@@ -79,7 +79,7 @@ try{
  const scan=async(label)=>{
   const missing=await page.evaluate(()=>{
    const roots=[document.querySelector("#app"),document.querySelector("#assistant-layer")].filter(Boolean);
-   const skip=[".markdown-body",".message-text",".message-bubble","pre","code","textarea","input","[contenteditable='true']",".pet-doc-entry pre",".pet-approval-card strong",".pet-approval-card p",".pet-approval-card small","[data-i18n-ignore]"].join(",");
+   const skip=[".markdown-body",".message-text",".message-bubble","pre","code","textarea","input","[contenteditable='true']",".pet-doc-entry pre",".pet-approval-card strong",".pet-approval-card p",".pet-approval-card small",".pet-overview-activity strong",".pet-watch-row strong","[data-i18n-ignore]"].join(",");
    const out=[];
    for(const root of roots){
     const walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT);
@@ -90,8 +90,8 @@ try{
   });
   assert.deepEqual(missing, [], label + " left untranslated Chinese");
  };
- await scan("pet workbench core");
- assert.equal(await page.locator('[data-pet-workbench-tab="core"]').getAttribute("class"), "active");
+ await scan("pet workbench overview");
+ assert.equal(await page.locator('[data-pet-workbench-tab="overview"]').getAttribute("class"), "active");
  assert.equal(await page.locator('[data-pet-workbench-tab="diary"]').count(), 0);
  assert.doesNotMatch(await page.locator("#app").innerText(), /日记|diary/i);
  const nav = page.locator('button[data-view="pet-workbench"]');
@@ -135,16 +135,19 @@ try{
  await eventCount(3,"pet_approval"); // Resolved elsewhere: 4 -> 3.
  await eventCount(5,"open"); // Reconnect catches up to missed approvals.
  await page.locator('.sidebar [data-view="pet-workbench"]').click();
- await page.waitForSelector('[data-pet-workbench-tab="core"].active');
+ await page.waitForSelector('[data-pet-workbench-tab="overview"].active');
  assert.equal(await page.locator("#pet-approval-count").innerText(),"5");
  await setCount(3);
  await page.locator('[data-pet-workbench-tab="approvals"]').click();
  for(const [id,decision,want] of [["approval-1","approve",2],["approval-2","reject",1],["idea-1","cancel",0]]){
+  await page.locator('[data-pet-approval-open="'+id+'"]').click();
+  await page.waitForSelector("dialog.pet-approval-detail-dialog[open]");
   const handle=async dialog=>dialog.accept("test reason");
-  page.once("dialog",handle);
-  await page.locator('[data-pet-approval-id="'+id+'"][data-pet-approval-decision="'+decision+'"]').click();
+  if(decision==="reject")page.once("dialog",handle);
+  await page.locator('dialog.pet-approval-detail-dialog [data-pet-approval-decision="'+decision+'"]').click();
   await page.waitForFunction(want=>document.querySelector("#pet-approval-count")?.textContent===(want?String(want):""),want);
-  page.removeListener("dialog",handle);
+  if(decision==="reject")page.removeListener("dialog",handle);
+  await page.waitForSelector("dialog.pet-approval-detail-dialog",{state:"detached"});
   assert.equal(await nav.locator(".task-tool-badge").count(),want?2:0);
  }
  await page.setViewportSize({width:390,height:844});
@@ -153,14 +156,18 @@ try{
  await page.setViewportSize({width:1400,height:1000});
  await page.goto(url+"/?legacy=1#pet-diary",{waitUntil:"networkidle"});
  assert.equal(new URL(page.url()).hash,"#pet-workbench");
- await page.waitForSelector('[data-pet-workbench-tab="core"].active');
+ await page.waitForSelector('[data-pet-workbench-tab="overview"].active');
  await page.evaluate(()=>document.querySelector('[data-pet-workbench-tab="approvals"]')?.click());await page.waitForTimeout(300);await scan("pet approvals");
+ await page.locator("[data-pet-approval-filters-open]").click();
+ await page.waitForSelector("dialog.pet-approval-filter-dialog[open]");
  await page.evaluate(()=>document.querySelector('[data-pet-approval-filter="idea"]')?.click());await page.waitForTimeout(200);await scan("pet ideas filter");
  await page.evaluate(()=>document.querySelector('[data-pet-approval-status-filter="pending"]')?.click());await page.waitForTimeout(200);await scan("pet approval status filter");
+ await page.locator("dialog.pet-approval-filter-dialog [data-pet-approval-filters-close]").click();
+ await page.waitForSelector("dialog.pet-approval-filter-dialog",{state:"detached"});
  await page.evaluate(()=>document.querySelector('[data-pet-workbench-tab="settings"]')?.click());await page.waitForTimeout(600);await scan("pet settings");
  await page.evaluate(()=>document.querySelector("#assistant-pet")?.click());await page.waitForTimeout(300);await scan("assistant panel");
  await page.goto(url+"/?language=zh-CN#pet-workbench",{waitUntil:"networkidle"});
- await page.waitForSelector('[data-pet-workbench-tab="core"].active');
+ await page.waitForSelector('[data-pet-workbench-tab="overview"].active');
  await setCount(7);
  for(const button of await nav.all()){
   assert.match(await button.getAttribute("title"),/7 条待审批/);

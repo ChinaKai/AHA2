@@ -4,13 +4,13 @@ import {COMMAND_PALETTE_COMPOSITION_GUARD_MS, COMMAND_PALETTE_DEBOUNCE_MS, build
 import type {CommandItem, CommandSection, CommandSectionID} from "./command_palette.js";
 import {handlePetStreamEvent, mountAssistant, showPetSettings, notifyPetTaskIdle, notifyPetTaskReply, notifyPetTaskThinking, resumePetNavigation, setAssistantVisible} from "./assistant.js";
 import {MODEL_WIRE_OPTIONS, backendSelectOptionsHTML, backendsPanelHTML, modelWireEditOptionsHTML, persistedWireValue, resolveBackendOptions} from "./backends.js";
-import {bindPetDocEditorButtons, createPetWorkbenchLoader, createPetWorkbenchPageKeeper, PET_APPROVAL_MAX_LIMIT, petApprovalMatches, petApprovalPage, renderPetApprovalLoadMore, renderPetInspectionSummary, renderPetWorkbenchLoadError, swapPetWorkbenchPage} from "./pet_workbench.js";
+import {bindPetDocEditorButtons, createPetWorkbenchLoader, createPetWorkbenchPageKeeper, mapPetWorkbenchTab, PET_APPROVAL_MAX_LIMIT, petApprovalMatches, petApprovalPage, renderPetApprovalLoadMore, renderPetOverview, renderPetRecords, renderPetWorkbenchLoadError, swapPetWorkbenchPage} from "./pet_workbench.js";
 import type {PetWorkbenchPageBinding} from "./pet_workbench.js";
 import {renderConversationList} from "./conversation_ui.js";
 import {bindCodexAccounts, renderCodexAccounts} from "./codex_accounts.js";
 import {bindChannels, exportRetiredChannelInstance, purgeRetiredChannelInstance, renderChannels} from "./channels.js";
 import {icon} from "./icons.js";
-import {createPetApprovalCounter, petPendingApprovalBadge, petApprovalOptions, renderPetApprovalModelBatch, renderPetApprovalOptionPicker, selectedPetApprovalOption} from "./pet_approvals.js";
+import {createPetApprovalCounter, petApprovalFilterCount, petPendingApprovalBadge, petApprovalOptions, renderPetApprovalDetail, renderPetApprovalFilters, renderPetApprovalList, selectedPetApprovalOption} from "./pet_approvals.js";
 import {applyLocale, normalizeLanguagePreference, startUITranslationObserver, t, tr, translateUI} from "./i18n.js";
 import {bindKnowledgeWorkspace, knowledgeEntryListVisible, renderKnowledgeWorkspace} from "./knowledge_workspace.js";
 import {bindHardwarePanel, refreshHardwarePanel, stopHardwarePanel} from "./hardware_panel.js";
@@ -35,7 +35,7 @@ import {DEFAULT_TASK_STATUS_FILTERS, LOCAL_TASK_DEVICE_FILTER, TASK_STATUS_GROUP
 import type {TaskStatusGroup} from "./task_filters.js";
 import {TASK_TOOL_DEFAULT_WIDTH, normalizePinnedTaskTool, normalizeTaskToolMode, normalizeTaskToolWidth, renderTaskToolButtons, renderTaskToolContent, renderTaskToolPanel} from "./task_tools.js";
 import type {TaskTool, TaskToolMode} from "./task_tools.js";
-import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, createListRefreshScheduler, createResourceLoader, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, loadNavigationSnapshot, matchingSlashCommands, paginateItems, paginationHTML, petWatchActionKeys, protoBadges, readPerfPanelPreference, renderModelHealthCell, renderProtocolProbeStatus, renderWorkspaceDetection, restoreInteractiveRegion, saveNavigationSnapshot, textMatchesQuery, writePerfPanelPreference} from "./ui_helpers.js";
+import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, createListRefreshScheduler, createResourceLoader, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, loadNavigationSnapshot, matchingSlashCommands, paginateItems, paginationHTML, protoBadges, readPerfPanelPreference, renderModelHealthCell, renderProtocolProbeStatus, renderWorkspaceDetection, restoreInteractiveRegion, saveNavigationSnapshot, textMatchesQuery, writePerfPanelPreference} from "./ui_helpers.js";
 import type {InteractiveRegionState, ModelHealthView} from "./ui_helpers.js";
 import {
   compactNumber,
@@ -80,7 +80,6 @@ import type {
   TaskMailOptions,
   Model,
   MCPServer,
-  PetChannelHealth,
   Project,
   Provider,
   ProxySettings,
@@ -394,13 +393,16 @@ applyLocale("auto");
 const app = document.querySelector<HTMLDivElement>("#app");
 const petApprovalCounter = createPetApprovalCounter(() => api.petPendingApprovalCount(), updatePetPendingApprovalIndicators);
 let petPendingApprovalTimer = 0;
-let petWorkbenchTab = "core";
+let petWorkbenchTab = "overview";
 // The workbench binds against a node that render() replaces wholesale. The
 // keeper lets the mounted page survive same-view renders so an unrelated
 // render cannot abort and restart its request; leaving the view releases it.
 const petWorkbenchPageKeeper = createPetWorkbenchPageKeeper();
 let petApprovalFilter: "all" | "idea" | "decision" = "all";
 let petApprovalStatusFilter: "all" | "pending" | "approved" | "rejected" | "cancelled" = "pending";
+// Mobile folds the approval detail and filters into full-screen dialogs. They
+// live outside #app so a background refresh cannot detach them mid-decision.
+let petWorkbenchDialog: HTMLDialogElement | null = null;
 let events: EventSource | null = null;
 // A direct #resources/#hardware link is an explicit navigation request; it must
 // not be overridden by a restored Task from the previous session.
@@ -1479,6 +1481,7 @@ function applyLocationHash(): boolean {
 // Switching the top-level view is shared by the sidebar, the palette and the
 // mobile search entry so every path resets the same per-view state.
 function switchView(nextView: View): void {
+  if (nextView !== "pet-workbench") closePetWorkbenchDialogs();
   cancelTaskOpen();
   state.view = nextView;
   if (nextView === "models") {
@@ -1850,7 +1853,7 @@ async function runCommandPaletteAction(action: string): Promise<void> {
     petWorkbenchTab = "approvals";
     switchView("pet-workbench");
   } else if (action === "pet-workbench") {
-    petWorkbenchTab = "core";
+    petWorkbenchTab = "overview";
     switchView("pet-workbench");
   }
 }
@@ -7255,12 +7258,10 @@ function petWorkbenchView(): string {
   return `<section class="page pet-workbench-page">
     <header class="page-head"><div><h1>${t("petWorkbench.title")}</h1><p>${t("petWorkbench.subtitle")}</p></div></header>
     <div class="pet-workbench-tabs" role="tablist">
-      <button type="button" class="active" data-pet-workbench-tab="core">${t("petWorkbench.core")}</button>
-      <button type="button" data-pet-workbench-tab="worklog">${t("petWorkbench.worklog")}</button>
-      <button type="button" data-pet-workbench-tab="inspection">${t("petWorkbench.inspection")} <span id="pet-channel-count"></span></button>
-      <button type="button" data-pet-workbench-tab="approvals">${t("petWorkbench.approvalsAndIdeas")} <span id="pet-approval-count">${petApprovalCounter.pending > 0 ? petApprovalCounter.pending : ""}</span></button>
-      <button type="button" data-pet-workbench-tab="follows">${t("petWorkbench.follows")}</button>
-      <button type="button" data-pet-workbench-tab="settings">${t("petWorkbench.settings")}</button>
+      <button type="button" role="tab" class="active" data-pet-workbench-tab="overview">${t("petWorkbench.overview")}</button>
+      <button type="button" role="tab" data-pet-workbench-tab="approvals">${t("petWorkbench.approvals")} <span id="pet-approval-count">${petApprovalCounter.pending > 0 ? petApprovalCounter.pending : ""}</span></button>
+      <button type="button" role="tab" data-pet-workbench-tab="records">${t("petWorkbench.records")}</button>
+      <button type="button" role="tab" data-pet-workbench-tab="settings">${t("petWorkbench.settings")}</button>
     </div>
     <div id="pet-workbench-body" class="pet-workbench-body"><div class="field-help">${t("common.loading")}</div></div>
   </section>`;
@@ -7287,14 +7288,22 @@ function showPetWorkbenchBindFailure(error: unknown): void {
 }
 
 // Legacy bookmarks and the pet panel use "ideas"; the tab is now "approvals".
+// Old five-tab names (core/worklog/inspection/follows) fold into the four tabs.
 function normalizedPetWorkbenchTab(): string {
-  return petWorkbenchTab === "ideas" ? "approvals" : petWorkbenchTab;
+  return mapPetWorkbenchTab(petWorkbenchTab);
+}
+
+function closePetWorkbenchDialogs(): void {
+  const dialog = petWorkbenchDialog;
+  petWorkbenchDialog = null;
+  if (!dialog) return;
+  if (dialog.open) dialog.close();
+  dialog.remove();
 }
 
 async function bindPetWorkbenchPage(): Promise<void> {
   const body = document.querySelector<HTMLElement>("#pet-workbench-body");
   const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-pet-workbench-tab]"));
-  const channelCount = document.querySelector<HTMLElement>("#pet-channel-count");
   if (!body || tabs.length === 0) return;
   // render() carries the live page across same-view renders, so this exact
   // connected body is already wired and must keep its in-flight loader. Only a
@@ -7309,6 +7318,23 @@ async function bindPetWorkbenchPage(): Promise<void> {
   let approvalLimit = 10;
   let worklogLimit = 30;
   let loadingMore: "approval" | "worklog" | null = null;
+
+  // `t` resolves catalog keys; legacy Chinese literals still go through `tr`
+  // so the English locale never shows a mixed sentence.
+  const petApprovalText = (key: string, values: Record<string, string | number> = {}): string => {
+    const value = t(key, values);
+    return value === key ? tr(key) : value;
+  };
+  const taskStatusText = (status: string): string => {
+    const literal = statusLabel(status);
+    const legacy = tr(literal);
+    if (legacy !== literal) return legacy;
+    // A couple of task literals have no legacy translation; keep the overview
+    // fully translated through its own keys instead of leaking Chinese.
+    const key = `petWorkbench.status.${status}`;
+    const label = t(key);
+    return label === key ? literal : label;
+  };
 
   const loadMoreFooter = (kind: "worklog", shown: number, total: number): string => {
     if (!total || shown >= total) return "";
@@ -7371,65 +7397,46 @@ async function bindPetWorkbenchPage(): Promise<void> {
   };
 
   const renderTab = () => {
-    if (!tabs.some(tab => tab.dataset.petWorkbenchTab === active)) active = "core";
+    active = mapPetWorkbenchTab(active);
     tabs.forEach(tab => tab.classList.toggle("active", tab.dataset.petWorkbenchTab === active));
     if (!view) {
       showLoadState();
       return;
     }
-    if (active === "core") {
-      body.innerHTML = view.core.length
-        ? view.core.map(item => `<details class="pet-doc-entry"><summary>${escapeHTML(item.name)}<button type="button" class="pet-doc-edit" data-pet-doc-edit data-pet-doc-section="core" data-pet-doc-name="${escapeHTML(item.name)}">${t("common.edit")}</button></summary><pre>${escapeHTML(item.content)}</pre></details>`).join("")
-        : `<div class="field-help">${t("petWorkbench.emptyCore")}</div>`;
-      bindPetDocEditors("core", load);
-    } else if (active === "worklog") {
-      body.innerHTML = renderPetMarkdownEntries(view.worklog, t("petWorkbench.emptyWorklog"), "worklog") + loadMoreFooter("worklog", view.worklog.length, view.worklog_total ?? view.worklog.length);
-      bindPetDocEditors("worklog", load);
-      bindLoadMore();
-    } else if (active === "inspection") {
-      body.innerHTML = renderPetInspectionSummary(view.inspection, t, formatDateTime)
-        + renderPetChannelHealth(view.channels || [], view.channel_note || "", view.channel_total || (view.channels || []).length);
-    } else if (active === "approvals") {
-      const items = (view.approvals || []).filter(item => petApprovalMatches(item, petApprovalFilter, petApprovalStatusFilter));
-      const filtering = petApprovalFilter !== "all" || petApprovalStatusFilter !== "all";
-      const empty = filtering ? t("petWorkbench.emptyFiltered") : t("petWorkbench.emptyApprovalsAndIdeas");
-      const kindFilters: Array<[string, string]> = [
-        ["all", t("petWorkbench.filterAll")],
-        ["idea", t("petWorkbench.ideas")],
-        ["decision", t("petWorkbench.approvals")],
-      ];
-      const statusFilters: Array<[string, string]> = [
-        ["all", t("petWorkbench.filterAll")],
-        ["pending", t("petWorkbench.filterPending")],
-        ["approved", t("petWorkbench.filterApproved")],
-        ["rejected", t("petWorkbench.filterRejected")],
-        ["cancelled", t("petWorkbench.filterCancelled")],
-      ];
-      // The fetch is always pending-first, so a resolved-only filter can need
-      // several "load more" clicks before matching rows appear.
-      const pendingFirstHint = petApprovalStatusFilter === "pending"
-        ? ""
-        : `<div class="field-help">${escapeHTML(t("petWorkbench.pendingFirstHint"))}</div>`;
-      body.innerHTML = `<div class="pet-approval-filters">${kindFilters.map(([id, label]) => `<button type="button" class="${petApprovalFilter === id ? "active" : ""}" data-pet-approval-filter="${id}">${label}</button>`).join("")}</div><div class="pet-approval-filters">${statusFilters.map(([id, label]) => `<button type="button" class="${petApprovalStatusFilter === id ? "active" : ""}" data-pet-approval-status-filter="${id}">${label}</button>`).join("")}</div>${pendingFirstHint}${renderPetApprovals(items, empty)}${approvalLoadMoreFooter()}`;
-      body.querySelectorAll<HTMLButtonElement>("[data-pet-approval-filter]").forEach(button => button.addEventListener("click", () => {
-        const next = button.dataset.petApprovalFilter;
-        if (next === "all" || next === "idea" || next === "decision") {
-          petApprovalFilter = next;
-          renderTab();
-        }
-      }));
-      body.querySelectorAll<HTMLButtonElement>("[data-pet-approval-status-filter]").forEach(button => button.addEventListener("click", () => {
-        const next = button.dataset.petApprovalStatusFilter;
-        if (next === "all" || next === "pending" || next === "approved" || next === "rejected" || next === "cancelled") {
-          petApprovalStatusFilter = next;
-          renderTab();
-        }
-      }));
-      bindApprovalActions();
-      bindLoadMore();
-    } else if (active === "follows") {
-      body.innerHTML = renderPetWatches(view.watches);
+    if (active === "overview") {
+      body.innerHTML = renderPetOverview({
+        inspection: view.inspection,
+        approvals: view.approvals || [],
+        watches: view.watches || [],
+        channels: view.channels || [],
+        channelTotal: view.channel_total,
+        pendingApprovals: typeof view.inspection?.pending_approvals === "number"
+          ? view.inspection.pending_approvals
+          : petApprovalCounter.pending,
+        translate: t,
+        formatTime: formatDateTime,
+        statusLabel: taskStatusText,
+      });
+      bindOverviewActions();
       bindPetWatchActions();
+    } else if (active === "approvals") {
+      body.innerHTML = `<div class="pet-approvals-toolbar"><button type="button" class="pet-approval-filter-button" data-pet-approval-filters-open>${icon("filter")}<span>${escapeHTML(t("petWorkbench.filterButton"))}</span><span class="pet-approval-filter-count" data-pet-approval-filter-count>${petApprovalFilterCount(petApprovalFilter, petApprovalStatusFilter)}</span></button></div><div id="pet-approval-rows-host"></div><div id="pet-approval-more-host"></div>`;
+      body.querySelector<HTMLButtonElement>("[data-pet-approval-filters-open]")?.addEventListener("click", openApprovalFilters);
+      renderApprovalRows();
+    } else if (active === "records") {
+      body.innerHTML = renderPetRecords(view.core, view.worklog, {
+        translate: t,
+        emptyCore: t("petWorkbench.emptyCore"),
+        emptyWorklog: t("petWorkbench.emptyWorklog"),
+      }) + loadMoreFooter("worklog", view.worklog.length, view.worklog_total ?? view.worklog.length);
+      bindPetDocEditorButtons(body, {
+        translate: t,
+        save: (section, name, content) => api.savePetWorkbenchDocument(section, name, content),
+        reload: load,
+        cancel: renderTab,
+      });
+      bindRecordToc();
+      bindLoadMore();
     } else if (active === "settings") {
       body.innerHTML = `<div id="pet-settings-host" class="pet-workbench-settings"></div>`;
       void showPetSettings();
@@ -7450,8 +7457,6 @@ async function bindPetWorkbenchPage(): Promise<void> {
       view = value;
       loadingMore = null;
       void refreshPetPendingApprovalCount();
-      const degradedChannels = (view.channels || []).filter(item => item.degraded).length;
-      if (channelCount) channelCount.textContent = degradedChannels > 0 ? String(degradedChannels) : "";
       renderTab();
       if ((view.approvals || []).some(item => item.status === "executing")) scheduleApprovalExecutionPoll();
     },
@@ -7484,39 +7489,68 @@ async function bindPetWorkbenchPage(): Promise<void> {
     }, 3000);
   }
 
-  // A failed resolve must not look like a dead button. The API client already
-  // puts the server's `message` in error.message; show it on the card that was
-  // clicked (the approvals list can be scrolled far below the panel top) and
-  // bring it into view.
-  const showApprovalError = (button: HTMLButtonElement, message: string) => {
-    const card = button.closest<HTMLElement>(".pet-approval-card") || body;
-    card.querySelector("[data-pet-approval-error]")?.remove();
-    const notice = document.createElement("div");
-    notice.className = "field-help pet-approval-error";
-    notice.dataset.petApprovalError = "";
-    notice.setAttribute("role", "alert");
-    notice.textContent = message;
-    card.appendChild(notice);
-    notice.scrollIntoView({block: "nearest"});
+  // Dialogs live outside #app so a background refresh cannot detach them while
+  // the owner is reading an approval or adjusting filters.
+  const createWorkbenchDialog = (className: string, html: string): HTMLDialogElement => {
+    closePetWorkbenchDialogs();
+    const dialog = document.createElement("dialog");
+    dialog.className = className;
+    dialog.innerHTML = `<div class="pet-approval-dialog-body">${html}</div>`;
+    document.body.appendChild(dialog);
+    petWorkbenchDialog = dialog;
+    dialog.addEventListener("cancel", event => {
+      event.preventDefault();
+      closePetWorkbenchDialogs();
+    });
+    dialog.addEventListener("click", event => {
+      if (event.target === dialog) closePetWorkbenchDialogs();
+    });
+    return dialog;
   };
 
-  const bindApprovalActions = () => {
-    body.querySelectorAll<HTMLButtonElement>("[data-pet-approval-decision]").forEach(button => {
+  const showDialogError = (dialog: HTMLDialogElement, message: string): void => {
+    const host = dialog.querySelector<HTMLElement>("[data-pet-approval-error]");
+    if (!host) return;
+    host.hidden = false;
+    host.className = "field-help pet-approval-error";
+    host.setAttribute("role", "alert");
+    host.textContent = message;
+    host.scrollIntoView({block: "nearest"});
+  };
+
+  const openOverviewTask = (taskID: string): void => {
+    if (!taskID) return;
+    closePetWorkbenchDialogs();
+    switchView("tasks");
+    void openTask(taskID).catch(error => {
+      setMessage("error", error instanceof Error ? error.message : String(error));
+      render();
+    });
+  };
+
+  const openApprovalDetail = (approvalID: string): void => {
+    const approval = view?.approvals.find(item => item.id === approvalID);
+    if (!approval) return;
+    const dialog = createWorkbenchDialog("pet-approval-detail-dialog", renderPetApprovalDetail(approval, {
+      translate: petApprovalText,
+      now: Date.now(),
+    }));
+    dialog.querySelector<HTMLButtonElement>("[data-pet-approval-detail-close]")?.addEventListener("click", closePetWorkbenchDialogs);
+    dialog.querySelectorAll<HTMLButtonElement>("[data-pet-approval-decision]").forEach(button => {
       button.addEventListener("click", async () => {
-        const id = button.dataset.petApprovalId || "";
         const decision = button.dataset.petApprovalDecision as "approve" | "reject" | "cancel";
-        if (!id || !decision) return;
+        if (!decision) return;
         let decisionReason = "";
         if (decision === "approve") {
           // Owner-decision approvals with payload options require a choice; the
           // chosen option value is the note so the pet knows which plan won.
-          const approval = view?.approvals.find(item => item.id === id);
-          const options = approval ? petApprovalOptions(approval) : [];
+          const options = petApprovalOptions(approval);
           if (options.length) {
-            const select = [...body.querySelectorAll<HTMLSelectElement>("[data-pet-approval-option]")].find(item => item.dataset.petApprovalOption === id);
+            const select = [...dialog.querySelectorAll<HTMLSelectElement>("[data-pet-approval-option]")]
+              .find(item => item.dataset.petApprovalOption === approvalID);
             decisionReason = selectedPetApprovalOption(options, select?.value);
             if (!decisionReason) {
-              showApprovalError(button, tr("请先选择一个方案再批准。"));
+              showDialogError(dialog, tr("请先选择一个方案再批准。"));
               select?.focus();
               return;
             }
@@ -7526,20 +7560,118 @@ async function bindPetWorkbenchPage(): Promise<void> {
           decisionReason = (window.prompt(t("petApproval.rejectReasonPrompt")) || "").trim();
           if (!decisionReason) return;
         }
-        const card = button.closest<HTMLElement>(".pet-approval-card");
-        const cardButtons = card
-          ? [...card.querySelectorAll<HTMLButtonElement>("[data-pet-approval-decision]")]
-          : [button];
-        cardButtons.forEach(item => { item.disabled = true; });
+        const buttons = [...dialog.querySelectorAll<HTMLButtonElement>("[data-pet-approval-decision]")];
+        buttons.forEach(item => { item.disabled = true; });
         try {
-          const result = await api.resolvePetApproval(id, decision, decisionReason);
+          const result = await api.resolvePetApproval(approvalID, decision, decisionReason);
+          closePetWorkbenchDialogs();
           await refreshPetPendingApprovalCount(true);
           await load();
           if (result.status === "executing") scheduleApprovalExecutionPoll();
         } catch (error) {
-          cardButtons.forEach(item => { item.disabled = false; });
-          showApprovalError(button, error instanceof Error ? error.message : String(error));
+          buttons.forEach(item => { item.disabled = false; });
+          showDialogError(dialog, error instanceof Error ? error.message : String(error));
         }
+      });
+    });
+    dialog.showModal();
+  };
+
+  const bindApprovalRows = (): void => {
+    body.querySelectorAll<HTMLButtonElement>("[data-pet-approval-open]").forEach(button => {
+      button.addEventListener("click", () => openApprovalDetail(button.dataset.petApprovalOpen || ""));
+    });
+  };
+
+  const renderApprovalRows = (): void => {
+    if (!view) return;
+    const items = (view.approvals || []).filter(item => petApprovalMatches(item, petApprovalFilter, petApprovalStatusFilter));
+    const filtering = petApprovalFilter !== "all" || (petApprovalStatusFilter !== "all" && petApprovalStatusFilter !== "pending");
+    const host = body.querySelector<HTMLElement>("#pet-approval-rows-host");
+    if (host) {
+      host.innerHTML = renderPetApprovalList(items, {
+        translate: petApprovalText,
+        now: Date.now(),
+        empty: filtering ? t("petWorkbench.emptyFiltered") : t("petWorkbench.emptyApprovalsPending"),
+      });
+      host.querySelectorAll<HTMLButtonElement>("[data-pet-approval-open]").forEach(button => {
+        button.addEventListener("click", () => openApprovalDetail(button.dataset.petApprovalOpen || ""));
+      });
+    }
+    const more = body.querySelector<HTMLElement>("#pet-approval-more-host");
+    if (more) more.innerHTML = approvalLoadMoreFooter();
+    const badge = body.querySelector<HTMLElement>("[data-pet-approval-filter-count]");
+    if (badge) badge.textContent = String(petApprovalFilterCount(petApprovalFilter, petApprovalStatusFilter));
+    bindLoadMore();
+  };
+
+  const openApprovalFilters = (): void => {
+    const dialog = createWorkbenchDialog("pet-approval-filter-dialog", renderPetApprovalFilters(
+      petApprovalFilter,
+      petApprovalStatusFilter,
+      petApprovalText,
+    ));
+    dialog.querySelector<HTMLButtonElement>("[data-pet-approval-filters-close]")?.addEventListener("click", closePetWorkbenchDialogs);
+    const syncCount = (): void => {
+      const count = petApprovalFilterCount(petApprovalFilter, petApprovalStatusFilter);
+      const summary = dialog.querySelector<HTMLElement>(".pet-approval-filter-summary");
+      if (summary) summary.textContent = petApprovalText("petWorkbench.filterActive", {count: String(count)});
+      const badge = body.querySelector<HTMLElement>("[data-pet-approval-filter-count]");
+      if (badge) badge.textContent = String(count);
+    };
+    dialog.querySelectorAll<HTMLButtonElement>("[data-pet-approval-filter]").forEach(button => {
+      button.addEventListener("click", () => {
+        const next = button.dataset.petApprovalFilter;
+        if (next !== "all" && next !== "idea" && next !== "decision") return;
+        petApprovalFilter = next;
+        dialog.querySelectorAll("[data-pet-approval-filter]").forEach(other => other.classList.toggle("active", other === button));
+        syncCount();
+        renderApprovalRows();
+      });
+    });
+    dialog.querySelectorAll<HTMLButtonElement>("[data-pet-approval-status-filter]").forEach(button => {
+      button.addEventListener("click", () => {
+        const next = button.dataset.petApprovalStatusFilter;
+        if (next !== "all" && next !== "pending" && next !== "approved" && next !== "rejected" && next !== "cancelled") return;
+        petApprovalStatusFilter = next;
+        dialog.querySelectorAll("[data-pet-approval-status-filter]").forEach(other => other.classList.toggle("active", other === button));
+        syncCount();
+        renderApprovalRows();
+      });
+    });
+    dialog.showModal();
+  };
+
+  const bindOverviewActions = (): void => {
+    body.querySelectorAll<HTMLButtonElement>("[data-pet-overview-jump]").forEach(button => {
+      button.addEventListener("click", () => {
+        const jump = button.dataset.petOverviewJump;
+        if (jump === "approvals") {
+          closePetWorkbenchDialogs();
+          active = "approvals";
+          petWorkbenchTab = active;
+          if (binding) binding.tab = active;
+          renderTab();
+        } else if (jump === "channels") {
+          switchView("channels");
+        } else {
+          document.getElementById("pet-overview-follows")?.scrollIntoView({block: "start", behavior: "smooth"});
+        }
+      });
+    });
+    bindApprovalRows();
+    body.querySelectorAll<HTMLButtonElement>("[data-pet-overview-task]").forEach(button => {
+      button.addEventListener("click", () => openOverviewTask(button.dataset.petOverviewTask || ""));
+    });
+  };
+
+  const bindRecordToc = (): void => {
+    body.querySelectorAll<HTMLButtonElement>("[data-pet-record-goto]").forEach(button => {
+      button.addEventListener("click", () => {
+        const target = document.getElementById(button.dataset.petRecordGoto || "");
+        if (!target) return;
+        if (target instanceof HTMLDetailsElement) target.open = true;
+        target.scrollIntoView({block: "start", behavior: "smooth"});
       });
     });
   };
@@ -7591,125 +7723,12 @@ async function bindPetWorkbenchPage(): Promise<void> {
   };
 
   tabs.forEach(tab => tab.addEventListener("click", () => {
-    active = tab.dataset.petWorkbenchTab || "core";
+    active = mapPetWorkbenchTab(tab.dataset.petWorkbenchTab);
     petWorkbenchTab = active;
+    closePetWorkbenchDialogs();
     if (binding) binding.tab = active;
     renderTab();
   }));
   await load();
 }
 
-function renderPetMarkdownEntries(entries: Array<{date: string; content: string}>, empty: string, section: string): string {
-  return entries.length
-    ? entries.map(entry => `<details class="pet-doc-entry"><summary>${escapeHTML(entry.date)}<button type="button" class="pet-doc-edit" data-pet-doc-edit data-pet-doc-section="${escapeHTML(section)}" data-pet-doc-name="${escapeHTML(entry.date)}.md">${t("common.edit")}</button></summary><pre>${escapeHTML(entry.content)}</pre></details>`).join("")
-    : `<div class="field-help">${escapeHTML(empty)}</div>`;
-}
-
-function bindPetDocEditors(section: string, reload: () => Promise<void>): void {
-  const body = document.querySelector<HTMLElement>("#pet-workbench-body");
-  if (!body) return;
-  bindPetDocEditorButtons(body, {
-    section,
-    translate: t,
-    save: (target, name, content) => api.savePetWorkbenchDocument(target, name, content),
-    reload,
-    cancel: () => {
-      document.querySelector<HTMLButtonElement>(`[data-pet-workbench-tab="${section}"]`)?.click();
-    },
-  });
-}
-
-function petWatchReasonLabel(reason: string): string {
-  const key = `petWorkbench.reason.${reason}`;
-  const label = t(key);
-  return label === key ? reason : label;
-}
-
-function renderPetWatches(items: Array<{task_id: string; code: string; title: string; status: string; watched: boolean; reason: string; ignored: boolean; updated_at: string}>): string {
-  const hint = `<div class="field-help">${escapeHTML(t("petWorkbench.followHint"))}</div>`;
-  if (items.length === 0) return `${hint}<div class="field-help">${escapeHTML(t("petWorkbench.emptyFollows"))}</div>`;
-  return hint + items.map(item => {
-    const title = `${item.code || item.task_id} · ${item.title || item.task_id}`;
-    const reason = item.reason ? petWatchReasonLabel(item.reason) : "-";
-    const taskID = escapeHTML(item.task_id);
-    const actions = `<div class="pet-watch-actions">${petWatchActionKeys(item).map(action => {
-      switch (action) {
-        case "follow": return `<button type="button" data-pet-watch-follow data-pet-watch-task="${taskID}">${t("petWorkbench.followTask")}</button>`;
-        case "unfollow": return `<button type="button" data-pet-watch-unfollow data-pet-watch-task="${taskID}">${t("petWorkbench.unfollowTask")}</button>`;
-        case "ignore": return `<button type="button" data-pet-watch-ignore="true" data-pet-watch-task="${taskID}">${t("petWorkbench.ignoreTask")}</button>`;
-        case "restoreIgnored": return `<button type="button" data-pet-watch-ignore="false" data-pet-watch-task="${taskID}">${t("petWorkbench.restoreIgnored")}</button>`;
-        case "restoreFollow": return `<button type="button" data-pet-watch-ignore="false" data-pet-watch-task="${taskID}">${t("petWorkbench.restoreFollow")}</button>`;
-        default: return "";
-      }
-    }).join("")}</div>`;
-    const followState = item.ignored ? ` · ${t("petWorkbench.followIgnored")}` : item.watched ? ` · ${t("petWorkbench.following")}` : "";
-    const meta = item.watched
-      ? `${t("petWorkbench.followReason")}: ${escapeHTML(reason)} · ${t("petWorkbench.followUpdated")}: ${escapeHTML(formatDateTime(item.updated_at))}`
-      : `${t("petWorkbench.followUpdated")}: ${escapeHTML(formatDateTime(item.updated_at))}`;
-    return `<article class="pet-watch-card ${item.ignored ? "ignored" : ""} ${item.watched ? "" : "unwatched"}">
-      <header><strong>${escapeHTML(title)}</strong><span class="pet-approval-status">${escapeHTML(statusLabel(item.status))}${followState}</span></header>
-      <small>${meta}</small>
-      ${actions}
-    </article>`;
-  }).join("");
-}
-
-function renderPetChannelHealth(items: PetChannelHealth[], note: string, total = items.length): string {
-  if (items.length === 0) {
-    return `<div class="field-help">${escapeHTML(t("petWorkbench.emptyChannels"))}</div>${note ? `<div class="pet-channel-note">${escapeHTML(note)}</div>` : ""}`;
-  }
-  const summary = note
-    ? `<div class="pet-channel-note">${escapeHTML(note)}</div>`
-    : `<div class="field-help">${escapeHTML(t("petWorkbench.channelHealthy"))}</div>`;
-  const truncated = total > items.length
-    ? `<div class="field-help">${escapeHTML(t("petWorkbench.channelShown", {shown: String(items.length), total: String(total)}))}</div>`
-    : "";
-  const cards = items.map(item => {
-    const availability = item.effective_availability ? ` / ${item.effective_availability}` : "";
-    const oldest = item.oldest_pending_minutes > 0
-      ? t("petWorkbench.channelAgeMinutes", {minutes: String(item.oldest_pending_minutes)})
-      : "-";
-    const attempts = item.stuck_pending || item.queued_pending || item.attempted_pending
-      ? ` (attempts=0 ${item.stuck_pending}，${t("petWorkbench.channelQueuedPending")} ${item.queued_pending}，attempts>0 ${item.attempted_pending})`
-      : "";
-    const expired = item.expired_leases > 0
-      ? `<span>${t("petWorkbench.channelExpiredLeases")}: ${item.expired_leases}</span>`
-      : "";
-    return `<article class="pet-channel-card${item.degraded ? " degraded" : ""}">
-      <header><strong>${escapeHTML(item.name)}</strong><span class="pet-channel-badge ${item.degraded ? "degraded" : "ok"}">${escapeHTML(item.degraded ? t("petWorkbench.channelDegraded") : t("petWorkbench.channelHealthyLabel"))}</span></header>
-      <div class="pet-channel-grid">
-        <span>${t("petWorkbench.channelStatus")}: ${escapeHTML(item.status || "-")}${escapeHTML(availability)}</span>
-        <span>${t("petWorkbench.channelPending")}: ${item.pending}${attempts}</span>
-        <span>${t("petWorkbench.channelOldestPending")}: ${escapeHTML(oldest)}</span>
-        ${expired}
-        <span>${t("petWorkbench.channelDeadLetter")}: ${item.dead_letter}</span>
-        ${item.last_error_code ? `<span>${t("petWorkbench.channelLastError")}: ${escapeHTML(item.last_error_code)}</span>` : ""}
-      </div>
-      ${item.note ? `<small>${escapeHTML(item.note)}</small>` : ""}
-    </article>`;
-  }).join("");
-  return `${summary}${truncated}<div class="pet-channel-list">${cards}</div>`;
-}
-
-function renderPetApprovals(items: Array<{id: string; title: string; summary: string; reason?: string; status: string; risk: string; kind: string; payload?: string; resolution?: string; decision_reason?: string}>, empty = t("petWorkbench.emptyApprovals")): string {
-  if (items.length === 0) return `<div class="field-help">${escapeHTML(empty)}</div>`;
-  return items.map(item => {
-    const executing = item.status === "executing";
-    const pending = item.status === "pending";
-    const status = executing ? tr("执行中") : item.status === "approved" ? tr("已批准") : item.status === "rejected" ? tr("已拒绝") : item.status === "cancelled" ? tr("已取消") : tr("待审批");
-    const kind = item.kind === "idea" ? t("petWorkbench.ideas") : t("petWorkbench.approvals");
-    const picker = pending ? renderPetApprovalOptionPicker(item.id, petApprovalOptions(item), tr) : "";
-    const actions = pending
-      ? `${picker}<div class="pet-approval-actions"><button type="button" class="primary" data-pet-approval-decision="approve" data-pet-approval-id="${escapeHTML(item.id)}">${tr("批准")}</button><button type="button" data-pet-approval-decision="reject" data-pet-approval-id="${escapeHTML(item.id)}">${tr("拒绝")}</button><button type="button" data-pet-approval-decision="cancel" data-pet-approval-id="${escapeHTML(item.id)}">${tr("取消")}</button></div>`
-      : "";
-    return `<article class="pet-approval-card ${pending ? "pending" : ""} ${executing ? "executing" : ""}">
-      <header><strong>${escapeHTML(item.title)}</strong><span class="pet-approval-status">${kind} · ${escapeHTML(status)} · ${escapeHTML(item.risk)}</span></header>
-      ${item.reason ? `<p class="pet-approval-reason"><strong>${t("petApproval.reason")}:</strong> ${escapeHTML(item.reason)}</p>` : ""}
-      <p>${escapeHTML(item.summary)}</p>
-      ${renderPetApprovalModelBatch(item, tr)}
-      ${executing ? `<p class="field-help">${escapeHTML(t("petWorkbench.approvalExecutingHint"))}</p>` : ""}
-      <small>${escapeHTML(item.kind)}${item.decision_reason ? ` · ${t("petApproval.decisionReason")}: ${escapeHTML(item.decision_reason)}` : item.resolution ? ` · ${escapeHTML(item.resolution)}` : ""}</small>
-      ${actions}
-    </article>`;
-  }).join("");
-}

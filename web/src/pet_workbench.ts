@@ -1,4 +1,6 @@
-import type {PetInspection} from "./types.js";
+import type {PetApproval, PetChannelHealth, PetInspection, PetTaskWatch} from "./types.js";
+import {petApprovalKindIcon, petApprovalStatusLabel} from "./pet_approvals.js";
+import {petWatchActionKeys} from "./ui_helpers.js";
 
 export type PetApprovalKindFilter = "all" | "idea" | "decision";
 export type PetApprovalStatusFilter = "all" | "pending" | "approved" | "rejected" | "cancelled";
@@ -113,7 +115,8 @@ export function renderPetApprovalLoadMore(
 }
 
 export interface PetDocEditorBinding {
-  section: string;
+  /** Fallback section for entries without their own data attribute. */
+  section?: string;
   translate: Translate;
   save: (section: string, name: string, content: string) => Promise<void>;
   reload: () => Promise<void>;
@@ -136,6 +139,10 @@ export function bindPetDocEditorButtons(root: ParentNode, binding: PetDocEditorB
       if (!details || !pre) return;
       details.open = true;
       const name = button.dataset.petDocName || "";
+      // The merged records tab renders core and worklog entries in one body,
+      // so each button carries its own section instead of relying on one
+      // section per binding.
+      const section = button.dataset.petDocSection || binding.section || "";
       const editor = document.createElement("div");
       editor.className = "pet-doc-editor";
       const textarea = document.createElement("textarea");
@@ -159,7 +166,7 @@ export function bindPetDocEditorButtons(root: ParentNode, binding: PetDocEditorB
       save.addEventListener("click", async () => {
         save.disabled = true;
         try {
-          await binding.save(binding.section, name, textarea.value);
+          await binding.save(section, name, textarea.value);
           await binding.reload();
         } catch (error) {
           save.disabled = false;
@@ -519,4 +526,303 @@ export function renderPetInspectionSummary(inspection: PetInspection | null | un
     ${loops.length ? `<div class="pet-inspection-loops">${loops.map(item => `<span>${escapeHTML(item)}</span>`).join("")}</div>` : ""}
     ${note ? `<div class="pet-inspection-note">${escapeHTML(note)}</div>` : ""}
   </section>`;
+}
+
+/* Four-tab workbench: overview, approvals, records, settings ---------------- */
+
+export type PetWorkbenchTab = "overview" | "approvals" | "records" | "settings";
+export const PET_WORKBENCH_TABS: readonly PetWorkbenchTab[] = ["overview", "approvals", "records", "settings"];
+
+// Legacy tab names stay routable: "ideas" was the old approvals tab, and the
+// five-tab layout folded core/worklog into records and inspection/follows into
+// overview. Anything unknown falls back to overview, the default tab.
+export function mapPetWorkbenchTab(value: unknown): PetWorkbenchTab {
+  switch (String(value ?? "").trim()) {
+    case "approvals":
+    case "ideas":
+      return "approvals";
+    case "records":
+    case "core":
+    case "worklog":
+      return "records";
+    case "settings":
+      return "settings";
+    case "overview":
+    case "inspection":
+    case "follows":
+      return "overview";
+    default:
+      return "overview";
+  }
+}
+
+// Task states that mean the pet's watched work needs the owner. "waiting_user"
+// is not an anomaly: it is normally the approval itself.
+export const PET_WATCH_ANOMALY_STATUSES = ["failed", "blocked", "interrupted", "error"] as const;
+
+export function petWatchAnomaly(item: {status?: string}): boolean {
+  const status = String(item.status ?? "").trim().toLowerCase();
+  return (PET_WATCH_ANOMALY_STATUSES as readonly string[]).includes(status);
+}
+
+export function countPetWatchAnomalies(items: Array<{status?: string; watched?: boolean; ignored?: boolean}>): number {
+  return items.filter(item => item.watched !== false && !item.ignored && petWatchAnomaly(item)).length;
+}
+
+export interface PetOverviewOptions {
+  inspection?: PetInspection | null;
+  approvals?: PetApproval[];
+  watches?: PetTaskWatch[];
+  channels?: PetChannelHealth[];
+  channelTotal?: number;
+  pendingApprovals?: number;
+  translate: Translate;
+  formatTime: FormatTime;
+  statusLabel?: (status: string) => string;
+  now?: number;
+}
+
+function overviewStatusLabel(status: string, options: PetOverviewOptions): string {
+  if (options.statusLabel) return options.statusLabel(status);
+  const key = `petWorkbench.status.${status}`;
+  const label = options.translate(key);
+  return label === key ? status : label;
+}
+
+function watchReasonLabel(reason: string, translate: Translate): string {
+  const key = `petWorkbench.reason.${reason}`;
+  const label = translate(key);
+  return label === key ? reason : label;
+}
+
+function watchActionButtons(item: PetTaskWatch, translate: Translate): string {
+  return petWatchActionKeys(item).map(action => {
+    switch (action) {
+      case "follow": return `<button type="button" data-pet-watch-follow data-pet-watch-task="${escapeHTML(item.task_id)}">${escapeHTML(translate("petWorkbench.followTask"))}</button>`;
+      case "unfollow": return `<button type="button" data-pet-watch-unfollow data-pet-watch-task="${escapeHTML(item.task_id)}">${escapeHTML(translate("petWorkbench.unfollowTask"))}</button>`;
+      case "ignore": return `<button type="button" data-pet-watch-ignore="true" data-pet-watch-task="${escapeHTML(item.task_id)}">${escapeHTML(translate("petWorkbench.ignoreTask"))}</button>`;
+      case "restoreIgnored": return `<button type="button" data-pet-watch-ignore="false" data-pet-watch-task="${escapeHTML(item.task_id)}">${escapeHTML(translate("petWorkbench.restoreIgnored"))}</button>`;
+      case "restoreFollow": return `<button type="button" data-pet-watch-ignore="false" data-pet-watch-task="${escapeHTML(item.task_id)}">${escapeHTML(translate("petWorkbench.restoreFollow"))}</button>`;
+      default: return "";
+    }
+  }).join("");
+}
+
+// A watched task is one compact row: title, status and last change on the
+// left, open plus the state-specific follow action on the right. Anomalous
+// tasks are tinted so the overview card count points to something visible
+// without opening every row.
+function renderWatchRow(item: PetTaskWatch, options: PetOverviewOptions): string {
+  const title = `${item.code || item.task_id} · ${item.title || item.task_id}`;
+  const anomaly = petWatchAnomaly(item);
+  const meta = `${overviewStatusLabel(item.status, options)} · ${options.formatTime(item.updated_at)}`;
+  return `<article class="pet-watch-row${anomaly ? " anomaly" : ""}">
+    <button type="button" class="pet-watch-row-main" data-pet-overview-task="${escapeHTML(item.task_id)}">
+      <strong>${escapeHTML(title)}</strong>
+      <small>${escapeHTML(meta)}${item.reason ? ` · ${escapeHTML(watchReasonLabel(item.reason, options.translate))}` : ""}</small>
+    </button>
+    <div class="pet-watch-row-actions">
+      <button type="button" data-pet-overview-task="${escapeHTML(item.task_id)}">${escapeHTML(options.translate("petWorkbench.openTask"))}</button>
+      ${watchActionButtons(item, options.translate)}
+    </div>
+  </article>`;
+}
+
+function overviewCard(jump: string, count: number, label: string, hint: string, extraClass = ""): string {
+  return `<button type="button" class="pet-overview-card ${extraClass}" data-pet-overview-jump="${jump}">
+    <strong>${count}</strong>
+    <span class="pet-overview-card-label">${escapeHTML(label)}</span>
+    <small>${escapeHTML(hint)}</small>
+  </button>`;
+}
+
+// renderPetOverview is the landing tab: what needs attention right now, the
+// three numerals that jump to their page, the compact follow list and the last
+// few changes. Inspection details and channel cards stay collapsed so the
+// owner is not greeted by a dashboard wall.
+export function renderPetOverview(options: PetOverviewOptions): string {
+  const translate = options.translate;
+  const inspection = options.inspection;
+  const approvals = options.approvals || [];
+  const watches = options.watches || [];
+  const channels = options.channels || [];
+  const pending = typeof options.pendingApprovals === "number" && Number.isFinite(options.pendingApprovals)
+    ? Math.max(0, Math.trunc(options.pendingApprovals))
+    : approvals.filter(item => item.status === "pending").length;
+  const anomalies = countPetWatchAnomalies(watches);
+  const degraded = channels.filter(item => item.degraded).length;
+  const channelTotal = typeof options.channelTotal === "number" && options.channelTotal >= 0 ? options.channelTotal : channels.length;
+  const health = textValue(inspection?.health);
+  const healthLabel = health === "ok"
+    ? translate("petWorkbench.inspectionHealthy")
+    : health === "degraded"
+      ? translate("petWorkbench.inspectionDegraded")
+      : translate("petWorkbench.inspectionUnknown");
+  const healthClass = health === "ok" ? "ok" : health === "degraded" ? "degraded" : "unknown";
+
+  const meta: string[] = [];
+  const version = textValue(inspection?.version);
+  const webVersion = textValue(inspection?.web_version);
+  if (version) meta.push(`${translate("petWorkbench.inspectionVersion")}: ${escapeHTML(version)}`);
+  if (webVersion) meta.push(`${translate("petWorkbench.inspectionWebVersion")}: ${escapeHTML(webVersion)}`);
+  const uptime = countValue(inspection?.uptime_minutes);
+  if (uptime !== null) meta.push(`${translate("petWorkbench.inspectionUptime")}: ${escapeHTML(uptimeText(uptime, translate))}`);
+  const checkedAt = textValue(inspection?.checked_at);
+  if (checkedAt) meta.push(`${translate("petWorkbench.inspectionCheckedAt")}: ${escapeHTML(options.formatTime(checkedAt))}`);
+
+  const watched = watches.filter(item => item.watched && !item.ignored);
+  const others = watches.filter(item => !item.watched || item.ignored);
+  const followRows = watched.length
+    ? watched.map(item => renderWatchRow(item, options)).join("")
+    : `<div class="field-help">${escapeHTML(translate("petWorkbench.emptyFollows"))}</div>`;
+  const otherRows = others.length
+    ? `<details class="pet-overview-other"><summary>${escapeHTML(translate("petWorkbench.otherFollows", {count: String(others.length)}))}</summary>${others.map(item => renderWatchRow(item, options)).join("")}</details>`
+    : "";
+
+  const activities: Array<{time: string; html: string}> = [];
+  for (const item of approvals) {
+    activities.push({
+      time: item.resolved_at || item.created_at || "",
+      html: `<button type="button" class="pet-overview-activity" data-pet-approval-open="${escapeHTML(item.id)}"><span class="pet-overview-activity-kind">${escapeHTML(translate("petWorkbench.overviewApprovalKind"))}</span><strong>${escapeHTML(item.title || "")}</strong><small>${escapeHTML(options.formatTime(item.created_at || ""))}</small></button>`,
+    });
+  }
+  for (const item of watched) {
+    activities.push({
+      time: item.updated_at || "",
+      html: `<button type="button" class="pet-overview-activity" data-pet-overview-task="${escapeHTML(item.task_id)}"><span class="pet-overview-activity-kind">${escapeHTML(translate("petWorkbench.overviewTaskKind"))}</span><strong>${escapeHTML(item.title || item.task_id)}</strong><small>${escapeHTML(options.formatTime(item.updated_at || ""))}</small></button>`,
+    });
+  }
+  activities.sort((left, right) => {
+    const leftTime = Date.parse(left.time) || 0;
+    const rightTime = Date.parse(right.time) || 0;
+    return rightTime - leftTime;
+  });
+  const recent = activities.length
+    ? activities.slice(0, 5).map(item => item.html).join("")
+    : `<div class="field-help">${escapeHTML(translate("petWorkbench.overviewEmptyActivity"))}</div>`;
+
+  return `<div class="pet-overview">
+    <section class="pet-overview-status">
+      <header><strong>${escapeHTML(translate("petWorkbench.overviewStatusTitle"))}</strong><span class="pet-inspection-health ${healthClass}">${escapeHTML(healthLabel)}</span></header>
+      ${meta.length ? `<div class="pet-inspection-meta">${meta.map(item => `<span>${item}</span>`).join("")}</div>` : ""}
+    </section>
+    <div class="pet-overview-cards">
+      ${overviewCard("approvals", pending, translate("petWorkbench.overviewPending"), translate("petWorkbench.overviewPendingHint"))}
+      ${overviewCard("follows", anomalies, translate("petWorkbench.overviewAnomalies"), translate("petWorkbench.overviewAnomaliesHint"), anomalies ? "attention" : "")}
+      ${overviewCard("channels", degraded, translate("petWorkbench.overviewChannels"), translate("petWorkbench.overviewChannelsHint", {total: String(channelTotal)}), degraded ? "attention" : "")}
+    </div>
+    <section class="pet-overview-follows" id="pet-overview-follows">
+      <header><h3>${escapeHTML(translate("petWorkbench.overviewFollows"))}</h3><small>${escapeHTML(translate("petWorkbench.followHint"))}</small></header>
+      ${followRows}
+      ${otherRows}
+    </section>
+    <section class="pet-overview-recent">
+      <h3>${escapeHTML(translate("petWorkbench.overviewRecent"))}</h3>
+      <div class="pet-overview-activity-list">${recent}</div>
+    </section>
+    <details class="pet-overview-inspection">
+      <summary>${escapeHTML(translate("petWorkbench.inspectionSummary"))}</summary>
+      ${renderPetInspectionSummary(inspection, translate, options.formatTime)}
+    </details>
+    <details class="pet-overview-channels" id="pet-overview-channels">
+      <summary>${escapeHTML(translate("petWorkbench.channelHealth"))}</summary>
+      ${renderPetChannelHealth(channels, textValue(inspection?.note), channelTotal, translate)}
+    </details>
+  </div>`;
+}
+
+export interface PetRecordEntry {
+  date: string;
+  content: string;
+}
+
+export interface PetRecordsOptions {
+  translate: Translate;
+  emptyCore: string;
+  emptyWorklog: string;
+}
+
+// Worklog entries are dated filenames, so newest-first is a plain string sort.
+// Copy first: the tab keeps the server response for pagination counts.
+export function sortPetWorklog<T extends {date?: string}>(entries: T[]): T[] {
+  return [...entries].sort((left, right) => String(right.date || "").localeCompare(String(left.date || "")));
+}
+
+function renderCoreEntry(entry: {name: string; content: string}, index: number, translate: Translate): string {
+  return `<details class="pet-doc-entry" id="pet-record-core-${index}"><summary><span>${escapeHTML(entry.name)}</span><button type="button" class="pet-doc-edit" data-pet-doc-edit data-pet-doc-section="core" data-pet-doc-name="${escapeHTML(entry.name)}">${escapeHTML(translate("common.edit"))}</button></summary><pre>${escapeHTML(entry.content)}</pre></details>`;
+}
+
+function renderWorklogEntry(entry: PetRecordEntry, translate: Translate): string {
+  return `<details class="pet-doc-entry"><summary><span>${escapeHTML(entry.date)}</span><button type="button" class="pet-doc-edit" data-pet-doc-edit data-pet-doc-section="worklog" data-pet-doc-name="${escapeHTML(entry.date)}.md">${escapeHTML(translate("common.edit"))}</button></summary><pre>${escapeHTML(entry.content)}</pre></details>`;
+}
+
+// renderPetRecords merges the old core and worklog tabs into one body. Core
+// documents stay pinned above the dated log; the table of contents is a
+// collapsible details that jumps to (and opens) one record.
+export function renderPetRecords(
+  core: Array<{name: string; content: string}>,
+  worklog: PetRecordEntry[],
+  options: PetRecordsOptions,
+): string {
+  const translate = options.translate;
+  const sorted = sortPetWorklog(worklog);
+  const toc = [
+    `<button type="button" data-pet-record-goto="pet-record-core">${escapeHTML(translate("petWorkbench.core"))} (${core.length})</button>`,
+    ...core.map((entry, index) => `<button type="button" class="pet-record-toc-sub" data-pet-record-goto="pet-record-core-${index}">${escapeHTML(entry.name)}</button>`),
+    `<button type="button" data-pet-record-goto="pet-record-worklog">${escapeHTML(translate("petWorkbench.worklog"))} (${sorted.length})</button>`,
+  ].join("");
+  const coreBody = core.length
+    ? core.map((entry, index) => renderCoreEntry(entry, index, translate)).join("")
+    : `<div class="field-help">${escapeHTML(options.emptyCore)}</div>`;
+  const worklogBody = sorted.length
+    ? sorted.map(entry => renderWorklogEntry(entry, translate)).join("")
+    : `<div class="field-help">${escapeHTML(options.emptyWorklog)}</div>`;
+  return `<div class="pet-records">
+    <details class="pet-record-toc"><summary>${escapeHTML(translate("petWorkbench.recordsToc"))}</summary><nav>${toc}</nav></details>
+    <section class="pet-record-section" id="pet-record-core">
+      <h3>${escapeHTML(translate("petWorkbench.core"))}</h3>
+      ${coreBody}
+    </section>
+    <section class="pet-record-section" id="pet-record-worklog">
+      <h3>${escapeHTML(translate("petWorkbench.worklog"))}</h3>
+      ${worklogBody}
+    </section>
+  </div>`;
+}
+
+export function renderPetChannelHealth(items: PetChannelHealth[], note: string, total: number, translate: Translate): string {
+  if (items.length === 0) {
+    return `<div class="field-help">${escapeHTML(translate("petWorkbench.emptyChannels"))}</div>${note ? `<div class="pet-channel-note">${escapeHTML(note)}</div>` : ""}`;
+  }
+  const summary = note
+    ? `<div class="pet-channel-note">${escapeHTML(note)}</div>`
+    : `<div class="field-help">${escapeHTML(translate("petWorkbench.channelHealthy"))}</div>`;
+  const truncated = total > items.length
+    ? `<div class="field-help">${escapeHTML(translate("petWorkbench.channelShown", {shown: String(items.length), total: String(total)}))}</div>`
+    : "";
+  const cards = items.map(item => {
+    const availability = item.effective_availability ? ` / ${item.effective_availability}` : "";
+    const oldest = item.oldest_pending_minutes > 0
+      ? translate("petWorkbench.channelAgeMinutes", {minutes: String(item.oldest_pending_minutes)})
+      : "-";
+    const attempts = item.stuck_pending || item.queued_pending || item.attempted_pending
+      ? ` (attempts=0 ${item.stuck_pending}，${translate("petWorkbench.channelQueuedPending")} ${item.queued_pending}，attempts>0 ${item.attempted_pending})`
+      : "";
+    const expired = item.expired_leases > 0
+      ? `<span>${translate("petWorkbench.channelExpiredLeases")}: ${item.expired_leases}</span>`
+      : "";
+    return `<article class="pet-channel-card${item.degraded ? " degraded" : ""}">
+      <header><strong>${escapeHTML(item.name)}</strong><span class="pet-channel-badge ${item.degraded ? "degraded" : "ok"}">${escapeHTML(item.degraded ? translate("petWorkbench.channelDegraded") : translate("petWorkbench.channelHealthyLabel"))}</span></header>
+      <div class="pet-channel-grid">
+        <span>${translate("petWorkbench.channelStatus")}: ${escapeHTML(item.status || "-")}${escapeHTML(availability)}</span>
+        <span>${translate("petWorkbench.channelPending")}: ${item.pending}${attempts}</span>
+        <span>${translate("petWorkbench.channelOldestPending")}: ${escapeHTML(oldest)}</span>
+        ${expired}
+        <span>${translate("petWorkbench.channelDeadLetter")}: ${item.dead_letter}</span>
+        ${item.last_error_code ? `<span>${translate("petWorkbench.channelLastError")}: ${escapeHTML(item.last_error_code)}</span>` : ""}
+      </div>
+      ${item.note ? `<small>${escapeHTML(item.note)}</small>` : ""}
+    </article>`;
+  }).join("");
+  return `${summary}${truncated}<div class="pet-channel-list">${cards}</div>`;
 }

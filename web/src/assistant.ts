@@ -233,7 +233,7 @@ export function mountAssistant(): void {
           <section><h3>模型</h3>
             <label class="assistant-settings-field">宠物模型（聊天 + 自主行为）<select id="pet-chat-model"></select></label>
           </section>
-          <section><h3>恢复出厂设置</h3>
+          <section class="assistant-settings-danger"><h3>恢复出厂设置</h3>
             <p class="assistant-settings-note">只清理本机宠物 Workspace、Task、工作记录/身份设定、审批与活动记录、聊天记录，并停用本机宠物。宠物项目、同步镜像和其他设备的宠物不受影响；模型、形象和权限设置会保留。</p>
             <button type="button" id="pet-reset-open" class="assistant-settings-trigger danger">恢复出厂设置…</button>
           </section>

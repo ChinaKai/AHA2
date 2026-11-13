@@ -3033,18 +3033,20 @@ test("sidebar and mobile navigation expose pet workbench and resources", async (
   assert.match(i18n, /"petWorkbench\.title": "Pet workbench"/);
 });
 
-test("pet workbench follows tab exposes unfollow and ignore actions", async () => {
+test("pet workbench overview exposes unfollow and ignore actions", async () => {
   const root = resolve(import.meta.dirname, "..");
   const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
+  const workbench = await readFile(resolve(root, "src", "pet_workbench.ts"), "utf8");
   const api = await readFile(resolve(root, "src", "api.ts"), "utf8");
   const i18n = await readFile(resolve(root, "src", "i18n.ts"), "utf8");
-  assert.match(main, /data-pet-workbench-tab="follows"/);
-  assert.match(main, /renderPetWatches\(view\.watches\)/);
-  assert.match(main, /data-pet-watch-follow/);
-  assert.match(main, /data-pet-watch-unfollow/);
-  assert.match(main, /data-pet-watch-ignore="true"/);
-  assert.match(main, /data-pet-watch-ignore="false"/);
-  assert.match(main, /petWatchActionKeys\(item\)/);
+  assert.match(main, /data-pet-workbench-tab="overview"/);
+  assert.match(main, /renderPetOverview\(\{/);
+  assert.match(workbench, /data-pet-watch-follow/);
+  assert.match(workbench, /data-pet-watch-unfollow/);
+  assert.match(workbench, /data-pet-watch-ignore="true"/);
+  assert.match(workbench, /data-pet-watch-ignore="false"/);
+  assert.match(workbench, /petWatchActionKeys\(item\)/);
+  assert.match(main, /bindPetWatchActions\(\)/);
   assert.match(api, /followPetTask/);
   assert.match(api, /removePetTaskWatch/);
   assert.match(api, /setPetTaskWatchIgnored/);
@@ -3069,10 +3071,11 @@ test("pet workbench actions cover unfollowed, followed, ignored, and restored ro
   assert.deepEqual(petWatchActionKeys({watched: false, ignored: true}), ["restoreIgnored"]);
 
   const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
-  // The unwatched branch now renders the same ignore action, and its restore
+  const workbench = await readFile(resolve(root, "src", "pet_workbench.ts"), "utf8");
+  // The unwatched branch renders the same ignore action, and its restore
   // button reuses the existing ignored=false handler.
-  assert.match(main, /case "ignore": return `<button[^`]*data-pet-watch-ignore="true"/);
-  assert.match(main, /case "restoreIgnored": return `<button[^`]*data-pet-watch-ignore="false"/);
+  assert.match(workbench, /case "ignore": return `<button[^`]*data-pet-watch-ignore="true"/);
+  assert.match(workbench, /case "restoreIgnored": return `<button[^`]*data-pet-watch-ignore="false"/);
   assert.match(main, /\[data-pet-watch-ignore\]"\)\.forEach[\s\S]*?const ignored = button\.dataset\.petWatchIgnore === "true"[\s\S]*?api\.setPetTaskWatchIgnored\(taskID, ignored\)[\s\S]*?await load\(\)/);
 });
 

@@ -73,9 +73,11 @@ test("batch model delete approvals show the snapshotted count and names", () => 
 
 test("heavy approval cards show the executing state and refresh until it finishes", async () => {
   const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
-  assert.match(main, /const status = executing \? tr\("执行中"\)/);
-  assert.match(main, /petWorkbench\.approvalExecutingHint/);
-  assert.match(main, /const cardButtons = card[\s\S]{0,200}\.disabled = true/);
+  const approvals = await readFile(resolve(root, "src", "pet_approvals.ts"), "utf8");
+  assert.match(approvals, /const executing = status === "executing"/);
+  assert.match(approvals, /petWorkbench\.approvalExecutingHint/);
+  assert.match(main, /const buttons = \[\.\.\.dialog\.querySelectorAll<HTMLButtonElement>\("\[data-pet-approval-decision\]"\)\]/);
+  assert.match(main, /buttons\.forEach\(item => \{ item\.disabled = true; \}\)/);
   assert.match(main, /if \(result\.status === "executing"\) scheduleApprovalExecutionPoll\(\)/);
   assert.match(main, /function scheduleApprovalExecutionPoll\(\): void/);
   assert.match(main, /some\(item => item\.status === "executing"\)/);
@@ -83,15 +85,19 @@ test("heavy approval cards show the executing state and refresh until it finishe
 
 test("approval cards wire the picker into approve and keep reject/cancel paths", async () => {
   const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
-  assert.match(main, /renderPetApprovalOptionPicker\(item\.id, petApprovalOptions\(item\), tr\)/);
-  assert.match(main, /if \(decision === "approve"\) \{[\s\S]{0,700}selectedPetApprovalOption\(options, select\?\.value\)[\s\S]{0,200}if \(!decisionReason\) \{[\s\S]{0,300}return;/);
+  const approvals = await readFile(resolve(root, "src", "pet_approvals.ts"), "utf8");
+  // The detail dialog is rendered by the shared approval module; main only
+  // binds the decisions.
+  assert.match(main, /renderPetApprovalDetail\(approval, \{[\s\S]{0,120}translate: petApprovalText/);
+  assert.match(approvals, /renderPetApprovalOptionPicker\(item\.id, petApprovalOptions\(item\), translate\)/);
+  assert.match(main, /if \(decision === "approve"\) \{[\s\S]{0,700}selectedPetApprovalOption\(options, select\?\.value\)[\s\S]{0,300}if \(!decisionReason\) \{[\s\S]{0,300}return;/);
   assert.match(main, /if \(decision === "reject"\) \{\s*decisionReason = \(window\.prompt\(t\("petApproval\.rejectReasonPrompt"\)\)/);
-  assert.match(main, /api\.resolvePetApproval\(id, decision, decisionReason\)/);
-  // A failed resolve must show the server message on the clicked card instead
-  // of silently re-enabling the button.
-  assert.match(main, /const showApprovalError = \(button: HTMLButtonElement, message: string\) => \{/);
-  assert.match(main, /data-pet-approval-error/);
-  assert.match(main, /showApprovalError\(button, error instanceof Error \? error\.message : String\(error\)\)/);
+  assert.match(main, /api\.resolvePetApproval\(approvalID, decision, decisionReason\)/);
+  // A failed resolve must show the server message inside the open dialog
+  // instead of silently re-enabling the buttons.
+  assert.match(main, /const showDialogError = \(dialog: HTMLDialogElement, message: string\): void => \{/);
+  assert.match(approvals, /data-pet-approval-error/);
+  assert.match(main, /showDialogError\(dialog, error instanceof Error \? error\.message : String\(error\)\)/);
   const app = await readFile(resolve(root, "build", "app.js"), "utf8");
   assert.match(app, /\.\/pet_approvals\.js\?v=[a-f0-9]{12}/);
 });

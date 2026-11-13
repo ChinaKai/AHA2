@@ -2,8 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {readFile} from "node:fs/promises";
 import {resolve} from "node:path";
-import {createPetApprovalCounter, petPendingApprovalBadge} from "../build/pet_approvals.js";
-import {bindPetDocEditorButtons, createPetWorkbenchLoader, createPetWorkbenchPageKeeper, PET_APPROVAL_MAX_LIMIT, petApprovalMatches, petApprovalPage, renderPetApprovalLoadMore, renderPetInspectionSummary, renderPetWorkbenchLoadError, swapPetWorkbenchPage} from "../build/pet_workbench.js";
+import {createPetApprovalCounter, petApprovalFilterCount, petPendingApprovalBadge, renderPetApprovalFilters, renderPetApprovalList, sortPetApprovals} from "../build/pet_approvals.js";
+import {bindPetDocEditorButtons, countPetWatchAnomalies, createPetWorkbenchLoader, createPetWorkbenchPageKeeper, mapPetWorkbenchTab, PET_APPROVAL_MAX_LIMIT, petApprovalMatches, petApprovalPage, renderPetApprovalLoadMore, renderPetInspectionSummary, renderPetOverview, renderPetRecords, renderPetWorkbenchLoadError, sortPetWorklog, swapPetWorkbenchPage} from "../build/pet_workbench.js";
 
 const root = resolve(import.meta.dirname, "../..");
 
@@ -253,7 +253,7 @@ test("an entry issues one workbench request and unrelated renders never abort it
     onError: () => {},
     timeoutMs: 60_000,
   });
-  binding = keeper.adopt(body, page, loader, "core");
+  binding = keeper.adopt(body, page, loader, "overview");
   const pending = loader.load();
   assert.equal(requests.length, 1, "entering the view issues exactly one request");
 
@@ -261,7 +261,7 @@ test("an entry issues one workbench request and unrelated renders never abort it
   // resource loads and messages render too. Every one of them must reuse the
   // live page instead of rebinding the loader.
   for (let render = 0; render < 6; render++) {
-    assert.equal(keeper.beforeRender({view: "pet-workbench", authenticated: true, tab: "core"}), page, `render ${render} carries the page`);
+    assert.equal(keeper.beforeRender({view: "pet-workbench", authenticated: true, tab: "overview"}), page, `render ${render} carries the page`);
     assert.equal(keeper.owns(body), true, `render ${render} sees the live binding`);
     assert.equal(requests.length, 1, `render ${render} must not issue another request`);
     assert.equal(requests[0].aborted, false, `render ${render} must not abort the in-flight request`);
@@ -380,8 +380,8 @@ function fakeTabbedWorkbench() {
       return match ? tabs.get(match[1]) ?? null : null;
     },
   };
-  for (const name of ["core", "worklog", "inspection", "approvals", "follows", "settings"]) {
-    const classes = new Set(name === "core" ? ["active"] : []);
+  for (const name of ["overview", "approvals", "records", "settings"]) {
+    const classes = new Set(name === "overview" ? ["active"] : []);
     tabs.set(name, {
       dataset: {petWorkbenchTab: name},
       classList: {toggle(token, force) { if (force) classes.add(token); else classes.delete(token); }},
@@ -401,7 +401,7 @@ test("a programmatic tab change is followed on the preserved page without restar
   const keeper = createPetWorkbenchPageKeeper();
   const {page, body, tabs, clickCounts} = fakeTabbedWorkbench();
   let binding = null;
-  let active = "core";
+  let active = "overview";
   const requests = [];
   const loader = createPetWorkbenchLoader({
     read: signal => new Promise((_resolve, reject) => {
@@ -435,19 +435,19 @@ test("a programmatic tab change is followed on the preserved page without restar
     "the mounted page is still carried across the render",
   );
   assert.equal(tabs.get("settings").isActive(), true, "the settings tab becomes selected");
-  assert.equal(tabs.get("core").isActive(), false);
+  assert.equal(tabs.get("overview").isActive(), false);
   assert.equal(active, "settings");
   assert.equal(binding.tab, "settings");
   assert.equal(body.innerHTML, "settings-body");
   assert.equal(requests.length, 1, "following the tab must not restart the request");
   assert.equal(requests[0].aborted, false, "following the tab must not abort the request");
 
-  // The kept page's listeners still work when the user moves back to core and
-  // approvals, and each click follows the normal path.
-  tabs.get("core").click();
-  assert.equal(active, "core");
-  assert.equal(tabs.get("core").isActive(), true);
-  assert.equal(binding.tab, "core");
+  // The kept page's listeners still work when the user moves back to overview
+  // and approvals, and each click follows the normal path.
+  tabs.get("overview").click();
+  assert.equal(active, "overview");
+  assert.equal(tabs.get("overview").isActive(), true);
+  assert.equal(binding.tab, "overview");
   tabs.get("approvals").click();
   assert.equal(active, "approvals");
   assert.equal(tabs.get("approvals").isActive(), true);
@@ -668,7 +668,10 @@ test("workbench wiring uses the guarded loader and renders the inspection summar
   assert.match(main, /createPetWorkbenchLoader\(/);
   assert.match(main, /api\.petWorkbench\(\{approvalLimit, worklogLimit\}, signal\)/);
   assert.match(main, /isCurrent: \(\) => body\.isConnected && petWorkbenchPageKeeper\.binding === binding/);
-  assert.match(main, /renderPetInspectionSummary\(view\.inspection, t, formatDateTime\)/);
+  assert.match(main, /renderPetOverview\(\{/);
+  assert.match(main, /inspection: view\.inspection/);
+  assert.match(main, /formatTime: formatDateTime/);
+  assert.match(loader, /renderPetInspectionSummary\(inspection, translate, options\.formatTime\)/);
   assert.match(main, /bindPetWorkbenchPage\(\)\.catch\(showPetWorkbenchBindFailure\)/);
   assert.match(main, /function showPetWorkbenchBindFailure/);
   assert.match(main, /renderPetWorkbenchLoadError\(loadError, t\)/);
@@ -694,13 +697,13 @@ test("workbench wiring uses the guarded loader and renders the inspection summar
   assert.match(loader, /loading = false/);
 });
 
-test("workbench defaults to core and removes journal UI/API while retaining old bookmarks", async () => {
+test("workbench defaults to overview and removes journal UI/API while retaining old bookmarks", async () => {
   const main = await readFile(resolve(root, "web/src/main.ts"), "utf8");
   const api = await readFile(resolve(root, "web/src/api.ts"), "utf8");
   const assistant = await readFile(resolve(root, "web/src/assistant.ts"), "utf8");
   const i18n = await readFile(resolve(root, "web/src/i18n.ts"), "utf8");
-  assert.match(main, /let petWorkbenchTab = "core"/);
-  assert.match(main, /class="active" data-pet-workbench-tab="core"/);
+  assert.match(main, /let petWorkbenchTab = "overview"/);
+  assert.match(main, /class="active" data-pet-workbench-tab="overview"/);
   assert.doesNotMatch(main, /data-pet-workbench-tab="diary"|view\.diary|diaryLimit|petDiary/);
   assert.doesNotMatch(api, /petDiary|diary_limit|diaryLimit/);
   assert.doesNotMatch(assistant + i18n, /日记|diary/i);
@@ -840,8 +843,10 @@ test("approval load-more markup matches the task list component and loading stat
 test("workbench collapses core documents and opens approvals on pending with ten-row pages", async () => {
   const main = await readFile(resolve(root, "web/src/main.ts"), "utf8");
   const loader = await readFile(resolve(root, "web/src/pet_workbench.ts"), "utf8");
-  assert.match(main, /view\.core\.map\(item => `<details class="pet-doc-entry"><summary>/);
-  assert.doesNotMatch(main, /<details class="pet-doc-entry" open>/);
+  assert.match(main, /renderPetRecords\(view\.core, view\.worklog,/);
+  assert.match(loader, /core\.map\(\(entry, index\) => renderCoreEntry\(/);
+  assert.match(loader, /<details class="pet-doc-entry" id="pet-record-core-\$\{index\}">/);
+  assert.doesNotMatch(loader, /<details class="pet-doc-entry" open>/);
   assert.match(main, /let petApprovalStatusFilter[^=]*= "pending";/);
   assert.match(main, /let petApprovalFilter: [^=]+= "all";/);
   assert.match(main, /let approvalLimit = 10;/);
@@ -1008,12 +1013,154 @@ test("document edit buttons open collapsed entries, focus the editor and save bo
 test("document editors share one attribute and the approval footer caps at 200", async () => {
   const main = await readFile(resolve(root, "web/src/main.ts"), "utf8");
   const loader = await readFile(resolve(root, "web/src/pet_workbench.ts"), "utf8");
-  assert.ok(main.includes('class="pet-doc-edit" data-pet-doc-edit data-pet-doc-section="core"'));
-  assert.ok(main.includes('class="pet-doc-edit" data-pet-doc-edit data-pet-doc-section="${escapeHTML(section)}"'));
+  const approvals = await readFile(resolve(root, "web/src/pet_approvals.ts"), "utf8");
+  const coreEdit = loader.match(/function renderCoreEntry\([\s\S]*?\n}/)?.[0] || "";
+  const worklogEdit = loader.match(/function renderWorklogEntry\([\s\S]*?\n}/)?.[0] || "";
+  assert.ok(coreEdit.includes('class="pet-doc-edit" data-pet-doc-edit data-pet-doc-section="core"'));
+  assert.ok(worklogEdit.includes('class="pet-doc-edit" data-pet-doc-edit data-pet-doc-section="worklog"'));
   assert.match(loader, /querySelectorAll<HTMLButtonElement>\("\[data-pet-doc-edit\]"\)/);
+  assert.match(loader, /const section = button\.dataset\.petDocSection \|\| binding\.section \|\| ""/);
   assert.match(loader, /details\.open = true/);
   assert.match(loader, /textarea\.focus\(\)/);
   assert.match(main, /approvalLimit = Math\.min\(approvalLimit \+ 10, PET_APPROVAL_MAX_LIMIT\)/);
   assert.match(main, /if \(loadingMore !== kind\) return;/);
-  assert.match(main, /petWorkbench\.pendingFirstHint/);
+  assert.match(approvals, /petWorkbench\.pendingFirstHint/);
+});
+
+test("the four workbench tabs default to overview and absorb legacy names", async () => {
+  const {PET_WORKBENCH_TABS} = await import("../build/pet_workbench.js");
+  assert.deepEqual([...PET_WORKBENCH_TABS], ["overview", "approvals", "records", "settings"]);
+  assert.equal(mapPetWorkbenchTab(undefined), "overview");
+  assert.equal(mapPetWorkbenchTab(""), "overview");
+  assert.equal(mapPetWorkbenchTab("overview"), "overview");
+  assert.equal(mapPetWorkbenchTab("approvals"), "approvals");
+  assert.equal(mapPetWorkbenchTab("ideas"), "approvals", "legacy idea links open approvals");
+  assert.equal(mapPetWorkbenchTab("records"), "records");
+  assert.equal(mapPetWorkbenchTab("core"), "records");
+  assert.equal(mapPetWorkbenchTab("worklog"), "records");
+  assert.equal(mapPetWorkbenchTab("settings"), "settings");
+  assert.equal(mapPetWorkbenchTab("inspection"), "overview");
+  assert.equal(mapPetWorkbenchTab("follows"), "overview");
+  assert.equal(mapPetWorkbenchTab("unknown-tab"), "overview");
+});
+
+const overviewText = (key, values = {}) => ({"petWorkbench.overviewChannelsHint": "{total} channels"}[key] ?? key)
+  .replace(/\{(\w+)\}/g, (_, name) => String(values[name] ?? `{${name}}`));
+
+const overviewChannel = {
+  id: "c-1", name: "Mail", status: "degraded", pending: 2, stuck_pending: 0, queued_pending: 0,
+  attempted_pending: 0, expired_leases: 0, oldest_pending_minutes: 0, oldest_unattempted_minutes: 0,
+  oldest_queued_minutes: 0, oldest_attempted_minutes: 0, expired_lease_minutes: 0, dead_letter: 0,
+  degraded: true,
+};
+
+test("overview counts pending approvals, watched anomalies and degraded channels", () => {
+  const html = renderPetOverview({
+    inspection: {health: "degraded", version: "1.2.3", pending_approvals: 3, checked_at: "2026-01-05T00:00:00Z"},
+    approvals: [
+      {id: "a-1", title: "Delete task", status: "pending", kind: "delete_task", created_at: "2026-01-05T00:00:00Z"},
+      {id: "a-2", title: "Old idea", status: "approved", kind: "idea", created_at: "2026-01-04T00:00:00Z"},
+    ],
+    watches: [
+      {task_id: "t-failed", code: "AHA-1", title: "Failed task", status: "failed", watched: true, reason: "manual", ignored: false, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-05T00:00:00Z"},
+      {task_id: "t-ok", code: "AHA-2", title: "Running task", status: "active", watched: true, reason: "manual", ignored: false, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-04T00:00:00Z"},
+      {task_id: "t-unwatched", code: "AHA-3", title: "Blocked but unwatched", status: "blocked", watched: false, reason: "manual", ignored: false, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-03T00:00:00Z"},
+    ],
+    channels: [overviewChannel],
+    channelTotal: 2,
+    pendingApprovals: 3,
+    translate: overviewText,
+    formatTime: value => `at ${value}`,
+  });
+  assert.match(html, /data-pet-overview-jump="approvals">\s*<strong>3<\/strong>/);
+  assert.match(html, /data-pet-overview-jump="follows"[^>]*>\s*<strong>1<\/strong>/, "only watched anomalies count");
+  assert.match(html, /data-pet-overview-jump="channels"[^>]*>\s*<strong>1<\/strong>/);
+  assert.match(html, /2 channels/);
+  assert.match(html, /id="pet-overview-follows"/);
+  assert.match(html, /data-pet-overview-task="t-failed"/);
+  assert.match(html, /data-pet-watch-unfollow data-pet-watch-task="t-failed"/, "unfollow is available from the overview");
+  assert.match(html, /pet-watch-row anomaly/);
+  assert.match(html, /data-pet-approval-open="a-1"/);
+  assert.match(html, /id="pet-overview-channels"/);
+  // The overview stays compact: only the five newest changes are listed.
+  assert.equal((html.match(/class="pet-overview-activity"/g) || []).length, 4);
+  assert.deepEqual(
+    [countPetWatchAnomalies([
+      {status: "failed", watched: true},
+      {status: "blocked", watched: true},
+      {status: "blocked", watched: false},
+      {status: "active", watched: true},
+    ])],
+    [2],
+  );
+});
+
+test("approvals open on pending, sorted by the longest wait", () => {
+  const items = [
+    {id: "new-pending", kind: "idea", status: "pending", title: "New", created_at: "2026-01-03T00:00:00Z"},
+    {id: "old-pending", kind: "delete_task", status: "pending", title: "Old", created_at: "2026-01-01T00:00:00Z"},
+    {id: "running", kind: "delete_workspace", status: "executing", title: "Running", created_at: "2026-01-02T00:00:00Z"},
+    {id: "resolved-old", kind: "idea", status: "approved", title: "Older", created_at: "2026-01-01T00:00:00Z", resolved_at: "2026-01-04T00:00:00Z"},
+    {id: "resolved-new", kind: "idea", status: "rejected", title: "Newer", created_at: "2026-01-01T00:00:00Z", resolved_at: "2026-01-05T00:00:00Z"},
+  ];
+  assert.deepEqual(
+    sortPetApprovals(items).map(item => item.id),
+    ["old-pending", "new-pending", "running", "resolved-new", "resolved-old"],
+  );
+  assert.deepEqual(items.map(item => item.id), ["new-pending", "old-pending", "running", "resolved-old", "resolved-new"], "sorting must not mutate the response");
+  const now = Date.parse("2026-01-03T02:00:00Z");
+  const html = renderPetApprovalList(items, {translate: overviewText, now});
+  const oldIndex = html.indexOf("data-pet-approval-open=\"old-pending\"");
+  const newIndex = html.indexOf("data-pet-approval-open=\"new-pending\"");
+  assert.ok(oldIndex >= 0 && oldIndex < newIndex, "longest wait first");
+  assert.match(html, /已等待 26 小时 0 分钟|petWorkbench\.approvalWaiting/, "waiting duration is shown");
+  assert.match(html, /class="pet-approval-row pending"/);
+  assert.match(renderPetApprovalList([], {translate: overviewText, empty: "没有待处理审批"}), /没有待处理审批/);
+});
+
+test("one filter button reports the active count and keeps pending as the default", () => {
+  assert.equal(petApprovalFilterCount("all", "pending"), 1);
+  assert.equal(petApprovalFilterCount("idea", "all"), 1);
+  assert.equal(petApprovalFilterCount("idea", "approved"), 2);
+  assert.equal(petApprovalFilterCount("all", "all"), 0);
+  const panel = renderPetApprovalFilters("idea", "approved", overviewText);
+  assert.match(panel, /class="pet-approval-filter-summary">petWorkbench\.filterActive</);
+  assert.match(panel, /data-pet-approval-filter="idea"[^>]*class="active"|class="active" data-pet-approval-filter="idea"/);
+  assert.match(panel, /data-pet-approval-pending-hint/);
+  assert.match(renderPetApprovalFilters("all", "pending", overviewText), /data-pet-approval-status-filter="pending"/);
+  assert.doesNotMatch(renderPetApprovalFilters("all", "pending", overviewText), /data-pet-approval-pending-hint/);
+});
+
+test("records pin core documents above a newest-first worklog with a collapsible TOC", () => {
+  const worklog = [
+    {date: "2026-01-02", content: "middle"},
+    {date: "2026-01-03", content: "newest"},
+    {date: "2026-01-01", content: "oldest"},
+  ];
+  assert.deepEqual(sortPetWorklog(worklog).map(entry => entry.date), ["2026-01-03", "2026-01-02", "2026-01-01"]);
+  assert.deepEqual(worklog.map(entry => entry.date), ["2026-01-02", "2026-01-03", "2026-01-01"], "sorting must not mutate the response");
+  const html = renderPetRecords(
+    [{name: "identity.md", content: "identity"}, {name: "principles.md", content: "principles"}],
+    worklog,
+    {translate: overviewText, emptyCore: "no core", emptyWorklog: "no worklog"},
+  );
+  assert.match(html, /<details class="pet-record-toc"><summary>petWorkbench\.recordsToc<\/summary>/);
+  assert.match(html, /data-pet-record-goto="pet-record-core"/);
+  assert.match(html, /data-pet-record-goto="pet-record-core-0"/);
+  assert.match(html, /data-pet-record-goto="pet-record-worklog"/);
+  assert.ok(html.indexOf('id="pet-record-core"') < html.indexOf('id="pet-record-worklog"'), "core stays pinned on top");
+  assert.ok(html.indexOf("newest") < html.indexOf("middle") && html.indexOf("middle") < html.indexOf("oldest"));
+  assert.match(html, /data-pet-doc-section="core" data-pet-doc-name="identity\.md"/);
+  assert.match(html, /data-pet-doc-section="worklog" data-pet-doc-name="2026-01-03\.md"/);
+});
+
+test("phones fit four tabs and turn approval dialogs into full-screen sheets", async () => {
+  const css = await readFile(resolve(root, "web/src/styles.css"), "utf8");
+  const mobile = css.slice(css.lastIndexOf("@media (max-width: 640px)"));
+  assert.notEqual(mobile, css, "a phone breakpoint must exist");
+  assert.match(mobile, /\.pet-workbench-tabs \{ display: grid; grid-template-columns: repeat\(4, minmax\(0, 1fr\)\); gap: 4px; \}/);
+  assert.match(mobile, /\.pet-workbench-tabs button \{[^}]*min-width: 0;[^}]*overflow: hidden;/);
+  assert.match(mobile, /\.pet-overview-cards \{ grid-template-columns: minmax\(0, 1fr\); \}/);
+  assert.match(mobile, /dialog\.pet-approval-detail-dialog, dialog\.pet-approval-filter-dialog \{[^}]*width: 100vw;[^}]*height: 100dvh;/);
+  assert.match(css, /\.pet-approval-row \{[^}]*grid-template-columns: 32px minmax\(0, 1fr\) auto auto;/);
 });
