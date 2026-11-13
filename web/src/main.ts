@@ -29,8 +29,8 @@ import {DEFAULT_TASK_STATUS_FILTERS, LOCAL_TASK_DEVICE_FILTER, TASK_STATUS_GROUP
 import type {TaskStatusGroup} from "./task_filters.js";
 import {TASK_TOOL_DEFAULT_WIDTH, normalizePinnedTaskTool, normalizeTaskToolMode, normalizeTaskToolWidth, renderTaskToolButtons, renderTaskToolContent, renderTaskToolPanel} from "./task_tools.js";
 import type {TaskTool, TaskToolMode} from "./task_tools.js";
-import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, createListRefreshScheduler, createResourceLoader, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, formCheckbox, loadNavigationSnapshot, matchingSlashCommands, paginateItems, paginationHTML, petWatchActionKeys, protoBadges, readPerfPanelPreference, renderProtocolProbeStatus, renderWorkspaceDetection, restoreInteractiveRegion, saveNavigationSnapshot, textMatchesQuery, writePerfPanelPreference} from "./ui_helpers.js";
-import type {InteractiveRegionState} from "./ui_helpers.js";
+import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, createListRefreshScheduler, createResourceLoader, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, formCheckbox, loadNavigationSnapshot, matchingSlashCommands, paginateItems, paginationHTML, petWatchActionKeys, protoBadges, readPerfPanelPreference, renderModelHealthCell, renderProtocolProbeStatus, renderWorkspaceDetection, restoreInteractiveRegion, saveNavigationSnapshot, textMatchesQuery, writePerfPanelPreference} from "./ui_helpers.js";
+import type {InteractiveRegionState, ModelHealthView} from "./ui_helpers.js";
 import {
   compactNumber,
   contextPercent,
@@ -322,6 +322,7 @@ const state: State = {
   models: [],
   modelPage: 1,
   modelSearch: "",
+  modelHealth: {} as Record<string, ModelHealthView>,
   providerPage: 1,
   codexAccountPage: 1,
   hardwareResources: [],
@@ -1989,7 +1990,15 @@ async function ensureViewData(view: View, force = false): Promise<void> {
   if (["projects", "tasks", "channels", "knowledge"].includes(view)) jobs.push(loadCoreData(force));
   if (["models", "tasks", "channels"].includes(view)) {
     jobs.push(loadResource("providers", force, async () => { state.providers = (await api.providers()).providers || []; }));
-    jobs.push(loadResource("models", force, async () => { state.models = (await api.models()).models || []; }));
+    jobs.push(loadResource("models", force, async () => {
+      state.models = (await api.models()).models || [];
+      // Drop health results for models that no longer exist so a stale badge
+      // cannot outlive its model record.
+      const ids = new Set(state.models.map(item => item.id));
+      for (const id of Object.keys(state.modelHealth)) {
+        if (!ids.has(id)) delete state.modelHealth[id];
+      }
+    }));
     jobs.push(loadResource("accounts", force, async () => { state.codexAccounts = (await api.codexAccounts()).accounts || []; }));
   }
   if (view === "models") jobs.push(loadResource("env", force, async () => { state.envGroups = (await api.envGroups()).env_groups || []; }));
@@ -3181,12 +3190,12 @@ function scheduleModelPageRender(): void {
 function modelResultsHTML(): string {
   const visibleModels = filteredModels();
   const modelPage = paginateItems(visibleModels, state.modelPage, MODEL_PAGE_SIZE);
-  const models = modelPage.items.map(item => `<tr><td><strong>${escapeHTML(item.display_name)}${modelSupportsImage(item) ? '<span class="capability-badge">图片</span>' : ''}</strong><small>${escapeHTML(item.wire_model)}</small></td><td><strong>${escapeHTML(item.provider_name || item.provider_id)}</strong><small>${escapeHTML(item.provider_id)}</small></td><td>${escapeHTML(backendProtocolLabel(item))}</td><td>${item.context_window ? Math.round(item.context_window / 1000) + "K" : "-"}${item.max_output_tokens ? `<small>输出 ${Math.round(item.max_output_tokens / 1000)}K</small>` : ""}${item.auto_compact_window ? `<small>自动压缩 ${Math.round(item.auto_compact_window / 1000)}K</small>` : ""}</td><td class="row-actions"><button type="button" data-edit-model="${item.id}" class="icon-button" title="编辑模型">${icon("edit")}</button><button type="button" data-delete-model="${item.id}" class="icon-button" title="删除模型">${icon("close")}</button></td></tr>`).join("");
+  const models = modelPage.items.map(item => `<tr><td><strong>${escapeHTML(item.display_name)}${modelSupportsImage(item) ? '<span class="capability-badge">图片</span>' : ''}</strong><small>${escapeHTML(item.wire_model)}</small></td><td><strong>${escapeHTML(item.provider_name || item.provider_id)}</strong><small>${escapeHTML(item.provider_id)}</small></td><td>${escapeHTML(backendProtocolLabel(item))}</td><td>${item.context_window ? Math.round(item.context_window / 1000) + "K" : "-"}${item.max_output_tokens ? `<small>输出 ${Math.round(item.max_output_tokens / 1000)}K</small>` : ""}${item.auto_compact_window ? `<small>自动压缩 ${Math.round(item.auto_compact_window / 1000)}K</small>` : ""}</td><td class="model-health-cell">${renderModelHealthCell(item.id, state.modelHealth[item.id])}</td><td class="row-actions"><button type="button" data-edit-model="${item.id}" class="icon-button" title="编辑模型">${icon("edit")}</button><button type="button" data-delete-model="${item.id}" class="icon-button" title="删除模型">${icon("close")}</button></td></tr>`).join("");
   const modelEmpty = state.models.length === 0 ? "选择 Provider 后添加模型。" : "没有匹配的模型。";
   const modelTotal = state.modelSearch.trim()
     ? `匹配 ${visibleModels.length} / 共 ${state.models.length} 个`
     : `共 ${state.models.length} 个`;
-  return `<div class="table-wrap"><table class="models-table"><thead><tr><th>模型</th><th>Provider</th><th>Backend</th><th>Context</th><th></th></tr></thead><tbody>${models || `<tr><td colspan="5">${modelEmpty}</td></tr>`}</tbody></table></div>${paginationHTML("models", modelPage, modelTotal)}`;
+  return `<div class="table-wrap"><table class="models-table"><thead><tr><th>模型</th><th>Provider</th><th>Backend</th><th>Context</th><th>可用性</th><th></th></tr></thead><tbody>${models || `<tr><td colspan="6">${modelEmpty}</td></tr>`}</tbody></table></div>${paginationHTML("models", modelPage, modelTotal)}`;
 }
 
 // Search results must not go through render(): the global render defers while
@@ -3223,6 +3232,23 @@ function openEditModelDialog(id: string): void {
   if (imageInput) imageInput.checked = modelSupportsImage(model);
   (document.querySelector<HTMLDialogElement>("#model-edit-dialog"))?.showModal();
   document.querySelector<HTMLElement>("#save-model-edit")?.setAttribute("data-model-id", id);
+}
+
+// checkModelHealthByID runs one model row's health check. Progress and the
+// result stay in that row: other rows keep their own state and stay clickable,
+// and a failure must not raise a global error banner.
+async function checkModelHealthByID(id: string): Promise<void> {
+  if (!id || state.modelHealth[id]?.status === "checking") return;
+  state.modelHealth[id] = {status: "checking"};
+  refreshModelResults();
+  try {
+    const result = await api.checkModelHealth(id);
+    state.modelHealth[id] = result.health;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error || "检测请求失败");
+    state.modelHealth[id] = {status: "error", detail: message};
+  }
+  refreshModelResults();
 }
 
 function deleteModelByID(id: string, button: HTMLElement | null): void {
@@ -5059,6 +5085,11 @@ function bindCommon(): void {
     const remove = target.closest<HTMLElement>("[data-delete-model]");
     if (remove) {
       deleteModelByID(remove.dataset.deleteModel || "", remove);
+      return;
+    }
+    const check = target.closest<HTMLElement>("[data-check-model]");
+    if (check) {
+      void checkModelHealthByID(check.dataset.checkModel || "");
       return;
     }
     const pager = target.closest<HTMLElement>('[data-page-kind="models"]');

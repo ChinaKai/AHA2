@@ -323,6 +323,18 @@ export interface Model {
   capabilities?: Record<string, unknown>;
 }
 
+/** Account usability of a configured model, measured by one real call. */
+export type ModelHealthStatus = "ok" | "rate_limited" | "unauthorized" | "quota_exhausted" | "model_not_found" | "rejected" | "unavailable" | "inconclusive";
+
+export interface ModelHealth {
+  status: ModelHealthStatus;
+  http_status?: number;
+  endpoint?: string;
+  retry_after_seconds?: number;
+  detail?: string;
+  checked_at?: string;
+}
+
 export interface WorkspaceProbe {
   status?: "ready" | "unavailable" | "not_installed" | "execution_failed" | string;
   version?: string;

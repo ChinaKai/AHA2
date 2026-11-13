@@ -1142,6 +1142,13 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 .proto.dsh { background: #e8f7f1; color: #087f5b; }
 .proto.none { background: #eef1f4; color: var(--muted); }
 .capability-badge { display: inline-block; margin-left: 6px; padding: 1px 5px; border-radius: 999px; background: #e8f7f1; color: #087f5b; font-size: 9px; font-weight: 800; vertical-align: 1px; }
+.model-health-cell { min-width: 128px; }
+.model-health { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.model-health .status { white-space: nowrap; }
+.model-health .health-check-button { padding: 3px 8px; font-size: 10px; }
+.model-health-detail { margin-top: 4px; }
+.model-health-detail summary { color: var(--muted); font-size: 10px; cursor: pointer; }
+.model-health-detail small { display: block; margin-top: 2px; color: var(--muted); font-size: 10px; word-break: break-all; }
 .detect-status { margin-top: 10px; color: var(--muted); font-size: 11px; }
 .two { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }
 .hardware-resource-dialog [hidden] { display: none !important; }

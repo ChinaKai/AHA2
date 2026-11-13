@@ -732,3 +732,76 @@ export function paginationHTML(kind: string, slice: PageSlice<unknown>, totalLab
 export function formCheckbox(form: FormData, name: string): boolean {
   return form.get(name) !== null;
 }
+
+// Model health status describes whether the configured account can call this
+// model right now. It is a different question from the protocol probe above:
+// 429 is throttling, 402/quota wording is an exhausted balance, and 404 means
+// the gateway does not serve this model. The wording must not collapse those
+// into "protocol unsupported".
+export type ModelHealthTone = "good" | "warn" | "bad" | "muted";
+
+export interface ModelHealthView {
+  status: string;
+  http_status?: number;
+  endpoint?: string;
+  retry_after_seconds?: number;
+  detail?: string;
+}
+
+export interface ModelHealthDisplay {
+  label: string;
+  tone: ModelHealthTone;
+  hint: string;
+}
+
+export function modelHealthDisplay(health?: ModelHealthView): ModelHealthDisplay | undefined {
+  if (!health) return undefined;
+  const retry = Number(health.retry_after_seconds || 0);
+  switch (health.status) {
+    case "checking":
+      return {label: "检测中…", tone: "muted", hint: "正在向模型端点发送一次最小请求。"};
+    case "ok":
+      return {label: "可用", tone: "good", hint: "当前账号可以正常调用该模型。"};
+    case "rate_limited":
+      return {label: retry > 0 ? `限流 · ${retry} 秒后重试` : "限流", tone: "warn", hint: "账号被限流，稍后重试；这不是模型或协议不可用。"};
+    case "unauthorized":
+      return {label: "鉴权失败", tone: "bad", hint: "API Key 无效、已过期，或没有该模型的权限。"};
+    case "quota_exhausted":
+      return {label: "余额不足", tone: "bad", hint: "账号余额或配额不足，需要充值或提升配额。"};
+    case "model_not_found":
+      return {label: "模型不存在", tone: "bad", hint: "Provider 不提供这个模型名，检查 wire_model 是否写错。"};
+    case "rejected":
+      return {label: "请求被拒绝", tone: "warn", hint: "请求参数或模型配置被拒绝；这不是余额或鉴权结论。"};
+    case "unavailable":
+      return {label: "不可用", tone: "bad", hint: "网关超时、不可达或返回服务端错误。"};
+    case "error":
+      return {label: "检测失败", tone: "muted", hint: "检测请求没有完成，可重试。"};
+    default:
+      return {label: "未确认", tone: "muted", hint: "网关响应无法判断账号当前是否可用。"};
+  }
+}
+
+export function renderModelHealthBadge(health?: ModelHealthView): string {
+  const display = modelHealthDisplay(health);
+  if (!display) return `<span class="status">未检测</span>`;
+  const tone = display.tone === "muted" ? "" : ` ${display.tone}`;
+  return `<span class="status${tone}" title="${escapeWorkspaceHTML(display.hint)}">${escapeWorkspaceHTML(display.label)}</span>`;
+}
+
+export function renderModelHealthDetail(health?: ModelHealthView): string {
+  if (!health || health.status === "checking") return "";
+  const facts: string[] = [];
+  if (health.http_status) facts.push(`HTTP ${health.http_status}`);
+  if (health.endpoint) facts.push(String(health.endpoint));
+  if (health.detail) facts.push(String(health.detail));
+  if (!facts.length) return "";
+  return `<details class="model-health-detail"><summary>详情</summary><small>${escapeWorkspaceHTML(facts.join(" · "))}</small></details>`;
+}
+
+// renderModelHealthCell is the whole row control: badge, one-shot button and
+// expandable evidence. Only this row's health state changes, so a failure or a
+// slow gateway cannot disable checks on other rows.
+export function renderModelHealthCell(modelID: string, health?: ModelHealthView): string {
+  const checking = health?.status === "checking";
+  return `<div class="model-health">${renderModelHealthBadge(health)}<button type="button" data-check-model="${escapeWorkspaceHTML(modelID)}" class="health-check-button"${checking ? " disabled" : ""}>${checking ? "检测中…" : "检测"}</button></div>${renderModelHealthDetail(health)}`;
+}

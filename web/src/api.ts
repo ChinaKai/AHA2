@@ -31,6 +31,7 @@ import type {
   KnowledgeProposal,
   KnowledgeReviewSettings,
   Model,
+  ModelHealth,
   OwnerAssistant,
   OwnerAssistantView,
   AssistantHint,
@@ -565,6 +566,10 @@ class APIClient {
 
   updateModel(id: string, payload: Record<string, unknown>): Promise<{model: Model}> {
     return this.request(`/api/v1/models/${encodeURIComponent(id)}`, {method: "PUT", body: JSON.stringify(payload)});
+  }
+
+  checkModelHealth(id: string): Promise<{health: ModelHealth}> {
+    return this.request(`/api/v1/models/${encodeURIComponent(id)}/health-check`, {method: "POST"});
   }
 
   codexAccounts(): Promise<{accounts: CodexAccount[]}> {

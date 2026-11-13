@@ -53,3 +53,9 @@
 - 分类：`internal/gateway/models.go` 的 `probeStatusForCode`。
 - 文案渲染：`web/src/ui_helpers.ts` 的 `protocolProbeFailures` / `renderProtocolProbeStatus`。
 - 测试：`internal/gateway/models_test.go`、`web/tests/model_protocol_display.test.mjs`。
+
+## 与「已添加模型」健康检测的区别
+
+协议探测回答「这个网关是否提供某种 wire 协议」，已添加模型列表的「检测」按钮回答
+「当前账号此刻能否成功调用这个模型」，状态包含限流、鉴权、余额不足、模型不存在等账号级结论。
+接口见 `POST /api/v1/models/{id}/health-check`，说明见 `docs/model-health-check.md`。
