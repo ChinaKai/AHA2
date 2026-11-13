@@ -3,6 +3,11 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -97,5 +102,65 @@ func TestModelDetectionJobCancellationStopsCatalogFetch(t *testing.T) {
 	view := waitModelDetectionStatus(t, job, "cancelled")
 	if view.Completed != 0 || len(view.Results) != 0 {
 		t.Fatalf("cancelled catalog job retained results: %#v", view)
+	}
+}
+
+func TestModelDetectionProbeUsesProviderAnthropicBaseURL(t *testing.T) {
+	t.Parallel()
+	var baseAnthropicHits int32
+	base := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.URL.Path == "/responses" || request.URL.Path == "/chat/completions":
+			writer.WriteHeader(http.StatusOK)
+		case strings.HasSuffix(request.URL.Path, "/messages"):
+			atomic.AddInt32(&baseAnthropicHits, 1)
+			http.NotFound(writer, request)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	t.Cleanup(base.Close)
+	var anthropicPaths []string
+	var mu sync.Mutex
+	anthropic := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		mu.Lock()
+		anthropicPaths = append(anthropicPaths, request.URL.Path)
+		mu.Unlock()
+		if request.URL.Path == "/apps/anthropic/v1/messages" {
+			writer.WriteHeader(http.StatusOK)
+			return
+		}
+		http.NotFound(writer, request)
+	}))
+	t.Cleanup(anthropic.Close)
+
+	jobs := newModelDetectionJobs()
+	provider := domain.Provider{
+		ID:               "provider-ali",
+		BaseURL:          base.URL + "/compatible-mode/v1",
+		AnthropicBaseURL: anthropic.URL + "/apps/anthropic",
+		AuthStyle:        "auto",
+	}
+	capabilities, anthropicBase, protocolErrors := jobs.probe(context.Background(), provider, "secret", "", "claude-model")
+	if capabilities["anthropic_messages"] != "supported" {
+		t.Fatalf("capabilities=%v protocolErrors=%v", capabilities, protocolErrors)
+	}
+	if anthropicBase != "" {
+		t.Fatalf("anthropicBase=%q, want empty for the configured base", anthropicBase)
+	}
+	mu.Lock()
+	paths := append([]string(nil), anthropicPaths...)
+	mu.Unlock()
+	sawMessages := false
+	for _, path := range paths {
+		if path == "/apps/anthropic/v1/messages" {
+			sawMessages = true
+		}
+	}
+	if !sawMessages {
+		t.Fatalf("configured anthropic_base_url was not probed: %v", paths)
+	}
+	if atomic.LoadInt32(&baseAnthropicHits) != 0 {
+		t.Fatalf("base_url was probed for anthropic_messages despite provider.anthropic_base_url")
 	}
 }
