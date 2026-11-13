@@ -276,6 +276,14 @@ func safeProbeDetail(item domain.Workspace, result Result, err error) string {
 // that reached this string would end up in the database and on screen.
 var credentialPattern = regexp.MustCompile(`sk-ant-[A-Za-z0-9_\-]{8,}`)
 
+// SafeDisplayText redacts credential-shaped substrings and the workspace
+// password, then bounds the length. Probe failures from this package are stored
+// in workspace capabilities and rendered in the UI; callers outside the package
+// use this same rule rather than re-implementing it.
+func SafeDisplayText(item domain.Workspace, value string) string {
+	return safeDisplayText(item, value)
+}
+
 func safeDisplayText(item domain.Workspace, value string) string {
 	value = strings.Join(strings.Fields(value), " ")
 	value = credentialPattern.ReplaceAllString(value, "[已隐藏]")

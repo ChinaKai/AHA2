@@ -26,25 +26,6 @@ func TestAgentAPISettingsAndWorkspaceDetectionPersist(t *testing.T) {
 	if err != nil || settings.URL != "https://aha.example.test" {
 		t.Fatalf("updated settings=%#v err=%v", settings, err)
 	}
-	if settings.StdioProxy {
-		t.Fatal("the SSH stdio proxy must default to off")
-	}
-	settings, err = database.UpdateAgentAPISettings(ctx, domain.AgentAPISettings{
-		URL: "https://aha.example.test", StdioProxy: true, UpdatedAt: now,
-	})
-	if err != nil || !settings.StdioProxy {
-		t.Fatalf("stdio proxy was not persisted: %#v err=%v", settings, err)
-	}
-	settings, err = database.AgentAPISettings(ctx)
-	if err != nil || !settings.StdioProxy {
-		t.Fatalf("stdio proxy did not survive a reload: %#v err=%v", settings, err)
-	}
-	settings, err = database.UpdateAgentAPISettings(ctx, domain.AgentAPISettings{
-		URL: "https://aha.example.test", UpdatedAt: now,
-	})
-	if err != nil || settings.StdioProxy {
-		t.Fatalf("stdio proxy did not turn off: %#v err=%v", settings, err)
-	}
 	project := domain.Project{ID: "project-agent-api", Name: "Project", CreatedAt: now, UpdatedAt: now}
 	if err := database.CreateProject(ctx, project); err != nil {
 		t.Fatal(err)
@@ -67,5 +48,43 @@ func TestAgentAPISettingsAndWorkspaceDetectionPersist(t *testing.T) {
 	stored, err = database.Workspace(ctx, workspace.ID)
 	if err != nil || stored.AgentAPIStatus != "unknown" || stored.AgentAPIResolvedURL != "" || !stored.AgentAPILastCheckedAt.IsZero() || stored.Capabilities["agent_api"] != nil {
 		t.Fatalf("reset workspace=%#v err=%v", stored, err)
+	}
+}
+
+// TestAgentAPISettingsLeaveLegacyStdioColumnUntouched covers a row written while
+// SSH stdio was an opt-in switch. The value is no longer read, so the upgraded
+// backend uses stdio regardless; the column keeps its old value so a downgrade
+// does not silently re-enable a transport the operator had switched off.
+func TestAgentAPISettingsLeaveLegacyStdioColumnUntouched(t *testing.T) {
+	t.Parallel()
+	for _, legacy := range []int{0, 1} {
+		ctx := context.Background()
+		database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := database.db.ExecContext(ctx, `UPDATE agent_api_settings SET stdio_proxy=? WHERE id=1`, legacy); err != nil {
+			database.Close()
+			t.Fatal(err)
+		}
+		settings, err := database.AgentAPISettings(ctx)
+		if err != nil || settings.URL != "" {
+			database.Close()
+			t.Fatalf("settings=%#v err=%v", settings, err)
+		}
+		if _, err := database.UpdateAgentAPISettings(ctx, domain.AgentAPISettings{URL: "https://aha.example.test"}); err != nil {
+			database.Close()
+			t.Fatal(err)
+		}
+		var stdioProxy int
+		if err := database.db.QueryRowContext(ctx, `SELECT stdio_proxy FROM agent_api_settings WHERE id=1`).Scan(&stdioProxy); err != nil {
+			database.Close()
+			t.Fatal(err)
+		}
+		if stdioProxy != legacy {
+			database.Close()
+			t.Fatalf("legacy stdio_proxy=%d was rewritten to %d", legacy, stdioProxy)
+		}
+		database.Close()
 	}
 }

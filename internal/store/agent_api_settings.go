@@ -12,13 +12,13 @@ import (
 // The allow_insecure column is deliberately not read: plaintext addresses off
 // loopback are no longer a state this program can be in. It is still written as 0
 // so databases created by an older build keep satisfying the NOT NULL default.
+// The stdio_proxy column is likewise legacy: SSH stdio is now unconditional, so
+// the value stored by an older build must not influence resolution.
 func (s *Store) AgentAPISettings(ctx context.Context) (domain.AgentAPISettings, error) {
 	var item domain.AgentAPISettings
 	var updatedAt string
-	var stdioProxy int
-	err := s.db.QueryRowContext(ctx, `SELECT url,migration_note,stdio_proxy,updated_at FROM agent_api_settings WHERE id=1`).
-		Scan(&item.URL, &item.MigrationNote, &stdioProxy, &updatedAt)
-	item.StdioProxy = stdioProxy != 0
+	err := s.db.QueryRowContext(ctx, `SELECT url,migration_note,updated_at FROM agent_api_settings WHERE id=1`).
+		Scan(&item.URL, &item.MigrationNote, &updatedAt)
 	item.UpdatedAt = parseTime(updatedAt)
 	return item, err
 }
@@ -27,16 +27,17 @@ func (s *Store) UpdateAgentAPISettings(ctx context.Context, item domain.AgentAPI
 	if item.UpdatedAt.IsZero() {
 		item.UpdatedAt = time.Now().UTC()
 	}
-	stdioproxy := 0
-	if item.StdioProxy {
-		stdioproxy = 1
-	}
+	// stdio_proxy is no longer read by this build, and it is deliberately not
+	// written either: the column keeps whatever an older build stored. That
+	// makes a downgrade behave exactly as before the upgrade instead of
+	// re-enabling a transport the operator had switched off. A fresh row takes
+	// the schema default, which no current reader consults.
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO agent_api_settings(id,url,allow_insecure,migration_note,stdio_proxy,updated_at) VALUES(1,?,0,?,?,?)
+		INSERT INTO agent_api_settings(id,url,allow_insecure,migration_note,updated_at) VALUES(1,?,0,?,?)
 		ON CONFLICT(id) DO UPDATE SET url=excluded.url,allow_insecure=0,
-			migration_note=excluded.migration_note,stdio_proxy=excluded.stdio_proxy,
+			migration_note=excluded.migration_note,
 			updated_at=excluded.updated_at`,
-		item.URL, item.MigrationNote, stdioproxy, timeString(item.UpdatedAt),
+		item.URL, item.MigrationNote, timeString(item.UpdatedAt),
 	)
 	return item, err
 }

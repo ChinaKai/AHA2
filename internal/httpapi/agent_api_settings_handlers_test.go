@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -65,28 +67,29 @@ func TestAgentAPISettingsAndWorkspaceReverseProbe(t *testing.T) {
 		t.Fatalf("update status=%d body=%#v", response.StatusCode, settings)
 	}
 
-	// stdio_proxy is the one switch the settings page renders. Saving it must
-	// survive a fresh GET (the page reload path) and a later URL-only save must
-	// not silently turn it off.
-	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/settings/agent-api", map[string]any{"url": server.URL, "stdio_proxy": true}, csrf)
-	decodeResponse(t, response, &settings)
-	if response.StatusCode != http.StatusOK || !settings.AgentAPI.StdioProxy {
-		t.Fatalf("enable stdio status=%d body=%#v", response.StatusCode, settings)
-	}
+	// The removed stdio switch must not linger in the response: the settings page
+	// reads this object, and a field the backend keeps emitting is dead API surface
+	// a stale client would keep rendering.
 	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/settings/agent-api", nil, "")
-	decodeResponse(t, response, &settings)
-	if response.StatusCode != http.StatusOK || !settings.AgentAPI.StdioProxy {
-		t.Fatalf("stdio did not survive reload status=%d body=%#v", response.StatusCode, settings)
+	body, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatal(err)
 	}
-	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/settings/agent-api", map[string]any{"url": server.URL}, csrf)
-	decodeResponse(t, response, &settings)
-	if response.StatusCode != http.StatusOK || !settings.AgentAPI.StdioProxy {
-		t.Fatalf("url-only save cleared stdio status=%d body=%#v", response.StatusCode, settings)
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatal(err)
 	}
+	agentAPIRaw, _ := raw["agent_api"].(map[string]any)
+	if _, present := agentAPIRaw["stdio_proxy"]; present {
+		t.Fatalf("the removed stdio_proxy field is still in the response: %s", body)
+	}
+	// A page loaded before the switch was removed may still PUT the old field.
+	// It is ignored rather than rejected, so that save still updates the override.
 	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/settings/agent-api", map[string]any{"url": server.URL, "stdio_proxy": false}, csrf)
 	decodeResponse(t, response, &settings)
-	if response.StatusCode != http.StatusOK || settings.AgentAPI.StdioProxy {
-		t.Fatalf("disable stdio status=%d body=%#v", response.StatusCode, settings)
+	if response.StatusCode != http.StatusOK || settings.AgentAPI.EffectiveURL != server.URL {
+		t.Fatalf("legacy payload status=%d body=%#v", response.StatusCode, settings)
 	}
 
 	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/workspaces/"+workspace.ID+"/detect", nil, csrf)

@@ -16,30 +16,25 @@ func (s *Server) agentAPISettings(writer http.ResponseWriter, request *http.Requ
 }
 
 func (s *Server) updateAgentAPISettings(writer http.ResponseWriter, request *http.Request) {
+	// The SSH stdio transport is unconditional now, so the only value this form
+	// carries is the hidden manual override. A page loaded before the switch was
+	// removed may still send stdio_proxy; it is accepted and ignored so that save
+	// does not fail with a JSON error while the new bundle is fetched.
 	var payload struct {
-		URL string `json:"url"`
-		// StdioProxy is opt-in for SSH workspaces. It is a pointer so a client
-		// that only edits the URL does not silently switch the tunnel off.
-		StdioProxy *bool `json:"stdio_proxy"`
+		URL        string `json:"url"`
+		StdioProxy *bool  `json:"stdio_proxy"`
 	}
 	if decodeJSON(request, &payload) != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	input := domain.AgentAPISettings{URL: payload.URL}
-	if payload.StdioProxy != nil {
-		input.StdioProxy = *payload.StdioProxy
-	} else if current, currentErr := s.app.AgentAPISettings(request.Context()); currentErr == nil {
-		input.StdioProxy = current.StdioProxy
-	}
-	item, err := s.app.UpdateAgentAPISettings(request.Context(), input)
+	item, err := s.app.UpdateAgentAPISettings(request.Context(), domain.AgentAPISettings{URL: payload.URL})
 	if err != nil {
 		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "agent_api_settings_invalid", "message": err.Error()})
 		return
 	}
 	s.audit(request, "settings.agent_api.update", "settings", "agent_api", map[string]any{
 		"url_configured": item.URL != "",
-		"stdio_proxy":    item.StdioProxy,
 	})
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "agent_api": item})
 }

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -15,8 +16,15 @@ import (
 
 func newAgentAPIProxyTestService(t *testing.T) (*Service, *store.Store) {
 	t.Helper()
+	service, database, _ := newAgentAPIProxyTestServiceWithPath(t)
+	return service, database
+}
+
+func newAgentAPIProxyTestServiceWithPath(t *testing.T) (*Service, *store.Store, string) {
+	t.Helper()
 	ctx := context.Background()
-	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	path := filepath.Join(t.TempDir(), "aha2.db")
+	database, err := store.Open(ctx, path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,19 +40,13 @@ func newAgentAPIProxyTestService(t *testing.T) (*Service, *store.Store) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	return &Service{store: database, now: time.Now, agentAPIURL: "http://127.0.0.1:8766"}, database
-}
-
-func enableStdioProxy(t *testing.T, service *Service) {
-	t.Helper()
-	settings, err := service.store.AgentAPISettings(context.Background())
-	if err != nil {
-		t.Fatal(err)
+	service := &Service{store: database, now: time.Now, agentAPIURL: "http://127.0.0.1:8766"}
+	// Turn-time detection (the fallback path) now includes a stdio stage. Tests
+	// that reach it must not open a real SSH connection.
+	service.agentAPIStdioProbeFn = func(context.Context, domain.Workspace, string) (workspacepkg.AgentAPIStdioResult, error) {
+		return workspacepkg.AgentAPIStdioResult{}, fmt.Errorf("stdio 不可用（测试默认）")
 	}
-	settings.StdioProxy = true
-	if _, err := service.store.UpdateAgentAPISettings(context.Background(), settings); err != nil {
-		t.Fatal(err)
-	}
+	return service, database, path
 }
 
 func agentProxyTestWorkspaceItem() domain.Workspace {
@@ -54,11 +56,26 @@ func agentProxyTestWorkspaceItem() domain.Workspace {
 	}
 }
 
-// TestPrepareAgentAPIForTurnKeepsTheOldPathWhenTheSwitchIsOff pins the "off
-// means unchanged" half of the contract: with the setting at its default, an
-// SSH workspace must resolve exactly as before and no tunnel is started.
-func TestPrepareAgentAPIForTurnKeepsTheOldPathWhenTheSwitchIsOff(t *testing.T) {
-	service, _ := newAgentAPIProxyTestService(t)
+// TestPrepareAgentAPIForTurnUsesStdioWithLegacyOptOut covers the upgrade path:
+// a database row written while stdio was opt-in and turned off must not keep the
+// workspace on the old transport. The stored flag is no longer read.
+func TestPrepareAgentAPIForTurnUsesStdioWithLegacyOptOut(t *testing.T) {
+	service, _, path := newAgentAPIProxyTestServiceWithPath(t)
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Exactly the row an older build wrote when the switch was off.
+	if _, err := raw.ExecContext(context.Background(), `UPDATE agent_api_settings SET stdio_proxy=0 WHERE id=1`); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	service.agentAPIProxyStartFn = func(context.Context, domain.Workspace, domain.Task, string, string, string, string) (*workspacepkg.AgentAPIProxy, error) {
+		return &workspacepkg.AgentAPIProxy{URL: "http://127.0.0.1:41000", Runtime: "node"}, nil
+	}
 	item := agentProxyTestWorkspaceItem()
 	item.AgentAPIStatus = "ready"
 	item.AgentAPIResolvedURL = "http://192.168.7.187:8766"
@@ -67,14 +84,11 @@ func TestPrepareAgentAPIForTurnKeepsTheOldPathWhenTheSwitchIsOff(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
-	if setup.Proxy != nil {
-		t.Fatal("a tunnel was started with the setting off")
+	if setup.Proxy == nil || setup.Path != agentAPIPathStdioNode {
+		t.Fatalf("setup = %#v, want the stdio path", setup)
 	}
-	if setup.URL != "http://192.168.7.187:8766" {
-		t.Fatalf("url = %q, want the previously resolved address", setup.URL)
-	}
-	if setup.Note != "" || setup.Path != agentAPIPathDirect {
-		t.Fatalf("setup = %#v, want a silent direct path", setup)
+	if setup.URL != "http://127.0.0.1:41000" {
+		t.Fatalf("url = %q", setup.URL)
 	}
 }
 
@@ -82,7 +96,6 @@ func TestPrepareAgentAPIForTurnKeepsTheOldPathWhenTheSwitchIsOff(t *testing.T) {
 // starts and the Turn gets the tunnel's loopback URL.
 func TestPrepareAgentAPIForTurnUsesStdioNode(t *testing.T) {
 	service, _ := newAgentAPIProxyTestService(t)
-	enableStdioProxy(t, service)
 	service.agentAPIProxyStartFn = func(context.Context, domain.Workspace, domain.Task, string, string, string, string) (*workspacepkg.AgentAPIProxy, error) {
 		return &workspacepkg.AgentAPIProxy{URL: "http://127.0.0.1:41000", Runtime: "node"}, nil
 	}
@@ -103,7 +116,6 @@ func TestPrepareAgentAPIForTurnUsesStdioNode(t *testing.T) {
 // explicit-helper path from the embedded Node script.
 func TestPrepareAgentAPIForTurnUsesStdioOverride(t *testing.T) {
 	service, _ := newAgentAPIProxyTestService(t)
-	enableStdioProxy(t, service)
 	service.agentAPIProxyStartFn = func(context.Context, domain.Workspace, domain.Task, string, string, string, string) (*workspacepkg.AgentAPIProxy, error) {
 		return &workspacepkg.AgentAPIProxy{URL: "http://127.0.0.1:41001", Runtime: "exec"}, nil
 	}
@@ -122,7 +134,6 @@ func TestPrepareAgentAPIForTurnUsesStdioOverride(t *testing.T) {
 // tunnel and the reason for leaving stdio is recorded.
 func TestPrepareAgentAPIForTurnFallsBackToTunnel(t *testing.T) {
 	service, _ := newAgentAPIProxyTestService(t)
-	enableStdioProxy(t, service)
 	service.agentAPIProxyStartFn = func(context.Context, domain.Workspace, domain.Task, string, string, string, string) (*workspacepkg.AgentAPIProxy, error) {
 		return nil, fmt.Errorf("准备 helper：Node helper 不可用：工作区里没有 node")
 	}
@@ -153,7 +164,6 @@ func TestPrepareAgentAPIForTurnFallsBackToTunnel(t *testing.T) {
 // tunnel reason remain visible.
 func TestPrepareAgentAPIForTurnFallsBackToLAN(t *testing.T) {
 	service, _ := newAgentAPIProxyTestService(t)
-	enableStdioProxy(t, service)
 	service.agentAPIProxyStartFn = func(context.Context, domain.Workspace, domain.Task, string, string, string, string) (*workspacepkg.AgentAPIProxy, error) {
 		return nil, fmt.Errorf("准备 helper：Node helper 不可用：工作区里没有 node")
 	}
@@ -199,7 +209,6 @@ func TestPrepareAgentAPIForTurnKeepsTunnelReasonWithLoopbackOverride(t *testing.
 		t.Fatal(err)
 	}
 	settings.URL = "http://127.0.0.1:8766"
-	settings.StdioProxy = true
 	if _, err := service.store.UpdateAgentAPISettings(ctx, settings); err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +244,6 @@ func TestPrepareAgentAPIForTurnSkipsNonLoopbackAddresses(t *testing.T) {
 	ctx := context.Background()
 	service, _ := newAgentAPIProxyTestService(t)
 	service.agentAPIURL = "http://192.168.7.187:8766"
-	enableStdioProxy(t, service)
 	item := agentProxyTestWorkspaceItem()
 	item.AgentAPIStatus = "ready"
 	item.AgentAPIResolvedURL = "http://192.168.7.187:8766"
@@ -261,7 +269,6 @@ func TestPrepareAgentAPIForTurnSkipsNonLoopbackAddresses(t *testing.T) {
 func TestPrepareAgentAPIForTurnPassesBackendBinary(t *testing.T) {
 	service, _ := newAgentAPIProxyTestService(t)
 	service.executor = backendBinaryExecutor{binary: "/opt/backend/codex"}
-	enableStdioProxy(t, service)
 	var received string
 	service.agentAPIProxyStartFn = func(_ context.Context, _ domain.Workspace, _ domain.Task, _, _, _, backendBinary string) (*workspacepkg.AgentAPIProxy, error) {
 		received = backendBinary
@@ -286,4 +293,56 @@ func (backendBinaryExecutor) Execute(context.Context, ExecutionRequest, func(Exe
 
 func (executor backendBinaryExecutor) BackendBinary(string) string {
 	return executor.binary
+}
+
+// TestPrepareAgentAPIForTurnFallbackSkipsStdioStage is the review regression:
+// the Turn attempted stdio and it failed. Re-resolving the address must not
+// repeat the whole stdio detection (another helper and SSH session), and the
+// stdio detection succeeding must not hand the Turn AHA's loopback as if the
+// reverse tunnel had been verified. The fallback must land on the probed LAN
+// address instead.
+func TestPrepareAgentAPIForTurnFallbackSkipsStdioStage(t *testing.T) {
+	service, _ := newAgentAPIProxyTestService(t)
+	item := agentProxyTestWorkspaceItem()
+	item.AgentAPIStatus = "ready"
+	item.AgentAPIResolvedURL = "http://127.0.0.1:8766"
+	item.Capabilities = map[string]any{"agent_api": map[string]any{
+		"status": "ready", "url": "http://127.0.0.1:8766", "via": "stdio", "runtime": "node",
+	}}
+	starts := 0
+	service.agentAPIProxyStartFn = func(context.Context, domain.Workspace, domain.Task, string, string, string, string) (*workspacepkg.AgentAPIProxy, error) {
+		starts++
+		return nil, fmt.Errorf("Agent API stdio 代理启动失败")
+	}
+	stdioDetections := 0
+	service.agentAPIStdioProbeFn = func(context.Context, domain.Workspace, string) (workspacepkg.AgentAPIStdioResult, error) {
+		stdioDetections++
+		return workspacepkg.AgentAPIStdioResult{URL: "http://127.0.0.1:42000", Runtime: "node"}, nil
+	}
+	lanURL := "http://192.168.7.187:8766"
+	service.agentAPIWorkspaceHostsFn = func(context.Context, domain.Workspace) []string { return nil }
+	service.agentAPILocalHostsFn = func() []string { return []string{"192.168.7.187"} }
+	service.agentAPIProbeFn = func(_ context.Context, _ domain.Workspace, candidate string) error {
+		if candidate == lanURL {
+			return nil
+		}
+		return fmt.Errorf("服务端拒绝端口转发：administratively prohibited")
+	}
+
+	setup, err := service.prepareAgentAPIForTurn(context.Background(), item, domain.Task{ID: "task-1"}, t.TempDir(), "codex")
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if starts != 1 {
+		t.Fatalf("proxy start calls = %d, want exactly the Turn's one attempt", starts)
+	}
+	if stdioDetections != 0 {
+		t.Fatalf("the fallback repeated stdio detection %d time(s)", stdioDetections)
+	}
+	if setup.Path != agentAPIPathLAN || setup.URL != lanURL || setup.Proxy != nil {
+		t.Fatalf("setup = %#v, want the probed LAN address", setup)
+	}
+	if forward := agentAPIReverseForward(item, setup.URL); forward != nil {
+		t.Fatalf("the fallback address still gets an unverified reverse tunnel: %#v", forward)
+	}
 }

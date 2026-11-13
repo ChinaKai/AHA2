@@ -20,18 +20,18 @@ await mkdir(output, {recursive: true});
 const csp = (await readFile(resolve(root, "internal/httpapi/server.go"), "utf8")).match(/Set\("Content-Security-Policy", "([^"]+)"\)/)[1];
 
 // The settings the advanced page reads. A stored override is present so the
-// panel has a value to render, and there is no insecure switch to flip.
+// panel has a value to render, and the stdio switch is gone entirely: SSH stdio
+// is the default transport, not a setting.
 const bootstrap = `
 const json = (value, status = 200) => new Response(JSON.stringify(value), {status, headers: {"Content-Type": "application/json"}});
 window.__puts = [];
 // localStorage stands in for the server's store so a page reload (a fresh
 // fetch of the same origin) sees the value the PUT saved.
-const storedStdio = () => localStorage.getItem("__aha_stdio") === "1";
+const storedURL = () => localStorage.getItem("__aha_url") || "https://override.example.test";
 const agentAPI = () => ({
-  url: "https://override.example.test",
+  url: storedURL(),
   startup_url: "http://127.0.0.1:8766",
-  effective_url: "https://override.example.test",
-  stdio_proxy: storedStdio(),
+  effective_url: storedURL(),
   migration_note: "旧版局域网明文地址已禁用",
 });
 window.fetch = async (input, init = {}) => {
@@ -46,8 +46,8 @@ window.fetch = async (input, init = {}) => {
   if (path === "/api/v1/settings/agent-api" && method === "PUT") {
     const body = JSON.parse(init.body || "{}");
     window.__puts.push(body);
-    localStorage.setItem("__aha_stdio", body.stdio_proxy ? "1" : "0");
-    return json({ok: true, agent_api: {...agentAPI(), url: body.url, effective_url: body.url || "http://127.0.0.1:8766", stdio_proxy: Boolean(body.stdio_proxy), migration_note: ""}});
+    localStorage.setItem("__aha_url", body.url || "");
+    return json({ok: true, agent_api: {...agentAPI(), url: body.url, effective_url: body.url || "http://127.0.0.1:8766", migration_note: ""}});
   }
   if (path === "/api/v1/tasks") return json({tasks: [], has_more: false});
   if (path === "/api/v1/projects") return json({projects: [], has_more: false});
@@ -109,12 +109,15 @@ try {
   });
   await page.waitForSelector("#agent-api-override-form", {timeout: 15000});
 
-  // The insecure switch is gone; a checkbox that still rendered would be dead
-  // weight that suggests plaintext is a supported choice.
+  // Removed switches that still rendered would be dead weight: plaintext is not a
+  // supported choice, and stdio is no longer a choice at all.
   assert.equal(await page.locator('#agent-api-override-form input[name="allow_insecure"]').count(), 0,
     "the removed insecure switch is still rendered");
+  assert.equal(await page.locator('#agent-api-override-form input[name="stdio_proxy"]').count(), 0,
+    "the removed stdio switch is still rendered");
   const panelText = await page.locator(".agent-api-override-panel").innerText();
   assert.match(panelText, /仅用于排障/, "the override no longer says it is a troubleshooting path");
+  assert.match(panelText, /stdio 承载 Agent API/, "the panel no longer explains the default stdio transport");
   assert.match(panelText, /旧版局域网明文地址已禁用/, "the migration diagnosis is not shown");
 
   const input = page.locator('#agent-api-override-form input[name="url"]');
@@ -126,28 +129,20 @@ try {
   let puts = await page.evaluate(() => window.__puts);
   assert.equal(puts.length, 1, `expected one settings write, got ${puts.length}: ${JSON.stringify(puts)}`);
   assert.equal(puts[0].url, "https://troubleshoot.example.test", `the write did not carry the override: ${JSON.stringify(puts[0])}`);
-  assert.deepEqual(Object.keys(puts[0]).sort(), ["stdio_proxy", "url"], `the write carried removed fields: ${JSON.stringify(puts[0])}`);
-  assert.equal(puts[0].stdio_proxy, false, `an unticked box sent true: ${JSON.stringify(puts[0])}`);
-
-  // Saving used to throw before the request because the checkbox was read off
-  // the FormData as if it were the form element. Submitting twice, with the box
-  // ticked, proves both the read and the request.
-  await page.locator('#agent-api-override-form input[name="stdio_proxy"]').check();
-  await page.locator("#agent-api-override-form button[type=submit]").click();
-  await page.waitForFunction(() => window.__puts.length > 1, null, {timeout: 10000});
-  puts = await page.evaluate(() => window.__puts);
-  assert.equal(puts[1].stdio_proxy, true, `a ticked box did not send true: ${JSON.stringify(puts[1])}`);
+  assert.deepEqual(Object.keys(puts[0]).sort(), ["url"], `the write carried removed fields: ${JSON.stringify(puts[0])}`);
   assert.deepEqual(errors, [], "the settings page threw while saving");
 
-  // Reload at the same view: the fresh page must fetch the saved switch and
-  // render it checked. This is the regression where a direct load of #other
-  // never fetched the advanced settings resource, so the default (off) state
-  // was rendered even though the store held true.
+  // Reload at the same view: the fresh page must fetch the saved override and
+  // still render no stdio switch. This is the regression where a direct load of
+  // #other never fetched the advanced settings resource, so the panel rendered
+  // defaults without asking the server.
   await page.evaluate(() => { window.location.hash = "#other"; });
   await page.reload({waitUntil: "networkidle"});
   await page.waitForSelector("#agent-api-override-form", {timeout: 15000});
-  assert.equal(await page.locator('#agent-api-override-form input[name="stdio_proxy"]').isChecked(), true,
-    "the saved stdio switch was not echoed after a reload");
+  assert.equal(await input.inputValue(), "https://troubleshoot.example.test",
+    "the saved override was not echoed after a reload");
+  assert.equal(await page.locator('#agent-api-override-form input[name="stdio_proxy"]').count(), 0,
+    "the removed stdio switch came back after a reload");
 
   await page.screenshot({path: resolve(output, "agent-api-override.png")});
   console.log("agent api override PUT:", JSON.stringify(puts[0]));

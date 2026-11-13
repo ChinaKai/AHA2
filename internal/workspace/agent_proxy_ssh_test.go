@@ -802,3 +802,128 @@ func TestAgentProxyNodeProbeReportsWhyNodeIsMissing(t *testing.T) {
 		t.Fatalf("stderr = %q, want the missing-node reason naming the backend", stderr)
 	}
 }
+
+// TestProbeAgentAPIOverStdioMaterializesAndCloses covers the detection contract:
+// a missing helper is uploaded, the proxy carries a real /healthz request, and
+// the tunnel is closed afterwards so no helper process is left on the workspace.
+func TestProbeAgentAPIOverStdioMaterializesAndCloses(t *testing.T) {
+	requireNode(t)
+	host, port := startExecSSHServer(t)
+	workspace := agentProxyTestWorkspace(host, port)
+	workDir := t.TempDir()
+	t.Setenv(agentProxyHelperOverride, "")
+
+	target := &http.Server{Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/healthz" {
+			http.NotFound(writer, request)
+			return
+		}
+		_, _ = io.WriteString(writer, `{"ok":true,"service":"aha2"}`)
+	})}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() { _ = target.Serve(listener) }()
+	defer target.Close()
+
+	if _, err := os.Stat(agentProxyShareDir(workDir)); !os.IsNotExist(err) {
+		t.Fatalf("the share directory existed before detection: %v", err)
+	}
+	result, err := ProbeAgentAPIOverStdio(context.Background(), workspace, "http://"+listener.Addr().String(), workDir, "", "1.0.0", "")
+	if err != nil {
+		t.Fatalf("stdio detection failed: %v", err)
+	}
+	if result.Runtime != agentproxy.NodeHelperRuntime {
+		t.Fatalf("runtime = %q, want node", result.Runtime)
+	}
+	if !strings.HasPrefix(result.URL, "http://127.0.0.1:") {
+		t.Fatalf("proxy URL = %q", result.URL)
+	}
+	if filepath.Dir(result.Helper) != agentProxyShareDir(workDir) {
+		t.Fatalf("helper = %s, want it materialised in %s", result.Helper, agentProxyShareDir(workDir))
+	}
+	if _, err := os.Stat(result.Helper); err != nil {
+		t.Fatalf("the helper was not materialised: %v", err)
+	}
+	// Closing the SSH session is what stops the remote helper. A request to the
+	// former proxy port must be refused, not served by an orphan.
+	client := &http.Client{Timeout: 2 * time.Second}
+	if response, err := client.Get(result.URL + "/healthz"); err == nil {
+		response.Body.Close()
+		t.Fatal("the proxy still answered after detection returned")
+	}
+}
+
+// TestProbeAgentAPIOverStdioClosesProxyOnHealthFailure makes the cleanup
+// unconditional: a helper that starts but does not serve a real AHA2 health
+// response must still be stopped.
+func TestProbeAgentAPIOverStdioClosesProxyOnHealthFailure(t *testing.T) {
+	requireNode(t)
+	host, port := startExecSSHServer(t)
+	workspace := agentProxyTestWorkspace(host, port)
+	workDir := t.TempDir()
+	t.Setenv(agentProxyHelperOverride, "")
+
+	target := &http.Server{Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = io.WriteString(writer, `{"ok":false,"service":"not-aha2"}`)
+	})}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() { _ = target.Serve(listener) }()
+	defer target.Close()
+
+	result, err := ProbeAgentAPIOverStdio(context.Background(), workspace, "http://"+listener.Addr().String(), workDir, "", "1.0.0", "")
+	if err == nil || !strings.Contains(err.Error(), "healthz") {
+		t.Fatalf("err = %v, want a health probe failure", err)
+	}
+	if result.URL == "" {
+		t.Fatalf("the proxy URL was not reported for diagnostics: %#v", result)
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	if response, err := client.Get(result.URL + "/healthz"); err == nil {
+		response.Body.Close()
+		t.Fatal("the proxy still answered after a failed detection")
+	}
+}
+
+// TestProbeAgentAPIOverStdioAddsContextIgnore covers the workspace-root side
+// effect: detection materialises the helper under .aha2-context/ without a Turn
+// to do context setup first, so it must add the same Git exclude rule. Otherwise
+// the first detection leaves an untracked directory in the operator's checkout.
+func TestProbeAgentAPIOverStdioAddsContextIgnore(t *testing.T) {
+	requireNode(t)
+	host, port := startExecSSHServer(t)
+	workspace := agentProxyTestWorkspace(host, port)
+	workDir := t.TempDir()
+	t.Setenv(agentProxyHelperOverride, "")
+	if output, err := exec.Command("git", "-C", workDir, "init", "-q").CombinedOutput(); err != nil {
+		t.Skipf("git init unavailable: %v %s", err, output)
+	}
+
+	target := &http.Server{Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = io.WriteString(writer, `{"ok":true,"service":"aha2"}`)
+	})}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() { _ = target.Serve(listener) }()
+	defer target.Close()
+
+	if _, err := ProbeAgentAPIOverStdio(context.Background(), workspace, "http://"+listener.Addr().String(), workDir, "", "1.0.0", ""); err != nil {
+		t.Fatalf("stdio detection failed: %v", err)
+	}
+	exclude, err := os.ReadFile(filepath.Join(workDir, ".git", "info", "exclude"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(exclude), ".aha2-context/") {
+		t.Fatalf("git exclude does not ignore the context directory:\n%s", exclude)
+	}
+}

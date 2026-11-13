@@ -30,7 +30,7 @@ import {DEFAULT_TASK_STATUS_FILTERS, LOCAL_TASK_DEVICE_FILTER, TASK_STATUS_GROUP
 import type {TaskStatusGroup} from "./task_filters.js";
 import {TASK_TOOL_DEFAULT_WIDTH, normalizePinnedTaskTool, normalizeTaskToolMode, normalizeTaskToolWidth, renderTaskToolButtons, renderTaskToolContent, renderTaskToolPanel} from "./task_tools.js";
 import type {TaskTool, TaskToolMode} from "./task_tools.js";
-import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, createListRefreshScheduler, createResourceLoader, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, formCheckbox, loadNavigationSnapshot, matchingSlashCommands, paginateItems, paginationHTML, petWatchActionKeys, protoBadges, readPerfPanelPreference, renderModelHealthCell, renderProtocolProbeStatus, renderWorkspaceDetection, restoreInteractiveRegion, saveNavigationSnapshot, textMatchesQuery, writePerfPanelPreference} from "./ui_helpers.js";
+import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, createListRefreshScheduler, createResourceLoader, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, loadNavigationSnapshot, matchingSlashCommands, paginateItems, paginationHTML, petWatchActionKeys, protoBadges, readPerfPanelPreference, renderModelHealthCell, renderProtocolProbeStatus, renderWorkspaceDetection, restoreInteractiveRegion, saveNavigationSnapshot, textMatchesQuery, writePerfPanelPreference} from "./ui_helpers.js";
 import type {InteractiveRegionState, ModelHealthView} from "./ui_helpers.js";
 import {
   compactNumber,
@@ -1365,7 +1365,7 @@ function workspaceAgentAPIStatusText(workspace: Workspace | null): string {
   const probe = (workspace.capabilities?.agent_api || {}) as {via?: string; url?: string; error?: string};
   const migration = workspace.agent_api_migration_note ? `配置迁移：${workspace.agent_api_migration_note}` : "";
   if ((workspace.agent_api_status === "ready" || probe.status === "ready") && (workspace.agent_api_resolved_url || probe.url)) {
-    const via = probe.via === "tunnel" ? "SSH 反向隧道" : "直连";
+    const via = probe.via === "stdio" ? "SSH stdio" : probe.via === "tunnel" ? "SSH 反向隧道" : "直连";
     return `${via}（自动选择）${migration ? ` · ${migration}` : ""}`;
   }
   if (workspace.agent_api_status === "error" || probe.status === "unavailable") {
@@ -3560,9 +3560,9 @@ function otherSettingsView(): string {
       <div class="panel-head"><strong>Agent API 高级覆盖</strong><span>仅用于排障</span></div>
       <form id="agent-api-override-form">
         <label>手动覆盖地址<input name="url" type="url" value="${escapeHTML(agentAPI.url)}" placeholder="https://aha.example.com"></label>
-        <div class="field-help">默认不需要填写。AHA 会自动选择：本机直连 → SSH 反向隧道 → WSL localhost。只有这些路径都不可用时，才在这里指定地址；只接受 <code>https://</code> 或 loopback <code>http://</code>，非 loopback 明文地址不会被接受。</div>
+        <div class="field-help">默认不需要填写。AHA 会自动选择：本机直连 → SSH stdio → SSH 反向隧道 → WSL localhost。只有这些路径都不可用时，才在这里指定地址；只接受 <code>https://</code> 或 loopback <code>http://</code>，非 loopback 明文地址不会被接受。</div>
         <div class="field-help">当前自动地址：<code>${escapeHTML(agentAPI.effective_url || "-")}</code>${agentAPI.startup_url ? ` · 启动推导：<code>${escapeHTML(agentAPI.startup_url)}</code>` : ""}</div>
-        <label class="security-setting-toggle"><input name="stdio_proxy" type="checkbox" ${agentAPI.stdio_proxy ? "checked" : ""}><span><strong>通过 SSH 会话承载 Agent API（stdio 代理）</strong><small>仅对 SSH 工作区生效。开启后不再依赖 sshd 端口转发，也不需要工作区能访问本机局域网地址；helper 会放在工作区的 <code>.aha2-context/share/agent-proxy</code>。关闭时保持现有的反向隧道 → 局域网回退。</small></span></label>
+        <div class="field-help">SSH 工作区默认通过会话自带的 stdio 承载 Agent API，不需要 sshd 端口转发；helper 放在工作区的 <code>.aha2-context/share/agent-proxy</code>。这里只保留排障用的手动覆盖。</div>
         ${agentAPIMigrationNote ? `<div class="security-warning active">配置迁移：${escapeHTML(agentAPIMigrationNote)}</div>` : ""}
         <div class="dialog-actions"><button class="primary" type="submit">保存覆盖</button><button type="button" id="clear-agent-api-override">清除覆盖</button></div>
       </form>
@@ -5663,10 +5663,9 @@ function bindCommon(): void {
   }, "保存中");
   bindForm("#agent-api-override-form", async form => {
     const url = String(form.get("url") || "").trim();
-    const stdioProxy = formCheckbox(form, "stdio_proxy");
-    const response = await api.updateAgentAPISettings({url, stdio_proxy: stdioProxy});
+    const response = await api.updateAgentAPISettings({url});
     state.agentAPISettings = response.agent_api;
-    setMessage("notice", stdioProxy ? "Agent API 设置已保存，SSH stdio 代理已开启" : (url ? "Agent API 手动覆盖已保存" : "Agent API 手动覆盖已清除"));
+    setMessage("notice", url ? "Agent API 手动覆盖已保存" : "Agent API 手动覆盖已清除");
   }, "保存中");
   document.querySelector("#clear-agent-api-override")?.addEventListener("click", () => {
     const form = document.querySelector<HTMLFormElement>("#agent-api-override-form");

@@ -12,6 +12,12 @@ import (
 	workspacepkg "github.com/ChinaKai/AHA2/internal/workspace"
 )
 
+// agentAPIStdioDetectTimeout bounds the whole stdio detection stage: helper
+// materialisation (which may upload the script), up to three SSH attempts, and
+// the health probe. Detection runs inside another request, so a workspace that
+// accepts SSH but never answers must not hold the endpoint open indefinitely.
+const agentAPIStdioDetectTimeout = 90 * time.Second
+
 func (s *Service) AgentAPISettings(ctx context.Context) (domain.AgentAPISettings, error) {
 	settings, err := s.store.AgentAPISettings(ctx)
 	if err != nil {
@@ -87,20 +93,28 @@ func (s *Service) ValidateWorkspaceAgentAPI(ctx context.Context, mode, rawURL st
 // An SSH workspace whose automatic choice has never been verified is detected
 // here, before the Turn starts. The loopback fallback only works when sshd
 // allows a reverse tunnel; when it does not, the Turn would otherwise fail on a
-// path detection could have replaced with the controlled LAN fallback. A
-// successful result is stored so later Turns reuse it; a failed probe leaves
-// the stored state and the normal fallback untouched.
+// path detection could have replaced with the controlled LAN fallback. The
+// detection re-run here never repeats the stdio stage: the caller just tried
+// it, and a second helper/SSH session could only hand the Turn a tunnel address
+// that was never probed. A successful result is stored so later Turns reuse it;
+// a failed probe leaves the stored state and the normal fallback untouched.
 func (s *Service) AgentAPIURLForWorkspace(ctx context.Context, item domain.Workspace) (string, error) {
 	settings, err := s.AgentAPISettings(ctx)
 	if err != nil {
 		return "", err
 	}
-	if item.AgentAPIStatus == "ready" && item.AgentAPIResolvedURL != "" {
+	if item.AgentAPIStatus == "ready" && item.AgentAPIResolvedURL != "" && !agentAPIDetectionUsedStdio(item) {
 		// Detection may have selected the controlled SSH fallback (AHA's own LAN
 		// address over plaintext after the tunnel failed), so the stored result is
 		// validated against the probe boundary rather than the config boundary.
 		return normalizeAgentAPIProbeResult(item, item.AgentAPIResolvedURL)
 	}
+	// A stdio detection result is not a cached address: it records that the
+	// helper carried the probe to AHA's loopback, while the reverse tunnel may
+	// never have been tested. If stdio stops working later (node removed, helper
+	// blocked), trusting the stored loopback would pick the tunnel without
+	// checking it. Falling through re-runs detection, which then selects the
+	// verified tunnel or LAN path.
 	if normalizeAgentAPIMode(item.AgentAPIMode) == "manual" && item.AgentAPIURL != "" {
 		return normalizeAgentAPIBaseURL(item.AgentAPIURL)
 	}
@@ -119,12 +133,25 @@ func (s *Service) AgentAPIURLForWorkspace(ctx context.Context, item domain.Works
 // result is cached on the workspace, because the probe costs a workspace
 // connection and every Turn would otherwise repeat it. A write failure is
 // ignored: the probe already proved this address works.
+//
+// The stdio stage is skipped here on purpose. The only caller,
+// AgentAPIURLForWorkspace, reaches this function either after a Turn already
+// attempted stdio or on a base address stdio cannot proxy (non-loopback).
+// Repeating the stage would open another helper/SSH session, and if it happened
+// to succeed it would return AHA's loopback as if the reverse tunnel had been
+// verified. The result must therefore be a tunnel or LAN address, which is
+// exactly what the remaining stages probe.
 func (s *Service) detectAgentAPIForTurn(ctx context.Context, item domain.Workspace) (string, bool) {
 	if normalizeAgentAPIMode(item.AgentAPIMode) != "auto" || item.Transport != "ssh" {
 		return "", false
 	}
-	detected := s.DetectWorkspaceAgentAPI(ctx, item)
+	detected := s.detectWorkspaceAgentAPI(ctx, item, false)
 	if detected.AgentAPIStatus != "ready" || detected.AgentAPIResolvedURL == "" {
+		return "", false
+	}
+	// Defensive: a stdio result must never become a Turn fallback address. Its
+	// loopback is only reachable through the helper that just failed.
+	if agentAPIDetectionUsedStdio(detected) {
 		return "", false
 	}
 	// Validate before caching: a result outside the probe boundary is not usable,
@@ -139,6 +166,13 @@ func (s *Service) detectAgentAPIForTurn(ctx context.Context, item domain.Workspa
 }
 
 func (s *Service) DetectWorkspaceAgentAPI(ctx context.Context, item domain.Workspace) domain.Workspace {
+	return s.detectWorkspaceAgentAPI(ctx, item, true)
+}
+
+// detectWorkspaceAgentAPI is the detection implementation. tryStdio is false
+// only for the Turn fallback, where stdio was already attempted in this same
+// resolution (see detectAgentAPIForTurn).
+func (s *Service) detectWorkspaceAgentAPI(ctx context.Context, item domain.Workspace, tryStdio bool) domain.Workspace {
 	now := time.Now().UTC()
 	item.AgentAPILastCheckedAt = now
 	item.AgentAPIResolvedURL = ""
@@ -155,10 +189,49 @@ func (s *Service) DetectWorkspaceAgentAPI(ctx context.Context, item domain.Works
 	if len(candidates) == 0 {
 		return markAgentAPIProbeFailure(item, "没有可测试的 Agent API 地址")
 	}
-	failures := make([]string, 0, len(candidates))
-	stages := make([]string, 0, len(candidates))
+	failures := make([]string, 0, len(candidates)+1)
+	stages := make([]string, 0, len(candidates)+1)
 	seenStages := map[string]bool{}
-	// keepTunnelFailure makes the rejected tunnel visible even when a later LAN
+	// The stdio transport is tried first for every SSH workspace: it needs only
+	// SSH itself, not sshd port forwarding or a reachable LAN address. A failure
+	// here is recorded and the tunnel/LAN candidates run exactly as before.
+	stdioFailure := ""
+	if tryStdio {
+		if base, ok := agentAPIStdioDetectionBase(item, settings); ok {
+			budget := agentAPIStdioDetectTimeout
+			if s.agentAPIStdioProbeBudget > 0 {
+				budget = s.agentAPIStdioProbeBudget
+			}
+			stdioCtx, cancel := context.WithTimeout(ctx, budget)
+			result, stdioErr := s.probeAgentAPIOverStdioForDetection(stdioCtx, item, base)
+			cancel()
+			if stdioErr == nil {
+				item.AgentAPIResolvedURL = base
+				item.AgentAPIStatus = "ready"
+				item.AgentAPIError = ""
+				// A working automatic path supersedes the migration warning.
+				item.AgentAPIMigrationNote = ""
+				reachability := map[string]any{
+					"status": "ready", "url": base, "via": "stdio", "runtime": result.Runtime,
+				}
+				// The proxy URL is the address that actually answered during this
+				// detection. It is an observation, not a stored endpoint: every Turn
+				// starts a new helper on a new port.
+				if result.URL != "" {
+					reachability["proxy_url"] = result.URL
+				}
+				item.Capabilities["agent_api"] = reachability
+				return item
+			}
+			// Probe errors can quote credentials back at us, and this string is
+			// stored in capabilities and shown in the UI.
+			stdioReason := workspacepkg.SafeDisplayText(item, stdioErr.Error())
+			stdioFailure = stdioReason
+			stages = append(stages, "SSH stdio")
+			failures = append(failures, "SSH stdio："+stdioReason)
+		}
+	}
+	// tunnelFailure makes the rejected tunnel visible even when a later LAN
 	// candidate wins: the fallback log names why the preferred path was not used
 	// instead of only which address was picked.
 	tunnelFailure := ""
@@ -181,6 +254,9 @@ func (s *Service) DetectWorkspaceAgentAPI(ctx context.Context, item domain.Works
 			// off exactly this loopback form; only the label distinguishes them.
 			reachability := map[string]any{
 				"status": "ready", "url": candidate, "via": agentAPIReachability(item, candidate),
+			}
+			if stdioFailure != "" {
+				reachability["stdio_error"] = stdioFailure
 			}
 			if tunnelFailure != "" {
 				reachability["tunnel_error"] = tunnelFailure
@@ -217,6 +293,55 @@ func (s *Service) probeAgentAPI(ctx context.Context, item domain.Workspace, cand
 		return s.agentAPIProbeFn(ctx, item, candidate)
 	}
 	return workspacepkg.ProbeAgentAPIThroughForward(ctx, item, candidate)
+}
+
+// agentAPIDetectionUsedStdio reports whether the recorded detection result was
+// produced by the stdio transport. Its address is AHA's loopback, reached
+// through the helper, so it says nothing about the reverse tunnel.
+func agentAPIDetectionUsedStdio(item domain.Workspace) bool {
+	probe, _ := item.Capabilities["agent_api"].(map[string]any)
+	via, _ := probe["via"].(string)
+	return via == "stdio"
+}
+
+// probeAgentAPIOverStdioForDetection is the detection side of the stdio path.
+// It materialises the helper in the workspace root (there is no Task work
+// directory in this flow), reusing one left by an earlier Turn or detection
+// when its version and digest still match.
+func (s *Service) probeAgentAPIOverStdioForDetection(ctx context.Context, item domain.Workspace, baseURL string) (workspacepkg.AgentAPIStdioResult, error) {
+	if s.agentAPIStdioProbeFn != nil {
+		return s.agentAPIStdioProbeFn(ctx, item, baseURL)
+	}
+	// No backend hint: detection has no runtime snapshot. The workspace's PATH
+	// is the only node source here; a Turn may still find node through its
+	// backend shebang, which is why a failed detection is not proof that stdio
+	// will fail for every Turn.
+	return workspacepkg.ProbeAgentAPIOverStdio(ctx, item, baseURL, item.RootPath, "", s.buildVersion, "")
+}
+
+// agentAPIBaseURL is the address the workspace is configured to reach. A manual
+// override wins over the derived startup address, matching the resolution order
+// a Turn already used.
+func agentAPIBaseURL(item domain.Workspace, settings domain.AgentAPISettings) string {
+	if normalizeAgentAPIMode(item.AgentAPIMode) == "manual" && item.AgentAPIURL != "" {
+		return item.AgentAPIURL
+	}
+	return settings.EffectiveURL
+}
+
+// agentAPIStdioDetectionBase reports whether stdio detection applies and which
+// base address it should proxy. It mirrors the Turn gate: only SSH, and only a
+// loopback base, because a workspace that can dial any other address itself
+// gains nothing from an extra tunnel.
+func agentAPIStdioDetectionBase(item domain.Workspace, settings domain.AgentAPISettings) (string, bool) {
+	if item.Transport != "ssh" {
+		return "", false
+	}
+	base := agentAPIBaseURL(item, settings)
+	if _, _, ok := workspacepkg.AgentAPIProxyTarget(base); !ok {
+		return "", false
+	}
+	return base, true
 }
 
 // agentAPIProbeCandidateLabel names the step a candidate belongs to, so a

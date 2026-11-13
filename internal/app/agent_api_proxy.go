@@ -44,12 +44,13 @@ type agentAPITurnSetup struct {
 // reason before the next one runs:
 //
 //  1. the stdio helper (AHA2_AGENT_PROXY_HELPER override, else the embedded
-//     Node script), which replaces the SSH channel itself with the Agent API;
+//     Node script), which replaces the SSH channel itself with the Agent API.
+//     It is the default for every SSH workspace, not an opt-in switch;
 //  2. the existing SSH reverse-tunnel -> LAN plaintext resolution.
 //
 // Anything that goes wrong while setting the stdio transport up is logged and
-// the previous resolution runs, so enabling the switch can only change the path
-// when the new one is actually available.
+// the previous resolution runs, so a workspace without a usable helper behaves
+// exactly as it did before the stdio transport existed.
 func (s *Service) prepareAgentAPIForTurn(ctx context.Context, item domain.Workspace, task domain.Task, workDir, backend string) (agentAPITurnSetup, error) {
 	if item.Transport != "ssh" {
 		url, err := s.AgentAPIURLForWorkspace(ctx, item)
@@ -59,14 +60,7 @@ func (s *Service) prepareAgentAPIForTurn(ctx context.Context, item domain.Worksp
 	if err != nil {
 		return agentAPITurnSetup{}, err
 	}
-	if !settings.StdioProxy {
-		url, err := s.AgentAPIURLForWorkspace(ctx, item)
-		return agentAPITurnSetup{URL: url, Path: agentAPIPathDirect}, err
-	}
-	base := settings.EffectiveURL
-	if normalizeAgentAPIMode(item.AgentAPIMode) == "manual" && item.AgentAPIURL != "" {
-		base = item.AgentAPIURL
-	}
+	base := agentAPIBaseURL(item, settings)
 	target, scheme, ok := workspacepkg.AgentAPIProxyTarget(base)
 	if !ok {
 		// Not loopback: the workspace can dial this address itself, so the
