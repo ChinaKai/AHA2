@@ -5788,6 +5788,12 @@ function render(): void {
     restoreRegionUI(document.querySelector<HTMLElement>("#agent-turn-slot"), previousTurnUI);
     restoreRegionUI(document.querySelector<HTMLElement>("#task-tool-panel-body"), previousToolUI);
   }
+  // Markup can only express "all selected"; a partial page selection is the
+  // checkbox's live indeterminate state. A whole-view render rebuilds the model
+  // results from markup, so re-apply the indicator exactly like the local
+  // results refresh does, after region restore has finished writing values.
+  const modelResults = document.querySelector<HTMLElement>("#model-results");
+  if (modelResults) syncModelSelectionIndicators(modelResults);
   const nextConversation = document.querySelector<HTMLElement>("#conversation-list");
   if (nextConversation) {
     if (preservedConversation) {

@@ -43,6 +43,12 @@ const accounts = Array.from({length: 12}, (_, index) => ({
   credential_configured: true,
   owner_bound: true,
   usage: {rate_limits: [], credits: {has_credits: true, unlimited: false, overage_limit_reached: false}},
+  // A ready account whose usage and model catalog were refreshed recently.
+  // Without these timestamps the page treats every account as stale and
+  // re-refreshes it on each render; this fixture has no endpoint that would
+  // ever advance them, so the test would never settle.
+  usage_updated_at: new Date().toISOString(),
+  models_updated_at: new Date().toISOString(),
   created_at: new Date().toISOString(),
   updated_at: new Date().toISOString(),
 }));
@@ -193,6 +199,24 @@ try {
     input.dispatchEvent(new Event("change", {bubbles: true}));
   });
   await page.waitForFunction(() => document.querySelector("[data-select-models-page]")?.indeterminate === true, null, {timeout: 15000});
+  // A whole-view render (the Provider pager calls render(), not the local
+  // results refresh) rebuilds the model table from markup. The page-level
+  // indicator must still agree with the rows after that render.
+  await page.evaluate(() => document.querySelector('[data-page-kind="providers"][data-page-delta="1"]')?.click());
+  await page.waitForFunction(() => document.querySelector(".list-footer-providers")?.textContent?.includes("第 2/4 页"), null, {timeout: 15000});
+  assert.equal(await page.evaluate(() => document.querySelector("[data-select-models-page]")?.indeterminate), true);
+  assert.equal(await page.evaluate(() => document.querySelector("[data-select-models-page]")?.checked), false);
+  assert.equal(await page.locator("[data-select-model]:checked").count(), 1);
+
+  // Paging keeps the selection: the indicator only describes the visible page.
+  await page.evaluate(() => document.querySelector('[data-page-kind="models"][data-page-delta="1"]')?.click());
+  await page.waitForFunction(() => document.querySelector(".list-footer-models")?.textContent?.includes("第 2/2 页"), null, {timeout: 15000});
+  assert.equal(await page.evaluate(() => document.querySelector("[data-select-models-page]")?.indeterminate), false);
+  assert.equal(await page.evaluate(() => document.querySelector("[data-select-models-page]")?.checked), false);
+  await page.evaluate(() => document.querySelector('[data-page-kind="models"][data-page-delta="-1"]')?.click());
+  await page.waitForFunction(() => document.querySelector(".list-footer-models")?.textContent?.includes("第 1/2 页"), null, {timeout: 15000});
+  assert.equal(await page.evaluate(() => document.querySelector("[data-select-models-page]")?.indeterminate), true);
+  assert.equal(await page.locator("[data-select-model]:checked").count(), 1);
   await page.evaluate(() => {
     const input = document.querySelector("[data-select-model]");
     if (!(input instanceof HTMLInputElement)) return;
@@ -210,6 +234,13 @@ try {
     input.dispatchEvent(new Event("change", {bubbles: true}));
   });
   await page.waitForFunction(() => document.querySelector(".model-batch-bar")?.textContent?.includes("已选 20 个模型"), null, {timeout: 15000});
+  // A full page selection must also survive a whole-view render: checked, never
+  // indeterminate, and every visible row still checked.
+  await page.evaluate(() => document.querySelector('[data-page-kind="providers"][data-page-delta="-1"]')?.click());
+  await page.waitForFunction(() => document.querySelector(".list-footer-providers")?.textContent?.includes("第 1/4 页"), null, {timeout: 15000});
+  assert.equal(await page.evaluate(() => document.querySelector("[data-select-models-page]")?.checked), true);
+  assert.equal(await page.evaluate(() => document.querySelector("[data-select-models-page]")?.indeterminate), false);
+  assert.equal(await page.locator("[data-select-model]:checked").count(), 20);
   await page.evaluate(() => document.querySelector("[data-batch-delete-models]")?.click());
   await page.waitForFunction(() => window.__batchDeleteRequests?.length === 1, null, {timeout: 15000});
   assert.equal(await page.evaluate(() => window.__batchDeleteIDs[0].length), 20);
