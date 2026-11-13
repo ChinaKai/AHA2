@@ -7,28 +7,20 @@ import {MODEL_WIRE_OPTIONS, backendSelectOptionsHTML, backendsPanelHTML, modelWi
 import {bindPetDocEditorButtons, createPetWorkbenchLoader, createPetWorkbenchPageKeeper, mapPetWorkbenchTab, PET_APPROVAL_MAX_LIMIT, petApprovalMatches, petApprovalPage, renderPetApprovalLoadMore, renderPetOverview, renderPetRecords, renderPetWorkbenchLoadError, swapPetWorkbenchPage} from "./pet_workbench.js";
 import type {PetWorkbenchPageBinding} from "./pet_workbench.js";
 import {renderConversationList} from "./conversation_ui.js";
-import {bindCodexAccounts, renderCodexAccounts} from "./codex_accounts.js";
-import {bindChannels, exportRetiredChannelInstance, purgeRetiredChannelInstance, renderChannels} from "./channels.js";
+import {chunkErrorHTML, chunkLoadingHTML, createLazyPage, retryLazyPage} from "./lazy_page.js";
+import type {LazyPage} from "./lazy_page.js";
 import {icon} from "./icons.js";
 import {createPetApprovalCounter, petApprovalFilterCount, petPendingApprovalBadge, petApprovalOptions, renderPetApprovalDetail, renderPetApprovalFilters, renderPetApprovalList, selectedPetApprovalOption} from "./pet_approvals.js";
 import {applyLocale, normalizeLanguagePreference, startUITranslationObserver, t, tr, translateUI} from "./i18n.js";
-import {bindKnowledgeWorkspace, knowledgeEntryListVisible, renderKnowledgeWorkspace} from "./knowledge_workspace.js";
 import {bindHardwarePanel, refreshHardwarePanel, stopHardwarePanel} from "./hardware_panel.js";
-import {bindResourcesPage, renderResourcesPage} from "./resources.js";
 import type {ResourcesTab} from "./resources.js";
-import {bindTaskMailPanel, renderTaskMailPanel} from "./mail_task.js";
 import type {MailResourcesData} from "./mail_resources.js";
 import {bindDesktopPanel, desktopPanelInteracting, refreshDesktopPanel, stopDesktopPanel} from "./desktop_panel.js";
-import {bindMCPPage, renderMCPPage} from "./mcp_page.js";
 import {renderMarkdown} from "./markdown.js";
 import {forgetAllModelHealth as clearAllModelHealth, forgetModelHealth as clearModelHealth, runModelHealthCheck, runModelHealthChecks} from "./model_health.js";
 import type {ModelHealthState} from "./model_health.js";
 import {MODEL_PAGE_SIZE, buildModelPage, modelBatchBarHTML, modelSelectionIndicator, modelSelectionState, pruneModelSelection, selectModelIDs, toggleModelSelection} from "./model_selection.js";
-import {bindPromptAdmin, loadPromptCatalog, renderPromptAdmin} from "./prompt_admin.js";
-import {bindProxySettings, renderProxySettings} from "./proxy_settings.js";
-import {formatBytes, purgeEnabled, renderDatabasePanel, retentionFormError, skipReasonText} from "./data_retention.js";
 import type {DataRetentionViewState} from "./data_retention.js";
-import {bindSyncSettings, isSyncSettingsFormEditing, renderSyncSettings} from "./sync_settings.js";
 import {bindRuntimeFields, proxyEnabledFrom, proxyOptionsHTML, runtimeFieldsHTML, setClaudeOfficialCatalog, setClaudeOfficialLoading, setRuntimeBackends, syncRuntimeFields} from "./runtime_picker.js";
 import type {ClaudeOfficialCatalog} from "./runtime_picker.js";
 import {renderComposerAgentOptions, renderComposerTools, TASK_ATTACHMENT_MAX_COUNT, taskAttachmentLimitHint, taskAttachmentValidationError} from "./task_composer.js";
@@ -36,7 +28,7 @@ import {DEFAULT_TASK_STATUS_FILTERS, LOCAL_TASK_DEVICE_FILTER, TASK_STATUS_GROUP
 import type {TaskStatusGroup} from "./task_filters.js";
 import {TASK_TOOL_DEFAULT_WIDTH, normalizePinnedTaskTool, normalizeTaskToolMode, normalizeTaskToolWidth, renderTaskToolButtons, renderTaskToolContent, renderTaskToolPanel} from "./task_tools.js";
 import type {TaskTool, TaskToolMode} from "./task_tools.js";
-import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, createListRefreshScheduler, createResourceLoader, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, loadNavigationSnapshot, matchingSlashCommands, paginateItems, paginationHTML, protoBadges, readPerfPanelPreference, renderModelHealthCell, renderProtocolProbeStatus, renderWorkspaceDetection, restoreInteractiveRegion, saveNavigationSnapshot, textMatchesQuery, writePerfPanelPreference} from "./ui_helpers.js";
+import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, createListRefreshScheduler, createResourceLoader, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, loadNavigationSnapshot, matchingSlashCommands, paginateItems, paginationHTML, planKeyedNodes, stableTextSignature, protoBadges, readPerfPanelPreference, renderModelHealthCell, renderProtocolProbeStatus, renderWorkspaceDetection, restoreInteractiveRegion, saveNavigationSnapshot, textMatchesQuery, writePerfPanelPreference} from "./ui_helpers.js";
 import type {InteractiveRegionState, ModelHealthView} from "./ui_helpers.js";
 import {
   compactNumber,
@@ -220,6 +212,224 @@ interface SidebarMemoItem {
   id: string;
   text: string;
   done: boolean;
+}
+
+/* Route-level page chunks ------------------------------------------------ */
+
+// Heavy, low-frequency pages are fetched on first entry. The wrappers keep the
+// existing call sites and return one shared loading card (or a retryable error)
+// until the chunk arrives. createLazyPage dedupes concurrent loads, so repeated
+// renders and re-entering the same page never start a second request.
+function lazyPageState<T>(page: LazyPage<T>): string {
+  return page.status() === "failed"
+    ? chunkErrorHTML(page.key, t("chunk.error"), page.error(), t("common.retry"))
+    : chunkLoadingHTML(t("chunk.loading"));
+}
+
+type KnowledgePageModule = typeof import("./knowledge_workspace.js");
+const knowledgePage = createLazyPage<KnowledgePageModule>("knowledge", () => import("./knowledge_workspace.js"), {onChange: () => render()});
+
+function renderKnowledgeWorkspace(...args: Parameters<KnowledgePageModule["renderKnowledgeWorkspace"]>): string {
+  const module = knowledgePage.loaded();
+  if (!module) { void knowledgePage.load(); return lazyPageState(knowledgePage); }
+  return module.renderKnowledgeWorkspace(...args);
+}
+
+function bindKnowledgeWorkspace(...args: Parameters<KnowledgePageModule["bindKnowledgeWorkspace"]>): void {
+  const module = knowledgePage.loaded();
+  if (module) module.bindKnowledgeWorkspace(...args);
+  else void knowledgePage.load();
+}
+
+function knowledgeEntryListVisible(...args: Parameters<KnowledgePageModule["knowledgeEntryListVisible"]>): boolean {
+  const module = knowledgePage.loaded();
+  if (module) return module.knowledgeEntryListVisible(...args);
+  void knowledgePage.load();
+  return false;
+}
+
+type CodexPageModule = typeof import("./codex_accounts.js");
+const codexPage = createLazyPage<CodexPageModule>("codex", () => import("./codex_accounts.js"), {onChange: () => render()});
+
+function renderCodexAccounts(...args: Parameters<CodexPageModule["renderCodexAccounts"]>): string {
+  const module = codexPage.loaded();
+  if (!module) { void codexPage.load(); return lazyPageState(codexPage); }
+  return module.renderCodexAccounts(...args);
+}
+
+function bindCodexAccounts(...args: Parameters<CodexPageModule["bindCodexAccounts"]>): void {
+  const module = codexPage.loaded();
+  if (module) module.bindCodexAccounts(...args);
+  else void codexPage.load();
+}
+
+type ChannelsPageModule = typeof import("./channels.js");
+const channelsPage = createLazyPage<ChannelsPageModule>("channels", () => import("./channels.js"), {onChange: () => render()});
+
+function renderChannels(...args: Parameters<ChannelsPageModule["renderChannels"]>): string {
+  const module = channelsPage.loaded();
+  if (!module) { void channelsPage.load(); return lazyPageState(channelsPage); }
+  return module.renderChannels(...args);
+}
+
+function bindChannels(...args: Parameters<ChannelsPageModule["bindChannels"]>): void {
+  const module = channelsPage.loaded();
+  if (module) module.bindChannels(...args);
+  else void channelsPage.load();
+}
+
+// The retired-instance actions are only reachable from an already-rendered
+// channels page, but await the chunk anyway so a fast click during the first
+// render cannot run against an unloaded module.
+async function purgeRetiredChannelInstance(...args: Parameters<ChannelsPageModule["purgeRetiredChannelInstance"]>): ReturnType<ChannelsPageModule["purgeRetiredChannelInstance"]> {
+  const module = channelsPage.loaded() ?? await channelsPage.load();
+  if (!module) throw new Error(t("chunk.error"));
+  return module.purgeRetiredChannelInstance(...args);
+}
+
+async function exportRetiredChannelInstance(...args: Parameters<ChannelsPageModule["exportRetiredChannelInstance"]>): Promise<void> {
+  const module = channelsPage.loaded() ?? await channelsPage.load();
+  if (!module) throw new Error(t("chunk.error"));
+  return module.exportRetiredChannelInstance(...args);
+}
+
+type ResourcesPageModule = typeof import("./resources.js");
+const resourcesPage = createLazyPage<ResourcesPageModule>("resources", () => import("./resources.js"), {onChange: () => render()});
+
+function renderResourcesPage(...args: Parameters<ResourcesPageModule["renderResourcesPage"]>): string {
+  const module = resourcesPage.loaded();
+  if (!module) { void resourcesPage.load(); return lazyPageState(resourcesPage); }
+  return module.renderResourcesPage(...args);
+}
+
+function bindResourcesPage(...args: Parameters<ResourcesPageModule["bindResourcesPage"]>): void {
+  const module = resourcesPage.loaded();
+  if (module) module.bindResourcesPage(...args);
+  else void resourcesPage.load();
+}
+
+type MailTaskPageModule = typeof import("./mail_task.js");
+const mailTaskPage = createLazyPage<MailTaskPageModule>("mail-task", () => import("./mail_task.js"), {onChange: () => render()});
+
+function renderTaskMailPanel(...args: Parameters<MailTaskPageModule["renderTaskMailPanel"]>): string {
+  const module = mailTaskPage.loaded();
+  if (!module) { void mailTaskPage.load(); return lazyPageState(mailTaskPage); }
+  return module.renderTaskMailPanel(...args);
+}
+
+function bindTaskMailPanel(...args: Parameters<MailTaskPageModule["bindTaskMailPanel"]>): void {
+  const module = mailTaskPage.loaded();
+  if (module) module.bindTaskMailPanel(...args);
+  else void mailTaskPage.load();
+}
+
+type MCPPageModule = typeof import("./mcp_page.js");
+const mcpPage = createLazyPage<MCPPageModule>("mcp", () => import("./mcp_page.js"), {onChange: () => render()});
+
+function renderMCPPage(...args: Parameters<MCPPageModule["renderMCPPage"]>): string {
+  const module = mcpPage.loaded();
+  if (!module) { void mcpPage.load(); return lazyPageState(mcpPage); }
+  return module.renderMCPPage(...args);
+}
+
+function bindMCPPage(...args: Parameters<MCPPageModule["bindMCPPage"]>): void {
+  const module = mcpPage.loaded();
+  if (module) module.bindMCPPage(...args);
+  else void mcpPage.load();
+}
+
+type PromptPageModule = typeof import("./prompt_admin.js");
+const promptPage = createLazyPage<PromptPageModule>("prompts", () => import("./prompt_admin.js"), {onChange: () => render()});
+
+function renderPromptAdmin(): string {
+  const module = promptPage.loaded();
+  if (!module) { void promptPage.load(); return lazyPageState(promptPage); }
+  return module.renderPromptAdmin();
+}
+
+function bindPromptAdmin(...args: Parameters<PromptPageModule["bindPromptAdmin"]>): void {
+  const module = promptPage.loaded();
+  if (module) module.bindPromptAdmin(...args);
+  else void promptPage.load();
+}
+
+async function loadPromptCatalog(): Promise<void> {
+  const module = promptPage.loaded() ?? await promptPage.load();
+  await module?.loadPromptCatalog();
+}
+
+type ProxyPageModule = typeof import("./proxy_settings.js");
+const proxyPage = createLazyPage<ProxyPageModule>("proxy", () => import("./proxy_settings.js"), {onChange: () => render()});
+
+function renderProxySettings(...args: Parameters<ProxyPageModule["renderProxySettings"]>): string {
+  const module = proxyPage.loaded();
+  if (!module) { void proxyPage.load(); return lazyPageState(proxyPage); }
+  return module.renderProxySettings(...args);
+}
+
+function bindProxySettings(...args: Parameters<ProxyPageModule["bindProxySettings"]>): void {
+  const module = proxyPage.loaded();
+  if (module) module.bindProxySettings(...args);
+  else void proxyPage.load();
+}
+
+type SyncPageModule = typeof import("./sync_settings.js");
+const syncPage = createLazyPage<SyncPageModule>("sync", () => import("./sync_settings.js"), {onChange: () => render()});
+
+function renderSyncSettings(...args: Parameters<SyncPageModule["renderSyncSettings"]>): string {
+  const module = syncPage.loaded();
+  if (!module) { void syncPage.load(); return lazyPageState(syncPage); }
+  return module.renderSyncSettings(...args);
+}
+
+function bindSyncSettings(...args: Parameters<SyncPageModule["bindSyncSettings"]>): void {
+  const module = syncPage.loaded();
+  if (module) module.bindSyncSettings(...args);
+  else void syncPage.load();
+}
+
+function isSyncSettingsFormEditing(...args: Parameters<SyncPageModule["isSyncSettingsFormEditing"]>): boolean {
+  const module = syncPage.loaded();
+  if (module) return module.isSyncSettingsFormEditing(...args);
+  void syncPage.load();
+  return false;
+}
+
+type DataRetentionPageModule = typeof import("./data_retention.js");
+const dataRetentionPage = createLazyPage<DataRetentionPageModule>("data-retention", () => import("./data_retention.js"), {onChange: () => render()});
+
+function renderDatabasePanel(...args: Parameters<DataRetentionPageModule["renderDatabasePanel"]>): string {
+  const module = dataRetentionPage.loaded();
+  if (!module) { void dataRetentionPage.load(); return lazyPageState(dataRetentionPage); }
+  return module.renderDatabasePanel(...args);
+}
+
+function formatBytes(...args: Parameters<DataRetentionPageModule["formatBytes"]>): string {
+  const module = dataRetentionPage.loaded();
+  if (module) return module.formatBytes(...args);
+  void dataRetentionPage.load();
+  return `${args[0]} B`;
+}
+
+function retentionFormError(...args: Parameters<DataRetentionPageModule["retentionFormError"]>): string {
+  const module = dataRetentionPage.loaded();
+  if (module) return module.retentionFormError(...args);
+  void dataRetentionPage.load();
+  return "";
+}
+
+function purgeEnabled(...args: Parameters<DataRetentionPageModule["purgeEnabled"]>): boolean {
+  const module = dataRetentionPage.loaded();
+  if (module) return module.purgeEnabled(...args);
+  void dataRetentionPage.load();
+  return false;
+}
+
+function skipReasonText(...args: Parameters<DataRetentionPageModule["skipReasonText"]>): string {
+  const module = dataRetentionPage.loaded();
+  if (module) return module.skipReasonText(...args);
+  void dataRetentionPage.load();
+  return String(args[0] ?? "");
 }
 
 const taskToolLayoutKey = "aha2.task-tool-layout";
@@ -4199,11 +4409,17 @@ function taskFilterPopover(
   </details>`;
 }
 
+function taskCardSignature(task: Task, project?: Project, workspace?: Workspace): string {
+  // A stable signature lets a list refresh keep every unchanged row as the
+  // same DOM node, so focus, text selection and in-row state survive.
+  return stableTextSignature([task, project?.name || "", workspace?.root_path || ""]);
+}
+
 function taskCardHtml(task: Task): string {
   const project = state.projects.find(item => item.id === task.project_id);
   const ws = state.workspaces.find(item => item.id === task.workspace_id);
   const archived = task.channel_retired === true || task.read_only_reason === "channel_retired";
-  return `<article class="task-card" data-task="${task.id}">
+  return `<article class="task-card" data-task="${task.id}" data-task-signature="${taskCardSignature(task, project, ws)}">
     <div class="task-card-main">
       <div class="task-card-title"><span class="task-code">${escapeHTML(task.code || "")}</span><h3 data-task-title="${task.id}">${escapeHTML(task.title)}</h3><span class="status ${statusClass(task.status)}">${statusLabel(task.status)}</span></div>
       ${task.current_goal && task.current_goal !== task.title ? `<p class="task-goal">${escapeHTML(task.current_goal)}</p>` : ""}
@@ -4230,8 +4446,7 @@ function filteredTasks(): Task[] {
   ));
 }
 
-function tasksView(): string {
-  if (state.selectedTask) return taskDetailView(state.selectedTask);
+function tasksPageHTML(): string {
   // Counts describe the whole set, so they come from the server aggregate
   // rather than the loaded page; a page-derived count is wrong as soon as the
   // list outgrows one page. Until the first response lands, show no numbers.
@@ -4252,7 +4467,7 @@ function tasksView(): string {
   const noMatchHint = taskLoadMoreNoMatch
     ? `<div class="task-filter-hint" data-task-load-more-empty>${icon("filter")}<span>新加载的任务都不符合当前筛选${listPages.tasks.hasMore ? "，可继续加载或显示全部" : "，可显示全部"}</span>${state.taskStatusFilters.size && !hiddenText ? `<button type="button" data-task-show-all>显示全部</button>` : ""}</div>`
     : "";
-  return shell(`<section class="page">
+  return `<section class="page">
     ${pageHead("任务", "Task 是长期目标，每条用户输入创建一个独立 Turn。", `<button data-dialog="task">${icon("plus")}创建任务</button>`)}
     <div class="task-filters">
       ${taskFilterPopover("project", "项目", "全部项目", projectOptions)}
@@ -4263,7 +4478,158 @@ function tasksView(): string {
     ${hiddenText ? `<div class="task-filter-hint" data-task-hidden-status>${icon("filter")}<span>${escapeHTML(hiddenText)}</span><button type="button" data-task-show-all>显示全部</button></div>` : ""}
     <div class="task-list">${rows || `<div class="empty">${state.tasks.length ? "没有符合条件的任务" : "创建第一个任务开始执行。"}</div>`}${noMatchHint}${loadMoreHTML("tasks")}</div>
     ${taskDialog()}
-  </section>`);
+  </section>`;
+}
+
+function tasksView(): string {
+  if (state.selectedTask) return taskDetailView(state.selectedTask);
+  return shell(tasksPageHTML());
+}
+
+interface TaskListFocus {
+  task: string;
+  tag: string;
+  attributes: string;
+  selectionStart?: number | null;
+  selectionEnd?: number | null;
+}
+
+function taskListFocusAttributes(element: HTMLElement): string {
+  return [...element.attributes]
+    .filter(attribute => attribute.name.startsWith("data-"))
+    .map(attribute => `${attribute.name}=${attribute.value}`)
+    .sort()
+    .join(";");
+}
+
+function captureTaskListFocus(root: HTMLElement): TaskListFocus | null {
+  const active = document.activeElement;
+  if (!(active instanceof HTMLElement) || !root.contains(active)) return null;
+  const control = active as HTMLInputElement;
+  return {
+    task: active.closest<HTMLElement>("[data-task]")?.dataset.task || "",
+    tag: active.tagName,
+    attributes: taskListFocusAttributes(active),
+    selectionStart: "selectionStart" in control ? control.selectionStart : undefined,
+    selectionEnd: "selectionEnd" in control ? control.selectionEnd : undefined,
+  };
+}
+
+function restoreTaskListFocus(root: HTMLElement, state: TaskListFocus | null): void {
+  if (!state) return;
+  const scopes = state.task
+    ? [...root.querySelectorAll<HTMLElement>(`[data-task="${CSS.escape(state.task)}"]`)]
+    : [root];
+  for (const scope of scopes) {
+    const candidates = [scope, ...scope.querySelectorAll<HTMLElement>("*")]
+      .filter(element => element.tagName === state.tag && taskListFocusAttributes(element) === state.attributes);
+    const target = candidates.find(element => !element.hasAttribute("disabled"));
+    if (!target) continue;
+    try { target.focus({preventScroll: true}); } catch { target.focus(); }
+    const control = target as HTMLInputElement;
+    if (state.selectionStart !== undefined && "setSelectionRange" in control) {
+      try { control.setSelectionRange(state.selectionStart, state.selectionEnd ?? state.selectionStart); } catch { /* unsupported input type */ }
+    }
+    return;
+  }
+}
+
+function patchTaskRows(list: HTMLElement, nextList: HTMLElement): void {
+  const selector = ":scope > article[data-task]";
+  const desired = [...nextList.querySelectorAll<HTMLElement>(selector)];
+  const current = new Map([...list.querySelectorAll<HTMLElement>(selector)].map(row => [row.dataset.task || "", row]));
+  const plan = planKeyedNodes(
+    [...current].map(([key, row]) => ({key, signature: row.dataset.taskSignature || ""})),
+    desired.map(row => ({key: row.dataset.task || "", signature: row.dataset.taskSignature || ""})),
+  );
+  const source = new Map(desired.map(row => [row.dataset.task || "", row]));
+  const replace = new Set(plan.replace);
+  const focus = captureTaskListFocus(list);
+  for (const key of plan.remove) current.get(key)?.remove();
+  let previous: Element | null = null;
+  for (const key of plan.order) {
+    const next = source.get(key);
+    if (!next) continue;
+    let row = current.get(key) || null;
+    // Unchanged rows stay the exact same node. Only changed rows are replaced,
+    // which is what keeps scroll and in-row focus stable across refreshes.
+    if (row && replace.has(key)) {
+      const replacement = next.cloneNode(true) as HTMLElement;
+      row.replaceWith(replacement);
+      row = replacement;
+    }
+    if (!row) {
+      row = next.cloneNode(true) as HTMLElement;
+      list.insertBefore(row, previous ? previous.nextSibling : list.firstElementChild);
+    } else {
+      const expected = previous ? previous.nextElementSibling : list.firstElementChild;
+      if (row !== expected) list.insertBefore(row, previous ? previous.nextSibling : list.firstElementChild);
+    }
+    previous = row;
+  }
+  restoreTaskListFocus(list, focus);
+}
+
+function patchTaskListTail(list: HTMLElement, nextList: HTMLElement): void {
+  const isRow = (element: Element) => element.matches("article[data-task]");
+  const current = [...list.children].filter(element => !isRow(element));
+  const desired = [...nextList.children].filter(element => !isRow(element));
+  if (current.map(element => element.outerHTML).join("") === desired.map(element => element.outerHTML).join("")) return;
+  const focus = captureTaskListFocus(list);
+  current.forEach(element => element.remove());
+  list.append(...desired.map(element => element.cloneNode(true)));
+  restoreTaskListFocus(list, focus);
+}
+
+function patchTaskHiddenHint(section: HTMLElement, nextSection: HTMLElement): void {
+  const current = section.querySelector<HTMLElement>("[data-task-hidden-status]");
+  const desired = nextSection.querySelector<HTMLElement>("[data-task-hidden-status]");
+  if (!desired) {
+    current?.remove();
+    return;
+  }
+  if (!current) {
+    section.querySelector(".task-list")?.before(desired.cloneNode(true));
+    return;
+  }
+  if (current.outerHTML !== desired.outerHTML) replaceInteractiveRegion(current, desired.innerHTML);
+}
+
+// performListRefresh reconciles only the task list's changed rows and chrome.
+// Returning false means the expected list shell is absent (another view, or a
+// detail just opened), and the caller falls back to a full render.
+function patchTaskList(): boolean {
+  if (state.selectedTask || openingTaskID) return false;
+  const section = document.querySelector<HTMLElement>("section.page");
+  const list = section?.querySelector<HTMLElement>(".task-list");
+  const filters = section?.querySelector<HTMLElement>(".task-filters");
+  if (!section || !list || !filters) return false;
+  const template = document.createElement("template");
+  template.innerHTML = tasksPageHTML();
+  const nextSection = template.content.querySelector<HTMLElement>("section.page");
+  const nextList = nextSection?.querySelector<HTMLElement>(".task-list");
+  const nextFilters = nextSection?.querySelector<HTMLElement>(".task-filters");
+  if (!nextSection || !nextList || !nextFilters) return false;
+
+  // The filters popover holds open state, checkbox selection and focus. Swapping
+  // only its inner HTML through the interactive-region helper restores all of
+  // them, while the surrounding page and scroll position stay untouched.
+  if (filters.outerHTML !== nextFilters.outerHTML) replaceInteractiveRegion(filters, nextFilters.innerHTML);
+
+  const count = section.querySelector<HTMLElement>(".task-count");
+  const nextCount = nextSection.querySelector<HTMLElement>(".task-count");
+  if (count && nextCount && (count.textContent !== nextCount.textContent || count.title !== nextCount.title)) {
+    count.textContent = nextCount.textContent;
+    count.title = nextCount.title;
+  }
+
+  patchTaskHiddenHint(section, nextSection);
+  patchTaskRows(list, nextList);
+  patchTaskListTail(list, nextList);
+  // Replaced rows, filter controls and the tail are fresh nodes; bind them now
+  // so actions work immediately, without unsettling the untouched rows.
+  bindTaskListControls(section);
+  return true;
 }
 
 function taskDialog(): string {
@@ -4929,6 +5295,9 @@ function taskMailActions(): {reload: () => Promise<void>; notify: (type: "error"
 }
 
 function taskMailPanelHTML(detail: TaskDetail): string {
+  // Other task tools receive this string but ignore it. Building it eagerly
+  // would fetch the mail chunk the first time any task detail opens.
+  if (state.taskTool !== "mail") return "";
   return renderTaskMailPanel(detail, state.taskMailOptions, state.mailAccounts, state.taskMailLoading, state.taskMailError);
 }
 
@@ -5106,6 +5475,93 @@ function hasActiveTextEditor(): boolean {
   return !["button", "checkbox", "color", "file", "hidden", "image", "radio", "range", "reset", "submit"].includes(active.type);
 }
 
+function conversationNodeKey(element: Element): string {
+  if (!(element instanceof HTMLElement)) return "";
+  if (element.dataset.messageId) return `message:${element.dataset.messageId}`;
+  if (element.id) return `id:${element.id}`;
+  if (element.dataset.uiKey) return `ui:${element.dataset.uiKey}`;
+  return "";
+}
+
+function conversationNodeSignature(element: Element): string {
+  if (element instanceof HTMLElement) {
+    // Content signatures ignore local view state (expanded message, open
+    // output details); a node is only replaced when the server data changed.
+    if (element.dataset.messageSignature) return element.dataset.messageSignature;
+    if (element.id) return `id:${element.id}`;
+  }
+  return element.outerHTML;
+}
+
+// Live SSE updates reconcile the conversation per message: unchanged messages
+// keep their DOM nodes (expanded state, selected text, image elements), and an
+// append-only update only inserts the new message. Replacing the whole list
+// used to rebuild every row on each token update.
+function patchConversationList(list: HTMLElement, nextHTML: string): void {
+  const template = document.createElement("template");
+  template.innerHTML = nextHTML;
+  const desired = [...template.content.children];
+  const current = [...list.children];
+  const currentByKey = new Map<string, Element>();
+  const currentState: Array<{key: string; signature: string}> = [];
+  const desiredByKey = new Map<string, Element>();
+  const desiredState: Array<{key: string; signature: string}> = [];
+  let currentUnkeyed = 0;
+  let desiredUnkeyed = 0;
+  for (const node of current) {
+    // Items without their own identity fall back to their position among the
+    // unkeyed nodes (the empty state), which keeps the keyed messages around it
+    // stable.
+    const key = conversationNodeKey(node) || `~${currentUnkeyed++}`;
+    currentByKey.set(key, node);
+    currentState.push({key, signature: conversationNodeSignature(node)});
+  }
+  for (const node of desired) {
+    const key = conversationNodeKey(node) || `~${desiredUnkeyed++}`;
+    desiredByKey.set(key, node);
+    desiredState.push({key, signature: conversationNodeSignature(node)});
+  }
+  const plan = planKeyedNodes(currentState, desiredState);
+  const replace = new Set(plan.replace);
+  const focus = captureRegionUI(list);
+  const images = captureConversationImages(list);
+  const previousTop = list.scrollTop;
+  const wasAtBottom = conversationIsAtBottom(list);
+  let changed = plan.replace.length > 0 || plan.insert.length > 0 || plan.remove.length > 0;
+  for (const key of plan.remove) currentByKey.get(key)?.remove();
+  let previous: Element | null = null;
+  for (const key of plan.order) {
+    const source = desiredByKey.get(key);
+    if (!source) continue;
+    let node = currentByKey.get(key) || null;
+    if (node && replace.has(key)) {
+      const replacement = source.cloneNode(true) as Element;
+      node.replaceWith(replacement);
+      node = replacement;
+    }
+    if (!node) {
+      node = source.cloneNode(true) as Element;
+      list.insertBefore(node, previous ? previous.nextSibling : list.firstElementChild);
+    } else {
+      const expected = previous ? previous.nextElementSibling : list.firstElementChild;
+      if (node !== expected) {
+        list.insertBefore(node, previous ? previous.nextSibling : list.firstElementChild);
+        changed = true;
+      }
+    }
+    previous = node;
+  }
+  if (!changed) {
+    if (scrollConversationToBottom) stabilizeConversationBottom(list);
+    return;
+  }
+  restoreConversationImages(list, images);
+  restoreRegionUI(list, focus, false);
+  if (shouldAutoScrollConversation(wasAtBottom)) stabilizeConversationBottom(list);
+  else if (!composingConversationTouch) list.scrollTop = previousTop;
+  bindConversationLiveControls();
+}
+
 function updateTaskLiveRegions(): void {
   const detail = state.selectedTask;
   if (!detail) return;
@@ -5118,22 +5574,8 @@ function updateTaskLiveRegions(): void {
   if (list) {
     const nextHTML = conversationListHtml();
     if (conversationRenderedHTML.get(list) !== nextHTML) {
-      const ui = captureRegionUI(list);
-      const images = captureConversationImages(list);
-      const previousHeight = list.scrollHeight;
-      const previousTop = list.scrollTop;
-      const wasAtBottom = previousHeight - previousTop - list.clientHeight < 80;
-      list.innerHTML = nextHTML;
+      patchConversationList(list, nextHTML);
       conversationRenderedHTML.set(list, nextHTML);
-      restoreConversationImages(list, images);
-      restoreRegionUI(list, ui, false);
-      if (shouldAutoScrollConversation(wasAtBottom)) stabilizeConversationBottom(list);
-      // Restoring the position captured before the replace is right for a reader
-      // who is sitting still, but during a live gesture it rewinds the drag: the
-      // finger has moved on since previousTop was read, and the assignment throws
-      // that movement away. Leave the list alone while the gesture owns it.
-      else if (!composingConversationTouch) list.scrollTop = previousTop;
-      bindConversationLiveControls();
     } else if (scrollConversationToBottom) {
       stabilizeConversationBottom(list);
     }
@@ -5436,14 +5878,170 @@ function bindAuth(): void {
   });
 }
 
+const boundTaskListControls = new WeakSet<Element>();
+
+// The task list refreshes in place, replacing changed rows, filter controls and
+// the load-more tail. Bind each replacement exactly once so row actions keep
+// working after a patch without stacking duplicate handlers on untouched rows.
+function bindTaskListControls(root: ParentNode = document): void {
+  const each = (selector: string, setup: (element: HTMLElement) => void) => {
+    root.querySelectorAll<HTMLElement>(selector).forEach(element => {
+      if (boundTaskListControls.has(element)) return;
+      boundTaskListControls.add(element);
+      setup(element);
+    });
+  };
+  each("[data-task]", button => {
+    button.addEventListener("pointerdown", () => {
+      taskListPointerActive = true;
+    });
+    button.addEventListener("click", async event => {
+      if ((event.target as HTMLElement).closest(".task-card-actions")) return;
+      const taskID = button.dataset.task!;
+      if (openingTaskID) return;
+      try {
+        await openTask(taskID);
+      } catch (error) {
+        setMessage("error", error instanceof Error ? error.message : String(error));
+        render();
+      }
+    });
+  });
+  each("[data-delete-task]", button => button.addEventListener("click", async event => {
+    event.stopPropagation();
+    const id = button.dataset.deleteTask!;
+    if (!window.confirm("删除该任务？此操作不可恢复。")) return;
+    void runWithFeedback(button, "删除中", async () => {
+      await api.deleteTask(id);
+      if (state.selectedTask?.task.id === id) {
+        state.selectedTask = null;
+        closeEvents();
+      }
+      state.tasks = state.tasks.filter(item => item.id !== id);
+      setMessage("notice", "任务已删除");
+      render();
+    });
+  }));
+  each("[data-retire-remote-task]", button => button.addEventListener("click", async event => {
+    event.stopPropagation();
+    const id = button.dataset.retireRemoteTask!;
+    const task = state.tasks.find(item => item.id === id);
+    const title = task?.title || state.selectedTask?.task.title || "该任务";
+    if (!window.confirm(`仅当来源设备已停用或数据已清空时才能移除“${title}”。此操作会生成同步删除标记，让所有设备删除该只读镜像，且不可恢复。确定继续？`)) return;
+    void runWithFeedback(button, "移除中", async () => {
+      await api.retireRemoteTaskMirror(id);
+      let synchronized = true;
+      try {
+        await api.runSync();
+      } catch {
+        synchronized = false;
+      }
+      if (state.selectedTask?.task.id === id) {
+        state.selectedTask = null;
+        closeEvents();
+      }
+      setMessage("notice", synchronized
+        ? "孤立只读任务已移除，删除标记已推送；其他设备将在下次同步时移除镜像"
+        : "孤立只读任务已移除；删除标记将在下次同步时传播到其他设备");
+      await loadAll();
+      render();
+    });
+  }));
+  each("[data-task-filter]", element => {
+    const details = element as HTMLDetailsElement;
+    details.addEventListener("toggle", () => {
+      const kind = details.dataset.taskFilter as TaskFilterKind;
+      if (details.open) {
+        state.taskOpenFilter = kind;
+        document.querySelectorAll<HTMLDetailsElement>("[data-task-filter]").forEach(other => {
+          if (other !== details) other.open = false;
+        });
+      } else if (state.taskOpenFilter === kind) {
+        state.taskOpenFilter = "";
+      }
+    });
+  });
+  each("[data-task-filter-option]", element => {
+    const input = element as HTMLInputElement;
+    input.addEventListener("change", () => {
+      const kind = input.dataset.taskFilterOption as TaskFilterKind;
+      const selected = taskFilterSelection(kind);
+      if (input.checked) selected.add(input.value);
+      else selected.delete(input.value);
+      state.taskOpenFilter = kind;
+      taskLoadMoreNoMatch = false;
+      render();
+    });
+  });
+  each("[data-task-filter-clear]", button => button.addEventListener("click", () => {
+    const kind = button.dataset.taskFilterClear as TaskFilterKind;
+    taskFilterSelection(kind).clear();
+    state.taskOpenFilter = kind;
+    taskLoadMoreNoMatch = false;
+    render();
+  }));
+  each("[data-task-show-all]", button => button.addEventListener("click", () => {
+    state.taskStatusFilters.clear();
+    state.taskOpenFilter = "";
+    taskLoadMoreNoMatch = false;
+    render();
+  }));
+  each("[data-edit-task-title]", button => button.addEventListener("click", async event => {
+    event.stopPropagation();
+    const taskID = button.dataset.editTaskTitle!;
+    const task = state.tasks.find(item => item.id === taskID);
+    const heading = document.querySelector<HTMLElement>(`[data-task-title="${CSS.escape(taskID)}"]`);
+    if (!task || !heading) return;
+    const input = document.createElement("input");
+    input.className = "task-title-input";
+    input.maxLength = 200;
+    input.value = task.title;
+    heading.replaceWith(input);
+    input.focus();
+    input.select();
+    let settled = false;
+    const finish = async (save: boolean) => {
+      if (settled) return;
+      settled = true;
+      const title = input.value.trim();
+      if (save && title && title !== task.title) {
+        try {
+          await api.updateTaskTitle(taskID, title);
+          setMessage("notice", "标题已更新");
+        } catch (error) {
+          setMessage("error", error instanceof Error ? error.message : String(error));
+        }
+      }
+      await loadAll();
+      render();
+    };
+    input.addEventListener("click", event => event.stopPropagation());
+    input.addEventListener("mousedown", event => event.stopPropagation());
+    input.addEventListener("keydown", event => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        void finish(true);
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        void finish(false);
+      }
+    });
+    input.addEventListener("blur", () => void finish(true));
+  }));
+  each('[data-load-more="tasks"]', button => button.addEventListener("click", () => {
+    void loadNextPage("tasks");
+  }));
+}
+
 function bindCommon(): void {
   bindSidebarControls();
-  bindCodexAccounts({
+  bindTaskListControls();
+  if (state.view === "models") bindCodexAccounts({
     accounts: state.codexAccounts,
     onChanged: async () => { await loadAll(); render(); },
     setMessage,
   });
-  bindProxySettings({
+  if (state.view === "proxy") bindProxySettings({
     settings: state.proxySettings,
     managed: state.managedProxy,
     onChanged: (settings, managed) => {
@@ -5453,7 +6051,7 @@ function bindCommon(): void {
     },
     setMessage,
   });
-  bindSyncSettings({
+  if (state.view === "sync") bindSyncSettings({
     settings: state.syncSettings,
     refresh: async () => {
       const [settings, status, conflicts] = await Promise.all([api.syncSettings(), api.syncStatus(), api.syncConflicts()]);
@@ -5470,7 +6068,7 @@ function bindCommon(): void {
     initialRun: state.syncRun,
     conflicts: state.syncConflicts,
   });
-  bindChannels({
+  if (state.view === "channels") bindChannels({
 		context: {models: state.models, accounts: state.codexAccounts, projects: state.projects, workspaces: state.workspaces, knowledgeIndexes: state.knowledgeIndexes, libraries: state.knowledgeLibraries},
     instances: state.channelInstances,
     refresh: async () => {
@@ -5512,7 +6110,7 @@ function bindCommon(): void {
   document.querySelector<HTMLElement>("#retry-view-data")?.addEventListener("click", () => {
     void ensureViewData(state.view, true).then(() => render());
   });
-  document.querySelectorAll<HTMLElement>("[data-load-more]").forEach(button => button.addEventListener("click", () => {
+  document.querySelectorAll<HTMLElement>('[data-load-more]:not([data-load-more="tasks"])').forEach(button => button.addEventListener("click", () => {
     void loadNextPage(button.dataset.loadMore as "projects" | "tasks" | "knowledge");
   }));
   document.querySelector("#logout")?.addEventListener("click", () => {
@@ -5855,121 +6453,6 @@ function bindCommon(): void {
       render();
     });
   }));
-  document.querySelectorAll<HTMLElement>("[data-delete-task]").forEach(button => button.addEventListener("click", async event => {
-    event.stopPropagation();
-    const id = button.dataset.deleteTask!;
-    if (!window.confirm("删除该任务？此操作不可恢复。")) return;
-    void runWithFeedback(button, "删除中", async () => {
-      await api.deleteTask(id);
-      if (state.selectedTask?.task.id === id) {
-        state.selectedTask = null;
-        closeEvents();
-      }
-      state.tasks = state.tasks.filter(item => item.id !== id);
-      setMessage("notice", "任务已删除");
-      render();
-    });
-  }));
-  document.querySelectorAll<HTMLElement>("[data-retire-remote-task]").forEach(button => button.addEventListener("click", async event => {
-    event.stopPropagation();
-    const id = button.dataset.retireRemoteTask!;
-    const task = state.tasks.find(item => item.id === id);
-    const title = task?.title || state.selectedTask?.task.title || "该任务";
-    if (!window.confirm(`仅当来源设备已停用或数据已清空时才能移除“${title}”。此操作会生成同步删除标记，让所有设备删除该只读镜像，且不可恢复。确定继续？`)) return;
-    void runWithFeedback(button, "移除中", async () => {
-      await api.retireRemoteTaskMirror(id);
-      let synchronized = true;
-      try {
-        await api.runSync();
-      } catch {
-        synchronized = false;
-      }
-      if (state.selectedTask?.task.id === id) {
-        state.selectedTask = null;
-        closeEvents();
-      }
-      setMessage("notice", synchronized
-        ? "孤立只读任务已移除，删除标记已推送；其他设备将在下次同步时移除镜像"
-        : "孤立只读任务已移除；删除标记将在下次同步时传播到其他设备");
-      await loadAll();
-      render();
-    });
-  }));
-  document.querySelectorAll<HTMLDetailsElement>("[data-task-filter]").forEach(details => details.addEventListener("toggle", () => {
-    const kind = details.dataset.taskFilter as TaskFilterKind;
-    if (details.open) {
-      state.taskOpenFilter = kind;
-      document.querySelectorAll<HTMLDetailsElement>("[data-task-filter]").forEach(other => {
-        if (other !== details) other.open = false;
-      });
-    } else if (state.taskOpenFilter === kind) {
-      state.taskOpenFilter = "";
-    }
-  }));
-  document.querySelectorAll<HTMLInputElement>("[data-task-filter-option]").forEach(input => input.addEventListener("change", () => {
-    const kind = input.dataset.taskFilterOption as TaskFilterKind;
-    const selected = taskFilterSelection(kind);
-    if (input.checked) selected.add(input.value);
-    else selected.delete(input.value);
-    state.taskOpenFilter = kind;
-    taskLoadMoreNoMatch = false;
-    render();
-  }));
-  document.querySelectorAll<HTMLButtonElement>("[data-task-filter-clear]").forEach(button => button.addEventListener("click", () => {
-    const kind = button.dataset.taskFilterClear as TaskFilterKind;
-    taskFilterSelection(kind).clear();
-    state.taskOpenFilter = kind;
-    taskLoadMoreNoMatch = false;
-    render();
-  }));
-  document.querySelectorAll<HTMLButtonElement>("[data-task-show-all]").forEach(button => button.addEventListener("click", () => {
-    state.taskStatusFilters.clear();
-    state.taskOpenFilter = "";
-    taskLoadMoreNoMatch = false;
-    render();
-  }));
-  document.querySelectorAll<HTMLElement>("[data-edit-task-title]").forEach(button => button.addEventListener("click", async event => {
-    event.stopPropagation();
-    const taskID = button.dataset.editTaskTitle!;
-    const task = state.tasks.find(item => item.id === taskID);
-    const heading = document.querySelector<HTMLElement>(`[data-task-title="${CSS.escape(taskID)}"]`);
-    if (!task || !heading) return;
-    const input = document.createElement("input");
-    input.className = "task-title-input";
-    input.maxLength = 200;
-    input.value = task.title;
-    heading.replaceWith(input);
-    input.focus();
-    input.select();
-    let settled = false;
-    const finish = async (save: boolean) => {
-      if (settled) return;
-      settled = true;
-      const title = input.value.trim();
-      if (save && title && title !== task.title) {
-        try {
-          await api.updateTaskTitle(taskID, title);
-          setMessage("notice", "标题已更新");
-        } catch (error) {
-          setMessage("error", error instanceof Error ? error.message : String(error));
-        }
-      }
-      await loadAll();
-      render();
-    };
-    input.addEventListener("click", event => event.stopPropagation());
-    input.addEventListener("mousedown", event => event.stopPropagation());
-    input.addEventListener("keydown", event => {
-      if (event.key === "Enter") {
-        event.preventDefault();
-        void finish(true);
-      } else if (event.key === "Escape") {
-        event.preventDefault();
-        void finish(false);
-      }
-    });
-    input.addEventListener("blur", () => void finish(true));
-  }));
   document.querySelector("#delete-project")?.addEventListener("click", () => {
     if (!state.selectedProject) return;
 		const project = state.selectedProject;
@@ -6110,22 +6593,6 @@ function bindCommon(): void {
       }
     });
   }));
-  document.querySelectorAll<HTMLElement>("[data-task]").forEach(button => {
-	button.addEventListener("pointerdown", () => {
-	  taskListPointerActive = true;
-	});
-	button.addEventListener("click", async event => {
-	  if ((event.target as HTMLElement).closest(".task-card-actions")) return;
-	  const taskID = button.dataset.task!;
-	  if (openingTaskID) return;
-	  try {
-		await openTask(taskID);
-	  } catch (error) {
-		setMessage("error", error instanceof Error ? error.message : String(error));
-		render();
-	  }
-	});
-  });
   bindTaskAgentControls();
   bindReopenTaskControls();
   document.querySelector<HTMLSelectElement>("#composer-agent")?.addEventListener("change", async event => {
@@ -6885,7 +7352,6 @@ async function loadOlderConversation(): Promise<void> {
   if (!state.selectedTask || !state.taskConversationBefore || loadingOlderConversation) return;
   loadingOlderConversation = true;
   const list = document.querySelector<HTMLElement>("#conversation-list");
-  const ui = captureRegionUI(list);
   const previousHeight = list?.scrollHeight || 0;
   const previousTop = list?.scrollTop || 0;
   try {
@@ -6904,11 +7370,11 @@ async function loadOlderConversation(): Promise<void> {
     state.taskConversationBefore = page.conversation.next_before || 0;
     if (list) {
       const nextHTML = conversationListHtml();
-      list.innerHTML = nextHTML;
+      patchConversationList(list, nextHTML);
       conversationRenderedHTML.set(list, nextHTML);
-      restoreRegionUI(list, ui, false);
+      // Loading older messages prepends rows above the viewport: keep the
+      // reader's anchor by shifting the same distance the list grew.
       list.scrollTop = previousTop + Math.max(0, list.scrollHeight - previousHeight);
-      bindConversationLiveControls();
     }
     const count = document.querySelector<HTMLElement>("#conversation-filter-count");
     if (count) count.textContent = `${state.taskConversation.length} 条已加载`;
@@ -6917,12 +7383,19 @@ async function loadOlderConversation(): Promise<void> {
   }
 }
 
+const boundConversationLoadOlder = new WeakSet<Element>();
+
 function bindConversationLiveControls(): void {
   const list = document.querySelector<HTMLElement>("#conversation-list");
   bindMessageBubbleControls(list || document);
-  document.querySelector("#load-older-conversation")?.addEventListener("click", () => {
-    void loadOlderConversation();
-  });
+  // Live patches call this repeatedly; bind the pagination button once.
+  const loadOlder = document.querySelector("#load-older-conversation");
+  if (loadOlder && !boundConversationLoadOlder.has(loadOlder)) {
+    boundConversationLoadOlder.add(loadOlder);
+    loadOlder.addEventListener("click", () => {
+      void loadOlderConversation();
+    });
+  }
   if (list && list.dataset.paginationBound !== "true") {
     list.dataset.paginationBound = "true";
     let previousTop = list.scrollTop;
@@ -7043,6 +7516,17 @@ document.addEventListener("close", event => {
 }, true);
 document.addEventListener("focusout", () => window.setTimeout(flushDeferredRender, 0), true);
 
+// Route chunks are retryable without a page reload. The button lives inside the
+// failed page's card, so re-rendering immediately swaps it for the loading card.
+document.addEventListener("click", event => {
+  const target = event.target instanceof Element ? event.target.closest<HTMLElement>("[data-chunk-retry]") : null;
+  if (!target) return;
+  if (!retryLazyPage(target.dataset.chunkRetry || "")) return;
+  event.preventDefault();
+  if (target instanceof HTMLButtonElement) target.disabled = true;
+  render();
+});
+
 // Event-driven list refresh: one global SSE stream keeps the task list (and
 // project/workspace labels) fresh without polling. The task detail view keeps
 // its own per-task SSE, so global list refreshes are coalesced and deferred
@@ -7080,7 +7564,7 @@ async function performListRefresh(): Promise<void> {
     const listPageVisible = state.view === "projects" || state.view === "tasks" || Boolean(state.selectedProject);
     if (!state.selectedTask && !openingTaskID && listPageVisible) {
       if (taskListPointerActive) state.renderPending = true;
-      else render();
+      else if (!patchTaskList()) render();
     }
   } catch {
     // Transient failures are retried by a queued event or SSE reconnect.

@@ -1054,6 +1054,31 @@ test("SSE list refresh is debounced and deferred while a task detail is open", a
   assert.match(script, /taskOpenLastMs/);
 });
 
+test("task list and conversation patches rebind fresh nodes exactly once", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const script = await readFile(resolve(root, "build", "app.js"), "utf8");
+  const helpers = await readFile(resolve(root, "build", "ui_helpers.js"), "utf8");
+  // In-place list updates replace changed rows, filter chrome and the load-more
+  // tail. Each fresh node must be bound again or its action is dead, while the
+  // guard keeps untouched rows from accumulating duplicate handlers.
+  assert.match(script, /const boundTaskListControls = new WeakSet\(\)/);
+  assert.match(script, /function bindTaskListControls[\s\S]{0,400}boundTaskListControls\.has\(element\)[\s\S]{0,120}boundTaskListControls\.add\(element\)/);
+  assert.match(script, /patchTaskRows\(list, nextList\);[\s\S]{0,200}patchTaskListTail\(list, nextList\);[\s\S]{0,300}bindTaskListControls\(section\);[\s\S]{0,80}return true/);
+  assert.match(script, /\[data-load-more\]:not\(\[data-load-more="tasks"\]\)/);
+  // bindCommon runs on every render; a page chunk's binder must not fire until
+  // that page is actually entered, or first paint would fetch every route.
+  assert.match(script, /if \(state\.view === "models"\) bindCodexAccounts\(\{/);
+  assert.match(script, /if \(state\.view === "proxy"\) bindProxySettings\(\{/);
+  assert.match(script, /if \(state\.view === "sync"\) bindSyncSettings\(\{/);
+  assert.match(script, /if \(state\.view === "channels"\) bindChannels\(\{/);
+  // Live conversation patches repeat on every token update; message controls
+  // and the older-page button must stay single-bound too.
+  assert.match(helpers, /const boundMessageBubbleControls = new WeakSet\(\)/);
+  assert.match(helpers, /function bindMessageBubbleControls[\s\S]{0,500}boundMessageBubbleControls\.has\(element\)/);
+  assert.match(script, /const boundConversationLoadOlder = new WeakSet\(\)/);
+  assert.match(script, /function bindConversationLiveControls[\s\S]{0,400}boundConversationLoadOlder\.has\(loadOlder\)[\s\S]{0,160}addEventListener\("click"/);
+});
+
 test("read-only task history opens on the latest page and lazily loads older rows", async () => {
   const root = resolve(import.meta.dirname, "..");
   const script = await readFile(resolve(root, "build", "app.js"), "utf8");
@@ -1415,12 +1440,14 @@ test("built web contains responsive application", async () => {
   const restoreGuards = script.match(/else if \(!composingConversationTouch\)/g) || [];
   assert.equal(restoreGuards.length, 2, `both conversation restore sites must defer to an active gesture, found ${restoreGuards.length}`);
   assert.match(script, /const conversationRenderedHTML = new WeakMap\(\)/);
-  assert.match(script, /if \(conversationRenderedHTML\.get\(list\) !== nextHTML\)[\s\S]{0,500}list\.innerHTML = nextHTML[\s\S]{0,180}conversationRenderedHTML\.set\(list,\s*nextHTML\)/);
+  // Live SSE updates reconcile message nodes instead of rebuilding the list, so
+  // composer focus, expanded messages and scroll position survive a token update.
+  assert.match(script, /if \(conversationRenderedHTML\.get\(list\) !== nextHTML\)[\s\S]{0,200}patchConversationList\(list, nextHTML\)[\s\S]{0,120}conversationRenderedHTML\.set\(list,\s*nextHTML\)/);
   assert.match(script, /const preservedConversation = previousConversation && preservePageUI[\s\S]{0,180}conversationRenderedHTML\.get\(previousConversation\) === nextConversationHTML/);
   assert.match(script, /function captureConversationImages[\s\S]{0,600}function restoreConversationImages/);
   assert.match(script, /images\.set\(key,\s*\[[\s\S]{0,100}\.\.\.images\.get\(key\) \|\| \[\],[\s\S]{0,40}image[\s\S]{0,20}\]\)/);
   assert.match(script, /images\.get\(button\.dataset\.imagePreview \|\| ""\)\?\.shift\(\)/);
-  assert.match(script, /const images = captureConversationImages\(list\)[\s\S]{0,260}list\.innerHTML = nextHTML[\s\S]{0,180}restoreConversationImages\(list, images\)/);
+  assert.match(script, /function patchConversationList[\s\S]{0,1800}const images = captureConversationImages\(list\)[\s\S]{0,3000}restoreConversationImages\(list, images\)/);
   assert.match(script, /if \(!preservedConversation && renderedConversation\) restoreConversationImages\(renderedConversation, previousConversationImages\)/);
   assert.match(script, /bindCommon\(\);[\s\S]{0,700}if \(preservedConversation\) document\.querySelector\("#conversation-list"\)\?\.replaceWith\(preservedConversation\)/);
   assert.match(script, /await restoreNavigationState\(savedNavigation\);[\s\S]{0,260}await ensureViewData\(state\.view\);[\s\S]{0,180}if \(state\.selectedTask\) requestConversationBottom\(\);[\s\S]{0,100}prefetchSecondaryData\(\)/);
@@ -1435,8 +1462,8 @@ test("built web contains responsive application", async () => {
   assert.match(conversation, /data-toggle-message/);
   assert.match(conversation, /data-message-id/);
   assert.match(helpers, /classList\.contains\("expanded"\)/);
-  assert.match(script, /list\.innerHTML = nextHTML;\s*conversationRenderedHTML\.set\(list, nextHTML\);\s*restoreConversationImages\(list, images\);\s*restoreRegionUI\(list, ui, false\);\s*if \(shouldAutoScrollConversation\(wasAtBottom\)\)[\s\S]{0,80}stabilizeConversationBottom\(list\)/);
-  assert.match(script, /list\.innerHTML = nextHTML;\s*conversationRenderedHTML\.set\(list, nextHTML\);\s*restoreRegionUI\(list, ui, false\);\s*list\.scrollTop = previousTop \+ Math\.max/);
+  assert.match(script, /function patchConversationList[\s\S]{0,4000}restoreRegionUI\(list, focus, false\);\s*if \(shouldAutoScrollConversation\(wasAtBottom\)\)[\s\S]{0,80}stabilizeConversationBottom\(list\)/);
+  assert.match(script, /function loadOlderConversation[\s\S]{0,2500}patchConversationList\(list, nextHTML\)[\s\S]{0,600}list\.scrollTop = previousTop \+ Math\.max/);
   assert.match(conversation, /data-image-preview/);
   assert.match(helpers, /showModal\(\)/);
   assert.match(helpers, /data-image-preview-download/);
@@ -3520,31 +3547,56 @@ test("boot starts auth and general settings in parallel", async () => {
   assert.match(source, /if \(state\.auth\.authenticated\) \{\s*const general = await generalRequest;/);
 });
 
-test("production web ships one hashed bundle within the transfer budget", async () => {
+test("production web splits route chunks and keeps the first-screen budget", async () => {
   const root = resolve(import.meta.dirname, "..");
   const dist = resolve(root, "dist");
   const index = await readFile(resolve(dist, "index.html"), "utf8");
   const scripts = [...index.matchAll(/<(?:script|link)\b[^>]*\b(?:src|href)="([^"]*\.js[^"]*)"/g)].map(match => match[1]);
   // A modulepreload plus the module script, both on the same URL: one fetch.
-  assert.equal(scripts.length, 2, "first screen must request a single JS bundle");
+  assert.equal(scripts.length, 2, "first screen must request a single JS entry");
   assert.equal(new Set(scripts).size, 1);
   assert.match(scripts[0], /^\/app\.[a-f0-9]{12}\.js\?v=[a-f0-9]{12}$/);
+  const version = scripts[0].split("?v=")[1];
   const bundleName = scripts[0].slice(1).split("?")[0];
-  const bundle = await readFile(resolve(dist, bundleName), "utf8");
-  assert.ok(bundle.includes("/api/v1/auth/status"), "bundle is missing the boot API");
-  assert.equal((bundle.match(/^import\s/mg) || []).length, 0, "bundle still has unbundled imports");
-  assert.doesNotThrow(() => new Function(bundle));
-  // Go's compress/gzip DefaultCompression lands within a few KiB of level 5;
-  // the budget is the actual first-screen transfer, not the build-time size.
-  const gzipped = gzipSync(Buffer.from(bundle), {level: 5}).length;
-  // The MCP, knowledge, and pet workbench pages landed as three concurrent
-  // rebuilds. Their real first-screen content puts the merged bundle at
-  // 260,508 bytes; the old 256,000-byte budget had only 281 bytes of headroom
-  // left once the knowledge page landed. Phase 4 will split pages at the route
-  // level and bring this back near 250KB, when the raised ceiling can tighten.
-  assert.ok(gzipped <= 268000, `first-screen JS gzip is ${gzipped} bytes`);
   const entries = await readdir(dist);
-  assert.deepEqual(entries.filter(name => name.endsWith(".js")), [bundleName], "dist must not ship per-module scripts");
+  const jsNames = entries.filter(name => name.endsWith(".js"));
+  assert.ok(jsNames.includes(bundleName), "entry chunk must be present");
+  assert.ok(jsNames.length > 1, "route pages must be emitted as separate chunks");
+  for (const page of ["knowledge_workspace", "mcp_page", "resources", "channels", "mail_task", "codex_accounts", "prompt_admin", "proxy_settings", "sync_settings", "data_retention"]) {
+    assert.ok(jsNames.some(name => name.startsWith(`${page}.`)), `${page} must be a route chunk`);
+  }
+
+  // Walk only static imports: these are what the browser needs before the first
+  // screen can paint. Dynamic imports are fetched when the user opens that page.
+  const seen = new Map();
+  const queue = [bundleName];
+  const importRe = /(?:from|import)\s*["']\.\/([^"'?]+\.js)(?:\?[^"']*)?["']/g;
+  while (queue.length) {
+    const name = queue.shift();
+    if (seen.has(name)) continue;
+    const text = await readFile(resolve(dist, name), "utf8");
+    seen.set(name, text);
+    for (const match of text.matchAll(importRe)) {
+      assert.ok(jsNames.includes(match[1]), `${name} imports missing chunk ${match[1]}`);
+      queue.push(match[1]);
+    }
+  }
+  const bundle = seen.get(bundleName);
+  assert.ok([...seen.values()].some(text => text.includes("/api/v1/auth/status")), "first-screen chunks are missing the boot API");
+  // Every chunk that the entry can fetch at runtime must carry the same build
+  // version, otherwise the immutable-cache policy would mix two builds.
+  const dynamicRe = /import\("\.\/([^"'?]+\.js)\?v=([a-f0-9]{12})"\)/g;
+  const dynamicImports = [...bundle.matchAll(dynamicRe)];
+  assert.ok(dynamicImports.length >= 5, "entry must lazy-load the heavy route pages");
+  for (const [, name, chunkVersion] of dynamicImports) {
+    assert.ok(jsNames.includes(name), `dynamic import target ${name} is missing`);
+    assert.equal(chunkVersion, version, `${name} has a different build version`);
+  }
+  // Baseline before route splitting: 263,232 bytes (sha 260,508 in the task
+  // brief). The entry plus its static chunks must stay under 256,000 bytes; the
+  // 15 lazy route chunks are not part of the first-screen transfer.
+  const gzipped = [...seen.values()].reduce((total, text) => total + gzipSync(Buffer.from(text), {level: 5}).length, 0);
+  assert.ok(gzipped <= 256000, `first-screen JS gzip is ${gzipped} bytes`);
   const stylesheet = index.match(/rel="stylesheet" href="([^"]+)"/)?.[1];
   assert.match(stylesheet, /^\/styles\.[a-f0-9]{12}\.css$/);
   assert.equal((index.match(/<script\b/g) || []).length, 1, "index must load one module script");

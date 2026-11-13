@@ -87,6 +87,48 @@ export interface ListRefreshScheduler {
   scheduled: () => boolean;
 }
 
+export function stableTextSignature(parts: unknown[]): string {
+  const text = JSON.stringify(parts);
+  let hash = 2166136261;
+  for (let index = 0; index < text.length; index++) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+export interface KeyedNodeState {
+  key: string;
+  signature: string;
+}
+
+export interface KeyedNodePlan {
+  order: string[];
+  replace: string[];
+  insert: string[];
+  remove: string[];
+}
+
+// List and conversation refreshes keep unchanged nodes as-is. A node is only
+// replaced when its key survives with a different content signature; rows that
+// disappeared are removed and new keys are inserted. Order is reported so the
+// caller can move only the nodes that actually changed position.
+export function planKeyedNodes(current: KeyedNodeState[], desired: KeyedNodeState[]): KeyedNodePlan {
+  const currentByKey = new Map(current.map(item => [item.key, item]));
+  const desiredKeys = new Set(desired.map(item => item.key));
+  const plan: KeyedNodePlan = {order: [], replace: [], insert: [], remove: []};
+  for (const item of current) {
+    if (!desiredKeys.has(item.key)) plan.remove.push(item.key);
+  }
+  for (const item of desired) {
+    plan.order.push(item.key);
+    const previous = currentByKey.get(item.key);
+    if (!previous) plan.insert.push(item.key);
+    else if (previous.signature !== item.signature) plan.replace.push(item.key);
+  }
+  return plan;
+}
+
 // A dense SSE burst can outrun a list request by an order of magnitude. Coalesce
 // events into one trailing refresh at min(last event + debounce, first event +
 // maxWait), keep a minimum gap between request starts, and never overlap
@@ -648,8 +690,19 @@ export async function copyText(value: string): Promise<void> {
   textarea.remove();
 }
 
+const boundMessageBubbleControls = new WeakSet<Element>();
+
 export function bindMessageBubbleControls(root: ParentNode = document): void {
+  const each = <T extends Element>(selector: string, setup: (element: T) => void) => {
+    root.querySelectorAll<T>(selector).forEach(element => {
+      if (boundMessageBubbleControls.has(element)) return;
+      boundMessageBubbleControls.add(element);
+      setup(element);
+    });
+  };
   root.querySelectorAll<HTMLElement>(".message").forEach(message => {
+    if (boundMessageBubbleControls.has(message)) return;
+    boundMessageBubbleControls.add(message);
     const preview = message.querySelector<HTMLElement>(".message-preview");
     const full = message.querySelector<HTMLElement>(".message-full-text");
     const toggle = message.querySelector<HTMLButtonElement>("[data-toggle-message]");
@@ -674,7 +727,7 @@ export function bindMessageBubbleControls(root: ParentNode = document): void {
   const previewImage = dialog?.querySelector<HTMLImageElement>("[data-image-preview-image]");
   const previewTitle = dialog?.querySelector<HTMLElement>("[data-image-preview-title]");
   const download = dialog?.querySelector<HTMLAnchorElement>("[data-image-preview-download]");
-  root.querySelectorAll<HTMLButtonElement>("[data-image-preview]").forEach(button => button.addEventListener("click", () => {
+  each<HTMLButtonElement>("[data-image-preview]", button => button.addEventListener("click", () => {
     if (!dialog || !previewImage || !download) return;
     const url = button.dataset.imagePreview || "";
     const name = button.dataset.imageName || "图片";
@@ -685,13 +738,16 @@ export function bindMessageBubbleControls(root: ParentNode = document): void {
     if (previewTitle) previewTitle.textContent = name;
     dialog.showModal();
   }));
-  dialog?.querySelectorAll<HTMLElement>("[data-image-preview-close]").forEach(button => button.addEventListener("click", () => dialog.close()));
-  dialog?.addEventListener("click", event => {
-    if (event.target === dialog) dialog.close();
-  });
-  dialog?.addEventListener("close", () => {
-    if (previewImage) previewImage.removeAttribute("src");
-  });
+  each<HTMLElement>("[data-image-preview-close]", button => button.addEventListener("click", () => dialog?.close()));
+  if (dialog && !boundMessageBubbleControls.has(dialog)) {
+    boundMessageBubbleControls.add(dialog);
+    dialog.addEventListener("click", event => {
+      if (event.target === dialog) dialog.close();
+    });
+    dialog.addEventListener("close", () => {
+      if (previewImage) previewImage.removeAttribute("src");
+    });
+  }
 }
 
 export interface PageSlice<T> {

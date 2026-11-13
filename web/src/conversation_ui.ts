@@ -1,6 +1,7 @@
 import {icon} from "./icons.js";
 import {renderMarkdown} from "./markdown.js";
 import {renderConversationWithOrchestration, visibleAgentText} from "./task_agents.js";
+import {stableTextSignature} from "./ui_helpers.js";
 import type {ConversationItem, TaskDetail} from "./types.js";
 
 const messageCollapseChars = 900;
@@ -73,7 +74,8 @@ function renderConversationItem(item: ConversationItem): string {
   const collapsible = characterCount > messageCollapseChars;
   const preview = collapsible ? `${Array.from(text.replace(/\s+/g, " ")).slice(0, messagePreviewChars - 1).join("").trim()}…` : text;
   const output = String(payload.output_tail || "");
-  return `<article class="message ${user ? "user" : "agent"} ${update ? "agent-update-message" : ""} ${reasoning ? "agent-reasoning-message" : ""} ${tool ? "agent-tool-message" : ""} ${routed ? "agent-routed-message" : ""} ${error ? "agent-error-message" : ""}" data-message-id="${escapeHTML(item.id)}" data-message-chars="${characterCount}" data-copy-message-source="${escapeHTML(text)}"><header><strong>${escapeHTML(sender)}</strong>${badge ? `<span>${badge}</span>` : ""}<time>${time}</time><button type="button" data-copy-message class="message-copy icon-button" title="复制">${icon("copy")}</button></header><div class="message-bubble"><div class="message-text markdown-body message-preview">${renderMarkdown(preview)}</div>${collapsible ? `<div class="message-text markdown-body message-full-text" hidden>${renderMarkdown(text)}</div><button type="button" data-toggle-message class="message-toggle">展开 · ${characterCount.toLocaleString()}字符</button>` : ""}${renderAttachments(item)}${output ? `<details class="message-output"><summary>查看输出摘要</summary><pre>${escapeHTML(output)}</pre></details>` : ""}</div></article>`;
+  const signature = stableTextSignature([item.kind, item.category, item.route_kind, item.summary, payload, item.created_at, sender]);
+  return `<article data-message-signature="${signature}" class="message ${user ? "user" : "agent"} ${update ? "agent-update-message" : ""} ${reasoning ? "agent-reasoning-message" : ""} ${tool ? "agent-tool-message" : ""} ${routed ? "agent-routed-message" : ""} ${error ? "agent-error-message" : ""}" data-message-id="${escapeHTML(item.id)}" data-message-chars="${characterCount}" data-copy-message-source="${escapeHTML(text)}"><header><strong>${escapeHTML(sender)}</strong>${badge ? `<span>${badge}</span>` : ""}<time>${time}</time><button type="button" data-copy-message class="message-copy icon-button" title="复制">${icon("copy")}</button></header><div class="message-bubble"><div class="message-text markdown-body message-preview">${renderMarkdown(preview)}</div>${collapsible ? `<div class="message-text markdown-body message-full-text" hidden>${renderMarkdown(text)}</div><button type="button" data-toggle-message class="message-toggle">展开 · ${characterCount.toLocaleString()}字符</button>` : ""}${renderAttachments(item)}${output ? `<details class="message-output"><summary>查看输出摘要</summary><pre>${escapeHTML(output)}</pre></details>` : ""}</div></article>`;
 }
 
 function toolLifecycleKey(item: ConversationItem): string {

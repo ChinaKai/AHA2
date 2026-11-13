@@ -1,7 +1,7 @@
 import {readFile, readdir, mkdir, writeFile, copyFile, rm, cp} from "node:fs/promises";
 import {createHash} from "node:crypto";
 import {createRequire, stripTypeScriptTypes} from "node:module";
-import {resolve} from "node:path";
+import {resolve, basename} from "node:path";
 
 // Two outputs come out of one build:
 //   web/build/  readable ES modules, one file per source module. Tests and the
@@ -24,7 +24,7 @@ try {
   throw new Error("esbuild is not installed; run `npm ci` in web/ before building");
 }
 
-const moduleNames = ["api", "i18n", "icons", "types", "pet_bubble", "pet_navigation", "pet_approvals", "pet_workbench", "runtime_picker", "task_agents", "task_composer", "task_filters", "hardware_terminal", "hardware_panel", "hardware_resources", "mail_cards", "mail_editor", "mail_resources", "mail_task", "resources", "desktop_panel", "task_tools", "mcp_page", "markdown", "conversation_ui", "ui_helpers", "model_health", "model_selection", "prompt_admin", "proxy_settings", "data_retention", "sync_settings", "codex_accounts", "knowledge_workspace", "channels", "assistant", "backends", "command_palette", "main"];
+const moduleNames = ["api", "i18n", "icons", "types", "lazy_page", "pet_bubble", "pet_navigation", "pet_approvals", "pet_workbench", "runtime_picker", "task_agents", "task_composer", "task_filters", "hardware_terminal", "hardware_panel", "hardware_resources", "mail_cards", "mail_editor", "mail_resources", "mail_task", "resources", "desktop_panel", "task_tools", "mcp_page", "markdown", "conversation_ui", "ui_helpers", "model_health", "model_selection", "prompt_admin", "proxy_settings", "data_retention", "sync_settings", "codex_accounts", "knowledge_workspace", "channels", "assistant", "backends", "command_palette", "main"];
 
 async function writeAssets(target) {
   await mkdir(resolve(target, "vendor"), {recursive: true});
@@ -67,11 +67,11 @@ async function buildModules() {
   // that hold shared state. Missing a rewrite here duplicates a singleton at
   // runtime, so the list stays explicit per file.
   const importers = {
-    "app.js": ["api", "i18n", "icons", "pet_approvals", "pet_workbench", "runtime_picker", "task_agents", "task_composer", "task_filters", "hardware_panel", "desktop_panel", "hardware_terminal", "task_tools", "markdown", "conversation_ui", "assistant", "backends", "ui_helpers", "model_health", "model_selection", "prompt_admin", "proxy_settings", "data_retention", "sync_settings", "codex_accounts", "hardware_resources", "knowledge_workspace", "channels", "resources", "mail_task", "mail_cards", "mail_resources", "command_palette", "mcp_page"],
+    "app.js": ["api", "i18n", "icons", "lazy_page", "pet_approvals", "pet_workbench", "runtime_picker", "task_agents", "task_composer", "task_filters", "hardware_panel", "desktop_panel", "hardware_terminal", "task_tools", "markdown", "conversation_ui", "assistant", "backends", "ui_helpers", "model_health", "model_selection", "prompt_admin", "proxy_settings", "data_retention", "sync_settings", "codex_accounts", "hardware_resources", "knowledge_workspace", "channels", "resources", "mail_task", "mail_cards", "mail_resources", "command_palette", "mcp_page"],
     "model_selection.js": ["ui_helpers"],
     "runtime_picker.js": ["backends"],
-    "task_agents.js": ["icons", "runtime_picker"],
-    "conversation_ui.js": ["icons", "mail_cards", "markdown", "task_agents"],
+    "task_agents.js": ["icons", "runtime_picker", "ui_helpers"],
+    "conversation_ui.js": ["icons", "mail_cards", "markdown", "task_agents", "ui_helpers"],
     "task_composer.js": ["icons", "i18n"],
     "task_tools.js": ["icons", "hardware_panel", "desktop_panel", "task_agents"],
     "hardware_panel.js": ["api", "icons", "hardware_terminal"],
@@ -116,10 +116,15 @@ async function buildProduction() {
   await mkdir(output, {recursive: true});
   await writeAssets(output);
 
+  // Route pages are imported with `import()`, so production emits one entry
+  // chunk plus one content-hashed chunk per lazily entered route. The entry
+  // keeps a 12-hex sha256 name; chunks take esbuild's content hash.
   const js = await esbuild.build({
-    entryPoints: [resolve(source, "src", "main.ts")],
+    entryPoints: {app: resolve(source, "src", "main.ts")},
+    outdir: output,
     bundle: true,
     write: false,
+    splitting: true,
     format: "esm",
     platform: "browser",
     target: "esnext",
@@ -127,10 +132,14 @@ async function buildProduction() {
     charset: "utf8",
     legalComments: "none",
     logLevel: "silent",
+    entryNames: "[name].[hash]",
+    chunkNames: "[name].[hash]",
+    metafile: true,
   });
-  const jsText = js.outputFiles[0].text;
-  const jsHash = contentHash(jsText);
-  await writeFile(resolve(output, `app.${jsHash}.js`), jsText);
+  const jsOutputs = js.outputFiles.filter(file => file.path.endsWith(".js"));
+  const entry = jsOutputs.find(file => basename(file.path).startsWith("app."));
+  if (!entry) throw new Error("production build produced no entry chunk");
+  const jsHash = contentHash(entry.text);
 
   const styles = await readFile(resolve(source, "src", "styles.css"), "utf8");
   const mailStyles = await readFile(resolve(source, "src", "mail.css"), "utf8");
@@ -141,15 +150,33 @@ async function buildProduction() {
     legalComments: "none",
   });
   const cssHash = contentHash(css.code);
-  await writeFile(resolve(output, `styles.${cssHash}.css`), css.code);
 
   // hardware_panel.ts copies the app script's ?v= query onto the lazily loaded
   // /vendor/xterm.js and /vendor/xterm.css URLs. The query therefore has to
   // cover the vendor bytes too: a vendor-only change must not keep serving the
-  // old terminal from the immutable cache.
+  // old terminal from the immutable cache. It also covers every route chunk,
+  // so one version stays valid for the whole build.
   const vendorNames = (await readdir(resolve(output, "vendor"))).sort();
   const vendorContent = await Promise.all(vendorNames.map(name => readFile(resolve(output, "vendor", name))));
-  const buildHash = contentHash(Buffer.concat([Buffer.from(jsText, "utf8"), Buffer.from(css.code, "utf8"), ...vendorContent]));
+  const buildHash = contentHash(Buffer.concat([
+    ...jsOutputs.map(file => Buffer.from(file.text, "utf8")),
+    Buffer.from(css.code, "utf8"),
+    ...vendorContent,
+  ]));
+
+  // Every static and dynamic import gets the build-wide version so the Go
+  // server treats all chunks as immutable and a rebuild never mixes versions.
+  const names = new Map(jsOutputs.map(file => [basename(file.path), basename(file.path)]));
+  names.set(basename(entry.path), `app.${jsHash}.js`);
+  for (const file of jsOutputs) {
+    const text = file.text.replace(/(["'])\.\/([^"'?]+\.js)\1/g, (match, quote, name) => {
+      const finalName = names.get(name);
+      return finalName ? `${quote}./${finalName}?v=${buildHash}${quote}` : match;
+    });
+    const name = basename(file.path) === basename(entry.path) ? `app.${jsHash}.js` : basename(file.path);
+    await writeFile(resolve(output, name), text);
+  }
+  await writeFile(resolve(output, `styles.${cssHash}.css`), css.code);
 
   const template = await readFile(resolve(source, "index.html"), "utf8");
   // The file name stays the app bundle hash (that is the true cache key); the
@@ -163,7 +190,7 @@ async function buildProduction() {
     .replace('<script type="module" src="/app.js"></script>', `<script type="module" src="${appURL}"></script>`);
   if (index === template) throw new Error("index.html template no longer matches the build entry points");
   await writeFile(resolve(output, "index.html"), index);
-  return {jsHash, cssHash, buildHash};
+  return {jsHash, cssHash, buildHash, chunks: jsOutputs.length - 1};
 }
 
 function contentHash(content) {
@@ -173,4 +200,4 @@ function contentHash(content) {
 await buildModules();
 const production = await buildProduction();
 console.log(`Built ${modulesOutput} and ${output}`);
-console.log(`Production assets: app.${production.jsHash}.js styles.${production.cssHash}.css vendor v=${production.buildHash}`);
+console.log(`Production assets: app.${production.jsHash}.js styles.${production.cssHash}.css ${production.chunks} route chunks vendor v=${production.buildHash}`);

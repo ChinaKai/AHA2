@@ -2,6 +2,7 @@ import {icon} from "./icons.js";
 import {fastModeFieldHTML, proxyOptionsHTML, runtimeBackendChoices, runtimeFieldsHTML} from "./runtime_picker.js";
 import type {RuntimeSelection} from "./runtime_picker.js";
 import type {CodexAccount, ConversationItem, MCPServer, Model, Skill, TaskAgent, TaskContextDetail, TaskDetail, TaskMemory, Turn} from "./types.js";
+import {stableTextSignature} from "./ui_helpers.js";
 
 export type TaskRealtimeState = "connecting" | "live" | "fallback";
 
@@ -290,7 +291,7 @@ function renderOrchestrationCard(item: ConversationItem, detail: TaskDetail): st
     return `<div><strong>${escapeHTML(agentID)}</strong><span title="${escapeHTML(route?.assignment || "")}">${escapeHTML(route?.title || agent?.title || turn?.title || "子 Agent")}</span><b class="${statusClass(status)}">${statusLabel(status)}</b></div>`;
   }).join("");
   const time = new Date(item.created_at).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
-  return `<article class="aha-orchestration-card"><header><strong>${icon("bot")}AHA 系统路由</strong><time>${time}</time></header><p>${escapeHTML(item.summary || `AHA 已向 ${agentIDs.length} 个子 Agent 路由任务`)}</p><div>${rows}</div></article>`;
+  return `<article data-message-id="${escapeHTML(item.id)}" data-message-signature="${stableTextSignature([item, detail.turns])}" class="aha-orchestration-card"><header><strong>${icon("bot")}AHA 系统路由</strong><time>${time}</time></header><p>${escapeHTML(item.summary || `AHA 已向 ${agentIDs.length} 个子 Agent 路由任务`)}</p><div>${rows}</div></article>`;
 }
 
 function renderChannelOutreachCard(item: ConversationItem): string {
@@ -305,7 +306,7 @@ function renderChannelOutreachCard(item: ConversationItem): string {
     const role = String(recipient.collaboration_role || (recipient.is_bot ? "机器人" : "群成员"));
     return `<div><strong>${escapeHTML(name)}</strong><span>${escapeHTML(role)}</span><b>${escapeHTML(status)}</b></div>`;
   }).join("");
-  return `<article class="aha-orchestration-card aha-channel-route-card"><header><strong>${icon("send")}AHA 主动路由</strong><span>阻塞协调</span><time>${systemCardTime(item)}</time></header><p>${escapeHTML(message)}</p><div>${rows || `<div><strong>${escapeHTML(destination)}</strong><span>群聊主渠道</span><b>${escapeHTML(status)}</b></div>`}</div></article>`;
+  return `<article data-message-id="${escapeHTML(item.id)}" data-message-signature="${stableTextSignature([item])}" class="aha-orchestration-card aha-channel-route-card"><header><strong>${icon("send")}AHA 主动路由</strong><span>阻塞协调</span><time>${systemCardTime(item)}</time></header><p>${escapeHTML(message)}</p><div>${rows || `<div><strong>${escapeHTML(destination)}</strong><span>群聊主渠道</span><b>${escapeHTML(status)}</b></div>`}</div></article>`;
 }
 
 function renderChannelReplyCard(item: ConversationItem): string {
@@ -319,7 +320,7 @@ function renderChannelReplyCard(item: ConversationItem): string {
   const state = String(payload.delivery_state || "pending");
   const status = channelDeliveryStateLabel(state);
   const message = String(payload.message || item.summary || "");
-  return `<article class="aha-orchestration-card aha-channel-route-card aha-channel-reply-card"><header><strong>${icon("send")}AHA 渠道回复</strong><span>${escapeHTML(status)}</span><time>${systemCardTime(item)}</time></header><p>${escapeHTML(destination)} · 回复 ${escapeHTML(recipientName)}</p>${message ? `<div class="aha-route-message">${escapeHTML(message)}</div>` : ""}<div><div><strong>${escapeHTML(recipientName)}</strong><span>${escapeHTML(sourceLabel)}</span><b>${escapeHTML(status)}</b></div></div></article>`;
+  return `<article data-message-id="${escapeHTML(item.id)}" data-message-signature="${stableTextSignature([item])}" class="aha-orchestration-card aha-channel-route-card aha-channel-reply-card"><header><strong>${icon("send")}AHA 渠道回复</strong><span>${escapeHTML(status)}</span><time>${systemCardTime(item)}</time></header><p>${escapeHTML(destination)} · 回复 ${escapeHTML(recipientName)}</p>${message ? `<div class="aha-route-message">${escapeHTML(message)}</div>` : ""}<div><div><strong>${escapeHTML(recipientName)}</strong><span>${escapeHTML(sourceLabel)}</span><b>${escapeHTML(status)}</b></div></div></article>`;
 }
 
 function renderChannelRouteCard(item: ConversationItem): string {
@@ -352,7 +353,7 @@ function renderChannelRouteCard(item: ConversationItem): string {
     const resultLabel = messageStatus === "replied" ? (replyAccepted ? "已回复" : "回复内容") :
       messageStatus === "not_replied" ? (reason === "reply_decision_end" ? "无需回复" : "未回复") : status;
     const result = messageStatus === "replied" ? replyMessage : detail;
-    return `<article class="aha-orchestration-card aha-channel-route-card aha-channel-status-card" data-channel-status="${escapeHTML(messageStatus)}"><header><strong>${icon("send")}AHA 渠道消息</strong><span>${escapeHTML(status)}</span><time>${systemCardTime(item)}</time></header><p>${escapeHTML(destination)} · ${escapeHTML(who)}</p>${result ? `<div class="aha-route-message"><strong>${escapeHTML(resultLabel)}：</strong>${escapeHTML(result)}</div>` : ""}${messageStatus !== "replied" && inboundMessage ? `<div class="aha-route-message">${escapeHTML(inboundMessage)}</div>` : ""}</article>`;
+    return `<article data-message-id="${escapeHTML(item.id)}" data-message-signature="${stableTextSignature([item])}" class="aha-orchestration-card aha-channel-route-card aha-channel-status-card" data-channel-status="${escapeHTML(messageStatus)}"><header><strong>${icon("send")}AHA 渠道消息</strong><span>${escapeHTML(status)}</span><time>${systemCardTime(item)}</time></header><p>${escapeHTML(destination)} · ${escapeHTML(who)}</p>${result ? `<div class="aha-route-message"><strong>${escapeHTML(resultLabel)}：</strong>${escapeHTML(result)}</div>` : ""}${messageStatus !== "replied" && inboundMessage ? `<div class="aha-route-message">${escapeHTML(inboundMessage)}</div>` : ""}</article>`;
   }
   const state = String(payload.delivery_state || "pending");
   const status = channelDeliveryStateLabel(state);
@@ -361,7 +362,7 @@ function renderChannelRouteCard(item: ConversationItem): string {
   const decision = String(payload.reply_decision || "");
   const detail = reason === "bot_dialogue_max_turns" ? "达到机器人最大连续轮数" :
     reason === "bot_dialogue_ended" ? "机器人对话已结束" : bot ? `机器人对话 · ${decision || "未设置决策"}` : "最终回复";
-  return `<article class="aha-orchestration-card aha-channel-route-card"><header><strong>${icon("send")}AHA 外部路由</strong><span>${escapeHTML(status)}</span><time>${systemCardTime(item)}</time></header><p>${escapeHTML(destination)} · ${escapeHTML(detail)}</p>${payload.message ? `<div class="aha-route-message">${escapeHTML(String(payload.message))}</div>` : ""}</article>`;
+  return `<article data-message-id="${escapeHTML(item.id)}" data-message-signature="${stableTextSignature([item])}" class="aha-orchestration-card aha-channel-route-card"><header><strong>${icon("send")}AHA 外部路由</strong><span>${escapeHTML(status)}</span><time>${systemCardTime(item)}</time></header><p>${escapeHTML(destination)} · ${escapeHTML(detail)}</p>${payload.message ? `<div class="aha-route-message">${escapeHTML(String(payload.message))}</div>` : ""}</article>`;
 }
 
 // "delivered"/"provider_accepted" only mean the provider accepted the message
@@ -421,14 +422,14 @@ function renderAgentConfigCard(item: ConversationItem): string {
     ["权限", `${String(payload.filesystem || "-")} · ${String(payload.approval || "-")}`],
     ["代理", payload.proxy_enabled ? "启用" : "关闭"],
   ];
-  return `<article class="aha-status-card aha-config-card"><header><strong>${icon("edit")}Agent 配置更新</strong><time>${systemCardTime(item)}</time></header><div class="aha-status-grid">${rows.map(([label, value]) => `<span><small>${escapeHTML(label)}</small><b>${escapeHTML(value)}</b></span>`).join("")}</div></article>`;
+  return `<article data-message-id="${escapeHTML(item.id)}" data-message-signature="${stableTextSignature([item])}" class="aha-status-card aha-config-card"><header><strong>${icon("edit")}Agent 配置更新</strong><time>${systemCardTime(item)}</time></header><div class="aha-status-grid">${rows.map(([label, value]) => `<span><small>${escapeHTML(label)}</small><b>${escapeHTML(value)}</b></span>`).join("")}</div></article>`;
 }
 
 function renderTurnDurationCard(item: ConversationItem): string {
   const payload = item.payload || {};
   const status = String(payload.status || "completed");
   const elapsed = Number(payload.elapsed_ms || 0);
-  return `<article class="aha-status-card aha-duration-card"><header><strong>${icon("clock")}Turn ${escapeHTML(payload.turn_sequence || "")} 耗时</strong><span class="${statusClass(status)}">${statusLabel(status)}</span><time>${systemCardTime(item)}</time></header><div class="aha-status-grid duration"><span><small>总计</small><b>${formatDuration(elapsed)}</b></span><span><small>排队</small><b>${formatDuration(Number(payload.queue_duration_ms || 0))}</b></span><span><small>Context</small><b>${formatDuration(Number(payload.context_prepare_duration_ms || 0))}</b></span><span><small>Session</small><b>${formatDuration(Number(payload.session_wake_duration_ms || 0))}</b></span><span><small>Backend</small><b>${formatDuration(Number(payload.backend_start_duration_ms || 0))}</b></span><span><small>活跃</small><b>${formatDuration(Number(payload.active_duration_ms || 0))}</b></span><span><small>收尾</small><b>${formatDuration(Number(payload.finalize_duration_ms || 0))}</b></span></div></article>`;
+  return `<article data-message-id="${escapeHTML(item.id)}" data-message-signature="${stableTextSignature([item])}" class="aha-status-card aha-duration-card"><header><strong>${icon("clock")}Turn ${escapeHTML(payload.turn_sequence || "")} 耗时</strong><span class="${statusClass(status)}">${statusLabel(status)}</span><time>${systemCardTime(item)}</time></header><div class="aha-status-grid duration"><span><small>总计</small><b>${formatDuration(elapsed)}</b></span><span><small>排队</small><b>${formatDuration(Number(payload.queue_duration_ms || 0))}</b></span><span><small>Context</small><b>${formatDuration(Number(payload.context_prepare_duration_ms || 0))}</b></span><span><small>Session</small><b>${formatDuration(Number(payload.session_wake_duration_ms || 0))}</b></span><span><small>Backend</small><b>${formatDuration(Number(payload.backend_start_duration_ms || 0))}</b></span><span><small>活跃</small><b>${formatDuration(Number(payload.active_duration_ms || 0))}</b></span><span><small>收尾</small><b>${formatDuration(Number(payload.finalize_duration_ms || 0))}</b></span></div></article>`;
 }
 
 export function renderConversationWithOrchestration(

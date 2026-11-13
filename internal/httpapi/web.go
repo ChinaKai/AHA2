@@ -53,10 +53,10 @@ func (s *Server) serveWeb(writer http.ResponseWriter, request *http.Request) {
 	}
 	if acceptsGzip(request) && compressible {
 		var compressed bytes.Buffer
-		// The Web build now serves one large bundle instead of three dozen
-		// small modules. BestSpeed leaves it around 280 KiB on the wire; the
-		// default level costs CPU only on the first, cache-filling request and
-		// keeps the first-screen transfer within budget.
+		// The first screen is one entry chunk plus its static shared chunks;
+		// route pages are separate lazy chunks. The default level costs CPU
+		// only on the first, cache-filling request and keeps the transfer
+		// within budget.
 		zipper, zipErr := gzip.NewWriterLevel(&compressed, gzip.DefaultCompression)
 		if zipErr == nil {
 			_, zipErr = zipper.Write(data)
