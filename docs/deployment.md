@@ -131,7 +131,9 @@ bash scripts/build-windows-package.sh --version 0.5.23 --output-dir dist
 
 `local_build.sh` 只是 `scripts/build-windows-package.sh` 的薄包装；两者都只构建，没有部署模式。
 `--version` 缺省时依次取 `VERSION` 环境变量、最近的 git tag、`0.0.0`；也可用 `--output-dir`
-把包写到仓库外的干净目录，用 `--commit` 覆盖清单里的 commit。
+把包写到仓库外的干净目录，用 `--commit` 覆盖清单里的 commit。构建在源树的临时副本里进行，
+Web 构建和嵌入资源都写在副本中，仓库里只写 `--output-dir`；没有 `.git` 的源码快照也能用
+`--commit` 构建。
 
 构建产物：
 
@@ -167,7 +169,8 @@ PowerShell Parser 解析；`scripts/ps1_encoding_test.go` 在非 Windows CI 上�
 
 部署不再是仓库的一部分。目标机器上的本机安装器按顺序负责：
 
-- 预检：工具链、安装目录可写，以及数据目录和安装目录所在卷的可用空间。
+- 预检：安装目录可写，以及数据目录和安装目录所在卷的可用空间。目标机只运行预构建产物，
+  不需要 Go、Node 等构建工具链。
 - 停服：停止 `aha2-tray.exe`、`aha2.exe`、飞书插件及其后端子进程，确认退出后再替换文件。
 - 备份：备份运行数据（`aha2.db` 与 `aha2.db-wal`；`aha2.db-shm` 是易失缓存，不备份）、
   Secret Store、Setup Token、旧二进制和原登录任务，并在备份后校验大小与 SHA256。

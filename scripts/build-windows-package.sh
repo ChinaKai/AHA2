@@ -7,6 +7,10 @@ set -euo pipefail
 # anything. Installing, backing up, replacing, rolling back and health checks
 # belong to the host installer.
 #
+# The build runs in a temporary copy of the source tree because the Web build
+# writes web/dist and the embedded-asset directory. Copying keeps the source
+# checkout untouched; only --output-dir is written in place.
+#
 # Output (under --output-dir, default dist/):
 #   aha2-windows-amd64.exe
 #   aha2-tray-windows-amd64.exe
@@ -18,14 +22,16 @@ usage() {
   cat <<'EOF'
 Usage: bash scripts/build-windows-package.sh [options]
 
-Build the Windows release package and its release-manifest.json.
-This script only builds; deployment belongs to the host installer.
+Build the Windows release package and its release-manifest.json in a temporary
+copy of the source tree. This script only builds; deployment belongs to the host
+installer, which needs no Go or Node toolchain.
 
 Options:
   --version VERSION    Override the package version (default: VERSION env,
                        then the nearest git tag, then 0.0.0)
   --output-dir DIR     Package directory (default: <repo>/dist)
-  --commit SHA         Commit recorded in the manifest (default: git rev-parse HEAD)
+  --commit SHA         Commit recorded in the manifest (default: git rev-parse HEAD;
+                       also supplies the 12-character build hash outside a git checkout)
   --skip-web-test      Do not run web/tests/build.test.mjs
   -h, --help           Show this help
 
@@ -38,6 +44,7 @@ repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 version="${VERSION:-}"
 output_dir="$repo_dir/dist"
 commit=""
+commit_given=0
 run_web_test=1
 
 while (($# > 0)); do
@@ -55,6 +62,7 @@ while (($# > 0)); do
     --commit)
       [[ $# -ge 2 ]] || { printf 'Missing value for --commit\n' >&2; exit 2; }
       commit="$2"
+      commit_given=1
       shift 2
       ;;
     --skip-web-test)
@@ -83,10 +91,16 @@ if [[ ! "$version" =~ ^[0-9]+([.][0-9]+){2}$ ]]; then
   exit 2
 fi
 
-if [[ -z "$commit" ]]; then
+if ((commit_given)); then
+  [[ "$commit" =~ ^[0-9a-fA-F]{12,40}$ ]] || {
+    printf 'Commit must be 12 to 40 hexadecimal characters: %s\n' "$commit" >&2
+    exit 2
+  }
+else
   commit="$(git -C "$repo_dir" rev-parse HEAD 2>/dev/null || true)"
+  [[ -n "$commit" ]] || { printf 'Commit is required outside a git checkout; pass --commit.\n' >&2; exit 2; }
 fi
-[[ -n "$commit" ]] || { printf 'Commit is required outside a git checkout; pass --commit.\n' >&2; exit 2; }
+commit_hash="$(printf '%s' "${commit:0:12}" | tr '[:upper:]' '[:lower:]')"
 
 # The Web build calls module.stripTypeScriptTypes, which Node added in 22.13.0 and
 # 23.2.0 and removed again in 26. Check the capability instead of the version so
@@ -125,12 +139,37 @@ else
 fi
 [[ -n "$go_bin" && -x "$go_bin" ]] || { printf 'Go toolchain was not found; set GO_BIN.\n' >&2; exit 1; }
 command -v sha256sum >/dev/null 2>&1 || { printf 'sha256sum was not found.\n' >&2; exit 1; }
+command -v tar >/dev/null 2>&1 || { printf 'tar was not found.\n' >&2; exit 1; }
 
 output_dir="$(realpath -m "$output_dir")"
 mkdir -p -- "$output_dir"
 
+# Copy the source tree instead of building in place. web/dist and
+# internal/webassets/dist are generated directories; writing them inside the
+# checkout would leave build output behind and make the "only the output
+# directory is written" promise false.
+build_dir="$(mktemp -d "${TMPDIR:-/tmp}/aha2-build.XXXXXX")"
+cleanup() {
+  rm -rf -- "$build_dir"
+}
+trap cleanup EXIT
+
+printf '==> Copy sources to a build directory\n'
+tar -C "$repo_dir" -cf - \
+  --exclude=.git \
+  --exclude=.aha2-context \
+  --exclude=.tools \
+  --exclude=tmp \
+  --exclude=dist \
+  --exclude=node_modules \
+  . | tar -C "$build_dir" -xf -
+
 built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-web_version="$(bash "$repo_dir/scripts/web-version.sh" "$version")"
+if ((commit_given)); then
+  web_version="$(AHA2_GIT_HASH="$commit_hash" bash "$repo_dir/scripts/web-version.sh" "$version")"
+else
+  web_version="$(bash "$repo_dir/scripts/web-version.sh" "$version")"
+fi
 go_version="$("$go_bin" version | awk '{print $3}')"
 node_version="$("$node_bin" --version)"
 server_exe="$output_dir/aha2-windows-amd64.exe"
@@ -141,9 +180,10 @@ feishu_manifest="$feishu_dir/plugin.json"
 manifest_path="$output_dir/release-manifest.json"
 
 printf 'Repository: %s\n' "$repo_dir"
+printf 'Build dir: %s\n' "$build_dir"
 printf 'Version: %s\n' "$version"
 printf 'Web version: %s\n' "$web_version"
-printf 'Commit: %s\n' "$commit"
+printf 'Commit: %s (%s)\n' "$commit" "$commit_hash"
 printf 'Output: %s\n' "$output_dir"
 printf 'Node: %s (%s)\n' "$node_bin" "$node_version"
 printf 'Go: %s (%s)\n' "$go_bin" "$go_version"
@@ -151,35 +191,41 @@ printf 'Go: %s (%s)\n' "$go_bin" "$go_version"
 rm -f -- "$server_exe" "$tray_exe" "$feishu_exe" "$manifest_path"
 
 printf '==> Build Web assets\n'
-"$node_bin" "$repo_dir/scripts/build-web.mjs"
+"$node_bin" "$build_dir/scripts/build-web.mjs"
 if ((run_web_test)); then
   printf '==> Test Web build\n'
-  "$node_bin" --test "$repo_dir/web/tests/build.test.mjs"
+  (cd "$build_dir" && "$node_bin" --test "$build_dir/web/tests/build.test.mjs")
 fi
 
 printf '==> Sync embedded Web assets\n'
-mkdir -p -- "$repo_dir/internal/webassets/dist"
-find "$repo_dir/internal/webassets/dist" -mindepth 1 -maxdepth 1 ! -name '.gitkeep' -exec rm -rf -- {} +
-cp -a -- "$repo_dir/web/dist/." "$repo_dir/internal/webassets/dist/"
+mkdir -p -- "$build_dir/internal/webassets/dist"
+find "$build_dir/internal/webassets/dist" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+cp -a -- "$build_dir/web/dist/." "$build_dir/internal/webassets/dist/"
 
 printf '==> Build Windows server\n'
 (
-  cd "$repo_dir"
-  CGO_ENABLED=0 GOOS=windows GOARCH=amd64 "$go_bin" build -trimpath \
+  cd "$build_dir"
+  CGO_ENABLED=0 GOOS=windows GOARCH=amd64 "$go_bin" build -buildvcs=false -trimpath \
     -ldflags="-s -w -X main.version=$version -X main.webVersion=$web_version" \
     -o "$server_exe" ./cmd/aha
 )
 printf '==> Build Windows tray\n'
 (
-  cd "$repo_dir"
-  CGO_ENABLED=0 GOOS=windows GOARCH=amd64 "$go_bin" build -trimpath \
+  cd "$build_dir"
+  CGO_ENABLED=0 GOOS=windows GOARCH=amd64 "$go_bin" build -buildvcs=false -trimpath \
     -ldflags="-s -w -H windowsgui -X main.version=$version" \
     -o "$tray_exe" ./cmd/aha-tray
 )
 
+# The Feishu plugin is a nested Go module; neither the root `go test ./...` nor
+# the plugin compile reaches its tests, so the package build runs them itself.
+printf '==> Test Feishu plugin\n'
+(cd "$build_dir/plugins/feishu" && "$go_bin" test ./...)
+printf '==> Vet Feishu plugin\n'
+(cd "$build_dir/plugins/feishu" && "$go_bin" vet ./...)
 printf '==> Build Feishu plugin\n'
 GO_BIN="$go_bin" AHA2_PLUGIN_OUTPUT_DIR="$feishu_dir" \
-  bash "$repo_dir/scripts/build-feishu-plugin.sh" windows/amd64
+  bash "$build_dir/scripts/build-feishu-plugin.sh" windows/amd64
 
 assert_pe() {
   local file="$1"
@@ -199,7 +245,7 @@ if grep -q "SET_BY_PACKAGING" "$feishu_manifest"; then
 fi
 
 printf '==> Write release manifest\n'
-"$node_bin" "$repo_dir/scripts/release-manifest.mjs" \
+"$node_bin" "$build_dir/scripts/release-manifest.mjs" \
   --root "$output_dir" \
   --version "$version" \
   --commit "$commit" \

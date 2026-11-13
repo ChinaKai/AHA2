@@ -39,6 +39,14 @@ jobs:
           go test ./...
           go vet ./...
 
+      # plugins/feishu is a nested Go module, so the root `go test ./...` above
+      # never reaches its tests.
+      - name: Test Feishu plugin
+        run: |
+          cd plugins/feishu
+          go test ./...
+          go vet ./...
+
   build-windows-installer:
     needs: test
     runs-on: windows-latest
