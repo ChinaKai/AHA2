@@ -41,6 +41,7 @@
   --color-warning: #8a5a12;
   --color-warning-soft: #fbf0d9;
   --color-warning-ink: #7a4d0c;
+  --color-warning-bright: #f0b26b;
   --color-danger: #a3362d;
   --color-danger-soft: #fbe9e7;
   --color-danger-ink: #8f2f27;
@@ -89,6 +90,8 @@
   /* Focus and motion */
   --focus-ring-color: #9a5b1f;
   --focus-ring: 0 0 0 3px rgba(154, 91, 31, .30);
+  --focus-ring-nav-color: #f0b26b;
+  --focus-ring-nav: 0 0 0 3px rgba(240, 178, 107, .45);
   --duration-fast: 120ms;
   --duration-base: 160ms;
   --duration-slow: 180ms;
@@ -128,8 +131,11 @@ body.task-view-active #app,
 body.task-view-active .app-shell,
 body.task-view-active .workspace { height: 100%; min-height: 0; overflow: hidden; }
 button, input, select, textarea { font-family: inherit; font-size: inherit; }
-button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 36px; padding: 0 12px; border: 1px solid var(--color-border-strong); border-radius: var(--radius-control); background: var(--color-surface); color: var(--color-text); font-weight: 650; cursor: pointer; transition: background-color var(--duration-fast) var(--ease-standard),border-color var(--duration-fast) var(--ease-standard),color var(--duration-fast) var(--ease-standard),box-shadow var(--duration-fast) var(--ease-standard); }
-button:hover:not(:disabled) { border-color: var(--color-accent); background: var(--color-accent-soft); color: var(--color-accent-ink); }
+button { --button-bg: var(--color-surface); --button-border: var(--color-border-strong); --button-fg: var(--color-text); display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 36px; padding: 0 12px; border: 1px solid var(--button-border); border-radius: var(--radius-control); background: var(--button-bg); color: var(--button-fg); font-weight: 650; cursor: pointer; transition: background-color var(--duration-fast) var(--ease-standard),border-color var(--duration-fast) var(--ease-standard),color var(--duration-fast) var(--ease-standard),box-shadow var(--duration-fast) var(--ease-standard); }
+/* Base hover changes only the button defaults. A component that declares its
+   own background/colour/border keeps it, because those declarations win over
+   the element rule and the custom properties below are not used by it. */
+button:hover:not(:disabled) { --button-bg: var(--color-accent-soft); --button-border: var(--color-accent); --button-fg: var(--color-accent-ink); }
 button.primary, .primary { border-color: var(--color-accent); background: var(--color-accent); color: var(--color-text-inverse); }
 button.primary:hover:not(:disabled), .primary:hover:not(:disabled) { border-color: var(--color-accent-hover); background: var(--color-accent-hover); color: var(--color-text-inverse); }
 button.primary:active:not(:disabled), .primary:active:not(:disabled) { border-color: var(--color-accent-active); background: var(--color-accent-active); }
@@ -188,6 +194,10 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { border-color
 .form-error { margin-top: 12px; color: var(--color-danger); font-size: var(--font-size-12); }
 
 :where(a, button, input, select, textarea, summary, [role="button"], [tabindex]):focus-visible { outline: 2px solid var(--focus-ring-color); outline-offset: 2px; }
+/* Dark surfaces need their own focus colour: the light-surface amber only
+   reaches 2.91:1 against --color-nav. This one clears 3:1 on both nav states. */
+.sidebar :focus-visible, .login-brand :focus-visible { outline-color: var(--focus-ring-nav-color); }
+.bottom-nav button:focus-visible { outline-color: var(--focus-ring-color); }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; scroll-behavior: auto !important; }
@@ -202,7 +212,8 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { border-color
 .sidebar nav button span, .sidebar .brand-lockup > div, .owner-block > div { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sidebar-resizer { position: relative; z-index: 5; width: 8px; min-height: 100vh; cursor: col-resize; touch-action: none; }
 .sidebar-resizer::after { position: absolute; top: 0; bottom: 0; left: 3px; width: 1px; background: transparent; content: ""; transition: background .15s ease,box-shadow .15s ease; }
-.sidebar-resizer:hover::after, .sidebar-resizer:focus-visible::after, body.sidebar-resizing .sidebar-resizer::after { background: var(--color-accent); box-shadow: var(--focus-ring); }
+.sidebar-resizer:hover::after, body.sidebar-resizing .sidebar-resizer::after { background: var(--color-accent); box-shadow: var(--focus-ring); }
+.sidebar-resizer:focus-visible::after { background: var(--focus-ring-nav-color); box-shadow: var(--focus-ring-nav); }
 body.sidebar-resizing { cursor: col-resize; user-select: none; }
 .sidebar-memo { --memo-surface: #352a22; --memo-input: var(--color-nav); --memo-border: var(--color-nav-border); --memo-text: var(--color-nav-text); --memo-placeholder: var(--color-nav-muted); display: flex; flex: 0 0 auto; flex-direction: column; min-height: 120px; margin-top: 24px; overflow: hidden; border: 1px solid var(--memo-border); border-radius: var(--radius-card); background: var(--memo-surface); color: var(--memo-text); }
 .sidebar-memo > header { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 38px; padding: 0 8px 0 10px; border-bottom: 1px solid var(--memo-border); color: var(--memo-text); }
@@ -211,7 +222,7 @@ body.sidebar-resizing { cursor: col-resize; user-select: none; }
 .sidebar-memo > header .icon-button { width: 28px; min-height: 28px; padding: 0; border: 0; background: transparent; color: var(--memo-placeholder); }
 .sidebar-memo-colors { display: flex; flex-wrap: wrap; gap: 6px; padding: 7px 8px 0; }
 .sidebar-memo-swatch { width: 18px; min-height: 18px; height: 18px; padding: 0; border: 2px solid transparent; border-radius: 50%; background: var(--swatch-color); box-shadow: inset 0 0 0 1px rgba(15,23,42,.22); }
-.sidebar-memo-swatch:hover, .sidebar-memo-swatch:focus-visible, .sidebar-memo-swatch.active { border-color: var(--color-nav-text); outline: 2px solid var(--focus-ring-color); outline-offset: 1px; }
+.sidebar-memo-swatch:hover, .sidebar-memo-swatch:focus-visible, .sidebar-memo-swatch.active { border-color: var(--color-nav-text); outline: 2px solid var(--focus-ring-nav-color); outline-offset: 1px; }
 .sidebar-memo-body { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; gap: 8px; padding: 8px; }
 .sidebar-memo-list { display: grid; align-content: start; gap: 5px; min-height: 0; overflow: auto; }
 .sidebar-memo-item { display: grid; grid-template-columns: 16px minmax(0,1fr) 24px; align-items: start; gap: 6px; min-width: 0; padding: 5px 4px; border: 1px solid transparent; border-radius: 5px; background: var(--memo-input); }
@@ -1404,9 +1415,9 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 .task-tool-actions .task-tool-button.active { background: #edf4ff; color: #1d4ed8; box-shadow: inset 0 -2px #2563eb; }
 .task-tool-actions .task-tool-button.connected { background: #ecfdf5; color: #15803d; box-shadow: inset 0 -2px #16a34a; }
 .task-tool-actions .task-tool-button.connected.active { background: #dcfce7; color: #166534; }
-.task-tool-actions .task-tool-button.has-pending:not(.active) { background: #fffaf0; color: #b45309; }
+.task-tool-actions .task-tool-button.has-pending:not(.active) { background: var(--color-warning-soft); color: var(--color-warning-ink); }
 .task-tool-actions .task-tool-button:disabled { background: #f8fafc; color: #a0a7b1; opacity: 1; }
-.task-tool-badge { position: absolute; top: 2px; right: 2px; min-width: 14px; height: 14px; padding: 0 3px; border-radius: 7px; background: #d97706; color: #fff; font-size: 8px; font-weight: 800; line-height: 14px; text-align: center; pointer-events: none; }
+.task-tool-badge { position: absolute; top: 2px; right: 2px; min-width: 14px; height: 14px; padding: 0 3px; border-radius: var(--radius-pill); background: var(--color-warning); color: var(--color-text-inverse); font-size: var(--font-size-11); font-weight: 800; line-height: 14px; text-align: center; pointer-events: none; }
 .task-tool-panel .ctx-view { padding: 10px; }
 .agent-collaboration-settings { margin: 0 0 14px; padding: 12px; border: 1px solid var(--line); }
 .agent-collaboration-settings legend { padding: 0 6px; color: var(--muted); font-size: 10px; font-weight: 800; }
@@ -2652,6 +2663,8 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 
 /* Position pending badges without changing navigation width or height. */
 .sidebar nav button[data-view="pet-workbench"], .bottom-nav button[data-view="pet-workbench"] { position: relative; }
-.sidebar nav button.has-pending, .bottom-nav button.has-pending { color: #d97706; }
+.sidebar nav button.has-pending, .sidebar nav button.has-pending.active { color: var(--color-warning-bright); }
+.sidebar nav button.has-pending:hover:not(:disabled) { color: var(--color-warning-bright); }
+.bottom-nav button.has-pending, .bottom-nav button.has-pending.active { color: var(--color-warning-ink); }
 .sidebar nav button .task-tool-badge { top: 50%; transform: translateY(-50%); right: 6px; overflow: visible; }
 .sidebar nav button[data-view="pet-workbench"] > span:not(.task-tool-badge) { padding-right: 24px; }

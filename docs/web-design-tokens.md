@@ -32,7 +32,8 @@
 | `--color-success-bright` | `#9bd7ae` | 深色导航上的成功/安全提示文字 |
 | `--color-warning` | `#8a5a12` | 警告态强调 |
 | `--color-warning-soft` | `#fbf0d9` | 警告态背景 |
-| `--color-warning-ink` | `#7a4d0c` | 警告态背景上的文字 |
+| `--color-warning-ink` | `#7a4d0c` | 警告态背景上的文字、浅色底上的待审批文字 |
+| `--color-warning-bright` | `#f0b26b` | 深色导航上的待审批文字 |
 | `--color-danger` | `#a3362d` | 危险态强调、删除操作 |
 | `--color-danger-soft` | `#fbe9e7` | 危险态背景 |
 | `--color-danger-ink` | `#8f2f27` | 危险态背景上的文字 |
@@ -87,27 +88,29 @@
 
 | Token | 值 | 用途 |
 | --- | --- | --- |
-| `--focus-ring-color` | `#9a5b1f` | 键盘焦点描边颜色 |
-| `--focus-ring` | `0 0 0 3px rgba(154, 91, 31, .30)` | 输入控件焦点环 |
+| `--focus-ring-color` | `#9a5b1f` | 浅色表面的键盘焦点描边颜色 |
+| `--focus-ring` | `0 0 0 3px rgba(154, 91, 31, .30)` | 浅色表面的输入控件焦点环 |
+| `--focus-ring-nav-color` | `#f0b26b` | 深色导航/登录品牌区的键盘焦点描边颜色 |
+| `--focus-ring-nav` | `0 0 0 3px rgba(240, 178, 107, .45)` | 深色表面的焦点环 |
 | `--duration-fast` | `120ms` | 悬停、颜色过渡 |
 | `--duration-base` | `160ms` | 常规过渡 |
 | `--duration-slow` | `180ms` | 浮层/展开过渡 |
 | `--ease-standard` | `cubic-bezier(.2, 0, 0, 1)` | 标准缓动 |
 
-`@media (prefers-reduced-motion: reduce)` 把动画和过渡压到 1ms，并关闭平滑滚动。`:focus-visible` 给键盘焦点统一 2px 描边；输入控件用 `--focus-ring` 的 3px 外环。
+`@media (prefers-reduced-motion: reduce)` 把动画和过渡压到 1ms，并关闭平滑滚动。`:focus-visible` 给键盘焦点统一 2px 描边；输入控件用 `--focus-ring` 的 3px 外环。侧栏和登录品牌区是深色表面，焦点色改用 `--focus-ring-nav-color`，避免浅色表面的 `--focus-ring-color` 在深色底上只有 2.91:1。
 
 ## 组件映射
 
 | 组件 | 选择器 | 主要 token |
 | --- | --- | --- |
-| 按钮 primary | `button`, `.primary` | `--color-accent`、`--color-text-inverse`、`--radius-control` |
+| 按钮 primary | `button`, `.primary` | `--color-accent`、`--color-text-inverse`、`--radius-control`；基础 hover 只改 `--button-*` 自定义属性，组件自己声明的背景/文字/描边不会被抢走 |
 | 按钮 secondary | `button.secondary` | `--color-surface`、`--color-border-strong`、`--color-text` |
 | 按钮 ghost | `button.ghost` | `transparent`、`--color-text-muted`、`--color-surface-muted` |
 | 按钮 danger | `button.danger` | `--color-danger`、`--color-danger-soft`、`--color-danger-ink` |
 | 输入/选择/文本域 | `input`, `select`, `textarea` | `--color-border-strong`、`--color-surface`、`--radius-control`、`--focus-ring` |
 | 表格 | `table`, `th`, `td` | `--color-border`、`--color-text-muted`、`--font-size-11` |
 | 卡片/面板 | `.panel`, `.metrics > div`, `.task-card`, `.backend-card`, `.managed-profile-card`, `.channel-instance-card`, `.knowledge-entry-card`, `.skill-card` | `--radius-card`、`--color-surface`、`--shadow-xs` |
-| 徽标/状态 | `.status`, `.sync-status-pill`, `.backend-identifier`, `.backend-proto`, `.chips` | `--radius-pill`、`--color-*-soft/ink` |
+| 徽标/状态 | `.status`, `.sync-status-pill`, `.backend-identifier`, `.backend-proto`, `.chips`, `.task-tool-badge` | `--radius-pill`、`--color-*-soft/ink`；待审批徽标用 `--color-warning` 底 + `--color-text-inverse` 字，导航待审批文字用 `--color-warning-ink`（浅底）或 `--color-warning-bright`（深色侧栏） |
 | 对话框 | `dialog`, `.dialog-head`, `.dialog-actions` | `--radius-popover`、`--shadow-dialog`、`--color-overlay` |
 | 浮层/菜单 | `.task-filter-menu`, `.conversation-filter-menu`, `.slash-command-menu`, `.hardware-title-group-menu`, `.desktop-popover` | `--radius-popover`、`--shadow-popover`、`--color-surface-raised` |
 | 消息条 | `.banner`, `.app-hydrating`, `.security-warning`, `.form-error` | 语义 `-soft/-ink`、`--radius-control` |
@@ -130,6 +133,12 @@
 | `--color-accent-ink` | `--color-accent-soft` | 6.63:1 |
 | `--color-success-ink` | `--color-success-soft` | 7.50:1 |
 | `--color-warning-ink` | `--color-warning-soft` | 6.42:1 |
+| `--color-warning-ink` | `--color-surface` | 7.14:1 |
+| `--color-warning-bright` | `--color-nav` | 8.45:1 |
+| `--color-warning-bright` | `--color-nav-active` | 6.24:1 |
+| `--color-text-inverse` | `--color-warning` | 5.61:1 |
+| `--focus-ring-nav-color` | `--color-nav` | 8.45:1 |
+| `--focus-ring-nav-color` | `--color-nav-active` | 6.24:1 |
 | `--color-danger-ink` | `--color-danger-soft` | 6.88:1 |
 | `--color-info-ink` | `--color-info-soft` | 7.28:1 |
 | `--color-amber-ink` | `--color-amber-soft` | 5.92:1 |
