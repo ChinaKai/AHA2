@@ -461,6 +461,12 @@ test("Agent API is automatic and read-only in the normal Workspace UI", async ()
   assert.match(script, /workspace-agent-api-status/);
   assert.match(styles, /\.workspace-agent-api-status-block/);
 
+  // Help text follows the SSH-stdio-first order; the retired direct -> tunnel
+  // -> WSL sequence must not survive in the Workspace or override copy.
+  assert.match(script, /SSH 工作区优先 SSH stdio/);
+  assert.doesNotMatch(script, /本机直连 → SSH 反向隧道 → WSL localhost/);
+  assert.doesNotMatch(script, /本机直连 → SSH stdio/);
+
   // The hidden manual override lives in advanced settings and is explicitly a
   // troubleshooting path. It accepts only https/loopback (enforced server-side).
   assert.match(script, /agent-api-override-form/);

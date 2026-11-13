@@ -120,15 +120,23 @@ func DetectModelsContextWithClient(ctx context.Context, baseURL, apiKey, authSty
 	if client == nil {
 		client = &http.Client{Timeout: timeout}
 	}
-	var lastError string
+	// Keep every failed endpoint/auth attempt: the unauthenticated probe runs
+	// last, and its generic 401 used to hide the authenticated attempt's real
+	// upstream error (Moonshot's "Invalid Authentication", for example).
+	var failures []modelDetectFailure
 	for _, endpoint := range candidates {
 		for _, set := range authSets {
 			if err := ctx.Err(); err != nil {
 				return Result{}, err
 			}
-			models, err := fetchModels(ctx, client, endpoint, set.headers)
+			models, err := fetchModels(ctx, client, endpoint, set.headers, key)
 			if err != nil {
-				lastError = endpoint + ": " + err.Error()
+				failures = append(failures, modelDetectFailure{
+					endpoint:      endpoint,
+					authStyle:     set.style,
+					authenticated: set.style != "none",
+					detail:        err.Error(),
+				})
 				continue
 			}
 			if len(models) > 0 {
@@ -136,13 +144,51 @@ func DetectModelsContextWithClient(ctx context.Context, baseURL, apiKey, authSty
 			}
 		}
 	}
-	if lastError != "" {
-		return Result{}, fmt.Errorf("failed to detect models: %s", lastError)
+	if len(failures) > 0 {
+		return Result{}, fmt.Errorf("failed to detect models: %s", summarizeModelDetectFailures(failures, key))
 	}
 	return Result{AuthStyle: "none", Models: []DetectedModel{}}, nil
 }
 
-func fetchModels(ctx context.Context, client *http.Client, endpoint string, headers map[string]string) ([]DetectedModel, error) {
+// modelDetectFailure records one endpoint/auth attempt that did not produce a
+// model list.
+type modelDetectFailure struct {
+	endpoint      string
+	authStyle     string
+	authenticated bool
+	detail        string
+}
+
+// summarizeModelDetectFailures renders failed catalog attempts as a single
+// redacted line per distinct attempt. When an API key is configured, only the
+// authenticated attempts are reported: the trailing unauthenticated probe
+// cannot succeed on a key-protected gateway, and its 401 would otherwise
+// overwrite the meaningful auth error. Every line carries the auth style and the
+// HTTP status/upstream body snippet so the UI can explain why detection failed.
+func summarizeModelDetectFailures(failures []modelDetectFailure, apiKey string) string {
+	selected := make([]modelDetectFailure, 0, len(failures))
+	for _, failure := range failures {
+		if failure.authenticated {
+			selected = append(selected, failure)
+		}
+	}
+	if len(selected) == 0 {
+		selected = failures
+	}
+	seen := make(map[string]struct{}, len(selected))
+	lines := make([]string, 0, len(selected))
+	for _, failure := range selected {
+		line := probeRedact(fmt.Sprintf("%s [%s]: %s", failure.endpoint, failure.authStyle, failure.detail), apiKey)
+		if _, ok := seen[line]; ok {
+			continue
+		}
+		seen[line] = struct{}{}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "; ")
+}
+
+func fetchModels(ctx context.Context, client *http.Client, endpoint string, headers map[string]string, apiKey string) ([]DetectedModel, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
@@ -156,6 +202,11 @@ func fetchModels(ctx context.Context, client *http.Client, endpoint string, head
 	}
 	defer response.Body.Close()
 	if response.StatusCode >= 400 {
+		// Carry the upstream body into the aggregate error: a bare "HTTP 401"
+		// hides the provider's actual explanation (invalid auth, quota, ...).
+		if snippet := probeResponseSnippet(response.Body, apiKey); snippet != "" {
+			return nil, fmt.Errorf("HTTP %d: %s", response.StatusCode, snippet)
+		}
 		return nil, fmt.Errorf("HTTP %d", response.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, 4<<20))
