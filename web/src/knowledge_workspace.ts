@@ -1103,6 +1103,10 @@ export function bindKnowledgeWorkspace(context: KnowledgeWorkspaceContext): void
   });
   document.querySelector<HTMLSelectElement>("#knowledge-project-select")?.addEventListener("change", event => {
     if (!confirmDiscardEdit()) {
+      // The render that follows restores control values by region key, so a
+      // rejected change would otherwise survive every later render and leave
+      // the select showing a project the module never switched to.
+      event.currentTarget.value = selectedProjectID;
       context.render();
       return;
     }
@@ -1122,6 +1126,7 @@ export function bindKnowledgeWorkspace(context: KnowledgeWorkspaceContext): void
   });
   document.querySelector<HTMLSelectElement>("[data-knowledge-source-filter]")?.addEventListener("change", event => {
     if (!confirmDiscardEdit()) {
+      event.currentTarget.value = selectedKnowledgeSourceID;
       context.render();
       return;
     }

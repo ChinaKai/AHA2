@@ -194,6 +194,24 @@ try {
   await page.waitForFunction(() => document.querySelector(".knowledge-directory-search-hint")?.textContent?.includes("nothing-matches"), null, {timeout: 5000});
   await page.locator("#knowledge-search").fill("");
 
+  // A rejected unsaved switch must snap the controls back to the module state.
+  // Region restore would otherwise keep replaying the rejected value into every
+  // later render, leaving the select on a project the page never switched to.
+  await page.evaluate(() => document.querySelector('[data-knowledge-open="knowledge-doc"]')?.click());
+  await page.waitForSelector('[data-knowledge-edit="knowledge-doc"]', {timeout: 10000});
+  await page.evaluate(() => document.querySelector('[data-knowledge-edit="knowledge-doc"]')?.click());
+  await page.waitForSelector("#knowledge-inline-editor", {timeout: 10000});
+  await page.locator("#knowledge-inline-editor [name=title]").fill("Build guide changed");
+  await page.waitForSelector(".knowledge-unsaved.visible", {timeout: 5000});
+  await page.evaluate(() => { window.confirm = () => false; });
+  await page.selectOption("#knowledge-project-select", "project-2");
+  assert.equal(await page.locator("#knowledge-project-select").inputValue(), "project-1");
+  await page.selectOption("[data-knowledge-source-filter]", "project-1");
+  assert.equal(await page.locator("[data-knowledge-source-filter]").inputValue(), "all");
+  await page.evaluate(() => { window.confirm = () => true; });
+  await page.evaluate(() => document.querySelector("[data-knowledge-edit-cancel]")?.click());
+  await page.waitForFunction(() => document.querySelector(".knowledge-page")?.classList.contains("knowledge-mode-read"), null, {timeout: 10000});
+
   // Review shows one pending proposal at a time with source, confidence, and body.
   await page.evaluate(() => document.querySelector("[data-knowledge-mode=review]")?.click());
   await page.waitForSelector(".knowledge-review-card", {timeout: 15000});
