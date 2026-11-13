@@ -1,5 +1,7 @@
 import {api, setAPIRequestObserver} from "./api.js";
 import type {APIRequestSample} from "./api.js";
+import {COMMAND_PALETTE_DEBOUNCE_MS, buildCommandSections, createDebouncer, flattenCommandSections, isPaletteShortcut, paletteKeyAction, readRecentTaskIDs, rememberRecentTaskID} from "./command_palette.js";
+import type {CommandItem, CommandSection, CommandSectionID} from "./command_palette.js";
 import {handlePetStreamEvent, mountAssistant, showPetSettings, notifyPetTaskIdle, notifyPetTaskReply, notifyPetTaskThinking, resumePetNavigation, setAssistantVisible} from "./assistant.js";
 import {MODEL_WIRE_OPTIONS, backendSelectOptionsHTML, backendsPanelHTML, modelWireEditOptionsHTML, persistedWireValue, resolveBackendOptions} from "./backends.js";
 import {bindPetDocEditorButtons, createPetWorkbenchLoader, createPetWorkbenchPageKeeper, PET_APPROVAL_MAX_LIMIT, petApprovalMatches, petApprovalPage, renderPetApprovalLoadMore, renderPetInspectionSummary, renderPetWorkbenchLoadError, swapPetWorkbenchPage} from "./pet_workbench.js";
@@ -1474,6 +1476,404 @@ function applyLocationHash(): boolean {
   return true;
 }
 
+// Switching the top-level view is shared by the sidebar, the palette and the
+// mobile search entry so every path resets the same per-view state.
+function switchView(nextView: View): void {
+  cancelTaskOpen();
+  state.view = nextView;
+  if (nextView === "models") {
+    state.modelSearch = "";
+    state.modelPage = 1;
+    state.modelSelected.clear();
+    state.providerPage = 1;
+    state.codexAccountPage = 1;
+  }
+  if (nextView === "proxy") resourceStates.proxy.loaded = false;
+  state.selectedTask = null;
+  state.selectedProject = null;
+  state.dialogProjectID = "";
+  closeEvents();
+  render();
+  void ensureViewData(state.view, nextView === "proxy").then(() => {
+    // Entering the workbench already rendered its page and started exactly one
+    // load; a second full render here used to rebind and abort that request.
+    if (state.view === "pet-workbench" && petWorkbenchPageKeeper.binding) return;
+    render();
+  });
+}
+
+function showTaskCreateDialog(): boolean {
+  const dialog = document.querySelector<HTMLDialogElement>("#task-dialog");
+  if (!dialog) return false;
+  taskSkillsDirty = false;
+  syncTaskWorkspaces();
+  dialog.showModal();
+  return true;
+}
+
+/* Global command palette -------------------------------------------------- */
+
+const commandPaletteDebouncer = createDebouncer(COMMAND_PALETTE_DEBOUNCE_MS, query => applyCommandPaletteQuery(query));
+let commandPaletteRoot: HTMLDialogElement | null = null;
+let commandPaletteInput: HTMLInputElement | null = null;
+let commandPaletteListbox: HTMLElement | null = null;
+let commandPaletteCount: HTMLElement | null = null;
+let commandPaletteItems: CommandItem[] = [];
+let commandPaletteRecent: CommandItem[] = [];
+let commandPaletteSections: CommandSection[] = [];
+let commandPaletteVisible: CommandItem[] = [];
+let commandPaletteActiveIndex = 0;
+let commandPaletteComposing = false;
+let commandPaletteOpenedFrom: HTMLElement | null = null;
+
+function commandPaletteStorage(): Storage | null {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+function commandPaletteShortcutLabel(): string {
+  return /Mac|iPhone|iPad/.test(navigator.platform || "") ? "⌘K" : "Ctrl K";
+}
+
+function commandPaletteTaskItems(): CommandItem[] {
+  return state.tasks.map(task => {
+    const project = state.projects.find(item => item.id === task.project_id);
+    const workspace = state.workspaces.find(item => item.id === task.workspace_id);
+    const status = statusLabel(task.status);
+    const code = task.code || "";
+    return {
+      id: `task:${task.id}`,
+      kind: "task" as const,
+      label: task.title,
+      detail: [code, project?.name, workspace?.name, status].filter(Boolean).join(" · "),
+      keywords: [code, code.replace(/^task-/, ""), task.status, status, project?.name || "", workspace?.name || "", task.current_goal || ""],
+      target: task.id,
+    };
+  });
+}
+
+function commandPalettePages(): CommandItem[] {
+  return [
+    {id: "page:models", kind: "page", label: t("nav.models"), detail: t("palette.page.modelsDetail"), keywords: ["model", "models", "模型"], target: "models"},
+    {id: "page:pet-workbench", kind: "page", label: t("palette.petApprovalsPage"), detail: t("palette.page.approvalsDetail"), keywords: ["approval", "approvals", "审批", "pet", "宠物"], target: "pet-workbench"},
+    {id: "page:knowledge", kind: "page", label: t("nav.knowledge"), detail: t("palette.page.knowledgeDetail"), keywords: ["knowledge", "doc", "知识", "文档"], target: "knowledge"},
+    {id: "page:channels", kind: "page", label: t("nav.channels"), detail: t("palette.page.channelsDetail"), keywords: ["channel", "channels", "bot", "渠道"], target: "channels"},
+    {id: "page:mcp", kind: "page", label: "MCP", detail: t("palette.page.mcpDetail"), keywords: ["mcp", "tool", "工具"], target: "mcp"},
+    {id: "page:advanced", kind: "page", label: t("nav.advancedSettings"), detail: t("palette.page.advancedDetail"), keywords: ["settings", "advanced", "设置", "高级"], target: "advanced"},
+    {id: "page:data", kind: "page", label: t("advanced.data.title"), detail: t("palette.page.dataDetail"), keywords: ["data", "storage", "数据", "清理"], target: "data"},
+  ];
+}
+
+function commandPaletteActions(): CommandItem[] {
+  return [
+    {id: "action:new-task", kind: "action", label: t("palette.newTask"), detail: t("palette.newTaskDetail"), keywords: ["new", "create", "task", "新建", "任务"], target: "new-task"},
+    {id: "action:open-models", kind: "action", label: t("palette.openModels"), detail: t("nav.models"), keywords: ["model", "models", "模型"], target: "models"},
+    {id: "action:open-approvals", kind: "action", label: t("palette.openApprovals"), detail: t("petWorkbench.approvals"), keywords: ["approval", "approvals", "审批"], target: "approvals"},
+    {id: "action:open-pet-workbench", kind: "action", label: t("palette.openPetWorkbench"), detail: t("petWorkbench.title"), keywords: ["pet", "workbench", "宠物", "工作台"], target: "pet-workbench"},
+  ];
+}
+
+function commandPaletteGroupLabels(): Partial<Record<CommandSectionID, string>> {
+  return {
+    tasks: t("nav.tasks"),
+    projects: t("nav.projects"),
+    workspaces: "Workspace",
+    pages: t("palette.group.pages"),
+    actions: t("palette.group.actions"),
+    recent: t("palette.group.recent"),
+  };
+}
+
+function commandPaletteAllItems(): CommandItem[] {
+  const items = [...commandPaletteTaskItems()];
+  for (const project of state.projects) {
+    items.push({id: `project:${project.id}`, kind: "project", label: project.name, detail: t("palette.projectDetail"), keywords: [project.name, "project", "项目"], target: project.id});
+  }
+  for (const workspace of state.workspaces) {
+    const project = state.projects.find(item => item.id === workspace.project_id);
+    items.push({
+      id: `workspace:${workspace.id}`,
+      kind: "workspace",
+      label: workspace.name,
+      detail: ["Workspace", project?.name, workspace.root_path].filter(Boolean).join(" · "),
+      keywords: [workspace.name, workspace.root_path, project?.name || "", "workspace"],
+      target: workspace.project_id,
+    });
+  }
+  items.push(...commandPalettePages(), ...commandPaletteActions());
+  return items;
+}
+
+// Recents are resolved against the loaded Task store on every open, so a Task
+// deleted (or no longer visible) since it was opened cannot come back from
+// localStorage. The store is already the server's filtered view.
+function commandPaletteRecentItems(items: CommandItem[]): CommandItem[] {
+  const tasks = new Map(items.filter(item => item.kind === "task").map(item => [item.target, item]));
+  return readRecentTaskIDs(commandPaletteStorage())
+    .map(taskID => tasks.get(taskID))
+    .filter((item): item is CommandItem => Boolean(item));
+}
+
+function rememberCommandPaletteTask(taskID: string): void {
+  rememberRecentTaskID(commandPaletteStorage(), taskID);
+}
+
+// A background list refresh may add, rename or delete Tasks while the panel is
+// open. Rebuild the index from the new store so a removed Task cannot be
+// selected; the current query is applied immediately instead of waiting.
+function rebuildOpenCommandPaletteIndex(): void {
+  if (!commandPaletteRoot?.open) return;
+  commandPaletteDebouncer.cancel();
+  commandPaletteItems = commandPaletteAllItems();
+  commandPaletteRecent = commandPaletteRecentItems(commandPaletteItems);
+  applyCommandPaletteQuery(commandPaletteInput?.value || "");
+}
+
+function ensureCommandPalette(): HTMLDialogElement | null {
+  if (commandPaletteRoot) return commandPaletteRoot;
+  if (!document.body) return null;
+  const root = document.createElement("dialog");
+  root.id = "command-palette";
+  root.className = "command-palette";
+  root.setAttribute("aria-label", t("palette.ariaLabel"));
+  root.innerHTML = `<div class="command-palette-box">
+    <div class="command-palette-field">
+      ${icon("search")}
+      <input id="command-palette-input" type="text" role="combobox" aria-expanded="true" aria-controls="command-palette-listbox" aria-autocomplete="list" aria-label="${t("palette.placeholder")}" placeholder="${t("palette.placeholder")}" autocomplete="off" spellcheck="false">
+      <kbd class="command-palette-key">${commandPaletteShortcutLabel()}</kbd>
+      <button type="button" class="icon-button" data-command-palette-close aria-label="${t("palette.close")}" title="${t("palette.close")}">${icon("close")}</button>
+    </div>
+    <p id="command-palette-count" class="command-palette-count" role="status" aria-live="polite"></p>
+    <div id="command-palette-listbox" class="command-palette-results" role="listbox" aria-label="${t("palette.ariaLabel")}"></div>
+    <footer class="command-palette-help"><span>${t("palette.selectHint")}</span><span>${t("palette.openHint")}</span><span>${t("palette.closeHint")}</span></footer>
+  </div>`;
+  document.body.appendChild(root);
+  commandPaletteRoot = root;
+  commandPaletteInput = root.querySelector<HTMLInputElement>("#command-palette-input");
+  commandPaletteListbox = root.querySelector<HTMLElement>("#command-palette-listbox");
+  commandPaletteCount = root.querySelector<HTMLElement>("#command-palette-count");
+  bindCommandPalette();
+  return root;
+}
+
+function bindCommandPalette(): void {
+  const root = commandPaletteRoot;
+  const input = commandPaletteInput;
+  const listbox = commandPaletteListbox;
+  if (!root || !input || !listbox) return;
+  input.addEventListener("input", () => {
+    if (commandPaletteComposing) return;
+    commandPaletteDebouncer.schedule(input.value);
+  });
+  input.addEventListener("compositionstart", () => {
+    commandPaletteComposing = true;
+  });
+  input.addEventListener("compositionend", () => {
+    commandPaletteComposing = false;
+    commandPaletteDebouncer.schedule(input.value);
+  });
+  input.addEventListener("keydown", event => {
+    const result = paletteKeyAction(event, {
+      count: commandPaletteVisible.length,
+      activeIndex: commandPaletteActiveIndex,
+      composing: commandPaletteComposing,
+    });
+    if (!result.handled) return;
+    event.preventDefault();
+    if (result.action === "close") {
+      closeCommandPalette();
+      return;
+    }
+    if (result.action === "up" || result.action === "down") {
+      setCommandPaletteActive(result.activeIndex ?? 0);
+      return;
+    }
+    if (result.action === "select") {
+      // Enter right after typing must search the text on screen, not the
+      // section from before the 100ms debounce fired.
+      commandPaletteDebouncer.flush();
+      const item = commandPaletteVisible[commandPaletteActiveIndex];
+      if (item) void executeCommandPaletteItem(item);
+    }
+  });
+  listbox.addEventListener("click", event => {
+    const option = event.target instanceof Element ? event.target.closest<HTMLElement>("[data-command-index]") : null;
+    const index = Number(option?.dataset.commandIndex);
+    const item = Number.isInteger(index) ? commandPaletteVisible[index] : undefined;
+    if (item) void executeCommandPaletteItem(item);
+  });
+  root.querySelector<HTMLElement>("[data-command-palette-close]")?.addEventListener("click", () => closeCommandPalette());
+  // Clicking the backdrop is outside .command-palette-box.
+  root.addEventListener("click", event => {
+    if (event.target === root) closeCommandPalette();
+  });
+  root.addEventListener("cancel", event => {
+    event.preventDefault();
+    if (!commandPaletteComposing) closeCommandPalette();
+  });
+}
+
+function applyCommandPaletteQuery(query: string): void {
+  commandPaletteSections = buildCommandSections({query, items: commandPaletteItems, recent: commandPaletteRecent, labels: commandPaletteGroupLabels()});
+  commandPaletteVisible = flattenCommandSections(commandPaletteSections);
+  commandPaletteActiveIndex = 0;
+  renderCommandPaletteResults();
+  updateCommandPaletteActive();
+}
+
+function renderCommandPaletteResults(): void {
+  const listbox = commandPaletteListbox;
+  const count = commandPaletteCount;
+  if (!listbox || !count) return;
+  let index = 0;
+  const groups = commandPaletteSections.map(section => {
+    const options = section.items.map(item => {
+      const optionIndex = index++;
+      return `<div role="option" id="command-palette-option-${optionIndex}" data-command-index="${optionIndex}" class="command-palette-option" aria-selected="false">
+        <span class="command-palette-option-label">${escapeHTML(item.label)}</span>
+        <small class="command-palette-option-detail">${escapeHTML(item.detail)}</small>
+      </div>`;
+    }).join("");
+    return `<section class="command-palette-group" role="group" aria-labelledby="command-palette-group-${section.id}"><h3 id="command-palette-group-${section.id}">${escapeHTML(section.label)}</h3>${options}</section>`;
+  }).join("");
+  listbox.innerHTML = groups || `<div class="command-palette-empty">${t("palette.noResults")}</div>`;
+  count.textContent = commandPaletteVisible.length ? t("palette.resultCount", {count: commandPaletteVisible.length}) : t("palette.noResults");
+  commandPaletteInput?.removeAttribute("aria-activedescendant");
+}
+
+function setCommandPaletteActive(index: number): void {
+  if (!commandPaletteVisible.length) {
+    commandPaletteActiveIndex = 0;
+    updateCommandPaletteActive();
+    return;
+  }
+  commandPaletteActiveIndex = Math.min(Math.max(0, index), commandPaletteVisible.length - 1);
+  updateCommandPaletteActive();
+}
+
+function updateCommandPaletteActive(): void {
+  const options = commandPaletteListbox?.querySelectorAll<HTMLElement>("[data-command-index]") || [];
+  const activeOption = commandPaletteActiveIndex >= 0 && commandPaletteActiveIndex < options.length ? options[commandPaletteActiveIndex] : null;
+  options.forEach(option => {
+    const active = option === activeOption;
+    option.setAttribute("aria-selected", String(active));
+    option.classList.toggle("active", active);
+  });
+  if (activeOption) {
+    commandPaletteInput?.setAttribute("aria-activedescendant", activeOption.id);
+    activeOption.scrollIntoView({block: "nearest"});
+  } else {
+    commandPaletteInput?.removeAttribute("aria-activedescendant");
+  }
+}
+
+function openCommandPalette(): void {
+  if (!state.auth?.authenticated) return;
+  const root = ensureCommandPalette();
+  const input = commandPaletteInput;
+  if (!root || !input) return;
+  commandPaletteOpenedFrom = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  // Rebuild from the live stores on every open: a refresh may have added,
+  // renamed or removed Tasks since the palette was last used.
+  commandPaletteItems = commandPaletteAllItems();
+  commandPaletteRecent = commandPaletteRecentItems(commandPaletteItems);
+  commandPaletteComposing = false;
+  commandPaletteDebouncer.cancel();
+  input.value = "";
+  applyCommandPaletteQuery("");
+  if (!root.open) root.showModal();
+  input.focus();
+}
+
+function closeCommandPalette(): void {
+  commandPaletteDebouncer.cancel();
+  commandPaletteComposing = false;
+  if (commandPaletteRoot?.open) commandPaletteRoot.close();
+  const previous = commandPaletteOpenedFrom;
+  commandPaletteOpenedFrom = null;
+  if (previous?.isConnected) previous.focus();
+  else focusCommandPaletteTrigger();
+}
+
+function focusCommandPaletteTrigger(): void {
+  const triggers = Array.from(document.querySelectorAll<HTMLElement>("[data-command-palette-open]"));
+  const visible = triggers.find(trigger => trigger.getClientRects().length > 0);
+  (visible || triggers[0])?.focus();
+}
+
+function openCommandPaletteProject(projectID: string): void {
+  const project = state.projects.find(item => item.id === projectID) || null;
+  state.view = "projects";
+  state.selectedProject = project;
+  state.dialogProjectID = projectID;
+  state.selectedTask = null;
+  closeEvents();
+  render();
+  if (!project) void ensureViewData("projects").then(() => render());
+}
+
+async function openTaskCreateDialogFromPalette(): Promise<void> {
+  state.view = "tasks";
+  state.selectedTask = null;
+  state.selectedProject = null;
+  state.dialogProjectID = "";
+  closeEvents();
+  render();
+  await ensureViewData("tasks");
+  render();
+  showTaskCreateDialog();
+}
+
+async function runCommandPaletteAction(action: string): Promise<void> {
+  if (action === "new-task") {
+    await openTaskCreateDialogFromPalette();
+  } else if (action === "models") {
+    switchView("models");
+  } else if (action === "approvals") {
+    petWorkbenchTab = "approvals";
+    switchView("pet-workbench");
+  } else if (action === "pet-workbench") {
+    petWorkbenchTab = "core";
+    switchView("pet-workbench");
+  }
+}
+
+async function executeCommandPaletteItem(item: CommandItem): Promise<void> {
+  closeCommandPalette();
+  try {
+    if (item.kind === "task") {
+      rememberCommandPaletteTask(item.target);
+      await openTask(item.target);
+    } else if (item.kind === "project" || item.kind === "workspace") {
+      openCommandPaletteProject(item.target);
+    } else if (item.kind === "page") {
+      const view = viewFromName(item.target);
+      if (!view) return;
+      if (view === "pet-workbench") petWorkbenchTab = "approvals";
+      switchView(view);
+    } else {
+      await runCommandPaletteAction(item.target);
+    }
+  } catch (error) {
+    setMessage("error", error instanceof Error ? error.message : String(error));
+    render();
+  } finally {
+    // The navigation replaced the shell, so the element that opened the
+    // palette may be detached; put focus on the freshly rendered trigger.
+    focusCommandPaletteTrigger();
+  }
+}
+
+document.addEventListener("keydown", event => {
+  if (event.defaultPrevented || !isPaletteShortcut(event)) return;
+  event.preventDefault();
+  if (commandPaletteRoot?.open) closeCommandPalette();
+  else openCommandPalette();
+});
+
 async function bootstrap(): Promise<void> {
   const savedNavigation = loadNavigationSnapshot();
   const hashRouted = applyLocationHash();
@@ -2700,6 +3100,7 @@ async function openTask(taskID: string): Promise<void> {
       ? ""
       : state.taskToolPinned;
     state.taskDetailLoading = false;
+    rememberCommandPaletteTask(taskID);
     requestConversationBottom();
     if (detail.task.read_only || detail.task.status === "draft") closeEvents();
     else openEvents(taskID, state.taskEventCursor);
@@ -3060,6 +3461,7 @@ function shell(content: string): string {
   return `<div class="app-shell">
     <aside class="sidebar">
       <div class="brand-lockup"><span class="brand-mark"><img src="/assets/aha-logo.svg" alt=""></span><div><strong>AHA</strong><small>${t("brand.tagline")}</small></div></div>
+      <button type="button" class="command-palette-trigger" data-command-palette-open aria-label="${t("palette.ariaLabel")}（${commandPaletteShortcutLabel()}）" title="${t("palette.placeholder")}">${icon("search")}<span>${t("palette.search")}</span><kbd>${commandPaletteShortcutLabel()}</kbd></button>
       <nav>${nav.map(([view, glyph, label]) => navButton(view, glyph, label)).join("")}</nav>
       <section class="sidebar-memo ${state.sidebarMemoCollapsed ? "collapsed" : ""}">
         <header><strong>${icon("edit")}便签</strong><button id="toggle-sidebar-memo" class="icon-button" type="button" aria-label="${state.sidebarMemoCollapsed ? "展开便签" : "折叠便签"}" title="${state.sidebarMemoCollapsed ? "展开便签" : "折叠便签"}">${icon(state.sidebarMemoCollapsed ? "chevron-up" : "chevron-down")}</button></header>
@@ -3072,6 +3474,7 @@ function shell(content: string): string {
     <div id="sidebar-resizer" class="sidebar-resizer" role="separator" aria-label="调整侧栏宽度" aria-orientation="vertical" aria-valuemin="${SIDEBAR_MIN_WIDTH}" aria-valuemax="${SIDEBAR_MAX_WIDTH}" aria-valuenow="${state.sidebarWidth}" tabindex="0" title="拖动调整侧栏宽度，双击恢复默认"></div>
     <header class="mobile-header"><div class="brand-lockup"><span class="brand-mark"><img src="/assets/aha-logo.svg" alt=""></span><strong>AHA</strong></div><button id="mobile-context" class="icon-button">${icon("menu")}</button></header>
     <main class="workspace">${resourceStatusHTML()}${banner()}${content}</main>
+    <button type="button" class="command-palette-fab" data-command-palette-open aria-label="${t("palette.ariaLabel")}（${commandPaletteShortcutLabel()}）" title="${t("palette.placeholder")}">${icon("search")}</button>
     <nav class="bottom-nav">${mobileNav.map(([view, glyph, label]) => navButton(view, glyph, label)).join("")}</nav>
   </div>`;
 }
@@ -5009,29 +5412,9 @@ function bindCommon(): void {
     window.dispatchEvent(new CustomEvent("aha:pet-settings"));
   }));
   document.querySelectorAll<HTMLElement>("[data-view]").forEach(button => button.addEventListener("click", () => {
-    cancelTaskOpen();
-    const nextView = button.dataset.view as View;
-    state.view = nextView;
-    if (nextView === "models") {
-      state.modelSearch = "";
-      state.modelPage = 1;
-      state.modelSelected.clear();
-      state.providerPage = 1;
-      state.codexAccountPage = 1;
-    }
-    if (nextView === "proxy") resourceStates.proxy.loaded = false;
-    state.selectedTask = null;
-    state.selectedProject = null;
-    state.dialogProjectID = "";
-    closeEvents();
-    render();
-    void ensureViewData(state.view, nextView === "proxy").then(() => {
-      // Entering the workbench already rendered its page and started exactly one
-      // load; a second full render here used to rebind and abort that request.
-      if (state.view === "pet-workbench" && petWorkbenchPageKeeper.binding) return;
-      render();
-    });
+    switchView(button.dataset.view as View);
   }));
+  document.querySelectorAll<HTMLElement>("[data-command-palette-open]").forEach(button => button.addEventListener("click", () => openCommandPalette()));
   document.querySelector<HTMLElement>("#retry-view-data")?.addEventListener("click", () => {
     void ensureViewData(state.view, true).then(() => render());
   });
@@ -5077,8 +5460,8 @@ function bindCommon(): void {
       return;
     }
     if (button.dataset.dialog === "task") {
-      taskSkillsDirty = false;
-      syncTaskWorkspaces();
+      showTaskCreateDialog();
+      return;
     }
     document.querySelector<HTMLDialogElement>(`#${button.dataset.dialog}-dialog`)?.showModal();
   }));
@@ -6557,6 +6940,7 @@ async function performListRefresh(): Promise<void> {
     state.workspaces = workspaces.workspaces || [];
     listPages.projects = {cursor: projects.next_cursor || "", hasMore: Boolean(projects.has_more), loadingMore: false};
     listPages.tasks = {cursor: tasks.next_cursor || "", hasMore: Boolean(tasks.has_more), loadingMore: false};
+    rebuildOpenCommandPaletteIndex();
     const listPageVisible = state.view === "projects" || state.view === "tasks" || Boolean(state.selectedProject);
     if (!state.selectedTask && !openingTaskID && listPageVisible) {
       if (taskListPointerActive) state.renderPending = true;

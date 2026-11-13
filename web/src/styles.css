@@ -2763,3 +2763,41 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 .bottom-nav button.has-pending, .bottom-nav button.has-pending.active { color: var(--color-warning-ink); }
 .sidebar nav button .task-tool-badge { top: 50%; transform: translateY(-50%); right: 6px; overflow: visible; box-shadow: 0 0 0 1px var(--color-warning-bright); }
 .sidebar nav button[data-view="pet-workbench"] > span:not(.task-tool-badge) { padding-right: 24px; }
+
+/* Global command palette: sidebar entry with the shortcut hint, a floating
+   entry on mobile, and a modal dialog whose background is inert while open. */
+.command-palette-trigger { display: flex; width: 100%; min-height: 34px; margin-top: 18px; justify-content: flex-start; gap: 8px; padding: 0 10px; border-color: var(--color-nav-border); background: var(--color-nav-active); color: var(--color-nav-muted); font-size: 12px; font-weight: 500; }
+.command-palette-trigger:hover:not(:disabled) { border-color: var(--color-nav-border); background: var(--color-nav-active); color: var(--color-nav-text); }
+.command-palette-trigger .icon { width: 15px; height: 15px; }
+.command-palette-trigger kbd { margin-left: auto; padding: 1px 5px; border: 1px solid var(--color-nav-border); border-radius: 4px; color: var(--color-nav-muted); font-size: 10px; font-weight: 600; }
+.command-palette-fab { display: none; }
+#command-palette { width: min(680px,calc(100vw - 32px)); max-height: min(72vh,640px); margin: 10vh auto auto; padding: 0; overflow: hidden; }
+.command-palette-box { display: grid; grid-template-rows: auto auto minmax(0,1fr) auto; max-height: min(72vh,640px); }
+.command-palette-field { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--color-border); }
+.command-palette-field > .icon { flex: 0 0 auto; width: 18px; height: 18px; color: var(--color-text-muted); }
+#command-palette-input { flex: 1 1 auto; min-width: 0; min-height: 36px; padding: 0 4px; border: 0; background: transparent; color: inherit; font-size: 15px; }
+#command-palette-input:focus { outline: none; }
+.command-palette-key { flex: 0 0 auto; padding: 2px 6px; border: 1px solid var(--color-border); border-radius: 4px; color: var(--color-text-muted); font-size: 10px; font-weight: 600; }
+.command-palette-count { min-height: 18px; margin: 0; padding: 6px 14px 2px; color: var(--color-text-muted); font-size: 11px; }
+.command-palette-results { min-height: 80px; padding: 4px 8px 10px; overflow: auto; overscroll-behavior: contain; }
+.command-palette-group { display: grid; gap: 2px; padding: 4px 0; }
+.command-palette-group h3 { margin: 4px 8px 2px; color: var(--color-text-muted); font-size: 10px; font-weight: 700; letter-spacing: .04em; }
+.command-palette-option { display: grid; gap: 1px; padding: 8px 10px; border-radius: 6px; cursor: pointer; }
+.command-palette-option.active, .command-palette-option[aria-selected="true"] { background: var(--color-accent-soft); color: var(--color-accent-ink); }
+.command-palette-option-label { overflow: hidden; font-size: 13px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.command-palette-option-detail { overflow: hidden; color: var(--color-text-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.command-palette-option.active .command-palette-option-detail { color: inherit; opacity: .8; }
+.command-palette-empty { padding: 24px 12px; color: var(--color-text-muted); font-size: 12px; text-align: center; }
+.command-palette-help { display: flex; gap: 14px; padding: 8px 14px; border-top: 1px solid var(--color-border); color: var(--color-text-muted); font-size: 10px; }
+@media (max-width: 760px) {
+  /* Safe-area padding plus the visual viewport height: the panel shrinks with
+     the on-screen keyboard instead of leaving the input behind it. */
+  .command-palette-fab { position: fixed; right: 14px; bottom: calc(var(--mobile-bottom-nav-height) + 12px); z-index: 35; display: grid; place-items: center; width: 46px; height: 46px; min-height: 46px; padding: 0; border-color: var(--color-accent); border-radius: 50%; background: var(--color-accent); color: var(--color-text-inverse); box-shadow: var(--shadow-popover); }
+  .command-palette-fab:hover:not(:disabled) { border-color: var(--color-accent-hover); background: var(--color-accent-hover); color: var(--color-text-inverse); }
+  .command-palette-fab .icon { width: 20px; height: 20px; }
+  #command-palette { position: fixed; top: var(--visual-viewport-offset-top); right: 0; bottom: auto; left: 0; width: 100vw; max-width: 100vw; height: var(--visual-viewport-height); max-height: var(--visual-viewport-height); margin: 0; border: 0; border-radius: 0; }
+  .command-palette-box { height: 100%; max-height: 100%; padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
+  #command-palette-input { font-size: 16px; }
+  .command-palette-results { padding-bottom: calc(10px + env(safe-area-inset-bottom)); }
+  .command-palette-help { display: none; }
+}
