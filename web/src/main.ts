@@ -1,6 +1,7 @@
 import {api, setAPIRequestObserver} from "./api.js";
 import type {APIRequestSample} from "./api.js";
 import {handlePetStreamEvent, mountAssistant, showPetSettings, notifyPetTaskIdle, notifyPetTaskReply, notifyPetTaskThinking, resumePetNavigation, setAssistantVisible} from "./assistant.js";
+import {backendsPanelHTML} from "./backends.js";
 import {bindPetDocEditorButtons, createPetWorkbenchLoader, createPetWorkbenchPageKeeper, PET_APPROVAL_MAX_LIMIT, petApprovalMatches, petApprovalPage, renderPetApprovalLoadMore, renderPetInspectionSummary, renderPetWorkbenchLoadError, swapPetWorkbenchPage} from "./pet_workbench.js";
 import type {PetWorkbenchPageBinding} from "./pet_workbench.js";
 import {renderConversationList} from "./conversation_ui.js";
@@ -3287,6 +3288,7 @@ function modelsView(): string {
       </div>
       <section class="panel"><div class="panel-head"><strong>Models</strong><div class="panel-head-actions"><input id="model-search" name="model-query" class="model-search" type="search" autocomplete="off" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" spellcheck="false" readonly placeholder="搜索模型 / Provider / Backend" value="${escapeHTML(state.modelSearch)}"><button data-dialog="model">${icon("plus")}添加模型</button></div></div><div id="model-results">${modelResultsHTML()}</div></section>
     </div>
+    ${backendsPanelHTML()}
     ${providerDialog()}${modelDialog()}${editModelDialog()}
   </section>`);
 }

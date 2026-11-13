@@ -3321,6 +3321,7 @@ test("models page paginates accounts, providers and models", async () => {
   assert.match(main, /id="model-search"/);
   assert.match(main, /data-1p-ignore/);
   assert.match(main, /readonly placeholder="搜索模型/);
+  assert.match(main, /backendsPanelHTML\(\)/);
   assert.match(main, /modelSearchUserInput/);
   assert.match(main, /nextView === "models"/);
   assert.match(main, /data-page-kind/);

@@ -14,7 +14,7 @@ await copyFile(resolve(root, "assets", "aha-logo.svg"), resolve(output, "assets"
 await copyFile(resolve(root, "assets", "aha2-logo.png"), resolve(output, "assets", "aha2-logo.png"));
 await copyFile(resolve(root, "assets", "aha2.ico"), resolve(output, "favicon.ico"));
 
-for (const name of ["api", "i18n", "icons", "types", "pet_bubble", "pet_navigation", "pet_approvals", "pet_workbench", "runtime_picker", "task_agents", "task_composer", "task_filters", "hardware_terminal", "hardware_panel", "hardware_resources", "mail_cards", "mail_editor", "mail_resources", "mail_task", "resources", "desktop_panel", "task_tools", "markdown", "conversation_ui", "ui_helpers", "model_health", "prompt_admin", "proxy_settings", "data_retention", "sync_settings", "codex_accounts", "knowledge_workspace", "channels", "assistant", "main"]) {
+for (const name of ["api", "i18n", "icons", "types", "pet_bubble", "pet_navigation", "pet_approvals", "pet_workbench", "runtime_picker", "task_agents", "task_composer", "task_filters", "hardware_terminal", "hardware_panel", "hardware_resources", "mail_cards", "mail_editor", "mail_resources", "mail_task", "resources", "desktop_panel", "task_tools", "markdown", "conversation_ui", "ui_helpers", "model_health", "prompt_admin", "proxy_settings", "data_retention", "sync_settings", "codex_accounts", "knowledge_workspace", "channels", "assistant", "backends", "main"]) {
   const input = await readFile(resolve(source, "src", `${name}.ts`), "utf8");
   const transformed = stripTypeScriptTypes(input, {mode: "transform", sourceMap: false});
   const outputName = name === "main" ? "app" : name;
@@ -63,6 +63,7 @@ const versionSource = await Promise.all([
   readFile(resolve(output, "knowledge_workspace.js")),
   readFile(resolve(output, "channels.js")),
   readFile(resolve(output, "assistant.js")),
+  readFile(resolve(output, "backends.js")),
   readFile(resolve(output, "styles.css")),
   readFile(resolve(output, "vendor", "xterm.js")),
   readFile(resolve(output, "vendor", "xterm.css")),
@@ -85,7 +86,8 @@ const versionedApp = (await readFile(appPath, "utf8"))
   .replaceAll('"./task_tools.js"', `"./task_tools.js?v=${version}"`)
   .replaceAll('"./markdown.js"', `"./markdown.js?v=${version}"`)
   .replaceAll('"./conversation_ui.js"', `"./conversation_ui.js?v=${version}"`)
-  .replaceAll('"./assistant.js"', `"./assistant.js?v=${version}"`);
+  .replaceAll('"./assistant.js"', `"./assistant.js?v=${version}"`)
+  .replaceAll('"./backends.js"', `"./backends.js?v=${version}"`);
 const versionedAppWithHelpers = versionedApp
   .replaceAll('"./ui_helpers.js"', `"./ui_helpers.js?v=${version}"`)
   .replaceAll('"./model_health.js"', `"./model_health.js?v=${version}"`)

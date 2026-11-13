@@ -59,3 +59,18 @@
 协议探测回答「这个网关是否提供某种 wire 协议」，已添加模型列表的「检测」按钮回答
 「当前账号此刻能否成功调用这个模型」，状态包含限流、鉴权、余额不足、模型不存在等账号级结论。
 接口见 `POST /api/v1/models/{id}/health-check`，说明见 `docs/model-health-check.md`。
+
+## Backend 不是 Provider，也不是模型协议
+
+Web 模型页底部的「AHA 支持的 Backend」列出可执行 Turn 的 agent 运行时。选择模型时，Backend
+决定由哪个 Agent CLI 跑任务；Provider 只描述模型来源（Base URL 与凭据），wire 协议描述请求
+格式。三者互不等同，模型行里的 `backend.protocol` 只是把当下组合展示出来。
+
+| Backend | identifier | 支持的协议 | 官方安装/文档 |
+| --- | --- | --- | --- |
+| Claude Code | `claude` | Anthropic Messages | https://code.claude.com/docs/en/overview |
+| Codex CLI | `codex` | Responses、Chat Completions | https://learn.chatgpt.com/docs/codex/cli |
+| DeepSeek Harness | `dsh` | Responses、Chat Completions、Anthropic Messages | https://deepseek-harness.github.io/deepseek-harness/ |
+
+该区块只做展示：不探测版本、不发网络请求、不改模型或 Provider 配置；安装命令以等宽文本给出，
+不会自动执行。实现与测试见 `web/src/backends.ts`、`web/tests/backends.test.mjs`。
