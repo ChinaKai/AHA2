@@ -1,6 +1,6 @@
 # Web 设计 token（阶段 2）
 
-视觉方向 B「温暖工作台」的基础层。所有 token 定义在 `web/src/styles.css` 的 `:root`，基础组件直接消费这些变量。本轮只改样式与 token，不改 DOM、布局、导航结构、文案、交互行为，也不做暗色模式。
+视觉方向 B「温暖工作台」的基础层。所有 token 定义在 `web/src/styles.css` 的 `:root`，基础组件直接消费这些变量。本轮只改样式与 token，不改 DOM、布局结构、导航结构、文案、交互行为，也不做暗色模式。允许的视觉调整包括颜色、字号、圆角、阴影、间距和状态外观；不移动、增删或重排页面结构。
 
 ## 颜色
 
@@ -110,7 +110,7 @@
 | 输入/选择/文本域 | `input`, `select`, `textarea` | `--color-border-strong`、`--color-surface`、`--radius-control`、`--focus-ring` |
 | 表格 | `table`, `th`, `td` | `--color-border`、`--color-text-muted`、`--font-size-11` |
 | 卡片/面板 | `.panel`, `.metrics > div`, `.task-card`, `.backend-card`, `.managed-profile-card`, `.channel-instance-card`, `.knowledge-entry-card`, `.skill-card` | `--radius-card`、`--color-surface`、`--shadow-xs` |
-| 徽标/状态 | `.status`, `.sync-status-pill`, `.backend-identifier`, `.backend-proto`, `.chips`, `.task-tool-badge` | `--radius-pill`、`--color-*-soft/ink`；待审批徽标用 `--color-warning` 底 + `--color-text-inverse` 字，导航待审批文字用 `--color-warning-ink`（浅底）或 `--color-warning-bright`（深色侧栏） |
+| 徽标/状态 | `.status`, `.sync-status-pill`, `.backend-identifier`, `.backend-proto`, `.chips`, `.task-tool-badge` | `--radius-pill`、`--color-*-soft/ink`；待审批徽标用 `--color-warning` 底 + `--color-text-inverse` 字，另加 `--color-warning-bright` 1px 外圈，保证在深色侧栏背景上仍有 ≥3:1 的非文本边界；导航待审批文字用 `--color-warning-ink`（浅底）或 `--color-warning-bright`（深色侧栏） |
 | 对话框 | `dialog`, `.dialog-head`, `.dialog-actions` | `--radius-popover`、`--shadow-dialog`、`--color-overlay` |
 | 浮层/菜单 | `.task-filter-menu`, `.conversation-filter-menu`, `.slash-command-menu`, `.hardware-title-group-menu`, `.desktop-popover` | `--radius-popover`、`--shadow-popover`、`--color-surface-raised` |
 | 消息条 | `.banner`, `.app-hydrating`, `.security-warning`, `.form-error` | 语义 `-soft/-ink`、`--radius-control` |
@@ -162,4 +162,4 @@ node --test web/tests/*.test.mjs
 go test ./internal/httpapi -count=1
 ```
 
-`web/tests/design_tokens.test.mjs` 检查核心 token、关键选择器是否使用 `var(--...)`、颜色对比度、焦点环、reduced-motion，以及 select 的 4px 左内边距（避免 Windows/Edge 原生选项弹层文字错位回归）。
+`web/tests/design_tokens.test.mjs` 检查核心 token、关键选择器是否使用 `var(--...)`、颜色对比度、焦点环、reduced-motion，以及 select 的 4px 左内边距（避免 Windows/Edge 原生选项弹层文字错位回归）。测试内置最小 CSS 层叠模型：递归解析 at-rule，归一化多行/逗号选择器，计算特异性，处理 `!important`，并按最终 `:root` 层叠值解析变量；对高特异性、多行选择器、at-rule 内规则、`!important` 和后置 `:root` 覆盖做回归。

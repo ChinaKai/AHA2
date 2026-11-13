@@ -2666,5 +2666,5 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 .sidebar nav button.has-pending, .sidebar nav button.has-pending.active { color: var(--color-warning-bright); }
 .sidebar nav button.has-pending:hover:not(:disabled) { color: var(--color-warning-bright); }
 .bottom-nav button.has-pending, .bottom-nav button.has-pending.active { color: var(--color-warning-ink); }
-.sidebar nav button .task-tool-badge { top: 50%; transform: translateY(-50%); right: 6px; overflow: visible; }
+.sidebar nav button .task-tool-badge { top: 50%; transform: translateY(-50%); right: 6px; overflow: visible; box-shadow: 0 0 0 1px var(--color-warning-bright); }
 .sidebar nav button[data-view="pet-workbench"] > span:not(.task-tool-badge) { padding-right: 24px; }
