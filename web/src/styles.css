@@ -3097,10 +3097,13 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
    kept on one line are wider than that and made the whole page scroll
    sideways. Fold the four equal entries into their own grid row across this
    band (and 641-760 where the sidebar is already gone) instead of only at
-   640px. */
+   640px. At the narrow end a column is ~112px, so the button text is sized
+   down and the badge may wrap under the label instead of pushing past the
+   button's own box. */
 @media (max-width: 1040px) {
   .knowledge-section-nav { order: 2; display: grid; flex: 1 1 100%; grid-template-columns: repeat(4,minmax(0,1fr)); width: 100%; }
-  .knowledge-section-nav button { min-width: 0; padding: 5px 2px; white-space: normal; line-height: 1.2; }
+  .knowledge-section-nav button { flex-wrap: wrap; row-gap: 2px; min-width: 0; padding: 5px 2px; font-size: 12px; white-space: normal; line-height: 1.2; }
+  .knowledge-section-nav .knowledge-pending-count { margin-left: 0; }
   .knowledge-search-box { order: 5; }
   .knowledge-topbar > #knowledge-refresh { order: 5; flex: 0 0 auto; }
 }

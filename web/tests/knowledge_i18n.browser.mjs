@@ -141,7 +141,7 @@ try {
 
   // English labels are widest: sample the band where the sidebar still leaves
   // the topbar narrow and the one-line nav used to force a page-wide overflow.
-  for (const width of [761, 800, 900, 960, 1040]) {
+  for (const width of [761, 762, 770, 780, 800, 900, 960, 1040]) {
     await page.setViewportSize({width, height: 1000});
     await page.waitForTimeout(100);
     const overflow = await page.evaluate(() => {

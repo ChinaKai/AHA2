@@ -3498,6 +3498,10 @@ test("knowledge section nav cannot overflow between 641 and 1040px in either loc
   assert.ok(band, "the 641-1040px band must own the folded nav rule");
   assert.match(band[0], /\.knowledge-section-nav \{ order: 2; display: grid; flex: 1 1 100%;[^}]*grid-template-columns: repeat\(4,minmax\(0,1fr\)\); width: 100%/);
   assert.match(band[0], /\.knowledge-section-nav button \{[^}]*min-width: 0;[^}]*white-space: normal/);
+  // At the narrow end "Pending proposals" plus its badge exceeds the ~112px
+  // column unless the label shrinks and the badge can fall to a second line.
+  assert.match(band[0], /\.knowledge-section-nav button \{[^}]*flex-wrap: wrap;[^}]*font-size: 12px/);
+  assert.match(band[0], /\.knowledge-section-nav \.knowledge-pending-count \{ margin-left: 0; \}/);
   // Search and refresh follow the folded nav instead of squeezing it.
   assert.match(band[0], /\.knowledge-search-box \{ order: 5; \}/);
   assert.match(band[0], /#knowledge-refresh \{ order: 5; flex: 0 0 auto; \}/);
