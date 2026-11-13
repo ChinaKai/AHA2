@@ -6,7 +6,6 @@ param(
 	[string]$InputFeishuPlugin = "",
 	[string]$InputFeishuManifest = "",
     [string]$OutputDir = "",
-	[string]$InputHelperDir = "",
     [string]$Version = "dev",
     [string]$ISCCPath = "",
 	[switch]$PerUser,
@@ -55,7 +54,6 @@ $trayInputPath = [IO.Path]::GetFullPath($InputTrayExe)
 $feishuPluginPath = if ([string]::IsNullOrWhiteSpace($InputFeishuPlugin)) { "" } else { [IO.Path]::GetFullPath($InputFeishuPlugin) }
 $feishuManifestPath = if ([string]::IsNullOrWhiteSpace($InputFeishuManifest)) { "" } else { [IO.Path]::GetFullPath($InputFeishuManifest) }
 $outputPath = [IO.Path]::GetFullPath($OutputDir)
-$helperInputPath = if ([string]::IsNullOrWhiteSpace($InputHelperDir)) { Join-Path $repo "dist\agent-proxy" } else { [IO.Path]::GetFullPath($InputHelperDir) }
 $normalizedVersion = $Version.Trim()
 if ($normalizedVersion.StartsWith("v", [StringComparison]::OrdinalIgnoreCase)) {
     $normalizedVersion = $normalizedVersion.Substring(1)
@@ -71,8 +69,6 @@ $requiredContracts = @(
     '#define SourceTrayExe',
     'DestName: "aha2.exe"',
     'DestName: "aha2-tray.exe"',
-    'SourceHelperDir',
-    'DestDir: "{app}\agent-proxy"',
 	'DestName: "Hysteria-LICENSE.txt"',
 	'DestName: "yaml-v3-LICENSE.txt"',
 	'DestName: "Xray-core-MPL-2.0.txt"',
@@ -138,10 +134,9 @@ foreach ($forbidden in @("service run --listen", "actions= restart/", "Configure
 if ($ValidateOnly) {
     $serverState = if (Test-Path -LiteralPath $inputPath -PathType Leaf) {"found"} else {"not present"}
     $trayState = if (Test-Path -LiteralPath $trayInputPath -PathType Leaf) {"found"} else {"not present"}
-	$helperState = if (Test-Path -LiteralPath (Join-Path $helperInputPath "manifest.json") -PathType Leaf) { "found" } else { "not present" }
 	$feishuState = if ($feishuPluginPath -and (Test-Path -LiteralPath $feishuPluginPath -PathType Leaf) -and (Test-Path -LiteralPath $feishuManifestPath -PathType Leaf)) { "found" } else { "not bundled" }
 	$mode = if ($PerUser) { "per-user" } else { "per-machine" }
-	Write-Output "Installer definition valid ($mode); server input $serverState; tray input $trayState; Agent proxy helpers $helperState; Feishu plugin $feishuState."
+	Write-Output "Installer definition valid ($mode); server input $serverState; tray input $trayState; Feishu plugin $feishuState."
     exit 0
 }
 
@@ -172,64 +167,6 @@ if ((Get-PEWindowsSubsystem $trayInputPath) -ne 2) {
     throw "AHA2 tray executable must use the Windows GUI subsystem (-H windowsgui): $trayInputPath"
 }
 
-# The helper bundle is what makes a Windows AHA able to serve a Linux workspace
-# over SSH stdio. Verify every entry before packaging so a broken or partial
-# bundle fails here instead of at Turn time on the owner's machine.
-function Assert-AgentProxyHelperBundle([string]$Directory) {
-    $manifestPath = Join-Path $Directory "manifest.json"
-    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
-        throw "Agent proxy helper manifest not found: $manifestPath (build it with scripts/build-agent-proxy-helpers.sh)"
-    }
-    try {
-        $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json
-    } catch {
-        throw "Agent proxy helper manifest is not valid JSON: $manifestPath"
-    }
-    if ($null -eq $manifest) {
-        throw "Agent proxy helper manifest is empty: $manifestPath"
-    }
-    $protocol = if ($null -ne $manifest.PSObject.Properties["protocol"]) { $manifest.protocol } else { $null }
-    if ($protocol -ne 1) {
-        throw "Agent proxy helper manifest protocol must be 1, got: $protocol"
-    }
-    $entries = if ($null -ne $manifest.PSObject.Properties["helpers"]) { @($manifest.helpers) } else { @() }
-    if ($entries.Count -eq 0) {
-        throw "Agent proxy helper manifest lists no platforms: $manifestPath"
-    }
-    $platforms = @()
-    foreach ($entry in $entries) {
-        foreach ($field in @("os", "arch", "file", "sha256")) {
-            if ($null -eq $entry.PSObject.Properties[$field]) {
-                throw "Agent proxy helper manifest entry has no $field: $manifestPath"
-            }
-        }
-        $osName = [string]$entry.os
-        $archName = [string]$entry.arch
-        $fileName = [string]$entry.file
-        if ([string]::IsNullOrWhiteSpace($osName) -or [string]::IsNullOrWhiteSpace($archName) -or [string]::IsNullOrWhiteSpace($fileName)) {
-            throw "Agent proxy helper manifest entry is incomplete: $manifestPath"
-        }
-        if ($osName -eq "windows") {
-            throw "Agent proxy helpers for Windows workspaces are not supported: $osName/$archName"
-        }
-        if ([IO.Path]::GetFileName($fileName) -ne $fileName) {
-            throw "Agent proxy helper file name must be a plain name: $fileName"
-        }
-        $filePath = Join-Path $Directory $fileName
-        if (-not (Test-Path -LiteralPath $filePath -PathType Leaf)) {
-            throw "Agent proxy helper listed in the manifest is missing: $filePath"
-        }
-        $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $filePath).Hash.ToLowerInvariant()
-        if ($actual -ne ([string]$entry.sha256).ToLowerInvariant()) {
-            throw "Agent proxy helper hash mismatch: $filePath"
-        }
-        $platforms += ($osName + "/" + $archName)
-    }
-    if (-not ($platforms -contains "linux/amd64")) {
-        throw "Agent proxy helper bundle has no linux/amd64 helper: $($platforms -join ', ')"
-    }
-}
-Assert-AgentProxyHelperBundle $helperInputPath
 if ([string]::IsNullOrWhiteSpace($ISCCPath)) {
     $command = Get-Command "ISCC.exe" -ErrorAction SilentlyContinue
     if ($command) {
@@ -261,7 +198,6 @@ $compilerArgs = @(
 	"/DMyAppVersion=$normalizedVersion",
 	"/DSourceExe=$inputPath",
 	"/DSourceTrayExe=$trayInputPath",
-	"/DSourceHelperDir=$helperInputPath",
 	"/DOutputDir=$outputPath"
 )
 if ($feishuPluginPath) {

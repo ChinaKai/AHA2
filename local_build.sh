@@ -176,7 +176,6 @@ go_bin="$repo_dir/.tools/go/bin/go"
 export GOCACHE="${GOCACHE:-$repo_dir/.tools/gocache-linux}"
 export GOPATH="${GOPATH:-$repo_dir/.tools/gopath-linux}"
 mkdir -p -- "$GOCACHE" "$GOPATH" "$repo_dir/dist"
-helper_dir="$repo_dir/dist/agent-proxy"
 if [[ -n "$proxy_url" ]]; then
   export HTTP_PROXY="$proxy_url"
   export HTTPS_PROXY="$proxy_url"
@@ -205,7 +204,6 @@ build_user_installer() {
     -RepoPath "$repo_win"
     -InputExe "$(wslpath -w "$repo_dir/dist/aha2-windows-amd64.exe")"
     -InputTrayExe "$(wslpath -w "$repo_dir/dist/aha2-tray-windows-amd64.exe")"
-    -InputHelperDir "$(wslpath -w "$helper_dir")"
     -OutputDir "$installer_win"
     -Version "$version"
     -PerUser
@@ -276,16 +274,6 @@ build_candidates() {
       -ldflags="-s -w -H windowsgui -X main.version=$normalized_version" \
       -o dist/aha2-tray-windows-amd64.exe ./cmd/aha-tray
   )
-  # Windows cannot upload its own aha2.exe to a Linux workspace. Build the
-  # packaged Linux helpers before packaging so a clean tree does not fail inside
-  # the installer builder's helper-bundle check.
-  printf '==> Build Agent API stdio helpers\n'
-  (
-    cd "$repo_dir"
-    GO_BIN="$go_bin" VERSION="$normalized_version" WEB_VERSION="$web_version" \
-      bash scripts/build-agent-proxy-helpers.sh "$helper_dir"
-  )
-
   if [[ -f "$repo_dir/plugins/feishu/go.mod" ]]; then
     printf '==> Test Feishu plugin\n'
     (cd "$repo_dir/plugins/feishu" && "$go_bin" test ./...)
@@ -315,10 +303,6 @@ NODE
   if [[ -f "$repo_dir/dist/plugins/feishu/windows-amd64/aha2-channel-feishu.exe" ]]; then
     assert_pe "$repo_dir/dist/plugins/feishu/windows-amd64/aha2-channel-feishu.exe"
   fi
-  [[ -f "$helper_dir/manifest.json" ]] || {
-    printf 'Agent proxy helper bundle is missing: %s/manifest.json\n' "$helper_dir" >&2
-    exit 1
-  }
   build_user_installer
 }
 

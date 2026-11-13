@@ -121,12 +121,11 @@ powershell.exe -ExecutionPolicy Bypass -File scripts\build-and-deploy-windows-us
 
 脚本只复用仓库现有的 WSL Go 工具链，自动读取真实发行版名称并预检磁盘空间；Web 与 Go 验证在同一轮各执行一次。已有已验证候选时传入 `-DeployOnly`，只执行安装、重启、健康和哈希校验。
 
-构建阶段还会调用 `scripts/build-agent-proxy-helpers.sh` 生成 `dist/agent-proxy`（Linux
-`linux/amd64`、`linux/arm64` helper 与 manifest）；`local_build.sh` 走同一入口。安装包会内置该目录，
-`build-windows-installer.ps1` 在打包前校验 manifest、平台与文件哈希。
-
-本机部署（原地升级）时的 helper 复制、备份与回滚由本机安装器负责，不在仓库脚本内；本仓库只负责
-编译并产出 helper 包。
+Agent API stdio helper 不再需要单独构建或安装：它是一个只用 Node 标准库的单文件脚本，通过
+`go:embed` 打在 `aha2.exe` 里，运行时才上传到工作区 `.aha2-context/share/agent-proxy/`。因此
+构建链路不产出 `dist/agent-proxy`，安装包也不带按平台的 helper；Windows 上的 AHA2 服务 Linux
+工作区时，只要工作区有可用的 node（backend 本身是 node 脚本时由 shebang 保证）。旧版本安装到
+`{app}\agent-proxy` 的预编译 helper 会在升级安装时删除。
 
 ### PowerShell 脚本编码
 
@@ -369,9 +368,8 @@ SHA256SUMS
 bash scripts/build-all.sh
 ```
 
-该脚本还会交叉编译 `linux/amd64` 与 `linux/arm64` 的 Agent API stdio helper，输出到
-`dist/agent-proxy/`（含 `manifest.json`）。Windows 安装包会把它安装到 `{app}\agent-proxy`，
-因此 Windows 上的 AHA2 可以直接服务 Linux 工作区，不需要手工提供 helper。
+该脚本不再产出预编译的 Agent API stdio helper：helper 是内嵌在 `aha2.exe` 里的 Node 脚本，
+安装包不含 `agent-proxy/` 目录。
 
 已有 Windows amd64 控制面和 tray 程序且安装了 Inno Setup 6 时，可构建安装包：
 

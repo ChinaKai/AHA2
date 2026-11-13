@@ -10,10 +10,6 @@
 #ifndef OutputDir
   #define OutputDir "..\..\dist\installer"
 #endif
-#ifndef SourceHelperDir
-  #define SourceHelperDir "..\..\dist\agent-proxy"
-#endif
-
 #define AppName "AHA2"
 #define ServiceName "AHA2"
 #define ListenAddress "127.0.0.1:8766"
@@ -59,10 +55,6 @@ RestartApplications=no
 [Files]
 Source: "{#SourceExe}"; DestDir: "{app}"; DestName: "aha2.exe"; Flags: ignoreversion
 Source: "{#SourceTrayExe}"; DestDir: "{app}"; DestName: "aha2-tray.exe"; Flags: ignoreversion
-; Prebuilt Agent API stdio helpers for workspaces whose platform is not the
-; host's (a Windows AHA serving a Linux workspace). The runtime verifies the
-; manifest's os/arch/sha256 before using one.
-Source: "{#SourceHelperDir}\*"; DestDir: "{app}\agent-proxy"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "Register-AHA2UserTask.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "Prepare-AHA2DataDir.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\third_party\hysteria\LICENSE.md"; DestDir: "{app}\licenses"; DestName: "Hysteria-LICENSE.txt"; Flags: ignoreversion
@@ -77,6 +69,10 @@ Source: "{#SourceFeishuManifest}"; DestDir: "{code:SelectedDataDir}\plugins\chan
 
 [InstallDelete]
 Type: files; Name: "{app}\Run-AHA2User.vbs"
+; Older releases installed prebuilt Agent API stdio helpers here. The helper is
+; now a Node script embedded in aha2.exe, so the directory is dead weight (tens
+; of megabytes) and is removed on upgrade.
+Type: filesandordirs; Name: "{app}\agent-proxy"
 ; The previous release created "启动 AHA2" pointing at schtasks.exe. Inno only
 ; removes shortcuts it created in this run, so without this the old entry survives
 ; an upgrade and the Start menu shows both it and the new entries.

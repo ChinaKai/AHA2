@@ -1,25 +1,52 @@
-# Agent API over SSH stdio（task-304）
+# Agent API over SSH stdio（task-304 / task-314）
 
 远端 Workspace 的 Agent 需要访问 AHA API。原有路径是 `ssh -R` 反向隧道，失败后回退到
 AHA 的局域网明文地址。本改动把 Agent API 放进 SSH 会话自带的 stdin/stdout：
 
-只要 SSH 能登录并执行命令，Agent API 就可用；不需要 sshd 放开端口转发，不需要远端改配置，
-也不需要 sudo，局域网里不再出现明文控制面地址。
+只要 SSH 能登录并执行命令，Agent API 就可能可用；不需要 sshd 放开端口转发，不需要远端改配置，
+也不需要 sudo。工作区里只落一个几十 KB 的 Node 脚本，不再出现完整服务端二进制。
 
-默认关闭。开关打开前，现有「反向隧道 → LAN 回退」行为逐字节保持不变。
+默认关闭。开关打开前，现有「反向隧道 → LAN 回退」行为保持不变。
+
+## 运行时选择顺序
+
+每个 Turn 只走一层；上一层失败时把原因写进日志再进入下一层，不会静默跳过：
+
+1. `AHA2_AGENT_PROXY_HELPER` 显式覆盖。文件被上传到工作区并直接执行；它必须自己接受
+   `--stdio --protocol 1`。这是给测试和特殊运行时留的逃生口，默认不使用。
+2. 内嵌 Node helper。先确认工作区有可用的 node：
+   - backend 命令是脚本时，读取其 shebang。`#!/usr/bin/env node` 或 `/path/to/node` 都按
+     node 解释器处理，并且优先于 PATH 里的 node——backend 能跑，就说明这个解释器一定存在。
+   - backend 不是 node 脚本（例如 claude 的原生 ELF）或 shebang 不是 node 时，执行
+     `command -v node`。
+   两者都失败时记录「工作区里没有 node」和 backend 名称，进入下一层。
+3. SSH 反向隧道。既有逻辑在 backend 命令上挂 `ReverseForward`（x/crypto/ssh 的
+   `tcpip-forward` 请求，等价于 `ssh -R 127.0.0.1:<port>:127.0.0.1:8766`），并先在工作区侧
+   通过隧道探测 `/healthz`。sshd 拒绝转发（`AllowTcpForwarding local` 等）时，拒绝原因写进
+   workspace 的检测记录（`capabilities.agent_api.tunnel_error`）并出现在回退日志里。
+4. LAN HTTP 明文兜底：既有检测流程继续按候选地址探测，选到 AHA 的局域网地址后按旧行为使用。
+
+日志依次可见：`Agent API stdio 代理不可用，尝试 SSH 反向隧道 ...：<helper 失败原因>`，
+然后是 `Agent API 回退到 SSH 反向隧道 ...` 或
+`Agent API SSH 反向隧道不可用（<拒绝原因>），回退 LAN 明文 ...`。
 
 ## 结构与代码
 
 | 位置 | 作用 |
 | --- | --- |
 | `internal/agentproxy/frame.go` | 帧编解码、上限校验 |
-| `internal/agentproxy/mux.go` | 连接号多路复用、半关闭、信用窗口背压 |
-| `internal/agentproxy/helper.go` | 工作区侧：loopback 监听、READY、accept→帧 |
+| `internal/agentproxy/mux.go` | 连接号多路复用、半关闭、信用窗口背压（AHA 侧） |
+| `internal/agentproxy/node_helper.js` | 工作区侧 Node helper：loopback 监听、READY、accept→帧 |
+| `internal/agentproxy/node_helper.go` | `go:embed` 脚本并暴露 sha256 |
 | `internal/agentproxy/client.go` | AHA 侧：解析 READY、按帧拨号 127.0.0.1:8766 |
-| `cmd/aha/agent_proxy.go` | 隐藏子命令 `aha2 agent-proxy --stdio --protocol 1` |
-| `internal/workspace/agent_proxy_helper.go` | helper 物化与校验 |
+| `internal/agentproxy/helper.go` | Go 版 helper 参考实现，仅用于显式覆盖与测试 |
+| `internal/workspace/agent_proxy_helper.go` | node 探测、helper 物化、manifest 与探活 |
 | `internal/workspace/agent_proxy.go` | 每条 Turn 的 SSH 会话、重连、回退 |
-| `internal/app/agent_api_proxy.go` | 开关判定、Turn 接线与关闭 |
+| `internal/app/agent_api_proxy.go` | 开关判定、逐层回退与日志 |
+
+`cmd/aha/agent_proxy.go` 的隐藏子命令保留为兼容入口：它不被默认使用，也不随发行包提供任何
+预编译 helper；只有显式把 `AHA2_AGENT_PROXY_HELPER` 指向一个实现了该子命令的 aha2 二进制时才会
+走到它。新方案默认使用 Node 脚本。
 
 ## 帧格式（protocol 1）
 
@@ -38,6 +65,9 @@ type(1) | stream_id(4) | payload_length(4) | payload
 长度超过 32 KiB、类型未知、控制帧长度不对，一律视为坏帧：整个多路复用器立刻拆掉，
 已打开的流全部 reset。帧长度是位置性的，出错后没有可靠的重同步点，硬撑只会把错误数据
 写进别的流。
+
+Node helper 对 socket 读到的数据按 32 KiB 切片后再发，因为 Node 单次最多读出 64 KiB；
+不切片会直接被 Go 侧判为坏帧。
 
 两处远端输入的上限同样重要：READY 行最多 256 字节，超出按握手失败处理；每条通道最多
 64 条并发流，超出的 OPEN 只回 RESET，不拨号也不建 goroutine。
@@ -61,54 +91,45 @@ type(1) | stream_id(4) | payload_length(4) | payload
 stdin 收到 EOF 即退出，不会留下孤儿进程。AHA 本身崩溃时 SSH 连接断开，效果相同。
 
 建立阶段失败（SSH 连不上、READY 超时 15s、协议版本不符、helper 退出）时最多尝试 3 次，
-退避 200ms/600ms；全部失败才回退，并把原因写进日志
-（`Agent API stdio 代理不可用，回退到反向隧道/LAN 流程 ...`）。回退后走原来的
-`AgentAPIURLForWorkspace`，也就是隧道→LAN 的既有逻辑。Turn 已经开始运行后隧道再断，
+退避 200ms/600ms；全部失败才回退，并把原因写进日志。Turn 已经开始运行后隧道再断，
 不会静默换地址（URL 已经注入给 Agent），只会让在途连接 reset。
 
 开关判定（`prepareAgentAPIForTurn`）：
 
 - 开关关闭，或不是 SSH 工作区 → 完全走旧逻辑。
 - 生效地址不是 loopback（局域网地址或外部 https）→ 不启动代理：工作区本来就能直连。
-- 生效地址是 loopback → 物化 helper、起隧道，Turn 使用 `<scheme>://127.0.0.1:<远端端口>`。
-  scheme 沿用生效地址：隧道只搬字节，`https://127.0.0.1` 的 TLS 会端到端透传，
-  不会被悄悄降级成明文。
-- 代理成功时不再计算 `ReverseForward`：否则反向隧道会指向代理自己的远端端口。
+- 生效地址是 loopback → 按上面的顺序尝试 stdio（显式覆盖 → Node helper → 反向隧道 → LAN）。
+  stdio 成功时 Turn 使用 `<scheme>://127.0.0.1:<远端端口>`；scheme 沿用生效地址，
+  `https://127.0.0.1` 的 TLS 会端到端透传，不会被悄悄降级成明文。
+- stdio 成功时不再计算 `ReverseForward`：否则反向隧道会指向代理自己的远端端口。
+
+backend 命令从 runtime snapshot 的 backend 名解析（`BackendBinaryResolver`，由
+`internal/execution.Executor` 实现），只作为 shebang 提示；拿不到时退回 PATH 探测。
 
 ## helper 物化
 
 `<task-workdir>/.aha2-context/share/agent-proxy/`：
 
-- `manifest.json`：`protocol/version/os/arch/sha256/updated_at`
-- `aha2-agent-proxy-<version>-<sha8>`，权限 0700
+- `manifest.json`：`protocol/version/runtime/sha256/updated_at`。`runtime` 为 `node`（内嵌脚本）
+  或 `exec`（显式覆盖）。
+- `aha2-agent-proxy-<version>-<sha8>.js`（Node）或 `aha2-agent-proxy-<version>-<sha8>`（exec），
+  权限 0700。
 
-复用条件：manifest 的 protocol/version/os/arch/sha256 全部一致，且远端文件重新算出的
+复用条件：manifest 的 protocol/version/runtime/sha256 全部一致，且远端文件重新算出的
 sha256 也一致。只信 manifest 不信文件是不够的——半写入或被替换的文件不能被当成合法 helper 执行。
 manifest 读取在远端先查大小（>4 KiB 直接拒绝），不把工作区给的任意长度内容拉回内存。
 
 上传顺序：临时文件 → `chmod 700` → 远端 sha256 校验 → 原子 `mv` → 保留当前与上一代 →
 最后原子写 manifest。并发 ensure 允许重复上传：rename 是原子的，manifest 最后写，
 读者不会看到「manifest 指向还不存在的文件」。旧一代保留一份给正在运行的 helper
-（POSIX inode 语义），更早的删除。
+（POSIX inode 语义），更早的删除；同一 glob 会顺带清掉旧版本安装留下的预编译 helper。
+
+物化后探活：Node 用探测到的解释器执行 `node <script> --version`，输出必须含
+`protocol=1`；显式覆盖执行 `<helper> version`。noexec 挂载或 node 是坏 shim 会在这里失败。
 
 回退顺序：共享目录 → 本 Task 的 `scratch/agent-proxy` → 工作区 `/tmp/aha2-agent-proxy-<uid>`。
 放在 scratch 里是为了让 `RemoveTaskScratch` 收尾时把它一起删掉，不按 Task 留副本。
-每次物化后执行 `<helper> version` 探活，noexec 挂载会在这里失败并继续回退；
 回退原因写进日志。写目录前检查它不是符号链接、且属于当前用户，临时文件用 `mktemp` 创建。
-
-helper 的来源按以下顺序选择：
-
-1. `AHA2_AGENT_PROXY_HELPER` 指定的预编译 helper。它的平台由提供者决定，manifest 记为
-   工作区平台，`<helper> version` 探活仍会证明它能不能真的跑起来。
-2. 工作区平台与本机相同时，直接使用当前 aha2 可执行文件。
-3. 平台不同时，使用安装目录旁 `agent-proxy/` 里对应平台的发包 helper。发行包在构建时
-   交叉编译 `linux/amd64` 与 `linux/arm64`，`manifest.json` 记录每个文件的
-   `os/arch/sha256`；运行时先校验 manifest 的 protocol、平台与文件哈希，再上传。
-   Windows 宿主配 Linux 工作区默认走这条路径，不再需要用户手工准备 helper。
-
-三条路径都不可用时，错误信息写明缺失的平台、查找过的 manifest/文件路径和恢复办法
-（重新安装或构建包含该平台的发行包，或显式设置 `AHA2_AGENT_PROXY_HELPER`），随后照常
-回退到反向隧道/LAN 并写日志。
 
 共享目录不在 Task 清理范围内：`RemoveTaskScratch` 只删 `.aha2-context/<task>/scratch`，
 `share/` 随工作区一起删除；scratch 里的回退副本随 Task 收尾删除。
@@ -117,6 +138,8 @@ helper 的来源按以下顺序选择：
 
 - Token 仍只经 `AHA2_AGENT_API_TOKEN`（HTTP Authorization 头）传递，不进 argv、不落日志。
 - helper 只在工作区 loopback 监听随机端口；AHA 侧不新增监听端口。
+- 工作区里不再有可 serve、可读本地文件与网络的完整服务端二进制；helper 只用 Node 标准库
+  （`net`、`events`），只做 stdio↔loopback 转发。
 - 不需要修改远端 sshd，也不需要 sudo。
 - 隐藏子命令不写入文档，不参与 `serve` 参数解析。
 
@@ -124,16 +147,15 @@ helper 的来源按以下顺序选择：
 
 - `go test ./internal/agentproxy`：帧往返、坏帧/超长帧、8 路并发、半关闭、2×窗口以上的
   数据、单流故障隔离、真实 HTTP 请求、READY 超时与协议不符、接收侧超窗 reset、
-  单通道 64 流上限、超长 READY 行拒绝、https scheme 保留。
-- `go test ./internal/workspace`：物化复用、版本升级与保留、4 路并发 ensure 且文件与
-  manifest 一致、清理不删 `share/`、SSH 会话上的真实 HTTP 端到端、helper 缺失时有限重试后回退、
-  显式 helper 跳过架构比较、超大 manifest 被覆盖；以及 Windows 宿主 + linux/amd64 工作区
-  选中内置 helper、manifest 平台与远端一致、tar 往返后 helper 仍可执行、缺平台与
-  sha256 不符时的报错文案。
-- `go test ./internal/app`：开关关闭行为不变、开启但不可达时回退并记录原因、非 loopback 地址不建隧道。
-- `go test ./internal/store ./internal/httpapi`：schema v133、设置持久化与 API 解析。
-- `go test -race ./internal/agentproxy` 通过。
-- `node --test web/tests/agent_api_stdio_proxy.test.mjs`：勾选框从 FormData 读取，
-  以及设置保存确实发送 `stdio_proxy`。
+  单通道 64 流上限、超长 READY 行拒绝、https scheme 保留；以及 Node helper 作为真实进程
+  的 HTTP/并发/多窗口/坏帧/退出测试（无 node 时跳过）。
+- `go test ./internal/workspace`：Node helper 物化与复用、版本升级与保留、4 路并发 ensure、
+  manifest 字段（protocol/version/runtime/sha256）与文件哈希一致、清理不删 `share/`、
+  SSH 会话上的 Node helper 真实 HTTP 端到端、显式覆盖走 exec runtime、node 探测的
+  shebang 优先/PATH 兜底/缺失原因。
+- `go test ./internal/app`：开关关闭行为不变、stdio 成功路径、显式覆盖路径、
+  node 失败 → 隧道 → LAN 的选择顺序与原因、非 loopback 地址不建隧道。
+- 变异验证：删掉 READY 协议检查、删掉某一层回退、把 socket 数据恢复成 64 KiB 单帧，
+  对应测试都会变红。
 
 不部署、不重启本机 AHA2、不改生产库、不改远端 sshd。

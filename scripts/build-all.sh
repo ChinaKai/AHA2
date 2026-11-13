@@ -27,8 +27,3 @@ for target in linux/amd64 linux/arm64 windows/amd64 windows/arm64 darwin/amd64 d
     CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" "$go_bin" build -trimpath -ldflags="-s -w -H windowsgui" -o "dist/aha2-tray-${os}-${arch}.exe" ./cmd/aha-tray
   fi
 done
-
-# Helpers for workspaces whose platform differs from the host (Windows AHA
-# serving a Linux workspace). They are installed next to the Windows executable.
-GO_BIN="$go_bin" VERSION="$base_version" WEB_VERSION="$web_version" \
-  bash "$repo/scripts/build-agent-proxy-helpers.sh" "$repo/dist/agent-proxy"
