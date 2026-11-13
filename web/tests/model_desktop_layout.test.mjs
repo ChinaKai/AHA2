@@ -109,7 +109,7 @@ test("the health badge, check, edit and delete share one action cell", async () 
   assert.match(row, /data-delete-model="\$\{item\.id\}"/);
 });
 
-test("the table is fixed-layout with an ellipsized name and a bounded action column", async () => {
+test("the three-column table bounds the action cell and keeps a name floor", async () => {
   const css = await readFile(resolve(root, "src", "styles.css"), "utf8");
   assert.match(css, /\.models-table-wrap \.models-table \{ table-layout: fixed; \}/);
   const first = ruleFor(
@@ -123,6 +123,14 @@ test("the table is fixed-layout with an ellipsized name and a bounded action col
   );
   assert.match(actions, /width: 272px;/);
   assert.match(actions, /text-align: right;/);
+  // 34px + 272px leaves the name the rest; the 1040px provider-stack breakpoint
+  // and this floor stop the name from being squeezed to 0px at 761-1000px.
+  const [wide = ""] = mediaBlocks(css, "min-width: 761px");
+  assert.notEqual(wide, "", "a min-width: 761px block must exist");
+  assert.match(
+    ruleFor(wide, ".models-table-wrap .models-table .model-name-cell"),
+    /min-width: 120px;/,
+  );
 
   assert.match(ruleFor(css, ".models-table-wrap .models-table .model-row"), /height: 48px;/);
   assert.match(ruleFor(css, ".models-table-wrap .models-table .model-name-cell"), /overflow: hidden;/);
@@ -147,9 +155,20 @@ test("the action group never wraps and keeps 36px touch targets", async () => {
   assert.match(ruleFor(css, ".model-row-actions .icon-button"), /min-height: 36px;/);
   assert.match(ruleFor(css, ".model-row-actions .icon-button"), /min-width: 36px;/);
   assert.match(ruleFor(css, ".model-row-actions .health-check-button"), /min-height: 36px;/);
-  // The evidence panel opens out of flow so the row cannot grow past 52px.
-  assert.match(css, /\.model-health-detail \{ position: relative;[^}]*margin-top: 0;/);
-  assert.match(css, /\.model-health-detail small \{[^}]*position: absolute;/);
+  // Health evidence moved into the badge tooltip, so no expandable control can
+  // widen the action cell or grow the 48px row.
+  assert.doesNotMatch(css, /model-health-detail/);
+});
+
+test("the provider sidebar stacks before the Models panel becomes too narrow", async () => {
+  const css = await readFile(resolve(root, "src", "styles.css"), "utf8");
+  const [narrow = ""] = mediaBlocks(css, "max-width: 1040px");
+  assert.notEqual(narrow, "", "a max-width: 1040px block must exist");
+  assert.match(narrow, /\.provider-layout \{ grid-template-columns: minmax\(0,1fr\); \}/);
+  // Above the breakpoint the two-column split leaves the name a readable floor.
+  const [wide = ""] = mediaBlocks(css, "min-width: 761px");
+  assert.notEqual(wide, "", "a min-width: 761px block must exist");
+  assert.match(ruleFor(wide, ".models-table-wrap .models-table .model-name-cell"), /min-width: 120px;/);
 });
 
 test("the old seven-column desktop contract is gone", async () => {

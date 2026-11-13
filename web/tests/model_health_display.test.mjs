@@ -71,21 +71,24 @@ test("checking disables only that row's button and shows progress", () => {
   assert.doesNotMatch(other, /disabled/);
 });
 
-test("the detail block exposes HTTP status, endpoint and body without markup injection", () => {
-  const html = helpers.renderModelHealthDetail({
+test("the badge tooltip exposes HTTP status, endpoint and body without markup injection", () => {
+  const html = helpers.renderModelHealthBadge({
     status: "rejected",
     http_status: 400,
     endpoint: "https://gateway.example/v1/responses",
     detail: '<script>alert("x")</script> invalid max_tokens',
   });
-  assert.match(html, /<summary>详情<\/summary>/);
+  assert.match(html, /title="/);
   assert.match(html, /HTTP 400/);
   assert.match(html, /https:\/\/gateway\.example\/v1\/responses/);
   assert.doesNotMatch(html, /<script>/);
   assert.match(html, /&lt;script&gt;/);
-  // Nothing to expand for a healthy or in-flight row.
-  assert.equal(helpers.renderModelHealthDetail({status: "ok"}), "");
-  assert.equal(helpers.renderModelHealthDetail({status: "checking"}), "");
+  // A healthy or in-flight row keeps the plain hint; nothing extra to show.
+  const ok = helpers.renderModelHealthBadge({status: "ok"});
+  assert.doesNotMatch(ok, /HTTP|https?:/);
+  const checking = helpers.renderModelHealthBadge({status: "checking"});
+  assert.match(checking, /检测中/);
+  assert.doesNotMatch(checking, /HTTP|https?:/);
 });
 
 test("editing a model or provider clears stale health results", async () => {

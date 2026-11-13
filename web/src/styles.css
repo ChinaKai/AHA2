@@ -1300,16 +1300,11 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 .model-health { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .model-health .status { white-space: nowrap; }
 .model-health .health-check-button { padding: 3px 8px; font-size: 10px; }
-/* The expandable evidence lives inside the row's health cell. It is positioned
-   out of flow so opening it cannot stretch the compact 48px row; the summary
-   stays on the line and the panel opens over the rows below. */
-.model-health-detail { position: relative; display: inline-flex; align-items: center; margin-top: 0; }
-.model-health-detail summary { color: var(--muted); font-size: 10px; white-space: nowrap; cursor: pointer; }
-.model-health-detail small { display: block; position: absolute; top: calc(100% + 4px); right: 0; z-index: 20; width: max-content; max-width: min(260px, 62vw); margin-top: 0; padding: 8px 10px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-surface); box-shadow: 0 6px 18px rgba(15, 23, 42, .16); color: var(--muted); font-size: 10px; text-align: left; white-space: normal; word-break: break-all; }
 /* The model list is one compact line at every width: checkbox, name, then the
    health badge, check button, edit and delete in a single actions cell. Only
-   three table columns exist, so the table fits any desktop width instead of
-   clipping availability/action cells, and the row height stays near a button. */
+   three table columns exist, so the fixed widths are 34px + 272px and the name
+   takes the rest. The provider layout stacks below 1041px to guarantee the name
+   column room; the 120px floor below is a backstop for the two-column range. */
 .models-table-wrap .models-table { table-layout: fixed; }
 .models-table-wrap .models-table th,
 .models-table-wrap .models-table td { padding: 6px 10px; vertical-align: middle; }
@@ -1324,6 +1319,11 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 .models-table-wrap .models-table .model-name-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .models-table-wrap .models-table .model-name-cell .capability-badge { flex: 0 0 auto; }
 .models-table-wrap .models-table .model-actions-cell { white-space: nowrap; }
+/* Backstop for the two-column range at 1041px+: the name keeps a readable
+   floor even if a future change widens the action cell. */
+@media (min-width: 761px) {
+  .models-table-wrap .models-table .model-name-cell { min-width: 120px; }
+}
 .model-row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
 .model-row-actions .model-health-cell { display: inline-flex; align-items: center; min-width: 0; }
 .model-row-actions .model-health { flex-wrap: nowrap; }
@@ -1747,6 +1747,15 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 .realtime-state.live { color: var(--green); }
 .realtime-state.connecting { color: var(--amber); }
 .realtime-state.fallback { color: #1d4ed8; }
+
+/* With the 228px app sidebar still visible, a two-column provider layout leaves
+   the Models panel only ~270-440px between 761 and 1040px: too narrow for the
+   checkbox + name + health/actions row. Stack the Providers sidebar above the
+   panel through 1040px; from 1041px up the 60% right column leaves the name a
+   readable 140px+ floor. */
+@media (max-width: 1040px) {
+  .provider-layout { grid-template-columns: minmax(0,1fr); }
+}
 
 @media (max-width: 980px) {
   .sync-domain-grid { grid-template-columns: repeat(3,minmax(0,1fr)); }
