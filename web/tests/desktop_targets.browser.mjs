@@ -237,52 +237,30 @@ try {
   await page.click("#desktop-refresh");
   await page.waitForTimeout(400);
   assert.equal(requests.length, writesBeforeSelection, "selection/refresh must not switch");
-  await page.click('[data-desktop-mode="background"]');
-  assert.equal(await remoteOption.evaluate(node => node.disabled), true, JSON.stringify(await page.evaluate(() => ({
-    mode: document.querySelector('[data-desktop-mode="background"]').getAttribute("aria-pressed"),
-    active: document.activeElement?.outerHTML, options: document.querySelector("#desktop-window").innerHTML,
-  }))));
-  assert.equal(await page.locator("#desktop-share").isDisabled(), true);
-  // Background availability must not depend on permission to switch desktops.
-  backgroundDesktopSupported = true;
-  targets.desktop_switch_supported = false;
-  await page.click("#desktop-refresh");
-  await page.waitForFunction(() => !document.querySelector("#desktop-share").disabled);
-  assert.equal(await remoteOption.evaluate(node => node.disabled), false);
-  assert.equal(await page.locator('#desktop-window optgroup[label="已有桌面"]').count(), 0);
-  assert.equal(await page.locator("#desktop-new-desktop").isDisabled(), true);
-  const beforeBackgroundConfirm = confirmations.length;
-  const writesBeforeBackground = requests.length;
-  await page.click("#desktop-share");
-  await page.waitForFunction(() => document.querySelector("#desktop-title").textContent === "Review Editor");
-  assert.equal(confirmations.length, beforeBackgroundConfirm + 1);
-  assert.match(confirmations.at(-1), /不切换桌面、不激活窗口/);
-  assert.match(confirmations.at(-1), /所属桌面「Review & notes」后台操作，不切换到该桌面/);
-  assert.doesNotMatch(confirmations.at(-1), /将切换到窗口所属桌面|会移动宿主鼠标/);
-  assert.equal(requests.length, writesBeforeBackground + 1);
-  assert.deepEqual(requests.at(-1).payload.target, {kind: "window", window_id: "opaque-other-desktop"});
-  assert.equal(requests.at(-1).payload.mode, "background");
-  assert.equal(requests.at(-1).payload.confirm_foreground, false);
-  assert.equal(requests.at(-1).payload.confirm_shared, true);
-  assert.equal(await page.locator("#desktop-focus").isDisabled(), true);
-  assert.equal(await page.locator("[data-desktop-action]").count(), 0, "available window is not a promise of controls");
-  await page.screenshot({path: resolve(output, "background-cross-desktop.png")});
-  await open("targets");
-  await page.click('[data-desktop-mode="foreground"]');
+  // Sharing is foreground-only now: the background/foreground mode switch is
+  // gone, so a window on another desktop depends on the desktop-switch grant.
+  assert.equal(await page.locator("[data-desktop-mode]").count(), 0, "the removed sharing-mode switch is still rendered");
   targets.desktop_switch_supported = false;
   await page.click("#desktop-refresh");
   await page.waitForFunction(() => document.querySelector("#desktop-share").disabled);
-  assert.equal(await remoteOption.evaluate(node => node.disabled), true);
+  assert.equal(await remoteOption.evaluate(node => node.disabled), true, JSON.stringify(await page.evaluate(() => ({
+    options: document.querySelector("#desktop-window").innerHTML,
+  }))));
+  assert.equal(await page.locator('#desktop-window optgroup[label="已有桌面"] option[value*="desktop-b"]').evaluate(node => node.disabled), true);
+  assert.equal(await page.locator("#desktop-new-desktop").isDisabled(), true);
   targets.desktop_switch_supported = true;
   await page.click("#desktop-refresh");
   await page.waitForFunction(() => !document.querySelector("#desktop-share").disabled);
+  assert.equal(await remoteOption.evaluate(node => node.disabled), false);
   const beforeRemoteConfirm = confirmations.length;
   await page.click("#desktop-share");
   await page.waitForFunction(() => document.querySelector("#desktop-title").textContent === "Review Editor");
   assert.equal(confirmations.length, beforeRemoteConfirm + 1);
   assert.match(confirmations.at(-1), /将切换到窗口所属桌面：Review & notes/);
+  assert.equal(requests.at(-1).payload.mode, "foreground");
   assert.deepEqual(requests.at(-1).payload.target, {kind: "window", window_id: "opaque-other-desktop"});
   assert.equal(requests.at(-1).payload.confirm_foreground, true);
+  assert.match(await page.locator("#desktop-mode-status").textContent(), /前台/);
   // Return via the public mock selection path, preserving the rest of the suite.
   await open("targets");
   await page.selectOption("#desktop-window", choice("window", "opaque-window-one"));

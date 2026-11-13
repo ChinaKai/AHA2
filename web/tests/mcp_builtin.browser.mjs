@@ -115,6 +115,9 @@ try {
 
   await channelRow.locator("[data-mcp-detail]").click();
   await page.waitForSelector("#mcp-detail-dialog[open]", {timeout: 5000});
+  // The dialog shows a loading placeholder and fills the body after the detail
+  // request resolves; read it only once that render has happened.
+  await page.waitForFunction(() => document.querySelector("#mcp-detail-body")?.textContent?.includes("由当前 Turn 动态注入"), null, {timeout: 15000});
   const detail = await page.locator("#mcp-detail-body").textContent();
   assert.match(detail, /由当前 Turn 动态注入/);
   assert.match(detail, /channel_reply/);
