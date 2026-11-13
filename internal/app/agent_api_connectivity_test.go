@@ -16,6 +16,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/secrets"
 	"github.com/ChinaKai/AHA2/internal/store"
+	workspacepkg "github.com/ChinaKai/AHA2/internal/workspace"
 )
 
 func newAgentAPIConnectivityService(t *testing.T) (*Service, *store.Store) {
@@ -36,6 +37,11 @@ func newAgentAPIConnectivityService(t *testing.T) (*Service, *store.Store) {
 	// view. Tests pin both to nothing by default so a case that cares opts in.
 	service.agentAPILocalHostsFn = func() []string { return nil }
 	service.agentAPIWorkspaceHostsFn = func(context.Context, domain.Workspace) []string { return nil }
+	// Stdio detection is a real SSH round trip. Tests that do not care about it
+	// make it fail fast; the ones that do override this seam.
+	service.agentAPIStdioProbeFn = func(context.Context, domain.Workspace, string) (workspacepkg.AgentAPIStdioResult, error) {
+		return workspacepkg.AgentAPIStdioResult{}, errors.New("stdio 不可用（测试默认）")
+	}
 	return service, database
 }
 
@@ -568,5 +574,186 @@ func TestPlaintextProbeBoundaryIsSSHOnlyAndLANOnly(t *testing.T) {
 	}
 	if _, _, err := service.ValidateWorkspaceAgentAPI(ctx, "manual", lanURL); err == nil {
 		t.Fatal("manual workspace URL accepted a plaintext LAN URL")
+	}
+}
+
+// TestDetectSSHWorkspaceAgentAPIPrefersStdio pins the new first stage: an SSH
+// workspace is probed over the stdio helper before the reverse tunnel and any
+// LAN candidate are even considered.
+func TestDetectSSHWorkspaceAgentAPIPrefersStdio(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	service, database := newAgentAPIConnectivityService(t)
+	defer database.Close()
+	var bases []string
+	service.agentAPIStdioProbeFn = func(_ context.Context, _ domain.Workspace, base string) (workspacepkg.AgentAPIStdioResult, error) {
+		bases = append(bases, base)
+		return workspacepkg.AgentAPIStdioResult{URL: "http://127.0.0.1:41000", Runtime: "node"}, nil
+	}
+	probe := &recordingAgentAPIProbe{ok: func(string) bool {
+		t.Error("a candidate was probed after stdio already succeeded")
+		return false
+	}}
+	service.agentAPIProbeFn = probe.probe
+	item := service.DetectWorkspaceAgentAPI(ctx, domain.Workspace{
+		Transport: "ssh", RootPath: "/repo", Health: "ready", AgentAPIMode: "auto", Capabilities: map[string]any{},
+	})
+	if item.AgentAPIStatus != "ready" || item.AgentAPIResolvedURL != "http://127.0.0.1:8766" || item.AgentAPIError != "" {
+		t.Fatalf("detected=%#v", item)
+	}
+	if len(bases) != 1 || bases[0] != "http://127.0.0.1:8766" {
+		t.Fatalf("stdio bases = %v, want the loopback base", bases)
+	}
+	capability, _ := item.Capabilities["agent_api"].(map[string]any)
+	if capability["status"] != "ready" || capability["via"] != "stdio" || capability["runtime"] != "node" || capability["proxy_url"] != "http://127.0.0.1:41000" {
+		t.Fatalf("capability=%#v", capability)
+	}
+}
+
+// TestDetectSSHWorkspaceAgentAPIFallsBackFromStdio covers a workspace without a
+// usable helper: the stdio reason is kept, the tunnel still wins, and the
+// recorded capability names both layers.
+func TestDetectSSHWorkspaceAgentAPIFallsBackFromStdio(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	service, database := newAgentAPIConnectivityService(t)
+	defer database.Close()
+	service.agentAPIStdioProbeFn = func(context.Context, domain.Workspace, string) (workspacepkg.AgentAPIStdioResult, error) {
+		return workspacepkg.AgentAPIStdioResult{}, errors.New("准备 helper：Node helper 不可用：工作区里没有 node")
+	}
+	probe := &recordingAgentAPIProbe{ok: func(candidate string) bool { return candidate == "http://127.0.0.1:8766" }}
+	service.agentAPIProbeFn = probe.probe
+	item := service.DetectWorkspaceAgentAPI(ctx, domain.Workspace{
+		Transport: "ssh", RootPath: "/repo", Health: "ready", AgentAPIMode: "auto", Capabilities: map[string]any{},
+	})
+	if item.AgentAPIStatus != "ready" || item.AgentAPIResolvedURL != "http://127.0.0.1:8766" {
+		t.Fatalf("detected=%#v", item)
+	}
+	if len(probe.calls) != 1 || probe.calls[0] != "http://127.0.0.1:8766" {
+		t.Fatalf("probe calls = %v, want only the tunnel after stdio failed", probe.calls)
+	}
+	capability, _ := item.Capabilities["agent_api"].(map[string]any)
+	if capability["via"] != "tunnel" {
+		t.Fatalf("capability=%#v", capability)
+	}
+	if stdioError, _ := capability["stdio_error"].(string); !strings.Contains(stdioError, "没有 node") {
+		t.Fatalf("stdio failure was not recorded: %#v", capability)
+	}
+}
+
+// TestDetectFailureNamesStdioStage checks that a total failure reports the stdio
+// stage and its reason rather than silently jumping to tunnel/LAN.
+func TestDetectFailureNamesStdioStage(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	service, database := newAgentAPIConnectivityService(t)
+	defer database.Close()
+	service.agentAPIStdioProbeFn = func(context.Context, domain.Workspace, string) (workspacepkg.AgentAPIStdioResult, error) {
+		return workspacepkg.AgentAPIStdioResult{}, errors.New("准备 helper：工作区里没有 node")
+	}
+	service.agentAPILocalHostsFn = func() []string { return []string{"192.168.7.44"} }
+	probe := &recordingAgentAPIProbe{ok: func(string) bool { return false }}
+	service.agentAPIProbeFn = probe.probe
+	item := service.DetectWorkspaceAgentAPI(ctx, domain.Workspace{
+		Transport: "ssh", RootPath: "/repo", Health: "ready", AgentAPIMode: "auto", Capabilities: map[string]any{},
+	})
+	if item.AgentAPIStatus != "error" {
+		t.Fatalf("detected=%#v", item)
+	}
+	for _, stage := range []string{"SSH stdio", "隧道", "LAN 明文"} {
+		if !strings.Contains(item.AgentAPIError, stage) {
+			t.Fatalf("error %q does not name stage %q", item.AgentAPIError, stage)
+		}
+	}
+	if !strings.Contains(item.AgentAPIError, "没有 node") {
+		t.Fatalf("error %q does not carry the stdio reason", item.AgentAPIError)
+	}
+}
+
+// TestDetectNonSSHWorkspaceSkipsStdio keeps the stage SSH-only: a native
+// workspace must not pay for an SSH helper it can never use.
+func TestDetectNonSSHWorkspaceSkipsStdio(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	service, database := newAgentAPIConnectivityService(t)
+	defer database.Close()
+	service.agentAPIStdioProbeFn = func(context.Context, domain.Workspace, string) (workspacepkg.AgentAPIStdioResult, error) {
+		t.Error("stdio was attempted for a non-SSH workspace")
+		return workspacepkg.AgentAPIStdioResult{}, nil
+	}
+	probe := &recordingAgentAPIProbe{ok: func(candidate string) bool { return candidate == "http://127.0.0.1:8766" }}
+	service.agentAPIProbeFn = probe.probe
+	item := service.DetectWorkspaceAgentAPI(ctx, domain.Workspace{
+		Transport: "native", RootPath: t.TempDir(), Health: "ready", AgentAPIMode: "auto", Capabilities: map[string]any{},
+	})
+	if item.AgentAPIStatus != "ready" {
+		t.Fatalf("detected=%#v", item)
+	}
+	capability, _ := item.Capabilities["agent_api"].(map[string]any)
+	if capability["via"] != "direct" {
+		t.Fatalf("capability=%#v", capability)
+	}
+}
+
+// TestDetectStdioStageIsBounded proves the stage cannot hold the endpoint: a
+// probe that never answers is cancelled by the stage budget and the tunnel
+// candidates still run.
+func TestDetectStdioStageIsBounded(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	service, database := newAgentAPIConnectivityService(t)
+	defer database.Close()
+	service.agentAPIStdioProbeBudget = 25 * time.Millisecond
+	service.agentAPIStdioProbeFn = func(ctx context.Context, _ domain.Workspace, _ string) (workspacepkg.AgentAPIStdioResult, error) {
+		<-ctx.Done()
+		return workspacepkg.AgentAPIStdioResult{}, ctx.Err()
+	}
+	probe := &recordingAgentAPIProbe{ok: func(candidate string) bool { return candidate == "http://127.0.0.1:8766" }}
+	service.agentAPIProbeFn = probe.probe
+	start := time.Now()
+	item := service.DetectWorkspaceAgentAPI(ctx, domain.Workspace{
+		Transport: "ssh", RootPath: "/repo", Health: "ready", AgentAPIMode: "auto", Capabilities: map[string]any{},
+	})
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("the stdio stage was not bounded: %s", elapsed)
+	}
+	if item.AgentAPIStatus != "ready" {
+		t.Fatalf("detected=%#v", item)
+	}
+	capability, _ := item.Capabilities["agent_api"].(map[string]any)
+	if stdioError, _ := capability["stdio_error"].(string); !strings.Contains(stdioError, "deadline exceeded") {
+		t.Fatalf("cancel reason was not recorded: %#v", capability)
+	}
+}
+
+// TestAgentAPIURLForWorkspaceRetriesDetectionAfterStdioCache pins the stale
+// cache boundary: a stdio detection result only proves the helper reached AHA's
+// loopback. If stdio later fails, the stored loopback must not be trusted as a
+// working reverse tunnel; resolution re-runs detection and can select LAN.
+func TestAgentAPIURLForWorkspaceRetriesDetectionAfterStdioCache(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	service, database := newAgentAPIConnectivityService(t)
+	defer database.Close()
+	service.agentAPILocalHostsFn = func() []string { return []string{"192.168.7.44"} }
+	lanURL := "http://192.168.7.44:8766"
+	probe := &recordingAgentAPIProbe{ok: func(candidate string) bool { return candidate == lanURL }}
+	service.agentAPIProbeFn = probe.probe
+	item := createAgentAPITestSSHWorkspace(t, database, domain.Workspace{
+		ID: "ws-stdio-cache", Transport: "ssh", RootPath: "/repo", AgentAPIMode: "auto",
+	})
+	item.AgentAPIStatus = "ready"
+	item.AgentAPIResolvedURL = "http://127.0.0.1:8766"
+	item.Capabilities = map[string]any{"agent_api": map[string]any{
+		"status": "ready", "url": "http://127.0.0.1:8766", "via": "stdio", "runtime": "node",
+	}}
+
+	got, err := service.AgentAPIURLForWorkspace(ctx, item)
+	if err != nil || got != lanURL {
+		t.Fatalf("resolved=%q err=%v, want the re-detected LAN address", got, err)
+	}
+	wantCalls := []string{"http://127.0.0.1:8766", lanURL}
+	if !reflect.DeepEqual(probe.calls, wantCalls) {
+		t.Fatalf("probe calls = %v, want a fresh tunnel/LAN detection %v", probe.calls, wantCalls)
 	}
 }

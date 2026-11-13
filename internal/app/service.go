@@ -195,12 +195,19 @@ type Service struct {
 	webVersion                  string
 	startedAt                   time.Time
 
-	// These three are detection seams. Production uses the workspace probe and
+	// These four are detection seams. Production uses the workspace probe and
 	// the real host enumeration; tests substitute them so address selection can be
 	// exercised without an actual SSH host or the test machine's interfaces.
 	agentAPIProbeFn          func(context.Context, domain.Workspace, string) error
 	agentAPILocalHostsFn     func() []string
 	agentAPIWorkspaceHostsFn func(context.Context, domain.Workspace) []string
+	// agentAPIStdioProbeFn substitutes the SSH stdio detection stage so tests
+	// can cover the order, the recorded result, and the fallback without a real
+	// workspace and helper upload.
+	agentAPIStdioProbeFn func(context.Context, domain.Workspace, string) (workspacepkg.AgentAPIStdioResult, error)
+	// agentAPIStdioProbeBudget replaces agentAPIStdioDetectTimeout in tests so
+	// the bounded-stage path runs in milliseconds. Zero uses the constant.
+	agentAPIStdioProbeBudget time.Duration
 
 	mu                  sync.Mutex
 	cancels             map[string]context.CancelFunc

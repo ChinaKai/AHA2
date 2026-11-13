@@ -208,10 +208,12 @@ export function renderWorkspaceDetection(workspace: Workspace): string {
       // the workspace connects to 127.0.0.1, which is never true remotely.
       const via = (agentAPIProbe as {via?: string} | undefined)?.via;
       const address = agentAPIProbe?.url || workspace.agent_api_resolved_url || "";
-      details.push({
-        kind: "muted",
-        text: via === "tunnel" ? "Agent API · SSH 反向隧道已连通" : `Agent API · 直连 ${address || "已连接"}`,
-      });
+      const text = via === "stdio"
+        ? "Agent API · SSH stdio"
+        : via === "tunnel"
+          ? "Agent API · SSH 反向隧道已连通"
+          : `Agent API · 直连 ${address || "已连接"}`;
+      details.push({kind: "muted", text});
     } else if (agentAPIProbe?.status === "unavailable" || workspace.agent_api_status === "error") {
       details.push({kind: "bad", text: `Agent API · 不可用：${agentAPIProbe?.error || workspace.agent_api_error || "反向连接失败"}`});
     } else {

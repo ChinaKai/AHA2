@@ -3623,5 +3623,22 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("record schema v133: %w", err)
 		}
 	}
+	var hasV134 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=134)`).Scan(&hasV134)
+	if !hasV134 {
+		// SSH stdio is no longer an opt-in: every SSH workspace tries it first.
+		// A row written by an older build still records stdio_proxy=0; flipping it
+		// keeps the stored state honest for anything that still inspects the
+		// column. This build no longer reads it, so the migration is a
+		// compatibility record rather than the behaviour switch.
+		if _, err := s.db.ExecContext(ctx,
+			`UPDATE agent_api_settings SET stdio_proxy=1 WHERE stdio_proxy=0`); err != nil {
+			return fmt.Errorf("apply schema v134: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(134, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return fmt.Errorf("record schema v134: %w", err)
+		}
+	}
 	return nil
 }
