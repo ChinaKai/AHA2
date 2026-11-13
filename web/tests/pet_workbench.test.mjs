@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {readFile} from "node:fs/promises";
 import {resolve} from "node:path";
 import {createPetApprovalCounter, petApprovalFilterCount, petPendingApprovalBadge, renderPetApprovalFilters, renderPetApprovalList, sortPetApprovals} from "../build/pet_approvals.js";
-import {bindPetDocEditorButtons, countPetWatchAnomalies, createPetWorkbenchLoader, createPetWorkbenchPageKeeper, mapPetWorkbenchTab, PET_APPROVAL_MAX_LIMIT, petApprovalMatches, petApprovalPage, renderPetApprovalLoadMore, renderPetInspectionSummary, renderPetOverview, renderPetRecords, renderPetWorkbenchLoadError, sortPetWorklog, swapPetWorkbenchPage} from "../build/pet_workbench.js";
+import {bindPetDocEditorButtons, countPetWatchAnomalies, createPetWorkbenchLoader, createPetWorkbenchPageKeeper, mapPetWorkbenchTab, PET_APPROVAL_MAX_LIMIT, petApprovalMatches, petApprovalPage, renderPetApprovalLoadMore, renderPetOverview, renderPetRecords, renderPetWorkbenchLoadError, sortPetWorklog, swapPetWorkbenchPage} from "../build/pet_workbench.js";
 
 const root = resolve(import.meta.dirname, "../..");
 
@@ -59,34 +59,6 @@ test("failed count refresh retains the last count and allows the next poll", asy
   assert.equal(counter.pending, 5);
 });
 
-const zh = (key, values = {}) => {
-  const catalog = {
-    "petWorkbench.inspectionSummary": "巡检快照",
-    "petWorkbench.inspectionUnavailable": "巡检快照暂不可用，稍后重试。",
-    "petWorkbench.inspectionHealthy": "正常",
-    "petWorkbench.inspectionDegraded": "降级",
-    "petWorkbench.inspectionUnknown": "未知",
-    "petWorkbench.inspectionVersion": "版本",
-    "petWorkbench.inspectionWebVersion": "Web 版本",
-    "petWorkbench.inspectionStartedAt": "启动时间",
-    "petWorkbench.inspectionUptime": "运行时长",
-    "petWorkbench.inspectionCheckedAt": "检查时间",
-    "petWorkbench.inspectionDegradedChannels": "降级渠道",
-    "petWorkbench.inspectionTasksTotal": "任务总数",
-    "petWorkbench.inspectionActive": "执行中",
-    "petWorkbench.inspectionWaitingUser": "等待主人",
-    "petWorkbench.inspectionFailed": "失败",
-    "petWorkbench.inspectionBlocked": "阻塞",
-    "petWorkbench.inspectionCompleted": "已完成",
-    "petWorkbench.inspectionOpenTasks": "未闭环",
-    "petWorkbench.inspectionAttentionTasks": "需关注",
-    "petWorkbench.inspectionPendingApprovals": "待审批",
-    "petWorkbench.uptimeMinutes": "{minutes} 分钟",
-    "petWorkbench.uptimeHours": "{hours} 小时 {minutes} 分钟",
-    "petWorkbench.uptimeDays": "{days} 天 {hours} 小时",
-  };
-  return (catalog[key] ?? key).replace(/\{(\w+)\}/g, (_, name) => String(values[name] ?? `{${name}}`));
-};
 const identityTime = value => value;
 
 test("the retryable error state escapes messages and includes a retry button", () => {
@@ -102,50 +74,6 @@ test("the retryable error state escapes messages and includes a retry button", (
   assert.match(renderPetWorkbenchLoadError("", translate), /加载失败，请重试/);
 });
 
-test("inspection summary renders versions, health, uptime, task stats, loops and note", () => {
-  const html = renderPetInspectionSummary({
-    checked_at: "2026-11-09T13:01:00Z",
-    health: "degraded",
-    version: "0.6.0",
-    web_version: "abc123",
-    started_at: "2026-11-09T11:00:00Z",
-    uptime_minutes: 65,
-    tasks_total: 7,
-    active: 2,
-    waiting_user: 1,
-    failed: 1,
-    blocked: 1,
-    completed: 2,
-    pending_approvals: 3,
-    degraded_channels: ["飞书（degraded）"],
-    degraded_channel_count: 1,
-    open_tasks: 4,
-    attention_tasks: 2,
-    note: "有 2 个未闭环任务需要处理。",
-  }, zh, identityTime);
-  for (const expected of [
-    "巡检快照", "降级", "版本: 0.6.0", "Web 版本: abc123", "运行时长: 1 小时 5 分钟",
-    "检查时间: 2026-11-09T13:01:00Z", "降级渠道: 1",
-    "任务总数", "等待主人", "已完成", "未闭环: 4", "需关注: 2", "待审批: 3",
-    "有 2 个未闭环任务需要处理。",
-  ]) {
-    assert.ok(html.includes(expected), `missing ${expected}: ${html}`);
-  }
-});
-
-test("inspection summary shows an explicit empty state and never renders dirty values", () => {
-  const empty = renderPetInspectionSummary(null, zh, identityTime);
-  assert.match(empty, /巡检快照暂不可用/);
-  const dirty = renderPetInspectionSummary({
-    checked_at: "", health: "", version: undefined, web_version: "",
-    uptime_minutes: "not-a-number", tasks_total: undefined, active: -1,
-    waiting_user: Number.NaN, failed: null, blocked: "", completed: undefined,
-    pending_approvals: -2, degraded_channel_count: "x", open_tasks: undefined,
-    attention_tasks: null, note: "",
-  }, zh, identityTime);
-  assert.match(dirty, /巡检快照暂不可用/);
-  assert.doesNotMatch(dirty, /undefined|NaN|null|Infinity/);
-});
 
 test("a slow workbench response times out, auto-retries once, then exposes a retryable error", async () => {
   let calls = 0;
@@ -661,7 +589,7 @@ test("non-retryable 4xx failures surface immediately without an automatic retry"
   assert.equal(loader.busy(), false);
 });
 
-test("workbench wiring uses the guarded loader and renders the inspection summary", async () => {
+test("workbench wiring uses the guarded loader and a compact overview", async () => {
   const main = await readFile(resolve(root, "web/src/main.ts"), "utf8");
   const api = await readFile(resolve(root, "web/src/api.ts"), "utf8");
   const loader = await readFile(resolve(root, "web/src/pet_workbench.ts"), "utf8");
@@ -671,7 +599,8 @@ test("workbench wiring uses the guarded loader and renders the inspection summar
   assert.match(main, /renderPetOverview\(\{/);
   assert.match(main, /inspection: view\.inspection/);
   assert.match(main, /formatTime: formatDateTime/);
-  assert.match(loader, /renderPetInspectionSummary\(inspection, translate, options\.formatTime\)/);
+  assert.doesNotMatch(loader, /renderPetInspectionSummary|renderPetChannelHealth/);
+  assert.doesNotMatch(loader, /pet-overview-inspection|pet-overview-channels/);
   assert.match(main, /bindPetWorkbenchPage\(\)\.catch\(showPetWorkbenchBindFailure\)/);
   assert.match(main, /function showPetWorkbenchBindFailure/);
   assert.match(main, /renderPetWorkbenchLoadError\(loadError, t\)/);
@@ -1099,7 +1028,16 @@ test("overview counts pending approvals, watched anomalies and degraded channels
   assert.match(html, /data-pet-watch-unfollow data-pet-watch-task="t-failed"/, "unfollow is available from the overview");
   assert.match(html, /pet-watch-row anomaly/);
   assert.match(html, /data-pet-approval-open="a-1"/);
-  assert.match(html, /id="pet-overview-channels"/);
+  // The top status row and recent activity stay; the inspection snapshot and
+  // channel-health details below it were removed from the overview.
+  assert.match(html, /class="pet-overview-status"/);
+  assert.match(html, /class="pet-overview-recent"/);
+  assert.match(html, /petWorkbench\.inspectionVersion: 1\.2\.3/);
+  assert.match(html, /petWorkbench\.inspectionCheckedAt: at 2026-01-05T00:00:00Z/);
+  assert.doesNotMatch(html, /class="pet-overview-inspection"/);
+  assert.doesNotMatch(html, /class="pet-overview-channels"/);
+  assert.doesNotMatch(html, /petWorkbench\.inspectionSummary|petWorkbench\.channelHealth/);
+  assert.doesNotMatch(html, /pet-inspection-summary|pet-channel-card|pet-channel-list/);
   // The overview stays compact: only the five newest changes are listed.
   assert.equal((html.match(/class="pet-overview-activity"/g) || []).length, 4);
   assert.deepEqual(
@@ -1125,6 +1063,8 @@ test("empty watch lists render as collapsed sections with zero counts", () => {
   assert.match(html, /没有忽略的任务。/);
   assert.doesNotMatch(html, /class="pet-overview-follows"[^>]*\sopen/);
   assert.doesNotMatch(html, /class="pet-overview-other"[^>]*\sopen/);
+  assert.doesNotMatch(html, /class="pet-overview-inspection"/);
+  assert.doesNotMatch(html, /class="pet-overview-channels"/);
 });
 
 test("approvals open on pending, sorted by the longest wait", () => {
