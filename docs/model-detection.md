@@ -62,17 +62,17 @@
 
 ## Backend 不是 Provider，也不是模型协议
 
-Web 模型页底部的「AHA 支持的 Backend」列出可执行 Turn 的 agent 运行时。选择模型时，Backend
+Web 模型页顶部、模型列表之前的「AHA 支持的 Backend」列出可执行 Turn 的 agent 运行时。选择模型时，Backend
 决定由哪个 Agent CLI 跑任务；Provider 只描述模型来源（Base URL 与凭据），wire 协议描述请求
 格式。三者互不等同，模型行里的 `backend.protocol` 只是把当下组合展示出来。
 
-| Backend | identifier | 支持的协议 | 官方安装/文档 |
+| Backend | identifier | 支持的协议 | 官方文档 |
 | --- | --- | --- | --- |
 | Claude Code | `claude` | Anthropic Messages | https://code.claude.com/docs/en/overview |
 | Codex CLI | `codex` | Responses、Chat Completions | https://learn.chatgpt.com/docs/codex/cli |
 | DeepSeek Harness | `dsh` | Responses、Chat Completions、Anthropic Messages | https://deepseek-harness.github.io/deepseek-harness/ |
 
-安装命令按平台展示，并和官方页保持一致：
+以下安装命令仅作参考；UI 卡片不再显示安装命令或运行要求，安装方式以官方文档为准：
 
 - Claude Code：Windows PowerShell `irm https://claude.ai/install.ps1 | iex`；macOS / Linux / WSL
   `curl -fsSL https://claude.ai/install.sh | bash`。
@@ -80,6 +80,6 @@ Web 模型页底部的「AHA 支持的 Backend」列出可执行 Turn 的 agent 
   安装方式以官方页为准）。
 - DeepSeek Harness：需要 Node.js >= 24.9.0，执行 `npx @deepseek-ai/dsh web`。
 
-该区块只做展示：不探测版本、不发网络请求、不改模型或 Provider 配置；安装命令以等宽文本给出，
-不会自动执行。`web/src/backends.ts` 同时是运行时协议矩阵、Backend 下拉和显示名的单一来源，
+该区块只做展示：不探测版本、不发网络请求、不改模型或 Provider 配置；卡片只提供官方文档链接，
+不显示安装命令或运行要求。`web/src/backends.ts` 同时是运行时协议矩阵、Backend 下拉和显示名的单一来源，
 实现与测试见 `web/tests/backends.test.mjs`。

@@ -216,7 +216,9 @@ test("models page mounts the supported backends panel before the Models panel", 
   // presence: the backends panel must come before the Models list and its
   // "add model" button so a long model list cannot push it out of view.
   const viewStart = app.indexOf("function modelsView()");
-  const viewEnd = app.indexOf("function advancedSettingsView()");
+  // End at the function's own column-0 closing brace instead of the next
+  // function's name, so reordering functions in main.ts cannot break this.
+  const viewEnd = app.indexOf("\n}\n", viewStart);
   assert.ok(viewStart >= 0 && viewEnd > viewStart, "modelsView must exist in the built app");
   const view = app.slice(viewStart, viewEnd);
   assert.equal((view.match(/\$\{backendsPanelHTML\(\)\}/g) || []).length, 1, "models page must mount the backends panel exactly once");
