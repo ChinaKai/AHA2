@@ -5,10 +5,10 @@ import {renderMarkdown} from "./markdown.js";
 import type {Knowledge, KnowledgeLibrary, KnowledgeProposal, KnowledgeReviewSettings, ProductLine, Project, Skill, Workspace} from "./types.js";
 
 type KnowledgeScope = "project" | "global";
-type KnowledgeMode = "read" | "edit" | "review" | "manage";
-type ManageTab = "skills" | "libraries";
+type KnowledgeMode = "read" | "edit" | "review" | "skills";
 type KnowledgeDocumentKind = "global" | "project" | "project-navigation";
 type MobilePane = "directory" | "reader";
+type ReviewScopeFilter = "all" | "global" | `project:${string}`;
 
 export interface KnowledgeWorkspaceContext {
   projects: Project[];
@@ -56,6 +56,8 @@ export interface KnowledgeReviewItem {
   confidenceLabel: string;
   createdAt: string;
   sourceLabel: string;
+  scope: "global" | "project";
+  projectID: string;
   proposal?: KnowledgeProposal;
   entry?: Knowledge;
 }
@@ -68,15 +70,18 @@ export interface KnowledgeDocumentStatus {
 let selectedProjectID = "";
 let activeScope: KnowledgeScope = "project";
 let activeMode: KnowledgeMode = "read";
-let manageTab: ManageTab = "skills";
 let selectedKnowledgeID = "";
 let selectedLibraryID = "";
 let selectedKnowledgeSourceID = "all";
 let knowledgeSearch = "";
 let directoryCollapsed = false;
 let mobilePane: MobilePane = "directory";
-let secondaryOpen = false;
+// The project settings subpage replaces the reader without touching the
+// selected document, directory collapse, or mobile pane, so closing it lands
+// back where the operator left the project knowledge page.
+let settingsOpen = false;
 let reviewIndex = 0;
+let reviewScopeFilter: ReviewScopeFilter = "all";
 let editState: KnowledgeEditState | null = null;
 let productLines: ProductLine[] = [];
 let skills: Skill[] = [];
@@ -330,7 +335,7 @@ function renderTreeNodes(items: Knowledge[], parentID: string, depth: number, ho
 function renderDirectory(context: KnowledgeWorkspaceContext | null, groups: KnowledgeTreeGroup[], homeID: string, homeLabel: string, selectedID: string, titleFor: (item: Knowledge) => string, sourceToolbar: string, allowCreate: boolean, readOnly: boolean, total: number): string {
   const project = context ? selectedProject(context.projects) : null;
   const projectSelect = context && activeScope === "project" && context.projects.length
-    ? `<label class="knowledge-project-select"><span>${t("knowledge.project")}</span><select id="knowledge-project-select">${context.projects.map(item => `<option value="${escapeHTML(item.id)}" ${item.id === project?.id ? "selected" : ""}>${escapeHTML(item.name)}</option>`).join("")}</select></label>`
+    ? `<div class="knowledge-project-picker"><label class="knowledge-project-select"><span>${t("knowledge.project")}</span><select id="knowledge-project-select">${context.projects.map(item => `<option value="${escapeHTML(item.id)}" ${item.id === project?.id ? "selected" : ""}>${escapeHTML(item.name)}</option>`).join("")}</select></label><button type="button" class="icon-button knowledge-project-settings-button" data-knowledge-project-settings title="${t("knowledge.settings.open")}" aria-label="${t("knowledge.settings.open")}">${icon("settings")}</button></div>`
     : "";
   const newButton = allowCreate && !readOnly
     ? `<button class="primary" type="button" data-knowledge-new="${activeScope === "global" ? "global" : "project"}">${icon("plus")}${t("knowledge.new")}</button>`
@@ -377,7 +382,7 @@ function renderReaderDocument(entries: Knowledge[], empty: string, kind: Knowled
     ? `<h2>${t("knowledge.links")}</h2><ul class="knowledge-index-links">${children.map(item => `<li><button type="button" class="knowledge-index-link" data-knowledge-open="${escapeHTML(item.id)}">${escapeHTML(titleFor(item))}</button><span>：${escapeHTML(knowledgeIndexSummary(item))}</span></li>`).join("")}</ul>`
     : "";
   const actions = `<div class="knowledge-document-actions">${directoryCollapsed ? `<button type="button" data-knowledge-directory-expand>${t("knowledge.expandDirectory")}</button>` : ""}${canEdit && selected ? `<button type="button" class="primary" data-knowledge-edit="${escapeHTML(selected.id)}">${icon("edit")}${t("common.edit")}</button>` : ""}</div>`;
-  const libraryBack = readOnly ? `<button type="button" class="knowledge-mobile-back knowledge-library-back" data-knowledge-library-back>${icon("projects")}${t("knowledge.backToLibraries")}</button>` : "";
+  const libraryBack = readOnly ? `<button type="button" class="knowledge-mobile-back knowledge-library-back" data-knowledge-library-back>${icon("projects")}${t("knowledge.backToSettings")}</button>` : "";
   const mobileBack = readOnly ? "" : `<button type="button" class="knowledge-mobile-back" data-knowledge-mobile-back>${icon("projects")}${t("knowledge.backToDirectory")}</button>`;
   return `<section class="panel knowledge-reader">
     <article class="knowledge-document">
@@ -535,6 +540,8 @@ export function knowledgeReviewQueue(proposals: KnowledgeProposal[], entries: Kn
       confidenceLabel: proposalConfidenceLabel(proposal, entry),
       createdAt: proposal.created_at,
       sourceLabel: proposal.source_task_id ? t("knowledge.review.sourceTask", {id: proposal.source_task_id}) : t("knowledge.review.suggestion"),
+      scope: proposal.scope || proposal.proposed?.scope || entry?.scope || "project",
+      projectID: proposal.proposed?.bound_project_id || proposal.project_id || proposal.proposed?.project_id || entry?.bound_project_id || entry?.project_id || "",
       proposal,
     };
   });
@@ -547,17 +554,42 @@ export function knowledgeReviewQueue(proposals: KnowledgeProposal[], entries: Kn
       confidenceLabel: typeof entry.confidence === "number" && entry.confidence > 0 ? `${Math.round(entry.confidence * 100)}%` : "—",
       createdAt: entry.updated_at,
       sourceLabel: t("knowledge.review.legacy"),
+      scope: entry.scope,
+      projectID: entry.bound_project_id || entry.project_id || "",
       entry,
     });
   }
   return items;
 }
 
-function renderStaleFallback(entries: Knowledge[], pendingEntryIDs: Set<string>, projects: Project[]): string {
-  const stale = entries.filter(item => !item.is_index && !pendingEntryIDs.has(item.id) && (item.status === "stale" || item.feedback_state === "wrong"));
+function matchesReviewScope(scope: "global" | "project", projectID: string, filter: ReviewScopeFilter): boolean {
+  if (filter === "all") return true;
+  if (filter === "global") return scope === "global";
+  return scope === "project" && `project:${projectID}` === filter;
+}
+
+/** The review inbox is cross-project; the in-page filter narrows it without changing the queue. */
+export function filterKnowledgeReviewItems(items: KnowledgeReviewItem[], filter: ReviewScopeFilter): KnowledgeReviewItem[] {
+  return items.filter(item => matchesReviewScope(item.scope, item.projectID, filter));
+}
+
+function renderStaleFallback(entries: Knowledge[], pendingEntryIDs: Set<string>, projects: Project[], filter: ReviewScopeFilter): string {
+  const stale = entries.filter(item => !item.is_index && !pendingEntryIDs.has(item.id) && (item.status === "stale" || item.feedback_state === "wrong") && matchesReviewScope(item.scope, item.bound_project_id || item.project_id || "", filter));
   if (!stale.length) return "";
   const projectNames = new Map(projects.map(project => [project.id, project.name]));
   return `<section class="knowledge-stale-fallback"><div><h3>${t("knowledge.review.staleTitle")}</h3><p>${t("knowledge.review.staleBody")}</p></div>${stale.map(item => `<article><span><strong>${escapeHTML(item.title)}</strong><small>${escapeHTML(item.scope === "global" ? t("knowledge.review.scopeGlobal") : projectNames.get(item.project_id || "") || t("knowledge.review.scopeProject"))}</small></span><button type="button" data-knowledge-verify="${escapeHTML(item.id)}">${t("knowledge.review.verify")}</button></article>`).join("")}</section>`;
+}
+
+function renderReviewScopeFilter(projects: Project[]): string {
+  const options = [
+    `<option value="all" ${reviewScopeFilter === "all" ? "selected" : ""}>${t("knowledge.review.filterAll")}</option>`,
+    `<option value="global" ${reviewScopeFilter === "global" ? "selected" : ""}>${t("knowledge.review.scopeGlobal")}</option>`,
+    ...projects.map(project => {
+      const value = `project:${project.id}`;
+      return `<option value="${escapeHTML(value)}" ${reviewScopeFilter === value ? "selected" : ""}>${escapeHTML(t("knowledge.review.filterProject", {name: project.name}))}</option>`;
+    }),
+  ].join("");
+  return `<label class="knowledge-review-filter"><span>${t("knowledge.review.filterLabel")}</span><select data-knowledge-review-scope>${options}</select></label>`;
 }
 
 export function renderKnowledgeReviewPage(context: KnowledgeWorkspaceContext): string {
@@ -565,15 +597,15 @@ export function renderKnowledgeReviewPage(context: KnowledgeWorkspaceContext): s
 }
 
 function renderReviewPage(context: KnowledgeWorkspaceContext): string {
-  const items = knowledgeReviewQueue(context.proposals || [], context.knowledge, context.projects);
+  const items = filterKnowledgeReviewItems(knowledgeReviewQueue(context.proposals || [], context.knowledge, context.projects), reviewScopeFilter);
   const pendingEntryIDs = new Set((context.proposals || []).filter(item => item.status === "pending").map(item => item.entry_id));
   if (reviewIndex >= items.length) reviewIndex = Math.max(0, items.length - 1);
   const current = items[reviewIndex];
   const reviewSettings = context.reviewSettings || {auto_approve: false};
   const autoReview = `<label class="knowledge-auto-review-toggle"><input type="checkbox" data-knowledge-auto-review ${reviewSettings.auto_approve ? "checked" : ""}><span><strong>${t("knowledge.review.auto")}</strong><small>${reviewSettings.auto_approve ? t("knowledge.review.autoOn") : t("knowledge.review.autoOff")}</small></span></label>`;
-  const head = `<div class="knowledge-review-head"><button type="button" data-knowledge-mode="read">${t("knowledge.review.back")}</button><div><h2>${t("knowledge.review.heading")}</h2><p>${t("knowledge.review.subtitle")}</p></div>${autoReview}</div>`;
+  const head = `<div class="knowledge-review-head"><button type="button" data-knowledge-mode="read">${t("knowledge.review.back")}</button><div><h2>${t("knowledge.review.heading")}</h2><p>${t("knowledge.review.subtitle")}</p></div>${renderReviewScopeFilter(context.projects)}${autoReview}</div>`;
   if (!current) {
-    return `<section class="knowledge-review">${head}${renderEmpty(t("knowledge.review.empty"))}${renderStaleFallback(context.knowledge, pendingEntryIDs, context.projects)}</section>`;
+    return `<section class="knowledge-review">${head}${renderEmpty(reviewScopeFilter === "all" ? t("knowledge.review.empty") : t("knowledge.review.filterEmpty"))}${renderStaleFallback(context.knowledge, pendingEntryIDs, context.projects, reviewScopeFilter)}</section>`;
   }
   const entry = current.proposal ? context.knowledge.find(item => item.id === current.proposal?.entry_id) : current.entry;
   const body = current.proposal ? proposalDiffMarkup(current.proposal, context.knowledge) : `<div class="knowledge-proposal-full"><div class="markdown-body">${renderMarkdown(current.entry?.body || "")}</div></div>`;
@@ -587,7 +619,7 @@ function renderReviewPage(context: KnowledgeWorkspaceContext): string {
     ${entry ? `<p class="knowledge-review-entry">${t("knowledge.review.target", {title: escapeHTML(entry.title)})}</p>` : ""}
     ${actions}
   </article>`;
-  return `<section class="knowledge-review">${head}${nav}${card}${renderStaleFallback(context.knowledge, pendingEntryIDs, context.projects)}</section>`;
+  return `<section class="knowledge-review">${head}${nav}${card}${renderStaleFallback(context.knowledge, pendingEntryIDs, context.projects, reviewScopeFilter)}</section>`;
 }
 
 function renderBindings(workspaces: Workspace[]): string {
@@ -661,9 +693,9 @@ function renderSkills(context: KnowledgeWorkspaceContext): string {
     ${knowledgeListFooter(shown.length, visible.length, totalLabel)}`;
 }
 
-function renderKnowledgeLibraries(context: KnowledgeWorkspaceContext): string {
+function renderKnowledgeLibraries(context: KnowledgeWorkspaceContext, currentProjectID = ""): string {
   const projectName = new Map(context.projects.map(project => [project.id, project.name]));
-  const options = context.projects.map(project => `<option value="${escapeHTML(project.id)}">${escapeHTML(project.name)}</option>`).join("");
+  const options = context.projects.map(project => `<option value="${escapeHTML(project.id)}" ${project.id === currentProjectID ? "selected" : ""}>${escapeHTML(project.name)}</option>`).join("");
   const cards = (context.libraries || []).filter(library => !library.bound_project_id).map(library => `<article class="panel knowledge-library-card pending">
     <header><div><span class="knowledge-library-state">${library.bound_project_id ? t("knowledge.manage.boundLabel") : t("knowledge.manage.pendingLabel")}</span><strong>${escapeHTML(library.name)}</strong></div><small>${t("knowledge.manage.counts", {knowledge: library.knowledge_count, skills: library.skill_count})}</small></header>
     <p>${escapeHTML(library.description || library.source_identity || t("knowledge.manage.libraryDescription"))}</p>
@@ -674,38 +706,41 @@ function renderKnowledgeLibraries(context: KnowledgeWorkspaceContext): string {
   return `<div class="knowledge-section-head"><div><h2>${t("knowledge.manage.unboundTitle")}</h2><p>${t("knowledge.manage.unboundNote")}</p></div></div><div class="knowledge-library-grid">${cards || renderEmpty(t("knowledge.manage.emptyLibraries"))}</div>`;
 }
 
-function renderSettings(project: Project, projectWorkspaces: Workspace[], context: KnowledgeWorkspaceContext): string {
+function renderProjectSettingsContent(project: Project, projectWorkspaces: Workspace[], context: KnowledgeWorkspaceContext): string {
   const boundLibraries = (context.libraries || []).filter(item => item.bound_project_id === project.id);
   const directKnowledge = context.knowledge.filter(item => item.scope === "project" && item.project_id === project.id && !item.is_index).length;
   const directSkills = skills.filter(item => item.scope === "project" && item.project_id === project.id).length;
   const ownedKnowledge = directKnowledge + directSkills ? `<article><div>${icon("knowledge")}<span><strong>${t("knowledge.manage.ownName", {name: escapeHTML(project.name)})}</strong><small>${t("knowledge.manage.counts", {knowledge: directKnowledge, skills: directSkills})}</small></span></div><div class="actions"><button type="button" data-project-knowledge-detach>${t("knowledge.manage.detach")}</button><button class="danger" type="button" data-project-knowledge-delete>${t("knowledge.manage.deleteOwn")}</button></div></article>` : "";
-  return `<div class="knowledge-section-head"><div><h2>${t("knowledge.manage.settings")}</h2><p>${t("knowledge.manage.settingsNote")}</p></div></div>
-    <section class="panel knowledge-setting-card"><div><strong>${t("knowledge.manage.policy")}</strong><p>${t("knowledge.manage.policyNote")}</p></div><button type="button" class="${project.knowledge_policy === "disabled" ? "" : "primary"}" data-project-kb-toggle>${project.knowledge_policy === "disabled" ? t("knowledge.manage.disabled") : t("knowledge.manage.enabled")}</button></section>
+  return `<section class="panel knowledge-setting-card"><div><strong>${t("knowledge.manage.policy")}</strong><p>${t("knowledge.manage.policyNote")}</p></div><button type="button" class="${project.knowledge_policy === "disabled" ? "" : "primary"}" data-project-kb-toggle>${project.knowledge_policy === "disabled" ? t("knowledge.manage.disabled") : t("knowledge.manage.enabled")}</button></section>
     <section class="panel spaced knowledge-source-settings"><div class="panel-head"><div><strong>${t("knowledge.manage.own")}</strong><small>${t("knowledge.manage.ownNote")}</small></div><span>${t("knowledge.manage.ownCount", {count: directKnowledge})}</span></div><div class="product-line-list">${ownedKnowledge || renderEmpty(t("knowledge.manage.noOwn"))}</div></section>
     <section class="panel spaced knowledge-source-settings"><div class="panel-head"><div><strong>${t("knowledge.manage.bound")}</strong><small>${t("knowledge.manage.boundNote")}</small></div><span>${boundLibraries.length}</span></div><div class="product-line-list">${boundLibraries.map(item => `<article><div>${icon("knowledge")}<span><strong>${escapeHTML(item.name)}</strong><small>${t("knowledge.manage.counts", {knowledge: item.knowledge_count, skills: item.skill_count})} · ${bindingModeLabel(item.binding_mode)}</small></span></div><div class="actions"><select aria-label="${t("knowledge.manage.bindingMode")}" data-knowledge-library-mode="${escapeHTML(item.id)}"><option value="project" ${item.binding_mode === "project" ? "selected" : ""}>${t("knowledge.binding.project")}</option><option value="external" ${item.binding_mode !== "project" ? "selected" : ""}>${t("knowledge.binding.external")}</option></select><button type="button" data-knowledge-library-mode-save="${escapeHTML(item.id)}">${t("knowledge.manage.saveMode")}</button><button type="button" data-knowledge-library-unbind="${escapeHTML(item.id)}">${t("knowledge.manage.unbind")}</button><button class="danger" type="button" data-knowledge-library-delete="${escapeHTML(item.id)}">${t("knowledge.manage.deleteLibrary")}</button></div></article>`).join("") || renderEmpty(t("knowledge.manage.noBound"))}</div></section>
     <section class="panel spaced"><div class="panel-head"><strong>Product Lines</strong><button type="button" data-product-line-new>${icon("plus")}${t("knowledge.manage.newProductLine")}</button></div><div class="product-line-list">${productLines.map(line => `<article><div>${icon("branch")}<span><strong>${escapeHTML(line.name)}</strong><small>${escapeHTML(line.branch_pattern || "*")} ${line.default ? "· default" : ""}</small></span></div><button type="button" class="icon-button" data-product-line-delete="${line.id}">${icon("close")}</button></article>`).join("") || renderEmpty(t("knowledge.manage.noProductLine"))}</div></section>
     ${renderBindings(projectWorkspaces)}`;
 }
 
-export function renderKnowledgeManagePage(context: KnowledgeWorkspaceContext, tab: ManageTab = "skills"): string {
-  const previous = manageTab;
-  manageTab = tab;
-  const html = renderManagePage(context);
-  manageTab = previous;
-  return html;
+/** Project settings is a subpage of project knowledge, not a top-level entry: it only
+ *  shows the current project's libraries, bindings, and workspace bindings. */
+export function renderKnowledgeProjectSettings(context: KnowledgeWorkspaceContext): string {
+  const project = selectedProject(context.projects);
+  if (!project) return renderEmpty(t("knowledge.manage.noProject"));
+  const projectWorkspaces = context.workspaces.filter(item => item.project_id === project.id);
+  const projectSelect = `<label class="knowledge-project-select"><span>${t("knowledge.project")}</span><select id="knowledge-project-select">${context.projects.map(item => `<option value="${escapeHTML(item.id)}" ${item.id === project.id ? "selected" : ""}>${escapeHTML(item.name)}</option>`).join("")}</select></label>`;
+  return `<section class="knowledge-settings">
+    <div class="knowledge-settings-head"><button type="button" class="knowledge-settings-close" data-knowledge-settings-close>${icon("projects")}${t("knowledge.settings.close")}</button><div><h2>${t("knowledge.manage.settings")}</h2><p>${t("knowledge.manage.settingsNote")}</p></div>${projectSelect}</div>
+    ${renderProjectSettingsContent(project, projectWorkspaces, context)}
+    ${renderKnowledgeLibraries(context, project.id)}
+  </section>`;
 }
 
-function renderManagePage(context: KnowledgeWorkspaceContext): string {
-  const project = selectedProject(context.projects);
-  const projectWorkspaces = project ? context.workspaces.filter(item => item.project_id === project.id) : [];
-  const tabs = `<div class="knowledge-manage-tabs" role="tablist" aria-label="${t("knowledge.manage.tabsAria")}"><button type="button" data-knowledge-manage-tab="skills" class="${manageTab === "skills" ? "active" : ""}">${t("knowledge.manage.skills")}</button><button type="button" data-knowledge-manage-tab="libraries" class="${manageTab === "libraries" ? "active" : ""}">${t("knowledge.manage.libraries")}</button></div>`;
-  const content = manageTab === "skills"
-    ? renderSkills(context)
-    : `${project ? renderSettings(project, projectWorkspaces, context) : renderEmpty(t("knowledge.manage.noProject"))}${renderKnowledgeLibraries(context)}`;
-  return `<section class="knowledge-manage"><div class="knowledge-manage-head"><button type="button" data-knowledge-mode="read">${t("knowledge.manage.back")}</button>${tabs}</div>${content}</section>`;
+/** Skills keep their own layered catalog; this is a top-level section, not a management tab. */
+export function renderKnowledgeSkillsPage(context: KnowledgeWorkspaceContext): string {
+  return `<section class="knowledge-skills">${renderSkills(context)}</section>`;
 }
 
 function renderReadWorkspace(context: KnowledgeWorkspaceContext, project: Project | null): string {
+  if (settingsOpen && activeScope === "project") {
+    return renderKnowledgeProjectSettings(context);
+  }
   if (selectedLibraryID && activeScope === "project") {
     const library = (context.libraries || []).find(item => item.id === selectedLibraryID);
     if (!library) {
@@ -729,22 +764,26 @@ function renderReadWorkspace(context: KnowledgeWorkspaceContext, project: Projec
   return renderReadLayout(context, filtered, t("knowledge.emptyProject"), "project", Boolean(selectedSource?.external), sourceLabelFor, knowledgeSourceToolbar(sources), allowCreate);
 }
 
-function renderScopeSwitch(): string {
-  return `<div class="knowledge-scope-tabs" role="tablist" aria-label="${t("knowledge.tab.project")} / ${t("knowledge.tab.global")}"><button type="button" role="tab" data-knowledge-scope="project" aria-selected="${activeScope === "project"}" class="${activeScope === "project" ? "active" : ""}">${t("knowledge.tab.project")}</button><button type="button" role="tab" data-knowledge-scope="global" aria-selected="${activeScope === "global"}" class="${activeScope === "global" ? "active" : ""}">${t("knowledge.tab.global")}</button></div>`;
+function renderSectionNav(pendingCount: number): string {
+  const section = activeMode === "skills" ? "skills" : activeMode === "review" ? "review" : activeScope;
+  const button = (key: string, label: string, extra = "") => `<button type="button" data-knowledge-section="${key}" ${extra} aria-current="${section === key ? "page" : "false"}" class="${section === key ? "active" : ""}">${label}</button>`;
+  return `<nav class="knowledge-section-nav" aria-label="${t("knowledge.sectionNav")}">
+    ${button("project", t("knowledge.tab.project"), 'data-knowledge-scope="project"')}
+    ${button("global", t("knowledge.tab.global"), 'data-knowledge-scope="global"')}
+    ${button("skills", t("knowledge.skillsEntry"), 'data-knowledge-mode="skills"')}
+    ${button("review", `${t("knowledge.reviewEntry")} <b class="knowledge-pending-count ${pendingCount ? "has-pending" : ""}">${pendingCount}</b>`, 'data-knowledge-mode="review"')}
+  </nav>`;
 }
 
 function renderTopbar(pendingCount: number): string {
+  const search = (activeMode === "read" || activeMode === "edit") && !settingsOpen
+    ? `<label class="knowledge-search-box">${icon("search")}<input id="knowledge-search" type="search" autocomplete="off" data-allow-rerender="true" placeholder="${t("knowledge.searchPlaceholder")}" value="${escapeHTML(knowledgeSearch)}"></label>`
+    : "";
   return `<div class="page-head knowledge-topbar">
     <div class="knowledge-heading"><h1>${t("knowledge.title")}</h1><p>${t("knowledge.subtitle")}</p></div>
-    ${renderScopeSwitch()}
-    <label class="knowledge-search-box">${icon("search")}<input id="knowledge-search" type="search" autocomplete="off" data-allow-rerender="true" placeholder="${t("knowledge.searchPlaceholder")}" value="${escapeHTML(knowledgeSearch)}"></label>
+    ${renderSectionNav(pendingCount)}
+    ${search}
     <button id="knowledge-refresh" type="button">${icon("refresh")}${t("common.refresh")}</button>
-    <button type="button" class="knowledge-more-toggle" data-knowledge-more aria-expanded="${secondaryOpen}">${icon("menu")}${t("knowledge.more")}</button>
-    <nav class="knowledge-secondary ${secondaryOpen ? "open" : ""}" aria-label="${t("knowledge.secondary")}">
-      <button type="button" data-knowledge-mode="review" class="${activeMode === "review" ? "active" : ""}">${t("knowledge.reviewEntry")} <b class="knowledge-pending-count ${pendingCount ? "has-pending" : ""}">${pendingCount}</b></button>
-      <button type="button" data-knowledge-mode="manage" data-knowledge-manage-tab="skills" class="${activeMode === "manage" && manageTab === "skills" ? "active" : ""}">${t("knowledge.skillsEntry")}</button>
-      <button type="button" data-knowledge-mode="manage" data-knowledge-manage-tab="libraries" class="${activeMode === "manage" && manageTab === "libraries" ? "active" : ""}">${t("knowledge.librariesEntry")}</button>
-    </nav>
   </div>`;
 }
 
@@ -762,7 +801,7 @@ function productLineDialog(): string {
 }
 
 export function knowledgeEntryListVisible(projects: Project[]): boolean {
-  if (activeMode !== "read" || selectedLibraryID) return false;
+  if (activeMode !== "read" || selectedLibraryID || settingsOpen) return false;
   if (activeScope === "global") return true;
   return Boolean(selectedProject(projects));
 }
@@ -816,6 +855,7 @@ function applyKnowledgeDeepLink(context: KnowledgeWorkspaceContext): void {
   if (link.scope) activeScope = link.scope;
   if (link.projectID) selectedProjectID = link.projectID;
   activeMode = "read";
+  settingsOpen = false;
   selectedKnowledgeID = link.docID;
   mobilePane = "reader";
   const known = context.knowledge.find(entry => entry.id === link.docID);
@@ -842,8 +882,8 @@ export function renderKnowledgeWorkspace(context: KnowledgeWorkspaceContext): st
   const project = selectedProject(context.projects);
   if (!project && activeScope === "project" && !selectedKnowledgeID) activeScope = "global";
   const pendingCount = knowledgeReviewQueue(context.proposals || [], context.knowledge, context.projects).length;
-  const body = activeMode === "manage"
-    ? renderManagePage(context)
+  const body = activeMode === "skills"
+    ? renderKnowledgeSkillsPage(context)
     : activeMode === "review"
       ? renderReviewPage(context)
       : activeMode === "edit"
@@ -1077,6 +1117,7 @@ export function bindKnowledgeWorkspace(context: KnowledgeWorkspaceContext): void
     if (!confirmDiscardEdit()) return;
     activeScope = button.dataset.knowledgeScope === "global" ? "global" : "project";
     activeMode = "read";
+    settingsOpen = false;
     selectedKnowledgeID = "";
     selectedLibraryID = "";
     mobilePane = "directory";
@@ -1086,19 +1127,27 @@ export function bindKnowledgeWorkspace(context: KnowledgeWorkspaceContext): void
   }));
   document.querySelectorAll<HTMLElement>("[data-knowledge-mode]").forEach(button => button.addEventListener("click", () => {
     if (!confirmDiscardEdit()) return;
-    if (button.dataset.knowledgeManageTab === "skills" || button.dataset.knowledgeManageTab === "libraries") manageTab = button.dataset.knowledgeManageTab;
     activeMode = (button.dataset.knowledgeMode || "read") as KnowledgeMode;
+    settingsOpen = false;
     mobilePane = activeMode === "read" ? mobilePane : "directory";
-    secondaryOpen = false;
     if (activeMode !== "read") clearKnowledgeDeepLink();
     context.render();
   }));
-  document.querySelectorAll<HTMLElement>("[data-knowledge-manage-tab]").forEach(button => button.addEventListener("click", () => {
-    manageTab = button.dataset.knowledgeManageTab === "libraries" ? "libraries" : "skills";
+  document.querySelectorAll<HTMLElement>("[data-knowledge-project-settings]").forEach(button => button.addEventListener("click", () => {
+    if (!confirmDiscardEdit()) return;
+    activeScope = "project";
+    activeMode = "read";
+    settingsOpen = true;
     context.render();
   }));
-  document.querySelector<HTMLElement>("[data-knowledge-more]")?.addEventListener("click", () => {
-    secondaryOpen = !secondaryOpen;
+  document.querySelectorAll<HTMLElement>("[data-knowledge-settings-close]").forEach(button => button.addEventListener("click", () => {
+    settingsOpen = false;
+    context.render();
+  }));
+  document.querySelector<HTMLSelectElement>("[data-knowledge-review-scope]")?.addEventListener("change", event => {
+    const value = event.currentTarget.value || "all";
+    reviewScopeFilter = value === "global" || value.startsWith("project:") ? value as ReviewScopeFilter : "all";
+    reviewIndex = 0;
     context.render();
   });
   document.querySelector<HTMLSelectElement>("#knowledge-project-select")?.addEventListener("change", event => {
@@ -1370,14 +1419,15 @@ export function bindKnowledgeWorkspace(context: KnowledgeWorkspaceContext): void
     selectedLibraryID = button.dataset.knowledgeLibraryOpen || "";
     selectedKnowledgeID = "";
     activeMode = "read";
+    settingsOpen = false;
     mobilePane = "reader";
     context.render();
   }));
   document.querySelectorAll<HTMLElement>("[data-knowledge-library-back]").forEach(button => button.addEventListener("click", () => {
     selectedLibraryID = "";
     selectedKnowledgeID = "";
-    activeMode = "manage";
-    manageTab = "libraries";
+    activeMode = "read";
+    settingsOpen = true;
     mobilePane = "directory";
     clearKnowledgeDeepLink();
     context.render();

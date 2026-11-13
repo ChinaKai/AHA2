@@ -228,8 +228,8 @@ try {
   assert.match(await page.locator(".knowledge-review-nav").textContent(), /第 2 \/ 2 条/);
   await page.evaluate(() => document.querySelector("[data-knowledge-mode=read]")?.click());
 
-  // Skills live under management and keep search, scope filter, detail, and paging.
-  await page.evaluate(() => document.querySelector("[data-knowledge-mode=manage][data-knowledge-manage-tab=skills]")?.click());
+  // Skills are their own top-level section and keep search, scope filter, detail, and paging.
+  await page.evaluate(() => document.querySelector("[data-knowledge-mode=skills]")?.click());
   await page.waitForSelector("#knowledge-skill-search", {timeout: 15000});
   await page.waitForFunction(() => document.querySelectorAll(".skill-card").length === 6, null, {timeout: 15000});
   assert.equal(await page.locator('[data-load-more="knowledge"]').count(), 0);

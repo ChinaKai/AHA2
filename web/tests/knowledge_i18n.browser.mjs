@@ -103,7 +103,7 @@ try {
     assert.deepEqual(missing, [], `${label} left untranslated Chinese text`);
   };
 
-  // Reading, editing, review, and management are separate surfaces.
+  // Reading, editing, review, skills, and project settings are separate surfaces.
   await page.evaluate(() => document.querySelector("[data-knowledge-scope=global]")?.click());
   await page.waitForFunction(() => document.querySelector(".knowledge-page")?.classList.contains("knowledge-mode-read"), null, {timeout: 10000});
   await page.waitForFunction(() => document.querySelector("[data-load-more=knowledge]")?.textContent === "Load more", null, {timeout: 10000});
@@ -120,7 +120,7 @@ try {
   await scan("knowledge review");
   await page.evaluate(() => document.querySelector("[data-knowledge-mode=read]")?.click());
 
-  await page.evaluate(() => document.querySelector("[data-knowledge-mode=manage][data-knowledge-manage-tab=skills]")?.click());
+  await page.evaluate(() => document.querySelector("[data-knowledge-mode=skills]")?.click());
   await page.waitForSelector("#knowledge-skill-search", {timeout: 15000});
   await scan("knowledge skills");
   await page.evaluate(() => document.querySelector("[data-skill-new]")?.click());
@@ -129,9 +129,15 @@ try {
   assert.equal(await page.locator("#skill-editor-form input[name=description]").getAttribute("placeholder"), "Used when deciding whether this Skill applies to a Task");
   await page.evaluate(() => document.querySelector("#skill-editor-dialog [data-kb-close]")?.click());
 
-  await page.evaluate(() => document.querySelector("[data-knowledge-mode=manage][data-knowledge-manage-tab=libraries]")?.click());
-  await page.waitForSelector(".knowledge-library-card", {timeout: 10000});
-  await scan("knowledge libraries");
+  // Libraries and bindings belong to project settings, not the top level.
+  await page.evaluate(() => document.querySelector("[data-knowledge-scope=project]")?.click());
+  await page.waitForFunction(() => document.querySelector(".knowledge-page")?.classList.contains("knowledge-mode-read"), null, {timeout: 10000});
+  await page.evaluate(() => document.querySelector("[data-knowledge-project-settings]")?.click());
+  await page.waitForSelector(".knowledge-settings .knowledge-library-card", {timeout: 10000});
+  assert.equal(await page.locator(".knowledge-document-body").count(), 0);
+  await scan("knowledge project settings");
+  await page.evaluate(() => document.querySelector("[data-knowledge-settings-close]")?.click());
+  await page.waitForSelector(".knowledge-read-layout", {timeout: 10000});
   assert.deepEqual(errors, []);
 } finally {
   await browser?.close();

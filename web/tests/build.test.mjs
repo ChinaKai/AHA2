@@ -1242,7 +1242,10 @@ test("built web contains responsive application", async () => {
   assert.match(knowledgeWorkspace, /knowledge-feedback-active/);
   assert.match(knowledgeWorkspace, /feedback_state === "stale"/);
   assert.match(knowledgeWorkspace, /data-knowledge-mode="review"/);
-  assert.match(knowledgeWorkspace, /data-knowledge-mode="manage"/);
+  assert.match(knowledgeWorkspace, /data-knowledge-mode="skills"/);
+  assert.match(knowledgeWorkspace, /data-knowledge-section/);
+  assert.match(knowledgeWorkspace, /data-knowledge-project-settings/);
+  assert.doesNotMatch(knowledgeWorkspace, /knowledge\.librariesEntry/);
   assert.match(knowledgeWorkspace, /data-knowledge-unsaved/);
   assert.doesNotMatch(knowledgeWorkspace, /data-knowledge-toggle/);
   assert.match(knowledgeWorkspace, /data-knowledge-open/);
@@ -1772,7 +1775,7 @@ test("hardware tool title renders the active hardware group switcher", async () 
   assert.match(emptyHTML, /<details class="hardware-config" open>/);
 });
 
-test("knowledge workspace opens in reading mode with explicit edit, review, and manage modes", async () => {
+test("knowledge workspace opens in reading mode with four equal top-level sections", async () => {
   const root = resolve(import.meta.dirname, "..");
   const {renderKnowledgeWorkspace} = await import(pathToFileURL(resolve(root, "build", "knowledge_workspace.js")));
   const html = renderKnowledgeWorkspace({
@@ -1806,17 +1809,23 @@ test("knowledge workspace opens in reading mode with explicit edit, review, and 
   assert.doesNotMatch(html, /data-knowledge-proposal-approve|data-knowledge-proposal-reject/);
   assert.doesNotMatch(html, /data-knowledge-update-filter|data-knowledge-batch/);
   assert.doesNotMatch(html, /data-knowledge-area/);
-  // Review and management are explicit secondary entries, not mixed into reading.
-  assert.match(html, /data-knowledge-mode="review"/);
-  assert.match(html, /data-knowledge-mode="manage"/);
-  assert.match(html, /data-knowledge-manage-tab="skills"/);
-  assert.match(html, /data-knowledge-manage-tab="libraries"/);
+  // Four equal top-level sections; only the review entry carries a count badge.
+  assert.match(html, /class="knowledge-section-nav"/);
+  assert.match(html, /data-knowledge-section="project"[^>]*data-knowledge-scope="project"/);
+  assert.match(html, /data-knowledge-section="global"[^>]*data-knowledge-scope="global"/);
+  assert.match(html, /data-knowledge-section="skills"[^>]*data-knowledge-mode="skills"/);
+  assert.match(html, /data-knowledge-section="review"[^>]*data-knowledge-mode="review"/);
   assert.match(html, /待审提案/);
   // Two pending proposals plus the unshadowed legacy candidate entry.
   assert.match(html, /knowledge-pending-count has-pending">3</);
+  assert.equal((html.match(/knowledge-pending-count/g) || []).length, 1, "only review may carry a count badge");
+  // Libraries and bindings are no longer a top-level entry.
+  assert.doesNotMatch(html, /库与绑定/);
   assert.match(html, /搜索当前知识库/);
-  assert.match(html, /data-knowledge-scope="project"/);
-  assert.match(html, /data-knowledge-scope="global"/);
+  // Project knowledge exposes the project settings gear next to the project picker.
+  assert.match(html, /id="knowledge-project-select"/);
+  assert.match(html, /data-knowledge-project-settings/);
+  assert.match(html, /aria-label="项目设置"/);
 });
 
 test("task agent config selects skills explicitly", async () => {
@@ -2491,7 +2500,7 @@ test("project navigation and project knowledge share the tree layout with full b
   assert.match(styles, /\.markdown-body \.knowledge-index-link \{[^}]*display:\s*inline/);
 });
 
-test("knowledge libraries support pending browse, bind, and unbind", async () => {
+test("project settings owns the current project's libraries and bindings", async () => {
   const root = resolve(import.meta.dirname, "..");
   const module = await import(pathToFileURL(resolve(root, "build", "knowledge_workspace.js")));
   const workspace = await readFile(resolve(root, "build", "knowledge_workspace.js"), "utf8");
@@ -2502,19 +2511,21 @@ test("knowledge libraries support pending browse, bind, and unbind", async () =>
   assert.match(workspace, /bound_project_id/);
   assert.match(workspace, /selectedLibraryID/);
   assert.match(workspace, /readOnly/);
-  const html = module.renderKnowledgeManagePage({
+  const html = module.renderKnowledgeProjectSettings({
     projects: [{id: "project-1", name: "AHA2"}],
-    workspaces: [],
-    knowledge: [{id: "own", scope: "project", project_id: "project-1", title: "Own doc", body: "body", status: "verified", is_index: false}],
+    workspaces: [{id: "workspace-1", project_id: "project-1", name: "Native", locality: "local", transport: "native", root_path: "/repo", health: "ready"}],
+    knowledge: [{id: "own", scope: "project", project_id: "project-1", title: "Own doc", body: "BODY_MUST_NOT_APPEAR", status: "verified", is_index: false}],
     libraries: [
       {id: "library-1", name: "Imported", description: "Docs", container_project_id: "container-1", knowledge_count: 3, skill_count: 1},
       {id: "library-2", name: "Bound library", description: "Bound docs", container_project_id: "container-2", bound_project_id: "project-1", binding_mode: "project", knowledge_count: 2, skill_count: 0},
     ],
     proposals: [], reviewSettings: {auto_approve: false},
     refreshData: async () => {}, render: () => {}, setMessage: () => {},
-  }, "libraries");
-  assert.match(html, /knowledge-manage-tabs/);
-  assert.match(html, /data-knowledge-manage-tab="libraries"/);
+  });
+  assert.match(html, /class="knowledge-settings"/);
+  assert.match(html, /data-knowledge-settings-close/);
+  assert.match(html, /id="knowledge-project-select"/);
+  assert.match(html, /Workspace Bindings/);
   assert.match(html, /待绑定项目知识库/);
   assert.match(html, /data-knowledge-library-open="library-1"/);
   assert.match(html, /data-knowledge-library-bind="library-1"/);
@@ -2523,7 +2534,9 @@ test("knowledge libraries support pending browse, bind, and unbind", async () =>
   assert.match(html, /项目设置/);
   assert.match(html, /data-project-knowledge-detach/);
   assert.match(html, /data-project-knowledge-delete/);
+  assert.doesNotMatch(html, /BODY_MUST_NOT_APPEAR/);
   assert.doesNotMatch(html, /knowledge-document-body/);
+  assert.doesNotMatch(html, /data-knowledge-mode=/);
   assert.match(api, /knowledge\/libraries/);
   assert.match(api, /bindKnowledgeLibrary/);
   assert.match(api, /unbindKnowledgeLibrary/);
@@ -2535,7 +2548,7 @@ test("knowledge libraries support pending browse, bind, and unbind", async () =>
   assert.match(styles, /\.knowledge-library-card \{[^}]*grid-template-rows:\s*auto auto auto;[^}]*align-content:\s*start;[^}]*height:\s*auto/);
 });
 
-test("skills and library bindings are management-only, with no document body", async () => {
+test("skills and project settings are separate sections with no document body", async () => {
   const root = resolve(import.meta.dirname, "..");
   const module = await import(pathToFileURL(resolve(root, "build", "knowledge_workspace.js")));
   const context = {
@@ -2545,18 +2558,21 @@ test("skills and library bindings are management-only, with no document body", a
     libraries: [], proposals: [], reviewSettings: {auto_approve: false},
     refreshData: async () => {}, render: () => {}, setMessage: () => {},
   };
-  const skillsHTML = module.renderKnowledgeManagePage(context, "skills");
-  assert.match(skillsHTML, /knowledge-manage-tabs/);
-  assert.match(skillsHTML, /data-knowledge-manage-tab="skills" class="active"/);
+  const skillsHTML = module.renderKnowledgeSkillsPage(context);
+  assert.equal((skillsHTML.match(/class="skill-card/g) || []).length, 0);
   assert.match(skillsHTML, /新建 Skill/);
   assert.match(skillsHTML, /id="knowledge-skill-search"/);
+  assert.doesNotMatch(skillsHTML, /knowledge-manage-tabs/);
   assert.doesNotMatch(skillsHTML, /BODY_MUST_NOT_APPEAR/);
   assert.doesNotMatch(skillsHTML, /knowledge-document-body/);
-  const librariesHTML = module.renderKnowledgeManagePage(context, "libraries");
-  assert.match(librariesHTML, /Workspace Bindings/);
-  assert.match(librariesHTML, /待绑定项目知识库/);
-  assert.doesNotMatch(librariesHTML, /BODY_MUST_NOT_APPEAR/);
-  assert.doesNotMatch(librariesHTML, /data-knowledge-proposal-approve/);
+  assert.doesNotMatch(skillsHTML, /data-knowledge-project-settings/);
+  const settingsHTML = module.renderKnowledgeProjectSettings(context);
+  assert.match(settingsHTML, /Workspace Bindings/);
+  assert.match(settingsHTML, /待绑定项目知识库/);
+  assert.match(settingsHTML, /data-knowledge-settings-close/);
+  assert.doesNotMatch(settingsHTML, /BODY_MUST_NOT_APPEAR/);
+  assert.doesNotMatch(settingsHTML, /data-knowledge-proposal-approve/);
+  assert.doesNotMatch(settingsHTML, /knowledge-manage-tabs/);
 });
 
 test("project knowledge keeps a merged view while exposing source labels and filters", async () => {
@@ -3465,8 +3481,9 @@ test("knowledge navigation hierarchy, mode switching, unsaved guard, and mobile 
   assert.match(source, /data-knowledge-edit/);
   assert.match(source, /data-knowledge-unsaved/);
   assert.match(source, /markEditorDirty/);
-  assert.match(styles, /@media \(max-width: 640px\)[\s\S]*?\.knowledge-secondary \{ display: none;/);
-  assert.match(styles, /@media \(max-width: 640px\)[\s\S]*?\.knowledge-secondary\.open \{ display: grid;/);
+  assert.match(styles, /@media \(max-width: 640px\)[\s\S]*?\.knowledge-section-nav \{ order: 2; display: grid;[^}]*grid-template-columns: repeat\(4,minmax\(0,1fr\)\)/);
+  assert.match(styles, /@media \(max-width: 640px\)[\s\S]*?\.knowledge-settings \{ position: fixed; inset: 0;/);
+  assert.doesNotMatch(styles, /\.knowledge-secondary/);
 });
 
 test("boot starts auth and general settings in parallel", async () => {
