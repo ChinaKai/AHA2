@@ -72,5 +72,14 @@ Web 模型页底部的「AHA 支持的 Backend」列出可执行 Turn 的 agent 
 | Codex CLI | `codex` | Responses、Chat Completions | https://learn.chatgpt.com/docs/codex/cli |
 | DeepSeek Harness | `dsh` | Responses、Chat Completions、Anthropic Messages | https://deepseek-harness.github.io/deepseek-harness/ |
 
+安装命令按平台展示，并和官方页保持一致：
+
+- Claude Code：Windows PowerShell `irm https://claude.ai/install.ps1 | iex`；macOS / Linux / WSL
+  `curl -fsSL https://claude.ai/install.sh | bash`。
+- Codex CLI：macOS / Linux `curl -fsSL https://chatgpt.com/codex/install.sh | sh`（Windows 与 npm
+  安装方式以官方页为准）。
+- DeepSeek Harness：需要 Node.js >= 24.9.0，执行 `npx @deepseek-ai/dsh web`。
+
 该区块只做展示：不探测版本、不发网络请求、不改模型或 Provider 配置；安装命令以等宽文本给出，
-不会自动执行。实现与测试见 `web/src/backends.ts`、`web/tests/backends.test.mjs`。
+不会自动执行。`web/src/backends.ts` 同时是运行时协议矩阵、Backend 下拉和显示名的单一来源，
+实现与测试见 `web/tests/backends.test.mjs`。

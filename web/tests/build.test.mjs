@@ -2061,7 +2061,7 @@ test("runtime picker separates Env and Official Codex models", async () => {
     id: "model-dsh", display_name: "DSH Model", provider_id: "gateway", provider_name: "Gateway A",
     source: "provider", backend: "dsh", wire_model: "dsh-model", created_at: "", updated_at: "",
   }], [], {backend: "dsh", model_source: "env", model_id: "model-dsh"});
-  assert.match(dshHTML, />DSH<\/option>/);
+  assert.match(dshHTML, />DeepSeek Harness<\/option>/);
   assert.match(dshHTML, /value="model-dsh" selected/);
   assert.doesNotMatch(dshHTML, /value="official"/);
   assert.match(dshHTML, /id="dsh-codex-stream-settings"[^>]*hidden/);

@@ -105,6 +105,12 @@ const versionedAppWithKnowledge = versionedAppWithHelpers
   .replaceAll('"./mail_cards.js"', `"./mail_cards.js?v=${version}"`)
   .replaceAll('"./mail_resources.js"', `"./mail_resources.js?v=${version}"`);
 await writeFile(appPath, versionedAppWithKnowledge);
+// runtime_picker is loaded by both app.js and task_agents.js; point its backend
+// labels at the same versioned backends module so there is one catalog instance.
+const runtimePickerPath = resolve(output, "runtime_picker.js");
+const versionedRuntimePicker = (await readFile(runtimePickerPath, "utf8"))
+  .replaceAll('"./backends.js"', `"./backends.js?v=${version}"`);
+await writeFile(runtimePickerPath, versionedRuntimePicker);
 const agentsPath = resolve(output, "task_agents.js");
 const versionedAgents = (await readFile(agentsPath, "utf8"))
   .replaceAll('"./icons.js"', `"./icons.js?v=${version}"`)

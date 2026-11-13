@@ -1,4 +1,5 @@
 import type {ClaudeModelOption, CodexAccount, CodexModelOption, Model} from "./types.js";
+import {supportedBackendName} from "./backends.js";
 
 type RuntimeSelection = {
   backend?: string;
@@ -11,11 +12,9 @@ type RuntimeSelection = {
   fast_mode?: boolean;
 };
 
+// backendLabel uses the same full display names as the Models page catalog.
 export function backendLabel(backend: string): string {
-  if (backend === "codex") return "Codex";
-  if (backend === "claude") return "Claude Code";
-  if (backend === "dsh") return "DSH";
-  return backend;
+  return supportedBackendName(backend);
 }
 
 export type ClaudeOfficialAvailability = "ready" | "loading" | "not_logged_in" | "unknown" | "unavailable";
