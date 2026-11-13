@@ -132,7 +132,9 @@ try {
   // provider and carries its model count.
   assert.ok(await page.locator(".model-group-row").count() > 0);
   assert.match(await page.locator(".model-group-row").first().textContent(), /Provider 01/);
-  assert.match(await page.locator(".model-group-row").first().textContent(), /共 1 个/);
+  // Provider 01 owns Model 1 and Model 21, so its header reports the filtered
+  // total (2) and the part visible on this page (1).
+  assert.match(await page.locator(".model-group-row").first().textContent(), /共 2 个 · 本页 1 个/);
   assert.equal(await page.locator(".provider-row").count(), 5);
   assert.match(await page.locator(".list-footer-providers").textContent(), /第 1\/4 页/);
   assert.equal(await page.locator(".codex-account-card").count(), 3);
