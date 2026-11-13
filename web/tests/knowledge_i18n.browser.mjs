@@ -73,13 +73,11 @@ try {
   page.on("pageerror", error => errors.push(error.message));
   await page.goto(url, {waitUntil: "networkidle"});
   await page.evaluate(() => document.querySelector("[data-view=knowledge]")?.click());
-  await page.waitForSelector("[data-knowledge-area=global]", {timeout: 15000});
-  assert.equal((await page.locator("[data-knowledge-area=global] span").textContent()).trim(), "Global knowledge");
-  assert.equal((await page.locator("[data-knowledge-area=libraries] span").textContent()).trim(), "Unbound");
-  assert.equal((await page.locator("[data-knowledge-area=skills] span").textContent()).trim(), "Skills");
-  // Load-more belongs to the global/project entry lists, not the default updates tab.
-  await page.evaluate(() => document.querySelector("[data-knowledge-area=global]")?.click());
-  await page.waitForFunction(() => document.querySelector("[data-load-more=knowledge]")?.textContent === "Load more", null, {timeout: 10000});
+  await page.waitForSelector("[data-knowledge-scope=global]", {timeout: 15000});
+  assert.equal((await page.locator("[data-knowledge-scope=global]").textContent()).trim(), "Global knowledge");
+  assert.equal((await page.locator("[data-knowledge-scope=project]").textContent()).trim(), "Project knowledge");
+  assert.equal(await page.locator("#knowledge-search").getAttribute("placeholder"), "Search this knowledge base");
+  assert.equal((await page.locator("[data-knowledge-mode=review]").textContent()).trim().replace(/\s+/g, " "), "Pending proposals 0");
 
   const scan = async (label) => {
     const missing = await page.evaluate(() => {
@@ -105,26 +103,35 @@ try {
     assert.deepEqual(missing, [], `${label} left untranslated Chinese text`);
   };
 
-  for (const area of ["global", "libraries", "skills"]) {
-    await page.evaluate(a => document.querySelector(`[data-knowledge-area="${a}"]`)?.click(), area);
-    await page.waitForTimeout(300);
-    await scan(`knowledge ${area}`);
-    if (area === "global") {
-      await page.evaluate(() => document.querySelector("[data-knowledge-new]")?.click());
-      await page.waitForTimeout(200);
-      await scan("global knowledge editor");
-      assert.equal(await page.locator("#knowledge-editor-form input[name=title]").getAttribute("placeholder"), "e.g. Local development workflow");
-      await page.evaluate(() => document.querySelector("#knowledge-editor-dialog [data-kb-close]")?.click());
-    } else if (area === "skills") {
-      await page.evaluate(() => document.querySelector("[data-skill-new]")?.click());
-      await page.waitForTimeout(200);
-      await scan("Skill editor");
-      assert.equal(await page.locator("#skill-editor-form input[name=description]").getAttribute("placeholder"), "Used when deciding whether this Skill applies to a Task");
-    }
-  }
-  await page.evaluate(() => document.querySelector("[data-knowledge-area=updates]")?.click());
-  await page.waitForTimeout(300);
-  await scan("knowledge updates");
+  // Reading, editing, review, and management are separate surfaces.
+  await page.evaluate(() => document.querySelector("[data-knowledge-scope=global]")?.click());
+  await page.waitForFunction(() => document.querySelector(".knowledge-page")?.classList.contains("knowledge-mode-read"), null, {timeout: 10000});
+  await page.waitForFunction(() => document.querySelector("[data-load-more=knowledge]")?.textContent === "Load more", null, {timeout: 10000});
+  await scan("global reading");
+
+  await page.evaluate(() => document.querySelector("[data-knowledge-new=global]")?.click());
+  await page.waitForSelector("#knowledge-inline-editor", {timeout: 10000});
+  await scan("knowledge editor");
+  await page.evaluate(() => document.querySelector("[data-knowledge-edit-cancel]")?.click());
+  await page.waitForFunction(() => document.querySelector(".knowledge-page")?.classList.contains("knowledge-mode-read"), null, {timeout: 10000});
+
+  await page.evaluate(() => document.querySelector("[data-knowledge-mode=review]")?.click());
+  await page.waitForSelector(".knowledge-review", {timeout: 10000});
+  await scan("knowledge review");
+  await page.evaluate(() => document.querySelector("[data-knowledge-mode=read]")?.click());
+
+  await page.evaluate(() => document.querySelector("[data-knowledge-mode=manage][data-knowledge-manage-tab=skills]")?.click());
+  await page.waitForSelector("#knowledge-skill-search", {timeout: 15000});
+  await scan("knowledge skills");
+  await page.evaluate(() => document.querySelector("[data-skill-new]")?.click());
+  await page.waitForTimeout(200);
+  await scan("Skill editor");
+  assert.equal(await page.locator("#skill-editor-form input[name=description]").getAttribute("placeholder"), "Used when deciding whether this Skill applies to a Task");
+  await page.evaluate(() => document.querySelector("#skill-editor-dialog [data-kb-close]")?.click());
+
+  await page.evaluate(() => document.querySelector("[data-knowledge-mode=manage][data-knowledge-manage-tab=libraries]")?.click());
+  await page.waitForSelector(".knowledge-library-card", {timeout: 10000});
+  await scan("knowledge libraries");
   assert.deepEqual(errors, []);
 } finally {
   await browser?.close();

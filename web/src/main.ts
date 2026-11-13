@@ -6498,6 +6498,7 @@ function bindTaskToolsAndPanels(): void {
     knowledge: state.knowledge,
     libraries: state.knowledgeLibraries,
     proposals: state.knowledgeProposals,
+    reviewSettings: state.knowledgeReviewSettings,
     refreshData: loadKnowledgeData,
     render,
     setMessage,
