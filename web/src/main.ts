@@ -3024,7 +3024,7 @@ function updatePetPendingApprovalIndicators(): void {
   const pending = petApprovalCounter.pending;
   document.querySelectorAll<HTMLElement>('[data-view="pet-workbench"]').forEach(button => {
     button.classList.toggle("has-pending", pending > 0);
-    const label = pending > 0 ? petPendingApprovalLabel() : t("petWorkbench.title");
+    const label = pending > 0 ? petPendingApprovalLabel() : t("nav.pet");
     button.title = label;
     button.setAttribute("aria-label", label);
     button.querySelector(".task-tool-badge")?.remove();
@@ -3054,7 +3054,7 @@ function shell(content: string): string {
     ["knowledge", "knowledge", "nav.knowledge"],
     ["models", "model", "nav.models"],
     ["resources", "hardware", "nav.resources"],
-    ["pet-workbench", "bot", "petWorkbench.title"],
+    ["pet-workbench", "bot", "nav.pet"],
   ] as const;
   const mobileNav = [...nav, ["advanced", "settings", "nav.advanced"] as const];
   return `<div class="app-shell">

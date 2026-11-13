@@ -3026,7 +3026,8 @@ test("sidebar and mobile navigation expose pet workbench and resources", async (
   const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
   const i18n = await readFile(resolve(root, "src", "i18n.ts"), "utf8");
   assert.match(main, /\["resources", "hardware", "nav\.resources"\]/);
-  assert.match(main, /\["pet-workbench", "bot", "petWorkbench\.title"\]/);
+  assert.match(main, /\["pet-workbench", "bot", "nav\.pet"\]/);
+  assert.match(i18n, /"nav\.pet": "宠物"/);
   assert.match(main, /const mobileNav = \[\.\.\.nav, \["advanced", "settings", "nav\.advanced"\] as const\]/);
   assert.match(i18n, /"petWorkbench\.title": "宠物工作台"/);
   assert.match(i18n, /"petWorkbench\.title": "Pet workbench"/);
