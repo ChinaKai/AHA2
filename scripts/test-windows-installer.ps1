@@ -177,111 +177,6 @@ try {
 }
 & (Join-Path $repo "installer\windows\Prepare-AHA2DataDir.ps1") -DataDir (Join-Path ([IO.Path]::GetTempPath()) "AHA2 User Data") -ValidateOnly
 
-$userDeployPath = Join-Path $repo "scripts\deploy-windows-user.ps1"
-$userDeploy = Get-Content -Raw -Encoding UTF8 -LiteralPath $userDeployPath
-foreach ($contract in @("ProviderPath", "GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)", "-WorkingDirectory `$install", "AllowCustomUserWritableInstallDir", "UpdateExistingInstallInPlace", "existing-install-in-place", "Custom install directory is not writable", "WriteAccessVerified", "-PerUser", "ElevationRequired=`$false", "AHA2-Setup-User-x64.exe", "Wait-AHA2Health", "Get-FileHash", "AHA2 User", "AHA2 User Update", "DetachedWorker", "New-ScheduledTaskAction", "RunLevel Limited", "Stop-AHA2ProcessTrees", "System32\taskkill.exe", "`$taskkillExecutable", "`$global:LASTEXITCODE = 0", "/T", "/SKIPUSERTASK=1", "user-deploy-result.json", "stagedInstaller", "Unblock-File", "Start-Process -FilePath `$stagedInstaller", "-SelfTest", "StopTimeoutSeconds", "Test-AHA2ExclusiveFileProbe", "Set-AHA2StagedFileAtomic", "Restore-AHA2DatabaseFromBackup", "PRAGMA quick_check", "winsqlite3.dll", "LockedFiles", "BackupSHA256", "RollbackVerified", "rollback_health", "BackupPresent", "Get-AHA2FileRollbackAction", "Get-AHA2ProcessList", "EnumerationError", "Set-AHA2InstalledFile", "Get-AHA2DeploymentPreflight", "Get-AHA2VolumeChecks", "Get-AHA2PreflightRequest", "Get-AHA2PreflightRequirementText", "Invoke-AHA2DeploymentPreflight", "Get-AHA2VolumeFreeBytes", "FreeBytes", "RequiredBytes", "Volumes", "aha2TempSpaceAllowanceBytes", "Copy-AHA2DatabaseBackup", "databaseBackupFileNames", "Get-AHA2ScriptEncodingState", "Assert-AHA2WindowsPowerShellScriptEncoding", "Resolve-AHA2DetachedHandoff", "Assert-AHA2DetachedWorkerAlive", "HandoffTimeoutSeconds", "Test-AHA2WorkerStartedSince", "Get-AHA2UtcTimestamp")) {
-    if (-not $userDeploy.Contains($contract)) {
-        throw "Per-user deployment contract is missing: $contract"
-    }
-}
-if ($userDeploy.Contains("Get-CimInstance Win32_Process -ErrorAction SilentlyContinue") -or
-    $userDeploy.Contains('-Filter "ProcessId=$($Target.Id)" -ErrorAction SilentlyContinue') -or
-    $userDeploy.Contains('-Filter "ProcessId=$current" -ErrorAction SilentlyContinue')) {
-    throw "Process enumeration and identity lookups must fail closed instead of swallowing CIM errors."
-}
-if ($userDeploy.Contains("Start-Process -FilePath `$installer")) {
-    throw "Per-user deployment must not launch the installer directly from the WSL UNC path; stage a local copy first."
-}
-if ($userDeploy.Contains('Copy-Item -LiteralPath $backupFile -Destination')) {
-    throw "Per-user rollback must not copy a backup over a live file; stage and atomically replace it."
-}
-if (-not $userDeploy.Contains("[IO.File]::Replace")) {
-    throw "Per-user rollback must use an atomic file replacement for binaries and the database."
-}
-if ($userDeploy.Contains("[IO.File]::Replace(`$TemporaryPath, `$Destination, `$null)") -or
-    $userDeploy.Contains("[IO.File]::Replace(`$temporaryTarget, `$target, `$null)")) {
-    throw "Atomic replacement must pass [NullString]::Value, not `$null, as the backup name."
-}
-if (-not $userDeploy.Contains("[NullString]::Value")) {
-    throw "Atomic replacement must pass [NullString]::Value as the null backup name."
-}
-$preflightIndex = $userDeploy.IndexOf('$preflight = Invoke-AHA2DeploymentPreflight')
-$stopStageIndex = $userDeploy.IndexOf('$stop = Stop-AHA2ProcessTrees')
-$backupDirectoryIndex = $userDeploy.IndexOf('New-Item -ItemType Directory -Path $backup')
-if ($preflightIndex -lt 0 -or $stopStageIndex -lt 0 -or $backupDirectoryIndex -lt 0 -or
-    $preflightIndex -gt $stopStageIndex -or $preflightIndex -gt $backupDirectoryIndex) {
-    throw "Per-user deployment must complete the disk-space preflight before creating the backup directory or stopping AHA2."
-}
-$preflightRequestMarker = 'Get-AHA2PreflightRequest -DataDirectory $data -DatabasePaths @($databasePath,$databaseWalPath,$databaseShmPath) -InstallDirectory $install -TempDirectory ([IO.Path]::GetTempPath()) -UseInstaller (-not $UpdateExistingInstallInPlace)'
-if (-not $userDeploy.Contains($preflightRequestMarker)) {
-    throw "Per-user deployment must build the preflight request from the data, install, and temp directories, and skip temp for in-place updates."
-}
-$taskSnapshotIndex = $userDeploy.IndexOf('$previousTaskXML')
-$stopBeforeBackupIndex = $userDeploy.IndexOf('Stop-AHA2ProcessTrees', $taskSnapshotIndex)
-$databaseBackupIndex = $userDeploy.IndexOf('$state.Stage = "backup"', $taskSnapshotIndex)
-if ($stopBeforeBackupIndex -lt 0 -or $databaseBackupIndex -lt 0 -or $stopBeforeBackupIndex -gt $databaseBackupIndex) {
-    throw "Per-user deployment must stop and verify the complete AHA2 process tree before copying SQLite backup files."
-}
-$backupListMarker = '$databaseBackupFileNames = @("aha2.db", "aha2.db-wal")'
-if (-not $userDeploy.Contains($backupListMarker)) {
-    throw "Per-user deployment must limit database backups to aha2.db and aha2.db-wal; aha2.db-shm is volatile."
-}
-if ($userDeploy.Contains('$databaseFileNames + @("secrets.json"')) {
-    throw "Per-user backup loop still iterates the full database trio, including the volatile shm file."
-}
-$backupFunctionStart = $userDeploy.IndexOf('function Test-AHA2BackupCopy')
-$backupFunctionEnd = $userDeploy.IndexOf('function Copy-AHA2DatabaseBackup', $backupFunctionStart)
-if ($backupFunctionStart -lt 0 -or $backupFunctionEnd -le $backupFunctionStart) {
-    throw "Per-user deployment is missing the backup verification helpers."
-}
-$backupFunction = $userDeploy.Substring($backupFunctionStart, $backupFunctionEnd - $backupFunctionStart)
-if (-not $backupFunction.Contains('Get-FileHash -LiteralPath $Source -Algorithm SHA256 -ErrorAction Stop') -or
-    -not $backupFunction.Contains('catch')) {
-    throw "Test-AHA2BackupCopy must stop on Get-FileHash errors and report the file with its reason."
-}
-$restoreFunctionStart = $userDeploy.IndexOf('function Restore-AHA2DatabaseFromBackup')
-$restoreFunctionEnd = $userDeploy.IndexOf('function Test-AHA2ExclusiveFileProbe', $restoreFunctionStart)
-if ($restoreFunctionStart -lt 0 -or $restoreFunctionEnd -le $restoreFunctionStart) {
-    throw "Per-user deployment is missing the database restore helper."
-}
-$restoreFunction = $userDeploy.Substring($restoreFunctionStart, $restoreFunctionEnd - $restoreFunctionStart)
-if (-not $restoreFunction.Contains('$databaseBackupFileNames') -or $restoreFunction.Contains('"aha2.db-shm"')) {
-    throw "Database restore must only consider durable backup files and must never copy shm back."
-}
-$handoffStart = $userDeploy.IndexOf('if (-not $DetachedWorker -and (Test-AHA2Ancestor))')
-$handoffEnd = $userDeploy.IndexOf('$stamp = [DateTime]::UtcNow.ToString', $handoffStart)
-if ($handoffStart -lt 0 -or $handoffEnd -le $handoffStart) {
-    throw "Per-user deployment is missing the detached worker handoff block."
-}
-$handoffSection = $userDeploy.Substring($handoffStart, $handoffEnd - $handoffStart)
-foreach ($marker in @('Assert-AHA2WindowsPowerShellScriptEncoding', 'Start-ScheduledTask', '$decision -eq "failed"', 'Assert-AHA2DetachedWorkerAlive')) {
-    if (-not $handoffSection.Contains($marker)) {
-        throw "Detached handoff must fail loudly when the worker exits without a result: missing $marker"
-    }
-}
-$legacyDeploy = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo "scripts\deploy-windows.ps1")
-if ($legacyDeploy -match 'runtimeFiles\s*=\s*@\([^)]*aha2\.db-shm') {
-    throw "Legacy deploy-windows.ps1 must not back up the volatile aha2.db-shm."
-}
-if (-not $legacyDeploy.Contains('foreach ($staleName in @("aha2.db-shm", "aha2.db-wal"))')) {
-    throw "Legacy deploy-windows.ps1 rollback must delete stale shm and WAL before restoring the database."
-}
-& $userDeployPath -SelfTest
-& $userDeployPath -RepoPath $repo -InputExe (Join-Path $repo "go.mod") -InputTrayExe (Join-Path $repo "go.mod") -InstallDir (Join-Path $localAppData "Programs\AHA2-validation") -DataDir (Join-Path ([IO.Path]::GetTempPath()) "AHA2 User Data") -ValidateOnly
-$customInstallValidation = Join-Path $repo ".tools\AHA2 Custom Install Validation"
-New-Item -ItemType Directory -Path $customInstallValidation -Force | Out-Null
-$previousLocalAppData = $env:LOCALAPPDATA
-try {
-    $env:LOCALAPPDATA = Join-Path $repo ".tools\fake-local-app-data"
-    $customValidation = & $userDeployPath -RepoPath $repo -InputExe (Join-Path $repo "go.mod") -InputTrayExe (Join-Path $repo "go.mod") -InstallDir $customInstallValidation -DataDir (Join-Path ([IO.Path]::GetTempPath()) "AHA2 User Data") -AllowCustomUserWritableInstallDir -ValidateOnly
-    if ($customValidation.Mode -ne "per-user-custom" -or -not $customValidation.WriteAccessVerified) {
-        throw "Custom user-writable deployment validation did not report the expected mode."
-    }
-} finally {
-    $env:LOCALAPPDATA = $previousLocalAppData
-    Remove-Item -LiteralPath $customInstallValidation -Recurse -Force -ErrorAction SilentlyContinue
-}
-
 $unsafeListenRejected = $false
 try {
     & $taskScriptPath -TrayExecutable (Join-Path $repo "go.mod") -ServerExecutable (Join-Path $repo "go.mod") -Listen '127.0.0.1:8766"' -DataDir $repo -ValidateOnly
@@ -384,28 +279,25 @@ foreach ($contract in @("./cmd/aha-tray", "aha2-tray-", "-H windowsgui")) {
         throw "Local cross-build contract is missing: $contract"
     }
 }
-$buildAndDeploy = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo "scripts\build-and-deploy-windows-user.ps1")
-# These assertions name the mechanism, so reworking an invocation legitimately
-# changes them -- the guard is that the capability is still present, not that the
-# wording froze. Keep each one pointing at a real marker: the toolchain probe, the
-# free-space probe, and the node that runs the Web build.
-foreach ($contract in @("ProviderPath", "GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)", "aha2-version-", "main.webVersion=", "InputFeishuPlugin", "InputFeishuManifest", "AllowCustomUserWritableInstallDir", "UpdateExistingInstallInPlace", "No WSL Node.js able to run the Web build was found", "NodeRuntime", '$wslNode, "scripts/build-web.mjs"', '"test", "-x", "$linuxRepo/.tools/go/bin/go"', '"df", "-Pk", "."')) {
-    if (-not $buildAndDeploy.Contains($contract)) {
-        throw "Windows build-and-deploy contract is missing: $contract"
+$packageBuilder = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo "scripts\build-windows-package.sh")
+foreach ($contract in @(
+    "scripts/build-web.mjs", "web/tests/build.test.mjs", "CGO_ENABLED=0 GOOS=windows GOARCH=amd64",
+    "-H windowsgui", "plugins/feishu", "aha2-windows-amd64.exe", "aha2-tray-windows-amd64.exe",
+    "release-manifest.json", "scripts/release-manifest.mjs"
+)) {
+    if (-not $packageBuilder.Contains($contract)) {
+        throw "Windows package build contract is missing: $contract"
+    }
+}
+$manifestGenerator = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo "scripts\release-manifest.mjs")
+foreach ($contract in @("schema_version", "version", "commit", "built_at", "generator", "files", "sha256")) {
+    if (-not $manifestGenerator.Contains($contract)) {
+        throw "Release manifest generator contract is missing: $contract"
     }
 }
 $localBuildScript = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo "local_build.sh")
-foreach ($contract in @(
-    "scripts/build-web.mjs", "web/tests/build.test.mjs", "test ./...", "vet ./...",
-    "CGO_ENABLED=0 GOOS=windows GOARCH=amd64", "-H windowsgui", "plugins/feishu",
-    "build-and-deploy-windows-user.ps1", "-DeployOnly", "AllowCustomUserWritableInstallDir",
-    "UpdateExistingInstallInPlace", "user-deploy-result-local-build.json",
-    "build-windows-installer.ps1", "AHA2_INSTALLER_DIR", "AHA2_ISCC_PATH",
-    "AHA2-Setup-User-x64.exe", "-PerUser"
-)) {
-    if (-not $localBuildScript.Contains($contract)) {
-        throw "WSL local build contract is missing: $contract"
-    }
+if (-not $localBuildScript.Contains("scripts/build-windows-package.sh")) {
+    throw "local_build.sh must delegate to the Windows package build script."
 }
 if ($localBuildScript.Contains(".aha2-planned-restart")) {
     throw "WSL local build must not restore the removed planned-restart marker."

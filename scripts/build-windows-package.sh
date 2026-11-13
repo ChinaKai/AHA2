@@ -1,0 +1,244 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Builds the Windows release package consumed by the installer on the target
+# machine. The repository only compiles and packages here: this script never
+# stops a service, copies installed files, touches a data directory or restarts
+# anything. Installing, backing up, replacing, rolling back and health checks
+# belong to the host installer.
+#
+# Output (under --output-dir, default dist/):
+#   aha2-windows-amd64.exe
+#   aha2-tray-windows-amd64.exe
+#   plugins/feishu/windows-amd64/aha2-channel-feishu.exe
+#   plugins/feishu/windows-amd64/plugin.json
+#   release-manifest.json
+
+usage() {
+  cat <<'EOF'
+Usage: bash scripts/build-windows-package.sh [options]
+
+Build the Windows release package and its release-manifest.json.
+This script only builds; deployment belongs to the host installer.
+
+Options:
+  --version VERSION    Override the package version (default: VERSION env,
+                       then the nearest git tag, then 0.0.0)
+  --output-dir DIR     Package directory (default: <repo>/dist)
+  --commit SHA         Commit recorded in the manifest (default: git rev-parse HEAD)
+  --skip-web-test      Do not run web/tests/build.test.mjs
+  -h, --help           Show this help
+
+Environment overrides:
+  VERSION, GO_BIN, AHA2_BUILD_DATE, AHA2_GIT_HASH
+EOF
+}
+
+repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+version="${VERSION:-}"
+output_dir="$repo_dir/dist"
+commit=""
+run_web_test=1
+
+while (($# > 0)); do
+  case "$1" in
+    --version)
+      [[ $# -ge 2 ]] || { printf 'Missing value for --version\n' >&2; exit 2; }
+      version="$2"
+      shift 2
+      ;;
+    --output-dir)
+      [[ $# -ge 2 ]] || { printf 'Missing value for --output-dir\n' >&2; exit 2; }
+      output_dir="$2"
+      shift 2
+      ;;
+    --commit)
+      [[ $# -ge 2 ]] || { printf 'Missing value for --commit\n' >&2; exit 2; }
+      commit="$2"
+      shift 2
+      ;;
+    --skip-web-test)
+      run_web_test=0
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      printf 'Unknown option: %s\n' "$1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ -z "$version" ]]; then
+  version="$(git -C "$repo_dir" describe --tags --abbrev=0 2>/dev/null || true)"
+fi
+version="${version#v}"
+[[ -n "$version" ]] || version="0.0.0"
+if [[ ! "$version" =~ ^[0-9]+([.][0-9]+){2}$ ]]; then
+  printf 'Version must use x.y.z format: %s\n' "$version" >&2
+  exit 2
+fi
+
+if [[ -z "$commit" ]]; then
+  commit="$(git -C "$repo_dir" rev-parse HEAD 2>/dev/null || true)"
+fi
+[[ -n "$commit" ]] || { printf 'Commit is required outside a git checkout; pass --commit.\n' >&2; exit 2; }
+
+# The Web build calls module.stripTypeScriptTypes, which Node added in 22.13.0 and
+# 23.2.0 and removed again in 26. Check the capability instead of the version so
+# an interpreter that only looks new enough fails at the check, not deep inside
+# build-web.mjs.
+node_can_build_web() {
+  "$1" -e 'const m = require("node:module"); process.exit(typeof m.stripTypeScriptTypes === "function" ? 0 : 1);' >/dev/null 2>&1
+}
+
+node_bin=""
+if candidate="$(command -v node 2>/dev/null)" && node_can_build_web "$candidate"; then
+  node_bin="$candidate"
+else
+  while IFS= read -r candidate; do
+    [[ -x "$candidate" ]] || continue
+    if node_can_build_web "$candidate"; then
+      node_bin="$candidate"
+      break
+    fi
+  done < <(ls -1d "$HOME"/.nvm/versions/node/*/bin/node /usr/local/bin/node 2>/dev/null | sort -Vr)
+fi
+[[ -n "$node_bin" ]] || {
+  printf 'No Node.js interpreter able to run the Web build was found.\n' >&2
+  printf 'It needs module.stripTypeScriptTypes with {mode:"transform"}, which is\n' >&2
+  printf 'present in Node 22.13+/23.2+ and removed again in Node 26.\n' >&2
+  printf 'On PATH: %s\n' "$(node --version 2>/dev/null || printf 'no node')" >&2
+  exit 1
+}
+
+if [[ -n "${GO_BIN:-}" ]]; then
+  go_bin="$GO_BIN"
+elif [[ -x "$repo_dir/.tools/go/bin/go" ]]; then
+  go_bin="$repo_dir/.tools/go/bin/go"
+else
+  go_bin="$(command -v go || true)"
+fi
+[[ -n "$go_bin" && -x "$go_bin" ]] || { printf 'Go toolchain was not found; set GO_BIN.\n' >&2; exit 1; }
+command -v sha256sum >/dev/null 2>&1 || { printf 'sha256sum was not found.\n' >&2; exit 1; }
+
+output_dir="$(realpath -m "$output_dir")"
+mkdir -p -- "$output_dir"
+
+built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+web_version="$(bash "$repo_dir/scripts/web-version.sh" "$version")"
+go_version="$("$go_bin" version | awk '{print $3}')"
+node_version="$("$node_bin" --version)"
+server_exe="$output_dir/aha2-windows-amd64.exe"
+tray_exe="$output_dir/aha2-tray-windows-amd64.exe"
+feishu_dir="$output_dir/plugins/feishu/windows-amd64"
+feishu_exe="$feishu_dir/aha2-channel-feishu.exe"
+feishu_manifest="$feishu_dir/plugin.json"
+manifest_path="$output_dir/release-manifest.json"
+
+printf 'Repository: %s\n' "$repo_dir"
+printf 'Version: %s\n' "$version"
+printf 'Web version: %s\n' "$web_version"
+printf 'Commit: %s\n' "$commit"
+printf 'Output: %s\n' "$output_dir"
+printf 'Node: %s (%s)\n' "$node_bin" "$node_version"
+printf 'Go: %s (%s)\n' "$go_bin" "$go_version"
+
+rm -f -- "$server_exe" "$tray_exe" "$feishu_exe" "$manifest_path"
+
+printf '==> Build Web assets\n'
+"$node_bin" "$repo_dir/scripts/build-web.mjs"
+if ((run_web_test)); then
+  printf '==> Test Web build\n'
+  "$node_bin" --test "$repo_dir/web/tests/build.test.mjs"
+fi
+
+printf '==> Sync embedded Web assets\n'
+mkdir -p -- "$repo_dir/internal/webassets/dist"
+find "$repo_dir/internal/webassets/dist" -mindepth 1 -maxdepth 1 ! -name '.gitkeep' -exec rm -rf -- {} +
+cp -a -- "$repo_dir/web/dist/." "$repo_dir/internal/webassets/dist/"
+
+printf '==> Build Windows server\n'
+(
+  cd "$repo_dir"
+  CGO_ENABLED=0 GOOS=windows GOARCH=amd64 "$go_bin" build -trimpath \
+    -ldflags="-s -w -X main.version=$version -X main.webVersion=$web_version" \
+    -o "$server_exe" ./cmd/aha
+)
+printf '==> Build Windows tray\n'
+(
+  cd "$repo_dir"
+  CGO_ENABLED=0 GOOS=windows GOARCH=amd64 "$go_bin" build -trimpath \
+    -ldflags="-s -w -H windowsgui -X main.version=$version" \
+    -o "$tray_exe" ./cmd/aha-tray
+)
+
+printf '==> Build Feishu plugin\n'
+GO_BIN="$go_bin" AHA2_PLUGIN_OUTPUT_DIR="$feishu_dir" \
+  bash "$repo_dir/scripts/build-feishu-plugin.sh" windows/amd64
+
+assert_pe() {
+  local file="$1"
+  [[ -f "$file" ]] || { printf 'Package artifact is missing: %s\n' "$file" >&2; exit 1; }
+  [[ "$(LC_ALL=C head -c 2 "$file")" == "MZ" ]] || {
+    printf 'Package artifact is not a Windows PE executable: %s\n' "$file" >&2
+    exit 1
+  }
+}
+assert_pe "$server_exe"
+assert_pe "$tray_exe"
+assert_pe "$feishu_exe"
+[[ -f "$feishu_manifest" ]] || { printf 'Feishu plugin manifest is missing: %s\n' "$feishu_manifest" >&2; exit 1; }
+if grep -q "SET_BY_PACKAGING" "$feishu_manifest"; then
+  printf 'Feishu plugin manifest still contains the packaging placeholder: %s\n' "$feishu_manifest" >&2
+  exit 1
+fi
+
+printf '==> Write release manifest\n'
+"$node_bin" "$repo_dir/scripts/release-manifest.mjs" \
+  --root "$output_dir" \
+  --version "$version" \
+  --commit "$commit" \
+  --built-at "$built_at" \
+  --output "$manifest_path" \
+  --generator-script "scripts/build-windows-package.sh" \
+  --generator-command "bash scripts/build-windows-package.sh --version $version --output-dir $output_dir" \
+  --web-version "$web_version" \
+  --go-version "$go_version" \
+  --node-version "$node_version" \
+  aha2-windows-amd64.exe \
+  aha2-tray-windows-amd64.exe \
+  plugins/feishu/windows-amd64/aha2-channel-feishu.exe \
+  plugins/feishu/windows-amd64/plugin.json
+
+printf '==> Verify release manifest\n'
+"$node_bin" - "$manifest_path" "$version" "$commit" <<'NODE'
+const fs = require("node:fs");
+const [manifestPath, version, commit] = process.argv.slice(2);
+const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+const expected = [
+  "aha2-windows-amd64.exe",
+  "aha2-tray-windows-amd64.exe",
+  "plugins/feishu/windows-amd64/aha2-channel-feishu.exe",
+  "plugins/feishu/windows-amd64/plugin.json",
+];
+if (manifest.version !== version) throw new Error(`manifest version ${manifest.version} != ${version}`);
+if (manifest.commit !== commit) throw new Error(`manifest commit ${manifest.commit} != ${commit}`);
+const paths = manifest.files.map((file) => file.path);
+for (const path of expected) {
+  if (!paths.includes(path)) throw new Error(`manifest is missing ${path}`);
+}
+for (const file of manifest.files) {
+  if (!/^[0-9a-f]{64}$/.test(file.sha256)) throw new Error(`manifest has a malformed sha256 for ${file.path}`);
+}
+if (!manifest.generator || manifest.generator.script !== "scripts/build-windows-package.sh") {
+  throw new Error("manifest generator.script is not scripts/build-windows-package.sh");
+}
+NODE
+
+printf 'Package ready: %s\n' "$output_dir"
+printf '  %s\n' "$server_exe" "$tray_exe" "$feishu_exe" "$feishu_manifest" "$manifest_path"

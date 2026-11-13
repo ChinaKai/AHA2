@@ -2,13 +2,22 @@
 set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-go_bin="${GO_BIN:-$repo/.tools/go/bin/go}"
+if [[ -n "${GO_BIN:-}" ]]; then
+  go_bin="$GO_BIN"
+elif [[ -x "$repo/.tools/go/bin/go" ]]; then
+  go_bin="$repo/.tools/go/bin/go"
+else
+  go_bin="$(command -v go || true)"
+fi
+[[ -n "$go_bin" && -x "$go_bin" ]] || { echo "Go toolchain was not found; set GO_BIN." >&2; exit 1; }
 target="${1:-windows/amd64}"
 os="${target%/*}"
 arch="${target#*/}"
 suffix=""
 [[ "$os" == "windows" ]] && suffix=".exe"
-output_dir="$repo/dist/plugins/feishu/$os-$arch"
+# AHA2_PLUGIN_OUTPUT_DIR lets a package build place the plugin inside its own
+# output directory instead of the repository dist/ tree.
+output_dir="${AHA2_PLUGIN_OUTPUT_DIR:-$repo/dist/plugins/feishu/$os-$arch}"
 output="$output_dir/aha2-channel-feishu$suffix"
 
 mkdir -p "$output_dir"

@@ -98,7 +98,7 @@ Workspace 默认通过既有 SSH 连接建立反向隧道，不需要在安装�
 完成页可以选择打开 `http://127.0.0.1:8766`。Release 中的统一 `SHA256SUMS`
 可用于校验下载完整性。
 
-## Windows per-user 开发安装与自动部署
+## Windows per-user 安装与构建出包
 
 频繁本地开发使用 `AHA2-Setup-User-x64.exe`。它以最低权限安装到当前用户的
 `LOCALAPPDATA\Programs\AHA2`，默认数据目录为 `LOCALAPPDATA\AHA2`，只监听 loopback，
@@ -106,20 +106,48 @@ Workspace 默认通过既有 SSH 连接建立反向隧道，不需要在安装�
 
 从已有机器级安装迁移时，可在首次 per-user 安装中显式复用用户已有写权限的数据目录；安装器会
 把唯一登录任务切换到用户级二进制。旧机器级文件不会被无权限删除，可在确认新实例健康后单独执行
-一次管理员卸载。后续开发部署使用 `scripts/deploy-windows-user.ps1`，脚本会备份运行数据和旧用户级
-二进制、构建 per-user 安装包、升级、重启并核对健康与哈希。
+一次管理员卸载。
 
-需要从源码完成完整验证、构建、打包、升级和重启时，使用单一入口，避免手工重复探测工具链或重复执行测试：
+### 职责边界
 
-```powershell
-powershell.exe -ExecutionPolicy Bypass -File scripts\build-and-deploy-windows-user.ps1 `
-  -Version 0.5.19 `
-  -DataDir D:\ProgramData\AHA2 `
-  -Listen 0.0.0.0:8766 `
-  -HealthURL http://127.0.0.1:8766/healthz
+仓库只负责编译出包。远端的构建机把应用代码、Web 资源和飞书插件编译成 Windows 包，产物里
+只有可执行文件和清单，不带任何部署逻辑。预检、停止 AHA2、备份运行数据和旧二进制、替换、
+回滚、health 检查以及备份保留，全部由目标机器上的本机安装器负责。仓库里的构建脚本不读取
+安装目录、不碰运行数据、也不重启任何进程。
+
+旧版本随仓库下发的 operator 部署脚本已移除，不再作为受支持的入口，也不随 tar 包分发；
+替代方案是“构建机出包 + 本机安装器部署”。这样部署步骤不再受 Windows PowerShell 编码和
+执行策略影响，仓库和安装器的职责也不再混在一起。
+
+### 构建 Windows 包
+
+在构建机上执行：
+
+```bash
+./local_build.sh --version 0.5.23
+# 等价于
+bash scripts/build-windows-package.sh --version 0.5.23 --output-dir dist
 ```
 
-脚本只复用仓库现有的 WSL Go 工具链，自动读取真实发行版名称并预检磁盘空间；Web 与 Go 验证在同一轮各执行一次。已有已验证候选时传入 `-DeployOnly`，只执行安装、重启、健康和哈希校验。
+`local_build.sh` 只是 `scripts/build-windows-package.sh` 的薄包装；两者都只构建，没有部署模式。
+`--version` 缺省时依次取 `VERSION` 环境变量、最近的 git tag、`0.0.0`；也可用 `--output-dir`
+把包写到仓库外的干净目录，用 `--commit` 覆盖清单里的 commit。
+
+构建产物：
+
+```text
+<output-dir>/aha2-windows-amd64.exe
+<output-dir>/aha2-tray-windows-amd64.exe
+<output-dir>/plugins/feishu/windows-amd64/aha2-channel-feishu.exe
+<output-dir>/plugins/feishu/windows-amd64/plugin.json
+<output-dir>/release-manifest.json
+```
+
+`release-manifest.json` 由构建步骤生成，记录 `version`、`commit`、`built_at`、生成方式
+（脚本、命令行、Web/Go/Node 版本）以及每个产物文件的相对路径、大小和 SHA256。它只是产物
+清单，不含部署步骤，也不包含自身。构建脚本写清单前会检查三个 PE 文件的 `MZ` 头、飞书
+清单里的打包占位符已被真实哈希替换，以及四个输入文件都存在；缺一项就直接失败，不会产出
+不完整的包。
 
 Agent API stdio helper 不再需要单独构建或安装：它是一个只用 Node 标准库的单文件脚本，通过
 `go:embed` 打在 `aha2.exe` 里，运行时才上传到工作区 `.aha2-context/share/agent-proxy/`。因此
@@ -133,62 +161,21 @@ Agent API stdio helper 不再需要单独构建或安装：它是一个只用 No
 **UTF-8 with BOM**（文件头 `EF BB BF`）。5.1 会把无 BOM 的文件按系统 ANSI 代码页解析；中文字符串
 会变成乱码，并可能在第一条语句执行前就抛 ParserError。打包和下载链路（包括 `tar`）必须原样保留
 BOM，不得重新编码或裁剪文件头。`scripts/test-windows-installer.ps1` 会检查每个脚本的 BOM 并用
-PowerShell Parser 解析；`scripts/ps1_encoding_test.go` 在非 Windows CI 上检查 BOM 和 tar 往返；
-`deploy-windows-user.ps1` 在把自身交给计划任务 worker 前也会检查编码，缺少 BOM 时直接抛错而不是
-交给 5.1 后静默退出。
+PowerShell Parser 解析；`scripts/ps1_encoding_test.go` 在非 Windows CI 上检查 BOM 和 tar 往返。
 
-### 部署失败路径与结果字段
+### 部署归属与失败处理
 
-`deploy-windows-user.ps1` 在停止 AHA2、复制备份之前先做磁盘空间预检，按每个涉及的卷分别检查：
-数据目录所在卷需要 `aha2.db`、`aha2.db-wal`、`aha2.db-shm` 当前大小的 2 倍（备份复制加 WAL 增长和
-临时文件余量）再加 1GiB 安全余量（shm 只参与空间估算，不会被复制）；安装目录所在卷预留 200MB；临时目录（安装包暂存）所在卷预留 300MB，
-但临时目录只在安装器分支检查，`-UpdateExistingInstallInPlace` 在目标目录旁暂存，不要求临时卷空间。
-同一卷上的需求合并计算，任何一卷不足都会直接失败；失败说明只列出本次实际检查的角色，installer 模式包含临时目录预留，in-place 模式不会出现临时目录/temp 字样。结果 JSON 记录 `Stage=preflight`、
-`Volume`/`FreeBytes`/`RequiredBytes`（数据卷）和 `Volumes`（每个卷的角色、可用与需求），
-**不会停止 AHA2，也不会复制或替换任何文件**；外层 `build-and-deploy-windows-user.ps1` 和
-`local_build.sh` 会按非 0 退出码原样报错。空间足够时逐卷记录 Free/Required 日志；后续流程与之前一致。
+部署不再是仓库的一部分。目标机器上的本机安装器按顺序负责：
 
-在替换任何已安装文件或数据库前，还必须先“验证已停”：重新枚举
-`aha2.exe`、`aha2-tray.exe`、`aha2-channel-feishu.exe` 及其全部后端子进程，确认进程消失后
-再以独占方式打开 `aha2.exe`、`aha2.db`、WAL/SHM 等文件做探测；失败会按 `-StopTimeoutSeconds`
-（默认 45 秒）重试，超时则拒绝继续修改，而不是边跑边复制。进程枚举或进程身份查询失败时按“未验证/
-仍存活”处理，绝不把 WMI/CIM 错误当成“没有进程”。备份只在这个验证通过后执行，
-**只复制并校验 `aha2.db` 与 `aha2.db-wal`**，每个复制结果校验大小与 SHA256。`aha2.db-shm` 是
-SQLite 的易失共享内存缓存，不复制、不哈希；它在 SQLite 运行期间被短暂占用时 `Get-FileHash` 会失败，
-曾经在 StrictMode 下把 `(null).Hash` 变成“找不到 Hash 属性”并中止整个备份阶段。哈希失败会带上
-源/目标文件名和原因，由调用方按备份校验失败处理。失败回滚同样先验证停止，再用“同目录临时文件 +
-哈希校验 + `[IO.File]::Replace` 原子替换”恢复二进制、`aha2.db`/`aha2.db-wal` 以及备份中的
-`secrets.json`/`setup-token`；部署前不存在的文件（例如首次安装的 Feishu 插件与清单）在回滚时删除。
-数据库恢复前**无条件**删除失败版本可能留下的 `aha2.db-wal` 和 `aha2.db-shm`（即使备份里没有 WAL），
-再按备份内容原子恢复，最后对数据库执行 `PRAGMA quick_check`；只有返回 `ok` 才会重新启动服务。
-恢复只考虑 `aha2.db`/`aha2.db-wal`：旧备份目录里残留的 shm 会被忽略，不会被复制回数据目录。
-回滚无法验证时保持 AHA2 停止、保留备份，并在结果中输出人工恢复步骤（同样要求先移走
-`aha2.db`/`aha2.db-wal`/`aha2.db-shm` 再复制备份）。
+- 预检：工具链、安装目录可写，以及数据目录和安装目录所在卷的可用空间。
+- 停服：停止 `aha2-tray.exe`、`aha2.exe`、飞书插件及其后端子进程，确认退出后再替换文件。
+- 备份：备份运行数据（`aha2.db` 与 `aha2.db-wal`；`aha2.db-shm` 是易失缓存，不备份）、
+  Secret Store、Setup Token、旧二进制和原登录任务，并在备份后校验大小与 SHA256。
+- 替换与回滚：原子替换二进制和数据库；失败时恢复备份，无法验证时保持服务停止并输出人工恢复步骤。
+- health 与备份保留：启动后检查 `/healthz`，再按保留策略清理旧备份。
 
-结果 JSON 中的诊断字段：
-
-- `Stage`：失败时最后执行的阶段（`preflight`/`stop`/`backup`/`install`/`health`/`rollback`）；成功时为 `health`。
-- `Volume`/`FreeBytes`/`RequiredBytes`：数据卷及其可用/需求字节；`Volumes`：每个涉及的卷（data/install/temp）的角色、可用与需求明细。预检失败时都写入结果 JSON。
-- `FailedStage`：最初触发失败的阶段；`LockedFiles`：无法独占、无法原子替换或恢复后校验不通过的文件。
-- `BackupSHA256`/`BackupSizes`/`BackupVerified`：备份校验结果；`StopVerified`/`StopAttempts`：停止验证结果与重试次数。
-- `RollbackVerified`：回滚的二进制与数据库是否已原子恢复且 `quick_check` 通过。
-- `rollback_health`：回滚与恢复后启动的完整结论；`ManualRecovery`：需要人工恢复时的步骤与备份校验值。
-
-结果文件是诊断产物：写入是 best-effort，原子替换失败（目标被锁、文件系统不支持等）时会退回直接写入，
-仍失败则只记录告警，不会因为写结果失败而中断或回滚一次已经成功的部署。
-
-当部署从 AHA2 自己的进程树里启动时，脚本会注册计划任务 `AHA2 User Update` 并在
-`-DetachedWorker` 下继续。handoff 会在 `-HandoffTimeoutSeconds`（默认 8 秒）内确认 worker 已经启动：
-写入了新的结果文件则返回 `completed`；worker 已启动但退出且没有写结果则**抛错**，错误里带上
-`LastTaskResult` 和 `dist/user-deploy.log` 的末尾日志；worker 仍在运行则返回 `scheduled`，由外层
-继续轮询结果文件。worker 是否已启动按 UTC 归一后比较 `LastRunTime`，避免非 UTC 时区把旧运行误判成本次启动。
-这样 worker 解析失败、启动即崩溃或找不到依赖时不会再以退出码 0 假装交接成功。
-如果外部的远程部署包装脚本自己启动 worker（例如仓库外的 `deploy-aha2-remote.ps1`），也必须采用同样的判定：
-worker 已经启动但短时间内退出且没有写新的 result 时，以非 0 退出并打印 stderr/日志尾部，不能只打一条警告
-就返回 0。仓库内目前没有这个包装脚本；`deploy-windows-user.ps1` 的 handoff 是它应复用的参考实现。
-
-`-SelfTest` 只检查纯函数、恢复计划和临时目录中的原子替换，不读取或修改安装目录、进程、计划任务和数据库，
-可在任意 PowerShell 7 上运行；`scripts/test-windows-installer.ps1` 也会在 Windows 上执行它。
+部署过程中的阶段、结果 JSON、日志和人工恢复步骤都由本机安装器生成和保存，不在本仓库内。
+旧版本的部署结果 JSON 只作为历史记录，不再由本仓库产出。
 
 ## macOS 机器级安装
 
@@ -316,12 +303,9 @@ python C:\Users\toope\AppData\Local\AHA\aha managed-process status aha2-v1
 python C:\Users\toope\AppData\Local\AHA\aha managed-process stop aha2-v1
 ```
 
-本地 Agent 构建并部署时使用选中的 `aha2-local-build` Skill：先构建 staging 二进制，
-再由宿主 AHA `managed-process` 启动独立部署 Worker；Worker 停止服务、备份运行数据与旧二进制、替换并重启，最后
-检查 `http://127.0.0.1:8766/healthz`；失败时恢复旧二进制。这条入口（`scripts/deploy-windows.ps1`，仍受支持）
-与 `deploy-windows-user.ps1` 使用同一条数据库备份规则：只备份 `aha2.db`/`aha2.db-wal`，回滚前删除 stale
-`aha2.db-shm`/`aha2.db-wal`，绝不把 shm 写回数据目录。AHA2 自身的 Agent API
-只适合托管普通 Task 进程，不能用于安全地重启 AHA2 自身。
+AHA2 的自更新不由仓库脚本负责：构建机只产出 Windows 包和 `release-manifest.json`，目标机器上的
+本机安装器负责停止、备份、替换、回滚和 health 检查。仓库不再提供随包下发的部署入口，也不托管
+重启自身的 Worker。AHA2 自身的 Agent API 只适合托管普通 Task 进程，不能用于安全地重启 AHA2 自身。
 
 远程 Workspace 的 Agent API 地址由 AHA 自动选择（SSH 优先走反向隧道），通常无需配置。
 仅有反向代理等无法自动推断的场景需要给出 HTTPS 基址：
@@ -340,6 +324,7 @@ Release 只包含标准安装包，不发布裸二进制。`aha2-sync` 是单独
 
 ```text
 AHA2-Setup-x64.exe
+AHA2-Setup-User-x64.exe
 aha2_<version>_amd64.deb
 aha2_<version>_arm64.deb
 aha2-<version>-1.x86_64.rpm
@@ -354,6 +339,10 @@ SHA256SUMS
 ```
 
 打包过程仍会生成临时目标平台二进制，但只作为安装包输入，不上传到 Release。
+
+构建机交付给本机安装器的是 Windows 包，由 `scripts/build-windows-package.sh` 生成，包含
+`aha2-windows-amd64.exe`、`aha2-tray-windows-amd64.exe`、飞书插件目录和
+`release-manifest.json`。包的构建和清单格式见“Windows per-user 安装与构建出包”。
 
 本地仅校验安装器定义、不生成二进制：
 

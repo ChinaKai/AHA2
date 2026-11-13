@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 )
 
@@ -108,67 +107,5 @@ func TestTarPackagingPreservesUTF8BOM(t *testing.T) {
 		if sha256.Sum256(original[rel]) != sha256.Sum256(roundTripped) {
 			t.Errorf("tar round-trip changed the script bytes of %s", rel)
 		}
-	}
-}
-
-// TestDeployScriptBackupAndHandoffContract keeps the Linux test suite able to
-// catch a regression that removes the shm exclusion, the hash error handling,
-// or the fail-loud handoff. The PowerShell self-test exercises the behaviour on
-// Windows; these markers prove the production path still wires it.
-func TestDeployScriptBackupAndHandoffContract(t *testing.T) {
-	root := repoRoot(t)
-	data, err := os.ReadFile(filepath.Join(root, "scripts", "deploy-windows-user.ps1"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := string(data)
-	for _, want := range []string{
-		`$databaseBackupFileNames = @("aha2.db", "aha2.db-wal")`,
-		`Copy-AHA2DatabaseBackup -DataDirectory $data -BackupDirectory $backup`,
-		`Get-FileHash -LiteralPath $Source -Algorithm SHA256 -ErrorAction Stop`,
-		`$databaseBackupFileNames | Where-Object`,
-		`Resolve-AHA2DetachedHandoff`,
-		`Assert-AHA2DetachedWorkerAlive`,
-		`Assert-AHA2WindowsPowerShellScriptEncoding`,
-		`Test-AHA2WorkerStartedSince`,
-		`Get-AHA2UtcTimestamp`,
-	} {
-		if !strings.Contains(text, want) {
-			t.Errorf("deploy-windows-user.ps1 no longer contains %q", want)
-		}
-	}
-	if strings.Contains(text, `$databaseFileNames + @("secrets.json"`) {
-		t.Error("backup loop still iterates the full database trio, including aha2.db-shm")
-	}
-
-	handoffStart := strings.Index(text, `if (-not $DetachedWorker -and (Test-AHA2Ancestor))`)
-	if handoffStart < 0 {
-		t.Fatal("deploy-windows-user.ps1 no longer has a detached handoff block")
-	}
-	handoffEnd := strings.Index(text[handoffStart:], `$stamp = [DateTime]::UtcNow.ToString`)
-	if handoffEnd < 0 {
-		t.Fatal("could not find the end of the detached handoff block")
-	}
-	handoff := text[handoffStart : handoffStart+handoffEnd]
-	for _, want := range []string{
-		`$decision -eq "failed"`,
-		`Assert-AHA2DetachedWorkerAlive -TaskInfo $taskInfo -LogPath $workerLogPath`,
-		`Assert-AHA2WindowsPowerShellScriptEncoding -Path $PSCommandPath`,
-	} {
-		if !strings.Contains(handoff, want) {
-			t.Errorf("detached handoff no longer fails loudly: missing %q", want)
-		}
-	}
-
-	legacy, err := os.ReadFile(filepath.Join(root, "scripts", "deploy-windows.ps1"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	legacyText := string(legacy)
-	if !strings.Contains(legacyText, `$runtimeFiles = @("aha2.db", "aha2.db-wal", "secrets.json", "setup-token")`) {
-		t.Error("legacy deploy-windows.ps1 still backs up aha2.db-shm")
-	}
-	if !strings.Contains(legacyText, `foreach ($staleName in @("aha2.db-shm", "aha2.db-wal"))`) {
-		t.Error("legacy deploy-windows.ps1 rollback must delete stale shm and WAL before restoring")
 	}
 }

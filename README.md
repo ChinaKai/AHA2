@@ -16,17 +16,16 @@ Project → Workspace → Task → Turn → Task Memory → Knowledge → Next T
 
 托盘会把 `aha2.exe serve` 的 stdout/stderr 写入 `<数据目录>\logs\aha2-server.log`，并记录启动命令行、PID、退出码或启动错误；文件上限 10 MB，超出后轮转为 `aha2-server.log.1`（最多保留两份）。排查启动失败或崩溃时优先查看该文件。
 
-在 WSL 源码仓库中更新当前 Windows 本地实例：
+在构建机上产出 Windows 包（两个 exe、飞书插件目录和 `release-manifest.json`）：
 
 ```bash
-./local_build.sh --validate-only
-./local_build.sh
+./local_build.sh --version 0.5.23
+# 等价于
+bash scripts/build-windows-package.sh --version 0.5.23 --output-dir dist
 ```
 
-脚本默认构建并部署 `0.5.23` 到 `D:\Program Files\AHA2`，复用 `D:\ProgramData\AHA2` 和
-`0.0.0.0:8766`，同时生成
-`dist/installer-user-0.5.23/AHA2-Setup-User-x64.exe`；可通过 `--version` 以及脚本帮助中列出的
-`AHA2_*` 环境变量覆盖。
+仓库只负责构建，不停服务、不替换文件、也不回滚；安装和升级由目标机器上的本机安装器负责。
+`release-manifest.json` 记录版本、commit、构建时间、生成方式和每个产物的 SHA256。
 
 ### Debian / Ubuntu
 
