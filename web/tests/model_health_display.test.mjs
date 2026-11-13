@@ -88,6 +88,17 @@ test("the detail block exposes HTTP status, endpoint and body without markup inj
   assert.equal(helpers.renderModelHealthDetail({status: "checking"}), "");
 });
 
+test("editing a model or provider clears stale health results", async () => {
+  const app = await readFile(resolve(root, "dist", "app.js"), "utf8");
+  assert.match(app, /function forgetModelHealth/, "no per-model health reset exists");
+  assert.match(app, /function forgetAllModelHealth/, "no provider-wide health reset exists");
+  assert.match(app, /forgetModelHealth\(id\);/, "model edits/deletes do not clear the old health result");
+  assert.match(app, /forgetAllModelHealth\(\);/, "provider edits do not clear old health results");
+  // A response that was in flight when the result was cleared must not win.
+  assert.match(app, /state\.modelHealthSeq\[id\] !== seq/, "an old health response can overwrite cleared state");
+  assert.match(app, /if \(force\) forgetAllModelHealth\(\);/, "a forced refresh keeps stale health results");
+});
+
 test("the model page wires the per-row check without a global error path", async () => {
   const app = await readFile(resolve(root, "dist", "app.js"), "utf8");
   assert.match(app, /api\.checkModelHealth\(id\)/, "the row action no longer calls the health endpoint");

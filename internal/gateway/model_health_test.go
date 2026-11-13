@@ -60,7 +60,7 @@ func TestCheckModelHealthStatusMapping(t *testing.T) {
 				return healthJSONResponse(testCase.code, testCase.body, testCase.headers), nil
 			})}
 			health := CheckModelHealth(context.Background(), client, "https://gateway.example/v1", "", secret,
-				"bearer", "model-x", "chat_completions", 5*time.Second)
+				"bearer", "codex", "model-x", "chat", 5*time.Second)
 			if health.Status != testCase.wantStatus {
 				t.Fatalf("status=%q want %q (http=%d detail=%q)", health.Status, testCase.wantStatus, health.HTTPStatus, health.Detail)
 			}
@@ -91,7 +91,7 @@ func TestCheckModelHealthTimeoutIsUnavailable(t *testing.T) {
 	})}
 	started := time.Now()
 	health := CheckModelHealth(context.Background(), client, "https://gateway.example/v1", "", "secret-key",
-		"bearer", "model-x", "chat_completions", 50*time.Millisecond)
+		"bearer", "codex", "model-x", "chat", 50*time.Millisecond)
 	if health.Status != ModelHealthUnavailable {
 		t.Fatalf("status=%q want unavailable (detail=%q)", health.Status, health.Detail)
 	}
@@ -106,9 +106,74 @@ func TestCheckModelHealthTimeoutIsUnavailable(t *testing.T) {
 	}
 }
 
-// TestCheckModelHealthSendsCanonicalBodyAndPrefersAnthropicBase asserts the
-// request shape and the endpoint priority the UI relies on.
-func TestCheckModelHealthSendsCanonicalBodyAndPrefersAnthropicBase(t *testing.T) {
+// TestCheckModelHealthNormalizesStoredWireAPI covers the values the model
+// records actually contain: add/update handlers rewrite chat_completions to
+// "chat", so a health check that only accepted chat_completions never sent a
+// request at all.
+func TestCheckModelHealthNormalizesStoredWireAPI(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		backend  string
+		wireAPI  string
+		wantPath string
+	}{
+		{name: "chat", backend: "codex", wireAPI: "chat", wantPath: "/v1/chat/completions"},
+		{name: "chat_completions", backend: "codex", wireAPI: "chat_completions", wantPath: "/v1/chat/completions"},
+		{name: "empty codex wire", backend: "codex", wireAPI: "", wantPath: "/v1/responses"},
+		{name: "empty dsh wire", backend: "DSH", wireAPI: "", wantPath: "/v1/responses"},
+		{name: "uppercase claude backend", backend: "CLAUDE", wireAPI: "anthropic_messages", wantPath: "/apps/anthropic/v1/messages"},
+	}
+	for _, testCase := range cases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			var mu sync.Mutex
+			var hits []string
+			client := &http.Client{Transport: probeRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+				mu.Lock()
+				hits = append(hits, request.URL.Path)
+				mu.Unlock()
+				return healthJSONResponse(http.StatusOK, `{}`, nil), nil
+			})}
+			health := CheckModelHealth(context.Background(), client, "https://gateway.example/v1",
+				"https://gateway.example/apps/anthropic", "secret-key", "auto", testCase.backend, "model-x", testCase.wireAPI, 5*time.Second)
+			if health.Status != ModelHealthOK {
+				t.Fatalf("status=%q detail=%q hits=%v", health.Status, health.Detail, hits)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(hits) != 1 || hits[0] != testCase.wantPath {
+				t.Fatalf("hits=%v want [%s]", hits, testCase.wantPath)
+			}
+		})
+	}
+}
+
+func TestCheckModelHealthRejectsIncompatibleBackendWireAPI(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	client := &http.Client{Transport: probeRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		calls++
+		return healthJSONResponse(http.StatusOK, `{}`, nil), nil
+	})}
+	health := CheckModelHealth(context.Background(), client, "https://gateway.example/v1", "", "secret-key",
+		"bearer", "claude", "model-x", "responses", 5*time.Second)
+	if health.Status != ModelHealthInconclusive {
+		t.Fatalf("status=%q want inconclusive", health.Status)
+	}
+	if calls != 0 {
+		t.Fatalf("an impossible runtime configuration must not reach the gateway, calls=%d", calls)
+	}
+	if !strings.Contains(health.Detail, "anthropic_messages") {
+		t.Fatalf("detail does not explain the mismatch: %q", health.Detail)
+	}
+}
+
+// TestCheckModelHealthSendsCanonicalBody asserts the request shape and that
+// anthropic_base_url becomes the runtime base (which the SDK extends with
+// /v1/messages).
+func TestCheckModelHealthSendsCanonicalBody(t *testing.T) {
 	t.Parallel()
 	var mu sync.Mutex
 	seen := make(map[string]map[string]any)
@@ -124,19 +189,15 @@ func TestCheckModelHealthSendsCanonicalBodyAndPrefersAnthropicBase(t *testing.T)
 	})}
 
 	health := CheckModelHealth(context.Background(), client, "https://gateway.example/v1",
-		"https://gateway.example/apps/anthropic", "secret-key", "x-api-key", "alias-model", "anthropic_messages", 5*time.Second)
+		"https://gateway.example/apps/anthropic", "secret-key", "x-api-key", "claude", "alias-model", "anthropic_messages", 5*time.Second)
 	if health.Status != ModelHealthOK {
 		t.Fatalf("status=%q detail=%q", health.Status, health.Detail)
 	}
 	mu.Lock()
-	if len(seen) != 1 {
-		mu.Unlock()
-		t.Fatalf("expected one request, got %v", seen)
-	}
-	payload, ok := seen["/apps/anthropic/messages"]
+	payload, ok := seen["/apps/anthropic/v1/messages"]
 	mu.Unlock()
 	if !ok {
-		t.Fatalf("anthropic_base_url was not preferred: %v", seen)
+		t.Fatalf("anthropic_base_url was not used with the runtime path: %v", seen)
 	}
 	if model, _ := payload["model"].(string); model != "alias-model" {
 		t.Fatalf("wire_model=%#v", payload["model"])
@@ -151,7 +212,7 @@ func TestCheckModelHealthSendsCanonicalBodyAndPrefersAnthropicBase(t *testing.T)
 	seen = make(map[string]map[string]any)
 	mu.Unlock()
 	health = CheckModelHealth(context.Background(), client, "https://gateway.example/v1", "",
-		"secret-key", "bearer", "alias-model", "responses", 5*time.Second)
+		"secret-key", "bearer", "codex", "alias-model", "responses", 5*time.Second)
 	if health.Status != ModelHealthOK {
 		t.Fatalf("responses status=%q detail=%q", health.Status, health.Detail)
 	}
@@ -173,31 +234,69 @@ func TestCheckModelHealthSendsCanonicalBodyAndPrefersAnthropicBase(t *testing.T)
 	}
 }
 
-// TestCheckModelHealthFallsBackToV1EndpointForm covers bare-host provider
-// bases: the first form 404s, the /v1 form answers.
-func TestCheckModelHealthFallsBackToV1EndpointForm(t *testing.T) {
+// TestCheckModelHealthDoesNotProbeNonRuntimePath pins the review finding: the
+// Codex runtime calls OPENAI_BASE_URL + /chat/completions exactly. A /v1
+// prefix inferred from a bare host is not a real execution path, so reporting
+// it "ok" would hide that the Task still fails.
+func TestCheckModelHealthDoesNotProbeNonRuntimePath(t *testing.T) {
 	t.Parallel()
+	var mu sync.Mutex
 	var hits []string
 	client := &http.Client{Transport: probeRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		mu.Lock()
 		hits = append(hits, request.URL.Path)
+		mu.Unlock()
 		if request.URL.Path == "/v1/chat/completions" {
 			return healthJSONResponse(http.StatusOK, `{}`, nil), nil
 		}
 		return healthJSONResponse(http.StatusNotFound, `{"error":{"message":"route not found"}}`, nil), nil
 	})}
 	health := CheckModelHealth(context.Background(), client, "https://gateway.example", "", "secret-key",
-		"bearer", "model-x", "chat_completions", 5*time.Second)
-	if health.Status != ModelHealthOK {
-		t.Fatalf("status=%q detail=%q hits=%v", health.Status, health.Detail, hits)
+		"bearer", "codex", "model-x", "chat", 5*time.Second)
+	if health.Status != ModelHealthModelNotFound {
+		t.Fatalf("status=%q want model_not_found (detail=%q)", health.Status, health.Detail)
 	}
-	if len(hits) != 2 || hits[0] != "/chat/completions" || hits[1] != "/v1/chat/completions" {
-		t.Fatalf("unexpected endpoint order: %v", hits)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(hits) != 1 || hits[0] != "/chat/completions" {
+		t.Fatalf("health check probed a path the runtime never uses: %v", hits)
 	}
 }
 
-// TestCheckModelHealthStreamingRetryKeepsRealTaskSemantics mirrors the
-// protocol probe: a gateway that only accepts Responses in streaming mode must
-// not look "rejected" to the health check.
+// TestCheckModelHealthAnthropicUsesConfiguredBaseOnly pins the second half of
+// the review finding: when anthropic_base_url is configured, runtime_selection
+// uses only that base. A 200 on the plain provider base must not turn into ok.
+func TestCheckModelHealthAnthropicUsesConfiguredBaseOnly(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	var hits []string
+	client := &http.Client{Transport: probeRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		mu.Lock()
+		hits = append(hits, request.URL.Path)
+		mu.Unlock()
+		if request.URL.Path == "/v1/messages" {
+			return healthJSONResponse(http.StatusOK, `{}`, nil), nil
+		}
+		return healthJSONResponse(http.StatusNotFound, `{"error":{"message":"not found"}}`, nil), nil
+	})}
+	health := CheckModelHealth(context.Background(), client, "https://gateway.example",
+		"https://gateway.example/apps/anthropic", "secret-key", "x-api-key",
+		"claude", "model-x", "anthropic_messages", 5*time.Second)
+	if health.Status == ModelHealthOK {
+		t.Fatalf("configured entry failed but health reported ok: endpoint=%q hits=%v", health.Endpoint, hits)
+	}
+	if health.Status != ModelHealthModelNotFound {
+		t.Fatalf("status=%q want model_not_found (detail=%q)", health.Status, health.Detail)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(hits) != 1 || hits[0] != "/apps/anthropic/v1/messages" {
+		t.Fatalf("health check fell back to a base the runtime does not use: %v", hits)
+	}
+}
+
+// TestCheckModelHealthStreamingRetryKeepsRealTaskSemantics mirrors a gateway
+// that only accepts Responses in streaming mode.
 func TestCheckModelHealthStreamingRetryKeepsRealTaskSemantics(t *testing.T) {
 	t.Parallel()
 	var mu sync.Mutex
@@ -214,7 +313,7 @@ func TestCheckModelHealthStreamingRetryKeepsRealTaskSemantics(t *testing.T) {
 		return probeSSEResponse("event: response.created\ndata: {\"type\":\"response.created\"}\n\n"), nil
 	})}
 	health := CheckModelHealth(context.Background(), client, "https://gateway.example/v1", "", "secret-key",
-		"bearer", "model-x", "responses", 5*time.Second)
+		"bearer", "codex", "model-x", "responses", 5*time.Second)
 	if health.Status != ModelHealthOK {
 		t.Fatalf("status=%q detail=%q", health.Status, health.Detail)
 	}
@@ -231,6 +330,155 @@ func TestCheckModelHealthStreamingRetryKeepsRealTaskSemantics(t *testing.T) {
 	}
 }
 
+// TestCheckModelHealthGeneric400IsNotRetried keeps avoidable duplicate
+// requests out of ordinary parameter rejections.
+func TestCheckModelHealthGeneric400IsNotRetried(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	requests := 0
+	client := &http.Client{Transport: probeRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		return healthJSONResponse(http.StatusBadRequest, `{"error":{"message":"invalid max_tokens"}}`, nil), nil
+	})}
+	health := CheckModelHealth(context.Background(), client, "https://gateway.example/v1", "", "secret-key",
+		"bearer", "codex", "model-x", "responses", 5*time.Second)
+	if health.Status != ModelHealthRejected {
+		t.Fatalf("status=%q want rejected", health.Status)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if requests != 1 {
+		t.Fatalf("a generic 400 was retried: requests=%d", requests)
+	}
+}
+
+// TestCheckModelHealthStreamingRetryPreservesAccountErrors covers review
+// finding 2: the retry's 401/402/5xx must replace the ambiguous 400.
+func TestCheckModelHealthStreamingRetryPreservesAccountErrors(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name       string
+		code       int
+		body       string
+		wantStatus string
+	}{
+		{name: "stream unauthorized", code: http.StatusUnauthorized, body: `{"error":{"message":"invalid api key"}}`, wantStatus: ModelHealthUnauthorized},
+		{name: "stream payment required", code: http.StatusPaymentRequired, body: `{"error":{"message":"quota exhausted"}}`, wantStatus: ModelHealthQuotaExhausted},
+		{name: "stream server error", code: http.StatusBadGateway, body: `{"error":{"message":"upstream down"}}`, wantStatus: ModelHealthUnavailable},
+	}
+	for _, testCase := range cases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			client := &http.Client{Transport: probeRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+				var payload map[string]any
+				_ = json.NewDecoder(request.Body).Decode(&payload)
+				if stream, _ := payload["stream"].(bool); !stream {
+					return healthJSONResponse(http.StatusBadRequest, `{"error":{"message":"streaming is required"}}`, nil), nil
+				}
+				return healthJSONResponse(testCase.code, testCase.body, nil), nil
+			})}
+			health := CheckModelHealth(context.Background(), client, "https://gateway.example/v1", "", "secret-key",
+				"bearer", "codex", "model-x", "responses", 5*time.Second)
+			if health.Status != testCase.wantStatus {
+				t.Fatalf("status=%q want %q (http=%d detail=%q)", health.Status, testCase.wantStatus, health.HTTPStatus, health.Detail)
+			}
+			if health.HTTPStatus != testCase.code {
+				t.Fatalf("http_status=%d want %d", health.HTTPStatus, testCase.code)
+			}
+		})
+	}
+}
+
+// TestCheckModelHealthSSEErrorEvent is the other half of finding 2: HTTP 200
+// plus data:{"type":"error"} must not be reported as ok.
+func TestCheckModelHealthSSEErrorEvent(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name       string
+		data       string
+		wantStatus string
+	}{
+		{name: "quota", data: `{"type":"error","error":{"message":"insufficient quota: 余额不足"}}`, wantStatus: ModelHealthQuotaExhausted},
+		{name: "auth", data: `{"type":"error","error":{"message":"invalid api key","code":"unauthorized"}}`, wantStatus: ModelHealthUnauthorized},
+		{name: "generic", data: `{"type":"error","error":{"message":"internal error"}}`, wantStatus: ModelHealthInconclusive},
+	}
+	for _, testCase := range cases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			client := &http.Client{Transport: probeRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+				var payload map[string]any
+				_ = json.NewDecoder(request.Body).Decode(&payload)
+				if stream, _ := payload["stream"].(bool); !stream {
+					return healthJSONResponse(http.StatusBadRequest, `{"error":{"message":"this model requires streaming"}}`, nil), nil
+				}
+				return probeSSEResponse("event: error\ndata: " + testCase.data + "\n\n"), nil
+			})}
+			health := CheckModelHealth(context.Background(), client, "https://gateway.example/v1", "", "secret-key",
+				"bearer", "codex", "model-x", "responses", 5*time.Second)
+			if health.Status != testCase.wantStatus {
+				t.Fatalf("status=%q want %q (detail=%q)", health.Status, testCase.wantStatus, health.Detail)
+			}
+			if !strings.Contains(health.Detail, "quota") && !strings.Contains(health.Detail, "error") && !strings.Contains(health.Detail, "api key") {
+				t.Fatalf("SSE error evidence was lost: %q", health.Detail)
+			}
+		})
+	}
+}
+
+// TestCheckModelHealthUsesRuntimeAuthHeader keeps the credential header equal
+// to what the backend actually sends: OpenAI-compatible always Bearer, and
+// Anthropic x-api-key unless the Provider chose bearer.
+func TestCheckModelHealthUsesRuntimeAuthHeader(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name       string
+		wireAPI    string
+		authStyle  string
+		wantHeader string
+		wantValue  string
+	}{
+		{name: "chat auto uses bearer", wireAPI: "chat", authStyle: "auto", wantHeader: "Authorization", wantValue: "Bearer secret-key"},
+		{name: "chat x-api-key still uses bearer", wireAPI: "chat", authStyle: "x-api-key", wantHeader: "Authorization", wantValue: "Bearer secret-key"},
+		{name: "anthropic auto uses x-api-key", wireAPI: "anthropic_messages", authStyle: "auto", wantHeader: "x-api-key", wantValue: "secret-key"},
+		{name: "anthropic bearer", wireAPI: "anthropic_messages", authStyle: "bearer", wantHeader: "Authorization", wantValue: "Bearer secret-key"},
+	}
+	for _, testCase := range cases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			var got http.Header
+			client := &http.Client{Transport: probeRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+				got = request.Header.Clone()
+				return healthJSONResponse(http.StatusOK, `{}`, nil), nil
+			})}
+			backend := "codex"
+			if testCase.wireAPI == "anthropic_messages" {
+				backend = "claude"
+			}
+			health := CheckModelHealth(context.Background(), client, "https://gateway.example/v1",
+				"https://gateway.example/apps/anthropic", "secret-key", testCase.authStyle,
+				backend, "model-x", testCase.wireAPI, 5*time.Second)
+			if health.Status != ModelHealthOK {
+				t.Fatalf("status=%q detail=%q", health.Status, health.Detail)
+			}
+			if got.Get(testCase.wantHeader) != testCase.wantValue {
+				t.Fatalf("%s=%q want %q", testCase.wantHeader, got.Get(testCase.wantHeader), testCase.wantValue)
+			}
+			other := "x-api-key"
+			if testCase.wantHeader == "x-api-key" {
+				other = "Authorization"
+			}
+			if got.Get(other) != "" {
+				t.Fatalf("unexpected %s header %q", other, got.Get(other))
+			}
+		})
+	}
+}
+
 func TestCheckModelHealthRedactionOnNonBodyEvidence(t *testing.T) {
 	t.Parallel()
 	secret := "secret-key"
@@ -238,7 +486,7 @@ func TestCheckModelHealthRedactionOnNonBodyEvidence(t *testing.T) {
 		return nil, errors.New(`Post "https://user:` + secret + `@gateway.example/v1/chat/completions?api_key=` + secret + `": dial tcp: lookup gateway.example: no such host`)
 	})}
 	health := CheckModelHealth(context.Background(), client, "https://user:"+secret+"@gateway.example/v1?token="+secret, "",
-		secret, "bearer", "model-x", "chat_completions", 5*time.Second)
+		secret, "bearer", "codex", "model-x", "chat", 5*time.Second)
 	if health.Status != ModelHealthUnavailable {
 		t.Fatalf("status=%q want unavailable", health.Status)
 	}
@@ -255,7 +503,7 @@ func TestCheckModelHealthRedactionOnNonBodyEvidence(t *testing.T) {
 func TestCheckModelHealthMissingCredentialIsUnauthorized(t *testing.T) {
 	t.Parallel()
 	health := CheckModelHealth(context.Background(), nil, "https://gateway.example/v1", "", "",
-		"bearer", "model-x", "chat_completions", 5*time.Second)
+		"bearer", "codex", "model-x", "chat", 5*time.Second)
 	if health.Status != ModelHealthUnauthorized {
 		t.Fatalf("status=%q want unauthorized", health.Status)
 	}

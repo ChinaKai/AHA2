@@ -323,6 +323,7 @@ const state: State = {
   modelPage: 1,
   modelSearch: "",
   modelHealth: {} as Record<string, ModelHealthView>,
+  modelHealthSeq: {} as Record<string, number>,
   providerPage: 1,
   codexAccountPage: 1,
   hardwareResources: [],
@@ -1991,12 +1992,13 @@ async function ensureViewData(view: View, force = false): Promise<void> {
   if (["models", "tasks", "channels"].includes(view)) {
     jobs.push(loadResource("providers", force, async () => { state.providers = (await api.providers()).providers || []; }));
     jobs.push(loadResource("models", force, async () => {
+      if (force) forgetAllModelHealth();
       state.models = (await api.models()).models || [];
       // Drop health results for models that no longer exist so a stale badge
       // cannot outlive its model record.
       const ids = new Set(state.models.map(item => item.id));
       for (const id of Object.keys(state.modelHealth)) {
-        if (!ids.has(id)) delete state.modelHealth[id];
+        if (!ids.has(id)) forgetModelHealth(id);
       }
     }));
     jobs.push(loadResource("accounts", force, async () => { state.codexAccounts = (await api.codexAccounts()).accounts || []; }));
@@ -3236,19 +3238,42 @@ function openEditModelDialog(id: string): void {
 
 // checkModelHealthByID runs one model row's health check. Progress and the
 // result stay in that row: other rows keep their own state and stay clickable,
-// and a failure must not raise a global error banner.
+// and a failure must not raise a global error banner. A per-model sequence
+// makes an in-flight answer unable to overwrite a result that was cleared by an
+// edit or a forced refresh.
 async function checkModelHealthByID(id: string): Promise<void> {
   if (!id || state.modelHealth[id]?.status === "checking") return;
+  const seq = (state.modelHealthSeq[id] || 0) + 1;
+  state.modelHealthSeq[id] = seq;
   state.modelHealth[id] = {status: "checking"};
   refreshModelResults();
+  let next: ModelHealthView;
   try {
     const result = await api.checkModelHealth(id);
-    state.modelHealth[id] = result.health;
+    next = result.health;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error || "检测请求失败");
-    state.modelHealth[id] = {status: "error", detail: message};
+    next = {status: "error", detail: message};
   }
+  if (state.modelHealthSeq[id] !== seq) return;
+  state.modelHealth[id] = next;
   refreshModelResults();
+}
+
+// forgetModelHealth clears one model's result and invalidates any request that
+// is still in flight for it.
+function forgetModelHealth(id: string): void {
+  delete state.modelHealth[id];
+  state.modelHealthSeq[id] = (state.modelHealthSeq[id] || 0) + 1;
+}
+
+// forgetAllModelHealth is for Provider changes and forced reloads, where the
+// stored credential or endpoint can change for every model at once.
+function forgetAllModelHealth(): void {
+  state.modelHealth = {};
+  for (const id of Object.keys(state.modelHealthSeq)) {
+    state.modelHealthSeq[id] += 1;
+  }
 }
 
 function deleteModelByID(id: string, button: HTMLElement | null): void {
@@ -3256,6 +3281,7 @@ function deleteModelByID(id: string, button: HTMLElement | null): void {
   if (!window.confirm("删除该模型？使用此模型的任务会暂停输入，进入任务后可重新选择模型。")) return;
   void runWithFeedback(button, "删除中", async () => {
     await api.deleteModel(id);
+    forgetModelHealth(id);
     setMessage("notice", "模型已删除");
     await loadAll();
     render();
@@ -5188,6 +5214,9 @@ function bindCommon(): void {
       const body = {name, base_url: baseURL, anthropic_base_url: anthropicURL, api_key: apiKey, auth_style: "auto"};
       if (editId) await api.updateProvider(editId, body);
       else await api.createProvider(body);
+      // A Provider edit can change the credential, base URL, or Anthropic
+      // entry for every model it backs; old health badges are no longer true.
+      forgetAllModelHealth();
       document.querySelector<HTMLDialogElement>("#provider-dialog")?.close();
       setMessage("notice", "Provider 已保存");
       await loadAll();
@@ -5214,6 +5243,7 @@ function bindCommon(): void {
     if (!window.confirm("删除该 Provider 及其模型和凭据？使用这些模型的任务会暂停输入，进入任务后可重新选择模型。")) return;
     void runWithFeedback(button, "删除中", async () => {
       const result = await api.deleteProvider(id);
+      forgetAllModelHealth();
       setMessage("notice", result.warning || "Provider 已删除");
       await loadAll();
       render();
@@ -5405,6 +5435,7 @@ function bindCommon(): void {
         default_reasoning_effort: String((document.querySelector<HTMLSelectElement>("#model-edit-effort"))?.value || ""),
         supports_image_input: Boolean((document.querySelector<HTMLInputElement>("#model-edit-image"))?.checked),
       });
+      forgetModelHealth(id);
       document.querySelector<HTMLDialogElement>("#model-edit-dialog")?.close();
       setMessage("notice", "模型已更新");
       await loadAll();

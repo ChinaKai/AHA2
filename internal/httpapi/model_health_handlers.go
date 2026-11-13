@@ -31,24 +31,19 @@ func (s *Server) checkModelHealth(writer http.ResponseWriter, request *http.Requ
 	if provider.CredentialRef != "" && s.secrets != nil {
 		apiKey, _ = s.secrets.Get(provider.CredentialRef)
 	}
-	wireAPI := strings.TrimSpace(model.WireAPI)
-	if wireAPI == "" {
-		// Older records predate the wire_api field. Match the UI's default:
-		// Claude backend uses Anthropic Messages, everything else Responses.
-		if model.Backend == "claude" {
-			wireAPI = "anthropic_messages"
-		} else {
-			wireAPI = "responses"
-		}
-	}
+	wireAPI, wireErr := gateway.NormalizeModelHealthWireAPI(model.Backend, model.WireAPI)
 	health := gateway.CheckModelHealth(request.Context(), nil,
 		provider.BaseURL, provider.AnthropicBaseURL, apiKey, provider.AuthStyle,
-		model.WireModel, wireAPI, modelHealthTimeout)
+		model.Backend, model.WireModel, model.WireAPI, modelHealthTimeout)
 	// The health result is evidence, not configuration: persist nothing and do
 	// not disable the model. Audit only the classification and the already
-	// redacted endpoint, never the response body or the key.
+	// redacted endpoint, never the API key.
+	auditWire := wireAPI
+	if wireErr != nil {
+		auditWire = model.WireAPI
+	}
 	auditData := map[string]any{
-		"wire_api": wireAPI, "status": health.Status, "http_status": health.HTTPStatus,
+		"wire_api": auditWire, "status": health.Status, "http_status": health.HTTPStatus,
 		"endpoint": health.Endpoint, "retry_after_seconds": health.RetryAfterSeconds,
 	}
 	if health.Detail != "" {

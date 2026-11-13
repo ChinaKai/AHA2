@@ -1,8 +1,12 @@
 package gateway
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -38,49 +42,107 @@ type ModelHealth struct {
 	CheckedAt         time.Time `json:"checked_at"`
 }
 
-// CheckModelHealth sends one minimal request for the model's wire protocol and
-// classifies the answer by account usability. It reuses probeRequestBody,
-// probeResponseSnippet and probeRedact so the request shape and the redaction
-// boundary stay identical to protocol detection.
+// NormalizeModelHealthWireAPI maps a stored model wire_api onto the value the
+// runtime actually executes. Model records and the Web form store "chat" (the
+// add/update handlers rewrite "chat_completions" to "chat"), so accepting only
+// "chat_completions" would leave real models uncheckable. An empty value follows
+// the same backend defaults as internal/app.defaultModelWireAPI.
+func NormalizeModelHealthWireAPI(backend, wireAPI string) (string, error) {
+	wire := strings.ToLower(strings.TrimSpace(wireAPI))
+	if wire == "chat_completions" {
+		wire = "chat"
+	}
+	switch strings.ToLower(strings.TrimSpace(backend)) {
+	case "claude":
+		if wire == "" {
+			wire = "anthropic_messages"
+		}
+		if wire != "anthropic_messages" {
+			return "", fmt.Errorf("Claude Backend 只支持 anthropic_messages")
+		}
+	case "codex":
+		if wire == "" {
+			wire = "responses"
+		}
+		if wire != "responses" && wire != "chat" {
+			return "", fmt.Errorf("Codex Backend 不支持 wire_api %q", wireAPI)
+		}
+	case "dsh":
+		if wire == "" {
+			wire = "responses"
+		}
+		switch wire {
+		case "responses", "chat", "anthropic_messages":
+		default:
+			return "", fmt.Errorf("DSH Backend 不支持 wire_api %q", wireAPI)
+		}
+	default:
+		if wire == "" {
+			wire = "responses"
+		}
+		switch wire {
+		case "responses", "chat", "anthropic_messages":
+		default:
+			return "", fmt.Errorf("不支持的 wire_api：%q", wireAPI)
+		}
+	}
+	return wire, nil
+}
+
+// CheckModelHealth sends one minimal request on the endpoint the runtime would
+// actually call and classifies the answer by account usability. It reuses
+// probeRequestBody, probeResponseSnippet and probeRedact so the request shape
+// and the redaction boundary stay identical to protocol detection.
 //
-// wireAPI selects the endpoint (responses, chat_completions, anthropic_messages).
-// anthropic_base_url is preferred when set, because gateways such as Ali Token
-// Plan expose Anthropic Messages on a separate path. The caller resolves an
-// empty wireAPI from the model's backend before calling.
-func CheckModelHealth(ctx context.Context, client *http.Client, baseURL, anthropicBaseURL, apiKey, authStyle, wireModel, wireAPI string, timeout time.Duration) ModelHealth {
+// The endpoint mirrors runtime_selection.go: OpenAI-compatible providers use
+// provider.base_url plus /responses or /chat/completions, and Anthropic
+// Messages uses anthropic_base_url (or base_url when unset) plus /v1/messages —
+// the same base the Claude Code SDK appends /v1/messages to. Probe-only
+// fallbacks such as base/v1 derived paths or /anthropic candidates are
+// deliberately not used: reporting them "ok" would hide that a real Task fails.
+func CheckModelHealth(ctx context.Context, client *http.Client, baseURL, anthropicBaseURL, apiKey, authStyle, backend, wireModel, wireAPI string, timeout time.Duration) ModelHealth {
 	result := ModelHealth{Status: ModelHealthInconclusive, CheckedAt: time.Now().UTC()}
 	modelID := strings.TrimSpace(wireModel)
 	key := strings.TrimSpace(apiKey)
 	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	anthropicBase := strings.TrimRight(strings.TrimSpace(anthropicBaseURL), "/")
-	wire := strings.ToLower(strings.TrimSpace(wireAPI))
+	wire, err := NormalizeModelHealthWireAPI(backend, wireAPI)
+	if err != nil {
+		result.Detail = err.Error()
+		return result
+	}
 	if modelID == "" {
 		result.Detail = "模型没有配置 wire_model"
 		return result
 	}
-	if wire == "" {
-		result.Detail = "模型没有配置 wire_api"
-		return result
+	if wire == "anthropic_messages" && anthropicBase != "" {
+		base = anthropicBase
 	}
-	endpoints := modelHealthEndpoints(base, anthropicBase, wire)
-	if len(endpoints) == 0 {
+	if base == "" {
 		result.Status = ModelHealthUnavailable
 		result.Detail = "Provider 没有配置 Base URL"
 		return result
 	}
+	endpoint := modelHealthEndpoint(base, wire)
 	normalizedAuth := strings.ToLower(strings.TrimSpace(authStyle))
 	if normalizedAuth == "" {
 		normalizedAuth = "auto"
 	}
 	if key == "" && normalizedAuth != "none" {
 		// A missing credential is an auth condition for this account, not a
-		// transport failure: retrying or checking another endpoint cannot help.
+		// transport failure: retrying or another endpoint cannot help.
 		result.Status = ModelHealthUnauthorized
-		result.Endpoint = probeRedact(endpoints[0], key)
+		result.Endpoint = probeRedact(endpoint, key)
 		result.Detail = "Provider 未配置 API Key"
 		return result
 	}
-	body := probeRequestBody(wire, modelID, false)
+	probeWire := wire
+	if probeWire == "chat" {
+		// probeRequestBody names this protocol chat_completions; the stored
+		// model value and the Codex runtime call it "chat".
+		probeWire = "chat_completions"
+	}
+	body := probeRequestBody(probeWire, modelID, false)
 	if body == nil {
 		result.Detail = "不支持的 wire_api：" + wire
 		return result
@@ -94,103 +156,48 @@ func CheckModelHealth(ctx context.Context, client *http.Client, baseURL, anthrop
 		defer cancel()
 	}
 
-	best := result
-	for _, auth := range modelHealthAuthOrder(wire, normalizedAuth) {
-		credentialRejected := false
-		for _, endpoint := range endpoints {
-			if ctx.Err() != nil {
-				return unavailableHealth(endpoint, ctx.Err().Error(), key)
-			}
-			attempt := checkModelHealthEndpoint(ctx, client, endpoint, modelHealthHeaders(wire, auth, key), body, wire, modelID, key)
-			switch attempt.Status {
-			case ModelHealthOK, ModelHealthRateLimited, ModelHealthQuotaExhausted, ModelHealthUnavailable, ModelHealthInconclusive:
-				return attempt
-			case ModelHealthUnauthorized:
-				// The credential header was rejected; another header style may
-				// still work when auth is auto. Endpoint choice cannot fix auth,
-				// so stop trying this style's other endpoint forms.
-				best = attempt
-				credentialRejected = true
-			case ModelHealthModelNotFound, ModelHealthRejected:
-				// 404 can also mean this base form lacks the API prefix, and a
-				// 400 can be a wrong route; the next endpoint form may answer.
-				// Either way the gateway evaluated the credential, so there is
-				// no reason to replay every endpoint with another header style.
-				if healthRank(attempt.Status) > healthRank(best.Status) {
-					best = attempt
-				}
-			}
-			if attempt.Status == ModelHealthUnauthorized {
-				break
-			}
-		}
-		if !credentialRejected {
-			break
-		}
+	// Use the credential header the runtime actually sends, not a probe-style
+	// search across header styles: an "auto" provider whose x-api-key works
+	// while the runtime sends a different header would otherwise report ok
+	// while every Task fails.
+	auth := modelHealthAuthStyle(wire, normalizedAuth)
+	if ctx.Err() != nil {
+		return unavailableHealth(endpoint, ctx.Err().Error(), key)
 	}
-	if best.Status == ModelHealthInconclusive && best.Detail == "" {
-		best.Status = ModelHealthModelNotFound
-		best.Endpoint = probeRedact(endpoints[0], key)
-		best.Detail = "端点未返回可判定的响应"
-	}
-	return best
+	return checkModelHealthEndpoint(ctx, client, endpoint, modelHealthHeaders(wire, auth, key), body, wire, modelID, key)
 }
 
-// modelHealthEndpoints returns the endpoint forms to try. Anthropic Messages
-// prefers the configured anthropic_base_url and the same base candidates the
-// protocol probe uses; the other protocols use the provider base URL.
-func modelHealthEndpoints(base, anthropicBase, wireAPI string) []string {
-	rel := ""
+// modelHealthEndpoint is the exact path the backend appends to its configured
+// base URL. Do not add probe-style variants here: the health check must
+// predict what a real Task request will do.
+func modelHealthEndpoint(base, wireAPI string) string {
 	switch wireAPI {
 	case "responses":
-		rel = "responses"
-	case "chat_completions":
-		rel = "chat/completions"
+		return base + "/responses"
+	case "chat":
+		return base + "/chat/completions"
 	case "anthropic_messages":
-		rel = "messages"
+		return base + "/v1/messages"
 	default:
-		return nil
+		return ""
 	}
-	var bases []string
-	if wireAPI == "anthropic_messages" {
-		bases = anthropicBaseCandidates(base, anthropicBase)
-	} else if base != "" {
-		bases = []string{base}
-	}
-	seen := make(map[string]struct{}, len(bases)*2)
-	var endpoints []string
-	add := func(endpoint string) {
-		if endpoint == "" {
-			return
-		}
-		if _, ok := seen[endpoint]; ok {
-			return
-		}
-		seen[endpoint] = struct{}{}
-		endpoints = append(endpoints, endpoint)
-	}
-	for _, candidate := range bases {
-		add(candidate + "/" + rel)
-		if !strings.HasSuffix(candidate, "/v1") && !strings.HasSuffix(candidate, "/v1/") {
-			add(candidate + "/v1/" + rel)
-		}
-	}
-	return endpoints
 }
 
-// modelHealthAuthOrder narrows the credential header styles the same way the
-// protocol probe does, so a rate-limited gateway is not asked twice.
-func modelHealthAuthOrder(wireAPI, authStyle string) []string {
-	order := []string{"bearer", "x-api-key"}
+// modelHealthAuthStyle mirrors runtime_selection.go: Anthropic uses x-api-key
+// (ANTHROPIC_API_KEY) unless the Provider explicitly chose bearer
+// (ANTHROPIC_AUTH_TOKEN); OpenAI-compatible backends always use
+// Authorization: Bearer through their env_key.
+func modelHealthAuthStyle(wireAPI, authStyle string) string {
+	if authStyle == "none" {
+		return "none"
+	}
 	if wireAPI == "anthropic_messages" {
-		order = []string{"x-api-key", "bearer"}
+		if authStyle == "bearer" {
+			return "bearer"
+		}
+		return "x-api-key"
 	}
-	switch authStyle {
-	case "bearer", "x-api-key", "none":
-		return []string{authStyle}
-	default:
-		return order
-	}
+	return "bearer"
 }
 
 func modelHealthHeaders(wireAPI, auth, apiKey string) map[string]string {
@@ -208,28 +215,39 @@ func modelHealthHeaders(wireAPI, auth, apiKey string) map[string]string {
 	return headers
 }
 
-// checkModelHealthEndpoint performs exactly one request and classifies it.
-// Responses requests rejected with 400 are retried once with stream=true,
-// mirroring probeWireAPI: gateways such as Ali Token Plan accept the protocol
-// only in streaming mode, and a health check must not report those models as
-// rejected while real Tasks work.
+// checkModelHealthEndpoint performs one request and optionally one streaming
+// retry. The retry is limited to Responses 400 answers whose body says the
+// model requires streaming (gateways such as Ali Token Plan only accept this
+// protocol in streaming mode). A generic 400 parameter error is not retried.
 func checkModelHealthEndpoint(ctx context.Context, client *http.Client, endpoint string, headers map[string]string, body []byte, wireAPI, modelID, apiKey string) ModelHealth {
-	health, code, _ := modelHealthRequest(ctx, client, endpoint, headers, body, false, apiKey)
-	if health.Status == ModelHealthRejected && code == http.StatusBadRequest && wireAPI == "responses" && ctx.Err() == nil {
-		streamHeaders := make(map[string]string, len(headers))
-		for key, value := range headers {
-			streamHeaders[key] = value
-		}
-		streamHealth, _, _ := modelHealthRequest(ctx, client, endpoint, streamHeaders, probeRequestBody(wireAPI, modelID, true), true, apiKey)
-		if streamHealth.Status == ModelHealthOK || streamHealth.Status == ModelHealthRateLimited {
-			return streamHealth
-		}
+	health, code, detail := modelHealthRequest(ctx, client, endpoint, headers, body, false, apiKey)
+	if health.Status != ModelHealthRejected || code != http.StatusBadRequest || wireAPI != "responses" || ctx.Err() != nil {
+		return health
+	}
+	if !modelHealthRequiresStreaming(detail) {
+		return health
+	}
+	streamHeaders := make(map[string]string, len(headers))
+	for key, value := range headers {
+		streamHeaders[key] = value
+	}
+	streamHealth, _, _ := modelHealthRequest(ctx, client, endpoint, streamHeaders, probeRequestBody(wireAPI, modelID, true), true, apiKey)
+	// A 401/402/404/5xx (or an SSE error event) during the retry is more
+	// informative than the original 400 and must not be hidden by it.
+	if healthMergeRank(streamHealth.Status) > healthMergeRank(health.Status) {
+		return streamHealth
 	}
 	return health
 }
 
+// modelHealthRequiresStreaming reports whether the 400 evidence points at a
+// streaming-only model rather than a generic parameter/schema rejection.
+func modelHealthRequiresStreaming(detail string) bool {
+	return strings.Contains(strings.ToLower(detail), "stream")
+}
+
 // modelHealthRequest sends one request and returns the classified result,
-// the HTTP status (0 for transport failures), and the raw classified detail.
+// the HTTP status (0 for transport failures), and the classified detail.
 func modelHealthRequest(ctx context.Context, client *http.Client, endpoint string, headers map[string]string, body []byte, stream bool, apiKey string) (ModelHealth, int, string) {
 	result := ModelHealth{CheckedAt: time.Now().UTC(), Endpoint: probeRedact(endpoint, apiKey)}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
@@ -253,9 +271,19 @@ func modelHealthRequest(ctx context.Context, client *http.Client, endpoint strin
 	result.RetryAfterSeconds = modelHealthRetryAfter(response.Header)
 	if code >= 200 && code < 300 {
 		if stream {
-			if err := readFirstSSEEvent(response.Body); err != nil {
+			data, readErr := readFirstSSEDataLine(response.Body)
+			if readErr != nil {
 				result.Status = ModelHealthInconclusive
-				result.Detail = probeRedact(err.Error(), apiKey)
+				result.Detail = probeRedact(readErr.Error(), apiKey)
+				return result, code, result.Detail
+			}
+			if status, message := modelHealthSSEErrorStatus(data); status != "" {
+				// A 200 SSE response can carry the real failure in an error
+				// event; reporting that as "ok" would tell the Owner a model
+				// works while every Task fails with the same quota message.
+				result.Status = status
+				result.Detail = probeRedact(message, apiKey)
+				result.RetryAfterSeconds = 0
 				return result, code, result.Detail
 			}
 		}
@@ -273,11 +301,86 @@ func modelHealthRequest(ctx context.Context, client *http.Client, endpoint strin
 	return result, code, detail
 }
 
+// readFirstSSEDataLine reads until the first SSE data line and returns its
+// payload. Comment/heartbeat lines do not count. A stream that closes without
+// data is an error, matching the protocol probe's definition of a live stream.
+func readFirstSSEDataLine(body io.Reader) (string, error) {
+	reader := bufio.NewReader(io.LimitReader(body, probeStreamReadLimit))
+	for {
+		line, err := reader.ReadString('\n')
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "data:") {
+			return strings.TrimSpace(strings.TrimPrefix(trimmed, "data:")), nil
+		}
+		switch {
+		case err == nil:
+			continue
+		case err == io.EOF:
+			return "", errProbeStreamWithoutEvents
+		default:
+			return "", err
+		}
+	}
+}
+
+// modelHealthSSEErrorStatus inspects the first SSE data payload. A non-error
+// event returns ("", ""). An error event is classified with the same quota /
+// auth / model wording as an HTTP body, because gateways sometimes report an
+// exhausted balance or a revoked key as HTTP 200 plus an SSE error.
+func modelHealthSSEErrorStatus(payload string) (string, string) {
+	var event map[string]any
+	if err := json.Unmarshal([]byte(payload), &event); err != nil {
+		return "", ""
+	}
+	typeName, _ := event["type"].(string)
+	errorValue, hasError := event["error"]
+	if !hasError && !strings.EqualFold(strings.TrimSpace(typeName), "error") {
+		return "", ""
+	}
+	text := payload
+	if details, ok := errorValue.(map[string]any); ok {
+		parts := make([]string, 0, 3)
+		for _, name := range []string{"message", "code", "type"} {
+			if value, ok := details[name].(string); ok && strings.TrimSpace(value) != "" {
+				parts = append(parts, value)
+			}
+		}
+		if len(parts) > 0 {
+			text = strings.Join(parts, " ")
+		}
+	}
+	switch {
+	case modelHealthQuotaExhausted(text):
+		return ModelHealthQuotaExhausted, text
+	case modelHealthAuthError(text):
+		return ModelHealthUnauthorized, text
+	case modelHealthModelMissing(text):
+		return ModelHealthModelNotFound, text
+	default:
+		return ModelHealthInconclusive, text
+	}
+}
+
+// modelHealthAuthError recognizes auth wording carried by an SSE error event.
+func modelHealthAuthError(text string) bool {
+	lower := strings.ToLower(text)
+	for _, keyword := range []string{
+		"unauthorized", "unauthenticated", "authentication", "not authorized",
+		"invalid api key", "invalid_api_key", "permission", "forbidden",
+		"access denied", "鉴权", "认证", "401", "403",
+	} {
+		if strings.Contains(lower, keyword) {
+			return true
+		}
+	}
+	return false
+}
+
 // modelHealthStatusForCode maps one HTTP answer to account usability. 404 is
 // model_not_found here (unlike the protocol probe, where it means "no such
-// endpoint"): the model's endpoint form is already known to exist, so the
-// gateway is saying it does not serve this model. A bare 400 stays "rejected"
-// unless the redacted body clearly names quota/billing or a missing model.
+// endpoint"): the endpoint is the one the runtime calls, so the gateway is
+// saying it does not serve this model. A bare 400 stays "rejected" unless the
+// redacted body clearly names quota/billing or a missing model.
 func modelHealthStatusForCode(code int, detail string) string {
 	switch {
 	case code >= 200 && code < 300:
@@ -386,20 +489,25 @@ func unavailableHealth(endpoint, detail, apiKey string) ModelHealth {
 	}
 }
 
-// healthRank orders fallback evidence when no endpoint produced a definitive
-// account verdict. A rejected request is more informative than "route absent".
-func healthRank(status string) int {
+// healthMergeRank orders the streaming retry against the original 400. Any
+// account-level answer (ok, throttle, quota, auth, model, service) outranks the
+// ambiguous 400; a second 400 does not replace the first rejection's evidence.
+func healthMergeRank(status string) int {
 	switch status {
-	case ModelHealthQuotaExhausted:
-		return 5
-	case ModelHealthUnauthorized:
-		return 4
+	case ModelHealthOK:
+		return 8
+	case ModelHealthRateLimited:
+		return 7
+	case ModelHealthQuotaExhausted, ModelHealthUnauthorized:
+		return 6
 	case ModelHealthModelNotFound:
+		return 5
+	case ModelHealthUnavailable:
+		return 4
+	case ModelHealthInconclusive:
 		return 3
 	case ModelHealthRejected:
 		return 2
-	case ModelHealthInconclusive:
-		return 1
 	default:
 		return 0
 	}
