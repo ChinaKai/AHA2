@@ -33,8 +33,12 @@ test("interactive region state restores scroll, focus, controls, and expansion",
       this.open = Boolean(options.open);
       this.name = options.name || "";
       this.value = options.value || "";
+      // defaultValue/defaultChecked are what the markup rendered: they stay put
+      // while the user edits the control, and a render replaces both.
+      this.defaultValue = options.defaultValue ?? this.value;
       this.type = options.type || "";
       this.checked = Boolean(options.checked);
+      this.defaultChecked = options.defaultChecked ?? this.checked;
       this.selectionStart = options.selectionStart ?? null;
       this.selectionEnd = options.selectionEnd ?? null;
     }
@@ -55,9 +59,9 @@ test("interactive region state restores scroll, focus, controls, and expansion",
   const tree = fresh => {
     const root = new FakeElement("div");
     const list = new FakeElement("div", {dataset: {uiKey: "model-list"}, classes: ["detected-list"], scrollTop: fresh ? 0 : 140, scrollHeight: 500, clientHeight: 200});
-    const search = new FakeElement("input", {id: "detect-search", type: "search", value: fresh ? "" : "model-b", selectionStart: fresh ? 0 : 3, selectionEnd: fresh ? 0 : 5});
-    const selected = new FakeElement("input", {dataset: {uiKey: "selected-model"}, type: "checkbox", checked: fresh});
-    const pending = new FakeElement("input", {dataset: {uiKey: "pending-model"}, type: "checkbox", checked: fresh, disabled: !fresh});
+    const search = new FakeElement("input", {id: "detect-search", type: "search", value: fresh ? "" : "model-b", defaultValue: "", selectionStart: fresh ? 0 : 3, selectionEnd: fresh ? 0 : 5});
+    const selected = new FakeElement("input", {dataset: {uiKey: "selected-model"}, type: "checkbox", checked: fresh, defaultChecked: true});
+    const pending = new FakeElement("input", {dataset: {uiKey: "pending-model"}, type: "checkbox", checked: fresh, defaultChecked: true, disabled: !fresh});
     const details = new FakeElement("details", {dataset: {uiKey: "details"}, open: !fresh});
     const message = new FakeElement("article", {dataset: {messageId: "message-1"}, classes: fresh ? [] : ["expanded"]});
     list.append(selected, pending);
@@ -86,12 +90,13 @@ test("interactive region state restores scroll, focus, controls, and expansion",
     // before the options loaded, or pointing at a removed entry) must fall back
     // to the freshly rendered default. Forcing the stale value leaves the select
     // at selectedIndex -1, which silently empties everything derived from it.
-    const withSelect = (options, value) => {
+    const withSelect = (options, renderedDefault, liveValue = renderedDefault) => {
       const root = new FakeElement("div");
       const select = new FakeElement("select", {id: "task-project", name: "project_id"});
-      // Mirror the browser: options is a live list, value picks a matching
-      // option, and a value with no match leaves selectedIndex at -1.
-      select.options = options.map(option => ({value: option, selected: false}));
+      // Mirror the browser: options is a live list, defaultSelected records the
+      // rendered selection, value picks a matching option, and a value with no
+      // match leaves selectedIndex at -1.
+      select.options = options.map(option => ({value: option, selected: false, defaultSelected: option === renderedDefault}));
       Object.defineProperty(select, "value", {
         get() { return select.options[select.selectedIndex]?.value ?? ""; },
         set(next) {
@@ -99,23 +104,52 @@ test("interactive region state restores scroll, focus, controls, and expansion",
           select.options.forEach((option, index) => { option.selected = index === select.selectedIndex; });
         },
       });
+      Object.defineProperty(select, "defaultValue", {
+        get() { return select.options.find(option => option.defaultSelected)?.value ?? ""; },
+      });
       select.selectedIndex = -1;
-      select.value = value;
+      select.value = liveValue;
       root.append(select);
       return {root, select};
     };
     const capturedEmpty = withSelect([], "");
     const capturedState = helpers.captureInteractiveRegion(capturedEmpty.root);
-    const repopulated = withSelect(["project-1", "project-2"], "");
+    const repopulated = withSelect(["project-1", "project-2"], "project-1");
     helpers.restoreInteractiveRegion(repopulated.root, capturedState);
     assert.equal(repopulated.select.value, "project-1", "a stale empty select value must adopt the new default");
 
     // A value that is still offered keeps winning over the default.
-    const keptSource = withSelect(["project-1", "project-2"], "project-2");
+    const keptSource = withSelect(["project-1", "project-2"], "project-1", "project-2");
     const keptState = helpers.captureInteractiveRegion(keptSource.root);
     const keptTarget = withSelect(["project-1", "project-2"], "project-1");
     helpers.restoreInteractiveRegion(keptTarget.root, keptState);
     assert.equal(keptTarget.select.value, "project-2", "a still-valid selection must be preserved");
+
+    // A field captured before its async settings arrived is pristine and empty;
+    // the render that lands with the saved value must keep it. Replaying the
+    // capture here is the #other Agent API override bug: the input showed empty
+    // even though the stored address was present in the markup.
+    const withURLInput = (renderedDefault, value = renderedDefault) => {
+      const root = new FakeElement("div");
+      const input = new FakeElement("input", {id: "agent-api-url", type: "url", value, defaultValue: renderedDefault});
+      root.append(input);
+      return {root, input};
+    };
+    const pendingSettings = withURLInput("");
+    const pendingState = helpers.captureInteractiveRegion(pendingSettings.root);
+    const loadedSettings = withURLInput("https://troubleshoot.example.test");
+    helpers.restoreInteractiveRegion(loadedSettings.root, pendingState);
+    assert.equal(loadedSettings.input.value, "https://troubleshoot.example.test",
+      "a pristine capture must not overwrite a value that finished loading");
+
+    // The same render must still keep what the user typed: an edited field is
+    // not pristine, so its live value goes back instead of the rendered default.
+    const edited = withURLInput("https://troubleshoot.example.test", "https://draft.example.test");
+    const editedState = helpers.captureInteractiveRegion(edited.root);
+    const rerendered = withURLInput("https://troubleshoot.example.test");
+    helpers.restoreInteractiveRegion(rerendered.root, editedState);
+    assert.equal(rerendered.input.value, "https://draft.example.test",
+      "a user edit must survive a same-view re-render");
   } finally {
     if (previous.HTMLElement === undefined) delete globalThis.HTMLElement; else globalThis.HTMLElement = previous.HTMLElement;
     if (previous.document === undefined) delete globalThis.document; else globalThis.document = previous.document;

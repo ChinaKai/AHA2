@@ -145,6 +145,21 @@ try {
     "the removed stdio switch came back after a reload");
 
   await page.screenshot({path: resolve(output, "agent-api-override.png")});
+
+  // The echo above must not come at the cost of the user's typing: a same-view
+  // re-render still has to keep an edited field. The perf switch re-renders in
+  // place, and the marker proves that render really happened rather than the
+  // typed value simply never being touched.
+  await input.fill("https://draft.example.test");
+  await page.evaluate(() => {
+    document.querySelector("#agent-api-override-form")?.setAttribute("data-probe", "old");
+  });
+  await page.locator("#perf-panel-setting").click();
+  await page.waitForFunction(() => !document.querySelector('#agent-api-override-form[data-probe="old"]'),
+    null, {timeout: 10000});
+  assert.equal(await input.inputValue(), "https://draft.example.test",
+    "a same-view re-render discarded the override the Owner was editing");
+  assert.deepEqual(errors, [], "the settings page threw while re-rendering");
   console.log("agent api override PUT:", JSON.stringify(puts[0]));
 } finally {
   if (browser) await browser.close();

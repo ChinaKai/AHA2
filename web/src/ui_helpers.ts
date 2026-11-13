@@ -493,6 +493,7 @@ export interface InteractiveRegionState {
     checked?: boolean;
     selected?: string[];
     disabled: boolean;
+    pristine: boolean;
     selectionStart?: number | null;
     selectionEnd?: number | null;
   }>;
@@ -542,6 +543,30 @@ function shouldCaptureControl(element: HTMLInputElement | HTMLSelectElement | HT
   return !["button", "submit", "reset", "file", "hidden", "password"].includes((element as HTMLInputElement).type);
 }
 
+// Whether a control still holds exactly what its markup rendered. A control the
+// user has not touched is "pristine": restoring its captured value would only
+// replay the old render. That replay is wrong once the new render learned
+// something the old DOM did not know — a settings field captured while its async
+// load was still pending is empty, and writing that empty value back wipes the
+// saved value the render just filled in. Only a control that moved away from its
+// rendered default carries state the fresh markup cannot reproduce.
+function controlIsPristine(element: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement): boolean {
+  if (element.tagName === "SELECT") {
+    const select = element as HTMLSelectElement;
+    if (select.multiple) {
+      const selected = [...select.selectedOptions].map(option => option.value);
+      const defaults = [...select.options].filter(option => option.defaultSelected).map(option => option.value);
+      return selected.length === defaults.length && selected.every((value, index) => value === defaults[index]);
+    }
+    return select.value === select.defaultValue;
+  }
+  if (element.tagName === "INPUT") {
+    const input = element as HTMLInputElement;
+    if (["checkbox", "radio"].includes(input.type)) return input.checked === input.defaultChecked;
+  }
+  return element.value === (element as HTMLInputElement | HTMLTextAreaElement).defaultValue;
+}
+
 function shouldCaptureScroll(root: HTMLElement, element: HTMLElement): boolean {
   if (element === root || element.dataset.preserveScroll !== undefined) return true;
   if (["detected-list", "table-wrap", "channel-checkbox-list", "ctx-scroll", "ctx-view", "hardware-config", "terminal-history"].some(name => element.classList.contains(name))) return true;
@@ -572,6 +597,7 @@ export function captureInteractiveRegion(root: HTMLElement | null): InteractiveR
         checked: element.tagName === "INPUT" && ["checkbox", "radio"].includes(input.type) ? input.checked : undefined,
         selected: element.tagName === "SELECT" && select.multiple ? [...select.selectedOptions].map(option => option.value) : undefined,
         disabled: element.disabled,
+        pristine: controlIsPristine(element),
         selectionStart: "selectionStart" in element ? element.selectionStart : undefined,
         selectionEnd: "selectionEnd" in element ? element.selectionEnd : undefined,
       };
@@ -603,6 +629,10 @@ export function restoreInteractiveRegion(root: HTMLElement | null, state: Intera
     // A disabled placeholder becoming enabled represents new live data. Keep
     // its newly rendered default rather than restoring the placeholder value.
     if (saved.disabled && !element.disabled) continue;
+    // An untouched control has nothing of its own to restore: the fresh markup
+    // already carries whatever the render knows now. Replaying the captured
+    // value would undo an async load that finished between the two renders.
+    if (saved.pristine) continue;
     const input = element as HTMLInputElement;
     const select = element as HTMLSelectElement;
     if (saved.checked !== undefined && element.tagName === "INPUT") input.checked = saved.checked;
