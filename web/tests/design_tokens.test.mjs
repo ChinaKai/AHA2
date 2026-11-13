@@ -6,15 +6,18 @@ import {resolve} from "node:path";
 const repo = resolve(import.meta.dirname, "..", "..");
 const css = await readFile(resolve(repo, "web", "src", "styles.css"), "utf8");
 
-// The cascade checks model a 1280px desktop viewport. Conditional media
-// queries that do not match that viewport are parsed but do not contribute a
-// declaration, so the result is the same cascade the desktop UI sees.
+// The cascade checks model four fixed layout widths plus one declared
+// container width. This is a deliberately small CSS cascade model, not a
+// browser: it covers the selector and at-rule surface used by the assertions
+// below. See docs/web-design-tokens.md for the documented limits.
 //
 // Supported selector surface: type/class/id/attribute selectors, descendant
 // and child combinators, :not/:is/:where/:root, ::pseudo-elements and the UI
 // state pseudo-classes used by these targets. Sibling combinators and :has
 // are not modeled because no assertion below depends on them.
-const VIEWPORT_WIDTH = 1280;
+const VIEWPORTS = [375, 768, 1280, 1440];
+const DEFAULT_VIEWPORT = 1280;
+const CONTAINER_WIDTH = 900;
 
 /* ------------------------------------------------------------------ *
  * CSS parser
@@ -122,7 +125,7 @@ function parseDeclarations(block) {
   return declarations;
 }
 
-function evaluateMedia(condition) {
+function evaluateMedia(condition, viewportWidth) {
   return splitTopLevel(condition, ",").some(query => {
     const normalized = query.trim().toLowerCase();
     if (!normalized || normalized === "all" || normalized === "screen") return true;
@@ -132,23 +135,148 @@ function evaluateMedia(condition) {
       if (item === "all" || item === "screen") return true;
       if (item === "print") return false;
       const minWidth = item.match(/^\(min-width:\s*(\d+(?:\.\d+)?)px\)$/);
-      if (minWidth) return VIEWPORT_WIDTH >= Number(minWidth[1]);
+      if (minWidth) return viewportWidth >= Number(minWidth[1]);
       const maxWidth = item.match(/^\(max-width:\s*(\d+(?:\.\d+)?)px\)$/);
-      if (maxWidth) return VIEWPORT_WIDTH <= Number(maxWidth[1]);
+      if (maxWidth) return viewportWidth <= Number(maxWidth[1]);
       if (item.includes("prefers-reduced-motion")) return false;
       if (item.includes("prefers-color-scheme")) return false;
-      // Unknown features do not match the modeled desktop baseline.
+      // Unknown features do not match the modeled viewport.
       return false;
     });
   });
 }
 
-function parseStylesheet(source) {
+function evaluateContainer(condition) {
+  // Container-name queries are allowed; only the size condition is modeled.
+  const firstParen = condition.indexOf("(");
+  const features = firstParen >= 0 ? condition.slice(firstParen) : condition;
+  return splitTopLevel(features, ",").some(query => {
+    const normalized = query.trim().toLowerCase();
+    if (!normalized) return false;
+    return normalized.split(/\s+and\s+/).every(feature => {
+      const item = feature.trim();
+      const minWidth = item.match(/^\(min-width:\s*(\d+(?:\.\d+)?)px\)$/);
+      if (minWidth) return CONTAINER_WIDTH >= Number(minWidth[1]);
+      const maxWidth = item.match(/^\(max-width:\s*(\d+(?:\.\d+)?)px\)$/);
+      if (maxWidth) return CONTAINER_WIDTH <= Number(maxWidth[1]);
+      return false;
+    });
+  });
+}
+
+function splitTopLevelKeyword(text, keyword) {
+  const lowerKeyword = keyword.toLowerCase();
+  const parts = [];
+  let depth = 0;
+  let quote = null;
+  let start = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (quote) {
+      if (char === "\\") index += 1;
+      else if (char === quote) quote = null;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (char === "(" || char === "[") {
+      depth += 1;
+      continue;
+    }
+    if (char === ")" || char === "]") {
+      depth -= 1;
+      continue;
+    }
+    if (depth === 0 && text.slice(index, index + keyword.length).toLowerCase() === lowerKeyword) {
+      const before = text[index - 1] ?? " ";
+      const after = text[index + keyword.length] ?? " ";
+      if (/\s/.test(before) && /\s/.test(after)) {
+        parts.push(text.slice(start, index).trim());
+        start = index + keyword.length;
+        index += keyword.length - 1;
+      }
+    }
+  }
+  parts.push(text.slice(start).trim());
+  return parts.filter(part => part.length > 0);
+}
+
+const SUPPORTED_PROPERTIES = new Set([
+  "accent-color", "animation", "aspect-ratio", "backdrop-filter", "background",
+  "background-color", "border", "border-color", "border-radius", "box-shadow",
+  "color", "color-scheme", "container-name", "container-type", "content", "display",
+  "flex", "flex-direction", "flex-wrap", "font", "font-family", "font-size",
+  "font-weight", "gap", "grid", "grid-template-columns", "height", "inset",
+  "justify-content", "line-height", "margin", "max-height", "max-width", "min-height",
+  "min-width", "opacity", "outline", "overflow", "padding", "position", "transform",
+  "transition", "width", "z-index",
+]);
+
+const DISPLAY_VALUES = new Set([
+  "block", "contents", "flex", "flow-root", "grid", "inline", "inline-block",
+  "inline-flex", "inline-grid", "list-item", "none", "ruby", "table", "table-cell",
+  "table-row",
+]);
+
+function supportsDeclaration(property, value) {
+  if (!property || !value) return false;
+  if (property.startsWith("--")) return true;
+  if (!SUPPORTED_PROPERTIES.has(property)) return false;
+  if (/unsupported|invalid|unknown/i.test(value)) return false;
+  if (property === "display") return DISPLAY_VALUES.has(value);
+  return true;
+}
+
+function evaluateSupports(condition) {
+  const text = condition.trim();
+  if (!text) return false;
+  if (/^not\s+/i.test(text)) return !evaluateSupports(text.replace(/^not\s+/i, "").trim());
+  const orParts = splitTopLevelKeyword(text, "or");
+  if (orParts.length > 1) return orParts.some(evaluateSupports);
+  const andParts = splitTopLevelKeyword(text, "and");
+  if (andParts.length > 1) return andParts.every(evaluateSupports);
+  if (!text.startsWith("(") || !text.endsWith(")")) return false;
+  const inner = text.slice(1, -1).trim();
+  if (!inner) return false;
+  if (inner.startsWith("(") || /^not\s+/i.test(inner)
+    || splitTopLevelKeyword(inner, "or").length > 1
+    || splitTopLevelKeyword(inner, "and").length > 1) {
+    return evaluateSupports(inner);
+  }
+  const colon = indexOfTopLevel(inner, ":");
+  if (colon < 0) return false;
+  const property = inner.slice(0, colon).trim().toLowerCase();
+  const value = inner.slice(colon + 1).trim().toLowerCase();
+  return supportsDeclaration(property, value);
+}
+
+const TRACKED_SELECTOR_PATTERN = /(?:^|[\s,{])(?::root|button|\.primary|\.secondary|\.ghost|\.danger|\.task-tool-badge|\.bottom-nav|\.sidebar)(?=[\s,{:.#\[])/;
+
+function containsTrackedSelector(block) {
+  return TRACKED_SELECTOR_PATTERN.test(block);
+}
+
+function parseStylesheet(source, viewportWidth = DEFAULT_VIEWPORT) {
   const clean = stripComments(source);
   const rules = [];
   let order = 0;
+  const layerOrder = [];
+  const layerRanks = new Map();
+  let anonymousLayer = 0;
 
-  function parseBlock(text, applies) {
+  const registerLayer = name => {
+    if (!layerRanks.has(name)) {
+      layerRanks.set(name, layerOrder.length);
+      layerOrder.push(name);
+    }
+    return layerRanks.get(name);
+  };
+
+  const scopedLayer = (parent, name) => parent ? `${parent}.${name}` : name;
+
+  function parseBlock(text, applies, layer = null) {
     let index = 0;
     while (index < text.length) {
       while (index < text.length && /\s/.test(text[index])) index += 1;
@@ -189,6 +317,11 @@ function parseStylesheet(source) {
 
       const prelude = text.slice(start, index).trim();
       if (text[index] === ";") {
+        if (/^@layer\b/i.test(prelude)) {
+          for (const name of prelude.slice(6).split(",").map(item => item.trim()).filter(Boolean)) {
+            registerLayer(scopedLayer(layer, name));
+          }
+        }
         index += 1;
         continue;
       }
@@ -200,13 +333,25 @@ function parseStylesheet(source) {
       if (prelude.startsWith("@")) {
         const atMatch = prelude.match(/^@([\w-]+)/);
         const atName = atMatch?.[1]?.toLowerCase() ?? "";
-        if (atName === "media" || atName === "supports" || atName === "layer") {
-          const condition = prelude.slice(atMatch[0].length).trim();
-          const nestedApplies = applies && (atName !== "media" || evaluateMedia(condition));
-          parseBlock(block, nestedApplies);
+        const condition = atMatch ? prelude.slice(atMatch[0].length).trim() : "";
+        if (atName === "media") {
+          parseBlock(block, applies && evaluateMedia(condition, viewportWidth), layer);
+        } else if (atName === "supports") {
+          parseBlock(block, applies && evaluateSupports(condition), layer);
+        } else if (atName === "container") {
+          parseBlock(block, applies && evaluateContainer(condition), layer);
+        } else if (atName === "layer") {
+          const names = condition.split(",").map(item => item.trim()).filter(Boolean);
+          if (names.length === 0) names.push(`__anonymous_${anonymousLayer++}`);
+          const chosen = names[0];
+          const nestedLayer = scopedLayer(layer, chosen);
+          registerLayer(nestedLayer);
+          parseBlock(block, applies, nestedLayer);
+        } else if (atName === "keyframes" || atName === "font-face" || atName === "page") {
+          // Known non-element at-rules.
+        } else if (containsTrackedSelector(block)) {
+          throw new Error(`unmodeled at-rule @${atName || "(anonymous)"} affects tracked selectors; extend the cascade model or remove the rule`);
         }
-        // @keyframes, @font-face, @page and other at-rules do not contribute
-        // element declarations, so their blocks are skipped.
         continue;
       }
 
@@ -216,18 +361,32 @@ function parseStylesheet(source) {
         .filter(Boolean);
       const declarations = parseDeclarations(block);
       for (const declaration of declarations) declaration.order = order++;
-      if (selectors.length && declarations.length) rules.push({selectors, declarations});
+      if (selectors.length && declarations.length) {
+        rules.push({
+          selectors,
+          declarations,
+          layer,
+          layerRank: layer ? registerLayer(layer) : null,
+        });
+      }
     }
   }
 
-  parseBlock(clean, true);
+  parseBlock(clean, true, null);
   return {rules};
 }
 
 const sheetCache = new Map();
-function sheet(source) {
-  if (!sheetCache.has(source)) sheetCache.set(source, parseStylesheet(source));
-  return sheetCache.get(source);
+function sheet(source, viewportWidth = DEFAULT_VIEWPORT) {
+  let byViewport = sheetCache.get(source);
+  if (!byViewport) {
+    byViewport = new Map();
+    sheetCache.set(source, byViewport);
+  }
+  if (!byViewport.has(viewportWidth)) {
+    byViewport.set(viewportWidth, parseStylesheet(source, viewportWidth));
+  }
+  return byViewport.get(viewportWidth);
 }
 
 /* ------------------------------------------------------------------ *
@@ -541,13 +700,20 @@ function matchesSelector(selector, element) {
   return matchAt(parsed.compounds.length - 1, element);
 }
 
-function element(tag, {classes = [], states = [], attrs = {}, id = null, parent = null} = {}) {
+function element(tag, {classes = [], states = [], attrs = {}, id = null, type = null, parent = null} = {}) {
+  const attributeMap = new Map(
+    Object.entries(attrs).map(([name, value]) => [name.toLowerCase(), String(value)]),
+  );
+  const normalizedClasses = classes.map(String);
+  if (normalizedClasses.length > 0) attributeMap.set("class", normalizedClasses.join(" "));
+  if (id !== null) attributeMap.set("id", String(id));
+  if (type !== null) attributeMap.set("type", String(type));
   return {
     tag: tag.toLowerCase(),
     id,
-    classes: new Set(classes),
+    classes: new Set(normalizedClasses),
     states: new Set(states),
-    attrs: new Map(Object.entries(attrs).map(([name, value]) => [name.toLowerCase(), value])),
+    attrs: attributeMap,
     parent,
     matchCache: new Map(),
   };
@@ -575,6 +741,20 @@ function valueForProperty(property, value, requested) {
 function isBetter(candidate, winner) {
   if (!winner) return true;
   if (candidate.important !== winner.important) return candidate.important;
+  if (candidate.layer !== winner.layer) {
+    if (!candidate.important) {
+      // Normal declarations: unlayered wins over layered; later layer wins
+      // over earlier.
+      if (candidate.layer === null) return true;
+      if (winner.layer === null) return false;
+      return candidate.layerRank > winner.layerRank;
+    }
+    // Important declarations reverse layer priority: layered wins over
+    // unlayered; earlier layer wins over later.
+    if (candidate.layer === null) return false;
+    if (winner.layer === null) return true;
+    return candidate.layerRank < winner.layerRank;
+  }
   const comparison = compareSpecificity(candidate.specificity, winner.specificity);
   if (comparison !== 0) return comparison > 0;
   return candidate.order > winner.order;
@@ -587,8 +767,8 @@ function matchesSelectorCached(selector, element) {
   return element.matchCache.get(selector);
 }
 
-function resolveProperty(source, element, property) {
-  const {rules} = sheet(source);
+function resolveProperty(source, element, property, viewportWidth = DEFAULT_VIEWPORT) {
+  const {rules} = sheet(source, viewportWidth);
   let winner = null;
   for (const rule of rules) {
     let bestSpecificity = null;
@@ -608,6 +788,8 @@ function resolveProperty(source, element, property) {
         important: declaration.important,
         specificity: bestSpecificity,
         order: declaration.order,
+        layer: rule.layer,
+        layerRank: rule.layerRank,
       };
       if (isBetter(candidate, winner)) winner = candidate;
     }
@@ -616,9 +798,14 @@ function resolveProperty(source, element, property) {
 }
 
 const tokenCache = new Map();
-function rootTokens(source) {
-  if (tokenCache.has(source)) return tokenCache.get(source);
-  const {rules} = sheet(source);
+function rootTokens(source, viewportWidth = DEFAULT_VIEWPORT) {
+  let byViewport = tokenCache.get(source);
+  if (!byViewport) {
+    byViewport = new Map();
+    tokenCache.set(source, byViewport);
+  }
+  if (byViewport.has(viewportWidth)) return byViewport.get(viewportWidth);
+  const {rules} = sheet(source, viewportWidth);
   const root = element("html", {states: ["root"]});
   const names = new Set();
   for (const rule of rules) {
@@ -629,10 +816,10 @@ function rootTokens(source) {
   }
   const tokens = new Map();
   for (const name of names) {
-    const value = resolveProperty(source, root, name);
+    const value = resolveProperty(source, root, name, viewportWidth);
     if (value !== undefined) tokens.set(name, value);
   }
-  tokenCache.set(source, tokens);
+  byViewport.set(viewportWidth, tokens);
   return tokens;
 }
 
@@ -640,16 +827,30 @@ function rootTokens(source) {
  * Contrast
  * ------------------------------------------------------------------ */
 
-function token(value, name) {
-  const resolved = rootTokens(value).get(name);
-  assert.ok(resolved, `${name} is defined by the final :root cascade`);
+function token(value, name, viewportWidth = DEFAULT_VIEWPORT) {
+  const resolved = rootTokens(value, viewportWidth).get(name);
+  assert.ok(resolved, `${name} is defined by the final :root cascade at ${viewportWidth}px`);
   return resolved;
 }
 
-function hexToken(value, name) {
-  const resolved = token(value, name);
+function hexToken(value, name, viewportWidth = DEFAULT_VIEWPORT) {
+  const resolved = token(value, name, viewportWidth);
   assert.match(resolved, /^#[0-9a-f]{6}$/i, `${name} must resolve to a direct hex value, got ${resolved}`);
   return resolved;
+}
+
+function resolveVars(value, source, viewportWidth) {
+  const tokens = rootTokens(source, viewportWidth);
+  let resolved = value;
+  for (let pass = 0; pass < 10; pass += 1) {
+    const next = resolved.replace(/var\((--[\w-]+)(?:,\s*([^)]*))?\)/g, (_, name, fallback) => {
+      const tokenValue = tokens.get(name);
+      return tokenValue ?? fallback?.trim() ?? "";
+    });
+    if (next === resolved) break;
+    resolved = next;
+  }
+  return resolved.trim();
 }
 
 function luminance(hex) {
@@ -668,17 +869,23 @@ function contrast(foreground, background) {
   return (lighter + 0.05) / (darker + 0.05);
 }
 
+function assertContrastAtLeast(foreground, background, minimum, label) {
+  const ratio = contrast(foreground, background);
+  assert.ok(ratio >= minimum, `${label} is ${ratio.toFixed(2)}:1, expected >= ${minimum}:1`);
+}
+
 /* ------------------------------------------------------------------ *
  * Elements under test
  * ------------------------------------------------------------------ */
 
-const PRIMARY = element("button", {classes: ["primary"]});
-const SECONDARY = element("button", {classes: ["secondary"]});
-const GHOST = element("button", {classes: ["ghost"]});
-const DANGER = element("button", {classes: ["danger"]});
-const DEFAULT_HOVER = element("button", {states: ["hover"]});
-const INPUT = element("input");
-const SELECT = element("select");
+const BUTTON = element("button", {type: "button"});
+const PRIMARY = element("button", {classes: ["primary"], type: "button"});
+const SECONDARY = element("button", {classes: ["secondary"], type: "button"});
+const GHOST = element("button", {classes: ["ghost"], type: "button"});
+const DANGER = element("button", {classes: ["danger"], type: "button"});
+const DEFAULT_HOVER = element("button", {states: ["hover"], type: "button"});
+const INPUT = element("input", {type: "text"});
+const SELECT = element("select", {type: "select-one"});
 const TABLE_HEADER = element("th");
 const PANEL = element("section", {classes: ["panel"]});
 const STATUS = element("span", {classes: ["status"]});
@@ -693,45 +900,55 @@ const LOGIN_BRAND = element("div", {classes: ["login-brand"]});
 const SWATCH_HOVER = element("button", {
   classes: ["sidebar-memo-swatch"],
   states: ["hover"],
+  type: "button",
   parent: element("div", {classes: ["sidebar-memo"], parent: SIDEBAR}),
 });
 const HARDWARE_ACTIVE = element("button", {
   classes: ["hardware-toggle", "active"],
   states: ["hover"],
+  type: "button",
 });
 const CHARACTER_HOVER = element("button", {
   classes: ["assistant-character-button"],
   states: ["hover"],
+  type: "button",
   parent: element("div", {classes: ["assistant-panel"]}),
 });
 const COMPOSER_BUTTON = element("button", {
   states: ["hover"],
+  type: "button",
   parent: element("div", {classes: ["assistant-composer"]}),
 });
 
 const SIDEBAR_NAV_FOCUS = element("button", {
   states: ["focus-visible"],
+  type: "button",
   parent: element("nav", {parent: SIDEBAR}),
 });
 const BOTTOM_NAV_FOCUS = element("button", {
   states: ["focus-visible"],
+  type: "button",
   parent: element("nav", {classes: ["bottom-nav"]}),
 });
 
 const SIDEBAR_PENDING = element("button", {
   classes: ["has-pending"],
+  type: "button",
   parent: element("nav", {parent: SIDEBAR}),
 });
 const SIDEBAR_PENDING_ACTIVE = element("button", {
   classes: ["has-pending", "active"],
+  type: "button",
   parent: element("nav", {parent: SIDEBAR}),
 });
 const BOTTOM_PENDING = element("button", {
   classes: ["has-pending"],
+  type: "button",
   parent: element("nav", {classes: ["bottom-nav"]}),
 });
 const BOTTOM_PENDING_ACTIVE = element("button", {
   classes: ["has-pending", "active"],
+  type: "button",
   parent: element("nav", {classes: ["bottom-nav"]}),
 });
 const BOTTOM_BADGE = element("span", {
@@ -743,8 +960,8 @@ const SIDEBAR_BADGE = element("span", {
   parent: SIDEBAR_PENDING,
 });
 
-function style(source, subject, property) {
-  return resolveProperty(source, subject, property);
+function style(source, subject, property, viewportWidth = DEFAULT_VIEWPORT) {
+  return resolveProperty(source, subject, property, viewportWidth);
 }
 
 /* ------------------------------------------------------------------ *
@@ -752,46 +969,87 @@ function style(source, subject, property) {
  * stylesheets and asserts that each one throws.
  * ------------------------------------------------------------------ */
 
+function forEachViewport(check) {
+  for (const viewport of VIEWPORTS) check(viewport);
+}
+
 function assertPrimaryHealthy(source = css) {
-  assert.equal(style(source, PRIMARY, "background"), "var(--color-accent)");
-  assert.equal(style(source, PRIMARY, "color"), "var(--color-text-inverse)");
+  forEachViewport(viewport => {
+    assert.equal(style(source, PRIMARY, "background", viewport), "var(--color-accent)", `primary background at ${viewport}px`);
+    assert.equal(style(source, PRIMARY, "color", viewport), "var(--color-text-inverse)", `primary color at ${viewport}px`);
+    assertContrastAtLeast(
+      resolveVars(style(source, PRIMARY, "color", viewport), source, viewport),
+      resolveVars(style(source, PRIMARY, "background", viewport), source, viewport),
+      4.5,
+      `primary text at ${viewport}px`,
+    );
+  });
 }
 
 function assertNavFocusHealthy(source = css) {
-  assert.equal(style(source, SIDEBAR_NAV_FOCUS, "outline-color"), "var(--focus-ring-nav-color)");
-  assert.equal(style(source, BOTTOM_NAV_FOCUS, "outline-color"), "var(--focus-ring-color)");
+  forEachViewport(viewport => {
+    assert.equal(style(source, SIDEBAR_NAV_FOCUS, "outline-color", viewport), "var(--focus-ring-nav-color)", `sidebar focus at ${viewport}px`);
+    assert.equal(style(source, BOTTOM_NAV_FOCUS, "outline-color", viewport), "var(--focus-ring-color)", `bottom-nav focus at ${viewport}px`);
+    const sidebarFocus = resolveVars(style(source, SIDEBAR_NAV_FOCUS, "outline-color", viewport), source, viewport);
+    assertContrastAtLeast(sidebarFocus, token(source, "--color-nav", viewport), 3, `sidebar focus on nav at ${viewport}px`);
+    assertContrastAtLeast(sidebarFocus, token(source, "--color-nav-active", viewport), 3, `sidebar focus on active nav at ${viewport}px`);
+    const bottomFocus = resolveVars(style(source, BOTTOM_NAV_FOCUS, "outline-color", viewport), source, viewport);
+    assertContrastAtLeast(bottomFocus, token(source, "--color-surface", viewport), 3, `bottom-nav focus at ${viewport}px`);
+  });
 }
 
 function assertPendingHealthy(source = css) {
-  assert.equal(style(source, BOTTOM_BADGE, "background"), "var(--color-warning)");
-  assert.equal(style(source, BOTTOM_BADGE, "color"), "var(--color-text-inverse)");
-  assert.equal(style(source, SIDEBAR_BADGE, "box-shadow"), "0 0 0 1px var(--color-warning-bright)");
-  assert.equal(style(source, BOTTOM_PENDING, "color"), "var(--color-warning-ink)");
-  assert.equal(style(source, BOTTOM_PENDING_ACTIVE, "color"), "var(--color-warning-ink)");
-  assert.equal(style(source, SIDEBAR_PENDING, "color"), "var(--color-warning-bright)");
-  assert.equal(style(source, SIDEBAR_PENDING_ACTIVE, "color"), "var(--color-warning-bright)");
-  assert.equal(style(source, SIDEBAR_BADGE, "background"), "var(--color-warning)");
+  forEachViewport(viewport => {
+    assert.equal(style(source, BOTTOM_BADGE, "background", viewport), "var(--color-warning)", `badge background at ${viewport}px`);
+    assert.equal(style(source, BOTTOM_BADGE, "color", viewport), "var(--color-text-inverse)", `badge text at ${viewport}px`);
+    assert.equal(style(source, SIDEBAR_BADGE, "box-shadow", viewport), "0 0 0 1px var(--color-warning-bright)", `sidebar badge ring at ${viewport}px`);
+    assert.equal(style(source, BOTTOM_PENDING, "color", viewport), "var(--color-warning-ink)", `bottom pending at ${viewport}px`);
+    assert.equal(style(source, BOTTOM_PENDING_ACTIVE, "color", viewport), "var(--color-warning-ink)", `bottom pending active at ${viewport}px`);
+    assert.equal(style(source, SIDEBAR_PENDING, "color", viewport), "var(--color-warning-bright)", `sidebar pending at ${viewport}px`);
+    assert.equal(style(source, SIDEBAR_PENDING_ACTIVE, "color", viewport), "var(--color-warning-bright)", `sidebar pending active at ${viewport}px`);
+    assert.equal(style(source, SIDEBAR_BADGE, "background", viewport), "var(--color-warning)", `sidebar badge background at ${viewport}px`);
+
+    const surface = token(source, "--color-surface", viewport);
+    const nav = token(source, "--color-nav", viewport);
+    const navActive = token(source, "--color-nav-active", viewport);
+    assertContrastAtLeast(resolveVars(style(source, BOTTOM_PENDING, "color", viewport), source, viewport), surface, 4.5, `bottom pending at ${viewport}px`);
+    assertContrastAtLeast(resolveVars(style(source, BOTTOM_PENDING_ACTIVE, "color", viewport), source, viewport), surface, 4.5, `bottom pending active at ${viewport}px`);
+    assertContrastAtLeast(resolveVars(style(source, BOTTOM_BADGE, "color", viewport), source, viewport), resolveVars(style(source, BOTTOM_BADGE, "background", viewport), source, viewport), 4.5, `badge text at ${viewport}px`);
+    assertContrastAtLeast(resolveVars(style(source, SIDEBAR_PENDING, "color", viewport), source, viewport), nav, 4.5, `sidebar pending at ${viewport}px`);
+    assertContrastAtLeast(resolveVars(style(source, SIDEBAR_PENDING_ACTIVE, "color", viewport), source, viewport), navActive, 4.5, `sidebar pending active at ${viewport}px`);
+    const badgeRing = colorFromShorthand(resolveVars(style(source, SIDEBAR_BADGE, "box-shadow", viewport), source, viewport));
+    assert.ok(badgeRing, `sidebar badge ring color at ${viewport}px`);
+    assertContrastAtLeast(badgeRing, nav, 3, `sidebar badge ring on nav at ${viewport}px`);
+    assertContrastAtLeast(badgeRing, navActive, 3, `sidebar badge ring on active nav at ${viewport}px`);
+  });
 }
 
 function assertComponentStatesHealthy(source = css) {
-  assert.equal(style(source, SWATCH_HOVER, "background"), "var(--swatch-color)");
-  assert.equal(style(source, HARDWARE_ACTIVE, "background"), "#dce8ff");
-  assert.equal(style(source, HARDWARE_ACTIVE, "color"), "#1d4ed8");
-  assert.equal(style(source, CHARACTER_HOVER, "background"), "#eaf4ff");
-  assert.equal(style(source, CHARACTER_HOVER, "border-color"), "#9fc4ee");
-  assert.equal(style(source, COMPOSER_BUTTON, "background"), "#2563eb");
-  assert.equal(style(source, COMPOSER_BUTTON, "color"), "#fff");
-  assert.equal(style(source, DEFAULT_HOVER, "--button-bg"), "var(--color-accent-soft)");
-  assert.equal(style(source, DEFAULT_HOVER, "--button-border"), "var(--color-accent)");
-  assert.equal(style(source, DEFAULT_HOVER, "--button-fg"), "var(--color-accent-ink)");
+  forEachViewport(viewport => {
+    assert.equal(style(source, SWATCH_HOVER, "background", viewport), "var(--swatch-color)", `swatch background at ${viewport}px`);
+    assert.equal(style(source, HARDWARE_ACTIVE, "background", viewport), "#dce8ff", `hardware background at ${viewport}px`);
+    assert.equal(style(source, HARDWARE_ACTIVE, "color", viewport), "#1d4ed8", `hardware color at ${viewport}px`);
+    assert.equal(style(source, CHARACTER_HOVER, "background", viewport), "#eaf4ff", `character background at ${viewport}px`);
+    assert.equal(style(source, CHARACTER_HOVER, "border-color", viewport), "#9fc4ee", `character border at ${viewport}px`);
+    assert.equal(style(source, COMPOSER_BUTTON, "background", viewport), "#2563eb", `composer background at ${viewport}px`);
+    assert.equal(style(source, COMPOSER_BUTTON, "color", viewport), "#fff", `composer color at ${viewport}px`);
+    assert.equal(style(source, DEFAULT_HOVER, "--button-bg", viewport), "var(--color-accent-soft)", `default hover background at ${viewport}px`);
+    assert.equal(style(source, DEFAULT_HOVER, "--button-border", viewport), "var(--color-accent)", `default hover border at ${viewport}px`);
+    assert.equal(style(source, DEFAULT_HOVER, "--button-fg", viewport), "var(--color-accent-ink)", `default hover text at ${viewport}px`);
+    const hoverBackground = resolveVars(style(source, DEFAULT_HOVER, "--button-bg", viewport), source, viewport);
+    const hoverForeground = resolveVars(style(source, DEFAULT_HOVER, "--button-fg", viewport), source, viewport);
+    assertContrastAtLeast(hoverForeground, hoverBackground, 4.5, `default hover text at ${viewport}px`);
+  });
 }
 
 function assertContrastHealthy(source = css) {
-  const ratio = contrast(
-    hexToken(source, "--color-text-inverse"),
-    hexToken(source, "--color-accent"),
-  );
-  assert.ok(ratio >= 4.5, `inverse/accent contrast is ${ratio.toFixed(2)}:1`);
+  forEachViewport(viewport => {
+    const ratio = contrast(
+      hexToken(source, "--color-text-inverse", viewport),
+      hexToken(source, "--color-accent", viewport),
+    );
+    assert.ok(ratio >= 4.5, `inverse/accent contrast at ${viewport}px is ${ratio.toFixed(2)}:1`);
+  });
 }
 
 /* ------------------------------------------------------------------ *
@@ -850,13 +1108,13 @@ test("core colour, type, spacing, radius, elevation and motion tokens exist", ()
  * ------------------------------------------------------------------ */
 
 test("base components consume tokens instead of hard-coded colours", () => {
-  assert.equal(style(css, element("button"), "--button-bg"), "var(--color-surface)");
-  assert.equal(style(css, element("button"), "--button-border"), "var(--color-border-strong)");
-  assert.equal(style(css, element("button"), "--button-fg"), "var(--color-text)");
-  assert.equal(style(css, element("button"), "border"), "1px solid var(--button-border)");
-  assert.equal(style(css, element("button"), "border-radius"), "var(--radius-control)");
-  assert.equal(style(css, element("button"), "background"), "var(--button-bg)");
-  assert.equal(style(css, element("button"), "color"), "var(--button-fg)");
+  assert.equal(style(css, BUTTON, "--button-bg"), "var(--color-surface)");
+  assert.equal(style(css, BUTTON, "--button-border"), "var(--color-border-strong)");
+  assert.equal(style(css, BUTTON, "--button-fg"), "var(--color-text)");
+  assert.equal(style(css, BUTTON, "border"), "1px solid var(--button-border)");
+  assert.equal(style(css, BUTTON, "border-radius"), "var(--radius-control)");
+  assert.equal(style(css, BUTTON, "background"), "var(--button-bg)");
+  assert.equal(style(css, BUTTON, "color"), "var(--button-fg)");
 
   for (const [subject, property, expected] of [
     [SECONDARY, "border-color", "var(--color-border-strong)"],
@@ -939,6 +1197,112 @@ test("the cascade model catches known override patterns", () => {
   );
 });
 
+test("viewport-scoped overrides are evaluated at 375/768/1280/1440", () => {
+  const pending = `${css}\n@media (max-width:760px){ .bottom-nav button.has-pending{color:#fff} }\n`;
+  assert.equal(style(pending, BOTTOM_PENDING, "color", 375), "#fff");
+  for (const viewport of [768, 1280, 1440]) {
+    assert.equal(style(pending, BOTTOM_PENDING, "color", viewport), "var(--color-warning-ink)", `pending at ${viewport}px`);
+  }
+  assert.throws(() => assertPendingHealthy(pending), Error, "pending override must fail at 375px");
+
+  const primary = `${css}\n@media (min-width:1281px){ button.primary{background:#fff;color:#fff} }\n`;
+  assert.equal(style(primary, PRIMARY, "background", 1440), "#fff");
+  for (const viewport of [375, 768, 1280]) {
+    assert.equal(style(primary, PRIMARY, "background", viewport), "var(--color-accent)", `primary at ${viewport}px`);
+  }
+  assert.throws(() => assertPrimaryHealthy(primary), Error, "primary override must fail at 1440px");
+
+  const focus = `${css}\n@media (max-width:760px){ .bottom-nav button:focus-visible{outline-color:#fff} }\n`;
+  assert.equal(style(focus, BOTTOM_NAV_FOCUS, "outline-color", 375), "#fff");
+  for (const viewport of [768, 1280, 1440]) {
+    assert.equal(style(focus, BOTTOM_NAV_FOCUS, "outline-color", viewport), "var(--focus-ring-color)", `focus at ${viewport}px`);
+  }
+  assert.throws(() => assertNavFocusHealthy(focus), Error, "focus override must fail at 375px");
+
+  const badge = `${css}\n@media (min-width:1281px){ .task-tool-badge{background:#fff;color:#fff} }\n`;
+  assert.equal(style(badge, BOTTOM_BADGE, "background", 1440), "#fff");
+  for (const viewport of [375, 768, 1280]) {
+    assert.equal(style(badge, BOTTOM_BADGE, "background", viewport), "var(--color-warning)", `badge at ${viewport}px`);
+  }
+  assert.throws(() => assertPendingHealthy(badge), Error, "badge override must fail at 1440px");
+});
+
+test("attribute selectors match only attributes present on the fixture", () => {
+  const classMutation = `${css}\nbutton[class]{background:#fff;color:#fff}\n`;
+  assert.equal(style(classMutation, PRIMARY, "background"), "#fff");
+  assert.equal(style(classMutation, BUTTON, "background"), "var(--button-bg)");
+  assert.throws(() => assertPrimaryHealthy(classMutation), Error);
+
+  const dataTaskAbsent = `${css}\nbutton[data-task]{background:#fff;color:#fff}\n`;
+  assert.equal(style(dataTaskAbsent, PRIMARY, "background"), "var(--color-accent)");
+  assertPrimaryHealthy(dataTaskAbsent);
+
+  const withDataTask = element("button", {
+    classes: ["primary"],
+    type: "button",
+    attrs: {"data-task": "task-1"},
+  });
+  assert.equal(style(dataTaskAbsent, withDataTask, "background"), "#fff");
+
+  const ariaButton = element("button", {type: "button", attrs: {"aria-current": "page"}});
+  const ariaMutation = `${css}\nbutton[aria-current="page"]{color:#fff}\n`;
+  assert.equal(style(ariaMutation, ariaButton, "color"), "#fff");
+  assert.equal(style(ariaMutation, BUTTON, "color"), "var(--button-fg)");
+});
+
+test("@layer follows layer order, unlayered priority and important reversal", () => {
+  const layeredNormal = `${css}\n@layer base { button.primary { background:#fff; color:#fff; } }\n`;
+  assert.equal(style(layeredNormal, PRIMARY, "background"), "var(--color-accent)");
+  assertPrimaryHealthy(layeredNormal);
+
+  const layeredImportant = `${css}\n@layer base { button.primary { background:#fff !important; color:#fff !important; } }\n`;
+  assert.equal(style(layeredImportant, PRIMARY, "background"), "#fff");
+  assert.throws(() => assertPrimaryHealthy(layeredImportant), Error);
+
+  const laterLayer = `${css}\n@layer first, second;\n@layer second { .primary { outline-color:#fff; } }\n@layer first { .primary { outline-color:#eee; } }\n`;
+  assert.equal(style(laterLayer, PRIMARY, "outline-color"), "#fff");
+
+  const importantLayerReversal = `${css}\n@layer first, second;\n@layer second { .primary { outline-color:#fff !important; } }\n@layer first { .primary { outline-color:#eee !important; } }\n`;
+  assert.equal(style(importantLayerReversal, PRIMARY, "outline-color"), "#eee");
+});
+
+test("@supports evaluates the modeled declaration conditions", () => {
+  const supported = `${css}\n@supports (display: grid) { button.primary { background:#fff; color:#fff; } }\n`;
+  assert.equal(style(supported, PRIMARY, "background"), "#fff");
+  assert.throws(() => assertPrimaryHealthy(supported), Error);
+
+  const unsupportedProperty = `${css}\n@supports (not-a-real-property: 1) { button.primary { background:#fff; color:#fff; } }\n`;
+  assert.equal(style(unsupportedProperty, PRIMARY, "background"), "var(--color-accent)");
+  assertPrimaryHealthy(unsupportedProperty);
+
+  const unsupportedValue = `${css}\n@supports (display: unsupported-value) { button.primary { background:#fff; color:#fff; } }\n`;
+  assert.equal(style(unsupportedValue, PRIMARY, "background"), "var(--color-accent)");
+
+  const negated = `${css}\n@supports not (display: grid) { button.primary { background:#fff; color:#fff; } }\n`;
+  assert.equal(style(negated, PRIMARY, "background"), "var(--color-accent)");
+});
+
+test("@container evaluates the declared 900px container", () => {
+  const applies = `${css}\n@container (min-width: 500px) { button.primary { background:#fff; color:#fff; } }\n`;
+  assert.equal(style(applies, PRIMARY, "background"), "#fff");
+  assert.throws(() => assertPrimaryHealthy(applies), Error);
+
+  const doesNotApply = `${css}\n@container (min-width: 1000px) { button.primary { background:#fff; color:#fff; } }\n`;
+  assert.equal(style(doesNotApply, PRIMARY, "background"), "var(--color-accent)");
+  assertPrimaryHealthy(doesNotApply);
+
+  const named = `${css}\n@container card (max-width: 1000px) { button.primary { background:#fff; color:#fff; } }\n`;
+  assert.equal(style(named, PRIMARY, "background"), "#fff");
+});
+
+test("unmodeled at-rules that affect tracked selectors fail loudly", () => {
+  const unknown = `${css}\n@scope (.app) { button.primary { background:#fff; } }\n`;
+  assert.throws(() => style(unknown, PRIMARY, "background"), /unmodeled at-rule @scope/);
+
+  const unrelated = `${css}\n@starting-style { .unrelated { opacity: 0; } }\n`;
+  assert.equal(style(unrelated, PRIMARY, "background"), "var(--color-accent)");
+});
+
 /* ------------------------------------------------------------------ *
  * Contrast
  * ------------------------------------------------------------------ */
@@ -968,9 +1332,11 @@ test("text, navigation and status pairs meet WCAG AA contrast", () => {
     ["--focus-ring-nav-color", "--color-nav", 3],
     ["--focus-ring-nav-color", "--color-nav-active", 3],
   ];
-  for (const [foreground, background, minimum] of pairs) {
-    const ratio = contrast(hexToken(css, foreground), hexToken(css, background));
-    assert.ok(ratio >= minimum, `${foreground} on ${background} is ${ratio.toFixed(2)}:1, expected >= ${minimum}:1`);
+  for (const viewport of VIEWPORTS) {
+    for (const [foreground, background, minimum] of pairs) {
+      const ratio = contrast(hexToken(css, foreground, viewport), hexToken(css, background, viewport));
+      assert.ok(ratio >= minimum, `${foreground} on ${background} at ${viewport}px is ${ratio.toFixed(2)}:1, expected >= ${minimum}:1`);
+    }
   }
 });
 

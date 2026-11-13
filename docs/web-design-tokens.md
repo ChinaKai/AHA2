@@ -162,4 +162,15 @@ node --test web/tests/*.test.mjs
 go test ./internal/httpapi -count=1
 ```
 
-`web/tests/design_tokens.test.mjs` 检查核心 token、关键选择器是否使用 `var(--...)`、颜色对比度、焦点环、reduced-motion，以及 select 的 4px 左内边距（避免 Windows/Edge 原生选项弹层文字错位回归）。测试内置最小 CSS 层叠模型：递归解析 at-rule，归一化多行/逗号选择器，计算特异性，处理 `!important`，并按最终 `:root` 层叠值解析变量；对高特异性、多行选择器、at-rule 内规则、`!important` 和后置 `:root` 覆盖做回归。
+`web/tests/design_tokens.test.mjs` 检查核心 token、关键选择器是否使用 `var(--...)`、颜色对比度、焦点环、reduced-motion，以及 select 的 4px 左内边距（避免 Windows/Edge 原生选项弹层文字错位回归）。
+
+测试内置的是**最小 CSS 层叠模型**，不是完整浏览器层叠器。明确范围：
+
+- **视口**：375、768、1280、1440。按钮、导航焦点、待审批文字/徽标在四个视口都按最终声明和解析后的 token 计算对比度；任一视口不达标即失败。
+- **容器查询**：`@container` 按声明宽度 900px 求值。
+- **支持的 at-rule**：`@media`（`min-width` / `max-width`）、`@supports`（最小声明支持判断：已知属性、`display` 合法值、`not` / `and` / `or`）、`@layer`（层顺序、未分层普通声明优先、`!important` 反向层序）、`@container`（宽度条件）。
+- **支持的选择器**：type / class / id / attribute、后代与子代组合器、`:not` / `:is` / `:where` / `:root`、伪元素、UI 状态伪类；fixture 会把 classes、id、type 同步到 `class` / `id` / `type` 属性，`[class]`、`[data-task]`、`[aria-current]` 等属性选择器按真实属性匹配。
+- **已知未建模**：兄弟组合器（`+` / `~`）、`:has`、除宽度外的 media/container 特性、复杂嵌套层的细分规则、`outline`/`border`/`background` 之外的 shorthand 展开。
+- **未建模 at-rule 的防线**：遇到 `@layer` / `@supports` / `@container` 之外的未知 at-rule，如果其中出现被跟踪的 token/按钮/导航/pending 选择器，测试会抛出“unmodeled at-rule”而不是静默通过。
+
+层叠模型覆盖高特异性、多行选择器、at-rule 内规则、`!important`、后置 `:root`、视口内覆盖、层顺序和属性选择器回归。它不是浏览器 smoke：不渲染页面，也不验证真实布局。
