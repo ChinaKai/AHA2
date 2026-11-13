@@ -202,7 +202,7 @@ test("forms and action groups stay aligned without narrow-window button distorti
   assert.match(styles, /dialog > \.dialog-head \{[^}]*padding:\s*18px 18px 0/);
   assert.match(styles, /@media \(max-width:\s*760px\)[\s\S]*?\.provider-layout \.provider-row \{[^}]*grid-template-columns:\s*minmax\(0,1fr\) auto/);
   assert.match(styles, /@media \(max-width:\s*400px\)[\s\S]*?\.dialog-actions \{[^}]*grid-template-columns:\s*minmax\(0,1fr\)/);
-  assert.match(styles, /\.models-table th:nth-child\(3\)/);
+  assert.match(styles, /\.models-table-wrap \.models-table th:nth-child\(3\)/);
   assert.doesNotMatch(styles, /\n\s*th:nth-child\(2\),\s*td:nth-child\(2\)/);
   assert.match(styles, /@media \(max-width:\s*760px\)[\s\S]*?\.task-draft-banner button \{[^}]*grid-column:\s*1 \/ -1/);
   assert.match(styles, /@media \(max-width:\s*760px\)[\s\S]*?\.remote-readonly-actions \{[^}]*grid-column:\s*1 \/ -1/);

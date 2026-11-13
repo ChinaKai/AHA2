@@ -32,6 +32,35 @@ function mediaBlocks(css, query) {
   }
 }
 
+function ruleSelectors(block) {
+  const clean = block.replace(/\/\*[\s\S]*?\*\//g, "");
+  const selectors = [];
+  for (const rule of clean.split("}")) {
+    const open = rule.indexOf("{");
+    if (open < 0) continue;
+    for (const part of rule.slice(0, open).split(",")) {
+      selectors.push(part.replace(/\s+/g, " ").trim());
+    }
+  }
+  return selectors;
+}
+
+test("model card rules cannot leak to other .models-table consumers", async () => {
+  const css = await readFile(resolve(root, "src", "styles.css"), "utf8");
+  for (const query of ["max-width: 760px", "max-width: 640px", "max-width: 400px", "max-width: 360px"]) {
+    for (const block of mediaBlocks(css, query)) {
+      for (const selector of ruleSelectors(block)) {
+        if (!/\.models-table(?![\w-])/.test(selector)) continue;
+        assert.match(
+          selector,
+          /^\.models-table-wrap \.models-table(?![\w-])/,
+          `${query} block contains an unscoped model-table selector: ${selector}`,
+        );
+      }
+    }
+  }
+});
+
 test("model rows expose labels and card markers for the phone layout", async () => {
   const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
   const row = main.match(/function modelRowHTML[\s\S]*?\n}/)?.[0] || "";
@@ -70,25 +99,25 @@ test("<=640px turns model rows into Provider-grouped cards", async () => {
 
   // The horizontal scroller and the desktop min-width are both disabled.
   assert.match(block, /\.models-table-wrap \{ overflow: visible; \}/);
-  assert.match(block, /\.models-table, \.models-table thead, \.models-table tbody \{ display: block; width: 100%; \}/);
-  assert.match(block, /\.models-table td:nth-child\(3\),\s*\.models-table td:nth-child\(5\) \{ display: block;/);
-  assert.match(block, /\.models-table td\.model-health-cell \{ min-width: 0; \}/);
+  assert.match(block, /\.models-table-wrap \.models-table,\s*\.models-table-wrap \.models-table thead,\s*\.models-table-wrap \.models-table tbody \{ display: block; width: 100%; \}/);
+  assert.match(block, /\.models-table-wrap \.models-table td:nth-child\(3\),\s*\.models-table-wrap \.models-table td:nth-child\(5\) \{ display: block;/);
+  assert.match(block, /\.models-table-wrap \.models-table td\.model-health-cell \{ min-width: 0; \}/);
 
   // Each row is a card with a header row and labelled detail rows.
-  assert.match(block, /\.models-table \.model-row \{ display: grid; grid-template-columns: 20px minmax\(0,1fr\) auto;/);
-  assert.match(block, /\.model-row > td\[data-label\] \{ grid-column: 1 \/ -1;/);
+  assert.match(block, /\.models-table-wrap \.models-table \.model-row \{ display: grid; grid-template-columns: 20px minmax\(0,1fr\) auto;/);
+  assert.match(block, /\.models-table-wrap \.models-table \.model-row > td\[data-label\] \{ grid-column: 1 \/ -1;/);
   assert.match(block, /content: attr\(data-label\)/);
-  assert.match(block, /\.model-row > td\.row-actions \{ grid-column: 3; grid-row: 1;/);
+  assert.match(block, /\.models-table-wrap \.models-table \.model-row > td\.row-actions \{ grid-column: 3; grid-row: 1;/);
 
   // Provider group header keeps its checkbox/indeterminate hook and count.
-  assert.match(block, /\.models-table \.model-group-row \{ display: flex;/);
-  assert.match(block, /\.model-group-select-label \{ display: inline;/);
+  assert.match(block, /\.models-table-wrap \.models-table \.model-group-row \{ display: flex;/);
+  assert.match(block, /\.models-page \.model-group-select-label \{ display: inline;/);
 
-  // Touch targets and the batch bar stay usable above the bottom nav.
-  assert.match(block, /\.model-row \.row-actions \.icon-button \{[^}]*min-height: 36px;/);
-  assert.match(block, /\.model-row \.health-check-button \{[^}]*min-height: 36px;/);
-  assert.match(block, /\.model-batch-bar \{[^}]*position: sticky;[^}]*top: 0;/);
-  assert.match(block, /\.model-batch-actions button \{[^}]*min-height: 36px;/);
+  // Touch targets stay usable; the batch bar stays in normal document flow.
+  assert.match(block, /\.models-table-wrap \.models-table \.model-row \.row-actions \.icon-button \{[^}]*min-height: 36px;/);
+  assert.match(block, /\.models-table-wrap \.models-table \.model-row \.health-check-button \{[^}]*min-height: 36px;/);
+  assert.doesNotMatch(block, /\.model-batch-bar \{[^}]*position:\s*(?:sticky|fixed)/);
+  assert.match(block, /\.models-page \.model-batch-actions button \{[^}]*min-height: 36px;/);
 
   // Reserve room under the list so the pet and bottom nav cannot hide the
   // last card's edit/delete/check controls.
@@ -99,8 +128,8 @@ test("narrow phone breakpoints tighten the card layout without shrinking targets
   const css = await readFile(resolve(root, "src", "styles.css"), "utf8");
   const blocks400 = mediaBlocks(css, "max-width: 400px");
   const blocks360 = mediaBlocks(css, "max-width: 360px");
-  assert.ok(blocks400.some(block => /\.models-table \.model-row \{ grid-template-columns: 18px minmax\(0,1fr\) auto;/.test(block)));
-  assert.ok(blocks360.some(block => /\.models-table \.model-row \{ padding: 9px 8px; \}/.test(block)));
+  assert.ok(blocks400.some(block => /\.models-table-wrap \.models-table \.model-row \{ grid-template-columns: 18px minmax\(0,1fr\) auto;/.test(block)));
+  assert.ok(blocks360.some(block => /\.models-table-wrap \.models-table \.model-row \{ padding: 9px 8px; \}/.test(block)));
   // The compact rules must not drop below the 36px primary action target.
   assert.ok(blocks360.every(block => !/row-actions \.icon-button \{[^}]*min-height: (?:3[0-5]|[12]?\d)px/.test(block)));
 });
@@ -110,8 +139,9 @@ test("the desktop model table keeps its existing appearance", async () => {
   // Desktop rules survive outside the phone block.
   assert.match(css, /\.model-health-cell \{ min-width: 128px; \}/);
   assert.match(css, /\.models-table input\[type="checkbox"\] \{ width: 15px; height: 15px;/);
-  // The old 760px column-hiding rules stay in place for >640px widths.
-  assert.match(css, /@media \(max-width: 760px\)[\s\S]*?\.models-table th:nth-child\(3\), \.models-table td:nth-child\(3\)/);
+  // The old 760px column-hiding rules stay in place for >640px widths and are
+  // scoped to the model page so the MCP table keeps its status column.
+  assert.match(css, /@media \(max-width: 760px\)[\s\S]*?\.models-table-wrap \.models-table th:nth-child\(3\), \.models-table-wrap \.models-table td:nth-child\(3\)/);
   // Card-only rules must not leak outside the phone/media blocks.
   const gridRule = css.indexOf(".models-table .model-row { display: grid;");
   const first640 = css.indexOf("@media (max-width: 640px)");
