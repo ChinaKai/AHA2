@@ -79,7 +79,7 @@ try{
  const scan=async(label)=>{
   const missing=await page.evaluate(()=>{
    const roots=[document.querySelector("#app"),document.querySelector("#assistant-layer")].filter(Boolean);
-   const skip=[".markdown-body",".message-text",".message-bubble","pre","code","textarea","input","[contenteditable='true']",".pet-doc-entry pre",".pet-approval-card strong",".pet-approval-card p",".pet-approval-card small",".pet-overview-activity strong",".pet-watch-row strong","[data-i18n-ignore]"].join(",");
+   const skip=[".markdown-body",".message-text",".message-bubble","pre","code","textarea","input","[contenteditable='true']",".pet-doc-entry pre",".pet-approval-card strong",".pet-approval-row-main strong",".pet-approval-card p",".pet-approval-card small",".pet-overview-activity strong",".pet-watch-row strong","[data-i18n-ignore]"].join(",");
    const out=[];
    for(const root of roots){
     const walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT);
