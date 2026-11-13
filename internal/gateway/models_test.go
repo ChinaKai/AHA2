@@ -563,3 +563,64 @@ func TestProbeModelCapabilitiesKeepsHTTP400Ambiguous(t *testing.T) {
 		t.Fatalf("protocol_errors leaked the API key: %q", evidence)
 	}
 }
+
+// A 400 on the configured Anthropic entry point must not stop the probe: the
+// gateway may still serve Anthropic Messages under another candidate base.
+func TestProbeModelCapabilitiesAnthropicFallbackAfterRejectedCandidate(t *testing.T) {
+	t.Parallel()
+	base, paths := newProbeTestServer(t, map[string]int{
+		"/wrong/messages":        http.StatusBadRequest,
+		"/wrong/v1/messages":     http.StatusBadRequest,
+		"/anthropic/v1/messages": http.StatusOK,
+	})
+
+	caps, anthropicBase, errs := ProbeModelCapabilitiesForProviderContext(
+		context.Background(), base.URL+"/v1", base.URL+"/wrong", "secret", "auto", "claude-model", 5*time.Second, nil)
+	if caps["anthropic_messages"] != "supported" {
+		t.Fatalf("caps=%v errs=%v, want the later Anthropic candidate to succeed", caps, errs)
+	}
+	if anthropicBase != base.URL+"/anthropic" {
+		t.Fatalf("anthropicBase=%q, want %q", anthropicBase, base.URL+"/anthropic")
+	}
+	if !containsString(paths(), "/anthropic/v1/messages") {
+		t.Fatalf("the later Anthropic candidate was not probed: %v", paths())
+	}
+}
+
+// Unauthorized, service, and inconclusive results describe the credential or
+// gateway rather than the base path, so the probe keeps the first candidate's
+// verdict and does not multiply requests across every candidate.
+func TestProbeModelCapabilitiesAnthropicFallbackStopsOnNonPathFailures(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		status int
+		want   string
+	}{
+		{"unauthorized", http.StatusUnauthorized, "unauthorized"},
+		{"unavailable", http.StatusInternalServerError, "unavailable"},
+		{"inconclusive", http.StatusUnprocessableEntity, "inconclusive"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			base, paths := newProbeTestServer(t, map[string]int{
+				"/wrong/messages":    tc.status,
+				"/wrong/v1/messages": tc.status,
+			})
+			caps, anthropicBase, errs := ProbeModelCapabilitiesForProviderContext(
+				context.Background(), base.URL+"/v1", base.URL+"/wrong", "secret", "auto", "claude-model", 5*time.Second, nil)
+			if caps["anthropic_messages"] != tc.want {
+				t.Fatalf("caps=%v errs=%v, want %q", caps, errs, tc.want)
+			}
+			if anthropicBase != "" {
+				t.Fatalf("anthropicBase=%q, want empty for a non-path failure", anthropicBase)
+			}
+			for _, path := range paths() {
+				if !strings.HasPrefix(path, "/wrong/") {
+					t.Fatalf("probe fell back to %q after %s", path, tc.name)
+				}
+			}
+		})
+	}
+}

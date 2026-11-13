@@ -29,7 +29,7 @@ import {DEFAULT_TASK_STATUS_FILTERS, LOCAL_TASK_DEVICE_FILTER, TASK_STATUS_GROUP
 import type {TaskStatusGroup} from "./task_filters.js";
 import {TASK_TOOL_DEFAULT_WIDTH, normalizePinnedTaskTool, normalizeTaskToolMode, normalizeTaskToolWidth, renderTaskToolButtons, renderTaskToolContent, renderTaskToolPanel} from "./task_tools.js";
 import type {TaskTool, TaskToolMode} from "./task_tools.js";
-import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, createListRefreshScheduler, createResourceLoader, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, formCheckbox, loadNavigationSnapshot, matchingSlashCommands, paginateItems, paginationHTML, petWatchActionKeys, readPerfPanelPreference, renderProtocolProbeStatus, renderWorkspaceDetection, restoreInteractiveRegion, saveNavigationSnapshot, textMatchesQuery, writePerfPanelPreference} from "./ui_helpers.js";
+import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, createListRefreshScheduler, createResourceLoader, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, formCheckbox, loadNavigationSnapshot, matchingSlashCommands, paginateItems, paginationHTML, petWatchActionKeys, protoBadges, readPerfPanelPreference, renderProtocolProbeStatus, renderWorkspaceDetection, restoreInteractiveRegion, saveNavigationSnapshot, textMatchesQuery, writePerfPanelPreference} from "./ui_helpers.js";
 import type {InteractiveRegionState} from "./ui_helpers.js";
 import {
   compactNumber,
@@ -1392,23 +1392,6 @@ function backendProtocolLabel(model: Model): string {
 
 function modelSupportsImage(model: Model): boolean {
   return model.capabilities?.supports_image_input !== false;
-}
-
-function supportedWireAPIs(model: DetectedModel): string[] {
-  const caps = model.capabilities || {};
-  const order = ["responses", "chat_completions", "anthropic_messages"] as const;
-  // rate_limited means the endpoint exists and accepted the request but the
-  // gateway throttled the burst probe — the protocol is still usable.
-  return order.filter(api => caps[api] === "supported" || caps[api] === "rate_limited").map(api => api === "chat_completions" ? "chat" : api);
-}
-
-function protoBadges(model: DetectedModel): string {
-  const wire = supportedWireAPIs(model);
-  const parts: string[] = [];
-  if (wire.includes("responses")) parts.push(`<span class="proto codex">Responses</span>`);
-  if (wire.includes("chat")) parts.push(`<span class="proto codex">Chat</span>`);
-  if (wire.includes("anthropic_messages")) parts.push(`<span class="proto claude">Messages</span>`);
-  return parts.length ? parts.join("") : `<span class="proto none">不支持</span>`;
 }
 
 function applyProviderPreset(): void {

@@ -1,4 +1,4 @@
-import type {Project, Task, Workspace, WorkspaceProbe} from "./types.js";
+import type {DetectedModel, Project, Task, Workspace, WorkspaceProbe} from "./types.js";
 
 export type PetWatchAction = "follow" | "unfollow" | "ignore" | "restoreIgnored" | "restoreFollow";
 
@@ -232,6 +232,29 @@ export function renderWorkspaceDetection(workspace: Workspace): string {
         ? `<span class="status bad">Workspace 不可访问</span>`
         : `<span class="status warn">无可用 Backend</span>`;
   return `<div class="workspace-detection">${summary}${details.map(detail => `<small class="${detail.kind}" title="${escapeWorkspaceHTML(detail.text)}">${escapeWorkspaceHTML(detail.text)}</small>`).join("")}</div>`;
+}
+
+export function supportedWireAPIs(model: DetectedModel): string[] {
+  const caps = model.capabilities || {};
+  const order = ["responses", "chat_completions", "anthropic_messages"] as const;
+  // rate_limited means the endpoint exists and accepted the request but the
+  // gateway throttled the burst probe — the protocol is still usable.
+  return order.filter(api => caps[api] === "supported" || caps[api] === "rate_limited").map(api => api === "chat_completions" ? "chat" : api);
+}
+
+export function protoBadges(model: DetectedModel): string {
+  const wire = supportedWireAPIs(model);
+  const parts: string[] = [];
+  if (wire.includes("responses")) parts.push(`<span class="proto codex">Responses</span>`);
+  if (wire.includes("chat")) parts.push(`<span class="proto codex">Chat</span>`);
+  if (wire.includes("anthropic_messages")) parts.push(`<span class="proto claude">Messages</span>`);
+  if (parts.length) return parts.join("");
+  // "不支持" is only earned by confirmed missing endpoints (404/405/501).
+  // A 400, 422, auth failure, or 5xx leaves the protocol unconfirmed, so the
+  // badge must stay neutral instead of contradicting the per-protocol result.
+  const statuses = Object.values(model.capabilities || {});
+  const confirmedAbsent = statuses.length > 0 && statuses.every(status => status === "unsupported");
+  return confirmedAbsent ? `<span class="proto none">不支持</span>` : `<span class="proto none">未确认</span>`;
 }
 
 // Per-protocol probe results for the detection row. "unsupported" stays muted

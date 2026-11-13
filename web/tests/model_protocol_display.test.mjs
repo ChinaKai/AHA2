@@ -113,3 +113,42 @@ test("supported and rate-limited protocols render no failure text", () => {
   assert.equal(html, "");
   assert.deepEqual(helpers.protocolProbeFailures({responses: "supported"}, {}), []);
 });
+
+test("badge row only says 不支持 when every failure is a confirmed missing endpoint", () => {
+  const row = (caps, errors = {}) =>
+    helpers.protoBadges({id: "model", capabilities: caps}) + helpers.renderProtocolProbeStatus(caps, errors);
+  const unsupportedBadge = /<span class="proto none">不支持<\/span>/;
+  const unconfirmedBadge = /<span class="proto none">未确认<\/span>/;
+  const rejectedErrors = {
+    responses: "https://gateway.example/v1/responses: HTTP 400",
+    chat_completions: "https://gateway.example/v1/chat/completions: HTTP 400",
+    anthropic_messages: "https://gateway.example/v1/messages: HTTP 400",
+  };
+
+  const allMissing = row({responses: "unsupported", chat_completions: "unsupported", anthropic_messages: "unsupported"});
+  assert.match(allMissing, unsupportedBadge);
+  assert.doesNotMatch(allMissing, unconfirmedBadge);
+
+  const allRejected = row({responses: "rejected", chat_completions: "rejected", anthropic_messages: "rejected"}, rejectedErrors);
+  assert.match(allRejected, unconfirmedBadge);
+  assert.doesNotMatch(allRejected, unsupportedBadge);
+
+  const mixed = row({responses: "unsupported", chat_completions: "rejected", anthropic_messages: "unsupported"}, rejectedErrors);
+  assert.match(mixed, unconfirmedBadge);
+  assert.doesNotMatch(mixed, unsupportedBadge);
+
+  for (const status of ["unauthorized", "unavailable", "inconclusive"]) {
+    const state = row({responses: status, chat_completions: status, anthropic_messages: status});
+    assert.match(state, unconfirmedBadge, `${status} must stay unconfirmed`);
+    assert.doesNotMatch(state, unsupportedBadge, `${status} must not say 不支持`);
+  }
+
+  // A supported protocol still gets its normal badge; the failure block
+  // describes the rejected protocol without claiming the model is unsupported.
+  const partial = row({responses: "rejected", chat_completions: "supported", anthropic_messages: "unsupported"}, rejectedErrors);
+  assert.match(partial, /<span class="proto codex">Chat<\/span>/);
+  assert.doesNotMatch(partial, unsupportedBadge);
+  assert.doesNotMatch(partial, unconfirmedBadge);
+
+  assert.match(row({}), unconfirmedBadge);
+});

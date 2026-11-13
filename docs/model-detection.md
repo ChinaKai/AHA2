@@ -24,8 +24,11 @@
 
 ## 详情与重试
 
-- 每个失败协议保留候选 URL 与 HTTP 状态：`protocol_errors[wire_api] = "<url>: HTTP <code>"`。
-  Anthropic 会按「配置的 anthropic_base_url → base_url → /anthropic」顺序列出每个候选。
+- 每个实际探测过的失败候选都保留 URL 与 HTTP 状态：`protocol_errors[wire_api] = "<url>: HTTP <code>"`。
+  Anthropic 先探测配置的 `anthropic_base_url`（未配置时用 `base_url`）；只有结果是路径类失败
+  （`unsupported` 404/405/501 或 `rejected` 400）时，才继续探测 `base_url` 与 `/anthropic`，
+  成功即停。401/403、5xx/传输失败、422 等非路径状态保留首个候选结论，不再换候选，避免放大
+  请求或掩盖鉴权/服务问题。
 - UI 默认只显示简洁结论和可操作提示；候选 URL/HTTP 状态收在「查看详情」里。
 - 全部协议为 `unavailable` 时，服务端用同一认证重试一次。`unavailable` 既包括超时/DNS/
   连接失败，也包括 HTTP 5xx 网关错误，二者都走这条重试路径。
@@ -33,6 +36,9 @@
 - `unsupported`/`rejected`/`inconclusive` 不重试，避免用重试掩盖真实的协议或配置问题。
 - 检测进度只按「已完成的模型数/模型总数」统计，不受分类文案影响；`supported` 与
   `rate_limited` 的协议标签照常显示。
+- 协议徽标只有在上方协议结果里没有任何可用协议、且全部失败都是确认的端点缺失
+  （`unsupported`）时才显示「不支持」；存在 `rejected`、`inconclusive`、鉴权失败或服务异常
+  时显示中性的「未确认」。
 
 ## 代码位置
 

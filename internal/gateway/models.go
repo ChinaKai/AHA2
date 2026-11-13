@@ -284,7 +284,7 @@ func ProbeModelCapabilitiesForProviderContext(ctx context.Context, baseURL, anth
 		if line := probeEvidence(candidates[0], status, code, errText); line != "" {
 			evidence = append(evidence, line)
 		}
-		if status == "unsupported" {
+		if anthropicCandidateFallback(status) {
 			for _, candidate := range candidates[1:] {
 				if ctx.Err() != nil {
 					status, errText = "unavailable", ctx.Err().Error()
@@ -302,7 +302,9 @@ func ProbeModelCapabilitiesForProviderContext(ctx context.Context, baseURL, anth
 				if line := probeEvidence(candidate, retriedStatus, retriedCode, retriedErr); line != "" {
 					evidence = append(evidence, line)
 				}
-				if retriedStatus != "unsupported" {
+				// Keep the most diagnostic result instead of letting whichever
+				// candidate ran last rewrite an auth or service failure.
+				if statusRank(retriedStatus) > statusRank(status) {
 					status = retriedStatus
 				}
 			}
@@ -356,6 +358,18 @@ func anthropicBaseCandidates(baseURL, anthropicBaseURL string) []string {
 		add(root + "/anthropic")
 	}
 	return candidates
+}
+
+// anthropicCandidateFallback reports whether a candidate's probe result means
+// "this base URL is probably the wrong or absent entry point", in which case
+// the remaining candidates are still worth probing. A missing route
+// (unsupported: 404/405/501) and an ambiguous rejection (rejected: 400) can
+// both be fixed by another base URL. Unauthorized, unavailable (5xx/timeout),
+// rate_limited, and inconclusive describe the credential or the gateway
+// itself, so they keep the first candidate's verdict instead of multiplying
+// requests and hiding an auth or service problem.
+func anthropicCandidateFallback(status string) bool {
+	return status == "unsupported" || status == "rejected"
 }
 
 // probeEvidence describes one failed probe candidate as "<candidate URL>:
