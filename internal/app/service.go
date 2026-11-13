@@ -115,6 +115,13 @@ type Executor interface {
 	Execute(context.Context, ExecutionRequest, func(ExecutionEvent)) (ExecutionResult, error)
 }
 
+// BackendBinaryResolver is implemented by an Executor that can name the command
+// it will run for a backend. The SSH stdio helper uses it to read a Node
+// backend script's shebang, which is a stronger guarantee than probing PATH.
+type BackendBinaryResolver interface {
+	BackendBinary(backend string) string
+}
+
 type PreparedWorkspace struct {
 	Path         string
 	BaseCommit   string
@@ -222,6 +229,10 @@ type Service struct {
 	// scheduleSnapshotHook is a test seam that runs after scheduleAgent has read
 	// the pending inbox snapshot and before it claims it. Production leaves it nil.
 	scheduleSnapshotHook func()
+	// agentAPIProxyStartFn is the SSH stdio setup seam. Production leaves it nil
+	// and uses the real transport; tests substitute it to exercise the fallback
+	// order without an SSH host.
+	agentAPIProxyStartFn func(context.Context, domain.Workspace, domain.Task, string, string, string, string) (*workspacepkg.AgentAPIProxy, error)
 }
 
 func (s *Service) SetProxyRuntime(runtime ProxyRuntime) {
@@ -1106,7 +1117,15 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 	if workDir == "" {
 		workDir = workspace.RootPath
 	}
-	agentAPISetup, err := s.prepareAgentAPIForTurn(ctx, workspace, task, workDir)
+	snapshot, err := s.store.RuntimeSnapshot(ctx, turn.RuntimeConfigSnapshotID)
+	if err != nil {
+		s.failTurn(ctx, &turn, task, err)
+		return
+	}
+	// The backend command is read before the Agent API setup: when it is a Node
+	// script, its shebang is the proof that the workspace has a node runtime for
+	// the embedded stdio helper.
+	agentAPISetup, err := s.prepareAgentAPIForTurn(ctx, workspace, task, workDir, snapshot.Backend)
 	if err != nil {
 		s.failTurn(ctx, &turn, task, fmt.Errorf("resolve Agent API URL: %w", err))
 		return
@@ -1116,11 +1135,6 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		// The helper is a child of this SSH session; closing it here is what
 		// keeps a finished or failed Turn from leaving a process behind.
 		defer func() { _ = agentAPISetup.Proxy.Close() }()
-	}
-	snapshot, err := s.store.RuntimeSnapshot(ctx, turn.RuntimeConfigSnapshotID)
-	if err != nil {
-		s.failTurn(ctx, &turn, task, err)
-		return
 	}
 	model, unavailable := s.runtimeSnapshotAvailability(ctx, snapshot)
 	if unavailable != "" {

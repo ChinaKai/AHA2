@@ -25,8 +25,10 @@ import (
 // multiplexed stream, so "SSH works" is the only requirement: no sshd setting,
 // no extra listening port on either side, no plaintext on the LAN.
 //
-// The helper is the same aha2 binary invoked as a hidden subcommand, materialised
-// into the workspace's shared context directory.
+// The helper is a single-file Node script embedded in the aha2 executable and
+// materialised into the workspace's shared context directory. A workspace
+// without a usable node falls through to the reverse tunnel and then to the
+// plaintext LAN address, exactly as before the stdio transport existed.
 
 // AgentProxyAttempts bounds how often a failed handshake is retried before the
 // Turn falls back. A transient dial failure is worth one more try; a workspace
@@ -39,9 +41,12 @@ const AgentProxyReadyTimeout = 15 * time.Second
 // AgentAPIProxy is a running stdio tunnel. Its URL is the Agent API base the
 // workspace must use for the duration of the Turn.
 type AgentAPIProxy struct {
-	URL     string
-	Target  string
-	Helper  string
+	URL    string
+	Target string
+	Helper string
+	// Runtime is the helper's runtime ("node" or "exec"), so the caller can
+	// report which layer actually carried the Turn.
+	Runtime string
 	Attempt int
 
 	session    *agentproxy.Session
@@ -75,17 +80,18 @@ func (proxy *AgentAPIProxy) Close() error {
 // Each attempt uses its own SSH connection. A fresh connection is what makes a
 // retry meaningful: a helper that failed to start leaves its session dead, and
 // reusing it would only replay the same failure.
-func StartAgentAPIProxy(ctx context.Context, item domain.Workspace, helperPath, target, scheme string) (*AgentAPIProxy, error) {
+func StartAgentAPIProxy(ctx context.Context, item domain.Workspace, helper AgentProxyHelper, target, scheme string) (*AgentAPIProxy, error) {
 	runner, ok := RunnerFor(item).(*SSHRunner)
 	if !ok || item.Transport != "ssh" {
 		return nil, fmt.Errorf("Agent API stdio 代理仅支持 SSH 工作区")
 	}
-	command := shellQuote(helperPath) + fmt.Sprintf(" agent-proxy --stdio --protocol %d", agentproxy.Protocol)
+	command := helper.Command(agentproxy.Protocol)
 	backoff := 200 * time.Millisecond
 	var lastErr error
 	for attempt := 1; attempt <= AgentProxyAttempts; attempt++ {
-		proxy, err := startAgentAPIProxyOnce(ctx, runner, command, helperPath, target, scheme, attempt)
+		proxy, err := startAgentAPIProxyOnce(ctx, runner, command, helper.Path, target, scheme, attempt)
 		if err == nil {
+			proxy.Runtime = helper.Runtime
 			return proxy, nil
 		}
 		lastErr = err
@@ -155,10 +161,11 @@ func startAgentAPIProxyOnce(ctx context.Context, runner *SSHRunner, command, hel
 		}
 		return nil, err
 	}
-	return &AgentAPIProxy{
+	proxy := &AgentAPIProxy{
 		URL: tunnel.URL, Target: target, Helper: helperPath,
 		Attempt: attempt, session: tunnel, ssh: session, connection: connection,
-	}, nil
+	}
+	return proxy, nil
 }
 
 type cappedBuffer struct {

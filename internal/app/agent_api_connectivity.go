@@ -158,6 +158,10 @@ func (s *Service) DetectWorkspaceAgentAPI(ctx context.Context, item domain.Works
 	failures := make([]string, 0, len(candidates))
 	stages := make([]string, 0, len(candidates))
 	seenStages := map[string]bool{}
+	// keepTunnelFailure makes the rejected tunnel visible even when a later LAN
+	// candidate wins: the fallback log names why the preferred path was not used
+	// instead of only which address was picked.
+	tunnelFailure := ""
 	for _, candidate := range candidates {
 		// Probe the way a Turn will reach it, tunnel included. A bare probe of a
 		// remote workspace's configured loopback address always fails, because that
@@ -175,9 +179,13 @@ func (s *Service) DetectWorkspaceAgentAPI(ctx context.Context, item domain.Works
 			// tunnel — so presenting it as an address the workspace dials would claim
 			// something untrue. The address is kept as-is because the tunnel gate keys
 			// off exactly this loopback form; only the label distinguishes them.
-			item.Capabilities["agent_api"] = map[string]any{
+			reachability := map[string]any{
 				"status": "ready", "url": candidate, "via": agentAPIReachability(item, candidate),
 			}
+			if tunnelFailure != "" {
+				reachability["tunnel_error"] = tunnelFailure
+			}
+			item.Capabilities["agent_api"] = reachability
 			return item
 		}
 		// Name the step that failed (tunnel, LAN plaintext, override). Without this
@@ -185,6 +193,9 @@ func (s *Service) DetectWorkspaceAgentAPI(ctx context.Context, item domain.Works
 		// attempted. The stage summary comes first so truncation cannot hide which
 		// paths were tried. Probe errors never carry the token.
 		label := agentAPIProbeCandidateLabel(item, settings, candidate)
+		if tunnelFailure == "" && label == "隧道" {
+			tunnelFailure = fmt.Sprintf("%s（%s）：%s", label, candidate, truncateAgentAPIError(err.Error()))
+		}
 		if !seenStages[label] {
 			seenStages[label] = true
 			stages = append(stages, label)

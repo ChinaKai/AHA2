@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -29,10 +30,13 @@ import (
 
 // These tests drive the SSH stdio transport against a mock SSH server that
 // executes commands locally. That is the same shape a real workspace has: the
-// exec request runs a shell, and the session channel carries stdin/stdout. The
-// helper in these tests is a wrapper script around this test binary, which runs
-// the real agentproxy helper in a child process — so framing, READY parsing and
-// process lifetime are all exercised rather than simulated.
+// exec request runs a shell, and the session channel carries stdin/stdout.
+//
+// The normal helper is the embedded Node script, so most tests need a real node
+// and skip where it is not installed. The explicit-override path keeps using a
+// wrapper around this test binary, which runs the Go reference helper in a child
+// process — framing, READY parsing and process lifetime are then exercised for
+// both runtimes.
 
 // TestAgentProxyHelperProcess is not a test: it is the helper child process the
 // wrapper script starts. It exits before the testing framework prints anything,
@@ -63,6 +67,15 @@ func TestAgentProxyHelperProcess(t *testing.T) {
 	os.Exit(0)
 }
 
+func requireNode(t *testing.T) string {
+	t.Helper()
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is not installed")
+	}
+	return node
+}
+
 func writeAgentProxyWrapper(t *testing.T, directory, marker string) string {
 	t.Helper()
 	executable, err := os.Executable()
@@ -72,10 +85,12 @@ func writeAgentProxyWrapper(t *testing.T, directory, marker string) string {
 	if err := os.MkdirAll(directory, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// An explicit helper is started directly, so the wrapper speaks the same
+	// contract as the embedded script: `--stdio --protocol N` on argv.
 	script := "#!/bin/sh\n" +
 		"case \"$1\" in\n" +
 		"  version) echo 'aha2 test " + marker + "'; exit 0 ;;\n" +
-		"  agent-proxy) shift; GO_WANT_AGENT_PROXY_HELPER=1 exec '" + executable + "' -test.run=TestAgentProxyHelperProcess -- agent-proxy \"$@\" ;;\n" +
+		"  --stdio) GO_WANT_AGENT_PROXY_HELPER=1 exec '" + executable + "' -test.run=TestAgentProxyHelperProcess -- \"$@\" ;;\n" +
 		"esac\n" +
 		"exit 2\n"
 	path := filepath.Join(directory, "aha2-test-helper")
@@ -202,94 +217,6 @@ func agentProxyTestWorkspace(host string, port int) domain.Workspace {
 	}
 }
 
-func TestAgentProxyHelperMaterializesAndReuses(t *testing.T) {
-	host, port := startExecSSHServer(t)
-	workspace := agentProxyTestWorkspace(host, port)
-	workDir := t.TempDir()
-	helperSource := writeAgentProxyWrapper(t, t.TempDir(), "v1")
-	t.Setenv(agentProxyHelperOverride, helperSource)
-
-	helper, err := EnsureAgentProxyHelper(context.Background(), workspace, workDir, "task-1", "1.0.0")
-	if err != nil {
-		t.Fatalf("ensure helper: %v", err)
-	}
-	shareDir := filepath.Join(workDir, ".aha2-context", "share", "agent-proxy")
-	if filepath.Dir(helper.Path) != shareDir {
-		t.Fatalf("helper path = %s, want under %s", helper.Path, shareDir)
-	}
-	if helper.Note != "" {
-		t.Fatalf("shared directory reported a fallback: %s", helper.Note)
-	}
-	info, err := os.Stat(helper.Path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0o700 {
-		t.Fatalf("helper mode = %v, want 0700", info.Mode().Perm())
-	}
-	manifest := readTestManifest(t, filepath.Join(shareDir, "manifest.json"))
-	if manifest.Protocol != agentproxy.Protocol || manifest.Version != "1.0.0" || manifest.OS != "linux" {
-		t.Fatalf("manifest = %#v", manifest)
-	}
-
-	// Reuse: the second ensure must not upload again, so the file's mtime and
-	// the manifest stay untouched.
-	before := info.ModTime()
-	again, err := EnsureAgentProxyHelper(context.Background(), workspace, workDir, "task-2", "1.0.0")
-	if err != nil {
-		t.Fatalf("second ensure: %v", err)
-	}
-	if again.Path != helper.Path {
-		t.Fatalf("reuse picked %s, want %s", again.Path, helper.Path)
-	}
-	after, err := os.Stat(helper.Path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !after.ModTime().Equal(before) {
-		t.Fatalf("helper was rewritten on reuse: %s -> %s", before, after.ModTime())
-	}
-
-	// A new version uploads a new file and prunes anything older than the one
-	// generation kept for already running processes.
-	upgraded := writeAgentProxyWrapper(t, t.TempDir(), "v2")
-	t.Setenv(agentProxyHelperOverride, upgraded)
-	third, err := EnsureAgentProxyHelper(context.Background(), workspace, workDir, "task-3", "2.0.0")
-	if err != nil {
-		t.Fatalf("upgrade ensure: %v", err)
-	}
-	if third.Path == helper.Path {
-		t.Fatal("upgrade reused the old binary")
-	}
-	entries, err := os.ReadDir(shareDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var binaries []string
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), agentProxyBinaryPrefix) {
-			binaries = append(binaries, entry.Name())
-		}
-	}
-	// Current plus the generation it replaced: an old helper that is still
-	// running keeps its inode, and anything older than that is dropped.
-	if len(binaries) != 2 {
-		t.Fatalf("share directory kept %v, want the current and previous helper", binaries)
-	}
-	foundCurrent := false
-	for _, name := range binaries {
-		if name == filepath.Base(third.Path) {
-			foundCurrent = true
-		}
-	}
-	if !foundCurrent {
-		t.Fatalf("share directory does not contain %s: %v", filepath.Base(third.Path), binaries)
-	}
-	if manifest := readTestManifest(t, filepath.Join(shareDir, "manifest.json")); manifest.Version != "2.0.0" {
-		t.Fatalf("manifest version = %s, want 2.0.0", manifest.Version)
-	}
-}
-
 func readTestManifest(t *testing.T, path string) agentProxyManifest {
 	t.Helper()
 	content, err := os.ReadFile(path)
@@ -308,11 +235,115 @@ func testSHA256(content []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func TestAgentProxyHelperConcurrentEnsure(t *testing.T) {
+func agentProxyShareDir(workDir string) string {
+	return filepath.Join(workDir, ".aha2-context", "share", "agent-proxy")
+}
+
+// TestAgentProxyNodeHelperMaterializesAndReuses pins the new artifact: the
+// manifest records runtime=node, the uploaded file is the embedded script with
+// the digest the manifest promises, and a second ensure does not rewrite it.
+func TestAgentProxyNodeHelperMaterializesAndReuses(t *testing.T) {
+	requireNode(t)
 	host, port := startExecSSHServer(t)
 	workspace := agentProxyTestWorkspace(host, port)
 	workDir := t.TempDir()
-	t.Setenv(agentProxyHelperOverride, writeAgentProxyWrapper(t, t.TempDir(), "v1"))
+	t.Setenv(agentProxyHelperOverride, "")
+
+	helper, err := EnsureAgentProxyHelper(context.Background(), workspace, workDir, "task-1", "1.0.0", "")
+	if err != nil {
+		t.Fatalf("ensure helper: %v", err)
+	}
+	if helper.Runtime != agentproxy.NodeHelperRuntime {
+		t.Fatalf("runtime = %q, want node", helper.Runtime)
+	}
+	if !strings.HasSuffix(helper.Path, ".js") {
+		t.Fatalf("helper path = %s, want a .js script", helper.Path)
+	}
+	if filepath.Dir(helper.Path) != agentProxyShareDir(workDir) {
+		t.Fatalf("helper path = %s, want under %s", helper.Path, agentProxyShareDir(workDir))
+	}
+	if helper.Note != "" {
+		t.Fatalf("shared directory reported a fallback: %s", helper.Note)
+	}
+	info, err := os.Stat(helper.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o700 {
+		t.Fatalf("helper mode = %v, want 0700", info.Mode().Perm())
+	}
+	script, digest := agentproxy.NodeHelper()
+	content, err := os.ReadFile(helper.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(content, script) {
+		t.Fatal("uploaded helper is not the embedded script")
+	}
+	if got := testSHA256(content); got != digest {
+		t.Fatalf("uploaded digest = %s, want %s", got, digest)
+	}
+	manifest := readTestManifest(t, filepath.Join(agentProxyShareDir(workDir), agentProxyManifestName))
+	if manifest.Protocol != agentproxy.Protocol || manifest.Version != "1.0.0" || manifest.Runtime != agentproxy.NodeHelperRuntime {
+		t.Fatalf("manifest = %#v", manifest)
+	}
+	if manifest.SHA256 != digest {
+		t.Fatalf("manifest sha = %s, want %s", manifest.SHA256, digest)
+	}
+
+	// Reuse: the second ensure must not upload again, so the file's mtime and
+	// the manifest stay untouched.
+	before := info.ModTime()
+	again, err := EnsureAgentProxyHelper(context.Background(), workspace, workDir, "task-2", "1.0.0", "")
+	if err != nil {
+		t.Fatalf("second ensure: %v", err)
+	}
+	if again.Path != helper.Path {
+		t.Fatalf("reuse picked %s, want %s", again.Path, helper.Path)
+	}
+	after, err := os.Stat(helper.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.ModTime().Equal(before) {
+		t.Fatalf("helper was rewritten on reuse: %s -> %s", before, after.ModTime())
+	}
+
+	// A new version uploads a new file and prunes anything older than the one
+	// generation kept for already running processes.
+	third, err := EnsureAgentProxyHelper(context.Background(), workspace, workDir, "task-3", "2.0.0", "")
+	if err != nil {
+		t.Fatalf("upgrade ensure: %v", err)
+	}
+	if third.Path == helper.Path {
+		t.Fatal("upgrade reused the old script")
+	}
+	entries, err := os.ReadDir(agentProxyShareDir(workDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var scripts []string
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), agentProxyScriptPrefix) {
+			scripts = append(scripts, entry.Name())
+		}
+	}
+	// Current plus the generation it replaced: an old helper that is still
+	// running keeps its inode, and anything older than that is dropped.
+	if len(scripts) != 2 {
+		t.Fatalf("share directory kept %v, want the current and previous helper", scripts)
+	}
+	if manifest := readTestManifest(t, filepath.Join(agentProxyShareDir(workDir), agentProxyManifestName)); manifest.Version != "2.0.0" {
+		t.Fatalf("manifest version = %s, want 2.0.0", manifest.Version)
+	}
+}
+
+func TestAgentProxyNodeHelperConcurrentEnsure(t *testing.T) {
+	requireNode(t)
+	host, port := startExecSSHServer(t)
+	workspace := agentProxyTestWorkspace(host, port)
+	workDir := t.TempDir()
+	t.Setenv(agentProxyHelperOverride, "")
 
 	const parallel = 4
 	paths := make([]string, parallel)
@@ -322,7 +353,7 @@ func TestAgentProxyHelperConcurrentEnsure(t *testing.T) {
 	for index := 0; index < parallel; index++ {
 		go func(index int) {
 			defer wait.Done()
-			helper, err := EnsureAgentProxyHelper(context.Background(), workspace, workDir, "task-"+strconv.Itoa(index), "1.0.0")
+			helper, err := EnsureAgentProxyHelper(context.Background(), workspace, workDir, "task-"+strconv.Itoa(index), "1.0.0", "")
 			paths[index], errs[index] = helper.Path, err
 		}(index)
 	}
@@ -335,7 +366,7 @@ func TestAgentProxyHelperConcurrentEnsure(t *testing.T) {
 			t.Fatalf("concurrent ensures disagreed: %s vs %s", paths[index], paths[0])
 		}
 	}
-	manifest := readTestManifest(t, filepath.Join(filepath.Dir(paths[0]), "manifest.json"))
+	manifest := readTestManifest(t, filepath.Join(filepath.Dir(paths[0]), agentProxyManifestName))
 	if manifest.SHA256 == "" {
 		t.Fatal("manifest lost its digest")
 	}
@@ -351,10 +382,11 @@ func TestAgentProxyHelperConcurrentEnsure(t *testing.T) {
 }
 
 func TestAgentProxyEndToEndCarriesHTTP(t *testing.T) {
+	requireNode(t)
 	host, port := startExecSSHServer(t)
 	workspace := agentProxyTestWorkspace(host, port)
 	workDir := t.TempDir()
-	t.Setenv(agentProxyHelperOverride, writeAgentProxyWrapper(t, t.TempDir(), "v1"))
+	t.Setenv(agentProxyHelperOverride, "")
 
 	target := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		_, _ = io.WriteString(w, `{"service":"aha2","path":"`+request.URL.Path+`"}`)
@@ -367,15 +399,18 @@ func TestAgentProxyEndToEndCarriesHTTP(t *testing.T) {
 	go func() { _ = target.Serve(listener) }()
 	defer target.Close()
 
-	helper, err := EnsureAgentProxyHelper(context.Background(), workspace, workDir, "task-1", "1.0.0")
+	helper, err := EnsureAgentProxyHelper(context.Background(), workspace, workDir, "task-1", "1.0.0", "")
 	if err != nil {
 		t.Fatalf("ensure helper: %v", err)
 	}
-	proxy, err := StartAgentAPIProxy(context.Background(), workspace, helper.Path, listener.Addr().String(), "http")
+	proxy, err := StartAgentAPIProxy(context.Background(), workspace, helper, listener.Addr().String(), "http")
 	if err != nil {
 		t.Fatalf("start proxy: %v", err)
 	}
 	defer proxy.Close()
+	if proxy.Runtime != agentproxy.NodeHelperRuntime {
+		t.Fatalf("proxy runtime = %q, want node", proxy.Runtime)
+	}
 	if !strings.HasPrefix(proxy.URL, "http://127.0.0.1:") {
 		t.Fatalf("proxy URL = %q", proxy.URL)
 	}
@@ -408,7 +443,8 @@ func TestAgentProxyStartFailsWithoutHelper(t *testing.T) {
 	host, port := startExecSSHServer(t)
 	workspace := agentProxyTestWorkspace(host, port)
 	start := time.Now()
-	_, err := StartAgentAPIProxy(context.Background(), workspace, "/nonexistent/aha2-agent-proxy", "127.0.0.1:1", "http")
+	helper := AgentProxyHelper{Path: "/nonexistent/aha2-agent-proxy", Runtime: agentProxyRuntimeExec}
+	_, err := StartAgentAPIProxy(context.Background(), workspace, helper, "127.0.0.1:1", "http")
 	if err == nil {
 		t.Fatal("starting a missing helper succeeded")
 	}
@@ -422,12 +458,13 @@ func TestAgentProxyStartFailsWithoutHelper(t *testing.T) {
 }
 
 func TestAgentProxyCleanupKeepsSharedDirectory(t *testing.T) {
+	requireNode(t)
 	host, port := startExecSSHServer(t)
 	workspace := agentProxyTestWorkspace(host, port)
 	workDir := t.TempDir()
-	t.Setenv(agentProxyHelperOverride, writeAgentProxyWrapper(t, t.TempDir(), "v1"))
+	t.Setenv(agentProxyHelperOverride, "")
 
-	helper, err := EnsureAgentProxyHelper(context.Background(), workspace, workDir, "task-1", "1.0.0")
+	helper, err := EnsureAgentProxyHelper(context.Background(), workspace, workDir, "task-1", "1.0.0", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -446,29 +483,51 @@ func TestAgentProxyCleanupKeepsSharedDirectory(t *testing.T) {
 	}
 }
 
-// TestAgentProxyExplicitHelperSkipsTheArchitectureCheck covers the Windows-host
-// case: the AHA process platform says nothing about a helper the operator built
-// for the workspace, so an explicit helper must not be rejected for "mismatch".
-func TestAgentProxyExplicitHelperSkipsTheArchitectureCheck(t *testing.T) {
+// TestAgentProxyExplicitOverrideUsesExecRuntime covers the retained
+// AHA2_AGENT_PROXY_HELPER path: the supplied file is uploaded, recorded as
+// runtime=exec, and run directly without any node probe.
+func TestAgentProxyExplicitOverrideUsesExecRuntime(t *testing.T) {
 	host, port := startExecSSHServer(t)
 	workspace := agentProxyTestWorkspace(host, port)
-	// A platform this process is definitely not running on.
-	remoteArch := "arm64"
-	if runtime.GOARCH == "arm64" {
-		remoteArch = "amd64"
-	}
-	workspace.Platform = "linux/" + remoteArch
 	workDir := t.TempDir()
 	t.Setenv(agentProxyHelperOverride, writeAgentProxyWrapper(t, t.TempDir(), "v1"))
 
-	helper, err := EnsureAgentProxyHelper(context.Background(), workspace, workDir, "task-1", "1.0.0")
+	helper, err := EnsureAgentProxyHelper(context.Background(), workspace, workDir, "task-1", "1.0.0", "")
 	if err != nil {
 		t.Fatalf("explicit helper was rejected: %v", err)
 	}
-	manifest := readTestManifest(t, filepath.Join(filepath.Dir(helper.Path), "manifest.json"))
-	if manifest.Arch != remoteArch || manifest.OS != "linux" {
-		t.Fatalf("manifest platform = %s/%s, want linux/%s", manifest.OS, manifest.Arch, remoteArch)
+	if helper.Runtime != agentProxyRuntimeExec {
+		t.Fatalf("runtime = %q, want exec", helper.Runtime)
 	}
+	if strings.HasSuffix(helper.Path, ".js") {
+		t.Fatalf("explicit helper was uploaded as a script: %s", helper.Path)
+	}
+	manifest := readTestManifest(t, filepath.Join(filepath.Dir(helper.Path), agentProxyManifestName))
+	if manifest.Runtime != agentProxyRuntimeExec || manifest.Protocol != agentproxy.Protocol {
+		t.Fatalf("manifest = %#v", manifest)
+	}
+
+	target := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		_, _ = io.WriteString(w, `{"service":"aha2"}`)
+	})}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() { _ = target.Serve(listener) }()
+	defer target.Close()
+
+	proxy, err := StartAgentAPIProxy(context.Background(), workspace, helper, listener.Addr().String(), "http")
+	if err != nil {
+		t.Fatalf("start proxy: %v", err)
+	}
+	defer proxy.Close()
+	response, err := (&http.Client{Timeout: 10 * time.Second}).Get(proxy.URL + "/healthz")
+	if err != nil {
+		t.Fatalf("GET through override: %v", err)
+	}
+	response.Body.Close()
 }
 
 // TestAgentProxyManifestReadRejectsOversizedFile calls the reader directly with
@@ -484,7 +543,7 @@ func TestAgentProxyManifestReadRejectsOversizedFile(t *testing.T) {
 	runner := RunnerFor(workspace)
 
 	// Control: a normal manifest reads back, so a failure below is about size.
-	small := `{"protocol":1,"version":"1.0.0","os":"linux","arch":"amd64","sha256":"abc","updated_at":"2026-01-01T00:00:00Z"}`
+	small := `{"protocol":1,"version":"1.0.0","runtime":"node","sha256":"abc","updated_at":"2026-01-01T00:00:00Z"}`
 	if err := os.WriteFile(filepath.Join(directory, agentProxyManifestName), []byte(small), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -493,7 +552,7 @@ func TestAgentProxyManifestReadRejectsOversizedFile(t *testing.T) {
 		t.Fatalf("small manifest read = %#v err=%v", parsed, err)
 	}
 
-	oversized := `{"protocol":1,"version":"1.0.0","os":"linux","arch":"amd64","sha256":"` +
+	oversized := `{"protocol":1,"version":"1.0.0","runtime":"node","sha256":"` +
 		strings.Repeat("x", agentProxyManifestLimit) + `","updated_at":"2026-01-01T00:00:00Z"}`
 	if len(oversized) <= agentProxyManifestLimit {
 		t.Fatalf("fixture is only %d bytes", len(oversized))
@@ -515,12 +574,13 @@ func TestAgentProxyManifestReadRejectsOversizedFile(t *testing.T) {
 // limit: whatever the manifest contains, ensure must still leave a usable helper
 // behind.
 func TestAgentProxyEnsureOverwritesACorruptManifest(t *testing.T) {
+	requireNode(t)
 	host, port := startExecSSHServer(t)
 	workspace := agentProxyTestWorkspace(host, port)
 	workDir := t.TempDir()
-	t.Setenv(agentProxyHelperOverride, writeAgentProxyWrapper(t, t.TempDir(), "v1"))
+	t.Setenv(agentProxyHelperOverride, "")
 
-	shareDir := filepath.Join(workDir, ".aha2-context", "share", "agent-proxy")
+	shareDir := agentProxyShareDir(workDir)
 	if err := os.MkdirAll(shareDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -528,22 +588,22 @@ func TestAgentProxyEnsureOverwritesACorruptManifest(t *testing.T) {
 	for index := range oversized {
 		oversized[index] = 'x'
 	}
-	if err := os.WriteFile(filepath.Join(shareDir, "manifest.json"), oversized, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(shareDir, agentProxyManifestName), oversized, 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	helper, err := EnsureAgentProxyHelper(context.Background(), workspace, workDir, "task-1", "1.0.0")
+	helper, err := EnsureAgentProxyHelper(context.Background(), workspace, workDir, "task-1", "1.0.0", "")
 	if err != nil {
 		t.Fatalf("ensure over an oversized manifest: %v", err)
 	}
-	content, err := os.ReadFile(filepath.Join(shareDir, "manifest.json"))
+	content, err := os.ReadFile(filepath.Join(shareDir, agentProxyManifestName))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(content) > agentProxyManifestLimit {
 		t.Fatalf("manifest was not replaced: %d bytes", len(content))
 	}
-	if manifest := readTestManifest(t, filepath.Join(shareDir, "manifest.json")); manifest.Version != "1.0.0" {
+	if manifest := readTestManifest(t, filepath.Join(shareDir, agentProxyManifestName)); manifest.Version != "1.0.0" {
 		t.Fatalf("manifest version = %q", manifest.Version)
 	}
 	if filepath.Dir(helper.Path) != shareDir {
@@ -555,10 +615,11 @@ func TestAgentProxyEnsureOverwritesACorruptManifest(t *testing.T) {
 // lifetime: it lives inside the Task scratch, so closing the Task removes it
 // instead of leaving one helper copy per Task behind.
 func TestAgentProxyFallbackDirectoryIsCleanedWithTaskScratch(t *testing.T) {
+	requireNode(t)
 	host, port := startExecSSHServer(t)
 	workspace := agentProxyTestWorkspace(host, port)
 	workDir := t.TempDir()
-	t.Setenv(agentProxyHelperOverride, writeAgentProxyWrapper(t, t.TempDir(), "v1"))
+	t.Setenv(agentProxyHelperOverride, "")
 
 	// A regular file where the shared directory's parent must be makes the
 	// shared candidate fail deterministically, even for a privileged user.
@@ -571,7 +632,7 @@ func TestAgentProxyFallbackDirectoryIsCleanedWithTaskScratch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	helper, err := EnsureAgentProxyHelper(context.Background(), workspace, workDir, "task-1", "1.0.0")
+	helper, err := EnsureAgentProxyHelper(context.Background(), workspace, workDir, "task-1", "1.0.0", "")
 	if err != nil {
 		t.Fatalf("ensure with an unusable shared directory: %v", err)
 	}
@@ -591,5 +652,116 @@ func TestAgentProxyFallbackDirectoryIsCleanedWithTaskScratch(t *testing.T) {
 	}
 	if _, err := os.Stat(shareSentinel); err != nil {
 		t.Fatalf("Task cleanup touched the shared path: %v", err)
+	}
+}
+
+// runAgentProxyNodeProbe runs the real detection script with an exact PATH, so
+// the shebang/PATH precedence is tested without depending on the test machine.
+func runAgentProxyNodeProbe(t *testing.T, path, backend string) (string, string, int) {
+	t.Helper()
+	shell, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh is not available")
+	}
+	command := exec.Command(shell, "-c", agentProxyNodeProbeScript, "aha2-agent-proxy-node", backend)
+	command.Env = []string{"PATH=" + path}
+	var stdout, stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	err = command.Run()
+	if err == nil {
+		return stdout.String(), stderr.String(), 0
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("run probe: %v", err)
+	}
+	return stdout.String(), stderr.String(), exitErr.ExitCode()
+}
+
+func writeExecutable(t *testing.T, directory, name string) string {
+	t.Helper()
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, name)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// nodeProbePath builds the exact PATH for a probe run: the tools the script
+// itself calls plus, optionally, a node binary.
+func nodeProbePath(t *testing.T, nodePath string) string {
+	t.Helper()
+	directory := t.TempDir()
+	for _, tool := range []string{"head", "basename"} {
+		resolved, err := exec.LookPath(tool)
+		if err != nil {
+			t.Skipf("%s is not available", tool)
+		}
+		if err := os.Symlink(resolved, filepath.Join(directory, tool)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if nodePath != "" {
+		if err := os.Symlink(nodePath, filepath.Join(directory, "node")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return directory
+}
+
+// TestAgentProxyNodeProbePrefersBackendShebang is the hard guarantee: a Node
+// backend script is already running in the workspace, so its interpreter wins
+// over whatever `node` happens to be on PATH.
+func TestAgentProxyNodeProbePrefersBackendShebang(t *testing.T) {
+	shebangDir := t.TempDir()
+	shebangNode := writeExecutable(t, shebangDir, "node")
+	pathNode := writeExecutable(t, t.TempDir(), "node")
+	pathDir := nodeProbePath(t, pathNode)
+	backend := filepath.Join(t.TempDir(), "codex")
+	if err := os.WriteFile(backend, []byte("#!"+shebangNode+"\nconsole.log('backend')\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, code := runAgentProxyNodeProbe(t, pathDir, backend)
+	if code != 0 {
+		t.Fatalf("probe exit = %d, stderr = %q", code, stderr)
+	}
+	if strings.TrimSpace(stdout) != shebangNode {
+		t.Fatalf("interpreter = %q, want the backend shebang %q (PATH node was %q)", stdout, shebangNode, pathNode)
+	}
+}
+
+// TestAgentProxyNodeProbeFallsBackToPath covers a backend that is not a Node
+// script: the workspace's own `node` is used.
+func TestAgentProxyNodeProbeFallsBackToPath(t *testing.T) {
+	pathNode := writeExecutable(t, t.TempDir(), "node")
+	pathDir := nodeProbePath(t, pathNode)
+	backend := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(backend, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, code := runAgentProxyNodeProbe(t, pathDir, backend)
+	if code != 0 {
+		t.Fatalf("probe exit = %d, stderr = %q", code, stderr)
+	}
+	if want := filepath.Join(pathDir, "node"); strings.TrimSpace(stdout) != want {
+		t.Fatalf("interpreter = %q, want PATH node %q", stdout, want)
+	}
+}
+
+// TestAgentProxyNodeProbeReportsWhyNodeIsMissing keeps the node layer's failure
+// from being silent: the caller logs this text before falling back.
+func TestAgentProxyNodeProbeReportsWhyNodeIsMissing(t *testing.T) {
+	_, stderr, code := runAgentProxyNodeProbe(t, nodeProbePath(t, ""), "/usr/local/bin/codex")
+	if code == 0 {
+		t.Fatal("probe succeeded without node")
+	}
+	if !strings.Contains(stderr, "没有 node") || !strings.Contains(stderr, "/usr/local/bin/codex") {
+		t.Fatalf("stderr = %q, want the missing-node reason naming the backend", stderr)
 	}
 }

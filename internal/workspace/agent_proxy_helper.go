@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,8 +10,6 @@ import (
 	"io"
 	"os"
 	"path"
-	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,87 +19,120 @@ import (
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
-// The helper is this same aha2 binary: the hidden "agent-proxy" subcommand is
-// the workspace side of the tunnel. Materialising it under the workspace's
-// shared context means many Tasks reuse one upload, and a running helper keeps
-// working if a newer upload replaces the file (POSIX rename keeps the inode).
+// The helper is a single-file Node script embedded in this executable. It is
+// uploaded into the workspace's shared context, so many Tasks reuse one upload,
+// and a running helper keeps working if a newer upload replaces the file (the
+// running process already read the script). No prebuilt binary is shipped for
+// any platform: the only requirement is that the workspace has a usable node.
 
 const (
 	agentProxyShareDirectory = "share"
 	agentProxyDirectoryName  = "agent-proxy"
 	agentProxyManifestName   = "manifest.json"
-	agentProxyBinaryPrefix   = "aha2-agent-proxy"
-	// agentProxyBundleDirectoryName is the directory next to the installed
-	// aha2 executable that carries helpers for workspaces whose platform is not
-	// the host's. The release packages it, so a Windows installation can serve
-	// a Linux workspace without an operator-supplied binary.
-	agentProxyBundleDirectoryName = "agent-proxy"
-	// The bundle manifest lists one entry per platform. It is local to the
-	// installation, but its size is still bounded: a malformed file must be
-	// rejected before it is buffered.
-	agentProxyBundleManifestLimit = 16 * 1024
+	// agentProxyScriptPrefix is also the prefix the upload script prunes, so a
+	// prebuilt helper left by an older AHA2 release is removed on upgrade.
+	agentProxyScriptPrefix = "aha2-agent-proxy"
 	// agentProxyManifestLimit bounds the manifest read. A real manifest is a
 	// few hundred bytes; anything larger is not one, and must be refused before
 	// it is buffered rather than parsed.
 	agentProxyManifestLimit = 4096
-	// agentProxyHelperOverride points at a prebuilt helper. It still wins over
-	// everything else for cross-architecture hosts and tests.
+	// agentProxyHelperOverride points at a prebuilt helper to upload instead of
+	// the embedded script. It stays first for operators who need a custom
+	// runtime; without it the helper is always the embedded Node script.
 	agentProxyHelperOverride = "AHA2_AGENT_PROXY_HELPER"
+	// agentProxyRuntimeExec marks an explicitly supplied executable, which the
+	// workspace runs directly rather than through an interpreter.
+	agentProxyRuntimeExec = "exec"
 )
 
-// AgentProxyHelper is a materialised helper executable on a workspace.
+// AgentProxyHelper is a materialised helper on a workspace.
 type AgentProxyHelper struct {
 	Path string
+	// Runtime is agentproxy.NodeHelperRuntime for the embedded script, which is
+	// started as `<Interpreter> <Path>`, or agentProxyRuntimeExec for an
+	// operator-supplied executable started directly.
+	Runtime string
+	// Interpreter is the workspace-side node binary that runs Path when Runtime
+	// is "node".
+	Interpreter string
 	// Note explains a fallback location, so the Turn log says why the shared
 	// directory was not used instead of leaving it to be guessed.
 	Note string
 }
 
+func (helper AgentProxyHelper) Command(protocol int) string {
+	if helper.Runtime == agentproxy.NodeHelperRuntime {
+		return shellQuote(helper.Interpreter) + " " + shellQuote(helper.Path) +
+			" --stdio --protocol " + strconv.Itoa(protocol)
+	}
+	return shellQuote(helper.Path) + " --stdio --protocol " + strconv.Itoa(protocol)
+}
+
 type agentProxyManifest struct {
 	Protocol  int    `json:"protocol"`
 	Version   string `json:"version"`
-	OS        string `json:"os"`
-	Arch      string `json:"arch"`
+	Runtime   string `json:"runtime"`
 	SHA256    string `json:"sha256"`
 	UpdatedAt string `json:"updated_at"`
 }
 
-// EnsureAgentProxyHelper makes sure a runnable helper exists and returns its
-// workspace path.
+// agentProxySource is what gets uploaded: the embedded script or an explicitly
+// supplied helper file. The digest is computed once per process, because it is
+// compared with the workspace manifest on every Turn.
+type agentProxySource struct {
+	runtime     string
+	sha256      string
+	extension   string
+	interpreter string
+	open        func() (io.ReadCloser, error)
+}
+
+// EnsureAgentProxyHelper makes sure a runnable helper exists and returns it.
 //
-// The shared directory is tried first. A workspace that cannot be written to,
-// or that mounts the directory noexec, falls back to the per-Task context and
-// then to the system temp directory; each fallback is reported in Note rather
-// than silently degrading.
-func EnsureAgentProxyHelper(ctx context.Context, item domain.Workspace, workDir, taskID, version string) (AgentProxyHelper, error) {
+// The selection order is part of the contract, and every rejected fallback is
+// reported in the returned error rather than silently skipped:
+//
+//  1. AHA2_AGENT_PROXY_HELPER, when set, is uploaded and executed directly.
+//  2. Otherwise the embedded Node script is used, but only after the workspace
+//     proves it has a node binary: a node-script backend's shebang is a hard
+//     guarantee, `command -v node` is the fallback.
+//
+// If neither can be prepared the caller logs this error and falls back to the
+// reverse tunnel and then the LAN address.
+func EnsureAgentProxyHelper(ctx context.Context, item domain.Workspace, workDir, taskID, version, backend string) (AgentProxyHelper, error) {
 	if IsWindowsWorkspace(item) {
 		return AgentProxyHelper{}, fmt.Errorf("Agent API stdio 代理暂不支持 Windows 工作区")
 	}
 	runner := RunnerFor(item)
-	remoteOS, remoteArch, err := agentProxyRemotePlatform(ctx, runner)
+	if override := strings.TrimSpace(os.Getenv(agentProxyHelperOverride)); override != "" {
+		source, err := agentProxyExecSource(override)
+		if err != nil {
+			return AgentProxyHelper{}, fmt.Errorf("%s=%s：%w", agentProxyHelperOverride, override, err)
+		}
+		return ensureAgentProxy(ctx, item, runner, workDir, taskID, version, source)
+	}
+	interpreter, err := detectAgentProxyNode(ctx, runner, backend)
 	if err != nil {
-		return AgentProxyHelper{}, err
+		return AgentProxyHelper{}, fmt.Errorf("Node helper 不可用：%w", err)
 	}
-	source, err := agentProxySourceBinary(remoteOS, remoteArch)
-	if err != nil {
-		return AgentProxyHelper{}, err
-	}
-	// An explicit or bundled helper was chosen for this workspace's platform
-	// already, so it is not compared with the AHA process. Only the running aha2
-	// executable inherits its platform from this process; the `version` probe
-	// below still proves the chosen binary runs on this workspace.
-	if !source.explicit && !source.bundled && (remoteOS != source.os || remoteArch != source.arch) {
-		return AgentProxyHelper{}, fmt.Errorf(
-			"helper 架构不匹配：本机 %s/%s，工作区 %s/%s；可通过 %s 指定预编译的 Linux helper",
-			source.os, source.arch, remoteOS, remoteArch, agentProxyHelperOverride,
-		)
-	}
-	targetName := agentProxyBinaryName(version, source.sha256)
+	script, digest := agentproxy.NodeHelper()
+	return ensureAgentProxy(ctx, item, runner, workDir, taskID, version, agentProxySource{
+		runtime:     agentproxy.NodeHelperRuntime,
+		sha256:      digest,
+		extension:   ".js",
+		interpreter: interpreter,
+		open: func() (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader(script)), nil
+		},
+	})
+}
+
+func ensureAgentProxy(ctx context.Context, item domain.Workspace, runner Runner, workDir, taskID, version string, source agentProxySource) (AgentProxyHelper, error) {
+	targetName := agentProxyHelperName(version, source.sha256, source.extension)
 	manifest := agentProxyManifest{
 		Protocol:  agentproxy.Protocol,
 		Version:   version,
-		OS:        remoteOS,
-		Arch:      remoteArch,
+		Runtime:   source.runtime,
 		SHA256:    source.sha256,
 		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
@@ -128,7 +160,7 @@ func EnsureAgentProxyHelper(ctx context.Context, item domain.Workspace, workDir,
 			failures = append(failures, fmt.Sprintf("%s：%v", entry.dir, err))
 			continue
 		}
-		if err := probeAgentProxyHelper(ctx, runner, helperPath); err != nil {
+		if err := probeAgentProxyHelper(ctx, runner, helperPath, source); err != nil {
 			failures = append(failures, fmt.Sprintf("%s：%v", helperPath, err))
 			continue
 		}
@@ -136,205 +168,20 @@ func EnsureAgentProxyHelper(ctx context.Context, item domain.Workspace, workDir,
 		if len(failures) > 0 {
 			note = strings.Join(append([]string{note}, failures...), "；")
 		}
-		return AgentProxyHelper{Path: helperPath, Note: note}, nil
+		return AgentProxyHelper{
+			Path: helperPath, Runtime: source.runtime,
+			Interpreter: source.interpreter, Note: note,
+		}, nil
 	}
 	return AgentProxyHelper{}, fmt.Errorf("无法在工作区放置 Agent API helper：%s", strings.Join(failures, "；"))
 }
 
-func agentProxyBinaryName(version, digest string) string {
+func agentProxyHelperName(version, digest, extension string) string {
 	short := digest
 	if len(short) > 8 {
 		short = short[:8]
 	}
-	return fmt.Sprintf("%s-%s-%s", agentProxyBinaryPrefix, sanitizeAgentProxyVersion(version), short)
-}
-
-type agentProxySource struct {
-	path   string
-	sha256 string
-	os     string
-	arch   string
-	size   int64
-	// explicit marks a binary supplied through AHA2_AGENT_PROXY_HELPER. Its
-	// platform is whatever the operator built, so it is recorded as the
-	// workspace's platform instead of being compared with this process.
-	explicit bool
-	// bundled marks a helper shipped in the installation's agent-proxy
-	// directory. Its platform comes from the bundle manifest entry that matched
-	// the workspace, so it is also not compared with this process.
-	bundled bool
-}
-
-var agentProxySourceCache struct {
-	sync.Mutex
-	key    string
-	source agentProxySource
-}
-
-// Indirections for tests: production always asks the running process and the
-// host it is on, but the Windows-host/Linux-workspace combination cannot be
-// produced on a Linux test runner without substituting both.
-var (
-	agentProxyExecutablePath = os.Executable
-	agentProxyHostPlatform   = func() (string, string) { return runtime.GOOS, runtime.GOARCH }
-)
-
-// agentProxyBundleManifest is the installation-side manifest listing helpers
-// built for other platforms. It is written by scripts/build-agent-proxy-helpers.sh.
-type agentProxyBundleManifest struct {
-	Protocol int                      `json:"protocol"`
-	Version  string                   `json:"version"`
-	Helpers  []agentProxyBundleHelper `json:"helpers"`
-}
-
-type agentProxyBundleHelper struct {
-	OS     string `json:"os"`
-	Arch   string `json:"arch"`
-	File   string `json:"file"`
-	SHA256 string `json:"sha256"`
-}
-
-// agentProxySourceBinary picks the binary to upload for one workspace platform.
-//
-// The running executable is the normal source only when the workspace runs on
-// the same OS and architecture. A Windows installation serving a Linux workspace
-// cannot copy aha2.exe there, so it falls back to the packaged helper for that
-// platform. The environment override stays first for operators who need it.
-func agentProxySourceBinary(remoteOS, remoteArch string) (agentProxySource, error) {
-	hostOS, hostArch := agentProxyHostPlatform()
-	executable := ""
-	if strings.TrimSpace(os.Getenv(agentProxyHelperOverride)) == "" {
-		resolved, err := agentProxyExecutablePath()
-		if err != nil {
-			return agentProxySource{}, fmt.Errorf("定位当前 aha2 可执行文件：%w", err)
-		}
-		executable = resolved
-	}
-	return agentProxyResolveSource(hostOS, hostArch, executable, remoteOS, remoteArch)
-}
-
-func agentProxyResolveSource(hostOS, hostArch, executable, remoteOS, remoteArch string) (agentProxySource, error) {
-	if override := strings.TrimSpace(os.Getenv(agentProxyHelperOverride)); override != "" {
-		// Taken at the operator's word: its platform is recorded as the
-		// workspace's platform rather than compared with this process.
-		return agentProxySourceAt(override, remoteOS, remoteArch, true, false)
-	}
-	if hostOS == remoteOS && hostArch == remoteArch {
-		return agentProxySourceAt(executable, hostOS, hostArch, false, false)
-	}
-	return agentProxyBundleSource(filepath.Dir(executable), hostOS, hostArch, remoteOS, remoteArch)
-}
-
-// agentProxyBundleSource finds the packaged helper for remoteOS/remoteArch and
-// verifies it against the bundle manifest before it is used.
-//
-// Every failure names the platform, what was looked at, and why it was
-// rejected. The caller falls back to the reverse tunnel/LAN path and logs this
-// error, so it is the only recovery hint an operator gets.
-func agentProxyBundleSource(installDir, hostOS, hostArch, remoteOS, remoteArch string) (agentProxySource, error) {
-	directory := filepath.Join(installDir, agentProxyBundleDirectoryName)
-	manifestPath := filepath.Join(directory, agentProxyManifestName)
-	fail := func(detail string) (agentProxySource, error) {
-		return agentProxySource{}, fmt.Errorf(
-			"缺少 %s/%s 的 helper（本机 %s/%s）：已查找 %s，%s；请重新安装或构建包含该平台的 AHA2 发行包（安装目录下的 %s/ 需带 %s），或通过 %s 指定预编译 helper",
-			remoteOS, remoteArch, hostOS, hostArch, manifestPath, detail,
-			agentProxyBundleDirectoryName, agentProxyManifestName, agentProxyHelperOverride,
-		)
-	}
-	manifest, err := readAgentProxyBundleManifest(manifestPath)
-	if err != nil {
-		return fail(fmt.Sprintf("读取 manifest 失败：%v", err))
-	}
-	if manifest.Protocol != agentproxy.Protocol {
-		return fail(fmt.Sprintf("manifest protocol=%d，本程序要求 %d", manifest.Protocol, agentproxy.Protocol))
-	}
-	declared := make([]string, 0, len(manifest.Helpers))
-	var entry *agentProxyBundleHelper
-	for index := range manifest.Helpers {
-		candidate := &manifest.Helpers[index]
-		declared = append(declared, candidate.OS+"/"+candidate.Arch)
-		if candidate.OS == remoteOS && candidate.Arch == remoteArch && entry == nil {
-			entry = candidate
-		}
-	}
-	if len(declared) == 0 {
-		return fail("manifest 未声明任何平台")
-	}
-	if entry == nil {
-		return fail("manifest 只声明了 " + strings.Join(declared, "、"))
-	}
-	name := filepath.Base(entry.File)
-	if name == "" || name == "." || name != entry.File {
-		return fail(fmt.Sprintf("manifest 的 helper 文件名 %q 不合法", entry.File))
-	}
-	helperPath := filepath.Join(directory, name)
-	source, err := agentProxySourceAt(helperPath, entry.OS, entry.Arch, false, true)
-	if err != nil {
-		return fail(fmt.Sprintf("%s（%v）", helperPath, err))
-	}
-	if entry.SHA256 == "" || source.sha256 != strings.ToLower(strings.TrimSpace(entry.SHA256)) {
-		return agentProxySource{}, fmt.Errorf(
-			"缺少可用的 %s/%s helper：%s 的 sha256=%s，manifest 期望 %q；请重新安装或构建包含该平台的 AHA2 发行包，或通过 %s 指定预编译 helper",
-			remoteOS, remoteArch, helperPath, source.sha256, entry.SHA256, agentProxyHelperOverride,
-		)
-	}
-	return source, nil
-}
-
-func readAgentProxyBundleManifest(path string) (agentProxyBundleManifest, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return agentProxyBundleManifest{}, err
-	}
-	if info.Size() > agentProxyBundleManifestLimit {
-		return agentProxyBundleManifest{}, fmt.Errorf("manifest 过大：%d 字节", info.Size())
-	}
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return agentProxyBundleManifest{}, err
-	}
-	var manifest agentProxyBundleManifest
-	if err := json.Unmarshal(content, &manifest); err != nil {
-		return agentProxyBundleManifest{}, fmt.Errorf("解析 manifest：%w", err)
-	}
-	return manifest, nil
-}
-
-// agentProxySourceAt hashes the helper binary once per process. The upload
-// itself re-reads the file; only the digest is worth caching, and it must not be
-// recomputed for every Turn of every Task.
-func agentProxySourceAt(path, osName, arch string, explicit, bundled bool) (agentProxySource, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return agentProxySource{}, fmt.Errorf("读取 helper 源文件：%w", err)
-	}
-	// The key includes how the binary was chosen: the same path read through the
-	// override, as the running executable, or from the bundle carries different
-	// platform rules.
-	key := fmt.Sprintf("%s|%d|%d|%t|%t|%s/%s", path, info.Size(), info.ModTime().UnixNano(), explicit, bundled, osName, arch)
-	agentProxySourceCache.Lock()
-	cached, cachedKey := agentProxySourceCache.source, agentProxySourceCache.key
-	agentProxySourceCache.Unlock()
-	if cachedKey == key {
-		return cached, nil
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return agentProxySource{}, fmt.Errorf("打开 helper 源文件：%w", err)
-	}
-	defer file.Close()
-	digest := sha256.New()
-	if _, err := io.Copy(digest, file); err != nil {
-		return agentProxySource{}, fmt.Errorf("计算 helper 哈希：%w", err)
-	}
-	source := agentProxySource{
-		path: path, sha256: hex.EncodeToString(digest.Sum(nil)),
-		os: osName, arch: arch, size: info.Size(), explicit: explicit, bundled: bundled,
-	}
-	agentProxySourceCache.Lock()
-	agentProxySourceCache.key, agentProxySourceCache.source = key, source
-	agentProxySourceCache.Unlock()
-	return source, nil
+	return fmt.Sprintf("%s-%s-%s%s", agentProxyScriptPrefix, sanitizeAgentProxyVersion(version), short, extension)
 }
 
 func sanitizeAgentProxyVersion(value string) string {
@@ -358,81 +205,159 @@ func sanitizeAgentProxyVersion(value string) string {
 	return cleaned
 }
 
-func agentProxyRemotePlatform(ctx context.Context, runner Runner) (string, string, error) {
-	if detect, ok := runner.(interface{ DetectedPlatform() string }); ok {
-		if value := strings.TrimSpace(detect.DetectedPlatform()); value != "" {
-			if osName, arch, ok := parseAgentProxyPlatform(value); ok {
-				return osName, arch, nil
-			}
-		}
+var agentProxyExecSourceCache struct {
+	sync.Mutex
+	path   string
+	size   int64
+	mtime  int64
+	digest string
+}
+
+func agentProxyExecSource(helperPath string) (agentProxySource, error) {
+	info, err := os.Stat(helperPath)
+	if err != nil {
+		return agentProxySource{}, fmt.Errorf("读取 helper 源文件：%w", err)
 	}
+	if info.IsDir() {
+		return agentProxySource{}, fmt.Errorf("helper 源文件是目录")
+	}
+	digest, err := agentProxyExecDigest(helperPath, info)
+	if err != nil {
+		return agentProxySource{}, err
+	}
+	return agentProxySource{
+		runtime: agentProxyRuntimeExec, sha256: digest,
+		open: func() (io.ReadCloser, error) { return os.Open(helperPath) },
+	}, nil
+}
+
+func agentProxyExecDigest(helperPath string, info os.FileInfo) (string, error) {
+	key := info.Size()
+	modified := info.ModTime().UnixNano()
+	agentProxyExecSourceCache.Lock()
+	cached, cachedPath, cachedSize, cachedModified := agentProxyExecSourceCache.digest,
+		agentProxyExecSourceCache.path, agentProxyExecSourceCache.size, agentProxyExecSourceCache.mtime
+	agentProxyExecSourceCache.Unlock()
+	if cached != "" && cachedPath == helperPath && cachedSize == key && cachedModified == modified {
+		return cached, nil
+	}
+	file, err := os.Open(helperPath)
+	if err != nil {
+		return "", fmt.Errorf("打开 helper 源文件：%w", err)
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", fmt.Errorf("计算 helper 哈希：%w", err)
+	}
+	digest := hex.EncodeToString(hash.Sum(nil))
+	agentProxyExecSourceCache.Lock()
+	agentProxyExecSourceCache.path, agentProxyExecSourceCache.size = helperPath, key
+	agentProxyExecSourceCache.mtime, agentProxyExecSourceCache.digest = modified, digest
+	agentProxyExecSourceCache.Unlock()
+	return digest, nil
+}
+
+// detectAgentProxyNode finds the node binary to run the embedded script with.
+//
+// A backend that is itself a Node script is the strongest signal: the workspace
+// is already executing that interpreter, so its shebang is taken as a hard
+// guarantee even when `node` is not on PATH. Otherwise the workspace is asked
+// for `node` on PATH. The error names both attempts, because the caller turns it
+// into the visible reason for leaving the stdio transport.
+func detectAgentProxyNode(ctx context.Context, runner Runner, backend string) (string, error) {
 	result, err := runner.Run(ctx, Command{
 		Executable: "sh",
-		Args:       []string{"-c", `printf '%s %s' "$(uname -s)" "$(uname -m)"`},
+		Args:       []string{"-c", agentProxyNodeProbeScript, "aha2-agent-proxy-node", backend},
 		Timeout:    15 * time.Second, OutputLimit: 512,
 	}, nil)
 	if err != nil {
-		return "", "", fmt.Errorf("探测工作区平台：%w", err)
+		return "", fmt.Errorf("探测工作区 node：%w", err)
 	}
 	if result.ExitCode != 0 {
-		return "", "", fmt.Errorf("探测工作区平台失败：%s", remoteCommandDetail(result))
-	}
-	osName, arch, ok := parseAgentProxyPlatform(result.Stdout)
-	if !ok {
-		return "", "", fmt.Errorf("无法识别工作区平台 %q", strings.TrimSpace(result.Stdout))
-	}
-	return osName, arch, nil
-}
-
-// parseAgentProxyPlatform accepts the detected "Linux 6.8.0 x86_64" form, the
-// plain "Linux x86_64" probe output, and the stored "linux/arm64" form.
-func parseAgentProxyPlatform(value string) (string, string, bool) {
-	fields := strings.Fields(strings.ToLower(value))
-	if len(fields) == 0 {
-		return "", "", false
-	}
-	osName, arch := normalizeAgentProxyOS(fields[0]), ""
-	if osName == "" {
-		return "", "", false
-	}
-	// Stored platform strings are "os/arch"; uname output never has a slash.
-	if _, rest, found := strings.Cut(fields[0], "/"); found {
-		arch = normalizeAgentProxyArch(rest)
-	}
-	if arch == "" {
-		for _, field := range fields[1:] {
-			if arch = normalizeAgentProxyArch(field); arch != "" {
-				break
-			}
+		detail := strings.TrimSpace(result.Stderr)
+		if detail == "" {
+			detail = fmt.Sprintf("探测脚本 exit %d", result.ExitCode)
 		}
+		return "", fmt.Errorf("%s", detail)
 	}
-	if arch == "" {
-		return "", "", false
+	interpreter := strings.TrimSpace(result.Stdout)
+	if interpreter == "" {
+		return "", fmt.Errorf("探测脚本没有返回 node 路径")
 	}
-	return osName, arch, true
+	return interpreter, nil
 }
 
-func normalizeAgentProxyOS(value string) string {
-	switch {
-	case strings.HasPrefix(value, "linux"):
-		return "linux"
-	case strings.HasPrefix(value, "darwin"):
-		return "darwin"
-	default:
-		return ""
-	}
+// agentProxyNodeProbeScript reads the backend's shebang first, then falls back
+// to PATH. It prints the interpreter path on success and a reason on failure.
+// The first argument after the script name becomes $0, so the backend is $1.
+const agentProxyNodeProbeScript = `set -u
+backend=$1
+
+resolve() {
+  command -v "$1" 2>/dev/null
 }
 
-func normalizeAgentProxyArch(value string) string {
-	switch value {
-	case "x86_64", "amd64", "x64":
-		return "amd64"
-	case "aarch64", "arm64":
-		return "arm64"
-	default:
-		return ""
-	}
+node_from_shebang() {
+  candidate=$1
+  first=$(head -c 256 "$candidate" 2>/dev/null | head -n 1) || return 1
+  case $first in
+    '#!'*) ;;
+    *) return 1 ;;
+  esac
+  line=${first#??}
+  set -- $line
+  [ $# -gt 0 ] || return 1
+  interpreter=$1
+  shift
+  if [ "$(basename "$interpreter")" = env ]; then
+    interpreter=
+    while [ $# -gt 0 ]; do
+      case $1 in
+        -S|-i|-u) shift ;;
+        -*|*=*) shift ;;
+        *) interpreter=$1; break ;;
+      esac
+    done
+  fi
+  [ -n "$interpreter" ] || return 1
+  case $(basename "$interpreter" 2>/dev/null) in
+    node|nodejs) ;;
+    *) return 1 ;;
+  esac
+  case $interpreter in
+    */*) [ -x "$interpreter" ] || return 1
+         printf '%s' "$interpreter"; return 0 ;;
+    *) resolved=$(resolve "$interpreter" || true)
+       [ -n "$resolved" ] || return 1
+       printf '%s' "$resolved"; return 0 ;;
+  esac
 }
+
+if [ -n "$backend" ]; then
+  candidate=$backend
+  case $candidate in
+    */*) [ -f "$candidate" ] || candidate= ;;
+    *) candidate=$(resolve "$backend" || true) ;;
+  esac
+  if [ -n "$candidate" ] && [ -f "$candidate" ]; then
+    if found=$(node_from_shebang "$candidate"); then
+      printf '%s' "$found"; exit 0
+    fi
+  fi
+fi
+
+if found=$(resolve node); then
+  printf '%s' "$found"; exit 0
+fi
+
+if [ -n "$backend" ]; then
+  echo "工作区里没有 node：backend $backend 不是 node 脚本，且 PATH 中找不到 node" >&2
+else
+  echo "工作区里没有 node：未提供 backend 命令，且 PATH 中找不到 node" >&2
+fi
+exit 3
+`
 
 func agentProxyTempDirectory(ctx context.Context, runner Runner) (string, error) {
 	result, err := runner.Run(ctx, Command{
@@ -452,7 +377,7 @@ func agentProxyTempDirectory(ctx context.Context, runner Runner) (string, error)
 
 // ensureAgentProxyAt materialises the helper in one directory and returns its
 // path. Reuse is decided by the manifest plus a fresh hash of the file itself:
-// a manifest alone is a claim, and a half-written or replaced binary must not be
+// a manifest alone is a claim, and a half-written or replaced file must not be
 // executed just because the manifest still names it.
 func ensureAgentProxyAt(
 	ctx context.Context,
@@ -464,7 +389,7 @@ func ensureAgentProxyAt(
 	target := path.Join(directory, targetName)
 	previous, _ := readAgentProxyManifest(ctx, runner, directory)
 	if previous != nil && previous.Protocol == manifest.Protocol && previous.Version == manifest.Version &&
-		previous.OS == manifest.OS && previous.Arch == manifest.Arch && previous.SHA256 == manifest.SHA256 {
+		previous.Runtime == manifest.Runtime && previous.SHA256 == manifest.SHA256 {
 		if hash, err := agentProxyRemoteHash(ctx, runner, target); err == nil && hash == manifest.SHA256 {
 			return target, nil
 		}
@@ -474,7 +399,7 @@ func ensureAgentProxyAt(
 	if err != nil {
 		return "", err
 	}
-	file, err := os.Open(source.path)
+	file, err := source.open()
 	if err != nil {
 		return "", fmt.Errorf("打开 helper 源文件：%w", err)
 	}
@@ -487,7 +412,7 @@ func ensureAgentProxyAt(
 	// execute that inode, and keeping it costs one file.
 	previousPath := ""
 	if previous != nil && previous.SHA256 != "" {
-		if name := agentProxyBinaryName(previous.Version, previous.SHA256); name != targetName {
+		if name := agentProxyHelperName(previous.Version, previous.SHA256, agentProxyExtension(previous.Runtime)); name != targetName {
 			previousPath = path.Join(directory, name)
 		}
 	}
@@ -503,6 +428,13 @@ func ensureAgentProxyAt(
 		return "", fmt.Errorf("%s", remoteCommandDetail(result))
 	}
 	return target, nil
+}
+
+func agentProxyExtension(runtime string) string {
+	if runtime == agentproxy.NodeHelperRuntime {
+		return ".js"
+	}
+	return ""
 }
 
 // agentProxyUploadScript writes the helper from stdin, verifies its digest,
@@ -542,8 +474,9 @@ if [ "$got" != "$want" ]; then
   exit 4
 fi
 mv -f "$tmp" "$target"
-# Keep the current binary and the generation the previous manifest named; drop
-# anything older so a workspace does not accumulate one copy per version.
+# Keep the current helper and the generation the previous manifest named; drop
+# anything older so a workspace does not accumulate one copy per version. The
+# glob also removes a prebuilt helper left by an older AHA2 release.
 for candidate in "$dir"/aha2-agent-proxy-*; do
   [ -f "$candidate" ] || continue
   [ "$candidate" = "$target" ] && continue
@@ -606,17 +539,25 @@ fi`, "aha-agent-proxy-hash", helperPath},
 	return strings.TrimSpace(result.Stdout), nil
 }
 
-func probeAgentProxyHelper(ctx context.Context, runner Runner, helperPath string) error {
-	result, err := runner.Run(ctx, Command{
-		Executable: helperPath, Args: []string{"version"}, Timeout: 15 * time.Second, OutputLimit: 512,
-	}, nil)
+// probeAgentProxyHelper proves the helper actually runs on this workspace.
+// For the Node script this runs the detected interpreter, so a workspace whose
+// `node` is a broken shim or is mounted noexec is rejected here rather than at
+// the first Agent API request.
+func probeAgentProxyHelper(ctx context.Context, runner Runner, helperPath string, source agentProxySource) error {
+	command := Command{Executable: helperPath, Args: []string{"version"}, Timeout: 15 * time.Second, OutputLimit: 512}
+	want := "aha2"
+	if source.runtime == agentproxy.NodeHelperRuntime {
+		command = Command{Executable: source.interpreter, Args: []string{helperPath, "--version"}, Timeout: 15 * time.Second, OutputLimit: 512}
+		want = "protocol=" + strconv.Itoa(agentproxy.Protocol)
+	}
+	result, err := runner.Run(ctx, command, nil)
 	if err != nil {
 		return fmt.Errorf("执行 helper 失败（可能是 noexec 挂载）：%w", err)
 	}
 	if result.ExitCode != 0 {
 		return fmt.Errorf("helper 无法执行（exit %d）：%s", result.ExitCode, remoteCommandDetail(result))
 	}
-	if !strings.Contains(result.Stdout, "aha2") {
+	if !strings.Contains(result.Stdout, want) {
 		return fmt.Errorf("helper 输出异常：%q", strings.TrimSpace(result.Stdout))
 	}
 	return nil

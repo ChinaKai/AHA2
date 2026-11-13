@@ -63,14 +63,17 @@ func (s *Store) UpdateWorkspaceAgentAPIDetection(ctx context.Context, item domai
 		UPDATE workspaces
 		SET agent_api_resolved_url=?,agent_api_status=?,agent_api_error=?,agent_api_migration_note=?,
 			agent_api_last_checked_at=?,
-			capabilities_json=json_set(
-				CASE WHEN json_valid(capabilities_json) THEN capabilities_json ELSE '{}' END,
-				'$.agent_api', json(?)),
+			capabilities_json=CASE
+				WHEN json_valid(capabilities_json) AND json_type(capabilities_json) = 'object'
+					THEN json_set(capabilities_json, '$.agent_api', json(?))
+				ELSE json_set('{}', '$.agent_api', json(?))
+			END,
 			updated_at=?
 		WHERE id=?`,
 		item.AgentAPIResolvedURL, workspaceAgentAPIStatus(item.AgentAPIStatus), item.AgentAPIError,
 		item.AgentAPIMigrationNote, timeString(item.AgentAPILastCheckedAt),
-		encodeJSON(item.Capabilities["agent_api"]), timeString(item.UpdatedAt), item.ID,
+		encodeJSON(item.Capabilities["agent_api"]), encodeJSON(item.Capabilities["agent_api"]),
+		timeString(item.UpdatedAt), item.ID,
 	)
 	return err
 }

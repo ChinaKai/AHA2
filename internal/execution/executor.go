@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/app"
@@ -37,6 +38,23 @@ func (executor Executor) Execute(ctx context.Context, request app.ExecutionReque
 		return executor.runDSH(ctx, dsh, request, emit)
 	default:
 		return app.ExecutionResult{}, fmt.Errorf("unsupported backend %q", request.Snapshot.Backend)
+	}
+}
+
+// BackendBinary reports the configured command for a backend, or an empty
+// string when the adapter was left at its PATH default. It satisfies the app's
+// BackendBinaryResolver so the SSH stdio helper can check a Node backend
+// script's shebang instead of assuming where node lives.
+func (executor Executor) BackendBinary(name string) string {
+	switch name {
+	case "codex":
+		return strings.TrimSpace(executor.Codex.Binary)
+	case "claude":
+		return strings.TrimSpace(executor.Claude.Binary)
+	case "dsh":
+		return strings.TrimSpace(executor.DSH.Binary)
+	default:
+		return ""
 	}
 }
 
