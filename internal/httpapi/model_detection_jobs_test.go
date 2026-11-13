@@ -164,3 +164,44 @@ func TestModelDetectionProbeUsesProviderAnthropicBaseURL(t *testing.T) {
 		t.Fatalf("base_url was probed for anthropic_messages despite provider.anthropic_base_url")
 	}
 }
+
+func TestModelDetectionProbeReportsFailedCandidateEvidence(t *testing.T) {
+	t.Parallel()
+	notFound := func() *httptest.Server {
+		server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			if request.URL.Path == "/responses" || request.URL.Path == "/chat/completions" ||
+				request.URL.Path == "/v1/responses" || request.URL.Path == "/v1/chat/completions" {
+				writer.WriteHeader(http.StatusOK)
+				return
+			}
+			http.NotFound(writer, request)
+		}))
+		t.Cleanup(server.Close)
+		return server
+	}
+	base := notFound()
+	anthropic := notFound()
+	jobs := newModelDetectionJobs()
+	provider := domain.Provider{
+		ID:               "provider-ali",
+		BaseURL:          base.URL + "/v1",
+		AnthropicBaseURL: anthropic.URL + "/apps/anthropic",
+		AuthStyle:        "auto",
+	}
+	capabilities, _, protocolErrors := jobs.probe(context.Background(), provider, "secret", "", "claude-model")
+	if capabilities["anthropic_messages"] != "unsupported" {
+		t.Fatalf("capabilities=%v protocolErrors=%v", capabilities, protocolErrors)
+	}
+	evidence := protocolErrors["anthropic_messages"]
+	for _, want := range []string{
+		anthropic.URL + "/apps/anthropic: HTTP 404",
+		base.URL + "/v1: HTTP 404",
+	} {
+		if !strings.Contains(evidence, want) {
+			t.Fatalf("protocol_errors missing %q: %q", want, evidence)
+		}
+	}
+	if strings.Contains(evidence, "secret") {
+		t.Fatalf("protocol_errors leaked the API key: %q", evidence)
+	}
+}

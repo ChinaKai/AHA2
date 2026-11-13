@@ -276,14 +276,17 @@ func ProbeModelCapabilitiesForProviderContext(ctx context.Context, baseURL, anth
 			return
 		}
 		status, code, errText := probeWireAPI(ctx, client, candidates[0], key, normalizedAuth, modelID, "anthropic_messages")
+		evidence := make([]string, 0, len(candidates))
+		if line := probeEvidence(candidates[0], status, code, errText); line != "" {
+			evidence = append(evidence, line)
+		}
 		if status == "unsupported" {
-			evidence := make([]string, 0, len(candidates))
-			if line := probeEvidenceLine(candidates[0], status, code); line != "" {
-				evidence = append(evidence, line)
-			}
 			for _, candidate := range candidates[1:] {
 				if ctx.Err() != nil {
 					status, errText = "unavailable", ctx.Err().Error()
+					if line := probeEvidence(candidate, status, 0, errText); line != "" {
+						evidence = append(evidence, line)
+					}
 					break
 				}
 				retriedStatus, retriedCode, retriedErr := probeWireAPI(ctx, client, candidate, key, normalizedAuth, modelID, "anthropic_messages")
@@ -292,18 +295,18 @@ func ProbeModelCapabilitiesForProviderContext(ctx context.Context, baseURL, anth
 					anthropicBase = candidate
 					break
 				}
-				if retriedErr != "" {
-					evidence = append(evidence, candidate+": "+retriedErr)
-				} else if line := probeEvidenceLine(candidate, retriedStatus, retriedCode); line != "" {
+				if line := probeEvidence(candidate, retriedStatus, retriedCode, retriedErr); line != "" {
 					evidence = append(evidence, line)
 				}
-				if retriedStatus != "unsupported" && errText == "" {
-					status, errText = retriedStatus, retriedErr
+				if retriedStatus != "unsupported" {
+					status = retriedStatus
 				}
 			}
-			if status != "supported" && status != "rate_limited" && errText == "" && len(evidence) > 0 {
-				errText = strings.Join(evidence, "; ")
-			}
+		}
+		if status != "supported" && status != "rate_limited" {
+			// Every failed candidate keeps its URL and HTTP status so the UI can
+			// tell a missing route (404) from an auth problem (401/403).
+			errText = strings.Join(evidence, "; ")
 		}
 		anthropicStatus, anthropicErr = status, errText
 	}()
@@ -351,18 +354,23 @@ func anthropicBaseCandidates(baseURL, anthropicBaseURL string) []string {
 	return candidates
 }
 
-// probeEvidenceLine describes a failed probe candidate for protocol_errors. It
-// carries the URL and HTTP status so a manual probe can show which entry point
-// was actually tried without exposing credentials.
-func probeEvidenceLine(candidate, status string, code int) string {
-	if code <= 0 {
+// probeEvidence describes one failed probe candidate as "<candidate URL>:
+// HTTP <code>" so protocol_errors shows which entry point was tried and why it
+// failed. Transport errors already name the endpoint; they are prefixed with
+// the candidate when they do not. It never includes the API key.
+func probeEvidence(candidate, status string, code int, errText string) string {
+	switch {
+	case status == "supported" || status == "rate_limited" || status == "":
 		return ""
-	}
-	switch status {
-	case "unsupported", "inconclusive", "unauthorized":
+	case code > 0:
 		return fmt.Sprintf("%s: HTTP %d", candidate, code)
+	case errText != "":
+		if strings.Contains(errText, candidate) {
+			return errText
+		}
+		return candidate + ": " + errText
 	default:
-		return ""
+		return candidate + ": " + status
 	}
 }
 
@@ -432,19 +440,34 @@ func probeWireAPI(ctx context.Context, client *http.Client, base, apiKey, authSt
 			if status == "supported" || status == "rate_limited" {
 				return status, code, ""
 			}
-			if statusRank(status) > statusRank(best) {
+			rank := statusRank(status)
+			switch {
+			case rank > statusRank(best):
 				best = status
 				bestCode = code
-				bestError = ""
-				if err != nil {
-					bestError = err.Error()
-				} else if status == "unavailable" {
-					bestError = fmt.Sprintf("HTTP %d", code)
-				}
+				bestError = probeEndpointError(endpoint, status, code, err)
+			case rank == statusRank(best) && bestCode == 0 && code != 0:
+				// unsupported is also the initial best, so a 404/405/501 must be
+				// recorded explicitly or callers lose the HTTP status.
+				bestCode = code
+				bestError = probeEndpointError(endpoint, status, code, err)
 			}
 		}
 	}
 	return best, bestCode, bestError
+}
+
+// probeEndpointError carries the endpoint and HTTP status into protocol_errors
+// so a failed protocol probe names what it actually tried. The API key is
+// never part of an endpoint URL.
+func probeEndpointError(endpoint, status string, code int, err error) string {
+	if err != nil {
+		return err.Error()
+	}
+	if code != 0 {
+		return fmt.Sprintf("%s: HTTP %d", endpoint, code)
+	}
+	return ""
 }
 
 func probeOneEndpoint(ctx context.Context, client *http.Client, endpoint string, headers map[string]string, body []byte) (string, int, error) {

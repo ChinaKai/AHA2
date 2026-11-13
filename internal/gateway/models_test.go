@@ -405,3 +405,95 @@ func TestAnthropicBaseCandidatesOrderAndDedup(t *testing.T) {
 		})
 	}
 }
+
+// newAnthropicProbeServer serves the OpenAI protocols and answers every
+// Anthropic path with the configured status, so a test can drive the
+// protocol_errors evidence for each failure mode.
+func newAnthropicProbeServer(t *testing.T, anthropicStatus int) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/responses", "/chat/completions":
+			w.WriteHeader(http.StatusOK)
+		default:
+			if strings.HasSuffix(r.URL.Path, "/messages") {
+				w.WriteHeader(anthropicStatus)
+				return
+			}
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func TestProbeModelCapabilitiesReportsAllNotFoundCandidates(t *testing.T) {
+	t.Parallel()
+	base := newAnthropicProbeServer(t, http.StatusNotFound)
+	anthropic := newAnthropicProbeServer(t, http.StatusNotFound)
+
+	caps, _, errs := ProbeModelCapabilitiesForProviderContext(
+		context.Background(), base.URL+"/v1", anthropic.URL+"/apps/anthropic",
+		"secret", "auto", "claude-model", 5*time.Second, nil)
+	if caps["anthropic_messages"] != "unsupported" {
+		t.Fatalf("caps=%v errs=%v", caps, errs)
+	}
+	evidence := errs["anthropic_messages"]
+	for _, want := range []string{
+		anthropic.URL + "/apps/anthropic: HTTP 404",
+		base.URL + "/v1: HTTP 404",
+		base.URL + "/anthropic: HTTP 404",
+	} {
+		if !strings.Contains(evidence, want) {
+			t.Fatalf("protocol_errors missing %q: %q", want, evidence)
+		}
+	}
+	if strings.Contains(evidence, "secret") {
+		t.Fatalf("protocol_errors leaked the API key: %q", evidence)
+	}
+}
+
+func TestProbeModelCapabilitiesReportsUnauthorizedCandidate(t *testing.T) {
+	t.Parallel()
+	base := newAnthropicProbeServer(t, http.StatusNotFound)
+	anthropic := newAnthropicProbeServer(t, http.StatusUnauthorized)
+
+	caps, _, errs := ProbeModelCapabilitiesForProviderContext(
+		context.Background(), base.URL+"/v1", anthropic.URL+"/apps/anthropic",
+		"secret", "auto", "claude-model", 5*time.Second, nil)
+	if caps["anthropic_messages"] != "unauthorized" {
+		t.Fatalf("caps=%v errs=%v", caps, errs)
+	}
+	evidence := errs["anthropic_messages"]
+	if !strings.Contains(evidence, anthropic.URL+"/apps/anthropic: HTTP 401") {
+		t.Fatalf("protocol_errors missing the unauthorized candidate: %q", evidence)
+	}
+	if strings.Contains(evidence, "secret") {
+		t.Fatalf("protocol_errors leaked the API key: %q", evidence)
+	}
+}
+
+func TestProbeModelCapabilitiesReportsFallbackServerErrors(t *testing.T) {
+	t.Parallel()
+	base := newAnthropicProbeServer(t, http.StatusInternalServerError)
+	anthropic := newAnthropicProbeServer(t, http.StatusNotFound)
+
+	caps, _, errs := ProbeModelCapabilitiesForProviderContext(
+		context.Background(), base.URL+"/v1", anthropic.URL+"/apps/anthropic",
+		"secret", "auto", "claude-model", 5*time.Second, nil)
+	if caps["anthropic_messages"] != "unavailable" {
+		t.Fatalf("caps=%v errs=%v", caps, errs)
+	}
+	evidence := errs["anthropic_messages"]
+	for _, want := range []string{
+		anthropic.URL + "/apps/anthropic: HTTP 404",
+		base.URL + "/v1: HTTP 500",
+	} {
+		if !strings.Contains(evidence, want) {
+			t.Fatalf("protocol_errors missing %q: %q", want, evidence)
+		}
+	}
+	if strings.Contains(evidence, "secret") {
+		t.Fatalf("protocol_errors leaked the API key: %q", evidence)
+	}
+}
