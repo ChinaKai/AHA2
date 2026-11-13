@@ -124,9 +124,12 @@ class APIClient {
   // this never serves data older than one request.
   private inFlightReads = new Map<string, Promise<unknown>>();
   // A read started before a write may be about to return pre-write data.
-  // Bumping the generation on every write keeps that read out of the coalescing
-  // map for calls made afterwards, so a refresh triggered by a successful
-  // submit never joins the stale pre-submit request.
+  // Bumping the generation when a write starts keeps that read out of the
+  // coalescing map for reads requested afterwards. It has to move again when
+  // the write settles: a read requested while the write was still in flight
+  // already took the bumped generation, and a refresh triggered by the write's
+  // completion would otherwise join it and receive a snapshot the server may
+  // have produced before the write committed.
   private readGeneration = 0;
 
   setCSRF(value?: string): void {
@@ -150,7 +153,8 @@ class APIClient {
 
   async request<T>(path: string, options: RequestInit = {}): Promise<T> {
     const method = (options.method || "GET").toUpperCase();
-    if (method !== "GET" && method !== "HEAD") this.readGeneration++;
+    const isWrite = method !== "GET" && method !== "HEAD";
+    if (isWrite) this.readGeneration++;
     const observer = requestObserver;
     const startedAt = observer ? performance.now() : 0;
     const headers = new Headers(options.headers || {});
@@ -176,6 +180,10 @@ class APIClient {
       }
       return body as T;
     } finally {
+      // A read requested while this write was in flight may have been answered
+      // from the pre-commit state. Move to a new generation when the write
+      // settles so a refresh issued now cannot reuse that read's promise.
+      if (isWrite) this.readGeneration++;
       // A failed fetch has no response; recording status 0 / ok false keeps the
       // failure visible without inventing an HTTP status.
       if (observer) {

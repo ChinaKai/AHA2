@@ -79,6 +79,30 @@ test("a write between two reads does not let the later read join the pre-write o
   await Promise.all([before, write, after]);
 });
 
+test("a read started while a write is in flight is not reused after the write settles", async t => {
+  const original = globalThis.fetch;
+  const {calls, fetch} = controlledFetch({ok: true, task: {id: "task-4"}});
+  globalThis.fetch = fetch;
+  t.after(() => { globalThis.fetch = original; });
+
+  const write = api.resolveTaskPermissionRequest("task-4", "request-2", "approve");
+  // This read can reach the server before the write commits. Its promise must
+  // not back a refresh that runs after the write settles.
+  const duringWrite = api.task("task-4");
+  assert.equal(calls.length, 2);
+
+  calls[0].release();
+  await write;
+  assert.equal(calls.length, 2, "the read requested during the write is still in flight");
+
+  const afterWrite = api.task("task-4");
+  assert.equal(calls.length, 3, "post-write refresh must issue a new request, not reuse the in-flight pre-commit read");
+
+  calls[1].release();
+  calls[2].release();
+  await Promise.all([duringWrite, afterWrite]);
+});
+
 test("a failed shared read reaches every waiter and is not cached", async t => {
   const original = globalThis.fetch;
   let attempts = 0;
