@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -10,6 +11,25 @@ import (
 	"strings"
 	"sync"
 	"time"
+)
+
+const (
+	// probeMaxOutputTokens is a legally minimal output budget shared by the
+	// three wire protocols. Strict gateways reject a 1-token budget (below
+	// their minimum, or an invalid parameter), which used to make an available
+	// protocol look unavailable.
+	probeMaxOutputTokens = 16
+	// probeErrorBodyReadLimit bounds how much of an error response is read;
+	// probeErrorBodyMaxRunes bounds how much survives into protocol_errors.
+	probeErrorBodyReadLimit = 8 << 10
+	probeErrorBodyMaxRunes  = 512
+	// probeStreamTimeout bounds a streaming probe request: connection, response
+	// headers and the read of the first SSE event share this deadline, so a
+	// gateway that opens a stream and then stays silent cannot hold detection
+	// open until the caller's overall deadline.
+	probeStreamTimeout = 10 * time.Second
+	// probeStreamReadLimit caps how many bytes the first-event reader consumes.
+	probeStreamReadLimit = 64 << 10
 )
 
 // DetectedModel is a model advertised by an OpenAI/Anthropic-compatible
@@ -355,23 +375,84 @@ func anthropicBaseCandidates(baseURL, anthropicBaseURL string) []string {
 }
 
 // probeEvidence describes one failed probe candidate as "<candidate URL>:
-// HTTP <code>" so protocol_errors shows which entry point was tried and why it
-// failed. Transport errors already name the endpoint; they are prefixed with
-// the candidate when they do not. It never includes the API key.
-func probeEvidence(candidate, status string, code int, errText string) string {
+// HTTP <code>[: <sanitized body snippet>]" so protocol_errors shows which entry
+// point was tried and why it failed. Transport errors already name the
+// endpoint; they are prefixed with the candidate when they do not. It never
+// includes the API key.
+func probeEvidence(candidate, status string, code int, detail string) string {
 	switch {
 	case status == "supported" || status == "rate_limited" || status == "":
 		return ""
 	case code > 0:
-		return fmt.Sprintf("%s: HTTP %d", candidate, code)
-	case errText != "":
-		if strings.Contains(errText, candidate) {
-			return errText
+		line := fmt.Sprintf("%s: HTTP %d", candidate, code)
+		if snippet := probeEvidenceSnippet(detail, code); snippet != "" {
+			return line + ": " + snippet
 		}
-		return candidate + ": " + errText
+		return line
+	case detail != "":
+		if strings.Contains(detail, candidate) {
+			return detail
+		}
+		return candidate + ": " + detail
 	default:
 		return candidate + ": " + status
 	}
+}
+
+// probeRequestBody builds the minimal legal request body for a wire protocol
+// probe. The Responses body follows the official /responses schema: input is a
+// message array whose content parts are typed input_text. A bare input string
+// plus a 1-token output budget is rejected by strict gateways even though the
+// protocol and model are available.
+func probeRequestBody(wireAPI, modelID string, stream bool) []byte {
+	var payload map[string]any
+	switch wireAPI {
+	case "responses":
+		payload = map[string]any{
+			"model": modelID,
+			"input": []any{map[string]any{
+				"role":    "user",
+				"content": []any{map[string]any{"type": "input_text", "text": "ping"}},
+			}},
+			"max_output_tokens": probeMaxOutputTokens,
+			"stream":            stream,
+		}
+	case "chat_completions":
+		payload = map[string]any{
+			"model":      modelID,
+			"messages":   []any{map[string]any{"role": "user", "content": "ping"}},
+			"max_tokens": probeMaxOutputTokens,
+		}
+	case "anthropic_messages":
+		payload = map[string]any{
+			"model":      modelID,
+			"max_tokens": probeMaxOutputTokens,
+			"messages":   []any{map[string]any{"role": "user", "content": "ping"}},
+		}
+	default:
+		return nil
+	}
+	body, _ := json.Marshal(payload)
+	return body
+}
+
+// probeEvidenceSnippet extracts the response-body part from a detail string
+// that probeWireAPI already formatted as "<endpoint>: HTTP <code>: <body>", so
+// probeEvidence can attribute it to the candidate base URL without repeating
+// the endpoint and status.
+func probeEvidenceSnippet(detail string, code int) string {
+	status := fmt.Sprintf("HTTP %d", code)
+	switch {
+	case detail == "", detail == status:
+		return ""
+	case strings.HasPrefix(detail, status+": "):
+		return strings.TrimPrefix(detail, status+": ")
+	}
+	marker := ": " + status + ": "
+	if index := strings.Index(detail, marker); index >= 0 {
+		return detail[index+len(marker):]
+	}
+	return detail
 }
 
 // probeWireAPI probes a wire protocol across endpoint forms (a bare path for
@@ -379,27 +460,23 @@ func probeEvidence(candidate, status string, code int, errText string) string {
 // /v1-prefixed path for bare-host bases). Auth is narrowed to the confirmed
 // style when known so rate-limited gateways are not flooded with redundant
 // requests. A definitive result (supported or rate_limited) stops the probe.
+// When a non-streaming Responses request is rejected with 400, the same
+// endpoint is retried once with stream=true because some gateways only accept
+// this protocol in streaming mode.
 func probeWireAPI(ctx context.Context, client *http.Client, base, apiKey, authStyle, modelID, wireAPI string) (string, int, string) {
 	rel := ""
-	var body []byte
 	switch wireAPI {
 	case "responses":
 		rel = "responses"
-		body, _ = json.Marshal(map[string]any{"model": modelID, "input": "ping", "max_output_tokens": 1})
 	case "chat_completions":
 		rel = "chat/completions"
-		body, _ = json.Marshal(map[string]any{
-			"model": modelID, "messages": []any{map[string]any{"role": "user", "content": "ping"}}, "max_tokens": 1,
-		})
 	case "anthropic_messages":
 		rel = "messages"
-		body, _ = json.Marshal(map[string]any{
-			"model": modelID, "max_tokens": 1, "messages": []any{map[string]any{"role": "user", "content": "ping"}},
-		})
 	}
 	if rel == "" {
 		return "unsupported", 0, ""
 	}
+	body := probeRequestBody(wireAPI, modelID, false)
 	endpoints := []string{base + "/" + rel}
 	if !strings.HasSuffix(base, "/v1") && !strings.HasSuffix(base, "/v1/") {
 		endpoints = append(endpoints, base+"/v1/"+rel)
@@ -436,7 +513,19 @@ func probeWireAPI(ctx context.Context, client *http.Client, base, apiKey, authSt
 			default:
 				headers["Authorization"] = "Bearer " + apiKey
 			}
-			status, code, err := probeOneEndpoint(ctx, client, endpoint, headers, body)
+			status, code, detail := probeOneEndpoint(ctx, client, endpoint, headers, body, false, apiKey)
+			if wireAPI == "responses" && code == http.StatusBadRequest && ctx.Err() == nil {
+				// Some gateways only accept the Responses protocol in streaming
+				// mode; retry the same endpoint with stream=true and require the
+				// first SSE event before accepting the retry as support.
+				streamStatus, streamCode, streamDetail := probeOneEndpoint(ctx, client, endpoint, headers, probeRequestBody(wireAPI, modelID, true), true, apiKey)
+				if streamStatus == "supported" || streamStatus == "rate_limited" {
+					return streamStatus, streamCode, ""
+				}
+				if statusRank(streamStatus) > statusRank(status) {
+					status, code, detail = streamStatus, streamCode, streamDetail
+				}
+			}
 			if status == "supported" || status == "rate_limited" {
 				return status, code, ""
 			}
@@ -445,12 +534,12 @@ func probeWireAPI(ctx context.Context, client *http.Client, base, apiKey, authSt
 			case rank > statusRank(best):
 				best = status
 				bestCode = code
-				bestError = probeEndpointError(endpoint, status, code, err)
+				bestError = probeEndpointError(endpoint, status, code, detail)
 			case rank == statusRank(best) && bestCode == 0 && code != 0:
 				// unsupported is also the initial best, so a 404/405/501 must be
 				// recorded explicitly or callers lose the HTTP status.
 				bestCode = code
-				bestError = probeEndpointError(endpoint, status, code, err)
+				bestError = probeEndpointError(endpoint, status, code, detail)
 			}
 		}
 	}
@@ -458,46 +547,110 @@ func probeWireAPI(ctx context.Context, client *http.Client, base, apiKey, authSt
 }
 
 // probeEndpointError carries the endpoint and HTTP status into protocol_errors
-// so a failed protocol probe names what it actually tried. The API key is
-// never part of an endpoint URL.
-func probeEndpointError(endpoint, status string, code int, err error) string {
-	if err != nil {
-		return err.Error()
-	}
+// so a failed protocol probe names what it actually tried. detail may add a
+// sanitized response-body snippet for 4xx/5xx responses. The API key is never
+// part of an endpoint URL.
+func probeEndpointError(endpoint, status string, code int, detail string) string {
 	if code != 0 {
+		if detail != "" {
+			return fmt.Sprintf("%s: HTTP %d: %s", endpoint, code, detail)
+		}
 		return fmt.Sprintf("%s: HTTP %d", endpoint, code)
+	}
+	if detail != "" {
+		if strings.Contains(detail, endpoint) {
+			return detail
+		}
+		return endpoint + ": " + detail
 	}
 	return ""
 }
 
-func probeOneEndpoint(ctx context.Context, client *http.Client, endpoint string, headers map[string]string, body []byte) (string, int, error) {
+// probeOneEndpoint sends one probe request and classifies the response. detail
+// carries a sanitized, truncated response-body snippet on non-2xx responses so
+// a 400 can be told apart from an auth, model, or transport error. A streaming
+// probe reads the first SSE event under probeStreamTimeout, so a gateway that
+// opens the stream and stays silent cannot hang detection.
+func probeOneEndpoint(ctx context.Context, client *http.Client, endpoint string, headers map[string]string, body []byte, stream bool, apiKey string) (string, int, string) {
+	if stream {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, probeStreamTimeout)
+		defer cancel()
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return "unavailable", 0, err
+		return "unavailable", 0, err.Error()
 	}
 	for key, value := range headers {
 		request.Header.Set(key, value)
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		return "unavailable", 0, err
+		return "unavailable", 0, err.Error()
 	}
 	defer response.Body.Close()
 	code := response.StatusCode
-	switch {
-	case code >= 200 && code < 300:
-		return "supported", code, nil
-	case code == 401 || code == 403:
-		return "unauthorized", code, nil
-	case code == 429:
-		return "rate_limited", code, nil
-	case code == 404 || code == 405 || code == 501:
-		return "unsupported", code, nil
-	case code >= 500:
-		return "unavailable", code, fmt.Errorf("HTTP %d", code)
-	default:
-		return "inconclusive", code, nil
+	if code >= 200 && code < 300 {
+		if stream {
+			if err := readFirstSSEEvent(response.Body); err != nil {
+				return "inconclusive", code, err.Error()
+			}
+		}
+		return "supported", code, ""
 	}
+	detail := probeResponseSnippet(response.Body, apiKey)
+	switch {
+	case code == 401 || code == 403:
+		return "unauthorized", code, detail
+	case code == 429:
+		return "rate_limited", code, ""
+	case code == 404 || code == 405 || code == 501:
+		return "unsupported", code, detail
+	case code >= 500:
+		return "unavailable", code, detail
+	default:
+		return "inconclusive", code, detail
+	}
+}
+
+// readFirstSSEEvent reads until the first SSE data line, the end of the stream,
+// or probeStreamReadLimit. It returns a read error (for example the stream
+// timeout) so the caller classifies the probe as inconclusive instead of
+// hanging; a cleanly closed stream counts as accepted.
+func readFirstSSEEvent(body io.Reader) error {
+	reader := bufio.NewReader(io.LimitReader(body, probeStreamReadLimit))
+	for {
+		line, err := reader.ReadString('\n')
+		if strings.HasPrefix(strings.TrimSpace(line), "data:") {
+			return nil
+		}
+		switch {
+		case err == nil:
+			continue
+		case err == io.EOF:
+			return nil
+		default:
+			return err
+		}
+	}
+}
+
+// probeResponseSnippet renders a bounded, single-line, key-redacted snippet of
+// an error response body for protocol_errors.
+func probeResponseSnippet(body io.Reader, apiKey string) string {
+	raw, _ := io.ReadAll(io.LimitReader(body, probeErrorBodyReadLimit))
+	text := strings.TrimSpace(string(raw))
+	if text == "" {
+		return ""
+	}
+	if apiKey != "" {
+		text = strings.ReplaceAll(text, apiKey, "[redacted]")
+	}
+	text = strings.Join(strings.Fields(text), " ")
+	if runes := []rune(text); len(runes) > probeErrorBodyMaxRunes {
+		text = string(runes[:probeErrorBodyMaxRunes]) + "…"
+	}
+	return text
 }
 
 func statusRank(status string) int {
