@@ -122,11 +122,10 @@ test("the desktop row is a compact single line without the description", async (
   assert.match(name, /white-space: nowrap;/);
 });
 
-test("<=640px turns the same DOM into a three-line card without overflow", async () => {
+test("<=1040px turns the same DOM into a three-line card without overflow", async () => {
   const css = await readFile(resolve(webRoot, "src", "styles.css"), "utf8");
-  // The model page owns an earlier 640px block; pick the MCP one by content.
-  const block = mediaBlocks(css, "max-width: 640px").find(candidate => candidate.includes(".mcp-row")) ?? "";
-  assert.notEqual(block, "", "a max-width: 640px MCP block must exist");
+  const block = mediaBlocks(css, "max-width: 1040px").find(candidate => candidate.includes(".mcp-row")) ?? "";
+  assert.notEqual(block, "", "a max-width: 1040px MCP card block must exist");
   assert.match(ruleFor(block, ".mcp-list-head"), /display: none;/);
   const row = ruleFor(block, ".mcp-row");
   assert.match(row, /display: grid;/);
@@ -137,13 +136,59 @@ test("<=640px turns the same DOM into a three-line card without overflow", async
   assert.match(ruleFor(block, ".mcp-row .mcp-status"), /grid-area: status;/);
   assert.match(ruleFor(block, ".mcp-row .mcp-actions"), /grid-area: actions;/);
   assert.match(ruleFor(block, ".mcp-actions button"), /min-height: 36px;/);
-  assert.match(ruleFor(block, ".mcp-page"), /padding-bottom: calc\(96px \+ env\(safe-area-inset-bottom\)\);/);
   // No fixed column may exceed a 360px viewport once the list becomes cards.
   for (const rule of rules(block)) {
     for (const match of rule.body.matchAll(/width:\s*(\d+)px/g)) {
       assert.ok(Number(match[1]) <= 400, `fixed width ${match[1]}px in ${rule.selectors.join(",")}`);
     }
   }
+
+  const phone = mediaBlocks(css, "max-width: 640px").find(candidate => candidate.includes(".mcp-page")) ?? "";
+  assert.notEqual(phone, "", "the <=640px block keeps the phone bottom padding");
+  assert.match(ruleFor(phone, ".mcp-page"), /padding-bottom: calc\(96px \+ env\(safe-area-inset-bottom\)\);/);
+});
+
+test("the 641-1040px band keeps names visible and every action reachable", async () => {
+  const css = await readFile(resolve(webRoot, "src", "styles.css"), "utf8");
+  // The app shell keeps its 228px sidebar plus the 8px resizer through 1040px;
+  // this arithmetic mirrors that layout without a browser dependency.
+  const sidebar = Number(css.match(/--sidebar-width:\s*(\d+)px/)?.[1] ?? NaN)
+    + Number(css.match(/\.sidebar-resizer \{[^}]*?width:\s*(\d+)px/)?.[1] ?? NaN);
+  const pagePadding = Number(css.match(/^\.page \{[^}]*?padding:\s*(\d+)px;/m)?.[1] ?? NaN);
+  const mobilePage = mediaBlocks(css, "max-width: 760px")
+    .map(block => block.match(/\.page \{[^}]*?padding:\s*\d+px (\d+)px/m)?.[1])
+    .find(Boolean);
+  assert.ok(Number.isFinite(sidebar) && Number.isFinite(pagePadding) && mobilePage, "app shell metrics must be readable");
+
+  const card = mediaBlocks(css, "max-width: 1040px").find(candidate => candidate.includes(".mcp-row")) ?? "";
+  assert.notEqual(card, "", "the card block must cover the intermediate band");
+  const cardRow = ruleFor(card, ".mcp-row");
+  const cardPadding = Number(cardRow.match(/padding:\s*\d+px (\d+)px/)?.[1] ?? NaN);
+  const desktopRow = rules(css)
+    .filter(rule => rule.selectors.includes(".mcp-row"))
+    .map(rule => rule.body)
+    .join(" ");
+  const columns = desktopRow.match(/grid-template-columns:([^;]+);/)?.[1] ?? "";
+  const fixedColumns = [...columns.matchAll(/(\d+)px/g)].reduce((sum, match) => sum + Number(match[1]), 0);
+  const gap = Number(desktopRow.match(/gap:\s*\d+px (\d+)px/)?.[1] ?? NaN);
+  assert.ok(Number.isFinite(cardPadding) && fixedColumns > 0 && Number.isFinite(gap), "row metrics must be readable");
+
+  // Three 2-glyph actions at 12px plus 10px side padding and two 6px gaps.
+  const actionsWidth = 3 * (2 * 10 + 24) + 2 * 6;
+  const nameFloor = 200;
+  for (const width of [641, 700, 761, 768, 800, 829, 830, 880, 1040]) {
+    assert.ok(width <= 1040, `${width}px must be covered by the card block`);
+    const chrome = width > 760 ? sidebar : 0;
+    const padding = width > 760 ? pagePadding : Number(mobilePage);
+    const rowWidth = width - chrome - padding * 2 - 2 - cardPadding * 2;
+    assert.ok(rowWidth >= nameFloor, `${width}px leaves the name only ${rowWidth}px`);
+    assert.ok(rowWidth >= actionsWidth, `${width}px leaves actions only ${rowWidth}px of ${actionsWidth}px`);
+  }
+
+  // At the first desktop pixel the four fixed columns still leave the name a
+  // readable floor once the same shell and row padding are subtracted.
+  const desktopRowWidth = 1041 - sidebar - pagePadding * 2 - 2 - cardPadding * 2;
+  assert.ok(desktopRowWidth - fixedColumns - gap * 3 >= 140, `1041px name width ${desktopRowWidth - fixedColumns - gap * 3}px`);
 });
 
 test("built-in servers stay read-only and keep their badges", () => {

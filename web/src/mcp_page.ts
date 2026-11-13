@@ -4,9 +4,10 @@ import {icon} from "./icons.js";
 import type {MCPServer} from "./types.js";
 
 // The MCP page is one list at every width. >=1041px renders it as a compact
-// table-like row (name, connection, status, actions); every narrower viewport
-// turns the same article into a three-line card. All hooks use .mcp-* so the
-// model page's .models-table responsive rules never apply here.
+// table-like row (name, connection, status, actions); <=1040px turns the same
+// article into a three-line card, because the visible 228px sidebar leaves the
+// fixed action columns no room below that. All hooks use .mcp-* so the model
+// page's .models-table responsive rules never apply here.
 
 export interface MCPDraft {
   name: string;

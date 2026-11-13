@@ -2843,11 +2843,12 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
   .command-palette-help { display: none; }
 }
 
-/* MCP page: below 640px the same row DOM folds into a three-line card (name,
-   connection + status, actions). These blocks stay last so the model-page
-   media queries keep their document order. */
-@media (max-width: 640px) {
-  .mcp-page { padding-bottom: calc(96px + env(safe-area-inset-bottom)); }
+/* MCP page: the four-column line needs the full 1041px desktop width. Between
+   641 and 1040px the 228px sidebar is still visible and leaves the fixed
+   112+190+208px columns no room for the name (or pushes actions past the
+   viewport), so the same row DOM folds into a three-line card there too.
+   These blocks stay last so the model-page media queries keep their order. */
+@media (max-width: 1040px) {
   .mcp-list-head { display: none; }
   .mcp-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "name name" "conn status" "actions actions"; align-items: center; gap: 4px 10px; min-height: 0; padding: 10px 12px; }
   .mcp-row .mcp-name { grid-area: name; width: 100%; }
@@ -2856,6 +2857,10 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
   .mcp-row .mcp-status { grid-area: status; justify-self: end; }
   .mcp-row .mcp-actions { grid-area: actions; justify-content: flex-end; }
   .mcp-actions button { min-height: 36px; }
+}
+
+@media (max-width: 640px) {
+  .mcp-page { padding-bottom: calc(96px + env(safe-area-inset-bottom)); }
   .mcp-dialog { width: calc(100vw - 20px); }
   .mcp-detail-meta > div { grid-template-columns: 68px minmax(0, 1fr); }
 }
