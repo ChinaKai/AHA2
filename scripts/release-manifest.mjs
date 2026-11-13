@@ -39,7 +39,11 @@ function normalizeVersion(version) {
   if (typeof version !== "string" || version.trim() === "") {
     throw new Error("manifest version must be a non-empty string");
   }
-  return version.trim().replace(/^v/i, "");
+  const normalized = version.trim().replace(/^v/i, "");
+  if (normalized === "") {
+    throw new Error("manifest version must name a version after the v prefix");
+  }
+  return normalized;
 }
 
 function requireNonEmpty(name, value) {

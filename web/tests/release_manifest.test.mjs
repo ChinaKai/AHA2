@@ -86,6 +86,11 @@ test("release manifest rejects empty file lists, duplicate entries and missing i
     /version/,
   );
   await assert.rejects(
+    buildManifest({root, version: "v", commit: "abc", generator: {script: "s.sh"}, files: ["aha2-windows-amd64.exe"]}),
+    /version/,
+    "a version that is only a v prefix must be rejected, not stored as an empty string",
+  );
+  await assert.rejects(
     buildManifest({root, version: "1.2.3", commit: "", generator: {script: "s.sh"}, files: ["aha2-windows-amd64.exe"]}),
     /commit/,
   );

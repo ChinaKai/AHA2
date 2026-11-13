@@ -130,14 +130,24 @@ fi
   exit 1
 }
 
+# GO_BIN may be an absolute path or a bare command name (release CI passes
+# GO_BIN=go). Resolve bare names through PATH instead of testing the literal
+# string as a file.
 if [[ -n "${GO_BIN:-}" ]]; then
-  go_bin="$GO_BIN"
+  if [[ "$GO_BIN" == */* ]]; then
+    go_bin="$GO_BIN"
+  else
+    go_bin="$(command -v "$GO_BIN" 2>/dev/null || true)"
+  fi
 elif [[ -x "$repo_dir/.tools/go/bin/go" ]]; then
   go_bin="$repo_dir/.tools/go/bin/go"
 else
   go_bin="$(command -v go || true)"
 fi
-[[ -n "$go_bin" && -x "$go_bin" ]] || { printf 'Go toolchain was not found; set GO_BIN.\n' >&2; exit 1; }
+[[ -n "$go_bin" && -x "$go_bin" ]] || {
+  printf 'Go toolchain was not found: GO_BIN=%s\n' "${GO_BIN:-}" >&2
+  exit 1
+}
 command -v sha256sum >/dev/null 2>&1 || { printf 'sha256sum was not found.\n' >&2; exit 1; }
 command -v tar >/dev/null 2>&1 || { printf 'tar was not found.\n' >&2; exit 1; }
 
@@ -219,10 +229,25 @@ printf '==> Build Windows tray\n'
 
 # The Feishu plugin is a nested Go module; neither the root `go test ./...` nor
 # the plugin compile reaches its tests, so the package build runs them itself.
+# The success marker is printed only after the captured test output reports an
+# ok package, so deleting the execution line fails the build instead of leaving
+# a green banner behind.
 printf '==> Test Feishu plugin\n'
-(cd "$build_dir/plugins/feishu" && "$go_bin" test ./...)
+plugin_test_output="$(cd "$build_dir/plugins/feishu" && "$go_bin" test ./... 2>&1)" || {
+  printf '%s\n' "$plugin_test_output" >&2
+  printf 'Feishu plugin tests failed.\n' >&2
+  exit 1
+}
+printf '%s\n' "$plugin_test_output"
+# Either an ok package or an explicit "no test files" result is evidence that
+# `go test` ran; empty output means the invocation was removed.
+if ! grep -Eq '^(ok|\?)[[:space:]]' <<<"$plugin_test_output"; then
+  printf 'Feishu plugin tests did not report a package result.\n' >&2
+  exit 1
+fi
 printf '==> Vet Feishu plugin\n'
 (cd "$build_dir/plugins/feishu" && "$go_bin" vet ./...)
+printf '==> Feishu plugin tests passed\n'
 printf '==> Build Feishu plugin\n'
 GO_BIN="$go_bin" AHA2_PLUGIN_OUTPUT_DIR="$feishu_dir" \
   bash "$build_dir/scripts/build-feishu-plugin.sh" windows/amd64
@@ -245,6 +270,13 @@ if grep -q "SET_BY_PACKAGING" "$feishu_manifest"; then
 fi
 
 printf '==> Write release manifest\n'
+# Record the full invocation so replaying from a source snapshot (no .git) can
+# reproduce the same package: the commit and test options are part of the
+# generator description, and the output path is shell-quoted.
+generator_command="bash scripts/build-windows-package.sh --version $version --commit $commit --output-dir $(printf '%q' "$output_dir")"
+if ((run_web_test == 0)); then
+  generator_command+=" --skip-web-test"
+fi
 "$node_bin" "$build_dir/scripts/release-manifest.mjs" \
   --root "$output_dir" \
   --version "$version" \
@@ -252,7 +284,7 @@ printf '==> Write release manifest\n'
   --built-at "$built_at" \
   --output "$manifest_path" \
   --generator-script "scripts/build-windows-package.sh" \
-  --generator-command "bash scripts/build-windows-package.sh --version $version --output-dir $output_dir" \
+  --generator-command "$generator_command" \
   --web-version "$web_version" \
   --go-version "$go_version" \
   --node-version "$node_version" \

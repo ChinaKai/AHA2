@@ -215,10 +215,12 @@ type releaseManifest struct {
 func TestWindowsPackageBuildProducesAllArtifacts(t *testing.T) {
 	requirePackageBuildTools(t)
 	root := repoRoot(t)
-	output := t.TempDir()
+	// A space in the output path proves the manifest generator command quotes it.
+	output := filepath.Join(t.TempDir(), "package dir")
 	const version = "1.2.3"
 	const commit = "0123456789abcdef0123456789abcdef01234567"
 	before := snapshotSourceTree(t, root)
+	recorder, goCallLog, realGo := installGoCallRecorder(t, t.TempDir())
 	cmd := exec.Command(buildScriptPath(root),
 		"--version", version,
 		"--commit", commit,
@@ -226,15 +228,24 @@ func TestWindowsPackageBuildProducesAllArtifacts(t *testing.T) {
 		"--skip-web-test",
 	)
 	cmd.Dir = root
-	cmd.Env = append(os.Environ(), "VERSION=")
+	cmd.Env = append(os.Environ(), "VERSION=",
+		"GO_BIN="+recorder,
+		"AHA2_REAL_GO="+realGo,
+		"AHA2_GO_CALL_LOG="+goCallLog,
+	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("build-windows-package.sh failed: %v\n%s", err, out)
 	}
 	assertSourceTreeUnchanged(t, before, snapshotSourceTree(t, root))
-	if !strings.Contains(string(out), "==> Test Feishu plugin") {
-		t.Error("package build did not run the nested Feishu plugin tests")
+	// The banner alone is not evidence: it could print before the test runs.
+	// The recorder proves the build actually invoked `go test` and `go vet` in
+	// the nested plugin module.
+	if !strings.Contains(string(out), "==> Feishu plugin tests passed") {
+		t.Error("package build did not report the Feishu plugin tests as passed")
 	}
+	assertGoCall(t, goCallLog, "test ./...", "plugins/feishu")
+	assertGoCall(t, goCallLog, "vet ./...", "plugins/feishu")
 
 	required := []string{
 		"aha2-windows-amd64.exe",
@@ -290,6 +301,13 @@ func TestWindowsPackageBuildProducesAllArtifacts(t *testing.T) {
 	}
 	if manifest.Generator.Command == "" || manifest.Generator.WebVersion == "" || manifest.Generator.GoVersion == "" || manifest.Generator.NodeVersion == "" {
 		t.Errorf("manifest generator is incomplete: %+v", manifest.Generator)
+	}
+	// Replaying from a source snapshot needs the commit and test options in the
+	// recorded command, not just the version.
+	for _, want := range []string{"--version " + version, "--commit " + commit, "--output-dir", "--skip-web-test"} {
+		if !strings.Contains(manifest.Generator.Command, want) {
+			t.Errorf("manifest generator.command = %q, missing %q", manifest.Generator.Command, want)
+		}
 	}
 
 	got := make(map[string]releaseManifestFile, len(manifest.Files))
@@ -382,6 +400,31 @@ func TestWindowsPackageBuildWorksWithoutGitCheckout(t *testing.T) {
 	}
 }
 
+// TestWindowsPackageBuildAcceptsBareGoCommand covers the release workflow,
+// which passes GO_BIN=go rather than an absolute path.
+func TestWindowsPackageBuildAcceptsBareGoCommand(t *testing.T) {
+	bash := requirePackageBuildTools(t)
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go is not on PATH")
+	}
+	root := repoRoot(t)
+	output := t.TempDir()
+	cmd := exec.Command(bash, buildScriptPath(root),
+		"--version", "1.2.3",
+		"--commit", "0123456789abcdef0123456789abcdef01234567",
+		"--output-dir", output,
+		"--skip-web-test",
+	)
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(), "VERSION=", "GO_BIN=go")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build with GO_BIN=go failed: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(output, "release-manifest.json")); err != nil {
+		t.Fatalf("release manifest missing from the GO_BIN=go build: %v", err)
+	}
+}
+
 func requirePackageBuildTools(t *testing.T) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -395,6 +438,45 @@ func requirePackageBuildTools(t *testing.T) string {
 		t.Skip("bash is not available")
 	}
 	return bash
+}
+
+// installGoCallRecorder wraps the real go binary so the E2E can prove which
+// commands the build actually executed, including in the nested plugin module.
+func installGoCallRecorder(t *testing.T, dir string) (recorder, logPath, realGo string) {
+	t.Helper()
+	realGo, err := exec.LookPath("go")
+	if err != nil {
+		t.Skip("go is not on PATH")
+	}
+	logPath = filepath.Join(dir, "go-calls.log")
+	recorder = filepath.Join(dir, "go-recorder")
+	script := "#!/usr/bin/env bash\n" +
+		"set -euo pipefail\n" +
+		"printf '%s\\t%s\\n' \"$PWD\" \"$*\" >> \"$AHA2_GO_CALL_LOG\"\n" +
+		"exec \"$AHA2_REAL_GO\" \"$@\"\n"
+	if err := os.WriteFile(recorder, []byte(script), 0o755); err != nil {
+		t.Fatalf("write go recorder: %v", err)
+	}
+	return recorder, logPath, realGo
+}
+
+func assertGoCall(t *testing.T, logPath, wantArgs, cwdSuffix string) {
+	t.Helper()
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("go call log: %v", err)
+	}
+	wantSuffix := "/" + filepath.ToSlash(cwdSuffix)
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		cwd, args, ok := strings.Cut(line, "\t")
+		if !ok {
+			continue
+		}
+		if strings.HasSuffix(filepath.ToSlash(cwd), wantSuffix) && strings.HasPrefix(args, wantArgs) {
+			return
+		}
+	}
+	t.Errorf("go was never invoked as %q in %s; recorded calls:\n%s", wantArgs, cwdSuffix, data)
 }
 
 // snapshotSourceTree records every file in the checkout (generated directories
