@@ -3599,6 +3599,9 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   assert.ok(gzipped <= 256000, `first-screen JS gzip is ${gzipped} bytes`);
   const stylesheet = index.match(/rel="stylesheet" href="([^"]+)"/)?.[1];
   assert.match(stylesheet, /^\/styles\.[a-f0-9]{12}\.css$/);
+  // The first paint transfers the stylesheet too; budget the whole screen.
+  const stylesheetGzip = gzipSync(await readFile(resolve(dist, stylesheet.slice(1))), {level: 5}).length;
+  assert.ok(gzipped + stylesheetGzip <= 256000, `first-screen JS+CSS gzip is ${gzipped + stylesheetGzip} bytes`);
   assert.equal((index.match(/<script\b/g) || []).length, 1, "index must load one module script");
   assert.ok(!index.includes('src="/app.js"'));
 });
