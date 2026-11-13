@@ -1,7 +1,7 @@
 import {api, setAPIRequestObserver} from "./api.js";
 import type {APIRequestSample} from "./api.js";
 import {handlePetStreamEvent, mountAssistant, showPetSettings, notifyPetTaskIdle, notifyPetTaskReply, notifyPetTaskThinking, resumePetNavigation, setAssistantVisible} from "./assistant.js";
-import {MODEL_WIRE_OPTIONS, backendSelectOptionsHTML, backendsPanelHTML} from "./backends.js";
+import {MODEL_WIRE_OPTIONS, backendSelectOptionsHTML, backendsPanelHTML, modelWireEditOptionsHTML, persistedWireValue, resolveBackendOptions} from "./backends.js";
 import {bindPetDocEditorButtons, createPetWorkbenchLoader, createPetWorkbenchPageKeeper, PET_APPROVAL_MAX_LIMIT, petApprovalMatches, petApprovalPage, renderPetApprovalLoadMore, renderPetInspectionSummary, renderPetWorkbenchLoadError, swapPetWorkbenchPage} from "./pet_workbench.js";
 import type {PetWorkbenchPageBinding} from "./pet_workbench.js";
 import {renderConversationList} from "./conversation_ui.js";
@@ -1038,18 +1038,12 @@ function openProviderDialog(provider: Provider | null): void {
 // selected workspace's detection results. Falls back to the backends that have
 // configured models when the workspace has not been detected yet.
 function backendOptionsForWorkspace(ws?: Workspace): string[] {
-  if (ws) {
-    const caps = (ws.capabilities || {}) as Record<string, {status?: string}>;
-    const ready: string[] = [];
-    if (caps.codex?.status === "ready") ready.push("codex");
-    if (caps.claude?.status === "ready") ready.push("claude");
-    if (caps.dsh?.status === "ready") ready.push("dsh");
-    if (ready.length) return ready;
-    if (ws.health !== "unknown") return ready; // detected, none ready
-  }
-  const present = new Set(state.models.map(item => item.backend));
-  if (state.codexAccounts.length) present.add("codex");
-  return ["codex", "claude", "dsh"].filter(backend => present.has(backend));
+  return resolveBackendOptions({
+    capabilities: ws ? ((ws.capabilities || {}) as Record<string, {status?: string}>) : undefined,
+    detected: Boolean(ws && ws.health !== "unknown"),
+    presentBackends: state.models.map(item => item.backend),
+    hasCodexAccount: state.codexAccounts.length > 0,
+  });
 }
 
 function claudeOfficialCatalog(workspace?: Workspace): ClaudeOfficialCatalog {
@@ -3221,7 +3215,7 @@ function openEditModelDialog(id: string): void {
   const wireModelInput = document.querySelector<HTMLInputElement>("#model-edit-wire-model");
   if (wireModelInput) wireModelInput.value = model.wire_model || "";
   if (wireInput) {
-    wireInput.value = model.wire_api || (model.backend === "claude" ? "anthropic_messages" : "responses");
+    wireInput.value = persistedWireValue(model.wire_api || (model.backend === "claude" ? "anthropic_messages" : "responses"));
     wireInput.disabled = false;
   }
   if (backendInput) backendInput.value = model.backend;
@@ -3604,7 +3598,7 @@ function modelDialog(): string {
 }
 
 function editModelDialog(): string {
-  return `<dialog id="model-edit-dialog"><div class="dialog-head"><h2>编辑模型</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><div class="dialog-body"><label>显示名称<input id="model-edit-name"></label><label>模型 ID（发送给后端）<input id="model-edit-wire-model" spellcheck="false"><span class="field-help">决定实际调用的模型；Claude 走网关且需要 1M 上下文时，在此追加 [1m]。</span></label><div class="two"><label>模型协议<select id="model-edit-wire"><option value="responses">Responses</option><option value="chat">Chat Completions</option><option value="anthropic_messages">Anthropic Messages</option></select></label><label>Agent Backend<select id="model-edit-backend">${backendSelectOptionsHTML()}</select></label></div><div class="two"><label>默认推理强度<select id="model-edit-effort"><option value="">继承默认</option><option>high</option><option>medium</option><option>low</option></select></label><label>Context Window<input id="model-edit-context" type="number" value="0"></label></div><label>Max Output Tokens<input id="model-edit-maxout" type="number" value="0"></label><label>自动压缩窗口（tokens）<input id="model-edit-compact" type="number" min="0" step="1000" value="0"><span class="field-help">按上下文窗口的 80% 计算，并预留最大输出与 16K 余量；0 表示交给 Agent CLI 自己决定。Claude Code 和 Codex 会读取该值。</span></label><label class="security-setting-toggle"><input id="model-edit-image" type="checkbox"><span><strong>支持图片输入</strong><small>默认开启；仅当该模型确实不能接收图片时关闭。DSH 会据此在 profile 里声明 input 模态。</small></span></label><div class="dialog-actions"><button type="button" data-close>取消</button><button type="button" id="save-model-edit" class="primary">保存</button></div></div></dialog>`;
+  return `<dialog id="model-edit-dialog"><div class="dialog-head"><h2>编辑模型</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><div class="dialog-body"><label>显示名称<input id="model-edit-name"></label><label>模型 ID（发送给后端）<input id="model-edit-wire-model" spellcheck="false"><span class="field-help">决定实际调用的模型；Claude 走网关且需要 1M 上下文时，在此追加 [1m]。</span></label><div class="two"><label>模型协议<select id="model-edit-wire">${modelWireEditOptionsHTML()}</select></label><label>Agent Backend<select id="model-edit-backend">${backendSelectOptionsHTML()}</select></label></div><div class="two"><label>默认推理强度<select id="model-edit-effort"><option value="">继承默认</option><option>high</option><option>medium</option><option>low</option></select></label><label>Context Window<input id="model-edit-context" type="number" value="0"></label></div><label>Max Output Tokens<input id="model-edit-maxout" type="number" value="0"></label><label>自动压缩窗口（tokens）<input id="model-edit-compact" type="number" min="0" step="1000" value="0"><span class="field-help">按上下文窗口的 80% 计算，并预留最大输出与 16K 余量；0 表示交给 Agent CLI 自己决定。Claude Code 和 Codex 会读取该值。</span></label><label class="security-setting-toggle"><input id="model-edit-image" type="checkbox"><span><strong>支持图片输入</strong><small>默认开启；仅当该模型确实不能接收图片时关闭。DSH 会据此在 profile 里声明 input 模态。</small></span></label><div class="dialog-actions"><button type="button" data-close>取消</button><button type="button" id="save-model-edit" class="primary">保存</button></div></div></dialog>`;
 }
 
 function workspaceTakeoverDialog(): string {
@@ -5406,7 +5400,7 @@ function bindCommon(): void {
         // "leave it alone", so sending the current value is harmless but
         // sending "" would silently keep the old name.
         ...(wireModelValue ? {wire_model: wireModelValue} : {}),
-        wire_api: String((document.querySelector<HTMLSelectElement>("#model-edit-wire"))?.value || "responses"),
+        wire_api: persistedWireValue(String((document.querySelector<HTMLSelectElement>("#model-edit-wire"))?.value || "responses")),
         backend: String((document.querySelector<HTMLSelectElement>("#model-edit-backend"))?.value || ""),
         context_window: Number((document.querySelector<HTMLInputElement>("#model-edit-context"))?.value || 0),
         max_output_tokens: Number((document.querySelector<HTMLInputElement>("#model-edit-maxout"))?.value || 0),

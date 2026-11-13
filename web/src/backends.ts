@@ -33,6 +33,19 @@ export interface ModelWireOption {
   backends: string[];
 }
 
+export interface ModelWireEditOption {
+  value: string;
+  label: string;
+  runtime: ModelWire;
+}
+
+export interface BackendOptionInput {
+  capabilities?: Record<string, {status?: string}>;
+  detected: boolean;
+  presentBackends: Iterable<string>;
+  hasCodexAccount: boolean;
+}
+
 const WIRE_LABELS: Array<{wire: ModelWire; label: string}> = [
   {wire: "responses", label: "Responses"},
   {wire: "chat_completions", label: "Chat Completions"},
@@ -89,6 +102,50 @@ export const MODEL_WIRE_OPTIONS: ModelWireOption[] = WIRE_LABELS.map(item => ({
   label: item.label,
   backends: SUPPORTED_BACKENDS.filter(backend => backend.protocols.some(protocol => protocol.wire === item.wire)).map(backend => backend.id),
 }));
+
+// Runtime pickers historically list Codex first; keep that order while making
+// the catalog the membership source. Backends added to the catalog later append
+// here automatically.
+const PREFERRED_RUNTIME_ORDER = ["codex", "claude", "dsh"];
+export const SUPPORTED_BACKEND_IDS: string[] = [
+  ...PREFERRED_RUNTIME_ORDER.filter(id => SUPPORTED_BACKENDS.some(backend => backend.id === id)),
+  ...SUPPORTED_BACKENDS.map(backend => backend.id).filter(id => !PREFERRED_RUNTIME_ORDER.includes(id)),
+];
+
+// resolveBackendOptions decides which backends a Task may select. Detected
+// workspaces contribute their ready backends; before detection, fall back to
+// backends that already have models or accounts configured.
+export function resolveBackendOptions(input: BackendOptionInput): string[] {
+  const capabilities = input.capabilities;
+  if (capabilities) {
+    const ready = SUPPORTED_BACKEND_IDS.filter(id => capabilities[id]?.status === "ready");
+    if (ready.length) return ready;
+    if (input.detected) return ready;
+  }
+  const present = new Set(input.presentBackends);
+  if (input.hasCodexAccount) present.add("codex");
+  return SUPPORTED_BACKEND_IDS.filter(id => present.has(id));
+}
+
+// The API persists Chat Completions as "chat"; probes and add-model requests
+// use the wire name "chat_completions". Keep both directions in one place.
+export function persistedWireValue(wire: string): string {
+  return wire === "chat_completions" ? "chat" : wire;
+}
+
+export function runtimeWireValue(wire: string): ModelWire {
+  return (wire === "chat" ? "chat_completions" : wire) as ModelWire;
+}
+
+export const MODEL_WIRE_EDIT_OPTIONS: ModelWireEditOption[] = MODEL_WIRE_OPTIONS.map(option => ({
+  value: persistedWireValue(option.value),
+  label: option.label,
+  runtime: option.value,
+}));
+
+export function modelWireEditOptionsHTML(): string {
+  return MODEL_WIRE_EDIT_OPTIONS.map(option => `<option value="${escapeHTML(option.value)}">${escapeHTML(option.label)}</option>`).join("");
+}
 
 export function supportedBackendName(id: string): string {
   return SUPPORTED_BACKENDS.find(backend => backend.id === id)?.name ?? id;
