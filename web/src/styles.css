@@ -1285,7 +1285,7 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 .proto.dsh { background: #e8f7f1; color: #087f5b; }
 .proto.none { background: #eef1f4; color: var(--muted); }
 .capability-badge { display: inline-block; margin-left: 6px; padding: 1px 5px; border-radius: 999px; background: #e8f7f1; color: #087f5b; font-size: 9px; font-weight: 800; vertical-align: 1px; }
-.model-health-cell { min-width: 128px; }
+.model-health-cell { min-width: 0; }
 .model-select-cell { width: 34px; padding-right: 6px; }
 .models-table input[type="checkbox"] { width: 15px; height: 15px; min-width: 15px; margin: 0; padding: 0; accent-color: var(--color-accent); }
 .model-group-row td { background: var(--color-surface-muted); border-bottom-color: var(--color-border-subtle); }
@@ -1300,9 +1300,36 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 .model-health { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .model-health .status { white-space: nowrap; }
 .model-health .health-check-button { padding: 3px 8px; font-size: 10px; }
-.model-health-detail { margin-top: 4px; }
-.model-health-detail summary { color: var(--muted); font-size: 10px; cursor: pointer; }
-.model-health-detail small { display: block; margin-top: 2px; color: var(--muted); font-size: 10px; word-break: break-all; }
+/* The expandable evidence lives inside the row's health cell. It is positioned
+   out of flow so opening it cannot stretch the compact 48px row; the summary
+   stays on the line and the panel opens over the rows below. */
+.model-health-detail { position: relative; display: inline-flex; align-items: center; margin-top: 0; }
+.model-health-detail summary { color: var(--muted); font-size: 10px; white-space: nowrap; cursor: pointer; }
+.model-health-detail small { display: block; position: absolute; top: calc(100% + 4px); right: 0; z-index: 20; width: max-content; max-width: min(260px, 62vw); margin-top: 0; padding: 8px 10px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-surface); box-shadow: 0 6px 18px rgba(15, 23, 42, .16); color: var(--muted); font-size: 10px; text-align: left; white-space: normal; word-break: break-all; }
+/* The model list is one compact line at every width: checkbox, name, then the
+   health badge, check button, edit and delete in a single actions cell. Only
+   three table columns exist, so the table fits any desktop width instead of
+   clipping availability/action cells, and the row height stays near a button. */
+.models-table-wrap .models-table { table-layout: fixed; }
+.models-table-wrap .models-table th,
+.models-table-wrap .models-table td { padding: 6px 10px; vertical-align: middle; }
+.models-table-wrap .models-table thead th { padding-top: 8px; padding-bottom: 8px; white-space: nowrap; }
+.models-table-wrap .models-table th:nth-child(1),
+.models-table-wrap .models-table td:nth-child(1) { width: 34px; padding-right: 0; }
+.models-table-wrap .models-table th:nth-child(3),
+.models-table-wrap .models-table td:nth-child(3) { width: 272px; padding-left: 0; text-align: right; }
+.models-table-wrap .models-table .model-row { height: 48px; }
+.models-table-wrap .models-table .model-name-cell { min-width: 0; overflow: hidden; }
+.models-table-wrap .models-table .model-name-cell strong { display: flex; align-items: center; gap: 4px; min-width: 0; font-size: 13px; }
+.models-table-wrap .models-table .model-name-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.models-table-wrap .models-table .model-name-cell .capability-badge { flex: 0 0 auto; }
+.models-table-wrap .models-table .model-actions-cell { white-space: nowrap; }
+.model-row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+.model-row-actions .model-health-cell { display: inline-flex; align-items: center; min-width: 0; }
+.model-row-actions .model-health { flex-wrap: nowrap; }
+.model-row-actions .row-actions { flex-wrap: nowrap; }
+.model-row-actions .icon-button { width: 36px; min-width: 36px; min-height: 36px; padding: 0; }
+.model-row-actions .health-check-button { min-height: 36px; padding: 0 10px; font-size: 11px; white-space: nowrap; }
 .detect-status { margin-top: 10px; color: var(--muted); font-size: 11px; }
 .two { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }
 .hardware-resource-dialog [hidden] { display: none !important; }
@@ -1867,7 +1894,6 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
   .prompt-template-list { display: flex; max-width: 100%; overflow-x: auto; overflow-y: hidden; border-right: 0; border-bottom: 1px solid var(--line); }
   .prompt-template-item { flex: 0 0 210px; border-right: 1px solid var(--line); }
   .prompt-editor { padding: 12px; }
-  .models-table-wrap .models-table th:nth-child(3), .models-table-wrap .models-table td:nth-child(3), .models-table-wrap .models-table th:nth-child(5), .models-table-wrap .models-table td:nth-child(5) { display: none; }
   .model-batch-bar { flex-wrap: wrap; }
   .model-batch-actions { justify-content: flex-start; }
   .task-screen { width: 100%; max-width: 100vw; min-width: 0; height: calc(var(--visual-viewport-height) - var(--mobile-bottom-nav-height)); padding: 0; overflow: hidden; }
@@ -2634,37 +2660,30 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
   .data-cleanup-actions button { width: 100%; }
   .data-cleanup-actions input { width: 84px; }
 
-  /* Models on phones: the same table rows become Provider-grouped cards. One
-     DOM stays in place, so the delegated row handlers and the >640px table are
-     untouched; only the table display box changes here. */
+  /* Models on phones: the same compact single-line rows as the desktop table,
+     only tighter. The table boxes become block/flex so the action group can
+     shrink the name instead of overflowing the 360px viewport. One DOM stays
+     in place, so the delegated row handlers keep working unchanged. */
   .models-page { padding-bottom: calc(96px + env(safe-area-inset-bottom)); }
   .models-table-wrap { overflow: visible; }
-  /* The MCP list also uses .models-table; every card rule is scoped to the
-     model page wrapper so that table keeps its desktop layout on phones. */
+  /* The MCP list also uses .models-table; every phone rule is scoped to the
+     model page wrapper so that table keeps its desktop layout. */
   .models-table-wrap .models-table,
   .models-table-wrap .models-table thead,
   .models-table-wrap .models-table tbody { display: block; width: 100%; }
-  .models-table-wrap .models-table thead tr { display: flex; align-items: center; gap: 8px; padding: 7px 12px; border-bottom: 1px solid var(--color-border); }
+  .models-table-wrap .models-table thead tr { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-bottom: 1px solid var(--color-border); }
   .models-table-wrap .models-table thead th { display: none; padding: 0; border: 0; }
   .models-table-wrap .models-table thead th.model-select-cell { display: flex; align-items: center; gap: 8px; width: auto; min-width: 0; }
   .models-page .model-page-select-label { display: inline; color: var(--color-text-muted); font-size: 11px; font-weight: 600; }
   .models-table-wrap .models-table tbody > tr { display: block; }
-  .models-table-wrap .models-table td,
-  .models-table-wrap .models-table td:nth-child(3),
-  .models-table-wrap .models-table td:nth-child(5) { display: block; min-width: 0; padding: 0; border: 0; }
-  .models-table-wrap .models-table .model-row { display: grid; grid-template-columns: 20px minmax(0,1fr) auto; column-gap: 8px; row-gap: 7px; padding: 12px; border-bottom: 1px solid var(--color-border); }
-  .models-table-wrap .models-table .model-row > td.model-select-cell { display: flex; align-items: flex-start; width: auto; padding-top: 2px; }
-  .models-table-wrap .models-table .model-row > td.model-name-cell { grid-column: 2; grid-row: 1; min-width: 0; }
-  .models-table-wrap .models-table .model-row > td.row-actions { grid-column: 3; grid-row: 1; display: flex; gap: 4px; }
-  .models-table-wrap .models-table .model-row > td[data-label] { grid-column: 1 / -1; overflow-wrap: anywhere; }
-  .models-table-wrap .models-table .model-row > td[data-label]::before { display: block; margin-bottom: 3px; color: var(--color-text-muted); font-size: 10px; font-weight: 700; content: attr(data-label); }
-  .models-table-wrap .models-table .model-name-cell strong { overflow-wrap: anywhere; font-size: 13px; }
-  .models-table-wrap .models-table .model-name-cell small { overflow-wrap: anywhere; }
-  .models-table-wrap .models-table td.model-health-cell { min-width: 0; }
-  .models-table-wrap .models-table .model-row .row-actions .icon-button { width: 36px; min-width: 36px; min-height: 36px; padding: 0; }
-  .models-table-wrap .models-table .model-row .health-check-button { min-height: 36px; padding: 0 12px; font-size: 12px; }
+  .models-table-wrap .models-table td { display: block; min-width: 0; padding: 0; border: 0; }
+  .models-table-wrap .models-table .model-row { display: flex; align-items: center; gap: 8px; height: auto; min-height: 48px; padding: 4px 10px; border-bottom: 1px solid var(--color-border); }
+  .models-table-wrap .models-table .model-row > td.model-select-cell { display: flex; flex: 0 0 18px; align-items: center; width: auto; padding: 0; }
+  .models-table-wrap .models-table .model-row > td.model-name-cell { flex: 1 1 auto; width: auto; min-width: 0; overflow: hidden; }
+  .models-table-wrap .models-table .model-row > td.model-actions-cell { flex: 0 0 auto; width: auto; padding: 0; }
+  .models-table-wrap .models-table .model-row .model-name-cell strong { font-size: 13px; }
   .models-table-wrap .models-table input[type="checkbox"] { width: 18px; height: 18px; min-width: 18px; }
-  .models-table-wrap .models-table .model-group-row { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--color-border-subtle); background: var(--color-surface-muted); }
+  .models-table-wrap .models-table .model-group-row { display: flex; align-items: center; gap: 8px; padding: 9px 10px; border-bottom: 1px solid var(--color-border-subtle); background: var(--color-surface-muted); }
   .models-table-wrap .models-table .model-group-row > td { padding: 0; border: 0; }
   .models-table-wrap .models-table .model-group-row > td.model-group-title { display: flex; flex: 1 1 auto; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; order: 1; min-width: 0; }
   .models-table-wrap .models-table .model-group-row > td.model-select-cell { display: flex; align-items: center; gap: 6px; order: 2; width: auto; margin-left: auto; }
@@ -2677,16 +2696,16 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 }
 
 @media (max-width: 400px) {
-  .models-table-wrap .models-table .model-row { grid-template-columns: 18px minmax(0,1fr) auto; column-gap: 6px; padding: 10px; }
-  .models-table-wrap .models-table .model-group-row { padding: 9px 10px; }
+  .models-table-wrap .models-table .model-row { gap: 6px; padding: 4px 8px; }
+  .models-table-wrap .models-table .model-group-row { padding: 8px 10px; }
   .models-page .model-batch-bar { padding: 9px 10px; }
 }
 
 @media (max-width: 360px) {
-  .models-table-wrap .models-table .model-row { padding: 9px 8px; }
-  .models-table-wrap .models-table .model-row .row-actions { gap: 2px; }
+  .models-table-wrap .models-table .model-row { gap: 5px; padding: 4px 6px; }
+  .models-table-wrap .models-table .model-row .model-row-actions { gap: 4px; }
   .models-table-wrap .models-table .model-name-cell strong { font-size: 12px; }
-  .models-table-wrap .models-table .model-row .health-check-button { padding: 0 9px; }
+  .models-table-wrap .models-table .model-actions-cell .health-check-button { padding: 0 7px; font-size: 10px; }
 }
 
 /* Pet settings is a page, not a modal: keep the sidebar visible and render
