@@ -587,6 +587,135 @@ func TestCheckModelHealthStreamOptions400IsNotRetried(t *testing.T) {
 	}
 }
 
+// TestModelHealthRequiresStreamingMatcher pins both directions of the
+// heuristic: field-name rejections must not retry, negations must not retry,
+// and explicit Chinese "only streaming" wording must retry.
+func TestModelHealthRequiresStreamingMatcher(t *testing.T) {
+	t.Parallel()
+	for _, detail := range []string{
+		"this model requires streaming",
+		"streaming mode is required",
+		"streaming is required",
+		"must be streamed",
+		"must use stream",
+		"only supports streaming",
+		"只支持流式",
+		"仅支持流式",
+		"必须使用流式",
+		"需要使用流式",
+		"必须流式",
+	} {
+		if !modelHealthRequiresStreaming(detail) {
+			t.Errorf("%q should trigger the streaming retry", detail)
+		}
+	}
+	for _, detail := range []string{
+		"",
+		`{"error":{"message":"invalid stream_options parameter"}}`,
+		`{"error":{"message":"invalid streaming mode parameter"}}`,
+		"不需要流式",
+		"无需使用流式",
+		"不需要使用流式",
+		"streaming is not required",
+		"no need to stream",
+		"this request does not require streaming",
+	} {
+		if modelHealthRequiresStreaming(detail) {
+			t.Errorf("%q must not trigger the streaming retry", detail)
+		}
+	}
+}
+
+// TestCheckModelHealthStreamingRetryRejectionsAreSingleRequest is the request
+// count side of the matcher: only a real "must stream" message retries.
+func TestCheckModelHealthStreamingRetryRejectionsAreSingleRequest(t *testing.T) {
+	t.Parallel()
+	for _, message := range []string{
+		"invalid stream_options parameter",
+		"invalid streaming mode parameter",
+		"不需要流式",
+	} {
+		message := message
+		t.Run(message, func(t *testing.T) {
+			t.Parallel()
+			var mu sync.Mutex
+			requests := 0
+			client := &http.Client{Transport: probeRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+				mu.Lock()
+				requests++
+				mu.Unlock()
+				return healthJSONResponse(http.StatusBadRequest, `{"error":{"message":"`+message+`"}}`, nil), nil
+			})}
+			health := CheckModelHealth(context.Background(), client, "https://gateway.example/v1", "", "secret-key",
+				"bearer", "codex", "model-x", "responses", 5*time.Second)
+			if health.Status != ModelHealthRejected {
+				t.Fatalf("status=%q want rejected (detail=%q)", health.Status, health.Detail)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if requests != 1 {
+				t.Fatalf("message %q was retried: requests=%d", message, requests)
+			}
+		})
+	}
+}
+
+func TestCheckModelHealthChineseStreamingOnlyRetries(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	requests := 0
+	client := &http.Client{Transport: probeRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		var payload map[string]any
+		_ = json.NewDecoder(request.Body).Decode(&payload)
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		if stream, _ := payload["stream"].(bool); !stream {
+			return healthJSONResponse(http.StatusBadRequest, `{"error":{"message":"该模型只支持流式调用"}}`, nil), nil
+		}
+		return probeSSEResponse("event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n"), nil
+	})}
+	health := CheckModelHealth(context.Background(), client, "https://gateway.example/v1", "", "secret-key",
+		"bearer", "codex", "model-x", "responses", 5*time.Second)
+	if health.Status != ModelHealthOK {
+		t.Fatalf("status=%q detail=%q", health.Status, health.Detail)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if requests != 2 {
+		t.Fatalf("requests=%d want 2 (non-streaming plus one streaming retry)", requests)
+	}
+}
+
+// TestCheckModelHealthRejectsUnknownBackend covers the runtime rule that an
+// unknown or empty backend never starts a Task, so reporting a live endpoint
+// as ok would be a guaranteed false positive.
+func TestCheckModelHealthRejectsUnknownBackend(t *testing.T) {
+	t.Parallel()
+	for _, backend := range []string{"openai", ""} {
+		backend := backend
+		t.Run("backend="+backend, func(t *testing.T) {
+			t.Parallel()
+			calls := 0
+			client := &http.Client{Transport: probeRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+				calls++
+				return healthJSONResponse(http.StatusOK, `{}`, nil), nil
+			})}
+			health := CheckModelHealth(context.Background(), client, "https://gateway.example/v1", "", "secret-key",
+				"bearer", backend, "model-x", "", 5*time.Second)
+			if health.Status != ModelHealthInconclusive {
+				t.Fatalf("status=%q want inconclusive (detail=%q)", health.Status, health.Detail)
+			}
+			if calls != 0 {
+				t.Fatalf("unknown backend %q reached the gateway, calls=%d", backend, calls)
+			}
+			if !strings.Contains(health.Detail, "backend") {
+				t.Fatalf("detail does not name the backend problem: %q", health.Detail)
+			}
+		})
+	}
+}
+
 func TestCheckModelHealthRedactionOnNonBodyEvidence(t *testing.T) {
 	t.Parallel()
 	secret := "secret-key"

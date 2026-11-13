@@ -10,8 +10,9 @@
 
 - 从模型记录读取 `provider_id`、`backend`、`wire_model`、`wire_api`。存储值 `chat` 与
   `chat_completions` 等价（Provider/模型接口会把后者规范成 `chat`）；`wire_api` 为空时按
-  backend 推断：`claude` → `anthropic_messages`，`codex`/`dsh` → `responses`。backend 与
-  wire_api 不兼容（如 Claude + Responses）直接返回 `inconclusive`，不发请求。
+  backend 推断：`claude` → `anthropic_messages`，`codex`/`dsh` → `responses`。未知或空
+  backend 与运行时一致直接判定失败（返回 `inconclusive`，不向网关发请求）；backend 与
+  wire_api 不兼容（如 Claude + Responses）同样不发请求。
 - 从 Provider 的 `credential_ref` 取 API Key，并按运行时实际发送的请求头发请求：
   OpenAI 兼容 backend 始终用 `Authorization: Bearer`；Anthropic 默认用 `x-api-key`
   （`ANTHROPIC_API_KEY`），`auth_style=bearer` 时用 Bearer（`ANTHROPIC_AUTH_TOKEN`）。
@@ -27,8 +28,11 @@
 - 发一次最小真实请求：复用协议探测的官方请求体（Responses 的 typed `input` 数组与 16 token
   预算、Chat/Anthropic 的 `max_tokens:16`）。
 - Responses 非流式请求被 400 拒绝、且响应体明确表示“必须流式”时（`requires streaming`、
-  `streaming mode`、`must be streamed` 及等价中文），同一端点用 `stream:true` 重试一次；
-  仅提到 `stream_options` 等字段名的普通参数错误不重试，避免重复计费。
+  `streaming mode is required`、`must be streamed`、`只支持流式`、`必须使用流式`、
+  `需要使用流式` 等），同一端点用 `stream:true` 重试一次。匹配是短语级而非
+  `contains("stream")`：`invalid stream_options parameter`、`invalid streaming mode
+  parameter` 及否定表达（`不需要流式`、`无需使用流式`、`streaming is not required`、
+  `no need`）都不会重试，避免重复计费。
 - 流式读取不是“看到第一个 `data:` 就算成功”：在 64 KiB 与流超时内持续读事件，直到出现
   可判定的失败或终止事件。识别标准 Responses 的 `response.failed.response.error` 嵌套错误，
   也识别 `response.created` 之后才出现的 `error`/`response.failed`；SSE error 按配额/鉴权/
@@ -103,7 +107,8 @@
 
 - `internal/gateway/model_health_test.go`：fake transport 覆盖 200/429(+Retry-After 与缺失)/
   401/403/402/400(quota)/400(参数)/400(空体)/400(model 缺失)/404/5xx/超时；`chat`/
-  `chat_completions`/空 `wire_api`/大小写 backend 的端点选择；断言请求体形状、Anthropic base
+  `chat_completions`/空 `wire_api`/大小写 backend 的端点选择；未知或空 backend 直接
+  `inconclusive` 且不发请求；断言请求体形状、Anthropic base
   优先、只使用运行时端点、普通 400 与 `stream_options` 400 不重试、流式重试保留 401/402/5xx、
   标准 `response.failed.response.error`、首事件成功后失败、缺少终止事件归 inconclusive，以及
   端点/响应体/传输错误均不含 Key。

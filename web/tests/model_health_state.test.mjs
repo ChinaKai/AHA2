@@ -98,3 +98,58 @@ test("onChange fires for the progress state and the final state", async () => {
   });
   assert.deepEqual(changes, ["checking", "rate_limited"]);
 });
+
+// The web build only strips types and never runs tsc, so a state property that
+// is initialized but missing from the State interface ships silently. This is
+// the guard for the health state added in task-330.
+test("every top-level state key is declared by State or an inherited interface", async () => {
+  const {readFile} = await import("node:fs/promises");
+  const source = resolve(import.meta.dirname, "..", "src");
+  const main = await readFile(resolve(source, "main.ts"), "utf8");
+  const stateModule = await readFile(resolve(source, "model_health.ts"), "utf8");
+
+  const header = main.match(/interface State(?:\s+extends\s+([A-Za-z_$][\w$]*))?\s*\{/);
+  assert.ok(header, "State interface must exist");
+  const interfaceBody = main.slice(header.index + header[0].length);
+  const declared = new Set(
+    interfaceBody.slice(0, interfaceBody.indexOf("\n}"))
+      .split("\n")
+      .map(line => line.replace(/\/\/.*$/, "").trim())
+      .map(line => line.match(/^([A-Za-z_$][\w$]*)\s*:/)?.[1])
+      .filter(Boolean),
+  );
+  const inherited = header[1];
+  if (inherited) {
+    const inheritedBody = stateModule.match(new RegExp(`export interface ${inherited} \\{([\\s\\S]*?)\\n\\}`))?.[1];
+    assert.ok(inheritedBody, `inherited interface ${inherited} must be found in model_health.ts`);
+    for (const line of inheritedBody.split("\n")) {
+      const key = line.replace(/\/\/.*$/, "").trim().match(/^([A-Za-z_$][\w$]*)\s*:/)?.[1];
+      if (key) declared.add(key);
+    }
+    for (const key of ["modelHealth", "modelHealthSeq"]) {
+      assert.ok(declared.has(key), `State does not inherit ${key}`);
+    }
+  }
+
+  const literalStart = main.indexOf("const state: State = {");
+  assert.ok(literalStart >= 0, "state literal must be typed as State");
+  let depth = 0;
+  let end = literalStart;
+  for (; end < main.length; end++) {
+    if (main[end] === "{") depth++;
+    else if (main[end] === "}" && --depth === 0) break;
+  }
+  const literal = main.slice(literalStart, end + 1);
+  let flat = "";
+  // The slice starts at the literal's opening brace; begin one level out so
+  // top-level properties report at depth 0.
+  depth = -1;
+  for (const character of literal) {
+    if ("{([".includes(character)) { depth++; flat += " "; continue; }
+    if ("})]".includes(character)) { depth--; flat += " "; continue; }
+    flat += depth === 0 ? character : " ";
+  }
+  const initialized = [...flat.matchAll(/([A-Za-z_$][\w$]*)\s*:\s*/g)].map(match => match[1]);
+  const missing = initialized.filter(key => !declared.has(key) && !["const", "state", "State"].includes(key));
+  assert.deepEqual([...new Set(missing)], [], "state keys missing from the State interface");
+});

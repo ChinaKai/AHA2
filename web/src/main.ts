@@ -18,6 +18,7 @@ import type {MailResourcesData} from "./mail_resources.js";
 import {bindDesktopPanel, desktopPanelInteracting, refreshDesktopPanel, stopDesktopPanel} from "./desktop_panel.js";
 import {renderMarkdown} from "./markdown.js";
 import {forgetAllModelHealth as clearAllModelHealth, forgetModelHealth as clearModelHealth, runModelHealthCheck} from "./model_health.js";
+import type {ModelHealthState} from "./model_health.js";
 import {bindPromptAdmin, loadPromptCatalog, renderPromptAdmin} from "./prompt_admin.js";
 import {bindProxySettings, renderProxySettings} from "./proxy_settings.js";
 import {formatBytes, purgeEnabled, renderDatabasePanel, retentionFormError, skipReasonText} from "./data_retention.js";
@@ -104,7 +105,7 @@ interface TaskChannelState {
   contacts: ChannelContact[];
   members: ChannelGroupMember[];
 }
-interface State {
+interface State extends ModelHealthState {
   auth: AuthStatus | null;
   view: View;
   loading: boolean;

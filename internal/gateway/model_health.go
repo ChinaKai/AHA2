@@ -77,15 +77,13 @@ func NormalizeModelHealthWireAPI(backend, wireAPI string) (string, error) {
 		default:
 			return "", fmt.Errorf("DSH Backend 不支持 wire_api %q", wireAPI)
 		}
+	case "":
+		return "", fmt.Errorf("模型没有配置 backend")
 	default:
-		if wire == "" {
-			wire = "responses"
-		}
-		switch wire {
-		case "responses", "chat", "anthropic_messages":
-		default:
-			return "", fmt.Errorf("不支持的 wire_api：%q", wireAPI)
-		}
+		// runtime_selection.go rejects an unknown backend before any request,
+		// so a health check that assumed Responses would report a false ok for
+		// a Task that can never start.
+		return "", fmt.Errorf("不支持的 backend：%q", backend)
 	}
 	return wire, nil
 }
@@ -242,17 +240,39 @@ func checkModelHealthEndpoint(ctx context.Context, client *http.Client, endpoint
 }
 
 // modelHealthRequiresStreaming reports whether the 400 evidence explicitly
-// says the model must be called in streaming mode. Matching a bare "stream" is
-// too broad: an "invalid stream_options parameter" rejection is an ordinary
+// says the model must be called in streaming mode. It is deliberately a
+// phrase matcher, not a "contains stream" check: an "invalid stream_options
+// parameter" or "invalid streaming mode parameter" rejection is an ordinary
 // request error, and retrying it would double-charge and hide the real cause.
+// Negations are checked first so "不需要流式" / "streaming is not required" do
+// not match the positive Chinese phrases they contain.
 func modelHealthRequiresStreaming(detail string) bool {
-	text := strings.ToLower(detail)
+	text := strings.ToLower(strings.Join(strings.Fields(detail), " "))
+	if text == "" {
+		return false
+	}
+	for _, negation := range []string{
+		"不需要流式", "无需流式", "无需使用流式", "不用流式", "不要求流式",
+		"不需要使用流式", "不是流式", "无需以流式", "不必流式",
+		"not required", "no need", "does not require", "doesn't require",
+		"do not require", "no streaming", "streaming is not required",
+		"streaming not required", "not streaming", "not streamed",
+	} {
+		if strings.Contains(text, negation) {
+			return false
+		}
+	}
 	for _, phrase := range []string{
-		"requires streaming", "require streaming", "streaming mode",
-		"must be streamed", "must use streaming", "streaming is required",
+		"requires streaming", "require streaming", "requires stream mode",
+		"requires streaming mode", "must be streamed", "must use streaming",
+		"must use stream", "streaming is required", "streaming mode is required",
 		"streaming required", "stream is required", "only supports streaming",
 		"only support streaming", "only available with streaming",
-		"必须使用流式", "只能使用流式", "仅支持流式", "需要流式", "必须以流式",
+		"only available in streaming", "supports only streaming",
+		"只支持流式", "仅支持流式", "只接受流式", "仅接受流式",
+		"必须流式", "必须使用流式", "必须使用流式模式", "必须以流式",
+		"只能使用流式", "只能以流式", "需要使用流式", "需要使用流式模式",
+		"要求流式", "需要流式",
 	} {
 		if strings.Contains(text, phrase) {
 			return true
