@@ -234,9 +234,10 @@ export function renderWorkspaceDetection(workspace: Workspace): string {
   return `<div class="workspace-detection">${summary}${details.map(detail => `<small class="${detail.kind}" title="${escapeWorkspaceHTML(detail.text)}">${escapeWorkspaceHTML(detail.text)}</small>`).join("")}</div>`;
 }
 
-// Model probe statuses that mean the gateway does not serve this wire
-// protocol, not that the network failed. These stay muted so the detection row
-// reads as "this protocol is not offered" instead of an alarming fault.
+// Per-protocol probe results for the detection row. "unsupported" stays muted
+// because an absent endpoint is normal; "rejected" (HTTP 400) keeps neutral
+// wording because the status alone cannot say whether the protocol, model,
+// parameters, or auth is at fault. Only transport failures use fault wording.
 const PROBE_WIRE_ORDER = ["responses", "chat_completions", "anthropic_messages"] as const;
 const PROBE_WIRE_LABELS: Record<string, string> = {
   responses: "Responses",
@@ -260,7 +261,8 @@ export interface ProtocolProbeFailure {
 function probeHTTPStatus(status: string, detail: string): number | undefined {
   const codes = Array.from(detail.matchAll(/HTTP\s+(\d{3})/g), match => Number(match[1]));
   const matchesStatus = (code: number): boolean => {
-    if (status === "unsupported") return [400, 404, 405, 501].includes(code);
+    if (status === "unsupported") return [404, 405, 501].includes(code);
+    if (status === "rejected") return code === 400;
     if (status === "unauthorized") return code === 401 || code === 403;
     if (status === "unavailable") return code >= 500;
     return code < 500 && ![400, 401, 403, 404, 405, 429, 501].includes(code);
@@ -287,6 +289,13 @@ export function protocolProbeFailures(capabilities: Record<string, string> | und
         message = `${label} 不可用${suffix}`;
         hint = "该网关没有提供这个协议端点，不是网络故障。";
         tone = "muted";
+        break;
+      case "rejected":
+        // A bare HTTP 400 cannot distinguish an unsupported protocol from an
+        // unknown model, bad parameters, or auth/gateway policy. Keep the
+        // wording neutral instead of claiming the endpoint is absent.
+        message = `${label} 请求被拒绝${suffix}`;
+        hint = "可能不支持该协议，也可能是模型、参数或鉴权配置错误。";
         break;
       case "unauthorized":
         message = `${label} 鉴权失败${suffix}`;

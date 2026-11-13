@@ -196,10 +196,11 @@ func int64Value(value any) int64 {
 // ProbeModelCapabilities sends a minimal request for each supported wire
 // protocol and reports which ones the gateway accepts for the given model.
 // Status values mirror the legacy AHA probe: supported / unsupported /
-// unauthorized / rate_limited / unavailable / inconclusive. "unsupported"
-// means the gateway rejected the protocol shape itself (HTTP 400/404/405/501),
-// so callers can say the protocol is unavailable instead of implying a
-// network fault.
+// rejected / unauthorized / rate_limited / unavailable / inconclusive.
+// "unsupported" means the endpoint is absent (HTTP 404/405/501); "rejected"
+// means the gateway answered HTTP 400, which may be an unsupported protocol
+// or an unknown model/parameter/auth problem, so callers must keep the
+// wording neutral instead of claiming the protocol is not offered.
 //
 // For anthropic_messages it also tries the gateway's /anthropic suffix (some
 // gateways like DeepSeek/MiniMax/Kimi serve the Anthropic protocol there) and
@@ -473,12 +474,15 @@ func probeEndpointError(endpoint, status string, code int, err error) string {
 	return ""
 }
 
-// probeStatusForCode classifies one probe response. 400/404/405/501 mean the
-// gateway does not expose this wire protocol at that endpoint: the request
-// shape (Responses vs Chat vs Messages) is rejected, which is a protocol
-// mismatch, not a transport fault. 401/403 stay auth failures, 429 stays rate
-// limited, and 5xx stays a transient service/transport failure. The remaining
-// codes are inconclusive and keep their HTTP status as evidence.
+// probeStatusForCode classifies one probe response. 404/405/501 mean the
+// gateway does not expose this wire protocol at that endpoint. 400 is kept
+// separate as "rejected": the gateway refused this request, but the status
+// code alone cannot distinguish an unsupported protocol from an unknown
+// model, bad parameters, auth/gateway policy, or a malformed body. 401/403
+// stay auth failures, 429 stays rate limited, and 5xx stays a transient
+// service/transport failure. The remaining codes are inconclusive and keep
+// their HTTP status as evidence. None of these classifications are transport
+// failures unless the request never produced an HTTP response.
 func probeStatusForCode(code int) string {
 	switch {
 	case code >= 200 && code < 300:
@@ -487,7 +491,9 @@ func probeStatusForCode(code int) string {
 		return "unauthorized"
 	case code == 429:
 		return "rate_limited"
-	case code == 400 || code == 404 || code == 405 || code == 501:
+	case code == 400:
+		return "rejected"
+	case code == 404 || code == 405 || code == 501:
 		return "unsupported"
 	case code >= 500:
 		return "unavailable"
@@ -523,7 +529,7 @@ func statusRank(status string) int {
 		return 4
 	case "unavailable":
 		return 3
-	case "inconclusive":
+	case "inconclusive", "rejected":
 		return 2
 	default:
 		return 1

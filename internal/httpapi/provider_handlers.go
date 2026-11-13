@@ -341,8 +341,8 @@ func (s *Server) probeProviderModel(writer http.ResponseWriter, request *http.Re
 	retryStyle := ""
 	switch {
 	case modelProbeAllStatus(capabilities, "unavailable"):
-		// Transport failures and request timeouts are transient; give the
-		// gateway one more chance before reporting the protocols unsupported.
+		// HTTP 5xx, transport failures, and request timeouts are transient;
+		// give the gateway one more chance before reporting the protocols.
 		retryStyle = authStyle
 	case modelProbeAllStatus(capabilities, "unauthorized") && !strings.EqualFold(authStyle, "auto"):
 		// A catalog that accepts one header does not guarantee every model

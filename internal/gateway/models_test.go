@@ -508,9 +508,12 @@ func TestProbeStatusForCodeClassifiesProtocolRejections(t *testing.T) {
 		{http.StatusUnauthorized, "unauthorized"},
 		{http.StatusForbidden, "unauthorized"},
 		{http.StatusTooManyRequests, "rate_limited"},
-		// A gateway that rejects the wire-protocol request shape does not
-		// support that protocol; none of these are network faults.
-		{http.StatusBadRequest, "unsupported"},
+		// A bare 400 is ambiguous: it can be an unsupported protocol, an
+		// unknown model, bad parameters, or an auth/gateway policy rejection.
+		// It must not be classified as an absent endpoint.
+		{http.StatusBadRequest, "rejected"},
+		// Missing route/method/implementation means the protocol endpoint is
+		// not offered; none of these are network faults.
 		{http.StatusNotFound, "unsupported"},
 		{http.StatusMethodNotAllowed, "unsupported"},
 		{http.StatusNotImplemented, "unsupported"},
@@ -525,13 +528,17 @@ func TestProbeStatusForCodeClassifiesProtocolRejections(t *testing.T) {
 	}
 }
 
-func TestProbeModelCapabilitiesTreatsHTTP400AsProtocolUnavailable(t *testing.T) {
+// An invalid model or bad parameter can also produce HTTP 400. The probe only
+// sees the status code, so it must report an ambiguous rejection instead of
+// claiming the protocol endpoint is absent.
+func TestProbeModelCapabilitiesKeepsHTTP400Ambiguous(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/responses":
-			// This gateway implements Chat and Messages but not Responses.
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"message":"model not found","type":"invalid_request_error"}}`))
 		case "/chat/completions", "/v1/messages":
 			w.WriteHeader(http.StatusOK)
 		default:
@@ -541,9 +548,9 @@ func TestProbeModelCapabilitiesTreatsHTTP400AsProtocolUnavailable(t *testing.T) 
 	t.Cleanup(server.Close)
 
 	caps, _, errs := ProbeModelCapabilitiesContextWithClientDetailed(
-		context.Background(), server.URL, "secret", "auto", "ali-model", 5*time.Second, nil)
-	if caps["responses"] != "unsupported" {
-		t.Fatalf("responses=%q errs=%v, want unsupported for HTTP 400", caps["responses"], errs)
+		context.Background(), server.URL, "secret", "auto", "unknown-model", 5*time.Second, nil)
+	if caps["responses"] != "rejected" {
+		t.Fatalf("responses=%q errs=%v, want rejected for an ambiguous HTTP 400", caps["responses"], errs)
 	}
 	if caps["chat_completions"] != "supported" || caps["anthropic_messages"] != "supported" {
 		t.Fatalf("caps=%v, want chat and anthropic supported", caps)
