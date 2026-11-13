@@ -624,3 +624,29 @@ func TestProbeModelCapabilitiesAnthropicFallbackStopsOnNonPathFailures(t *testin
 		})
 	}
 }
+
+// A rate-limited fallback candidate is still the working Anthropic entry
+// point: keep the rate_limited status, return that base, and stop probing.
+func TestProbeModelCapabilitiesAnthropicFallbackRecordsRateLimitedBase(t *testing.T) {
+	t.Parallel()
+	base, paths := newProbeTestServer(t, map[string]int{
+		"/wrong/messages":    http.StatusBadRequest,
+		"/wrong/v1/messages": http.StatusBadRequest,
+		"/v1/messages":       http.StatusTooManyRequests,
+	})
+
+	caps, anthropicBase, errs := ProbeModelCapabilitiesForProviderContext(
+		context.Background(), base.URL+"/v1", base.URL+"/wrong", "secret", "auto", "claude-model", 5*time.Second, nil)
+	if caps["anthropic_messages"] != "rate_limited" {
+		t.Fatalf("caps=%v errs=%v, want rate_limited", caps, errs)
+	}
+	if anthropicBase != base.URL+"/v1" {
+		t.Fatalf("anthropicBase=%q, want the rate-limited candidate %q", anthropicBase, base.URL+"/v1")
+	}
+	if !containsString(paths(), "/v1/messages") {
+		t.Fatalf("the rate-limited fallback candidate was not probed: %v", paths())
+	}
+	if containsString(paths(), "/anthropic/v1/messages") {
+		t.Fatalf("probe continued after a rate_limited success: %v", paths())
+	}
+}

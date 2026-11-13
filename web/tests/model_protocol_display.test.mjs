@@ -112,6 +112,8 @@ test("supported and rate-limited protocols render no failure text", () => {
   );
   assert.equal(html, "");
   assert.deepEqual(helpers.protocolProbeFailures({responses: "supported"}, {}), []);
+  // 429 is a usable protocol: it still gets the normal protocol badge.
+  assert.match(helpers.protoBadges({id: "model", capabilities: {chat_completions: "rate_limited"}}), /<span class="proto codex">Chat<\/span>/);
 });
 
 test("badge row only says 不支持 when every failure is a confirmed missing endpoint", () => {

@@ -26,9 +26,10 @@
 
 - 每个实际探测过的失败候选都保留 URL 与 HTTP 状态：`protocol_errors[wire_api] = "<url>: HTTP <code>"`。
   Anthropic 先探测配置的 `anthropic_base_url`（未配置时用 `base_url`）；只有结果是路径类失败
-  （`unsupported` 404/405/501 或 `rejected` 400）时，才继续探测 `base_url` 与 `/anthropic`，
-  成功即停。401/403、5xx/传输失败、422 等非路径状态保留首个候选结论，不再换候选，避免放大
-  请求或掩盖鉴权/服务问题。
+  （`unsupported` 404/405/501 或 `rejected` 400）时，才继续探测 `base_url` 与 `/anthropic`。
+  2xx 或 429 都视为终态成功并停止探测：429 保留 `rate_limited` 状态，同时把该候选记为
+  `anthropic_base_url`，避免用户添加模型时拿到空端点。401/403、5xx/传输失败、422 等非路径
+  状态保留首个候选结论，不再换候选，避免放大请求或掩盖鉴权/服务问题。
 - UI 默认只显示简洁结论和可操作提示；候选 URL/HTTP 状态收在「查看详情」里。
 - 全部协议为 `unavailable` 时，服务端用同一认证重试一次。`unavailable` 既包括超时/DNS/
   连接失败，也包括 HTTP 5xx 网关错误，二者都走这条重试路径。

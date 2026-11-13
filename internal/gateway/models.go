@@ -294,8 +294,10 @@ func ProbeModelCapabilitiesForProviderContext(ctx context.Context, baseURL, anth
 					break
 				}
 				retriedStatus, retriedCode, retriedErr := probeWireAPI(ctx, client, candidate, key, normalizedAuth, modelID, "anthropic_messages")
-				if retriedStatus == "supported" {
-					status, errText = "supported", ""
+				if retriedStatus == "supported" || retriedStatus == "rate_limited" {
+					// 429 proves the endpoint exists and serves the protocol;
+					// keep the status but record the base the caller must use.
+					status, errText = retriedStatus, ""
 					anthropicBase = candidate
 					break
 				}
