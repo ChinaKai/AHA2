@@ -200,7 +200,9 @@ func int64Value(value any) int64 {
 //
 // For anthropic_messages it also tries the gateway's /anthropic suffix (some
 // gateways like DeepSeek/MiniMax/Kimi serve the Anthropic protocol there) and
-// returns that base URL when it is the one that works.
+// returns that base URL when it is the one that works. Callers that know the
+// provider's configured Anthropic entry point should use
+// ProbeModelCapabilitiesForProviderContext instead.
 func ProbeModelCapabilities(baseURL, apiKey, authStyle, modelID string, timeout time.Duration) (map[string]string, string) {
 	return ProbeModelCapabilitiesContext(context.Background(), baseURL, apiKey, authStyle, modelID, timeout)
 }
@@ -222,6 +224,16 @@ func ProbeModelCapabilitiesContextWithClient(ctx context.Context, baseURL, apiKe
 // error behind each non-definitive protocol status, so a manual probe that
 // reports every protocol unavailable can explain why instead of hiding it.
 func ProbeModelCapabilitiesContextWithClientDetailed(ctx context.Context, baseURL, apiKey, authStyle, modelID string, timeout time.Duration, client *http.Client) (map[string]string, string, map[string]string) {
+	return ProbeModelCapabilitiesForProviderContext(ctx, baseURL, "", apiKey, authStyle, modelID, timeout, client)
+}
+
+// ProbeModelCapabilitiesForProviderContext probes the wire protocols of a
+// provider whose Anthropic entry point can differ from its OpenAI-compatible
+// base URL (provider.anthropic_base_url, e.g. Ali token plan's /apps/anthropic).
+// The configured Anthropic base is probed before URLs derived from baseURL so a
+// gateway-specific path is not missed. It also returns the transport error
+// behind each non-definitive protocol status.
+func ProbeModelCapabilitiesForProviderContext(ctx context.Context, baseURL, anthropicBaseURL, apiKey, authStyle, modelID string, timeout time.Duration, client *http.Client) (map[string]string, string, map[string]string) {
 	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	key := strings.TrimSpace(apiKey)
 	if base == "" || modelID == "" || key == "" {
@@ -258,27 +270,39 @@ func ProbeModelCapabilitiesContextWithClientDetailed(ctx context.Context, baseUR
 	}()
 	go func() {
 		defer wg.Done()
-		candidates := anthropicBaseCandidates(base)
+		candidates := anthropicBaseCandidates(base, anthropicBaseURL)
 		if len(candidates) == 0 {
 			anthropicStatus, anthropicErr = "unavailable", "provider base URL is empty"
 			return
 		}
-		status, _, errText := probeWireAPI(ctx, client, candidates[0], key, normalizedAuth, modelID, "anthropic_messages")
-		if status == "unsupported" && len(candidates) > 1 {
+		status, code, errText := probeWireAPI(ctx, client, candidates[0], key, normalizedAuth, modelID, "anthropic_messages")
+		if status == "unsupported" {
+			evidence := make([]string, 0, len(candidates))
+			if line := probeEvidenceLine(candidates[0], status, code); line != "" {
+				evidence = append(evidence, line)
+			}
 			for _, candidate := range candidates[1:] {
 				if ctx.Err() != nil {
 					status, errText = "unavailable", ctx.Err().Error()
 					break
 				}
-				retriedStatus, _, retriedErr := probeWireAPI(ctx, client, candidate, key, normalizedAuth, modelID, "anthropic_messages")
+				retriedStatus, retriedCode, retriedErr := probeWireAPI(ctx, client, candidate, key, normalizedAuth, modelID, "anthropic_messages")
 				if retriedStatus == "supported" {
 					status, errText = "supported", ""
 					anthropicBase = candidate
 					break
 				}
-				if retriedErr != "" && errText == "" {
+				if retriedErr != "" {
+					evidence = append(evidence, candidate+": "+retriedErr)
+				} else if line := probeEvidenceLine(candidate, retriedStatus, retriedCode); line != "" {
+					evidence = append(evidence, line)
+				}
+				if retriedStatus != "unsupported" && errText == "" {
 					status, errText = retriedStatus, retriedErr
 				}
+			}
+			if status != "supported" && status != "rate_limited" && errText == "" && len(evidence) > 0 {
+				errText = strings.Join(evidence, "; ")
 			}
 		}
 		anthropicStatus, anthropicErr = status, errText
@@ -290,26 +314,56 @@ func ProbeModelCapabilitiesContextWithClientDetailed(ctx context.Context, baseUR
 	return capabilities, anthropicBase, protocolErrors
 }
 
-// anthropicBaseCandidates returns the provider base first, then the /anthropic
-// variant when it differs (the suffix some gateways use for Anthropic Messages).
-func anthropicBaseCandidates(baseURL string) []string {
+// anthropicBaseCandidates returns the configured Anthropic entry point first
+// (provider.anthropic_base_url, when set), then the OpenAI-compatible base URL
+// and the /anthropic variant when it differs (the suffix some gateways use for
+// Anthropic Messages). Duplicate URLs are dropped so each base is probed once.
+func anthropicBaseCandidates(baseURL, anthropicBaseURL string) []string {
 	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	configured := strings.TrimRight(strings.TrimSpace(anthropicBaseURL), "/")
+	candidates := make([]string, 0, 3)
+	seen := make(map[string]struct{}, 3)
+	add := func(candidate string) {
+		if candidate == "" {
+			return
+		}
+		if _, ok := seen[candidate]; ok {
+			return
+		}
+		seen[candidate] = struct{}{}
+		candidates = append(candidates, candidate)
+	}
+	add(configured)
 	if base == "" {
-		return nil
+		if len(candidates) == 0 {
+			return nil
+		}
+		return candidates
 	}
-	if strings.HasSuffix(base, "/anthropic") {
-		return []string{base}
-	}
-	root := base
-	if strings.HasSuffix(base, "/v1") {
-		root = base[:len(base)-3]
-	}
-	candidates := []string{base}
-	anthropic := root + "/anthropic"
-	if anthropic != base {
-		candidates = append(candidates, anthropic)
+	add(base)
+	if !strings.HasSuffix(base, "/anthropic") {
+		root := base
+		if strings.HasSuffix(base, "/v1") {
+			root = base[:len(base)-3]
+		}
+		add(root + "/anthropic")
 	}
 	return candidates
+}
+
+// probeEvidenceLine describes a failed probe candidate for protocol_errors. It
+// carries the URL and HTTP status so a manual probe can show which entry point
+// was actually tried without exposing credentials.
+func probeEvidenceLine(candidate, status string, code int) string {
+	if code <= 0 {
+		return ""
+	}
+	switch status {
+	case "unsupported", "inconclusive", "unauthorized":
+		return fmt.Sprintf("%s: HTTP %d", candidate, code)
+	default:
+		return ""
+	}
 }
 
 // probeWireAPI probes a wire protocol across endpoint forms (a bare path for

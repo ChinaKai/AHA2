@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -196,4 +199,209 @@ func TestModelDetectionRequestsHonorContextCancellation(t *testing.T) {
 			t.Fatal("capability request ignored cancellation")
 		}
 	})
+}
+
+// probeTestServer serves the OpenAI protocols and records which Anthropic
+// entry points were hit, so a test can prove which base URL was probed.
+func newProbeTestServer(t *testing.T, anthropicStatus map[string]int) (*httptest.Server, func() []string) {
+	t.Helper()
+	var mu sync.Mutex
+	var anthropicPaths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/responses", "/chat/completions":
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/messages") {
+			mu.Lock()
+			anthropicPaths = append(anthropicPaths, r.URL.Path)
+			mu.Unlock()
+			if code, ok := anthropicStatus[r.URL.Path]; ok {
+				w.WriteHeader(code)
+				return
+			}
+			http.NotFound(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(server.Close)
+	return server, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), anthropicPaths...)
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestProbeModelCapabilitiesPrefersConfiguredAnthropicBaseURL(t *testing.T) {
+	t.Parallel()
+	base, baseAnthropicPaths := newProbeTestServer(t, nil)
+	anthropic, anthropicPaths := newProbeTestServer(t, map[string]int{
+		"/apps/anthropic/v1/messages": http.StatusOK,
+	})
+
+	caps, anthropicBase, errs := ProbeModelCapabilitiesForProviderContext(
+		context.Background(), base.URL+"/compatible-mode/v1", anthropic.URL+"/apps/anthropic",
+		"secret", "auto", "claude-model", 5*time.Second, nil)
+	if caps["anthropic_messages"] != "supported" {
+		t.Fatalf("caps=%v errs=%v", caps, errs)
+	}
+	if !containsString(anthropicPaths(), "/apps/anthropic/v1/messages") {
+		t.Fatalf("configured anthropic base was not probed: %v", anthropicPaths())
+	}
+	if len(baseAnthropicPaths()) != 0 {
+		t.Fatalf("base_url was probed for anthropic_messages despite configured anthropic_base_url: %v", baseAnthropicPaths())
+	}
+	// The configured entry point worked first, so no fallback base is reported.
+	if anthropicBase != "" {
+		t.Fatalf("anthropicBase=%q, want empty for the configured base", anthropicBase)
+	}
+}
+
+func TestProbeModelCapabilitiesConfiguredAnthropicBaseEndingWithV1(t *testing.T) {
+	t.Parallel()
+	base, _ := newProbeTestServer(t, nil)
+	anthropic, anthropicPaths := newProbeTestServer(t, map[string]int{
+		"/apps/anthropic/v1/messages": http.StatusOK,
+	})
+
+	caps, _, errs := ProbeModelCapabilitiesForProviderContext(
+		context.Background(), base.URL+"/v1", anthropic.URL+"/apps/anthropic",
+		"secret", "bearer", "claude-model", 5*time.Second, nil)
+	if caps["anthropic_messages"] != "supported" {
+		t.Fatalf("caps=%v errs=%v", caps, errs)
+	}
+	if !containsString(anthropicPaths(), "/apps/anthropic/v1/messages") {
+		t.Fatalf("configured base did not fall back to /v1/messages: %v", anthropicPaths())
+	}
+}
+
+func TestProbeModelCapabilitiesDerivesAnthropicBaseWhenUnset(t *testing.T) {
+	t.Parallel()
+	base, basePaths := newProbeTestServer(t, map[string]int{
+		"/anthropic/v1/messages": http.StatusOK,
+	})
+
+	caps, anthropicBase, errs := ProbeModelCapabilitiesForProviderContext(
+		context.Background(), base.URL+"/v1", "", "secret", "auto", "claude-model", 5*time.Second, nil)
+	if caps["anthropic_messages"] != "supported" {
+		t.Fatalf("caps=%v errs=%v", caps, errs)
+	}
+	if anthropicBase != base.URL+"/anthropic" {
+		t.Fatalf("anthropicBase=%q, want %q", anthropicBase, base.URL+"/anthropic")
+	}
+	if !containsString(basePaths(), "/anthropic/v1/messages") {
+		t.Fatalf("derived /anthropic base was not probed: %v", basePaths())
+	}
+}
+
+func TestProbeModelCapabilitiesConfiguredAnthropicBaseHonorsAuthStyle(t *testing.T) {
+	t.Parallel()
+	base, _ := newProbeTestServer(t, nil)
+	var mu sync.Mutex
+	var seen []http.Header
+	anthropic := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/apps/anthropic/v1/messages" {
+			http.NotFound(w, r)
+			return
+		}
+		mu.Lock()
+		seen = append(seen, r.Header.Clone())
+		mu.Unlock()
+		if r.Header.Get("Authorization") == "Bearer secret" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(anthropic.Close)
+	headers := func() []http.Header {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]http.Header(nil), seen...)
+	}
+
+	caps, _, errs := ProbeModelCapabilitiesForProviderContext(
+		context.Background(), base.URL, anthropic.URL+"/apps/anthropic", "secret", "bearer", "claude-model", 5*time.Second, nil)
+	if caps["anthropic_messages"] != "supported" {
+		t.Fatalf("caps=%v errs=%v", caps, errs)
+	}
+	for _, header := range headers() {
+		if header.Get("x-api-key") != "" {
+			t.Fatalf("auth_style=bearer also sent x-api-key: %v", header)
+		}
+	}
+
+	mu.Lock()
+	seen = nil
+	mu.Unlock()
+	caps, _, _ = ProbeModelCapabilitiesForProviderContext(
+		context.Background(), base.URL, anthropic.URL+"/apps/anthropic", "secret", "x-api-key", "claude-model", 5*time.Second, nil)
+	if caps["anthropic_messages"] != "unauthorized" {
+		t.Fatalf("caps=%v, want unauthorized for the narrowed auth style", caps)
+	}
+	for _, header := range headers() {
+		if header.Get("Authorization") != "" {
+			t.Fatalf("auth_style=x-api-key also sent bearer: %v", header)
+		}
+	}
+}
+
+func TestAnthropicBaseCandidatesOrderAndDedup(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name       string
+		base       string
+		configured string
+		want       []string
+	}{
+		{
+			name: "configured first then derived",
+			base: "https://gateway.example/v1", configured: "https://gateway.example/apps/anthropic",
+			want: []string{"https://gateway.example/apps/anthropic", "https://gateway.example/v1", "https://gateway.example/anthropic"},
+		},
+		{
+			name: "empty configured keeps legacy order",
+			base: "https://gateway.example/v1", configured: "   ",
+			want: []string{"https://gateway.example/v1", "https://gateway.example/anthropic"},
+		},
+		{
+			name: "configured equals base is deduped",
+			base: "https://gateway.example/v1", configured: "https://gateway.example/v1/",
+			want: []string{"https://gateway.example/v1", "https://gateway.example/anthropic"},
+		},
+		{
+			name: "base already anthropic suffix",
+			base: "https://gateway.example/anthropic", configured: "",
+			want: []string{"https://gateway.example/anthropic"},
+		},
+		{
+			name: "base already anthropic suffix with duplicate configured",
+			base: "https://gateway.example/anthropic", configured: "https://gateway.example/anthropic",
+			want: []string{"https://gateway.example/anthropic"},
+		},
+		{
+			name: "empty urls",
+			base: "", configured: "",
+			want: nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := anthropicBaseCandidates(tc.base, tc.configured); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("anthropicBaseCandidates(%q, %q) = %v, want %v", tc.base, tc.configured, got, tc.want)
+			}
+		})
+	}
 }

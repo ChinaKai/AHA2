@@ -92,7 +92,7 @@ func newModelDetectionJobs() *modelDetectionJobs {
 			return gateway.DetectModelsContext(ctx, provider.BaseURL, apiKey, provider.AuthStyle, 15*time.Second)
 		},
 		probe: func(ctx context.Context, provider domain.Provider, apiKey, authStyle, modelID string) (map[string]string, string, map[string]string) {
-			return gateway.ProbeModelCapabilitiesContextWithClientDetailed(ctx, provider.BaseURL, apiKey, authStyle, modelID, modelProbeTimeout, nil)
+			return gateway.ProbeModelCapabilitiesForProviderContext(ctx, provider.BaseURL, provider.AnthropicBaseURL, apiKey, authStyle, modelID, modelProbeTimeout, nil)
 		},
 	}
 }
