@@ -40,8 +40,9 @@ const (
 	// the embedded script. It stays first for operators who need a custom
 	// runtime; without it the helper is always the embedded Node script.
 	agentProxyHelperOverride = "AHA2_AGENT_PROXY_HELPER"
-	// agentProxyRuntimeExec marks an explicitly supplied executable, which the
-	// workspace runs directly rather than through an interpreter.
+	// agentProxyRuntimeExec marks an explicitly supplied aha2 helper, which the
+	// workspace runs through its `agent-proxy` subcommand rather than through an
+	// interpreter.
 	agentProxyRuntimeExec = "exec"
 )
 
@@ -50,7 +51,8 @@ type AgentProxyHelper struct {
 	Path string
 	// Runtime is agentproxy.NodeHelperRuntime for the embedded script, which is
 	// started as `<Interpreter> <Path>`, or agentProxyRuntimeExec for an
-	// operator-supplied executable started directly.
+	// operator-supplied aha2-style helper, which is started through its
+	// `agent-proxy` subcommand (the same entry point the old binary helper used).
 	Runtime string
 	// Interpreter is the workspace-side node binary that runs Path when Runtime
 	// is "node".
@@ -60,12 +62,18 @@ type AgentProxyHelper struct {
 	Note string
 }
 
+// Command is the workspace-side command that starts the helper.
+//
+// The explicit override is an aha2-style helper, not a bare `--stdio`
+// executable: it is identified by the `version` probe and entered through the
+// same hidden `agent-proxy` subcommand the prebuilt helper used. The embedded
+// script instead runs under the node interpreter with the flags directly.
 func (helper AgentProxyHelper) Command(protocol int) string {
+	flags := " --stdio --protocol " + strconv.Itoa(protocol)
 	if helper.Runtime == agentproxy.NodeHelperRuntime {
-		return shellQuote(helper.Interpreter) + " " + shellQuote(helper.Path) +
-			" --stdio --protocol " + strconv.Itoa(protocol)
+		return shellQuote(helper.Interpreter) + " " + shellQuote(helper.Path) + flags
 	}
-	return shellQuote(helper.Path) + " --stdio --protocol " + strconv.Itoa(protocol)
+	return shellQuote(helper.Path) + " agent-proxy" + flags
 }
 
 type agentProxyManifest struct {
@@ -92,7 +100,8 @@ type agentProxySource struct {
 // The selection order is part of the contract, and every rejected fallback is
 // reported in the returned error rather than silently skipped:
 //
-//  1. AHA2_AGENT_PROXY_HELPER, when set, is uploaded and executed directly.
+//  1. AHA2_AGENT_PROXY_HELPER, when set, is uploaded and entered through the
+//     aha2-style `agent-proxy` subcommand after a `version` probe.
 //  2. Otherwise the embedded Node script is used, but only after the workspace
 //     proves it has a node binary: a node-script backend's shebang is a hard
 //     guarantee, `command -v node` is the fallback.

@@ -12,8 +12,11 @@ AHA 的局域网明文地址。本改动把 Agent API 放进 SSH 会话自带的
 
 每个 Turn 只走一层；上一层失败时把原因写进日志再进入下一层，不会静默跳过：
 
-1. `AHA2_AGENT_PROXY_HELPER` 显式覆盖。文件被上传到工作区并直接执行；它必须自己接受
-   `--stdio --protocol 1`。这是给测试和特殊运行时留的逃生口，默认不使用。
+1. `AHA2_AGENT_PROXY_HELPER` 显式覆盖。文件被上传到工作区，按 aha2 helper 的入口执行：
+   先用 `<helper> version` 探活（输出须含 `aha2`），再用
+   `<helper> agent-proxy --stdio --protocol 1` 启动。它不是"裸 `--stdio` 可执行文件"，
+   指向一个只有 `--stdio` 参数的脚本会在探活或启动阶段失败。这是给测试和特殊运行时留的
+   逃生口，默认不使用。
 2. 内嵌 Node helper。先确认工作区有可用的 node：
    - backend 命令是脚本时，读取其 shebang。`#!/usr/bin/env node` 或 `/path/to/node` 都按
      node 解释器处理，并且优先于 PATH 里的 node——backend 能跑，就说明这个解释器一定存在。
@@ -44,9 +47,10 @@ AHA 的局域网明文地址。本改动把 Agent API 放进 SSH 会话自带的
 | `internal/workspace/agent_proxy.go` | 每条 Turn 的 SSH 会话、重连、回退 |
 | `internal/app/agent_api_proxy.go` | 开关判定、逐层回退与日志 |
 
-`cmd/aha/agent_proxy.go` 的隐藏子命令保留为兼容入口：它不被默认使用，也不随发行包提供任何
-预编译 helper；只有显式把 `AHA2_AGENT_PROXY_HELPER` 指向一个实现了该子命令的 aha2 二进制时才会
-走到它。新方案默认使用 Node 脚本。
+`cmd/aha/agent_proxy.go` 的隐藏子命令保留为显式覆盖的入口：它不被默认使用，也不随发行包
+提供任何预编译 helper；只有把 `AHA2_AGENT_PROXY_HELPER` 指向实现了 `version` 与
+`agent-proxy --stdio` 的 aha2 helper 时才会走到它。默认路径使用内嵌 Node 脚本，
+启动命令是 `<node> <script> --stdio --protocol 1`。
 
 ## 帧格式（protocol 1）
 
@@ -148,13 +152,16 @@ manifest 读取在远端先查大小（>4 KiB 直接拒绝），不把工作区�
 - `go test ./internal/agentproxy`：帧往返、坏帧/超长帧、8 路并发、半关闭、2×窗口以上的
   数据、单流故障隔离、真实 HTTP 请求、READY 超时与协议不符、接收侧超窗 reset、
   单通道 64 流上限、超长 READY 行拒绝、https scheme 保留；以及 Node helper 作为真实进程
-  的 HTTP/并发/多窗口/坏帧/退出测试（无 node 时跳过）。
+  的 HTTP/并发/多窗口/坏帧/半截帧 EOF/退出测试（无 node 时跳过）。
 - `go test ./internal/workspace`：Node helper 物化与复用、版本升级与保留、4 路并发 ensure、
   manifest 字段（protocol/version/runtime/sha256）与文件哈希一致、清理不删 `share/`、
   SSH 会话上的 Node helper 真实 HTTP 端到端、显式覆盖走 exec runtime、node 探测的
   shebang 优先/PATH 兜底/缺失原因。
 - `go test ./internal/app`：开关关闭行为不变、stdio 成功路径、显式覆盖路径、
-  node 失败 → 隧道 → LAN 的选择顺序与原因、非 loopback 地址不建隧道。
+  node 失败 → 隧道 → LAN 的选择顺序与原因、非 loopback 地址不建隧道；loopback 全局覆盖
+  被标成「覆盖地址」时，隧道拒绝原因仍然保留。
+- `go test ./scripts`：安装器 `[InstallDelete]` 只允许 `{app}`/`{group}` 内的路径，
+  并且保留删除旧 `{app}\agent-proxy` 的条目。
 - 变异验证：删掉 READY 协议检查、删掉某一层回退、把 socket 数据恢复成 64 KiB 单帧，
   对应测试都会变红。
 

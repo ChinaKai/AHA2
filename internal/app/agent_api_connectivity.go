@@ -193,8 +193,12 @@ func (s *Service) DetectWorkspaceAgentAPI(ctx context.Context, item domain.Works
 		// attempted. The stage summary comes first so truncation cannot hide which
 		// paths were tried. Probe errors never carry the token.
 		label := agentAPIProbeCandidateLabel(item, settings, candidate)
-		if tunnelFailure == "" && label == "隧道" {
-			tunnelFailure = fmt.Sprintf("%s（%s）：%s", label, candidate, truncateAgentAPIError(err.Error()))
+		// The tunnel is any loopback candidate on an SSH workspace, including one
+		// that came from the stored override: the display label says "覆盖地址"
+		// there, but the probe still had to go through the reverse forward. Keying
+		// off the label lost the refusal reason in exactly that case.
+		if tunnelFailure == "" && agentAPICandidateIsTunnel(item, candidate) {
+			tunnelFailure = fmt.Sprintf("隧道（%s）：%s", candidate, truncateAgentAPIError(err.Error()))
 		}
 		if !seenStages[label] {
 			seenStages[label] = true
@@ -236,6 +240,21 @@ func agentAPIProbeCandidateLabel(item domain.Workspace, settings domain.AgentAPI
 		return "LAN 明文"
 	}
 	return "直连"
+}
+
+// agentAPICandidateIsTunnel reports whether this candidate is reachable only
+// through the reverse tunnel: an SSH workspace and an AHA-loopback address.
+// The display label cannot answer this, because an override address carries the
+// "覆盖地址" label even when it is loopback.
+func agentAPICandidateIsTunnel(item domain.Workspace, candidate string) bool {
+	if item.Transport != "ssh" {
+		return false
+	}
+	parsed, err := url.Parse(strings.TrimSpace(candidate))
+	if err != nil || parsed.Hostname() == "" {
+		return false
+	}
+	return agentAPIHostIsLoopback(parsed.Hostname())
 }
 
 // agentAPIReachability describes how the workspace reaches AHA, for display.

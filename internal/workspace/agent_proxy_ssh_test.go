@@ -85,12 +85,14 @@ func writeAgentProxyWrapper(t *testing.T, directory, marker string) string {
 	if err := os.MkdirAll(directory, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// An explicit helper is started directly, so the wrapper speaks the same
-	// contract as the embedded script: `--stdio --protocol N` on argv.
+	// The explicit override is an aha2-style helper: `version` identifies it and
+	// the hidden `agent-proxy` subcommand enters the tunnel. This is the exact
+	// contract Command builds, so a regression to a bare `--stdio` invocation
+	// fails the end-to-end test instead of only the probe.
 	script := "#!/bin/sh\n" +
 		"case \"$1\" in\n" +
 		"  version) echo 'aha2 test " + marker + "'; exit 0 ;;\n" +
-		"  --stdio) GO_WANT_AGENT_PROXY_HELPER=1 exec '" + executable + "' -test.run=TestAgentProxyHelperProcess -- \"$@\" ;;\n" +
+		"  agent-proxy) shift; GO_WANT_AGENT_PROXY_HELPER=1 exec '" + executable + "' -test.run=TestAgentProxyHelperProcess -- agent-proxy \"$@\" ;;\n" +
 		"esac\n" +
 		"exit 2\n"
 	path := filepath.Join(directory, "aha2-test-helper")
@@ -214,6 +216,20 @@ func agentProxyTestWorkspace(host string, port int) domain.Workspace {
 		ID: "workspace-test", Name: "test", Transport: "ssh",
 		SSHHost: host, SSHUser: "tester", SSHPort: port, SSHAuth: "password", SSHPassword: "secret",
 		Platform: "linux/" + runtime.GOARCH,
+	}
+}
+
+// TestAgentProxyHelperCommand pins the two launch contracts. The explicit
+// override is an aha2-style helper entered through `agent-proxy`; the embedded
+// script is run by the detected interpreter with the flags directly.
+func TestAgentProxyHelperCommand(t *testing.T) {
+	node := AgentProxyHelper{Path: "/srv/helper.js", Runtime: agentproxy.NodeHelperRuntime, Interpreter: "/usr/local/bin/node"}
+	if got, want := node.Command(agentproxy.Protocol), `'/usr/local/bin/node' '/srv/helper.js' --stdio --protocol 1`; got != want {
+		t.Fatalf("node command = %q, want %q", got, want)
+	}
+	exec := AgentProxyHelper{Path: "/usr/local/bin/aha2", Runtime: agentProxyRuntimeExec}
+	if got, want := exec.Command(agentproxy.Protocol), `'/usr/local/bin/aha2' agent-proxy --stdio --protocol 1`; got != want {
+		t.Fatalf("exec command = %q, want %q", got, want)
 	}
 }
 
@@ -528,6 +544,27 @@ func TestAgentProxyExplicitOverrideUsesExecRuntime(t *testing.T) {
 		t.Fatalf("GET through override: %v", err)
 	}
 	response.Body.Close()
+}
+
+// TestAgentProxyExplicitOverrideRequiresAha2Entry pins the documented override
+// contract: a helper that only understands `--stdio` is rejected by the
+// `version` probe, instead of passing preparation and failing at startup.
+func TestAgentProxyExplicitOverrideRequiresAha2Entry(t *testing.T) {
+	host, port := startExecSSHServer(t)
+	workspace := agentProxyTestWorkspace(host, port)
+	path := filepath.Join(t.TempDir(), "stdio-only-helper")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n[ \"$1\" = \"--stdio\" ] && exec cat >/dev/null\nexit 2\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(agentProxyHelperOverride, path)
+
+	_, err := EnsureAgentProxyHelper(context.Background(), workspace, t.TempDir(), "task-1", "1.0.0", "")
+	if err == nil {
+		t.Fatal("a bare --stdio helper was accepted as an aha2-style override")
+	}
+	if !strings.Contains(err.Error(), "helper 无法执行") {
+		t.Fatalf("error = %v, want the failed version probe", err)
+	}
 }
 
 // TestAgentProxyManifestReadRejectsOversizedFile calls the reader directly with

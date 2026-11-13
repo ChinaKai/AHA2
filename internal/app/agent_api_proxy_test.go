@@ -187,6 +187,47 @@ func TestPrepareAgentAPIForTurnFallsBackToLAN(t *testing.T) {
 	}
 }
 
+// TestPrepareAgentAPIForTurnKeepsTunnelReasonWithLoopbackOverride is the
+// regression for a stored loopback override: that candidate is labelled
+// "覆盖地址", not "隧道", but the probe still went through the reverse forward,
+// so its refusal must not be dropped when a LAN candidate then succeeds.
+func TestPrepareAgentAPIForTurnKeepsTunnelReasonWithLoopbackOverride(t *testing.T) {
+	ctx := context.Background()
+	service, _ := newAgentAPIProxyTestService(t)
+	settings, err := service.store.AgentAPISettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.URL = "http://127.0.0.1:8766"
+	settings.StdioProxy = true
+	if _, err := service.store.UpdateAgentAPISettings(ctx, settings); err != nil {
+		t.Fatal(err)
+	}
+	service.agentAPIProxyStartFn = func(context.Context, domain.Workspace, domain.Task, string, string, string, string) (*workspacepkg.AgentAPIProxy, error) {
+		return nil, fmt.Errorf("准备 helper：Node helper 不可用：工作区里没有 node")
+	}
+	service.agentAPIWorkspaceHostsFn = func(context.Context, domain.Workspace) []string { return nil }
+	service.agentAPILocalHostsFn = func() []string { return []string{"192.168.7.187"} }
+	service.agentAPIProbeFn = func(_ context.Context, _ domain.Workspace, candidate string) error {
+		if strings.Contains(candidate, "127.0.0.1") {
+			return fmt.Errorf("服务端拒绝端口转发：administratively prohibited")
+		}
+		return nil
+	}
+
+	setup, err := service.prepareAgentAPIForTurn(ctx, agentProxyTestWorkspaceItem(), domain.Task{ID: "task-1"}, t.TempDir(), "codex")
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if setup.Path != agentAPIPathLAN {
+		t.Fatalf("path = %q, want lan", setup.Path)
+	}
+	detail := service.agentAPIFallbackDetail(ctx, domain.Workspace{ID: "workspace-1"})
+	if !strings.Contains(detail, "administratively prohibited") {
+		t.Fatalf("fallback detail = %q, want the loopback override's tunnel refusal", detail)
+	}
+}
+
 // TestPrepareAgentAPIForTurnSkipsNonLoopbackAddresses checks the other side of
 // the gate: a workspace that can already dial AHA must not be routed through a
 // tunnel that would only add a hop and a failure mode.

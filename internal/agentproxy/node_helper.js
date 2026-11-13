@@ -409,7 +409,13 @@ function run() {
     }
   });
   process.stdin.on('end', () => {
-    // stdin EOF is the normal end: the SSH session that carried it is gone.
+    // stdin EOF is the normal end, but only between frames. Bytes left in the
+    // buffer are a frame cut in half, which the Go reader treats as a broken
+    // channel; reporting it as a clean exit would hide data loss.
+    if (buffer.length > 0) {
+      fail(`truncated frame at end of input: ${buffer.length} bytes`);
+      return;
+    }
     shutdown(0);
   });
   process.stdin.on('error', (error) => fail(`read stdin: ${error.message}`));

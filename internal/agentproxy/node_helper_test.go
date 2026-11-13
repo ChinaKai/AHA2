@@ -242,6 +242,35 @@ func TestNodeHelperMalformedFrameTearsDownChannel(t *testing.T) {
 	}
 }
 
+// TestNodeHelperRejectsTruncatedFrameOnEOF keeps EOF from masking data loss: a
+// frame cut in half is a broken channel, the same verdict the Go reader reaches.
+func TestNodeHelperRejectsTruncatedFrameOnEOF(t *testing.T) {
+	target := startAgentProxyTestTarget(t, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(writer, "ok")
+	}))
+	session, stderr := startNodeSession(t, target)
+
+	// Five bytes of a nine-byte header, then EOF.
+	if _, err := session.stdio.Stdin.Write([]byte{byte(frameData), 0, 0, 0, 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.stdio.Stdin.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-session.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("helper did not exit after a truncated frame")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(stderr.String(), "truncated frame") && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !strings.Contains(stderr.String(), "truncated frame") {
+		t.Fatalf("stderr = %q, want a truncated-frame error", stderr.String())
+	}
+}
+
 // TestNodeHelperExitsOnStdinEOF pins normal shutdown: the SSH session closing
 // its side is what stops the helper, with no orphan process left behind.
 func TestNodeHelperExitsOnStdinEOF(t *testing.T) {
