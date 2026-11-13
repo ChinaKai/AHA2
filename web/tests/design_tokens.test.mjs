@@ -6,8 +6,8 @@ import {resolve} from "node:path";
 const repo = resolve(import.meta.dirname, "..", "..");
 const css = await readFile(resolve(repo, "web", "src", "styles.css"), "utf8");
 
-// The cascade checks model four fixed layout widths plus one declared
-// container width. This is a deliberately small CSS cascade model, not a
+// The cascade checks model five fixed layout widths plus two declared
+// container widths. This is a deliberately small CSS cascade model, not a
 // browser: it covers the selector and at-rule surface used by the assertions
 // below. See docs/web-design-tokens.md for the documented limits.
 //
@@ -15,9 +15,11 @@ const css = await readFile(resolve(repo, "web", "src", "styles.css"), "utf8");
 // and child combinators, :not/:is/:where/:root, ::pseudo-elements and the UI
 // state pseudo-classes used by these targets. Sibling combinators and :has
 // are not modeled because no assertion below depends on them.
-const VIEWPORTS = [375, 768, 1280, 1440];
+const VIEWPORTS = [360, 375, 768, 1280, 1440];
 const DEFAULT_VIEWPORT = 1280;
-const CONTAINER_WIDTH = 900;
+const CONTAINER_WIDTHS = [360, 900];
+const DEFAULT_CONTAINER_WIDTH = 900;
+const KNOWN_CONTAINERS = new Set(["shared-desktop"]);
 
 /* ------------------------------------------------------------------ *
  * CSS parser
@@ -146,22 +148,50 @@ function evaluateMedia(condition, viewportWidth) {
   });
 }
 
-function evaluateContainer(condition) {
-  // Container-name queries are allowed; only the size condition is modeled.
+const ASSERTED_PROPERTY_PATTERN = /(?:^|[;{])\s*(?:color|background(?:-color)?|border(?:-(?:top|right|bottom|left|color|radius))?(?:-color)?|outline(?:-color)?|box-shadow|font-size|display|padding|--color-[\w-]+|--button-[\w-]+|--focus-[\w-]+|--radius-[\w-]+|--shadow-[\w-]+|--swatch-color)\s*:/i;
+
+function containsAssertedProperty(block) {
+  return ASSERTED_PROPERTY_PATTERN.test(block);
+}
+
+function evaluateContainer(condition, containerWidth, block) {
   const firstParen = condition.indexOf("(");
+  const name = firstParen > 0 ? condition.slice(0, firstParen).trim() : "";
+  if (name && !KNOWN_CONTAINERS.has(name)) {
+    if (containsAssertedProperty(block)) {
+      throw new Error(`unmodeled container ${name} affects asserted properties; add the container name or remove the rule`);
+    }
+    return false;
+  }
   const features = firstParen >= 0 ? condition.slice(firstParen) : condition;
-  return splitTopLevel(features, ",").some(query => {
-    const normalized = query.trim().toLowerCase();
-    if (!normalized) return false;
-    return normalized.split(/\s+and\s+/).every(feature => {
-      const item = feature.trim();
-      const minWidth = item.match(/^\(min-width:\s*(\d+(?:\.\d+)?)px\)$/);
-      if (minWidth) return CONTAINER_WIDTH >= Number(minWidth[1]);
-      const maxWidth = item.match(/^\(max-width:\s*(\d+(?:\.\d+)?)px\)$/);
-      if (maxWidth) return CONTAINER_WIDTH <= Number(maxWidth[1]);
-      return false;
-    });
-  });
+  const queries = splitTopLevel(features, ",")
+    .map(query => query.trim().toLowerCase())
+    .filter(Boolean);
+  if (queries.length === 0) {
+    if (containsAssertedProperty(block)) {
+      throw new Error(`unmodeled container condition "${condition}" affects asserted properties`);
+    }
+    return false;
+  }
+  let recognized = false;
+  const result = queries.some(query => query.split(/\s+and\s+/).every(feature => {
+    const item = feature.trim();
+    const minWidth = item.match(/^\(min-width:\s*(\d+(?:\.\d+)?)px\)$/);
+    if (minWidth) {
+      recognized = true;
+      return containerWidth >= Number(minWidth[1]);
+    }
+    const maxWidth = item.match(/^\(max-width:\s*(\d+(?:\.\d+)?)px\)$/);
+    if (maxWidth) {
+      recognized = true;
+      return containerWidth <= Number(maxWidth[1]);
+    }
+    return false;
+  }));
+  if (!recognized && containsAssertedProperty(block)) {
+    throw new Error(`unmodeled container condition "${condition}" affects asserted properties; only width features are modeled`);
+  }
+  return result;
 }
 
 function splitTopLevelKeyword(text, keyword) {
@@ -252,13 +282,7 @@ function evaluateSupports(condition) {
   return supportsDeclaration(property, value);
 }
 
-const TRACKED_SELECTOR_PATTERN = /(?:^|[\s,{])(?::root|button|\.primary|\.secondary|\.ghost|\.danger|\.task-tool-badge|\.bottom-nav|\.sidebar)(?=[\s,{:.#\[])/;
-
-function containsTrackedSelector(block) {
-  return TRACKED_SELECTOR_PATTERN.test(block);
-}
-
-function parseStylesheet(source, viewportWidth = DEFAULT_VIEWPORT) {
+function parseStylesheet(source, viewportWidth = DEFAULT_VIEWPORT, containerWidth = DEFAULT_CONTAINER_WIDTH) {
   const clean = stripComments(source);
   const rules = [];
   let order = 0;
@@ -339,7 +363,7 @@ function parseStylesheet(source, viewportWidth = DEFAULT_VIEWPORT) {
         } else if (atName === "supports") {
           parseBlock(block, applies && evaluateSupports(condition), layer);
         } else if (atName === "container") {
-          parseBlock(block, applies && evaluateContainer(condition), layer);
+          parseBlock(block, applies && evaluateContainer(condition, containerWidth, block), layer);
         } else if (atName === "layer") {
           const names = condition.split(",").map(item => item.trim()).filter(Boolean);
           if (names.length === 0) names.push(`__anonymous_${anonymousLayer++}`);
@@ -349,8 +373,8 @@ function parseStylesheet(source, viewportWidth = DEFAULT_VIEWPORT) {
           parseBlock(block, applies, nestedLayer);
         } else if (atName === "keyframes" || atName === "font-face" || atName === "page") {
           // Known non-element at-rules.
-        } else if (containsTrackedSelector(block)) {
-          throw new Error(`unmodeled at-rule @${atName || "(anonymous)"} affects tracked selectors; extend the cascade model or remove the rule`);
+        } else if (containsAssertedProperty(block)) {
+          throw new Error(`unmodeled at-rule @${atName || "(anonymous)"} contains asserted properties; extend the cascade model or remove the rule`);
         }
         continue;
       }
@@ -377,16 +401,17 @@ function parseStylesheet(source, viewportWidth = DEFAULT_VIEWPORT) {
 }
 
 const sheetCache = new Map();
-function sheet(source, viewportWidth = DEFAULT_VIEWPORT) {
+function sheet(source, viewportWidth = DEFAULT_VIEWPORT, containerWidth = DEFAULT_CONTAINER_WIDTH) {
   let byViewport = sheetCache.get(source);
   if (!byViewport) {
     byViewport = new Map();
     sheetCache.set(source, byViewport);
   }
-  if (!byViewport.has(viewportWidth)) {
-    byViewport.set(viewportWidth, parseStylesheet(source, viewportWidth));
+  const key = `${viewportWidth}/${containerWidth}`;
+  if (!byViewport.has(key)) {
+    byViewport.set(key, parseStylesheet(source, viewportWidth, containerWidth));
   }
-  return byViewport.get(viewportWidth);
+  return byViewport.get(key);
 }
 
 /* ------------------------------------------------------------------ *
@@ -767,8 +792,8 @@ function matchesSelectorCached(selector, element) {
   return element.matchCache.get(selector);
 }
 
-function resolveProperty(source, element, property, viewportWidth = DEFAULT_VIEWPORT) {
-  const {rules} = sheet(source, viewportWidth);
+function resolveProperty(source, element, property, viewportWidth = DEFAULT_VIEWPORT, containerWidth = DEFAULT_CONTAINER_WIDTH) {
+  const {rules} = sheet(source, viewportWidth, containerWidth);
   let winner = null;
   for (const rule of rules) {
     let bestSpecificity = null;
@@ -798,14 +823,15 @@ function resolveProperty(source, element, property, viewportWidth = DEFAULT_VIEW
 }
 
 const tokenCache = new Map();
-function rootTokens(source, viewportWidth = DEFAULT_VIEWPORT) {
+function rootTokens(source, viewportWidth = DEFAULT_VIEWPORT, containerWidth = DEFAULT_CONTAINER_WIDTH) {
   let byViewport = tokenCache.get(source);
   if (!byViewport) {
     byViewport = new Map();
     tokenCache.set(source, byViewport);
   }
-  if (byViewport.has(viewportWidth)) return byViewport.get(viewportWidth);
-  const {rules} = sheet(source, viewportWidth);
+  const key = `${viewportWidth}/${containerWidth}`;
+  if (byViewport.has(key)) return byViewport.get(key);
+  const {rules} = sheet(source, viewportWidth, containerWidth);
   const root = element("html", {states: ["root"]});
   const names = new Set();
   for (const rule of rules) {
@@ -816,10 +842,10 @@ function rootTokens(source, viewportWidth = DEFAULT_VIEWPORT) {
   }
   const tokens = new Map();
   for (const name of names) {
-    const value = resolveProperty(source, root, name, viewportWidth);
+    const value = resolveProperty(source, root, name, viewportWidth, containerWidth);
     if (value !== undefined) tokens.set(name, value);
   }
-  byViewport.set(viewportWidth, tokens);
+  byViewport.set(key, tokens);
   return tokens;
 }
 
@@ -827,14 +853,14 @@ function rootTokens(source, viewportWidth = DEFAULT_VIEWPORT) {
  * Contrast
  * ------------------------------------------------------------------ */
 
-function token(value, name, viewportWidth = DEFAULT_VIEWPORT) {
-  const resolved = rootTokens(value, viewportWidth).get(name);
-  assert.ok(resolved, `${name} is defined by the final :root cascade at ${viewportWidth}px`);
+function token(value, name, viewportWidth = DEFAULT_VIEWPORT, containerWidth = DEFAULT_CONTAINER_WIDTH) {
+  const resolved = rootTokens(value, viewportWidth, containerWidth).get(name);
+  assert.ok(resolved, `${name} is defined by the final :root cascade at ${viewportWidth}px / ${containerWidth}px`);
   return resolved;
 }
 
-function hexToken(value, name, viewportWidth = DEFAULT_VIEWPORT) {
-  const resolved = token(value, name, viewportWidth);
+function hexToken(value, name, viewportWidth = DEFAULT_VIEWPORT, containerWidth = DEFAULT_CONTAINER_WIDTH) {
+  const resolved = token(value, name, viewportWidth, containerWidth);
   assert.match(resolved, /^#[0-9a-f]{6}$/i, `${name} must resolve to a direct hex value, got ${resolved}`);
   return resolved;
 }
@@ -960,8 +986,8 @@ const SIDEBAR_BADGE = element("span", {
   parent: SIDEBAR_PENDING,
 });
 
-function style(source, subject, property, viewportWidth = DEFAULT_VIEWPORT) {
-  return resolveProperty(source, subject, property, viewportWidth);
+function style(source, subject, property, viewportWidth = DEFAULT_VIEWPORT, containerWidth = DEFAULT_CONTAINER_WIDTH) {
+  return resolveProperty(source, subject, property, viewportWidth, containerWidth);
 }
 
 /* ------------------------------------------------------------------ *
@@ -1197,7 +1223,14 @@ test("the cascade model catches known override patterns", () => {
   );
 });
 
-test("viewport-scoped overrides are evaluated at 375/768/1280/1440", () => {
+test("viewport-scoped overrides are evaluated at 360/375/768/1280/1440", () => {
+  const pending360 = `${css}\n@media (max-width:360px){ .bottom-nav button.has-pending{color:#fff} }\n`;
+  assert.equal(style(pending360, BOTTOM_PENDING, "color", 360), "#fff");
+  for (const viewport of [375, 768, 1280, 1440]) {
+    assert.equal(style(pending360, BOTTOM_PENDING, "color", viewport), "var(--color-warning-ink)", `pending 360 mutation at ${viewport}px`);
+  }
+  assert.throws(() => assertPendingHealthy(pending360), Error, "pending override must fail at 360px");
+
   const pending = `${css}\n@media (max-width:760px){ .bottom-nav button.has-pending{color:#fff} }\n`;
   assert.equal(style(pending, BOTTOM_PENDING, "color", 375), "#fff");
   for (const viewport of [768, 1280, 1440]) {
@@ -1282,25 +1315,54 @@ test("@supports evaluates the modeled declaration conditions", () => {
   assert.equal(style(negated, PRIMARY, "background"), "var(--color-accent)");
 });
 
-test("@container evaluates the declared 900px container", () => {
+test("@container evaluates known names at 360 and 900 container widths", () => {
   const applies = `${css}\n@container (min-width: 500px) { button.primary { background:#fff; color:#fff; } }\n`;
-  assert.equal(style(applies, PRIMARY, "background"), "#fff");
+  assert.equal(style(applies, PRIMARY, "background", 1280, 900), "#fff");
+  assert.equal(style(applies, PRIMARY, "background", 1280, 360), "var(--color-accent)");
   assert.throws(() => assertPrimaryHealthy(applies), Error);
 
   const doesNotApply = `${css}\n@container (min-width: 1000px) { button.primary { background:#fff; color:#fff; } }\n`;
-  assert.equal(style(doesNotApply, PRIMARY, "background"), "var(--color-accent)");
+  assert.equal(style(doesNotApply, PRIMARY, "background", 1280, 900), "var(--color-accent)");
+  assert.equal(style(doesNotApply, PRIMARY, "background", 1280, 360), "var(--color-accent)");
   assertPrimaryHealthy(doesNotApply);
 
-  const named = `${css}\n@container card (max-width: 1000px) { button.primary { background:#fff; color:#fff; } }\n`;
-  assert.equal(style(named, PRIMARY, "background"), "#fff");
+  const namedNarrow = `${css}\n@container shared-desktop (max-width: 360px) { button.primary { background:#fff; color:#fff; } }\n`;
+  assert.equal(style(namedNarrow, PRIMARY, "background", 1280, 360), "#fff");
+  assert.equal(style(namedNarrow, PRIMARY, "background", 1280, 900), "var(--color-accent)");
+
+  const namedWide = `${css}\n@container shared-desktop (min-width: 500px) { button.primary { background:#fff; color:#fff; } }\n`;
+  assert.equal(style(namedWide, PRIMARY, "background", 1280, 360), "var(--color-accent)");
+  assert.equal(style(namedWide, PRIMARY, "background", 1280, 900), "#fff");
+
+  const unknownName = `${css}\n@container card (max-width: 1000px) { button.primary { background:#fff; color:#fff; } }\n`;
+  assert.throws(() => style(unknownName, PRIMARY, "background", 1280, 900), /unmodeled container card/);
+  assert.throws(() => style(unknownName, PRIMARY, "background", 1280, 360), /unmodeled container card/);
+
+  const unknownNameLayoutOnly = `${css}\n@container card (max-width: 1000px) { .unrelated { margin:0; width:10px; } }\n`;
+  assert.equal(style(unknownNameLayoutOnly, PRIMARY, "background", 1280, 900), "var(--color-accent)");
+
+  assert.equal(style(css, PRIMARY, "background", 1280, 360), "var(--color-accent)");
+  assert.equal(style(css, PRIMARY, "background", 1280, 900), "var(--color-accent)");
 });
 
-test("unmodeled at-rules that affect tracked selectors fail loudly", () => {
-  const unknown = `${css}\n@scope (.app) { button.primary { background:#fff; } }\n`;
-  assert.throws(() => style(unknown, PRIMARY, "background"), /unmodeled at-rule @scope/);
+test("unmodeled at-rules fail when their block asserts a tracked property", () => {
+  for (const rule of [
+    "button.primary { background:#fff; }",
+    ".panel { background:#fff; }",
+    "input { color:#fff; }",
+    ".sidebar-memo-swatch { background:#fff; }",
+    ".unrelated { font-size:12px; }",
+    ".unrelated { --color-accent:#fff; }",
+  ]) {
+    const unknown = `${css}\n@scope (.app) { ${rule} }\n`;
+    assert.throws(() => style(unknown, PRIMARY, "background"), /unmodeled at-rule @scope/, rule);
+  }
 
-  const unrelated = `${css}\n@starting-style { .unrelated { opacity: 0; } }\n`;
-  assert.equal(style(unrelated, PRIMARY, "background"), "var(--color-accent)");
+  const layoutOnly = `${css}\n@scope (.app) { .unrelated { margin:0; width:10px; } }\n`;
+  assert.equal(style(layoutOnly, PRIMARY, "background"), "var(--color-accent)");
+
+  const unrelatedAtRule = `${css}\n@starting-style { .unrelated { opacity: 0; } }\n`;
+  assert.equal(style(unrelatedAtRule, PRIMARY, "background"), "var(--color-accent)");
 });
 
 /* ------------------------------------------------------------------ *
