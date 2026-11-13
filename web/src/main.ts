@@ -3270,6 +3270,7 @@ function modelsView(): string {
   const codexPage = paginateItems(state.codexAccounts, state.codexAccountPage, CODEX_ACCOUNT_PAGE_SIZE);
   return shell(`<section class="page">
     ${pageHead("模型", "Models 管理 Provider / Env 模型与 Agent Backend；Codex 与 Claude Code 官方账号在创建或编辑 Task 时选择。")}
+    ${backendsPanelHTML()}
     <div class="provider-layout">
       <div class="provider-sidebar">
         ${renderCodexAccounts(codexPage.items, paginationHTML("codex-accounts", codexPage))}
@@ -3277,7 +3278,6 @@ function modelsView(): string {
       </div>
       <section class="panel"><div class="panel-head"><strong>Models</strong><div class="panel-head-actions"><input id="model-search" name="model-query" class="model-search" type="search" autocomplete="off" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" spellcheck="false" readonly placeholder="搜索模型 / Provider / Backend" value="${escapeHTML(state.modelSearch)}"><button data-dialog="model">${icon("plus")}添加模型</button></div></div><div id="model-results">${modelResultsHTML()}</div></section>
     </div>
-    ${backendsPanelHTML()}
     ${providerDialog()}${modelDialog()}${editModelDialog()}
   </section>`);
 }

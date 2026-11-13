@@ -12,19 +12,12 @@ export interface BackendProtocol {
   label: string;
 }
 
-export interface BackendInstall {
-  platform: string;
-  command: string;
-}
-
 export interface SupportedBackend {
   id: "claude" | "codex" | "dsh";
   name: string;
   tagline: string;
   protocols: BackendProtocol[];
   docURL: string;
-  requirement?: string;
-  installs: BackendInstall[];
 }
 
 export interface ModelWireOption {
@@ -59,10 +52,6 @@ export const SUPPORTED_BACKENDS: readonly SupportedBackend[] = [
     tagline: "Anthropic 官方 agent CLI，通过 Anthropic Messages 协议运行。",
     protocols: [{wire: "anthropic_messages", label: "Anthropic Messages"}],
     docURL: "https://code.claude.com/docs/en/overview",
-    installs: [
-      {platform: "Windows PowerShell", command: "irm https://claude.ai/install.ps1 | iex"},
-      {platform: "macOS / Linux / WSL", command: "curl -fsSL https://claude.ai/install.sh | bash"},
-    ],
   },
   {
     id: "codex",
@@ -73,9 +62,6 @@ export const SUPPORTED_BACKENDS: readonly SupportedBackend[] = [
       {wire: "chat_completions", label: "Chat Completions"},
     ],
     docURL: "https://learn.chatgpt.com/docs/codex/cli",
-    installs: [
-      {platform: "macOS / Linux", command: "curl -fsSL https://chatgpt.com/codex/install.sh | sh"},
-    ],
   },
   {
     id: "dsh",
@@ -87,10 +73,6 @@ export const SUPPORTED_BACKENDS: readonly SupportedBackend[] = [
       {wire: "anthropic_messages", label: "Anthropic Messages"},
     ],
     docURL: "https://deepseek-harness.github.io/deepseek-harness/",
-    requirement: "Node.js >= 24.9.0",
-    installs: [
-      {platform: "任意平台", command: "npx @deepseek-ai/dsh web"},
-    ],
   },
 ];
 
@@ -165,18 +147,8 @@ function protocolTagsHTML(protocols: BackendProtocol[]): string {
     .join("");
 }
 
-function installsHTML(backend: SupportedBackend): string {
-  const requirement = backend.requirement
-    ? `<div class="backend-install backend-requirement"><span>运行要求</span><code>${escapeHTML(backend.requirement)}</code></div>`
-    : "";
-  const commands = backend.installs
-    .map(install => `<div class="backend-install" data-platform="${escapeHTML(install.platform)}"><span>${escapeHTML(install.platform)}</span><code>${escapeHTML(install.command)}</code></div>`)
-    .join("");
-  return `${requirement}${commands}`;
-}
-
 // backendsPanelHTML renders the read-only "supported backends" panel for the
-// Models page. Links open in a new tab; install commands are text only.
+// Models page. Links open in a new tab; installation is left to the linked docs.
 export function backendsPanelHTML(): string {
   const cards = SUPPORTED_BACKENDS.map(backend => `<article class="backend-card" data-backend-id="${escapeHTML(backend.id)}">
       <div class="backend-card-head">
@@ -185,7 +157,6 @@ export function backendsPanelHTML(): string {
       </div>
       <p class="backend-tagline">${escapeHTML(backend.tagline)}</p>
       <div class="backend-protocols">${protocolTagsHTML(backend.protocols)}</div>
-      ${installsHTML(backend)}
     </article>`).join("");
   return `<section class="panel spaced supported-backends-panel" id="supported-backends" aria-labelledby="supported-backends-title">
     <div class="panel-head"><strong id="supported-backends-title">AHA 支持的 Backend</strong><span>Agent 运行时，不是 Provider 或模型协议</span></div>
