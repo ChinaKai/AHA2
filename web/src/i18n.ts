@@ -1291,6 +1291,8 @@ const legacyEnglish: Record<string, string> = {
   "停用": "Disable",
   "开启": "On",
   "关闭": "Close",
+  "开": "On",
+  "关": "Off",
   "成功": "Success",
   "失败": "Failed",
   "错误": "Error",

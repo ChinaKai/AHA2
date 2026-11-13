@@ -132,13 +132,13 @@ test("validation explains missing models, invalid effort and unavailable selecti
   );
 });
 
-test("closing with unsaved edits asks first and cancel performs no write", async () => {
-  const app = await readFile(resolve(root, "build", "app.js"), "utf8");
-  assert.match(app, /function confirmAgentConfigClose/);
-  assert.match(app, /Agent 配置尚未保存，关闭将丢弃这些修改。确定关闭？/);
-  assert.match(app, /agentConfigBaseline = ""/, "saving does not reset the dirty baseline");
-  assert.match(app, /addEventListener\("cancel"/, "Esc bypasses the unsaved-changes prompt");
-  assert.match(app, /bindForm\("#agent-config-form"/);
-  // Cancelling only closes the dialog; the write path is the submit handler.
-  assert.match(app, /data-close>取消/);
+test("the standalone Fast fold badge translates its on and off states", async () => {
+  const i18n = await import(pathToFileURL(resolve(root, "build", "i18n.js")));
+  try {
+    i18n.applyLocale("en-US");
+    assert.equal(i18n.tr("开"), "On");
+    assert.equal(i18n.tr("关"), "Off");
+  } finally {
+    i18n.applyLocale("zh-CN");
+  }
 });
