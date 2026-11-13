@@ -3201,7 +3201,11 @@ function currentModelPage(): ReturnType<typeof buildModelPage> {
 
 function modelRowHTML(item: Model): string {
   const selected = state.modelSelected.has(item.id);
-  return `<tr class="model-row" data-model-card="${escapeHTML(item.id)}"><td class="model-select-cell"><input type="checkbox" data-select-model="${escapeHTML(item.id)}" ${selected ? "checked" : ""} aria-label="选择 ${escapeHTML(item.display_name)}"></td><td class="model-name-cell"><strong>${escapeHTML(item.display_name)}${modelSupportsImage(item) ? '<span class="capability-badge">图片</span>' : ''}</strong><small>${escapeHTML(item.wire_model)}</small></td><td data-label="Provider"><strong>${escapeHTML(item.provider_name || item.provider_id)}</strong><small>${escapeHTML(item.provider_id)}</small></td><td data-label="Backend/协议">${escapeHTML(backendProtocolLabel(item))}</td><td data-label="Context">${item.context_window ? Math.round(item.context_window / 1000) + "K" : "-"}${item.max_output_tokens ? `<small>输出 ${Math.round(item.max_output_tokens / 1000)}K</small>` : ""}${item.auto_compact_window ? `<small>自动压缩 ${Math.round(item.auto_compact_window / 1000)}K</small>` : ""}</td><td class="model-health-cell" data-label="可用性">${renderModelHealthCell(item.id, state.modelHealth[item.id])}</td><td class="row-actions"><button type="button" data-edit-model="${item.id}" class="icon-button" title="编辑模型">${icon("edit")}</button><button type="button" data-delete-model="${item.id}" class="icon-button" title="删除模型">${icon("close")}</button></td></tr>`;
+  // The row is one compact line at every width. Provider, Backend, Context and
+  // the wire_model small print are gone; the full name and wire_model survive
+  // in the title so a truncated name can still be identified on hover.
+  const title = item.wire_model ? `${item.display_name} · ${item.wire_model}` : item.display_name;
+  return `<tr class="model-row" data-model-card="${escapeHTML(item.id)}"><td class="model-select-cell"><input type="checkbox" data-select-model="${escapeHTML(item.id)}" ${selected ? "checked" : ""} aria-label="选择 ${escapeHTML(item.display_name)}"></td><td class="model-name-cell"><strong title="${escapeHTML(title)}"><span class="model-name-text">${escapeHTML(item.display_name)}</span>${modelSupportsImage(item) ? '<span class="capability-badge">图片</span>' : ''}</strong></td><td class="model-actions-cell"><div class="model-row-actions"><div class="model-health-cell">${renderModelHealthCell(item.id, state.modelHealth[item.id])}</div><div class="row-actions"><button type="button" data-edit-model="${item.id}" class="icon-button" title="编辑模型">${icon("edit")}</button><button type="button" data-delete-model="${item.id}" class="icon-button" title="删除模型">${icon("close")}</button></div></div></td></tr>`;
 }
 
 function modelGroupRowsHTML(group: ReturnType<typeof buildModelPage>["groups"][number]): string {
@@ -3210,7 +3214,7 @@ function modelGroupRowsHTML(group: ReturnType<typeof buildModelPage>["groups"][n
   const count = group.total > group.items.length
     ? `共 ${group.total} 个 · 本页 ${group.items.length} 个`
     : `共 ${group.total} 个`;
-  return `<tr class="model-group-row" data-model-group="${escapeHTML(group.providerId)}"><td class="model-select-cell"><input type="checkbox" data-select-model-group="${escapeHTML(group.providerId)}" ${groupAllSelected ? "checked" : ""} aria-label="全选本页分组 ${escapeHTML(group.providerName)}"><span class="model-group-select-label">全选本页</span></td><td colspan="6" class="model-group-title"><strong>${escapeHTML(group.providerName)}</strong><span class="model-group-count">${count}</span></td></tr>${group.items.map(modelRowHTML).join("")}`;
+  return `<tr class="model-group-row" data-model-group="${escapeHTML(group.providerId)}"><td class="model-select-cell"><input type="checkbox" data-select-model-group="${escapeHTML(group.providerId)}" ${groupAllSelected ? "checked" : ""} aria-label="全选本页分组 ${escapeHTML(group.providerName)}"><span class="model-group-select-label">全选本页</span></td><td colspan="2" class="model-group-title"><strong>${escapeHTML(group.providerName)}</strong><span class="model-group-count">${count}</span></td></tr>${group.items.map(modelRowHTML).join("")}`;
 }
 
 function modelResultsHTML(): string {
@@ -3222,7 +3226,7 @@ function modelResultsHTML(): string {
   const modelTotal = state.modelSearch.trim()
     ? `匹配 ${visibleModels.length} / 共 ${state.models.length} 个`
     : `共 ${state.models.length} 个`;
-  return `${modelBatchBarHTML(selectedModelIDs().length)}<div class="table-wrap models-table-wrap"><table class="models-table"><thead><tr><th class="model-select-cell"><input type="checkbox" data-select-models-page ${pageAllSelected ? "checked" : ""} aria-label="全选本页模型"><span class="model-page-select-label">全选本页</span></th><th>模型</th><th>Provider</th><th>Backend</th><th>Context</th><th>可用性</th><th></th></tr></thead><tbody>${groups || `<tr><td colspan="7">${modelEmpty}</td></tr>`}</tbody></table></div>${paginationHTML("models", modelPage.slice, modelTotal)}`;
+  return `${modelBatchBarHTML(selectedModelIDs().length)}<div class="table-wrap models-table-wrap"><table class="models-table"><thead><tr><th class="model-select-cell"><input type="checkbox" data-select-models-page ${pageAllSelected ? "checked" : ""} aria-label="全选本页模型"><span class="model-page-select-label">全选本页</span></th><th>模型</th><th class="model-actions-head">操作</th></tr></thead><tbody>${groups || `<tr><td colspan="3">${modelEmpty}</td></tr>`}</tbody></table></div>${paginationHTML("models", modelPage.slice, modelTotal)}`;
 }
 
 function batchCheckSelectedModels(): void {

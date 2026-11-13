@@ -783,27 +783,32 @@ export function modelHealthDisplay(health?: ModelHealthView): ModelHealthDisplay
   }
 }
 
-export function renderModelHealthBadge(health?: ModelHealthView): string {
-  const display = modelHealthDisplay(health);
-  if (!display) return `<span class="status">未检测</span>`;
-  const tone = display.tone === "muted" ? "" : ` ${display.tone}`;
-  return `<span class="status${tone}" title="${escapeWorkspaceHTML(display.hint)}">${escapeWorkspaceHTML(display.label)}</span>`;
-}
-
-export function renderModelHealthDetail(health?: ModelHealthView): string {
+// The badge title carries the same HTTP/endpoint/summary evidence the old
+// inline <details> exposed. Keeping it in the tooltip means the compact action
+// cell has a bounded width: a long endpoint or error summary cannot push the
+// model name down to zero at narrow desktop widths.
+function modelHealthEvidence(health?: ModelHealthView): string {
   if (!health || health.status === "checking") return "";
   const facts: string[] = [];
   if (health.http_status) facts.push(`HTTP ${health.http_status}`);
   if (health.endpoint) facts.push(String(health.endpoint));
   if (health.detail) facts.push(String(health.detail));
-  if (!facts.length) return "";
-  return `<details class="model-health-detail"><summary>详情</summary><small>${escapeWorkspaceHTML(facts.join(" · "))}</small></details>`;
+  return facts.join(" · ");
 }
 
-// renderModelHealthCell is the whole row control: badge, one-shot button and
-// expandable evidence. Only this row's health state changes, so a failure or a
-// slow gateway cannot disable checks on other rows.
+export function renderModelHealthBadge(health?: ModelHealthView): string {
+  const display = modelHealthDisplay(health);
+  if (!display) return `<span class="status">未检测</span>`;
+  const tone = display.tone === "muted" ? "" : ` ${display.tone}`;
+  const evidence = modelHealthEvidence(health);
+  const title = evidence ? `${display.hint} · ${evidence}` : display.hint;
+  return `<span class="status${tone}" title="${escapeWorkspaceHTML(title)}">${escapeWorkspaceHTML(display.label)}</span>`;
+}
+
+// renderModelHealthCell is the whole row control: badge and one-shot button.
+// Only this row's health state changes, so a failure or a slow gateway cannot
+// disable checks on other rows.
 export function renderModelHealthCell(modelID: string, health?: ModelHealthView): string {
   const checking = health?.status === "checking";
-  return `<div class="model-health">${renderModelHealthBadge(health)}<button type="button" data-check-model="${escapeWorkspaceHTML(modelID)}" class="health-check-button"${checking ? " disabled" : ""}>${checking ? "检测中…" : "检测"}</button></div>${renderModelHealthDetail(health)}`;
+  return `<div class="model-health">${renderModelHealthBadge(health)}<button type="button" data-check-model="${escapeWorkspaceHTML(modelID)}" class="health-check-button"${checking ? " disabled" : ""}>${checking ? "检测中…" : "检测"}</button></div>`;
 }
