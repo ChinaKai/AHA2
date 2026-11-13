@@ -1291,6 +1291,9 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 .model-group-row td { background: var(--color-surface-muted); border-bottom-color: var(--color-border-subtle); }
 .model-group-row strong { display: inline; font-size: var(--font-size-11); }
 .model-group-count { margin-left: 8px; color: var(--color-text-muted); font-size: 10px; font-weight: 500; }
+/* These labels only exist for the phone card layout; the desktop table header
+   already names every column, so keep them out of the desktop appearance. */
+.model-page-select-label, .model-group-select-label { display: none; }
 .model-batch-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 15px; border-bottom: 1px solid var(--color-border); background: var(--color-accent-soft); color: var(--color-accent-ink); font-size: var(--font-size-11); }
 .model-batch-bar > strong { white-space: nowrap; }
 .model-batch-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
@@ -2630,6 +2633,56 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
   .data-cleanup-actions label { justify-content: space-between; }
   .data-cleanup-actions button { width: 100%; }
   .data-cleanup-actions input { width: 84px; }
+
+  /* Models on phones: the same table rows become Provider-grouped cards. One
+     DOM stays in place, so the delegated row handlers and the >640px table are
+     untouched; only the table display box changes here. */
+  .models-page { padding-bottom: calc(96px + env(safe-area-inset-bottom)); }
+  .models-table-wrap { overflow: visible; }
+  .models-table, .models-table thead, .models-table tbody { display: block; width: 100%; }
+  .models-table thead tr { display: flex; align-items: center; gap: 8px; padding: 7px 12px; border-bottom: 1px solid var(--color-border); }
+  .models-table thead th { display: none; padding: 0; border: 0; }
+  .models-table thead th.model-select-cell { display: flex; align-items: center; gap: 8px; width: auto; min-width: 0; }
+  .model-page-select-label { display: inline; color: var(--color-text-muted); font-size: 11px; font-weight: 600; }
+  .models-table tbody > tr { display: block; }
+  .models-table td,
+  .models-table td:nth-child(3),
+  .models-table td:nth-child(5) { display: block; min-width: 0; padding: 0; border: 0; }
+  .models-table .model-row { display: grid; grid-template-columns: 20px minmax(0,1fr) auto; column-gap: 8px; row-gap: 7px; padding: 12px; border-bottom: 1px solid var(--color-border); }
+  .models-table .model-row > td.model-select-cell { display: flex; align-items: flex-start; width: auto; padding-top: 2px; }
+  .models-table .model-row > td.model-name-cell { grid-column: 2; grid-row: 1; min-width: 0; }
+  .models-table .model-row > td.row-actions { grid-column: 3; grid-row: 1; display: flex; gap: 4px; }
+  .models-table .model-row > td[data-label] { grid-column: 1 / -1; overflow-wrap: anywhere; }
+  .models-table .model-row > td[data-label]::before { display: block; margin-bottom: 3px; color: var(--color-text-muted); font-size: 10px; font-weight: 700; content: attr(data-label); }
+  .models-table .model-name-cell strong { overflow-wrap: anywhere; font-size: 13px; }
+  .models-table .model-name-cell small { overflow-wrap: anywhere; }
+  .models-table td.model-health-cell { min-width: 0; }
+  .models-table .model-row .row-actions .icon-button { width: 36px; min-width: 36px; min-height: 36px; padding: 0; }
+  .models-table .model-row .health-check-button { min-height: 36px; padding: 0 12px; font-size: 12px; }
+  .models-table input[type="checkbox"] { width: 18px; height: 18px; min-width: 18px; }
+  .models-table .model-group-row { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--color-border-subtle); background: var(--color-surface-muted); }
+  .models-table .model-group-row > td { padding: 0; border: 0; }
+  .models-table .model-group-row > td.model-group-title { display: flex; flex: 1 1 auto; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; order: 1; min-width: 0; }
+  .models-table .model-group-row > td.model-select-cell { display: flex; align-items: center; gap: 6px; order: 2; width: auto; margin-left: auto; }
+  .model-group-select-label { display: inline; color: var(--color-text-muted); font-size: 11px; font-weight: 600; white-space: nowrap; }
+  .models-table .model-group-row strong { font-size: 12px; }
+  .models-table tbody > tr:not(.model-row):not(.model-group-row) > td { display: block; padding: 16px 12px; color: var(--color-text-muted); }
+  .model-batch-bar { position: sticky; top: 0; z-index: 9; flex-wrap: wrap; padding: 10px 12px; }
+  .model-batch-actions { justify-content: flex-start; }
+  .model-batch-actions button { min-height: 36px; padding: 0 12px; }
+}
+
+@media (max-width: 400px) {
+  .models-table .model-row { grid-template-columns: 18px minmax(0,1fr) auto; column-gap: 6px; padding: 10px; }
+  .models-table .model-group-row { padding: 9px 10px; }
+  .model-batch-bar { padding: 9px 10px; }
+}
+
+@media (max-width: 360px) {
+  .models-table .model-row { padding: 9px 8px; }
+  .models-table .model-row .row-actions { gap: 2px; }
+  .models-table .model-name-cell strong { font-size: 12px; }
+  .models-table .model-row .health-check-button { padding: 0 9px; }
 }
 
 /* Pet settings is a page, not a modal: keep the sidebar visible and render

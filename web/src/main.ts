@@ -3201,7 +3201,7 @@ function currentModelPage(): ReturnType<typeof buildModelPage> {
 
 function modelRowHTML(item: Model): string {
   const selected = state.modelSelected.has(item.id);
-  return `<tr class="model-row"><td class="model-select-cell"><input type="checkbox" data-select-model="${escapeHTML(item.id)}" ${selected ? "checked" : ""} aria-label="选择 ${escapeHTML(item.display_name)}"></td><td><strong>${escapeHTML(item.display_name)}${modelSupportsImage(item) ? '<span class="capability-badge">图片</span>' : ''}</strong><small>${escapeHTML(item.wire_model)}</small></td><td><strong>${escapeHTML(item.provider_name || item.provider_id)}</strong><small>${escapeHTML(item.provider_id)}</small></td><td>${escapeHTML(backendProtocolLabel(item))}</td><td>${item.context_window ? Math.round(item.context_window / 1000) + "K" : "-"}${item.max_output_tokens ? `<small>输出 ${Math.round(item.max_output_tokens / 1000)}K</small>` : ""}${item.auto_compact_window ? `<small>自动压缩 ${Math.round(item.auto_compact_window / 1000)}K</small>` : ""}</td><td class="model-health-cell">${renderModelHealthCell(item.id, state.modelHealth[item.id])}</td><td class="row-actions"><button type="button" data-edit-model="${item.id}" class="icon-button" title="编辑模型">${icon("edit")}</button><button type="button" data-delete-model="${item.id}" class="icon-button" title="删除模型">${icon("close")}</button></td></tr>`;
+  return `<tr class="model-row" data-model-card="${escapeHTML(item.id)}"><td class="model-select-cell"><input type="checkbox" data-select-model="${escapeHTML(item.id)}" ${selected ? "checked" : ""} aria-label="选择 ${escapeHTML(item.display_name)}"></td><td class="model-name-cell"><strong>${escapeHTML(item.display_name)}${modelSupportsImage(item) ? '<span class="capability-badge">图片</span>' : ''}</strong><small>${escapeHTML(item.wire_model)}</small></td><td data-label="Provider"><strong>${escapeHTML(item.provider_name || item.provider_id)}</strong><small>${escapeHTML(item.provider_id)}</small></td><td data-label="Backend/协议">${escapeHTML(backendProtocolLabel(item))}</td><td data-label="Context">${item.context_window ? Math.round(item.context_window / 1000) + "K" : "-"}${item.max_output_tokens ? `<small>输出 ${Math.round(item.max_output_tokens / 1000)}K</small>` : ""}${item.auto_compact_window ? `<small>自动压缩 ${Math.round(item.auto_compact_window / 1000)}K</small>` : ""}</td><td class="model-health-cell" data-label="可用性">${renderModelHealthCell(item.id, state.modelHealth[item.id])}</td><td class="row-actions"><button type="button" data-edit-model="${item.id}" class="icon-button" title="编辑模型">${icon("edit")}</button><button type="button" data-delete-model="${item.id}" class="icon-button" title="删除模型">${icon("close")}</button></td></tr>`;
 }
 
 function modelGroupRowsHTML(group: ReturnType<typeof buildModelPage>["groups"][number]): string {
@@ -3210,7 +3210,7 @@ function modelGroupRowsHTML(group: ReturnType<typeof buildModelPage>["groups"][n
   const count = group.total > group.items.length
     ? `共 ${group.total} 个 · 本页 ${group.items.length} 个`
     : `共 ${group.total} 个`;
-  return `<tr class="model-group-row"><td class="model-select-cell"><input type="checkbox" data-select-model-group="${escapeHTML(group.providerId)}" ${groupAllSelected ? "checked" : ""} aria-label="全选本页分组 ${escapeHTML(group.providerName)}"></td><td colspan="6"><strong>${escapeHTML(group.providerName)}</strong><span class="model-group-count">${count}</span></td></tr>${group.items.map(modelRowHTML).join("")}`;
+  return `<tr class="model-group-row" data-model-group="${escapeHTML(group.providerId)}"><td class="model-select-cell"><input type="checkbox" data-select-model-group="${escapeHTML(group.providerId)}" ${groupAllSelected ? "checked" : ""} aria-label="全选本页分组 ${escapeHTML(group.providerName)}"><span class="model-group-select-label">全选本页</span></td><td colspan="6" class="model-group-title"><strong>${escapeHTML(group.providerName)}</strong><span class="model-group-count">${count}</span></td></tr>${group.items.map(modelRowHTML).join("")}`;
 }
 
 function modelResultsHTML(): string {
@@ -3222,7 +3222,7 @@ function modelResultsHTML(): string {
   const modelTotal = state.modelSearch.trim()
     ? `匹配 ${visibleModels.length} / 共 ${state.models.length} 个`
     : `共 ${state.models.length} 个`;
-  return `${modelBatchBarHTML(selectedModelIDs().length)}<div class="table-wrap"><table class="models-table"><thead><tr><th class="model-select-cell"><input type="checkbox" data-select-models-page ${pageAllSelected ? "checked" : ""} aria-label="全选本页模型"></th><th>模型</th><th>Provider</th><th>Backend</th><th>Context</th><th>可用性</th><th></th></tr></thead><tbody>${groups || `<tr><td colspan="7">${modelEmpty}</td></tr>`}</tbody></table></div>${paginationHTML("models", modelPage.slice, modelTotal)}`;
+  return `${modelBatchBarHTML(selectedModelIDs().length)}<div class="table-wrap models-table-wrap"><table class="models-table"><thead><tr><th class="model-select-cell"><input type="checkbox" data-select-models-page ${pageAllSelected ? "checked" : ""} aria-label="全选本页模型"><span class="model-page-select-label">全选本页</span></th><th>模型</th><th>Provider</th><th>Backend</th><th>Context</th><th>可用性</th><th></th></tr></thead><tbody>${groups || `<tr><td colspan="7">${modelEmpty}</td></tr>`}</tbody></table></div>${paginationHTML("models", modelPage.slice, modelTotal)}`;
 }
 
 function batchCheckSelectedModels(): void {
@@ -3348,7 +3348,7 @@ function modelsView(): string {
     <span class="row-actions"><button type="button" data-edit-provider="${item.id}" class="icon-button" title="编辑 Provider">${icon("edit")}</button><button type="button" data-delete-provider="${item.id}" class="icon-button" title="删除 Provider">${icon("close")}</button></span>
   </article>`).join("");
   const codexPage = paginateItems(state.codexAccounts, state.codexAccountPage, CODEX_ACCOUNT_PAGE_SIZE);
-  return shell(`<section class="page">
+  return shell(`<section class="page models-page">
     ${pageHead("模型", "Models 管理 Provider / Env 模型与 Agent Backend；Codex 与 Claude Code 官方账号在创建或编辑 Task 时选择。")}
     ${backendsPanelHTML()}
     <div class="provider-layout">
@@ -3356,7 +3356,7 @@ function modelsView(): string {
         ${renderCodexAccounts(codexPage.items, paginationHTML("codex-accounts", codexPage))}
         <section class="panel"><div class="panel-head"><strong>Providers</strong><button data-dialog="provider">${icon("plus")}添加 Provider</button></div>${providers || `<div class="empty">先添加 Provider（API Base URL + API Key）。</div>`}${paginationHTML("providers", providerPage)}</section>
       </div>
-      <section class="panel"><div class="panel-head"><strong>Models</strong><div class="panel-head-actions"><input id="model-search" name="model-query" class="model-search" type="search" autocomplete="off" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" spellcheck="false" readonly placeholder="搜索模型 / Provider / Backend" value="${escapeHTML(state.modelSearch)}"><button data-dialog="model">${icon("plus")}添加模型</button></div></div><div id="model-results">${modelResultsHTML()}</div></section>
+      <section class="panel model-panel"><div class="panel-head"><strong>Models</strong><div class="panel-head-actions"><input id="model-search" name="model-query" class="model-search" type="search" autocomplete="off" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" spellcheck="false" readonly placeholder="搜索模型 / Provider / Backend" value="${escapeHTML(state.modelSearch)}"><button data-dialog="model">${icon("plus")}添加模型</button></div></div><div id="model-results">${modelResultsHTML()}</div></section>
     </div>
     ${providerDialog()}${modelDialog()}${editModelDialog()}
   </section>`);

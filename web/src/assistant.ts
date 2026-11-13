@@ -1536,9 +1536,15 @@ function dockPoint(): {x: number; y: number} {
     const y = Math.max(rect.top + 8, Math.min(rect.top + 58, rect.bottom - PET_SIZE - 76));
     return {x, y};
   }
+  // On phones the bottom navigation owns the lowest strip. Dock above it so
+  // the pet does not cover the nav or the last card's action row.
+  const nav = document.querySelector<HTMLElement>(".bottom-nav");
+  const navHeight = nav && window.getComputedStyle(nav).display !== "none"
+    ? nav.getBoundingClientRect().height
+    : 0;
   return {
     x: Math.max(12, window.innerWidth - PET_SIZE - 22),
-    y: Math.max(12, window.innerHeight - PET_SIZE - 22),
+    y: Math.max(12, window.innerHeight - navHeight - PET_SIZE - 12),
   };
 }
 
