@@ -19,13 +19,15 @@ import (
 )
 
 // removedOperatorDeployScripts are the operator deployment entry points the
-// repository retired in task-315. Deployment now belongs to the installer on
-// the target machine, so these must stay gone and must not come back through a
-// doc, build script or test.
+// repository retired in task-315, stored as case-insensitive name stems so a
+// reference without the .ps1 suffix or with different capitalisation is still
+// caught. Deployment now belongs to the installer on the target machine, so
+// these must stay gone and must not come back through a doc, build script or
+// test.
 var removedOperatorDeployScripts = []string{
-	"deploy-windows-user.ps1",
-	"build-and-deploy-windows-user.ps1",
-	"deploy-windows.ps1",
+	"build-and-deploy-windows-user",
+	"deploy-windows-user",
+	"deploy-windows",
 }
 
 // ignoredReferenceDirs keeps the reference sweep out of generated output,
@@ -42,9 +44,10 @@ var ignoredReferenceDirs = map[string]bool{
 }
 
 func referencesRemovedScript(content string) string {
+	lower := strings.ToLower(content)
 	match := ""
 	for _, name := range removedOperatorDeployScripts {
-		if strings.Contains(content, name) && len(name) > len(match) {
+		if strings.Contains(lower, name) && len(name) > len(match) {
 			match = name
 		}
 	}
@@ -53,11 +56,26 @@ func referencesRemovedScript(content string) string {
 
 // TestRemovedScriptReferenceDetector protects the sweep below from going
 // vacuous: an empty name list or a broken matcher would otherwise make the
-// repository-wide assertion pass while references remain.
+// repository-wide assertion pass while references remain. It pins the two
+// blind spots found in review: case differences and a bare name without the
+// .ps1 suffix.
 func TestRemovedScriptReferenceDetector(t *testing.T) {
 	for _, name := range removedOperatorDeployScripts {
-		if got := referencesRemovedScript("powershell.exe -File scripts\\" + name); got != name {
+		if got := referencesRemovedScript("powershell.exe -File scripts\\" + name + ".ps1"); got != name {
 			t.Fatalf("detector missed %s (got %q)", name, got)
+		}
+	}
+	for _, sample := range []struct {
+		content string
+		want    string
+	}{
+		{"powershell -File scripts\\Deploy-Windows.ps1", "deploy-windows"},
+		{"powershell -File scripts\\DEPLOY-WINDOWS-USER.PS1", "deploy-windows-user"},
+		{"bash scripts/deploy-windows-user", "deploy-windows-user"},
+		{"Build-And-Deploy-Windows-User.ps1", "build-and-deploy-windows-user"},
+	} {
+		if got := referencesRemovedScript(sample.content); got != sample.want {
+			t.Errorf("detector on %q = %q, want %q", sample.content, got, sample.want)
 		}
 	}
 	if got := referencesRemovedScript("bash scripts/build-windows-package.sh --version 1.2.3"); got != "" {
@@ -67,15 +85,19 @@ func TestRemovedScriptReferenceDetector(t *testing.T) {
 
 func TestOperatorDeployScriptsRemoved(t *testing.T) {
 	root := repoRoot(t)
-	for _, name := range removedOperatorDeployScripts {
-		path := filepath.Join(root, "scripts", name)
-		_, err := os.Stat(path)
-		if err == nil {
-			t.Errorf("scripts/%s still exists; the repository must only build packages", name)
-			continue
-		}
-		if !errors.Is(err, fs.ErrNotExist) {
-			t.Fatalf("stat scripts/%s: %v", name, err)
+	entries, err := os.ReadDir(filepath.Join(root, "scripts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("scripts directory is empty; the existence check would be vacuous")
+	}
+	for _, entry := range entries {
+		lower := strings.ToLower(entry.Name())
+		for _, name := range removedOperatorDeployScripts {
+			if strings.Contains(lower, name) {
+				t.Errorf("scripts/%s still exists; the repository must only build packages", entry.Name())
+			}
 		}
 	}
 }
@@ -184,25 +206,20 @@ type releaseManifest struct {
 
 // TestWindowsPackageBuildProducesAllArtifacts builds the release package into a
 // directory outside the repository and checks the manifest against the files on
-// disk. It needs the Go and Node toolchains, so it is opt-in:
+// disk. It also snapshots the source tree before and after the build: the
+// script may only write --output-dir, so web/dist and internal/webassets/dist
+// must stay untouched even though the Web build regenerates them in its
+// temporary copy. It needs the Go and Node toolchains, so it is opt-in:
 //
 //	AHA2_BUILD_E2E=1 go test ./scripts/ -run TestWindowsPackageBuild -v
 func TestWindowsPackageBuildProducesAllArtifacts(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the clean-directory package build runs on the Linux build server")
-	}
-	if os.Getenv("AHA2_BUILD_E2E") != "1" {
-		t.Skip("set AHA2_BUILD_E2E=1 to build the Windows package (needs go and node)")
-	}
-	bash, err := exec.LookPath("bash")
-	if err != nil {
-		t.Skip("bash is not available")
-	}
+	requirePackageBuildTools(t)
 	root := repoRoot(t)
 	output := t.TempDir()
 	const version = "1.2.3"
 	const commit = "0123456789abcdef0123456789abcdef01234567"
-	cmd := exec.Command(bash, filepath.Join(root, "scripts", "build-windows-package.sh"),
+	before := snapshotSourceTree(t, root)
+	cmd := exec.Command(buildScriptPath(root),
 		"--version", version,
 		"--commit", commit,
 		"--output-dir", output,
@@ -210,8 +227,13 @@ func TestWindowsPackageBuildProducesAllArtifacts(t *testing.T) {
 	)
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(), "VERSION=")
-	if out, err := cmd.CombinedOutput(); err != nil {
+	out, err := cmd.CombinedOutput()
+	if err != nil {
 		t.Fatalf("build-windows-package.sh failed: %v\n%s", err, out)
+	}
+	assertSourceTreeUnchanged(t, before, snapshotSourceTree(t, root))
+	if !strings.Contains(string(out), "==> Test Feishu plugin") {
+		t.Error("package build did not run the nested Feishu plugin tests")
 	}
 
 	required := []string{
@@ -312,6 +334,207 @@ func TestWindowsPackageBuildProducesAllArtifacts(t *testing.T) {
 	if subsystem := uint16(trayHeader[subsystemOffset]) | uint16(trayHeader[subsystemOffset+1])<<8; subsystem != 2 {
 		t.Errorf("tray subsystem = %d, want 2 (Windows GUI)", subsystem)
 	}
+}
+
+// TestWindowsPackageBuildWorksWithoutGitCheckout builds from a source snapshot
+// that has no .git directory, passing only --commit and --version. The Web
+// version must come from that commit rather than from `git rev-parse`.
+func TestWindowsPackageBuildWorksWithoutGitCheckout(t *testing.T) {
+	bash := requirePackageBuildTools(t)
+	root := repoRoot(t)
+	source := filepath.Join(t.TempDir(), "source")
+	copySourceTree(t, root, source)
+	if _, err := os.Stat(filepath.Join(source, ".git")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("source snapshot still has a .git entry: %v", err)
+	}
+
+	output := filepath.Join(t.TempDir(), "package")
+	const commit = "0123456789abcdef0123456789abcdef01234567"
+	cmd := exec.Command(bash, filepath.Join(source, "scripts", "build-windows-package.sh"),
+		"--version", "1.2.3",
+		"--commit", commit,
+		"--output-dir", output,
+		"--skip-web-test",
+	)
+	cmd.Dir = source
+	cmd.Env = append(os.Environ(), "VERSION=", "AHA2_BUILD_DATE=20260101")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build without a git checkout failed: %v\n%s", err, out)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(output, "release-manifest.json"))
+	if err != nil {
+		t.Fatalf("release manifest: %v", err)
+	}
+	var manifest releaseManifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		t.Fatalf("parse release manifest: %v", err)
+	}
+	if manifest.Commit != commit {
+		t.Errorf("manifest commit = %q, want %q", manifest.Commit, commit)
+	}
+	const wantWebVersion = "v1.2.3.20260101.0123456789ab"
+	if manifest.Generator.WebVersion != wantWebVersion {
+		t.Errorf("manifest web_version = %q, want %q (derived from --commit)", manifest.Generator.WebVersion, wantWebVersion)
+	}
+	if _, err := os.Stat(filepath.Join(output, "plugins", "feishu", "windows-amd64", "plugin.json")); err != nil {
+		t.Fatalf("Feishu plugin manifest missing from the no-git build: %v", err)
+	}
+}
+
+func requirePackageBuildTools(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the clean-directory package build runs on the Linux build server")
+	}
+	if os.Getenv("AHA2_BUILD_E2E") != "1" {
+		t.Skip("set AHA2_BUILD_E2E=1 to build the Windows package (needs go and node)")
+	}
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash is not available")
+	}
+	return bash
+}
+
+// snapshotSourceTree records every file in the checkout (generated directories
+// included) by content hash, so a build that writes web/dist or the embedded
+// asset directory is visible even though those paths are gitignored.
+func snapshotSourceTree(t *testing.T, root string) map[string]string {
+	t.Helper()
+	snapshot := make(map[string]string, 4096)
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			if path == root {
+				return nil
+			}
+			switch entry.Name() {
+			case ".git", ".aha2-context", "node_modules", "tmp":
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if entry.Name() == ".git" {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if entry.Type()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			snapshot[rel] = "symlink:" + target
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		sum := sha256.Sum256(data)
+		snapshot[rel] = hex.EncodeToString(sum[:])
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("snapshot %s: %v", root, err)
+	}
+	return snapshot
+}
+
+func assertSourceTreeUnchanged(t *testing.T, before, after map[string]string) {
+	t.Helper()
+	reported := 0
+	for path, want := range before {
+		got, ok := after[path]
+		if ok && got == want {
+			continue
+		}
+		if !ok {
+			t.Errorf("build removed source tree entry %s", path)
+		} else {
+			t.Errorf("build rewrote source tree entry %s; only --output-dir may be written", path)
+		}
+		reported++
+		if reported >= 10 {
+			t.Errorf("further source tree changes suppressed")
+			break
+		}
+	}
+	for path := range after {
+		if _, ok := before[path]; ok {
+			continue
+		}
+		t.Errorf("build created %s inside the source tree; only --output-dir may be written", path)
+		reported++
+		if reported >= 10 {
+			t.Errorf("further source tree changes suppressed")
+			break
+		}
+	}
+}
+
+// copySourceTree copies the working tree without git metadata or generated
+// directories, producing the kind of snapshot a build server may receive.
+func copySourceTree(t *testing.T, source, dest string) {
+	t.Helper()
+	err := filepath.WalkDir(source, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			if rel == "." {
+				return os.MkdirAll(dest, 0o755)
+			}
+			switch entry.Name() {
+			case ".git", ".aha2-context", ".tools", "artifacts", "dist", "node_modules", "output", "tmp":
+				return fs.SkipDir
+			}
+			return os.MkdirAll(filepath.Join(dest, rel), 0o755)
+		}
+		if entry.Name() == ".git" {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dest, rel)
+		if entry.Type()&os.ModeSymlink != 0 {
+			link, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(link, target)
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, info.Mode().Perm())
+	})
+	if err != nil {
+		t.Fatalf("copy source tree: %v", err)
+	}
+}
+
+func buildScriptPath(root string) string {
+	return filepath.Join(root, "scripts", "build-windows-package.sh")
 }
 
 func peSubsystemOffset(data []byte) (int, error) {

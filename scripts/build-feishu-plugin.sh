@@ -23,7 +23,7 @@ output="$output_dir/aha2-channel-feishu$suffix"
 mkdir -p "$output_dir"
 (
   cd "$repo/plugins/feishu"
-  CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" "$go_bin" build -trimpath -ldflags="-s -w" -o "$output" .
+  CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" "$go_bin" build -buildvcs=false -trimpath -ldflags="-s -w" -o "$output" .
 )
 cp "$repo/plugins/feishu/plugin.json" "$output_dir/plugin.json"
 digest="$(sha256sum "$output" | cut -d' ' -f1)"

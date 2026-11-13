@@ -255,7 +255,7 @@ $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo ".gith
 foreach ($contract in @(
     "runs-on: windows-latest", "cmd\aha-tray", "aha2-tray.exe", "-H windowsgui", "build-windows-installer.ps1", "-InputTrayExe",
 	"AHA2-Setup-x64.exe", "AHA2-Setup-User-x64.exe", "build-feishu-plugin.sh", "build-linux-packages.sh", "build-linux-sync-packages.sh", "aha2-sync_", "build-macos-packages.sh",
-    "ubuntu-24.04-arm", "SHA256SUMS", "merge-multiple: true", "pattern: package-*", "main.version=", "main.webVersion=", "gh release create"
+    "ubuntu-24.04-arm", "SHA256SUMS", "merge-multiple: true", "pattern: package-*", "main.version=", "main.webVersion=", "gh release create", "Test Feishu plugin"
 )) {
     if (-not $workflow.Contains($contract)) {
         throw "Release workflow contract is missing: $contract"
@@ -283,7 +283,7 @@ $packageBuilder = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo 
 foreach ($contract in @(
     "scripts/build-web.mjs", "web/tests/build.test.mjs", "CGO_ENABLED=0 GOOS=windows GOARCH=amd64",
     "-H windowsgui", "plugins/feishu", "aha2-windows-amd64.exe", "aha2-tray-windows-amd64.exe",
-    "release-manifest.json", "scripts/release-manifest.mjs"
+    "release-manifest.json", "scripts/release-manifest.mjs", "mktemp -d", "go test ./...", "go vet ./..."
 )) {
     if (-not $packageBuilder.Contains($contract)) {
         throw "Windows package build contract is missing: $contract"
