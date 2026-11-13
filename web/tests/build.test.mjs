@@ -2638,10 +2638,9 @@ test("model detection fetches the catalog, supports multi-select and an add dial
   assert.match(main, /匹配 /);
   assert.match(main, /已选 /);
   assert.match(main, /session\.selected/);
-  assert.match(main, /protocolFailureDetail/);
+  assert.match(main, /renderProtocolProbeStatus/);
   assert.match(main, /mergeProbedModel/);
   assert.match(main, /max_input_tokens: probed\.max_input_tokens \|\| catalogModel\.max_input_tokens/);
-  assert.match(main, /协议结果：/);
   assert.match(main, /protocolErrors/);
   assert.match(main, /获取模型列表/);
   assert.match(main, /id="open-model-add"/);

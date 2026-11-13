@@ -5,9 +5,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -23,13 +25,22 @@ const (
 	// probeErrorBodyMaxRunes bounds how much survives into protocol_errors.
 	probeErrorBodyReadLimit = 8 << 10
 	probeErrorBodyMaxRunes  = 512
-	// probeStreamTimeout bounds a streaming probe request: connection, response
-	// headers and the read of the first SSE event share this deadline, so a
-	// gateway that opens a stream and then stays silent cannot hold detection
-	// open until the caller's overall deadline.
-	probeStreamTimeout = 10 * time.Second
 	// probeStreamReadLimit caps how many bytes the first-event reader consumes.
 	probeStreamReadLimit = 64 << 10
+)
+
+// probeStreamTimeout bounds a streaming probe request: connection, response
+// headers and the read of the first SSE event share this deadline, so a gateway
+// that opens a stream and then stays silent cannot hold detection open until
+// the caller's overall deadline. It is a variable so a test can shorten it and
+// prove the internal deadline exists instead of relying on the outer context.
+var probeStreamTimeout = 10 * time.Second
+
+var (
+	probeURLUserInfoPattern     = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)[^/@\s]+@`)
+	probeSensitiveQueryPattern  = regexp.MustCompile(`(?i)([?&](?:api[_-]?key|key|token|access_token|auth|password|secret)=)[^&\s"']*`)
+	probeBearerTokenPattern     = regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9._~+/-]+=*`)
+	errProbeStreamWithoutEvents = errors.New("stream closed before an SSE data event")
 )
 
 // DetectedModel is a model advertised by an OpenAI/Anthropic-compatible
@@ -216,7 +227,11 @@ func int64Value(value any) int64 {
 // ProbeModelCapabilities sends a minimal request for each supported wire
 // protocol and reports which ones the gateway accepts for the given model.
 // Status values mirror the legacy AHA probe: supported / unsupported /
-// unauthorized / rate_limited / unavailable / inconclusive.
+// rejected / unauthorized / rate_limited / unavailable / inconclusive.
+// "unsupported" means the endpoint is absent (HTTP 404/405/501); "rejected"
+// means the gateway answered HTTP 400, which may be an unsupported protocol
+// or an unknown model/parameter/auth problem, so callers must keep the
+// wording neutral instead of claiming the protocol is not offered.
 //
 // For anthropic_messages it also tries the gateway's /anthropic suffix (some
 // gateways like DeepSeek/MiniMax/Kimi serve the Anthropic protocol there) and
@@ -271,7 +286,10 @@ func ProbeModelCapabilitiesForProviderContext(ctx context.Context, baseURL, anth
 	record := func(wireAPI, status, errText string) {
 		capabilities[wireAPI] = status
 		if errText != "" && status != "supported" && status != "rate_limited" {
-			protocolErrors[wireAPI] = errText
+			// Evidence is returned to the UI and written to the audit log, so
+			// redact the complete line (candidate URL, transport error, and
+			// body snippet) instead of trusting individual producers.
+			protocolErrors[wireAPI] = probeRedact(errText, key)
 		}
 	}
 	// Probes are independent: run them concurrently so a slow gateway does not
@@ -300,7 +318,7 @@ func ProbeModelCapabilitiesForProviderContext(ctx context.Context, baseURL, anth
 		if line := probeEvidence(candidates[0], status, code, errText); line != "" {
 			evidence = append(evidence, line)
 		}
-		if status == "unsupported" {
+		if anthropicCandidateFallback(status) {
 			for _, candidate := range candidates[1:] {
 				if ctx.Err() != nil {
 					status, errText = "unavailable", ctx.Err().Error()
@@ -310,15 +328,19 @@ func ProbeModelCapabilitiesForProviderContext(ctx context.Context, baseURL, anth
 					break
 				}
 				retriedStatus, retriedCode, retriedErr := probeWireAPI(ctx, client, candidate, key, normalizedAuth, modelID, "anthropic_messages")
-				if retriedStatus == "supported" {
-					status, errText = "supported", ""
+				if retriedStatus == "supported" || retriedStatus == "rate_limited" {
+					// 429 proves the endpoint exists and serves the protocol;
+					// keep the status but record the base the caller must use.
+					status, errText = retriedStatus, ""
 					anthropicBase = candidate
 					break
 				}
 				if line := probeEvidence(candidate, retriedStatus, retriedCode, retriedErr); line != "" {
 					evidence = append(evidence, line)
 				}
-				if retriedStatus != "unsupported" {
+				// Keep the most diagnostic result instead of letting whichever
+				// candidate ran last rewrite an auth or service failure.
+				if statusRank(retriedStatus) > statusRank(status) {
 					status = retriedStatus
 				}
 			}
@@ -372,6 +394,18 @@ func anthropicBaseCandidates(baseURL, anthropicBaseURL string) []string {
 		add(root + "/anthropic")
 	}
 	return candidates
+}
+
+// anthropicCandidateFallback reports whether a candidate's probe result means
+// "this base URL is probably the wrong or absent entry point", in which case
+// the remaining candidates are still worth probing. A missing route
+// (unsupported: 404/405/501) and an ambiguous rejection (rejected: 400) can
+// both be fixed by another base URL. Unauthorized, unavailable (5xx/timeout),
+// rate_limited, and inconclusive describe the credential or the gateway
+// itself, so they keep the first candidate's verdict instead of multiplying
+// requests and hiding an auth or service problem.
+func anthropicCandidateFallback(status string) bool {
+	return status == "unsupported" || status == "rejected"
 }
 
 // probeEvidence describes one failed probe candidate as "<candidate URL>:
@@ -522,7 +556,12 @@ func probeWireAPI(ctx context.Context, client *http.Client, base, apiKey, authSt
 				if streamStatus == "supported" || streamStatus == "rate_limited" {
 					return streamStatus, streamCode, ""
 				}
-				if statusRank(streamStatus) > statusRank(status) {
+				// A 200 stream that never produced a data event is a distinct
+				// signal (the endpoint accepted the request but did not stream
+				// the protocol), so it replaces the earlier 400 rejection even
+				// though both rank as ambiguous. A second 400 keeps the first
+				// rejection, whose body is the better evidence.
+				if statusRank(streamStatus) > statusRank(status) || (streamCode >= 200 && streamCode < 300) {
 					status, code, detail = streamStatus, streamCode, streamDetail
 				}
 			}
@@ -566,11 +605,39 @@ func probeEndpointError(endpoint, status string, code int, detail string) string
 	return ""
 }
 
+// probeStatusForCode classifies one probe response. 404/405/501 mean the
+// gateway does not expose this wire protocol at that endpoint. 400 is kept
+// separate as "rejected": the gateway refused this request, but the status
+// code alone cannot distinguish an unsupported protocol from an unknown
+// model, bad parameters, auth/gateway policy, or a malformed body. 401/403
+// stay auth failures, 429 stays rate limited, and 5xx stays a transient
+// service/transport failure. The remaining codes are inconclusive and keep
+// their HTTP status as evidence. None of these classifications are transport
+// failures unless the request never produced an HTTP response.
+func probeStatusForCode(code int) string {
+	switch {
+	case code >= 200 && code < 300:
+		return "supported"
+	case code == 401 || code == 403:
+		return "unauthorized"
+	case code == 429:
+		return "rate_limited"
+	case code == 400:
+		return "rejected"
+	case code == 404 || code == 405 || code == 501:
+		return "unsupported"
+	case code >= 500:
+		return "unavailable"
+	default:
+		return "inconclusive"
+	}
+}
+
 // probeOneEndpoint sends one probe request and classifies the response. detail
 // carries a sanitized, truncated response-body snippet on non-2xx responses so
 // a 400 can be told apart from an auth, model, or transport error. A streaming
-// probe reads the first SSE event under probeStreamTimeout, so a gateway that
-// opens the stream and stays silent cannot hang detection.
+// probe reads the first SSE data event under probeStreamTimeout, so a gateway
+// that opens the stream and stays silent cannot hang detection.
 func probeOneEndpoint(ctx context.Context, client *http.Client, endpoint string, headers map[string]string, body []byte, stream bool, apiKey string) (string, int, string) {
 	if stream {
 		var cancel context.CancelFunc
@@ -598,58 +665,68 @@ func probeOneEndpoint(ctx context.Context, client *http.Client, endpoint string,
 		}
 		return "supported", code, ""
 	}
-	detail := probeResponseSnippet(response.Body, apiKey)
-	switch {
-	case code == 401 || code == 403:
-		return "unauthorized", code, detail
-	case code == 429:
-		return "rate_limited", code, ""
-	case code == 404 || code == 405 || code == 501:
-		return "unsupported", code, detail
-	case code >= 500:
-		return "unavailable", code, detail
-	default:
-		return "inconclusive", code, detail
-	}
+	return probeStatusForCode(code), code, probeResponseSnippet(response.Body, apiKey)
 }
 
-// readFirstSSEEvent reads until the first SSE data line, the end of the stream,
-// or probeStreamReadLimit. It returns a read error (for example the stream
-// timeout) so the caller classifies the probe as inconclusive instead of
-// hanging; a cleanly closed stream counts as accepted.
+// readFirstSSEEvent reads until the first SSE data line or the end of the
+// stream/limit. A stream that closes without any data line is an error: an
+// empty body, a heartbeat-only stream, and a non-SSE body do not prove the
+// protocol works. Read errors (including the stream timeout) are returned so
+// the caller classifies the probe as inconclusive instead of hanging.
 func readFirstSSEEvent(body io.Reader) error {
 	reader := bufio.NewReader(io.LimitReader(body, probeStreamReadLimit))
 	for {
 		line, err := reader.ReadString('\n')
-		if strings.HasPrefix(strings.TrimSpace(line), "data:") {
+		if isProbeSSEDataLine(line) {
 			return nil
 		}
 		switch {
 		case err == nil:
 			continue
 		case err == io.EOF:
-			return nil
+			return errProbeStreamWithoutEvents
 		default:
 			return err
 		}
 	}
 }
 
-// probeResponseSnippet renders a bounded, single-line, key-redacted snippet of
-// an error response body for protocol_errors.
+// isProbeSSEDataLine reports whether line is an SSE data field. TrimSpace
+// handles CRLF line endings; comment/heartbeat lines (": ...") do not match.
+func isProbeSSEDataLine(line string) bool {
+	return strings.HasPrefix(strings.TrimSpace(line), "data:")
+}
+
+// probeResponseSnippet renders a bounded, single-line, redacted snippet of an
+// error response body for protocol_errors.
 func probeResponseSnippet(body io.Reader, apiKey string) string {
 	raw, _ := io.ReadAll(io.LimitReader(body, probeErrorBodyReadLimit))
-	text := strings.TrimSpace(string(raw))
+	text := probeRedact(strings.TrimSpace(string(raw)), apiKey)
+	if text == "" {
+		return ""
+	}
+	text = strings.Join(strings.Fields(text), " ")
+	if runes := []rune(text); len(runes) > probeErrorBodyMaxRunes {
+		text = string(runes[:probeErrorBodyMaxRunes]) + "…"
+	}
+	return text
+}
+
+// probeRedact removes credentials from any text that becomes protocol
+// evidence: the API key itself, URL userinfo from provider base URLs, and
+// key/token query parameters or bearer tokens echoed by a gateway or a
+// transport error. Evidence can reach audit logs, so redaction is applied once
+// to the final evidence string as well as to response-body snippets.
+func probeRedact(text, apiKey string) string {
 	if text == "" {
 		return ""
 	}
 	if apiKey != "" {
 		text = strings.ReplaceAll(text, apiKey, "[redacted]")
 	}
-	text = strings.Join(strings.Fields(text), " ")
-	if runes := []rune(text); len(runes) > probeErrorBodyMaxRunes {
-		text = string(runes[:probeErrorBodyMaxRunes]) + "…"
-	}
+	text = probeURLUserInfoPattern.ReplaceAllString(text, "${1}[redacted]@")
+	text = probeSensitiveQueryPattern.ReplaceAllString(text, "${1}[redacted]")
+	text = probeBearerTokenPattern.ReplaceAllString(text, "${1}[redacted]")
 	return text
 }
 
@@ -663,7 +740,7 @@ func statusRank(status string) int {
 		return 4
 	case "unavailable":
 		return 3
-	case "inconclusive":
+	case "inconclusive", "rejected":
 		return 2
 	default:
 		return 1

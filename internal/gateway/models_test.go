@@ -693,8 +693,8 @@ func TestProbeResponses400EvidenceIsTruncatedAndRedacted(t *testing.T) {
 
 	caps, _, errs := ProbeModelCapabilitiesForProviderContext(
 		context.Background(), "https://gateway.example/v1", "", "secret-key", "bearer", "model-x", 5*time.Second, client)
-	if caps["responses"] != "inconclusive" {
-		t.Fatalf("caps=%v errs=%v", caps, errs)
+	if caps["responses"] != "rejected" {
+		t.Fatalf("caps=%v errs=%v, want rejected for HTTP 400", caps, errs)
 	}
 	evidence := errs["responses"]
 	if !strings.Contains(evidence, "HTTP 400") || !strings.Contains(evidence, "参数错误") {
@@ -728,9 +728,17 @@ func (b *probeBlockingBody) Read([]byte) (int, error) {
 
 func (b *probeBlockingBody) Close() error { return nil }
 
-func TestProbeResponsesStreamingProbeHonorsTimeout(t *testing.T) {
-	t.Parallel()
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+// TestProbeResponsesStreamingProbeHonorsInternalTimeout distinguishes the
+// internal probeStreamTimeout from the caller's context: the outer deadline is
+// far longer, so removing the internal deadline makes this test run until the
+// outer one and fail the elapsed assertion. It is deliberately not parallel
+// because it shortens the package-level timeout.
+func TestProbeResponsesStreamingProbeHonorsInternalTimeout(t *testing.T) {
+	previous := probeStreamTimeout
+	probeStreamTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { probeStreamTimeout = previous })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	client := &http.Client{Transport: probeRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 		switch {
@@ -758,10 +766,381 @@ func TestProbeResponsesStreamingProbeHonorsTimeout(t *testing.T) {
 	start := time.Now()
 	caps, _, _ := ProbeModelCapabilitiesForProviderContext(
 		ctx, "https://gateway.example/v1", "", "secret-key", "bearer", "model-x", 5*time.Second, client)
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Fatalf("streaming probe did not honor its deadline: %v", elapsed)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("streaming probe used the outer deadline instead of probeStreamTimeout: %v", elapsed)
+	}
+	if caps["responses"] == "supported" {
+		t.Fatalf("caps=%v, an empty stream must not be supported", caps)
 	}
 	if caps["responses"] != "inconclusive" {
 		t.Fatalf("caps=%v, want inconclusive for a stream that never emits an event", caps)
+	}
+}
+
+func TestReadFirstSSEEventRequiresDataLine(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		body    string
+		wantErr bool
+	}{
+		{"data line", "data: {\"type\":\"response.created\"}\n\n", false},
+		{"data line with CRLF", "event: response.created\r\ndata: {}\r\n\r\n", false},
+		{"comment and heartbeat before data", ": keep-alive\n\nevent: x\ndata: {}\n\n", false},
+		{"empty body", "", true},
+		{"heartbeat only", ": keep-alive\n\n: ping\n", true},
+		{"non-SSE body", `{"ok":true}`, true},
+		{"over limit without data", strings.Repeat("x", probeStreamReadLimit+16), true},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := readFirstSSEEvent(strings.NewReader(tc.body))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("readFirstSSEEvent(%q) error=%v, wantErr=%v", tc.body, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestProbeResponsesEmptyStreamIsInconclusive(t *testing.T) {
+	t.Parallel()
+	cases := []struct{ name, streamBody string }{
+		{"empty stream", ""},
+		{"heartbeat only", ": keep-alive\n\n"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			client := &http.Client{Transport: probeRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+				switch {
+				case strings.HasSuffix(request.URL.Path, "/responses"):
+					var payload map[string]any
+					if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+						return probeJSONResponse(http.StatusBadRequest, `{"error":"invalid json"}`), nil
+					}
+					if stream, _ := payload["stream"].(bool); !stream {
+						return probeJSONResponse(http.StatusBadRequest, `{"error":{"message":"stream required"}}`), nil
+					}
+					return probeSSEResponse(tc.streamBody), nil
+				case strings.HasSuffix(request.URL.Path, "/chat/completions"):
+					return probeJSONResponse(http.StatusOK, `{}`), nil
+				default:
+					return probeJSONResponse(http.StatusNotFound, `not found`), nil
+				}
+			})}
+			caps, _, errs := ProbeModelCapabilitiesForProviderContext(
+				context.Background(), "https://gateway.example/v1", "", "secret-key", "bearer", "model-x", 5*time.Second, client)
+			if caps["responses"] == "supported" {
+				t.Fatalf("caps=%v errs=%v, an empty stream must not be supported", caps, errs)
+			}
+			if caps["responses"] != "inconclusive" {
+				t.Fatalf("caps=%v errs=%v, want inconclusive", caps, errs)
+			}
+		})
+	}
+}
+
+// probeEventThenBlockBody emits one SSE data event and then blocks until the
+// request context is cancelled; Close signals that the probe stopped reading
+// instead of draining the stream.
+type probeEventThenBlockBody struct {
+	first  []byte
+	offset int
+	ctx    context.Context
+	closed chan struct{}
+}
+
+func (b *probeEventThenBlockBody) Read(p []byte) (int, error) {
+	if b.offset < len(b.first) {
+		n := copy(p, b.first[b.offset:])
+		b.offset += n
+		return n, nil
+	}
+	<-b.ctx.Done()
+	return 0, b.ctx.Err()
+}
+
+func (b *probeEventThenBlockBody) Close() error {
+	close(b.closed)
+	return nil
+}
+
+func TestProbeResponsesStopsAfterFirstSSEDataEvent(t *testing.T) {
+	t.Parallel()
+	closed := make(chan struct{})
+	client := &http.Client{Transport: probeRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasSuffix(request.URL.Path, "/responses"):
+			var payload map[string]any
+			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+				return probeJSONResponse(http.StatusBadRequest, `{"error":"invalid json"}`), nil
+			}
+			if stream, _ := payload["stream"].(bool); !stream {
+				return probeJSONResponse(http.StatusBadRequest, `{"error":{"message":"stream required"}}`), nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     "200 OK",
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body: &probeEventThenBlockBody{
+					first:  []byte("event: response.created\r\ndata: {}\r\n\r\n"),
+					ctx:    request.Context(),
+					closed: closed,
+				},
+			}, nil
+		case strings.HasSuffix(request.URL.Path, "/chat/completions"):
+			return probeJSONResponse(http.StatusOK, `{}`), nil
+		default:
+			return probeJSONResponse(http.StatusNotFound, `not found`), nil
+		}
+	})}
+
+	start := time.Now()
+	caps, _, _ := ProbeModelCapabilitiesForProviderContext(
+		context.Background(), "https://gateway.example/v1", "", "secret-key", "bearer", "model-x", 5*time.Second, client)
+	if caps["responses"] != "supported" {
+		t.Fatalf("caps=%v, want supported after the first data event", caps)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("probe drained the SSE stream instead of stopping at the first event: %v", elapsed)
+	}
+	select {
+	case <-closed:
+	default:
+		t.Fatal("response body was not closed after the first data event")
+	}
+}
+
+func TestProbeResponses400WithoutBodyKeepsStatusEvidence(t *testing.T) {
+	t.Parallel()
+	client := &http.Client{Transport: probeRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasSuffix(request.URL.Path, "/responses"):
+			return probeJSONResponse(http.StatusBadRequest, ""), nil
+		case strings.HasSuffix(request.URL.Path, "/chat/completions"):
+			return probeJSONResponse(http.StatusOK, `{}`), nil
+		default:
+			return probeJSONResponse(http.StatusNotFound, `not found`), nil
+		}
+	})}
+	caps, _, errs := ProbeModelCapabilitiesForProviderContext(
+		context.Background(), "https://gateway.example/v1", "", "secret-key", "bearer", "model-x", 5*time.Second, client)
+	if caps["responses"] != "rejected" {
+		t.Fatalf("caps=%v errs=%v, want rejected", caps, errs)
+	}
+	if evidence := errs["responses"]; evidence != "https://gateway.example/v1/responses: HTTP 400" {
+		t.Fatalf("empty 400 body evidence=%q", evidence)
+	}
+}
+
+func TestProbeRedactRemovesCredentials(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		text string
+		want string
+	}{
+		{"api key", "body secret-key", "body [redacted]"},
+		{"url userinfo", "https://user:pass@gateway.example/v1", "https://[redacted]@gateway.example/v1"},
+		{"api_key query", "https://gateway.example/v1?api_key=abc&x=1", "https://gateway.example/v1?api_key=[redacted]&x=1"},
+		{"token query", "https://gateway.example/?token=abc", "https://gateway.example/?token=[redacted]"},
+		{"bearer token", "Authorization: Bearer sk-abc", "Authorization: Bearer [redacted]"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := probeRedact(tc.text, "secret-key"); got != tc.want {
+				t.Fatalf("probeRedact(%q)=%q, want %q", tc.text, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestProbeEvidenceRedactsProviderURLAndBody(t *testing.T) {
+	t.Parallel()
+	client := &http.Client{Transport: probeRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasSuffix(request.URL.Path, "/responses"):
+			return probeJSONResponse(http.StatusBadRequest,
+				`{"error":{"message":"see https://gateway.example/?api_key=other-secret and secret-key"}}`), nil
+		case strings.HasSuffix(request.URL.Path, "/chat/completions"):
+			return probeJSONResponse(http.StatusOK, `{}`), nil
+		default:
+			return probeJSONResponse(http.StatusNotFound, `not found`), nil
+		}
+	})}
+	caps, _, errs := ProbeModelCapabilitiesForProviderContext(
+		context.Background(), "https://user:pass@gateway.example/v1", "", "secret-key", "bearer", "model-x", 5*time.Second, client)
+	if caps["responses"] != "rejected" {
+		t.Fatalf("caps=%v errs=%v", caps, errs)
+	}
+	evidence := errs["responses"]
+	for _, secret := range []string{"user:pass", "other-secret", "secret-key"} {
+		if strings.Contains(evidence, secret) {
+			t.Fatalf("evidence leaked %q: %q", secret, evidence)
+		}
+	}
+	if !strings.Contains(evidence, "https://[redacted]@gateway.example/v1/responses: HTTP 400") {
+		t.Fatalf("evidence lost the redacted endpoint: %q", evidence)
+	}
+	if !strings.Contains(evidence, "api_key=[redacted]") {
+		t.Fatalf("evidence lost the redacted query parameter: %q", evidence)
+	}
+}
+
+func TestProbeStatusForCodeClassifiesProtocolRejections(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		code int
+		want string
+	}{
+		{http.StatusOK, "supported"},
+		{http.StatusUnauthorized, "unauthorized"},
+		{http.StatusForbidden, "unauthorized"},
+		{http.StatusTooManyRequests, "rate_limited"},
+		// A bare 400 is ambiguous: it can be an unsupported protocol, an
+		// unknown model, bad parameters, or an auth/gateway policy rejection.
+		// It must not be classified as an absent endpoint.
+		{http.StatusBadRequest, "rejected"},
+		// Missing route/method/implementation means the protocol endpoint is
+		// not offered; none of these are network faults.
+		{http.StatusNotFound, "unsupported"},
+		{http.StatusMethodNotAllowed, "unsupported"},
+		{http.StatusNotImplemented, "unsupported"},
+		{http.StatusInternalServerError, "unavailable"},
+		{http.StatusServiceUnavailable, "unavailable"},
+		{http.StatusUnprocessableEntity, "inconclusive"},
+	}
+	for _, tc := range cases {
+		if got := probeStatusForCode(tc.code); got != tc.want {
+			t.Errorf("probeStatusForCode(%d)=%q, want %q", tc.code, got, tc.want)
+		}
+	}
+}
+
+// An invalid model or bad parameter can also produce HTTP 400. The probe only
+// sees the status code, so it must report an ambiguous rejection instead of
+// claiming the protocol endpoint is absent.
+func TestProbeModelCapabilitiesKeepsHTTP400Ambiguous(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/responses":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"message":"model not found","type":"invalid_request_error"}}`))
+		case "/chat/completions", "/v1/messages":
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	caps, _, errs := ProbeModelCapabilitiesContextWithClientDetailed(
+		context.Background(), server.URL, "secret", "auto", "unknown-model", 5*time.Second, nil)
+	if caps["responses"] != "rejected" {
+		t.Fatalf("responses=%q errs=%v, want rejected for an ambiguous HTTP 400", caps["responses"], errs)
+	}
+	if caps["chat_completions"] != "supported" || caps["anthropic_messages"] != "supported" {
+		t.Fatalf("caps=%v, want chat and anthropic supported", caps)
+	}
+	evidence := errs["responses"]
+	if !strings.Contains(evidence, server.URL+"/responses: HTTP 400") {
+		t.Fatalf("protocol_errors missing the HTTP 400 candidate: %q", evidence)
+	}
+	if strings.Contains(evidence, "secret") {
+		t.Fatalf("protocol_errors leaked the API key: %q", evidence)
+	}
+}
+
+// A 400 on the configured Anthropic entry point must not stop the probe: the
+// gateway may still serve Anthropic Messages under another candidate base.
+func TestProbeModelCapabilitiesAnthropicFallbackAfterRejectedCandidate(t *testing.T) {
+	t.Parallel()
+	base, paths := newProbeTestServer(t, map[string]int{
+		"/wrong/messages":        http.StatusBadRequest,
+		"/wrong/v1/messages":     http.StatusBadRequest,
+		"/anthropic/v1/messages": http.StatusOK,
+	})
+
+	caps, anthropicBase, errs := ProbeModelCapabilitiesForProviderContext(
+		context.Background(), base.URL+"/v1", base.URL+"/wrong", "secret", "auto", "claude-model", 5*time.Second, nil)
+	if caps["anthropic_messages"] != "supported" {
+		t.Fatalf("caps=%v errs=%v, want the later Anthropic candidate to succeed", caps, errs)
+	}
+	if anthropicBase != base.URL+"/anthropic" {
+		t.Fatalf("anthropicBase=%q, want %q", anthropicBase, base.URL+"/anthropic")
+	}
+	if !containsString(paths(), "/anthropic/v1/messages") {
+		t.Fatalf("the later Anthropic candidate was not probed: %v", paths())
+	}
+}
+
+// Unauthorized, service, and inconclusive results describe the credential or
+// gateway rather than the base path, so the probe keeps the first candidate's
+// verdict and does not multiply requests across every candidate.
+func TestProbeModelCapabilitiesAnthropicFallbackStopsOnNonPathFailures(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		status int
+		want   string
+	}{
+		{"unauthorized", http.StatusUnauthorized, "unauthorized"},
+		{"unavailable", http.StatusInternalServerError, "unavailable"},
+		{"inconclusive", http.StatusUnprocessableEntity, "inconclusive"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			base, paths := newProbeTestServer(t, map[string]int{
+				"/wrong/messages":    tc.status,
+				"/wrong/v1/messages": tc.status,
+			})
+			caps, anthropicBase, errs := ProbeModelCapabilitiesForProviderContext(
+				context.Background(), base.URL+"/v1", base.URL+"/wrong", "secret", "auto", "claude-model", 5*time.Second, nil)
+			if caps["anthropic_messages"] != tc.want {
+				t.Fatalf("caps=%v errs=%v, want %q", caps, errs, tc.want)
+			}
+			if anthropicBase != "" {
+				t.Fatalf("anthropicBase=%q, want empty for a non-path failure", anthropicBase)
+			}
+			for _, path := range paths() {
+				if !strings.HasPrefix(path, "/wrong/") {
+					t.Fatalf("probe fell back to %q after %s", path, tc.name)
+				}
+			}
+		})
+	}
+}
+
+// A rate-limited fallback candidate is still the working Anthropic entry
+// point: keep the rate_limited status, return that base, and stop probing.
+func TestProbeModelCapabilitiesAnthropicFallbackRecordsRateLimitedBase(t *testing.T) {
+	t.Parallel()
+	base, paths := newProbeTestServer(t, map[string]int{
+		"/wrong/messages":    http.StatusBadRequest,
+		"/wrong/v1/messages": http.StatusBadRequest,
+		"/v1/messages":       http.StatusTooManyRequests,
+	})
+
+	caps, anthropicBase, errs := ProbeModelCapabilitiesForProviderContext(
+		context.Background(), base.URL+"/v1", base.URL+"/wrong", "secret", "auto", "claude-model", 5*time.Second, nil)
+	if caps["anthropic_messages"] != "rate_limited" {
+		t.Fatalf("caps=%v errs=%v, want rate_limited", caps, errs)
+	}
+	if anthropicBase != base.URL+"/v1" {
+		t.Fatalf("anthropicBase=%q, want the rate-limited candidate %q", anthropicBase, base.URL+"/v1")
+	}
+	if !containsString(paths(), "/v1/messages") {
+		t.Fatalf("the rate-limited fallback candidate was not probed: %v", paths())
+	}
+	if containsString(paths(), "/anthropic/v1/messages") {
+		t.Fatalf("probe continued after a rate_limited success: %v", paths())
 	}
 }

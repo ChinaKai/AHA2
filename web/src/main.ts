@@ -29,7 +29,7 @@ import {DEFAULT_TASK_STATUS_FILTERS, LOCAL_TASK_DEVICE_FILTER, TASK_STATUS_GROUP
 import type {TaskStatusGroup} from "./task_filters.js";
 import {TASK_TOOL_DEFAULT_WIDTH, normalizePinnedTaskTool, normalizeTaskToolMode, normalizeTaskToolWidth, renderTaskToolButtons, renderTaskToolContent, renderTaskToolPanel} from "./task_tools.js";
 import type {TaskTool, TaskToolMode} from "./task_tools.js";
-import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, createListRefreshScheduler, createResourceLoader, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, formCheckbox, loadNavigationSnapshot, matchingSlashCommands, paginateItems, paginationHTML, petWatchActionKeys, readPerfPanelPreference, renderWorkspaceDetection, restoreInteractiveRegion, saveNavigationSnapshot, textMatchesQuery, writePerfPanelPreference} from "./ui_helpers.js";
+import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, createListRefreshScheduler, createResourceLoader, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, formCheckbox, loadNavigationSnapshot, matchingSlashCommands, paginateItems, paginationHTML, petWatchActionKeys, protoBadges, readPerfPanelPreference, renderProtocolProbeStatus, renderWorkspaceDetection, restoreInteractiveRegion, saveNavigationSnapshot, textMatchesQuery, writePerfPanelPreference} from "./ui_helpers.js";
 import type {InteractiveRegionState} from "./ui_helpers.js";
 import {
   compactNumber,
@@ -1394,23 +1394,6 @@ function modelSupportsImage(model: Model): boolean {
   return model.capabilities?.supports_image_input !== false;
 }
 
-function supportedWireAPIs(model: DetectedModel): string[] {
-  const caps = model.capabilities || {};
-  const order = ["responses", "chat_completions", "anthropic_messages"] as const;
-  // rate_limited means the endpoint exists and accepted the request but the
-  // gateway throttled the burst probe — the protocol is still usable.
-  return order.filter(api => caps[api] === "supported" || caps[api] === "rate_limited").map(api => api === "chat_completions" ? "chat" : api);
-}
-
-function protoBadges(model: DetectedModel): string {
-  const wire = supportedWireAPIs(model);
-  const parts: string[] = [];
-  if (wire.includes("responses")) parts.push(`<span class="proto codex">Responses</span>`);
-  if (wire.includes("chat")) parts.push(`<span class="proto codex">Chat</span>`);
-  if (wire.includes("anthropic_messages")) parts.push(`<span class="proto claude">Messages</span>`);
-  return parts.length ? parts.join("") : `<span class="proto none">不支持</span>`;
-}
-
 function applyProviderPreset(): void {
   const key = String((document.querySelector("#provider-preset") as HTMLSelectElement)?.value || "custom");
   const preset = PROVIDER_PRESETS[key] || PROVIDER_PRESETS.custom;
@@ -1547,7 +1530,7 @@ interface ModelDetectionSession {
   results: Map<string, DetectedModel>;
   detecting: Set<string>;
   probeErrors: Map<string, string>;
-  protocolErrors: Map<string, string>;
+  protocolErrors: Map<string, Record<string, string>>;
   selected: Set<string>;
   anthropicBaseURL: string;
   loading: boolean;
@@ -1594,16 +1577,9 @@ function mergeProbedModel(catalogModel: DetectedModel | undefined, probed: Detec
 function detectedModelRow(session: ModelDetectionSession, item: DetectedModel, ready: boolean): string {
   const detecting = session.detecting.has(item.id);
   const probeError = session.probeErrors.get(item.id) || "";
-  const protocolError = session.protocolErrors.get(item.id) || "";
+  const protocolErrors = session.protocolErrors.get(item.id) || {};
   const selected = session.selected.has(item.id);
-  return `<div class="detected-item${ready ? "" : " pending"}${selected ? " selected" : ""}" data-model="${escapeHTML(item.id)}"><input type="checkbox" class="detected-model" value="${escapeHTML(item.id)}" ${selected ? "checked" : ""}><span><strong>${escapeHTML(item.id)}</strong>${item.max_input_tokens ? `<small>context ${Math.round(item.max_input_tokens / 1000)}K</small>` : ""}${ready ? `<span class="proto-badges">${protoBadges(item)}</span>${supportedWireAPIs(item).length ? "" : protocolFailureDetail(item)}` : `<span class="proto pending">未检测</span>`}${protocolError ? `<small class="bad">传输错误：${escapeHTML(protocolError)}</small>` : ""}${probeError ? `<small class="bad">${escapeHTML(probeError)}</small>` : ""}</span><button type="button" data-probe-model="${escapeHTML(item.id)}" ${detecting ? "disabled" : ""}>${detecting ? "检测中…" : ready ? "重新检测" : "检测"}</button></div>`;
-}
-
-function protocolFailureDetail(model: DetectedModel): string {
-  const entries = Object.entries(model.capabilities || {});
-  if (!entries.length) return "";
-  const text = entries.map(([key, value]) => `${key.replace("_", " ")}=${value}`).join(" · ");
-  return `<small class="bad">协议结果：${escapeHTML(text)}</small>`;
+  return `<div class="detected-item${ready ? "" : " pending"}${selected ? " selected" : ""}" data-model="${escapeHTML(item.id)}"><input type="checkbox" class="detected-model" value="${escapeHTML(item.id)}" ${selected ? "checked" : ""}><div class="detected-model-body"><strong>${escapeHTML(item.id)}</strong>${item.max_input_tokens ? `<small>context ${Math.round(item.max_input_tokens / 1000)}K</small>` : ""}${ready ? `<span class="proto-badges">${protoBadges(item)}</span>${renderProtocolProbeStatus(item.capabilities, protocolErrors)}` : `<span class="proto pending">未检测</span>`}${probeError ? `<small class="bad">${escapeHTML(probeError)}</small>` : ""}</div><button type="button" data-probe-model="${escapeHTML(item.id)}" ${detecting ? "disabled" : ""}>${detecting ? "检测中…" : ready ? "重新检测" : "检测"}</button></div>`;
 }
 
 function applyModelDetectionFilter(root: HTMLElement, query: string): void {
@@ -1718,8 +1694,8 @@ async function probeSelectedModels(session: ModelDetectionSession, ids: string[]
         const response = await api.probeModel(session.providerID, modelID, session.authStyle);
         session.results.set(modelID, mergeProbedModel(session.catalog.find(item => item.id === modelID), response.model));
         if (response.anthropic_base_url) session.anthropicBaseURL = response.anthropic_base_url;
-        const detail = Object.entries(response.protocol_errors || {}).map(([key, value]) => `${key.replace("_", " ")}=${value}`).join(" · ");
-        if (detail) session.protocolErrors.set(modelID, detail);
+        const errors = response.protocol_errors || {};
+        if (Object.keys(errors).length) session.protocolErrors.set(modelID, errors);
         else session.protocolErrors.delete(modelID);
       } catch (error) {
         session.probeErrors.set(modelID, error instanceof Error ? error.message : String(error));
@@ -1837,8 +1813,8 @@ async function startModelDetection(providerID: string, button: HTMLElement, resu
       void api.probeModel(session.providerID, modelID, session.authStyle).then(response => {
         session.results.set(modelID, mergeProbedModel(session.catalog.find(item => item.id === modelID), response.model));
         if (response.anthropic_base_url) session.anthropicBaseURL = response.anthropic_base_url;
-        const detail = Object.entries(response.protocol_errors || {}).map(([key, value]) => `${key.replace("_", " ")}=${value}`).join(" · ");
-        if (detail) session.protocolErrors.set(modelID, detail);
+        const errors = response.protocol_errors || {};
+        if (Object.keys(errors).length) session.protocolErrors.set(modelID, errors);
         else session.protocolErrors.delete(modelID);
       }).catch(error => {
         session.probeErrors.set(modelID, error instanceof Error ? error.message : String(error));

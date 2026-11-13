@@ -1,4 +1,4 @@
-import type {Project, Task, Workspace, WorkspaceProbe} from "./types.js";
+import type {DetectedModel, Project, Task, Workspace, WorkspaceProbe} from "./types.js";
 
 export type PetWatchAction = "follow" | "unfollow" | "ignore" | "restoreIgnored" | "restoreFollow";
 
@@ -232,6 +232,130 @@ export function renderWorkspaceDetection(workspace: Workspace): string {
         ? `<span class="status bad">Workspace 不可访问</span>`
         : `<span class="status warn">无可用 Backend</span>`;
   return `<div class="workspace-detection">${summary}${details.map(detail => `<small class="${detail.kind}" title="${escapeWorkspaceHTML(detail.text)}">${escapeWorkspaceHTML(detail.text)}</small>`).join("")}</div>`;
+}
+
+export function supportedWireAPIs(model: DetectedModel): string[] {
+  const caps = model.capabilities || {};
+  const order = ["responses", "chat_completions", "anthropic_messages"] as const;
+  // rate_limited means the endpoint exists and accepted the request but the
+  // gateway throttled the burst probe — the protocol is still usable.
+  return order.filter(api => caps[api] === "supported" || caps[api] === "rate_limited").map(api => api === "chat_completions" ? "chat" : api);
+}
+
+export function protoBadges(model: DetectedModel): string {
+  const wire = supportedWireAPIs(model);
+  const parts: string[] = [];
+  if (wire.includes("responses")) parts.push(`<span class="proto codex">Responses</span>`);
+  if (wire.includes("chat")) parts.push(`<span class="proto codex">Chat</span>`);
+  if (wire.includes("anthropic_messages")) parts.push(`<span class="proto claude">Messages</span>`);
+  if (parts.length) return parts.join("");
+  // "不支持" is only earned by confirmed missing endpoints (404/405/501).
+  // A 400, 422, auth failure, or 5xx leaves the protocol unconfirmed, so the
+  // badge must stay neutral instead of contradicting the per-protocol result.
+  const statuses = Object.values(model.capabilities || {});
+  const confirmedAbsent = statuses.length > 0 && statuses.every(status => status === "unsupported");
+  return confirmedAbsent ? `<span class="proto none">不支持</span>` : `<span class="proto none">未确认</span>`;
+}
+
+// Per-protocol probe results for the detection row. "unsupported" stays muted
+// because an absent endpoint is normal; "rejected" (HTTP 400) keeps neutral
+// wording because the status alone cannot say whether the protocol, model,
+// parameters, or auth is at fault. Only transport failures use fault wording.
+const PROBE_WIRE_ORDER = ["responses", "chat_completions", "anthropic_messages"] as const;
+const PROBE_WIRE_LABELS: Record<string, string> = {
+  responses: "Responses",
+  chat_completions: "Chat",
+  anthropic_messages: "Messages",
+};
+
+export interface ProtocolProbeFailure {
+  wire: string;
+  label: string;
+  status: string;
+  tone: "bad" | "muted";
+  message: string;
+  hint: string;
+  detail: string;
+}
+
+// probeHTTPStatus picks the HTTP code that matches the classified status out
+// of the candidate evidence (Anthropic probes can list several URLs). The
+// first matching code is the one the backend used to pick the status.
+function probeHTTPStatus(status: string, detail: string): number | undefined {
+  const codes = Array.from(detail.matchAll(/HTTP\s+(\d{3})/g), match => Number(match[1]));
+  const matchesStatus = (code: number): boolean => {
+    if (status === "unsupported") return [404, 405, 501].includes(code);
+    if (status === "rejected") return code === 400;
+    if (status === "unauthorized") return code === 401 || code === 403;
+    if (status === "unavailable") return code >= 500;
+    return code < 500 && ![400, 401, 403, 404, 405, 429, 501].includes(code);
+  };
+  return codes.find(matchesStatus) ?? codes[0];
+}
+
+export function protocolProbeFailures(capabilities: Record<string, string> | undefined, protocolErrors: Record<string, string> | undefined): ProtocolProbeFailure[] {
+  const caps = capabilities || {};
+  const errors = protocolErrors || {};
+  const failures: ProtocolProbeFailure[] = [];
+  for (const wire of PROBE_WIRE_ORDER) {
+    const status = caps[wire];
+    if (!status || status === "supported" || status === "rate_limited") continue;
+    const label = PROBE_WIRE_LABELS[wire] || wire;
+    const detail = String(errors[wire] || "");
+    const code = probeHTTPStatus(status, detail);
+    const suffix = code ? `（HTTP ${code}）` : "";
+    let message = `${label} ${status}`;
+    let hint = "可展开详情查看探测结果。";
+    let tone: "bad" | "muted" = "bad";
+    switch (status) {
+      case "unsupported":
+        message = `${label} 不可用${suffix}`;
+        hint = "该网关没有提供这个协议端点，不是网络故障。";
+        tone = "muted";
+        break;
+      case "rejected":
+        // A bare HTTP 400 cannot distinguish an unsupported protocol from an
+        // unknown model, bad parameters, or auth/gateway policy. Keep the
+        // wording neutral instead of claiming the endpoint is absent.
+        message = `${label} 请求被拒绝${suffix}`;
+        hint = "可能不支持该协议，也可能是模型、参数或鉴权配置错误。";
+        break;
+      case "unauthorized":
+        message = `${label} 鉴权失败${suffix}`;
+        hint = "检查 API Key 或鉴权方式。";
+        break;
+      case "unavailable":
+        if (code && code >= 500) {
+          message = `${label} 服务异常${suffix}`;
+          hint = "网关返回服务端错误，稍后重试；若持续失败请检查 Base URL 或代理。";
+        } else {
+          message = `${label} 传输错误${suffix}`;
+          hint = "检查网络连接、代理或 Base URL 后重试。";
+        }
+        break;
+      case "inconclusive":
+        message = `${label} 未确认${suffix}`;
+        hint = "网关拒绝了这次探测，可展开详情查看。";
+        break;
+    }
+    failures.push({wire, label, status, tone, message, hint, detail});
+  }
+  return failures;
+}
+
+// renderProtocolProbeStatus renders the per-protocol result for one detected
+// model. The default line states what happened in plain terms; the candidate
+// URLs and HTTP statuses stay available behind "查看详情".
+export function renderProtocolProbeStatus(capabilities: Record<string, string> | undefined, protocolErrors: Record<string, string> | undefined): string {
+  const failures = protocolProbeFailures(capabilities, protocolErrors);
+  if (!failures.length) return "";
+  const summary = failures.map(failure => `<span class="proto-result ${failure.tone}">${escapeWorkspaceHTML(failure.message)}</span>`).join("");
+  const hints = [...new Set(failures.map(failure => failure.hint))];
+  const details = failures.filter(failure => failure.detail);
+  const detailHTML = details.length
+    ? `<details class="proto-detail"><summary>查看详情</summary>${details.map(failure => `<small>${escapeWorkspaceHTML(failure.label)}：${escapeWorkspaceHTML(failure.detail)}</small>`).join("")}</details>`
+    : "";
+  return `<div class="proto-failures">${summary}<small class="proto-hint">${escapeWorkspaceHTML(hints.join(" "))}</small>${detailHTML}</div>`;
 }
 
 export const TASK_SLASH_COMMANDS = [
