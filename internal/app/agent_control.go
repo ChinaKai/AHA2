@@ -627,9 +627,6 @@ func (s *Service) AgentProjectWorkspaces(ctx context.Context, claims agentapi.Cl
 	if err != nil {
 		return nil, err
 	}
-	if !call.Task.AgentCapabilities["workspace_read"] {
-		return nil, ErrAgentCallForbidden
-	}
 	return s.store.ListWorkspaces(ctx, call.Project.ID)
 }
 
@@ -637,9 +634,6 @@ func (s *Service) AgentProjectRuntimes(ctx context.Context, claims agentapi.Clai
 	call, err := s.AgentCallContext(ctx, claims, true)
 	if err != nil {
 		return nil, err
-	}
-	if !call.Task.AgentCapabilities["task_create"] {
-		return nil, ErrAgentCallForbidden
 	}
 	models, err := s.store.ListModels(ctx)
 	if err != nil {
@@ -702,12 +696,6 @@ func (s *Service) CreateAgentTask(ctx context.Context, claims agentapi.Claims, i
 	if err != nil {
 		return domain.Task{}, domain.Turn{}, err
 	}
-	if !call.Task.AgentCapabilities["task_create"] {
-		return domain.Task{}, domain.Turn{}, ErrAgentCallForbidden
-	}
-	if input.CloneHardware && !call.Task.AgentCapabilities["clone_hardware"] {
-		return domain.Task{}, domain.Turn{}, ErrAgentCallForbidden
-	}
 	workspace, err := s.store.Workspace(ctx, strings.TrimSpace(input.WorkspaceID))
 	if err != nil || workspace.ProjectID != call.Project.ID {
 		return domain.Task{}, domain.Turn{}, ErrAgentCallForbidden
@@ -766,9 +754,6 @@ func (s *Service) AgentProjectTask(ctx context.Context, claims agentapi.Claims, 
 	call, err := s.AgentCallContext(ctx, claims, true)
 	if err != nil {
 		return domain.Task{}, nil, err
-	}
-	if !call.Task.AgentCapabilities["task_create"] {
-		return domain.Task{}, nil, ErrAgentCallForbidden
 	}
 	item, err := s.store.Task(ctx, strings.TrimSpace(taskID))
 	if err != nil || item.ProjectID != call.Project.ID {

@@ -38,11 +38,11 @@ func (s *Server) agentCapabilitiesInfo(writer http.ResponseWriter, request *http
 		// Reported separately so a caller can tell whether a global skill is
 		// possible before sending one and being refused.
 		"skill_create_global": main && s.app.AgentGlobalSkillAllowed(request.Context(), call),
-		"workspace_read":      main && call.Task.AgentCapabilities["workspace_read"],
-		"task_create":         main && call.Task.AgentCapabilities["task_create"],
-		"clone_hardware":      main && call.Task.AgentCapabilities["clone_hardware"],
-		"collaboration":       main && call.Task.CollaborationMode == "auto",
-		"channel_outreach":    channelOutreach, "channel_reply": channelReply, "channel_reply_decision": channelReplyDecision,
+		// These three project-level abilities are available to Main by default;
+		// the Task-stored grants stay in the schema for compatibility only.
+		"workspace_read": main, "task_create": main, "clone_hardware": main,
+		"collaboration":    main && call.Task.CollaborationMode == "auto",
+		"channel_outreach": channelOutreach, "channel_reply": channelReply, "channel_reply_decision": channelReplyDecision,
 		"hardware": true, "managed_process": true,
 		"desktop": main && s.desktop.Status(call.Task.ID).Supported,
 	}})

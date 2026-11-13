@@ -176,6 +176,8 @@ try {
   // 1. An edit followed by Esc asks first. Dismissing keeps the dialog and its
   //    edit in place and still writes nothing.
   await openDialog();
+  assert.equal(await page.locator("#agent-config-capabilities-fold").count(), 0, "the project-level authorization module is still rendered");
+  assert.equal(await page.locator('#agent-config-form input[name="cap_workspace_read"]').count(), 0, "the capability checkboxes are still rendered");
   await page.selectOption("#agent-config-effort", "low");
   await page.evaluate(() => { window.__confirmAnswer = false; });
   await page.keyboard.press("Escape");
@@ -226,7 +228,7 @@ try {
   assert.equal(saved[0].body.collaboration_mode, "auto", "collaboration mode was not saved");
   assert.equal(saved[0].body.max_agents, 3, "max agents was not saved");
   assert.equal(saved[0].body.knowledge_policy, "enabled", "knowledge policy was not saved");
-  assert.deepEqual(saved[0].body.agent_capabilities, {workspace_read: false, task_create: false, clone_hardware: false});
+  assert.equal("agent_capabilities" in saved[0].body, false, "the Agent config PATCH still carries capability grants");
   assert.equal(saved[1].body.inherit_main, false);
   assert.equal(saved[1].body.backend, "codex");
   assert.equal(saved[1].body.reasoning_effort, "medium", "reasoning effort was not saved");

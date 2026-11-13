@@ -267,20 +267,57 @@ func TestAgentStateKnowledgeAndSkillAPIs(t *testing.T) {
 		t.Fatalf("inbox wait status=%d payload=%#v", response.StatusCode, inboxWaitPayload)
 	}
 
-	response = agentRequest(t, server.URL+"/api/v1/agent/project/workspaces", http.MethodGet, token, nil)
-	if response.StatusCode != http.StatusForbidden {
-		t.Fatalf("default project capability status=%d", response.StatusCode)
-	}
-	response.Body.Close()
-	if err := database.UpdateTaskAgentCapabilities(ctx, task.ID, map[string]bool{"workspace_read": true, "task_create": true, "clone_hardware": true}, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
-		t.Fatal(err)
+	// The three project-level abilities are available to Main without any
+	// persisted grant on the Task. The state flags keep reporting them for
+	// older clients.
+	if capabilityFlags["workspace_read"] != true || capabilityFlags["task_create"] != true || capabilityFlags["clone_hardware"] != true {
+		t.Fatalf("project capabilities are not reported as available by default: %#v", capabilityFlags)
 	}
 	response = agentRequest(t, server.URL+"/api/v1/agent/project/workspaces", http.MethodGet, token, nil)
 	var workspacesPayload map[string]any
 	decodeResponse(t, response, &workspacesPayload)
-	if response.StatusCode != http.StatusOK || len(workspacesPayload["workspaces"].([]any)) != 1 {
+	listed, _ := workspacesPayload["workspaces"].([]any)
+	if response.StatusCode != http.StatusOK || len(listed) != 1 || listed[0].(map[string]any)["id"] != task.WorkspaceID {
 		t.Fatalf("workspaces status=%d payload=%#v", response.StatusCode, workspacesPayload)
 	}
+	// Non-Main turns stay refused even though Main needs no grant.
+	subTurn := domain.Turn{
+		ID: domain.NewID("turn"), TaskID: task.ID, AgentID: "sub-001",
+		Sequence: turn.Sequence + 1, InputMessageID: turn.InputMessageID, Status: domain.TurnRunning,
+		RuntimeConfigSnapshotID: task.RuntimeConfigSnapshotID, Attempt: 1, Generation: 1, QueuedAt: time.Now().UTC(),
+	}
+	if err := database.CreateTurn(ctx, subTurn); err != nil {
+		t.Fatal(err)
+	}
+	subToken, err := capabilities.Issue(task.ID, "sub-001", subTurn.ID, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer capabilities.Revoke(subToken)
+	response = agentRequest(t, server.URL+"/api/v1/agent/project/workspaces", http.MethodGet, subToken, nil)
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("non-Main workspace list status=%d", response.StatusCode)
+	}
+	response.Body.Close()
+	// A Task still cannot be created in another Project's Workspace.
+	otherProject := domain.Project{ID: domain.NewID("project"), Name: "Other", CreatedAt: now, UpdatedAt: now}
+	otherWorkspace := domain.Workspace{
+		ID: domain.NewID("workspace"), ProjectID: otherProject.ID, Name: "Other", Locality: "local",
+		Transport: "native", RootPath: t.TempDir(), Health: "ready", CreatedAt: now, UpdatedAt: now,
+	}
+	if err := database.CreateProject(ctx, otherProject); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CreateWorkspace(ctx, otherWorkspace); err != nil {
+		t.Fatal(err)
+	}
+	response = agentRequest(t, server.URL+"/api/v1/agent/tasks", http.MethodPost, token, map[string]any{
+		"workspace_id": otherWorkspace.ID, "title": "cross project", "request": "must be refused",
+	})
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("cross-project task status=%d", response.StatusCode)
+	}
+	response.Body.Close()
 	response = agentRequest(t, server.URL+"/api/v1/agent/project/runtimes", http.MethodGet, token, nil)
 	var runtimesPayload map[string]any
 	decodeResponse(t, response, &runtimesPayload)
@@ -308,6 +345,21 @@ func TestAgentStateKnowledgeAndSkillAPIs(t *testing.T) {
 	}
 	if value, ok := secretStore.Get(clonedGroups[0].CredentialRef); !ok || value != "test-secret" {
 		t.Fatal("cloned binding lost the shared hardware credential")
+	}
+
+	// Without an explicit clone_hardware request the new Task must not inherit
+	// the source hardware bindings.
+	response = agentRequest(t, server.URL+"/api/v1/agent/tasks", http.MethodPost, token, map[string]any{
+		"workspace_id": task.WorkspaceID, "title": "no hardware", "request": "test default hardware",
+	})
+	var noClonePayload map[string]any
+	decodeResponse(t, response, &noClonePayload)
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("agent task without hardware status=%d payload=%#v", response.StatusCode, noClonePayload)
+	}
+	noCloneTaskID := noClonePayload["task"].(map[string]any)["id"].(string)
+	if groups, err := database.HardwareGroups(ctx, noCloneTaskID); err != nil || len(groups) != 0 {
+		t.Fatalf("hardware was copied without clone_hardware: groups=%#v err=%v", groups, err)
 	}
 
 	response = agentRequest(t, server.URL+"/api/v1/agent/tasks", http.MethodPost, token, map[string]any{

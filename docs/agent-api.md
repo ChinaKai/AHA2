@@ -62,12 +62,12 @@ Task Memory 的旧 decisions/facts/progress/verification/next_actions 数组只�
 只有 Main Agent 可以修改 Memory 和提交协作批次；协作请求提交后立即由 AHA 编排。
 最终回复只包含自然语言，不再携带 Turn checkpoint。
 
-项目 Workspace 列表和 Task 创建能力仅对 Main 开放，并强制限定到当前 Project；还要求
-Owner 在 Task Main 配置中显式开启持久化的 `workspace_read/task_create/clone_hardware`
-授权，默认全部关闭。
-创建 Task 时可使用 `clone_hardware:true`，由服务端复制当前 Task 的硬件组和 Secret，
-Secret 使用新 Task 专属引用且不会进入响应。新 Task 固定使用单 Agent 模式，并继承当前
-Main 的运行时与权限上限，避免为调用 Agent API 意外关闭网络能力。
+项目 Workspace 列表和 Task 创建能力仅对 Main 开放，并强制限定到当前 Project。
+`workspace_read`、`task_create`、`clone_hardware` 三项能力对 Main 默认可用，不再要求在
+Task 上显式开启持久化授权；`GET /api/v1/agent/capabilities` 仍返回这三个字段以兼容旧客户端。
+创建 Task 只在请求显式携带 `clone_hardware:true` 时，由服务端复制当前 Task 的硬件组和
+Secret，Secret 使用新 Task 专属引用且不会进入响应。新 Task 固定使用单 Agent 模式，并继承
+当前 Main 的运行时与权限上限，避免为调用 Agent API 意外关闭网络能力。
 
 `GET /api/v1/agent/project/runtimes` 只返回已配置 Runtime 的非敏感选择字段，不返回环境变量或凭据。
 `POST /api/v1/agent/tasks` 省略 Runtime 字段时继承当前 Main；需要覆盖时，先读取 Runtime 列表，

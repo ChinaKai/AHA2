@@ -36,7 +36,6 @@ import {
   formatDuration,
   isActiveTurn,
   latestAgentTurns,
-  agentCapabilitiesFold,
   agentConfigChanged,
   agentConfigSnapshot,
   agentConfigSummary,
@@ -4667,7 +4666,6 @@ function taskDialog(): string {
         <h3>任务设置</h3>
         <div class="two"><label>协作模式<select name="collaboration_mode"><option value="auto">Auto</option><option value="single">Single</option></select></label><label>最大 Agent 数<input name="max_agents" type="number" min="1" value="3"></label></div>
         <label>Knowledge<select name="knowledge_policy"><option value="inherit">继承 Project</option><option value="enabled">开启</option><option value="disabled">关闭</option></select></label>
-        ${agentCapabilitiesFold("task", {})}
         <div id="task-git-isolation"><label>任务隔离<select name="isolation" id="task-isolation"><option value="inplace" selected>原地执行（默认）</option><option value="worktree">独立 Worktree</option></select></label><div id="task-worktree-settings"><label>Worktree 根目录<input name="worktree_dir" id="task-worktree-dir" placeholder="默认：仓库上一级/.aha2-worktrees"></label><div class="field-help">系统会在根目录下追加 Task ID；切换为原地执行后不使用此配置。</div></div><div class="two" id="task-branches"><label>目标分支<input name="target_branch" placeholder="默认当前分支"></label><label>任务分支<input name="task_branch" placeholder="aha/task-name"></label></div></div>
       </section>
     </div>
@@ -4678,14 +4676,6 @@ function taskDialog(): string {
 // Keeps each collapsed summary truthful about what is switched on inside it.
 // Both dialogs share the same helpers, so the create panel and the Agent config
 // dialog report counts in exactly the same words.
-function syncFoldCount(scope: string, id: string, total: number): void {
-  const root = document.querySelector<HTMLElement>(`#${scope}`);
-  if (!root) return;
-  const on = root.querySelectorAll<HTMLInputElement>(`#${id} input[type=checkbox]:checked`).length;
-  const badge = root.querySelector<HTMLElement>(`#${id} [data-fold-count]`);
-  if (badge) badge.textContent = on ? `已启用 ${on}/${total}` : "默认关闭";
-}
-
 function syncMCPFoldCount(scope: string, id: string): void {
   const root = document.querySelector<HTMLElement>(`#${scope}`);
   if (!root) return;
@@ -4729,7 +4719,6 @@ function syncAdvancedSummary(scope: string, prefix: string): void {
 }
 
 function syncTaskFormFoldCounts(): void {
-  syncFoldCount("task-dialog", "task-capabilities-fold", 3);
   syncSkillsFoldCount("task-dialog", "task-skills-fold");
   syncMCPFoldCount("task-dialog", "task-mcp-fold");
   syncFastFoldCount("task-dialog", "task");
@@ -4737,7 +4726,6 @@ function syncTaskFormFoldCounts(): void {
 }
 
 function syncAgentFoldCounts(): void {
-  syncFoldCount("agent-config-dialog", "agent-config-capabilities-fold", 3);
   syncSkillsFoldCount("agent-config-dialog", "agent-config-skills-fold");
   syncMCPFoldCount("agent-config-dialog", "agent-config-mcp-fold");
   syncFastFoldCount("agent-config-dialog", "agent-config");
@@ -6561,11 +6549,6 @@ function bindCommon(): void {
       max_agents: Number(payload.max_agents || 3),
       proxy_enabled: proxyEnabledFrom(payload.proxy_enabled),
       fast_mode: payload.fast_mode === "on",
-      agent_capabilities: {
-        workspace_read: form.get("cap_workspace_read") === "on",
-        task_create: form.get("cap_task_create") === "on",
-        clone_hardware: form.get("cap_clone_hardware") === "on",
-      },
       stream_idle_timeout_ms: Number(streamIdleTimeoutSeconds || 120) * 1000,
       stream_max_retries: Number(payload.stream_max_retries || 0),
     });
@@ -6648,11 +6631,6 @@ function bindCommon(): void {
         max_agents: Number(form.get("max_agents") || 3),
         knowledge_policy: String(form.get("knowledge_policy") || "inherit"),
         skill_ids: form.getAll("skill_ids").map(String),
-        agent_capabilities: {
-          workspace_read: form.get("cap_workspace_read") === "on",
-          task_create: form.get("cap_task_create") === "on",
-          clone_hardware: form.get("cap_clone_hardware") === "on",
-        },
       });
     }
     await api.updateTaskAgent(state.selectedTask.task.id, agentID, inheritMain ? {

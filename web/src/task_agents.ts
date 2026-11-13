@@ -592,19 +592,6 @@ export function agentFastFold(prefix: string, checked: boolean, backend: string)
   </details>`;
 }
 
-export function agentCapabilitiesFold(prefix: string, capabilities: Record<string, boolean> | undefined): string {
-  const granted = capabilities || {};
-  const on = ["workspace_read", "task_create", "clone_hardware"].filter(name => granted[name]).length;
-  return `<details class="task-form-fold" id="${prefix}-capabilities-fold">
-    <summary><strong>Agent 项目级授权</strong><b data-fold-count>${on ? `已启用 ${on}/3` : "默认关闭"}</b></summary>
-    <div class="task-form-fold-body"><div class="task-skill-options">
-      <label class="task-skill-option"><input type="checkbox" name="cap_workspace_read" ${granted.workspace_read ? "checked" : ""}><span><strong>读取同 Project Workspace</strong><small>允许读取当前项目其他 Workspace</small></span></label>
-      <label class="task-skill-option"><input type="checkbox" name="cap_task_create" ${granted.task_create ? "checked" : ""}><span><strong>创建同 Project Task</strong><small>允许在当前项目下创建 Task</small></span></label>
-      <label class="task-skill-option"><input type="checkbox" name="cap_clone_hardware" ${granted.clone_hardware ? "checked" : ""}><span><strong>克隆当前 Task 硬件启用关系</strong><small>新 Task 继承当前硬件配置</small></span></label>
-    </div></div>
-  </details>`;
-}
-
 export type AgentConfigFormOptions = {
   prefix: string;
   models: Model[];
@@ -679,7 +666,6 @@ function renderTaskPolicySection(detail: TaskDetail): string {
       <label>最大 Agent 数<input name="max_agents" type="number" min="1" value="${Math.max(1, Number(detail.task.max_agents || 3))}"></label>
     </div>
     <label>Knowledge<select name="knowledge_policy"><option value="inherit" ${detail.task.knowledge_policy === "inherit" ? "selected" : ""}>继承 Project</option><option value="enabled" ${detail.task.knowledge_policy === "enabled" ? "selected" : ""}>开启</option><option value="disabled" ${detail.task.knowledge_policy === "disabled" ? "selected" : ""}>关闭</option></select></label>
-    ${agentCapabilitiesFold("agent-config", detail.task.agent_capabilities)}
   </section>`;
 }
 

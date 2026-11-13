@@ -1,7 +1,7 @@
 // Optional browser verification; dependencies and browser files stay in .tools.
 // Drives the real built Web bundle against a stubbed AHA API to confirm the task
 // panel work: grouped status filters with server counts, the create panel's
-// project-level grants, the proxy select, and the collapsed optional modules.
+// proxy select, and the collapsed optional modules.
 import assert from "node:assert/strict";
 import {createServer} from "node:http";
 import {readFile, mkdir} from "node:fs/promises";
@@ -168,7 +168,7 @@ try {
   assert.deepEqual(deviceLabels, ["本机", "device-b"], `device options lost the whole set: ${deviceLabels}`);
   assert.deepEqual(deviceCounts, ["6", "1"], "device counts are not the server totals");
 
-  // 3. The create panel: proxy is a select, both optional modules start collapsed.
+  // 3. The create panel: proxy is a select and the optional Skills module starts collapsed.
   await page.click('[data-dialog="task"]');
   await page.waitForSelector("#task-dialog[open]", {timeout: 5000});
   // The project select drives which skills are offered, so it must hold a value
@@ -179,11 +179,9 @@ try {
   assert.equal(await proxy.count(), 1, "proxy is not a select in the create panel");
   assert.equal(await proxy.inputValue(), "disabled", "proxy does not default to 关闭");
   assert.equal(await page.locator('#task-form [name="proxy_enabled"][type=checkbox]').count(), 0, "the proxy checkbox is still present");
-  for (const id of ["task-capabilities-fold", "task-skills-fold"]) {
-    assert.equal(await page.locator(`#${id}`).evaluate(node => node.open), false, `${id} should start collapsed`);
-  }
+  assert.equal(await page.locator("#task-capabilities-fold").count(), 0, "the project-level authorization module is still rendered");
+  assert.equal(await page.locator("#task-skills-fold").evaluate(node => node.open), false, "task-skills-fold should start collapsed");
   assert.match(await page.locator("#task-skills-fold [data-fold-count]").innerText(), /未选择/);
-  assert.match(await page.locator("#task-capabilities-fold [data-fold-count]").innerText(), /默认关闭/);
   await page.screenshot({path: resolve(output, "task-panel-collapsed.png")});
 
   // A collapsed Skills module must not grow the dialog with the skill count.
@@ -199,16 +197,13 @@ try {
   await page.locator("#task-skills-fold summary").click();
   assert.ok(await skillsHeight() <= collapsedSkillsHeight + 1, "collapsed skills module grew with the skill count");
 
-  // 4. Creating passes the grants and the proxy choice through. The dialog is
-  // rebuilt by every list re-render, so it is opened here rather than reused
-  // from the filter checks above.
+  // 4. Creating passes the skills and proxy choice through and no longer sends
+  // capability grants. The dialog is rebuilt by every list re-render, so it is
+  // opened here rather than reused from the filter checks above.
   await page.locator("#task-dialog").evaluate(dialog => dialog.close());
   await page.waitForFunction(() => document.querySelector("#task-model")?.options.length > 0, null, {timeout: 10000});
   await page.click('[data-dialog="task"]');
   await page.waitForSelector("#task-dialog[open]", {timeout: 5000});
-  await page.locator("#task-capabilities-fold summary").click();
-  await page.locator('#task-capabilities-fold input[name="cap_workspace_read"]').setChecked(true);
-  assert.match(await page.locator("#task-capabilities-fold [data-fold-count]").innerText(), /已启用 1\/3/);
   await page.locator("#task-skills-fold summary").click();
   await page.locator('#task-skills-fold input[value="skill-a"]').setChecked(true);
   await page.locator('#task-skills-fold input[value="skill-b"]').setChecked(true);
@@ -232,9 +227,7 @@ try {
   const created = await page.evaluate(() => window.__created);
   assert.equal(created.proxy_enabled, true, "proxy select was not submitted");
   assert.equal(created.fast_mode, true, "the fast switch was not submitted as a boolean");
-  assert.equal(created.agent_capabilities.workspace_read, true, "the workspace grant was not submitted");
-  assert.equal(created.agent_capabilities.task_create, false, "an unchecked grant was submitted as granted");
-  assert.equal(created.agent_capabilities.clone_hardware, false, "an unchecked grant was submitted as granted");
+  assert.equal("agent_capabilities" in created, false, "the create payload still carries capability grants");
   assert.deepEqual(created.skill_ids.sort(), ["skill-a", "skill-b"], "selected skills were not submitted");
   assert.deepEqual(errors, [], "the task panel threw while being driven");
 

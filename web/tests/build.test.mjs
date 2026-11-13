@@ -1696,10 +1696,9 @@ test("built web contains responsive application", async () => {
   assert.match(agents, /Backend 启动/);
   assert.doesNotMatch(agents, /Turn Cache/);
   assert.match(agents, /累计 Cache/);
-  assert.match(agents, /cap_workspace_read/);
-  assert.match(agents, /cap_task_create/);
-  assert.match(agents, /cap_clone_hardware/);
-  assert.match(css, /\.task-agent-capabilities/);
+  assert.doesNotMatch(agents, /cap_workspace_read|cap_task_create|cap_clone_hardware/);
+  assert.doesNotMatch(agents, /Agent 项目级授权/);
+  assert.doesNotMatch(css, /\.task-agent-capabilities/);
   assert.match(css, /overflow-wrap: anywhere/);
   assert.doesNotMatch(script, /data-task-action="delete"/);
   assert.match(script, /requestAnimationFrame\(runTaskClock\)/);
