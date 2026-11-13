@@ -46,7 +46,7 @@ window.fetch=async(input,init={})=>{
   if(item?.status==="pending"){item.status=JSON.parse(init.body).decision;window.pendingCount--;}
   return json({ok:true,approval:item});
  }
- if(path==="/api/v1/pet/workbench")return json({core:[],worklog:[],approvals,updated_at:new Date().toISOString()});
+ if(path==="/api/v1/pet/workbench")return json({core:[],worklog:[],approvals,updated_at:new Date().toISOString(),inspection:{health:"degraded",version:"9.9.9",web_version:"web-1",uptime_minutes:125,checked_at:new Date().toISOString(),pending_approvals:3},channels:[{id:"c-1",name:"Mail",status:"degraded",pending:2,degraded:true}],channel_total:1});
  if(path==="/api/v1/tasks")return json({tasks:[],has_more:false});
  if(path==="/api/v1/projects")return json({projects:[],has_more:false});
  if(path==="/api/v1/workspaces")return json({workspaces:[]});
@@ -92,6 +92,41 @@ try{
  };
  await scan("pet workbench overview");
  assert.equal(await page.locator('[data-pet-workbench-tab="overview"]').getAttribute("class"), "active");
+ // The overview no longer carries the inspection snapshot or channel-health
+ // cards below Recent activity, even though the response contains both.
+ const workbenchBody = page.locator("#pet-workbench-body");
+ assert.equal(await workbenchBody.locator(".pet-overview-inspection").count(), 0);
+ assert.equal(await workbenchBody.locator(".pet-overview-channels").count(), 0);
+ assert.equal(await workbenchBody.locator(".pet-inspection-summary").count(), 0);
+ assert.equal(await workbenchBody.locator(".pet-channel-card").count(), 0);
+ assert.doesNotMatch(await workbenchBody.innerText(), /Inspection snapshot|Channel health/);
+ // The status row, numeric cards, watch lists and recent activity still render.
+ assert.equal(await workbenchBody.locator(".pet-overview-status").count(), 1);
+ assert.equal(await workbenchBody.locator(".pet-overview-cards").count(), 1);
+ assert.equal(await workbenchBody.locator(".pet-overview-follows").count(), 1);
+ assert.equal(await workbenchBody.locator(".pet-overview-recent").count(), 1);
+ assert.match(await workbenchBody.locator(".pet-overview-status").innerText(), /Version: 9\.9\.9/);
+ assert.match(await workbenchBody.locator(".pet-overview-status").innerText(), /Uptime: 2 h 5 min/);
+ // Recent activity is the last overview section: no hollow grid row or spare
+ // gap is left behind at either viewport width.
+ const assertOverviewLayout = async label => {
+  const layout = await page.evaluate(() => {
+   const overview = document.querySelector("#pet-workbench-body .pet-overview");
+   const recent = document.querySelector("#pet-workbench-body .pet-overview-recent");
+   return {
+    sections: [...overview.children].map(el => ({className: el.className, width: Math.round(el.getBoundingClientRect().width), height: Math.round(el.getBoundingClientRect().height)})),
+    overviewBottom: Math.round(overview.getBoundingClientRect().bottom),
+    recentBottom: Math.round(recent.getBoundingClientRect().bottom),
+   };
+  });
+  assert.deepEqual(layout.sections.map(section => section.className), ["pet-overview-status", "pet-overview-cards", "pet-overview-follows", "pet-overview-other", "pet-overview-recent"], label);
+  assert.ok(layout.sections.every(section => section.width > 0 && section.height > 0), label + " has an empty section");
+  assert.equal(layout.recentBottom, layout.overviewBottom, label + " leaves space below Recent activity");
+ };
+ await assertOverviewLayout("desktop overview");
+ await page.setViewportSize({width:390,height:844});
+ await assertOverviewLayout("mobile overview");
+ await page.setViewportSize({width:1400,height:1000});
  assert.equal(await page.locator('[data-pet-workbench-tab="diary"]').count(), 0);
  assert.doesNotMatch(await page.locator("#app").innerText(), /日记|diary/i);
  const nav = page.locator('button[data-view="pet-workbench"]');

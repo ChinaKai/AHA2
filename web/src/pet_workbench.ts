@@ -464,70 +464,6 @@ function uptimeText(minutes: number, translate: Translate): string {
   return translate("petWorkbench.uptimeDays", {days: Math.floor(hours / 24), hours: hours % 24});
 }
 
-// renderPetInspectionSummary renders the compact snapshot above the channel
-// cards. Missing or non-numeric values are omitted instead of rendering
-// "undefined"/NaN; a snapshot with nothing trustworthy shows an empty state.
-export function renderPetInspectionSummary(inspection: PetInspection | null | undefined, translate: Translate, formatTime: FormatTime): string {
-  if (!inspection || typeof inspection !== "object") {
-    return `<div class="field-help">${escapeHTML(translate("petWorkbench.inspectionUnavailable"))}</div>`;
-  }
-  const health = textValue(inspection.health);
-  const healthLabel = health === "ok"
-    ? translate("petWorkbench.inspectionHealthy")
-    : health === "degraded"
-      ? translate("petWorkbench.inspectionDegraded")
-      : translate("petWorkbench.inspectionUnknown");
-
-  const meta: string[] = [];
-  const version = textValue(inspection.version);
-  const webVersion = textValue(inspection.web_version);
-  if (version) meta.push(`${translate("petWorkbench.inspectionVersion")}: ${escapeHTML(version)}`);
-  if (webVersion) meta.push(`${translate("petWorkbench.inspectionWebVersion")}: ${escapeHTML(webVersion)}`);
-  const startedAt = textValue(inspection.started_at);
-  if (startedAt) meta.push(`${translate("petWorkbench.inspectionStartedAt")}: ${escapeHTML(formatTime(startedAt))}`);
-  const uptime = countValue(inspection.uptime_minutes);
-  if (uptime !== null) meta.push(`${translate("petWorkbench.inspectionUptime")}: ${escapeHTML(uptimeText(uptime, translate))}`);
-  const checkedAt = textValue(inspection.checked_at);
-  if (checkedAt) meta.push(`${translate("petWorkbench.inspectionCheckedAt")}: ${escapeHTML(formatTime(checkedAt))}`);
-  const degraded = countValue(inspection.degraded_channel_count);
-  if (degraded !== null) meta.push(`${translate("petWorkbench.inspectionDegradedChannels")}: ${degraded}`);
-
-  const taskCounts: Array<[string, number | null]> = [
-    ["petWorkbench.inspectionTasksTotal", countValue(inspection.tasks_total)],
-    ["petWorkbench.inspectionActive", countValue(inspection.active)],
-    ["petWorkbench.inspectionWaitingUser", countValue(inspection.waiting_user)],
-    ["petWorkbench.inspectionFailed", countValue(inspection.failed)],
-    ["petWorkbench.inspectionBlocked", countValue(inspection.blocked)],
-    ["petWorkbench.inspectionCompleted", countValue(inspection.completed)],
-  ];
-  const stats = taskCounts
-    .filter(([, value]) => value !== null)
-    .map(([key, value]) => `<span><small>${escapeHTML(translate(key))}</small><strong>${value}</strong></span>`)
-    .join("");
-  const loops: string[] = [];
-  const openTasks = countValue(inspection.open_tasks);
-  if (openTasks !== null) loops.push(`${translate("petWorkbench.inspectionOpenTasks")}: ${openTasks}`);
-  const attentionTasks = countValue(inspection.attention_tasks);
-  if (attentionTasks !== null) loops.push(`${translate("petWorkbench.inspectionAttentionTasks")}: ${attentionTasks}`);
-  const pendingApprovals = countValue(inspection.pending_approvals);
-  if (pendingApprovals !== null) loops.push(`${translate("petWorkbench.inspectionPendingApprovals")}: ${pendingApprovals}`);
-
-  const note = textValue(inspection.note);
-  const hasContent = meta.length > 0 || stats !== "" || loops.length > 0 || note !== "" || health === "ok" || health === "degraded";
-  if (!hasContent) {
-    return `<div class="field-help">${escapeHTML(translate("petWorkbench.inspectionUnavailable"))}</div>`;
-  }
-
-  const badgeClass = health === "ok" ? "ok" : health === "degraded" ? "degraded" : "unknown";
-  return `<section class="pet-inspection-summary">
-    <header class="pet-inspection-summary-head"><strong>${escapeHTML(translate("petWorkbench.inspectionSummary"))}</strong><span class="pet-inspection-health ${badgeClass}">${escapeHTML(healthLabel)}</span></header>
-    ${meta.length ? `<div class="pet-inspection-meta">${meta.map(item => `<span>${item}</span>`).join("")}</div>` : ""}
-    ${stats ? `<div class="pet-inspection-stats">${stats}</div>` : ""}
-    ${loops.length ? `<div class="pet-inspection-loops">${loops.map(item => `<span>${escapeHTML(item)}</span>`).join("")}</div>` : ""}
-    ${note ? `<div class="pet-inspection-note">${escapeHTML(note)}</div>` : ""}
-  </section>`;
-}
-
 /* Four-tab workbench: overview, approvals, records, settings ---------------- */
 
 export type PetWorkbenchTab = "overview" | "approvals" | "records" | "settings";
@@ -638,8 +574,8 @@ function overviewCard(jump: string, count: number, label: string, hint: string, 
 
 // renderPetOverview is the landing tab: what needs attention right now, the
 // three numerals that jump to their page, the compact follow list and the last
-// few changes. Inspection details and channel cards stay collapsed so the
-// owner is not greeted by a dashboard wall.
+// few changes. Inspection snapshots and channel-health cards live on their own
+// pages, so the overview stays short.
 export function renderPetOverview(options: PetOverviewOptions): string {
   const translate = options.translate;
   const inspection = options.inspection;
@@ -724,14 +660,6 @@ export function renderPetOverview(options: PetOverviewOptions): string {
       <h3>${escapeHTML(translate("petWorkbench.overviewRecent"))}</h3>
       <div class="pet-overview-activity-list">${recent}</div>
     </section>
-    <details class="pet-overview-inspection">
-      <summary>${escapeHTML(translate("petWorkbench.inspectionSummary"))}</summary>
-      ${renderPetInspectionSummary(inspection, translate, options.formatTime)}
-    </details>
-    <details class="pet-overview-channels" id="pet-overview-channels">
-      <summary>${escapeHTML(translate("petWorkbench.channelHealth"))}</summary>
-      ${renderPetChannelHealth(channels, textValue(inspection?.note), channelTotal, translate)}
-    </details>
   </div>`;
 }
 
@@ -806,41 +734,4 @@ export function renderPetRecords(
       </section>
     </div>
   </div>`;
-}
-
-export function renderPetChannelHealth(items: PetChannelHealth[], note: string, total: number, translate: Translate): string {
-  if (items.length === 0) {
-    return `<div class="field-help">${escapeHTML(translate("petWorkbench.emptyChannels"))}</div>${note ? `<div class="pet-channel-note">${escapeHTML(note)}</div>` : ""}`;
-  }
-  const summary = note
-    ? `<div class="pet-channel-note">${escapeHTML(note)}</div>`
-    : `<div class="field-help">${escapeHTML(translate("petWorkbench.channelHealthy"))}</div>`;
-  const truncated = total > items.length
-    ? `<div class="field-help">${escapeHTML(translate("petWorkbench.channelShown", {shown: String(items.length), total: String(total)}))}</div>`
-    : "";
-  const cards = items.map(item => {
-    const availability = item.effective_availability ? ` / ${item.effective_availability}` : "";
-    const oldest = item.oldest_pending_minutes > 0
-      ? translate("petWorkbench.channelAgeMinutes", {minutes: String(item.oldest_pending_minutes)})
-      : "-";
-    const attempts = item.stuck_pending || item.queued_pending || item.attempted_pending
-      ? ` (attempts=0 ${item.stuck_pending}，${translate("petWorkbench.channelQueuedPending")} ${item.queued_pending}，attempts>0 ${item.attempted_pending})`
-      : "";
-    const expired = item.expired_leases > 0
-      ? `<span>${translate("petWorkbench.channelExpiredLeases")}: ${item.expired_leases}</span>`
-      : "";
-    return `<article class="pet-channel-card${item.degraded ? " degraded" : ""}">
-      <header><strong>${escapeHTML(item.name)}</strong><span class="pet-channel-badge ${item.degraded ? "degraded" : "ok"}">${escapeHTML(item.degraded ? translate("petWorkbench.channelDegraded") : translate("petWorkbench.channelHealthyLabel"))}</span></header>
-      <div class="pet-channel-grid">
-        <span>${translate("petWorkbench.channelStatus")}: ${escapeHTML(item.status || "-")}${escapeHTML(availability)}</span>
-        <span>${translate("petWorkbench.channelPending")}: ${item.pending}${attempts}</span>
-        <span>${translate("petWorkbench.channelOldestPending")}: ${escapeHTML(oldest)}</span>
-        ${expired}
-        <span>${translate("petWorkbench.channelDeadLetter")}: ${item.dead_letter}</span>
-        ${item.last_error_code ? `<span>${translate("petWorkbench.channelLastError")}: ${escapeHTML(item.last_error_code)}</span>` : ""}
-      </div>
-      ${item.note ? `<small>${escapeHTML(item.note)}</small>` : ""}
-    </article>`;
-  }).join("");
-  return `${summary}${truncated}<div class="pet-channel-list">${cards}</div>`;
 }
