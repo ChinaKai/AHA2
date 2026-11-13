@@ -1254,6 +1254,28 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 .dialog-head h2 { margin: 0; font-size: var(--font-size-20); }
 .dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); margin-top: var(--space-4); }
 .dialog-actions > button { flex: 0 0 auto; white-space: nowrap; }
+
+/* Shared Agent config form: Create Task and Task detail use the same sections,
+   fold summaries and footer, so the dialog width and rhythm stay identical. */
+dialog.agent-config-dialog { width: min(760px,calc(100vw - 32px)); }
+.agent-config-dialog form { display: flex; flex-direction: column; max-height: calc(100vh - 32px); padding: 0; }
+.agent-config-dialog .dialog-head { padding: 18px 18px 12px; border-bottom: 1px solid var(--line); }
+.agent-config-dialog .dialog-head > div { min-width: 0; }
+.agent-config-dialog .dialog-head small { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; }
+.agent-config-dialog .dialog-body { display: grid; flex: 1 1 auto; gap: 12px; min-height: 0; overflow-y: auto; padding: 14px 18px; }
+.agent-config-section { min-width: 0; padding: 14px; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--color-surface); }
+.agent-config-section > h3 { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin: 0 0 10px; font-size: 12px; }
+.agent-config-section > h3 > small { min-width: 0; color: var(--muted); font-size: 10px; font-weight: 600; text-align: right; overflow-wrap: anywhere; }
+.agent-config-section > label { margin-top: 10px; margin-bottom: 0; }
+.agent-config-section > .two { margin-top: 10px; }
+.agent-config-section > :first-child { margin-top: 0; }
+.agent-config-primary { align-items: end; }
+.agent-effort-field select { font-weight: 700; }
+.agent-config-advanced .task-form-fold { margin: 8px 0; background: var(--color-surface-muted); }
+.agent-config-advanced .task-form-fold:last-child { margin-bottom: 0; }
+.agent-config-task .task-form-fold { margin: 10px 0 0; }
+.agent-config-actions { margin: 0; padding: 12px 18px calc(12px + env(safe-area-inset-bottom)); border-top: 1px solid var(--line); background: var(--color-surface); }
+.agent-config-dialog .form-error { margin: 0 18px 10px; }
 .hardware-console-actions button, .ctx-session-actions button, .knowledge-document-actions button, .knowledge-entry-actions button, .prompt-editor footer button { flex: 0 0 auto; white-space: nowrap; }
 .ctx-session-actions span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .form-error { margin-top: 12px; padding: 9px 11px; border: 1px solid var(--color-danger); border-radius: var(--radius-control); background: var(--color-danger-soft); color: var(--color-danger-ink); font-size: var(--font-size-12); line-height: 1.5; }
@@ -3097,6 +3119,19 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
   .knowledge-skill-toolbar select { flex: 1 1 100%; max-width: none; }
   .knowledge-binding-grid { grid-template-columns: minmax(0,1fr); }
   .knowledge-setting-card { gap: 10px; }
+}
+
+/* Fullscreen create/detail Agent config on phones, with the primary action kept
+   at the bottom of the viewport. */
+@media (max-width: 640px) {
+  dialog.agent-config-dialog { position: fixed; inset: 0; width: 100%; max-width: 100%; height: 100dvh; max-height: 100dvh; margin: 0; border: 0; border-radius: 0; }
+  .agent-config-dialog form { height: 100%; max-height: 100dvh; }
+  .agent-config-dialog .dialog-head { padding: max(14px,env(safe-area-inset-top)) 12px 10px; }
+  .agent-config-dialog .dialog-body { gap: 10px; padding: 10px 12px; }
+  .agent-config-section { padding: 12px; }
+  .agent-config-section .two { grid-template-columns: minmax(0,1fr); }
+  .agent-config-actions { padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); }
+  .agent-config-actions > button { flex: 1 1 120px; min-width: 0; }
 }
 
 @media (max-width: 640px) {

@@ -1952,6 +1952,7 @@ const legacyEnglish: Record<string, string> = {
   "流中断重试次数": "Stream retry count",
   "Codex 官方账号使用 CLI 默认的流超时与重试参数；两项设置仅适用于自定义 Env Provider。": "Official Codex accounts use the CLI's default stream timeout and retry settings; both apply only to custom Env providers.",
   "Codex 加速档（Fast）": "Codex Fast tier",
+  "Fast 模式": "Fast mode",
   "约 1.5 倍速度，但按更高费率计费。仅对 Codex 生效。": "About 1.5× faster with higher billing. Codex only.",
   "推理强度": "Reasoning effort",
   "沙箱（文件访问）": "Sandbox (file access)",
@@ -1970,6 +1971,18 @@ const legacyEnglish: Record<string, string> = {
   "还没有可用 MCP，先在侧边栏 MCP 页添加。": "No MCP servers available; add one on the MCP page.",
   "创建，稍后启动": "Create, start later",
   "创建并立即启动": "Create and start now",
+  "执行配置": "Execution",
+  "高级配置": "Advanced",
+  "基本信息": "Basics",
+  "任务设置": "Task settings",
+  "目标": "Goal",
+  "保存 Agent 配置": "Save Agent config",
+  "模型与推理强度决定新 Agent 的执行方式，创建后仍可调整。": "Model and reasoning effort decide how new Agents run; both remain editable after creation.",
+  "Agent 配置尚未保存，关闭将丢弃这些修改。确定关闭？": "Agent config has unsaved changes. Close and discard them?",
+  "请选择模型 Backend": "Select a model Backend",
+  "请选择模型": "Select a model",
+  "请选择 Codex 官方模型": "Select a Codex official model",
+  "请选择 Claude 官方模型": "Select a Claude official model",
   "可选的外部消息渠道；插件缺失或停用不会影响 AHA2 核心功能。": "Optional external messaging channels; missing or disabled plugins do not affect AHA2 core.",
   "渠道提供方": "Channel providers",
   "仅加载受管目录中 manifest 与可执行文件校验通过的插件。": "Only plugins whose manifest and executable pass verification in the managed directory are loaded.",
@@ -2577,6 +2590,20 @@ function translatePatternText(text: string): string | null {
   if (match) return `${match[1]} configuration`;
   match = /^已选 (\d+) 项$/.exec(text);
   if (match) return `${match[1]} selected`;
+  match = /^已选 (\d+)$/.exec(text);
+  if (match) return `${match[1]} selected`;
+  match = /^已启用 (\d+)\/(\d+)$/.exec(text);
+  if (match) return `${match[1]}/${match[2]} enabled`;
+  match = /^技能 (\d+) · MCP (\d+) · Fast (开|关)$/.exec(text);
+  if (match) return `Skills ${match[1]} · MCP ${match[2]} · Fast ${match[3] === "开" ? "on" : "off"}`;
+  match = /^Fast (开|关)$/.exec(text);
+  if (match) return `Fast ${match[1] === "开" ? "on" : "off"}`;
+  match = /^推理强度无效，可选值：(.*)$/.exec(text);
+  if (match) return `Invalid reasoning effort; choose one of: ${match[1]}`;
+  match = /^所选技能不可用，请重新选择：(.*)$/.exec(text);
+  if (match) return `Selected Skills are unavailable; choose again: ${match[1]}`;
+  match = /^所选 MCP 工具不可用，请重新选择：(.*)$/.exec(text);
+  if (match) return `Selected MCP tools are unavailable; choose again: ${match[1]}`;
   match = /^已选 (\d+) 个模型$/.exec(text);
   if (match) return `${match[1]} models selected`;
   match = /^(\d+) 个项目$/.exec(text);

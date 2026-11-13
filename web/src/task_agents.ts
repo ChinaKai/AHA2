@@ -1,5 +1,6 @@
 import {icon} from "./icons.js";
-import {proxyOptionsHTML, runtimeFieldsHTML} from "./runtime_picker.js";
+import {fastModeFieldHTML, proxyOptionsHTML, runtimeBackendChoices, runtimeFieldsHTML} from "./runtime_picker.js";
+import type {RuntimeSelection} from "./runtime_picker.js";
 import type {CodexAccount, ConversationItem, MCPServer, Model, Skill, TaskAgent, TaskContextDetail, TaskDetail, TaskMemory, Turn} from "./types.js";
 
 export type TaskRealtimeState = "connecting" | "live" | "fallback";
@@ -453,21 +454,147 @@ export function renderConversationWithOrchestration(
   }).join("");
 }
 
-function renderTaskSkills(skills: Skill[], projectID: string, selected: string[]): string {
-  const visible = skills.filter(item => item.enabled && item.status === "active" && (item.scope === "global" || item.project_id === projectID || item.bound_project_id === projectID));
-  return visible.map(item => {
-    const auto = item.auto_attach ? ' <span class="capability-badge">\u81ea\u52a8</span>' : "";
-    return `<label class="task-skill-option"><input type="checkbox" name="skill_ids" value="${item.id}" ${selected.includes(item.id) ? "checked" : ""}><span><strong>${escapeHTML(item.name)}${auto}</strong><small>${escapeHTML(item.scope)} \u00b7 ${escapeHTML(item.description || "\u65e0\u63cf\u8ff0")}</small></span></label>`;
-  }).join("") || `<div class="field-help">\u5f53\u524d Project \u6ca1\u6709\u53ef\u7528 Skill\u3002</div>`;
+export type AgentEffortLevel = string;
+
+// Claude exposes one more tier than the other Backends. Both the model picker
+// and the shared Agent config form read the list from here so they cannot drift.
+export function effortLevelsForBackend(backend: string): AgentEffortLevel[] {
+  return backend === "claude"
+    ? ["low", "medium", "high", "xhigh", "max"]
+    : ["low", "medium", "high", "xhigh"];
 }
 
-// Both optional modules collapse to one row so they stop growing the dialog;
-// Skills in particular gains a row per Skill the Project has. The summary badge
-// reports what is switched on, because the body is hidden when collapsed.
-function agentCapabilitiesFold(capabilities: Record<string, boolean> | undefined): string {
+// New Agent config starts at high rather than whatever the selected model
+// happens to prefer; an existing value is never replaced.
+export function defaultAgentEffort(backend: string): AgentEffortLevel {
+  const levels = effortLevelsForBackend(backend);
+  return levels.includes("high") ? "high" : (levels[levels.length - 1] || "");
+}
+
+export function agentConfigSummary(skillCount: number, mcpCount: number, fastMode: boolean): string {
+  return `技能 ${skillCount} · MCP ${mcpCount} · Fast ${fastMode ? "开" : "关"}`;
+}
+
+// Used by both dialogs to decide whether closing would lose edits. The values
+// are normalised (sorted keys, sorted multi-values) so DOM order cannot look
+// like a change on its own.
+export function agentConfigSnapshot(values: Record<string, unknown>): string {
+  const parts: string[] = [];
+  for (const key of Object.keys(values).sort()) {
+    if (key === "agent_id" || key === "start_mode") continue;
+    const raw = values[key];
+    const items = Array.isArray(raw) ? raw.map(String).sort() : [String(raw ?? "")];
+    parts.push(`${key}=${items.join(",")}`);
+  }
+  return parts.join("&");
+}
+
+export function agentConfigChanged(baseline: string, current: string): boolean {
+  return Boolean(baseline) && baseline !== current;
+}
+
+export type AgentConfigValidationInput = {
+  backend?: string;
+  modelSource?: string;
+  modelID?: string;
+  reasoningEffort?: string;
+  skillIDs?: string[];
+  availableSkillIDs?: string[];
+  mcpIDs?: string[];
+  availableMCPIDs?: string[];
+};
+
+// Server-side validation still owns the final word; this catches the cases the
+// dialog can explain better and keeps both submit paths consistent.
+export function validateAgentConfigInput(input: AgentConfigValidationInput): string[] {
+  const errors: string[] = [];
+  const backend = String(input.backend || "");
+  if (!backend) errors.push("请选择模型 Backend");
+  const source = String(input.modelSource || "env");
+  const modelID = String(input.modelID || "");
+  if (source === "env" && !modelID) errors.push("请选择模型");
+  if (source === "official" && !modelID) errors.push("请选择 Codex 官方模型");
+  if (source === "claude_native" && !modelID) errors.push("请选择 Claude 官方模型");
+  const levels = effortLevelsForBackend(backend);
+  const effort = String(input.reasoningEffort || "");
+  if (!levels.includes(effort)) errors.push(`推理强度无效，可选值：${levels.join(" / ")}`);
+  if (input.availableSkillIDs) {
+    const available = new Set(input.availableSkillIDs);
+    const invalid = (input.skillIDs || []).filter(id => !available.has(id));
+    if (invalid.length) errors.push(`所选技能不可用，请重新选择：${invalid.join("、")}`);
+  }
+  if (input.availableMCPIDs) {
+    const available = new Set(input.availableMCPIDs);
+    const invalid = (input.mcpIDs || []).filter(id => !available.has(id));
+    if (invalid.length) errors.push(`所选 MCP 工具不可用，请重新选择：${invalid.join("、")}`);
+  }
+  return errors;
+}
+
+export function renderTaskSkills(skills: Skill[], projectID: string, selected: string[]): string {
+  const visible = skills.filter(item => item.enabled && item.status === "active" && (item.scope === "global" || item.project_id === projectID || item.bound_project_id === projectID));
+  return visible.map(item => {
+    const auto = item.auto_attach ? ' <span class="capability-badge">自动</span>' : "";
+    return `<label class="task-skill-option"><input type="checkbox" name="skill_ids" value="${escapeHTML(item.id)}" ${selected.includes(item.id) ? "checked" : ""}><span><strong>${escapeHTML(item.name)}${auto}</strong><small>${escapeHTML(item.scope)} · ${escapeHTML(item.description || "无描述")}</small></span></label>`;
+  }).join("") || `<div class="field-help">当前 Project 没有可用 Skill。</div>`;
+}
+
+export type MCPOptionsResult = {body: string; total: number};
+
+export function renderMCPOptions(
+  mcpServers: MCPServer[],
+  selected: string[],
+  options: {petTask?: boolean; excludeBuiltin?: boolean} = {},
+): MCPOptionsResult {
+  const items = mcpServers.filter(item => item.enabled && !item.auto_inject
+    && (item.id !== "mcp_pet" || options.petTask)
+    && (!options.excludeBuiltin || !item.builtin));
+  const chosen = new Set(selected);
+  const body = items.map(item => {
+    const forced = Boolean(options.petTask && item.id === "mcp_pet");
+    return `<label class="task-skill-option"><input type="checkbox" name="mcp_server_ids" value="${escapeHTML(item.id)}" ${chosen.has(item.id) ? "checked" : ""} ${forced ? "disabled checked" : ""}><span><strong>${escapeHTML(item.name)}</strong><small>${escapeHTML(item.description || item.transport)}</small></span></label>`;
+  }).join("");
+  return {
+    body: body || `<div class="field-help">${items.length ? "没有可供选择的 MCP。" : "还没有可用 MCP。"}</div>`,
+    total: items.length,
+  };
+}
+
+export function agentSkillsFold(
+  prefix: string,
+  body: string,
+  count: number,
+  options: {bodyID?: string} = {},
+): string {
+  const bodyID = options.bodyID ? ` id="${options.bodyID}"` : "";
+  return `<details class="task-form-fold" id="${prefix}-skills-fold">
+    <summary><strong>技能</strong><b data-fold-count>${count ? `已选 ${count}` : "未选择"}</b></summary>
+    <div class="task-form-fold-body"><div class="task-skill-options"${bodyID}>${body}</div></div>
+  </details>`;
+}
+
+export function agentMCPFold(prefix: string, body: string, count: number, total: number, options: {bodyID?: string} = {}): string {
+  const bodyID = options.bodyID ? ` id="${options.bodyID}"` : "";
+  return `<details class="task-form-fold" id="${prefix}-mcp-fold">
+    <summary><strong>MCP 工具</strong><b data-fold-count>${count ? `已选 ${count}` : (total ? "未选择" : "无可用")}</b></summary>
+    <div class="task-form-fold-body"><div class="task-skill-options"${bodyID}>${body}</div></div>
+  </details>`;
+}
+
+// Fast only exists for Codex. syncRuntimeFields hides the fold for every other
+// Backend, exactly as it hides the row inside it.
+export function agentFastFold(prefix: string, checked: boolean, backend: string): string {
+  const supported = backend === "codex";
+  return `<details class="task-form-fold" id="${prefix}-fast-fold" ${supported ? "" : "hidden"}>
+    <summary><strong>Fast 模式</strong><b data-fold-count>${checked ? "开" : "关"}</b></summary>
+    <div class="task-form-fold-body">${fastModeFieldHTML(prefix, checked, backend, "agent-fast-mode")}</div>
+  </details>`;
+}
+
+export function agentCapabilitiesFold(prefix: string, capabilities: Record<string, boolean> | undefined): string {
   const granted = capabilities || {};
   const on = ["workspace_read", "task_create", "clone_hardware"].filter(name => granted[name]).length;
-  return `<details class="task-form-fold" id="agent-capabilities-fold">
+  return `<details class="task-form-fold" id="${prefix}-capabilities-fold">
     <summary><strong>Agent 项目级授权</strong><b data-fold-count>${on ? `已启用 ${on}/3` : "默认关闭"}</b></summary>
     <div class="task-form-fold-body"><div class="task-skill-options">
       <label class="task-skill-option"><input type="checkbox" name="cap_workspace_read" ${granted.workspace_read ? "checked" : ""}><span><strong>读取同 Project Workspace</strong><small>允许读取当前项目其他 Workspace</small></span></label>
@@ -477,44 +604,112 @@ function agentCapabilitiesFold(capabilities: Record<string, boolean> | undefined
   </details>`;
 }
 
-function agentSkillsFold(skills: Skill[], projectID: string, selected: string[]): string {
-  return `<details class="task-form-fold" id="agent-skills-fold">
-    <summary><strong>Task Skills</strong><b data-fold-count>${selected.length ? `已选 ${selected.length}` : "未选择"}</b></summary>
-    <div class="task-form-fold-body"><div class="task-skill-options">${renderTaskSkills(skills, projectID, selected)}</div></div>
-  </details>`;
+export type AgentConfigFormOptions = {
+  prefix: string;
+  models: Model[];
+  accounts: CodexAccount[];
+  skills: Skill[];
+  mcpServers: MCPServer[];
+  projectID: string;
+  selection?: RuntimeSelection;
+  effort?: string;
+  skillIDs?: string[];
+  mcpIDs?: string[];
+  fastMode?: boolean;
+  petTask?: boolean;
+  excludeBuiltinMCP?: boolean;
+  skillsBody?: string;
+  skillsBodyID?: string;
+  mcpBody?: string;
+  mcpBodyID?: string;
+  mcpTotal?: number;
+  // Skills and MCP belong to the Task, not to one Agent. Sub-agent dialogs show
+  // only their own runtime fields, so they do not offer controls that would not
+  // be saved by updateTaskAgent.
+  showTaskModules?: boolean;
+};
+
+// The one Agent config component. Create Task and the Task detail dialog both
+// render this exact block, so order, copy, folding and defaults cannot diverge.
+export function renderAgentConfigForm(options: AgentConfigFormOptions): string {
+  const selection = options.selection || {};
+  const backends = runtimeBackendChoices(options.models, options.accounts, selection);
+  const backend = String(selection.backend || backends[0] || "");
+  const levels = effortLevelsForBackend(backend);
+  const requestedEffort = String(options.effort || selection.reasoning_effort || "");
+  const effort = levels.includes(requestedEffort) ? requestedEffort : defaultAgentEffort(backend);
+  const skillIDs = options.skillIDs || [];
+  const mcpIDs = options.mcpIDs || [];
+  const fastMode = options.fastMode ?? Boolean(selection.fast_mode);
+  const showTaskModules = options.showTaskModules !== false;
+  const skillsBody = options.skillsBody ?? renderTaskSkills(options.skills, options.projectID, skillIDs);
+  const mcp = options.mcpBody === undefined
+    ? renderMCPOptions(options.mcpServers, mcpIDs, {petTask: options.petTask, excludeBuiltin: options.excludeBuiltinMCP})
+    : {body: options.mcpBody, total: options.mcpTotal || 0};
+  const filesystem = String(selection.filesystem || "workspace-write");
+  const approval = String(selection.approval || "never");
+  // A sub-agent whose Backend has no Fast tier has nothing to put in Advanced.
+  const advanced = showTaskModules || backend === "codex" ? `<section class="agent-config-section agent-config-advanced agent-runtime-fields">
+    <h3>高级配置<small class="agent-config-summary" id="${options.prefix}-advanced-summary" data-advanced-summary>${showTaskModules ? agentConfigSummary(skillIDs.length, mcpIDs.length, fastMode) : `Fast ${fastMode ? "开" : "关"}`}</small></h3>
+    ${showTaskModules ? agentSkillsFold(options.prefix, skillsBody, skillIDs.length, {bodyID: options.skillsBodyID}) : ""}
+    ${showTaskModules ? agentMCPFold(options.prefix, mcp.body, mcpIDs.length, mcp.total, {bodyID: options.mcpBodyID}) : ""}
+    ${agentFastFold(options.prefix, fastMode, backend)}
+  </section>` : "";
+  return `<section class="agent-config-section agent-config-execution agent-runtime-fields">
+    <h3>执行配置</h3>
+    ${runtimeFieldsHTML(options.prefix, options.models, options.accounts, selection, "", {fastMode: "external"})}
+    <div class="two agent-config-primary">
+      <label class="agent-effort-field">推理强度<select name="reasoning_effort" id="${options.prefix}-effort" required>${levels.map(level => `<option value="${level}" ${level === effort ? "selected" : ""}>${level}</option>`).join("")}</select></label>
+      <label>沙箱（文件访问）<select name="filesystem"><option value="workspace-write" ${filesystem === "workspace-write" ? "selected" : ""}>工作区可写</option><option value="read-only" ${filesystem === "read-only" ? "selected" : ""}>只读</option><option value="danger-full-access" ${filesystem === "danger-full-access" ? "selected" : ""}>完全访问</option></select></label>
+    </div>
+    <div class="two">
+      <label>审批<select name="approval"><option value="never" ${approval !== "auto" ? "selected" : ""}>无需确认</option><option value="auto" ${approval === "auto" ? "selected" : ""}>自动批准（跳过权限检查）</option></select></label>
+      <label>Backend 代理<select name="proxy_enabled">${proxyOptionsHTML(Boolean(selection.proxy_enabled))}</select></label>
+    </div>
+  </section>
+  ${advanced}`;
+}
+
+function renderTaskPolicySection(detail: TaskDetail): string {
+  return `<section class="agent-config-section agent-config-task">
+    <h3>任务设置</h3>
+    <div class="two">
+      <label>协作模式<select name="collaboration_mode"><option value="single" ${detail.task.collaboration_mode === "single" ? "selected" : ""}>Single</option><option value="auto" ${detail.task.collaboration_mode !== "single" ? "selected" : ""}>Auto</option></select></label>
+      <label>最大 Agent 数<input name="max_agents" type="number" min="1" value="${Math.max(1, Number(detail.task.max_agents || 3))}"></label>
+    </div>
+    <label>Knowledge<select name="knowledge_policy"><option value="inherit" ${detail.task.knowledge_policy === "inherit" ? "selected" : ""}>继承 Project</option><option value="enabled" ${detail.task.knowledge_policy === "enabled" ? "selected" : ""}>开启</option><option value="disabled" ${detail.task.knowledge_policy === "disabled" ? "selected" : ""}>关闭</option></select></label>
+    ${agentCapabilitiesFold("agent-config", detail.task.agent_capabilities)}
+  </section>`;
 }
 
 export function renderAgentConfigDialog(detail: TaskDetail, agentID: string, models: Model[], accounts: CodexAccount[], skills: Skill[], mcpServers: MCPServer[] = []): string {
   const agent = (detail.agents || []).find(item => item.agent_id === agentID);
   if (!agent) return "";
-  const effortLevels = agent.backend === "claude"
-    ? ["low", "medium", "high", "xhigh", "max"]
-    : ["low", "medium", "high", "xhigh"];
-  const mainSettings = agent.agent_id === "main" ? `<fieldset class="agent-collaboration-settings"><legend>Task \u7b56\u7565</legend><div class="two">
-    <label>\u534f\u4f5c\u6a21\u5f0f<select name="collaboration_mode"><option value="single" ${detail.task.collaboration_mode === "single" ? "selected" : ""}>Single</option><option value="auto" ${detail.task.collaboration_mode !== "single" ? "selected" : ""}>Auto</option></select></label>
-    <label>\u6700\u5927 Agent \u6570<input name="max_agents" type="number" min="1" value="${Math.max(1, Number(detail.task.max_agents || 3))}"></label>
-  </div><label>Knowledge<select name="knowledge_policy"><option value="inherit" ${detail.task.knowledge_policy === "inherit" ? "selected" : ""}>\u7ee7\u627f Project</option><option value="enabled" ${detail.task.knowledge_policy === "enabled" ? "selected" : ""}>\u5f00\u542f</option><option value="disabled" ${detail.task.knowledge_policy === "disabled" ? "selected" : ""}>\u5173\u95ed</option></select></label>${agentCapabilitiesFold(detail.task.agent_capabilities)}${agentSkillsFold(skills, detail.task.project_id, detail.task.skill_ids || [])}${agentMCPFold(detail, mcpServers)}</fieldset>` : `<label class="agent-inherit-toggle"><input name="inherit_main" type="checkbox" ${agent.inherit_main ? "checked" : ""}>\u7ee7\u627f Main \u5f53\u524d\u914d\u7f6e</label>`;
-  return `<dialog id="agent-config-dialog"><form id="agent-config-form" method="dialog">
+  const isMain = agent.agent_id === "main";
+  const inheritToggle = isMain ? "" : `<label class="agent-inherit-toggle"><input name="inherit_main" type="checkbox" ${agent.inherit_main ? "checked" : ""}>继承 Main 当前配置</label>`;
+  const form = renderAgentConfigForm({
+    prefix: "agent-config",
+    models,
+    accounts,
+    skills,
+    mcpServers,
+    projectID: detail.task.project_id,
+    selection: agent,
+    effort: agent.reasoning_effort,
+    skillIDs: detail.task.skill_ids || [],
+    mcpIDs: detail.task.mcp_server_ids || [],
+    fastMode: agent.fast_mode,
+    petTask: detail.task.project_id === "project_pet",
+    showTaskModules: isMain,
+  });
+  return `<dialog id="agent-config-dialog" class="wide agent-config-dialog"><form id="agent-config-form" method="dialog">
     <div class="dialog-head"><div><h2>${escapeHTML(agent.agent_id)} 配置</h2><small>${escapeHTML(agent.title || agent.role)}</small></div><button type="button" data-close class="icon-button">${icon("close")}</button></div>
-    <input type="hidden" name="agent_id" value="${escapeHTML(agent.agent_id)}">
-    ${mainSettings}
-    ${runtimeFieldsHTML("agent-config", models, accounts, agent, "agent-runtime-fields")}
-    <div class="two agent-runtime-fields">
-      <label>推理强度<select name="reasoning_effort" id="agent-config-effort">${effortLevels.map(level => `<option value="${level}" ${level === agent.reasoning_effort ? "selected" : ""}>${level}</option>`).join("")}</select></label>
-      <label>沙箱<select name="filesystem"><option value="read-only" ${agent.filesystem === "read-only" ? "selected" : ""}>只读</option><option value="workspace-write" ${agent.filesystem === "workspace-write" ? "selected" : ""}>工作区可写</option><option value="danger-full-access" ${agent.filesystem === "danger-full-access" ? "selected" : ""}>完全访问</option></select></label>
+    <div class="dialog-body">
+      <input type="hidden" name="agent_id" value="${escapeHTML(agent.agent_id)}">
+      ${inheritToggle}
+      ${form}
+      ${isMain ? renderTaskPolicySection(detail) : ""}
     </div>
-    <label class="agent-runtime-fields">审批<select name="approval"><option value="never" ${agent.approval !== "auto" ? "selected" : ""}>无需确认</option><option value="auto" ${agent.approval === "auto" ? "selected" : ""}>自动批准</option></select></label>
-    <label class="agent-runtime-fields">Backend 代理<select name="proxy_enabled">${proxyOptionsHTML(agent.proxy_enabled)}</select></label>
-    <div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" value="default">保存</button></div>
+    <div class="dialog-actions agent-config-actions"><button type="button" data-close>取消</button><button class="primary" value="default">保存 Agent 配置</button></div>
   </form></dialog>`;
-}
-
-function agentMCPFold(detail: TaskDetail, mcpServers: MCPServer[]): string {
-  const petTask = detail.task.project_id === "project_pet";
-  const selected = new Set(detail.task.mcp_server_ids || []);
-  const options = mcpServers.filter(item => item.enabled && !item.auto_inject && (item.id !== "mcp_pet" || petTask)).map(item => {
-    const forced = petTask && item.id === "mcp_pet";
-    return `<label class="task-skill-option"><input type="checkbox" name="task_mcp_ids" value="${escapeHTML(item.id)}" ${selected.has(item.id) ? "checked" : ""} ${forced ? "disabled checked" : ""}><span><strong>${escapeHTML(item.name)}</strong><small>${escapeHTML(item.description || item.transport)}</small></span></label>`;
-  }).join("");
-  return `<details class="task-form-fold" id="agent-mcp-fold"><summary><strong>MCP 工具</strong><b data-fold-count>${selected.size ? `已选 ${selected.size}` : "未选择"}</b></summary><div class="task-form-fold-body"><div class="task-skill-options">${options || '<div class="field-help">还没有可用 MCP。</div>'}</div></div></details>`;
 }

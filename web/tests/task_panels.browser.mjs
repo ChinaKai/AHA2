@@ -218,7 +218,9 @@ try {
   await page.screenshot({path: resolve(output, "task-panel-create.png")});
   await proxy.selectOption("enabled");
   // The accelerated tier is a checkbox, so it is the one runtime field that
-  // submits the string "on" and has to reach the request as a boolean.
+  // submits the string "on" and has to reach the request as a boolean. It lives
+  // inside the collapsed advanced section, so open that fold first.
+  await page.locator("#task-fast-fold summary").click();
   const fastTier = page.locator('#task-form input[name="fast_mode"]');
   assert.equal(await fastTier.count(), 1, "the create panel has no Codex fast switch");
   assert.equal(await fastTier.isVisible(), true, "the fast switch is hidden for a Codex workspace");

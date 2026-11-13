@@ -44,11 +44,19 @@ import {
   formatDuration,
   isActiveTurn,
   latestAgentTurns,
+  agentCapabilitiesFold,
+  agentConfigChanged,
+  agentConfigSnapshot,
+  agentConfigSummary,
   renderAgentConfigDialog,
+  renderAgentConfigForm,
   renderAgentTurnCard,
+  renderMCPOptions,
+  renderTaskSkills,
   renderTaskReviewDecision,
   renderContextMetrics,
   usageNumber,
+  validateAgentConfigInput,
 } from "./task_agents.js";
 import type {
   AgentAPISettings,
@@ -1097,7 +1105,8 @@ function syncTaskBackend(): void {
   const options = backendOptionsForWorkspace(ws);
   setRuntimeBackends("task", options);
   setClaudeOfficialCatalog("task", claudeOfficialCatalog(ws));
-  syncRuntimeFields("task", state.models, state.codexAccounts);
+  // Create Task always starts at high; a model default must not replace it.
+  syncRuntimeFields("task", state.models, state.codexAccounts, false);
   syncTaskGitIsolation();
 }
 
@@ -1267,6 +1276,33 @@ function syncTaskWorkspaces(): void {
 
 let taskSkillsDirty = false;
 
+// The Agent config dialog compares the live form with the snapshot taken when
+// it opened. Saving or discarding resets the baseline, so only edits that have
+// not been written prompt on close.
+let agentConfigBaseline = "";
+
+function agentConfigFormSnapshot(form: HTMLFormElement): string {
+  const values: Record<string, unknown> = {};
+  for (const [key, value] of new FormData(form).entries()) {
+    const existing = values[key];
+    if (existing === undefined) values[key] = String(value);
+    else if (Array.isArray(existing)) existing.push(String(value));
+    else values[key] = [String(existing), String(value)];
+  }
+  return agentConfigSnapshot(values);
+}
+
+function agentConfigDirty(dialog: HTMLDialogElement): boolean {
+  const form = dialog.querySelector<HTMLFormElement>("#agent-config-form");
+  if (!form || !agentConfigBaseline) return false;
+  return agentConfigChanged(agentConfigBaseline, agentConfigFormSnapshot(form));
+}
+
+function confirmAgentConfigClose(dialog: HTMLDialogElement): boolean {
+  if (!agentConfigDirty(dialog)) return true;
+  return window.confirm("Agent 配置尚未保存，关闭将丢弃这些修改。确定关闭？");
+}
+
 function autoTaskSkillIDs(projectID: string): string[] {
   return state.skills
     .filter(item => item.enabled && item.status === "active" && item.auto_attach &&
@@ -1280,12 +1316,8 @@ function availableTaskSkills(projectID: string): Skill[] {
 
 function taskSkillOptions(projectID: string, selected: string[] = [], includeAutoDefaults = false): string {
   const items = availableTaskSkills(projectID);
-  const defaults = new Set(includeAutoDefaults ? autoTaskSkillIDs(projectID) : []);
-  return items.map(item => {
-    const checked = selected.includes(item.id) || defaults.has(item.id);
-    const auto = item.auto_attach ? ' <span class="capability-badge">\u81ea\u52a8</span>' : "";
-    return `<label class="task-skill-option"><input type="checkbox" name="skill_ids" value="${item.id}" ${checked ? "checked" : ""}><span><strong>${escapeHTML(item.name)}${auto}</strong><small>${escapeHTML(item.scope)} \u00b7 ${escapeHTML(item.description || "\u65e0\u63cf\u8ff0")}</small></span></label>`;
-  }).join("") || `<div class="field-help">\u5f53\u524d Project \u6ca1\u6709\u53ef\u7528 Skill\uff0cTask \u4e0d\u4f1a\u6ce8\u5165\u4efb\u4f55 Skill \u8def\u5f84\u3002</div>`;
+  const defaults = includeAutoDefaults ? autoTaskSkillIDs(projectID) : [];
+  return renderTaskSkills(items, projectID, [...new Set([...selected, ...defaults])]);
 }
 
 function syncTaskSkills(): void {
@@ -3248,6 +3280,9 @@ function bindTaskAgentControls(): void {
     const dialog = document.querySelector<HTMLDialogElement>("#agent-config-dialog");
     dialog?.showModal();
     syncAgentConfigFields();
+    const form = dialog?.querySelector<HTMLFormElement>("#agent-config-form");
+    agentConfigBaseline = form ? agentConfigFormSnapshot(form) : "";
+    syncAgentFoldCounts();
     if (document.querySelector<HTMLSelectElement>("#agent-config-model-source")?.value === "claude_native") {
       void refreshClaudeOfficialCatalog("agent-config", state.selectedTask?.task.workspace_id || "");
     }
@@ -4229,60 +4264,63 @@ function tasksView(): string {
 
 function taskDialog(): string {
   const projectID = state.projects.find(project => !project.channel_retired && !isSystemProject(project))?.id || "";
-  return taskDialogBase().replace(
-    '<div id="task-git-isolation">',
-    `<div class="two"><label>Knowledge<select name="knowledge_policy"><option value="inherit">\u7ee7\u627f Project</option><option value="enabled">\u5f00\u542f</option><option value="disabled">\u5173\u95ed</option></select></label><label>Backend \u4ee3\u7406<select name="proxy_enabled">${proxyOptionsHTML(false)}</select></label></div>${taskCapabilitiesFold({})}${taskSkillsFold(taskSkillOptions(projectID, [], true))}<div id="task-git-isolation">`,
-  );
-}
-
-// Both optional modules collapse to one line by default: they are configured far
-// less often than the fields above, and Skills would otherwise grow the dialog
-// with every Skill the Project gains.
-function taskCapabilitiesFold(capabilities: Record<string, boolean> | undefined): string {
-  const granted = capabilities || {};
-  const body = `<div class="task-agent-capabilities">
-    <p>\u9ed8\u8ba4\u5173\u95ed\uff1b\u4ec5 Main Agent \u53ef\u7528\u3002</p>
-    <label><input type="checkbox" name="cap_workspace_read" ${granted.workspace_read ? "checked" : ""}>\u8bfb\u53d6\u540c Project Workspace</label>
-    <label><input type="checkbox" name="cap_task_create" ${granted.task_create ? "checked" : ""}>\u521b\u5efa\u540c Project Task</label>
-    <label><input type="checkbox" name="cap_clone_hardware" ${granted.clone_hardware ? "checked" : ""}>\u514b\u9686\u5f53\u524d Task \u786c\u4ef6\u542f\u7528\u5173\u7cfb</label>
-  </div>`;
-  return taskFormFold("task-capabilities-fold", "Agent \u9879\u76ee\u7ea7\u6388\u6743", body);
-}
-
-function taskSkillsFold(body: string): string {
-  return taskFormFold("task-skills-fold", "Task Skills", `<div class="task-skill-options" id="task-skill-options">${body}</div>`);
-}
-
-function taskMCPFold(): string {
-  // mcp_pet is attached automatically only to the system pet Task. A normal
-  // user Task must not be able to select it.
-  const options = state.mcpServers.filter(item => item.enabled && !item.builtin).map(item => `<label class="task-skill-option"><input type="checkbox" name="mcp_server_ids" value="${escapeHTML(item.id)}"><span><strong>${escapeHTML(item.name)}</strong><small>${escapeHTML(item.description || item.transport)}</small></span></label>`).join("");
-  return taskFormFold("task-mcp-fold", "MCP 工具", `<div class="task-skill-options" id="task-mcp-options">${options || '<div class="field-help">没有可供普通任务选择的 MCP。</div>'}</div>`);
-}
-
-function taskFormFold(id: string, title: string, body: string): string {
-  return `<details class="task-form-fold" id="${id}">
-    <summary><strong>${title}</strong><b data-fold-count></b></summary>
-    <div class="task-form-fold-body">${body}</div>
-  </details>`;
+  const autoSkills = autoTaskSkillIDs(projectID);
+  const mcp = renderMCPOptions(state.mcpServers, [], {excludeBuiltin: true});
+  const agentConfig = renderAgentConfigForm({
+    prefix: "task",
+    models: state.models,
+    accounts: state.codexAccounts,
+    skills: state.skills,
+    mcpServers: state.mcpServers,
+    projectID,
+    effort: "high",
+    skillIDs: autoSkills,
+    mcpIDs: [],
+    fastMode: false,
+    skillsBody: taskSkillOptions(projectID, autoSkills),
+    skillsBodyID: "task-skill-options",
+    mcpBody: mcp.body,
+    mcpBodyID: "task-mcp-options",
+    mcpTotal: mcp.total,
+  });
+  return `<dialog id="task-dialog" class="wide agent-config-dialog"><form id="task-form">
+    <div class="dialog-head"><div><h2>创建任务</h2><small>模型与推理强度决定新 Agent 的执行方式，创建后仍可调整。</small></div><button type="button" data-close class="icon-button">${icon("close")}</button></div>
+    <div class="dialog-body">
+      <section class="agent-config-section">
+        <h3>基本信息</h3>
+        <label>标题<input name="title" required></label>
+        <div class="two"><label>项目<select name="project_id" id="task-project" required>${state.projects.filter(item => !item.channel_retired && !isSystemProject(item)).map(item => `<option value="${item.id}">${escapeHTML(item.name)}</option>`).join("")}</select></label><label>Workspace<select name="workspace_id" id="task-workspace" required></select></label></div>
+        <label>目标<textarea name="request" required></textarea></label>
+      </section>
+      ${agentConfig}
+      <section class="agent-config-section agent-config-task">
+        <h3>任务设置</h3>
+        <div class="two"><label>协作模式<select name="collaboration_mode"><option value="auto">Auto</option><option value="single">Single</option></select></label><label>最大 Agent 数<input name="max_agents" type="number" min="1" value="3"></label></div>
+        <label>Knowledge<select name="knowledge_policy"><option value="inherit">继承 Project</option><option value="enabled">开启</option><option value="disabled">关闭</option></select></label>
+        ${agentCapabilitiesFold("task", {})}
+        <div id="task-git-isolation"><label>任务隔离<select name="isolation" id="task-isolation"><option value="inplace" selected>原地执行（默认）</option><option value="worktree">独立 Worktree</option></select></label><div id="task-worktree-settings"><label>Worktree 根目录<input name="worktree_dir" id="task-worktree-dir" placeholder="默认：仓库上一级/.aha2-worktrees"></label><div class="field-help">系统会在根目录下追加 Task ID；切换为原地执行后不使用此配置。</div></div><div class="two" id="task-branches"><label>目标分支<input name="target_branch" placeholder="默认当前分支"></label><label>任务分支<input name="task_branch" placeholder="aha/task-name"></label></div></div>
+      </section>
+    </div>
+    <div class="dialog-actions agent-config-actions"><button type="button" data-close>取消</button><button type="submit" name="start_mode" value="manual">创建，稍后启动</button><button class="primary" type="submit" name="start_mode" value="immediate">创建任务</button></div>
+  </form></dialog>`;
 }
 
 // Keeps each collapsed summary truthful about what is switched on inside it.
-// The same helper serves the create panel and the Agent config dialog, whose
-// folds use the same ids.
+// Both dialogs share the same helpers, so the create panel and the Agent config
+// dialog report counts in exactly the same words.
 function syncFoldCount(scope: string, id: string, total: number): void {
   const root = document.querySelector<HTMLElement>(`#${scope}`);
   if (!root) return;
   const on = root.querySelectorAll<HTMLInputElement>(`#${id} input[type=checkbox]:checked`).length;
   const badge = root.querySelector<HTMLElement>(`#${id} [data-fold-count]`);
-  if (badge) badge.textContent = on ? `\u5df2\u542f\u7528 ${on}/${total}` : "\u9ed8\u8ba4\u5173\u95ed";
+  if (badge) badge.textContent = on ? `已启用 ${on}/${total}` : "默认关闭";
 }
 
 function syncMCPFoldCount(scope: string, id: string): void {
   const root = document.querySelector<HTMLElement>(`#${scope}`);
   if (!root) return;
-  const selected = root.querySelectorAll<HTMLInputElement>(`#${id} input[name="mcp_server_ids"], #${id} input[name="task_mcp_ids"]`).length;
-  const checked = root.querySelectorAll<HTMLInputElement>(`#${id} input[name="mcp_server_ids"]:checked, #${id} input[name="task_mcp_ids"]:checked`).length;
+  const selected = root.querySelectorAll<HTMLInputElement>(`#${id} input[name="mcp_server_ids"]`).length;
+  const checked = root.querySelectorAll<HTMLInputElement>(`#${id} input[name="mcp_server_ids"]:checked`).length;
   const badge = root.querySelector<HTMLElement>(`#${id} [data-fold-count]`);
   if (badge) badge.textContent = checked ? `已选 ${checked}` : (selected ? "未选择" : "无可用");
 }
@@ -4292,25 +4330,49 @@ function syncSkillsFoldCount(scope: string, id: string): void {
   if (!root) return;
   const selected = root.querySelectorAll<HTMLInputElement>(`#${id} input[name="skill_ids"]:checked`).length;
   const badge = root.querySelector<HTMLElement>(`#${id} [data-fold-count]`);
-  if (badge) badge.textContent = selected ? `\u5df2\u9009 ${selected}` : "\u672a\u9009\u62e9";
+  if (badge) badge.textContent = selected ? `已选 ${selected}` : "未选择";
+}
+
+function syncFastFoldCount(scope: string, prefix: string): void {
+  const root = document.querySelector<HTMLElement>(`#${scope}`);
+  if (!root) return;
+  const checked = root.querySelector<HTMLInputElement>(`#${prefix}-fast-mode-row input[name="fast_mode"]`)?.checked;
+  const badge = root.querySelector<HTMLElement>(`#${prefix}-fast-fold [data-fold-count]`);
+  if (badge) badge.textContent = checked ? "开" : "关";
+}
+
+// The advanced section carries one combined summary next to its title, matching
+// the fold badges underneath: 技能 N · MCP N · Fast 开/关.
+function syncAdvancedSummary(scope: string, prefix: string): void {
+  const root = document.querySelector<HTMLElement>(`#${scope}`);
+  if (!root) return;
+  const skills = root.querySelectorAll<HTMLInputElement>(`#${prefix}-skills-fold input[name="skill_ids"]:checked`).length;
+  const mcp = root.querySelectorAll<HTMLInputElement>(`#${prefix}-mcp-fold input[name="mcp_server_ids"]:checked`).length;
+  const fast = Boolean(root.querySelector<HTMLInputElement>(`#${prefix}-fast-mode-row input[name="fast_mode"]`)?.checked);
+  const summary = root.querySelector<HTMLElement>(`#${prefix}-advanced-summary`);
+  if (!summary) return;
+  if (!root.querySelector<HTMLElement>(`#${prefix}-skills-fold`)) {
+    summary.textContent = `Fast ${fast ? "开" : "关"}`;
+    return;
+  }
+  summary.textContent = agentConfigSummary(skills, mcp, fast);
 }
 
 function syncTaskFormFoldCounts(): void {
   syncFoldCount("task-dialog", "task-capabilities-fold", 3);
   syncSkillsFoldCount("task-dialog", "task-skills-fold");
   syncMCPFoldCount("task-dialog", "task-mcp-fold");
+  syncFastFoldCount("task-dialog", "task");
+  syncAdvancedSummary("task-dialog", "task");
 }
 
 function syncAgentFoldCounts(): void {
-  syncFoldCount("agent-config-dialog", "agent-capabilities-fold", 3);
-  syncSkillsFoldCount("agent-config-dialog", "agent-skills-fold");
-  syncMCPFoldCount("agent-config-dialog", "agent-mcp-fold");
+  syncFoldCount("agent-config-dialog", "agent-config-capabilities-fold", 3);
+  syncSkillsFoldCount("agent-config-dialog", "agent-config-skills-fold");
+  syncMCPFoldCount("agent-config-dialog", "agent-config-mcp-fold");
+  syncFastFoldCount("agent-config-dialog", "agent-config");
+  syncAdvancedSummary("agent-config-dialog", "agent-config");
 }
-
-function taskDialogBase(): string {
-return `<dialog id="task-dialog" class="wide"><form id="task-form"><div class="dialog-head"><h2>创建任务</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><label>标题<input name="title" required></label><label>需求<textarea name="request" required></textarea></label><div class="two"><label>项目<select name="project_id" id="task-project" required>${state.projects.filter(item => !item.channel_retired && !isSystemProject(item)).map(item => `<option value="${item.id}">${escapeHTML(item.name)}</option>`).join("")}</select></label><label>Workspace<select name="workspace_id" id="task-workspace" required></select></label></div>${runtimeFieldsHTML("task", state.models, state.codexAccounts)}<div class="two"><label>推理强度<select name="reasoning_effort" id="task-effort"></select></label><label>沙箱（文件访问）<select name="filesystem"><option value="workspace-write">工作区可写</option><option value="read-only">只读</option><option value="danger-full-access">完全访问</option></select></label></div><div class="two"><label>协作模式<select name="collaboration_mode"><option value="auto">Auto</option><option value="single">Single</option></select></label><label>最大 Agent 数<input name="max_agents" type="number" min="1" value="3"></label></div><label>审批<select name="approval"><option value="never">无需确认</option><option value="auto">自动批准（跳过权限检查）</option></select></label><div id="task-git-isolation"><label>任务隔离<select name="isolation" id="task-isolation"><option value="inplace" selected>原地执行（默认）</option><option value="worktree">独立 Worktree</option></select></label><div id="task-worktree-settings"><label>Worktree 根目录<input name="worktree_dir" id="task-worktree-dir" placeholder="默认：仓库上一级/.aha2-worktrees"></label><div class="field-help">系统会在根目录下追加 Task ID；切换为原地执行后不使用此配置。</div></div><div class="two" id="task-branches"><label>目标分支<input name="target_branch" placeholder="默认当前分支"></label><label>任务分支<input name="task_branch" placeholder="aha/task-name"></label></div></div>${taskMCPFold()}<div class="dialog-actions"><button type="button" data-close>取消</button><button type="submit" name="start_mode" value="manual">创建，稍后启动</button><button class="primary" type="submit" name="start_mode" value="immediate">创建并立即启动</button></div></form></dialog>`;
-}
-
 let slashCommandSelection = 0;
 
 function availableTaskSlashCommands(): typeof TASK_SLASH_COMMANDS[number][] {
@@ -5430,7 +5492,7 @@ function bindCommon(): void {
 			render();
 		},
   });
-  bindRuntimeFields("task", state.models, state.codexAccounts, syncTaskGitIsolation);
+  bindRuntimeFields("task", state.models, state.codexAccounts, syncTaskGitIsolation, true);
   bindRuntimeFields("takeover-task", state.models, state.codexAccounts, syncTakeoverTaskBackend);
   bindRuntimeFields("agent-config", state.models, state.codexAccounts, syncAgentConfigFields, true);
   bindClaudeOfficialDetection("task", () => String(document.querySelector<HTMLSelectElement>("#task-workspace")?.value || ""));
@@ -5656,7 +5718,9 @@ function bindCommon(): void {
   document.querySelector<HTMLInputElement>('[name="clear_ssh_password"]')?.addEventListener("change", syncWorkspaceFields);
   document.querySelector("#provider-preset")?.addEventListener("change", applyProviderPreset);
   document.querySelectorAll<HTMLElement>("[data-close]").forEach(button => button.addEventListener("click", () => {
-    button.closest("dialog")?.close();
+    const dialog = button.closest("dialog") as HTMLDialogElement | null;
+    if (dialog?.id === "agent-config-dialog" && !confirmAgentConfigClose(dialog)) return;
+    dialog?.close();
   }));
   document.querySelectorAll<HTMLElement>("[data-project]").forEach(element => element.addEventListener("click", () => {
     const id = element.dataset.project!;
@@ -5983,6 +6047,19 @@ function bindCommon(): void {
     assertClaudeOfficialReady("task");
     const payload = Object.fromEntries(form.entries()) as Record<string, string>;
     const {stream_idle_timeout_seconds: streamIdleTimeoutSeconds, ...taskPayload} = payload;
+    const modelSource = String(form.get("model_source") || "env");
+    const modelID = modelSource === "env" ? String(form.get("model_id") || "") : String(form.get("wire_model") || "");
+    const configErrors = validateAgentConfigInput({
+      backend: String(form.get("backend") || ""),
+      modelSource,
+      modelID,
+      reasoningEffort: String(form.get("reasoning_effort") || ""),
+      skillIDs: form.getAll("skill_ids").map(String),
+      availableSkillIDs: [...document.querySelectorAll<HTMLInputElement>('#task-skills-fold input[name="skill_ids"]')].map(input => input.value),
+      mcpIDs: form.getAll("mcp_server_ids").map(String),
+      availableMCPIDs: [...document.querySelectorAll<HTMLInputElement>('#task-mcp-fold input[name="mcp_server_ids"]')].map(input => input.value),
+    });
+    if (configErrors.length) throw new Error(configErrors[0]);
     const result = await api.createTask({
       ...taskPayload,
       skill_ids: form.getAll("skill_ids").map(String),
@@ -6052,6 +6129,12 @@ function bindCommon(): void {
     render();
   });
   document.querySelector<HTMLInputElement>('[name="inherit_main"]')?.addEventListener("change", syncAgentConfigFields);
+  // Esc closes a native dialog without going through [data-close]; it must ask
+  // the same question when there are unsaved edits.
+  document.querySelector<HTMLDialogElement>("#agent-config-dialog")?.addEventListener("cancel", event => {
+    const dialog = event.currentTarget as HTMLDialogElement;
+    if (!confirmAgentConfigClose(dialog)) event.preventDefault();
+  });
   // Collapsed summaries report what is selected inside them.
   document.querySelector<HTMLElement>("#agent-config-dialog")?.addEventListener("change", event => {
     const target = event.target;
@@ -6061,9 +6144,29 @@ function bindCommon(): void {
     if (!state.selectedTask) return;
     assertClaudeOfficialReady("agent-config");
     const agentID = String(form.get("agent_id") || state.selectedTaskAgent);
+    const inheritMain = agentID !== "main" && form.get("inherit_main") === "on";
+    if (!inheritMain) {
+      const modelSource = String(form.get("model_source") || "env");
+      const modelID = modelSource === "env" ? String(form.get("model_id") || "") : String(form.get("wire_model") || "");
+      const errors = validateAgentConfigInput({
+        backend: String(form.get("backend") || ""),
+        modelSource,
+        modelID,
+        reasoningEffort: String(form.get("reasoning_effort") || ""),
+        skillIDs: agentID === "main" ? form.getAll("skill_ids").map(String) : [],
+        availableSkillIDs: agentID === "main"
+          ? [...document.querySelectorAll<HTMLInputElement>('#agent-config-skills-fold input[name="skill_ids"]')].map(input => input.value)
+          : undefined,
+        mcpIDs: agentID === "main" ? form.getAll("mcp_server_ids").map(String) : [],
+        availableMCPIDs: agentID === "main"
+          ? [...document.querySelectorAll<HTMLInputElement>('#agent-config-mcp-fold input[name="mcp_server_ids"]')].map(input => input.value)
+          : undefined,
+      });
+      if (errors.length) throw new Error(errors[0]);
+    }
     if (agentID === "main") {
       await api.updateTask(state.selectedTask.task.id, {
-        mcp_server_ids: form.getAll("task_mcp_ids").map(String),
+        mcp_server_ids: form.getAll("mcp_server_ids").map(String),
         collaboration_mode: String(form.get("collaboration_mode") || "auto"),
         max_agents: Number(form.get("max_agents") || 3),
         knowledge_policy: String(form.get("knowledge_policy") || "inherit"),
@@ -6075,7 +6178,6 @@ function bindCommon(): void {
         },
       });
     }
-    const inheritMain = agentID !== "main" && form.get("inherit_main") === "on";
     await api.updateTaskAgent(state.selectedTask.task.id, agentID, inheritMain ? {
       inherit_main: true,
     } : {
@@ -6094,6 +6196,7 @@ function bindCommon(): void {
       fast_mode: form.get("fast_mode") === "on",
     });
     await refreshTaskRuntime(state.selectedTask.task.id);
+    agentConfigBaseline = "";
     setMessage("notice", `${agentID} 配置已更新，下一个 Turn 生效`);
   });
   document.querySelector("#back-tasks")?.addEventListener("click", () => {

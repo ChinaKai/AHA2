@@ -1569,7 +1569,6 @@ test("built web contains responsive application", async () => {
   assert.match(proxySettings, /saveProxySettings/);
   assert.match(proxySettings, /pendingSubscription\(\)\.then/);
   assert.match(proxySettings, /return api\.importProxySubscription/);
-  assert.match(script, /name=\\?"proxy_enabled/);
   assert.match(agents, /name="proxy_enabled"/);
   assert.match(proxySettings, /HTTP_PROXY/);
   assert.match(proxySettings, /testProxySettings/);
@@ -1828,7 +1827,7 @@ test("task agent config selects skills explicitly", async () => {
     agents: [{agent_id: "main", role: "main", title: "Main", backend: "codex", model_source: "env", model_id: "model-1", reasoning_effort: "high", filesystem: "workspace-write", approval: "never", proxy_enabled: false}],
     turns: [], memory: {task_id: "task-1", current_goal: ""},
   }, "main", [], [], [{id: "skill-1", scope: "global", project_id: "", name: "Review", description: "Review changes", instructions: "Review", version: 1, status: "active", enabled: true, source_path: "", created_at: "", updated_at: ""}]);
-  assert.match(html, /Task Skills/);
+  assert.match(html, /技能/);
   assert.match(html, /name="skill_ids" value="skill-1" checked/);
 });
 
@@ -2655,6 +2654,7 @@ test("task creation supports manual draft and explicit start", async () => {
 test("system-managed resources are read-only and normal tasks exclude pet MCP", async () => {
   const root = resolve(import.meta.dirname, "..");
   const main = await readFile(resolve(root, "build", "app.js"), "utf8");
+  const agents = await readFile(resolve(root, "build", "task_agents.js"), "utf8");
   const catalog = await readFile(resolve(root, "..", "internal", "httpapi", "catalog_handlers.go"), "utf8");
   const tasks = await readFile(resolve(root, "..", "internal", "httpapi", "task_handlers.go"), "utf8");
   const service = await readFile(resolve(root, "..", "internal", "app", "service.go"), "utf8");
@@ -2662,7 +2662,7 @@ test("system-managed resources are read-only and normal tasks exclude pet MCP", 
   assert.match(main, /function isSystemProject/);
   assert.match(main, /!isSystemProject\(item\)/);
   assert.match(main, /系统托管/);
-  assert.match(main, /item\.enabled && !item\.builtin/);
+  assert.match(agents, /!options\.excludeBuiltin \|\| !item\.builtin/);
   assert.match(catalog, /system_project_read_only/);
   assert.match(catalog, /domain\.IsSystemManagedProject/);
   assert.match(tasks, /system_project_read_only/);
@@ -3398,7 +3398,7 @@ test("built-in channel MCP is read-only and auto-injected in the MCP page", asyn
   assert.match(i18n, /"mcp\.badge\.autoInject": "自动注入"/);
   assert.match(i18n, /"mcp\.detail\.dynamic": "由当前 Turn 动态注入"/);
   assert.match(main, /bindMCPPage/);
-  assert.match(main, /state\.mcpServers\.filter\(item => item\.enabled && !item\.builtin\)/);
+  assert.match(agents, /options\.excludeBuiltin \|\| !item\.builtin/);
   assert.match(agents, /!item\.auto_inject/);
 });
 

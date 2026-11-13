@@ -1,7 +1,7 @@
 import type {ClaudeModelOption, CodexAccount, CodexModelOption, Model} from "./types.js";
 import {supportedBackendName} from "./backends.js";
 
-type RuntimeSelection = {
+export type RuntimeSelection = {
   backend?: string;
   model_source?: string;
   model_id?: string;
@@ -10,6 +10,9 @@ type RuntimeSelection = {
   stream_idle_timeout_ms?: number;
   stream_max_retries?: number;
   fast_mode?: boolean;
+  filesystem?: string;
+  approval?: string;
+  proxy_enabled?: boolean;
 };
 
 // backendLabel uses the same full display names as the Models page catalog.
@@ -110,21 +113,41 @@ function officialModelOptions(catalog: ClaudeOfficialCatalog | undefined, select
   )).join("");
 }
 
+// The Backend list is derived from the stored selection first, then every
+// configured Env model, then a Codex account. The shared Agent config form uses
+// the same resolver so its fold summaries agree with the picker.
+export function runtimeBackendChoices(
+  models: Model[],
+  accounts: CodexAccount[],
+  selection: RuntimeSelection = {},
+): string[] {
+  return [...new Set([
+    ...(selection.backend ? [selection.backend] : []),
+    ...models.filter(model => model.source !== "official" && model.source !== "claude_native").map(model => model.backend),
+    ...(accounts.length ? ["codex"] : []),
+  ])];
+}
+
+// Fast is a Codex-only tier. The row is rendered on its own so the shared Agent
+// config form can place it in the collapsed advanced section while keeping the
+// id that syncRuntimeFields toggles.
+export function fastModeFieldHTML(prefix: string, checked: boolean, backend: string, className = ""): string {
+  const runtimeClass = className ? ` ${className}` : "";
+  return `<label id="${prefix}-fast-mode-row" class="security-setting-toggle runtime-picker${runtimeClass}" ${backend === "codex" ? "" : "hidden"}><input name="fast_mode" type="checkbox" ${checked ? "checked" : ""}><span><strong>Fast 模式</strong><small>约 1.5 倍速度，但按更高费率计费。仅对 Codex 生效。</small></span></label>`;
+}
+
 export function runtimeFieldsHTML(
   prefix: string,
   models: Model[],
   accounts: CodexAccount[],
   selection: RuntimeSelection = {},
   className = "",
+  options: {fastMode?: "inline" | "external"} = {},
 ): string {
   const source = selection.model_source === "official"
     ? "official"
     : selection.model_source === "claude_native" ? "claude_native" : "env";
-  const backends = [...new Set([
-    ...(selection.backend ? [selection.backend] : []),
-    ...models.filter(model => model.source !== "official" && model.source !== "claude_native").map(model => model.backend),
-    ...(accounts.length ? ["codex"] : []),
-  ])];
+  const backends = runtimeBackendChoices(models, accounts, selection);
   const backend = selection.backend || backends[0] || "";
   const accountID = selection.codex_account_id || accounts[0]?.id || "";
   const wireModels = accountModels(accounts, accountID);
@@ -162,7 +185,7 @@ export function runtimeFieldsHTML(
     <label>流中断重试次数<input name="stream_max_retries" type="number" min="1" max="10" step="1" value="${streamMaxRetries}" required></label>
     <div class="field-help" id="${prefix}-codex-stream-official-help" hidden>Codex 官方账号使用 CLI 默认的流超时与重试参数；两项设置仅适用于自定义 Env Provider。</div>
   </div>
-  <label id="${prefix}-fast-mode-row" class="security-setting-toggle runtime-picker${runtimeClass}" ${backend === "codex" ? "" : "hidden"}><input name="fast_mode" type="checkbox" ${selection.fast_mode ? "checked" : ""}><span><strong>Codex 加速档（Fast）</strong><small>约 1.5 倍速度，但按更高费率计费。仅对 Codex 生效。</small></span></label>`;
+  ${options.fastMode === "external" ? "" : fastModeFieldHTML(prefix, Boolean(selection.fast_mode), backend, className)}`;
 }
 
 export function setRuntimeBackends(prefix: string, backends: string[]): void {
@@ -189,6 +212,7 @@ export function syncRuntimeFields(prefix: string, models: Model[], accounts: Cod
   const streamSettings = document.querySelector<HTMLElement>(`#${prefix}-codex-stream-settings`);
   const streamOfficialHelp = document.querySelector<HTMLElement>(`#${prefix}-codex-stream-official-help`);
   const fastModeRow = document.querySelector<HTMLElement>(`#${prefix}-fast-mode-row`);
+  const fastModeFold = document.querySelector<HTMLElement>(`#${prefix}-fast-fold`);
   if (!sourceField || !sourceSelect || !envField || !modelSelect || !officialFields || !accountSelect || !wireSelect || !nativeFields || !nativeSelect) return;
 
   const supportsOfficial = backend === "codex";
@@ -226,6 +250,7 @@ export function syncRuntimeFields(prefix: string, models: Model[], accounts: Cod
   // than disabled: a disabled checkbox drops out of the form, so saving an edit
   // made while another Backend is selected would clear a stored tier.
   if (fastModeRow) fastModeRow.hidden = !supportsOfficial;
+  if (fastModeFold) fastModeFold.hidden = !supportsOfficial;
   envField.hidden = official || native;
   modelSelect.disabled = official || native;
   modelSelect.required = !official && !native;
@@ -272,8 +297,11 @@ export function syncRuntimeFields(prefix: string, models: Model[], accounts: Cod
     : native
       ? undefined
       : models.find(model => model.id === modelSelect.value);
+  // Once someone picks an effort explicitly, changing the model must not
+  // silently replace that choice with the model default.
+  const preferDefault = preferModelDefault && effort.dataset.userChosen !== "true";
   effort.value = resolveReasoningEffort(
-    effortLevels, previousEffort, selectedModel?.default_reasoning_effort || "", preferModelDefault,
+    effortLevels, previousEffort, selectedModel?.default_reasoning_effort || "", preferDefault,
   );
 }
 
@@ -331,12 +359,18 @@ export function bindRuntimeFields(
   onBackendChange?: () => void,
   preserveInitialEffort = false,
 ): void {
+  // A dialog that owns its effort value (Create Task starts at high, an Agent
+  // starts from its stored tier) must not let a new model default replace it.
+  const preferModelDefaultOnChange = !preserveInitialEffort;
   document.querySelector(`#${prefix}-backend`)?.addEventListener("change", () => {
-    syncRuntimeFields(prefix, models, accounts, true);
+    syncRuntimeFields(prefix, models, accounts, preferModelDefaultOnChange);
     onBackendChange?.();
   });
   for (const suffix of ["model-source", "model", "codex-account", "wire-model"]) {
-    document.querySelector(`#${prefix}-${suffix}`)?.addEventListener("change", () => syncRuntimeFields(prefix, models, accounts, true));
+    document.querySelector(`#${prefix}-${suffix}`)?.addEventListener("change", () => syncRuntimeFields(prefix, models, accounts, preferModelDefaultOnChange));
   }
+  document.querySelector(`#${prefix}-effort`)?.addEventListener("change", event => {
+    (event.currentTarget as HTMLSelectElement).dataset.userChosen = "true";
+  });
   syncRuntimeFields(prefix, models, accounts, !preserveInitialEffort);
 }
