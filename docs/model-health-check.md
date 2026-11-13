@@ -26,10 +26,15 @@
   仍会失败，健康检测不能报 `ok`。
 - 发一次最小真实请求：复用协议探测的官方请求体（Responses 的 typed `input` 数组与 16 token
   预算、Chat/Anthropic 的 `max_tokens:16`）。
-- Responses 非流式请求被 400 拒绝、且响应体明确提到 streaming 时，同一端点用 `stream:true`
-  重试一次并读取第一个 SSE `data:` 事件；普通 400 参数错误不重试。重试结果按信息量合并：
-  401/402/403/404/5xx 或 SSE error 事件优先于原来的 400；SSE `data: {"type":"error",...}`
-  会按配额/鉴权/模型关键词分类，不会被当成 `ok`。
+- Responses 非流式请求被 400 拒绝、且响应体明确表示“必须流式”时（`requires streaming`、
+  `streaming mode`、`must be streamed` 及等价中文），同一端点用 `stream:true` 重试一次；
+  仅提到 `stream_options` 等字段名的普通参数错误不重试，避免重复计费。
+- 流式读取不是“看到第一个 `data:` 就算成功”：在 64 KiB 与流超时内持续读事件，直到出现
+  可判定的失败或终止事件。识别标准 Responses 的 `response.failed.response.error` 嵌套错误，
+  也识别 `response.created` 之后才出现的 `error`/`response.failed`；SSE error 按配额/鉴权/
+  模型关键词分类，不会报 `ok`。首事件成功但流在终止事件前关闭时归为 `inconclusive`。
+- 重试结果按信息量合并：401/402/403/404/5xx 或 SSE error 事件优先于原来的 400，SSE error
+  也不会被原来的 400 掩盖。
 - 不写数据库，不改模型配置，不自动禁用模型。
 
 响应始终是 HTTP 200（模型不存在时仍返回 404 `model_not_found`），结果在 `health` 对象里：
@@ -52,7 +57,7 @@
 
 | 条件 | status | UI 文案 |
 | --- | --- | --- |
-| 2xx（流式回退时需读到首个 SSE data 事件） | `ok` | 可用 |
+| 2xx（流式回退时需读到终止事件，且没有 error 事件） | `ok` | 可用 |
 | 429 | `rate_limited` | 限流；带 `Retry-After` 时显示「限流 · N 秒后重试」 |
 | 401 / 403 | `unauthorized` | 鉴权失败 |
 | 402 | `quota_exhausted` | 余额不足 |
@@ -96,19 +101,23 @@
 
 ## 测试
 
-- `internal/gateway/model_health_test.go`：fake transport 覆盖 200/429(+Retry-After)/401/403/
-  402/400(quota)/400(参数)/400(model 缺失)/404/5xx/超时；`chat`/`chat_completions`/空
-  `wire_api`/大小写 backend 的端点选择；断言请求体形状、Anthropic base 优先、只使用运行时端点、
-  普通 400 不重试、流式重试保留 401/402/5xx、SSE error 事件分类，以及端点/响应体/传输错误均
-  不含 Key。
+- `internal/gateway/model_health_test.go`：fake transport 覆盖 200/429(+Retry-After 与缺失)/
+  401/403/402/400(quota)/400(参数)/400(空体)/400(model 缺失)/404/5xx/超时；`chat`/
+  `chat_completions`/空 `wire_api`/大小写 backend 的端点选择；断言请求体形状、Anthropic base
+  优先、只使用运行时端点、普通 400 与 `stream_options` 400 不重试、流式重试保留 401/402/5xx、
+  标准 `response.failed.response.error`、首事件成功后失败、缺少终止事件归 inconclusive，以及
+  端点/响应体/传输错误均不含 Key。
 - `internal/httpapi/model_health_http_test.go`：真实 httptest 上游，断言 429 映射、Retry-After、
   响应不泄露 Key、模型配置未被修改、缺失模型 404、缺失凭据不发请求、未登录 401。
 - `web/tests/model_health_display.test.mjs`：各状态文案与色调、429 不是「不可用/不支持」、
   余额不是「可用」、按钮 loading 只影响本行、详情转义、页面接线、编辑/Provider 变更清理旧结果。
+- `web/tests/model_health_state.test.mjs`：行为级验证检查中防重复、清除结果时丢弃在途响应、
+  旧响应不能覆盖新检查、强制刷新清除全部在途结果、失败只落在本行。
 
 ## 代码位置
 
 - 分类与请求：`internal/gateway/model_health.go`。
 - 接口：`internal/httpapi/model_health_handlers.go`，路由在 `internal/httpapi/server.go`。
-- 前端：`web/src/api.ts`、`web/src/main.ts`（`checkModelHealthByID`）、
-  `web/src/ui_helpers.ts`（`modelHealthDisplay` / `renderModelHealthCell`）。
+- 前端：`web/src/api.ts`、`web/src/main.ts`（行渲染与接线）、`web/src/model_health.ts`
+  （检查/清除/请求代次状态机）、`web/src/ui_helpers.ts`
+  （`modelHealthDisplay` / `renderModelHealthCell`）。
