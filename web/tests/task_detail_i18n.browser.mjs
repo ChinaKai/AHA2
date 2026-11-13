@@ -16,6 +16,7 @@ const csp = (await readFile(resolve(root, "internal/httpapi/server.go"), "utf8")
 
 const bootstrap = `
 const json = (value, status = 200) => new Response(JSON.stringify(value), {status, headers: {"Content-Type": "application/json"}});
+const language = new URLSearchParams(location.search).get("lang") === "zh-CN" ? "zh-CN" : "en-US";
 const now = new Date().toISOString();
 const started = new Date(Date.now() - 20000).toISOString();
 const task = {
@@ -35,7 +36,7 @@ window.fetch = async (input, init = {}) => {
   const path = url.pathname;
   const method = (init.method || "GET").toUpperCase();
   if (path === "/api/v1/auth/status") return json({authenticated: true, csrf_token: "csrf", owner: {id: "owner-1", username: "owner"}});
-  if (path === "/api/v1/settings/general") return json({ok: true, general: {language: "en-US"}});
+  if (path === "/api/v1/settings/general") return json({ok: true, general: {language}});
   if (path === "/api/v1/assistant") return json({assistant: {character: "gugugaga", name: "AHA", nickname: "AHA", enabled: true}, messages: [], models: [], tools: []});
   if (path === "/api/v1/tasks/task-1" && method === "GET") return json({
     task, turns: [turn],
@@ -134,7 +135,24 @@ try {
     });
     assert.deepEqual(missing, [], `${label} left untranslated Chinese in Task detail`);
   };
+  // The permission, mail and attachment toolbar controls are icon-only, so
+  // their title and aria-label are the only visible or screen-reader copy.
+  const assertTaskToolLabels = async (target, expectations) => {
+    for (const [selector, expected] of Object.entries(expectations)) {
+      const element = target.locator(selector);
+      assert.equal(await element.getAttribute("title"), expected.title, `${selector} title`);
+      assert.equal(await element.getAttribute("aria-label"), expected.label, `${selector} aria-label`);
+    }
+  };
   await scan("closed Round card");
+  await assertTaskToolLabels(page, {
+    '[data-task-tool="permissions"]': {title: "Permission requests", label: "Permission requests"},
+    '[data-task-tool="mail"]': {title: "Mail", label: "Mail"},
+    "#message-attachment-pick": {
+      title: "Add attachments or paste images (up to 8 per message, 200MiB per file)",
+      label: "Add attachments (up to 8 per message, 200MiB per file)",
+    },
+  });
   assert.match(await page.locator("#agent-turn-slot summary").innerText(), /Round 3 · Completed/);
 
   await page.evaluate(() => document.querySelector("#agent-turn-slot summary")?.click());
@@ -160,6 +178,24 @@ try {
   assert.equal(await page.locator("#task-i18n-probe span").nth(1).innerText(), "Waiting for input");
   assert.equal(await page.locator("#task-i18n-probe span").nth(2).innerText(), "Opening Task");
   assert.equal(await page.locator("#task-i18n-probe span").nth(3).innerText(), "Loading the latest 20 messages…");
+
+  // The same three controls must stay Chinese in zh-CN; an English fallback
+  // there is just as much a translation gap as Chinese leaking into en-US.
+  const zhPage = await browser.newPage({viewport: {width: 1280, height: 900}, locale: "zh-CN"});
+  const zhErrors = [];
+  zhPage.on("pageerror", error => zhErrors.push(error.message));
+  await zhPage.goto(`${url}/?lang=zh-CN`, {waitUntil: "networkidle"});
+  await zhPage.waitForSelector("#message-form", {timeout: 15000});
+  await assertTaskToolLabels(zhPage, {
+    '[data-task-tool="permissions"]': {title: "权限申请", label: "权限申请"},
+    '[data-task-tool="mail"]': {title: "邮件", label: "邮件"},
+    "#message-attachment-pick": {
+      title: "添加附件或直接粘贴图片（每条消息最多 8 个，单文件 ≤200MiB）",
+      label: "添加附件（每条消息最多 8 个，单文件 ≤200MiB）",
+    },
+  });
+  assert.deepEqual(zhErrors, []);
+  await zhPage.close();
   assert.deepEqual(errors, []);
 } finally {
   await browser?.close();

@@ -1789,7 +1789,10 @@ const legacyEnglish: Record<string, string> = {
   "或输入新密码": "or enter a new password",
   "模型配置不可用，请修改模型配置": "Model configuration unavailable; edit it",
   "输入消息重试，或输入 /reopen": "Enter a message to retry, or type /reopen",
+  "权限申请": "Permission requests",
+  "邮件": "Mail",
   "添加附件或直接粘贴图片": "Add attachments or paste images",
+  "正在上传附件": "Uploading attachments",
   "选择旧任务后载入其 Main 配置，可继续修改。": "Select an old Task to load its Main configuration.",
   "用这条便签创建任务": "Create a Task from this note",
   "尚未选择联调人": "No contact selected",
@@ -2572,6 +2575,16 @@ function translatePatternText(text: string): string | null {
   if (match) return `The pet requests changing security settings: access_scope=${match[1]}, validate_origin=${match[2]}. It applies immediately after approval.`;
   match = /^修改安全设置$/.exec(text);
   if (match) return "Change security settings";
+  match = /^权限申请（(\d+) 条待审批）$/.exec(text);
+  if (match) return `Permission requests (${match[1]} pending)`;
+  match = /^邮件（(\d+) 条待审批）$/.exec(text);
+  if (match) return `Mail (${match[1]} pending)`;
+  match = /^每条消息最多 (\d+) 个，单文件 ≤(\d+)MiB$/.exec(text);
+  if (match) return `up to ${match[1]} per message, ${match[2]}MiB per file`;
+  match = /^添加附件或直接粘贴图片（(.+)）$/.exec(text);
+  if (match) return `Add attachments or paste images (${translatePatternText(match[1]) ?? match[1]})`;
+  match = /^添加附件（(.+)）$/.exec(text);
+  if (match) return `Add attachments (${translatePatternText(match[1]) ?? match[1]})`;
   match = /^发送给 (.*?)，输入 \/ 查看命令$/.exec(text);
   if (match) return `Send to ${match[1]}; type / for commands`;
   match = /^(.*?) 正在执行，发送后将排队$/.exec(text);
