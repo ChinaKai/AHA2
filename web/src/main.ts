@@ -1,6 +1,6 @@
 import {api, setAPIRequestObserver} from "./api.js";
 import type {APIRequestSample} from "./api.js";
-import {COMMAND_PALETTE_DEBOUNCE_MS, buildCommandSections, createDebouncer, flattenCommandSections, isPaletteShortcut, paletteKeyAction, readRecentTaskIDs, rememberRecentTaskID} from "./command_palette.js";
+import {COMMAND_PALETTE_COMPOSITION_GUARD_MS, COMMAND_PALETTE_DEBOUNCE_MS, buildCommandSections, createDebouncer, flattenCommandSections, isPaletteShortcut, paletteKeyAction, readRecentTaskIDs, rememberRecentTaskID, runPaletteSelection} from "./command_palette.js";
 import type {CommandItem, CommandSection, CommandSectionID} from "./command_palette.js";
 import {handlePetStreamEvent, mountAssistant, showPetSettings, notifyPetTaskIdle, notifyPetTaskReply, notifyPetTaskThinking, resumePetNavigation, setAssistantVisible} from "./assistant.js";
 import {MODEL_WIRE_OPTIONS, backendSelectOptionsHTML, backendsPanelHTML, modelWireEditOptionsHTML, persistedWireValue, resolveBackendOptions} from "./backends.js";
@@ -1524,6 +1524,7 @@ let commandPaletteSections: CommandSection[] = [];
 let commandPaletteVisible: CommandItem[] = [];
 let commandPaletteActiveIndex = 0;
 let commandPaletteComposing = false;
+let commandPaletteCompositionEndedAt = 0;
 let commandPaletteOpenedFrom: HTMLElement | null = null;
 
 function commandPaletteStorage(): Storage | null {
@@ -1670,16 +1671,23 @@ function bindCommandPalette(): void {
   });
   input.addEventListener("compositionstart", () => {
     commandPaletteComposing = true;
+    commandPaletteCompositionEndedAt = 0;
   });
   input.addEventListener("compositionend", () => {
     commandPaletteComposing = false;
+    // WebKit fires this before the keydown that commits the composition with
+    // Enter, so remember when composition ended to swallow that Enter.
+    commandPaletteCompositionEndedAt = performance.now();
     commandPaletteDebouncer.schedule(input.value);
   });
   input.addEventListener("keydown", event => {
+    const justComposed = commandPaletteCompositionEndedAt > 0
+      && performance.now() - commandPaletteCompositionEndedAt <= COMMAND_PALETTE_COMPOSITION_GUARD_MS;
     const result = paletteKeyAction(event, {
       count: commandPaletteVisible.length,
       activeIndex: commandPaletteActiveIndex,
       composing: commandPaletteComposing,
+      justComposed,
     });
     if (!result.handled) return;
     event.preventDefault();
@@ -1781,6 +1789,7 @@ function openCommandPalette(): void {
   commandPaletteItems = commandPaletteAllItems();
   commandPaletteRecent = commandPaletteRecentItems(commandPaletteItems);
   commandPaletteComposing = false;
+  commandPaletteCompositionEndedAt = 0;
   commandPaletteDebouncer.cancel();
   input.value = "";
   applyCommandPaletteQuery("");
@@ -1788,12 +1797,17 @@ function openCommandPalette(): void {
   input.focus();
 }
 
-function closeCommandPalette(): void {
+// Dismissing the palette returns focus where it was. Executing an item does
+// not: that focus may be a Task composer whose render guard would keep the old
+// Task on screen while the selected Task loads underneath.
+function closeCommandPalette(restoreFocus = true): void {
   commandPaletteDebouncer.cancel();
   commandPaletteComposing = false;
+  commandPaletteCompositionEndedAt = 0;
   if (commandPaletteRoot?.open) commandPaletteRoot.close();
   const previous = commandPaletteOpenedFrom;
   commandPaletteOpenedFrom = null;
+  if (!restoreFocus) return;
   if (previous?.isConnected) previous.focus();
   else focusCommandPaletteTrigger();
 }
@@ -1841,22 +1855,32 @@ async function runCommandPaletteAction(action: string): Promise<void> {
   }
 }
 
+async function navigateCommandPaletteItem(item: CommandItem): Promise<void> {
+  if (item.kind === "task") {
+    rememberCommandPaletteTask(item.target);
+    await openTask(item.target);
+  } else if (item.kind === "project" || item.kind === "workspace") {
+    openCommandPaletteProject(item.target);
+  } else if (item.kind === "page") {
+    const view = viewFromName(item.target);
+    if (!view) return;
+    if (view === "pet-workbench") petWorkbenchTab = "approvals";
+    switchView(view);
+  } else {
+    await runCommandPaletteAction(item.target);
+  }
+}
+
 async function executeCommandPaletteItem(item: CommandItem): Promise<void> {
-  closeCommandPalette();
   try {
-    if (item.kind === "task") {
-      rememberCommandPaletteTask(item.target);
-      await openTask(item.target);
-    } else if (item.kind === "project" || item.kind === "workspace") {
-      openCommandPaletteProject(item.target);
-    } else if (item.kind === "page") {
-      const view = viewFromName(item.target);
-      if (!view) return;
-      if (view === "pet-workbench") petWorkbenchTab = "approvals";
-      switchView(view);
-    } else {
-      await runCommandPaletteAction(item.target);
-    }
+    // runPaletteSelection closes without restoring focus and focuses the
+    // trigger before navigation; otherwise a focused Task composer makes
+    // render() defer and the old Task stays on screen while the new one loads.
+    await runPaletteSelection({
+      closePalette: restoreFocus => closeCommandPalette(restoreFocus),
+      focusTrigger: () => focusCommandPaletteTrigger(),
+      navigate: () => navigateCommandPaletteItem(item),
+    });
   } catch (error) {
     setMessage("error", error instanceof Error ? error.message : String(error));
     render();

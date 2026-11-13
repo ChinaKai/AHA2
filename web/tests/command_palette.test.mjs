@@ -22,6 +22,32 @@ function sampleItems() {
   ];
 }
 
+test("executing an item drops composer focus before navigation starts", async () => {
+  const calls = [];
+  let releaseNavigation;
+  const navigation = new Promise(resolve => {
+    releaseNavigation = resolve;
+  });
+  const running = palette.runPaletteSelection({
+    closePalette(restorePreviousFocus) {
+      calls.push(`close:${restorePreviousFocus}`);
+    },
+    focusTrigger() {
+      calls.push("focus");
+    },
+    navigate() {
+      calls.push("navigate");
+      return navigation;
+    },
+  });
+  // This is the regression: previously the palette closed with focus restored
+  // to the old Task composer, and only then openTask changed state.
+  assert.deepEqual(calls, ["close:false", "focus", "navigate"]);
+  releaseNavigation();
+  await running;
+  assert.deepEqual(calls, ["close:false", "focus", "navigate"]);
+});
+
 test("Ctrl+K and Cmd+K open the palette while plain K does not", () => {
   assert.equal(palette.isPaletteShortcut({key: "k", ctrlKey: true}), true);
   assert.equal(palette.isPaletteShortcut({key: "K", metaKey: true}), true);
@@ -47,6 +73,25 @@ test("IME composition swallows Enter and arrows until the composition is committ
   assert.deepEqual(
     palette.paletteKeyAction({key: "Enter"}, {count: 3, activeIndex: 1}),
     {handled: true, action: "select", activeIndex: 1},
+  );
+});
+
+test("WebKit's post-composition Enter is ignored even with isComposing=false", () => {
+  assert.equal(palette.COMMAND_PALETTE_COMPOSITION_GUARD_MS, 50);
+  assert.deepEqual(
+    palette.paletteKeyAction({key: "Enter", keyCode: 13, isComposing: false}, {count: 2, activeIndex: 0, justComposed: true}),
+    {handled: false},
+    "Safari fires compositionend before the committing Enter keydown",
+  );
+  assert.equal(
+    palette.paletteKeyAction({key: "Enter"}, {count: 2, activeIndex: 0, justComposed: false}).action,
+    "select",
+    "the guard must expire so a later Enter still selects",
+  );
+  assert.equal(
+    palette.paletteKeyAction({key: "ArrowDown"}, {count: 2, activeIndex: 0, justComposed: true}).action,
+    "down",
+    "only Enter belongs to the composition commit",
   );
 });
 
@@ -217,9 +262,23 @@ test("main.ts wires the shortcut, dialog semantics, IME guard and routing", asyn
   assert.match(main, /await openTaskCreateDialogFromPalette\(\)/);
   assert.match(main, /petWorkbenchTab = "approvals";/);
 
-  // Focus returns to the trigger after closing and after a route change.
-  assert.match(main, /function closeCommandPalette\(\)[\s\S]{0,400}?previous\?\.isConnected\) previous\.focus\(\)/);
+  // Focus returns to the trigger after closing and after a route change...
+  assert.match(main, /function closeCommandPalette\(restoreFocus = true\): void \{[\s\S]{0,600}?if \(!restoreFocus\) return;[\s\S]{0,240}?previous\?\.isConnected\) previous\.focus\(\)/);
   assert.match(main, /function focusCommandPaletteTrigger\(\)/);
+  // ...but executing an item must drop the old composer focus before openTask.
+  // The ordering lives in runPaletteSelection above; here we pin that the
+  // execution path really uses it.
+  assert.match(main, /await runPaletteSelection\(\{/);
+  assert.match(main, /navigate: \(\) => navigateCommandPaletteItem\(item\)/);
+  assert.match(main, /async function navigateCommandPaletteItem\(item: CommandItem\): Promise<void> \{[\s\S]{0,400}?await openTask\(item\.target\)/);
+  const executeStart = main.indexOf("async function executeCommandPaletteItem");
+  const executeBody = main.slice(executeStart, main.indexOf('document.addEventListener("keydown"', executeStart));
+  assert.doesNotMatch(executeBody, /closeCommandPalette\(\);/, "execution must not restore the old composer focus");
+
+  // Safari IME: compositionend timestamps the keydown guard window.
+  assert.match(main, /commandPaletteCompositionEndedAt = performance\.now\(\)/);
+  assert.match(main, /justComposed/);
+  assert.match(main, /COMMAND_PALETTE_COMPOSITION_GUARD_MS/);
 
   assert.match(buildScript, /"command_palette", "main"/);
 

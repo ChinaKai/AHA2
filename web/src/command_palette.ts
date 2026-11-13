@@ -118,6 +118,12 @@ export interface CommandKeyContext {
   count: number;
   activeIndex: number;
   composing?: boolean;
+  /**
+   * WebKit commits a composition by firing compositionend before the Enter
+   * keydown, so that keydown has isComposing=false and keyCode=13. Treat an
+   * Enter within the post-composition guard window as part of the commit.
+   */
+  justComposed?: boolean;
 }
 
 export interface CommandKeyResult {
@@ -137,6 +143,7 @@ export function isPaletteShortcut(event: CommandKeyEvent): boolean {
 // until the composition has been committed.
 export function paletteKeyAction(event: CommandKeyEvent, context: CommandKeyContext): CommandKeyResult {
   if (context.composing || event.isComposing || event.keyCode === 229) return {handled: false};
+  if (context.justComposed && event.key === "Enter") return {handled: false};
   const count = Math.max(0, context.count);
   if (event.key === "Escape") return {handled: true, action: "close"};
   if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -166,6 +173,9 @@ export interface Debouncer {
 }
 
 export const COMMAND_PALETTE_DEBOUNCE_MS = 100;
+// Safari/WebKit fires compositionend before the Enter keydown that commits the
+// text. Ignore an Enter this close to compositionend; a later Enter works.
+export const COMMAND_PALETTE_COMPOSITION_GUARD_MS = 50;
 
 export function createDebouncer(delayMs: number, run: (value: string) => void, timers?: DebouncerTimers): Debouncer {
   const clock = timers || {
@@ -203,6 +213,23 @@ export function createDebouncer(delayMs: number, run: (value: string) => void, t
       return handle !== null;
     },
   };
+}
+
+export interface PaletteSelectionHooks {
+  /** When true, focus returns to whatever opened the palette. */
+  closePalette(restorePreviousFocus: boolean): void;
+  focusTrigger(): void;
+  navigate(): void | Promise<void>;
+}
+
+// Selecting an item navigates away. The old editor (often a Task composer)
+// must lose focus before navigation starts, and must not get it back: main.ts
+// defers renders while a #message-form textarea is focused, which would leave
+// the previous Task on screen while the new one is already selected in state.
+export async function runPaletteSelection(hooks: PaletteSelectionHooks): Promise<void> {
+  hooks.closePalette(false);
+  hooks.focusTrigger();
+  await hooks.navigate();
 }
 
 export interface StorageLike {
