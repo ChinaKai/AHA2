@@ -1,4 +1,4 @@
-import {readFile, mkdir, writeFile, copyFile, rm, cp} from "node:fs/promises";
+import {readFile, readdir, mkdir, writeFile, copyFile, rm, cp} from "node:fs/promises";
 import {createHash} from "node:crypto";
 import {createRequire, stripTypeScriptTypes} from "node:module";
 import {resolve} from "node:path";
@@ -141,10 +141,18 @@ async function buildProduction() {
   const cssHash = contentHash(css.code);
   await writeFile(resolve(output, `styles.${cssHash}.css`), css.code);
 
+  // hardware_panel.ts copies the app script's ?v= query onto the lazily loaded
+  // /vendor/xterm.js and /vendor/xterm.css URLs. The query therefore has to
+  // cover the vendor bytes too: a vendor-only change must not keep serving the
+  // old terminal from the immutable cache.
+  const vendorNames = (await readdir(resolve(output, "vendor"))).sort();
+  const vendorContent = await Promise.all(vendorNames.map(name => readFile(resolve(output, "vendor", name))));
+  const buildHash = contentHash(Buffer.concat([Buffer.from(jsText, "utf8"), Buffer.from(css.code, "utf8"), ...vendorContent]));
+
   const template = await readFile(resolve(source, "index.html"), "utf8");
-  const appURL = `/app.${jsHash}.js?v=${jsHash}`;
-  // The query keeps the existing contract used by hardware_panel.ts when it
-  // builds /vendor/xterm.js URLs; the filename hash drives immutable caching.
+  // The file name stays the app bundle hash (that is the true cache key); the
+  // query is the build-wide version consumed by the vendor loader.
+  const appURL = `/app.${jsHash}.js?v=${buildHash}`;
   const index = template
     .replace(
       '<link rel="stylesheet" href="/styles.css">',
@@ -153,14 +161,14 @@ async function buildProduction() {
     .replace('<script type="module" src="/app.js"></script>', `<script type="module" src="${appURL}"></script>`);
   if (index === template) throw new Error("index.html template no longer matches the build entry points");
   await writeFile(resolve(output, "index.html"), index);
-  return {jsHash, cssHash};
+  return {jsHash, cssHash, buildHash};
 }
 
-function contentHash(text) {
-  return createHash("sha256").update(text).digest("hex").slice(0, 12);
+function contentHash(content) {
+  return createHash("sha256").update(content).digest("hex").slice(0, 12);
 }
 
 await buildModules();
 const production = await buildProduction();
 console.log(`Built ${modulesOutput} and ${output}`);
-console.log(`Production assets: app.${production.jsHash}.js styles.${production.cssHash}.css`);
+console.log(`Production assets: app.${production.jsHash}.js styles.${production.cssHash}.css vendor v=${production.buildHash}`);
