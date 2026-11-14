@@ -414,6 +414,9 @@ body.task-view-active .banner { border: 1px solid var(--color-border); border-ra
 .task-meta span { display: inline-flex; align-items: center; gap: 4px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .task-meta .icon { width: 13px; height: 13px; flex: 0 0 auto; }
 .task-card-actions { display: flex; align-items: center; gap: 4px; }
+/* Mobile-only copy of the title status, shown above the row actions. Hidden on
+   desktop so each breakpoint renders exactly one status badge. */
+.task-card-actions-status { display: none; }
 .task-title-input { width: min(420px, 80%); }
 
 .provider-layout { display: grid; grid-template-columns: 1fr 1.5fr; align-items: start; gap: 16px; }
@@ -2114,6 +2117,13 @@ dialog.agent-config-dialog { width: min(760px,calc(100vw - 32px)); }
   .task-filter-menu { width: min(300px,calc(100vw - 40px)); }
   .task-count { grid-column: 1 / -1; margin-left: 0; text-align: right; }
   .task-card { padding: 12px; }
+  /* The title keeps only the task code and the heading; the status moves into
+     the action column above the row buttons so the heading gets the width. */
+  .task-card-title .task-card-title-status { display: none; }
+  /* The negative block margin lets the two-row action stack centre inside the
+     title/meta height, so the card does not grow when the badge moves in. */
+  .task-card-actions.has-status { display: grid; grid-template-columns: auto auto; align-content: center; justify-content: end; justify-items: end; gap: 2px 4px; margin-block: -4.5px; }
+  .task-card-actions .task-card-actions-status { display: inline-flex; grid-column: 1 / -1; padding: 0 6px; line-height: 15px; }
   .task-meta { gap: 8px; }
   .messages { padding: 12px; }
   .message { max-width: 92%; }

@@ -4453,9 +4453,13 @@ function taskCardHtml(task: Task): string {
   const project = state.projects.find(item => item.id === task.project_id);
   const ws = state.workspaces.find(item => item.id === task.workspace_id);
   const archived = task.channel_retired === true || task.read_only_reason === "channel_retired";
+  // Read-only rows already carry their own state badge in the action column, so
+  // only ordinary rows get the mobile action-column status copy; the mobile
+  // breakpoint hides the title badge for every row to avoid showing it twice.
+  const readonlyBadge = archived || task.read_only || task.status === "completed";
   return `<article class="task-card" data-task="${task.id}" data-task-signature="${taskCardSignature(task, project, ws)}">
     <div class="task-card-main">
-      <div class="task-card-title"><span class="task-code">${escapeHTML(task.code || "")}</span><h3 data-task-title="${task.id}">${escapeHTML(task.title)}</h3><span class="status ${statusClass(task.status)}">${statusLabel(task.status)}</span></div>
+      <div class="task-card-title"><span class="task-code">${escapeHTML(task.code || "")}</span><h3 data-task-title="${task.id}">${escapeHTML(task.title)}</h3><span class="status task-card-title-status ${statusClass(task.status)}">${statusLabel(task.status)}</span></div>
       ${task.current_goal && task.current_goal !== task.title ? `<p class="task-goal">${escapeHTML(task.current_goal)}</p>` : ""}
       <div class="task-meta">
         <span title="所属项目">${icon("projects")}<span>${escapeHTML(project?.name || task.project_id)}</span></span>
@@ -4465,7 +4469,8 @@ function taskCardHtml(task: Task): string {
         ${task.created_at ? `<span title="创建时间">${icon("clock")}<span>${formatDateTime(task.created_at)}</span></span>` : ""}
       </div>
     </div>
-    <div class="task-card-actions">
+    <div class="task-card-actions${readonlyBadge ? "" : " has-status"}">
+      ${readonlyBadge ? "" : `<span class="status task-card-actions-status ${statusClass(task.status)}">${statusLabel(task.status)}</span>`}
       ${archived ? `<span class="status warn">归档只读</span>` : task.read_only ? `<button type="button" data-retire-remote-task="${task.id}" class="icon-button danger" title="移除孤立只读任务">${icon("close")}</button><span class="status warn" title="所属设备：${escapeHTML(task.owner_device_id || "未知")}">只读</span>` : task.status === "completed" ? `<span class="status warn" title="任务已完成，需先重新打开才能编辑">已完成只读</span><button type="button" data-delete-task="${task.id}" class="icon-button" title="删除任务">${icon("close")}</button>` : `<button type="button" data-edit-task-title="${task.id}" class="icon-button" title="编辑标题">${icon("edit")}</button><button type="button" data-delete-task="${task.id}" class="icon-button" title="删除任务">${icon("close")}</button>`}
     </div>
   </article>`;
