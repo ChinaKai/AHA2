@@ -38,6 +38,7 @@ const TASK = ${JSON.stringify(TASK)};
 const iso = value => new Date(value).toISOString();
 window.__scenario = "running";
 window.__phase = "tool";
+window.__toolName = "Read";
 window.__sequence = 0;
 const scenario = () => {
   const now = Date.now();
@@ -45,7 +46,7 @@ const scenario = () => {
     return {
       round: {id: "round-7", task_id: TASK.id, sequence: 7, status: "running", created_at_ms: now - 120000, started_at_ms: now - 120000},
       turnStatus: "running",
-      activity: {phase: window.__phase, tool_name: "Read", since_ms: now - 5000, since: iso(now - 5000), elapsed_ms: 5000,
+      activity: {phase: window.__phase, tool_name: window.__toolName, since_ms: now - 5000, since: iso(now - 5000), elapsed_ms: 5000,
         attempt: 1, round_id: "round-7", turn_id: "turn-7", agent_id: "main"},
     };
   }
@@ -150,7 +151,7 @@ const PHASES = new Map([
   ["preparing", "Preparing"],
   ["session_wake", "Waking session"],
   ["thinking", "Thinking"],
-  ["tool", "Calling tool"],
+  ["tool", "Read"],
   ["waiting_backend", "Waiting for backend"],
   ["retrying", "Retrying"],
   ["finalizing", "Finalizing"],
@@ -205,17 +206,31 @@ try {
     assert.match(text, /Round 7/, `${phase}: round summary: ${text}`);
     assert.doesNotMatch(text, HAN, `${phase}: Chinese leaked into the en-US summary: ${text}`);
     assert.match(text, new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), `${phase}: label missing: ${text}`);
-    assert.doesNotMatch(text, /Read/, `${phase}: tool name leaked`);
+    if (phase !== "tool") assert.doesNotMatch(text, /Read/, `${phase}: tool name leaked`);
     const clocks = await page.evaluate(() =>
       [...document.querySelectorAll(".round-summary-phase time")].map(node => node.textContent));
     assert.equal(clocks.length, 2, `${phase}: both clocks`);
   }
 
-  // The reviewer's exact runtime line: Round 7 · Calling tool · 5s · 02:00.
+  // The reviewer's exact runtime line: Round 7 · Read · 5s · 02:00.
   const toolLine = seen.get("tool");
-  assert.match(toolLine, /Round 7 · Calling tool/, `en-US tool line: ${toolLine}`);
+  assert.match(toolLine, /Round 7 · Read/, `en-US tool line: ${toolLine}`);
+  assert.doesNotMatch(toolLine, /Calling tool/, `en-US tool line still uses the old label: ${toolLine}`);
   assert.match(toolLine, /\d+s/, `en-US tool step clock: ${toolLine}`);
   assert.match(toolLine, /\d{2}:\d{2}/, `en-US tool total clock: ${toolLine}`);
+  // A blank tool name falls back to the English generic noun.
+  await emitUpdate(page, "running", "tool");
+  await page.evaluate(() => { window.__toolName = ""; window.__sequence += 1;
+    (window.__sources || []).find(item => item.url.includes("/tasks/t-round/events"))?.emit("update", {data: JSON.stringify({sequence: window.__sequence, type: "turn_status"})}); });
+  await page.waitForFunction(() =>
+    (document.querySelector("#agent-turn-slot .round-activity-text")?.textContent || "") === "Tool",
+  null, {timeout: 10000});
+  const fallbackLine = await summary(page);
+  assert.match(fallbackLine, /Round 7 · Tool/, `en-US empty tool fallback: ${fallbackLine}`);
+  assert.doesNotMatch(fallbackLine, /Calling tool/, "empty tool name fell back to the old label");
+  assert.doesNotMatch(fallbackLine, HAN, "Chinese leaked into the tool fallback");
+  await page.evaluate(() => { window.__toolName = "Read"; });
+
   // Nothing Chinese anywhere in any of the eight running summaries.
   for (const [phase, text] of seen) assert.doesNotMatch(text, HAN, `${phase}: Han in summary`);
   console.log(`en-US runtime summary: ${toolLine}`);

@@ -2051,13 +2051,17 @@ test("round summary shows the backend activity and collapses terminal rounds", a
   const tool = running("tool");
   assert.match(tool, /role="status" aria-live="polite"/);
   assert.match(tool, /data-round-event="tool"/);
-  assert.match(tool, /正在调用工具/);
-  assert.doesNotMatch(tool, /Read/);
+  assert.match(tool, /<span class="round-activity-text">Read<\/span>/);
+  assert.doesNotMatch(tool, /正在调用工具/);
+  // A blank tool name falls back to the short generic noun.
+  const toolFallback = renderAgentTurnCard({...base, activity: {...activity("tool"), tool_name: "   "}}, "live");
+  assert.match(toolFallback, /<span class="round-activity-text">工具<\/span>/);
+  assert.doesNotMatch(toolFallback, /正在调用工具/);
   assert.match(tool, /data-round-time="step" data-live-elapsed-ms="12000"/);
   assert.match(tool, /data-round-time="total" data-live-elapsed-ms="\d+" data-live-synced-at="[\d.]+" data-live-running="true"/);
   // The live region contains the event word only; both clocks live outside it.
   const liveRegion = tool.match(/<span class="round-activity"[^>]*>(.*?)<\/span><span class="round-summary-sep">/s)?.[1] || "";
-  assert.match(liveRegion, /正在调用工具/);
+  assert.match(liveRegion, /Read/);
   assert.doesNotMatch(liveRegion, /data-round-time|\d+s|<time/);
   assert.match(tool, /<details>/);
 
@@ -2066,7 +2070,7 @@ test("round summary shows the backend activity and collapses terminal rounds", a
     ["preparing", "正在准备"],
     ["session_wake", "正在唤醒 Session"],
     ["thinking", "正在思考"],
-    ["tool", "正在调用工具"],
+    ["tool", "Read"],
     ["waiting_backend", "等待 Backend 响应"],
     ["retrying", "重试中"],
     ["finalizing", "正在整理结果"],
@@ -2077,7 +2081,7 @@ test("round summary shows the backend activity and collapses terminal rounds", a
     assert.ok(html.includes(`<span class="round-activity-text">${label}</span>`), `${phase} label: ${html}`);
     assert.match(html, /data-round-time="step"/, `${phase} step clock`);
     assert.match(html, /data-round-time="total"/, `${phase} total clock`);
-    assert.doesNotMatch(html, /Read/, `${phase} rendered the tool name`);
+    if (phase !== "tool") assert.doesNotMatch(html, /Read/, `${phase} rendered the tool name`);
   }
 
   const done = renderAgentTurnCard({...base,
@@ -2103,13 +2107,16 @@ test("round summary shows the backend activity and collapses terminal rounds", a
   i18n.applyLocale("en-US");
   try {
     const english = renderAgentTurnCard({...base, activity: activity("tool")}, "live");
-    assert.match(english, /Calling tool/);
-    assert.doesNotMatch(english, /Read/);
+    assert.match(english, /<span class="round-activity-text">Read<\/span>/);
+    assert.doesNotMatch(english, /Calling tool/);
+    const englishFallback = renderAgentTurnCard({...base, activity: {...activity("tool"), tool_name: ""}}, "live");
+    assert.match(englishFallback, /<span class="round-activity-text">Tool<\/span>/);
     assert.match(renderAgentTurnCard({...base, activity: activity("waiting_backend")}, "live"), /Waiting for backend/);
   } finally {
     i18n.applyLocale("zh-CN");
   }
 });
+
 
 test("codex accounts render compact weekly quota", async () => {
   const root = resolve(import.meta.dirname, "..");

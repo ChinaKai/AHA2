@@ -91,7 +91,7 @@ function liveEventLabel(activity: TaskActivity | null | undefined): string {
     case "queued": return t("round.activity.queued");
     case "preparing": return t("round.activity.preparing");
     case "session_wake": return t("round.activity.sessionWake");
-    case "tool": return t("round.activity.tool");
+    case "tool": return activity.tool_name?.trim() || t("round.activity.toolFallback");
     case "waiting_backend": return t("round.activity.waitingBackend");
     case "retrying": return t("round.activity.retrying");
     case "finalizing": return t("round.activity.finalizing");

@@ -172,7 +172,7 @@ const snapshot = page => page.evaluate(() => {
     textWhiteSpace: textStyle?.whiteSpace || "",
     textOverflowX: textStyle?.overflow || "",
     textAnimation: textStyle?.animationName || "",
-    dotAnimation: activity ? getComputedStyle(activity, "::before").animationName : "",
+    dotContent: activity ? getComputedStyle(activity, "::before").content : "none",
   };
 });
 
@@ -181,7 +181,7 @@ const PHASE_LABELS = {
   preparing: "正在准备",
   session_wake: "正在唤醒 Session",
   thinking: "正在思考",
-  tool: "正在调用工具",
+  tool: LONG_TOOL,
   waiting_backend: "等待 Backend 响应",
   retrying: "重试中",
   finalizing: "正在整理结果",
@@ -243,8 +243,8 @@ try {
   const desktopTool = await snapshot(page);
   assert.match(desktopTool.summaryText, /Round 2125/);
   assert.equal(desktopTool.eventKind, "tool");
-  assert.equal(desktopTool.activityText, "正在调用工具");
-  assert.doesNotMatch(desktopTool.summaryText, new RegExp(LONG_TOOL));
+  assert.equal(desktopTool.activityText, LONG_TOOL);
+  assert.ok(desktopTool.summaryText.includes("Round 2125 · " + LONG_TOOL), `tool name missing: ${desktopTool.summaryText}`);
   assert.equal(desktopTool.channelText, "SSE");
   assert.deepEqual(desktopTool.times.length, 2);
   assert.match(desktopTool.stepText, /^(59s|\d{2}:\d\d)$/);
@@ -258,7 +258,7 @@ try {
   assert.equal(desktopTool.textOverflow, "ellipsis");
   assert.equal(desktopTool.textWhiteSpace, "nowrap");
   assert.match(desktopTool.textAnimation, /round-activity-breathe/);
-  assert.match(desktopTool.dotAnimation, /round-activity-pulse/);
+  assert.equal(desktopTool.dotContent, "none", "the summary still renders a status dot");
   assert.ok(desktopTool.summaryHeight <= 39, `desktop summary grew to ${desktopTool.summaryHeight}px`);
   assertInsideViewport(desktopTool, "desktop tool");
   assertBadgeVisible(desktopTool, "desktop tool");
@@ -274,9 +274,9 @@ try {
     assert.equal(state.activityText, expected, `${phase}: event copy`);
     assert.equal(state.eventKind, phase, `${phase}: event kind`);
     assert.equal(state.times.length, 2, `${phase}: both clocks`);
-    assert.doesNotMatch(state.summaryText, new RegExp(LONG_TOOL), `${phase}: tool name leaked`);
+    if (phase !== "tool") assert.doesNotMatch(state.summaryText, new RegExp(LONG_TOOL), `${phase}: tool name leaked`);
     assert.match(state.textAnimation, /round-activity-breathe/, `${phase}: event text should breathe`);
-    assert.match(state.dotAnimation, /round-activity-pulse/, `${phase}: status dot should breathe`);
+    assert.equal(state.dotContent, "none", `${phase}: the summary still renders a status dot`);
   }
 
   await showActivity(page, "thinking");
@@ -293,7 +293,6 @@ try {
   await page.emulateMedia({reducedMotion: "reduce"});
   const reduced = await snapshot(page);
   assert.equal(reduced.textAnimation, "none", "reduced motion still animates the event text");
-  assert.equal(reduced.dotAnimation, "none", "reduced motion still animates the status dot");
   await page.emulateMedia({reducedMotion: "no-preference"});
 
   for (const viewport of [{width: 360, height: 800}, {width: 390, height: 844}]) {
@@ -302,12 +301,12 @@ try {
     await page.waitForFunction(width => window.innerWidth === width, viewport.width, {timeout: 5000});
     await showActivity(page, "tool");
     const tool = await snapshot(page);
-    assert.equal(tool.activityText, "正在调用工具");
+    assert.equal(tool.activityText, LONG_TOOL);
     assert.equal(tool.eventKind, "tool");
     assert.deepEqual(tool.times.length, 2);
     assert.match(tool.stepText, /^(59s|\d{2}:\d\d)$/);
     assert.match(tool.totalText, /^\d{2,}:\d\d$/);
-    assert.doesNotMatch(tool.summaryText, new RegExp(LONG_TOOL));
+    assert.ok(tool.summaryText.includes(LONG_TOOL), `${label}: tool name missing`);
     assertInsideViewport(tool, `${label} tool`);
     assertBadgeVisible(tool, `${label} tool`);
     assert.equal(tool.channelText, "SSE");

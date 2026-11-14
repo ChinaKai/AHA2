@@ -1448,16 +1448,16 @@ dialog.agent-config-dialog { width: min(760px,calc(100vw - 32px)); }
 .round-channel.connecting { background: #fff7e8; color: var(--amber); }
 .round-summary-phase { display: inline-flex; align-items: baseline; gap: 4px; min-width: 0; white-space: nowrap; }
 /* text-overflow does not reach a bare text node inside a flex container, so the
-   label gets its own truncating span; the dots and both clocks keep their width. */
-.round-activity { display: inline-flex; flex: 0 1 auto; align-items: center; gap: 4px; min-width: 0; overflow: hidden; }
+   label gets its own truncating span; the dots and both clocks keep their width.
+   The wrapper must reuse the event text baseline instead of synthesising one
+   from a child box, otherwise the whole event word drops below the other text. */
+.round-activity { display: inline-flex; flex: 0 1 auto; align-items: baseline; min-width: 0; overflow: hidden; }
 .round-activity-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; animation: round-activity-breathe 1.8s ease-in-out infinite; }
 .round-summary-sep, .round-summary-phase time { flex: 0 0 auto; }
-.round-activity::before { content: ""; flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%; background: var(--green); animation: round-activity-pulse 1.4s ease-in-out infinite; }
-/* Every running event breathes through the same pair of animations. Terminal
-   rounds render no .round-activity at all, so completed/failed stay static. */
-@keyframes round-activity-pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .35; transform: scale(.7); } }
+/* Only the event word breathes. Terminal rounds render no .round-activity at
+   all, so completed/failed stay static. */
 @keyframes round-activity-breathe { 0%, 100% { opacity: 1; } 50% { opacity: .55; } }
-@media (prefers-reduced-motion: reduce) { .round-activity::before, .round-activity-text { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .round-activity-text { animation: none; } }
 .agent-turn-rows { border-top: 1px solid var(--line); }
 .agent-turn-row { display: grid; grid-template-columns: 90px 75px 48px minmax(80px,1fr) 66px 68px; align-items: center; gap: 8px; min-height: 31px; padding: 4px 10px; border-bottom: 1px solid #edf0f3; font-size: 10px; }
 .agent-turn-row > strong { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }

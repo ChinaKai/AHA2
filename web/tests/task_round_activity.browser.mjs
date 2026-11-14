@@ -49,6 +49,7 @@ const iso = value => new Date(value).toISOString();
 const elapsed = value => Math.max(0, Date.now() - value);
 window.__scenario = "running";
 window.__phase = "tool";
+window.__toolName = "Read";
 window.__lastCategories = [];
 const scenario = () => {
   const now = Date.now();
@@ -57,7 +58,7 @@ const scenario = () => {
     return {
       round: {id: "round-1", task_id: TASK.id, sequence: 1, status: "running", created_at: iso(now - 30000), created_at_ms: now - 30000, started_at_ms: now - 30000},
       turnStatus: "running",
-      activity: {phase: window.__phase, tool_name: "Read",
+      activity: {phase: window.__phase, tool_name: window.__toolName,
         since: iso(SINCE), since_ms: SINCE, elapsed_ms: elapsed(SINCE), attempt: 1, round_id: "round-1", turn_id: "turn-1", agent_id: "main"},
     };
   }
@@ -156,8 +157,8 @@ const card = page => page.evaluate(() => {
     eventKind: slot.querySelector(".round-activity")?.getAttribute("data-round-event") || "",
     eventAnimation: slot.querySelector(".round-activity-text")
       ? getComputedStyle(slot.querySelector(".round-activity-text")).animationName : "",
-    dotAnimation: slot.querySelector(".round-activity")
-      ? getComputedStyle(slot.querySelector(".round-activity"), "::before").animationName : "",
+    dotContent: slot.querySelector(".round-activity")
+      ? getComputedStyle(slot.querySelector(".round-activity"), "::before").content : "none",
     times: [...slot.querySelectorAll(".round-summary-phase time")].map(node => ({
       kind: node.getAttribute("data-round-time"),
       text: node.textContent,
@@ -190,21 +191,22 @@ try {
 
   await page.goto(url, {waitUntil: "domcontentloaded"});
   await page.waitForSelector("#agent-turn-slot .agent-turn-card", {timeout: 20000});
-  await waitForCard(page, "正在调用工具");
+  await waitForCard(page, "Read");
 
   const running = await card(page);
   assert.ok(running.text.includes("Round 1"), `round summary: ${running.text}`);
   assert.equal(running.open, false, "the diagnostic details must start collapsed");
   assert.equal(running.rowsVisible, false, "collapsed diagnostics should hide agent rows");
 
-  // Every non-terminal phase has its own event copy. Tool names never render,
-  // both clocks are present, and the live region holds the event word only.
+  // Every non-terminal phase has its own event copy. The tool phase renders the
+  // normalised tool name, both clocks are present, and the live region holds
+  // nothing but the event word.
   const phases = new Map([
     ["queued", "排队等待"],
     ["preparing", "正在准备"],
     ["session_wake", "正在唤醒 Session"],
     ["thinking", "正在思考"],
-    ["tool", "正在调用工具"],
+    ["tool", "Read"],
     ["waiting_backend", "等待 Backend 响应"],
     ["retrying", "重试中"],
     ["finalizing", "正在整理结果"],
@@ -222,15 +224,24 @@ try {
       assert.ok(item.text, `${phase}: ${item.kind} clock is empty`);
       assert.match(item.live, /^\d+$/, `${phase}: ${item.kind} clock is not ticking from an elapsed value`);
     });
-    assert.doesNotMatch(state.text, /Read/, `${phase}: tool name leaked into the summary`);
+    if (phase !== "tool") assert.doesNotMatch(state.text, /Read/, `${phase}: tool name leaked into the summary`);
     assert.match(state.eventAnimation, /round-activity-breathe/, `${phase}: event text should breathe`);
-    assert.match(state.dotAnimation, /round-activity-pulse/, `${phase}: status dot should breathe`);
+    assert.equal(state.dotContent, "none", `${phase}: the summary still renders a status dot`);
   }
 
+  // A blank tool name falls back to the short generic noun, never the old
+  // "正在调用工具" phrase.
+  await page.evaluate(() => { window.__scenario = "running"; window.__phase = "tool"; window.__toolName = ""; });
+  await waitForCard(page, "工具");
+  const fallback = await card(page);
+  assert.equal(fallback.event, "工具", "empty tool name fallback copy");
+  assert.equal(fallback.liveText, "工具", "empty tool name fallback in the live region");
+
   // A refresh rebuilds the same activity from Task detail, not from local timers.
+  await page.evaluate(() => { window.__toolName = "Read"; });
   await page.reload({waitUntil: "domcontentloaded"});
   await page.waitForSelector("#agent-turn-slot .agent-turn-card", {timeout: 20000});
-  await waitForCard(page, "正在调用工具");
+  await waitForCard(page, "Read");
   assert.equal((await card(page)).open, false);
 
   // The same line must remain visible while the diagnostic details are open.
