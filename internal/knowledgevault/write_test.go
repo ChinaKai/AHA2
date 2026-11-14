@@ -506,12 +506,13 @@ func TestWriteKnowledgeIdempotencyKeyScopedByTask(t *testing.T) {
 }
 
 // Global rows are indexed without a project_id; the duplicate gate must query
-// them without the token project or it never sees any candidate.
+// them without the token project or it never sees any candidate. Keep the
+// non-empty ProjectID from writeTestCreate: the API always passes the token
+// project, and that is exactly the condition that used to produce zero rows.
 func TestWriteKnowledgeGlobalDuplicateGate(t *testing.T) {
 	manager, _, ctx := newWriteTestManager(t)
 	request := writeTestCreate("全局重复检测")
 	request.Scope = WriteScopeGlobal
-	request.ProjectID = ""
 	request.AllowGlobal = true
 	first, err := manager.WriteKnowledge(ctx, request)
 	if err != nil {
