@@ -1,5 +1,6 @@
 import {api} from "./api.js";
 import {icon} from "./icons.js";
+import {t} from "./i18n.js";
 import type {SyncConflict, SyncPreview, SyncRunProgress, SyncSettings, SyncState} from "./types.js";
 
 function escapeHTML(value: unknown): string {
@@ -202,7 +203,7 @@ export function renderSyncSettings(settings: SyncSettings, state: SyncState, pen
       const title = !remote.empty ? remote.title : !local.empty ? local.title : item.object_id;
       return `<article class="sync-conflict-card"><header><span class="sync-domain-badge">${syncDomainForType(item.object_type)}</span><strong>${escapeHTML(item.object_type)}</strong><small>${time(item.created_at)}</small></header><div class="sync-conflict-title">${escapeHTML(title)}</div><div class="sync-conflict-meta"><span>本机 ${escapeHTML(item.local_version || "—")}</span><span>远端 ${escapeHTML(item.remote_version || "—")}</span><span class="sync-conflict-id">${escapeHTML(item.object_id)}</span></div><button type="button" data-sync-conflict="${escapeHTML(item.id)}">查看并处理</button></article>`;
     }).join("")}</div>` : '<div class="empty-state">当前没有同步冲突</div>'}</section>
-    <dialog id="sync-conflict-dialog"><div class="dialog-head"><h2>处理同步冲突</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><div class="dialog-body"><div id="sync-conflict-detail"></div><div class="dialog-actions"><button type="button" data-sync-resolution="local">保留本机</button><button type="button" data-sync-resolution="remote">采用远端</button><button type="button" data-sync-resolution="ignore">忽略</button><button type="button" data-close>取消</button></div></div></dialog>
+    <dialog id="sync-conflict-dialog"><div class="dialog-head"><h2>处理同步冲突</h2><button type="button" data-close class="icon-button" aria-label="${t("common.closeDialog")}">${icon("close")}</button></div><div class="dialog-body"><div id="sync-conflict-detail"></div><div class="dialog-actions"><button type="button" data-sync-resolution="local">保留本机</button><button type="button" data-sync-resolution="remote">采用远端</button><button type="button" data-sync-resolution="ignore">忽略</button><button type="button" data-close>取消</button></div></div></dialog>
   </section>`;
 }
 

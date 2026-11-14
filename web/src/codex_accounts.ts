@@ -1,5 +1,6 @@
 import {api} from "./api.js";
 import {icon} from "./icons.js";
+import {t} from "./i18n.js";
 import type {CodexAccount, CodexUsageWindow} from "./types.js";
 const refreshingAccounts = new Set<string>();
 
@@ -83,7 +84,7 @@ function renderCodexAccountsBase(accounts: CodexAccount[], footer = ""): string 
     ${rows || `<div class="empty">添加 OpenAI Codex 账号后，可为每个模型选择独立账号。</div>`}
     ${footer}
   </section>
-  <dialog id="codex-account-dialog" class="wide"><div class="dialog-head"><h2>添加 Codex 账号</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><div class="dialog-body">
+  <dialog id="codex-account-dialog" class="wide"><div class="dialog-head"><h2>添加 Codex 账号</h2><button type="button" data-close class="icon-button" aria-label="${t("common.closeDialog")}">${icon("close")}</button></div><div class="dialog-body">
     <label>账号备注<input id="codex-account-label" placeholder="可选，例如 工作账号"></label>
     <label>授权链接<div class="codex-auth-link"><textarea id="codex-auth-url" readonly rows="4" placeholder="正在生成..."></textarea><button type="button" id="copy-codex-auth-url" class="icon-button" title="复制授权链接">${icon("copy")}</button></div></label>
     <div class="field-help">复制链接到浏览器完成登录。跳转失败页面出现后，复制浏览器地址栏中的完整 Callback URL。</div>

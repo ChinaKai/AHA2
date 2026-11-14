@@ -154,7 +154,7 @@ export function renderMCPPage(servers: MCPServer[]): string {
 
 function mcpEditDialogHTML(): string {
   return `<dialog id="mcp-edit-dialog" class="mcp-dialog" aria-labelledby="mcp-edit-title"><form id="mcp-edit-form" novalidate>
-    <div class="dialog-head"><h2 id="mcp-edit-title">${t("mcp.edit.addTitle")}</h2><button type="button" data-mcp-close class="icon-button">${icon("close")}</button></div>
+    <div class="dialog-head"><h2 id="mcp-edit-title">${t("mcp.edit.addTitle")}</h2><button type="button" data-mcp-close class="icon-button" aria-label="${t("common.closeDialog")}">${icon("close")}</button></div>
     <div class="dialog-body">
       <label>${t("mcp.field.name")}<input name="name" autocomplete="off" placeholder="filesystem"></label>
       <label>${t("mcp.field.transport")}<select name="transport"><option value="http">HTTP</option><option value="stdio">stdio</option></select></label>
@@ -179,7 +179,7 @@ function mcpEditDialogHTML(): string {
 
 function mcpDetailDialogHTML(): string {
   return `<dialog id="mcp-detail-dialog" class="mcp-dialog" aria-labelledby="mcp-detail-name">
-    <div class="dialog-head"><h2 id="mcp-detail-name">${t("mcp.detail.title")}</h2><button type="button" data-mcp-close class="icon-button">${icon("close")}</button></div>
+    <div class="dialog-head"><h2 id="mcp-detail-name">${t("mcp.detail.title")}</h2><button type="button" data-mcp-close class="icon-button" aria-label="${t("common.closeDialog")}">${icon("close")}</button></div>
     <div class="dialog-body" id="mcp-detail-body"></div>
     <div class="dialog-actions"><button type="button" id="mcp-detail-test">${t("mcp.detail.test")}</button><button type="button" class="primary" data-mcp-close>${t("mcp.detail.close")}</button></div>
   </dialog>`;
@@ -187,7 +187,7 @@ function mcpDetailDialogHTML(): string {
 
 function mcpDeleteDialogHTML(): string {
   return `<dialog id="mcp-delete-dialog" class="mcp-dialog mcp-confirm-dialog" aria-labelledby="mcp-delete-title">
-    <div class="dialog-head"><h2 id="mcp-delete-title">${t("mcp.delete.title")}</h2><button type="button" data-mcp-close class="icon-button">${icon("close")}</button></div>
+    <div class="dialog-head"><h2 id="mcp-delete-title">${t("mcp.delete.title")}</h2><button type="button" data-mcp-close class="icon-button" aria-label="${t("common.closeDialog")}">${icon("close")}</button></div>
     <div class="dialog-body"><p id="mcp-delete-message"></p></div>
     <div class="dialog-actions"><button type="button" data-mcp-close>${t("mcp.cancel")}</button><button type="button" class="danger" id="mcp-delete-confirm">${t("mcp.delete.confirm")}</button></div>
   </dialog>`;
@@ -400,7 +400,6 @@ function openMCPDeleteDialog(options: MCPPageOptions, server: MCPServer, returnT
   rememberFocus(dialog, returnTo);
   bindDialogDismissal(dialog);
   dialog.showModal();
-  window.setTimeout(() => dialog.querySelector<HTMLElement>('[data-mcp-close]')?.focus(), 0);
 }
 
 async function openMCPDetail(options: MCPPageOptions, id: string, returnTo?: HTMLElement | null): Promise<void> {

@@ -788,6 +788,54 @@ export function bindMessageBubbleControls(root: ParentNode = document): void {
   }
 }
 
+const dialogDismissSelector = "[data-close],[data-setup-close],[data-onboarding-close],[data-kb-close],[data-mcp-close]";
+
+function dialogEntryVisible(element: HTMLElement): boolean {
+  return element.getClientRects().length > 0;
+}
+
+// Native showModal() focuses the first tabbable element, which is the icon-only
+// close button in every AHA dialog header. Land on the first meaningful control
+// instead; read-only dialogs focus their heading.
+function dialogEntryTarget(dialog: HTMLDialogElement): HTMLElement | null {
+  const control = [...dialog.querySelectorAll<HTMLElement>(
+    "input:not([type='hidden']):not([disabled]), select:not([disabled]), textarea:not([disabled])",
+  )].find(dialogEntryVisible);
+  if (control) return control;
+  const heading = dialog.querySelector<HTMLElement>(".dialog-head h2, h2, h3");
+  if (heading) {
+    if (!heading.hasAttribute("tabindex")) heading.setAttribute("tabindex", "-1");
+    return heading;
+  }
+  const action = [...dialog.querySelectorAll<HTMLElement>("button:not([disabled]), a[href]")]
+    .find(element => !element.matches(dialogDismissSelector) && dialogEntryVisible(element));
+  return action || dialog;
+}
+
+let dialogEntryFocusInstalled = false;
+const dialogEntrySeen = new WeakSet<HTMLDialogElement>();
+
+// One document-level listener covers every dialog, including the ones created
+// dynamically by the channel and workbench code, without touching each opener.
+export function installDialogEntryFocus(): void {
+  if (typeof document === "undefined" || dialogEntryFocusInstalled) return;
+  dialogEntryFocusInstalled = true;
+  document.addEventListener("focusin", event => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+    const dialog = target.closest("dialog[open]");
+    if (!(dialog instanceof HTMLDialogElement) || dialogEntrySeen.has(dialog)) return;
+    dialogEntrySeen.add(dialog);
+    if (!target.matches(dialogDismissSelector)) return;
+    const next = dialogEntryTarget(dialog);
+    if (next && next !== target) next.focus({preventScroll: true});
+  });
+  // close does not bubble, but capture still reaches the document.
+  document.addEventListener("close", event => {
+    if (event.target instanceof HTMLDialogElement) dialogEntrySeen.delete(event.target);
+  }, true);
+}
+
 export interface PageSlice<T> {
   items: T[];
   page: number;

@@ -1,5 +1,6 @@
 import {api} from "./api.js";
 import {icon} from "./icons.js";
+import {t} from "./i18n.js";
 import type {ChannelConversationSummary, ChannelDelivery, ChannelInstance, ChannelOnboardingOptions, ChannelOnboardingSession, ChannelPlugin, CodexAccount, Knowledge, KnowledgeLibrary, Model, Project, Workspace} from "./types.js";
 
 interface ChannelUIContext {
@@ -192,7 +193,7 @@ function openChannelSettings(instance: ChannelInstance, context: ChannelUIContex
   const dialog = document.createElement("dialog");
   dialog.id = "channel-settings-dialog";
   dialog.className = "channel-settings-dialog";
-  dialog.innerHTML = `<div class="dialog-head"><div><h2>渠道设置</h2><p>${escapeHTML(instance.name)}</p></div><button type="button" class="icon-button" data-close>${icon("close")}</button></div>
+  dialog.innerHTML = `<div class="dialog-head"><div><h2>渠道设置</h2><p>${escapeHTML(instance.name)}</p></div><button type="button" class="icon-button" data-close aria-label="${t("common.closeDialog")}">${icon("close")}</button></div>
     <div class="dialog-body">
       ${channelRuntimeEditor(config, context)}
       <fieldset><legend>消息通知</legend><label class="channel-check"><input type="checkbox" name="notify_task_status" ${config.notify_task_status === true ? "checked" : ""}>普通 Task 状态变更推送到飞书私聊助手</label><small>仅推送等待处理、完成、失败或中断等状态；不会推送普通消息、过程输出或渠道宿主 Task。</small></fieldset>
@@ -325,7 +326,7 @@ function openChannelConversations(instance: ChannelInstance, uiOptions: {setMess
   const dialog = document.createElement("dialog");
   dialog.id = "channel-conversations-dialog";
   dialog.className = "channel-conversations-dialog";
-  dialog.innerHTML = `<div class="dialog-head"><div><h2>会话</h2><p>${escapeHTML(instance.name)} · 私聊与群聊</p></div><button type="button" class="icon-button" data-close>${icon("close")}</button></div><div class="dialog-body"><div data-conversations-body><small>加载中…</small></div></div><div class="dialog-actions"><button type="button" data-close>关闭</button></div>`;
+  dialog.innerHTML = `<div class="dialog-head"><div><h2>会话</h2><p>${escapeHTML(instance.name)} · 私聊与群聊</p></div><button type="button" class="icon-button" data-close aria-label="${t("common.closeDialog")}">${icon("close")}</button></div><div class="dialog-body"><div data-conversations-body><small>加载中…</small></div></div><div class="dialog-actions"><button type="button" data-close>关闭</button></div>`;
   document.body.append(dialog);
   dialog.showModal();
   const close = () => { dialog.close(); dialog.remove(); };
@@ -531,7 +532,7 @@ function showOnboardingSetup(instance: ChannelInstance, options: ChannelOnboardi
   dialog.id = "channel-onboarding-setup";
   dialog.className = "channel-onboarding-setup";
   const existingApp = options.mode === "existing_app";
-  dialog.innerHTML = `<form method="dialog"><div class="dialog-head"><div><h2>${existingApp ? "更新飞书权限与发布" : "配置飞书扫码权限"}</h2><small>${existingApp ? "每次确认都提交应用发布；已开启权限不能在扫码中撤销。" : "核心权限固定启用，其他权限按需勾选。"}</small></div><button type="button" class="icon-button" data-setup-close>${icon("close")}</button></div>
+  dialog.innerHTML = `<form method="dialog"><div class="dialog-head"><div><h2>${existingApp ? "更新飞书权限与发布" : "配置飞书扫码权限"}</h2><small>${existingApp ? "每次确认都提交应用发布；已开启权限不能在扫码中撤销。" : "核心权限固定启用，其他权限按需勾选。"}</small></div><button type="button" class="icon-button" data-setup-close aria-label="${t("common.closeDialog")}">${icon("close")}</button></div>
     <div class="dialog-body channel-onboarding-setup-body">
       <fieldset><legend>飞书权限</legend><div class="channel-onboarding-option-list">${permissionOptionsHTML(options) || "<small>当前提供方没有可选权限。</small>"}</div><p class="field-help">扫码只增补权限。已开启权限需要到飞书开发者后台撤销。</p></fieldset>
       <fieldset><legend>飞书机器人菜单</legend><div class="channel-onboarding-menu-reset"><span><strong>重置为 AHA 默认菜单</strong><small>重新初始化项目、Workspace、任务查询和创建任务菜单，可能提交应用发布。</small></span><button type="button" data-reset-runtime-menus>重置菜单</button></div></fieldset>
@@ -626,7 +627,7 @@ function showOnboarding(initial: ChannelOnboardingSession, options: {refresh: ()
   const existingApp = initial.mode === "existing_app";
   const title = existingApp ? "扫码更新飞书权限" : "扫码创建飞书应用";
   const notice = existingApp ? "仅增补权限，不修改已有菜单或其他应用配置。即使没有新增权限，扫码确认后也会自动提交应用版本发布；审批结果以飞书后台为准。" : "请在飞书官方页面核对应用名称与最小权限后确认。新应用会执行一次 AHA 菜单初始化并提交发布。";
-  dialog.innerHTML = `<div class="dialog-body"><header class="dialog-head"><div><h2>${title}</h2><p>${notice}</p></div><button type="button" class="icon-button" data-onboarding-close>${icon("close")}</button></header><div data-onboarding-state class="channel-onboarding-state"></div><div class="dialog-actions"><button type="button" data-onboarding-cancel>取消绑定</button></div></div>`;
+  dialog.innerHTML = `<div class="dialog-body"><header class="dialog-head"><div><h2>${title}</h2><p>${notice}</p></div><button type="button" class="icon-button" data-onboarding-close aria-label="${t("common.closeDialog")}">${icon("close")}</button></header><div data-onboarding-state class="channel-onboarding-state"></div><div class="dialog-actions"><button type="button" data-onboarding-cancel>取消绑定</button></div></div>`;
   document.body.append(dialog);
   const close = () => { if (onboardingPoll) window.clearTimeout(onboardingPoll); onboardingPoll = 0; dialog.close(); dialog.remove(); };
   dialog.querySelector("[data-onboarding-close]")?.addEventListener("click", () => { close(); void options.refresh(); });

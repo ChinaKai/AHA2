@@ -29,7 +29,7 @@ import {DEFAULT_TASK_STATUS_FILTERS, LOCAL_TASK_DEVICE_FILTER, TASK_STATUS_GROUP
 import type {TaskStatusGroup} from "./task_filters.js";
 import {TASK_TOOL_DEFAULT_WIDTH, normalizePinnedTaskTool, normalizeTaskToolMode, normalizeTaskToolWidth, renderTaskToolButtons, renderTaskToolContent, renderTaskToolPanel} from "./task_tools.js";
 import type {TaskTool, TaskToolMode} from "./task_tools.js";
-import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, createListRefreshScheduler, createResourceLoader, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, loadNavigationSnapshot, matchingSlashCommands, paginateItems, paginationHTML, planKeyedNodes, stableTextSignature, protoBadges, readPerfPanelPreference, renderModelHealthCell, renderProtocolProbeStatus, renderWorkspaceDetection, replaceInteractiveRegion, restoreInteractiveRegion, saveNavigationSnapshot, textMatchesQuery, writePerfPanelPreference} from "./ui_helpers.js";
+import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, createListRefreshScheduler, createResourceLoader, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, installDialogEntryFocus, loadNavigationSnapshot, matchingSlashCommands, paginateItems, paginationHTML, planKeyedNodes, stableTextSignature, protoBadges, readPerfPanelPreference, renderModelHealthCell, renderProtocolProbeStatus, renderWorkspaceDetection, replaceInteractiveRegion, restoreInteractiveRegion, saveNavigationSnapshot, textMatchesQuery, writePerfPanelPreference} from "./ui_helpers.js";
 import type {InteractiveRegionState, ModelHealthView} from "./ui_helpers.js";
 import {
   compactNumber,
@@ -676,6 +676,9 @@ let loadingOlderConversation = false;
 let taskListPointerActive = false;
 let appPointerActive = false;
 let openingTaskID = "";
+// Set only when a Task was opened from its list card, so returning to the list
+// can put focus back on that card instead of the top of the page.
+let taskCardFocusReturnID = "";
 let listRefreshInFlight = false;
 // Startup prefetch never chains other views. It runs at most once, on idle, and
 // only while the user has not interacted or opened a Task.
@@ -3870,12 +3873,12 @@ function projectDetailView(project: Project): string {
 }
 
 function projectDialog(): string {
-  return `<dialog id="project-dialog"><form id="project-form" method="dialog"><div class="dialog-head"><h2>新建项目</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><input type="hidden" id="project-edit-id" name="project_edit_id" value=""><label>名称<input name="name" id="project-name" required></label><label>描述<textarea name="description" id="project-desc"></textarea></label><label>项目类型<select name="project_type" id="project-type"><option value="folder">普通文件夹</option><option value="git">Git 仓库</option></select></label><div class="git-fields" style="display:none"><label>Git Repository Identity<input name="repository_identity" id="project-repo" placeholder="可选：remote URL"></label><label>默认分支<input name="default_branch" id="project-branch" value="main"></label></div><div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" value="default">创建项目</button></div></form></dialog>`;
+  return `<dialog id="project-dialog"><form id="project-form" method="dialog"><div class="dialog-head"><h2>新建项目</h2><button type="button" data-close class="icon-button" aria-label="${t("common.closeDialog")}">${icon("close")}</button></div><input type="hidden" id="project-edit-id" name="project_edit_id" value=""><label>名称<input name="name" id="project-name" required></label><label>描述<textarea name="description" id="project-desc"></textarea></label><label>项目类型<select name="project_type" id="project-type"><option value="folder">普通文件夹</option><option value="git">Git 仓库</option></select></label><div class="git-fields" style="display:none"><label>Git Repository Identity<input name="repository_identity" id="project-repo" placeholder="可选：remote URL"></label><label>默认分支<input name="default_branch" id="project-branch" value="main"></label></div><div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" value="default">创建项目</button></div></form></dialog>`;
 }
 
 function workspaceDialog(): string {
   return `<dialog id="workspace-dialog"><form id="workspace-form" method="dialog">
-    <div class="dialog-head"><h2>添加 Workspace</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div>
+    <div class="dialog-head"><h2>添加 Workspace</h2><button type="button" data-close class="icon-button" aria-label="${t("common.closeDialog")}">${icon("close")}</button></div>
     <input type="hidden" id="ws-edit-id" name="ws_edit_id" value="">
     <label>项目<select name="project_id" id="ws-project">${state.projects.filter(item => !item.channel_retired && !isSystemProject(item)).map(item => `<option value="${item.id}" ${item.id === state.dialogProjectID ? "selected" : ""}>${escapeHTML(item.name)}</option>`).join("")}</select></label>
     <label>名称<input name="name" id="ws-name" value="本地开发" required></label>
@@ -4394,20 +4397,20 @@ function providerDialog(): string {
     .filter(([key]) => key !== "custom")
     .map(([key, preset]) => `<option value="${key}">${escapeHTML(preset.name)}</option>`)
     .join("");
-  return `<dialog id="provider-dialog"><div class="dialog-head"><h2>添加 Provider</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><div class="dialog-body"><input type="hidden" id="provider-edit-id" name="provider_edit_id" value=""><label>常用供应商<select id="provider-preset">${presets}<option value="custom">自定义</option></select></label><label>名称<input id="provider-name" placeholder="网关名称" required></label><label>API Base URL（OpenAI 风格）<input id="provider-base-url" placeholder="https://api.example.com/v1" required></label><label>Anthropic Base URL（可选，仅当与上方不同）<input id="provider-anthropic-url" placeholder="https://api.example.com/anthropic"></label><label>API Key<input id="provider-api-key" type="password" placeholder="留空则保持不变"></label><div class="dialog-actions"><button type="button" id="save-provider" class="primary">保存 Provider</button></div></div></dialog>`;
+  return `<dialog id="provider-dialog"><div class="dialog-head"><h2>添加 Provider</h2><button type="button" data-close class="icon-button" aria-label="${t("common.closeDialog")}">${icon("close")}</button></div><div class="dialog-body"><input type="hidden" id="provider-edit-id" name="provider_edit_id" value=""><label>常用供应商<select id="provider-preset">${presets}<option value="custom">自定义</option></select></label><label>名称<input id="provider-name" placeholder="网关名称" required></label><label>API Base URL（OpenAI 风格）<input id="provider-base-url" placeholder="https://api.example.com/v1" required></label><label>Anthropic Base URL（可选，仅当与上方不同）<input id="provider-anthropic-url" placeholder="https://api.example.com/anthropic"></label><label>API Key<input id="provider-api-key" type="password" placeholder="留空则保持不变"></label><div class="dialog-actions"><button type="button" id="save-provider" class="primary">保存 Provider</button></div></div></dialog>`;
 }
 
 function modelDialog(): string {
   const options = state.providers.map(item => `<option value="${item.id}">${escapeHTML(item.name)}</option>`).join("");
-  return `<dialog id="model-dialog" class="wide"><div class="dialog-head"><h2>添加模型</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><div class="dialog-body"><label>Provider<select id="model-provider">${options || `<option value="">先添加 Provider</option>`}</select></label><div class="dialog-actions"><button type="button" id="detect-models" class="primary">${icon("refresh")}获取模型列表</button><button type="button" id="open-model-add" disabled>添加 (0)</button></div><div id="model-detect-results"></div></div></dialog><dialog id="model-add-dialog"><div class="dialog-head"><h2>添加所选模型</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><div class="dialog-body"><div class="two"><label>Backend<select id="model-add-backend">${backendSelectOptionsHTML()}</select></label><label>协议<select id="model-add-wire"></select></label></div><div class="field-help" id="model-add-summary">已选 0 个模型</div><div class="dialog-actions"><button type="button" data-close>取消</button><button type="button" id="confirm-model-add" class="primary">添加</button></div></div></dialog>`;
+  return `<dialog id="model-dialog" class="wide"><div class="dialog-head"><h2>添加模型</h2><button type="button" data-close class="icon-button" aria-label="${t("common.closeDialog")}">${icon("close")}</button></div><div class="dialog-body"><label>Provider<select id="model-provider">${options || `<option value="">先添加 Provider</option>`}</select></label><div class="dialog-actions"><button type="button" id="detect-models" class="primary">${icon("refresh")}获取模型列表</button><button type="button" id="open-model-add" disabled>添加 (0)</button></div><div id="model-detect-results"></div></div></dialog><dialog id="model-add-dialog"><div class="dialog-head"><h2>添加所选模型</h2><button type="button" data-close class="icon-button" aria-label="${t("common.closeDialog")}">${icon("close")}</button></div><div class="dialog-body"><div class="two"><label>Backend<select id="model-add-backend">${backendSelectOptionsHTML()}</select></label><label>协议<select id="model-add-wire"></select></label></div><div class="field-help" id="model-add-summary">已选 0 个模型</div><div class="dialog-actions"><button type="button" data-close>取消</button><button type="button" id="confirm-model-add" class="primary">添加</button></div></div></dialog>`;
 }
 
 function editModelDialog(): string {
-  return `<dialog id="model-edit-dialog"><div class="dialog-head"><h2>编辑模型</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><div class="dialog-body"><label>显示名称<input id="model-edit-name"></label><label>模型 ID（发送给后端）<input id="model-edit-wire-model" spellcheck="false"><span class="field-help">决定实际调用的模型；Claude 走网关且需要 1M 上下文时，在此追加 [1m]。</span></label><div class="two"><label>模型协议<select id="model-edit-wire">${modelWireEditOptionsHTML()}</select></label><label>Agent Backend<select id="model-edit-backend">${backendSelectOptionsHTML()}</select></label></div><div class="two"><label>默认推理强度<select id="model-edit-effort"><option value="">继承默认</option><option>high</option><option>medium</option><option>low</option></select></label><label>Context Window<input id="model-edit-context" type="number" value="0"></label></div><label>Max Output Tokens<input id="model-edit-maxout" type="number" value="0"></label><label>自动压缩窗口（tokens）<input id="model-edit-compact" type="number" min="0" step="1000" value="0"><span class="field-help">按上下文窗口的 80% 计算，并预留最大输出与 16K 余量；0 表示交给 Agent CLI 自己决定。Claude Code 和 Codex 会读取该值。</span></label><label class="security-setting-toggle"><input id="model-edit-image" type="checkbox"><span><strong>支持图片输入</strong><small>默认开启；仅当该模型确实不能接收图片时关闭。DSH 会据此在 profile 里声明 input 模态。</small></span></label><div class="dialog-actions"><button type="button" data-close>取消</button><button type="button" id="save-model-edit" class="primary">保存</button></div></div></dialog>`;
+  return `<dialog id="model-edit-dialog"><div class="dialog-head"><h2>编辑模型</h2><button type="button" data-close class="icon-button" aria-label="${t("common.closeDialog")}">${icon("close")}</button></div><div class="dialog-body"><label>显示名称<input id="model-edit-name"></label><label>模型 ID（发送给后端）<input id="model-edit-wire-model" spellcheck="false"><span class="field-help">决定实际调用的模型；Claude 走网关且需要 1M 上下文时，在此追加 [1m]。</span></label><div class="two"><label>模型协议<select id="model-edit-wire">${modelWireEditOptionsHTML()}</select></label><label>Agent Backend<select id="model-edit-backend">${backendSelectOptionsHTML()}</select></label></div><div class="two"><label>默认推理强度<select id="model-edit-effort"><option value="">继承默认</option><option>high</option><option>medium</option><option>low</option></select></label><label>Context Window<input id="model-edit-context" type="number" value="0"></label></div><label>Max Output Tokens<input id="model-edit-maxout" type="number" value="0"></label><label>自动压缩窗口（tokens）<input id="model-edit-compact" type="number" min="0" step="1000" value="0"><span class="field-help">按上下文窗口的 80% 计算，并预留最大输出与 16K 余量；0 表示交给 Agent CLI 自己决定。Claude Code 和 Codex 会读取该值。</span></label><label class="security-setting-toggle"><input id="model-edit-image" type="checkbox"><span><strong>支持图片输入</strong><small>默认开启；仅当该模型确实不能接收图片时关闭。DSH 会据此在 profile 里声明 input 模态。</small></span></label><div class="dialog-actions"><button type="button" data-close>取消</button><button type="button" id="save-model-edit" class="primary">保存</button></div></div></dialog>`;
 }
 
 function workspaceTakeoverDialog(): string {
-  return `<dialog id="workspace-takeover-dialog"><form id="workspace-takeover-form"><div class="dialog-head"><h2>接管只读 Workspace</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><input type="hidden" name="source_id"><p class="field-help">接管会创建新的本机 Workspace；远端镜像保持只读且不会被修改。</p><label>名称<input name="name" required></label><div class="two"><label>Transport<select name="transport"><option value="native">Native</option><option value="wsl">WSL</option><option value="ssh">SSH</option></select></label><label>本机 Root Path<input name="root_path" required placeholder="必须重新确认本机路径"></label></div><label class="workspace-takeover-wsl">WSL Distro<input name="distro" placeholder="例如 Ubuntu"></label><div class="workspace-takeover-ssh"><div class="two"><label>SSH Host<input name="ssh_host"></label><label>SSH User<input name="ssh_user"></label></div><div class="two"><label>SSH Port<input name="ssh_port" type="number" min="1" max="65535" value="22"></label><label>SSH Auth<select name="ssh_auth"><option value="auto">Auto</option><option value="password">Password</option><option value="key">Key</option></select></label></div><label class="reuse-remote-secret"><input name="reuse_remote_credential" type="checkbox">复用已同步的端到端加密 SSH 凭据</label><label>或输入新密码<input name="ssh_password" type="password" autocomplete="new-password"></label></div><div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" type="submit">创建本机副本</button></div></form></dialog>`;
+  return `<dialog id="workspace-takeover-dialog"><form id="workspace-takeover-form"><div class="dialog-head"><h2>接管只读 Workspace</h2><button type="button" data-close class="icon-button" aria-label="${t("common.closeDialog")}">${icon("close")}</button></div><input type="hidden" name="source_id"><p class="field-help">接管会创建新的本机 Workspace；远端镜像保持只读且不会被修改。</p><label>名称<input name="name" required></label><div class="two"><label>Transport<select name="transport"><option value="native">Native</option><option value="wsl">WSL</option><option value="ssh">SSH</option></select></label><label>本机 Root Path<input name="root_path" required placeholder="必须重新确认本机路径"></label></div><label class="workspace-takeover-wsl">WSL Distro<input name="distro" placeholder="例如 Ubuntu"></label><div class="workspace-takeover-ssh"><div class="two"><label>SSH Host<input name="ssh_host"></label><label>SSH User<input name="ssh_user"></label></div><div class="two"><label>SSH Port<input name="ssh_port" type="number" min="1" max="65535" value="22"></label><label>SSH Auth<select name="ssh_auth"><option value="auto">Auto</option><option value="password">Password</option><option value="key">Key</option></select></label></div><label class="reuse-remote-secret"><input name="reuse_remote_credential" type="checkbox">复用已同步的端到端加密 SSH 凭据</label><label>或输入新密码<input name="ssh_password" type="password" autocomplete="new-password"></label></div><div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" type="submit">创建本机副本</button></div></form></dialog>`;
 }
 
 interface TaskFilterOption {
@@ -4464,8 +4467,11 @@ function taskCardHtml(task: Task): string {
   // only ordinary rows get the mobile action-column status copy; the mobile
   // breakpoint hides the title badge for every row to avoid showing it twice.
   const readonlyBadge = archived || task.read_only || task.status === "completed";
+  // The card body is the keyboard entry point; the edit/delete buttons are
+  // siblings so they stay independently operable and never open the Task.
+  const openLabel = [task.code, task.title, statusLabel(task.status)].filter(Boolean).join(" ");
   return `<article class="task-card" data-task="${task.id}" data-task-signature="${taskCardSignature(task, project, ws)}">
-    <div class="task-card-main">
+    <div class="task-card-main" role="button" tabindex="0" data-task-open aria-label="${escapeHTML(openLabel)}">
       <div class="task-card-title"><span class="task-code">${escapeHTML(task.code || "")}</span><h3 data-task-title="${task.id}">${escapeHTML(task.title)}</h3><span class="status task-card-title-status ${statusClass(task.status)}">${statusLabel(task.status)}</span></div>
       ${task.current_goal && task.current_goal !== task.title ? `<p class="task-goal">${escapeHTML(task.current_goal)}</p>` : ""}
       <div class="task-meta">
@@ -4700,7 +4706,7 @@ function taskDialog(): string {
     mcpTotal: mcp.total,
   });
   return `<dialog id="task-dialog" class="wide agent-config-dialog"><form id="task-form">
-    <div class="dialog-head"><div><h2>创建任务</h2><small>模型与推理强度决定新 Agent 的执行方式，创建后仍可调整。</small></div><button type="button" data-close class="icon-button">${icon("close")}</button></div>
+    <div class="dialog-head"><div><h2>创建任务</h2><small>模型与推理强度决定新 Agent 的执行方式，创建后仍可调整。</small></div><button type="button" data-close class="icon-button" aria-label="${t("common.closeDialog")}">${icon("close")}</button></div>
     <div class="dialog-body">
       <section class="agent-config-section">
         <h3>基本信息</h3>
@@ -4813,7 +4819,7 @@ function taskTakeoverDialog(detail: TaskDetail): string {
   const workspaces = state.workspaces.filter(item => item.project_id === detail.task.project_id && !item.read_only && Boolean(item.root_path));
   const hardware = detail.hardware || [];
   const groups = hardware.map(group => `<fieldset class="takeover-hardware" data-hardware-id="${escapeHTML(group.id)}"><legend>${escapeHTML(group.description || group.id)}</legend><input type="hidden" data-field="id" value="${escapeHTML(group.id)}"><input type="hidden" data-field="description" value="${escapeHTML(group.description || "")}"><input type="hidden" data-field="mode" value="${escapeHTML(group.mode)}"><div class="two"><label>本机串口<input data-field="serial-device" placeholder="${escapeHTML(group.serial?.device || "无需串口")}" ${group.serial?.device ? "required" : ""}></label><label>Baudrate<input data-field="serial-baudrate" type="number" value="${Number(group.serial?.baudrate || 115200)}"></label></div><div class="two"><label>本机网络地址<input data-field="network-host" placeholder="${escapeHTML(group.network?.host || "无需网络")}" ${group.network?.host ? "required" : ""}></label><label>端口<input data-field="network-port" type="number" value="${Number(group.network?.port || 22)}"></label></div><input type="hidden" data-field="network-protocol" value="${escapeHTML(group.network?.protocol || "raw")}"><input type="hidden" data-field="network-ssh-auth" value="${escapeHTML(group.network?.ssh_auth || "auto")}"><label>用户名<input data-field="username" value="${escapeHTML(group.username || "")}"></label>${group.password_configured ? `<label class="reuse-remote-secret"><input data-field="reuse-remote-credential" type="checkbox" checked>复用已同步的端到端加密凭据</label>` : ""}<label>${group.password_configured ? "或输入新密码" : "密码（可选）"}<input data-field="password" type="password" autocomplete="new-password"></label></fieldset>`).join("");
-  return `<dialog id="task-takeover-dialog" class="wide"><form id="task-takeover-form"><div class="dialog-head"><h2>接管只读 Task</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><p class="field-help">接管会创建新的本机 Task。请重新选择本机 Workspace，并确认所有设备专属路径和端点。</p><label>标题<input name="title" required value="${escapeHTML(detail.task.title)} (本机)"></label><label>需求<textarea name="request" required>${escapeHTML(detail.task.original_request || detail.task.current_goal || detail.task.title)}</textarea></label><label>本机 Workspace<select name="workspace_id" id="takeover-task-workspace" required>${workspaces.map(item => `<option value="${item.id}">${escapeHTML(item.name)} · ${escapeHTML(item.root_path)}</option>`).join("") || '<option value="">请先为此项目创建本机 Workspace</option>'}</select></label>${runtimeFieldsHTML("takeover-task", state.models, state.codexAccounts)}<div class="two"><label>推理强度<select name="reasoning_effort" id="takeover-task-effort"></select></label><label>文件访问<select name="filesystem"><option value="workspace-write">工作区可写</option><option value="read-only">只读</option><option value="danger-full-access">完全访问</option></select></label></div><div class="two"><label>协作模式<select name="collaboration_mode"><option value="auto" ${detail.task.collaboration_mode === "auto" ? "selected" : ""}>Auto</option><option value="single" ${detail.task.collaboration_mode === "single" ? "selected" : ""}>Single</option></select></label><label>最大 Agent 数<input name="max_agents" type="number" min="1" value="${Number(detail.task.max_agents || 3)}"></label></div><label>审批<select name="approval"><option value="never">无需确认</option><option value="auto">自动批准</option></select></label>${groups ? `<section><h3>本机硬件重绑定</h3>${groups}</section>` : ""}<div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" type="submit" ${workspaces.length ? "" : "disabled"}>创建本机 Task</button></div></form></dialog>`;
+  return `<dialog id="task-takeover-dialog" class="wide"><form id="task-takeover-form"><div class="dialog-head"><h2>接管只读 Task</h2><button type="button" data-close class="icon-button" aria-label="${t("common.closeDialog")}">${icon("close")}</button></div><p class="field-help">接管会创建新的本机 Task。请重新选择本机 Workspace，并确认所有设备专属路径和端点。</p><label>标题<input name="title" required value="${escapeHTML(detail.task.title)} (本机)"></label><label>需求<textarea name="request" required>${escapeHTML(detail.task.original_request || detail.task.current_goal || detail.task.title)}</textarea></label><label>本机 Workspace<select name="workspace_id" id="takeover-task-workspace" required>${workspaces.map(item => `<option value="${item.id}">${escapeHTML(item.name)} · ${escapeHTML(item.root_path)}</option>`).join("") || '<option value="">请先为此项目创建本机 Workspace</option>'}</select></label>${runtimeFieldsHTML("takeover-task", state.models, state.codexAccounts)}<div class="two"><label>推理强度<select name="reasoning_effort" id="takeover-task-effort"></select></label><label>文件访问<select name="filesystem"><option value="workspace-write">工作区可写</option><option value="read-only">只读</option><option value="danger-full-access">完全访问</option></select></label></div><div class="two"><label>协作模式<select name="collaboration_mode"><option value="auto" ${detail.task.collaboration_mode === "auto" ? "selected" : ""}>Auto</option><option value="single" ${detail.task.collaboration_mode === "single" ? "selected" : ""}>Single</option></select></label><label>最大 Agent 数<input name="max_agents" type="number" min="1" value="${Number(detail.task.max_agents || 3)}"></label></div><label>审批<select name="approval"><option value="never">无需确认</option><option value="auto">自动批准</option></select></label>${groups ? `<section><h3>本机硬件重绑定</h3>${groups}</section>` : ""}<div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" type="submit" ${workspaces.length ? "" : "disabled"}>创建本机 Task</button></div></form></dialog>`;
 }
 
 function taskChannelPanelHTML(): string {
@@ -5512,7 +5518,7 @@ function syncCompletedTaskFrozen(detail: TaskDetail): void {
 }
 
 function reopenTaskDialog(detail: TaskDetail): string {
-  return `<dialog id="reopen-task-dialog"><form id="reopen-task-form"><div class="dialog-head"><h2>重新打开任务</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><div class="dialog-body"><p class="field-help">${escapeHTML(detail.task.code || detail.task.title)}</p><p>重新打开后 Task 回到「等待处理」状态，可以继续编辑配置和发送消息。</p><p class="dialog-warning">已完成的记录不会被删除，但新消息会开启新的 Round。</p></div><div class="dialog-actions"><button type="button" data-close>取消</button><button type="submit" class="primary">确认重新打开</button></div></form></dialog>`;
+  return `<dialog id="reopen-task-dialog"><form id="reopen-task-form"><div class="dialog-head"><h2>重新打开任务</h2><button type="button" data-close class="icon-button" aria-label="${t("common.closeDialog")}">${icon("close")}</button></div><div class="dialog-body"><p class="field-help">${escapeHTML(detail.task.code || detail.task.title)}</p><p>重新打开后 Task 回到「等待处理」状态，可以继续编辑配置和发送消息。</p><p class="dialog-warning">已完成的记录不会被删除，但新消息会开启新的 Round。</p></div><div class="dialog-actions"><button type="button" data-close>取消</button><button type="submit" class="primary">确认重新打开</button></div></form></dialog>`;
 }
 
 // Explains in the frozen state why input is gone and what the way forward is.
@@ -6346,20 +6352,31 @@ function bindTaskListControls(root: ParentNode = document): void {
       setup(element);
     });
   };
-  each("[data-task]", button => {
-    button.addEventListener("pointerdown", () => {
+  const openTaskFromCard = (taskID: string): void => {
+    if (!taskID || openingTaskID) return;
+    taskCardFocusReturnID = taskID;
+    void openTask(taskID).catch(error => {
+      taskCardFocusReturnID = "";
+      setMessage("error", error instanceof Error ? error.message : String(error));
+      render();
+    });
+  };
+  each("[data-task]", card => {
+    card.addEventListener("pointerdown", () => {
       taskListPointerActive = true;
     });
-    button.addEventListener("click", async event => {
+    card.addEventListener("click", event => {
       if ((event.target as HTMLElement).closest(".task-card-actions")) return;
-      const taskID = button.dataset.task!;
-      if (openingTaskID) return;
-      try {
-        await openTask(taskID);
-      } catch (error) {
-        setMessage("error", error instanceof Error ? error.message : String(error));
-        render();
-      }
+      openTaskFromCard(card.dataset.task!);
+    });
+  });
+  // Enter/Space only activate the card body itself. Key events bubbling from
+  // the edit/delete buttons are left to those controls.
+  each("[data-task-open]", open => {
+    open.addEventListener("keydown", event => {
+      if (event.target !== open || (event.key !== "Enter" && event.key !== " ")) return;
+      event.preventDefault();
+      openTaskFromCard(open.closest<HTMLElement>("[data-task]")?.dataset.task || "");
     });
   });
   each("[data-delete-task]", button => button.addEventListener("click", async event => {
@@ -7126,6 +7143,12 @@ function bindCommon(): void {
     state.selectedTask = null;
     closeEvents();
     render();
+    const returnID = taskCardFocusReturnID;
+    taskCardFocusReturnID = "";
+    if (returnID) {
+      document.querySelector<HTMLElement>(`.task-card[data-task="${CSS.escape(returnID)}"] [data-task-open]`)
+        ?.focus({preventScroll: true});
+    }
   });
   document.querySelector<HTMLFormElement>("#task-takeover-form")?.addEventListener("submit", event => {
     event.preventDefault();
@@ -8213,6 +8236,7 @@ document.addEventListener("click", event => {
   window.dispatchEvent(new CustomEvent("aha:pet-settings"));
 });
 startUITranslationObserver();
+installDialogEntryFocus();
 render();
 if (perfEnabled) startPerfPanel();
 void bootstrap();

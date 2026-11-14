@@ -744,7 +744,7 @@ export function renderAgentConfigDialog(detail: TaskDetail, agentID: string, mod
     showTaskModules: isMain,
   });
   return `<dialog id="agent-config-dialog" class="wide agent-config-dialog"><form id="agent-config-form" method="dialog">
-    <div class="dialog-head"><div><h2>${escapeHTML(agent.agent_id)} 配置</h2><small>${escapeHTML(agent.title || agent.role)}</small></div><button type="button" data-close class="icon-button">${icon("close")}</button></div>
+    <div class="dialog-head"><div><h2>${escapeHTML(agent.agent_id)} 配置</h2><small>${escapeHTML(agent.title || agent.role)}</small></div><button type="button" data-close class="icon-button" aria-label="${t("common.closeDialog")}">${icon("close")}</button></div>
     <div class="dialog-body">
       <input type="hidden" name="agent_id" value="${escapeHTML(agent.agent_id)}">
       ${inheritToggle}
