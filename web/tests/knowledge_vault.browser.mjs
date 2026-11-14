@@ -50,11 +50,23 @@ const FENCE_DOC = {
   outline: [{level: 1, text: "文档", slug: "kv-doc"}, {level: 2, text: "真标题", slug: "kv-real-title"}],
   backlinks: [], tags: [],
 };
-const globalTree = [{
-  id: "g-index", title: "全局索引", path: "global/index.md", type: "navigation", status: "verified", scope: "global", is_index: true, system: true, children: [],
+const DEEP_DOC = {
+  ...DOC, id: "g-deep", title: "深入指南", path: "global/guides/advanced/deep.md",
+  relative_path: "global/guides/advanced/deep.md", absolute_path: "/srv/vault/项目 知识/global/guides/advanced/deep.md",
+  scope: "global", project_id: "", library_id: "global", library_name: "全局知识",
+  obsidian_file: "global/guides/advanced/deep", backlinks: [], tags: [],
+};
+const globalTree = [{id: "g-index", title: "全局索引", path: "global/index.md", type: "navigation", status: "verified", scope: "global", is_index: true, system: true, children: [],
 }, {
   id: "g-folder", title: "guides", path: "global/guides", type: "reference", status: "verified", scope: "global", is_index: false, system: false,
-  children: [{id: "g-doc", title: "全局指南", path: "global/guides/guide.md", type: "practice", status: "verified", scope: "global", is_index: false, system: false, children: []}],
+  children: [
+    {id: "g-doc", title: "全局指南", path: "global/guides/guide.md", type: "practice", status: "verified", scope: "global", is_index: false, system: false, children: []},
+    {id: "g-sub", title: "advanced", path: "global/guides/advanced", type: "reference", status: "verified", scope: "global", is_index: false, system: false,
+      children: [{id: "g-deep", title: "深入指南", path: "global/guides/advanced/deep.md", type: "practice", status: "verified", scope: "global", is_index: false, system: false, children: []}]},
+  ],
+}, {
+  id: "g-other", title: "reference", path: "global/reference", type: "reference", status: "verified", scope: "global", is_index: false, system: false,
+  children: [{id: "g-other-doc", title: "参考手册", path: "global/reference/manual.md", type: "reference", status: "verified", scope: "global", is_index: false, system: false, children: []}],
 }];
 const projectTree = [{
   id: "p-index", title: "Demo 索引", path: "projects/p1/index.md", type: "navigation", status: "verified", scope: "project", project_id: "p1", is_index: true, system: true, children: [],
@@ -87,6 +99,7 @@ const TREES = ${JSON.stringify({global: globalTree, "project:p1": projectTree})}
 const DOC = ${JSON.stringify(DOC)};
 const INBOX_DOC = ${JSON.stringify(INBOX_DOC)};
 const FENCE_DOC = ${JSON.stringify(FENCE_DOC)};
+const DEEP_DOC = ${JSON.stringify(DEEP_DOC)};
 const RECENT = ${JSON.stringify(RECENT)};
 const GLOBAL_RECENT = ${JSON.stringify(GLOBAL_RECENT)};
 const GLOBAL_INBOX = ${JSON.stringify(GLOBAL_INBOX)};
@@ -124,6 +137,7 @@ window.fetch = async (input, init = {}) => {
   if (path.startsWith("/api/v1/knowledge-vault/doc/")) {
     const id = decodeURIComponent(path.slice("/api/v1/knowledge-vault/doc/".length));
     if (id === "doc-fence") return json({ok: true, doc: FENCE_DOC});
+    if (id === "g-deep") return json({ok: true, doc: DEEP_DOC});
     if (id === "doc-1" || id === "doc-2" || id.startsWith("doc-") || id === "g-doc" || id === "g-index") return json({ok: true, doc: DOC});
     if (id === "inbox-1") return json({ok: true, doc: INBOX_DOC});
     return json({ok: false, error: "knowledge_vault_document_not_found"}, 404);
@@ -258,8 +272,37 @@ try {
   // Tree is a nav with real anchors, grouped by folder and not by type.
   assert.equal(await page.locator("nav.kv-tree-panel").count(), 1);
   assert.equal(await page.locator('nav.kv-tree-panel [role="tree"]').count(), 0);
-  assert.ok(await page.locator('a.kv-tree-link[href="#knowledge?doc=g-doc&scope=global"]').count() >= 1);
   assert.match(await page.locator("nav.kv-tree-panel").innerText(), /系统索引[\s\S]*文档/);
+
+  // Every directory starts collapsed like `tree` output: children are not in
+  // the DOM until the folder is expanded, and nested folders stay closed.
+  assert.equal(await page.locator('[data-kv-toggle="g-folder"]').getAttribute("aria-expanded"), "false");
+  assert.equal(await page.locator('[data-kv-toggle="g-other"]').getAttribute("aria-expanded"), "false");
+  assert.equal(await page.locator('a[data-kv-doc="g-doc"]').count(), 0, "collapsed folder children are not rendered");
+  assert.equal(await page.locator('a[data-kv-doc="g-deep"]').count(), 0);
+  await page.locator('[data-kv-toggle="g-folder"]').click();
+  assert.equal(await page.locator('[data-kv-toggle="g-folder"]').getAttribute("aria-expanded"), "true");
+  assert.ok(await page.locator('a.kv-tree-link[href="#knowledge?doc=g-doc&scope=global"]').count() >= 1);
+  assert.equal(await page.locator('[data-kv-toggle="g-sub"]').getAttribute("aria-expanded"), "false");
+  assert.equal(await page.locator('a[data-kv-doc="g-deep"]').count(), 0, "nested folders start collapsed too");
+  // The toggle keeps keyboard operation: Enter collapses and expands.
+  await page.locator('[data-kv-toggle="g-folder"]').focus();
+  await page.keyboard.press("Enter");
+  assert.equal(await page.locator('[data-kv-toggle="g-folder"]').getAttribute("aria-expanded"), "false");
+  assert.equal(await page.locator('a[data-kv-doc="g-doc"]').count(), 0);
+  await page.keyboard.press("Enter");
+  assert.equal(await page.locator('[data-kv-toggle="g-folder"]').getAttribute("aria-expanded"), "true");
+  assert.equal(await page.locator('a[data-kv-doc="g-doc"]').count(), 1);
+
+  // Switching libraries rebuilds the tree collapsed; coming back does not
+  // resurrect the previous expansion.
+  await page.selectOption("#kv-library", "project:p1");
+  await page.waitForFunction(() => Boolean(document.querySelector('a[data-kv-doc="doc-1"]')));
+  await page.selectOption("#kv-library", "global");
+  await page.waitForFunction(() => document.querySelector('[data-kv-toggle="g-folder"]')?.getAttribute("aria-expanded") === "false");
+  assert.equal(await page.locator('a[data-kv-doc="g-doc"]').count(), 0, "switching libraries resets folders to collapsed");
+  await page.locator('[data-kv-toggle="g-folder"]').click();
+  await page.waitForSelector('a[data-kv-doc="g-doc"]');
 
   // Document page and the three open methods (plus copy path).
   await page.locator('a[data-kv-doc="g-doc"]').click();
@@ -328,6 +371,18 @@ try {
   await page.waitForSelector(".kv-doc-body");
   assert.equal((await page.locator(".kv-doc-head h1").textContent()).trim(), "构建指南");
 
+  // A deep-linked document reopens only its ancestor folders, so its row is
+  // visible while every sibling directory stays collapsed.
+  await page.goto(`${url}/?deep=nested#knowledge?doc=g-deep&scope=global`, {waitUntil: "networkidle"});
+  await page.waitForSelector(".kv-doc-body");
+  assert.equal((await page.locator(".kv-doc-head h1").textContent()).trim(), "深入指南");
+  await page.waitForSelector('a[data-kv-doc="g-deep"]');
+  assert.equal(await page.locator('[data-kv-toggle="g-folder"]').getAttribute("aria-expanded"), "true");
+  assert.equal(await page.locator('[data-kv-toggle="g-sub"]').getAttribute("aria-expanded"), "true");
+  assert.equal(await page.locator('[data-kv-toggle="g-other"]').getAttribute("aria-expanded"), "false");
+  assert.equal(await page.locator('a[data-kv-doc="g-other-doc"]').count(), 0, "sibling folders stay collapsed");
+  assert.equal(await page.locator('a[data-kv-doc="g-deep"]').getAttribute("aria-current"), "page");
+
   // Fenced `#` lines never become outline entries, and outline links attach by
   // text/level even when the index omits a heading that the file renders.
   await page.goto(`${url}/?fence=1#knowledge?doc=doc-fence&scope=global`, {waitUntil: "networkidle"});
@@ -380,6 +435,11 @@ try {
   assert.equal(await page.locator("#kv-settings-dialog").evaluate(dialog => dialog.open), true);
   await page.locator("#kv-settings-dialog [data-kv-settings-close]").first().click();
   assert.equal(await page.locator("#kv-settings-dialog").evaluate(dialog => dialog.open), false);
+
+  // The mobile tree also starts collapsed; expand one folder to pick a row.
+  assert.equal(await page.locator('a[data-kv-doc="g-doc"]').count(), 0);
+  await page.locator('[data-kv-toggle="g-folder"]').click();
+  await page.waitForSelector('a[data-kv-doc="g-doc"]');
 
   await page.evaluate(() => window.scrollTo(0, 360));
   await page.waitForTimeout(80);

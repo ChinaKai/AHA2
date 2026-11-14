@@ -153,10 +153,10 @@ test("the page exposes exactly the four read-only entries and no edit or review 
   assert.doesNotMatch(html, /data-kv-(edit|delete|move|approve)|>删除<|>编辑<|>待审提案</);
   assert.match(html, /系统索引/);
   assert.match(html, /文档/);
-  assert.match(html, /href="#knowledge\?doc=doc-1&amp;scope=global"/, "tree rows are real anchors");
   assert.match(html, /<nav class="kv-tree-panel" aria-label="目录">/, "tree is a nav, not a fake tree role");
   assert.doesNotMatch(html, /role="tree"/);
-  assert.match(html, /data-kv-toggle="folder"[^>]*aria-expanded="true"/);
+  assert.match(html, /data-kv-toggle="folder"[^>]*aria-expanded="false"/);
+  assert.doesNotMatch(html, /href="#knowledge\?doc=doc-1&amp;scope=global"/, "folder children start hidden");
   assert.equal((html.match(/class="kv-tab kv-tab-/g) || []).length, 4);
   // Heading and tabs form one group; controls are a separate group. The old
   // mobile "more" menu must not be rendered at all: skills and settings are
@@ -165,6 +165,37 @@ test("the page exposes exactly the four read-only entries and no edit or review 
   assert.match(html, /<div class="kv-controls">[\s\S]*data-kv-settings/);
   assert.equal((html.match(/data-kv-tab-button="/g) || []).length, 4, "no duplicate tab buttons in a more menu");
   assert.doesNotMatch(html, /data-kv-more|kv-more-trigger|kv-more-menu/);
+});
+
+test("folders default to collapsed and only an explicit expansion shows children", () => {
+  const tree = [
+    {id: "index", title: "全局索引", path: "global/index.md", type: "navigation", status: "verified", scope: "global", is_index: true, system: true, children: []},
+    {id: "folder", title: "guides", path: "global/guides", type: "reference", status: "verified", scope: "global", is_index: false, system: false, children: [
+      {id: "sub", title: "advanced", path: "global/guides/advanced", type: "reference", status: "verified", scope: "global", is_index: false, system: false, children: [
+        {id: "deep", title: "深入指南", path: "global/guides/advanced/deep.md", type: "practice", status: "verified", scope: "global", is_index: false, system: false, children: []},
+      ]},
+    ]},
+  ];
+  reset({tree: [...tree]});
+  let html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /data-kv-toggle="folder"[^>]*aria-expanded="false"/);
+  assert.doesNotMatch(html, /data-kv-toggle="sub"/);
+  assert.doesNotMatch(html, /data-kv-doc="deep"/);
+  assert.deepEqual(vault.vaultTreeAncestors(tree, "deep"), ["folder", "sub"]);
+  assert.deepEqual(vault.vaultTreeAncestors(tree, "folder"), []);
+  assert.equal(vault.vaultTreeAncestors(tree, "missing"), null);
+
+  reset({tree: [...tree], expanded: new Set(["folder"])});
+  html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /data-kv-toggle="folder"[^>]*aria-expanded="true"/);
+  assert.match(html, /data-kv-toggle="sub"[^>]*aria-expanded="false"/);
+  assert.doesNotMatch(html, /data-kv-doc="deep"/);
+
+  reset({tree: [...tree], expanded: new Set(["folder", "sub"])});
+  html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /data-kv-toggle="sub"[^>]*aria-expanded="true"/);
+  assert.match(html, /data-kv-doc="deep"/);
+  assert.match(html, /href="#knowledge\?doc=deep&amp;scope=global"/, "tree rows are real anchors");
 });
 
 test("topbar CSS keeps the tab strip on one row and shows skills/settings on phones", async () => {

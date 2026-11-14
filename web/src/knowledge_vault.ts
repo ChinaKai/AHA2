@@ -54,7 +54,7 @@ interface VaultState {
   treeKey: string;
   recentKey: string;
   inboxKey: string;
-  collapsed: Set<string>;
+  expanded: Set<string>;
   selectedID: string;
   doc: KnowledgeVaultDoc | null;
   docState: LoadState;
@@ -94,7 +94,7 @@ function initialState(): VaultState {
     remoteHost: "", rebuiltAt: "", warning: "",
     tab: "knowledge", libraryID: "global", projectFilter: "",
     typeFilter: "", statusFilter: "", tagFilter: "",
-    tree: [], treeState: "idle", treeError: "", treeKey: "", collapsed: new Set(),
+    tree: [], treeState: "idle", treeError: "", treeKey: "", expanded: new Set(),
     recentKey: "", inboxKey: "",
     selectedID: "", doc: null, docState: "idle", docError: "",
     recent: [], recentState: "idle", recentError: "",
@@ -407,17 +407,19 @@ function treeBodyHTML(): string {
 
 function treeNodeHTML(node: KnowledgeVaultTreeNode, depth = 0): string {
   const children = node.children || [];
-  const collapsed = state.collapsed.has(node.id);
+  // Directories start collapsed like `tree` output; only an explicit toggle (or
+  // the selected document's ancestor path) puts an id in `expanded`.
+  const expanded = state.expanded.has(node.id);
   const selected = node.id === state.selectedID;
   if (children.length === 0) {
     return `<li class="kv-tree-node" style="--kv-depth:${depth}"><a class="kv-tree-link${selected ? " selected" : ""}" href="${escapeVaultHTML(docHash(node))}" data-kv-doc="${escapeVaultHTML(node.id)}" aria-current="${selected ? "page" : "false"}"><span class="kv-tree-title">${escapeVaultHTML(node.title)}</span>${node.is_index ? badge(t("kv.index"), "index") : ""}${badge(typeLabel(node.type), "type")}</a></li>`;
   }
   return `<li class="kv-tree-node" style="--kv-depth:${depth}">
     <div class="kv-tree-row">
-      <button type="button" class="kv-tree-toggle" data-kv-toggle="${escapeVaultHTML(node.id)}" aria-expanded="${!collapsed}" aria-label="${collapsed ? t("kv.expandNode") : t("kv.collapseNode")}">${icon(collapsed ? "chevron-down" : "chevron-up")}</button>
+      <button type="button" class="kv-tree-toggle" data-kv-toggle="${escapeVaultHTML(node.id)}" aria-expanded="${expanded}" aria-label="${expanded ? t("kv.collapseNode") : t("kv.expandNode")}">${icon(expanded ? "chevron-up" : "chevron-down")}</button>
       <a class="kv-tree-link${selected ? " selected" : ""}" href="${escapeVaultHTML(docHash(node))}" data-kv-doc="${escapeVaultHTML(node.id)}" aria-current="${selected ? "page" : "false"}"><span class="kv-tree-title">${escapeVaultHTML(node.title)}</span>${node.is_index ? badge(t("kv.index"), "index") : ""}${badge(typeLabel(node.type), "type")}</a>
     </div>
-    ${collapsed ? "" : `<ul class="kv-tree-list">${children.map(child => treeNodeHTML(child, depth + 1)).join("")}</ul>`}
+    ${expanded ? `<ul class="kv-tree-list">${children.map(child => treeNodeHTML(child, depth + 1)).join("")}</ul>` : ""}
   </li>`;
 }
 
@@ -528,6 +530,30 @@ function settingsDialogHTML(): string {
   </dialog>`;
 }
 
+/* Tree expansion -------------------------------------------------------- */
+
+// Returns the ids of the folders between the tree root and `id` (excluding the
+// node itself), or null when the node is not in this tree. The trail drives the
+// automatic expansion that keeps a deep-linked document visible while every
+// sibling folder stays collapsed.
+export function vaultTreeAncestors(nodes: KnowledgeVaultTreeNode[], id: string, trail: string[] = []): string[] | null {
+  for (const node of nodes) {
+    if (node.id === id) return trail;
+    const children = node.children || [];
+    if (children.length === 0) continue;
+    const found = vaultTreeAncestors(children, id, [...trail, node.id]);
+    if (found) return found;
+  }
+  return null;
+}
+
+function expandTreePathTo(id: string): void {
+  if (!id) return;
+  const ancestors = vaultTreeAncestors(state.tree, id);
+  if (!ancestors) return;
+  for (const ancestor of ancestors) state.expanded.add(ancestor);
+}
+
 /* Data loading ----------------------------------------------------------- */
 
 function contextFromConfig(): KnowledgeVaultContext {
@@ -593,6 +619,9 @@ async function loadTree(force = false): Promise<void> {
   state.treeKey = key;
   state.treeState = "loading";
   state.treeError = "";
+  // A freshly loaded tree starts collapsed; only the selected document's
+  // ancestor path is reopened after the nodes arrive.
+  state.expanded = new Set();
   rerender();
   try {
     const payload: KnowledgeVaultTree = await api.knowledgeVaultTree(key);
@@ -600,6 +629,7 @@ async function loadTree(force = false): Promise<void> {
     state.tree = payload.nodes || [];
     state.indexReady = payload.index_ready;
     state.treeState = "ready";
+    expandTreePathTo(state.selectedID);
   } catch (error) {
     if (ticket !== treeRequest || state.treeKey !== key) return;
     state.treeState = "error";
@@ -616,6 +646,9 @@ async function loadDoc(id: string, force = false): Promise<void> {
   state.docError = "";
   state.feedback = "";
   state.doc = null;
+  // Clicking a document, a search result, or following a deep link reopens only
+  // that document's ancestor folders so its row is visible in the tree.
+  expandTreePathTo(id);
   rerender();
   try {
     const payload = await api.knowledgeVaultDoc(id);
@@ -1005,8 +1038,8 @@ export function bindKnowledgeVaultPage(context: KnowledgeVaultContext): void {
   root.querySelectorAll<HTMLElement>("[data-kv-toggle]").forEach(button => {
     button.addEventListener("click", () => {
       const id = button.dataset.kvToggle || "";
-      if (state.collapsed.has(id)) state.collapsed.delete(id);
-      else state.collapsed.add(id);
+      if (state.expanded.has(id)) state.expanded.delete(id);
+      else state.expanded.add(id);
       rerender();
     });
   });
