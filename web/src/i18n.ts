@@ -610,6 +610,7 @@ const zhCN: Record<string, string> = {
   "knowledge.list.shown": "{summary} · 已显示 {shown} 个",
   "knowledge.list.more": "加载更多",
   "conversation.newMessages": "有新消息（{count}）",
+  "conversation.newMessagesFallback": "有新消息",
 };
 
 const enUS: Record<string, string> = {
@@ -1219,6 +1220,7 @@ const enUS: Record<string, string> = {
   "knowledge.list.shown": "{summary} · showing {shown}",
   "knowledge.list.more": "Load more",
   "conversation.newMessages": "New messages ({count})",
+  "conversation.newMessagesFallback": "New messages",
 };
 
 // Transitional UI phrase table for modules that have not been migrated to
@@ -2328,6 +2330,7 @@ const legacyEnglish: Record<string, string> = {
   "DeepSeek 大肥鱼": "DeepSeek Big Fish",
   "大肥鱼": "Big Fish",
   "原版鲸鱼娘": "Classic whale girl",
+  "有新消息": "New messages",
 };
 
 let locale: Locale = "zh-CN";

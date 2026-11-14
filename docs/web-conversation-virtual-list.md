@@ -57,9 +57,15 @@ npm --prefix web test                              422 pass / 0 fail
 node web/tests/conversation_virtual.browser.mjs    通过（15/24/26 行，锚点误差 ≤2px；zh-CN/en-US 提示断言通过）
 node web/tests/conversation_virtual_image.browser.mjs  通过（连续 6 次；增长 420px，底部距离 0px，锚点不变）
 conversation_wheel_follow.browser.mjs              通过（滚动后仍跟随，start 2415 → after 2702/2702）
-首屏 JS gzip（app + 4 个静态 chunk）               196,847 B
-首屏 CSS gzip                                      45,160 B
-首屏 JS+CSS gzip                                   242,007 B（预算 256,000 B）
+首屏 JS gzip（app + 4 个静态 chunk）               199,964 B
+首屏 CSS gzip                                      46,872 B
+首屏 JS+CSS gzip                                   246,836 B（预算 256,000 B）
+```
+
+首屏 gzip 于 2026-11-14 复测，口径与 `web/tests/build.test.mjs` 的「production web splits route chunks and keeps the first-screen budget」一致：从 `web/dist/index.html` 取入口 `app.<hash>.js`，只沿静态 `import` 遍历入口及其 chunk（动态路由 chunk 不计），每个文件用 `gzipSync(level: 5)` 求和；CSS 取 `index.html` 引用的 stylesheet，同样 level 5。上一提交 HEAD 实测为 JS 199,932 B + CSS 46,872 B = 246,804 B；本次为静态兜底新增语义 key 后，JS 为 199,964 B，合计 246,836 B。复测命令（仓库根目录执行，输出即上面的 JS/CSS/合计）：
+
+```bash
+node -e 'const fs=require("fs"),z=require("zlib"),p="web/dist/";const html=fs.readFileSync(p+"index.html","utf8");const entry=html.match(/src=\x22\/(app\.[a-f0-9]{12}\.js)[^\x22]*\x22/)[1];const seen=new Map(),q=[entry],re=/(?:from|import)\s*[\x22\x27]\.\/([^\x22\x27?]+\.js)(?:\?[^\x22\x27]*)?[\x22\x27]/g;while(q.length){const n=q.shift();if(seen.has(n))continue;const t=fs.readFileSync(p+n,"utf8");seen.set(n,t);for(const m of t.matchAll(re))q.push(m[1]);}const js=[...seen.values()].reduce((s,t)=>s+z.gzipSync(Buffer.from(t),{level:5}).length,0);const css=z.gzipSync(fs.readFileSync(p+html.match(/rel=\x22stylesheet\x22 href=\x22\/([^\x22]+)\x22/)[1]),{level:5}).length;console.log(`JS ${js} B; CSS ${css} B; total ${js+css} B; chunks ${[...seen.keys()].join(",")}`);'
 ```
 
 ## 五、验证缺口
