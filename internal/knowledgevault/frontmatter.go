@@ -42,9 +42,10 @@ var legacyTypeAliases = map[string]string{
 	"postmortem": TypeDiagnostic, "bug": TypeDiagnostic, "fix": TypeDiagnostic,
 	"note": TypeReference, "fact": TypeReference, "doc": TypeReference,
 	"documentation": TypeReference, "general": TypeReference, "snippet": TypeReference,
-	"command": TypeReference, "reference-material": TypeReference,
+	"command": TypeReference, "technical": TypeReference, "reference-material": TypeReference,
 	"design": TypeArchitecture, "spec": TypeArchitecture, "structure": TypeArchitecture,
 	"topology": TypeArchitecture, "architecture-decision": TypeArchitecture,
+	"solution": TypeArchitecture,
 }
 
 // NormalizeType returns the canonical type and the legacy value that must be

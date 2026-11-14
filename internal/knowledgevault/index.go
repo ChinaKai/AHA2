@@ -165,6 +165,7 @@ type RebuildReport struct {
 	Global    int      `json:"global"`
 	Projects  int      `json:"projects"`
 	Archives  int      `json:"archives"`
+	Orphans   int      `json:"orphans"`
 	Tags      int      `json:"tags"`
 	Links     int      `json:"links"`
 	Warnings  []string `json:"warnings,omitempty"`
@@ -346,6 +347,8 @@ func (i *Index) Rebuild(ctx context.Context, vaultPath string) (RebuildReport, e
 			report.Projects++
 		case "archive":
 			report.Archives++
+		case "orphan":
+			report.Orphans++
 		}
 	}
 	return report, nil
@@ -360,6 +363,12 @@ func buildScannedRecord(relative, raw string, document Document, manifest Manife
 	}
 	if frontmatter.Scope == "global" {
 		scope = "global"
+	}
+	if frontmatter.Scope == "orphan" {
+		scope = "orphan"
+		if projectID == "" {
+			projectID = strings.TrimSpace(frontmatter.ProjectID)
+		}
 	}
 	body := StripGeneratedIndex(document.Body)
 	if document.Warning != "" {
@@ -440,6 +449,8 @@ func scopeForPath(relative string, manifest Manifest, reverseProjects, reverseAr
 	switch segments[0] {
 	case "global":
 		return "global", "", false
+	case "orphans":
+		return "orphan", "", false
 	case "projects", "archive":
 		if len(segments) < 2 {
 			return "unknown", "", false
@@ -456,7 +467,7 @@ func scopeForPath(relative string, manifest Manifest, reverseProjects, reverseAr
 
 func scopeForPathIsUnknown(relative string) bool {
 	first := strings.SplitN(relative, "/", 2)[0]
-	return first != "global" && first != "projects" && first != "archive"
+	return first != "global" && first != "projects" && first != "archive" && first != "orphans"
 }
 
 func reverseSlugMap(values map[string]string) map[string]string {
@@ -734,6 +745,7 @@ type IndexStatus struct {
 	Global    int    `json:"global"`
 	Projects  int    `json:"projects"`
 	Archives  int    `json:"archives"`
+	Orphans   int    `json:"orphans"`
 	Tags      int    `json:"tags"`
 	Links     int    `json:"links"`
 	Warnings  int    `json:"warnings"`
@@ -750,6 +762,7 @@ func (i *Index) Status(ctx context.Context) (IndexStatus, error) {
 		{&status.Global, `SELECT COUNT(*) FROM entries WHERE scope='global'`},
 		{&status.Projects, `SELECT COUNT(*) FROM entries WHERE scope='project'`},
 		{&status.Archives, `SELECT COUNT(*) FROM entries WHERE scope='archive'`},
+		{&status.Orphans, `SELECT COUNT(*) FROM entries WHERE scope='orphan'`},
 		{&status.Tags, `SELECT COUNT(*) FROM tags`},
 		{&status.Links, `SELECT COUNT(*) FROM links`},
 		{&status.Warnings, `SELECT COUNT(*) FROM warnings`},

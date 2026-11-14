@@ -529,3 +529,136 @@ func TestExportResolvesCaseInsensitiveCollisions(t *testing.T) {
 		t.Fatalf("collision filenames = %v", names)
 	}
 }
+
+func TestExportOrphansAreIsolatedAndReconciled(t *testing.T) {
+	database, databasePath := openTestStore(t)
+	seedStandardVaultDatabase(t, database)
+	now := "2026-11-14T10:00:00Z"
+	execTestSQL(t, databasePath, `INSERT INTO knowledge_entries(id,scope,project_id,parent_id,slug,type,title,body,status,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		"knowledge_orphan_one", "project", "project-deleted", "", "orphan-one", "practice", "孤儿条目一", "孤儿正文一", "verified", now, now)
+	execTestSQL(t, databasePath, `INSERT INTO knowledge_entries(id,scope,project_id,parent_id,slug,type,title,body,status,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		"knowledge_orphan_two", "project", "project-deleted", "", "orphan-two", "diagnostic", "孤儿条目二", "孤儿正文二", "verified", now, now)
+	config := DefaultConfig(t.TempDir())
+
+	report, err := Export(context.Background(), config, databasePath, ExportOptions{Commit: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.SourceEntries != 18 || report.Total != 18 || report.ExportedEntries != 18 || report.AccountedEntries != 18 {
+		t.Fatalf("reconciliation counts = %+v", report)
+	}
+	if report.Orphans != 2 || len(report.OrphanList) != 2 {
+		t.Fatalf("orphan report = %+v", report)
+	}
+	if report.Global != 8 || report.Projects != 6 || report.Archives != 2 {
+		t.Fatalf("category counts changed: %+v", report)
+	}
+	orphanWarnings := 0
+	for _, warning := range report.Warnings {
+		if strings.Contains(warning, "orphan entry") {
+			orphanWarnings++
+		}
+	}
+	if orphanWarnings != 2 {
+		t.Fatalf("orphan warnings = %d: %v", orphanWarnings, report.Warnings)
+	}
+	foundBodies := map[string]bool{}
+	err = filepath.WalkDir(filepath.Join(config.VaultPath, "orphans"), func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for _, body := range []string{"孤儿正文一", "孤儿正文二"} {
+			if strings.Contains(string(data), body) {
+				foundBodies[body] = true
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(foundBodies) != 2 {
+		t.Fatalf("orphan bodies not preserved: %v", foundBodies)
+	}
+
+	ctx := context.Background()
+	index, err := OpenIndex(ctx, config.IndexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+	rebuild, err := index.Rebuild(ctx, config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rebuild.Entries != 18 || rebuild.Orphans != 2 || rebuild.Global+rebuild.Projects+rebuild.Archives+rebuild.Orphans != rebuild.Entries {
+		t.Fatalf("rebuild did not account for orphans: %+v", rebuild)
+	}
+}
+
+func TestExportDryRunDoesNotWrite(t *testing.T) {
+	database, databasePath := openTestStore(t)
+	seedStandardVaultDatabase(t, database)
+	config := DefaultConfig(t.TempDir())
+
+	report, err := Export(context.Background(), config, databasePath, ExportOptions{Commit: true, DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.DryRun || report.SourceEntries != 16 || report.Total != 16 || report.AccountedEntries != 16 {
+		t.Fatalf("dry-run reconciliation = %+v", report)
+	}
+	if report.Written != 0 || report.Unchanged != 0 || report.Removed != 0 || report.FilesPlanned == 0 {
+		t.Fatalf("dry-run touched files: %+v", report)
+	}
+	if _, err := os.Stat(config.VaultPath); !os.IsNotExist(err) {
+		t.Fatalf("dry-run created vault path: %v", err)
+	}
+}
+
+func TestExportDoesNotFollowPreplantedTemporarySymlink(t *testing.T) {
+	database, databasePath := openTestStore(t)
+	seedStandardVaultDatabase(t, database)
+	config := DefaultConfig(t.TempDir())
+	if _, err := Export(context.Background(), config, databasePath, ExportOptions{Commit: false}); err != nil {
+		t.Fatal(err)
+	}
+	victimPath := filepath.Join(t.TempDir(), "victim.txt")
+	victim := []byte("external victim must stay unchanged")
+	if err := os.WriteFile(victimPath, victim, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(config.VaultPath, "projects", "demo-project", "inbox", "inbox-one.md")
+	temporary := target + ".tmp"
+	if err := os.Symlink(victimPath, temporary); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	execTestSQL(t, databasePath, `UPDATE knowledge_entries SET body='内容已更新，触发重写。' WHERE slug='inbox-one'`)
+	second, err := Export(context.Background(), config, databasePath, ExportOptions{Commit: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Written == 0 {
+		t.Fatal("expected the changed document to be rewritten")
+	}
+	after, err := os.ReadFile(victimPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(victim) {
+		t.Fatalf("external victim was overwritten: %q", after)
+	}
+	info, err := os.Lstat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("exported document became a symlink")
+	}
+}

@@ -112,6 +112,32 @@ func TestNormalizeType(t *testing.T) {
 	}
 }
 
+func TestNormalizeTypeCoversMigrationInventory(t *testing.T) {
+	cases := map[string]string{
+		"navigation":   TypeNavigation,
+		"decision":     TypeDecision,
+		"practice":     TypePractice,
+		"lesson":       TypePractice,
+		"diagnostic":   TypeDiagnostic,
+		"diagnosis":    TypeDiagnostic,
+		"reference":    TypeReference,
+		"technical":    TypeReference,
+		"fact":         TypeReference,
+		"architecture": TypeArchitecture,
+		"design":       TypeArchitecture,
+		"solution":     TypeArchitecture,
+	}
+	for raw, want := range cases {
+		canonical, legacy := NormalizeType(raw, "")
+		if canonical != want {
+			t.Errorf("NormalizeType(%q) = %q, want %q", raw, canonical, want)
+		}
+		if canonicalTypes[raw] && legacy != "" {
+			t.Errorf("canonical type %q unexpectedly kept legacy %q", raw, legacy)
+		}
+	}
+}
+
 func TestFirstHeadingIgnoresFencedCode(t *testing.T) {
 	body := "```\n# not a title\n```\n\n# Real title\n"
 	if heading := FirstHeading(body); heading != "Real title" {

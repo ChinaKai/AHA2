@@ -119,13 +119,15 @@ type Manifest struct {
 }
 
 type ExportSummary struct {
-	Total        int    `json:"total"`
-	Global       int    `json:"global"`
-	Projects     int    `json:"projects"`
-	Archives     int    `json:"archives"`
-	ProjectInbox int    `json:"project_inbox"`
-	Groups       int    `json:"groups"`
-	ExportedAt   string `json:"exported_at,omitempty"`
+	Total            int    `json:"total"`
+	Global           int    `json:"global"`
+	Projects         int    `json:"projects"`
+	Archives         int    `json:"archives"`
+	ArchiveLibraries int    `json:"archive_libraries,omitempty"`
+	Orphans          int    `json:"orphans,omitempty"`
+	ProjectInbox     int    `json:"project_inbox"`
+	Groups           int    `json:"groups"`
+	ExportedAt       string `json:"exported_at,omitempty"`
 }
 
 func defaultManifest(vaultPath, vaultName string, now time.Time) Manifest {
@@ -144,7 +146,7 @@ func defaultManifest(vaultPath, vaultName string, now time.Time) Manifest {
 		ArchiveNames:  map[string]string{},
 		Skills:        map[string]SkillLocation{},
 		Reserved: []string{
-			".trash", ".aha", ".git", ".obsidian", "skills",
+			".trash", ".aha", ".git", ".obsidian", "orphans", "skills",
 			"global/skills", "global/inbox",
 		},
 		ReservedPatterns: []string{
@@ -330,6 +332,7 @@ func vaultReadme(manifest Manifest) string {
 - ` + "`global/inbox/`" + `：未归类到主题组的全局文档。
 - ` + "`projects/<slug>/index.md`" + `：项目知识入口；主题组是子目录，根下叶子文档在 ` + "`inbox/`" + `。
 - ` + "`archive/<slug>/`" + `：AHA1 归档知识库，单独标记，不并入主库。
+- ` + "`orphans/`" + `：导出时找不到所属项目或 scope 的孤儿条目隔离区；正文保留，报告逐条列出。
 - ` + "`skills/<slug>/`" + `：技能包的扁平预留位置；Phase 1 不迁移技能。
 - ` + "`.trash/`" + `：删除暂存，不作为有效知识。
 - ` + "`.aha-vault.json`" + `：vault 身份、项目 ID 与稳定目录 slug 的映射。
@@ -411,14 +414,40 @@ func writeFileIfChanged(path string, content []byte, mode os.FileMode) error {
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	directory := filepath.Dir(path)
+	if err := os.MkdirAll(directory, 0o755); err != nil {
 		return err
 	}
-	temporary := path + ".tmp"
-	if err := os.WriteFile(temporary, content, mode); err != nil {
+	// Use a random, exclusively-created temporary file in the target
+	// directory. A deterministic "<path>.tmp" can be pre-planted as a
+	// symlink, which os.WriteFile would follow and overwrite outside the
+	// vault before the rename.
+	temporary, err := os.CreateTemp(directory, "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(temporary, path)
+	temporaryPath := temporary.Name()
+	cleanup := func() {
+		_ = temporary.Close()
+		_ = os.Remove(temporaryPath)
+	}
+	if _, err := temporary.Write(content); err != nil {
+		cleanup()
+		return err
+	}
+	if err := temporary.Chmod(mode); err != nil {
+		cleanup()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		_ = os.Remove(temporaryPath)
+		return err
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		_ = os.Remove(temporaryPath)
+		return err
+	}
+	return nil
 }
 
 // commitVault initializes a local (never remote) Git repository when needed and

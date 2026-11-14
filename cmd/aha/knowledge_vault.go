@@ -94,6 +94,7 @@ func knowledgeVaultExport(args []string) error {
 	options.register(flags)
 	databasePath := flags.String("database", "", "AHA2 database path (default <data-dir>/aha2.db)")
 	commit := flags.Bool("commit", true, "commit exported files to the local vault Git repository")
+	dryRun := flags.Bool("dry-run", false, "reconcile source and planned entries without writing the vault")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -107,7 +108,7 @@ func knowledgeVaultExport(args []string) error {
 	if strings.TrimSpace(*databasePath) == "" {
 		*databasePath = filepath.Join(config.DataDir, "aha2.db")
 	}
-	report, err := knowledgevault.Export(context.Background(), config, *databasePath, knowledgevault.ExportOptions{Commit: *commit})
+	report, err := knowledgevault.Export(context.Background(), config, *databasePath, knowledgevault.ExportOptions{Commit: *commit, DryRun: *dryRun})
 	if err != nil {
 		return err
 	}
@@ -150,7 +151,7 @@ func knowledgeVaultSearch(args []string) error {
 	flags := flag.NewFlagSet("aha2 knowledge-vault search", flag.ContinueOnError)
 	options := knowledgeVaultCommon{}
 	options.register(flags)
-	scope := flags.String("scope", "", "restrict to global, project, archive, or unknown")
+	scope := flags.String("scope", "", "restrict to global, project, archive, orphan, or unknown")
 	projectID := flags.String("project", "", "restrict to one project ID")
 	limit := flags.Int("limit", 20, "maximum results (1-200)")
 	includeArchives := flags.Bool("include-archives", false, "include AHA1 archive libraries")

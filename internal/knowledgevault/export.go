@@ -59,25 +59,38 @@ type sourceData struct {
 // ExportOptions controls one staged export.
 type ExportOptions struct {
 	Commit bool
+	// DryRun plans the export and reports the reconciliation without writing
+	// any vault file, manifest, index, or Git commit.
+	DryRun bool
 	Now    func() time.Time
 }
 
-// ExportReport is the operator-facing result of one export.
+// ExportReport is the operator-facing result of one export. Total,
+// ExportedEntries, and AccountedEntries must equal SourceEntries; Orphans is
+// the subset written to the isolated orphans/ area.
 type ExportReport struct {
-	VaultPath    string   `json:"vault_path"`
-	DatabasePath string   `json:"database_path"`
-	Total        int      `json:"total"`
-	Global       int      `json:"global"`
-	Projects     int      `json:"projects"`
-	Archives     int      `json:"archives"`
-	ProjectInbox int      `json:"project_inbox"`
-	Groups       int      `json:"groups"`
-	Written      int      `json:"written"`
-	Unchanged    int      `json:"unchanged"`
-	Removed      int      `json:"removed"`
-	Warnings     []string `json:"warnings,omitempty"`
-	GitWarning   string   `json:"git_warning,omitempty"`
-	Committed    bool     `json:"committed"`
+	VaultPath        string   `json:"vault_path"`
+	DatabasePath     string   `json:"database_path"`
+	SourceEntries    int      `json:"source_entries"`
+	Total            int      `json:"total"`
+	ExportedEntries  int      `json:"exported_entries"`
+	AccountedEntries int      `json:"accounted_entries"`
+	Global           int      `json:"global"`
+	Projects         int      `json:"projects"`
+	Archives         int      `json:"archives"`
+	ArchiveLibraries int      `json:"archive_libraries"`
+	Orphans          int      `json:"orphans"`
+	OrphanList       []string `json:"orphan_list,omitempty"`
+	ProjectInbox     int      `json:"project_inbox"`
+	Groups           int      `json:"groups"`
+	FilesPlanned     int      `json:"files_planned"`
+	Written          int      `json:"written"`
+	Unchanged        int      `json:"unchanged"`
+	Removed          int      `json:"removed"`
+	DryRun           bool     `json:"dry_run"`
+	Warnings         []string `json:"warnings,omitempty"`
+	GitWarning       string   `json:"git_warning,omitempty"`
+	Committed        bool     `json:"committed"`
 }
 
 func openReadOnlySQLite(path string) (*sql.DB, error) {
@@ -436,9 +449,11 @@ func (tree *knowledgeTree) walk(visitor func(*knowledgeNode)) {
 	visit(tree.root)
 }
 
-func entryFrontmatter(entry sourceEntry, scope string, isIndex bool, archive bool, pathHint string) Frontmatter {
+func entryFrontmatter(entry sourceEntry, scope string, isIndex bool, archive bool, orphan bool, pathHint string) Frontmatter {
 	canonical, legacy := NormalizeType(entry.Type, pathHint)
-	if entry.Scope == "project" && archive {
+	if orphan {
+		scope = "orphan"
+	} else if entry.Scope == "project" && archive {
 		scope = "archive"
 	}
 	frontmatter := Frontmatter{
@@ -509,8 +524,8 @@ func StripGeneratedIndex(body string) string {
 	return strings.TrimRight(body, "\n \t")
 }
 
-func renderEntryDocument(node *knowledgeNode, scope string, isIndex bool, archive bool) (string, error) {
-	frontmatter := entryFrontmatter(node.entry, scope, isIndex, archive, node.rel)
+func renderEntryDocument(node *knowledgeNode, scope string, isIndex bool, archive bool, orphan bool) (string, error) {
+	frontmatter := entryFrontmatter(node.entry, scope, isIndex, archive, orphan, node.rel)
 	body := StripGeneratedIndex(node.entry.Body)
 	if node.isDir {
 		block := generatedIndexBlock(node)
@@ -531,7 +546,8 @@ func (t *knowledgeTree) allNodes() []*knowledgeNode {
 
 // Export writes the current database knowledge into the staging vault. The
 // database is opened read-only; only vault files, its manifest, and the local
-// Git repository are written.
+// Git repository are written. DryRun plans the same output and reports the
+// reconciliation without touching the filesystem.
 func Export(ctx context.Context, cfg Config, databasePath string, options ExportOptions) (ExportReport, error) {
 	cfg, err := cfg.Normalized()
 	if err != nil {
@@ -542,19 +558,69 @@ func Export(ctx context.Context, cfg Config, databasePath string, options Export
 	if err != nil {
 		return report, err
 	}
-	if _, err := Bootstrap(cfg, InitOptions{}); err != nil {
-		return report, err
-	}
-	manifest, err := ReadManifest(cfg.VaultPath)
-	if err != nil {
-		return report, err
-	}
-	originalManifest := manifest
 	now := time.Now().UTC()
 	if options.Now != nil {
 		now = options.Now().UTC()
 	}
+	if !options.DryRun {
+		if _, err := Bootstrap(cfg, InitOptions{}); err != nil {
+			return report, err
+		}
+	}
+	manifest, err := ReadManifest(cfg.VaultPath)
+	if err != nil {
+		if !options.DryRun || !os.IsNotExist(err) {
+			return report, err
+		}
+		manifest = defaultManifest(cfg.VaultPath, "", now)
+	}
+	originalManifest := manifest
+	documents, planned, plannedManifest, err := planExport(cfg, source, manifest, now)
+	planned.VaultPath = cfg.VaultPath
+	planned.DatabasePath = databasePath
+	planned.FilesPlanned = len(documents)
+	planned.DryRun = options.DryRun
+	if err != nil {
+		return planned, err
+	}
+	if options.DryRun {
+		return planned, nil
+	}
 
+	report = planned
+	report.Written, report.Unchanged, err = writeDocuments(cfg.VaultPath, documents)
+	if err != nil {
+		return report, err
+	}
+	report.Removed, err = pruneExportedPaths(cfg.VaultPath, documents)
+	if err != nil {
+		return report, err
+	}
+	pruneEmptyDirectories(cfg.VaultPath, map[string]bool{"global": true, "projects": true, "archive": true, "orphans": true})
+
+	manifest = plannedManifest
+	if report.Written == 0 && report.Removed == 0 && manifestsEquivalent(originalManifest, manifest) {
+		manifest = originalManifest
+	}
+	if err := writeManifest(cfg.VaultPath, manifest); err != nil {
+		return report, err
+	}
+	if err := writeExportState(cfg.VaultPath, documents, now); err != nil {
+		return report, err
+	}
+	if options.Commit {
+		warning, committed := commitVault(cfg.VaultPath, "Export AHA2 knowledge into vault")
+		report.GitWarning = warning
+		report.Committed = committed
+	}
+	return report, nil
+}
+
+// planExport builds the complete document set in memory. It never writes to
+// the vault, so the same path powers both a real export and --dry-run
+// reconciliation.
+func planExport(cfg Config, source sourceData, manifest Manifest, now time.Time) (map[string][]byte, ExportReport, Manifest, error) {
+	report := ExportReport{VaultPath: cfg.VaultPath, SourceEntries: len(source.Entries)}
 	mainProjects := []sourceProject{}
 	archiveProjects := []sourceProject{}
 	for _, project := range source.Projects {
@@ -573,7 +639,7 @@ func Export(ctx context.Context, cfg Config, databasePath string, options Export
 	manifest.ArchiveNames = archiveSlugs.names
 
 	guard := NewPathGuard(cfg.VaultPath)
-	for _, relative := range []string{manifestFileName, readmeFileName, ".gitignore", ".trash", ".aha", ".git", ".obsidian", "skills"} {
+	for _, relative := range []string{manifestFileName, readmeFileName, ".gitignore", ".trash", ".aha", ".git", ".obsidian", "skills", "orphans"} {
 		guard.Reserved(relative, "reserved")
 	}
 
@@ -583,12 +649,15 @@ func Export(ctx context.Context, cfg Config, databasePath string, options Export
 		key := entry.Scope + "\x00" + entry.ProjectID
 		groupEntries[key] = append(groupEntries[key], entry)
 	}
+	consumed := map[string]bool{}
 
 	writeTree := func(scope, projectID, base string, archive bool) error {
-		entries := groupEntries[scope+"\x00"+projectID]
+		key := scope + "\x00" + projectID
+		entries := groupEntries[key]
 		if len(entries) == 0 {
 			return nil
 		}
+		consumed[key] = true
 		if scope == "project" && archive {
 			scope = "archive"
 		}
@@ -598,7 +667,7 @@ func Export(ctx context.Context, cfg Config, databasePath string, options Export
 		}
 		for _, node := range tree.allNodes() {
 			isRoot := node == tree.root
-			content, err := renderEntryDocument(node, node.entry.Scope, isRoot || node.entry.IsIndex, archive)
+			content, err := renderEntryDocument(node, node.entry.Scope, isRoot || node.entry.IsIndex, archive, false)
 			if err != nil {
 				return err
 			}
@@ -625,14 +694,14 @@ func Export(ctx context.Context, cfg Config, databasePath string, options Export
 		return nil
 	}
 
-	globalEntries := groupEntries["global\x00"]
-	if len(globalEntries) == 0 {
-		// Bootstrap already wrote a placeholder root. Leave it in place.
-	} else if err := writeTree("global", "", "global", false); err != nil {
-		return report, err
+	if len(groupEntries["global\x00"]) > 0 {
+		if err := writeTree("global", "", "global", false); err != nil {
+			return nil, report, manifest, err
+		}
 	}
 	for _, project := range mainProjects {
-		if len(groupEntries["project\x00"+project.ID]) == 0 {
+		key := "project\x00" + project.ID
+		if len(groupEntries[key]) == 0 {
 			continue
 		}
 		base := filepath.ToSlash(filepath.Join("projects", mainSlugs.byID[project.ID]))
@@ -641,11 +710,12 @@ func Export(ctx context.Context, cfg Config, databasePath string, options Export
 			documents[path.Join(directory, ".gitkeep")] = []byte{}
 		}
 		if err := writeTree("project", project.ID, base, false); err != nil {
-			return report, err
+			return nil, report, manifest, err
 		}
 	}
 	for _, project := range archiveProjects {
-		if len(groupEntries["project\x00"+project.ID]) == 0 {
+		key := "project\x00" + project.ID
+		if len(groupEntries[key]) == 0 {
 			continue
 		}
 		base := filepath.ToSlash(filepath.Join("archive", archiveSlugs.byID[project.ID]))
@@ -654,24 +724,67 @@ func Export(ctx context.Context, cfg Config, databasePath string, options Export
 			documents[path.Join(directory, ".gitkeep")] = []byte{}
 		}
 		if err := writeTree("project", project.ID, base, true); err != nil {
-			return report, err
+			return nil, report, manifest, err
+		}
+		report.ArchiveLibraries++
+	}
+
+	// Any group not consumed above belongs to a removed project, an empty
+	// project_id, or an unknown scope. Export it into an isolated orphans/
+	// area instead of silently dropping it, and list every record in the
+	// report so the source count always reconciles.
+	orphanKeys := []string{}
+	for key, entries := range groupEntries {
+		if len(entries) > 0 && !consumed[key] {
+			orphanKeys = append(orphanKeys, key)
+		}
+	}
+	sort.Strings(orphanKeys)
+	usedOrphanBases := map[string]bool{}
+	for _, key := range orphanKeys {
+		entries := groupEntries[key]
+		consumed[key] = true
+		scope, projectID := splitGroupKey(key)
+		base := path.Join("orphans", orphanGroupLabel(scope, projectID))
+		uniqueBase := base
+		for attempt := 2; usedOrphanBases[strings.ToLower(uniqueBase)]; attempt++ {
+			uniqueBase = fmt.Sprintf("%s-%d", base, attempt)
+		}
+		usedOrphanBases[strings.ToLower(uniqueBase)] = true
+		sort.Slice(entries, func(left, right int) bool { return entries[left].ID < entries[right].ID })
+		for _, entry := range entries {
+			segment := SafeSegment(documentSlug(entry), "doc-"+shortID(entry.ID))
+			rel, _, err := guard.Allocate(path.Join(uniqueBase, segment+".md"), "file:"+entry.ID)
+			if err != nil {
+				return nil, report, manifest, err
+			}
+			node := &knowledgeNode{entry: entry, rel: rel}
+			content, err := renderEntryDocument(node, entry.Scope, entry.IsIndex, false, true)
+			if err != nil {
+				return nil, report, manifest, err
+			}
+			rel = filepath.ToSlash(rel)
+			documents[rel] = []byte(content)
+			report.Orphans++
+			line := fmt.Sprintf("%s (scope=%s project=%s) -> %s", entry.ID, entry.Scope, entry.ProjectID, rel)
+			report.OrphanList = append(report.OrphanList, line)
+			report.Warnings = append(report.Warnings, "orphan entry "+line)
 		}
 	}
 
-	report.Total = report.Global + report.Projects + report.Archives
-	report.Written, report.Unchanged, err = writeDocuments(cfg.VaultPath, documents)
-	if err != nil {
-		return report, err
+	report.ExportedEntries = report.Global + report.Projects + report.Archives + report.Orphans
+	report.AccountedEntries = report.ExportedEntries
+	report.Total = report.ExportedEntries
+	if report.AccountedEntries != report.SourceEntries {
+		return nil, report, manifest, fmt.Errorf(
+			"export reconciliation failed: %d source entries, %d accounted entries (%d global, %d projects, %d archives, %d orphans)",
+			report.SourceEntries, report.AccountedEntries, report.Global, report.Projects, report.Archives, report.Orphans)
 	}
-	report.Removed, err = pruneExportedPaths(cfg.VaultPath, documents)
-	if err != nil {
-		return report, err
-	}
-	pruneEmptyDirectories(cfg.VaultPath, map[string]bool{"global": true, "projects": true, "archive": true})
 
 	summary := &ExportSummary{
 		Total: report.Total, Global: report.Global, Projects: report.Projects,
-		Archives: report.Archives, ProjectInbox: report.ProjectInbox, Groups: report.Groups,
+		Archives: report.Archives, ArchiveLibraries: report.ArchiveLibraries,
+		Orphans: report.Orphans, ProjectInbox: report.ProjectInbox, Groups: report.Groups,
 		ExportedAt: now.Format(time.RFC3339),
 	}
 	if manifest.Export != nil && sameExportSummary(*manifest.Export, *summary) {
@@ -679,26 +792,38 @@ func Export(ctx context.Context, cfg Config, databasePath string, options Export
 	}
 	manifest.Export = summary
 	manifest.UpdatedAt = now.Format(time.RFC3339)
-	if report.Written == 0 && report.Removed == 0 && manifestsEquivalent(originalManifest, manifest) {
-		manifest = originalManifest
+	return documents, report, manifest, nil
+}
+
+func splitGroupKey(key string) (string, string) {
+	parts := strings.SplitN(key, "\x00", 2)
+	scope := parts[0]
+	projectID := ""
+	if len(parts) > 1 {
+		projectID = parts[1]
 	}
-	if err := writeManifest(cfg.VaultPath, manifest); err != nil {
-		return report, err
+	return scope, projectID
+}
+
+func orphanGroupLabel(scope, projectID string) string {
+	switch {
+	case scope == "project" && projectID != "":
+		return "project-" + Slugify(projectID)
+	case scope == "project":
+		return "project-unassigned"
+	default:
+		value := scope
+		if strings.TrimSpace(value) == "" {
+			value = "unknown"
+		}
+		return "scope-" + Slugify(value)
 	}
-	if err := writeExportState(cfg.VaultPath, documents, now); err != nil {
-		return report, err
-	}
-	if options.Commit {
-		warning, committed := commitVault(cfg.VaultPath, "Export AHA2 knowledge into vault")
-		report.GitWarning = warning
-		report.Committed = committed
-	}
-	return report, nil
 }
 
 func sameExportSummary(left, right ExportSummary) bool {
 	return left.Total == right.Total && left.Global == right.Global &&
 		left.Projects == right.Projects && left.Archives == right.Archives &&
+		left.ArchiveLibraries == right.ArchiveLibraries && left.Orphans == right.Orphans &&
 		left.ProjectInbox == right.ProjectInbox && left.Groups == right.Groups
 }
 
