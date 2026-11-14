@@ -1116,8 +1116,11 @@ test("task list and conversation patches rebind fresh nodes exactly once", async
 test("read-only task history opens on the latest page and lazily loads older rows", async () => {
   const root = resolve(import.meta.dirname, "..");
   const script = await readFile(resolve(root, "build", "app.js"), "utf8");
-  assert.match(script, /summary\?\.read_only\s*\?\s*\[\s*"chat",\s*"update",\s*"error"\s*\]/);
-  assert.doesNotMatch(script, /summary\?\.read_only\s*\?\s*\[[^\]]*"mail"/);
+  // Read-only history uses the same selected categories as the filter control;
+  // it must not silently add update or drop tool behind the user's back.
+  assert.match(script, /const categories = selectedConversationCategories\(\);/);
+  assert.doesNotMatch(script, /summary\?\.read_only\s*\?\s*\[/);
+  assert.doesNotMatch(script, /if \(summary\?\.read_only\) state\.taskCategories/);
   assert.match(script, /agentConversation\(taskID,\s*"main",\s*\{\s*limit:\s*initialConversationPageSize,\s*categories\s*\}/);
   assert.match(script, /requestConversationBottom\(\)/);
   assert.match(script, /detail\.task\.read_only\s*\|\|\s*detail\.task\.status\s*===\s*"draft"\)\s*closeEvents\(\)/);

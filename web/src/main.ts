@@ -3377,8 +3377,9 @@ async function openTask(taskID: string): Promise<void> {
   const summary = state.tasks.find(task => task.id === taskID);
   if (summary) showTaskLoading(summary);
   try {
-    const categories: ConversationCategory[] = summary?.read_only ? ["chat", "update", "error"] : selectedConversationCategories();
-    if (summary?.read_only) state.taskCategories.tool = false;
+    // Read-only mirrors use the same filter state as local Tasks: the control
+    // and the request must always name the same categories.
+    const categories: ConversationCategory[] = selectedConversationCategories();
     let pagePromise = summary?.status === "draft"
       ? Promise.resolve(null)
       : api.agentConversation(taskID, "main", {limit: initialConversationPageSize, categories});
