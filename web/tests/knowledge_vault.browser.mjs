@@ -395,7 +395,7 @@ try {
   assert.doesNotMatch(treeText, /全局知识首页/);
   assert.match(treeText, /global/);
   assert.match(treeText, /projects/);
-  assert.equal(await page.locator('a[data-kv-doc="g-index"]').count(), 1, "the global root index is the global folder row");
+  assert.equal(await page.locator('[data-kv-open-index="g-index"]').count(), 1, "the global root index has one explicit open-page button");
   assert.equal(await page.locator('li.kv-tree-folder').filter({has: page.locator('[data-kv-toggle="g-index"]')}).locator('.kv-badge').count(), 0, "directory rows carry no badges");
 
   // Every directory starts collapsed like `tree` output: children are not in
@@ -424,12 +424,13 @@ try {
   assert.equal(await page.locator('[data-kv-toggle="g-folder"]').getAttribute("aria-expanded"), "true");
   assert.equal(await page.locator('a[data-kv-doc="g-doc"]').count(), 1);
 
-  // Folder rows use a directory icon as their only expand/collapse control.
-  // There are no up/down chevrons, the icon and title are separate controls,
-  // and clicking the icon never opens a document.
+  // Folder rows use a directory icon for expand/collapse, and the directory
+  // title is a second toggle control. There are no up/down chevrons and
+  // clicking either control never opens a document.
   assert.equal(await page.locator('.kv-tree-toggle:has(.kv-tree-folder-icon)').count(), await page.locator('.kv-tree-toggle').count(), "every toggle is a folder icon");
-  assert.equal(await page.locator('.kv-tree-toggle [d*="m18 15"], .kv-tree-toggle [d*="m6 9"]').count(), 0, "no chevron arrows remain");
+  assert.equal(await page.locator('.kv-tree-toggle [d*="m18 15"], .kv-tree-toggle [d*="m6 9"]').count(), 0, "no chevron arrows remain in the tree");
   await page.locator('[data-kv-toggle="g-index"]').focus();
+  await page.keyboard.press("Tab");
   await page.keyboard.press("Tab");
   await page.keyboard.press("Tab");
   assert.equal(await page.evaluate(() => document.activeElement?.dataset.kvToggle), "g-folder", "Tab reaches the next folder icon button");
@@ -439,31 +440,46 @@ try {
   assert.equal(await page.evaluate(() => location.hash), hashBeforeIconToggle, "icon toggle does not open a document");
   assert.equal(await page.locator(".kv-doc-head h1").count(), 0, "icon toggle leaves the reading pane untouched");
 
-  // A click anywhere on the row except the title link toggles the branch.
-  const otherRow = page.locator('[data-kv-row-toggle="g-other"]');
-  const otherBox = await otherRow.boundingBox();
-  await otherRow.click({position: {x: Math.max(8, otherBox.width - 4), y: otherBox.height / 2}});
-  assert.equal(await page.locator('[data-kv-toggle="g-other"]').getAttribute("aria-expanded"), "false", "row whitespace collapses the folder");
+  // The folder icon also toggles from the keyboard.
+  await page.locator('[data-kv-toggle="g-other"]').click();
+  assert.equal(await page.locator('[data-kv-toggle="g-other"]').getAttribute("aria-expanded"), "false", "icon click collapses the folder");
   await page.locator('[data-kv-toggle="g-other"]').focus();
   await page.keyboard.press("Space");
   assert.equal(await page.locator('[data-kv-toggle="g-other"]').getAttribute("aria-expanded"), "true", "Space expands from the keyboard");
   await page.keyboard.press("Space");
   assert.equal(await page.locator('[data-kv-toggle="g-other"]').getAttribute("aria-expanded"), "false");
 
-  // Clicking the directory title opens its index without collapsing the tree.
-  await page.locator('a[data-kv-doc="g-folder"]').click();
+  // Clicking the directory title toggles the branch but never loads its index.
+  const hashBeforeTitleToggle = await page.evaluate(() => location.hash);
+  await page.locator('[data-kv-title-toggle="g-folder"]').click();
+  assert.equal(await page.locator('[data-kv-toggle="g-folder"]').getAttribute("aria-expanded"), "false", "title click collapses the folder");
+  assert.equal(await page.evaluate(() => location.hash), hashBeforeTitleToggle, "title click does not open a document");
+  assert.equal(await page.locator(".kv-doc-head h1").count(), 0, "title click leaves the reading pane untouched");
+  await page.locator('[data-kv-title-toggle="g-folder"]').focus();
+  await page.keyboard.press("Enter");
+  assert.equal(await page.locator('[data-kv-toggle="g-folder"]').getAttribute("aria-expanded"), "true", "Enter on the title expands the folder");
+  await page.keyboard.press("Enter");
+  assert.equal(await page.locator('[data-kv-toggle="g-folder"]').getAttribute("aria-expanded"), "false", "Enter on the title collapses it again");
+
+  // Only the explicit open-page button loads the index, and the selected state
+  // stays on that button instead of the directory title.
+  await page.locator('[data-kv-open-index="g-folder"]').click();
   await page.waitForSelector(".kv-doc-body");
   assert.equal((await page.locator(".kv-doc-head h1").textContent()).trim(), "构建指南");
-  assert.equal(await page.locator('[data-kv-toggle="g-folder"]').getAttribute("aria-expanded"), "true", "opening the index does not collapse the folder");
+  assert.equal(await page.locator('[data-kv-toggle="g-folder"]').getAttribute("aria-expanded"), "false", "opening the index does not expand or collapse the folder");
+  assert.equal(await page.locator('[data-kv-open-index="g-folder"]').getAttribute("aria-current"), "page", "the open-page button carries the current state");
+  assert.equal(await page.locator('[data-kv-title-toggle="g-folder"]').evaluate(element => element.classList.contains("selected")), false, "selection never lands on the title");
+  assert.equal(await page.locator('[data-kv-title-toggle="g-folder"]').getAttribute("aria-current"), null);
+  await page.locator('[data-kv-toggle="g-folder"]').click();
 
   // Same-depth folder names and document titles share one computed left edge;
   // the indentation step is exactly 12px per level.
   await page.locator('[data-kv-toggle="g-sub"]').click();
   await page.waitForSelector('a[data-kv-doc="g-deep"]');
   const titleLeft = async selector => page.locator(`${selector} .kv-tree-title`).first().evaluate(element => element.getBoundingClientRect().left);
-  const depth2Folder = await titleLeft('a[data-kv-doc="g-sub"]');
+  const depth2Folder = await titleLeft('[data-kv-folder-title="g-sub"]');
   const depth2Doc = await titleLeft('a[data-kv-doc="g-doc"]');
-  const depth3Folder = await titleLeft('a[data-kv-doc="g-level3"]');
+  const depth3Folder = await titleLeft('[data-kv-folder-title="g-level3"]');
   const depth3Doc = await titleLeft('a[data-kv-doc="g-deep"]');
   assert.ok(Math.abs(depth2Folder - depth2Doc) <= 1, `depth 2 titles align: ${depth2Folder} vs ${depth2Doc}`);
   assert.ok(Math.abs(depth3Folder - depth3Doc) <= 1, `depth 3 titles align: ${depth3Folder} vs ${depth3Doc}`);
@@ -483,6 +499,17 @@ try {
     await page.mouse.up();
   };
   assert.ok(Math.abs((await treeWidth()) - 270) < 1, "default sidebar is 270px");
+  // The resize guide line is visible by default and only deepens on hover/focus.
+  const guideLine = () => page.locator(".kv-tree-resizer").evaluate(element => {
+    const style = getComputedStyle(element, "::after");
+    return {opacity: style.opacity, color: style.backgroundColor};
+  });
+  const restingGuide = await guideLine();
+  assert.equal(restingGuide.opacity, "1", "the resize guide line is always visible");
+  await page.locator(".kv-tree-resizer").hover();
+  await page.waitForTimeout(180);
+  const hoveredGuide = await guideLine();
+  assert.notEqual(hoveredGuide.color, restingGuide.color, "hover deepens the guide line color");
   await dragResizerTo(1100);
   assert.ok(Math.abs((await treeWidth()) - 460) < 1, "drag clamps at 460px");
   await dragResizerTo(0);
@@ -516,9 +543,15 @@ try {
   assert.ok(Math.abs((await treeWidth()) - 270) < 1);
 
   // Collapse to a directory rail, then restore; both states survive reloads.
+  assert.equal(await page.locator("[data-kv-sidebar-toggle]").getAttribute("aria-expanded"), "true");
+  assert.equal(await page.locator("[data-kv-sidebar-toggle]").getAttribute("aria-label"), "收起目录栏");
+  assert.equal(await page.locator("[data-kv-sidebar-toggle] svg path").getAttribute("d"), "m15 18-6-6 6-6", "the expanded sidebar uses a chevron-left");
   await page.locator("[data-kv-sidebar-toggle]").click();
   assert.equal(await page.locator(".knowledge-vault").getAttribute("data-kv-sidebar-collapsed"), "true");
   assert.equal(await page.locator(".kv-tree-panel").evaluate(element => element.classList.contains("collapsed")), true);
+  assert.equal(await page.locator("[data-kv-sidebar-toggle]").getAttribute("aria-expanded"), "false");
+  assert.equal(await page.locator("[data-kv-sidebar-toggle]").getAttribute("aria-label"), "展开目录栏");
+  assert.equal(await page.locator("[data-kv-sidebar-toggle] svg path").getAttribute("d"), "m9 18 6-6-6-6", "the collapsed rail uses a chevron-right");
   assert.ok(Math.abs((await treeWidth()) - 48) < 1, "collapsed rail is 48px");
   assert.equal(await page.locator(".kv-tree-resizer").count(), 0, "collapsed panel has no drag handle");
   assert.equal(await page.locator(".kv-tree-body").isVisible(), false);
@@ -529,6 +562,8 @@ try {
   assert.ok(Math.abs((await treeWidth()) - 48) < 1);
   await page.locator("[data-kv-sidebar-toggle]").click();
   assert.equal(await page.locator(".knowledge-vault").getAttribute("data-kv-sidebar-collapsed"), "false");
+  assert.equal(await page.locator("[data-kv-sidebar-toggle]").getAttribute("aria-expanded"), "true");
+  assert.equal(await page.locator("[data-kv-sidebar-toggle]").getAttribute("aria-label"), "收起目录栏");
   assert.equal(await page.locator(".kv-tree-body").isVisible(), true);
   assert.ok(Math.abs((await treeWidth()) - 270) < 1, "expanding restores the saved width");
   assert.equal(await page.evaluate(() => localStorage.getItem("aha2.knowledgeVault.sidebarCollapsed")), "0");
@@ -544,7 +579,7 @@ try {
   await page.locator('[data-kv-toggle="vault-dir:projects"]').click();
   await page.waitForSelector('[data-kv-toggle="p-index"]');
   assert.equal(await page.locator('[data-kv-toggle="p-index"]').getAttribute("aria-expanded"), "false");
-  assert.equal(await page.locator('a[data-kv-doc="p-guides"]').count(), 0);
+  assert.equal(await page.locator('[data-kv-open-index="p-guides"]').count(), 0);
   await page.locator('[data-kv-toggle="p-index"]').click();
   await page.waitForSelector('[data-kv-toggle="p-guides"]');
   assert.equal(await page.locator('[data-kv-toggle="p-guides"]').getAttribute("aria-expanded"), "false");

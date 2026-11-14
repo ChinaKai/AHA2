@@ -77,6 +77,7 @@ const localText: Record<string, [zhCN: string, enUS: string]> = {
   "kv.sidebarCollapse": ["收起目录栏", "Collapse contents sidebar"],
   "kv.sidebarExpand": ["展开目录栏", "Expand contents sidebar"],
   "kv.resizeSidebar": ["调整目录栏宽度", "Resize contents sidebar"],
+  "kv.openDirectoryPage": ["打开目录页", "Open directory page"],
 };
 
 function kt(key: string, values: Record<string, string | number> = {}): string {
@@ -120,10 +121,10 @@ const TREE_STYLES = `
 .kv-panel-head span { margin-right: auto; }
 .kv-sidebar-toggle {
   flex: 0 0 auto; display: inline-grid; place-items: center; width: 28px; height: 28px;
-  padding: 0; border: 1px solid transparent; border-radius: 5px; background: transparent;
+  padding: 0; border: 1px solid var(--color-border-subtle); border-radius: 5px; background: var(--color-surface);
   color: var(--color-text-muted); cursor: pointer;
 }
-.kv-sidebar-toggle:hover { background: var(--color-surface-muted); color: var(--color-text); }
+.kv-sidebar-toggle:hover { background: var(--color-surface-muted); color: var(--color-text); border-color: var(--color-border); }
 .kv-sidebar-toggle .icon { width: 15px; height: 15px; }
 .kv-tree-panel.collapsed { padding: 8px 5px; overflow: hidden; }
 .kv-tree-panel.collapsed .kv-panel-head { justify-content: center; padding: 2px 0 8px; border-bottom: 0; }
@@ -136,9 +137,9 @@ const TREE_STYLES = `
 }
 .kv-tree-resizer::after {
   content: ""; position: absolute; inset: 0 2px; border-radius: 999px;
-  background: var(--color-border-subtle); opacity: 0; transition: opacity .12s ease;
+  background: var(--color-border-strong); opacity: 1; transition: background-color .12s ease, opacity .12s ease;
 }
-.kv-tree-resizer:hover::after, .kv-tree-resizer:focus-visible::after { opacity: 1; }
+.kv-tree-resizer:hover::after, .kv-tree-resizer:focus-visible::after { background: var(--color-text-muted); opacity: 1; }
 body.kv-resizing { cursor: col-resize; user-select: none; }
 .kv-tree-list .kv-tree-list { padding-left: 12px; }
 .kv-tree-row { gap: 0; min-width: 0; border-radius: 5px; }
@@ -152,7 +153,20 @@ body.kv-resizing { cursor: col-resize; user-select: none; }
 .kv-tree-toggle-space { flex: 0 0 var(--kv-tree-toggle-size); width: var(--kv-tree-toggle-size); height: 30px; }
 .kv-tree-folder-icon { display: inline-flex; align-items: center; justify-content: center; color: inherit; }
 .kv-tree-folder-icon .icon { width: 15px; height: 15px; }
-.kv-tree-link.kv-tree-folder-link { flex: 0 1 auto; max-width: calc(100% - var(--kv-tree-toggle-size)); font-weight: 500; }
+.kv-tree-link.kv-tree-folder-link { flex: 1 1 auto; max-width: none; font-weight: 500; }
+.kv-tree-folder-title {
+  justify-content: flex-start; min-height: 0;
+  border: 0; background: transparent; font-family: inherit; font-size: var(--font-size-13);
+  text-align: left; cursor: pointer;
+}
+.kv-tree-open-index {
+  flex: 0 0 auto; display: inline-grid; place-items: center; width: 24px; height: 26px; min-height: 0;
+  padding: 0; border: 0; border-radius: 5px; background: transparent;
+  color: var(--color-text-subtle); cursor: pointer;
+}
+.kv-tree-open-index:hover { background: var(--color-surface-muted); color: var(--color-text); }
+.kv-tree-open-index.selected { background: var(--color-accent-soft); color: var(--color-accent-ink); }
+.kv-tree-open-index .icon { width: 14px; height: 14px; }
 .kv-tree-link { padding: 5px 6px; }
 .kv-tree-doc-link { padding-left: 0; }
 .kv-tree-doc-spacer { flex: 0 0 var(--kv-tree-toggle-size); width: var(--kv-tree-toggle-size); height: 1px; }
@@ -162,7 +176,7 @@ body.kv-resizing { cursor: col-resize; user-select: none; }
 @media (max-width: 760px) {
   .knowledge-vault { --kv-tree-toggle-size: 32px; }
   .kv-workspace { grid-template-columns: minmax(0, 1fr); gap: 0; }
-  .kv-tree-toggle, .kv-tree-toggle-space { height: 36px; }
+  .kv-tree-toggle, .kv-tree-toggle-space, .kv-tree-folder-title, .kv-tree-open-index { height: 36px; }
   .kv-sidebar-toggle, .kv-tree-resizer { display: none; }
   .kv-tree-panel.collapsed { padding: 0; overflow: visible; }
   .kv-tree-panel.collapsed .kv-panel-head { justify-content: space-between; padding: 2px 6px 8px; border-bottom: 1px solid var(--color-border-subtle); }
@@ -812,7 +826,7 @@ function knowledgeBodyHTML(): string {
   return `<div class="kv-workspace" data-kv-mobile-pane="${state.mobilePane}">
     <nav id="kv-tree-panel" class="kv-tree-panel${state.sidebarCollapsed ? " collapsed" : ""}" aria-label="${t("kv.tree")}">
       <div class="kv-panel-head">
-        <button type="button" class="kv-sidebar-toggle icon-button" data-kv-sidebar-toggle aria-expanded="${!state.sidebarCollapsed}" aria-controls="kv-tree-panel" aria-label="${escapeVaultHTML(sidebarLabel)}" title="${escapeVaultHTML(sidebarLabel)}">${icon("folder")}</button>
+        <button type="button" class="kv-sidebar-toggle icon-button" data-kv-sidebar-toggle aria-expanded="${!state.sidebarCollapsed}" aria-controls="kv-tree-panel" aria-label="${escapeVaultHTML(sidebarLabel)}" title="${escapeVaultHTML(sidebarLabel)}">${icon(state.sidebarCollapsed ? "chevron-right" : "chevron-left")}</button>
         <span>${t("kv.tree")}</span>
         <small>${state.treeState === "ready" ? `${state.tree.length} ${t("kv.groups")}` : ""}</small>
       </div>
@@ -856,25 +870,30 @@ function treeNodeHTML(node: KnowledgeVaultTreeNode, depth = 0): string {
   }
   const hasIndex = node.has_index ?? Boolean(node.is_index);
   const canToggle = children.length > 0;
+  const id = escapeVaultHTML(node.id);
   const toggleLabel = expanded ? t("kv.collapseNode") : t("kv.expandNode");
-  // The folder icon itself is the expand/collapse hit area. It is deliberately
-  // separate from the title link: opening a directory's index must not also
-  // collapse the branch under the pointer.
+  // The folder icon is one expand/collapse control. The title is a second one:
+  // clicking a directory name must never load its index page, so the index has
+  // its own explicit button and the title cannot carry the selected state.
   const toggle = canToggle
-    ? `<button type="button" class="kv-tree-toggle" data-kv-toggle="${escapeVaultHTML(node.id)}" aria-expanded="${expanded}" aria-label="${escapeVaultHTML(toggleLabel)}" title="${escapeVaultHTML(toggleLabel)}"><span class="kv-tree-folder-icon" aria-hidden="true">${icon("folder")}</span></button>`
+    ? `<button type="button" class="kv-tree-toggle" data-kv-toggle="${id}" aria-expanded="${expanded}" aria-label="${escapeVaultHTML(toggleLabel)}" title="${escapeVaultHTML(toggleLabel)}"><span class="kv-tree-folder-icon" aria-hidden="true">${icon("folder")}</span></button>`
     : `<span class="kv-tree-toggle-space" aria-hidden="true"></span>`;
   const title = `<span class="kv-tree-title">${escapeVaultHTML(node.title)}</span>`;
-  const rowContent = hasIndex
-    ? `<a class="kv-tree-link kv-tree-folder-link${selected ? " selected" : ""}" href="${escapeVaultHTML(docHash(node))}" data-kv-doc="${escapeVaultHTML(node.id)}" aria-current="${selected ? "page" : "false"}">${title}</a>`
-    : `<span class="kv-tree-link kv-tree-folder-link">${title}</span>`;
-  // The row around the title toggles the branch (virtual directories have no
-  // index page, so the whole row is the control). The title link stops at the
-  // text so trailing whitespace still belongs to the row.
-  const rowAttributes = canToggle ? ` data-kv-row-toggle="${escapeVaultHTML(node.id)}"` : "";
+  const titleControl = canToggle
+    ? `<button type="button" class="kv-tree-link kv-tree-folder-link kv-tree-folder-title" data-kv-folder-title="${id}" data-kv-title-toggle="${id}" aria-expanded="${expanded}">${title}</button>`
+    : `<span class="kv-tree-link kv-tree-folder-link" data-kv-folder-title="${id}">${title}</span>`;
+  const openIndexLabel = kt("kv.openDirectoryPage");
+  const openIndex = hasIndex
+    ? `<button type="button" class="kv-tree-open-index${selected ? " selected" : ""}" data-kv-open-index="${id}" data-kv-doc="${id}" aria-current="${selected ? "page" : "false"}" aria-label="${escapeVaultHTML(openIndexLabel)}" title="${escapeVaultHTML(openIndexLabel)}">${icon("knowledge")}</button>`
+    : "";
+  // The row around the title toggles the branch as well, so the whitespace
+  // right of the title stays a large hit area.
+  const rowAttributes = canToggle ? ` data-kv-row-toggle="${id}"` : "";
   return `<li class="kv-tree-node kv-tree-folder" style="--kv-depth:${depth}">
     <div class="kv-tree-row${canToggle ? " kv-tree-row-toggle" : ""}"${rowAttributes}>
       ${toggle}
-      ${rowContent}
+      ${titleControl}
+      ${openIndex}
     </div>
     ${expanded && canToggle ? `<ul class="kv-tree-list">${children.map(child => treeNodeHTML(child, depth + 1)).join("")}</ul>` : ""}
   </li>`;
@@ -1786,7 +1805,7 @@ function handleDocLink(event: Event): boolean {
 function focusSelector(element: Element | null): string {
   if (!(element instanceof HTMLElement)) return "";
   if (element.id) return `#${typeof CSS !== "undefined" && CSS.escape ? CSS.escape(element.id) : element.id}`;
-  for (const name of ["kvSidebarToggle", "kvToggle", "kvFeedback", "kvTabButton", "kvDoc", "kvCopy", "kvTag"]) {
+  for (const name of ["kvSidebarToggle", "kvToggle", "kvTitleToggle", "kvFeedback", "kvTabButton", "kvDoc", "kvCopy", "kvTag"]) {
     const value = (element.dataset as Record<string, string | undefined>)[name];
     if (value) return `[data-kv-${name.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`) }="${typeof CSS !== "undefined" && CSS.escape ? CSS.escape(value) : value}"]`;
   }
@@ -1908,9 +1927,16 @@ export function bindKnowledgeVaultPage(context: KnowledgeVaultContext): void {
       toggleTreeFolder(treeToggle.dataset.kvToggle || "");
       return;
     }
-    // Folder rows without an index have no title link; clicking their blank
-    // area is the same as clicking the folder icon. Title links were consumed
-    // by handleDocLink above and never reach this branch.
+    // The directory title only expands or collapses its branch. It never opens
+    // the index page; that is the separate data-kv-open-index button, consumed
+    // by handleDocLink above.
+    const titleToggle = target?.closest<HTMLElement>("[data-kv-title-toggle]");
+    if (titleToggle) {
+      toggleTreeFolder(titleToggle.dataset.kvTitleToggle || "");
+      return;
+    }
+    // Folder rows without an index have no title control; clicking their blank
+    // area is the same as clicking the folder icon.
     const rowToggle = target?.closest<HTMLElement>("[data-kv-row-toggle]");
     if (rowToggle && !target?.closest("[data-kv-doc]")) {
       toggleTreeFolder(rowToggle.dataset.kvRowToggle || "");

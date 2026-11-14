@@ -216,19 +216,19 @@ test("directory rows open their index document once and never repeat index.md as
   ], "global");
   reset({tree, expanded: new Set(["g-general"])});
   const html = vault.renderKnowledgeVaultPage(context());
-  assert.equal((html.match(/data-kv-doc="g-general"/g) || []).length, 1, "index document is represented by the folder row only");
+  assert.equal((html.match(/data-kv-doc="g-general"/g) || []).length, 1, "index document is represented by the open-page button only");
   assert.match(html, /data-kv-doc="g-general"/);
-  assert.match(html, /href="#knowledge\?doc=g-general&amp;scope=global"/);
+  assert.match(html, /data-kv-open-index="g-general"/);
   assert.doesNotMatch(html, /data-kv-doc="g-extra"/, "a duplicate index.md entry is not a leaf");
   assert.match(html, /<span class="kv-tree-title">general<\/span>/);
   assert.doesNotMatch(html, /kv-badge-index/);
-  const folderLink = html.match(/<a class="kv-tree-link kv-tree-folder-link[^>]*data-kv-doc="g-general"[^>]*>[\s\S]*?<\/a>/)?.[0] || "";
-  assert.equal(folderLink.includes("kv-badge"), false, "directory rows do not carry index or navigation badges");
+  const folderRow = html.match(/<div class="kv-tree-row kv-tree-row-toggle" data-kv-row-toggle="g-general">[\s\S]*?<\/div>/)?.[0] || "";
+  assert.equal(folderRow.includes("kv-badge"), false, "directory rows do not carry index or navigation badges");
   assert.match(html, /kv-tree-folder-icon/, "directories use a folder icon");
   assert.match(html, /kv-badge-type[^>]*>实践</, "leaf documents keep their type badge");
 });
 
-test("folder icons toggle, titles open the index, and document titles align under folder titles", () => {
+test("folder icons and titles toggle, an explicit button opens the index, and selection never lands on a title", () => {
   const tree = vault.buildVaultDirectoryTree([
     treeFixture("g-root", "全局知识首页", "global/index.md", [
       treeFixture("g-full", "完整目录", "global/full/index.md", [
@@ -236,32 +236,36 @@ test("folder icons toggle, titles open the index, and document titles align unde
         {id: "g-leaf", title: "同级文档", path: "global/full/leaf.md", type: "practice", status: "verified", scope: "global", is_index: false, system: false, children: []},
       ]),
       treeFixture("g-empty", "只有索引", "global/empty/index.md", []),
-      {id: "g-inbox-doc", title: "收件箱文档", path: "global/inbox/idea.md", type: "practice", status: "unverified", scope: "global", is_index: false, system: false, children: []},
     ]),
   ], "global");
-  reset({tree, expanded: new Set(["g-full"])});
+  reset({tree, expanded: new Set(["g-full"]), selectedID: "g-full"});
   const html = vault.renderKnowledgeVaultPage(context());
 
-  // The folder icon is its own button; the title is an independent link.
+  // The folder icon and the title are both toggle controls; the title is a
+  // button, never a document link, and it cannot carry the selected state.
   const fullRow = html.match(/<div class="kv-tree-row kv-tree-row-toggle" data-kv-row-toggle="g-full">[\s\S]*?<\/div>/)?.[0] || "";
   assert.match(fullRow, /<button type="button" class="kv-tree-toggle" data-kv-toggle="g-full" aria-expanded="true"/);
-  assert.match(fullRow, /<a class="kv-tree-link kv-tree-folder-link" href="#knowledge\?doc=g-full&amp;scope=global" data-kv-doc="g-full"/);
-  assert.equal(fullRow.indexOf("data-kv-toggle=\"g-full\"") < fullRow.indexOf("data-kv-doc=\"g-full\""), true, "icon precedes the title link");
-  assert.doesNotMatch(fullRow, /<a[^>]*data-kv-doc="g-full"[^>]*>[^<]*<button/);
+  assert.match(fullRow, /<button type="button" class="kv-tree-link kv-tree-folder-link kv-tree-folder-title" data-kv-folder-title="g-full" data-kv-title-toggle="g-full" aria-expanded="true"><span class="kv-tree-title">full<\/span><\/button>/);
+  assert.doesNotMatch(fullRow, /kv-tree-folder-title[^>]*data-kv-doc=/);
+  assert.doesNotMatch(fullRow, /kv-tree-folder-title[^>]*selected/);
+  assert.match(fullRow, /<button type="button" class="kv-tree-open-index selected" data-kv-open-index="g-full" data-kv-doc="g-full" aria-current="page" aria-label="打开目录页"/);
+  assert.equal(fullRow.indexOf("data-kv-toggle=\"g-full\"") < fullRow.indexOf("data-kv-title-toggle=\"g-full\""), true, "icon precedes the title toggle");
+  assert.equal(fullRow.indexOf("data-kv-title-toggle=\"g-full\"") < fullRow.indexOf("data-kv-open-index=\"g-full\""), true, "the open-page button follows the title");
 
-  // A folder with an index but no children keeps a blank icon slot; only the
-  // title link opens the index.
-  const emptyRow = html.match(/<div class="kv-tree-row">\s*<span class="kv-tree-toggle-space"[\s\S]*?data-kv-doc="g-empty"[\s\S]*?<\/div>/)?.[0] || "";
+  // A folder with an index but no children keeps a blank toggle slot; only the
+  // explicit open-page button loads the index.
+  const emptyRow = html.match(/<div class="kv-tree-row">\s*<span class="kv-tree-toggle-space"[\s\S]*?data-kv-open-index="g-empty"[\s\S]*?<\/div>/)?.[0] || "";
   assert.match(emptyRow, /kv-tree-toggle-space/);
+  assert.match(emptyRow, /<span class="kv-tree-link kv-tree-folder-link" data-kv-folder-title="g-empty"><span class="kv-tree-title">empty<\/span><\/span>/);
   assert.match(emptyRow, /data-kv-doc="g-empty"/);
   assert.doesNotMatch(emptyRow, /data-kv-toggle="/);
   assert.doesNotMatch(emptyRow, /data-kv-row-toggle/);
 
-  // Virtual directories have no index; the row itself is the control.
-  const inboxRow = html.match(/<div class="kv-tree-row kv-tree-row-toggle" data-kv-row-toggle="vault-dir:global\/inbox">[\s\S]*?<\/div>/)?.[0] || "";
-  assert.match(inboxRow, /data-kv-toggle="vault-dir:global\/inbox"/);
+  // An empty directory without an index has no open-page button at all.
+  const inboxRow = html.match(/<div class="kv-tree-row">\s*<span class="kv-tree-toggle-space" aria-hidden="true"><\/span>\s*<span class="kv-tree-link kv-tree-folder-link" data-kv-folder-title="vault-dir:global\/inbox"><span class="kv-tree-title">inbox<\/span><\/span>\s*<\/div>/)?.[0] || "";
+  assert.match(inboxRow, /<span class="kv-tree-title">inbox<\/span>/);
   assert.doesNotMatch(inboxRow, /data-kv-doc=/);
-  assert.match(inboxRow, /<span class="kv-tree-link kv-tree-folder-link"><span class="kv-tree-title">inbox<\/span><\/span>/);
+  assert.doesNotMatch(inboxRow, /data-kv-open-index/);
 
   // Document rows reserve the same icon width and carry the same depth.
   const docRow = html.match(/<li class="kv-tree-node kv-tree-doc" style="--kv-depth:1"><a[\s\S]*?<\/a><\/li>/)?.[0] || "";
@@ -274,18 +278,24 @@ test("the sidebar defaults to 270px, collapses to a rail and exposes a 6px separ
   let html = vault.renderKnowledgeVaultPage(context());
   assert.match(html, /style="--kv-tree-width:270px;--kv-resizer-width:6px" data-kv-sidebar-collapsed="false"/);
   assert.match(html, /class="kv-tree-resizer" role="separator" aria-orientation="vertical" tabindex="0"[^>]*aria-valuemin="220" aria-valuemax="460" aria-valuenow="270"/);
+  assert.match(html, /data-kv-sidebar-toggle aria-expanded="true" aria-controls="kv-tree-panel" aria-label="收起目录栏"/);
+  assert.match(html, /data-kv-sidebar-toggle[^>]*>[^<]*<svg[^>]*><path d="m15 18-6-6 6-6"\/>/, "expanded sidebar shows a collapse chevron");
 
   reset({sidebarCollapsed: true});
   html = vault.renderKnowledgeVaultPage(context());
   assert.match(html, /style="--kv-tree-width:48px;--kv-resizer-width:0px" data-kv-sidebar-collapsed="true"/);
   assert.match(html, /class="kv-tree-panel collapsed"/);
-  assert.match(html, /data-kv-sidebar-toggle aria-expanded="false"/);
+  assert.match(html, /data-kv-sidebar-toggle aria-expanded="false" aria-controls="kv-tree-panel" aria-label="展开目录栏"/);
+  assert.match(html, /data-kv-sidebar-toggle[^>]*>[^<]*<svg[^>]*><path d="m9 18 6-6-6-6"\/>/, "collapsed rail shows the expand chevron");
   assert.doesNotMatch(html, /kv-tree-resizer/);
 
   // Route-only styles travel in the lazy knowledge chunk, not styles.css.
   const css = await readFile(resolve(root, "src", "knowledge_vault.ts"), "utf8");
   assert.match(css, /\.kv-tree-list \.kv-tree-list \{ padding-left: 12px; \}/);
   assert.match(css, /\.kv-tree-resizer \{[^}]*width: 6px/);
+  // The resize guide line is always visible and only darkens on hover/focus.
+  assert.match(css, /\.kv-tree-resizer::after \{[^}]*background: var\(--color-border-strong\); opacity: 1;/);
+  assert.match(css, /\.kv-tree-resizer:hover::after, \.kv-tree-resizer:focus-visible::after \{ background: var\(--color-text-muted\); opacity: 1; \}/);
   assert.match(css, /@media \(max-width: 760px\)[\s\S]*\.kv-sidebar-toggle, \.kv-tree-resizer \{ display: none; \}/);
   assert.match(css, /@media \(max-width: 760px\)[\s\S]*\.kv-tree-panel\.collapsed \.kv-tree-body \{ display: block; \}/);
 });
