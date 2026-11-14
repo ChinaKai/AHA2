@@ -19,6 +19,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/desktop"
 	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/hardware"
+	"github.com/ChinaKai/AHA2/internal/knowledgevault"
 	mailpkg "github.com/ChinaKai/AHA2/internal/mail"
 	"github.com/ChinaKai/AHA2/internal/managedprocess"
 	"github.com/ChinaKai/AHA2/internal/outboundproxy"
@@ -68,7 +69,10 @@ type Config struct {
 	// LocalOwnerIngest registers the loopback-only owner message ingest route.
 	// It is off by default; when off the path is not routed at all.
 	LocalOwnerIngest bool
-	StartedAt        time.Time
+	// KnowledgeVault is non-nil only when the Phase 2 feature switch is on.
+	// The legacy knowledge routes stay registered either way.
+	KnowledgeVault *knowledgevault.Reader
+	StartedAt      time.Time
 }
 
 type Server struct {
@@ -120,6 +124,7 @@ type Server struct {
 	systemCachedAt           time.Time
 	systemCache              map[string]any
 	runtimeContextCache      runtimeContextCache
+	knowledgeVault           *knowledgevault.Reader
 }
 
 func New(config Config) *Server {
@@ -217,6 +222,7 @@ func New(config Config) *Server {
 		localOwnerMessageLimiter: newLocalOwnerMessageLimiter(),
 		authLimiter:              newAuthLimiter(),
 		modelDetectionJobs:       newModelDetectionJobs(),
+		knowledgeVault:           config.KnowledgeVault,
 	}
 	if server.webVersion == "" {
 		server.webVersion = server.version
@@ -544,6 +550,18 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/knowledge/proposals/{id}/approve", s.withAuth(http.HandlerFunc(s.approveKnowledgeProposal)))
 	mux.Handle("POST /api/v1/knowledge/proposals/{id}/reject", s.withAuth(http.HandlerFunc(s.rejectKnowledgeProposal)))
 	mux.Handle("POST /api/v1/knowledge/proposals/batch", s.withAuth(http.HandlerFunc(s.batchKnowledgeProposalReviews)))
+	// Phase 2 read-only vault API. Routes are absent when the feature switch is
+	// off, so the path falls through to a 404 and no legacy knowledge behavior
+	// changes.
+	if s.knowledgeVault != nil {
+		mux.Handle("GET /api/v1/knowledge-vault/libraries", s.withAuth(http.HandlerFunc(s.knowledgeVaultLibraries)))
+		mux.Handle("GET /api/v1/knowledge-vault/tree", s.withAuth(http.HandlerFunc(s.knowledgeVaultTree)))
+		mux.Handle("GET /api/v1/knowledge-vault/doc/{id}", s.withAuth(http.HandlerFunc(s.knowledgeVaultDocument)))
+		mux.Handle("GET /api/v1/knowledge-vault/search", s.withAuth(http.HandlerFunc(s.knowledgeVaultSearch)))
+		mux.Handle("GET /api/v1/knowledge-vault/recent", s.withAuth(http.HandlerFunc(s.knowledgeVaultRecent)))
+		mux.Handle("GET /api/v1/knowledge-vault/inbox", s.withAuth(http.HandlerFunc(s.knowledgeVaultInbox)))
+		mux.Handle("GET /api/v1/knowledge-vault/skills", s.withAuth(http.HandlerFunc(s.knowledgeVaultSkills)))
+	}
 	mux.Handle("GET /api/v1/projects/{id}/product-lines", s.withAuth(http.HandlerFunc(s.listProductLines)))
 	mux.Handle("POST /api/v1/projects/{id}/product-lines", s.withAuth(http.HandlerFunc(s.createProductLine)))
 	mux.Handle("DELETE /api/v1/projects/{id}/product-lines/{line}", s.withAuth(http.HandlerFunc(s.deleteProductLine)))

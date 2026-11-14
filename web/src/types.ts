@@ -1650,3 +1650,176 @@ export interface TaskMailOptions {
   build_artifacts: BuildArtifact[];
   messages: MailMessageCard[];
 }
+
+export interface KnowledgeVaultLibrary {
+  id: string;
+  kind: "global" | "project" | "archive" | "orphan" | string;
+  name: string;
+  project_id?: string;
+  count: number;
+}
+
+export interface KnowledgeVaultLibraries {
+  ok: boolean;
+  enabled: boolean;
+  vault_ready: boolean;
+  index_ready: boolean;
+  vault_name?: string;
+  obsidian_vault?: string;
+  obsidian_ready: boolean;
+  remote_host?: string;
+  vault_path?: string;
+  libraries: KnowledgeVaultLibrary[];
+  projects: KnowledgeVaultLibrary[];
+  archives?: KnowledgeVaultLibrary[];
+  orphans?: number;
+  rebuilt_at?: string;
+  warning?: string;
+}
+
+export interface KnowledgeVaultTreeNode {
+  id: string;
+  title: string;
+  path: string;
+  type: string;
+  status: string;
+  scope: string;
+  project_id?: string;
+  updated?: string;
+  is_index: boolean;
+  system: boolean;
+  children?: KnowledgeVaultTreeNode[];
+}
+
+export interface KnowledgeVaultTree {
+  ok: boolean;
+  enabled: boolean;
+  index_ready: boolean;
+  library: string;
+  project_id?: string;
+  count: number;
+  nodes: KnowledgeVaultTreeNode[];
+  warning?: string;
+}
+
+export interface KnowledgeVaultOutlineItem {
+  level: number;
+  text: string;
+  slug: string;
+}
+
+export interface KnowledgeVaultBacklink {
+  id: string;
+  title: string;
+  path: string;
+}
+
+export interface KnowledgeVaultDoc {
+  id: string;
+  title: string;
+  path: string;
+  relative_path: string;
+  absolute_path: string;
+  scope: string;
+  project_id?: string;
+  library_id: string;
+  library_name: string;
+  type: string;
+  legacy_type?: string;
+  status: string;
+  body: string;
+  tags?: string[];
+  updated?: string;
+  created?: string;
+  modified_at?: string;
+  is_index: boolean;
+  system: boolean;
+  warning?: string;
+  outline: KnowledgeVaultOutlineItem[];
+  backlinks: KnowledgeVaultBacklink[];
+  obsidian_vault?: string;
+  obsidian_ready: boolean;
+  obsidian_file?: string;
+  remote_host?: string;
+  vault_path?: string;
+}
+
+export interface KnowledgeVaultSearchResult {
+  id: string;
+  title: string;
+  path: string;
+  type: string;
+  scope: string;
+  project_id?: string;
+  status: string;
+  tags?: string[];
+  snippet?: string;
+  updated?: string;
+  archive?: boolean;
+}
+
+export interface KnowledgeVaultSearch {
+  ok: boolean;
+  enabled: boolean;
+  index_ready: boolean;
+  results: KnowledgeVaultSearchResult[];
+  warning?: string;
+}
+
+export interface KnowledgeVaultRecentItem {
+  id: string;
+  title: string;
+  path: string;
+  type: string;
+  status: string;
+  scope: string;
+  project_id?: string;
+  library_id: string;
+  library: string;
+  updated?: string;
+  modified_at: string;
+}
+
+export interface KnowledgeVaultRecent {
+  ok: boolean;
+  enabled: boolean;
+  index_ready: boolean;
+  items: KnowledgeVaultRecentItem[];
+}
+
+export interface KnowledgeVaultInboxCount {
+  library_id: string;
+  library: string;
+  project_id?: string;
+  count: number;
+}
+
+export interface KnowledgeVaultInbox {
+  ok: boolean;
+  enabled: boolean;
+  index_ready: boolean;
+  count: number;
+  counts: KnowledgeVaultInboxCount[];
+  items: KnowledgeVaultRecentItem[];
+}
+
+export interface KnowledgeVaultSkill {
+  id: string;
+  slug: string;
+  name: string;
+  scope: string;
+  project_id?: string;
+  library: string;
+  description?: string;
+  file_count: number;
+  files?: string[];
+  relative_path: string;
+  absolute_path: string;
+  open_path: string;
+}
+
+export interface KnowledgeVaultSkills {
+  ok: boolean;
+  enabled: boolean;
+  skills: KnowledgeVaultSkill[];
+}

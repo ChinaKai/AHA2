@@ -171,6 +171,9 @@ interface State extends ModelHealthState {
   knowledgeLibraries: KnowledgeLibrary[];
   knowledgeProposals: KnowledgeProposal[];
   knowledgeReviewSettings: KnowledgeReviewSettings;
+  // Phase 2 file-vault page. null means "not probed yet"; false keeps the old
+  // knowledge workspace and its API calls completely unchanged.
+  knowledgeVaultEnabled: boolean | null;
   skills: Skill[];
   mcpServers: MCPServer[];
   selectedTask: TaskDetail | null;
@@ -246,6 +249,21 @@ function knowledgeEntryListVisible(...args: Parameters<KnowledgePageModule["know
   if (module) return module.knowledgeEntryListVisible(...args);
   void knowledgePage.load();
   return false;
+}
+
+type KnowledgeVaultPageModule = typeof import("./knowledge_vault.js");
+const knowledgeVaultPage = createLazyPage<KnowledgeVaultPageModule>("knowledge-vault", () => import("./knowledge_vault.js"), {onChange: () => render()});
+
+function renderKnowledgeVaultPage(...args: Parameters<KnowledgeVaultPageModule["renderKnowledgeVaultPage"]>): string {
+  const module = knowledgeVaultPage.loaded();
+  if (!module) { void knowledgeVaultPage.load(); return lazyPageState(knowledgeVaultPage); }
+  return module.renderKnowledgeVaultPage(...args);
+}
+
+function bindKnowledgeVaultPage(...args: Parameters<KnowledgeVaultPageModule["bindKnowledgeVaultPage"]>): void {
+  const module = knowledgeVaultPage.loaded();
+  if (module) module.bindKnowledgeVaultPage(...args);
+  else void knowledgeVaultPage.load();
 }
 
 type CodexPageModule = typeof import("./codex_accounts.js");
@@ -572,6 +590,7 @@ const state: State = {
   knowledgeLibraries: [],
   knowledgeProposals: [],
   knowledgeReviewSettings: {auto_approve: false},
+  knowledgeVaultEnabled: null,
   skills: [],
   mcpServers: [],
   selectedTask: null,
@@ -2648,6 +2667,31 @@ async function loadKnowledgeData(force = true): Promise<void> {
   });
 }
 
+// The Phase 2 page is opt-in on the server: its route only exists when the
+// knowledge-vault feature is enabled. Probe once and keep the legacy workspace
+// path (including all of its API calls) byte-for-byte unchanged when it is off.
+let knowledgeVaultProbe: Promise<boolean> | null = null;
+async function detectKnowledgeVault(force = false): Promise<boolean> {
+  if (!force && state.knowledgeVaultEnabled !== null) return state.knowledgeVaultEnabled;
+  if (knowledgeVaultProbe) return knowledgeVaultProbe;
+  knowledgeVaultProbe = api.knowledgeVaultLibraries()
+    .then(result => {
+      state.knowledgeVaultEnabled = result?.enabled === true;
+      return state.knowledgeVaultEnabled;
+    })
+    .catch(() => {
+      state.knowledgeVaultEnabled = false;
+      return false;
+    })
+    .finally(() => { knowledgeVaultProbe = null; });
+  return knowledgeVaultProbe;
+}
+
+async function loadKnowledgeViewData(force = true): Promise<void> {
+  if (await detectKnowledgeVault(false)) return;
+  await loadKnowledgeData(force);
+}
+
 async function loadNextPage(kind: "projects" | "tasks" | "knowledge"): Promise<void> {
   const page = listPages[kind];
   if (!page.hasMore || !page.cursor || page.loadingMore) return;
@@ -2740,7 +2784,7 @@ async function ensureViewData(view: View, force = false): Promise<void> {
     }));
     jobs.push(loadKnowledgeData(force));
   }
-  if (view === "knowledge") jobs.push(loadKnowledgeData(force));
+  if (view === "knowledge") jobs.push(loadKnowledgeViewData(force));
   if (view === "proxy") jobs.push(loadResource("proxy", force, async () => {
     const result = await api.proxySettings();
     if (result.proxy) state.proxySettings = result.proxy;
@@ -6166,17 +6210,21 @@ function render(): void {
         mail: mailResourcesData(),
       })),
       tasks: tasksView,
-      knowledge: () => shell(`${renderKnowledgeWorkspace({
-        projects: state.projects,
-        workspaces: state.workspaces,
-        knowledge: state.knowledge,
-        libraries: state.knowledgeLibraries,
-        proposals: state.knowledgeProposals,
-        reviewSettings: state.knowledgeReviewSettings,
-        refreshData: loadKnowledgeData,
-        render,
-        setMessage,
-      })}${knowledgeEntryListVisible(state.projects) ? loadMoreHTML("knowledge") : ""}`),
+      knowledge: () => state.knowledgeVaultEnabled === true
+        ? shell(renderKnowledgeVaultPage({render, setMessage}))
+        : state.knowledgeVaultEnabled === false
+          ? shell(`${renderKnowledgeWorkspace({
+            projects: state.projects,
+            workspaces: state.workspaces,
+            knowledge: state.knowledge,
+            libraries: state.knowledgeLibraries,
+            proposals: state.knowledgeProposals,
+            reviewSettings: state.knowledgeReviewSettings,
+            refreshData: loadKnowledgeData,
+            render,
+            setMessage,
+          })}${knowledgeEntryListVisible(state.projects) ? loadMoreHTML("knowledge") : ""}`)
+          : shell(chunkLoadingHTML(t("chunk.loading"))),
       prompts: () => advancedSubview(renderPromptAdmin()),
       proxy: () => advancedSubview(renderProxySettings(
         state.proxySettings,
@@ -7577,17 +7625,20 @@ function bindTaskToolsAndPanels(): void {
   if (state.taskTool === "hardware" && state.selectedTask) bindHardwarePanel(state.selectedTask, setMessage);
   if (state.taskTool === "browser" && state.selectedTask) bindDesktopPanel(state.selectedTask, setMessage);
   if (state.taskTool === "channel" && state.selectedTask) bindTaskChannelPanel();
-  if (state.view === "knowledge" && !state.selectedProject && !state.selectedTask) bindKnowledgeWorkspace({
-    projects: state.projects,
-    workspaces: state.workspaces,
-    knowledge: state.knowledge,
-    libraries: state.knowledgeLibraries,
-    proposals: state.knowledgeProposals,
-    reviewSettings: state.knowledgeReviewSettings,
-    refreshData: loadKnowledgeData,
-    render,
-    setMessage,
-  });
+  if (state.view === "knowledge" && !state.selectedProject && !state.selectedTask) {
+    if (state.knowledgeVaultEnabled === true) bindKnowledgeVaultPage({render, setMessage});
+    else if (state.knowledgeVaultEnabled === false) bindKnowledgeWorkspace({
+      projects: state.projects,
+      workspaces: state.workspaces,
+      knowledge: state.knowledge,
+      libraries: state.knowledgeLibraries,
+      proposals: state.knowledgeProposals,
+      reviewSettings: state.knowledgeReviewSettings,
+      refreshData: loadKnowledgeData,
+      render,
+      setMessage,
+    });
+  }
   if (state.view === "mcp") bindMCPView();
   if (state.view === "advanced") bindLanguageSetting();
   if (state.view === "data") bindDataManagementPage();

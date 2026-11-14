@@ -124,24 +124,25 @@ func parseCommand(args []string) (string, []string, error) {
 }
 
 type serveOptions struct {
-	listen                string
-	dataDir               string
-	setupToken            string
-	setupTokenFile        string
-	secureCookie          bool
-	allowCrossOrigin      bool
-	agentAPIURL           string
-	mailTaskBaseURL       string
-	mailDownloadBaseURL   string
-	mailDownloadListen    string
-	logLevel              string
-	codexBinary           string
-	claudeBinary          string
-	dshBinary             string
-	localOwnerIngest      bool
-	knowledgeVaultEnabled bool
-	knowledgeVaultPath    string
-	knowledgeVaultIndex   string
+	listen                   string
+	dataDir                  string
+	setupToken               string
+	setupTokenFile           string
+	secureCookie             bool
+	allowCrossOrigin         bool
+	agentAPIURL              string
+	mailTaskBaseURL          string
+	mailDownloadBaseURL      string
+	mailDownloadListen       string
+	logLevel                 string
+	codexBinary              string
+	claudeBinary             string
+	dshBinary                string
+	localOwnerIngest         bool
+	knowledgeVaultEnabled    bool
+	knowledgeVaultPath       string
+	knowledgeVaultIndex      string
+	knowledgeVaultRemoteHost string
 	// deprecatedLiveInput records old live-inbox switches that were supplied.
 	// They are accepted so existing service definitions keep starting, but they
 	// no longer select any behavior.
@@ -185,6 +186,7 @@ func parseServeOptions(name string, args []string) (serveOptions, error) {
 	knowledgeVaultEnabled := flags.Bool("knowledge-vault-enabled", envBool("AHA2_KNOWLEDGE_VAULT_ENABLED"), "enable the file-backed knowledge vault (Phase 1: configuration only, legacy knowledge UI/API unchanged)")
 	knowledgeVaultPath := flags.String("knowledge-vault-path", os.Getenv("AHA2_KNOWLEDGE_VAULT_PATH"), "knowledge vault directory (default <data-dir>/knowledge-vault)")
 	knowledgeVaultIndex := flags.String("knowledge-vault-index", os.Getenv("AHA2_KNOWLEDGE_VAULT_INDEX"), "knowledge index database (default <data-dir>/knowledge-vault-index.db)")
+	knowledgeVaultRemoteHost := flags.String("knowledge-vault-remote-host", os.Getenv("AHA2_KNOWLEDGE_VAULT_REMOTE_HOST"), "SSH host used for vscode-remote knowledge links (optional)")
 	// Live inbox delivery is always enabled when the runner can stream stdin.
 	// Keep the old switches as parse-only no-ops so existing service definitions
 	// and scripts still start; they cannot turn the behavior on or off.
@@ -209,6 +211,7 @@ func parseServeOptions(name string, args []string) (serveOptions, error) {
 		knowledgeVaultEnabled:      *knowledgeVaultEnabled,
 		knowledgeVaultPath:         *knowledgeVaultPath,
 		knowledgeVaultIndex:        *knowledgeVaultIndex,
+		knowledgeVaultRemoteHost:   *knowledgeVaultRemoteHost,
 		deprecatedLiveInput:        deprecatedLiveInput,
 		deprecatedAgentAPIInsecure: deprecatedAgentAPIInsecure,
 	}, nil
@@ -275,6 +278,7 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	if err := os.MkdirAll(absoluteDataDir, 0o700); err != nil {
 		return fmt.Errorf("create data dir: %w", err)
 	}
+	var knowledgeVaultReader *knowledgevault.Reader
 	if options.knowledgeVaultEnabled {
 		vaultConfig, err := (knowledgevault.Config{
 			Enabled: options.knowledgeVaultEnabled, DataDir: absoluteDataDir,
@@ -283,8 +287,14 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 		if err != nil {
 			return fmt.Errorf("resolve knowledge vault configuration: %w", err)
 		}
-		logger.Info("knowledge vault enabled (Phase 1 configuration only; legacy knowledge UI and API are unchanged)",
-			"vault", vaultConfig.VaultPath, "index", vaultConfig.IndexPath)
+		knowledgeVaultReader, err = knowledgevault.OpenReader(ctx, vaultConfig, options.knowledgeVaultRemoteHost)
+		if err != nil {
+			return fmt.Errorf("open knowledge vault: %w", err)
+		}
+		defer knowledgeVaultReader.Close()
+		logger.Info("knowledge vault enabled (Phase 2 read-only Web/API; legacy knowledge UI and API are unchanged)",
+			"vault", vaultConfig.VaultPath, "index", vaultConfig.IndexPath,
+			"vault_ready", knowledgeVaultReader.VaultReady(), "index_ready", knowledgeVaultReader.IndexReady())
 	}
 	if options.setupTokenFile == "" {
 		options.setupTokenFile = filepath.Join(absoluteDataDir, "setup-token")
@@ -425,6 +435,7 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 		WebVersion:          webVersion,
 		ListenAddress:       options.listen,
 		LocalOwnerIngest:    options.localOwnerIngest,
+		KnowledgeVault:      knowledgeVaultReader,
 	})
 	if options.allowCrossOrigin {
 		logger.Warn("Origin host validation disabled")

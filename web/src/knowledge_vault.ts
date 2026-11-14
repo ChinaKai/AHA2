@@ -1,0 +1,1042 @@
+import {api} from "./api.js";
+import {t, formatLocaleDateTime} from "./i18n.js";
+import {icon} from "./icons.js";
+import {renderMarkdown} from "./markdown.js";
+import type {
+  KnowledgeVaultDoc,
+  KnowledgeVaultInbox,
+  KnowledgeVaultLibrary,
+  KnowledgeVaultLibraries,
+  KnowledgeVaultOutlineItem,
+  KnowledgeVaultRecent,
+  KnowledgeVaultRecentItem,
+  KnowledgeVaultSearch,
+  KnowledgeVaultSearchResult,
+  KnowledgeVaultSkill,
+  KnowledgeVaultSkills,
+  KnowledgeVaultTreeNode,
+  KnowledgeVaultTree,
+} from "./types.js";
+
+type VaultTab = "knowledge" | "recent" | "inbox" | "skills";
+type MobilePane = "list" | "doc";
+type LoadState = "idle" | "loading" | "ready" | "error";
+
+export interface KnowledgeVaultContext {
+  render: () => void;
+  setMessage: (kind: "notice" | "error", message: string) => void;
+}
+
+interface VaultState {
+  initialized: boolean;
+  loading: LoadState;
+  error: string;
+  libraries: KnowledgeVaultLibrary[];
+  projects: KnowledgeVaultLibrary[];
+  vaultReady: boolean;
+  indexReady: boolean;
+  vaultName: string;
+  vaultPath: string;
+  obsidianVault: string;
+  obsidianReady: boolean;
+  remoteHost: string;
+  rebuiltAt: string;
+  warning: string;
+  tab: VaultTab;
+  libraryID: string;
+  projectFilter: string;
+  typeFilter: string;
+  statusFilter: string;
+  tagFilter: string;
+  tree: KnowledgeVaultTreeNode[];
+  treeState: LoadState;
+  treeError: string;
+  treeKey: string;
+  collapsed: Set<string>;
+  selectedID: string;
+  doc: KnowledgeVaultDoc | null;
+  docState: LoadState;
+  docError: string;
+  recent: KnowledgeVaultRecentItem[];
+  recentState: LoadState;
+  recentError: string;
+  inbox: KnowledgeVaultInbox | null;
+  inboxState: LoadState;
+  inboxError: string;
+  skills: KnowledgeVaultSkill[];
+  skillsState: LoadState;
+  skillsError: string;
+  searchOpen: boolean;
+  searchQuery: string;
+  searchLibrary: string;
+  searchProject: string;
+  searchType: string;
+  searchStatus: string;
+  searchTag: string;
+  searchState: LoadState;
+  searchError: string;
+  searchResults: KnowledgeVaultSearchResult[];
+  feedback: "" | "helped" | "stale";
+  contextOpen: boolean;
+  moreOpen: boolean;
+  mobilePane: MobilePane;
+  listScroll: number;
+  docScroll: number;
+  pendingSearch: number;
+}
+
+function initialState(): VaultState {
+  return {
+    initialized: false, loading: "idle", error: "",
+    libraries: [], projects: [], vaultReady: false, indexReady: false,
+    vaultName: "", vaultPath: "", obsidianVault: "", obsidianReady: false,
+    remoteHost: "", rebuiltAt: "", warning: "",
+    tab: "knowledge", libraryID: "global", projectFilter: "",
+    typeFilter: "", statusFilter: "", tagFilter: "",
+    tree: [], treeState: "idle", treeError: "", treeKey: "", collapsed: new Set(),
+    selectedID: "", doc: null, docState: "idle", docError: "",
+    recent: [], recentState: "idle", recentError: "",
+    inbox: null, inboxState: "idle", inboxError: "",
+    skills: [], skillsState: "idle", skillsError: "",
+    searchOpen: false, searchQuery: "", searchLibrary: "", searchProject: "",
+    searchType: "", searchStatus: "", searchTag: "",
+    searchState: "idle", searchError: "", searchResults: [],
+    feedback: "", contextOpen: false, moreOpen: false,
+    mobilePane: "list", listScroll: 0, docScroll: 0, pendingSearch: 0,
+  };
+}
+
+let state = initialState();
+let binding = false;
+let keyboardBound = false;
+let hashBound = false;
+let searchTimer: ReturnType<typeof setTimeout> | null = null;
+const pendingLoads = new Set<string>();
+
+export function __setKnowledgeVaultStateForTest(patch: Partial<VaultState>): void {
+  state = {...state, ...patch};
+}
+
+export function __resetKnowledgeVaultStateForTest(): void {
+  state = initialState();
+  binding = false;
+}
+
+/* Pure URI builders ------------------------------------------------------ */
+
+function encodeURIPath(value: string): string {
+  const normalized = String(value ?? "").replaceAll("\\", "/");
+  const drive = normalized.match(/^([A-Za-z]):(.*)$/);
+  if (drive) {
+    return `${drive[1]}:${drive[2].split("/").map(encodeURIComponent).join("/")}`;
+  }
+  return normalized.split("/").map(encodeURIComponent).join("/");
+}
+
+export function vscodeLocalURI(absolutePath: string): string {
+  const normalized = String(absolutePath ?? "").replaceAll("\\", "/").replace(/^\/+/, "");
+  return `vscode://file/${encodeURIPath(normalized)}`;
+}
+
+export function vscodeRemoteURI(host: string, absolutePath: string): string | null {
+  const trimmed = String(host ?? "").trim();
+  if (!trimmed) return null;
+  const normalized = String(absolutePath ?? "").replaceAll("\\", "/").replace(/^\/+/, "");
+  return `vscode://vscode-remote/ssh-remote+${encodeURIComponent(trimmed)}/${encodeURIPath(normalized)}`;
+}
+
+export function obsidianURI(vaultName: string, relativePath: string): string {
+  const file = String(relativePath ?? "").replaceAll("\\", "/").replace(/\.md$/i, "");
+  return `obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(file)}`;
+}
+
+export function vaultQuery(params: Record<string, string | number | undefined | null>): string {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null || value === "") continue;
+    query.set(key, String(value));
+  }
+  return query.toString();
+}
+
+export function docHash(doc: {id: string; scope?: string; project_id?: string}): string {
+  const scope = doc.scope === "global" || doc.scope === "project" || doc.scope === "archive" ? doc.scope : "";
+  return `#knowledge?${vaultQuery({doc: doc.id, scope, project: doc.project_id || ""})}`;
+}
+
+export function parseDocHash(hash: string): {id: string; library: string; project: string} | null {
+  const raw = String(hash ?? "").replace(/^#/, "");
+  const [name, query = ""] = raw.split("?");
+  if (name !== "knowledge") return null;
+  const params = new URLSearchParams(query);
+  const id = params.get("doc") || "";
+  const scope = params.get("scope") || params.get("library") || "";
+  const project = params.get("project") || "";
+  let library = "";
+  if (scope === "global") library = "global";
+  else if (scope === "project" && project) library = `project:${project}`;
+  else if (scope === "archive" && project) library = `archive:${project}`;
+  else if (scope) library = scope;
+  return {id, library, project};
+}
+
+export function escapeVaultHTML(value: unknown): string {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+export function highlightVaultText(value: unknown, query: string): string {
+  const text = String(value ?? "");
+  const needle = String(query ?? "").trim();
+  if (!needle) return escapeVaultHTML(text);
+  const index = text.toLowerCase().indexOf(needle.toLowerCase());
+  if (index < 0) return escapeVaultHTML(text);
+  return `${escapeVaultHTML(text.slice(0, index))}<mark>${escapeVaultHTML(text.slice(index, index + needle.length))}</mark>${escapeVaultHTML(text.slice(index + needle.length))}`;
+}
+
+function localDayKey(value: string | number | Date): string {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+export function groupRecentByDay(items: KnowledgeVaultRecentItem[], now: Date = new Date()): Array<{key: string; label: string; items: KnowledgeVaultRecentItem[]}> {
+  const today = localDayKey(now);
+  const yesterday = localDayKey(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1));
+  const groups = new Map<string, KnowledgeVaultRecentItem[]>();
+  for (const item of items) {
+    const key = localDayKey(item.modified_at || item.updated || "");
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(item);
+  }
+  return [...groups.entries()].map(([key, groupItems]) => ({
+    key,
+    label: key === today ? t("kv.today") : key === yesterday ? t("kv.yesterday") : (key ? formatLocaleDateTime(`${key}T00:00:00`, {year: "numeric", month: "short", day: "numeric"}) : t("kv.unknownDate")),
+    items: groupItems,
+  }));
+}
+
+/* Small view helpers ----------------------------------------------------- */
+
+function typeLabel(type: string): string {
+  const key = `kv.type.${type}`;
+  const label = t(key);
+  return label === key ? type : label;
+}
+
+function statusLabel(status: string): string {
+  const key = `kv.status.${status}`;
+  const label = t(key);
+  return label === key ? status : label;
+}
+
+function safeDateTime(value?: string): string {
+  if (!value) return t("kv.never");
+  return formatLocaleDateTime(value, {year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"});
+}
+
+export function vaultEmptyState(kind: "loading" | "error" | "empty", message = "", retry = false): string {
+  const title = kind === "loading" ? t("kv.loading") : kind === "error" ? t("kv.error") : t("kv.empty");
+  const body = message || (kind === "empty" ? t("kv.emptyHint") : "");
+  return `<div class="kv-state kv-state-${kind}" role="status" aria-live="polite">
+    <strong>${escapeVaultHTML(title)}</strong>
+    ${body ? `<p>${escapeVaultHTML(body)}</p>` : ""}
+    ${retry ? `<button type="button" class="secondary" data-kv-retry>${t("kv.retry")}</button>` : ""}
+  </div>`;
+}
+
+function badge(text: string, kind = ""): string {
+  return `<span class="kv-badge${kind ? ` kv-badge-${kind}` : ""}">${escapeVaultHTML(text)}</span>`;
+}
+
+function metaBadges(item: {type: string; status: string}): string {
+  return `${badge(typeLabel(item.type), "type")}${badge(statusLabel(item.status), item.status === "stale" || item.status === "pending" ? "warn" : "status")}`;
+}
+
+function openActions(absolutePath: string, relativePath: string, obsidianFile = "", options: {compact?: boolean} = {}): string {
+  const local = vscodeLocalURI(absolutePath);
+  const remote = vscodeRemoteURI(state.remoteHost, absolutePath);
+  const obsidian = state.obsidianVault ? obsidianURI(state.obsidianVault, obsidianFile || relativePath) : "";
+  return `<div class="kv-open-actions${options.compact ? " compact" : ""}">
+    <a class="kv-open kv-open-desktop" href="${escapeVaultHTML(local)}" target="_blank" rel="noopener" title="${t("kv.openVSCodeLocal")}">${icon("monitor")}<span>${t("kv.openVSCodeLocal")}</span></a>
+    ${remote
+      ? `<a class="kv-open kv-open-desktop" href="${escapeVaultHTML(remote)}" target="_blank" rel="noopener" title="${t("kv.openVSCodeRemote")}">${icon("link")}<span>${t("kv.openVSCodeRemote")}</span></a>`
+      : `<button type="button" class="kv-open kv-open-desktop" data-kv-copy="${escapeVaultHTML(absolutePath)}" title="${t("kv.remoteUnavailable")}">${icon("copy")}<span>${t("kv.openVSCodeRemote")}</span></button>`}
+    ${obsidian
+      ? `<a class="kv-open kv-open-desktop" href="${escapeVaultHTML(obsidian)}" target="_blank" rel="noopener" title="${state.obsidianReady ? t("kv.openObsidian") : t("kv.obsidianUnregistered")}">${icon("branch")}<span>${t("kv.openObsidian")}</span>${state.obsidianReady ? "" : `<small>${t("kv.obsidianUnregistered")}</small>`}</a>`
+      : ""}
+    <button type="button" class="kv-open kv-copy" data-kv-copy="${escapeVaultHTML(absolutePath)}">${icon("copy")}<span>${t("kv.copyPath")}</span></button>
+  </div>`;
+}
+
+/* Page render ------------------------------------------------------------ */
+
+export function renderKnowledgeVaultPage(_context: KnowledgeVaultContext): string {
+  if (!state.initialized || state.loading === "loading") {
+    return `<div class="knowledge-vault" data-kv-tab="${state.tab}">${vaultEmptyState("loading")}</div>`;
+  }
+  if (state.loading === "error") {
+    return `<div class="knowledge-vault" data-kv-tab="${state.tab}">${vaultEmptyState("error", state.error, true)}</div>`;
+  }
+  return `<div class="knowledge-vault${state.contextOpen ? " context-open" : ""}" data-kv-tab="${state.tab}">
+    ${topbarHTML()}
+    ${moreMenuHTML()}
+    ${searchPanelHTML()}
+    <div class="kv-content" data-kv-mobile-pane="${state.mobilePane}">
+      ${state.tab === "knowledge" ? knowledgeBodyHTML() : state.tab === "recent" ? recentBodyHTML() : state.tab === "inbox" ? inboxBodyHTML() : skillsBodyHTML()}
+    </div>
+    ${settingsDialogHTML()}
+  </div>`;
+}
+
+function topbarHTML(): string {
+  const tabs: Array<[VaultTab, string, string]> = [
+    ["knowledge", "knowledge", "kv.tab.knowledge"],
+    ["recent", "clock", "kv.tab.recent"],
+    ["inbox", "mail", "kv.tab.inbox"],
+    ["skills", "bot", "kv.tab.skills"],
+  ];
+  const inboxCount = state.inbox?.count ?? 0;
+  const projectOptions = [`<option value="">${t("kv.allProjects")}</option>`, ...state.projects.map(item => `<option value="${escapeVaultHTML(item.project_id || "")}"${state.projectFilter === (item.project_id || "") ? " selected" : ""}>${escapeVaultHTML(item.name)}</option>`)].join("");
+  const libraryOptions = state.libraries.map(item => `<option value="${escapeVaultHTML(item.id)}"${state.libraryID === item.id ? " selected" : ""}>${escapeVaultHTML(item.name)} (${item.count})</option>`).join("");
+  return `<header class="kv-topbar">
+    <div class="kv-heading"><strong>${t("kv.title")}</strong><small>${t("kv.subtitle")}</small></div>
+    <nav class="kv-tabs" aria-label="${t("kv.sections")}">
+      ${tabs.map(([tab, glyph, key]) => `<button type="button" aria-current="${state.tab === tab ? "page" : "false"}" class="kv-tab kv-tab-${tab}" data-kv-tab-button="${tab}">${icon(glyph)}<span>${t(key)}</span>${tab === "inbox" && inboxCount > 0 ? `<span class="kv-count">${inboxCount}</span>` : ""}</button>`).join("")}
+    </nav>
+    <div class="kv-controls">
+      <label class="kv-select"><span>${t("kv.library")}</span><select id="kv-library" aria-label="${t("kv.library")}">${libraryOptions || `<option value="global">${t("kv.title")}</option>`}</select></label>
+      <label class="kv-select"><span>${t("kv.project")}</span><select id="kv-project" aria-label="${t("kv.project")}">${projectOptions}</select></label>
+      <button type="button" class="kv-search-trigger" data-kv-search-open aria-label="${t("kv.searchShortcut")}" title="${t("kv.searchShortcut")}">${icon("search")}<span>${t("kv.search")}</span></button>
+      <button type="button" class="kv-more-trigger" data-kv-more aria-expanded="${state.moreOpen}" aria-label="${t("kv.more")}">${icon("menu")}<span>${t("kv.more")}</span></button>
+      <button type="button" class="kv-settings-trigger icon-button" data-kv-settings aria-label="${t("kv.settings")}" title="${t("kv.settings")}">${icon("settings")}</button>
+    </div>
+  </header>`;
+}
+
+function moreMenuHTML(): string {
+  return `<div class="kv-more-menu" ${state.moreOpen ? "" : "hidden"}>
+    <button type="button" data-kv-tab-button="skills">${icon("bot")}<span>${t("kv.tab.skills")}</span></button>
+    <button type="button" data-kv-settings>${icon("settings")}<span>${t("kv.settings")}</span></button>
+  </div>`;
+}
+
+function searchPanelHTML(): string {
+  const typeOptions = ["", "navigation", "decision", "practice", "diagnostic", "reference", "architecture"].map(type => `<option value="${type}"${state.searchType === type ? " selected" : ""}>${type ? typeLabel(type) : t("kv.allTypes")}</option>`).join("");
+  const statusOptions = ["", "verified", "stale", "pending", "draft", "unverified", "conflict"].map(value => `<option value="${value}"${state.searchStatus === value ? " selected" : ""}>${value ? statusLabel(value) : t("kv.allStatuses")}</option>`).join("");
+  const libraryOptions = [`<option value="">${t("kv.allLibraries")}</option>`, ...state.libraries.map(item => `<option value="${escapeVaultHTML(item.id)}"${state.searchLibrary === item.id ? " selected" : ""}>${escapeVaultHTML(item.name)}</option>`)].join("");
+  const projectOptions = [`<option value="">${t("kv.allProjects")}</option>`, ...state.projects.map(item => `<option value="${escapeVaultHTML(item.project_id || "")}"${state.searchProject === (item.project_id || "") ? " selected" : ""}>${escapeVaultHTML(item.name)}</option>`)].join("");
+  return `<section class="kv-search-panel" ${state.searchOpen ? "" : "hidden"} aria-label="${t("kv.search")}" role="dialog" aria-modal="false">
+    <div class="kv-search-head">
+      <label class="kv-search-field">${icon("search")}<input id="kv-search" type="search" value="${escapeVaultHTML(state.searchQuery)}" placeholder="${t("kv.searchPlaceholder")}" aria-label="${t("kv.searchPlaceholder")}" autocomplete="off" data-allow-rerender="true"></label>
+      <button type="button" class="icon-button" data-kv-search-close aria-label="${t("kv.closeSearch")}" title="${t("kv.closeSearch")}">${icon("close")}</button>
+    </div>
+    <div class="kv-search-filters">
+      <label><span>${t("kv.library")}</span><select id="kv-search-library">${libraryOptions}</select></label>
+      <label><span>${t("kv.project")}</span><select id="kv-search-project">${projectOptions}</select></label>
+      <label><span>${t("kv.type")}</span><select id="kv-search-type">${typeOptions}</select></label>
+      <label><span>${t("kv.status")}</span><select id="kv-search-status">${statusOptions}</select></label>
+      <label><span>${t("kv.tag")}</span><input id="kv-search-tag" type="text" value="${escapeVaultHTML(state.searchTag)}" placeholder="${t("kv.tagPlaceholder")}" data-allow-rerender="true"></label>
+    </div>
+    <div class="kv-search-results" aria-live="polite">
+      ${searchResultsHTML()}
+    </div>
+  </section>`;
+}
+
+function searchResultsHTML(): string {
+  if (state.searchState === "loading") return vaultEmptyState("loading");
+  if (state.searchState === "error") return vaultEmptyState("error", state.searchError, true);
+  if (!state.searchQuery.trim() && !state.searchTag.trim()) return `<p class="kv-hint">${t("kv.searchHint")}</p>`;
+  if (state.searchState === "ready" && state.searchResults.length === 0) return vaultEmptyState("empty");
+  return state.searchResults.map(item => `<div class="kv-search-result">
+    <a class="kv-search-result-link" href="${escapeVaultHTML(docHash({id: item.id, scope: item.scope, project_id: item.project_id}))}" data-kv-doc="${escapeVaultHTML(item.id)}">
+      <span class="kv-search-result-main"><strong>${highlightVaultText(item.title, state.searchQuery)}</strong><small>${highlightVaultText(item.path, state.searchQuery)}</small></span>
+      ${item.snippet ? `<p>${highlightVaultText(item.snippet, state.searchQuery)}</p>` : ""}
+    </a>
+    <span class="kv-search-result-meta">${metaBadges(item)}${item.tags?.length ? item.tags.map(tag => `<button type="button" class="kv-tag" data-kv-tag="${escapeVaultHTML(tag)}">#${escapeVaultHTML(tag)}</button>`).join("") : ""}</span>
+  </div>`).join("");
+}
+
+function knowledgeBodyHTML(): string {
+  return `<div class="kv-workspace" data-kv-mobile-pane="${state.mobilePane}">
+    <nav class="kv-tree-panel" aria-label="${t("kv.tree")}">
+      <div class="kv-panel-head"><span>${t("kv.tree")}</span><small>${state.treeState === "ready" ? `${state.tree.length} ${t("kv.groups")}` : ""}</small></div>
+      ${treeBodyHTML()}
+    </nav>
+    <article class="kv-doc-panel">
+      ${docBodyHTML()}
+    </article>
+    <aside class="kv-context-panel" aria-label="${t("kv.context")}">
+      ${contextBodyHTML()}
+    </aside>
+  </div>`;
+}
+
+function treeBodyHTML(): string {
+  if (state.treeState === "loading") return vaultEmptyState("loading");
+  if (state.treeState === "error") return vaultEmptyState("error", state.treeError, true);
+  if (!state.indexReady) return vaultEmptyState("empty", t("kv.indexMissing"));
+  if (state.tree.length === 0) return vaultEmptyState("empty");
+  const systems = state.tree.filter(node => node.system);
+  const documents = state.tree.filter(node => !node.system);
+  const group = (label: string, nodes: KnowledgeVaultTreeNode[]) => nodes.length === 0 ? "" : `<section class="kv-tree-group"><h3>${escapeVaultHTML(label)}</h3><ul class="kv-tree-list">${nodes.map(node => treeNodeHTML(node)).join("")}</ul></section>`;
+  return `${group(t("kv.systemIndexes"), systems)}${group(t("kv.documents"), documents)}`;
+}
+
+function treeNodeHTML(node: KnowledgeVaultTreeNode, depth = 0): string {
+  const children = node.children || [];
+  const collapsed = state.collapsed.has(node.id);
+  const selected = node.id === state.selectedID;
+  if (children.length === 0) {
+    return `<li class="kv-tree-node" style="--kv-depth:${depth}"><a class="kv-tree-link${selected ? " selected" : ""}" href="${escapeVaultHTML(docHash(node))}" data-kv-doc="${escapeVaultHTML(node.id)}" aria-current="${selected ? "page" : "false"}"><span class="kv-tree-title">${escapeVaultHTML(node.title)}</span>${node.is_index ? badge(t("kv.index"), "index") : ""}${badge(typeLabel(node.type), "type")}</a></li>`;
+  }
+  return `<li class="kv-tree-node" style="--kv-depth:${depth}">
+    <div class="kv-tree-row">
+      <button type="button" class="kv-tree-toggle" data-kv-toggle="${escapeVaultHTML(node.id)}" aria-expanded="${!collapsed}" aria-label="${collapsed ? t("kv.expandNode") : t("kv.collapseNode")}">${icon(collapsed ? "chevron-down" : "chevron-up")}</button>
+      <a class="kv-tree-link${selected ? " selected" : ""}" href="${escapeVaultHTML(docHash(node))}" data-kv-doc="${escapeVaultHTML(node.id)}" aria-current="${selected ? "page" : "false"}"><span class="kv-tree-title">${escapeVaultHTML(node.title)}</span>${node.is_index ? badge(t("kv.index"), "index") : ""}${badge(typeLabel(node.type), "type")}</a>
+    </div>
+    ${collapsed ? "" : `<ul class="kv-tree-list">${children.map(child => treeNodeHTML(child, depth + 1)).join("")}</ul>`}
+  </li>`;
+}
+
+function docBodyHTML(): string {
+  const back = `<button type="button" class="kv-back" data-kv-back>${icon("chevron-up")}<span>${t("kv.backToList")}</span></button>`;
+  if (state.docState === "loading") return `${back}${vaultEmptyState("loading")}`;
+  if (state.docState === "error") return `${back}${vaultEmptyState("error", state.docError, true)}`;
+  if (!state.doc) return `${back}${vaultEmptyState("empty", t("kv.selectDoc"))}`;
+  const doc = state.doc;
+  const crumbs = doc.path.split("/");
+  return `${back}
+    <nav class="kv-breadcrumb" aria-label="${t("kv.breadcrumb")}">${crumbs.map((part, index) => `<span${index === crumbs.length - 1 ? ' aria-current="page"' : ""}>${escapeVaultHTML(part.replace(/\.md$/i, ""))}</span>`).join('<i aria-hidden="true">/</i>')}</nav>
+    <div class="kv-doc-head">
+      <div>
+        <h1>${escapeVaultHTML(doc.title)}</h1>
+        <p class="kv-doc-meta"><span>${t("kv.source")}: ${escapeVaultHTML(doc.library_name)}</span>${doc.project_id ? `<span>${t("kv.project")}: ${escapeVaultHTML(doc.project_id)}</span>` : ""}<span>${t("kv.updated")}: ${escapeVaultHTML(safeDateTime(doc.modified_at || doc.updated))}</span><span>${t("kv.status")}: ${escapeVaultHTML(statusLabel(doc.status))}</span></p>
+      </div>
+      <div class="kv-doc-tools">
+        ${openActions(doc.absolute_path, doc.relative_path, doc.obsidian_file)}
+        <button type="button" class="kv-context-toggle" data-kv-context-toggle aria-expanded="${state.contextOpen}">${icon("panel")}<span>${t("kv.context")}</span></button>
+      </div>
+    </div>
+    ${doc.warning ? `<div class="kv-warning" role="status">${escapeVaultHTML(doc.warning)}</div>` : ""}
+    <div class="kv-doc-meta-badges">${metaBadges(doc)}${doc.tags?.map(tag => `<button type="button" class="kv-tag" data-kv-tag="${escapeVaultHTML(tag)}">#${escapeVaultHTML(tag)}</button>`).join("") || ""}</div>
+    <div class="markdown-body kv-doc-body" data-kv-doc-body>${renderMarkdown(doc.body)}</div>
+    <footer class="kv-feedback">
+      <span>${t("kv.feedbackPrompt")}</span>
+      <button type="button" class="kv-feedback-button${state.feedback === "helped" ? " active" : ""}" data-kv-feedback="helped">${icon("shield")}<span>${t("kv.helpful")}</span></button>
+      <button type="button" class="kv-feedback-button${state.feedback === "stale" ? " active" : ""}" data-kv-feedback="stale">${icon("clock")}<span>${t("kv.stale")}</span></button>
+      ${state.feedback ? `<small role="status">${t("kv.feedbackReadonly")}</small>` : ""}
+    </footer>`;
+}
+
+function contextBodyHTML(): string {
+  if (!state.doc) return `<p class="kv-hint">${t("kv.selectDoc")}</p>`;
+  const doc = state.doc;
+  const outline = doc.outline.length
+    ? `<ol class="kv-outline">${doc.outline.map((item: KnowledgeVaultOutlineItem) => `<li style="--kv-level:${item.level}"><a href="#${escapeVaultHTML(item.slug)}" data-kv-outline="${escapeVaultHTML(item.slug)}">${escapeVaultHTML(item.text)}</a></li>`).join("")}</ol>`
+    : `<p class="kv-hint">${t("kv.noOutline")}</p>`;
+  const tags = doc.tags?.length
+    ? `<div class="kv-tag-list">${doc.tags.map(tag => `<button type="button" class="kv-tag" data-kv-tag="${escapeVaultHTML(tag)}">#${escapeVaultHTML(tag)}</button>`).join("")}</div>`
+    : `<p class="kv-hint">${t("kv.noTags")}</p>`;
+  const backlinks = doc.backlinks.length
+    ? `<ul class="kv-backlinks">${doc.backlinks.map(item => `<li><a href="${escapeVaultHTML(docHash({id: item.id}))}" data-kv-doc="${escapeVaultHTML(item.id)}">${escapeVaultHTML(item.title)}</a></li>`).join("")}</ul>`
+    : `<p class="kv-hint">${t("kv.noBacklinks")}</p>`;
+  return `<section class="kv-context-section"><h3>${t("kv.outline")}</h3>${outline}</section>
+    <section class="kv-context-section"><h3>${t("kv.tags")}</h3>${tags}</section>
+    <section class="kv-context-section"><h3>${t("kv.backlinks")}</h3>${backlinks}</section>
+    <button type="button" class="kv-context-close" data-kv-context-toggle>${t("kv.close")}</button>`;
+}
+
+function recentBodyHTML(): string {
+  if (state.recentState === "loading") return vaultEmptyState("loading");
+  if (state.recentState === "error") return vaultEmptyState("error", state.recentError, true);
+  if (!state.indexReady) return vaultEmptyState("empty", t("kv.indexMissing"));
+  if (state.recent.length === 0) return vaultEmptyState("empty", t("kv.recentEmpty"));
+  return `<section class="kv-feed" aria-label="${t("kv.tab.recent")}">
+    ${groupRecentByDay(state.recent).map(group => `<section class="kv-feed-day"><h2>${escapeVaultHTML(group.label)}</h2><ul>${group.items.map(item => `<li><a class="kv-feed-item" href="${escapeVaultHTML(docHash({id: item.id, scope: item.scope, project_id: item.project_id}))}" data-kv-doc="${escapeVaultHTML(item.id)}">
+      <span class="kv-feed-time">${escapeVaultHTML(formatLocaleDateTime(item.modified_at, {hour: "2-digit", minute: "2-digit"}))}</span>
+      <span class="kv-feed-main"><strong>${escapeVaultHTML(item.title)}</strong><small>${escapeVaultHTML(item.library)}${item.project_id ? ` · ${escapeVaultHTML(item.project_id)}` : ""} · ${escapeVaultHTML(item.path)}</small></span>
+      ${metaBadges(item)}
+    </a></li>`).join("")}</ul></section>`).join("")}
+  </section>`;
+}
+
+function inboxBodyHTML(): string {
+  if (state.inboxState === "loading") return vaultEmptyState("loading");
+  if (state.inboxState === "error") return vaultEmptyState("error", state.inboxError, true);
+  if (!state.indexReady) return vaultEmptyState("empty", t("kv.indexMissing"));
+  if (!state.inbox || state.inbox.items.length === 0) return vaultEmptyState("empty", t("kv.inboxEmpty"));
+  return `<section class="kv-inbox" aria-label="${t("kv.tab.inbox")}">
+    <header class="kv-inbox-head"><h2>${t("kv.inboxCount", {count: state.inbox.count})}</h2><div class="kv-inbox-counts">${state.inbox.counts.map(item => `<button type="button" class="kv-chip" data-kv-inbox-library="${escapeVaultHTML(item.library_id)}">${escapeVaultHTML(item.library)} <b>${item.count}</b></button>`).join("")}</div></header>
+    <ul class="kv-inbox-list">${state.inbox.items.map(item => `<li><a class="kv-inbox-item" href="${escapeVaultHTML(docHash({id: item.id, scope: item.scope, project_id: item.project_id}))}" data-kv-doc="${escapeVaultHTML(item.id)}">
+      <span class="kv-feed-main"><strong>${escapeVaultHTML(item.title)}</strong><small>${escapeVaultHTML(item.path)} · ${escapeVaultHTML(item.library)}</small></span>
+      ${badge(typeLabel(item.type), "type")}
+    </a></li>`).join("")}</ul>
+  </section>`;
+}
+
+function skillsBodyHTML(): string {
+  if (state.skillsState === "loading") return vaultEmptyState("loading");
+  if (state.skillsState === "error") return vaultEmptyState("error", state.skillsError, true);
+  if (state.skills.length === 0) return vaultEmptyState("empty", t("kv.skillsEmpty"));
+  return `<section class="kv-skills" aria-label="${t("kv.tab.skills")}">
+    <p class="kv-hint">${t("kv.skillsReadonly")}</p>
+    <div class="kv-skill-grid">${state.skills.map(skill => `<article class="kv-skill-card">
+      <header><strong>${escapeVaultHTML(skill.name)}</strong>${badge(skill.scope === "global" ? t("kv.scope.global") : t("kv.scope.project"), "type")}</header>
+      <p>${escapeVaultHTML(skill.description || t("kv.noDescription"))}</p>
+      <small>${escapeVaultHTML(skill.library)} · ${t("kv.skillFiles", {count: skill.file_count})}</small>
+      ${openActions(skill.open_path, `${skill.relative_path}/SKILL.md`, "", {compact: true})}
+    </article>`).join("")}</div>
+  </section>`;
+}
+
+function settingsDialogHTML(): string {
+  const ready = (value: boolean) => value ? t("kv.settingsReady") : t("kv.settingsNotReady");
+  return `<dialog id="kv-settings-dialog" class="kv-settings">
+    <header><h2>${t("kv.settings")}</h2><button type="button" class="icon-button" data-kv-settings-close aria-label="${t("kv.close")}">${icon("close")}</button></header>
+    <dl>
+      <div><dt>${t("kv.settingsVault")}</dt><dd>${escapeVaultHTML(state.vaultPath || t("kv.none"))}</dd></div>
+      <div><dt>${t("kv.settingsIndex")}</dt><dd>${escapeVaultHTML(state.indexReady ? t("kv.settingsReady") : t("kv.settingsNotReady"))}</dd></div>
+      <div><dt>${t("kv.settingsRebuilt")}</dt><dd>${escapeVaultHTML(state.rebuiltAt ? safeDateTime(state.rebuiltAt) : t("kv.none"))}</dd></div>
+      <div><dt>${t("kv.settingsObsidian")}</dt><dd>${escapeVaultHTML(state.obsidianVault || t("kv.none"))} · ${escapeVaultHTML(ready(state.obsidianReady))}</dd></div>
+      <div><dt>${t("kv.settingsRemote")}</dt><dd>${escapeVaultHTML(state.remoteHost || t("kv.none"))}</dd></div>
+    </dl>
+    <p class="kv-hint">${t("kv.settingsHint")}</p>
+    <footer><button type="button" data-kv-settings-close>${t("kv.close")}</button></footer>
+  </dialog>`;
+}
+
+/* Data loading ----------------------------------------------------------- */
+
+function contextFromConfig(): KnowledgeVaultContext {
+  return {render: () => {}, setMessage: () => {}};
+}
+let activeContext: KnowledgeVaultContext = contextFromConfig();
+
+function rerender(): void {
+  activeContext.render();
+}
+
+function applyLibraries(payload: KnowledgeVaultLibraries): void {
+  state.libraries = payload.libraries || [];
+  state.projects = payload.projects || [];
+  state.vaultReady = Boolean(payload.vault_ready);
+  state.indexReady = Boolean(payload.index_ready);
+  state.vaultName = payload.vault_name || "";
+  state.vaultPath = payload.vault_path || "";
+  state.obsidianVault = payload.obsidian_vault || "";
+  state.obsidianReady = Boolean(payload.obsidian_ready);
+  state.remoteHost = payload.remote_host || "";
+  state.rebuiltAt = payload.rebuilt_at || "";
+  state.warning = payload.warning || "";
+  if (!state.libraries.some(item => item.id === state.libraryID)) {
+    state.libraryID = state.libraries[0]?.id || "global";
+  }
+  const current = state.libraries.find(item => item.id === state.libraryID);
+  state.projectFilter = current?.kind === "project" ? current.project_id || "" : "";
+}
+
+async function loadLibraries(): Promise<boolean> {
+  state.loading = "loading";
+  rerender();
+  try {
+    const payload = await api.knowledgeVaultLibraries();
+    applyLibraries(payload);
+    state.initialized = true;
+    state.loading = "ready";
+    state.error = "";
+    rerender();
+    return true;
+  } catch (error) {
+    state.initialized = true;
+    state.loading = "error";
+    state.error = error instanceof Error ? error.message : String(error);
+    rerender();
+    return false;
+  }
+}
+
+function loadOnce(key: string, action: () => Promise<void>): void {
+  if (pendingLoads.has(key)) return;
+  pendingLoads.add(key);
+  void action().catch(error => {
+    activeContext.setMessage("error", error instanceof Error ? error.message : String(error));
+  }).finally(() => pendingLoads.delete(key));
+}
+
+async function loadTree(force = false): Promise<void> {
+  const key = `${state.libraryID}`;
+  if (!force && state.treeKey === key && state.treeState !== "error") return;
+  state.treeKey = key;
+  state.treeState = "loading";
+  state.treeError = "";
+  rerender();
+  try {
+    const payload: KnowledgeVaultTree = await api.knowledgeVaultTree(state.libraryID);
+    state.tree = payload.nodes || [];
+    state.indexReady = payload.index_ready;
+    state.treeState = "ready";
+  } catch (error) {
+    state.treeState = "error";
+    state.treeError = error instanceof Error ? error.message : String(error);
+  }
+  rerender();
+}
+
+async function loadDoc(id: string, force = false): Promise<void> {
+  if (!id) return;
+  if (!force && state.selectedID === id && state.docState === "ready") return;
+  state.selectedID = id;
+  state.docState = "loading";
+  state.docError = "";
+  state.feedback = "";
+  state.doc = null;
+  rerender();
+  try {
+    const payload = await api.knowledgeVaultDoc(id);
+    if (state.selectedID !== id) return;
+    state.doc = payload.doc;
+    state.docState = "ready";
+  } catch (error) {
+    if (state.selectedID !== id) return;
+    state.docState = "error";
+    state.docError = error instanceof Error ? error.message : String(error);
+  }
+  rerender();
+  decorateDocBody();
+}
+
+async function loadRecent(force = false): Promise<void> {
+  if (!force && state.recentState === "ready") return;
+  state.recentState = "loading";
+  rerender();
+  try {
+    const payload: KnowledgeVaultRecent = await api.knowledgeVaultRecent(state.projectFilter);
+    state.recent = payload.items || [];
+    state.indexReady = payload.index_ready;
+    state.recentState = "ready";
+  } catch (error) {
+    state.recentState = "error";
+    state.recentError = error instanceof Error ? error.message : String(error);
+  }
+  rerender();
+}
+
+async function loadInbox(force = false): Promise<void> {
+  if (!force && state.inboxState === "ready") return;
+  state.inboxState = "loading";
+  rerender();
+  try {
+    const payload = await api.knowledgeVaultInbox(state.projectFilter);
+    state.inbox = payload;
+    state.indexReady = payload.index_ready;
+    state.inboxState = "ready";
+  } catch (error) {
+    state.inboxState = "error";
+    state.inboxError = error instanceof Error ? error.message : String(error);
+  }
+  rerender();
+}
+
+async function loadSkills(force = false): Promise<void> {
+  if (!force && state.skillsState === "ready") return;
+  state.skillsState = "loading";
+  rerender();
+  try {
+    const payload: KnowledgeVaultSkills = await api.knowledgeVaultSkills();
+    state.skills = payload.skills || [];
+    state.skillsState = "ready";
+  } catch (error) {
+    state.skillsState = "error";
+    state.skillsError = error instanceof Error ? error.message : String(error);
+  }
+  rerender();
+}
+
+function loadTab(tab: VaultTab): void {
+  if (tab === "knowledge") loadOnce("tree", () => loadTree());
+  else if (tab === "recent") loadOnce("recent", () => loadRecent());
+  else if (tab === "inbox") loadOnce("inbox", () => loadInbox());
+  else if (tab === "skills") loadOnce("skills", () => loadSkills());
+}
+
+function performSearch(): void {
+  const query = state.searchQuery.trim();
+  const tag = state.searchTag.trim();
+  if (!query && !tag) {
+    state.searchResults = [];
+    state.searchState = "idle";
+    rerender();
+    return;
+  }
+  const ticket = ++state.pendingSearch;
+  state.searchState = "loading";
+  rerender();
+  void api.knowledgeVaultSearch({
+    q: query, tag,
+    library: state.searchLibrary, project: state.searchProject,
+    type: state.searchType, status: state.searchStatus, limit: 40,
+  }).then((payload: KnowledgeVaultSearch) => {
+    if (ticket !== state.pendingSearch) return;
+    state.searchResults = payload.results || [];
+    state.searchState = "ready";
+    rerender();
+  }).catch((error: unknown) => {
+    if (ticket !== state.pendingSearch) return;
+    state.searchState = "error";
+    state.searchError = error instanceof Error ? error.message : String(error);
+    rerender();
+  });
+}
+
+function scheduleSearch(): void {
+  if (searchTimer) clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    searchTimer = null;
+    performSearch();
+  }, 160);
+}
+
+function openSearch(): void {
+  state.searchOpen = true;
+  state.moreOpen = false;
+  rerender();
+  requestAnimationFrame(() => document.querySelector<HTMLInputElement>("#kv-search")?.focus());
+}
+
+function closeSearch(): void {
+  state.searchOpen = false;
+  rerender();
+}
+
+function syncHash(doc: KnowledgeVaultDoc | null): void {
+  if (!doc) return;
+  try {
+    window.history.replaceState(null, "", docHash(doc));
+  } catch {
+    // History can be unavailable in embedded webviews; deep linking is then
+    // only best-effort and the page state still works.
+  }
+}
+
+/* Interaction ------------------------------------------------------------ */
+
+function enterDoc(id: string, libraryHint = ""): void {
+  if (libraryHint && state.libraries.some(item => item.id === libraryHint)) state.libraryID = libraryHint;
+  if (state.mobilePane === "list") state.listScroll = window.scrollY;
+  state.mobilePane = "doc";
+  state.searchOpen = false;
+  void loadDoc(id).then(() => {
+    const doc = state.doc;
+    if (!doc) return;
+    if (state.libraries.some(item => item.id === doc.library_id)) state.libraryID = doc.library_id;
+    syncHash(doc);
+    if (state.mobilePane === "doc") window.scrollTo(0, 0);
+    void loadTree(false);
+    decorateDocBody();
+  });
+}
+
+function backToList(): void {
+  state.docScroll = window.scrollY;
+  state.mobilePane = "list";
+  rerender();
+  requestAnimationFrame(() => window.scrollTo(0, state.listScroll));
+}
+
+function setTab(tab: VaultTab): void {
+  state.tab = tab;
+  state.moreOpen = false;
+  state.mobilePane = "list";
+  rerender();
+  loadTab(tab);
+}
+
+function decorateDocBody(): void {
+  const body = document.querySelector<HTMLElement>("[data-kv-doc-body]");
+  if (!body || !state.doc) return;
+  const headings = body.querySelectorAll<HTMLElement>("h1,h2,h3,h4,h5,h6");
+  const outline = state.doc.outline;
+  headings.forEach((heading, index) => {
+    if (outline[index]?.slug) heading.id = outline[index].slug;
+  });
+}
+
+function copyPath(value: string): void {
+  const done = () => activeContext.setMessage("notice", t("kv.copied"));
+  if (navigator.clipboard?.writeText) {
+    void navigator.clipboard.writeText(value).then(done).catch(() => fallbackCopy(value, done));
+    return;
+  }
+  fallbackCopy(value, done);
+}
+
+function fallbackCopy(value: string, done: () => void): void {
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    document.execCommand("copy");
+    done();
+  } catch {
+    activeContext.setMessage("error", value);
+  } finally {
+    textarea.remove();
+  }
+}
+
+function bindKeyboard(): void {
+  if (keyboardBound) return;
+  keyboardBound = true;
+  document.addEventListener("keydown", event => {
+    if (!document.querySelector(".knowledge-vault")) return;
+    const modifier = event.ctrlKey || event.metaKey;
+    if (modifier && event.key.toLowerCase() === "k") {
+      event.preventDefault();
+      event.stopPropagation();
+      openSearch();
+      return;
+    }
+    if (event.key === "Escape") {
+      if (state.searchOpen) {
+        event.preventDefault();
+        event.stopPropagation();
+        closeSearch();
+      } else if (state.contextOpen) {
+        state.contextOpen = false;
+        rerender();
+      } else if (state.moreOpen) {
+        state.moreOpen = false;
+        rerender();
+      }
+    }
+  }, true);
+}
+
+function bindHash(): void {
+  if (hashBound) return;
+  hashBound = true;
+  window.addEventListener("hashchange", () => {
+    if (!document.querySelector(".knowledge-vault")) return;
+    const parsed = parseDocHash(window.location.hash);
+    if (!parsed?.id) return;
+    if (parsed.library) state.libraryID = parsed.library;
+    const unchanged = parsed.id === state.selectedID && state.docState === "ready";
+    state.tab = "knowledge";
+    state.mobilePane = "doc";
+    if (unchanged) rerender();
+    else void loadDoc(parsed.id);
+  });
+}
+
+function handleDocLink(event: Event): boolean {
+  const target = (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-kv-doc]");
+  if (!target) return false;
+  if (event instanceof MouseEvent && (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0)) return true;
+  event.preventDefault();
+  const library = target.closest<HTMLElement>("[data-kv-inbox-library]")?.dataset.kvInboxLibrary || "";
+  enterDoc(target.dataset.kvDoc || "", library);
+  return true;
+}
+
+function focusSelector(element: Element | null): string {
+  if (!(element instanceof HTMLElement)) return "";
+  if (element.id) return `#${typeof CSS !== "undefined" && CSS.escape ? CSS.escape(element.id) : element.id}`;
+  for (const name of ["kvToggle", "kvFeedback", "kvTabButton", "kvDoc", "kvCopy", "kvTag", "kvInboxLibrary"]) {
+    const value = (element.dataset as Record<string, string | undefined>)[name];
+    if (value) return `[data-kv-${name.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`) }="${typeof CSS !== "undefined" && CSS.escape ? CSS.escape(value) : value}"]`;
+  }
+  return "";
+}
+
+function renderPreservingFocus(renderPage: () => void): void {
+  const active = document.activeElement;
+  const selector = focusSelector(active);
+  const start = active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement ? active.selectionStart : null;
+  const end = active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement ? active.selectionEnd : null;
+  renderPage();
+  if (!selector) return;
+  const next = document.querySelector<HTMLElement>(selector);
+  if (!next) return;
+  next.focus({preventScroll: true});
+  if ((next instanceof HTMLInputElement || next instanceof HTMLTextAreaElement) && start !== null) {
+    try { next.setSelectionRange(start, end ?? start); } catch { /* some input types reject selection ranges */ }
+  }
+}
+
+export function bindKnowledgeVaultPage(context: KnowledgeVaultContext): void {
+  activeContext = {render: () => renderPreservingFocus(context.render), setMessage: context.setMessage};
+  bindKeyboard();
+  bindHash();
+  if (!binding) {
+    binding = true;
+    void loadLibraries().then(ok => {
+      if (!ok) return;
+      const parsed = parseDocHash(window.location.hash);
+      if (parsed?.library && state.libraries.some(item => item.id === parsed.library)) state.libraryID = parsed.library;
+      const current = state.libraries.find(item => item.id === state.libraryID);
+      state.projectFilter = current?.kind === "project" ? current.project_id || "" : "";
+      loadTab(state.tab);
+      if (parsed?.id) {
+        state.tab = "knowledge";
+        state.mobilePane = "doc";
+        void loadDoc(parsed.id).then(() => { syncHash(state.doc); decorateDocBody(); });
+      }
+    });
+  } else if (state.initialized && state.loading === "ready") {
+    loadTab(state.tab);
+  }
+
+  const root = document.querySelector<HTMLElement>(".knowledge-vault");
+  if (!root) return;
+
+  root.querySelectorAll<HTMLElement>("[data-kv-tab-button]").forEach(button => {
+    button.addEventListener("click", () => setTab(button.dataset.kvTabButton as VaultTab));
+  });
+
+  const librarySelect = root.querySelector<HTMLSelectElement>("#kv-library");
+  librarySelect?.addEventListener("change", () => {
+    state.libraryID = librarySelect.value;
+    const current = state.libraries.find(item => item.id === state.libraryID);
+    state.projectFilter = current?.kind === "project" ? current.project_id || "" : "";
+    state.recentState = "idle";
+    state.inboxState = "idle";
+    rerender();
+    loadTab(state.tab);
+  });
+
+  const projectSelect = root.querySelector<HTMLSelectElement>("#kv-project");
+  projectSelect?.addEventListener("change", () => {
+    state.projectFilter = projectSelect.value;
+    state.libraryID = projectSelect.value ? `project:${projectSelect.value}` : "global";
+    state.recentState = "idle";
+    state.inboxState = "idle";
+    rerender();
+    loadTab(state.tab);
+  });
+
+  root.querySelector<HTMLElement>("[data-kv-more]")?.addEventListener("click", () => {
+    state.moreOpen = !state.moreOpen;
+    rerender();
+  });
+  root.querySelector<HTMLElement>("[data-kv-search-open]")?.addEventListener("click", openSearch);
+  root.querySelector<HTMLElement>("[data-kv-search-close]")?.addEventListener("click", closeSearch);
+  root.querySelector<HTMLElement>("[data-kv-settings]")?.addEventListener("click", () => {
+    state.moreOpen = false;
+    const dialog = document.querySelector<HTMLDialogElement>("#kv-settings-dialog");
+    dialog?.showModal();
+  });
+  root.querySelectorAll<HTMLElement>("[data-kv-settings-close]").forEach(button => {
+    button.addEventListener("click", () => document.querySelector<HTMLDialogElement>("#kv-settings-dialog")?.close());
+  });
+
+  const searchInput = root.querySelector<HTMLInputElement>("#kv-search");
+  searchInput?.addEventListener("input", () => {
+    state.searchQuery = searchInput.value;
+    scheduleSearch();
+  });
+  const searchTag = root.querySelector<HTMLInputElement>("#kv-search-tag");
+  searchTag?.addEventListener("input", () => {
+    state.searchTag = searchTag.value;
+    scheduleSearch();
+  });
+  for (const [selector, key] of [["#kv-search-library", "searchLibrary"], ["#kv-search-project", "searchProject"], ["#kv-search-type", "searchType"], ["#kv-search-status", "searchStatus"]] as const) {
+    const element = root.querySelector<HTMLSelectElement>(selector);
+    element?.addEventListener("change", () => {
+      (state as unknown as Record<string, string>)[key] = element.value;
+      performSearch();
+    });
+  }
+
+  root.querySelectorAll<HTMLElement>("[data-kv-toggle]").forEach(button => {
+    button.addEventListener("click", () => {
+      const id = button.dataset.kvToggle || "";
+      if (state.collapsed.has(id)) state.collapsed.delete(id);
+      else state.collapsed.add(id);
+      rerender();
+    });
+  });
+
+  root.addEventListener("click", event => {
+    if (handleDocLink(event)) return;
+    const target = event.target as HTMLElement | null;
+    const copy = target?.closest<HTMLElement>("[data-kv-copy]");
+    if (copy) {
+      copyPath(copy.dataset.kvCopy || "");
+      return;
+    }
+    const tag = target?.closest<HTMLElement>("[data-kv-tag]");
+    if (tag) {
+      state.searchTag = tag.dataset.kvTag || "";
+      state.searchOpen = true;
+      state.tab = "knowledge";
+      rerender();
+      performSearch();
+      requestAnimationFrame(() => document.querySelector<HTMLInputElement>("#kv-search")?.focus());
+      return;
+    }
+    const feedback = target?.closest<HTMLElement>("[data-kv-feedback]");
+    if (feedback) {
+      state.feedback = feedback.dataset.kvFeedback === "stale" ? "stale" : "helped";
+      rerender();
+      return;
+    }
+    if (target?.closest("[data-kv-back]")) {
+      backToList();
+      return;
+    }
+    if (target?.closest("[data-kv-context-toggle]")) {
+      state.contextOpen = !state.contextOpen;
+      rerender();
+      return;
+    }
+    if (target?.closest("[data-kv-retry]")) {
+      if (state.loading === "error") void loadLibraries();
+      else if (state.docState === "error") void loadDoc(state.selectedID, true);
+      else if (state.searchState === "error") performSearch();
+      else if (state.tab === "recent") void loadRecent(true);
+      else if (state.tab === "inbox") void loadInbox(true);
+      else if (state.tab === "skills") void loadSkills(true);
+      else void loadTree(true);
+      return;
+    }
+    const outline = target?.closest<HTMLElement>("[data-kv-outline]");
+    if (outline) {
+      event.preventDefault();
+      const heading = document.getElementById(outline.dataset.kvOutline || "");
+      heading?.scrollIntoView({behavior: "smooth", block: "start"});
+      heading?.setAttribute("tabindex", "-1");
+      heading?.focus({preventScroll: true});
+      return;
+    }
+    const inboxChip = target?.closest<HTMLElement>("[data-kv-inbox-library]");
+    if (inboxChip) {
+      state.libraryID = inboxChip.dataset.kvInboxLibrary || "global";
+      const current = state.libraries.find(item => item.id === state.libraryID);
+      state.projectFilter = current?.kind === "project" ? current.project_id || "" : "";
+      state.inboxState = "idle";
+      rerender();
+      void loadInbox(true);
+    }
+  });
+
+  if (state.searchOpen) requestAnimationFrame(() => root.querySelector<HTMLInputElement>("#kv-search")?.focus());
+  decorateDocBody();
+}
+
+/* Test-only state access ------------------------------------------------ */
+
+export function __getKnowledgeVaultStateForTest(): VaultState {
+  return state;
+}

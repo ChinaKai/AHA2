@@ -30,6 +30,13 @@ import type {
   KnowledgeLibrary,
   KnowledgeProposal,
   KnowledgeReviewSettings,
+  KnowledgeVaultDoc,
+  KnowledgeVaultInbox,
+  KnowledgeVaultLibraries,
+  KnowledgeVaultRecent,
+  KnowledgeVaultSearch,
+  KnowledgeVaultSkills,
+  KnowledgeVaultTree,
   Model,
   ModelHealth,
   OwnerAssistant,
@@ -1000,6 +1007,48 @@ class APIClient {
 
   knowledgeEntry(id: string): Promise<{knowledge: Knowledge}> {
     return this.request(`/api/v1/knowledge/${encodeURIComponent(id)}`);
+  }
+
+  knowledgeVaultLibraries(): Promise<KnowledgeVaultLibraries> {
+    return this.request("/api/v1/knowledge-vault/libraries");
+  }
+
+  knowledgeVaultTree(library: string, projectID = ""): Promise<KnowledgeVaultTree> {
+    const query = new URLSearchParams();
+    if (library) query.set("library", library);
+    if (projectID) query.set("project", projectID);
+    return this.request(`/api/v1/knowledge-vault/tree?${query}`);
+  }
+
+  knowledgeVaultDoc(id: string): Promise<{ok: boolean; doc: KnowledgeVaultDoc}> {
+    return this.request(`/api/v1/knowledge-vault/doc/${encodeURIComponent(id)}`);
+  }
+
+  knowledgeVaultSearch(options: {q?: string; library?: string; project?: string; type?: string; status?: string; tag?: string; limit?: number} = {}): Promise<KnowledgeVaultSearch> {
+    const query = new URLSearchParams();
+    for (const key of ["q", "library", "project", "type", "status", "tag"] as const) {
+      const value = options[key];
+      if (value) query.set(key, value);
+    }
+    if (options.limit) query.set("limit", String(options.limit));
+    return this.request(`/api/v1/knowledge-vault/search?${query}`);
+  }
+
+  knowledgeVaultRecent(projectID = "", limit = 120): Promise<KnowledgeVaultRecent> {
+    const query = new URLSearchParams();
+    if (projectID) query.set("project", projectID);
+    if (limit) query.set("limit", String(limit));
+    return this.request(`/api/v1/knowledge-vault/recent?${query}`);
+  }
+
+  knowledgeVaultInbox(projectID = ""): Promise<KnowledgeVaultInbox> {
+    const query = new URLSearchParams();
+    if (projectID) query.set("project", projectID);
+    return this.request(`/api/v1/knowledge-vault/inbox?${query}`);
+  }
+
+  knowledgeVaultSkills(): Promise<KnowledgeVaultSkills> {
+    return this.request("/api/v1/knowledge-vault/skills");
   }
 
   knowledgeLibraries(): Promise<{libraries: KnowledgeLibrary[]}> {

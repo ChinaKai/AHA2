@@ -620,6 +620,9 @@ func resolveParents(records []*scannedRecord, byPath map[string]*scannedRecord, 
 type SearchOptions struct {
 	Scope           string
 	ProjectID       string
+	Type            string
+	Status          string
+	Tag             string
 	Limit           int
 	IncludeArchives bool
 }
@@ -658,6 +661,20 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 	if options.ProjectID != "" {
 		sqlQuery += ` AND project_id=?`
 		args = append(args, options.ProjectID)
+	}
+	if options.Type != "" {
+		sqlQuery += ` AND type=?`
+		args = append(args, options.Type)
+	}
+	if options.Status != "" {
+		sqlQuery += ` AND status=?`
+		args = append(args, options.Status)
+	}
+	if options.Tag != "" {
+		// instr keeps the tag comparison literal: LIKE would treat % and _ in
+		// a tag name as wildcards and make an "exact" filter fuzzy.
+		sqlQuery += ` AND instr(','||tags||',', ?)>0`
+		args = append(args, ","+options.Tag+",")
 	}
 	if !options.IncludeArchives {
 		sqlQuery += ` AND archive=0`
