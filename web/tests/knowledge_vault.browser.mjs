@@ -56,6 +56,12 @@ const DEEP_DOC = {
   scope: "global", project_id: "", library_id: "global", library_name: "全局知识",
   obsidian_file: "global/guides/advanced/deep", backlinks: [], tags: [],
 };
+const G_OTHER_DOC = {
+  ...DOC, id: "g-other", title: "参考资料", path: "global/reference/index.md",
+  relative_path: "global/reference/index.md", absolute_path: "/srv/vault/项目 知识/global/reference/index.md",
+  scope: "global", project_id: "", library_id: "global", library_name: "全局知识",
+  obsidian_file: "global/reference/index", backlinks: [], tags: [],
+};
 const LONG_DOC = {
   ...DOC, id: "long-doc",
   title: "一个很长的知识库文档标题用来验证文档头按钮不会挤压标题并且标题能够独占整行自然换行",
@@ -126,6 +132,7 @@ const DOC = ${JSON.stringify(DOC)};
 const INBOX_DOC = ${JSON.stringify(INBOX_DOC)};
 const FENCE_DOC = ${JSON.stringify(FENCE_DOC)};
 const DEEP_DOC = ${JSON.stringify(DEEP_DOC)};
+const G_OTHER_DOC = ${JSON.stringify(G_OTHER_DOC)};
 const LONG_DOC = ${JSON.stringify(LONG_DOC)};
 const RECENT = ${JSON.stringify(RECENT)};
 const GLOBAL_RECENT = ${JSON.stringify(GLOBAL_RECENT)};
@@ -171,6 +178,7 @@ window.fetch = async (input, init = {}) => {
     const id = decodeURIComponent(path.slice("/api/v1/knowledge-vault/doc/".length));
     if (id === "doc-fence") return json({ok: true, doc: FENCE_DOC});
     if (id === "g-deep") return json({ok: true, doc: DEEP_DOC});
+    if (id === "g-other") return json({ok: true, doc: G_OTHER_DOC});
     if (id === "long-doc") return json({ok: true, doc: LONG_DOC});
     if (id === "doc-1" || id === "doc-2" || id.startsWith("doc-") || id === "g-doc" || id === "g-index" || id === "g-folder" || id === "g-sub" || id === "g-other" || id === "p-index" || id === "p-guides") return json({ok: true, doc: DOC});
     if (id === "inbox-1") return json({ok: true, doc: INBOX_DOC});
@@ -395,7 +403,8 @@ try {
   assert.doesNotMatch(treeText, /全局知识首页/);
   assert.match(treeText, /global/);
   assert.match(treeText, /projects/);
-  assert.equal(await page.locator('[data-kv-open-index="g-index"]').count(), 1, "the global root index has one explicit open-page button");
+  assert.equal(await page.locator('[data-kv-open-index]').count(), 0, "directory pages open from the title, not a separate button");
+  assert.equal(await page.locator('[data-kv-title-open="g-index"]').count(), 1, "the global root title opens its index");
   assert.equal(await page.locator('li.kv-tree-folder').filter({has: page.locator('[data-kv-toggle="g-index"]')}).locator('.kv-badge').count(), 0, "directory rows carry no badges");
 
   // Every directory starts collapsed like `tree` output: children are not in
@@ -424,53 +433,66 @@ try {
   assert.equal(await page.locator('[data-kv-toggle="g-folder"]').getAttribute("aria-expanded"), "true");
   assert.equal(await page.locator('a[data-kv-doc="g-doc"]').count(), 1);
 
-  // Folder rows use a directory icon for expand/collapse, and the directory
-  // title is a second toggle control. There are no up/down chevrons and
-  // clicking either control never opens a document.
-  assert.equal(await page.locator('.kv-tree-toggle:has(.kv-tree-folder-icon)').count(), await page.locator('.kv-tree-toggle').count(), "every toggle is a folder icon");
-  assert.equal(await page.locator('.kv-tree-toggle [d*="m18 15"], .kv-tree-toggle [d*="m6 9"]').count(), 0, "no chevron arrows remain in the tree");
+  // Directory rows lead with a chevron that only toggles, followed by a folder
+// icon and a title that opens the index. Document rows use a document icon.
+  const togglePaths = await page.locator('.kv-tree-toggle svg path').evaluateAll(nodes => nodes.map(node => node.getAttribute("d")));
+  assert.ok(togglePaths.length > 0);
+  assert.ok(togglePaths.every(d => d === "m6 9 6 6 6-6" || d === "m9 18 6-6-6-6"), "every toggle uses an expand/collapse chevron");
+  assert.equal(await page.locator('.kv-tree-toggle .kv-tree-folder-icon').count(), 0, "the toggle is a chevron, not a folder icon");
+  assert.ok(await page.locator('.kv-tree-row > .kv-tree-folder-icon').count() > 0, "directory rows keep a separate folder icon");
+  assert.ok(await page.locator('a[data-kv-doc] .kv-tree-doc-icon').count() > 0, "document rows use a document icon");
   await page.locator('[data-kv-toggle="g-index"]').focus();
   await page.keyboard.press("Tab");
   await page.keyboard.press("Tab");
-  await page.keyboard.press("Tab");
-  assert.equal(await page.evaluate(() => document.activeElement?.dataset.kvToggle), "g-folder", "Tab reaches the next folder icon button");
+  assert.equal(await page.evaluate(() => document.activeElement?.dataset.kvToggle), "g-folder", "Tab reaches the next folder chevron");
   const hashBeforeIconToggle = await page.evaluate(() => location.hash);
   await page.locator('[data-kv-toggle="g-other"]').click();
   assert.equal(await page.locator('[data-kv-toggle="g-other"]').getAttribute("aria-expanded"), "true");
-  assert.equal(await page.evaluate(() => location.hash), hashBeforeIconToggle, "icon toggle does not open a document");
-  assert.equal(await page.locator(".kv-doc-head h1").count(), 0, "icon toggle leaves the reading pane untouched");
+  assert.equal(await page.evaluate(() => location.hash), hashBeforeIconToggle, "chevron toggle does not open a document");
+  assert.equal(await page.locator(".kv-doc-head h1").count(), 0, "chevron toggle leaves the reading pane untouched");
 
-  // The folder icon also toggles from the keyboard.
+  // The chevron also toggles from the keyboard.
   await page.locator('[data-kv-toggle="g-other"]').click();
-  assert.equal(await page.locator('[data-kv-toggle="g-other"]').getAttribute("aria-expanded"), "false", "icon click collapses the folder");
+  assert.equal(await page.locator('[data-kv-toggle="g-other"]').getAttribute("aria-expanded"), "false", "chevron click collapses the folder");
   await page.locator('[data-kv-toggle="g-other"]').focus();
   await page.keyboard.press("Space");
   assert.equal(await page.locator('[data-kv-toggle="g-other"]').getAttribute("aria-expanded"), "true", "Space expands from the keyboard");
   await page.keyboard.press("Space");
   assert.equal(await page.locator('[data-kv-toggle="g-other"]').getAttribute("aria-expanded"), "false");
 
-  // Clicking the directory title toggles the branch but never loads its index.
-  const hashBeforeTitleToggle = await page.evaluate(() => location.hash);
-  await page.locator('[data-kv-title-toggle="g-folder"]').click();
-  assert.equal(await page.locator('[data-kv-toggle="g-folder"]').getAttribute("aria-expanded"), "false", "title click collapses the folder");
-  assert.equal(await page.evaluate(() => location.hash), hashBeforeTitleToggle, "title click does not open a document");
-  assert.equal(await page.locator(".kv-doc-head h1").count(), 0, "title click leaves the reading pane untouched");
-  await page.locator('[data-kv-title-toggle="g-folder"]').focus();
-  await page.keyboard.press("Enter");
-  assert.equal(await page.locator('[data-kv-toggle="g-folder"]').getAttribute("aria-expanded"), "true", "Enter on the title expands the folder");
-  await page.keyboard.press("Enter");
-  assert.equal(await page.locator('[data-kv-toggle="g-folder"]').getAttribute("aria-expanded"), "false", "Enter on the title collapses it again");
-
-  // Only the explicit open-page button loads the index, and the selected state
-  // stays on that button instead of the directory title.
-  await page.locator('[data-kv-open-index="g-folder"]').click();
+  // First title click opens that directory's index and expands it. The title
+  // carries the selected pill but stays clickable.
+  await page.locator('[data-kv-folder-title="g-other"]').click();
   await page.waitForSelector(".kv-doc-body");
-  assert.equal((await page.locator(".kv-doc-head h1").textContent()).trim(), "构建指南");
-  assert.equal(await page.locator('[data-kv-toggle="g-folder"]').getAttribute("aria-expanded"), "false", "opening the index does not expand or collapse the folder");
-  assert.equal(await page.locator('[data-kv-open-index="g-folder"]').getAttribute("aria-current"), "page", "the open-page button carries the current state");
-  assert.equal(await page.locator('[data-kv-title-toggle="g-folder"]').evaluate(element => element.classList.contains("selected")), false, "selection never lands on the title");
-  assert.equal(await page.locator('[data-kv-title-toggle="g-folder"]').getAttribute("aria-current"), null);
-  await page.locator('[data-kv-toggle="g-folder"]').click();
+  assert.equal((await page.locator(".kv-doc-head h1").textContent()).trim(), "参考资料");
+  assert.equal(await page.locator('[data-kv-toggle="g-other"]').getAttribute("aria-expanded"), "true", "title click expands the folder");
+  assert.match(await page.evaluate(() => location.hash), /doc=g-other/, "title click opens the directory index");
+  const otherTitle = page.locator('[data-kv-folder-title="g-other"]');
+  assert.equal(await otherTitle.evaluate(element => element.classList.contains("selected")), true, "the selected pill sits on the title");
+  assert.equal(await otherTitle.getAttribute("aria-current"), "page");
+
+  // Second click on the same title collapses it without leaving the page.
+  await otherTitle.click();
+  await page.waitForTimeout(80);
+  assert.equal(await page.locator('[data-kv-toggle="g-other"]').getAttribute("aria-expanded"), "false", "second title click collapses the folder");
+  assert.match(await page.evaluate(() => location.hash), /doc=g-other/, "collapsing via the title stays on the index");
+  assert.equal((await page.locator(".kv-doc-head h1").textContent()).trim(), "参考资料");
+  assert.equal(await page.locator('[data-kv-folder-title="g-other"]').getAttribute("aria-current"), "page", "the selected title remains selected while collapsed");
+
+  // The chevron on the same selected row only toggles; it never navigates.
+  const hashBeforeSelectedChevron = await page.evaluate(() => location.hash);
+  await page.locator('[data-kv-toggle="g-other"]').click();
+  assert.equal(await page.locator('[data-kv-toggle="g-other"]').getAttribute("aria-expanded"), "true");
+  assert.equal(await page.evaluate(() => location.hash), hashBeforeSelectedChevron, "chevron toggle does not navigate");
+  await page.locator('[data-kv-toggle="g-other"]').click();
+  assert.equal(await page.locator('[data-kv-toggle="g-other"]').getAttribute("aria-expanded"), "false");
+
+  // The title stays keyboard-operable and keeps both actions.
+  await page.locator('[data-kv-folder-title="g-other"]').focus();
+  await page.keyboard.press("Enter");
+  assert.equal(await page.locator('[data-kv-toggle="g-other"]').getAttribute("aria-expanded"), "true", "Enter on the title expands");
+  await page.keyboard.press("Enter");
+  assert.equal(await page.locator('[data-kv-toggle="g-other"]').getAttribute("aria-expanded"), "false", "Enter on the title collapses again");
 
   // Same-depth folder names and document titles share one computed left edge;
   // the indentation step is exactly 12px per level.
@@ -546,7 +568,8 @@ try {
   assert.equal(await page.locator("[data-kv-sidebar-toggle]").getAttribute("aria-expanded"), "true");
   assert.equal(await page.locator("[data-kv-sidebar-toggle]").getAttribute("aria-label"), "收起目录栏");
   assert.equal(await page.locator("[data-kv-sidebar-toggle] svg path").getAttribute("d"), "m15 18-6-6 6-6", "the expanded sidebar uses a chevron-left");
-  await page.locator("[data-kv-sidebar-toggle]").click();
+  await page.locator("[data-kv-sidebar-toggle]").focus();
+  await page.keyboard.press("Enter");
   assert.equal(await page.locator(".knowledge-vault").getAttribute("data-kv-sidebar-collapsed"), "true");
   assert.equal(await page.locator(".kv-tree-panel").evaluate(element => element.classList.contains("collapsed")), true);
   assert.equal(await page.locator("[data-kv-sidebar-toggle]").getAttribute("aria-expanded"), "false");
@@ -560,7 +583,8 @@ try {
   await page.waitForSelector(".knowledge-vault");
   assert.equal(await page.locator(".knowledge-vault").getAttribute("data-kv-sidebar-collapsed"), "true", "collapsed state survives refresh");
   assert.ok(Math.abs((await treeWidth()) - 48) < 1);
-  await page.locator("[data-kv-sidebar-toggle]").click();
+  await page.locator("[data-kv-sidebar-toggle]").focus();
+  await page.keyboard.press("Space");
   assert.equal(await page.locator(".knowledge-vault").getAttribute("data-kv-sidebar-collapsed"), "false");
   assert.equal(await page.locator("[data-kv-sidebar-toggle]").getAttribute("aria-expanded"), "true");
   assert.equal(await page.locator("[data-kv-sidebar-toggle]").getAttribute("aria-label"), "收起目录栏");
@@ -579,7 +603,7 @@ try {
   await page.locator('[data-kv-toggle="vault-dir:projects"]').click();
   await page.waitForSelector('[data-kv-toggle="p-index"]');
   assert.equal(await page.locator('[data-kv-toggle="p-index"]').getAttribute("aria-expanded"), "false");
-  assert.equal(await page.locator('[data-kv-open-index="p-guides"]').count(), 0);
+  assert.equal(await page.locator('[data-kv-open-index]').count(), 0, "no separate directory-page buttons remain");
   await page.locator('[data-kv-toggle="p-index"]').click();
   await page.waitForSelector('[data-kv-toggle="p-guides"]');
   assert.equal(await page.locator('[data-kv-toggle="p-guides"]').getAttribute("aria-expanded"), "false");

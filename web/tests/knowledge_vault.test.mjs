@@ -205,7 +205,7 @@ test("project trees show theme directories and the real inbox folder", () => {
   assert.equal(tree[1].has_index, true);
 });
 
-test("directory rows open their index document once and never repeat index.md as a leaf", () => {
+test("directory titles open their index and never repeat index.md as a leaf", () => {
   const tree = vault.buildVaultDirectoryTree([
     treeFixture("g-root", "全局知识首页", "global/index.md", [
       treeFixture("g-general", "通用知识", "global/general/index.md", [
@@ -216,19 +216,19 @@ test("directory rows open their index document once and never repeat index.md as
   ], "global");
   reset({tree, expanded: new Set(["g-general"])});
   const html = vault.renderKnowledgeVaultPage(context());
-  assert.equal((html.match(/data-kv-doc="g-general"/g) || []).length, 1, "index document is represented by the open-page button only");
-  assert.match(html, /data-kv-doc="g-general"/);
-  assert.match(html, /data-kv-open-index="g-general"/);
+  assert.equal((html.match(/data-kv-doc="g-general"/g) || []).length, 0, "the index is opened from the directory title, not a document row");
+  assert.match(html, /data-kv-title-open="g-general"/);
   assert.doesNotMatch(html, /data-kv-doc="g-extra"/, "a duplicate index.md entry is not a leaf");
   assert.match(html, /<span class="kv-tree-title">general<\/span>/);
   assert.doesNotMatch(html, /kv-badge-index/);
   const folderRow = html.match(/<div class="kv-tree-row kv-tree-row-toggle" data-kv-row-toggle="g-general">[\s\S]*?<\/div>/)?.[0] || "";
   assert.equal(folderRow.includes("kv-badge"), false, "directory rows do not carry index or navigation badges");
   assert.match(html, /kv-tree-folder-icon/, "directories use a folder icon");
+  assert.match(html, /kv-tree-doc-icon/, "documents use a document icon");
   assert.match(html, /kv-badge-type[^>]*>实践</, "leaf documents keep their type badge");
 });
 
-test("folder icons and titles toggle, an explicit button opens the index, and selection never lands on a title", () => {
+test("titles open the index and toggle, chevrons only toggle, and selected titles stay clickable", () => {
   const tree = vault.buildVaultDirectoryTree([
     treeFixture("g-root", "全局知识首页", "global/index.md", [
       treeFixture("g-full", "完整目录", "global/full/index.md", [
@@ -241,35 +241,34 @@ test("folder icons and titles toggle, an explicit button opens the index, and se
   reset({tree, expanded: new Set(["g-full"]), selectedID: "g-full"});
   const html = vault.renderKnowledgeVaultPage(context());
 
-  // The folder icon and the title are both toggle controls; the title is a
-  // button, never a document link, and it cannot carry the selected state.
+  // The leftmost chevron toggles only. The folder title is a button that opens
+  // the index and toggles the branch, and it carries the selected pill even
+  // while the branch is open.
   const fullRow = html.match(/<div class="kv-tree-row kv-tree-row-toggle" data-kv-row-toggle="g-full">[\s\S]*?<\/div>/)?.[0] || "";
-  assert.match(fullRow, /<button type="button" class="kv-tree-toggle" data-kv-toggle="g-full" aria-expanded="true"/);
-  assert.match(fullRow, /<button type="button" class="kv-tree-link kv-tree-folder-link kv-tree-folder-title" data-kv-folder-title="g-full" data-kv-title-toggle="g-full" aria-expanded="true"><span class="kv-tree-title">full<\/span><\/button>/);
+  assert.match(fullRow, /<button type="button" class="kv-tree-toggle" data-kv-toggle="g-full" aria-expanded="true"[^>]*><svg[^>]*><path d="m6 9 6 6 6-6"\/>/);
+  assert.match(fullRow, /<span class="kv-tree-folder-icon" aria-hidden="true">/);
+  assert.match(fullRow, /<button type="button" class="kv-tree-link kv-tree-folder-link kv-tree-folder-title selected" data-kv-folder-title="g-full" data-kv-title-open="g-full" data-kv-title-toggle="g-full" aria-current="page"><span class="kv-tree-title">full<\/span><\/button>/);
   assert.doesNotMatch(fullRow, /kv-tree-folder-title[^>]*data-kv-doc=/);
-  assert.doesNotMatch(fullRow, /kv-tree-folder-title[^>]*selected/);
-  assert.match(fullRow, /<button type="button" class="kv-tree-open-index selected" data-kv-open-index="g-full" data-kv-doc="g-full" aria-current="page" aria-label="打开目录页"/);
-  assert.equal(fullRow.indexOf("data-kv-toggle=\"g-full\"") < fullRow.indexOf("data-kv-title-toggle=\"g-full\""), true, "icon precedes the title toggle");
-  assert.equal(fullRow.indexOf("data-kv-title-toggle=\"g-full\"") < fullRow.indexOf("data-kv-open-index=\"g-full\""), true, "the open-page button follows the title");
+  assert.doesNotMatch(fullRow, /data-kv-open-index|kv-tree-open-index/);
+  assert.equal(fullRow.indexOf("data-kv-toggle=\"g-full\"") < fullRow.indexOf("kv-tree-folder-icon"), true, "the chevron precedes the folder icon");
+  assert.equal(fullRow.indexOf("kv-tree-folder-icon") < fullRow.indexOf("data-kv-title-open=\"g-full\""), true, "the title follows the icons");
 
-  // A folder with an index but no children keeps a blank toggle slot; only the
-  // explicit open-page button loads the index.
-  const emptyRow = html.match(/<div class="kv-tree-row">\s*<span class="kv-tree-toggle-space"[\s\S]*?data-kv-open-index="g-empty"[\s\S]*?<\/div>/)?.[0] || "";
+  // A folder with an index but no children still opens it from the title.
+  const emptyRow = html.match(/<div class="kv-tree-row">\s*<span class="kv-tree-toggle-space"[\s\S]*?data-kv-title-open="g-empty"[\s\S]*?<\/div>/)?.[0] || "";
   assert.match(emptyRow, /kv-tree-toggle-space/);
-  assert.match(emptyRow, /<span class="kv-tree-link kv-tree-folder-link" data-kv-folder-title="g-empty"><span class="kv-tree-title">empty<\/span><\/span>/);
-  assert.match(emptyRow, /data-kv-doc="g-empty"/);
+  assert.match(emptyRow, /<button type="button" class="kv-tree-link kv-tree-folder-link kv-tree-folder-title" data-kv-folder-title="g-empty" data-kv-title-open="g-empty"><span class="kv-tree-title">empty<\/span><\/button>/);
   assert.doesNotMatch(emptyRow, /data-kv-toggle="/);
   assert.doesNotMatch(emptyRow, /data-kv-row-toggle/);
 
-  // An empty directory without an index has no open-page button at all.
-  const inboxRow = html.match(/<div class="kv-tree-row">\s*<span class="kv-tree-toggle-space" aria-hidden="true"><\/span>\s*<span class="kv-tree-link kv-tree-folder-link" data-kv-folder-title="vault-dir:global\/inbox"><span class="kv-tree-title">inbox<\/span><\/span>\s*<\/div>/)?.[0] || "";
+  // An empty directory without an index is just a label.
+  const inboxRow = html.match(/<div class="kv-tree-row">(?:(?!<\/div>)[\s\S])*?data-kv-folder-title="vault-dir:global\/inbox"[\s\S]*?<\/div>/)?.[0] || "";
   assert.match(inboxRow, /<span class="kv-tree-title">inbox<\/span>/);
-  assert.doesNotMatch(inboxRow, /data-kv-doc=/);
-  assert.doesNotMatch(inboxRow, /data-kv-open-index/);
+  assert.doesNotMatch(inboxRow, /data-kv-doc=|data-kv-title-open=/);
 
-  // Document rows reserve the same icon width and carry the same depth.
+  // Document rows share the chevron slot and icon width with folder rows.
   const docRow = html.match(/<li class="kv-tree-node kv-tree-doc" style="--kv-depth:1"><a[\s\S]*?<\/a><\/li>/)?.[0] || "";
-  assert.match(docRow, /<span class="kv-tree-doc-spacer" aria-hidden="true"><\/span><span class="kv-tree-title">同级文档<\/span>/);
+  assert.match(docRow, /<span class="kv-tree-toggle-space" aria-hidden="true"><\/span><span class="kv-tree-doc-icon" aria-hidden="true"><svg[^>]*><path d="M6 2h8l4 4v16H6z"\/>/);
+  assert.match(docRow, /<span class="kv-tree-title">同级文档<\/span>/);
   assert.match(html, /<li class="kv-tree-node kv-tree-folder" style="--kv-depth:1">/);
 });
 
