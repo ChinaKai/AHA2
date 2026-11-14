@@ -2025,7 +2025,7 @@ test("round summary shows the backend activity and collapses terminal rounds", a
   const {renderAgentTurnCard} = await import(pathToFileURL(resolve(root, "build", "task_agents.js")));
   const base = {
     task: {id: "task-1", project_id: "project-1", workspace_id: "workspace-1", title: "Task", original_request: "", current_goal: "", status: "active", isolation: "inplace", collaboration_mode: "single", max_agents: 1, knowledge_policy: "inherit", skill_ids: [], total_tokens: 0, created_at: "", updated_at: ""},
-    latest_round: {id: "round-1", task_id: "task-1", sequence: 2, status: "running", created_at: ""},
+    latest_round: {id: "round-1", task_id: "task-1", sequence: 2, status: "running", created_at: "", started_at_ms: Date.now() - 30000},
     agents: [],
     turns: [{
       id: "turn-1", task_id: "task-1", round_id: "round-1", agent_id: "main", sequence: 2,
@@ -2035,40 +2035,70 @@ test("round summary shows the backend activity and collapses terminal rounds", a
     event_cursor: 0,
     server_time_ms: 0,
   };
-  const tool = renderAgentTurnCard({...base, activity: {
-    phase: "tool", tool_name: "Read", since_ms: 0, elapsed_ms: 12000,
+  const activity = phase => ({
+    phase, tool_name: "Read", since_ms: 0, elapsed_ms: 12000,
     attempt: 1, round_id: "round-1", turn_id: "turn-1", agent_id: "main",
-  }}, "live");
+  });
+  const running = phase => renderAgentTurnCard({...base, activity: activity(phase)}, "live");
+
+  const tool = running("tool");
   assert.match(tool, /role="status" aria-live="polite"/);
-  assert.match(tool, /正在调用工具：Read/);
-  assert.match(tool, /data-live-elapsed-ms="12000"/);
+  assert.match(tool, /data-round-event="tool"/);
+  assert.match(tool, /正在调用工具/);
+  assert.doesNotMatch(tool, /Read/);
+  assert.match(tool, /data-round-time="step" data-live-elapsed-ms="12000"/);
+  assert.match(tool, /data-round-time="total" data-live-elapsed-ms="\d+" data-live-synced-at="[\d.]+" data-live-running="true"/);
+  // The live region contains the event word only; both clocks live outside it.
+  const liveRegion = tool.match(/<span class="round-activity"[^>]*>(.*?)<\/span><span class="round-summary-sep">/s)?.[1] || "";
+  assert.match(liveRegion, /正在调用工具/);
+  assert.doesNotMatch(liveRegion, /data-round-time|\d+s|<time/);
   assert.match(tool, /<details>/);
 
+  const labels = new Map([
+    ["queued", "排队等待"],
+    ["preparing", "正在准备"],
+    ["session_wake", "正在唤醒 Session"],
+    ["thinking", "正在思考"],
+    ["tool", "正在调用工具"],
+    ["waiting_backend", "等待 Backend 响应"],
+    ["retrying", "重试中"],
+    ["finalizing", "正在整理结果"],
+  ]);
+  for (const [phase, label] of labels) {
+    const html = running(phase);
+    assert.match(html, new RegExp(`data-round-event="${phase}"`), `${phase} event kind`);
+    assert.ok(html.includes(`<span class="round-activity-text">${label}</span>`), `${phase} label: ${html}`);
+    assert.match(html, /data-round-time="step"/, `${phase} step clock`);
+    assert.match(html, /data-round-time="total"/, `${phase} total clock`);
+    assert.doesNotMatch(html, /Read/, `${phase} rendered the tool name`);
+  }
+
   const done = renderAgentTurnCard({...base,
-    latest_round: {...base.latest_round, status: "completed"},
+    latest_round: {...base.latest_round, status: "completed", started_at_ms: 1000, finished_at_ms: 61000},
     turns: [{...base.turns[0], status: "succeeded", finished_at_ms: 20000}],
     activity: {phase: "done", elapsed_ms: 0, attempt: 1, round_id: "round-1", turn_id: "turn-1", agent_id: "main"},
   }, "live");
-  assert.match(done, /Round 2 · <span class="round-summary-phase">完成<\/span>/);
+  assert.match(done, /Round 2 · <span class="round-summary-phase">完成<span class="round-summary-sep">·<\/span><time class="round-total-time" data-round-time="total">01:00<\/time>/);
   assert.doesNotMatch(done, /role="status"/);
+  assert.doesNotMatch(done, /data-round-time="step"/);
   assert.match(done, /<details>/);
 
   const failed = renderAgentTurnCard({...base,
-    latest_round: {...base.latest_round, status: "failed"},
+    latest_round: {...base.latest_round, status: "failed", started_at_ms: 1000, finished_at_ms: 61000},
     turns: [{...base.turns[0], status: "failed", error: "backend exploded"}],
     activity: {phase: "failed", elapsed_ms: 0, attempt: 1, round_id: "round-1", turn_id: "turn-1", agent_id: "main"},
   }, "live");
-  assert.match(failed, /Round 2 · <span class="round-summary-phase">失败<\/span>/);
+  assert.match(failed, /Round 2 · <span class="round-summary-phase">失败<span class="round-summary-sep">·<\/span><time class="round-total-time" data-round-time="total">01:00<\/time>/);
+  assert.doesNotMatch(failed, /role="status"/);
   assert.match(failed, /backend exploded/);
 
   const i18n = await import(pathToFileURL(resolve(root, "build", "i18n.js")));
   i18n.applyLocale("en-US");
   try {
-    const english = renderAgentTurnCard({...base, activity: {
-      phase: "tool", tool_name: "Read", elapsed_ms: 12000,
-      attempt: 1, round_id: "round-1", turn_id: "turn-1", agent_id: "main",
-    }}, "live");
-    assert.match(english, /Calling tool: Read/);
+    const english = renderAgentTurnCard({...base, activity: activity("tool")}, "live");
+    assert.match(english, /Calling tool/);
+    assert.doesNotMatch(english, /Read/);
+    assert.match(renderAgentTurnCard({...base, activity: activity("waiting_backend")}, "live"), /Waiting for backend/);
   } finally {
     i18n.applyLocale("zh-CN");
   }

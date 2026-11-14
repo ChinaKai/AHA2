@@ -1,9 +1,11 @@
-// Browser verification for the mobile Round summary width (task-394).
+// Browser verification for the mobile Round summary width (task-396).
 //
-// A running round announces a long MCP tool name. The summary must stay on one
-// line inside the card, the elapsed time and the realtime channel badge must
-// remain fully visible, and the card must not grow wider than the viewport.
-// The same page is measured at 1280 to prove the desktop layout is unchanged.
+// A running round shows an event word plus a 59s step clock and a 63m total
+// clock. The summary must stay on one line inside the card, both clocks and
+// the realtime channel badge must remain fully visible, the tool name must
+// never render, every running event must breathe, and the card must not grow
+// wider than the viewport. Terminal rounds stay static. The same page is
+// measured at 1280 to prove the desktop layout is unchanged.
 import assert from "node:assert/strict";
 import {createServer} from "node:http";
 import {mkdir, readFile} from "node:fs/promises";
@@ -25,7 +27,7 @@ const screenshotDir = process.env.AHA_TEST_SCREENSHOT_DIR || "";
 
 const LONG_TOOL = "mcp__aha2-pet__aha_request_code_review";
 const TASK = {
-  id: "t-round", code: "task-394", title: "Round summary width", status: "active",
+  id: "t-round", code: "task-396", title: "Round summary width", status: "active",
   project_id: "project-1", workspace_id: "workspace-1", collaboration_mode: "single", max_agents: 1,
   original_request: "work", current_goal: "work", task_branch: "",
   runtime_config_snapshot_id: "runtime-1", total_tokens: 0,
@@ -62,17 +64,20 @@ window.EventSource = class {
 const detail = () => {
   const now = Date.now();
   const since = now - 59000;
-  const activity = window.__phase === "thinking"
-    ? {phase: "thinking", since: iso(since), since_ms: since, elapsed_ms: 59000, attempt: 1, round_id: "round-1", turn_id: "turn-1", agent_id: "main"}
-    : {phase: "tool", tool_name: window.__toolName, since: iso(since), since_ms: since, elapsed_ms: 59000, attempt: 1, round_id: "round-1", turn_id: "turn-1", agent_id: "main"};
+  const activity = {
+    phase: window.__phase, tool_name: window.__toolName,
+    since: iso(since), since_ms: since, elapsed_ms: 59000, attempt: 1,
+    round_id: "round-1", turn_id: "turn-1", agent_id: "main",
+  };
   return {
     task: TASK,
-    latest_round: {id: "round-1", task_id: TASK.id, sequence: 2125, status: "running", created_at: iso(now - 63000), created_at_ms: now - 63000, started_at_ms: now - 63000},
+    // 63 minutes and 3 seconds: total is over an hour while the step stays 59s.
+    latest_round: {id: "round-1", task_id: TASK.id, sequence: 2125, status: "running", created_at: iso(now - 3783000), created_at_ms: now - 3783000, started_at_ms: now - 3783000},
     activity,
     turns: [{
       id: "turn-1", task_id: TASK.id, round_id: "round-1", agent_id: "main", sequence: 1,
-      generation: 1, attempt: 1, status: "running", queued_at: iso(now - 63000), queued_at_ms: now - 63000,
-      started_at: iso(now - 62000), started_at_ms: now - 62000,
+      generation: 1, attempt: 1, status: "running", queued_at: iso(now - 3783000), queued_at_ms: now - 3783000,
+      started_at: iso(now - 3782000), started_at_ms: now - 3782000,
       first_event_at_ms: now - 60000, elapsed_ms: 59000,
     }],
     agents: [{agent_id: "main", status: "active", title: "Main", runtime_config_valid: true, unread_count: 0}],
@@ -143,29 +148,44 @@ const snapshot = page => page.evaluate(() => {
   const label = summary?.querySelector(":scope > span");
   const activity = summary?.querySelector(".round-activity");
   const text = summary?.querySelector(".round-activity-text");
-  const time = summary?.querySelector(".round-summary-phase time");
+  const step = summary?.querySelector('time[data-round-time="step"]');
+  const total = summary?.querySelector('time[data-round-time="total"]');
   const channel = summary?.querySelector(".round-channel");
   const textStyle = text ? getComputedStyle(text) : null;
-  const summaryStyle = summary ? getComputedStyle(summary) : null;
   return {
     innerWidth: window.innerWidth,
     documentScrollWidth: document.documentElement.scrollWidth,
     bodyScrollWidth: document.body.scrollWidth,
     card: box(card), summary: box(summary), label: box(label), activity: box(activity),
-    text: box(text), time: box(time), channel: box(channel),
+    text: box(text), step: box(step), total: box(total), channel: box(channel),
     summaryHeight: summary ? summary.getBoundingClientRect().height : 0,
     summaryScrollHeight: summary?.scrollHeight || 0,
     summaryClientHeight: summary?.clientHeight || 0,
     summaryText: summary?.textContent?.replace(/\s+/g, " ").trim() || "",
     activityText: text?.textContent || "",
+    eventKind: activity?.getAttribute("data-round-event") || "",
+    stepText: step?.textContent || "",
+    totalText: total?.textContent || "",
+    times: [...(summary?.querySelectorAll(".round-summary-phase time") || [])].map(node => node.textContent),
     channelText: channel?.textContent || "",
     textOverflow: textStyle?.textOverflow || "",
     textWhiteSpace: textStyle?.whiteSpace || "",
     textOverflowX: textStyle?.overflow || "",
-    summaryWhiteSpace: summaryStyle?.whiteSpace || "",
+    textAnimation: textStyle?.animationName || "",
+    dotAnimation: activity ? getComputedStyle(activity, "::before").animationName : "",
   };
 });
 
+const PHASE_LABELS = {
+  queued: "排队等待",
+  preparing: "正在准备",
+  session_wake: "正在唤醒 Session",
+  thinking: "正在思考",
+  tool: "正在调用工具",
+  waiting_backend: "等待 Backend 响应",
+  retrying: "重试中",
+  finalizing: "正在整理结果",
+};
 async function showActivity(page, phase) {
   await page.evaluate(nextPhase => {
     window.__phase = nextPhase;
@@ -174,10 +194,9 @@ async function showActivity(page, phase) {
     const source = (window.__sources || []).find(item => item.url.includes("/tasks/t-round/events"));
     source.emit("update", {data: JSON.stringify({sequence: window.__sequence, type: "turn_status"})});
   }, phase);
-  const expected = phase === "thinking" ? "正在思考" : LONG_TOOL;
   await page.waitForFunction(needle =>
     (document.querySelector("#agent-turn-slot .round-activity-text")?.textContent || "").includes(needle),
-  expected, {timeout: 10000});
+  PHASE_LABELS[phase], {timeout: 10000});
 }
 
 function assertInsideViewport(state, label) {
@@ -218,70 +237,116 @@ try {
   await showActivity(page, "tool");
   await page.waitForFunction(() => document.querySelector(".round-channel")?.textContent === "SSE", null, {timeout: 5000});
 
-  // Desktop baseline: the long label is fully readable and the card/badge keep
-  // the same geometry as the short "正在思考" label, matching pre-change layout.
-  const desktopLong = await snapshot(page);
-  assert.match(desktopLong.summaryText, /Round 2125/);
-  assert.ok(desktopLong.summaryText.includes(LONG_TOOL), `desktop summary lost the tool name: ${desktopLong.summaryText}`);
-  assert.equal(desktopLong.channelText, "SSE");
-  assert.ok(desktopLong.text.scrollWidth <= desktopLong.text.clientWidth + 1,
-    "desktop should show the whole activity label");
-  assert.ok(desktopLong.summaryHeight <= 39, `desktop summary grew to ${desktopLong.summaryHeight}px`);
-  assertInsideViewport(desktopLong, "desktop long");
-  assertBadgeVisible(desktopLong, "desktop long");
+  // Desktop baseline: the event word, the 59s step and the 63m total all fit on
+  // one line; the tool name is never rendered. Card and badge geometry must not
+  // depend on which event word is showing.
+  const desktopTool = await snapshot(page);
+  assert.match(desktopTool.summaryText, /Round 2125/);
+  assert.equal(desktopTool.eventKind, "tool");
+  assert.equal(desktopTool.activityText, "正在调用工具");
+  assert.doesNotMatch(desktopTool.summaryText, new RegExp(LONG_TOOL));
+  assert.equal(desktopTool.channelText, "SSE");
+  assert.deepEqual(desktopTool.times.length, 2);
+  assert.match(desktopTool.stepText, /^(59s|1:\d\d)$/);
+  assert.match(desktopTool.totalText, /^\d{2,}:\d\d$/);
+  assert.ok(Number(desktopTool.totalText.split(":")[0]) >= 63,
+    `desktop total should be over an hour: ${desktopTool.totalText}`);
+  assert.ok(desktopTool.step.right <= desktopTool.total.left + 0.5,
+    "desktop step clock overlaps the total clock");
+  assert.ok(desktopTool.total.right <= desktopTool.summary.right + 0.5,
+    "desktop total clock is outside the summary");
+  assert.equal(desktopTool.textOverflow, "ellipsis");
+  assert.equal(desktopTool.textWhiteSpace, "nowrap");
+  assert.match(desktopTool.textAnimation, /round-activity-breathe/);
+  assert.match(desktopTool.dotAnimation, /round-activity-pulse/);
+  assert.ok(desktopTool.summaryHeight <= 39, `desktop summary grew to ${desktopTool.summaryHeight}px`);
+  assertInsideViewport(desktopTool, "desktop tool");
+  assertBadgeVisible(desktopTool, "desktop tool");
+
+  // The total clock keeps running between backend refreshes.
+  await page.waitForFunction(previous =>
+    (document.querySelector('time[data-round-time="total"]')?.textContent || "") !== previous,
+  desktopTool.totalText, {timeout: 4000});
+
+  for (const [phase, expected] of Object.entries(PHASE_LABELS)) {
+    await showActivity(page, phase);
+    const state = await snapshot(page);
+    assert.equal(state.activityText, expected, `${phase}: event copy`);
+    assert.equal(state.eventKind, phase, `${phase}: event kind`);
+    assert.equal(state.times.length, 2, `${phase}: both clocks`);
+    assert.doesNotMatch(state.summaryText, new RegExp(LONG_TOOL), `${phase}: tool name leaked`);
+    assert.match(state.textAnimation, /round-activity-breathe/, `${phase}: event text should breathe`);
+    assert.match(state.dotAnimation, /round-activity-pulse/, `${phase}: status dot should breathe`);
+  }
 
   await showActivity(page, "thinking");
-  const desktopShort = await snapshot(page);
-  assert.ok(Math.abs(desktopLong.card.width - desktopShort.card.width) <= 1,
-    `desktop card width changed with the label: ${desktopLong.card.width} vs ${desktopShort.card.width}`);
-  assert.ok(Math.abs(desktopLong.card.height - desktopShort.card.height) <= 1,
-    `desktop card height changed with the label: ${desktopLong.card.height} vs ${desktopShort.card.height}`);
-  assert.ok(Math.abs(desktopLong.channel.left - desktopShort.channel.left) <= 1 &&
-    Math.abs(desktopLong.channel.right - desktopShort.channel.right) <= 1,
-    `desktop badge moved with the label: ${JSON.stringify(desktopShort.channel)} vs ${JSON.stringify(desktopLong.channel)}`);
+  const desktopThinking = await snapshot(page);
+  assert.ok(Math.abs(desktopTool.card.width - desktopThinking.card.width) <= 1,
+    `desktop card width changed with the event: ${desktopTool.card.width} vs ${desktopThinking.card.width}`);
+  assert.ok(Math.abs(desktopTool.card.height - desktopThinking.card.height) <= 1,
+    `desktop card height changed with the event: ${desktopTool.card.height} vs ${desktopThinking.card.height}`);
+  assert.ok(Math.abs(desktopTool.channel.left - desktopThinking.channel.left) <= 1 &&
+    Math.abs(desktopTool.channel.right - desktopThinking.channel.right) <= 1,
+    `desktop badge moved with the event: ${JSON.stringify(desktopThinking.channel)} vs ${JSON.stringify(desktopTool.channel)}`);
+
+  // prefers-reduced-motion turns both breathing animations off.
+  await page.emulateMedia({reducedMotion: "reduce"});
+  const reduced = await snapshot(page);
+  assert.equal(reduced.textAnimation, "none", "reduced motion still animates the event text");
+  assert.equal(reduced.dotAnimation, "none", "reduced motion still animates the status dot");
+  await page.emulateMedia({reducedMotion: "no-preference"});
 
   for (const viewport of [{width: 360, height: 800}, {width: 390, height: 844}]) {
     const label = `${viewport.width}x${viewport.height}`;
     await page.setViewportSize(viewport);
     await page.waitForFunction(width => window.innerWidth === width, viewport.width, {timeout: 5000});
     await showActivity(page, "tool");
-    const long = await snapshot(page);
-    assert.equal(long.activityText, `正在调用工具：${LONG_TOOL}`);
-    assert.ok(long.summaryText.includes("59s") || /01:\d\d/.test(long.summaryText),
-      `${label}: elapsed time missing from the summary: ${long.summaryText}`);
-    assertInsideViewport(long, `${label} long`);
-    assertBadgeVisible(long, `${label} long`);
-    assert.equal(long.channelText, "SSE");
+    const tool = await snapshot(page);
+    assert.equal(tool.activityText, "正在调用工具");
+    assert.equal(tool.eventKind, "tool");
+    assert.deepEqual(tool.times.length, 2);
+    assert.match(tool.stepText, /^(59s|1:\d\d)$/);
+    assert.match(tool.totalText, /^\d{2,}:\d\d$/);
+    assert.doesNotMatch(tool.summaryText, new RegExp(LONG_TOOL));
+    assertInsideViewport(tool, `${label} tool`);
+    assertBadgeVisible(tool, `${label} tool`);
+    assert.equal(tool.channelText, "SSE");
 
-    // One line: the summary keeps its 38px min-height, the activity label
-    // ellipsizes inside its own box, and the elapsed time stays visible.
-    assert.ok(long.summaryHeight <= 39, `${label}: summary wrapped to ${long.summaryHeight}px`);
-    assert.ok(long.summaryScrollHeight <= long.summaryClientHeight + 1,
-      `${label}: summary scroll height ${long.summaryScrollHeight} exceeds ${long.summaryClientHeight}`);
-    assert.equal(long.textOverflow, "ellipsis", `${label}: activity label has no ellipsis`);
-    assert.equal(long.textWhiteSpace, "nowrap", `${label}: activity label can wrap`);
-    assert.equal(long.textOverflowX, "hidden", `${label}: activity label is not clipped`);
-    assert.ok(long.text.scrollWidth > long.text.clientWidth + 1,
-      `${label}: the long activity label was not truncated (${long.text.clientWidth}px)`);
-    assert.ok(long.time.right <= long.summary.right + 0.5 && long.time.left >= long.summary.left - 0.5,
-      `${label}: elapsed time is outside the summary`);
+    // One line: the summary keeps its 38px min-height, the event word may
+    // ellipsize inside its own box, and both clocks stay visible.
+    assert.ok(tool.summaryHeight <= 39, `${label}: summary wrapped to ${tool.summaryHeight}px`);
+    assert.ok(tool.summaryScrollHeight <= tool.summaryClientHeight + 1,
+      `${label}: summary scroll height ${tool.summaryScrollHeight} exceeds ${tool.summaryClientHeight}`);
+    assert.equal(tool.textOverflow, "ellipsis", `${label}: activity label has no ellipsis`);
+    assert.equal(tool.textWhiteSpace, "nowrap", `${label}: activity label can wrap`);
+    assert.equal(tool.textOverflowX, "hidden", `${label}: activity label is not clipped`);
+    assert.ok(tool.step.right <= tool.total.left + 0.5, `${label}: step clock overlaps the total clock`);
+    assert.ok(tool.step.left >= tool.summary.left - 0.5 && tool.total.right <= tool.summary.right + 0.5,
+      `${label}: a clock is outside the summary`);
+    assert.ok(tool.step.scrollWidth <= tool.step.clientWidth + 1,
+      `${label}: step clock is truncated (${tool.step.clientWidth}px)`);
+    assert.ok(tool.total.scrollWidth <= tool.total.clientWidth + 1,
+      `${label}: total clock is truncated (${tool.total.clientWidth}px)`);
 
     if (screenshotDir) {
       await mkdir(screenshotDir, {recursive: true});
-      await page.screenshot({path: resolve(screenshotDir, `task-394-round-${viewport.width}-long.png`)});
+      await page.screenshot({path: resolve(screenshotDir, `task-396-round-${viewport.width}-tool.png`)});
     }
 
     await showActivity(page, "thinking");
-    const short = await snapshot(page);
-    assert.ok(Math.abs(long.card.height - short.card.height) <= 1,
-      `${label}: card height differs from the short label baseline (${long.card.height} vs ${short.card.height})`);
-    assert.ok(Math.abs(long.card.width - short.card.width) <= 1,
-      `${label}: card width changed with the label (${long.card.width} vs ${short.card.width})`);
-    assert.ok(short.text.scrollWidth <= short.text.clientWidth + 1,
-      `${label}: the short label should not be ellipsized`);
+    const thinking = await snapshot(page);
+    assert.ok(Math.abs(tool.card.height - thinking.card.height) <= 1,
+      `${label}: card height differs from the short event baseline (${tool.card.height} vs ${thinking.card.height})`);
+    assert.ok(Math.abs(tool.card.width - thinking.card.width) <= 1,
+      `${label}: card width changed with the event (${tool.card.width} vs ${thinking.card.width})`);
+    assert.ok(thinking.step.right <= thinking.total.left + 0.5, `${label}: step clock overlaps the total clock`);
+    assert.ok(thinking.step.left >= thinking.summary.left - 0.5 && thinking.total.right <= thinking.summary.right + 0.5,
+      `${label}: a clock is outside the summary`);
+    assertInsideViewport(thinking, `${label} thinking`);
+    assertBadgeVisible(thinking, `${label} thinking`);
 
     if (screenshotDir) {
-      await page.screenshot({path: resolve(screenshotDir, `task-394-round-${viewport.width}-short.png`)});
+      await page.screenshot({path: resolve(screenshotDir, `task-396-round-${viewport.width}-thinking.png`)});
     }
   }
 

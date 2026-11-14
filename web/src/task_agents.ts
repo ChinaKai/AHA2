@@ -84,21 +84,19 @@ export function isActiveTurn(status: string): boolean {
   return !["succeeded", "failed", "interrupted", "blocked"].includes(status);
 }
 
-function activityLabel(activity: TaskActivity): string {
-  switch (activity.phase) {
+// The running summary names the backend phase. Tool names are deliberately
+// not rendered; they change too fast to read and cost width.
+function liveEventLabel(activity: TaskActivity | null | undefined): string {
+  switch (activity?.phase) {
     case "queued": return t("round.activity.queued");
     case "preparing": return t("round.activity.preparing");
     case "session_wake": return t("round.activity.sessionWake");
-    case "tool": return activity.tool_name
-      ? t("round.activity.tool", {name: activity.tool_name})
-      : t("round.activity.toolGeneric");
+    case "tool": return t("round.activity.tool");
     case "waiting_backend": return t("round.activity.waitingBackend");
     case "retrying": return t("round.activity.retrying");
     case "finalizing": return t("round.activity.finalizing");
-    case "thinking": return t("round.activity.thinking");
-    case "done": return t("round.summary.completed");
-    case "failed": return t("round.summary.failed");
-    default: return t("round.summary.running");
+    case "thinking":
+    default: return t("round.activity.thinking");
   }
 }
 
@@ -236,12 +234,16 @@ export function renderAgentTurnCard(
   const activity = detail.activity || null;
   const liveActivity = active.length && activity && activity.phase !== "done" && activity.phase !== "failed" ? activity : null;
   const activityElapsed = Number(liveActivity?.elapsed_ms);
-  const summaryElapsed = Number.isFinite(activityElapsed) && activityElapsed >= 0 ? activityElapsed : roundElapsed;
-  // The live region only wraps the phase label. The elapsed clock ticks every
-  // second and would otherwise be announced on every tick.
+  const focusElapsed = Number(focus.elapsed_ms || durationMs(
+    focus.started_at_ms || focus.started_at || focus.queued_at_ms || focus.queued_at,
+    focus.finished_at_ms || focus.finished_at,
+  ));
+  const stepElapsed = Number.isFinite(activityElapsed) && activityElapsed >= 0 ? activityElapsed : focusElapsed;
+  // Both clocks tick every second through updateLiveDurations. The live region
+  // only wraps the event word, so the clocks are never announced repeatedly.
   const summaryLine = active.length
-    ? `<span class="round-summary-phase"><span class="round-activity" role="status" aria-live="polite"><span class="round-activity-text">${escapeHTML(liveActivity ? activityLabel(liveActivity) : statusLabel(focus.status))}</span></span> · <time${liveElapsedAttributes(summaryElapsed, true)}>${formatDuration(summaryElapsed)}</time></span>`
-    : `<span class="round-summary-phase">${escapeHTML(terminalRoundLabel(round.status, activity))}</span>`;
+    ? `<span class="round-summary-phase"><span class="round-activity" data-round-event="${escapeHTML(liveActivity?.phase || "thinking")}" role="status" aria-live="polite"><span class="round-activity-text">${escapeHTML(liveEventLabel(liveActivity))}</span></span><span class="round-summary-sep">·</span><time class="round-step-time" data-round-time="step"${liveElapsedAttributes(stepElapsed, true)}>${formatDuration(stepElapsed)}</time><span class="round-summary-sep">·</span><time class="round-total-time" data-round-time="total"${liveElapsedAttributes(roundElapsed, true)}>${formatDuration(roundElapsed)}</time></span>`
+    : `<span class="round-summary-phase">${escapeHTML(terminalRoundLabel(round.status, activity))}<span class="round-summary-sep">·</span><time class="round-total-time" data-round-time="total">${formatDuration(roundElapsed)}</time></span>`;
   return `<section class="agent-turn-card ${active.length ? "active" : ""}">
     <details>
       <summary><span>Round ${round.sequence} · ${summaryLine}</span><small>${turns.length} Agents · ${active.length} active</small><code data-round-channel class="round-channel ${realtimeState}">${realtimeState === "live" ? "SSE" : realtimeState === "fallback" ? "2s" : "..."}</code></summary>

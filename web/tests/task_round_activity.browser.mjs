@@ -1,10 +1,12 @@
 // Browser verification for the server-driven Round activity summary.
 //
 // The fixture serves a running turn whose activity comes from the Task detail
-// response, then flips that response to waiting, completed and failed. The card
-// must announce the phase, keep diagnostics expandable, collapse terminal
-// rounds, and fit a phone without horizontal overflow. The same page also
-// checks the chat+error default message filter and a manual tool toggle.
+// response, cycles every non-terminal phase, then flips that response to
+// completed and failed. The card must name the phase without the tool name,
+// show both clocks, breathe only while running, keep diagnostics expandable,
+// collapse terminal rounds, and fit a phone without horizontal overflow. The
+// same page also checks the chat+error default message filter and a manual
+// tool toggle.
 import assert from "node:assert/strict";
 import {createServer} from "node:http";
 import {readFile} from "node:fs/promises";
@@ -46,15 +48,16 @@ const SINCE = Date.now() - 12000;
 const iso = value => new Date(value).toISOString();
 const elapsed = value => Math.max(0, Date.now() - value);
 window.__scenario = "running";
+window.__phase = "tool";
 window.__lastCategories = [];
 const scenario = () => {
   const now = Date.now();
   const phase = window.__scenario;
-  if (phase === "running" || phase === "waiting") {
+  if (phase === "running") {
     return {
       round: {id: "round-1", task_id: TASK.id, sequence: 1, status: "running", created_at: iso(now - 30000), created_at_ms: now - 30000, started_at_ms: now - 30000},
       turnStatus: "running",
-      activity: {phase: phase === "waiting" ? "waiting_backend" : "tool", tool_name: phase === "waiting" ? undefined : "Read",
+      activity: {phase: window.__phase, tool_name: "Read",
         since: iso(SINCE), since_ms: SINCE, elapsed_ms: elapsed(SINCE), attempt: 1, round_id: "round-1", turn_id: "turn-1", agent_id: "main"},
     };
   }
@@ -140,14 +143,26 @@ const card = page => page.evaluate(() => {
   const slot = document.querySelector("#agent-turn-slot .agent-turn-card");
   if (!slot) return null;
   const summary = slot.querySelector("details > summary");
+  const live = slot.querySelector('[role="status"][aria-live="polite"]');
   return {
     text: summary?.textContent?.replace(/\s+/g, " ").trim() || "",
     open: slot.querySelector("details")?.open,
-    liveRole: Boolean(slot.querySelector('[role="status"][aria-live="polite"]')),
+    liveRole: Boolean(live),
+    liveText: live?.textContent?.trim() || "",
     rows: slot.querySelectorAll(".agent-turn-row").length,
     rowsVisible: Boolean(slot.querySelector(".agent-turn-rows")?.checkVisibility()),
     failure: slot.querySelector(".turn-failure")?.textContent?.replace(/\s+/g, " ").trim() || "",
-    elapsed: slot.querySelector("time[data-live-elapsed-ms]")?.getAttribute("data-live-elapsed-ms") || "",
+    event: slot.querySelector(".round-activity-text")?.textContent || "",
+    eventKind: slot.querySelector(".round-activity")?.getAttribute("data-round-event") || "",
+    eventAnimation: slot.querySelector(".round-activity-text")
+      ? getComputedStyle(slot.querySelector(".round-activity-text")).animationName : "",
+    dotAnimation: slot.querySelector(".round-activity")
+      ? getComputedStyle(slot.querySelector(".round-activity"), "::before").animationName : "",
+    times: [...slot.querySelectorAll(".round-summary-phase time")].map(node => ({
+      kind: node.getAttribute("data-round-time"),
+      text: node.textContent,
+      live: node.getAttribute("data-live-elapsed-ms"),
+    })),
   };
 });
 
@@ -175,18 +190,47 @@ try {
 
   await page.goto(url, {waitUntil: "domcontentloaded"});
   await page.waitForSelector("#agent-turn-slot .agent-turn-card", {timeout: 20000});
-  await waitForCard(page, "正在调用工具：Read");
+  await waitForCard(page, "正在调用工具");
 
   const running = await card(page);
   assert.ok(running.text.includes("Round 1"), `round summary: ${running.text}`);
-  assert.match(running.elapsed, /^\d+$/);
   assert.equal(running.open, false, "the diagnostic details must start collapsed");
   assert.equal(running.rowsVisible, false, "collapsed diagnostics should hide agent rows");
+
+  // Every non-terminal phase has its own event copy. Tool names never render,
+  // both clocks are present, and the live region holds the event word only.
+  const phases = new Map([
+    ["queued", "排队等待"],
+    ["preparing", "正在准备"],
+    ["session_wake", "正在唤醒 Session"],
+    ["thinking", "正在思考"],
+    ["tool", "正在调用工具"],
+    ["waiting_backend", "等待 Backend 响应"],
+    ["retrying", "重试中"],
+    ["finalizing", "正在整理结果"],
+  ]);
+  for (const [phase, label] of phases) {
+    await page.evaluate(next => { window.__scenario = "running"; window.__phase = next; }, phase);
+    await waitForCard(page, label);
+    const state = await card(page);
+    assert.equal(state.event, label, `${phase}: event copy`);
+    assert.equal(state.eventKind, phase, `${phase}: event kind`);
+    assert.equal(state.liveText, label, `${phase}: live region must contain only the event word`);
+    assert.equal(state.times.length, 2, `${phase}: both clocks must be visible`);
+    assert.deepEqual(state.times.map(item => item.kind), ["step", "total"], `${phase}: clock kinds`);
+    state.times.forEach(item => {
+      assert.ok(item.text, `${phase}: ${item.kind} clock is empty`);
+      assert.match(item.live, /^\d+$/, `${phase}: ${item.kind} clock is not ticking from an elapsed value`);
+    });
+    assert.doesNotMatch(state.text, /Read/, `${phase}: tool name leaked into the summary`);
+    assert.match(state.eventAnimation, /round-activity-breathe/, `${phase}: event text should breathe`);
+    assert.match(state.dotAnimation, /round-activity-pulse/, `${phase}: status dot should breathe`);
+  }
 
   // A refresh rebuilds the same activity from Task detail, not from local timers.
   await page.reload({waitUntil: "domcontentloaded"});
   await page.waitForSelector("#agent-turn-slot .agent-turn-card", {timeout: 20000});
-  await waitForCard(page, "正在调用工具：Read");
+  await waitForCard(page, "正在调用工具");
   assert.equal((await card(page)).open, false);
 
   // The same line must remain visible while the diagnostic details are open.
@@ -196,13 +240,15 @@ try {
   await page.click("#agent-turn-slot .agent-turn-card details > summary");
   await page.waitForFunction(() => !document.querySelector("#agent-turn-slot .agent-turn-card details")?.open, null, {timeout: 5000});
 
-  await page.evaluate(() => { window.__scenario = "waiting"; });
-  await waitForCard(page, "等待 Backend 响应");
-
   await page.evaluate(() => { window.__scenario = "completed"; });
   await waitForCard(page, "完成", false);
   const completed = await card(page);
   assert.ok(completed.text.includes("Round 1"), `completed summary: ${completed.text}`);
+  assert.equal(completed.times.length, 1, "a completed round shows the total clock only");
+  assert.equal(completed.times[0].kind, "total");
+  assert.match(completed.times[0].text, /^\d+s$|^\d+:\d\d$/);
+  assert.equal(completed.eventKind, "", "a completed round has no breathing event");
+  assert.equal(completed.eventAnimation, "", "a completed round must not animate");
   assert.equal(completed.open, false, "a completed round must default to collapsed");
   await page.click("#agent-turn-slot .agent-turn-card details > summary");
   await page.waitForFunction(() => document.querySelector("#agent-turn-slot .agent-turn-card details")?.open, null, {timeout: 5000});
@@ -212,7 +258,12 @@ try {
   await page.evaluate(() => { window.__scenario = "failed"; });
   await waitForCard(page, "失败", false);
   const failed = await card(page);
+  assert.equal(failed.times.length, 1, "a failed round shows the total clock only");
+  assert.equal(failed.times[0].kind, "total");
+  assert.equal(failed.eventKind, "", "a failed round has no breathing event");
+  assert.equal(failed.eventAnimation, "", "a failed round must not animate");
   assert.equal(failed.open, false, "a failed round must default to collapsed");
+  assert.doesNotMatch(failed.text, /完成/, "a failed round must not read as completed");
   await page.click("#agent-turn-slot .agent-turn-card details > summary");
   await page.waitForFunction(() => (document.querySelector("#agent-turn-slot .turn-failure")?.textContent || "").includes("backend exploded"), null, {timeout: 5000});
   const failedOpen = await card(page);
