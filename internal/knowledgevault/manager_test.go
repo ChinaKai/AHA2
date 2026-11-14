@@ -253,3 +253,101 @@ func TestEffectiveStartupSwitchPrefersDatabaseAfterFirstWebToggle(t *testing.T) 
 		})
 	}
 }
+
+func TestManagerSetEnabledMigratesLegacyIndexSchema(t *testing.T) {
+	config, ctx := legacyIndexVault(t)
+	manager, err := NewManager(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	if err := manager.SetEnabled(ctx, true); err != nil {
+		t.Fatalf("enable a vault with a legacy index: %v", err)
+	}
+	var entries []IndexEntry
+	if err := manager.WithReader(func(reader *Reader) error {
+		var readErr error
+		entries, readErr = reader.Entries(ctx, "global", "")
+		return readErr
+	}); err != nil {
+		t.Fatalf("query a legacy index through the manager: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("manager returned no global entries after migrating the legacy index")
+	}
+}
+
+func TestManagerBackfillsMissingGuideOnStartupAndRebuild(t *testing.T) {
+	ctx := context.Background()
+	config := DefaultConfig(t.TempDir())
+	if _, err := Bootstrap(config, InitOptions{VaultName: "Upgrade Vault", Commit: false}); err != nil {
+		t.Fatal(err)
+	}
+	guidePath := filepath.Join(config.VaultPath, filepath.FromSlash(GuideRelativePath))
+	if err := os.Remove(guidePath); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewManager(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+
+	if err := manager.SetEnabled(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	guide, err := ReadGuide(config.VaultPath)
+	if err != nil {
+		t.Fatalf("startup did not backfill the guide: %v", err)
+	}
+	if guide.Title != GuideTitle || !strings.Contains(guide.Prompt, "先搜索再写") {
+		t.Fatalf("backfilled guide = %#v", guide)
+	}
+
+	custom := "---\ntitle: 手写指南\n---\n\n自定义正文。\n"
+	if err := os.WriteFile(guidePath, []byte(custom), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.SetEnabled(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.SetEnabled(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	if raw, err := os.ReadFile(guidePath); err != nil || string(raw) != custom {
+		t.Fatalf("startup overwrote the hand-written guide: %q err=%v", raw, err)
+	}
+
+	// A rebuild must repair the guide before scanning so the fresh index sees it.
+	if err := os.Remove(guidePath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Rebuild(ctx); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(guidePath)
+	if err != nil {
+		t.Fatalf("rebuild did not backfill the guide: %v", err)
+	}
+	if err := manager.WithReader(func(reader *Reader) error {
+		entries, readErr := reader.Entries(ctx, "global", "")
+		if readErr != nil {
+			return readErr
+		}
+		findIndexEntry(t, entries, GuideRelativePath)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// A second rebuild is idempotent: the guide file is not rewritten.
+	if _, err := manager.Rebuild(ctx); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(guidePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Fatalf("rebuild rewrote the guide: before=%v after=%v", before.ModTime(), after.ModTime())
+	}
+}

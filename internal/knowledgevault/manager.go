@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"sync"
@@ -71,6 +72,18 @@ func (m *Manager) Config() Config { return m.config }
 // able to explain the vault while the index is being repaired.
 func (m *Manager) Guide() (Guide, error) {
 	return ReadGuide(m.config.VaultPath)
+}
+
+// ensureGuide repairs the upgrade case where an initialized vault predates the
+// canonical guide. It never overwrites an existing (including hand-written)
+// guide, and a failure is logged instead of blocking knowledge reads.
+func (m *Manager) ensureGuide() {
+	if !VaultInitialized(m.config.VaultPath) {
+		return
+	}
+	if _, err := EnsureGuide(m.config.VaultPath, time.Now().UTC()); err != nil {
+		log.Printf("ensure knowledge guide for %s: %v", m.config.VaultPath, err)
+	}
 }
 
 func (m *Manager) Enabled() bool {
@@ -148,6 +161,10 @@ func (m *Manager) SetEnabled(ctx context.Context, enabled bool) error {
 		}
 		return nil
 	}
+	// Upgrade path: a vault created by an older release has no guide file.
+	// Repair it before opening so the Agent guide endpoint works without a
+	// manual rebuild.
+	m.ensureGuide()
 	reader, err := OpenReader(ctx, m.config)
 	if err != nil {
 		return err
@@ -267,6 +284,8 @@ func (m *Manager) rebuildLocked(ctx context.Context) (RebuildReport, error) {
 	if !VaultInitialized(m.config.VaultPath) {
 		return RebuildReport{}, ErrVaultNotInitialized
 	}
+	// Backfill before the scan so a repaired guide is indexed by this rebuild.
+	m.ensureGuide()
 	if m.reader != nil {
 		_ = m.reader.Close()
 		m.reader = nil

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -306,5 +307,22 @@ func TestAgentKnowledgeGuideHandler(t *testing.T) {
 	empty.agentKnowledgeGuide(recorder, request)
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("missing manager status = %d", recorder.Code)
+	}
+}
+
+func TestAgentKnowledgeGuideMissingFileIsNotFound(t *testing.T) {
+	manager := knowledgeVaultManagerFixture(t)
+	guidePath := filepath.Join(manager.Config().VaultPath, filepath.FromSlash(knowledgevault.GuideRelativePath))
+	if err := os.Remove(guidePath); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{knowledgeVault: manager}
+	recorder := httptest.NewRecorder()
+	server.agentKnowledgeGuide(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/agent/knowledge/guide", nil))
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("missing guide status = %d body=%s, want 404", recorder.Code, recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), "escapes") {
+		t.Fatalf("missing guide was reported as a path escape: %s", recorder.Body.String())
 	}
 }

@@ -42,6 +42,15 @@ func ReadGuide(vaultPath string) (Guide, error) {
 		return Guide{}, ErrGuideNotFound
 	}
 	target := filepath.Join(vaultPath, filepath.FromSlash(GuideRelativePath))
+	// Check existence before resolving symlinks: EvalSymlinks fails for a
+	// missing file, and treating that as a path escape turns a vault without
+	// a guide (the normal upgrade state) into a security error and a 500.
+	if _, err := os.Lstat(target); err != nil {
+		if os.IsNotExist(err) {
+			return Guide{}, ErrGuideNotFound
+		}
+		return Guide{}, fmt.Errorf("read knowledge guide: %w", err)
+	}
 	if !IsInsideRoot(vaultPath, target) {
 		return Guide{}, fmt.Errorf("knowledge guide escapes the vault root")
 	}
@@ -66,6 +75,45 @@ func ReadGuide(vaultPath string) (Guide, error) {
 		prompt = fallbackPromptGuide()
 	}
 	return Guide{Path: GuideRelativePath, Title: title, Content: content, Prompt: prompt}, nil
+}
+
+// EnsureGuide creates the canonical system guide when the vault does not have
+// one yet. It never overwrites an existing guide, so a hand-written replacement
+// survives startup and rebuild, and repeated calls are a no-op. It reports
+// whether this call created the file so callers can record it as a change.
+func EnsureGuide(vaultPath string, now time.Time) (bool, error) {
+	vaultPath = strings.TrimSpace(vaultPath)
+	if vaultPath == "" {
+		return false, fmt.Errorf("ensure knowledge guide: empty vault path")
+	}
+	target := filepath.Join(vaultPath, filepath.FromSlash(GuideRelativePath))
+	if _, err := os.Lstat(target); err == nil {
+		return false, nil
+	} else if !os.IsNotExist(err) {
+		return false, fmt.Errorf("stat knowledge guide: %w", err)
+	}
+	if err := ensureSafeWriteTarget(vaultPath, target); err != nil {
+		return false, fmt.Errorf("ensure knowledge guide: %w", err)
+	}
+	// O_EXCL keeps a concurrent writer (another startup or a hand-written
+	// file created between the check and the open) from being overwritten.
+	file, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		if os.IsExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("ensure knowledge guide: %w", err)
+	}
+	if _, err := file.WriteString(defaultGuideContent(now)); err != nil {
+		_ = file.Close()
+		_ = os.Remove(target)
+		return false, fmt.Errorf("write knowledge guide: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(target)
+		return false, fmt.Errorf("write knowledge guide: %w", err)
+	}
+	return true, nil
 }
 
 func extractPromptGuide(content string) string {

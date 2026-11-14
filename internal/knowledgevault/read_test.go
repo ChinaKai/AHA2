@@ -2,6 +2,7 @@ package knowledgevault
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -521,6 +522,94 @@ func TestReaderSkillsAreListedFromVaultFolders(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("demo-skill not found: %+v", skills.Skills)
+	}
+}
+
+// legacyIndexVault exports and rebuilds the standard seed vault, then removes
+// the summary/revision columns to reproduce an index left behind by an older
+// release.
+func legacyIndexVault(t *testing.T) (Config, context.Context) {
+	t.Helper()
+	config, index, ctx := exportSeedVault(t)
+	if _, err := index.Rebuild(ctx, config.VaultPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := index.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dropIndexColumns(t, config.IndexPath, "summary", "revision")
+	return config, ctx
+}
+
+func dropIndexColumns(t *testing.T, indexPath string, columns ...string) {
+	t.Helper()
+	database, err := sql.Open("sqlite", SQLiteFileDSN(indexPath, "_pragma=busy_timeout(5000)&_txlock=immediate"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	for _, column := range columns {
+		if _, err := database.Exec(`ALTER TABLE entries DROP COLUMN ` + column); err != nil {
+			t.Fatalf("drop index column %s: %v", column, err)
+		}
+	}
+}
+
+func indexColumns(t *testing.T, indexPath string) map[string]bool {
+	t.Helper()
+	database, err := sql.Open("sqlite", SQLiteFileDSN(indexPath, "mode=ro&_pragma=busy_timeout(5000)"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	rows, err := database.Query(`PRAGMA table_info(entries)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	columns := map[string]bool{}
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatal(err)
+		}
+		columns[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return columns
+}
+
+func TestOpenReaderMigratesLegacyIndexSchema(t *testing.T) {
+	config, ctx := legacyIndexVault(t)
+	if columns := indexColumns(t, config.IndexPath); columns["summary"] || columns["revision"] {
+		t.Fatalf("legacy index still has the new columns: %v", columns)
+	}
+	reader, err := OpenReader(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	entries, err := reader.Entries(ctx, "project", "project-demo")
+	if err != nil {
+		t.Fatalf("read a legacy index through the reader: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("legacy index returned no entries after migration")
+	}
+	search, err := reader.Search(ctx, DocumentSearchOptions{Query: "部署前先验证", Library: "global"})
+	if err != nil {
+		t.Fatalf("search a legacy index through the reader: %v", err)
+	}
+	if len(search.Results) == 0 {
+		t.Fatal("search on the migrated index returned no results")
+	}
+	columns := indexColumns(t, config.IndexPath)
+	if !columns["summary"] || !columns["revision"] {
+		t.Fatalf("reader did not migrate the legacy index schema: %v", columns)
 	}
 }
 

@@ -107,15 +107,61 @@ func OpenIndex(ctx context.Context, indexPath string) (*Index, error) {
 		return nil, err
 	}
 	index := &Index{db: db, path: indexPath}
-	if _, err := db.ExecContext(ctx, indexSchema); err != nil {
+	if err := ensureIndexSchema(ctx, db); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("create knowledge index schema: %w", err)
-	}
-	if err := migrateIndexSchema(ctx, db); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("migrate knowledge index schema: %w", err)
+		return nil, err
 	}
 	return index, nil
+}
+
+// ensureIndexSchema applies the current schema and additive migrations to an
+// open database. CREATE TABLE IF NOT EXISTS keeps this safe on every open.
+func ensureIndexSchema(ctx context.Context, db *sql.DB) error {
+	if _, err := db.ExecContext(ctx, indexSchema); err != nil {
+		return fmt.Errorf("create knowledge index schema: %w", err)
+	}
+	if err := migrateIndexSchema(ctx, db); err != nil {
+		return fmt.Errorf("migrate knowledge index schema: %w", err)
+	}
+	return nil
+}
+
+// migrateIndexSchemaFile upgrades an existing index database in place. A
+// missing index is the normal empty state and is left alone: only OpenIndex
+// creates a new database. OpenReader calls this before opening its read-only
+// connection, because a read-only handle cannot run the additive migrations
+// and older indexes would otherwise fail with "no such column: summary".
+func migrateIndexSchemaFile(ctx context.Context, indexPath string) error {
+	absolute, err := filepath.Abs(indexPath)
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(absolute)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if info.IsDir() {
+		return fmt.Errorf("knowledge index path is a directory: %s", absolute)
+	}
+	db, err := openIndexDatabase(absolute)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	// Only migrate a database that already is a knowledge index. A foreign or
+	// misconfigured SQLite file must not gain tables just because it was
+	// opened through the reader.
+	var name string
+	if err := db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name='entries'`).Scan(&name); err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	}
+	return ensureIndexSchema(ctx, db)
 }
 
 // migrateIndexSchema adds columns introduced after the first index release.

@@ -2,10 +2,12 @@ package knowledgevault
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeVaultTestFile(t *testing.T, vaultPath, relative, content string) {
@@ -296,6 +298,48 @@ func TestRebuildCreatesMissingManifest(t *testing.T) {
 	}
 	if manifest.Version != ManifestVersion || manifest.Projects["project-demo"] != "demo-project" {
 		t.Fatalf("generated manifest = %#v", manifest)
+	}
+}
+
+func TestReadGuideMissingVaultReportsNotFoundNotEscape(t *testing.T) {
+	_, err := ReadGuide(t.TempDir())
+	if !errors.Is(err, ErrGuideNotFound) {
+		t.Fatalf("ReadGuide on a vault without a guide = %v, want ErrGuideNotFound", err)
+	}
+	if strings.Contains(err.Error(), "escapes") {
+		t.Fatalf("a missing guide was reported as a path escape: %v", err)
+	}
+}
+
+func TestEnsureGuideBackfillsOnceAndKeepsHandWrittenGuide(t *testing.T) {
+	vaultPath := t.TempDir()
+	created, err := EnsureGuide(vaultPath, time.Now())
+	if err != nil || !created {
+		t.Fatalf("EnsureGuide on an empty vault = (%v, %v), want created", created, err)
+	}
+	guidePath := filepath.Join(vaultPath, filepath.FromSlash(GuideRelativePath))
+	canonical, err := os.ReadFile(guidePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err = EnsureGuide(vaultPath, time.Now())
+	if err != nil || created {
+		t.Fatalf("second EnsureGuide = (%v, %v), want an idempotent no-op", created, err)
+	}
+	if after, err := os.ReadFile(guidePath); err != nil || !bytes.Equal(after, canonical) {
+		t.Fatalf("second EnsureGuide changed the guide: err=%v", err)
+	}
+
+	custom := "---\ntitle: 手写指南\n---\n\n自定义正文。\n"
+	if err := os.WriteFile(guidePath, []byte(custom), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	created, err = EnsureGuide(vaultPath, time.Now())
+	if err != nil || created {
+		t.Fatalf("EnsureGuide over a hand-written guide = (%v, %v), want a no-op", created, err)
+	}
+	if after, err := os.ReadFile(guidePath); err != nil || string(after) != custom {
+		t.Fatalf("EnsureGuide overwrote the hand-written guide: %q err=%v", after, err)
 	}
 }
 

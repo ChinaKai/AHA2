@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path"
 	"path/filepath"
@@ -27,8 +28,8 @@ var ErrDocumentNotFound = errors.New("knowledge vault document not found")
 const maxSkillPackageFileSize = 2 << 20
 
 // Reader is the single read-only entry point for the Phase 2 Web API. It never
-// writes the vault or the index: the index is opened with SQLite mode=ro and
-// the manifest is only read.
+// writes the vault and only writes the index to apply schema migrations before
+// the read-only connection is opened.
 type Reader struct {
 	config     Config
 	manifest   Manifest
@@ -56,6 +57,13 @@ func OpenReader(ctx context.Context, config Config) (*Reader, error) {
 		}
 	}
 	if info, statErr := os.Stat(normalized.IndexPath); statErr == nil && !info.IsDir() {
+		// A deployed index may predate columns such as summary/revision. The
+		// read-only handle cannot migrate, so upgrade the schema first; if that
+		// fails we still try to open and let the caller report the read error
+		// instead of silently falling back to legacy knowledge.
+		if migrateErr := migrateIndexSchemaFile(ctx, normalized.IndexPath); migrateErr != nil {
+			log.Printf("knowledge vault index schema migration failed for %s; reads may fail and fall back to legacy knowledge: %v", normalized.IndexPath, migrateErr)
+		}
 		index, openErr := openReadOnlyIndex(ctx, normalized.IndexPath)
 		if openErr != nil {
 			return nil, fmt.Errorf("open knowledge vault index: %w", openErr)

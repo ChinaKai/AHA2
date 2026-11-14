@@ -296,14 +296,12 @@ func Bootstrap(cfg Config, options InitOptions) (InitReport, error) {
 		}
 	}
 
-	guidePath := filepath.Join(cfg.VaultPath, filepath.FromSlash(GuideRelativePath))
-	if _, err := os.Stat(guidePath); os.IsNotExist(err) {
-		if err := writeVaultFileIfChanged(cfg.VaultPath, guidePath, []byte(defaultGuideContent(now)), 0o644); err != nil {
-			return report, err
-		}
-		report.Created = append(report.Created, GuideRelativePath)
-	} else if err != nil {
+	guideCreated, err := EnsureGuide(cfg.VaultPath, now)
+	if err != nil {
 		return report, err
+	}
+	if guideCreated {
+		report.Created = append(report.Created, GuideRelativePath)
 	}
 
 	globalIndex := filepath.Join(cfg.VaultPath, "global", "index.md")
