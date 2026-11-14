@@ -482,6 +482,25 @@ export function clearNavigationSnapshot(): void {
   }
 }
 
+// Only deep links put a view in the address bar; every other page is restored
+// from NavigationSnapshot. So a hash that names another view must be removed
+// when the user leaves it, or the next load routes straight back there. Anchors
+// like `#heading-slug` are not view names and are left alone. Returns the URL
+// to replace, or null when the hash already belongs to `view`.
+export function staleViewHashTarget(
+  hash: string,
+  pathname: string,
+  search: string,
+  view: string,
+  isViewName: (name: string) => boolean,
+): string | null {
+  const raw = String(hash || "").replace(/^#/, "");
+  if (!raw) return null;
+  const name = raw.split("?")[0];
+  if (!isViewName(name) || name === view) return null;
+  return `${pathname}${search}`;
+}
+
 export interface InteractiveRegionState {
   rootScrollTop: number;
   rootScrollLeft: number;

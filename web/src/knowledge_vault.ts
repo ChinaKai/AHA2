@@ -781,6 +781,9 @@ function closeSearch(): void {
 
 function syncHash(doc: KnowledgeVaultDoc | null): void {
   if (!doc) return;
+  // A doc request can finish after the user switched to another view. Writing
+  // the deep link then would route the next refresh back to knowledge.
+  if (!document.querySelector(".knowledge-vault")) return;
   try {
     window.history.replaceState(null, "", docHash(doc));
   } catch {

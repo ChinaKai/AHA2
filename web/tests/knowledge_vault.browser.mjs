@@ -405,6 +405,49 @@ try {
   await page.waitForSelector(".kv-state-error");
   assert.match(await page.locator(".kv-state-error").innerText(), /knowledge_vault_document_not_found/);
 
+  // Address bar: opening a document updates the hash in place (no reload, no
+  // history growth); every top-level view switch drops the knowledge hash so a
+  // refresh restores the view the user is actually on.
+  await page.goto(url, {waitUntil: "networkidle"});
+  await page.evaluate(() => document.querySelector("[data-view=knowledge]")?.click());
+  await page.waitForSelector(".kv-tree-link", {timeout: 15000});
+  await page.selectOption("#kv-library", "project:p1");
+  await page.waitForFunction(() => Boolean(document.querySelector('a[data-kv-doc="doc-1"]')));
+  const deepLinkHistory = await page.evaluate(() => history.length);
+  await page.evaluate(() => { window.__deepLinkMarker = "alive"; });
+  await page.locator('a[data-kv-doc="doc-1"]').click();
+  await page.waitForSelector(".kv-doc-body");
+  await page.waitForFunction(() => location.hash.startsWith("#knowledge?doc=doc-1"));
+  assert.equal(await page.evaluate(() => window.__deepLinkMarker), "alive", "opening a document is an in-page update, not a reload");
+  assert.equal(await page.evaluate(() => history.length), deepLinkHistory, "opening a document replaces the hash instead of stacking history");
+
+  await page.evaluate(() => document.querySelector("[data-view=tasks]")?.click());
+  await page.waitForSelector(".task-list", {timeout: 15000});
+  assert.equal(await page.evaluate(() => location.hash), "", "leaving knowledge drops its deep-link hash");
+  await page.reload({waitUntil: "networkidle"});
+  await page.waitForSelector(".task-list", {timeout: 15000});
+  assert.equal(await page.locator(".knowledge-vault").count(), 0, "refresh stays on the tasks view");
+
+  await page.evaluate(() => document.querySelector("[data-view=knowledge]")?.click());
+  await page.waitForSelector(".kv-tree-link", {timeout: 15000});
+  await page.selectOption("#kv-library", "project:p1");
+  await page.waitForFunction(() => Boolean(document.querySelector('a[data-kv-doc="doc-1"]')));
+  await page.locator('a[data-kv-doc="doc-1"]').click();
+  await page.waitForSelector(".kv-doc-body");
+  await page.waitForFunction(() => location.hash.startsWith("#knowledge?doc=doc-1"));
+  await page.evaluate(() => document.querySelector("[data-view=advanced]")?.click());
+  await page.waitForSelector("#language-setting", {timeout: 15000});
+  assert.equal(await page.evaluate(() => location.hash), "", "settings navigation drops the knowledge hash");
+  await page.reload({waitUntil: "networkidle"});
+  await page.waitForSelector("#language-setting", {timeout: 15000});
+  assert.equal(await page.locator(".knowledge-vault").count(), 0, "refresh stays on the settings view");
+
+  // A direct deep link still opens the referenced document.
+  await page.goto(`${url}/#knowledge?doc=doc-1&scope=project&project=p1`, {waitUntil: "networkidle"});
+  await page.waitForSelector(".kv-doc-body");
+  assert.match(await page.evaluate(() => location.hash), /^#knowledge\?doc=doc-1/);
+  assert.equal((await page.locator(".kv-doc-head h1").textContent()).trim(), "构建指南");
+
   // Mobile: one column, list -> doc -> back keeps scroll, copy path only.
   await page.setViewportSize({width: 390, height: 780});
   await page.goto(url, {waitUntil: "networkidle"});

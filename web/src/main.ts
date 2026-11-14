@@ -29,7 +29,7 @@ import {DEFAULT_TASK_STATUS_FILTERS, LOCAL_TASK_DEVICE_FILTER, TASK_STATUS_GROUP
 import type {TaskStatusGroup} from "./task_filters.js";
 import {TASK_TOOL_DEFAULT_WIDTH, normalizePinnedTaskTool, normalizeTaskToolMode, normalizeTaskToolWidth, renderTaskToolButtons, renderTaskToolContent, renderTaskToolPanel} from "./task_tools.js";
 import type {TaskTool, TaskToolMode} from "./task_tools.js";
-import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, createListRefreshScheduler, createResourceLoader, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, installDialogEntryFocus, loadNavigationSnapshot, matchingSlashCommands, paginateItems, paginationHTML, planKeyedNodes, stableTextSignature, protoBadges, readPerfPanelPreference, renderModelHealthCell, renderProtocolProbeStatus, renderWorkspaceDetection, replaceInteractiveRegion, restoreInteractiveRegion, saveNavigationSnapshot, textMatchesQuery, writePerfPanelPreference} from "./ui_helpers.js";
+import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, createListRefreshScheduler, createResourceLoader, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, installDialogEntryFocus, loadNavigationSnapshot, matchingSlashCommands, paginateItems, paginationHTML, planKeyedNodes, stableTextSignature, protoBadges, readPerfPanelPreference, renderModelHealthCell, renderProtocolProbeStatus, renderWorkspaceDetection, replaceInteractiveRegion, restoreInteractiveRegion, saveNavigationSnapshot, staleViewHashTarget, textMatchesQuery, writePerfPanelPreference} from "./ui_helpers.js";
 import type {InteractiveRegionState, ModelHealthView} from "./ui_helpers.js";
 import {
   compactNumber,
@@ -1800,6 +1800,21 @@ function applyLocationHash(): boolean {
     }
   }
   return true;
+}
+
+// applyLocationHash() gives a hash priority over the navigation snapshot at
+// boot. Keep the address bar honest when the user leaves a deep-linked view:
+// drop the old hash so the next refresh restores the view they are on now.
+function syncViewHash(): void {
+  const target = staleViewHashTarget(
+    window.location.hash,
+    window.location.pathname,
+    window.location.search,
+    state.view,
+    name => viewFromName(name) !== null,
+  );
+  if (target === null) return;
+  window.history.replaceState(null, "", target);
 }
 
 // Switching the top-level view is shared by the sidebar, the palette and the
@@ -6211,6 +6226,10 @@ function render(): void {
     return;
   }
   persistNavigationState();
+  // The snapshot and the address bar describe the same committed view. Doing
+  // this here (not at the top of render) keeps the boot-time deep link intact
+  // while still covering every navigation path that sets state.view directly.
+  syncViewHash();
   if (document.activeElement instanceof HTMLTextAreaElement && document.activeElement.closest("#message-form")) {
     state.renderPending = true;
     return;

@@ -827,6 +827,9 @@ function knowledgeDeepLink(): {docID: string; scope: "" | "global" | "project"; 
 
 function writeKnowledgeDeepLink(id: string): void {
   if (!id || id.startsWith(syntheticHomeID)) return;
+  // Async save/load paths can land after the user left the knowledge view;
+  // never put its hash back on another page.
+  if (typeof window === "undefined" || !document.querySelector(".knowledge-page")) return;
   const params = new URLSearchParams({doc: id});
   if (activeScope === "global") {
     params.set("scope", "global");
@@ -835,7 +838,6 @@ function writeKnowledgeDeepLink(id: string): void {
     if (selectedProjectID) params.set("project", selectedProjectID);
   }
   const next = `#knowledge?${params.toString()}`;
-  if (typeof window === "undefined") return;
   if (window.location.hash !== next) window.history.replaceState(null, "", next);
 }
 
