@@ -6202,7 +6202,9 @@ function render(): void {
   }
   // Never tear down the DOM while a modal dialog is open, or the dialog would
   // close unexpectedly. Defer until the dialog closes (see close listener).
-  if (document.querySelector("dialog[open]")) {
+  // The knowledge settings dialog opts out: it reopens itself and restores
+  // focus after each render so index/Git status can update in place.
+  if (document.querySelector("dialog[open]:not(#kv-settings-dialog)")) {
     state.renderPending = true;
     return;
   }

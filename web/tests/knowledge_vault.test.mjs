@@ -21,7 +21,6 @@ function reset(patch = {}) {
     vaultPath: "/srv/vault",
     obsidianVault: "AHA2 Knowledge",
     obsidianReady: true,
-    remoteHost: "devbox",
     libraries: [
       {id: "global", kind: "global", name: "全局知识", count: 2},
       {id: "project:p1", kind: "project", name: "Demo", project_id: "p1", count: 3},
@@ -376,11 +375,68 @@ test("document header keeps three icon actions on the breadcrumb row and drops r
   assert.doesNotMatch(html, /window\.open/);
 });
 
-test("a configured remote host no longer adds a remote VSCode action", () => {
-  reset({selectedID: "doc-1", docState: "ready", remoteHost: "devbox", doc});
+test("the settings dialog drops the remote host row and offers the index rebuild", () => {
+  reset({
+    selectedID: "doc-1", docState: "ready", doc,
+    settingsState: "ready",
+    settings: {
+      enabled: true, source: "database", vault_ready: true, vault_initialized: true,
+      index_ready: true, vault_name: "AHA2 Knowledge", vault_path: "/srv/vault",
+      index_path: "/srv/index.db", entry_count: 5, rebuilt_at: "2026-11-14T13:38:42Z",
+    },
+  });
   const html = vault.renderKnowledgeVaultPage(context());
-  assert.doesNotMatch(html, /vscode-remote/);
-  assert.doesNotMatch(html, /VSCode 远程/);
+  assert.doesNotMatch(html, /远程主机/);
+  assert.doesNotMatch(html, /Remote host/);
+  assert.doesNotMatch(html, /remoteHost|remote_host/);
+  assert.match(html, /id="kv-settings-rebuild"(?![^>]*disabled)/);
+  assert.match(html, /索引操作/);
+});
+
+test("the gear rebuild stays disabled before settings load or without an initialized vault", () => {
+  reset({settingsState: "loading", settings: null});
+  let html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /id="kv-settings-rebuild"[^>]*disabled/);
+
+  reset({
+    settingsState: "ready",
+    settings: {
+      enabled: true, source: "database", vault_ready: true, vault_initialized: false,
+      index_ready: false, vault_path: "/srv/vault", index_path: "/srv/index.db", entry_count: 0,
+    },
+  });
+  html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /id="kv-settings-rebuild"[^>]*disabled/);
+});
+
+test("the gear dialog shows rebuild busy, success and failure states", () => {
+  const settings = {
+    enabled: true, source: "database", vault_ready: true, vault_initialized: true,
+    index_ready: true, vault_name: "AHA2 Knowledge", vault_path: "/srv/vault",
+    index_path: "/srv/index.db", entry_count: 5, rebuilt_at: "2026-11-14T13:38:42Z",
+  };
+  reset({settingsState: "ready", settings, rebuildBusy: true});
+  let html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /aria-busy="true"/);
+  assert.match(html, /重建中/);
+  assert.match(html, /id="kv-settings-rebuild"[^>]*disabled/);
+
+  reset({settingsState: "ready", settings, rebuildNotice: {kind: "notice", message: "已重建 7 条 · 2026/11/14 21:00"}});
+  html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /role="status">已重建 7 条/);
+  assert.doesNotMatch(html, /远程主机/);
+
+  reset({settingsState: "ready", settings, rebuildNotice: {kind: "error", message: "重建索引失败：磁盘只读"}});
+  html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /role="alert">重建索引失败：磁盘只读/);
+  assert.match(html, /id="kv-settings-rebuild"(?![^>]*disabled)/);
+});
+
+test("a settings load failure is explicit and retryable without breaking the dialog", () => {
+  reset({settingsState: "error", settingsError: "network down"});
+  const html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /role="alert">network down/);
+  assert.match(html, /data-kv-settings-retry/);
 });
 
 test("unregistered Obsidian is greyed out and explains the reason", () => {
@@ -459,4 +515,93 @@ test("vault API requests carry library, project, type, status and tag filters", 
   assert.equal(calls[0], "/api/v1/knowledge-vault/tree?library=project%3Ap+1&project=p+1");
   assert.equal(calls[1], "/api/v1/knowledge-vault/search?q=%E6%9E%84%E5%BB%BA+%E6%8C%87%E5%8D%97&library=project%3Ap1&project=p1&type=practice&status=verified&tag=build&limit=20");
   assert.equal(calls[2], "/api/v1/knowledge-vault/doc/doc%2F1");
+});
+const gitStatus = {
+  available: true,
+  initialized: true,
+  branch: "main",
+  current_branch: "main",
+  remote: "git@example.com:…",
+  remote_set: true,
+  clean: true,
+  changed: 0,
+  tracking: true,
+  ahead: 0,
+  behind: 0,
+  has_commits: true,
+  last_commit: "abc1234",
+  last_commit_message: "Add notes",
+  last_commit_at: "2026-11-14T12:00:00Z",
+  last_sync_at: "2026-11-14T12:01:00Z",
+};
+
+test("the Git section starts uninitialized and offers only the init action", () => {
+  reset({
+    gitState: "ready",
+    git: {...gitStatus, initialized: false, remote_set: false, remote: "", has_commits: false, tracking: false},
+  });
+  const html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /Git 同步/);
+  assert.match(html, /未初始化/);
+  assert.match(html, /id="kv-git-init"/);
+  assert.doesNotMatch(html, /id="kv-git-pull"/);
+  assert.doesNotMatch(html, /id="kv-git-push"/);
+  assert.doesNotMatch(html, /id="kv-git-remote-input"/);
+});
+
+test("the Git section shows masked remote, status and aligned actions", () => {
+  reset({gitState: "ready", git: gitStatus});
+  const html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /已初始化/);
+  assert.match(html, /git@example\.com:…/);
+  assert.match(html, /已同步/);
+  assert.match(html, /abc1234 · Add notes/);
+  assert.match(html, /id="kv-git-remote-save"/);
+  assert.match(html, /id="kv-git-sync"/);
+  // Clean + tracking + no local commits: commit and push are disabled.
+  assert.match(html, /id="kv-git-commit"[^>]*disabled/);
+  assert.match(html, /id="kv-git-push"[^>]*disabled/);
+  assert.doesNotMatch(html, /id="kv-git-pull"[^>]*disabled/);
+  assert.doesNotMatch(html, /id="kv-git-sync"[^>]*disabled/);
+});
+
+test("the Git section explains dirty, ahead/behind and busy states", () => {
+  reset({gitState: "ready", git: {...gitStatus, clean: false, changed: 3, ahead: 2, behind: 1}});
+  let html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /有 3 个未提交修改/);
+  assert.match(html, /领先 2 · 落后 1/);
+  assert.doesNotMatch(html, /id="kv-git-commit"[^>]*disabled/);
+  assert.match(html, /id="kv-git-pull"[^>]*disabled/);
+  assert.match(html, /id="kv-git-sync"[^>]*disabled/);
+  assert.doesNotMatch(html, /id="kv-git-push"[^>]*disabled/);
+
+  reset({gitState: "ready", git: gitStatus, gitBusy: "sync"});
+  html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /同步中…/);
+  assert.match(html, /id="kv-git-sync"[^>]*disabled/);
+  assert.match(html, /id="kv-git-remote-input"[^>]*disabled/);
+});
+
+test("the Git section surfaces unavailable, load failure and operation errors", () => {
+  reset({gitState: "ready", git: {...gitStatus, available: false}});
+  let html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /当前环境没有可用的 git 命令/);
+  assert.doesNotMatch(html, /id="kv-git-init"/);
+
+  reset({gitState: "error", git: null, gitError: "network down"});
+  html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /读取 Git 状态失败：network down/);
+  assert.match(html, /data-kv-git-retry/);
+
+  reset({gitState: "ready", git: gitStatus, gitNotice: {kind: "error", message: "git push 失败：remote rejected"}});
+  html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /role="alert">git push 失败：remote rejected/);
+});
+
+test("the Git remote never appears in full and no token input is offered", () => {
+  reset({gitState: "ready", git: gitStatus});
+  const html = vault.renderKnowledgeVaultPage(context());
+  assert.doesNotMatch(html, /example\.com\/secret/);
+  assert.doesNotMatch(html, /type="password"/);
+  assert.match(html, /仅支持 SSH remote/);
 });

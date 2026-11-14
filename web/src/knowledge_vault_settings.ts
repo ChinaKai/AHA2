@@ -18,7 +18,7 @@ interface SettingsPanelState {
   settings: KnowledgeVaultSettings | null;
   error: string;
   unsupported: boolean;
-  busy: "" | "toggle" | "init" | "rebuild";
+  busy: "" | "toggle" | "init";
 }
 
 let state: SettingsPanelState = {loaded: false, loading: false, settings: null, error: "", unsupported: false, busy: ""};
@@ -123,26 +123,6 @@ async function initializeSamples(): Promise<void> {
   }
 }
 
-async function rebuildIndex(): Promise<void> {
-  const context = activeContext;
-  if (state.busy || context === null) return;
-  state.busy = "rebuild";
-  state.error = "";
-  context.render();
-  try {
-    const result = await api.rebuildKnowledgeVaultIndex();
-    applySettings(result.settings, context);
-    context.setMessage("notice", `索引已重建：${result.rebuild.entries} 条文档`);
-  } catch (error) {
-    state.error = errorMessage(error);
-    context.setMessage("error", `重建索引失败：${state.error}`);
-    await loadSettings(context);
-  } finally {
-    state.busy = "";
-    context.render();
-  }
-}
-
 function settingsBody(): string {
   const settings = state.settings;
   if (state.unsupported) {
@@ -168,7 +148,7 @@ function settingsBody(): string {
   const warning = settings.warning === "vault_missing"
     ? `<div class="security-warning">知识库目录尚未创建。可以先打开开关查看空态，或初始化示例知识库。</div>`
     : settings.warning === "index_missing"
-      ? `<div class="security-warning">索引尚未建立。请点「重建索引」，或初始化示例知识库。</div>`
+      ? `<div class="security-warning">索引尚未建立。请在知识库页的齿轮设置中重建索引，或初始化示例知识库。</div>`
       : "";
   return `
     <label class="security-setting-toggle knowledge-vault-toggle"><input id="knowledge-vault-enabled" name="knowledge_vault_enabled" type="checkbox" ${settings.enabled ? "checked" : ""} ${busy ? "disabled" : ""}><span><strong>启用文件知识库（Web 只读）</strong><small>运行态生效，无需重启 AHA2；关闭后立即回到旧知识页。</small></span></label>
@@ -180,11 +160,10 @@ function settingsBody(): string {
     </dl>
     ${warning}
     ${state.error ? `<div class="security-warning active" role="alert">${escapeHTML(state.error)}</div>` : ""}
-    <div class="knowledge-vault-actions">
-      ${!settings.vault_initialized ? `<button type="button" id="knowledge-vault-init" class="primary" ${busy ? "disabled" : ""}>${busy === "init" ? "初始化中…" : "初始化示例知识库"}</button>` : ""}
-      <button type="button" id="knowledge-vault-rebuild" ${busy || !settings.enabled || !settings.vault_initialized ? "disabled" : ""}>${busy === "rebuild" ? "重建中…" : "重建索引"}</button>
-    </div>
-    <div class="field-help knowledge-vault-note">文件是知识正本，Web 只读；请用 VSCode 或 Obsidian 编辑后点「重建索引」（没有实时监听）。示例仅用于体验，可随时删除；不会导入或删除旧知识库。</div>`;
+    ${!settings.vault_initialized ? `<div class="knowledge-vault-actions">
+      <button type="button" id="knowledge-vault-init" class="primary" ${busy ? "disabled" : ""}>${busy === "init" ? "初始化中…" : "初始化示例知识库"}</button>
+    </div>` : ""}
+    <div class="field-help knowledge-vault-note">文件是知识正本，Web 只读；请用 VSCode 或 Obsidian 编辑，然后在知识库页的齿轮设置中重建索引（没有实时监听）。示例仅用于体验，可随时删除；不会导入或删除旧知识库。</div>`;
 }
 
 export function renderKnowledgeVaultSettingsPanel(context: KnowledgeVaultSettingsContext): string {
@@ -204,7 +183,6 @@ export function bindKnowledgeVaultSettingsPanel(context: KnowledgeVaultSettingsC
   const toggle = document.querySelector<HTMLInputElement>("#knowledge-vault-enabled");
   toggle?.addEventListener("change", () => { void setEnabled(toggle.checked); });
   document.querySelector<HTMLButtonElement>("#knowledge-vault-init")?.addEventListener("click", () => { void initializeSamples(); });
-  document.querySelector<HTMLButtonElement>("#knowledge-vault-rebuild")?.addEventListener("click", () => { void rebuildIndex(); });
   document.querySelector<HTMLButtonElement>("#knowledge-vault-retry")?.addEventListener("click", () => {
     state.error = "";
     void loadSettings(context).then(() => context.render());
@@ -217,4 +195,4 @@ export function __resetKnowledgeVaultSettingsForTest(): void {
   pendingLoad = null;
 }
 
-export const __knowledgeVaultSettingsActionsForTest = {setEnabled, initializeSamples, rebuildIndex};
+export const __knowledgeVaultSettingsActionsForTest = {setEnabled, initializeSamples};

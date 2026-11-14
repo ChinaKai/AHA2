@@ -1667,7 +1667,6 @@ export interface KnowledgeVaultLibraries {
   vault_name?: string;
   obsidian_vault?: string;
   obsidian_ready: boolean;
-  remote_host?: string;
   vault_path?: string;
   libraries: KnowledgeVaultLibrary[];
   projects: KnowledgeVaultLibrary[];
@@ -1691,7 +1690,6 @@ export interface KnowledgeVaultSettings {
   entry_count: number;
   rebuilt_at?: string;
   warning?: string;
-  remote_host?: string;
 }
 
 export interface KnowledgeVaultSettingsResponse {
@@ -1723,6 +1721,32 @@ export interface KnowledgeVaultInitResponse extends KnowledgeVaultSettingsRespon
 
 export interface KnowledgeVaultRebuildResponse extends KnowledgeVaultSettingsResponse {
   rebuild: KnowledgeVaultRebuildReport;
+}
+
+export interface KnowledgeVaultGitStatus {
+  available: boolean;
+  initialized: boolean;
+  branch: string;
+  current_branch?: string;
+  remote?: string;
+  remote_set: boolean;
+  clean: boolean;
+  changed: number;
+  tracking: boolean;
+  ahead: number;
+  behind: number;
+  has_commits: boolean;
+  last_commit?: string;
+  last_commit_message?: string;
+  last_commit_at?: string;
+  last_sync_at?: string;
+}
+
+export interface KnowledgeVaultGitResponse {
+  ok: boolean;
+  git: KnowledgeVaultGitStatus;
+  message?: string;
+  created?: boolean;
 }
 
 export interface KnowledgeVaultTreeNode {
@@ -1791,7 +1815,6 @@ export interface KnowledgeVaultDoc {
   obsidian_vault?: string;
   obsidian_ready: boolean;
   obsidian_file?: string;
-  remote_host?: string;
   vault_path?: string;
 }
 

@@ -1,9 +1,11 @@
 import {api} from "./api.js";
-import {t, formatLocaleDateTime} from "./i18n.js";
+import {t, currentLocale, formatLocaleDateTime} from "./i18n.js";
 import {icon} from "./icons.js";
 import {renderMarkdown} from "./markdown.js";
 import type {
   KnowledgeVaultDoc,
+  KnowledgeVaultGitResponse,
+  KnowledgeVaultGitStatus,
   KnowledgeVaultInbox,
   KnowledgeVaultLibrary,
   KnowledgeVaultLibraries,
@@ -12,6 +14,7 @@ import type {
   KnowledgeVaultRecentItem,
   KnowledgeVaultSearch,
   KnowledgeVaultSearchResult,
+  KnowledgeVaultSettings,
   KnowledgeVaultSkill,
   KnowledgeVaultSkills,
   KnowledgeVaultTreeNode,
@@ -22,6 +25,87 @@ type VaultTab = "knowledge" | "recent" | "inbox" | "skills";
 type MobilePane = "list" | "doc";
 type LoadState = "idle" | "loading" | "ready" | "error";
 type SearchScope = "all" | "project" | "directory";
+type GitBusy = "" | "init" | "remote" | "commit" | "pull" | "push" | "sync";
+
+// Settings and Git labels live in this lazy route chunk rather than the
+// first-screen i18n catalog: they are only needed once the knowledge page has
+// loaded, and keeping them here preserves the first-screen size budget.
+const localText: Record<string, [zhCN: string, enUS: string]> = {
+  "kv.settingsIndexAction": ["索引操作", "Index action"],
+  "kv.settingsRebuild": ["重建索引", "Rebuild index"],
+  "kv.settingsRebuilding": ["重建中…", "Rebuilding…"],
+  "kv.settingsRebuildDone": ["已重建 {count} 条 · {time}", "Rebuilt {count} entries · {time}"],
+  "kv.settingsRebuildFailed": ["重建索引失败", "Index rebuild failed"],
+  "kv.gitTitle": ["Git 同步", "Git sync"],
+  "kv.gitRepo": ["仓库", "Repository"],
+  "kv.gitUninitialized": ["未初始化", "Not initialized"],
+  "kv.gitInitialized": ["已初始化", "Initialized"],
+  "kv.gitBranch": ["分支", "Branch"],
+  "kv.gitRemote": ["远程", "Remote"],
+  "kv.gitRemoteUnset": ["未设置", "Not set"],
+  "kv.gitWorktree": ["工作区", "Worktree"],
+  "kv.gitClean": ["干净", "Clean"],
+  "kv.gitDirty": ["有 {count} 个未提交修改", "{count} uncommitted changes"],
+  "kv.gitSyncState": ["同步状态", "Sync state"],
+  "kv.gitInSync": ["已同步", "In sync"],
+  "kv.gitAhead": ["领先 {count}", "{count} ahead"],
+  "kv.gitBehind": ["落后 {count}", "{count} behind"],
+  "kv.gitNoTracking": ["尚未建立远程跟踪", "No remote tracking branch yet"],
+  "kv.gitLastCommit": ["最近提交", "Last commit"],
+  "kv.gitLastSync": ["最近同步", "Last sync"],
+  "kv.gitNone": ["无", "None"],
+  "kv.gitRemoteInput": ["SSH remote", "SSH remote"],
+  "kv.gitRemotePlaceholder": ["git@host:path 或 ssh://user@host/path", "git@host:path or ssh://user@host/path"],
+  "kv.gitBranchInput": ["分支", "Branch"],
+  "kv.gitSaveRemote": ["保存设置", "Save settings"],
+  "kv.gitInit": ["初始化仓库", "Initialize repository"],
+  "kv.gitCommit": ["提交", "Commit"],
+  "kv.gitCommitMessage": ["提交说明（可选）", "Commit message (optional)"],
+  "kv.gitCommitPlaceholder": ["留空使用默认说明", "Leave blank for the default message"],
+  "kv.gitPull": ["拉取", "Pull"],
+  "kv.gitPush": ["推送", "Push"],
+  "kv.gitSync": ["同步", "Sync"],
+  "kv.gitInitializing": ["初始化中…", "Initializing…"],
+  "kv.gitSaving": ["保存中…", "Saving…"],
+  "kv.gitCommitting": ["提交中…", "Committing…"],
+  "kv.gitPulling": ["拉取中…", "Pulling…"],
+  "kv.gitPushing": ["推送中…", "Pushing…"],
+  "kv.gitSyncing": ["同步中…", "Syncing…"],
+  "kv.gitUnavailable": ["当前环境没有可用的 git 命令，Git 管理已禁用。", "Git is not available in this environment; Git management is disabled."],
+  "kv.gitLoadFailed": ["读取 Git 状态失败", "Failed to read Git status"],
+  "kv.gitHint": ["仅支持 SSH remote，使用系统 SSH agent 或默认密钥；Web 不保存密码或 token。所有同步均为手动操作，拉取只做 fast-forward，分叉时停止而不会合并或强推。", "SSH remotes only, using your system SSH agent or default key; the Web UI never stores passwords or tokens. Every sync is manual, pulls are fast-forward only, and divergence stops instead of merging or force pushing."],
+};
+
+function kt(key: string, values: Record<string, string | number> = {}): string {
+  const [zh, en] = localText[key] ?? ["", ""];
+  const template = (currentLocale() === "en-US" ? en : zh) || t(key);
+  return template.replace(/\{(\w+)\}/g, (_, name: string) => String(values[name] ?? `{${name}}`));
+}
+
+// Git is only rendered by this lazy route, so its layout CSS rides in the same
+// chunk instead of growing the first-screen stylesheet.
+const GIT_STYLES = `
+.kv-settings-notice { margin: var(--space-2) 0 0; font-size: var(--font-size-12); line-height: 1.5; overflow-wrap: anywhere; }
+.kv-settings-notice.error { color: var(--color-danger); }
+.kv-settings-section { margin-top: var(--space-4); padding-top: var(--space-3); border-top: 1px solid var(--color-border); min-width: 0; }
+.kv-settings-section h3 { margin: 0; font-size: var(--font-size-14); }
+.kv-git-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(120px, 0.55fr) auto; gap: var(--space-2); align-items: end; min-width: 0; }
+.kv-git-form label, .kv-git-commit-row label { display: grid; gap: 4px; min-width: 0; font-size: var(--font-size-12); color: var(--color-text-muted); }
+.kv-git-commit-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-2); align-items: end; margin-top: var(--space-2); min-width: 0; }
+.kv-git-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: var(--space-2); }
+@media (max-width: 760px) {
+  .kv-git-form, .kv-git-commit-row { grid-template-columns: minmax(0, 1fr); }
+  .kv-git-form button, .kv-git-commit-row button { justify-self: start; }
+}
+`;
+
+function installGitStyles(): void {
+  if (document.getElementById("kv-git-styles")) return;
+  const style = document.createElement("style");
+  style.id = "kv-git-styles";
+  style.textContent = GIT_STYLES;
+  document.head.append(style);
+}
 
 export interface KnowledgeVaultContext {
   render: () => void;
@@ -40,7 +124,6 @@ interface VaultState {
   vaultPath: string;
   obsidianVault: string;
   obsidianReady: boolean;
-  remoteHost: string;
   rebuiltAt: string;
   warning: string;
   tab: VaultTab;
@@ -79,6 +162,20 @@ interface VaultState {
   searchResults: KnowledgeVaultSearchResult[];
   feedback: "" | "helped" | "stale";
   contextOpen: boolean;
+  settingsOpen: boolean;
+  settingsState: LoadState;
+  settings: KnowledgeVaultSettings | null;
+  settingsError: string;
+  rebuildBusy: boolean;
+  rebuildNotice: {kind: "notice" | "error"; message: string} | null;
+  gitState: LoadState;
+  git: KnowledgeVaultGitStatus | null;
+  gitError: string;
+  gitBusy: GitBusy;
+  gitNotice: {kind: "notice" | "error"; message: string} | null;
+  gitRemoteDraft: string;
+  gitBranchDraft: string;
+  gitCommitDraft: string;
   mobilePane: MobilePane;
   listScroll: number;
   docScroll: number;
@@ -90,7 +187,7 @@ function initialState(): VaultState {
     initialized: false, loading: "idle", error: "",
     libraries: [], projects: [], vaultReady: false, indexReady: false,
     vaultName: "", vaultPath: "", obsidianVault: "", obsidianReady: false,
-    remoteHost: "", rebuiltAt: "", warning: "",
+    rebuiltAt: "", warning: "",
     tab: "knowledge", libraryID: "global",
     typeFilter: "", statusFilter: "", tagFilter: "",
     tree: [], treeState: "idle", treeError: "", treeKey: "", expanded: new Set(),
@@ -103,6 +200,10 @@ function initialState(): VaultState {
     searchType: "", searchStatus: "", searchTag: "",
     searchState: "idle", searchError: "", searchResults: [],
     feedback: "", contextOpen: false,
+    settingsOpen: false, settingsState: "idle", settings: null, settingsError: "",
+    rebuildBusy: false, rebuildNotice: null,
+    gitState: "idle", git: null, gitError: "", gitBusy: "", gitNotice: null,
+    gitRemoteDraft: "", gitBranchDraft: "", gitCommitDraft: "",
     mobilePane: "list", listScroll: 0, docScroll: 0, pendingSearch: 0,
   };
 }
@@ -713,18 +814,274 @@ function skillsBodyHTML(): string {
 
 function settingsDialogHTML(): string {
   const ready = (value: boolean) => value ? t("kv.settingsReady") : t("kv.settingsNotReady");
-  return `<dialog id="kv-settings-dialog" class="kv-settings">
+  const settings = state.settings;
+  // The gear panel offers the only rebuild action. It stays disabled until the
+  // settings endpoint confirms the vault exists and the runtime switch is on,
+  // matching the old advanced-settings rule.
+  const canRebuild = Boolean(settings?.enabled && settings?.vault_initialized) && !state.rebuildBusy;
+  // The settings endpoint is authoritative for these three fields. Library and
+  // document payloads also carry them, but may lag behind a rebuild; prefer the
+  // freshly loaded settings so the dialog and the rebuild notice agree.
+  const vaultPath = settings?.vault_path || state.vaultPath;
+  const indexReady = settings ? Boolean(settings.index_ready) : state.indexReady;
+  const rebuiltAt = settings?.rebuilt_at || state.rebuiltAt;
+  const rebuildLabel = state.rebuildBusy ? kt("kv.settingsRebuilding") : kt("kv.settingsRebuild");
+  const notice = state.rebuildNotice
+    ? `<p class="kv-settings-notice ${state.rebuildNotice.kind === "error" ? "error" : "success"}" role="${state.rebuildNotice.kind === "error" ? "alert" : "status"}">${escapeVaultHTML(state.rebuildNotice.message)}</p>`
+    : "";
+  const settingsError = state.settingsError
+    ? `<p class="kv-settings-notice error" role="alert">${escapeVaultHTML(state.settingsError)}</p><button type="button" class="secondary" data-kv-settings-retry>${t("kv.retry")}</button>`
+    : "";
+  return `<dialog id="kv-settings-dialog" class="kv-settings"${state.rebuildBusy ? ' aria-busy="true"' : ""}>
     <header><h2>${t("kv.settings")}</h2><button type="button" class="icon-button" data-kv-settings-close aria-label="${t("kv.close")}">${icon("close")}</button></header>
     <dl>
-      <div><dt>${t("kv.settingsVault")}</dt><dd>${escapeVaultHTML(state.vaultPath || t("kv.none"))}</dd></div>
-      <div><dt>${t("kv.settingsIndex")}</dt><dd>${escapeVaultHTML(state.indexReady ? t("kv.settingsReady") : t("kv.settingsNotReady"))}</dd></div>
-      <div><dt>${t("kv.settingsRebuilt")}</dt><dd>${escapeVaultHTML(state.rebuiltAt ? safeDateTime(state.rebuiltAt) : t("kv.none"))}</dd></div>
-      <div><dt>${t("kv.settingsObsidian")}</dt><dd>${escapeVaultHTML(state.obsidianVault || t("kv.none"))} · ${escapeVaultHTML(ready(state.obsidianReady))}</dd></div>
-      <div><dt>${t("kv.settingsRemote")}</dt><dd>${escapeVaultHTML(state.remoteHost || t("kv.none"))}</dd></div>
+      <div><dt>${t("kv.settingsVault")}</dt><dd class="kv-settings-value">${escapeVaultHTML(vaultPath || t("kv.none"))}</dd></div>
+      <div><dt>${t("kv.settingsIndex")}</dt><dd class="kv-settings-value">${escapeVaultHTML(indexReady ? t("kv.settingsReady") : t("kv.settingsNotReady"))}</dd></div>
+      <div><dt>${t("kv.settingsRebuilt")}</dt><dd class="kv-settings-value">${escapeVaultHTML(rebuiltAt ? safeDateTime(rebuiltAt) : t("kv.none"))}</dd></div>
+      <div class="kv-settings-action-row"><dt>${kt("kv.settingsIndexAction")}</dt><dd class="kv-settings-value"><button type="button" id="kv-settings-rebuild" class="secondary" ${canRebuild ? "" : "disabled"}>${rebuildLabel}</button>${notice}</dd></div>
+      <div><dt>${t("kv.settingsObsidian")}</dt><dd class="kv-settings-value">${escapeVaultHTML(state.obsidianVault || t("kv.none"))} · ${escapeVaultHTML(ready(state.obsidianReady))}</dd></div>
     </dl>
+    ${settingsError}
+    ${gitSectionHTML()}
     <p class="kv-hint">${t("kv.settingsHint")}</p>
     <footer><button type="button" data-kv-settings-close>${t("kv.close")}</button></footer>
   </dialog>`;
+}
+
+/* Settings dialog ------------------------------------------------------- */
+
+function applyVaultSettings(settings: KnowledgeVaultSettings): void {
+  state.settings = settings;
+  state.settingsState = "ready";
+  state.settingsError = "";
+  state.vaultPath = settings.vault_path || state.vaultPath;
+  state.indexReady = Boolean(settings.index_ready);
+  state.vaultReady = Boolean(settings.vault_ready);
+  state.rebuiltAt = settings.rebuilt_at || "";
+}
+
+async function loadVaultSettings(): Promise<void> {
+  if (state.settingsState === "loading") return;
+  state.settingsState = "loading";
+  state.settingsError = "";
+  rerender();
+  try {
+    const result = await api.knowledgeVaultSettings();
+    applyVaultSettings(result.settings);
+  } catch (error) {
+    state.settingsState = "error";
+    state.settingsError = error instanceof Error ? error.message : String(error);
+  }
+  rerender();
+}
+
+function reopenSettingsDialog(): void {
+  if (!state.settingsOpen) return;
+  const dialog = document.querySelector<HTMLDialogElement>("#kv-settings-dialog");
+  if (dialog && !dialog.open) dialog.showModal();
+}
+
+function openSettingsDialog(): void {
+  state.settingsOpen = true;
+  state.rebuildNotice = null;
+  rerender();
+  if (state.settingsState === "idle" || state.settingsState === "error") void loadVaultSettings();
+  void loadVaultGitStatus();
+  requestAnimationFrame(reopenSettingsDialog);
+}
+
+function closeSettingsDialog(): void {
+  state.settingsOpen = false;
+  document.querySelector<HTMLDialogElement>("#kv-settings-dialog")?.close();
+}
+
+// The files changed on disk; every projection the page cached is one index
+// generation old. Reload them in place so the selected document, its deep link
+// and the open settings dialog all survive.
+async function refreshAfterIndexRebuild(): Promise<void> {
+  await Promise.all([
+    loadTree(true, true),
+    state.selectedID ? loadDoc(state.selectedID, true) : Promise.resolve(),
+    loadRecent(true),
+    loadInbox(true),
+  ]);
+}
+
+async function rebuildSettingsIndex(): Promise<void> {
+  if (state.rebuildBusy || !state.settings?.enabled || !state.settings.vault_initialized) return;
+  state.rebuildBusy = true;
+  state.rebuildNotice = null;
+  rerender();
+  try {
+    const result = await api.rebuildKnowledgeVaultIndex();
+    applyVaultSettings(result.settings);
+    const rebuiltAt = safeDateTime(result.rebuild.rebuilt_at || result.settings.rebuilt_at);
+    state.rebuildNotice = {kind: "notice", message: kt("kv.settingsRebuildDone", {count: result.rebuild.entries, time: rebuiltAt})};
+    await refreshAfterIndexRebuild();
+  } catch (error) {
+    state.rebuildNotice = {kind: "error", message: `${kt("kv.settingsRebuildFailed")}：${error instanceof Error ? error.message : String(error)}`};
+    // The failed rebuild may have changed which index generation is readable.
+    try {
+      const current = await api.knowledgeVaultSettings();
+      applyVaultSettings(current.settings);
+    } catch {
+      // Keep the previous status; the error itself is the actionable message.
+    }
+  } finally {
+    state.rebuildBusy = false;
+    rerender();
+    reopenSettingsDialog();
+  }
+}
+
+/* Git settings ---------------------------------------------------------- */
+
+const GIT_BUSY_LABEL: Record<Exclude<GitBusy, "">, string> = {
+  init: "kv.gitInitializing", remote: "kv.gitSaving", commit: "kv.gitCommitting",
+  pull: "kv.gitPulling", push: "kv.gitPushing", sync: "kv.gitSyncing",
+};
+
+function gitActionLabel(kind: Exclude<GitBusy, "">, key: string): string {
+  return kt(state.gitBusy === kind ? GIT_BUSY_LABEL[kind] : key);
+}
+
+function gitNoticeHTML(): string {
+  if (!state.gitNotice) return "";
+  const role = state.gitNotice.kind === "error" ? "alert" : "status";
+  return `<p class="kv-settings-notice ${state.gitNotice.kind === "error" ? "error" : "success"}" role="${role}">${escapeVaultHTML(state.gitNotice.message)}</p>`;
+}
+
+function gitSectionHTML(): string {
+  const git = state.git;
+  let body = "";
+  if (state.gitState === "error" && !git) {
+    body = `<p class="kv-settings-notice error" role="alert">${kt("kv.gitLoadFailed")}：${escapeVaultHTML(state.gitError)}</p>
+      <button type="button" class="secondary" data-kv-git-retry>${t("kv.retry")}</button>`;
+  } else if (!git) {
+    body = `<p class="kv-hint" role="status">${t("kv.loading")}</p>`;
+  } else if (!git.available) {
+    body = `<p class="kv-settings-notice error" role="alert">${kt("kv.gitUnavailable")}</p>`;
+  } else {
+    const busy = Boolean(state.gitBusy);
+    const disabled = busy ? " disabled" : "";
+    const repo = git.initialized ? kt("kv.gitInitialized") : kt("kv.gitUninitialized");
+    const worktree = git.clean ? kt("kv.gitClean") : kt("kv.gitDirty", {count: git.changed});
+    let syncState = kt("kv.gitNoTracking");
+    if (git.tracking) {
+      const parts: string[] = [];
+      if (git.ahead > 0) parts.push(kt("kv.gitAhead", {count: git.ahead}));
+      if (git.behind > 0) parts.push(kt("kv.gitBehind", {count: git.behind}));
+      syncState = parts.length > 0 ? parts.join(" · ") : kt("kv.gitInSync");
+    }
+    const lastCommit = git.last_commit
+      ? `${git.last_commit}${git.last_commit_message ? ` · ${git.last_commit_message}` : ""}${git.last_commit_at ? ` · ${safeDateTime(git.last_commit_at)}` : ""}`
+      : kt("kv.gitNone");
+    const lastSync = git.last_sync_at ? safeDateTime(git.last_sync_at) : kt("kv.gitNone");
+    const remoteForm = git.initialized ? `<div class="kv-git-form">
+      <label><span>${kt("kv.gitRemoteInput")}</span><input id="kv-git-remote-input" type="text" data-allow-rerender="true" placeholder="${kt("kv.gitRemotePlaceholder")}" value="${escapeVaultHTML(state.gitRemoteDraft)}" autocomplete="off" spellcheck="false"${disabled}></label>
+      <label><span>${kt("kv.gitBranchInput")}</span><input id="kv-git-branch-input" type="text" data-allow-rerender="true" value="${escapeVaultHTML(state.gitBranchDraft || git.branch)}" autocomplete="off" spellcheck="false"${disabled}></label>
+      <button type="button" id="kv-git-remote-save" class="secondary"${disabled}>${gitActionLabel("remote", "kv.gitSaveRemote")}</button>
+    </div>` : "";
+    const actions = git.initialized ? `
+      <div class="kv-git-commit-row">
+        <label><span>${kt("kv.gitCommitMessage")}</span><input id="kv-git-commit-message" type="text" data-allow-rerender="true" maxlength="200" placeholder="${kt("kv.gitCommitPlaceholder")}" value="${escapeVaultHTML(state.gitCommitDraft)}" autocomplete="off"${disabled}></label>
+        <button type="button" id="kv-git-commit" class="secondary"${git.clean ? " disabled" : disabled}>${gitActionLabel("commit", "kv.gitCommit")}</button>
+      </div>
+      <div class="kv-git-actions">
+        <button type="button" id="kv-git-pull"${(!git.remote_set || !git.clean) ? " disabled" : disabled}>${gitActionLabel("pull", "kv.gitPull")}</button>
+        <button type="button" id="kv-git-push"${(!git.remote_set || !git.has_commits || (git.tracking && git.ahead === 0)) ? " disabled" : disabled}>${gitActionLabel("push", "kv.gitPush")}</button>
+        <button type="button" id="kv-git-sync" class="primary"${(!git.remote_set || !git.clean) ? " disabled" : disabled}>${gitActionLabel("sync", "kv.gitSync")}</button>
+      </div>` : `<div class="kv-git-actions"><button type="button" id="kv-git-init" class="primary"${disabled}>${gitActionLabel("init", "kv.gitInit")}</button></div>`;
+    body = `<dl>
+      <div><dt>${kt("kv.gitRepo")}</dt><dd class="kv-settings-value">${repo}</dd></div>
+      <div><dt>${kt("kv.gitBranch")}</dt><dd class="kv-settings-value">${escapeVaultHTML(git.branch)}</dd></div>
+      <div><dt>${kt("kv.gitRemote")}</dt><dd class="kv-settings-value">${escapeVaultHTML(git.remote_set ? git.remote || "" : kt("kv.gitRemoteUnset"))}</dd></div>
+      <div><dt>${kt("kv.gitWorktree")}</dt><dd class="kv-settings-value">${escapeVaultHTML(worktree)}</dd></div>
+      <div><dt>${kt("kv.gitSyncState")}</dt><dd class="kv-settings-value">${escapeVaultHTML(syncState)}</dd></div>
+      <div><dt>${kt("kv.gitLastCommit")}</dt><dd class="kv-settings-value">${escapeVaultHTML(lastCommit)}</dd></div>
+      <div><dt>${kt("kv.gitLastSync")}</dt><dd class="kv-settings-value">${escapeVaultHTML(lastSync)}</dd></div>
+    </dl>
+    ${remoteForm}
+    ${actions}
+    ${gitNoticeHTML()}
+    <p class="kv-hint">${kt("kv.gitHint")}</p>`;
+  }
+  return `<section class="kv-settings-section kv-git" aria-labelledby="kv-git-title">
+    <h3 id="kv-git-title">${kt("kv.gitTitle")}</h3>
+    ${body}
+  </section>`;
+}
+
+function applyGitStatus(git: KnowledgeVaultGitStatus): void {
+  state.git = git;
+  state.gitState = "ready";
+  state.gitError = "";
+}
+
+function knowledgeVaultGitRequest(action: "status" | "init" | "remote" | "commit" | "pull" | "push" | "sync", payload?: {remote?: string; branch?: string; message?: string}): Promise<KnowledgeVaultGitResponse> {
+  return api.request(`/api/v1/knowledge-vault/git/${action}`, action === "status" ? {} : {method: action === "remote" ? "PUT" : "POST", body: payload ? JSON.stringify(payload) : undefined});
+}
+
+async function loadVaultGitStatus(): Promise<void> {
+  if (state.gitState === "loading") return;
+  state.gitState = "loading";
+  state.gitError = "";
+  rerender();
+  try {
+    const result = await knowledgeVaultGitRequest("status");
+    applyGitStatus(result.git);
+  } catch (error) {
+    state.gitState = "error";
+    state.gitError = error instanceof Error ? error.message : String(error);
+  }
+  rerender();
+}
+
+async function runGitOperation(kind: Exclude<GitBusy, "">, action: () => Promise<{git: KnowledgeVaultGitStatus; message?: string}>): Promise<void> {
+  if (state.gitBusy) return;
+  state.gitBusy = kind;
+  state.gitNotice = null;
+  rerender();
+  try {
+    const result = await action();
+    applyGitStatus(result.git);
+    state.gitRemoteDraft = "";
+    state.gitBranchDraft = "";
+    state.gitCommitDraft = "";
+    state.gitNotice = {kind: "notice", message: result.message || kt("kv.gitInSync")};
+  } catch (error) {
+    state.gitNotice = {kind: "error", message: error instanceof Error ? error.message : String(error)};
+  } finally {
+    state.gitBusy = "";
+    rerender();
+  }
+}
+
+async function initializeVaultGit(): Promise<void> {
+  await runGitOperation("init", () => knowledgeVaultGitRequest("init"));
+}
+
+async function saveVaultGitRemote(): Promise<void> {
+  const remote = document.querySelector<HTMLInputElement>("#kv-git-remote-input")?.value.trim() || "";
+  const branch = document.querySelector<HTMLInputElement>("#kv-git-branch-input")?.value.trim() || "";
+  await runGitOperation("remote", () => knowledgeVaultGitRequest("remote", {remote, branch}));
+}
+
+async function commitVaultGit(): Promise<void> {
+  const message = document.querySelector<HTMLInputElement>("#kv-git-commit-message")?.value.trim() || "";
+  await runGitOperation("commit", () => knowledgeVaultGitRequest("commit", {message}));
+}
+
+async function pullVaultGit(): Promise<void> {
+  await runGitOperation("pull", () => knowledgeVaultGitRequest("pull"));
+}
+
+async function pushVaultGit(): Promise<void> {
+  await runGitOperation("push", () => knowledgeVaultGitRequest("push"));
+}
+
+async function syncVaultGit(): Promise<void> {
+  await runGitOperation("sync", () => knowledgeVaultGitRequest("sync"));
 }
 
 /* Tree expansion -------------------------------------------------------- */
@@ -771,7 +1128,6 @@ function applyLibraries(payload: KnowledgeVaultLibraries): void {
   state.vaultPath = payload.vault_path || "";
   state.obsidianVault = payload.obsidian_vault || "";
   state.obsidianReady = Boolean(payload.obsidian_ready);
-  state.remoteHost = payload.remote_host || "";
   state.rebuiltAt = payload.rebuilt_at || "";
   state.warning = payload.warning || "";
   if (!state.libraries.some(item => item.id === state.libraryID)) {
@@ -807,7 +1163,7 @@ function loadOnce(key: string, action: () => Promise<void>): void {
   }).finally(() => pendingLoads.delete(key));
 }
 
-async function loadTree(force = false): Promise<void> {
+async function loadTree(force = false, preserveExpansion = false): Promise<void> {
   const key = VAULT_TREE_LIBRARY;
   if (!force && state.treeKey === key && state.treeState !== "error") return;
   const ticket = ++treeRequest;
@@ -815,8 +1171,9 @@ async function loadTree(force = false): Promise<void> {
   state.treeState = "loading";
   state.treeError = "";
   // A freshly loaded tree starts collapsed; only the selected document's
-  // ancestor path is reopened after the nodes arrive.
-  state.expanded = new Set();
+  // ancestor path is reopened after the nodes arrive. A rebuild refresh keeps
+  // the folders the user already opened.
+  if (!preserveExpansion) state.expanded = new Set();
   rerender();
   try {
     const payload: KnowledgeVaultTree = await api.knowledgeVaultTree(key);
@@ -1177,11 +1534,16 @@ function focusSelector(element: Element | null): string {
 }
 
 function renderPreservingFocus(renderPage: () => void): void {
+  const dialogWasOpen = state.settingsOpen && Boolean(document.querySelector<HTMLDialogElement>("#kv-settings-dialog")?.open);
   const active = document.activeElement;
   const selector = focusSelector(active);
   const start = active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement ? active.selectionStart : null;
   const end = active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement ? active.selectionEnd : null;
   renderPage();
+  // The whole page markup, including the <dialog>, is replaced on every render.
+  // Reopen it before restoring focus so in-place status updates do not close
+  // the panel under the Owner.
+  if (dialogWasOpen) reopenSettingsDialog();
   if (!selector) return;
   const next = document.querySelector<HTMLElement>(selector);
   if (!next) return;
@@ -1192,6 +1554,7 @@ function renderPreservingFocus(renderPage: () => void): void {
 }
 
 export function bindKnowledgeVaultPage(context: KnowledgeVaultContext): void {
+  installGitStyles();
   activeContext = {render: () => renderPreservingFocus(context.render), setMessage: context.setMessage};
   bindKeyboard();
   bindHash();
@@ -1221,12 +1584,27 @@ export function bindKnowledgeVaultPage(context: KnowledgeVaultContext): void {
 
   root.querySelector<HTMLElement>("[data-kv-search-open]")?.addEventListener("click", openSearch);
   root.querySelector<HTMLElement>("[data-kv-search-close]")?.addEventListener("click", closeSearch);
-  root.querySelector<HTMLElement>("[data-kv-settings]")?.addEventListener("click", () => {
-    const dialog = document.querySelector<HTMLDialogElement>("#kv-settings-dialog");
-    dialog?.showModal();
-  });
+  root.querySelector<HTMLElement>("[data-kv-settings]")?.addEventListener("click", openSettingsDialog);
   root.querySelectorAll<HTMLElement>("[data-kv-settings-close]").forEach(button => {
-    button.addEventListener("click", () => document.querySelector<HTMLDialogElement>("#kv-settings-dialog")?.close());
+    button.addEventListener("click", closeSettingsDialog);
+  });
+  root.querySelector<HTMLButtonElement>("#kv-settings-rebuild")?.addEventListener("click", () => { void rebuildSettingsIndex(); });
+  root.querySelector<HTMLButtonElement>("[data-kv-settings-retry]")?.addEventListener("click", () => { void loadVaultSettings(); });
+  root.querySelector<HTMLButtonElement>("[data-kv-git-retry]")?.addEventListener("click", () => { void loadVaultGitStatus(); });
+  root.querySelector<HTMLButtonElement>("#kv-git-init")?.addEventListener("click", () => { void initializeVaultGit(); });
+  root.querySelector<HTMLButtonElement>("#kv-git-remote-save")?.addEventListener("click", () => { void saveVaultGitRemote(); });
+  root.querySelector<HTMLButtonElement>("#kv-git-commit")?.addEventListener("click", () => { void commitVaultGit(); });
+  root.querySelector<HTMLButtonElement>("#kv-git-pull")?.addEventListener("click", () => { void pullVaultGit(); });
+  root.querySelector<HTMLButtonElement>("#kv-git-push")?.addEventListener("click", () => { void pushVaultGit(); });
+  root.querySelector<HTMLButtonElement>("#kv-git-sync")?.addEventListener("click", () => { void syncVaultGit(); });
+  root.querySelector<HTMLInputElement>("#kv-git-remote-input")?.addEventListener("input", event => {
+    state.gitRemoteDraft = (event.target as HTMLInputElement).value;
+  });
+  root.querySelector<HTMLInputElement>("#kv-git-branch-input")?.addEventListener("input", event => {
+    state.gitBranchDraft = (event.target as HTMLInputElement).value;
+  });
+  root.querySelector<HTMLInputElement>("#kv-git-commit-message")?.addEventListener("input", event => {
+    state.gitCommitDraft = (event.target as HTMLInputElement).value;
   });
 
   const searchInput = root.querySelector<HTMLInputElement>("#kv-search");
@@ -1316,6 +1694,7 @@ export function bindKnowledgeVaultPage(context: KnowledgeVaultContext): void {
   });
 
   if (state.searchOpen) requestAnimationFrame(() => root.querySelector<HTMLInputElement>("#kv-search")?.focus());
+  if (state.settingsOpen) requestAnimationFrame(reopenSettingsDialog);
   decorateDocBody();
 }
 

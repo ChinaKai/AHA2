@@ -36,7 +36,7 @@ const DOC = {
   outline: [{level: 1, text: "构建", slug: "build"}, {level: 2, text: "步骤", slug: "steps"}],
   backlinks: [{id: "doc-2", title: "发布检查", path: "projects/p1/guides/release.md"}],
   obsidian_ready: true, obsidian_file: "projects/p1/guides/build",
-  obsidian_vault: "AHA2 Knowledge", remote_host: "devbox",
+  obsidian_vault: "AHA2 Knowledge",
 };
 const INBOX_DOC = {...DOC, id: "inbox-1", title: "新想法", path: "projects/p1/inbox/idea.md", relative_path: "projects/p1/inbox/idea.md", absolute_path: "/srv/vault/项目 知识/projects/p1/inbox/idea.md", type: "practice", status: "unverified", tags: []};
 // The outline deliberately omits `额外标题` (an older-index simulation), so
@@ -98,9 +98,20 @@ const GLOBAL_INBOX = {id: "g-inbox", title: "全局想法", path: "global/inbox/
 const SEARCH = [
   {id: "doc-1", title: "构建指南", path: "projects/p1/guides/build.md", type: "practice", scope: "project", project_id: "p1", status: "verified", tags: ["build"], snippet: "运行 make build 构建项目", updated: now},
 ];
-const LIBS = {ok: true, enabled: true, vault_ready: true, index_ready: true, vault_name: "AHA2 Knowledge", obsidian_vault: "AHA2 Knowledge", obsidian_ready: true, remote_host: "devbox", vault_path: "/srv/vault", rebuilt_at: now,
+const LIBS = {ok: true, enabled: true, vault_ready: true, index_ready: true, vault_name: "AHA2 Knowledge", obsidian_vault: "AHA2 Knowledge", obsidian_ready: true, vault_path: "/srv/vault", rebuilt_at: now,
   libraries: [{id: "global", kind: "global", name: "全局知识", count: 1}, {id: "project:p1", kind: "project", name: "Demo", project_id: "p1", count: 28}],
   projects: [{id: "project:p1", kind: "project", name: "Demo", project_id: "p1", count: 28}], archives: [], orphans: 0};
+const LONG_VAULT_PATH = "/srv/build/users/owner/knowledge-vault/项目知识库/一个很长的目录名称/用来验证桌面设置中的路径能够自然换行";
+const SETTINGS = {ok: true, settings: {
+  enabled: true, source: "database", vault_ready: true, vault_initialized: true, index_ready: true,
+  vault_name: "AHA2 Knowledge", vault_path: LONG_VAULT_PATH, index_path: "/srv/build/users/owner/aha2/knowledge-vault-index.db",
+  entry_count: 5, rebuilt_at: now,
+}};
+const GIT_STATUS = {
+  available: true, initialized: false, branch: "main", current_branch: "main",
+  remote: "", remote_set: false, clean: true, changed: 0, tracking: false,
+  ahead: 0, behind: 0, has_commits: false,
+};
 
 function bootstrap(off) {
   return `
@@ -123,6 +134,12 @@ window.__vaultTreeRequests = [];
 window.__vaultRecentRequests = [];
 window.__vaultInboxRequests = [];
 window.__vaultDelays = {};
+window.__vaultSettings = ${JSON.stringify(SETTINGS)};
+window.__vaultGit = ${JSON.stringify(GIT_STATUS)};
+window.__vaultRebuildCount = 0;
+window.__vaultRebuildFail = false;
+window.__vaultGitRemotePayload = null;
+window.__vaultGitFailPush = false;
 const delay = async (kind, key) => {
   const milliseconds = Number(window.__vaultDelays?.[kind]?.[key] || 0);
   if (milliseconds > 0) await new Promise(resolve => setTimeout(resolve, milliseconds));
@@ -179,6 +196,67 @@ window.fetch = async (input, init = {}) => {
   if (path === "/api/v1/knowledge/libraries") return json({libraries: []});
   if (path === "/api/v1/knowledge/indexes") return json({indexes: []});
   if (path === "/api/v1/knowledge/proposals") return json({proposals: [], total: 0, page: 1, pages: 0, has_more: false});
+  if (path === "/api/v1/settings/knowledge-vault") {
+    if (String(init.method || "GET").toUpperCase() === "PUT") {
+      const body = JSON.parse(init.body || "{}");
+      window.__vaultSettings.settings.enabled = Boolean(body.enabled);
+    }
+    return json(window.__vaultSettings);
+  }
+  if (path === "/api/v1/settings/knowledge-vault/init") {
+    return json({ok: true, settings: window.__vaultSettings.settings, created: [], skipped: [], samples: 0, rebuild: {entries: 5, rebuilt_at: "${now}"}});
+  }
+  if (path === "/api/v1/settings/knowledge-vault/rebuild") {
+    window.__vaultRebuildCount += 1;
+    if (window.__vaultRebuildFail) return json({ok: false, error: "rebuild_failed", message: "磁盘只读"}, 500);
+    window.__vaultSettings.settings.entry_count = 7;
+    window.__vaultSettings.settings.rebuilt_at = "2026-11-14T13:38:42Z";
+    return json({ok: true, settings: window.__vaultSettings.settings, rebuild: {entries: 7, rebuilt_at: "2026-11-14T13:38:42Z"}});
+  }
+  if (path === "/api/v1/knowledge-vault/git/status") return json({ok: true, git: window.__vaultGit});
+  if (path === "/api/v1/knowledge-vault/git/init") {
+    Object.assign(window.__vaultGit, {
+      initialized: true, has_commits: true, clean: true, changed: 0,
+      last_commit: "1a2b3c4", last_commit_message: "Initialize AHA2 knowledge vault", last_commit_at: "${now}",
+    });
+    return json({ok: true, git: window.__vaultGit, message: "Git 仓库已初始化并完成首次提交", created: true});
+  }
+  if (path === "/api/v1/knowledge-vault/git/remote") {
+    const body = JSON.parse(init.body || "{}");
+    window.__vaultGitRemotePayload = body;
+    if (String(body.remote || "").includes(";")) {
+      return json({ok: false, error: "invalid_git_remote", message: "SSH remote 格式无效：请使用 git@host:path 或 ssh://user@host/path"}, 400);
+    }
+    if (body.remote) {
+      window.__vaultGit.remote = "git@example.com:…";
+      window.__vaultGit.remote_set = true;
+    }
+    if (body.branch) window.__vaultGit.branch = body.branch;
+    return json({ok: true, git: window.__vaultGit, message: "SSH remote 与分支已保存"});
+  }
+  if (path === "/api/v1/knowledge-vault/git/commit") {
+    const body = JSON.parse(init.body || "{}");
+    Object.assign(window.__vaultGit, {
+      clean: true, changed: 0, has_commits: true, ahead: (window.__vaultGit.ahead || 0) + 1,
+      last_commit: "5e6f7a8", last_commit_message: body.message || "Update knowledge vault from AHA2 Web", last_commit_at: "${now}",
+    });
+    return json({ok: true, git: window.__vaultGit, message: "已提交 5e6f7a8"});
+  }
+  if (path === "/api/v1/knowledge-vault/git/pull") {
+    if (!window.__vaultGit.clean) return json({ok: false, error: "git_worktree_dirty", message: "git worktree has uncommitted changes"}, 409);
+    window.__vaultGit.behind = 0;
+    return json({ok: true, git: window.__vaultGit, message: "已拉取远程更新"});
+  }
+  if (path === "/api/v1/knowledge-vault/git/push") {
+    if (window.__vaultGitFailPush) return json({ok: false, error: "git_push_rejected", message: "git push 失败：remote rejected"}, 409);
+    Object.assign(window.__vaultGit, {ahead: 0, tracking: true});
+    return json({ok: true, git: window.__vaultGit, message: "已推送到远程"});
+  }
+  if (path === "/api/v1/knowledge-vault/git/sync") {
+    if (!window.__vaultGit.clean) return json({ok: false, error: "git_worktree_dirty", message: "git worktree has uncommitted changes"}, 409);
+    Object.assign(window.__vaultGit, {ahead: 0, behind: 0, tracking: true, last_sync_at: "2026-11-14T14:00:00Z"});
+    return json({ok: true, git: window.__vaultGit, message: "已同步"});
+  }
   if (path.startsWith("/api/v1/")) return json({});
   return json({});
 };
@@ -646,6 +724,125 @@ try {
   assert.match(await page.evaluate(() => location.hash), /^#knowledge\?doc=doc-1/);
   assert.equal((await page.locator(".kv-doc-head h1").textContent()).trim(), "构建指南");
 
+  // Settings integration: the gear dialog owns index rebuild and Git. The old
+  // advanced-settings rebuild button and the remote-host row are both gone.
+  await page.locator(".kv-settings-trigger").click();
+  await page.waitForSelector("#kv-settings-dialog", {state: "visible"});
+  await page.waitForSelector("#kv-settings-rebuild:not([disabled])");
+  await page.waitForSelector("#kv-git-init");
+  assert.equal(await page.locator("#knowledge-vault-rebuild").count(), 0, "advanced settings duplicate rebuild is out of this page");
+  assert.doesNotMatch(await page.locator("#kv-settings-dialog").innerText(), /远程主机|Remote host/);
+  assert.equal(await page.locator("#kv-settings-dialog").getByText("远程主机").count(), 0);
+  assert.equal(await page.locator("#kv-settings-dialog [href*='vscode-remote']").count(), 0);
+
+  // Rebuild keeps the dialog, selection and deep link alive while refreshing
+  // every cached projection in place.
+  await page.waitForFunction(() => document.querySelector("#kv-settings-dialog")?.innerText.includes("一个很长的目录名称"));
+  const rebuildBefore = await page.evaluate(() => ({
+    hash: location.hash,
+    tree: window.__vaultTreeRequests.length,
+    doc: window.__vaultRequests.filter(item => item.startsWith("/api/v1/knowledge-vault/doc/doc-1")).length,
+    recent: window.__vaultRecentRequests.length,
+    inbox: window.__vaultInboxRequests.length,
+    rebuilds: window.__vaultRebuildCount,
+  }));
+  await page.evaluate(() => { window.__deepLinkMarker = "still-here"; });
+  await page.locator("#kv-settings-rebuild").click();
+  await page.waitForSelector("#kv-settings-dialog .kv-settings-notice.success", {timeout: 5000});
+  assert.match(await page.locator("#kv-settings-dialog .kv-settings-notice.success").innerText(), /已重建 7 条/);
+  await page.waitForFunction(count => window.__vaultTreeRequests.length > count, rebuildBefore.tree);
+  await page.waitForFunction(count => window.__vaultRequests.filter(item => item.startsWith("/api/v1/knowledge-vault/doc/doc-1")).length > count, rebuildBefore.doc);
+  await page.waitForFunction(count => window.__vaultRecentRequests.length > count, rebuildBefore.recent);
+  await page.waitForFunction(count => window.__vaultInboxRequests.length > count, rebuildBefore.inbox);
+  assert.equal(await page.locator("#kv-settings-dialog").evaluate(dialog => dialog.open), true, "rebuild keeps the dialog open");
+  assert.equal(await page.evaluate(() => location.hash), rebuildBefore.hash, "rebuild preserves the deep link");
+  assert.equal(await page.evaluate(() => window.__deepLinkMarker), "still-here", "rebuild does not reload the page");
+  assert.equal((await page.locator(".kv-doc-head h1").textContent()).trim(), "构建指南", "rebuild keeps the selected document");
+  assert.equal(await page.evaluate(() => window.__vaultRebuildCount), rebuildBefore.rebuilds + 1);
+
+  await page.evaluate(() => { window.__vaultRebuildFail = true; });
+  await page.locator("#kv-settings-rebuild").click();
+  await page.waitForSelector("#kv-settings-dialog .kv-settings-notice.error[role='alert']", {timeout: 5000});
+  assert.match(await page.locator("#kv-settings-dialog .kv-settings-notice.error[role='alert']").innerText(), /重建索引失败/);
+  await page.waitForSelector("#kv-settings-rebuild:not([disabled])", {timeout: 5000});
+  assert.equal(await page.locator("#kv-settings-dialog").evaluate(dialog => dialog.open), true, "failed rebuild keeps the dialog open");
+  await page.evaluate(() => { window.__vaultRebuildFail = false; });
+
+  // Git starts uninitialized, then init/remote/commit/push/sync all run from
+  // the same panel; the full SSH URL never reaches the DOM.
+  const gitSection = page.locator(".kv-settings-section.kv-git");
+  assert.match(await gitSection.innerText(), /未初始化/);
+  await page.locator("#kv-git-init").click();
+  await page.waitForSelector("#kv-git-remote-input", {timeout: 5000});
+  assert.match(await gitSection.innerText(), /已初始化/);
+  await page.fill("#kv-git-remote-input", "git@example.com:org/repo.git");
+  await page.fill("#kv-git-branch-input", "main");
+  await page.locator("#kv-git-remote-save").click();
+  await page.waitForFunction(() => document.querySelector(".kv-git .kv-settings-notice.success")?.textContent.includes("SSH remote 与分支已保存"));
+  assert.deepEqual(await page.evaluate(() => window.__vaultGitRemotePayload), {remote: "git@example.com:org/repo.git", branch: "main"});
+  assert.match(await gitSection.innerText(), /git@example\.com:…/);
+  assert.doesNotMatch(await gitSection.innerText(), /org\/repo\.git/);
+
+  // Invalid remote is rejected inline, keeps the typed value for correction,
+  // and leaves the previously saved masked remote untouched.
+  await page.fill("#kv-git-remote-input", "git@example.com:repo;touch /tmp/pwned");
+  await page.locator("#kv-git-remote-save").click();
+  await page.waitForSelector(".kv-git .kv-settings-notice.error[role='alert']", {timeout: 5000});
+  assert.match(await page.locator(".kv-git .kv-settings-notice.error[role='alert']").innerText(), /SSH remote 格式无效/);
+  assert.equal(await page.inputValue("#kv-git-remote-input"), "git@example.com:repo;touch /tmp/pwned");
+  assert.match(await gitSection.innerText(), /git@example\.com:…/);
+
+  // Dirty worktree enables commit but disables pull/sync. Reopening the gear
+  // refreshes the Git status from the API.
+  await page.evaluate(() => { window.__vaultGit.clean = false; window.__vaultGit.changed = 2; });
+  await page.locator("#kv-settings-dialog [data-kv-settings-close]").first().click();
+  await page.locator(".kv-settings-trigger").click();
+  await page.waitForSelector("#kv-git-commit:not([disabled])", {timeout: 5000});
+  assert.match(await page.locator(".kv-settings-section.kv-git").innerText(), /有 2 个未提交修改/);
+  assert.match(await page.locator("#kv-git-pull").getAttribute("disabled"), /.*/, "pull is disabled while dirty");
+  assert.match(await page.locator("#kv-git-sync").getAttribute("disabled"), /.*/, "sync is disabled while dirty");
+  await page.fill("#kv-git-commit-message", "浏览器提交");
+  await page.locator("#kv-git-commit").click();
+  await page.waitForFunction(() => document.querySelector(".kv-git .kv-settings-notice.success")?.textContent.includes("已提交"));
+  assert.match(await page.locator(".kv-settings-section.kv-git").innerText(), /干净/);
+  await page.waitForSelector("#kv-git-push:not([disabled])", {timeout: 5000});
+  await page.locator("#kv-git-push").click();
+  await page.waitForFunction(() => document.querySelector(".kv-git .kv-settings-notice.success")?.textContent.includes("已推送到远程"));
+  await page.waitForSelector("#kv-git-sync:not([disabled])", {timeout: 5000});
+  await page.locator("#kv-git-sync").click();
+  await page.waitForFunction(() => document.querySelector(".kv-git .kv-settings-notice.success")?.textContent.includes("已同步"));
+  assert.match(await page.locator(".kv-settings-section.kv-git").innerText(), /已同步/);
+
+  // Desktop alignment: every dt/dd row starts on the same top edge and every
+  // value column shares one left edge, including the long vault path and the
+  // Git rows.
+  const settingsLayout = await page.evaluate(() => {
+    const dialog = document.querySelector("#kv-settings-dialog");
+    const rows = [...dialog.querySelectorAll("dl > div")].map(row => {
+      const dtElement = row.querySelector("dt");
+      const dt = dtElement.getBoundingClientRect();
+      const dd = row.querySelector("dd").getBoundingClientRect();
+      return {label: dtElement.textContent.trim(), dtTop: dt.top, ddTop: dd.top, ddLeft: dd.left};
+    });
+    return {
+      rows,
+      dialogOverflow: dialog.scrollWidth - dialog.clientWidth,
+      pageOverflow: document.documentElement.scrollWidth - window.innerWidth,
+      remoteHostRows: [...dialog.querySelectorAll("dt")].filter(node => node.textContent.includes("远程主机")).length,
+    };
+  });
+  assert.ok(settingsLayout.rows.length >= 10, "main and Git rows are both measured");
+  for (const row of settingsLayout.rows) {
+    assert.ok(Math.abs(row.dtTop - row.ddTop) <= 2, `${row.label}: dt/dd top edges differ by ${Math.abs(row.dtTop - row.ddTop)}px`);
+  }
+  const valueLefts = [...new Set(settingsLayout.rows.map(row => Math.round(row.ddLeft)))];
+  assert.equal(valueLefts.length, 1, `value columns share one left edge: ${JSON.stringify(valueLefts)}`);
+  assert.ok(settingsLayout.dialogOverflow <= 1, "long paths wrap without horizontal overflow");
+  assert.ok(settingsLayout.pageOverflow <= 1, "settings dialog does not overflow the page");
+  assert.equal(settingsLayout.remoteHostRows, 0);
+  await page.screenshot({path: resolve(screenshots, "knowledge-vault-settings-git.png"), fullPage: false});
+  await page.locator("#kv-settings-dialog [data-kv-settings-close]").first().click();
+
   // Mobile: one column, list -> doc -> back keeps scroll, copy path only.
   await page.setViewportSize({width: 390, height: 780});
   await page.goto(url, {waitUntil: "networkidle"});
@@ -675,9 +872,30 @@ try {
   await page.locator('.kv-tabs [data-kv-tab-button="knowledge"]').click();
   await page.waitForSelector(".kv-tree-link");
 
-  // The gear opens the settings dialog without a menu detour.
+  // The gear opens the settings dialog without a menu detour. On a phone the
+  // Git form stacks into one column and nothing overflows horizontally.
   await page.locator(".kv-settings-trigger").click();
+  await page.waitForSelector("#kv-settings-dialog", {state: "visible"});
   assert.equal(await page.locator("#kv-settings-dialog").evaluate(dialog => dialog.open), true);
+  await page.waitForSelector("#kv-git-init", {timeout: 5000});
+  await page.locator("#kv-git-init").click();
+  await page.waitForSelector("#kv-git-remote-input", {timeout: 5000});
+  const mobileSettingsLayout = await page.evaluate(() => {
+    const dialog = document.querySelector("#kv-settings-dialog");
+    const remote = document.querySelector("#kv-git-remote-input").getBoundingClientRect();
+    const branch = document.querySelector("#kv-git-branch-input").getBoundingClientRect();
+    return {
+      dialogOverflow: dialog.scrollWidth - dialog.clientWidth,
+      pageOverflow: document.documentElement.scrollWidth - window.innerWidth,
+      stacked: branch.top >= remote.bottom - 1,
+      remoteHost: dialog.innerText.includes("远程主机"),
+    };
+  });
+  assert.equal(mobileSettingsLayout.stacked, true, "mobile Git inputs stack vertically");
+  assert.ok(mobileSettingsLayout.dialogOverflow <= 1, "390px settings dialog has no horizontal overflow");
+  assert.ok(mobileSettingsLayout.pageOverflow <= 1, "390px settings dialog does not overflow the page");
+  assert.equal(mobileSettingsLayout.remoteHost, false);
+  await page.screenshot({path: resolve(screenshots, "knowledge-vault-mobile-settings.png"), fullPage: false});
   await page.locator("#kv-settings-dialog [data-kv-settings-close]").first().click();
   assert.equal(await page.locator("#kv-settings-dialog").evaluate(dialog => dialog.open), false);
 

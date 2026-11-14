@@ -77,7 +77,10 @@ test("settings panel shows vault, index and source for an enabled vault", async 
     assert.match(html, /\/srv\/vault/);
     // An initialized vault must not offer the destructive-ish init action.
     assert.doesNotMatch(html, /knowledge-vault-init/);
-    assert.match(html, /id="knowledge-vault-rebuild"(?![^>]*disabled)/);
+    // Rebuilding moved to the knowledge page's gear panel; the advanced panel
+    // keeps only the switch, sample init, status and path.
+    assert.doesNotMatch(html, /knowledge-vault-rebuild/);
+    assert.match(html, /知识库页的齿轮设置中重建索引/);
     assert.equal(ctx.applied.length, 1);
     assert.equal(ctx.applied[0].enabled, true);
   } finally {
@@ -95,7 +98,7 @@ test("an empty vault offers sample initialization before enabling the index acti
     assert.match(html, /已关闭 · 来源：启动参数/);
     assert.match(html, /未初始化/);
     assert.match(html, /id="knowledge-vault-init"/);
-    assert.match(html, /id="knowledge-vault-rebuild" disabled/);
+    assert.doesNotMatch(html, /knowledge-vault-rebuild/);
     assert.match(html, /索引尚未建立/);
   } finally {
     restore();
