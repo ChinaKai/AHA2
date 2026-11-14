@@ -3232,42 +3232,43 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-3);
+  gap: var(--space-2) var(--space-3);
   padding: var(--space-2) 0;
   border-bottom: 1px solid var(--color-border-subtle);
 }
-.kv-heading { display: flex; flex-direction: column; min-width: 150px; }
+/* Heading and tabs share one flex line so the controls can wrap as a whole
+   without ever splitting the tab strip into a second row. */
+.kv-topbar-main { display: flex; align-items: center; gap: var(--space-3); flex: 1 1 auto; min-width: 0; }
+.kv-heading { display: flex; flex-direction: column; flex: 0 0 auto; min-width: 0; }
 .kv-heading strong { font-size: var(--font-size-20); }
 .kv-heading small { color: var(--color-text-muted); font-size: var(--font-size-12); }
-.kv-tabs { display: flex; flex-wrap: wrap; gap: 2px; margin-right: auto; }
+.kv-tabs {
+  display: flex; flex-wrap: nowrap; gap: 2px;
+  flex: 1 1 auto; min-width: 0;
+  /* Room for the focus ring inside the horizontal scroll container. */
+  padding-block: 4px; margin-block: -4px;
+  overflow-x: auto; overflow-y: hidden; scrollbar-width: thin;
+}
 .kv-tab {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 7px 11px; border: 1px solid transparent; border-radius: var(--radius-control);
   background: transparent; color: var(--color-text-muted); font: inherit; font-size: var(--font-size-13);
-  cursor: pointer; min-width: 0;
+  cursor: pointer; min-width: 0; flex: 0 0 auto;
 }
 .kv-tab:hover { background: var(--color-surface-muted); color: var(--color-text); }
 .kv-tab[aria-current="page"] { background: var(--color-accent-soft); border-color: var(--color-border); color: var(--color-accent-ink); font-weight: 600; }
 .kv-tab .icon { width: 15px; height: 15px; }
 .kv-count { display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; background: var(--color-amber-soft); color: var(--color-amber-ink); font-size: var(--font-size-11); }
-.kv-controls { display: flex; align-items: end; gap: var(--space-2); flex-wrap: wrap; }
+.kv-controls { display: flex; align-items: center; gap: var(--space-2); flex: 0 0 auto; margin-left: auto; }
 .kv-select { display: flex; flex-direction: column; gap: 2px; font-size: var(--font-size-11); color: var(--color-text-muted); }
 .kv-select select { max-width: 190px; }
-.kv-search-trigger, .kv-more-trigger {
+.kv-search-trigger {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 6px 10px; border: 1px solid var(--color-border); border-radius: var(--radius-control);
   background: var(--color-surface); color: var(--color-text); font: inherit; font-size: var(--font-size-13); cursor: pointer;
 }
-.kv-search-trigger:hover, .kv-more-trigger:hover { background: var(--color-surface-muted); }
-.kv-more-trigger { display: none; }
-.kv-more-menu {
-  position: absolute; right: var(--space-4); top: 96px; z-index: 30;
-  display: flex; flex-direction: column; min-width: 180px; padding: 6px;
-  background: var(--color-surface-raised); border: 1px solid var(--color-border); border-radius: var(--radius-card); box-shadow: var(--shadow-pop, 0 12px 32px rgba(43,33,27,.16));
-}
-.kv-more-menu[hidden] { display: none; }
-.kv-more-menu button { display: flex; align-items: center; gap: 8px; padding: 9px 10px; border: 0; border-radius: 6px; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
-.kv-more-menu button:hover { background: var(--color-surface-muted); }
+.kv-search-trigger:hover { background: var(--color-surface-muted); }
+.kv-settings-trigger { flex: 0 0 auto; }
 
 .kv-content { min-width: 0; }
 .kv-workspace {
@@ -3422,6 +3423,11 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
 .knowledge-vault :focus-visible { outline: 2px solid var(--color-accent, #7c3b2b); outline-offset: 2px; }
 
 @media (max-width: 1180px) {
+  /* Below the wide layout the controls keep their own line instead of
+     squeezing the tab strip. The tabs scroll horizontally as one row. */
+  .kv-controls { flex: 1 1 100%; justify-content: flex-end; margin-left: 0; }
+  .kv-select { flex: 0 1 190px; min-width: 0; }
+  .kv-select select { width: 100%; max-width: 190px; }
   .kv-workspace { grid-template-columns: var(--kv-tree-width) minmax(0, 1fr); }
   .kv-context-panel {
     display: none;
@@ -3439,17 +3445,13 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
   .kv-heading strong { font-size: var(--font-size-16); }
   .kv-heading small { display: none; }
   .kv-topbar { gap: 8px; padding-bottom: var(--space-2); }
-  .kv-tabs { order: 3; width: 100%; margin-right: 0; overflow-x: auto; flex-wrap: nowrap; scrollbar-width: thin; }
-  .kv-tab { flex: 0 0 auto; }
-  .kv-tab-skills { display: none; }
-  .kv-controls { flex: 1 1 100%; align-items: center; }
+  .kv-topbar-main { flex: 1 1 100%; flex-direction: column; align-items: stretch; gap: 8px; }
+  .kv-tabs { width: 100%; }
+  .kv-controls { order: 2; flex: 1 1 100%; align-items: center; justify-content: flex-start; margin-left: 0; }
   .kv-select { flex: 1 1 0; min-width: 0; }
   .kv-select select { max-width: none; width: 100%; }
+  .kv-search-trigger { flex: 0 0 auto; }
   .kv-search-trigger span { display: none; }
-  .kv-more-trigger { display: inline-flex; }
-  .kv-more-trigger span { display: none; }
-  .kv-settings-trigger { display: none; }
-  .kv-more-menu { top: 118px; right: 12px; }
   .kv-workspace { grid-template-columns: minmax(0, 1fr); gap: 0; }
   .kv-tree-panel { position: static; max-height: none; border: 0; border-radius: 0; padding: 0; }
   .kv-doc-panel { padding-bottom: calc(72px + env(safe-area-inset-bottom)); }

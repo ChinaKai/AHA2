@@ -5,6 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {pathToFileURL} from "node:url";
 import {resolve} from "node:path";
+import {readFile} from "node:fs/promises";
 
 const root = resolve(import.meta.dirname, "..");
 const vault = await import(pathToFileURL(resolve(root, "build", "knowledge_vault.js")).href);
@@ -157,6 +158,26 @@ test("the page exposes exactly the four read-only entries and no edit or review 
   assert.doesNotMatch(html, /role="tree"/);
   assert.match(html, /data-kv-toggle="folder"[^>]*aria-expanded="true"/);
   assert.equal((html.match(/class="kv-tab kv-tab-/g) || []).length, 4);
+  // Heading and tabs form one group; controls are a separate group. The old
+  // mobile "more" menu must not be rendered at all: skills and settings are
+  // directly visible at every width.
+  assert.match(html, /<div class="kv-topbar-main">[\s\S]*class="kv-heading"[\s\S]*class="kv-tabs"/);
+  assert.match(html, /<div class="kv-controls">[\s\S]*data-kv-settings/);
+  assert.equal((html.match(/data-kv-tab-button="/g) || []).length, 4, "no duplicate tab buttons in a more menu");
+  assert.doesNotMatch(html, /data-kv-more|kv-more-trigger|kv-more-menu/);
+});
+
+test("topbar CSS keeps the tab strip on one row and shows skills/settings on phones", async () => {
+  const css = await readFile(resolve(root, "src", "styles.css"), "utf8");
+  assert.match(css, /\.kv-topbar-main \{[^}]*flex: 1 1 auto/);
+  assert.match(css, /\.kv-tabs \{[^}]*flex-wrap: nowrap/);
+  assert.match(css, /\.kv-tabs \{[^}]*overflow-x: auto/);
+  assert.match(css, /\.kv-controls \{[^}]*align-items: center/);
+  // The old mobile "more" affordance is gone; skills and settings are never
+  // hidden at the phone breakpoint.
+  assert.doesNotMatch(css, /\.kv-more-(?:trigger|menu)\b/);
+  assert.doesNotMatch(css, /\.kv-tab-skills \{ display: none/);
+  assert.doesNotMatch(css, /\.kv-settings-trigger \{ display: none/);
 });
 
 test("document rendering offers local VSCode, remote VSCode, Obsidian and copy path", () => {

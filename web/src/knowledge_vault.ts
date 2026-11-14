@@ -80,7 +80,6 @@ interface VaultState {
   searchResults: KnowledgeVaultSearchResult[];
   feedback: "" | "helped" | "stale";
   contextOpen: boolean;
-  moreOpen: boolean;
   mobilePane: MobilePane;
   listScroll: number;
   docScroll: number;
@@ -104,7 +103,7 @@ function initialState(): VaultState {
     searchOpen: false, searchQuery: "", searchLibrary: "", searchProject: "",
     searchType: "", searchStatus: "", searchTag: "",
     searchState: "idle", searchError: "", searchResults: [],
-    feedback: "", contextOpen: false, moreOpen: false,
+    feedback: "", contextOpen: false,
     mobilePane: "list", listScroll: 0, docScroll: 0, pendingSearch: 0,
   };
 }
@@ -309,7 +308,6 @@ export function renderKnowledgeVaultPage(_context: KnowledgeVaultContext): strin
   }
   return `<div class="knowledge-vault${state.contextOpen ? " context-open" : ""}" data-kv-tab="${state.tab}">
     ${topbarHTML()}
-    ${moreMenuHTML()}
     ${searchPanelHTML()}
     <div class="kv-content" data-kv-mobile-pane="${state.mobilePane}">
       ${state.tab === "knowledge" ? knowledgeBodyHTML() : state.tab === "recent" ? recentBodyHTML() : state.tab === "inbox" ? inboxBodyHTML() : skillsBodyHTML()}
@@ -329,25 +327,19 @@ function topbarHTML(): string {
   const projectOptions = [`<option value="">${t("kv.allProjects")}</option>`, ...state.projects.map(item => `<option value="${escapeVaultHTML(item.project_id || "")}"${state.projectFilter === (item.project_id || "") ? " selected" : ""}>${escapeVaultHTML(item.name)}</option>`)].join("");
   const libraryOptions = state.libraries.map(item => `<option value="${escapeVaultHTML(item.id)}"${state.libraryID === item.id ? " selected" : ""}>${escapeVaultHTML(item.name)} (${item.count})</option>`).join("");
   return `<header class="kv-topbar">
-    <div class="kv-heading"><strong>${t("kv.title")}</strong><small>${t("kv.subtitle")}</small></div>
-    <nav class="kv-tabs" aria-label="${t("kv.sections")}">
-      ${tabs.map(([tab, glyph, key]) => `<button type="button" aria-current="${state.tab === tab ? "page" : "false"}" class="kv-tab kv-tab-${tab}" data-kv-tab-button="${tab}">${icon(glyph)}<span>${t(key)}</span>${tab === "inbox" && inboxCount > 0 ? `<span class="kv-count">${inboxCount}</span>` : ""}</button>`).join("")}
-    </nav>
+    <div class="kv-topbar-main">
+      <div class="kv-heading"><strong>${t("kv.title")}</strong><small>${t("kv.subtitle")}</small></div>
+      <nav class="kv-tabs" aria-label="${t("kv.sections")}">
+        ${tabs.map(([tab, glyph, key]) => `<button type="button" aria-current="${state.tab === tab ? "page" : "false"}" class="kv-tab kv-tab-${tab}" data-kv-tab-button="${tab}">${icon(glyph)}<span>${t(key)}</span>${tab === "inbox" && inboxCount > 0 ? `<span class="kv-count">${inboxCount}</span>` : ""}</button>`).join("")}
+      </nav>
+    </div>
     <div class="kv-controls">
       <label class="kv-select"><span>${t("kv.library")}</span><select id="kv-library" aria-label="${t("kv.library")}">${libraryOptions || `<option value="global">${t("kv.title")}</option>`}</select></label>
       <label class="kv-select"><span>${t("kv.project")}</span><select id="kv-project" aria-label="${t("kv.project")}">${projectOptions}</select></label>
       <button type="button" class="kv-search-trigger" data-kv-search-open aria-label="${t("kv.searchShortcut")}" title="${t("kv.searchShortcut")}">${icon("search")}<span>${t("kv.search")}</span></button>
-      <button type="button" class="kv-more-trigger" data-kv-more aria-expanded="${state.moreOpen}" aria-label="${t("kv.more")}">${icon("menu")}<span>${t("kv.more")}</span></button>
       <button type="button" class="kv-settings-trigger icon-button" data-kv-settings aria-label="${t("kv.settings")}" title="${t("kv.settings")}">${icon("settings")}</button>
     </div>
   </header>`;
-}
-
-function moreMenuHTML(): string {
-  return `<div class="kv-more-menu" ${state.moreOpen ? "" : "hidden"}>
-    <button type="button" data-kv-tab-button="skills">${icon("bot")}<span>${t("kv.tab.skills")}</span></button>
-    <button type="button" data-kv-settings>${icon("settings")}<span>${t("kv.settings")}</span></button>
-  </div>`;
 }
 
 function searchPanelHTML(): string {
@@ -745,7 +737,6 @@ function scheduleSearch(): void {
 
 function openSearch(): void {
   state.searchOpen = true;
-  state.moreOpen = false;
   rerender();
   requestAnimationFrame(() => document.querySelector<HTMLInputElement>("#kv-search")?.focus());
 }
@@ -792,7 +783,6 @@ function backToList(): void {
 
 function setTab(tab: VaultTab): void {
   state.tab = tab;
-  state.moreOpen = false;
   state.mobilePane = "list";
   rerender();
   loadTab(tab);
@@ -876,9 +866,6 @@ function bindKeyboard(): void {
         closeSearch();
       } else if (state.contextOpen) {
         state.contextOpen = false;
-        rerender();
-      } else if (state.moreOpen) {
-        state.moreOpen = false;
         rerender();
       }
     }
@@ -987,14 +974,9 @@ export function bindKnowledgeVaultPage(context: KnowledgeVaultContext): void {
     loadTab(state.tab);
   });
 
-  root.querySelector<HTMLElement>("[data-kv-more]")?.addEventListener("click", () => {
-    state.moreOpen = !state.moreOpen;
-    rerender();
-  });
   root.querySelector<HTMLElement>("[data-kv-search-open]")?.addEventListener("click", openSearch);
   root.querySelector<HTMLElement>("[data-kv-search-close]")?.addEventListener("click", closeSearch);
   root.querySelector<HTMLElement>("[data-kv-settings]")?.addEventListener("click", () => {
-    state.moreOpen = false;
     const dialog = document.querySelector<HTMLDialogElement>("#kv-settings-dialog");
     dialog?.showModal();
   });
