@@ -68,14 +68,17 @@ func (e *GitCommandError) Error() string {
 
 func (e *GitCommandError) Unwrap() error { return ErrGitCommand }
 
-// GitStatus is the read model for the settings Git section. Remote is always
-// masked; the full URL is never returned to the browser.
+// GitStatus is the read model for the settings Git section. Remote stays
+// masked for backwards compatibility. RemoteFull carries the SSH remote (user,
+// host and repository path only, never credentials) so the authenticated
+// settings page can show and copy the repository the owner configured.
 type GitStatus struct {
 	Available     bool   `json:"available"`
 	Initialized   bool   `json:"initialized"`
 	Branch        string `json:"branch"`
 	CurrentBranch string `json:"current_branch,omitempty"`
 	Remote        string `json:"remote,omitempty"`
+	RemoteFull    string `json:"remote_full,omitempty"`
 	RemoteSet     bool   `json:"remote_set"`
 	Clean         bool   `json:"clean"`
 	Changed       int    `json:"changed"`
@@ -222,6 +225,37 @@ func MaskGitRemote(remote string) string {
 		}
 	}
 	return "…"
+}
+
+// FullGitRemote returns the complete SSH remote for the authenticated settings
+// page: user, host and repository path only. Non-SSH remotes (the test-only
+// local override) stay hidden, and any credential material is dropped even
+// though ValidateGitRemote already rejects credential URLs.
+func FullGitRemote(remote string) string {
+	remote = strings.TrimSpace(remote)
+	if remote == "" {
+		return ""
+	}
+	if strings.HasPrefix(strings.ToLower(remote), "ssh://") {
+		parsed, err := url.Parse(remote)
+		if err != nil || parsed.Host == "" || parsed.Path == "" {
+			return ""
+		}
+		clean := &url.URL{Scheme: "ssh", Host: parsed.Host, Path: parsed.Path}
+		if parsed.User != nil {
+			if username := parsed.User.Username(); username != "" {
+				clean.User = url.User(username)
+			}
+		}
+		return clean.String()
+	}
+	// Only show scp-style remotes that pass the same validation used when the
+	// owner saves one, so a manually configured path cannot smuggle query or
+	// credential text into the settings page.
+	if scpRemotePattern.MatchString(remote) && ValidateGitRemote(remote, false) == nil {
+		return remote
+	}
+	return ""
 }
 
 var (
@@ -436,6 +470,7 @@ func (g *Git) Status(ctx context.Context) (GitStatus, error) {
 
 	if remote, err := g.remoteURL(ctx); err == nil {
 		status.Remote = MaskGitRemote(remote)
+		status.RemoteFull = FullGitRemote(remote)
 		status.RemoteSet = true
 	}
 

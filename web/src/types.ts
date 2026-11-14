@@ -1729,6 +1729,8 @@ export interface KnowledgeVaultGitStatus {
   branch: string;
   current_branch?: string;
   remote?: string;
+  /** Full SSH remote (user/host/path only) for the authenticated settings page. */
+  remote_full?: string;
   remote_set: boolean;
   clean: boolean;
   changed: number;

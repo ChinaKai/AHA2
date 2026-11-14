@@ -145,7 +145,7 @@ test("the page exposes exactly the four read-only entries and no edit or review 
   assert.doesNotMatch(html, /系统索引/);
   assert.doesNotMatch(html, /全局知识首页/, "the library root index is not a folder row");
   assert.match(html, /<span class="kv-tree-title">general<\/span>/);
-  assert.match(html, /<span class="kv-tree-title">inbox<\/span>/);
+  assert.doesNotMatch(html, /<span class="kv-tree-title">inbox<\/span>/, "the browse tree never shows an inbox folder");
   assert.match(html, /<nav id="kv-tree-panel" class="kv-tree-panel" aria-label="目录">/, "tree is a nav, not a fake tree role");
   assert.doesNotMatch(html, /role="tree"/);
   assert.match(html, /data-kv-toggle="g-general"[^>]*aria-expanded="false"/);
@@ -174,7 +174,7 @@ test("the tree rebuilds real vault directories and uses path basenames, not inde
       ]),
     ]),
   ], "global");
-  assert.deepEqual(tree.map(node => node.title), ["agent-lessons", "general", "inbox"]);
+  assert.deepEqual(tree.map(node => node.title), ["agent-lessons", "general"]);
   const lessons = tree.find(node => node.title === "agent-lessons");
   assert.equal(lessons.id, "g-lessons");
   assert.equal(lessons.path, "global/agent-lessons");
@@ -184,25 +184,26 @@ test("the tree rebuilds real vault directories and uses path basenames, not inde
   assert.deepEqual(technical.children.map(node => node.title), ["串口登录等待提示"]);
   assert.equal(JSON.stringify(tree).includes("全局知识首页"), false, "the root index title never becomes a folder name");
   assert.equal(JSON.stringify(tree).includes("Agent 经验教训"), false, "index titles never become folder names");
-  assert.equal(tree.find(node => node.title === "inbox").has_index, false);
+  assert.equal(tree.some(node => node.title === "inbox"), false, "no empty inbox folder is injected");
 });
 
-test("project trees show theme directories and the real inbox folder", () => {
+test("project trees show theme directories and hide inbox documents", () => {
   const tree = vault.buildVaultDirectoryTree([
     treeFixture("p-root", "Demo 索引", "projects/demo/index.md", [
       treeFixture("p-group", "导航组", "projects/demo/navigation-group/index.md", [
         {id: "p-module", title: "模块 A", path: "projects/demo/navigation-group/module-a.md", type: "reference", status: "verified", scope: "project", project_id: "p1", is_index: false, system: false, children: []},
       ], {scope: "project", project_id: "p1"}),
-      {id: "p-idea", title: "收件箱一", path: "projects/demo/inbox/idea.md", type: "practice", status: "unverified", scope: "project", project_id: "p1", is_index: false, system: false, children: []},
+      treeFixture("p-inbox", "收件箱", "projects/demo/inbox/index.md", [
+        {id: "p-idea", title: "收件箱一", path: "projects/demo/inbox/idea.md", type: "practice", status: "unverified", scope: "project", project_id: "p1", is_index: false, system: false, children: []},
+      ], {scope: "project", project_id: "p1"}),
     ], {scope: "project", project_id: "p1"}),
   ], "project:p1");
-  assert.deepEqual(tree.map(node => node.title), ["inbox", "navigation-group"]);
-  assert.equal(tree[0].path, "projects/demo/inbox");
-  assert.equal(tree[0].has_index, false);
-  assert.deepEqual(tree[0].children.map(node => node.title), ["收件箱一"]);
-  assert.equal(tree[1].path, "projects/demo/navigation-group");
-  assert.equal(tree[1].id, "p-group");
-  assert.equal(tree[1].has_index, true);
+  assert.deepEqual(tree.map(node => node.title), ["navigation-group"]);
+  assert.equal(tree[0].path, "projects/demo/navigation-group");
+  assert.equal(tree[0].id, "p-group");
+  assert.equal(tree[0].has_index, true);
+  assert.equal(JSON.stringify(tree).includes("inbox"), false);
+  assert.equal(JSON.stringify(tree).includes("收件箱一"), false);
 });
 
 test("directory titles open their index and never repeat index.md as a leaf", () => {
@@ -259,11 +260,6 @@ test("titles open the index and toggle, chevrons only toggle, and selected title
   assert.match(emptyRow, /<button type="button" class="kv-tree-link kv-tree-folder-link kv-tree-folder-title" data-kv-folder-title="g-empty" data-kv-title-open="g-empty"><span class="kv-tree-title">empty<\/span><\/button>/);
   assert.doesNotMatch(emptyRow, /data-kv-toggle="/);
   assert.doesNotMatch(emptyRow, /data-kv-row-toggle/);
-
-  // An empty directory without an index is just a label.
-  const inboxRow = html.match(/<div class="kv-tree-row">(?:(?!<\/div>)[\s\S])*?data-kv-folder-title="vault-dir:global\/inbox"[\s\S]*?<\/div>/)?.[0] || "";
-  assert.match(inboxRow, /<span class="kv-tree-title">inbox<\/span>/);
-  assert.doesNotMatch(inboxRow, /data-kv-doc=|data-kv-title-open=/);
 
   // Document rows share the chevron slot and icon width with folder rows.
   const docRow = html.match(/<li class="kv-tree-node kv-tree-doc" style="--kv-depth:1"><a[\s\S]*?<\/a><\/li>/)?.[0] || "";
@@ -326,8 +322,8 @@ test("the mixed tree roots at the real global and projects directories", () => {
   const demo = projects.children.find(node => node.title === "demo");
   assert.equal(demo.id, "p-root");
   assert.equal(demo.has_index, true);
-  assert.deepEqual(demo.children.map(node => node.title), ["guides", "inbox"]);
-  assert.equal(demo.children.find(node => node.title === "inbox").has_index, false, "an empty project inbox still renders");
+  assert.deepEqual(demo.children.map(node => node.title), ["guides"]);
+  assert.equal(JSON.stringify(tree).includes("inbox"), false, "inbox paths never reach the mixed tree");
 
   reset({tree});
   let html = vault.renderKnowledgeVaultPage(context());
@@ -340,7 +336,64 @@ test("the mixed tree roots at the real global and projects directories", () => {
   html = vault.renderKnowledgeVaultPage(context());
   assert.match(html, /data-kv-toggle="p-root"[^>]*aria-expanded="true"/);
   assert.match(html, /<span class="kv-tree-title">guides<\/span>/);
-  assert.match(html, /<span class="kv-tree-title">inbox<\/span>/);
+  assert.doesNotMatch(html, /<span class="kv-tree-title">inbox<\/span>/);
+});
+
+test("inbox path segments are filtered from global, project and archive trees", () => {
+  const tree = vault.buildVaultDirectoryTree([
+    treeFixture("g-root", "全局知识首页", "global/index.md", [
+      treeFixture("g-general", "通用知识", "global/general/index.md", [
+        {id: "g-doc", title: "通用文档", path: "global/general/doc.md", type: "practice", status: "verified", scope: "global", is_index: false, system: false, children: []},
+      ]),
+      treeFixture("g-inbox", "收件箱", "global/inbox/index.md", [
+        {id: "g-inbox-doc", title: "全局想法", path: "global/inbox/idea.md", type: "practice", status: "unverified", scope: "global", is_index: false, system: false, children: []},
+      ]),
+    ]),
+    treeFixture("p-root", "Demo 索引", "projects/demo/index.md", [
+      treeFixture("p-inbox", "收件箱", "projects/demo/inbox/index.md", [
+        {id: "p-inbox-doc", title: "项目想法", path: "projects/demo/inbox/idea.md", type: "practice", status: "unverified", scope: "project", project_id: "demo", is_index: false, system: false, children: []},
+      ], {scope: "project", project_id: "demo"}),
+      // Only the exact segment is reserved: a directory that merely starts
+      // with "inbox" stays browsable.
+      treeFixture("p-notes", "收件箱笔记", "projects/demo/inbox-notes/index.md", [
+        {id: "p-note", title: "笔记一", path: "projects/demo/inbox-notes/keep.md", type: "practice", status: "verified", scope: "project", project_id: "demo", is_index: false, system: false, children: []},
+      ], {scope: "project", project_id: "demo"}),
+    ], {scope: "project", project_id: "demo"}),
+    treeFixture("a-root", "归档", "archive/aha1-archive/index.md", [
+      treeFixture("a-inbox", "收件箱", "archive/aha1-archive/inbox/index.md", [
+        {id: "a-inbox-doc", title: "归档想法", path: "archive/aha1-archive/inbox/legacy.md", type: "practice", status: "unverified", scope: "archive", is_index: false, system: false, children: []},
+      ], {scope: "archive"}),
+      treeFixture("a-notes", "笔记", "archive/aha1-archive/notes/index.md", [
+        {id: "a-note", title: "归档笔记", path: "archive/aha1-archive/notes/keep.md", type: "practice", status: "verified", scope: "archive", is_index: false, system: false, children: []},
+      ], {scope: "archive"}),
+    ], {scope: "archive"}),
+  ], "all");
+
+  const paths = [];
+  const walk = nodes => nodes.forEach(node => {
+    paths.push(node.path);
+    walk(node.children || []);
+  });
+  walk(tree);
+  assert.equal(paths.some(relative => relative.split("/").some(segment => segment.toLowerCase() === "inbox")), false, "no path segment may be inbox");
+  assert.equal(paths.includes("global/general/doc.md"), true, "ordinary global documents remain");
+  assert.equal(paths.includes("projects/demo/inbox-notes/keep.md"), true, "only the exact inbox segment is filtered");
+  assert.equal(paths.includes("archive/aha1-archive/notes/keep.md"), true, "ordinary archive documents remain");
+  const serialized = JSON.stringify(tree);
+  assert.equal(serialized.includes("全局想法"), false);
+  assert.equal(serialized.includes("项目想法"), false);
+  assert.equal(serialized.includes("归档想法"), false);
+
+  // Inbox pages stay reachable through the "待整理" tab, which renders its own
+  // list independently of the tree.
+  reset({tab: "inbox", inboxState: "ready", inbox: {count: 2, counts: [], items: [
+    {id: "p-inbox-doc", title: "项目想法", path: "projects/demo/inbox/idea.md", type: "practice", status: "unverified", scope: "project", project_id: "demo", library_id: "project:demo", library: "Demo", modified_at: "2026-11-14T10:00:00Z"},
+    {id: "g-inbox-doc", title: "全局想法", path: "global/inbox/idea.md", type: "practice", status: "unverified", scope: "global", library_id: "global", library: "全局知识", modified_at: "2026-11-14T10:00:00Z"},
+  ]}});
+  const inboxHTML = vault.renderKnowledgeVaultPage(context());
+  assert.match(inboxHTML, /2 条待整理/);
+  assert.match(inboxHTML, /projects\/demo\/inbox\/idea\.md/);
+  assert.match(inboxHTML, /global\/inbox\/idea\.md/);
 });
 
 test("the topbar no longer duplicates scope in library and project dropdowns", () => {
@@ -597,6 +650,7 @@ const gitStatus = {
   branch: "main",
   current_branch: "main",
   remote: "git@example.com:…",
+  remote_full: "git@example.com:owner/knowledge-vault.git",
   remote_set: true,
   clean: true,
   changed: 0,
@@ -624,11 +678,12 @@ test("the Git section starts uninitialized and offers only the init action", () 
   assert.doesNotMatch(html, /id="kv-git-remote-input"/);
 });
 
-test("the Git section shows masked remote, status and aligned actions", () => {
+test("the Git section shows the full remote, status and aligned actions", () => {
   reset({gitState: "ready", git: gitStatus});
   const html = vault.renderKnowledgeVaultPage(context());
   assert.match(html, /已初始化/);
-  assert.match(html, /git@example\.com:…/);
+  assert.match(html, /git@example\.com:owner\/knowledge-vault\.git/);
+  assert.doesNotMatch(html, /git@example\.com:…/);
   assert.match(html, /已同步/);
   assert.match(html, /abc1234 · Add notes/);
   assert.match(html, /id="kv-git-remote-save"/);
@@ -673,12 +728,20 @@ test("the Git section surfaces unavailable, load failure and operation errors", 
   assert.match(html, /role="alert">git push 失败：remote rejected/);
 });
 
-test("the Git remote never appears in full and no token input is offered", () => {
+test("the Git remote shows its full SSH address but never credentials", () => {
   reset({gitState: "ready", git: gitStatus});
   const html = vault.renderKnowledgeVaultPage(context());
-  assert.doesNotMatch(html, /example\.com\/secret/);
+  assert.match(html, /data-kv-copy="git@example\.com:owner\/knowledge-vault\.git"/);
+  assert.match(html, /aria-label="复制远程地址"/);
+  assert.match(html, /data-kv-copy="\/srv\/vault"[^>]*aria-label="复制库路径"/);
   assert.doesNotMatch(html, /type="password"/);
+  assert.doesNotMatch(html, /secret|token@/i);
   assert.match(html, /仅支持 SSH remote/);
+
+  // Payloads produced before remote_full existed keep the masked fallback.
+  reset({gitState: "ready", git: {...gitStatus, remote_full: undefined}});
+  const masked = vault.renderKnowledgeVaultPage(context());
+  assert.match(masked, /git@example\.com:…/);
 });
 
 test("generated directory list wikilinks become hash links and keep their labels", () => {

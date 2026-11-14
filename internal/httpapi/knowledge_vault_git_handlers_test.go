@@ -111,6 +111,9 @@ func TestKnowledgeVaultGitAPILocalRemoteLifecycle(t *testing.T) {
 	if response.StatusCode != http.StatusOK || remoteResult["git"].(map[string]any)["remote_set"] != true {
 		t.Fatalf("set remote status=%d payload=%#v", response.StatusCode, remoteResult)
 	}
+	if full, present := remoteResult["git"].(map[string]any)["remote_full"]; present && full != "" {
+		t.Fatalf("test-only local remote must not be exposed in full: %#v", remoteResult)
+	}
 	encoded, _ := json.Marshal(remoteResult)
 	if strings.Contains(string(encoded), remote) {
 		t.Fatalf("full remote leaked in response: %s", encoded)
@@ -226,6 +229,15 @@ func TestKnowledgeVaultGitAPIReportsUnreachableSSHRemoteWithoutLeakingURL(t *tes
 	decodeResponse(t, response, &saved)
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("set remote status=%d payload=%#v", response.StatusCode, saved)
+	}
+	// The authenticated settings page receives the full SSH remote so the owner
+	// can read and copy it, while the masked field keeps existing consumers.
+	savedGit := saved["git"].(map[string]any)
+	if savedGit["remote_full"] != remote {
+		t.Fatalf("status must expose the full SSH remote: %#v", savedGit)
+	}
+	if masked, _ := savedGit["remote"].(string); masked == "" || strings.Contains(masked, "/secret/repo.git") {
+		t.Fatalf("masked remote must hide the repository path: %#v", savedGit)
 	}
 	if err := os.WriteFile(filepath.Join(config.VaultPath, "offline.md"), []byte("# offline\n"), 0o644); err != nil {
 		t.Fatal(err)

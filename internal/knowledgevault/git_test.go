@@ -174,6 +174,10 @@ func TestGitCommitPushPullAndSyncWithLocalBareRemote(t *testing.T) {
 	if !result.Status.RemoteSet || result.Status.Remote == remote || strings.Contains(result.Status.Remote, remote) {
 		t.Fatalf("remote must be masked in status: %+v", result.Status)
 	}
+	// The test-only local remote is not an SSH remote, so it stays hidden.
+	if result.Status.RemoteFull != "" {
+		t.Fatalf("local remote must not be exposed in full: %+v", result.Status)
+	}
 	if result.Status.Branch != "main" {
 		t.Fatalf("unexpected branch: %+v", result.Status)
 	}
@@ -398,6 +402,31 @@ func TestGitUnreachableRemoteAndUninitializedVault(t *testing.T) {
 	}
 	if strings.Contains(status.Remote, "/repo.git") || !strings.Contains(status.Remote, "127.0.0.1") {
 		t.Fatalf("unexpected masked remote: %q", status.Remote)
+	}
+	if status.RemoteFull != "ssh://git@127.0.0.1:1/repo.git" {
+		t.Fatalf("status must expose the full SSH remote, got %q", status.RemoteFull)
+	}
+}
+
+func TestFullGitRemoteKeepsSSHPathAndDropsCredentials(t *testing.T) {
+	cases := map[string]string{
+		"git@github.com:org/repo.git":                      "git@github.com:org/repo.git",
+		"  git@example.com:/srv/repos/repo.git  ":          "git@example.com:/srv/repos/repo.git",
+		"ssh://git@github.com/org/repo.git":                "ssh://git@github.com/org/repo.git",
+		"ssh://git@github.com:2222/org/repo.git":           "ssh://git@github.com:2222/org/repo.git",
+		"ssh://user:secret-token@example.com/org/repo.git": "ssh://user@example.com/org/repo.git",
+		"https://user:token@example.com/org/repo.git":      "",
+		"git@example.com":                                  "",
+		"":                                                 "",
+		"/tmp/test-only/remote.git":                        "",
+	}
+	for remote, want := range cases {
+		if got := FullGitRemote(remote); got != want {
+			t.Errorf("FullGitRemote(%q) = %q, want %q", remote, got, want)
+		}
+	}
+	if strings.Contains(FullGitRemote("ssh://user:secret-token@example.com/org/repo.git"), "secret-token") {
+		t.Fatal("FullGitRemote leaked a credential")
 	}
 }
 

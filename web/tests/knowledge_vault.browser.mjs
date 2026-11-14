@@ -106,6 +106,10 @@ const allTree = [{
   }, {
     id: "g-gen-folder", title: "自动目录", path: "global/zz-generated/index.md", type: "navigation", status: "verified", scope: "global", is_index: true, system: true,
     children: [{id: "g-gen-doc", title: "生成文档", path: "global/zz-generated/doc.md", type: "practice", status: "verified", scope: "global", is_index: false, system: false, children: []}],
+  }, {
+    // The API tree still carries inbox paths; the browser must filter them.
+    id: "g-inbox", title: "收件箱", path: "global/inbox/index.md", type: "navigation", status: "unverified", scope: "global", is_index: true, system: true,
+    children: [{id: "g-inbox-doc", title: "全局想法", path: "global/inbox/idea.md", type: "practice", status: "unverified", scope: "global", is_index: false, system: false, children: []}],
   }],
 }, {
   id: "p-index", title: "Demo 索引", path: "projects/p1/index.md", type: "navigation", status: "verified", scope: "project", project_id: "p1", is_index: true, system: true, children: [{
@@ -116,6 +120,9 @@ const allTree = [{
       path: index === 0 ? "projects/p1/guides/build.md" : `projects/p1/guides/doc-${index + 1}.md`,
       type: "practice", status: "verified", scope: "project", project_id: "p1", is_index: false, system: false, children: [],
     })),
+  }, {
+    id: "p-inbox", title: "收件箱", path: "projects/p1/inbox/index.md", type: "navigation", status: "unverified", scope: "project", project_id: "p1", is_index: true, system: true,
+    children: [{id: "inbox-1", title: "新想法", path: "projects/p1/inbox/idea.md", type: "practice", status: "unverified", scope: "project", project_id: "p1", is_index: false, system: false, children: []}],
   }],
 }];
 const RECENT = [
@@ -140,7 +147,7 @@ const SETTINGS = {ok: true, settings: {
 }};
 const GIT_STATUS = {
   available: true, initialized: false, branch: "main", current_branch: "main",
-  remote: "", remote_set: false, clean: true, changed: 0, tracking: false,
+  remote: "", remote_full: "", remote_set: false, clean: true, changed: 0, tracking: false,
   ahead: 0, behind: 0, has_commits: false,
 };
 
@@ -266,6 +273,7 @@ if (id === "g-other") return json({ok: true, doc: G_OTHER_DOC});
     }
     if (body.remote) {
       window.__vaultGit.remote = "git@example.com:…";
+      window.__vaultGit.remote_full = body.remote;
       window.__vaultGit.remote_set = true;
     }
     if (body.branch) window.__vaultGit.branch = body.branch;
@@ -429,6 +437,15 @@ try {
   assert.doesNotMatch(treeText, /全局知识首页/);
   assert.match(treeText, /global/);
   assert.match(treeText, /projects/);
+  // Inbox paths may still arrive in the API tree, but the browse tree hides
+  // them; they belong to the "待整理" page only.
+  assert.equal(await page.locator('.kv-tree-title', {hasText: "inbox"}).count(), 0, "the tree has no inbox folder");
+  assert.equal(await page.locator('.kv-tree-title', {hasText: "收件箱"}).count(), 0, "the tree hides inbox folder titles");
+  assert.equal(await page.locator('[data-kv-toggle="g-inbox"]').count(), 0);
+  assert.equal(await page.locator('[data-kv-toggle="p-inbox"]').count(), 0);
+  assert.equal(await page.locator('a[data-kv-doc="inbox-1"]').count(), 0);
+  assert.equal(await page.locator('a[data-kv-doc="g-inbox-doc"]').count(), 0);
+  assert.doesNotMatch(treeText, /全局想法|新想法/, "inbox documents never appear in the tree");
   assert.equal(await page.locator('[data-kv-open-index]').count(), 0, "directory pages open from the title, not a separate button");
   assert.equal(await page.locator('[data-kv-title-open="g-index"]').count(), 1, "the global root title opens its index");
   assert.equal(await page.locator('li.kv-tree-folder').filter({has: page.locator('[data-kv-toggle="g-index"]')}).locator('.kv-badge').count(), 0, "directory rows carry no badges");
@@ -440,6 +457,8 @@ try {
   assert.equal(await page.locator('[data-kv-toggle="g-folder"]').count(), 0, "collapsed global children are not rendered");
   assert.equal(await page.locator('[data-kv-toggle="p-index"]').count(), 0, "collapsed project children are not rendered");
   await page.locator('[data-kv-toggle="g-index"]').click();
+  assert.equal(await page.locator('[data-kv-toggle="g-inbox"]').count(), 0, "expanded global still has no inbox folder");
+  assert.equal(await page.locator('a[data-kv-doc="g-inbox-doc"]').count(), 0);
   assert.equal(await page.locator('[data-kv-toggle="g-index"]').getAttribute("aria-expanded"), "true");
   assert.equal(await page.locator('[data-kv-toggle="g-folder"]').getAttribute("aria-expanded"), "false");
   assert.equal(await page.locator('[data-kv-toggle="g-other"]').getAttribute("aria-expanded"), "false");
@@ -696,6 +715,8 @@ try {
   assert.equal(await page.locator('[data-kv-open-index]').count(), 0, "no separate directory-page buttons remain");
   await page.locator('[data-kv-toggle="p-index"]').click();
   await page.waitForSelector('[data-kv-toggle="p-guides"]');
+  assert.equal(await page.locator('[data-kv-toggle="p-inbox"]').count(), 0, "an expanded project still has no inbox folder");
+  assert.equal(await page.locator('a[data-kv-doc="inbox-1"]').count(), 0, "project inbox documents never appear in the tree");
   assert.equal(await page.locator('[data-kv-toggle="p-guides"]').getAttribute("aria-expanded"), "false");
   await page.locator('[data-kv-toggle="p-guides"]').click();
   await page.waitForSelector('a[data-kv-doc="doc-1"]');
@@ -1054,7 +1075,8 @@ try {
   await page.evaluate(() => { window.__vaultRebuildFail = false; });
 
   // Git starts uninitialized, then init/remote/commit/push/sync all run from
-  // the same panel; the full SSH URL never reaches the DOM.
+  // the same panel. The authenticated status now carries the full SSH remote
+  // (user/host/path) so the owner can read and copy it.
   const gitSection = page.locator(".kv-settings-section.kv-git");
   assert.match(await gitSection.innerText(), /未初始化/);
   await page.locator("#kv-git-init").click();
@@ -1065,17 +1087,67 @@ try {
   await page.locator("#kv-git-remote-save").click();
   await page.waitForFunction(() => document.querySelector(".kv-git .kv-settings-notice.success")?.textContent.includes("SSH remote 与分支已保存"));
   assert.deepEqual(await page.evaluate(() => window.__vaultGitRemotePayload), {remote: "git@example.com:org/repo.git", branch: "main"});
-  assert.match(await gitSection.innerText(), /git@example\.com:…/);
-  assert.doesNotMatch(await gitSection.innerText(), /org\/repo\.git/);
+  assert.match(await gitSection.innerText(), /git@example\.com:org\/repo\.git/);
+  assert.doesNotMatch(await gitSection.innerText(), /git@example\.com:…/);
+
+  // Both the library path and the full remote offer copy buttons wired to the
+  // shared data-kv-copy handler, with accessible labels.
+  const vaultCopy = page.locator('#kv-settings-dialog .kv-settings-copy button[aria-label="复制库路径"]');
+  assert.equal(await vaultCopy.count(), 1);
+  assert.equal(await vaultCopy.getAttribute("data-kv-copy"), LONG_VAULT_PATH);
+  assert.equal(await vaultCopy.getAttribute("title"), "复制库路径");
+  await vaultCopy.click();
+  await page.waitForFunction(path => navigator.clipboard.readText().then(text => text === path), LONG_VAULT_PATH);
+  const remoteCopy = page.locator('#kv-settings-dialog .kv-settings-copy button[aria-label="复制远程地址"]');
+  assert.equal(await remoteCopy.count(), 1);
+  assert.equal(await remoteCopy.getAttribute("data-kv-copy"), "git@example.com:org/repo.git");
+  assert.equal(await remoteCopy.getAttribute("title"), "复制远程地址");
+  await remoteCopy.click();
+  await page.waitForFunction(() => navigator.clipboard.readText().then(text => text === "git@example.com:org/repo.git"));
+
+  const gitFormGeometry = () => page.evaluate(() => {
+    const dialog = document.querySelector("#kv-settings-dialog");
+    const box = selector => document.querySelector(selector).getBoundingClientRect();
+    return {
+      remote: box("#kv-git-remote-input"),
+      branch: box("#kv-git-branch-input"),
+      save: box("#kv-git-remote-save"),
+      message: box("#kv-git-commit-message"),
+      commit: box("#kv-git-commit"),
+      overflow: dialog.scrollWidth - dialog.clientWidth,
+    };
+  });
+  // The two form rows share one column set: the commit message spans remote +
+  // branch, and the commit button's right edge lines up with 保存设置.
+  const desktopForm = await gitFormGeometry();
+  assert.ok(Math.abs(desktopForm.message.left - desktopForm.remote.left) <= 1, "commit row starts with the remote input");
+  assert.ok(Math.abs(desktopForm.message.right - desktopForm.branch.right) <= 1, "commit message spans remote and branch");
+  assert.ok(Math.abs(desktopForm.commit.right - desktopForm.save.right) <= 1, "commit and save buttons share a right edge");
+  assert.ok(Math.abs(desktopForm.commit.bottom - desktopForm.message.bottom) <= 1, "commit button shares the message row baseline");
+  assert.ok(desktopForm.commit.left >= desktopForm.message.right - 1, "commit button stays right of the message input");
+  assert.ok(desktopForm.message.top >= desktopForm.remote.bottom - 1, "form rows do not overlap");
+  assert.ok(desktopForm.overflow <= 1, "Git form has no horizontal overflow");
+
+  // 800px is still above the stacking breakpoint and keeps the same alignment.
+  await page.setViewportSize({width: 800, height: 900});
+  await page.waitForTimeout(80);
+  const narrowForm = await gitFormGeometry();
+  assert.ok(Math.abs(narrowForm.message.right - narrowForm.branch.right) <= 1, "narrow commit message still spans both inputs");
+  assert.ok(Math.abs(narrowForm.commit.right - narrowForm.save.right) <= 1, "narrow commit and save buttons share a right edge");
+  assert.ok(Math.abs(narrowForm.commit.bottom - narrowForm.message.bottom) <= 1, "narrow commit button shares the message row baseline");
+  assert.ok(narrowForm.message.top >= narrowForm.remote.bottom - 1, "narrow rows do not overlap");
+  assert.ok(narrowForm.overflow <= 1, "narrow Git form has no horizontal overflow");
+  await page.setViewportSize({width: 1280, height: 900});
+  await page.waitForTimeout(80);
 
   // Invalid remote is rejected inline, keeps the typed value for correction,
-  // and leaves the previously saved masked remote untouched.
+  // and leaves the previously saved full remote untouched.
   await page.fill("#kv-git-remote-input", "git@example.com:repo;touch /tmp/pwned");
   await page.locator("#kv-git-remote-save").click();
   await page.waitForSelector(".kv-git .kv-settings-notice.error[role='alert']", {timeout: 5000});
   assert.match(await page.locator(".kv-git .kv-settings-notice.error[role='alert']").innerText(), /SSH remote 格式无效/);
   assert.equal(await page.inputValue("#kv-git-remote-input"), "git@example.com:repo;touch /tmp/pwned");
-  assert.match(await gitSection.innerText(), /git@example\.com:…/);
+  assert.match(await gitSection.innerText(), /git@example\.com:org\/repo\.git/);
 
   // Dirty worktree enables commit but disables pull/sync. Reopening the gear
   // refreshes the Git status from the API.
@@ -1186,14 +1258,23 @@ try {
     const dialog = document.querySelector("#kv-settings-dialog");
     const remote = document.querySelector("#kv-git-remote-input").getBoundingClientRect();
     const branch = document.querySelector("#kv-git-branch-input").getBoundingClientRect();
+    const message = document.querySelector("#kv-git-commit-message").getBoundingClientRect();
+    const commit = document.querySelector("#kv-git-commit").getBoundingClientRect();
+    const save = document.querySelector("#kv-git-remote-save").getBoundingClientRect();
     return {
       dialogOverflow: dialog.scrollWidth - dialog.clientWidth,
       pageOverflow: document.documentElement.scrollWidth - window.innerWidth,
       stacked: branch.top >= remote.bottom - 1,
+      commitStacked: commit.top >= message.bottom - 1,
+      messageAligned: Math.abs(message.left - remote.left) <= 1,
+      saveBeforeCommit: save.bottom <= message.top + 1,
       remoteHost: dialog.innerText.includes("远程主机"),
     };
   });
   assert.equal(mobileSettingsLayout.stacked, true, "mobile Git inputs stack vertically");
+  assert.equal(mobileSettingsLayout.commitStacked, true, "mobile commit button stacks below its message");
+  assert.equal(mobileSettingsLayout.messageAligned, true, "mobile commit message shares the input left edge");
+  assert.equal(mobileSettingsLayout.saveBeforeCommit, true, "mobile rows do not overlap");
   assert.ok(mobileSettingsLayout.dialogOverflow <= 1, "390px settings dialog has no horizontal overflow");
   assert.ok(mobileSettingsLayout.pageOverflow <= 1, "390px settings dialog does not overflow the page");
   assert.equal(mobileSettingsLayout.remoteHost, false);

@@ -43,6 +43,8 @@ const localText: Record<string, [zhCN: string, enUS: string]> = {
   "kv.gitBranch": ["分支", "Branch"],
   "kv.gitRemote": ["远程", "Remote"],
   "kv.gitRemoteUnset": ["未设置", "Not set"],
+  "kv.copyVaultPath": ["复制库路径", "Copy vault path"],
+  "kv.copyRemote": ["复制远程地址", "Copy remote address"],
   "kv.gitWorktree": ["工作区", "Worktree"],
   "kv.gitClean": ["干净", "Clean"],
   "kv.gitDirty": ["有 {count} 个未提交修改", "{count} uncommitted changes"],
@@ -92,13 +94,21 @@ const GIT_STYLES = `
 .kv-settings-notice.error { color: var(--color-danger); }
 .kv-settings-section { margin-top: var(--space-4); padding-top: var(--space-3); border-top: 1px solid var(--color-border); min-width: 0; }
 .kv-settings-section h3 { margin: 0; font-size: var(--font-size-14); }
+/* Both form rows share one grid: the commit message spans the remote and
+   branch tracks, and its button sits in the same auto track as 保存设置 so
+   both right edges line up at every width above the stacking breakpoint. */
 .kv-git-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(120px, 0.55fr) auto; gap: var(--space-2); align-items: end; min-width: 0; }
-.kv-git-form label, .kv-git-commit-row label { display: grid; gap: 4px; min-width: 0; font-size: var(--font-size-12); color: var(--color-text-muted); }
-.kv-git-commit-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-2); align-items: end; margin-top: var(--space-2); min-width: 0; }
+.kv-git-form label { display: grid; gap: 4px; margin: 0; min-width: 0; font-size: var(--font-size-12); color: var(--color-text-muted); }
+.kv-git-commit-label { grid-column: 1 / span 2; }
+#kv-git-commit { grid-column: 3; }
 .kv-git-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: var(--space-2); }
+.kv-settings-copy { display: flex; align-items: flex-start; gap: 6px; }
+.kv-settings-copy > span { min-width: 0; overflow-wrap: anywhere; }
+.kv-settings-copy .kv-copy { flex: 0 0 auto; }
 @media (max-width: 760px) {
-  .kv-git-form, .kv-git-commit-row { grid-template-columns: minmax(0, 1fr); }
-  .kv-git-form button, .kv-git-commit-row button { justify-self: start; }
+  .kv-git-form { grid-template-columns: minmax(0, 1fr); }
+  .kv-git-form button { justify-self: start; }
+  .kv-git-commit-label, #kv-git-commit { grid-column: 1; }
 }
 `;
 
@@ -563,6 +573,12 @@ function normalizeTreePath(value: unknown): string {
   return String(value ?? "").replaceAll("\\", "/").replace(/^\/+|\/+$/g, "");
 }
 
+// Inbox documents are listed only on the "待整理" page. The browse tree never
+// shows them, matching Reader.Inbox: any path segment named inbox is excluded.
+function isInboxVaultPath(value: string): boolean {
+  return normalizeTreePath(value).split("/").some(segment => segment.toLowerCase() === "inbox");
+}
+
 function treeBaseName(value: string): string {
   const normalized = normalizeTreePath(value);
   const separator = normalized.lastIndexOf("/");
@@ -611,6 +627,7 @@ function cloneVaultDocNode(node: KnowledgeVaultTreeNode): KnowledgeVaultTreeNode
 function collectVaultDocuments(nodes: KnowledgeVaultTreeNode[], documents: Map<string, KnowledgeVaultTreeNode>): void {
   for (const node of nodes) {
     const relative = normalizeTreePath(node.path);
+    if (isInboxVaultPath(relative)) continue;
     if (relative && /\.md$/i.test(relative)) {
       const key = `${node.scope || ""}\u0000${node.project_id || ""}\u0000${relative}`;
       if (!documents.has(key)) documents.set(key, cloneVaultDocNode(node));
@@ -778,8 +795,8 @@ function vaultFolderNode(bucket: VaultDirectoryBucket): KnowledgeVaultTreeNode {
 
 // Rebuilds the selectable tree from the API's real vault paths. Each directory
 // becomes a folder row named after its path segment; its index.md stays the
-// folder's document and is never repeated as a leaf. Empty inbox folders still
-// render because the exporter reserves them for every library.
+// folder's document and is never repeated as a leaf. Inbox paths are dropped by
+// collectVaultDocuments because those documents belong to the "待整理" page.
 export function buildVaultDirectoryTree(nodes: KnowledgeVaultTreeNode[], libraryID = ""): KnowledgeVaultTreeNode[] {
   const documentsByKey = new Map<string, KnowledgeVaultTreeNode>();
   collectVaultDocuments(nodes || [], documentsByKey);
@@ -800,14 +817,6 @@ export function buildVaultDirectoryTree(nodes: KnowledgeVaultTreeNode[], library
       continue;
     }
     bucket.documents.push(doc);
-  }
-  if (rootPath && (libraryID === "global" || libraryID.startsWith("project:") || libraryID.startsWith("archive:"))) {
-    ensureVaultDirectory(root, directories, `${rootPath}/inbox`, rootPath);
-  } else if (!rootPath && libraryID === "all") {
-    // The mixed view nests every library under its vault directory. Reserve the
-    // inbox folder for each of them even when it has no documents yet.
-    const scopes = new Set([...directories.keys()].map(path => treeScopeRoot(path)).filter(Boolean));
-    for (const scope of scopes) ensureVaultDirectory(root, directories, `${scope}/inbox`, rootPath);
   }
   return vaultDirectoryChildren(root);
 }
@@ -1066,6 +1075,12 @@ function skillsBodyHTML(): string {
   </section>`;
 }
 
+function settingsCopyHTML(value: string, labelKey: string): string {
+  if (!value) return "";
+  const label = kt(labelKey);
+  return `<button type="button" class="kv-open kv-copy" data-kv-copy="${escapeVaultHTML(value)}" title="${escapeVaultHTML(label)}" aria-label="${escapeVaultHTML(label)}">${icon("copy")}</button>`;
+}
+
 function settingsDialogHTML(): string {
   const ready = (value: boolean) => value ? t("kv.settingsReady") : t("kv.settingsNotReady");
   const settings = state.settings;
@@ -1089,7 +1104,7 @@ function settingsDialogHTML(): string {
   return `<dialog id="kv-settings-dialog" class="kv-settings"${state.rebuildBusy ? ' aria-busy="true"' : ""}>
     <header><h2>${t("kv.settings")}</h2><button type="button" class="icon-button" data-kv-settings-close aria-label="${t("kv.close")}">${icon("close")}</button></header>
     <dl>
-      <div><dt>${t("kv.settingsVault")}</dt><dd class="kv-settings-value">${escapeVaultHTML(vaultPath || t("kv.none"))}</dd></div>
+      <div><dt>${t("kv.settingsVault")}</dt><dd class="kv-settings-value kv-settings-copy"><span>${escapeVaultHTML(vaultPath || t("kv.none"))}</span>${settingsCopyHTML(vaultPath, "kv.copyVaultPath")}</dd></div>
       <div><dt>${t("kv.settingsIndex")}</dt><dd class="kv-settings-value">${escapeVaultHTML(indexReady ? t("kv.settingsReady") : t("kv.settingsNotReady"))}</dd></div>
       <div><dt>${t("kv.settingsRebuilt")}</dt><dd class="kv-settings-value">${escapeVaultHTML(rebuiltAt ? safeDateTime(rebuiltAt) : t("kv.none"))}</dd></div>
       <div class="kv-settings-action-row"><dt>${kt("kv.settingsIndexAction")}</dt><dd class="kv-settings-value"><button type="button" id="kv-settings-rebuild" class="secondary" ${canRebuild ? "" : "disabled"}>${rebuildLabel}</button>${notice}</dd></div>
@@ -1231,6 +1246,9 @@ function gitSectionHTML(): string {
     const busy = Boolean(state.gitBusy);
     const disabled = busy ? " disabled" : "";
     const repo = git.initialized ? kt("kv.gitInitialized") : kt("kv.gitUninitialized");
+    // Prefer the full SSH remote the API now returns; older payloads only had
+    // the masked form, which still beats showing nothing.
+    const remoteDisplay = git.remote_set ? git.remote_full || git.remote || "" : "";
     const worktree = git.clean ? kt("kv.gitClean") : kt("kv.gitDirty", {count: git.changed});
     let syncState = kt("kv.gitNoTracking");
     if (git.tracking) {
@@ -1243,16 +1261,17 @@ function gitSectionHTML(): string {
       ? `${git.last_commit}${git.last_commit_message ? ` · ${git.last_commit_message}` : ""}${git.last_commit_at ? ` · ${safeDateTime(git.last_commit_at)}` : ""}`
       : kt("kv.gitNone");
     const lastSync = git.last_sync_at ? safeDateTime(git.last_sync_at) : kt("kv.gitNone");
+    // One grid holds both form rows so the two buttons share the same auto
+    // track: the commit message spans the remote and branch tracks, and its
+    // button's right edge lines up with 保存设置 at every non-stacked width.
     const remoteForm = git.initialized ? `<div class="kv-git-form">
       <label><span>${kt("kv.gitRemoteInput")}</span><input id="kv-git-remote-input" type="text" data-allow-rerender="true" placeholder="${kt("kv.gitRemotePlaceholder")}" value="${escapeVaultHTML(state.gitRemoteDraft)}" autocomplete="off" spellcheck="false"${disabled}></label>
       <label><span>${kt("kv.gitBranchInput")}</span><input id="kv-git-branch-input" type="text" data-allow-rerender="true" value="${escapeVaultHTML(state.gitBranchDraft || git.branch)}" autocomplete="off" spellcheck="false"${disabled}></label>
       <button type="button" id="kv-git-remote-save" class="secondary"${disabled}>${gitActionLabel("remote", "kv.gitSaveRemote")}</button>
+      <label class="kv-git-commit-label"><span>${kt("kv.gitCommitMessage")}</span><input id="kv-git-commit-message" type="text" data-allow-rerender="true" maxlength="200" placeholder="${kt("kv.gitCommitPlaceholder")}" value="${escapeVaultHTML(state.gitCommitDraft)}" autocomplete="off"${disabled}></label>
+      <button type="button" id="kv-git-commit" class="secondary"${git.clean ? " disabled" : disabled}>${gitActionLabel("commit", "kv.gitCommit")}</button>
     </div>` : "";
     const actions = git.initialized ? `
-      <div class="kv-git-commit-row">
-        <label><span>${kt("kv.gitCommitMessage")}</span><input id="kv-git-commit-message" type="text" data-allow-rerender="true" maxlength="200" placeholder="${kt("kv.gitCommitPlaceholder")}" value="${escapeVaultHTML(state.gitCommitDraft)}" autocomplete="off"${disabled}></label>
-        <button type="button" id="kv-git-commit" class="secondary"${git.clean ? " disabled" : disabled}>${gitActionLabel("commit", "kv.gitCommit")}</button>
-      </div>
       <div class="kv-git-actions">
         <button type="button" id="kv-git-pull"${(!git.remote_set || !git.clean) ? " disabled" : disabled}>${gitActionLabel("pull", "kv.gitPull")}</button>
         <button type="button" id="kv-git-push"${(!git.remote_set || !git.has_commits || (git.tracking && git.ahead === 0)) ? " disabled" : disabled}>${gitActionLabel("push", "kv.gitPush")}</button>
@@ -1261,7 +1280,7 @@ function gitSectionHTML(): string {
     body = `<dl>
       <div><dt>${kt("kv.gitRepo")}</dt><dd class="kv-settings-value">${repo}</dd></div>
       <div><dt>${kt("kv.gitBranch")}</dt><dd class="kv-settings-value">${escapeVaultHTML(git.branch)}</dd></div>
-      <div><dt>${kt("kv.gitRemote")}</dt><dd class="kv-settings-value">${escapeVaultHTML(git.remote_set ? git.remote || "" : kt("kv.gitRemoteUnset"))}</dd></div>
+      <div><dt>${kt("kv.gitRemote")}</dt><dd class="kv-settings-value kv-settings-copy"><span>${escapeVaultHTML(remoteDisplay || kt("kv.gitRemoteUnset"))}</span>${settingsCopyHTML(remoteDisplay, "kv.copyRemote")}</dd></div>
       <div><dt>${kt("kv.gitWorktree")}</dt><dd class="kv-settings-value">${escapeVaultHTML(worktree)}</dd></div>
       <div><dt>${kt("kv.gitSyncState")}</dt><dd class="kv-settings-value">${escapeVaultHTML(syncState)}</dd></div>
       <div><dt>${kt("kv.gitLastCommit")}</dt><dd class="kv-settings-value">${escapeVaultHTML(lastCommit)}</dd></div>
