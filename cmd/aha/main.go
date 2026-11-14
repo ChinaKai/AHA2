@@ -124,25 +124,24 @@ func parseCommand(args []string) (string, []string, error) {
 }
 
 type serveOptions struct {
-	listen                   string
-	dataDir                  string
-	setupToken               string
-	setupTokenFile           string
-	secureCookie             bool
-	allowCrossOrigin         bool
-	agentAPIURL              string
-	mailTaskBaseURL          string
-	mailDownloadBaseURL      string
-	mailDownloadListen       string
-	logLevel                 string
-	codexBinary              string
-	claudeBinary             string
-	dshBinary                string
-	localOwnerIngest         bool
-	knowledgeVaultEnabled    bool
-	knowledgeVaultPath       string
-	knowledgeVaultIndex      string
-	knowledgeVaultRemoteHost string
+	listen                string
+	dataDir               string
+	setupToken            string
+	setupTokenFile        string
+	secureCookie          bool
+	allowCrossOrigin      bool
+	agentAPIURL           string
+	mailTaskBaseURL       string
+	mailDownloadBaseURL   string
+	mailDownloadListen    string
+	logLevel              string
+	codexBinary           string
+	claudeBinary          string
+	dshBinary             string
+	localOwnerIngest      bool
+	knowledgeVaultEnabled bool
+	knowledgeVaultPath    string
+	knowledgeVaultIndex   string
 	// deprecatedLiveInput records old live-inbox switches that were supplied.
 	// They are accepted so existing service definitions keep starting, but they
 	// no longer select any behavior.
@@ -186,7 +185,6 @@ func parseServeOptions(name string, args []string) (serveOptions, error) {
 	knowledgeVaultEnabled := flags.Bool("knowledge-vault-enabled", envBool("AHA2_KNOWLEDGE_VAULT_ENABLED"), "startup default for the file-backed knowledge vault (the Web settings toggle takes precedence once used)")
 	knowledgeVaultPath := flags.String("knowledge-vault-path", os.Getenv("AHA2_KNOWLEDGE_VAULT_PATH"), "knowledge vault directory (default <data-dir>/knowledge-vault)")
 	knowledgeVaultIndex := flags.String("knowledge-vault-index", os.Getenv("AHA2_KNOWLEDGE_VAULT_INDEX"), "knowledge index database (default <data-dir>/knowledge-vault-index.db)")
-	knowledgeVaultRemoteHost := flags.String("knowledge-vault-remote-host", os.Getenv("AHA2_KNOWLEDGE_VAULT_REMOTE_HOST"), "SSH host used for vscode-remote knowledge links (optional)")
 	// Live inbox delivery is always enabled when the runner can stream stdin.
 	// Keep the old switches as parse-only no-ops so existing service definitions
 	// and scripts still start; they cannot turn the behavior on or off.
@@ -211,7 +209,6 @@ func parseServeOptions(name string, args []string) (serveOptions, error) {
 		knowledgeVaultEnabled:      *knowledgeVaultEnabled,
 		knowledgeVaultPath:         *knowledgeVaultPath,
 		knowledgeVaultIndex:        *knowledgeVaultIndex,
-		knowledgeVaultRemoteHost:   *knowledgeVaultRemoteHost,
 		deprecatedLiveInput:        deprecatedLiveInput,
 		deprecatedAgentAPIInsecure: deprecatedAgentAPIInsecure,
 	}, nil
@@ -288,7 +285,7 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	// The manager always exists so the Phase 3 routes stay registered and can
 	// report "disabled" with a plain 404. The effective value is applied after
 	// the database is open: a Web toggle (configured=1) outranks env/flags.
-	knowledgeVaultManager, err := knowledgevault.NewManager(knowledgeVaultConfig, options.knowledgeVaultRemoteHost)
+	knowledgeVaultManager, err := knowledgevault.NewManager(knowledgeVaultConfig)
 	if err != nil {
 		return fmt.Errorf("create knowledge vault manager: %w", err)
 	}

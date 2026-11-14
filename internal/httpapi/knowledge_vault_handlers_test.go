@@ -70,7 +70,7 @@ title: 收件想法
 	if err := index.Close(); err != nil {
 		t.Fatal(err)
 	}
-	manager, err := knowledgevault.NewManager(config, "devbox")
+	manager, err := knowledgevault.NewManager(config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ title: 收件想法
 // routes stay registered and every read answers 404.
 func knowledgeVaultDisabledManager(t *testing.T) *knowledgevault.Manager {
 	t.Helper()
-	manager, err := knowledgevault.NewManager(knowledgevault.DefaultConfig(t.TempDir()), "")
+	manager, err := knowledgevault.NewManager(knowledgevault.DefaultConfig(t.TempDir()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestKnowledgeVaultAPIReadsLibrariesTreeDocumentSearchRecentInboxAndSkills(t
 	if response.StatusCode != http.StatusOK || libraries["enabled"] != true || libraries["index_ready"] != true {
 		t.Fatalf("libraries status=%d payload=%#v", response.StatusCode, libraries)
 	}
-	if libraries["vault_name"] != "HTTP Vault" || libraries["obsidian_vault"] != "HTTP Vault" || libraries["remote_host"] != "devbox" {
+	if libraries["vault_name"] != "HTTP Vault" || libraries["obsidian_vault"] != "HTTP Vault" {
 		t.Fatalf("libraries metadata = %#v", libraries)
 	}
 	if len(libraries["libraries"].([]any)) == 0 {
@@ -190,7 +190,7 @@ func TestKnowledgeVaultAPIReadsLibrariesTreeDocumentSearchRecentInboxAndSkills(t
 		t.Fatalf("doc status=%d payload=%#v", response.StatusCode, doc)
 	}
 	document := doc["doc"].(map[string]any)
-	if document["title"] != "部署指南" || document["obsidian_ready"] != true || document["remote_host"] != "devbox" {
+	if document["title"] != "部署指南" || document["obsidian_ready"] != true {
 		t.Fatalf("doc = %#v", document)
 	}
 	if len(document["outline"].([]any)) != 1 {

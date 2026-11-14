@@ -61,7 +61,7 @@ func TestKnowledgeVaultInitSamplesCreatesFilesAndIndex(t *testing.T) {
 			t.Fatalf("sample %s missing: %v", sample.Path, err)
 		}
 	}
-	reader, err := knowledgevault.OpenReader(ctx, config, "")
+	reader, err := knowledgevault.OpenReader(ctx, config)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -30,18 +30,17 @@ type Reader struct {
 	index      *Index
 	vaultReady bool
 	indexReady bool
-	remoteHost string
 }
 
 // OpenReader opens the existing vault and index if both are present. A missing
 // vault or index is not an error: the reader still reports the feature switch
 // and the UI shows the "not exported yet" state.
-func OpenReader(ctx context.Context, config Config, remoteHost string) (*Reader, error) {
+func OpenReader(ctx context.Context, config Config) (*Reader, error) {
 	normalized, err := config.Normalized()
 	if err != nil {
 		return nil, err
 	}
-	reader := &Reader{config: normalized, remoteHost: strings.TrimSpace(remoteHost)}
+	reader := &Reader{config: normalized}
 	if info, statErr := os.Stat(normalized.VaultPath); statErr == nil && info.IsDir() {
 		reader.vaultReady = true
 		manifest, manifestErr := ReadManifest(normalized.VaultPath)
@@ -91,7 +90,6 @@ func (r *Reader) Config() Config     { return r.config }
 func (r *Reader) VaultReady() bool   { return r.vaultReady }
 func (r *Reader) IndexReady() bool   { return r.indexReady }
 func (r *Reader) Manifest() Manifest { return r.manifest }
-func (r *Reader) RemoteHost() string { return r.remoteHost }
 
 // Library is one selectable source in the top-level library picker.
 type Library struct {
@@ -109,7 +107,6 @@ type LibraryList struct {
 	VaultName     string    `json:"vault_name,omitempty"`
 	ObsidianVault string    `json:"obsidian_vault,omitempty"`
 	ObsidianReady bool      `json:"obsidian_ready"`
-	RemoteHost    string    `json:"remote_host,omitempty"`
 	VaultPath     string    `json:"vault_path,omitempty"`
 	Libraries     []Library `json:"libraries"`
 	Projects      []Library `json:"projects"`
@@ -126,8 +123,8 @@ func (r *Reader) Libraries(ctx context.Context) LibraryList {
 	result := LibraryList{
 		Enabled: true, VaultReady: r.vaultReady, IndexReady: r.indexReady,
 		VaultName: r.manifest.VaultName, ObsidianVault: r.manifest.ObsidianVault,
-		ObsidianReady: r.obsidianRegistered(), RemoteHost: r.remoteHost,
-		VaultPath: r.config.VaultPath, Libraries: []Library{}, Projects: []Library{},
+		ObsidianReady: r.obsidianRegistered(),
+		VaultPath:     r.config.VaultPath, Libraries: []Library{}, Projects: []Library{},
 	}
 	if !r.vaultReady {
 		result.Warning = "vault_missing"
@@ -338,7 +335,6 @@ type Doc struct {
 	ObsidianVault string        `json:"obsidian_vault,omitempty"`
 	ObsidianReady bool          `json:"obsidian_ready"`
 	ObsidianFile  string        `json:"obsidian_file,omitempty"`
-	RemoteHost    string        `json:"remote_host,omitempty"`
 	VaultPath     string        `json:"vault_path,omitempty"`
 }
 
@@ -397,7 +393,7 @@ func (r *Reader) Document(ctx context.Context, id, relativePath string) (Doc, er
 		IsIndex: entry.IsIndex, System: isSystemEntry(entry), Warning: entry.Warning,
 		Outline: outlineItems(entry.Body), Backlinks: []Backlink{},
 		ObsidianVault: r.manifest.ObsidianVault, ObsidianReady: r.obsidianRegistered(),
-		ObsidianFile: obsidianFile, RemoteHost: r.remoteHost, VaultPath: r.config.VaultPath,
+		ObsidianFile: obsidianFile, VaultPath: r.config.VaultPath,
 	}
 	backlinks, backlinkErr := r.backlinks(ctx, entry)
 	if backlinkErr != nil {

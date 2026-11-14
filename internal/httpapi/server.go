@@ -567,6 +567,13 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("PUT /api/v1/settings/knowledge-vault", s.withAuth(http.HandlerFunc(s.updateKnowledgeVaultSettings)))
 		mux.Handle("POST /api/v1/settings/knowledge-vault/init", s.withAuth(http.HandlerFunc(s.initializeKnowledgeVault)))
 		mux.Handle("POST /api/v1/settings/knowledge-vault/rebuild", s.withAuth(http.HandlerFunc(s.rebuildKnowledgeVaultIndex)))
+		mux.Handle("GET /api/v1/knowledge-vault/git/status", s.withAuth(http.HandlerFunc(s.knowledgeVaultGitStatus)))
+		mux.Handle("PUT /api/v1/knowledge-vault/git/remote", s.withAuth(http.HandlerFunc(s.updateKnowledgeVaultGitRemote)))
+		mux.Handle("POST /api/v1/knowledge-vault/git/init", s.withAuth(http.HandlerFunc(s.initializeKnowledgeVaultGit)))
+		mux.Handle("POST /api/v1/knowledge-vault/git/commit", s.withAuth(http.HandlerFunc(s.commitKnowledgeVaultGit)))
+		mux.Handle("POST /api/v1/knowledge-vault/git/pull", s.withAuth(http.HandlerFunc(s.pullKnowledgeVaultGit)))
+		mux.Handle("POST /api/v1/knowledge-vault/git/push", s.withAuth(http.HandlerFunc(s.pushKnowledgeVaultGit)))
+		mux.Handle("POST /api/v1/knowledge-vault/git/sync", s.withAuth(http.HandlerFunc(s.syncKnowledgeVaultGit)))
 	}
 	mux.Handle("GET /api/v1/projects/{id}/product-lines", s.withAuth(http.HandlerFunc(s.listProductLines)))
 	mux.Handle("POST /api/v1/projects/{id}/product-lines", s.withAuth(http.HandlerFunc(s.createProductLine)))

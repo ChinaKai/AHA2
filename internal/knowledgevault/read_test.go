@@ -22,7 +22,7 @@ func readerFixture(t *testing.T) (Config, *Reader, context.Context) {
 	if err := index.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reader, err := OpenReader(ctx, config, "devbox")
+	reader, err := OpenReader(ctx, config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -405,9 +405,6 @@ func TestReaderDocumentResolvesIDAndPathAndReturnsOutlineAndLinks(t *testing.T) 
 	if byID.ObsidianVault != reader.Manifest().ObsidianVault {
 		t.Fatalf("obsidian vault = %q", byID.ObsidianVault)
 	}
-	if byID.RemoteHost != "devbox" {
-		t.Fatalf("remote host = %q", byID.RemoteHost)
-	}
 	if len(byID.Backlinks) == 0 {
 		t.Fatalf("backlinks = %+v", byID.Backlinks)
 	}
@@ -498,7 +495,7 @@ func TestReaderSkillsAreListedFromVaultFolders(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(directory, "extra.md"), []byte("extra"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	reader, err := OpenReader(context.Background(), config, "")
+	reader, err := OpenReader(context.Background(), config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -529,7 +526,7 @@ func TestReaderSkillsAreListedFromVaultFolders(t *testing.T) {
 
 func TestOpenReaderWithoutVaultOrIndexIsAnEmptyStateNotAnError(t *testing.T) {
 	config := DefaultConfig(t.TempDir())
-	reader, err := OpenReader(context.Background(), config, "")
+	reader, err := OpenReader(context.Background(), config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -585,7 +582,7 @@ func benchmarkReaderFixture(b *testing.B) *Reader {
 	if err := index.Close(); err != nil {
 		b.Fatal(err)
 	}
-	reader, err := OpenReader(ctx, config, "")
+	reader, err := OpenReader(ctx, config)
 	if err != nil {
 		b.Fatal(err)
 	}

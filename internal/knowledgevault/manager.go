@@ -17,12 +17,11 @@ import (
 // callback, so a Reader can never be closed while a handler is querying its
 // index. SetEnabled, Rebuild, Initialize and Close hold the write lock.
 type Manager struct {
-	mu         sync.RWMutex
-	config     Config
-	remoteHost string
-	enabled    bool
-	source     string
-	reader     *Reader
+	mu      sync.RWMutex
+	config  Config
+	enabled bool
+	source  string
+	reader  *Reader
 }
 
 // The effective switch comes either from the persisted database row or from
@@ -44,15 +43,14 @@ var (
 
 // NewManager normalizes the configured paths and starts disabled. The caller
 // applies the effective startup state with SetEnabled.
-func NewManager(config Config, remoteHost string) (*Manager, error) {
+func NewManager(config Config) (*Manager, error) {
 	normalized, err := config.Normalized()
 	if err != nil {
 		return nil, err
 	}
 	return &Manager{
-		config:     normalized,
-		remoteHost: strings.TrimSpace(remoteHost),
-		source:     SourceStartup,
+		config: normalized,
+		source: SourceStartup,
 	}, nil
 }
 
@@ -112,7 +110,7 @@ func (m *Manager) SetEnabled(ctx context.Context, enabled bool) error {
 		}
 		return nil
 	}
-	reader, err := OpenReader(ctx, m.config, m.remoteHost)
+	reader, err := OpenReader(ctx, m.config)
 	if err != nil {
 		return err
 	}
@@ -153,7 +151,6 @@ type Status struct {
 	EntryCount       int    `json:"entry_count"`
 	RebuiltAt        string `json:"rebuilt_at,omitempty"`
 	Warning          string `json:"warning,omitempty"`
-	RemoteHost       string `json:"remote_host,omitempty"`
 }
 
 func (m *Manager) Status(ctx context.Context) Status {
@@ -162,7 +159,6 @@ func (m *Manager) Status(ctx context.Context) Status {
 	status := Status{
 		Enabled: m.enabled, Source: m.source,
 		VaultPath: m.config.VaultPath, IndexPath: m.config.IndexPath,
-		RemoteHost:       m.remoteHost,
 		VaultInitialized: VaultInitialized(m.config.VaultPath),
 	}
 	if m.reader != nil {
@@ -246,7 +242,7 @@ func (m *Manager) Rebuild(ctx context.Context) (RebuildReport, error) {
 		m.reopenLocked(ctx)
 		return report, fmt.Errorf("close knowledge index: %w", closeErr)
 	}
-	reader, openErr := OpenReader(ctx, m.config, m.remoteHost)
+	reader, openErr := OpenReader(ctx, m.config)
 	if openErr != nil {
 		// The files are intact but the new index cannot be read; report the
 		// failure instead of silently serving an empty page.
@@ -308,7 +304,7 @@ func (m *Manager) Initialize(ctx context.Context, samples bool) (SampleInitResul
 		return result, fmt.Errorf("close knowledge index: %w", closeErr)
 	}
 	result.Rebuild = rebuildReport
-	reader, err := OpenReader(ctx, m.config, m.remoteHost)
+	reader, err := OpenReader(ctx, m.config)
 	if err != nil {
 		return result, fmt.Errorf("open knowledge vault: %w", err)
 	}
@@ -321,7 +317,7 @@ func (m *Manager) Initialize(ctx context.Context, samples bool) (SampleInitResul
 }
 
 func (m *Manager) reopenLocked(ctx context.Context) {
-	reader, err := OpenReader(context.WithoutCancel(ctx), m.config, m.remoteHost)
+	reader, err := OpenReader(context.WithoutCancel(ctx), m.config)
 	if err != nil {
 		m.reader = nil
 		m.enabled = false

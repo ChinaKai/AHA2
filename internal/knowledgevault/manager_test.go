@@ -14,7 +14,7 @@ import (
 func newTestManager(t *testing.T) (*Manager, Config) {
 	t.Helper()
 	config := DefaultConfig(t.TempDir())
-	manager, err := NewManager(config, "devbox")
+	manager, err := NewManager(config)
 	if err != nil {
 		t.Fatal(err)
 	}

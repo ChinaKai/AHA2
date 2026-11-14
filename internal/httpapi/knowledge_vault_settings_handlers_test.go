@@ -26,7 +26,7 @@ func TestKnowledgeVaultSettingsToggleInitAndRebuild(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()
 	config := knowledgevault.DefaultConfig(dataDir)
-	manager, err := knowledgevault.NewManager(config, "")
+	manager, err := knowledgevault.NewManager(config)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -30,6 +30,9 @@ type Config struct {
 	DataDir   string
 	VaultPath string
 	IndexPath string
+	// AllowLocalRemote is a test-only escape hatch for temporary bare repos.
+	// Production stays SSH-only and never sets this field.
+	AllowLocalRemote bool
 }
 
 // DefaultConfig keeps the vault next to the AHA2 data directory. It never
@@ -282,7 +285,7 @@ func Bootstrap(cfg Config, options InitOptions) (InitReport, error) {
 		return report, err
 	}
 	gitignorePath := filepath.Join(cfg.VaultPath, ".gitignore")
-	gitignore := "# Local index/state is regenerated from the vault files.\n.aha/\n.obsidian/\n*.tmp\n.DS_Store\nThumbs.db\n"
+	gitignore := gitIgnoreBody
 	if err := writeVaultFileIfChanged(cfg.VaultPath, gitignorePath, []byte(gitignore), 0o644); err != nil {
 		return report, err
 	}
