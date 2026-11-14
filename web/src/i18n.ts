@@ -1218,6 +1218,7 @@ const enUS: Record<string, string> = {
   "knowledge.list.total": "{count} total",
   "knowledge.list.shown": "{summary} · showing {shown}",
   "knowledge.list.more": "Load more",
+  "conversation.newMessages": "New messages ({count})",
 };
 
 // Transitional UI phrase table for modules that have not been migrated to
@@ -2327,7 +2328,6 @@ const legacyEnglish: Record<string, string> = {
   "DeepSeek 大肥鱼": "DeepSeek Big Fish",
   "大肥鱼": "Big Fish",
   "原版鲸鱼娘": "Classic whale girl",
-  "conversation.newMessages": "New messages ({count})",
 };
 
 let locale: Locale = "zh-CN";

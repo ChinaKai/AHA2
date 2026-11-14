@@ -5161,15 +5161,19 @@ function measureConversationChrome(list: HTMLElement): void {
 // Margins are folded into the measured height because the spacers must cover
 // the same distance the normal flow would: message and status-card margins
 // differ, and adjacent sibling margins do not collapse through a spacer.
+function conversationNodeHeight(node: HTMLElement): number {
+  const style = window.getComputedStyle(node);
+  return node.getBoundingClientRect().height
+    + (Number.parseFloat(style.marginTop) || 0)
+    + (Number.parseFloat(style.marginBottom) || 0);
+}
+
 function measureConversationMessages(list: HTMLElement): boolean {
   let changed = false;
   for (const node of conversationMessageNodes(list)) {
     const key = node.dataset.messageId || "";
     if (!key) continue;
-    const style = window.getComputedStyle(node);
-    const height = node.getBoundingClientRect().height
-      + (Number.parseFloat(style.marginTop) || 0)
-      + (Number.parseFloat(style.marginBottom) || 0);
+    const height = conversationNodeHeight(node);
     if (!Number.isFinite(height) || height <= 0) continue;
     const previous = conversationHeights.get(key);
     if (previous === undefined || Math.abs(previous - height) > 0.5) {
@@ -5327,10 +5331,36 @@ function updateConversationWindow(force = false): void {
   syncConversationNewMessagesHint();
 }
 
+// Growth that happened above the viewport shifts every row the reader is
+// looking at, but the browser does not adjust scrollTop for it. The height
+// cache still holds the previous size when the resize notification or image
+// load arrives, so the shift can be applied before the anchor is captured.
+// Doing it here rather than in the image handler also covers the case where
+// the observer reports the image's new size before its load event runs.
+function compensateConversationGrowthAboveViewport(list: HTMLElement): void {
+  const listTop = list.getBoundingClientRect().top;
+  let growth = 0;
+  for (const node of conversationMessageNodes(list)) {
+    const previous = conversationHeights.get(node.dataset.messageId || "");
+    if (previous === undefined) continue;
+    const delta = conversationNodeHeight(node) - previous;
+    if (Math.abs(delta) < 0.5) continue;
+    // Layout already reflects the change, so reconstruct where the row ended
+    // before it: a row that overlapped the viewport then is the reader's
+    // anchor row, its top did not move, and the existing anchor capture
+    // handles it. Only a row entirely above the viewport shifts every visible
+    // row.
+    if (node.getBoundingClientRect().bottom - delta > listTop + 1) continue;
+    growth += delta;
+  }
+  if (Math.abs(growth) >= 0.5) list.scrollTop += growth;
+}
+
 function refreshConversationMeasurements(): void {
   const list = document.querySelector<HTMLElement>("#conversation-list");
   if (!list || state.taskDetailLoading) return;
   measureConversationChrome(list);
+  compensateConversationGrowthAboveViewport(list);
   const anchor = captureConversationAnchor(list);
   if (!measureConversationMessages(list)) return;
   const {window, count} = conversationWindowFor(liveConversationViewport(list));
@@ -5340,18 +5370,22 @@ function refreshConversationMeasurements(): void {
 }
 
 function observeConversationRows(list: HTMLElement): void {
-  if (!conversationResizeObserver) {
-    conversationResizeObserver = new ResizeObserver(() => {
-      if (conversationMeasureFrame) return;
-      conversationMeasureFrame = window.requestAnimationFrame(() => {
-        conversationMeasureFrame = 0;
-        refreshConversationMeasurements();
-      });
+  // A long-lived observer can stop reporting after being disconnected and
+  // re-observed on the same nodes within one turn (the browser deduplicates
+  // the same-node notification), which leaves an expanded or image-grown row
+  // unmeasured. Rebuild the observer so the next resize is delivered.
+  conversationResizeObserver?.disconnect();
+  const observer = new ResizeObserver(() => {
+    if (conversationMeasureFrame) return;
+    conversationMeasureFrame = window.requestAnimationFrame(() => {
+      conversationMeasureFrame = 0;
+      refreshConversationMeasurements();
     });
-  }
-  conversationResizeObserver.disconnect();
-  conversationResizeObserver.observe(list);
-  conversationMessageNodes(list).forEach(node => conversationResizeObserver?.observe(node));
+  });
+  conversationResizeObserver = observer;
+  observer.observe(list);
+  conversationMessageNodes(list).forEach(node => observer.observe(node));
+  watchConversationImages(list);
 }
 
 function syncConversationNewMessagesHint(): void {
@@ -5743,9 +5777,36 @@ function stabilizeConversationBottom(list: HTMLElement): void {
   for (const delay of [80, 240, 600]) {
     window.setTimeout(apply, delay);
   }
+}
+
+const conversationImageLoadBound = new WeakSet<HTMLImageElement>();
+
+function watchConversationImages(list: HTMLElement): void {
   list.querySelectorAll<HTMLImageElement>("img").forEach(image => {
-    if (!image.complete) image.addEventListener("load", apply, {once: true});
+    if (conversationImageLoadBound.has(image)) return;
+    // Do not gate on `complete`: a lazy image can report complete before the
+    // browser has queued its request, and the load event then arrives with no
+    // listener attached.
+    conversationImageLoadBound.add(image);
+    image.addEventListener("load", () => conversationImageLoaded(image), {once: true});
   });
+}
+
+function conversationImageLoaded(image: HTMLImageElement): void {
+  const list = document.querySelector<HTMLElement>("#conversation-list");
+  if (!list?.isConnected || !image.isConnected) return;
+  // Only an image that occupies space above the reader's viewport pushes every
+  // row the reader is looking at downwards.
+  const grewAboveViewport = image.getBoundingClientRect().top < list.getBoundingClientRect().top + 1;
+  refreshConversationMeasurements();
+  observeConversationRows(list);
+  if (!grewAboveViewport || !conversationFollowBottom || composingConversationTouch) return;
+  // Measurement shifts the scroll offset with the growth, so a reader who was
+  // exactly at the bottom stays there and one inside the follow band stays at
+  // the same distance. Re-pin anyway: this is not a new message, so the short
+  // post-gesture suppression window does not apply, and the new pin version
+  // invalidates any older pending pin.
+  stabilizeConversationBottom(list);
 }
 
 function captureConversationImages(list: HTMLElement | null): Map<string, HTMLImageElement[]> {
@@ -7777,6 +7838,22 @@ function bindConversationLiveControls(): void {
       updateTaskLiveRegions();
       syncConversationNewMessagesHint();
     });
+  }
+  if (list && list.dataset.heightChangesBound !== "true") {
+    list.dataset.heightChangesBound = "true";
+    // Expansion happens in the message control itself and may not change the
+    // window HTML, so the patching path cannot be relied on to re-arm the
+    // observer. Re-observe before the default toggle action (click) and after
+    // a details element changes (toggle).
+    const rearm = () => {
+      observeConversationRows(list);
+      scheduleConversationWindowUpdate();
+    };
+    list.addEventListener("click", event => {
+      const target = event.target instanceof Element ? event.target.closest("[data-toggle-message], summary") : null;
+      if (target) rearm();
+    });
+    list.addEventListener("toggle", rearm, true);
   }
   if (list) observeConversationRows(list);
   if (list && list.dataset.paginationBound !== "true") {

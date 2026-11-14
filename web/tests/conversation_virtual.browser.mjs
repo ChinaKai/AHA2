@@ -100,7 +100,7 @@ window.fetch = async (input, init = {}) => {
   const path = url.pathname;
   const method = (init.method || "GET").toUpperCase();
   if (path === "/api/v1/auth/status") return json({authenticated: true, csrf_token: "csrf", owner: {id: "owner-1", username: "owner"}});
-  if (path === "/api/v1/settings/general") return json({ok: true, general: {language: "zh-CN"}});
+  if (path === "/api/v1/settings/general") return json({ok: true, general: {language: new URLSearchParams(location.search).get("lang") || "zh-CN"}});
   if (path === "/api/v1/assistant") return json({assistant: {character: "gugugaga", name: "AHA", nickname: "AHA", enabled: false}, messages: [], models: [], tools: []});
   if (path === "/api/v1/projects") return json({projects: [{id: "project-1", name: "Project", project_type: "folder", channel_retired: false}], has_more: false});
   if (path === "/api/v1/workspaces") return json({workspaces: [{id: "workspace-1", project_id: "project-1", name: "W", root_path: "/tmp", transport: "native", health: "ready"}]});
@@ -305,6 +305,8 @@ try {
   assert.ok(Math.abs(anchoredAfter.offset - anchoredBefore.offset) <= 2,
     `the anchored row moved ${anchoredBefore.offset} -> ${anchoredAfter.offset}px`);
   assert.ok(afterLive.hint, "the new-message hint did not appear");
+  const zhHint = await page.evaluate(() => document.querySelector("#conversation-new-messages")?.textContent?.trim() || "");
+  assert.match(zhHint, /^有新消息（\d+）$/, `zh-CN unread hint: ${zhHint}`);
 
   // The hint returns to the newest message and following resumes.
   await page.click("#conversation-new-messages");
@@ -354,6 +356,29 @@ try {
   assert.ok(olderAfter.scrollTop > olderBefore.scrollTop, "the scroll offset did not absorb the prepended history");
 
   assert.deepEqual(errors, [], "the virtual conversation threw");
+
+  // The unread hint is rendered through t(), so en-US must use the enUS table
+  // rather than the legacy English phrase table (which only backs tr() and the
+  // DOM translation safety net).
+  const english = await browser.newPage({viewport: {width: 1280, height: 800}});
+  const englishErrors = [];
+  english.on("pageerror", error => englishErrors.push(error.message));
+  english.on("console", message => { if (message.type() === "error") englishErrors.push(message.text()); });
+  await english.goto(`${url}?lang=en-US`, {waitUntil: "domcontentloaded"});
+  await english.waitForSelector("#conversation-list .message", {timeout: 20000});
+  await english.waitForFunction(() => {
+    const list = document.querySelector("#conversation-list");
+    return list && list.scrollHeight - list.scrollTop - list.clientHeight < 80;
+  }, null, {timeout: 20000});
+  await scrollTo(english, (await listState(english)).scrollTop - 1600);
+  await english.evaluate(() => { window.__quiet = false; });
+  await english.waitForFunction(() => !document.querySelector("#conversation-new-messages")?.hidden, null, {timeout: 10000});
+  const englishHint = await english.evaluate(() => document.querySelector("#conversation-new-messages")?.textContent?.trim() || "");
+  assert.match(englishHint, /^New messages \(\d+\)$/, `en-US unread hint: ${englishHint}`);
+  assert.ok(!/[\u3400-\u9fff]/.test(englishHint), `en-US unread hint contains Han characters: ${englishHint}`);
+  assert.deepEqual(englishErrors, [], "the en-US conversation threw");
+  await english.close();
+
   await page.screenshot({path: resolve(output, "conversation-virtual.png")});
   console.log("conversation virtual:", JSON.stringify({
     initialRows: initial.count, initialHeight: initial.scrollHeight,
