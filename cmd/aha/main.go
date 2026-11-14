@@ -26,6 +26,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/execution"
 	"github.com/ChinaKai/AHA2/internal/hardware"
 	"github.com/ChinaKai/AHA2/internal/httpapi"
+	"github.com/ChinaKai/AHA2/internal/knowledgevault"
 	mailpkg "github.com/ChinaKai/AHA2/internal/mail"
 	"github.com/ChinaKai/AHA2/internal/mailworker"
 	"github.com/ChinaKai/AHA2/internal/managedprocess"
@@ -81,6 +82,8 @@ func main() {
 		err = runPlatformService(args)
 	case "import-aha1-knowledge":
 		err = importAHA1Knowledge(args)
+	case "knowledge-vault":
+		err = knowledgeVault(args)
 	}
 	if err != nil {
 		slog.Error("AHA2 stopped", "error", err)
@@ -108,6 +111,8 @@ func parseCommand(args []string) (string, []string, error) {
 		return "agent-proxy", args[1:], nil
 	case "import-aha1-knowledge":
 		return "import-aha1-knowledge", args[1:], nil
+	case "knowledge-vault":
+		return "knowledge-vault", args[1:], nil
 	case "service":
 		if len(args) < 2 || args[1] != "run" {
 			return "", nil, fmt.Errorf("usage: aha2 service run [serve flags]")
@@ -119,21 +124,24 @@ func parseCommand(args []string) (string, []string, error) {
 }
 
 type serveOptions struct {
-	listen              string
-	dataDir             string
-	setupToken          string
-	setupTokenFile      string
-	secureCookie        bool
-	allowCrossOrigin    bool
-	agentAPIURL         string
-	mailTaskBaseURL     string
-	mailDownloadBaseURL string
-	mailDownloadListen  string
-	logLevel            string
-	codexBinary         string
-	claudeBinary        string
-	dshBinary           string
-	localOwnerIngest    bool
+	listen                string
+	dataDir               string
+	setupToken            string
+	setupTokenFile        string
+	secureCookie          bool
+	allowCrossOrigin      bool
+	agentAPIURL           string
+	mailTaskBaseURL       string
+	mailDownloadBaseURL   string
+	mailDownloadListen    string
+	logLevel              string
+	codexBinary           string
+	claudeBinary          string
+	dshBinary             string
+	localOwnerIngest      bool
+	knowledgeVaultEnabled bool
+	knowledgeVaultPath    string
+	knowledgeVaultIndex   string
 	// deprecatedLiveInput records old live-inbox switches that were supplied.
 	// They are accepted so existing service definitions keep starting, but they
 	// no longer select any behavior.
@@ -174,6 +182,9 @@ func parseServeOptions(name string, args []string) (serveOptions, error) {
 	claudeBinary := flags.String("claude-bin", envOr("AHA2_CLAUDE_BIN", "claude"), "Claude Code executable")
 	dshBinary := flags.String("dsh-bin", envOr("AHA2_DSH_BIN", "dsh"), "DeepSeek Harness executable")
 	localOwnerIngest := flags.Bool("local-owner-ingest", envBool("AHA2_LOCAL_OWNER_INGEST"), "enable the loopback-only local owner message ingest endpoint")
+	knowledgeVaultEnabled := flags.Bool("knowledge-vault-enabled", envBool("AHA2_KNOWLEDGE_VAULT_ENABLED"), "enable the file-backed knowledge vault (Phase 1: configuration only, legacy knowledge UI/API unchanged)")
+	knowledgeVaultPath := flags.String("knowledge-vault-path", os.Getenv("AHA2_KNOWLEDGE_VAULT_PATH"), "knowledge vault directory (default <data-dir>/knowledge-vault)")
+	knowledgeVaultIndex := flags.String("knowledge-vault-index", os.Getenv("AHA2_KNOWLEDGE_VAULT_INDEX"), "knowledge index database (default <data-dir>/knowledge-vault-index.db)")
 	// Live inbox delivery is always enabled when the runner can stream stdin.
 	// Keep the old switches as parse-only no-ops so existing service definitions
 	// and scripts still start; they cannot turn the behavior on or off.
@@ -195,6 +206,9 @@ func parseServeOptions(name string, args []string) (serveOptions, error) {
 		logLevel: *logLevel, codexBinary: *codexBinary,
 		claudeBinary: *claudeBinary, dshBinary: *dshBinary,
 		localOwnerIngest:           *localOwnerIngest,
+		knowledgeVaultEnabled:      *knowledgeVaultEnabled,
+		knowledgeVaultPath:         *knowledgeVaultPath,
+		knowledgeVaultIndex:        *knowledgeVaultIndex,
 		deprecatedLiveInput:        deprecatedLiveInput,
 		deprecatedAgentAPIInsecure: deprecatedAgentAPIInsecure,
 	}, nil
@@ -260,6 +274,17 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	}
 	if err := os.MkdirAll(absoluteDataDir, 0o700); err != nil {
 		return fmt.Errorf("create data dir: %w", err)
+	}
+	if options.knowledgeVaultEnabled {
+		vaultConfig, err := (knowledgevault.Config{
+			Enabled: options.knowledgeVaultEnabled, DataDir: absoluteDataDir,
+			VaultPath: options.knowledgeVaultPath, IndexPath: options.knowledgeVaultIndex,
+		}).Normalized()
+		if err != nil {
+			return fmt.Errorf("resolve knowledge vault configuration: %w", err)
+		}
+		logger.Info("knowledge vault enabled (Phase 1 configuration only; legacy knowledge UI and API are unchanged)",
+			"vault", vaultConfig.VaultPath, "index", vaultConfig.IndexPath)
 	}
 	if options.setupTokenFile == "" {
 		options.setupTokenFile = filepath.Join(absoluteDataDir, "setup-token")
