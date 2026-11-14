@@ -209,6 +209,12 @@ type Service struct {
 	// the bounded-stage path runs in milliseconds. Zero uses the constant.
 	agentAPIStdioProbeBudget time.Duration
 
+	// activityMu guards the in-memory tool stream state behind TaskActivity.
+	// It is separate from mu so emitting an event never waits on cancellation
+	// bookkeeping (and vice versa).
+	activityMu sync.Mutex
+	activities map[string]*domain.TurnActivityState
+
 	mu                  sync.Mutex
 	cancels             map[string]context.CancelFunc
 	runContext          context.Context
@@ -347,6 +353,7 @@ func NewService(database *store.Store, secretStore *secrets.FileStore, executor 
 		prompts:              prompt.NewEngine(database),
 		cancels:              map[string]context.CancelFunc{},
 		runContext:           context.Background(),
+		activities:           map[string]*domain.TurnActivityState{},
 		mergeDelay:           time.Second,
 		mergeTimers:          map[string]*time.Timer{},
 		collaborationDelay:   350 * time.Millisecond,
@@ -1086,6 +1093,9 @@ const (
 
 func (s *Service) runTurn(ctx context.Context, turnID string) {
 	defer func() {
+		// Tool stream state has no meaning after the turn settles and the stored
+		// timestamps carry the terminal phase.
+		s.clearActivity(turnID)
 		// A canceled preparation can return before any terminal write happens.
 		// Settle it while the cancel handle is still registered, then remove the
 		// handle so a later InterruptTurn can fall back to the stored status.
@@ -2592,6 +2602,7 @@ func latestTurnsByAgent(turns []domain.Turn) map[string]domain.Turn {
 }
 
 func (s *Service) recordExecutionEvent(ctx context.Context, turn domain.Turn, event ExecutionEvent) {
+	s.noteExecutionActivity(turn, event)
 	if event.Type == "agent_progress" && strings.EqualFold(fmt.Sprint(event.Data["phase"]), "streaming") {
 		return
 	}
@@ -2687,6 +2698,8 @@ func (s *Service) emitTurn(ctx context.Context, turn domain.Turn, eventType stri
 	data["attempt"] = turn.Attempt
 	data["generation"] = turn.Generation
 	data["required"] = turn.Required
+	// The same snapshot type is returned by Task detail. Old clients ignore it.
+	data["activity"] = s.activitySnapshot(turn)
 	s.emit(ctx, turn.TaskID, "turn", turn.ID, eventType, data)
 }
 

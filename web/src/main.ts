@@ -580,7 +580,7 @@ const state: State = {
   taskConversationBefore: 0,
   taskConversationLatest: 0,
   taskEventCursor: 0,
-  taskCategories: {chat: true, update: true, tool: false, error: true},
+  taskCategories: {chat: true, update: false, tool: false, error: true},
   taskContext: null,
   taskRealtimeState: "connecting",
   taskDraft: "",
@@ -3591,6 +3591,12 @@ function taskRuntimeSignature(detail: TaskDetail | null): string {
     agents: (detail.agents || []).map(agent => [
       agent.agent_id, agent.status, agent.runtime_config_snapshot_id, agent.unread_count, agent.updated_at,
     ]),
+    // Elapsed time is intentionally absent: the card ticks it locally, while a
+    // phase or tool change must be able to trigger an incremental re-render.
+    activity: detail.activity ? [
+      detail.activity.phase, detail.activity.tool_name, detail.activity.since_ms,
+      detail.activity.turn_id, detail.activity.attempt,
+    ] : null,
     hardware: detail.hardware,
     memory: detail.memory,
   });

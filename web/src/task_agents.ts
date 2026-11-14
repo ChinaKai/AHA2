@@ -1,7 +1,8 @@
 import {icon} from "./icons.js";
+import {t} from "./i18n.js";
 import {fastModeFieldHTML, proxyOptionsHTML, runtimeBackendChoices, runtimeFieldsHTML} from "./runtime_picker.js";
 import type {RuntimeSelection} from "./runtime_picker.js";
-import type {CodexAccount, ConversationItem, MCPServer, Model, Skill, TaskAgent, TaskContextDetail, TaskDetail, TaskMemory, Turn} from "./types.js";
+import type {CodexAccount, ConversationItem, MCPServer, Model, Skill, TaskActivity, TaskAgent, TaskContextDetail, TaskDetail, TaskMemory, Turn} from "./types.js";
 import {stableTextSignature} from "./ui_helpers.js";
 
 export type TaskRealtimeState = "connecting" | "live" | "fallback";
@@ -81,6 +82,33 @@ function liveElapsedAttributes(elapsedMs: number, running: boolean): string {
 
 export function isActiveTurn(status: string): boolean {
   return !["succeeded", "failed", "interrupted", "blocked"].includes(status);
+}
+
+function activityLabel(activity: TaskActivity): string {
+  switch (activity.phase) {
+    case "queued": return t("round.activity.queued");
+    case "preparing": return t("round.activity.preparing");
+    case "session_wake": return t("round.activity.sessionWake");
+    case "tool": return activity.tool_name
+      ? t("round.activity.tool", {name: activity.tool_name})
+      : t("round.activity.toolGeneric");
+    case "waiting_backend": return t("round.activity.waitingBackend");
+    case "retrying": return t("round.activity.retrying");
+    case "finalizing": return t("round.activity.finalizing");
+    case "thinking": return t("round.activity.thinking");
+    case "done": return t("round.summary.completed");
+    case "failed": return t("round.summary.failed");
+    default: return t("round.summary.running");
+  }
+}
+
+function terminalRoundLabel(roundStatus: string, activity: TaskActivity | null | undefined): string {
+  if (roundStatus === "completed") return t("round.summary.completed");
+  if (roundStatus === "failed") return t("round.summary.failed");
+  if (roundStatus === "interrupted") return t("round.summary.interrupted");
+  if (activity?.phase === "done") return t("round.summary.completed");
+  if (activity?.phase === "failed") return t("round.summary.failed");
+  return statusLabel(roundStatus);
 }
 
 export function usageNumber(usage: Record<string, number> | undefined, key: string): number {
@@ -180,7 +208,6 @@ export function renderAgentTurnCard(
   }
   const active = turns.filter(turn => isActiveTurn(turn.status));
   const failure = [...turns].reverse().find(turn => turn.status === "failed" || turn.status === "blocked");
-  const completed = turns.filter(turn => turn.status === "succeeded").length;
   const roundElapsed = Number(round.elapsed_ms || durationMs(
     round.started_at_ms || round.started_at || round.created_at_ms || round.created_at,
     round.finished_at_ms || round.finished_at,
@@ -206,9 +233,18 @@ export function renderAgentTurnCard(
   const usage = focus.usage || {};
   const inputTokens = Number(contextMetrics?.input_tokens ?? roundInputTokens(usage));
   const outputTokens = Number(contextMetrics?.output_tokens ?? usageNumber(usage, "output_tokens"));
+  const activity = detail.activity || null;
+  const liveActivity = active.length && activity && activity.phase !== "done" && activity.phase !== "failed" ? activity : null;
+  const activityElapsed = Number(liveActivity?.elapsed_ms);
+  const summaryElapsed = Number.isFinite(activityElapsed) && activityElapsed >= 0 ? activityElapsed : roundElapsed;
+  // The live region only wraps the phase label. The elapsed clock ticks every
+  // second and would otherwise be announced on every tick.
+  const summaryLine = active.length
+    ? `<span class="round-summary-phase"><span class="round-activity" role="status" aria-live="polite">${escapeHTML(liveActivity ? activityLabel(liveActivity) : statusLabel(focus.status))}</span> · <time${liveElapsedAttributes(summaryElapsed, true)}>${formatDuration(summaryElapsed)}</time></span>`
+    : `<span class="round-summary-phase">${escapeHTML(terminalRoundLabel(round.status, activity))}</span>`;
   return `<section class="agent-turn-card ${active.length ? "active" : ""}">
     <details>
-      <summary><span>Round ${round.sequence} · <span>${statusLabel(round.status)}</span> · <time${liveElapsedAttributes(roundElapsed, active.length > 0)}>${formatDuration(roundElapsed)}</time> · ${completed}/${turns.length}</span><small>${turns.length} Agents · ${active.length} active</small><code data-round-channel class="round-channel ${realtimeState}">${realtimeState === "live" ? "SSE" : realtimeState === "fallback" ? "2s" : "..."}</code></summary>
+      <summary><span>Round ${round.sequence} · ${summaryLine}</span><small>${turns.length} Agents · ${active.length} active</small><code data-round-channel class="round-channel ${realtimeState}">${realtimeState === "live" ? "SSE" : realtimeState === "fallback" ? "2s" : "..."}</code></summary>
       <div class="agent-turn-rows">${rows}</div>
       <div class="turn-stage-grid">
         <span><small>排队</small><strong>${formatDuration(Number(focus.queue_duration_ms || 0))}</strong></span>

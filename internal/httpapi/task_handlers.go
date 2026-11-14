@@ -497,7 +497,11 @@ func (s *Server) taskDetail(writer http.ResponseWriter, request *http.Request) {
 				turns = append(turns, turn)
 			}
 		}
-		writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "task": mirror.Task, "latest_round": latest, "turns": turns, "agents": mirror.Agents, "memory": compactTaskMemory(mirror.Memory), "hardware": mirror.Hardware, "event_cursor": 0, "server_time_ms": time.Now().UTC().UnixMilli()})
+		var mirrorActivity *domain.TaskActivity
+		if s.app != nil {
+			mirrorActivity = s.app.TaskActivity(latest, turns)
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "task": mirror.Task, "latest_round": latest, "turns": turns, "activity": mirrorActivity, "agents": mirror.Agents, "memory": compactTaskMemory(mirror.Memory), "hardware": mirror.Hardware, "event_cursor": 0, "server_time_ms": time.Now().UTC().UnixMilli()})
 		return
 	}
 	ctx := request.Context()
@@ -542,8 +546,12 @@ func (s *Server) taskDetail(writer http.ResponseWriter, request *http.Request) {
 	now := time.Now().UTC()
 	applyRoundTiming(&round, now)
 	applyTurnTimings(turns, now)
+	var activity *domain.TaskActivity
+	if s.app != nil {
+		activity = s.app.TaskActivity(round, turns)
+	}
 	writeJSON(writer, http.StatusOK, map[string]any{
-		"ok": true, "task": task, "latest_round": round, "turns": turns, "agents": agents, "memory": compactTaskMemory(memory),
+		"ok": true, "task": task, "latest_round": round, "turns": turns, "activity": activity, "agents": agents, "memory": compactTaskMemory(memory),
 		"hardware":            hardwareGroups,
 		"hardware_resources":  hardwareResources,
 		"permission_requests": permissionRequests,

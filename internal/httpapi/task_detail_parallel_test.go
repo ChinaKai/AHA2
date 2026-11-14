@@ -422,3 +422,19 @@ func BenchmarkTaskDetail(b *testing.B) {
 		}
 	}
 }
+
+func TestTaskDetailIncludesAuthoritativeActivity(t *testing.T) {
+	fixture := newTaskDetailFixture(t, true)
+	sections := getTaskDetailSections(t, fixture)
+	raw, ok := sections["activity"]
+	if !ok || string(raw) == "null" {
+		t.Fatalf("task detail activity = %s, want a snapshot", raw)
+	}
+	var activity domain.TaskActivity
+	if err := json.Unmarshal(raw, &activity); err != nil {
+		t.Fatal(err)
+	}
+	if activity.Phase != domain.ActivityDone || activity.TurnID == "" || activity.RoundID == "" {
+		t.Fatalf("activity = %+v, want a finished turn snapshot", activity)
+	}
+}

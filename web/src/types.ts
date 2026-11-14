@@ -559,6 +559,30 @@ export interface TaskRound {
   elapsed_ms: number;
 }
 
+export type ActivityPhase =
+  | "queued"
+  | "preparing"
+  | "session_wake"
+  | "thinking"
+  | "tool"
+  | "waiting_backend"
+  | "retrying"
+  | "finalizing"
+  | "done"
+  | "failed";
+
+export interface TaskActivity {
+  phase: ActivityPhase;
+  tool_name?: string;
+  since?: string;
+  since_ms?: number;
+  elapsed_ms?: number;
+  attempt: number;
+  round_id: string;
+  turn_id: string;
+  agent_id: string;
+}
+
 export type ConversationCategory = "chat" | "update" | "tool" | "error";
 
 export interface Attachment {
@@ -869,6 +893,7 @@ export interface TaskDetail {
   task: Task;
   latest_round?: TaskRound;
   turns: Turn[];
+  activity?: TaskActivity | null;
   agents: TaskAgent[];
   memory?: TaskMemory;
   hardware?: HardwareGroup[];

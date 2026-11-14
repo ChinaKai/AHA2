@@ -1436,6 +1436,11 @@ dialog.agent-config-dialog { width: min(760px,calc(100vw - 32px)); }
 .round-channel.live { background: #edf9f1; color: var(--green); }
 .round-channel.fallback { background: #edf4ff; color: #1d4ed8; }
 .round-channel.connecting { background: #fff7e8; color: var(--amber); }
+.round-summary-phase { display: inline-flex; align-items: baseline; gap: 4px; min-width: 0; white-space: nowrap; }
+.round-activity { display: inline-flex; align-items: center; gap: 4px; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.round-activity::before { content: ""; flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%; background: var(--green); animation: round-activity-pulse 1.4s ease-in-out infinite; }
+@keyframes round-activity-pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .35; transform: scale(.7); } }
+@media (prefers-reduced-motion: reduce) { .round-activity::before { animation: none; } }
 .agent-turn-rows { border-top: 1px solid var(--line); }
 .agent-turn-row { display: grid; grid-template-columns: 90px 75px 48px minmax(80px,1fr) 66px 68px; align-items: center; gap: 8px; min-height: 31px; padding: 4px 10px; border-bottom: 1px solid #edf0f3; font-size: 10px; }
 .agent-turn-row > strong { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }

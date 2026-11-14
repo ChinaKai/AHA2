@@ -1521,7 +1521,7 @@ test("built web contains responsive application", async () => {
   assert.doesNotMatch(conversation, /mailConversationCardHtml|mail-message-card|data-message-category="mail"/);
   assert.doesNotMatch(script, /taskCategories:\s*\{[\s\S]{0,200}mail/);
   assert.doesNotMatch(script, /\["chat", "update", "error", "mail"\]/);
-  assert.match(script, /taskCategories:\s*\{[\s\S]{0,200}tool:\s*false/);
+  assert.match(script, /taskCategories:\s*\{\s*chat:\s*true,\s*update:\s*false,\s*tool:\s*false,\s*error:\s*true\s*\}/);
   assert.match(script, /消息已排队/);
   assert.match(promptAdmin, /prompt-template-layout/);
   assert.match(script, /renderCodexAccounts/);
@@ -2015,6 +2015,60 @@ test("round card reports uncached turn input and hides ambiguous cache usage", a
   assert.match(html, /<small>Context<\/small><strong>128\.6K \/ 258\.4K<\/strong>/);
   assert.doesNotMatch(html, /<small>Turn Cache<\/small>/);
   assert.doesNotMatch(html, /<small>Input<\/small><strong>128\.6K<\/strong>/);
+});
+
+test("round summary shows the backend activity and collapses terminal rounds", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const {renderAgentTurnCard} = await import(pathToFileURL(resolve(root, "build", "task_agents.js")));
+  const base = {
+    task: {id: "task-1", project_id: "project-1", workspace_id: "workspace-1", title: "Task", original_request: "", current_goal: "", status: "active", isolation: "inplace", collaboration_mode: "single", max_agents: 1, knowledge_policy: "inherit", skill_ids: [], total_tokens: 0, created_at: "", updated_at: ""},
+    latest_round: {id: "round-1", task_id: "task-1", sequence: 2, status: "running", created_at: ""},
+    agents: [],
+    turns: [{
+      id: "turn-1", task_id: "task-1", round_id: "round-1", agent_id: "main", sequence: 2,
+      generation: 1, attempt: 1, status: "running", instruction: "", prompt_chars: 0,
+      context_window: 258400, usage: {}, created_at: "",
+    }],
+    event_cursor: 0,
+    server_time_ms: 0,
+  };
+  const tool = renderAgentTurnCard({...base, activity: {
+    phase: "tool", tool_name: "Read", since_ms: 0, elapsed_ms: 12000,
+    attempt: 1, round_id: "round-1", turn_id: "turn-1", agent_id: "main",
+  }}, "live");
+  assert.match(tool, /role="status" aria-live="polite"/);
+  assert.match(tool, /正在调用工具：Read/);
+  assert.match(tool, /data-live-elapsed-ms="12000"/);
+  assert.match(tool, /<details>/);
+
+  const done = renderAgentTurnCard({...base,
+    latest_round: {...base.latest_round, status: "completed"},
+    turns: [{...base.turns[0], status: "succeeded", finished_at_ms: 20000}],
+    activity: {phase: "done", elapsed_ms: 0, attempt: 1, round_id: "round-1", turn_id: "turn-1", agent_id: "main"},
+  }, "live");
+  assert.match(done, /Round 2 · <span class="round-summary-phase">完成<\/span>/);
+  assert.doesNotMatch(done, /role="status"/);
+  assert.match(done, /<details>/);
+
+  const failed = renderAgentTurnCard({...base,
+    latest_round: {...base.latest_round, status: "failed"},
+    turns: [{...base.turns[0], status: "failed", error: "backend exploded"}],
+    activity: {phase: "failed", elapsed_ms: 0, attempt: 1, round_id: "round-1", turn_id: "turn-1", agent_id: "main"},
+  }, "live");
+  assert.match(failed, /Round 2 · <span class="round-summary-phase">失败<\/span>/);
+  assert.match(failed, /backend exploded/);
+
+  const i18n = await import(pathToFileURL(resolve(root, "build", "i18n.js")));
+  i18n.applyLocale("en-US");
+  try {
+    const english = renderAgentTurnCard({...base, activity: {
+      phase: "tool", tool_name: "Read", elapsed_ms: 12000,
+      attempt: 1, round_id: "round-1", turn_id: "turn-1", agent_id: "main",
+    }}, "live");
+    assert.match(english, /Calling tool: Read/);
+  } finally {
+    i18n.applyLocale("zh-CN");
+  }
 });
 
 test("codex accounts render compact weekly quota", async () => {
