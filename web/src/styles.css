@@ -933,7 +933,10 @@ dt { margin-top: 9px; color: var(--muted); font-size: 9px; }
 dd { margin: 3px 0 0; overflow-wrap: anywhere; font-size: 11px; }
 .turn-line { display: grid; gap: 4px; margin-bottom: 8px; }
 .turn-line small { color: var(--muted); overflow-wrap: anywhere; }
-.conversation { display: grid; grid-template-rows: auto minmax(0,1fr) auto; width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; }
+/* The explicit minmax(0,1fr) column keeps the Round summary's nowrap content
+   from sizing the implicit track to max-content on phones; overflow-x:hidden
+   used to clip the card and its SSE badge instead of constraining it. */
+.conversation { display: grid; grid-template-columns: minmax(0,1fr); grid-template-rows: auto minmax(0,1fr) auto; width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; }
 .turn-card { display: grid; gap: 3px; padding: 11px 16px; border-bottom: 1px solid var(--line); background: #f8f9fb; }
 .turn-card.active { background: #fff7e8; }
 .turn-card small { color: var(--muted); }
@@ -1391,12 +1394,16 @@ dialog.agent-config-dialog { width: min(760px,calc(100vw - 32px)); }
 .agent-selector-state.warn { color: var(--amber); }
 .conversation { grid-template-rows: auto minmax(0,1fr) auto auto; }
 .load-older { display: flex; margin: 0 auto 14px; min-height: 30px; color: var(--muted); font-size: 10px; }
-.agent-turn-card { max-height: min(36vh,300px); margin: 0 12px 8px; overflow: auto; border: 1px solid var(--color-border); border-radius: var(--radius-card); background: var(--color-surface); }
+.agent-turn-card { min-width: 0; max-height: min(36vh,300px); margin: 0 12px 8px; overflow: auto; border: 1px solid var(--color-border); border-radius: var(--radius-card); background: var(--color-surface); }
+.agent-turn-card details { min-width: 0; }
 .agent-turn-card.active { border-color: #a9c5f7; }
 .agent-turn-card.empty-turn { display: grid; gap: 3px; padding: 10px 12px; background: #f8fafc; }
 .agent-turn-card.empty-turn small { color: var(--muted); }
 .agent-turn-card details > summary { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 38px; padding: 0 10px; background: #f8fafc; cursor: pointer; font-weight: 800; }
-.agent-turn-card details > summary small { color: var(--muted); font-weight: 500; }
+/* The summary line is a flex row: the label takes the remaining width and can
+   shrink, while the channel badge and agent count keep their intrinsic size. */
+.agent-turn-card details > summary > span { flex: 0 1 auto; min-width: 0; }
+.agent-turn-card details > summary small { flex: 0 0 auto; color: var(--muted); font-weight: 500; }
 .turn-failure { display: grid; gap: 3px; padding: 8px 10px; border-top: 1px solid #efc5c2; background: #fff7f6; color: var(--red); font-size: 10px; }
 .turn-failure span { color: #7f302b; overflow-wrap: anywhere; }
 .task-failure-banner { display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid #efc5c2; background: #fff7f6; color: var(--red); font-size: 10px; }
@@ -1440,7 +1447,11 @@ dialog.agent-config-dialog { width: min(760px,calc(100vw - 32px)); }
 .round-channel.fallback { background: #edf4ff; color: #1d4ed8; }
 .round-channel.connecting { background: #fff7e8; color: var(--amber); }
 .round-summary-phase { display: inline-flex; align-items: baseline; gap: 4px; min-width: 0; white-space: nowrap; }
-.round-activity { display: inline-flex; align-items: center; gap: 4px; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* text-overflow does not reach a bare text node inside a flex container, so the
+   label gets its own truncating span; the dot and elapsed time keep their width. */
+.round-activity { display: inline-flex; flex: 0 1 auto; align-items: center; gap: 4px; min-width: 0; overflow: hidden; }
+.round-activity-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.round-summary-phase time { flex: 0 0 auto; }
 .round-activity::before { content: ""; flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%; background: var(--green); animation: round-activity-pulse 1.4s ease-in-out infinite; }
 @keyframes round-activity-pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .35; transform: scale(.7); } }
 @media (prefers-reduced-motion: reduce) { .round-activity::before { animation: none; } }
@@ -2157,7 +2168,11 @@ dialog.agent-config-dialog { width: min(760px,calc(100vw - 32px)); }
   .slash-command-menu button { grid-template-columns: 34px 92px minmax(0,1fr); min-height: 36px; padding: 5px 7px; }
   .agent-turn-card { max-width: calc(100% - 16px); margin-right: 8px; margin-left: 8px; }
   .agent-turn-card details > summary { min-width: 0; padding-right: 7px; padding-left: 7px; }
-  .agent-turn-card details > summary > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* The label row is itself a flex container so the phase can shrink below its
+     max-content width; the ellipsis then lands inside the activity text while
+     the elapsed time and the SSE badge stay at their natural width. */
+  .agent-turn-card details > summary > span { display: flex; align-items: baseline; gap: 4px; min-width: 0; overflow: hidden; white-space: nowrap; }
+  .agent-turn-card details > summary > span > .round-summary-phase { flex: 1 1 auto; overflow: hidden; }
   .agent-turn-card details > summary > small { display: none; }
   .agent-turn-row { grid-template-columns: 70px 62px 40px minmax(50px,1fr) 56px; gap: 5px; padding-right: 7px; padding-left: 7px; }
   .agent-turn-row > small { display: none; }

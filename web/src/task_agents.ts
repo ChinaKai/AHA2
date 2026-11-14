@@ -240,7 +240,7 @@ export function renderAgentTurnCard(
   // The live region only wraps the phase label. The elapsed clock ticks every
   // second and would otherwise be announced on every tick.
   const summaryLine = active.length
-    ? `<span class="round-summary-phase"><span class="round-activity" role="status" aria-live="polite">${escapeHTML(liveActivity ? activityLabel(liveActivity) : statusLabel(focus.status))}</span> · <time${liveElapsedAttributes(summaryElapsed, true)}>${formatDuration(summaryElapsed)}</time></span>`
+    ? `<span class="round-summary-phase"><span class="round-activity" role="status" aria-live="polite"><span class="round-activity-text">${escapeHTML(liveActivity ? activityLabel(liveActivity) : statusLabel(focus.status))}</span></span> · <time${liveElapsedAttributes(summaryElapsed, true)}>${formatDuration(summaryElapsed)}</time></span>`
     : `<span class="round-summary-phase">${escapeHTML(terminalRoundLabel(round.status, activity))}</span>`;
   return `<section class="agent-turn-card ${active.length ? "active" : ""}">
     <details>
