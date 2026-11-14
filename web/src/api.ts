@@ -32,9 +32,12 @@ import type {
   KnowledgeReviewSettings,
   KnowledgeVaultDoc,
   KnowledgeVaultInbox,
+  KnowledgeVaultInitResponse,
   KnowledgeVaultLibraries,
   KnowledgeVaultRecent,
+  KnowledgeVaultRebuildResponse,
   KnowledgeVaultSearch,
+  KnowledgeVaultSettingsResponse,
   KnowledgeVaultSkills,
   KnowledgeVaultTree,
   Model,
@@ -1049,6 +1052,24 @@ class APIClient {
 
   knowledgeVaultSkills(): Promise<KnowledgeVaultSkills> {
     return this.request("/api/v1/knowledge-vault/skills");
+  }
+
+  // Phase 3 runtime settings. The toggle answers with the live status, so the
+  // panel never has to guess whether the vault/index is ready.
+  knowledgeVaultSettings(): Promise<KnowledgeVaultSettingsResponse> {
+    return this.request("/api/v1/settings/knowledge-vault");
+  }
+
+  updateKnowledgeVaultSettings(enabled: boolean): Promise<KnowledgeVaultSettingsResponse> {
+    return this.request("/api/v1/settings/knowledge-vault", {method: "PUT", body: JSON.stringify({enabled})});
+  }
+
+  initializeKnowledgeVaultSamples(samples = true): Promise<KnowledgeVaultInitResponse> {
+    return this.request("/api/v1/settings/knowledge-vault/init", {method: "POST", body: JSON.stringify({samples})});
+  }
+
+  rebuildKnowledgeVaultIndex(): Promise<KnowledgeVaultRebuildResponse> {
+    return this.request("/api/v1/settings/knowledge-vault/rebuild", {method: "POST"});
   }
 
   knowledgeLibraries(): Promise<{libraries: KnowledgeLibrary[]}> {

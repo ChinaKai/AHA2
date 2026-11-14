@@ -769,6 +769,29 @@ type IndexStatus struct {
 	RebuiltAt string `json:"rebuilt_at,omitempty"`
 }
 
+// VisibleEntryCount counts documents a reader actually sees in the knowledge
+// tree: inbox files and reserved top-level paths (skills, .trash, ...) are
+// excluded, matching the reader's tree and library counts.
+func (i *Index) VisibleEntryCount(ctx context.Context) (int, error) {
+	rows, err := i.db.QueryContext(ctx, `SELECT path FROM entries`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		var relative string
+		if err := rows.Scan(&relative); err != nil {
+			return 0, err
+		}
+		if isInboxPath(relative) || isReservedVaultPath(relative) {
+			continue
+		}
+		count++
+	}
+	return count, rows.Err()
+}
+
 func (i *Index) Status(ctx context.Context) (IndexStatus, error) {
 	status := IndexStatus{Path: i.path}
 	counts := []struct {

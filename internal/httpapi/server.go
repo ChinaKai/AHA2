@@ -69,9 +69,10 @@ type Config struct {
 	// LocalOwnerIngest registers the loopback-only owner message ingest route.
 	// It is off by default; when off the path is not routed at all.
 	LocalOwnerIngest bool
-	// KnowledgeVault is non-nil only when the Phase 2 feature switch is on.
-	// The legacy knowledge routes stay registered either way.
-	KnowledgeVault *knowledgevault.Reader
+	// KnowledgeVault is the Phase 3 runtime manager. It is always non-nil in
+	// production so routes can stay registered and report "disabled" with a
+	// 404 while the switch is off. The legacy knowledge routes never change.
+	KnowledgeVault *knowledgevault.Manager
 	StartedAt      time.Time
 }
 
@@ -124,7 +125,7 @@ type Server struct {
 	systemCachedAt           time.Time
 	systemCache              map[string]any
 	runtimeContextCache      runtimeContextCache
-	knowledgeVault           *knowledgevault.Reader
+	knowledgeVault           *knowledgevault.Manager
 }
 
 func New(config Config) *Server {
@@ -550,9 +551,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/knowledge/proposals/{id}/approve", s.withAuth(http.HandlerFunc(s.approveKnowledgeProposal)))
 	mux.Handle("POST /api/v1/knowledge/proposals/{id}/reject", s.withAuth(http.HandlerFunc(s.rejectKnowledgeProposal)))
 	mux.Handle("POST /api/v1/knowledge/proposals/batch", s.withAuth(http.HandlerFunc(s.batchKnowledgeProposalReviews)))
-	// Phase 2 read-only vault API. Routes are absent when the feature switch is
-	// off, so the path falls through to a 404 and no legacy knowledge behavior
-	// changes.
+	// Phase 2/3 read-only vault API. Routes are always registered when the
+	// manager exists; when the runtime switch is off every data endpoint
+	// answers 404 knowledge_vault_disabled. The legacy knowledge routes are
+	// untouched.
 	if s.knowledgeVault != nil {
 		mux.Handle("GET /api/v1/knowledge-vault/libraries", s.withAuth(http.HandlerFunc(s.knowledgeVaultLibraries)))
 		mux.Handle("GET /api/v1/knowledge-vault/tree", s.withAuth(http.HandlerFunc(s.knowledgeVaultTree)))
@@ -561,6 +563,10 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("GET /api/v1/knowledge-vault/recent", s.withAuth(http.HandlerFunc(s.knowledgeVaultRecent)))
 		mux.Handle("GET /api/v1/knowledge-vault/inbox", s.withAuth(http.HandlerFunc(s.knowledgeVaultInbox)))
 		mux.Handle("GET /api/v1/knowledge-vault/skills", s.withAuth(http.HandlerFunc(s.knowledgeVaultSkills)))
+		mux.Handle("GET /api/v1/settings/knowledge-vault", s.withAuth(http.HandlerFunc(s.knowledgeVaultSettings)))
+		mux.Handle("PUT /api/v1/settings/knowledge-vault", s.withAuth(http.HandlerFunc(s.updateKnowledgeVaultSettings)))
+		mux.Handle("POST /api/v1/settings/knowledge-vault/init", s.withAuth(http.HandlerFunc(s.initializeKnowledgeVault)))
+		mux.Handle("POST /api/v1/settings/knowledge-vault/rebuild", s.withAuth(http.HandlerFunc(s.rebuildKnowledgeVaultIndex)))
 	}
 	mux.Handle("GET /api/v1/projects/{id}/product-lines", s.withAuth(http.HandlerFunc(s.listProductLines)))
 	mux.Handle("POST /api/v1/projects/{id}/product-lines", s.withAuth(http.HandlerFunc(s.createProductLine)))

@@ -183,7 +183,7 @@ func parseServeOptions(name string, args []string) (serveOptions, error) {
 	claudeBinary := flags.String("claude-bin", envOr("AHA2_CLAUDE_BIN", "claude"), "Claude Code executable")
 	dshBinary := flags.String("dsh-bin", envOr("AHA2_DSH_BIN", "dsh"), "DeepSeek Harness executable")
 	localOwnerIngest := flags.Bool("local-owner-ingest", envBool("AHA2_LOCAL_OWNER_INGEST"), "enable the loopback-only local owner message ingest endpoint")
-	knowledgeVaultEnabled := flags.Bool("knowledge-vault-enabled", envBool("AHA2_KNOWLEDGE_VAULT_ENABLED"), "enable the file-backed knowledge vault (Phase 1: configuration only, legacy knowledge UI/API unchanged)")
+	knowledgeVaultEnabled := flags.Bool("knowledge-vault-enabled", envBool("AHA2_KNOWLEDGE_VAULT_ENABLED"), "startup default for the file-backed knowledge vault (the Web settings toggle takes precedence once used)")
 	knowledgeVaultPath := flags.String("knowledge-vault-path", os.Getenv("AHA2_KNOWLEDGE_VAULT_PATH"), "knowledge vault directory (default <data-dir>/knowledge-vault)")
 	knowledgeVaultIndex := flags.String("knowledge-vault-index", os.Getenv("AHA2_KNOWLEDGE_VAULT_INDEX"), "knowledge index database (default <data-dir>/knowledge-vault-index.db)")
 	knowledgeVaultRemoteHost := flags.String("knowledge-vault-remote-host", os.Getenv("AHA2_KNOWLEDGE_VAULT_REMOTE_HOST"), "SSH host used for vscode-remote knowledge links (optional)")
@@ -278,24 +278,21 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	if err := os.MkdirAll(absoluteDataDir, 0o700); err != nil {
 		return fmt.Errorf("create data dir: %w", err)
 	}
-	var knowledgeVaultReader *knowledgevault.Reader
-	if options.knowledgeVaultEnabled {
-		vaultConfig, err := (knowledgevault.Config{
-			Enabled: options.knowledgeVaultEnabled, DataDir: absoluteDataDir,
-			VaultPath: options.knowledgeVaultPath, IndexPath: options.knowledgeVaultIndex,
-		}).Normalized()
-		if err != nil {
-			return fmt.Errorf("resolve knowledge vault configuration: %w", err)
-		}
-		knowledgeVaultReader, err = knowledgevault.OpenReader(ctx, vaultConfig, options.knowledgeVaultRemoteHost)
-		if err != nil {
-			return fmt.Errorf("open knowledge vault: %w", err)
-		}
-		defer knowledgeVaultReader.Close()
-		logger.Info("knowledge vault enabled (Phase 2 read-only Web/API; legacy knowledge UI and API are unchanged)",
-			"vault", vaultConfig.VaultPath, "index", vaultConfig.IndexPath,
-			"vault_ready", knowledgeVaultReader.VaultReady(), "index_ready", knowledgeVaultReader.IndexReady())
+	knowledgeVaultConfig, err := (knowledgevault.Config{
+		Enabled: options.knowledgeVaultEnabled, DataDir: absoluteDataDir,
+		VaultPath: options.knowledgeVaultPath, IndexPath: options.knowledgeVaultIndex,
+	}).Normalized()
+	if err != nil {
+		return fmt.Errorf("resolve knowledge vault configuration: %w", err)
 	}
+	// The manager always exists so the Phase 3 routes stay registered and can
+	// report "disabled" with a plain 404. The effective value is applied after
+	// the database is open: a Web toggle (configured=1) outranks env/flags.
+	knowledgeVaultManager, err := knowledgevault.NewManager(knowledgeVaultConfig, options.knowledgeVaultRemoteHost)
+	if err != nil {
+		return fmt.Errorf("create knowledge vault manager: %w", err)
+	}
+	defer knowledgeVaultManager.Close()
 	if options.setupTokenFile == "" {
 		options.setupTokenFile = filepath.Join(absoluteDataDir, "setup-token")
 	}
@@ -309,6 +306,27 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 		return err
 	}
 	defer database.Close()
+	// Phase 3 startup precedence: a Web toggle persisted with configured=1 is
+	// authoritative; otherwise the env/flag value decides and is NOT written
+	// back, so an operator can still change the default until the owner uses
+	// the settings panel.
+	vaultSettings, err := database.KnowledgeVaultSettings(ctx)
+	if err != nil {
+		return fmt.Errorf("read knowledge vault settings: %w", err)
+	}
+	vaultEnabled, vaultSource := knowledgevault.EffectiveStartupSwitch(
+		vaultSettings.Configured, vaultSettings.Enabled, options.knowledgeVaultEnabled,
+	)
+	knowledgeVaultManager.SetSource(vaultSource)
+	if err := knowledgeVaultManager.SetEnabled(ctx, vaultEnabled); err != nil {
+		// A broken index must not keep the whole control plane from starting;
+		// the owner can rebuild it from the settings panel or the CLI.
+		logger.Warn("knowledge vault could not be opened; starting with it disabled",
+			"vault", knowledgeVaultConfig.VaultPath, "index", knowledgeVaultConfig.IndexPath, "error", err)
+	}
+	logger.Info("knowledge vault runtime switch",
+		"enabled", knowledgeVaultManager.Enabled(), "source", vaultSource,
+		"vault", knowledgeVaultConfig.VaultPath, "index", knowledgeVaultConfig.IndexPath)
 	// The periodic sync worker gets its own pool over the same WAL file. Long
 	// export/pull phases no longer occupy the Web API connection; writes still
 	// serialize through SQLite with busy_timeout and an immediate transaction
@@ -435,7 +453,7 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 		WebVersion:          webVersion,
 		ListenAddress:       options.listen,
 		LocalOwnerIngest:    options.localOwnerIngest,
-		KnowledgeVault:      knowledgeVaultReader,
+		KnowledgeVault:      knowledgeVaultManager,
 	})
 	if options.allowCrossOrigin {
 		logger.Warn("Origin host validation disabled")

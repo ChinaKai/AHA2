@@ -75,6 +75,7 @@ import type {
   NetworkSettings,
   KnowledgeProposal,
   KnowledgeReviewSettings,
+  KnowledgeVaultSettings,
   MailAccount,
   MailMessage,
   MailTemplate,
@@ -264,6 +265,30 @@ function bindKnowledgeVaultPage(...args: Parameters<KnowledgeVaultPageModule["bi
   const module = knowledgeVaultPage.loaded();
   if (module) module.bindKnowledgeVaultPage(...args);
   else void knowledgeVaultPage.load();
+}
+
+type KnowledgeVaultSettingsModule = typeof import("./knowledge_vault_settings.js");
+const knowledgeVaultSettingsPage = createLazyPage<KnowledgeVaultSettingsModule>("knowledge-vault-settings", () => import("./knowledge_vault_settings.js"), {onChange: () => render()});
+
+function knowledgeVaultSettingsContext(): Parameters<KnowledgeVaultSettingsModule["renderKnowledgeVaultSettingsPanel"]>[0] {
+  return {render, setMessage, onSettingsApplied: applyKnowledgeVaultSettings};
+}
+
+function renderKnowledgeVaultSettingsPanel(): string {
+  const module = knowledgeVaultSettingsPage.loaded();
+  if (!module) { void knowledgeVaultSettingsPage.load(); return lazyPageState(knowledgeVaultSettingsPage); }
+  return module.renderKnowledgeVaultSettingsPanel(knowledgeVaultSettingsContext());
+}
+
+function bindKnowledgeVaultSettingsPanel(): void {
+  const module = knowledgeVaultSettingsPage.loaded();
+  if (module) module.bindKnowledgeVaultSettingsPanel(knowledgeVaultSettingsContext());
+  else void knowledgeVaultSettingsPage.load();
+}
+
+function refreshKnowledgeVaultSettings(): Promise<void> {
+  const module = knowledgeVaultSettingsPage.loaded();
+  return module ? module.refreshKnowledgeVaultSettingsPanel(knowledgeVaultSettingsContext()) : Promise.resolve();
 }
 
 type CodexPageModule = typeof import("./codex_accounts.js");
@@ -2667,24 +2692,40 @@ async function loadKnowledgeData(force = true): Promise<void> {
   });
 }
 
-// The Phase 2 page is opt-in on the server: its route only exists when the
-// knowledge-vault feature is enabled. Probe once and keep the legacy workspace
-// path (including all of its API calls) byte-for-byte unchanged when it is off.
+// The Phase 2 page is opt-in on the server: its data routes answer 404 while
+// the Phase 3 switch is off. Probe once and keep the legacy workspace path
+// (including all of its API calls) byte-for-byte unchanged when it is off.
+// The token invalidates a probe that was already in flight when the Owner
+// toggled the switch, so a slow stale answer cannot overwrite the new state.
 let knowledgeVaultProbe: Promise<boolean> | null = null;
+let knowledgeVaultProbeToken = 0;
 async function detectKnowledgeVault(force = false): Promise<boolean> {
   if (!force && state.knowledgeVaultEnabled !== null) return state.knowledgeVaultEnabled;
   if (knowledgeVaultProbe) return knowledgeVaultProbe;
+  const token = knowledgeVaultProbeToken;
   knowledgeVaultProbe = api.knowledgeVaultLibraries()
     .then(result => {
+      if (token !== knowledgeVaultProbeToken) return state.knowledgeVaultEnabled === true;
       state.knowledgeVaultEnabled = result?.enabled === true;
       return state.knowledgeVaultEnabled;
     })
     .catch(() => {
-      state.knowledgeVaultEnabled = false;
-      return false;
+      if (token === knowledgeVaultProbeToken) state.knowledgeVaultEnabled = false;
+      return state.knowledgeVaultEnabled === true;
     })
-    .finally(() => { knowledgeVaultProbe = null; });
+    .finally(() => {
+      if (token === knowledgeVaultProbeToken) knowledgeVaultProbe = null;
+    });
   return knowledgeVaultProbe;
+}
+
+function applyKnowledgeVaultSettings(settings: KnowledgeVaultSettings): void {
+  knowledgeVaultProbeToken++;
+  knowledgeVaultProbe = null;
+  state.knowledgeVaultEnabled = settings.enabled;
+  // Libraries, tree, documents and search all cached data from before the
+  // switch/rebuild; drop it so the next visit fetches the current generation.
+  knowledgeVaultPage.loaded()?.resetKnowledgeVaultPage();
 }
 
 async function loadKnowledgeViewData(force = true): Promise<void> {
@@ -2801,6 +2842,7 @@ async function ensureViewData(view: View, force = false): Promise<void> {
     if (backend.backend) state.backendSettings = backend.backend;
     if (network.network) state.networkSettings = network.network;
   }));
+  if (view === "other") jobs.push(refreshKnowledgeVaultSettings());
   if (view === "data") jobs.push(loadDataInventory(force), loadDatabaseStats(force));
   if (view === "sync") jobs.push(loadResource("sync", force, async () => {
     const [settings, status, conflicts] = await Promise.all([api.syncSettings(), api.syncStatus(), api.syncConflicts()]);
@@ -4245,6 +4287,11 @@ function bindLanguageSetting(): void {
 // The switch applies immediately: enabling installs the observer and starts the
 // panel in place, so the Owner can keep the page they are diagnosing.
 function bindOtherSettingsPage(): void {
+  bindPerfPanelSetting();
+  bindKnowledgeVaultSettingsPanel();
+}
+
+function bindPerfPanelSetting(): void {
   const toggle = document.querySelector<HTMLInputElement>("#perf-panel-setting");
   if (!toggle) return;
   toggle.addEventListener("change", () => {
@@ -4382,6 +4429,7 @@ function otherSettingsView(): string {
       <label class="security-setting-toggle"><input id="perf-panel-setting" name="perf_panel" type="checkbox" ${perfPanelOn ? "checked" : ""}><span><strong>显示性能面板</strong><small>开启后显示 API/首屏耗时面板；关闭后立即隐藏。</small></span></label>
       <div class="field-help">偏好只保存在当前浏览器；带 <code>?perf=1</code> 打开页面也会自动开启，不会同步到服务端。</div>
     </section>
+    ${renderKnowledgeVaultSettingsPanel()}
     <section class="panel spaced account-security-panel backend-timeout-settings-panel">
       <div class="panel-head"><strong>Backend 超时</strong><span>Codex / Claude 统一生效</span></div>
       <form id="backend-settings-form">

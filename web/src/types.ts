@@ -1677,6 +1677,54 @@ export interface KnowledgeVaultLibraries {
   warning?: string;
 }
 
+// Phase 3 runtime switch and status. "configured" is server-side only; the Web
+// UI distinguishes the source (database vs startup env/flags).
+export interface KnowledgeVaultSettings {
+  enabled: boolean;
+  source: "database" | "startup";
+  vault_ready: boolean;
+  vault_initialized: boolean;
+  index_ready: boolean;
+  vault_name?: string;
+  vault_path: string;
+  index_path: string;
+  entry_count: number;
+  rebuilt_at?: string;
+  warning?: string;
+  remote_host?: string;
+}
+
+export interface KnowledgeVaultSettingsResponse {
+  ok: boolean;
+  settings: KnowledgeVaultSettings;
+}
+
+export interface KnowledgeVaultRebuildReport {
+  vault_path: string;
+  index_path: string;
+  entries: number;
+  global: number;
+  projects: number;
+  archives: number;
+  orphans: number;
+  tags: number;
+  links: number;
+  warnings?: string[];
+  skipped: number;
+  rebuilt_at: string;
+}
+
+export interface KnowledgeVaultInitResponse extends KnowledgeVaultSettingsResponse {
+  created: string[];
+  skipped?: string[];
+  samples: number;
+  rebuild: KnowledgeVaultRebuildReport;
+}
+
+export interface KnowledgeVaultRebuildResponse extends KnowledgeVaultSettingsResponse {
+  rebuild: KnowledgeVaultRebuildReport;
+}
+
 export interface KnowledgeVaultTreeNode {
   id: string;
   title: string;

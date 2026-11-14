@@ -71,6 +71,7 @@ func knowledgeVaultInit(args []string) error {
 	options.register(flags)
 	vaultName := flags.String("name", "", "vault display name (defaults to the directory name)")
 	commit := flags.Bool("commit", true, "initialize a local Git repository and commit the initial structure")
+	samples := flags.Bool("samples", false, "seed the fixed Phase 3 sample documents (only when this call creates the vault)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -81,11 +82,51 @@ func knowledgeVaultInit(args []string) error {
 	if err != nil {
 		return err
 	}
+	type initReport struct {
+		knowledgevault.InitReport
+		Samples        []string                      `json:"samples,omitempty"`
+		SamplesSkipped string                        `json:"samples_skipped,omitempty"`
+		Rebuild        *knowledgevault.RebuildReport `json:"rebuild,omitempty"`
+	}
+	result := initReport{}
+	initialized := knowledgevault.VaultInitialized(config.VaultPath)
+	if *samples {
+		if initialized {
+			result.SamplesSkipped = "vault already initialized; sample documents were not written"
+		} else {
+			// Write the seed first so the initial Git commit (if requested)
+			// contains the samples too. Bootstrap never overwrites them.
+			written, writeErr := knowledgevault.WriteSamples(config, time.Now().UTC())
+			if writeErr != nil {
+				return writeErr
+			}
+			result.Samples = written.Created
+		}
+	}
 	report, err := knowledgevault.Bootstrap(config, knowledgevault.InitOptions{VaultName: *vaultName, Commit: *commit})
 	if err != nil {
 		return err
 	}
-	return writeKnowledgeVaultReport(os.Stdout, report)
+	result.InitReport = report
+	if !initialized && (len(result.Samples) > 0 || *samples) {
+		// The global index is generated from the files, so seed without a
+		// rebuild would leave the Web page empty.
+		ctx := context.Background()
+		index, openErr := knowledgevault.OpenIndex(ctx, config.IndexPath)
+		if openErr != nil {
+			return openErr
+		}
+		rebuildReport, rebuildErr := index.Rebuild(ctx, config.VaultPath)
+		closeErr := index.Close()
+		if rebuildErr != nil {
+			return rebuildErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		result.Rebuild = &rebuildReport
+	}
+	return writeKnowledgeVaultReport(os.Stdout, result)
 }
 
 func knowledgeVaultExport(args []string) error {

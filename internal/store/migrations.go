@@ -3660,5 +3660,28 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("record schema v135: %w", err)
 		}
 	}
+	var hasV136 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=136)`).Scan(&hasV136)
+	if !hasV136 {
+		// Phase 3 keeps the file vault switch in its own table. The old
+		// knowledge tables are intentionally untouched, and configured=0 means
+		// "no Web decision yet" so startup env/flags still decide the default.
+		if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS knowledge_vault_settings(
+			id INTEGER PRIMARY KEY,
+			enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0,1)),
+			configured INTEGER NOT NULL DEFAULT 0 CHECK(configured IN (0,1)),
+			updated_at TEXT NOT NULL
+		)`); err != nil {
+			return fmt.Errorf("apply schema v136 knowledge vault settings: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO knowledge_vault_settings(id,enabled,configured,updated_at)
+			VALUES(1,0,0,strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return fmt.Errorf("seed schema v136 knowledge vault settings: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(136, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return fmt.Errorf("record schema v136: %w", err)
+		}
+	}
 	return nil
 }

@@ -93,6 +93,16 @@ type GeneralSettings struct {
 	UpdatedAt time.Time `json:"updated_at,omitempty"`
 }
 
+// KnowledgeVaultSettings is the Phase 3 runtime switch for the file-backed
+// read-only knowledge vault. Configured distinguishes "never touched in the
+// Web UI" (the startup env/flags still win) from an owner decision persisted
+// in the database.
+type KnowledgeVaultSettings struct {
+	Enabled    bool      `json:"enabled"`
+	Configured bool      `json:"configured"`
+	UpdatedAt  time.Time `json:"updated_at,omitempty"`
+}
+
 const (
 	LanguageAuto       = "auto"
 	LanguageSimplified = "zh-CN"

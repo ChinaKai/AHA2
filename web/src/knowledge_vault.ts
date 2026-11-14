@@ -128,6 +128,23 @@ export function __resetKnowledgeVaultStateForTest(): void {
   binding = false;
 }
 
+// The Phase 3 settings panel calls this after a switch, init, or rebuild so the
+// page cannot render libraries/tree/doc data fetched under the previous switch
+// generation. Global keyboard/hash listeners stay bound; only the reload guard
+// is cleared so the next visit fetches fresh data.
+export function resetKnowledgeVaultPage(): void {
+  state = initialState();
+  binding = false;
+  pendingLoads.clear();
+  if (searchTimer !== null) {
+    clearTimeout(searchTimer);
+    searchTimer = null;
+  }
+  treeRequest++;
+  recentRequest++;
+  inboxRequest++;
+}
+
 /* Pure URI builders ------------------------------------------------------ */
 
 function encodeURIPath(value: string): string {

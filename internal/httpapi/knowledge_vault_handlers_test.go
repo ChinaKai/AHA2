@@ -17,9 +17,9 @@ import (
 	"github.com/ChinaKai/AHA2/internal/store"
 )
 
-// knowledgeVaultReaderFixture builds a real Phase 1 vault on disk, rebuilds
-// its index, and opens the same read-only reader the server uses.
-func knowledgeVaultReaderFixture(t *testing.T) *knowledgevault.Reader {
+// knowledgeVaultManagerFixture builds a real Phase 1 vault on disk, rebuilds
+// its index, and returns the same enabled runtime manager the server uses.
+func knowledgeVaultManagerFixture(t *testing.T) *knowledgevault.Manager {
 	t.Helper()
 	ctx := context.Background()
 	config := knowledgevault.DefaultConfig(t.TempDir())
@@ -70,57 +70,87 @@ title: 收件想法
 	if err := index.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reader, err := knowledgevault.OpenReader(ctx, config, "devbox")
+	manager, err := knowledgevault.NewManager(config, "devbox")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = reader.Close() })
-	return reader
+	if err := manager.SetEnabled(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	return manager
 }
 
-func knowledgeVaultServer(t *testing.T, reader *knowledgevault.Reader) (*httptest.Server, *http.Client, string) {
+// knowledgeVaultDisabledManager is the "manager exists, switch off" case: the
+// routes stay registered and every read answers 404.
+func knowledgeVaultDisabledManager(t *testing.T) *knowledgevault.Manager {
+	t.Helper()
+	manager, err := knowledgevault.NewManager(knowledgevault.DefaultConfig(t.TempDir()), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	return manager
+}
+
+func knowledgeVaultServer(t *testing.T, manager *knowledgevault.Manager) (*httptest.Server, *http.Client, string) {
+	t.Helper()
+	server, client, csrf, _ := knowledgeVaultServerAt(t, manager, t.TempDir())
+	return server, client, csrf
+}
+
+func knowledgeVaultServerAt(t *testing.T, manager *knowledgevault.Manager, dataDir string) (*httptest.Server, *http.Client, string, *store.Store) {
 	t.Helper()
 	ctx := context.Background()
-	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	database, err := store.Open(ctx, filepath.Join(dataDir, "aha2.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = database.Close() })
-	secretStore, err := secrets.Open(filepath.Join(t.TempDir(), "secrets.json"))
+	secretStore, err := secrets.Open(filepath.Join(dataDir, "secrets.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	authService := auth.NewService(database, "setup-test", time.Hour)
 	config := Config{Store: database, Auth: authService, App: app.NewService(database, secretStore, app.StubExecutor{})}
-	if reader != nil {
-		config.KnowledgeVault = reader
+	if manager != nil {
+		config.KnowledgeVault = manager
 	}
 	server := httptest.NewServer(New(config).Handler())
 	t.Cleanup(server.Close)
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{Jar: jar}
 	csrf := registerOwner(t, client, server.URL)
-	return server, client, csrf
+	return server, client, csrf, database
 }
 
-func TestKnowledgeVaultAPIIsAbsentWhenTheSwitchIsOff(t *testing.T) {
-	server, client, _ := knowledgeVaultServer(t, nil)
+func TestKnowledgeVaultAPIReportsDisabledWhenTheSwitchIsOff(t *testing.T) {
+	server, client, _ := knowledgeVaultServer(t, knowledgeVaultDisabledManager(t))
 	for _, path := range []string{
 		"/api/v1/knowledge-vault/libraries",
 		"/api/v1/knowledge-vault/tree?library=global",
+		"/api/v1/knowledge-vault/doc/knowledge_http_deploy",
 		"/api/v1/knowledge-vault/search?q=deploy",
 		"/api/v1/knowledge-vault/recent",
 		"/api/v1/knowledge-vault/inbox",
 		"/api/v1/knowledge-vault/skills",
 	} {
 		response := requestJSON(t, client, http.MethodGet, server.URL+path, nil, "")
-		response.Body.Close()
-		if response.StatusCode != http.StatusNotFound {
-			t.Fatalf("%s status = %d, want 404 when the switch is off", path, response.StatusCode)
+		var payload map[string]any
+		decodeResponse(t, response, &payload)
+		if response.StatusCode != http.StatusNotFound || payload["error"] != "knowledge_vault_disabled" {
+			t.Fatalf("%s status = %d payload=%#v, want 404 knowledge_vault_disabled", path, response.StatusCode, payload)
 		}
 	}
+	// The settings endpoint works while the data API is off.
+	response := requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/settings/knowledge-vault", nil, "")
+	var settings map[string]any
+	decodeResponse(t, response, &settings)
+	if response.StatusCode != http.StatusOK || settings["settings"].(map[string]any)["enabled"] != false {
+		t.Fatalf("settings status=%d payload=%#v", response.StatusCode, settings)
+	}
 	// The legacy API remains available and untouched.
-	response := requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/knowledge/libraries", nil, "")
+	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/knowledge/libraries", nil, "")
 	var legacy map[string]any
 	decodeResponse(t, response, &legacy)
 	if response.StatusCode != http.StatusOK {
@@ -129,8 +159,8 @@ func TestKnowledgeVaultAPIIsAbsentWhenTheSwitchIsOff(t *testing.T) {
 }
 
 func TestKnowledgeVaultAPIReadsLibrariesTreeDocumentSearchRecentInboxAndSkills(t *testing.T) {
-	reader := knowledgeVaultReaderFixture(t)
-	server, client, _ := knowledgeVaultServer(t, reader)
+	manager := knowledgeVaultManagerFixture(t)
+	server, client, _ := knowledgeVaultServer(t, manager)
 
 	response := requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/knowledge-vault/libraries", nil, "")
 	var libraries map[string]any
@@ -208,8 +238,8 @@ func TestKnowledgeVaultAPIReadsLibrariesTreeDocumentSearchRecentInboxAndSkills(t
 }
 
 func TestKnowledgeVaultAPIRejectsWritesAndUnknownDocuments(t *testing.T) {
-	reader := knowledgeVaultReaderFixture(t)
-	server, client, csrf := knowledgeVaultServer(t, reader)
+	manager := knowledgeVaultManagerFixture(t)
+	server, client, csrf := knowledgeVaultServer(t, manager)
 
 	response := requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/knowledge-vault/doc/knowledge_http_deploy", map[string]any{"body": "changed"}, csrf)
 	response.Body.Close()

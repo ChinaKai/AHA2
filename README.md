@@ -106,4 +106,5 @@ worktree 隔离的 Task 完成后，收尾会先把任务分支合并回目标�
 - [Linux 打包与配置](docs/linux-packaging.md)
 - [Sync Center 部署](docs/sync-center.md)
 - [Agent API](docs/agent-api.md)
+- [文件知识库](docs/knowledge-vault.md)
 - [AHA1 知识库迁移](docs/aha1-knowledge-import.md)

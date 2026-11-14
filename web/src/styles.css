@@ -324,6 +324,18 @@ body.task-view-active .banner { border: 1px solid var(--color-border); border-ra
 .security-setting-toggle small { margin-top: 4px; color: var(--muted); font-weight: 400; line-height: 1.5; }
 .security-warning { margin-top: 12px; padding: 10px 12px; border-left: 3px solid var(--color-warning); background: var(--color-warning-soft); color: var(--color-warning-ink); font-size: var(--font-size-11); line-height: 1.6; }
 .security-warning.active { border-left-color: var(--color-danger); background: var(--color-danger-soft); color: var(--color-danger-ink); }
+.knowledge-vault-settings-panel .knowledge-vault-toggle { margin: 18px; }
+.knowledge-vault-settings-panel .knowledge-vault-toggle input { cursor: pointer; }
+.knowledge-vault-settings-panel .knowledge-vault-toggle input:disabled { cursor: progress; }
+.knowledge-vault-status { display: grid; gap: 8px; margin: 0; padding: 0 18px; }
+.knowledge-vault-status > div { display: grid; grid-template-columns: 72px minmax(0,1fr); gap: 10px; align-items: start; }
+.knowledge-vault-status dt { color: var(--color-text-muted); font-size: var(--font-size-11); }
+.knowledge-vault-status dd { min-width: 0; margin: 0; font-size: var(--font-size-12); overflow-wrap: anywhere; }
+.knowledge-vault-status code { overflow-wrap: anywhere; }
+.knowledge-vault-settings-panel .security-warning { margin: 12px 18px 0; }
+.knowledge-vault-settings-panel .knowledge-vault-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 16px 18px 0; }
+.knowledge-vault-settings-panel .knowledge-vault-note { margin: 12px 18px 18px; }
+.knowledge-vault-settings-panel .knowledge-vault-actions + .knowledge-vault-note { margin-top: 16px; }
 .recovery-note > div:last-child { padding: 14px 18px; color: var(--muted); font-size: 11px; line-height: 1.6; }
 .recovery-note p { margin: 0 0 7px; }
 .recovery-note p:last-child { margin-bottom: 0; }
