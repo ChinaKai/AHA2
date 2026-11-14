@@ -34,7 +34,7 @@ test("mobile task cards move the status badge above the row actions", async () =
   );
   assert.match(
     main,
-    /readonlyBadge \? "" : `<span class="status task-card-actions-status \$\{statusClass\(task\.status\)\}">\$\{statusLabel\(task\.status\)\}<\/span>`/,
+    /readonlyBadge \? "" : `<span class="status task-card-actions-status \$\{statusClass\(task\.status\)\}"><span class="task-card-actions-status-text">\$\{statusLabel\(task\.status\)\}<\/span><\/span>`/,
     "the mobile action-column status is rendered for read-only rows too",
   );
 
@@ -44,13 +44,19 @@ test("mobile task cards move the status badge above the row actions", async () =
     styles,
     /@media \(max-width: 760px\)[\s\S]*?\.task-card-title \.task-card-title-status \{ display: none; \}/,
   );
+  // Fixed button tracks: the spanning badge must not feed auto track sizing,
+  // or a long translated label ("Waiting for input") widens the whole column.
   assert.match(
     styles,
-    /@media \(max-width: 760px\)[\s\S]*?\.task-card-actions\.has-status \{[^}]*display: grid;[^}]*grid-template-columns: auto auto;[^}]*justify-items: end;/,
+    /@media \(max-width: 760px\)[\s\S]*?\.task-card-actions\.has-status \{[^}]*display: grid;[^}]*grid-template-columns: 36px 36px;[^}]*justify-items: end;/,
   );
   assert.match(
     styles,
-    /@media \(max-width: 760px\)[\s\S]*?\.task-card-actions \.task-card-actions-status \{[^}]*display: inline-flex;[^}]*grid-column: 1 \/ -1;/,
+    /@media \(max-width: 760px\)[\s\S]*?\.task-card-actions \.task-card-actions-status \{[^}]*display: inline-flex;[^}]*grid-column: 1 \/ -1;[^}]*max-width: 100%;/,
+  );
+  assert.match(
+    styles,
+    /@media \(max-width: 760px\)[\s\S]*?\.task-card-actions-status-text \{[^}]*min-width: 0;[^}]*overflow: hidden;[^}]*text-overflow: ellipsis;/,
   );
   // The action buttons must keep their normal hit area on mobile.
   assert.doesNotMatch(

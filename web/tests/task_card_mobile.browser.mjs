@@ -3,10 +3,12 @@
 // that directory can point AHA_PLAYWRIGHT_MODULE / AHA_BROWSER_EXECUTABLE at a
 // local Playwright install (see docs/web-conversation-virtual-list.md).
 //
-// Checks, against the real built Web bundle:
-//   390x844 and 360x800: the status badge sits above edit/delete, the title got
-//     the released width, one status is announced, nothing overflows, and the
-//     row buttons still open the title editor.
+// Checks, against the real built Web bundle, in zh-CN and en-US:
+//   360/375/390/414: the status badge sits above edit/delete, the action column
+//     stays no wider than the two 36px buttons, the title gained width, the
+//     card did not grow, one status is announced and nothing overflows.
+//     A long translated label ("Waiting for input") must truncate, not widen
+//     the column and push .task-meta onto a second line.
 //   1280x900: the title still carries the status inline (desktop unchanged).
 //   completed / read-only / archived rows: exactly one state badge.
 import assert from "node:assert/strict";
@@ -43,7 +45,10 @@ const COUNTS = {
   device: {local: 5, "remote:device-b": 1},
 };
 
+// The language comes from the page URL so one server can serve both locales;
+// the app reads it through its normal settings/general boot request.
 const bootstrap = `
+const LANG = new URL(location.href).searchParams.get("lang") || "zh-CN";
 const json = (value, status = 200) => new Response(JSON.stringify(value), {status, headers: {"Content-Type": "application/json"}});
 const TASKS = ${JSON.stringify(TASKS)};
 const COUNTS = ${JSON.stringify(COUNTS)};
@@ -52,7 +57,7 @@ window.fetch = async (input, init = {}) => {
   const path = url.pathname;
   const method = (init.method || "GET").toUpperCase();
   if (path === "/api/v1/auth/status") return json({authenticated: true, csrf_token: "csrf", owner: {id: "owner-1", username: "owner"}});
-  if (path === "/api/v1/settings/general") return json({ok: true, general: {language: "zh-CN"}});
+  if (path === "/api/v1/settings/general") return json({ok: true, general: {language: LANG}});
   if (path === "/api/v1/assistant") return json({assistant: {character: "gugugaga", name: "AHA", nickname: "AHA", enabled: true}, messages: [], models: [], tools: []});
   if (path === "/api/v1/tasks" && method === "GET") return json({tasks: TASKS, has_more: false, counts: COUNTS});
   if (path === "/api/v1/projects") return json({projects: [{id: "project-1", name: "Project One", project_type: "folder", channel_retired: false}]});
@@ -87,6 +92,7 @@ const server = createServer(async (request, response) => {
 });
 await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
 const url = `http://127.0.0.1:${server.address().port}`;
+const BUTTON_ROW_WIDTH = 76;
 
 const layout = (page, id) => page.locator(`.task-card[data-task="${id}"]`).evaluate(card => {
   const box = node => {
@@ -96,6 +102,7 @@ const layout = (page, id) => page.locator(`.task-card[data-task="${id}"]`).evalu
   const shown = node => Boolean(node) && getComputedStyle(node).display !== "none";
   const titleStatus = card.querySelector(".task-card-title-status");
   const actionStatus = card.querySelector(".task-card-actions-status");
+  const actionStatusText = card.querySelector(".task-card-actions-status-text");
   const actions = card.querySelector(".task-card-actions");
   const buttons = [...card.querySelectorAll(".task-card-actions button")];
   const heading = card.querySelector(".task-card-title h3");
@@ -105,6 +112,8 @@ const layout = (page, id) => page.locator(`.task-card[data-task="${id}"]`).evalu
     titleStatusShown: shown(titleStatus),
     actionStatusShown: shown(actionStatus),
     actionStatus: shown(actionStatus) ? box(actionStatus) : null,
+    actionStatusOverflow: actionStatusText ? actionStatusText.scrollWidth > actionStatusText.clientWidth + 0.5 : false,
+    actionStatusText: actionStatus ? actionStatus.textContent.trim() : "",
     actions: box(actions),
     buttons: buttons.map(button => ({title: button.title, ...box(button)})),
     visibleStatuses: [...card.querySelectorAll(".status")].filter(shown).map(node => node.textContent.trim()),
@@ -123,6 +132,8 @@ const baselineLayout = (page, id) => page.locator(`.task-card[data-task="${id}"]
   if (status) {
     status.classList.remove("task-card-actions-status");
     status.classList.add("task-card-title-status");
+    // Inline display beats the mobile rule that hides the title status, so the
+    // clone reproduces the pre-change title row rather than the new one.
     status.style.display = "inline-flex";
     title.appendChild(status);
   }
@@ -136,13 +147,38 @@ const toggle = (page, kind, value, checked) => page.evaluate(([kind, value, chec
   input.checked = checked;
   input.dispatchEvent(new Event("change", {bubbles: true}));
 }, [kind, value, checked]);
-const expectOpenMobile = (id, card) => {
-  assert.equal(card.titleStatusShown, false, `${id}: the title still shows the status on mobile`);
-  assert.equal(card.actionStatusShown, true, `${id}: the action column has no status badge on mobile`);
-  assert.ok(card.actionStatus.bottom <= card.buttons[0].top + 0.5, `${id}: the status is not above the row buttons`);
-  assert.ok(card.actionStatus.right <= card.actions.right + 0.5, `${id}: the status escapes the action column`);
-  assert.ok(card.actions.width <= 80, `${id}: the action column grew past two buttons (${card.actions.width})`);
-  assert.equal(card.visibleStatuses.length, 1, `${id}: more than one status is visible: ${card.visibleStatuses}`);
+const withRemote = async page => {
+  await page.waitForSelector('.task-card[data-task="t-active"]', {timeout: 15000});
+  // Remote mirrors are filtered out by default; include their device so the
+  // read-only card is measurable.
+  await toggle(page, "device", "remote:device-b", true);
+  await page.waitForFunction(() => document.querySelectorAll(".task-card").length === 5);
+};
+const openPage = async (locale, viewport) => {
+  const page = await browser.newPage({viewport});
+  page.on("pageerror", error => errors.push(`${locale}: ${error.message}`));
+  await page.goto(`${url}/?lang=${locale}`, {waitUntil: "networkidle"});
+  await withRemote(page);
+  return page;
+};
+const expectOpenMobile = (locale, id, card, baseline) => {
+  assert.equal(card.titleStatusShown, false, `${locale} ${id}: the title still shows the status on mobile`);
+  assert.equal(card.actionStatusShown, true, `${locale} ${id}: the action column has no status badge on mobile`);
+  assert.ok(card.actionStatus.bottom <= card.buttons[0].top + 0.5, `${locale} ${id}: the status is not above the row buttons`);
+  assert.ok(card.actionStatus.right <= card.actions.right + 0.5, `${locale} ${id}: the status escapes the action column`);
+  assert.ok(
+    card.actions.width <= BUTTON_ROW_WIDTH + 0.5,
+    `${locale} ${id}: the action column grew past the two-button row (${card.actions.width})`,
+  );
+  assert.ok(
+    card.actionStatus.width <= card.actions.width + 0.5,
+    `${locale} ${id}: the status badge is wider than the action column`,
+  );
+  assert.equal(card.visibleStatuses.length, 1, `${locale} ${id}: more than one status is visible: ${card.visibleStatuses}`);
+  assert.ok(
+    card.card.height <= baseline.cardHeight + 0.5,
+    `${locale} ${id}: the card grew taller (${card.card.height} vs ${baseline.cardHeight})`,
+  );
 };
 const expectSingleReadonlyBadge = (id, card, label) => {
   assert.equal(card.titleStatusShown, false, `${id}: the title status is still visible on mobile`);
@@ -151,68 +187,101 @@ const expectSingleReadonlyBadge = (id, card, label) => {
 };
 
 let browser;
+const errors = [];
+const MOBILE_WIDTHS = [
+  {width: 360, height: 800},
+  {width: 375, height: 812},
+  {width: 390, height: 844},
+  {width: 414, height: 896},
+];
 try {
   browser = await chromium.launch({...launchOptions, headless: true});
-  const page = await browser.newPage({viewport: {width: 1280, height: 900}});
-  const errors = [];
-  page.on("pageerror", error => errors.push(error.message));
-  await page.goto(url, {waitUntil: "networkidle"});
-  await page.waitForSelector('.task-card[data-task="t-active"]', {timeout: 15000});
-  // Remote mirrors are filtered out by default; include their device so the
-  // read-only card is measurable.
-  await toggle(page, "device", "remote:device-b", true);
-  await page.waitForFunction(() => document.querySelectorAll(".task-card").length === 5);
+  const zhPage = await openPage("zh-CN", {width: 1280, height: 900});
 
-  const desktop = await layout(page, "t-active");
-  assert.equal(desktop.titleStatusShown, true, "desktop lost its inline title status");
-  assert.equal(desktop.actionStatusShown, false, "desktop shows the mobile status copy");
-  await page.screenshot({path: resolve(output, "task-card-mobile-desktop.png")});
+  // Desktop keeps the status inline in the title row.
+  const zhDesktop = await layout(zhPage, "t-active");
+  assert.equal(zhDesktop.titleStatusShown, true, "desktop lost its inline title status");
+  assert.equal(zhDesktop.actionStatusShown, false, "desktop shows the mobile status copy");
+  assert.ok(zhDesktop.actions.width <= BUTTON_ROW_WIDTH + 0.5, "desktop action column changed width");
+  await zhPage.screenshot({path: resolve(output, "task-card-mobile-desktop.png")});
 
-  for (const viewport of [{width: 390, height: 844, minHeading: 150}, {width: 360, height: 800, minHeading: 120}]) {
-    await page.setViewportSize(viewport);
-    await page.waitForFunction(() => document.querySelectorAll(".task-card").length === 5);
-    const active = await layout(page, "t-active");
-    const baseline = await baselineLayout(page, "t-active");
-    expectOpenMobile("t-active", active);
-    expectOpenMobile("t-waiting", await layout(page, "t-waiting"));
+  for (const viewport of MOBILE_WIDTHS) {
+    await zhPage.setViewportSize(viewport);
+    await zhPage.waitForFunction(() => document.querySelectorAll(".task-card").length === 5);
+    const active = await layout(zhPage, "t-active");
+    const activeBaseline = await baselineLayout(zhPage, "t-active");
+    expectOpenMobile("zh-CN", "t-active", active, activeBaseline);
+    expectOpenMobile("zh-CN", "t-waiting", await layout(zhPage, "t-waiting"), await baselineLayout(zhPage, "t-waiting"));
     assert.ok(
-      active.headingWidth > baseline.headingWidth + 30,
-      `${viewport.width}px: the title did not gain width (${active.headingWidth} vs ${baseline.headingWidth})`,
+      active.headingWidth > activeBaseline.headingWidth + 30,
+      `zh-CN ${viewport.width}px: the title did not gain width (${active.headingWidth} vs ${activeBaseline.headingWidth})`,
     );
-    assert.ok(active.headingWidth >= viewport.minHeading, `${viewport.width}px: the title is still cramped (${active.headingWidth})`);
-    assert.ok(
-      active.card.height <= baseline.cardHeight + 0.5,
-      `${viewport.width}px: the card grew taller (${active.card.height} vs ${baseline.cardHeight})`,
-    );
-    const overflow = await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth && document.body.scrollWidth <= window.innerWidth);
-    assert.equal(overflow, true, `${viewport.width}px: the task list overflows horizontally`);
-    await page.screenshot({path: resolve(output, `task-card-mobile-${viewport.width}.png`)});
+    const overflow = await zhPage.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth && document.body.scrollWidth <= window.innerWidth);
+    assert.equal(overflow, true, `zh-CN ${viewport.width}px: the task list overflows horizontally`);
+    await zhPage.screenshot({path: resolve(output, `task-card-mobile-zh-${viewport.width}.png`)});
   }
 
-  // The action buttons keep their size and still open the title editor.
-  const buttons = (await layout(page, "t-active")).buttons;
-  assert.deepEqual(buttons.map(button => [button.width, button.height]), [[36, 36], [36, 36]], "the mobile row buttons lost their hit area");
-  await page.locator('.task-card[data-task="t-active"] [data-edit-task-title]').click();
-  assert.equal(await page.locator('.task-card[data-task="t-active"] .task-title-input').count(), 1, "the edit button no longer opens the title editor");
-
   // Read-only rows keep their single existing badge, with no extra status copy.
-  await page.reload({waitUntil: "networkidle"});
-  await page.waitForSelector('.task-card[data-task="t-active"]', {timeout: 15000});
-  await toggle(page, "device", "remote:device-b", true);
-  await page.waitForFunction(() => document.querySelectorAll(".task-card").length === 5);
-  expectSingleReadonlyBadge("t-readonly", await layout(page, "t-readonly"), "只读");
-  expectSingleReadonlyBadge("t-archived", await layout(page, "t-archived"), "归档只读");
+  await zhPage.setViewportSize({width: 390, height: 844});
+  await zhPage.waitForFunction(() => document.querySelectorAll(".task-card").length === 5);
+  expectSingleReadonlyBadge("t-readonly", await layout(zhPage, "t-readonly"), "只读");
+  expectSingleReadonlyBadge("t-archived", await layout(zhPage, "t-archived"), "归档只读");
 
   // Completed rows swap 已完成 for the existing 已完成只读 badge, not both.
-  await toggle(page, "status", "done", true);
-  await toggle(page, "status", "open", false);
-  await toggle(page, "status", "error", false);
-  await page.waitForFunction(() => document.querySelectorAll(".task-card").length === 1);
-  expectSingleReadonlyBadge("t-done", await layout(page, "t-done"), "已完成只读");
-  await page.screenshot({path: resolve(output, "task-card-mobile-done.png")});
+  await toggle(zhPage, "status", "done", true);
+  await toggle(zhPage, "status", "open", false);
+  await toggle(zhPage, "status", "error", false);
+  await zhPage.waitForFunction(() => document.querySelectorAll(".task-card").length === 1);
+  expectSingleReadonlyBadge("t-done", await layout(zhPage, "t-done"), "已完成只读");
+  await zhPage.screenshot({path: resolve(output, "task-card-mobile-done.png")});
+
+  // The row buttons keep their size and still open the title editor.
+  await zhPage.reload({waitUntil: "networkidle"});
+  await withRemote(zhPage);
+  const zhButtons = (await layout(zhPage, "t-active")).buttons;
+  assert.deepEqual(zhButtons.map(button => [button.width, button.height]), [[36, 36], [36, 36]], "the mobile row buttons lost their hit area");
+  await zhPage.locator('.task-card[data-task="t-active"] [data-edit-task-title]').click();
+  assert.equal(await zhPage.locator('.task-card[data-task="t-active"] .task-title-input').count(), 1, "the edit button no longer opens the title editor");
+  await zhPage.close();
+
+  // English is the regression that the review caught: the long "Waiting for
+  // input" label used to widen the auto-sized action column and wrap .task-meta.
+  const enPage = await openPage("en-US", {width: 1280, height: 900});
+  const enDesktop = await layout(enPage, "t-active");
+  assert.equal(enDesktop.titleStatusShown, true, "en-US desktop lost its inline title status");
+  assert.equal(enDesktop.actionStatusShown, false, "en-US desktop shows the mobile status copy");
+  for (const viewport of MOBILE_WIDTHS) {
+    await enPage.setViewportSize(viewport);
+    await enPage.waitForFunction(() => document.querySelectorAll(".task-card").length === 5);
+    const waiting = await layout(enPage, "t-waiting");
+    const waitingBaseline = await baselineLayout(enPage, "t-waiting");
+    expectOpenMobile("en-US", "t-waiting", waiting, waitingBaseline);
+    if (viewport.width === 390) {
+      assert.match(waiting.actionStatusText, /Waiting for input/, "the en-US status label did not translate");
+      assert.equal(waiting.actionStatusOverflow, true, "the long en-US label is not truncating inside the action column");
+      // The exact numbers the review asked for: narrow action column, no taller card.
+      assert.ok(waiting.actions.width <= BUTTON_ROW_WIDTH, `en-US 390: action column is ${waiting.actions.width}px`);
+      assert.ok(waiting.card.height <= waitingBaseline.cardHeight + 0.5, `en-US 390: card is ${waiting.card.height}px vs ${waitingBaseline.cardHeight}px`);
+      console.log(
+        `en-US 390x844 waiting_user: card ${waiting.card.height}px (baseline ${waitingBaseline.cardHeight}px), ` +
+        `action column ${waiting.actions.width}px, badge ${waiting.actionStatus.width}px`,
+      );
+    }
+    const active = await layout(enPage, "t-active");
+    const activeBaseline = await baselineLayout(enPage, "t-active");
+    expectOpenMobile("en-US", "t-active", active, activeBaseline);
+    assert.ok(
+      active.headingWidth > activeBaseline.headingWidth + 30,
+      `en-US ${viewport.width}px: the title did not gain width (${active.headingWidth} vs ${activeBaseline.headingWidth})`,
+    );
+    const overflow = await enPage.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth && document.body.scrollWidth <= window.innerWidth);
+    assert.equal(overflow, true, `en-US ${viewport.width}px: the task list overflows horizontally`);
+    await enPage.screenshot({path: resolve(output, `task-card-mobile-en-${viewport.width}.png`)});
+  }
+  await enPage.close();
 
   assert.deepEqual(errors, [], "the task list threw while checking the mobile card layout");
-  console.log("task card mobile layout verified in the built Web bundle");
+  console.log("task card mobile layout verified in zh-CN and en-US");
 } finally {
   await browser?.close();
   server.close();

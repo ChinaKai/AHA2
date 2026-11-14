@@ -4470,7 +4470,7 @@ function taskCardHtml(task: Task): string {
       </div>
     </div>
     <div class="task-card-actions${readonlyBadge ? "" : " has-status"}">
-      ${readonlyBadge ? "" : `<span class="status task-card-actions-status ${statusClass(task.status)}">${statusLabel(task.status)}</span>`}
+      ${readonlyBadge ? "" : `<span class="status task-card-actions-status ${statusClass(task.status)}"><span class="task-card-actions-status-text">${statusLabel(task.status)}</span></span>`}
       ${archived ? `<span class="status warn">归档只读</span>` : task.read_only ? `<button type="button" data-retire-remote-task="${task.id}" class="icon-button danger" title="移除孤立只读任务">${icon("close")}</button><span class="status warn" title="所属设备：${escapeHTML(task.owner_device_id || "未知")}">只读</span>` : task.status === "completed" ? `<span class="status warn" title="任务已完成，需先重新打开才能编辑">已完成只读</span><button type="button" data-delete-task="${task.id}" class="icon-button" title="删除任务">${icon("close")}</button>` : `<button type="button" data-edit-task-title="${task.id}" class="icon-button" title="编辑标题">${icon("edit")}</button><button type="button" data-delete-task="${task.id}" class="icon-button" title="删除任务">${icon("close")}</button>`}
     </div>
   </article>`;

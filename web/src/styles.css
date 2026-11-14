@@ -2122,8 +2122,13 @@ dialog.agent-config-dialog { width: min(760px,calc(100vw - 32px)); }
   .task-card-title .task-card-title-status { display: none; }
   /* The negative block margin lets the two-row action stack centre inside the
      title/meta height, so the card does not grow when the badge moves in. */
-  .task-card-actions.has-status { display: grid; grid-template-columns: auto auto; align-content: center; justify-content: end; justify-items: end; gap: 2px 4px; margin-block: -4.5px; }
-  .task-card-actions .task-card-actions-status { display: inline-flex; grid-column: 1 / -1; padding: 0 6px; line-height: 15px; }
+  .task-card-actions.has-status { display: grid; grid-template-columns: 36px 36px; align-content: center; justify-content: end; justify-items: end; gap: 2px 4px; margin-block: -4.5px; }
+  /* Fixed button tracks keep the spanning badge out of column sizing; a long
+     translated label truncates instead of widening the action column. */
+  .task-card-actions .task-card-actions-status { display: inline-flex; grid-column: 1 / -1; max-width: 100%; padding: 0 6px; line-height: 15px; }
+  /* The label itself truncates: text-overflow does not reach text wrapped in an
+     anonymous flex item, so the inner span carries the ellipsis. */
+  .task-card-actions-status-text { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   .task-meta { gap: 8px; }
   .messages { padding: 12px; }
   .message { max-width: 92%; }
