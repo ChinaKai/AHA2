@@ -56,8 +56,9 @@ type AgentKnowledgeFeedbackResult struct {
 }
 
 // SetKnowledgeVaultRuntimeWrite installs the independent Agent write gate. It
-// never enables reads; the runtime-read gate and the project allowlist still
-// decide which source a Turn sees and therefore which source it writes.
+// never enables reads; the read gate (Web switch, runtime read, allowlist,
+// index readiness, manifest binding) still decides which source a Turn sees and
+// therefore which source it writes.
 func (s *Service) SetKnowledgeVaultRuntimeWrite(enabled bool) {
 	s.knowledgeVaultRuntimeWrite = enabled
 	if s.knowledgeVault != nil {
@@ -68,9 +69,10 @@ func (s *Service) SetKnowledgeVaultRuntimeWrite(enabled bool) {
 }
 
 // vaultKnowledgeWriteEnabled follows the read source: a project reads from the
-// vault only when the runtime read gate and allowlist both match, and it may
-// write the vault only when the independent write gate is also on. There is no
-// path where a Turn reads the vault and writes the legacy tables.
+// vault only when the read gate matches (Web switch, runtime read, allowlist,
+// index ready, manifest bound), and it may write the vault only when the
+// independent write gate is also on. There is no path where a Turn reads the
+// vault and writes the legacy tables.
 func (s *Service) vaultKnowledgeWriteEnabled(projectID string) bool {
 	if !s.vaultReadEnabled(projectID) {
 		return false

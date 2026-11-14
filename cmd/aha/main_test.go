@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -10,6 +11,21 @@ import (
 
 	"github.com/ChinaKai/AHA2/internal/store"
 )
+
+func unsetEnv(t *testing.T, key string) {
+	t.Helper()
+	previous, existed := os.LookupEnv(key)
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if existed {
+			_ = os.Setenv(key, previous)
+		} else {
+			_ = os.Unsetenv(key)
+		}
+	})
+}
 
 func TestParseCommandRoutesServeAndWindowsService(t *testing.T) {
 	t.Parallel()
@@ -101,54 +117,83 @@ func TestParseServiceRunOptions(t *testing.T) {
 	}
 }
 
-func TestKnowledgeVaultRuntimeReadDefaultsOff(t *testing.T) {
-	t.Setenv("AHA2_KNOWLEDGE_VAULT_RUNTIME_READ", "")
-	t.Setenv("AHA2_LISTEN", "")
-	t.Setenv("AHA2_DATA_DIR", "")
+func TestKnowledgeVaultRuntimeReadDefaultsOnAndCanBeDisabled(t *testing.T) {
+	unsetEnv(t, "AHA2_KNOWLEDGE_VAULT_RUNTIME_READ")
+	unsetEnv(t, "AHA2_LISTEN")
+	unsetEnv(t, "AHA2_DATA_DIR")
 	options, err := parseServeOptions("aha2 serve", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if options.knowledgeVaultRuntimeRead {
-		t.Fatal("runtime read gate must default to false")
-	}
-	options, err = parseServeOptions("aha2 serve", []string{"--knowledge-vault-runtime-read"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !options.knowledgeVaultRuntimeRead {
-		t.Fatal("runtime read flag was not applied")
+		t.Fatal("runtime read gate must default to true")
+	}
+	options, err = parseServeOptions("aha2 serve", []string{"--knowledge-vault-runtime-read=false"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.knowledgeVaultRuntimeRead {
+		t.Fatal("explicit --knowledge-vault-runtime-read=false was ignored")
+	}
+	t.Setenv("AHA2_KNOWLEDGE_VAULT_RUNTIME_READ", "false")
+	options, err = parseServeOptions("aha2 serve", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.knowledgeVaultRuntimeRead {
+		t.Fatal("AHA2_KNOWLEDGE_VAULT_RUNTIME_READ=false was ignored")
+	}
+	// A non-truthy rollback word must fail closed, not leave the default on.
+	t.Setenv("AHA2_KNOWLEDGE_VAULT_RUNTIME_READ", "off")
+	options, err = parseServeOptions("aha2 serve", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.knowledgeVaultRuntimeRead {
+		t.Fatal("AHA2_KNOWLEDGE_VAULT_RUNTIME_READ=off left the switch on")
 	}
 }
 
-func TestKnowledgeVaultRuntimeWriteDefaultsOffAndIsIndependent(t *testing.T) {
-	t.Setenv("AHA2_KNOWLEDGE_VAULT_RUNTIME_WRITE", "")
-	t.Setenv("AHA2_KNOWLEDGE_VAULT_RUNTIME_READ", "")
-	t.Setenv("AHA2_LISTEN", "")
-	t.Setenv("AHA2_DATA_DIR", "")
+func TestKnowledgeVaultRuntimeWriteDefaultsOnAndIsIndependent(t *testing.T) {
+	unsetEnv(t, "AHA2_KNOWLEDGE_VAULT_RUNTIME_WRITE")
+	unsetEnv(t, "AHA2_KNOWLEDGE_VAULT_RUNTIME_READ")
+	unsetEnv(t, "AHA2_LISTEN")
+	unsetEnv(t, "AHA2_DATA_DIR")
 	options, err := parseServeOptions("aha2 serve", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if options.knowledgeVaultRuntimeWrite {
-		t.Fatal("runtime write gate must default to false")
-	}
-	options, err = parseServeOptions("aha2 serve", []string{"--knowledge-vault-runtime-write"})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if !options.knowledgeVaultRuntimeWrite {
-		t.Fatal("runtime write flag was not applied")
+		t.Fatal("runtime write gate must default to true")
 	}
-	if options.knowledgeVaultRuntimeRead {
-		t.Fatal("enabling the write gate must not enable runtime reads")
-	}
-	options, err = parseServeOptions("aha2 serve", []string{"--knowledge-vault-runtime-read"})
+	options, err = parseServeOptions("aha2 serve", []string{"--knowledge-vault-runtime-write=false"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if options.knowledgeVaultRuntimeWrite {
-		t.Fatal("enabling runtime reads must not enable writes")
+		t.Fatal("explicit --knowledge-vault-runtime-write=false was ignored")
+	}
+
+	// Turning runtime reads off must not turn the independent write gate off.
+	t.Setenv("AHA2_KNOWLEDGE_VAULT_RUNTIME_READ", "false")
+	t.Setenv("AHA2_KNOWLEDGE_VAULT_RUNTIME_WRITE", "")
+	options, err = parseServeOptions("aha2 serve", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.knowledgeVaultRuntimeRead || !options.knowledgeVaultRuntimeWrite {
+		t.Fatalf("runtime gates are not independent: read=%v write=%v", options.knowledgeVaultRuntimeRead, options.knowledgeVaultRuntimeWrite)
+	}
+
+	// And turning the write gate off must not turn runtime reads off.
+	t.Setenv("AHA2_KNOWLEDGE_VAULT_RUNTIME_READ", "")
+	t.Setenv("AHA2_KNOWLEDGE_VAULT_RUNTIME_WRITE", "false")
+	options, err = parseServeOptions("aha2 serve", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !options.knowledgeVaultRuntimeRead || options.knowledgeVaultRuntimeWrite {
+		t.Fatalf("runtime gates are not independent: read=%v write=%v", options.knowledgeVaultRuntimeRead, options.knowledgeVaultRuntimeWrite)
 	}
 }
 

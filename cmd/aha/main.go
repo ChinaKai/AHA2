@@ -185,8 +185,8 @@ func parseServeOptions(name string, args []string) (serveOptions, error) {
 	dshBinary := flags.String("dsh-bin", envOr("AHA2_DSH_BIN", "dsh"), "DeepSeek Harness executable")
 	localOwnerIngest := flags.Bool("local-owner-ingest", envBool("AHA2_LOCAL_OWNER_INGEST"), "enable the loopback-only local owner message ingest endpoint")
 	knowledgeVaultEnabled := flags.Bool("knowledge-vault-enabled", envBool("AHA2_KNOWLEDGE_VAULT_ENABLED"), "startup default for the file-backed knowledge vault (the Web settings toggle takes precedence once used)")
-	knowledgeVaultRuntimeRead := flags.Bool("knowledge-vault-runtime-read", envBool("AHA2_KNOWLEDGE_VAULT_RUNTIME_READ"), "switch allowlisted projects' Agent knowledge and skills to the vault (default false; independent from the Web vault switch)")
-	knowledgeVaultRuntimeWrite := flags.Bool("knowledge-vault-runtime-write", envBool("AHA2_KNOWLEDGE_VAULT_RUNTIME_WRITE"), "write allowlisted, vault-reading projects' Agent knowledge to the vault (default false; independent from runtime read)")
+	knowledgeVaultRuntimeRead := flags.Bool("knowledge-vault-runtime-read", envBoolOr("AHA2_KNOWLEDGE_VAULT_RUNTIME_READ", true), "switch projects' Agent knowledge and skills to the vault (unset AHA2_KNOWLEDGE_VAULT_READ_PROJECTS means all projects; independent from the Web vault switch)")
+	knowledgeVaultRuntimeWrite := flags.Bool("knowledge-vault-runtime-write", envBoolOr("AHA2_KNOWLEDGE_VAULT_RUNTIME_WRITE", true), "write vault-reading projects' Agent knowledge to the vault (requires runtime read and the Web vault switch; independent from runtime read)")
 	knowledgeVaultPath := flags.String("knowledge-vault-path", os.Getenv("AHA2_KNOWLEDGE_VAULT_PATH"), "knowledge vault directory (default <data-dir>/knowledge-vault)")
 	knowledgeVaultIndex := flags.String("knowledge-vault-index", os.Getenv("AHA2_KNOWLEDGE_VAULT_INDEX"), "knowledge index database (default <data-dir>/knowledge-vault-index.db)")
 	// Live inbox delivery is always enabled when the runner can stream stdin.
@@ -328,10 +328,16 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 		logger.Warn("knowledge vault could not be opened; starting with it disabled",
 			"vault", knowledgeVaultConfig.VaultPath, "index", knowledgeVaultConfig.IndexPath, "error", err)
 	}
+	// Phase 3: vault is the default for every project. The read scope below is
+	// the rollback view ("all" when the env is unset, "none" for an explicit
+	// empty value, otherwise the comma list); the Web switch is still a
+	// separate prerequisite and does not imply the runtime gates are on.
 	logger.Info("knowledge vault runtime switch",
 		"enabled", knowledgeVaultManager.Enabled(), "source", vaultSource,
 		"runtime_read", options.knowledgeVaultRuntimeRead,
 		"runtime_write", options.knowledgeVaultRuntimeWrite,
+		"read_projects", app.KnowledgeVaultReadScope(),
+		"defaults", "vault for all projects; set AHA2_KNOWLEDGE_VAULT_READ_PROJECTS to a comma list or empty to roll back",
 		"vault", knowledgeVaultConfig.VaultPath, "index", knowledgeVaultConfig.IndexPath)
 	// The periodic sync worker gets its own pool over the same WAL file. Long
 	// export/pull phases no longer occupy the Web API connection; writes still
@@ -618,6 +624,24 @@ func envOr(name, fallback string) string {
 func envBool(name string) bool {
 	switch os.Getenv(name) {
 	case "1", "true", "TRUE", "yes", "YES":
+		return true
+	default:
+		return false
+	}
+}
+
+// envBoolOr is envBool with a non-false default. An unset or blank value keeps
+// the fallback; any other value that is not an explicit truthy word disables
+// the switch. That fail-closed direction matches the old envBool and keeps a
+// misspelled rollback value (for example "off" or "disabled") from silently
+// leaving a default-on vault gate enabled.
+func envBoolOr(name string, fallback bool) bool {
+	value, present := os.LookupEnv(name)
+	if !present || strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "on":
 		return true
 	default:
 		return false

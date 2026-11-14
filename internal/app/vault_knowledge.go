@@ -13,16 +13,14 @@ import (
 	"github.com/ChinaKai/AHA2/internal/knowledgevault"
 )
 
-// knowledgeVaultReadProjectsEnv is the canary allowlist. An unset value keeps
-// the pet project in the candidate set; an explicit empty or comma list without
-// the project rolls that project back to the legacy DB immediately. The
-// separate runtime-read gate must also be on.
+// knowledgeVaultReadProjectsEnv is the rollback allowlist. Phase 3 defaults to
+// every project: an unset value admits any non-empty project ID. An explicit
+// comma list admits only its members, and an explicit empty string rolls every
+// project back to the legacy DB. The separate runtime-read gate must also be on.
 const knowledgeVaultReadProjectsEnv = "AHA2_KNOWLEDGE_VAULT_READ_PROJECTS"
 
-// The canary covers the pet project locally and the AHA2 project on the
-// remote builder. The runtime vault switch still defaults to off; an enabled
-// vault only overrides these two projects and leaves every other project on
-// the legacy tables.
+// aha2ProjectID is the builder project used by the Phase 2 canary tests and
+// kept as a named fixture now that the default is no longer a two-project list.
 const aha2ProjectID = "project_6ff866f348d8a892d5e8"
 
 func knowledgeVaultReadAllowed(projectID string) bool {
@@ -32,7 +30,7 @@ func knowledgeVaultReadAllowed(projectID string) bool {
 	}
 	raw, configured := os.LookupEnv(knowledgeVaultReadProjectsEnv)
 	if !configured {
-		return projectID == petProjectID || projectID == aha2ProjectID
+		return true
 	}
 	for _, item := range strings.Split(raw, ",") {
 		if strings.TrimSpace(item) == projectID {
@@ -42,17 +40,42 @@ func knowledgeVaultReadAllowed(projectID string) bool {
 	return false
 }
 
+// KnowledgeVaultReadScope describes the rollback allowlist for startup
+// diagnostics: "all" when unset, "none" when explicitly empty, otherwise the
+// configured comma list.
+func KnowledgeVaultReadScope() string {
+	raw, configured := os.LookupEnv(knowledgeVaultReadProjectsEnv)
+	if !configured {
+		return "all"
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "none"
+	}
+	return raw
+}
+
 type vaultKnowledgeSnapshot struct {
 	Global  []domain.KnowledgeEntry
 	Project []domain.KnowledgeEntry
 	Stale   []domain.KnowledgeEntry
 }
 
-// vaultReadEnabled requires the independent runtime gate before the allowlist.
-// A Web-enabled vault with this gate off keeps both knowledge and skills on the
-// legacy sources.
+// vaultReadEnabled is the source-routing gate: the Web vault switch (manager
+// enabled), the independent runtime gate, and the rollback allowlist must all
+// agree, and the index must be ready with the manifest binding the project.
+// The readiness checks make writes follow the source a read would actually use:
+// an unbound or not-yet-indexed project keeps the legacy path for both.
 func (s *Service) vaultReadEnabled(projectID string) bool {
-	return s != nil && s.knowledgeVault != nil && s.knowledgeVaultRuntimeRead && knowledgeVaultReadAllowed(projectID)
+	if s == nil || s.knowledgeVault == nil || !s.knowledgeVaultRuntimeRead || !knowledgeVaultReadAllowed(projectID) {
+		return false
+	}
+	available := false
+	err := s.knowledgeVault.WithReader(func(reader *knowledgevault.Reader) error {
+		available = reader.IndexReady() && strings.TrimSpace(reader.Manifest().Projects[projectID]) != ""
+		return nil
+	})
+	return err == nil && available
 }
 
 func (s *Service) vaultKnowledgeForProject(ctx context.Context, projectID string) (vaultKnowledgeSnapshot, bool) {

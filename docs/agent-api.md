@@ -170,14 +170,21 @@ project-collaboration binding.
 
 `POST /api/v1/agent/skills` accepts `name`, `description`, and `instructions`. Main Agent creates an active, enabled Skill scoped to the current Project, and AHA2 automatically selects it for the current Task. It is available through the Agent API immediately and is materialized into context on the next Turn.
 
-`POST /api/v1/agent/knowledge/entries` 是 Phase 1 统一写入入口：`mode=create|revise`，
+`POST /api/v1/agent/knowledge/entries` 是统一写入入口：`mode=create|revise`，
 服务端从 Task token 解析 Project，忽略客户端传入的路径；`scope` 只接受 `project` 或
 `global`（全局写入仍需 Main Agent 与 task-route 权限）。create 校验六种规范 type、
 title、summary、body、tags、禁止内容以及 `search_query`/`duplicate_ack`；高相似度返回
 409 与 `duplicate_candidates`。revise 需要 `entry_id` + `base_revision`，冲突返回 409。
-响应中的 `source` 说明本次写入落在 `vault` 还是 `legacy`。写入来源跟随读取来源：项目
-读 vault 但 runtime write 开关关闭时返回 409 `knowledge_vault_write_disabled`，不会静默
-回退旧表；读旧表时该接口复用 proposal 流程。
+响应中的 `source` 说明本次写入落在 `vault` 还是 `legacy`。
+
+从本次全量切换起 Agent 读写默认对所有项目使用 vault：`--knowledge-vault-runtime-read` /
+`--knowledge-vault-runtime-write`（及对应 env）默认 true，显式设为 false 仍可关闭；
+`AHA2_KNOWLEDGE_VAULT_READ_PROJECTS` 未设置表示全量，显式逗号列表只切换列表内项目，
+显式空字符串表示全部回退旧表。**Web 的“文件知识库”开关只控制文件页面和 API，不等于
+runtime 已切换**；实际读写还要求该开关开启、索引 ready、manifest 已绑定项目，索引未
+ready 或项目未绑定时继续使用旧表。写入来源跟随实际读取来源：项目读 vault 但 runtime
+write 关闭时返回 409 `knowledge_vault_write_disabled`，**不会**静默回退旧表；项目本身
+读旧表时该接口继续复用 proposal 流程，旧表和旧 skills 保留。
 
 `POST /api/v1/agent/knowledge/feedback` 接受 `entry_id` 和 `kind=helped|stale|wrong`。
 stale/wrong 只更新状态并进入待修订队列，不修改正文；helped 只记录正向反馈。该接口与
