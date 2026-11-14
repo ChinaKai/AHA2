@@ -163,13 +163,6 @@ export function vscodeLocalURI(absolutePath: string): string {
   return `vscode://file/${encodeURIPath(normalized)}`;
 }
 
-export function vscodeRemoteURI(host: string, absolutePath: string): string | null {
-  const trimmed = String(host ?? "").trim();
-  if (!trimmed) return null;
-  const normalized = String(absolutePath ?? "").replaceAll("\\", "/").replace(/^\/+/, "");
-  return `vscode://vscode-remote/ssh-remote+${encodeURIComponent(trimmed)}/${encodeURIPath(normalized)}`;
-}
-
 export function obsidianURI(vaultName: string, relativePath: string): string {
   const file = String(relativePath ?? "").replaceAll("\\", "/").replace(/\.md$/i, "");
   return `obsidian://open?vault=${encodeURIComponent(vaultName)}&file=${encodeURIComponent(file)}`;
@@ -284,19 +277,24 @@ function metaBadges(item: {type: string; status: string}): string {
   return `${badge(typeLabel(item.type), "type")}${badge(statusLabel(item.status), item.status === "stale" || item.status === "pending" ? "warn" : "status")}`;
 }
 
-function openActions(absolutePath: string, relativePath: string, obsidianFile = "", options: {compact?: boolean} = {}): string {
+function openActionLabel(base: string, context = ""): string {
+  return context ? t("kv.openActionContext", {action: base, name: context}) : base;
+}
+
+function openActions(absolutePath: string, relativePath: string, obsidianFile = "", options: {compact?: boolean; context?: string; copyKey?: string} = {}): string {
   const local = vscodeLocalURI(absolutePath);
-  const remote = vscodeRemoteURI(state.remoteHost, absolutePath);
   const obsidian = state.obsidianVault ? obsidianURI(state.obsidianVault, obsidianFile || relativePath) : "";
+  const obsidianEnabled = Boolean(obsidian) && state.obsidianReady;
+  const vscodeLabel = openActionLabel(t("kv.openVSCodeLocal"), options.context);
+  const obsidianLabel = openActionLabel(t("kv.openObsidian"), options.context);
+  const copyLabel = openActionLabel(t(options.copyKey || "kv.copyPath"), options.context);
+  const obsidianHint = `${obsidianLabel}：${t("kv.obsidianUnregistered")}`;
   return `<div class="kv-open-actions${options.compact ? " compact" : ""}">
-    <a class="kv-open kv-open-desktop" href="${escapeVaultHTML(local)}" target="_blank" rel="noopener" title="${t("kv.openVSCodeLocal")}">${icon("monitor")}<span>${t("kv.openVSCodeLocal")}</span></a>
-    ${remote
-      ? `<a class="kv-open kv-open-desktop" href="${escapeVaultHTML(remote)}" target="_blank" rel="noopener" title="${t("kv.openVSCodeRemote")}">${icon("link")}<span>${t("kv.openVSCodeRemote")}</span></a>`
-      : `<button type="button" class="kv-open kv-open-desktop" data-kv-copy="${escapeVaultHTML(absolutePath)}" title="${t("kv.remoteUnavailable")}">${icon("copy")}<span>${t("kv.openVSCodeRemote")}</span></button>`}
-    ${obsidian
-      ? `<a class="kv-open kv-open-desktop" href="${escapeVaultHTML(obsidian)}" target="_blank" rel="noopener" title="${state.obsidianReady ? t("kv.openObsidian") : t("kv.obsidianUnregistered")}">${icon("branch")}<span>${t("kv.openObsidian")}</span>${state.obsidianReady ? "" : `<small>${t("kv.obsidianUnregistered")}</small>`}</a>`
-      : ""}
-    <button type="button" class="kv-open kv-copy" data-kv-copy="${escapeVaultHTML(absolutePath)}">${icon("copy")}<span>${t("kv.copyPath")}</span></button>
+    <a class="kv-open" href="${escapeVaultHTML(local)}" target="_blank" rel="noopener" title="${escapeVaultHTML(vscodeLabel)}" aria-label="${escapeVaultHTML(vscodeLabel)}">${icon("monitor")}</a>
+    ${obsidianEnabled
+      ? `<a class="kv-open" href="${escapeVaultHTML(obsidian)}" target="_blank" rel="noopener" title="${escapeVaultHTML(obsidianLabel)}" aria-label="${escapeVaultHTML(obsidianLabel)}">${icon("branch")}</a>`
+      : `<button type="button" class="kv-open" disabled title="${escapeVaultHTML(obsidianHint)}" aria-label="${escapeVaultHTML(obsidianHint)}">${icon("branch")}</button>`}
+    <button type="button" class="kv-open kv-copy" data-kv-copy="${escapeVaultHTML(absolutePath)}" title="${escapeVaultHTML(copyLabel)}" aria-label="${escapeVaultHTML(copyLabel)}">${icon("copy")}</button>
   </div>`;
 }
 
@@ -628,15 +626,17 @@ function docBodyHTML(): string {
   const doc = state.doc;
   const crumbs = doc.path.split("/");
   return `${back}
-    <nav class="kv-breadcrumb" aria-label="${t("kv.breadcrumb")}">${crumbs.map((part, index) => `<span${index === crumbs.length - 1 ? ' aria-current="page"' : ""}>${escapeVaultHTML(part.replace(/\.md$/i, ""))}</span>`).join('<i aria-hidden="true">/</i>')}</nav>
-    <div class="kv-doc-head">
-      <div>
-        <h1>${escapeVaultHTML(doc.title)}</h1>
-        <p class="kv-doc-meta"><span>${t("kv.source")}: ${escapeVaultHTML(doc.library_name)}</span>${doc.project_id ? `<span>${t("kv.project")}: ${escapeVaultHTML(doc.project_id)}</span>` : ""}<span>${t("kv.updated")}: ${escapeVaultHTML(safeDateTime(doc.modified_at || doc.updated))}</span><span>${t("kv.status")}: ${escapeVaultHTML(statusLabel(doc.status))}</span></p>
-      </div>
-      <div class="kv-doc-tools">
+    <div class="kv-doc-toolbar">
+      <nav class="kv-breadcrumb" aria-label="${t("kv.breadcrumb")}">${crumbs.map((part, index) => `<span${index === crumbs.length - 1 ? ' aria-current="page"' : ""}>${escapeVaultHTML(part.replace(/\.md$/i, ""))}</span>`).join('<i aria-hidden="true">/</i>')}</nav>
+      <div class="kv-doc-actions">
         ${openActions(doc.absolute_path, doc.relative_path, doc.obsidian_file)}
-        <button type="button" class="kv-context-toggle" data-kv-context-toggle aria-expanded="${state.contextOpen}">${icon("panel")}<span>${t("kv.context")}</span></button>
+      </div>
+    </div>
+    <div class="kv-doc-head">
+      <h1>${escapeVaultHTML(doc.title)}</h1>
+      <div class="kv-doc-subhead">
+        <p class="kv-doc-meta"><span>${t("kv.source")}: ${escapeVaultHTML(doc.library_name)}</span>${doc.project_id ? `<span>${t("kv.project")}: ${escapeVaultHTML(doc.project_id)}</span>` : ""}<span>${t("kv.updated")}: ${escapeVaultHTML(safeDateTime(doc.modified_at || doc.updated))}</span><span>${t("kv.status")}: ${escapeVaultHTML(statusLabel(doc.status))}</span></p>
+        <button type="button" class="kv-context-toggle" data-kv-context-toggle aria-expanded="${state.contextOpen}" aria-label="${t("kv.context")}" title="${t("kv.context")}">${icon("panel")}<span>${t("kv.context")}</span></button>
       </div>
     </div>
     ${doc.warning ? `<div class="kv-warning" role="status">${escapeVaultHTML(doc.warning)}</div>` : ""}
@@ -706,7 +706,7 @@ function skillsBodyHTML(): string {
       <header><strong>${escapeVaultHTML(skill.name)}</strong>${badge(skill.scope === "global" ? t("kv.scope.global") : t("kv.scope.project"), "type")}</header>
       <p>${escapeVaultHTML(skill.description || t("kv.noDescription"))}</p>
       <small>${escapeVaultHTML(skill.library)} · ${t("kv.skillFiles", {count: skill.file_count})}</small>
-      ${openActions(skill.open_path, `${skill.relative_path}/SKILL.md`, "", {compact: true})}
+      <footer class="kv-skill-actions">${openActions(skill.open_path, `${skill.relative_path}/SKILL.md`, "", {compact: true, context: skill.name, copyKey: "kv.copySkillPath"})}</footer>
     </article>`).join("")}</div>
   </section>`;
 }
@@ -1073,7 +1073,10 @@ function decorateDocBody(): void {
 }
 
 function copyPath(value: string): void {
-  const done = () => activeContext.setMessage("notice", t("kv.copied"));
+  const done = () => {
+    activeContext.setMessage("notice", t("kv.copied"));
+    activeContext.render();
+  };
   if (navigator.clipboard?.writeText) {
     void navigator.clipboard.writeText(value).then(done).catch(() => fallbackCopy(value, done));
     return;

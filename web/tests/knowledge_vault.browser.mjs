@@ -56,6 +56,14 @@ const DEEP_DOC = {
   scope: "global", project_id: "", library_id: "global", library_name: "全局知识",
   obsidian_file: "global/guides/advanced/deep", backlinks: [], tags: [],
 };
+const LONG_DOC = {
+  ...DOC, id: "long-doc",
+  title: "一个很长的知识库文档标题用来验证文档头按钮不会挤压标题并且标题能够独占整行自然换行",
+  path: "global/guides/long-title.md", relative_path: "global/guides/long-title.md",
+  absolute_path: "/srv/vault/项目 知识/global/guides/long-title.md",
+  scope: "global", project_id: "", library_id: "global", library_name: "全局知识",
+  obsidian_file: "global/guides/long-title", backlinks: [], tags: [],
+};
 const allTree = [{
   id: "g-index", title: "全局知识首页", path: "global/index.md", type: "navigation", status: "verified", scope: "global", is_index: true, system: true, children: [{
     id: "g-folder", title: "通用知识", path: "global/guides/index.md", type: "navigation", status: "verified", scope: "global", is_index: true, system: true,
@@ -98,11 +106,13 @@ function bootstrap(off) {
   return `
 const OFF = ${off};
 const LIBS = ${JSON.stringify(LIBS)};
+if (location.search.includes("obsidian=off")) LIBS.obsidian_ready = false;
 const TREES = ${JSON.stringify({all: allTree})};
 const DOC = ${JSON.stringify(DOC)};
 const INBOX_DOC = ${JSON.stringify(INBOX_DOC)};
 const FENCE_DOC = ${JSON.stringify(FENCE_DOC)};
 const DEEP_DOC = ${JSON.stringify(DEEP_DOC)};
+const LONG_DOC = ${JSON.stringify(LONG_DOC)};
 const RECENT = ${JSON.stringify(RECENT)};
 const GLOBAL_RECENT = ${JSON.stringify(GLOBAL_RECENT)};
 const GLOBAL_INBOX = ${JSON.stringify(GLOBAL_INBOX)};
@@ -141,6 +151,7 @@ window.fetch = async (input, init = {}) => {
     const id = decodeURIComponent(path.slice("/api/v1/knowledge-vault/doc/".length));
     if (id === "doc-fence") return json({ok: true, doc: FENCE_DOC});
     if (id === "g-deep") return json({ok: true, doc: DEEP_DOC});
+    if (id === "long-doc") return json({ok: true, doc: LONG_DOC});
     if (id === "doc-1" || id === "doc-2" || id.startsWith("doc-") || id === "g-doc" || id === "g-index" || id === "g-folder" || id === "g-sub" || id === "g-other" || id === "p-index" || id === "p-guides") return json({ok: true, doc: DOC});
     if (id === "inbox-1") return json({ok: true, doc: INBOX_DOC});
     return json({ok: false, error: "knowledge_vault_document_not_found"}, 404);
@@ -160,7 +171,10 @@ window.fetch = async (input, init = {}) => {
       ? json({ok: true, enabled: true, index_ready: true, count: 1, counts: [{library_id: "project:p1", library: "Demo", project_id: "p1", count: 1}], items: [RECENT[1]]})
       : json({ok: true, enabled: true, index_ready: true, count: 2, counts: [{library_id: "global", library: "全局知识", count: 1}, {library_id: "project:p1", library: "Demo", project_id: "p1", count: 1}], items: [RECENT[1], GLOBAL_INBOX]});
   }
-  if (path === "/api/v1/knowledge-vault/skills") return json({ok: true, enabled: true, skills: [{id: "s1", slug: "demo", name: "Demo Skill", scope: "global", library: "全局知识", description: "构建技能", file_count: 3, relative_path: "skills/demo", absolute_path: "/srv/vault/skills/demo", open_path: "/srv/vault/skills/demo/SKILL.md"}]});
+  if (path === "/api/v1/knowledge-vault/skills") return json({ok: true, enabled: true, skills: [
+    {id: "s1", slug: "demo", name: "Demo Skill", scope: "global", library: "全局知识", description: "构建技能", file_count: 3, relative_path: "skills/demo", absolute_path: "/srv/vault/skills/demo", open_path: "/srv/vault/skills/demo/SKILL.md"},
+    {id: "s2", slug: "long-skill", name: "一个名字非常长的技能包用来验证底部图标不会挤压标题和描述文字", scope: "project", project_id: "p1", library: "Demo", description: "这个技能描述也很长，用来确认三个图标位于卡片底部右侧时不会占用标题或描述的水平空间，并且卡片内部不会出现横向溢出。", file_count: 5, relative_path: "projects/p1/skills/long-skill", absolute_path: "/srv/vault/projects/p1/skills/long-skill", open_path: "/srv/vault/projects/p1/skills/long-skill/SKILL.md"},
+  ]});
   if (path === "/api/v1/knowledge") return json({knowledge: OLD_KNOWLEDGE, proposals: [], review_settings: {auto_approve: false}, has_more: false});
   if (path === "/api/v1/knowledge/libraries") return json({libraries: []});
   if (path === "/api/v1/knowledge/indexes") return json({indexes: []});
@@ -227,6 +241,7 @@ let browser;
 try {
   browser = await chromium.launch({executablePath, args: ["--no-sandbox"], headless: true});
   const page = await browser.newPage({viewport: {width: 1280, height: 900}, locale: "zh-CN"});
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
   const errors = [];
   page.on("pageerror", error => errors.push(error.message));
   await page.goto(url, {waitUntil: "networkidle"});
@@ -350,20 +365,53 @@ try {
   const treeRequests = await page.evaluate(() => window.__vaultTreeRequests);
   assert.deepEqual([...new Set(treeRequests)], ["all"], "one all-library tree request powers both scopes");
 
-  // Document page and the three open methods (plus copy path).
+  // Document page: three icon-only open actions on the breadcrumb row. The
+  // remote VSCode entry is gone and the title has its own line.
   await page.locator('a[data-kv-doc="g-doc"]').click();
   await page.waitForSelector(".kv-doc-body");
   assert.equal((await page.locator(".kv-doc-head h1").textContent()).trim(), "构建指南");
+  const actions = page.locator(".kv-doc-toolbar .kv-open");
+  assert.equal(await actions.count(), 3);
+  assert.equal(await page.locator('a.kv-open[href^="vscode://vscode-remote"]').count(), 0);
+  assert.equal(await page.locator(".kv-doc-toolbar").getByText("VSCode 远程").count(), 0);
+  const actionNames = await actions.evaluateAll(nodes => nodes.map(node => node.getAttribute("aria-label")));
+  assert.deepEqual(actionNames, ["在本地 VSCode 打开", "在 Obsidian 打开", "复制文档路径"]);
+  assert.equal(await actions.locator("span").count(), 0, "open actions are icon-only");
   const local = page.locator('a.kv-open[href^="vscode://file/"]');
-  const remote = page.locator('a.kv-open[href^="vscode://vscode-remote/ssh-remote+devbox/"]');
   const obsidian = page.locator('a.kv-open[href^="obsidian://open"]');
   assert.equal(await local.count(), 1);
-  assert.equal(await remote.count(), 1);
   assert.equal(await obsidian.count(), 1);
   assert.match(await local.getAttribute("href"), /%E9%A1%B9%E7%9B%AE%20%E7%9F%A5%E8%AF%86/);
   assert.equal(await local.getAttribute("target"), "_blank");
   assert.equal(await obsidian.getAttribute("href"), "obsidian://open?vault=AHA2%20Knowledge&file=projects%2Fp1%2Fguides%2Fbuild");
   assert.equal(await page.locator("[data-kv-copy]").count() >= 1, true);
+
+  const docGeometry = () => page.evaluate(() => {
+    const rect = selector => document.querySelector(selector).getBoundingClientRect();
+    const toolbar = rect(".kv-doc-toolbar");
+    const breadcrumb = rect(".kv-breadcrumb");
+    const actionRow = rect(".kv-doc-toolbar .kv-open-actions");
+    const title = rect(".kv-doc-head h1");
+    const head = rect(".kv-doc-head");
+    const panel = rect(".kv-doc-panel");
+    return {
+      toolbar, breadcrumb, actions: actionRow, title, head, panel,
+      overflow: document.documentElement.scrollWidth - window.innerWidth,
+    };
+  });
+  let doc = await docGeometry();
+  assert.ok(doc.actions.top >= doc.toolbar.top - 1 && doc.actions.bottom <= doc.toolbar.bottom + 1, "actions stay on the breadcrumb row");
+  assert.ok(doc.breadcrumb.top >= doc.toolbar.top - 1 && doc.breadcrumb.bottom <= doc.toolbar.bottom + 1, "breadcrumb defines that row");
+  assert.ok(Math.abs(doc.actions.right - doc.panel.right) < 8, "actions end at the document panel's right edge");
+  assert.ok(doc.title.top >= doc.toolbar.bottom - 1, "title starts below the breadcrumb row");
+  assert.ok(Math.abs(doc.title.width - doc.head.width) < 1, "title spans the full content width");
+  assert.ok(doc.overflow <= 1, "document header has no horizontal overflow");
+
+  // Copy path is still one click with the light notice.
+  await page.locator(".kv-doc-toolbar [data-kv-copy]").click();
+  await page.waitForSelector(".banner.success", {timeout: 5000});
+  assert.match(await page.locator(".banner.success").textContent(), /已复制绝对路径/);
+
   assert.equal(await page.locator(".kv-doc-body").innerHTML().then(html => /<script/i.test(html)), false);
   assert.match(await page.locator(".kv-context-panel").innerText(), /大纲[\s\S]*构建[\s\S]*标签[\s\S]*build[\s\S]*反链[\s\S]*发布检查/);
 
@@ -429,7 +477,41 @@ try {
   await page.locator('.kv-tabs [data-kv-tab-button="skills"]').click();
   await page.waitForSelector(".kv-skill-card");
   assert.match(await page.locator(".kv-skill-card").first().innerText(), /Demo Skill[\s\S]*构建技能[\s\S]*3 个文件/);
-  assert.equal(await page.locator('a.kv-open[href^="vscode://file/"]').count() >= 1, true);
+  assert.equal(await page.locator(".kv-skill-card").count(), 2);
+  const demoCard = page.locator(".kv-skill-card", {hasText: "Demo Skill"});
+  const skillActions = demoCard.locator(".kv-skill-actions .kv-open");
+  assert.equal(await skillActions.count(), 3);
+  const skillNames = await skillActions.evaluateAll(nodes => nodes.map(node => node.getAttribute("aria-label")));
+  assert.deepEqual(skillNames, ["在本地 VSCode 打开「Demo Skill」", "在 Obsidian 打开「Demo Skill」", "复制技能路径「Demo Skill」"]);
+  assert.equal(await page.locator('.kv-skill-card a.kv-open[href^="vscode://vscode-remote"]').count(), 0);
+  assert.equal(await page.locator(".kv-skill-card .kv-open span").count(), 0, "skill actions are icon-only");
+  const skillLayout = await page.evaluate(() => {
+    const card = [...document.querySelectorAll(".kv-skill-card")].find(node => node.textContent.includes("一个名字非常长的技能包"));
+    const footer = card.querySelector(".kv-skill-actions");
+    const actions = footer.querySelector(".kv-open-actions").getBoundingClientRect();
+    const title = card.querySelector("header strong").getBoundingClientRect();
+    const description = card.querySelector("p").getBoundingClientRect();
+    const cardRect = card.getBoundingClientRect();
+    return {
+      footerIsLast: card.lastElementChild === footer,
+      rightGap: cardRect.right - actions.right,
+      actionsTop: actions.top,
+      descriptionBottom: description.bottom,
+      footerTop: footer.getBoundingClientRect().top,
+      cardTop: cardRect.top,
+      titleWidth: title.width,
+      cardOverflow: card.scrollWidth - card.clientWidth,
+      overflow: document.documentElement.scrollWidth - window.innerWidth,
+    };
+  });
+  assert.equal(skillLayout.footerIsLast, true, "skill actions are the card's bottom row");
+  assert.ok(skillLayout.footerTop > skillLayout.cardTop, "skill actions sit below the file count");
+  assert.ok(skillLayout.actionsTop >= skillLayout.descriptionBottom - 1, "skill actions never squeeze the long title or description");
+  assert.ok(skillLayout.rightGap >= 0 && skillLayout.rightGap <= 24, "skill actions are right-aligned inside the card padding");
+  assert.ok(skillLayout.titleWidth > 80, "a long skill name keeps a usable title width");
+  assert.ok(skillLayout.cardOverflow <= 1, "long skill cards do not overflow internally");
+  assert.ok(skillLayout.overflow <= 1, "skills tab has no horizontal overflow");
+  await page.screenshot({path: resolve(screenshots, "knowledge-vault-skills.png"), fullPage: false});
 
   await axe(page, "desktop");
   assert.deepEqual(errors, []);
@@ -474,6 +556,29 @@ try {
   await page.goto(`${url}/?deep=2#knowledge?doc=missing&scope=global`, {waitUntil: "networkidle"});
   await page.waitForSelector(".kv-state-error");
   assert.match(await page.locator(".kv-state-error").innerText(), /knowledge_vault_document_not_found/);
+
+  // A long title wraps naturally on its own line instead of being squeezed by
+  // the action buttons, and the three icons stay at the breadcrumb's right end.
+  await page.goto(`${url}/?long=1#knowledge?doc=long-doc&scope=global`, {waitUntil: "networkidle"});
+  await page.waitForSelector(".kv-doc-body");
+  assert.match(await page.locator(".kv-doc-head h1").textContent(), /一个很长的知识库文档标题/);
+  doc = await docGeometry();
+  assert.ok(Math.abs(doc.title.width - doc.head.width) < 1, "long title spans the full content width");
+  assert.ok(doc.title.top >= doc.toolbar.bottom - 1, "long title stays below the action row");
+  assert.ok(doc.actions.top >= doc.toolbar.top - 1 && doc.actions.bottom <= doc.toolbar.bottom + 1);
+  assert.ok(doc.overflow <= 1, "long title does not overflow horizontally");
+  assert.equal(await page.locator(".kv-doc-toolbar .kv-open").count(), 3);
+
+  // An unregistered Obsidian vault greys out only that icon and explains why.
+  await page.goto(`${url}/?obsidian=off#knowledge?doc=doc-1&scope=project&project=p1`, {waitUntil: "networkidle"});
+  await page.waitForSelector(".kv-doc-body");
+  const disabledObsidian = page.locator(".kv-doc-toolbar button.kv-open[disabled]");
+  assert.equal(await disabledObsidian.count(), 1);
+  assert.match(await disabledObsidian.getAttribute("title"), /先在 Obsidian 打开该文件夹/);
+  assert.match(await disabledObsidian.getAttribute("aria-label"), /在 Obsidian 打开[\s\S]*先在 Obsidian 打开该文件夹/);
+  assert.equal(await page.locator('.kv-doc-toolbar a.kv-open[href^="obsidian://"]').count(), 0);
+  assert.equal(await page.locator('.kv-doc-toolbar a.kv-open[href^="vscode://file/"]').count(), 1);
+  assert.equal(await page.locator(".kv-doc-toolbar .kv-open").count(), 3);
 
   // Address bar: opening a document updates the hash in place (no reload, no
   // history growth); every top-level view switch drops the knowledge hash so a
@@ -538,6 +643,10 @@ try {
   await page.keyboard.press("Enter");
   await page.waitForSelector(".kv-skill-card");
   assert.equal(await page.locator('.kv-tabs [data-kv-tab-button="skills"]').getAttribute("aria-current"), "page");
+  const mobileSkillActions = page.locator(".kv-skill-card").first().locator(".kv-skill-actions .kv-open");
+  assert.equal(await mobileSkillActions.count(), 3);
+  assert.equal(await mobileSkillActions.first().isVisible(), true);
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), "390px skill cards keep three icons without overflowing");
   await page.locator('.kv-tabs [data-kv-tab-button="knowledge"]').click();
   await page.waitForSelector(".kv-tree-link");
 
@@ -560,8 +669,20 @@ try {
   await page.waitForSelector(".kv-doc-body");
   assert.equal(await page.locator(".kv-tree-panel").isVisible(), false);
   assert.equal(await page.locator(".kv-doc-panel").isVisible(), true);
-  assert.equal(await page.locator(".kv-copy").isVisible(), true);
-  assert.equal(await page.locator(".kv-open-desktop").first().isVisible(), false);
+  const mobileActions = page.locator(".kv-doc-toolbar .kv-open");
+  assert.equal(await mobileActions.count(), 3);
+  assert.equal(await mobileActions.nth(0).isVisible(), true, "mobile keeps local VSCode");
+  assert.equal(await mobileActions.nth(1).isVisible(), true, "mobile keeps Obsidian");
+  assert.equal(await mobileActions.nth(2).isVisible(), true, "mobile keeps copy path");
+  const mobileSizes = await mobileActions.evaluateAll(nodes => nodes.map(node => {
+    const rect = node.getBoundingClientRect();
+    return {width: rect.width, height: rect.height};
+  }));
+  assert.ok(mobileSizes.every(size => size.width >= 26 && size.width <= 30 && size.width === size.height), `mobile action icons shrink to 28px squares: ${JSON.stringify(mobileSizes)}`);
+  doc = await docGeometry();
+  assert.ok(doc.actions.top >= doc.toolbar.top - 1 && doc.actions.bottom <= doc.toolbar.bottom + 1, "mobile actions share the breadcrumb row");
+  assert.ok(doc.title.top >= doc.toolbar.bottom - 1, "mobile title stays on its own line");
+  assert.ok(Math.abs(doc.title.width - doc.head.width) < 1, "mobile title spans the full content width");
   assert.ok((await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)), "390px document view has no horizontal overflow");
   await page.screenshot({path: resolve(screenshots, "knowledge-vault-mobile-doc.png"), fullPage: false});
   await page.locator("[data-kv-context-toggle]").first().click();
@@ -584,6 +705,37 @@ try {
   assert.equal(layout.skillsVisible, true, "360px shows the skills tab directly");
   assert.equal(layout.settingsVisible, true, "360px shows the settings gear directly");
   assert.equal(layout.moreCount, 0, "360px has no more trigger or menu");
+
+  // A long title at the narrowest width wraps inside the content column while
+  // the three icons keep their row; nothing spills sideways.
+  const phone = await browser.newPage({viewport: {width: 360, height: 780}, locale: "zh-CN"});
+  await phone.goto(`${url}/?long=360#knowledge?doc=long-doc&scope=global`, {waitUntil: "networkidle"});
+  await phone.waitForSelector(".kv-doc-body");
+  const phoneLayout = await phone.evaluate(() => {
+    const rect = selector => document.querySelector(selector).getBoundingClientRect();
+    const toolbar = rect(".kv-doc-toolbar");
+    const title = rect(".kv-doc-head h1");
+    const head = rect(".kv-doc-head");
+    const icons = [...document.querySelectorAll(".kv-doc-toolbar .kv-open")];
+    return {
+      iconCount: icons.length,
+      iconSizes: icons.map(node => {
+        const box = node.getBoundingClientRect();
+        return {width: box.width, height: box.height, visible: Boolean(node.offsetParent)};
+      }),
+      titleWidth: title.width,
+      headWidth: head.width,
+      titleTop: title.top,
+      toolbarBottom: toolbar.bottom,
+      overflow: document.documentElement.scrollWidth - window.innerWidth,
+    };
+  });
+  assert.equal(phoneLayout.iconCount, 3);
+  assert.ok(phoneLayout.iconSizes.every(size => size.visible && size.width === size.height && size.width <= 30), "360px keeps three square icons");
+  assert.ok(Math.abs(phoneLayout.titleWidth - phoneLayout.headWidth) < 1, "long title spans the narrow content column");
+  assert.ok(phoneLayout.titleTop >= phoneLayout.toolbarBottom - 1, "long title wraps below the icon row");
+  assert.ok(phoneLayout.overflow <= 1, "360px long title does not overflow");
+  await phone.close();
 
   await page.setViewportSize({width: 760, height: 780});
   await page.waitForTimeout(80);

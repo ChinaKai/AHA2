@@ -78,18 +78,6 @@ test("VSCode local URIs encode spaces and Chinese, and keep a Windows drive lett
   );
 });
 
-test("VSCode remote URIs use ssh-remote and degrade to null without a host", () => {
-  assert.equal(
-    vault.vscodeRemoteURI("devbox", "/srv/vault/项目 文档/a b.md"),
-    "vscode://vscode-remote/ssh-remote+devbox/srv/vault/%E9%A1%B9%E7%9B%AE%20%E6%96%87%E6%A1%A3/a%20b.md",
-  );
-  assert.equal(vault.vscodeRemoteURI("", "/srv/vault/a.md"), null);
-  assert.equal(vault.vscodeRemoteURI("   ", "/srv/vault/a.md"), null);
-  assert.equal(
-    vault.vscodeRemoteURI("devbox", "D:\\notes\\计划.md"),
-    "vscode://vscode-remote/ssh-remote+devbox/D:/notes/%E8%AE%A1%E5%88%92.md",
-  );
-});
 
 test("Obsidian URIs drop the .md suffix and encode the vault and nested file path", () => {
   assert.equal(
@@ -353,30 +341,55 @@ test("topbar CSS keeps the tab strip on one row and shows skills/settings on pho
   assert.doesNotMatch(css, /\.kv-settings-trigger \{ display: none/);
 });
 
-test("document rendering offers local VSCode, remote VSCode, Obsidian and copy path", () => {
+test("document and skill actions are compact icon controls on every viewport", async () => {
+  const css = await readFile(resolve(root, "src", "styles.css"), "utf8");
+  assert.match(css, /\.kv-doc-toolbar \{[^}]*display: flex[^}]*justify-content: space-between/);
+  assert.match(css, /\.kv-open \{[^}]*width: 31px; height: 31px[^}]*padding: 0/);
+  assert.match(css, /\.kv-open-actions\.compact \.kv-open \{ width: 29px; height: 29px; \}/);
+  assert.match(css, /\.kv-open:disabled \{[^}]*opacity: \.45/);
+  assert.match(css, /\.kv-skill-actions \{[^}]*justify-content: flex-end/);
+  assert.match(css, /@media \(max-width: 760px\) \{[\s\S]*?\.kv-doc-actions \.kv-open \{ width: 28px; height: 28px; \}/);
+  assert.doesNotMatch(css, /\.kv-open-desktop/);
+  assert.doesNotMatch(css, /\.kv-doc-tools/);
+});
+
+test("document header keeps three icon actions on the breadcrumb row and drops remote VSCode", () => {
   reset({selectedID: "doc-1", docState: "ready", doc});
   const html = vault.renderKnowledgeVaultPage(context());
   assert.match(html, /href="vscode:\/\/file\/srv\/vault\/%E9%A1%B9%E7%9B%AE%20%E7%9F%A5%E8%AF%86\/projects\/p1\/guides\/build\.md"/);
-  assert.match(html, /href="vscode:\/\/vscode-remote\/ssh-remote\+devbox\/srv\/vault\/%E9%A1%B9%E7%9B%AE%20%E7%9F%A5%E8%AF%86\/projects\/p1\/guides\/build\.md"/);
   assert.match(html, /href="obsidian:\/\/open\?vault=AHA2%20Knowledge&amp;file=projects%2Fp1%2Fguides%2Fbuild"/);
   assert.match(html, /data-kv-copy="\/srv\/vault\/项目 知识\/projects\/p1\/guides\/build\.md"/);
+  assert.doesNotMatch(html, /vscode-remote/);
+  assert.doesNotMatch(html, /VSCode 远程/);
+  assert.doesNotMatch(html, /kv-open-desktop/);
+  // The toolbar carries the breadcrumb and the three icon actions; the title
+  // sits in the next block on its own line.
+  assert.match(html, /<div class="kv-doc-toolbar">\s*<nav class="kv-breadcrumb"[\s\S]*?<div class="kv-doc-actions">[\s\S]*?<div class="kv-open-actions">[\s\S]*?<\/div>\s*<\/div>\s*<div class="kv-doc-head">\s*<h1>/);
+  const toolbar = html.slice(html.indexOf('<div class="kv-doc-toolbar">'), html.indexOf('<div class="kv-doc-head">'));
+  assert.equal((toolbar.match(/class="kv-open(?: kv-copy)?"/g) || []).length, 3, "exactly three icon actions");
+  assert.match(toolbar, /aria-label="在本地 VSCode 打开"/);
+  assert.match(toolbar, /aria-label="在 Obsidian 打开"/);
+  assert.match(toolbar, /aria-label="复制文档路径"/);
+  assert.doesNotMatch(toolbar, /<span>(?:在本地 VSCode 打开|在 Obsidian 打开|复制文档路径)<\/span>/);
   assert.match(html, /有帮助/);
   assert.match(html, /过时/);
   assert.doesNotMatch(html, /window\.open/);
 });
 
-test("without a remote host the remote action is a copy fallback, not a broken link", () => {
-  reset({selectedID: "doc-1", docState: "ready", remoteHost: "", doc});
+test("a configured remote host no longer adds a remote VSCode action", () => {
+  reset({selectedID: "doc-1", docState: "ready", remoteHost: "devbox", doc});
   const html = vault.renderKnowledgeVaultPage(context());
   assert.doesNotMatch(html, /vscode-remote/);
-  assert.match(html, /title="无法判断远程主机，已降级为复制路径"/);
+  assert.doesNotMatch(html, /VSCode 远程/);
 });
 
-test("unregistered Obsidian keeps the button and explains how to register the folder", () => {
+test("unregistered Obsidian is greyed out and explains the reason", () => {
   reset({selectedID: "doc-1", docState: "ready", obsidianReady: false, doc});
   const html = vault.renderKnowledgeVaultPage(context());
-  assert.match(html, /obsidian:\/\/open/);
-  assert.match(html, /先在 Obsidian 打开该文件夹/);
+  assert.doesNotMatch(html, /obsidian:\/\/open/);
+  assert.match(html, /<button type="button" class="kv-open" disabled title="在 Obsidian 打开：先在 Obsidian 打开该文件夹" aria-label="在 Obsidian 打开：先在 Obsidian 打开该文件夹">/);
+  assert.match(html, /aria-label="在本地 VSCode 打开"/);
+  assert.match(html, /aria-label="复制文档路径"/);
 });
 
 test("tree loading, empty and error states are explicit", () => {
@@ -419,6 +432,16 @@ test("inbox and skills are read-only lists with no move or edit affordances", ()
   assert.match(skills, /Build/);
   assert.match(skills, /3 个文件/);
   assert.match(skills, /vscode:\/\/file\/srv\/vault\/skills\/build/);
+  // Skill cards keep the same three icon actions, right-aligned in a footer
+  // below the file count, with the skill name in each accessible label.
+  assert.match(skills, /<footer class="kv-skill-actions"><div class="kv-open-actions compact">/);
+  const card = skills.slice(skills.indexOf('<article class="kv-skill-card">'), skills.indexOf("</article>"));
+  assert.equal((card.match(/class="kv-open(?: kv-copy)?"/g) || []).length, 3);
+  assert.match(card, /aria-label="在本地 VSCode 打开「Build」"/);
+  assert.match(card, /aria-label="在 Obsidian 打开「Build」"/);
+  assert.match(card, /aria-label="复制技能路径「Build」"/);
+  assert.doesNotMatch(card, /VSCode 远程/);
+  assert.doesNotMatch(card, /<span>(?:在本地 VSCode 打开|在 Obsidian 打开|复制技能路径)/);
   assert.doesNotMatch(skills, /data-kv-(edit|delete)/);
 });
 
