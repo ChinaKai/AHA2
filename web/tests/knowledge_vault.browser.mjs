@@ -406,8 +406,13 @@ try {
   assert.equal(await page.locator(".kv-search-panel").isVisible(), false);
 
   // Opening a project document from search expands only its ancestor folders in
-  // the single all-library tree.
-  await page.waitForSelector('a[data-kv-doc="doc-1"]');
+  // the single all-library tree. The closed search panel keeps its result links
+  // in the DOM, so this wait must be scoped to the tree: an unscoped selector
+  // resolves to the hidden search link first and times out waiting for it to
+  // become visible.
+  assert.equal(await page.locator('.kv-search-panel a[data-kv-doc="doc-1"]').count(), 1, "the hidden search panel keeps its result link in the DOM");
+  assert.equal(await page.locator('.kv-search-panel a[data-kv-doc="doc-1"]').isVisible(), false, "the closed search panel link must stay hidden");
+  await page.waitForSelector('.kv-tree-panel a[data-kv-doc="doc-1"]');
   assert.equal(await page.locator('[data-kv-toggle="vault-dir:projects"]').getAttribute("aria-expanded"), "true");
   assert.equal(await page.locator('[data-kv-toggle="p-index"]').getAttribute("aria-expanded"), "true");
   assert.equal(await page.locator('[data-kv-toggle="p-guides"]').getAttribute("aria-expanded"), "true");
