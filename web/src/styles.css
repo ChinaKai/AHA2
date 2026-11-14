@@ -3297,6 +3297,10 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
 }
 .kv-tree-toggle .icon { width: 14px; height: 14px; }
 .kv-tree-toggle:hover { background: var(--color-surface-muted); }
+.kv-tree-toggle-space { flex: 0 0 auto; width: 22px; height: 26px; }
+.kv-tree-folder-icon { flex: 0 0 auto; display: inline-flex; color: var(--color-text-muted); }
+.kv-tree-folder-icon .icon { width: 14px; height: 14px; }
+.kv-tree-folder-link { font-weight: 500; }
 .kv-tree-link {
   flex: 1 1 auto; display: flex; align-items: center; gap: 6px; min-width: 0;
   padding: 5px 6px 5px calc(6px + var(--kv-depth, 0) * 10px);
@@ -3380,6 +3384,8 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
 .kv-inbox-counts { display: flex; flex-wrap: wrap; gap: 4px; }
 .kv-chip { padding: 3px 8px; border: 1px solid var(--color-border); border-radius: 999px; background: var(--color-surface); color: var(--color-text-muted); font: inherit; font-size: var(--font-size-12); cursor: pointer; }
 .kv-chip:hover { background: var(--color-surface-muted); }
+.kv-chip-static { cursor: default; }
+.kv-chip-static:hover { background: var(--color-surface); }
 
 .kv-skill-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: var(--space-3); margin-top: var(--space-3); }
 .kv-skill-card { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-4); border: 1px solid var(--color-border-subtle); border-radius: var(--radius-card); background: var(--color-surface); min-width: 0; }

@@ -21,6 +21,7 @@ import type {
 type VaultTab = "knowledge" | "recent" | "inbox" | "skills";
 type MobilePane = "list" | "doc";
 type LoadState = "idle" | "loading" | "ready" | "error";
+type SearchScope = "all" | "project" | "directory";
 
 export interface KnowledgeVaultContext {
   render: () => void;
@@ -44,7 +45,6 @@ interface VaultState {
   warning: string;
   tab: VaultTab;
   libraryID: string;
-  projectFilter: string;
   typeFilter: string;
   statusFilter: string;
   tagFilter: string;
@@ -70,8 +70,7 @@ interface VaultState {
   skillsError: string;
   searchOpen: boolean;
   searchQuery: string;
-  searchLibrary: string;
-  searchProject: string;
+  searchScope: SearchScope;
   searchType: string;
   searchStatus: string;
   searchTag: string;
@@ -92,7 +91,7 @@ function initialState(): VaultState {
     libraries: [], projects: [], vaultReady: false, indexReady: false,
     vaultName: "", vaultPath: "", obsidianVault: "", obsidianReady: false,
     remoteHost: "", rebuiltAt: "", warning: "",
-    tab: "knowledge", libraryID: "global", projectFilter: "",
+    tab: "knowledge", libraryID: "global",
     typeFilter: "", statusFilter: "", tagFilter: "",
     tree: [], treeState: "idle", treeError: "", treeKey: "", expanded: new Set(),
     recentKey: "", inboxKey: "",
@@ -100,7 +99,7 @@ function initialState(): VaultState {
     recent: [], recentState: "idle", recentError: "",
     inbox: null, inboxState: "idle", inboxError: "",
     skills: [], skillsState: "idle", skillsError: "",
-    searchOpen: false, searchQuery: "", searchLibrary: "", searchProject: "",
+    searchOpen: false, searchQuery: "", searchScope: "all",
     searchType: "", searchStatus: "", searchTag: "",
     searchState: "idle", searchError: "", searchResults: [],
     feedback: "", contextOpen: false,
@@ -117,6 +116,10 @@ let treeRequest = 0;
 let recentRequest = 0;
 let inboxRequest = 0;
 const pendingLoads = new Set<string>();
+// One tree covers every library: its roots are the vault's real top-level
+// directories (global/ and projects/), so the page no longer has a separate
+// library/project scope selector.
+const VAULT_TREE_LIBRARY = "all";
 
 export function __setKnowledgeVaultStateForTest(patch: Partial<VaultState>): void {
   state = {...state, ...patch};
@@ -297,6 +300,194 @@ function openActions(absolutePath: string, relativePath: string, obsidianFile = 
   </div>`;
 }
 
+/* Directory tree --------------------------------------------------------- */
+
+const VAULT_INDEX_FILE = "index.md";
+
+function normalizeTreePath(value: unknown): string {
+  return String(value ?? "").replaceAll("\\", "/").replace(/^\/+|\/+$/g, "");
+}
+
+function treeBaseName(value: string): string {
+  const normalized = normalizeTreePath(value);
+  const separator = normalized.lastIndexOf("/");
+  return separator < 0 ? normalized : normalized.slice(separator + 1);
+}
+
+function treeDirectoryPath(value: string): string {
+  const normalized = normalizeTreePath(value);
+  const separator = normalized.lastIndexOf("/");
+  return separator < 0 ? "" : normalized.slice(0, separator);
+}
+
+export function isVaultIndexPath(value: string): boolean {
+  return treeBaseName(value).toLowerCase() === VAULT_INDEX_FILE;
+}
+
+function treeScopeRoot(value: string): string {
+  const segments = normalizeTreePath(value).split("/").filter(Boolean);
+  if (segments[0] === "global") return "global";
+  if ((segments[0] === "projects" || segments[0] === "archive" || segments[0] === "orphans") && segments.length >= 2) {
+    return `${segments[0]}/${segments[1]}`;
+  }
+  return segments.length >= 2 ? segments[0] : "";
+}
+
+function cloneVaultDocNode(node: KnowledgeVaultTreeNode): KnowledgeVaultTreeNode {
+  return {
+    id: node.id,
+    title: node.title,
+    path: normalizeTreePath(node.path),
+    type: node.type,
+    status: node.status,
+    scope: node.scope,
+    project_id: node.project_id,
+    updated: node.updated,
+    is_index: isVaultIndexPath(node.path),
+    system: false,
+    children: [],
+  };
+}
+
+// The server tree already includes every index document and leaf, but it uses
+// the index document's title as the folder label and nests by parent/index
+// links. Flattening by path lets the UI rebuild the real vault directories:
+// directory names always come from the path basename.
+function collectVaultDocuments(nodes: KnowledgeVaultTreeNode[], documents: Map<string, KnowledgeVaultTreeNode>): void {
+  for (const node of nodes) {
+    const relative = normalizeTreePath(node.path);
+    if (relative && /\.md$/i.test(relative)) {
+      const key = `${node.scope || ""}\u0000${node.project_id || ""}\u0000${relative}`;
+      if (!documents.has(key)) documents.set(key, cloneVaultDocNode(node));
+    }
+    collectVaultDocuments(node.children || [], documents);
+  }
+}
+
+// A single library tree is rooted at its library directory (global/, or
+// projects/<slug>/), which must not appear as a row. The mixed "all libraries"
+// view keeps those scope directories visible instead.
+export function vaultTreeRoot(documents: KnowledgeVaultTreeNode[], libraryID = ""): string {
+  if (documents.length === 0) return "";
+  if (libraryID === "global") {
+    return documents.some(doc => normalizeTreePath(doc.path).startsWith("global/")) ? "global" : "";
+  }
+  if (libraryID.startsWith("project:") || libraryID.startsWith("archive:") || libraryID === "orphan") {
+    const roots = new Set(documents.map(doc => treeScopeRoot(doc.path)).filter(root => root && root !== "global"));
+    return roots.size === 1 ? [...roots][0] : "";
+  }
+  return "";
+}
+
+interface VaultDirectoryBucket {
+  name: string;
+  path: string;
+  index?: KnowledgeVaultTreeNode;
+  directories: Map<string, VaultDirectoryBucket>;
+  documents: KnowledgeVaultTreeNode[];
+}
+
+function newVaultDirectory(path: string): VaultDirectoryBucket {
+  return {name: treeBaseName(path), path, directories: new Map(), documents: []};
+}
+
+function ensureVaultDirectory(root: VaultDirectoryBucket, directories: Map<string, VaultDirectoryBucket>, target: string, rootPath: string): VaultDirectoryBucket {
+  const normalized = normalizeTreePath(target);
+  if (!normalized || normalized === rootPath) return root;
+  const existing = directories.get(normalized);
+  if (existing) return existing;
+  const parentPath = treeDirectoryPath(normalized);
+  const parent = parentPath ? ensureVaultDirectory(root, directories, parentPath, rootPath) : root;
+  const bucket = newVaultDirectory(normalized);
+  parent.directories.set(bucket.name, bucket);
+  directories.set(normalized, bucket);
+  return bucket;
+}
+
+function representativeVaultDocument(bucket: VaultDirectoryBucket): KnowledgeVaultTreeNode | undefined {
+  if (bucket.index) return bucket.index;
+  if (bucket.documents.length > 0) return bucket.documents[0];
+  for (const child of bucket.directories.values()) {
+    const found = representativeVaultDocument(child);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function compareVaultTreeText(left: string, right: string): number {
+  const a = left.toLowerCase();
+  const b = right.toLowerCase();
+  if (a !== b) return a < b ? -1 : 1;
+  if (left === right) return 0;
+  return left < right ? -1 : 1;
+}
+
+function vaultDirectoryChildren(bucket: VaultDirectoryBucket): KnowledgeVaultTreeNode[] {
+  const folders = [...bucket.directories.values()]
+    .sort((left, right) => compareVaultTreeText(left.name, right.name))
+    .map(vaultFolderNode);
+  const documents = bucket.documents
+    .slice()
+    .sort((left, right) => compareVaultTreeText(left.title, right.title) || compareVaultTreeText(left.id, right.id))
+    .map(doc => ({...doc, children: [] as KnowledgeVaultTreeNode[]}));
+  return [...folders, ...documents];
+}
+
+function vaultFolderNode(bucket: VaultDirectoryBucket): KnowledgeVaultTreeNode {
+  const index = bucket.index;
+  const representative = representativeVaultDocument(bucket);
+  return {
+    id: index?.id || `vault-dir:${bucket.path}`,
+    title: bucket.name,
+    path: bucket.path,
+    type: "folder",
+    status: index?.status || "",
+    scope: index?.scope || representative?.scope || "",
+    project_id: index?.project_id || representative?.project_id,
+    updated: index?.updated,
+    is_index: Boolean(index),
+    system: false,
+    has_index: Boolean(index),
+    children: vaultDirectoryChildren(bucket),
+  };
+}
+
+// Rebuilds the selectable tree from the API's real vault paths. Each directory
+// becomes a folder row named after its path segment; its index.md stays the
+// folder's document and is never repeated as a leaf. Empty inbox folders still
+// render because the exporter reserves them for every library.
+export function buildVaultDirectoryTree(nodes: KnowledgeVaultTreeNode[], libraryID = ""): KnowledgeVaultTreeNode[] {
+  const documentsByKey = new Map<string, KnowledgeVaultTreeNode>();
+  collectVaultDocuments(nodes || [], documentsByKey);
+  const documents = [...documentsByKey.values()];
+  if (documents.length === 0) return [];
+
+  const rootPath = vaultTreeRoot(documents, libraryID);
+  const root = newVaultDirectory(rootPath);
+  const directories = new Map<string, VaultDirectoryBucket>([[rootPath, root]]);
+  for (const doc of documents) {
+    const relative = normalizeTreePath(doc.path);
+    const directoryPath = treeDirectoryPath(relative);
+    const bucket = ensureVaultDirectory(root, directories, directoryPath, rootPath);
+    if (isVaultIndexPath(relative)) {
+      // The library root index is the page behind the tree, not a folder row.
+      if (directoryPath === rootPath) continue;
+      if (!bucket.index) bucket.index = doc;
+      continue;
+    }
+    bucket.documents.push(doc);
+  }
+  if (rootPath && (libraryID === "global" || libraryID.startsWith("project:") || libraryID.startsWith("archive:"))) {
+    ensureVaultDirectory(root, directories, `${rootPath}/inbox`, rootPath);
+  } else if (!rootPath && libraryID === "all") {
+    // The mixed view nests every library under its vault directory. Reserve the
+    // inbox folder for each of them even when it has no documents yet.
+    const scopes = new Set([...directories.keys()].map(path => treeScopeRoot(path)).filter(Boolean));
+    for (const scope of scopes) ensureVaultDirectory(root, directories, `${scope}/inbox`, rootPath);
+  }
+  return vaultDirectoryChildren(root);
+}
+
 /* Page render ------------------------------------------------------------ */
 
 export function renderKnowledgeVaultPage(_context: KnowledgeVaultContext): string {
@@ -324,8 +515,6 @@ function topbarHTML(): string {
     ["skills", "bot", "kv.tab.skills"],
   ];
   const inboxCount = state.inbox?.count ?? 0;
-  const projectOptions = [`<option value="">${t("kv.allProjects")}</option>`, ...state.projects.map(item => `<option value="${escapeVaultHTML(item.project_id || "")}"${state.projectFilter === (item.project_id || "") ? " selected" : ""}>${escapeVaultHTML(item.name)}</option>`)].join("");
-  const libraryOptions = state.libraries.map(item => `<option value="${escapeVaultHTML(item.id)}"${state.libraryID === item.id ? " selected" : ""}>${escapeVaultHTML(item.name)} (${item.count})</option>`).join("");
   return `<header class="kv-topbar">
     <div class="kv-topbar-main">
       <div class="kv-heading"><strong>${t("kv.title")}</strong><small>${t("kv.subtitle")}</small></div>
@@ -334,8 +523,6 @@ function topbarHTML(): string {
       </nav>
     </div>
     <div class="kv-controls">
-      <label class="kv-select"><span>${t("kv.library")}</span><select id="kv-library" aria-label="${t("kv.library")}">${libraryOptions || `<option value="global">${t("kv.title")}</option>`}</select></label>
-      <label class="kv-select"><span>${t("kv.project")}</span><select id="kv-project" aria-label="${t("kv.project")}">${projectOptions}</select></label>
       <button type="button" class="kv-search-trigger" data-kv-search-open aria-label="${t("kv.searchShortcut")}" title="${t("kv.searchShortcut")}">${icon("search")}<span>${t("kv.search")}</span></button>
       <button type="button" class="kv-settings-trigger icon-button" data-kv-settings aria-label="${t("kv.settings")}" title="${t("kv.settings")}">${icon("settings")}</button>
     </div>
@@ -345,16 +532,14 @@ function topbarHTML(): string {
 function searchPanelHTML(): string {
   const typeOptions = ["", "navigation", "decision", "practice", "diagnostic", "reference", "architecture"].map(type => `<option value="${type}"${state.searchType === type ? " selected" : ""}>${type ? typeLabel(type) : t("kv.allTypes")}</option>`).join("");
   const statusOptions = ["", "verified", "stale", "pending", "draft", "unverified", "conflict"].map(value => `<option value="${value}"${state.searchStatus === value ? " selected" : ""}>${value ? statusLabel(value) : t("kv.allStatuses")}</option>`).join("");
-  const libraryOptions = [`<option value="">${t("kv.allLibraries")}</option>`, ...state.libraries.map(item => `<option value="${escapeVaultHTML(item.id)}"${state.searchLibrary === item.id ? " selected" : ""}>${escapeVaultHTML(item.name)}</option>`)].join("");
-  const projectOptions = [`<option value="">${t("kv.allProjects")}</option>`, ...state.projects.map(item => `<option value="${escapeVaultHTML(item.project_id || "")}"${state.searchProject === (item.project_id || "") ? " selected" : ""}>${escapeVaultHTML(item.name)}</option>`)].join("");
+  const scopeOptions: Array<[SearchScope, string]> = [["all", t("kv.searchScopeAll")], ["project", t("kv.searchScopeProject")], ["directory", t("kv.searchScopeDirectory")]];
   return `<section class="kv-search-panel" ${state.searchOpen ? "" : "hidden"} aria-label="${t("kv.search")}" role="dialog" aria-modal="false">
     <div class="kv-search-head">
       <label class="kv-search-field">${icon("search")}<input id="kv-search" type="search" value="${escapeVaultHTML(state.searchQuery)}" placeholder="${t("kv.searchPlaceholder")}" aria-label="${t("kv.searchPlaceholder")}" autocomplete="off" data-allow-rerender="true"></label>
       <button type="button" class="icon-button" data-kv-search-close aria-label="${t("kv.closeSearch")}" title="${t("kv.closeSearch")}">${icon("close")}</button>
     </div>
     <div class="kv-search-filters">
-      <label><span>${t("kv.library")}</span><select id="kv-search-library">${libraryOptions}</select></label>
-      <label><span>${t("kv.project")}</span><select id="kv-search-project">${projectOptions}</select></label>
+      <label><span>${t("kv.searchScope")}</span><select id="kv-search-scope">${scopeOptions.map(([value, label]) => `<option value="${value}"${state.searchScope === value ? " selected" : ""}>${escapeVaultHTML(label)}</option>`).join("")}</select></label>
       <label><span>${t("kv.type")}</span><select id="kv-search-type">${typeOptions}</select></label>
       <label><span>${t("kv.status")}</span><select id="kv-search-status">${statusOptions}</select></label>
       <label><span>${t("kv.tag")}</span><input id="kv-search-tag" type="text" value="${escapeVaultHTML(state.searchTag)}" placeholder="${t("kv.tagPlaceholder")}" data-allow-rerender="true"></label>
@@ -372,7 +557,7 @@ function searchResultsHTML(): string {
   if (state.searchState === "ready" && state.searchResults.length === 0) return vaultEmptyState("empty");
   return state.searchResults.map(item => `<div class="kv-search-result">
     <a class="kv-search-result-link" href="${escapeVaultHTML(docHash({id: item.id, scope: item.scope, project_id: item.project_id}))}" data-kv-doc="${escapeVaultHTML(item.id)}">
-      <span class="kv-search-result-main"><strong>${highlightVaultText(item.title, state.searchQuery)}</strong><small>${highlightVaultText(item.path, state.searchQuery)}</small></span>
+      <span class="kv-search-result-main"><strong>${highlightVaultText(item.title, state.searchQuery)}</strong><small>${escapeVaultHTML(item.scope || "")}${item.project_id ? ` · ${escapeVaultHTML(item.project_id)}` : ""} · ${highlightVaultText(item.path, state.searchQuery)}</small></span>
       ${item.snippet ? `<p>${highlightVaultText(item.snippet, state.searchQuery)}</p>` : ""}
     </a>
     <span class="kv-search-result-meta">${metaBadges(item)}${item.tags?.length ? item.tags.map(tag => `<button type="button" class="kv-tag" data-kv-tag="${escapeVaultHTML(tag)}">#${escapeVaultHTML(tag)}</button>`).join("") : ""}</span>
@@ -399,10 +584,14 @@ function treeBodyHTML(): string {
   if (state.treeState === "error") return vaultEmptyState("error", state.treeError, true);
   if (!state.indexReady) return vaultEmptyState("empty", t("kv.indexMissing"));
   if (state.tree.length === 0) return vaultEmptyState("empty");
-  const systems = state.tree.filter(node => node.system);
-  const documents = state.tree.filter(node => !node.system);
-  const group = (label: string, nodes: KnowledgeVaultTreeNode[]) => nodes.length === 0 ? "" : `<section class="kv-tree-group"><h3>${escapeVaultHTML(label)}</h3><ul class="kv-tree-list">${nodes.map(node => treeNodeHTML(node)).join("")}</ul></section>`;
-  return `${group(t("kv.systemIndexes"), systems)}${group(t("kv.documents"), documents)}`;
+  return `<ul class="kv-tree-list">${state.tree.map(node => treeNodeHTML(node)).join("")}</ul>`;
+}
+
+function isVaultFolderNode(node: KnowledgeVaultTreeNode): boolean {
+  if (node.type === "folder") return true;
+  // Old API payloads used the index document as a folder node whose path was
+  // the document path; keep those payloads renderable during a rollout.
+  return (node.children?.length || 0) > 0 && !/\.md$/i.test(String(node.path ?? ""));
 }
 
 function treeNodeHTML(node: KnowledgeVaultTreeNode, depth = 0): string {
@@ -411,15 +600,23 @@ function treeNodeHTML(node: KnowledgeVaultTreeNode, depth = 0): string {
   // the selected document's ancestor path) puts an id in `expanded`.
   const expanded = state.expanded.has(node.id);
   const selected = node.id === state.selectedID;
-  if (children.length === 0) {
-    return `<li class="kv-tree-node" style="--kv-depth:${depth}"><a class="kv-tree-link${selected ? " selected" : ""}" href="${escapeVaultHTML(docHash(node))}" data-kv-doc="${escapeVaultHTML(node.id)}" aria-current="${selected ? "page" : "false"}"><span class="kv-tree-title">${escapeVaultHTML(node.title)}</span>${node.is_index ? badge(t("kv.index"), "index") : ""}${badge(typeLabel(node.type), "type")}</a></li>`;
+  if (!isVaultFolderNode(node)) {
+    return `<li class="kv-tree-node kv-tree-doc" style="--kv-depth:${depth}"><a class="kv-tree-link${selected ? " selected" : ""}" href="${escapeVaultHTML(docHash(node))}" data-kv-doc="${escapeVaultHTML(node.id)}" aria-current="${selected ? "page" : "false"}"><span class="kv-tree-title">${escapeVaultHTML(node.title)}</span>${badge(typeLabel(node.type), "type")}</a></li>`;
   }
-  return `<li class="kv-tree-node" style="--kv-depth:${depth}">
+  const hasIndex = node.has_index ?? Boolean(node.is_index);
+  const rowTitle = `<span class="kv-tree-folder-icon" aria-hidden="true">${icon("folder")}</span><span class="kv-tree-title">${escapeVaultHTML(node.title)}</span>`;
+  const row = hasIndex
+    ? `<a class="kv-tree-link kv-tree-folder-link${selected ? " selected" : ""}" href="${escapeVaultHTML(docHash(node))}" data-kv-doc="${escapeVaultHTML(node.id)}" aria-current="${selected ? "page" : "false"}">${rowTitle}</a>`
+    : `<span class="kv-tree-link kv-tree-folder-link">${rowTitle}</span>`;
+  const toggle = children.length > 0
+    ? `<button type="button" class="kv-tree-toggle" data-kv-toggle="${escapeVaultHTML(node.id)}" aria-expanded="${expanded}" aria-label="${expanded ? t("kv.collapseNode") : t("kv.expandNode")}">${icon(expanded ? "chevron-up" : "chevron-down")}</button>`
+    : `<span class="kv-tree-toggle-space" aria-hidden="true"></span>`;
+  return `<li class="kv-tree-node kv-tree-folder" style="--kv-depth:${depth}">
     <div class="kv-tree-row">
-      <button type="button" class="kv-tree-toggle" data-kv-toggle="${escapeVaultHTML(node.id)}" aria-expanded="${expanded}" aria-label="${expanded ? t("kv.collapseNode") : t("kv.expandNode")}">${icon(expanded ? "chevron-up" : "chevron-down")}</button>
-      <a class="kv-tree-link${selected ? " selected" : ""}" href="${escapeVaultHTML(docHash(node))}" data-kv-doc="${escapeVaultHTML(node.id)}" aria-current="${selected ? "page" : "false"}"><span class="kv-tree-title">${escapeVaultHTML(node.title)}</span>${node.is_index ? badge(t("kv.index"), "index") : ""}${badge(typeLabel(node.type), "type")}</a>
+      ${toggle}
+      ${row}
     </div>
-    ${expanded ? `<ul class="kv-tree-list">${children.map(child => treeNodeHTML(child, depth + 1)).join("")}</ul>` : ""}
+    ${expanded && children.length > 0 ? `<ul class="kv-tree-list">${children.map(child => treeNodeHTML(child, depth + 1)).join("")}</ul>` : ""}
   </li>`;
 }
 
@@ -491,7 +688,7 @@ function inboxBodyHTML(): string {
   if (!state.indexReady) return vaultEmptyState("empty", t("kv.indexMissing"));
   if (!state.inbox || state.inbox.items.length === 0) return vaultEmptyState("empty", t("kv.inboxEmpty"));
   return `<section class="kv-inbox" aria-label="${t("kv.tab.inbox")}">
-    <header class="kv-inbox-head"><h2>${t("kv.inboxCount", {count: state.inbox.count})}</h2><div class="kv-inbox-counts">${state.inbox.counts.map(item => `<button type="button" class="kv-chip" data-kv-inbox-library="${escapeVaultHTML(item.library_id)}">${escapeVaultHTML(item.library)} <b>${item.count}</b></button>`).join("")}</div></header>
+    <header class="kv-inbox-head"><h2>${t("kv.inboxCount", {count: state.inbox.count})}</h2><div class="kv-inbox-counts">${state.inbox.counts.map(item => `<span class="kv-chip kv-chip-static">${escapeVaultHTML(item.library)} <b>${item.count}</b></span>`).join("")}</div></header>
     <ul class="kv-inbox-list">${state.inbox.items.map(item => `<li><a class="kv-inbox-item" href="${escapeVaultHTML(docHash({id: item.id, scope: item.scope, project_id: item.project_id}))}" data-kv-doc="${escapeVaultHTML(item.id)}">
       <span class="kv-feed-main"><strong>${escapeVaultHTML(item.title)}</strong><small>${escapeVaultHTML(item.path)} · ${escapeVaultHTML(item.library)}</small></span>
       ${badge(typeLabel(item.type), "type")}
@@ -580,8 +777,6 @@ function applyLibraries(payload: KnowledgeVaultLibraries): void {
   if (!state.libraries.some(item => item.id === state.libraryID)) {
     state.libraryID = state.libraries[0]?.id || "global";
   }
-  const current = state.libraries.find(item => item.id === state.libraryID);
-  state.projectFilter = current?.kind === "project" ? current.project_id || "" : "";
 }
 
 async function loadLibraries(): Promise<boolean> {
@@ -613,7 +808,7 @@ function loadOnce(key: string, action: () => Promise<void>): void {
 }
 
 async function loadTree(force = false): Promise<void> {
-  const key = state.libraryID;
+  const key = VAULT_TREE_LIBRARY;
   if (!force && state.treeKey === key && state.treeState !== "error") return;
   const ticket = ++treeRequest;
   state.treeKey = key;
@@ -626,7 +821,7 @@ async function loadTree(force = false): Promise<void> {
   try {
     const payload: KnowledgeVaultTree = await api.knowledgeVaultTree(key);
     if (ticket !== treeRequest || state.treeKey !== key) return;
-    state.tree = payload.nodes || [];
+    state.tree = buildVaultDirectoryTree(payload.nodes || [], key);
     state.indexReady = payload.index_ready;
     state.treeState = "ready";
     expandTreePathTo(state.selectedID);
@@ -665,7 +860,9 @@ async function loadDoc(id: string, force = false): Promise<void> {
 }
 
 async function loadRecent(force = false): Promise<void> {
-  const key = state.projectFilter;
+  // Recent is always the all-libraries feed; every row carries its own
+  // library/project/path context instead of relying on a topbar scope.
+  const key = "";
   if (!force && state.recentKey === key && (state.recentState === "ready" || state.recentState === "loading")) return;
   const ticket = ++recentRequest;
   state.recentKey = key;
@@ -686,7 +883,8 @@ async function loadRecent(force = false): Promise<void> {
 }
 
 async function loadInbox(force = false): Promise<void> {
-  const key = state.projectFilter;
+  // Like recent, the inbox defaults to every library.
+  const key = "";
   if (!force && state.inboxKey === key && (state.inboxState === "ready" || state.inboxState === "loading")) return;
   const ticket = ++inboxRequest;
   state.inboxKey = key;
@@ -731,6 +929,17 @@ function loadTab(tab: VaultTab): void {
   else if (tab === "skills") loadOnce("skills", () => loadSkills());
 }
 
+function currentVaultDirectory(): string {
+  const relative = String(state.doc?.path || "");
+  const separator = relative.lastIndexOf("/");
+  return separator < 0 ? "" : relative.slice(0, separator);
+}
+
+function currentSearchContext(): {library: string; project: string} {
+  if (state.doc) return {library: state.doc.library_id || "", project: state.doc.project_id || ""};
+  return {library: state.libraryID === "global" ? "" : state.libraryID, project: ""};
+}
+
 function performSearch(): void {
   const query = state.searchQuery.trim();
   const tag = state.searchTag.trim();
@@ -743,13 +952,20 @@ function performSearch(): void {
   const ticket = ++state.pendingSearch;
   state.searchState = "loading";
   rerender();
+  const scoped = state.searchScope !== "all";
+  const context = scoped ? currentSearchContext() : {library: "", project: ""};
+  const directory = state.searchScope === "directory" ? currentVaultDirectory() : "";
   void api.knowledgeVaultSearch({
     q: query, tag,
-    library: state.searchLibrary, project: state.searchProject,
+    library: context.library, project: context.project,
     type: state.searchType, status: state.searchStatus, limit: 40,
   }).then((payload: KnowledgeVaultSearch) => {
     if (ticket !== state.pendingSearch) return;
-    state.searchResults = payload.results || [];
+    let results = payload.results || [];
+    // The read API has no path-prefix filter, so "current directory" narrows
+    // the same scoped result set in the client.
+    if (directory) results = results.filter(item => item.path === directory || item.path.startsWith(`${directory}/`));
+    state.searchResults = results;
     state.searchState = "ready";
     rerender();
   }).catch((error: unknown) => {
@@ -937,7 +1153,7 @@ function handleDocLink(event: Event): boolean {
 function focusSelector(element: Element | null): string {
   if (!(element instanceof HTMLElement)) return "";
   if (element.id) return `#${typeof CSS !== "undefined" && CSS.escape ? CSS.escape(element.id) : element.id}`;
-  for (const name of ["kvToggle", "kvFeedback", "kvTabButton", "kvDoc", "kvCopy", "kvTag", "kvInboxLibrary"]) {
+  for (const name of ["kvToggle", "kvFeedback", "kvTabButton", "kvDoc", "kvCopy", "kvTag"]) {
     const value = (element.dataset as Record<string, string | undefined>)[name];
     if (value) return `[data-kv-${name.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`) }="${typeof CSS !== "undefined" && CSS.escape ? CSS.escape(value) : value}"]`;
   }
@@ -969,8 +1185,6 @@ export function bindKnowledgeVaultPage(context: KnowledgeVaultContext): void {
       if (!ok) return;
       const parsed = parseDocHash(window.location.hash);
       if (parsed?.library && state.libraries.some(item => item.id === parsed.library)) state.libraryID = parsed.library;
-      const current = state.libraries.find(item => item.id === state.libraryID);
-      state.projectFilter = current?.kind === "project" ? current.project_id || "" : "";
       loadTab(state.tab);
       if (parsed?.id) {
         state.tab = "knowledge";
@@ -987,27 +1201,6 @@ export function bindKnowledgeVaultPage(context: KnowledgeVaultContext): void {
 
   root.querySelectorAll<HTMLElement>("[data-kv-tab-button]").forEach(button => {
     button.addEventListener("click", () => setTab(button.dataset.kvTabButton as VaultTab));
-  });
-
-  const librarySelect = root.querySelector<HTMLSelectElement>("#kv-library");
-  librarySelect?.addEventListener("change", () => {
-    state.libraryID = librarySelect.value;
-    const current = state.libraries.find(item => item.id === state.libraryID);
-    state.projectFilter = current?.kind === "project" ? current.project_id || "" : "";
-    state.recentState = "idle";
-    state.inboxState = "idle";
-    rerender();
-    loadTab(state.tab);
-  });
-
-  const projectSelect = root.querySelector<HTMLSelectElement>("#kv-project");
-  projectSelect?.addEventListener("change", () => {
-    state.projectFilter = projectSelect.value;
-    state.libraryID = projectSelect.value ? `project:${projectSelect.value}` : "global";
-    state.recentState = "idle";
-    state.inboxState = "idle";
-    rerender();
-    loadTab(state.tab);
   });
 
   root.querySelector<HTMLElement>("[data-kv-search-open]")?.addEventListener("click", openSearch);
@@ -1030,7 +1223,12 @@ export function bindKnowledgeVaultPage(context: KnowledgeVaultContext): void {
     state.searchTag = searchTag.value;
     scheduleSearch();
   });
-  for (const [selector, key] of [["#kv-search-library", "searchLibrary"], ["#kv-search-project", "searchProject"], ["#kv-search-type", "searchType"], ["#kv-search-status", "searchStatus"]] as const) {
+  const searchScopeSelect = root.querySelector<HTMLSelectElement>("#kv-search-scope");
+  searchScopeSelect?.addEventListener("change", () => {
+    state.searchScope = (searchScopeSelect.value as SearchScope) || "all";
+    performSearch();
+  });
+  for (const [selector, key] of [["#kv-search-type", "searchType"], ["#kv-search-status", "searchStatus"]] as const) {
     const element = root.querySelector<HTMLSelectElement>(selector);
     element?.addEventListener("change", () => {
       (state as unknown as Record<string, string>)[key] = element.value;
@@ -1098,15 +1296,6 @@ export function bindKnowledgeVaultPage(context: KnowledgeVaultContext): void {
       heading?.setAttribute("tabindex", "-1");
       heading?.focus({preventScroll: true});
       return;
-    }
-    const inboxChip = target?.closest<HTMLElement>("[data-kv-inbox-library]");
-    if (inboxChip) {
-      state.libraryID = inboxChip.dataset.kvInboxLibrary || "global";
-      const current = state.libraries.find(item => item.id === state.libraryID);
-      state.projectFilter = current?.kind === "project" ? current.project_id || "" : "";
-      state.inboxState = "idle";
-      rerender();
-      void loadInbox(true);
     }
   });
 

@@ -136,26 +136,32 @@ test("recent items group by local day with today and yesterday labels", () => {
   assert.equal(groups[2].items[0].id, "d");
 });
 
+function treeFixture(id, title, path, children = [], extra = {}) {
+  return {id, title, path, type: "navigation", status: "verified", scope: "global", is_index: true, system: true, children, ...extra};
+}
+
 test("the page exposes exactly the four read-only entries and no edit or review controls", () => {
-  reset({
-    tree: [
-      {id: "index", title: "全局索引", path: "global/index.md", type: "navigation", status: "verified", scope: "global", is_index: true, system: true, children: []},
-      {id: "folder", title: "guides", path: "guides", type: "reference", status: "verified", scope: "global", is_index: false, system: false, children: [
-        {id: "doc-1", title: "构建指南", path: "guides/build.md", type: "practice", status: "verified", scope: "global", is_index: false, system: false, children: []},
-      ]},
-    ],
-  });
+  const tree = vault.buildVaultDirectoryTree([
+    treeFixture("g-root", "全局知识首页", "global/index.md", [
+      treeFixture("g-general", "通用知识", "global/general/index.md", [
+        {id: "doc-1", title: "构建指南", path: "global/general/build.md", type: "practice", status: "verified", scope: "global", is_index: false, system: false, children: []},
+      ]),
+    ]),
+  ], "global");
+  reset({tree});
   const html = vault.renderKnowledgeVaultPage(context());
   for (const tab of ["knowledge", "recent", "inbox", "skills"]) {
     assert.match(html, new RegExp(`data-kv-tab-button="${tab}"`));
   }
   assert.doesNotMatch(html, />项目知识<|>待审提案<|data-knowledge-section=/);
   assert.doesNotMatch(html, /data-kv-(edit|delete|move|approve)|>删除<|>编辑<|>待审提案</);
-  assert.match(html, /系统索引/);
-  assert.match(html, /文档/);
+  assert.doesNotMatch(html, /系统索引/);
+  assert.doesNotMatch(html, /全局知识首页/, "the library root index is not a folder row");
+  assert.match(html, /<span class="kv-tree-title">general<\/span>/);
+  assert.match(html, /<span class="kv-tree-title">inbox<\/span>/);
   assert.match(html, /<nav class="kv-tree-panel" aria-label="目录">/, "tree is a nav, not a fake tree role");
   assert.doesNotMatch(html, /role="tree"/);
-  assert.match(html, /data-kv-toggle="folder"[^>]*aria-expanded="false"/);
+  assert.match(html, /data-kv-toggle="g-general"[^>]*aria-expanded="false"/);
   assert.doesNotMatch(html, /href="#knowledge\?doc=doc-1&amp;scope=global"/, "folder children start hidden");
   assert.equal((html.match(/class="kv-tab kv-tab-/g) || []).length, 4);
   // Heading and tabs form one group; controls are a separate group. The old
@@ -167,16 +173,152 @@ test("the page exposes exactly the four read-only entries and no edit or review 
   assert.doesNotMatch(html, /data-kv-more|kv-more-trigger|kv-more-menu/);
 });
 
+test("the tree rebuilds real vault directories and uses path basenames, not index titles", () => {
+  const tree = vault.buildVaultDirectoryTree([
+    treeFixture("g-root", "全局知识首页", "global/index.md", [
+      treeFixture("g-general", "通用知识", "global/general/index.md", [
+        {id: "g-deploy", title: "共享部署经验", path: "global/general/shared-deploy.md", type: "practice", status: "verified", scope: "global", is_index: false, system: false, children: []},
+      ]),
+      treeFixture("g-lessons", "Agent 经验教训", "global/agent-lessons/index.md", [
+        treeFixture("g-behavior", "行为教训", "global/agent-lessons/behavior-lessons/index.md", []),
+        treeFixture("g-technical", "技术诊断", "global/agent-lessons/technical-diagnostics/index.md", [
+          {id: "g-serial", title: "串口登录等待提示", path: "global/agent-lessons/technical-diagnostics/serial-login.md", type: "diagnostic", status: "verified", scope: "global", is_index: false, system: false, children: []},
+        ]),
+      ]),
+    ]),
+  ], "global");
+  assert.deepEqual(tree.map(node => node.title), ["agent-lessons", "general", "inbox"]);
+  const lessons = tree.find(node => node.title === "agent-lessons");
+  assert.equal(lessons.id, "g-lessons");
+  assert.equal(lessons.path, "global/agent-lessons");
+  assert.equal(lessons.has_index, true);
+  assert.deepEqual(lessons.children.map(node => node.title), ["behavior-lessons", "technical-diagnostics"]);
+  const technical = lessons.children.find(node => node.title === "technical-diagnostics");
+  assert.deepEqual(technical.children.map(node => node.title), ["串口登录等待提示"]);
+  assert.equal(JSON.stringify(tree).includes("全局知识首页"), false, "the root index title never becomes a folder name");
+  assert.equal(JSON.stringify(tree).includes("Agent 经验教训"), false, "index titles never become folder names");
+  assert.equal(tree.find(node => node.title === "inbox").has_index, false);
+});
+
+test("project trees show theme directories and the real inbox folder", () => {
+  const tree = vault.buildVaultDirectoryTree([
+    treeFixture("p-root", "Demo 索引", "projects/demo/index.md", [
+      treeFixture("p-group", "导航组", "projects/demo/navigation-group/index.md", [
+        {id: "p-module", title: "模块 A", path: "projects/demo/navigation-group/module-a.md", type: "reference", status: "verified", scope: "project", project_id: "p1", is_index: false, system: false, children: []},
+      ], {scope: "project", project_id: "p1"}),
+      {id: "p-idea", title: "收件箱一", path: "projects/demo/inbox/idea.md", type: "practice", status: "unverified", scope: "project", project_id: "p1", is_index: false, system: false, children: []},
+    ], {scope: "project", project_id: "p1"}),
+  ], "project:p1");
+  assert.deepEqual(tree.map(node => node.title), ["inbox", "navigation-group"]);
+  assert.equal(tree[0].path, "projects/demo/inbox");
+  assert.equal(tree[0].has_index, false);
+  assert.deepEqual(tree[0].children.map(node => node.title), ["收件箱一"]);
+  assert.equal(tree[1].path, "projects/demo/navigation-group");
+  assert.equal(tree[1].id, "p-group");
+  assert.equal(tree[1].has_index, true);
+});
+
+test("directory rows open their index document once and never repeat index.md as a leaf", () => {
+  const tree = vault.buildVaultDirectoryTree([
+    treeFixture("g-root", "全局知识首页", "global/index.md", [
+      treeFixture("g-general", "通用知识", "global/general/index.md", [
+        {id: "g-deploy", title: "共享部署经验", path: "global/general/shared-deploy.md", type: "practice", status: "verified", scope: "global", is_index: false, system: false, children: []},
+        {id: "g-extra", title: "索引叶子", path: "global/general/index.md", type: "reference", status: "verified", scope: "global", is_index: false, system: false, children: []},
+      ]),
+    ]),
+  ], "global");
+  reset({tree, expanded: new Set(["g-general"])});
+  const html = vault.renderKnowledgeVaultPage(context());
+  assert.equal((html.match(/data-kv-doc="g-general"/g) || []).length, 1, "index document is represented by the folder row only");
+  assert.match(html, /data-kv-doc="g-general"/);
+  assert.match(html, /href="#knowledge\?doc=g-general&amp;scope=global"/);
+  assert.doesNotMatch(html, /data-kv-doc="g-extra"/, "a duplicate index.md entry is not a leaf");
+  assert.match(html, /<span class="kv-tree-title">general<\/span>/);
+  assert.doesNotMatch(html, /kv-badge-index/);
+  const folderLink = html.match(/<a class="kv-tree-link kv-tree-folder-link[^>]*data-kv-doc="g-general"[^>]*>[\s\S]*?<\/a>/)?.[0] || "";
+  assert.equal(folderLink.includes("kv-badge"), false, "directory rows do not carry index or navigation badges");
+  assert.match(html, /kv-tree-folder-icon/, "directories use a folder icon");
+  assert.match(html, /kv-badge-type[^>]*>实践</, "leaf documents keep their type badge");
+});
+
+test("the mixed tree roots at the real global and projects directories", () => {
+  const tree = vault.buildVaultDirectoryTree([
+    treeFixture("g-root", "全局知识首页", "global/index.md", [
+      treeFixture("g-general", "通用知识", "global/general/index.md", [
+        {id: "g-doc", title: "通用文档", path: "global/general/doc.md", type: "practice", status: "verified", scope: "global", is_index: false, system: false, children: []},
+      ]),
+    ]),
+    treeFixture("p-root", "Demo 索引", "projects/demo/index.md", [
+      treeFixture("p-guides", "指南", "projects/demo/guides/index.md", [], {scope: "project", project_id: "demo"}),
+      {id: "p-idea", title: "项目想法", path: "projects/demo/inbox/idea.md", type: "practice", status: "unverified", scope: "project", project_id: "demo", is_index: false, system: false, children: []},
+    ], {scope: "project", project_id: "demo"}),
+  ], "all");
+
+  assert.deepEqual(tree.map(node => node.title), ["global", "projects"]);
+  const global = tree[0];
+  const projects = tree[1];
+  assert.equal(global.path, "global");
+  assert.equal(global.id, "g-root", "the global root index is the folder row");
+  assert.equal(projects.path, "projects");
+  assert.equal(projects.has_index, false, "the projects container is a plain directory");
+  const demo = projects.children.find(node => node.title === "demo");
+  assert.equal(demo.id, "p-root");
+  assert.equal(demo.has_index, true);
+  assert.deepEqual(demo.children.map(node => node.title), ["guides", "inbox"]);
+  assert.equal(demo.children.find(node => node.title === "inbox").has_index, false, "an empty project inbox still renders");
+
+  reset({tree});
+  let html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /data-kv-toggle="g-root"[^>]*aria-expanded="false"/);
+  assert.match(html, /data-kv-toggle="vault-dir:projects"[^>]*aria-expanded="false"/);
+  assert.doesNotMatch(html, /data-kv-doc="g-general"/, "the global directory starts collapsed");
+  assert.doesNotMatch(html, /data-kv-doc="p-root"/, "the projects directory starts collapsed");
+
+  reset({tree, expanded: new Set(["vault-dir:projects", "p-root"])});
+  html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /data-kv-toggle="p-root"[^>]*aria-expanded="true"/);
+  assert.match(html, /<span class="kv-tree-title">guides<\/span>/);
+  assert.match(html, /<span class="kv-tree-title">inbox<\/span>/);
+});
+
+test("the topbar no longer duplicates scope in library and project dropdowns", () => {
+  reset({});
+  const html = vault.renderKnowledgeVaultPage(context());
+  assert.doesNotMatch(html, /id="kv-library"/);
+  assert.doesNotMatch(html, /id="kv-project"/);
+  assert.doesNotMatch(html, /kv-scope-select/);
+  assert.match(html, /id="kv-search-scope"/);
+  assert.match(html, /<option value="all" selected>全部<\/option>/);
+  assert.match(html, /<option value="project">当前项目<\/option>/);
+  assert.match(html, /<option value="directory">当前目录<\/option>/);
+});
+
+test("recent and inbox default to all libraries and keep project/path context", () => {
+  reset({
+    tab: "recent",
+    recentState: "ready",
+    recent: [{
+      id: "r1", title: "最近想法", path: "projects/demo/inbox/idea.md", type: "practice",
+      status: "unverified", scope: "project", project_id: "demo", library_id: "project:demo",
+      library: "Demo", modified_at: "2026-11-14T10:00:00Z",
+    }],
+  });
+  const recent = vault.renderKnowledgeVaultPage(context());
+  assert.match(recent, /projects\/demo\/inbox\/idea\.md/);
+  assert.match(recent, /Demo/);
+});
+
 test("folders default to collapsed and only an explicit expansion shows children", () => {
-  const tree = [
-    {id: "index", title: "全局索引", path: "global/index.md", type: "navigation", status: "verified", scope: "global", is_index: true, system: true, children: []},
-    {id: "folder", title: "guides", path: "global/guides", type: "reference", status: "verified", scope: "global", is_index: false, system: false, children: [
-      {id: "sub", title: "advanced", path: "global/guides/advanced", type: "reference", status: "verified", scope: "global", is_index: false, system: false, children: [
-        {id: "deep", title: "深入指南", path: "global/guides/advanced/deep.md", type: "practice", status: "verified", scope: "global", is_index: false, system: false, children: []},
-      ]},
-    ]},
-  ];
-  reset({tree: [...tree]});
+  const tree = vault.buildVaultDirectoryTree([
+    treeFixture("g-root", "全局知识首页", "global/index.md", [
+      treeFixture("folder", "guides", "global/guides/index.md", [
+        treeFixture("sub", "advanced", "global/guides/advanced/index.md", [
+          {id: "deep", title: "深入指南", path: "global/guides/advanced/deep.md", type: "practice", status: "verified", scope: "global", is_index: false, system: false, children: []},
+        ]),
+      ]),
+    ]),
+  ], "global");
+  reset({tree});
   let html = vault.renderKnowledgeVaultPage(context());
   assert.match(html, /data-kv-toggle="folder"[^>]*aria-expanded="false"/);
   assert.doesNotMatch(html, /data-kv-toggle="sub"/);
@@ -185,13 +327,13 @@ test("folders default to collapsed and only an explicit expansion shows children
   assert.deepEqual(vault.vaultTreeAncestors(tree, "folder"), []);
   assert.equal(vault.vaultTreeAncestors(tree, "missing"), null);
 
-  reset({tree: [...tree], expanded: new Set(["folder"])});
+  reset({tree, expanded: new Set(["folder"])});
   html = vault.renderKnowledgeVaultPage(context());
   assert.match(html, /data-kv-toggle="folder"[^>]*aria-expanded="true"/);
   assert.match(html, /data-kv-toggle="sub"[^>]*aria-expanded="false"/);
   assert.doesNotMatch(html, /data-kv-doc="deep"/);
 
-  reset({tree: [...tree], expanded: new Set(["folder", "sub"])});
+  reset({tree, expanded: new Set(["folder", "sub"])});
   html = vault.renderKnowledgeVaultPage(context());
   assert.match(html, /data-kv-toggle="sub"[^>]*aria-expanded="true"/);
   assert.match(html, /data-kv-doc="deep"/);

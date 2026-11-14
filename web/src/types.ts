@@ -1736,6 +1736,9 @@ export interface KnowledgeVaultTreeNode {
   updated?: string;
   is_index: boolean;
   system: boolean;
+  // Set by the Web tree builder for directory rows: the folder has its own
+  // index.md document and clicking the row opens it. Never sent by the API.
+  has_index?: boolean;
   children?: KnowledgeVaultTreeNode[];
 }
 

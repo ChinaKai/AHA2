@@ -37,7 +37,7 @@ func walkTree(nodes []TreeNode, visit func(TreeNode)) {
 	}
 }
 
-func TestReaderTreeGroupsFoldersAndHidesInboxAndReservedAreas(t *testing.T) {
+func TestReaderTreeKeepsInboxButHidesReservedAreas(t *testing.T) {
 	_, reader, ctx := readerFixture(t)
 	result, err := reader.Tree(ctx, "project:project-demo", "")
 	if err != nil {
@@ -47,12 +47,19 @@ func TestReaderTreeGroupsFoldersAndHidesInboxAndReservedAreas(t *testing.T) {
 		t.Fatalf("tree = %+v", result)
 	}
 	paths := []string{}
+	inbox := 0
 	walkTree(result.Nodes, func(node TreeNode) {
 		paths = append(paths, node.Path)
-		if strings.Contains(node.Path, "/inbox/") || strings.HasPrefix(node.Path, "skills/") || strings.Contains(node.Path, "/skills/") {
+		if strings.Contains(node.Path, "/inbox/") {
+			inbox++
+		}
+		if strings.HasPrefix(node.Path, "skills/") || strings.Contains(node.Path, "/skills/") {
 			t.Errorf("reserved path leaked into the knowledge tree: %s", node.Path)
 		}
 	})
+	if inbox == 0 {
+		t.Fatalf("inbox documents are missing from the real directory tree: %v", paths)
+	}
 	if !containsPath(paths, "projects/demo-project/navigation-group/module-a.md") {
 		t.Fatalf("folder child missing from tree: %v", paths)
 	}

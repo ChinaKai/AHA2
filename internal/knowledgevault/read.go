@@ -279,8 +279,10 @@ type TreeResult struct {
 	Warning    string     `json:"warning,omitempty"`
 }
 
-// Tree returns the folder/theme tree for one library. Inbox, skills and trash
-// documents are excluded by design; they have their own read-only pages.
+// Tree returns the folder/theme tree for one library. Skills and trash
+// documents are excluded by design because they have their own read-only pages.
+// Inbox documents are kept: they live in the vault's real inbox/ directory and
+// the Web tree shows that directory alongside the theme folders.
 func (r *Reader) Tree(ctx context.Context, library, projectID string) (TreeResult, error) {
 	result := TreeResult{Enabled: true, IndexReady: r.indexReady, Library: library, ProjectID: projectID, Nodes: []TreeNode{}}
 	scope, scopedProjectID, libraryErr := r.libraryScope(library, projectID)
@@ -298,7 +300,7 @@ func (r *Reader) Tree(ctx context.Context, library, projectID string) (TreeResul
 	}
 	filtered := make([]IndexEntry, 0, len(entries))
 	for _, entry := range entries {
-		if isInboxPath(entry.Path) || isReservedVaultPath(entry.Path) {
+		if isReservedVaultPath(entry.Path) {
 			continue
 		}
 		filtered = append(filtered, entry)

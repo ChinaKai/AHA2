@@ -1,6 +1,6 @@
-// Optional browser verification for the Phase 2 read-only knowledge vault.
-// Drives the real bundle against a fixture API and covers: four entries,
-// library/project switching, tree links, editor URIs, search/deep links,
+// Tree verification for the read-only knowledge vault. Drives the real bundle
+// against a fixture API and covers: four entries, one real directory tree rooted
+// at global/projects, tree links, editor URIs, search scopes/deep links,
 // recent/inbox/skills, mobile two-level navigation, overflow, axe, and the
 // switch-off legacy page.
 import assert from "node:assert/strict";
@@ -56,26 +56,29 @@ const DEEP_DOC = {
   scope: "global", project_id: "", library_id: "global", library_name: "全局知识",
   obsidian_file: "global/guides/advanced/deep", backlinks: [], tags: [],
 };
-const globalTree = [{id: "g-index", title: "全局索引", path: "global/index.md", type: "navigation", status: "verified", scope: "global", is_index: true, system: true, children: [],
+const allTree = [{
+  id: "g-index", title: "全局知识首页", path: "global/index.md", type: "navigation", status: "verified", scope: "global", is_index: true, system: true, children: [{
+    id: "g-folder", title: "通用知识", path: "global/guides/index.md", type: "navigation", status: "verified", scope: "global", is_index: true, system: true,
+    children: [
+      {id: "g-doc", title: "全局指南", path: "global/guides/guide.md", type: "practice", status: "verified", scope: "global", is_index: false, system: false, children: []},
+      {id: "g-sub", title: "进阶", path: "global/guides/advanced/index.md", type: "navigation", status: "verified", scope: "global", is_index: true, system: true,
+        children: [{id: "g-deep", title: "深入指南", path: "global/guides/advanced/deep.md", type: "practice", status: "verified", scope: "global", is_index: false, system: false, children: []}]},
+    ],
+  }, {
+    id: "g-other", title: "参考资料", path: "global/reference/index.md", type: "navigation", status: "verified", scope: "global", is_index: true, system: true,
+    children: [{id: "g-other-doc", title: "参考手册", path: "global/reference/manual.md", type: "reference", status: "verified", scope: "global", is_index: false, system: false, children: []}],
+  }],
 }, {
-  id: "g-folder", title: "guides", path: "global/guides", type: "reference", status: "verified", scope: "global", is_index: false, system: false,
-  children: [
-    {id: "g-doc", title: "全局指南", path: "global/guides/guide.md", type: "practice", status: "verified", scope: "global", is_index: false, system: false, children: []},
-    {id: "g-sub", title: "advanced", path: "global/guides/advanced", type: "reference", status: "verified", scope: "global", is_index: false, system: false,
-      children: [{id: "g-deep", title: "深入指南", path: "global/guides/advanced/deep.md", type: "practice", status: "verified", scope: "global", is_index: false, system: false, children: []}]},
-  ],
-}, {
-  id: "g-other", title: "reference", path: "global/reference", type: "reference", status: "verified", scope: "global", is_index: false, system: false,
-  children: [{id: "g-other-doc", title: "参考手册", path: "global/reference/manual.md", type: "reference", status: "verified", scope: "global", is_index: false, system: false, children: []}],
+  id: "p-index", title: "Demo 索引", path: "projects/p1/index.md", type: "navigation", status: "verified", scope: "project", project_id: "p1", is_index: true, system: true, children: [{
+    id: "p-guides", title: "指南", path: "projects/p1/guides/index.md", type: "navigation", status: "verified", scope: "project", project_id: "p1", is_index: true, system: true,
+    children: Array.from({length: 28}, (_, index) => ({
+      id: index === 0 ? "doc-1" : `doc-${index + 1}`,
+      title: index === 0 ? "构建指南" : `项目文档 ${index + 1}`,
+      path: index === 0 ? "projects/p1/guides/build.md" : `projects/p1/guides/doc-${index + 1}.md`,
+      type: "practice", status: "verified", scope: "project", project_id: "p1", is_index: false, system: false, children: [],
+    })),
+  }],
 }];
-const projectTree = [{
-  id: "p-index", title: "Demo 索引", path: "projects/p1/index.md", type: "navigation", status: "verified", scope: "project", project_id: "p1", is_index: true, system: true, children: [],
-}, ...Array.from({length: 28}, (_, index) => ({
-  id: index === 0 ? "doc-1" : `doc-${index + 1}`,
-  title: index === 0 ? "构建指南" : `项目文档 ${index + 1}`,
-  path: index === 0 ? "projects/p1/guides/build.md" : `projects/p1/guides/doc-${index + 1}.md`,
-  type: "practice", status: "verified", scope: "project", project_id: "p1", is_index: false, system: false, children: [],
-}))];
 const RECENT = [
   {id: "doc-1", title: "构建指南", path: "projects/p1/guides/build.md", type: "practice", status: "verified", scope: "project", project_id: "p1", library_id: "project:p1", library: "Demo", modified_at: now},
   {id: "inbox-1", title: "新想法", path: "projects/p1/inbox/idea.md", type: "practice", status: "unverified", scope: "project", project_id: "p1", library_id: "project:p1", library: "Demo", modified_at: "2026-11-13T08:00:00Z"},
@@ -95,7 +98,7 @@ function bootstrap(off) {
   return `
 const OFF = ${off};
 const LIBS = ${JSON.stringify(LIBS)};
-const TREES = ${JSON.stringify({global: globalTree, "project:p1": projectTree})};
+const TREES = ${JSON.stringify({all: allTree})};
 const DOC = ${JSON.stringify(DOC)};
 const INBOX_DOC = ${JSON.stringify(INBOX_DOC)};
 const FENCE_DOC = ${JSON.stringify(FENCE_DOC)};
@@ -129,7 +132,7 @@ window.fetch = async (input, init = {}) => {
   if (path === "/api/v1/events") return json({events: [], cursor: 0});
   if (path === "/api/v1/knowledge-vault/libraries") return OFF ? json({ok: false, error: "knowledge_vault_disabled"}, 404) : json(LIBS);
   if (path === "/api/v1/knowledge-vault/tree") {
-    const library = url.searchParams.get("library") || "global";
+    const library = url.searchParams.get("library") || "all";
     window.__vaultTreeRequests.push(library);
     await delay("tree", library);
     return json({ok: true, enabled: true, index_ready: true, library, count: (TREES[library] || []).length, nodes: TREES[library] || []});
@@ -138,7 +141,7 @@ window.fetch = async (input, init = {}) => {
     const id = decodeURIComponent(path.slice("/api/v1/knowledge-vault/doc/".length));
     if (id === "doc-fence") return json({ok: true, doc: FENCE_DOC});
     if (id === "g-deep") return json({ok: true, doc: DEEP_DOC});
-    if (id === "doc-1" || id === "doc-2" || id.startsWith("doc-") || id === "g-doc" || id === "g-index") return json({ok: true, doc: DOC});
+    if (id === "doc-1" || id === "doc-2" || id.startsWith("doc-") || id === "g-doc" || id === "g-index" || id === "g-folder" || id === "g-sub" || id === "g-other" || id === "p-index" || id === "p-guides") return json({ok: true, doc: DOC});
     if (id === "inbox-1") return json({ok: true, doc: INBOX_DOC});
     return json({ok: false, error: "knowledge_vault_document_not_found"}, 404);
   }
@@ -147,7 +150,7 @@ window.fetch = async (input, init = {}) => {
     const project = url.searchParams.get("project") || "";
     window.__vaultRecentRequests.push(project || "all");
     await delay("recent", project || "all");
-    return json({ok: true, enabled: true, index_ready: true, items: project ? RECENT : GLOBAL_RECENT});
+    return json({ok: true, enabled: true, index_ready: true, items: project ? RECENT : [...RECENT, ...GLOBAL_RECENT]});
   }
   if (path === "/api/v1/knowledge-vault/inbox") {
     const project = url.searchParams.get("project") || "";
@@ -155,7 +158,7 @@ window.fetch = async (input, init = {}) => {
     await delay("inbox", project || "all");
     return project
       ? json({ok: true, enabled: true, index_ready: true, count: 1, counts: [{library_id: "project:p1", library: "Demo", project_id: "p1", count: 1}], items: [RECENT[1]]})
-      : json({ok: true, enabled: true, index_ready: true, count: 1, counts: [{library_id: "global", library: "全局知识", count: 1}], items: [GLOBAL_INBOX]});
+      : json({ok: true, enabled: true, index_ready: true, count: 2, counts: [{library_id: "global", library: "全局知识", count: 1}, {library_id: "project:p1", library: "Demo", project_id: "p1", count: 1}], items: [RECENT[1], GLOBAL_INBOX]});
   }
   if (path === "/api/v1/knowledge-vault/skills") return json({ok: true, enabled: true, skills: [{id: "s1", slug: "demo", name: "Demo Skill", scope: "global", library: "全局知识", description: "构建技能", file_count: 3, relative_path: "skills/demo", absolute_path: "/srv/vault/skills/demo", open_path: "/srv/vault/skills/demo/SKILL.md"}]});
   if (path === "/api/v1/knowledge") return json({knowledge: OLD_KNOWLEDGE, proposals: [], review_settings: {auto_approve: false}, has_more: false});
@@ -202,6 +205,22 @@ async function axe(page, label) {
   assert.equal(result.violations.find(item => item.id === "button-name")?.nodes.length || 0, 0, `${label}: button-name`);
   assert.equal(result.violations.find(item => item.id === "aria-required-children")?.nodes.length || 0, 0, `${label}: aria-required-children`);
   console.log(`axe ${label}: ${result.violations.length} violation types, 0 critical/serious, 0 button-name, 0 aria-required-children`);
+}
+
+async function expandGlobalTree(page) {
+  await page.locator('[data-kv-toggle="g-index"]').click();
+  await page.waitForSelector('[data-kv-toggle="g-folder"]');
+  await page.locator('[data-kv-toggle="g-folder"]').click();
+  await page.waitForSelector('a[data-kv-doc="g-doc"]');
+}
+
+async function expandProjectTree(page) {
+  await page.locator('[data-kv-toggle="vault-dir:projects"]').click();
+  await page.waitForSelector('[data-kv-toggle="p-index"]');
+  await page.locator('[data-kv-toggle="p-index"]').click();
+  await page.waitForSelector('[data-kv-toggle="p-guides"]');
+  await page.locator('[data-kv-toggle="p-guides"]').click();
+  await page.waitForSelector('a[data-kv-doc="doc-1"]');
 }
 
 let browser;
@@ -269,13 +288,28 @@ try {
   await page.setViewportSize({width: 1280, height: 900});
   await page.waitForTimeout(60);
 
-  // Tree is a nav with real anchors, grouped by folder and not by type.
+  // The topbar has no library/project scope dropdowns any more: the tree itself
+  // navigates the real vault directories, rooted at global/ and projects/.
+  assert.equal(await page.locator("#kv-library").count(), 0);
+  assert.equal(await page.locator("#kv-project").count(), 0);
   assert.equal(await page.locator("nav.kv-tree-panel").count(), 1);
   assert.equal(await page.locator('nav.kv-tree-panel [role="tree"]').count(), 0);
-  assert.match(await page.locator("nav.kv-tree-panel").innerText(), /系统索引[\s\S]*文档/);
+  let treeText = await page.locator("nav.kv-tree-panel").innerText();
+  assert.doesNotMatch(treeText, /系统索引/);
+  assert.doesNotMatch(treeText, /全局知识首页/);
+  assert.match(treeText, /global/);
+  assert.match(treeText, /projects/);
+  assert.equal(await page.locator('a[data-kv-doc="g-index"]').count(), 1, "the global root index is the global folder row");
+  assert.equal(await page.locator('li.kv-tree-folder').filter({has: page.locator('[data-kv-toggle="g-index"]')}).locator('.kv-badge').count(), 0, "directory rows carry no badges");
 
   // Every directory starts collapsed like `tree` output: children are not in
   // the DOM until the folder is expanded, and nested folders stay closed.
+  assert.equal(await page.locator('[data-kv-toggle="g-index"]').getAttribute("aria-expanded"), "false");
+  assert.equal(await page.locator('[data-kv-toggle="vault-dir:projects"]').getAttribute("aria-expanded"), "false");
+  assert.equal(await page.locator('[data-kv-toggle="g-folder"]').count(), 0, "collapsed global children are not rendered");
+  assert.equal(await page.locator('[data-kv-toggle="p-index"]').count(), 0, "collapsed project children are not rendered");
+  await page.locator('[data-kv-toggle="g-index"]').click();
+  assert.equal(await page.locator('[data-kv-toggle="g-index"]').getAttribute("aria-expanded"), "true");
   assert.equal(await page.locator('[data-kv-toggle="g-folder"]').getAttribute("aria-expanded"), "false");
   assert.equal(await page.locator('[data-kv-toggle="g-other"]').getAttribute("aria-expanded"), "false");
   assert.equal(await page.locator('a[data-kv-doc="g-doc"]').count(), 0, "collapsed folder children are not rendered");
@@ -294,15 +328,27 @@ try {
   assert.equal(await page.locator('[data-kv-toggle="g-folder"]').getAttribute("aria-expanded"), "true");
   assert.equal(await page.locator('a[data-kv-doc="g-doc"]').count(), 1);
 
-  // Switching libraries rebuilds the tree collapsed; coming back does not
-  // resurrect the previous expansion.
-  await page.selectOption("#kv-library", "project:p1");
-  await page.waitForFunction(() => Boolean(document.querySelector('a[data-kv-doc="doc-1"]')));
-  await page.selectOption("#kv-library", "global");
-  await page.waitForFunction(() => document.querySelector('[data-kv-toggle="g-folder"]')?.getAttribute("aria-expanded") === "false");
-  assert.equal(await page.locator('a[data-kv-doc="g-doc"]').count(), 0, "switching libraries resets folders to collapsed");
-  await page.locator('[data-kv-toggle="g-folder"]').click();
-  await page.waitForSelector('a[data-kv-doc="g-doc"]');
+  // Clicking the directory row opens the directory's index document; the same
+  // index is not rendered a second time as a leaf row.
+  await page.locator('a[data-kv-doc="g-folder"]').click();
+  await page.waitForSelector(".kv-doc-body");
+  assert.equal((await page.locator(".kv-doc-head h1").textContent()).trim(), "构建指南");
+
+  // Enter a project from the tree: projects -> p1 -> guides, each level
+  // expanded explicitly. The single tree request already covers all libraries.
+  await page.locator('[data-kv-toggle="vault-dir:projects"]').click();
+  await page.waitForSelector('[data-kv-toggle="p-index"]');
+  assert.equal(await page.locator('[data-kv-toggle="p-index"]').getAttribute("aria-expanded"), "false");
+  assert.equal(await page.locator('a[data-kv-doc="p-guides"]').count(), 0);
+  await page.locator('[data-kv-toggle="p-index"]').click();
+  await page.waitForSelector('[data-kv-toggle="p-guides"]');
+  assert.equal(await page.locator('[data-kv-toggle="p-guides"]').getAttribute("aria-expanded"), "false");
+  await page.locator('[data-kv-toggle="p-guides"]').click();
+  await page.waitForSelector('a[data-kv-doc="doc-1"]');
+  assert.match(await page.locator(".kv-tree-panel").innerText(), /项目文档 2/);
+  assert.equal(await page.locator('a[data-kv-doc="g-doc"]').count(), 1, "the global scope stays browsable in the same tree");
+  const treeRequests = await page.evaluate(() => window.__vaultTreeRequests);
+  assert.deepEqual([...new Set(treeRequests)], ["all"], "one all-library tree request powers both scopes");
 
   // Document page and the three open methods (plus copy path).
   await page.locator('a[data-kv-doc="g-doc"]').click();
@@ -342,21 +388,38 @@ try {
   const searchRequest = await page.evaluate(() => window.__vaultRequests.filter(item => item.startsWith("/api/v1/knowledge-vault/search")).at(-1));
   assert.match(searchRequest, /q=%E6%9E%84%E5%BB%BA/);
   assert.match(searchRequest, /type=practice/);
+  // Search scope lives in the search panel, not in the topbar. It defaults to
+  // all and can be narrowed to the current project or directory; results keep
+  // scope/project/path context.
+  assert.equal(await page.locator("#kv-search-scope").inputValue(), "all");
+  assert.match(await page.locator(".kv-search-result").innerText(), /project · p1 · projects\/p1\/guides\/build\.md/);
+  await page.selectOption("#kv-search-scope", "project");
+  await page.waitForFunction(() => window.__vaultRequests.filter(item => item.startsWith("/api/v1/knowledge-vault/search")).at(-1)?.includes("library=project%3Ap1"));
+  const projectSearch = await page.evaluate(() => window.__vaultRequests.filter(item => item.startsWith("/api/v1/knowledge-vault/search")).at(-1));
+  assert.match(projectSearch, /project=p1/);
+  const beforeDirectorySearch = await page.evaluate(() => window.__vaultRequests.filter(item => item.startsWith("/api/v1/knowledge-vault/search")).length);
+  await page.selectOption("#kv-search-scope", "directory");
+  await page.waitForFunction(count => window.__vaultRequests.filter(item => item.startsWith("/api/v1/knowledge-vault/search")).length > count, beforeDirectorySearch);
+  await page.waitForSelector(".kv-search-result");
   await page.locator('.kv-search-result a[data-kv-doc="doc-1"]').click();
   await page.waitForSelector(".kv-doc-body");
   assert.equal(await page.locator(".kv-search-panel").isVisible(), false);
 
-  // Library/project switch loads the project tree.
-  await page.selectOption("#kv-library", "project:p1");
-  await page.waitForFunction(() => document.querySelectorAll("[data-kv-toggle], .kv-tree-link").length > 0);
-  assert.ok(await page.locator('a[data-kv-doc="doc-1"]').count() >= 1);
-  // Recent, inbox (read-only), skills.
+  // Opening a project document from search expands only its ancestor folders in
+  // the single all-library tree.
+  await page.waitForSelector('a[data-kv-doc="doc-1"]');
+  assert.equal(await page.locator('[data-kv-toggle="vault-dir:projects"]').getAttribute("aria-expanded"), "true");
+  assert.equal(await page.locator('[data-kv-toggle="p-index"]').getAttribute("aria-expanded"), "true");
+  assert.equal(await page.locator('[data-kv-toggle="p-guides"]').getAttribute("aria-expanded"), "true");
+  assert.equal(await page.locator('[data-kv-toggle="g-other"]').getAttribute("aria-expanded"), "false", "sibling directories stay collapsed");
+  // Recent, inbox (read-only) and skills default to all libraries and keep
+  // project/path context on every row.
   await page.locator('[data-kv-tab-button="recent"]').click();
   await page.waitForSelector(".kv-feed-day");
-  assert.match(await page.locator(".kv-feed").innerText(), /构建指南[\s\S]*Demo/);
+  assert.match(await page.locator(".kv-feed").innerText(), /构建指南[\s\S]*Demo[\s\S]*全局指南[\s\S]*全局知识/);
   await page.locator('[data-kv-tab-button="inbox"]').click();
   await page.waitForSelector(".kv-inbox");
-  assert.match(await page.locator(".kv-inbox").innerText(), /1 条待整理[\s\S]*projects\/p1\/inbox\/idea\.md/);
+  assert.match(await page.locator(".kv-inbox").innerText(), /2 条待整理[\s\S]*projects\/p1\/inbox\/idea\.md[\s\S]*global\/inbox\/idea\.md/);
   assert.equal(await page.locator(".kv-inbox [data-kv-move], .kv-inbox [data-kv-edit]").count(), 0);
   await page.locator('.kv-tabs [data-kv-tab-button="skills"]').click();
   await page.waitForSelector(".kv-skill-card");
@@ -377,9 +440,11 @@ try {
   await page.waitForSelector(".kv-doc-body");
   assert.equal((await page.locator(".kv-doc-head h1").textContent()).trim(), "深入指南");
   await page.waitForSelector('a[data-kv-doc="g-deep"]');
+  assert.equal(await page.locator('[data-kv-toggle="g-index"]').getAttribute("aria-expanded"), "true");
   assert.equal(await page.locator('[data-kv-toggle="g-folder"]').getAttribute("aria-expanded"), "true");
   assert.equal(await page.locator('[data-kv-toggle="g-sub"]').getAttribute("aria-expanded"), "true");
   assert.equal(await page.locator('[data-kv-toggle="g-other"]').getAttribute("aria-expanded"), "false");
+  assert.equal(await page.locator('[data-kv-toggle="vault-dir:projects"]').getAttribute("aria-expanded"), "false", "the project branch stays collapsed for a global deep link");
   assert.equal(await page.locator('a[data-kv-doc="g-other-doc"]').count(), 0, "sibling folders stay collapsed");
   assert.equal(await page.locator('a[data-kv-doc="g-deep"]').getAttribute("aria-current"), "page");
 
@@ -411,8 +476,7 @@ try {
   await page.goto(url, {waitUntil: "networkidle"});
   await page.evaluate(() => document.querySelector("[data-view=knowledge]")?.click());
   await page.waitForSelector(".kv-tree-link", {timeout: 15000});
-  await page.selectOption("#kv-library", "project:p1");
-  await page.waitForFunction(() => Boolean(document.querySelector('a[data-kv-doc="doc-1"]')));
+  await expandProjectTree(page);
   const deepLinkHistory = await page.evaluate(() => history.length);
   await page.evaluate(() => { window.__deepLinkMarker = "alive"; });
   await page.locator('a[data-kv-doc="doc-1"]').click();
@@ -430,8 +494,7 @@ try {
 
   await page.evaluate(() => document.querySelector("[data-view=knowledge]")?.click());
   await page.waitForSelector(".kv-tree-link", {timeout: 15000});
-  await page.selectOption("#kv-library", "project:p1");
-  await page.waitForFunction(() => Boolean(document.querySelector('a[data-kv-doc="doc-1"]')));
+  await expandProjectTree(page);
   await page.locator('a[data-kv-doc="doc-1"]').click();
   await page.waitForSelector(".kv-doc-body");
   await page.waitForFunction(() => location.hash.startsWith("#knowledge?doc=doc-1"));
@@ -479,10 +542,11 @@ try {
   await page.locator("#kv-settings-dialog [data-kv-settings-close]").first().click();
   assert.equal(await page.locator("#kv-settings-dialog").evaluate(dialog => dialog.open), false);
 
-  // The mobile tree also starts collapsed; expand one folder to pick a row.
+  // The mobile tree also starts collapsed at the two scope roots; expand one
+  // directory path to pick a document row.
+  assert.equal(await page.locator('[data-kv-toggle="g-index"]').getAttribute("aria-expanded"), "false");
   assert.equal(await page.locator('a[data-kv-doc="g-doc"]').count(), 0);
-  await page.locator('[data-kv-toggle="g-folder"]').click();
-  await page.waitForSelector('a[data-kv-doc="g-doc"]');
+  await expandGlobalTree(page);
 
   await page.evaluate(() => window.scrollTo(0, 360));
   await page.waitForTimeout(80);
@@ -530,53 +594,24 @@ try {
   assert.ok((await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)), "1280px has no horizontal overflow");
   await page.screenshot({path: resolve(screenshots, "knowledge-vault-desktop.png"), fullPage: false});
 
-  // Rapid library/project switches: a delayed old response must never overwrite
-  // the newly selected library. The fixture logs requests and supports delays.
-  const race = await browser.newPage({viewport: {width: 1280, height: 900}, locale: "zh-CN"});
-  const raceErrors = [];
-  race.on("pageerror", error => raceErrors.push(error.message));
-  await race.goto(`${url}/?race=1`, {waitUntil: "networkidle"});
-  await race.evaluate(() => {
-    window.__vaultDelays = {tree: {global: 500}, recent: {p1: 500}, inbox: {p1: 500}};
+  // One all-library tree request is shared by every scope. Switching tabs while
+  // it is still in flight must not start a second request or render stale data.
+  const single = await browser.newPage({viewport: {width: 1280, height: 900}, locale: "zh-CN"});
+  const singleErrors = [];
+  single.on("pageerror", error => singleErrors.push(error.message));
+  await single.goto(`${url}/?single=1`, {waitUntil: "networkidle"});
+  await single.evaluate(() => {
+    window.__vaultDelays = {tree: {all: 500}};
   });
-  await race.evaluate(() => document.querySelector("[data-view=knowledge]")?.click());
-  await race.waitForSelector("#kv-library");
-  await race.selectOption("#kv-library", "project:p1");
-  await race.waitForFunction(() => window.__vaultTreeRequests.includes("project:p1"));
-  await race.waitForTimeout(650);
-  assert.deepEqual((await race.evaluate(() => window.__vaultTreeRequests)).slice(0, 2), ["global", "project:p1"]);
-  assert.equal(await race.locator("#kv-library").inputValue(), "project:p1");
-  assert.match(await race.locator(".kv-tree-panel").innerText(), /项目文档 2/);
-  assert.doesNotMatch(await race.locator(".kv-tree-panel").innerText(), /全局指南/, "the delayed global tree overwrote the project tree");
-
-  await race.locator('[data-kv-tab-button="recent"]').click();
-  await race.waitForFunction(() => window.__vaultRecentRequests.includes("p1"));
-  await race.selectOption("#kv-library", "global");
-  await race.waitForFunction(() => window.__vaultRecentRequests.includes("all"));
-  await race.waitForTimeout(650);
-  const recentRequests = await race.evaluate(() => window.__vaultRecentRequests);
-  assert.ok(recentRequests.includes("p1"), "the project recent request must be sent before the switch");
-  assert.equal(recentRequests.at(-1), "all");
-  assert.ok(recentRequests.lastIndexOf("all") > recentRequests.indexOf("p1"));
-  assert.equal(await race.locator("#kv-library").inputValue(), "global");
-  assert.match(await race.locator(".kv-feed").innerText(), /全局指南/);
-  assert.doesNotMatch(await race.locator(".kv-feed").innerText(), /构建指南/, "the delayed project feed overwrote the global feed");
-
-  await race.selectOption("#kv-library", "project:p1");
-  await race.locator('[data-kv-tab-button="inbox"]').click();
-  await race.waitForFunction(() => window.__vaultInboxRequests.includes("p1"));
-  await race.selectOption("#kv-library", "global");
-  await race.waitForFunction(() => window.__vaultInboxRequests.includes("all"));
-  await race.waitForTimeout(650);
-  const inboxRequests = await race.evaluate(() => window.__vaultInboxRequests);
-  assert.ok(inboxRequests.includes("p1"), "the project inbox request must be sent before the switch");
-  assert.equal(inboxRequests.at(-1), "all");
-  assert.ok(inboxRequests.lastIndexOf("all") > inboxRequests.indexOf("p1"));
-  assert.equal(await race.locator("#kv-library").inputValue(), "global");
-  assert.match(await race.locator(".kv-inbox").innerText(), /全局想法/);
-  assert.doesNotMatch(await race.locator(".kv-inbox").innerText(), /新想法/, "the delayed project inbox overwrote the global inbox");
-  assert.deepEqual(raceErrors, []);
-  await race.close();
+  await single.evaluate(() => document.querySelector("[data-view=knowledge]")?.click());
+  await single.waitForSelector(".kv-tree-panel", {timeout: 15000});
+  await single.locator('[data-kv-tab-button="recent"]').click();
+  await single.locator('[data-kv-tab-button="knowledge"]').click();
+  await single.waitForSelector('[data-kv-toggle="g-index"]', {timeout: 15000});
+  assert.deepEqual((await single.evaluate(() => window.__vaultTreeRequests)), ["all"]);
+  assert.match(await single.locator(".kv-tree-panel").innerText(), /global[\s\S]*projects/);
+  assert.deepEqual(singleErrors, []);
+  await single.close();
 
   // Switch off: the legacy knowledge page is exactly what renders; the new
   // endpoints 404 and no vault chunk is mounted.
