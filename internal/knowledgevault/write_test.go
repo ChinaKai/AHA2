@@ -437,6 +437,103 @@ func TestWriteKnowledgeIdempotencyKeyReplaysOnce(t *testing.T) {
 	}
 }
 
+// The agent-writes state file is shared by the whole vault. A key from another
+// Task must never replay (and silently swallow) a write it did not make.
+func TestWriteKnowledgeIdempotencyKeyScopedByTask(t *testing.T) {
+	manager, _, ctx := newWriteTestManager(t)
+	requestA := writeTestCreateThemed("跨 Task 幂等 A", "任务A独立主题")
+	requestA.IdempotencyKey = "shared-key"
+	requestA.SourceTask = "task-a"
+	requestA.SourceTurn = "turn-a"
+	firstA, err := manager.WriteKnowledge(ctx, requestA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayA, err := manager.WriteKnowledge(ctx, requestA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !replayA.IdempotentReplay || replayA.ID != firstA.ID {
+		t.Fatalf("same-task replay = %+v", replayA)
+	}
+
+	requestB := writeTestCreateThemed("跨 Task 幂等 B", "任务B独立主题")
+	requestB.IdempotencyKey = "shared-key"
+	requestB.SourceTask = "task-b"
+	requestB.SourceTurn = "turn-b"
+	firstB, err := manager.WriteKnowledge(ctx, requestB)
+	if err != nil {
+		t.Fatalf("task-b write with a shared key = %v", err)
+	}
+	if firstB.IdempotentReplay || firstB.ID == firstA.ID || firstB.Path == firstA.Path {
+		t.Fatalf("task-b replay leaked task-a result: %+v", firstB)
+	}
+	replayB, err := manager.WriteKnowledge(ctx, requestB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !replayB.IdempotentReplay || replayB.ID != firstB.ID {
+		t.Fatalf("task-b replay = %+v", replayB)
+	}
+
+	// Feedback keys are scoped the same way.
+	feedbackA := FeedbackRequest{
+		Scope: WriteScopeProject, ProjectID: "project-demo", EntryID: firstA.ID,
+		Kind: FeedbackHelped, IdempotencyKey: "shared-feedback-key",
+		SourceTask: "task-a", SourceTurn: "turn-a",
+	}
+	if _, err := manager.KnowledgeFeedback(ctx, feedbackA); err != nil {
+		t.Fatal(err)
+	}
+	feedbackB := feedbackA
+	feedbackB.Kind = FeedbackStale
+	feedbackB.SourceTask = "task-b"
+	feedbackB.SourceTurn = "turn-b"
+	resultB, err := manager.KnowledgeFeedback(ctx, feedbackB)
+	if err != nil {
+		t.Fatalf("task-b feedback with a shared key = %v", err)
+	}
+	if resultB.IdempotentReplay || resultB.Kind != FeedbackStale || resultB.Status != FeedbackStale {
+		t.Fatalf("task-b feedback replayed task-a result: %+v", resultB)
+	}
+	replayFeedbackB, err := manager.KnowledgeFeedback(ctx, feedbackB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !replayFeedbackB.IdempotentReplay || replayFeedbackB.Kind != FeedbackStale {
+		t.Fatalf("task-b feedback replay = %+v", replayFeedbackB)
+	}
+}
+
+// Global rows are indexed without a project_id; the duplicate gate must query
+// them without the token project or it never sees any candidate.
+func TestWriteKnowledgeGlobalDuplicateGate(t *testing.T) {
+	manager, _, ctx := newWriteTestManager(t)
+	request := writeTestCreate("全局重复检测")
+	request.Scope = WriteScopeGlobal
+	request.ProjectID = ""
+	request.AllowGlobal = true
+	first, err := manager.WriteKnowledge(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(first.Path, "global/inbox/") {
+		t.Fatalf("global path = %s", first.Path)
+	}
+
+	_, err = manager.WriteKnowledge(ctx, request)
+	var writeErr *WriteError
+	if !errors.As(err, &writeErr) || writeErr.Code != WriteErrorDuplicate {
+		t.Fatalf("global duplicate error = %v", err)
+	}
+	if len(writeErr.Candidates) == 0 || writeErr.Candidates[0].ID != first.ID {
+		t.Fatalf("global duplicate candidates = %+v", writeErr.Candidates)
+	}
+	if writeErr.Candidates[0].Similarity < 0.8 {
+		t.Fatalf("global similarity = %f, want >= 0.8", writeErr.Candidates[0].Similarity)
+	}
+}
+
 func TestWriteKnowledgePerTurnBudget(t *testing.T) {
 	manager, _, ctx := newWriteTestManager(t)
 	manager.setWriteBudgetForTest(1)

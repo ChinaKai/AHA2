@@ -268,7 +268,7 @@ func (m *Manager) WriteKnowledge(ctx context.Context, request WriteRequest) (Wri
 		return WriteResult{}, err
 	}
 	if request.IdempotencyKey != "" {
-		if record, ok := findWriteRecord(state, request.IdempotencyKey); ok {
+		if record, ok := findWriteRecord(state, request.SourceTask, request.IdempotencyKey); ok {
 			record.Result.IdempotentReplay = true
 			return record.Result, nil
 		}
@@ -361,7 +361,7 @@ func (m *Manager) KnowledgeFeedback(ctx context.Context, request FeedbackRequest
 		return FeedbackResult{}, err
 	}
 	if request.IdempotencyKey != "" {
-		if record, ok := findFeedbackRecord(state, request.IdempotencyKey); ok {
+		if record, ok := findFeedbackRecord(state, request.SourceTask, request.IdempotencyKey); ok {
 			record.Result.IdempotentReplay = true
 			return record.Result, nil
 		}
@@ -942,7 +942,14 @@ func validateVaultWritePath(relative, scope, projectSlug string) error {
 }
 
 func (m *Manager) duplicateCandidatesLocked(ctx context.Context, request WriteRequest) ([]DuplicateCandidate, error) {
-	entries, err := m.reader.index.Entries(ctx, request.Scope, request.ProjectID)
+	// Global rows are indexed with an empty project_id, so filtering a global
+	// create by the token project would return no rows and silently skip the
+	// duplicate gate.
+	projectID := request.ProjectID
+	if request.Scope == WriteScopeGlobal {
+		projectID = ""
+	}
+	entries, err := m.reader.index.Entries(ctx, request.Scope, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -1139,19 +1146,40 @@ func checkWriteBudget(state agentWriteState, request WriteRequest, budget int) e
 	return nil
 }
 
-func findWriteRecord(state agentWriteState, key string) (agentWriteRecord, bool) {
+// idempotencyKeyScope namespaces a client key by the Task that submitted it.
+// The agent-writes state file is shared by the whole vault, so a key alone
+// would let another Task replay (and silently swallow) a write it never made.
+func idempotencyKeyScope(sourceTask, key string) string {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return ""
+	}
+	return strings.TrimSpace(sourceTask) + "|" + key
+}
+
+func findWriteRecord(state agentWriteState, sourceTask, key string) (agentWriteRecord, bool) {
+	scope := idempotencyKeyScope(sourceTask, key)
+	if scope == "" {
+		return agentWriteRecord{}, false
+	}
 	for index := len(state.Entries) - 1; index >= 0; index-- {
-		if state.Entries[index].Key == key && key != "" {
-			return state.Entries[index], true
+		record := state.Entries[index]
+		if idempotencyKeyScope(record.SourceTask, record.Key) == scope {
+			return record, true
 		}
 	}
 	return agentWriteRecord{}, false
 }
 
-func findFeedbackRecord(state agentWriteState, key string) (agentFeedbackRecord, bool) {
+func findFeedbackRecord(state agentWriteState, sourceTask, key string) (agentFeedbackRecord, bool) {
+	scope := idempotencyKeyScope(sourceTask, key)
+	if scope == "" {
+		return agentFeedbackRecord{}, false
+	}
 	for index := len(state.Feedback) - 1; index >= 0; index-- {
-		if state.Feedback[index].Key == key && key != "" {
-			return state.Feedback[index], true
+		record := state.Feedback[index]
+		if idempotencyKeyScope(record.SourceTask, record.Key) == scope {
+			return record, true
 		}
 	}
 	return agentFeedbackRecord{}, false
