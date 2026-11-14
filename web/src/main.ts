@@ -679,6 +679,13 @@ let openingTaskID = "";
 // Set only when a Task was opened from its list card, so returning to the list
 // can put focus back on that card instead of the top of the page.
 let taskCardFocusReturnID = "";
+
+// Any exit from the Task detail other than the back button drops the return
+// target: the row may be gone, and a later open from another entry point must
+// not steal focus back to an old card.
+function clearTaskCardFocusReturn(): void {
+  taskCardFocusReturnID = "";
+}
 let listRefreshInFlight = false;
 // Startup prefetch never chains other views. It runs at most once, on idle, and
 // only while the user has not interacted or opened a Task.
@@ -1766,6 +1773,7 @@ function switchView(nextView: View): void {
   }
   if (nextView === "proxy") resourceStates.proxy.loaded = false;
   state.selectedTask = null;
+  clearTaskCardFocusReturn();
   state.selectedProject = null;
   state.dialogProjectID = "";
   closeEvents();
@@ -2100,6 +2108,7 @@ function openCommandPaletteProject(projectID: string): void {
   state.selectedProject = project;
   state.dialogProjectID = projectID;
   state.selectedTask = null;
+  clearTaskCardFocusReturn();
   closeEvents();
   render();
   if (!project) void ensureViewData("projects").then(() => render());
@@ -2108,6 +2117,7 @@ function openCommandPaletteProject(projectID: string): void {
 async function openTaskCreateDialogFromPalette(): Promise<void> {
   state.view = "tasks";
   state.selectedTask = null;
+  clearTaskCardFocusReturn();
   state.selectedProject = null;
   state.dialogProjectID = "";
   closeEvents();
@@ -3038,6 +3048,7 @@ async function createTaskFromMemo(memoID: string): Promise<void> {
   cancelTaskOpen();
   state.view = "tasks";
   state.selectedTask = null;
+  clearTaskCardFocusReturn();
   state.selectedProject = null;
   state.dialogProjectID = "";
   closeEvents();
@@ -4469,7 +4480,7 @@ function taskCardHtml(task: Task): string {
   const readonlyBadge = archived || task.read_only || task.status === "completed";
   // The card body is the keyboard entry point; the edit/delete buttons are
   // siblings so they stay independently operable and never open the Task.
-  const openLabel = [task.code, task.title, statusLabel(task.status)].filter(Boolean).join(" ");
+  const openLabel = [task.code, task.title, tr(statusLabel(task.status))].filter(Boolean).join(" ");
   return `<article class="task-card" data-task="${task.id}" data-task-signature="${taskCardSignature(task, project, ws)}">
     <div class="task-card-main" role="button" tabindex="0" data-task-open aria-label="${escapeHTML(openLabel)}">
       <div class="task-card-title"><span class="task-code">${escapeHTML(task.code || "")}</span><h3 data-task-title="${task.id}">${escapeHTML(task.title)}</h3><span class="status task-card-title-status ${statusClass(task.status)}">${statusLabel(task.status)}</span></div>
@@ -6387,6 +6398,7 @@ function bindTaskListControls(root: ParentNode = document): void {
       await api.deleteTask(id);
       if (state.selectedTask?.task.id === id) {
         state.selectedTask = null;
+        clearTaskCardFocusReturn();
         closeEvents();
       }
       state.tasks = state.tasks.filter(item => item.id !== id);
@@ -6410,6 +6422,7 @@ function bindTaskListControls(root: ParentNode = document): void {
       }
       if (state.selectedTask?.task.id === id) {
         state.selectedTask = null;
+        clearTaskCardFocusReturn();
         closeEvents();
       }
       setMessage("notice", synchronized
@@ -6464,6 +6477,16 @@ function bindTaskListControls(root: ParentNode = document): void {
     const task = state.tasks.find(item => item.id === taskID);
     const heading = document.querySelector<HTMLElement>(`[data-task-title="${CSS.escape(taskID)}"]`);
     if (!task || !heading) return;
+    // A role="button" subtree may not contain focusable controls. While the
+    // inline editor is open, expose the row body as a plain container; the
+    // card template's button semantics come back in finish().
+    const cardMain = heading.closest<HTMLElement>(".task-card-main");
+    const cardRole = cardMain?.getAttribute("role") ?? null;
+    const cardTabIndex = cardMain?.getAttribute("tabindex") ?? null;
+    const cardLabel = cardMain?.getAttribute("aria-label") ?? null;
+    cardMain?.removeAttribute("role");
+    cardMain?.removeAttribute("tabindex");
+    cardMain?.removeAttribute("aria-label");
     const input = document.createElement("input");
     input.className = "task-title-input";
     input.maxLength = 200;
@@ -6479,6 +6502,16 @@ function bindTaskListControls(root: ParentNode = document): void {
       // focus, so an Enter/Escape close must release focus before re-rendering;
       // otherwise the editor stays stuck in place with its typed value.
       if (document.activeElement === input) input.blur();
+      // The list patch keeps an unchanged row as the same DOM node, so put the
+      // heading and the row's button semantics back before re-rendering. A
+      // cancelled edit leaves the signature unchanged and would otherwise keep
+      // the editor markup on screen.
+      if (input.isConnected) input.replaceWith(heading);
+      if (cardMain?.isConnected) {
+        if (cardRole !== null) cardMain.setAttribute("role", cardRole);
+        if (cardTabIndex !== null) cardMain.setAttribute("tabindex", cardTabIndex);
+        if (cardLabel !== null) cardMain.setAttribute("aria-label", cardLabel);
+      }
       const title = input.value.trim();
       if (save && title && title !== task.title) {
         try {
@@ -6566,6 +6599,7 @@ function bindCommon(): void {
 			state.selectedProject = state.projects.find(project => project.id === projectID) || null;
 			state.dialogProjectID = projectID;
 			state.selectedTask = null;
+			clearTaskCardFocusReturn();
 			closeEvents();
 			render();
 		},
@@ -6595,6 +6629,7 @@ function bindCommon(): void {
       await api.logout();
       state.auth = {...state.auth!, authenticated: false};
       state.selectedTask = null;
+      clearTaskCardFocusReturn();
       state.selectedProject = null;
       authRecoveryOpen = false;
       clearNavigationSnapshot();
@@ -6805,6 +6840,7 @@ function bindCommon(): void {
     state.selectedProject = state.projects.find(item => item.id === id) || null;
     state.dialogProjectID = id;
     state.selectedTask = null;
+    clearTaskCardFocusReturn();
     closeEvents();
     render();
   }));
@@ -7140,11 +7176,11 @@ function bindCommon(): void {
     cancelTaskOpen();
     if (state.taskTool === "hardware") stopHardwarePanel();
     if (state.taskTool === "browser") stopDesktopPanel();
+    const returnID = taskCardFocusReturnID;
     state.selectedTask = null;
+    clearTaskCardFocusReturn();
     closeEvents();
     render();
-    const returnID = taskCardFocusReturnID;
-    taskCardFocusReturnID = "";
     if (returnID) {
       document.querySelector<HTMLElement>(`.task-card[data-task="${CSS.escape(returnID)}"] [data-task-open]`)
         ?.focus({preventScroll: true});
@@ -8204,6 +8240,7 @@ window.addEventListener("aha:open-pet-settings", () => {
   petWorkbenchTab = "settings";
   state.view = "pet-workbench";
   state.selectedTask = null;
+  clearTaskCardFocusReturn();
   state.selectedProject = null;
   closeEvents();
   render();
@@ -8213,6 +8250,7 @@ window.addEventListener("aha:open-advanced", () => {
   cancelTaskOpen();
   state.view = "advanced";
   state.selectedTask = null;
+  clearTaskCardFocusReturn();
   state.selectedProject = null;
   closeEvents();
   render();
