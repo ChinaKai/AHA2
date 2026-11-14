@@ -29,7 +29,7 @@ import {DEFAULT_TASK_STATUS_FILTERS, LOCAL_TASK_DEVICE_FILTER, TASK_STATUS_GROUP
 import type {TaskStatusGroup} from "./task_filters.js";
 import {TASK_TOOL_DEFAULT_WIDTH, normalizePinnedTaskTool, normalizeTaskToolMode, normalizeTaskToolWidth, renderTaskToolButtons, renderTaskToolContent, renderTaskToolPanel} from "./task_tools.js";
 import type {TaskTool, TaskToolMode} from "./task_tools.js";
-import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, createListRefreshScheduler, createResourceLoader, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, loadNavigationSnapshot, matchingSlashCommands, paginateItems, paginationHTML, planKeyedNodes, stableTextSignature, protoBadges, readPerfPanelPreference, renderModelHealthCell, renderProtocolProbeStatus, renderWorkspaceDetection, restoreInteractiveRegion, saveNavigationSnapshot, textMatchesQuery, writePerfPanelPreference} from "./ui_helpers.js";
+import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, createListRefreshScheduler, createResourceLoader, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, loadNavigationSnapshot, matchingSlashCommands, paginateItems, paginationHTML, planKeyedNodes, stableTextSignature, protoBadges, readPerfPanelPreference, renderModelHealthCell, renderProtocolProbeStatus, renderWorkspaceDetection, replaceInteractiveRegion, restoreInteractiveRegion, saveNavigationSnapshot, textMatchesQuery, writePerfPanelPreference} from "./ui_helpers.js";
 import type {InteractiveRegionState, ModelHealthView} from "./ui_helpers.js";
 import {
   compactNumber,
@@ -6458,6 +6458,10 @@ function bindTaskListControls(root: ParentNode = document): void {
     const finish = async (save: boolean) => {
       if (settled) return;
       settled = true;
+      // render() refuses to touch the DOM while a text editor still holds
+      // focus, so an Enter/Escape close must release focus before re-rendering;
+      // otherwise the editor stays stuck in place with its typed value.
+      if (document.activeElement === input) input.blur();
       const title = input.value.trim();
       if (save && title && title !== task.title) {
         try {
@@ -8042,7 +8046,11 @@ async function performListRefresh(): Promise<void> {
     rebuildOpenCommandPaletteIndex();
     const listPageVisible = state.view === "projects" || state.view === "tasks" || Boolean(state.selectedProject);
     if (!state.selectedTask && !openingTaskID && listPageVisible) {
-      if (taskListPointerActive) state.renderPending = true;
+      // An in-row title editor is a live text control the row patch cannot
+      // carry over: replacing its row drops the typed value and focus. Hold the
+      // patch until the editor closes; finish() re-renders the list with the
+      // already-fresh state instead.
+      if (taskListPointerActive || hasActiveTextEditor()) state.renderPending = true;
       else if (!patchTaskList()) render();
     }
   } catch {

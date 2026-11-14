@@ -2934,7 +2934,13 @@ test("large catalogs use independent route resources and cursor pages", async ()
 test("task list protects clicks from live refresh and reports open failures", async () => {
   const source = await readFile(resolve(import.meta.dirname, "..", "src", "main.ts"), "utf8");
   assert.match(source, /taskListPointerActive = true/);
-  assert.match(source, /if \(taskListPointerActive\) state\.renderPending = true/);
+  // A pointer press, and an in-row text editor, both keep the patch deferred:
+  // replacing the focused row would drop the typed value and focus.
+  assert.match(source, /if \(taskListPointerActive \|\| hasActiveTextEditor\(\)\) state\.renderPending = true/);
+  // The filter replacement is referenced by patchTaskList; without this import
+  // the ReferenceError is swallowed by performListRefresh's catch and the list
+  // silently stops refreshing whenever the facet counts change.
+  assert.match(source, /import \{[^}]*\breplaceInteractiveRegion\b[^}]*\} from "\.\/ui_helpers\.js"/);
   assert.match(source, /window\.setTimeout\(flushDeferredRender, 0\)/);
   assert.match(source, /openingTaskID = taskID/);
   assert.match(source, /setMessage\("error", error instanceof Error/);
