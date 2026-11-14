@@ -39,6 +39,17 @@ const DOC = {
   obsidian_vault: "AHA2 Knowledge", remote_host: "devbox",
 };
 const INBOX_DOC = {...DOC, id: "inbox-1", title: "新想法", path: "projects/p1/inbox/idea.md", relative_path: "projects/p1/inbox/idea.md", absolute_path: "/srv/vault/项目 知识/projects/p1/inbox/idea.md", type: "practice", status: "unverified", tags: []};
+// The outline deliberately omits `额外标题` (an older-index simulation), so
+// index-based slug assignment would attach the real heading's id to the extra
+// heading. `# 注释` is inside a fence and must never appear in the outline.
+const FENCE_DOC = {
+  ...DOC, id: "doc-fence", title: "围栏文档", path: "global/guides/fence.md",
+  relative_path: "global/guides/fence.md", absolute_path: "/srv/vault/项目 知识/global/guides/fence.md",
+  scope: "global", project_id: "", library_id: "global", library_name: "全局知识",
+  body: "# 文档\n\n### 额外标题\n\n```bash\n# 注释\n```\n\n## 真标题\n\n正文。\n",
+  outline: [{level: 1, text: "文档", slug: "kv-doc"}, {level: 2, text: "真标题", slug: "kv-real-title"}],
+  backlinks: [], tags: [],
+};
 const globalTree = [{
   id: "g-index", title: "全局索引", path: "global/index.md", type: "navigation", status: "verified", scope: "global", is_index: true, system: true, children: [],
 }, {
@@ -57,6 +68,10 @@ const RECENT = [
   {id: "doc-1", title: "构建指南", path: "projects/p1/guides/build.md", type: "practice", status: "verified", scope: "project", project_id: "p1", library_id: "project:p1", library: "Demo", modified_at: now},
   {id: "inbox-1", title: "新想法", path: "projects/p1/inbox/idea.md", type: "practice", status: "unverified", scope: "project", project_id: "p1", library_id: "project:p1", library: "Demo", modified_at: "2026-11-13T08:00:00Z"},
 ];
+const GLOBAL_RECENT = [
+  {id: "g-doc", title: "全局指南", path: "global/guides/guide.md", type: "practice", status: "verified", scope: "global", library_id: "global", library: "全局知识", modified_at: now},
+];
+const GLOBAL_INBOX = {id: "g-inbox", title: "全局想法", path: "global/inbox/idea.md", type: "practice", status: "unverified", scope: "global", library_id: "global", library: "全局知识", modified_at: now};
 const SEARCH = [
   {id: "doc-1", title: "构建指南", path: "projects/p1/guides/build.md", type: "practice", scope: "project", project_id: "p1", status: "verified", tags: ["build"], snippet: "运行 make build 构建项目", updated: now},
 ];
@@ -71,10 +86,21 @@ const LIBS = ${JSON.stringify(LIBS)};
 const TREES = ${JSON.stringify({global: globalTree, "project:p1": projectTree})};
 const DOC = ${JSON.stringify(DOC)};
 const INBOX_DOC = ${JSON.stringify(INBOX_DOC)};
+const FENCE_DOC = ${JSON.stringify(FENCE_DOC)};
 const RECENT = ${JSON.stringify(RECENT)};
+const GLOBAL_RECENT = ${JSON.stringify(GLOBAL_RECENT)};
+const GLOBAL_INBOX = ${JSON.stringify(GLOBAL_INBOX)};
 const SEARCH = ${JSON.stringify(SEARCH)};
 const OLD_KNOWLEDGE = [{id: "global-root", scope: "global", parent_id: "", is_index: true, type: "navigation", title: "Global index", slug: "index", body: "Global home.", status: "verified", confidence: .9, revision: 1, sort_order: 0, helped_count: 0, stale_count: 0, created_at: "${now}", updated_at: "${now}"}];
 window.__vaultRequests = [];
+window.__vaultTreeRequests = [];
+window.__vaultRecentRequests = [];
+window.__vaultInboxRequests = [];
+window.__vaultDelays = {};
+const delay = async (kind, key) => {
+  const milliseconds = Number(window.__vaultDelays?.[kind]?.[key] || 0);
+  if (milliseconds > 0) await new Promise(resolve => setTimeout(resolve, milliseconds));
+};
 const json = (value, status = 200) => new Response(JSON.stringify(value), {status, headers: {"Content-Type": "application/json"}});
 window.fetch = async (input, init = {}) => {
   const url = new URL(typeof input === "string" ? input : input.url, location.origin);
@@ -91,17 +117,32 @@ window.fetch = async (input, init = {}) => {
   if (path === "/api/v1/knowledge-vault/libraries") return OFF ? json({ok: false, error: "knowledge_vault_disabled"}, 404) : json(LIBS);
   if (path === "/api/v1/knowledge-vault/tree") {
     const library = url.searchParams.get("library") || "global";
+    window.__vaultTreeRequests.push(library);
+    await delay("tree", library);
     return json({ok: true, enabled: true, index_ready: true, library, count: (TREES[library] || []).length, nodes: TREES[library] || []});
   }
   if (path.startsWith("/api/v1/knowledge-vault/doc/")) {
     const id = decodeURIComponent(path.slice("/api/v1/knowledge-vault/doc/".length));
+    if (id === "doc-fence") return json({ok: true, doc: FENCE_DOC});
     if (id === "doc-1" || id === "doc-2" || id.startsWith("doc-") || id === "g-doc" || id === "g-index") return json({ok: true, doc: DOC});
     if (id === "inbox-1") return json({ok: true, doc: INBOX_DOC});
     return json({ok: false, error: "knowledge_vault_document_not_found"}, 404);
   }
   if (path === "/api/v1/knowledge-vault/search") return json({ok: true, enabled: true, index_ready: true, results: SEARCH});
-  if (path === "/api/v1/knowledge-vault/recent") return json({ok: true, enabled: true, index_ready: true, items: RECENT});
-  if (path === "/api/v1/knowledge-vault/inbox") return json({ok: true, enabled: true, index_ready: true, count: 1, counts: [{library_id: "project:p1", library: "Demo", project_id: "p1", count: 1}], items: [RECENT[1]]});
+  if (path === "/api/v1/knowledge-vault/recent") {
+    const project = url.searchParams.get("project") || "";
+    window.__vaultRecentRequests.push(project || "all");
+    await delay("recent", project || "all");
+    return json({ok: true, enabled: true, index_ready: true, items: project ? RECENT : GLOBAL_RECENT});
+  }
+  if (path === "/api/v1/knowledge-vault/inbox") {
+    const project = url.searchParams.get("project") || "";
+    window.__vaultInboxRequests.push(project || "all");
+    await delay("inbox", project || "all");
+    return project
+      ? json({ok: true, enabled: true, index_ready: true, count: 1, counts: [{library_id: "project:p1", library: "Demo", project_id: "p1", count: 1}], items: [RECENT[1]]})
+      : json({ok: true, enabled: true, index_ready: true, count: 1, counts: [{library_id: "global", library: "全局知识", count: 1}], items: [GLOBAL_INBOX]});
+  }
   if (path === "/api/v1/knowledge-vault/skills") return json({ok: true, enabled: true, skills: [{id: "s1", slug: "demo", name: "Demo Skill", scope: "global", library: "全局知识", description: "构建技能", file_count: 3, relative_path: "skills/demo", absolute_path: "/srv/vault/skills/demo", open_path: "/srv/vault/skills/demo/SKILL.md"}]});
   if (path === "/api/v1/knowledge") return json({knowledge: OLD_KNOWLEDGE, proposals: [], review_settings: {auto_approve: false}, has_more: false});
   if (path === "/api/v1/knowledge/libraries") return json({libraries: []});
@@ -239,6 +280,23 @@ try {
   await page.waitForSelector(".kv-doc-body");
   assert.equal((await page.locator(".kv-doc-head h1").textContent()).trim(), "构建指南");
 
+  // Fenced `#` lines never become outline entries, and outline links attach by
+  // text/level even when the index omits a heading that the file renders.
+  await page.goto(`${url}/?fence=1#knowledge?doc=doc-fence&scope=global`, {waitUntil: "networkidle"});
+  await page.waitForSelector(".kv-doc-body");
+  const outlineText = await page.locator(".kv-outline").innerText();
+  assert.match(outlineText, /真标题/);
+  assert.doesNotMatch(outlineText, /注释/);
+  assert.equal(await page.locator('a[data-kv-outline="kv-real-title"]').count(), 1);
+  assert.equal(await page.locator("h3#kv-real-title").count(), 0, "the extra heading must not steal the outline id");
+  await page.locator('a[data-kv-outline="kv-real-title"]').click();
+  await page.waitForTimeout(80);
+  assert.deepEqual(await page.evaluate(() => ({
+    id: document.activeElement?.id,
+    tag: document.activeElement?.tagName,
+    text: document.activeElement?.textContent,
+  })), {id: "kv-real-title", tag: "H2", text: "真标题"});
+
   // An unknown deep link is an explicit error state, never a blank page.
   await page.goto(`${url}/?deep=2#knowledge?doc=missing&scope=global`, {waitUntil: "networkidle"});
   await page.waitForSelector(".kv-state-error");
@@ -287,6 +345,54 @@ try {
   await page.waitForTimeout(80);
   assert.ok((await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)), "1280px has no horizontal overflow");
   await page.screenshot({path: resolve(screenshots, "knowledge-vault-desktop.png"), fullPage: false});
+
+  // Rapid library/project switches: a delayed old response must never overwrite
+  // the newly selected library. The fixture logs requests and supports delays.
+  const race = await browser.newPage({viewport: {width: 1280, height: 900}, locale: "zh-CN"});
+  const raceErrors = [];
+  race.on("pageerror", error => raceErrors.push(error.message));
+  await race.goto(`${url}/?race=1`, {waitUntil: "networkidle"});
+  await race.evaluate(() => {
+    window.__vaultDelays = {tree: {global: 500}, recent: {p1: 500}, inbox: {p1: 500}};
+  });
+  await race.evaluate(() => document.querySelector("[data-view=knowledge]")?.click());
+  await race.waitForSelector("#kv-library");
+  await race.selectOption("#kv-library", "project:p1");
+  await race.waitForFunction(() => window.__vaultTreeRequests.includes("project:p1"));
+  await race.waitForTimeout(650);
+  assert.deepEqual((await race.evaluate(() => window.__vaultTreeRequests)).slice(0, 2), ["global", "project:p1"]);
+  assert.equal(await race.locator("#kv-library").inputValue(), "project:p1");
+  assert.match(await race.locator(".kv-tree-panel").innerText(), /项目文档 2/);
+  assert.doesNotMatch(await race.locator(".kv-tree-panel").innerText(), /全局指南/, "the delayed global tree overwrote the project tree");
+
+  await race.locator('[data-kv-tab-button="recent"]').click();
+  await race.waitForFunction(() => window.__vaultRecentRequests.includes("p1"));
+  await race.selectOption("#kv-library", "global");
+  await race.waitForFunction(() => window.__vaultRecentRequests.includes("all"));
+  await race.waitForTimeout(650);
+  const recentRequests = await race.evaluate(() => window.__vaultRecentRequests);
+  assert.ok(recentRequests.includes("p1"), "the project recent request must be sent before the switch");
+  assert.equal(recentRequests.at(-1), "all");
+  assert.ok(recentRequests.lastIndexOf("all") > recentRequests.indexOf("p1"));
+  assert.equal(await race.locator("#kv-library").inputValue(), "global");
+  assert.match(await race.locator(".kv-feed").innerText(), /全局指南/);
+  assert.doesNotMatch(await race.locator(".kv-feed").innerText(), /构建指南/, "the delayed project feed overwrote the global feed");
+
+  await race.selectOption("#kv-library", "project:p1");
+  await race.locator('[data-kv-tab-button="inbox"]').click();
+  await race.waitForFunction(() => window.__vaultInboxRequests.includes("p1"));
+  await race.selectOption("#kv-library", "global");
+  await race.waitForFunction(() => window.__vaultInboxRequests.includes("all"));
+  await race.waitForTimeout(650);
+  const inboxRequests = await race.evaluate(() => window.__vaultInboxRequests);
+  assert.ok(inboxRequests.includes("p1"), "the project inbox request must be sent before the switch");
+  assert.equal(inboxRequests.at(-1), "all");
+  assert.ok(inboxRequests.lastIndexOf("all") > inboxRequests.indexOf("p1"));
+  assert.equal(await race.locator("#kv-library").inputValue(), "global");
+  assert.match(await race.locator(".kv-inbox").innerText(), /全局想法/);
+  assert.doesNotMatch(await race.locator(".kv-inbox").innerText(), /新想法/, "the delayed project inbox overwrote the global inbox");
+  assert.deepEqual(raceErrors, []);
+  await race.close();
 
   // Switch off: the legacy knowledge page is exactly what renders; the new
   // endpoints 404 and no vault chunk is mounted.

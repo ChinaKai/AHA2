@@ -52,6 +52,8 @@ interface VaultState {
   treeState: LoadState;
   treeError: string;
   treeKey: string;
+  recentKey: string;
+  inboxKey: string;
   collapsed: Set<string>;
   selectedID: string;
   doc: KnowledgeVaultDoc | null;
@@ -94,6 +96,7 @@ function initialState(): VaultState {
     tab: "knowledge", libraryID: "global", projectFilter: "",
     typeFilter: "", statusFilter: "", tagFilter: "",
     tree: [], treeState: "idle", treeError: "", treeKey: "", collapsed: new Set(),
+    recentKey: "", inboxKey: "",
     selectedID: "", doc: null, docState: "idle", docError: "",
     recent: [], recentState: "idle", recentError: "",
     inbox: null, inboxState: "idle", inboxError: "",
@@ -111,6 +114,9 @@ let binding = false;
 let keyboardBound = false;
 let hashBound = false;
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
+let treeRequest = 0;
+let recentRequest = 0;
+let inboxRequest = 0;
 const pendingLoads = new Set<string>();
 
 export function __setKnowledgeVaultStateForTest(patch: Partial<VaultState>): void {
@@ -572,18 +578,21 @@ function loadOnce(key: string, action: () => Promise<void>): void {
 }
 
 async function loadTree(force = false): Promise<void> {
-  const key = `${state.libraryID}`;
+  const key = state.libraryID;
   if (!force && state.treeKey === key && state.treeState !== "error") return;
+  const ticket = ++treeRequest;
   state.treeKey = key;
   state.treeState = "loading";
   state.treeError = "";
   rerender();
   try {
-    const payload: KnowledgeVaultTree = await api.knowledgeVaultTree(state.libraryID);
+    const payload: KnowledgeVaultTree = await api.knowledgeVaultTree(key);
+    if (ticket !== treeRequest || state.treeKey !== key) return;
     state.tree = payload.nodes || [];
     state.indexReady = payload.index_ready;
     state.treeState = "ready";
   } catch (error) {
+    if (ticket !== treeRequest || state.treeKey !== key) return;
     state.treeState = "error";
     state.treeError = error instanceof Error ? error.message : String(error);
   }
@@ -614,15 +623,20 @@ async function loadDoc(id: string, force = false): Promise<void> {
 }
 
 async function loadRecent(force = false): Promise<void> {
-  if (!force && state.recentState === "ready") return;
+  const key = state.projectFilter;
+  if (!force && state.recentKey === key && (state.recentState === "ready" || state.recentState === "loading")) return;
+  const ticket = ++recentRequest;
+  state.recentKey = key;
   state.recentState = "loading";
   rerender();
   try {
-    const payload: KnowledgeVaultRecent = await api.knowledgeVaultRecent(state.projectFilter);
+    const payload: KnowledgeVaultRecent = await api.knowledgeVaultRecent(key);
+    if (ticket !== recentRequest || state.recentKey !== key) return;
     state.recent = payload.items || [];
     state.indexReady = payload.index_ready;
     state.recentState = "ready";
   } catch (error) {
+    if (ticket !== recentRequest || state.recentKey !== key) return;
     state.recentState = "error";
     state.recentError = error instanceof Error ? error.message : String(error);
   }
@@ -630,15 +644,20 @@ async function loadRecent(force = false): Promise<void> {
 }
 
 async function loadInbox(force = false): Promise<void> {
-  if (!force && state.inboxState === "ready") return;
+  const key = state.projectFilter;
+  if (!force && state.inboxKey === key && (state.inboxState === "ready" || state.inboxState === "loading")) return;
+  const ticket = ++inboxRequest;
+  state.inboxKey = key;
   state.inboxState = "loading";
   rerender();
   try {
-    const payload = await api.knowledgeVaultInbox(state.projectFilter);
+    const payload = await api.knowledgeVaultInbox(key);
+    if (ticket !== inboxRequest || state.inboxKey !== key) return;
     state.inbox = payload;
     state.indexReady = payload.index_ready;
     state.inboxState = "ready";
   } catch (error) {
+    if (ticket !== inboxRequest || state.inboxKey !== key) return;
     state.inboxState = "error";
     state.inboxError = error instanceof Error ? error.message : String(error);
   }
@@ -661,9 +680,12 @@ async function loadSkills(force = false): Promise<void> {
 }
 
 function loadTab(tab: VaultTab): void {
-  if (tab === "knowledge") loadOnce("tree", () => loadTree());
-  else if (tab === "recent") loadOnce("recent", () => loadRecent());
-  else if (tab === "inbox") loadOnce("inbox", () => loadInbox());
+  // Tree/recent/inbox dedupe on the parameter key inside each loader. A shared
+  // loader-name key would drop the request for a newly selected library while
+  // the previous one is still in flight.
+  if (tab === "knowledge") void loadTree();
+  else if (tab === "recent") void loadRecent();
+  else if (tab === "inbox") void loadInbox();
   else if (tab === "skills") loadOnce("skills", () => loadSkills());
 }
 
@@ -759,14 +781,36 @@ function setTab(tab: VaultTab): void {
   loadTab(tab);
 }
 
+function normalizedHeadingText(value: string | null | undefined): string {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function renderedHeadingText(markdown: string): string {
+  const holder = document.createElement("div");
+  holder.innerHTML = renderMarkdown(`# ${markdown}`);
+  return normalizedHeadingText(holder.querySelector("h1")?.textContent || markdown);
+}
+
 function decorateDocBody(): void {
   const body = document.querySelector<HTMLElement>("[data-kv-doc-body]");
   if (!body || !state.doc) return;
-  const headings = body.querySelectorAll<HTMLElement>("h1,h2,h3,h4,h5,h6");
+  const headings = [...body.querySelectorAll<HTMLElement>("h1,h2,h3,h4,h5,h6")];
   const outline = state.doc.outline;
-  headings.forEach((heading, index) => {
-    if (outline[index]?.slug) heading.id = outline[index].slug;
-  });
+  // Match by rendered text and level rather than array position. This keeps
+  // outline links correct when the index is older than the file or when a
+  // heading was filtered out (for example, a `#` line inside a code fence).
+  let cursor = 0;
+  for (const item of outline) {
+    const wanted = renderedHeadingText(item.text);
+    for (let index = cursor; index < headings.length; index += 1) {
+      const heading = headings[index];
+      if (Number(heading.tagName.slice(1)) !== item.level) continue;
+      if (normalizedHeadingText(heading.textContent) !== wanted) continue;
+      if (!heading.id) heading.id = item.slug;
+      cursor = index + 1;
+      break;
+    }
+  }
 }
 
 function copyPath(value: string): void {

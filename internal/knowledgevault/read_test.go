@@ -289,6 +289,41 @@ func TestReaderDocumentBuildsOutlineFromHeadings(t *testing.T) {
 	}
 }
 
+func TestReaderOutlineSkipsFencedCode(t *testing.T) {
+	config, reader, ctx := readerFixture(t)
+	outlinePath := filepath.Join(config.VaultPath, "global", "general", "fenced-outline.md")
+	raw := "---\nid: knowledge_global_fenced_outline\ntype: reference\nstatus: verified\ntitle: 围栏文档\n---\n\n" +
+		"# 文档\n\n" +
+		"```bash\n# 注释\n## 假标题\n```\n\n" +
+		"## 真标题\n\n" +
+		"~~~shell\n# 另一个注释\n~~~\n\n" +
+		"### 末尾标题\n"
+	if err := os.WriteFile(outlinePath, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	index, err := OpenIndex(ctx, config.IndexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := index.Rebuild(ctx, config.VaultPath); err != nil {
+		t.Fatal(err)
+	}
+	_ = index.Close()
+	doc, err := reader.Document(ctx, "", "global/general/fenced-outline.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Outline) != 3 {
+		t.Fatalf("outline = %+v", doc.Outline)
+	}
+	want := []string{"文档", "真标题", "末尾标题"}
+	for index, item := range doc.Outline {
+		if item.Text != want[index] {
+			t.Fatalf("outline[%d] = %+v, want %q", index, item, want[index])
+		}
+	}
+}
+
 func TestReaderIndexIsReadOnly(t *testing.T) {
 	_, reader, _ := readerFixture(t)
 	if _, err := reader.index.db.Exec(`INSERT INTO entries (id) VALUES ('should-fail')`); err == nil {

@@ -913,9 +913,23 @@ func isSystemEntry(entry IndexEntry) bool {
 func outlineItems(body string) []OutlineItem {
 	result := []OutlineItem{}
 	seen := map[string]int{}
+	fenceMarker := byte(0)
+	fenceLength := 0
 	for _, line := range strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n") {
 		trimmed := strings.TrimLeft(line, " ")
 		if len(line)-len(trimmed) > 3 {
+			continue
+		}
+		if fenceMarker != 0 {
+			if closesCodeFence(trimmed, fenceMarker, fenceLength) {
+				fenceMarker = 0
+				fenceLength = 0
+			}
+			continue
+		}
+		if marker, length, ok := opensCodeFence(trimmed); ok {
+			fenceMarker = marker
+			fenceLength = length
 			continue
 		}
 		level := 0
@@ -939,6 +953,33 @@ func outlineItems(body string) []OutlineItem {
 		result = append(result, OutlineItem{Level: level, Text: text, Slug: slug})
 	}
 	return result
+}
+
+func opensCodeFence(line string) (byte, int, bool) {
+	if len(line) < 3 || (line[0] != '`' && line[0] != '~') {
+		return 0, 0, false
+	}
+	marker := line[0]
+	length := 0
+	for length < len(line) && line[length] == marker {
+		length++
+	}
+	if length < 3 {
+		return 0, 0, false
+	}
+	info := strings.TrimSpace(line[length:])
+	if marker == '`' && strings.ContainsRune(info, '`') {
+		return 0, 0, false
+	}
+	return marker, length, true
+}
+
+func closesCodeFence(line string, marker byte, minimum int) bool {
+	length := 0
+	for length < len(line) && line[length] == marker {
+		length++
+	}
+	return length >= minimum && strings.TrimSpace(line[length:]) == ""
 }
 
 func outlineSlug(text string) string {
