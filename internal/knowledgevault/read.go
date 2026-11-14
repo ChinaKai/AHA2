@@ -826,59 +826,122 @@ func (r *Reader) libraryScope(library, projectID string) (string, string, error)
 	}
 }
 
+// isIndexDocumentPath reports whether a vault-relative path is a directory's
+// index.md. Exported folder nodes always live at <dir>/index.md, but the index
+// database cannot be trusted for the is_index flag: a document that gained
+// children after export keeps is_index=false in its frontmatter, so the path is
+// the only stable directory marker.
+func isIndexDocumentPath(relative string) bool {
+	return strings.EqualFold(path.Base(filepath.ToSlash(relative)), "index.md")
+}
+
+// buildReaderTree renders the vault's on-disk directory hierarchy instead of
+// the database parent links. Every index.md entry owns its directory and shows
+// up as a folder node even when the database stored is_index=false. Documents,
+// and folders under directories without an index.md, attach to their nearest
+// indexed ancestor; directories without an index.md never become synthetic
+// clickable nodes.
 func buildReaderTree(entries []IndexEntry) []TreeNode {
-	nodes := make(map[string]*TreeNode, len(entries))
-	parents := make(map[string]string, len(entries))
-	order := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		if _, exists := nodes[entry.ID]; exists {
-			continue
-		}
-		node := &TreeNode{
+	type treeEntry struct {
+		node     TreeNode
+		dir      string // non-empty only for directory nodes
+		children []*treeEntry
+	}
+	newEntry := func(entry IndexEntry, folder bool) *treeEntry {
+		item := &treeEntry{node: TreeNode{
 			ID: entry.ID, Title: entry.Title, Path: entry.Path, Type: entry.Type,
 			Status: entry.Status, Scope: entry.Scope, ProjectID: entry.ProjectID,
 			Updated: entry.Updated, IsIndex: entry.IsIndex, System: isSystemEntry(entry),
+		}}
+		if folder {
+			item.node.IsIndex = true
+			item.node.System = true
+			item.dir = path.Dir(filepath.ToSlash(entry.Path))
+			if item.dir == "." {
+				item.dir = ""
+			}
 		}
-		nodes[entry.ID] = node
-		parents[entry.ID] = entry.ParentID
-		order = append(order, entry.ID)
+		return item
 	}
-	children := map[string][]*TreeNode{}
-	roots := []*TreeNode{}
-	for _, id := range order {
-		node := nodes[id]
-		parentID := parents[id]
-		if parentID != "" && nodes[parentID] != nil && parentID != id {
-			children[parentID] = append(children[parentID], node)
-		} else {
-			roots = append(roots, node)
+
+	folders := map[string]*treeEntry{}
+	folderIDs := map[string]bool{}
+	folderOrder := make([]*treeEntry, 0, len(entries))
+	for _, entry := range entries {
+		if !isIndexDocumentPath(entry.Path) || folderIDs[entry.ID] {
+			continue
 		}
+		item := newEntry(entry, true)
+		if _, exists := folders[item.dir]; exists {
+			continue
+		}
+		folders[item.dir] = item
+		folderIDs[entry.ID] = true
+		folderOrder = append(folderOrder, item)
 	}
-	var attach func(node *TreeNode) TreeNode
-	sortNodes := func(list []*TreeNode) {
+
+	rootChildren := make([]*treeEntry, 0, len(entries))
+	nearestFolder := func(directory string) *treeEntry {
+		for directory != "" && directory != "." && directory != "/" {
+			if folder, ok := folders[directory]; ok {
+				return folder
+			}
+			parent := path.Dir(directory)
+			if parent == directory {
+				break
+			}
+			directory = parent
+		}
+		return nil
+	}
+	attach := func(item *treeEntry, directory string) {
+		if parent := nearestFolder(directory); parent != nil && parent != item {
+			parent.children = append(parent.children, item)
+			return
+		}
+		rootChildren = append(rootChildren, item)
+	}
+	for _, item := range folderOrder {
+		attach(item, path.Dir(item.dir))
+	}
+	placed := make(map[string]bool, len(folderIDs)+len(entries))
+	for id := range folderIDs {
+		placed[id] = true
+	}
+	for _, entry := range entries {
+		if placed[entry.ID] {
+			continue
+		}
+		placed[entry.ID] = true
+		attach(newEntry(entry, false), path.Dir(filepath.ToSlash(entry.Path)))
+	}
+
+	sortEntries := func(list []*treeEntry) {
 		sort.SliceStable(list, func(left, right int) bool {
-			if list[left].IsIndex != list[right].IsIndex {
-				return list[left].IsIndex
+			a, b := list[left].node, list[right].node
+			if a.IsIndex != b.IsIndex {
+				return a.IsIndex
 			}
-			if list[left].Title != list[right].Title {
-				return list[left].Title < list[right].Title
+			if a.Title != b.Title {
+				return a.Title < b.Title
 			}
-			return list[left].ID < list[right].ID
+			return a.ID < b.ID
 		})
 	}
-	attach = func(node *TreeNode) TreeNode {
-		copy := *node
-		childNodes := children[node.ID]
-		sortNodes(childNodes)
-		for _, child := range childNodes {
-			copy.Children = append(copy.Children, attach(child))
+	var render func(item *treeEntry) TreeNode
+	render = func(item *treeEntry) TreeNode {
+		sortEntries(item.children)
+		node := item.node
+		node.Children = nil
+		for _, child := range item.children {
+			node.Children = append(node.Children, render(child))
 		}
-		return copy
+		return node
 	}
-	sortNodes(roots)
-	result := make([]TreeNode, 0, len(roots))
-	for _, root := range roots {
-		result = append(result, attach(root))
+	sortEntries(rootChildren)
+	result := make([]TreeNode, 0, len(rootChildren))
+	for _, item := range rootChildren {
+		result = append(result, render(item))
 	}
 	return result
 }

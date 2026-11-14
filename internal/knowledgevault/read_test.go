@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -79,6 +80,78 @@ func TestReaderTreeGroupsFoldersAndHidesInboxAndReservedAreas(t *testing.T) {
 	}
 }
 
+func directChildByPath(node TreeNode, target string) *TreeNode {
+	for index := range node.Children {
+		if node.Children[index].Path == target {
+			return &node.Children[index]
+		}
+	}
+	return nil
+}
+
+func findTreeNodeByPath(nodes []TreeNode, target string) *TreeNode {
+	for index := range nodes {
+		if nodes[index].Path == target {
+			return &nodes[index]
+		}
+		if found := findTreeNodeByPath(nodes[index].Children, target); found != nil {
+			return found
+		}
+	}
+	return nil
+}
+
+// TestReaderTreeFollowsVaultDirectories guards the real-vault layout: exported
+// directory nodes keep is_index=false after a rebuild, so the tree must nest by
+// path instead of trusting the database parent/index flags.
+func TestReaderTreeFollowsVaultDirectories(t *testing.T) {
+	_, reader, ctx := readerFixture(t)
+	global, err := reader.Tree(ctx, "global", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := findTreeNodeByPath(global.Nodes, "global/index.md")
+	if root == nil {
+		t.Fatalf("global root index missing from tree: %+v", global.Nodes)
+	}
+	if !root.IsIndex || !root.System {
+		t.Fatalf("directory node was not promoted to a folder: %+v", root)
+	}
+	for _, relative := range []string{"global/general/index.md", "global/agent-lessons/index.md"} {
+		node := directChildByPath(*root, relative)
+		if node == nil {
+			t.Fatalf("%s is not a child of the global root", relative)
+		}
+		if !node.IsIndex || !node.System {
+			t.Fatalf("is_index=0 directory node was not promoted: %+v", node)
+		}
+	}
+	lessons := findTreeNodeByPath(global.Nodes, "global/agent-lessons/index.md")
+	if lessons == nil {
+		t.Fatal("agent-lessons folder missing")
+	}
+	for _, relative := range []string{
+		"global/agent-lessons/behavior-lessons/index.md",
+		"global/agent-lessons/technical-diagnostics/index.md",
+	} {
+		if findTreeNodeByPath(lessons.Children, relative) == nil {
+			t.Fatalf("%s is not nested under agent-lessons", relative)
+		}
+	}
+	verify := findTreeNodeByPath(global.Nodes, "global/agent-lessons/behavior-lessons/verify-first.md")
+	if verify == nil {
+		t.Fatal("behavior lesson document missing")
+	}
+	if directChildByPath(*root, "global/agent-lessons/behavior-lessons/verify-first.md") != nil {
+		t.Fatal("nested behavior lesson was flattened onto the global root")
+	}
+	counted := 0
+	walkTree(global.Nodes, func(TreeNode) { counted++ })
+	if counted != global.Count {
+		t.Fatalf("tree exposes %d nodes but reports count %d", counted, global.Count)
+	}
+}
+
 func containsPath(paths []string, want string) bool {
 	for _, path := range paths {
 		if path == want {
@@ -86,6 +159,80 @@ func containsPath(paths []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func childIDs(node TreeNode) []string {
+	ids := make([]string, 0, len(node.Children))
+	for _, child := range node.Children {
+		ids = append(ids, child.ID)
+	}
+	return ids
+}
+
+func TestBuildReaderTreeUsesPathsAndPromotesIndexDocuments(t *testing.T) {
+	// Every index.md carries is_index=false and every document keeps a flat
+	// database parent: only the vault path may decide the hierarchy.
+	entries := []IndexEntry{
+		{ID: "root", Path: "global/index.md", Type: TypeNavigation, Title: "Global", Scope: "global"},
+		{ID: "general", Path: "global/general/index.md", Type: TypeNavigation, Title: "General", Scope: "global", ParentID: "root"},
+		{ID: "general-doc", Path: "global/general/deploy.md", Type: TypePractice, Title: "Deploy", Scope: "global", ParentID: "root"},
+		{ID: "lessons", Path: "global/agent-lessons/index.md", Type: TypeNavigation, Title: "Agent Lessons", Scope: "global", ParentID: "root"},
+		{ID: "behavior", Path: "global/agent-lessons/behavior-lessons/index.md", Type: TypeNavigation, Title: "Behavior Lessons", Scope: "global", ParentID: "lessons"},
+		{ID: "behavior-doc", Path: "global/agent-lessons/behavior-lessons/verify-first.md", Type: TypePractice, Title: "Verify First", Scope: "global", ParentID: "root"},
+		{ID: "technical", Path: "global/agent-lessons/technical-diagnostics/index.md", Type: TypeNavigation, Title: "Technical Diagnostics", Scope: "global", ParentID: "lessons"},
+		{ID: "technical-doc", Path: "global/agent-lessons/technical-diagnostics/serial-login.md", Type: TypeDiagnostic, Title: "Serial Login", Scope: "global", ParentID: "root"},
+		{ID: "loose-doc", Path: "global/loose/topic.md", Type: TypeReference, Title: "Loose Topic", Scope: "global", ParentID: "root"},
+		{ID: "root-doc", Path: "global/overview.md", Type: TypeReference, Title: "Overview", Scope: "global", ParentID: "root"},
+	}
+	nodes := buildReaderTree(entries)
+	if len(nodes) != 1 || nodes[0].ID != "root" {
+		t.Fatalf("tree roots = %+v", nodes)
+	}
+	root := nodes[0]
+	if !root.IsIndex || !root.System || root.Title != "Global" || root.Path != "global/index.md" {
+		t.Fatalf("root node = %+v", root)
+	}
+	if got, want := childIDs(root), []string{"lessons", "general", "loose-doc", "root-doc"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("root children = %v, want %v", got, want)
+	}
+	if node := findTreeNodeByPath(root.Children, "global/loose"); node != nil {
+		t.Fatalf("directory without index.md became a node: %+v", node)
+	}
+	lessons := findTreeNodeByPath(nodes, "global/agent-lessons/index.md")
+	if lessons == nil {
+		t.Fatal("agent-lessons folder missing")
+	}
+	if got, want := childIDs(*lessons), []string{"behavior", "technical"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("agent-lessons children = %v, want %v", got, want)
+	}
+	for _, id := range []string{"general", "lessons", "behavior", "technical"} {
+		node := findTreeNodeByPath(nodes, nodePath(t, entries, id))
+		if node == nil || !node.IsIndex || !node.System {
+			t.Fatalf("folder %s was not promoted to an index node: %+v", id, node)
+		}
+	}
+	if got, want := childIDs(*findTreeNodeByPath(nodes, "global/general/index.md")), []string{"general-doc"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("general children = %v, want %v", got, want)
+	}
+	if got, want := childIDs(*findTreeNodeByPath(nodes, "global/agent-lessons/behavior-lessons/index.md")), []string{"behavior-doc"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("behavior children = %v, want %v", got, want)
+	}
+	counted := 0
+	walkTree(nodes, func(TreeNode) { counted++ })
+	if counted != len(entries) {
+		t.Fatalf("tree exposes %d nodes, want %d", counted, len(entries))
+	}
+}
+
+func nodePath(t *testing.T, entries []IndexEntry, id string) string {
+	t.Helper()
+	for _, entry := range entries {
+		if entry.ID == id {
+			return entry.Path
+		}
+	}
+	t.Fatalf("entry %s missing", id)
+	return ""
 }
 
 func TestReaderLibrariesExcludeInboxFromCounts(t *testing.T) {
