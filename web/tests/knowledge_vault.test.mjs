@@ -297,6 +297,10 @@ test("the sidebar defaults to 270px, collapses to a rail and exposes a 6px separ
   assert.match(css, /\.kv-tree-resizer:hover::after, \.kv-tree-resizer:focus-visible::after \{ background: var\(--color-text-muted\); opacity: 1; \}/);
   assert.match(css, /@media \(max-width: 760px\)[\s\S]*\.kv-sidebar-toggle, \.kv-tree-resizer \{ display: none; \}/);
   assert.match(css, /@media \(max-width: 760px\)[\s\S]*\.kv-tree-panel\.collapsed \.kv-tree-body \{ display: block; \}/);
+  // Collapsed pages omit the resizer element, so the grid drops its track as
+  // well; otherwise the reader would be laid into the 0px resizer column.
+  assert.match(css, /@media \(min-width: 1181px\) \{\s*\.knowledge-vault\[data-kv-sidebar-collapsed="true"\] \.kv-workspace \{ grid-template-columns: var\(--kv-tree-width\) minmax\(0, 1fr\) var\(--kv-context-width\); \}/);
+  assert.match(css, /@media \(min-width: 761px\) and \(max-width: 1180px\) \{\s*\.knowledge-vault\[data-kv-sidebar-collapsed="true"\] \.kv-workspace \{ grid-template-columns: var\(--kv-tree-width\) minmax\(0, 1fr\); \}/);
 });
 
 test("the mixed tree roots at the real global and projects directories", () => {

@@ -116,6 +116,12 @@ function installGitStyles(): void {
 const TREE_STYLES = `
 .knowledge-vault { --kv-resizer-width: 6px; --kv-tree-toggle-size: 28px; --kv-tree-icon-size: 22px; }
 .kv-workspace { grid-template-columns: var(--kv-tree-width) var(--kv-resizer-width) minmax(0, 1fr) var(--kv-context-width); }
+/* The resizer is omitted from the DOM while collapsed, so the grid must drop
+   its column too or every following item shifts one track left and the reader
+   lands in the zero-width resizer track. */
+@media (min-width: 1181px) {
+  .knowledge-vault[data-kv-sidebar-collapsed="true"] .kv-workspace { grid-template-columns: var(--kv-tree-width) minmax(0, 1fr) var(--kv-context-width); }
+}
 .kv-panel-head { align-items: center; }
 .kv-panel-head span { margin-right: auto; }
 .kv-sidebar-toggle {
@@ -166,6 +172,11 @@ body.kv-resizing { cursor: col-resize; user-select: none; }
 .kv-tree-doc-link { padding-left: 0; }
 @media (max-width: 1180px) {
   .kv-workspace { grid-template-columns: var(--kv-tree-width) var(--kv-resizer-width) minmax(0, 1fr); }
+}
+/* Mid widths hide the context panel, so there are only two tracks; mobile
+   keeps its single stacked column and never uses this override. */
+@media (min-width: 761px) and (max-width: 1180px) {
+  .knowledge-vault[data-kv-sidebar-collapsed="true"] .kv-workspace { grid-template-columns: var(--kv-tree-width) minmax(0, 1fr); }
 }
 @media (max-width: 760px) {
   .knowledge-vault { --kv-tree-toggle-size: 32px; }

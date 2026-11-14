@@ -538,6 +538,22 @@ try {
   // Sidebar geometry: 270px by default, drag bounds, keyboard, double-click
   // reset, refresh persistence, and a collapsible rail that also persists.
   const treeWidth = () => page.locator(".kv-tree-panel").evaluate(element => element.getBoundingClientRect().width);
+  // The resizer is only rendered while expanded, so the collapsed grid must not
+  // keep a track for it: otherwise the reader is laid into the (0px) resizer
+  // column and collapses into a one-character vertical strip.
+  const workspaceLayout = () => page.evaluate(() => {
+    const box = selector => document.querySelector(selector).getBoundingClientRect();
+    const workspace = document.querySelector(".kv-workspace");
+    const context = document.querySelector(".kv-context-panel");
+    return {
+      tracks: getComputedStyle(workspace).gridTemplateColumns.split(/\s+/).filter(Boolean).length,
+      docWidth: box(".kv-doc-panel").width,
+      docRight: box(".kv-doc-panel").right,
+      contextVisible: Boolean(context.offsetParent),
+      contextLeft: box(".kv-context-panel").left,
+      overflow: document.documentElement.scrollWidth - window.innerWidth,
+    };
+  });
   const dragResizerTo = async x => {
     const box = await page.locator(".kv-tree-resizer").boundingBox();
     const y = box.y + Math.min(80, box.height / 2);
@@ -579,6 +595,17 @@ try {
   await page.locator(".kv-tree-resizer").dblclick();
   assert.ok(Math.abs((await treeWidth()) - 270) < 1);
 
+  // Hand-edited or legacy storage values are clamped instead of squeezing the
+  // reader: too small becomes the minimum, non-numeric falls back to default.
+  await page.evaluate(() => localStorage.setItem("aha2.knowledgeVault.sidebarWidth", "12"));
+  await page.reload({waitUntil: "networkidle"});
+  await page.waitForSelector(".kv-tree-resizer");
+  assert.ok(Math.abs((await treeWidth()) - 220) < 1, "stored widths below the minimum clamp to 220px");
+  await page.evaluate(() => localStorage.setItem("aha2.knowledgeVault.sidebarWidth", "not-a-number"));
+  await page.reload({waitUntil: "networkidle"});
+  await page.waitForSelector(".kv-tree-resizer");
+  assert.ok(Math.abs((await treeWidth()) - 270) < 1, "a non-numeric stored width falls back to 270px");
+
   // At 900px the 40vw cap is the binding upper bound.
   await page.setViewportSize({width: 900, height: 900});
   await page.waitForTimeout(80);
@@ -591,6 +618,15 @@ try {
   assert.ok(Math.abs((await treeWidth()) - 270) < 1);
 
   // Collapse to a directory rail, then restore; both states survive reloads.
+  // The reader width is asserted at both the wide and the mid breakpoint: the
+  // collapsed grid must hand the removed resizer track back to the document.
+  await page.setViewportSize({width: 1440, height: 900});
+  await page.waitForTimeout(80);
+  const expandedLayout = await workspaceLayout();
+  assert.equal(expandedLayout.tracks, 4, "the wide expanded grid has tree, resizer, reader and context tracks");
+  assert.ok(expandedLayout.docWidth > 400, `expanded reader keeps a usable width: ${expandedLayout.docWidth}`);
+  assert.ok(expandedLayout.overflow <= 1, "1440px expanded has no horizontal overflow");
+  assert.equal(expandedLayout.contextVisible, true);
   assert.equal(await page.locator("[data-kv-sidebar-toggle]").getAttribute("aria-expanded"), "true");
   assert.equal(await page.locator("[data-kv-sidebar-toggle]").getAttribute("aria-label"), "收起目录栏");
   assert.equal(await page.locator("[data-kv-sidebar-toggle] svg path").getAttribute("d"), "m15 18-6-6 6-6", "the expanded sidebar uses a chevron-left");
@@ -604,11 +640,34 @@ try {
   assert.ok(Math.abs((await treeWidth()) - 48) < 1, "collapsed rail is 48px");
   assert.equal(await page.locator(".kv-tree-resizer").count(), 0, "collapsed panel has no drag handle");
   assert.equal(await page.locator(".kv-tree-body").isVisible(), false);
+  let collapsedLayout = await workspaceLayout();
+  assert.equal(collapsedLayout.tracks, 3, "collapsed drops the resizer track instead of shifting the reader into it");
+  assert.ok(collapsedLayout.docWidth >= expandedLayout.docWidth + 100, `collapsed reader reclaims the rail: ${collapsedLayout.docWidth} vs ${expandedLayout.docWidth}`);
+  assert.ok(collapsedLayout.docWidth > 500, `collapsed reader is not a narrow strip: ${collapsedLayout.docWidth}`);
+  assert.ok(collapsedLayout.docWidth > (await treeWidth()), "collapsed reader is wider than the rail");
+  assert.ok(collapsedLayout.docRight <= collapsedLayout.contextLeft + 1, "collapsed reader ends before the context column");
+  assert.ok(collapsedLayout.overflow <= 1, "1440px collapsed has no horizontal overflow");
+  await page.screenshot({path: resolve(screenshots, "knowledge-vault-collapsed-1440.png"), fullPage: false});
   assert.equal(await page.evaluate(() => localStorage.getItem("aha2.knowledgeVault.sidebarCollapsed")), "1");
+
+  // Mid width hides the context panel, leaving two tracks while collapsed.
+  await page.setViewportSize({width: 1000, height: 900});
+  await page.waitForTimeout(80);
+  collapsedLayout = await workspaceLayout();
+  assert.equal(collapsedLayout.tracks, 2, "1000px collapsed has tree and reader tracks only");
+  assert.ok(collapsedLayout.docWidth > 350, `1000px collapsed reader is usable: ${collapsedLayout.docWidth}`);
+  assert.ok(collapsedLayout.overflow <= 1, "1000px collapsed has no horizontal overflow");
+
+  await page.setViewportSize({width: 1440, height: 900});
+  await page.waitForTimeout(80);
   await page.reload({waitUntil: "networkidle"});
   await page.waitForSelector(".knowledge-vault");
   assert.equal(await page.locator(".knowledge-vault").getAttribute("data-kv-sidebar-collapsed"), "true", "collapsed state survives refresh");
   assert.ok(Math.abs((await treeWidth()) - 48) < 1);
+  collapsedLayout = await workspaceLayout();
+  assert.equal(collapsedLayout.tracks, 3, "refreshed collapsed grid still has three tracks");
+  assert.ok(collapsedLayout.docWidth > 500, `refreshed collapsed reader keeps its width: ${collapsedLayout.docWidth}`);
+  assert.ok(collapsedLayout.overflow <= 1, "refreshed collapsed page has no horizontal overflow");
   await page.locator("[data-kv-sidebar-toggle]").focus();
   await page.keyboard.press("Space");
   assert.equal(await page.locator(".knowledge-vault").getAttribute("data-kv-sidebar-collapsed"), "false");
@@ -616,7 +675,12 @@ try {
   assert.equal(await page.locator("[data-kv-sidebar-toggle]").getAttribute("aria-label"), "收起目录栏");
   assert.equal(await page.locator(".kv-tree-body").isVisible(), true);
   assert.ok(Math.abs((await treeWidth()) - 270) < 1, "expanding restores the saved width");
+  const restoredLayout = await workspaceLayout();
+  assert.equal(restoredLayout.tracks, 4, "expanding restores the resizer track");
+  assert.ok(Math.abs(restoredLayout.docWidth - expandedLayout.docWidth) < 2, `expanding restores the reader width: ${restoredLayout.docWidth} vs ${expandedLayout.docWidth}`);
   assert.equal(await page.evaluate(() => localStorage.getItem("aha2.knowledgeVault.sidebarCollapsed")), "0");
+  await page.setViewportSize({width: 1280, height: 900});
+  await page.waitForTimeout(80);
 
   // Return to a clean knowledge view for the project-tree checks below.
   await page.goto(url, {waitUntil: "networkidle"});
