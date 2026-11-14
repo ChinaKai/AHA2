@@ -2,6 +2,7 @@ package knowledgevault
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -160,6 +161,225 @@ func deriveSkills(vaultPath string, projects, archives map[string]string) (map[s
 	return result, warnings, nil
 }
 
+// missingIndexSkipNames are directory names that never receive an automatic
+// index.md. They are reserved vault areas or directories the knowledge tree
+// deliberately keeps out of the generated navigation.
+var missingIndexSkipNames = map[string]bool{
+	"inbox": true, "skills": true, "index": true,
+	".trash": true, ".aha": true, ".git": true, ".obsidian": true,
+	"archive": true, "orphans": true,
+}
+
+// createMissingIndexPages creates a canonical index.md for every directory
+// under global/ and projects/<slug>/ that holds knowledge documents but has no
+// index page yet. Existing pages are never touched, reserved directories are
+// skipped, and any failure is reported as a warning so a broken page cannot
+// abort the rebuild. The generated navigation block stays empty here;
+// maintainVaultIndexes fills it from the records scanned by this rebuild.
+func createMissingIndexPages(vaultPath string, manifest Manifest) []string {
+	warnings := []string{}
+	directoriesWithDocuments := map[string]bool{}
+	walkErr := filepath.WalkDir(vaultPath, func(filePath string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			// The main scan reports walk errors; page creation is best-effort.
+			return nil
+		}
+		relative, err := filepath.Rel(vaultPath, filePath)
+		if err != nil || relative == "." {
+			return nil
+		}
+		relative = filepath.ToSlash(relative)
+		if entry.IsDir() {
+			name := entry.Name()
+			if strings.HasPrefix(name, ".") || missingIndexSkipNames[strings.ToLower(name)] {
+				return fs.SkipDir
+			}
+			if !autoIndexDirectoryAllowed(relative) {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(strings.ToLower(entry.Name()), ".md") || relative == readmeFileName {
+			return nil
+		}
+		directory := path.Dir(relative)
+		// Documents directly under global/ count too; projects/ itself is only
+		// the container for project directories, not a knowledge directory.
+		if directory != "projects" && autoIndexDirectoryAllowed(directory) {
+			directoriesWithDocuments[directory] = true
+		}
+		return nil
+	})
+	if walkErr != nil {
+		return append(warnings, fmt.Sprintf("scan for missing index pages: %v", walkErr))
+	}
+
+	// A directory that only contains subdirectories needs an index page too so
+	// the parent can link to it; walk the ancestors of each document directory.
+	candidates := map[string]bool{}
+	for directory := range directoriesWithDocuments {
+		for directory != "" && directory != "." && directory != "projects" {
+			if !autoIndexDirectoryAllowed(directory) {
+				break
+			}
+			candidates[directory] = true
+			parent := path.Dir(directory)
+			if parent == directory {
+				break
+			}
+			directory = parent
+		}
+	}
+	paths := make([]string, 0, len(candidates))
+	for directory := range candidates {
+		paths = append(paths, directory)
+	}
+	sort.Strings(paths)
+
+	reverseProjects := reverseSlugMap(manifest.Projects)
+	for _, directory := range paths {
+		relative := path.Join(directory, "index.md")
+		target := filepath.Join(vaultPath, filepath.FromSlash(relative))
+		if _, err := os.Lstat(target); err == nil {
+			continue
+		} else if !os.IsNotExist(err) {
+			warnings = append(warnings, fmt.Sprintf("%s: inspect missing index page: %v", relative, err))
+			continue
+		}
+		frontmatter, warning, ok := missingIndexFrontmatter(vaultPath, manifest, reverseProjects, directory)
+		if warning != "" {
+			warnings = append(warnings, warning)
+		}
+		if !ok {
+			continue
+		}
+		if err := createVaultIndexPage(vaultPath, relative, frontmatter); err != nil {
+			warnings = append(warnings, fmt.Sprintf("%s: create missing index page: %v", relative, err))
+		}
+	}
+	return warnings
+}
+
+// autoIndexDirectoryAllowed reports whether a vault-relative directory belongs
+// to the global or project knowledge trees. Excluded names are pruned while
+// walking, so this only has to recognise the two roots.
+func autoIndexDirectoryAllowed(relative string) bool {
+	if relative == "global" || strings.HasPrefix(relative, "global/") {
+		return true
+	}
+	if relative == "projects" {
+		return true
+	}
+	if !strings.HasPrefix(relative, "projects/") {
+		return false
+	}
+	slug := strings.SplitN(strings.TrimPrefix(relative, "projects/"), "/", 2)[0]
+	return slug != ""
+}
+
+// missingIndexFrontmatter builds the canonical page metadata for a missing
+// directory index. A project page without a trustworthy project id is skipped:
+// guessing would bind documents to the wrong project.
+func missingIndexFrontmatter(vaultPath string, manifest Manifest, reverseProjects map[string]string, directory string) (Frontmatter, string, bool) {
+	frontmatter := Frontmatter{Type: TypeNavigation, Status: "verified", IsIndex: boolPointer(true)}
+	if directory == "global" || strings.HasPrefix(directory, "global/") {
+		frontmatter.Scope = "global"
+		if directory == "global" {
+			frontmatter.Title = "全局知识"
+		} else {
+			frontmatter.Title = humanizeSegment(path.Base(directory))
+		}
+		return frontmatter, "", true
+	}
+	projectSlug := strings.SplitN(strings.TrimPrefix(directory, "projects/"), "/", 2)[0]
+	projectID := reverseProjects[projectSlug]
+	if projectID == "" {
+		projectID = inferProjectIDFromDocuments(vaultPath, path.Join("projects", projectSlug))
+	}
+	if projectID == "" {
+		return Frontmatter{}, fmt.Sprintf("projects/%s: index.md is missing and the project id cannot be determined; page not created", projectSlug), false
+	}
+	frontmatter.Scope = "project"
+	frontmatter.ProjectID = projectID
+	if directory == path.Join("projects", projectSlug) {
+		frontmatter.Title = strings.TrimSpace(manifest.ProjectNames[projectID])
+		if frontmatter.Title == "" {
+			frontmatter.Title = humanizeSegment(projectSlug)
+		}
+	} else {
+		frontmatter.Title = humanizeSegment(path.Base(directory))
+	}
+	return frontmatter, "", true
+}
+
+// inferProjectIDFromDocuments recovers a project binding from the documents
+// that already live in the project directory. Exported vaults always carry
+// project_id in frontmatter, so an old vault whose index.md was lost can still
+// be repaired without guessing.
+func inferProjectIDFromDocuments(vaultPath, projectRoot string) string {
+	counts := map[string]int{}
+	_ = filepath.WalkDir(filepath.Join(vaultPath, filepath.FromSlash(projectRoot)), func(filePath string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(strings.ToLower(entry.Name()), ".md") {
+			return nil
+		}
+		raw, err := os.ReadFile(filePath)
+		if err != nil {
+			return nil
+		}
+		projectID := strings.TrimSpace(ParseDocument(string(raw)).Frontmatter.ProjectID)
+		if projectID != "" {
+			counts[projectID]++
+		}
+		return nil
+	})
+	best := ""
+	for projectID, count := range counts {
+		if best == "" || count > counts[best] || (count == counts[best] && projectID < best) {
+			best = projectID
+		}
+	}
+	return best
+}
+
+// createVaultIndexPage writes one canonical index page. O_EXCL plus the safe
+// target check make this a create-only operation: a hand-written page, a
+// concurrent writer, or a symlink can never be overwritten.
+func createVaultIndexPage(vaultPath, relative string, frontmatter Frontmatter) error {
+	target := filepath.Join(vaultPath, filepath.FromSlash(relative))
+	if _, err := os.Lstat(target); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := ensureSafeWriteTarget(vaultPath, target); err != nil {
+		return err
+	}
+	content, err := renderDocument(frontmatter, indexBlockStart+"\n"+indexBlockEnd)
+	if err != nil {
+		return err
+	}
+	file, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		if os.IsExist(err) {
+			return nil
+		}
+		return err
+	}
+	if _, err := file.WriteString(content); err != nil {
+		_ = file.Close()
+		_ = os.Remove(target)
+		return err
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(target)
+		return err
+	}
+	return nil
+}
+
 // maintainVaultIndexes rewrites only the machine-generated block inside
 // existing index.md files. It never creates a page and never touches content
 // outside the markers, including frontmatter and hand-written intros.
@@ -253,7 +473,10 @@ func generatedIndexBlockForEntries(byPath map[string]*scannedRecord, subdirector
 	for _, relative := range subdirectories {
 		entry := byPath[path.Join(relative, "index.md")]
 		target := strings.TrimSuffix(relative, ".md") + "/index"
-		lines = append(lines, indexListLine(target, entry.entry.Title, IndexSummary(entry.entry.Body, 120)))
+		// Directory pages keep the generated block in their indexed body, but
+		// the summary must ignore it or the parent block would change on every
+		// rebuild.
+		lines = append(lines, indexListLine(target, entry.entry.Title, IndexSummary(StripGeneratedIndex(entry.entry.Body), 120)))
 	}
 	for _, relative := range documents {
 		entry := byPath[relative]

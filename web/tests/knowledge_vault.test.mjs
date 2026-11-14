@@ -676,3 +676,98 @@ test("the Git remote never appears in full and no token input is offered", () =>
   assert.doesNotMatch(html, /type="password"/);
   assert.match(html, /仅支持 SSH remote/);
 });
+
+test("generated directory list wikilinks become hash links and keep their labels", () => {
+  const markdown = `# 通用知识
+
+手写导语。
+
+<!-- aha-vault:index:start -->
+## 文档
+
+- [[global/guides/topic|主题文档]] — 摘要。
+- [[global/guides/advanced/index|进阶目录]]
+- [[global/guides/code|带 [括号] 的标题]]
+<!-- aha-vault:index:end -->
+`;
+  const rewritten = vault.rewriteVaultWikilinks(markdown);
+  assert.match(rewritten, /- \[主题文档\]\(#vault-wikilink=global%2Fguides%2Ftopic\) — 摘要。/);
+  assert.match(rewritten, /- \[进阶目录\]\(#vault-wikilink=global%2Fguides%2Fadvanced%2Findex\)/);
+  assert.match(rewritten, /- \[带 \\\[括号\\\] 的标题\]\(#vault-wikilink=global%2Fguides%2Fcode\)/);
+  assert.doesNotMatch(rewritten, /\[\[/);
+
+  // Inline wikilinks outside a list item and code fences stay untouched: the
+  // shared renderer keeps them literal by design.
+  const untouched = vault.rewriteVaultWikilinks("参见 [[部署]]。\n\n```\n- [[not|a link]]\n```\n");
+  assert.match(untouched, /参见 \[\[部署\]\]。/);
+  assert.match(untouched, /- \[\[not\|a link\]\]/);
+});
+
+test("wikilink targets resolve by path, directory, suffix and unique title", () => {
+  const tree = vault.buildVaultDirectoryTree([
+    treeFixture("g-root", "全局知识首页", "global/index.md", [
+      treeFixture("g-general", "通用知识", "global/general/index.md", [
+        {id: "g-topic", title: "主题文档", path: "global/general/topic.md", type: "practice", status: "verified", scope: "global", is_index: false, system: false, children: []},
+        {id: "g-other", title: "通用知识", path: "global/general/other.md", type: "practice", status: "verified", scope: "global", is_index: false, system: false, children: []},
+      ]),
+      treeFixture("g-reference", "参考资料", "global/reference/index.md", []),
+    ]),
+  ], "all");
+  const byPath = new Map();
+  const visit = nodes => nodes.forEach(node => {
+    assert.ok(node.path);
+    if (!node.id.startsWith("vault-dir:")) byPath.set(node.path.replace(/\.md$/i, ""), node);
+    visit(node.children || []);
+  });
+  visit(tree);
+  assert.equal(vault.resolveVaultWikilink("global/general/topic", byPath)?.id, "g-topic");
+  assert.equal(vault.resolveVaultWikilink("global/general/topic.md", byPath)?.id, "g-topic");
+  assert.equal(vault.resolveVaultWikilink("global/general/index", byPath)?.id, "g-general", "directory targets map to the folder page");
+  assert.equal(vault.resolveVaultWikilink("topic", byPath)?.id, "g-topic", "unique suffix is accepted");
+  assert.equal(vault.resolveVaultWikilink("主题文档", byPath)?.id, "g-topic", "unique title is accepted");
+  assert.equal(vault.resolveVaultWikilink("global/general", byPath)?.id, "g-general");
+  assert.equal(vault.resolveVaultWikilink("missing", byPath), null);
+});
+
+test("a directory page renders the generated list as links, not raw brackets", () => {
+  const tree = vault.buildVaultDirectoryTree([
+    treeFixture("g-root", "全局知识首页", "global/index.md", [
+      treeFixture("g-general", "通用知识", "global/general/index.md", [
+        {id: "g-topic", title: "主题文档", path: "global/general/topic.md", type: "practice", status: "verified", scope: "global", is_index: false, system: false, children: []},
+      ]),
+      treeFixture("g-reference", "参考资料", "global/reference/index.md", []),
+    ]),
+  ], "all");
+  const indexDoc = {
+    ...doc,
+    id: "g-general",
+    title: "通用知识",
+    path: "global/general/index.md",
+    relative_path: "global/general/index.md",
+    scope: "global",
+    project_id: "",
+    library_id: "global",
+    library_name: "全局知识",
+    is_index: true,
+    body: `# 通用知识
+
+手写导语。
+
+<!-- aha-vault:index:start -->
+## 文档
+
+- [[global/general/topic|主题文档]] — 自动生成的摘要。
+- [[global/reference/index|参考资料]] — 子目录。
+<!-- aha-vault:index:end -->
+`,
+    outline: [{level: 1, text: "通用知识", slug: "kv-doc"}, {level: 2, text: "文档", slug: "docs"}],
+  };
+  reset({tree, selectedID: "g-general", docState: "ready", doc: indexDoc});
+  const html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /手写导语。/);
+  assert.match(html, /<h2>文档<\/h2>/);
+  assert.doesNotMatch(html, /\[\[/);
+  assert.match(html, /href="#vault-wikilink=global%2Fgeneral%2Ftopic"[^>]*>主题文档<\/a>/);
+  assert.match(html, /href="#vault-wikilink=global%2Freference%2Findex"[^>]*>参考资料<\/a>/);
+  assert.match(html, /自动生成的摘要。/);
+});

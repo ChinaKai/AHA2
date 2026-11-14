@@ -304,6 +304,9 @@ func (i *Index) Rebuild(ctx context.Context, vaultPath string) (RebuildReport, e
 			report.Warnings = append(report.Warnings, "manifest could not be read: "+firstLine(manifestErr.Error()))
 		}
 	}
+	// Backfill directory pages before deriving the manifest: a project root
+	// index.md is exactly what binds a project slug to its project id.
+	report.Warnings = append(report.Warnings, createMissingIndexPages(absoluteVault, manifest)...)
 	if manifestErr == nil || os.IsNotExist(manifestErr) {
 		derived, deriveWarnings, deriveErr := deriveManifest(absoluteVault, manifest, time.Now().UTC())
 		report.Warnings = append(report.Warnings, deriveWarnings...)
@@ -383,6 +386,11 @@ func (i *Index) Rebuild(ctx context.Context, vaultPath string) (RebuildReport, e
 
 	resolveParents(records, byPath, reverseProjects, reverseArchives, &report.Warnings)
 
+	// Fill the generated navigation on disk before inserting rows, then re-read
+	// those pages so the projection carries the same block the Web renders.
+	report.Warnings = append(report.Warnings, maintainVaultIndexes(absoluteVault, records)...)
+	report.Warnings = append(report.Warnings, refreshIndexRecordBodies(absoluteVault, records)...)
+
 	tx, err := i.db.BeginTx(ctx, nil)
 	if err != nil {
 		return report, err
@@ -448,7 +456,6 @@ func (i *Index) Rebuild(ctx context.Context, vaultPath string) (RebuildReport, e
 	}
 	report.Entries = len(records)
 	report.Warnings = append(report.Warnings, vaultWarnings...)
-	report.Warnings = append(report.Warnings, maintainVaultIndexes(absoluteVault, records)...)
 	report.Warnings = capWarnings(report.Warnings, 200)
 	for _, record := range records {
 		switch record.entry.Scope {
@@ -485,6 +492,11 @@ func buildScannedRecord(relative, raw string, document Document, manifest Manife
 	if document.Warning != "" {
 		record.warnings = append(record.warnings, document.Warning)
 		body = document.Raw
+	} else if isIndexDocumentPath(relative) {
+		// Directory pages keep their generated navigation block: the Web reader
+		// must render the same document list Obsidian shows. Ordinary documents
+		// still lose it so repeated export/rebuild cycles stay byte-stable.
+		body = strings.TrimRight(strings.ReplaceAll(document.Body, "\r\n", "\n"), "\n \t")
 	}
 	slug := strings.TrimSpace(frontmatter.Slug)
 	if slug == "" {
@@ -553,8 +565,36 @@ func buildScannedRecord(relative, raw string, document Document, manifest Manife
 		Prefix:      prefixFromPath(relative),
 	}
 	record.entry.Frontmatter = encodeExtra(frontmatter.Extra)
-	record.links = extractLinks(body)
+	// Generated navigation must not turn every directory page into a backlink
+	// source; only hand-written links count.
+	record.links = extractLinks(StripGeneratedIndex(body))
 	return record
+}
+
+// refreshIndexRecordBodies re-reads maintained index pages so the projection
+// stores the generated block that is now on disk. Without this the first
+// rebuild after creating a page would serve an empty directory list until the
+// next rebuild.
+func refreshIndexRecordBodies(vaultPath string, records []*scannedRecord) []string {
+	warnings := []string{}
+	for _, record := range records {
+		if !isIndexDocumentPath(record.entry.Path) {
+			continue
+		}
+		target := filepath.Join(vaultPath, filepath.FromSlash(record.entry.Path))
+		raw, err := os.ReadFile(target)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("%s: refresh generated index body: %v", record.entry.Path, err))
+			continue
+		}
+		document := ParseDocument(string(raw))
+		if document.Warning != "" {
+			continue
+		}
+		record.entry.Body = strings.TrimRight(strings.ReplaceAll(document.Body, "\r\n", "\n"), "\n \t")
+		record.entry.ContentHash = fmt.Sprintf("%x", sha256.Sum256(raw))
+	}
+	return warnings
 }
 
 func scopeForPath(relative string, manifest Manifest, reverseProjects, reverseArchives map[string]string) (string, string, bool) {
@@ -799,7 +839,9 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 	}
 	if query != "" {
 		lower := strings.ToLower(query)
-		sqlQuery += ` AND (instr(lower(title),?)>0 OR instr(lower(body),?)>0 OR instr(lower(path),?)>0 OR instr(lower(tags),?)>0)`
+		// Directory pages store their generated navigation block, so their body
+		// text is machine-written; match them by title/path only.
+		sqlQuery += ` AND (instr(lower(title),?)>0 OR (instr(lower(body),?)>0 AND lower(path) NOT LIKE '%index.md') OR instr(lower(path),?)>0 OR instr(lower(tags),?)>0)`
 		args = append(args, lower, lower, lower, lower)
 		sqlQuery += ` ORDER BY CASE WHEN instr(lower(title),?)>0 THEN 0 ELSE 1 END, updated DESC, id LIMIT ?`
 		args = append(args, lower, limit)

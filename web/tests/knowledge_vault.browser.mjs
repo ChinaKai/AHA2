@@ -62,6 +62,25 @@ const G_OTHER_DOC = {
   scope: "global", project_id: "", library_id: "global", library_name: "全局知识",
   obsidian_file: "global/reference/index", backlinks: [], tags: [],
 };
+// A directory page exactly as the rebuild writes it: hand-written intro plus the
+// generated navigation block with vault-relative wikilinks.
+const GENERATED_INDEX_DOC = {
+  ...DOC, id: "g-gen-folder", title: "自动目录", path: "global/zz-generated/index.md",
+  relative_path: "global/zz-generated/index.md", absolute_path: "/srv/vault/项目 知识/global/zz-generated/index.md",
+  scope: "global", project_id: "", library_id: "global", library_name: "全局知识",
+  type: "navigation", is_index: true, system: true,
+  body: "# 自动目录\n\n手写导语。\n\n<!-- aha-vault:index:start -->\n## 文档\n\n- [[global/zz-generated/doc|生成文档]] — 自动补建的目录页。\n- [[global/guides/index|通用知识]] — 子目录。\n<!-- aha-vault:index:end -->\n",
+  outline: [{level: 1, text: "自动目录", slug: "kv-doc"}, {level: 2, text: "文档", slug: "docs"}],
+  backlinks: [], tags: [],
+};
+const GENERATED_DOC = {
+  ...DOC, id: "g-gen-doc", title: "生成文档", path: "global/zz-generated/doc.md",
+  relative_path: "global/zz-generated/doc.md", absolute_path: "/srv/vault/项目 知识/global/zz-generated/doc.md",
+  scope: "global", project_id: "", library_id: "global", library_name: "全局知识",
+  body: "# 生成文档\n\n这是自动目录里的目标文档。\n",
+  outline: [{level: 1, text: "生成文档", slug: "生成文档"}],
+  backlinks: [], tags: [],
+};
 const LONG_DOC = {
   ...DOC, id: "long-doc",
   title: "一个很长的知识库文档标题用来验证文档头按钮不会挤压标题并且标题能够独占整行自然换行",
@@ -84,6 +103,9 @@ const allTree = [{
   }, {
     id: "g-other", title: "参考资料", path: "global/reference/index.md", type: "navigation", status: "verified", scope: "global", is_index: true, system: true,
     children: [{id: "g-other-doc", title: "参考手册", path: "global/reference/manual.md", type: "reference", status: "verified", scope: "global", is_index: false, system: false, children: []}],
+  }, {
+    id: "g-gen-folder", title: "自动目录", path: "global/zz-generated/index.md", type: "navigation", status: "verified", scope: "global", is_index: true, system: true,
+    children: [{id: "g-gen-doc", title: "生成文档", path: "global/zz-generated/doc.md", type: "practice", status: "verified", scope: "global", is_index: false, system: false, children: []}],
   }],
 }, {
   id: "p-index", title: "Demo 索引", path: "projects/p1/index.md", type: "navigation", status: "verified", scope: "project", project_id: "p1", is_index: true, system: true, children: [{
@@ -133,6 +155,8 @@ const INBOX_DOC = ${JSON.stringify(INBOX_DOC)};
 const FENCE_DOC = ${JSON.stringify(FENCE_DOC)};
 const DEEP_DOC = ${JSON.stringify(DEEP_DOC)};
 const G_OTHER_DOC = ${JSON.stringify(G_OTHER_DOC)};
+const GENERATED_INDEX_DOC = ${JSON.stringify(GENERATED_INDEX_DOC)};
+const GENERATED_DOC = ${JSON.stringify(GENERATED_DOC)};
 const LONG_DOC = ${JSON.stringify(LONG_DOC)};
 const RECENT = ${JSON.stringify(RECENT)};
 const GLOBAL_RECENT = ${JSON.stringify(GLOBAL_RECENT)};
@@ -178,7 +202,9 @@ window.fetch = async (input, init = {}) => {
     const id = decodeURIComponent(path.slice("/api/v1/knowledge-vault/doc/".length));
     if (id === "doc-fence") return json({ok: true, doc: FENCE_DOC});
     if (id === "g-deep") return json({ok: true, doc: DEEP_DOC});
-    if (id === "g-other") return json({ok: true, doc: G_OTHER_DOC});
+if (id === "g-other") return json({ok: true, doc: G_OTHER_DOC});
+    if (id === "g-gen-folder") return json({ok: true, doc: GENERATED_INDEX_DOC});
+    if (id === "g-gen-doc") return json({ok: true, doc: GENERATED_DOC});
     if (id === "long-doc") return json({ok: true, doc: LONG_DOC});
     if (id === "doc-1" || id === "doc-2" || id.startsWith("doc-") || id === "g-doc" || id === "g-index" || id === "g-folder" || id === "g-sub" || id === "g-other" || id === "p-index" || id === "p-guides") return json({ok: true, doc: DOC});
     if (id === "inbox-1") return json({ok: true, doc: INBOX_DOC});
@@ -613,6 +639,30 @@ try {
   assert.equal(await page.locator('a[data-kv-doc="g-doc"]').count(), 1, "the global scope stays browsable in the same tree");
   const treeRequests = await page.evaluate(() => window.__vaultTreeRequests);
   assert.deepEqual([...new Set(treeRequests)], ["all"], "one all-library tree request powers both scopes");
+
+  // A generated directory page lists its documents as real links: the body
+  // must not show raw [[...]] syntax, and both a document and a subdirectory
+  // entry must open the target page.
+  await page.locator('button[data-kv-folder-title="g-gen-folder"]').click();
+  await page.waitForFunction(() => document.querySelector(".kv-doc-head h1")?.textContent?.trim() === "自动目录");
+  const directoryBody = page.locator("[data-kv-doc-body]");
+  const directoryText = await directoryBody.innerText();
+  assert.match(directoryText, /手写导语。/);
+  assert.match(directoryText, /文档[\s\S]*生成文档[\s\S]*自动补建的目录页。[\s\S]*通用知识/);
+  assert.doesNotMatch(directoryText, /\[\[|\]\]/, "the generated list never renders raw wikilink syntax");
+  const generatedLink = directoryBody.locator('a[data-kv-doc="g-gen-doc"]');
+  assert.equal(await generatedLink.count(), 1);
+  assert.equal((await generatedLink.innerText()).trim(), "生成文档");
+  assert.doesNotMatch(await generatedLink.getAttribute("href") || "", /vault-wikilink/, "placeholder links are resolved");
+  assert.equal(await generatedLink.getAttribute("target"), null, "internal document links stay in the reader");
+  await generatedLink.click();
+  await page.waitForFunction(() => document.querySelector(".kv-doc-head h1")?.textContent?.trim() === "生成文档");
+  assert.match(await page.locator("[data-kv-doc-body]").innerText(), /自动目录里的目标文档/);
+
+  await page.locator('button[data-kv-folder-title="g-gen-folder"]').click();
+  await page.waitForFunction(() => document.querySelector(".kv-doc-head h1")?.textContent?.trim() === "自动目录");
+  await page.locator('[data-kv-doc-body] a[data-kv-doc="g-folder"]').click();
+  await page.waitForFunction(() => document.querySelector(".kv-doc-head h1")?.textContent?.trim() === "构建指南");
 
   // Document page: three icon-only open actions on the breadcrumb row. The
   // remote VSCode entry is gone and the title has its own line.

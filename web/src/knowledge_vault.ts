@@ -608,6 +608,75 @@ function collectVaultDocuments(nodes: KnowledgeVaultTreeNode[], documents: Map<s
   }
 }
 
+// The generated directory list uses vault-relative wikilinks such as
+// [[global/general/topic|主题]]. Resolve them against the loaded tree so the
+// knowledge reader can open the target instead of showing raw brackets.
+function vaultWikilinkIndex(): Map<string, KnowledgeVaultTreeNode> {
+  const byPath = new Map<string, KnowledgeVaultTreeNode>();
+  const visit = (nodes: KnowledgeVaultTreeNode[]): void => {
+    for (const node of nodes) {
+      const relative = normalizeTreePath(node.path).replace(/\.md$/i, "");
+      // Virtual folder rows (no index.md) are navigation-only, not documents.
+      if (relative && !node.id.startsWith("vault-dir:")) byPath.set(relative, node);
+      visit(node.children || []);
+    }
+  };
+  visit(state.tree);
+  return byPath;
+}
+
+function uniqueVaultNode(nodes: KnowledgeVaultTreeNode[]): KnowledgeVaultTreeNode | null {
+  const seen = new Map<string, KnowledgeVaultTreeNode>();
+  for (const node of nodes) seen.set(node.id, node);
+  return seen.size === 1 ? [...seen.values()][0] : null;
+}
+
+// The generated directory list stores Obsidian wikilinks ([[path|label]]). The
+// shared markdown renderer keeps those literal on purpose, so the reader turns
+// list-item wikilinks into ordinary hash links before rendering; the anchors
+// are swapped for real document links once the vault tree is available.
+const vaultWikilinkHrefPrefix = "#vault-wikilink=";
+
+export function rewriteVaultWikilinks(markdown: string): string {
+  let fence = "";
+  return markdown.split("\n").map(line => {
+    const fenceMarker = line.match(/^ {0,3}(`{3,}|~{3,})/);
+    if (fenceMarker) {
+      if (!fence) fence = fenceMarker[1][0];
+      else if (fenceMarker[1][0] === fence) fence = "";
+      return line;
+    }
+    if (fence) return line;
+    const match = line.match(/^([ \t]*[-*+][ \t]+)\[\[(.+?)\]\](.*)$/);
+    if (!match) return line;
+    const [, bullet, inner, rest] = match;
+    const separator = inner.indexOf("|");
+    const target = (separator >= 0 ? inner.slice(0, separator) : inner).trim();
+    const label = (separator >= 0 ? inner.slice(separator + 1) : inner).trim() || target;
+    if (!target) return line;
+    const escapedLabel = label.replace(/[\\\[\]]/g, "\\$&");
+    return `${bullet}[${escapedLabel}](${vaultWikilinkHrefPrefix}${encodeURIComponent(target)})${rest}`;
+  }).join("\n");
+}
+
+export function resolveVaultWikilink(target: string, byPath: Map<string, KnowledgeVaultTreeNode>): KnowledgeVaultTreeNode | null {
+  const normalized = normalizeTreePath(target).trim().replace(/\.md$/i, "").replace(/\/+$/, "");
+  if (!normalized) return null;
+  const direct = byPath.get(normalized);
+  if (direct) return direct;
+  // Generated lists name a directory's page as `<dir>/index`.
+  const directory = byPath.get(normalized.replace(/\/index$/i, ""));
+  if (directory) return directory;
+  // A link may also name the directory rather than its index page.
+  const nested = byPath.get(`${normalized}/index`);
+  if (nested) return nested;
+  // Obsidian also accepts a shortest-unique path ([[topic]]) or a title.
+  const suffix = `/${normalized}`;
+  const bySuffix = uniqueVaultNode([...byPath].filter(([relative]) => relative.endsWith(suffix)).map(([, node]) => node));
+  if (bySuffix) return bySuffix;
+  return uniqueVaultNode([...byPath.values()].filter(node => node.title === target.trim()));
+}
+
 // A single library tree is rooted at its library directory (global/, or
 // projects/<slug>/), which must not appear as a row. The mixed "all libraries"
 // view keeps those scope directories visible instead.
@@ -916,7 +985,7 @@ function docBodyHTML(): string {
     </div>
     ${doc.warning ? `<div class="kv-warning" role="status">${escapeVaultHTML(doc.warning)}</div>` : ""}
     <div class="kv-doc-meta-badges">${metaBadges(doc)}${doc.tags?.map(tag => `<button type="button" class="kv-tag" data-kv-tag="${escapeVaultHTML(tag)}">#${escapeVaultHTML(tag)}</button>`).join("") || ""}</div>
-    <div class="markdown-body kv-doc-body" data-kv-doc-body>${renderMarkdown(doc.body)}</div>
+    <div class="markdown-body kv-doc-body" data-kv-doc-body>${renderMarkdown(rewriteVaultWikilinks(doc.body))}</div>
     <footer class="kv-feedback">
       <span>${t("kv.feedbackPrompt")}</span>
       <button type="button" class="kv-feedback-button${state.feedback === "helped" ? " active" : ""}" data-kv-feedback="helped">${icon("shield")}<span>${t("kv.helpful")}</span></button>
@@ -1461,6 +1530,9 @@ async function loadTree(force = false, preserveExpansion = false): Promise<void>
     state.treeError = error instanceof Error ? error.message : String(error);
   }
   rerender();
+  // A document opened before the tree arrived may still have unresolved
+  // wikilinks; resolve them against the tree that just loaded.
+  if (state.doc && state.docState === "ready") decorateDocBody();
 }
 
 async function loadDoc(id: string, force = false): Promise<void> {
@@ -1700,6 +1772,38 @@ function decorateDocBody(): void {
       break;
     }
   }
+  decorateWikilinks(body);
+}
+
+// Wikilinks are placeholder hash links; once the tree is available they
+// become real document links (or plain labels when the target does not exist),
+// so nothing dead is clickable.
+function decorateWikilinks(body: HTMLElement): void {
+  const links = [...body.querySelectorAll<HTMLAnchorElement>(`a[href^="${vaultWikilinkHrefPrefix}"]`)];
+  if (!links.length) return;
+  const byPath = vaultWikilinkIndex();
+  for (const link of links) {
+    // Placeholder links point inside the reader even before they resolve, so
+    // they must never inherit the renderer's new-tab attributes.
+    link.removeAttribute("target");
+    link.removeAttribute("rel");
+    const raw = link.getAttribute("href") || "";
+    let target = "";
+    try {
+      target = decodeURIComponent(raw.slice(vaultWikilinkHrefPrefix.length));
+    } catch {
+      // A malformed escape cannot name a document; fall through as unresolved.
+    }
+    const node = resolveVaultWikilink(target, byPath);
+    if (!node) {
+      // The tree may still be loading; a later decoration can resolve it.
+      if (state.treeState !== "ready") continue;
+      link.replaceWith(...link.childNodes);
+      continue;
+    }
+    link.dataset.kvDoc = node.id;
+    link.href = docHash({id: node.id, scope: node.scope, project_id: node.project_id});
+  }
 }
 
 let copyNoticeVersion = 0;
@@ -1793,6 +1897,17 @@ function handleDocLink(event: Event): boolean {
   event.preventDefault();
   const library = target.closest<HTMLElement>("[data-kv-inbox-library]")?.dataset.kvInboxLibrary || "";
   enterDoc(target.dataset.kvDoc || "", library);
+  return true;
+}
+
+// A wikilink whose target is not in the tree is unwrapped once the tree is
+// ready; until then this guard keeps its placeholder hash from rewriting the
+// route and dropping the reader on an empty page.
+function handleMissingWikilink(event: Event): boolean {
+  const anchor = (event.target as HTMLElement | null)?.closest<HTMLAnchorElement>(`a[href^="${vaultWikilinkHrefPrefix}"]`);
+  if (!anchor) return false;
+  if (event instanceof MouseEvent && (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0)) return true;
+  event.preventDefault();
   return true;
 }
 
@@ -1911,6 +2026,7 @@ export function bindKnowledgeVaultPage(context: KnowledgeVaultContext): void {
 
   root.addEventListener("click", event => {
     if (handleDocLink(event)) return;
+    if (handleMissingWikilink(event)) return;
     const target = event.target as HTMLElement | null;
     if (target?.closest("[data-kv-sidebar-toggle]")) {
       toggleSidebar();
