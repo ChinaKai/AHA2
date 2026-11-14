@@ -3914,7 +3914,7 @@ function shell(content: string): string {
 
 function banner(): string {
   const messages = `${state.error ? `<div class="banner error">${escapeHTML(state.error)}</div>` : ""}${state.notice ? `<div class="banner success">${escapeHTML(state.notice)}</div>` : ""}`;
-  return messages ? `<div class="banner-stack">${messages}</div>` : "";
+  return `<div class="banner-stack" role="status" aria-live="polite">${messages}</div>`;
 }
 
 function resourceStatusHTML(): string {

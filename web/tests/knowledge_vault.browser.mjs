@@ -407,10 +407,20 @@ try {
   assert.ok(Math.abs(doc.title.width - doc.head.width) < 1, "title spans the full content width");
   assert.ok(doc.overflow <= 1, "document header has no horizontal overflow");
 
-  // Copy path is still one click with the light notice.
-  await page.locator(".kv-doc-toolbar [data-kv-copy]").click();
+  // Copy path keeps keyboard focus on the same button across the transient
+  // banner appearing and disappearing. The feedback must not re-render the page.
+  const docCopy = page.locator(".kv-doc-toolbar [data-kv-copy]");
+  const docCopyPath = await docCopy.getAttribute("data-kv-copy");
+  await docCopy.focus();
+  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute("aria-label")), "复制文档路径");
+  await page.keyboard.press("Enter");
   await page.waitForSelector(".banner.success", {timeout: 5000});
   assert.match(await page.locator(".banner.success").textContent(), /已复制绝对路径/);
+  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute("data-kv-copy")), docCopyPath, "copy keeps focus on the document copy button");
+  assert.equal(await page.locator(".banner-stack").getAttribute("role"), "status");
+  assert.equal(await page.locator(".banner-stack").getAttribute("aria-live"), "polite");
+  await page.waitForSelector(".banner.success", {state: "detached", timeout: 7000});
+  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute("data-kv-copy")), docCopyPath, "banner expiry keeps focus on the document copy button");
 
   assert.equal(await page.locator(".kv-doc-body").innerHTML().then(html => /<script/i.test(html)), false);
   assert.match(await page.locator(".kv-context-panel").innerText(), /大纲[\s\S]*构建[\s\S]*标签[\s\S]*build[\s\S]*反链[\s\S]*发布检查/);
@@ -485,6 +495,21 @@ try {
   assert.deepEqual(skillNames, ["在本地 VSCode 打开「Demo Skill」", "在 Obsidian 打开「Demo Skill」", "复制技能路径「Demo Skill」"]);
   assert.equal(await page.locator('.kv-skill-card a.kv-open[href^="vscode://vscode-remote"]').count(), 0);
   assert.equal(await page.locator(".kv-skill-card .kv-open span").count(), 0, "skill actions are icon-only");
+
+  // The skill card copy button also keeps focus while its notice appears and
+  // expires; its live region is the same global banner.
+  const skillCopy = demoCard.locator("[data-kv-copy]");
+  const skillCopyPath = await skillCopy.getAttribute("data-kv-copy");
+  await skillCopy.focus();
+  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute("aria-label")), "复制技能路径「Demo Skill」");
+  await page.keyboard.press("Enter");
+  await page.waitForSelector(".banner.success", {timeout: 5000});
+  assert.match(await page.locator(".banner.success").textContent(), /已复制绝对路径/);
+  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute("data-kv-copy")), skillCopyPath, "copy keeps focus on the skill copy button");
+  assert.equal(await page.locator(".banner-stack").getAttribute("role"), "status");
+  assert.equal(await page.locator(".banner-stack").getAttribute("aria-live"), "polite");
+  await page.waitForSelector(".banner.success", {state: "detached", timeout: 7000});
+  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute("data-kv-copy")), skillCopyPath, "banner expiry keeps focus on the skill copy button");
   const skillLayout = await page.evaluate(() => {
     const card = [...document.querySelectorAll(".kv-skill-card")].find(node => node.textContent.includes("一个名字非常长的技能包"));
     const footer = card.querySelector(".kv-skill-actions");

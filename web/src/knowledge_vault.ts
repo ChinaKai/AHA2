@@ -1072,11 +1072,22 @@ function decorateDocBody(): void {
   }
 }
 
+let copyNoticeVersion = 0;
+
+function showCopyNotice(kind: "notice" | "error", message: string): void {
+  // Update only the banner live region. A full render would replace the
+  // focused copy button and drop keyboard focus.
+  const stack = document.querySelector<HTMLElement>("main.workspace > .banner-stack");
+  if (!stack) return;
+  const version = ++copyNoticeVersion;
+  stack.innerHTML = `<div class="banner ${kind === "error" ? "error" : "success"}">${escapeVaultHTML(message)}</div>`;
+  window.setTimeout(() => {
+    if (version === copyNoticeVersion && stack.isConnected) stack.innerHTML = "";
+  }, 5000);
+}
+
 function copyPath(value: string): void {
-  const done = () => {
-    activeContext.setMessage("notice", t("kv.copied"));
-    activeContext.render();
-  };
+  const done = () => showCopyNotice("notice", t("kv.copied"));
   if (navigator.clipboard?.writeText) {
     void navigator.clipboard.writeText(value).then(done).catch(() => fallbackCopy(value, done));
     return;
@@ -1085,6 +1096,7 @@ function copyPath(value: string): void {
 }
 
 function fallbackCopy(value: string, done: () => void): void {
+  const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   const textarea = document.createElement("textarea");
   textarea.value = value;
   textarea.setAttribute("readonly", "");
@@ -1096,9 +1108,10 @@ function fallbackCopy(value: string, done: () => void): void {
     document.execCommand("copy");
     done();
   } catch {
-    activeContext.setMessage("error", value);
+    showCopyNotice("error", value);
   } finally {
     textarea.remove();
+    previous?.focus({preventScroll: true});
   }
 }
 
