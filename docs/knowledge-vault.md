@@ -41,21 +41,21 @@ vault 和索引路径仍由 `AHA2_KNOWLEDGE_VAULT_PATH`、`AHA2_KNOWLEDGE_VAULT_
 - 对已存在的 `index.md`，只重写 `<!-- aha-vault:index:start -->` 到 `<!-- aha-vault:index:end -->` 之间的自动区块：先列直接子目录的 index 标题与摘要，再列直接子文档。标记外的手写导语和 frontmatter 原样保留，`updated` 不改。
 - 不自动创建 vault 根、`projects/`、`archive/`、`inbox/` 的 index；只维护用户已经创建并带有标记的 index。缺少标记只给出 warning，不改写文件；内容没有变化时不落盘，写入失败会保留 warning，可再次重建重试。
 
-## Agent 读取 canary
+## Agent 读写（Phase 3 默认全量）
 
-Agent 读取和技能加载切换按项目灰度。Web 的 vault 总开关仍然默认关闭（legacy），本功能完成不会自动开启：
+从本次全量切换起，Agent 知识读取、技能加载和写入默认对所有项目使用 vault；Web 的“文件知识库”总开关仍是独立前置条件，默认关闭（legacy）。三个开关的关系：
 
-- Agent runtime 读取还有独立开关 `AHA2_KNOWLEDGE_VAULT_RUNTIME_READ`（或 `--knowledge-vault-runtime-read`），默认 false。**Web 的“文件知识库”开关只控制文件知识库页面和 API，不代表 Agent runtime 已切到 vault。**
-- `AHA2_KNOWLEDGE_VAULT_READ_PROJECTS` 是逗号分隔的项目 ID allowlist。未设置时默认为宠物项目 `project_pet` 与 AHA2 项目 `project_6ff866f348d8a892d5e8`；显式设为空表示不切换任何项目。
-- 只有同时满足“Web vault 开关开启、runtime read 开关开启、项目在 allowlist、索引就绪、manifest 已绑定该项目”时，Turn 知识块和 Agent 知识列表才读取 vault；其他项目继续使用旧知识表和旧技能目录。runtime read 关闭时，即使 manager 已 enabled 且 allowlist 命中，知识和技能也全部走旧来源。
+- Agent runtime 读取有独立开关 `AHA2_KNOWLEDGE_VAULT_RUNTIME_READ`（或 `--knowledge-vault-runtime-read`），默认 true。**Web 的“文件知识库”开关只控制文件知识库页面和 API，不代表 Agent runtime 已切到 vault；两者必须同时开启。**
+- `AHA2_KNOWLEDGE_VAULT_READ_PROJECTS` 是逗号分隔的项目 ID allowlist，现在只作为回退手段。**未设置时任何非空 projectID 都允许读取 vault**；显式设为逗号列表时只允许列表内项目；显式设为空字符串时所有项目回退 legacy。
+- 每个项目实际读取 vault 仍需同时满足：Web vault 开关开启（manager enabled）、runtime read 开关开启、项目在 allowlist、索引 ready、manifest 已绑定该项目。任一不满足时，Turn 知识块、Agent 知识列表和技能加载继续使用旧知识表和旧技能目录；manifest 未绑定的项目按 legacy 处理。
 - 技能优先从 `global/skills/<slug>/` 或 `projects/<slug>/skills/<slug>/` 加载；vault 中找不到对应包时回退到旧的 `<data-dir>/knowledge/skills` 并记录日志，旧目录不会被删除。
-- 回退：从 allowlist 移除项目或显式设为空，该项目下一 Turn 就回到旧 DB；关闭 runtime read 开关或 Web vault 总开关则所有项目回退（runtime read 是启动配置，修改后需重启）。canary 本身不写 vault、不删除旧数据；写入由下面独立的 runtime write 开关控制。
+- 回退：显式设置 `AHA2_KNOWLEDGE_VAULT_READ_PROJECTS`（移出项目或设为空），该项目下一 Turn 回到旧 DB；设置 `--knowledge-vault-runtime-read=false`（或 `AHA2_KNOWLEDGE_VAULT_RUNTIME_READ=false`）或关闭 Web vault 总开关则所有项目回退（runtime read 是启动配置，修改后需重启）。旧知识表与旧 skills 始终保留，不因切换删除。
 
-## Agent 写入（Phase 1）
+## Agent 写入
 
-写入有独立开关 `AHA2_KNOWLEDGE_VAULT_RUNTIME_WRITE`（或 `--knowledge-vault-runtime-write`），默认 false，与 runtime read 相互独立：
+写入有独立开关 `AHA2_KNOWLEDGE_VAULT_RUNTIME_WRITE`（或 `--knowledge-vault-runtime-write`），默认 true：
 
-- 写入来源跟随读取来源。项目只有同时满足 runtime read、allowlist、manifest 绑定和 runtime write 才写 vault；非 allowlist 项目、runtime read 关闭或 Web vault 总开关关闭时，新写入接口继续调用旧知识 proposal 流程，旧表不会删除。
+- 写入来源跟随实际读取来源。项目只有同时满足 read gate（manager enabled、runtime read、allowlist、索引 ready、manifest 绑定）、runtime write 和引擎写 gate 才写 vault；读旧表的项目（Web vault 关闭、runtime read 关闭、不在 allowlist、索引未 ready 或 manifest 未绑定）继续调用旧知识 proposal 流程，旧表不会删除。
 - 项目正在读 vault 但 runtime write 关闭时，写入接口返回 409 `knowledge_vault_write_disabled`，**不会**回退到旧表，避免同一 Turn 出现 vault 读、legacy 写的双写分裂。打开 runtime write 后立即写 vault；从 allowlist 移除项目则下一 Turn 回滚到旧写入路径。
 - `POST /api/v1/agent/knowledge/entries` 支持 `mode=create|revise`。create 必须提供六种规范 `type` 之一、`title`、`summary`、`body`、以及 `search_query` 或 `duplicate_ack`；服务端按标题分配文件名，不接受客户端路径。与已有文档高度相似（Dice 相似度 ≥ 0.8）的 create 返回 409 `duplicate_knowledge` 与 `duplicate_candidates`，确认后可带 `duplicate_ack` 重试。
 - revise 必须提供 `entry_id` 和 `base_revision`（可选 `base_hash`）；revision 或 hash 与磁盘不一致返回 409 `knowledge_revision_conflict`，不会覆盖更新版本。写入成功后 revision + 1 并同步重建索引。

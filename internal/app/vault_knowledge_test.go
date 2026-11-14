@@ -27,18 +27,24 @@ func withUnsetEnv(t *testing.T, key string) {
 
 func TestKnowledgeVaultReadAllowlistParsing(t *testing.T) {
 	withUnsetEnv(t, knowledgeVaultReadProjectsEnv)
-	for _, projectID := range []string{petProjectID, aha2ProjectID} {
+	for _, projectID := range []string{petProjectID, aha2ProjectID, "project_other"} {
 		if !knowledgeVaultReadAllowed(projectID) {
-			t.Fatalf("default allowlist does not include %s", projectID)
+			t.Fatalf("unset allowlist did not admit %s", projectID)
 		}
 	}
-	if knowledgeVaultReadAllowed("project_other") || knowledgeVaultReadAllowed("") {
-		t.Fatal("default allowlist accepted a non-canary project")
+	if knowledgeVaultReadAllowed("") {
+		t.Fatal("unset allowlist admitted an empty project ID")
+	}
+	if scope := KnowledgeVaultReadScope(); scope != "all" {
+		t.Fatalf("unset read scope = %q, want all", scope)
 	}
 
 	t.Setenv(knowledgeVaultReadProjectsEnv, "project_other")
 	if knowledgeVaultReadAllowed(petProjectID) || knowledgeVaultReadAllowed(aha2ProjectID) || !knowledgeVaultReadAllowed("project_other") {
 		t.Fatal("explicit allowlist was not applied")
+	}
+	if scope := KnowledgeVaultReadScope(); scope != "project_other" {
+		t.Fatalf("explicit read scope = %q", scope)
 	}
 
 	t.Setenv(knowledgeVaultReadProjectsEnv, petProjectID+", "+aha2ProjectID)
@@ -47,10 +53,18 @@ func TestKnowledgeVaultReadAllowlistParsing(t *testing.T) {
 			t.Fatalf("comma-separated allowlist missed %s", projectID)
 		}
 	}
+	if knowledgeVaultReadAllowed("project_other") {
+		t.Fatal("comma-separated allowlist admitted a project outside the list")
+	}
 
 	t.Setenv(knowledgeVaultReadProjectsEnv, "")
-	if knowledgeVaultReadAllowed(petProjectID) || knowledgeVaultReadAllowed(aha2ProjectID) {
-		t.Fatal("empty allowlist did not roll back to legacy knowledge")
+	for _, projectID := range []string{petProjectID, aha2ProjectID, "project_other"} {
+		if knowledgeVaultReadAllowed(projectID) {
+			t.Fatalf("empty allowlist did not roll %s back to legacy knowledge", projectID)
+		}
+	}
+	if scope := KnowledgeVaultReadScope(); scope != "none" {
+		t.Fatalf("empty read scope = %q, want none", scope)
 	}
 }
 
@@ -107,18 +121,24 @@ func vaultCanaryFiles() map[string]string {
 	}
 }
 
-func TestVaultKnowledgeCanaryProjectsAndIsolation(t *testing.T) {
-	t.Setenv(knowledgeVaultReadProjectsEnv, petProjectID+","+aha2ProjectID)
+func TestVaultKnowledgeDefaultsToAllProjectsAndHonoursRollbackAllowlist(t *testing.T) {
+	withUnsetEnv(t, knowledgeVaultReadProjectsEnv)
 	manager := buildVaultReadManager(t, true, vaultCanaryFiles())
 	service := &Service{knowledgeVault: manager, knowledgeVaultRuntimeRead: true}
 	ctx := context.Background()
 
+	// With the env unset every bound project reads the vault, not just the old
+	// pet/AHA2 canary pair.
+	for _, projectID := range []string{petProjectID, aha2ProjectID, "project_other"} {
+		snapshot, ok := service.vaultKnowledgeForProject(ctx, projectID)
+		if !ok || len(snapshot.Project) != 2 || snapshot.Project[0].ProjectID != projectID {
+			t.Fatalf("project %s snapshot = %#v ok=%v", projectID, snapshot, ok)
+		}
+	}
+
 	pet, ok := service.vaultKnowledgeForProject(ctx, petProjectID)
 	if !ok {
 		t.Fatal("pet project did not read the vault")
-	}
-	if len(pet.Project) != 2 || pet.Project[0].ProjectID != petProjectID {
-		t.Fatalf("pet project entries = %#v", pet.Project)
 	}
 	if len(pet.Stale) != 1 || pet.Stale[0].ID != "knowledge_pet_stale" {
 		t.Fatalf("pet stale entries = %#v", pet.Stale)
@@ -132,35 +152,37 @@ func TestVaultKnowledgeCanaryProjectsAndIsolation(t *testing.T) {
 		t.Fatalf("global entries = %#v", pet.Global)
 	}
 
-	aha2, ok := service.vaultKnowledgeForProject(ctx, aha2ProjectID)
-	if !ok || len(aha2.Project) != 2 || aha2.Project[0].ProjectID != aha2ProjectID {
-		t.Fatalf("AHA2 project snapshot = %#v ok=%v", aha2, ok)
+	// An explicit list is the rollback lever: only listed projects read vault.
+	t.Setenv(knowledgeVaultReadProjectsEnv, petProjectID+","+aha2ProjectID)
+	if _, ok := service.vaultKnowledgeForProject(ctx, petProjectID); !ok {
+		t.Fatal("listed project stopped reading the vault")
 	}
-
 	if _, ok := service.vaultKnowledgeForProject(ctx, "project_other"); ok {
 		t.Fatal("non-allowlisted project read the vault")
 	}
 
 	t.Setenv(knowledgeVaultReadProjectsEnv, "")
-	if _, ok := service.vaultKnowledgeForProject(ctx, petProjectID); ok {
-		t.Fatal("empty allowlist did not roll back")
+	for _, projectID := range []string{petProjectID, aha2ProjectID, "project_other"} {
+		if _, ok := service.vaultKnowledgeForProject(ctx, projectID); ok {
+			t.Fatalf("empty allowlist did not roll %s back", projectID)
+		}
 	}
 }
 
-func TestVaultKnowledgeRuntimeReadGateDefaultsOff(t *testing.T) {
-	var zero Service
-	if zero.knowledgeVaultRuntimeRead {
-		t.Fatal("runtime read gate must default to false")
-	}
-
-	t.Setenv(knowledgeVaultReadProjectsEnv, petProjectID+","+aha2ProjectID)
+func TestVaultKnowledgeRuntimeReadGateOffFallsBack(t *testing.T) {
+	withUnsetEnv(t, knowledgeVaultReadProjectsEnv)
 	files := vaultCanaryFiles()
 	files["global/skills/demo/SKILL.md"] = "---\nname: Demo\ndescription: Vault demo\n---\n\n# Vault Demo\n"
 	manager := buildVaultReadManager(t, true, files)
-	service := &Service{knowledgeVault: manager}
 	ctx := context.Background()
 
+	// The CLI/env default is on, but an explicit false must keep both knowledge
+	// and skills on the legacy sources even when the allowlist is unset.
+	service := &Service{knowledgeVault: manager}
 	for _, projectID := range []string{petProjectID, aha2ProjectID} {
+		if service.vaultReadEnabled(projectID) {
+			t.Fatalf("runtime gate off still routed %s to the vault", projectID)
+		}
 		if _, ok := service.vaultKnowledgeForProject(ctx, projectID); ok {
 			t.Fatalf("runtime gate off still read vault knowledge for %s", projectID)
 		}
@@ -171,18 +193,80 @@ func TestVaultKnowledgeRuntimeReadGateDefaultsOff(t *testing.T) {
 			t.Fatalf("runtime gate off still loaded vault skills for %s: %#v", projectID, result[0].PackageFiles)
 		}
 	}
+
+	enabled := &Service{knowledgeVault: manager, knowledgeVaultRuntimeRead: true}
+	snapshot, ok := enabled.vaultKnowledgeForProject(ctx, petProjectID)
+	if !ok || len(snapshot.Project) == 0 {
+		t.Fatalf("runtime gate on did not read the vault: %#v ok=%v", snapshot, ok)
+	}
 }
 
 func TestVaultKnowledgeFallsBackWhenDisabledOrUnbound(t *testing.T) {
-	t.Setenv(knowledgeVaultReadProjectsEnv, petProjectID+","+aha2ProjectID)
+	withUnsetEnv(t, knowledgeVaultReadProjectsEnv)
 	disabled := buildVaultReadManager(t, false, vaultCanaryFiles())
+	if (&Service{knowledgeVault: disabled, knowledgeVaultRuntimeRead: true}).vaultReadEnabled(petProjectID) {
+		t.Fatal("Web vault switch off still routed reads to the vault")
+	}
 	if _, ok := (&Service{knowledgeVault: disabled, knowledgeVaultRuntimeRead: true}).vaultKnowledgeForProject(context.Background(), petProjectID); ok {
 		t.Fatal("disabled vault was treated as a read source")
 	}
 
 	manager := buildVaultReadManager(t, true, map[string]string{})
-	if _, ok := (&Service{knowledgeVault: manager, knowledgeVaultRuntimeRead: true}).vaultKnowledgeForProject(context.Background(), petProjectID); ok {
+	manager.SetRuntimeWrite(true)
+	service := &Service{knowledgeVault: manager, knowledgeVaultRuntimeRead: true, knowledgeVaultRuntimeWrite: true}
+	if service.vaultReadEnabled(petProjectID) {
+		t.Fatal("unbound vault project was routed to the vault")
+	}
+	if service.vaultKnowledgeWriteEnabled(petProjectID) {
+		t.Fatal("unbound vault project was allowed to write the vault")
+	}
+	if _, ok := service.vaultKnowledgeForProject(context.Background(), petProjectID); ok {
 		t.Fatal("unbound vault project was treated as a read source")
+	}
+	legacy := []domain.SkillFile{{Path: "SKILL.md", Content: "legacy"}}
+	skills := []domain.Skill{{ID: "skill_project", Scope: "project", ProjectID: petProjectID, PackageSlug: "demo", PackageFiles: legacy}}
+	result := service.applyVaultSkillPackages(context.Background(), petProjectID, skills)
+	if len(result[0].PackageFiles) != 1 || result[0].PackageFiles[0].Content != "legacy" {
+		t.Fatalf("unbound project did not keep the legacy skill package: %#v", result[0].PackageFiles)
+	}
+}
+
+func TestVaultKnowledgeWriteRequiresReadAndRuntimeGates(t *testing.T) {
+	withUnsetEnv(t, knowledgeVaultReadProjectsEnv)
+	manager := buildVaultReadManager(t, true, vaultCanaryFiles())
+
+	// Read gate off (even with runtime write on) must make writes unavailable;
+	// the write gate never routes a project that reads legacy back to the vault.
+	manager.SetRuntimeWrite(true)
+	readOff := &Service{knowledgeVault: manager, knowledgeVaultRuntimeWrite: true}
+	if readOff.vaultKnowledgeWriteEnabled(petProjectID) {
+		t.Fatal("write gate enabled while the read gate is off")
+	}
+
+	// Read on but runtime write off.
+	writeOff := &Service{knowledgeVault: manager, knowledgeVaultRuntimeRead: true}
+	if writeOff.vaultKnowledgeWriteEnabled(petProjectID) {
+		t.Fatal("write gate enabled while runtime write is off")
+	}
+
+	// Read and runtime write on, but the engine gate still off.
+	manager.SetRuntimeWrite(false)
+	if (&Service{knowledgeVault: manager, knowledgeVaultRuntimeRead: true, knowledgeVaultRuntimeWrite: true}).vaultKnowledgeWriteEnabled(petProjectID) {
+		t.Fatal("write gate enabled while the engine gate is off")
+	}
+
+	// All three agree.
+	manager.SetRuntimeWrite(true)
+	if !(&Service{knowledgeVault: manager, knowledgeVaultRuntimeRead: true, knowledgeVaultRuntimeWrite: true}).vaultKnowledgeWriteEnabled(petProjectID) {
+		t.Fatal("write gate stayed off with read, runtime write and engine gates on")
+	}
+
+	// The Web vault switch is part of the read gate, so a disabled manager
+	// keeps writes on the legacy path too.
+	disabled := buildVaultReadManager(t, false, vaultCanaryFiles())
+	disabled.SetRuntimeWrite(true)
+	if (&Service{knowledgeVault: disabled, knowledgeVaultRuntimeRead: true, knowledgeVaultRuntimeWrite: true}).vaultKnowledgeWriteEnabled(petProjectID) {
+		t.Fatal("disabled Web vault still routed writes to the vault")
 	}
 }
 
