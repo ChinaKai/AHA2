@@ -207,6 +207,54 @@ try {
   assert.equal(await page.locator("[data-knowledge-scope]").count(), 0, "old knowledge tabs are gone");
   assert.equal(await page.locator("text=待审提案").count(), 0);
 
+  // The topbar keeps heading + tabs on one line and centers the controls with
+  // them at 1280. Mid widths move the whole controls group below the tab row
+  // rather than letting the tabs break into a second line.
+  const topbarLayout = page => page.evaluate(() => {
+    const box = element => {
+      const rect = element.getBoundingClientRect();
+      return {top: rect.top, bottom: rect.bottom, right: rect.right, centerY: rect.top + rect.height / 2};
+    };
+    const tabElements = [...document.querySelectorAll(".kv-tabs .kv-tab")];
+    const tabs = tabElements.map(box);
+    const controls = box(document.querySelector(".kv-controls"));
+    const main = box(document.querySelector(".kv-topbar-main"));
+    return {
+      overflow: document.documentElement.scrollWidth - window.innerWidth,
+      tabCount: tabElements.length,
+      tabTop: Math.min(...tabs.map(item => item.top)),
+      tabBottom: Math.max(...tabs.map(item => item.bottom)),
+      tabTopSpread: Math.max(...tabs.map(item => item.top)) - Math.min(...tabs.map(item => item.top)),
+      controls,
+      main,
+      topbarRight: document.querySelector(".kv-topbar").getBoundingClientRect().right,
+      tabsOverflowX: getComputedStyle(document.querySelector(".kv-tabs")).overflowX,
+      skillsVisible: Boolean(document.querySelector(".kv-tab-skills")?.offsetParent),
+      settingsVisible: Boolean(document.querySelector(".kv-settings-trigger")?.offsetParent),
+      moreCount: document.querySelectorAll("[data-kv-more], .kv-more-menu").length,
+    };
+  });
+
+  let layout = await topbarLayout(page);
+  assert.ok(layout.overflow <= 1, "1280px has no horizontal overflow");
+  assert.equal(layout.tabCount, 4);
+  assert.ok(layout.tabTopSpread < 1, "1280px keeps all four tabs on one row");
+  assert.ok(layout.controls.top < layout.tabBottom, "1280px keeps the controls on the tab row");
+  assert.ok(Math.abs(layout.main.centerY - layout.controls.centerY) < 8, "1280px centers controls with the tabs");
+  assert.ok(Math.abs(layout.controls.right - layout.topbarRight) < 3, "1280px right-aligns the controls");
+
+  for (const width of [1040, 900]) {
+    await page.setViewportSize({width, height: 900});
+    await page.waitForTimeout(60);
+    layout = await topbarLayout(page);
+    assert.ok(layout.overflow <= 1, `${width}px has no horizontal overflow`);
+    assert.ok(layout.tabTopSpread < 1, `${width}px keeps all four tabs on one row`);
+    assert.ok(layout.controls.top >= layout.tabBottom - 1, `${width}px wraps the controls below the tabs as a group`);
+    assert.ok(Math.abs(layout.controls.right - layout.topbarRight) < 3, `${width}px keeps the controls right-aligned`);
+  }
+  await page.setViewportSize({width: 1280, height: 900});
+  await page.waitForTimeout(60);
+
   // Tree is a nav with real anchors, grouped by folder and not by type.
   assert.equal(await page.locator("nav.kv-tree-panel").count(), 1);
   assert.equal(await page.locator('nav.kv-tree-panel [role="tree"]').count(), 0);
@@ -310,11 +358,29 @@ try {
   assert.equal(await page.locator(".kv-tree-panel").isVisible(), true);
   await page.screenshot({path: resolve(screenshots, "knowledge-vault-mobile-list.png"), fullPage: false});
   assert.equal(await page.locator(".kv-doc-panel").isVisible(), false);
-  await page.locator("[data-kv-more]").click();
-  assert.equal(await page.locator(".kv-more-menu").isVisible(), true);
-  assert.equal(await page.locator('.kv-more-menu [data-kv-tab-button="skills"]').count(), 1);
-  assert.equal(await page.locator(".kv-more-menu [data-kv-settings]").count(), 1);
-  await page.locator("[data-kv-more]").click();
+  layout = await topbarLayout(page);
+  assert.ok(layout.overflow <= 1, "390px has no horizontal overflow");
+  assert.ok(layout.tabTopSpread < 1, "390px keeps the four tabs on one row");
+  assert.equal(layout.skillsVisible, true, "390px shows the skills tab directly");
+  assert.equal(layout.settingsVisible, true, "390px shows the settings gear directly");
+  assert.equal(layout.moreCount, 0, "390px has no more trigger or menu");
+  assert.equal(layout.tabsOverflowX, "auto", "the mobile tab strip scrolls horizontally when needed");
+
+  // The skills tab is keyboard reachable and activates with Enter.
+  await page.locator('.kv-tabs [data-kv-tab-button="skills"]').focus();
+  assert.equal(await page.evaluate(() => document.activeElement?.dataset.kvTabButton), "skills");
+  await page.keyboard.press("Enter");
+  await page.waitForSelector(".kv-skill-card");
+  assert.equal(await page.locator('.kv-tabs [data-kv-tab-button="skills"]').getAttribute("aria-current"), "page");
+  await page.locator('.kv-tabs [data-kv-tab-button="knowledge"]').click();
+  await page.waitForSelector(".kv-tree-link");
+
+  // The gear opens the settings dialog without a menu detour.
+  await page.locator(".kv-settings-trigger").click();
+  assert.equal(await page.locator("#kv-settings-dialog").evaluate(dialog => dialog.open), true);
+  await page.locator("#kv-settings-dialog [data-kv-settings-close]").first().click();
+  assert.equal(await page.locator("#kv-settings-dialog").evaluate(dialog => dialog.open), false);
+
   await page.evaluate(() => window.scrollTo(0, 360));
   await page.waitForTimeout(80);
   const before = await page.evaluate(() => window.scrollY);
@@ -341,6 +407,21 @@ try {
   await page.setViewportSize({width: 360, height: 780});
   await page.waitForTimeout(80);
   assert.ok((await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)), "360px has no horizontal overflow");
+  layout = await topbarLayout(page);
+  assert.ok(layout.tabTopSpread < 1, "360px keeps the four tabs on one row");
+  assert.equal(layout.skillsVisible, true, "360px shows the skills tab directly");
+  assert.equal(layout.settingsVisible, true, "360px shows the settings gear directly");
+  assert.equal(layout.moreCount, 0, "360px has no more trigger or menu");
+
+  await page.setViewportSize({width: 760, height: 780});
+  await page.waitForTimeout(80);
+  layout = await topbarLayout(page);
+  assert.ok(layout.overflow <= 1, "760px has no horizontal overflow");
+  assert.ok(layout.tabTopSpread < 1, "760px keeps the four tabs on one row");
+  assert.equal(layout.skillsVisible, true, "760px shows the skills tab directly");
+  assert.equal(layout.settingsVisible, true, "760px shows the settings gear directly");
+  assert.equal(layout.moreCount, 0, "760px has no more trigger or menu");
+
   await page.setViewportSize({width: 1280, height: 900});
   await page.waitForTimeout(80);
   assert.ok((await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)), "1280px has no horizontal overflow");
