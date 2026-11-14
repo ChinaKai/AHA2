@@ -7,6 +7,10 @@ export type PetApprovalStatusFilter = "all" | "pending" | "approved" | "rejected
 
 // The server bounds approval_limit at 200 (app.petWorkbenchLimit); the page
 // must stop growing there instead of offering a button that cannot load more.
+// Measured 2026-11 with a 200-approval fixture: 10 rows on the first page and
+// 190 after loading every page under the default pending filter, all the same
+// 56px height. Below the ~500-row DOM threshold, so the list keeps its plain
+// rendering; revisit this if the server cap grows.
 export const PET_APPROVAL_MAX_LIMIT = 200;
 
 export interface PetApprovalPage {
@@ -606,6 +610,12 @@ export function renderPetOverview(options: PetOverviewOptions): string {
   const checkedAt = textValue(inspection?.checked_at);
   if (checkedAt) meta.push(`${translate("petWorkbench.inspectionCheckedAt")}: ${escapeHTML(options.formatTime(checkedAt))}`);
 
+  // Deliberately not virtualized. The 2026-11 fixture with 500 watches (200
+  // followed + 300 other/ignored) rendered 500 rows in two collapsed <details>,
+  // each row a fixed 54px. The list is static unless the owner changes a
+  // follow, so the DOM cost is bounded and paid once, unlike the conversation
+  // which streams and measures variable rows. If the server ever returns a
+  // watch list materially above 500, apply the conversation window pattern.
   const watched = watches.filter(item => item.watched && !item.ignored);
   const others = watches.filter(item => !item.watched || item.ignored);
   const followRows = watched.length

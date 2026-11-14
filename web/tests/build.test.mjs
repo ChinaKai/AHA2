@@ -1469,14 +1469,18 @@ test("built web contains responsive application", async () => {
   assert.match(script, /function shouldAutoScrollConversation[\s\S]{0,400}composingConversationTouch\) return false[\s\S]{0,120}conversationFollowBottom\) return false/);
   assert.match(script, /composingConversationTouch = true;[\s\S]{0,160}cancelConversationBottomPin\(\)/);
   assert.match(script, /currentTop < previousTop - 2 && userDriven\) conversationFollowBottom = false/);
-  // Restoring the pre-replace position is right for a still reader but rewinds a
-  // drag that is still in progress, so both restore sites must skip it mid-gesture.
-  const restoreGuards = script.match(/else if \(!composingConversationTouch\)/g) || [];
-  assert.equal(restoreGuards.length, 2, `both conversation restore sites must defer to an active gesture, found ${restoreGuards.length}`);
+  // Virtual rows are keyed on the first visible message, not a pixel offset.
+  // Restoring that anchor keeps the same content under a reader who is still
+  // dragging; the old pixel restore could rewind a gesture and had to be
+  // skipped mid-drag, which is no longer necessary.
+  assert.match(script, /const anchor = captureConversationAnchor\(list\)[\s\S]{0,900}restoreConversationAnchor\(list, anchor\)/);
+  assert.match(script, /const previousConversationAnchor = captureConversationAnchor\(previousConversation\)/);
+  assert.match(script, /restoreConversationAnchor\(nextConversation, previousConversationAnchor\)/);
+  assert.doesNotMatch(script, /else if \(!composingConversationTouch\) list\.scrollTop = previousTop/);
   assert.match(script, /const conversationRenderedHTML = new WeakMap\(\)/);
   // Live SSE updates reconcile message nodes instead of rebuilding the list, so
   // composer focus, expanded messages and scroll position survive a token update.
-  assert.match(script, /if \(conversationRenderedHTML\.get\(list\) !== nextHTML\)[\s\S]{0,200}patchConversationList\(list, nextHTML\)[\s\S]{0,120}conversationRenderedHTML\.set\(list,\s*nextHTML\)/);
+  assert.match(script, /if \(conversationRenderedHTML\.get\(list\) !== nextHTML\)[\s\S]{0,200}patchConversationList\(list, nextHTML, window\d*\)[\s\S]{0,120}conversationRenderedHTML\.set\(list,\s*nextHTML\)/);
   assert.match(script, /const preservedConversation = previousConversation && preservePageUI[\s\S]{0,180}conversationRenderedHTML\.get\(previousConversation\) === nextConversationHTML/);
   assert.match(script, /function captureConversationImages[\s\S]{0,600}function restoreConversationImages/);
   assert.match(script, /images\.set\(key,\s*\[[\s\S]{0,100}\.\.\.images\.get\(key\) \|\| \[\],[\s\S]{0,40}image[\s\S]{0,20}\]\)/);
@@ -1496,8 +1500,8 @@ test("built web contains responsive application", async () => {
   assert.match(conversation, /data-toggle-message/);
   assert.match(conversation, /data-message-id/);
   assert.match(helpers, /classList\.contains\("expanded"\)/);
-  assert.match(script, /function patchConversationList[\s\S]{0,4000}restoreRegionUI\(list, focus, false\);\s*if \(shouldAutoScrollConversation\(wasAtBottom\)\)[\s\S]{0,80}stabilizeConversationBottom\(list\)/);
-  assert.match(script, /function loadOlderConversation[\s\S]{0,2500}patchConversationList\(list, nextHTML\)[\s\S]{0,600}list\.scrollTop = previousTop \+ Math\.max/);
+  assert.match(script, /function patchConversationList[\s\S]{0,4000}restoreRegionUI\(list, focus, false\)[\s\S]{0,600}if \(autoScroll\) stabilizeConversationBottom\(list\)[\s\S]{0,120}restoreConversationAnchor\(list, anchor\)/);
+  assert.match(script, /function loadOlderConversation[\s\S]{0,2500}const viewport = liveConversationViewport\(list\)[\s\S]{0,300}patchConversationList\(list, nextHTML, window\d*\)/);
   assert.match(conversation, /data-image-preview/);
   assert.match(helpers, /showModal\(\)/);
   assert.match(helpers, /data-image-preview-download/);

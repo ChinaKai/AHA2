@@ -609,6 +609,7 @@ const zhCN: Record<string, string> = {
   "knowledge.list.total": "共 {count} 个",
   "knowledge.list.shown": "{summary} · 已显示 {shown} 个",
   "knowledge.list.more": "加载更多",
+  "conversation.newMessages": "有新消息（{count}）",
 };
 
 const enUS: Record<string, string> = {
@@ -2326,6 +2327,7 @@ const legacyEnglish: Record<string, string> = {
   "DeepSeek 大肥鱼": "DeepSeek Big Fish",
   "大肥鱼": "Big Fish",
   "原版鲸鱼娘": "Classic whale girl",
+  "conversation.newMessages": "New messages ({count})",
 };
 
 let locale: Locale = "zh-CN";

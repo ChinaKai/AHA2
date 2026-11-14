@@ -6,7 +6,8 @@ import {handlePetStreamEvent, mountAssistant, showPetSettings, notifyPetTaskIdle
 import {MODEL_WIRE_OPTIONS, backendSelectOptionsHTML, backendsPanelHTML, modelWireEditOptionsHTML, persistedWireValue, resolveBackendOptions} from "./backends.js";
 import {bindPetDocEditorButtons, createPetWorkbenchLoader, createPetWorkbenchPageKeeper, mapPetWorkbenchTab, PET_APPROVAL_MAX_LIMIT, petApprovalMatches, petApprovalPage, renderPetApprovalLoadMore, renderPetOverview, renderPetRecords, renderPetWorkbenchLoadError, swapPetWorkbenchPage} from "./pet_workbench.js";
 import type {PetWorkbenchPageBinding} from "./pet_workbench.js";
-import {renderConversationList} from "./conversation_ui.js";
+import {conversationItemKeys, conversationRenderableItems, conversationWindow, renderConversationList} from "./conversation_ui.js";
+import type {ConversationWindow, ConversationWindowOptions} from "./conversation_ui.js";
 import {chunkErrorHTML, chunkLoadingHTML, createLazyPage, retryLazyPage} from "./lazy_page.js";
 import type {LazyPage} from "./lazy_page.js";
 import {icon} from "./icons.js";
@@ -655,6 +656,22 @@ const conversationUserScrollWindowMs = 1200;
 let conversationUserScrollUntil = 0;
 let composerFocusWasAtBottom = false;
 const conversationRenderedHTML = new WeakMap<HTMLElement, string>();
+// Virtual conversation state. Message heights vary (code blocks, tool output,
+// images), so each row is measured after it renders and the cache feeds the
+// spacer offsets. The cache and per-row UI state are scoped to the open Task
+// and Agent: switching either one starts from fresh measurements.
+const conversationHeights = new Map<string, number>();
+const conversationMessageUI = new Map<string, {expanded: boolean; details: boolean[]}>();
+let conversationHeaderHeight = 0;
+let conversationPaddingTop = 0;
+let conversationWindowFrame = 0;
+let conversationMeasureFrame = 0;
+let conversationResizeObserver: ResizeObserver | null = null;
+let conversationUnreadMessages = 0;
+const conversationVirtualOverscanPx = 600;
+// Measured average row (including margins) on the 1000-message fixture. Rows
+// outside the window use this until the reader brings them on screen.
+const conversationVirtualEstimatePx = 80;
 let loadingOlderConversation = false;
 let taskListPointerActive = false;
 let appPointerActive = false;
@@ -1033,6 +1050,13 @@ const listPages: Record<"projects" | "tasks" | "knowledge", {cursor: string; has
 const initialListPageSize = 50;
 // Matches the server's maxListPageSize.
 const maxListPageSize = 200;
+// Kept as a plain DOM list, not virtualized. Measured 2026-11 on a 200-Task
+// fixture: 33 rows rendered on first load under the default status filters, 133
+// after every load-more (the other Tasks were completed and hidden), with two
+// row heights (98px / 74px). That is far below the ~500-row point where keeping
+// every row mounted stops being reasonable; 200 is also the server's cap. The
+// approval list uses the same 200 cap and measured 190 rows of one fixed 56px
+// height, so it stays a plain DOM list too. Re-measure before raising either cap.
 // Set when "加载更多" brought in tasks but none of them pass the current filters,
 // so the unchanged list does not read as a broken page.
 let taskLoadMoreNoMatch = false;
@@ -3295,6 +3319,12 @@ function selectedConversationCategories(): ConversationCategory[] {
   return (Object.keys(state.taskCategories) as ConversationCategory[]).filter(category => state.taskCategories[category]);
 }
 
+// Measured 2026-11 with a 1000-message fixture at 1280x800: 1000 DOM message
+// nodes, 79,819px of scroll height and a 1,099ms openTask. Rows are variable
+// (56-102px: plain text, tool output, collapsed code), so the conversation is
+// windowed around the viewport (see conversationWindow in conversation_ui.ts and
+// the controller in main.ts). Live state is capped at 300 rows, but 300 mounted
+// variable-height rows are still enough to make every patch expensive.
 const initialConversationPageSize = 20;
 
 function cancelTaskOpen(): void {
@@ -3315,6 +3345,7 @@ function showTaskLoading(task: Task): void {
     server_time_ms: Date.now(),
   };
   state.selectedTaskAgent = "main";
+  resetConversationVirtualState();
   state.taskConversation = [];
   state.taskConversationHasMore = false;
   state.taskConversationBefore = 0;
@@ -3454,6 +3485,7 @@ async function selectTaskAgent(agentID: string): Promise<void> {
     limit: initialConversationPageSize,
     categories: selectedConversationCategories(),
   });
+  resetConversationVirtualState();
   state.taskConversation = page.conversation.items || [];
   state.taskConversationHasMore = page.conversation.has_more;
   state.taskConversationBefore = page.conversation.next_before || 0;
@@ -3609,6 +3641,9 @@ async function refreshTaskRuntime(taskID: string): Promise<boolean> {
     const seen = new Set(state.taskConversation.map(item => item.sequence));
     const appended = page.conversation.items.filter(item => !seen.has(item.sequence));
     if (appended.length) {
+      // A reader who left the bottom keeps their position; the hint tells them
+      // there is new content instead of yanking the viewport.
+      if (!conversationFollowBottom) conversationUnreadMessages += appended.length;
       state.taskConversation.push(...appended);
       changed = true;
       if (taskID === "task_pet") {
@@ -5043,8 +5078,289 @@ function startTaskClock(): void {
   taskClockSecond = -1;
   taskClockFrame = window.requestAnimationFrame(runTaskClock);
 }
-function conversationListHtml(): string {
-  return renderConversationList(state.taskConversation, state.selectedTask, state.taskConversationHasMore);
+interface ConversationAnchor {
+  key: string;
+  /** The item's top relative to the scroll container's viewport. */
+  viewportOffset: number;
+}
+
+interface ConversationViewport {
+  scrollTop: number;
+  clientHeight: number;
+  atBottom: boolean;
+  anchor: ConversationAnchor | null;
+}
+
+function conversationMessageNodes(list: HTMLElement | null): HTMLElement[] {
+  return list ? [...list.querySelectorAll<HTMLElement>("[data-message-id]")] : [];
+}
+
+function conversationContentTop(): number {
+  return conversationHeaderHeight + conversationPaddingTop;
+}
+
+function captureConversationAnchor(list: HTMLElement | null): ConversationAnchor | null {
+  if (!list) return null;
+  const listTop = list.getBoundingClientRect().top;
+  for (const node of conversationMessageNodes(list)) {
+    const rect = node.getBoundingClientRect();
+    if (rect.bottom > listTop + 1) {
+      const key = node.dataset.messageId || "";
+      if (key) return {key, viewportOffset: rect.top - listTop};
+    }
+  }
+  // A scrollbar drag can land inside a spacer with no row rendered around the
+  // viewport. Anchor on the virtual row at that offset instead, so rebuilding
+  // the window keeps the same content under the reader.
+  const keys = conversationItemKeys(state.taskConversation);
+  if (!keys.length) return null;
+  let offset = Math.max(0, list.scrollTop - conversationContentTop());
+  for (const key of keys) {
+    const height = conversationHeights.get(key) ?? conversationVirtualEstimatePx;
+    if (offset < height) return {key, viewportOffset: -offset};
+    offset -= height;
+  }
+  const last = keys[keys.length - 1];
+  return {key: last, viewportOffset: -(conversationHeights.get(last) ?? conversationVirtualEstimatePx)};
+}
+
+function restoreConversationAnchor(list: HTMLElement, anchor: ConversationAnchor | null): void {
+  if (!anchor?.key) return;
+  const node = conversationMessageNodes(list).find(item => item.dataset.messageId === anchor.key);
+  if (node) {
+    const delta = (node.getBoundingClientRect().top - list.getBoundingClientRect().top) - anchor.viewportOffset;
+    if (Math.abs(delta) >= 0.5) list.scrollTop += delta;
+    return;
+  }
+  const items = conversationRenderableItems(state.taskConversation);
+  const index = items.findIndex(item => item.id === anchor.key);
+  if (index < 0) return;
+  let top = 0;
+  for (let position = 0; position < index; position += 1) {
+    top += conversationHeights.get(items[position].id) ?? conversationVirtualEstimatePx;
+  }
+  list.scrollTop = conversationContentTop() + top - anchor.viewportOffset;
+}
+
+function measureConversationChrome(list: HTMLElement): void {
+  const header = list.querySelector<HTMLElement>("#load-older-conversation");
+  let headerHeight = 0;
+  if (header) {
+    const style = window.getComputedStyle(header);
+    headerHeight = header.getBoundingClientRect().height
+      + (Number.parseFloat(style.marginTop) || 0)
+      + (Number.parseFloat(style.marginBottom) || 0);
+  }
+  const paddingTop = Number.parseFloat(window.getComputedStyle(list).paddingTop) || 0;
+  if (Math.abs(headerHeight - conversationHeaderHeight) > 0.5 || Math.abs(paddingTop - conversationPaddingTop) > 0.5) {
+    conversationHeaderHeight = headerHeight;
+    conversationPaddingTop = paddingTop;
+  }
+}
+
+// Margins are folded into the measured height because the spacers must cover
+// the same distance the normal flow would: message and status-card margins
+// differ, and adjacent sibling margins do not collapse through a spacer.
+function measureConversationMessages(list: HTMLElement): boolean {
+  let changed = false;
+  for (const node of conversationMessageNodes(list)) {
+    const key = node.dataset.messageId || "";
+    if (!key) continue;
+    const style = window.getComputedStyle(node);
+    const height = node.getBoundingClientRect().height
+      + (Number.parseFloat(style.marginTop) || 0)
+      + (Number.parseFloat(style.marginBottom) || 0);
+    if (!Number.isFinite(height) || height <= 0) continue;
+    const previous = conversationHeights.get(key);
+    if (previous === undefined || Math.abs(previous - height) > 0.5) {
+      conversationHeights.set(key, height);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function captureConversationMessageState(list: HTMLElement | null): Map<string, {expanded: boolean; details: boolean[]}> {
+  const captured = new Map<string, {expanded: boolean; details: boolean[]}>();
+  for (const node of conversationMessageNodes(list)) {
+    const key = node.dataset.messageId || "";
+    if (!key) continue;
+    const state = {
+      expanded: node.classList.contains("expanded"),
+      details: [...node.querySelectorAll("details")].map(detail => detail.open),
+    };
+    if (state.expanded || state.details.some(Boolean)) {
+      captured.set(key, state);
+      conversationMessageUI.set(key, state);
+    } else {
+      // The reader collapsed this row: drop the remembered state so recycling
+      // cannot resurrect it later.
+      conversationMessageUI.delete(key);
+    }
+  }
+  return captured;
+}
+
+function restoreConversationMessageState(root: HTMLElement, captured: Map<string, {expanded: boolean; details: boolean[]}>): void {
+  for (const node of conversationMessageNodes(root)) {
+    const key = node.dataset.messageId || "";
+    const state = captured.get(key) || conversationMessageUI.get(key);
+    if (!state) continue;
+    if (state.expanded && !node.classList.contains("expanded")) {
+      node.classList.add("expanded");
+      const preview = node.querySelector<HTMLElement>(".message-preview");
+      const full = node.querySelector<HTMLElement>(".message-full-text");
+      const toggle = node.querySelector<HTMLButtonElement>("[data-toggle-message]");
+      if (preview) preview.hidden = true;
+      if (full) full.hidden = false;
+      if (toggle) toggle.textContent = "收起";
+    }
+    node.querySelectorAll("details").forEach((detail, index) => {
+      if (state.details[index] !== undefined) detail.open = state.details[index];
+    });
+  }
+}
+
+function conversationFocusedMessageKey(): string {
+  const active = document.activeElement;
+  if (!(active instanceof Element)) return "";
+  return active.closest<HTMLElement>("[data-message-id]")?.dataset.messageId || "";
+}
+
+function liveConversationViewport(list: HTMLElement | null): ConversationViewport {
+  if (!list) {
+    return {scrollTop: 0, clientHeight: Math.max(320, Math.round(window.innerHeight * 0.6)), atBottom: true, anchor: null};
+  }
+  return {
+    scrollTop: list.scrollTop,
+    clientHeight: list.clientHeight,
+    atBottom: scrollConversationToBottom || (conversationFollowBottom && conversationIsAtBottom(list)),
+    anchor: captureConversationAnchor(list),
+  };
+}
+
+function conversationWindowOptions(viewport: ConversationViewport): ConversationWindowOptions {
+  return {
+    heights: conversationHeights,
+    scrollTop: viewport.scrollTop,
+    clientHeight: viewport.clientHeight,
+    headerHeight: conversationHeaderHeight,
+    paddingTop: conversationPaddingTop,
+    overscanPx: conversationVirtualOverscanPx,
+    estimateHeight: conversationVirtualEstimatePx,
+    atBottom: viewport.atBottom,
+    anchorKey: viewport.anchor?.key || "",
+    pinnedKey: conversationFocusedMessageKey(),
+  };
+}
+
+function conversationWindowFor(viewport: ConversationViewport): {window: ConversationWindow; count: number} {
+  const keys = conversationItemKeys(state.taskConversation);
+  return {window: conversationWindow(keys, conversationWindowOptions(viewport)), count: keys.length};
+}
+
+function conversationListHtml(viewport?: ConversationViewport): string {
+  const list = document.querySelector<HTMLElement>("#conversation-list");
+  return renderConversationList(
+    state.taskConversation,
+    state.selectedTask,
+    state.taskConversationHasMore,
+    conversationWindowOptions(viewport || liveConversationViewport(list)),
+  );
+}
+
+function syncConversationSpacers(list: HTMLElement, window: ConversationWindow, count: number): void {
+  const top = list.querySelector<HTMLElement>('[data-ui-key="conversation-spacer-top"]');
+  const bottom = list.querySelector<HTMLElement>('[data-ui-key="conversation-spacer-bottom"]');
+  if (window.start <= 0) top?.remove();
+  else if (top) top.style.height = `${Math.max(0, window.topHeight)}px`;
+  if (window.end >= count) bottom?.remove();
+  else if (bottom) bottom.style.height = `${Math.max(0, window.bottomHeight)}px`;
+}
+
+function noteConversationWindowBounds(list: HTMLElement, window: ConversationWindow): void {
+  list.dataset.windowStart = String(window.start);
+  list.dataset.windowEnd = String(window.end);
+}
+
+function resetConversationVirtualState(): void {
+  conversationHeights.clear();
+  conversationMessageUI.clear();
+  conversationUnreadMessages = 0;
+  conversationHeaderHeight = 0;
+  conversationPaddingTop = 0;
+  if (conversationWindowFrame) window.cancelAnimationFrame(conversationWindowFrame);
+  conversationWindowFrame = 0;
+  if (conversationMeasureFrame) window.cancelAnimationFrame(conversationMeasureFrame);
+  conversationMeasureFrame = 0;
+  conversationResizeObserver?.disconnect();
+}
+
+function scheduleConversationWindowUpdate(): void {
+  if (conversationWindowFrame) return;
+  conversationWindowFrame = window.requestAnimationFrame(() => {
+    conversationWindowFrame = 0;
+    updateConversationWindow();
+  });
+}
+
+function updateConversationWindow(force = false): void {
+  const list = document.querySelector<HTMLElement>("#conversation-list");
+  if (!list || state.taskDetailLoading) return;
+  measureConversationChrome(list);
+  const viewport = liveConversationViewport(list);
+  const {window, count} = conversationWindowFor(viewport);
+  const renderedStart = Number(list.dataset.windowStart ?? "-1");
+  const renderedEnd = Number(list.dataset.windowEnd ?? "-1");
+  if (!force && renderedStart === window.start && renderedEnd === window.end) {
+    syncConversationSpacers(list, window, count);
+    return;
+  }
+  const nextHTML = conversationListHtml(viewport);
+  if (conversationRenderedHTML.get(list) === nextHTML) {
+    noteConversationWindowBounds(list, window);
+    syncConversationSpacers(list, window, count);
+    return;
+  }
+  patchConversationList(list, nextHTML, window, true);
+  conversationRenderedHTML.set(list, nextHTML);
+  syncConversationNewMessagesHint();
+}
+
+function refreshConversationMeasurements(): void {
+  const list = document.querySelector<HTMLElement>("#conversation-list");
+  if (!list || state.taskDetailLoading) return;
+  measureConversationChrome(list);
+  const anchor = captureConversationAnchor(list);
+  if (!measureConversationMessages(list)) return;
+  const {window, count} = conversationWindowFor(liveConversationViewport(list));
+  syncConversationSpacers(list, window, count);
+  restoreConversationAnchor(list, anchor);
+  scheduleConversationWindowUpdate();
+}
+
+function observeConversationRows(list: HTMLElement): void {
+  if (!conversationResizeObserver) {
+    conversationResizeObserver = new ResizeObserver(() => {
+      if (conversationMeasureFrame) return;
+      conversationMeasureFrame = window.requestAnimationFrame(() => {
+        conversationMeasureFrame = 0;
+        refreshConversationMeasurements();
+      });
+    });
+  }
+  conversationResizeObserver.disconnect();
+  conversationResizeObserver.observe(list);
+  conversationMessageNodes(list).forEach(node => conversationResizeObserver?.observe(node));
+}
+
+function syncConversationNewMessagesHint(): void {
+  const button = document.querySelector<HTMLButtonElement>("#conversation-new-messages");
+  if (!button) return;
+  button.hidden = conversationUnreadMessages <= 0;
+  if (conversationUnreadMessages > 0) {
+    button.textContent = t("conversation.newMessages", {count: conversationUnreadMessages});
+  }
 }
 function taskFailureBannerHtml(detail: TaskDetail): string {
   if (!["failed", "blocked"].includes(detail.task.status)) return "";
@@ -5308,7 +5624,7 @@ function taskDetailView(detail: TaskDetail): string {
     ${archivedReadOnly ? `<div class="task-failure-banner remote-readonly"><strong>渠道归档只读</strong><span>该渠道实例已归档</span><small>历史内容可查看和导出，不能继续执行或修改</small></div>` : remoteReadOnly ? `<div class="task-failure-banner remote-readonly"><strong>其他设备的只读 Task</strong><span>所属设备：${escapeHTML(detail.task.owner_device_id || "未知")}</span><small>可查看同步历史，不能在本机执行或修改</small><div class="remote-readonly-actions"><button type="button" id="takeover-task">${icon("copy")}接管到本机</button><button type="button" class="danger" data-retire-remote-task="${detail.task.id}">${icon("close")}移除孤立任务</button></div></div>` : ""}
     <div id="task-failure-slot">${taskFailureBannerHtml(detail)}</div>
     ${draft ? `<div class="task-failure-banner task-draft-banner"><strong>任务尚未启动</strong><span>可以先配置 Agent、Skill 和硬件调试，准备好后再启动。</span><button type="button" id="start-task" class="primary">${icon("play")}启动任务</button></div>` : ""}
-    <div class="messages" id="conversation-list">${loadingDetail ? `<div class="task-detail-loading" role="status">${icon("spinner", true)}<strong>正在打开任务</strong><small>加载最近 ${initialConversationPageSize} 条消息…</small></div>` : conversationListHtml()}</div>
+    <div class="conversation-stream"><div class="messages" id="conversation-list">${loadingDetail ? `<div class="task-detail-loading" role="status">${icon("spinner", true)}<strong>正在打开任务</strong><small>加载最近 ${initialConversationPageSize} 条消息…</small></div>` : conversationListHtml()}</div><button type="button" id="conversation-new-messages" class="conversation-new-messages" hidden>有新消息</button></div>
     <div id="agent-turn-slot">${renderAgentTurnCard(detail, state.taskRealtimeState, state.taskContext?.context.metrics)}</div>
     <div id="task-frozen-slot">${completedTaskBannerHtml(detail)}</div>
     ${messageComposerOpenTag(detail, {runtimeError})}${messageComposerHtml(detail, {activeTurn: Boolean(activeTurn), runtimeError})}</${messageComposerElement(detail)}>
@@ -5358,7 +5674,9 @@ function requestConversationBottom(): void {
   // so following resumes even if they had scrolled away before.
   conversationFollowBottom = true;
   composingConversationTouch = false;
+  conversationUnreadMessages = 0;
   conversationBottomPinVersion++;
+  syncConversationNewMessagesHint();
 }
 
 function cancelConversationBottomPin(): void {
@@ -5385,7 +5703,11 @@ function noteConversationWheel(): void {
 function endConversationGesture(): void {
   composingConversationTouch = false;
   const list = document.querySelector<HTMLElement>("#conversation-list");
-  if (list && conversationIsAtBottom(list)) conversationFollowBottom = true;
+  if (list && conversationIsAtBottom(list)) {
+    conversationFollowBottom = true;
+    conversationUnreadMessages = 0;
+    syncConversationNewMessagesHint();
+  }
 }
 
 function conversationIsAtBottom(list: HTMLElement): boolean {
@@ -5485,7 +5807,12 @@ function conversationNodeSignature(element: Element): string {
 // keep their DOM nodes (expanded state, selected text, image elements), and an
 // append-only update only inserts the new message. Replacing the whole list
 // used to rebuild every row on each token update.
-function patchConversationList(list: HTMLElement, nextHTML: string): void {
+function patchConversationList(
+  list: HTMLElement,
+  nextHTML: string,
+  windowInfo?: ConversationWindow,
+  scrollDriven = false,
+): void {
   const template = document.createElement("template");
   template.innerHTML = nextHTML;
   const desired = [...template.content.children];
@@ -5512,9 +5839,12 @@ function patchConversationList(list: HTMLElement, nextHTML: string): void {
   const plan = planKeyedNodes(currentState, desiredState);
   const replace = new Set(plan.replace);
   const focus = captureRegionUI(list);
+  const messageUI = captureConversationMessageState(list);
   const images = captureConversationImages(list);
+  const anchor = captureConversationAnchor(list);
   const previousTop = list.scrollTop;
   const wasAtBottom = conversationIsAtBottom(list);
+  const autoScroll = !scrollDriven && shouldAutoScrollConversation(wasAtBottom);
   let changed = plan.replace.length > 0 || plan.insert.length > 0 || plan.remove.length > 0;
   for (const key of plan.remove) currentByKey.get(key)?.remove();
   let previous: Element | null = null;
@@ -5539,14 +5869,33 @@ function patchConversationList(list: HTMLElement, nextHTML: string): void {
     }
     previous = node;
   }
+  if (windowInfo) noteConversationWindowBounds(list, windowInfo);
   if (!changed) {
     if (scrollConversationToBottom) stabilizeConversationBottom(list);
+    observeConversationRows(list);
     return;
   }
   restoreConversationImages(list, images);
   restoreRegionUI(list, focus, false);
-  if (shouldAutoScrollConversation(wasAtBottom)) stabilizeConversationBottom(list);
-  else if (!composingConversationTouch) list.scrollTop = previousTop;
+  restoreConversationMessageState(list, messageUI);
+  measureConversationChrome(list);
+  measureConversationMessages(list);
+  const renderedWindow = windowInfo || conversationWindowFor(liveConversationViewport(list)).window;
+  syncConversationSpacers(list, renderedWindow, conversationItemKeys(state.taskConversation).length);
+  if (autoScroll) stabilizeConversationBottom(list);
+  else {
+    // Restoring the anchored row keeps the same content under the reader when a
+    // prepend, a live insert, or a spacer recalculation changes the heights
+    // above it. Unlike restoring the previous pixel offset, this does not fight
+    // an in-progress drag.
+    restoreConversationAnchor(list, anchor);
+    if (!anchor) list.scrollTop = previousTop;
+  }
+  observeConversationRows(list);
+  const after = conversationWindowFor(liveConversationViewport(list)).window;
+  if (!windowInfo || after.start !== windowInfo.start || after.end !== windowInfo.end) {
+    scheduleConversationWindowUpdate();
+  }
   bindConversationLiveControls();
 }
 
@@ -5560,13 +5909,17 @@ function updateTaskLiveRegions(): void {
   const activeTurn = (detail.turns || []).find(item => item.agent_id === state.selectedTaskAgent && isActiveTurn(item.status));
   const list = document.querySelector<HTMLElement>("#conversation-list");
   if (list) {
-    const nextHTML = conversationListHtml();
+    measureConversationChrome(list);
+    const viewport = liveConversationViewport(list);
+    const {window} = conversationWindowFor(viewport);
+    const nextHTML = conversationListHtml(viewport);
     if (conversationRenderedHTML.get(list) !== nextHTML) {
-      patchConversationList(list, nextHTML);
+      patchConversationList(list, nextHTML, window);
       conversationRenderedHTML.set(list, nextHTML);
     } else if (scrollConversationToBottom) {
       stabilizeConversationBottom(list);
     }
+    syncConversationNewMessagesHint();
     scrollConversationToBottom = false;
   }
   const turnSlot = document.querySelector<HTMLElement>("#agent-turn-slot");
@@ -5690,11 +6043,25 @@ function render(): void {
   const previousToolUI = captureRegionUI(document.querySelector<HTMLElement>("#task-tool-panel-body"));
   const previousConversationUI = captureRegionUI(previousConversation);
   const previousConversationImages = captureConversationImages(previousConversation);
+  const previousConversationMessageUI = captureConversationMessageState(previousConversation);
+  if (previousConversation) measureConversationChrome(previousConversation);
+  const previousConversationAnchor = captureConversationAnchor(previousConversation);
   const previousScrollTop = previousConversation?.scrollTop || 0;
-  const previousScrollHeight = previousConversation?.scrollHeight || 0;
   const wasAtConversationBottom = previousConversation
     ? previousConversation.scrollHeight - previousConversation.scrollTop - previousConversation.clientHeight < 80
     : false;
+  const autoScrollConversation = shouldAutoScrollConversation(wasAtConversationBottom);
+  // A whole-view render can replace the conversation too (tool panels, status
+  // changes). Rebuild the window around the same anchor instead of rendering
+  // all messages or rewinding the reader.
+  const nextConversationViewport: ConversationViewport | null = previousConversation && !state.taskDetailLoading
+    ? {
+      scrollTop: previousScrollTop,
+      clientHeight: previousConversation.clientHeight,
+      atBottom: autoScrollConversation,
+      anchor: previousConversationAnchor,
+    }
+    : null;
   let content: string;
   if (state.selectedProject) {
     content = projectDetailView(state.selectedProject);
@@ -5738,7 +6105,12 @@ function render(): void {
   }
   const preservedDesktop = state.taskTool === "browser" && preservePageUI
     ? document.querySelector<HTMLElement>(`#desktop-tool[data-read-only="${Boolean(state.selectedTask?.task.read_only)}"]`) : null;
-  const nextConversationHTML = state.selectedTask && !state.taskDetailLoading ? conversationListHtml() : "";
+  const nextConversationHTML = state.selectedTask && !state.taskDetailLoading
+    ? conversationListHtml(nextConversationViewport || undefined)
+    : "";
+  const nextConversationWindow = nextConversationViewport && !state.taskDetailLoading
+    ? conversationWindowFor(nextConversationViewport).window
+    : null;
   const preservedConversation = previousConversation && preservePageUI
     && conversationRenderedHTML.get(previousConversation) === nextConversationHTML ? previousConversation : null;
   app.innerHTML = content;
@@ -5786,14 +6158,30 @@ function render(): void {
   if (nextConversation) {
     if (preservedConversation) {
       if (scrollConversationToBottom) stabilizeConversationBottom(nextConversation);
+      syncConversationNewMessagesHint();
     } else {
-      if (!state.taskDetailLoading) conversationRenderedHTML.set(nextConversation, nextConversationHTML);
       restoreRegionUI(nextConversation, previousConversationUI, false);
-      if (shouldAutoScrollConversation(wasAtConversationBottom)) {
-        stabilizeConversationBottom(nextConversation);
+      if (!state.taskDetailLoading) {
+        conversationRenderedHTML.set(nextConversation, nextConversationHTML);
+        restoreConversationMessageState(nextConversation, previousConversationMessageUI);
+        measureConversationChrome(nextConversation);
+        measureConversationMessages(nextConversation);
+        const count = conversationItemKeys(state.taskConversation).length;
+        if (nextConversationWindow) {
+          noteConversationWindowBounds(nextConversation, nextConversationWindow);
+          syncConversationSpacers(nextConversation, nextConversationWindow, count);
+          observeConversationRows(nextConversation);
+        }
+        if (autoScrollConversation) {
+          stabilizeConversationBottom(nextConversation);
+        } else if (previousConversationAnchor) {
+          restoreConversationAnchor(nextConversation, previousConversationAnchor);
+        } else {
+          nextConversation.scrollTop = previousScrollTop;
+        }
+        scheduleConversationWindowUpdate();
+        syncConversationNewMessagesHint();
       } else if (!composingConversationTouch) {
-        // Same reasoning as the live-region path: do not rewind a gesture that is
-        // still in progress.
         nextConversation.scrollTop = previousScrollTop;
       }
     }
@@ -7335,9 +7723,6 @@ function noteTaskStreamSignal(taskID: string): void {
 async function loadOlderConversation(): Promise<void> {
   if (!state.selectedTask || !state.taskConversationBefore || loadingOlderConversation) return;
   loadingOlderConversation = true;
-  const list = document.querySelector<HTMLElement>("#conversation-list");
-  const previousHeight = list?.scrollHeight || 0;
-  const previousTop = list?.scrollTop || 0;
   try {
     const page = await api.agentConversation(state.selectedTask.task.id, state.selectedTaskAgent, {
       before: state.taskConversationBefore,
@@ -7352,13 +7737,16 @@ async function loadOlderConversation(): Promise<void> {
     }
     state.taskConversationHasMore = page.conversation.has_more && state.taskConversation.length < 300;
     state.taskConversationBefore = page.conversation.next_before || 0;
+    const list = document.querySelector<HTMLElement>("#conversation-list");
     if (list) {
-      const nextHTML = conversationListHtml();
-      patchConversationList(list, nextHTML);
+      measureConversationChrome(list);
+      const viewport = liveConversationViewport(list);
+      const {window} = conversationWindowFor(viewport);
+      const nextHTML = conversationListHtml(viewport);
+      patchConversationList(list, nextHTML, window);
       conversationRenderedHTML.set(list, nextHTML);
-      // Loading older messages prepends rows above the viewport: keep the
-      // reader's anchor by shifting the same distance the list grew.
-      list.scrollTop = previousTop + Math.max(0, list.scrollHeight - previousHeight);
+      // The patch anchored on the first visible row before the prepend and
+      // restored it after; prepended rows above it never move the viewport.
     }
     const count = document.querySelector<HTMLElement>("#conversation-filter-count");
     if (count) count.textContent = `${state.taskConversation.length} 条已加载`;
@@ -7368,6 +7756,7 @@ async function loadOlderConversation(): Promise<void> {
 }
 
 const boundConversationLoadOlder = new WeakSet<Element>();
+const boundConversationNewMessages = new WeakSet<Element>();
 
 function bindConversationLiveControls(): void {
   const list = document.querySelector<HTMLElement>("#conversation-list");
@@ -7380,6 +7769,16 @@ function bindConversationLiveControls(): void {
       void loadOlderConversation();
     });
   }
+  const newMessages = document.querySelector<HTMLButtonElement>("#conversation-new-messages");
+  if (newMessages && !boundConversationNewMessages.has(newMessages)) {
+    boundConversationNewMessages.add(newMessages);
+    newMessages.addEventListener("click", () => {
+      requestConversationBottom();
+      updateTaskLiveRegions();
+      syncConversationNewMessagesHint();
+    });
+  }
+  if (list) observeConversationRows(list);
   if (list && list.dataset.paginationBound !== "true") {
     list.dataset.paginationBound = "true";
     let previousTop = list.scrollTop;
@@ -7394,11 +7793,18 @@ function bindConversationLiveControls(): void {
       // not be read as intent.
       const userDriven = composingConversationTouch || Date.now() < conversationUserScrollUntil;
       if (currentTop < previousTop - 2 && userDriven) conversationFollowBottom = false;
-      else if (conversationIsAtBottom(list)) conversationFollowBottom = true;
+      else if (conversationIsAtBottom(list)) {
+        conversationFollowBottom = true;
+        if (conversationUnreadMessages) {
+          conversationUnreadMessages = 0;
+          syncConversationNewMessagesHint();
+        }
+      }
       if (currentTop < previousTop && currentTop <= 80 && state.taskConversationHasMore) {
         void loadOlderConversation();
       }
       previousTop = currentTop;
+      scheduleConversationWindowUpdate();
     }, {passive: true});
   }
   if (list && list.dataset.bottomPinBound !== "true") {

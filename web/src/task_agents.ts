@@ -432,15 +432,31 @@ function renderTurnDurationCard(item: ConversationItem): string {
   return `<article data-message-id="${escapeHTML(item.id)}" data-message-signature="${stableTextSignature([item])}" class="aha-status-card aha-duration-card"><header><strong>${icon("clock")}Turn ${escapeHTML(payload.turn_sequence || "")} 耗时</strong><span class="${statusClass(status)}">${statusLabel(status)}</span><time>${systemCardTime(item)}</time></header><div class="aha-status-grid duration"><span><small>总计</small><b>${formatDuration(elapsed)}</b></span><span><small>排队</small><b>${formatDuration(Number(payload.queue_duration_ms || 0))}</b></span><span><small>Context</small><b>${formatDuration(Number(payload.context_prepare_duration_ms || 0))}</b></span><span><small>Session</small><b>${formatDuration(Number(payload.session_wake_duration_ms || 0))}</b></span><span><small>Backend</small><b>${formatDuration(Number(payload.backend_start_duration_ms || 0))}</b></span><span><small>活跃</small><b>${formatDuration(Number(payload.active_duration_ms || 0))}</b></span><span><small>收尾</small><b>${formatDuration(Number(payload.finalize_duration_ms || 0))}</b></span></div></article>`;
 }
 
+function repliedChannelReceipts(items: ConversationItem[]): Set<string> {
+  return new Set(items.filter(item => {
+    const payload = item.payload || {};
+    return item.kind === "agent_channel_route" && payload.status_card === true && payload.message_status === "replied";
+  }).map(item => String((item.payload || {}).inbound_receipt_id || "")).filter(Boolean));
+}
+
+// A channel reply whose delivery is already represented by its replied status
+// card renders as an empty string. The virtual list needs item positions that
+// match the DOM, so callers drop these invisible rows before measuring.
+export function conversationItemsWithContent(items: ConversationItem[]): ConversationItem[] {
+  const repliedReceipts = repliedChannelReceipts(items);
+  return items.filter(item => {
+    if (item.kind !== "agent_channel_reply") return true;
+    const receiptID = String((item.payload || {}).inbound_receipt_id || "");
+    return !receiptID || !repliedReceipts.has(receiptID);
+  });
+}
+
 export function renderConversationWithOrchestration(
   items: ConversationItem[],
   detail: TaskDetail | null,
   renderItem: (item: ConversationItem) => string,
 ): string {
-  const repliedReceipts = new Set(items.filter(item => {
-    const payload = item.payload || {};
-    return item.kind === "agent_channel_route" && payload.status_card === true && payload.message_status === "replied";
-  }).map(item => String((item.payload || {}).inbound_receipt_id || "")).filter(Boolean));
+  const repliedReceipts = repliedChannelReceipts(items);
   return items.map(item => {
     if (item.kind === "agent_batch_dispatched" && detail) return renderOrchestrationCard(item, detail);
     if (item.kind === "agent_channel_outreach") return renderChannelOutreachCard(item);

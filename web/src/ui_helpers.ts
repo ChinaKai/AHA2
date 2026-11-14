@@ -524,6 +524,14 @@ function regionElementKey(root: HTMLElement, element: HTMLElement): string {
   if (element.id) return `id:${element.id}`;
   if (element.dataset.uiKey) return `ui:${element.dataset.uiKey}`;
   if (element.dataset.messageId) return `message:${element.dataset.messageId}`;
+  // A virtual conversation recycles whole message rows. A positional path is
+  // not stable across that recycle and would hand focus to whichever new row
+  // happens to occupy the same offset; anchor the path inside the message so a
+  // kept row can restore its own control and a recycled row has no match.
+  const message = element.closest<HTMLElement>("[data-message-id]");
+  if (message && root.contains(message)) {
+    return `message:${message.dataset.messageId}:path:${regionElementPath(message, element)}`;
+  }
   const tag = element.tagName.toLowerCase();
   const control = element as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
   if (["input", "select", "textarea"].includes(tag) && control.name) {

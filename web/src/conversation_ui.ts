@@ -1,6 +1,6 @@
 import {icon} from "./icons.js";
 import {renderMarkdown} from "./markdown.js";
-import {renderConversationWithOrchestration, visibleAgentText} from "./task_agents.js";
+import {conversationItemsWithContent, renderConversationWithOrchestration, visibleAgentText} from "./task_agents.js";
 import {stableTextSignature} from "./ui_helpers.js";
 import type {ConversationItem, TaskDetail} from "./types.js";
 
@@ -124,11 +124,127 @@ export function coalesceToolConversationItems(items: ConversationItem[]): Conver
   return result;
 }
 
+// The rows the conversation actually renders. Tool lifecycles are folded into
+// one row and delivered channel replies are hidden by their status card, so
+// these are also the only rows that can be measured or windowed.
+export function conversationRenderableItems(items: ConversationItem[]): ConversationItem[] {
+  return conversationItemsWithContent(coalesceToolConversationItems(items));
+}
+
+export function conversationItemKeys(items: ConversationItem[]): string[] {
+  return conversationRenderableItems(items).map(item => item.id);
+}
+
+export interface ConversationWindowOptions {
+  heights: ReadonlyMap<string, number>;
+  scrollTop: number;
+  clientHeight: number;
+  /** Height of the "load earlier" row above the items, including its margin. */
+  headerHeight?: number;
+  /** Padding at the top of the scroll container. */
+  paddingTop?: number;
+  overscanPx?: number;
+  estimateHeight?: number;
+  /** The reader is at (or is being sent to) the newest message. */
+  atBottom?: boolean;
+  /** First item currently in view; the window must keep it rendered. */
+  anchorKey?: string;
+  /** Focused message; recycling must not drop its focus. */
+  pinnedKey?: string;
+}
+
+export interface ConversationWindow {
+  /** First rendered item index (inclusive). */
+  start: number;
+  /** Last rendered item index (exclusive). */
+  end: number;
+  topHeight: number;
+  bottomHeight: number;
+  totalHeight: number;
+}
+
+const conversationWindowMaxSpan = 240;
+
+// Window math for the variable-height message list. Item offsets come from the
+// measured-height cache with an estimate for rows that have never been on
+// screen; spacers stand in for everything outside [start, end), so the scroll
+// height stays continuous while only a bounded set of rows is in the DOM.
+export function conversationWindow(keys: string[], options: ConversationWindowOptions): ConversationWindow {
+  const count = keys.length;
+  if (!count) return {start: 0, end: 0, topHeight: 0, bottomHeight: 0, totalHeight: 0};
+  const estimate = Number.isFinite(options.estimateHeight) && (options.estimateHeight || 0) > 0
+    ? options.estimateHeight as number : 96;
+  const overscan = Math.max(0, options.overscanPx ?? 600);
+  const clientHeight = Math.max(0, options.clientHeight || 0);
+  const prefix = new Array<number>(count + 1);
+  prefix[0] = 0;
+  for (let index = 0; index < count; index += 1) {
+    const measured = options.heights.get(keys[index]);
+    prefix[index + 1] = prefix[index] + (Number.isFinite(measured) && (measured as number) >= 0 ? measured as number : estimate);
+  }
+  const totalHeight = prefix[count];
+  const chrome = Math.max(0, (options.headerHeight || 0) + (options.paddingTop || 0));
+  const viewTop = options.atBottom
+    ? Math.max(0, totalHeight - clientHeight)
+    : Math.max(0, (options.scrollTop || 0) - chrome);
+  const viewBottom = viewTop + clientHeight;
+  // First item whose bottom edge is past the overscanned top of the viewport.
+  const startAt = (offset: number): number => {
+    let low = 0;
+    let high = count;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (prefix[middle + 1] > offset) high = middle;
+      else low = middle + 1;
+    }
+    return Math.min(count - 1, low);
+  };
+  // First item whose top edge is at/after the overscanned bottom edge.
+  const endAt = (offset: number): number => {
+    let low = 1;
+    let high = count;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (prefix[middle] >= offset) high = middle;
+      else low = middle + 1;
+    }
+    return low;
+  };
+  let start = startAt(viewTop - overscan);
+  let end = Math.max(start + 1, endAt(viewBottom + overscan));
+  for (const key of [options.anchorKey, options.pinnedKey]) {
+    if (!key) continue;
+    const index = keys.indexOf(key);
+    // Keep the anchor/pinned row rendered. The span cap protects the DOM bound
+    // if focus or the scrollbar sits far outside the viewport.
+    if (index < start && end - index <= conversationWindowMaxSpan) start = index;
+    else if (index >= end && index + 1 - start <= conversationWindowMaxSpan) end = index + 1;
+  }
+  return {
+    start,
+    end,
+    topHeight: prefix[start],
+    bottomHeight: totalHeight - prefix[end],
+    totalHeight,
+  };
+}
+
+function conversationSpacer(position: "top" | "bottom", height: number): string {
+  if (height <= 0) return "";
+  return `<div class="conversation-spacer" data-ui-key="conversation-spacer-${position}" aria-hidden="true" style="height:${Math.round(height * 100) / 100}px"></div>`;
+}
+
 export function renderConversationList(
   items: ConversationItem[],
   detail: TaskDetail | null,
   hasMore: boolean,
+  windowOptions?: ConversationWindowOptions,
 ): string {
-  const history = (renderConversationWithOrchestration(coalesceToolConversationItems(items), detail, renderConversationItem) || `<div class="empty">暂无符合筛选条件的记录。</div>`) + imagePreviewDialog();
-  return `${hasMore ? `<button type="button" id="load-older-conversation" class="load-older">加载更早记录</button>` : ""}${history || `<div class="empty">暂无符合筛选条件的记录。</div>`}`;
+  const renderable = conversationRenderableItems(items);
+  const window = windowOptions
+    ? conversationWindow(renderable.map(item => item.id), windowOptions)
+    : null;
+  const visible = window ? renderable.slice(window.start, window.end) : renderable;
+  const history = (renderConversationWithOrchestration(visible, detail, renderConversationItem) || `<div class="empty">暂无符合筛选条件的记录。</div>`) + imagePreviewDialog();
+  return `${hasMore ? `<button type="button" id="load-older-conversation" class="load-older">加载更早记录</button>` : ""}${window ? conversationSpacer("top", window.topHeight) : ""}${history}${window ? conversationSpacer("bottom", window.bottomHeight) : ""}`;
 }
