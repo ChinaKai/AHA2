@@ -13,7 +13,7 @@
 - 共记录 **17 项**问题：**High 5、Medium 6、Low 6**。
 - 最值得先处理的是键盘与读屏可用性，而不是视觉：
   1. 任务列表卡片只能鼠标点击打开，键盘无法聚焦卡片（High）。
-  2. 12 个对话框的图标关闭按钮没有可访问名称（High，axe `button-name` critical）。
+  2. 23 个对话框的图标关闭按钮没有可访问名称（High，axe `button-name` critical）。
   3. 知识库树声明为 `role="tree"`，但子节点不是 treeitem，axe `aria-required-children` critical（High）。
   4. Provider 对话框空值保存时完全没有任何可见错误提示（High）。
   5. 生产 `index.html` 把 `aria-live="polite"` 放在整个 `#app` 上，每次渲染都会让读屏播报整页（High）。
@@ -85,7 +85,7 @@
 | ID | 页面 | 问题 | 实际 | 期望 | 影响 | 严重度 |
 | --- | --- | --- | --- | --- | --- | --- |
 | F01 | 任务列表 | 任务卡只能用鼠标打开 | `<article class="task-card" data-task>` 无 `tabindex`/`role`，Tab 只停在“编辑标题/删除任务”；回车无效 | 卡片主体可聚焦（链接/按钮）并支持 Enter/Space 打开 | 键盘用户无法直接遍历并打开任务，只能依赖隐藏的 Ctrl+K 命令面板 | High |
-| F02 | 任务创建、Provider 等 12 个对话框 | 图标关闭按钮无可访问名称 | `<button data-close class="icon-button">` 内只有 `aria-hidden` 的 SVG，名称空 | `aria-label="关闭"`（邮件/硬件对话框已有此写法） | 读屏只读“按钮”；打开对话框时焦点默认落在该按钮上 | High |
+| F02 | 任务创建、Provider 等 23 个对话框 | 图标关闭按钮无可访问名称 | `<button data-close class="icon-button">` 内只有 `aria-hidden` 的 SVG，名称空 | `aria-label="关闭"`（邮件/硬件对话框已有此写法） | 读屏只读“按钮”；打开对话框时焦点默认落在该按钮上 | High |
 | F03 | 知识库 | `role="tree"` 结构与子节点不合法 | `<nav class="knowledge-tree" role="tree">` 下是普通 div 与 button；无 treeitem/group 角色、无方向键模型 | 移除 tree 角色改用导航+展开按钮，或完整实现 tree/treeitem 与键盘模型 | axe critical；读屏树导航语义错误 | High |
 | F04 | 模型/Provider | 空值保存无任何错误提示 | 清空名称/Base URL 后点“保存 Provider”：对话框保持打开，无 inline error、无 banner、无 `aria-invalid` | 对话框内 `role="alert"` 错误提示，并标记两个字段 | 用户不知道为何无法保存，只能反复点击 | High |
 | F05 | 全站 | 整个 `#app` 是 polite live region | `web/index.html:14` 的 `<div id="app" aria-live="polite">`；每次 render 替换大段子树，live region 文本等于整页 | 移除根节点 live region；按用途增加局部 `role="status"`/`aria-live`，错误用 `role="alert"` | 导航/刷新/新消息时读屏可能整页播报，真正重要的更新被淹没；视图切换也没有 `document.title` 变化 | High |
@@ -120,22 +120,37 @@
 
 证据：运行时读取 `{tag:"ARTICLE", role:null, tabIndex:-1, hasTabindex:false, focusables:["编辑标题","删除任务"]}`；焦点序列 1–16 步无卡片主体。
 
-### F02 12 个对话框的关闭按钮无可访问名称（High）
+### F02 23 个对话框的关闭按钮无可访问名称（High）
 
 复现：`#tasks` → “创建任务”；或 `#models` → “添加 Provider”。用 axe 扫描打开的对话框，或查看对话框头部按钮的无障碍名称。
 
 实际：`<button type="button" data-close class="icon-button"><svg aria-hidden="true">…</svg></button>`，`aria-label`/`title`/文本均为空；任务创建对话框打开后的 `document.activeElement` 正是这个按钮，且名称为空。
 
-期望：`aria-label="关闭"`（`mail_resources.ts`、`mail_task.ts`、`hardware_resources.ts` 已是正确写法）。
+全量清点后共 **23 个**未命名图标关闭按钮，分布在 23 个对话框中。按关闭属性分类：
+
+| 变体 | 数量 | 位置（文件:行，括号内为对话框用途） |
+| --- | --- | --- |
+| `data-close` | 15 | `main.ts:3873`（项目）、`3878`（添加 Workspace）、`4397`（Provider）、`4402`×2（`model-dialog` 添加模型、`model-add-dialog` 添加所选模型）、`4406`（编辑模型）、`4410`（接管 Workspace）、`4703`（创建任务）、`4816`（接管任务）、`5515`（重新打开任务），共 10 个按钮；`channels.ts:195`（渠道设置）、`328`（会话）；`codex_accounts.ts:86`（添加 Codex 账号）；`sync_settings.ts:205`（同步冲突）；`task_agents.ts:747`（Agent 配置） |
+| `data-setup-close` | 1 | `channels.ts:534`（飞书扫码权限配置） |
+| `data-onboarding-close` | 1 | `channels.ts:629`（扫码绑定进行中） |
+| `data-kb-close` | 3 | `knowledge_workspace.ts:792`（Skill 编辑）、`796`（Skill 详情）、`800`（Product Line） |
+| `data-mcp-close` | 3 | `mcp_page.ts:157`（MCP 编辑）、`182`（MCP 详情）、`190`（MCP 删除） |
+
+清点口径与易漏点：
+
+- 只统计按钮内容仅含 `${icon("close")}`、且没有 `aria-label`/`title`/可见文本的图标按钮；同一对话框里“取消”“关闭”等文本按钮名称正常，不计入。
+- `main.ts:4402` 一行返回两个 `<dialog>`（`#model-dialog` 与 `#model-add-dialog`），每个各有一个关闭图标，因此该行按 **2 个**计；若按源码行数清点会少算 1 个。
+- `mail_*`、`hardware_*`、`mail_task.ts` 等处的 `data-close` 图标按钮已经写了 `aria-label="关闭"`，不计入；其余不在上表的 `icon("close")` 用于删除、解除绑定、关闭工具面板等非对话框场景，也不计入。
+
+期望：23 个图标按钮统一补 `aria-label="关闭"`（`mail_resources.ts`、`mail_task.ts`、`hardware_resources.ts` 已是正确写法）。
 
 影响：读屏用户只听到“按钮”，且初始焦点落在无法识别的控件上。
 
-证据：axe 4.10.2 在 `#task-dialog`、`#provider-dialog` 上均报 `button-name` critical。源码中同类写法共 12 处：
+证据：
 
-- `web/src/main.ts:3873`（项目）、`3878`（Workspace）、`4397`（Provider）、`4402`（添加模型）、`4406`（编辑模型）、`4410`（接管 Workspace）、`4703`（创建任务）、`4816`（接管任务）、`5515`（重新打开任务）
-- `web/src/codex_accounts.ts:86`
-- `web/src/sync_settings.ts:205`
-- `web/src/task_agents.ts:747`
+- 源码全量扫描（命令与输出见 §8.4）结果为 23，按变体分布 `data-close` 15、`data-setup-close` 1、`data-onboarding-close` 1、`data-kb-close` 3、`data-mcp-close` 3。
+- axe 4.10.2 复核了其中 21 个可打开的对话框，覆盖全部 5 种变体；每个对话框都恰好产生 1 个 `button-name` 节点，未出现额外命中。其余 2 个（`#task-takeover-dialog`、`#sync-conflict-dialog`）使用完全相同的按钮模板，由静态扫描覆盖。
+- 任务创建对话框打开后 `document.activeElement` 是无名关闭按钮；其余对话框同样把初始焦点放在各自的图标关闭按钮上。
 
 ### F03 知识库树的 ARIA 结构不合法（High）
 
@@ -306,7 +321,7 @@ axe 报 `aria-required-children` critical：“Element has children which are no
 | 排名 | ID | 严重度 | 问题 | 一句话影响 |
 | --- | --- | --- | --- | --- |
 | 1 | F01 | High | 任务卡片键盘不可打开 | 键盘用户无法在列表中进入任务 |
-| 2 | F02 | High | 12 个对话框关闭按钮无名称 | 读屏只听到“按钮”，初始焦点即落在其上 |
+| 2 | F02 | High | 23 个对话框关闭按钮无名称 | 读屏只听到“按钮”，初始焦点即落在其上 |
 | 3 | F03 | High | 知识库树 ARIA 结构错误 | 读屏树导航语义失效 |
 | 4 | F04 | High | Provider 空值保存无提示 | 用户被静默卡住，不知道缺什么 |
 | 5 | F05 | High | 整个 `#app` 为 polite live region | 读屏整页播报，重要更新被淹没 |
@@ -327,8 +342,9 @@ axe 报 `aria-required-children` critical：“Element has children which are no
 
 ### 批次 2：可访问名称与列表语义（F02、F15）
 
-- 12 处对话框关闭按钮补 `aria-label="关闭"`；MCP 行去掉不合适的 `role="listitem"`（或改为 div）。
-- 验收：对话框 axe `button-name` 为 0；MCP `aria-allowed-role` 为 0；关闭按钮被读屏读作“关闭”。
+- 为全部 23 个对话框关闭按钮补 `aria-label="关闭"`，覆盖 5 种变体：`data-close` 15（含 `main.ts:4402` 的两个对话框按钮）、`data-setup-close` 1、`data-onboarding-close` 1、`data-kb-close` 3、`data-mcp-close` 3。不要只按 `data-close` 或按源码行清点。
+- MCP 行去掉不合适的 `role="listitem"`（或改为 div）。
+- 验收：对 23 个对话框逐一运行 axe，`button-name` 为 0，且 `data-close`/`data-setup-close`/`data-onboarding-close`/`data-kb-close`/`data-mcp-close` 五种关闭变体全部覆盖；每个关闭按钮被读屏读作“关闭”；静态扫描同一正则的结果为 0。
 
 ### 批次 3：知识库树与命令面板 ARIA（F03、F06、F14）
 
@@ -390,14 +406,71 @@ node web/tests/task_list_live_refresh.browser.mjs
 
 | 规则 | 影响 | 命中 |
 | --- | --- | --- |
-| `button-name` | critical | 任务创建、Provider 对话框各 1 |
+| `button-name` | critical | 23 个对话框各 1；本次复核 21 个，每个 1 |
 | `aria-required-children` | critical | 知识库 5 个断点；命令面板 1 |
 | `aria-allowed-role` | minor | 知识库 5；MCP 20 |
 | `heading-order` | moderate | 20（4 场景×5 断点） |
 | `color-contrast` | serious | 合计 111（去重 4 类选择器） |
 | `landmark-complementary-is-top-level` | moderate | 10（任务详情×5、权限面板×5） |
 
-### 8.4 交互探针关键读数
+### 8.4 关闭按钮全量扫描与 axe 复核
+
+在仓库根目录执行（统计内容仅含 `${icon("close")}`、且没有 `aria-label`/`title`/可见文本的关闭按钮）：
+
+```bash
+node --input-type=module -e '
+import {readdirSync, readFileSync} from "node:fs";
+const V = ["data-close","data-setup-close","data-onboarding-close","data-kb-close","data-mcp-close"];
+const B = /<button\b([^>]*)>([\s\S]*?)<\/button>/g;
+const rows = [];
+for (const f of readdirSync("web/src").filter(f => f.endsWith(".ts"))) {
+  const s = readFileSync(`web/src/${f}`, "utf8");
+  for (const m of s.matchAll(B)) {
+    const v = V.find(v => new RegExp(`(^|\\s)${v}(\\s|=|$)`).test(m[1]));
+    if (!v) continue;
+    const body = m[2].replace(/\$\{icon\("close"\)\}/g, "").replace(/<[^>]*>/g, "").trim();
+    const named = /aria-label=|title=/.test(m[1]) || body !== "";
+    if (!named) rows.push(`${f}:${s.slice(0, m.index).split("\n").length} ${v}`);
+  }
+}
+console.log(rows.join("\n")); console.log("total", rows.length);
+'
+```
+
+输出（逐行）：
+
+```text
+channels.ts:195 data-close
+channels.ts:328 data-close
+channels.ts:534 data-setup-close
+channels.ts:629 data-onboarding-close
+codex_accounts.ts:86 data-close
+knowledge_workspace.ts:792 data-kb-close
+knowledge_workspace.ts:796 data-kb-close
+knowledge_workspace.ts:800 data-kb-close
+main.ts:3873 data-close
+main.ts:3878 data-close
+main.ts:4397 data-close
+main.ts:4402 data-close
+main.ts:4402 data-close
+main.ts:4406 data-close
+main.ts:4410 data-close
+main.ts:4703 data-close
+main.ts:4816 data-close
+main.ts:5515 data-close
+mcp_page.ts:157 data-mcp-close
+mcp_page.ts:182 data-mcp-close
+mcp_page.ts:190 data-mcp-close
+sync_settings.ts:205 data-close
+task_agents.ts:747 data-close
+total 23
+```
+
+按变体汇总：`data-close` 15、`data-setup-close` 1、`data-onboarding-close` 1、`data-kb-close` 3、`data-mcp-close` 3，合计 23。`main.ts:4402` 出现两次，对应同一源码行里的 `#model-dialog` 与 `#model-add-dialog` 两个对话框，不能按行去重。
+
+axe 复核（Playwright 1.65.1 + axe-core 4.10.2，标签集同上）实际打开了 21 个对话框：任务创建、项目、添加 Workspace、Provider、添加模型、添加所选模型、编辑模型、接管 Workspace、重新打开任务、Agent 配置、MCP 编辑/详情/删除、Skill 编辑/详情、Product Line、渠道设置、渠道会话、飞书权限配置、扫码绑定、添加 Codex 账号。每个对话框运行 `axe.run(dialog)` 的结果都只有 `button-name` 一条规则命中，且恰好 1 个节点；未出现其他违规，也没有第 24 个关闭变体。未在 fixture 中打开的 2 个是 `#task-takeover-dialog`（`main.ts:4816`）与 `#sync-conflict-dialog`（`sync_settings.ts:205`），其按钮模板与上表完全一致，由静态扫描覆盖。
+
+### 8.5 交互探针关键读数
 
 | 场景 | 读数 |
 | --- | --- |
