@@ -43,12 +43,13 @@ vault 和索引路径仍由 `AHA2_KNOWLEDGE_VAULT_PATH`、`AHA2_KNOWLEDGE_VAULT_
 
 ## Agent 读取 canary
 
-Agent 读取和技能加载切换按项目灰度。vault 总开关仍然默认关闭（legacy），本功能完成不会自动开启：
+Agent 读取和技能加载切换按项目灰度。Web 的 vault 总开关仍然默认关闭（legacy），本功能完成不会自动开启：
 
+- Agent runtime 读取还有独立开关 `AHA2_KNOWLEDGE_VAULT_RUNTIME_READ`（或 `--knowledge-vault-runtime-read`），默认 false。**Web 的“文件知识库”开关只控制文件知识库页面和 API，不代表 Agent runtime 已切到 vault。**
 - `AHA2_KNOWLEDGE_VAULT_READ_PROJECTS` 是逗号分隔的项目 ID allowlist。未设置时默认为宠物项目 `project_pet` 与 AHA2 项目 `project_6ff866f348d8a892d5e8`；显式设为空表示不切换任何项目。
-- 只有同时满足“vault 开关开启、项目在 allowlist、索引就绪、manifest 已绑定该项目”时，Turn 知识块和 Agent 知识列表才读取 vault；其他项目继续使用旧知识表和旧技能目录。
+- 只有同时满足“Web vault 开关开启、runtime read 开关开启、项目在 allowlist、索引就绪、manifest 已绑定该项目”时，Turn 知识块和 Agent 知识列表才读取 vault；其他项目继续使用旧知识表和旧技能目录。runtime read 关闭时，即使 manager 已 enabled 且 allowlist 命中，知识和技能也全部走旧来源。
 - 技能优先从 `global/skills/<slug>/` 或 `projects/<slug>/skills/<slug>/` 加载；vault 中找不到对应包时回退到旧的 `<data-dir>/knowledge/skills` 并记录日志，旧目录不会被删除。
-- 回退是即时的：从 allowlist 移除项目或显式设为空，该项目下一 Turn 就回到旧 DB；关闭 vault 总开关则所有项目回退。canary 只影响读取，不写 vault、不删除旧数据。
+- 回退：从 allowlist 移除项目或显式设为空，该项目下一 Turn 就回到旧 DB；关闭 runtime read 开关或 Web vault 总开关则所有项目回退（runtime read 是启动配置，修改后需重启）。canary 只影响读取，不写 vault、不删除旧数据。
 
 ## 示例知识库（体验数据，可删除）
 

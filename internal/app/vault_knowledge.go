@@ -14,8 +14,9 @@ import (
 )
 
 // knowledgeVaultReadProjectsEnv is the canary allowlist. An unset value keeps
-// the pet project on the vault; an explicit empty or comma list without the
-// project rolls that project back to the legacy DB immediately.
+// the pet project in the candidate set; an explicit empty or comma list without
+// the project rolls that project back to the legacy DB immediately. The
+// separate runtime-read gate must also be on.
 const knowledgeVaultReadProjectsEnv = "AHA2_KNOWLEDGE_VAULT_READ_PROJECTS"
 
 // The canary covers the pet project locally and the AHA2 project on the
@@ -47,8 +48,15 @@ type vaultKnowledgeSnapshot struct {
 	Stale   []domain.KnowledgeEntry
 }
 
+// vaultReadEnabled requires the independent runtime gate before the allowlist.
+// A Web-enabled vault with this gate off keeps both knowledge and skills on the
+// legacy sources.
+func (s *Service) vaultReadEnabled(projectID string) bool {
+	return s != nil && s.knowledgeVault != nil && s.knowledgeVaultRuntimeRead && knowledgeVaultReadAllowed(projectID)
+}
+
 func (s *Service) vaultKnowledgeForProject(ctx context.Context, projectID string) (vaultKnowledgeSnapshot, bool) {
-	if s.knowledgeVault == nil || !knowledgeVaultReadAllowed(projectID) {
+	if !s.vaultReadEnabled(projectID) {
 		return vaultKnowledgeSnapshot{}, false
 	}
 	snapshot := vaultKnowledgeSnapshot{}
@@ -190,7 +198,7 @@ func (s *Service) knowledgeGuidePrompt() string {
 // A missing or unreadable package keeps the legacy dataDir copy; the old skill
 // directories are never modified or removed.
 func (s *Service) applyVaultSkillPackages(ctx context.Context, projectID string, skills []domain.Skill) []domain.Skill {
-	if s.knowledgeVault == nil || !knowledgeVaultReadAllowed(projectID) || len(skills) == 0 {
+	if !s.vaultReadEnabled(projectID) || len(skills) == 0 {
 		return skills
 	}
 	result := append([]domain.Skill(nil), skills...)

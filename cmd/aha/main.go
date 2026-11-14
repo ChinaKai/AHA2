@@ -124,24 +124,25 @@ func parseCommand(args []string) (string, []string, error) {
 }
 
 type serveOptions struct {
-	listen                string
-	dataDir               string
-	setupToken            string
-	setupTokenFile        string
-	secureCookie          bool
-	allowCrossOrigin      bool
-	agentAPIURL           string
-	mailTaskBaseURL       string
-	mailDownloadBaseURL   string
-	mailDownloadListen    string
-	logLevel              string
-	codexBinary           string
-	claudeBinary          string
-	dshBinary             string
-	localOwnerIngest      bool
-	knowledgeVaultEnabled bool
-	knowledgeVaultPath    string
-	knowledgeVaultIndex   string
+	listen                    string
+	dataDir                   string
+	setupToken                string
+	setupTokenFile            string
+	secureCookie              bool
+	allowCrossOrigin          bool
+	agentAPIURL               string
+	mailTaskBaseURL           string
+	mailDownloadBaseURL       string
+	mailDownloadListen        string
+	logLevel                  string
+	codexBinary               string
+	claudeBinary              string
+	dshBinary                 string
+	localOwnerIngest          bool
+	knowledgeVaultEnabled     bool
+	knowledgeVaultRuntimeRead bool
+	knowledgeVaultPath        string
+	knowledgeVaultIndex       string
 	// deprecatedLiveInput records old live-inbox switches that were supplied.
 	// They are accepted so existing service definitions keep starting, but they
 	// no longer select any behavior.
@@ -183,6 +184,7 @@ func parseServeOptions(name string, args []string) (serveOptions, error) {
 	dshBinary := flags.String("dsh-bin", envOr("AHA2_DSH_BIN", "dsh"), "DeepSeek Harness executable")
 	localOwnerIngest := flags.Bool("local-owner-ingest", envBool("AHA2_LOCAL_OWNER_INGEST"), "enable the loopback-only local owner message ingest endpoint")
 	knowledgeVaultEnabled := flags.Bool("knowledge-vault-enabled", envBool("AHA2_KNOWLEDGE_VAULT_ENABLED"), "startup default for the file-backed knowledge vault (the Web settings toggle takes precedence once used)")
+	knowledgeVaultRuntimeRead := flags.Bool("knowledge-vault-runtime-read", envBool("AHA2_KNOWLEDGE_VAULT_RUNTIME_READ"), "switch allowlisted projects' Agent knowledge and skills to the vault (default false; independent from the Web vault switch)")
 	knowledgeVaultPath := flags.String("knowledge-vault-path", os.Getenv("AHA2_KNOWLEDGE_VAULT_PATH"), "knowledge vault directory (default <data-dir>/knowledge-vault)")
 	knowledgeVaultIndex := flags.String("knowledge-vault-index", os.Getenv("AHA2_KNOWLEDGE_VAULT_INDEX"), "knowledge index database (default <data-dir>/knowledge-vault-index.db)")
 	// Live inbox delivery is always enabled when the runner can stream stdin.
@@ -207,6 +209,7 @@ func parseServeOptions(name string, args []string) (serveOptions, error) {
 		claudeBinary: *claudeBinary, dshBinary: *dshBinary,
 		localOwnerIngest:           *localOwnerIngest,
 		knowledgeVaultEnabled:      *knowledgeVaultEnabled,
+		knowledgeVaultRuntimeRead:  *knowledgeVaultRuntimeRead,
 		knowledgeVaultPath:         *knowledgeVaultPath,
 		knowledgeVaultIndex:        *knowledgeVaultIndex,
 		deprecatedLiveInput:        deprecatedLiveInput,
@@ -323,6 +326,7 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	}
 	logger.Info("knowledge vault runtime switch",
 		"enabled", knowledgeVaultManager.Enabled(), "source", vaultSource,
+		"runtime_read", options.knowledgeVaultRuntimeRead,
 		"vault", knowledgeVaultConfig.VaultPath, "index", knowledgeVaultConfig.IndexPath)
 	// The periodic sync worker gets its own pool over the same WAL file. Long
 	// export/pull phases no longer occupy the Web API connection; writes still
@@ -380,7 +384,7 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 		Settings: database,
 	}
 	appService := app.NewService(database, secretStore, executor)
-	appService.SetKnowledgeVault(knowledgeVaultManager)
+	appService.SetKnowledgeVault(knowledgeVaultManager, options.knowledgeVaultRuntimeRead)
 	appService.SetBuildInfo(version, webVersion, time.Now().UTC())
 	appService.MigratePetTaskGoal(ctx)
 	appService.StartPetTaskNotifications()

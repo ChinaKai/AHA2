@@ -101,6 +101,26 @@ func TestParseServiceRunOptions(t *testing.T) {
 	}
 }
 
+func TestKnowledgeVaultRuntimeReadDefaultsOff(t *testing.T) {
+	t.Setenv("AHA2_KNOWLEDGE_VAULT_RUNTIME_READ", "")
+	t.Setenv("AHA2_LISTEN", "")
+	t.Setenv("AHA2_DATA_DIR", "")
+	options, err := parseServeOptions("aha2 serve", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.knowledgeVaultRuntimeRead {
+		t.Fatal("runtime read gate must default to false")
+	}
+	options, err = parseServeOptions("aha2 serve", []string{"--knowledge-vault-runtime-read"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !options.knowledgeVaultRuntimeRead {
+		t.Fatal("runtime read flag was not applied")
+	}
+}
+
 // Live inbox delivery is always on. The old flags and environment variables are
 // still accepted so existing service definitions keep starting, but they are
 // reported as deprecated and cannot select any behavior.

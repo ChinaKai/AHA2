@@ -110,7 +110,7 @@ func vaultCanaryFiles() map[string]string {
 func TestVaultKnowledgeCanaryProjectsAndIsolation(t *testing.T) {
 	t.Setenv(knowledgeVaultReadProjectsEnv, petProjectID+","+aha2ProjectID)
 	manager := buildVaultReadManager(t, true, vaultCanaryFiles())
-	service := &Service{knowledgeVault: manager}
+	service := &Service{knowledgeVault: manager, knowledgeVaultRuntimeRead: true}
 	ctx := context.Background()
 
 	pet, ok := service.vaultKnowledgeForProject(ctx, petProjectID)
@@ -147,15 +147,41 @@ func TestVaultKnowledgeCanaryProjectsAndIsolation(t *testing.T) {
 	}
 }
 
+func TestVaultKnowledgeRuntimeReadGateDefaultsOff(t *testing.T) {
+	var zero Service
+	if zero.knowledgeVaultRuntimeRead {
+		t.Fatal("runtime read gate must default to false")
+	}
+
+	t.Setenv(knowledgeVaultReadProjectsEnv, petProjectID+","+aha2ProjectID)
+	files := vaultCanaryFiles()
+	files["global/skills/demo/SKILL.md"] = "---\nname: Demo\ndescription: Vault demo\n---\n\n# Vault Demo\n"
+	manager := buildVaultReadManager(t, true, files)
+	service := &Service{knowledgeVault: manager}
+	ctx := context.Background()
+
+	for _, projectID := range []string{petProjectID, aha2ProjectID} {
+		if _, ok := service.vaultKnowledgeForProject(ctx, projectID); ok {
+			t.Fatalf("runtime gate off still read vault knowledge for %s", projectID)
+		}
+		legacy := []domain.SkillFile{{Path: "SKILL.md", Content: "legacy"}}
+		skills := []domain.Skill{{ID: "skill_demo", Scope: "global", PackageSlug: "demo", PackageFiles: legacy}}
+		result := service.applyVaultSkillPackages(ctx, projectID, skills)
+		if len(result[0].PackageFiles) != 1 || result[0].PackageFiles[0].Content != "legacy" {
+			t.Fatalf("runtime gate off still loaded vault skills for %s: %#v", projectID, result[0].PackageFiles)
+		}
+	}
+}
+
 func TestVaultKnowledgeFallsBackWhenDisabledOrUnbound(t *testing.T) {
 	t.Setenv(knowledgeVaultReadProjectsEnv, petProjectID+","+aha2ProjectID)
 	disabled := buildVaultReadManager(t, false, vaultCanaryFiles())
-	if _, ok := (&Service{knowledgeVault: disabled}).vaultKnowledgeForProject(context.Background(), petProjectID); ok {
+	if _, ok := (&Service{knowledgeVault: disabled, knowledgeVaultRuntimeRead: true}).vaultKnowledgeForProject(context.Background(), petProjectID); ok {
 		t.Fatal("disabled vault was treated as a read source")
 	}
 
 	manager := buildVaultReadManager(t, true, map[string]string{})
-	if _, ok := (&Service{knowledgeVault: manager}).vaultKnowledgeForProject(context.Background(), petProjectID); ok {
+	if _, ok := (&Service{knowledgeVault: manager, knowledgeVaultRuntimeRead: true}).vaultKnowledgeForProject(context.Background(), petProjectID); ok {
 		t.Fatal("unbound vault project was treated as a read source")
 	}
 }
@@ -169,7 +195,7 @@ func TestApplyVaultSkillPackagesUsesVaultAndFallsBack(t *testing.T) {
 		"projects/pet/skills/project-demo/SKILL.md":   "---\nname: Project Demo\ndescription: Project vault demo\n---\n\n# Project Vault Demo\n",
 		"projects/pet/skills/project-demo/scripts/go": "#!/bin/sh\necho project\n",
 	})
-	service := &Service{knowledgeVault: manager}
+	service := &Service{knowledgeVault: manager, knowledgeVaultRuntimeRead: true}
 	legacy := []domain.SkillFile{{Path: "SKILL.md", Content: "legacy"}}
 	skills := []domain.Skill{
 		{ID: "skill_demo", Scope: "global", PackageSlug: "demo", PackageFiles: legacy},

@@ -193,11 +193,14 @@ type Service struct {
 	agentAPI                    *agentapi.Capabilities
 	agentAPIURL                 string
 	// knowledgeVault is the optional canary read source. Nil keeps every
-	// project on the legacy knowledge tables.
-	knowledgeVault *knowledgevault.Manager
-	buildVersion   string
-	webVersion     string
-	startedAt      time.Time
+	// project on the legacy knowledge tables. knowledgeVaultRuntimeRead is a
+	// separate, default-off gate: the Web vault switch may be enabled while
+	// Agent turns still read the legacy DB.
+	knowledgeVault            *knowledgevault.Manager
+	knowledgeVaultRuntimeRead bool
+	buildVersion              string
+	webVersion                string
+	startedAt                 time.Time
 
 	// These four are detection seams. Production uses the workspace probe and
 	// the real host enumeration; tests substitute them so address selection can be
@@ -295,10 +298,12 @@ func (s *Service) SetAgentAPI(capabilities *agentapi.Capabilities, baseURL strin
 }
 
 // SetKnowledgeVault installs the optional canary read source. The allowlist is
-// evaluated per Turn, so callers can enable/disable the vault at runtime
-// without restarting the Service.
-func (s *Service) SetKnowledgeVault(manager *knowledgevault.Manager) {
+// evaluated per Turn, but runtimeRead is a separate default-off gate: enabling
+// the Web vault does not switch Agent knowledge or skills until the operator
+// explicitly turns runtime reading on.
+func (s *Service) SetKnowledgeVault(manager *knowledgevault.Manager, runtimeRead bool) {
 	s.knowledgeVault = manager
+	s.knowledgeVaultRuntimeRead = runtimeRead
 }
 
 // SetBuildInfo lets the pet's read-only inspection snapshot report the same
