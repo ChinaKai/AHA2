@@ -588,6 +588,11 @@ func (s *Service) ApplicableAgentKnowledge(ctx context.Context, claims agentapi.
 	}
 	if channelContext, channelErr := s.store.ChannelContextForInboxBatch(ctx, call.Turn.InboxBatchID); channelErr == nil {
 		if channelRouteMode(channelContext) == "task_route" {
+			if snapshot, ok := s.vaultKnowledgeForProject(ctx, call.Project.ID); ok {
+				items := append(append(snapshot.Project, snapshot.Global...), snapshot.Stale...)
+				markAgentKnowledgeWritable(items, s.AgentKnowledgePublishAllowed(ctx, call))
+				return items, nil
+			}
 			lines, _ := s.store.ListProductLines(ctx, call.Project.ID)
 			line := resolveProductLine(lines, call.Task.TargetBranch, call.Project.DefaultBranch)
 			project, _ := s.store.ListApplicableKnowledge(ctx, call.Project.ID, line.ID, []domain.KnowledgeStatus{domain.KnowledgeVerified, domain.KnowledgeStale})
@@ -602,6 +607,11 @@ func (s *Service) ApplicableAgentKnowledge(ctx context.Context, claims agentapi.
 			strings.TrimSpace(fmt.Sprint(channelContext["endpoint"])),
 			strings.TrimSpace(fmt.Sprint(channelContext["conversation_id"])),
 		)
+	}
+	if snapshot, ok := s.vaultKnowledgeForProject(ctx, call.Project.ID); ok {
+		items := append(append(snapshot.Project, snapshot.Global...), snapshot.Stale...)
+		markAgentKnowledgeWritable(items, s.AgentKnowledgePublishAllowed(ctx, call))
+		return items, nil
 	}
 	lines, _ := s.store.ListProductLines(ctx, call.Project.ID)
 	line := resolveProductLine(lines, call.Task.TargetBranch, call.Project.DefaultBranch)

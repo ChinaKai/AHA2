@@ -40,14 +40,17 @@ const (
 )
 
 type BuildInput struct {
-	Project                domain.Project
-	Workspace              domain.Workspace
-	Task                   domain.Task
-	Agent                  domain.TaskAgent
-	Snapshot               domain.RuntimeConfigSnapshot
-	GlobalKnowledge        []domain.KnowledgeEntry
-	ProjectKnowledge       []domain.KnowledgeEntry
-	StaleKnowledge         []domain.KnowledgeEntry
+	Project          domain.Project
+	Workspace        domain.Workspace
+	Task             domain.Task
+	Agent            domain.TaskAgent
+	Snapshot         domain.RuntimeConfigSnapshot
+	GlobalKnowledge  []domain.KnowledgeEntry
+	ProjectKnowledge []domain.KnowledgeEntry
+	StaleKnowledge   []domain.KnowledgeEntry
+	// KnowledgeGuide is the slim vault guide injected ahead of the knowledge
+	// tree. It explains boundaries and the Agent API in every Turn.
+	KnowledgeGuide         string
 	Skills                 []domain.Skill
 	ProductLine            domain.ProductLine
 	KnowledgeEnabled       bool
@@ -1396,7 +1399,15 @@ func joinPathTail(segments []string, depth int) string {
 
 func knowledgeResources(input BuildInput, root string) []ContextResource {
 	directory := joinContextPath(input, root, "knowledge")
-	resources := knowledgeScopeResources(input, directory, "global", input.GlobalKnowledge)
+	resources := []ContextResource{}
+	if guide := strings.TrimSpace(input.KnowledgeGuide); guide != "" {
+		description := "知识库使用指南：目录结构、读写边界、类型、反馈和 Agent API 限制"
+		if domain.NormalizeLanguage(input.Language) == domain.LanguageEnglish {
+			description = "Knowledge-base guide: layout, scope boundaries, types, feedback, and Agent API limits"
+		}
+		resources = append(resources, resource(input, "knowledge-guide", joinContextPath(input, directory, "guide.md"), description, guide))
+	}
+	resources = append(resources, knowledgeScopeResources(input, directory, "global", input.GlobalKnowledge)...)
 	resources = append(resources, knowledgeScopeResources(input, directory, "project", input.ProjectKnowledge)...)
 	return append(resources, staleKnowledgeResources(input, directory, input.StaleKnowledge)...)
 }

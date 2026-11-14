@@ -197,8 +197,23 @@ func (i *Index) Rebuild(ctx context.Context, vaultPath string) (RebuildReport, e
 	}
 	manifest, manifestErr := ReadManifest(absoluteVault)
 	report := RebuildReport{VaultPath: absoluteVault, IndexPath: i.path, RebuiltAt: time.Now().UTC().Format(time.RFC3339)}
-	if manifestErr != nil && !os.IsNotExist(manifestErr) {
-		report.Warnings = append(report.Warnings, "manifest could not be read: "+firstLine(manifestErr.Error()))
+	if manifestErr != nil {
+		if os.IsNotExist(manifestErr) {
+			manifest = defaultManifest(absoluteVault, "", time.Now().UTC())
+			if err := writeManifest(absoluteVault, manifest); err != nil {
+				return report, fmt.Errorf("create vault manifest: %w", err)
+			}
+		} else {
+			report.Warnings = append(report.Warnings, "manifest could not be read: "+firstLine(manifestErr.Error()))
+		}
+	}
+	if manifestErr == nil || os.IsNotExist(manifestErr) {
+		derived, deriveWarnings, deriveErr := deriveManifest(absoluteVault, manifest, time.Now().UTC())
+		report.Warnings = append(report.Warnings, deriveWarnings...)
+		if deriveErr != nil {
+			return report, deriveErr
+		}
+		manifest = derived
 	}
 	reverseProjects := reverseSlugMap(manifest.Projects)
 	reverseArchives := reverseSlugMap(manifest.Archives)
@@ -336,6 +351,7 @@ func (i *Index) Rebuild(ctx context.Context, vaultPath string) (RebuildReport, e
 	}
 	report.Entries = len(records)
 	report.Warnings = append(report.Warnings, vaultWarnings...)
+	report.Warnings = append(report.Warnings, maintainVaultIndexes(absoluteVault, records)...)
 	report.Warnings = capWarnings(report.Warnings, 200)
 	for _, record := range records {
 		switch record.entry.Scope {

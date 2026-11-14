@@ -8,6 +8,7 @@ import (
 
 	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/domain"
+	"github.com/ChinaKai/AHA2/internal/knowledgevault"
 	"github.com/ChinaKai/AHA2/internal/store"
 )
 
@@ -245,6 +246,23 @@ func (s *Server) setAgentChannelReplyDecision(writer http.ResponseWriter, reques
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"ok": true, "decision": payload.Decision, "inbound_receipt_id": payload.InboundReceiptID,
 	})
+}
+
+func (s *Server) agentKnowledgeGuide(writer http.ResponseWriter, request *http.Request) {
+	if s.knowledgeVault == nil {
+		writeError(writer, http.StatusNotFound, "knowledge_guide_not_found")
+		return
+	}
+	guide, err := s.knowledgeVault.Guide()
+	if err != nil {
+		if errors.Is(err, knowledgevault.ErrGuideNotFound) {
+			writeError(writer, http.StatusNotFound, "knowledge_guide_not_found")
+			return
+		}
+		writeErrorDetail(writer, http.StatusInternalServerError, "knowledge_guide_unavailable", err.Error())
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "guide": guide})
 }
 
 func (s *Server) agentKnowledge(writer http.ResponseWriter, request *http.Request) {

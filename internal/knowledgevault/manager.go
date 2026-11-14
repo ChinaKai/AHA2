@@ -56,6 +56,13 @@ func NewManager(config Config) (*Manager, error) {
 
 func (m *Manager) Config() Config { return m.config }
 
+// Guide reads the canonical guide directly from disk. It intentionally does
+// not require the runtime switch or a rebuilt index: the Agent API must be
+// able to explain the vault while the index is being repaired.
+func (m *Manager) Guide() (Guide, error) {
+	return ReadGuide(m.config.VaultPath)
+}
+
 func (m *Manager) Enabled() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

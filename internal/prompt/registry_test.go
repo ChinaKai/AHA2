@@ -1050,3 +1050,23 @@ func TestBuildInjectsDefaultGuideTemplateReference(t *testing.T) {
 		t.Fatalf("guide context advertised variables: %s", content)
 	}
 }
+
+func TestKnowledgeGuideIsMaterializedAheadOfScopeResources(t *testing.T) {
+	input := BuildInput{
+		Task:           domain.Task{ID: "task_guide"},
+		Agent:          domain.TaskAgent{AgentID: "main"},
+		Workspace:      domain.Workspace{Transport: "native"},
+		Language:       domain.LanguageSimplified,
+		KnowledgeGuide: "# 知识库使用指南（精简）\n\n先搜索再写。",
+	}
+	resources := knowledgeResources(input, "")
+	if len(resources) == 0 || resources[0].ID != "knowledge-guide" {
+		t.Fatalf("guide resource = %#v", resources)
+	}
+	if !strings.HasSuffix(filepath.ToSlash(resources[0].Path), "knowledge/guide.md") {
+		t.Fatalf("guide path = %s", resources[0].Path)
+	}
+	if resources[0].Content != input.KnowledgeGuide || !resources[0].EntryPoint {
+		t.Fatalf("guide content was not preserved: %#v", resources[0])
+	}
+}

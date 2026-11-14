@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // ErrReaderNotReady is returned when a read API is called before the vault or
@@ -20,6 +21,10 @@ var ErrReaderNotReady = errors.New("knowledge vault index is not ready")
 
 // ErrDocumentNotFound reports an id or path that is not present in the index.
 var ErrDocumentNotFound = errors.New("knowledge vault document not found")
+
+// maxSkillPackageFileSize mirrors the legacy loader cap so switching sources
+// never changes which files are materialized.
+const maxSkillPackageFileSize = 2 << 20
 
 // Reader is the single read-only entry point for the Phase 2 Web API. It never
 // writes the vault or the index: the index is opened with SQLite mode=ro and
@@ -90,6 +95,90 @@ func (r *Reader) Config() Config     { return r.config }
 func (r *Reader) VaultReady() bool   { return r.vaultReady }
 func (r *Reader) IndexReady() bool   { return r.indexReady }
 func (r *Reader) Manifest() Manifest { return r.manifest }
+
+// Guide returns the canonical knowledge-base guide. It reads the file directly
+// so the guide remains available even when the index is missing.
+func (r *Reader) Guide() (Guide, error) {
+	if !r.vaultReady {
+		return Guide{}, ErrGuideNotFound
+	}
+	return ReadGuide(r.config.VaultPath)
+}
+
+// Entries returns raw index rows for one scope/project. Callers are responsible
+// for filtering status, archives and reserved paths for their own surface.
+func (r *Reader) Entries(ctx context.Context, scope, projectID string) ([]IndexEntry, error) {
+	if !r.indexReady {
+		return nil, ErrReaderNotReady
+	}
+	return r.index.Entries(ctx, scope, projectID)
+}
+
+// SkillPackageFile is one text file inside a vault skill package.
+type SkillPackageFile struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+}
+
+// ErrSkillPackageNotFound reports a missing SKILL.md so the caller can fall
+// back to the legacy flat skill directory.
+var ErrSkillPackageNotFound = errors.New("knowledge vault skill package not found")
+
+// SkillFiles reads a vault skill package relative to the vault root. Binary
+// and oversized files are skipped; the legacy loader applies the same limits.
+func (r *Reader) SkillFiles(relative string) ([]SkillPackageFile, error) {
+	if !r.vaultReady {
+		return nil, ErrSkillPackageNotFound
+	}
+	relative = filepath.ToSlash(filepath.Clean(strings.TrimSpace(relative)))
+	if relative == "" || relative == "." || strings.HasPrefix(relative, "../") {
+		return nil, ErrSkillPackageNotFound
+	}
+	directory := filepath.Join(r.config.VaultPath, filepath.FromSlash(relative))
+	if !IsInsideRoot(r.config.VaultPath, directory) {
+		return nil, ErrSkillPackageNotFound
+	}
+	if _, err := os.Stat(filepath.Join(directory, "SKILL.md")); err != nil {
+		return nil, ErrSkillPackageNotFound
+	}
+	files := []SkillPackageFile{}
+	err := filepath.WalkDir(directory, func(filePath string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		if entry.IsDir() {
+			if entry.Name() == ".git" || entry.Name() == "node_modules" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil || info.Size() > maxSkillPackageFileSize {
+			return nil
+		}
+		relativeFile, relErr := filepath.Rel(directory, filePath)
+		if relErr != nil || strings.HasPrefix(relativeFile, "..") {
+			return nil
+		}
+		data, readErr := os.ReadFile(filePath)
+		if readErr != nil {
+			return nil
+		}
+		if !utf8.Valid(data) || strings.ContainsRune(string(data), '\x00') {
+			return nil
+		}
+		files = append(files, SkillPackageFile{Path: filepath.ToSlash(relativeFile), Content: string(data)})
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(files, func(left, right int) bool { return files[left].Path < files[right].Path })
+	return files, nil
+}
 
 // Library is one selectable source in the top-level library picker.
 type Library struct {

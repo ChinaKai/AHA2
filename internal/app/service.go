@@ -21,6 +21,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/backend"
 	"github.com/ChinaKai/AHA2/internal/codexaccount"
 	"github.com/ChinaKai/AHA2/internal/domain"
+	"github.com/ChinaKai/AHA2/internal/knowledgevault"
 	"github.com/ChinaKai/AHA2/internal/prompt"
 	"github.com/ChinaKai/AHA2/internal/proxyconfig"
 	"github.com/ChinaKai/AHA2/internal/secrets"
@@ -191,9 +192,12 @@ type Service struct {
 	petApprovalExecutionTimeout time.Duration
 	agentAPI                    *agentapi.Capabilities
 	agentAPIURL                 string
-	buildVersion                string
-	webVersion                  string
-	startedAt                   time.Time
+	// knowledgeVault is the optional canary read source. Nil keeps every
+	// project on the legacy knowledge tables.
+	knowledgeVault *knowledgevault.Manager
+	buildVersion   string
+	webVersion     string
+	startedAt      time.Time
 
 	// These four are detection seams. Production uses the workspace probe and
 	// the real host enumeration; tests substitute them so address selection can be
@@ -288,6 +292,13 @@ func (s *Service) SetCodexAccountManager(manager *codexaccount.Manager) {
 func (s *Service) SetAgentAPI(capabilities *agentapi.Capabilities, baseURL string) {
 	s.agentAPI = capabilities
 	s.agentAPIURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+}
+
+// SetKnowledgeVault installs the optional canary read source. The allowlist is
+// evaluated per Turn, so callers can enable/disable the vault at runtime
+// without restarting the Service.
+func (s *Service) SetKnowledgeVault(manager *knowledgevault.Manager) {
+	s.knowledgeVault = manager
 }
 
 // SetBuildInfo lets the pet's read-only inspection snapshot report the same
@@ -1177,24 +1188,39 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 	} else if kbEnabled {
 		lines, _ := s.store.ListProductLines(ctx, project.ID)
 		productLine = resolveProductLine(lines, task.TargetBranch, project.DefaultBranch)
-		globalKB, _ = s.store.ListKnowledge(ctx, "global", "", []domain.KnowledgeStatus{domain.KnowledgeVerified})
-		projectKB, _ = s.store.ListApplicableKnowledge(ctx, project.ID, productLine.ID, []domain.KnowledgeStatus{domain.KnowledgeVerified})
-		globalStale, _ := s.store.ListKnowledge(ctx, "global", "", []domain.KnowledgeStatus{domain.KnowledgeStale})
-		projectStale, _ := s.store.ListApplicableKnowledge(ctx, project.ID, productLine.ID, []domain.KnowledgeStatus{domain.KnowledgeStale})
-		pending, _ := s.store.ListKnowledgeProposals(ctx, "", "")
-		pendingEntries := map[string]bool{}
-		for _, proposal := range pending {
-			if proposal.Status == domain.KnowledgeProposalPending {
-				pendingEntries[proposal.EntryID] = true
+		if snapshot, ok := s.vaultKnowledgeForProject(ctx, project.ID); ok {
+			globalKB, projectKB = snapshot.Global, snapshot.Project
+			pendingEntries := s.vaultPendingKnowledgeIDs(ctx)
+			for _, entry := range snapshot.Stale {
+				if !pendingEntries[entry.ID] {
+					staleKB = append(staleKB, entry)
+				}
 			}
-		}
-		for _, entry := range append(globalStale, projectStale...) {
-			if !entry.IsIndex && !pendingEntries[entry.ID] {
-				staleKB = append(staleKB, entry)
+		} else {
+			globalKB, _ = s.store.ListKnowledge(ctx, "global", "", []domain.KnowledgeStatus{domain.KnowledgeVerified})
+			projectKB, _ = s.store.ListApplicableKnowledge(ctx, project.ID, productLine.ID, []domain.KnowledgeStatus{domain.KnowledgeVerified})
+			globalStale, _ := s.store.ListKnowledge(ctx, "global", "", []domain.KnowledgeStatus{domain.KnowledgeStale})
+			projectStale, _ := s.store.ListApplicableKnowledge(ctx, project.ID, productLine.ID, []domain.KnowledgeStatus{domain.KnowledgeStale})
+			pending, _ := s.store.ListKnowledgeProposals(ctx, "", "")
+			pendingEntries := map[string]bool{}
+			for _, proposal := range pending {
+				if proposal.Status == domain.KnowledgeProposalPending {
+					pendingEntries[proposal.EntryID] = true
+				}
+			}
+			for _, entry := range append(globalStale, projectStale...) {
+				if !entry.IsIndex && !pendingEntries[entry.ID] {
+					staleKB = append(staleKB, entry)
+				}
 			}
 		}
 	}
 	skills = s.activeTaskSkills(ctx, task)
+	skills = s.applyVaultSkillPackages(ctx, project.ID, skills)
+	knowledgeGuide := ""
+	if kbEnabled {
+		knowledgeGuide = s.knowledgeGuidePrompt()
+	}
 	agent, err := s.store.TaskAgent(ctx, task.ID, turn.AgentID)
 	if err != nil {
 		s.failTurn(ctx, &turn, task, err)
@@ -1311,7 +1337,7 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 	}
 	preview, err := s.prompts.Build(ctx, prompt.BuildInput{
 		Project: project, Workspace: workspace, Task: task, Agent: agent, Snapshot: snapshot,
-		GlobalKnowledge: globalKB, ProjectKnowledge: projectKB, StaleKnowledge: staleKB, Skills: skills,
+		GlobalKnowledge: globalKB, ProjectKnowledge: projectKB, StaleKnowledge: staleKB, KnowledgeGuide: knowledgeGuide, Skills: skills,
 		ProductLine: productLine, KnowledgeEnabled: kbEnabled,
 		Conversation: promptConversation, Turns: allTurns, Hardware: hardwareGroups,
 		MailAccounts: mailAccounts, MailTemplates: mailTemplates, MailDefaultTemplates: mailDefaultTemplates,

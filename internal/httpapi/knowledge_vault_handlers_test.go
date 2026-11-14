@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -271,5 +272,39 @@ func assertNoTreePath(t *testing.T, nodes []any, forbidden string) {
 		if children, ok := node["children"].([]any); ok {
 			assertNoTreePath(t, children, forbidden)
 		}
+	}
+}
+
+func TestAgentKnowledgeGuideHandler(t *testing.T) {
+	manager := knowledgeVaultManagerFixture(t)
+	server := &Server{knowledgeVault: manager}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/agent/knowledge/guide", nil)
+	recorder := httptest.NewRecorder()
+	server.agentKnowledgeGuide(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("guide status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var payload struct {
+		OK    bool                 `json:"ok"`
+		Guide knowledgevault.Guide `json:"guide"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.OK || payload.Guide.Path != knowledgevault.GuideRelativePath || payload.Guide.Prompt == "" {
+		t.Fatalf("guide payload = %#v", payload)
+	}
+
+	recorder = httptest.NewRecorder()
+	server.agentKnowledgeGuide(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("second guide status = %d", recorder.Code)
+	}
+
+	empty := &Server{}
+	recorder = httptest.NewRecorder()
+	empty.agentKnowledgeGuide(recorder, request)
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("missing manager status = %d", recorder.Code)
 	}
 }

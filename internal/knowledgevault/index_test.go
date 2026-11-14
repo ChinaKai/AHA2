@@ -42,7 +42,7 @@ func TestRebuildProjectsVaultTree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Entries != 16 || report.Global != 8 || report.Projects != 6 || report.Archives != 2 {
+	if report.Entries != 17 || report.Global != 9 || report.Projects != 6 || report.Archives != 2 {
 		t.Fatalf("rebuild counts = %+v", report)
 	}
 	if report.Links != 1 || report.Tags != 0 {
@@ -56,8 +56,8 @@ func TestRebuildProjectsVaultTree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 16 {
-		t.Fatalf("entries = %d, want 16", len(entries))
+	if len(entries) != 17 {
+		t.Fatalf("entries = %d, want 17", len(entries))
 	}
 	globalRoot := findIndexEntry(t, entries, "global/index.md")
 	if !globalRoot.IsIndex || globalRoot.Scope != "global" || globalRoot.Type != TypeNavigation {
@@ -83,7 +83,7 @@ func TestRebuildProjectsVaultTree(t *testing.T) {
 		t.Fatalf("archive type mapping = %+v", archive)
 	}
 
-	results, err := index.Search(ctx, "部署", SearchOptions{})
+	results, err := index.Search(ctx, "部署前先验证", SearchOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,14 +97,14 @@ func TestRebuildProjectsVaultTree(t *testing.T) {
 	if len(scoped) != 2 {
 		t.Fatalf("project search = %+v", scoped)
 	}
-	archived, err := index.Search(ctx, "归档", SearchOptions{IncludeArchives: true})
+	archived, err := index.Search(ctx, "AHA1 归档内容", SearchOptions{IncludeArchives: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(archived) != 1 || archived[0].Scope != "archive" {
 		t.Fatalf("archive search = %+v", archived)
 	}
-	hidden, err := index.Search(ctx, "归档", SearchOptions{})
+	hidden, err := index.Search(ctx, "AHA1 归档内容", SearchOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestRebuildProjectsVaultTree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.Entries != 16 || status.Global != 8 || status.Projects != 6 || status.Archives != 2 {
+	if status.Entries != 17 || status.Global != 9 || status.Projects != 6 || status.Archives != 2 {
 		t.Fatalf("index status = %+v", status)
 	}
 	if status.Links != 1 || status.RebuiltAt == "" {
@@ -203,8 +203,8 @@ func TestRebuildKeepsMalformedFrontmatterFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Entries != 17 {
-		t.Fatalf("entries = %d, want 17", report.Entries)
+	if report.Entries != 18 {
+		t.Fatalf("entries = %d, want 18", report.Entries)
 	}
 	foundWarning := false
 	for _, warning := range report.Warnings {
@@ -256,8 +256,8 @@ func TestRebuildSkipsSymlinkEscape(t *testing.T) {
 	if report.Skipped == 0 {
 		t.Fatal("symlink was not counted as skipped")
 	}
-	if report.Entries != 16 {
-		t.Fatalf("entries = %d, want 16", report.Entries)
+	if report.Entries != 17 {
+		t.Fatalf("entries = %d, want 17", report.Entries)
 	}
 	foundWarning := false
 	for _, warning := range report.Warnings {

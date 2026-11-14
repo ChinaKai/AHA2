@@ -494,6 +494,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/agent/channel/reply-decision", s.withAgentCapability(http.HandlerFunc(s.setAgentChannelReplyDecision)))
 	mux.Handle("POST /api/v1/agent/turn/attachments", s.withAgentCapability(http.HandlerFunc(s.uploadAgentAttachment)))
 	mux.Handle("GET /api/v1/agent/knowledge", s.withAgentCapability(http.HandlerFunc(s.agentKnowledge)))
+	mux.Handle("GET /api/v1/agent/knowledge/guide", s.withAgentCapability(http.HandlerFunc(s.agentKnowledgeGuide)))
 	mux.Handle("GET /api/v1/agent/knowledge/{knowledge}", s.withAgentCapability(http.HandlerFunc(s.agentKnowledgeEntry)))
 	mux.Handle("POST /api/v1/agent/knowledge/candidates", s.withAgentCapability(http.HandlerFunc(s.submitAgentKnowledge)))
 	mux.Handle("POST /api/v1/agent/knowledge/{knowledge}/feedback", s.withAgentCapability(http.HandlerFunc(s.submitAgentKnowledgeFeedback)))

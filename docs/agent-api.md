@@ -142,6 +142,7 @@ POST /api/v1/agent/channel/reply-decision
 ```text
 GET  /api/v1/agent/knowledge
 GET  /api/v1/agent/knowledge/{id}
+GET  /api/v1/agent/knowledge/guide
 POST /api/v1/agent/knowledge/candidates
 POST /api/v1/agent/knowledge/{id}/feedback
 GET  /api/v1/agent/skills
@@ -149,6 +150,13 @@ POST /api/v1/agent/skills
 GET  /api/v1/agent/skills/{id}
 PUT  /api/v1/agent/skills/{id}
 ```
+
+`GET /api/v1/agent/knowledge/guide` returns the vault usage guide at
+`global/general/knowledge-base-guide.md` with `path`, `title`, full `content`
+and the slim `prompt` block injected into Task Prompts. It reads the file
+directly, so it still works while the index is rebuilding; when the file is
+missing the endpoint returns 404 and Task Prompts use the built-in fallback.
+The guide is not repeated inside the regular knowledge list.
 
 `GET /api/v1/agent/knowledge` marks bound project entries with `binding_mode` and
 `can_propose_revision`. A `project` binding allows the current Project's Main

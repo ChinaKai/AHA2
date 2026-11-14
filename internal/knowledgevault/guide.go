@@ -1,0 +1,190 @@
+package knowledgevault
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+const (
+	// GuideRelativePath is the canonical, human-readable vault usage guide. It
+	// stays a normal vault document so it shows up in Obsidian and in the Web
+	// knowledge tree, while the Agent API and the Task Prompt read it directly.
+	GuideRelativePath = "global/general/knowledge-base-guide.md"
+	// GuideTitle is used when the guide file has no readable title.
+	GuideTitle = "知识库使用指南"
+
+	guidePromptStart = "<!-- aha-vault:prompt:start -->"
+	guidePromptEnd   = "<!-- aha-vault:prompt:end -->"
+)
+
+// Guide is the full guide document plus the slim prompt section. Content is
+// the on-disk Markdown (frontmatter included); Prompt is what every Task
+// receives, so it must stay short enough to survive context compaction.
+type Guide struct {
+	Path    string `json:"path"`
+	Title   string `json:"title"`
+	Content string `json:"content"`
+	Prompt  string `json:"prompt"`
+}
+
+// ErrGuideNotFound reports a vault without the canonical guide file.
+var ErrGuideNotFound = fmt.Errorf("knowledge guide not found at %s", GuideRelativePath)
+
+// ReadGuide reads the guide from a vault. It does not require a rebuilt index:
+// the guide is the one document that must remain readable when the index is
+// being rebuilt or missing.
+func ReadGuide(vaultPath string) (Guide, error) {
+	vaultPath = strings.TrimSpace(vaultPath)
+	if vaultPath == "" {
+		return Guide{}, ErrGuideNotFound
+	}
+	target := filepath.Join(vaultPath, filepath.FromSlash(GuideRelativePath))
+	if !IsInsideRoot(vaultPath, target) {
+		return Guide{}, fmt.Errorf("knowledge guide escapes the vault root")
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return Guide{}, ErrGuideNotFound
+		}
+		return Guide{}, fmt.Errorf("read knowledge guide: %w", err)
+	}
+	content := string(data)
+	document := ParseDocument(content)
+	title := strings.TrimSpace(document.Frontmatter.Title)
+	if title == "" {
+		title = FirstHeading(document.Body)
+	}
+	if title == "" {
+		title = GuideTitle
+	}
+	prompt := extractPromptGuide(content)
+	if prompt == "" {
+		prompt = fallbackPromptGuide()
+	}
+	return Guide{Path: GuideRelativePath, Title: title, Content: content, Prompt: prompt}, nil
+}
+
+func extractPromptGuide(content string) string {
+	start := strings.Index(content, guidePromptStart)
+	if start < 0 {
+		return ""
+	}
+	start += len(guidePromptStart)
+	end := strings.Index(content[start:], guidePromptEnd)
+	if end < 0 {
+		return ""
+	}
+	return strings.TrimSpace(content[start : start+end])
+}
+
+func fallbackPromptGuide() string {
+	return strings.TrimSpace(`
+# 知识库使用指南（精简）
+- 知识库正本是 vault 文件：global/ 为跨项目知识，projects/<slug>/ 为项目知识；项目文档不得跨项目引用。
+- 六种 type：navigation、decision、practice、diagnostic、reference、architecture。写入前先搜索相同主题，优先更新已有文档。
+- 根下叶子文档放 inbox/；过时用 stale、错误用 wrong、有帮助用 helped 反馈，不要直接改状态。
+- 禁止凭据、密钥、个人隐私、大段日志/二进制、无证据猜测和可直接执行的攻击载荷。
+- Agent API：GET /api/v1/agent/knowledge、GET /api/v1/agent/knowledge/{id}、GET /api/v1/agent/knowledge/guide、POST /api/v1/agent/knowledge/candidates（每批 1–20 条，标题 ≤300 字符，正文 ≤20000 字符）、POST /api/v1/agent/knowledge/{id}/feedback。
+`)
+}
+
+func defaultGuideContent(now time.Time) string {
+	frontmatter := Frontmatter{
+		Title: GuideTitle, Slug: "knowledge-base-guide", Scope: "global",
+		Type: TypeNavigation, Status: "verified",
+		Created: now.UTC().Format(time.RFC3339), Updated: now.UTC().Format(time.RFC3339),
+	}
+	body := strings.TrimSpace(`
+本指南说明 AHA2 知识库的正本位置、写入边界和 Agent 使用方式。知识正文以 vault 文件为准，数据库只是可重建的索引。
+
+## 目录结构
+
+- ` + "`global/index.md`" + `：全局知识入口。
+- ` + "`global/general/`" + `：跨项目通用知识；本指南位于 ` + "`global/general/knowledge-base-guide.md`" + `。
+- ` + "`global/agent-lessons/`" + `：可复用的 Agent 技术诊断与行为教训。
+- ` + "`global/inbox/`" + `：尚未归入主题组的全局文档。
+- ` + "`projects/<slug>/index.md`" + `：项目知识入口；主题组是子目录，根下叶子文档放 ` + "`projects/<slug>/inbox/`" + `。
+- ` + "`archive/<slug>/`" + `：AHA1 归档库，单独标记，不并入主库。
+- ` + "`orphans/`" + `：无法判断归属的导出隔离区，不参与正常检索。
+- ` + "`global/skills/<slug>/`" + `、` + "`projects/<slug>/skills/<slug>/`" + `：技能包。
+- ` + "`.trash/`" + `：删除暂存；不作为有效知识。
+
+## global 与 project 的边界
+
+- 只有可跨项目复用的方法、决策和参考资料写入 ` + "`global/`" + `。
+- 依赖某个仓库、分支、部署环境或客户配置的内容写入对应 ` + "`projects/<slug>/`" + `。
+- 项目知识不得被其他项目引用；跨项目复用时先在 global 建立脱敏后的通用版本。
+- 不确定归属时先放项目 ` + "`inbox/`" + `，不要凭空创建新项目目录。
+
+## 六种规范 type
+
+- ` + "`navigation`" + `：目录页、入口和阅读路径。
+- ` + "`decision`" + `：已做出的取舍、原因和被否决方案。
+- ` + "`practice`" + `：可复用的操作步骤与约定。
+- ` + "`diagnostic`" + `：故障现象、定位过程和根因。
+- ` + "`reference`" + `：稳定的参数、接口、路径和清单。
+- ` + "`architecture`" + `：模块边界、数据流和长期结构。
+
+旧类型只能保留在 ` + "`legacy_type`" + `，新文档必须使用上述六种之一。
+
+## 先搜后写
+
+写入前先搜索标题、slug、标签和正文关键词。已有主题应更新原文档，而不是新建近似重复项。新文档必须有明确标题、摘要和 ` + "`type`" + `；目录页由重建索引自动维护，不要手工改写 ` + "`<!-- aha-vault:index:start -->`" + ` 到 ` + "`<!-- aha-vault:index:end -->`" + ` 之间的内容。
+
+## inbox
+
+根目录下没有主题组的叶子文档放入 ` + "`inbox/`" + `；inbox 是待整理区，不作为长期分类。整理时移动到主题子目录，并保留原有正文。
+
+## stale / wrong / helped
+
+- ` + "`stale`" + `：内容可能过时，需要结合当前代码重新验证。
+- ` + "`wrong`" + `：已确认错误，不能继续作为事实。
+- ` + "`helped`" + `：本文档对当前任务有帮助，用于反馈排序。
+
+不要直接把 stale/wrong 改回 verified。修订必须基于本轮代码、测试或文档证据，通过候选提案提交。
+
+## 禁止内容
+
+- 密码、令牌、私钥、Cookie、连接串等凭据与密钥。
+- 个人隐私、客户敏感数据、未脱敏的内部地址。
+- 大段原始日志、二进制内容、完整数据库转储。
+- 没有证据的猜测、攻击指令，以及可直接执行的恶意载荷。
+
+## Agent API 端点与限制
+
+- ` + "`GET /api/v1/agent/knowledge`" + `：列出当前 Task 可读知识。
+- ` + "`GET /api/v1/agent/knowledge/{id}`" + `：读取单篇知识。
+- ` + "`GET /api/v1/agent/knowledge/guide`" + `：读取本指南。
+- ` + "`POST /api/v1/agent/knowledge/candidates`" + `：提交候选，每批 1–20 条。
+- ` + "`POST /api/v1/agent/knowledge/{id}/feedback`" + `：提交 ` + "`stale`" + `、` + "`wrong`" + ` 或 ` + "`helped`" + `。
+
+候选标题不超过 300 字符，正文不超过 20000 字符。写 API 和 auto-apply 未启用时，候选只进入待审队列，不会直接修改 vault。
+
+## Task Prompt 精简版
+
+以下区块会被注入 Task Prompt；修改时保持简短，不要在这里放凭据或长示例。
+
+` + guidePromptStart + `
+# 知识库使用指南（精简）
+- vault 是知识正本：global/ 跨项目，projects/<slug>/ 项目内；项目文档不得跨项目引用。
+- 六种 type：navigation、decision、practice、diagnostic、reference、architecture。
+- 先搜索再写；优先更新已有文档。根下叶子放 inbox/。
+- 过时用 stale、错误用 wrong、有帮助用 helped 反馈，不直接改状态。
+- 禁止凭据、隐私、大段日志/二进制、无证据猜测和恶意载荷。
+- API：GET /api/v1/agent/knowledge、GET /api/v1/agent/knowledge/{id}、GET /api/v1/agent/knowledge/guide、POST /api/v1/agent/knowledge/candidates（1–20 条，标题 ≤300、正文 ≤20000 字符）、POST /api/v1/agent/knowledge/{id}/feedback。
+` + guidePromptEnd + `
+`)
+	return renderDocumentPanicFree(frontmatter, body)
+}
+
+func renderDocumentPanicFree(frontmatter Frontmatter, body string) string {
+	content, err := renderDocument(frontmatter, body)
+	if err != nil {
+		return body
+	}
+	return content
+}

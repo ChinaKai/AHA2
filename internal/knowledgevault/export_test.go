@@ -348,7 +348,7 @@ func TestExportHandlesAcceptanceScale(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rebuild.Entries != 797 || rebuild.Global != 221 || rebuild.Projects != 576 || rebuild.Archives != 0 {
+	if rebuild.Entries != 798 || rebuild.Global != 222 || rebuild.Projects != 576 || rebuild.Archives != 0 {
 		t.Fatalf("rebuild counts = %+v", rebuild)
 	}
 	if rebuild.Warnings != nil {
@@ -597,7 +597,7 @@ func TestExportOrphansAreIsolatedAndReconciled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rebuild.Entries != 18 || rebuild.Orphans != 2 || rebuild.Global+rebuild.Projects+rebuild.Archives+rebuild.Orphans != rebuild.Entries {
+	if rebuild.Entries != 19 || rebuild.Orphans != 2 || rebuild.Global+rebuild.Projects+rebuild.Archives+rebuild.Orphans != rebuild.Entries {
 		t.Fatalf("rebuild did not account for orphans: %+v", rebuild)
 	}
 }
