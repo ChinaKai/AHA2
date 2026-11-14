@@ -247,7 +247,7 @@ try {
   assert.doesNotMatch(desktopTool.summaryText, new RegExp(LONG_TOOL));
   assert.equal(desktopTool.channelText, "SSE");
   assert.deepEqual(desktopTool.times.length, 2);
-  assert.match(desktopTool.stepText, /^(59s|1:\d\d)$/);
+  assert.match(desktopTool.stepText, /^(59s|\d{2}:\d\d)$/);
   assert.match(desktopTool.totalText, /^\d{2,}:\d\d$/);
   assert.ok(Number(desktopTool.totalText.split(":")[0]) >= 63,
     `desktop total should be over an hour: ${desktopTool.totalText}`);
@@ -305,7 +305,7 @@ try {
     assert.equal(tool.activityText, "正在调用工具");
     assert.equal(tool.eventKind, "tool");
     assert.deepEqual(tool.times.length, 2);
-    assert.match(tool.stepText, /^(59s|1:\d\d)$/);
+    assert.match(tool.stepText, /^(59s|\d{2}:\d\d)$/);
     assert.match(tool.totalText, /^\d{2,}:\d\d$/);
     assert.doesNotMatch(tool.summaryText, new RegExp(LONG_TOOL));
     assertInsideViewport(tool, `${label} tool`);

@@ -2022,7 +2022,14 @@ test("round card reports uncached turn input and hides ambiguous cache usage", a
 
 test("round summary shows the backend activity and collapses terminal rounds", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const {renderAgentTurnCard} = await import(pathToFileURL(resolve(root, "build", "task_agents.js")));
+  const taskAgentsURL = pathToFileURL(resolve(root, "build", "task_agents.js"));
+  const {renderAgentTurnCard} = await import(taskAgentsURL);
+  // build-web.mjs rewrites task_agents' i18n import to the versioned URL, so
+  // the card translates through that instance. Importing the bare i18n.js
+  // here would create a second instance and applyLocale would never reach it.
+  const agentSource = await readFile(resolve(root, "build", "task_agents.js"), "utf8");
+  const i18nImport = agentSource.match(/from "\.\/(i18n\.js\?v=[^"]+)"/)?.[1];
+  assert.ok(i18nImport, "task_agents.js must import the versioned i18n singleton");
   const base = {
     task: {id: "task-1", project_id: "project-1", workspace_id: "workspace-1", title: "Task", original_request: "", current_goal: "", status: "active", isolation: "inplace", collaboration_mode: "single", max_agents: 1, knowledge_policy: "inherit", skill_ids: [], total_tokens: 0, created_at: "", updated_at: ""},
     latest_round: {id: "round-1", task_id: "task-1", sequence: 2, status: "running", created_at: "", started_at_ms: Date.now() - 30000},
@@ -2092,7 +2099,7 @@ test("round summary shows the backend activity and collapses terminal rounds", a
   assert.doesNotMatch(failed, /role="status"/);
   assert.match(failed, /backend exploded/);
 
-  const i18n = await import(pathToFileURL(resolve(root, "build", "i18n.js")));
+  const i18n = await import(new URL(`./${i18nImport}`, taskAgentsURL).href);
   i18n.applyLocale("en-US");
   try {
     const english = renderAgentTurnCard({...base, activity: activity("tool")}, "live");

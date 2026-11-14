@@ -70,7 +70,7 @@ async function buildModules() {
     "app.js": ["api", "i18n", "icons", "lazy_page", "pet_approvals", "pet_workbench", "runtime_picker", "task_agents", "task_composer", "task_filters", "hardware_panel", "desktop_panel", "hardware_terminal", "task_tools", "markdown", "conversation_ui", "assistant", "backends", "ui_helpers", "model_health", "model_selection", "prompt_admin", "proxy_settings", "data_retention", "sync_settings", "codex_accounts", "hardware_resources", "knowledge_workspace", "channels", "resources", "mail_task", "mail_cards", "mail_resources", "command_palette", "mcp_page"],
     "model_selection.js": ["ui_helpers"],
     "runtime_picker.js": ["backends"],
-    "task_agents.js": ["icons", "runtime_picker", "ui_helpers"],
+    "task_agents.js": ["i18n", "icons", "runtime_picker", "ui_helpers"],
     "conversation_ui.js": ["icons", "mail_cards", "markdown", "task_agents", "ui_helpers"],
     "task_composer.js": ["icons", "i18n"],
     "task_tools.js": ["icons", "hardware_panel", "desktop_panel", "task_agents"],
