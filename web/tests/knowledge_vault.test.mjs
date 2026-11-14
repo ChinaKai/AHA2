@@ -146,7 +146,7 @@ test("the page exposes exactly the four read-only entries and no edit or review 
   assert.doesNotMatch(html, /全局知识首页/, "the library root index is not a folder row");
   assert.match(html, /<span class="kv-tree-title">general<\/span>/);
   assert.match(html, /<span class="kv-tree-title">inbox<\/span>/);
-  assert.match(html, /<nav class="kv-tree-panel" aria-label="目录">/, "tree is a nav, not a fake tree role");
+  assert.match(html, /<nav id="kv-tree-panel" class="kv-tree-panel" aria-label="目录">/, "tree is a nav, not a fake tree role");
   assert.doesNotMatch(html, /role="tree"/);
   assert.match(html, /data-kv-toggle="g-general"[^>]*aria-expanded="false"/);
   assert.doesNotMatch(html, /href="#knowledge\?doc=doc-1&amp;scope=global"/, "folder children start hidden");
@@ -226,6 +226,68 @@ test("directory rows open their index document once and never repeat index.md as
   assert.equal(folderLink.includes("kv-badge"), false, "directory rows do not carry index or navigation badges");
   assert.match(html, /kv-tree-folder-icon/, "directories use a folder icon");
   assert.match(html, /kv-badge-type[^>]*>实践</, "leaf documents keep their type badge");
+});
+
+test("folder icons toggle, titles open the index, and document titles align under folder titles", () => {
+  const tree = vault.buildVaultDirectoryTree([
+    treeFixture("g-root", "全局知识首页", "global/index.md", [
+      treeFixture("g-full", "完整目录", "global/full/index.md", [
+        treeFixture("g-sub", "子目录", "global/full/sub/index.md", []),
+        {id: "g-leaf", title: "同级文档", path: "global/full/leaf.md", type: "practice", status: "verified", scope: "global", is_index: false, system: false, children: []},
+      ]),
+      treeFixture("g-empty", "只有索引", "global/empty/index.md", []),
+      {id: "g-inbox-doc", title: "收件箱文档", path: "global/inbox/idea.md", type: "practice", status: "unverified", scope: "global", is_index: false, system: false, children: []},
+    ]),
+  ], "global");
+  reset({tree, expanded: new Set(["g-full"])});
+  const html = vault.renderKnowledgeVaultPage(context());
+
+  // The folder icon is its own button; the title is an independent link.
+  const fullRow = html.match(/<div class="kv-tree-row kv-tree-row-toggle" data-kv-row-toggle="g-full">[\s\S]*?<\/div>/)?.[0] || "";
+  assert.match(fullRow, /<button type="button" class="kv-tree-toggle" data-kv-toggle="g-full" aria-expanded="true"/);
+  assert.match(fullRow, /<a class="kv-tree-link kv-tree-folder-link" href="#knowledge\?doc=g-full&amp;scope=global" data-kv-doc="g-full"/);
+  assert.equal(fullRow.indexOf("data-kv-toggle=\"g-full\"") < fullRow.indexOf("data-kv-doc=\"g-full\""), true, "icon precedes the title link");
+  assert.doesNotMatch(fullRow, /<a[^>]*data-kv-doc="g-full"[^>]*>[^<]*<button/);
+
+  // A folder with an index but no children keeps a blank icon slot; only the
+  // title link opens the index.
+  const emptyRow = html.match(/<div class="kv-tree-row">\s*<span class="kv-tree-toggle-space"[\s\S]*?data-kv-doc="g-empty"[\s\S]*?<\/div>/)?.[0] || "";
+  assert.match(emptyRow, /kv-tree-toggle-space/);
+  assert.match(emptyRow, /data-kv-doc="g-empty"/);
+  assert.doesNotMatch(emptyRow, /data-kv-toggle="/);
+  assert.doesNotMatch(emptyRow, /data-kv-row-toggle/);
+
+  // Virtual directories have no index; the row itself is the control.
+  const inboxRow = html.match(/<div class="kv-tree-row kv-tree-row-toggle" data-kv-row-toggle="vault-dir:global\/inbox">[\s\S]*?<\/div>/)?.[0] || "";
+  assert.match(inboxRow, /data-kv-toggle="vault-dir:global\/inbox"/);
+  assert.doesNotMatch(inboxRow, /data-kv-doc=/);
+  assert.match(inboxRow, /<span class="kv-tree-link kv-tree-folder-link"><span class="kv-tree-title">inbox<\/span><\/span>/);
+
+  // Document rows reserve the same icon width and carry the same depth.
+  const docRow = html.match(/<li class="kv-tree-node kv-tree-doc" style="--kv-depth:1"><a[\s\S]*?<\/a><\/li>/)?.[0] || "";
+  assert.match(docRow, /<span class="kv-tree-doc-spacer" aria-hidden="true"><\/span><span class="kv-tree-title">同级文档<\/span>/);
+  assert.match(html, /<li class="kv-tree-node kv-tree-folder" style="--kv-depth:1">/);
+});
+
+test("the sidebar defaults to 270px, collapses to a rail and exposes a 6px separator", async () => {
+  reset({});
+  let html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /style="--kv-tree-width:270px;--kv-resizer-width:6px" data-kv-sidebar-collapsed="false"/);
+  assert.match(html, /class="kv-tree-resizer" role="separator" aria-orientation="vertical" tabindex="0"[^>]*aria-valuemin="220" aria-valuemax="460" aria-valuenow="270"/);
+
+  reset({sidebarCollapsed: true});
+  html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /style="--kv-tree-width:48px;--kv-resizer-width:0px" data-kv-sidebar-collapsed="true"/);
+  assert.match(html, /class="kv-tree-panel collapsed"/);
+  assert.match(html, /data-kv-sidebar-toggle aria-expanded="false"/);
+  assert.doesNotMatch(html, /kv-tree-resizer/);
+
+  // Route-only styles travel in the lazy knowledge chunk, not styles.css.
+  const css = await readFile(resolve(root, "src", "knowledge_vault.ts"), "utf8");
+  assert.match(css, /\.kv-tree-list \.kv-tree-list \{ padding-left: 12px; \}/);
+  assert.match(css, /\.kv-tree-resizer \{[^}]*width: 6px/);
+  assert.match(css, /@media \(max-width: 760px\)[\s\S]*\.kv-sidebar-toggle, \.kv-tree-resizer \{ display: none; \}/);
+  assert.match(css, /@media \(max-width: 760px\)[\s\S]*\.kv-tree-panel\.collapsed \.kv-tree-body \{ display: block; \}/);
 });
 
 test("the mixed tree roots at the real global and projects directories", () => {

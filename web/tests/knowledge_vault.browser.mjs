@@ -70,7 +70,10 @@ const allTree = [{
     children: [
       {id: "g-doc", title: "全局指南", path: "global/guides/guide.md", type: "practice", status: "verified", scope: "global", is_index: false, system: false, children: []},
       {id: "g-sub", title: "进阶", path: "global/guides/advanced/index.md", type: "navigation", status: "verified", scope: "global", is_index: true, system: true,
-        children: [{id: "g-deep", title: "深入指南", path: "global/guides/advanced/deep.md", type: "practice", status: "verified", scope: "global", is_index: false, system: false, children: []}]},
+        children: [
+          {id: "g-deep", title: "深入指南", path: "global/guides/advanced/deep.md", type: "practice", status: "verified", scope: "global", is_index: false, system: false, children: []},
+          {id: "g-level3", title: "深层目录", path: "global/guides/advanced/level3/index.md", type: "navigation", status: "verified", scope: "global", is_index: true, system: true, children: []},
+        ]},
     ],
   }, {
     id: "g-other", title: "参考资料", path: "global/reference/index.md", type: "navigation", status: "verified", scope: "global", is_index: true, system: true,
@@ -421,11 +424,120 @@ try {
   assert.equal(await page.locator('[data-kv-toggle="g-folder"]').getAttribute("aria-expanded"), "true");
   assert.equal(await page.locator('a[data-kv-doc="g-doc"]').count(), 1);
 
-  // Clicking the directory row opens the directory's index document; the same
-  // index is not rendered a second time as a leaf row.
+  // Folder rows use a directory icon as their only expand/collapse control.
+  // There are no up/down chevrons, the icon and title are separate controls,
+  // and clicking the icon never opens a document.
+  assert.equal(await page.locator('.kv-tree-toggle:has(.kv-tree-folder-icon)').count(), await page.locator('.kv-tree-toggle').count(), "every toggle is a folder icon");
+  assert.equal(await page.locator('.kv-tree-toggle [d*="m18 15"], .kv-tree-toggle [d*="m6 9"]').count(), 0, "no chevron arrows remain");
+  await page.locator('[data-kv-toggle="g-index"]').focus();
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("Tab");
+  assert.equal(await page.evaluate(() => document.activeElement?.dataset.kvToggle), "g-folder", "Tab reaches the next folder icon button");
+  const hashBeforeIconToggle = await page.evaluate(() => location.hash);
+  await page.locator('[data-kv-toggle="g-other"]').click();
+  assert.equal(await page.locator('[data-kv-toggle="g-other"]').getAttribute("aria-expanded"), "true");
+  assert.equal(await page.evaluate(() => location.hash), hashBeforeIconToggle, "icon toggle does not open a document");
+  assert.equal(await page.locator(".kv-doc-head h1").count(), 0, "icon toggle leaves the reading pane untouched");
+
+  // A click anywhere on the row except the title link toggles the branch.
+  const otherRow = page.locator('[data-kv-row-toggle="g-other"]');
+  const otherBox = await otherRow.boundingBox();
+  await otherRow.click({position: {x: Math.max(8, otherBox.width - 4), y: otherBox.height / 2}});
+  assert.equal(await page.locator('[data-kv-toggle="g-other"]').getAttribute("aria-expanded"), "false", "row whitespace collapses the folder");
+  await page.locator('[data-kv-toggle="g-other"]').focus();
+  await page.keyboard.press("Space");
+  assert.equal(await page.locator('[data-kv-toggle="g-other"]').getAttribute("aria-expanded"), "true", "Space expands from the keyboard");
+  await page.keyboard.press("Space");
+  assert.equal(await page.locator('[data-kv-toggle="g-other"]').getAttribute("aria-expanded"), "false");
+
+  // Clicking the directory title opens its index without collapsing the tree.
   await page.locator('a[data-kv-doc="g-folder"]').click();
   await page.waitForSelector(".kv-doc-body");
   assert.equal((await page.locator(".kv-doc-head h1").textContent()).trim(), "构建指南");
+  assert.equal(await page.locator('[data-kv-toggle="g-folder"]').getAttribute("aria-expanded"), "true", "opening the index does not collapse the folder");
+
+  // Same-depth folder names and document titles share one computed left edge;
+  // the indentation step is exactly 12px per level.
+  await page.locator('[data-kv-toggle="g-sub"]').click();
+  await page.waitForSelector('a[data-kv-doc="g-deep"]');
+  const titleLeft = async selector => page.locator(`${selector} .kv-tree-title`).first().evaluate(element => element.getBoundingClientRect().left);
+  const depth2Folder = await titleLeft('a[data-kv-doc="g-sub"]');
+  const depth2Doc = await titleLeft('a[data-kv-doc="g-doc"]');
+  const depth3Folder = await titleLeft('a[data-kv-doc="g-level3"]');
+  const depth3Doc = await titleLeft('a[data-kv-doc="g-deep"]');
+  assert.ok(Math.abs(depth2Folder - depth2Doc) <= 1, `depth 2 titles align: ${depth2Folder} vs ${depth2Doc}`);
+  assert.ok(Math.abs(depth3Folder - depth3Doc) <= 1, `depth 3 titles align: ${depth3Folder} vs ${depth3Doc}`);
+  assert.ok(Math.abs((depth3Doc - depth2Doc) - 12) <= 1, `one level adds 12px: ${depth2Doc} vs ${depth3Doc}`);
+  assert.equal(await page.locator('a[data-kv-doc="g-doc"]').evaluate(element => element.closest("li").getAttribute("style")), "--kv-depth:2");
+  assert.equal(await page.locator('a[data-kv-doc="g-deep"]').evaluate(element => element.closest("li").getAttribute("style")), "--kv-depth:3");
+
+  // Sidebar geometry: 270px by default, drag bounds, keyboard, double-click
+  // reset, refresh persistence, and a collapsible rail that also persists.
+  const treeWidth = () => page.locator(".kv-tree-panel").evaluate(element => element.getBoundingClientRect().width);
+  const dragResizerTo = async x => {
+    const box = await page.locator(".kv-tree-resizer").boundingBox();
+    const y = box.y + Math.min(80, box.height / 2);
+    await page.mouse.move(box.x + box.width / 2, y);
+    await page.mouse.down();
+    await page.mouse.move(x, y, {steps: 6});
+    await page.mouse.up();
+  };
+  assert.ok(Math.abs((await treeWidth()) - 270) < 1, "default sidebar is 270px");
+  await dragResizerTo(1100);
+  assert.ok(Math.abs((await treeWidth()) - 460) < 1, "drag clamps at 460px");
+  await dragResizerTo(0);
+  assert.ok(Math.abs((await treeWidth()) - 220) < 1, "drag clamps at 220px");
+  await page.locator(".kv-tree-resizer").dblclick();
+  assert.ok(Math.abs((await treeWidth()) - 270) < 1, "double-click resets to 270px");
+  await page.locator(".kv-tree-resizer").focus();
+  await page.keyboard.press("End");
+  assert.ok(Math.abs((await treeWidth()) - 460) < 1, "End jumps to the maximum");
+  await page.keyboard.press("ArrowLeft");
+  assert.ok(Math.abs((await treeWidth()) - 448) < 1, "ArrowLeft adjusts by 12px");
+  assert.equal(await page.locator(".kv-tree-resizer").getAttribute("aria-valuenow"), "448");
+  assert.equal(await page.evaluate(() => localStorage.getItem("aha2.knowledgeVault.sidebarWidth")), "448");
+
+  // The width survives a full refresh.
+  await page.goto(`${url}/?sidebar=persist#knowledge?doc=doc-1&scope=project&project=p1`, {waitUntil: "networkidle"});
+  await page.waitForSelector(".kv-tree-resizer");
+  assert.ok(Math.abs((await treeWidth()) - 448) < 1, "refresh restores the saved width");
+  await page.locator(".kv-tree-resizer").dblclick();
+  assert.ok(Math.abs((await treeWidth()) - 270) < 1);
+
+  // At 900px the 40vw cap is the binding upper bound.
+  await page.setViewportSize({width: 900, height: 900});
+  await page.waitForTimeout(80);
+  await dragResizerTo(1000);
+  assert.ok(Math.abs((await treeWidth()) - 360) < 1, "sidebar never exceeds 40% of the viewport");
+  assert.equal(await page.locator(".kv-tree-resizer").getAttribute("aria-valuemax"), "360");
+  await page.setViewportSize({width: 1280, height: 900});
+  await page.waitForTimeout(80);
+  await page.locator(".kv-tree-resizer").dblclick();
+  assert.ok(Math.abs((await treeWidth()) - 270) < 1);
+
+  // Collapse to a directory rail, then restore; both states survive reloads.
+  await page.locator("[data-kv-sidebar-toggle]").click();
+  assert.equal(await page.locator(".knowledge-vault").getAttribute("data-kv-sidebar-collapsed"), "true");
+  assert.equal(await page.locator(".kv-tree-panel").evaluate(element => element.classList.contains("collapsed")), true);
+  assert.ok(Math.abs((await treeWidth()) - 48) < 1, "collapsed rail is 48px");
+  assert.equal(await page.locator(".kv-tree-resizer").count(), 0, "collapsed panel has no drag handle");
+  assert.equal(await page.locator(".kv-tree-body").isVisible(), false);
+  assert.equal(await page.evaluate(() => localStorage.getItem("aha2.knowledgeVault.sidebarCollapsed")), "1");
+  await page.reload({waitUntil: "networkidle"});
+  await page.waitForSelector(".knowledge-vault");
+  assert.equal(await page.locator(".knowledge-vault").getAttribute("data-kv-sidebar-collapsed"), "true", "collapsed state survives refresh");
+  assert.ok(Math.abs((await treeWidth()) - 48) < 1);
+  await page.locator("[data-kv-sidebar-toggle]").click();
+  assert.equal(await page.locator(".knowledge-vault").getAttribute("data-kv-sidebar-collapsed"), "false");
+  assert.equal(await page.locator(".kv-tree-body").isVisible(), true);
+  assert.ok(Math.abs((await treeWidth()) - 270) < 1, "expanding restores the saved width");
+  assert.equal(await page.evaluate(() => localStorage.getItem("aha2.knowledgeVault.sidebarCollapsed")), "0");
+
+  // Return to a clean knowledge view for the project-tree checks below.
+  await page.goto(url, {waitUntil: "networkidle"});
+  await page.evaluate(() => document.querySelector("[data-view=knowledge]")?.click());
+  await page.waitForSelector(".kv-tree-link", {timeout: 15000});
+  await expandGlobalTree(page);
 
   // Enter a project from the tree: projects -> p1 -> guides, each level
   // expanded explicitly. The single tree request already covers all libraries.
@@ -864,6 +976,8 @@ try {
   await page.evaluate(() => document.querySelector("[data-view=knowledge]")?.click());
   await page.waitForSelector(".kv-tree-link");
   assert.equal(await page.locator(".kv-tree-panel").isVisible(), true);
+  assert.equal(await page.locator(".kv-tree-resizer").isVisible(), false, "phones have no drag handle");
+  assert.equal(await page.locator("[data-kv-sidebar-toggle]").isVisible(), false, "phones hide the collapse control");
   await page.screenshot({path: resolve(screenshots, "knowledge-vault-mobile-list.png"), fullPage: false});
   assert.equal(await page.locator(".kv-doc-panel").isVisible(), false);
   layout = await topbarLayout(page);

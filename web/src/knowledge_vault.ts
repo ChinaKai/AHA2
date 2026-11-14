@@ -74,6 +74,9 @@ const localText: Record<string, [zhCN: string, enUS: string]> = {
   "kv.gitUnavailable": ["当前环境没有可用的 git 命令，Git 管理已禁用。", "Git is not available in this environment; Git management is disabled."],
   "kv.gitLoadFailed": ["读取 Git 状态失败", "Failed to read Git status"],
   "kv.gitHint": ["仅支持 SSH remote，使用系统 SSH agent 或默认密钥；Web 不保存密码或 token。所有同步均为手动操作，拉取只做 fast-forward，分叉时停止而不会合并或强推。", "SSH remotes only, using your system SSH agent or default key; the Web UI never stores passwords or tokens. Every sync is manual, pulls are fast-forward only, and divergence stops instead of merging or force pushing."],
+  "kv.sidebarCollapse": ["收起目录栏", "Collapse contents sidebar"],
+  "kv.sidebarExpand": ["展开目录栏", "Expand contents sidebar"],
+  "kv.resizeSidebar": ["调整目录栏宽度", "Resize contents sidebar"],
 };
 
 function kt(key: string, values: Record<string, string | number> = {}): string {
@@ -104,6 +107,75 @@ function installGitStyles(): void {
   const style = document.createElement("style");
   style.id = "kv-git-styles";
   style.textContent = GIT_STYLES;
+  document.head.append(style);
+}
+
+// The tree and resizable sidebar also belong to this lazy route. Their rules
+// override the base vault layout once the page renders, so the first-screen
+// stylesheet keeps its original size budget.
+const TREE_STYLES = `
+.knowledge-vault { --kv-resizer-width: 6px; --kv-tree-toggle-size: 28px; }
+.kv-workspace { grid-template-columns: var(--kv-tree-width) var(--kv-resizer-width) minmax(0, 1fr) var(--kv-context-width); }
+.kv-panel-head { align-items: center; }
+.kv-panel-head span { margin-right: auto; }
+.kv-sidebar-toggle {
+  flex: 0 0 auto; display: inline-grid; place-items: center; width: 28px; height: 28px;
+  padding: 0; border: 1px solid transparent; border-radius: 5px; background: transparent;
+  color: var(--color-text-muted); cursor: pointer;
+}
+.kv-sidebar-toggle:hover { background: var(--color-surface-muted); color: var(--color-text); }
+.kv-sidebar-toggle .icon { width: 15px; height: 15px; }
+.kv-tree-panel.collapsed { padding: 8px 5px; overflow: hidden; }
+.kv-tree-panel.collapsed .kv-panel-head { justify-content: center; padding: 2px 0 8px; border-bottom: 0; }
+.kv-tree-panel.collapsed .kv-panel-head span,
+.kv-tree-panel.collapsed .kv-panel-head small,
+.kv-tree-panel.collapsed .kv-tree-body { display: none; }
+.kv-tree-resizer {
+  position: relative; align-self: stretch; width: 6px; min-height: 180px;
+  border-radius: 999px; cursor: col-resize; touch-action: none;
+}
+.kv-tree-resizer::after {
+  content: ""; position: absolute; inset: 0 2px; border-radius: 999px;
+  background: var(--color-border-subtle); opacity: 0; transition: opacity .12s ease;
+}
+.kv-tree-resizer:hover::after, .kv-tree-resizer:focus-visible::after { opacity: 1; }
+body.kv-resizing { cursor: col-resize; user-select: none; }
+.kv-tree-list .kv-tree-list { padding-left: 12px; }
+.kv-tree-row { gap: 0; min-width: 0; border-radius: 5px; }
+.kv-tree-row-toggle { cursor: pointer; }
+.kv-tree-toggle {
+  flex: 0 0 var(--kv-tree-toggle-size); width: var(--kv-tree-toggle-size); height: 30px;
+  padding: 0; border: 0; border-radius: 5px; background: transparent; color: var(--color-text-muted); cursor: pointer;
+}
+.kv-tree-toggle .icon { width: 15px; height: 15px; }
+.kv-tree-toggle:hover { color: var(--color-text); }
+.kv-tree-toggle-space { flex: 0 0 var(--kv-tree-toggle-size); width: var(--kv-tree-toggle-size); height: 30px; }
+.kv-tree-folder-icon { display: inline-flex; align-items: center; justify-content: center; color: inherit; }
+.kv-tree-folder-icon .icon { width: 15px; height: 15px; }
+.kv-tree-link.kv-tree-folder-link { flex: 0 1 auto; max-width: calc(100% - var(--kv-tree-toggle-size)); font-weight: 500; }
+.kv-tree-link { padding: 5px 6px; }
+.kv-tree-doc-link { padding-left: 0; }
+.kv-tree-doc-spacer { flex: 0 0 var(--kv-tree-toggle-size); width: var(--kv-tree-toggle-size); height: 1px; }
+@media (max-width: 1180px) {
+  .kv-workspace { grid-template-columns: var(--kv-tree-width) var(--kv-resizer-width) minmax(0, 1fr); }
+}
+@media (max-width: 760px) {
+  .knowledge-vault { --kv-tree-toggle-size: 32px; }
+  .kv-workspace { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .kv-tree-toggle, .kv-tree-toggle-space { height: 36px; }
+  .kv-sidebar-toggle, .kv-tree-resizer { display: none; }
+  .kv-tree-panel.collapsed { padding: 0; overflow: visible; }
+  .kv-tree-panel.collapsed .kv-panel-head { justify-content: space-between; padding: 2px 6px 8px; border-bottom: 1px solid var(--color-border-subtle); }
+  .kv-tree-panel.collapsed .kv-panel-head span, .kv-tree-panel.collapsed .kv-panel-head small { display: inline; }
+  .kv-tree-panel.collapsed .kv-tree-body { display: block; }
+}
+`;
+
+function installTreeStyles(): void {
+  if (typeof document === "undefined" || document.getElementById("kv-tree-styles")) return;
+  const style = document.createElement("style");
+  style.id = "kv-tree-styles";
+  style.textContent = TREE_STYLES;
   document.head.append(style);
 }
 
@@ -180,6 +252,69 @@ interface VaultState {
   listScroll: number;
   docScroll: number;
   pendingSearch: number;
+  sidebarWidth: number;
+  sidebarCollapsed: boolean;
+}
+
+const SIDEBAR_WIDTH_KEY = "aha2.knowledgeVault.sidebarWidth";
+const SIDEBAR_COLLAPSED_KEY = "aha2.knowledgeVault.sidebarCollapsed";
+const SIDEBAR_DEFAULT_WIDTH = 270;
+const SIDEBAR_MIN_WIDTH = 220;
+const SIDEBAR_MAX_WIDTH = 460;
+const SIDEBAR_COLLAPSED_WIDTH = 48;
+const SIDEBAR_RESIZER_WIDTH = 6;
+const SIDEBAR_STEP = 12;
+
+function sidebarMaximumWidth(): number {
+  const viewport = typeof window === "undefined" ? 0 : window.innerWidth;
+  if (!Number.isFinite(viewport) || viewport <= 0) return SIDEBAR_MAX_WIDTH;
+  // The sidebar never takes more than 40% of the viewport, even when the
+  // persisted desktop width is wider than the current window.
+  return Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, Math.floor(viewport * 0.4)));
+}
+
+function clampSidebarWidth(value: number): number {
+  if (!Number.isFinite(value)) return SIDEBAR_DEFAULT_WIDTH;
+  return Math.max(SIDEBAR_MIN_WIDTH, Math.min(sidebarMaximumWidth(), Math.round(value)));
+}
+
+function readStoredSidebarWidth(): number {
+  try {
+    if (typeof localStorage === "undefined") return SIDEBAR_DEFAULT_WIDTH;
+    const parsed = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY));
+    return Number.isFinite(parsed) && parsed > 0 ? clampSidebarWidth(parsed) : SIDEBAR_DEFAULT_WIDTH;
+  } catch {
+    return SIDEBAR_DEFAULT_WIDTH;
+  }
+}
+
+function readStoredSidebarCollapsed(): boolean {
+  try {
+    return typeof localStorage !== "undefined" && localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function persistSidebarWidth(width: number): void {
+  try {
+    if (typeof localStorage !== "undefined") localStorage.setItem(SIDEBAR_WIDTH_KEY, String(clampSidebarWidth(width)));
+  } catch {
+    // Storage can be unavailable in embedded webviews; the current width
+    // still applies for this page.
+  }
+}
+
+function persistSidebarCollapsed(collapsed: boolean): void {
+  try {
+    if (typeof localStorage !== "undefined") localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? "1" : "0");
+  } catch {
+    // See persistSidebarWidth.
+  }
+}
+
+function initialSidebarWidth(): number {
+  return readStoredSidebarWidth();
 }
 
 function initialState(): VaultState {
@@ -205,6 +340,7 @@ function initialState(): VaultState {
     gitState: "idle", git: null, gitError: "", gitBusy: "", gitNotice: null,
     gitRemoteDraft: "", gitBranchDraft: "", gitCommitDraft: "",
     mobilePane: "list", listScroll: 0, docScroll: 0, pendingSearch: 0,
+    sidebarWidth: initialSidebarWidth(), sidebarCollapsed: readStoredSidebarCollapsed(),
   };
 }
 
@@ -212,6 +348,7 @@ let state = initialState();
 let binding = false;
 let keyboardBound = false;
 let hashBound = false;
+let sidebarViewportBound = false;
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
 let treeRequest = 0;
 let recentRequest = 0;
@@ -589,14 +726,21 @@ export function buildVaultDirectoryTree(nodes: KnowledgeVaultTreeNode[], library
 
 /* Page render ------------------------------------------------------------ */
 
+function vaultRootAttributes(): string {
+  const treeWidth = state.sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : state.sidebarWidth;
+  const resizerWidth = state.sidebarCollapsed ? 0 : SIDEBAR_RESIZER_WIDTH;
+  return `style="--kv-tree-width:${treeWidth}px;--kv-resizer-width:${resizerWidth}px" data-kv-sidebar-collapsed="${state.sidebarCollapsed}"`;
+}
+
 export function renderKnowledgeVaultPage(_context: KnowledgeVaultContext): string {
+  installTreeStyles();
   if (!state.initialized || state.loading === "loading") {
-    return `<div class="knowledge-vault" data-kv-tab="${state.tab}">${vaultEmptyState("loading")}</div>`;
+    return `<div class="knowledge-vault" data-kv-tab="${state.tab}" ${vaultRootAttributes()}>${vaultEmptyState("loading")}</div>`;
   }
   if (state.loading === "error") {
-    return `<div class="knowledge-vault" data-kv-tab="${state.tab}">${vaultEmptyState("error", state.error, true)}</div>`;
+    return `<div class="knowledge-vault" data-kv-tab="${state.tab}" ${vaultRootAttributes()}>${vaultEmptyState("error", state.error, true)}</div>`;
   }
-  return `<div class="knowledge-vault${state.contextOpen ? " context-open" : ""}" data-kv-tab="${state.tab}">
+  return `<div class="knowledge-vault${state.contextOpen ? " context-open" : ""}" data-kv-tab="${state.tab}" ${vaultRootAttributes()}>
     ${topbarHTML()}
     ${searchPanelHTML()}
     <div class="kv-content" data-kv-mobile-pane="${state.mobilePane}">
@@ -664,11 +808,17 @@ function searchResultsHTML(): string {
 }
 
 function knowledgeBodyHTML(): string {
+  const sidebarLabel = state.sidebarCollapsed ? kt("kv.sidebarExpand") : kt("kv.sidebarCollapse");
   return `<div class="kv-workspace" data-kv-mobile-pane="${state.mobilePane}">
-    <nav class="kv-tree-panel" aria-label="${t("kv.tree")}">
-      <div class="kv-panel-head"><span>${t("kv.tree")}</span><small>${state.treeState === "ready" ? `${state.tree.length} ${t("kv.groups")}` : ""}</small></div>
-      ${treeBodyHTML()}
+    <nav id="kv-tree-panel" class="kv-tree-panel${state.sidebarCollapsed ? " collapsed" : ""}" aria-label="${t("kv.tree")}">
+      <div class="kv-panel-head">
+        <button type="button" class="kv-sidebar-toggle icon-button" data-kv-sidebar-toggle aria-expanded="${!state.sidebarCollapsed}" aria-controls="kv-tree-panel" aria-label="${escapeVaultHTML(sidebarLabel)}" title="${escapeVaultHTML(sidebarLabel)}">${icon("folder")}</button>
+        <span>${t("kv.tree")}</span>
+        <small>${state.treeState === "ready" ? `${state.tree.length} ${t("kv.groups")}` : ""}</small>
+      </div>
+      <div class="kv-tree-body">${treeBodyHTML()}</div>
     </nav>
+    ${state.sidebarCollapsed ? "" : `<div class="kv-tree-resizer" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${escapeVaultHTML(kt("kv.resizeSidebar"))}" aria-valuemin="${SIDEBAR_MIN_WIDTH}" aria-valuemax="${sidebarMaximumWidth()}" aria-valuenow="${state.sidebarWidth}" data-kv-resizer></div>`}
     <article class="kv-doc-panel">
       ${docBodyHTML()}
     </article>
@@ -700,22 +850,33 @@ function treeNodeHTML(node: KnowledgeVaultTreeNode, depth = 0): string {
   const expanded = state.expanded.has(node.id);
   const selected = node.id === state.selectedID;
   if (!isVaultFolderNode(node)) {
-    return `<li class="kv-tree-node kv-tree-doc" style="--kv-depth:${depth}"><a class="kv-tree-link${selected ? " selected" : ""}" href="${escapeVaultHTML(docHash(node))}" data-kv-doc="${escapeVaultHTML(node.id)}" aria-current="${selected ? "page" : "false"}"><span class="kv-tree-title">${escapeVaultHTML(node.title)}</span>${badge(typeLabel(node.type), "type")}</a></li>`;
+    // The spacer occupies exactly one folder-icon width so document titles and
+    // same-level folder titles share the same left edge.
+    return `<li class="kv-tree-node kv-tree-doc" style="--kv-depth:${depth}"><a class="kv-tree-link kv-tree-doc-link${selected ? " selected" : ""}" href="${escapeVaultHTML(docHash(node))}" data-kv-doc="${escapeVaultHTML(node.id)}" aria-current="${selected ? "page" : "false"}"><span class="kv-tree-doc-spacer" aria-hidden="true"></span><span class="kv-tree-title">${escapeVaultHTML(node.title)}</span>${badge(typeLabel(node.type), "type")}</a></li>`;
   }
   const hasIndex = node.has_index ?? Boolean(node.is_index);
-  const rowTitle = `<span class="kv-tree-folder-icon" aria-hidden="true">${icon("folder")}</span><span class="kv-tree-title">${escapeVaultHTML(node.title)}</span>`;
-  const row = hasIndex
-    ? `<a class="kv-tree-link kv-tree-folder-link${selected ? " selected" : ""}" href="${escapeVaultHTML(docHash(node))}" data-kv-doc="${escapeVaultHTML(node.id)}" aria-current="${selected ? "page" : "false"}">${rowTitle}</a>`
-    : `<span class="kv-tree-link kv-tree-folder-link">${rowTitle}</span>`;
-  const toggle = children.length > 0
-    ? `<button type="button" class="kv-tree-toggle" data-kv-toggle="${escapeVaultHTML(node.id)}" aria-expanded="${expanded}" aria-label="${expanded ? t("kv.collapseNode") : t("kv.expandNode")}">${icon(expanded ? "chevron-up" : "chevron-down")}</button>`
+  const canToggle = children.length > 0;
+  const toggleLabel = expanded ? t("kv.collapseNode") : t("kv.expandNode");
+  // The folder icon itself is the expand/collapse hit area. It is deliberately
+  // separate from the title link: opening a directory's index must not also
+  // collapse the branch under the pointer.
+  const toggle = canToggle
+    ? `<button type="button" class="kv-tree-toggle" data-kv-toggle="${escapeVaultHTML(node.id)}" aria-expanded="${expanded}" aria-label="${escapeVaultHTML(toggleLabel)}" title="${escapeVaultHTML(toggleLabel)}"><span class="kv-tree-folder-icon" aria-hidden="true">${icon("folder")}</span></button>`
     : `<span class="kv-tree-toggle-space" aria-hidden="true"></span>`;
+  const title = `<span class="kv-tree-title">${escapeVaultHTML(node.title)}</span>`;
+  const rowContent = hasIndex
+    ? `<a class="kv-tree-link kv-tree-folder-link${selected ? " selected" : ""}" href="${escapeVaultHTML(docHash(node))}" data-kv-doc="${escapeVaultHTML(node.id)}" aria-current="${selected ? "page" : "false"}">${title}</a>`
+    : `<span class="kv-tree-link kv-tree-folder-link">${title}</span>`;
+  // The row around the title toggles the branch (virtual directories have no
+  // index page, so the whole row is the control). The title link stops at the
+  // text so trailing whitespace still belongs to the row.
+  const rowAttributes = canToggle ? ` data-kv-row-toggle="${escapeVaultHTML(node.id)}"` : "";
   return `<li class="kv-tree-node kv-tree-folder" style="--kv-depth:${depth}">
-    <div class="kv-tree-row">
+    <div class="kv-tree-row${canToggle ? " kv-tree-row-toggle" : ""}"${rowAttributes}>
       ${toggle}
-      ${row}
+      ${rowContent}
     </div>
-    ${expanded && children.length > 0 ? `<ul class="kv-tree-list">${children.map(child => treeNodeHTML(child, depth + 1)).join("")}</ul>` : ""}
+    ${expanded && canToggle ? `<ul class="kv-tree-list">${children.map(child => treeNodeHTML(child, depth + 1)).join("")}</ul>` : ""}
   </li>`;
 }
 
@@ -1118,6 +1279,93 @@ function expandTreePathTo(id: string): void {
   const ancestors = vaultTreeAncestors(state.tree, id);
   if (!ancestors) return;
   for (const ancestor of ancestors) state.expanded.add(ancestor);
+}
+
+function toggleTreeFolder(id: string): void {
+  if (!id) return;
+  if (state.expanded.has(id)) state.expanded.delete(id);
+  else state.expanded.add(id);
+  rerender();
+}
+
+function toggleSidebar(): void {
+  state.sidebarCollapsed = !state.sidebarCollapsed;
+  persistSidebarCollapsed(state.sidebarCollapsed);
+  rerender();
+}
+
+// Width changes update only the CSS custom property and the separator's ARIA
+// value while the pointer is down. Re-rendering the page on every pointermove
+// would replace the dragged element and make the drag unusable.
+function applySidebarWidth(root: HTMLElement, width: number, persist: boolean): void {
+  const clamped = clampSidebarWidth(width);
+  state.sidebarWidth = clamped;
+  root.style.setProperty("--kv-tree-width", `${clamped}px`);
+  const resizer = root.querySelector<HTMLElement>("[data-kv-resizer]");
+  if (resizer) {
+    resizer.setAttribute("aria-valuenow", String(clamped));
+    resizer.setAttribute("aria-valuemax", String(sidebarMaximumWidth()));
+  }
+  if (persist) persistSidebarWidth(clamped);
+}
+
+function bindSidebarResizer(root: HTMLElement): void {
+  const resizer = root.querySelector<HTMLElement>("[data-kv-resizer]");
+  if (!resizer) return;
+  let dragging = false;
+  let pointerID = -1;
+  let dragStartX = 0;
+  let dragStartWidth = SIDEBAR_DEFAULT_WIDTH;
+  const finish = (event: PointerEvent): void => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.classList.remove("kv-resizing");
+    if (pointerID >= 0 && resizer.hasPointerCapture(pointerID)) {
+      try { resizer.releasePointerCapture(pointerID); } catch { /* already released */ }
+    }
+    pointerID = -1;
+    applySidebarWidth(root, dragStartWidth + (event.clientX - dragStartX), true);
+  };
+  resizer.addEventListener("pointerdown", event => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    dragging = true;
+    pointerID = event.pointerId;
+    dragStartX = event.clientX;
+    dragStartWidth = state.sidebarWidth;
+    resizer.focus({preventScroll: true});
+    try { resizer.setPointerCapture(event.pointerId); } catch { /* pointer capture is best-effort */ }
+    document.body.classList.add("kv-resizing");
+  });
+  resizer.addEventListener("pointermove", event => {
+    if (!dragging) return;
+    applySidebarWidth(root, dragStartWidth + (event.clientX - dragStartX), false);
+  });
+  resizer.addEventListener("pointerup", finish);
+  resizer.addEventListener("pointercancel", finish);
+  resizer.addEventListener("dblclick", () => {
+    applySidebarWidth(root, SIDEBAR_DEFAULT_WIDTH, true);
+  });
+  resizer.addEventListener("keydown", event => {
+    let next = state.sidebarWidth;
+    if (event.key === "ArrowLeft") next -= SIDEBAR_STEP;
+    else if (event.key === "ArrowRight") next += SIDEBAR_STEP;
+    else if (event.key === "Home") next = SIDEBAR_MIN_WIDTH;
+    else if (event.key === "End") next = sidebarMaximumWidth();
+    else return;
+    event.preventDefault();
+    applySidebarWidth(root, next, true);
+  });
+}
+
+function bindSidebarViewport(): void {
+  if (sidebarViewportBound || typeof window === "undefined") return;
+  sidebarViewportBound = true;
+  window.addEventListener("resize", () => {
+    const root = document.querySelector<HTMLElement>(".knowledge-vault");
+    if (!root || state.sidebarCollapsed) return;
+    applySidebarWidth(root, state.sidebarWidth, false);
+  });
 }
 
 /* Data loading ----------------------------------------------------------- */
@@ -1538,7 +1786,7 @@ function handleDocLink(event: Event): boolean {
 function focusSelector(element: Element | null): string {
   if (!(element instanceof HTMLElement)) return "";
   if (element.id) return `#${typeof CSS !== "undefined" && CSS.escape ? CSS.escape(element.id) : element.id}`;
-  for (const name of ["kvToggle", "kvFeedback", "kvTabButton", "kvDoc", "kvCopy", "kvTag"]) {
+  for (const name of ["kvSidebarToggle", "kvToggle", "kvFeedback", "kvTabButton", "kvDoc", "kvCopy", "kvTag"]) {
     const value = (element.dataset as Record<string, string | undefined>)[name];
     if (value) return `[data-kv-${name.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`) }="${typeof CSS !== "undefined" && CSS.escape ? CSS.escape(value) : value}"]`;
   }
@@ -1589,6 +1837,9 @@ export function bindKnowledgeVaultPage(context: KnowledgeVaultContext): void {
 
   const root = document.querySelector<HTMLElement>(".knowledge-vault");
   if (!root) return;
+
+  bindSidebarViewport();
+  bindSidebarResizer(root);
 
   root.querySelectorAll<HTMLElement>("[data-kv-tab-button]").forEach(button => {
     button.addEventListener("click", () => setTab(button.dataset.kvTabButton as VaultTab));
@@ -1645,18 +1896,26 @@ export function bindKnowledgeVaultPage(context: KnowledgeVaultContext): void {
     });
   }
 
-  root.querySelectorAll<HTMLElement>("[data-kv-toggle]").forEach(button => {
-    button.addEventListener("click", () => {
-      const id = button.dataset.kvToggle || "";
-      if (state.expanded.has(id)) state.expanded.delete(id);
-      else state.expanded.add(id);
-      rerender();
-    });
-  });
-
   root.addEventListener("click", event => {
     if (handleDocLink(event)) return;
     const target = event.target as HTMLElement | null;
+    if (target?.closest("[data-kv-sidebar-toggle]")) {
+      toggleSidebar();
+      return;
+    }
+    const treeToggle = target?.closest<HTMLElement>("[data-kv-toggle]");
+    if (treeToggle) {
+      toggleTreeFolder(treeToggle.dataset.kvToggle || "");
+      return;
+    }
+    // Folder rows without an index have no title link; clicking their blank
+    // area is the same as clicking the folder icon. Title links were consumed
+    // by handleDocLink above and never reach this branch.
+    const rowToggle = target?.closest<HTMLElement>("[data-kv-row-toggle]");
+    if (rowToggle && !target?.closest("[data-kv-doc]")) {
+      toggleTreeFolder(rowToggle.dataset.kvRowToggle || "");
+      return;
+    }
     const copy = target?.closest<HTMLElement>("[data-kv-copy]");
     if (copy) {
       copyPath(copy.dataset.kvCopy || "");
