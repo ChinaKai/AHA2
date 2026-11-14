@@ -841,7 +841,22 @@ try {
   assert.ok(settingsLayout.pageOverflow <= 1, "settings dialog does not overflow the page");
   assert.equal(settingsLayout.remoteHostRows, 0);
   await page.screenshot({path: resolve(screenshots, "knowledge-vault-settings-git.png"), fullPage: false});
+
+  // Native ESC dismissal is sticky: it must clear the dialog's open intent so
+  // the next page render cannot reopen it behind the Owner's back. The close
+  // button keeps the same contract.
+  await page.keyboard.press("Escape");
+  await page.waitForFunction(() => document.querySelector("#kv-settings-dialog")?.open === false);
+  await page.locator('.kv-tabs [data-kv-tab-button="recent"]').click();
+  await page.waitForSelector('.knowledge-vault[data-kv-tab="recent"]');
+  assert.equal(await page.locator("#kv-settings-dialog").evaluate(dialog => dialog.open), false, "ESC close survives the next render");
+  await page.locator(".kv-settings-trigger").click();
+  await page.waitForSelector("#kv-settings-dialog[open]");
   await page.locator("#kv-settings-dialog [data-kv-settings-close]").first().click();
+  await page.waitForFunction(() => document.querySelector("#kv-settings-dialog")?.open === false);
+  await page.locator('.kv-tabs [data-kv-tab-button="knowledge"]').click();
+  await page.waitForSelector('.knowledge-vault[data-kv-tab="knowledge"]');
+  assert.equal(await page.locator("#kv-settings-dialog").evaluate(dialog => dialog.open), false, "close button dismissal survives the next render");
 
   // Mobile: one column, list -> doc -> back keeps scroll, copy path only.
   await page.setViewportSize({width: 390, height: 780});

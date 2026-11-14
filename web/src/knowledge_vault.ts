@@ -878,7 +878,8 @@ async function loadVaultSettings(): Promise<void> {
 function reopenSettingsDialog(): void {
   if (!state.settingsOpen) return;
   const dialog = document.querySelector<HTMLDialogElement>("#kv-settings-dialog");
-  if (dialog && !dialog.open) dialog.showModal();
+  if (!dialog || dialog.open) return;
+  dialog.showModal();
 }
 
 function openSettingsDialog(): void {
@@ -893,6 +894,17 @@ function openSettingsDialog(): void {
 function closeSettingsDialog(): void {
   state.settingsOpen = false;
   document.querySelector<HTMLDialogElement>("#kv-settings-dialog")?.close();
+}
+
+// Native ESC goes through cancel/close without calling the close button, so it
+// must clear the open intent too. A close event queued by the button (or by a
+// dialog instance a render already replaced) is ignored: the state is already
+// false, or the event no longer belongs to the dialog currently in the DOM.
+function handleSettingsDialogDismissed(event: Event): void {
+  if (!state.settingsOpen) return;
+  const dialog = event.currentTarget;
+  if (!(dialog instanceof HTMLDialogElement) || document.querySelector("#kv-settings-dialog") !== dialog) return;
+  state.settingsOpen = false;
 }
 
 // The files changed on disk; every projection the page cached is one index
@@ -1588,6 +1600,9 @@ export function bindKnowledgeVaultPage(context: KnowledgeVaultContext): void {
   root.querySelectorAll<HTMLElement>("[data-kv-settings-close]").forEach(button => {
     button.addEventListener("click", closeSettingsDialog);
   });
+  const settingsDialog = root.querySelector<HTMLDialogElement>("#kv-settings-dialog");
+  settingsDialog?.addEventListener("cancel", handleSettingsDialogDismissed);
+  settingsDialog?.addEventListener("close", handleSettingsDialogDismissed);
   root.querySelector<HTMLButtonElement>("#kv-settings-rebuild")?.addEventListener("click", () => { void rebuildSettingsIndex(); });
   root.querySelector<HTMLButtonElement>("[data-kv-settings-retry]")?.addEventListener("click", () => { void loadVaultSettings(); });
   root.querySelector<HTMLButtonElement>("[data-kv-git-retry]")?.addEventListener("click", () => { void loadVaultGitStatus(); });
