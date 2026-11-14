@@ -497,6 +497,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/agent/knowledge/guide", s.withAgentCapability(http.HandlerFunc(s.agentKnowledgeGuide)))
 	mux.Handle("GET /api/v1/agent/knowledge/{knowledge}", s.withAgentCapability(http.HandlerFunc(s.agentKnowledgeEntry)))
 	mux.Handle("POST /api/v1/agent/knowledge/candidates", s.withAgentCapability(http.HandlerFunc(s.submitAgentKnowledge)))
+	mux.Handle("POST /api/v1/agent/knowledge/entries", s.withAgentCapability(http.HandlerFunc(s.submitAgentKnowledgeEntry)))
+	mux.Handle("POST /api/v1/agent/knowledge/feedback", s.withAgentCapability(http.HandlerFunc(s.submitAgentKnowledgeFeedbackEntry)))
 	mux.Handle("POST /api/v1/agent/knowledge/{knowledge}/feedback", s.withAgentCapability(http.HandlerFunc(s.submitAgentKnowledgeFeedback)))
 	mux.Handle("POST /api/v1/agent/collaboration/batches", s.withAgentCapability(http.HandlerFunc(s.submitAgentCollaboration)))
 	mux.Handle(waitAgentCollaborationRoute, s.withAgentCapability(http.HandlerFunc(s.waitAgentCollaboration)))

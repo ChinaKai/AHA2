@@ -22,6 +22,16 @@ type Manager struct {
 	enabled bool
 	source  string
 	reader  *Reader
+	// runtimeWrite is the independent, default-off Agent write gate. Even an
+	// enabled vault keeps Agent writes on the legacy tables until an operator
+	// turns this on for an allowlisted project.
+	runtimeWrite bool
+	// writeBudget is the per-Task/Turn entry write limit; zero uses
+	// DefaultWriteBudget. It is a field so tests can shrink the budget.
+	writeBudget int
+	// writeHook is a test seam called after the file write and before the
+	// index rebuild. Production leaves it nil.
+	writeHook func() error
 }
 
 // The effective switch comes either from the persisted database row or from
@@ -73,6 +83,27 @@ func (m *Manager) Source() string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.source
+}
+
+// SetRuntimeWrite applies the independent Agent write gate. It never enables
+// the vault itself: reads and writes still require the Web switch and the
+// project allowlist.
+func (m *Manager) SetRuntimeWrite(enabled bool) {
+	m.mu.Lock()
+	m.runtimeWrite = enabled
+	m.mu.Unlock()
+}
+
+func (m *Manager) RuntimeWriteEnabled() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.runtimeWrite
+}
+
+func (m *Manager) setWriteBudgetForTest(budget int) {
+	m.mu.Lock()
+	m.writeBudget = budget
+	m.mu.Unlock()
 }
 
 // EffectiveStartupSwitch applies the Phase 3 precedence rule: once the owner
@@ -227,6 +258,12 @@ func (m *Manager) Rebuild(ctx context.Context) (RebuildReport, error) {
 	if !m.enabled {
 		return RebuildReport{}, ErrDisabled
 	}
+	return m.rebuildLocked(ctx)
+}
+
+// rebuildLocked rebuilds the projection and reopens the reader. The caller
+// holds m.mu for writing.
+func (m *Manager) rebuildLocked(ctx context.Context) (RebuildReport, error) {
 	if !VaultInitialized(m.config.VaultPath) {
 		return RebuildReport{}, ErrVaultNotInitialized
 	}

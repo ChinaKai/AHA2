@@ -145,6 +145,8 @@ GET  /api/v1/agent/knowledge/{id}
 GET  /api/v1/agent/knowledge/guide
 POST /api/v1/agent/knowledge/candidates
 POST /api/v1/agent/knowledge/{id}/feedback
+POST /api/v1/agent/knowledge/entries
+POST /api/v1/agent/knowledge/feedback
 GET  /api/v1/agent/skills
 POST /api/v1/agent/skills
 GET  /api/v1/agent/skills/{id}
@@ -167,6 +169,20 @@ revision attempts. `knowledge_publish` is the Task-level capability, while
 project-collaboration binding.
 
 `POST /api/v1/agent/skills` accepts `name`, `description`, and `instructions`. Main Agent creates an active, enabled Skill scoped to the current Project, and AHA2 automatically selects it for the current Task. It is available through the Agent API immediately and is materialized into context on the next Turn.
+
+`POST /api/v1/agent/knowledge/entries` 是 Phase 1 统一写入入口：`mode=create|revise`，
+服务端从 Task token 解析 Project，忽略客户端传入的路径；`scope` 只接受 `project` 或
+`global`（全局写入仍需 Main Agent 与 task-route 权限）。create 校验六种规范 type、
+title、summary、body、tags、禁止内容以及 `search_query`/`duplicate_ack`；高相似度返回
+409 与 `duplicate_candidates`。revise 需要 `entry_id` + `base_revision`，冲突返回 409。
+响应中的 `source` 说明本次写入落在 `vault` 还是 `legacy`。写入来源跟随读取来源：项目
+读 vault 但 runtime write 开关关闭时返回 409 `knowledge_vault_write_disabled`，不会静默
+回退旧表；读旧表时该接口复用 proposal 流程。
+
+`POST /api/v1/agent/knowledge/feedback` 接受 `entry_id` 和 `kind=helped|stale|wrong`。
+stale/wrong 只更新状态并进入待修订队列，不修改正文；helped 只记录正向反馈。该接口与
+entries 一样按读取来源选择 vault 或 legacy，并在写入后立即可被同一 Turn 的
+`GET /api/v1/agent/knowledge` 读到。
 
 Knowledge 只返回当前 Project/Product Line 可用的已发布条目；更新已有条目必须携带
 `base_revision`。Agent 提交的新知识或修订统一先创建 proposal；手动评审模式保持 pending，

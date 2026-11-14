@@ -196,11 +196,19 @@ type Service struct {
 	// project on the legacy knowledge tables. knowledgeVaultRuntimeRead is a
 	// separate, default-off gate: the Web vault switch may be enabled while
 	// Agent turns still read the legacy DB.
-	knowledgeVault            *knowledgevault.Manager
-	knowledgeVaultRuntimeRead bool
-	buildVersion              string
-	webVersion                string
-	startedAt                 time.Time
+	knowledgeVault *knowledgevault.Manager
+	// runtimeRead switches reads to the vault; runtimeWrite switches writes.
+	// Both default to off and are independent: a vault-reading Turn still
+	// writes the legacy tables unless runtimeWrite is explicitly enabled.
+	knowledgeVaultRuntimeRead  bool
+	knowledgeVaultRuntimeWrite bool
+	// agentKnowledgeBudget keeps the legacy fallback on the same per-Turn
+	// write budget as the vault engine, which tracks its own counter durably.
+	agentKnowledgeBudgetMu sync.Mutex
+	agentKnowledgeBudget   map[string]legacyKnowledgeBudget
+	buildVersion           string
+	webVersion             string
+	startedAt              time.Time
 
 	// These four are detection seams. Production uses the workspace probe and
 	// the real host enumeration; tests substitute them so address selection can be

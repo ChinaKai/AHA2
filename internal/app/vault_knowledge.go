@@ -121,7 +121,10 @@ func mapVaultKnowledgeEntry(entry knowledgevault.IndexEntry) (domain.KnowledgeEn
 	if status != domain.KnowledgeVerified && status != domain.KnowledgeStale {
 		return domain.KnowledgeEntry{}, false
 	}
-	revision := 1
+	revision := entry.Revision
+	if revision <= 0 {
+		revision = 1
+	}
 	feedback := ""
 	if status == domain.KnowledgeStale {
 		feedback = "stale"

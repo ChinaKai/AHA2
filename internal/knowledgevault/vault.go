@@ -452,6 +452,12 @@ func writeFileIfChanged(path string, content []byte, mode os.FileMode) error {
 		cleanup()
 		return err
 	}
+	// Flush before the rename so a crash cannot leave the target pointing at
+	// an empty or partially written file.
+	if err := temporary.Sync(); err != nil {
+		cleanup()
+		return err
+	}
 	if err := temporary.Close(); err != nil {
 		_ = os.Remove(temporaryPath)
 		return err
@@ -459,6 +465,14 @@ func writeFileIfChanged(path string, content []byte, mode os.FileMode) error {
 	if err := os.Rename(temporaryPath, path); err != nil {
 		_ = os.Remove(temporaryPath)
 		return err
+	}
+	// Best effort directory fsync: the rename itself is atomic, this only
+	// makes the directory entry durable on filesystems that need it. Windows
+	// does not support syncing a directory handle, so a failure is ignored
+	// there (and on any filesystem that reports it).
+	if directory, openErr := os.Open(filepath.Dir(path)); openErr == nil {
+		_ = directory.Sync()
+		_ = directory.Close()
 	}
 	return nil
 }

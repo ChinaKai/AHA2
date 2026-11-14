@@ -121,6 +121,37 @@ func TestKnowledgeVaultRuntimeReadDefaultsOff(t *testing.T) {
 	}
 }
 
+func TestKnowledgeVaultRuntimeWriteDefaultsOffAndIsIndependent(t *testing.T) {
+	t.Setenv("AHA2_KNOWLEDGE_VAULT_RUNTIME_WRITE", "")
+	t.Setenv("AHA2_KNOWLEDGE_VAULT_RUNTIME_READ", "")
+	t.Setenv("AHA2_LISTEN", "")
+	t.Setenv("AHA2_DATA_DIR", "")
+	options, err := parseServeOptions("aha2 serve", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.knowledgeVaultRuntimeWrite {
+		t.Fatal("runtime write gate must default to false")
+	}
+	options, err = parseServeOptions("aha2 serve", []string{"--knowledge-vault-runtime-write"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !options.knowledgeVaultRuntimeWrite {
+		t.Fatal("runtime write flag was not applied")
+	}
+	if options.knowledgeVaultRuntimeRead {
+		t.Fatal("enabling the write gate must not enable runtime reads")
+	}
+	options, err = parseServeOptions("aha2 serve", []string{"--knowledge-vault-runtime-read"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.knowledgeVaultRuntimeWrite {
+		t.Fatal("enabling runtime reads must not enable writes")
+	}
+}
+
 // Live inbox delivery is always on. The old flags and environment variables are
 // still accepted so existing service definitions keep starting, but they are
 // reported as deprecated and cannot select any behavior.

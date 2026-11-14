@@ -105,6 +105,8 @@ type Frontmatter struct {
 	LegacyType string
 	Tags       []string
 	Status     string
+	Summary    string
+	Revision   int
 	Parent     string
 	Created    string
 	Updated    string
@@ -154,9 +156,10 @@ func ParseDocument(raw string) Document {
 func frontmatterFromMap(metadata map[string]any) Frontmatter {
 	known := map[string]bool{
 		"id": true, "title": true, "slug": true, "scope": true, "project_id": true,
-		"type": true, "legacy_type": true, "tags": true, "status": true, "parent": true,
-		"created": true, "updated": true, "source_task": true, "source_turn": true,
-		"confidence": true, "trust": true, "sort_order": true, "is_index": true, "archive": true,
+		"type": true, "legacy_type": true, "tags": true, "status": true, "summary": true,
+		"revision": true, "parent": true, "created": true, "updated": true,
+		"source_task": true, "source_turn": true, "confidence": true, "trust": true,
+		"sort_order": true, "is_index": true, "archive": true,
 	}
 	item := Frontmatter{Extra: map[string]any{}}
 	for key, value := range metadata {
@@ -182,6 +185,12 @@ func frontmatterFromMap(metadata map[string]any) Frontmatter {
 			item.LegacyType = stringValue(value)
 		case "status":
 			item.Status = strings.ToLower(stringValue(value))
+		case "summary":
+			item.Summary = stringValue(value)
+		case "revision":
+			if parsed, ok := intValue(value); ok && parsed > 0 {
+				item.Revision = parsed
+			}
 		case "parent":
 			item.Parent = stringValue(value)
 		case "created":
@@ -394,6 +403,8 @@ func renderFrontmatter(item Frontmatter) (string, error) {
 		LegacyType string   `yaml:"legacy_type,omitempty"`
 		Tags       []string `yaml:"tags,omitempty"`
 		Status     string   `yaml:"status,omitempty"`
+		Summary    string   `yaml:"summary,omitempty"`
+		Revision   int      `yaml:"revision,omitempty"`
 		Parent     string   `yaml:"parent,omitempty"`
 		Created    string   `yaml:"created,omitempty"`
 		Updated    string   `yaml:"updated,omitempty"`
@@ -408,7 +419,7 @@ func renderFrontmatter(item Frontmatter) (string, error) {
 	encoded, err := yaml.Marshal(yamlFrontmatter{
 		ID: item.ID, Title: item.Title, Slug: item.Slug, Scope: item.Scope,
 		ProjectID: item.ProjectID, Type: item.Type, LegacyType: item.LegacyType,
-		Tags: item.Tags, Status: item.Status, Parent: item.Parent,
+		Tags: item.Tags, Status: item.Status, Summary: item.Summary, Revision: item.Revision, Parent: item.Parent,
 		Created: item.Created, Updated: item.Updated,
 		SourceTask: item.SourceTask, SourceTurn: item.SourceTurn,
 		Confidence: item.Confidence, Trust: item.Trust,

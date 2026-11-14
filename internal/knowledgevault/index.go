@@ -43,6 +43,8 @@ CREATE TABLE IF NOT EXISTS entries (
     title TEXT NOT NULL,
     body TEXT NOT NULL,
     status TEXT NOT NULL,
+    summary TEXT NOT NULL DEFAULT '',
+    revision INTEGER NOT NULL DEFAULT 0,
     tags TEXT NOT NULL DEFAULT '',
     sort_order INTEGER NOT NULL DEFAULT 0,
     is_index INTEGER NOT NULL DEFAULT 0,
@@ -109,7 +111,54 @@ func OpenIndex(ctx context.Context, indexPath string) (*Index, error) {
 		db.Close()
 		return nil, fmt.Errorf("create knowledge index schema: %w", err)
 	}
+	if err := migrateIndexSchema(ctx, db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate knowledge index schema: %w", err)
+	}
 	return index, nil
+}
+
+// migrateIndexSchema adds columns introduced after the first index release.
+// The index is a rebuildable projection, but deployed databases must keep
+// opening until the next rebuild replaces them.
+func migrateIndexSchema(ctx context.Context, db *sql.DB) error {
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(entries)`)
+	if err != nil {
+		return err
+	}
+	columns := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull int
+		var defaultValue any
+		var primaryKey int
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return err
+		}
+		columns[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, item := range []struct {
+		name string
+		sql  string
+	}{
+		{"summary", `ALTER TABLE entries ADD COLUMN summary TEXT NOT NULL DEFAULT ''`},
+		{"revision", `ALTER TABLE entries ADD COLUMN revision INTEGER NOT NULL DEFAULT 0`},
+	} {
+		if columns[item.name] {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, item.sql); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (i *Index) Close() error {
@@ -133,6 +182,8 @@ type IndexEntry struct {
 	Title       string   `json:"title"`
 	Body        string   `json:"body"`
 	Status      string   `json:"status"`
+	Summary     string   `json:"summary,omitempty"`
+	Revision    int      `json:"revision"`
 	Tags        []string `json:"tags,omitempty"`
 	SortOrder   int      `json:"sort_order"`
 	IsIndex     bool     `json:"is_index"`
@@ -300,11 +351,11 @@ func (i *Index) Rebuild(ctx context.Context, vaultPath string) (RebuildReport, e
 		entry := record.entry
 		frontmatterJSON := record.entry.Frontmatter
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO entries(id,path,scope,project_id,slug,parent_id,type,legacy_type,title,body,status,tags,
+			INSERT INTO entries(id,path,scope,project_id,slug,parent_id,type,legacy_type,title,body,status,summary,revision,tags,
 				sort_order,is_index,archive,created,updated,source_task,source_turn,confidence,trust,prefix,content_hash,warning,frontmatter_json)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			entry.ID, entry.Path, entry.Scope, entry.ProjectID, entry.Slug, entry.ParentID,
-			entry.Type, entry.LegacyType, entry.Title, entry.Body, entry.Status, strings.Join(entry.Tags, ","),
+			entry.Type, entry.LegacyType, entry.Title, entry.Body, entry.Status, entry.Summary, entry.Revision, strings.Join(entry.Tags, ","),
 			entry.SortOrder, boolInt(entry.IsIndex), boolInt(entry.Archive), entry.Created, entry.Updated,
 			entry.SourceTask, entry.SourceTurn, entry.Confidence, entry.Trust, entry.Prefix, entry.ContentHash,
 			strings.Join(record.warnings, "; "), frontmatterJSON,
@@ -438,12 +489,17 @@ func buildScannedRecord(relative, raw string, document Document, manifest Manife
 	if (scope == "project" || scope == "archive") && projectID == "" {
 		record.warnings = append(record.warnings, "project slug is missing from the manifest")
 	}
+	revision := frontmatter.Revision
+	if revision <= 0 {
+		revision = 1
+	}
 	tags := append([]string{}, frontmatter.Tags...)
 	sort.Strings(tags)
 	record.entry = IndexEntry{
 		ID: id, Path: relative, Scope: scope, ProjectID: projectID, Slug: slug,
 		ParentID: strings.TrimSpace(frontmatter.Parent), Type: canonical, LegacyType: legacy,
-		Title: title, Body: body, Status: status, Tags: tags, SortOrder: sortOrder,
+		Title: title, Body: body, Status: status, Summary: strings.TrimSpace(frontmatter.Summary),
+		Revision: revision, Tags: tags, SortOrder: sortOrder,
 		IsIndex: isIndex, Archive: archive, Created: frontmatter.Created, Updated: frontmatter.Updated,
 		SourceTask: frontmatter.SourceTask, SourceTurn: frontmatter.SourceTurn,
 		Confidence: confidence, Trust: frontmatter.Trust,
@@ -649,6 +705,8 @@ type SearchResult struct {
 	Scope     string   `json:"scope"`
 	ProjectID string   `json:"project_id,omitempty"`
 	Status    string   `json:"status"`
+	Summary   string   `json:"summary,omitempty"`
+	Revision  int      `json:"revision,omitempty"`
 	Tags      []string `json:"tags,omitempty"`
 	Snippet   string   `json:"snippet,omitempty"`
 	Updated   string   `json:"updated,omitempty"`
@@ -666,7 +724,7 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 		limit = 200
 	}
 	query = strings.TrimSpace(query)
-	sqlQuery := `SELECT id,title,path,type,scope,project_id,status,tags,updated,archive,body FROM entries WHERE 1=1`
+	sqlQuery := `SELECT id,title,path,type,scope,project_id,status,summary,revision,tags,updated,archive,body FROM entries WHERE 1=1`
 	args := []any{}
 	if options.Scope != "" {
 		sqlQuery += ` AND scope=?`
@@ -715,7 +773,7 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 		var body string
 		var archive int
 		if err := rows.Scan(&item.ID, &item.Title, &item.Path, &item.Type, &item.Scope, &item.ProjectID,
-			&item.Status, &tags, &item.Updated, &archive, &body); err != nil {
+			&item.Status, &item.Summary, &item.Revision, &tags, &item.Updated, &archive, &body); err != nil {
 			return nil, err
 		}
 		item.Archive = archive != 0
@@ -832,7 +890,7 @@ func (i *Index) Status(ctx context.Context) (IndexStatus, error) {
 
 // Entries lists indexed entries for a scope. Empty scope returns all entries.
 func (i *Index) Entries(ctx context.Context, scope, projectID string) ([]IndexEntry, error) {
-	query := `SELECT id,path,scope,project_id,slug,parent_id,type,legacy_type,title,body,status,tags,
+	query := `SELECT id,path,scope,project_id,slug,parent_id,type,legacy_type,title,body,status,summary,revision,tags,
 		sort_order,is_index,archive,created,updated,source_task,source_turn,confidence,trust,prefix,content_hash,warning,frontmatter_json
 		FROM entries WHERE 1=1`
 	args := []any{}
@@ -855,7 +913,8 @@ func (i *Index) Entries(ctx context.Context, scope, projectID string) ([]IndexEn
 		var item IndexEntry
 		var tags string
 		if err := rows.Scan(&item.ID, &item.Path, &item.Scope, &item.ProjectID, &item.Slug, &item.ParentID,
-			&item.Type, &item.LegacyType, &item.Title, &item.Body, &item.Status, &tags,
+			&item.Type, &item.LegacyType, &item.Title, &item.Body, &item.Status, &item.Summary,
+			&item.Revision, &tags,
 			&item.SortOrder, &item.IsIndex, &item.Archive, &item.Created, &item.Updated,
 			&item.SourceTask, &item.SourceTurn, &item.Confidence, &item.Trust, &item.Prefix,
 			&item.ContentHash, &item.Warning, &item.Frontmatter); err != nil {

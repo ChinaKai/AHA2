@@ -49,7 +49,19 @@ Agent 读取和技能加载切换按项目灰度。Web 的 vault 总开关仍然
 - `AHA2_KNOWLEDGE_VAULT_READ_PROJECTS` 是逗号分隔的项目 ID allowlist。未设置时默认为宠物项目 `project_pet` 与 AHA2 项目 `project_6ff866f348d8a892d5e8`；显式设为空表示不切换任何项目。
 - 只有同时满足“Web vault 开关开启、runtime read 开关开启、项目在 allowlist、索引就绪、manifest 已绑定该项目”时，Turn 知识块和 Agent 知识列表才读取 vault；其他项目继续使用旧知识表和旧技能目录。runtime read 关闭时，即使 manager 已 enabled 且 allowlist 命中，知识和技能也全部走旧来源。
 - 技能优先从 `global/skills/<slug>/` 或 `projects/<slug>/skills/<slug>/` 加载；vault 中找不到对应包时回退到旧的 `<data-dir>/knowledge/skills` 并记录日志，旧目录不会被删除。
-- 回退：从 allowlist 移除项目或显式设为空，该项目下一 Turn 就回到旧 DB；关闭 runtime read 开关或 Web vault 总开关则所有项目回退（runtime read 是启动配置，修改后需重启）。canary 只影响读取，不写 vault、不删除旧数据。
+- 回退：从 allowlist 移除项目或显式设为空，该项目下一 Turn 就回到旧 DB；关闭 runtime read 开关或 Web vault 总开关则所有项目回退（runtime read 是启动配置，修改后需重启）。canary 本身不写 vault、不删除旧数据；写入由下面独立的 runtime write 开关控制。
+
+## Agent 写入（Phase 1）
+
+写入有独立开关 `AHA2_KNOWLEDGE_VAULT_RUNTIME_WRITE`（或 `--knowledge-vault-runtime-write`），默认 false，与 runtime read 相互独立：
+
+- 写入来源跟随读取来源。项目只有同时满足 runtime read、allowlist、manifest 绑定和 runtime write 才写 vault；非 allowlist 项目、runtime read 关闭或 Web vault 总开关关闭时，新写入接口继续调用旧知识 proposal 流程，旧表不会删除。
+- 项目正在读 vault 但 runtime write 关闭时，写入接口返回 409 `knowledge_vault_write_disabled`，**不会**回退到旧表，避免同一 Turn 出现 vault 读、legacy 写的双写分裂。打开 runtime write 后立即写 vault；从 allowlist 移除项目则下一 Turn 回滚到旧写入路径。
+- `POST /api/v1/agent/knowledge/entries` 支持 `mode=create|revise`。create 必须提供六种规范 `type` 之一、`title`、`summary`、`body`、以及 `search_query` 或 `duplicate_ack`；服务端按标题分配文件名，不接受客户端路径。与已有文档高度相似（Dice 相似度 ≥ 0.8）的 create 返回 409 `duplicate_knowledge` 与 `duplicate_candidates`，确认后可带 `duplicate_ack` 重试。
+- revise 必须提供 `entry_id` 和 `base_revision`（可选 `base_hash`）；revision 或 hash 与磁盘不一致返回 409 `knowledge_revision_conflict`，不会覆盖更新版本。写入成功后 revision + 1 并同步重建索引。
+- 路径策略：项目知识只能写入已存在的 topic group（含 `index.md` 的子目录）或 `projects/<slug>/inbox/`；全局知识只能进入 `global/inbox/`。Agent 不能创建项目根、topic group、`index.md`、`skills`、`archive`、`orphans`、`.trash`，路径穿越、绝对路径、反斜杠和 symlink 目标一律拒绝。
+- `POST /api/v1/agent/knowledge/feedback` 支持 `helped|stale|wrong`。`stale`/`wrong` 只改 frontmatter `status` 并进入待修订队列，不改正文、不增加 revision；`helped` 只记录正向反馈。两种来源都不会因反馈改写正文。
+- 原子性：临时文件写入并 fsync 后 rename，随后重建索引；任一步失败会恢复旧文件并回滚索引重建，不留下半写文件。审计（`source_task`、`source_turn`、旧 revision、diff 摘要、writer）与幂等键、每 Task/Turn 默认 3 条写入预算保存在 vault 内 `.aha/agent-writes.json`。
 
 ## 示例知识库（体验数据，可删除）
 

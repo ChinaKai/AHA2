@@ -501,7 +501,7 @@ func (r *Reader) entryByPath(ctx context.Context, relative string) (IndexEntry, 
 	return scanIndexEntry(r.index.db.QueryRowContext(ctx, entrySelectSQL+` WHERE path=?`, relative))
 }
 
-const entrySelectSQL = `SELECT id,path,scope,project_id,slug,parent_id,type,legacy_type,title,body,status,tags,
+const entrySelectSQL = `SELECT id,path,scope,project_id,slug,parent_id,type,legacy_type,title,body,status,summary,revision,tags,
 	sort_order,is_index,archive,created,updated,source_task,source_turn,confidence,trust,prefix,content_hash,warning,frontmatter_json
 	FROM entries`
 
@@ -509,7 +509,8 @@ func scanIndexEntry(row *sql.Row) (IndexEntry, error) {
 	var item IndexEntry
 	var tags string
 	err := row.Scan(&item.ID, &item.Path, &item.Scope, &item.ProjectID, &item.Slug, &item.ParentID,
-		&item.Type, &item.LegacyType, &item.Title, &item.Body, &item.Status, &tags,
+		&item.Type, &item.LegacyType, &item.Title, &item.Body, &item.Status, &item.Summary,
+		&item.Revision, &tags,
 		&item.SortOrder, &item.IsIndex, &item.Archive, &item.Created, &item.Updated,
 		&item.SourceTask, &item.SourceTurn, &item.Confidence, &item.Trust, &item.Prefix,
 		&item.ContentHash, &item.Warning, &item.Frontmatter)

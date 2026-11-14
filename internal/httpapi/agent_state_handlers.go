@@ -331,6 +331,106 @@ func (s *Server) submitAgentKnowledgeFeedback(writer http.ResponseWriter, reques
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "knowledge": item})
 }
 
+// submitAgentKnowledgeEntry is the Phase 1 vault write API. The write source is
+// decided by the application layer from the read source; this handler only
+// decodes input and maps structured errors to status codes.
+func (s *Server) submitAgentKnowledgeEntry(writer http.ResponseWriter, request *http.Request) {
+	claims, _ := agentClaimsFromContext(request.Context())
+	var payload app.AgentKnowledgeEntryInput
+	if err := decodeJSON(request, &payload); err != nil {
+		writeErrorDetail(writer, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	result, err := s.app.SubmitAgentKnowledgeEntry(request.Context(), claims, payload)
+	if err != nil {
+		writeAgentKnowledgeWriteError(writer, err)
+		return
+	}
+	status := http.StatusOK
+	if payload.Mode == "" || strings.EqualFold(payload.Mode, "create") {
+		status = http.StatusCreated
+	}
+	s.audit(request, "agent.knowledge.entry", "task", claims.TaskID, map[string]any{
+		"source": result.Source, "mode": payload.Mode,
+	})
+	body := map[string]any{"ok": true, "source": result.Source}
+	if result.Entry != nil {
+		body["entry"] = result.Entry
+	}
+	if result.Knowledge != nil {
+		body["knowledge"] = result.Knowledge
+	}
+	if result.Proposals != nil {
+		body["proposals"] = result.Proposals
+	}
+	writeJSON(writer, status, body)
+}
+
+func (s *Server) submitAgentKnowledgeFeedbackEntry(writer http.ResponseWriter, request *http.Request) {
+	claims, _ := agentClaimsFromContext(request.Context())
+	var payload app.AgentKnowledgeFeedbackInput
+	if err := decodeJSON(request, &payload); err != nil {
+		writeErrorDetail(writer, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	result, err := s.app.SubmitAgentKnowledgeFeedbackEntry(request.Context(), claims, payload)
+	if err != nil {
+		writeAgentKnowledgeWriteError(writer, err)
+		return
+	}
+	s.audit(request, "agent.knowledge.feedback_entry", "knowledge", payload.EntryID, map[string]any{
+		"source": result.Source, "kind": payload.Kind,
+	})
+	body := map[string]any{"ok": true, "source": result.Source}
+	if result.Feedback != nil {
+		body["feedback"] = result.Feedback
+	}
+	if result.Knowledge != nil {
+		body["knowledge"] = result.Knowledge
+	}
+	writeJSON(writer, http.StatusOK, body)
+}
+
+func writeAgentKnowledgeWriteError(writer http.ResponseWriter, err error) {
+	var writeErr *knowledgevault.WriteError
+	if errors.As(err, &writeErr) {
+		switch writeErr.Code {
+		case knowledgevault.WriteErrorDuplicate:
+			writeJSON(writer, http.StatusConflict, map[string]any{
+				"ok": false, "error": writeErr.Code, "message": writeErr.Message,
+				"duplicate_candidates": writeErr.Candidates,
+			})
+			return
+		case knowledgevault.WriteErrorRevisionConflict, knowledgevault.WriteErrorIndexStale, knowledgevault.WriteErrorDisabled:
+			writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": writeErr.Code, "message": writeErr.Message})
+			return
+		case knowledgevault.WriteErrorBudget:
+			writeJSON(writer, http.StatusTooManyRequests, map[string]any{"ok": false, "error": writeErr.Code, "message": writeErr.Message})
+			return
+		case knowledgevault.WriteErrorNotFound:
+			writeJSON(writer, http.StatusNotFound, map[string]any{"ok": false, "error": writeErr.Code, "message": writeErr.Message})
+			return
+		case knowledgevault.WriteErrorForbiddenScope:
+			writeJSON(writer, http.StatusForbidden, map[string]any{"ok": false, "error": writeErr.Code, "message": writeErr.Message})
+			return
+		case knowledgevault.WriteErrorProjectUnbound, knowledgevault.WriteErrorUnavailable:
+			writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": writeErr.Code, "message": writeErr.Message})
+			return
+		default:
+			writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": writeErr.Code, "message": writeErr.Message})
+			return
+		}
+	}
+	switch {
+	case errors.Is(err, knowledgevault.ErrDisabled), errors.Is(err, knowledgevault.ErrVaultNotInitialized):
+		writeJSON(writer, http.StatusConflict, map[string]any{
+			"ok": false, "error": "knowledge_vault_unavailable", "message": err.Error(),
+		})
+	default:
+		writeAgentControlError(writer, err)
+	}
+}
+
 func (s *Server) submitAgentCollaboration(writer http.ResponseWriter, request *http.Request) {
 	claims, _ := agentClaimsFromContext(request.Context())
 	var payload struct {
