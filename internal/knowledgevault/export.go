@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -98,8 +97,7 @@ func openReadOnlySQLite(path string) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	location := &url.URL{Scheme: "file", Path: filepath.ToSlash(absolute)}
-	dsn := location.String() + "?mode=ro&_pragma=busy_timeout(5000)"
+	dsn := SQLiteFileDSN(absolute, "mode=ro&_pragma=busy_timeout(5000)")
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open source database: %w", err)

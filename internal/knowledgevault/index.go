@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io/fs"
-	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -89,8 +88,7 @@ func openIndexDatabase(path string) (*sql.DB, error) {
 	if err := os.MkdirAll(filepath.Dir(absolute), 0o700); err != nil {
 		return nil, fmt.Errorf("create index directory: %w", err)
 	}
-	location := &url.URL{Scheme: "file", Path: filepath.ToSlash(absolute)}
-	dsn := location.String() + "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_txlock=immediate"
+	dsn := SQLiteFileDSN(absolute, "_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_txlock=immediate")
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open knowledge index: %w", err)

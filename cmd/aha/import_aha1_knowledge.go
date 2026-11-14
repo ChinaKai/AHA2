@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ChinaKai/AHA2/internal/knowledgevault"
 	"github.com/ChinaKai/AHA2/internal/legacyimport"
 	"github.com/ChinaKai/AHA2/internal/store"
 )
@@ -187,7 +188,7 @@ func snapshotSQLiteDatabase(source, target string) error {
 	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 		return err
 	}
-	location := "file:" + filepath.ToSlash(absolute) + "?mode=ro"
+	location := knowledgevault.SQLiteFileDSN(absolute, "mode=ro")
 	database, err := sql.Open("sqlite", location)
 	if err != nil {
 		return err

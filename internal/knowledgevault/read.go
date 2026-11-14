@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -68,8 +67,7 @@ func openReadOnlyIndex(ctx context.Context, indexPath string) (*Index, error) {
 	if err != nil {
 		return nil, err
 	}
-	location := &url.URL{Scheme: "file", Path: filepath.ToSlash(absolute)}
-	db, err := sql.Open("sqlite", location.String()+"?mode=ro&_pragma=busy_timeout(5000)")
+	db, err := sql.Open("sqlite", SQLiteFileDSN(absolute, "mode=ro&_pragma=busy_timeout(5000)"))
 	if err != nil {
 		return nil, err
 	}
