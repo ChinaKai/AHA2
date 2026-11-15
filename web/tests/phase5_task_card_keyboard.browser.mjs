@@ -12,7 +12,10 @@
 //   - while the inline title editor is open the row body drops its button
 //     semantics, so axe nested-interactive stays clean; cancelling restores
 //     role/tabindex/aria-label and the card still opens with Enter;
-//   - returning to the list restores focus to the card;
+//   - returning to the list restores focus to the card, through both the back
+//     control and Escape; a dialog or a text control keeps its own Escape;
+//   - when the row is removed by the list refresh that was parked while the
+//     detail was open, focus moves to the task list container instead of BODY;
 //   - 360/390/1280 keep the card height and horizontal overflow unchanged
 //     across focus/open/back (focus must not reflow the row).
 //
@@ -52,6 +55,10 @@ const bootstrap = `
 const json = (value, status = 200) => new Response(JSON.stringify(value), {status, headers: {"Content-Type": "application/json"}});
 const TASKS = ${JSON.stringify(TASKS)};
 const COUNTS = ${JSON.stringify(COUNTS)};
+// The list response is mutable so a test can make a row disappear while its
+// detail is open, then let the parked list refresh run after closing.
+window.__taskList = TASKS;
+window.__eventSources = [];
 const LANGUAGE = new URL(location.href).searchParams.get("lang") === "en-US" ? "en-US" : "zh-CN";
 window.fetch = async (input, init = {}) => {
   const url = new URL(typeof input === "string" ? input : input.url, location.origin);
@@ -61,7 +68,7 @@ window.fetch = async (input, init = {}) => {
   if (path === "/api/v1/settings/general") return json({ok: true, general: {language: LANGUAGE}});
   if (path === "/api/v1/system") return json({system: {web_version: "v0.0.0.test", version: "v0.0.0.test", started_at: new Date().toISOString()}});
   if (path === "/api/v1/assistant") return json({assistant: {character: "gugugaga", name: "AHA", nickname: "AHA", enabled: false}, messages: [], models: [], tools: []});
-  if (path === "/api/v1/tasks" && method === "GET") return json({tasks: TASKS, has_more: false, counts: COUNTS});
+  if (path === "/api/v1/tasks" && method === "GET") return json({tasks: window.__taskList, has_more: false, counts: COUNTS});
   if (path === "/api/v1/projects") return json({projects: [{id: "project-1", name: "Project One", project_type: "folder", channel_retired: false}]});
   if (path === "/api/v1/workspaces") return json({workspaces: [{id: "workspace-1", project_id: "project-1", name: "WS One", root_path: "/tmp/ws", transport: "native", health: "ready"}]});
   if (path === "/api/v1/skills") return json({skills: []});
@@ -78,7 +85,12 @@ window.fetch = async (input, init = {}) => {
   if (path.startsWith("/api/v1/")) return json({});
   return json({});
 };
-window.EventSource = class { constructor() {} close() {} addEventListener() {} };
+window.EventSource = class {
+  constructor() { this.listeners = {}; window.__eventSources.push(this); }
+  close() {}
+  addEventListener(name, fn) { (this.listeners[name] ||= []).push(fn); }
+};
+window.__emitTaskEvent = (type, data) => window.__eventSources.forEach(source => (source.listeners.update || []).forEach(fn => fn({data: JSON.stringify({type, data})})));
 sessionStorage.setItem("aha2.navigation", JSON.stringify({view: "tasks"}));
 `;
 const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="/styles.css"><script src="/axe.js"></script></head><body><main id="app"></main><script type="module" src="/fixture.js"></script><script type="module" src="/app.js"></script></body></html>`;
@@ -113,6 +125,7 @@ const active = page => page.evaluate(() => {
   if (!(element instanceof HTMLElement)) return null;
   return {
     tag: element.tagName,
+    cls: element.className,
     task: element.closest("[data-task]")?.dataset.task || "",
     open: element.matches("[data-task-open]"),
     edit: element.matches("[data-edit-task-title]"),
@@ -194,6 +207,34 @@ try {
   const returned = await active(page);
   assert.deepEqual({task: returned?.task, open: returned?.open}, {task: "t-alpha", open: true}, "focus did not return to the Task card");
 
+  // Escape is the layer's other dismiss path and restores the same focus.
+  await cardOpen(page, "t-alpha").focus();
+  await page.keyboard.press("Enter");
+  await page.waitForSelector(".task-screen", {timeout: 15000});
+  await page.keyboard.press("Escape");
+  await page.waitForSelector(".task-screen", {state: "detached", timeout: 15000});
+  const escaped = await active(page);
+  assert.deepEqual({task: escaped?.task, open: escaped?.open}, {task: "t-alpha", open: true}, "Escape did not return focus to the Task card");
+
+  // A text control keeps Escape for itself: dismissing things in the composer
+  // must not knock the keyboard user out of the Task.
+  await cardOpen(page, "t-alpha").focus();
+  await page.keyboard.press("Enter");
+  await page.waitForSelector(".task-screen", {timeout: 15000});
+  await page.locator("#message-form textarea").focus();
+  await page.keyboard.press("Escape");
+  assert.equal(await page.locator(".task-screen").count(), 1, "Escape in the composer closed the Task detail");
+
+  // Dialogs above the detail keep their own Escape: closing Agent config must
+  // leave the Task open underneath.
+  await page.locator(".composer-agent-config").click();
+  await page.waitForSelector("#agent-config-dialog[open]", {timeout: 5000});
+  await page.keyboard.press("Escape");
+  await page.waitForSelector("#agent-config-dialog", {state: "hidden", timeout: 5000});
+  assert.equal(await page.locator(".task-screen").count(), 1, "Escape in the Agent config dialog also closed the Task detail");
+  await page.click("#back-tasks");
+  await page.waitForSelector('.task-card[data-task="t-alpha"]', {timeout: 15000});
+
   // Space opens the same Task and does not scroll the page.
   const scrollBefore = await page.evaluate(() => window.scrollY);
   await cardOpen(page, "t-alpha").focus();
@@ -262,6 +303,20 @@ try {
   assert.ok(confirmDialog, "Enter on the delete button did not ask for confirmation");
   assert.match(confirmDialog.message, /删除该任务/, "the delete confirmation does not describe the action");
   assert.equal(await page.locator(".task-screen").count(), 0, "Enter on the delete button opened the Task");
+
+  // If the row that opened the detail is gone once the parked list refresh
+  // catches up, focus must land on the list container — not on BODY.
+  await cardOpen(page, "t-alpha").focus();
+  await page.keyboard.press("Enter");
+  await page.waitForSelector(".task-screen", {timeout: 15000});
+  await page.evaluate(() => {
+    window.__taskList = window.__taskList.filter(task => task.id !== "t-alpha");
+    window.__emitTaskEvent("task_updated", {task_id: "t-alpha"});
+  });
+  await page.click("#back-tasks");
+  await page.waitForFunction(() => !document.querySelector('.task-card[data-task="t-alpha"]'), null, {timeout: 15000});
+  const fallback = await active(page);
+  assert.deepEqual({tag: fallback?.tag, cls: fallback?.cls}, {tag: "DIV", cls: "task-list"}, "a removed row dropped focus instead of moving it to the task list");
 
   // en-US: the accessible name uses the same translated status text as the
   // visible badge; a user-written Chinese title stays untouched.

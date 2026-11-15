@@ -742,6 +742,17 @@ let taskCardFocusReturnID = "";
 function clearTaskCardFocusReturn(): void {
   taskCardFocusReturnID = "";
 }
+
+// After the detail closes, focus belongs on the card that opened it. When that
+// row is already gone (filtered out, or removed by a list refresh) focus must
+// still land on the visible list instead of being dropped onto BODY.
+function focusTaskListReturnTarget(taskID: string): void {
+  const card = taskID
+    ? document.querySelector<HTMLElement>(`.task-card[data-task="${CSS.escape(taskID)}"] [data-task-open]`)
+    : null;
+  const target = card || document.querySelector<HTMLElement>(".task-list");
+  target?.focus({preventScroll: true});
+}
 let listRefreshInFlight = false;
 // Startup prefetch never chains other views. It runs at most once, on idle, and
 // only while the user has not interacted or opened a Task.
@@ -2272,6 +2283,17 @@ document.addEventListener("keydown", event => {
   else openCommandPalette();
 });
 
+// Escape dismisses the Task detail like its back control. A dialog, the command
+// palette, an open Task tool panel and text controls keep their own Escape
+// behavior, so only an otherwise plain detail layer is closed here.
+document.addEventListener("keydown", event => {
+  if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || event.key !== "Escape") return;
+  if (!state.selectedTask || state.taskTool || document.querySelector("dialog[open]")) return;
+  if (event.target instanceof Element && event.target.closest("input, textarea, select, [contenteditable='true']")) return;
+  event.preventDefault();
+  closeTaskDetail();
+});
+
 async function bootstrap(): Promise<void> {
   const savedNavigation = loadNavigationSnapshot();
   const hashRouted = applyLocationHash();
@@ -3495,6 +3517,21 @@ function cancelTaskOpen(): void {
   state.taskDetailLoading = false;
 }
 
+// One exit for both dismiss paths (Escape and the back control): stop the live
+// feeds, put focus back on the row that opened the detail, and let a later list
+// refresh fall back to the list container when that row disappears.
+function closeTaskDetail(): void {
+  cancelTaskOpen();
+  if (state.taskTool === "hardware") stopHardwarePanel();
+  if (state.taskTool === "browser") stopDesktopPanel();
+  const returnID = taskCardFocusReturnID;
+  state.selectedTask = null;
+  clearTaskCardFocusReturn();
+  closeEvents();
+  render();
+  focusTaskListReturnTarget(returnID);
+}
+
 function showTaskLoading(task: Task): void {
   closeEvents();
   state.view = "tasks";
@@ -4693,7 +4730,7 @@ function tasksPageHTML(): string {
       <span class="task-count" title="${escapeHTML(countTitle)}">匹配 ${filtered.length} / 已加载 ${state.tasks.length}${counts ? ` / 全部 ${totalTasks}` : ""}</span>
     </div>
     ${hiddenText ? `<div class="task-filter-hint" data-task-hidden-status>${icon("filter")}<span>${escapeHTML(hiddenText)}</span><button type="button" data-task-show-all>显示全部</button></div>` : ""}
-    <div class="task-list">${rows || `<div class="empty">${state.tasks.length ? "没有符合条件的任务" : "创建第一个任务开始执行。"}</div>`}${noMatchHint}${loadMoreHTML("tasks")}</div>
+    <div class="task-list" tabindex="-1">${rows || `<div class="empty">${state.tasks.length ? "没有符合条件的任务" : "创建第一个任务开始执行。"}</div>`}${noMatchHint}${loadMoreHTML("tasks")}</div>
     ${taskDialog()}
   </section>`;
 }
@@ -4749,6 +4786,9 @@ function restoreTaskListFocus(root: HTMLElement, state: TaskListFocus | null): v
     }
     return;
   }
+  // The row (or the focused control in it) was removed by the refresh. Keep
+  // focus on the list container instead of letting it drop onto BODY.
+  try { root.focus({preventScroll: true}); } catch { root.focus(); }
 }
 
 function patchTaskRows(list: HTMLElement, nextList: HTMLElement): void {
@@ -7336,20 +7376,7 @@ function bindCommon(): void {
     agentConfigBaseline = "";
     setMessage("notice", `${agentID} 配置已更新，下一个 Turn 生效`);
   });
-  document.querySelector("#back-tasks")?.addEventListener("click", () => {
-    cancelTaskOpen();
-    if (state.taskTool === "hardware") stopHardwarePanel();
-    if (state.taskTool === "browser") stopDesktopPanel();
-    const returnID = taskCardFocusReturnID;
-    state.selectedTask = null;
-    clearTaskCardFocusReturn();
-    closeEvents();
-    render();
-    if (returnID) {
-      document.querySelector<HTMLElement>(`.task-card[data-task="${CSS.escape(returnID)}"] [data-task-open]`)
-        ?.focus({preventScroll: true});
-    }
-  });
+  document.querySelector("#back-tasks")?.addEventListener("click", () => closeTaskDetail());
   document.querySelector<HTMLFormElement>("#task-takeover-form")?.addEventListener("submit", event => {
     event.preventDefault();
     if (!state.selectedTask?.task.read_only) return;
