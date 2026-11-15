@@ -4043,6 +4043,13 @@ async function refreshPetPendingApprovalCount(afterMutation = false): Promise<vo
   catch { /* Retain the last successful count; the bounded poll retries. */ }
 }
 
+// A pet_approval event changes the badge and, when the approvals tab is open,
+// the mounted list. Reconnect uses the same path to catch up on missed events.
+function refreshPetApprovalState(): void {
+  void refreshPetPendingApprovalCount(true);
+  petWorkbenchPageKeeper.binding?.refresh?.();
+}
+
 function navButton(view: View, glyph: string, label: Parameters<typeof t>[0]): string {
   const pending = view === "pet-workbench" ? petApprovalCounter.pending : 0;
   const description = pending > 0 ? petPendingApprovalLabel() : t(label);
@@ -8467,7 +8474,7 @@ function openGlobalEvents(): void {
       handlePetStreamEvent(type, data);
       return;
     }
-    if (type === "pet_approval") void refreshPetPendingApprovalCount(true);
+    if (type === "pet_approval") refreshPetApprovalState();
     if (eventRefreshesTaskList(type)) {
       refreshListData();
     }
@@ -8479,7 +8486,7 @@ function openGlobalEvents(): void {
   // disconnected are caught up.
   globalEvents.addEventListener("open", () => {
     refreshListData();
-    void refreshPetPendingApprovalCount(true);
+    refreshPetApprovalState();
     // A background Turn may have queued an open_task while no tab was
     // connected; claim it now that this session has a live event stream.
     resumePetNavigation();
@@ -8656,6 +8663,7 @@ async function bindPetWorkbenchPage(): Promise<void> {
   let approvalLimit = 10;
   let worklogLimit = 30;
   let loadingMore: "approval" | "worklog" | null = null;
+  let approvalRefreshQueued = false;
 
   // `t` resolves catalog keys; legacy Chinese literals still go through `tr`
   // so the English locale never shows a mixed sentence.
@@ -8725,10 +8733,6 @@ async function bindPetWorkbenchPage(): Promise<void> {
   const showLoadState = () => {
     if (loadError) {
       body.innerHTML = renderPetWorkbenchLoadError(loadError, t);
-      body.querySelector<HTMLButtonElement>("[data-pet-workbench-retry]")?.addEventListener("click", () => {
-        loadError = "";
-        void load();
-      });
     } else {
       body.innerHTML = `<div class="field-help">${escapeHTML(t("common.loading"))}</div>`;
     }
@@ -8758,7 +8762,7 @@ async function bindPetWorkbenchPage(): Promise<void> {
       bindOverviewActions();
       bindPetWatchActions();
     } else if (active === "approvals") {
-      body.innerHTML = `<div class="pet-approvals-toolbar"><button type="button" class="pet-approval-filter-button" data-pet-approval-filters-open>${icon("filter")}<span>${escapeHTML(t("petWorkbench.filterButton"))}</span><span class="pet-approval-filter-count" data-pet-approval-filter-count>${petApprovalFilterCount(petApprovalFilter, petApprovalStatusFilter)}</span></button></div><div id="pet-approval-rows-host"></div><div id="pet-approval-more-host"></div>`;
+      body.innerHTML = (loadError ? renderPetWorkbenchLoadError(loadError, t) : "") + `<div class="pet-approvals-toolbar"><button type="button" class="pet-approval-filter-button" data-pet-approval-filters-open>${icon("filter")}<span>${escapeHTML(t("petWorkbench.filterButton"))}</span><span class="pet-approval-filter-count" data-pet-approval-filter-count>${petApprovalFilterCount(petApprovalFilter, petApprovalStatusFilter)}</span></button></div><div id="pet-approval-rows-host"></div><div id="pet-approval-more-host"></div>`;
       body.querySelector<HTMLButtonElement>("[data-pet-approval-filters-open]")?.addEventListener("click", openApprovalFilters);
       renderApprovalRows();
     } else if (active === "records") {
@@ -8805,15 +8809,39 @@ async function bindPetWorkbenchPage(): Promise<void> {
       if ((view.approvals || []).some(item => item.status === "executing")) scheduleApprovalExecutionPoll();
     },
     onError: message => {
-      view = null;
       loadingMore = null;
       loadError = message;
-      showLoadState();
+      // A failed list refresh keeps the last good approvals on screen; other
+      // tabs keep the original full retry state.
+      if (view && active === "approvals") renderTab();
+      else {
+        view = null;
+        showLoadState();
+      }
     },
     timeoutMessage: t("petWorkbench.loadTimeout"),
   });
   binding = petWorkbenchPageKeeper.adopt(body, body.closest<HTMLElement>(".pet-workbench-page"), loader, active);
+  binding.refresh = () => { if (active === "approvals") refreshApprovals(); };
   const load = () => loader.load();
+
+  // Live approval events use the same loader as user actions. An event during
+  // an in-flight request queues exactly one follow-up so a commit that landed
+  // after the read is not missed.
+  const refreshApprovals = (): void => {
+    if (loader.busy()) {
+      // The in-flight request may have read the database before this event's
+      // commit; attach one follow-up instead of dropping the event.
+      if (approvalRefreshQueued) return;
+      approvalRefreshQueued = true;
+      void load().then(() => {
+        approvalRefreshQueued = false;
+        refreshApprovals();
+      });
+      return;
+    }
+    void load();
+  };
 
   // A heavy delete is executed in the background after the resolve returns
   // 202, so the card is refreshed until the approval leaves "executing".
@@ -8910,7 +8938,7 @@ async function bindPetWorkbenchPage(): Promise<void> {
           const result = await api.resolvePetApproval(approvalID, decision, decisionReason);
           closePetWorkbenchDialogs();
           await refreshPetPendingApprovalCount(true);
-          await load();
+          refreshApprovals();
           if (result.status === "executing") scheduleApprovalExecutionPoll();
         } catch (error) {
           buttons.forEach(item => { item.disabled = false; });
@@ -9086,12 +9114,20 @@ async function bindPetWorkbenchPage(): Promise<void> {
     });
   };
 
+  body.addEventListener("click", event => {
+    if (!(event.target instanceof Element) || !event.target.closest("[data-pet-workbench-retry]")) return;
+    loadError = "";
+    void load();
+  });
   tabs.forEach(tab => tab.addEventListener("click", () => {
     active = mapPetWorkbenchTab(tab.dataset.petWorkbenchTab);
     petWorkbenchTab = active;
     closePetWorkbenchDialogs();
     if (binding) binding.tab = active;
     renderTab();
+    // Entering approvals always re-reads, because events that arrived while
+    // another tab was open cannot patch the mounted rows.
+    if (active === "approvals") void load();
   }));
   await load();
 }

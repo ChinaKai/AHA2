@@ -642,6 +642,28 @@ test("workbench defaults to overview and removes journal UI/API while retaining 
   assert.doesNotMatch(main, /view\.approvals\.filter\(item => item\.status === "pending"\)\.length/);
 });
 
+test("live pet_approval events refresh the mounted approval list", async () => {
+  const main = await readFile(resolve(root, "web/src/main.ts"), "utf8");
+  const loader = await readFile(resolve(root, "web/src/pet_workbench.ts"), "utf8");
+  // The global stream and the reconnect path share one helper.
+  assert.match(main, /if \(type === "pet_approval"\) refreshPetApprovalState\(\);/);
+  assert.match(main, /function refreshPetApprovalState\(\): void \{[\s\S]*?void refreshPetPendingApprovalCount\(true\);[\s\S]*?petWorkbenchPageKeeper\.binding\?\.refresh\?\.\(\);/);
+  // Only the approvals tab reloads live; entering it re-reads because events
+  // that arrived on another tab cannot patch the mounted rows.
+  assert.match(main, /binding\.refresh = \(\) => \{ if \(active === "approvals"\) refreshApprovals\(\); \};/);
+  assert.match(main, /if \(active === "approvals"\) void load\(\);/);
+  // An event during an in-flight read queues exactly one follow-up.
+  assert.match(main, /if \(approvalRefreshQueued\) return;/);
+  assert.match(main, /approvalRefreshQueued = true;/);
+  assert.match(main, /void load\(\)\.then\(\(\) => \{\s*approvalRefreshQueued = false;/);
+  // A failed refresh keeps the last good list instead of clearing it.
+  assert.match(main, /if \(view && active === "approvals"\) renderTab\(\);/);
+  assert.match(main, /loadError \? renderPetWorkbenchLoadError\(loadError, t\) : ""/);
+  assert.match(loader, /refresh\?: \(\) => void;/);
+  // The resolve path uses the same queued refresh instead of a plain load.
+  assert.match(main, /await refreshPetPendingApprovalCount\(true\);[\s\S]{0,80}?refreshApprovals\(\);/);
+});
+
 const approvalRow = (id, kind, status) => ({id, kind, status, title: id, summary: "", risk: "low"});
 const approvalCount = (kind, status, count) => ({kind, status, count});
 const approvalTranslations = {

@@ -340,6 +340,8 @@ export interface PetWorkbenchPageBinding {
   loader: {dispose: () => void};
   /** The tab this binding last rendered; kept in sync by the caller. */
   tab: string;
+  /** Background reload for live events; set by the bound page. */
+  refresh?: () => void;
 }
 
 export interface PetWorkbenchRenderContext {
