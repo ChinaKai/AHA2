@@ -1710,6 +1710,11 @@ test("built web contains responsive application", async () => {
   assert.doesNotMatch(script, /data-task-action="delete"/);
   assert.match(script, /requestAnimationFrame\(runTaskClock\)/);
   assert.match(script, /composer-focused/);
+  // Phones cannot keep the global fixed search FAB: it sits on the Task
+  // composer. Task view renders its own in-stream entry above the composer.
+  assert.match(script, /class="command-palette-fab task-search-fab" data-command-palette-open/);
+  assert.match(css, /\.app-shell > \.command-palette-fab \{ display: none; \}/);
+  assert.match(css, /\.task-search-fab \{[^}]*position: absolute;[^}]*bottom: 10px/);
   assert.match(css, /--mobile-bottom-nav-height:\s*calc\(62px \+ env\(safe-area-inset-bottom\)\)/);
   assert.match(css, /\.task-screen \{[^}]*height:\s*calc\(var\(--visual-viewport-height\) - var\(--mobile-bottom-nav-height\)\)/);
   assert.match(css, /\.bottom-nav \{[^}]*height:\s*var\(--mobile-bottom-nav-height\)/);

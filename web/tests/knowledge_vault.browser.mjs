@@ -391,18 +391,35 @@ try {
   assert.equal((await page.locator("#kv-activity-title").textContent()).trim(), "动态与更新");
   assert.equal(await page.locator("[data-kv-activity]").getAttribute("aria-current"), "page");
   assert.equal(await page.locator("[data-kv-activity]").evaluate(element => element.classList.contains("selected")), true);
-  assert.deepEqual(await page.locator(".kv-activity-block-head h2").allTextContents().then(items => items.map(item => item.trim())), ["最近更新", "待整理"]);
+  assert.deepEqual(await page.locator(".kv-activity-block-head h2").allTextContents().then(items => items.map(item => item.trim())), ["待整理", "最近更新"]);
   assert.equal(await page.locator("text=从左侧选择文档").count(), 0, "the default page is not the empty reader");
   await page.waitForSelector(".kv-feed-day");
   assert.match(await page.locator(".kv-feed").innerText(), /构建指南[\s\S]*Demo[\s\S]*全局指南[\s\S]*全局知识/);
   await page.waitForSelector(".kv-inbox-group");
   assert.match(await page.locator(".kv-inbox").innerText(), /2 条待整理[\s\S]*全局知识[\s\S]*1 条[\s\S]*global\/inbox\/idea\.md[\s\S]*Demo[\s\S]*1 条[\s\S]*projects\/p1\/inbox\/idea\.md/);
 
-  // Both blocks open the referenced document, and back returns to the activity
-  // page with its entry still selected.
-  await page.locator('.kv-feed [data-kv-doc="doc-1"]').click();
+  // Recent rows preview in place; the route only changes from 打开原文. The
+  // inbox rows remain direct document links.
+  const routeBeforePreview = await page.evaluate(() => location.hash);
+  await page.locator('.kv-feed [data-kv-preview="doc-1"]').click();
+  await page.waitForSelector(".kv-preview-panel .kv-preview-body.markdown-body", {timeout: 5000});
+  assert.equal(await page.evaluate(() => location.hash), routeBeforePreview, "opening the preview does not change the route");
+  assert.equal((await page.locator("#kv-preview-title").textContent()).trim(), "构建指南");
+  assert.match(await page.locator(".kv-preview-meta").innerText(), /projects\/p1\/guides\/build\.md/);
+  assert.match(await page.locator(".kv-preview-meta").innerText(), /2026/);
+  const previewOpenLink = page.locator(".kv-preview-open");
+  assert.equal(await previewOpenLink.getAttribute("data-kv-doc"), "doc-1");
+  assert.equal((await previewOpenLink.innerText()).trim(), "打开原文");
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(80);
+  assert.equal(await page.locator(".kv-preview-panel").count(), 0, "Escape closes the preview");
+  assert.equal(await page.evaluate(() => location.hash), routeBeforePreview, "closing the preview keeps the route");
+  await page.locator('.kv-feed [data-kv-preview="doc-1"]').click();
+  await page.waitForSelector(".kv-preview-panel");
+  await page.locator(".kv-preview-open").click();
   await page.waitForSelector(".kv-doc-body");
   assert.equal((await page.locator(".kv-doc-head h1").textContent()).trim(), "构建指南");
+  assert.match(await page.evaluate(() => location.hash), /doc=doc-1/, "打开原文 navigates to the reader");
   await page.locator("[data-kv-back]").click();
   await page.waitForSelector(".kv-activity");
   assert.equal(await page.locator("[data-kv-activity]").getAttribute("aria-current"), "page");
@@ -419,11 +436,13 @@ try {
   const topbarLayout = page => page.evaluate(() => {
     const box = element => {
       const rect = element.getBoundingClientRect();
-      return {top: rect.top, bottom: rect.bottom, right: rect.right, centerY: rect.top + rect.height / 2};
+      return {top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right, width: rect.width, height: rect.height, centerY: rect.top + rect.height / 2};
     };
     const tabElements = [...document.querySelectorAll(".kv-tabs .kv-tab")];
     const tabs = tabElements.map(box);
     const controls = box(document.querySelector(".kv-controls"));
+    const search = box(document.querySelector(".kv-search-trigger"));
+    const settings = box(document.querySelector(".kv-settings-trigger"));
     const main = box(document.querySelector(".kv-topbar-main"));
     return {
       overflow: document.documentElement.scrollWidth - window.innerWidth,
@@ -431,7 +450,17 @@ try {
       tabTop: Math.min(...tabs.map(item => item.top)),
       tabBottom: Math.max(...tabs.map(item => item.bottom)),
       tabTopSpread: Math.max(...tabs.map(item => item.top)) - Math.min(...tabs.map(item => item.top)),
+      tabCenterY: tabs.reduce((sum, item) => sum + item.centerY, 0) / tabs.length,
+      tabHeight: Math.min(...tabs.map(item => item.height)),
+      tabLeft: Math.min(...tabs.map(item => item.left)),
+      tabRight: Math.max(...tabs.map(item => item.right)),
       controls,
+      search,
+      settings,
+      searchHeight: search.bottom - search.top,
+      settingsHeight: settings.bottom - settings.top,
+      searchWidth: search.right - search.left,
+      settingsWidth: settings.right - settings.left,
       main,
       topbarRight: document.querySelector(".kv-topbar").getBoundingClientRect().right,
       tabsOverflowX: getComputedStyle(document.querySelector(".kv-tabs")).overflowX,
@@ -1261,7 +1290,7 @@ try {
   assert.equal(await page.locator("#kv-settings-dialog").evaluate(dialog => dialog.open), false, "close button dismissal survives the next render");
 
   // Mobile: one column, list -> doc -> back keeps scroll, copy path only.
-  await page.setViewportSize({width: 390, height: 780});
+  await page.setViewportSize({width: 390, height: 844});
   await page.goto(url, {waitUntil: "networkidle"});
   await page.evaluate(() => document.querySelector("[data-view=knowledge]")?.click());
   await page.waitForSelector(".kv-tree-link");
@@ -1277,6 +1306,13 @@ try {
   assert.equal(layout.settingsVisible, true, "390px shows the settings gear directly");
   assert.equal(layout.moreCount, 0, "390px has no more trigger or menu");
   assert.equal(layout.tabsOverflowX, "auto", "the mobile tab strip scrolls horizontally when needed");
+  // Tabs, search and settings share the row under the title, all at least 40px.
+  assert.ok(layout.controls.top < layout.tabBottom, "390px keeps tabs and controls on one row");
+  assert.ok(Math.abs(layout.controls.centerY - layout.tabCenterY) < 2, "390px centers the controls with the tabs");
+  assert.ok(layout.search.left > layout.tabRight, "390px places search and settings after the tabs");
+  assert.ok(layout.settings.right <= 390 + 1, "390px keeps the gear inside the viewport");
+  assert.ok(layout.tabHeight >= 40 && layout.searchHeight >= 40 && layout.settingsHeight >= 40, `390px touch targets are at least 40px: ${JSON.stringify({tab: layout.tabHeight, search: layout.searchHeight, settings: layout.settingsHeight})}`);
+  assert.ok(layout.searchWidth >= 40 && layout.settingsWidth >= 40, "390px search and settings are at least 40px wide");
 
   // The skills tab is keyboard reachable and activates with Enter.
   await page.locator('.kv-tabs [data-kv-tab-button="skills"]').focus();
@@ -1298,6 +1334,33 @@ try {
   assert.equal(await page.locator(".kv-tree-panel").isVisible(), false);
   assert.equal(await page.locator(".kv-doc-panel").isVisible(), true);
   assert.equal(await page.locator("[data-kv-activity]").getAttribute("aria-current"), "page");
+  // The preview is a full-width sheet that stops above the bottom navigation
+  // and never rewrites the route; its own close button dismisses it.
+  const mobileRouteBeforePreview = await page.evaluate(() => location.hash);
+  await page.locator('.kv-feed [data-kv-preview="doc-1"]').click();
+  await page.waitForSelector(".kv-preview-panel .kv-preview-body.markdown-body", {timeout: 5000});
+  const mobilePreview = await page.evaluate(() => {
+    const panel = document.querySelector(".kv-preview-panel").getBoundingClientRect();
+    const nav = document.querySelector(".bottom-nav").getBoundingClientRect();
+    const body = document.querySelector(".kv-preview-body");
+    return {
+      width: panel.width,
+      left: panel.left,
+      bottom: panel.bottom,
+      navTop: nav.top,
+      bodyOverflowY: getComputedStyle(body).overflowY,
+      overflow: document.documentElement.scrollWidth - window.innerWidth,
+      hash: location.hash,
+    };
+  });
+  assert.ok(Math.abs(mobilePreview.width - 390) <= 1, `390px preview is full width: ${mobilePreview.width}`);
+  assert.ok(mobilePreview.bottom <= mobilePreview.navTop + 1, "390px preview does not cover the bottom navigation");
+  assert.equal(mobilePreview.bodyOverflowY, "auto", "the preview body scrolls inside the sheet");
+  assert.equal(mobilePreview.hash, mobileRouteBeforePreview, "the mobile preview keeps the route");
+  assert.ok(mobilePreview.overflow <= 1, "390px preview has no horizontal overflow");
+  await page.locator("[data-kv-preview-close]").click();
+  await page.waitForTimeout(80);
+  assert.equal(await page.locator(".kv-preview-panel").count(), 0, "the mobile preview closes");
   await page.locator("[data-kv-back-tree]").click();
   await page.waitForTimeout(80);
   assert.equal(await page.locator(".kv-tree-panel").isVisible(), true);
@@ -1380,7 +1443,9 @@ try {
   assert.ok((await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)), "390px has no horizontal overflow");
   await axe(page, "mobile-390");
 
-  await page.setViewportSize({width: 360, height: 780});
+  await page.setViewportSize({width: 360, height: 800});
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.waitForTimeout(60);
   await page.waitForTimeout(80);
   assert.ok((await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)), "360px has no horizontal overflow");
   layout = await topbarLayout(page);
@@ -1388,10 +1453,17 @@ try {
   assert.equal(layout.skillsVisible, true, "360px shows the skills tab directly");
   assert.equal(layout.settingsVisible, true, "360px shows the settings gear directly");
   assert.equal(layout.moreCount, 0, "360px has no more trigger or menu");
+  assert.ok(layout.overflow <= 1, "360px header has no horizontal overflow");
+  assert.ok(layout.controls.top < layout.tabBottom, "360px keeps tabs and controls on one row");
+  assert.ok(Math.abs(layout.controls.centerY - layout.tabCenterY) < 2, "360px centers the controls with the tabs");
+  assert.ok(layout.search.left > layout.tabRight, "360px places search and settings after the tabs");
+  assert.ok(layout.settings.right <= 360 + 1, "360px keeps the gear inside the viewport");
+  assert.ok(layout.tabHeight >= 40 && layout.searchHeight >= 40 && layout.settingsHeight >= 40, `360px touch targets are at least 40px: ${JSON.stringify({tab: layout.tabHeight, search: layout.searchHeight, settings: layout.settingsHeight})}`);
+  assert.ok(layout.searchWidth >= 40 && layout.settingsWidth >= 40, "360px search and settings are at least 40px wide");
 
   // A long title at the narrowest width wraps inside the content column while
   // the three icons keep their row; nothing spills sideways.
-  const phone = await browser.newPage({viewport: {width: 360, height: 780}, locale: "zh-CN"});
+  const phone = await browser.newPage({viewport: {width: 360, height: 800}, locale: "zh-CN"});
   await phone.goto(`${url}/?long=360#knowledge?doc=long-doc&scope=global`, {waitUntil: "networkidle"});
   await phone.waitForSelector(".kv-doc-body");
   const phoneLayout = await phone.evaluate(() => {
@@ -1421,6 +1493,8 @@ try {
   await phone.close();
 
   await page.setViewportSize({width: 760, height: 780});
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.waitForTimeout(60);
   await page.waitForTimeout(80);
   layout = await topbarLayout(page);
   assert.ok(layout.overflow <= 1, "760px has no horizontal overflow");
@@ -1428,6 +1502,9 @@ try {
   assert.equal(layout.skillsVisible, true, "760px shows the skills tab directly");
   assert.equal(layout.settingsVisible, true, "760px shows the settings gear directly");
   assert.equal(layout.moreCount, 0, "760px has no more trigger or menu");
+  assert.ok(layout.controls.top < layout.tabBottom, "760px keeps tabs and controls on one row");
+  assert.ok(Math.abs(layout.controls.centerY - layout.tabCenterY) < 2, "760px centers the controls with the tabs");
+  assert.ok(layout.tabHeight >= 40 && layout.searchHeight >= 40 && layout.settingsHeight >= 40, "760px touch targets are at least 40px");
 
   await page.setViewportSize({width: 1280, height: 900});
   await page.waitForTimeout(80);
@@ -1468,7 +1545,7 @@ try {
   const healthyRecentStart = await requestCount(failingInbox, "Recent");
   assert.equal(failedInboxStart, 1, "the failing inbox is requested once on load");
   assert.ok(healthyRecentStart >= 1);
-  assert.ok(await failingInbox.locator(".kv-feed [data-kv-doc]").count() > 0, "the healthy recent feed still renders");
+  assert.ok(await failingInbox.locator(".kv-feed [data-kv-preview]").count() > 0, "the healthy recent feed still renders");
   await failingInbox.waitForTimeout(700);
   assert.equal(await requestCount(failingInbox, "Inbox"), failedInboxStart, "an errored feed is not retried by rendering");
   assert.equal(await requestCount(failingInbox, "Recent"), healthyRecentStart, "the healthy feed is not refetched");

@@ -11,7 +11,8 @@ import {pathToFileURL} from "node:url";
 const root = resolve(import.meta.dirname, "../..");
 const tools = resolve(root, ".tools/web-validation");
 const {chromium} = await import(pathToFileURL(resolve(tools, "node_modules/playwright/index.mjs")));
-const {default: binary} = await import(pathToFileURL(resolve(tools, "node_modules/@sparticuz/chromium/build/index.js")));
+const configuredBrowser = process.env.AHA_BROWSER_EXECUTABLE;
+const {default: binary} = configuredBrowser ? {default: null} : await import(pathToFileURL(resolve(tools, "node_modules/@sparticuz/chromium/build/index.js")));
 const csp = (await readFile(resolve(root, "internal/httpapi/server.go"), "utf8")).match(/Set\("Content-Security-Policy", "([^"]+)"\)/)[1];
 
 const bootstrap = `
@@ -98,7 +99,10 @@ const url = `http://127.0.0.1:${server.address().port}`;
 
 let browser;
 try {
-  browser = await chromium.launch({executablePath: await binary.executablePath(), args: binary.args, headless: true});
+  const launchOptions = configuredBrowser
+    ? {executablePath: configuredBrowser, args: ["--no-sandbox"]}
+    : {executablePath: await binary.executablePath(), args: binary.args};
+  browser = await chromium.launch({...launchOptions, headless: true});
   const page = await browser.newPage({viewport: {width: 1280, height: 900}, locale: "en-US"});
   const errors = [];
   page.on("pageerror", error => errors.push(error.message));
@@ -196,6 +200,50 @@ try {
   });
   assert.deepEqual(zhErrors, []);
   await zhPage.close();
+
+  // Phone geometry: the global fixed search FAB used to sit on the composer.
+  // Task view now exposes an in-stream search entry that ends above the
+  // composer, leaves the attachment/send controls clear, and still opens the
+  // palette with focus returning to it after Escape.
+  for (const [width, height] of [[360, 800], [390, 844]]) {
+    await page.setViewportSize({width, height});
+    await page.waitForTimeout(120);
+    const geometry = await page.evaluate(() => {
+      const rect = selector => {
+        const box = document.querySelector(selector).getBoundingClientRect();
+        return {top: box.top, right: box.right, bottom: box.bottom, left: box.left, width: box.width, height: box.height};
+      };
+      return {
+        taskViewActive: document.body.classList.contains("task-view-active"),
+        globalFabDisplay: getComputedStyle(document.querySelector(".app-shell > .command-palette-fab")).display,
+        fab: rect(".task-search-fab"),
+        composer: rect("#message-form"),
+        attachment: rect("#message-attachment-pick"),
+        send: rect("#message-send"),
+        overflow: document.documentElement.scrollWidth - window.innerWidth,
+      };
+    });
+    assert.equal(geometry.taskViewActive, true, `${width}px is the Task detail route`);
+    assert.equal(geometry.globalFabDisplay, "none", `${width}px hides the global FAB on the Task route`);
+    assert.ok(geometry.fab.width >= 40 && geometry.fab.height >= 40, `${width}px search entry is a 40px touch target`);
+    assert.ok(geometry.fab.bottom <= geometry.composer.top - 1, `${width}px search entry sits above the composer`);
+    const overlaps = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+    assert.equal(overlaps(geometry.fab, geometry.composer), false, `${width}px search entry does not cover the composer`);
+    assert.equal(overlaps(geometry.fab, geometry.attachment), false, `${width}px search entry does not cover the attachment button`);
+    assert.equal(overlaps(geometry.fab, geometry.send), false, `${width}px search entry does not cover send`);
+    assert.ok(geometry.attachment.bottom <= height && geometry.send.bottom <= height, `${width}px composer controls stay on screen`);
+    assert.ok(geometry.overflow <= 1, `${width}px Task detail has no horizontal overflow`);
+
+    await page.locator(".task-search-fab").click();
+    await page.waitForSelector("#command-palette", {state: "visible", timeout: 5000});
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => {
+      const palette = document.querySelector("#command-palette");
+      return !palette || palette.open === false || getComputedStyle(palette).display === "none";
+    });
+    assert.equal(await page.evaluate(() => document.activeElement?.classList.contains("task-search-fab")), true, `${width}px focus returns to the search entry`);
+  }
+  await page.setViewportSize({width: 1280, height: 900});
   assert.deepEqual(errors, []);
 } finally {
   await browser?.close();

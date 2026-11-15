@@ -87,6 +87,9 @@ const localText: Record<string, [zhCN: string, enUS: string]> = {
   "kv.activityInboxGroupCount": ["{count} 条", "{count} items"],
   "kv.activityBackToTree": ["返回目录", "Back to contents"],
   "kv.docBackToActivity": ["返回动态", "Back to activity"],
+  "kv.previewTitle": ["文档预览", "Document preview"],
+  "kv.openOriginal": ["打开原文", "Open document"],
+  "kv.closePreview": ["关闭预览", "Close preview"],
 };
 
 function kt(key: string, values: Record<string, string | number> = {}): string {
@@ -232,6 +235,11 @@ body.kv-resizing { cursor: col-resize; user-select: none; }
 @media (min-width: 761px) and (max-width: 1180px) {
   .knowledge-vault[data-kv-sidebar-collapsed="true"] .kv-workspace { grid-template-columns: var(--kv-tree-width) minmax(0, 1fr); }
 }
+@media (max-width: 1180px) {
+  /* The controls are inside .kv-topbar-main now; let them wrap as the same
+     full-width second line they occupied before the mobile row layout. */
+  .kv-topbar-main { flex-wrap: wrap; }
+}
 @media (max-width: 760px) {
   .knowledge-vault { --kv-tree-toggle-size: 32px; }
   .kv-workspace { grid-template-columns: minmax(0, 1fr); gap: 0; }
@@ -243,8 +251,60 @@ body.kv-resizing { cursor: col-resize; user-select: none; }
   .kv-tree-panel.collapsed .kv-tree-body { display: block; }
   .kv-activity-head { flex-wrap: wrap; }
   .kv-activity-back { display: inline-flex; order: -1; margin-bottom: 0; }
+  /* The title keeps its own row; tabs, search and settings share the row below
+     as three group items that never wrap into a second line. */
+  .kv-topbar-main { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+  .kv-heading { flex: 1 1 100%; }
+  .kv-tabs { flex: 1 1 auto; width: auto; }
+  .kv-controls { order: 0; flex: 0 0 auto; justify-content: flex-end; margin-left: 0; gap: 6px; }
+  .kv-tab { min-height: 40px; }
+  .kv-search-trigger, .kv-settings-trigger { width: 40px; min-height: 40px; height: 40px; padding: 0; justify-content: center; }
 }
 `;
+
+// Recent rows open this in-page preview instead of navigating. It borrows the
+// search panel's floating-card language but renders the fetched document body,
+// so the Owner can judge the update before committing to the reader route.
+const PREVIEW_STYLES = `
+.kv-preview-panel {
+  position: fixed; z-index: 60; top: 72px; left: 50%; transform: translateX(-50%);
+  width: min(680px, calc(100vw - 32px)); max-height: min(80dvh, 760px);
+  display: flex; flex-direction: column; gap: var(--space-3);
+  padding: var(--space-4); border: 1px solid var(--color-border); border-radius: var(--radius-card);
+  background: var(--color-surface-raised); box-shadow: 0 24px 70px rgba(43, 33, 27, .24);
+}
+.kv-preview-head { display: flex; align-items: flex-start; gap: var(--space-2); }
+.kv-preview-head > div { flex: 1 1 auto; min-width: 0; }
+.kv-preview-head strong { display: block; font-size: var(--font-size-16); overflow-wrap: anywhere; }
+.kv-preview-meta { display: flex; flex-wrap: wrap; gap: 2px 10px; margin: 4px 0 0; color: var(--color-text-muted); font-size: var(--font-size-12); overflow-wrap: anywhere; }
+.kv-preview-body { flex: 1 1 auto; min-height: 120px; overflow: auto; overscroll-behavior: contain; }
+.kv-preview-actions { display: flex; justify-content: flex-end; }
+.kv-preview-open {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 40px; padding: 0 14px;
+  border-radius: var(--radius-control); background: var(--color-accent); color: var(--color-text-inverse);
+  font-size: var(--font-size-13); font-weight: 600; text-decoration: none;
+}
+.kv-preview-open:hover { background: var(--color-accent-hover); color: var(--color-text-inverse); }
+.kv-preview-open .icon { width: 16px; height: 16px; }
+@media (max-width: 760px) {
+  /* Full-width sheet above the bottom navigation; the body scrolls inside it. */
+  .kv-preview-panel {
+    top: 0; left: 0; transform: none; width: 100vw;
+    height: calc(100dvh - var(--mobile-bottom-nav-height));
+    max-height: calc(100dvh - var(--mobile-bottom-nav-height));
+    border-radius: 0; padding: 12px;
+  }
+  .kv-preview-actions .kv-preview-open { width: 100%; }
+}
+`;
+
+function installPreviewStyles(): void {
+  if (typeof document === "undefined" || document.getElementById("kv-preview-styles")) return;
+  const style = document.createElement("style");
+  style.id = "kv-preview-styles";
+  style.textContent = PREVIEW_STYLES;
+  document.head.append(style);
+}
 
 function installTreeStyles(): void {
   if (typeof document === "undefined" || document.getElementById("kv-tree-styles")) return;
@@ -292,6 +352,10 @@ interface VaultState {
   recent: KnowledgeVaultRecentItem[];
   recentState: LoadState;
   recentError: string;
+  previewID: string;
+  previewDoc: KnowledgeVaultDoc | null;
+  previewState: LoadState;
+  previewError: string;
   inbox: KnowledgeVaultInbox | null;
   inboxState: LoadState;
   inboxError: string;
@@ -408,6 +472,7 @@ function initialState(): VaultState {
     recentKey: "", inboxKey: "",
     selectedID: VAULT_ACTIVITY_ID, doc: null, docState: "idle", docError: "",
     recent: [], recentState: "idle", recentError: "",
+    previewID: "", previewDoc: null, previewState: "idle", previewError: "",
     inbox: null, inboxState: "idle", inboxError: "",
     skills: [], skillsState: "idle", skillsError: "",
     searchOpen: false, searchQuery: "", searchScope: "all",
@@ -432,6 +497,9 @@ let searchTimer: ReturnType<typeof setTimeout> | null = null;
 let treeRequest = 0;
 let recentRequest = 0;
 let inboxRequest = 0;
+let previewRequest = 0;
+// Focus returns to the recent row after the preview is dismissed.
+let previewTriggerID = "";
 const pendingLoads = new Set<string>();
 // One tree covers every library: its roots are the vault's real top-level
 // directories (global/ and projects/), so the page no longer has a separate
@@ -881,6 +949,7 @@ function vaultRootAttributes(): string {
 
 export function renderKnowledgeVaultPage(_context: KnowledgeVaultContext): string {
   installTreeStyles();
+  installPreviewStyles();
   if (!state.initialized || state.loading === "loading") {
     return `<div class="knowledge-vault" data-kv-tab="${state.tab}" ${vaultRootAttributes()}>${vaultEmptyState("loading")}</div>`;
   }
@@ -890,6 +959,7 @@ export function renderKnowledgeVaultPage(_context: KnowledgeVaultContext): strin
   return `<div class="knowledge-vault${state.contextOpen ? " context-open" : ""}" data-kv-tab="${state.tab}" ${vaultRootAttributes()}>
     ${topbarHTML()}
     ${searchPanelHTML()}
+    ${previewPanelHTML()}
     <div class="kv-content" data-kv-mobile-pane="${state.mobilePane}">
       ${state.tab === "knowledge" ? knowledgeBodyHTML() : skillsBodyHTML()}
     </div>
@@ -910,10 +980,10 @@ function topbarHTML(): string {
       <nav class="kv-tabs" aria-label="${t("kv.sections")}">
         ${tabs.map(([tab, glyph, key]) => `<button type="button" aria-current="${state.tab === tab ? "page" : "false"}" class="kv-tab kv-tab-${tab}" data-kv-tab-button="${tab}">${icon(glyph)}<span>${t(key)}</span></button>`).join("")}
       </nav>
-    </div>
-    <div class="kv-controls">
-      <button type="button" class="kv-search-trigger" data-kv-search-open aria-label="${t("kv.searchShortcut")}" title="${t("kv.searchShortcut")}">${icon("search")}<span>${t("kv.search")}</span></button>
-      <button type="button" class="kv-settings-trigger icon-button" data-kv-settings aria-label="${t("kv.settings")}" title="${t("kv.settings")}">${icon("settings")}</button>
+      <div class="kv-controls">
+        <button type="button" class="kv-search-trigger" data-kv-search-open aria-label="${t("kv.searchShortcut")}" title="${t("kv.searchShortcut")}">${icon("search")}<span>${t("kv.search")}</span></button>
+        <button type="button" class="kv-settings-trigger icon-button" data-kv-settings aria-label="${t("kv.settings")}" title="${t("kv.settings")}">${icon("settings")}</button>
+      </div>
     </div>
   </header>`;
 }
@@ -936,6 +1006,39 @@ function searchPanelHTML(): string {
     <div class="kv-search-results" aria-live="polite">
       ${searchResultsHTML()}
     </div>
+  </section>`;
+}
+
+function previewPanelHTML(): string {
+  if (!state.previewID) return "";
+  const summary = state.recent.find(item => item.id === state.previewID) || null;
+  const doc = state.previewState === "ready" ? state.previewDoc : null;
+  const title = doc?.title || summary?.title || kt("kv.previewTitle");
+  const updated = doc ? (doc.modified_at || doc.updated) : summary?.modified_at;
+  const path = doc?.path || summary?.path || "";
+  const body = state.previewState === "error"
+    // The preview has its own retry button; the shared data-kv-retry handler
+    // would retry whichever other panel happens to be in an error state.
+    ? `${vaultEmptyState("error", state.previewError)}<button type="button" class="secondary" data-kv-preview-retry>${t("kv.retry")}</button>`
+    : doc
+      ? `<div class="markdown-body kv-preview-body">${renderMarkdown(rewriteVaultWikilinks(doc.body))}</div>`
+      : `<div class="kv-preview-body">${vaultEmptyState("loading")}</div>`;
+  const targetID = doc?.id || state.previewID;
+  const href = doc
+    ? docHash({id: doc.id, scope: doc.scope, project_id: doc.project_id})
+    : docHash({id: state.previewID, scope: summary?.scope, project_id: summary?.project_id});
+  return `<section class="kv-preview-panel" data-kv-preview-panel role="dialog" aria-modal="false" aria-labelledby="kv-preview-title">
+    <div class="kv-preview-head">
+      <div>
+        <strong id="kv-preview-title">${escapeVaultHTML(title)}</strong>
+        <p class="kv-preview-meta">${updated ? `<span>${t("kv.updated")}: ${escapeVaultHTML(safeDateTime(updated))}</span>` : ""}${path ? `<span>${escapeVaultHTML(path)}</span>` : ""}</p>
+      </div>
+      <button type="button" class="icon-button" data-kv-preview-close aria-label="${kt("kv.closePreview")}" title="${kt("kv.closePreview")}">${icon("close")}</button>
+    </div>
+    ${body}
+    <footer class="kv-preview-actions">
+      <a class="kv-preview-open" href="${escapeVaultHTML(href)}" data-kv-doc="${escapeVaultHTML(targetID)}">${icon("panel")}<span>${kt("kv.openOriginal")}</span></a>
+    </footer>
   </section>`;
 }
 
@@ -1113,18 +1216,18 @@ function activityBodyHTML(): string {
       </div>
       <button type="button" class="kv-back kv-activity-back" data-kv-back-tree>${icon("chevron-up")}<span>${kt("kv.activityBackToTree")}</span></button>
     </header>
+    <section class="kv-activity-block" aria-labelledby="kv-activity-inbox">
+      <header class="kv-activity-block-head">
+        <h2 id="kv-activity-inbox">${kt("kv.activityInbox")}</h2>
+      </header>
+      ${inboxFeedHTML()}
+    </section>
     <section class="kv-activity-block" aria-labelledby="kv-activity-recent">
       <header class="kv-activity-block-head">
         <h2 id="kv-activity-recent">${kt("kv.activityRecent")}</h2>
         <small>${recentCount > 0 ? kt("kv.activityRecentCount", {count: recentCount}) : ""}</small>
       </header>
       ${recentFeedHTML()}
-    </section>
-    <section class="kv-activity-block" aria-labelledby="kv-activity-inbox">
-      <header class="kv-activity-block-head">
-        <h2 id="kv-activity-inbox">${kt("kv.activityInbox")}</h2>
-      </header>
-      ${inboxFeedHTML()}
     </section>
   </section>`;
 }
@@ -1135,7 +1238,7 @@ function recentFeedHTML(): string {
   if (!state.indexReady) return vaultEmptyState("empty", t("kv.indexMissing"));
   if (state.recent.length === 0) return vaultEmptyState("empty", t("kv.recentEmpty"));
   return `<section class="kv-feed" aria-label="${kt("kv.activityRecent")}">
-    ${groupRecentByDay(state.recent).map(group => `<section class="kv-feed-day"><h2>${escapeVaultHTML(group.label)}</h2><ul>${group.items.map(item => `<li><a class="kv-feed-item" href="${escapeVaultHTML(docHash({id: item.id, scope: item.scope, project_id: item.project_id}))}" data-kv-doc="${escapeVaultHTML(item.id)}">
+    ${groupRecentByDay(state.recent).map(group => `<section class="kv-feed-day"><h2>${escapeVaultHTML(group.label)}</h2><ul>${group.items.map(item => `<li><a class="kv-feed-item" href="${escapeVaultHTML(docHash({id: item.id, scope: item.scope, project_id: item.project_id}))}" data-kv-preview="${escapeVaultHTML(item.id)}" aria-haspopup="dialog">
       <span class="kv-feed-time">${escapeVaultHTML(formatLocaleDateTime(item.modified_at, {hour: "2-digit", minute: "2-digit"}))}</span>
       <span class="kv-feed-main"><strong>${escapeVaultHTML(item.title)}</strong><small>${escapeVaultHTML(item.library)}${item.project_id ? ` · ${escapeVaultHTML(item.project_id)}` : ""} · ${escapeVaultHTML(item.path)}</small></span>
       ${metaBadges(item)}
@@ -1703,7 +1806,13 @@ async function loadTree(force = false, preserveExpansion = false): Promise<void>
 
 async function loadDoc(id: string, force = false): Promise<void> {
   if (!id) return;
-  if (!force && state.selectedID === id && state.docState === "ready") return;
+  // Any route into the reader dismisses the in-page preview first.
+  const hadPreview = Boolean(state.previewID);
+  clearPreviewState();
+  if (!force && state.selectedID === id && state.docState === "ready") {
+    if (hadPreview) rerender();
+    return;
+  }
   state.selectedID = id;
   state.docState = "loading";
   state.docError = "";
@@ -1773,6 +1882,57 @@ async function loadInbox(force = false): Promise<void> {
     state.inboxError = error instanceof Error ? error.message : String(error);
   }
   rerender();
+}
+
+async function loadPreview(id: string): Promise<void> {
+  if (!id) return;
+  const ticket = ++previewRequest;
+  state.previewID = id;
+  state.previewDoc = null;
+  state.previewState = "loading";
+  state.previewError = "";
+  rerender();
+  try {
+    const payload = await api.knowledgeVaultDoc(id);
+    if (ticket !== previewRequest || state.previewID !== id) return;
+    state.previewDoc = payload.doc;
+    state.previewState = "ready";
+  } catch (error) {
+    if (ticket !== previewRequest || state.previewID !== id) return;
+    state.previewState = "error";
+    state.previewError = error instanceof Error ? error.message : String(error);
+  }
+  rerender();
+}
+
+// Opening the preview never touches selectedID or the hash: the activity page
+// stays the current route until the explicit 打开原文 link calls enterDoc.
+function openPreview(id: string): void {
+  if (!id) return;
+  const active = document.activeElement;
+  previewTriggerID = active instanceof HTMLElement ? (active.dataset.kvPreview || "") : "";
+  void loadPreview(id);
+}
+
+function clearPreviewState(): void {
+  state.previewID = "";
+  state.previewDoc = null;
+  state.previewState = "idle";
+  state.previewError = "";
+  previewTriggerID = "";
+  previewRequest++;
+}
+
+function closePreview(restoreFocus = true): void {
+  if (!state.previewID) return;
+  const id = previewTriggerID;
+  clearPreviewState();
+  rerender();
+  if (!restoreFocus || !id) return;
+  requestAnimationFrame(() => {
+    const escaped = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(id) : id;
+    document.querySelector<HTMLElement>(`[data-kv-preview="${escaped}"]`)?.focus({preventScroll: true});
+  });
 }
 
 async function loadSkills(force = false): Promise<void> {
@@ -1910,6 +2070,7 @@ function selectActivity(options: {mobilePane?: MobilePane; refresh?: boolean} = 
   state.docError = "";
   state.feedback = "";
   state.searchOpen = false;
+  clearPreviewState();
   if (options.mobilePane) state.mobilePane = options.mobilePane;
   clearDocHash();
   void loadRecent(Boolean(options.refresh));
@@ -1960,6 +2121,7 @@ function backToList(): void {
 function setTab(tab: VaultTab): void {
   state.tab = tab;
   state.mobilePane = "list";
+  clearPreviewState();
   rerender();
   loadTab(tab);
 }
@@ -2088,6 +2250,10 @@ function bindKeyboard(): void {
         event.preventDefault();
         event.stopPropagation();
         closeSearch();
+      } else if (state.previewID) {
+        event.preventDefault();
+        event.stopPropagation();
+        closePreview();
       } else if (state.contextOpen) {
         state.contextOpen = false;
         rerender();
@@ -2119,6 +2285,15 @@ function bindHash(): void {
     if (unchanged) rerender();
     else void loadDoc(parsed.id);
   });
+}
+
+function handlePreviewLink(event: Event): boolean {
+  const target = (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-kv-preview]");
+  if (!target) return false;
+  if (event instanceof MouseEvent && (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0)) return true;
+  event.preventDefault();
+  openPreview(target.dataset.kvPreview || "");
+  return true;
 }
 
 function handleDocLink(event: Event): boolean {
@@ -2262,9 +2437,18 @@ export function bindKnowledgeVaultPage(context: KnowledgeVaultContext): void {
   }
 
   root.addEventListener("click", event => {
+    if (handlePreviewLink(event)) return;
     if (handleDocLink(event)) return;
     if (handleMissingWikilink(event)) return;
     const target = event.target as HTMLElement | null;
+    if (target?.closest("[data-kv-preview-close]")) {
+      closePreview();
+      return;
+    }
+    if (target?.closest("[data-kv-preview-retry]")) {
+      if (state.previewID) void loadPreview(state.previewID);
+      return;
+    }
     if (target?.closest("[data-kv-activity]")) {
       openActivity();
       return;

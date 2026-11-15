@@ -157,11 +157,9 @@ test("the page exposes two top-level tabs, the fixed activity entry, and no edit
   assert.match(html, /data-kv-toggle="g-general"[^>]*aria-expanded="false"/);
   assert.doesNotMatch(html, /href="#knowledge\?doc=doc-1&amp;scope=global"/, "folder children start hidden");
   assert.equal((html.match(/class="kv-tab kv-tab-/g) || []).length, 2);
-  // Heading and tabs form one group; controls are a separate group. The old
-  // mobile "more" menu must not be rendered at all: skills and settings are
-  // directly visible at every width.
-  assert.match(html, /<div class="kv-topbar-main">[\s\S]*class="kv-heading"[\s\S]*class="kv-tabs"/);
-  assert.match(html, /<div class="kv-controls">[\s\S]*data-kv-settings/);
+  // Heading, tabs and controls form one group; phones put the tabs and the two
+  // controls on the same row beneath the title.
+  assert.match(html, /<div class="kv-topbar-main">[\s\S]*class="kv-heading"[\s\S]*class="kv-tabs"[\s\S]*<div class="kv-controls">[\s\S]*data-kv-settings[\s\S]*<\/header>/);
   assert.equal((html.match(/data-kv-tab-button="/g) || []).length, 2, "no duplicate tab buttons in a more menu");
   assert.doesNotMatch(html, /data-kv-more|kv-more-trigger|kv-more-menu/);
 
@@ -171,8 +169,9 @@ test("the page exposes two top-level tabs, the fixed activity entry, and no edit
   assert.equal((html.match(/data-kv-activity/g) || []).length, 1);
   assert.equal(html.indexOf("data-kv-activity") < html.indexOf('class="kv-tree-list"'), true, "the activity entry sits above the real directory list");
   assert.match(html, /<article class="kv-doc-panel kv-activity-panel">[\s\S]*id="kv-activity-title">动态与更新/);
-  assert.match(html, /id="kv-activity-recent">最近更新/);
+  assert.ok(html.indexOf('id="kv-activity-inbox"') < html.indexOf('id="kv-activity-recent"'), "待整理 comes before 最近更新");
   assert.match(html, /id="kv-activity-inbox">待整理/);
+  assert.match(html, /id="kv-activity-recent">最近更新/);
   assert.doesNotMatch(html, /从左侧选择文档/);
   assert.doesNotMatch(html, /class="kv-context-panel"/, "the activity page does not leave an empty context column");
 });
@@ -459,6 +458,7 @@ test("the activity page groups the inbox by library and keeps both blocks visibl
   const html = vault.renderKnowledgeVaultPage(context());
   assert.match(html, /class="kv-activity"/);
   assert.equal((html.match(/class="kv-activity-block"/g) || []).length, 2, "recent and inbox are the two activity blocks");
+  assert.ok(html.indexOf('aria-labelledby="kv-activity-inbox"') < html.indexOf('aria-labelledby="kv-activity-recent"'), "the inbox block renders before the recent block");
   assert.match(html, /class="kv-feed"[\s\S]*最近想法[\s\S]*全局指南/);
   assert.match(html, /3 条待整理/);
   assert.equal((html.match(/class="kv-inbox-group"/g) || []).length, 2, "inbox items are grouped by library");
@@ -473,6 +473,39 @@ test("the activity page groups the inbox by library and keeps both blocks visibl
   assert.match(empty, /最近没有变更/);
   assert.match(empty, /待整理为空/);
   assert.match(empty, /id="kv-activity-title">动态与更新/);
+});
+
+test("recent rows open an in-page preview and only 打开原文 links to the reader", async () => {
+  const recent = {
+    id: "r1", title: "最近想法", path: "projects/demo/inbox/idea.md", type: "practice",
+    status: "unverified", scope: "project", project_id: "p1", library_id: "project:p1",
+    library: "Demo", modified_at: "2026-11-14T10:00:00Z",
+  };
+  reset({recentState: "ready", recent: [recent]});
+  const html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /<a class="kv-feed-item"[^>]*data-kv-preview="r1"[^>]*aria-haspopup="dialog"/);
+  assert.doesNotMatch(html, /class="kv-feed-item"[^>]*data-kv-doc="r1"/, "a recent row is not a direct document link");
+  assert.doesNotMatch(html, /data-kv-preview-panel/, "the preview only exists while open");
+
+  reset({recentState: "ready", recent: [recent], previewID: "r1", previewState: "ready", previewDoc: doc});
+  const preview = vault.renderKnowledgeVaultPage(context());
+  assert.match(preview, /<section class="kv-preview-panel" data-kv-preview-panel role="dialog" aria-modal="false" aria-labelledby="kv-preview-title">/);
+  assert.match(preview, /id="kv-preview-title">构建指南/);
+  assert.match(preview, /projects\/p1\/guides\/build\.md/);
+  assert.match(preview, /class="markdown-body kv-preview-body"/, "the preview renders the fetched body");
+  assert.match(preview, /data-kv-preview-close/, "the preview has an explicit close control");
+  assert.match(preview, /class="kv-preview-open" href="#knowledge\?doc=doc-1&amp;scope=project&amp;project=p1" data-kv-doc="doc-1"/, "only this link keeps the reader route");
+  assert.doesNotMatch(preview, /data-kv-doc="r1"/);
+
+  reset({recentState: "ready", recent: [recent], previewID: "r1", previewState: "error", previewError: "读取预览失败"});
+  const failed = vault.renderKnowledgeVaultPage(context());
+  assert.match(failed, /读取预览失败/);
+  assert.match(failed, /data-kv-preview-retry/, "a failed preview retries itself, not another panel");
+  assert.match(failed, /data-kv-doc="r1"|data-kv-doc="doc-1"/, "the original document stays reachable after a preview failure");
+
+  const source = await readFile(resolve(root, "src", "knowledge_vault.ts"), "utf8");
+  assert.match(source, /\.kv-preview-panel \{[^}]*position: fixed; z-index: 60/);
+  assert.match(source, /@media \(max-width: 760px\) \{[\s\S]*?\.kv-preview-panel \{[\s\S]*?height: calc\(100dvh - var\(--mobile-bottom-nav-height\)\)/);
 });
 
 test("folders default to collapsed and only an explicit expansion shows children", () => {
@@ -507,12 +540,21 @@ test("folders default to collapsed and only an explicit expansion shows children
   assert.match(html, /href="#knowledge\?doc=deep&amp;scope=global"/, "tree rows are real anchors");
 });
 
-test("topbar CSS keeps the tab strip on one row and shows skills/settings on phones", async () => {
+test("topbar CSS puts tabs, search and settings on one phone row and shows both on desktop", async () => {
   const css = await readFile(resolve(root, "src", "styles.css"), "utf8");
+  const source = await readFile(resolve(root, "src", "knowledge_vault.ts"), "utf8");
   assert.match(css, /\.kv-topbar-main \{[^}]*flex: 1 1 auto/);
   assert.match(css, /\.kv-tabs \{[^}]*flex-wrap: nowrap/);
   assert.match(css, /\.kv-tabs \{[^}]*overflow-x: auto/);
   assert.match(css, /\.kv-controls \{[^}]*align-items: center/);
+  // The phone row lives in the lazy route chunk: title on its own line, then
+  // tabs + search + settings with 40px touch targets.
+  assert.match(source, /@media \(max-width: 760px\) \{[\s\S]*?\.kv-topbar-main \{ flex-direction: row; flex-wrap: wrap; align-items: center;/);
+  assert.match(source, /\.kv-heading \{ flex: 1 1 100%; \}/);
+  assert.match(source, /\.kv-tabs \{ flex: 1 1 auto; width: auto; \}/);
+  assert.match(source, /\.kv-controls \{ order: 0; flex: 0 0 auto; justify-content: flex-end; margin-left: 0;/);
+  assert.match(source, /\.kv-tab \{ min-height: 40px; \}/);
+  assert.match(source, /\.kv-search-trigger, \.kv-settings-trigger \{ width: 40px; min-height: 40px; height: 40px;/);
   // The old mobile "more" affordance is gone; skills and settings are never
   // hidden at the phone breakpoint.
   assert.doesNotMatch(css, /\.kv-more-(?:trigger|menu)\b/);
