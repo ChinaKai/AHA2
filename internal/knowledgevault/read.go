@@ -534,8 +534,14 @@ func (r *Reader) entryByID(ctx context.Context, id string) (IndexEntry, error) {
 
 // EntryByID resolves one indexed document. Callers outside the package use it
 // to decide whether an ID belongs to the vault (and therefore whether a Web or
-// Pet operation must write the vault) before touching either store.
+// Pet operation must write the vault) before touching either store. A vault
+// opened without a ready index has no rows: report not-found rather than
+// dereferencing the nil index. Callers that route by source keep their normal
+// legacy path for that state.
 func (r *Reader) EntryByID(ctx context.Context, id string) (IndexEntry, error) {
+	if r == nil || !r.indexReady || r.index == nil {
+		return IndexEntry{}, sql.ErrNoRows
+	}
 	return r.entryByID(ctx, strings.TrimSpace(id))
 }
 

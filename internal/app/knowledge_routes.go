@@ -253,6 +253,12 @@ func (s *Service) vaultEntryByID(ctx context.Context, id string) (knowledgevault
 	var entry knowledgevault.IndexEntry
 	found := false
 	err := s.knowledgeVault.WithReader(func(reader *knowledgevault.Reader) error {
+		if !reader.IndexReady() {
+			// A vault opened before its index exists has no IDs. Keep the
+			// caller on its normal legacy path instead of dereferencing a nil
+			// index inside Reader.EntryByID.
+			return nil
+		}
 		item, lookupErr := reader.EntryByID(ctx, id)
 		switch {
 		case lookupErr == nil:

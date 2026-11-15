@@ -413,6 +413,48 @@ func TestApplicableAgentKnowledgeRoutesVaultAndLegacyProjects(t *testing.T) {
 	}
 }
 
+func TestChannelKnowledgeWithoutReadyIndexKeepsLegacyAndDoesNotPanic(t *testing.T) {
+	fixture := newChannelKnowledgeFixture(t)
+	// An enabled manager whose index has not been built yet has a nil index.
+	// Channel knowledge must treat every ID as not-found in the vault and stay
+	// on the legacy path instead of panicking.
+	fixture.service.SetKnowledgeVault(buildVaultSkillManagerWithoutIndex(t), true)
+	if _, found, err := fixture.service.vaultEntryByID(fixture.ctx, "knowledge_pet_legacy_only"); err != nil || found {
+		t.Fatalf("unready vault lookup found=%v err=%v", found, err)
+	}
+	entries, err := fixture.service.channelAllowedKnowledge(fixture.ctx, fixture.instance.ID, domain.ChannelEndpointGroupDigitalHuman, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := knowledgeEntryIDs(entries)
+	for _, want := range []string{"knowledge_pet_legacy_only", "knowledge_legacy_readable"} {
+		if !ids[want] {
+			t.Fatalf("unready index did not keep the legacy path for %s: %#v", want, entries)
+		}
+	}
+}
+
+func TestChannelKnowledgeRuntimeReadOffBypassesBrokenVaultProbe(t *testing.T) {
+	fixture := newChannelKnowledgeFixture(t)
+	readerErr := errors.New("index connection lost")
+	// runtimeRead=off forces the legacy source. The resolver must not touch a
+	// broken vault reader, otherwise a forced legacy read becomes an error.
+	fixture.service.SetKnowledgeVault(failingKnowledgeVault{err: readerErr}, false)
+	entries, err := fixture.service.channelAllowedKnowledge(fixture.ctx, fixture.instance.ID, domain.ChannelEndpointGroupDigitalHuman, "")
+	if err != nil {
+		t.Fatalf("runtimeRead=off channel read failed: %v", err)
+	}
+	if !knowledgeEntryIDs(entries)["knowledge_pet_legacy_only"] {
+		t.Fatalf("runtimeRead=off did not use the legacy source: %#v", entries)
+	}
+	// With runtimeRead on the same broken reader is authoritative, so the
+	// channel read must fail closed rather than serving the legacy rows.
+	fixture.service.SetKnowledgeVault(failingKnowledgeVault{err: readerErr}, true)
+	if _, err := fixture.service.channelAllowedKnowledge(fixture.ctx, fixture.instance.ID, domain.ChannelEndpointGroupDigitalHuman, ""); err == nil {
+		t.Fatal("runtimeRead=on channel read silently fell back to legacy")
+	}
+}
+
 func TestPetKnowledgeProposalsFollowTheReadSource(t *testing.T) {
 	service, database, _, project := knowledgeRouteFixture(t, "project_other")
 	ctx := context.Background()

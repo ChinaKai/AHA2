@@ -233,7 +233,10 @@ func (s *Service) channelKnowledgeEntry(ctx context.Context, id string) (domain.
 	if id == "" {
 		return domain.KnowledgeEntry{}, false, nil
 	}
-	if s.knowledgeVault != nil && s.knowledgeVault.Enabled() {
+	// Probe the vault only while vault reads are effective. With the runtime
+	// read gate off every scope is legacy by definition, so touching a broken
+	// vault reader would turn a forced legacy read into an error.
+	if s.knowledgeVault != nil && s.knowledgeVault.Enabled() && s.knowledgeVaultRuntimeRead {
 		raw, found, err := s.vaultEntryByID(ctx, id)
 		if err != nil {
 			return domain.KnowledgeEntry{}, false, err

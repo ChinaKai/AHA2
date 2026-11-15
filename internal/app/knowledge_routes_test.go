@@ -287,6 +287,36 @@ func TestLegacyProposalCannotBeApprovedAfterVaultBecomesReadSource(t *testing.T)
 	}
 }
 
+func TestVaultProposalCannotBeApprovedAfterRollback(t *testing.T) {
+	service, database, _, project := knowledgeRouteFixture(t, "project_other")
+	ctx := context.Background()
+	setKnowledgeAutoApprove(t, database, false)
+	submitted, err := service.PetSubmitKnowledge(ctx, "project", project.ID, []KnowledgeCandidate{{
+		Type: "practice", Title: "切换前 vault 提案", Body: vaultRouteBody(),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(submitted.Proposals) != 1 {
+		t.Fatalf("vault proposals=%#v", submitted.Proposals)
+	}
+	proposal, err := database.KnowledgeProposal(ctx, submitted.Proposals[0].ID)
+	if err != nil || proposal.TargetSource != domain.KnowledgeProposalTargetVault {
+		t.Fatalf("vault proposal=%#v err=%v", proposal, err)
+	}
+	service.knowledgeVaultRuntimeRead = false
+	if _, _, err := service.ApproveKnowledgeProposal(ctx, proposal.ID, time.Now().UTC()); !errors.Is(err, ErrKnowledgeReadSourceMismatch) {
+		t.Fatalf("approval after rollback error=%v", err)
+	}
+	stored, err := database.KnowledgeProposal(ctx, proposal.ID)
+	if err != nil || stored.Status != domain.KnowledgeProposalPending {
+		t.Fatalf("rolled-back approval changed proposal=%#v err=%v", stored, err)
+	}
+	if _, found, err := service.vaultEntryByID(ctx, proposal.EntryID); err != nil || found {
+		t.Fatalf("rolled-back approval published vault entry: found=%v err=%v", found, err)
+	}
+}
+
 func vaultFeedbackFixture(t *testing.T) (*Service, *store.Store, *knowledgevault.Manager, domain.Project, domain.KnowledgeEntry, domain.KnowledgeEntry, domain.KnowledgeEntry) {
 	t.Helper()
 	withUnsetEnv(t, knowledgeVaultReadProjectsEnv)
