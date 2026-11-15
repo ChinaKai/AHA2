@@ -30,9 +30,9 @@ const vaultContext = {
   ...legacyContext,
   knowledgeVaultEnabled: true,
   vaultLibraries: [
-    {id: "global", kind: "global", name: "全局知识", count: 4},
-    {id: "project:p1", kind: "project", name: "Demo", project_id: "p1", count: 2},
-    {id: "archive:old", kind: "archive", name: "Old", project_id: "old", count: 1},
+    {id: "global", kind: "global", name: "全局知识", root_id: "knowledge_root_global", count: 4},
+    {id: "project:p1", kind: "project", name: "Demo", project_id: "p1", root_id: "knowledge_root_project_pv", count: 2},
+    {id: "archive:old", kind: "archive", name: "Old", project_id: "old", root_id: "knowledge_root_archive_old", count: 1},
   ],
 };
 
@@ -43,14 +43,22 @@ test("vault off keeps the legacy project and library sources", () => {
   assert.ok(sources.every(item => !item.root.startsWith("project:")), "legacy mode must not surface vault library ids");
 });
 
-test("vault on uses vault libraries and never legacy roots", () => {
+test("vault on lists project roots by index entry id and never legacy roots", () => {
   const sources = channels.channelKnowledgeSources(vaultContext);
-  assert.deepEqual(sources.map(item => item.root), ["global", "project:p1"]);
-  assert.ok(sources.every(item => item.kind === "vault" && item.selectable === false));
-  assert.ok(sources.every(item => !item.root.startsWith("knowledge_root_")), "vault mode leaked a legacy root");
+  // The picker key ("project:p1") is not a knowledge entry id; grants must use
+  // the root_id. Global and archive libraries are not channel-grantable.
+  assert.deepEqual(sources.map(item => item.root), ["knowledge_root_project_pv"]);
+  assert.ok(sources.every(item => item.kind === "vault" && item.selectable));
+  assert.ok(sources.every(item => !item.root.startsWith("knowledge_root_project_project")));
+  assert.ok(sources.every(item => !item.root.startsWith("project:")), "vault mode leaked a picker key as a grant id");
 });
 
 test("vault on with no readable libraries returns an empty list instead of legacy fallback", () => {
   const sources = channels.channelKnowledgeSources({...vaultContext, vaultLibraries: []});
+  assert.deepEqual(sources, []);
+});
+
+test("vault project libraries without a root id are not offered as grants", () => {
+  const sources = channels.channelKnowledgeSources({...vaultContext, vaultLibraries: [{id: "project:p2", kind: "project", name: "No root", project_id: "p2", count: 1}]});
   assert.deepEqual(sources, []);
 });

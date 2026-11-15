@@ -57,7 +57,23 @@ func buildChannelVaultManager(t *testing.T) *knowledgevault.Manager {
 	return manager
 }
 
-func TestChannelKnowledgeRootsIncludeVaultAndAcceptVaultGrant(t *testing.T) {
+type channelVaultFixture struct {
+	service       *Service
+	database      *store.Store
+	owner         domain.Owner
+	instance      domain.ChannelInstance
+	hostProject   domain.Project
+	vaultRootID   string
+	legacyRoot    domain.KnowledgeEntry
+	legacyProject domain.Project
+}
+
+// newChannelVaultFixture builds a vault-routed project and a legacy project
+// behind one channel instance. seedPolicies mirrors the legacy CreateInstance
+// behavior; without it the instance has no channel policy, like a vault-era
+// instance created after task-488.
+func newChannelVaultFixture(t *testing.T, seedPolicies bool) *channelVaultFixture {
+	t.Helper()
 	previous, existed := os.LookupEnv("AHA2_KNOWLEDGE_VAULT_READ_PROJECTS")
 	if err := os.Unsetenv("AHA2_KNOWLEDGE_VAULT_READ_PROJECTS"); err != nil {
 		t.Fatal(err)
@@ -114,29 +130,41 @@ func TestChannelKnowledgeRootsIncludeVaultAndAcceptVaultGrant(t *testing.T) {
 	if err := database.CreateChannelInstanceWithHost(ctx, hostProject, hostWorkspace, instance, endpoints); err != nil {
 		t.Fatal(err)
 	}
-	hostRoot, err := database.EnsureKnowledgeRoot(ctx, "project", hostProject.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := database.EnsureChannelKnowledgePolicies(ctx, instance.ID, hostRoot.ID, now); err != nil {
-		t.Fatal(err)
+	if seedPolicies {
+		hostRoot, err := database.EnsureKnowledgeRoot(ctx, "project", hostProject.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := database.EnsureChannelKnowledgePolicies(ctx, instance.ID, hostRoot.ID, now); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	appService := app.NewService(database, nil, app.StubExecutor{})
 	appService.SetKnowledgeVault(buildChannelVaultManager(t), true)
 	service := New(Config{Store: database, App: appService, Secrets: &memorySecrets{}, DataDir: t.TempDir(), RuntimeDevice: "device"})
-	roots, vaultRoots, err := service.channelKnowledgeSourceRoots(ctx)
+	return &channelVaultFixture{
+		service: service, database: database, owner: owner, instance: instance,
+		hostProject: hostProject, vaultRootID: "knowledge_root_project_pv",
+		legacyRoot: legacyRoot, legacyProject: legacyProject,
+	}
+}
+
+func TestChannelKnowledgeRootsIncludeVaultAndAcceptVaultGrant(t *testing.T) {
+	fixture := newChannelVaultFixture(t, true)
+	ctx := context.Background()
+	roots, vaultRoots, err := fixture.service.channelKnowledgeSourceRoots(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !roots["knowledge_root_project_pv"] || !vaultRoots["knowledge_root_project_pv"] {
+	if !roots[fixture.vaultRootID] || !vaultRoots[fixture.vaultRootID] {
 		t.Fatalf("vault project root is not grantable: roots=%v vault=%v", roots, vaultRoots)
 	}
-	if !roots[legacyRoot.ID] || vaultRoots[legacyRoot.ID] {
+	if !roots[fixture.legacyRoot.ID] || vaultRoots[fixture.legacyRoot.ID] {
 		t.Fatalf("legacy project root is not grantable from the legacy source: roots=%v vault=%v", roots, vaultRoots)
 	}
 
-	policies, err := database.ChannelKnowledgePolicies(ctx, instance.ID)
+	policies, err := fixture.database.ChannelKnowledgePolicies(ctx, fixture.instance.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,12 +177,12 @@ func TestChannelKnowledgeRootsIncludeVaultAndAcceptVaultGrant(t *testing.T) {
 	if revision == 0 {
 		t.Fatal("group policy missing")
 	}
-	if _, err := service.ReplaceOwnerKnowledgeGrants(ctx, owner.ID, instance.ID, domain.ChannelEndpointGroupDigitalHuman, "selected", revision, []KnowledgeGrantInput{
-		{KnowledgeEntryID: "knowledge_root_project_pv", GrantScope: "subtree"},
+	if _, err := fixture.service.ReplaceOwnerKnowledgeGrants(ctx, fixture.owner.ID, fixture.instance.ID, domain.ChannelEndpointGroupDigitalHuman, "selected", revision, []KnowledgeGrantInput{
+		{KnowledgeEntryID: fixture.vaultRootID, GrantScope: "subtree"},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	policies, err = service.OwnerKnowledgePolicies(ctx, owner.ID, instance.ID)
+	policies, err = fixture.service.OwnerKnowledgePolicies(ctx, fixture.owner.ID, fixture.instance.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,12 +192,49 @@ func TestChannelKnowledgeRootsIncludeVaultAndAcceptVaultGrant(t *testing.T) {
 			continue
 		}
 		for _, grant := range policy["grants"].([]map[string]string) {
-			if grant["knowledge_entry_id"] == "knowledge_root_project_pv" {
+			if grant["knowledge_entry_id"] == fixture.vaultRootID {
 				granted = true
 			}
 		}
 	}
 	if !granted {
 		t.Fatalf("vault root grant was not stored: %#v", policies)
+	}
+}
+
+// A vault-era instance has no policy and no legacy host root. The owner's first
+// explicit selection creates the policy with an empty fixed index; it must not
+// seed a legacy knowledge root just to make the policy row possible.
+func TestChannelVaultGrantCreatesPolicyWithoutLegacyRoot(t *testing.T) {
+	fixture := newChannelVaultFixture(t, false)
+	ctx := context.Background()
+	policies, err := fixture.database.ChannelKnowledgePolicies(ctx, fixture.instance.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(policies) != 0 {
+		t.Fatalf("vault-era fixture unexpectedly has policies: %#v", policies)
+	}
+	if _, err := fixture.service.ReplaceOwnerKnowledgeGrants(ctx, fixture.owner.ID, fixture.instance.ID, domain.ChannelEndpointGroupDigitalHuman, "selected", 0, []KnowledgeGrantInput{
+		{KnowledgeEntryID: fixture.vaultRootID, GrantScope: "subtree"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	selection, err := fixture.database.ChannelKnowledgeSelection(ctx, fixture.instance.ID, domain.ChannelEndpointGroupDigitalHuman)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !selection.Configured || selection.FixedIndexEntryID != "" || selection.ScopeMode != "selected" {
+		t.Fatalf("explicit vault selection stored an unexpected policy: %#v", selection)
+	}
+	if len(selection.Grants) != 1 || selection.Grants[0].KnowledgeEntryID != fixture.vaultRootID {
+		t.Fatalf("explicit vault selection grants=%#v", selection.Grants)
+	}
+	indexes, err := fixture.database.KnowledgeIndexes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root, found := indexes[fixture.hostProject.ID]; found {
+		t.Fatalf("explicit vault selection seeded a legacy host root: %#v", root)
 	}
 }

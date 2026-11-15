@@ -34,6 +34,19 @@ type channelKnowledgeFixture struct {
 
 func newChannelKnowledgeFixture(t *testing.T) *channelKnowledgeFixture {
 	t.Helper()
+	return newChannelKnowledgeFixtureWithPolicies(t, true)
+}
+
+// newChannelKnowledgeFixtureWithoutPolicies mirrors a channel instance created
+// while the vault is the read source: no legacy host root and no channel
+// policy. The read path must treat that as an explicit empty selection.
+func newChannelKnowledgeFixtureWithoutPolicies(t *testing.T) *channelKnowledgeFixture {
+	t.Helper()
+	return newChannelKnowledgeFixtureWithPolicies(t, false)
+}
+
+func newChannelKnowledgeFixtureWithPolicies(t *testing.T, seedPolicies bool) *channelKnowledgeFixture {
+	t.Helper()
 	withUnsetEnv(t, knowledgeVaultReadProjectsEnv)
 	ctx := context.Background()
 	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
@@ -149,12 +162,14 @@ func newChannelKnowledgeFixture(t *testing.T) *channelKnowledgeFixture {
 	if err := database.CreateChannelInstanceWithHost(ctx, hostProject, hostWorkspace, instance, endpoints); err != nil {
 		t.Fatal(err)
 	}
-	hostRoot, err := database.EnsureKnowledgeRoot(ctx, "project", hostProject.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := database.EnsureChannelKnowledgePolicies(ctx, instance.ID, hostRoot.ID, now); err != nil {
-		t.Fatal(err)
+	if seedPolicies {
+		hostRoot, err := database.EnsureKnowledgeRoot(ctx, "project", hostProject.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := database.EnsureChannelKnowledgePolicies(ctx, instance.ID, hostRoot.ID, now); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return &channelKnowledgeFixture{
 		service: service, database: database, ctx: ctx, owner: owner, instance: instance,
@@ -523,5 +538,74 @@ func TestPetKnowledgeProposalsFollowTheReadSource(t *testing.T) {
 	}
 	if len(legacyView.Proposals) != 1 || legacyView.Proposals[0].ID != legacySubmitted.Proposals[0].ID {
 		t.Fatalf("unbound project did not list its legacy proposal: %#v", legacyView.Proposals)
+	}
+}
+
+// A channel created while the vault is the read source has no policy. The read
+// must be an explicit empty selection even though the vault and legacy tables
+// both hold entries: no implicit grant and no generic ErrNoRows failure.
+func TestChannelKnowledgeUnconfiguredVaultInstanceReturnsExplicitEmptySelection(t *testing.T) {
+	fixture := newChannelKnowledgeFixtureWithoutPolicies(t)
+	policies, err := fixture.database.ChannelKnowledgePolicies(fixture.ctx, fixture.instance.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(policies) != 0 {
+		t.Fatalf("fixture unexpectedly seeded policies: %#v", policies)
+	}
+	for _, endpoint := range []string{domain.ChannelEndpointGroupDigitalHuman, domain.ChannelEndpointAssistantDM} {
+		entries, err := fixture.service.channelAllowedKnowledge(fixture.ctx, fixture.instance.ID, endpoint, "")
+		if err != nil {
+			t.Fatalf("endpoint %s unconfigured read failed instead of returning an empty selection: %v", endpoint, err)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("endpoint %s unconfigured read granted %d entries: %#v", endpoint, len(entries), entries)
+		}
+	}
+}
+
+// The owner's first explicit vault-root selection creates the policy and is
+// the only source of channel knowledge; other vault projects and legacy rows
+// stay out of the selection.
+func TestExplicitVaultRootSelectionConfiguresUnconfiguredChannel(t *testing.T) {
+	fixture := newChannelKnowledgeFixtureWithoutPolicies(t)
+	now := time.Now().UTC()
+	vaultRootID := "knowledge_root_project_pet"
+	vaultIDs := map[string]bool{vaultRootID: true}
+	grants := []domain.ChannelKnowledgeGrant{{KnowledgeEntryID: vaultRootID, GrantScope: "subtree"}}
+	if err := fixture.database.ReplaceChannelKnowledgeGrants(fixture.ctx, fixture.instance.ID, domain.ChannelEndpointGroupDigitalHuman, fixture.owner.ID, "selected", 0, grants, vaultIDs, now); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := fixture.service.channelAllowedKnowledge(fixture.ctx, fixture.instance.ID, domain.ChannelEndpointGroupDigitalHuman, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := knowledgeEntryIDs(entries)
+	if !ids[vaultRootID] || !ids["knowledge_pet_note"] {
+		t.Fatalf("explicit vault root did not grant its verified subtree: %#v", entries)
+	}
+	if ids["knowledge_legacy_readable"] || ids["knowledge_pet_legacy_only"] {
+		t.Fatalf("explicit vault selection leaked legacy or unselected knowledge: %#v", entries)
+	}
+	// The private chat is the bound Owner and keeps the documented "always all"
+	// rule once the channel has a policy; it still never serves the vault
+	// project's legacy rows.
+	dmEntries, err := fixture.service.channelAllowedKnowledge(fixture.ctx, fixture.instance.ID, domain.ChannelEndpointAssistantDM, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dmIDs := knowledgeEntryIDs(dmEntries)
+	if !dmIDs["knowledge_pet_note"] || !dmIDs["knowledge_legacy_readable"] {
+		t.Fatalf("private chat did not read all sources after configuration: %#v", dmEntries)
+	}
+	if dmIDs["knowledge_pet_legacy_only"] {
+		t.Fatalf("private chat served a vault project's legacy row: %#v", dmEntries)
+	}
+	selection, err := fixture.database.ChannelKnowledgeSelection(fixture.ctx, fixture.instance.ID, domain.ChannelEndpointGroupDigitalHuman)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !selection.Configured || selection.FixedIndexEntryID != "" || selection.ScopeMode != "selected" {
+		t.Fatalf("explicit selection stored an unexpected policy: %#v", selection)
 	}
 }

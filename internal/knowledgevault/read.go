@@ -194,7 +194,11 @@ type Library struct {
 	Kind      string `json:"kind"`
 	Name      string `json:"name"`
 	ProjectID string `json:"project_id,omitempty"`
-	Count     int    `json:"count"`
+	// RootID is the index entry ID of the library's own index document. It is
+	// the value channel knowledge grants must store: the library ID is only a
+	// picker key ("project:<id>"/"global"), not a knowledge entry ID.
+	RootID string `json:"root_id,omitempty"`
+	Count  int    `json:"count"`
 }
 
 type LibraryList struct {
@@ -243,8 +247,17 @@ func (r *Reader) Libraries(ctx context.Context) LibraryList {
 		return result
 	}
 	counts := map[string]int{}
+	rootIDs := map[string]string{}
 	orphans := 0
 	for _, entry := range entries {
+		if entry.IsIndex {
+			switch entry.Scope {
+			case "global":
+				rootIDs["global"] = entry.ID
+			case "project":
+				rootIDs["project:"+entry.ProjectID] = entry.ID
+			}
+		}
 		if isInboxPath(entry.Path) || isReservedVaultPath(entry.Path) {
 			continue
 		}
@@ -259,10 +272,11 @@ func (r *Reader) Libraries(ctx context.Context) LibraryList {
 			orphans++
 		}
 	}
-	result.Libraries = append(result.Libraries, Library{ID: "global", Kind: "global", Name: "全局知识", Count: counts["global"]})
+	result.Libraries = append(result.Libraries, Library{ID: "global", Kind: "global", Name: "全局知识", Count: counts["global"], RootID: rootIDs["global"]})
 	result.Projects = r.manifestProjects()
 	for index := range result.Projects {
 		result.Projects[index].Count = counts[result.Projects[index].ID]
+		result.Projects[index].RootID = rootIDs[result.Projects[index].ID]
 		result.Libraries = append(result.Libraries, result.Projects[index])
 	}
 	result.Archived = r.manifestArchives()

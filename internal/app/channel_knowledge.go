@@ -10,6 +10,7 @@ import (
 
 	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/knowledgevault"
+	"github.com/ChinaKai/AHA2/internal/store"
 )
 
 // KnowledgeIndexSource is one grantable project knowledge root together with
@@ -95,6 +96,14 @@ func (s *Service) vaultProjectRootEntry(ctx context.Context, projectID string) (
 // returning legacy rows.
 func (s *Service) channelAllowedKnowledge(ctx context.Context, instanceID, endpointKind, conversationID string) ([]domain.KnowledgeEntry, error) {
 	selection, err := s.store.ChannelKnowledgeSelection(ctx, instanceID, endpointKind)
+	if errors.Is(err, store.ErrChannelKnowledgeUnconfigured) {
+		// A channel created while the vault is the read source has no policy:
+		// vault knowledge is never granted implicitly. This is an explicit empty
+		// selection, not a read failure; the owner selects sources in the channel
+		// settings and the UI shows the unconfigured state.
+		log.Printf("channel knowledge instance %s endpoint %s is not configured; using an empty selection", instanceID, endpointKind)
+		return []domain.KnowledgeEntry{}, nil
+	}
 	if err != nil {
 		return nil, err
 	}

@@ -1660,6 +1660,9 @@ export interface KnowledgeVaultLibrary {
   kind: "global" | "project" | "archive" | "orphan" | string;
   name: string;
   project_id?: string;
+  // The vault index entry ID of this library's index document. Channel grants
+  // must store this value; `id` is only the picker key.
+  root_id?: string;
   count: number;
 }
 

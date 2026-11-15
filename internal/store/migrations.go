@@ -3759,5 +3759,17 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("apply schema v140 channel knowledge vault grants: %w", err)
 		}
 	}
+	var hasV141 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=141)`).Scan(&hasV141)
+	var policyEntryReferences int
+	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_foreign_key_list('channel_knowledge_policies') WHERE "table"='knowledge_entries'`).Scan(&policyEntryReferences)
+	if !hasV141 || policyEntryReferences > 0 {
+		// A vault-routed channel host project has no legacy knowledge root. The
+		// policy's fixed index stays optional (empty) so an explicit vault-root
+		// selection can create the policy without seeding legacy rows.
+		if err := s.migrateChannelKnowledgePolicyVaultIndex(ctx); err != nil {
+			return fmt.Errorf("apply schema v141 channel knowledge vault policy index: %w", err)
+		}
+	}
 	return nil
 }

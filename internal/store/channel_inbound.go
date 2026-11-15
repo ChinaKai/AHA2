@@ -16,6 +16,11 @@ import (
 // read source first; this method stays for tests and explicit legacy callers.
 func (s *Store) ChannelAllowedKnowledge(ctx context.Context, instanceID, endpointKind, conversationID string) ([]domain.KnowledgeEntry, error) {
 	selection, err := s.ChannelKnowledgeSelection(ctx, instanceID, endpointKind)
+	if errors.Is(err, ErrChannelKnowledgeUnconfigured) {
+		// No policy means no explicit grant. Returning an empty selection keeps
+		// the state explainable instead of surfacing a bare ErrNoRows.
+		return []domain.KnowledgeEntry{}, nil
+	}
 	if err != nil {
 		return nil, err
 	}

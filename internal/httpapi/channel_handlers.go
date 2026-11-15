@@ -479,7 +479,7 @@ func (s *Server) channelConversationSummaries(writer http.ResponseWriter, reques
 
 func (s *Server) channelKnowledgePolicy(writer http.ResponseWriter, request *http.Request) {
 	if s.channels == nil {
-		writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "policies": []any{}})
+		writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "policies": []any{}, "configured": false})
 		return
 	}
 	session, _ := sessionFromContext(request.Context())
@@ -488,7 +488,11 @@ func (s *Server) channelKnowledgePolicy(writer http.ResponseWriter, request *htt
 		writeChannelError(writer, err, "get_channel_knowledge_policy_failed")
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "policies": items})
+	// A channel created while the vault is the read source starts with no group
+	// policy. Return that as an explicit unconfigured state instead of an empty
+	// list the UI cannot explain. The private chat policy is implicit, so
+	// "configured" describes the group policy the owner edits here.
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "policies": items, "configured": len(items) > 0})
 }
 
 func (s *Server) updateChannelKnowledgePolicy(writer http.ResponseWriter, request *http.Request) {
@@ -503,7 +507,7 @@ func (s *Server) updateChannelKnowledgePolicy(writer http.ResponseWriter, reques
 		writeKnowledgeVaultManagementConflict(writer)
 		return
 	}
-	revision, ok := channelIfMatch(writer, request)
+	revision, ok := channelIfMatchAllowCreate(writer, request)
 	if !ok {
 		return
 	}
@@ -523,15 +527,26 @@ func (s *Server) updateChannelKnowledgePolicy(writer http.ResponseWriter, reques
 		return
 	}
 	s.audit(request, "channel.knowledge_policy.update", "channel_instance", request.PathValue("id"), map[string]any{"endpoint": payload.Endpoint, "scope_mode": payload.ScopeMode, "grant_count": len(payload.Grants)})
-	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "policies": items})
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "policies": items, "configured": true})
 }
 
 func channelIfMatch(writer http.ResponseWriter, request *http.Request) (int, bool) {
+	return channelRevisionFromIfMatch(writer, request, 1)
+}
+
+// channelIfMatchAllowCreate additionally accepts revision 0: the client saw an
+// unconfigured endpoint and asks to create its first policy. Other channel
+// resources keep requiring a concrete revision.
+func channelIfMatchAllowCreate(writer http.ResponseWriter, request *http.Request) (int, bool) {
+	return channelRevisionFromIfMatch(writer, request, 0)
+}
+
+func channelRevisionFromIfMatch(writer http.ResponseWriter, request *http.Request, minimum int) (int, bool) {
 	value := strings.TrimSpace(request.Header.Get("If-Match"))
 	value = strings.TrimPrefix(value, "W/")
 	value = strings.Trim(value, `"`)
 	revision, err := strconv.Atoi(value)
-	if err != nil || revision < 1 {
+	if err != nil || revision < minimum {
 		writeError(writer, http.StatusPreconditionRequired, "if_match_required")
 		return 0, false
 	}
