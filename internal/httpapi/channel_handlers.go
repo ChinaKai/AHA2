@@ -496,6 +496,13 @@ func (s *Server) updateChannelKnowledgePolicy(writer http.ResponseWriter, reques
 		writeError(writer, http.StatusServiceUnavailable, "channels_unavailable")
 		return
 	}
+	// Grants point at legacy knowledge roots. When the channel host project
+	// reads the vault, rewriting them would keep steering the channel back to
+	// the old tables; refuse instead of silently mixing sources.
+	if instance, err := s.store.ChannelInstance(request.Context(), request.PathValue("id")); err == nil && s.knowledgeVaultReadActive("project", instance.HostProjectID) {
+		writeKnowledgeVaultManagementConflict(writer)
+		return
+	}
 	revision, ok := channelIfMatch(writer, request)
 	if !ok {
 		return

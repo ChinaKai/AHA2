@@ -24,9 +24,11 @@ func (s *Store) CreateProject(ctx context.Context, project domain.Project) error
 	if err != nil {
 		return err
 	}
-	_, err = s.EnsureKnowledgeRoot(ctx, "project", project.ID)
-	if err != nil {
-		return err
+	if s.legacyKnowledgeRootsEnabled(project.ID) {
+		_, err = s.EnsureKnowledgeRoot(ctx, "project", project.ID)
+		if err != nil {
+			return err
+		}
 	}
 	if project.ProjectType == "knowledge" {
 		_, err = s.EnsureKnowledgeLibraryForProject(ctx, project)

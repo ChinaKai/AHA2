@@ -58,6 +58,34 @@ title: 收件想法
 
 待整理。
 `)
+	// One project library binds project-1 in the manifest so the live vault
+	// read gate applies to it. Tests that need legacy fallback use a project
+	// outside this manifest.
+	write("projects/demo/index.md", `---
+id: knowledge_root_project_project-1
+type: navigation
+status: verified
+title: 演示项目
+scope: project
+project_id: project-1
+is_index: true
+---
+# 演示
+
+演示入口。
+`)
+	write("projects/demo/guide.md", `---
+id: knowledge_project_1_guide
+type: practice
+status: verified
+title: 演示文档
+scope: project
+project_id: project-1
+---
+# 演示文档
+
+项目正文。
+`)
 	if err := os.MkdirAll(filepath.Join(config.VaultPath, ".obsidian"), 0o755); err != nil {
 		t.Fatal(err)
 	}

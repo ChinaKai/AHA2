@@ -312,6 +312,12 @@ func (s *Service) SetAgentAPI(capabilities *agentapi.Capabilities, baseURL strin
 func (s *Service) SetKnowledgeVault(manager knowledgeVaultBackend, runtimeRead bool) {
 	s.knowledgeVault = manager
 	s.knowledgeVaultRuntimeRead = runtimeRead
+	// Project creation happens through the store, which has no vault
+	// dependency. Install the same live gate there so creating a project while
+	// the vault is the read source no longer seeds legacy root indexes.
+	if s.store != nil {
+		s.store.SetLegacyKnowledgeRootsGuard(s.LegacyKnowledgeRootsEnabled)
+	}
 }
 
 // SetBuildInfo lets the pet's read-only inspection snapshot report the same
