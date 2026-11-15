@@ -117,6 +117,19 @@ func (s KnowledgeVaultSettings) VaultPopulated() bool {
 	return !s.MigrationVerifiedAt.IsZero() || !s.ImportVerifiedAt.IsZero()
 }
 
+// VaultSkillPreference is the owner's auto-attach choice for one file-vault
+// skill. The vault files stay read-only; this row only decides whether a new
+// Task pre-selects the skill. GlobalAttachConfirmedAt records the explicit
+// second confirmation the owner rule requires for global vault skills.
+type VaultSkillPreference struct {
+	SkillID                 string    `json:"skill_id"`
+	Scope                   string    `json:"scope"`
+	ProjectID               string    `json:"project_id,omitempty"`
+	AutoAttach              bool      `json:"auto_attach"`
+	GlobalAttachConfirmedAt time.Time `json:"global_attach_confirmed_at,omitempty"`
+	UpdatedAt               time.Time `json:"updated_at,omitempty"`
+}
+
 // LegacyKnowledgeInventory counts the pre-vault knowledge that an upgrade may
 // still be using. SkillPackages covers old flat skill directories even when
 // their database rows were already removed.

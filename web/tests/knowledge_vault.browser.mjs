@@ -189,6 +189,11 @@ const DOC_DIFF = ${JSON.stringify(DOC_DIFF)};
 const EMPTY_DIFF = ${JSON.stringify(EMPTY_DIFF)};
 const UNAVAILABLE_DIFF = ${JSON.stringify(UNAVAILABLE_DIFF)};
 const OLD_KNOWLEDGE = [{id: "global-root", scope: "global", parent_id: "", is_index: true, type: "navigation", title: "Global index", slug: "index", body: "Global home.", status: "verified", confidence: .9, revision: 1, sort_order: 0, helped_count: 0, stale_count: 0, created_at: "${now}", updated_at: "${now}"}];
+const SKILLS = [
+  {key: "vault-skill:global:demo", id: "s1", slug: "demo", name: "Demo Skill", scope: "global", library: "全局知识", description: "构建技能", file_count: 3, relative_path: "skills/demo", absolute_path: "/srv/vault/skills/demo", open_path: "/srv/vault/skills/demo/SKILL.md", source: "vault", auto_attach: false, auto_attach_effective: false, auto_attach_confirmed: false, can_update: true, project_bound: true},
+  {key: "vault-skill:project:p1:long-skill", id: "s2", slug: "long-skill", name: "一个名字非常长的技能包用来验证底部图标不会挤压标题和描述文字", scope: "project", project_id: "p1", library: "Demo", description: "这个技能描述也很长，用来确认三个图标位于卡片底部右侧时不会占用标题或描述的水平空间，并且卡片内部不会出现横向溢出。", file_count: 5, relative_path: "projects/p1/skills/long-skill", absolute_path: "/srv/vault/projects/p1/skills/long-skill", open_path: "/srv/vault/projects/p1/skills/long-skill/SKILL.md", source: "vault", auto_attach: false, auto_attach_effective: false, auto_attach_confirmed: false, can_update: true, project_bound: true},
+];
+window.__vaultSkillAutoCalls = [];
 window.__vaultRequests = [];
 window.__vaultTreeRequests = [];
 window.__vaultRecentRequests = [];
@@ -264,10 +269,20 @@ if (id === "g-other") return json({ok: true, doc: G_OTHER_DOC});
       ? json({ok: true, enabled: true, index_ready: true, count: 1, counts: [{library_id: "project:p1", library: "Demo", project_id: "p1", count: 1}], items: [RECENT[1]]})
       : json({ok: true, enabled: true, index_ready: true, count: 2, counts: [{library_id: "global", library: "全局知识", count: 1}, {library_id: "project:p1", library: "Demo", project_id: "p1", count: 1}], items: [RECENT[1], GLOBAL_INBOX]});
   }
-  if (path === "/api/v1/knowledge-vault/skills") return json({ok: true, enabled: true, skills: [
-    {id: "s1", slug: "demo", name: "Demo Skill", scope: "global", library: "全局知识", description: "构建技能", file_count: 3, relative_path: "skills/demo", absolute_path: "/srv/vault/skills/demo", open_path: "/srv/vault/skills/demo/SKILL.md"},
-    {id: "s2", slug: "long-skill", name: "一个名字非常长的技能包用来验证底部图标不会挤压标题和描述文字", scope: "project", project_id: "p1", library: "Demo", description: "这个技能描述也很长，用来确认三个图标位于卡片底部右侧时不会占用标题或描述的水平空间，并且卡片内部不会出现横向溢出。", file_count: 5, relative_path: "projects/p1/skills/long-skill", absolute_path: "/srv/vault/projects/p1/skills/long-skill", open_path: "/srv/vault/projects/p1/skills/long-skill/SKILL.md"},
-  ]});
+  if (path === "/api/v1/knowledge-vault/skills/auto-attach" && String(init.method || "GET").toUpperCase() === "PUT") {
+    const body = JSON.parse(init.body || "{}");
+    window.__vaultSkillAutoCalls.push(body);
+    if (body.auto_attach && String(body.key).includes(":global:") && !body.confirm_global) {
+      return json({ok: false, error: "global_confirmation_required"}, 409);
+    }
+    const target = SKILLS.find(item => item.key === body.key);
+    if (!target) return json({ok: false, error: "vault_skill_not_found"}, 404);
+    target.auto_attach = Boolean(body.auto_attach);
+    target.auto_attach_confirmed = Boolean(body.confirm_global);
+    target.auto_attach_effective = target.auto_attach;
+    return json({ok: true, skill: target});
+  }
+  if (path === "/api/v1/knowledge-vault/skills") return json({ok: true, enabled: true, index_ready: true, runtime_read: true, bound_project_ids: ["p1"], skills: SKILLS.map(item => ({...item}))});
   if (path === "/api/v1/knowledge") return json({knowledge: OLD_KNOWLEDGE, proposals: [], review_settings: {auto_approve: false}, has_more: false});
   if (path === "/api/v1/knowledge/libraries") return json({libraries: []});
   if (path === "/api/v1/knowledge/indexes") return json({indexes: []});
@@ -998,6 +1013,32 @@ try {
   assert.deepEqual(skillNames, ["在本地 VSCode 打开「Demo Skill」", "在 Obsidian 打开「Demo Skill」", "复制技能路径「Demo Skill」"]);
   assert.equal(await page.locator('.kv-skill-card a.kv-open[href^="vscode://vscode-remote"]').count(), 0);
   assert.equal(await page.locator(".kv-skill-card .kv-open span").count(), 0, "skill actions are icon-only");
+  // Source and scope are always spelled out next to the auto-enable switch.
+  assert.match(await demoCard.innerText(), /vault 技能[\s\S]*全局[\s\S]*任务自动启用/);
+  assert.match(await page.locator(".kv-skill-card", {hasText: "一个名字非常长"}).innerText(), /vault 技能[\s\S]*项目 · Demo/);
+  const globalSwitch = demoCard.locator("[data-kv-skill-auto]");
+  assert.equal(await globalSwitch.getAttribute("role"), "switch");
+  assert.equal(await globalSwitch.isChecked(), false);
+  await page.evaluate(() => {
+    window.__vaultConfirmCalls = [];
+    window.confirm = message => {
+      window.__vaultConfirmCalls.push(message);
+      return true;
+    };
+  });
+  await demoCard.locator(".kv-skill-auto").click();
+  await page.waitForFunction(() => document.querySelector('[data-kv-skill-auto="vault-skill:global:demo"]')?.checked === true);
+  assert.match(await page.evaluate(() => window.__vaultConfirmCalls[0] || ""), /所有已绑定知识库的项目/);
+  assert.deepEqual(await page.evaluate(() => window.__vaultSkillAutoCalls.map(call => ({key: call.key, auto: call.auto_attach, confirm: call.confirm_global}))), [
+    {key: "vault-skill:global:demo", auto: true, confirm: true},
+  ]);
+  const projectCard = page.locator(".kv-skill-card", {hasText: "一个名字非常长"});
+  await projectCard.locator(".kv-skill-auto").click();
+  await page.waitForFunction(() => document.querySelector('[data-kv-skill-auto="vault-skill:project:p1:long-skill"]')?.checked === true);
+  assert.deepEqual(await page.evaluate(() => window.__vaultSkillAutoCalls.map(call => ({key: call.key, auto: call.auto_attach, confirm: call.confirm_global}))), [
+    {key: "vault-skill:global:demo", auto: true, confirm: true},
+    {key: "vault-skill:project:p1:long-skill", auto: true, confirm: false},
+  ]);
 
   // The skill card copy button also keeps focus while its notice appears and
   // expires; its live region is the same global banner.
@@ -1006,7 +1047,9 @@ try {
   await skillCopy.focus();
   assert.equal(await page.evaluate(() => document.activeElement?.getAttribute("aria-label")), "复制技能路径「Demo Skill」");
   await page.keyboard.press("Enter");
-  await page.waitForSelector(".banner.success", {timeout: 5000});
+  // The auto-enable notice from the switch above may still be on screen, so
+  // wait for the copy notice itself rather than any success banner.
+  await page.waitForFunction(() => document.querySelector(".banner.success")?.textContent.includes("已复制绝对路径"), null, {timeout: 5000});
   assert.match(await page.locator(".banner.success").textContent(), /已复制绝对路径/);
   assert.equal(await page.evaluate(() => document.activeElement?.getAttribute("data-kv-copy")), skillCopyPath, "copy keeps focus on the skill copy button");
   assert.equal(await page.locator(".banner-stack").getAttribute("role"), "status");
@@ -1021,7 +1064,7 @@ try {
     const description = card.querySelector("p").getBoundingClientRect();
     const cardRect = card.getBoundingClientRect();
     return {
-      footerIsLast: card.lastElementChild === footer,
+      footerIsLast: card.lastElementChild?.classList.contains("kv-skill-status"),
       rightGap: cardRect.right - actions.right,
       actionsTop: actions.top,
       descriptionBottom: description.bottom,
@@ -1032,7 +1075,7 @@ try {
       overflow: document.documentElement.scrollWidth - window.innerWidth,
     };
   });
-  assert.equal(skillLayout.footerIsLast, true, "skill actions are the card's bottom row");
+  assert.equal(skillLayout.footerIsLast, true, "the auto-attach status closes the card below its actions");
   assert.ok(skillLayout.footerTop > skillLayout.cardTop, "skill actions sit below the file count");
   assert.ok(skillLayout.actionsTop >= skillLayout.descriptionBottom - 1, "skill actions never squeeze the long title or description");
   assert.ok(skillLayout.rightGap >= 0 && skillLayout.rightGap <= 24, "skill actions are right-aligned inside the card padding");
@@ -1369,6 +1412,9 @@ try {
   assert.equal(await mobileSkillActions.count(), 3);
   assert.equal(await mobileSkillActions.first().isVisible(), true);
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), "390px skill cards keep three icons without overflowing");
+  const mobileSkillToggle = page.locator(".kv-skill-card").first().locator(".kv-skill-auto");
+  assert.equal(await mobileSkillToggle.isVisible(), true);
+  assert.ok((await mobileSkillToggle.boundingBox()).height >= 40, "390px auto-enable switch is a 40px touch target");
   await page.locator('.kv-tabs [data-kv-tab-button="knowledge"]').click();
   await page.waitForSelector(".kv-tree-link");
 

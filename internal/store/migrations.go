@@ -3705,5 +3705,26 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("record schema v137: %w", err)
 		}
 	}
+	var hasV138 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=138)`).Scan(&hasV138)
+	if !hasV138 {
+		// Vault skills live in files, but their auto-attach choice is an owner
+		// preference and must survive restarts. The row is keyed by the stable
+		// vault skill key and never writes to the vault itself.
+		if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS vault_skill_preferences(
+			skill_id TEXT PRIMARY KEY,
+			scope TEXT NOT NULL DEFAULT '' CHECK(scope IN ('','global','project','archive')),
+			project_id TEXT NOT NULL DEFAULT '',
+			auto_attach INTEGER NOT NULL DEFAULT 0 CHECK(auto_attach IN (0,1)),
+			global_attach_confirmed_at TEXT NOT NULL DEFAULT '',
+			updated_at TEXT NOT NULL
+		)`); err != nil {
+			return fmt.Errorf("apply schema v138 vault skill preferences: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(138, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return fmt.Errorf("record schema v138: %w", err)
+		}
+	}
 	return nil
 }

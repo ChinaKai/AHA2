@@ -535,7 +535,17 @@ func (s *Server) listSkills(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusInternalServerError, "list_skills_failed")
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "skills": items})
+	// The task picker merges this list with vault skills. A source field makes
+	// the two origins explicit without changing the stored skill shape.
+	type skillListItem struct {
+		domain.Skill
+		Source string `json:"source"`
+	}
+	result := make([]skillListItem, 0, len(items))
+	for _, item := range items {
+		result = append(result, skillListItem{Skill: item, Source: "legacy"})
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "skills": result})
 }
 
 type skillPayload struct {

@@ -58,6 +58,9 @@ window.fetch = async (input, init = {}) => {
   ], has_more: false});
   if (path === "/api/v1/workspaces") return json({workspaces: [{id: "workspace-1", project_id: "project-1", name: "WS One", root_path: "/tmp/ws", transport: "native", health: "ready", read_only: false, capabilities: {codex: {status: "ready"}}}]});
   if (path === "/api/v1/skills") return json({skills: SKILLS});
+  if (path === "/api/v1/knowledge-vault/skills") return json({ok: true, enabled: true, index_ready: true, runtime_read: true, bound_project_ids: ["project-1"], skills: [
+    {key: "vault-skill:project:project-1:vault-review", id: "vs-1", slug: "vault-review", name: "Vault review", scope: "project", project_id: "project-1", library: "Project One", description: "from the vault", file_count: 2, files: ["SKILL.md"], relative_path: "projects/project-1/skills/vault-review", absolute_path: "/vault/projects/project-1/skills/vault-review", open_path: "/vault/projects/project-1/skills/vault-review", source: "vault", auto_attach: true, auto_attach_effective: true, auto_attach_confirmed: false, can_update: true, project_bound: true},
+  ]});
   if (path === "/api/v1/models") return json({models: [{id: "model-1", display_name: "Stub model", provider_id: "provider-1", source: "provider", backend: "codex", wire_model: "stub", default_env_group_id: "env-1", created_at: new Date().toISOString(), updated_at: new Date().toISOString()}]});
   if (path === "/api/v1/providers") return json({providers: [{id: "provider-1", name: "Provider", auth_style: "none"}]});
   if (path === "/api/v1/env-groups") return json({env_groups: [{id: "env-1", name: "Env", provider_id: "provider-1", backend: "stub", revision: 1, environment: {}, secret_refs: {}}]});
@@ -181,18 +184,29 @@ try {
   assert.equal(await page.locator('#task-form [name="proxy_enabled"][type=checkbox]').count(), 0, "the proxy checkbox is still present");
   assert.equal(await page.locator("#task-capabilities-fold").count(), 0, "the project-level authorization module is still rendered");
   assert.equal(await page.locator("#task-skills-fold").evaluate(node => node.open), false, "task-skills-fold should start collapsed");
-  assert.match(await page.locator("#task-skills-fold [data-fold-count]").innerText(), /未选择/);
+  // The project's vault skill is auto-enabled, so it is already inherited even
+  // while the fold is collapsed; the count reflects that without opening it.
+  assert.match(await page.locator("#task-skills-fold [data-fold-count]").innerText(), /已选 1/);
   await page.screenshot({path: resolve(output, "task-panel-collapsed.png")});
 
   // A collapsed Skills module must not grow the dialog with the skill count.
   const skillsHeight = () => page.locator("#task-skills-fold").evaluate(node => node.getBoundingClientRect().height);
   const collapsedSkillsHeight = await skillsHeight();
   await page.locator("#task-skills-fold summary").click();
+  // The vault skill is auto-enabled for this project, so the create panel
+  // inherits it without the Owner opening the fold; it stays removable.
+  const vaultSkill = page.locator('#task-skills-fold input[value="vault-skill:project:project-1:vault-review"]');
+  assert.equal(await vaultSkill.count(), 1, "the vault skill is missing from the create panel");
+  assert.equal(await vaultSkill.isChecked(), true, "the auto-enabled vault skill was not inherited");
+  assert.match(await page.locator('#task-skills-fold input[value="vault-skill:project:project-1:vault-review"]').locator("xpath=..").innerText(), /vault 技能/);
   await page.locator('#task-skills-fold input[value="skill-a"]').setChecked(true);
   await page.locator('#task-skills-fold input[value="skill-b"]').setChecked(true);
-  assert.match(await page.locator("#task-skills-fold [data-fold-count]").innerText(), /已选 2/);
+  assert.match(await page.locator("#task-skills-fold [data-fold-count]").innerText(), /已选 3/);
   const offered = await page.locator('#task-skills-fold input[name="skill_ids"]').evaluateAll(nodes => nodes.map(node => node.value));
-  assert.deepEqual(offered.sort(), ["skill-a", "skill-b"], `skills from another project leaked in: ${offered}`);
+  assert.deepEqual(offered.sort(), ["skill-a", "skill-b", "vault-skill:project:project-1:vault-review"], `unexpected skill offer: ${offered}`);
+  // Manual removal is allowed and must survive the submit.
+  await vaultSkill.setChecked(false);
+  assert.match(await page.locator("#task-skills-fold [data-fold-count]").innerText(), /已选 2/);
   await page.screenshot({path: resolve(output, "task-panel-expanded.png")});
   await page.locator("#task-skills-fold summary").click();
   assert.ok(await skillsHeight() <= collapsedSkillsHeight + 1, "collapsed skills module grew with the skill count");
@@ -207,6 +221,9 @@ try {
   await page.locator("#task-skills-fold summary").click();
   await page.locator('#task-skills-fold input[value="skill-a"]').setChecked(true);
   await page.locator('#task-skills-fold input[value="skill-b"]').setChecked(true);
+  // The inherited vault skill is removed by hand here so the submitted list
+  // proves a manual removal survives, not just that the default was offered.
+  await page.locator('#task-skills-fold input[value="vault-skill:project:project-1:vault-review"]').setChecked(false);
   await page.locator("#task-skills-fold summary").click();
   await page.locator('#task-form select[name="filesystem"]').selectOption("read-only");
   await page.locator('#task-form select[name="collaboration_mode"]').selectOption("single");

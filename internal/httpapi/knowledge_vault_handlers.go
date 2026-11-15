@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/knowledgevault"
 )
 
@@ -214,12 +215,7 @@ func (s *Server) knowledgeVaultInbox(writer http.ResponseWriter, request *http.R
 }
 
 func (s *Server) knowledgeVaultSkills(writer http.ResponseWriter, request *http.Request) {
-	var result knowledgevault.SkillsResponse
-	err := s.withKnowledgeVaultReader(func(reader *knowledgevault.Reader) error {
-		var readErr error
-		result, readErr = reader.Skills(request.Context())
-		return readErr
-	})
+	catalog, err := s.app.VaultSkillCatalog(request.Context(), strings.TrimSpace(request.URL.Query().Get("project_id")))
 	if errors.Is(err, knowledgevault.ErrDisabled) {
 		writeKnowledgeVaultDisabled(writer)
 		return
@@ -228,5 +224,48 @@ func (s *Server) knowledgeVaultSkills(writer http.ResponseWriter, request *http.
 		writeError(writer, http.StatusInternalServerError, "knowledge_vault_skills_failed")
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "enabled": true, "skills": result.Skills})
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"ok": true, "enabled": true, "index_ready": catalog.IndexReady,
+		"runtime_read": catalog.RuntimeRead, "bound_project_ids": catalog.BoundProjectIDs,
+		"skills": catalog.Skills,
+	})
+}
+
+// updateKnowledgeVaultSkillAutoAttach persists only the owner preference. It
+// never edits the SKILL.md package or the legacy skills table.
+func (s *Server) updateKnowledgeVaultSkillAutoAttach(writer http.ResponseWriter, request *http.Request) {
+	var payload struct {
+		Key           string `json:"key"`
+		AutoAttach    *bool  `json:"auto_attach"`
+		ConfirmGlobal bool   `json:"confirm_global"`
+	}
+	if err := decodeJSON(request, &payload); err != nil {
+		writeErrorDetail(writer, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	if strings.TrimSpace(payload.Key) == "" || payload.AutoAttach == nil {
+		writeErrorDetail(writer, http.StatusBadRequest, "invalid_auto_attach", "key and auto_attach are required")
+		return
+	}
+	view, err := s.app.SetVaultSkillAutoAttach(request.Context(), payload.Key, *payload.AutoAttach, payload.ConfirmGlobal)
+	switch {
+	case errors.Is(err, knowledgevault.ErrDisabled):
+		writeKnowledgeVaultDisabled(writer)
+		return
+	case errors.Is(err, app.ErrVaultSkillNotFound):
+		writeErrorDetail(writer, http.StatusNotFound, "vault_skill_not_found", err.Error())
+		return
+	case errors.Is(err, app.ErrVaultSkillNotAutoAttachable):
+		writeErrorDetail(writer, http.StatusBadRequest, "vault_skill_not_auto_attachable", err.Error())
+		return
+	case errors.Is(err, app.ErrVaultGlobalConfirmationRequired):
+		writeErrorDetail(writer, http.StatusConflict, "global_confirmation_required", "全局 vault 技能自动启用需要二次确认")
+		return
+	case err != nil:
+		writeErrorDetail(writer, http.StatusInternalServerError, "vault_skill_auto_attach_failed", err.Error())
+		return
+	}
+	s.audit(request, "knowledge_vault.skill_auto_attach", "vault_skill", view.Key,
+		map[string]any{"auto_attach": *payload.AutoAttach, "scope": view.Scope, "project_id": view.ProjectID})
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "skill": view})
 }

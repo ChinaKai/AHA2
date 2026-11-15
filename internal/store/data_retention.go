@@ -58,7 +58,7 @@ var databaseCatalog = []databaseCategoryDef{
 	{"H", "settings", domain.DatabaseSafetyKeep, []string{
 		"models", "providers", "env_groups", "codex_accounts", "backend_settings", "agent_api_settings",
 		"general_settings", "security_settings", "network_settings", "proxy_settings", "mcp_servers",
-		"data_retention_settings", "knowledge_vault_settings",
+		"data_retention_settings", "knowledge_vault_settings", "vault_skill_preferences",
 	}},
 	{"I", "pet", domain.DatabaseSafetyKeep, []string{
 		"owner_assistants", "pet_states", "pet_approvals", "pet_events", "pet_task_watches", "pet_navigation_actions",

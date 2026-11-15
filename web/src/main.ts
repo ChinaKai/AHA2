@@ -176,6 +176,12 @@ interface State extends ModelHealthState {
   // knowledge workspace and its API calls completely unchanged.
   knowledgeVaultEnabled: boolean | null;
   skills: Skill[];
+  // Vault packages are not rows in the legacy skills table. They are merged into
+  // the task picker only when runtime reads are on and the project is bound.
+  vaultSkills: Skill[];
+  vaultSkillsAvailable: boolean;
+  vaultSkillsRuntimeRead: boolean;
+  vaultSkillsBoundProjects: string[];
   mcpServers: MCPServer[];
   selectedTask: TaskDetail | null;
   taskConversation: ConversationItem[];
@@ -617,6 +623,10 @@ const state: State = {
   knowledgeReviewSettings: {auto_approve: false},
   knowledgeVaultEnabled: null,
   skills: [],
+  vaultSkills: [],
+  vaultSkillsAvailable: false,
+  vaultSkillsRuntimeRead: false,
+  vaultSkillsBoundProjects: [],
   mcpServers: [],
   selectedTask: null,
   taskConversation: [],
@@ -1594,21 +1604,38 @@ function confirmAgentConfigClose(dialog: HTMLDialogElement): boolean {
   return window.confirm("Agent 配置尚未保存，关闭将丢弃这些修改。确定关闭？");
 }
 
+let vaultTaskSkillsModule: typeof import("./task_vault_skills.js") | null = null;
+
+function availableVaultTaskSkills(projectID: string, includeIDs: string[] = []): Skill[] {
+  return vaultTaskSkillsModule
+    ? vaultTaskSkillsModule.vaultTaskSkillsForProject(state.vaultSkills, state.vaultSkillsRuntimeRead, state.vaultSkillsBoundProjects, projectID, includeIDs)
+    : [];
+}
+
 function autoTaskSkillIDs(projectID: string): string[] {
-  return state.skills
-    .filter(item => item.enabled && item.status === "active" && item.auto_attach &&
+  return availableTaskSkills(projectID)
+    .filter(item => item.auto_attach &&
       (item.scope === "global" || (item.scope === "project" && item.project_id === projectID)))
     .map(item => item.id);
 }
 
-function availableTaskSkills(projectID: string): Skill[] {
-  return state.skills.filter(item => item.enabled && item.status === "active" && (item.scope === "global" || item.project_id === projectID || item.bound_project_id === projectID));
+function availableTaskSkills(projectID: string, includeIDs: string[] = []): Skill[] {
+  const legacy = state.skills.filter(item => item.enabled && item.status === "active" && (item.scope === "global" || item.project_id === projectID || item.bound_project_id === projectID));
+  return [...legacy, ...availableVaultTaskSkills(projectID, includeIDs)];
+}
+
+function taskSkillSourceHint(projectID: string): string {
+  return vaultTaskSkillsModule
+    ? vaultTaskSkillsModule.vaultTaskSkillHint(state.vaultSkillsAvailable, state.vaultSkillsRuntimeRead, state.vaultSkillsBoundProjects, projectID)
+    : "";
 }
 
 function taskSkillOptions(projectID: string, selected: string[] = [], includeAutoDefaults = false): string {
   const items = availableTaskSkills(projectID);
   const defaults = includeAutoDefaults ? autoTaskSkillIDs(projectID) : [];
-  return renderTaskSkills(items, projectID, [...new Set([...selected, ...defaults])]);
+  const hint = taskSkillSourceHint(projectID);
+  return renderTaskSkills(items, projectID, [...new Set([...selected, ...defaults])])
+    + (hint ? `<div class="field-help task-skill-source-hint">${escapeHTML(hint)}</div>` : "");
 }
 
 function syncTaskSkills(): void {
@@ -2830,7 +2857,27 @@ async function ensureViewData(view: View, force = false): Promise<void> {
       state.mailMessages = (await api.mailMessages({status: state.mailFilterStatus, account_id: state.mailFilterAccount, limit: 100})).messages || [];
     }));
   }
-  if (view === "tasks") jobs.push(loadResource("skills", force, async () => { state.skills = (await api.skills()).skills || []; }));
+  if (view === "tasks") jobs.push(loadResource("skills", force, async () => {
+    state.skills = (await api.skills()).skills || [];
+    // Vault support is a lazy chunk: the mapping and copy are only needed on
+    // the Tasks view, and a disabled vault must leave legacy skills untouched.
+    // A stale cached index can miss the chunk, so degrade to legacy skills
+    // rather than failing the whole Tasks view.
+    try {
+      const module = await import("./task_vault_skills.js");
+      vaultTaskSkillsModule = module;
+      const vault = await module.loadVaultTaskSkills();
+      state.vaultSkills = vault.skills;
+      state.vaultSkillsAvailable = vault.available;
+      state.vaultSkillsRuntimeRead = vault.runtimeRead;
+      state.vaultSkillsBoundProjects = vault.boundProjects;
+    } catch {
+      state.vaultSkills = [];
+      state.vaultSkillsAvailable = false;
+      state.vaultSkillsRuntimeRead = false;
+      state.vaultSkillsBoundProjects = [];
+    }
+  }));
   if (view === "tasks" || view === "mcp") jobs.push(loadMCPServers(force));
   if (view === "channels") {
     jobs.push(loadResource("channels", force, async () => {
@@ -5807,7 +5854,7 @@ function taskDetailView(detail: TaskDetail): string {
       ${chat}
       ${renderTaskToolPanel(state.taskTool, detail, state.selectedTaskAgent, taskCtxHtml(), state.taskToolMode, taskChannelPanelHTML(), state.taskToolPinned === state.taskTool, taskPermissionPanelHtml(detail), taskMailPanelHTML(detail))}
     </div>
-    ${renderAgentConfigDialog(detail, state.selectedTaskAgent, state.models, state.codexAccounts, state.skills, state.mcpServers)}${taskTakeoverDialog(detail)}<div id="task-screen-dialogs">${completed ? reopenTaskDialog(detail) : ""}</div>
+    ${renderAgentConfigDialog(detail, state.selectedTaskAgent, state.models, state.codexAccounts, availableTaskSkills(detail.task.project_id, detail.task.skill_ids || []), state.mcpServers)}${taskTakeoverDialog(detail)}<div id="task-screen-dialogs">${completed ? reopenTaskDialog(detail) : ""}</div>
   </section>`);
 }
 
