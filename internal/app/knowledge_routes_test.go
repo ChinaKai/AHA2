@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -283,6 +285,118 @@ func TestLegacyProposalCannotBeApprovedAfterVaultBecomesReadSource(t *testing.T)
 	if _, err := database.Knowledge(ctx, proposal.EntryID); err == nil {
 		t.Fatal("legacy proposal approval wrote a hidden legacy entry")
 	}
+}
+
+func vaultFeedbackFixture(t *testing.T) (*Service, *store.Store, *knowledgevault.Manager, domain.Project, domain.KnowledgeEntry, domain.KnowledgeEntry, domain.KnowledgeEntry) {
+	t.Helper()
+	withUnsetEnv(t, knowledgeVaultReadProjectsEnv)
+	fixture := newPetTaskFixture(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	project := domain.Project{
+		ID: "project_feedback_route", Name: "Feedback Route", ProjectType: "folder",
+		KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now,
+	}
+	if err := fixture.database.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	projectRoot, err := fixture.database.EnsureKnowledgeRoot(ctx, "project", project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	globalRoot, err := fixture.database.EnsureKnowledgeRoot(ctx, "global", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := func(id, scope, projectID, parentID, title string) domain.KnowledgeEntry {
+		item := domain.KnowledgeEntry{
+			ID: id, Scope: scope, ProjectID: projectID, ParentID: parentID,
+			Slug: strings.ReplaceAll(id, "_", "-"),
+			Type: "practice", Title: title, Body: "旧库反馈测试正文。", Status: domain.KnowledgeVerified,
+			Revision: 1, CreatedAt: now, UpdatedAt: now,
+		}
+		if err := fixture.database.CreateKnowledge(ctx, item); err != nil {
+			t.Fatal(err)
+		}
+		created, err := fixture.database.Knowledge(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return created
+	}
+	projectEntry := entry("knowledge_feedback_project", "project", project.ID, projectRoot.ID, "旧库项目反馈行")
+	globalEntry := entry("knowledge_feedback_global", "global", "", globalRoot.ID, "旧库全局反馈行")
+	legacyOnlyGlobal := entry("knowledge_feedback_legacy_only", "global", "", globalRoot.ID, "仅旧库全局反馈行")
+
+	manager := buildVaultReadManager(t, true, map[string]string{
+		"projects/feedback-route/index.md":    "---\nid: " + projectRoot.ID + "\ntitle: Feedback Route\nscope: project\nproject_id: " + project.ID + "\ntype: navigation\nstatus: verified\nis_index: true\n---\n项目入口。\n",
+		"projects/feedback-route/feedback.md": "---\nid: " + projectEntry.ID + "\ntitle: " + projectEntry.Title + "\nscope: project\nproject_id: " + project.ID + "\ntype: practice\nstatus: verified\nrevision: 1\n---\n旧库反馈测试正文。\n",
+		"global/index.md":                     "---\nid: " + globalRoot.ID + "\ntitle: 全局首页\nscope: global\ntype: navigation\nstatus: verified\nis_index: true\n---\n全局入口。\n",
+		"global/general/feedback.md":          "---\nid: " + globalEntry.ID + "\ntitle: " + globalEntry.Title + "\nscope: global\ntype: practice\nstatus: verified\nrevision: 1\n---\n旧库反馈测试正文。\n",
+	})
+	service := fixture.service
+	service.knowledgeVault = manager
+	service.knowledgeVaultRuntimeRead = true
+	service.knowledgeVaultRuntimeWrite = true
+	return service, fixture.database, manager, project, projectEntry, globalEntry, legacyOnlyGlobal
+}
+
+func TestWebKnowledgeFeedbackFollowsVaultAndNeverUpdatesLegacy(t *testing.T) {
+	service, database, manager, _, projectEntry, globalEntry, legacyOnlyGlobal := vaultFeedbackFixture(t)
+	ctx := context.Background()
+	before := map[string]domain.KnowledgeEntry{
+		projectEntry.ID: projectEntry, globalEntry.ID: globalEntry, legacyOnlyGlobal.ID: legacyOnlyGlobal,
+	}
+	assertLegacyUnchanged := func(t *testing.T, id string) {
+		t.Helper()
+		original := before[id]
+		after, err := database.Knowledge(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if after.FeedbackState != original.FeedbackState || after.HelpedCount != original.HelpedCount ||
+			after.StaleCount != original.StaleCount || !after.UpdatedAt.Equal(original.UpdatedAt) {
+			t.Fatalf("legacy row %s changed: before=%#v after=%#v", id, original, after)
+		}
+	}
+
+	result, err := service.FeedbackWebKnowledge(ctx, projectEntry.ID, "stale")
+	if err != nil || result.Source != "vault" || result.Entry.Status != domain.KnowledgeStale || result.Entry.FeedbackState != "stale" {
+		t.Fatalf("project feedback result=%#v err=%v", result, err)
+	}
+	assertLegacyUnchanged(t, projectEntry.ID)
+	path := filepath.Join(manager.Config().VaultPath, "projects", "feedback-route", "feedback.md")
+	if raw, err := os.ReadFile(path); err != nil || !strings.Contains(string(raw), "status: stale") {
+		t.Fatalf("vault file was not marked stale: %q err=%v", raw, err)
+	}
+
+	result, err = service.FeedbackWebKnowledge(ctx, globalEntry.ID, "helped")
+	if err != nil || result.Source != "vault" {
+		t.Fatalf("global feedback result=%#v err=%v", result, err)
+	}
+	assertLegacyUnchanged(t, globalEntry.ID)
+
+	if _, err := service.FeedbackWebKnowledge(ctx, legacyOnlyGlobal.ID, "helped"); !errors.Is(err, ErrKnowledgeReadSourceMismatch) {
+		t.Fatalf("legacy-only global feedback error=%v, want a read-source mismatch", err)
+	}
+	assertLegacyUnchanged(t, legacyOnlyGlobal.ID)
+
+	service.SetKnowledgeVaultRuntimeWrite(false)
+	var writeErr *knowledgevault.WriteError
+	if _, err := service.FeedbackWebKnowledge(ctx, projectEntry.ID, "helped"); !errors.As(err, &writeErr) || writeErr.Code != knowledgevault.WriteErrorDisabled {
+		t.Fatalf("write-gate-off feedback error=%v", err)
+	}
+	assertLegacyUnchanged(t, projectEntry.ID)
+	service.SetKnowledgeVaultRuntimeWrite(true)
+
+	// An unbound project reads the legacy tables, but global knowledge still
+	// reads the vault: global feedback must keep going to the vault.
+	t.Setenv(knowledgeVaultReadProjectsEnv, "project_elsewhere")
+	result, err = service.FeedbackWebKnowledge(ctx, globalEntry.ID, "helped")
+	if err != nil || result.Source != "vault" {
+		t.Fatalf("unbound global feedback result=%#v err=%v", result, err)
+	}
+	assertLegacyUnchanged(t, globalEntry.ID)
 }
 
 func TestPetGlobalKnowledgeWritesVault(t *testing.T) {

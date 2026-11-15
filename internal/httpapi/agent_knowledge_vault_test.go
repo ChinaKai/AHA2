@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -232,4 +233,166 @@ func TestAgentKnowledgeVaultWriteAPI(t *testing.T) {
 	if response.StatusCode != http.StatusTooManyRequests || payload["error"] != "knowledge_write_budget_exceeded" {
 		t.Fatalf("legacy budget status=%d payload=%#v", response.StatusCode, payload)
 	}
+}
+
+// TestAgentKnowledgeFeedbackFollowsReadSourceAndNeverWritesLegacy covers the
+// audit finding: both feedback endpoints wrote the legacy tables even while the
+// Project read the vault. Feedback must be routed by the entry ID, and a global
+// entry stays vault-backed even when the Project itself is unbound.
+func TestAgentKnowledgeFeedbackFollowsReadSourceAndNeverWritesLegacy(t *testing.T) {
+	ctx := context.Background()
+	databasePath := filepath.Join(t.TempDir(), "aha2.db")
+	database, err := store.Open(ctx, databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	task := createHardwareAPITask(t, database)
+	now := time.Now().UTC()
+
+	projectRoot, err := database.EnsureKnowledgeRoot(ctx, "project", task.ProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	globalRoot, err := database.EnsureKnowledgeRoot(ctx, "global", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	create := func(id, scope, projectID, parentID, title string) domain.KnowledgeEntry {
+		item := domain.KnowledgeEntry{
+			ID: id, Scope: scope, ProjectID: projectID, ParentID: parentID,
+			Slug: "feedback-" + strings.ReplaceAll(id[len("knowledge_feedback_"):], "_", "-"), Type: "practice", Title: title,
+			Body: "旧库反馈路由测试正文。", Status: domain.KnowledgeVerified, Revision: 1,
+			CreatedAt: now, UpdatedAt: now,
+		}
+		if err := database.CreateKnowledge(ctx, item); err != nil {
+			t.Fatal(err)
+		}
+		stored, err := database.Knowledge(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return stored
+	}
+	projectEntry := create("knowledge_feedback_http_project", "project", task.ProjectID, projectRoot.ID, "旧库 HTTP 项目反馈行")
+	globalEntry := create("knowledge_feedback_http_global", "global", "", globalRoot.ID, "旧库 HTTP 全局反馈行")
+
+	executor := &blockingAgentAPIExecutor{started: make(chan app.ExecutionRequest, 4), release: make(chan struct{}), done: make(chan struct{})}
+	service := app.NewService(database, nil, executor)
+	turn, err := service.SubmitMessage(ctx, task.ID, "exercise feedback routing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-executor.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("turn did not start")
+	}
+
+	vaultConfig := knowledgevault.DefaultConfig(t.TempDir())
+	if _, err := knowledgevault.Export(ctx, vaultConfig, databasePath, knowledgevault.ExportOptions{Commit: false}); err != nil {
+		t.Fatal(err)
+	}
+	index, err := knowledgevault.OpenIndex(ctx, vaultConfig.IndexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := index.Rebuild(ctx, vaultConfig.VaultPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := index.Close(); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := knowledgevault.NewManager(vaultConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	if err := manager.SetEnabled(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{projectEntry.ID, globalEntry.ID} {
+		if err := manager.WithReader(func(reader *knowledgevault.Reader) error {
+			found, lookupErr := reader.EntryByID(ctx, id)
+			if lookupErr != nil || found.ID != id {
+				t.Fatalf("exported vault is missing %s: found=%#v err=%v", id, found, lookupErr)
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Setenv("AHA2_KNOWLEDGE_VAULT_READ_PROJECTS", task.ProjectID)
+	service.SetKnowledgeVault(manager, true)
+	service.SetKnowledgeVaultRuntimeWrite(true)
+
+	capabilities := agentapi.NewCapabilities()
+	token, err := capabilities.Issue(task.ID, "main", turn.ID, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(New(Config{
+		Store: database, App: service, AgentCapabilities: capabilities, KnowledgeVault: manager,
+	}).Handler())
+	defer server.Close()
+
+	assertLegacyUnchanged := func(id string, before domain.KnowledgeEntry) {
+		t.Helper()
+		after, err := database.Knowledge(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if after.FeedbackState != before.FeedbackState || after.HelpedCount != before.HelpedCount ||
+			after.StaleCount != before.StaleCount || !after.UpdatedAt.Equal(before.UpdatedAt) {
+			t.Fatalf("legacy row %s changed: before=%#v after=%#v", id, before, after)
+		}
+	}
+
+	// The retired endpoint must follow the read source instead of writing the
+	// legacy row whose ID it was given.
+	var payload map[string]any
+	response := agentRequest(t, server.URL+"/api/v1/agent/knowledge/"+projectEntry.ID+"/feedback", http.MethodPost, token, map[string]any{"kind": "stale"})
+	decodeResponse(t, response, &payload)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("legacy feedback endpoint status=%d payload=%#v", response.StatusCode, payload)
+	}
+	if knowledge, _ := payload["knowledge"].(map[string]any); knowledge["status"] != "stale" {
+		t.Fatalf("legacy feedback endpoint did not update the vault: %#v", payload)
+	}
+	assertLegacyUnchanged(projectEntry.ID, projectEntry)
+
+	// The new endpoint writes the global vault entry while the Project is bound.
+	response = agentRequest(t, server.URL+"/api/v1/agent/knowledge/feedback", http.MethodPost, token, map[string]any{
+		"entry_id": globalEntry.ID, "kind": "helped",
+	})
+	decodeResponse(t, response, &payload)
+	if response.StatusCode != http.StatusOK || payload["source"] != "vault" {
+		t.Fatalf("global feedback status=%d payload=%#v", response.StatusCode, payload)
+	}
+	assertLegacyUnchanged(globalEntry.ID, globalEntry)
+
+	// A Project that is no longer bound still reads global knowledge from the
+	// vault; global feedback must not fall back to the legacy row.
+	t.Setenv("AHA2_KNOWLEDGE_VAULT_READ_PROJECTS", "project-unbound-elsewhere")
+	response = agentRequest(t, server.URL+"/api/v1/agent/knowledge/feedback", http.MethodPost, token, map[string]any{
+		"entry_id": globalEntry.ID, "kind": "helped",
+	})
+	decodeResponse(t, response, &payload)
+	if response.StatusCode != http.StatusOK || payload["source"] != "vault" {
+		t.Fatalf("unbound global feedback status=%d payload=%#v", response.StatusCode, payload)
+	}
+	assertLegacyUnchanged(globalEntry.ID, globalEntry)
+
+	// With the write gate off the request is refused explicitly; it never falls
+	// back to the legacy tables.
+	service.SetKnowledgeVaultRuntimeWrite(false)
+	response = agentRequest(t, server.URL+"/api/v1/agent/knowledge/feedback", http.MethodPost, token, map[string]any{
+		"entry_id": globalEntry.ID, "kind": "helped",
+	})
+	decodeResponse(t, response, &payload)
+	if response.StatusCode != http.StatusConflict || payload["error"] != "knowledge_vault_write_disabled" {
+		t.Fatalf("write-gate-off feedback status=%d payload=%#v", response.StatusCode, payload)
+	}
+	assertLegacyUnchanged(globalEntry.ID, globalEntry)
 }

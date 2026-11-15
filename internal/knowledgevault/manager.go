@@ -89,6 +89,14 @@ func (m *Manager) ensureGuide() {
 	if _, err := EnsureGuide(m.config.VaultPath, time.Now().UTC()); err != nil {
 		log.Printf("ensure knowledge guide for %s: %v", m.config.VaultPath, err)
 	}
+	// The guide is hand-editable and survives upgrades, so a vault created by an
+	// older release can still name the retired Agent endpoints. Repair only the
+	// endpoint strings; the owner's prose stays untouched.
+	if changed, err := RepairGuideEndpoints(m.config.VaultPath); err != nil {
+		log.Printf("repair knowledge guide endpoints for %s: %v", m.config.VaultPath, err)
+	} else if changed {
+		log.Printf("updated retired Agent endpoints in knowledge guide %s", m.config.VaultPath)
+	}
 }
 
 func (m *Manager) Enabled() bool {
