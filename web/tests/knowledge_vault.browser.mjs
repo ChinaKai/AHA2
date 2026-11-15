@@ -1,8 +1,8 @@
 // Tree verification for the read-only knowledge vault. Drives the real bundle
-// against a fixture API and covers: four entries, one real directory tree rooted
-// at global/projects, tree links, editor URIs, search scopes/deep links,
-// recent/inbox/skills, mobile two-level navigation, overflow, axe, and the
-// switch-off legacy page.
+// against a fixture API and covers: the two top tabs plus the fixed activity
+// entry, one real directory tree rooted at global/projects, tree links, editor
+// URIs, search scopes/deep links, activity recent/inbox/skills, mobile
+// two-level navigation, overflow, axe, and the switch-off legacy page.
 import assert from "node:assert/strict";
 import {createServer} from "node:http";
 import {readFile, mkdir} from "node:fs/promises";
@@ -371,12 +371,42 @@ try {
   await page.evaluate(() => document.querySelector("[data-view=knowledge]")?.click());
   await page.waitForSelector(".knowledge-vault .kv-tab", {timeout: 15000});
 
-  // Four top-level entries, no old tabs/proposals.
+  // Only knowledge and skills remain at the top level; recent and the inbox
+  // moved into the activity page.
   const tabs = await page.locator(".kv-tabs .kv-tab").allTextContents();
-  assert.deepEqual(tabs.map(text => text.trim()), ["知识", "最近", "待整理", "技能"]);
-  assert.equal(await page.locator(".kv-tabs .kv-tab").count(), 4);
+  assert.deepEqual(tabs.map(text => text.trim()), ["知识", "技能"]);
+  assert.equal(await page.locator(".kv-tabs .kv-tab").count(), 2);
+  assert.equal(await page.locator('[data-kv-tab-button="recent"], [data-kv-tab-button="inbox"]').count(), 0, "recent/inbox tabs are gone");
   assert.equal(await page.locator("[data-knowledge-scope]").count(), 0, "old knowledge tabs are gone");
   assert.equal(await page.locator("text=待审提案").count(), 0);
+
+  // Entering the knowledge base selects the fixed activity entry and shows a
+  // real page, not the old blank "select a document" pane.
+  await page.waitForSelector(".kv-activity");
+  assert.equal((await page.locator("#kv-activity-title").textContent()).trim(), "动态与更新");
+  assert.equal(await page.locator("[data-kv-activity]").getAttribute("aria-current"), "page");
+  assert.equal(await page.locator("[data-kv-activity]").evaluate(element => element.classList.contains("selected")), true);
+  assert.deepEqual(await page.locator(".kv-activity-block-head h2").allTextContents().then(items => items.map(item => item.trim())), ["最近更新", "待整理"]);
+  assert.equal(await page.locator("text=从左侧选择文档").count(), 0, "the default page is not the empty reader");
+  await page.waitForSelector(".kv-feed-day");
+  assert.match(await page.locator(".kv-feed").innerText(), /构建指南[\s\S]*Demo[\s\S]*全局指南[\s\S]*全局知识/);
+  await page.waitForSelector(".kv-inbox-group");
+  assert.match(await page.locator(".kv-inbox").innerText(), /2 条待整理[\s\S]*全局知识[\s\S]*1 条[\s\S]*global\/inbox\/idea\.md[\s\S]*Demo[\s\S]*1 条[\s\S]*projects\/p1\/inbox\/idea\.md/);
+
+  // Both blocks open the referenced document, and back returns to the activity
+  // page with its entry still selected.
+  await page.locator('.kv-feed [data-kv-doc="doc-1"]').click();
+  await page.waitForSelector(".kv-doc-body");
+  assert.equal((await page.locator(".kv-doc-head h1").textContent()).trim(), "构建指南");
+  await page.locator("[data-kv-back]").click();
+  await page.waitForSelector(".kv-activity");
+  assert.equal(await page.locator("[data-kv-activity]").getAttribute("aria-current"), "page");
+  await page.locator('.kv-inbox-group [data-kv-doc="inbox-1"]').click();
+  await page.waitForSelector(".kv-doc-body");
+  assert.equal((await page.locator(".kv-doc-head h1").textContent()).trim(), "新想法");
+  await page.locator("[data-kv-back]").click();
+  await page.waitForSelector(".kv-activity");
+  await page.waitForSelector('[data-kv-toggle="g-index"]');
 
   // The topbar keeps heading + tabs on one line and centers the controls with
   // them at 1280. Mid widths move the whole controls group below the tab row
@@ -408,8 +438,8 @@ try {
 
   let layout = await topbarLayout(page);
   assert.ok(layout.overflow <= 1, "1280px has no horizontal overflow");
-  assert.equal(layout.tabCount, 4);
-  assert.ok(layout.tabTopSpread < 1, "1280px keeps all four tabs on one row");
+  assert.equal(layout.tabCount, 2);
+  assert.ok(layout.tabTopSpread < 1, "1280px keeps both tabs on one row");
   assert.ok(layout.controls.top < layout.tabBottom, "1280px keeps the controls on the tab row");
   assert.ok(Math.abs(layout.main.centerY - layout.controls.centerY) < 8, "1280px centers controls with the tabs");
   assert.ok(Math.abs(layout.controls.right - layout.topbarRight) < 3, "1280px right-aligns the controls");
@@ -419,12 +449,18 @@ try {
     await page.waitForTimeout(60);
     layout = await topbarLayout(page);
     assert.ok(layout.overflow <= 1, `${width}px has no horizontal overflow`);
-    assert.ok(layout.tabTopSpread < 1, `${width}px keeps all four tabs on one row`);
+    assert.ok(layout.tabTopSpread < 1, `${width}px keeps both tabs on one row`);
     assert.ok(layout.controls.top >= layout.tabBottom - 1, `${width}px wraps the controls below the tabs as a group`);
     assert.ok(Math.abs(layout.controls.right - layout.topbarRight) < 3, `${width}px keeps the controls right-aligned`);
   }
   await page.setViewportSize({width: 1280, height: 900});
   await page.waitForTimeout(60);
+
+  // Reload so the directory checks start from the default state: the activity
+  // page selected and every folder collapsed. Opening a document above expands
+  // its ancestor path and that expansion is deliberately kept when returning.
+  await page.goto(url, {waitUntil: "networkidle"});
+  await page.waitForSelector(".kv-activity");
 
   // The topbar has no library/project scope dropdowns any more: the tree itself
   // navigates the real vault directories, rooted at global/ and projects/.
@@ -438,13 +474,15 @@ try {
   assert.match(treeText, /global/);
   assert.match(treeText, /projects/);
   // Inbox paths may still arrive in the API tree, but the browse tree hides
-  // them; they belong to the "待整理" page only.
+  // them; they belong to the activity page's 待整理 block only.
   assert.equal(await page.locator('.kv-tree-title', {hasText: "inbox"}).count(), 0, "the tree has no inbox folder");
   assert.equal(await page.locator('.kv-tree-title', {hasText: "收件箱"}).count(), 0, "the tree hides inbox folder titles");
   assert.equal(await page.locator('[data-kv-toggle="g-inbox"]').count(), 0);
   assert.equal(await page.locator('[data-kv-toggle="p-inbox"]').count(), 0);
-  assert.equal(await page.locator('a[data-kv-doc="inbox-1"]').count(), 0);
-  assert.equal(await page.locator('a[data-kv-doc="g-inbox-doc"]').count(), 0);
+  // Inbox documents live on the activity page now, so these checks are scoped
+  // to the tree rather than the whole document.
+  assert.equal(await page.locator('nav.kv-tree-panel a[data-kv-doc="inbox-1"]').count(), 0);
+  assert.equal(await page.locator('nav.kv-tree-panel a[data-kv-doc="g-inbox-doc"]').count(), 0);
   assert.doesNotMatch(treeText, /全局想法|新想法/, "inbox documents never appear in the tree");
   assert.equal(await page.locator('[data-kv-open-index]').count(), 0, "directory pages open from the title, not a separate button");
   assert.equal(await page.locator('[data-kv-title-open="g-index"]').count(), 1, "the global root title opens its index");
@@ -458,25 +496,25 @@ try {
   assert.equal(await page.locator('[data-kv-toggle="p-index"]').count(), 0, "collapsed project children are not rendered");
   await page.locator('[data-kv-toggle="g-index"]').click();
   assert.equal(await page.locator('[data-kv-toggle="g-inbox"]').count(), 0, "expanded global still has no inbox folder");
-  assert.equal(await page.locator('a[data-kv-doc="g-inbox-doc"]').count(), 0);
+  assert.equal(await page.locator('nav.kv-tree-panel a[data-kv-doc="g-inbox-doc"]').count(), 0);
   assert.equal(await page.locator('[data-kv-toggle="g-index"]').getAttribute("aria-expanded"), "true");
   assert.equal(await page.locator('[data-kv-toggle="g-folder"]').getAttribute("aria-expanded"), "false");
   assert.equal(await page.locator('[data-kv-toggle="g-other"]').getAttribute("aria-expanded"), "false");
-  assert.equal(await page.locator('a[data-kv-doc="g-doc"]').count(), 0, "collapsed folder children are not rendered");
-  assert.equal(await page.locator('a[data-kv-doc="g-deep"]').count(), 0);
+  assert.equal(await page.locator('nav.kv-tree-panel a[data-kv-doc="g-doc"]').count(), 0, "collapsed folder children are not rendered");
+  assert.equal(await page.locator('nav.kv-tree-panel a[data-kv-doc="g-deep"]').count(), 0);
   await page.locator('[data-kv-toggle="g-folder"]').click();
   assert.equal(await page.locator('[data-kv-toggle="g-folder"]').getAttribute("aria-expanded"), "true");
   assert.ok(await page.locator('a.kv-tree-link[href="#knowledge?doc=g-doc&scope=global"]').count() >= 1);
   assert.equal(await page.locator('[data-kv-toggle="g-sub"]').getAttribute("aria-expanded"), "false");
-  assert.equal(await page.locator('a[data-kv-doc="g-deep"]').count(), 0, "nested folders start collapsed too");
+  assert.equal(await page.locator('nav.kv-tree-panel a[data-kv-doc="g-deep"]').count(), 0, "nested folders start collapsed too");
   // The toggle keeps keyboard operation: Enter collapses and expands.
   await page.locator('[data-kv-toggle="g-folder"]').focus();
   await page.keyboard.press("Enter");
   assert.equal(await page.locator('[data-kv-toggle="g-folder"]').getAttribute("aria-expanded"), "false");
-  assert.equal(await page.locator('a[data-kv-doc="g-doc"]').count(), 0);
+  assert.equal(await page.locator('nav.kv-tree-panel a[data-kv-doc="g-doc"]').count(), 0);
   await page.keyboard.press("Enter");
   assert.equal(await page.locator('[data-kv-toggle="g-folder"]').getAttribute("aria-expanded"), "true");
-  assert.equal(await page.locator('a[data-kv-doc="g-doc"]').count(), 1);
+  assert.equal(await page.locator('nav.kv-tree-panel a[data-kv-doc="g-doc"]').count(), 1);
 
   // Directory rows lead with a chevron that only toggles, followed by a folder
 // icon and a title that opens the index. Document rows use a document icon.
@@ -542,17 +580,17 @@ try {
   // Same-depth folder names and document titles share one computed left edge;
   // the indentation step is exactly 12px per level.
   await page.locator('[data-kv-toggle="g-sub"]').click();
-  await page.waitForSelector('a[data-kv-doc="g-deep"]');
+  await page.waitForSelector('nav.kv-tree-panel a[data-kv-doc="g-deep"]');
   const titleLeft = async selector => page.locator(`${selector} .kv-tree-title`).first().evaluate(element => element.getBoundingClientRect().left);
   const depth2Folder = await titleLeft('[data-kv-folder-title="g-sub"]');
-  const depth2Doc = await titleLeft('a[data-kv-doc="g-doc"]');
+  const depth2Doc = await titleLeft('nav.kv-tree-panel a[data-kv-doc="g-doc"]');
   const depth3Folder = await titleLeft('[data-kv-folder-title="g-level3"]');
-  const depth3Doc = await titleLeft('a[data-kv-doc="g-deep"]');
+  const depth3Doc = await titleLeft('nav.kv-tree-panel a[data-kv-doc="g-deep"]');
   assert.ok(Math.abs(depth2Folder - depth2Doc) <= 1, `depth 2 titles align: ${depth2Folder} vs ${depth2Doc}`);
   assert.ok(Math.abs(depth3Folder - depth3Doc) <= 1, `depth 3 titles align: ${depth3Folder} vs ${depth3Doc}`);
   assert.ok(Math.abs((depth3Doc - depth2Doc) - 12) <= 1, `one level adds 12px: ${depth2Doc} vs ${depth3Doc}`);
-  assert.equal(await page.locator('a[data-kv-doc="g-doc"]').evaluate(element => element.closest("li").getAttribute("style")), "--kv-depth:2");
-  assert.equal(await page.locator('a[data-kv-doc="g-deep"]').evaluate(element => element.closest("li").getAttribute("style")), "--kv-depth:3");
+  assert.equal(await page.locator('nav.kv-tree-panel a[data-kv-doc="g-doc"]').evaluate(element => element.closest("li").getAttribute("style")), "--kv-depth:2");
+  assert.equal(await page.locator('nav.kv-tree-panel a[data-kv-doc="g-deep"]').evaluate(element => element.closest("li").getAttribute("style")), "--kv-depth:3");
 
   // Sidebar geometry: 270px by default, drag bounds, keyboard, double-click
   // reset, refresh persistence, and a collapsible rail that also persists.
@@ -716,12 +754,12 @@ try {
   await page.locator('[data-kv-toggle="p-index"]').click();
   await page.waitForSelector('[data-kv-toggle="p-guides"]');
   assert.equal(await page.locator('[data-kv-toggle="p-inbox"]').count(), 0, "an expanded project still has no inbox folder");
-  assert.equal(await page.locator('a[data-kv-doc="inbox-1"]').count(), 0, "project inbox documents never appear in the tree");
+  assert.equal(await page.locator('nav.kv-tree-panel a[data-kv-doc="inbox-1"]').count(), 0, "project inbox documents never appear in the tree");
   assert.equal(await page.locator('[data-kv-toggle="p-guides"]').getAttribute("aria-expanded"), "false");
   await page.locator('[data-kv-toggle="p-guides"]').click();
-  await page.waitForSelector('a[data-kv-doc="doc-1"]');
+  await page.waitForSelector('nav.kv-tree-panel a[data-kv-doc="doc-1"]');
   assert.match(await page.locator(".kv-tree-panel").innerText(), /项目文档 2/);
-  assert.equal(await page.locator('a[data-kv-doc="g-doc"]').count(), 1, "the global scope stays browsable in the same tree");
+  assert.equal(await page.locator('nav.kv-tree-panel a[data-kv-doc="g-doc"]').count(), 1, "the global scope stays browsable in the same tree");
   const treeRequests = await page.evaluate(() => window.__vaultTreeRequests);
   assert.deepEqual([...new Set(treeRequests)], ["all"], "one all-library tree request powers both scopes");
 
@@ -859,15 +897,17 @@ try {
   assert.equal(await page.locator('[data-kv-toggle="p-index"]').getAttribute("aria-expanded"), "true");
   assert.equal(await page.locator('[data-kv-toggle="p-guides"]').getAttribute("aria-expanded"), "true");
   assert.equal(await page.locator('[data-kv-toggle="g-other"]').getAttribute("aria-expanded"), "false", "sibling directories stay collapsed");
-  // Recent, inbox (read-only) and skills default to all libraries and keep
-  // project/path context on every row.
-  await page.locator('[data-kv-tab-button="recent"]').click();
+  // The activity entry returns from a document and refreshes both all-library
+  // feeds; every row keeps its project/path context. The inbox is read-only.
+  await page.locator("[data-kv-activity]").click();
+  await page.waitForSelector(".kv-activity");
+  assert.equal(await page.locator("[data-kv-activity]").getAttribute("aria-current"), "page");
   await page.waitForSelector(".kv-feed-day");
   assert.match(await page.locator(".kv-feed").innerText(), /构建指南[\s\S]*Demo[\s\S]*全局指南[\s\S]*全局知识/);
-  await page.locator('[data-kv-tab-button="inbox"]').click();
   await page.waitForSelector(".kv-inbox");
-  assert.match(await page.locator(".kv-inbox").innerText(), /2 条待整理[\s\S]*projects\/p1\/inbox\/idea\.md[\s\S]*global\/inbox\/idea\.md/);
+  assert.match(await page.locator(".kv-inbox").innerText(), /2 条待整理[\s\S]*全局知识[\s\S]*1 条[\s\S]*global\/inbox\/idea\.md[\s\S]*Demo[\s\S]*1 条[\s\S]*projects\/p1\/inbox\/idea\.md/);
   assert.equal(await page.locator(".kv-inbox [data-kv-move], .kv-inbox [data-kv-edit]").count(), 0);
+  assert.equal(await page.locator(".kv-context-panel").count(), 0, "the activity page has no empty context column");
   await page.locator('.kv-tabs [data-kv-tab-button="skills"]').click();
   await page.waitForSelector(".kv-skill-card");
   assert.match(await page.locator(".kv-skill-card").first().innerText(), /Demo Skill[\s\S]*构建技能[\s\S]*3 个文件/);
@@ -998,7 +1038,7 @@ try {
   await expandProjectTree(page);
   const deepLinkHistory = await page.evaluate(() => history.length);
   await page.evaluate(() => { window.__deepLinkMarker = "alive"; });
-  await page.locator('a[data-kv-doc="doc-1"]').click();
+  await page.locator('nav.kv-tree-panel a[data-kv-doc="doc-1"]').click();
   await page.waitForSelector(".kv-doc-body");
   await page.waitForFunction(() => location.hash.startsWith("#knowledge?doc=doc-1"));
   assert.equal(await page.evaluate(() => window.__deepLinkMarker), "alive", "opening a document is an in-page update, not a reload");
@@ -1014,7 +1054,7 @@ try {
   await page.evaluate(() => document.querySelector("[data-view=knowledge]")?.click());
   await page.waitForSelector(".kv-tree-link", {timeout: 15000});
   await expandProjectTree(page);
-  await page.locator('a[data-kv-doc="doc-1"]').click();
+  await page.locator('nav.kv-tree-panel a[data-kv-doc="doc-1"]').click();
   await page.waitForSelector(".kv-doc-body");
   await page.waitForFunction(() => location.hash.startsWith("#knowledge?doc=doc-1"));
   await page.evaluate(() => document.querySelector("[data-view=advanced]")?.click());
@@ -1204,8 +1244,8 @@ try {
   // button keeps the same contract.
   await page.keyboard.press("Escape");
   await page.waitForFunction(() => document.querySelector("#kv-settings-dialog")?.open === false);
-  await page.locator('.kv-tabs [data-kv-tab-button="recent"]').click();
-  await page.waitForSelector('.knowledge-vault[data-kv-tab="recent"]');
+  await page.locator("[data-kv-activity]").click();
+  await page.waitForSelector('.knowledge-vault[data-kv-tab="knowledge"] .kv-activity');
   assert.equal(await page.locator("#kv-settings-dialog").evaluate(dialog => dialog.open), false, "ESC close survives the next render");
   await page.locator(".kv-settings-trigger").click();
   await page.waitForSelector("#kv-settings-dialog[open]");
@@ -1227,7 +1267,7 @@ try {
   assert.equal(await page.locator(".kv-doc-panel").isVisible(), false);
   layout = await topbarLayout(page);
   assert.ok(layout.overflow <= 1, "390px has no horizontal overflow");
-  assert.ok(layout.tabTopSpread < 1, "390px keeps the four tabs on one row");
+  assert.ok(layout.tabTopSpread < 1, "390px keeps both tabs on one row");
   assert.equal(layout.skillsVisible, true, "390px shows the skills tab directly");
   assert.equal(layout.settingsVisible, true, "390px shows the settings gear directly");
   assert.equal(layout.moreCount, 0, "390px has no more trigger or menu");
@@ -1245,6 +1285,18 @@ try {
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), "390px skill cards keep three icons without overflowing");
   await page.locator('.kv-tabs [data-kv-tab-button="knowledge"]').click();
   await page.waitForSelector(".kv-tree-link");
+
+  // The activity entry works as a two-level page on a phone too: selecting it
+  // shows the activity page, and its back button returns to the directory.
+  await page.locator("[data-kv-activity]").click();
+  await page.waitForSelector(".kv-activity");
+  assert.equal(await page.locator(".kv-tree-panel").isVisible(), false);
+  assert.equal(await page.locator(".kv-doc-panel").isVisible(), true);
+  assert.equal(await page.locator("[data-kv-activity]").getAttribute("aria-current"), "page");
+  await page.locator("[data-kv-back-tree]").click();
+  await page.waitForTimeout(80);
+  assert.equal(await page.locator(".kv-tree-panel").isVisible(), true);
+  assert.equal(await page.locator(".kv-activity").isVisible(), false);
 
   // The gear opens the settings dialog without a menu detour. On a phone the
   // Git form stacks into one column and nothing overflows horizontally.
@@ -1285,13 +1337,13 @@ try {
   // The mobile tree also starts collapsed at the two scope roots; expand one
   // directory path to pick a document row.
   assert.equal(await page.locator('[data-kv-toggle="g-index"]').getAttribute("aria-expanded"), "false");
-  assert.equal(await page.locator('a[data-kv-doc="g-doc"]').count(), 0);
+  assert.equal(await page.locator('nav.kv-tree-panel a[data-kv-doc="g-doc"]').count(), 0);
   await expandGlobalTree(page);
 
   await page.evaluate(() => window.scrollTo(0, 360));
   await page.waitForTimeout(80);
   const before = await page.evaluate(() => window.scrollY);
-  await page.locator('a[data-kv-doc="g-doc"]').click();
+  await page.locator('nav.kv-tree-panel a[data-kv-doc="g-doc"]').click();
   await page.waitForSelector(".kv-doc-body");
   assert.equal(await page.locator(".kv-tree-panel").isVisible(), false);
   assert.equal(await page.locator(".kv-doc-panel").isVisible(), true);
@@ -1327,7 +1379,7 @@ try {
   await page.waitForTimeout(80);
   assert.ok((await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)), "360px has no horizontal overflow");
   layout = await topbarLayout(page);
-  assert.ok(layout.tabTopSpread < 1, "360px keeps the four tabs on one row");
+  assert.ok(layout.tabTopSpread < 1, "360px keeps both tabs on one row");
   assert.equal(layout.skillsVisible, true, "360px shows the skills tab directly");
   assert.equal(layout.settingsVisible, true, "360px shows the settings gear directly");
   assert.equal(layout.moreCount, 0, "360px has no more trigger or menu");
@@ -1367,7 +1419,7 @@ try {
   await page.waitForTimeout(80);
   layout = await topbarLayout(page);
   assert.ok(layout.overflow <= 1, "760px has no horizontal overflow");
-  assert.ok(layout.tabTopSpread < 1, "760px keeps the four tabs on one row");
+  assert.ok(layout.tabTopSpread < 1, "760px keeps both tabs on one row");
   assert.equal(layout.skillsVisible, true, "760px shows the skills tab directly");
   assert.equal(layout.settingsVisible, true, "760px shows the settings gear directly");
   assert.equal(layout.moreCount, 0, "760px has no more trigger or menu");
@@ -1388,7 +1440,7 @@ try {
   });
   await single.evaluate(() => document.querySelector("[data-view=knowledge]")?.click());
   await single.waitForSelector(".kv-tree-panel", {timeout: 15000});
-  await single.locator('[data-kv-tab-button="recent"]').click();
+  await single.locator('[data-kv-tab-button="skills"]').click();
   await single.locator('[data-kv-tab-button="knowledge"]').click();
   await single.waitForSelector('[data-kv-toggle="g-index"]', {timeout: 15000});
   assert.deepEqual((await single.evaluate(() => window.__vaultTreeRequests)), ["all"]);

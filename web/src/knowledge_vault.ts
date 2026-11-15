@@ -21,7 +21,7 @@ import type {
   KnowledgeVaultTree,
 } from "./types.js";
 
-type VaultTab = "knowledge" | "recent" | "inbox" | "skills";
+type VaultTab = "knowledge" | "skills";
 type MobilePane = "list" | "doc";
 type LoadState = "idle" | "loading" | "ready" | "error";
 type SearchScope = "all" | "project" | "directory";
@@ -79,6 +79,14 @@ const localText: Record<string, [zhCN: string, enUS: string]> = {
   "kv.sidebarCollapse": ["收起目录栏", "Collapse contents sidebar"],
   "kv.sidebarExpand": ["展开目录栏", "Expand contents sidebar"],
   "kv.resizeSidebar": ["调整目录栏宽度", "Resize contents sidebar"],
+  "kv.activityTitle": ["动态与更新", "Activity & updates"],
+  "kv.activitySubtitle": ["最近更新与待整理", "Recent updates and inbox"],
+  "kv.activityRecent": ["最近更新", "Recently updated"],
+  "kv.activityInbox": ["待整理", "Inbox"],
+  "kv.activityRecentCount": ["{count} 篇", "{count} documents"],
+  "kv.activityInboxGroupCount": ["{count} 条", "{count} items"],
+  "kv.activityBackToTree": ["返回目录", "Back to contents"],
+  "kv.docBackToActivity": ["返回动态", "Back to activity"],
 };
 
 function kt(key: string, values: Record<string, string | number> = {}): string {
@@ -180,6 +188,42 @@ body.kv-resizing { cursor: col-resize; user-select: none; }
 .kv-tree-title { padding-left: 6px; }
 .kv-tree-link { padding: 5px 6px; }
 .kv-tree-doc-link { padding-left: 0; }
+/* The activity entry is pinned above the real directory list, outside the
+   tree's folder/leaf model. It uses the same selected pill as tree rows. */
+.kv-tree-home { margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px solid var(--color-border-subtle); }
+.kv-activity-link { width: 100%; border: 0; background: transparent; font: inherit; text-align: left; cursor: pointer; }
+.kv-activity-link > .icon { flex: 0 0 15px; width: 15px; height: 15px; color: var(--color-text-muted); }
+.kv-activity-link.selected > .icon { color: var(--color-accent-ink); }
+.kv-activity-link .kv-count { margin-left: auto; }
+/* Documents now return to the activity page, so the back control is useful at
+   every width, not only in the phone list/doc split. */
+.kv-back { display: inline-flex; }
+.kv-activity { display: grid; gap: var(--space-6); max-width: 980px; min-width: 0; }
+/* The directory list is already on screen beside the activity page at wide
+   widths; this control only exists to leave the phone's reader pane. */
+.kv-activity-back { display: none; }
+.kv-activity-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); }
+.kv-activity-head h1 { margin: 0 0 4px; font-size: clamp(24px, 3vw, 34px); line-height: 1.2; overflow-wrap: anywhere; }
+.kv-activity-block { display: grid; gap: var(--space-3); min-width: 0; }
+/* The feed/inbox blocks are grid items inside the reader column. Without an
+   explicit zero minimum their longest unbreakable path becomes the column's
+   min-content width and pushes the page past the viewport at mid widths. */
+.kv-activity-block > *, .kv-feed, .kv-feed-day, .kv-inbox, .kv-inbox-group { min-width: 0; }
+/* These lists are grids sized by their items. An implicit auto track takes the
+   widest row's max-content width, so pin it to the available column instead. */
+.kv-feed-day ul, .kv-inbox-list { grid-template-columns: minmax(0, 1fr); }
+.kv-activity-block-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); padding-bottom: 8px; border-bottom: 1px solid var(--color-border-subtle); }
+.kv-activity-block-head h2 { margin: 0; font-size: var(--font-size-20); }
+.kv-activity-block-head small { color: var(--color-text-muted); font-size: var(--font-size-12); }
+.kv-inbox-total { margin: 0; color: var(--color-text-muted); font-size: var(--font-size-13); }
+.kv-inbox-group { display: grid; gap: 4px; margin-bottom: var(--space-4); }
+.kv-inbox-group-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.kv-inbox-group-head h3 { margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--font-size-13); }
+.kv-inbox-group-head .kv-chip { flex: 0 0 auto; }
+@media (min-width: 761px) {
+  .kv-workspace.kv-workspace-activity { grid-template-columns: var(--kv-tree-width) var(--kv-resizer-width) minmax(0, 1fr); }
+  .knowledge-vault[data-kv-sidebar-collapsed="true"] .kv-workspace.kv-workspace-activity { grid-template-columns: var(--kv-tree-width) minmax(0, 1fr); }
+}
 @media (max-width: 1180px) {
   .kv-workspace { grid-template-columns: var(--kv-tree-width) var(--kv-resizer-width) minmax(0, 1fr); }
 }
@@ -197,6 +241,8 @@ body.kv-resizing { cursor: col-resize; user-select: none; }
   .kv-tree-panel.collapsed .kv-panel-head { justify-content: space-between; padding: 2px 6px 8px; border-bottom: 1px solid var(--color-border-subtle); }
   .kv-tree-panel.collapsed .kv-panel-head span, .kv-tree-panel.collapsed .kv-panel-head small { display: inline; }
   .kv-tree-panel.collapsed .kv-tree-body { display: block; }
+  .kv-activity-head { flex-wrap: wrap; }
+  .kv-activity-back { display: inline-flex; order: -1; margin-bottom: 0; }
 }
 `;
 
@@ -285,6 +331,10 @@ interface VaultState {
   sidebarCollapsed: boolean;
 }
 
+// The activity page is a fixed first row in the tree, not a vault directory.
+// A sentinel in selectedID keeps it selectable without inventing a document id
+// that the doc API could accidentally resolve.
+const VAULT_ACTIVITY_ID = "__kv_activity__";
 const SIDEBAR_WIDTH_KEY = "aha2.knowledgeVault.sidebarWidth";
 const SIDEBAR_COLLAPSED_KEY = "aha2.knowledgeVault.sidebarCollapsed";
 const SIDEBAR_DEFAULT_WIDTH = 270;
@@ -356,7 +406,7 @@ function initialState(): VaultState {
     typeFilter: "", statusFilter: "", tagFilter: "",
     tree: [], treeState: "idle", treeError: "", treeKey: "", expanded: new Set(),
     recentKey: "", inboxKey: "",
-    selectedID: "", doc: null, docState: "idle", docError: "",
+    selectedID: VAULT_ACTIVITY_ID, doc: null, docState: "idle", docError: "",
     recent: [], recentState: "idle", recentError: "",
     inbox: null, inboxState: "idle", inboxError: "",
     skills: [], skillsState: "idle", skillsError: "",
@@ -841,25 +891,24 @@ export function renderKnowledgeVaultPage(_context: KnowledgeVaultContext): strin
     ${topbarHTML()}
     ${searchPanelHTML()}
     <div class="kv-content" data-kv-mobile-pane="${state.mobilePane}">
-      ${state.tab === "knowledge" ? knowledgeBodyHTML() : state.tab === "recent" ? recentBodyHTML() : state.tab === "inbox" ? inboxBodyHTML() : skillsBodyHTML()}
+      ${state.tab === "knowledge" ? knowledgeBodyHTML() : skillsBodyHTML()}
     </div>
     ${settingsDialogHTML()}
   </div>`;
 }
 
 function topbarHTML(): string {
+  // Recent and the inbox now live on the activity page, so the top level keeps
+  // only the two true sections: knowledge and skills.
   const tabs: Array<[VaultTab, string, string]> = [
     ["knowledge", "knowledge", "kv.tab.knowledge"],
-    ["recent", "clock", "kv.tab.recent"],
-    ["inbox", "mail", "kv.tab.inbox"],
     ["skills", "bot", "kv.tab.skills"],
   ];
-  const inboxCount = state.inbox?.count ?? 0;
   return `<header class="kv-topbar">
     <div class="kv-topbar-main">
       <div class="kv-heading"><strong>${t("kv.title")}</strong><small>${t("kv.subtitle")}</small></div>
       <nav class="kv-tabs" aria-label="${t("kv.sections")}">
-        ${tabs.map(([tab, glyph, key]) => `<button type="button" aria-current="${state.tab === tab ? "page" : "false"}" class="kv-tab kv-tab-${tab}" data-kv-tab-button="${tab}">${icon(glyph)}<span>${t(key)}</span>${tab === "inbox" && inboxCount > 0 ? `<span class="kv-count">${inboxCount}</span>` : ""}</button>`).join("")}
+        ${tabs.map(([tab, glyph, key]) => `<button type="button" aria-current="${state.tab === tab ? "page" : "false"}" class="kv-tab kv-tab-${tab}" data-kv-tab-button="${tab}">${icon(glyph)}<span>${t(key)}</span></button>`).join("")}
       </nav>
     </div>
     <div class="kv-controls">
@@ -904,9 +953,16 @@ function searchResultsHTML(): string {
   </div>`).join("");
 }
 
+function isActivitySelected(): boolean {
+  return state.selectedID === VAULT_ACTIVITY_ID;
+}
+
 function knowledgeBodyHTML(): string {
   const sidebarLabel = state.sidebarCollapsed ? kt("kv.sidebarExpand") : kt("kv.sidebarCollapse");
-  return `<div class="kv-workspace" data-kv-mobile-pane="${state.mobilePane}">
+  const activity = isActivitySelected();
+  // The activity page consumes the reader column only; keeping an empty
+  // context column beside it would leave a dead gutter at wide widths.
+  return `<div class="kv-workspace${activity ? " kv-workspace-activity" : ""}" data-kv-mobile-pane="${state.mobilePane}">
     <nav id="kv-tree-panel" class="kv-tree-panel${state.sidebarCollapsed ? " collapsed" : ""}" aria-label="${t("kv.tree")}">
       <div class="kv-panel-head">
         <button type="button" class="kv-sidebar-toggle icon-button" data-kv-sidebar-toggle aria-expanded="${!state.sidebarCollapsed}" aria-controls="kv-tree-panel" aria-label="${escapeVaultHTML(sidebarLabel)}" title="${escapeVaultHTML(sidebarLabel)}">${icon(state.sidebarCollapsed ? "chevron-right" : "chevron-left")}</button>
@@ -916,21 +972,36 @@ function knowledgeBodyHTML(): string {
       <div class="kv-tree-body">${treeBodyHTML()}</div>
     </nav>
     ${state.sidebarCollapsed ? "" : `<div class="kv-tree-resizer" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${escapeVaultHTML(kt("kv.resizeSidebar"))}" aria-valuemin="${SIDEBAR_MIN_WIDTH}" aria-valuemax="${sidebarMaximumWidth()}" aria-valuenow="${state.sidebarWidth}" data-kv-resizer></div>`}
-    <article class="kv-doc-panel">
-      ${docBodyHTML()}
+    <article class="kv-doc-panel${activity ? " kv-activity-panel" : ""}">
+      ${activity ? activityBodyHTML() : docBodyHTML()}
     </article>
-    <aside class="kv-context-panel" aria-label="${t("kv.context")}">
+    ${activity ? "" : `<aside class="kv-context-panel" aria-label="${t("kv.context")}">
       ${contextBodyHTML()}
-    </aside>
+    </aside>`}
+  </div>`;
+}
+
+// Kept local instead of joining the shared icon table: that table is part of
+// the first-screen entry chunk, which sits exactly on its gzip budget.
+const ACTIVITY_ICON = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>';
+
+function activityEntryHTML(): string {
+  const selected = isActivitySelected();
+  const count = state.inboxState === "ready" ? state.inbox?.count ?? 0 : 0;
+  return `<div class="kv-tree-home">
+    <button type="button" class="kv-tree-link kv-activity-link${selected ? " selected" : ""}" data-kv-activity aria-current="${selected ? "page" : "false"}">
+      ${ACTIVITY_ICON}<span class="kv-tree-title">${kt("kv.activityTitle")}</span>${count > 0 ? `<span class="kv-count">${count}</span>` : ""}
+    </button>
   </div>`;
 }
 
 function treeBodyHTML(): string {
-  if (state.treeState === "loading") return vaultEmptyState("loading");
-  if (state.treeState === "error") return vaultEmptyState("error", state.treeError, true);
-  if (!state.indexReady) return vaultEmptyState("empty", t("kv.indexMissing"));
-  if (state.tree.length === 0) return vaultEmptyState("empty");
-  return `<ul class="kv-tree-list">${state.tree.map(node => treeNodeHTML(node)).join("")}</ul>`;
+  const home = activityEntryHTML();
+  if (state.treeState === "loading") return `${home}${vaultEmptyState("loading")}`;
+  if (state.treeState === "error") return `${home}${vaultEmptyState("error", state.treeError, true)}`;
+  if (!state.indexReady) return `${home}${vaultEmptyState("empty", t("kv.indexMissing"))}`;
+  if (state.tree.length === 0) return `${home}${vaultEmptyState("empty")}`;
+  return `${home}<ul class="kv-tree-list">${state.tree.map(node => treeNodeHTML(node)).join("")}</ul>`;
 }
 
 function isVaultFolderNode(node: KnowledgeVaultTreeNode): boolean {
@@ -983,7 +1054,7 @@ function treeNodeHTML(node: KnowledgeVaultTreeNode, depth = 0): string {
 }
 
 function docBodyHTML(): string {
-  const back = `<button type="button" class="kv-back" data-kv-back>${icon("chevron-up")}<span>${t("kv.backToList")}</span></button>`;
+  const back = `<button type="button" class="kv-back" data-kv-back>${icon("chevron-up")}<span>${kt("kv.docBackToActivity")}</span></button>`;
   if (state.docState === "loading") return `${back}${vaultEmptyState("loading")}`;
   if (state.docState === "error") return `${back}${vaultEmptyState("error", state.docError, true)}`;
   if (!state.doc) return `${back}${vaultEmptyState("empty", t("kv.selectDoc"))}`;
@@ -1032,12 +1103,38 @@ function contextBodyHTML(): string {
     <button type="button" class="kv-context-close" data-kv-context-toggle>${t("kv.close")}</button>`;
 }
 
-function recentBodyHTML(): string {
-  if (state.recentState === "loading") return vaultEmptyState("loading");
+function activityBodyHTML(): string {
+  const recentCount = state.recentState === "ready" ? state.recent.length : 0;
+  return `<section class="kv-activity" aria-labelledby="kv-activity-title">
+    <header class="kv-activity-head">
+      <div>
+        <h1 id="kv-activity-title">${kt("kv.activityTitle")}</h1>
+        <p class="kv-hint">${kt("kv.activitySubtitle")}</p>
+      </div>
+      <button type="button" class="kv-back kv-activity-back" data-kv-back-tree>${icon("chevron-up")}<span>${kt("kv.activityBackToTree")}</span></button>
+    </header>
+    <section class="kv-activity-block" aria-labelledby="kv-activity-recent">
+      <header class="kv-activity-block-head">
+        <h2 id="kv-activity-recent">${kt("kv.activityRecent")}</h2>
+        <small>${recentCount > 0 ? kt("kv.activityRecentCount", {count: recentCount}) : ""}</small>
+      </header>
+      ${recentFeedHTML()}
+    </section>
+    <section class="kv-activity-block" aria-labelledby="kv-activity-inbox">
+      <header class="kv-activity-block-head">
+        <h2 id="kv-activity-inbox">${kt("kv.activityInbox")}</h2>
+      </header>
+      ${inboxFeedHTML()}
+    </section>
+  </section>`;
+}
+
+function recentFeedHTML(): string {
+  if (state.recentState === "loading" || state.recentState === "idle") return vaultEmptyState("loading");
   if (state.recentState === "error") return vaultEmptyState("error", state.recentError, true);
   if (!state.indexReady) return vaultEmptyState("empty", t("kv.indexMissing"));
   if (state.recent.length === 0) return vaultEmptyState("empty", t("kv.recentEmpty"));
-  return `<section class="kv-feed" aria-label="${t("kv.tab.recent")}">
+  return `<section class="kv-feed" aria-label="${kt("kv.activityRecent")}">
     ${groupRecentByDay(state.recent).map(group => `<section class="kv-feed-day"><h2>${escapeVaultHTML(group.label)}</h2><ul>${group.items.map(item => `<li><a class="kv-feed-item" href="${escapeVaultHTML(docHash({id: item.id, scope: item.scope, project_id: item.project_id}))}" data-kv-doc="${escapeVaultHTML(item.id)}">
       <span class="kv-feed-time">${escapeVaultHTML(formatLocaleDateTime(item.modified_at, {hour: "2-digit", minute: "2-digit"}))}</span>
       <span class="kv-feed-main"><strong>${escapeVaultHTML(item.title)}</strong><small>${escapeVaultHTML(item.library)}${item.project_id ? ` · ${escapeVaultHTML(item.project_id)}` : ""} · ${escapeVaultHTML(item.path)}</small></span>
@@ -1046,17 +1143,53 @@ function recentBodyHTML(): string {
   </section>`;
 }
 
-function inboxBodyHTML(): string {
-  if (state.inboxState === "loading") return vaultEmptyState("loading");
+interface VaultInboxGroup {
+  key: string;
+  library: string;
+  count: number;
+  items: KnowledgeVaultRecentItem[];
+}
+
+// The inbox endpoint already returns per-library counts plus rows that carry
+// library_id/library, so the activity page can group client-side without a new
+// API. Counts lead the order; any item whose library is absent from counts is
+// appended instead of being dropped.
+function groupInboxByLibrary(inbox: KnowledgeVaultInbox): VaultInboxGroup[] {
+  const groups = new Map<string, VaultInboxGroup>();
+  for (const entry of inbox.counts || []) {
+    const key = entry.library_id || entry.library;
+    if (!key) continue;
+    groups.set(key, {key, library: entry.library || key, count: entry.count, items: []});
+  }
+  for (const item of inbox.items || []) {
+    const key = item.library_id || item.library || "";
+    if (!key) continue;
+    let group = groups.get(key);
+    if (!group) {
+      group = {key, library: item.library || key, count: 0, items: []};
+      groups.set(key, group);
+    }
+    group.items.push(item);
+    if (!(inbox.counts || []).some(entry => (entry.library_id || entry.library) === key)) group.count++;
+  }
+  return [...groups.values()].filter(group => group.items.length > 0);
+}
+
+function inboxFeedHTML(): string {
+  if (state.inboxState === "loading" || state.inboxState === "idle") return vaultEmptyState("loading");
   if (state.inboxState === "error") return vaultEmptyState("error", state.inboxError, true);
   if (!state.indexReady) return vaultEmptyState("empty", t("kv.indexMissing"));
   if (!state.inbox || state.inbox.items.length === 0) return vaultEmptyState("empty", t("kv.inboxEmpty"));
-  return `<section class="kv-inbox" aria-label="${t("kv.tab.inbox")}">
-    <header class="kv-inbox-head"><h2>${t("kv.inboxCount", {count: state.inbox.count})}</h2><div class="kv-inbox-counts">${state.inbox.counts.map(item => `<span class="kv-chip kv-chip-static">${escapeVaultHTML(item.library)} <b>${item.count}</b></span>`).join("")}</div></header>
-    <ul class="kv-inbox-list">${state.inbox.items.map(item => `<li><a class="kv-inbox-item" href="${escapeVaultHTML(docHash({id: item.id, scope: item.scope, project_id: item.project_id}))}" data-kv-doc="${escapeVaultHTML(item.id)}">
-      <span class="kv-feed-main"><strong>${escapeVaultHTML(item.title)}</strong><small>${escapeVaultHTML(item.path)} · ${escapeVaultHTML(item.library)}</small></span>
-      ${badge(typeLabel(item.type), "type")}
-    </a></li>`).join("")}</ul>
+  const groups = groupInboxByLibrary(state.inbox);
+  return `<section class="kv-inbox" aria-label="${kt("kv.activityInbox")}">
+    <p class="kv-inbox-total">${t("kv.inboxCount", {count: state.inbox.count})}</p>
+    ${groups.map(group => `<section class="kv-inbox-group" data-kv-inbox-library="${escapeVaultHTML(group.key)}">
+      <header class="kv-inbox-group-head"><h3>${escapeVaultHTML(group.library)}</h3><span class="kv-chip kv-chip-static">${kt("kv.activityInboxGroupCount", {count: group.count})}</span></header>
+      <ul class="kv-inbox-list">${group.items.map(item => `<li><a class="kv-inbox-item" href="${escapeVaultHTML(docHash({id: item.id, scope: item.scope, project_id: item.project_id}))}" data-kv-doc="${escapeVaultHTML(item.id)}">
+        <span class="kv-feed-main"><strong>${escapeVaultHTML(item.title)}</strong><small>${escapeVaultHTML(item.path)} · ${escapeVaultHTML(item.library)}</small></span>
+        ${badge(typeLabel(item.type), "type")}
+      </a></li>`).join("")}</ul>
+    </section>`).join("")}
   </section>`;
 }
 
@@ -1182,7 +1315,7 @@ function handleSettingsDialogDismissed(event: Event): void {
 async function refreshAfterIndexRebuild(): Promise<void> {
   await Promise.all([
     loadTree(true, true),
-    state.selectedID ? loadDoc(state.selectedID, true) : Promise.resolve(),
+    state.selectedID && !isActivitySelected() ? loadDoc(state.selectedID, true) : Promise.resolve(),
     loadRecent(true),
     loadInbox(true),
   ]);
@@ -1655,10 +1788,18 @@ function loadTab(tab: VaultTab): void {
   // Tree/recent/inbox dedupe on the parameter key inside each loader. A shared
   // loader-name key would drop the request for a newly selected library while
   // the previous one is still in flight.
-  if (tab === "knowledge") void loadTree();
-  else if (tab === "recent") void loadRecent();
-  else if (tab === "inbox") void loadInbox();
-  else if (tab === "skills") loadOnce("skills", () => loadSkills());
+  if (tab === "knowledge") {
+    void loadTree();
+    // Activity is the default selection, so its two feeds load with the tree.
+    // When a document is selected the cached activity data stays untouched;
+    // switching back to the activity entry reuses it instead of refetching.
+    if (isActivitySelected()) {
+      void loadRecent();
+      void loadInbox();
+    }
+  } else {
+    loadOnce("skills", () => loadSkills());
+  }
 }
 
 function currentVaultDirectory(): string {
@@ -1740,7 +1881,52 @@ function syncHash(doc: KnowledgeVaultDoc | null): void {
   }
 }
 
+function clearDocHash(): void {
+  if (typeof window === "undefined" || !document.querySelector(".knowledge-vault")) return;
+  try {
+    window.history.replaceState(null, "", "#knowledge");
+  } catch {
+    // See syncHash: the activity page still works without history support.
+  }
+}
+
+function isMobileViewport(): boolean {
+  const width = typeof window === "undefined" ? 0 : Number(window.innerWidth);
+  return Number.isFinite(width) && width > 0 && width <= 760;
+}
+
 /* Interaction ------------------------------------------------------------ */
+
+function selectActivity(options: {mobilePane?: MobilePane; refresh?: boolean} = {}): void {
+  state.selectedID = VAULT_ACTIVITY_ID;
+  state.doc = null;
+  state.docState = "idle";
+  state.docError = "";
+  state.feedback = "";
+  state.searchOpen = false;
+  if (options.mobilePane) state.mobilePane = options.mobilePane;
+  clearDocHash();
+  void loadRecent(Boolean(options.refresh));
+  void loadInbox(Boolean(options.refresh));
+  rerender();
+}
+
+function openActivity(): void {
+  // The activity entry is also the refresh affordance: re-entering it pulls
+  // fresh recent/inbox data even when the page is already showing.
+  selectActivity({mobilePane: "doc", refresh: true});
+  if (typeof window !== "undefined") requestAnimationFrame(() => window.scrollTo(0, 0));
+}
+
+function backToActivity(): void {
+  state.docScroll = typeof window === "undefined" ? 0 : window.scrollY;
+  const mobile = isMobileViewport();
+  // On phones "back" returns to the directory list, where the activity entry is
+  // selected at the top. On wider screens it returns to the activity page.
+  selectActivity({mobilePane: "list"});
+  if (typeof window === "undefined") return;
+  requestAnimationFrame(() => window.scrollTo(0, mobile ? state.listScroll : 0));
+}
 
 function enterDoc(id: string, libraryHint = ""): void {
   if (libraryHint && state.libraries.some(item => item.id === libraryHint)) state.libraryID = libraryHint;
@@ -1910,7 +2096,16 @@ function bindHash(): void {
   window.addEventListener("hashchange", () => {
     if (!document.querySelector(".knowledge-vault")) return;
     const parsed = parseDocHash(window.location.hash);
-    if (!parsed?.id) return;
+    if (!parsed?.id) {
+      // A bare #knowledge is the activity page; leaving a document hash and
+      // going back must not leave the previous reader on screen.
+      if (window.location.hash === "#knowledge" || window.location.hash === "") {
+        if (state.doc || state.docState !== "idle" || !isActivitySelected()) {
+          selectActivity({mobilePane: "doc"});
+        }
+      }
+      return;
+    }
     if (parsed.library) state.libraryID = parsed.library;
     const unchanged = parsed.id === state.selectedID && state.docState === "ready";
     state.tab = "knowledge";
@@ -1982,10 +2177,16 @@ export function bindKnowledgeVaultPage(context: KnowledgeVaultContext): void {
       if (!ok) return;
       const parsed = parseDocHash(window.location.hash);
       if (parsed?.library && state.libraries.some(item => item.id === parsed.library)) state.libraryID = parsed.library;
+      if (parsed?.id) {
+        // A doc deep link wins over the default activity selection. Set the id
+        // before loadTab so the activity feeds are not fetched for a page that
+        // will immediately render the document.
+        state.tab = "knowledge";
+        state.selectedID = parsed.id;
+        state.mobilePane = "doc";
+      }
       loadTab(state.tab);
       if (parsed?.id) {
-        state.tab = "knowledge";
-        state.mobilePane = "doc";
         void loadDoc(parsed.id).then(() => { syncHash(state.doc); decorateDocBody(); });
       }
     });
@@ -2058,6 +2259,14 @@ export function bindKnowledgeVaultPage(context: KnowledgeVaultContext): void {
     if (handleDocLink(event)) return;
     if (handleMissingWikilink(event)) return;
     const target = event.target as HTMLElement | null;
+    if (target?.closest("[data-kv-activity]")) {
+      openActivity();
+      return;
+    }
+    if (target?.closest("[data-kv-back-tree]")) {
+      backToList();
+      return;
+    }
     if (target?.closest("[data-kv-sidebar-toggle]")) {
       toggleSidebar();
       return;
@@ -2113,7 +2322,7 @@ export function bindKnowledgeVaultPage(context: KnowledgeVaultContext): void {
       return;
     }
     if (target?.closest("[data-kv-back]")) {
-      backToList();
+      backToActivity();
       return;
     }
     if (target?.closest("[data-kv-context-toggle]")) {
@@ -2123,12 +2332,16 @@ export function bindKnowledgeVaultPage(context: KnowledgeVaultContext): void {
     }
     if (target?.closest("[data-kv-retry]")) {
       if (state.loading === "error") void loadLibraries();
-      else if (state.docState === "error") void loadDoc(state.selectedID, true);
+      else if (state.docState === "error" && !isActivitySelected()) void loadDoc(state.selectedID, true);
       else if (state.searchState === "error") performSearch();
-      else if (state.tab === "recent") void loadRecent(true);
-      else if (state.tab === "inbox") void loadInbox(true);
       else if (state.tab === "skills") void loadSkills(true);
-      else void loadTree(true);
+      else if (isActivitySelected()) {
+        // The activity page shows three independent states: the directory
+        // tree plus the two feeds. Retry whichever one actually failed.
+        if (state.treeState === "error") void loadTree(true);
+        if (state.recentState === "error") void loadRecent(true);
+        if (state.inboxState === "error") void loadInbox(true);
+      } else void loadTree(true);
       return;
     }
     const outline = target?.closest<HTMLElement>("[data-kv-outline]");

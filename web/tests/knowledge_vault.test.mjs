@@ -127,7 +127,7 @@ function treeFixture(id, title, path, children = [], extra = {}) {
   return {id, title, path, type: "navigation", status: "verified", scope: "global", is_index: true, system: true, children, ...extra};
 }
 
-test("the page exposes exactly the four read-only entries and no edit or review controls", () => {
+test("the page exposes two top-level tabs, the fixed activity entry, and no edit or review controls", () => {
   const tree = vault.buildVaultDirectoryTree([
     treeFixture("g-root", "全局知识首页", "global/index.md", [
       treeFixture("g-general", "通用知识", "global/general/index.md", [
@@ -137,9 +137,10 @@ test("the page exposes exactly the four read-only entries and no edit or review 
   ], "global");
   reset({tree});
   const html = vault.renderKnowledgeVaultPage(context());
-  for (const tab of ["knowledge", "recent", "inbox", "skills"]) {
+  for (const tab of ["knowledge", "skills"]) {
     assert.match(html, new RegExp(`data-kv-tab-button="${tab}"`));
   }
+  assert.doesNotMatch(html, /data-kv-tab-button="(?:recent|inbox)"/, "recent/inbox tabs are folded into the activity page");
   assert.doesNotMatch(html, />项目知识<|>待审提案<|data-knowledge-section=/);
   assert.doesNotMatch(html, /data-kv-(edit|delete|move|approve)|>删除<|>编辑<|>待审提案</);
   assert.doesNotMatch(html, /系统索引/);
@@ -150,14 +151,25 @@ test("the page exposes exactly the four read-only entries and no edit or review 
   assert.doesNotMatch(html, /role="tree"/);
   assert.match(html, /data-kv-toggle="g-general"[^>]*aria-expanded="false"/);
   assert.doesNotMatch(html, /href="#knowledge\?doc=doc-1&amp;scope=global"/, "folder children start hidden");
-  assert.equal((html.match(/class="kv-tab kv-tab-/g) || []).length, 4);
+  assert.equal((html.match(/class="kv-tab kv-tab-/g) || []).length, 2);
   // Heading and tabs form one group; controls are a separate group. The old
   // mobile "more" menu must not be rendered at all: skills and settings are
   // directly visible at every width.
   assert.match(html, /<div class="kv-topbar-main">[\s\S]*class="kv-heading"[\s\S]*class="kv-tabs"/);
   assert.match(html, /<div class="kv-controls">[\s\S]*data-kv-settings/);
-  assert.equal((html.match(/data-kv-tab-button="/g) || []).length, 4, "no duplicate tab buttons in a more menu");
+  assert.equal((html.match(/data-kv-tab-button="/g) || []).length, 2, "no duplicate tab buttons in a more menu");
   assert.doesNotMatch(html, /data-kv-more|kv-more-trigger|kv-more-menu/);
+
+  // The activity entry is a fixed first row, selected by default, and the
+  // right pane is the activity page rather than the old blank "select a doc".
+  assert.match(html, /<button type="button" class="kv-tree-link kv-activity-link selected" data-kv-activity aria-current="page">/);
+  assert.equal((html.match(/data-kv-activity/g) || []).length, 1);
+  assert.equal(html.indexOf("data-kv-activity") < html.indexOf('class="kv-tree-list"'), true, "the activity entry sits above the real directory list");
+  assert.match(html, /<article class="kv-doc-panel kv-activity-panel">[\s\S]*id="kv-activity-title">动态与更新/);
+  assert.match(html, /id="kv-activity-recent">最近更新/);
+  assert.match(html, /id="kv-activity-inbox">待整理/);
+  assert.doesNotMatch(html, /从左侧选择文档/);
+  assert.doesNotMatch(html, /class="kv-context-panel"/, "the activity page does not leave an empty context column");
 });
 
 test("the tree rebuilds real vault directories and uses path basenames, not index titles", () => {
@@ -384,9 +396,9 @@ test("inbox path segments are filtered from global, project and archive trees", 
   assert.equal(serialized.includes("项目想法"), false);
   assert.equal(serialized.includes("归档想法"), false);
 
-  // Inbox pages stay reachable through the "待整理" tab, which renders its own
-  // list independently of the tree.
-  reset({tab: "inbox", inboxState: "ready", inbox: {count: 2, counts: [], items: [
+  // Inbox documents stay reachable through the activity page's 待整理 block,
+  // which renders its own list independently of the tree.
+  reset({inboxState: "ready", inbox: {count: 2, counts: [], items: [
     {id: "p-inbox-doc", title: "项目想法", path: "projects/demo/inbox/idea.md", type: "practice", status: "unverified", scope: "project", project_id: "demo", library_id: "project:demo", library: "Demo", modified_at: "2026-11-14T10:00:00Z"},
     {id: "g-inbox-doc", title: "全局想法", path: "global/inbox/idea.md", type: "practice", status: "unverified", scope: "global", library_id: "global", library: "全局知识", modified_at: "2026-11-14T10:00:00Z"},
   ]}});
@@ -410,7 +422,6 @@ test("the topbar no longer duplicates scope in library and project dropdowns", (
 
 test("recent and inbox default to all libraries and keep project/path context", () => {
   reset({
-    tab: "recent",
     recentState: "ready",
     recent: [{
       id: "r1", title: "最近想法", path: "projects/demo/inbox/idea.md", type: "practice",
@@ -421,6 +432,42 @@ test("recent and inbox default to all libraries and keep project/path context", 
   const recent = vault.renderKnowledgeVaultPage(context());
   assert.match(recent, /projects\/demo\/inbox\/idea\.md/);
   assert.match(recent, /Demo/);
+});
+
+test("the activity page groups the inbox by library and keeps both blocks visible", () => {
+  reset({
+    recentState: "ready",
+    recent: [
+      {id: "r1", title: "最近想法", path: "projects/demo/inbox/idea.md", type: "practice", status: "unverified", scope: "project", project_id: "demo", library_id: "project:demo", library: "Demo", modified_at: "2026-11-14T10:00:00Z"},
+      {id: "r2", title: "全局指南", path: "global/guides/guide.md", type: "reference", status: "verified", scope: "global", library_id: "global", library: "全局知识", modified_at: "2026-11-13T10:00:00Z"},
+    ],
+    inboxState: "ready",
+    inbox: {
+      ok: true, enabled: true, index_ready: true, count: 3,
+      counts: [{library_id: "global", library: "全局知识", count: 1}, {library_id: "project:demo", library: "Demo", project_id: "demo", count: 2}],
+      items: [
+        {id: "i1", title: "项目想法", path: "projects/demo/inbox/idea.md", type: "practice", status: "unverified", scope: "project", project_id: "demo", library_id: "project:demo", library: "Demo", modified_at: "2026-11-14T10:00:00Z"},
+        {id: "i2", title: "全局想法", path: "global/inbox/idea.md", type: "practice", status: "unverified", scope: "global", library_id: "global", library: "全局知识", modified_at: "2026-11-14T11:00:00Z"},
+      ],
+    },
+  });
+  const html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /class="kv-activity"/);
+  assert.equal((html.match(/class="kv-activity-block"/g) || []).length, 2, "recent and inbox are the two activity blocks");
+  assert.match(html, /class="kv-feed"[\s\S]*最近想法[\s\S]*全局指南/);
+  assert.match(html, /3 条待整理/);
+  assert.equal((html.match(/class="kv-inbox-group"/g) || []).length, 2, "inbox items are grouped by library");
+  assert.equal(html.indexOf('data-kv-inbox-library="global"') < html.indexOf('data-kv-inbox-library="project:demo"'), true, "group order follows the API's counts order");
+  assert.match(html, /<h3>全局知识<\/h3><span class="kv-chip kv-chip-static">1 条<\/span>/);
+  assert.match(html, /<h3>Demo<\/h3><span class="kv-chip kv-chip-static">2 条<\/span>/);
+  assert.match(html, /href="#knowledge\?doc=i1&amp;scope=project&amp;project=demo"[^>]*data-kv-doc="i1"/);
+  assert.doesNotMatch(html, /data-kv-(move|archive|delete|edit)/);
+
+  reset({recentState: "ready", recent: [], inboxState: "ready", inbox: {count: 0, counts: [], items: []}});
+  const empty = vault.renderKnowledgeVaultPage(context());
+  assert.match(empty, /最近没有变更/);
+  assert.match(empty, /待整理为空/);
+  assert.match(empty, /id="kv-activity-title">动态与更新/);
 });
 
 test("folders default to collapsed and only an explicit expansion shows children", () => {
@@ -591,7 +638,6 @@ test("tree loading, empty and error states are explicit", () => {
 
 test("inbox and skills are read-only lists with no move or edit affordances", () => {
   reset({
-    tab: "inbox",
     inboxState: "ready",
     inbox: {
       ok: true, enabled: true, index_ready: true, count: 2,
