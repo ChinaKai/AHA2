@@ -2872,10 +2872,7 @@ async function ensureViewData(view: View, force = false): Promise<void> {
       state.vaultSkillsRuntimeRead = vault.runtimeRead;
       state.vaultSkillsBoundProjects = vault.boundProjects;
     } catch {
-      state.vaultSkills = [];
-      state.vaultSkillsAvailable = false;
-      state.vaultSkillsRuntimeRead = false;
-      state.vaultSkillsBoundProjects = [];
+      // A stale cached index can miss the chunk; legacy skills still load.
     }
   }));
   if (view === "tasks" || view === "mcp") jobs.push(loadMCPServers(force));

@@ -120,6 +120,10 @@ const localText: Record<string, [zhCN: string, enUS: string]> = {
   "kv.previewDiffEmpty": ["与基线相同，没有可显示的差异。", "Same as the baseline; no differences to show."],
   "kv.previewDiffUnavailable": ["无法显示变更：{reason}", "Changes unavailable: {reason}"],
   "kv.previewDiffFailed": ["读取变更失败，已显示全文。", "Could not read changes; showing the full document."],
+  "kv.recentShowUnchanged": ["显示仅时间更新", "Show timestamp-only updates"],
+  "kv.recentHideUnchanged": ["隐藏仅时间更新", "Hide timestamp-only updates"],
+  "kv.changeTimestampOnly": ["仅时间更新", "Timestamp only"],
+  "kv.changeUnknown": ["变更未知", "Change unknown"],
 };
 
 function kt(key: string, values: Record<string, string | number> = {}): string {
@@ -248,6 +252,11 @@ body.kv-resizing { cursor: col-resize; user-select: none; }
 .kv-activity-block-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); padding-bottom: 8px; border-bottom: 1px solid var(--color-border-subtle); }
 .kv-activity-block-head h2 { margin: 0; font-size: var(--font-size-20); }
 .kv-activity-block-head small { color: var(--color-text-muted); font-size: var(--font-size-12); }
+.kv-activity-block-actions { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: flex-end; gap: var(--space-2); min-width: 0; }
+.kv-recent-toggle { padding: 0; border: 0; background: transparent; color: var(--color-text-muted); font: inherit; font-size: var(--font-size-12); text-decoration: underline; cursor: pointer; }
+.kv-recent-toggle:hover { color: var(--color-text); }
+.kv-recent-toggle[aria-pressed="true"] { color: var(--color-accent-ink); }
+.kv-change-note { align-self: flex-start; margin-top: 1px; color: var(--color-text-subtle); font-size: var(--font-size-11); font-style: italic; }
 .kv-inbox-total { margin: 0; color: var(--color-text-muted); font-size: var(--font-size-13); }
 .kv-inbox-group { display: grid; gap: 4px; margin-bottom: var(--space-4); }
 .kv-inbox-group-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
@@ -280,6 +289,8 @@ body.kv-resizing { cursor: col-resize; user-select: none; }
   .kv-tree-panel.collapsed .kv-panel-head span, .kv-tree-panel.collapsed .kv-panel-head small { display: inline; }
   .kv-tree-panel.collapsed .kv-tree-body { display: block; }
   .kv-activity-head { flex-wrap: wrap; }
+  .kv-activity-block-head { flex-wrap: wrap; }
+  .kv-activity-block-actions { flex: 1 1 100%; justify-content: space-between; }
   .kv-activity-back { display: inline-flex; order: -1; margin-bottom: 0; }
   /* The title keeps its own row; tabs, search and settings share the row below
      as three group items that never wrap into a second line. */
@@ -406,6 +417,7 @@ interface VaultState {
   treeError: string;
   treeKey: string;
   recentKey: string;
+  recentIncludeUnchanged: boolean;
   inboxKey: string;
   expanded: Set<string>;
   selectedID: string;
@@ -541,7 +553,7 @@ function initialState(): VaultState {
     tab: "knowledge", libraryID: "global",
     typeFilter: "", statusFilter: "", tagFilter: "",
     tree: [], treeState: "idle", treeError: "", treeKey: "", expanded: new Set(),
-    recentKey: "", inboxKey: "",
+    recentKey: "", recentIncludeUnchanged: false, inboxKey: "",
     selectedID: VAULT_ACTIVITY_ID, doc: null, docState: "idle", docError: "",
     recent: [], recentState: "idle", recentError: "",
     previewID: "", previewDoc: null, previewState: "idle", previewError: "",
@@ -688,7 +700,8 @@ export function groupRecentByDay(items: KnowledgeVaultRecentItem[], now: Date = 
   const yesterday = localDayKey(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1));
   const groups = new Map<string, KnowledgeVaultRecentItem[]>();
   for (const item of items) {
-    const key = localDayKey(item.modified_at || item.updated || "");
+    // Group by when the content changed, not by a later mtime/export touch.
+    const key = localDayKey(item.changed_at || item.modified_at || item.updated || "");
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key)!.push(item);
   }
@@ -1367,11 +1380,22 @@ function activityBodyHTML(): string {
     <section class="kv-activity-block" aria-labelledby="kv-activity-recent">
       <header class="kv-activity-block-head">
         <h2 id="kv-activity-recent">${kt("kv.activityRecent")}</h2>
-        <small>${recentCount > 0 ? kt("kv.activityRecentCount", {count: recentCount}) : ""}</small>
+        <div class="kv-activity-block-actions">
+          ${recentUnchangedToggleHTML()}
+          <small>${recentCount > 0 ? kt("kv.activityRecentCount", {count: recentCount}) : ""}</small>
+        </div>
       </header>
       ${recentFeedHTML()}
     </section>
   </section>`;
+}
+
+// The switch is the only escape hatch for a timestamp-only row. It stays
+// visible above an empty feed so the owner can reveal hidden updates.
+function recentUnchangedToggleHTML(): string {
+  if (!state.indexReady) return "";
+  const active = state.recentIncludeUnchanged;
+  return `<button type="button" class="kv-recent-toggle" data-kv-recent-unchanged aria-pressed="${active ? "true" : "false"}">${kt(active ? "kv.recentHideUnchanged" : "kv.recentShowUnchanged")}</button>`;
 }
 
 function recentFeedHTML(): string {
@@ -1380,11 +1404,15 @@ function recentFeedHTML(): string {
   if (!state.indexReady) return vaultEmptyState("empty", t("kv.indexMissing"));
   if (state.recent.length === 0) return vaultEmptyState("empty", t("kv.recentEmpty"));
   return `<section class="kv-feed" aria-label="${kt("kv.activityRecent")}">
-    ${groupRecentByDay(state.recent).map(group => `<section class="kv-feed-day"><h2>${escapeVaultHTML(group.label)}</h2><ul>${group.items.map(item => `<li><a class="kv-feed-item" href="${escapeVaultHTML(docHash({id: item.id, scope: item.scope, project_id: item.project_id}))}" data-kv-preview="${escapeVaultHTML(item.id)}" aria-haspopup="dialog">
-      <span class="kv-feed-time">${escapeVaultHTML(formatLocaleDateTime(item.modified_at, {hour: "2-digit", minute: "2-digit"}))}</span>
-      <span class="kv-feed-main"><strong>${escapeVaultHTML(item.title)}</strong><small>${escapeVaultHTML(item.library)}${item.project_id ? ` · ${escapeVaultHTML(item.project_id)}` : ""} · ${escapeVaultHTML(item.path)}</small></span>
+    ${groupRecentByDay(state.recent).map(group => `<section class="kv-feed-day"><h2>${escapeVaultHTML(group.label)}</h2><ul>${group.items.map(item => {
+      const changedAt = item.changed_at || item.modified_at;
+      const changeNote = item.change_kind === "none" ? kt("kv.changeTimestampOnly") : item.change_kind === "unknown" ? kt("kv.changeUnknown") : "";
+      return `<li><a class="kv-feed-item" href="${escapeVaultHTML(docHash({id: item.id, scope: item.scope, project_id: item.project_id}))}" data-kv-preview="${escapeVaultHTML(item.id)}" aria-haspopup="dialog">
+      <span class="kv-feed-time">${escapeVaultHTML(formatLocaleDateTime(changedAt, {hour: "2-digit", minute: "2-digit"}))}</span>
+      <span class="kv-feed-main"><strong>${escapeVaultHTML(item.title)}</strong><small>${escapeVaultHTML(item.library)}${item.project_id ? ` · ${escapeVaultHTML(item.project_id)}` : ""} · ${escapeVaultHTML(item.path)}</small>${changeNote ? `<span class="kv-change-note">${escapeVaultHTML(changeNote)}</span>` : ""}</span>
       ${metaBadges(item)}
-    </a></li>`).join("")}</ul></section>`).join("")}
+    </a></li>`;
+    }).join("")}</ul></section>`).join("")}
   </section>`;
 }
 
@@ -2017,7 +2045,8 @@ async function loadDoc(id: string, force = false): Promise<void> {
 async function loadRecent(force = false): Promise<void> {
   // Recent is always the all-libraries feed; every row carries its own
   // library/project/path context instead of relying on a topbar scope.
-  const key = "";
+  const includeUnchanged = state.recentIncludeUnchanged;
+  const key = includeUnchanged ? "include-unchanged" : "";
   // Only an explicit retry may leave the error state: an automatic retry here
   // would loop because rendering re-runs the tab loaders.
   if (!force && state.recentKey === key && state.recentState !== "idle") return;
@@ -2026,9 +2055,11 @@ async function loadRecent(force = false): Promise<void> {
   state.recentState = "loading";
   rerender();
   try {
-    const payload: KnowledgeVaultRecent = await api.knowledgeVaultRecent(key);
+    const payload: KnowledgeVaultRecent = await api.knowledgeVaultRecent("", 120, includeUnchanged);
     if (ticket !== recentRequest || state.recentKey !== key) return;
-    state.recent = payload.items || [];
+    // Older servers return every row; keep the default list content-only until
+    // the owner explicitly asks for timestamp-only updates.
+    state.recent = (payload.items || []).filter(item => includeUnchanged || item.content_changed !== false);
     state.indexReady = payload.index_ready;
     state.recentState = "ready";
   } catch (error) {
@@ -2791,6 +2822,11 @@ export function bindKnowledgeVaultPage(context: KnowledgeVaultContext): void {
     if (target?.closest("[data-kv-context-toggle]")) {
       state.contextOpen = !state.contextOpen;
       rerender();
+      return;
+    }
+    if (target?.closest("[data-kv-recent-unchanged]")) {
+      state.recentIncludeUnchanged = !state.recentIncludeUnchanged;
+      void loadRecent(true);
       return;
     }
     if (target?.closest("[data-kv-retry]")) {

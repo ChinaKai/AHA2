@@ -1043,10 +1043,11 @@ class APIClient {
     return this.request(`/api/v1/knowledge-vault/search?${query}`);
   }
 
-  knowledgeVaultRecent(projectID = "", limit = 120): Promise<KnowledgeVaultRecent> {
+  knowledgeVaultRecent(projectID = "", limit = 120, includeUnchanged = false): Promise<KnowledgeVaultRecent> {
     const query = new URLSearchParams();
     if (projectID) query.set("project", projectID);
     if (limit) query.set("limit", String(limit));
+    if (includeUnchanged) query.set("include_unchanged", "true");
     return this.request(`/api/v1/knowledge-vault/recent?${query}`);
   }
 

@@ -633,7 +633,10 @@ func (r *Reader) Search(ctx context.Context, options DocumentSearchOptions) (Sea
 	return result, nil
 }
 
-// RecentDocument is one row of the mtime change feed.
+// maxRecentDocuments bounds one change-feed response after content filtering.
+const maxRecentDocuments = 120
+
+// RecentDocument is one row of the content change feed.
 type RecentDocument struct {
 	ID         string `json:"id"`
 	Title      string `json:"title"`
@@ -646,6 +649,13 @@ type RecentDocument struct {
 	Library    string `json:"library"`
 	Updated    string `json:"updated,omitempty"`
 	ModifiedAt string `json:"modified_at"`
+	// ChangedAt is when the content actually changed: file mtime for
+	// uncommitted rows, the last content-changing commit time for committed
+	// rows. The feed sorts on it.
+	ChangedAt      string `json:"changed_at,omitempty"`
+	ContentChanged bool   `json:"content_changed"`
+	ChangeKind     string `json:"change_kind"`
+	LastCommitAt   string `json:"last_commit_at,omitempty"`
 }
 
 type RecentResponse struct {
@@ -654,24 +664,33 @@ type RecentResponse struct {
 	Items      []RecentDocument `json:"items"`
 }
 
-// Recent orders documents by file mtime, not by frontmatter updated_at, so a
-// freshly exported or hand-edited file shows up even if its header is older.
-func (r *Reader) Recent(ctx context.Context, projectID string, limit int) (RecentResponse, error) {
+// Recent lists documents whose content actually changed. It compares the
+// worktree with HEAD (status plus one batched blob hash) and the last commit
+// that touched each path, so touching, exporting or rebuilding an unchanged
+// file no longer pushes an empty diff into the feed. includeUnchanged keeps
+// those timestamp-only rows with content_changed=false so the Web UI can reveal
+// them behind its explicit toggle.
+func (r *Reader) Recent(ctx context.Context, projectID string, limit int, includeUnchanged bool) (RecentResponse, error) {
 	result := RecentResponse{Enabled: true, IndexReady: r.indexReady, Items: []RecentDocument{}}
 	if !r.indexReady {
 		return result, nil
 	}
 	if limit <= 0 {
-		limit = 120
+		limit = maxRecentDocuments
 	}
-	if limit > 500 {
-		limit = 500
+	if limit > maxRecentDocuments {
+		limit = maxRecentDocuments
 	}
 	entries, err := r.index.Entries(ctx, "", "")
 	if err != nil {
 		return result, err
 	}
-	items := make([]RecentDocument, 0, len(entries))
+	type recentRow struct {
+		doc       RecentDocument
+		candidate recentCandidate
+	}
+	rows := make([]recentRow, 0, len(entries))
+	candidates := make([]recentCandidate, 0, len(entries))
 	for _, entry := range entries {
 		if isReservedVaultPath(entry.Path) {
 			continue
@@ -679,33 +698,90 @@ func (r *Reader) Recent(ctx context.Context, projectID string, limit int) (Recen
 		if projectID != "" && entry.ProjectID != projectID {
 			continue
 		}
+		if err := ValidateRelativePath(entry.Path); err != nil {
+			continue
+		}
+		absolute := filepath.Join(r.config.VaultPath, filepath.FromSlash(entry.Path))
+		if !IsInsideRoot(r.config.VaultPath, absolute) {
+			continue
+		}
 		libraryID, libraryName := r.libraryForEntry(entry)
 		modified := entry.Updated
-		absolute := filepath.Join(r.config.VaultPath, filepath.FromSlash(entry.Path))
+		candidate := recentCandidate{path: entry.Path, updatedAt: parseRecentTime(entry.Updated)}
 		if info, statErr := os.Stat(absolute); statErr == nil {
+			candidate.exists = true
+			candidate.modifiedAt = info.ModTime()
 			modified = info.ModTime().UTC().Format(time.RFC3339Nano)
 		}
 		if modified == "" {
 			modified = entry.Updated
 		}
-		items = append(items, RecentDocument{
-			ID: entry.ID, Title: entry.Title, Path: entry.Path, Type: entry.Type,
-			Status: entry.Status, Scope: entry.Scope, ProjectID: entry.ProjectID,
-			LibraryID: libraryID, Library: libraryName,
-			Updated: entry.Updated, ModifiedAt: modified,
+		rows = append(rows, recentRow{
+			doc: RecentDocument{
+				ID: entry.ID, Title: entry.Title, Path: entry.Path, Type: entry.Type,
+				Status: entry.Status, Scope: entry.Scope, ProjectID: entry.ProjectID,
+				LibraryID: libraryID, Library: libraryName,
+				Updated: entry.Updated, ModifiedAt: modified,
+			},
+			candidate: candidate,
 		})
+		candidates = append(candidates, candidate)
 	}
-	sort.SliceStable(items, func(left, right int) bool {
-		if items[left].ModifiedAt != items[right].ModifiedAt {
-			return items[left].ModifiedAt > items[right].ModifiedAt
+	changes := r.recentContentChanges(ctx, candidates)
+	type sortedItem struct {
+		doc       RecentDocument
+		effective time.Time
+	}
+	sorted := make([]sortedItem, 0, len(rows))
+	for _, row := range rows {
+		change, ok := changes[row.candidate.path]
+		if !ok {
+			change = recentContentChange{kind: RecentChangeUnknown, changedAt: row.candidate.fallbackTime()}
 		}
-		return items[left].ID < items[right].ID
+		if !includeUnchanged && !change.contentChanged() {
+			continue
+		}
+		effective := change.changedAt
+		if effective.IsZero() {
+			effective = row.candidate.fallbackTime()
+		}
+		doc := row.doc
+		doc.ChangeKind = change.kind
+		doc.ContentChanged = change.contentChanged()
+		if !effective.IsZero() {
+			doc.ChangedAt = effective.UTC().Format(time.RFC3339Nano)
+		}
+		if change.hasLastCommit {
+			doc.LastCommitAt = change.lastCommit.UTC().Format(time.RFC3339Nano)
+		}
+		sorted = append(sorted, sortedItem{doc: doc, effective: effective})
+	}
+	sort.SliceStable(sorted, func(left, right int) bool {
+		if !sorted[left].effective.Equal(sorted[right].effective) {
+			return sorted[left].effective.After(sorted[right].effective)
+		}
+		return sorted[left].doc.ID < sorted[right].doc.ID
 	})
+	items := make([]RecentDocument, 0, len(sorted))
+	for _, item := range sorted {
+		items = append(items, item.doc)
+	}
 	if len(items) > limit {
 		items = items[:limit]
 	}
 	result.Items = items
 	return result, nil
+}
+
+func parseRecentTime(value string) time.Time {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}
+	}
+	if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
+		return parsed
+	}
+	return time.Time{}
 }
 
 type InboxCount struct {
