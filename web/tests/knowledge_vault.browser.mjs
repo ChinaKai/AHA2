@@ -181,6 +181,9 @@ window.__vaultRebuildCount = 0;
 window.__vaultRebuildFail = false;
 window.__vaultGitRemotePayload = null;
 window.__vaultGitFailPush = false;
+const failureParams = new URLSearchParams(location.search);
+window.__vaultRecentFail = failureParams.get("failRecent") === "1";
+window.__vaultInboxFail = failureParams.get("failInbox") === "1";
 const delay = async (kind, key) => {
   const milliseconds = Number(window.__vaultDelays?.[kind]?.[key] || 0);
   if (milliseconds > 0) await new Promise(resolve => setTimeout(resolve, milliseconds));
@@ -222,12 +225,14 @@ if (id === "g-other") return json({ok: true, doc: G_OTHER_DOC});
     const project = url.searchParams.get("project") || "";
     window.__vaultRecentRequests.push(project || "all");
     await delay("recent", project || "all");
+    if (window.__vaultRecentFail) return json({ok: false, error: "recent_unavailable", message: "最近更新加载失败"}, 500);
     return json({ok: true, enabled: true, index_ready: true, items: project ? RECENT : [...RECENT, ...GLOBAL_RECENT]});
   }
   if (path === "/api/v1/knowledge-vault/inbox") {
     const project = url.searchParams.get("project") || "";
     window.__vaultInboxRequests.push(project || "all");
     await delay("inbox", project || "all");
+    if (window.__vaultInboxFail) return json({ok: false, error: "inbox_unavailable", message: "待整理加载失败"}, 500);
     return project
       ? json({ok: true, enabled: true, index_ready: true, count: 1, counts: [{library_id: "project:p1", library: "Demo", project_id: "p1", count: 1}], items: [RECENT[1]]})
       : json({ok: true, enabled: true, index_ready: true, count: 2, counts: [{library_id: "global", library: "全局知识", count: 1}, {library_id: "project:p1", library: "Demo", project_id: "p1", count: 1}], items: [RECENT[1], GLOBAL_INBOX]});
@@ -1447,6 +1452,63 @@ try {
   assert.match(await single.locator(".kv-tree-panel").innerText(), /global[\s\S]*projects/);
   assert.deepEqual(singleErrors, []);
   await single.close();
+
+  // A failing feed must settle in its error state. Rendering re-enters the tab
+  // loaders on every pass, so an automatic retry here used to hammer the
+  // endpoint in an error -> render -> request loop and disable the retry button.
+  const failingInbox = await browser.newPage({viewport: {width: 1280, height: 900}, locale: "zh-CN"});
+  const failingInboxErrors = [];
+  failingInbox.on("pageerror", error => failingInboxErrors.push(error.message));
+  await failingInbox.goto(`${url}/?failInbox=1`, {waitUntil: "networkidle"});
+  await failingInbox.evaluate(() => document.querySelector("[data-view=knowledge]")?.click());
+  const inboxBlock = 'section[aria-labelledby="kv-activity-inbox"]';
+  await failingInbox.waitForSelector(`${inboxBlock} .kv-state-error`, {timeout: 15000});
+  const requestCount = (target, key) => target.evaluate(name => window[name].length, `__vault${key}Requests`);
+  const failedInboxStart = await requestCount(failingInbox, "Inbox");
+  const healthyRecentStart = await requestCount(failingInbox, "Recent");
+  assert.equal(failedInboxStart, 1, "the failing inbox is requested once on load");
+  assert.ok(healthyRecentStart >= 1);
+  assert.ok(await failingInbox.locator(".kv-feed [data-kv-doc]").count() > 0, "the healthy recent feed still renders");
+  await failingInbox.waitForTimeout(700);
+  assert.equal(await requestCount(failingInbox, "Inbox"), failedInboxStart, "an errored feed is not retried by rendering");
+  assert.equal(await requestCount(failingInbox, "Recent"), healthyRecentStart, "the healthy feed is not refetched");
+  assert.match(await failingInbox.locator(inboxBlock).innerText(), /待整理加载失败/);
+  assert.equal(await failingInbox.locator(`${inboxBlock} .kv-state-loading`).count(), 0, "the error state stops flickering");
+  await axe(failingInbox, "activity inbox error");
+  await failingInbox.locator(`${inboxBlock} [data-kv-retry]`).click();
+  await failingInbox.waitForTimeout(400);
+  assert.equal(await requestCount(failingInbox, "Inbox"), failedInboxStart + 1, "the retry button makes exactly one forced request");
+  assert.equal(await requestCount(failingInbox, "Recent"), healthyRecentStart, "retrying the inbox leaves the healthy feed alone");
+  await failingInbox.waitForTimeout(700);
+  assert.equal(await requestCount(failingInbox, "Inbox"), failedInboxStart + 1, "a failed retry settles instead of looping");
+  assert.match(await failingInbox.locator(inboxBlock).innerText(), /待整理加载失败/);
+  assert.deepEqual(failingInboxErrors, []);
+  await failingInbox.close();
+
+  const failingBoth = await browser.newPage({viewport: {width: 1280, height: 900}, locale: "zh-CN"});
+  await failingBoth.goto(`${url}/?failRecent=1&failInbox=1`, {waitUntil: "networkidle"});
+  await failingBoth.evaluate(() => document.querySelector("[data-view=knowledge]")?.click());
+  await failingBoth.waitForFunction(() => document.querySelectorAll(".kv-activity .kv-state-error").length === 2, null, {timeout: 15000});
+  const bothStart = {
+    recent: await requestCount(failingBoth, "Recent"),
+    inbox: await requestCount(failingBoth, "Inbox"),
+  };
+  await failingBoth.waitForTimeout(700);
+  assert.deepEqual({
+    recent: await requestCount(failingBoth, "Recent"),
+    inbox: await requestCount(failingBoth, "Inbox"),
+  }, bothStart, "two errored feeds stay bounded");
+  assert.equal(await failingBoth.locator(".kv-activity .kv-state-error").count(), 2, "both errors remain visible");
+  await failingBoth.locator('section[aria-labelledby="kv-activity-inbox"] [data-kv-retry]').click();
+  await failingBoth.waitForTimeout(400);
+  assert.equal(await requestCount(failingBoth, "Recent"), bothStart.recent + 1);
+  assert.equal(await requestCount(failingBoth, "Inbox"), bothStart.inbox + 1);
+  await failingBoth.waitForTimeout(700);
+  assert.deepEqual({
+    recent: await requestCount(failingBoth, "Recent"),
+    inbox: await requestCount(failingBoth, "Inbox"),
+  }, {recent: bothStart.recent + 1, inbox: bothStart.inbox + 1}, "forced retries fail once each without starting another loop");
+  await failingBoth.close();
 
   // Switch off: the legacy knowledge page is exactly what renders; the new
   // endpoints 404 and no vault chunk is mounted.

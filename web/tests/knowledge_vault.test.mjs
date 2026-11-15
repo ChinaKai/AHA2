@@ -9,7 +9,12 @@ import {readFile} from "node:fs/promises";
 
 const root = resolve(import.meta.dirname, "..");
 const vault = await import(pathToFileURL(resolve(root, "build", "knowledge_vault.js")).href);
-const {api} = await import(pathToFileURL(resolve(root, "build", "api.js")).href);
+// The build rewrites shared imports to "./api.js?v=<build>"; importing the
+// unversioned URL would create a second APIClient singleton, so stubs would
+// never reach the page module.
+const vaultSource = await readFile(resolve(root, "build", "knowledge_vault.js"), "utf8");
+const apiVersion = vaultSource.match(/from "\.\/api\.js(\?v=[^"]+)"/)?.[1] || "";
+const {api} = await import(pathToFileURL(resolve(root, "build", "api.js")).href + apiVersion);
 
 function reset(patch = {}) {
   vault.__resetKnowledgeVaultStateForTest();
@@ -883,4 +888,54 @@ test("a directory page renders the generated list as links, not raw brackets", (
   assert.match(html, /href="#vault-wikilink=global%2Fgeneral%2Ftopic"[^>]*>主题文档<\/a>/);
   assert.match(html, /href="#vault-wikilink=global%2Freference%2Findex"[^>]*>参考资料<\/a>/);
   assert.match(html, /自动生成的摘要。/);
+});
+
+test("errored activity feeds and the tree only retry when forced", async () => {
+  const originals = {
+    tree: api.knowledgeVaultTree,
+    recent: api.knowledgeVaultRecent,
+    inbox: api.knowledgeVaultInbox,
+  };
+  const calls = {tree: 0, recent: 0, inbox: 0};
+  api.knowledgeVaultTree = async () => { calls.tree += 1; throw new Error("tree 500"); };
+  api.knowledgeVaultRecent = async () => { calls.recent += 1; throw new Error("recent 500"); };
+  api.knowledgeVaultInbox = async () => { calls.inbox += 1; throw new Error("inbox 500"); };
+  try {
+    reset({
+      treeKey: "all", treeState: "error", treeError: "tree 500",
+      recentKey: "", recentState: "error", recentError: "recent 500",
+      inboxKey: "", inboxState: "error", inboxError: "inbox 500",
+    });
+    // Rendering re-enters the tab loaders; those non-force calls must not
+    // retry a failed request or the page loops error -> render -> request.
+    await vault.__loadTreeForTest();
+    await vault.__loadRecentForTest();
+    await vault.__loadInboxForTest();
+    assert.deepEqual(calls, {tree: 0, recent: 0, inbox: 0}, "non-force loads leave errored feeds alone");
+    const errored = vault.__getKnowledgeVaultStateForTest();
+    assert.equal(errored.treeState, "error");
+    assert.equal(errored.recentState, "error");
+    assert.equal(errored.inboxState, "error");
+    assert.equal(errored.recentError, "recent 500");
+
+    await Promise.all([
+      vault.__loadTreeForTest(true),
+      vault.__loadRecentForTest(true),
+      vault.__loadInboxForTest(true),
+    ]);
+    assert.deepEqual(calls, {tree: 1, recent: 1, inbox: 1}, "an explicit retry requests each failed feed once");
+    assert.equal(vault.__getKnowledgeVaultStateForTest().recentState, "error", "a failed retry returns to the error state");
+
+    await vault.__loadRecentForTest();
+    await vault.__loadInboxForTest();
+    assert.deepEqual(calls, {tree: 1, recent: 1, inbox: 1}, "a failed retry does not start another loop");
+
+    reset({recentKey: "", recentState: "ready"});
+    await vault.__loadRecentForTest();
+    assert.equal(calls.recent, 1, "a ready feed is still a cache hit");
+  } finally {
+    api.knowledgeVaultTree = originals.tree;
+    api.knowledgeVaultRecent = originals.recent;
+    api.knowledgeVaultInbox = originals.inbox;
+  }
 });

@@ -1670,7 +1670,10 @@ function loadOnce(key: string, action: () => Promise<void>): void {
 
 async function loadTree(force = false, preserveExpansion = false): Promise<void> {
   const key = VAULT_TREE_LIBRARY;
-  if (!force && state.treeKey === key && state.treeState !== "error") return;
+  // A failed tree stays failed until an explicit retry. The page binding runs
+  // on every render, so retrying errored loads here would form an
+  // error -> rerender -> request loop.
+  if (!force && state.treeKey === key) return;
   const ticket = ++treeRequest;
   state.treeKey = key;
   state.treeState = "loading";
@@ -1728,7 +1731,9 @@ async function loadRecent(force = false): Promise<void> {
   // Recent is always the all-libraries feed; every row carries its own
   // library/project/path context instead of relying on a topbar scope.
   const key = "";
-  if (!force && state.recentKey === key && (state.recentState === "ready" || state.recentState === "loading")) return;
+  // Only an explicit retry may leave the error state: an automatic retry here
+  // would loop because rendering re-runs the tab loaders.
+  if (!force && state.recentKey === key && state.recentState !== "idle") return;
   const ticket = ++recentRequest;
   state.recentKey = key;
   state.recentState = "loading";
@@ -1750,7 +1755,8 @@ async function loadRecent(force = false): Promise<void> {
 async function loadInbox(force = false): Promise<void> {
   // Like recent, the inbox defaults to every library.
   const key = "";
-  if (!force && state.inboxKey === key && (state.inboxState === "ready" || state.inboxState === "loading")) return;
+  // Same error guard as recent: stay put until the retry button forces a load.
+  if (!force && state.inboxKey === key && state.inboxState !== "idle") return;
   const ticket = ++inboxRequest;
   state.inboxKey = key;
   state.inboxState = "loading";
@@ -2365,3 +2371,7 @@ export function bindKnowledgeVaultPage(context: KnowledgeVaultContext): void {
 export function __getKnowledgeVaultStateForTest(): VaultState {
   return state;
 }
+
+export const __loadTreeForTest = loadTree;
+export const __loadRecentForTest = loadRecent;
+export const __loadInboxForTest = loadInbox;
