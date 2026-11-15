@@ -823,7 +823,7 @@ func (s *Service) ReplaceOwnerKnowledgeGrants(ctx context.Context, ownerID, inst
 		scopeMode = "selected"
 	}
 	grants := make([]domain.ChannelKnowledgeGrant, 0, len(inputs))
-	allowedRoots, err := s.channelKnowledgeSourceRoots(ctx)
+	allowedRoots, vaultRoots, err := s.channelKnowledgeSourceRoots(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -834,40 +834,81 @@ func (s *Service) ReplaceOwnerKnowledgeGrants(ctx context.Context, ownerID, inst
 		}
 		grants = append(grants, domain.ChannelKnowledgeGrant{KnowledgeEntryID: entryID, GrantScope: "subtree"})
 	}
-	if err := s.store.ReplaceChannelKnowledgeGrants(ctx, instanceID, endpoint, ownerID, scopeMode, revision, grants, s.now().UTC()); err != nil {
+	if err := s.store.ReplaceChannelKnowledgeGrants(ctx, instanceID, endpoint, ownerID, scopeMode, revision, grants, vaultRoots, s.now().UTC()); err != nil {
 		return nil, err
 	}
 	return s.OwnerKnowledgePolicies(ctx, ownerID, instanceID)
 }
 
-func (s *Service) channelKnowledgeSourceRoots(ctx context.Context) (map[string]bool, error) {
+// channelKnowledgeSourceRoots returns the grantable roots of both sources. The
+// vault map is passed to the store so it can skip the legacy status check for
+// IDs that the vault index already validated.
+func (s *Service) channelKnowledgeSourceRoots(ctx context.Context) (map[string]bool, map[string]bool, error) {
+	allowedRoots := map[string]bool{}
+	vaultRoots := map[string]bool{}
+	if s.application != nil {
+		sources, err := s.application.KnowledgeIndexSources(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		projects, err := s.store.ListProjects(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		projectTypes := map[string]string{}
+		for _, project := range projects {
+			projectTypes[project.ID] = project.ProjectType
+		}
+		libraries, err := s.store.ListKnowledgeLibraries(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		libraryProjects := map[string]bool{}
+		for _, library := range libraries {
+			libraryProjects[library.ContainerProjectID] = true
+		}
+		for _, source := range sources {
+			projectID := strings.TrimSpace(source.Entry.ProjectID)
+			if projectID == "" {
+				continue
+			}
+			if libraryProjects[projectID] || (projectTypes[projectID] != "channel" && projectTypes[projectID] != "knowledge") {
+				allowedRoots[source.Entry.ID] = true
+				if source.Vault {
+					vaultRoots[source.Entry.ID] = true
+				}
+			}
+		}
+		return allowedRoots, vaultRoots, nil
+	}
+	// Fallback for a Channel service without an app wiring: the legacy root
+	// listing is the only source it can safely resolve.
 	entries, err := s.store.ListKnowledge(ctx, "", "", []domain.KnowledgeStatus{domain.KnowledgeVerified})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	libraries, err := s.store.ListKnowledgeLibraries(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	libraryProjects := map[string]bool{}
 	for _, library := range libraries {
 		libraryProjects[library.ContainerProjectID] = true
 	}
-	result := map[string]bool{}
 	for _, entry := range entries {
 		if !entry.IsIndex || entry.ProjectID == "" {
 			continue
 		}
 		if libraryProjects[entry.ProjectID] {
-			result[entry.ID] = true
+			allowedRoots[entry.ID] = true
 			continue
 		}
 		project, projectErr := s.store.Project(ctx, entry.ProjectID)
 		if projectErr == nil && project.ProjectType != "channel" && project.ProjectType != "knowledge" {
-			result[entry.ID] = true
+			allowedRoots[entry.ID] = true
 		}
 	}
-	return result, nil
+	return allowedRoots, vaultRoots, nil
 }
 
 func (s *Service) ReplayOwnerDelivery(ctx context.Context, ownerID, id string) (domain.ChannelDelivery, error) {

@@ -10,13 +10,16 @@ import (
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
+// ChannelAllowedKnowledge is the legacy-only resolver: every entry and grant
+// read here comes from knowledge_entries. Production reads go through
+// app.Service.channelAllowedKnowledge, which resolves each project's current
+// read source first; this method stays for tests and explicit legacy callers.
 func (s *Store) ChannelAllowedKnowledge(ctx context.Context, instanceID, endpointKind, conversationID string) ([]domain.KnowledgeEntry, error) {
-	var policyID, fixedIndexID string
-	var scopeMode string
-	err := s.db.QueryRowContext(ctx, `SELECT p.id,p.fixed_index_entry_id,p.scope_mode FROM channel_knowledge_policies p JOIN channel_endpoints e ON e.id=p.endpoint_id WHERE p.instance_id=? AND e.kind=? AND e.enabled=1`, instanceID, endpointKind).Scan(&policyID, &fixedIndexID, &scopeMode)
+	selection, err := s.ChannelKnowledgeSelection(ctx, instanceID, endpointKind)
 	if err != nil {
 		return nil, err
 	}
+	fixedIndexID, scopeMode := selection.FixedIndexEntryID, selection.ScopeMode
 	if endpointKind == domain.ChannelEndpointAssistantDM {
 		// The private chat is verified as the bound Owner; it always sees all
 		// normal project knowledge. Only the group digital human is scoped.
@@ -26,10 +29,8 @@ func (s *Store) ChannelAllowedKnowledge(ctx context.Context, instanceID, endpoin
 	if err != nil {
 		return nil, err
 	}
-	byID := map[string]domain.KnowledgeEntry{}
 	children := map[string][]string{}
 	for _, entry := range all {
-		byID[entry.ID] = entry
 		children[entry.ParentID] = append(children[entry.ParentID], entry.ID)
 	}
 	allowed := map[string]bool{fixedIndexID: true}
@@ -49,19 +50,10 @@ func (s *Store) ChannelAllowedKnowledge(ctx context.Context, instanceID, endpoin
 			}
 		}
 	}
-	grants, err := s.db.QueryContext(ctx, `SELECT knowledge_entry_id,grant_scope FROM channel_knowledge_grants WHERE policy_id=? AND revoked_at=''`, policyID)
-	if err != nil {
-		return nil, err
-	}
-	for grants.Next() {
-		var id, scope string
-		if err := grants.Scan(&id, &scope); err != nil {
-			grants.Close()
-			return nil, err
-		}
-		allowed[id] = true
-		if scope == "subtree" {
-			queue := append([]string{}, children[id]...)
+	for _, grant := range selection.Grants {
+		allowed[grant.KnowledgeEntryID] = true
+		if grant.GrantScope == "subtree" {
+			queue := append([]string{}, children[grant.KnowledgeEntryID]...)
 			for len(queue) > 0 {
 				child := queue[0]
 				queue = queue[1:]
@@ -73,7 +65,6 @@ func (s *Store) ChannelAllowedKnowledge(ctx context.Context, instanceID, endpoin
 			}
 		}
 	}
-	grants.Close()
 	result := []domain.KnowledgeEntry{}
 	for _, entry := range all {
 		if !allowed[entry.ID] {

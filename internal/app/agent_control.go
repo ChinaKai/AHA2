@@ -587,37 +587,36 @@ func (s *Service) ApplicableAgentKnowledge(ctx context.Context, claims agentapi.
 		return nil, err
 	}
 	if channelContext, channelErr := s.store.ChannelContextForInboxBatch(ctx, call.Turn.InboxBatchID); channelErr == nil {
-		if channelRouteMode(channelContext) == "task_route" {
-			if snapshot, ok := s.vaultKnowledgeForProject(ctx, call.Project.ID); ok {
-				items := append(append(snapshot.Project, snapshot.Global...), snapshot.Stale...)
-				markAgentKnowledgeWritable(items, s.AgentKnowledgePublishAllowed(ctx, call))
-				return items, nil
-			}
-			lines, _ := s.store.ListProductLines(ctx, call.Project.ID)
-			line := resolveProductLine(lines, call.Task.TargetBranch, call.Project.DefaultBranch)
-			project, _ := s.store.ListApplicableKnowledge(ctx, call.Project.ID, line.ID, []domain.KnowledgeStatus{domain.KnowledgeVerified, domain.KnowledgeStale})
-			global, _ := s.store.ListKnowledge(ctx, "global", "", []domain.KnowledgeStatus{domain.KnowledgeVerified, domain.KnowledgeStale})
-			items := append(project, global...)
-			markAgentKnowledgeWritable(items, s.AgentKnowledgePublishAllowed(ctx, call))
-			return items, nil
+		if channelRouteMode(channelContext) != "task_route" {
+			// Channel endpoints resolve each source project's current read
+			// source; a vault read failure is returned instead of exposing
+			// legacy rows.
+			return s.channelAllowedKnowledge(
+				ctx,
+				strings.TrimSpace(fmt.Sprint(channelContext["instance_id"])),
+				strings.TrimSpace(fmt.Sprint(channelContext["endpoint"])),
+				strings.TrimSpace(fmt.Sprint(channelContext["conversation_id"])),
+			)
 		}
-		return s.store.ChannelAllowedKnowledge(
-			ctx,
-			strings.TrimSpace(fmt.Sprint(channelContext["instance_id"])),
-			strings.TrimSpace(fmt.Sprint(channelContext["endpoint"])),
-			strings.TrimSpace(fmt.Sprint(channelContext["conversation_id"])),
-		)
-	}
-	if snapshot, ok := s.vaultKnowledgeForProject(ctx, call.Project.ID); ok {
-		items := append(append(snapshot.Project, snapshot.Global...), snapshot.Stale...)
-		markAgentKnowledgeWritable(items, s.AgentKnowledgePublishAllowed(ctx, call))
-		return items, nil
 	}
 	lines, _ := s.store.ListProductLines(ctx, call.Project.ID)
 	line := resolveProductLine(lines, call.Task.TargetBranch, call.Project.DefaultBranch)
-	project, _ := s.store.ListApplicableKnowledge(ctx, call.Project.ID, line.ID, []domain.KnowledgeStatus{domain.KnowledgeVerified, domain.KnowledgeStale})
-	global, _ := s.store.ListKnowledge(ctx, "global", "", []domain.KnowledgeStatus{domain.KnowledgeVerified, domain.KnowledgeStale})
-	items := append(project, global...)
+	// Project and global knowledge are read independently: a project still on
+	// the legacy tables must not hide a ready vault global library, and a
+	// vault-bound project must not see legacy global rows.
+	project, projectStale, _, err := s.projectKnowledgeForTask(ctx, call.Project.ID, line, false)
+	if err != nil {
+		return nil, err
+	}
+	global, globalStale, _, err := s.globalKnowledgeForTask(ctx, false)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]domain.KnowledgeEntry, 0, len(project)+len(projectStale)+len(global)+len(globalStale))
+	items = append(items, project...)
+	items = append(items, projectStale...)
+	items = append(items, global...)
+	items = append(items, globalStale...)
 	markAgentKnowledgeWritable(items, s.AgentKnowledgePublishAllowed(ctx, call))
 	return items, nil
 }

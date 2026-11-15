@@ -85,36 +85,13 @@ func (s *Service) vaultKnowledgeWriteEnabled(projectID string) bool {
 }
 
 // vaultFallbackWarning explains a legacy fallback when the owner-visible switch
-// is on. It only looks at the in-memory Reader (never probes the filesystem) so
-// it is cheap enough for a write response; without it an Agent would silently
-// see legacy knowledge and never learn that the vault is degraded.
+// is on. It only reads the in-memory source decision (never probes the
+// filesystem) so it is cheap enough for a write response; without it an Agent
+// would silently see legacy knowledge and never learn that the vault is
+// degraded. A fail-closed vault read is not a fallback and therefore has no
+// fallback warning: no legacy write is allowed in that state.
 func (s *Service) vaultFallbackWarning(projectID string) string {
-	if s == nil || s.knowledgeVault == nil || !s.knowledgeVault.Enabled() {
-		return ""
-	}
-	if !s.knowledgeVaultRuntimeRead {
-		return "知识库已启用，但支持诊断开关关闭了读取；本次使用旧知识库。"
-	}
-	if !knowledgeVaultReadAllowed(projectID) {
-		return "知识库已启用，但支持诊断的项目回退名单排除了当前项目；本次使用旧知识库。"
-	}
-	reason := ""
-	err := s.knowledgeVault.WithReader(func(reader *knowledgevault.Reader) error {
-		switch {
-		case !reader.IndexReady():
-			reason = "索引未就绪"
-		case strings.TrimSpace(reader.Manifest().Projects[projectID]) == "":
-			reason = "项目未绑定到知识库"
-		}
-		return nil
-	})
-	if err != nil {
-		reason = err.Error()
-	}
-	if reason == "" {
-		return ""
-	}
-	return "知识库已启用，但" + reason + "；本次使用旧知识库。"
+	return s.knowledgeReadDecision("project", projectID).Warning
 }
 
 func (s *Service) vaultWriteDisabledError() error {

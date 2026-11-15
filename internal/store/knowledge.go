@@ -509,6 +509,16 @@ func (s *Store) KnowledgeIndexes(ctx context.Context) (map[string]domain.Knowled
 	return result, rows.Err()
 }
 
+// KnowledgeRootForProject returns the verified project knowledge root without
+// scanning every project's roots. Callers that route each project to a
+// different source use it so a vault-routed project's legacy root is never
+// read merely to be filtered out.
+func (s *Store) KnowledgeRootForProject(ctx context.Context, projectID string) (domain.KnowledgeEntry, error) {
+	return scanKnowledge(s.db.QueryRowContext(ctx,
+		`SELECT `+knowledgeColumns+` FROM knowledge_entries WHERE scope='project' AND project_id=? AND is_index=1 AND status=? LIMIT 1`,
+		strings.TrimSpace(projectID), domain.KnowledgeVerified))
+}
+
 func (s *Store) ListKnowledgePage(ctx context.Context, scope, projectID string, statuses []domain.KnowledgeStatus, cursorAt time.Time, cursorID string, limit int) ([]domain.KnowledgeEntry, bool, error) {
 	query := `SELECT ` + knowledgeColumns + ` FROM knowledge_entries WHERE 1=1`
 	args := []any{}

@@ -196,7 +196,7 @@ type Service struct {
 	// project on the legacy knowledge tables. knowledgeVaultRuntimeRead is a
 	// separate, default-off gate: the Web vault switch may be enabled while
 	// Agent turns still read the legacy DB.
-	knowledgeVault *knowledgevault.Manager
+	knowledgeVault knowledgeVaultBackend
 	// runtimeRead switches reads to the vault; runtimeWrite switches writes.
 	// Both default to off and are independent: a vault-reading Turn still
 	// writes the legacy tables unless runtimeWrite is explicitly enabled.
@@ -309,7 +309,7 @@ func (s *Service) SetAgentAPI(capabilities *agentapi.Capabilities, baseURL strin
 // evaluated per Turn, but runtimeRead is a separate default-off gate: enabling
 // the Web vault does not switch Agent knowledge or skills until the operator
 // explicitly turns runtime reading on.
-func (s *Service) SetKnowledgeVault(manager *knowledgevault.Manager, runtimeRead bool) {
+func (s *Service) SetKnowledgeVault(manager knowledgeVaultBackend, runtimeRead bool) {
 	s.knowledgeVault = manager
 	s.knowledgeVaultRuntimeRead = runtimeRead
 }
@@ -1219,35 +1219,33 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		instanceID := strings.TrimSpace(fmt.Sprint(channelContext["instance_id"]))
 		endpoint := strings.TrimSpace(fmt.Sprint(channelContext["endpoint"]))
 		conversationID := strings.TrimSpace(fmt.Sprint(channelContext["conversation_id"]))
-		projectKB, _ = s.store.ChannelAllowedKnowledge(ctx, instanceID, endpoint, conversationID)
+		// Channel knowledge is resolved per project by its current read source.
+		// A vault read failure leaves the block empty instead of exposing the
+		// legacy rows the owner moved away from.
+		entries, knowledgeErr := s.channelAllowedKnowledge(ctx, instanceID, endpoint, conversationID)
+		if knowledgeErr != nil {
+			log.Printf("turn %s channel knowledge read failed; knowledge block left empty: %v", turn.ID, knowledgeErr)
+		} else {
+			projectKB = entries
+		}
 	} else if kbEnabled {
 		lines, _ := s.store.ListProductLines(ctx, project.ID)
 		productLine = resolveProductLine(lines, task.TargetBranch, project.DefaultBranch)
-		if snapshot, ok := s.vaultKnowledgeForProject(ctx, project.ID); ok {
-			globalKB, projectKB = snapshot.Global, snapshot.Project
-			pendingEntries := s.vaultPendingKnowledgeIDs(ctx)
-			for _, entry := range snapshot.Stale {
-				if !pendingEntries[entry.ID] {
-					staleKB = append(staleKB, entry)
-				}
-			}
+		// Project and global knowledge have independent source gates. Only one
+		// of them may be provided by the vault.
+		projectActive, projectStale, _, knowledgeErr := s.projectKnowledgeForTask(ctx, project.ID, productLine, true)
+		if knowledgeErr != nil {
+			log.Printf("turn %s project knowledge read failed; project knowledge block left empty: %v", turn.ID, knowledgeErr)
 		} else {
-			globalKB, _ = s.store.ListKnowledge(ctx, "global", "", []domain.KnowledgeStatus{domain.KnowledgeVerified})
-			projectKB, _ = s.store.ListApplicableKnowledge(ctx, project.ID, productLine.ID, []domain.KnowledgeStatus{domain.KnowledgeVerified})
-			globalStale, _ := s.store.ListKnowledge(ctx, "global", "", []domain.KnowledgeStatus{domain.KnowledgeStale})
-			projectStale, _ := s.store.ListApplicableKnowledge(ctx, project.ID, productLine.ID, []domain.KnowledgeStatus{domain.KnowledgeStale})
-			pending, _ := s.store.ListKnowledgeProposals(ctx, "", "")
-			pendingEntries := map[string]bool{}
-			for _, proposal := range pending {
-				if proposal.Status == domain.KnowledgeProposalPending {
-					pendingEntries[proposal.EntryID] = true
-				}
-			}
-			for _, entry := range append(globalStale, projectStale...) {
-				if !entry.IsIndex && !pendingEntries[entry.ID] {
-					staleKB = append(staleKB, entry)
-				}
-			}
+			projectKB = projectActive
+			staleKB = append(staleKB, projectStale...)
+		}
+		globalActive, globalStale, _, knowledgeErr := s.globalKnowledgeForTask(ctx, true)
+		if knowledgeErr != nil {
+			log.Printf("turn %s global knowledge read failed; global knowledge block left empty: %v", turn.ID, knowledgeErr)
+		} else {
+			globalKB = globalActive
+			staleKB = append(staleKB, globalStale...)
 		}
 	}
 	skills = s.activeTaskSkills(ctx, task)

@@ -81,6 +81,7 @@ func (s *Server) listKnowledge(writer http.ResponseWriter, request *http.Request
 			writeError(writer, http.StatusInternalServerError, "list_knowledge_proposals_failed")
 			return
 		}
+		proposals = s.visibleKnowledgeProposals(proposals)
 	}
 	reviewSettings, err := s.store.KnowledgeReviewSettings(request.Context())
 	if err != nil {
@@ -134,10 +135,23 @@ func (s *Server) listKnowledgeProposals(writer http.ResponseWriter, request *htt
 	if limit > 100 {
 		limit = 100
 	}
-	items, total, err := s.store.ListKnowledgeProposalsPage(request.Context(), request.URL.Query().Get("scope"), request.URL.Query().Get("project_id"), status, page, limit)
+	items, _, err := s.store.ListKnowledgeProposalsPage(request.Context(), request.URL.Query().Get("scope"), request.URL.Query().Get("project_id"), status, 1, 0)
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, "list_knowledge_proposals_failed")
 		return
+	}
+	items = s.visibleKnowledgeProposals(items)
+	total := len(items)
+	if limit > 0 {
+		start := (page - 1) * limit
+		if start > total {
+			start = total
+		}
+		end := start + limit
+		if end > total {
+			end = total
+		}
+		items = append([]domain.KnowledgeProposal(nil), items[start:end]...)
 	}
 	pages := 0
 	if limit > 0 {
@@ -147,6 +161,23 @@ func (s *Server) listKnowledgeProposals(writer http.ResponseWriter, request *htt
 		"ok": true, "proposals": items, "total": total, "page": page, "pages": pages,
 		"has_more": limit > 0 && page < pages,
 	})
+}
+
+// visibleKnowledgeProposals hides proposals whose target is not the current
+// read source of their own scope/project. A vault-routed project must not show
+// legacy proposals left over from before the switch, and a legacy project must
+// not show vault proposals it cannot publish.
+func (s *Server) visibleKnowledgeProposals(items []domain.KnowledgeProposal) []domain.KnowledgeProposal {
+	if s.app == nil {
+		return items
+	}
+	result := make([]domain.KnowledgeProposal, 0, len(items))
+	for _, item := range items {
+		if s.app.KnowledgeProposalVisible(item) {
+			result = append(result, item)
+		}
+	}
+	return result
 }
 
 func (s *Server) withGlobalKnowledgeNavigation(ctx context.Context, items []domain.KnowledgeEntry) ([]domain.KnowledgeEntry, error) {
@@ -198,14 +229,28 @@ func (s *Server) withGlobalKnowledgeNavigation(ctx context.Context, items []doma
 // rather than filtering a page of /api/v1/knowledge, which is recency-ordered
 // and therefore reports only the projects touched most recently.
 func (s *Server) knowledgeIndexes(writer http.ResponseWriter, request *http.Request) {
-	indexes, err := s.store.KnowledgeIndexes(request.Context())
-	if err != nil {
-		writeError(writer, http.StatusInternalServerError, "list_knowledge_indexes_failed")
-		return
-	}
-	entries := make([]domain.KnowledgeEntry, 0, len(indexes))
-	for _, entry := range indexes {
-		entries = append(entries, entry)
+	entries := []domain.KnowledgeEntry{}
+	if s.app != nil {
+		// Each project root comes from the store that currently owns it, so the
+		// channel grant picker never offers a legacy root for a vault-routed
+		// project. A vault read failure is surfaced instead of substituted.
+		sources, err := s.app.KnowledgeIndexSources(request.Context())
+		if err != nil {
+			writeError(writer, http.StatusInternalServerError, "list_knowledge_indexes_failed")
+			return
+		}
+		for _, source := range sources {
+			entries = append(entries, source.Entry)
+		}
+	} else {
+		indexes, err := s.store.KnowledgeIndexes(request.Context())
+		if err != nil {
+			writeError(writer, http.StatusInternalServerError, "list_knowledge_indexes_failed")
+			return
+		}
+		for _, entry := range indexes {
+			entries = append(entries, entry)
+		}
 	}
 	sort.Slice(entries, func(left, right int) bool { return entries[left].ProjectID < entries[right].ProjectID })
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "indexes": entries})

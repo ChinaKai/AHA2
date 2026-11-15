@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -56,65 +57,278 @@ func KnowledgeVaultReadScope() string {
 	return raw
 }
 
+// knowledgeVaultBackend is the subset of *knowledgevault.Manager the service
+// uses. Keeping it an interface gives tests a way to reproduce a reader
+// failure, which must stop the read instead of falling back to legacy rows.
+type knowledgeVaultBackend interface {
+	Config() knowledgevault.Config
+	Enabled() bool
+	Guide() (knowledgevault.Guide, error)
+	WithReader(func(*knowledgevault.Reader) error) error
+	SetRuntimeWrite(bool)
+	RuntimeWriteEnabled() bool
+	WriteKnowledge(context.Context, knowledgevault.WriteRequest) (knowledgevault.WriteResult, error)
+	KnowledgeFeedback(context.Context, knowledgevault.FeedbackRequest) (knowledgevault.FeedbackResult, error)
+}
+
 type vaultKnowledgeSnapshot struct {
 	Global  []domain.KnowledgeEntry
 	Project []domain.KnowledgeEntry
 	Stale   []domain.KnowledgeEntry
 }
 
-// vaultReadEnabled is the source-routing gate: the Web vault switch (manager
-// enabled), the independent runtime gate, and the rollback allowlist must all
-// agree, and the index must be ready with the manifest binding the project.
-// The readiness checks make writes follow the source a read would actually use:
-// an unbound or not-yet-indexed project keeps the legacy path for both.
-func (s *Service) vaultReadEnabled(projectID string) bool {
-	if s == nil || s.knowledgeVault == nil || !s.knowledgeVaultRuntimeRead || !knowledgeVaultReadAllowed(projectID) {
-		return false
-	}
-	available := false
-	err := s.knowledgeVault.WithReader(func(reader *knowledgevault.Reader) error {
-		available = reader.IndexReady() && strings.TrimSpace(reader.Manifest().Projects[projectID]) != ""
-		return nil
-	})
-	return err == nil && available
+// knowledgeReadDecision is the single "which store is authoritative" decision
+// every knowledge read uses. Vault=false means the legacy tables are the
+// current source and a fallback warning explains why. Vault=true with Err set
+// is a fail-closed state: the vault is the current source but it could not be
+// read, so callers must not serve legacy knowledge instead.
+type knowledgeReadDecision struct {
+	Vault   bool
+	Warning string
+	Err     error
 }
 
-func (s *Service) vaultKnowledgeForProject(ctx context.Context, projectID string) (vaultKnowledgeSnapshot, bool) {
-	if !s.vaultReadEnabled(projectID) {
-		if warning := s.vaultFallbackWarning(projectID); warning != "" {
-			log.Printf("knowledge vault project %s: %s", projectID, warning)
-		}
-		return vaultKnowledgeSnapshot{}, false
+// knowledgeReadDecision routes one scope/project. The Web vault switch
+// (manager enabled), the independent runtime read gate and the support
+// rollback allowlist must all agree; for a project the index must be ready and
+// the manifest must bind it. Global knowledge has no project binding, so only
+// its own gate decides.
+func (s *Service) knowledgeReadDecision(scope, projectID string) knowledgeReadDecision {
+	scope = strings.ToLower(strings.TrimSpace(scope))
+	projectID = strings.TrimSpace(projectID)
+	if s == nil || s.knowledgeVault == nil || !s.knowledgeVault.Enabled() {
+		return knowledgeReadDecision{}
 	}
-	snapshot := vaultKnowledgeSnapshot{}
-	ok := false
+	if !s.knowledgeVaultRuntimeRead {
+		return knowledgeReadDecision{Warning: "知识库已启用，但支持诊断开关关闭了读取；本次使用旧知识库。"}
+	}
+	if scope == "global" {
+		if raw, configured := os.LookupEnv(knowledgeVaultReadProjectsEnv); configured && strings.TrimSpace(raw) == "" {
+			return knowledgeReadDecision{Warning: "知识库已启用，但支持诊断回退名单已清空；全局知识使用旧知识库。"}
+		}
+	} else if !knowledgeVaultReadAllowed(projectID) {
+		return knowledgeReadDecision{Warning: "知识库已启用，但支持诊断的项目回退名单排除了当前项目；本次使用旧知识库。"}
+	}
+	decision := knowledgeReadDecision{Vault: true}
 	err := s.knowledgeVault.WithReader(func(reader *knowledgevault.Reader) error {
-		if !reader.IndexReady() || strings.TrimSpace(reader.Manifest().Projects[projectID]) == "" {
-			return nil
+		switch {
+		case !reader.IndexReady():
+			decision.Vault = false
+			decision.Warning = "知识库已启用，但索引未就绪；本次使用旧知识库。"
+		case scope != "global" && strings.TrimSpace(reader.Manifest().Projects[projectID]) == "":
+			decision.Vault = false
+			decision.Warning = "知识库已启用，但项目未绑定到知识库；本次使用旧知识库。"
 		}
-		global, err := reader.Entries(ctx, "global", "")
-		if err != nil {
-			return err
+		return nil
+	})
+	if err != nil {
+		// The manager is on and every routing gate admitted this scope, so the
+		// vault is authoritative. An unreadable reader must fail the read, not
+		// silently serve the old tables the owner moved away from.
+		decision.Vault = true
+		decision.Err = err
+	}
+	return decision
+}
+
+// vaultReadEnabled reports whether the vault is the current source for the
+// project, including the fail-closed case where it is authoritative but could
+// not be read. Write routing follows this so a transient reader failure never
+// writes a row the project no longer reads.
+func (s *Service) vaultReadEnabled(projectID string) bool {
+	return s.knowledgeReadDecision("project", projectID).Vault
+}
+
+func vaultReadFailure(scope, projectID string, err error) error {
+	target := "global"
+	if strings.TrimSpace(scope) != "global" {
+		target = "project " + strings.TrimSpace(projectID)
+	}
+	return fmt.Errorf("文件知识库读取 %s 失败，已停止使用旧知识库: %w", target, err)
+}
+
+// vaultProjectSnapshot reads one project's vault entries. It re-checks the
+// index and manifest binding that selected the source, so a vault that turns
+// unready between routing and reading is an error rather than an empty success.
+func (s *Service) vaultProjectSnapshot(ctx context.Context, projectID string) (vaultKnowledgeSnapshot, error) {
+	snapshot := vaultKnowledgeSnapshot{}
+	err := s.knowledgeVault.WithReader(func(reader *knowledgevault.Reader) error {
+		if !reader.IndexReady() || strings.TrimSpace(reader.Manifest().Projects[strings.TrimSpace(projectID)]) == "" {
+			return knowledgevault.ErrReaderNotReady
 		}
-		project, err := reader.Entries(ctx, "project", projectID)
+		project, err := reader.Entries(ctx, "project", strings.TrimSpace(projectID))
 		if err != nil {
 			return err
 		}
 		var stale []domain.KnowledgeEntry
-		snapshot.Global, stale = splitVaultKnowledge(mapVaultKnowledge(global))
-		snapshot.Stale = append(snapshot.Stale, stale...)
 		snapshot.Project, stale = splitVaultKnowledge(mapVaultKnowledge(project))
 		snapshot.Stale = append(snapshot.Stale, stale...)
-		ok = true
 		return nil
 	})
 	if err != nil {
-		if !errors.Is(err, knowledgevault.ErrDisabled) {
-			log.Printf("knowledge vault read for project %s failed; using legacy knowledge: %v", projectID, err)
+		return vaultKnowledgeSnapshot{}, err
+	}
+	return snapshot, nil
+}
+
+// vaultGlobalSnapshot reads global vault entries. Global routing never looks at
+// a project binding: that is what keeps a global read correct when the project
+// itself still uses the legacy tables.
+func (s *Service) vaultGlobalSnapshot(ctx context.Context) ([]domain.KnowledgeEntry, []domain.KnowledgeEntry, error) {
+	var active, stale []domain.KnowledgeEntry
+	err := s.knowledgeVault.WithReader(func(reader *knowledgevault.Reader) error {
+		if !reader.IndexReady() {
+			return knowledgevault.ErrReaderNotReady
 		}
+		entries, err := reader.Entries(ctx, "global", "")
+		if err != nil {
+			return err
+		}
+		active, stale = splitVaultKnowledge(mapVaultKnowledge(entries))
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return active, stale, nil
+}
+
+// readVaultProjectKnowledge returns (snapshot, true, nil) when the vault is the
+// current source, (zero, false, nil) when the legacy tables are, and an error
+// when the vault is authoritative but unreadable. Callers must stop on the
+// error instead of reading legacy rows.
+func (s *Service) readVaultProjectKnowledge(ctx context.Context, projectID string) (vaultKnowledgeSnapshot, bool, error) {
+	decision := s.knowledgeReadDecision("project", projectID)
+	if decision.Err != nil {
+		log.Printf("knowledge vault project %s: %v", projectID, decision.Err)
+		return vaultKnowledgeSnapshot{}, true, vaultReadFailure("project", projectID, decision.Err)
+	}
+	if !decision.Vault {
+		if decision.Warning != "" {
+			log.Printf("knowledge vault project %s: %s", projectID, decision.Warning)
+		}
+		return vaultKnowledgeSnapshot{}, false, nil
+	}
+	snapshot, err := s.vaultProjectSnapshot(ctx, projectID)
+	if err != nil {
+		log.Printf("knowledge vault project %s read failed: %v", projectID, err)
+		return vaultKnowledgeSnapshot{}, true, vaultReadFailure("project", projectID, err)
+	}
+	return snapshot, true, nil
+}
+
+// readVaultGlobalKnowledge is the global counterpart of
+// readVaultProjectKnowledge. Its gate is independent of any project binding.
+func (s *Service) readVaultGlobalKnowledge(ctx context.Context) ([]domain.KnowledgeEntry, []domain.KnowledgeEntry, bool, error) {
+	decision := s.knowledgeReadDecision("global", "")
+	if decision.Err != nil {
+		log.Printf("knowledge vault global: %v", decision.Err)
+		return nil, nil, true, vaultReadFailure("global", "", decision.Err)
+	}
+	if !decision.Vault {
+		if decision.Warning != "" {
+			log.Printf("knowledge vault global: %s", decision.Warning)
+		}
+		return nil, nil, false, nil
+	}
+	active, stale, err := s.vaultGlobalSnapshot(ctx)
+	if err != nil {
+		log.Printf("knowledge vault global read failed: %v", err)
+		return nil, nil, true, vaultReadFailure("global", "", err)
+	}
+	return active, stale, true, nil
+}
+
+// pendingKnowledgeIDs returns pending proposal entry IDs that target one
+// source. Stale vault entries with a pending vault proposal are suppressed just
+// like legacy entries with a pending legacy proposal.
+func (s *Service) pendingKnowledgeIDs(ctx context.Context, vault bool) map[string]bool {
+	proposals, err := s.store.ListKnowledgeProposals(ctx, "", "")
+	if err != nil {
+		return nil
+	}
+	result := map[string]bool{}
+	for _, proposal := range proposals {
+		if proposal.Status != domain.KnowledgeProposalPending {
+			continue
+		}
+		targetVault := proposal.TargetSource == domain.KnowledgeProposalTargetVault
+		if targetVault == vault {
+			result[proposal.EntryID] = true
+		}
+	}
+	return result
+}
+
+// projectKnowledgeForTask is the project half of a Turn/Agent knowledge read.
+// The returned source tells the caller which pending set applies. Vault errors
+// are returned, never turned into a legacy fallback.
+func (s *Service) projectKnowledgeForTask(ctx context.Context, projectID string, productLine domain.ProductLine, excludePending bool) ([]domain.KnowledgeEntry, []domain.KnowledgeEntry, string, error) {
+	snapshot, vault, err := s.readVaultProjectKnowledge(ctx, projectID)
+	if err != nil {
+		return nil, nil, "vault", err
+	}
+	if vault {
+		stale := snapshot.Stale
+		if excludePending {
+			pending := s.pendingKnowledgeIDs(ctx, true)
+			stale = filterPendingStale(stale, pending)
+		}
+		return snapshot.Project, stale, "vault", nil
+	}
+	active, _ := s.store.ListApplicableKnowledge(ctx, projectID, productLine.ID, []domain.KnowledgeStatus{domain.KnowledgeVerified})
+	stale, _ := s.store.ListApplicableKnowledge(ctx, projectID, productLine.ID, []domain.KnowledgeStatus{domain.KnowledgeStale})
+	if excludePending {
+		stale = filterPendingStale(stale, s.pendingKnowledgeIDs(ctx, false))
+	}
+	return active, stale, "legacy", nil
+}
+
+// globalKnowledgeForTask is the global half. It routes independently from the
+// project so an unbound project can still be served by a ready vault global
+// library, and a vault-bound project never sees legacy global rows.
+func (s *Service) globalKnowledgeForTask(ctx context.Context, excludePending bool) ([]domain.KnowledgeEntry, []domain.KnowledgeEntry, string, error) {
+	active, stale, vault, err := s.readVaultGlobalKnowledge(ctx)
+	if err != nil {
+		return nil, nil, "vault", err
+	}
+	if vault {
+		if excludePending {
+			stale = filterPendingStale(stale, s.pendingKnowledgeIDs(ctx, true))
+		}
+		return active, stale, "vault", nil
+	}
+	active, _ = s.store.ListKnowledge(ctx, "global", "", []domain.KnowledgeStatus{domain.KnowledgeVerified})
+	stale, _ = s.store.ListKnowledge(ctx, "global", "", []domain.KnowledgeStatus{domain.KnowledgeStale})
+	if excludePending {
+		stale = filterPendingStale(stale, s.pendingKnowledgeIDs(ctx, false))
+	}
+	return active, stale, "legacy", nil
+}
+
+func filterPendingStale(entries []domain.KnowledgeEntry, pending map[string]bool) []domain.KnowledgeEntry {
+	result := make([]domain.KnowledgeEntry, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsIndex || pending[entry.ID] {
+			continue
+		}
+		result = append(result, entry)
+	}
+	return result
+}
+
+// vaultKnowledgeForProject is kept for diagnostics and tests. Production reads
+// use the strict helpers above; this convenience view fills global and project
+// independently so the result never implies that one gate decided both.
+func (s *Service) vaultKnowledgeForProject(ctx context.Context, projectID string) (vaultKnowledgeSnapshot, bool) {
+	snapshot, vault, err := s.readVaultProjectKnowledge(ctx, projectID)
+	if err != nil || !vault {
 		return vaultKnowledgeSnapshot{}, false
 	}
-	return snapshot, ok
+	if global, _, _, globalErr := s.readVaultGlobalKnowledge(ctx); globalErr == nil {
+		snapshot.Global = global
+	}
+	return snapshot, true
 }
 
 func mapVaultKnowledge(entries []knowledgevault.IndexEntry) []domain.KnowledgeEntry {
@@ -194,20 +408,6 @@ func parseVaultTime(value string) time.Time {
 		}
 	}
 	return time.Time{}
-}
-
-func (s *Service) vaultPendingKnowledgeIDs(ctx context.Context) map[string]bool {
-	pending, err := s.store.ListKnowledgeProposals(ctx, "", "")
-	if err != nil {
-		return nil
-	}
-	result := map[string]bool{}
-	for _, proposal := range pending {
-		if proposal.Status == domain.KnowledgeProposalPending {
-			result[proposal.EntryID] = true
-		}
-	}
-	return result
 }
 
 func (s *Service) knowledgeGuidePrompt() string {

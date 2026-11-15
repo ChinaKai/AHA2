@@ -58,7 +58,46 @@ func (s *Store) ChannelKnowledgePolicies(ctx context.Context, instanceID string)
 	return result, nil
 }
 
-func (s *Store) ReplaceChannelKnowledgeGrants(ctx context.Context, instanceID, endpointKind, ownerID, scopeMode string, expectedRevision int, grants []domain.ChannelKnowledgeGrant, at time.Time) error {
+// ChannelKnowledgeSelection is the stored configuration for one endpoint: the
+// fixed index plus the owner-selected grants. The IDs may name either a legacy
+// knowledge row or a vault document; resolving them against the current read
+// source is the app layer's job, not the store's.
+type ChannelKnowledgeSelection struct {
+	PolicyID          string
+	FixedIndexEntryID string
+	ScopeMode         string
+	Grants            []domain.ChannelKnowledgeGrant
+}
+
+func (s *Store) ChannelKnowledgeSelection(ctx context.Context, instanceID, endpointKind string) (ChannelKnowledgeSelection, error) {
+	var result ChannelKnowledgeSelection
+	err := s.db.QueryRowContext(ctx, `SELECT p.id,p.fixed_index_entry_id,p.scope_mode FROM channel_knowledge_policies p JOIN channel_endpoints e ON e.id=p.endpoint_id WHERE p.instance_id=? AND e.kind=? AND e.enabled=1`, instanceID, endpointKind).
+		Scan(&result.PolicyID, &result.FixedIndexEntryID, &result.ScopeMode)
+	if err != nil {
+		return ChannelKnowledgeSelection{}, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT knowledge_entry_id,grant_scope FROM channel_knowledge_grants WHERE policy_id=? AND revoked_at='' ORDER BY knowledge_entry_id,grant_scope`, result.PolicyID)
+	if err != nil {
+		return ChannelKnowledgeSelection{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var grant domain.ChannelKnowledgeGrant
+		if err := rows.Scan(&grant.KnowledgeEntryID, &grant.GrantScope); err != nil {
+			return ChannelKnowledgeSelection{}, err
+		}
+		grant.PolicyID = result.PolicyID
+		result.Grants = append(result.Grants, grant)
+	}
+	return result, rows.Err()
+}
+
+// ReplaceChannelKnowledgeGrants replaces the active grants of one endpoint.
+// vaultIDs names the roots whose validation already happened against the vault
+// index; every other ID must still exist as a verified legacy knowledge entry.
+// This keeps the legacy integrity check without making a vault root depend on a
+// legacy row that no longer describes what the project reads.
+func (s *Store) ReplaceChannelKnowledgeGrants(ctx context.Context, instanceID, endpointKind, ownerID, scopeMode string, expectedRevision int, grants []domain.ChannelKnowledgeGrant, vaultIDs map[string]bool, at time.Time) error {
 	if scopeMode != "all" && scopeMode != "selected" {
 		return errors.New("invalid channel knowledge scope mode")
 	}
@@ -82,12 +121,14 @@ func (s *Store) ReplaceChannelKnowledgeGrants(ctx context.Context, instanceID, e
 		if grant.GrantScope != "node" && grant.GrantScope != "subtree" {
 			return errors.New("invalid channel knowledge grant scope")
 		}
-		var status string
-		if err := tx.QueryRowContext(ctx, `SELECT status FROM knowledge_entries WHERE id=?`, grant.KnowledgeEntryID).Scan(&status); err != nil {
-			return err
-		}
-		if status != string(domain.KnowledgeVerified) {
-			return errors.New("channel knowledge grant requires a verified stable entry id")
+		if !vaultIDs[grant.KnowledgeEntryID] {
+			var status string
+			if err := tx.QueryRowContext(ctx, `SELECT status FROM knowledge_entries WHERE id=?`, grant.KnowledgeEntryID).Scan(&status); err != nil {
+				return err
+			}
+			if status != string(domain.KnowledgeVerified) {
+				return errors.New("channel knowledge grant requires a verified stable entry id")
+			}
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO channel_knowledge_grants(id,policy_id,knowledge_entry_id,grant_scope,granted_by_owner_id,created_at,revoked_at) VALUES(?,?,?,?,?,?,'')`, domain.NewID("channel_knowledge_grant"), policyID, grant.KnowledgeEntryID, grant.GrantScope, ownerID, timeString(at)); err != nil {
 			return err

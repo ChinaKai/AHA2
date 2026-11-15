@@ -87,7 +87,9 @@ aha2 knowledge-vault import --database <data-dir>/aha2.db --kind git --remote gi
 Agent 读取、技能加载和写入都跟随同一个 owner 总开关，没有额外的用户可见开关：
 
 - 总开关开启且就绪：Turn 知识块、Agent 知识列表和技能优先使用 vault。每个项目还需索引 ready 且 manifest 已绑定；未绑定项目继续按 legacy 处理，并在面板和 Agent 响应中给出 warning。
-- 总开关关闭、索引未 ready、项目未绑定或读取失败：立即使用旧知识表和旧技能目录，不阻塞 Turn。`AgentKnowledgeEntryResult`/`AgentKnowledgeFeedbackResult` 的 `warning` 字段说明回退原因，服务端同时记录日志。
+- 总开关关闭、索引未 ready、项目未绑定或读取被回退名单排除：立即使用旧知识表和旧技能目录，不阻塞 Turn。`AgentKnowledgeEntryResult`/`AgentKnowledgeFeedbackResult` 的 `warning` 字段说明回退原因，服务端同时记录日志。
+- 项目已绑定且索引 ready 后，vault 读取失败必须 fail-closed：Turn 知识块留空、Agent 知识列表返回错误，并记录/返回 warning，**不回退旧库**。全局知识同理，且与项目绑定独立判断：全局读 vault 时即使项目仍未绑定，也只读 vault global。
+- 渠道知识按每个来源项目各自当前生效的读取源解析；vault 项目的旧 grants 不再授权旧库内容，渠道可授权根来自当前读取源（vault 项目的根是 vault 索引 ID）。
 - 技能优先从 `global/skills/<slug>/` 或 `projects/<slug>/skills/<slug>/` 加载；vault 中缺少对应包时回退到旧的 `<data-dir>/knowledge/skills`，旧目录不删除。
 - 以下环境变量/CLI 参数只作为支持人员的紧急诊断手段，不在普通 UI 展示，也不要求配置：`AHA2_KNOWLEDGE_VAULT_RUNTIME_READ` / `--knowledge-vault-runtime-read`（关闭后所有项目强制读旧库）、`AHA2_KNOWLEDGE_VAULT_RUNTIME_WRITE` / `--knowledge-vault-runtime-write`（关闭后 vault 写入接口返回 409）、`AHA2_KNOWLEDGE_VAULT_READ_PROJECTS`（逗号分隔项目 allowlist，设为空字符串时所有项目回退旧库）。它们只收窄单个 manager 开关，不会打开总开关，也不会写回数据库。
 - 回退：在 Web 关闭「文件知识库」即所有项目下一 Turn 回到旧知识库，无需重启；旧知识表与旧 skills 始终保留，不因切换删除。

@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -25,21 +24,10 @@ var (
 
 // vaultGlobalReadEnabled reports whether global knowledge is read from the
 // vault. Global entries have no project binding, so the project manifest check
-// does not apply; the manager switch, runtime read gate, rollback allowlist and
-// index readiness do.
+// does not apply; the shared knowledge read decision owns the manager switch,
+// runtime read gate, rollback allowlist and index readiness.
 func (s *Service) vaultGlobalReadEnabled() bool {
-	if s == nil || s.knowledgeVault == nil || !s.knowledgeVaultRuntimeRead {
-		return false
-	}
-	if raw, configured := os.LookupEnv(knowledgeVaultReadProjectsEnv); configured && strings.TrimSpace(raw) == "" {
-		return false
-	}
-	ready := false
-	err := s.knowledgeVault.WithReader(func(reader *knowledgevault.Reader) error {
-		ready = reader.IndexReady()
-		return nil
-	})
-	return err == nil && ready
+	return s.knowledgeReadDecision("global", "").Vault
 }
 
 func (s *Service) vaultGlobalKnowledgeWriteEnabled() bool {
@@ -47,24 +35,7 @@ func (s *Service) vaultGlobalKnowledgeWriteEnabled() bool {
 }
 
 func (s *Service) vaultGlobalFallbackWarning() string {
-	if s == nil || s.knowledgeVault == nil || !s.knowledgeVault.Enabled() {
-		return ""
-	}
-	if !s.knowledgeVaultRuntimeRead {
-		return "知识库已启用，但支持诊断开关关闭了读取；全局知识使用旧知识库。"
-	}
-	if raw, configured := os.LookupEnv(knowledgeVaultReadProjectsEnv); configured && strings.TrimSpace(raw) == "" {
-		return "知识库已启用，但支持诊断回退名单已清空；全局知识使用旧知识库。"
-	}
-	ready := false
-	_ = s.knowledgeVault.WithReader(func(reader *knowledgevault.Reader) error {
-		ready = reader.IndexReady()
-		return nil
-	})
-	if !ready {
-		return "知识库已启用，但索引未就绪；全局知识使用旧知识库。"
-	}
-	return ""
+	return s.knowledgeReadDecision("global", "").Warning
 }
 
 // knowledgeWriteRoute chooses the write source from the read source. It returns
@@ -90,34 +61,9 @@ func (s *Service) knowledgeWriteRoute(scope, projectID string) (bool, error) {
 	return false, nil
 }
 
-// vaultEntryByID reports whether an ID belongs to the vault. It is used before a
-// Pet/Web operation touches either store, so an ID that exists in the vault is
-// never revised or deleted through the legacy tables.
-func (s *Service) vaultGlobalKnowledge(ctx context.Context) ([]domain.KnowledgeEntry, bool) {
-	if !s.vaultGlobalReadEnabled() {
-		return nil, false
-	}
-	var result []domain.KnowledgeEntry
-	ok := false
-	err := s.knowledgeVault.WithReader(func(reader *knowledgevault.Reader) error {
-		if !reader.IndexReady() {
-			return nil
-		}
-		entries, err := reader.Entries(ctx, "global", "")
-		if err != nil {
-			return err
-		}
-		active, stale := splitVaultKnowledge(mapVaultKnowledge(entries))
-		result = append(active, stale...)
-		ok = true
-		return nil
-	})
-	if err != nil {
-		return nil, false
-	}
-	return result, ok
-}
-
+// readSourceIsVault reports whether one scope/project currently reads the
+// vault. Every caller that must not mix sources uses this instead of testing a
+// single gate itself.
 func (s *Service) readSourceIsVault(scope, projectID string) bool {
 	if strings.TrimSpace(scope) == "global" {
 		return s.vaultGlobalReadEnabled()
@@ -125,6 +71,20 @@ func (s *Service) readSourceIsVault(scope, projectID string) bool {
 	return s.vaultReadEnabled(projectID)
 }
 
+// KnowledgeProposalVisible reports whether a proposal publishes to the source
+// its scope/project currently reads. A vault-routed project must not show
+// legacy proposals left over from before the switch, and a legacy project must
+// not show vault proposals it cannot publish.
+func (s *Service) KnowledgeProposalVisible(proposal domain.KnowledgeProposal) bool {
+	scope, projectID := knowledgeProjectIDForScope(proposal.Proposed.Scope, proposal.Proposed.ProjectID)
+	sourceIsVault := s.readSourceIsVault(scope, projectID)
+	targetIsVault := proposal.TargetSource == domain.KnowledgeProposalTargetVault
+	return sourceIsVault == targetIsVault
+}
+
+// vaultEntryByID reports whether an ID belongs to the vault. It is used before
+// a Pet/Web operation touches either store, so an ID that exists in the vault
+// is never revised or deleted through the legacy tables.
 func (s *Service) vaultEntryByID(ctx context.Context, id string) (knowledgevault.IndexEntry, bool, error) {
 	id = strings.TrimSpace(id)
 	if id == "" || s == nil || s.knowledgeVault == nil {
@@ -468,6 +428,11 @@ func (s *Service) ApproveKnowledgeProposal(ctx context.Context, id string, decid
 			return domain.KnowledgeProposal{}, domain.KnowledgeEntry{}, ErrKnowledgeReadSourceMismatch
 		}
 		return s.store.ApproveKnowledgeProposal(ctx, id, decidedAt, decisionReason...)
+	}
+	// The reverse direction must fail closed too: a vault proposal approved
+	// after the source rolled back would publish a document nothing reads.
+	if !s.readSourceIsVault(proposal.Proposed.Scope, proposal.Proposed.ProjectID) {
+		return domain.KnowledgeProposal{}, domain.KnowledgeEntry{}, ErrKnowledgeReadSourceMismatch
 	}
 	return s.approveVaultKnowledgeProposal(ctx, proposal, decidedAt, decisionReason...)
 }

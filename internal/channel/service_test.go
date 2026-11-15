@@ -683,7 +683,7 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 		if stringField(policy, "endpoint") != domain.ChannelEndpointAssistantDM {
 			continue
 		}
-		if err := database.ReplaceChannelKnowledgeGrants(ctx, instance.ID, domain.ChannelEndpointAssistantDM, owner.ID, "selected", intField(policy, "revision"), nil, now); err != nil {
+		if err := database.ReplaceChannelKnowledgeGrants(ctx, instance.ID, domain.ChannelEndpointAssistantDM, owner.ID, "selected", intField(policy, "revision"), nil, nil, now); err != nil {
 			t.Fatal(err)
 		}
 	}

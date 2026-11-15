@@ -3747,5 +3747,17 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("record schema v139: %w", err)
 		}
 	}
+	var hasV140 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=140)`).Scan(&hasV140)
+	var grantEntryReferences int
+	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_foreign_key_list('channel_knowledge_grants') WHERE "table"='knowledge_entries'`).Scan(&grantEntryReferences)
+	if !hasV140 || grantEntryReferences > 0 {
+		// Vault knowledge IDs are not rows in knowledge_entries. Drop that one
+		// foreign key so a vault root can be granted without writing a shadow
+		// legacy row; the policy/owner references stay enforced.
+		if err := s.migrateChannelKnowledgeGrantVaultIDs(ctx); err != nil {
+			return fmt.Errorf("apply schema v140 channel knowledge vault grants: %w", err)
+		}
+	}
 	return nil
 }

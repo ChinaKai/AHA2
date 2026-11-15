@@ -114,16 +114,23 @@ func (s *Service) PetListKnowledge(ctx context.Context, scope, projectID string,
 	var entries []domain.KnowledgeEntry
 	var err error
 	if scope == "project" {
-		if snapshot, ok := s.vaultKnowledgeForProject(ctx, projectID); ok {
+		if snapshot, vault, readErr := s.readVaultProjectKnowledge(ctx, projectID); readErr != nil {
+			return PetKnowledgeView{}, readErr
+		} else if vault {
 			entries = append(entries, snapshot.Project...)
 			entries = append(entries, snapshot.Stale...)
 		} else {
 			entries, err = s.store.ListProjectKnowledge(ctx, projectID, nil)
 		}
-	} else if vaultEntries, ok := s.vaultGlobalKnowledge(ctx); ok {
-		entries = vaultEntries
 	} else {
-		entries, err = s.store.ListKnowledge(ctx, "global", "", nil)
+		if active, stale, vault, readErr := s.readVaultGlobalKnowledge(ctx); readErr != nil {
+			return PetKnowledgeView{}, readErr
+		} else if vault {
+			entries = append(entries, active...)
+			entries = append(entries, stale...)
+		} else {
+			entries, err = s.store.ListKnowledge(ctx, "global", "", nil)
+		}
 	}
 	if err != nil {
 		return PetKnowledgeView{}, err
@@ -142,6 +149,13 @@ func (s *Service) PetListKnowledge(ctx context.Context, scope, projectID string,
 				break
 			}
 			if proposal.Status != domain.KnowledgeProposalPending {
+				continue
+			}
+			// A proposal is only actionable in the source that publishes it.
+			// A vault-routed project must not show legacy proposals left over
+			// from before the switch, and a legacy project must not show vault
+			// proposals it cannot publish.
+			if !s.KnowledgeProposalVisible(proposal) {
 				continue
 			}
 			view.Proposals = append(view.Proposals, PetKnowledgeProposalBrief{
