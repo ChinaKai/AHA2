@@ -26,6 +26,29 @@ export function eventRefreshesTaskList(type: string): boolean {
   return ["task_", "turn_", "round_", "knowledge_"].some(prefix => type.startsWith(prefix));
 }
 
+// Only a Task settling into a state the reader must know about is announced.
+// Running-to-running refreshes, list patches, and ordinary renders stay silent.
+export function taskStatusNeedsAnnouncement(previous: string, next: string): boolean {
+  return previous !== next && ["completed", "failed", "blocked", "cancelled"].includes(next);
+}
+
+// Collapses an event and a duplicate report of the same event (for example two
+// refreshes that both observed the same status transition) into one write.
+export function createStatusAnnouncer(dedupMs = 3000, now: () => number = Date.now) {
+  let last = "";
+  let lastAt = 0;
+  return {
+    claim(message: string): boolean {
+      if (!message) return false;
+      const at = now();
+      if (message === last && at - lastAt < dedupMs) return false;
+      last = message;
+      lastAt = at;
+      return true;
+    },
+  };
+}
+
 export interface ResourceStateLike {
   loading: boolean;
   loaded: boolean;

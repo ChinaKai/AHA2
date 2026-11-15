@@ -125,6 +125,9 @@
 
 * { box-sizing: border-box; }
 html, body, #app { min-height: 100%; margin: 0; }
+/* The persistent status live region announces only explicit events; it must
+   stay in the accessibility tree, so it cannot use display:none. */
+.visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
 body { min-width: 320px; }
 body.task-view-active { height: 100dvh; overflow: hidden; }
 body.task-view-active #app,

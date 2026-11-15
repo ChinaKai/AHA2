@@ -369,7 +369,7 @@ window.confirm = () => true;
 `;
 }
 
-const pageHTML = fixture => `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AHA2</title><link rel="stylesheet" href="/styles.css"></head><body><main id="app"></main><script src="${fixture}"></script><script type="module" src="/app.js"></script></body></html>`;
+const pageHTML = fixture => `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AHA2</title><link rel="stylesheet" href="/styles.css"></head><body><div id="app"></div><div id="app-status" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div><script src="${fixture}"></script><script type="module" src="/app.js"></script></body></html>`;
 const mime = {".js": "text/javascript", ".css": "text/css", ".html": "text/html", ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon"};
 const server = createServer(async (request, response) => {
   const pathname = new URL(request.url, "http://localhost").pathname;
@@ -962,9 +962,13 @@ try {
   await page.waitForSelector(".banner.success", {timeout: 5000});
   assert.match(await page.locator(".banner.success").textContent(), /已复制绝对路径/);
   assert.equal(await page.evaluate(() => document.activeElement?.getAttribute("data-kv-copy")), docCopyPath, "copy keeps focus on the document copy button");
-  assert.equal(await page.locator(".banner-stack").getAttribute("role"), "status");
-  assert.equal(await page.locator(".banner-stack").getAttribute("aria-live"), "polite");
+  // The visible banner is no longer the live region: the persistent app status
+  // region carries the same notice, and it survives the banner re-render.
+  assert.equal(await page.locator(".banner-stack").getAttribute("role"), null);
+  assert.equal(await page.locator("#app-status").getAttribute("role"), "status");
+  await page.waitForFunction(() => document.querySelector("#app-status")?.textContent.includes("已复制绝对路径"));
   await page.waitForSelector(".banner.success", {state: "detached", timeout: 7000});
+  assert.match(await page.locator("#app-status").textContent(), /已复制绝对路径/, "the notice outlives the visual banner");
   assert.equal(await page.evaluate(() => document.activeElement?.getAttribute("data-kv-copy")), docCopyPath, "banner expiry keeps focus on the document copy button");
 
   assert.equal(await page.locator(".kv-doc-body").innerHTML().then(html => /<script/i.test(html)), false);
@@ -1081,9 +1085,11 @@ try {
   await page.waitForFunction(() => document.querySelector(".banner.success")?.textContent.includes("已复制绝对路径"), null, {timeout: 5000});
   assert.match(await page.locator(".banner.success").textContent(), /已复制绝对路径/);
   assert.equal(await page.evaluate(() => document.activeElement?.getAttribute("data-kv-copy")), skillCopyPath, "copy keeps focus on the skill copy button");
-  assert.equal(await page.locator(".banner-stack").getAttribute("role"), "status");
-  assert.equal(await page.locator(".banner-stack").getAttribute("aria-live"), "polite");
+  assert.equal(await page.locator(".banner-stack").getAttribute("role"), null);
+  assert.equal(await page.locator("#app-status").getAttribute("role"), "status");
+  await page.waitForFunction(() => document.querySelector("#app-status")?.textContent.includes("已复制绝对路径"));
   await page.waitForSelector(".banner.success", {state: "detached", timeout: 7000});
+  assert.match(await page.locator("#app-status").textContent(), /已复制绝对路径/, "the notice outlives the visual banner");
   assert.equal(await page.evaluate(() => document.activeElement?.getAttribute("data-kv-copy")), skillCopyPath, "banner expiry keeps focus on the skill copy button");
   const skillLayout = await page.evaluate(() => {
     const card = [...document.querySelectorAll(".kv-skill-card")].find(node => node.textContent.includes("一个名字非常长的技能包"));

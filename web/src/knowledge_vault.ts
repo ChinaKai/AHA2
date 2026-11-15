@@ -392,6 +392,8 @@ function installTreeStyles(): void {
 export interface KnowledgeVaultContext {
   render: () => void;
   setMessage: (kind: "notice" | "error", message: string) => void;
+  /** Speaks a transient notice without re-rendering the page. */
+  announce?: (message: string) => void;
 }
 
 interface VaultState {
@@ -1927,7 +1929,7 @@ function bindSidebarViewport(): void {
 /* Data loading ----------------------------------------------------------- */
 
 function contextFromConfig(): KnowledgeVaultContext {
-  return {render: () => {}, setMessage: () => {}};
+  return {render: () => {}, setMessage: () => {}, announce: () => {}};
 }
 let activeContext: KnowledgeVaultContext = contextFromConfig();
 
@@ -2486,10 +2488,11 @@ function decorateWikilinks(body: HTMLElement): void {
 let copyNoticeVersion = 0;
 
 function showCopyNotice(kind: "notice" | "error", message: string): void {
-  // Update only the banner live region. A full render would replace the
-  // focused copy button and drop keyboard focus.
+  // Update only the banner and the persistent status region. A full render
+  // would replace the focused copy button and drop keyboard focus.
   const stack = document.querySelector<HTMLElement>("main.workspace > .banner-stack");
   if (!stack) return;
+  activeContext.announce?.(message);
   const version = ++copyNoticeVersion;
   stack.innerHTML = `<div class="banner ${kind === "error" ? "error" : "success"}">${escapeVaultHTML(message)}</div>`;
   window.setTimeout(() => {
@@ -2642,7 +2645,7 @@ function renderPreservingFocus(renderPage: () => void): void {
 
 export function bindKnowledgeVaultPage(context: KnowledgeVaultContext): void {
   installGitStyles();
-  activeContext = {render: () => renderPreservingFocus(context.render), setMessage: context.setMessage};
+  activeContext = {render: () => renderPreservingFocus(context.render), setMessage: context.setMessage, announce: context.announce};
   bindKeyboard();
   bindHash();
   if (!binding) {

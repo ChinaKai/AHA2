@@ -29,7 +29,7 @@ import {DEFAULT_TASK_STATUS_FILTERS, LOCAL_TASK_DEVICE_FILTER, TASK_STATUS_GROUP
 import type {TaskStatusGroup} from "./task_filters.js";
 import {TASK_TOOL_DEFAULT_WIDTH, normalizePinnedTaskTool, normalizeTaskToolMode, normalizeTaskToolWidth, renderTaskToolButtons, renderTaskToolContent, renderTaskToolPanel} from "./task_tools.js";
 import type {TaskTool, TaskToolMode} from "./task_tools.js";
-import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, createListRefreshScheduler, createResourceLoader, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, installDialogEntryFocus, loadNavigationSnapshot, matchingSlashCommands, paginateItems, paginationHTML, planKeyedNodes, stableTextSignature, protoBadges, readPerfPanelPreference, renderModelHealthCell, renderProtocolProbeStatus, renderWorkspaceDetection, replaceInteractiveRegion, restoreInteractiveRegion, saveNavigationSnapshot, staleViewHashTarget, textMatchesQuery, writePerfPanelPreference} from "./ui_helpers.js";
+import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, createListRefreshScheduler, createResourceLoader, createStatusAnnouncer, eventRefreshesTaskList, taskStatusNeedsAnnouncement, exactSlashCommand, executeAgentSessionAction, installDialogEntryFocus, loadNavigationSnapshot, matchingSlashCommands, paginateItems, paginationHTML, planKeyedNodes, stableTextSignature, protoBadges, readPerfPanelPreference, renderModelHealthCell, renderProtocolProbeStatus, renderWorkspaceDetection, replaceInteractiveRegion, restoreInteractiveRegion, saveNavigationSnapshot, staleViewHashTarget, textMatchesQuery, writePerfPanelPreference} from "./ui_helpers.js";
 import type {InteractiveRegionState, ModelHealthView} from "./ui_helpers.js";
 import {
   compactNumber,
@@ -671,7 +671,26 @@ const state: State = {
 
 applyLocale("auto");
 const app = document.querySelector<HTMLDivElement>("#app");
+// render() replaces #app wholesale, so the live region that speaks for the page
+// lives beside it and survives. Only explicit events write here; an ordinary
+// render, a poll, or an unchanged list patch never does.
+const appStatus = document.querySelector<HTMLElement>("#app-status");
+const statusAnnouncer = createStatusAnnouncer();
+
+function announceStatus(text: string, detail = ""): void {
+  const message = detail ? `${text} ${detail}` : text;
+  if (!appStatus || !statusAnnouncer.claim(message)) return;
+  // Emptying first makes a genuine repeat after the dedup window a new change
+  // inside the polite region instead of an ignored identical write.
+  appStatus.textContent = "";
+  setTimeout(() => {
+    if (appStatus) appStatus.textContent = message;
+  }, 30);
+}
+
 const petApprovalCounter = createPetApprovalCounter(() => api.petPendingApprovalCount(), updatePetPendingApprovalIndicators);
+// The first count is the baseline; only a later increase means a new approval.
+let seenPendingApprovals: number | null = null;
 let petPendingApprovalTimer = 0;
 let petWorkbenchTab = "overview";
 // Records table of contents: wide screens start open, phones start folded. The
@@ -1812,6 +1831,9 @@ function applyProviderPreset(): void {
 
 function setMessage(type: "error" | "notice", value: string): void {
   state[type] = value;
+  // Feedback banners are re-created by the next render, so announce from the
+  // persistent region instead of relying on a newly inserted live node.
+  announceStatus(String(value));
   window.setTimeout(() => {
     if (state[type] === value) {
       state[type] = "";
@@ -3882,6 +3904,7 @@ async function loadTaskMail(taskID: string): Promise<void> {
 
 async function refreshTaskRuntime(taskID: string): Promise<boolean> {
   if (state.selectedTask?.task.id !== taskID) return false;
+  const previousStatus = state.selectedTask.task.status;
   const previousSignature = taskRuntimeSignature(state.selectedTask);
   const previousContext = state.taskContext ? JSON.stringify(state.taskContext) : "";
   const previousMail = state.taskMailOptions ? JSON.stringify(state.taskMailOptions) : "";
@@ -3897,6 +3920,9 @@ async function refreshTaskRuntime(taskID: string): Promise<boolean> {
   ]);
   detail.agents ||= [];
   state.selectedTask = detail;
+  if (taskStatusNeedsAnnouncement(previousStatus, detail.task.status)) {
+    announceStatus(tr(statusLabel(detail.task.status)), detail.task.code || detail.task.title);
+  }
   let changed = taskRuntimeSignature(detail) !== previousSignature;
   state.taskEventCursor = Math.max(state.taskEventCursor, detail.event_cursor || 0);
   if (page.conversation.items?.length) {
@@ -3975,7 +4001,7 @@ function loginView(): string {
         <label>${t("login.confirmPassword")}<input name="confirm_password" type="password" autocomplete="new-password" minlength="10" required></label>
         <button class="primary full" type="submit">${t("login.resetLogin")}</button>
         <button id="back-to-login" class="auth-link" type="button">${t("login.backLogin")}</button>
-        ${state.error ? `<div class="form-error">${escapeHTML(state.error)}</div>` : ""}
+        ${state.error ? `<div class="form-error" role="alert">${escapeHTML(state.error)}</div>` : ""}
       </form>` : `<form id="auth-form" class="auth-form">
         <h1>${register ? t("login.initOwner") : t("login.login")}</h1>
         <p>${register ? t("login.initIntro") : t("login.loginIntro")}</p>
@@ -3984,7 +4010,7 @@ function loginView(): string {
         <label>${t("login.password")}<input name="password" type="password" autocomplete="${register ? "new-password" : "current-password"}" minlength="10" required></label>
         <button class="primary full" type="submit">${register ? t("login.createOwner") : t("login.login")}</button>
         ${register ? "" : `<button id="forgot-password" class="auth-link" type="button">${t("login.forgot")}</button>`}
-        ${state.error ? `<div class="form-error">${escapeHTML(state.error)}</div>` : ""}
+        ${state.error ? `<div class="form-error" role="alert">${escapeHTML(state.error)}</div>` : ""}
       </form>`}
     </main>
   </div>`;
@@ -3996,6 +4022,9 @@ function petPendingApprovalLabel(): string {
 
 function updatePetPendingApprovalIndicators(): void {
   const pending = petApprovalCounter.pending;
+  const added = seenPendingApprovals === null ? 0 : pending - seenPendingApprovals;
+  seenPendingApprovals = pending;
+  if (added > 0) announceStatus(t("a11y.newApprovals", {count: added}));
   document.querySelectorAll<HTMLElement>('[data-view="pet-workbench"]').forEach(button => {
     button.classList.toggle("has-pending", pending > 0);
     const label = pending > 0 ? petPendingApprovalLabel() : t("nav.pet");
@@ -4054,7 +4083,7 @@ function shell(content: string): string {
 
 function banner(): string {
   const messages = `${state.error ? `<div class="banner error">${escapeHTML(state.error)}</div>` : ""}${state.notice ? `<div class="banner success">${escapeHTML(state.notice)}</div>` : ""}`;
-  return `<div class="banner-stack" role="status" aria-live="polite">${messages}</div>`;
+  return `<div class="banner-stack">${messages}</div>`;
 }
 
 function resourceStatusHTML(): string {
@@ -6423,7 +6452,7 @@ function render(): void {
       })),
       tasks: tasksView,
       knowledge: () => state.knowledgeVaultEnabled === true
-        ? shell(renderKnowledgeVaultPage({render, setMessage}))
+        ? shell(renderKnowledgeVaultPage({render, setMessage, announce: announceStatus}))
         : state.knowledgeVaultEnabled === false
           ? shell(`${renderKnowledgeWorkspace({
             projects: state.projects,
@@ -7833,7 +7862,7 @@ function bindTaskToolsAndPanels(): void {
   if (state.taskTool === "browser" && state.selectedTask) bindDesktopPanel(state.selectedTask, setMessage);
   if (state.taskTool === "channel" && state.selectedTask) bindTaskChannelPanel();
   if (state.view === "knowledge" && !state.selectedProject && !state.selectedTask) {
-    if (state.knowledgeVaultEnabled === true) bindKnowledgeVaultPage({render, setMessage});
+    if (state.knowledgeVaultEnabled === true) bindKnowledgeVaultPage({render, setMessage, announce: announceStatus});
     else if (state.knowledgeVaultEnabled === false) bindKnowledgeWorkspace({
       projects: state.projects,
       workspaces: state.workspaces,
