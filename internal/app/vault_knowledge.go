@@ -205,42 +205,19 @@ func applyVaultLibraryNames(result *knowledgevault.LibraryList, manifest knowled
 	}
 }
 
+// vaultKnowledgeForProject is the convenience view for diagnostics and tests.
+// It must stay source-strict: project and global are resolved by their own
+// gates, and a vault read failure returns unavailable instead of falling back
+// to the legacy rows the project no longer reads.
 func (s *Service) vaultKnowledgeForProject(ctx context.Context, projectID string) (vaultKnowledgeSnapshot, bool) {
-	if !s.vaultReadEnabled(projectID) {
-		if warning := s.vaultFallbackWarning(projectID); warning != "" {
-			log.Printf("knowledge vault project %s: %s", projectID, warning)
-		}
+	snapshot, vault, err := s.readVaultProjectKnowledge(ctx, projectID)
+	if err != nil || !vault {
 		return vaultKnowledgeSnapshot{}, false
 	}
-	snapshot := vaultKnowledgeSnapshot{}
-	ok := false
-	err := s.knowledgeVault.WithReader(func(reader *knowledgevault.Reader) error {
-		if !reader.IndexReady() || strings.TrimSpace(reader.Manifest().Projects[projectID]) == "" {
-			return nil
-		}
-		global, err := reader.Entries(ctx, "global", "")
-		if err != nil {
-			return err
-		}
-		project, err := reader.Entries(ctx, "project", projectID)
-		if err != nil {
-			return err
-		}
-		var stale []domain.KnowledgeEntry
-		snapshot.Global, stale = splitVaultKnowledge(mapVaultKnowledge(global))
-		snapshot.Stale = append(snapshot.Stale, stale...)
-		snapshot.Project, stale = splitVaultKnowledge(mapVaultKnowledge(project))
-		snapshot.Stale = append(snapshot.Stale, stale...)
-		ok = true
-		return nil
-	})
-	if err != nil {
-		if !errors.Is(err, knowledgevault.ErrDisabled) {
-			log.Printf("knowledge vault read for project %s failed; using legacy knowledge: %v", projectID, err)
-		}
-		return vaultKnowledgeSnapshot{}, false
+	if active, _, globalVault, globalErr := s.readVaultGlobalKnowledge(ctx); globalErr == nil && globalVault {
+		snapshot.Global = active
 	}
-	return snapshot, ok
+	return snapshot, true
 }
 
 // vaultReadEnabled reports whether the vault is the current source for the
