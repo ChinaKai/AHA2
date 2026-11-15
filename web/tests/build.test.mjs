@@ -1601,6 +1601,11 @@ test("built web contains responsive application", async () => {
 	for (const marker of ["data-channel-policy-select-all", "data-channel-policy-clear", "knowledge_scope_mode", "data-channel-knowledge-selected", "全部项目知识与知识库"]) assert.match(channels, new RegExp(marker));
 	assert.match(channels, /私聊默认全部/);
 	assert.match(channels, /policy\.endpoint === "group_digital_human"/);
+	// The channels view follows the live knowledge source instead of always
+	// loading the legacy lists, and the vault branch hides legacy sources.
+	assert.match(script, /jobs\.push\(loadChannelKnowledgeSources\(force\)\)/);
+	assert.match(channels, /data-channel-vault-knowledge/);
+	assert.match(channels, /旧库知识源已隐藏/);
 	assert.doesNotMatch(channels, /group_operation_scope_mode|group_allowed_project_ids|group_allowed_workspace_ids/);
 	assert.doesNotMatch(channels, /name="operation_scope_mode"|name="allowed_project_ids"|name="allowed_workspace_ids"/);
 	assert.doesNotMatch(channels, /data-channel-activity|Owner 收件箱与投递/);

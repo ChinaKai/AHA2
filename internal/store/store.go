@@ -56,7 +56,33 @@ type Store struct {
 	statusMu       sync.RWMutex
 	statusListener TaskStatusListener
 
+	// legacyRootsMu guards the optional eager legacy knowledge-root gate. The
+	// app wires it from the live vault switch; a nil guard keeps the historical
+	// always-create behavior for tests and non-vault callers.
+	legacyRootsMu   sync.RWMutex
+	legacyRootsGate func(projectID string) bool
+
 	databaseStats databaseStatsCache
+}
+
+// SetLegacyKnowledgeRootsGuard installs the predicate that decides whether
+// eager legacy knowledge-root creation should run for a project. It is called
+// on every project creation, so the predicate must consult the live vault
+// switch rather than a value captured at startup.
+func (s *Store) SetLegacyKnowledgeRootsGuard(guard func(projectID string) bool) {
+	if s == nil {
+		return
+	}
+	s.legacyRootsMu.Lock()
+	s.legacyRootsGate = guard
+	s.legacyRootsMu.Unlock()
+}
+
+func (s *Store) legacyKnowledgeRootsEnabled(projectID string) bool {
+	s.legacyRootsMu.RLock()
+	guard := s.legacyRootsGate
+	s.legacyRootsMu.RUnlock()
+	return guard == nil || guard(projectID)
 }
 
 func (s *Store) DataDir() string {

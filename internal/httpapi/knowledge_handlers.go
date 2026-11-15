@@ -36,6 +36,17 @@ func (s *Server) listKnowledge(writer http.ResponseWriter, request *http.Request
 		}
 	}
 	scope, projectID := request.URL.Query().Get("scope"), request.URL.Query().Get("project_id")
+	// A project that reads the vault must not keep listing its legacy copy. An
+	// unfiltered list includes global entries, so it follows the global gate.
+	if projectID != "" {
+		if s.knowledgeVaultReadActive("project", projectID) {
+			writeKnowledgeVaultReadConflict(writer)
+			return
+		}
+	} else if s.knowledgeVaultReadActive("global", "") {
+		writeKnowledgeVaultReadConflict(writer)
+		return
+	}
 	var page listPage[domain.KnowledgeEntry]
 	if options.Paged && !(scope == "project" && projectID != "") {
 		cursorAt, cursorID, cursorErr := listCursorPosition(options, "knowledge")
@@ -204,7 +215,12 @@ func (s *Server) knowledgeIndexes(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	entries := make([]domain.KnowledgeEntry, 0, len(indexes))
-	for _, entry := range indexes {
+	for projectID, entry := range indexes {
+		// A project that reads the vault has no selectable legacy root. Keeping
+		// the row would let the Web source picker grant stale legacy subtrees.
+		if s.knowledgeVaultReadActive("project", projectID) {
+			continue
+		}
 		entries = append(entries, entry)
 	}
 	sort.Slice(entries, func(left, right int) bool { return entries[left].ProjectID < entries[right].ProjectID })
@@ -212,9 +228,22 @@ func (s *Server) knowledgeIndexes(writer http.ResponseWriter, request *http.Requ
 }
 
 func (s *Server) knowledgeDetail(writer http.ResponseWriter, request *http.Request) {
-	item, err := s.store.Knowledge(request.Context(), request.PathValue("id"))
+	id := request.PathValue("id")
+	// A migrated entry keeps its ID in the vault, so a vault hit proves the ID
+	// belongs to the current source even when the legacy row is still present.
+	if s.app != nil {
+		if entry, found, err := s.app.KnowledgeVaultEntry(request.Context(), id); err == nil && found && s.knowledgeVaultReadActive(entry.Scope, entry.ProjectID) {
+			writeKnowledgeVaultReadConflict(writer)
+			return
+		}
+	}
+	item, err := s.store.Knowledge(request.Context(), id)
 	if err != nil {
 		writeError(writer, http.StatusNotFound, "knowledge_not_found")
+		return
+	}
+	if s.knowledgeVaultReadActive(item.Scope, item.ProjectID) {
+		writeKnowledgeVaultReadConflict(writer)
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "knowledge": item})

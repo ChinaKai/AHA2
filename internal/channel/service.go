@@ -456,8 +456,10 @@ func (s *Service) CreateInstance(ctx context.Context, ownerID, pluginID, name, i
 		if existing.OwnerID != ownerID || existing.PluginID != pluginID || existing.Name != name {
 			return domain.ChannelInstance{}, fmt.Errorf("idempotency key was already used with a different request")
 		}
-		if root, rootErr := s.store.EnsureKnowledgeRoot(ctx, "project", existing.HostProjectID); rootErr == nil {
-			_ = s.store.EnsureChannelKnowledgePolicies(ctx, existing.ID, root.ID, now)
+		if s.legacyKnowledgeRootsEnabled(existing.HostProjectID) {
+			if root, rootErr := s.store.EnsureKnowledgeRoot(ctx, "project", existing.HostProjectID); rootErr == nil {
+				_ = s.store.EnsureChannelKnowledgePolicies(ctx, existing.ID, root.ID, now)
+			}
 		}
 		return existing, nil
 	} else if !errors.Is(existingErr, sql.ErrNoRows) {
@@ -489,14 +491,27 @@ func (s *Service) CreateInstance(ctx context.Context, ownerID, pluginID, name, i
 	if err := s.store.CreateChannelInstanceWithHost(ctx, project, workspace, item, endpoints); err != nil {
 		return domain.ChannelInstance{}, err
 	}
-	knowledgeRoot, err := s.store.EnsureKnowledgeRoot(ctx, "project", projectID)
-	if err != nil {
-		return domain.ChannelInstance{}, fmt.Errorf("create channel knowledge root: %w", err)
-	}
-	if err := s.store.EnsureChannelKnowledgePolicies(ctx, item.ID, knowledgeRoot.ID, now); err != nil {
-		return domain.ChannelInstance{}, fmt.Errorf("create channel knowledge policies: %w", err)
+	if s.legacyKnowledgeRootsEnabled(projectID) {
+		knowledgeRoot, err := s.store.EnsureKnowledgeRoot(ctx, "project", projectID)
+		if err != nil {
+			return domain.ChannelInstance{}, fmt.Errorf("create channel knowledge root: %w", err)
+		}
+		if err := s.store.EnsureChannelKnowledgePolicies(ctx, item.ID, knowledgeRoot.ID, now); err != nil {
+			return domain.ChannelInstance{}, fmt.Errorf("create channel knowledge policies: %w", err)
+		}
 	}
 	return s.store.ChannelInstance(ctx, instanceID)
+}
+
+// legacyKnowledgeRootsEnabled follows the same live vault gate the app installs
+// on the store. A new channel host project must not seed the legacy knowledge
+// tables once the vault is the read source; the legacy root is still created
+// lazily if a legacy fallback ever writes.
+func (s *Service) legacyKnowledgeRootsEnabled(projectID string) bool {
+	if s == nil || s.application == nil {
+		return true
+	}
+	return s.application.LegacyKnowledgeRootsEnabled(projectID)
 }
 
 func stableID(prefix string, values ...string) string {

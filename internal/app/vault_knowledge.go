@@ -79,6 +79,37 @@ func (s *Service) vaultReadEnabled(projectID string) bool {
 	return err == nil && available
 }
 
+// KnowledgeVaultReadEnabled reports whether the given scope/project currently
+// reads knowledge from the file vault. It is the routing gate the Agent and Web
+// write paths use, exposed so the legacy HTTP handlers and the Web page cannot
+// disagree with the source a Turn would actually read. An unbound project or a
+// read-fallback keeps its legacy behavior.
+func (s *Service) KnowledgeVaultReadEnabled(scope, projectID string) bool {
+	if strings.EqualFold(strings.TrimSpace(scope), "global") {
+		return s.vaultGlobalReadEnabled()
+	}
+	return s.vaultReadEnabled(projectID)
+}
+
+// KnowledgeVaultEntry reports whether id exists in the vault index and returns
+// the mapped entry. It never falls back to the legacy tables, so a legacy
+// handler can tell "this ID belongs to the vault" from "this ID is unknown".
+func (s *Service) KnowledgeVaultEntry(ctx context.Context, id string) (domain.KnowledgeEntry, bool, error) {
+	return s.vaultDomainEntry(ctx, id)
+}
+
+// LegacyKnowledgeRootsEnabled reports whether eager legacy knowledge-root
+// creation should still run for a project. Once the manager switch and the
+// runtime read gate are on and the support allowlist admits the project, new
+// projects must not seed the legacy tables; if a legacy write ever falls back,
+// EnsureKnowledgeRoot still creates the root lazily on demand.
+func (s *Service) LegacyKnowledgeRootsEnabled(projectID string) bool {
+	if s == nil || s.knowledgeVault == nil || !s.knowledgeVault.Enabled() || !s.knowledgeVaultRuntimeRead {
+		return true
+	}
+	return !knowledgeVaultReadAllowed(projectID)
+}
+
 func (s *Service) vaultKnowledgeForProject(ctx context.Context, projectID string) (vaultKnowledgeSnapshot, bool) {
 	if !s.vaultReadEnabled(projectID) {
 		if warning := s.vaultFallbackWarning(projectID); warning != "" {

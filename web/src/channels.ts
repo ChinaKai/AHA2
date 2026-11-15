@@ -1,7 +1,7 @@
 import {api} from "./api.js";
 import {icon} from "./icons.js";
 import {t} from "./i18n.js";
-import type {ChannelConversationSummary, ChannelDelivery, ChannelInstance, ChannelOnboardingOptions, ChannelOnboardingSession, ChannelPlugin, CodexAccount, Knowledge, KnowledgeLibrary, Model, Project, Workspace} from "./types.js";
+import type {ChannelConversationSummary, ChannelDelivery, ChannelInstance, ChannelOnboardingOptions, ChannelOnboardingSession, ChannelPlugin, CodexAccount, Knowledge, KnowledgeLibrary, KnowledgeVaultLibrary, Model, Project, Workspace} from "./types.js";
 
 interface ChannelUIContext {
 	models: Model[];
@@ -11,6 +11,10 @@ interface ChannelUIContext {
 	// One verified knowledge root per project, from /knowledge/indexes. Not a page.
 	knowledgeIndexes: Knowledge[];
 	libraries: KnowledgeLibrary[];
+	// True once the owner switched reads to the file vault. The legacy index and
+	// library arrays above then stay unused by the channel page.
+	knowledgeVaultEnabled: boolean;
+	vaultLibraries: KnowledgeVaultLibrary[];
 }
 
 function escapeHTML(value: unknown): string {
@@ -158,7 +162,23 @@ function channelRuntimeEditor(config: Record<string, unknown>, context: ChannelU
   return `<fieldset class="channel-runtime-editor"><legend>运行模型</legend><label>模型与执行账号<select name="channel_runtime">${channelRuntimeOptions(config, context)}</select></label><small>私聊和群聊共用。官方 Codex 模型会同时指定账号。</small></fieldset>`;
 }
 
-function channelKnowledgeSources(context: ChannelUIContext): Array<{label: string; root: string}> {
+export interface ChannelKnowledgeSource {
+	label: string;
+	root: string;
+	kind: "legacy" | "vault";
+	selectable: boolean;
+}
+
+// The channel scope picker reads the source that is live. With the vault on it
+// lists vault libraries and never touches /knowledge/indexes or
+// /knowledge/libraries; the policy editor is read-only because channel grants
+// still reference legacy roots. With the vault off the legacy list is unchanged.
+export function channelKnowledgeSources(context: ChannelUIContext): ChannelKnowledgeSource[] {
+  if (context.knowledgeVaultEnabled === true) {
+    return (context.vaultLibraries || [])
+      .filter(library => library.kind === "project" || library.kind === "global")
+      .map(library => ({label: `vault 知识库 · ${library.name}`, root: library.id, kind: "vault" as const, selectable: false}));
+  }
   const rootByProject = new Map(context.knowledgeIndexes.map(entry => [entry.project_id, entry.id]));
   const projectSources = context.projects
     .filter(project => !["channel", "knowledge"].includes(project.project_type || ""))
@@ -167,7 +187,13 @@ function channelKnowledgeSources(context: ChannelUIContext): Array<{label: strin
   const librarySources = context.libraries
     .map(library => ({label: `知识库 · ${library.name}`, root: rootByProject.get(library.container_project_id) || ""}))
     .filter(item => item.root);
-  return [...projectSources, ...librarySources];
+  return [...projectSources, ...librarySources].map(item => ({...item, kind: "legacy" as const, selectable: true}));
+}
+
+function channelVaultKnowledgeSection(context: ChannelUIContext): string {
+  const sources = channelKnowledgeSources(context);
+  const rows = sources.map(source => `<li><span>${escapeHTML(source.label)}</span></li>`).join("");
+  return `<div data-channel-vault-knowledge><p><strong>文件知识库（vault）已启用</strong></p><p>旧库知识源已隐藏，渠道知识改由 vault 提供；请在 <a href="#knowledge">知识</a> 页面查看和编辑文档。</p>${rows ? `<ul class="channel-checkbox-list">${rows}</ul>` : `<small>暂无可用的 vault 知识库。</small>`}<small>此处的旧库授权编辑已停用，避免继续修改旧表。</small></div>`;
 }
 
 function formatChannelTime(value?: string): string {
@@ -207,23 +233,29 @@ function openChannelSettings(instance: ChannelInstance, context: ChannelUIContex
   dialog.addEventListener("cancel", event => { event.preventDefault(); close(); });
   const knowledgeHost = dialog.querySelector<HTMLElement>("[data-channel-settings-knowledge]");
   const saveButton = dialog.querySelector<HTMLButtonElement>("[data-save]");
-  void api.channelKnowledgePolicies(instance.id).then(policies => {
-    if (!dialog.isConnected || !knowledgeHost) return;
-    const groupPolicy = policies.policies.find(policy => policy.endpoint === "group_digital_human");
-    if (!groupPolicy) {
-      knowledgeHost.innerHTML = `<small>暂无群聊 Knowledge 策略。</small>`;
-      return;
-    }
-    const sources = channelKnowledgeSources(context);
-    const granted = new Set((groupPolicy.grants || []).map(grant => grant.knowledge_entry_id));
-    const scopeMode = groupPolicy.scope_mode === "all" ? "all" : "selected";
-    const choices = sources.map(source => `<label class="channel-check"><input type="checkbox" name="knowledge_entry_id" value="${escapeHTML(source.root)}" ${granted.has(source.root) ? "checked" : ""}>${escapeHTML(source.label)}</label>`).join("");
-    knowledgeHost.innerHTML = `<div data-channel-settings-policy data-revision="${groupPolicy.revision}"><label>范围模式<select name="knowledge_scope_mode"><option value="all" ${scopeMode === "all" ? "selected" : ""}>全部项目知识与知识库</option><option value="selected" ${scopeMode === "selected" ? "selected" : ""}>限制到所选知识源</option></select></label><div data-channel-knowledge-selected ${scopeMode === "all" ? "hidden" : ""}><div class="channel-batch-toolbar"><button type="button" data-channel-policy-select-all>全选</button><button type="button" data-channel-policy-clear>清空</button></div><div class="channel-checkbox-list">${choices || "<small>暂无可选知识源</small>"}</div></div><small>固定渠道索引始终可读。</small></div>`;
-    const policyContainer = knowledgeHost.querySelector<HTMLElement>("[data-channel-settings-policy]");
-    if (policyContainer) bindChannelKnowledgeScope(policyContainer);
-  }).catch(error => {
-    if (knowledgeHost) knowledgeHost.textContent = error instanceof Error ? error.message : String(error);
-  });
+  if (context.knowledgeVaultEnabled === true) {
+    // Read-only vault view: no legacy policy fetch, no legacy source values,
+    // and no policy container, so the save handler never rewrites old grants.
+    if (knowledgeHost) knowledgeHost.innerHTML = channelVaultKnowledgeSection(context);
+  } else {
+    void api.channelKnowledgePolicies(instance.id).then(policies => {
+      if (!dialog.isConnected || !knowledgeHost) return;
+      const groupPolicy = policies.policies.find(policy => policy.endpoint === "group_digital_human");
+      if (!groupPolicy) {
+        knowledgeHost.innerHTML = `<small>暂无群聊 Knowledge 策略。</small>`;
+        return;
+      }
+      const sources = channelKnowledgeSources(context);
+      const granted = new Set((groupPolicy.grants || []).map(grant => grant.knowledge_entry_id));
+      const scopeMode = groupPolicy.scope_mode === "all" ? "all" : "selected";
+      const choices = sources.map(source => `<label class="channel-check"><input type="checkbox" name="knowledge_entry_id" value="${escapeHTML(source.root)}" ${granted.has(source.root) ? "checked" : ""}>${escapeHTML(source.label)}</label>`).join("");
+      knowledgeHost.innerHTML = `<div data-channel-settings-policy data-revision="${groupPolicy.revision}"><label>范围模式<select name="knowledge_scope_mode"><option value="all" ${scopeMode === "all" ? "selected" : ""}>全部项目知识与知识库</option><option value="selected" ${scopeMode === "selected" ? "selected" : ""}>限制到所选知识源</option></select></label><div data-channel-knowledge-selected ${scopeMode === "all" ? "hidden" : ""}><div class="channel-batch-toolbar"><button type="button" data-channel-policy-select-all>全选</button><button type="button" data-channel-policy-clear>清空</button></div><div class="channel-checkbox-list">${choices || "<small>暂无可选知识源</small>"}</div></div><small>固定渠道索引始终可读。</small></div>`;
+      const policyContainer = knowledgeHost.querySelector<HTMLElement>("[data-channel-settings-policy]");
+      if (policyContainer) bindChannelKnowledgeScope(policyContainer);
+    }).catch(error => {
+      if (knowledgeHost) knowledgeHost.textContent = error instanceof Error ? error.message : String(error);
+    });
+  }
   saveButton?.addEventListener("click", () => {
     void (async () => {
       const runtimeOption = dialog.querySelector<HTMLSelectElement>('select[name="channel_runtime"]')?.selectedOptions[0];

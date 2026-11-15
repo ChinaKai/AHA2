@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/store"
 )
 
@@ -16,7 +17,17 @@ func (s *Server) listKnowledgeLibraries(writer http.ResponseWriter, request *htt
 		writeError(writer, http.StatusInternalServerError, "list_knowledge_libraries_failed")
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "libraries": items})
+	// Keep the endpoint readable for diagnostics, but do not advertise a legacy
+	// library whose projects now read the vault: the Web channel source picker
+	// must not be able to grant it.
+	visible := make([]domain.KnowledgeLibrary, 0, len(items))
+	for _, item := range items {
+		if s.knowledgeLibraryVaultActive(request.Context(), item) {
+			continue
+		}
+		visible = append(visible, item)
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "libraries": visible})
 }
 
 func (s *Server) bindKnowledgeLibrary(writer http.ResponseWriter, request *http.Request) {
@@ -26,6 +37,10 @@ func (s *Server) bindKnowledgeLibrary(writer http.ResponseWriter, request *http.
 	}
 	if decodeJSON(request, &payload) != nil || strings.TrimSpace(payload.ProjectID) == "" {
 		writeError(writer, http.StatusBadRequest, "knowledge_library_project_required")
+		return
+	}
+	if s.knowledgeVaultReadActive("project", strings.TrimSpace(payload.ProjectID)) || s.knowledgeLibraryVaultActiveByID(request.Context(), request.PathValue("id")) {
+		writeKnowledgeVaultManagementConflict(writer)
 		return
 	}
 	item, err := s.store.BindKnowledgeLibrary(request.Context(), request.PathValue("id"), strings.TrimSpace(payload.ProjectID), strings.TrimSpace(payload.BindingMode), time.Now().UTC())
@@ -42,6 +57,10 @@ func (s *Server) bindKnowledgeLibrary(writer http.ResponseWriter, request *http.
 }
 
 func (s *Server) unbindKnowledgeLibrary(writer http.ResponseWriter, request *http.Request) {
+	if s.knowledgeLibraryVaultActiveByID(request.Context(), request.PathValue("id")) {
+		writeKnowledgeVaultManagementConflict(writer)
+		return
+	}
 	item, err := s.store.UnbindKnowledgeLibrary(request.Context(), request.PathValue("id"))
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -56,6 +75,10 @@ func (s *Server) unbindKnowledgeLibrary(writer http.ResponseWriter, request *htt
 }
 
 func (s *Server) deleteKnowledgeLibrary(writer http.ResponseWriter, request *http.Request) {
+	if s.knowledgeLibraryVaultActiveByID(request.Context(), request.PathValue("id")) {
+		writeKnowledgeVaultManagementConflict(writer)
+		return
+	}
 	result, err := s.store.DeleteKnowledgeLibrary(request.Context(), request.PathValue("id"))
 	if err != nil {
 		switch {
@@ -75,6 +98,10 @@ func (s *Server) deleteKnowledgeLibrary(writer http.ResponseWriter, request *htt
 }
 
 func (s *Server) detachProjectKnowledge(writer http.ResponseWriter, request *http.Request) {
+	if s.knowledgeVaultReadActive("project", request.PathValue("id")) {
+		writeKnowledgeVaultManagementConflict(writer)
+		return
+	}
 	item, err := s.store.DetachProjectKnowledge(request.Context(), request.PathValue("id"))
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -89,6 +116,10 @@ func (s *Server) detachProjectKnowledge(writer http.ResponseWriter, request *htt
 }
 
 func (s *Server) deleteProjectKnowledge(writer http.ResponseWriter, request *http.Request) {
+	if s.knowledgeVaultReadActive("project", request.PathValue("id")) {
+		writeKnowledgeVaultManagementConflict(writer)
+		return
+	}
 	result, err := s.store.DeleteProjectKnowledge(request.Context(), request.PathValue("id"))
 	if err != nil {
 		if err == sql.ErrNoRows {

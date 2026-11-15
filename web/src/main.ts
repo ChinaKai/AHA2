@@ -75,6 +75,7 @@ import type {
   NetworkSettings,
   KnowledgeProposal,
   KnowledgeReviewSettings,
+  KnowledgeVaultLibrary,
   KnowledgeVaultSettings,
   MailAccount,
   MailMessage,
@@ -175,6 +176,9 @@ interface State extends ModelHealthState {
   // Phase 2 file-vault page. null means "not probed yet"; false keeps the old
   // knowledge workspace and its API calls completely unchanged.
   knowledgeVaultEnabled: boolean | null;
+  // Channel knowledge sources when the vault is the live read source. The
+  // legacy index/library arrays stay untouched for unbound (fallback) projects.
+  vaultLibraries: KnowledgeVaultLibrary[];
   skills: Skill[];
   // Vault packages are not rows in the legacy skills table. They are merged into
   // the task picker only when runtime reads are on and the project is bound.
@@ -623,6 +627,7 @@ const state: State = {
   knowledgeProposals: [],
   knowledgeReviewSettings: {auto_approve: false},
   knowledgeVaultEnabled: null,
+  vaultLibraries: [],
   skills: [],
   vaultSkills: [],
   vaultSkillsOn: false,
@@ -2809,6 +2814,7 @@ function applyKnowledgeVaultSettings(settings: KnowledgeVaultSettings): void {
   knowledgeVaultProbeToken++;
   knowledgeVaultProbe = null;
   state.knowledgeVaultEnabled = settings.enabled;
+  state.vaultLibraries = [];
   // Libraries, tree, documents and search all cached data from before the
   // switch/rebuild; drop it so the next visit fetches the current generation.
   knowledgeVaultPage.loaded()?.resetKnowledgeVaultPage();
@@ -2816,6 +2822,26 @@ function applyKnowledgeVaultSettings(settings: KnowledgeVaultSettings): void {
 
 async function loadKnowledgeViewData(force = true): Promise<void> {
   if (await detectKnowledgeVault(false)) return;
+  await loadKnowledgeData(force);
+}
+
+// The channels page used to load the legacy knowledge lists unconditionally,
+// which kept requesting the old library even after the owner switched to the
+// vault. Keep the legacy calls byte-for-byte when the vault is off, and load
+// only vault libraries when it is on. A vault probe that succeeds but cannot
+// list libraries leaves the list empty; the dialog then shows its notice
+// instead of falling back to legacy sources.
+async function loadChannelKnowledgeSources(force = true): Promise<void> {
+  if (await detectKnowledgeVault(false)) {
+    state.vaultLibraries = [];
+    try {
+      const result = await api.knowledgeVaultLibraries();
+      state.vaultLibraries = result.libraries || [];
+    } catch {
+      // Hard failure stays visible as the empty-source notice.
+    }
+    return;
+  }
   await loadKnowledgeData(force);
 }
 
@@ -2927,7 +2953,7 @@ async function ensureViewData(view: View, force = false): Promise<void> {
       state.channelProviders = providers.providers || [];
       state.channelInstances = instances.instances || [];
     }));
-    jobs.push(loadKnowledgeData(force));
+    jobs.push(loadChannelKnowledgeSources(force));
   }
   if (view === "knowledge") jobs.push(loadKnowledgeViewData(force));
   if (view === "proxy") jobs.push(loadResource("proxy", force, async () => {
@@ -6378,7 +6404,7 @@ function render(): void {
   } else {
     const views: Record<View, () => string> = {
       projects: projectsView,
-		channels: () => shell(renderChannels(state.channelProviders, state.channelInstances, {models: state.models, accounts: state.codexAccounts, projects: state.projects, workspaces: state.workspaces, knowledgeIndexes: state.knowledgeIndexes, libraries: state.knowledgeLibraries})),
+		channels: () => shell(renderChannels(state.channelProviders, state.channelInstances, {models: state.models, accounts: state.codexAccounts, projects: state.projects, workspaces: state.workspaces, knowledgeIndexes: state.knowledgeIndexes, libraries: state.knowledgeLibraries, knowledgeVaultEnabled: state.knowledgeVaultEnabled === true, vaultLibraries: state.vaultLibraries})),
       models: modelsView,
       resources: () => shell(renderResourcesPage({
         tab: state.resourcesTab,
@@ -6802,7 +6828,7 @@ function bindCommon(): void {
     conflicts: state.syncConflicts,
   });
   if (state.view === "channels") bindChannels({
-		context: {models: state.models, accounts: state.codexAccounts, projects: state.projects, workspaces: state.workspaces, knowledgeIndexes: state.knowledgeIndexes, libraries: state.knowledgeLibraries},
+		context: {models: state.models, accounts: state.codexAccounts, projects: state.projects, workspaces: state.workspaces, knowledgeIndexes: state.knowledgeIndexes, libraries: state.knowledgeLibraries, knowledgeVaultEnabled: state.knowledgeVaultEnabled === true, vaultLibraries: state.vaultLibraries},
     instances: state.channelInstances,
     refresh: async () => {
       const [providers, instances, projects, workspaces, tasks] = await Promise.all([
