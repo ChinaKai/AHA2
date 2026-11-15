@@ -550,8 +550,9 @@ procedure ConfigureAHA2UserTask();
 var
   ResultCode: Integer;
 begin
-  { A caller that already has the authoritative listen and data-directory
-    arguments registers the login task itself and passes SKIPUSERTASK=1.
+  { A caller that already has the
+    authoritative listen and data-directory arguments registers the login
+    task itself and passes SKIPUSERTASK=1.
     Silent upgrades otherwise reuse stale wizard values and can reject an
     already-correct ACL-protected task. }
   if CompareText(ExpandConstant('{param:SKIPUSERTASK|0}'), '1') = 0 then
