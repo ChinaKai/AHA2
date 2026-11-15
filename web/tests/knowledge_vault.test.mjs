@@ -1070,3 +1070,81 @@ test("errored activity feeds and the tree only retry when forced", async () => {
     api.knowledgeVaultInbox = originals.inbox;
   }
 });
+
+test("recent grouping prefers the content change time over a later mtime", () => {
+  const groups = vault.groupRecentByDay([
+    {id: "a", modified_at: "2026-11-15T09:00:00", changed_at: "2026-11-14T09:00:00"},
+    {id: "b", modified_at: "2026-11-13T09:00:00"},
+  ], new Date("2026-11-15T12:00:00"));
+  assert.deepEqual(groups.map(group => group.key), ["2026-11-14", "2026-11-13"]);
+  assert.deepEqual(groups[0].items.map(item => item.id), ["a"], "a later mtime does not move the row to today");
+  assert.deepEqual(groups[1].items.map(item => item.id), ["b"]);
+});
+
+test("recent marks timestamp-only and unknown rows and exposes the reveal switch", () => {
+  const row = {
+    type: "practice", status: "verified", scope: "global", library_id: "global", library: "全局知识",
+    modified_at: "2026-11-14T10:00:00Z", path: "global/general/build.md",
+  };
+  reset({
+    recentState: "ready",
+    recent: [{...row, id: "r1", title: "真实变更", content_changed: true, change_kind: "uncommitted",
+      modified_at: "2026-11-14T10:00:00Z", changed_at: "2026-11-14T09:00:00Z"}],
+  });
+  let html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /data-kv-recent-unchanged aria-pressed="false"/);
+  assert.match(html, />显示仅时间更新</);
+  assert.match(html, /data-kv-preview="r1"/);
+  assert.doesNotMatch(html, /class="kv-change-note"/, "content changes carry no timestamp-only marker");
+
+  reset({recentState: "ready", recentIncludeUnchanged: true, recent: [
+    {...row, id: "r2", title: "仅时间更新", content_changed: false, change_kind: "none"},
+    {...row, id: "r3", title: "状态未知", content_changed: true, change_kind: "unknown"},
+  ]});
+  html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /data-kv-recent-unchanged aria-pressed="true"/);
+  assert.match(html, />隐藏仅时间更新</);
+  assert.match(html, /仅时间更新<\/span>/);
+  assert.match(html, /class="kv-change-note">变更未知</);
+  assert.match(html, /data-kv-preview="r2"/);
+  assert.match(html, /data-kv-preview="r3"/);
+
+  reset({recentState: "ready", recent: []});
+  html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /data-kv-recent-unchanged aria-pressed="false"/, "the switch stays reachable above an empty feed");
+  assert.match(html, /最近没有变更/);
+});
+
+test("loadRecent only requests timestamp-only rows after the switch is enabled", async () => {
+  const original = api.knowledgeVaultRecent;
+  const calls = [];
+  const row = {
+    title: "T", type: "practice", status: "verified", scope: "global",
+    library_id: "global", library: "全局知识", path: "global/general/build.md",
+    modified_at: "2026-11-14T10:00:00Z",
+  };
+  api.knowledgeVaultRecent = async (...args) => {
+    calls.push(args);
+    return {
+      ok: true, enabled: true, index_ready: true,
+      items: [
+        {...row, id: "changed", content_changed: true, change_kind: "uncommitted"},
+        {...row, id: "same", content_changed: false, change_kind: "none"},
+      ],
+    };
+  };
+  try {
+    reset({recentState: "idle"});
+    await vault.__loadRecentForTest(true);
+    assert.deepEqual(calls.at(-1), ["", 120, false]);
+    assert.deepEqual(vault.__getKnowledgeVaultStateForTest().recent.map(item => item.id), ["changed"],
+      "the client keeps filtering rows from a server without the new default");
+
+    vault.__setKnowledgeVaultStateForTest({recentIncludeUnchanged: true});
+    await vault.__loadRecentForTest(true);
+    assert.deepEqual(calls.at(-1), ["", 120, true], "the switch requests include_unchanged");
+    assert.deepEqual(vault.__getKnowledgeVaultStateForTest().recent.map(item => item.id), ["changed", "same"]);
+  } finally {
+    api.knowledgeVaultRecent = original;
+  }
+});

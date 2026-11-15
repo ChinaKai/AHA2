@@ -173,10 +173,15 @@ func (s *Server) knowledgeVaultRecent(writer http.ResponseWriter, request *http.
 			limit = parsed
 		}
 	}
+	includeUnchanged := false
+	switch strings.ToLower(strings.TrimSpace(request.URL.Query().Get("include_unchanged"))) {
+	case "1", "true", "yes":
+		includeUnchanged = true
+	}
 	var result knowledgevault.RecentResponse
 	err := s.withKnowledgeVaultReader(func(reader *knowledgevault.Reader) error {
 		var readErr error
-		result, readErr = reader.Recent(request.Context(), strings.TrimSpace(request.URL.Query().Get("project")), limit)
+		result, readErr = reader.Recent(request.Context(), strings.TrimSpace(request.URL.Query().Get("project")), limit, includeUnchanged)
 		return readErr
 	})
 	if errors.Is(err, knowledgevault.ErrDisabled) {

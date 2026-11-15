@@ -380,3 +380,80 @@ func TestKnowledgeVaultDiffAPIReportsLatestChangeAndDegradesWithoutGit(t *testin
 		t.Fatalf("missing document status=%d payload=%#v", response.StatusCode, missing)
 	}
 }
+
+// TestKnowledgeVaultRecentFiltersContentChanges covers the query parameter and
+// the default: timestamp-only rows disappear once the vault is a git
+// repository, and only include_unchanged exposes them again.
+func TestKnowledgeVaultRecentFiltersContentChanges(t *testing.T) {
+	ctx := context.Background()
+	manager := knowledgeVaultManagerFixture(t)
+	server, client, _ := knowledgeVaultServer(t, manager)
+
+	readRecent := func(query string) []map[string]any {
+		t.Helper()
+		response := requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/knowledge-vault/recent"+query, nil, "")
+		var payload map[string]any
+		decodeResponse(t, response, &payload)
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("recent%s status=%d payload=%#v", query, response.StatusCode, payload)
+		}
+		items := payload["items"].([]any)
+		out := make([]map[string]any, 0, len(items))
+		for _, item := range items {
+			out = append(out, item.(map[string]any))
+		}
+		return out
+	}
+	findPath := func(items []map[string]any, relative string) (map[string]any, bool) {
+		for _, item := range items {
+			if item["path"] == relative {
+				return item, true
+			}
+		}
+		return nil, false
+	}
+
+	// Without a repository the content state is unknown, so rows stay visible
+	// instead of being silently dropped as "unchanged".
+	for _, item := range readRecent("") {
+		if item["content_changed"] != true || item["change_kind"] != "unknown" {
+			t.Fatalf("non-git item = %#v", item)
+		}
+	}
+
+	if _, err := manager.Git().Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if items := readRecent(""); len(items) != 0 {
+		t.Fatalf("root-commit items = %#v", items)
+	}
+	unchanged := readRecent("?include_unchanged=1")
+	deploy, ok := findPath(unchanged, "global/general/deploy.md")
+	if !ok {
+		t.Fatalf("include_unchanged lost deploy: %#v", unchanged)
+	}
+	for _, item := range unchanged {
+		if item["content_changed"] != false || item["change_kind"] != "none" {
+			t.Fatalf("include_unchanged item = %#v", item)
+		}
+	}
+	if deploy["last_commit_at"] == nil || deploy["last_commit_at"] == "" {
+		t.Fatalf("include_unchanged deploy has no last_commit_at: %#v", deploy)
+	}
+	if items := readRecent("?include_unchanged=maybe"); len(items) != 0 {
+		t.Fatalf("invalid include_unchanged items = %#v", items)
+	}
+
+	deployPath := filepath.Join(manager.Config().VaultPath, "global", "general", "deploy.md")
+	if err := os.WriteFile(deployPath, []byte("---\nid: knowledge_http_deploy\ntype: practice\nstatus: verified\ntitle: 部署指南\n---\n# 部署\n\n更新后的正文。\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	items := readRecent("")
+	if len(items) != 1 {
+		t.Fatalf("uncommitted items = %#v", items)
+	}
+	if items[0]["path"] != "global/general/deploy.md" || items[0]["content_changed"] != true || items[0]["change_kind"] != "uncommitted" {
+		t.Fatalf("uncommitted item = %#v", items[0])
+	}
+}

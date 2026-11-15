@@ -341,7 +341,7 @@ func TestReaderRecentUsesFileMTimeAndKeepsInboxReadable(t *testing.T) {
 	if err := os.Chtimes(target, future, future); err != nil {
 		t.Fatal(err)
 	}
-	recent, err := reader.Recent(ctx, "", 5)
+	recent, err := reader.Recent(ctx, "", 5, false)
 	if err != nil {
 		t.Fatal(err)
 	}

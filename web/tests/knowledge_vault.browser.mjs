@@ -132,6 +132,14 @@ const RECENT = [
 const GLOBAL_RECENT = [
   {id: "g-doc", title: "全局指南", path: "global/guides/guide.md", type: "practice", status: "verified", scope: "global", library_id: "global", library: "全局知识", modified_at: now},
 ];
+// Unknown content state stays visible by default and is labelled, while the
+// timestamp-only row only appears after the explicit reveal switch.
+const UNKNOWN_RECENT = [
+  {id: "unknown-1", title: "状态未知", path: "global/guides/unknown.md", type: "practice", status: "verified", scope: "global", library_id: "global", library: "全局知识", modified_at: "2026-11-12T08:00:00Z", content_changed: true, change_kind: "unknown"},
+];
+const UNCHANGED_RECENT = [
+  {id: "unchanged-1", title: "仅时间更新条目", path: "global/guides/unchanged.md", type: "practice", status: "verified", scope: "global", library_id: "global", library: "全局知识", modified_at: now, changed_at: "2026-11-10T08:00:00Z", content_changed: false, change_kind: "none"},
+];
 // The fixture diff is deliberately small but covers every rendered row kind:
 // hunk header, context, remove and add with both line-number columns.
 const DOC_DIFF = {
@@ -183,6 +191,8 @@ const GENERATED_DOC = ${JSON.stringify(GENERATED_DOC)};
 const LONG_DOC = ${JSON.stringify(LONG_DOC)};
 const RECENT = ${JSON.stringify(RECENT)};
 const GLOBAL_RECENT = ${JSON.stringify(GLOBAL_RECENT)};
+const UNKNOWN_RECENT = ${JSON.stringify(UNKNOWN_RECENT)};
+const UNCHANGED_RECENT = ${JSON.stringify(UNCHANGED_RECENT)};
 const GLOBAL_INBOX = ${JSON.stringify(GLOBAL_INBOX)};
 const SEARCH = ${JSON.stringify(SEARCH)};
 const DOC_DIFF = ${JSON.stringify(DOC_DIFF)};
@@ -250,10 +260,12 @@ if (id === "g-other") return json({ok: true, doc: G_OTHER_DOC});
   if (path === "/api/v1/knowledge-vault/search") return json({ok: true, enabled: true, index_ready: true, results: SEARCH});
   if (path === "/api/v1/knowledge-vault/recent") {
     const project = url.searchParams.get("project") || "";
-    window.__vaultRecentRequests.push(project || "all");
+    const includeUnchanged = url.searchParams.get("include_unchanged") === "true";
+    window.__vaultRecentRequests.push(includeUnchanged ? "all+unchanged" : (project || "all"));
     await delay("recent", project || "all");
     if (window.__vaultRecentFail) return json({ok: false, error: "recent_unavailable", message: "最近更新加载失败"}, 500);
-    return json({ok: true, enabled: true, index_ready: true, items: project ? RECENT : [...RECENT, ...GLOBAL_RECENT]});
+    const items = project ? RECENT : [...RECENT, ...GLOBAL_RECENT, ...UNKNOWN_RECENT, ...(includeUnchanged ? UNCHANGED_RECENT : [])];
+    return json({ok: true, enabled: true, index_ready: true, items});
   }
   if (path === "/api/v1/knowledge-vault/inbox") {
     const project = url.searchParams.get("project") || "";
@@ -422,6 +434,23 @@ try {
   assert.equal(await page.locator("text=从左侧选择文档").count(), 0, "the default page is not the empty reader");
   await page.waitForSelector(".kv-feed-day");
   assert.match(await page.locator(".kv-feed").innerText(), /构建指南[\s\S]*Demo[\s\S]*全局指南[\s\S]*全局知识/);
+
+  // Timestamp-only rows are hidden until the owner asks for them, and an
+  // unknown content state stays visible with an explicit label.
+  const recentToggle = page.locator("[data-kv-recent-unchanged]");
+  assert.equal(await recentToggle.getAttribute("aria-pressed"), "false");
+  assert.equal((await recentToggle.innerText()).trim(), "显示仅时间更新");
+  assert.equal(await page.locator('.kv-feed [data-kv-preview="unchanged-1"]').count(), 0, "timestamp-only rows are hidden by default");
+  assert.match(await page.locator('.kv-feed [data-kv-preview="unknown-1"] .kv-feed-main').innerText(), /变更未知/);
+  await recentToggle.click();
+  await page.waitForSelector('.kv-feed [data-kv-preview="unchanged-1"]');
+  assert.equal(await page.locator("[data-kv-recent-unchanged]").getAttribute("aria-pressed"), "true");
+  assert.equal((await page.locator("[data-kv-recent-unchanged]").innerText()).trim(), "隐藏仅时间更新");
+  assert.match(await page.locator('.kv-feed [data-kv-preview="unchanged-1"] .kv-feed-main').innerText(), /仅时间更新/);
+  assert.ok(await page.evaluate(() => window.__vaultRecentRequests.includes("all+unchanged")), "the switch requests include_unchanged");
+  await page.locator("[data-kv-recent-unchanged]").click();
+  await page.waitForFunction(() => !document.querySelector('.kv-feed [data-kv-preview="unchanged-1"]'));
+  assert.equal(await page.locator("[data-kv-recent-unchanged]").getAttribute("aria-pressed"), "false", "the switch returns to the content-only feed");
   await page.waitForSelector(".kv-inbox-group");
   assert.match(await page.locator(".kv-inbox").innerText(), /2 条待整理[\s\S]*全局知识[\s\S]*1 条[\s\S]*global\/inbox\/idea\.md[\s\S]*Demo[\s\S]*1 条[\s\S]*projects\/p1\/inbox\/idea\.md/);
 
@@ -1379,6 +1408,10 @@ try {
   assert.equal(await page.locator(".kv-tree-panel").isVisible(), false);
   assert.equal(await page.locator(".kv-doc-panel").isVisible(), true);
   assert.equal(await page.locator("[data-kv-activity]").getAttribute("aria-current"), "page");
+  // The reveal switch stays reachable without widening the activity page.
+  await page.waitForSelector(".kv-feed-day");
+  assert.equal(await page.locator("[data-kv-recent-unchanged]").isVisible(), true, "390px keeps the reveal switch reachable");
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), "390px activity page has no horizontal overflow with the switch");
   // The preview is a full-width sheet that stops above the bottom navigation
   // and never rewrites the route; its own close button dismisses it.
   const mobileRouteBeforePreview = await page.evaluate(() => location.hash);

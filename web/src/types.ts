@@ -1964,6 +1964,10 @@ export interface KnowledgeVaultRecentItem {
   library: string;
   updated?: string;
   modified_at: string;
+  changed_at?: string;
+  content_changed?: boolean;
+  change_kind?: "uncommitted" | "committed" | "none" | "unknown";
+  last_commit_at?: string;
 }
 
 export interface KnowledgeVaultRecent {

@@ -133,6 +133,13 @@ func (g *Git) command(ctx context.Context, op string, args ...string) (string, e
 // space of context lines and the exact last line, so it cannot use the
 // trimmed convenience wrapper used by status/log commands.
 func (g *Git) commandRaw(ctx context.Context, op string, args ...string) (string, error) {
+	return g.commandInputRaw(ctx, op, "", args...)
+}
+
+// commandInputRaw is commandRaw with stdin support. The Recent change feed
+// feeds hundreds of vault-relative paths to one `git hash-object --stdin-paths`
+// process instead of starting git once per document.
+func (g *Git) commandInputRaw(ctx context.Context, op, input string, args ...string) (string, error) {
 	gitPath, err := g.gitBinary()
 	if err != nil {
 		return "", err
@@ -145,6 +152,9 @@ func (g *Git) commandRaw(ctx context.Context, op string, args ...string) (string
 	defer cancel()
 	command := exec.CommandContext(runCtx, gitPath, append([]string{"-C", g.vaultPath, op}, args...)...)
 	command.Env = gitEnvironment()
+	if input != "" {
+		command.Stdin = strings.NewReader(input)
+	}
 	output, runErr := command.CombinedOutput()
 	text := string(output)
 	if runErr == nil {
