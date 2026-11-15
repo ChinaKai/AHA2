@@ -21,9 +21,53 @@ interface SettingsPanelState {
   error: string;
   unsupported: boolean;
   busy: "" | "toggle" | "init" | "migrate" | "import";
+  // The import fold is re-rendered when a request starts, so its mode, open
+  // state and draft survive that render instead of collapsing mid-import.
+  importKind: "local" | "git";
+  importOpen: boolean;
+  importDraft: {path: string; remote: string; branch: string};
 }
 
-let state: SettingsPanelState = {loaded: false, loading: false, settings: null, error: "", unsupported: false, busy: ""};
+let state: SettingsPanelState = {
+  loaded: false, loading: false, settings: null, error: "", unsupported: false, busy: "",
+  importKind: "local", importOpen: false, importDraft: {path: "", remote: "", branch: ""},
+};
+
+// The panel is lazy-loaded from 其他设置, so its layout lives here instead of
+// growing the first-screen stylesheet. The generic input rules stretch radios
+// into full-width 38px blocks; scope the reset to this form so existing toggle
+// and checkbox components keep their own sizes.
+const IMPORT_STYLES = `
+.knowledge-vault-settings-panel .knowledge-vault-import { margin: 14px 18px 0; border: 1px solid var(--line); border-radius: 6px; background: #f8fafc; }
+.knowledge-vault-import > summary { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 44px; padding: 10px 12px; cursor: pointer; font-size: var(--font-size-12); font-weight: 700; list-style: none; }
+.knowledge-vault-import > summary::-webkit-details-marker { display: none; }
+.knowledge-vault-import > summary::after { content: "›"; flex: 0 0 auto; color: var(--color-text-muted); font-size: 14px; transform: rotate(90deg); transition: transform .15s ease; }
+.knowledge-vault-import[open] > summary::after { transform: rotate(-90deg); }
+.knowledge-vault-import-body { display: grid; gap: 12px; min-width: 0; padding: 0 12px 12px; }
+.knowledge-vault-import-modes { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.knowledge-vault-import-modes > legend { width: 100%; margin: 0 0 2px; padding: 0; color: var(--color-text-muted); font-size: var(--font-size-11); font-weight: 700; }
+.knowledge-vault-import-mode { display: inline-flex; align-items: center; gap: 8px; margin: 0; font-size: var(--font-size-12); font-weight: 600; cursor: pointer; }
+.knowledge-vault-import input[type="radio"], .knowledge-vault-import input[type="checkbox"] { width: auto; height: auto; min-height: 0; padding: 0; margin: 0; }
+.knowledge-vault-import-fields { display: grid; gap: 10px; min-width: 0; }
+.knowledge-vault-import-field { display: grid; gap: 5px; min-width: 0; margin: 0; color: var(--color-text); font-size: var(--font-size-11); font-weight: 700; }
+.knowledge-vault-import-field[hidden] { display: none; }
+.knowledge-vault-import-actions { display: flex; }
+.knowledge-vault-import-actions button { width: 100%; min-height: 40px; }
+.knowledge-vault-import-help { margin: 0; }
+@media (max-width: 760px) {
+  .knowledge-vault-settings-panel { padding-bottom: calc(56px + env(safe-area-inset-bottom)); }
+  .knowledge-vault-import > summary { min-height: 46px; padding: 12px; }
+  .knowledge-vault-status { min-width: 0; }
+}
+`;
+
+function installImportStyles(): void {
+  if (typeof document === "undefined" || document.getElementById("knowledge-vault-import-styles")) return;
+  const style = document.createElement("style");
+  style.id = "knowledge-vault-import-styles";
+  style.textContent = IMPORT_STYLES;
+  document.head.append(style);
+}
 let activeContext: KnowledgeVaultSettingsContext | null = null;
 let pendingLoad: Promise<void> | null = null;
 
@@ -50,6 +94,15 @@ function errorMessage(error: unknown): string {
 
 function populationRequest<T>(action: "migrate" | "import", options?: {kind: "local" | "git"; path?: string; remote?: string; branch?: string}): Promise<T> {
   return api.request<T>(`/api/v1/settings/knowledge-vault/${action}`, {method: "POST", body: options ? JSON.stringify(options) : undefined});
+}
+
+// Switching source mode only toggles the field rows; the inputs keep their
+// values, and the module state keeps the choice if the panel re-renders.
+function setImportKind(value: string): void {
+  state.importKind = value === "git" ? "git" : "local";
+  document.querySelectorAll<HTMLElement>(".knowledge-vault-import-field").forEach(field => {
+    field.hidden = field.dataset.importKind !== state.importKind;
+  });
 }
 
 function applySettings(settings: KnowledgeVaultSettings, context: KnowledgeVaultSettingsContext | null): void {
@@ -180,6 +233,8 @@ async function importExistingVault(): Promise<void> {
   const path = document.querySelector<HTMLInputElement>("#knowledge-vault-import-path")?.value.trim() ?? "";
   const remote = document.querySelector<HTMLInputElement>("#knowledge-vault-import-remote")?.value.trim() ?? "";
   const branch = document.querySelector<HTMLInputElement>("#knowledge-vault-import-branch")?.value.trim() ?? "";
+  state.importKind = kind;
+  state.importDraft = {path, remote, branch};
   if (kind === "local" && path === "") {
     context.setMessage("error", "请填写已有知识库的本地目录");
     return;
@@ -286,22 +341,28 @@ function settingsBody(): string {
     ${blockedHint}
     ${state.error ? `<div class="security-warning active" role="alert">${escapeHTML(state.error)}</div>` : ""}
     ${actions.length ? `<div class="knowledge-vault-actions">${actions.join("")}</div>` : ""}
-    ${canImport ? `<details class="knowledge-vault-import"><summary>导入已有知识库（本地目录或 Git 远端）</summary>
-      <div class="knowledge-vault-import-fields">
-        <label><input type="radio" name="knowledge-vault-import-kind" value="local" checked> 本地目录</label>
-        <label><input type="radio" name="knowledge-vault-import-kind" value="git"> Git 远端</label>
-        <input id="knowledge-vault-import-path" type="text" placeholder="已有知识库目录，例如 /srv/aha2-vault">
-        <input id="knowledge-vault-import-remote" type="text" placeholder="SSH 远端，例如 git@example.com:owner/vault.git">
-        <input id="knowledge-vault-import-branch" type="text" placeholder="分支（可选）">
-        <button type="button" id="knowledge-vault-import" ${busy ? "disabled" : ""}>${busy === "import" ? "导入中…" : "导入并校验"}</button>
+    ${canImport ? `<details class="knowledge-vault-import"${state.importOpen ? " open" : ""}><summary>导入已有知识库（本地目录或 Git 远端）</summary>
+      <div class="knowledge-vault-import-body">
+        <fieldset class="knowledge-vault-import-modes">
+          <legend>来源</legend>
+          <label class="knowledge-vault-import-mode"><input type="radio" name="knowledge-vault-import-kind" value="local" ${state.importKind === "local" ? "checked" : ""}> <span>本地目录</span></label>
+          <label class="knowledge-vault-import-mode"><input type="radio" name="knowledge-vault-import-kind" value="git" ${state.importKind === "git" ? "checked" : ""}> <span>Git 远端</span></label>
+        </fieldset>
+        <div class="knowledge-vault-import-fields">
+          <label class="knowledge-vault-import-field" data-import-kind="local"${state.importKind === "local" ? "" : " hidden"}><span>本地目录</span><input id="knowledge-vault-import-path" type="text" autocomplete="off" placeholder="例如 /srv/aha2-vault" value="${escapeHTML(state.importDraft.path)}"></label>
+          <label class="knowledge-vault-import-field" data-import-kind="git"${state.importKind === "git" ? "" : " hidden"}><span>SSH Git 远端</span><input id="knowledge-vault-import-remote" type="text" autocomplete="off" placeholder="例如 git@example.com:owner/vault.git" value="${escapeHTML(state.importDraft.remote)}"></label>
+          <label class="knowledge-vault-import-field" data-import-kind="git"${state.importKind === "git" ? "" : " hidden"}><span>分支（可选）</span><input id="knowledge-vault-import-branch" type="text" autocomplete="off" placeholder="留空使用远端默认分支" value="${escapeHTML(state.importDraft.branch)}"></label>
+        </div>
+        <div class="knowledge-vault-import-actions"><button type="button" id="knowledge-vault-import" ${busy ? "disabled" : ""}>${busy === "import" ? "导入中…" : "导入并校验"}</button></div>
+        <p class="field-help knowledge-vault-import-help">目标知识库目录必须为空；导入不会合并已有文件，也不会读取 Git 密码（仅支持 SSH 密钥）。</p>
       </div>
-      <div class="field-help">目标知识库目录必须为空；导入不会合并已有文件，也不会读取 Git 密码（仅支持 SSH 密钥）。</div>
     </details>` : ""}
     <div class="field-help knowledge-vault-note">文件是知识正本；请用 VSCode 或 Obsidian 编辑，然后在知识库页的齿轮设置中重建索引（Git pull 后会自动重建）。示例仅用于体验，可随时删除；不会删除旧知识库。</div>`;
 }
 
 export function renderKnowledgeVaultSettingsPanel(context: KnowledgeVaultSettingsContext): string {
   activeContext = context;
+  installImportStyles();
   if (!state.loaded && !state.loading) void loadSettings(context);
   const statusLabel = state.unsupported
     ? "当前版本不支持"
@@ -323,10 +384,27 @@ export function bindKnowledgeVaultSettingsPanel(context: KnowledgeVaultSettingsC
     state.error = "";
     void loadSettings(context).then(() => context.render());
   });
+  const details = document.querySelector<HTMLDetailsElement>(".knowledge-vault-import");
+  details?.addEventListener("toggle", () => { state.importOpen = details.open; });
+  document.querySelectorAll<HTMLInputElement>('input[name="knowledge-vault-import-kind"]').forEach(input => {
+    input.addEventListener("change", () => { if (input.checked) setImportKind(input.value); });
+  });
+  const draftInputs: Array<[string, keyof SettingsPanelState["importDraft"]]> = [
+    ["#knowledge-vault-import-path", "path"],
+    ["#knowledge-vault-import-remote", "remote"],
+    ["#knowledge-vault-import-branch", "branch"],
+  ];
+  draftInputs.forEach(([selector, key]) => {
+    const input = document.querySelector<HTMLInputElement>(selector);
+    input?.addEventListener("input", () => { state.importDraft[key] = input.value; });
+  });
 }
 
 export function __resetKnowledgeVaultSettingsForTest(): void {
-  state = {loaded: false, loading: false, settings: null, error: "", unsupported: false, busy: ""};
+  state = {
+    loaded: false, loading: false, settings: null, error: "", unsupported: false, busy: "",
+    importKind: "local", importOpen: false, importDraft: {path: "", remote: "", branch: ""},
+  };
   activeContext = null;
   pendingLoad = null;
 }

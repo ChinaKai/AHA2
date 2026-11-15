@@ -496,3 +496,94 @@ test("a failing status request is shown once and retried explicitly, not in a re
     restore();
   }
 });
+
+test("the import form labels its fields and only shows the selected source mode", async () => {
+  panel.__resetKnowledgeVaultSettingsForTest();
+  const restore = stub("knowledgeVaultSettings", async () => ({ok: true, settings: emptyVault()}));
+  const injected = [];
+  const listeners = {};
+  const element = (extra = {}) => ({
+    ...extra,
+    addEventListener(type, handler) { (this.listeners ??= {})[type] = handler; },
+  });
+  const pathField = element({dataset: {importKind: "local"}, hidden: false});
+  const remoteField = element({dataset: {importKind: "git"}, hidden: true});
+  const branchField = element({dataset: {importKind: "git"}, hidden: true});
+  const localRadio = element({value: "local", checked: true});
+  const gitRadio = element({value: "git", checked: false});
+  const pathInput = element({value: "", listeners: {}});
+  const remoteInput = element({value: "", listeners: {}});
+  const branchInput = element({value: "", listeners: {}});
+  const details = element({open: false});
+  const fakeDocument = {
+    getElementById: () => null,
+    createElement: () => ({}),
+    head: {append: node => injected.push(node)},
+    querySelector(selector) {
+      if (selector === 'input[name="knowledge-vault-import-kind"]:checked') return localRadio.checked ? localRadio : gitRadio;
+      if (selector === "#knowledge-vault-import-path") return pathInput;
+      if (selector === "#knowledge-vault-import-remote") return remoteInput;
+      if (selector === "#knowledge-vault-import-branch") return branchInput;
+      if (selector === ".knowledge-vault-import") return details;
+      return null;
+    },
+    querySelectorAll(selector) {
+      if (selector === 'input[name="knowledge-vault-import-kind"]') return [localRadio, gitRadio];
+      if (selector === ".knowledge-vault-import-field") return [pathField, remoteField, branchField];
+      return [];
+    },
+  };
+  const originalDocument = globalThis.document;
+  globalThis.document = fakeDocument;
+  try {
+    const ctx = context();
+    await panel.refreshKnowledgeVaultSettingsPanel(ctx);
+    const initialHTML = panel.renderKnowledgeVaultSettingsPanel(ctx);
+    panel.bindKnowledgeVaultSettingsPanel(ctx);
+
+    // Both modes have an explicit text label, and Git-only rows start hidden.
+    assert.match(initialHTML, /class="knowledge-vault-import-modes"/);
+    assert.match(initialHTML, /data-import-kind="local">/);
+    assert.match(initialHTML, /data-import-kind="git" hidden>/);
+    assert.equal(pathField.hidden, false);
+    assert.equal(remoteField.hidden, true);
+    assert.equal(branchField.hidden, true);
+    assert.equal(injected.length, 1);
+    assert.equal(injected[0].id, "knowledge-vault-import-styles");
+    assert.match(injected[0].textContent, /\.knowledge-vault-import input\[type="radio"\][^{]*\{ width: auto; height: auto; min-height: 0; padding: 0; margin: 0; \}/);
+    assert.match(injected[0].textContent, /\.knowledge-vault-import-actions button \{ width: 100%; min-height: 40px; \}/);
+    assert.match(injected[0].textContent, /\.knowledge-vault-import-field\[hidden\] \{ display: none; \}/);
+    assert.match(injected[0].textContent, /@media \(max-width: 760px\)/);
+
+    // Switching modes only toggles rows; the typed values stay in the inputs.
+    pathInput.value = "/srv/existing";
+    pathInput.listeners.input();
+    localRadio.checked = false;
+    gitRadio.checked = true;
+    gitRadio.listeners.change();
+    assert.equal(pathField.hidden, true);
+    assert.equal(remoteField.hidden, false);
+    assert.equal(branchField.hidden, false);
+    assert.equal(pathInput.value, "/srv/existing");
+
+    // A re-render keeps the selected mode, the draft values and the fold open.
+    details.open = true;
+    details.listeners.toggle();
+    gitRadio.checked = false;
+    localRadio.checked = true;
+    localRadio.listeners.change();
+    const html = panel.renderKnowledgeVaultSettingsPanel(ctx);
+    assert.match(html, /<details class="knowledge-vault-import" open>/);
+    assert.match(html, /value="local" checked/);
+    assert.match(html, /value="\/srv\/existing"/);
+    assert.match(html, /<span>本地目录<\/span><input id="knowledge-vault-import-path"/);
+    assert.match(html, /<span>SSH Git 远端<\/span><input id="knowledge-vault-import-remote"/);
+    assert.match(html, /<span>分支（可选）<\/span><input id="knowledge-vault-import-branch"/);
+    assert.match(html, /class="knowledge-vault-import-actions"><button type="button" id="knowledge-vault-import"/);
+    assert.match(html, /class="field-help knowledge-vault-import-help"/);
+    assert.doesNotMatch(html, /class="knowledge-vault-import-fields">\s*<label></);
+  } finally {
+    globalThis.document = originalDocument;
+    restore();
+  }
+});
