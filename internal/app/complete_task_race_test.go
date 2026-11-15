@@ -64,6 +64,68 @@ func waitForNoActiveTurn(t *testing.T, database *store.Store, taskID string) {
 	}
 }
 
+// waitForRoundSettled waits for the Turn's post-execution chain to finish.
+// afterTurnTerminal marks the Turn terminal, then calls scheduleAgent and
+// settleRound; the Round only becomes terminal at the very end of that chain.
+// Waiting on the Turn alone lets the next iteration enqueue into a Round that
+// the previous settlement is still about to close.
+func waitForRoundSettled(t *testing.T, database *store.Store, roundID string) domain.TaskRound {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		round, err := database.Round(context.Background(), roundID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if round.Status.Terminal() {
+			return round
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("round %s did not settle: status=%s", roundID, round.Status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// closeUnprocessedRound finishes the Round for a message the scheduler did not
+// turn into a Turn. The scheduler may already have closed it (the round-terminal
+// no-op path), so a terminal Round is accepted as-is.
+func closeUnprocessedRound(t *testing.T, database *store.Store, roundID string) {
+	t.Helper()
+	ctx := context.Background()
+	round, err := database.Round(ctx, roundID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if round.Status.Terminal() {
+		return
+	}
+	if err := database.CancelPendingInboxForRound(ctx, round.ID, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	previous := round.Status
+	round.Status = domain.RoundCompleted
+	round.FinishedAt = time.Now().UTC()
+	if err := database.UpdateRound(ctx, round, previous); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// assertInboxNotPending proves the completed Task did not leave the message
+// queued for a later scheduler to pick up behind the test's back.
+func assertInboxNotPending(t *testing.T, database *store.Store, taskID, agentID, inboxID string) {
+	t.Helper()
+	items, err := database.PendingAgentInbox(context.Background(), taskID, agentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range items {
+		if item.ID == inboxID {
+			t.Fatalf("inbox item %s is still pending after the round settled", inboxID)
+		}
+	}
+}
+
 func TestCompleteTaskRefusesActiveTurn(t *testing.T) {
 	executor := &blockingRaceExecutor{}
 	fixture := newPetTaskFixtureWithExecutor(t, executor)
@@ -122,7 +184,7 @@ func TestCompleteTaskAndScheduleAgentRace(t *testing.T) {
 			Content: fmt.Sprintf("race-%d", iteration), Source: "voice",
 			ClientRequestID: fmt.Sprintf("race-request-%d", iteration), CreatedAt: now,
 		}
-		round, _, _, _, _, _, err := fixture.database.EnqueueLocalOwnerMessage(ctx, message, "main", nil)
+		round, inbox, _, _, _, _, err := fixture.database.EnqueueLocalOwnerMessage(ctx, message, "main", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -162,8 +224,12 @@ func TestCompleteTaskAndScheduleAgentRace(t *testing.T) {
 				t.Fatalf("iteration %d: turns %d -> %d", iteration, beforeTurns, afterTurns)
 			}
 			close(release)
-			// Wait for the whole settlement, not only the Turn status: the task
-			// status transition happens after the Turn becomes terminal.
+			// Wait for the whole settlement, not only the Turn status: the Round
+			// closes after afterTurnTerminal has already run its own scheduler.
+			settled := waitForRoundSettled(t, fixture.database, round.ID)
+			if settled.Status != domain.RoundCompleted {
+				t.Fatalf("iteration %d: round settled as %s", iteration, settled.Status)
+			}
 			waitForTask(t, fixture.database, petTaskID, domain.TaskWaitingUser)
 			reloaded, err := fixture.database.Task(ctx, petTaskID)
 			if err != nil {
@@ -172,26 +238,20 @@ func TestCompleteTaskAndScheduleAgentRace(t *testing.T) {
 			if reloaded.Status == domain.TaskCompleted {
 				t.Fatalf("iteration %d: completed task with a Turn", iteration)
 			}
-		case errors.Is(scheduleErr, store.ErrTaskNotRunnable):
-			if completeErr != nil {
-				t.Fatalf("iteration %d: complete won but err=%v", iteration, completeErr)
-			}
-			if started {
-				t.Fatalf("iteration %d: claim started a Turn after losing", iteration)
-			}
+		case completeErr == nil && !started &&
+			(errors.Is(scheduleErr, store.ErrTaskNotRunnable) || scheduleErr == nil):
+			// CompleteTask won. The scheduler can observe that either as a refused
+			// claim (ErrTaskNotRunnable) or as a no-op when the Round it read was
+			// already closed around the message. Both are the same terminal state:
+			// the Task is completed, no Turn was started for this message, and the
+			// message must not stay pending for a later scheduler.
 			if afterTurns != beforeTurns {
-				t.Fatalf("iteration %d: turns %d -> %d after losing claim", iteration, beforeTurns, afterTurns)
+				t.Fatalf("iteration %d: turns %d -> %d after complete won", iteration, beforeTurns, afterTurns)
 			}
 			close(release)
-			if err := fixture.database.CancelPendingInboxForRound(ctx, round.ID, time.Now().UTC()); err != nil {
-				t.Fatal(err)
-			}
-			previousRoundStatus := round.Status
-			round.Status = domain.RoundCompleted
-			round.FinishedAt = time.Now().UTC()
-			if err := fixture.database.UpdateRound(ctx, round, previousRoundStatus); err != nil {
-				t.Fatal(err)
-			}
+			closeUnprocessedRound(t, fixture.database, round.ID)
+			assertInboxNotPending(t, fixture.database, petTaskID, "main", inbox.ID)
+			waitForNoActiveTurn(t, fixture.database, petTaskID)
 			reloaded, err := fixture.database.Task(ctx, petTaskID)
 			if err != nil {
 				t.Fatal(err)
