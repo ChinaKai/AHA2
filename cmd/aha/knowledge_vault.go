@@ -42,7 +42,7 @@ func (options knowledgeVaultCommon) config() (knowledgevault.Config, error) {
 
 func knowledgeVault(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: aha2 knowledge-vault <init|export|rebuild-index|search|status|migrate-legacy|import> [flags]")
+		return fmt.Errorf("usage: aha2 knowledge-vault <init|export|rebuild-index|search|status|migrate-legacy|import|delete-prep> [flags]")
 	}
 	switch args[0] {
 	case "init":
@@ -59,6 +59,8 @@ func knowledgeVault(args []string) error {
 		return knowledgeVaultMigrateLegacy(args[1:])
 	case "import":
 		return knowledgeVaultImport(args[1:])
+	case "delete-prep":
+		return knowledgeVaultDeletePrep(args[1:])
 	default:
 		return fmt.Errorf("unknown knowledge-vault command %q", args[0])
 	}
@@ -371,6 +373,34 @@ func knowledgeVaultStatus(args []string) error {
 			return statusErr
 		}
 		report.Index = &status
+	}
+	return writeKnowledgeVaultReport(os.Stdout, report)
+}
+
+func knowledgeVaultDeletePrep(args []string) error {
+	flags := flag.NewFlagSet("aha2 knowledge-vault delete-prep", flag.ContinueOnError)
+	options := knowledgeVaultCommon{}
+	options.register(flags)
+	databasePath := flags.String("database", "", "AHA2 database path (default <data-dir>/aha2.db)")
+	backupDir := flags.String("backup-dir", "", "backup directory (default <data-dir>/backups)")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
+	}
+	config, err := options.config()
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(*databasePath) == "" {
+		*databasePath = filepath.Join(config.DataDir, "aha2.db")
+	}
+	report, err := knowledgevault.PrepareKnowledgeDeletion(context.Background(), knowledgevault.DeletePrepOptions{
+		DataDir: config.DataDir, DatabasePath: *databasePath, VaultPath: config.VaultPath, BackupDir: *backupDir,
+	})
+	if err != nil {
+		return err
 	}
 	return writeKnowledgeVaultReport(os.Stdout, report)
 }
