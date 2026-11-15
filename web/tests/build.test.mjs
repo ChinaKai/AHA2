@@ -1312,7 +1312,7 @@ test("built web contains responsive application", async () => {
   assert.doesNotMatch(knowledgeWorkspace, /data-knowledge-toggle/);
   assert.match(knowledgeWorkspace, /data-knowledge-open/);
   assert.match(knowledgeWorkspace, /project-navigation/);
-  assert.match(css, /\.knowledge-entry-portals/);
+  assert.match(css, /\.knowledge-section-head/);
   assert.match(css, /\.knowledge-read-layout[^\n]*grid-template-columns: minmax\(210px,280px\)/);
   assert.match(css, /\.knowledge-read-layout\.directory-open \.knowledge-reader \{ display: none; \}/);
   assert.match(css, /\.knowledge-read-layout\.reader-open \.knowledge-directory \{ display: none; \}/);
@@ -1710,10 +1710,12 @@ test("built web contains responsive application", async () => {
   assert.doesNotMatch(script, /data-task-action="delete"/);
   assert.match(script, /requestAnimationFrame\(runTaskClock\)/);
   assert.match(script, /composer-focused/);
-  // Phones cannot keep the global fixed search FAB: it sits on the Task
-  // composer. Task view renders its own in-stream entry above the composer.
+  // Phones cannot keep the global fixed search FAB on the Task composer.
+  // Only Task view swaps it for its own in-stream entry; other mobile pages
+  // keep the global entry. Attached drafts hide the task entry as well.
   assert.match(script, /class="command-palette-fab task-search-fab" data-command-palette-open/);
-  assert.match(css, /\.app-shell > \.command-palette-fab \{ display: none; \}/);
+  assert.match(css, /body\.task-view-active \.app-shell > \.command-palette-fab \{ display: none; \}/);
+  assert.match(css, /body:has\(\.composer-attachment-tray\) \.task-search-fab \{ display: none; \}/);
   assert.match(css, /\.task-search-fab \{[^}]*position: absolute;[^}]*bottom: 10px/);
   assert.match(css, /--mobile-bottom-nav-height:\s*calc\(62px \+ env\(safe-area-inset-bottom\)\)/);
   assert.match(css, /\.task-screen \{[^}]*height:\s*calc\(var\(--visual-viewport-height\) - var\(--mobile-bottom-nav-height\)\)/);

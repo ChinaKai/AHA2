@@ -234,6 +234,69 @@ try {
     assert.ok(geometry.attachment.bottom <= height && geometry.send.bottom <= height, `${width}px composer controls stay on screen`);
     assert.ok(geometry.overflow <= 1, `${width}px Task detail has no horizontal overflow`);
 
+    // An open attachment tray shares the composer's stacking context (z-index
+    // 2), so the z-index 35 FAB would cover it and swallow clicks on its
+    // remove buttons. Reproduce the intersection first, then verify the tray
+    // hides the FAB and that it comes back when the tray closes.
+    const trayMarkup = `<div class="composer-attachment-tray">${Array.from({length: 8}, (_, index) => `
+      <article>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M0 0h24v24H0z"></path></svg>
+        <span><strong>screenshot-${index + 1}.png</strong><small>1.0 KB</small></span>
+        <button type="button" class="icon-button" data-remove-attachment="draft-${index + 1}" title="Remove attachment" aria-label="Remove attachment"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M0 0h24v24H0z"></path></svg></button>
+      </article>`).join("")}</div>`;
+    await page.evaluate(markup => {
+      document.querySelector("#message-attachment-input").insertAdjacentHTML("beforebegin", markup);
+    }, trayMarkup);
+    const overlapState = await page.evaluate(() => {
+      const style = document.createElement("style");
+      style.textContent = "body:has(.composer-attachment-tray) .task-search-fab { display: grid !important; }";
+      document.head.append(style);
+      const fab = document.querySelector(".task-search-fab");
+      const tray = document.querySelector(".composer-attachment-tray");
+      const fabBox = fab.getBoundingClientRect();
+      const trayBox = tray.getBoundingClientRect();
+      const overlapX = (Math.max(fabBox.left, trayBox.left) + Math.min(fabBox.right, trayBox.right)) / 2;
+      const overlapY = (Math.max(fabBox.top, trayBox.top) + Math.min(fabBox.bottom, trayBox.bottom)) / 2;
+      const hit = document.elementFromPoint(overlapX, overlapY);
+      style.remove();
+      return {
+        overlaps: fabBox.left < trayBox.right && fabBox.right > trayBox.left && fabBox.top < trayBox.bottom && fabBox.bottom > trayBox.top,
+        hitFab: Boolean(hit?.closest(".task-search-fab")),
+        fab: {left: fabBox.left, top: fabBox.top, right: fabBox.right, bottom: fabBox.bottom},
+        tray: {left: trayBox.left, top: trayBox.top, right: trayBox.right, bottom: trayBox.bottom},
+      };
+    });
+    if (width === 390) {
+      assert.equal(overlapState.overlaps, true, `390px old stacking lets the search FAB cover the attachment tray: ${JSON.stringify(overlapState)}`);
+      assert.equal(overlapState.hitFab, true, `390px old stacking lets the search FAB intercept tray buttons: ${JSON.stringify(overlapState)}`);
+    }
+
+    const trayState = await page.evaluate(() => {
+      const fab = document.querySelector(".task-search-fab");
+      const tray = document.querySelector(".composer-attachment-tray");
+      const remove = tray.querySelector("[data-remove-attachment]");
+      const fabBox = fab.getBoundingClientRect();
+      const removeBox = remove.getBoundingClientRect();
+      const hit = document.elementFromPoint(removeBox.left + removeBox.width / 2, removeBox.top + removeBox.height / 2);
+      return {
+        display: getComputedStyle(fab).display,
+        fab: {left: fabBox.left, top: fabBox.top, right: fabBox.right, bottom: fabBox.bottom, width: fabBox.width, height: fabBox.height},
+        hitInTray: Boolean(hit?.closest(".composer-attachment-tray")),
+      };
+    });
+    assert.equal(trayState.display, "none", `${width}px hides the search FAB while attachment drafts are open`);
+    assert.equal(trayState.fab.width, 0, `${width}px hidden search FAB has no hit box`);
+    assert.equal(trayState.hitInTray, true, `${width}px attachment tray button is clickable while the FAB is hidden`);
+
+    const restoredState = await page.evaluate(() => {
+      document.querySelector(".composer-attachment-tray")?.remove();
+      const fab = document.querySelector(".task-search-fab");
+      const box = fab.getBoundingClientRect();
+      return {display: getComputedStyle(fab).display, width: box.width, height: box.height};
+    });
+    assert.notEqual(restoredState.display, "none", `${width}px brings the search FAB back after the tray closes`);
+    assert.ok(restoredState.width >= 40 && restoredState.height >= 40, `${width}px restored search FAB is still a 40px target`);
+
     await page.locator(".task-search-fab").click();
     await page.waitForSelector("#command-palette", {state: "visible", timeout: 5000});
     await page.keyboard.press("Escape");
@@ -243,6 +306,37 @@ try {
     });
     assert.equal(await page.evaluate(() => document.activeElement?.classList.contains("task-search-fab")), true, `${width}px focus returns to the search entry`);
   }
+
+  // Leaving Task view must restore the global search FAB: mobile projects (and
+  // every other non-task route) have no in-stream replacement.
+  await page.setViewportSize({width: 390, height: 844});
+  await page.locator('.bottom-nav [data-view="projects"]').click();
+  await page.waitForFunction(() => !document.body.classList.contains("task-view-active"));
+  await page.waitForSelector(".app-shell > .command-palette-fab", {state: "visible", timeout: 15000});
+  const projectsFab = await page.evaluate(() => {
+    const fab = document.querySelector(".app-shell > .command-palette-fab");
+    const box = fab.getBoundingClientRect();
+    return {
+      taskView: document.body.classList.contains("task-view-active"),
+      display: getComputedStyle(fab).display,
+      width: box.width,
+      height: box.height,
+      taskEntries: document.querySelectorAll(".task-search-fab").length,
+    };
+  });
+  assert.equal(projectsFab.taskView, false, "390px projects route is not Task view");
+  assert.notEqual(projectsFab.display, "none", "390px projects route keeps the global search FAB");
+  assert.ok(projectsFab.width >= 40 && projectsFab.height >= 40, "390px projects search FAB is a 40px target");
+  assert.equal(projectsFab.taskEntries, 0, "390px projects route has no Task-only search entry");
+  await page.locator(".app-shell > .command-palette-fab").click();
+  await page.waitForSelector("#command-palette", {state: "visible", timeout: 5000});
+  await page.keyboard.press("Escape");
+  await page.waitForFunction(() => {
+    const palette = document.querySelector("#command-palette");
+    return !palette || palette.open === false || getComputedStyle(palette).display === "none";
+  });
+  assert.equal(await page.evaluate(() => document.activeElement?.classList.contains("command-palette-fab")), true, "390px projects focus returns to the global FAB");
+
   await page.setViewportSize({width: 1280, height: 900});
   assert.deepEqual(errors, []);
 } finally {

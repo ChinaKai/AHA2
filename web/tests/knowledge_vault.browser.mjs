@@ -1441,6 +1441,26 @@ try {
   assert.equal(await page.locator(".kv-tree-panel").isVisible(), true);
   assert.ok(Math.abs((await page.evaluate(() => window.scrollY)) - before) < 80, "list scroll is restored");
   assert.ok((await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)), "390px has no horizontal overflow");
+  const knowledgeFab = await page.evaluate(() => {
+    const fab = document.querySelector(".app-shell > .command-palette-fab");
+    const box = fab.getBoundingClientRect();
+    return {
+      taskView: document.body.classList.contains("task-view-active"),
+      display: getComputedStyle(fab).display,
+      width: box.width,
+      height: box.height,
+    };
+  });
+  assert.equal(knowledgeFab.taskView, false, "390px knowledge route is not Task view");
+  assert.notEqual(knowledgeFab.display, "none", "390px knowledge route keeps the global search FAB");
+  assert.ok(knowledgeFab.width >= 40 && knowledgeFab.height >= 40, "390px knowledge search FAB is a 40px target");
+  await page.locator(".app-shell > .command-palette-fab").click();
+  await page.waitForSelector("#command-palette", {state: "visible", timeout: 5000});
+  await page.keyboard.press("Escape");
+  await page.waitForFunction(() => {
+    const palette = document.querySelector("#command-palette");
+    return !palette || palette.open === false || getComputedStyle(palette).display === "none";
+  });
   await axe(page, "mobile-390");
 
   await page.setViewportSize({width: 360, height: 800});
