@@ -505,6 +505,13 @@ func unavailableDiff(reason string) DocDiff {
 	return DocDiff{Lines: []DiffLine{}, Reason: reason}
 }
 
+// literalPathspec stops git from expanding bracket characters in a vault file
+// name as a glob. Without it "note[1].md" also matches "note1.md", so a preview
+// could silently show a sibling file's diff and commit baseline.
+func literalPathspec(relativePath string) string {
+	return ":(literal)" + relativePath
+}
+
 // DocumentDiff compares a vault-relative document path with its latest
 // baseline. Uncommitted changes (staged or not) win; otherwise the last commit
 // that touched the file is compared with its parent. The caller must pass a
@@ -527,15 +534,16 @@ func (g *Git) DocumentDiff(ctx context.Context, relativePath string) (DocDiff, e
 	if !g.hasCommit(ctx) {
 		return unavailableDiff("知识库仓库还没有任何提交"), nil
 	}
+	pathspec := literalPathspec(relativePath)
 	// A file that was never added to git has no baseline at all. Checking
 	// ls-files first also keeps the untracked file's content out of the diff.
-	if _, err := g.command(ctx, "ls-files", "--error-unmatch", "--", relativePath); err != nil {
+	if _, err := g.command(ctx, "ls-files", "--error-unmatch", "--", pathspec); err != nil {
 		return unavailableDiff("文件尚未纳入 git 版本管理"), nil
 	}
 
 	// HEAD covers both staged and unstaged edits. The older "git diff -- path"
 	// form would silently miss a change the owner already staged.
-	output, err := g.commandRaw(ctx, "diff", "--no-color", "--no-ext-diff", "HEAD", "--", relativePath)
+	output, err := g.commandRaw(ctx, "diff", "--no-color", "--no-ext-diff", "HEAD", "--", pathspec)
 	if err != nil {
 		return unavailableDiff("读取 git 变更失败"), nil
 	}
@@ -545,7 +553,7 @@ func (g *Git) DocumentDiff(ctx context.Context, relativePath string) (DocDiff, e
 		return result, nil
 	}
 
-	commit, err := g.command(ctx, "log", "-1", "--format=%H", "--", relativePath)
+	commit, err := g.command(ctx, "log", "-1", "--format=%H", "--", pathspec)
 	if err != nil || strings.TrimSpace(commit) == "" {
 		return unavailableDiff("文件没有提交历史"), nil
 	}
@@ -560,7 +568,7 @@ func (g *Git) DocumentDiff(ctx context.Context, relativePath string) (DocDiff, e
 	if value, err := g.command(ctx, "show", "-s", "--format=%cI", commit); err == nil {
 		committedAt = strings.TrimSpace(value)
 	}
-	output, err = g.commandRaw(ctx, "diff", "--no-color", "--no-ext-diff", commit+"^", commit, "--", relativePath)
+	output, err = g.commandRaw(ctx, "diff", "--no-color", "--no-ext-diff", commit+"^", commit, "--", pathspec)
 	if err != nil {
 		return unavailableDiff("读取 git 变更失败"), nil
 	}

@@ -200,3 +200,75 @@ func TestDocumentDiffTruncatesLargeChanges(t *testing.T) {
 		t.Fatalf("large diff returned %d lines, limit is %d", len(diff.Lines), diffMaxLines)
 	}
 }
+
+// A bracket in a vault file name must never be read as a glob. With two
+// sibling files, note[1].md and note1.md, git's default pathspec treats the
+// former as a character class and silently returns the latter's history.
+func TestDocumentDiffUsesLiteralPathspecs(t *testing.T) {
+	ctx := context.Background()
+	config, git := newGitTestVault(t)
+	if _, err := git.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	const bracket = "note[1].md"
+	const sibling = "note1.md"
+	writeGitTestFile(t, config.VaultPath, bracket, "bracket original\n")
+	writeGitTestFile(t, config.VaultPath, sibling, "sibling original\n")
+	if _, err := git.Commit(ctx, "add both notes"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Uncommitted path: only the sibling changes. The bracket file is clean, so
+	// it must keep its own committed baseline (the commit that added it) and
+	// never report the sibling's uncommitted edit.
+	addNotesCommit := testGitCommand(t, config.VaultPath, "rev-parse", "HEAD")
+	writeGitTestFile(t, config.VaultPath, sibling, "sibling original\nsibling edit\n")
+	diff, err := git.DocumentDiff(ctx, bracket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !diff.Available || diff.Baseline != addNotesCommit || diff.Commit != addNotesCommit {
+		t.Fatalf("bracket file picked up the uncommitted sibling: %+v", diff)
+	}
+	for _, line := range diff.Lines {
+		if strings.Contains(line.Text, "sibling") {
+			t.Fatalf("uncommitted sibling content leaked into %q: %+v", bracket, diff)
+		}
+	}
+
+	// Committed path: the bracket file gets a later commit, then the sibling
+	// is committed again so it is the newest match for the loose pathspec.
+	if _, err := git.Commit(ctx, "commit sibling edit"); err != nil {
+		t.Fatal(err)
+	}
+	writeGitTestFile(t, config.VaultPath, bracket, "bracket original\nbracket edit\n")
+	if _, err := git.Commit(ctx, "commit bracket edit"); err != nil {
+		t.Fatal(err)
+	}
+	bracketCommit := testGitCommand(t, config.VaultPath, "rev-parse", "HEAD")
+	writeGitTestFile(t, config.VaultPath, sibling, "sibling original\nsibling edit\nsibling again\n")
+	if _, err := git.Commit(ctx, "commit sibling again"); err != nil {
+		t.Fatal(err)
+	}
+	siblingCommit := testGitCommand(t, config.VaultPath, "rev-parse", "HEAD")
+
+	diff, err = git.DocumentDiff(ctx, bracket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !diff.Available || diff.Baseline != bracketCommit || diff.Commit != bracketCommit {
+		t.Fatalf("bracket baseline = %q commit = %q, want %q (sibling %q): %+v", diff.Baseline, diff.Commit, bracketCommit, siblingCommit, diff)
+	}
+	var addedText []string
+	for _, line := range diff.Lines {
+		if line.Kind == "add" {
+			addedText = append(addedText, line.Text)
+		}
+		if strings.Contains(line.Text, "sibling") {
+			t.Fatalf("sibling content leaked into %q diff: %+v", bracket, diff)
+		}
+	}
+	if strings.Join(addedText, "\n") != "bracket edit" {
+		t.Fatalf("bracket diff added %q, want %q", addedText, "bracket edit")
+	}
+}
