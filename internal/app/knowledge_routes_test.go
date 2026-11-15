@@ -319,6 +319,27 @@ func TestPetGlobalKnowledgeWritesVault(t *testing.T) {
 	}
 }
 
+func TestPetDeleteVaultOnlyEntryIsExplicitlyUnsupported(t *testing.T) {
+	service, database, _, project := knowledgeRouteFixture(t, "project_other")
+	ctx := context.Background()
+	setKnowledgeAutoApprove(t, database, true)
+	submitted, err := service.PetSubmitKnowledge(ctx, "project", project.ID, []KnowledgeCandidate{{
+		Type: "practice", Title: "宠物删除 vault 条目", Body: vaultRouteBody(),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := service.vaultEntryByID(ctx, submitted.Entries[0].ID); err != nil || !found {
+		t.Fatalf("fixture entry missing from vault: found=%v err=%v", found, err)
+	}
+	if _, err := service.PetDeleteKnowledge(ctx, submitted.Entries[0].ID, "清理已经过期的知识条目"); !errors.Is(err, ErrKnowledgeVaultDeleteUnsupported) {
+		t.Fatalf("PetDeleteKnowledge error=%v", err)
+	}
+	if _, found, err := service.vaultEntryByID(ctx, submitted.Entries[0].ID); err != nil || !found {
+		t.Fatalf("refused Pet delete removed the vault entry: found=%v err=%v", found, err)
+	}
+}
+
 func TestWebKnowledgeWritesVaultAndRefusesDelete(t *testing.T) {
 	service, database, _, project := knowledgeRouteFixture(t, "project_other")
 	ctx := context.Background()

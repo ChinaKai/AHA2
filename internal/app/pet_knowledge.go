@@ -541,14 +541,17 @@ func (s *Service) PetDeleteKnowledge(ctx context.Context, entryID, reason string
 	if err != nil {
 		return domain.PetApproval{}, err
 	}
-	item, err := s.store.Knowledge(ctx, strings.TrimSpace(entryID))
-	if err != nil {
-		return domain.PetApproval{}, fmt.Errorf("知识条目不存在")
-	}
-	if _, found, lookupErr := s.vaultEntryByID(ctx, item.ID); lookupErr != nil {
+	entryID = strings.TrimSpace(entryID)
+	// Check the vault before the legacy table: a vault-only entry has no legacy
+	// row, and reporting "not found" here would contradict PetListKnowledge.
+	if _, found, lookupErr := s.vaultEntryByID(ctx, entryID); lookupErr != nil {
 		return domain.PetApproval{}, lookupErr
 	} else if found {
 		return domain.PetApproval{}, ErrKnowledgeVaultDeleteUnsupported
+	}
+	item, err := s.store.Knowledge(ctx, entryID)
+	if err != nil {
+		return domain.PetApproval{}, fmt.Errorf("知识条目不存在")
 	}
 	if s.readSourceIsVault(item.Scope, item.ProjectID) {
 		return domain.PetApproval{}, fmt.Errorf("知识条目不在当前读取源中，不能删除")
