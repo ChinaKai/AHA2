@@ -706,6 +706,24 @@ func skillAppliesToProject(item domain.Skill, projectID string) bool {
 }
 
 func (s *Service) autoAttachSkillIDs(ctx context.Context, projectID string) ([]string, error) {
+	// Source routing: once the vault read is effective for the project, the
+	// auto-attach selection comes exclusively from vault preferences. The
+	// legacy skills.AutoAttach rows are the fallback for projects still on the
+	// old store; merging both mounted the same package twice under two IDs.
+	if s.vaultReadEnabled(projectID) {
+		selection := s.vaultAutoAttachSelection(ctx, projectID)
+		for _, item := range s.supersededLegacyAutoAttach(ctx, projectID, selection.slugs) {
+			log.Printf("knowledge vault auto-attach for project %s: legacy skill %s (%q) has no vault counterpart and is not auto-attached because the project uses the vault source", projectID, item.ID, item.Name)
+		}
+		return selection.keys, nil
+	}
+	return s.legacyAutoAttachSkillIDs(ctx, projectID)
+}
+
+// legacyAutoAttachSkillIDs is the old-store auto-attach rule. It stays
+// unchanged for projects whose vault read is not effective (vault off, read
+// rolled back, index not ready or project not bound).
+func (s *Service) legacyAutoAttachSkillIDs(ctx context.Context, projectID string) ([]string, error) {
 	items, err := s.store.ListSkills(ctx, "", "", true)
 	if err != nil {
 		return nil, err
@@ -719,10 +737,6 @@ func (s *Service) autoAttachSkillIDs(ctx context.Context, projectID string) ([]s
 			result = append(result, item.ID)
 		}
 	}
-	// Vault skills have no legacy row, so their auto-attach preference is
-	// merged here under the same project rules. The helper already checks the
-	// runtime read gate and logs every preference it cannot honour.
-	result = append(result, s.vaultAutoAttachSkillKeys(ctx, projectID)...)
 	return result, nil
 }
 

@@ -281,15 +281,30 @@ func (s *Service) SetVaultSkillAutoAttach(ctx context.Context, key string, autoA
 	return view, nil
 }
 
+// vaultAutoAttachSelection is the auto-attach result for a project that reads
+// from the vault. Slugs is the set of package slugs covered by the selection,
+// which lets the caller explain legacy AutoAttach rows that no longer apply.
+type vaultAutoAttachSelection struct {
+	keys  []string
+	slugs map[string]bool
+}
+
 // vaultAutoAttachSkillKeys returns the vault skills that should be pre-selected
-// for a new task. It applies only when the vault read gate, the project's
-// manifest binding, and the index are all ready. Preferences that can no longer
-// be honoured are logged instead of silently disappearing.
+// for a new task.
 func (s *Service) vaultAutoAttachSkillKeys(ctx context.Context, projectID string) []string {
+	return s.vaultAutoAttachSelection(ctx, projectID).keys
+}
+
+// vaultAutoAttachSelection resolves the vault skills that should be
+// pre-selected for a new task. It applies only when the vault read gate, the
+// project's manifest binding, and the index are all ready. Preferences that can
+// no longer be honoured are logged instead of silently disappearing.
+func (s *Service) vaultAutoAttachSelection(ctx context.Context, projectID string) vaultAutoAttachSelection {
+	selection := vaultAutoAttachSelection{slugs: map[string]bool{}}
 	preferences, err := s.store.ListVaultSkillPreferences(ctx)
 	if err != nil {
 		log.Printf("knowledge vault auto-attach preferences for project %s: %v", projectID, err)
-		return nil
+		return selection
 	}
 	applicable := make([]domain.VaultSkillPreference, 0, len(preferences))
 	for _, item := range preferences {
@@ -308,11 +323,11 @@ func (s *Service) vaultAutoAttachSkillKeys(ctx context.Context, projectID string
 		}
 	}
 	if len(applicable) == 0 {
-		return nil
+		return selection
 	}
 	if !s.vaultReadEnabled(projectID) {
 		log.Printf("knowledge vault auto-attach for project %s: %d preference(s) not applied (%s)", projectID, len(applicable), s.vaultReadDisabledReason(projectID))
-		return nil
+		return selection
 	}
 	available := map[string]knowledgevault.SkillPackage{}
 	_ = s.knowledgeVault.WithReader(func(reader *knowledgevault.Reader) error {
@@ -354,9 +369,40 @@ func (s *Service) vaultAutoAttachSkillKeys(ctx context.Context, projectID string
 		}
 		log.Printf("knowledge vault auto-attach: skill %s shares slug %q with %s; skipped for project %s", item.SkillID, slug, current, projectID)
 	}
-	result := make([]string, 0, len(order))
+	selection.keys = make([]string, 0, len(order))
 	for _, slug := range order {
-		result = append(result, bySlug[slug])
+		selection.keys = append(selection.keys, bySlug[slug])
+		selection.slugs[slug] = true
+	}
+	return selection
+}
+
+// supersededLegacyAutoAttach lists the legacy AutoAttach rows that used to be
+// merged into a task but are now excluded because the project reads auto-attach
+// from the vault. Rows whose slug is covered by the vault selection are not
+// reported: the same package is still attached, just under its vault id. The
+// returned rows have no vault counterpart, so the task silently loses them
+// unless the caller reports why.
+func (s *Service) supersededLegacyAutoAttach(ctx context.Context, projectID string, vaultSlugs map[string]bool) []domain.Skill {
+	items, err := s.store.ListSkills(ctx, "", "", true)
+	if err != nil {
+		log.Printf("knowledge vault auto-attach for project %s: list legacy skills: %v", projectID, err)
+		return nil
+	}
+	result := make([]domain.Skill, 0)
+	for _, item := range items {
+		if !item.AutoAttach || !(item.Scope == "global" || (item.Scope == "project" && item.ProjectID == projectID)) {
+			continue
+		}
+		slug := strings.TrimSpace(item.PackageSlug)
+		if slug == "" {
+			slug = knowledgevault.Slugify(item.Name)
+		}
+		slug = knowledgevault.SafeSegment(slug, "skill")
+		if vaultSlugs[slug] {
+			continue
+		}
+		result = append(result, item)
 	}
 	return result
 }
