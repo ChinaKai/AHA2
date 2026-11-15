@@ -4,6 +4,8 @@ import {icon} from "./icons.js";
 import {renderMarkdown} from "./markdown.js";
 import type {
   KnowledgeVaultDoc,
+  KnowledgeVaultDocDiff,
+  KnowledgeVaultDiffLine,
   KnowledgeVaultGitResponse,
   KnowledgeVaultGitStatus,
   KnowledgeVaultInbox,
@@ -25,6 +27,7 @@ type VaultTab = "knowledge" | "skills";
 type MobilePane = "list" | "doc";
 type LoadState = "idle" | "loading" | "ready" | "error";
 type SearchScope = "all" | "project" | "directory";
+type PreviewTab = "diff" | "full";
 type GitBusy = "" | "init" | "remote" | "commit" | "pull" | "push" | "sync";
 
 // Settings and Git labels live in this lazy route chunk rather than the
@@ -90,6 +93,16 @@ const localText: Record<string, [zhCN: string, enUS: string]> = {
   "kv.previewTitle": ["文档预览", "Document preview"],
   "kv.openOriginal": ["打开原文", "Open document"],
   "kv.closePreview": ["关闭预览", "Close preview"],
+  "kv.previewDiff": ["变化", "Changes"],
+  "kv.previewFull": ["全文", "Full text"],
+  "kv.previewDiffAria": ["文档变更", "Document changes"],
+  "kv.previewUncommitted": ["未提交改动", "Uncommitted changes"],
+  "kv.previewCommit": ["提交 {hash}", "Commit {hash}"],
+  "kv.previewDiffStats": ["+{added} −{removed}", "+{added} −{removed}"],
+  "kv.previewDiffTruncated": ["变更过长，仅显示前 400 行", "Diff is long; showing the first 400 lines only"],
+  "kv.previewDiffEmpty": ["与基线相同，没有可显示的差异。", "Same as the baseline; no differences to show."],
+  "kv.previewDiffUnavailable": ["无法显示变更：{reason}", "Changes unavailable: {reason}"],
+  "kv.previewDiffFailed": ["读取变更失败，已显示全文。", "Could not read changes; showing the full document."],
 };
 
 function kt(key: string, values: Record<string, string | number> = {}): string {
@@ -278,6 +291,35 @@ const PREVIEW_STYLES = `
 .kv-preview-head strong { display: block; font-size: var(--font-size-16); overflow-wrap: anywhere; }
 .kv-preview-meta { display: flex; flex-wrap: wrap; gap: 2px 10px; margin: 4px 0 0; color: var(--color-text-muted); font-size: var(--font-size-12); overflow-wrap: anywhere; }
 .kv-preview-body { flex: 1 1 auto; min-height: 120px; overflow: auto; overscroll-behavior: contain; }
+.kv-preview-tools { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.kv-preview-tabs { display: inline-flex; padding: 2px; border: 1px solid var(--color-border); border-radius: var(--radius-control); background: var(--color-surface); }
+.kv-preview-tab {
+  min-height: 32px; padding: 0 12px; border: 0; border-radius: calc(var(--radius-control) - 2px);
+  background: transparent; color: var(--color-text-muted); font-size: var(--font-size-12); font-weight: 600; cursor: pointer;
+}
+.kv-preview-tab[aria-pressed="true"] { background: var(--color-accent); color: var(--color-text-inverse); }
+.kv-preview-tab:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 1px; }
+.kv-diff-body { padding: 0; border: 1px solid var(--color-border-subtle); border-radius: var(--radius-control); background: var(--color-surface); }
+.kv-diff-meta {
+  display: flex; flex-wrap: wrap; gap: 2px 10px; padding: 7px 10px;
+  border-bottom: 1px solid var(--color-border-subtle); color: var(--color-text-muted);
+  font-size: var(--font-size-12); overflow-wrap: anywhere;
+}
+.kv-diff-meta .kv-diff-count { font-variant-numeric: tabular-nums; }
+.kv-diff-notice { margin: 0; padding: 9px 10px; color: var(--color-warning-ink); background: var(--color-warning-soft); font-size: var(--font-size-12); line-height: 1.55; }
+.kv-diff { font-family: var(--font-family-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); font-size: var(--font-size-12); line-height: 1.55; }
+.kv-diff-row { display: grid; grid-template-columns: 42px 42px 20px minmax(0, 1fr); align-items: start; }
+.kv-diff-no { padding: 0 6px; text-align: right; color: var(--color-text-muted); font-variant-numeric: tabular-nums; user-select: none; }
+.kv-diff-sign { text-align: center; font-weight: 700; user-select: none; }
+.kv-diff-row code { display: block; min-width: 0; padding: 0 10px 0 2px; white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 4; }
+.kv-diff-hunk { border-top: 1px solid var(--color-border-subtle); border-bottom: 1px solid var(--color-border-subtle); background: var(--color-surface-sunken, var(--color-surface)); }
+.kv-diff-hunk code, .kv-diff-hunk .kv-diff-no { color: var(--color-text-muted); }
+.kv-diff-add { background: var(--color-success-soft); }
+.kv-diff-add .kv-diff-sign { color: var(--color-success-ink); }
+.kv-diff-remove { background: var(--color-danger-soft); }
+.kv-diff-remove .kv-diff-sign { color: var(--color-danger-ink); }
+.kv-diff-empty { margin: 0; }
+.kv-preview-notice { margin: 0 0 var(--space-2); padding: 9px 10px; border-radius: var(--radius-control); background: var(--color-warning-soft); color: var(--color-warning-ink); font-size: var(--font-size-12); line-height: 1.55; }
 .kv-preview-actions { display: flex; justify-content: flex-end; }
 .kv-preview-open {
   display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 40px; padding: 0 14px;
@@ -295,6 +337,10 @@ const PREVIEW_STYLES = `
     border-radius: 0; padding: 12px;
   }
   .kv-preview-actions .kv-preview-open { width: 100%; }
+  .kv-preview-tools { gap: 6px; }
+  .kv-preview-tab { min-height: 36px; }
+  .kv-diff-row { grid-template-columns: 34px 34px 16px minmax(0, 1fr); }
+  .kv-diff-no { padding: 0 4px; }
 }
 `;
 
@@ -356,6 +402,10 @@ interface VaultState {
   previewDoc: KnowledgeVaultDoc | null;
   previewState: LoadState;
   previewError: string;
+  previewTab: PreviewTab;
+  previewDiff: KnowledgeVaultDocDiff | null;
+  previewDiffState: LoadState;
+  previewDiffError: string;
   inbox: KnowledgeVaultInbox | null;
   inboxState: LoadState;
   inboxError: string;
@@ -473,6 +523,7 @@ function initialState(): VaultState {
     selectedID: VAULT_ACTIVITY_ID, doc: null, docState: "idle", docError: "",
     recent: [], recentState: "idle", recentError: "",
     previewID: "", previewDoc: null, previewState: "idle", previewError: "",
+    previewTab: "diff", previewDiff: null, previewDiffState: "idle", previewDiffError: "",
     inbox: null, inboxState: "idle", inboxError: "",
     skills: [], skillsState: "idle", skillsError: "",
     searchOpen: false, searchQuery: "", searchScope: "all",
@@ -1016,13 +1067,46 @@ function previewPanelHTML(): string {
   const title = doc?.title || summary?.title || kt("kv.previewTitle");
   const updated = doc ? (doc.modified_at || doc.updated) : summary?.modified_at;
   const path = doc?.path || summary?.path || "";
-  const body = state.previewState === "error"
+  const diff = state.previewDiff;
+  const diffUnavailable = state.previewDiffState === "ready" && diff !== null && !diff.available;
+  const markdownBody = doc ? `<div class="markdown-body">${renderMarkdown(rewriteVaultWikilinks(doc.body))}</div>` : "";
+  const tabs = `<div class="kv-preview-tools">
+    <div class="kv-preview-tabs" aria-label="${kt("kv.previewDiffAria")}">
+      <button type="button" class="kv-preview-tab" data-kv-preview-tab="diff" aria-pressed="${state.previewTab === "diff"}">${kt("kv.previewDiff")}</button>
+      <button type="button" class="kv-preview-tab" data-kv-preview-tab="full" aria-pressed="${state.previewTab === "full"}">${kt("kv.previewFull")}</button>
+    </div>
+  </div>`;
+  let body: string;
+  if (state.previewState === "error") {
     // The preview has its own retry button; the shared data-kv-retry handler
     // would retry whichever other panel happens to be in an error state.
-    ? `${vaultEmptyState("error", state.previewError)}<button type="button" class="secondary" data-kv-preview-retry>${t("kv.retry")}</button>`
-    : doc
-      ? `<div class="markdown-body kv-preview-body">${renderMarkdown(rewriteVaultWikilinks(doc.body))}</div>`
-      : `<div class="kv-preview-body">${vaultEmptyState("loading")}</div>`;
+    body = `${vaultEmptyState("error", state.previewError)}<button type="button" class="secondary" data-kv-preview-retry>${t("kv.retry")}</button>`;
+  } else if (!doc) {
+    body = `<div class="kv-preview-body">${vaultEmptyState("loading")}</div>`;
+  } else if (state.previewTab === "diff" && state.previewDiffState !== "idle") {
+    if (state.previewDiffState === "loading") {
+      body = `<div class="kv-preview-body">${vaultEmptyState("loading")}</div>`;
+    } else if (state.previewDiffState === "error") {
+      body = `<div class="kv-preview-body"><p class="kv-preview-notice">${kt("kv.previewDiffFailed")}</p>${markdownBody}</div>`;
+    } else if (diffUnavailable) {
+      body = `<div class="kv-preview-body"><p class="kv-preview-notice">${diffUnavailableText(diff)}</p>${markdownBody}</div>`;
+    } else if (!diff || diff.lines.length === 0) {
+      body = `<div class="kv-preview-body"><p class="kv-preview-notice">${kt("kv.previewDiffEmpty")}</p></div>`;
+    } else {
+      body = `<div class="kv-preview-body kv-diff-body">${diffMetaHTML(diff)}${renderDiffHTML(diff)}</div>`;
+    }
+  } else {
+    // The full-text view stays on the previous markdown markup. When the diff
+    // is unavailable the reason sits above the body instead of replacing it.
+    const notice = diffUnavailable
+      ? `<p class="kv-preview-notice">${diffUnavailableText(diff)}</p>`
+      : state.previewDiffState === "error"
+        ? `<p class="kv-preview-notice">${kt("kv.previewDiffFailed")}</p>`
+        : "";
+    body = notice
+      ? `<div class="kv-preview-body">${notice}${markdownBody}</div>`
+      : `<div class="markdown-body kv-preview-body">${renderMarkdown(rewriteVaultWikilinks(doc.body))}</div>`;
+  }
   const targetID = doc?.id || state.previewID;
   const href = doc
     ? docHash({id: doc.id, scope: doc.scope, project_id: doc.project_id})
@@ -1035,11 +1119,46 @@ function previewPanelHTML(): string {
       </div>
       <button type="button" class="icon-button" data-kv-preview-close aria-label="${kt("kv.closePreview")}" title="${kt("kv.closePreview")}">${icon("close")}</button>
     </div>
+    ${tabs}
     ${body}
     <footer class="kv-preview-actions">
       <a class="kv-preview-open" href="${escapeVaultHTML(href)}" data-kv-doc="${escapeVaultHTML(targetID)}">${icon("panel")}<span>${kt("kv.openOriginal")}</span></a>
     </footer>
   </section>`;
+}
+
+function diffUnavailableText(diff: KnowledgeVaultDocDiff): string {
+  const reason = escapeVaultHTML(diff.reason || kt("kv.previewDiffEmpty"));
+  return kt("kv.previewDiffUnavailable", {reason});
+}
+
+function diffBaselineLabel(diff: KnowledgeVaultDocDiff): string {
+  if (diff.baseline === "uncommitted") return kt("kv.previewUncommitted");
+  const hash = (diff.commit || diff.baseline || "").slice(0, 8);
+  return hash ? kt("kv.previewCommit", {hash}) : "";
+}
+
+function diffMetaHTML(diff: KnowledgeVaultDocDiff): string {
+  const parts: string[] = [];
+  const baseline = diffBaselineLabel(diff);
+  if (baseline) parts.push(`<span>${escapeVaultHTML(baseline)}</span>`);
+  if (diff.committed_at && diff.baseline !== "uncommitted") parts.push(`<span>${escapeVaultHTML(safeDateTime(diff.committed_at))}</span>`);
+  parts.push(`<span class="kv-diff-count">${escapeVaultHTML(kt("kv.previewDiffStats", {added: diff.added, removed: diff.removed}))}</span>`);
+  if (diff.truncated) parts.push(`<span>${escapeVaultHTML(kt("kv.previewDiffTruncated"))}</span>`);
+  return `<div class="kv-diff-meta">${parts.join("")}</div>`;
+}
+
+function renderDiffHTML(diff: KnowledgeVaultDocDiff): string {
+  const rows = diff.lines.map((line: KnowledgeVaultDiffLine) => {
+    if (line.kind === "hunk") {
+      return `<div class="kv-diff-row kv-diff-hunk"><span class="kv-diff-no"></span><span class="kv-diff-no"></span><span class="kv-diff-sign"></span><code>${escapeVaultHTML(line.text)}</code></div>`;
+    }
+    const sign = line.kind === "add" ? "+" : line.kind === "remove" ? "-" : " ";
+    const oldNo = line.kind === "add" ? "" : String(line.old_no || "");
+    const newNo = line.kind === "remove" ? "" : String(line.new_no || "");
+    return `<div class="kv-diff-row kv-diff-${line.kind}"><span class="kv-diff-no">${oldNo}</span><span class="kv-diff-no">${newNo}</span><span class="kv-diff-sign" aria-hidden="true">${sign}</span><code>${escapeVaultHTML(line.text)}</code></div>`;
+  }).join("");
+  return `<div class="kv-diff" role="group" aria-label="${kt("kv.previewDiffAria")}">${rows}</div>`;
 }
 
 function searchResultsHTML(): string {
@@ -1891,16 +2010,33 @@ async function loadPreview(id: string): Promise<void> {
   state.previewDoc = null;
   state.previewState = "loading";
   state.previewError = "";
+  // Every open starts on the change view; an unavailable diff switches the
+  // panel to the full text without a second round trip or a blank dialog.
+  state.previewTab = "diff";
+  state.previewDiff = null;
+  state.previewDiffState = "loading";
+  state.previewDiffError = "";
   rerender();
-  try {
-    const payload = await api.knowledgeVaultDoc(id);
-    if (ticket !== previewRequest || state.previewID !== id) return;
-    state.previewDoc = payload.doc;
+  const [docResult, diffResult] = await Promise.allSettled([
+    api.knowledgeVaultDoc(id),
+    api.knowledgeVaultDiff(id),
+  ]);
+  if (ticket !== previewRequest || state.previewID !== id) return;
+  if (docResult.status === "fulfilled") {
+    state.previewDoc = docResult.value.doc;
     state.previewState = "ready";
-  } catch (error) {
-    if (ticket !== previewRequest || state.previewID !== id) return;
+  } else {
     state.previewState = "error";
-    state.previewError = error instanceof Error ? error.message : String(error);
+    state.previewError = docResult.reason instanceof Error ? docResult.reason.message : String(docResult.reason);
+  }
+  if (diffResult.status === "fulfilled") {
+    state.previewDiff = diffResult.value.diff;
+    state.previewDiffState = "ready";
+    if (!state.previewDiff.available) state.previewTab = "full";
+  } else {
+    state.previewDiffState = "error";
+    state.previewDiffError = diffResult.reason instanceof Error ? diffResult.reason.message : String(diffResult.reason);
+    state.previewTab = "full";
   }
   rerender();
 }
@@ -1919,6 +2055,10 @@ function clearPreviewState(): void {
   state.previewDoc = null;
   state.previewState = "idle";
   state.previewError = "";
+  state.previewTab = "diff";
+  state.previewDiff = null;
+  state.previewDiffState = "idle";
+  state.previewDiffError = "";
   previewTriggerID = "";
   previewRequest++;
 }
@@ -2443,6 +2583,18 @@ export function bindKnowledgeVaultPage(context: KnowledgeVaultContext): void {
     const target = event.target as HTMLElement | null;
     if (target?.closest("[data-kv-preview-close]")) {
       closePreview();
+      return;
+    }
+    if (target?.closest("[data-kv-preview-tab]")) {
+      const tab = target?.closest<HTMLElement>("[data-kv-preview-tab]")?.dataset.kvPreviewTab;
+      const next: PreviewTab = tab === "full" ? "full" : "diff";
+      if (state.previewTab !== next) {
+        state.previewTab = next;
+        rerender();
+        // The body was replaced, so return focus to the chosen tab for
+        // keyboard users instead of dropping it on <body>.
+        requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-kv-preview-tab="${next}"]`)?.focus({preventScroll: true}));
+      }
       return;
     }
     if (target?.closest("[data-kv-preview-retry]")) {

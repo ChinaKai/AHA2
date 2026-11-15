@@ -508,6 +508,95 @@ test("recent rows open an in-page preview and only 打开原文 links to the rea
   assert.match(source, /@media \(max-width: 760px\) \{[\s\S]*?\.kv-preview-panel \{[\s\S]*?height: calc\(100dvh - var\(--mobile-bottom-nav-height\)\)/);
 });
 
+test("recent preview defaults to a unified diff and keeps a full-text switch", async () => {
+  const recent = {
+    id: "r1", title: "最近想法", path: "projects/demo/inbox/idea.md", type: "practice",
+    status: "unverified", scope: "project", project_id: "p1", library_id: "project:p1",
+    library: "Demo", modified_at: "2026-11-14T10:00:00Z",
+  };
+  const diff = {
+    available: true, baseline: "uncommitted", truncated: false, added: 1, removed: 1,
+    lines: [
+      {kind: "hunk", text: "@@ -1,3 +1,3 @@", old_no: 0, new_no: 0, old_start: 1, old_lines: 3, new_start: 1, new_lines: 3},
+      {kind: "context", text: "# 构建", old_no: 1, new_no: 1},
+      {kind: "remove", text: "旧构建命令", old_no: 2, new_no: 0},
+      {kind: "add", text: "<新构建命令>", old_no: 0, new_no: 2},
+      {kind: "context", text: "", old_no: 3, new_no: 3},
+    ],
+  };
+  reset({
+    recentState: "ready", recent: [recent], previewID: "r1", previewState: "ready", previewDoc: doc,
+    previewTab: "diff", previewDiffState: "ready", previewDiff: diff,
+  });
+  const html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /data-kv-preview-tab="diff" aria-pressed="true"/);
+  assert.match(html, /data-kv-preview-tab="full" aria-pressed="false"/);
+  assert.match(html, /class="kv-preview-body kv-diff-body"/, "the change view is the default");
+  assert.match(html, /class="kv-diff-meta"><span>未提交改动<\/span><span class="kv-diff-count">\+1 −1<\/span>/);
+  assert.match(html, /kv-diff-hunk[^>]*><span class="kv-diff-no"><\/span><span class="kv-diff-no"><\/span><span class="kv-diff-sign"><\/span><code>@@ -1,3 \+1,3 @@<\/code>/);
+  assert.match(html, /kv-diff-remove[^>]*><span class="kv-diff-no">2<\/span><span class="kv-diff-no"><\/span><span class="kv-diff-sign" aria-hidden="true">-<\/span><code>旧构建命令<\/code>/);
+  assert.match(html, /kv-diff-add[^>]*><span class="kv-diff-no"><\/span><span class="kv-diff-no">2<\/span><span class="kv-diff-sign" aria-hidden="true">\+<\/span><code>&lt;新构建命令&gt;<\/code>/);
+  assert.match(html, /kv-diff-context[^>]*><span class="kv-diff-no">1<\/span><span class="kv-diff-no">1<\/span>/, "context rows keep both line numbers");
+  assert.doesNotMatch(html, /class="markdown-body kv-preview-body"/);
+  assert.match(html, /class="kv-preview-open"/, "打开原文 survives the change view");
+
+  reset({
+    recentState: "ready", recent: [recent], previewID: "r1", previewState: "ready", previewDoc: doc,
+    previewTab: "full", previewDiffState: "ready", previewDiff: diff,
+  });
+  const full = vault.renderKnowledgeVaultPage(context());
+  assert.match(full, /class="markdown-body kv-preview-body"/, "the full-text tab still renders markdown");
+  assert.doesNotMatch(full, /class="kv-diff"/);
+  assert.match(full, /data-kv-preview-tab="full" aria-pressed="true"/);
+});
+
+test("recent preview explains committed, empty and unavailable diffs", async () => {
+  const recent = {
+    id: "r1", title: "最近想法", path: "projects/demo/inbox/idea.md", type: "practice",
+    status: "unverified", scope: "project", project_id: "p1", library_id: "project:p1",
+    library: "Demo", modified_at: "2026-11-14T10:00:00Z",
+  };
+  reset({
+    recentState: "ready", recent: [recent], previewID: "r1", previewState: "ready", previewDoc: doc,
+    previewTab: "diff", previewDiffState: "ready",
+    previewDiff: {
+      available: true, baseline: "0123456789abcdef0123456789abcdef01234567",
+      commit: "0123456789abcdef0123456789abcdef01234567",
+      committed_at: "2026-11-14T10:00:00Z", truncated: true, added: 3, removed: 0,
+      lines: [{kind: "hunk", text: "@@ -1 +1,2 @@", old_no: 0, new_no: 0, old_start: 1, old_lines: 1, new_start: 1, new_lines: 2}],
+    },
+  });
+  let html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /<span>提交 01234567<\/span>/);
+  assert.match(html, /变更过长，仅显示前 400 行/);
+  assert.match(html, /\+3 −0/);
+
+  reset({
+    recentState: "ready", recent: [recent], previewID: "r1", previewState: "ready", previewDoc: doc,
+    previewTab: "diff", previewDiffState: "ready",
+    previewDiff: {available: true, baseline: "uncommitted", truncated: false, added: 0, removed: 0, lines: []},
+  });
+  html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /与基线相同，没有可显示的差异。/);
+  assert.doesNotMatch(html, /class="kv-diff"/);
+
+  reset({
+    recentState: "ready", recent: [recent], previewID: "r1", previewState: "ready", previewDoc: doc,
+    previewTab: "full", previewDiffState: "ready",
+    previewDiff: {available: false, reason: "知识库不是 git 仓库", truncated: false, added: 0, removed: 0, lines: []},
+  });
+  html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /无法显示变更：知识库不是 git 仓库/, "the fallback keeps the reason visible");
+  assert.match(html, /class="kv-preview-body"><p class="kv-preview-notice">[\s\S]*class="markdown-body"/, "the unavailable diff falls back to the full body");
+  assert.doesNotMatch(html, /class="kv-diff"/);
+  assert.match(html, /data-kv-preview-tab="full" aria-pressed="true"/);
+
+  const source = await readFile(resolve(root, "src", "knowledge_vault.ts"), "utf8");
+  assert.match(source, /if \(!state\.previewDiff\.available\) state\.previewTab = "full";/, "an unavailable diff switches the tab automatically");
+  assert.match(source, /@media \(max-width: 760px\) \{[\s\S]*?\.kv-diff-row \{ grid-template-columns: 34px 34px 16px minmax\(0, 1fr\); \}/);
+  assert.match(source, /\.kv-diff-row code \{[^}]*white-space: pre-wrap; overflow-wrap: anywhere;/, "long diff lines wrap on phones instead of widening the sheet");
+});
+
 test("folders default to collapsed and only an explicit expansion shows children", () => {
   const tree = vault.buildVaultDirectoryTree([
     treeFixture("g-root", "全局知识首页", "global/index.md", [

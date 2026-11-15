@@ -132,6 +132,22 @@ const RECENT = [
 const GLOBAL_RECENT = [
   {id: "g-doc", title: "全局指南", path: "global/guides/guide.md", type: "practice", status: "verified", scope: "global", library_id: "global", library: "全局知识", modified_at: now},
 ];
+// The fixture diff is deliberately small but covers every rendered row kind:
+// hunk header, context, remove and add with both line-number columns.
+const DOC_DIFF = {
+  available: true, baseline: "uncommitted", truncated: false, added: 1, removed: 1,
+  lines: [
+    {kind: "hunk", text: "@@ -1,5 +1,6 @@", old_no: 0, new_no: 0, old_start: 1, old_lines: 5, new_start: 1, new_lines: 6},
+    {kind: "context", text: "# 构建", old_no: 1, new_no: 1},
+    {kind: "context", text: "", old_no: 2, new_no: 2},
+    {kind: "remove", text: "运行 make build。", old_no: 3, new_no: 0},
+    {kind: "add", text: "运行 make build，然后执行 make test。", old_no: 0, new_no: 3},
+    {kind: "context", text: "", old_no: 4, new_no: 4},
+    {kind: "context", text: "参见 [[部署]]。", old_no: 5, new_no: 5},
+  ],
+};
+const EMPTY_DIFF = {available: true, baseline: "uncommitted", truncated: false, added: 0, removed: 0, lines: []};
+const UNAVAILABLE_DIFF = {available: false, reason: "知识库不是 git 仓库", truncated: false, added: 0, removed: 0, lines: []};
 const GLOBAL_INBOX = {id: "g-inbox", title: "全局想法", path: "global/inbox/idea.md", type: "practice", status: "unverified", scope: "global", library_id: "global", library: "全局知识", modified_at: now};
 const SEARCH = [
   {id: "doc-1", title: "构建指南", path: "projects/p1/guides/build.md", type: "practice", scope: "project", project_id: "p1", status: "verified", tags: ["build"], snippet: "运行 make build 构建项目", updated: now},
@@ -169,6 +185,9 @@ const RECENT = ${JSON.stringify(RECENT)};
 const GLOBAL_RECENT = ${JSON.stringify(GLOBAL_RECENT)};
 const GLOBAL_INBOX = ${JSON.stringify(GLOBAL_INBOX)};
 const SEARCH = ${JSON.stringify(SEARCH)};
+const DOC_DIFF = ${JSON.stringify(DOC_DIFF)};
+const EMPTY_DIFF = ${JSON.stringify(EMPTY_DIFF)};
+const UNAVAILABLE_DIFF = ${JSON.stringify(UNAVAILABLE_DIFF)};
 const OLD_KNOWLEDGE = [{id: "global-root", scope: "global", parent_id: "", is_index: true, type: "navigation", title: "Global index", slug: "index", body: "Global home.", status: "verified", confidence: .9, revision: 1, sort_order: 0, helped_count: 0, stale_count: 0, created_at: "${now}", updated_at: "${now}"}];
 window.__vaultRequests = [];
 window.__vaultTreeRequests = [];
@@ -184,6 +203,7 @@ window.__vaultGitFailPush = false;
 const failureParams = new URLSearchParams(location.search);
 window.__vaultRecentFail = failureParams.get("failRecent") === "1";
 window.__vaultInboxFail = failureParams.get("failInbox") === "1";
+window.__vaultDiffMode = failureParams.get("diff") || "";
 const delay = async (kind, key) => {
   const milliseconds = Number(window.__vaultDelays?.[kind]?.[key] || 0);
   if (milliseconds > 0) await new Promise(resolve => setTimeout(resolve, milliseconds));
@@ -207,6 +227,13 @@ window.fetch = async (input, init = {}) => {
     window.__vaultTreeRequests.push(library);
     await delay("tree", library);
     return json({ok: true, enabled: true, index_ready: true, library, count: (TREES[library] || []).length, nodes: TREES[library] || []});
+  }
+  const docPrefix = "/api/v1/knowledge-vault/doc/";
+  if (path.startsWith(docPrefix) && path.endsWith("/diff")) {
+    if (window.__vaultDiffMode === "empty") return json({ok: true, enabled: true, diff: EMPTY_DIFF});
+    if (window.__vaultDiffMode === "unavailable") return json({ok: true, enabled: true, diff: UNAVAILABLE_DIFF});
+    if (window.__vaultDiffMode === "error") return json({ok: false, error: "knowledge_vault_document_diff_failed"}, 500);
+    return json({ok: true, enabled: true, diff: DOC_DIFF});
   }
   if (path.startsWith("/api/v1/knowledge-vault/doc/")) {
     const id = decodeURIComponent(path.slice("/api/v1/knowledge-vault/doc/".length));
@@ -402,11 +429,29 @@ try {
   // inbox rows remain direct document links.
   const routeBeforePreview = await page.evaluate(() => location.hash);
   await page.locator('.kv-feed [data-kv-preview="doc-1"]').click();
-  await page.waitForSelector(".kv-preview-panel .kv-preview-body.markdown-body", {timeout: 5000});
+  await page.waitForSelector(".kv-preview-panel .kv-diff .kv-diff-hunk", {timeout: 5000});
   assert.equal(await page.evaluate(() => location.hash), routeBeforePreview, "opening the preview does not change the route");
   assert.equal((await page.locator("#kv-preview-title").textContent()).trim(), "构建指南");
   assert.match(await page.locator(".kv-preview-meta").innerText(), /projects\/p1\/guides\/build\.md/);
   assert.match(await page.locator(".kv-preview-meta").innerText(), /2026/);
+  // The default view is the latest change, not the current body.
+  assert.equal(await page.locator('[data-kv-preview-tab="diff"]').getAttribute("aria-pressed"), "true");
+  assert.equal(await page.locator('[data-kv-preview-tab="full"]').getAttribute("aria-pressed"), "false");
+  assert.match(await page.locator(".kv-diff-meta").innerText(), /未提交改动/);
+  assert.match(await page.locator(".kv-diff-meta").innerText(), /\+1 −1/);
+  assert.match(await page.locator(".kv-diff-hunk").innerText(), /@@ -1,5 \+1,6 @@/);
+  assert.match(await page.locator(".kv-diff-remove").innerText(), /运行 make build。/);
+  assert.match(await page.locator(".kv-diff-add").innerText(), /运行 make build，然后执行 make test。/);
+  assert.equal(await page.locator(".kv-preview-body.markdown-body").count(), 0, "the change view hides the full text");
+  // 全文 switches back to the existing markdown body, and 变化 returns.
+  await page.locator('[data-kv-preview-tab="full"]').click();
+  await page.waitForSelector(".kv-preview-panel .kv-preview-body.markdown-body");
+  assert.match(await page.locator(".kv-preview-body.markdown-body").innerText(), /步骤[\s\S]*make build/);
+  assert.equal(await page.locator(".kv-preview-panel .kv-diff").count(), 0);
+  assert.equal(await page.locator('[data-kv-preview-tab="full"]').getAttribute("aria-pressed"), "true");
+  await page.locator('[data-kv-preview-tab="diff"]').click();
+  await page.waitForSelector(".kv-preview-panel .kv-diff");
+  assert.equal(await page.locator('[data-kv-preview-tab="diff"]').getAttribute("aria-pressed"), "true");
   const previewOpenLink = page.locator(".kv-preview-open");
   assert.equal(await previewOpenLink.getAttribute("data-kv-doc"), "doc-1");
   assert.equal((await previewOpenLink.innerText()).trim(), "打开原文");
@@ -1338,17 +1383,21 @@ try {
   // and never rewrites the route; its own close button dismisses it.
   const mobileRouteBeforePreview = await page.evaluate(() => location.hash);
   await page.locator('.kv-feed [data-kv-preview="doc-1"]').click();
-  await page.waitForSelector(".kv-preview-panel .kv-preview-body.markdown-body", {timeout: 5000});
+  await page.waitForSelector(".kv-preview-panel .kv-diff", {timeout: 5000});
   const mobilePreview = await page.evaluate(() => {
     const panel = document.querySelector(".kv-preview-panel").getBoundingClientRect();
     const nav = document.querySelector(".bottom-nav").getBoundingClientRect();
-    const body = document.querySelector(".kv-preview-body");
+    const body = document.querySelector(".kv-preview-body.kv-diff-body");
+    const code = document.querySelector(".kv-diff-row code");
     return {
       width: panel.width,
       left: panel.left,
       bottom: panel.bottom,
       navTop: nav.top,
       bodyOverflowY: getComputedStyle(body).overflowY,
+      codeWhiteSpace: getComputedStyle(code).whiteSpace,
+      codeRight: code.getBoundingClientRect().right,
+      panelRight: panel.right,
       overflow: document.documentElement.scrollWidth - window.innerWidth,
       hash: location.hash,
     };
@@ -1356,6 +1405,8 @@ try {
   assert.ok(Math.abs(mobilePreview.width - 390) <= 1, `390px preview is full width: ${mobilePreview.width}`);
   assert.ok(mobilePreview.bottom <= mobilePreview.navTop + 1, "390px preview does not cover the bottom navigation");
   assert.equal(mobilePreview.bodyOverflowY, "auto", "the preview body scrolls inside the sheet");
+  assert.equal(mobilePreview.codeWhiteSpace, "pre-wrap", "390px diff rows wrap long lines instead of panning");
+  assert.ok(mobilePreview.codeRight <= mobilePreview.panelRight + 1, "390px diff text stays inside the sheet");
   assert.equal(mobilePreview.hash, mobileRouteBeforePreview, "the mobile preview keeps the route");
   assert.ok(mobilePreview.overflow <= 1, "390px preview has no horizontal overflow");
   await page.locator("[data-kv-preview-close]").click();
@@ -1606,6 +1657,43 @@ try {
     inbox: await requestCount(failingBoth, "Inbox"),
   }, {recent: bothStart.recent + 1, inbox: bothStart.inbox + 1}, "forced retries fail once each without starting another loop");
   await failingBoth.close();
+
+  // An empty diff still renders a readable state instead of an empty panel.
+  const emptyPreview = await browser.newPage({viewport: {width: 390, height: 844}, locale: "zh-CN"});
+  await emptyPreview.goto(`${url}/?diff=empty`, {waitUntil: "networkidle"});
+  await emptyPreview.evaluate(() => document.querySelector("[data-view=knowledge]")?.click());
+  await emptyPreview.waitForSelector(".kv-tree-link");
+  await emptyPreview.locator("[data-kv-activity]").click();
+  await emptyPreview.waitForSelector(".kv-feed [data-kv-preview]", {state: "visible"});
+  await emptyPreview.locator('.kv-feed [data-kv-preview="doc-1"]').click();
+  await emptyPreview.waitForFunction(() => document.querySelector(".kv-preview-panel")?.textContent.includes("与基线相同"), null, {timeout: 5000});
+  assert.equal(await emptyPreview.locator(".kv-preview-panel .kv-diff").count(), 0, "an empty diff renders no rows");
+  assert.equal(await emptyPreview.locator('[data-kv-preview-tab="diff"]').getAttribute("aria-pressed"), "true", "the change tab stays selected for an empty diff");
+  assert.equal(await emptyPreview.evaluate(() => document.documentElement.scrollWidth - window.innerWidth <= 1), true);
+  await emptyPreview.screenshot({path: resolve(screenshots, "knowledge-vault-diff-empty-390.png"), fullPage: false});
+  await emptyPreview.close();
+
+  // No git history: the preview explains why and opens the full text by
+  // itself. Switching back to 变化 keeps the explanation and the body.
+  const unavailablePreview = await browser.newPage({viewport: {width: 390, height: 844}, locale: "zh-CN"});
+  await unavailablePreview.goto(`${url}/?diff=unavailable`, {waitUntil: "networkidle"});
+  await unavailablePreview.evaluate(() => document.querySelector("[data-view=knowledge]")?.click());
+  await unavailablePreview.waitForSelector(".kv-tree-link");
+  await unavailablePreview.locator("[data-kv-activity]").click();
+  await unavailablePreview.waitForSelector(".kv-feed [data-kv-preview]", {state: "visible"});
+  await unavailablePreview.locator('.kv-feed [data-kv-preview="doc-1"]').click();
+  await unavailablePreview.waitForSelector(".kv-preview-panel .kv-preview-notice", {timeout: 5000});
+  assert.match(await unavailablePreview.locator(".kv-preview-panel .kv-preview-notice").innerText(), /无法显示变更：知识库不是 git 仓库/);
+  assert.equal(await unavailablePreview.locator('[data-kv-preview-tab="full"]').getAttribute("aria-pressed"), "true", "unavailable diff falls back to full text");
+  assert.equal(await unavailablePreview.locator(".kv-preview-panel .markdown-body").count(), 1, "the full body stays visible after the fallback");
+  assert.equal(await unavailablePreview.locator(".kv-preview-panel .kv-diff").count(), 0);
+  await unavailablePreview.locator('[data-kv-preview-tab="diff"]').click();
+  await unavailablePreview.waitForSelector(".kv-preview-panel .kv-preview-notice");
+  assert.match(await unavailablePreview.locator(".kv-preview-panel .kv-preview-notice").innerText(), /无法显示变更/);
+  assert.equal(await unavailablePreview.locator(".kv-preview-panel .markdown-body").count(), 1, "the change tab also keeps the full body when no diff exists");
+  assert.equal(await unavailablePreview.evaluate(() => document.documentElement.scrollWidth - window.innerWidth <= 1), true);
+  await unavailablePreview.screenshot({path: resolve(screenshots, "knowledge-vault-diff-unavailable-390.png"), fullPage: false});
+  await unavailablePreview.close();
 
   // Switch off: the legacy knowledge page is exactly what renders; the new
   // endpoints 404 and no vault chunk is mounted.

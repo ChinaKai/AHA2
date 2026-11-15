@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -124,6 +125,14 @@ func (g *Git) gitBinary() (string, error) {
 }
 
 func (g *Git) command(ctx context.Context, op string, args ...string) (string, error) {
+	text, err := g.commandRaw(ctx, op, args...)
+	return strings.TrimSpace(text), err
+}
+
+// commandRaw leaves the output untouched. Diff parsing needs the leading
+// space of context lines and the exact last line, so it cannot use the
+// trimmed convenience wrapper used by status/log commands.
+func (g *Git) commandRaw(ctx context.Context, op string, args ...string) (string, error) {
 	gitPath, err := g.gitBinary()
 	if err != nil {
 		return "", err
@@ -137,7 +146,7 @@ func (g *Git) command(ctx context.Context, op string, args ...string) (string, e
 	command := exec.CommandContext(runCtx, gitPath, append([]string{"-C", g.vaultPath, op}, args...)...)
 	command.Env = gitEnvironment()
 	output, runErr := command.CombinedOutput()
-	text := strings.TrimSpace(string(output))
+	text := string(output)
 	if runErr == nil {
 		return text, nil
 	}
@@ -448,6 +457,215 @@ func (g *Git) requireVault(ctx context.Context) error {
 		return ErrVaultNotInitialized
 	}
 	return g.requireRepository(ctx)
+}
+
+// DocumentDiff bounds the preview payload. A knowledge document is text, but a
+// generated or hand-edited file can still produce a huge unified diff, so the
+// read API stops at whichever limit is reached first.
+const (
+	diffMaxLines = 400
+	diffMaxBytes = 64 << 10
+)
+
+// DiffLine is one rendered row of a unified diff. "hunk" rows carry the
+// @@ header plus its old/new ranges; context/add/remove rows carry their
+// one-based line numbers on each side (zero when that side has no line).
+type DiffLine struct {
+	Kind     string `json:"kind"`
+	Text     string `json:"text"`
+	OldNo    int    `json:"old_no"`
+	NewNo    int    `json:"new_no"`
+	OldStart int    `json:"old_start,omitempty"`
+	OldLines int    `json:"old_lines,omitempty"`
+	NewStart int    `json:"new_start,omitempty"`
+	NewLines int    `json:"new_lines,omitempty"`
+}
+
+// DocDiff is the read-only "latest change" view for one document. An
+// unavailable diff is a normal 200 response: the Web preview falls back to the
+// full document body and shows Reason instead of treating the reader as broken.
+type DocDiff struct {
+	Available   bool       `json:"available"`
+	Reason      string     `json:"reason,omitempty"`
+	Baseline    string     `json:"baseline,omitempty"`
+	Commit      string     `json:"commit,omitempty"`
+	CommittedAt string     `json:"committed_at,omitempty"`
+	Truncated   bool       `json:"truncated"`
+	Added       int        `json:"added"`
+	Removed     int        `json:"removed"`
+	Lines       []DiffLine `json:"lines"`
+}
+
+var (
+	diffHunkPattern = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@`)
+	diffHashPattern = regexp.MustCompile(`^[0-9a-f]{40,64}$`)
+)
+
+func unavailableDiff(reason string) DocDiff {
+	return DocDiff{Lines: []DiffLine{}, Reason: reason}
+}
+
+// DocumentDiff compares a vault-relative document path with its latest
+// baseline. Uncommitted changes (staged or not) win; otherwise the last commit
+// that touched the file is compared with its parent. The caller must pass a
+// path that came from the read-only index, never a raw client parameter.
+func (g *Git) DocumentDiff(ctx context.Context, relativePath string) (DocDiff, error) {
+	relativePath = filepath.ToSlash(strings.TrimSpace(relativePath))
+	if err := ValidateRelativePath(relativePath); err != nil {
+		return DocDiff{}, ErrDocumentNotFound
+	}
+	absolute := filepath.Join(g.vaultPath, filepath.FromSlash(relativePath))
+	if !IsInsideRoot(g.vaultPath, absolute) {
+		return DocDiff{}, ErrDocumentNotFound
+	}
+	if _, err := g.gitBinary(); err != nil {
+		return unavailableDiff("当前环境没有可用的 git 命令"), nil
+	}
+	if !g.isRepository(ctx) {
+		return unavailableDiff("知识库不是 git 仓库"), nil
+	}
+	if !g.hasCommit(ctx) {
+		return unavailableDiff("知识库仓库还没有任何提交"), nil
+	}
+	// A file that was never added to git has no baseline at all. Checking
+	// ls-files first also keeps the untracked file's content out of the diff.
+	if _, err := g.command(ctx, "ls-files", "--error-unmatch", "--", relativePath); err != nil {
+		return unavailableDiff("文件尚未纳入 git 版本管理"), nil
+	}
+
+	// HEAD covers both staged and unstaged edits. The older "git diff -- path"
+	// form would silently miss a change the owner already staged.
+	output, err := g.commandRaw(ctx, "diff", "--no-color", "--no-ext-diff", "HEAD", "--", relativePath)
+	if err != nil {
+		return unavailableDiff("读取 git 变更失败"), nil
+	}
+	if strings.TrimSpace(output) != "" {
+		result := DocDiff{Available: true, Baseline: "uncommitted", Lines: []DiffLine{}}
+		applyUnifiedDiff(&result, output)
+		return result, nil
+	}
+
+	commit, err := g.command(ctx, "log", "-1", "--format=%H", "--", relativePath)
+	if err != nil || strings.TrimSpace(commit) == "" {
+		return unavailableDiff("文件没有提交历史"), nil
+	}
+	commit = strings.TrimSpace(strings.Split(commit, "\n")[0])
+	if !diffHashPattern.MatchString(commit) {
+		return unavailableDiff("无法确定该文件的基线提交"), nil
+	}
+	if _, err := g.command(ctx, "rev-parse", "--verify", "--quiet", commit+"^"); err != nil {
+		return unavailableDiff("文件只有一次提交，没有可比较的历史版本"), nil
+	}
+	committedAt := ""
+	if value, err := g.command(ctx, "show", "-s", "--format=%cI", commit); err == nil {
+		committedAt = strings.TrimSpace(value)
+	}
+	output, err = g.commandRaw(ctx, "diff", "--no-color", "--no-ext-diff", commit+"^", commit, "--", relativePath)
+	if err != nil {
+		return unavailableDiff("读取 git 变更失败"), nil
+	}
+	result := DocDiff{
+		Available: true, Baseline: commit, Commit: commit,
+		CommittedAt: committedAt, Lines: []DiffLine{},
+	}
+	applyUnifiedDiff(&result, output)
+	return result, nil
+}
+
+func applyUnifiedDiff(result *DocDiff, output string) {
+	if strings.Contains(output, "Binary files ") && strings.Contains(output, " differ") {
+		result.Available = false
+		result.Reason = "二进制文件无法显示文本差异"
+		return
+	}
+	result.Lines, result.Truncated, result.Added, result.Removed = parseUnifiedDiff(output)
+}
+
+// parseUnifiedDiff turns git's unified diff into rows the Web preview can
+// render without reimplementing diff parsing in TypeScript. File headers and
+// the "no newline" marker are dropped; the first non-hunk rows appear before
+// any @@ header and are ignored by the inHunk guard.
+func parseUnifiedDiff(output string) (lines []DiffLine, truncated bool, added, removed int) {
+	lines = []DiffLine{}
+	bytes := 0
+	oldLine, newLine := 0, 0
+	inHunk := false
+	appendLine := func(line DiffLine) bool {
+		size := len(line.Text) + 32
+		if len(lines) >= diffMaxLines || bytes+size > diffMaxBytes {
+			truncated = true
+			return false
+		}
+		bytes += size
+		lines = append(lines, line)
+		return true
+	}
+	for _, raw := range strings.Split(output, "\n") {
+		raw = strings.TrimSuffix(raw, "\r")
+		if strings.HasPrefix(raw, "@@ -") {
+			match := diffHunkPattern.FindStringSubmatch(raw)
+			if match == nil {
+				inHunk = false
+				continue
+			}
+			oldStart := atoiOrZero(match[1])
+			newStart := atoiOrZero(match[3])
+			oldLines, newLines := 1, 1
+			if match[2] != "" {
+				oldLines = atoiOrZero(match[2])
+			}
+			if match[4] != "" {
+				newLines = atoiOrZero(match[4])
+			}
+			oldLine, newLine = oldStart, newStart
+			inHunk = true
+			if !appendLine(DiffLine{
+				Kind: "hunk", Text: raw,
+				OldStart: oldStart, OldLines: oldLines, NewStart: newStart, NewLines: newLines,
+			}) {
+				break
+			}
+			continue
+		}
+		if !inHunk {
+			continue
+		}
+		if strings.HasPrefix(raw, `\`) {
+			continue
+		}
+		var line DiffLine
+		switch {
+		case strings.HasPrefix(raw, "+"):
+			line = DiffLine{Kind: "add", Text: raw[1:], NewNo: newLine}
+			newLine++
+			added++
+		case strings.HasPrefix(raw, "-"):
+			line = DiffLine{Kind: "remove", Text: raw[1:], OldNo: oldLine}
+			oldLine++
+			removed++
+		case strings.HasPrefix(raw, " "):
+			// A blank file line arrives as a single space. A truly empty
+			// string is only the trailing newline and must not become a
+			// phantom context row past the end of the hunk.
+			line = DiffLine{Kind: "context", Text: raw[1:], OldNo: oldLine, NewNo: newLine}
+			oldLine++
+			newLine++
+		default:
+			continue
+		}
+		if !appendLine(line) {
+			break
+		}
+	}
+	return lines, truncated, added, removed
+}
+
+func atoiOrZero(value string) int {
+	number, err := strconv.Atoi(value)
+	if err != nil || number < 0 {
+		return 0
+	}
+	return number
 }
 
 // Status never fails just because git is missing or the vault is not a repo;

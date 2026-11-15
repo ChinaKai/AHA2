@@ -500,6 +500,31 @@ func (r *Reader) Document(ctx context.Context, id, relativePath string) (Doc, er
 	return doc, nil
 }
 
+// Diff resolves an indexed document id and returns its latest git change. The
+// vault-relative path comes from the index row, never from the HTTP request,
+// and is re-validated before git sees it.
+func (r *Reader) Diff(ctx context.Context, id string) (DocDiff, error) {
+	if !r.indexReady {
+		return DocDiff{}, ErrReaderNotReady
+	}
+	entry, err := r.entryByID(ctx, strings.TrimSpace(id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return DocDiff{}, ErrDocumentNotFound
+	}
+	if err != nil {
+		return DocDiff{}, err
+	}
+	if err := ValidateRelativePath(entry.Path); err != nil {
+		return DocDiff{}, ErrDocumentNotFound
+	}
+	absolute := filepath.Join(r.config.VaultPath, filepath.FromSlash(entry.Path))
+	if !IsInsideRoot(r.config.VaultPath, absolute) {
+		return DocDiff{}, ErrDocumentNotFound
+	}
+	git := &Git{vaultPath: r.config.VaultPath, timeout: gitCommandTimeout}
+	return git.DocumentDiff(ctx, entry.Path)
+}
+
 func (r *Reader) entryByID(ctx context.Context, id string) (IndexEntry, error) {
 	return scanIndexEntry(r.index.db.QueryRowContext(ctx, entrySelectSQL+` WHERE id=?`, id))
 }

@@ -562,6 +562,7 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("GET /api/v1/knowledge-vault/libraries", s.withAuth(http.HandlerFunc(s.knowledgeVaultLibraries)))
 		mux.Handle("GET /api/v1/knowledge-vault/tree", s.withAuth(http.HandlerFunc(s.knowledgeVaultTree)))
 		mux.Handle("GET /api/v1/knowledge-vault/doc/{id}", s.withAuth(http.HandlerFunc(s.knowledgeVaultDocument)))
+		mux.Handle("GET /api/v1/knowledge-vault/doc/{id}/diff", s.withAuth(http.HandlerFunc(s.knowledgeVaultDocumentDiff)))
 		mux.Handle("GET /api/v1/knowledge-vault/search", s.withAuth(http.HandlerFunc(s.knowledgeVaultSearch)))
 		mux.Handle("GET /api/v1/knowledge-vault/recent", s.withAuth(http.HandlerFunc(s.knowledgeVaultRecent)))
 		mux.Handle("GET /api/v1/knowledge-vault/inbox", s.withAuth(http.HandlerFunc(s.knowledgeVaultInbox)))

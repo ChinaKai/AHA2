@@ -1901,6 +1901,35 @@ export interface KnowledgeVaultDoc {
   vault_path?: string;
 }
 
+export interface KnowledgeVaultDiffLine {
+  kind: "hunk" | "context" | "add" | "remove";
+  text: string;
+  old_no: number;
+  new_no: number;
+  old_start?: number;
+  old_lines?: number;
+  new_start?: number;
+  new_lines?: number;
+}
+
+export interface KnowledgeVaultDocDiff {
+  available: boolean;
+  reason?: string;
+  baseline?: string;
+  commit?: string;
+  committed_at?: string;
+  truncated: boolean;
+  added: number;
+  removed: number;
+  lines: KnowledgeVaultDiffLine[];
+}
+
+export interface KnowledgeVaultDiffResponse {
+  ok: boolean;
+  enabled: boolean;
+  diff: KnowledgeVaultDocDiff;
+}
+
 export interface KnowledgeVaultSearchResult {
   id: string;
   title: string;

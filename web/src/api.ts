@@ -31,6 +31,7 @@ import type {
   KnowledgeProposal,
   KnowledgeReviewSettings,
   KnowledgeVaultDoc,
+  KnowledgeVaultDiffResponse,
   KnowledgeVaultInbox,
   KnowledgeVaultInitResponse,
   KnowledgeVaultLibraries,
@@ -1025,6 +1026,10 @@ class APIClient {
 
   knowledgeVaultDoc(id: string): Promise<{ok: boolean; doc: KnowledgeVaultDoc}> {
     return this.request(`/api/v1/knowledge-vault/doc/${encodeURIComponent(id)}`);
+  }
+
+  knowledgeVaultDiff(id: string): Promise<KnowledgeVaultDiffResponse> {
+    return this.request(`/api/v1/knowledge-vault/doc/${encodeURIComponent(id)}/diff`);
   }
 
   knowledgeVaultSearch(options: {q?: string; library?: string; project?: string; type?: string; status?: string; tag?: string; limit?: number} = {}): Promise<KnowledgeVaultSearch> {

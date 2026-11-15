@@ -132,6 +132,7 @@ func TestKnowledgeVaultAPIReportsDisabledWhenTheSwitchIsOff(t *testing.T) {
 		"/api/v1/knowledge-vault/libraries",
 		"/api/v1/knowledge-vault/tree?library=global",
 		"/api/v1/knowledge-vault/doc/knowledge_http_deploy",
+		"/api/v1/knowledge-vault/doc/knowledge_http_deploy/diff",
 		"/api/v1/knowledge-vault/search?q=deploy",
 		"/api/v1/knowledge-vault/recent",
 		"/api/v1/knowledge-vault/inbox",
@@ -324,5 +325,58 @@ func TestAgentKnowledgeGuideMissingFileIsNotFound(t *testing.T) {
 	}
 	if strings.Contains(recorder.Body.String(), "escapes") {
 		t.Fatalf("missing guide was reported as a path escape: %s", recorder.Body.String())
+	}
+}
+
+func TestKnowledgeVaultDiffAPIReportsLatestChangeAndDegradesWithoutGit(t *testing.T) {
+	manager := knowledgeVaultManagerFixture(t)
+	server, client, _ := knowledgeVaultServer(t, manager)
+	diffPath := "/api/v1/knowledge-vault/doc/knowledge_http_deploy/diff"
+
+	var payload struct {
+		OK   bool                   `json:"ok"`
+		Diff knowledgevault.DocDiff `json:"diff"`
+	}
+	response := requestJSON(t, client, http.MethodGet, server.URL+diffPath, nil, "")
+	decodeResponse(t, response, &payload)
+	if response.StatusCode != http.StatusOK || !payload.OK || payload.Diff.Available {
+		t.Fatalf("absent repository status=%d payload=%#v", response.StatusCode, payload)
+	}
+	if !strings.Contains(payload.Diff.Reason, "git 仓库") {
+		t.Fatalf("missing explicit unavailable reason: %#v", payload.Diff)
+	}
+
+	if _, err := manager.Git().Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	docPath := filepath.Join(manager.Config().VaultPath, "global", "general", "deploy.md")
+	raw, err := os.ReadFile(docPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(docPath, append(raw, []byte("补充一行变更。\n")...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	payload = struct {
+		OK   bool                   `json:"ok"`
+		Diff knowledgevault.DocDiff `json:"diff"`
+	}{}
+	response = requestJSON(t, client, http.MethodGet, server.URL+diffPath, nil, "")
+	decodeResponse(t, response, &payload)
+	if response.StatusCode != http.StatusOK || !payload.OK || !payload.Diff.Available {
+		t.Fatalf("diff status=%d payload=%#v", response.StatusCode, payload)
+	}
+	if payload.Diff.Baseline != "uncommitted" || payload.Diff.Added != 1 || payload.Diff.Removed != 0 {
+		t.Fatalf("unexpected uncommitted diff: %#v", payload.Diff)
+	}
+	if len(payload.Diff.Lines) == 0 || payload.Diff.Lines[0].Kind != "hunk" {
+		t.Fatalf("diff lines are not renderable: %#v", payload.Diff.Lines)
+	}
+
+	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/knowledge-vault/doc/missing/diff", nil, "")
+	var missing map[string]any
+	decodeResponse(t, response, &missing)
+	if response.StatusCode != http.StatusNotFound || missing["error"] != "knowledge_vault_document_not_found" {
+		t.Fatalf("missing document status=%d payload=%#v", response.StatusCode, missing)
 	}
 }

@@ -107,6 +107,30 @@ func (s *Server) knowledgeVaultDocument(writer http.ResponseWriter, request *htt
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "doc": document})
 }
 
+func (s *Server) knowledgeVaultDocumentDiff(writer http.ResponseWriter, request *http.Request) {
+	var diff knowledgevault.DocDiff
+	err := s.withKnowledgeVaultReader(func(reader *knowledgevault.Reader) error {
+		var readErr error
+		diff, readErr = reader.Diff(request.Context(), request.PathValue("id"))
+		return readErr
+	})
+	switch {
+	case errors.Is(err, knowledgevault.ErrDisabled):
+		writeKnowledgeVaultDisabled(writer)
+		return
+	case errors.Is(err, knowledgevault.ErrReaderNotReady):
+		writeError(writer, http.StatusNotFound, "knowledge_vault_index_missing")
+		return
+	case errors.Is(err, knowledgevault.ErrDocumentNotFound):
+		writeError(writer, http.StatusNotFound, "knowledge_vault_document_not_found")
+		return
+	case err != nil:
+		writeError(writer, http.StatusInternalServerError, "knowledge_vault_document_diff_failed")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "enabled": true, "diff": diff})
+}
+
 func (s *Server) knowledgeVaultSearch(writer http.ResponseWriter, request *http.Request) {
 	query := request.URL.Query()
 	limit := 30
