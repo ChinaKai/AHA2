@@ -320,7 +320,10 @@ func (r *Reader) manifestArchives() []Library {
 }
 
 func (r *Reader) projectName(id string) string {
-	if name := strings.TrimSpace(r.manifest.ProjectNames[id]); name != "" {
+	// Older rebuilds wrote the generated knowledge-home title into
+	// project_names. Ignore it so an existing install stops showing every
+	// project as "知识首页" even before the next rebuild repairs the manifest.
+	if name := strings.TrimSpace(r.manifest.ProjectNames[id]); name != "" && !isKnowledgeHomeTitle(name) {
 		return name
 	}
 	if slug := strings.TrimSpace(r.manifest.Projects[id]); slug != "" {
@@ -330,7 +333,7 @@ func (r *Reader) projectName(id string) string {
 }
 
 func (r *Reader) archiveName(id string) string {
-	if name := strings.TrimSpace(r.manifest.ArchiveNames[id]); name != "" {
+	if name := strings.TrimSpace(r.manifest.ArchiveNames[id]); name != "" && !isKnowledgeHomeTitle(name) {
 		return name
 	}
 	if slug := strings.TrimSpace(r.manifest.Archives[id]); slug != "" {

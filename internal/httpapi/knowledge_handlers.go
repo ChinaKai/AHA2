@@ -595,17 +595,22 @@ func (s *Server) feedbackKnowledge(writer http.ResponseWriter, request *http.Req
 		writeError(writer, http.StatusBadRequest, "invalid_knowledge_feedback")
 		return
 	}
-	item, err := s.store.FeedbackKnowledge(request.Context(), request.PathValue("id"), kind, time.Now().UTC().Format(time.RFC3339Nano))
+	result, err := s.app.FeedbackWebKnowledge(request.Context(), request.PathValue("id"), kind)
 	if err != nil {
 		if errors.Is(err, store.ErrKnowledgeFeedbackState) {
 			writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": "knowledge_feedback_conflict", "message": "该 revision 已标记为过时或错误，请先批准修订或确认当前内容仍然有效"})
 			return
 		}
-		writeError(writer, http.StatusNotFound, "knowledge_not_found")
+		var writeErr *knowledgevault.WriteError
+		if errors.As(err, &writeErr) && writeErr.Code == knowledgevault.WriteErrorNotFound {
+			writeError(writer, http.StatusNotFound, "knowledge_not_found")
+			return
+		}
+		writeKnowledgeMutationError(writer, "knowledge_feedback_failed", err)
 		return
 	}
-	s.audit(request, "knowledge.feedback", "knowledge", item.ID, map[string]any{"kind": kind})
-	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "knowledge": item})
+	s.audit(request, "knowledge.feedback", "knowledge", result.Entry.ID, map[string]any{"kind": kind, "source": result.Source})
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "source": result.Source, "knowledge": result.Entry})
 }
 
 func (s *Server) listProductLines(writer http.ResponseWriter, request *http.Request) {

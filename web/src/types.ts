@@ -2007,6 +2007,9 @@ export interface KnowledgeVaultSkill {
   scope: string;
   project_id?: string;
   library: string;
+  // Authoritative AHA2 project name for project/archive skills. Global skills
+  // leave it empty and keep the plain "全局" scope label.
+  project_name?: string;
   description?: string;
   file_count: number;
   files?: string[];

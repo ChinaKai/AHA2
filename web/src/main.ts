@@ -1641,11 +1641,20 @@ function availableVaultTaskSkills(projectID: string, includeIDs: string[] = []):
     : [];
 }
 
+function vaultTaskSkillSourceActive(projectID: string): boolean {
+  return vaultTaskSkillsModule
+    ? vaultTaskSkillsModule.vaultTaskSkillSourceActive(state.vaultSkillsOn, state.vaultSkillsRead, state.vaultSkillsIndex, state.vaultSkillsBound, projectID)
+    : false;
+}
+
 function autoTaskSkillIDs(projectID: string): string[] {
-  return availableTaskSkills(projectID)
-    .filter(item => item.auto_attach &&
-      (item.scope === "global" || (item.scope === "project" && item.project_id === projectID)))
-    .map(item => item.id);
+  const items = availableTaskSkills(projectID);
+  return vaultTaskSkillsModule
+    ? vaultTaskSkillsModule.taskAutoSkillIDs(items, vaultTaskSkillSourceActive(projectID), projectID)
+    : items
+      .filter(item => item.auto_attach &&
+        (item.scope === "global" || (item.scope === "project" && item.project_id === projectID)))
+      .map(item => item.id);
 }
 
 function availableTaskSkills(projectID: string, includeIDs: string[] = []): Skill[] {
@@ -1654,9 +1663,10 @@ function availableTaskSkills(projectID: string, includeIDs: string[] = []): Skil
 }
 
 function taskSkillSourceHint(projectID: string): string {
-  return vaultTaskSkillsModule
-    ? vaultTaskSkillsModule.vaultTaskSkillHint(state.vaultSkillsOn, state.vaultSkillsRead, state.vaultSkillsIndex, state.vaultSkillsBound, projectID)
-    : "";
+  if (!vaultTaskSkillsModule) return "";
+  const readiness = vaultTaskSkillsModule.vaultTaskSkillHint(state.vaultSkillsOn, state.vaultSkillsRead, state.vaultSkillsIndex, state.vaultSkillsBound, projectID);
+  if (readiness) return readiness;
+  return vaultTaskSkillsModule.vaultTaskAutoSourceHint(vaultTaskSkillSourceActive(projectID));
 }
 
 function taskSkillOptions(projectID: string, selected: string[] = [], includeAutoDefaults = false): string {

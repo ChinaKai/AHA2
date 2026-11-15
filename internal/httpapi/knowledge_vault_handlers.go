@@ -31,11 +31,11 @@ func writeKnowledgeVaultDisabled(writer http.ResponseWriter) {
 }
 
 func (s *Server) knowledgeVaultLibraries(writer http.ResponseWriter, request *http.Request) {
+	// The app layer overlays the authoritative AHA2 project names: the vault
+	// manifest only caches derived display names, and older rebuilds stored the
+	// generated knowledge-home title there.
 	var result knowledgevault.LibraryList
-	err := s.withKnowledgeVaultReader(func(reader *knowledgevault.Reader) error {
-		result = reader.Libraries(request.Context())
-		return nil
-	})
+	result, err := s.app.VaultLibraries(request.Context())
 	if errors.Is(err, knowledgevault.ErrDisabled) {
 		writeKnowledgeVaultDisabled(writer)
 		return

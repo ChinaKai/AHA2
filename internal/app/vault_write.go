@@ -297,30 +297,75 @@ func (s *Service) SubmitAgentKnowledgeFeedbackEntry(ctx context.Context, claims 
 		}
 	}
 
-	if s.vaultReadEnabled(call.Project.ID) {
-		if !s.vaultKnowledgeWriteEnabled(call.Project.ID) {
-			return AgentKnowledgeFeedbackResult{}, s.vaultWriteDisabledError()
-		}
-		request := knowledgevault.FeedbackRequest{
-			Scope: strings.ToLower(strings.TrimSpace(input.Scope)), ProjectID: call.Project.ID,
-			AllowGlobal:    s.AgentKnowledgePublishAllowed(ctx, call),
-			EntryID:        input.EntryID,
-			Kind:           kind,
-			IdempotencyKey: input.IdempotencyKey,
-			SourceTask:     call.Task.ID, SourceTurn: call.Turn.ID, Writer: call.Turn.AgentID,
-		}
-		result, writeErr := s.knowledgeVault.KnowledgeFeedback(ctx, request)
-		if writeErr != nil {
-			return AgentKnowledgeFeedbackResult{}, writeErr
-		}
-		return AgentKnowledgeFeedbackResult{Source: "vault", Feedback: &result}, nil
-	}
-
-	item, err := s.SubmitAgentKnowledgeFeedback(ctx, claims, KnowledgeFeedback{EntryID: input.EntryID, Kind: kind})
+	outcome, err := s.submitAgentKnowledgeFeedbackForCall(
+		ctx, call, input.EntryID, kind, s.AgentKnowledgePublishAllowed(ctx, call), input.IdempotencyKey,
+	)
 	if err != nil {
 		return AgentKnowledgeFeedbackResult{}, err
 	}
-	return AgentKnowledgeFeedbackResult{Source: "legacy", Warning: s.vaultFallbackWarning(call.Project.ID), Knowledge: &item}, nil
+	return AgentKnowledgeFeedbackResult{
+		Source: outcome.Source, Warning: outcome.Warning,
+		Feedback: outcome.Feedback, Knowledge: outcome.Knowledge,
+	}, nil
+}
+
+// agentKnowledgeFeedbackOutcome is the shared result of one feedback write.
+// Vault feedback reports the document result; legacy feedback reports the row.
+type agentKnowledgeFeedbackOutcome struct {
+	Source    string
+	Warning   string
+	Feedback  *knowledgevault.FeedbackResult
+	Knowledge *domain.KnowledgeEntry
+}
+
+// submitAgentKnowledgeFeedbackForCall resolves the read source from the entry
+// ID itself, so a global entry stays writable to the vault even when the
+// current Project is not bound. A scope that reads the vault never falls back
+// to the legacy tables; a disabled write gate is an explicit error.
+func (s *Service) submitAgentKnowledgeFeedbackForCall(ctx context.Context, call AgentCallContext, entryID, kind string, allowGlobal bool, idempotencyKey string) (agentKnowledgeFeedbackOutcome, error) {
+	target, err := s.resolveKnowledgeFeedbackTarget(ctx, entryID)
+	if err != nil {
+		return agentKnowledgeFeedbackOutcome{}, err
+	}
+	if target.Scope == knowledgevault.WriteScopeProject && target.ProjectID != call.Project.ID {
+		allowed, bindingErr := s.store.CanContributeKnowledgeLibrary(ctx, target.ProjectID, call.Project.ID)
+		if bindingErr != nil {
+			return agentKnowledgeFeedbackOutcome{}, bindingErr
+		}
+		if !allowed {
+			return agentKnowledgeFeedbackOutcome{}, ErrKnowledgeReadOnly
+		}
+		if target.Vault {
+			// The vault write contract has no cross-project feedback path; bound
+			// contribution only applies to the legacy proposal/feedback flow.
+			return agentKnowledgeFeedbackOutcome{}, ErrKnowledgeReadOnly
+		}
+	}
+	if target.Vault {
+		result, writeErr := s.knowledgeVault.KnowledgeFeedback(ctx, knowledgevault.FeedbackRequest{
+			Scope: target.Scope, ProjectID: target.ProjectID, AllowGlobal: allowGlobal,
+			EntryID:        target.VaultEntry.ID,
+			Kind:           kind,
+			IdempotencyKey: idempotencyKey,
+			SourceTask:     call.Task.ID, SourceTurn: call.Turn.ID, Writer: call.Turn.AgentID,
+		})
+		if writeErr != nil {
+			return agentKnowledgeFeedbackOutcome{}, writeErr
+		}
+		entry := applyVaultFeedbackResult(vaultEntryThatNeedsMapping(target.VaultEntry), result, kind)
+		return agentKnowledgeFeedbackOutcome{Source: "vault", Feedback: &result, Knowledge: &entry}, nil
+	}
+	entry, err := s.store.FeedbackKnowledge(ctx, target.LegacyEntry.ID, kind, timeString(s.now().UTC()))
+	if err != nil {
+		return agentKnowledgeFeedbackOutcome{}, err
+	}
+	s.linkTaskMemoryKnowledge(ctx, call.Task.ID, entry)
+	s.emit(ctx, call.Task.ID, "knowledge", entry.ID, "knowledge_feedback_recorded", map[string]any{"kind": kind, "title": entry.Title})
+	warning := s.vaultFallbackWarning(target.ProjectID)
+	if target.Scope == knowledgevault.WriteScopeGlobal {
+		warning = s.vaultGlobalFallbackWarning()
+	}
+	return agentKnowledgeFeedbackOutcome{Source: "legacy", Warning: warning, Knowledge: &entry}, nil
 }
 
 func (s *Service) agentKnowledgeRouteAllowed(ctx context.Context, call AgentCallContext) error {

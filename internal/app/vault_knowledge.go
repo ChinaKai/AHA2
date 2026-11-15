@@ -131,6 +131,118 @@ func (s *Service) knowledgeReadDecision(scope, projectID string) knowledgeReadDe
 	return decision
 }
 
+// vaultProjectNames returns authoritative display names from the AHA2 projects
+// table. The vault manifest only stores derived slugs plus a display-name cache
+// that older rebuilds filled with the generated "知识首页" page title, so every
+// vault read model that shows a project name starts here.
+func (s *Service) vaultProjectNames(ctx context.Context) map[string]string {
+	result := map[string]string{}
+	if s == nil || s.store == nil {
+		return result
+	}
+	projects, err := s.store.ListProjects(ctx)
+	if err != nil {
+		log.Printf("list projects for vault display names: %v", err)
+		return result
+	}
+	for _, project := range projects {
+		if name := strings.TrimSpace(project.Name); name != "" {
+			result[project.ID] = name
+		}
+	}
+	return result
+}
+
+// VaultLibraries returns the vault library picker with AHA2 project names
+// overlaid on the manifest. A project deleted from the database keeps its vault
+// slug rather than the stale manifest display-name cache.
+func (s *Service) VaultLibraries(ctx context.Context) (knowledgevault.LibraryList, error) {
+	if s == nil || s.knowledgeVault == nil {
+		return knowledgevault.LibraryList{}, knowledgevault.ErrDisabled
+	}
+	names := s.vaultProjectNames(ctx)
+	var result knowledgevault.LibraryList
+	err := s.knowledgeVault.WithReader(func(reader *knowledgevault.Reader) error {
+		result = reader.Libraries(ctx)
+		applyVaultLibraryNames(&result, reader.Manifest(), names)
+		return nil
+	})
+	if err != nil {
+		return knowledgevault.LibraryList{}, err
+	}
+	return result, nil
+}
+
+// applyVaultLibraryNames replaces manifest-derived names in place. It covers
+// the duplicated Libraries/Projects/Archived slices because the reader builds
+// both views from the same manifest entries.
+func applyVaultLibraryNames(result *knowledgevault.LibraryList, manifest knowledgevault.Manifest, names map[string]string) {
+	resolve := func(id, slug, fallback string) string {
+		if name := names[id]; name != "" {
+			return name
+		}
+		if slug = strings.TrimSpace(slug); slug != "" {
+			return slug
+		}
+		return fallback
+	}
+	for index := range result.Projects {
+		item := &result.Projects[index]
+		item.Name = resolve(item.ProjectID, manifest.Projects[item.ProjectID], item.Name)
+	}
+	for index := range result.Archived {
+		item := &result.Archived[index]
+		item.Name = resolve(item.ProjectID, manifest.Archives[item.ProjectID], item.Name)
+	}
+	for index := range result.Libraries {
+		item := &result.Libraries[index]
+		switch item.Kind {
+		case "project":
+			item.Name = resolve(item.ProjectID, manifest.Projects[item.ProjectID], item.Name)
+		case "archive":
+			item.Name = resolve(item.ProjectID, manifest.Archives[item.ProjectID], item.Name)
+		}
+	}
+}
+
+func (s *Service) vaultKnowledgeForProject(ctx context.Context, projectID string) (vaultKnowledgeSnapshot, bool) {
+	if !s.vaultReadEnabled(projectID) {
+		if warning := s.vaultFallbackWarning(projectID); warning != "" {
+			log.Printf("knowledge vault project %s: %s", projectID, warning)
+		}
+		return vaultKnowledgeSnapshot{}, false
+	}
+	snapshot := vaultKnowledgeSnapshot{}
+	ok := false
+	err := s.knowledgeVault.WithReader(func(reader *knowledgevault.Reader) error {
+		if !reader.IndexReady() || strings.TrimSpace(reader.Manifest().Projects[projectID]) == "" {
+			return nil
+		}
+		global, err := reader.Entries(ctx, "global", "")
+		if err != nil {
+			return err
+		}
+		project, err := reader.Entries(ctx, "project", projectID)
+		if err != nil {
+			return err
+		}
+		var stale []domain.KnowledgeEntry
+		snapshot.Global, stale = splitVaultKnowledge(mapVaultKnowledge(global))
+		snapshot.Stale = append(snapshot.Stale, stale...)
+		snapshot.Project, stale = splitVaultKnowledge(mapVaultKnowledge(project))
+		snapshot.Stale = append(snapshot.Stale, stale...)
+		ok = true
+		return nil
+	})
+	if err != nil {
+		if !errors.Is(err, knowledgevault.ErrDisabled) {
+			log.Printf("knowledge vault read for project %s failed; using legacy knowledge: %v", projectID, err)
+		}
+		return vaultKnowledgeSnapshot{}, false
+	}
+	return snapshot, ok
+}
+
 // vaultReadEnabled reports whether the vault is the current source for the
 // project, including the fail-closed case where it is authoritative but could
 // not be read. Write routing follows this so a transient reader failure never
@@ -315,20 +427,6 @@ func filterPendingStale(entries []domain.KnowledgeEntry, pending map[string]bool
 		result = append(result, entry)
 	}
 	return result
-}
-
-// vaultKnowledgeForProject is kept for diagnostics and tests. Production reads
-// use the strict helpers above; this convenience view fills global and project
-// independently so the result never implies that one gate decided both.
-func (s *Service) vaultKnowledgeForProject(ctx context.Context, projectID string) (vaultKnowledgeSnapshot, bool) {
-	snapshot, vault, err := s.readVaultProjectKnowledge(ctx, projectID)
-	if err != nil || !vault {
-		return vaultKnowledgeSnapshot{}, false
-	}
-	if global, _, _, globalErr := s.readVaultGlobalKnowledge(ctx); globalErr == nil {
-		snapshot.Global = global
-	}
-	return snapshot, true
 }
 
 func mapVaultKnowledge(entries []knowledgevault.IndexEntry) []domain.KnowledgeEntry {

@@ -61,6 +61,166 @@ func (s *Service) knowledgeWriteRoute(scope, projectID string) (bool, error) {
 	return false, nil
 }
 
+// knowledgeFeedbackTarget is the resolved owner of one feedback write. The
+// entry ID, not a client-supplied scope, decides the scope and project: a
+// migrated row keeps the same ID in both stores, so looking it up in the vault
+// first is what keeps feedback on the source the reader actually sees.
+type knowledgeFeedbackTarget struct {
+	Vault       bool
+	InVault     bool
+	Scope       string
+	ProjectID   string
+	VaultEntry  knowledgevault.IndexEntry
+	LegacyEntry domain.KnowledgeEntry
+}
+
+// resolveKnowledgeFeedbackTarget maps an entry ID to its current read source.
+// A vault entry whose scope reads the vault routes there; an entry that only
+// exists in the legacy tables is refused when that scope now reads the vault.
+// The returned error is explicit so a caller never silently writes the legacy
+// tables for vault-backed knowledge.
+func (s *Service) resolveKnowledgeFeedbackTarget(ctx context.Context, entryID string) (knowledgeFeedbackTarget, error) {
+	var target knowledgeFeedbackTarget
+	id := strings.TrimSpace(entryID)
+	if id == "" {
+		return target, &knowledgevault.WriteError{Code: knowledgevault.WriteErrorValidation, Message: "entry_id is required"}
+	}
+	vaultEntry, vaultFound, err := s.vaultEntryByID(ctx, id)
+	if err != nil {
+		return target, err
+	}
+	target.InVault = vaultFound
+	if vaultFound {
+		target.VaultEntry = vaultEntry
+		target.Scope, target.ProjectID = vaultEntry.Scope, vaultEntry.ProjectID
+	} else {
+		legacy, legacyErr := s.store.Knowledge(ctx, id)
+		if legacyErr != nil {
+			if errors.Is(legacyErr, sql.ErrNoRows) {
+				return target, &knowledgevault.WriteError{
+					Code:    knowledgevault.WriteErrorNotFound,
+					Message: "knowledge entry " + id + " was not found",
+				}
+			}
+			return target, legacyErr
+		}
+		target.LegacyEntry = legacy
+		target.Scope, target.ProjectID = legacy.Scope, legacy.ProjectID
+	}
+	useVault, routeErr := s.knowledgeWriteRoute(target.Scope, target.ProjectID)
+	if routeErr != nil {
+		return target, routeErr
+	}
+	if useVault && !target.InVault {
+		// The entry exists only in the legacy tables while this scope reads the
+		// vault. Writing that row would update knowledge the reader cannot see.
+		return target, ErrKnowledgeReadSourceMismatch
+	}
+	if !useVault && target.InVault {
+		// The write follows the legacy source. The vault copy must not be
+		// updated, so the same ID has to exist in the legacy tables as well.
+		legacy, legacyErr := s.store.Knowledge(ctx, id)
+		if legacyErr != nil {
+			return target, &knowledgevault.WriteError{
+				Code:    knowledgevault.WriteErrorNotFound,
+				Message: "knowledge entry " + id + " is not available from the current read source",
+			}
+		}
+		target.LegacyEntry = legacy
+	}
+	target.Vault = useVault
+	return target, nil
+}
+
+// vaultEntryThatNeedsMapping keeps a vault entry mapable after stale/wrong
+// feedback changed its status to a value the normal read filter drops.
+func vaultEntryThatNeedsMapping(entry knowledgevault.IndexEntry) domain.KnowledgeEntry {
+	if item, ok := mapVaultKnowledgeEntry(entry); ok {
+		return item
+	}
+	return domain.KnowledgeEntry{
+		ID: entry.ID, Scope: entry.Scope, ProjectID: entry.ProjectID, ParentID: entry.ParentID,
+		Slug: entry.Slug, SortOrder: entry.SortOrder, IsIndex: entry.IsIndex, Type: entry.Type,
+		Title: entry.Title, Body: entry.Body, Status: domain.KnowledgeStatus(entry.Status),
+		Confidence: entry.Confidence, Revision: entry.Revision, ContentHash: entry.ContentHash,
+		SourceTaskID: entry.SourceTask, SourceTurnID: entry.SourceTurn,
+		CreatedAt: parseVaultTime(entry.Created), UpdatedAt: parseVaultTime(entry.Updated),
+	}
+}
+
+func applyVaultFeedbackResult(item domain.KnowledgeEntry, result knowledgevault.FeedbackResult, kind string) domain.KnowledgeEntry {
+	if result.Status != "" {
+		item.Status = domain.KnowledgeStatus(result.Status)
+	}
+	if result.Revision > 0 {
+		item.Revision = result.Revision
+	}
+	if result.ContentHash != "" {
+		item.ContentHash = result.ContentHash
+	}
+	if updated := parseVaultTime(result.Updated); !updated.IsZero() {
+		item.UpdatedAt = updated
+	}
+	switch kind {
+	case knowledgevault.FeedbackStale:
+		item.FeedbackState = "stale"
+	case knowledgevault.FeedbackWrong:
+		item.FeedbackState = "wrong"
+	}
+	return item
+}
+
+// KnowledgeFeedbackWriteResult reports which source served a Web feedback
+// write so the HTTP layer can keep returning a knowledge record.
+type KnowledgeFeedbackWriteResult struct {
+	Entry   domain.KnowledgeEntry
+	Source  string
+	Warning string
+}
+
+// FeedbackWebKnowledge routes Web feedback by the entry ID the same way Agent
+// feedback is routed. A vault entry is updated in the vault; a legacy-only
+// entry is refused when its scope reads the vault; the legacy tables are only
+// written for a project that still reads them.
+func (s *Service) FeedbackWebKnowledge(ctx context.Context, id, kind string) (KnowledgeFeedbackWriteResult, error) {
+	target, err := s.resolveKnowledgeFeedbackTarget(ctx, id)
+	if err != nil {
+		return KnowledgeFeedbackWriteResult{}, err
+	}
+	if target.Vault {
+		result, err := s.knowledgeVault.KnowledgeFeedback(ctx, knowledgevault.FeedbackRequest{
+			Scope: target.Scope, ProjectID: target.ProjectID, AllowGlobal: true,
+			EntryID: target.VaultEntry.ID, Kind: kind, Writer: "web",
+		})
+		if err != nil {
+			return KnowledgeFeedbackWriteResult{}, err
+		}
+		entry := applyVaultFeedbackResult(vaultEntryThatNeedsMapping(target.VaultEntry), result, kind)
+		return KnowledgeFeedbackWriteResult{Entry: entry, Source: "vault"}, nil
+	}
+	entry, err := s.store.FeedbackKnowledge(ctx, target.LegacyEntry.ID, kind, timeString(s.now().UTC()))
+	if err != nil {
+		return KnowledgeFeedbackWriteResult{}, err
+	}
+	warning := s.vaultFallbackWarning(target.ProjectID)
+	if target.Scope == "global" {
+		warning = s.vaultGlobalFallbackWarning()
+	}
+	return KnowledgeFeedbackWriteResult{Entry: entry, Source: "legacy", Warning: warning}, nil
+}
+
+// vaultGlobalKnowledge is the compatibility view used by global snapshots that
+// only need titles. It follows the strict global source: a vault read failure
+// returns false and the caller omits the section rather than showing legacy
+// rows the owner moved away from.
+func (s *Service) vaultGlobalKnowledge(ctx context.Context) ([]domain.KnowledgeEntry, bool) {
+	active, stale, vault, err := s.readVaultGlobalKnowledge(ctx)
+	if err != nil || !vault {
+		return nil, false
+	}
+	return append(active, stale...), true
+}
+
 // readSourceIsVault reports whether one scope/project currently reads the
 // vault. Every caller that must not mix sources uses this instead of testing a
 // single gate itself.

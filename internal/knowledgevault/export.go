@@ -207,7 +207,7 @@ func allocateProjectSlugs(projects []sourceProject, existing map[string]string, 
 		used[strings.ToLower(candidate)] = project.ID
 	}
 	for id, name := range existingNames {
-		if _, ok := result.names[id]; !ok && name != "" {
+		if _, ok := result.names[id]; !ok && name != "" && !isKnowledgeHomeTitle(name) {
 			result.names[id] = name
 		}
 	}
