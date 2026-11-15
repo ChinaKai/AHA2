@@ -240,38 +240,20 @@ func (s *Server) withGlobalKnowledgeNavigation(ctx context.Context, items []doma
 // rather than filtering a page of /api/v1/knowledge, which is recency-ordered
 // and therefore reports only the projects touched most recently.
 func (s *Server) knowledgeIndexes(writer http.ResponseWriter, request *http.Request) {
-	entries := []domain.KnowledgeEntry{}
-	if s.app != nil {
-		// Each project root comes from the store that currently owns it, so the
-		// channel grant picker never offers a legacy root for a vault-routed
-		// project. A vault read failure is surfaced instead of substituted.
-		sources, err := s.app.KnowledgeIndexSources(request.Context())
-		if err != nil {
-			writeError(writer, http.StatusInternalServerError, "list_knowledge_indexes_failed")
-			return
+	indexes, err := s.store.KnowledgeIndexes(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "list_knowledge_indexes_failed")
+		return
+	}
+	entries := make([]domain.KnowledgeEntry, 0, len(indexes))
+	for projectID, entry := range indexes {
+		// This is the legacy knowledge API. A project that reads the vault has
+		// no selectable legacy root here; channel vault roots come from the
+		// source-aware app listing and the vault library picker.
+		if s.knowledgeVaultReadActive("project", projectID) {
+			continue
 		}
-		for _, source := range sources {
-			// Defense in depth: a legacy root must never be selectable once the
-			// project reads the vault.
-			if !source.Vault && s.knowledgeVaultReadActive("project", source.Entry.ProjectID) {
-				continue
-			}
-			entries = append(entries, source.Entry)
-		}
-	} else {
-		indexes, err := s.store.KnowledgeIndexes(request.Context())
-		if err != nil {
-			writeError(writer, http.StatusInternalServerError, "list_knowledge_indexes_failed")
-			return
-		}
-		entries = make([]domain.KnowledgeEntry, 0, len(indexes))
-		for projectID, entry := range indexes {
-			// A project that reads the vault has no selectable legacy root.
-			if s.knowledgeVaultReadActive("project", projectID) {
-				continue
-			}
-			entries = append(entries, entry)
-		}
+		entries = append(entries, entry)
 	}
 	sort.Slice(entries, func(left, right int) bool { return entries[left].ProjectID < entries[right].ProjectID })
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "indexes": entries})
