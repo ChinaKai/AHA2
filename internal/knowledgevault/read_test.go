@@ -515,6 +515,9 @@ func TestReaderSkillsAreListedFromVaultFolders(t *testing.T) {
 			if skill.Name != "Demo Skill" || skill.Description != "Read-only demo" || skill.FileCount != 2 {
 				t.Fatalf("skill = %+v", skill)
 			}
+			if skill.Key != "vault-skill:global:flat:demo-skill" {
+				t.Fatalf("flat skill key = %q, want a scope+slug key", skill.Key)
+			}
 			if !strings.HasSuffix(skill.OpenPath, filepath.Join("skills", "demo-skill", "SKILL.md")) {
 				t.Fatalf("open path = %q", skill.OpenPath)
 			}

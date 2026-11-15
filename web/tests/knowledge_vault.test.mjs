@@ -789,19 +789,24 @@ test("inbox and skills are read-only lists with no move or edit affordances", ()
   assert.match(inbox, /href="#knowledge\?doc=i1&amp;scope=project&amp;project=p1"/);
   assert.doesNotMatch(inbox, /data-kv-(move|archive|delete|edit)/);
 
-  reset({tab: "skills", skillsState: "ready", skills: [{
-    id: "s1", slug: "build", name: "Build", scope: "global", library: "全局知识",
+  reset({tab: "skills", skillsState: "ready", skillRuntimeRead: true, skills: [{
+    key: "vault-skill:global:build", id: "s1", slug: "build", name: "Build", scope: "global", library: "全局知识",
     description: "构建技能", file_count: 3, relative_path: "skills/build",
     absolute_path: "/srv/vault/skills/build", open_path: "/srv/vault/skills/build",
+    source: "vault", auto_attach: false, auto_attach_effective: false,
+    auto_attach_confirmed: false, can_update: true, project_bound: true,
   }]});
   const skills = vault.renderKnowledgeVaultPage(context());
   assert.match(skills, /Build/);
   assert.match(skills, /3 个文件/);
   assert.match(skills, /vscode:\/\/file\/srv\/vault\/skills\/build/);
-  // Skill cards keep the same three icon actions, right-aligned in a footer
-  // below the file count, with the skill name in each accessible label.
-  assert.match(skills, /<footer class="kv-skill-actions"><div class="kv-open-actions compact">/);
-  const card = skills.slice(skills.indexOf('<article class="kv-skill-card">'), skills.indexOf("</article>"));
+  // Skill cards keep the three icon actions and add the task auto-attach
+  // switch beside them; the source and scope are always spelled out.
+  assert.match(skills, /<footer class="kv-skill-footer">/);
+  assert.match(skills, /data-kv-skill-auto="vault-skill:global:build"/);
+  assert.match(skills, /任务自动启用/);
+  assert.match(skills, /vault 技能/);
+  const card = skills.slice(skills.indexOf('<article class="kv-skill-card"'), skills.indexOf("</article>"));
   assert.equal((card.match(/class="kv-open(?: kv-copy)?"/g) || []).length, 3);
   assert.match(card, /aria-label="在本地 VSCode 打开「Build」"/);
   assert.match(card, /aria-label="在 Obsidian 打开「Build」"/);

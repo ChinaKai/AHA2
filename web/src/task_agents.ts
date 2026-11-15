@@ -590,7 +590,11 @@ export function renderTaskSkills(skills: Skill[], projectID: string, selected: s
   const visible = skills.filter(item => item.enabled && item.status === "active" && (item.scope === "global" || item.project_id === projectID || item.bound_project_id === projectID));
   return visible.map(item => {
     const auto = item.auto_attach ? ' <span class="capability-badge">自动</span>' : "";
-    return `<label class="task-skill-option"><input type="checkbox" name="skill_ids" value="${escapeHTML(item.id)}" ${selected.includes(item.id) ? "checked" : ""}><span><strong>${escapeHTML(item.name)}${auto}</strong><small>${escapeHTML(item.scope)} · ${escapeHTML(item.description || "无描述")}</small></span></label>`;
+    // Legacy database skills and vault packages are both offered here, so the
+    // source is always spelled out instead of implying two systems run at once.
+    const source = item.source === "vault" ? "vault 技能" : "旧技能";
+    const scope = item.scope === "global" ? "全局" : "项目";
+    return `<label class="task-skill-option"><input type="checkbox" name="skill_ids" value="${escapeHTML(item.id)}" ${selected.includes(item.id) ? "checked" : ""}><span><strong>${escapeHTML(item.name)}${auto}</strong><small>${escapeHTML(source)} · ${escapeHTML(scope)} · ${escapeHTML(item.description || "无描述")}</small></span></label>`;
   }).join("") || `<div class="field-help">当前 Project 没有可用 Skill。</div>`;
 }
 

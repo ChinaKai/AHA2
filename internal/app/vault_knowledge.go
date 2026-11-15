@@ -239,6 +239,11 @@ func (s *Service) applyVaultSkillPackages(ctx context.Context, projectID string,
 		manifest := reader.Manifest()
 		for index := range result {
 			skill := &result[index]
+			// Vault-selected skills already carry their package files; only
+			// migrated legacy skills need the vault copy substituted.
+			if knowledgevault.IsVaultSkillID(skill.ID) {
+				continue
+			}
 			slug := strings.TrimSpace(skill.PackageSlug)
 			if slug == "" {
 				slug = knowledgevault.Slugify(skill.Name)

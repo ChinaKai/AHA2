@@ -859,7 +859,11 @@ func (r *Reader) Inbox(ctx context.Context, projectID string) (InboxResponse, er
 // SkillPackage is a read-only skill folder under skills/ or a project
 // skills/ directory. Phase 2 does not migrate skill contents.
 type SkillPackage struct {
-	ID           string   `json:"id"`
+	ID string `json:"id"`
+	// Key is the stable identity used by task selection and auto-attach
+	// preferences. Unlike ID it does not embed the project's vault slug, so a
+	// project rename inside the vault does not orphan the preference.
+	Key          string   `json:"key"`
 	Slug         string   `json:"slug"`
 	Name         string   `json:"name"`
 	Scope        string   `json:"scope"`
@@ -986,11 +990,39 @@ func (r *Reader) skillPackage(relative, scope, projectID, library string) (Skill
 	})
 	slug := childName(relative)
 	return SkillPackage{
-		ID: "vault-skill:" + strings.ReplaceAll(relative, "/", ":"), Slug: slug, Name: name,
+		ID: "vault-skill:" + strings.ReplaceAll(relative, "/", ":"), Key: SkillKey(scope, projectID, slug, relative),
+		Slug: slug, Name: name,
 		Scope: scope, ProjectID: projectID, Library: library, Description: description,
 		FileCount: fileCount, Files: files, RelativePath: relative,
 		AbsolutePath: directory, OpenPath: skillPath,
 	}, true
+}
+
+// VaultSkillIDPrefix marks a Task skill id owned by the file vault instead of
+// the legacy skills table. The two share one selection list in the Web UI.
+const VaultSkillIDPrefix = "vault-skill:"
+
+// IsVaultSkillID reports whether a task skill id belongs to a vault package.
+func IsVaultSkillID(id string) bool {
+	return strings.HasPrefix(strings.TrimSpace(id), VaultSkillIDPrefix)
+}
+
+// SkillKey derives the stable key for a vault skill. Scope plus project plus
+// slug survives project slug renames; the flat legacy skills/ area gets its
+// own namespace so it cannot collide with global/skills/<same-slug>.
+func SkillKey(scope, projectID, slug, relative string) string {
+	switch scope {
+	case "global":
+		if strings.HasPrefix(filepath.ToSlash(relative), "skills/") {
+			return VaultSkillIDPrefix + "global:flat:" + slug
+		}
+		return VaultSkillIDPrefix + "global:" + slug
+	case "project":
+		return VaultSkillIDPrefix + "project:" + projectID + ":" + slug
+	case "archive":
+		return VaultSkillIDPrefix + "archive:" + projectID + ":" + slug
+	}
+	return VaultSkillIDPrefix + strings.ReplaceAll(filepath.ToSlash(relative), "/", ":")
 }
 
 func childName(relative string) string {

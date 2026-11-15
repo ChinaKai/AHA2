@@ -3707,9 +3707,30 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	var hasV138 bool
 	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=138)`).Scan(&hasV138)
+	if !hasV138 {
+		// Vault skills live in files, but their auto-attach choice is an owner
+		// preference and must survive restarts. The row is keyed by the stable
+		// vault skill key and never writes to the vault itself.
+		if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS vault_skill_preferences(
+			skill_id TEXT PRIMARY KEY,
+			scope TEXT NOT NULL DEFAULT '' CHECK(scope IN ('','global','project','archive')),
+			project_id TEXT NOT NULL DEFAULT '',
+			auto_attach INTEGER NOT NULL DEFAULT 0 CHECK(auto_attach IN (0,1)),
+			global_attach_confirmed_at TEXT NOT NULL DEFAULT '',
+			updated_at TEXT NOT NULL
+		)`); err != nil {
+			return fmt.Errorf("apply schema v138 vault skill preferences: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(138, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return fmt.Errorf("record schema v138: %w", err)
+		}
+	}
+	var hasV139 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=139)`).Scan(&hasV139)
 	var hasTargetSource bool
 	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pragma_table_info('knowledge_proposals') WHERE name='target_source')`).Scan(&hasTargetSource)
-	if !hasV138 || !hasTargetSource {
+	if !hasV139 || !hasTargetSource {
 		// Vault-targeted proposals keep the review workflow but publish into the
 		// file vault instead of knowledge_entries. Existing rows stay legacy.
 		// The column check makes the migration reentrant when a test or an older
@@ -3718,12 +3739,12 @@ func (s *Store) migrate(ctx context.Context) error {
 			if _, err := s.db.ExecContext(ctx,
 				`ALTER TABLE knowledge_proposals ADD COLUMN target_source TEXT NOT NULL DEFAULT 'legacy' CHECK(target_source IN ('legacy','vault'))`); err != nil &&
 				!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
-				return fmt.Errorf("apply schema v138 knowledge proposal target source: %w", err)
+				return fmt.Errorf("apply schema v139 knowledge proposal target source: %w", err)
 			}
 		}
 		if _, err := s.db.ExecContext(ctx,
-			`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(138, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
-			return fmt.Errorf("record schema v138: %w", err)
+			`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(139, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return fmt.Errorf("record schema v139: %w", err)
 		}
 	}
 	return nil

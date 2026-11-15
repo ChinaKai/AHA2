@@ -39,6 +39,7 @@ import type {
   KnowledgeVaultRebuildResponse,
   KnowledgeVaultSearch,
   KnowledgeVaultSettingsResponse,
+  KnowledgeVaultSkill,
   KnowledgeVaultSkills,
   KnowledgeVaultTree,
   Model,
@@ -1056,8 +1057,19 @@ class APIClient {
     return this.request(`/api/v1/knowledge-vault/inbox?${query}`);
   }
 
-  knowledgeVaultSkills(): Promise<KnowledgeVaultSkills> {
-    return this.request("/api/v1/knowledge-vault/skills");
+  knowledgeVaultSkills(projectID = ""): Promise<KnowledgeVaultSkills> {
+    const query = projectID ? `?project_id=${encodeURIComponent(projectID)}` : "";
+    return this.request(`/api/v1/knowledge-vault/skills${query}`);
+  }
+
+  // Only the auto-attach preference is written; vault files and the legacy
+  // skills table are untouched. A global enable needs confirmGlobal, mirroring
+  // the server-side second confirmation rule.
+  updateKnowledgeVaultSkillAutoAttach(key: string, autoAttach: boolean, confirmGlobal = false): Promise<{ok: boolean; skill: KnowledgeVaultSkill}> {
+    return this.request("/api/v1/knowledge-vault/skills/auto-attach", {
+      method: "PUT",
+      body: JSON.stringify({key, auto_attach: autoAttach, confirm_global: confirmGlobal}),
+    });
   }
 
   // Phase 3 runtime settings. The toggle answers with the live status, so the

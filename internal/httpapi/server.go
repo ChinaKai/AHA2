@@ -567,6 +567,7 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("GET /api/v1/knowledge-vault/recent", s.withAuth(http.HandlerFunc(s.knowledgeVaultRecent)))
 		mux.Handle("GET /api/v1/knowledge-vault/inbox", s.withAuth(http.HandlerFunc(s.knowledgeVaultInbox)))
 		mux.Handle("GET /api/v1/knowledge-vault/skills", s.withAuth(http.HandlerFunc(s.knowledgeVaultSkills)))
+		mux.Handle("PUT /api/v1/knowledge-vault/skills/auto-attach", s.withAuth(http.HandlerFunc(s.updateKnowledgeVaultSkillAutoAttach)))
 		mux.Handle("GET /api/v1/settings/knowledge-vault", s.withAuth(http.HandlerFunc(s.knowledgeVaultSettings)))
 		mux.Handle("PUT /api/v1/settings/knowledge-vault", s.withAuth(http.HandlerFunc(s.updateKnowledgeVaultSettings)))
 		mux.Handle("POST /api/v1/settings/knowledge-vault/init", s.withAuth(http.HandlerFunc(s.initializeKnowledgeVault)))

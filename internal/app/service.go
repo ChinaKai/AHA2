@@ -674,6 +674,14 @@ func (s *Service) validateTaskSkillIDs(ctx context.Context, projectID string, id
 		if id == "" || seen[id] {
 			continue
 		}
+		if knowledgevault.IsVaultSkillID(id) {
+			if !s.vaultSkillExistsInProject(ctx, projectID, id) {
+				return nil, fmt.Errorf("vault skill %s is unavailable for this project", id)
+			}
+			seen[id] = true
+			result = append(result, id)
+			continue
+		}
 		item, err := s.store.Skill(ctx, id)
 		if err != nil {
 			return nil, fmt.Errorf("skill %s is unavailable", id)
@@ -711,6 +719,10 @@ func (s *Service) autoAttachSkillIDs(ctx context.Context, projectID string) ([]s
 			result = append(result, item.ID)
 		}
 	}
+	// Vault skills have no legacy row, so their auto-attach preference is
+	// merged here under the same project rules. The helper already checks the
+	// runtime read gate and logs every preference it cannot honour.
+	result = append(result, s.vaultAutoAttachSkillKeys(ctx, projectID)...)
 	return result, nil
 }
 
@@ -746,17 +758,26 @@ func (s *Service) UpdateTaskSkills(ctx context.Context, taskID string, ids []str
 }
 
 func (s *Service) activeTaskSkills(ctx context.Context, task domain.Task) []domain.Skill {
-	items, err := s.store.SkillsByIDs(ctx, task.SkillIDs)
+	dbIDs := make([]string, 0, len(task.SkillIDs))
+	vaultIDs := make([]string, 0, len(task.SkillIDs))
+	for _, id := range task.SkillIDs {
+		if knowledgevault.IsVaultSkillID(id) {
+			vaultIDs = append(vaultIDs, id)
+		} else {
+			dbIDs = append(dbIDs, id)
+		}
+	}
+	items, err := s.store.SkillsByIDs(ctx, dbIDs)
 	if err != nil {
 		items = nil
-		for _, id := range task.SkillIDs {
+		for _, id := range dbIDs {
 			item, itemErr := s.store.Skill(ctx, id)
 			if itemErr == nil {
 				items = append(items, item)
 			}
 		}
 	}
-	result := make([]domain.Skill, 0, len(items))
+	result := make([]domain.Skill, 0, len(items)+len(vaultIDs))
 	for _, item := range items {
 		if !item.Enabled || item.Status != "active" {
 			continue
@@ -765,6 +786,7 @@ func (s *Service) activeTaskSkills(ctx context.Context, task domain.Task) []doma
 			result = append(result, item)
 		}
 	}
+	result = append(result, s.vaultTaskSkills(ctx, task.ProjectID, vaultIDs)...)
 	return result
 }
 

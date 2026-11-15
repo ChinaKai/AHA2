@@ -114,7 +114,13 @@ func knowledgeVaultServerAt(t *testing.T, manager *knowledgevault.Manager, dataD
 		t.Fatal(err)
 	}
 	authService := auth.NewService(database, "setup-test", time.Hour)
-	config := Config{Store: database, Auth: authService, App: app.NewService(database, secretStore, app.StubExecutor{})}
+	appService := app.NewService(database, secretStore, app.StubExecutor{})
+	if manager != nil {
+		// Production wires the same manager into both consumers. The catalog
+		// handler uses the app service for preferences and the runtime gate.
+		appService.SetKnowledgeVault(manager, true)
+	}
+	config := Config{Store: database, Auth: authService, App: appService}
 	if manager != nil {
 		config.KnowledgeVault = manager
 	}

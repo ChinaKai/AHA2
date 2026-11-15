@@ -34,6 +34,24 @@ type GitBusy = "" | "init" | "remote" | "commit" | "pull" | "push" | "sync";
 // first-screen i18n catalog: they are only needed once the knowledge page has
 // loaded, and keeping them here preserves the first-screen size budget.
 const localText: Record<string, [zhCN: string, enUS: string]> = {
+  "kv.skillsAutoHint": ["开启后，新建任务会默认选中该技能；创建任务时仍可手动取消。", "When on, new tasks select this skill by default; you can still remove it while creating a task."],
+  "kv.skillAutoAttach": ["任务自动启用", "Auto-enable for tasks"],
+  "kv.skillAutoToggleAria": ["切换「{name}」任务自动启用", "Toggle auto-enable for {name}"],
+  "kv.skillSourceVault": ["vault 技能", "Vault skill"],
+  "kv.skillGlobalConfirm": ["将「{name}」设为全局自动启用？所有已绑定知识库的项目在新建任务时都会默认带上这个技能。", "Enable “{name}” globally? Every project bound to the knowledge vault will preselect this skill for new tasks."],
+  "kv.skillAutoEnabled": ["已开启「{name}」的任务自动启用。", "Auto-enable for “{name}” is on."],
+  "kv.skillAutoDisabled": ["已关闭「{name}」的任务自动启用。", "Auto-enable for “{name}” is off."],
+  "kv.skillAutoPending": ["已保存「{name}」的偏好，但知识库运行时读取未开启，暂时不会自动启用。", "The preference for “{name}” was saved, but knowledge vault runtime reads are off, so it will not take effect yet."],
+  "kv.skillGlobalHint": ["开启后，所有已绑定知识库的项目新建任务时默认选中；创建任务时仍可取消。", "When on, every project bound to the knowledge vault preselects this skill for new tasks; it can still be removed there."],
+  "kv.skillProjectHint": ["开启后，该项目新建任务时默认选中；创建任务时仍可取消。", "When on, new tasks in this project preselect this skill; it can still be removed there."],
+  "kv.skillRuntimeOff": ["知识库运行时读取未开启，vault 技能不会自动启用。", "Knowledge vault runtime reads are off, so vault skills will not auto-enable."],
+  "kv.skillIndexNotReady": ["知识库索引尚未就绪，vault 技能暂不可用。", "The knowledge vault index is not ready, so vault skills are unavailable."],
+  "kv.skillProjectNotBound": ["当前项目未绑定知识库项目库，vault 技能不会自动启用。", "This project is not bound to a vault project library, so vault skills will not auto-enable."],
+  "kv.skillArchiveReadonly": ["归档技能只读，不能自动启用。", "Archived skills are read-only and cannot auto-enable."],
+  "kv.skillPending": ["偏好已保存，但当前条件下暂不生效。", "The preference is saved but does not take effect under the current conditions."],
+  "kv.skillGlobalConfirmRequired": ["全局启用需要二次确认，请重试并确认弹窗。", "Global enabling needs the second confirmation; retry and confirm the dialog."],
+  "kv.skillNotFound": ["该 vault 技能已不存在，请刷新后重试。", "This vault skill no longer exists. Refresh and try again."],
+  "kv.skillVaultDisabled": ["知识库功能未启用，无法修改任务自动启用。", "The knowledge vault is disabled, so auto-enable cannot be changed."],
   "kv.settingsIndexAction": ["索引操作", "Index action"],
   "kv.settingsRebuild": ["重建索引", "Rebuild index"],
   "kv.settingsRebuilding": ["重建中…", "Rebuilding…"],
@@ -424,6 +442,10 @@ interface VaultState {
   skills: KnowledgeVaultSkill[];
   skillsState: LoadState;
   skillsError: string;
+  // The catalog reports the runtime gate once, so each card can explain why
+  // auto-attach would not take effect without extra requests.
+  skillRuntimeRead: boolean;
+  skillBusy: string;
   searchOpen: boolean;
   searchQuery: string;
   searchScope: SearchScope;
@@ -538,6 +560,7 @@ function initialState(): VaultState {
     previewTab: "diff", previewDiff: null, previewDiffState: "idle", previewDiffError: "",
     inbox: null, inboxState: "idle", inboxError: "",
     skills: [], skillsState: "idle", skillsError: "",
+    skillRuntimeRead: false, skillBusy: "",
     searchOpen: false, searchQuery: "", searchScope: "all",
     searchType: "", searchStatus: "", searchTag: "",
     searchState: "idle", searchError: "", searchResults: [],
@@ -1443,18 +1466,56 @@ function inboxFeedHTML(): string {
   </section>`;
 }
 
+function vaultProjectName(projectID?: string): string {
+  if (!projectID) return "";
+  return state.projects.find(item => item.project_id === projectID)?.name || projectID;
+}
+
+function skillAutoHint(skill: KnowledgeVaultSkill): string {
+  switch (skill.unavailable_reason) {
+    case "runtime_read_off":
+      return kt("kv.skillRuntimeOff");
+    case "index_not_ready":
+      return kt("kv.skillIndexNotReady");
+    case "project_not_bound":
+      return kt("kv.skillProjectNotBound");
+    case "archive_read_only":
+      return kt("kv.skillArchiveReadonly");
+  }
+  if (skill.auto_attach && !skill.auto_attach_effective) return kt("kv.skillPending");
+  return skill.scope === "global" ? kt("kv.skillGlobalHint") : kt("kv.skillProjectHint");
+}
+
 function skillsBodyHTML(): string {
   if (state.skillsState === "loading") return vaultEmptyState("loading");
   if (state.skillsState === "error") return vaultEmptyState("error", state.skillsError, true);
   if (state.skills.length === 0) return vaultEmptyState("empty", t("kv.skillsEmpty"));
+  const runtimeHint = state.skillRuntimeRead ? "" : `<p class="kv-hint kv-hint-warn">${kt("kv.skillRuntimeOff")}</p>`;
   return `<section class="kv-skills" aria-label="${t("kv.tab.skills")}">
     <p class="kv-hint">${t("kv.skillsReadonly")}</p>
-    <div class="kv-skill-grid">${state.skills.map(skill => `<article class="kv-skill-card">
-      <header><strong>${escapeVaultHTML(skill.name)}</strong>${badge(skill.scope === "global" ? t("kv.scope.global") : t("kv.scope.project"), "type")}</header>
+    ${runtimeHint}
+    <p class="kv-hint">${kt("kv.skillsAutoHint")}</p>
+    <div class="kv-skill-grid">${state.skills.map(skill => {
+      const scopeText = skill.scope === "global"
+        ? kt("kv.scope.global")
+        : `${kt("kv.scope.project")} · ${vaultProjectName(skill.project_id)}`;
+      const busy = state.skillBusy === skill.key;
+      const disabled = !skill.can_update || busy;
+      return `<article class="kv-skill-card" data-kv-skill-card="${escapeVaultHTML(skill.key)}">
+      <header><div class="kv-skill-title"><strong>${escapeVaultHTML(skill.name)}</strong><small class="kv-skill-meta">${badge(kt("kv.skillSourceVault"), "type")} ${escapeVaultHTML(scopeText)}</small></div></header>
       <p>${escapeVaultHTML(skill.description || t("kv.noDescription"))}</p>
       <small>${escapeVaultHTML(skill.library)} · ${t("kv.skillFiles", {count: skill.file_count})}</small>
-      <footer class="kv-skill-actions">${openActions(skill.open_path, `${skill.relative_path}/SKILL.md`, "", {compact: true, context: skill.name, copyKey: "kv.copySkillPath"})}</footer>
-    </article>`).join("")}</div>
+      <footer class="kv-skill-footer">
+        <label class="kv-skill-auto" title="${escapeVaultHTML(skillAutoHint(skill))}">
+          <input type="checkbox" role="switch" data-kv-skill-auto="${escapeVaultHTML(skill.key)}" aria-label="${escapeVaultHTML(kt("kv.skillAutoToggleAria", {name: skill.name}))}" ${skill.auto_attach ? "checked" : ""} ${disabled ? "disabled" : ""}>
+          <span class="kv-skill-auto-track" aria-hidden="true"></span>
+          <span class="kv-skill-auto-label">${kt("kv.skillAutoAttach")}</span>
+        </label>
+        <div class="kv-skill-actions">${openActions(skill.open_path, `${skill.relative_path}/SKILL.md`, "", {compact: true, context: skill.name, copyKey: "kv.copySkillPath"})}</div>
+      </footer>
+      <p class="kv-skill-status">${escapeVaultHTML(skillAutoHint(skill))}</p>
+    </article>`;
+    }).join("")}</div>
   </section>`;
 }
 
@@ -2113,12 +2174,73 @@ async function loadSkills(force = false): Promise<void> {
   try {
     const payload: KnowledgeVaultSkills = await api.knowledgeVaultSkills();
     state.skills = payload.skills || [];
+    state.skillRuntimeRead = Boolean(payload.runtime_read);
     state.skillsState = "ready";
   } catch (error) {
     state.skillsState = "error";
     state.skillsError = error instanceof Error ? error.message : String(error);
   }
   rerender();
+}
+
+function vaultSkillErrorText(error: unknown): string {
+  const code = (error as {code?: string} | null)?.code || "";
+  switch (code) {
+    case "global_confirmation_required":
+      return kt("kv.skillGlobalConfirmRequired");
+    case "vault_skill_not_found":
+      return kt("kv.skillNotFound");
+    case "vault_skill_not_auto_attachable":
+      return kt("kv.skillArchiveReadonly");
+    case "knowledge_vault_disabled":
+      return kt("kv.skillVaultDisabled");
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
+// Persists only the preference. Vault files stay untouched; the backend also
+// enforces the global second confirmation, so a bypassed confirm still fails.
+async function setSkillAutoAttach(key: string, enabled: boolean): Promise<void> {
+  const skill = state.skills.find(item => item.key === key);
+  if (!skill || state.skillBusy) {
+    rerender();
+    return;
+  }
+  let confirmGlobal = false;
+  if (enabled && skill.scope === "global") {
+    confirmGlobal = window.confirm(kt("kv.skillGlobalConfirm", {name: skill.name}));
+    if (!confirmGlobal) {
+      // Re-render so the checkbox snaps back to the persisted state.
+      rerender();
+      return;
+    }
+  }
+  state.skillBusy = key;
+  rerender();
+  try {
+    const response = await api.updateKnowledgeVaultSkillAutoAttach(key, enabled, confirmGlobal);
+    const index = state.skills.findIndex(item => item.key === key);
+    if (index >= 0) {
+      // Keep the catalog-only fields (project_bound, unavailable_reason) and
+      // apply just the preference fields from the write response.
+      state.skills[index] = {
+        ...state.skills[index],
+        auto_attach: response.skill.auto_attach,
+        auto_attach_effective: response.skill.auto_attach_effective,
+        auto_attach_confirmed: response.skill.auto_attach_confirmed,
+      };
+    }
+    if (enabled && !response.skill.auto_attach_effective) {
+      activeContext.setMessage("notice", kt("kv.skillAutoPending", {name: skill.name}));
+    } else {
+      activeContext.setMessage("notice", kt(enabled ? "kv.skillAutoEnabled" : "kv.skillAutoDisabled", {name: skill.name}));
+    }
+  } catch (error) {
+    activeContext.setMessage("error", vaultSkillErrorText(error));
+  } finally {
+    state.skillBusy = "";
+    rerender();
+  }
 }
 
 function loadTab(tab: VaultTab): void {
@@ -2491,7 +2613,7 @@ function handleMissingWikilink(event: Event): boolean {
 function focusSelector(element: Element | null): string {
   if (!(element instanceof HTMLElement)) return "";
   if (element.id) return `#${typeof CSS !== "undefined" && CSS.escape ? CSS.escape(element.id) : element.id}`;
-  for (const name of ["kvSidebarToggle", "kvToggle", "kvFolderTitle", "kvFeedback", "kvTabButton", "kvDoc", "kvCopy", "kvTag"]) {
+  for (const name of ["kvSidebarToggle", "kvToggle", "kvFolderTitle", "kvFeedback", "kvTabButton", "kvDoc", "kvCopy", "kvTag", "kvSkillAuto"]) {
     const value = (element.dataset as Record<string, string | undefined>)[name];
     if (value) return `[data-kv-${name.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`) }="${typeof CSS !== "undefined" && CSS.escape ? CSS.escape(value) : value}"]`;
   }
@@ -2731,6 +2853,12 @@ export function bindKnowledgeVaultPage(context: KnowledgeVaultContext): void {
       heading?.focus({preventScroll: true});
       return;
     }
+  });
+
+  root.addEventListener("change", event => {
+    const input = (event.target as HTMLElement | null)?.closest<HTMLInputElement>("[data-kv-skill-auto]");
+    if (!input) return;
+    void setSkillAutoAttach(input.dataset.kvSkillAuto || "", input.checked);
   });
 
   if (state.searchOpen) requestAnimationFrame(() => root.querySelector<HTMLInputElement>("#kv-search")?.focus());

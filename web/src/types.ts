@@ -850,6 +850,10 @@ export interface Skill {
   status: string;
   enabled: boolean;
   auto_attach?: boolean;
+  // The task picker merges legacy database skills and vault packages. The
+  // source lets the UI label them clearly so the Owner does not think both
+  // systems are silently running the same package.
+  source?: "legacy" | "vault";
   source_path?: string;
   files?: string[];
   created_at: string;
@@ -1994,6 +1998,9 @@ export interface KnowledgeVaultInbox {
 }
 
 export interface KnowledgeVaultSkill {
+  // Stable preference identity. It is scope+slug based and does not change when
+  // the project's vault library is renamed.
+  key: string;
   id: string;
   slug: string;
   name: string;
@@ -2006,10 +2013,23 @@ export interface KnowledgeVaultSkill {
   relative_path: string;
   absolute_path: string;
   open_path: string;
+  source: "vault";
+  auto_attach: boolean;
+  // Effective means the preference would actually pre-select the skill for new
+  // tasks: runtime read on, index ready, project bound, and global confirmation
+  // recorded.
+  auto_attach_effective: boolean;
+  auto_attach_confirmed: boolean;
+  can_update: boolean;
+  project_bound: boolean;
+  unavailable_reason?: "" | "runtime_read_off" | "index_not_ready" | "project_not_bound" | "archive_read_only";
 }
 
 export interface KnowledgeVaultSkills {
   ok: boolean;
   enabled: boolean;
+  index_ready: boolean;
+  runtime_read: boolean;
+  bound_project_ids: string[];
   skills: KnowledgeVaultSkill[];
 }
