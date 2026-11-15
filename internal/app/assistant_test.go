@@ -212,3 +212,38 @@ func TestAskOwnerAssistantUsesProviderModel(t *testing.T) {
 		t.Fatalf("messages=%#v err=%v", messages, err)
 	}
 }
+
+func TestAssistantSnapshotReadsVaultGlobalKnowledgeWithoutLegacyFallback(t *testing.T) {
+	withUnsetEnv(t, knowledgeVaultReadProjectsEnv)
+	fixture := newPetTaskFixture(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	root, err := fixture.database.EnsureKnowledgeRoot(ctx, "global", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.database.CreateKnowledge(ctx, domain.KnowledgeEntry{
+		ID: "knowledge_assistant_legacy_global", Scope: "global", ParentID: root.ID,
+		Slug: "assistant-legacy-global", Type: "practice", Title: "Legacy Global Title",
+		Body: "旧库全局正文。", Status: domain.KnowledgeVerified, Revision: 1, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	manager := buildVaultReadManager(t, true, map[string]string{
+		"global/index.md":         "---\nid: " + root.ID + "\ntitle: 全局首页\nscope: global\ntype: navigation\nstatus: verified\nis_index: true\n---\n全局入口。\n",
+		"global/general/vault.md": "---\nid: knowledge_assistant_vault_global\ntitle: Vault Global Title\nscope: global\ntype: practice\nstatus: verified\n---\n文件全局正文。\n",
+	})
+	fixture.service.knowledgeVault = manager
+	fixture.service.knowledgeVaultRuntimeRead = true
+
+	snapshot, err := fixture.service.assistantSnapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(snapshot, "Vault Global Title") {
+		t.Fatalf("snapshot did not list vault global knowledge:\n%s", snapshot)
+	}
+	if strings.Contains(snapshot, "Legacy Global Title") {
+		t.Fatalf("snapshot fell back to legacy global knowledge:\n%s", snapshot)
+	}
+}

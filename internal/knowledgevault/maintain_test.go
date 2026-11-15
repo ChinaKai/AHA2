@@ -74,6 +74,91 @@ is_index: true
 	}
 }
 
+func TestRebuildNeverStoresKnowledgeHomeAsProjectName(t *testing.T) {
+	config, index, ctx := exportSeedVault(t)
+	// The database names are authoritative on export; a rebuild must not
+	// overwrite them with the generated root index title (知识首页).
+	if _, err := index.Rebuild(ctx, config.VaultPath); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.ProjectNames["project-demo"] != "Demo Project" || manifest.ArchiveNames["project-archive"] != "AHA1 Archive" {
+		t.Fatalf("rebuild replaced exported project names: %#v / %#v", manifest.ProjectNames, manifest.ArchiveNames)
+	}
+
+	// Simulate an install written by the old generation logic, where every
+	// project_name was the knowledge-home page title. A rebuild repairs the
+	// cache to the stable slug instead of writing 知识首页 again.
+	manifest.ProjectNames["project-demo"] = "知识首页"
+	manifest.ArchiveNames["project-archive"] = "全局知识首页"
+	if err := writeManifest(config.VaultPath, manifest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := index.Rebuild(ctx, config.VaultPath); err != nil {
+		t.Fatal(err)
+	}
+	repaired, err := ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repaired.ProjectNames["project-demo"] != "demo-project" || repaired.ArchiveNames["project-archive"] != "aha1-archive" {
+		t.Fatalf("repaired project names = %#v, want the vault slugs", repaired.ProjectNames)
+	}
+	for id, name := range repaired.ProjectNames {
+		if name == "知识首页" || name == "全局知识首页" {
+			t.Fatalf("project %s still carries the knowledge-home title", id)
+		}
+	}
+	for id, name := range repaired.ArchiveNames {
+		if name == "知识首页" || name == "全局知识首页" {
+			t.Fatalf("archive %s still carries the knowledge-home title", id)
+		}
+	}
+
+	before, err := os.ReadFile(filepath.Join(config.VaultPath, manifestFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := index.Rebuild(ctx, config.VaultPath); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(filepath.Join(config.VaultPath, manifestFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("repaired manifest is not idempotent:\n%s\n---\n%s", before, after)
+	}
+}
+
+func TestResolveLibraryNameRejectsKnowledgeHomeTitles(t *testing.T) {
+	cases := []struct {
+		name     string
+		existing string
+		title    string
+		slug     string
+		id       string
+		want     string
+	}{
+		{"exported name wins over the generated index title", "AHA2", "知识首页", "aha2", "project-6ff866", "AHA2"},
+		{"generated index title is replaced by the slug", "知识首页", "知识首页", "aha2", "project-6ff866", "aha2"},
+		{"global home title is replaced by the slug", "全局知识首页", "知识首页", "bu2-cam1", "project-5ac7", "bu2-cam1"},
+		{"hand-authored project title is kept", "", "手工项目", "manual-project", "project-manual", "手工项目"},
+		{"missing everything falls back to the project id", "", "", "", "project-x", "project-x"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := resolveLibraryName(testCase.existing, testCase.title, testCase.slug, testCase.id); got != testCase.want {
+				t.Fatalf("resolveLibraryName(%q, %q, %q, %q) = %q, want %q",
+					testCase.existing, testCase.title, testCase.slug, testCase.id, got, testCase.want)
+			}
+		})
+	}
+}
+
 func TestRebuildMarksUnboundProjectWithoutDroppingFiles(t *testing.T) {
 	config, index, ctx := exportSeedVault(t)
 	writeVaultTestFile(t, config.VaultPath, "projects/unbound/index.md", "---\ntitle: 未绑定\nis_index: true\n---\n\n未绑定目录。\n")
@@ -343,6 +428,57 @@ func TestEnsureGuideBackfillsOnceAndKeepsHandWrittenGuide(t *testing.T) {
 	}
 }
 
+func TestRepairGuideEndpointsRewritesOnlyRetiredEndpoints(t *testing.T) {
+	vaultPath := t.TempDir()
+	target := filepath.Join(vaultPath, filepath.FromSlash(GuideRelativePath))
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := "---\ntitle: 手写指南\n---\n\n手写导语必须保留。\n\n" +
+		"- `POST /api/v1/agent/knowledge/candidates`：提交候选，每批 1–20 条。\n" +
+		"- `POST /api/v1/agent/knowledge/{id}/feedback`：提交 `stale`、`wrong` 或 `helped`。\n" +
+		"- API：POST /api/v1/agent/knowledge/candidates（1–20 条，标题 ≤300、正文 ≤20000 字符）、POST /api/v1/agent/knowledge/{id}/feedback。\n"
+	if err := os.WriteFile(target, []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := RepairGuideEndpoints(vaultPath)
+	if err != nil || !changed {
+		t.Fatalf("RepairGuideEndpoints = (%v, %v), want changed", changed, err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repaired := string(got)
+	for _, retired := range []string{
+		"/api/v1/agent/knowledge/candidates", "/api/v1/agent/knowledge/{id}/feedback", "提交候选，每批",
+	} {
+		if strings.Contains(repaired, retired) {
+			t.Fatalf("repaired guide still contains %q:\n%s", retired, repaired)
+		}
+	}
+	for _, want := range []string{
+		"手写导语必须保留。", "/api/v1/agent/knowledge/entries", "/api/v1/agent/knowledge/feedback",
+		"mode=create|revise", "`entry_id` + `kind`",
+	} {
+		if !strings.Contains(repaired, want) {
+			t.Fatalf("repaired guide is missing %q:\n%s", want, repaired)
+		}
+	}
+
+	changed, err = RepairGuideEndpoints(vaultPath)
+	if err != nil || changed {
+		t.Fatalf("second RepairGuideEndpoints = (%v, %v), want an idempotent no-op", changed, err)
+	}
+	if after, err := os.ReadFile(target); err != nil || string(after) != repaired {
+		t.Fatalf("second RepairGuideEndpoints changed the guide: err=%v", err)
+	}
+
+	if changed, err := RepairGuideEndpoints(t.TempDir()); err != nil || changed {
+		t.Fatalf("RepairGuideEndpoints on a vault without a guide = (%v, %v), want a no-op", changed, err)
+	}
+}
+
 func TestReadGuideAndBootstrapDoesNotOverwrite(t *testing.T) {
 	config := DefaultConfig(t.TempDir())
 	if _, err := Bootstrap(config, InitOptions{VaultName: "Guide Vault"}); err != nil {
@@ -355,9 +491,14 @@ func TestReadGuideAndBootstrapDoesNotOverwrite(t *testing.T) {
 	if guide.Path != GuideRelativePath || guide.Title != GuideTitle || !strings.Contains(guide.Prompt, "先搜索再写") {
 		t.Fatalf("guide = %#v", guide)
 	}
-	for _, expected := range []string{"global/", "projects/", "navigation", "decision", "practice", "diagnostic", "reference", "architecture", "inbox", "stale", "wrong", "helped", "禁止", "/api/v1/agent/knowledge/guide"} {
+	for _, expected := range []string{"global/", "projects/", "navigation", "decision", "practice", "diagnostic", "reference", "architecture", "inbox", "stale", "wrong", "helped", "禁止", "/api/v1/agent/knowledge/guide", "/api/v1/agent/knowledge/entries", "/api/v1/agent/knowledge/feedback"} {
 		if !strings.Contains(guide.Content, expected) {
 			t.Fatalf("guide is missing %q", expected)
+		}
+	}
+	for _, retired := range []string{"/api/v1/agent/knowledge/candidates", "/api/v1/agent/knowledge/{id}/feedback"} {
+		if strings.Contains(guide.Content, retired) || strings.Contains(guide.Prompt, retired) {
+			t.Fatalf("default guide still teaches the retired endpoint %q", retired)
 		}
 	}
 	custom := "---\ntitle: 自定义指南\n---\n\n自定义正文。\n"

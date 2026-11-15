@@ -17,7 +17,7 @@ import (
 // function only reads knowledge and skill files.
 func deriveManifest(vaultPath string, manifest Manifest, now time.Time) (Manifest, []string, error) {
 	updated := manifest
-	projects, projectNames, archives, archiveNames, warnings, err := deriveLibraries(vaultPath)
+	projects, projectNames, archives, archiveNames, warnings, err := deriveLibraries(vaultPath, manifest)
 	if err != nil {
 		return manifest, warnings, err
 	}
@@ -42,7 +42,7 @@ func deriveManifest(vaultPath string, manifest Manifest, now time.Time) (Manifes
 	return updated, warnings, nil
 }
 
-func deriveLibraries(vaultPath string) (map[string]string, map[string]string, map[string]string, map[string]string, []string, error) {
+func deriveLibraries(vaultPath string, manifest Manifest) (map[string]string, map[string]string, map[string]string, map[string]string, []string, error) {
 	projects := map[string]string{}
 	projectNames := map[string]string{}
 	archives := map[string]string{}
@@ -52,10 +52,11 @@ func deriveLibraries(vaultPath string) (map[string]string, map[string]string, ma
 		directory string
 		byID      map[string]string
 		names     map[string]string
+		existing  map[string]string
 		kind      string
 	}{
-		{directory: "projects", byID: projects, names: projectNames, kind: "project"},
-		{directory: "archive", byID: archives, names: archiveNames, kind: "archive"},
+		{directory: "projects", byID: projects, names: projectNames, existing: manifest.ProjectNames, kind: "project"},
+		{directory: "archive", byID: archives, names: archiveNames, existing: manifest.ArchiveNames, kind: "archive"},
 	} {
 		children, err := os.ReadDir(filepath.Join(vaultPath, filepath.FromSlash(root.directory)))
 		if err != nil {
@@ -94,17 +95,47 @@ func deriveLibraries(vaultPath string) (map[string]string, map[string]string, ma
 			}
 			usedSlugs[projectID] = relative
 			root.byID[projectID] = slug
-			name := strings.TrimSpace(document.Frontmatter.Title)
-			if name == "" {
-				name = FirstHeading(document.Body)
+			title := strings.TrimSpace(document.Frontmatter.Title)
+			if title == "" {
+				title = FirstHeading(document.Body)
 			}
-			if name == "" {
-				name = humanizeSegment(slug)
-			}
-			root.names[projectID] = name
+			root.names[projectID] = resolveLibraryName(root.existing[projectID], title, slug, projectID)
 		}
 	}
 	return projects, projectNames, archives, archiveNames, warnings, nil
+}
+
+// knowledgeHomeTitles are the generated navigation titles for the global and
+// project knowledge roots. They name the generated index page, not the owning
+// project, so they must never be stored as a project or archive display name.
+var knowledgeHomeTitles = map[string]bool{
+	"知识首页":   true,
+	"全局知识首页": true,
+}
+
+// resolveLibraryName picks the display name for one project/archive mapping.
+// A previously exported name (from the AHA2 projects table) wins because the
+// vault itself only stores a slug. The root index title is a last-resort
+// fallback for hand-authored vaults; the generated "knowledge home" titles are
+// rejected so the old bug cannot write them back. Without any usable name the
+// stable slug is the honest fallback.
+func resolveLibraryName(existing, title, slug, id string) string {
+	existing = strings.TrimSpace(existing)
+	title = strings.TrimSpace(title)
+	if existing != "" && !isKnowledgeHomeTitle(existing) && existing != title {
+		return existing
+	}
+	if title != "" && !isKnowledgeHomeTitle(title) {
+		return title
+	}
+	if slug = strings.TrimSpace(slug); slug != "" {
+		return slug
+	}
+	return id
+}
+
+func isKnowledgeHomeTitle(value string) bool {
+	return knowledgeHomeTitles[strings.TrimSpace(value)]
 }
 
 func deriveSkills(vaultPath string, projects, archives map[string]string) (map[string]SkillLocation, []string, error) {
@@ -303,7 +334,7 @@ func missingIndexFrontmatter(vaultPath string, manifest Manifest, reverseProject
 	frontmatter.ProjectID = projectID
 	if directory == path.Join("projects", projectSlug) {
 		frontmatter.Title = strings.TrimSpace(manifest.ProjectNames[projectID])
-		if frontmatter.Title == "" {
+		if frontmatter.Title == "" || isKnowledgeHomeTitle(frontmatter.Title) {
 			frontmatter.Title = humanizeSegment(projectSlug)
 		}
 	} else {

@@ -132,22 +132,31 @@ normal channel reply.
 
 - `GET /api/v1/agent/knowledge`
 - `GET /api/v1/agent/knowledge/{id}`
-- `POST /api/v1/agent/knowledge/candidates`
-- `POST /api/v1/agent/knowledge/{id}/feedback`
+- `GET /api/v1/agent/knowledge/guide`
+- `POST /api/v1/agent/knowledge/entries`
+- `POST /api/v1/agent/knowledge/feedback`
 - `GET /api/v1/agent/skills`
 - `POST /api/v1/agent/skills`
 - `GET /api/v1/agent/skills/{id}`
 - `PUT /api/v1/agent/skills/{id}`
 
-Knowledge changes are proposals. Use a revision only after the response reports it verified. Existing revisions require `base_revision`; Skill updates require the current `base_version` and replace the complete selected package.
-
-Knowledge candidates use:
+Knowledge writes use the single `entries` endpoint. Create sends `scope`, `type`, `title`, `summary`, `body`, and `search_query` or `duplicate_ack`:
 
 ```json
-{"candidates":[{"entry_id":"","base_revision":0,"scope":"project","parent_id":"","slug":"topic","sort_order":0,"is_index":false,"type":"practice","title":"...","body":"...","confidence":0.8,"product_line_id":""}]}
+{"mode":"create","scope":"project","type":"practice","title":"...","summary":"...","body":"...","search_query":"..."}
 ```
 
-Feedback uses `{"kind":"helped|stale|wrong"}`.
+Revise sends `entry_id` and the current `base_revision` from a fresh read:
+
+```json
+{"mode":"revise","entry_id":"knowledge_...","base_revision":2,"type":"practice","title":"...","summary":"...","body":"..."}
+```
+
+The response `source` names the store that served the write (`vault` or `legacy`); a legacy write is a proposal, so treat a revision as current only after it reports verified. Use the new endpoints even when `source` is `legacy`.
+
+Feedback uses `{"entry_id":"knowledge_...","kind":"helped|stale|wrong"}`. Take the entry ID from `GET /api/v1/agent/knowledge`; feedback follows the same read source as the list, so it never writes the legacy tables for vault knowledge.
+
+Skill updates require the current `base_version` and replace the complete selected package.
 
 Creating a Skill uses exactly these fields:
 

@@ -816,6 +816,33 @@ test("inbox and skills are read-only lists with no move or edit affordances", ()
   assert.doesNotMatch(skills, /data-kv-(edit|delete)/);
 });
 
+test("project skill cards prefer the authoritative project name", () => {
+  reset({tab: "skills", skillsState: "ready", skillRuntimeRead: true, skills: [
+    {
+      key: "vault-skill:project:p1:review", id: "s2", slug: "review", name: "Review", scope: "project",
+      project_id: "p1", library: "demo-slug", project_name: "AHA2", description: "审查技能",
+      file_count: 1, relative_path: "projects/aha2/skills/review",
+      absolute_path: "/srv/vault/projects/aha2/skills/review", open_path: "/srv/vault/projects/aha2/skills/review/SKILL.md",
+      source: "vault", auto_attach: false, auto_attach_effective: false,
+      auto_attach_confirmed: false, can_update: true, project_bound: true,
+    },
+    {
+      key: "vault-skill:global:build", id: "s1", slug: "build", name: "Build", scope: "global", library: "全局技能",
+      description: "构建技能", file_count: 3, relative_path: "skills/build",
+      absolute_path: "/srv/vault/skills/build", open_path: "/srv/vault/skills/build/SKILL.md",
+      source: "vault", auto_attach: false, auto_attach_effective: false,
+      auto_attach_confirmed: false, can_update: true, project_bound: true,
+    },
+  ]});
+  const html = vault.renderKnowledgeVaultPage(context());
+  // The API's project_name wins over the stale library slug and the picker
+  // map (state.projects still calls p1 "Demo" here).
+  assert.match(html, /项目 · AHA2/);
+  assert.doesNotMatch(html, /项目 · Demo/);
+  assert.doesNotMatch(html, /项目 · demo-slug/);
+  assert.match(html, /vault 技能[\s\S]*?全局<\/small>/);
+});
+
 test("vault API requests carry library, project, type, status and tag filters", async t => {
   const original = globalThis.fetch;
   const calls = [];

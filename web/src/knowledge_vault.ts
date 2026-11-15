@@ -1498,7 +1498,7 @@ function skillsBodyHTML(): string {
     <div class="kv-skill-grid">${state.skills.map(skill => {
       const scopeText = skill.scope === "global"
         ? kt("kv.scope.global")
-        : `${kt("kv.scope.project")} · ${vaultProjectName(skill.project_id)}`;
+        : `${kt("kv.scope.project")} · ${skill.project_name || vaultProjectName(skill.project_id)}`;
       const busy = state.skillBusy === skill.key;
       const disabled = !skill.can_update || busy;
       return `<article class="kv-skill-card" data-kv-skill-card="${escapeVaultHTML(skill.key)}">

@@ -66,3 +66,52 @@ test("a project skill wins over a global skill with the same slug", () => {
   assert.equal(offered[0].id, "vault-skill:project:p1:demo");
   assert.equal(offered[0].scope, "project");
 });
+
+function taskSkill(id, overrides = {}) {
+  return {
+    id,
+    package_slug: id,
+    scope: "global",
+    project_id: "",
+    name: id,
+    description: "",
+    instructions: "",
+    version: 1,
+    status: "active",
+    enabled: true,
+    auto_attach: true,
+    created_at: "",
+    updated_at: "",
+    ...overrides,
+  };
+}
+
+test("the vault becomes the auto-attach source only when its read gate is effective", () => {
+  assert.equal(taskVault.vaultTaskSkillSourceActive(true, true, true, ["p1"], "p1"), true);
+  assert.equal(taskVault.vaultTaskSkillSourceActive(false, true, true, ["p1"], "p1"), false);
+  assert.equal(taskVault.vaultTaskSkillSourceActive(true, false, true, ["p1"], "p1"), false);
+  assert.equal(taskVault.vaultTaskSkillSourceActive(true, true, false, ["p1"], "p1"), false);
+  assert.equal(taskVault.vaultTaskSkillSourceActive(true, true, true, [], "p1"), false);
+  assert.equal(taskVault.vaultTaskSkillSourceActive(true, true, true, ["p1"], ""), false);
+});
+
+test("auto-attach pre-selects one source and never merges legacy with vault", () => {
+  const skills = [
+    taskSkill("skill-legacy-global"),
+    taskSkill("skill-legacy-project", {scope: "project", project_id: "p1"}),
+    taskSkill("skill-legacy-manual", {auto_attach: false}),
+    taskSkill("skill-legacy-other", {scope: "project", project_id: "p2"}),
+    taskSkill("vault-skill:global:demo", {source: "vault", package_slug: "demo"}),
+    taskSkill("vault-skill:project:p1:review", {source: "vault", scope: "project", project_id: "p1"}),
+  ];
+  assert.deepEqual(
+    taskVault.taskAutoSkillIDs(skills, true, "p1"),
+    ["vault-skill:global:demo", "vault-skill:project:p1:review"],
+  );
+  assert.deepEqual(
+    taskVault.taskAutoSkillIDs(skills, false, "p1"),
+    ["skill-legacy-global", "skill-legacy-project"],
+  );
+  assert.match(taskVault.vaultTaskAutoSourceHint(true), /vault/);
+  assert.equal(taskVault.vaultTaskAutoSourceHint(false), "");
+});

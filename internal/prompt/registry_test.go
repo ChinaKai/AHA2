@@ -63,6 +63,22 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 			t.Fatalf("agent API resource is missing live inbox intent rule %q", marker)
 		}
 	}
+	for _, retired := range []string{
+		"/api/v1/agent/knowledge/candidates", "/api/v1/agent/knowledge/{id}/feedback",
+		"/api/v1/agent/knowledge/{knowledge}/feedback",
+	} {
+		if strings.Contains(templateBodies["resource.agent-api"], retired) {
+			t.Fatalf("agent API resource still teaches the retired endpoint %q", retired)
+		}
+	}
+	for _, current := range []string{
+		"POST /api/v1/agent/knowledge/entries", "POST /api/v1/agent/knowledge/feedback",
+		"GET /api/v1/agent/knowledge/guide",
+	} {
+		if !strings.Contains(templateBodies["resource.agent-api"], current) {
+			t.Fatalf("agent API resource is missing the current endpoint %q", current)
+		}
+	}
 	if err := engine.UpdateTemplate(ctx, "role.main", "CUSTOM MAIN {{.AgentID}}", templates[0].UpdatedAt); err != nil {
 		t.Fatal(err)
 	}

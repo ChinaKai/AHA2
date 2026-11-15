@@ -96,3 +96,33 @@ export function vaultTaskSkillHint(
   if (!boundProjects.includes(projectID)) return "当前项目未绑定知识库项目库，vault 技能不会出现在这里；旧技能不受影响。";
   return "";
 }
+
+// vaultTaskSkillSourceActive mirrors the server gate: a project takes its
+// auto-attach source from the vault only when the vault is enabled, runtime
+// reads are on, the index is ready and the project is bound.
+export function vaultTaskSkillSourceActive(
+  available: boolean,
+  runtimeRead: boolean,
+  indexReady: boolean,
+  boundProjects: string[],
+  projectID: string,
+): boolean {
+  return Boolean(projectID) && available && runtimeRead && indexReady && boundProjects.includes(projectID);
+}
+
+// taskAutoSkillIDs pre-selects exactly one auto-attach source. When the vault
+// is effective for the project the legacy AutoAttach rows are not offered,
+// otherwise the same package would be mounted twice (legacy id plus
+// vault-skill id). Projects without an effective vault keep the legacy rule.
+export function taskAutoSkillIDs(skills: Skill[], vaultSourceActive: boolean, projectID: string): string[] {
+  return skills
+    .filter(skill => (skill.source === "vault") === vaultSourceActive)
+    .filter(skill => Boolean(skill.auto_attach) &&
+      (skill.scope === "global" || (skill.scope === "project" && skill.project_id === projectID)))
+    .map(skill => skill.id);
+}
+
+export function vaultTaskAutoSourceHint(vaultSourceActive: boolean): string {
+  if (!vaultSourceActive) return "";
+  return "当前项目使用知识库（vault）技能源：自动启用只来自 vault，旧技能库的自动启用不再挂载。";
+}
