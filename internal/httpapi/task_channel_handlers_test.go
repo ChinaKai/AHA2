@@ -29,7 +29,7 @@ func TestTaskChannelRouteAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer database.Close()
-	executor := &blockingAgentAPIExecutor{started: make(chan app.ExecutionRequest, 1), release: make(chan struct{})}
+	executor := &blockingAgentAPIExecutor{started: make(chan app.ExecutionRequest, 1), release: make(chan struct{}), done: make(chan struct{})}
 	appService := app.NewService(database, nil, executor)
 	channelService := channel.New(channel.Config{Store: database, App: appService, DataDir: dataDir})
 	capabilities := agentapi.NewCapabilities()
