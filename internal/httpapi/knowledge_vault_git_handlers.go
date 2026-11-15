@@ -98,24 +98,28 @@ func (s *Server) commitKnowledgeVaultGit(writer http.ResponseWriter, request *ht
 }
 
 func (s *Server) pullKnowledgeVaultGit(writer http.ResponseWriter, request *http.Request) {
-	s.runKnowledgeVaultGitOperation(writer, request, "knowledge_vault.git_pull", func(git *knowledgevault.Git) (knowledgevault.GitOpResult, error) {
+	s.runKnowledgeVaultGitOperation(writer, request, "knowledge_vault.git_pull", true, func(git *knowledgevault.Git) (knowledgevault.GitOpResult, error) {
 		return git.Pull(request.Context())
 	})
 }
 
 func (s *Server) pushKnowledgeVaultGit(writer http.ResponseWriter, request *http.Request) {
-	s.runKnowledgeVaultGitOperation(writer, request, "knowledge_vault.git_push", func(git *knowledgevault.Git) (knowledgevault.GitOpResult, error) {
+	s.runKnowledgeVaultGitOperation(writer, request, "knowledge_vault.git_push", false, func(git *knowledgevault.Git) (knowledgevault.GitOpResult, error) {
 		return git.Push(request.Context())
 	})
 }
 
 func (s *Server) syncKnowledgeVaultGit(writer http.ResponseWriter, request *http.Request) {
-	s.runKnowledgeVaultGitOperation(writer, request, "knowledge_vault.git_sync", func(git *knowledgevault.Git) (knowledgevault.GitOpResult, error) {
+	s.runKnowledgeVaultGitOperation(writer, request, "knowledge_vault.git_sync", true, func(git *knowledgevault.Git) (knowledgevault.GitOpResult, error) {
 		return git.Sync(request.Context())
 	})
 }
 
-func (s *Server) runKnowledgeVaultGitOperation(writer http.ResponseWriter, request *http.Request, action string, run func(*knowledgevault.Git) (knowledgevault.GitOpResult, error)) {
+// runKnowledgeVaultGitOperation always reports the Git outcome, but a pull or
+// sync is not ready until the index has been rebuilt from the new files. A
+// rebuild failure is returned as an error with the Git status attached instead
+// of a misleading success.
+func (s *Server) runKnowledgeVaultGitOperation(writer http.ResponseWriter, request *http.Request, action string, rebuild bool, run func(*knowledgevault.Git) (knowledgevault.GitOpResult, error)) {
 	if s.knowledgeVault == nil {
 		writeKnowledgeVaultDisabled(writer)
 		return
@@ -125,12 +129,33 @@ func (s *Server) runKnowledgeVaultGitOperation(writer http.ResponseWriter, reque
 		s.writeKnowledgeVaultGitError(writer, err)
 		return
 	}
+	extra := map[string]any{"git": result.Status, "message": result.Message}
+	if rebuild {
+		report, rebuildErr := s.knowledgeVault.Rebuild(request.Context())
+		if rebuildErr != nil {
+			// The Git operation succeeded but the projection did not: report the
+			// failure and let the settings panel show needs_rebuild/error.
+			s.audit(request, action, "knowledge_vault_git", "vault", map[string]any{
+				"branch": result.Status.Branch, "index_rebuilt": false,
+			})
+			writeJSON(writer, http.StatusInternalServerError, map[string]any{
+				"ok": false, "error": "knowledge_vault_rebuild_failed",
+				"message": "Git 操作完成，但索引重建失败：" + rebuildErr.Error(),
+				"git":     result.Status, "ready": false,
+			})
+			return
+		}
+		extra["rebuild"] = report
+	}
 	s.audit(request, action, "knowledge_vault_git", "vault", map[string]any{
 		"branch": result.Status.Branch, "ahead": result.Status.Ahead, "behind": result.Status.Behind,
+		"index_rebuilt": rebuild,
 	})
-	writeJSON(writer, http.StatusOK, map[string]any{
-		"ok": true, "git": result.Status, "message": result.Message,
-	})
+	if view, _, viewErr := s.knowledgeVaultView(request.Context()); viewErr == nil {
+		extra["settings"] = view
+	}
+	extra["ok"] = true
+	writeJSON(writer, http.StatusOK, extra)
 }
 
 func (s *Server) writeKnowledgeVaultGitError(writer http.ResponseWriter, err error) {

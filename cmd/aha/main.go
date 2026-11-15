@@ -124,22 +124,26 @@ func parseCommand(args []string) (string, []string, error) {
 }
 
 type serveOptions struct {
-	listen                     string
-	dataDir                    string
-	setupToken                 string
-	setupTokenFile             string
-	secureCookie               bool
-	allowCrossOrigin           bool
-	agentAPIURL                string
-	mailTaskBaseURL            string
-	mailDownloadBaseURL        string
-	mailDownloadListen         string
-	logLevel                   string
-	codexBinary                string
-	claudeBinary               string
-	dshBinary                  string
-	localOwnerIngest           bool
-	knowledgeVaultEnabled      bool
+	listen                string
+	dataDir               string
+	setupToken            string
+	setupTokenFile        string
+	secureCookie          bool
+	allowCrossOrigin      bool
+	agentAPIURL           string
+	mailTaskBaseURL       string
+	mailDownloadBaseURL   string
+	mailDownloadListen    string
+	logLevel              string
+	codexBinary           string
+	claudeBinary          string
+	dshBinary             string
+	localOwnerIngest      bool
+	knowledgeVaultEnabled bool
+	// knowledgeVaultEnabledSet records an explicit support-only override of the
+	// startup default. Normal installs leave it false and let the backend choose
+	// fresh-install (vault on) vs upgrade (legacy until verified).
+	knowledgeVaultEnabledSet   bool
 	knowledgeVaultRuntimeRead  bool
 	knowledgeVaultRuntimeWrite bool
 	knowledgeVaultPath         string
@@ -184,9 +188,9 @@ func parseServeOptions(name string, args []string) (serveOptions, error) {
 	claudeBinary := flags.String("claude-bin", envOr("AHA2_CLAUDE_BIN", "claude"), "Claude Code executable")
 	dshBinary := flags.String("dsh-bin", envOr("AHA2_DSH_BIN", "dsh"), "DeepSeek Harness executable")
 	localOwnerIngest := flags.Bool("local-owner-ingest", envBool("AHA2_LOCAL_OWNER_INGEST"), "enable the loopback-only local owner message ingest endpoint")
-	knowledgeVaultEnabled := flags.Bool("knowledge-vault-enabled", envBool("AHA2_KNOWLEDGE_VAULT_ENABLED"), "startup default for the file-backed knowledge vault (the Web settings toggle takes precedence once used)")
-	knowledgeVaultRuntimeRead := flags.Bool("knowledge-vault-runtime-read", envBoolOr("AHA2_KNOWLEDGE_VAULT_RUNTIME_READ", true), "switch projects' Agent knowledge and skills to the vault (unset AHA2_KNOWLEDGE_VAULT_READ_PROJECTS means all projects; independent from the Web vault switch)")
-	knowledgeVaultRuntimeWrite := flags.Bool("knowledge-vault-runtime-write", envBoolOr("AHA2_KNOWLEDGE_VAULT_RUNTIME_WRITE", true), "write vault-reading projects' Agent knowledge to the vault (requires runtime read and the Web vault switch; independent from runtime read)")
+	knowledgeVaultEnabled := flags.Bool("knowledge-vault-enabled", envBool("AHA2_KNOWLEDGE_VAULT_ENABLED"), "support-only startup override for the file-backed knowledge vault switch (normally leave unset so fresh installs default on and upgrades wait for verified migration)")
+	knowledgeVaultRuntimeRead := flags.Bool("knowledge-vault-runtime-read", envBoolOr("AHA2_KNOWLEDGE_VAULT_RUNTIME_READ", true), "support-only emergency read cutoff (not shown in the Web UI; unset AHA2_KNOWLEDGE_VAULT_READ_PROJECTS means all projects)")
+	knowledgeVaultRuntimeWrite := flags.Bool("knowledge-vault-runtime-write", envBoolOr("AHA2_KNOWLEDGE_VAULT_RUNTIME_WRITE", true), "support-only emergency Agent write cutoff (the owner-visible switch still decides the source)")
 	knowledgeVaultPath := flags.String("knowledge-vault-path", os.Getenv("AHA2_KNOWLEDGE_VAULT_PATH"), "knowledge vault directory (default <data-dir>/knowledge-vault)")
 	knowledgeVaultIndex := flags.String("knowledge-vault-index", os.Getenv("AHA2_KNOWLEDGE_VAULT_INDEX"), "knowledge index database (default <data-dir>/knowledge-vault-index.db)")
 	// Live inbox delivery is always enabled when the runner can stream stdin.
@@ -202,6 +206,15 @@ func parseServeOptions(name string, args []string) (serveOptions, error) {
 	}
 	deprecatedLiveInput := deprecatedLiveInputSettings(flags)
 	deprecatedAgentAPIInsecure := deprecatedAgentAPIInsecureSettings(flags)
+	knowledgeVaultEnabledSet := false
+	flags.Visit(func(item *flag.Flag) {
+		if item.Name == "knowledge-vault-enabled" {
+			knowledgeVaultEnabledSet = true
+		}
+	})
+	if _, present := os.LookupEnv("AHA2_KNOWLEDGE_VAULT_ENABLED"); present {
+		knowledgeVaultEnabledSet = true
+	}
 	return serveOptions{
 		listen: *listen, dataDir: *dataDir, setupToken: *setupToken, setupTokenFile: *setupTokenFile,
 		secureCookie: *secureCookie, allowCrossOrigin: *allowCrossOrigin, agentAPIURL: *agentAPIURL,
@@ -211,6 +224,7 @@ func parseServeOptions(name string, args []string) (serveOptions, error) {
 		claudeBinary: *claudeBinary, dshBinary: *dshBinary,
 		localOwnerIngest:           *localOwnerIngest,
 		knowledgeVaultEnabled:      *knowledgeVaultEnabled,
+		knowledgeVaultEnabledSet:   knowledgeVaultEnabledSet,
 		knowledgeVaultRuntimeRead:  *knowledgeVaultRuntimeRead,
 		knowledgeVaultRuntimeWrite: *knowledgeVaultRuntimeWrite,
 		knowledgeVaultPath:         *knowledgeVaultPath,
@@ -309,16 +323,25 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 		return err
 	}
 	defer database.Close()
-	// Phase 3 startup precedence: a Web toggle persisted with configured=1 is
-	// authoritative; otherwise the env/flag value decides and is NOT written
-	// back, so an operator can still change the default until the owner uses
-	// the settings panel.
+	// Single-switch startup precedence: a Web toggle persisted with configured=1
+	// is authoritative. Otherwise the backend decides fresh install vs upgrade:
+	// a fresh install defaults to the vault, while an upgrade with legacy
+	// knowledge stays on legacy until a migration/import is verified. The old
+	// env/flag is a support-only override and is NOT persisted.
 	vaultSettings, err := database.KnowledgeVaultSettings(ctx)
 	if err != nil {
 		return fmt.Errorf("read knowledge vault settings: %w", err)
 	}
+	legacyInventory, err := database.LegacyKnowledgeInventory(ctx)
+	if err != nil {
+		return fmt.Errorf("read legacy knowledge inventory: %w", err)
+	}
+	startupDefault := knowledgevault.DefaultVaultEnabled(legacyInventory.HasLegacy(), vaultSettings.VaultPopulated())
+	if options.knowledgeVaultEnabledSet {
+		startupDefault = options.knowledgeVaultEnabled
+	}
 	vaultEnabled, vaultSource := knowledgevault.EffectiveStartupSwitch(
-		vaultSettings.Configured, vaultSettings.Enabled, options.knowledgeVaultEnabled,
+		vaultSettings.Configured, vaultSettings.Enabled, startupDefault,
 	)
 	knowledgeVaultManager.SetSource(vaultSource)
 	knowledgeVaultManager.SetRuntimeWrite(options.knowledgeVaultRuntimeWrite)
@@ -328,17 +351,20 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 		logger.Warn("knowledge vault could not be opened; starting with it disabled",
 			"vault", knowledgeVaultConfig.VaultPath, "index", knowledgeVaultConfig.IndexPath, "error", err)
 	}
-	// Phase 3: vault is the default for every project. The read scope below is
-	// the rollback view ("all" when the env is unset, "none" for an explicit
-	// empty value, otherwise the comma list); the Web switch is still a
-	// separate prerequisite and does not imply the runtime gates are on.
-	logger.Info("knowledge vault runtime switch",
+	logger.Info("knowledge vault switch",
 		"enabled", knowledgeVaultManager.Enabled(), "source", vaultSource,
-		"runtime_read", options.knowledgeVaultRuntimeRead,
-		"runtime_write", options.knowledgeVaultRuntimeWrite,
-		"read_projects", app.KnowledgeVaultReadScope(),
-		"defaults", "vault for all projects; set AHA2_KNOWLEDGE_VAULT_READ_PROJECTS to a comma list or empty to roll back",
+		"legacy_entries", legacyInventory.Entries, "legacy_skills", legacyInventory.Skills+legacyInventory.SkillPackages,
+		"migration_verified", !vaultSettings.MigrationVerifiedAt.IsZero(),
+		"import_verified", !vaultSettings.ImportVerifiedAt.IsZero(),
 		"vault", knowledgeVaultConfig.VaultPath, "index", knowledgeVaultConfig.IndexPath)
+	if !options.knowledgeVaultRuntimeRead || !options.knowledgeVaultRuntimeWrite || app.KnowledgeVaultReadScope() != "all" {
+		// Support-only overrides: logged for diagnostics, never rendered as owner
+		// switches. They can only narrow the manager switch, never replace it.
+		logger.Warn("knowledge vault support overrides active",
+			"runtime_read", options.knowledgeVaultRuntimeRead,
+			"runtime_write", options.knowledgeVaultRuntimeWrite,
+			"read_projects", app.KnowledgeVaultReadScope())
+	}
 	// The periodic sync worker gets its own pool over the same WAL file. Long
 	// export/pull phases no longer occupy the Web API connection; writes still
 	// serialize through SQLite with busy_timeout and an immediate transaction

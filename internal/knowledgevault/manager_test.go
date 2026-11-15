@@ -157,10 +157,11 @@ func TestManagerRebuildPicksUpEditedFiles(t *testing.T) {
 	if !strings.Contains(doc.Body, "文件是唯一正本") {
 		t.Fatalf("rebuilt body = %q", doc.Body)
 	}
-	// Rebuild before the vault exists is refused; rebuild while off is refused.
+	// Rebuild requires an initialized vault, not an enabled switch: it must work
+	// while off so migration/import/Git pull can refresh the projection first.
 	emptyManager, _ := newTestManager(t)
-	if _, err := emptyManager.Rebuild(ctx); !errors.Is(err, ErrDisabled) {
-		t.Fatalf("rebuild while disabled = %v, want ErrDisabled", err)
+	if _, err := emptyManager.Rebuild(ctx); !errors.Is(err, ErrVaultNotInitialized) {
+		t.Fatalf("rebuild without a vault = %v, want ErrVaultNotInitialized", err)
 	}
 	if err := emptyManager.SetEnabled(ctx, true); err != nil {
 		t.Fatal(err)

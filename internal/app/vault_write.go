@@ -34,8 +34,11 @@ type AgentKnowledgeEntryInput struct {
 
 // AgentKnowledgeEntryResult reports which source served the write. Vault writes
 // always carry Entry; the legacy fallback returns the proposal pipeline output.
+// Warning is set when the owner-visible vault switch is on but this Turn had to
+// fall back to legacy (unbound project, index unavailable, support override).
 type AgentKnowledgeEntryResult struct {
 	Source    string                      `json:"source"`
+	Warning   string                      `json:"warning,omitempty"`
 	Entry     *knowledgevault.WriteResult `json:"entry,omitempty"`
 	Knowledge []domain.KnowledgeEntry     `json:"knowledge,omitempty"`
 	Proposals []domain.KnowledgeProposal  `json:"proposals,omitempty"`
@@ -51,14 +54,15 @@ type AgentKnowledgeFeedbackInput struct {
 
 type AgentKnowledgeFeedbackResult struct {
 	Source    string                         `json:"source"`
+	Warning   string                         `json:"warning,omitempty"`
 	Feedback  *knowledgevault.FeedbackResult `json:"feedback,omitempty"`
 	Knowledge *domain.KnowledgeEntry         `json:"knowledge,omitempty"`
 }
 
-// SetKnowledgeVaultRuntimeWrite installs the independent Agent write gate. It
-// never enables reads; the read gate (Web switch, runtime read, allowlist,
-// index readiness, manifest binding) still decides which source a Turn sees and
-// therefore which source it writes.
+// SetKnowledgeVaultRuntimeWrite applies the support-only emergency Agent write
+// cutoff. It never enables or disables the vault itself: the owner-visible
+// manager switch decides whether reads, writes, skills and Web pages use the
+// vault, and writes simply follow the source that reads use.
 func (s *Service) SetKnowledgeVaultRuntimeWrite(enabled bool) {
 	s.knowledgeVaultRuntimeWrite = enabled
 	if s.knowledgeVault != nil {
@@ -69,15 +73,48 @@ func (s *Service) SetKnowledgeVaultRuntimeWrite(enabled bool) {
 }
 
 // vaultKnowledgeWriteEnabled follows the read source: a project reads from the
-// vault only when the read gate matches (Web switch, runtime read, allowlist,
-// index ready, manifest bound), and it may write the vault only when the
-// independent write gate is also on. There is no path where a Turn reads the
-// vault and writes the legacy tables.
+// vault only when the manager switch matches, the support overrides allow it,
+// the index is ready and the manifest binds the project; it may write the vault
+// only when the support-only write cutoff is also on. There is no path where a
+// Turn reads the vault and writes the legacy tables.
 func (s *Service) vaultKnowledgeWriteEnabled(projectID string) bool {
 	if !s.vaultReadEnabled(projectID) {
 		return false
 	}
 	return s.knowledgeVaultRuntimeWrite && s.knowledgeVault.RuntimeWriteEnabled()
+}
+
+// vaultFallbackWarning explains a legacy fallback when the owner-visible switch
+// is on. It only looks at the in-memory Reader (never probes the filesystem) so
+// it is cheap enough for a write response; without it an Agent would silently
+// see legacy knowledge and never learn that the vault is degraded.
+func (s *Service) vaultFallbackWarning(projectID string) string {
+	if s == nil || s.knowledgeVault == nil || !s.knowledgeVault.Enabled() {
+		return ""
+	}
+	if !s.knowledgeVaultRuntimeRead {
+		return "知识库已启用，但支持诊断开关关闭了读取；本次使用旧知识库。"
+	}
+	if !knowledgeVaultReadAllowed(projectID) {
+		return "知识库已启用，但支持诊断的项目回退名单排除了当前项目；本次使用旧知识库。"
+	}
+	reason := ""
+	err := s.knowledgeVault.WithReader(func(reader *knowledgevault.Reader) error {
+		switch {
+		case !reader.IndexReady():
+			reason = "索引未就绪"
+		case strings.TrimSpace(reader.Manifest().Projects[projectID]) == "":
+			reason = "项目未绑定到知识库"
+		}
+		return nil
+	})
+	if err != nil {
+		reason = err.Error()
+	}
+	if reason == "" {
+		return ""
+	}
+	return "知识库已启用，但" + reason + "；本次使用旧知识库。"
 }
 
 func (s *Service) vaultWriteDisabledError() error {
@@ -250,7 +287,7 @@ func (s *Service) SubmitAgentKnowledgeEntry(ctx context.Context, claims agentapi
 		return AgentKnowledgeEntryResult{}, err
 	}
 	s.consumeLegacyKnowledgeBudget(call.Task.ID, call.Turn.ID)
-	return AgentKnowledgeEntryResult{Source: "legacy", Knowledge: items, Proposals: proposals}, nil
+	return AgentKnowledgeEntryResult{Source: "legacy", Warning: s.vaultFallbackWarning(call.Project.ID), Knowledge: items, Proposals: proposals}, nil
 }
 
 // SubmitAgentKnowledgeFeedbackEntry routes stale/wrong/helped to the same
@@ -306,7 +343,7 @@ func (s *Service) SubmitAgentKnowledgeFeedbackEntry(ctx context.Context, claims 
 	if err != nil {
 		return AgentKnowledgeFeedbackResult{}, err
 	}
-	return AgentKnowledgeFeedbackResult{Source: "legacy", Knowledge: &item}, nil
+	return AgentKnowledgeFeedbackResult{Source: "legacy", Warning: s.vaultFallbackWarning(call.Project.ID), Knowledge: &item}, nil
 }
 
 func (s *Service) agentKnowledgeRouteAllowed(ctx context.Context, call AgentCallContext) error {

@@ -177,14 +177,13 @@ title、summary、body、tags、禁止内容以及 `search_query`/`duplicate_ack
 409 与 `duplicate_candidates`。revise 需要 `entry_id` + `base_revision`，冲突返回 409。
 响应中的 `source` 说明本次写入落在 `vault` 还是 `legacy`。
 
-从本次全量切换起 Agent 读写默认对所有项目使用 vault：`--knowledge-vault-runtime-read` /
-`--knowledge-vault-runtime-write`（及对应 env）默认 true，显式设为 false 仍可关闭；
-`AHA2_KNOWLEDGE_VAULT_READ_PROJECTS` 未设置表示全量，显式逗号列表只切换列表内项目，
-显式空字符串表示全部回退旧表。**Web 的“文件知识库”开关只控制文件页面和 API，不等于
-runtime 已切换**；实际读写还要求该开关开启、索引 ready、manifest 已绑定项目，索引未
-ready 或项目未绑定时继续使用旧表。写入来源跟随实际读取来源：项目读 vault 但 runtime
-write 关闭时返回 409 `knowledge_vault_write_disabled`，**不会**静默回退旧表；项目本身
-读旧表时该接口继续复用 proposal 流程，旧表和旧 skills 保留。
+Agent 读写跟随 owner 可见的单一「文件知识库」总开关：开启且就绪时读写 vault，
+关闭、索引未 ready、项目未绑定或读取失败时立即使用旧表，不阻塞 Turn。回退时响应中的
+`warning` 说明原因，`source` 仍为 `legacy`。`--knowledge-vault-runtime-read` /
+`--knowledge-vault-runtime-write` 及 `AHA2_KNOWLEDGE_VAULT_READ_PROJECTS` 只保留为支持
+人员的紧急诊断覆盖，不在普通 UI 展示，也不会打开总开关。写入来源跟随实际读取来源：
+项目读 vault 但 runtime write 被显式关闭时返回 409 `knowledge_vault_write_disabled`，
+**不会**静默回退旧表；项目本身读旧表时该接口继续复用 proposal 流程，旧表和旧 skills 保留。
 
 `POST /api/v1/agent/knowledge/feedback` 接受 `entry_id` 和 `kind=helped|stale|wrong`。
 stale/wrong 只更新状态并进入待修订队列，不修改正文；helped 只记录正向反馈。该接口与

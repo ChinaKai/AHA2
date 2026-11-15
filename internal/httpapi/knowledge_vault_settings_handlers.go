@@ -3,25 +3,103 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/knowledgevault"
 )
 
-// Phase 3 settings endpoints. They only control the file-backed vault: the
-// legacy knowledge tables are never read or written here.
+// Single-switch settings endpoints. The manager switch is the only control the
+// owner sees; the payload additionally carries backend-computed readiness,
+// legacy inventory and verified migration/import metadata so the Web UI never
+// has to guess why the switch is hidden or disabled.
+//
+// The legacy knowledge tables are never read or written by these handlers,
+// except by the migration endpoint that exports from them.
+
+type knowledgeVaultSettingsView struct {
+	knowledgevault.Status
+	Readiness           knowledgevault.Readiness        `json:"readiness"`
+	Legacy              domain.LegacyKnowledgeInventory `json:"legacy"`
+	Configured          bool                            `json:"configured"`
+	ImportSource        string                          `json:"import_source,omitempty"`
+	MigrationVerifiedAt time.Time                       `json:"migration_verified_at,omitempty"`
+	ImportVerifiedAt    time.Time                       `json:"import_verified_at,omitempty"`
+	LastBackupPath      string                          `json:"last_backup_path,omitempty"`
+	SettingsUpdatedAt   time.Time                       `json:"settings_updated_at,omitempty"`
+}
+
+func (s *Server) knowledgeVaultView(ctx context.Context) (knowledgeVaultSettingsView, knowledgevault.Readiness, error) {
+	status := s.knowledgeVault.Status(ctx)
+	settings, err := s.store.KnowledgeVaultSettings(ctx)
+	if err != nil {
+		return knowledgeVaultSettingsView{}, knowledgevault.Readiness{}, err
+	}
+	inventory, err := s.store.LegacyKnowledgeInventory(ctx)
+	if err != nil {
+		return knowledgeVaultSettingsView{}, knowledgevault.Readiness{}, err
+	}
+	projects, err := s.store.ListProjects(ctx)
+	if err != nil {
+		return knowledgeVaultSettingsView{}, knowledgevault.Readiness{}, err
+	}
+	known := make([]string, 0, len(projects))
+	for _, project := range projects {
+		known = append(known, project.ID)
+	}
+	readiness := knowledgevault.EvaluateReadiness(knowledgevault.ReadinessInput{
+		VaultInitialized:  status.VaultInitialized,
+		VaultWritable:     status.VaultWritable,
+		IndexReady:        status.IndexReady,
+		IndexWritable:     status.IndexWritable,
+		IndexStale:        status.IndexStale,
+		IndexError:        status.IndexError,
+		EntryCount:        status.EntryCount,
+		IndexWarnings:     status.IndexWarnings,
+		ProjectBindings:   status.ProjectBindings,
+		KnownProjects:     known,
+		LegacyEntries:     inventory.Entries,
+		LegacySkills:      inventory.Skills,
+		LegacySkillDirs:   inventory.SkillPackages,
+		MigrationVerified: !settings.MigrationVerifiedAt.IsZero(),
+		ImportVerified:    !settings.ImportVerifiedAt.IsZero(),
+	})
+	view := knowledgeVaultSettingsView{
+		Status: status, Readiness: readiness, Legacy: inventory,
+		Configured: settings.Configured, ImportSource: settings.ImportSource,
+		MigrationVerifiedAt: settings.MigrationVerifiedAt,
+		ImportVerifiedAt:    settings.ImportVerifiedAt,
+		LastBackupPath:      settings.LastBackupPath,
+		SettingsUpdatedAt:   settings.UpdatedAt,
+	}
+	return view, readiness, nil
+}
+
+func (s *Server) writeKnowledgeVaultView(writer http.ResponseWriter, request *http.Request, extra map[string]any) {
+	view, _, err := s.knowledgeVaultView(request.Context())
+	if err != nil {
+		writeJSON(writer, http.StatusInternalServerError, map[string]any{
+			"ok": false, "error": "knowledge_vault_status_failed", "message": err.Error(),
+		})
+		return
+	}
+	payload := map[string]any{"ok": true, "settings": view}
+	for key, value := range extra {
+		payload[key] = value
+	}
+	writeJSON(writer, http.StatusOK, payload)
+}
 
 func (s *Server) knowledgeVaultSettings(writer http.ResponseWriter, request *http.Request) {
 	if s.knowledgeVault == nil {
 		writeKnowledgeVaultDisabled(writer)
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{
-		"ok": true, "settings": s.knowledgeVault.Status(request.Context()),
-	})
+	s.writeKnowledgeVaultView(writer, request, nil)
 }
 
 func (s *Server) updateKnowledgeVaultSettings(writer http.ResponseWriter, request *http.Request) {
@@ -40,30 +118,66 @@ func (s *Server) updateKnowledgeVaultSettings(writer http.ResponseWriter, reques
 		writeErrorDetail(writer, http.StatusBadRequest, "invalid_enabled", "enabled is required")
 		return
 	}
+	enabled := *payload.Enabled
+	if enabled {
+		view, readiness, err := s.knowledgeVaultView(request.Context())
+		if err != nil {
+			writeJSON(writer, http.StatusInternalServerError, map[string]any{
+				"ok": false, "error": "knowledge_vault_status_failed", "message": err.Error(),
+			})
+			return
+		}
+		if !readiness.CanEnable {
+			// blocked (needs_migration / needs_rebuild / error) must not be
+			// enabled. Degraded is allowed and carries its warning.
+			writeJSON(writer, http.StatusConflict, map[string]any{
+				"ok": false, "error": "knowledge_vault_not_ready",
+				"message": readiness.Message, "missing": readiness.Missing,
+				"settings": view,
+			})
+			return
+		}
+	}
 	previousEnabled, previousSource := s.knowledgeVault.Enabled(), s.knowledgeVault.Source()
-	if err := s.knowledgeVault.SetEnabled(request.Context(), *payload.Enabled); err != nil {
+	if err := s.knowledgeVault.SetEnabled(request.Context(), enabled); err != nil {
 		writeJSON(writer, http.StatusInternalServerError, map[string]any{
 			"ok": false, "error": "knowledge_vault_toggle_failed", "message": err.Error(),
 		})
 		return
 	}
-	if _, err := s.store.UpdateKnowledgeVaultSettings(request.Context(), domain.KnowledgeVaultSettings{
-		Enabled: *payload.Enabled, Configured: true, UpdatedAt: time.Now().UTC(),
-	}); err != nil {
+	if err := s.store.SetKnowledgeVaultSwitch(request.Context(), enabled); err != nil {
 		s.rollbackKnowledgeVaultSwitch(previousEnabled, previousSource)
 		writeError(writer, http.StatusInternalServerError, "knowledge_vault_settings_failed")
 		return
 	}
 	s.knowledgeVault.SetSource(knowledgevault.SourceDatabase)
-	s.audit(request, "knowledge_vault.toggle", "knowledge_vault_settings", "1", map[string]any{"enabled": *payload.Enabled})
-	writeJSON(writer, http.StatusOK, map[string]any{
-		"ok": true, "settings": s.knowledgeVault.Status(request.Context()),
-	})
+	s.audit(request, "knowledge_vault.toggle", "knowledge_vault_settings", "1", map[string]any{"enabled": enabled})
+	s.writeKnowledgeVaultView(writer, request, nil)
 }
 
 func (s *Server) initializeKnowledgeVault(writer http.ResponseWriter, request *http.Request) {
 	if s.knowledgeVault == nil {
 		writeKnowledgeVaultDisabled(writer)
+		return
+	}
+	// Init creates an empty vault with optional samples. On an upgrade that
+	// still has legacy knowledge it would hide that knowledge behind a new
+	// switch, so the owner must migrate or import instead.
+	settings, settingsErr := s.store.KnowledgeVaultSettings(request.Context())
+	if settingsErr != nil {
+		writeError(writer, http.StatusInternalServerError, "knowledge_vault_settings_failed")
+		return
+	}
+	inventory, inventoryErr := s.store.LegacyKnowledgeInventory(request.Context())
+	if inventoryErr != nil {
+		writeError(writer, http.StatusInternalServerError, "knowledge_vault_settings_failed")
+		return
+	}
+	if inventory.HasLegacy() && !settings.VaultPopulated() {
+		writeJSON(writer, http.StatusConflict, map[string]any{
+			"ok": false, "error": "knowledge_vault_migration_required",
+			"message": "检测到旧知识库；请先迁移旧知识或导入已有知识库，不能直接创建空知识库。",
+		})
 		return
 	}
 	// The body is optional; a missing one means "seed the samples".
@@ -91,9 +205,7 @@ func (s *Server) initializeKnowledgeVault(writer http.ResponseWriter, request *h
 		return
 	}
 	// Initialization implies "on": the owner asked for a usable vault.
-	if _, err := s.store.UpdateKnowledgeVaultSettings(request.Context(), domain.KnowledgeVaultSettings{
-		Enabled: true, Configured: true, UpdatedAt: time.Now().UTC(),
-	}); err != nil {
+	if err := s.store.SetKnowledgeVaultSwitch(request.Context(), true); err != nil {
 		s.rollbackKnowledgeVaultSwitch(previousEnabled, previousSource)
 		writeError(writer, http.StatusInternalServerError, "knowledge_vault_settings_failed")
 		return
@@ -102,8 +214,7 @@ func (s *Server) initializeKnowledgeVault(writer http.ResponseWriter, request *h
 	s.audit(request, "knowledge_vault.init", "knowledge_vault", result.VaultPath, map[string]any{
 		"samples": result.Samples, "enabled": true,
 	})
-	writeJSON(writer, http.StatusOK, map[string]any{
-		"ok": true, "settings": s.knowledgeVault.Status(request.Context()),
+	s.writeKnowledgeVaultView(writer, request, map[string]any{
 		"created": result.Created, "skipped": result.Skipped,
 		"samples": result.Samples, "rebuild": result.Rebuild,
 	})
@@ -116,9 +227,6 @@ func (s *Server) rebuildKnowledgeVaultIndex(writer http.ResponseWriter, request 
 	}
 	report, err := s.knowledgeVault.Rebuild(request.Context())
 	switch {
-	case errors.Is(err, knowledgevault.ErrDisabled):
-		writeError(writer, http.StatusConflict, "knowledge_vault_disabled")
-		return
 	case errors.Is(err, knowledgevault.ErrVaultNotInitialized):
 		writeError(writer, http.StatusConflict, "knowledge_vault_not_initialized")
 		return
@@ -131,9 +239,145 @@ func (s *Server) rebuildKnowledgeVaultIndex(writer http.ResponseWriter, request 
 	s.audit(request, "knowledge_vault.rebuild", "knowledge_vault", report.VaultPath, map[string]any{
 		"entries": report.Entries, "warnings": len(report.Warnings),
 	})
-	writeJSON(writer, http.StatusOK, map[string]any{
-		"ok": true, "settings": s.knowledgeVault.Status(request.Context()), "rebuild": report,
+	s.writeKnowledgeVaultView(writer, request, map[string]any{"rebuild": report})
+}
+
+// migrateKnowledgeVault is the legacy upgrade path. It backs up the old
+// database and skill packages, exports knowledge into the vault, rebuilds and
+// verifies the index, records the verification, then turns the vault on. The
+// old data is never deleted.
+func (s *Server) migrateKnowledgeVault(writer http.ResponseWriter, request *http.Request) {
+	if s.knowledgeVault == nil {
+		writeKnowledgeVaultDisabled(writer)
+		return
+	}
+	previousEnabled, previousSource := s.knowledgeVault.Enabled(), s.knowledgeVault.Source()
+	report, err := knowledgevault.MigrateLegacyKnowledge(request.Context(), s.knowledgeVault.Config(), knowledgevault.LegacyMigrationOptions{
+		DataDir:      s.store.DataDir(),
+		DatabasePath: s.store.DatabasePath(),
 	})
+	switch {
+	case errors.Is(err, knowledgevault.ErrNoLegacyKnowledge):
+		writeJSON(writer, http.StatusConflict, map[string]any{
+			"ok": false, "error": "knowledge_vault_no_legacy_knowledge",
+			"message": err.Error(),
+		})
+		return
+	case err != nil:
+		writeJSON(writer, http.StatusInternalServerError, map[string]any{
+			"ok": false, "error": "knowledge_vault_migration_failed", "message": err.Error(),
+			"report": report,
+		})
+		return
+	}
+	if err := s.finishKnowledgeVaultPopulation(request.Context(), report.VerifiedAt, report.BackupPath, knowledgevault.MigrationSourceLegacy, true); err != nil {
+		s.rollbackKnowledgeVaultSwitch(previousEnabled, previousSource)
+		writeJSON(writer, http.StatusInternalServerError, map[string]any{
+			"ok": false, "error": "knowledge_vault_enable_failed", "message": err.Error(),
+			"report": report,
+		})
+		return
+	}
+	s.audit(request, "knowledge_vault.migrate", "knowledge_vault", report.VaultPath, map[string]any{
+		"entries": report.VerifiedEntries, "skills": report.VerifiedSkills, "backup": report.BackupPath,
+	})
+	s.writeKnowledgeVaultView(writer, request, map[string]any{"migration": report})
+}
+
+// importKnowledgeVault is the existing-vault path: copy a local directory or
+// clone a Git remote, rebuild the index, verify manifest/project bindings and
+// only then turn the vault on. A non-empty target is rejected, never merged.
+func (s *Server) importKnowledgeVault(writer http.ResponseWriter, request *http.Request) {
+	if s.knowledgeVault == nil {
+		writeKnowledgeVaultDisabled(writer)
+		return
+	}
+	var payload struct {
+		Kind   string `json:"kind"`
+		Path   string `json:"path"`
+		Remote string `json:"remote"`
+		Branch string `json:"branch"`
+	}
+	if err := decodeJSON(request, &payload); err != nil {
+		writeErrorDetail(writer, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	kind := strings.ToLower(strings.TrimSpace(payload.Kind))
+	if kind != "local" && kind != "git" {
+		writeErrorDetail(writer, http.StatusBadRequest, "invalid_import_kind", "kind must be local or git")
+		return
+	}
+	projects, err := s.store.ListProjects(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "knowledge_vault_status_failed")
+		return
+	}
+	known := make([]string, 0, len(projects))
+	for _, project := range projects {
+		known = append(known, project.ID)
+	}
+	previousEnabled, previousSource := s.knowledgeVault.Enabled(), s.knowledgeVault.Source()
+	report, err := knowledgevault.ImportExistingVault(request.Context(), s.knowledgeVault.Config(), knowledgevault.ExistingVaultImportOptions{
+		Kind: kind, Path: payload.Path, Remote: payload.Remote, Branch: payload.Branch,
+		KnownProjects: known,
+	})
+	var validation *knowledgevault.GitValidationError
+	switch {
+	case errors.Is(err, knowledgevault.ErrTargetNotEmpty):
+		writeJSON(writer, http.StatusConflict, map[string]any{
+			"ok": false, "error": "knowledge_vault_target_not_empty",
+			"message": "目标知识库目录已有文件；请先移走旧目录，导入不会自动合并。",
+		})
+		return
+	case errors.Is(err, knowledgevault.ErrImportSourceMissing):
+		writeError(writer, http.StatusBadRequest, "knowledge_vault_import_source_missing")
+		return
+	case errors.Is(err, knowledgevault.ErrImportManifestMissing):
+		writeError(writer, http.StatusBadRequest, "knowledge_vault_manifest_missing")
+		return
+	case errors.As(err, &validation):
+		writeErrorDetail(writer, http.StatusBadRequest, "invalid_git_"+validation.Field, validation.Message)
+		return
+	case err != nil:
+		writeJSON(writer, http.StatusInternalServerError, map[string]any{
+			"ok": false, "error": "knowledge_vault_import_failed", "message": err.Error(),
+			"report": report,
+		})
+		return
+	}
+	if err := s.finishKnowledgeVaultPopulation(request.Context(), report.VerifiedAt, "", knowledgevault.ImportSourceExisting, false); err != nil {
+		s.rollbackKnowledgeVaultSwitch(previousEnabled, previousSource)
+		writeJSON(writer, http.StatusInternalServerError, map[string]any{
+			"ok": false, "error": "knowledge_vault_enable_failed", "message": err.Error(),
+			"report": report,
+		})
+		return
+	}
+	s.audit(request, "knowledge_vault.import", "knowledge_vault", report.VaultPath, map[string]any{
+		"kind": report.Kind, "entries": report.IndexedEntries, "files": report.ImportedFiles,
+	})
+	s.writeKnowledgeVaultView(writer, request, map[string]any{"import": report})
+}
+
+// finishKnowledgeVaultPopulation records verified population first, then
+// refreshes the manager's reader from the new files/index and turns the switch
+// on. Rebuild also covers the case where the manager was already enabled with
+// an empty reader: without it the freshly imported vault would only become
+// visible after a manual rebuild. If the switch cannot open the freshly built
+// vault the caller rolls the in-memory state back; the verification timestamp
+// intentionally remains because the files and index did verify.
+func (s *Server) finishKnowledgeVaultPopulation(ctx context.Context, verifiedAt time.Time, backupPath, source string, legacyMigration bool) error {
+	if err := s.store.RecordKnowledgeVaultImport(ctx, source, verifiedAt, backupPath, legacyMigration); err != nil {
+		return err
+	}
+	if _, err := s.knowledgeVault.Rebuild(ctx); err != nil {
+		return fmt.Errorf("refresh knowledge vault after population: %w", err)
+	}
+	if err := s.knowledgeVault.SetEnabled(ctx, true); err != nil {
+		return err
+	}
+	s.knowledgeVault.SetSource(knowledgevault.SourceDatabase)
+	return nil
 }
 
 // rollbackKnowledgeVaultSwitch restores the in-memory switch when the database

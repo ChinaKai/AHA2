@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/knowledgevault"
+	"github.com/ChinaKai/AHA2/internal/store"
 )
 
 type knowledgeVaultCommon struct {
@@ -41,7 +42,7 @@ func (options knowledgeVaultCommon) config() (knowledgevault.Config, error) {
 
 func knowledgeVault(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: aha2 knowledge-vault <init|export|rebuild-index|search|status> [flags]")
+		return fmt.Errorf("usage: aha2 knowledge-vault <init|export|rebuild-index|search|status|migrate-legacy|import> [flags]")
 	}
 	switch args[0] {
 	case "init":
@@ -54,6 +55,10 @@ func knowledgeVault(args []string) error {
 		return knowledgeVaultSearch(args[1:])
 	case "status":
 		return knowledgeVaultStatus(args[1:])
+	case "migrate-legacy":
+		return knowledgeVaultMigrateLegacy(args[1:])
+	case "import":
+		return knowledgeVaultImport(args[1:])
 	default:
 		return fmt.Errorf("unknown knowledge-vault command %q", args[0])
 	}
@@ -181,6 +186,99 @@ func knowledgeVaultRebuildIndex(args []string) error {
 		return err
 	}
 	return writeKnowledgeVaultReport(os.Stdout, report)
+}
+
+func knowledgeVaultMigrateLegacy(args []string) error {
+	flags := flag.NewFlagSet("aha2 knowledge-vault migrate-legacy", flag.ContinueOnError)
+	options := knowledgeVaultCommon{}
+	options.register(flags)
+	databasePath := flags.String("database", "", "AHA2 database path (default <data-dir>/aha2.db)")
+	backupDir := flags.String("backup-dir", "", "backup directory (default <data-dir>/backups)")
+	commit := flags.Bool("commit", true, "commit exported files to the local vault Git repository")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
+	}
+	config, err := options.config()
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(*databasePath) == "" {
+		*databasePath = filepath.Join(config.DataDir, "aha2.db")
+	}
+	ctx := context.Background()
+	report, err := knowledgevault.MigrateLegacyKnowledge(ctx, config, knowledgevault.LegacyMigrationOptions{
+		DataDir: config.DataDir, DatabasePath: *databasePath, BackupDir: *backupDir, Commit: *commit,
+	})
+	if err != nil {
+		return err
+	}
+	if err := recordKnowledgeVaultPopulation(ctx, *databasePath, knowledgevault.MigrationSourceLegacy, report.VerifiedAt, report.BackupPath, true); err != nil {
+		return err
+	}
+	return writeKnowledgeVaultReport(os.Stdout, report)
+}
+
+func knowledgeVaultImport(args []string) error {
+	flags := flag.NewFlagSet("aha2 knowledge-vault import", flag.ContinueOnError)
+	options := knowledgeVaultCommon{}
+	options.register(flags)
+	databasePath := flags.String("database", "", "AHA2 database path (default <data-dir>/aha2.db)")
+	kind := flags.String("kind", "", "import source: local or git")
+	path := flags.String("path", "", "existing vault directory (kind=local)")
+	remote := flags.String("remote", "", "SSH Git remote (kind=git)")
+	branch := flags.String("branch", "", "optional branch (kind=git)")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
+	}
+	config, err := options.config()
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(*databasePath) == "" {
+		*databasePath = filepath.Join(config.DataDir, "aha2.db")
+	}
+	ctx := context.Background()
+	database, err := store.Open(ctx, *databasePath)
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	projects, err := database.ListProjects(ctx)
+	if err != nil {
+		return err
+	}
+	known := make([]string, 0, len(projects))
+	for _, project := range projects {
+		known = append(known, project.ID)
+	}
+	report, err := knowledgevault.ImportExistingVault(ctx, config, knowledgevault.ExistingVaultImportOptions{
+		Kind: *kind, Path: *path, Remote: *remote, Branch: *branch, KnownProjects: known,
+	})
+	if err != nil {
+		return err
+	}
+	if err := recordKnowledgeVaultPopulation(ctx, *databasePath, knowledgevault.ImportSourceExisting, report.VerifiedAt, "", false); err != nil {
+		return err
+	}
+	return writeKnowledgeVaultReport(os.Stdout, report)
+}
+
+// recordKnowledgeVaultPopulation persists the verified timestamp and turns the
+// owner-visible switch on. It opens the primary database separately so the
+// migration/import helpers stay free of store dependencies.
+func recordKnowledgeVaultPopulation(ctx context.Context, databasePath, source string, verifiedAt time.Time, backupPath string, legacyMigration bool) error {
+	database, err := store.Open(ctx, databasePath)
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	return database.RecordKnowledgeVaultImport(ctx, source, verifiedAt, backupPath, legacyMigration)
 }
 
 func knowledgeVaultSearch(args []string) error {

@@ -4,13 +4,52 @@
 
 ## 启用与关闭
 
-在「高级设置 → 其他设置 → 文件知识库」中切换：
+「高级设置 → 其他设置 → 文件知识库」只有一个 owner 可见的总开关：
 
-- 开关运行态生效，不需要重启 AHA2。
-- 首次切换后，选择写入 `knowledge_vault_settings` 表；此后以数据库设置为准，`AHA2_KNOWLEDGE_VAULT_ENABLED` / `--knowledge-vault-enabled` 只作为从未在 Web 切换过时的启动默认值。
-- 关闭时 7 个 `/api/v1/knowledge-vault/*` 数据接口返回 404，旧知识页与旧 API 不受影响。
+- 开：Web 知识页、Agent 知识读写和技能加载全部使用 vault。
+- 关：以上全部立即回到旧知识库，无需重启 AHA2；旧知识表和旧技能目录始终保留，不因切换删除。
 
-vault 和索引路径仍由 `AHA2_KNOWLEDGE_VAULT_PATH`、`AHA2_KNOWLEDGE_VAULT_INDEX`（或对应 CLI 参数）决定；默认位于 `<data-dir>/knowledge-vault` 与 `<data-dir>/knowledge-vault-index.db`。
+启动默认由后端判断，不要求 owner 先做选择：
+
+- 全新安装（没有旧知识或旧技能）：隐藏开关，只显示只读状态；默认启用文件知识库。
+- 旧版本升级（检测到旧知识表或旧技能包，且迁移/导入尚未验证）：显示「旧知识库回退」状态和迁移入口；迁移或导入校验完成前不能启用 vault。
+- owner 一旦在 Web 切换过，选择写入 `knowledge_vault_settings` 表并优先生效，之后以数据库设置为准。
+- `AHA2_KNOWLEDGE_VAULT_ENABLED` / `--knowledge-vault-enabled` 仅作为支持人员的紧急启动覆盖，不在普通 UI 展示，也不会写回数据库。
+
+关闭时 7 个 `/api/v1/knowledge-vault/*` 数据接口返回 404，旧知识页与旧 API 不受影响。vault 和索引路径仍由 `AHA2_KNOWLEDGE_VAULT_PATH`、`AHA2_KNOWLEDGE_VAULT_INDEX`（或对应 CLI 参数）决定；默认位于 `<data-dir>/knowledge-vault` 与 `<data-dir>/knowledge-vault-index.db`。
+
+## 就绪度
+
+后端在设置接口中计算并返回就绪状态，Web 只负责展示，不再自行拼规则：
+
+| 状态 | 含义 | 能否启用 |
+| --- | --- | --- |
+| `ready` | vault、索引、项目绑定和迁移验证都正常 | 可以 |
+| `degraded` | 可以启用，但存在未绑定项目或索引 warning；相关项目继续用旧知识库 | 可以，并显示警告 |
+| `needs_migration` | 检测到旧知识/旧技能，迁移或导入尚未验证 | 不可以 |
+| `needs_rebuild` | vault 未初始化、索引缺失/不可读，或知识文件比索引新 | 不可以 |
+| `error` | vault 或索引目录不可写/不可读 | 不可以 |
+
+检查项包括 vault 初始化、vault 可写、索引 schema、索引目录可写、索引新鲜度、条目数、manifest 项目绑定、旧知识迁移验证和索引 warning。`missing` 列出未通过的检查项。启用后若索引发生异常，Agent 立即回退旧知识库并返回 warning，Web 状态显示错误；关闭开关立即整体回退。
+
+## 迁移与导入
+
+两类数据入口都完整执行「备份/复制 → 重建索引 → 校验」，校验通过前不会启用 vault：
+
+- **旧知识迁移**：面板「迁移旧知识库并校验」或 `aha2 knowledge-vault migrate-legacy`。先备份 SQLite（`VACUUM INTO`，失败时字节复制）和旧技能包到 `<data-dir>/backups/knowledge-migration-*`，再导出旧知识和技能，重建索引，并逐条校验 ID、标题、文件 sha256 与抽样正文。成功后记录 `source=legacy-migration` 和 `migration_verified_at`；旧数据不删除。
+- **已有 vault 导入**：面板「导入已有知识库」或 `aha2 knowledge-vault import --kind local|git`。支持本地目录和 SSH Git 远端（仅 SSH 密钥，不接受密码或 HTTPS token）。复制/克隆后校验 manifest 与项目绑定，补齐缺失的 `index.md`，重建索引并校验。成功后记录 `source=existing-vault` 和 `import_verified_at`。
+- 目标 vault 目录非空时导入直接拒绝，不会自动合并；需要先移走旧目录。
+- Git pull/sync 成功后会自动重建索引并重新计算就绪度；只拉取成功不代表 ready，重建失败会以错误返回并保留 Git 结果。
+
+Web 面板之外也可以直接用 CLI（迁移会写入 vault 并重建索引；`--commit=false` 仅跳过本地 Git commit）：
+
+```sh
+aha2 knowledge-vault migrate-legacy --database <data-dir>/aha2.db --backup-dir <data-dir>/backups --commit
+aha2 knowledge-vault import --database <data-dir>/aha2.db --kind local --path /srv/existing-vault
+aha2 knowledge-vault import --database <data-dir>/aha2.db --kind git --remote git@example.com:owner/vault.git --branch main
+```
+
+设置接口 `POST /api/v1/settings/knowledge-vault/migrate` 和 `/import` 返回更新后的 `settings` 视图以及 `migration`/`import` 报告；导入参数为 `{"kind":"local|git","path":"...","remote":"...","branch":"..."}`。Git 远端仅接受 SSH 地址，错误信息会脱敏，不会回显凭据。
 
 ## 目录与知识边界
 
@@ -41,22 +80,20 @@ vault 和索引路径仍由 `AHA2_KNOWLEDGE_VAULT_PATH`、`AHA2_KNOWLEDGE_VAULT_
 - 对已存在的 `index.md`，只重写 `<!-- aha-vault:index:start -->` 到 `<!-- aha-vault:index:end -->` 之间的自动区块：先列直接子目录的 index 标题与摘要，再列直接子文档。标记外的手写导语和 frontmatter 原样保留，`updated` 不改。
 - 不自动创建 vault 根、`projects/`、`archive/`、`inbox/` 的 index；只维护用户已经创建并带有标记的 index。缺少标记只给出 warning，不改写文件；内容没有变化时不落盘，写入失败会保留 warning，可再次重建重试。
 
-## Agent 读写（Phase 3 默认全量）
+## Agent 读写
 
-从本次全量切换起，Agent 知识读取、技能加载和写入默认对所有项目使用 vault；Web 的“文件知识库”总开关仍是独立前置条件，默认关闭（legacy）。三个开关的关系：
+Agent 读取、技能加载和写入都跟随同一个 owner 总开关，没有额外的用户可见开关：
 
-- Agent runtime 读取有独立开关 `AHA2_KNOWLEDGE_VAULT_RUNTIME_READ`（或 `--knowledge-vault-runtime-read`），默认 true。**Web 的“文件知识库”开关只控制文件知识库页面和 API，不代表 Agent runtime 已切到 vault；两者必须同时开启。**
-- `AHA2_KNOWLEDGE_VAULT_READ_PROJECTS` 是逗号分隔的项目 ID allowlist，现在只作为回退手段。**未设置时任何非空 projectID 都允许读取 vault**；显式设为逗号列表时只允许列表内项目；显式设为空字符串时所有项目回退 legacy。
-- 每个项目实际读取 vault 仍需同时满足：Web vault 开关开启（manager enabled）、runtime read 开关开启、项目在 allowlist、索引 ready、manifest 已绑定该项目。任一不满足时，Turn 知识块、Agent 知识列表和技能加载继续使用旧知识表和旧技能目录；manifest 未绑定的项目按 legacy 处理。
-- 技能优先从 `global/skills/<slug>/` 或 `projects/<slug>/skills/<slug>/` 加载；vault 中找不到对应包时回退到旧的 `<data-dir>/knowledge/skills` 并记录日志，旧目录不会被删除。
-- 回退：显式设置 `AHA2_KNOWLEDGE_VAULT_READ_PROJECTS`（移出项目或设为空），该项目下一 Turn 回到旧 DB；设置 `--knowledge-vault-runtime-read=false`（或 `AHA2_KNOWLEDGE_VAULT_RUNTIME_READ=false`）或关闭 Web vault 总开关则所有项目回退（runtime read 是启动配置，修改后需重启）。旧知识表与旧 skills 始终保留，不因切换删除。
+- 总开关开启且就绪：Turn 知识块、Agent 知识列表和技能优先使用 vault。每个项目还需索引 ready 且 manifest 已绑定；未绑定项目继续按 legacy 处理，并在面板和 Agent 响应中给出 warning。
+- 总开关关闭、索引未 ready、项目未绑定或读取失败：立即使用旧知识表和旧技能目录，不阻塞 Turn。`AgentKnowledgeEntryResult`/`AgentKnowledgeFeedbackResult` 的 `warning` 字段说明回退原因，服务端同时记录日志。
+- 技能优先从 `global/skills/<slug>/` 或 `projects/<slug>/skills/<slug>/` 加载；vault 中缺少对应包时回退到旧的 `<data-dir>/knowledge/skills`，旧目录不删除。
+- 以下环境变量/CLI 参数只作为支持人员的紧急诊断手段，不在普通 UI 展示，也不要求配置：`AHA2_KNOWLEDGE_VAULT_RUNTIME_READ` / `--knowledge-vault-runtime-read`（关闭后所有项目强制读旧库）、`AHA2_KNOWLEDGE_VAULT_RUNTIME_WRITE` / `--knowledge-vault-runtime-write`（关闭后 vault 写入接口返回 409）、`AHA2_KNOWLEDGE_VAULT_READ_PROJECTS`（逗号分隔项目 allowlist，设为空字符串时所有项目回退旧库）。它们只收窄单个 manager 开关，不会打开总开关，也不会写回数据库。
+- 回退：在 Web 关闭「文件知识库」即所有项目下一 Turn 回到旧知识库，无需重启；旧知识表与旧 skills 始终保留，不因切换删除。
 
 ## Agent 写入
 
-写入有独立开关 `AHA2_KNOWLEDGE_VAULT_RUNTIME_WRITE`（或 `--knowledge-vault-runtime-write`），默认 true：
-
-- 写入来源跟随实际读取来源。项目只有同时满足 read gate（manager enabled、runtime read、allowlist、索引 ready、manifest 绑定）、runtime write 和引擎写 gate 才写 vault；读旧表的项目（Web vault 关闭、runtime read 关闭、不在 allowlist、索引未 ready 或 manifest 未绑定）继续调用旧知识 proposal 流程，旧表不会删除。
-- 项目正在读 vault 但 runtime write 关闭时，写入接口返回 409 `knowledge_vault_write_disabled`，**不会**回退到旧表，避免同一 Turn 出现 vault 读、legacy 写的双写分裂。打开 runtime write 后立即写 vault；从 allowlist 移除项目则下一 Turn 回滚到旧写入路径。
+- 写入来源跟随实际读取来源。项目正在读 vault 时，`POST /api/v1/agent/knowledge/entries` 与 `/feedback` 写 vault；读旧表的项目继续走旧知识 proposal/反馈流程，不会双写。
+- 支持开关 `AHA2_KNOWLEDGE_VAULT_RUNTIME_WRITE=false`（或 `--knowledge-vault-runtime-write=false`）关闭写入时，正在读 vault 的项目返回 409 `knowledge_vault_write_disabled`，**不会**回退到旧表，避免同一 Turn 出现 vault 读、legacy 写的分裂；重新打开后立即恢复。此开关仅用于支持诊断，默认 true，不在 Web 展示。
 - `POST /api/v1/agent/knowledge/entries` 支持 `mode=create|revise`。create 必须提供六种规范 `type` 之一、`title`、`summary`、`body`、以及 `search_query` 或 `duplicate_ack`；服务端按标题分配文件名，不接受客户端路径。与已有文档高度相似（Dice 相似度 ≥ 0.8）的 create 返回 409 `duplicate_knowledge` 与 `duplicate_candidates`，确认后可带 `duplicate_ack` 重试。
 - revise 必须提供 `entry_id` 和 `base_revision`（可选 `base_hash`）；revision 或 hash 与磁盘不一致返回 409 `knowledge_revision_conflict`，不会覆盖更新版本。写入成功后 revision + 1 并同步重建索引。
 - 路径策略：项目知识只能写入已存在的 topic group（含 `index.md` 的子目录）或 `projects/<slug>/inbox/`；全局知识只能进入 `global/inbox/`。Agent 不能创建项目根、topic group、`index.md`、`skills`、`archive`、`orphans`、`.trash`，路径穿越、绝对路径、反斜杠和 symlink 目标一律拒绝。
@@ -89,4 +126,4 @@ aha2 knowledge-vault rebuild-index
 aha2 knowledge-vault search <关键词>
 ```
 
-索引只服务于新知识页；旧知识表和旧知识页保持原样。正式迁移旧知识、删除旧知识库不在本功能范围内。
+索引只服务于新知识页；旧知识表和旧知识页保持原样。旧知识迁移、已有 vault 导入和 Git 同步均已实现，但任何流程都不会自动删除旧知识库；需要清理时由 owner 自行确认后手动处理。

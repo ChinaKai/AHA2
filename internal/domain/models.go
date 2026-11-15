@@ -93,14 +93,41 @@ type GeneralSettings struct {
 	UpdatedAt time.Time `json:"updated_at,omitempty"`
 }
 
-// KnowledgeVaultSettings is the Phase 3 runtime switch for the file-backed
-// read-only knowledge vault. Configured distinguishes "never touched in the
-// Web UI" (the startup env/flags still win) from an owner decision persisted
-// in the database.
+// KnowledgeVaultSettings is the single owner-visible knowledge manager switch.
+// Configured distinguishes "never touched in the Web UI" (the computed startup
+// default still wins) from an owner decision persisted in the database.
+//
+// ImportSource, MigrationVerifiedAt and ImportVerifiedAt record how the vault
+// was populated. They are written only after a migration/import has been
+// verified; the old knowledge tables are never deleted.
 type KnowledgeVaultSettings struct {
-	Enabled    bool      `json:"enabled"`
-	Configured bool      `json:"configured"`
-	UpdatedAt  time.Time `json:"updated_at,omitempty"`
+	Enabled             bool      `json:"enabled"`
+	Configured          bool      `json:"configured"`
+	ImportSource        string    `json:"import_source,omitempty"`
+	MigrationVerifiedAt time.Time `json:"migration_verified_at,omitempty"`
+	ImportVerifiedAt    time.Time `json:"import_verified_at,omitempty"`
+	LastBackupPath      string    `json:"last_backup_path,omitempty"`
+	UpdatedAt           time.Time `json:"updated_at,omitempty"`
+}
+
+// VaultPopulated reports whether a legacy migration or an existing-vault
+// import has been verified. Until one of them is, an upgrade that still has
+// legacy knowledge must keep the legacy rollback available.
+func (s KnowledgeVaultSettings) VaultPopulated() bool {
+	return !s.MigrationVerifiedAt.IsZero() || !s.ImportVerifiedAt.IsZero()
+}
+
+// LegacyKnowledgeInventory counts the pre-vault knowledge that an upgrade may
+// still be using. SkillPackages covers old flat skill directories even when
+// their database rows were already removed.
+type LegacyKnowledgeInventory struct {
+	Entries       int `json:"entries"`
+	Skills        int `json:"skills"`
+	SkillPackages int `json:"skill_packages"`
+}
+
+func (i LegacyKnowledgeInventory) HasLegacy() bool {
+	return i.Entries > 0 || i.Skills > 0 || i.SkillPackages > 0
 }
 
 const (

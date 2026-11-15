@@ -1217,10 +1217,10 @@ function settingsCopyHTML(value: string, labelKey: string): string {
 function settingsDialogHTML(): string {
   const ready = (value: boolean) => value ? t("kv.settingsReady") : t("kv.settingsNotReady");
   const settings = state.settings;
-  // The gear panel offers the only rebuild action. It stays disabled until the
-  // settings endpoint confirms the vault exists and the runtime switch is on,
-  // matching the old advanced-settings rule.
-  const canRebuild = Boolean(settings?.enabled && settings?.vault_initialized) && !state.rebuildBusy;
+  // The gear panel offers the only rebuild action. It needs an initialized vault,
+  // not an enabled switch: the backend allows a rebuild while the manager is off
+  // so migration/import/Git pull can refresh the projection first.
+  const canRebuild = Boolean(settings?.vault_initialized) && !state.rebuildBusy;
   // The settings endpoint is authoritative for these three fields. Library and
   // document payloads also carry them, but may lag behind a rebuild; prefer the
   // freshly loaded settings so the dialog and the rebuild notice agree.

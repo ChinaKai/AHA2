@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +12,11 @@ import (
 
 // Manager owns the runtime feature switch and the single read-only Reader used
 // by the Phase 2/3 Web API. The legacy knowledge store is never involved.
+//
+// The owner-visible model has one switch: on routes reads, writes, skills and
+// the Web pages to the vault; off sends all of them back to legacy. The
+// runtimeWrite field and the old project allowlist are support-only emergency
+// overrides for diagnostics, not user-visible gates.
 //
 // Locking contract: every read (WithReader, Status) holds RLock for the whole
 // callback, so a Reader can never be closed while a handler is querying its
@@ -23,9 +27,9 @@ type Manager struct {
 	enabled bool
 	source  string
 	reader  *Reader
-	// runtimeWrite is the independent, default-off Agent write gate. Even an
-	// enabled vault keeps Agent writes on the legacy tables until an operator
-	// turns this on for an allowlisted project.
+	// runtimeWrite is a support-only emergency write cutoff. It defaults on so
+	// the single manager switch is enough; support can still set it false to
+	// stop vault writes without touching the owner-visible switch.
 	runtimeWrite bool
 	// writeBudget is the per-Task/Turn entry write limit; zero uses
 	// DefaultWriteBudget. It is a field so tests can shrink the budget.
@@ -60,8 +64,9 @@ func NewManager(config Config) (*Manager, error) {
 		return nil, err
 	}
 	return &Manager{
-		config: normalized,
-		source: SourceStartup,
+		config:       normalized,
+		source:       SourceStartup,
+		runtimeWrite: true,
 	}, nil
 }
 
@@ -98,9 +103,9 @@ func (m *Manager) Source() string {
 	return m.source
 }
 
-// SetRuntimeWrite applies the independent Agent write gate. It never enables
-// the vault itself: reads and writes still require the Web switch and the
-// project allowlist.
+// SetRuntimeWrite applies the support-only emergency write cutoff. It never
+// enables or disables the vault itself; the owner-visible manager switch is the
+// only routing control.
 func (m *Manager) SetRuntimeWrite(enabled bool) {
 	m.mu.Lock()
 	m.runtimeWrite = enabled
@@ -193,87 +198,69 @@ func (m *Manager) WithReader(fn func(*Reader) error) error {
 
 // Status is safe in both switch states. When enabled it reports the live
 // Reader; when disabled it inspects the files on disk without keeping a
-// connection open, so the settings panel can still offer "initialize".
+// connection open, so the settings panel can still offer migration/import.
+// VaultWritable/IndexWritable/IndexStale/ProjectBindings feed the backend
+// readiness calculation.
 type Status struct {
-	Enabled          bool   `json:"enabled"`
-	Source           string `json:"source"`
-	VaultReady       bool   `json:"vault_ready"`
-	VaultInitialized bool   `json:"vault_initialized"`
-	IndexReady       bool   `json:"index_ready"`
-	VaultName        string `json:"vault_name,omitempty"`
-	VaultPath        string `json:"vault_path"`
-	IndexPath        string `json:"index_path"`
-	EntryCount       int    `json:"entry_count"`
-	RebuiltAt        string `json:"rebuilt_at,omitempty"`
-	Warning          string `json:"warning,omitempty"`
+	Enabled          bool              `json:"enabled"`
+	Source           string            `json:"source"`
+	VaultReady       bool              `json:"vault_ready"`
+	VaultInitialized bool              `json:"vault_initialized"`
+	IndexReady       bool              `json:"index_ready"`
+	VaultWritable    bool              `json:"vault_writable"`
+	IndexWritable    bool              `json:"index_writable"`
+	IndexStale       bool              `json:"index_stale,omitempty"`
+	IndexError       string            `json:"index_error,omitempty"`
+	VaultName        string            `json:"vault_name,omitempty"`
+	VaultPath        string            `json:"vault_path"`
+	IndexPath        string            `json:"index_path"`
+	EntryCount       int               `json:"entry_count"`
+	IndexWarnings    int               `json:"index_warnings,omitempty"`
+	RebuiltAt        string            `json:"rebuilt_at,omitempty"`
+	ProjectBindings  map[string]string `json:"project_bindings,omitempty"`
+	Warning          string            `json:"warning,omitempty"`
 }
 
 func (m *Manager) Status(ctx context.Context) Status {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
+	enabled, source, reader := m.enabled, m.source, m.reader
+	m.mu.RUnlock()
+	probe := m.Probe(ctx)
 	status := Status{
-		Enabled: m.enabled, Source: m.source,
+		Enabled: enabled, Source: source,
 		VaultPath: m.config.VaultPath, IndexPath: m.config.IndexPath,
-		VaultInitialized: VaultInitialized(m.config.VaultPath),
+		VaultReady: probe.VaultReady, VaultInitialized: probe.VaultInitialized,
+		VaultWritable: probe.VaultWritable, IndexReady: probe.IndexReady,
+		IndexWritable: probe.IndexWritable, IndexStale: probe.IndexStale,
+		IndexError: probe.IndexError, EntryCount: probe.EntryCount,
+		IndexWarnings: probe.IndexWarnings, RebuiltAt: probe.RebuiltAt,
+		ProjectBindings: probe.Manifest.Projects,
 	}
-	if m.reader != nil {
-		status.VaultReady = m.reader.VaultReady()
-		status.IndexReady = m.reader.IndexReady()
-		status.VaultName = m.reader.Manifest().VaultName
-		if status.IndexReady {
-			m.fillIndexStatus(ctx, &status, m.reader.index)
-		}
-	} else {
-		status.VaultReady = vaultDirectoryExists(m.config.VaultPath)
-		if status.VaultInitialized {
-			if manifest, err := ReadManifest(m.config.VaultPath); err == nil {
-				status.VaultName = manifest.VaultName
-			}
-		}
-		if info, err := os.Stat(m.config.IndexPath); err == nil && !info.IsDir() {
-			if index, openErr := openReadOnlyIndex(ctx, m.config.IndexPath); openErr == nil {
-				// Only claim "index ready" when the projection is actually
-				// readable; a truncated or foreign SQLite file must not make
-				// the settings panel lie.
-				if indexStatus, statusErr := index.Status(ctx); statusErr == nil {
-					status.IndexReady = true
-					status.RebuiltAt = indexStatus.RebuiltAt
-					if count, countErr := index.VisibleEntryCount(ctx); countErr == nil {
-						status.EntryCount = count
-					}
-				}
-				_ = index.Close()
-			}
-		}
+	if reader != nil {
+		status.VaultName = reader.Manifest().VaultName
+	} else if probe.ManifestOK {
+		status.VaultName = probe.Manifest.VaultName
 	}
 	if !status.VaultReady {
 		status.Warning = "vault_missing"
 	} else if !status.IndexReady {
 		status.Warning = "index_missing"
+	} else if status.IndexStale {
+		status.Warning = "index_stale"
 	}
 	return status
 }
 
-func (m *Manager) fillIndexStatus(ctx context.Context, status *Status, index *Index) {
-	if index == nil {
-		return
-	}
-	if count, err := index.VisibleEntryCount(ctx); err == nil {
-		status.EntryCount = count
-	}
-	if indexStatus, err := index.Status(ctx); err == nil {
-		status.RebuiltAt = indexStatus.RebuiltAt
-	}
-}
-
 // Rebuild closes the Reader, rebuilds the index from files, then opens a fresh
-// Reader. On failure it tries to restore the previous read view so a bad edit
-// does not take the page down.
+// Reader when the manager is on. It also works while the switch is off so a
+// migration, import or Git pull can refresh the projection before the owner
+// enables the vault. On failure it tries to restore the previous read view so
+// a bad edit does not take the page down.
 func (m *Manager) Rebuild(ctx context.Context) (RebuildReport, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if !m.enabled {
-		return RebuildReport{}, ErrDisabled
+	if !VaultInitialized(m.config.VaultPath) {
+		return RebuildReport{}, ErrVaultNotInitialized
 	}
 	return m.rebuildLocked(ctx)
 }
@@ -284,6 +271,7 @@ func (m *Manager) rebuildLocked(ctx context.Context) (RebuildReport, error) {
 	if !VaultInitialized(m.config.VaultPath) {
 		return RebuildReport{}, ErrVaultNotInitialized
 	}
+	wasEnabled := m.enabled
 	// Backfill before the scan so a repaired guide is indexed by this rebuild.
 	m.ensureGuide()
 	if m.reader != nil {
@@ -304,6 +292,13 @@ func (m *Manager) rebuildLocked(ctx context.Context) (RebuildReport, error) {
 	if closeErr != nil {
 		m.reopenLocked(ctx)
 		return report, fmt.Errorf("close knowledge index: %w", closeErr)
+	}
+	if !wasEnabled {
+		// Refreshing the index for a migration/import/Git pull must not
+		// silently turn the owner-visible switch on.
+		m.reader = nil
+		m.enabled = false
+		return report, nil
 	}
 	reader, openErr := OpenReader(ctx, m.config)
 	if openErr != nil {
@@ -380,6 +375,10 @@ func (m *Manager) Initialize(ctx context.Context, samples bool) (SampleInitResul
 }
 
 func (m *Manager) reopenLocked(ctx context.Context) {
+	if !m.enabled {
+		m.reader = nil
+		return
+	}
 	reader, err := OpenReader(context.WithoutCancel(ctx), m.config)
 	if err != nil {
 		m.reader = nil
@@ -400,9 +399,4 @@ func (m *Manager) Close() error {
 		return reader.Close()
 	}
 	return nil
-}
-
-func vaultDirectoryExists(vaultPath string) bool {
-	info, err := os.Stat(vaultPath)
-	return err == nil && info.IsDir()
 }

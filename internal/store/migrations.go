@@ -3683,5 +3683,27 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("record schema v136: %w", err)
 		}
 	}
+	var hasV137 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=137)`).Scan(&hasV137)
+	if !hasV137 {
+		// The single-switch model records how the vault was populated. The old
+		// knowledge and skill data stays where it is; these columns only decide
+		// whether the owner has explicitly verified a migration/import.
+		for _, statement := range []string{
+			`ALTER TABLE knowledge_vault_settings ADD COLUMN import_source TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE knowledge_vault_settings ADD COLUMN migration_verified_at TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE knowledge_vault_settings ADD COLUMN import_verified_at TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE knowledge_vault_settings ADD COLUMN last_backup_path TEXT NOT NULL DEFAULT ''`,
+		} {
+			if _, err := s.db.ExecContext(ctx, statement); err != nil &&
+				!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+				return fmt.Errorf("apply schema v137 knowledge vault import metadata: %w", err)
+			}
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(137, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return fmt.Errorf("record schema v137: %w", err)
+		}
+	}
 	return nil
 }

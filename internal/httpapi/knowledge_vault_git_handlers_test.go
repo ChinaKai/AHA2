@@ -142,6 +142,41 @@ func TestKnowledgeVaultGitAPILocalRemoteLifecycle(t *testing.T) {
 	if synced["message"] != "已同步" || synced["git"].(map[string]any)["last_sync_at"] == "" {
 		t.Fatalf("sync payload=%#v", synced)
 	}
+	if _, rebuilt := synced["rebuild"]; !rebuilt {
+		t.Fatalf("sync must rebuild the index from the pulled files: %#v", synced)
+	}
+	if settings, ok := synced["settings"].(map[string]any); !ok || settings["readiness"] == nil {
+		t.Fatalf("sync must recompute readiness after the rebuild: %#v", synced)
+	}
+
+	// A pull that actually brings a new file must rebuild the index too; a
+	// successful fetch alone is not readiness.
+	cloneDir := t.TempDir()
+	gitHelper(t, cloneDir, "clone", remote, cloneDir)
+	if err := os.WriteFile(filepath.Join(cloneDir, "pulled-note.md"), []byte("# Pulled note\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitHelper(t, cloneDir, "add", "pulled-note.md")
+	gitHelper(t, cloneDir, "commit", "-m", "remote note")
+	gitHelper(t, cloneDir, "push", "origin", "main")
+	pulled := post("/api/v1/knowledge-vault/git/pull", nil)
+	rebuild, ok := pulled["rebuild"].(map[string]any)
+	if !ok || rebuild["vault_path"] == "" {
+		t.Fatalf("pull must rebuild the index: %#v", pulled)
+	}
+	pullSettings, ok := pulled["settings"].(map[string]any)
+	if !ok || pullSettings["readiness"] == nil {
+		t.Fatalf("pull must recompute readiness: %#v", pulled)
+	}
+	// The pulled file must be visible through the same reader the Web uses,
+	// which proves the index was rebuilt after the pull.
+	search := requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/knowledge-vault/search?q=pulled-note", nil, "")
+	var searchBody map[string]any
+	decodeResponse(t, search, &searchBody)
+	results, _ := searchBody["results"].([]any)
+	if search.StatusCode != http.StatusOK || len(results) == 0 {
+		t.Fatalf("pulled file was not indexed: status=%d payload=%#v", search.StatusCode, searchBody)
+	}
 
 	// Dirty worktree stops pull/sync with a conflict response, not a merge.
 	if err := os.WriteFile(filepath.Join(config.VaultPath, "api-note.md"), []byte("# dirty\n"), 0o644); err != nil {

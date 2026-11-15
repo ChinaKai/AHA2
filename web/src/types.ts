@@ -1678,23 +1678,104 @@ export interface KnowledgeVaultLibraries {
 
 // Phase 3 runtime switch and status. "configured" is server-side only; the Web
 // UI distinguishes the source (database vs startup env/flags).
+export type KnowledgeVaultReadinessStatus = "ready" | "degraded" | "needs_migration" | "needs_rebuild" | "error";
+
+export interface KnowledgeVaultReadinessCheck {
+  id: string;
+  status: "ok" | "warn" | "fail";
+  message?: string;
+}
+
+export interface KnowledgeVaultReadiness {
+  status: KnowledgeVaultReadinessStatus;
+  can_enable: boolean;
+  default_enabled: boolean;
+  switch_visible: boolean;
+  message?: string;
+  missing?: string[];
+  checks: KnowledgeVaultReadinessCheck[];
+  unbound_projects?: string[];
+}
+
+export interface KnowledgeVaultLegacyInventory {
+  entries: number;
+  skills: number;
+  skill_packages: number;
+}
+
 export interface KnowledgeVaultSettings {
   enabled: boolean;
   source: "database" | "startup";
   vault_ready: boolean;
   vault_initialized: boolean;
+  vault_writable?: boolean;
   index_ready: boolean;
+  index_writable?: boolean;
+  index_stale?: boolean;
+  index_error?: string;
+  index_warnings?: number;
   vault_name?: string;
   vault_path: string;
   index_path: string;
   entry_count: number;
   rebuilt_at?: string;
   warning?: string;
+  project_bindings?: Record<string, string>;
+  readiness: KnowledgeVaultReadiness;
+  legacy: KnowledgeVaultLegacyInventory;
+  configured: boolean;
+  import_source?: string;
+  migration_verified_at?: string;
+  import_verified_at?: string;
+  last_backup_path?: string;
+  settings_updated_at?: string;
+}
+
+export interface KnowledgeVaultMigrationReport {
+  source: string;
+  vault_path: string;
+  database_path: string;
+  backup_path: string;
+  source_entries: number;
+  exported_entries: number;
+  indexed_entries: number;
+  verified_entries: number;
+  titles_verified: number;
+  hashes_verified: number;
+  sampled_entries?: string[];
+  source_skills: number;
+  exported_skills: number;
+  verified_skills: number;
+  warnings?: string[];
+  verified_at: string;
+}
+
+export interface KnowledgeVaultImportReport {
+  source: string;
+  kind: "local" | "git";
+  source_path?: string;
+  remote?: string;
+  branch?: string;
+  vault_path: string;
+  imported_files: number;
+  project_count: number;
+  unbound_projects?: string[];
+  indexed_entries: number;
+  warnings?: string[];
+  verified_at: string;
 }
 
 export interface KnowledgeVaultSettingsResponse {
   ok: boolean;
   settings: KnowledgeVaultSettings;
+}
+
+export interface KnowledgeVaultMigrationResponse extends KnowledgeVaultSettingsResponse {
+  migration: KnowledgeVaultMigrationReport;
+}
+
+export interface KnowledgeVaultImportResponse extends KnowledgeVaultSettingsResponse {
+  import: KnowledgeVaultImportReport;
 }
 
 export interface KnowledgeVaultRebuildReport {

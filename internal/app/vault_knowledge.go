@@ -13,10 +13,11 @@ import (
 	"github.com/ChinaKai/AHA2/internal/knowledgevault"
 )
 
-// knowledgeVaultReadProjectsEnv is the rollback allowlist. Phase 3 defaults to
-// every project: an unset value admits any non-empty project ID. An explicit
-// comma list admits only its members, and an explicit empty string rolls every
-// project back to the legacy DB. The separate runtime-read gate must also be on.
+// knowledgeVaultReadProjectsEnv is a support-only emergency rollback. The
+// owner-visible model has a single manager switch; this environment variable
+// exists for diagnostics and is never rendered in the Web UI. An unset value
+// admits any non-empty project ID, an explicit comma list admits only its
+// members, and an explicit empty string rolls every project back to legacy.
 const knowledgeVaultReadProjectsEnv = "AHA2_KNOWLEDGE_VAULT_READ_PROJECTS"
 
 // aha2ProjectID is the builder project used by the Phase 2 canary tests and
@@ -40,9 +41,9 @@ func knowledgeVaultReadAllowed(projectID string) bool {
 	return false
 }
 
-// KnowledgeVaultReadScope describes the rollback allowlist for startup
-// diagnostics: "all" when unset, "none" when explicitly empty, otherwise the
-// configured comma list.
+// KnowledgeVaultReadScope describes the support-only rollback allowlist for
+// startup diagnostics: "all" when unset, "none" when explicitly empty,
+// otherwise the configured comma list.
 func KnowledgeVaultReadScope() string {
 	raw, configured := os.LookupEnv(knowledgeVaultReadProjectsEnv)
 	if !configured {
@@ -80,6 +81,9 @@ func (s *Service) vaultReadEnabled(projectID string) bool {
 
 func (s *Service) vaultKnowledgeForProject(ctx context.Context, projectID string) (vaultKnowledgeSnapshot, bool) {
 	if !s.vaultReadEnabled(projectID) {
+		if warning := s.vaultFallbackWarning(projectID); warning != "" {
+			log.Printf("knowledge vault project %s: %s", projectID, warning)
+		}
 		return vaultKnowledgeSnapshot{}, false
 	}
 	snapshot := vaultKnowledgeSnapshot{}
