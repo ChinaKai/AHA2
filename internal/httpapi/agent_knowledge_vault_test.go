@@ -45,7 +45,7 @@ func TestAgentKnowledgeVaultWriteAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	executor := &blockingAgentAPIExecutor{started: make(chan app.ExecutionRequest, 4), release: make(chan struct{})}
+	executor := &blockingAgentAPIExecutor{started: make(chan app.ExecutionRequest, 4), release: make(chan struct{}), done: make(chan struct{})}
 	service := app.NewService(database, nil, executor)
 	turn, err := service.SubmitMessage(ctx, task.ID, "exercise the vault write API")
 	if err != nil {

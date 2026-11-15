@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,9 +26,17 @@ import (
 type blockingAgentAPIExecutor struct {
 	started chan app.ExecutionRequest
 	release chan struct{}
+	// done closes when the first Execute returns. It only covers the backend
+	// call: the service keeps writing the Turn result afterwards, and a Turn
+	// may even schedule a follow-up one on the same executor, so tests that own
+	// a TempDir must also wait for the Turn to settle and the run goroutines to
+	// exit before returning.
+	done     chan struct{}
+	doneOnce sync.Once
 }
 
 func (executor *blockingAgentAPIExecutor) Execute(ctx context.Context, request app.ExecutionRequest, _ func(app.ExecutionEvent)) (app.ExecutionResult, error) {
+	defer executor.doneOnce.Do(func() { close(executor.done) })
 	executor.started <- request
 	select {
 	case <-executor.release:
@@ -218,7 +227,7 @@ func TestAgentStateKnowledgeAndSkillAPIs(t *testing.T) {
 	if err := database.UpsertModel(ctx, claudeModel); err != nil {
 		t.Fatal(err)
 	}
-	executor := &blockingAgentAPIExecutor{started: make(chan app.ExecutionRequest, 4), release: make(chan struct{})}
+	executor := &blockingAgentAPIExecutor{started: make(chan app.ExecutionRequest, 4), release: make(chan struct{}), done: make(chan struct{})}
 	service := app.NewService(database, secretStore, executor)
 	if _, err := service.UpdateTaskSkills(ctx, task.ID, []string{skill.ID}); err != nil {
 		t.Fatal(err)
@@ -676,6 +685,34 @@ func TestAgentStateKnowledgeAndSkillAPIs(t *testing.T) {
 		t.Fatalf("Agent progress attachment missing: %#v", page.Items)
 	}
 	close(executor.release)
+	select {
+	case <-executor.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("backend execution did not return after release")
+	}
+	// Execute returning is not the end of the Turn: the service still records
+	// the reply, closes the backend session, and settles the round. Wait for
+	// that goroutine to finish before the test returns, otherwise its writes
+	// keep landing in the TempDirs while the test framework removes them.
+	settleDeadline := time.Now().Add(10 * time.Second)
+	for {
+		settledTurn, err := database.Turn(ctx, turn.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if settledTurn.Status.Terminal() {
+			break
+		}
+		if time.Now().After(settleDeadline) {
+			t.Fatalf("turn %s did not reach a terminal state: %s", turn.ID, settledTurn.Status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelShutdown()
+	if err := service.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("shutdown service: %v", err)
+	}
 }
 
 // agentRequestRaw sends a body verbatim, which the map-based helper cannot do:
