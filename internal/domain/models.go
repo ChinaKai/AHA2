@@ -625,20 +625,25 @@ type KnowledgeEntry struct {
 }
 
 type KnowledgeProposal struct {
-	ID             string                  `json:"id"`
-	EntryID        string                  `json:"entry_id"`
-	BaseRevision   int                     `json:"base_revision"`
-	BaseEntry      *KnowledgeEntry         `json:"base_entry,omitempty"`
-	Proposed       KnowledgeEntry          `json:"proposed"`
-	SourceTaskID   string                  `json:"source_task_id,omitempty"`
-	SourceTurnID   string                  `json:"source_turn_id,omitempty"`
-	Status         KnowledgeProposalStatus `json:"status"`
-	ReviewMode     string                  `json:"review_mode"`
-	Reason         string                  `json:"reason,omitempty"`
-	DecisionReason string                  `json:"decision_reason,omitempty"`
-	CreatedAt      time.Time               `json:"created_at"`
-	UpdatedAt      time.Time               `json:"updated_at"`
-	DecidedAt      time.Time               `json:"decided_at,omitempty"`
+	ID           string                  `json:"id"`
+	EntryID      string                  `json:"entry_id"`
+	BaseRevision int                     `json:"base_revision"`
+	BaseEntry    *KnowledgeEntry         `json:"base_entry,omitempty"`
+	Proposed     KnowledgeEntry          `json:"proposed"`
+	SourceTaskID string                  `json:"source_task_id,omitempty"`
+	SourceTurnID string                  `json:"source_turn_id,omitempty"`
+	Status       KnowledgeProposalStatus `json:"status"`
+	ReviewMode   string                  `json:"review_mode"`
+	// TargetSource records which knowledge source the proposal publishes to:
+	// "legacy" (the SQLite tables) or "vault" (the file vault). It is decided
+	// when the proposal is created so an approval can never write a source the
+	// submitter was not reading.
+	TargetSource   string    `json:"target_source,omitempty"`
+	Reason         string    `json:"reason,omitempty"`
+	DecisionReason string    `json:"decision_reason,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+	DecidedAt      time.Time `json:"decided_at,omitempty"`
 }
 
 type KnowledgeReviewSettings struct {

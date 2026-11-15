@@ -2207,7 +2207,7 @@ func (s *Service) applyMemoryPatch(ctx context.Context, task domain.Task, turn d
 	return s.store.UpsertTaskMemory(ctx, memory)
 }
 
-func (s *Service) createKnowledgeCandidates(ctx context.Context, projectID, taskID, turnID, branch, productLineID string, candidates []KnowledgeCandidate) ([]domain.KnowledgeEntry, []domain.KnowledgeProposal, error) {
+func (s *Service) createLegacyKnowledgeCandidates(ctx context.Context, projectID, taskID, turnID, branch, productLineID string, candidates []KnowledgeCandidate) ([]domain.KnowledgeEntry, []domain.KnowledgeProposal, error) {
 	now := s.now().UTC()
 	reviewSettings, _ := s.store.KnowledgeReviewSettings(ctx)
 	reviewMode := "manual"

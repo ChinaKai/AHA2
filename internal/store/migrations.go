@@ -3705,5 +3705,26 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("record schema v137: %w", err)
 		}
 	}
+	var hasV138 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=138)`).Scan(&hasV138)
+	var hasTargetSource bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pragma_table_info('knowledge_proposals') WHERE name='target_source')`).Scan(&hasTargetSource)
+	if !hasV138 || !hasTargetSource {
+		// Vault-targeted proposals keep the review workflow but publish into the
+		// file vault instead of knowledge_entries. Existing rows stay legacy.
+		// The column check makes the migration reentrant when a test or an older
+		// repair recreated the table while the version row survived.
+		if !hasTargetSource {
+			if _, err := s.db.ExecContext(ctx,
+				`ALTER TABLE knowledge_proposals ADD COLUMN target_source TEXT NOT NULL DEFAULT 'legacy' CHECK(target_source IN ('legacy','vault'))`); err != nil &&
+				!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+				return fmt.Errorf("apply schema v138 knowledge proposal target source: %w", err)
+			}
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(138, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return fmt.Errorf("record schema v138: %w", err)
+		}
+	}
 	return nil
 }

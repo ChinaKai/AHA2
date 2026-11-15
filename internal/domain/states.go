@@ -103,3 +103,10 @@ const (
 	KnowledgeProposalApproved KnowledgeProposalStatus = "approved"
 	KnowledgeProposalRejected KnowledgeProposalStatus = "rejected"
 )
+
+// Knowledge proposal target sources. A vault-targeted proposal keeps its
+// preview and review trail in the database but publishes into the file vault.
+const (
+	KnowledgeProposalTargetLegacy = "legacy"
+	KnowledgeProposalTargetVault  = "vault"
+)

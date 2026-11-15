@@ -529,6 +529,13 @@ func (r *Reader) entryByID(ctx context.Context, id string) (IndexEntry, error) {
 	return scanIndexEntry(r.index.db.QueryRowContext(ctx, entrySelectSQL+` WHERE id=?`, id))
 }
 
+// EntryByID resolves one indexed document. Callers outside the package use it
+// to decide whether an ID belongs to the vault (and therefore whether a Web or
+// Pet operation must write the vault) before touching either store.
+func (r *Reader) EntryByID(ctx context.Context, id string) (IndexEntry, error) {
+	return r.entryByID(ctx, strings.TrimSpace(id))
+}
+
 func (r *Reader) entryByPath(ctx context.Context, relative string) (IndexEntry, error) {
 	relative = filepath.ToSlash(strings.TrimSpace(relative))
 	return scanIndexEntry(r.index.db.QueryRowContext(ctx, entrySelectSQL+` WHERE path=?`, relative))

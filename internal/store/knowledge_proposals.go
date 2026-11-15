@@ -19,7 +19,14 @@ var (
 	ErrKnowledgeProposalResolved = errors.New("knowledge proposal is not pending")
 )
 
-const knowledgeProposalColumns = `id,entry_id,base_revision,proposed_json,source_task_id,source_turn_id,status,created_at,updated_at,decided_at,review_mode,reason,decision_reason`
+const knowledgeProposalColumns = `id,entry_id,base_revision,proposed_json,source_task_id,source_turn_id,status,created_at,updated_at,decided_at,review_mode,reason,decision_reason,target_source`
+
+func normalizeKnowledgeProposalTarget(value string) string {
+	if strings.EqualFold(strings.TrimSpace(value), domain.KnowledgeProposalTargetVault) {
+		return domain.KnowledgeProposalTargetVault
+	}
+	return domain.KnowledgeProposalTargetLegacy
+}
 
 type knowledgeProposalPayload struct {
 	Proposed     domain.KnowledgeEntry  `json:"proposed"`
@@ -35,9 +42,10 @@ func encodeKnowledgeProposal(item domain.KnowledgeProposal) (string, error) {
 func scanKnowledgeProposal(scanner interface{ Scan(...any) error }) (domain.KnowledgeProposal, error) {
 	var item domain.KnowledgeProposal
 	var proposedJSON, createdAt, updatedAt, decidedAt string
-	if err := scanner.Scan(&item.ID, &item.EntryID, &item.BaseRevision, &proposedJSON, &item.SourceTaskID, &item.SourceTurnID, &item.Status, &createdAt, &updatedAt, &decidedAt, &item.ReviewMode, &item.Reason, &item.DecisionReason); err != nil {
+	if err := scanner.Scan(&item.ID, &item.EntryID, &item.BaseRevision, &proposedJSON, &item.SourceTaskID, &item.SourceTurnID, &item.Status, &createdAt, &updatedAt, &decidedAt, &item.ReviewMode, &item.Reason, &item.DecisionReason, &item.TargetSource); err != nil {
 		return domain.KnowledgeProposal{}, err
 	}
+	item.TargetSource = normalizeKnowledgeProposalTarget(item.TargetSource)
 	var payload knowledgeProposalPayload
 	if err := json.Unmarshal([]byte(proposedJSON), &payload); err != nil {
 		return domain.KnowledgeProposal{}, fmt.Errorf("decode knowledge proposal %s: %w", item.ID, err)
@@ -72,7 +80,8 @@ func (s *Store) ImportKnowledgeProposal(ctx context.Context, item domain.Knowled
 		item.UpdatedAt = item.CreatedAt
 	}
 	item.ReviewMode = normalizeKnowledgeReviewMode(item.ReviewMode)
-	if item.Status == domain.KnowledgeProposalPending {
+	item.TargetSource = normalizeKnowledgeProposalTarget(item.TargetSource)
+	if item.Status == domain.KnowledgeProposalPending && item.TargetSource == domain.KnowledgeProposalTargetLegacy {
 		if err := s.defaultKnowledgeParent(ctx, &item.Proposed); err != nil {
 			return err
 		}
@@ -119,14 +128,14 @@ func (s *Store) ImportKnowledgeProposal(ctx context.Context, item domain.Knowled
 	if err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO knowledge_proposals(`+knowledgeProposalColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+	_, err = tx.ExecContext(ctx, `INSERT INTO knowledge_proposals(`+knowledgeProposalColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET entry_id=excluded.entry_id,base_revision=excluded.base_revision,
 		proposed_json=excluded.proposed_json,source_task_id=excluded.source_task_id,source_turn_id=excluded.source_turn_id,
 		status=excluded.status,created_at=excluded.created_at,updated_at=excluded.updated_at,decided_at=excluded.decided_at,
-		review_mode=excluded.review_mode,reason=excluded.reason,decision_reason=excluded.decision_reason`,
+		review_mode=excluded.review_mode,reason=excluded.reason,decision_reason=excluded.decision_reason,target_source=excluded.target_source`,
 		item.ID, item.EntryID, item.BaseRevision, encoded, item.SourceTaskID, item.SourceTurnID, item.Status,
 		timeString(item.CreatedAt), timeString(item.UpdatedAt), timeString(item.DecidedAt), item.ReviewMode,
-		item.Reason, item.DecisionReason)
+		item.Reason, item.DecisionReason, item.TargetSource)
 	if err != nil && strings.Contains(err.Error(), "knowledge_proposals.entry_id") {
 		return ErrKnowledgeProposalPending
 	}
@@ -271,11 +280,18 @@ func (s *Store) CreateKnowledgeProposal(ctx context.Context, item domain.Knowled
 	if strings.TrimSpace(item.ID) == "" || strings.TrimSpace(item.EntryID) == "" || item.EntryID != item.Proposed.ID || item.Status != domain.KnowledgeProposalPending {
 		return domain.KnowledgeProposal{}, fmt.Errorf("knowledge proposal is invalid")
 	}
-	if item.BaseRevision == 0 && item.Proposed.IsIndex {
-		return domain.KnowledgeProposal{}, ErrKnowledgeRootManaged
-	}
-	if IsManagedGlobalKnowledgeCategory(item.EntryID) {
-		return domain.KnowledgeProposal{}, ErrKnowledgeRootManaged
+	item.TargetSource = normalizeKnowledgeProposalTarget(item.TargetSource)
+	// Vault-targeted proposals are validated against the file vault by the app
+	// layer, so the legacy knowledge_entries checks below only apply to legacy
+	// targets.
+	vaultTarget := item.TargetSource == domain.KnowledgeProposalTargetVault
+	if !vaultTarget {
+		if item.BaseRevision == 0 && item.Proposed.IsIndex {
+			return domain.KnowledgeProposal{}, ErrKnowledgeRootManaged
+		}
+		if IsManagedGlobalKnowledgeCategory(item.EntryID) {
+			return domain.KnowledgeProposal{}, ErrKnowledgeRootManaged
+		}
 	}
 	if item.BaseRevision < 0 {
 		return domain.KnowledgeProposal{}, ErrKnowledgeProposalRevision
@@ -294,11 +310,13 @@ func (s *Store) CreateKnowledgeProposal(ctx context.Context, item domain.Knowled
 	item.Proposed.Revision = item.BaseRevision + 1
 	item.Proposed.Status = domain.KnowledgeCandidate
 	item.Proposed.LastVerifiedAt = time.Time{}
-	if err := s.defaultKnowledgeParent(ctx, &item.Proposed); err != nil {
-		return domain.KnowledgeProposal{}, err
-	}
-	if err := s.validateKnowledge(ctx, item.Proposed); err != nil {
-		return domain.KnowledgeProposal{}, err
+	if !vaultTarget {
+		if err := s.defaultKnowledgeParent(ctx, &item.Proposed); err != nil {
+			return domain.KnowledgeProposal{}, err
+		}
+		if err := s.validateKnowledge(ctx, item.Proposed); err != nil {
+			return domain.KnowledgeProposal{}, err
+		}
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -306,7 +324,10 @@ func (s *Store) CreateKnowledgeProposal(ctx context.Context, item domain.Knowled
 	}
 	defer tx.Rollback()
 	staleExisting := false
-	if item.BaseRevision == 0 {
+	if vaultTarget {
+		// The vault decides whether the entry exists and which revision it is at.
+		// BaseEntry is copied by the app so the review page can still show a diff.
+	} else if item.BaseRevision == 0 {
 		var revision int
 		err := tx.QueryRowContext(ctx, `SELECT revision FROM knowledge_entries WHERE id=?`, item.EntryID).Scan(&revision)
 		if err == nil || !errors.Is(err, sql.ErrNoRows) {
@@ -341,10 +362,10 @@ func (s *Store) CreateKnowledgeProposal(ctx context.Context, item domain.Knowled
 	if err != nil {
 		return domain.KnowledgeProposal{}, err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO knowledge_proposals(`+knowledgeProposalColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	_, err = tx.ExecContext(ctx, `INSERT INTO knowledge_proposals(`+knowledgeProposalColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		item.ID, item.EntryID, item.BaseRevision, proposedJSON, item.SourceTaskID, item.SourceTurnID, item.Status,
 		timeString(item.CreatedAt), timeString(item.UpdatedAt), timeString(item.DecidedAt), item.ReviewMode,
-		item.Reason, item.DecisionReason)
+		item.Reason, item.DecisionReason, item.TargetSource)
 	if err != nil {
 		if strings.Contains(err.Error(), "knowledge_proposals.entry_id") {
 			return domain.KnowledgeProposal{}, ErrKnowledgeProposalPending
@@ -492,6 +513,34 @@ func (s *Store) ApproveKnowledgeProposal(ctx context.Context, id string, decided
 	}
 	entry, err = s.Knowledge(ctx, entry.ID)
 	return proposal, entry, err
+}
+
+// MarkKnowledgeProposalApproved records an approval whose content was already
+// published outside knowledge_entries, i.e. into the vault. It never inserts a
+// legacy row, so an approval retried after a partial failure stays idempotent.
+func (s *Store) MarkKnowledgeProposalApproved(ctx context.Context, id string, decidedAt time.Time, decisionReason ...string) (domain.KnowledgeProposal, error) {
+	proposal, err := s.KnowledgeProposal(ctx, id)
+	if err != nil {
+		return domain.KnowledgeProposal{}, err
+	}
+	reason := ""
+	if len(decisionReason) > 0 {
+		reason = strings.TrimSpace(decisionReason[0])
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE knowledge_proposals SET status=?,updated_at=?,decided_at=?,decision_reason=? WHERE id=? AND status=?`,
+		domain.KnowledgeProposalApproved, timeString(decidedAt), timeString(decidedAt), reason, id, domain.KnowledgeProposalPending)
+	if err != nil {
+		return domain.KnowledgeProposal{}, err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return domain.KnowledgeProposal{}, ErrKnowledgeProposalResolved
+	}
+	if proposal.Proposed.ProjectID != "" {
+		if _, err := s.db.ExecContext(ctx, `UPDATE projects SET knowledge_revision=knowledge_revision+1 WHERE id=?`, proposal.Proposed.ProjectID); err != nil {
+			return domain.KnowledgeProposal{}, err
+		}
+	}
+	return s.KnowledgeProposal(ctx, id)
 }
 
 func (s *Store) RejectKnowledgeProposal(ctx context.Context, id string, decidedAt time.Time, decisionReason ...string) (domain.KnowledgeProposal, error) {

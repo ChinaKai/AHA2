@@ -71,9 +71,9 @@ func (s *Server) batchKnowledgeProposalReviews(writer http.ResponseWriter, reque
 		if payload.Action == "approve" {
 			var proposal domain.KnowledgeProposal
 			var entry domain.KnowledgeEntry
-			proposal, entry, err = s.store.ApproveKnowledgeProposal(request.Context(), id, now, payload.DecisionReason)
+			proposal, entry, err = s.approveKnowledgeProposalRecord(request.Context(), id, now, payload.DecisionReason)
 			if err == nil {
-				s.audit(request, "knowledge.proposal.batch_approve", "knowledge_proposal", proposal.ID, map[string]any{"entry_id": entry.ID, "revision": entry.Revision})
+				s.audit(request, "knowledge.proposal.batch_approve", "knowledge_proposal", proposal.ID, map[string]any{"entry_id": entry.ID, "revision": entry.Revision, "target": proposal.TargetSource})
 			}
 		} else {
 			var proposal domain.KnowledgeProposal

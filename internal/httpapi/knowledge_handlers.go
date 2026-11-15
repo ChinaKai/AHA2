@@ -12,7 +12,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/domain"
+	"github.com/ChinaKai/AHA2/internal/knowledgevault"
 	"github.com/ChinaKai/AHA2/internal/store"
 )
 
@@ -292,6 +294,20 @@ func (s *Server) createKnowledge(writer http.ResponseWriter, request *http.Reque
 		writeError(writer, http.StatusBadRequest, err.Error())
 		return
 	}
+	if s.app != nil {
+		result, err := s.app.CreateWebKnowledge(request.Context(), knowledgeWriteInput(payload))
+		if err != nil {
+			writeKnowledgeMutationError(writer, "create_knowledge_failed", err)
+			return
+		}
+		s.audit(request, "knowledge.create", "knowledge", result.Entry.ID, map[string]any{"scope": result.Entry.Scope, "source": result.Source})
+		response := map[string]any{"ok": true, "knowledge": result.Entry, "source": result.Source}
+		if result.Warning != "" {
+			response["warning"] = result.Warning
+		}
+		writeJSON(writer, http.StatusCreated, response)
+		return
+	}
 	now := time.Now().UTC()
 	status := domain.KnowledgeCandidate
 	if payload.Status == string(domain.KnowledgeVerified) {
@@ -333,12 +349,17 @@ func (s *Server) createKnowledge(writer http.ResponseWriter, request *http.Reque
 	writeJSON(writer, http.StatusCreated, map[string]any{"ok": true, "knowledge": item})
 }
 
-func (s *Server) updateKnowledge(writer http.ResponseWriter, request *http.Request) {
-	item, err := s.store.Knowledge(request.Context(), request.PathValue("id"))
-	if err != nil {
-		writeError(writer, http.StatusNotFound, "knowledge_not_found")
-		return
+func knowledgeWriteInput(payload knowledgePayload) app.KnowledgeWriteInput {
+	return app.KnowledgeWriteInput{
+		Scope: payload.Scope, ProjectID: payload.ProjectID, Type: payload.Type,
+		Title: payload.Title, Body: payload.Body, ParentID: payload.ParentID, Slug: payload.Slug,
+		SortOrder: payload.SortOrder, IsIndex: payload.IsIndex, Confidence: payload.Confidence,
+		Status: payload.Status, BranchScope: payload.BranchScope, ProductLineID: payload.ProductLineID,
+		VerifiedCommit: payload.VerifiedCommit,
 	}
+}
+
+func (s *Server) updateKnowledge(writer http.ResponseWriter, request *http.Request) {
 	var payload knowledgePayload
 	if err := decodeJSON(request, &payload); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_json")
@@ -346,6 +367,29 @@ func (s *Server) updateKnowledge(writer http.ResponseWriter, request *http.Reque
 	}
 	if err := normalizeKnowledgePayload(&payload); err != nil {
 		writeError(writer, http.StatusBadRequest, err.Error())
+		return
+	}
+	if s.app != nil {
+		result, err := s.app.UpdateWebKnowledge(request.Context(), request.PathValue("id"), knowledgeWriteInput(payload))
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				writeError(writer, http.StatusNotFound, "knowledge_not_found")
+				return
+			}
+			writeKnowledgeMutationError(writer, "update_knowledge_failed", err)
+			return
+		}
+		s.audit(request, "knowledge.update", "knowledge", result.Entry.ID, map[string]any{"revision": result.Entry.Revision, "source": result.Source})
+		response := map[string]any{"ok": true, "knowledge": result.Entry, "source": result.Source}
+		if result.Warning != "" {
+			response["warning"] = result.Warning
+		}
+		writeJSON(writer, http.StatusOK, response)
+		return
+	}
+	item, err := s.store.Knowledge(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeError(writer, http.StatusNotFound, "knowledge_not_found")
 		return
 	}
 	item.Scope, item.ProjectID, item.Type = payload.Scope, payload.ProjectID, payload.Type
@@ -382,6 +426,20 @@ func (s *Server) updateKnowledge(writer http.ResponseWriter, request *http.Reque
 }
 
 func (s *Server) deleteKnowledge(writer http.ResponseWriter, request *http.Request) {
+	if s.app != nil {
+		source, err := s.app.DeleteWebKnowledge(request.Context(), request.PathValue("id"))
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				writeError(writer, http.StatusNotFound, "knowledge_not_found")
+				return
+			}
+			writeKnowledgeMutationError(writer, "delete_knowledge_failed", err)
+			return
+		}
+		s.audit(request, "knowledge.delete", "knowledge", request.PathValue("id"), map[string]any{"source": source})
+		writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "source": source})
+		return
+	}
 	if err := s.store.DeleteKnowledge(request.Context(), request.PathValue("id")); err != nil {
 		writeKnowledgeMutationError(writer, "delete_knowledge_failed", err)
 		return
@@ -391,7 +449,21 @@ func (s *Server) deleteKnowledge(writer http.ResponseWriter, request *http.Reque
 }
 
 func writeKnowledgeMutationError(writer http.ResponseWriter, fallback string, err error) {
+	var vaultErr *knowledgevault.WriteError
 	switch {
+	case errors.As(err, &vaultErr):
+		status := http.StatusConflict
+		switch vaultErr.Code {
+		case knowledgevault.WriteErrorValidation, knowledgevault.WriteErrorForbiddenContent, knowledgevault.WriteErrorForbiddenScope:
+			status = http.StatusBadRequest
+		case knowledgevault.WriteErrorNotFound:
+			status = http.StatusNotFound
+		case knowledgevault.WriteErrorUnavailable, knowledgevault.WriteErrorIndexStale:
+			status = http.StatusServiceUnavailable
+		}
+		writeJSON(writer, status, map[string]any{"ok": false, "error": fallback, "message": vaultErr.Error(), "code": vaultErr.Code})
+	case errors.Is(err, app.ErrKnowledgeVaultDeleteUnsupported), errors.Is(err, app.ErrKnowledgeReadSourceMismatch):
+		writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": fallback, "message": err.Error()})
 	case errors.Is(err, store.ErrKnowledgeRoot), errors.Is(err, store.ErrKnowledgeRootManaged), errors.Is(err, store.ErrKnowledgeSiblingSlug), errors.Is(err, store.ErrKnowledgeHasChildren), errors.Is(err, store.ErrKnowledgeProposalPending), errors.Is(err, store.ErrKnowledgeProposalRevision), errors.Is(err, store.ErrKnowledgeProposalResolved):
 		writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": fallback, "message": err.Error()})
 	case errors.Is(err, store.ErrKnowledgeInvalidScope), errors.Is(err, store.ErrKnowledgeInvalidSlug), errors.Is(err, store.ErrKnowledgeParent), errors.Is(err, store.ErrKnowledgeCycle):
@@ -409,7 +481,7 @@ func (s *Server) approveKnowledgeProposal(writer http.ResponseWriter, request *h
 		writeError(writer, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	proposal, entry, err := s.store.ApproveKnowledgeProposal(request.Context(), request.PathValue("id"), time.Now().UTC(), payload.DecisionReason)
+	proposal, entry, err := s.approveKnowledgeProposalRecord(request.Context(), request.PathValue("id"), time.Now().UTC(), payload.DecisionReason)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(writer, http.StatusNotFound, "knowledge_proposal_not_found")
@@ -418,8 +490,15 @@ func (s *Server) approveKnowledgeProposal(writer http.ResponseWriter, request *h
 		writeKnowledgeMutationError(writer, "approve_knowledge_proposal_failed", err)
 		return
 	}
-	s.audit(request, "knowledge.proposal.approve", "knowledge_proposal", proposal.ID, map[string]any{"entry_id": entry.ID, "revision": entry.Revision})
+	s.audit(request, "knowledge.proposal.approve", "knowledge_proposal", proposal.ID, map[string]any{"entry_id": entry.ID, "revision": entry.Revision, "target": proposal.TargetSource})
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "proposal": proposal, "knowledge": entry})
+}
+
+func (s *Server) approveKnowledgeProposalRecord(ctx context.Context, id string, decidedAt time.Time, decisionReason string) (domain.KnowledgeProposal, domain.KnowledgeEntry, error) {
+	if s.app != nil {
+		return s.app.ApproveKnowledgeProposal(ctx, id, decidedAt, decisionReason)
+	}
+	return s.store.ApproveKnowledgeProposal(ctx, id, decidedAt, decisionReason)
 }
 
 func (s *Server) rejectKnowledgeProposal(writer http.ResponseWriter, request *http.Request) {
