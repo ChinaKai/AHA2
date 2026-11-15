@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -601,7 +602,23 @@ func (s *Service) assistantSnapshot(ctx context.Context) (string, error) {
 		builder.WriteString("- 暂无任务\n")
 	}
 
-	knowledge, _ := s.store.ListKnowledge(ctx, "", "", []domain.KnowledgeStatus{domain.KnowledgeVerified})
+	// The assistant snapshot is global, not bound to a Project. When global
+	// knowledge reads the vault, list it there; a vault read failure leaves the
+	// section empty with a warning instead of silently showing legacy titles.
+	knowledge := []domain.KnowledgeEntry{}
+	if s.vaultGlobalReadEnabled() {
+		items, ok := s.vaultGlobalKnowledge(ctx)
+		if !ok {
+			log.Printf("assistant snapshot: vault global knowledge is unavailable; omitting knowledge titles")
+		}
+		for _, entry := range items {
+			if entry.Status == domain.KnowledgeVerified {
+				knowledge = append(knowledge, entry)
+			}
+		}
+	} else {
+		knowledge, _ = s.store.ListKnowledge(ctx, "", "", []domain.KnowledgeStatus{domain.KnowledgeVerified})
+	}
 	if len(knowledge) > 0 {
 		builder.WriteString("\n已验证知识（标题，最多 25 条）：\n")
 		limit := len(knowledge)

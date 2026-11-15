@@ -428,6 +428,57 @@ func TestEnsureGuideBackfillsOnceAndKeepsHandWrittenGuide(t *testing.T) {
 	}
 }
 
+func TestRepairGuideEndpointsRewritesOnlyRetiredEndpoints(t *testing.T) {
+	vaultPath := t.TempDir()
+	target := filepath.Join(vaultPath, filepath.FromSlash(GuideRelativePath))
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := "---\ntitle: 手写指南\n---\n\n手写导语必须保留。\n\n" +
+		"- `POST /api/v1/agent/knowledge/candidates`：提交候选，每批 1–20 条。\n" +
+		"- `POST /api/v1/agent/knowledge/{id}/feedback`：提交 `stale`、`wrong` 或 `helped`。\n" +
+		"- API：POST /api/v1/agent/knowledge/candidates（1–20 条，标题 ≤300、正文 ≤20000 字符）、POST /api/v1/agent/knowledge/{id}/feedback。\n"
+	if err := os.WriteFile(target, []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := RepairGuideEndpoints(vaultPath)
+	if err != nil || !changed {
+		t.Fatalf("RepairGuideEndpoints = (%v, %v), want changed", changed, err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repaired := string(got)
+	for _, retired := range []string{
+		"/api/v1/agent/knowledge/candidates", "/api/v1/agent/knowledge/{id}/feedback", "提交候选，每批",
+	} {
+		if strings.Contains(repaired, retired) {
+			t.Fatalf("repaired guide still contains %q:\n%s", retired, repaired)
+		}
+	}
+	for _, want := range []string{
+		"手写导语必须保留。", "/api/v1/agent/knowledge/entries", "/api/v1/agent/knowledge/feedback",
+		"mode=create|revise", "`entry_id` + `kind`",
+	} {
+		if !strings.Contains(repaired, want) {
+			t.Fatalf("repaired guide is missing %q:\n%s", want, repaired)
+		}
+	}
+
+	changed, err = RepairGuideEndpoints(vaultPath)
+	if err != nil || changed {
+		t.Fatalf("second RepairGuideEndpoints = (%v, %v), want an idempotent no-op", changed, err)
+	}
+	if after, err := os.ReadFile(target); err != nil || string(after) != repaired {
+		t.Fatalf("second RepairGuideEndpoints changed the guide: err=%v", err)
+	}
+
+	if changed, err := RepairGuideEndpoints(t.TempDir()); err != nil || changed {
+		t.Fatalf("RepairGuideEndpoints on a vault without a guide = (%v, %v), want a no-op", changed, err)
+	}
+}
+
 func TestReadGuideAndBootstrapDoesNotOverwrite(t *testing.T) {
 	config := DefaultConfig(t.TempDir())
 	if _, err := Bootstrap(config, InitOptions{VaultName: "Guide Vault"}); err != nil {
@@ -440,9 +491,14 @@ func TestReadGuideAndBootstrapDoesNotOverwrite(t *testing.T) {
 	if guide.Path != GuideRelativePath || guide.Title != GuideTitle || !strings.Contains(guide.Prompt, "先搜索再写") {
 		t.Fatalf("guide = %#v", guide)
 	}
-	for _, expected := range []string{"global/", "projects/", "navigation", "decision", "practice", "diagnostic", "reference", "architecture", "inbox", "stale", "wrong", "helped", "禁止", "/api/v1/agent/knowledge/guide"} {
+	for _, expected := range []string{"global/", "projects/", "navigation", "decision", "practice", "diagnostic", "reference", "architecture", "inbox", "stale", "wrong", "helped", "禁止", "/api/v1/agent/knowledge/guide", "/api/v1/agent/knowledge/entries", "/api/v1/agent/knowledge/feedback"} {
 		if !strings.Contains(guide.Content, expected) {
 			t.Fatalf("guide is missing %q", expected)
+		}
+	}
+	for _, retired := range []string{"/api/v1/agent/knowledge/candidates", "/api/v1/agent/knowledge/{id}/feedback"} {
+		if strings.Contains(guide.Content, retired) || strings.Contains(guide.Prompt, retired) {
+			t.Fatalf("default guide still teaches the retired endpoint %q", retired)
 		}
 	}
 	custom := "---\ntitle: 自定义指南\n---\n\n自定义正文。\n"

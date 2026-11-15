@@ -324,7 +324,7 @@ func (s *Server) submitAgentKnowledgeFeedback(writer http.ResponseWriter, reques
 	}
 	item, err := s.app.SubmitAgentKnowledgeFeedback(request.Context(), claims, app.KnowledgeFeedback{EntryID: request.PathValue("knowledge"), Kind: payload.Kind})
 	if err != nil {
-		writeAgentControlError(writer, err)
+		writeAgentKnowledgeWriteError(writer, err)
 		return
 	}
 	s.audit(request, "agent.knowledge.feedback", "knowledge", item.ID, map[string]any{"kind": payload.Kind})
@@ -606,6 +606,8 @@ func writeAgentControlError(writer http.ResponseWriter, err error) {
 		writeJSON(writer, http.StatusForbidden, map[string]any{"ok": false, "error": "global_skill_forbidden", "message": "全局 Skill 会影响本机所有 Project，只能在 Main 且非受限群聊路由的 Turn 中创建；请改用 scope=\"project\""})
 	case errors.Is(err, app.ErrKnowledgeReadOnly):
 		writeJSON(writer, http.StatusForbidden, map[string]any{"ok": false, "error": "knowledge_entry_read_only", "message": "该知识来自外部引用型绑定；请切换为项目协作型，或在来源 Project 中提交修订"})
+	case errors.Is(err, app.ErrKnowledgeReadSourceMismatch):
+		writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": "knowledge_read_source_mismatch", "message": err.Error()})
 	case errors.Is(err, app.ErrAgentTurnInactive):
 		writeError(writer, http.StatusConflict, "agent_turn_inactive")
 	case errors.Is(err, app.ErrRevisionConflict), errors.Is(err, store.ErrKnowledgeProposalRevision), errors.Is(err, store.ErrKnowledgeProposalPending):

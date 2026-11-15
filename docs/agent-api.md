@@ -143,8 +143,6 @@ POST /api/v1/agent/channel/reply-decision
 GET  /api/v1/agent/knowledge
 GET  /api/v1/agent/knowledge/{id}
 GET  /api/v1/agent/knowledge/guide
-POST /api/v1/agent/knowledge/candidates
-POST /api/v1/agent/knowledge/{id}/feedback
 POST /api/v1/agent/knowledge/entries
 POST /api/v1/agent/knowledge/feedback
 GET  /api/v1/agent/skills
@@ -159,6 +157,10 @@ and the slim `prompt` block injected into Task Prompts. It reads the file
 directly, so it still works while the index is rebuilding; when the file is
 missing the endpoint returns 404 and Task Prompts use the built-in fallback.
 The guide is not repeated inside the regular knowledge list.
+
+Agent 模板只教 `entries` 与 `feedback` 两个写入端点。旧 candidates 与按 ID feedback
+路径仅为读取旧表项目的兼容层保留，新流程和文档不再推荐，也不会把 vault 生效项目的
+反馈写回旧库。
 
 `GET /api/v1/agent/knowledge` marks bound project entries with `binding_mode` and
 `can_propose_revision`. A `project` binding allows the current Project's Main
@@ -186,9 +188,10 @@ Agent 读写跟随 owner 可见的单一「文件知识库」总开关：开启�
 **不会**静默回退旧表；项目本身读旧表时该接口继续复用 proposal 流程，旧表和旧 skills 保留。
 
 `POST /api/v1/agent/knowledge/feedback` 接受 `entry_id` 和 `kind=helped|stale|wrong`。
-stale/wrong 只更新状态并进入待修订队列，不修改正文；helped 只记录正向反馈。该接口与
-entries 一样按读取来源选择 vault 或 legacy，并在写入后立即可被同一 Turn 的
-`GET /api/v1/agent/knowledge` 读到。
+stale/wrong 只更新状态并进入待修订队列，不修改正文；helped 只记录正向反馈。反馈按条目
+ID 解析 scope 后跟随读取源：global 条目不依赖项目绑定，只要全局知识读 vault 就写 vault；
+project 条目跟随所属 Project 的读取源。vault 可读但写入关闭时返回 409，绝不回退旧表。
+反馈写入后立即可被同一 Turn 的 `GET /api/v1/agent/knowledge` 读到。
 
 Knowledge 只返回当前 Project/Product Line 可用的已发布条目；更新已有条目必须携带
 `base_revision`。Agent 提交的新知识或修订统一先创建 proposal；手动评审模式保持 pending，

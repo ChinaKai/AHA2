@@ -99,7 +99,7 @@ Agent 读取、技能加载和写入都跟随同一个 owner 总开关，没有�
 - `POST /api/v1/agent/knowledge/entries` 支持 `mode=create|revise`。create 必须提供六种规范 `type` 之一、`title`、`summary`、`body`、以及 `search_query` 或 `duplicate_ack`；服务端按标题分配文件名，不接受客户端路径。与已有文档高度相似（Dice 相似度 ≥ 0.8）的 create 返回 409 `duplicate_knowledge` 与 `duplicate_candidates`，确认后可带 `duplicate_ack` 重试。
 - revise 必须提供 `entry_id` 和 `base_revision`（可选 `base_hash`）；revision 或 hash 与磁盘不一致返回 409 `knowledge_revision_conflict`，不会覆盖更新版本。写入成功后 revision + 1 并同步重建索引。
 - 路径策略：项目知识只能写入已存在的 topic group（含 `index.md` 的子目录）或 `projects/<slug>/inbox/`；全局知识只能进入 `global/inbox/`。Agent 不能创建项目根、topic group、`index.md`、`skills`、`archive`、`orphans`、`.trash`，路径穿越、绝对路径、反斜杠和 symlink 目标一律拒绝。
-- `POST /api/v1/agent/knowledge/feedback` 支持 `helped|stale|wrong`。`stale`/`wrong` 只改 frontmatter `status` 并进入待修订队列，不改正文、不增加 revision；`helped` 只记录正向反馈。两种来源都不会因反馈改写正文。
+- `POST /api/v1/agent/knowledge/feedback` 支持 `helped|stale|wrong`。`stale`/`wrong` 只改 frontmatter `status` 并进入待修订队列，不改正文、不增加 revision；`helped` 只记录正向反馈。两种来源都不会因反馈改写正文。反馈按条目 ID 跟随实际读取源：global 条目不依赖项目绑定，全局知识读 vault 时就写 vault；不会因为项目未绑定而写旧表。
 - 原子性：临时文件写入并 fsync 后 rename，随后重建索引；任一步失败会恢复旧文件并回滚索引重建，不留下半写文件。审计（`source_task`、`source_turn`、旧 revision、diff 摘要、writer）与幂等键、每 Task/Turn 默认 3 条写入预算保存在 vault 内 `.aha/agent-writes.json`。
 
 ## 示例知识库（体验数据，可删除）

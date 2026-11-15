@@ -116,6 +116,62 @@ func EnsureGuide(vaultPath string, now time.Time) (bool, error) {
 	return true, nil
 }
 
+// legacyGuideReplacements are the retired Agent endpoint spellings and the
+// one-line descriptions that only made sense for the old candidates batch.
+// RepairGuideEndpoints applies them verbatim so an existing guide stops
+// teaching a URL that writes the legacy tables.
+var legacyGuideReplacements = []struct{ old, new string }{
+	{"/api/v1/agent/knowledge/candidates", "/api/v1/agent/knowledge/entries"},
+	{"/api/v1/agent/knowledge/{id}/feedback", "/api/v1/agent/knowledge/feedback"},
+	{"/api/v1/agent/knowledge/{knowledge}/feedback", "/api/v1/agent/knowledge/feedback"},
+	{"POST /api/v1/agent/knowledge/feedback`：提交 ", "POST /api/v1/agent/knowledge/feedback`（`entry_id` + `kind`）：提交 "},
+	{"（每批 1–20 条，标题 ≤300 字符，正文 ≤20000 字符）", "（mode=create|revise，单篇写入，标题 ≤300 字符，正文 ≤20000 字符）"},
+	{"（1–20 条，标题 ≤300、正文 ≤20000 字符）", "（mode=create|revise，单篇写入，标题 ≤300、正文 ≤20000 字符）"},
+	{"：提交候选，每批 1–20 条。", "：创建或修订单篇知识，`mode=create|revise`。"},
+	{"候选标题不超过 300 字符，正文不超过 20000 字符。", "创建时标题不超过 300 字符，正文不超过 20000 字符；修订需携带 `entry_id` 和当前 `base_revision`。"},
+}
+
+// RepairGuideEndpoints rewrites the retired Agent endpoint strings in an
+// existing canonical guide. It never creates the guide (EnsureGuide does
+// that), never deletes or reformats surrounding text, and returns false
+// without writing when the file is already current, so every startup can
+// safely run it.
+func RepairGuideEndpoints(vaultPath string) (bool, error) {
+	vaultPath = strings.TrimSpace(vaultPath)
+	if vaultPath == "" {
+		return false, fmt.Errorf("repair knowledge guide: empty vault path")
+	}
+	target := filepath.Join(vaultPath, filepath.FromSlash(GuideRelativePath))
+	if _, err := os.Lstat(target); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("stat knowledge guide: %w", err)
+	}
+	if !IsInsideRoot(vaultPath, target) {
+		return false, fmt.Errorf("knowledge guide escapes the vault root")
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read knowledge guide: %w", err)
+	}
+	content := string(data)
+	repaired := content
+	for _, replacement := range legacyGuideReplacements {
+		repaired = strings.ReplaceAll(repaired, replacement.old, replacement.new)
+	}
+	if repaired == content {
+		return false, nil
+	}
+	if err := writeVaultFileIfChanged(vaultPath, target, []byte(repaired), 0o644); err != nil {
+		return false, fmt.Errorf("update knowledge guide endpoints: %w", err)
+	}
+	return true, nil
+}
+
 func extractPromptGuide(content string) string {
 	start := strings.Index(content, guidePromptStart)
 	if start < 0 {
@@ -136,7 +192,7 @@ func fallbackPromptGuide() string {
 - 六种 type：navigation、decision、practice、diagnostic、reference、architecture。写入前先搜索相同主题，优先更新已有文档。
 - 根下叶子文档放 inbox/；过时用 stale、错误用 wrong、有帮助用 helped 反馈，不要直接改状态。
 - 禁止凭据、密钥、个人隐私、大段日志/二进制、无证据猜测和可直接执行的攻击载荷。
-- Agent API：GET /api/v1/agent/knowledge、GET /api/v1/agent/knowledge/{id}、GET /api/v1/agent/knowledge/guide、POST /api/v1/agent/knowledge/candidates（每批 1–20 条，标题 ≤300 字符，正文 ≤20000 字符）、POST /api/v1/agent/knowledge/{id}/feedback。
+- Agent API：GET /api/v1/agent/knowledge、GET /api/v1/agent/knowledge/{id}、GET /api/v1/agent/knowledge/guide、POST /api/v1/agent/knowledge/entries（mode=create|revise，单篇写入，标题 ≤300 字符，正文 ≤20000 字符）、POST /api/v1/agent/knowledge/feedback（entry_id + kind）。
 `)
 }
 
@@ -207,10 +263,10 @@ func defaultGuideContent(now time.Time) string {
 - ` + "`GET /api/v1/agent/knowledge`" + `：列出当前 Task 可读知识。
 - ` + "`GET /api/v1/agent/knowledge/{id}`" + `：读取单篇知识。
 - ` + "`GET /api/v1/agent/knowledge/guide`" + `：读取本指南。
-- ` + "`POST /api/v1/agent/knowledge/candidates`" + `：提交候选，每批 1–20 条。
-- ` + "`POST /api/v1/agent/knowledge/{id}/feedback`" + `：提交 ` + "`stale`" + `、` + "`wrong`" + ` 或 ` + "`helped`" + `。
+- ` + "`POST /api/v1/agent/knowledge/entries`" + `：创建或修订单篇知识，` + "`mode=create|revise`" + `。
+- ` + "`POST /api/v1/agent/knowledge/feedback`" + `：用 ` + "`entry_id`" + ` 提交 ` + "`stale`" + `、` + "`wrong`" + ` 或 ` + "`helped`" + `。
 
-候选标题不超过 300 字符，正文不超过 20000 字符。写 API 和 auto-apply 未启用时，候选只进入待审队列，不会直接修改 vault。
+创建时标题不超过 300 字符，正文不超过 20000 字符；修订需携带 ` + "`entry_id`" + ` 和当前 ` + "`base_revision`" + `。写入来源跟随读取来源：vault 生效时直接写文件，旧库项目仍走待审提案。
 
 ## Task Prompt 精简版
 
@@ -223,7 +279,7 @@ func defaultGuideContent(now time.Time) string {
 - 先搜索再写；优先更新已有文档。根下叶子放 inbox/。
 - 过时用 stale、错误用 wrong、有帮助用 helped 反馈，不直接改状态。
 - 禁止凭据、隐私、大段日志/二进制、无证据猜测和恶意载荷。
-- API：GET /api/v1/agent/knowledge、GET /api/v1/agent/knowledge/{id}、GET /api/v1/agent/knowledge/guide、POST /api/v1/agent/knowledge/candidates（1–20 条，标题 ≤300、正文 ≤20000 字符）、POST /api/v1/agent/knowledge/{id}/feedback。
+- API：GET /api/v1/agent/knowledge、GET /api/v1/agent/knowledge/{id}、GET /api/v1/agent/knowledge/guide、POST /api/v1/agent/knowledge/entries（mode=create|revise，单篇写入，标题 ≤300、正文 ≤20000 字符）、POST /api/v1/agent/knowledge/feedback（entry_id + kind）。
 ` + guidePromptEnd + `
 `)
 	return renderDocumentPanicFree(frontmatter, body)

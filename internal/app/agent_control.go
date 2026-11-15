@@ -489,29 +489,21 @@ func (s *Service) SubmitAgentKnowledgeFeedback(ctx context.Context, claims agent
 	if channelContext, channelErr := s.store.ChannelContextForInboxBatch(ctx, call.Turn.InboxBatchID); channelErr == nil && channelRouteMode(channelContext) != "task_route" {
 		return domain.KnowledgeEntry{}, ErrAgentCallForbidden
 	}
-	entry, err := s.store.Knowledge(ctx, strings.TrimSpace(feedback.EntryID))
-	if err != nil {
-		return domain.KnowledgeEntry{}, ErrAgentCallForbidden
-	}
-	if entry.Scope == "project" && entry.ProjectID != call.Project.ID {
-		allowed, bindingErr := s.store.CanContributeKnowledgeLibrary(ctx, entry.ProjectID, call.Project.ID)
-		if bindingErr != nil {
-			return domain.KnowledgeEntry{}, bindingErr
-		}
-		if !allowed {
-			return domain.KnowledgeEntry{}, ErrKnowledgeReadOnly
-		}
-	}
 	kind := strings.TrimSpace(feedback.Kind)
 	if kind != "helped" && kind != "stale" && kind != "wrong" {
 		return domain.KnowledgeEntry{}, fmt.Errorf("invalid knowledge feedback")
 	}
-	entry, err = s.store.FeedbackKnowledge(ctx, entry.ID, kind, timeString(s.now().UTC()))
-	if err == nil {
-		s.linkTaskMemoryKnowledge(ctx, call.Task.ID, entry)
-		s.emit(ctx, call.Task.ID, "knowledge", entry.ID, "knowledge_feedback_recorded", map[string]any{"kind": kind, "title": entry.Title})
+	// The legacy endpoint keeps its historical permission scope (any Agent in a
+	// task route may mark global knowledge), but it must still write the source
+	// the reader uses: an ID that resolves to the vault is written to the vault.
+	outcome, err := s.submitAgentKnowledgeFeedbackForCall(ctx, call, feedback.EntryID, kind, true, "")
+	if err != nil {
+		return domain.KnowledgeEntry{}, err
 	}
-	return entry, err
+	if outcome.Knowledge == nil {
+		return domain.KnowledgeEntry{}, fmt.Errorf("knowledge feedback did not return an entry")
+	}
+	return *outcome.Knowledge, nil
 }
 
 func (s *Service) SubmitAgentCollaboration(ctx context.Context, claims agentapi.Claims, actions []AgentAction, mainFollowup string) (string, int, error) {
