@@ -311,3 +311,30 @@ func TestApplyVaultSkillPackagesUsesVaultAndFallsBack(t *testing.T) {
 		t.Fatal("test unexpectedly created a legacy skill directory")
 	}
 }
+
+// The project convenience view must not let the project gate decide global
+// knowledge: with both scopes on the vault, a global stale entry belongs to the
+// global reader only. The pre-task-486 implementation pulled global entries
+// (including global stale rows) through the project branch's single reader.
+func TestVaultKnowledgeForProjectKeepsProjectAndGlobalGatesIndependent(t *testing.T) {
+	withUnsetEnv(t, knowledgeVaultReadProjectsEnv)
+	files := vaultCanaryFiles()
+	files["global/general/global-stale.md"] = "---\nid: knowledge_global_stale\ntitle: 全局旧文\nscope: global\ntype: practice\nstatus: stale\n---\n全局待修订正文。\n"
+	manager := buildVaultReadManager(t, true, files)
+	service := &Service{knowledgeVault: manager, knowledgeVaultRuntimeRead: true}
+	snapshot, ok := service.vaultKnowledgeForProject(context.Background(), petProjectID)
+	if !ok {
+		t.Fatal("vault-bound project did not produce a snapshot")
+	}
+	if !knowledgeEntryIDs(snapshot.Project)["knowledge_pet_note"] {
+		t.Fatalf("project entries=%#v", snapshot.Project)
+	}
+	if !knowledgeEntryIDs(snapshot.Global)["knowledge_shared"] {
+		t.Fatalf("global entries=%#v", snapshot.Global)
+	}
+	for _, entry := range snapshot.Stale {
+		if entry.ID == "knowledge_global_stale" {
+			t.Fatalf("project gate pulled a global stale entry into the project snapshot: %#v", snapshot.Stale)
+		}
+	}
+}

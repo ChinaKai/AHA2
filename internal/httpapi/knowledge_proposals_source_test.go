@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -137,5 +138,14 @@ func TestKnowledgeProposalListsHideLegacyRowsForVaultProject(t *testing.T) {
 		}
 	}
 	check("/api/v1/knowledge/proposals?status=pending&limit=0")
-	check("/api/v1/knowledge?scope=project&project_id=" + project.ID)
+	// task-488 disables the legacy list on a vault-routed project entirely, so
+	// no legacy proposal can leak through that surface.
+	response, err := client.Get(server.URL + "/api/v1/knowledge?scope=project&project_id=" + project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("vault project legacy list status=%d, want 409", response.StatusCode)
+	}
 }

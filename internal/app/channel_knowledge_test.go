@@ -376,6 +376,10 @@ func TestKnowledgeReadFailsClosedWhenTheVaultIsUnreadable(t *testing.T) {
 	if _, _, _, err := service.globalKnowledgeForTask(ctx, false); err == nil {
 		t.Fatal("task global knowledge silently fell back to legacy")
 	}
+	if snapshot, ok := service.vaultKnowledgeForProject(ctx, project.ID); ok ||
+		len(snapshot.Project)+len(snapshot.Global)+len(snapshot.Stale) != 0 {
+		t.Fatalf("vaultKnowledgeForProject fell back to legacy: ok=%v snapshot=%#v", ok, snapshot)
+	}
 }
 
 func TestApplicableAgentKnowledgeRoutesVaultAndLegacyProjects(t *testing.T) {
