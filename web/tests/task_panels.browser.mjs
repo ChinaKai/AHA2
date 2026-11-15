@@ -60,6 +60,7 @@ window.fetch = async (input, init = {}) => {
   if (path === "/api/v1/skills") return json({skills: SKILLS});
   if (path === "/api/v1/knowledge-vault/skills") return json({ok: true, enabled: true, index_ready: true, runtime_read: true, bound_project_ids: ["project-1"], skills: [
     {key: "vault-skill:project:project-1:vault-review", id: "vs-1", slug: "vault-review", name: "Vault review", scope: "project", project_id: "project-1", library: "Project One", description: "from the vault", file_count: 2, files: ["SKILL.md"], relative_path: "projects/project-1/skills/vault-review", absolute_path: "/vault/projects/project-1/skills/vault-review", open_path: "/vault/projects/project-1/skills/vault-review", source: "vault", auto_attach: true, auto_attach_effective: true, auto_attach_confirmed: false, can_update: true, project_bound: true},
+    {key: "vault-skill:archive:project-1:old-review", id: "vs-old", slug: "old-review", name: "Archived vault review", scope: "archive", project_id: "project-1", library: "Project One", description: "read only", file_count: 1, files: ["SKILL.md"], relative_path: "archive/project-1/skills/old-review", absolute_path: "/vault/archive/project-1/skills/old-review", open_path: "/vault/archive/project-1/skills/old-review", source: "vault", auto_attach: true, auto_attach_effective: false, auto_attach_confirmed: false, can_update: false, project_bound: true, unavailable_reason: "archive_read_only"},
   ]});
   if (path === "/api/v1/models") return json({models: [{id: "model-1", display_name: "Stub model", provider_id: "provider-1", source: "provider", backend: "codex", wire_model: "stub", default_env_group_id: "env-1", created_at: new Date().toISOString(), updated_at: new Date().toISOString()}]});
   if (path === "/api/v1/providers") return json({providers: [{id: "provider-1", name: "Provider", auth_style: "none"}]});
@@ -199,6 +200,10 @@ try {
   assert.equal(await vaultSkill.count(), 1, "the vault skill is missing from the create panel");
   assert.equal(await vaultSkill.isChecked(), true, "the auto-enabled vault skill was not inherited");
   assert.match(await page.locator('#task-skills-fold input[value="vault-skill:project:project-1:vault-review"]').locator("xpath=..").innerText(), /vault 技能/);
+  // Archived vault packages are read-only: the catalog may auto-mark them, but
+  // they must never become a selectable option the server would reject.
+  assert.equal(await page.locator('#task-skills-fold input[value="vault-skill:archive:project-1:old-review"]').count(), 0, "an archive vault skill leaked into the task selector");
+  assert.doesNotMatch(await page.locator("#task-skills-fold").innerText(), /Archived vault review/);
   await page.locator('#task-skills-fold input[value="skill-a"]').setChecked(true);
   await page.locator('#task-skills-fold input[value="skill-b"]').setChecked(true);
   assert.match(await page.locator("#task-skills-fold [data-fold-count]").innerText(), /已选 3/);

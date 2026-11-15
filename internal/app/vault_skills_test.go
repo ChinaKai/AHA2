@@ -3,12 +3,14 @@ package app
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
+	"github.com/ChinaKai/AHA2/internal/knowledgevault"
 	"github.com/ChinaKai/AHA2/internal/secrets"
 	"github.com/ChinaKai/AHA2/internal/store"
 )
@@ -22,6 +24,8 @@ func vaultSkillFiles() map[string]string {
 	files["global/skills/demo/scripts/check.sh"] = "#!/bin/sh\necho vault\n"
 	files["projects/vault-skills/skills/vault-review/SKILL.md"] = "---\nname: Vault Review\ndescription: Project vault review\n---\n\n# Vault Review\n"
 	files["projects/vault-skills/skills/vault-review/scripts/run.sh"] = "#!/bin/sh\necho review\n"
+	// Same slug as the global demo skill: auto-attach must keep only one copy.
+	files["projects/vault-skills/skills/demo/SKILL.md"] = "---\nname: Demo\ndescription: Project demo skill\n---\n\n# Project Demo\n"
 	return files
 }
 
@@ -34,6 +38,40 @@ type vaultSkillsFixture struct {
 }
 
 func newVaultSkillsFixture(t *testing.T) vaultSkillsFixture {
+	t.Helper()
+	return newVaultSkillsFixtureWithManager(t, buildVaultReadManager(t, true, vaultSkillFiles()))
+}
+
+// buildVaultSkillManagerWithoutIndex opens a real vault with skill files but
+// no index, which is the cold-start/rebuild window the catalog must report.
+func buildVaultSkillManagerWithoutIndex(t *testing.T) *knowledgevault.Manager {
+	t.Helper()
+	ctx := context.Background()
+	config := knowledgevault.DefaultConfig(t.TempDir())
+	if _, err := knowledgevault.Bootstrap(config, knowledgevault.InitOptions{VaultName: "Vault Skills"}); err != nil {
+		t.Fatal(err)
+	}
+	for relative, content := range vaultSkillFiles() {
+		target := filepath.Join(config.VaultPath, filepath.FromSlash(relative))
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manager, err := knowledgevault.NewManager(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.SetEnabled(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	return manager
+}
+
+func newVaultSkillsFixtureWithManager(t *testing.T, manager *knowledgevault.Manager) vaultSkillsFixture {
 	t.Helper()
 	ctx := context.Background()
 	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
@@ -65,7 +103,6 @@ func newVaultSkillsFixture(t *testing.T) vaultSkillsFixture {
 	if err := database.UpsertModel(ctx, model); err != nil {
 		t.Fatal(err)
 	}
-	manager := buildVaultReadManager(t, true, vaultSkillFiles())
 	service := NewService(database, secretStore, &stubExecutor{})
 	service.SetKnowledgeVault(manager, true)
 	return vaultSkillsFixture{service: service, database: database, ctx: ctx, project: project, workspace: workspace}
@@ -177,6 +214,30 @@ func TestVaultGlobalAutoAttachRequiresSecondConfirmation(t *testing.T) {
 	}
 }
 
+func TestVaultAutoAttachDeduplicatesSameSlugByProject(t *testing.T) {
+	withUnsetEnv(t, knowledgeVaultReadProjectsEnv)
+	fixture := newVaultSkillsFixture(t)
+	ctx := fixture.ctx
+	if _, err := fixture.service.SetVaultSkillAutoAttach(ctx, "vault-skill:global:demo", true, true); err != nil {
+		t.Fatal(err)
+	}
+	projectKey := "vault-skill:project:" + fixture.project.ID + ":demo"
+	if _, err := fixture.service.SetVaultSkillAutoAttach(ctx, projectKey, true, false); err != nil {
+		t.Fatal(err)
+	}
+	keys := fixture.service.vaultAutoAttachSkillKeys(ctx, fixture.project.ID)
+	if len(keys) != 1 || keys[0] != projectKey {
+		t.Fatalf("same-slug auto-attach = %#v, want only %s", keys, projectKey)
+	}
+	task := fixture.createTask(t, nil)
+	if hasTaskSkill(task, "vault-skill:global:demo") {
+		t.Fatalf("the global copy of a project skill was auto-attached: %#v", task.SkillIDs)
+	}
+	if !hasTaskSkill(task, projectKey) {
+		t.Fatalf("the project copy was not auto-attached: %#v", task.SkillIDs)
+	}
+}
+
 func TestVaultSkillAutoAttachDegradesForUnboundProject(t *testing.T) {
 	withUnsetEnv(t, knowledgeVaultReadProjectsEnv)
 	fixture := newVaultSkillsFixture(t)
@@ -226,5 +287,51 @@ func TestApplyVaultSkillPackagesStillPrefersVaultAndFallsBack(t *testing.T) {
 	}
 	if len(result[1].PackageFiles) != 1 || result[1].PackageFiles[0].Content != "legacy" {
 		t.Fatalf("missing vault package did not fall back: %#v", result[1])
+	}
+}
+
+func TestVaultSkillAutoAttachRequiresIndexReady(t *testing.T) {
+	withUnsetEnv(t, knowledgeVaultReadProjectsEnv)
+	fixture := newVaultSkillsFixtureWithManager(t, buildVaultSkillManagerWithoutIndex(t))
+	ctx := fixture.ctx
+	view, err := fixture.service.SetVaultSkillAutoAttach(ctx, "vault-skill:global:demo", true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.AutoAttachEffective {
+		t.Fatalf("write response reported effective without an index: %#v", view)
+	}
+	if view.UnavailableReason != "index_not_ready" {
+		t.Fatalf("write response reason = %q, want index_not_ready", view.UnavailableReason)
+	}
+	catalog, err := fixture.service.VaultSkillCatalog(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if catalog.IndexReady {
+		t.Fatal("catalog reported an index that does not exist")
+	}
+	found := false
+	for _, item := range catalog.Skills {
+		if item.Key != "vault-skill:global:demo" {
+			continue
+		}
+		found = true
+		if !item.AutoAttach || item.AutoAttachEffective {
+			t.Fatalf("catalog auto-attach state without an index = %#v", item)
+		}
+		if item.UnavailableReason != "index_not_ready" {
+			t.Fatalf("catalog reason = %q, want index_not_ready", item.UnavailableReason)
+		}
+	}
+	if !found {
+		t.Fatal("global vault skill missing from the catalog")
+	}
+	if keys := fixture.service.vaultAutoAttachSkillKeys(ctx, fixture.project.ID); len(keys) != 0 {
+		t.Fatalf("auto-attach ran without an index: %#v", keys)
+	}
+	task := fixture.createTask(t, nil)
+	if hasTaskSkill(task, "vault-skill:global:demo") {
+		t.Fatalf("task inherited a vault skill while the index was unavailable: %#v", task.SkillIDs)
 	}
 }

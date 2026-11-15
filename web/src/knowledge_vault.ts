@@ -45,6 +45,7 @@ const localText: Record<string, [zhCN: string, enUS: string]> = {
   "kv.skillGlobalHint": ["开启后，所有已绑定知识库的项目新建任务时默认选中；创建任务时仍可取消。", "When on, every project bound to the knowledge vault preselects this skill for new tasks; it can still be removed there."],
   "kv.skillProjectHint": ["开启后，该项目新建任务时默认选中；创建任务时仍可取消。", "When on, new tasks in this project preselect this skill; it can still be removed there."],
   "kv.skillRuntimeOff": ["知识库运行时读取未开启，vault 技能不会自动启用。", "Knowledge vault runtime reads are off, so vault skills will not auto-enable."],
+  "kv.skillIndexNotReady": ["知识库索引尚未就绪，vault 技能暂不可用。", "The knowledge vault index is not ready, so vault skills are unavailable."],
   "kv.skillProjectNotBound": ["当前项目未绑定知识库项目库，vault 技能不会自动启用。", "This project is not bound to a vault project library, so vault skills will not auto-enable."],
   "kv.skillArchiveReadonly": ["归档技能只读，不能自动启用。", "Archived skills are read-only and cannot auto-enable."],
   "kv.skillPending": ["偏好已保存，但当前条件下暂不生效。", "The preference is saved but does not take effect under the current conditions."],
@@ -441,10 +442,9 @@ interface VaultState {
   skills: KnowledgeVaultSkill[];
   skillsState: LoadState;
   skillsError: string;
-  // The catalog reports the runtime gate and bound projects once, so each card
-  // can explain why auto-attach would not take effect without extra requests.
+  // The catalog reports the runtime gate once, so each card can explain why
+  // auto-attach would not take effect without extra requests.
   skillRuntimeRead: boolean;
-  skillBoundProjectIDs: string[];
   skillBusy: string;
   searchOpen: boolean;
   searchQuery: string;
@@ -560,7 +560,7 @@ function initialState(): VaultState {
     previewTab: "diff", previewDiff: null, previewDiffState: "idle", previewDiffError: "",
     inbox: null, inboxState: "idle", inboxError: "",
     skills: [], skillsState: "idle", skillsError: "",
-    skillRuntimeRead: false, skillBoundProjectIDs: [], skillBusy: "",
+    skillRuntimeRead: false, skillBusy: "",
     searchOpen: false, searchQuery: "", searchScope: "all",
     searchType: "", searchStatus: "", searchTag: "",
     searchState: "idle", searchError: "", searchResults: [],
@@ -1475,6 +1475,8 @@ function skillAutoHint(skill: KnowledgeVaultSkill): string {
   switch (skill.unavailable_reason) {
     case "runtime_read_off":
       return kt("kv.skillRuntimeOff");
+    case "index_not_ready":
+      return kt("kv.skillIndexNotReady");
     case "project_not_bound":
       return kt("kv.skillProjectNotBound");
     case "archive_read_only":
@@ -2173,7 +2175,6 @@ async function loadSkills(force = false): Promise<void> {
     const payload: KnowledgeVaultSkills = await api.knowledgeVaultSkills();
     state.skills = payload.skills || [];
     state.skillRuntimeRead = Boolean(payload.runtime_read);
-    state.skillBoundProjectIDs = payload.bound_project_ids || [];
     state.skillsState = "ready";
   } catch (error) {
     state.skillsState = "error";

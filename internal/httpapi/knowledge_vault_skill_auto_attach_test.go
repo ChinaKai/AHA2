@@ -12,6 +12,13 @@ import (
 
 func knowledgeVaultSkillManagerFixture(t *testing.T) *knowledgevault.Manager {
 	t.Helper()
+	return knowledgeVaultSkillManagerFixtureAt(t, true)
+}
+
+// knowledgeVaultSkillManagerFixtureAt lets a test open the vault with skill
+// files but no index, matching the cold-start/rebuild window.
+func knowledgeVaultSkillManagerFixtureAt(t *testing.T, withIndex bool) *knowledgevault.Manager {
+	t.Helper()
 	ctx := context.Background()
 	config := knowledgevault.DefaultConfig(t.TempDir())
 	if _, err := knowledgevault.Bootstrap(config, knowledgevault.InitOptions{VaultName: "Skill Vault", Commit: false}); err != nil {
@@ -30,15 +37,17 @@ func knowledgeVaultSkillManagerFixture(t *testing.T) *knowledgevault.Manager {
 	write("global/skills/demo/SKILL.md", "---\nname: Demo\ndescription: A global demo skill\n---\n\n# Demo\n")
 	write("global/skills/demo/scripts/check.sh", "#!/bin/sh\necho demo\n")
 	write("projects/pet/skills/pet-review/SKILL.md", "---\nname: Pet Review\ndescription: A project skill\n---\n\n# Pet Review\n")
-	index, err := knowledgevault.OpenIndex(ctx, config.IndexPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := index.Rebuild(ctx, config.VaultPath); err != nil {
-		t.Fatal(err)
-	}
-	if err := index.Close(); err != nil {
-		t.Fatal(err)
+	if withIndex {
+		index, err := knowledgevault.OpenIndex(ctx, config.IndexPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := index.Rebuild(ctx, config.VaultPath); err != nil {
+			t.Fatal(err)
+		}
+		if err := index.Close(); err != nil {
+			t.Fatal(err)
+		}
 	}
 	manager, err := knowledgevault.NewManager(config)
 	if err != nil {
@@ -169,5 +178,36 @@ func TestKnowledgeVaultSkillsStayDisabledWithTheSwitchOff(t *testing.T) {
 	decodeResponse(t, response, &payload)
 	if response.StatusCode != http.StatusNotFound || payload["error"] != "knowledge_vault_disabled" {
 		t.Fatalf("disabled catalog status=%d payload=%#v", response.StatusCode, payload)
+	}
+}
+
+func TestKnowledgeVaultSkillAutoAttachReportsIndexNotReady(t *testing.T) {
+	manager := knowledgeVaultSkillManagerFixtureAt(t, false)
+	server, client, csrf := knowledgeVaultServer(t, manager)
+
+	response := requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/knowledge-vault/skills", nil, "")
+	var catalog map[string]any
+	decodeResponse(t, response, &catalog)
+	if response.StatusCode != http.StatusOK || catalog["index_ready"] != false {
+		t.Fatalf("catalog without an index status=%d payload=%#v", response.StatusCode, catalog)
+	}
+
+	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/knowledge-vault/skills/auto-attach",
+		map[string]any{"key": "vault-skill:global:demo", "auto_attach": true, "confirm_global": true}, csrf)
+	var accepted map[string]any
+	decodeResponse(t, response, &accepted)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("enable without an index status=%d payload=%#v", response.StatusCode, accepted)
+	}
+	written := accepted["skill"].(map[string]any)
+	if written["auto_attach"] != true || written["auto_attach_effective"] != false || written["unavailable_reason"] != "index_not_ready" {
+		t.Fatalf("write response pretended auto-attach is effective: %#v", written)
+	}
+
+	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/knowledge-vault/skills", nil, "")
+	decodeResponse(t, response, &catalog)
+	demo := vaultSkillByKey(t, catalog, "vault-skill:global:demo")
+	if demo["auto_attach"] != true || demo["auto_attach_effective"] != false || demo["unavailable_reason"] != "index_not_ready" {
+		t.Fatalf("catalog lost the index gate: %#v", demo)
 	}
 }

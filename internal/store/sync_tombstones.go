@@ -82,6 +82,12 @@ func deleteSharedRow(ctx context.Context, tx *sql.Tx, objectType, objectID strin
 		if err := deleteMailBindingsForProjectTx(ctx, tx, objectID); err != nil {
 			return 0, err
 		}
+		// Vault packages live in files, but their auto-attach choice is keyed by
+		// project. Drop the project-scoped rows with the same transaction so a
+		// deleted project cannot leave preferences that fire on a reused ID.
+		if _, err := tx.ExecContext(ctx, `DELETE FROM vault_skill_preferences WHERE project_id=?`, objectID); err != nil {
+			return 0, err
+		}
 		result, err = tx.ExecContext(ctx, `DELETE FROM projects WHERE id=?`, objectID)
 	case "product_line":
 		result, err = tx.ExecContext(ctx, `DELETE FROM product_lines WHERE id=?`, objectID)

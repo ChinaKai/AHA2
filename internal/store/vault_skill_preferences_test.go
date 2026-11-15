@@ -48,3 +48,35 @@ func TestVaultSkillPreferencePersistsAndUpdates(t *testing.T) {
 		t.Fatalf("updated preference = %#v", items[0])
 	}
 }
+
+func TestDeleteProjectRemovesItsVaultSkillPreferences(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Now().UTC().Truncate(time.Second)
+	project := domain.Project{ID: "project_prefs", Name: "Prefs", CreatedAt: now, UpdatedAt: now}
+	if err := database.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []domain.VaultSkillPreference{
+		{SkillID: "vault-skill:global:demo", Scope: "global", AutoAttach: true, UpdatedAt: now},
+		{SkillID: "vault-skill:project:project_prefs:demo", Scope: "project", ProjectID: project.ID, AutoAttach: true, UpdatedAt: now},
+	} {
+		if err := database.SetVaultSkillPreference(ctx, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := database.DeleteProject(ctx, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	items, err := database.ListVaultSkillPreferences(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].SkillID != "vault-skill:global:demo" {
+		t.Fatalf("project deletion left preferences behind: %#v", items)
+	}
+}

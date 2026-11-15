@@ -179,9 +179,10 @@ interface State extends ModelHealthState {
   // Vault packages are not rows in the legacy skills table. They are merged into
   // the task picker only when runtime reads are on and the project is bound.
   vaultSkills: Skill[];
-  vaultSkillsAvailable: boolean;
-  vaultSkillsRuntimeRead: boolean;
-  vaultSkillsBoundProjects: string[];
+  vaultSkillsOn: boolean;
+  vaultSkillsRead: boolean;
+  vaultSkillsIndex: boolean;
+  vaultSkillsBound: string[];
   mcpServers: MCPServer[];
   selectedTask: TaskDetail | null;
   taskConversation: ConversationItem[];
@@ -624,9 +625,10 @@ const state: State = {
   knowledgeVaultEnabled: null,
   skills: [],
   vaultSkills: [],
-  vaultSkillsAvailable: false,
-  vaultSkillsRuntimeRead: false,
-  vaultSkillsBoundProjects: [],
+  vaultSkillsOn: false,
+  vaultSkillsRead: false,
+  vaultSkillsIndex: false,
+  vaultSkillsBound: [],
   mcpServers: [],
   selectedTask: null,
   taskConversation: [],
@@ -1608,7 +1610,7 @@ let vaultTaskSkillsModule: typeof import("./task_vault_skills.js") | null = null
 
 function availableVaultTaskSkills(projectID: string, includeIDs: string[] = []): Skill[] {
   return vaultTaskSkillsModule
-    ? vaultTaskSkillsModule.vaultTaskSkillsForProject(state.vaultSkills, state.vaultSkillsRuntimeRead, state.vaultSkillsBoundProjects, projectID, includeIDs)
+    ? vaultTaskSkillsModule.vaultTaskSkillsForProject(state.vaultSkills, state.vaultSkillsRead, state.vaultSkillsIndex, state.vaultSkillsBound, projectID, includeIDs)
     : [];
 }
 
@@ -1626,7 +1628,7 @@ function availableTaskSkills(projectID: string, includeIDs: string[] = []): Skil
 
 function taskSkillSourceHint(projectID: string): string {
   return vaultTaskSkillsModule
-    ? vaultTaskSkillsModule.vaultTaskSkillHint(state.vaultSkillsAvailable, state.vaultSkillsRuntimeRead, state.vaultSkillsBoundProjects, projectID)
+    ? vaultTaskSkillsModule.vaultTaskSkillHint(state.vaultSkillsOn, state.vaultSkillsRead, state.vaultSkillsIndex, state.vaultSkillsBound, projectID)
     : "";
 }
 
@@ -2868,9 +2870,10 @@ async function ensureViewData(view: View, force = false): Promise<void> {
       vaultTaskSkillsModule = module;
       const vault = await module.loadVaultTaskSkills();
       state.vaultSkills = vault.skills;
-      state.vaultSkillsAvailable = vault.available;
-      state.vaultSkillsRuntimeRead = vault.runtimeRead;
-      state.vaultSkillsBoundProjects = vault.boundProjects;
+      state.vaultSkillsOn = vault.available;
+      state.vaultSkillsRead = vault.runtimeRead;
+      state.vaultSkillsIndex = vault.indexReady;
+      state.vaultSkillsBound = vault.boundProjects;
     } catch {
       // A stale cached index can miss the chunk; legacy skills still load.
     }

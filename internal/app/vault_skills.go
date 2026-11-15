@@ -120,10 +120,10 @@ func (s *Service) VaultSkillCatalog(ctx context.Context, projectID string) (Vaul
 				ProjectBound:        bound,
 			}
 			if view.CanUpdate {
-				view.AutoAttachEffective = preference.AutoAttach && result.RuntimeRead && bound &&
+				view.AutoAttachEffective = preference.AutoAttach && result.RuntimeRead && result.IndexReady && bound &&
 					(skill.Scope != "global" || view.AutoAttachConfirmed)
 			}
-			view.UnavailableReason = vaultSkillUnavailableReason(result.RuntimeRead, projectID, bound, view.CanUpdate)
+			view.UnavailableReason = vaultSkillUnavailableReason(result.RuntimeRead, result.IndexReady, projectID, bound, view.CanUpdate)
 			result.Skills = append(result.Skills, view)
 		}
 		return nil
@@ -140,12 +140,15 @@ func (s *Service) VaultSkillCatalog(ctx context.Context, projectID string) (Vaul
 	return result, nil
 }
 
-func vaultSkillUnavailableReason(runtimeRead bool, projectID string, bound, autoAttachable bool) string {
+func vaultSkillUnavailableReason(runtimeRead, indexReady bool, projectID string, bound, autoAttachable bool) string {
 	if !autoAttachable {
 		return "archive_read_only"
 	}
 	if !runtimeRead {
 		return "runtime_read_off"
+	}
+	if !indexReady {
+		return "index_not_ready"
 	}
 	if projectID != "" && !bound {
 		return "project_not_bound"
@@ -176,7 +179,9 @@ func (s *Service) SetVaultSkillAutoAttach(ctx context.Context, key string, autoA
 	}
 	var view VaultSkillView
 	var resolved bool
+	var indexReady bool
 	err := s.knowledgeVault.WithReader(func(reader *knowledgevault.Reader) error {
+		indexReady = reader.IndexReady()
 		response, err := reader.Skills(ctx)
 		if err != nil {
 			return err
@@ -214,8 +219,10 @@ func (s *Service) SetVaultSkillAutoAttach(ctx context.Context, key string, autoA
 			}
 			view.AutoAttach = autoAttach
 			view.AutoAttachConfirmed = !preference.GlobalAttachConfirmedAt.IsZero()
-			view.AutoAttachEffective = autoAttach && s.knowledgeVaultRuntimeRead &&
+			view.AutoAttachEffective = autoAttach && s.knowledgeVaultRuntimeRead && indexReady &&
 				(skill.Scope != "global" || view.AutoAttachConfirmed)
+			view.ProjectBound = true
+			view.UnavailableReason = vaultSkillUnavailableReason(s.knowledgeVaultRuntimeRead, indexReady, "", true, true)
 			return nil
 		}
 		return nil
@@ -276,7 +283,7 @@ func (s *Service) vaultAutoAttachSkillKeys(ctx context.Context, projectID string
 		log.Printf("knowledge vault auto-attach for project %s: %d preference(s) not applied (%s)", projectID, len(applicable), s.vaultReadDisabledReason(projectID))
 		return nil
 	}
-	available := map[string]bool{}
+	available := map[string]knowledgevault.SkillPackage{}
 	_ = s.knowledgeVault.WithReader(func(reader *knowledgevault.Reader) error {
 		response, err := reader.Skills(ctx)
 		if err != nil {
@@ -284,18 +291,41 @@ func (s *Service) vaultAutoAttachSkillKeys(ctx context.Context, projectID string
 		}
 		for _, skill := range response.Skills {
 			if skill.Scope == "global" || (skill.Scope == "project" && skill.ProjectID == projectID) {
-				available[skill.Key] = true
+				available[skill.Key] = skill
 			}
 		}
 		return nil
 	})
-	result := make([]string, 0, len(applicable))
+	// A global and a project library can carry the same slug. Selecting both
+	// would put two identically named skills into the task prompt, so keep the
+	// more specific project copy and preserve the first-seen order.
+	bySlug := map[string]string{}
+	order := make([]string, 0, len(applicable))
 	for _, item := range applicable {
-		if available[item.SkillID] {
-			result = append(result, item.SkillID)
+		skill, ok := available[item.SkillID]
+		if !ok {
+			log.Printf("knowledge vault auto-attach: skill %s no longer exists in the vault; skipped for project %s", item.SkillID, projectID)
 			continue
 		}
-		log.Printf("knowledge vault auto-attach: skill %s no longer exists in the vault; skipped for project %s", item.SkillID, projectID)
+		slug := strings.TrimSpace(skill.Slug)
+		if slug == "" {
+			slug = skill.Key
+		}
+		current, seen := bySlug[slug]
+		if !seen {
+			order = append(order, slug)
+			bySlug[slug] = item.SkillID
+			continue
+		}
+		if skill.Scope == "project" && available[current].Scope != "project" {
+			bySlug[slug] = item.SkillID
+			continue
+		}
+		log.Printf("knowledge vault auto-attach: skill %s shares slug %q with %s; skipped for project %s", item.SkillID, slug, current, projectID)
+	}
+	result := make([]string, 0, len(order))
+	for _, slug := range order {
+		result = append(result, bySlug[slug])
 	}
 	return result
 }

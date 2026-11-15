@@ -2016,12 +2016,13 @@ export interface KnowledgeVaultSkill {
   source: "vault";
   auto_attach: boolean;
   // Effective means the preference would actually pre-select the skill for new
-  // tasks: runtime read on, project bound, and global confirmation recorded.
+  // tasks: runtime read on, index ready, project bound, and global confirmation
+  // recorded.
   auto_attach_effective: boolean;
   auto_attach_confirmed: boolean;
   can_update: boolean;
   project_bound: boolean;
-  unavailable_reason?: "" | "runtime_read_off" | "project_not_bound" | "archive_read_only";
+  unavailable_reason?: "" | "runtime_read_off" | "index_not_ready" | "project_not_bound" | "archive_read_only";
 }
 
 export interface KnowledgeVaultSkills {
