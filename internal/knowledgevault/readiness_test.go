@@ -1,6 +1,9 @@
 package knowledgevault
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestDefaultVaultEnabled(t *testing.T) {
 	cases := []struct {
@@ -73,6 +76,87 @@ func TestEvaluateReadinessStates(t *testing.T) {
 		result := EvaluateReadiness(input)
 		if result.Status != ReadinessReady || !result.CanEnable || !result.DefaultEnabled {
 			t.Fatalf("verified upgrade readiness = %+v", result)
+		}
+	})
+	t.Run("enabled in-use upgrade keeps legacy as a read-only rollback", func(t *testing.T) {
+		input := readyInput
+		input.LegacyEntries = 4
+		input.LegacySkills = 2
+		input.Configured = true
+		input.Enabled = true
+		result := EvaluateReadiness(input)
+		if result.Status != ReadinessReady || !result.CanEnable {
+			t.Fatalf("in-use upgrade readiness = %+v", result)
+		}
+		if hasCheck(result.Checks, "migration", checkFail) {
+			t.Fatalf("in-use upgrade must not report a migration failure: %+v", result.Checks)
+		}
+		if !hasCheck(result.Checks, "migration", checkOK) {
+			t.Fatalf("migration check = %+v, want ok", result.Checks)
+		}
+		if result.Missing != nil {
+			t.Fatalf("in-use upgrade missing = %v, want none", result.Missing)
+		}
+		if !strings.Contains(result.Message, "只读回滚") {
+			t.Fatalf("in-use message = %q, want a rollback-copy explanation", result.Message)
+		}
+	})
+	t.Run("in-use upgrade with a degraded project still avoids migration", func(t *testing.T) {
+		input := readyInput
+		input.LegacyEntries = 4
+		input.Configured = true
+		input.Enabled = true
+		input.ProjectBindings = map[string]string{"bound": "bound"}
+		input.KnownProjects = []string{"bound", "unbound"}
+		result := EvaluateReadiness(input)
+		if result.Status != ReadinessDegraded || !result.CanEnable {
+			t.Fatalf("in-use degraded readiness = %+v", result)
+		}
+		if hasCheck(result.Checks, "migration", checkFail) || !strings.Contains(result.Message, "只读回滚") {
+			t.Fatalf("in-use degraded must keep the rollback copy: %+v", result)
+		}
+	})
+	t.Run("configured but disabled upgrade still needs migration", func(t *testing.T) {
+		input := readyInput
+		input.LegacyEntries = 4
+		input.Configured = true
+		input.Enabled = false
+		result := EvaluateReadiness(input)
+		if result.Status != ReadinessNeedsMigration || result.CanEnable {
+			t.Fatalf("disabled upgrade readiness = %+v", result)
+		}
+	})
+	t.Run("enabled but unconfigured upgrade still needs migration", func(t *testing.T) {
+		input := readyInput
+		input.LegacyEntries = 4
+		input.Configured = false
+		input.Enabled = true
+		result := EvaluateReadiness(input)
+		if result.Status != ReadinessNeedsMigration || result.CanEnable {
+			t.Fatalf("unconfigured upgrade readiness = %+v", result)
+		}
+	})
+	t.Run("configured fresh install keeps the plain ready message", func(t *testing.T) {
+		input := readyInput
+		input.Configured = true
+		input.Enabled = true
+		result := EvaluateReadiness(input)
+		if result.Status != ReadinessReady || !result.CanEnable {
+			t.Fatalf("configured fresh install readiness = %+v", result)
+		}
+		if strings.Contains(result.Message, "只读回滚") {
+			t.Fatalf("fresh install message mentions a legacy rollback: %q", result.Message)
+		}
+	})
+	t.Run("in-use upgrade with an empty index still needs migration", func(t *testing.T) {
+		input := readyInput
+		input.LegacyEntries = 4
+		input.Configured = true
+		input.Enabled = true
+		input.EntryCount = 0
+		result := EvaluateReadiness(input)
+		if result.Status != ReadinessNeedsMigration || result.CanEnable {
+			t.Fatalf("empty in-use upgrade readiness = %+v", result)
 		}
 	})
 	t.Run("error", func(t *testing.T) {

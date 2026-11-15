@@ -62,6 +62,8 @@ func (s *Server) knowledgeVaultView(ctx context.Context) (knowledgeVaultSettings
 		IndexWarnings:     status.IndexWarnings,
 		ProjectBindings:   status.ProjectBindings,
 		KnownProjects:     known,
+		Configured:        settings.Configured,
+		Enabled:           status.Enabled,
 		LegacyEntries:     inventory.Entries,
 		LegacySkills:      inventory.Skills,
 		LegacySkillDirs:   inventory.SkillPackages,
@@ -261,6 +263,15 @@ func (s *Server) migrateKnowledgeVault(writer http.ResponseWriter, request *http
 		writeJSON(writer, http.StatusConflict, map[string]any{
 			"ok": false, "error": "knowledge_vault_no_legacy_knowledge",
 			"message": err.Error(),
+		})
+		return
+	case errors.Is(err, knowledgevault.ErrTargetNotEmpty):
+		// The vault may already be the live knowledge source without verified
+		// metadata. Never export the legacy database over it; the owner keeps
+		// the current files and the old database as a rollback copy.
+		writeJSON(writer, http.StatusConflict, map[string]any{
+			"ok": false, "error": "knowledge_vault_target_not_empty",
+			"message": "目标文件知识库已有条目或页面；迁移不会覆盖现有文件，也不会删除旧知识库。请继续使用当前知识库，或先备份并移走现有目录后再迁移。",
 		})
 		return
 	case err != nil:

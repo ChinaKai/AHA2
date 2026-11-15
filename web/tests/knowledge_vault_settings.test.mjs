@@ -85,6 +85,32 @@ function upgradeVault(patch = {}) {
   };
 }
 
+// An upgrade where the owner already runs on a populated vault but the
+// migration/import metadata is still empty. Legacy is a rollback copy only.
+function inUseUpgradeVault(patch = {}) {
+  return {
+    ...ready,
+    enabled: true,
+    configured: true,
+    entry_count: 992,
+    migration_verified_at: undefined,
+    readiness: {
+      status: "ready",
+      can_enable: true,
+      default_enabled: false,
+      switch_visible: true,
+      message: "文件知识库已就绪并在使用；旧知识库仅作只读回滚保留，不会被迁移覆盖。",
+      checks: [{
+        id: "migration",
+        status: "ok",
+        message: "文件知识库已启用并在使用；旧知识库仅作只读回滚保留，不会被迁移覆盖",
+      }],
+    },
+    legacy: {entries: 5, skills: 2, skill_packages: 2},
+    ...patch,
+  };
+}
+
 function context() {
   const applied = [];
   const messages = [];
@@ -227,6 +253,59 @@ test("an upgrade shows the legacy rollback switch, blocks enabling and offers mi
     assert.doesNotMatch(html, /id="knowledge-vault-init"/);
     assert.match(html, /未满足：migration/);
     assert.match(html, /3 条 · 1 个技能/);
+  } finally {
+    restore();
+  }
+});
+
+test("an enabled in-use upgrade hides migration and explains the legacy rollback copy", async () => {
+  panel.__resetKnowledgeVaultSettingsForTest();
+  const restore = stub("knowledgeVaultSettings", async () => ({ok: true, settings: inUseUpgradeVault()}));
+  try {
+    const ctx = context();
+    await panel.refreshKnowledgeVaultSettingsPanel(ctx);
+    const html = panel.renderKnowledgeVaultSettingsPanel(ctx);
+    assert.match(html, /type="checkbox" checked/);
+    assert.doesNotMatch(html, /type="checkbox"[^>]*disabled/);
+    // The migration button would export the legacy database over the live
+    // vault, so a running upgrade must never render it.
+    assert.doesNotMatch(html, /id="knowledge-vault-migrate"/);
+    assert.doesNotMatch(html, /id="knowledge-vault-init"/);
+    assert.match(html, /旧知识库仅作只读回滚保留，不会被迁移覆盖/);
+    assert.match(html, /仅作只读回滚保留/);
+    assert.match(html, /已就绪 · 992 条/);
+    assert.match(html, /就绪度：已就绪/);
+  } finally {
+    restore();
+  }
+});
+
+test("an enabled degraded upgrade warns about unbound projects without offering migration", async () => {
+  panel.__resetKnowledgeVaultSettingsForTest();
+  const degraded = inUseUpgradeVault({
+    readiness: {
+      status: "degraded",
+      can_enable: true,
+      default_enabled: false,
+      switch_visible: true,
+      message: "文件知识库已启用，但部分项目仍回退旧知识库或索引需要关注；旧知识库仅作只读回滚保留，不会被迁移覆盖。",
+      checks: [{
+        id: "manifest_binding",
+        status: "warn",
+        message: "1 个项目未绑定，这些项目继续使用旧知识库",
+      }],
+      unbound_projects: ["project-unbound"],
+    },
+  });
+  const restore = stub("knowledgeVaultSettings", async () => ({ok: true, settings: degraded}));
+  try {
+    const ctx = context();
+    await panel.refreshKnowledgeVaultSettingsPanel(ctx);
+    const html = panel.renderKnowledgeVaultSettingsPanel(ctx);
+    assert.match(html, /文件知识库已启用，但/);
+    assert.match(html, /1 个项目未绑定/);
+    assert.doesNotMatch(html, /可以启用，但/);
+    assert.doesNotMatch(html, /id="knowledge-vault-migrate"/);
   } finally {
     restore();
   }

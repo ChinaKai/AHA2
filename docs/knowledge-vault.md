@@ -13,6 +13,7 @@
 
 - 全新安装（没有旧知识或旧技能）：隐藏开关，只显示只读状态；默认启用文件知识库。
 - 旧版本升级（检测到旧知识表或旧技能包，且迁移/导入尚未验证）：显示「旧知识库回退」状态和迁移入口；迁移或导入校验完成前不能启用 vault。
+- 已启用且在用的升级（`configured=1`、`enabled=1`，且 vault 索引已有条目）：视为已经完成启用，就绪度只报告 `ready`/`degraded`，不显示迁移入口；旧知识库仅作只读回滚保留，不会被迁移覆盖。
 - owner 一旦在 Web 切换过，选择写入 `knowledge_vault_settings` 表并优先生效，之后以数据库设置为准。
 - `AHA2_KNOWLEDGE_VAULT_ENABLED` / `--knowledge-vault-enabled` 仅作为支持人员的紧急启动覆盖，不在普通 UI 展示，也不会写回数据库。
 
@@ -26,7 +27,7 @@
 | --- | --- | --- |
 | `ready` | vault、索引、项目绑定和迁移验证都正常 | 可以 |
 | `degraded` | 可以启用，但存在未绑定项目或索引 warning；相关项目继续用旧知识库 | 可以，并显示警告 |
-| `needs_migration` | 检测到旧知识/旧技能，迁移或导入尚未验证 | 不可以 |
+| `needs_migration` | 检测到旧知识/旧技能，迁移或导入尚未验证，且 vault 尚未启用或在用 | 不可以 |
 | `needs_rebuild` | vault 未初始化、索引缺失/不可读，或知识文件比索引新 | 不可以 |
 | `error` | vault 或索引目录不可写/不可读 | 不可以 |
 
@@ -37,6 +38,7 @@
 两类数据入口都完整执行「备份/复制 → 重建索引 → 校验」，校验通过前不会启用 vault：
 
 - **旧知识迁移**：面板「迁移旧知识库并校验」或 `aha2 knowledge-vault migrate-legacy`。先备份 SQLite（`VACUUM INTO`，失败时字节复制）和旧技能包到 `<data-dir>/backups/knowledge-migration-*`，再导出旧知识和技能，重建索引，并逐条校验 ID、标题、文件 sha256 与抽样正文。成功后记录 `source=legacy-migration` 和 `migration_verified_at`；旧数据不删除。
+- 迁移前会检查目标 vault：只要已有索引条目或 Markdown 页面（README 除外），HTTP 与 CLI 都直接拒绝并返回明确错误，不覆盖任何已有文件，也不提供 `--force` 覆盖入口。需要迁移时请先备份并移走现有目录。
 - **已有 vault 导入**：面板「导入已有知识库」或 `aha2 knowledge-vault import --kind local|git`。支持本地目录和 SSH Git 远端（仅 SSH 密钥，不接受密码或 HTTPS token）。复制/克隆后校验 manifest 与项目绑定，补齐缺失的 `index.md`，重建索引并校验。成功后记录 `source=existing-vault` 和 `import_verified_at`。
 - 目标 vault 目录非空时导入直接拒绝，不会自动合并；需要先移走旧目录。
 - Git pull/sync 成功后会自动重建索引并重新计算就绪度；只拉取成功不代表 ready，重建失败会以错误返回并保留 Git 结果。

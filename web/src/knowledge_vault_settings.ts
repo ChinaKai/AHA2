@@ -235,9 +235,15 @@ function settingsBody(): string {
     : "未就绪";
   const source = settings.source === "database" ? "数据库设置" : "启动默认";
   const switchVisible = readiness.switch_visible || settings.configured;
+  const legacyCount = settings.legacy.entries + Math.max(settings.legacy.skills, settings.legacy.skill_packages);
+  // An upgrade can already be running on the vault without migration metadata.
+  // In that state migration stays hidden and legacy is only a rollback copy.
+  const inUseUpgrade = settings.enabled && legacyCount > 0 && readiness.status !== "needs_migration";
   const legacyHint = readiness.status === "needs_migration"
     ? `<small>当前使用旧知识库回退；迁移或导入校验完成前不能启用文件知识库。</small>`
-    : `<small>运行态立即生效，无需重启 AHA2；关闭后 Web、Agent 读写与技能立即回到旧知识库。</small>`;
+    : inUseUpgrade
+      ? `<small>旧知识库仅作只读回滚保留，不会被迁移覆盖；关闭后 Web、Agent 读写与技能立即回到旧知识库。</small>`
+      : `<small>运行态立即生效，无需重启 AHA2；关闭后 Web、Agent 读写与技能立即回到旧知识库。</small>`;
   const switchHTML = !switchVisible
     ? `<div class="field-help knowledge-vault-note">新安装默认使用文件知识库；当前状态${readinessLabels[readiness.status]}。</div>`
     : `<label class="security-setting-toggle knowledge-vault-toggle"><input id="knowledge-vault-enabled" name="knowledge_vault_enabled" type="checkbox" ${settings.enabled ? "checked" : ""} ${busy || blocked ? "disabled" : ""}><span><strong>启用文件知识库（Web 与 Agent 读写、技能）</strong>${legacyHint}</span></label>`;
@@ -248,7 +254,7 @@ function settingsBody(): string {
     ? `<div class="security-warning active">未满足：${escapeHTML(readiness.missing.join("、"))}</div>`
     : "";
   const degraded = readiness.status === "degraded"
-    ? `<div class="security-warning">可以启用，但${escapeHTML(readiness.message || "部分项目仍会回退旧知识库。")}</div>`
+    ? `<div class="security-warning">${settings.enabled ? "" : "可以启用，但"}${escapeHTML(readiness.message || "部分项目仍会回退旧知识库。")}</div>`
     : "";
   const runtimeError = settings.enabled && (readiness.status === "error" || readiness.status === "needs_rebuild")
     ? `<div class="security-warning active" role="alert">文件知识库已启用，但${escapeHTML(readiness.message || "索引异常")}；Agent 本次会回退旧知识库，请重建索引。</div>`
@@ -272,7 +278,7 @@ function settingsBody(): string {
       <div><dt>vault</dt><dd>${vaultStatus}</dd></div>
       <div><dt>index</dt><dd>${indexStatus}</dd></div>
       <div><dt>路径</dt><dd><code>${escapeHTML(settings.vault_path || "-")}</code></dd></div>
-      <div><dt>旧知识</dt><dd>${settings.legacy.entries} 条 · ${Math.max(settings.legacy.skills, settings.legacy.skill_packages)} 个技能${settings.migration_verified_at ? " · 已迁移验证" : settings.import_verified_at ? " · 已导入验证" : ""}</dd></div>
+      <div><dt>旧知识</dt><dd>${settings.legacy.entries} 条 · ${Math.max(settings.legacy.skills, settings.legacy.skill_packages)} 个技能${settings.migration_verified_at ? " · 已迁移验证" : settings.import_verified_at ? " · 已导入验证" : inUseUpgrade ? " · 仅作只读回滚保留" : ""}</dd></div>
     </dl>
     <div class="knowledge-vault-checks">${checks}</div>
     ${degraded}

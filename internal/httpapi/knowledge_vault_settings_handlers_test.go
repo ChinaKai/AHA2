@@ -256,6 +256,89 @@ func TestKnowledgeVaultMigrateEndpointBlocksUntilVerified(t *testing.T) {
 	}
 }
 
+// A 0.5.x install can already be running on the vault while the legacy
+// database is still present and no migration/import is verified. That state
+// must read as ready (legacy is a rollback copy), and the migration endpoint
+// must refuse instead of exporting the old database over the live pages.
+func TestKnowledgeVaultEnabledUpgradeStaysReadyAndRefusesMigrationOverwrite(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	manager, err := knowledgevault.NewManager(knowledgevault.DefaultConfig(dataDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	server, client, csrf, database := knowledgeVaultServerAt(t, manager, dataDir)
+	if _, err := manager.Initialize(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetKnowledgeVaultSwitch(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.EnsureGlobalKnowledgeCategories(ctx); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := database.CreateKnowledge(ctx, domain.KnowledgeEntry{
+		ID: "knowledge_global_general_legacy_overwrite", Scope: "global",
+		ParentID: store.GlobalGeneralKnowledgeID, Slug: "legacy-overwrite", Type: "practice",
+		Title: "旧知识", Body: "如果迁移覆盖就会写入的文件。", Status: domain.KnowledgeVerified,
+		Confidence: 1, Revision: 1, CreatedAt: now, UpdatedAt: now, LastVerifiedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	settings := knowledgeVaultSettingsSnapshot(t, client, server.URL)
+	if settings["enabled"] != true || settings["configured"] != true {
+		t.Fatalf("enabled upgrade settings = %#v", settings)
+	}
+	if settings["entry_count"].(float64) == 0 {
+		t.Fatalf("enabled upgrade index is empty: %#v", settings)
+	}
+	readiness := settings["readiness"].(map[string]any)
+	if status := readiness["status"]; status != "ready" && status != "degraded" {
+		t.Fatalf("enabled upgrade readiness = %#v, want ready or degraded", readiness)
+	}
+	migrationOK := false
+	for _, raw := range readiness["checks"].([]any) {
+		check := raw.(map[string]any)
+		if check["id"] == "migration" && check["status"] == "ok" &&
+			strings.Contains(fmt.Sprint(check["message"]), "只读回滚") {
+			migrationOK = true
+		}
+	}
+	if !migrationOK {
+		t.Fatalf("enabled upgrade must explain the legacy rollback copy: %#v", readiness["checks"])
+	}
+
+	samplePath := filepath.Join(manager.Config().VaultPath, filepath.FromSlash(knowledgevault.SampleDocuments(time.Now())[0].Path))
+	before, err := os.ReadFile(samplePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/settings/knowledge-vault/migrate", nil, csrf)
+	var refused map[string]any
+	decodeResponse(t, response, &refused)
+	if response.StatusCode != http.StatusConflict || refused["error"] != "knowledge_vault_target_not_empty" {
+		t.Fatalf("migrate over the live vault status=%d payload=%#v", response.StatusCode, refused)
+	}
+	after, err := os.ReadFile(samplePath)
+	if err != nil {
+		t.Fatalf("live page disappeared after refused migration: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("refused migration overwrote a live vault page")
+	}
+	inventory, err := database.LegacyKnowledgeInventory(ctx)
+	if err != nil || inventory.Entries != 1 {
+		t.Fatalf("legacy data after refused migration = %+v err=%v", inventory, err)
+	}
+	stored, err := database.KnowledgeVaultSettings(ctx)
+	if err != nil || !stored.Enabled || stored.VaultPopulated() {
+		t.Fatalf("settings after refused migration = %+v err=%v", stored, err)
+	}
+}
+
 func TestKnowledgeVaultImportEndpointLocalAndCredentialSafety(t *testing.T) {
 	dataDir := t.TempDir()
 	manager, err := knowledgevault.NewManager(knowledgevault.DefaultConfig(dataDir))

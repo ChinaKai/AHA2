@@ -112,6 +112,13 @@ func MigrateLegacyKnowledge(ctx context.Context, cfg Config, options LegacyMigra
 		// knowledge and must not turn a fresh install into a migration target.
 		return report, ErrNoLegacyKnowledge
 	}
+	// An upgraded install may already be running on a populated vault whose
+	// verification metadata is absent. Exporting the legacy database over it
+	// would silently replace the owner's current pages, so refuse before the
+	// backup/export writes anything. The legacy data itself is left untouched.
+	if vaultHasContent(ctx, cfg) {
+		return report, fmt.Errorf("%w: %s already contains indexed entries or knowledge pages; legacy migration was not started", ErrTargetNotEmpty, cfg.VaultPath)
+	}
 	backupDir := strings.TrimSpace(options.BackupDir)
 	if backupDir == "" {
 		backupDir = filepath.Join(cfg.DataDir, defaultMigrationBackups)
@@ -164,6 +171,48 @@ func MigrateLegacyKnowledge(ctx context.Context, cfg Config, options LegacyMigra
 	}
 	report.VerifiedAt = now
 	return report, nil
+}
+
+// vaultHasContent reports whether legacy migration would overwrite owner
+// content: any indexed entry or any Markdown page besides the generated
+// README. Hidden state directories are not knowledge, but skills are counted
+// because the migration copies legacy skill packages into them. The check is
+// deliberately conservative; the caller refuses rather than merging.
+func vaultHasContent(ctx context.Context, cfg Config) bool {
+	if info, err := os.Stat(cfg.IndexPath); err == nil && !info.IsDir() {
+		if index, openErr := openReadOnlyIndex(ctx, cfg.IndexPath); openErr == nil {
+			if status, statusErr := index.Status(ctx); statusErr == nil && status.Entries > 0 {
+				_ = index.Close()
+				return true
+			}
+			_ = index.Close()
+		}
+	}
+	found := false
+	_ = filepath.WalkDir(cfg.VaultPath, func(filePath string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil
+		}
+		if entry.IsDir() {
+			if filePath == cfg.VaultPath {
+				return nil
+			}
+			switch strings.ToLower(entry.Name()) {
+			case ".aha", ".git", ".trash", ".obsidian":
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(strings.ToLower(entry.Name()), ".md") {
+			return nil
+		}
+		if strings.EqualFold(entry.Name(), readmeFileName) {
+			return nil
+		}
+		found = true
+		return fs.SkipAll
+	})
+	return found
 }
 
 type migrationVerification struct {

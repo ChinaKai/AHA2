@@ -65,6 +65,14 @@ type ReadinessInput struct {
 	// has no vault binding keeps using legacy knowledge (degraded, not fatal).
 	KnownProjects []string
 
+	// Configured is the persisted "owner used the Web switch" flag. Enabled is
+	// the live manager state. Together with a non-empty index they distinguish
+	// an upgrade that is already running on the vault from an upgrade that has
+	// not decided yet: only the former may treat legacy knowledge as a
+	// read-only rollback copy instead of blocking on migration.
+	Configured bool
+	Enabled    bool
+
 	LegacyEntries     int
 	LegacySkills      int
 	LegacySkillDirs   int
@@ -78,6 +86,15 @@ func (in ReadinessInput) HasLegacy() bool {
 
 func (in ReadinessInput) Populated() bool {
 	return in.MigrationVerified || in.ImportVerified
+}
+
+// InUse reports an upgrade that already runs on the vault: legacy knowledge is
+// still present, the owner turned the manager on and the index has content. Its
+// legacy database is a rollback copy, not a pending migration, so readiness
+// must not send the owner to a migration that would overwrite those pages. A
+// fresh install has no legacy and stays on the untouched ready path.
+func (in ReadinessInput) InUse() bool {
+	return in.HasLegacy() && in.Configured && in.Enabled && in.EntryCount > 0
 }
 
 // DefaultVaultEnabled is the startup default before the owner ever touched the
@@ -149,6 +166,11 @@ func EvaluateReadiness(in ReadinessInput) Readiness {
 		add("migration", checkOK, "没有检测到旧知识库")
 	} else if in.Populated() {
 		add("migration", checkOK, "旧知识迁移或已有知识库导入已验证；旧数据仍保留")
+	} else if in.InUse() {
+		// The owner already runs on the vault. A migration would re-export the
+		// legacy database over these pages, so legacy is intentionally left as
+		// a read-only rollback copy and readiness must not ask for it.
+		add("migration", checkOK, "文件知识库已启用并在使用；旧知识库仅作只读回滚保留，不会被迁移覆盖")
 	} else {
 		add("migration", checkFail, fmt.Sprintf("检测到旧知识库（%d 条知识、%d 个技能），迁移或导入尚未验证", in.LegacyEntries, maxInt(in.LegacySkills, in.LegacySkillDirs)))
 	}
@@ -173,10 +195,22 @@ func EvaluateReadiness(in ReadinessInput) Readiness {
 		result.Status = ReadinessReady
 		result.Message = "文件知识库已就绪。"
 	}
+	if in.InUse() {
+		// Say explicitly that the remaining legacy data is only a rollback copy;
+		// the ready/degraded copy otherwise reads like the vault still needs a
+		// migration.
+		switch result.Status {
+		case ReadinessReady:
+			result.Message = "文件知识库已就绪并在使用；旧知识库仅作只读回滚保留，不会被迁移覆盖。"
+		case ReadinessDegraded:
+			result.Message = "文件知识库已启用，但部分项目仍回退旧知识库或索引需要关注；旧知识库仅作只读回滚保留，不会被迁移覆盖。"
+		}
+	}
 	result.CanEnable = result.Status == ReadinessReady || result.Status == ReadinessDegraded
-	if !result.DefaultEnabled && !in.Populated() {
+	if !result.DefaultEnabled && !in.Populated() && !in.InUse() {
 		// The default is legacy, but the owner can still choose the vault once
 		// the blocking checks clear. Needs-migration never advertises that.
+		// An already-running vault keeps reporting its live readiness instead.
 		result.CanEnable = false
 	}
 	return result
