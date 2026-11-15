@@ -1326,6 +1326,20 @@ function openWorkspaceDialog(ws: Workspace | null): void {
   dialog.showModal();
 }
 
+// Provider fields live in a button-driven dialog, so the browser's native
+// `required` validation never runs. The error text sits next to the input and
+// doubles as its accessible description.
+function setProviderFieldError(input: HTMLInputElement | null, message: string): void {
+  if (!input) return;
+  const error = input.nextElementSibling as HTMLElement | null;
+  if (message) input.setAttribute("aria-invalid", "true");
+  else input.removeAttribute("aria-invalid");
+  if (error) {
+    error.textContent = message;
+    error.hidden = !message;
+  }
+}
+
 function openProviderDialog(provider: Provider | null): void {
   const dialog = document.querySelector<HTMLDialogElement>("#provider-dialog");
   if (!dialog) return;
@@ -1348,6 +1362,8 @@ function openProviderDialog(provider: Provider | null): void {
     if (anthropicInput) anthropicInput.value = provider.anthropic_base_url || "";
     if (keyInput) keyInput.value = "";
   }
+  setProviderFieldError(nameInput, "");
+  setProviderFieldError(baseInput, "");
   const title = dialog.querySelector(".dialog-head h2");
   if (title) title.textContent = provider ? "编辑 Provider" : "添加 Provider";
   dialog.showModal();
@@ -1762,6 +1778,10 @@ function applyProviderPreset(): void {
   if (nameInput) nameInput.value = preset.name;
   if (baseInput) baseInput.value = preset.base_url;
   if (anthropicInput) anthropicInput.value = preset.anthropic_base_url || "";
+  // Selecting a preset is an edit too: do not leave a stale "required" error
+  // next to a field the preset just filled.
+  setProviderFieldError(nameInput, "");
+  setProviderFieldError(baseInput, "");
 }
 
 function setMessage(type: "error" | "notice", value: string): void {
@@ -4562,7 +4582,7 @@ function providerDialog(): string {
     .filter(([key]) => key !== "custom")
     .map(([key, preset]) => `<option value="${key}">${escapeHTML(preset.name)}</option>`)
     .join("");
-  return `<dialog id="provider-dialog"><div class="dialog-head"><h2>添加 Provider</h2><button type="button" data-close class="icon-button" aria-label="${t("common.closeDialog")}">${icon("close")}</button></div><div class="dialog-body"><input type="hidden" id="provider-edit-id" name="provider_edit_id" value=""><label>常用供应商<select id="provider-preset">${presets}<option value="custom">自定义</option></select></label><label>名称<input id="provider-name" placeholder="网关名称" required></label><label>API Base URL（OpenAI 风格）<input id="provider-base-url" placeholder="https://api.example.com/v1" required></label><label>Anthropic Base URL（可选，仅当与上方不同）<input id="provider-anthropic-url" placeholder="https://api.example.com/anthropic"></label><label>API Key<input id="provider-api-key" type="password" placeholder="留空则保持不变"></label><div class="dialog-actions"><button type="button" id="save-provider" class="primary">保存 Provider</button></div></div></dialog>`;
+  return `<dialog id="provider-dialog"><div class="dialog-head"><h2>添加 Provider</h2><button type="button" data-close class="icon-button" aria-label="${t("common.closeDialog")}">${icon("close")}</button></div><div class="dialog-body"><input type="hidden" id="provider-edit-id" name="provider_edit_id" value=""><label>常用供应商<select id="provider-preset">${presets}<option value="custom">自定义</option></select></label><label>名称<input id="provider-name" placeholder="网关名称" aria-describedby="provider-name-error"><span id="provider-name-error" class="field-error" hidden></span></label><label>API Base URL（OpenAI 风格）<input id="provider-base-url" placeholder="https://api.example.com/v1" aria-describedby="provider-base-url-error"><span id="provider-base-url-error" class="field-error" hidden></span></label><label>Anthropic Base URL（可选，仅当与上方不同）<input id="provider-anthropic-url" placeholder="https://api.example.com/anthropic"></label><label>API Key<input id="provider-api-key" type="password" placeholder="留空则保持不变"></label><div class="dialog-actions"><button type="button" id="save-provider" class="primary">保存 Provider</button></div></div></dialog>`;
 }
 
 function modelDialog(): string {
@@ -6994,6 +7014,9 @@ function bindCommon(): void {
   document.querySelector<HTMLSelectElement>('#workspace-takeover-dialog [name="transport"]')?.addEventListener("change", syncWorkspaceTakeoverFields);
   document.querySelector<HTMLInputElement>('[name="clear_ssh_password"]')?.addEventListener("change", syncWorkspaceFields);
   document.querySelector("#provider-preset")?.addEventListener("change", applyProviderPreset);
+  document.querySelectorAll<HTMLInputElement>("#provider-name, #provider-base-url").forEach(input => {
+    input.addEventListener("input", () => setProviderFieldError(input, ""));
+  });
   document.querySelectorAll<HTMLElement>("[data-close]").forEach(button => button.addEventListener("click", () => {
     const dialog = button.closest("dialog") as HTMLDialogElement | null;
     if (dialog?.id === "agent-config-dialog" && !confirmAgentConfigClose(dialog)) return;
@@ -7052,12 +7075,17 @@ function bindCommon(): void {
   document.querySelector("#save-provider")?.addEventListener("click", () => {
     const button = document.querySelector<HTMLElement>("#save-provider");
     const editId = String((document.querySelector("#provider-edit-id") as HTMLInputElement)?.value || "");
-    const name = String((document.querySelector("#provider-name") as HTMLInputElement)?.value || "").trim();
-    const baseURL = String((document.querySelector("#provider-base-url") as HTMLInputElement)?.value || "").trim();
+    const nameInput = document.querySelector<HTMLInputElement>("#provider-name");
+    const baseURLInput = document.querySelector<HTMLInputElement>("#provider-base-url");
+    const name = String(nameInput?.value || "").trim();
+    const baseURL = String(baseURLInput?.value || "").trim();
     const anthropicURL = String((document.querySelector("#provider-anthropic-url") as HTMLInputElement)?.value || "").trim();
     const apiKey = String((document.querySelector("#provider-api-key") as HTMLInputElement)?.value || "").trim();
-    if (!name || !baseURL) {
-      setMessage("error", "请填写 Provider 名称与 API Base URL");
+    setProviderFieldError(nameInput, name ? "" : "请填写 Provider 名称");
+    setProviderFieldError(baseURLInput, baseURL ? "" : "请填写 API Base URL");
+    const firstInvalid = name ? (baseURL ? null : baseURLInput) : nameInput;
+    if (firstInvalid) {
+      firstInvalid.focus();
       return;
     }
     void runWithFeedback(button, "保存中", async () => {
