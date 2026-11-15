@@ -129,15 +129,19 @@ func hasTaskSkill(task domain.Task, id string) bool {
 	return false
 }
 
-func TestVaultSkillAutoAttachMergesWithLegacyAndLoadsPackageFiles(t *testing.T) {
+// A project whose vault read is effective takes auto-attach from the vault
+// preferences only. Legacy AutoAttach rows, including one with the same slug
+// as a vault package, must not be merged in.
+func TestVaultAutoAttachUsesVaultSourceAndLoadsPackageFiles(t *testing.T) {
 	withUnsetEnv(t, knowledgeVaultReadProjectsEnv)
 	fixture := newVaultSkillsFixture(t)
 	ctx := fixture.ctx
 	now := time.Now().UTC()
 	for _, item := range []domain.Skill{
-		{ID: "skill-legacy-global", Scope: "global", Name: "Legacy Global", Instructions: "legacy", Version: 1, Status: "active", Enabled: true, AutoAttach: true, CreatedAt: now, UpdatedAt: now},
-		{ID: "skill-legacy-project", Scope: "project", ProjectID: fixture.project.ID, Name: "Legacy Project", Instructions: "legacy", Version: 1, Status: "active", Enabled: true, AutoAttach: true, CreatedAt: now, UpdatedAt: now},
-		{ID: "skill-legacy-manual", Scope: "global", Name: "Legacy Manual", Instructions: "legacy", Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now},
+		{ID: "skill-legacy-global", PackageSlug: "legacy-global", Scope: "global", Name: "Legacy Global", Instructions: "legacy", Version: 1, Status: "active", Enabled: true, AutoAttach: true, CreatedAt: now, UpdatedAt: now},
+		{ID: "skill-legacy-project", PackageSlug: "legacy-project", Scope: "project", ProjectID: fixture.project.ID, Name: "Legacy Project", Instructions: "legacy", Version: 1, Status: "active", Enabled: true, AutoAttach: true, CreatedAt: now, UpdatedAt: now},
+		{ID: "skill-legacy-demo", PackageSlug: "demo", Scope: "global", Name: "Demo", Instructions: "legacy demo", Version: 1, Status: "active", Enabled: true, AutoAttach: true, CreatedAt: now, UpdatedAt: now},
+		{ID: "skill-legacy-manual", PackageSlug: "legacy-manual", Scope: "global", Name: "Legacy Manual", Instructions: "legacy", Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now},
 	} {
 		if err := fixture.database.CreateSkill(ctx, item); err != nil {
 			t.Fatal(err)
@@ -149,24 +153,28 @@ func TestVaultSkillAutoAttachMergesWithLegacyAndLoadsPackageFiles(t *testing.T) 
 	if _, err := fixture.service.SetVaultSkillAutoAttach(ctx, "vault-skill:project:"+fixture.project.ID+":vault-review", true, false); err != nil {
 		t.Fatal(err)
 	}
-	// The preference table is the only new storage: vault skills never become
-	// legacy rows, so the existing AutoAttach path is unchanged.
+	// Preferences live in their own table: the legacy skills page still sees
+	// every row and no vault skill becomes a legacy row.
 	legacy, err := fixture.database.ListSkills(ctx, "", "", false)
-	if err != nil || len(legacy) != 3 {
+	if err != nil || len(legacy) != 4 {
 		t.Fatalf("legacy skills changed: %#v err=%v", legacy, err)
 	}
 
 	task := fixture.createTask(t, nil)
+	if len(task.SkillIDs) != 2 {
+		t.Fatalf("vault auto-attach merged another source: %#v", task.SkillIDs)
+	}
 	for _, want := range []string{
-		"skill-legacy-global", "skill-legacy-project",
 		"vault-skill:global:demo", "vault-skill:project:" + fixture.project.ID + ":vault-review",
 	} {
 		if !hasTaskSkill(task, want) {
 			t.Fatalf("auto-attach missed %s: %#v", want, task.SkillIDs)
 		}
 	}
-	if hasTaskSkill(task, "skill-legacy-manual") {
-		t.Fatalf("non-auto legacy skill was selected: %#v", task.SkillIDs)
+	for _, unwanted := range []string{"skill-legacy-global", "skill-legacy-project", "skill-legacy-demo", "skill-legacy-manual"} {
+		if hasTaskSkill(task, unwanted) {
+			t.Fatalf("legacy skill %s was merged into a vault-sourced task: %#v", unwanted, task.SkillIDs)
+		}
 	}
 
 	active := fixture.service.activeTaskSkills(ctx, task)
@@ -185,8 +193,143 @@ func TestVaultSkillAutoAttachMergesWithLegacyAndLoadsPackageFiles(t *testing.T) 
 	if !ok || len(review.PackageFiles) != 2 || review.ProjectID != fixture.project.ID {
 		t.Fatalf("vault project skill was not materialized: %#v", byID)
 	}
-	if _, ok := byID["skill-legacy-global"]; !ok {
-		t.Fatal("legacy auto-attach skill disappeared")
+}
+
+// When the runtime read gate is off the vault preference is not effective, so
+// the legacy AutoAttach rule keeps working.
+func TestVaultAutoAttachFallsBackToLegacyWhenRuntimeReadOff(t *testing.T) {
+	withUnsetEnv(t, knowledgeVaultReadProjectsEnv)
+	fixture := newVaultSkillsFixture(t)
+	ctx := fixture.ctx
+	now := time.Now().UTC()
+	for _, item := range []domain.Skill{
+		{ID: "skill-legacy-global", Scope: "global", Name: "Legacy Global", Instructions: "legacy", Version: 1, Status: "active", Enabled: true, AutoAttach: true, CreatedAt: now, UpdatedAt: now},
+		{ID: "skill-legacy-project", Scope: "project", ProjectID: fixture.project.ID, Name: "Legacy Project", Instructions: "legacy", Version: 1, Status: "active", Enabled: true, AutoAttach: true, CreatedAt: now, UpdatedAt: now},
+	} {
+		if err := fixture.database.CreateSkill(ctx, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := fixture.service.SetVaultSkillAutoAttach(ctx, "vault-skill:global:demo", true, true); err != nil {
+		t.Fatal(err)
+	}
+	fixture.service.knowledgeVaultRuntimeRead = false
+
+	task := fixture.createTask(t, nil)
+	if len(task.SkillIDs) != 2 || !hasTaskSkill(task, "skill-legacy-global") || !hasTaskSkill(task, "skill-legacy-project") {
+		t.Fatalf("legacy auto-attach did not apply after the vault read was turned off: %#v", task.SkillIDs)
+	}
+	if hasTaskSkill(task, "vault-skill:global:demo") {
+		t.Fatalf("vault auto-attach applied while the runtime read was off: %#v", task.SkillIDs)
+	}
+}
+
+// An unbound project is not vault-effective even though the vault itself is
+// ready, so it keeps the legacy AutoAttach source.
+func TestVaultAutoAttachFallsBackToLegacyForUnboundProject(t *testing.T) {
+	withUnsetEnv(t, knowledgeVaultReadProjectsEnv)
+	fixture := newVaultSkillsFixture(t)
+	ctx := fixture.ctx
+	now := time.Now().UTC()
+	otherProject := domain.Project{ID: "project_vault_unbound", Name: "Unbound", CreatedAt: now, UpdatedAt: now}
+	if err := fixture.database.CreateProject(ctx, otherProject); err != nil {
+		t.Fatal(err)
+	}
+	otherWorkspace := domain.Workspace{
+		ID: "workspace-vault-unbound", ProjectID: otherProject.ID, Name: "local", Locality: "local", Transport: "native",
+		RootPath: t.TempDir(), Health: "ready", AgentAPIMode: "auto", CreatedAt: now, UpdatedAt: now,
+	}
+	if err := fixture.database.CreateWorkspace(ctx, otherWorkspace); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []domain.Skill{
+		{ID: "skill-unbound-global", Scope: "global", Name: "Global Auto", Instructions: "legacy", Version: 1, Status: "active", Enabled: true, AutoAttach: true, CreatedAt: now, UpdatedAt: now},
+		{ID: "skill-unbound-project", Scope: "project", ProjectID: otherProject.ID, Name: "Project Auto", Instructions: "legacy", Version: 1, Status: "active", Enabled: true, AutoAttach: true, CreatedAt: now, UpdatedAt: now},
+	} {
+		if err := fixture.database.CreateSkill(ctx, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := fixture.service.SetVaultSkillAutoAttach(ctx, "vault-skill:global:demo", true, true); err != nil {
+		t.Fatal(err)
+	}
+
+	task, err := fixture.service.CreateTask(ctx, CreateTaskInput{
+		ProjectID: otherProject.ID, WorkspaceID: otherWorkspace.ID, Title: "unbound auto",
+		Request: "unbound auto", ModelID: "model-vault-skills",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(task.SkillIDs) != 2 || !hasTaskSkill(task, "skill-unbound-global") || !hasTaskSkill(task, "skill-unbound-project") {
+		t.Fatalf("unbound project did not keep legacy auto-attach: %#v", task.SkillIDs)
+	}
+	if hasTaskSkill(task, "vault-skill:global:demo") {
+		t.Fatalf("unbound project received vault auto-attach: %#v", task.SkillIDs)
+	}
+}
+
+// A legacy AutoAttach row without a vault counterpart is not silently mounted
+// alongside the vault source: it is excluded and reported as superseded.
+func TestVaultAutoAttachReportsLegacySkillsWithoutVaultCounterpart(t *testing.T) {
+	withUnsetEnv(t, knowledgeVaultReadProjectsEnv)
+	fixture := newVaultSkillsFixture(t)
+	ctx := fixture.ctx
+	now := time.Now().UTC()
+	for _, item := range []domain.Skill{
+		{ID: "skill-legacy-only", PackageSlug: "legacy-only", Scope: "global", Name: "Legacy Only", Instructions: "legacy", Version: 1, Status: "active", Enabled: true, AutoAttach: true, CreatedAt: now, UpdatedAt: now},
+		{ID: "skill-legacy-demo", PackageSlug: "demo", Scope: "global", Name: "Demo", Instructions: "legacy", Version: 1, Status: "active", Enabled: true, AutoAttach: true, CreatedAt: now, UpdatedAt: now},
+	} {
+		if err := fixture.database.CreateSkill(ctx, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := fixture.service.SetVaultSkillAutoAttach(ctx, "vault-skill:global:demo", true, true); err != nil {
+		t.Fatal(err)
+	}
+
+	selection := fixture.service.vaultAutoAttachSelection(ctx, fixture.project.ID)
+	if len(selection.keys) != 1 || selection.keys[0] != "vault-skill:global:demo" {
+		t.Fatalf("vault auto-attach selection = %#v", selection.keys)
+	}
+	superseded := fixture.service.supersededLegacyAutoAttach(ctx, fixture.project.ID, selection.slugs)
+	if len(superseded) != 1 || superseded[0].ID != "skill-legacy-only" {
+		t.Fatalf("unreported legacy auto-attach = %#v", superseded)
+	}
+	task := fixture.createTask(t, nil)
+	if len(task.SkillIDs) != 1 || task.SkillIDs[0] != "vault-skill:global:demo" {
+		t.Fatalf("legacy auto-attach was still merged: %#v", task.SkillIDs)
+	}
+}
+
+// Explicit selection is untouched by the source split: a skill the owner
+// checked is still applied even when the project reads auto-attach from the
+// vault.
+func TestVaultAutoAttachKeepsExplicitManualSelection(t *testing.T) {
+	withUnsetEnv(t, knowledgeVaultReadProjectsEnv)
+	fixture := newVaultSkillsFixture(t)
+	ctx := fixture.ctx
+	now := time.Now().UTC()
+	for _, item := range []domain.Skill{
+		{ID: "skill-legacy-manual", Scope: "global", Name: "Legacy Manual", Instructions: "legacy", Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now},
+		{ID: "skill-legacy-auto", Scope: "global", Name: "Legacy Auto", Instructions: "legacy", Version: 1, Status: "active", Enabled: true, AutoAttach: true, CreatedAt: now, UpdatedAt: now},
+	} {
+		if err := fixture.database.CreateSkill(ctx, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := fixture.service.SetVaultSkillAutoAttach(ctx, "vault-skill:global:demo", true, true); err != nil {
+		t.Fatal(err)
+	}
+
+	task := fixture.createTask(t, []string{"skill-legacy-manual"})
+	for _, want := range []string{"skill-legacy-manual", "vault-skill:global:demo"} {
+		if !hasTaskSkill(task, want) {
+			t.Fatalf("explicit selection or vault auto-attach missing %s: %#v", want, task.SkillIDs)
+		}
+	}
+	if hasTaskSkill(task, "skill-legacy-auto") {
+		t.Fatalf("legacy auto-attach was merged with an explicit selection: %#v", task.SkillIDs)
 	}
 }
 
