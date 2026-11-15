@@ -33,13 +33,16 @@ var (
 // VaultSkillView is the API shape for one vault skill plus its preference and
 // the reason auto-attach would or would not take effect in a given project.
 type VaultSkillView struct {
-	Key                 string   `json:"key"`
-	ID                  string   `json:"id"`
-	Slug                string   `json:"slug"`
-	Name                string   `json:"name"`
-	Scope               string   `json:"scope"`
-	ProjectID           string   `json:"project_id,omitempty"`
-	Library             string   `json:"library"`
+	Key       string `json:"key"`
+	ID        string `json:"id"`
+	Slug      string `json:"slug"`
+	Name      string `json:"name"`
+	Scope     string `json:"scope"`
+	ProjectID string `json:"project_id,omitempty"`
+	Library   string `json:"library"`
+	// ProjectName is the authoritative AHA2 project name for project and
+	// archive skills. Global skills leave it empty so the UI keeps "全局".
+	ProjectName         string   `json:"project_name,omitempty"`
 	Description         string   `json:"description,omitempty"`
 	FileCount           int      `json:"file_count"`
 	Files               []string `json:"files,omitempty"`
@@ -87,6 +90,7 @@ func (s *Service) VaultSkillCatalog(ctx context.Context, projectID string) (Vaul
 	}
 	projectID = strings.TrimSpace(projectID)
 	preferences := s.vaultSkillPreferences(ctx)
+	projectNames := s.vaultProjectNames(ctx)
 	result := VaultSkillCatalog{RuntimeRead: s.knowledgeVaultRuntimeRead, Skills: []VaultSkillView{}}
 	err := s.knowledgeVault.WithReader(func(reader *knowledgevault.Reader) error {
 		result.IndexReady = reader.IndexReady()
@@ -119,6 +123,7 @@ func (s *Service) VaultSkillCatalog(ctx context.Context, projectID string) (Vaul
 				CanUpdate:           skill.Scope == "global" || skill.Scope == "project",
 				ProjectBound:        bound,
 			}
+			applyVaultSkillProjectName(&view, manifest, projectNames, skill)
 			if view.CanUpdate {
 				view.AutoAttachEffective = preference.AutoAttach && result.RuntimeRead && result.IndexReady && bound &&
 					(skill.Scope != "global" || view.AutoAttachConfirmed)
@@ -138,6 +143,30 @@ func (s *Service) VaultSkillCatalog(ctx context.Context, projectID string) (Vaul
 		return result.Skills[left].Key < result.Skills[right].Key
 	})
 	return result, nil
+}
+
+// applyVaultSkillProjectName keeps a skill card's library label consistent with
+// the library picker: the AHA2 project name first, then the vault slug, then the
+// reader's own fallback. Global skills keep "全局" and no project name.
+func applyVaultSkillProjectName(view *VaultSkillView, manifest knowledgevault.Manifest, names map[string]string, skill knowledgevault.SkillPackage) {
+	if view.Scope == "global" {
+		return
+	}
+	name := names[skill.ProjectID]
+	if name == "" {
+		slug := manifest.Projects[skill.ProjectID]
+		if skill.Scope == "archive" {
+			slug = manifest.Archives[skill.ProjectID]
+		}
+		name = strings.TrimSpace(slug)
+	}
+	if name == "" {
+		name = skill.Library
+	}
+	if name != "" {
+		view.ProjectName = name
+		view.Library = name
+	}
 }
 
 func vaultSkillUnavailableReason(runtimeRead, indexReady bool, projectID string, bound, autoAttachable bool) string {
@@ -180,6 +209,7 @@ func (s *Service) SetVaultSkillAutoAttach(ctx context.Context, key string, autoA
 	var view VaultSkillView
 	var resolved bool
 	var indexReady bool
+	projectNames := s.vaultProjectNames(ctx)
 	err := s.knowledgeVault.WithReader(func(reader *knowledgevault.Reader) error {
 		indexReady = reader.IndexReady()
 		response, err := reader.Skills(ctx)
@@ -201,6 +231,7 @@ func (s *Service) SetVaultSkillAutoAttach(ctx context.Context, key string, autoA
 				RelativePath: skill.RelativePath, AbsolutePath: skill.AbsolutePath, OpenPath: skill.OpenPath,
 				Source: "vault", CanUpdate: true,
 			}
+			applyVaultSkillProjectName(&view, reader.Manifest(), projectNames, skill)
 			preference := domain.VaultSkillPreference{
 				SkillID: skill.Key, Scope: skill.Scope, ProjectID: skill.ProjectID,
 				AutoAttach: autoAttach, UpdatedAt: s.now().UTC(),

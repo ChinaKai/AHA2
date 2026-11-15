@@ -74,6 +74,91 @@ is_index: true
 	}
 }
 
+func TestRebuildNeverStoresKnowledgeHomeAsProjectName(t *testing.T) {
+	config, index, ctx := exportSeedVault(t)
+	// The database names are authoritative on export; a rebuild must not
+	// overwrite them with the generated root index title (知识首页).
+	if _, err := index.Rebuild(ctx, config.VaultPath); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.ProjectNames["project-demo"] != "Demo Project" || manifest.ArchiveNames["project-archive"] != "AHA1 Archive" {
+		t.Fatalf("rebuild replaced exported project names: %#v / %#v", manifest.ProjectNames, manifest.ArchiveNames)
+	}
+
+	// Simulate an install written by the old generation logic, where every
+	// project_name was the knowledge-home page title. A rebuild repairs the
+	// cache to the stable slug instead of writing 知识首页 again.
+	manifest.ProjectNames["project-demo"] = "知识首页"
+	manifest.ArchiveNames["project-archive"] = "全局知识首页"
+	if err := writeManifest(config.VaultPath, manifest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := index.Rebuild(ctx, config.VaultPath); err != nil {
+		t.Fatal(err)
+	}
+	repaired, err := ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repaired.ProjectNames["project-demo"] != "demo-project" || repaired.ArchiveNames["project-archive"] != "aha1-archive" {
+		t.Fatalf("repaired project names = %#v, want the vault slugs", repaired.ProjectNames)
+	}
+	for id, name := range repaired.ProjectNames {
+		if name == "知识首页" || name == "全局知识首页" {
+			t.Fatalf("project %s still carries the knowledge-home title", id)
+		}
+	}
+	for id, name := range repaired.ArchiveNames {
+		if name == "知识首页" || name == "全局知识首页" {
+			t.Fatalf("archive %s still carries the knowledge-home title", id)
+		}
+	}
+
+	before, err := os.ReadFile(filepath.Join(config.VaultPath, manifestFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := index.Rebuild(ctx, config.VaultPath); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(filepath.Join(config.VaultPath, manifestFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("repaired manifest is not idempotent:\n%s\n---\n%s", before, after)
+	}
+}
+
+func TestResolveLibraryNameRejectsKnowledgeHomeTitles(t *testing.T) {
+	cases := []struct {
+		name     string
+		existing string
+		title    string
+		slug     string
+		id       string
+		want     string
+	}{
+		{"exported name wins over the generated index title", "AHA2", "知识首页", "aha2", "project-6ff866", "AHA2"},
+		{"generated index title is replaced by the slug", "知识首页", "知识首页", "aha2", "project-6ff866", "aha2"},
+		{"global home title is replaced by the slug", "全局知识首页", "知识首页", "bu2-cam1", "project-5ac7", "bu2-cam1"},
+		{"hand-authored project title is kept", "", "手工项目", "manual-project", "project-manual", "手工项目"},
+		{"missing everything falls back to the project id", "", "", "", "project-x", "project-x"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := resolveLibraryName(testCase.existing, testCase.title, testCase.slug, testCase.id); got != testCase.want {
+				t.Fatalf("resolveLibraryName(%q, %q, %q, %q) = %q, want %q",
+					testCase.existing, testCase.title, testCase.slug, testCase.id, got, testCase.want)
+			}
+		})
+	}
+}
+
 func TestRebuildMarksUnboundProjectWithoutDroppingFiles(t *testing.T) {
 	config, index, ctx := exportSeedVault(t)
 	writeVaultTestFile(t, config.VaultPath, "projects/unbound/index.md", "---\ntitle: 未绑定\nis_index: true\n---\n\n未绑定目录。\n")

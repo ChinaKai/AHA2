@@ -129,6 +129,57 @@ func hasTaskSkill(task domain.Task, id string) bool {
 	return false
 }
 
+func TestVaultSkillCatalogUsesDBProjectNameOverManifestCache(t *testing.T) {
+	files := vaultSkillFiles()
+	// The root index title is the generated knowledge-home page, not the
+	// project name. The manifest therefore only knows the slug here; the DB
+	// projects table supplies the real display name.
+	files["projects/vault-skills/index.md"] = "---\nid: knowledge_root_project_vault_skills\ntitle: 知识首页\nscope: project\nproject_id: " + vaultSkillsProjectID + "\ntype: navigation\nstatus: verified\nis_index: true\n---\nProject entry.\n"
+	fixture := newVaultSkillsFixtureWithManager(t, buildVaultReadManager(t, true, files))
+
+	catalog, err := fixture.service.VaultSkillCatalog(fixture.ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var projectSkill, globalSkill *VaultSkillView
+	for index := range catalog.Skills {
+		skill := &catalog.Skills[index]
+		switch skill.Key {
+		case "vault-skill:project:" + vaultSkillsProjectID + ":vault-review":
+			projectSkill = skill
+		case "vault-skill:global:demo":
+			globalSkill = skill
+		}
+	}
+	if projectSkill == nil {
+		t.Fatalf("project skill missing from catalog: %#v", catalog.Skills)
+	}
+	if projectSkill.ProjectName != fixture.project.Name || projectSkill.Library != fixture.project.Name {
+		t.Fatalf("project skill name = %q library = %q, want %q", projectSkill.ProjectName, projectSkill.Library, fixture.project.Name)
+	}
+	if globalSkill == nil || globalSkill.ProjectName != "" || globalSkill.Library != "全局技能" {
+		t.Fatalf("global skill = %#v, want no project name and the global library", globalSkill)
+	}
+
+	libraries, err := fixture.service.VaultLibraries(fixture.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, library := range libraries.Projects {
+		if library.ProjectID != fixture.project.ID {
+			continue
+		}
+		found = true
+		if library.Name != fixture.project.Name {
+			t.Fatalf("library name = %q, want %q", library.Name, fixture.project.Name)
+		}
+	}
+	if !found {
+		t.Fatalf("project library missing from picker: %#v", libraries.Projects)
+	}
+}
+
 func TestVaultSkillAutoAttachMergesWithLegacyAndLoadsPackageFiles(t *testing.T) {
 	withUnsetEnv(t, knowledgeVaultReadProjectsEnv)
 	fixture := newVaultSkillsFixture(t)
