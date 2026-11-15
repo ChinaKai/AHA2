@@ -149,6 +149,15 @@ func TestWebKnowledgeAPIWritesVaultAndRefusesVaultDelete(t *testing.T) {
 		t.Fatalf("updated revision=%#v", updated["revision"])
 	}
 
+	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/knowledge/"+entryID, map[string]any{
+		"scope": "global", "type": "practice", "title": "跨范围更新",
+		"body": "跨范围更新必须被拒绝，正文长度仍然需要超过二十个字符。",
+	}, csrf)
+	response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("cross-scope update status=%d", response.StatusCode)
+	}
+
 	response = requestJSON(t, client, http.MethodDelete, server.URL+"/api/v1/knowledge/"+entryID, nil, csrf)
 	if response.StatusCode != http.StatusConflict {
 		t.Fatalf("vault delete status=%d", response.StatusCode)

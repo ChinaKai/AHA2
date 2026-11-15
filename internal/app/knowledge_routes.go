@@ -420,6 +420,10 @@ func (s *Service) createKnowledgeCandidates(ctx context.Context, projectID, task
 	return s.createLegacyKnowledgeCandidates(ctx, projectID, taskID, turnID, branch, productLineID, candidates)
 }
 
+func knowledgeWriteValidation(message string) error {
+	return &knowledgevault.WriteError{Code: knowledgevault.WriteErrorValidation, Message: message}
+}
+
 func (s *Service) vaultCandidateRoute(projectID string, candidates []KnowledgeCandidate) (string, bool, error) {
 	vault := false
 	legacy := false
@@ -436,7 +440,7 @@ func (s *Service) vaultCandidateRoute(projectID string, candidates []KnowledgeCa
 		}
 	}
 	if vault && legacy {
-		return "", false, fmt.Errorf("同一批知识候选不能混合写入文件知识库和旧知识库")
+		return "", false, knowledgeWriteValidation("同一批知识候选不能混合写入文件知识库和旧知识库")
 	}
 	return scopeName(vault), vault, nil
 }
@@ -457,6 +461,12 @@ func (s *Service) ApproveKnowledgeProposal(ctx context.Context, id string, decid
 		return domain.KnowledgeProposal{}, domain.KnowledgeEntry{}, err
 	}
 	if proposal.TargetSource != domain.KnowledgeProposalTargetVault {
+		// A proposal accepted before the read source switched must not publish
+		// into a table the project no longer reads. Refuse instead of writing an
+		// invisible legacy row; the reviewer can ask for a fresh vault proposal.
+		if s.readSourceIsVault(proposal.Proposed.Scope, proposal.Proposed.ProjectID) {
+			return domain.KnowledgeProposal{}, domain.KnowledgeEntry{}, ErrKnowledgeReadSourceMismatch
+		}
 		return s.store.ApproveKnowledgeProposal(ctx, id, decidedAt, decisionReason...)
 	}
 	return s.approveVaultKnowledgeProposal(ctx, proposal, decidedAt, decisionReason...)
@@ -584,7 +594,7 @@ func (s *Service) CreateWebKnowledge(ctx context.Context, input KnowledgeWriteIn
 	typ := knowledgeCanonicalType(input.Type)
 	if useVault {
 		if input.IsIndex != nil && *input.IsIndex {
-			return KnowledgeWriteResult{}, fmt.Errorf("文件知识库不支持通过 Web 创建索引页")
+			return KnowledgeWriteResult{}, knowledgeWriteValidation("文件知识库不支持通过 Web 创建索引页")
 		}
 		entryID := strings.TrimSpace(input.ID)
 		if entryID == "" {
@@ -681,14 +691,14 @@ func (s *Service) UpdateWebKnowledge(ctx context.Context, id string, input Knowl
 		scope, projectID := knowledgeProjectIDForScope(vaultEntry.Scope, vaultEntry.ProjectID)
 		payloadScope, payloadProject := knowledgeProjectIDForScope(input.Scope, input.ProjectID)
 		if payloadScope != scope || payloadProject != projectID {
-			return KnowledgeWriteResult{}, fmt.Errorf("文件知识库中的条目不能跨 scope/project 移动")
+			return KnowledgeWriteResult{}, knowledgeWriteValidation("文件知识库中的条目不能跨 scope/project 移动")
 		}
 		if input.IsIndex != nil && *input.IsIndex != vaultEntry.IsIndex {
-			return KnowledgeWriteResult{}, fmt.Errorf("文件知识库不支持通过 Web 修改索引页类型")
+			return KnowledgeWriteResult{}, knowledgeWriteValidation("文件知识库不支持通过 Web 修改索引页类型")
 		}
 		status := strings.TrimSpace(input.Status)
 		if status != "" && status != string(domain.KnowledgeVerified) {
-			return KnowledgeWriteResult{}, fmt.Errorf("文件知识库写入只支持 verified 状态")
+			return KnowledgeWriteResult{}, knowledgeWriteValidation("文件知识库写入只支持 verified 状态")
 		}
 		useVault, routeErr := s.knowledgeWriteRoute(scope, projectID)
 		if routeErr != nil {

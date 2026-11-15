@@ -257,6 +257,34 @@ func TestPetVaultReadWithoutWriteFailsClosed(t *testing.T) {
 	}
 }
 
+func TestLegacyProposalCannotBeApprovedAfterVaultBecomesReadSource(t *testing.T) {
+	service, database, _, project := knowledgeRouteFixture(t, "project_other")
+	ctx := context.Background()
+	setKnowledgeAutoApprove(t, database, false)
+	service.knowledgeVaultRuntimeRead = false
+	submitted, err := service.PetSubmitKnowledge(ctx, "project", project.ID, []KnowledgeCandidate{{
+		Type: "practice", Title: "切换前旧库提案", Body: vaultRouteBody(),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(submitted.Proposals) != 1 {
+		t.Fatalf("legacy proposals=%#v", submitted.Proposals)
+	}
+	proposal, err := database.KnowledgeProposal(ctx, submitted.Proposals[0].ID)
+	if err != nil || proposal.TargetSource != domain.KnowledgeProposalTargetLegacy {
+		t.Fatalf("legacy proposal=%#v err=%v", proposal, err)
+	}
+	service.knowledgeVaultRuntimeRead = true
+	service.SetKnowledgeVaultRuntimeWrite(true)
+	if _, _, err := service.ApproveKnowledgeProposal(ctx, proposal.ID, time.Now().UTC()); !errors.Is(err, ErrKnowledgeReadSourceMismatch) {
+		t.Fatalf("approval after switch error=%v", err)
+	}
+	if _, err := database.Knowledge(ctx, proposal.EntryID); err == nil {
+		t.Fatal("legacy proposal approval wrote a hidden legacy entry")
+	}
+}
+
 func TestPetGlobalKnowledgeWritesVault(t *testing.T) {
 	service, database, _, _ := knowledgeRouteFixture(t, "project_other")
 	ctx := context.Background()
