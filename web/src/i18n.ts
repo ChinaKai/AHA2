@@ -2122,6 +2122,8 @@ const legacyEnglish: Record<string, string> = {
   "API Base URL（OpenAI 风格）": "API Base URL (OpenAI style)",
   "Anthropic Base URL（可选，仅当与上方不同）": "Anthropic Base URL (optional, only if different)",
   "保存 Provider": "Save provider",
+  "请填写 Provider 名称": "Enter a provider name",
+  "请填写 API Base URL": "Enter the API base URL",
   "先添加 Provider": "Add a provider first",
   "获取模型列表": "Fetch model list",
   "添加所选模型": "Add selected models",
