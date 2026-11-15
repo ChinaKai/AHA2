@@ -129,6 +129,22 @@ type WriteRequest struct {
 	SourceTask     string
 	SourceTurn     string
 	Writer         string
+	// ForceEntryID is server-only. It lets the Pet/Web submission paths preserve
+	// the caller's entry ID so a pending proposal can name the document before
+	// it exists. The Agent HTTP payload never fills it: Agent creates keep the
+	// server-generated ID.
+	ForceEntryID string
+	// ParentID/Slug/SortOrder carry the hierarchy the legacy proposal pipeline
+	// supported. Nil means "unchanged" on revise and "server default" on create.
+	// The Agent HTTP payload never fills these.
+	ParentID  *string
+	Slug      *string
+	SortOrder *int
+	// SkipBudget is server-only. Pet and Web submissions are explicit owner
+	// actions that may batch many candidates under one long-lived Task/Turn; they
+	// keep every validation and idempotency guarantee but do not consume the
+	// per-Agent-Turn write budget the Agent API uses to throttle speculation.
+	SkipBudget bool
 }
 
 // DuplicateCandidate is one existing document that resembles a create request.
@@ -322,7 +338,11 @@ func (m *Manager) WriteKnowledge(ctx context.Context, request WriteRequest) (Wri
 	state.Entries = append(state.Entries, record)
 	state.Entries = capWriteRecords(state.Entries, maxAgentRecords)
 	if request.SourceTask != "" || request.SourceTurn != "" {
-		state.Turns[turnBudgetKey(request)]++
+		if request.SkipBudget {
+			// An owner-initiated write must not consume the Agent turn's budget.
+		} else {
+			state.Turns[turnBudgetKey(request)]++
+		}
 	}
 	if err := m.saveAgentStateLocked(state); err != nil {
 		// The document and index are already durable. Report the audit failure
@@ -466,6 +486,15 @@ func normalizeWriteRequest(request WriteRequest) WriteRequest {
 	request.SourceTask = strings.TrimSpace(request.SourceTask)
 	request.SourceTurn = strings.TrimSpace(request.SourceTurn)
 	request.Writer = strings.TrimSpace(request.Writer)
+	request.ForceEntryID = strings.TrimSpace(request.ForceEntryID)
+	if request.ParentID != nil {
+		value := strings.TrimSpace(*request.ParentID)
+		request.ParentID = &value
+	}
+	if request.Slug != nil {
+		value := strings.TrimSpace(*request.Slug)
+		request.Slug = &value
+	}
 	request.Tags = normalizeTags(request.Tags)
 	return request
 }
@@ -540,6 +569,9 @@ func validateWriteRequest(request WriteRequest) error {
 		if request.EntryID != "" || request.BaseRevision != 0 {
 			return writeError(WriteErrorValidation, "create does not accept entry_id or base_revision")
 		}
+		if request.ForceEntryID != "" && !validEntryID(request.ForceEntryID) {
+			return writeError(WriteErrorValidation, "force_entry_id is not a valid knowledge ID")
+		}
 		if request.SearchQuery == "" && !request.DuplicateAck {
 			return writeError(WriteErrorValidation, "create requires search_query or duplicate_ack")
 		}
@@ -553,8 +585,17 @@ func validateWriteRequest(request WriteRequest) error {
 		if request.BaseRevision <= 0 {
 			return writeError(WriteErrorValidation, "revise requires a positive base_revision")
 		}
+		if request.ForceEntryID != "" && request.ForceEntryID != request.EntryID {
+			return writeError(WriteErrorValidation, "force_entry_id only applies to create")
+		}
 	default:
 		return writeError(WriteErrorValidation, "mode must be create or revise")
+	}
+	if request.ParentID != nil && !validParentID(*request.ParentID) {
+		return writeError(WriteErrorValidation, "parent_id is not a valid knowledge ID")
+	}
+	if request.Slug != nil && !validExplicitSlug(*request.Slug) {
+		return writeError(WriteErrorValidation, "slug is not a valid knowledge slug")
 	}
 	if request.Group != "" && !strings.EqualFold(request.Group, "inbox") && !validGroupName(request.Group) {
 		return writeError(WriteErrorValidation, "group must be an existing topic group name without path separators")
@@ -587,6 +628,40 @@ func normalizeTags(values []string) []string {
 	}
 	sort.Strings(result)
 	return result
+}
+
+func validEntryID(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) < 3 || len(value) > 120 {
+		return false
+	}
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func validParentID(value string) bool {
+	value = strings.TrimSpace(value)
+	return value == "" || validEntryID(value)
+}
+
+func validExplicitSlug(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "." || value == ".." || len([]rune(value)) > 80 {
+		return false
+	}
+	if strings.ContainsAny(value, `/\`) || strings.ContainsRune(value, 0) {
+		return false
+	}
+	if strings.ToLower(value) == "index" || isWindowsReserved(value) {
+		return false
+	}
+	return value == strings.TrimSpace(value)
 }
 
 func validGroupName(value string) bool {
@@ -675,6 +750,31 @@ func (m *Manager) createLocked(ctx context.Context, request WriteRequest, now ti
 		SourceTask: request.SourceTask, SourceTurn: request.SourceTurn,
 		Confidence: request.Confidence,
 	}
+	if request.ForceEntryID != "" {
+		frontmatter.ID = request.ForceEntryID
+	}
+	if request.Slug != nil && *request.Slug != "" {
+		frontmatter.Slug = *request.Slug
+	}
+	if request.ParentID != nil {
+		frontmatter.Parent = *request.ParentID
+	}
+	if request.SortOrder != nil {
+		sortOrder := *request.SortOrder
+		frontmatter.SortOrder = &sortOrder
+	}
+	if request.ForceEntryID != "" {
+		// A caller-supplied ID must name a new document. Rewriting an existing
+		// ID through create would fork the index's identity, so refuse instead.
+		if _, lookupErr := m.reader.entryByID(ctx, request.ForceEntryID); lookupErr == nil {
+			return WriteResult{}, nil, "", &WriteError{
+				Code:    WriteErrorDuplicate,
+				Message: "knowledge entry " + request.ForceEntryID + " already exists in the vault",
+			}
+		} else if !errors.Is(lookupErr, sql.ErrNoRows) {
+			return WriteResult{}, nil, "", fmt.Errorf("check knowledge entry id: %w", lookupErr)
+		}
+	}
 	content, err := renderDocument(frontmatter, request.Body)
 	if err != nil {
 		return WriteResult{}, nil, "", fmt.Errorf("render knowledge document: %w", err)
@@ -739,6 +839,16 @@ func (m *Manager) reviseLocked(ctx context.Context, request WriteRequest, now ti
 	frontmatter.SourceTurn = request.SourceTurn
 	if request.Confidence != nil {
 		frontmatter.Confidence = request.Confidence
+	}
+	if request.ParentID != nil {
+		frontmatter.Parent = *request.ParentID
+	}
+	if request.Slug != nil && *request.Slug != "" {
+		frontmatter.Slug = *request.Slug
+	}
+	if request.SortOrder != nil {
+		sortOrder := *request.SortOrder
+		frontmatter.SortOrder = &sortOrder
 	}
 	if frontmatter.Scope == "" {
 		frontmatter.Scope = entry.Scope
@@ -1134,6 +1244,9 @@ func turnBudgetKey(request WriteRequest) string {
 }
 
 func checkWriteBudget(state agentWriteState, request WriteRequest, budget int) error {
+	if request.SkipBudget {
+		return nil
+	}
 	if request.SourceTask == "" && request.SourceTurn == "" {
 		return nil
 	}

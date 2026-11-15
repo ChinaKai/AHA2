@@ -114,7 +114,14 @@ func (s *Service) PetListKnowledge(ctx context.Context, scope, projectID string,
 	var entries []domain.KnowledgeEntry
 	var err error
 	if scope == "project" {
-		entries, err = s.store.ListProjectKnowledge(ctx, projectID, nil)
+		if snapshot, ok := s.vaultKnowledgeForProject(ctx, projectID); ok {
+			entries = append(entries, snapshot.Project...)
+			entries = append(entries, snapshot.Stale...)
+		} else {
+			entries, err = s.store.ListProjectKnowledge(ctx, projectID, nil)
+		}
+	} else if vaultEntries, ok := s.vaultGlobalKnowledge(ctx); ok {
+		entries = vaultEntries
 	} else {
 		entries, err = s.store.ListKnowledge(ctx, "global", "", nil)
 	}
@@ -151,10 +158,30 @@ func (s *Service) PetKnowledgeDetail(ctx context.Context, id string) (PetKnowled
 	if _, err := s.petKnowledgeReadable(ctx); err != nil {
 		return PetKnowledgeDetail{}, err
 	}
-	entry, err := s.store.Knowledge(ctx, strings.TrimSpace(id))
+	id = strings.TrimSpace(id)
+	if raw, found, err := s.vaultEntryByID(ctx, id); err != nil {
+		return PetKnowledgeDetail{}, err
+	} else if found {
+		entry, ok := mapVaultKnowledgeEntry(raw)
+		if !ok {
+			return PetKnowledgeDetail{}, fmt.Errorf("知识条目不存在")
+		}
+		return petKnowledgeDetailFromEntry(entry)
+	}
+	entry, err := s.store.Knowledge(ctx, id)
 	if err != nil {
 		return PetKnowledgeDetail{}, fmt.Errorf("知识条目不存在")
 	}
+	// A vault-routed project must not reveal a legacy-only row: the read source
+	// cannot see it, so reporting it as existing would invite a write to the
+	// wrong store.
+	if s.readSourceIsVault(entry.Scope, entry.ProjectID) {
+		return PetKnowledgeDetail{}, fmt.Errorf("知识条目不存在")
+	}
+	return petKnowledgeDetailFromEntry(entry)
+}
+
+func petKnowledgeDetailFromEntry(entry domain.KnowledgeEntry) (PetKnowledgeDetail, error) {
 	body := entry.Body
 	truncated := false
 	if len([]rune(body)) > petKnowledgeTextLimit {
@@ -187,6 +214,7 @@ func petKnowledgeBrief(entry domain.KnowledgeEntry) PetKnowledgeBrief {
 type PetSubmitKnowledgeResult struct {
 	Entries   []PetKnowledgeBrief         `json:"entries"`
 	Proposals []PetKnowledgeProposalBrief `json:"proposals"`
+	Warning   string                      `json:"warning,omitempty"`
 }
 
 func (s *Service) PetSubmitKnowledge(ctx context.Context, scope, projectID string, candidates []KnowledgeCandidate) (PetSubmitKnowledgeResult, error) {
@@ -224,6 +252,10 @@ func (s *Service) PetSubmitKnowledge(ctx context.Context, scope, projectID strin
 	if len(candidates) == 0 || len(candidates) > 10 {
 		return PetSubmitKnowledgeResult{}, fmt.Errorf("一次需要提交 1–10 条知识候选")
 	}
+	useVault, err := s.knowledgeWriteRoute(scope, projectID)
+	if err != nil {
+		return PetSubmitKnowledgeResult{}, err
+	}
 	for index := range candidates {
 		candidate := &candidates[index]
 		candidate.Scope = scope
@@ -239,9 +271,22 @@ func (s *Service) PetSubmitKnowledge(ctx context.Context, scope, projectID strin
 			candidate.Type = "practice"
 		}
 		if candidate.EntryID != "" {
-			existing, err := s.store.Knowledge(ctx, candidate.EntryID)
-			if err != nil {
-				return PetSubmitKnowledgeResult{}, fmt.Errorf("知识条目 %s 不存在", candidate.EntryID)
+			var existing domain.KnowledgeEntry
+			if useVault {
+				item, found, lookupErr := s.vaultDomainEntry(ctx, candidate.EntryID)
+				if lookupErr != nil {
+					return PetSubmitKnowledgeResult{}, lookupErr
+				}
+				if !found {
+					return PetSubmitKnowledgeResult{}, fmt.Errorf("知识条目 %s 不在文件知识库中", candidate.EntryID)
+				}
+				existing = item
+			} else {
+				item, lookupErr := s.store.Knowledge(ctx, candidate.EntryID)
+				if lookupErr != nil {
+					return PetSubmitKnowledgeResult{}, fmt.Errorf("知识条目 %s 不存在", candidate.EntryID)
+				}
+				existing = item
 			}
 			if existing.Scope != scope || (scope == "project" && existing.ProjectID != projectID) {
 				if scope == "global" {
@@ -268,6 +313,13 @@ func (s *Service) PetSubmitKnowledge(ctx context.Context, scope, projectID strin
 		return PetSubmitKnowledgeResult{}, err
 	}
 	result := PetSubmitKnowledgeResult{Entries: make([]PetKnowledgeBrief, 0, len(entries)), Proposals: make([]PetKnowledgeProposalBrief, 0, len(proposals))}
+	if !useVault {
+		if scope == "global" {
+			result.Warning = s.vaultGlobalFallbackWarning()
+		} else {
+			result.Warning = s.vaultFallbackWarning(projectID)
+		}
+	}
 	for _, entry := range entries {
 		result.Entries = append(result.Entries, petKnowledgeBrief(entry))
 	}
@@ -489,9 +541,20 @@ func (s *Service) PetDeleteKnowledge(ctx context.Context, entryID, reason string
 	if err != nil {
 		return domain.PetApproval{}, err
 	}
-	item, err := s.store.Knowledge(ctx, strings.TrimSpace(entryID))
+	entryID = strings.TrimSpace(entryID)
+	// Check the vault before the legacy table: a vault-only entry has no legacy
+	// row, and reporting "not found" here would contradict PetListKnowledge.
+	if _, found, lookupErr := s.vaultEntryByID(ctx, entryID); lookupErr != nil {
+		return domain.PetApproval{}, lookupErr
+	} else if found {
+		return domain.PetApproval{}, ErrKnowledgeVaultDeleteUnsupported
+	}
+	item, err := s.store.Knowledge(ctx, entryID)
 	if err != nil {
 		return domain.PetApproval{}, fmt.Errorf("知识条目不存在")
+	}
+	if s.readSourceIsVault(item.Scope, item.ProjectID) {
+		return domain.PetApproval{}, fmt.Errorf("知识条目不在当前读取源中，不能删除")
 	}
 	if item.IsIndex || store.IsManagedGlobalKnowledgeCategory(item.ID) {
 		return domain.PetApproval{}, fmt.Errorf("知识入口不能删除")
