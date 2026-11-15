@@ -219,6 +219,72 @@ func TestPrepareKnowledgeDeletionMissingDatabase(t *testing.T) {
 	}
 }
 
+// prepareDeletionWithin guards against the backup-directory path regressing to
+// an unbounded retry loop: invalid locations must fail instead of hanging.
+func prepareDeletionWithin(t *testing.T, options DeletePrepOptions) (DeletePrepReport, error) {
+	t.Helper()
+	type outcome struct {
+		report DeletePrepReport
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		report, err := PrepareKnowledgeDeletion(context.Background(), options)
+		done <- outcome{report: report, err: err}
+	}()
+	select {
+	case result := <-done:
+		return result.report, result.err
+	case <-time.After(5 * time.Second):
+		t.Fatal("delete-prep did not return within 5s")
+		return DeletePrepReport{}, nil
+	}
+}
+
+func TestPrepareKnowledgeDeletionRejectsBackupDirThatIsAFile(t *testing.T) {
+	_, databasePath := openTestStore(t)
+	backupFile := filepath.Join(t.TempDir(), "backups")
+	if err := os.WriteFile(backupFile, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := prepareDeletionWithin(t, DeletePrepOptions{
+		DataDir: filepath.Dir(databasePath), DatabasePath: databasePath,
+		VaultPath: filepath.Join(t.TempDir(), "missing-vault"), BackupDir: backupFile,
+	})
+	if err == nil {
+		t.Fatal("expected a fast error when the backup directory is a regular file")
+	}
+	if !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("error = %v, want a not-a-directory error", err)
+	}
+}
+
+func TestPrepareKnowledgeDeletionRejectsUnreadableBackupDir(t *testing.T) {
+	_, databasePath := openTestStore(t)
+	backupDir := filepath.Join(t.TempDir(), "locked-backups")
+	if err := os.Mkdir(backupDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(backupDir, 0o000); err != nil {
+		t.Skipf("cannot chmod the backup directory: %v", err)
+	}
+	defer os.Chmod(backupDir, 0o700)
+	probe, probeErr := os.Create(filepath.Join(backupDir, "probe"))
+	if probeErr == nil {
+		probe.Close()
+		// Root (or a platform where 0o000 does not restrict traversal, such as
+		// Windows) can still reach the directory; the scenario is not testable.
+		t.Skip("process can still write inside a 0o000 directory")
+	}
+	_, err := prepareDeletionWithin(t, DeletePrepOptions{
+		DataDir: filepath.Dir(databasePath), DatabasePath: databasePath,
+		VaultPath: filepath.Join(t.TempDir(), "missing-vault"), BackupDir: backupDir,
+	})
+	if err == nil {
+		t.Fatal("expected a fast error when the backup directory is unreadable")
+	}
+}
+
 func TestPrepareKnowledgeDeletionWarnsWithoutManifest(t *testing.T) {
 	_, databasePath := openTestStore(t)
 	now := "2026-11-15T12:00:00Z"

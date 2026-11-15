@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -332,11 +333,26 @@ func deletePrepTableCounts(ctx context.Context, db *sql.DB) (map[string]int, err
 }
 
 func backupDatabaseForDeletion(ctx context.Context, databasePath, backupDir string, now time.Time) (string, string, string, error) {
+	// Reject unusable backup locations up front. Without this a plain file (or
+	// an unreadable directory) surfaces as a non-NotExist stat error inside the
+	// uniqueness loop below, and treating it as "already exists" would spin
+	// forever instead of failing fast.
+	if info, err := os.Stat(backupDir); err == nil {
+		if !info.IsDir() {
+			return "", "", "", fmt.Errorf("backup directory %s is not a directory", backupDir)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", "", "", fmt.Errorf("inspect backup directory %s: %w", backupDir, err)
+	}
 	base := filepath.Join(backupDir, deletePrepNamePrefix+now.Format("20060102-150405"))
 	target := base
 	for attempt := 2; ; attempt++ {
-		if _, err := os.Stat(target); os.IsNotExist(err) {
+		_, statErr := os.Stat(target)
+		if errors.Is(statErr, os.ErrNotExist) {
 			break
+		}
+		if statErr != nil {
+			return "", "", "", fmt.Errorf("inspect backup target %s: %w", target, statErr)
 		}
 		target = fmt.Sprintf("%s-%d", base, attempt)
 	}
