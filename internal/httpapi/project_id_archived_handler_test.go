@@ -2,10 +2,12 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -69,7 +71,8 @@ func TestRetryKnowledgeSpaceForArchivedProjectIDReturnsConflict(t *testing.T) {
 	}
 	if err := database.CreateProject(ctx, domain.Project{
 		ID: project.ID, Name: "Sync Replay", ProjectType: "folder",
-		KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now,
+		KnowledgePolicy: "enabled", KnowledgeState: domain.KnowledgeStateReady,
+		CreatedAt: now, UpdatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -83,5 +86,65 @@ func TestRetryKnowledgeSpaceForArchivedProjectIDReturnsConflict(t *testing.T) {
 	}
 	if body["error"] != "project_id_archived" || body["message"] == "" {
 		t.Fatalf("archived project id body = %v", body)
+	}
+}
+
+// The legacy cutover exports into the project space before dropping tables.
+// An archived project ID is a client conflict, not a generic cutover failure.
+func TestCutoverForArchivedProjectIDReturnsConflictCode(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	vaultConfig := knowledgevault.DefaultConfig(t.TempDir())
+	if _, err := knowledgevault.Bootstrap(vaultConfig, knowledgevault.InitOptions{VaultName: "Cutover"}); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := knowledgevault.NewManager(vaultConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.SetEnabled(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	appService := app.NewService(database, nil, nil)
+	appService.SetKnowledgeVault(manager, true)
+
+	now := time.Now().UTC()
+	project, err := appService.CreateProject(ctx, domain.Project{
+		ID: "p529cutover", Name: "Cutover Reuse", ProjectType: "folder",
+		KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := knowledgevault.ArchiveProjectSpace(vaultConfig, project.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.DeleteProjectWithSyncTombstone(ctx, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CreateProject(ctx, domain.Project{
+		ID: project.ID, Name: "Cutover Replay", ProjectType: "folder",
+		KnowledgePolicy: "enabled", KnowledgeState: domain.KnowledgeStateReady,
+		CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	server := &Server{store: database, app: appService, knowledgeVault: manager}
+	recorder := httptest.NewRecorder()
+	body := strings.NewReader(`{"project_id":"` + project.ID + `","confirm":true}`)
+	server.cutoverLegacyKnowledge(recorder, httptest.NewRequest(http.MethodPost,
+		"/api/v1/settings/knowledge-vault/cutover-legacy", body))
+	var payload map[string]any
+	if err := json.NewDecoder(recorder.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if recorder.Code != http.StatusConflict || payload["error"] != "project_id_archived" || payload["message"] == "" {
+		t.Fatalf("cutover archived id = %d %v", recorder.Code, payload)
 	}
 }
