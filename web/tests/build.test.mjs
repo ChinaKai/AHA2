@@ -1605,7 +1605,8 @@ test("built web contains responsive application", async () => {
 	// loading the legacy lists, and the vault branch hides legacy sources.
 	assert.match(script, /jobs\.push\(loadChannelKnowledgeSources\(force\)\)/);
 	assert.match(channels, /data-channel-vault-knowledge/);
-	assert.match(channels, /旧库知识源已隐藏/);
+	assert.match(channels, /渠道只读取已绑定的项目空间/);
+	assert.match(channels, /replaceChannelKnowledgeBindings/);
 	assert.doesNotMatch(channels, /group_operation_scope_mode|group_allowed_project_ids|group_allowed_workspace_ids/);
 	assert.doesNotMatch(channels, /name="operation_scope_mode"|name="allowed_project_ids"|name="allowed_workspace_ids"/);
 	assert.doesNotMatch(channels, /data-channel-activity|Owner 收件箱与投递/);

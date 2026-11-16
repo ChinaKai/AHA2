@@ -484,6 +484,13 @@ func (s *Server) channelKnowledgePolicy(writer http.ResponseWriter, request *htt
 	}
 	session, _ := sessionFromContext(request.Context())
 	items, err := s.channels.OwnerKnowledgePolicies(request.Context(), session.OwnerID, request.PathValue("id"))
+	if store.IsLegacyKnowledgeTableMissing(err) {
+		// The one-way cutover removed per-entry policies. Bindings now own
+		// channel knowledge; report an explicit unconfigured state instead of
+		// failing the whole channel settings page.
+		writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "policies": []any{}, "configured": false, "bindings_required": true})
+		return
+	}
 	if err != nil {
 		writeChannelError(writer, err, "get_channel_knowledge_policy_failed")
 		return
@@ -522,6 +529,13 @@ func (s *Server) updateChannelKnowledgePolicy(writer http.ResponseWriter, reques
 	}
 	session, _ := sessionFromContext(request.Context())
 	items, err := s.channels.ReplaceOwnerKnowledgeGrants(request.Context(), session.OwnerID, request.PathValue("id"), payload.Endpoint, payload.ScopeMode, revision, payload.Grants)
+	if store.IsLegacyKnowledgeTableMissing(err) {
+		writeJSON(writer, http.StatusConflict, map[string]any{
+			"ok": false, "error": "knowledge_bindings_required",
+			"message": "旧知识表已删除，请改用项目空间 binding 配置渠道知识",
+		})
+		return
+	}
 	if err != nil {
 		writeChannelError(writer, err, "update_channel_knowledge_policy_failed")
 		return

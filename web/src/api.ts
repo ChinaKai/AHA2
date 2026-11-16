@@ -30,6 +30,7 @@ import type {
   KnowledgeLibrary,
   KnowledgeProposal,
   KnowledgeReviewSettings,
+  ChannelKnowledgeBinding,
   KnowledgeVaultDoc,
   KnowledgeVaultFileList,
   KnowledgeVaultFileResponse,
@@ -1026,6 +1027,18 @@ class APIClient {
     if (library) query.set("library", library);
     if (projectID) query.set("project", projectID);
     return this.request(`/api/v1/knowledge-vault/tree?${query}`);
+  }
+
+  channelKnowledgeBindings(instanceID: string, endpoint = ""): Promise<{ok: boolean; endpoint: string; bindings: ChannelKnowledgeBinding[]}> {
+    const query = endpoint ? `?endpoint=${encodeURIComponent(endpoint)}` : "";
+    return this.request(`/api/v1/channel-instances/${encodeURIComponent(instanceID)}/knowledge-bindings${query}`);
+  }
+
+  replaceChannelKnowledgeBindings(instanceID: string, endpoint: string, bindings: Array<{space_project_id: string; access_mode?: string; scope_mode?: string}>): Promise<{ok: boolean; bindings: ChannelKnowledgeBinding[]}> {
+    return this.request(`/api/v1/channel-instances/${encodeURIComponent(instanceID)}/knowledge-bindings`, {
+      method: "PUT",
+      body: JSON.stringify({endpoint, bindings}),
+    });
   }
 
   knowledgeVaultFiles(path = ""): Promise<KnowledgeVaultFileList> {

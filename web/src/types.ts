@@ -1870,6 +1870,16 @@ export interface KnowledgeVaultTree {
   warning?: string;
 }
 
+export interface ChannelKnowledgeBinding {
+  consumer_type: string;
+  consumer_id: string;
+  space_project_id: string;
+  access_mode: "read" | "read_write" | string;
+  scope_mode: "all" | "selected" | string;
+  created_at?: string;
+  updated_at?: string;
+}
+
 export interface KnowledgeVaultFileEntry {
   name: string;
   path: string;

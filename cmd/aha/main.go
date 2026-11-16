@@ -343,6 +343,20 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	vaultEnabled, vaultSource := knowledgevault.EffectiveStartupSwitch(
 		vaultSettings.Configured, vaultSettings.Enabled, startupDefault,
 	)
+	legacyCutoverApplied := false
+	if applied, cutoverErr := database.LegacyCutoverApplied(ctx); cutoverErr == nil {
+		legacyCutoverApplied = applied
+	} else {
+		logger.Warn("read legacy knowledge cutover state", "error", cutoverErr)
+	}
+	if legacyCutoverApplied && !vaultEnabled {
+		// After the old tables are dropped there is no usable legacy source.
+		// Keeping the vault closed would make every knowledge read fail, so the
+		// one-way cutover pins the runtime to the vault.
+		vaultEnabled = true
+		vaultSource = knowledgevault.SourceDatabase
+		logger.Warn("legacy knowledge tables are gone; forcing the file vault on")
+	}
 	knowledgeVaultManager.SetSource(vaultSource)
 	knowledgeVaultManager.SetRuntimeWrite(options.knowledgeVaultRuntimeWrite)
 	if err := knowledgeVaultManager.SetEnabled(ctx, vaultEnabled); err != nil {
@@ -432,12 +446,6 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	}
 	appService := app.NewService(database, secretStore, executor)
 	knowledgeVaultManager.StartAutoIndex(ctx, 0)
-	legacyCutoverApplied := false
-	if applied, cutoverErr := database.LegacyCutoverApplied(ctx); cutoverErr == nil {
-		legacyCutoverApplied = applied
-	} else {
-		logger.Warn("read legacy knowledge cutover state", "error", cutoverErr)
-	}
 	appService.SetLegacyKnowledgeDisabled(legacyCutoverApplied)
 	appService.SetKnowledgeVault(knowledgeVaultManager, options.knowledgeVaultRuntimeRead)
 	appService.SetKnowledgeVaultRuntimeWrite(options.knowledgeVaultRuntimeWrite)

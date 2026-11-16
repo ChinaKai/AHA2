@@ -198,6 +198,20 @@ func (s *Store) CutoverLegacyKnowledge(ctx context.Context, options LegacyCutove
 	return report, nil
 }
 
+// IsLegacyKnowledgeTableMissing reports a query failure caused by the one-way
+// cutover. Callers render an explicit "migrated/empty" state instead of a 500.
+func IsLegacyKnowledgeTableMissing(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "no such table: knowledge_entries") ||
+		strings.Contains(message, "no such table: knowledge_libraries") ||
+		strings.Contains(message, "no such table: channel_knowledge_policies") ||
+		strings.Contains(message, "no such table: channel_knowledge_grants") ||
+		strings.Contains(message, "no such table: project_knowledge_bindings")
+}
+
 // LegacyCutoverApplied reports whether schema v143 is recorded.
 func (s *Store) LegacyCutoverApplied(ctx context.Context) (bool, error) {
 	var exists int

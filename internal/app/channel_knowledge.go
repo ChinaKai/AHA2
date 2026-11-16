@@ -104,6 +104,11 @@ func (s *Service) channelAllowedKnowledge(ctx context.Context, instanceID, endpo
 	} else if len(bindings) > 0 {
 		return s.channelBindingEntries(ctx, bindings)
 	}
+	if s.knowledgeLegacyDisabled {
+		// No binding and no legacy tables: an explicit empty selection. The
+		// channel does not borrow its host space implicitly.
+		return []domain.KnowledgeEntry{}, nil
+	}
 	selection, err := s.store.ChannelKnowledgeSelection(ctx, instanceID, endpointKind)
 	if errors.Is(err, store.ErrChannelKnowledgeUnconfigured) {
 		// A channel created while the vault is the read source has no policy:
