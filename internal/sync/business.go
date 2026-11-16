@@ -591,6 +591,10 @@ func applyBusinessObject(ctx context.Context, database *store.Store, obj domain.
 	if obj.Operation == "delete" && (obj.Type == TypeTask || obj.Type == TypeWorkspace) {
 		return applyTaskGraphObject(ctx, database, obj)
 	}
+	// resurrectTombstone is the skill tombstone version this event is allowed
+	// to supersede. The tombstone is not removed here: the create that follows
+	// does it in the same transaction as the row and the package.
+	resurrectTombstone := ""
 	if tombstone, err := database.SyncTombstone(ctx, obj.Type, obj.ID); err == nil {
 		if obj.Operation == "delete" {
 			return nil
@@ -607,11 +611,14 @@ func applyBusinessObject(ctx context.Context, database *store.Store, obj domain.
 			if !resurrects || !sharedVersionNewer(TypeSkill, version, tombstone.Version) {
 				return nil
 			}
-		} else if !sharedVersionNewer(obj.Type, obj.SourceVersion, tombstone.Version) {
-			return nil
-		}
-		if err := database.DeleteSyncTombstone(ctx, obj.Type, obj.ID); err != nil {
-			return err
+			resurrectTombstone = tombstone.Version
+		} else {
+			if !sharedVersionNewer(obj.Type, obj.SourceVersion, tombstone.Version) {
+				return nil
+			}
+			if err := database.DeleteSyncTombstone(ctx, obj.Type, obj.ID); err != nil {
+				return err
+			}
 		}
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return err
@@ -636,7 +643,7 @@ func applyBusinessObject(ctx context.Context, database *store.Store, obj domain.
 	if obj.Operation != "upsert" {
 		return fmt.Errorf("unsupported operation %q", obj.Operation)
 	}
-	return upsertBusinessObject(ctx, database, obj, exists)
+	return upsertBusinessObject(ctx, database, obj, exists, resurrectTombstone)
 }
 
 func currentBusinessObject(ctx context.Context, database *store.Store, kind, id string) (json.RawMessage, string, bool, error) {
@@ -723,7 +730,7 @@ func currentBusinessObject(ctx context.Context, database *store.Store, kind, id 
 	return raw, version, true, err
 }
 
-func upsertBusinessObject(ctx context.Context, database *store.Store, obj domain.SyncObject, exists bool) error {
+func upsertBusinessObject(ctx context.Context, database *store.Store, obj domain.SyncObject, exists bool, resurrectTombstone string) error {
 	now := time.Now().UTC()
 	switch obj.Type {
 	case TypeProject, TypeWorkspace, TypeTask, TypeTaskAgent, TypeRound, TypeTurn, TypeConversation, TypeTaskMemory, TypeHardware:
@@ -894,18 +901,18 @@ func upsertBusinessObject(ctx context.Context, database *store.Store, obj domain
 		if desired < 1 {
 			desired = 1
 		}
-		p.Skill.Version = desired - 1
-		if err := database.CreateSkill(ctx, p.Skill); err != nil {
+		if resurrectTombstone != "" {
+			// A tombstoned object that still has a row is inconsistent state;
+			// keep the tombstone blocking rather than guessing.
+			if exists {
+				return nil
+			}
+			p.Skill.Version = desired
+			_, err := database.ResurrectSkillPackage(ctx, p.Skill, p.Files, resurrectTombstone)
 			return err
 		}
-		created, err := database.Skill(ctx, obj.ID)
-		if err != nil {
-			return err
-		}
-		created.Scope, created.ProjectID = p.Skill.Scope, p.Skill.ProjectID
-		created.Name, created.Description, created.Instructions = p.Skill.Name, p.Skill.Description, p.Skill.Instructions
-		created.Status, created.Enabled, created.UpdatedAt = p.Skill.Status, p.Skill.Enabled, p.Skill.UpdatedAt
-		_, err = database.UpdateSkillPackage(ctx, created, desired-1, p.Files)
+		p.Skill.Version = desired
+		_, err := database.CreateSkillPackage(ctx, p.Skill, p.Files)
 		return err
 	case TypeProvider:
 		var v domain.Provider

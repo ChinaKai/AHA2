@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -152,79 +153,125 @@ func (s *Store) removeSkillPackage(item domain.Skill) error {
 	return os.RemoveAll(absoluteRoot)
 }
 
-func (s *Store) UpdateSkillPackage(ctx context.Context, item domain.Skill, baseVersion int, files []domain.SkillFile) (domain.Skill, error) {
-	if item.Version != baseVersion {
-		return domain.Skill{}, fmt.Errorf("skill version conflict")
-	}
+// validateSkillPackageFiles normalises and checks one complete package before
+// anything is written to disk. Duplicate paths and oversized or binary content
+// are rejected here so every writer shares the same rules.
+func validateSkillPackageFiles(files []domain.SkillFile) ([]domain.SkillFile, error) {
 	validated := make([]domain.SkillFile, 0, len(files))
 	seen := map[string]bool{}
 	hasEntry := false
 	for _, file := range files {
 		name := path.Clean(strings.ReplaceAll(strings.TrimSpace(file.Path), `\`, "/"))
 		if name == "." || strings.HasPrefix(name, "/") || name == ".." || strings.HasPrefix(name, "../") {
-			return domain.Skill{}, fmt.Errorf("invalid skill package path %q", file.Path)
+			return nil, fmt.Errorf("invalid skill package path %q", file.Path)
 		}
 		if seen[name] || len(file.Content) > maxSkillPackageFileSize || strings.ContainsRune(file.Content, '\x00') {
-			return domain.Skill{}, fmt.Errorf("invalid skill package file %q", name)
+			return nil, fmt.Errorf("invalid skill package file %q", name)
 		}
 		seen[name] = true
 		hasEntry = hasEntry || name == "SKILL.md"
 		validated = append(validated, domain.SkillFile{Path: name, Content: file.Content})
 	}
 	if !hasEntry {
-		return domain.Skill{}, fmt.Errorf("SKILL.md is required")
+		return nil, fmt.Errorf("SKILL.md is required")
 	}
 	for _, file := range validated {
 		if file.Path == "SKILL.md" && !validSkillEntry(file.Content) {
-			return domain.Skill{}, fmt.Errorf("SKILL.md frontmatter requires name and description")
+			return nil, fmt.Errorf("SKILL.md frontmatter requires name and description")
 		}
 	}
+	return validated, nil
+}
+
+// replaceSkillPackage stages the package beside the live directory and swaps it
+// in. A missing live directory is not an error: a resurrected skill has no
+// package left over from the delete.
+func (s *Store) replaceSkillPackage(item domain.Skill, files []domain.SkillFile) error {
 	base := filepath.Join(s.dataDir, "knowledge", "skills")
 	if err := os.MkdirAll(base, 0o700); err != nil {
-		return domain.Skill{}, err
+		return err
 	}
 	stage, err := os.MkdirTemp(base, ".skill-stage-")
 	if err != nil {
-		return domain.Skill{}, err
+		return err
 	}
 	defer os.RemoveAll(stage)
-	for _, file := range validated {
+	for _, file := range files {
 		target := filepath.Join(stage, filepath.FromSlash(file.Path))
 		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
-			return domain.Skill{}, err
+			return err
 		}
 		if err := os.WriteFile(target, []byte(file.Content), 0o600); err != nil {
-			return domain.Skill{}, err
+			return err
 		}
 	}
 	root := s.SkillPackagePath(item)
 	backup := root + ".backup"
-	_ = os.RemoveAll(backup)
-	if err := os.Rename(root, backup); err != nil {
-		return domain.Skill{}, err
+	if err := os.RemoveAll(backup); err != nil {
+		return err
+	}
+	rootExists := true
+	if _, err := os.Stat(root); errors.Is(err, os.ErrNotExist) {
+		rootExists = false
+	} else if err != nil {
+		return err
+	}
+	if rootExists {
+		if err := os.Rename(root, backup); err != nil {
+			return err
+		}
 	}
 	if err := os.Rename(stage, root); err != nil {
+		if rootExists {
+			_ = os.Rename(backup, root)
+		}
+		return err
+	}
+	return nil
+}
+
+// rollbackSkillPackage undoes replaceSkillPackage for a write that could not be
+// committed, and commitSkillPackage drops the backup once it can.
+func (s *Store) rollbackSkillPackage(item domain.Skill) {
+	root := s.SkillPackagePath(item)
+	backup := root + ".backup"
+	_ = os.RemoveAll(root)
+	if _, err := os.Stat(backup); err == nil {
 		_ = os.Rename(backup, root)
+	}
+}
+
+func (s *Store) commitSkillPackage(item domain.Skill) {
+	_ = os.RemoveAll(s.SkillPackagePath(item) + ".backup")
+}
+
+func (s *Store) UpdateSkillPackage(ctx context.Context, item domain.Skill, baseVersion int, files []domain.SkillFile) (domain.Skill, error) {
+	if item.Version != baseVersion {
+		return domain.Skill{}, fmt.Errorf("skill version conflict")
+	}
+	validated, err := validateSkillPackageFiles(files)
+	if err != nil {
+		return domain.Skill{}, err
+	}
+	if err := s.replaceSkillPackage(item, validated); err != nil {
 		return domain.Skill{}, err
 	}
 	item.Version++
-	item.SourcePath = root
+	item.SourcePath = s.SkillPackagePath(item)
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE skills SET package_slug=?,scope=?,project_id=?,name=?,description=?,instructions=?,version=?,status=?,enabled=?,auto_attach=?,source_path=?,updated_at=? WHERE id=? AND version=?`,
 		item.PackageSlug, item.Scope, item.ProjectID, item.Name, item.Description, item.Instructions, item.Version,
-		item.Status, boolInt(item.Enabled), boolInt(item.AutoAttach), root, timeString(item.UpdatedAt), item.ID, baseVersion,
+		item.Status, boolInt(item.Enabled), boolInt(item.AutoAttach), item.SourcePath, timeString(item.UpdatedAt), item.ID, baseVersion,
 	)
 	if err != nil {
-		_ = os.RemoveAll(root)
-		_ = os.Rename(backup, root)
+		s.rollbackSkillPackage(item)
 		return domain.Skill{}, err
 	}
 	if rows, _ := result.RowsAffected(); rows != 1 {
-		_ = os.RemoveAll(root)
-		_ = os.Rename(backup, root)
+		s.rollbackSkillPackage(item)
 		return domain.Skill{}, fmt.Errorf("skill version conflict")
 	}
-	_ = os.RemoveAll(backup)
+	s.commitSkillPackage(item)
 	item.PackageFiles = validated
 	item.Files = make([]string, 0, len(validated))
 	for _, file := range validated {

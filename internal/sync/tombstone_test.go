@@ -285,3 +285,67 @@ func TestSkillFilesMatchRejectsDuplicatePaths(t *testing.T) {
 		t.Fatal("clean identical package was treated as different")
 	}
 }
+
+// TestResurrectFailureKeepsTombstoneAndBlocking pins that a resurrect which
+// cannot be written leaves no trace: the tombstone, the row and the package are
+// one transaction, so a package-slug conflict must not unlock the object.
+func TestResurrectFailureKeepsTombstoneAndBlocking(t *testing.T) {
+	t.Parallel()
+	ctx, database, now := context.Background(), businessStore(t), time.Now().UTC()
+	if err := database.CreateSkill(ctx, domain.Skill{ID: "skill-holder", PackageSlug: "demo", Scope: "global", Name: "holder", Description: "holder", Instructions: "holder body", Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ApplySyncTombstone(ctx, TypeSkill, "skill-target", "delete:skill-target", "1", now); err != nil {
+		t.Fatal(err)
+	}
+	resurrect := func() error {
+		raw, err := json.Marshal(skillPayload{
+			Skill:     domain.Skill{ID: "skill-target", PackageSlug: "demo", Scope: "global", Name: "demo", Description: "demo", Instructions: "rebuilt body", Version: 2, Status: "active", Enabled: true},
+			Files:     []domain.SkillFile{{Path: "SKILL.md", Content: "---\nname: \"demo\"\ndescription: \"demo\"\n---\n\nrebuilt body\n"}},
+			Resurrect: "resurrect:target",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return applyBusinessObject(ctx, database, domain.SyncObject{Type: TypeSkill, ID: "skill-target", Operation: "upsert", Payload: raw, SourceVersion: "2"})
+	}
+	if err := resurrect(); err == nil {
+		t.Fatal("resurrect with a conflicting package slug was accepted")
+	}
+	tombstone, err := database.SyncTombstone(ctx, TypeSkill, "skill-target")
+	if err != nil || tombstone.Version != "1" {
+		t.Fatalf("failed resurrect lost the tombstone: %#v err=%v", tombstone, err)
+	}
+	if _, err := database.Skill(ctx, "skill-target"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("failed resurrect left a row: %v", err)
+	}
+	// The ordinary replay path must still be blocked after the failure.
+	plain, err := json.Marshal(skillPayload{
+		Skill: domain.Skill{ID: "skill-target", Scope: "global", Name: "demo", Description: "demo", Instructions: "churn body", Version: 9, Status: "active", Enabled: true},
+		Files: []domain.SkillFile{{Path: "SKILL.md", Content: "---\nname: \"demo\"\ndescription: \"demo\"\n---\n\nchurn body\n"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applyBusinessObject(ctx, database, domain.SyncObject{Type: TypeSkill, ID: "skill-target", Operation: "upsert", Payload: plain, SourceVersion: "9"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Skill(ctx, "skill-target"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("plain upsert revived a failed resurrect: %v", err)
+	}
+
+	// Once the slug is free the same event succeeds and the state is coherent.
+	if err := database.DeleteSkill(ctx, "skill-holder"); err != nil {
+		t.Fatal(err)
+	}
+	if err := resurrect(); err != nil {
+		t.Fatal(err)
+	}
+	rebuilt, err := database.Skill(ctx, "skill-target")
+	if err != nil || rebuilt.Version != 2 || rebuilt.Instructions != "rebuilt body" {
+		t.Fatalf("rebuilt skill=%#v err=%v", rebuilt, err)
+	}
+	if _, err := database.SyncTombstone(ctx, TypeSkill, "skill-target"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("tombstone survived the successful resurrect: %v", err)
+	}
+}
