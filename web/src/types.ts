@@ -1698,6 +1698,9 @@ export interface KnowledgeVaultReadiness {
   can_enable: boolean;
   default_enabled: boolean;
   switch_visible: boolean;
+  // False once the instance has committed to the vault: the switch is lock-on
+  // and the backend rejects a direct API rollback to legacy knowledge.
+  rollback_allowed: boolean;
   message?: string;
   missing?: string[];
   checks: KnowledgeVaultReadinessCheck[];

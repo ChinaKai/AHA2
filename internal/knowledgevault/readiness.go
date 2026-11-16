@@ -16,10 +16,15 @@ import (
 // UI renders every check so a migration, a stale index and an unbound project
 // are distinguishable instead of all looking like "not ready".
 type Readiness struct {
-	Status          string           `json:"status"`
-	CanEnable       bool             `json:"can_enable"`
-	DefaultEnabled  bool             `json:"default_enabled"`
-	SwitchVisible   bool             `json:"switch_visible"`
+	Status         string `json:"status"`
+	CanEnable      bool   `json:"can_enable"`
+	DefaultEnabled bool   `json:"default_enabled"`
+	SwitchVisible  bool   `json:"switch_visible"`
+	// RollbackAllowed tells the Web UI whether the switch may be turned off to
+	// fall back to legacy knowledge. Migration/import commits the instance to
+	// the vault, so the switch is lock-on and the backend rejects a rollback
+	// even when the API is called directly.
+	RollbackAllowed bool             `json:"rollback_allowed"`
 	Message         string           `json:"message,omitempty"`
 	Missing         []string         `json:"missing,omitempty"`
 	Checks          []ReadinessCheck `json:"checks"`
@@ -90,11 +95,23 @@ func (in ReadinessInput) Populated() bool {
 
 // InUse reports an upgrade that already runs on the vault: legacy knowledge is
 // still present, the owner turned the manager on and the index has content. Its
-// legacy database is a rollback copy, not a pending migration, so readiness
+// legacy database is a read-only backup, not a pending migration, so readiness
 // must not send the owner to a migration that would overwrite those pages. A
 // fresh install has no legacy and stays on the untouched ready path.
 func (in ReadinessInput) InUse() bool {
 	return in.HasLegacy() && in.Configured && in.Enabled && in.EntryCount > 0
+}
+
+// RollbackAllowed reports whether turning the switch off may send knowledge
+// reads back to the legacy database. Once the owner has committed to the
+// vault — the persisted switch was used, a migration/import was verified, or
+// the vault is live — the vault is the only source of truth and rollback is
+// closed for good. A fresh install has no legacy knowledge to fall back to,
+// so it is closed there as well; only an upgrade that still carries unmigrated
+// legacy knowledge keeps the concept, and that state cannot be enabled before
+// the migration completes anyway.
+func (in ReadinessInput) RollbackAllowed() bool {
+	return in.HasLegacy() && !in.Configured && !in.Populated() && !in.InUse()
 }
 
 // DefaultVaultEnabled is the startup default before the owner ever touched the
@@ -111,6 +128,7 @@ func DefaultVaultEnabled(hasLegacy, populated bool) bool {
 func EvaluateReadiness(in ReadinessInput) Readiness {
 	result := Readiness{
 		SwitchVisible:   in.HasLegacy(),
+		RollbackAllowed: in.RollbackAllowed(),
 		DefaultEnabled:  DefaultVaultEnabled(in.HasLegacy(), in.Populated()),
 		Checks:          []ReadinessCheck{},
 		UnboundProjects: unboundProjects(in.ProjectBindings, in.KnownProjects),
@@ -169,8 +187,8 @@ func EvaluateReadiness(in ReadinessInput) Readiness {
 	} else if in.InUse() {
 		// The owner already runs on the vault. A migration would re-export the
 		// legacy database over these pages, so legacy is intentionally left as
-		// a read-only rollback copy and readiness must not ask for it.
-		add("migration", checkOK, "文件知识库已启用并在使用；旧知识库仅作只读回滚保留，不会被迁移覆盖")
+		// a read-only backup and readiness must not ask for it.
+		add("migration", checkOK, "文件知识库已启用并在使用；旧知识库仅作只读备份保留，不会被迁移覆盖，也不能回退")
 	} else {
 		add("migration", checkFail, fmt.Sprintf("检测到旧知识库（%d 条知识、%d 个技能），迁移或导入尚未验证", in.LegacyEntries, maxInt(in.LegacySkills, in.LegacySkillDirs)))
 	}
@@ -196,14 +214,14 @@ func EvaluateReadiness(in ReadinessInput) Readiness {
 		result.Message = "文件知识库已就绪。"
 	}
 	if in.InUse() {
-		// Say explicitly that the remaining legacy data is only a rollback copy;
-		// the ready/degraded copy otherwise reads like the vault still needs a
-		// migration.
+		// Say explicitly that the remaining legacy data is only a read-only
+		// backup; the ready/degraded copy otherwise reads like the vault still
+		// needs a migration.
 		switch result.Status {
 		case ReadinessReady:
-			result.Message = "文件知识库已就绪并在使用；旧知识库仅作只读回滚保留，不会被迁移覆盖。"
+			result.Message = "文件知识库已就绪并在使用；旧知识库仅作只读备份保留，不会被迁移覆盖，也不能回退。"
 		case ReadinessDegraded:
-			result.Message = "文件知识库已启用，但部分项目仍回退旧知识库或索引需要关注；旧知识库仅作只读回滚保留，不会被迁移覆盖。"
+			result.Message = "文件知识库已启用，但部分项目仍回退旧知识库或索引需要关注；旧知识库仅作只读备份保留，不会被迁移覆盖。"
 		}
 	}
 	result.CanEnable = result.Status == ReadinessReady || result.Status == ReadinessDegraded

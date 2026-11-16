@@ -45,6 +45,9 @@ func TestKnowledgeVaultSettingsToggleInitAndRebuild(t *testing.T) {
 	if readiness["switch_visible"] != false || readiness["default_enabled"] != true || readiness["status"] != "needs_rebuild" {
 		t.Fatalf("fresh-install readiness = %#v", readiness)
 	}
+	if readiness["rollback_allowed"] != false {
+		t.Fatalf("a fresh install has no legacy knowledge to roll back to: %#v", readiness)
+	}
 	if settings["legacy"].(map[string]any)["entries"].(float64) != 0 {
 		t.Fatalf("fresh install should have no legacy knowledge: %#v", settings["legacy"])
 	}
@@ -90,23 +93,25 @@ func TestKnowledgeVaultSettingsToggleInitAndRebuild(t *testing.T) {
 		t.Fatalf("sample doc status=%d payload=%#v", response.StatusCode, doc)
 	}
 
-	// Off hides the data API but keeps the samples on disk; on restores them.
+	// The initialized instance is committed to the vault: rollback is closed,
+	// and a direct API close is refused instead of silently returning to the
+	// legacy database. The Web switch renders as a disabled checked box.
+	if readiness = settings["readiness"].(map[string]any); readiness["rollback_allowed"] != false {
+		t.Fatalf("rollback must be closed after init: %#v", readiness)
+	}
 	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/settings/knowledge-vault", map[string]any{"enabled": false}, csrf)
-	var disabled map[string]any
-	decodeResponse(t, response, &disabled)
-	if response.StatusCode != http.StatusOK || disabled["settings"].(map[string]any)["enabled"] != false {
-		t.Fatalf("disable status=%d payload=%#v", response.StatusCode, disabled)
+	var locked map[string]any
+	decodeResponse(t, response, &locked)
+	if response.StatusCode != http.StatusConflict || locked["error"] != "knowledge_vault_rollback_locked" {
+		t.Fatalf("disable locked vault status=%d payload=%#v", response.StatusCode, locked)
+	}
+	if locked["settings"].(map[string]any)["enabled"] != true {
+		t.Fatalf("a refused close changed the settings view: %#v", locked["settings"])
 	}
 	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/knowledge-vault/doc/"+knowledgevault.SampleWelcomeID, nil, "")
 	response.Body.Close()
-	if response.StatusCode != http.StatusNotFound {
-		t.Fatalf("doc while off status=%d, want 404", response.StatusCode)
-	}
-	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/settings/knowledge-vault", map[string]any{"enabled": true}, csrf)
-	var enabled map[string]any
-	decodeResponse(t, response, &enabled)
-	if response.StatusCode != http.StatusOK || enabled["settings"].(map[string]any)["index_ready"] != true {
-		t.Fatalf("re-enable status=%d payload=%#v", response.StatusCode, enabled)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("doc after refused close status=%d, want 200", response.StatusCode)
 	}
 
 	// Editing a file and rebuilding makes the new text searchable.
@@ -213,6 +218,11 @@ func TestKnowledgeVaultMigrateEndpointBlocksUntilVerified(t *testing.T) {
 	if readiness["status"] != "needs_migration" || readiness["can_enable"] != false || readiness["switch_visible"] != true {
 		t.Fatalf("upgrade readiness = %#v", readiness)
 	}
+	// Nothing is enabled yet, so the legacy database is still the only live
+	// source; rollback stays conceptually open until migration commits.
+	if readiness["rollback_allowed"] != true {
+		t.Fatalf("unmigrated upgrade readiness = %#v", readiness)
+	}
 	if settings["legacy"].(map[string]any)["entries"].(float64) != 1 {
 		t.Fatalf("legacy inventory = %#v", settings["legacy"])
 	}
@@ -247,8 +257,15 @@ func TestKnowledgeVaultMigrateEndpointBlocksUntilVerified(t *testing.T) {
 	if !strings.HasPrefix(settings["migration_verified_at"].(string), "20") {
 		t.Fatalf("migration_verified_at = %v", settings["migration_verified_at"])
 	}
-	if settings["readiness"].(map[string]any)["status"] != "ready" {
-		t.Fatalf("readiness after migration = %#v", settings["readiness"])
+	readiness = settings["readiness"].(map[string]any)
+	if readiness["status"] != "ready" || readiness["rollback_allowed"] != false {
+		t.Fatalf("readiness after migration = %#v", readiness)
+	}
+	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/settings/knowledge-vault", map[string]any{"enabled": false}, csrf)
+	var rollbackRefused map[string]any
+	decodeResponse(t, response, &rollbackRefused)
+	if response.StatusCode != http.StatusConflict || rollbackRefused["error"] != "knowledge_vault_rollback_locked" {
+		t.Fatalf("disable after migration status=%d payload=%#v", response.StatusCode, rollbackRefused)
 	}
 	inventory, err := database.LegacyKnowledgeInventory(ctx)
 	if err != nil || inventory.Entries != 1 {
@@ -299,16 +316,25 @@ func TestKnowledgeVaultEnabledUpgradeStaysReadyAndRefusesMigrationOverwrite(t *t
 	if status := readiness["status"]; status != "ready" && status != "degraded" {
 		t.Fatalf("enabled upgrade readiness = %#v, want ready or degraded", readiness)
 	}
+	if readiness["rollback_allowed"] != false {
+		t.Fatalf("an enabled upgrade must not allow a rollback: %#v", readiness)
+	}
 	migrationOK := false
 	for _, raw := range readiness["checks"].([]any) {
 		check := raw.(map[string]any)
 		if check["id"] == "migration" && check["status"] == "ok" &&
-			strings.Contains(fmt.Sprint(check["message"]), "只读回滚") {
+			strings.Contains(fmt.Sprint(check["message"]), "只读备份") {
 			migrationOK = true
 		}
 	}
 	if !migrationOK {
-		t.Fatalf("enabled upgrade must explain the legacy rollback copy: %#v", readiness["checks"])
+		t.Fatalf("enabled upgrade must explain the read-only legacy backup: %#v", readiness["checks"])
+	}
+	response := requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/settings/knowledge-vault", map[string]any{"enabled": false}, csrf)
+	var rollbackRefused map[string]any
+	decodeResponse(t, response, &rollbackRefused)
+	if response.StatusCode != http.StatusConflict || rollbackRefused["error"] != "knowledge_vault_rollback_locked" {
+		t.Fatalf("disable live upgrade status=%d payload=%#v", response.StatusCode, rollbackRefused)
 	}
 
 	samplePath := filepath.Join(manager.Config().VaultPath, filepath.FromSlash(knowledgevault.SampleDocuments(time.Now())[0].Path))
@@ -316,7 +342,7 @@ func TestKnowledgeVaultEnabledUpgradeStaysReadyAndRefusesMigrationOverwrite(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	response := requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/settings/knowledge-vault/migrate", nil, csrf)
+	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/settings/knowledge-vault/migrate", nil, csrf)
 	var refused map[string]any
 	decodeResponse(t, response, &refused)
 	if response.StatusCode != http.StatusConflict || refused["error"] != "knowledge_vault_target_not_empty" {
@@ -381,5 +407,64 @@ func TestKnowledgeVaultImportEndpointLocalAndCredentialSafety(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(fmt.Sprint(failed)), strings.ToLower(secret)) {
 		t.Fatalf("credential import response leaked the token: %#v", failed)
+	}
+}
+
+// A committed vault can start disabled when its directory or index cannot be
+// opened. The persisted row still carries enabled=1/configured=1, so a close
+// must stay refused; otherwise the next restart silently serves legacy
+// knowledge again. This regression used to be masked by gating the refusal on
+// the runtime switch, which is exactly what startup degradation turns off.
+func TestKnowledgeVaultRollbackRefusedAfterStartupDegraded(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	manager, err := knowledgevault.NewManager(knowledgevault.DefaultConfig(dataDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	server, client, csrf, database := knowledgeVaultServerAt(t, manager, dataDir)
+
+	if _, err := manager.Initialize(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	// A verified import is the committed state the reviewer cares about: the
+	// persisted row is enabled+configured even though the manager will start
+	// degraded below.
+	if err := database.RecordKnowledgeVaultImport(ctx, knowledgevault.ImportSourceExisting, time.Now().UTC(), "", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.SetEnabled(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+
+	settings := knowledgeVaultSettingsSnapshot(t, client, server.URL)
+	if settings["enabled"] != false || settings["configured"] != true {
+		t.Fatalf("degraded startup settings = %#v", settings)
+	}
+	readiness := settings["readiness"].(map[string]any)
+	if readiness["rollback_allowed"] != false {
+		t.Fatalf("a committed vault must not allow rollback even while degraded: %#v", readiness)
+	}
+	if settings["import_verified_at"].(string) == "0001-01-01T00:00:00Z" {
+		t.Fatalf("import verification missing: %#v", settings["import_verified_at"])
+	}
+
+	response := requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/settings/knowledge-vault", map[string]any{"enabled": false}, csrf)
+	var locked map[string]any
+	decodeResponse(t, response, &locked)
+	if response.StatusCode != http.StatusConflict || locked["error"] != "knowledge_vault_rollback_locked" {
+		t.Fatalf("degraded close status=%d payload=%#v", response.StatusCode, locked)
+	}
+
+	stored, err := database.KnowledgeVaultSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stored.Enabled || !stored.Configured {
+		t.Fatalf("refused close persisted a legacy fallback: %+v", stored)
+	}
+	if manager.Enabled() {
+		t.Fatal("a refused close changed the runtime switch")
 	}
 }

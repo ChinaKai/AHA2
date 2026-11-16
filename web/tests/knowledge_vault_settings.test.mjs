@@ -42,6 +42,7 @@ const ready = {
     can_enable: true,
     default_enabled: true,
     switch_visible: true,
+    rollback_allowed: false,
     checks: [{id: "index_schema", status: "ok", message: "索引 schema 可读"}],
   },
   legacy: {entries: 0, skills: 0, skill_packages: 0},
@@ -64,6 +65,7 @@ function emptyVault(patch = {}) {
       can_enable: false,
       default_enabled: true,
       switch_visible: false,
+      rollback_allowed: false,
       message: "知识库或索引尚未就绪，请先重建索引。",
       missing: ["vault_initialized", "index_schema"],
       checks: [
@@ -90,6 +92,7 @@ function upgradeVault(patch = {}) {
       can_enable: false,
       default_enabled: false,
       switch_visible: true,
+      rollback_allowed: true,
       message: "升级后需要先迁移旧知识库，或导入已有知识库，才能启用文件知识库。",
       missing: ["migration"],
       checks: [{id: "migration", status: "fail", message: "检测到旧知识库（3 条知识、1 个技能），迁移或导入尚未验证"}],
@@ -113,11 +116,12 @@ function inUseUpgradeVault(patch = {}) {
       can_enable: true,
       default_enabled: false,
       switch_visible: true,
-      message: "文件知识库已就绪并在使用；旧知识库仅作只读回滚保留，不会被迁移覆盖。",
+      rollback_allowed: false,
+      message: "文件知识库已就绪并在使用；旧知识库仅作只读备份保留，不会被迁移覆盖，也不能回退。",
       checks: [{
         id: "migration",
         status: "ok",
-        message: "文件知识库已启用并在使用；旧知识库仅作只读回滚保留，不会被迁移覆盖",
+        message: "文件知识库已启用并在使用；旧知识库仅作只读备份保留，不会被迁移覆盖",
       }],
     },
     legacy: {entries: 5, skills: 2, skill_packages: 2},
@@ -151,6 +155,9 @@ test("settings panel shows vault, index and source for an enabled vault", async 
     await panel.refreshKnowledgeVaultSettingsPanel(ctx);
     const html = panel.renderKnowledgeVaultSettingsPanel(ctx);
     assert.match(html, /class="knowledge-vault-state is-on">已启用</);
+    // The blocked-page CTA focuses this heading, so it must be focusable
+    // without entering the normal tab order.
+    assert.match(html, /id="knowledge-vault-settings-title" tabindex="-1"/);
     assert.match(html, /状态来源：数据库设置/);
     assert.match(html, /Vault 路径<\/dt><dd><code>\/srv\/vault<\/code>/);
     assert.match(html, /索引路径<\/dt><dd><code>\/srv\/index\.db<\/code>/);
@@ -197,7 +204,7 @@ test("an empty vault offers sample initialization before enabling the index acti
   }
 });
 
-test("the toggle persists through the API and updates the shell switch state", async () => {
+test("a committed vault locks the switch on and never closes through the client action", async () => {
   panel.__resetKnowledgeVaultSettingsForTest();
   const calls = [];
   const restoreGet = stub("knowledgeVaultSettings", async () => ({ok: true, settings: ready}));
@@ -208,11 +215,18 @@ test("the toggle persists through the API and updates the shell switch state", a
   try {
     const ctx = context();
     await panel.refreshKnowledgeVaultSettingsPanel(ctx);
+    const html = panel.renderKnowledgeVaultSettingsPanel(ctx);
+    // The box is checked and disabled: a read-only status, not a control.
+    assert.match(html, /type="checkbox" checked[^>]*disabled/);
+    assert.match(html, /class="knowledge-vault-badge">已锁定</);
+    assert.match(html, /文件知识库已启用并锁定/);
+    assert.match(html, /class="knowledge-vault-state is-on">已启用</);
+    // The change action is the single entry point; call it directly to prove a
+    // programmatic click cannot reach the API either.
     await panel.__knowledgeVaultSettingsActionsForTest.setEnabled(false);
-    assert.deepEqual(calls, [false]);
-    assert.equal(ctx.applied.at(-1).enabled, false);
-    assert.match(panel.renderKnowledgeVaultSettingsPanel(ctx), /class="knowledge-vault-state">已关闭</);
-    assert.ok(ctx.messages.some(message => message.kind === "notice" && message.message.includes("已关闭，已立即回到旧知识库")));
+    assert.deepEqual(calls, [], "setEnabled(false) must not call the API on a locked vault");
+    assert.ok(ctx.messages.some(message => message.kind === "error" && message.message.includes("不能关闭回退旧库")));
+    assert.match(panel.renderKnowledgeVaultSettingsPanel(ctx), /type="checkbox" checked[^>]*disabled/);
   } finally {
     restoreGet();
     restorePut();
@@ -294,26 +308,27 @@ test("an upgrade shows the legacy rollback switch, blocks enabling and offers mi
   }
 });
 
-test("an enabled in-use upgrade hides migration and explains the legacy rollback copy", async () => {
+test("an enabled in-use upgrade locks the switch on and keeps legacy as a read-only backup", async () => {
   panel.__resetKnowledgeVaultSettingsForTest();
   const restore = stub("knowledgeVaultSettings", async () => ({ok: true, settings: inUseUpgradeVault()}));
   try {
     const ctx = context();
     await panel.refreshKnowledgeVaultSettingsPanel(ctx);
     const html = panel.renderKnowledgeVaultSettingsPanel(ctx);
-    assert.match(html, /type="checkbox" checked/);
-    assert.doesNotMatch(html, /type="checkbox"[^>]*disabled/);
+    assert.match(html, /type="checkbox" checked[^>]*disabled/);
+    assert.match(html, /已迁移到文件知识库，不能回退旧库/);
     // The migration button would export the legacy database over the live
     // vault, so a running upgrade must never render it.
     assert.doesNotMatch(html, /id="knowledge-vault-migrate"/);
     assert.doesNotMatch(html, /id="knowledge-vault-init"/);
-    assert.match(html, /旧知识库仅作只读回滚保留，不会被迁移覆盖/);
-    assert.match(html, /class="knowledge-vault-badge">仅回滚</);
+    assert.match(html, /旧知识库仅作只读备份保留，不会被迁移覆盖，也不能通过开关回退/);
+    assert.match(html, /class="knowledge-vault-badge">只读保留</);
     assert.match(html, /索引条数<\/dt><dd>992 条/);
     assert.match(html, /class="knowledge-vault-badge is-ok">正常</);
-    // The rollback sentence appeared four times before the regroup; it is now
-    // stated exactly once in the legacy section.
-    assert.equal((html.match(/仅作只读回滚保留/g) ?? []).length, 1);
+    // The backup sentence appears exactly once, in the legacy section; the
+    // switch hint only states the no-rollback rule.
+    assert.equal((html.match(/旧知识库仅作只读备份保留/g) ?? []).length, 1);
+    assert.equal((html.match(/不能回退旧库/g) ?? []).length, 1);
     // Migration is represented by the legacy facts row, not a duplicate check.
     assert.doesNotMatch(html, /文件知识库已启用并在使用；旧知识库/);
   } finally {
@@ -329,7 +344,8 @@ test("an enabled degraded upgrade warns about unbound projects without offering 
       can_enable: true,
       default_enabled: false,
       switch_visible: true,
-      message: "文件知识库已启用，但部分项目仍回退旧知识库或索引需要关注；旧知识库仅作只读回滚保留，不会被迁移覆盖。",
+      rollback_allowed: false,
+      message: "文件知识库已启用，但部分项目仍回退旧知识库或索引需要关注；旧知识库仅作只读备份保留，不会被迁移覆盖。",
       checks: [{
         id: "manifest_binding",
         status: "warn",
@@ -350,7 +366,7 @@ test("an enabled degraded upgrade warns about unbound projects without offering 
     assert.doesNotMatch(html, /文件知识库已启用，但部分项目仍回退旧知识库/);
     assert.doesNotMatch(html, /knowledge-vault-attention/);
     assert.equal((html.match(/1 个，继续使用旧库/g) ?? []).length, 1);
-    assert.equal((html.match(/仅作只读回滚保留/g) ?? []).length, 1);
+    assert.equal((html.match(/旧知识库仅作只读备份保留/g) ?? []).length, 1);
     assert.doesNotMatch(html, /id="knowledge-vault-migrate"/);
   } finally {
     restore();
@@ -644,13 +660,13 @@ test("the panel groups source, health and legacy in order without a mixed state 
   const restore = stub("knowledgeVaultSettings", async () => ({ok: true, settings: inUseUpgradeVault({
     readiness: {
       status: "degraded", can_enable: true, default_enabled: false, switch_visible: true,
-      message: "文件知识库已启用，但部分项目仍回退旧知识库或索引需要关注；旧知识库仅作只读回滚保留，不会被迁移覆盖。",
+      message: "文件知识库已启用，但部分项目仍回退旧知识库或索引需要关注；旧知识库仅作只读备份保留，不会被迁移覆盖。",
       unbound_projects: ["p1"],
       checks: [
         {id: "vault_initialized", status: "ok", message: "知识库目录已初始化"},
         {id: "index_schema", status: "ok", message: "索引 schema 可读"},
         {id: "manifest_binding", status: "warn", message: "1 个项目未绑定，这些项目继续使用旧知识库"},
-        {id: "migration", status: "ok", message: "文件知识库已启用并在使用；旧知识库仅作只读回滚保留，不会被迁移覆盖"},
+        {id: "migration", status: "ok", message: "文件知识库已启用并在使用；旧知识库仅作只读备份保留，不会被迁移覆盖"},
       ],
     },
   })}));
@@ -713,12 +729,14 @@ test("the panel copy follows the active locale", async () => {
   }
 });
 
-test("a configured vault keeps the switch visible without legacy knowledge", async () => {
+test("a configured vault without legacy knowledge still locks the switch on", async () => {
   panel.__resetKnowledgeVaultSettingsForTest();
+  // A machine whose legacy tables were cleaned away still counts as committed
+  // to the vault: configured=true must not make the switch closable.
   const configured = {
     ...ready,
     configured: true,
-    readiness: {...ready.readiness, switch_visible: false},
+    readiness: {...ready.readiness, switch_visible: false, rollback_allowed: false},
     legacy: {entries: 0, skills: 0, skill_packages: 0},
   };
   const restore = stub("knowledgeVaultSettings", async () => ({ok: true, settings: configured}));
@@ -728,9 +746,11 @@ test("a configured vault keeps the switch visible without legacy knowledge", asy
     const html = panel.renderKnowledgeVaultSettingsPanel(ctx);
     // switchVisible = readiness.switch_visible || settings.configured: no legacy
     // and switch_visible=false must still render the switch once the owner has
-    // configured the vault.
+    // configured the vault, but only as a locked-on status.
     assert.match(html, /id="knowledge-vault-enabled"/);
-    assert.match(html, /type="checkbox" checked/);
+    assert.match(html, /type="checkbox" checked[^>]*disabled/);
+    assert.match(html, /class="knowledge-vault-badge">已锁定</);
+    assert.match(html, /文件知识库已启用并锁定/);
     assert.doesNotMatch(html, /全新安装默认使用文件知识库/);
     assert.doesNotMatch(html, /knowledge-vault-legacy/);
     assert.match(html, /class="knowledge-vault-state is-on">已启用</);

@@ -2853,8 +2853,10 @@ function applyKnowledgeVaultSettings(settings: KnowledgeVaultSettings): void {
 }
 
 async function loadKnowledgeViewData(force = true): Promise<void> {
-  if (await detectKnowledgeVault(false)) return;
-  await loadKnowledgeData(force);
+  // The vault page loads its own libraries and renders the blocked state when
+  // the switch is off. Keep the shared probe warm for the channel/task source
+  // pickers, but never fetch the legacy workspace lists for this route.
+  await detectKnowledgeVault(force);
 }
 
 // The channels page used to load the legacy knowledge lists unconditionally,
@@ -6458,21 +6460,10 @@ function render(): void {
         mail: mailResourcesData(),
       })),
       tasks: tasksView,
-      knowledge: () => state.knowledgeVaultEnabled === true
-        ? shell(renderKnowledgeVaultPage({render, setMessage, announce: announceStatus}))
-        : state.knowledgeVaultEnabled === false
-          ? shell(`${renderKnowledgeWorkspace({
-            projects: state.projects,
-            workspaces: state.workspaces,
-            knowledge: state.knowledge,
-            libraries: state.knowledgeLibraries,
-            proposals: state.knowledgeProposals,
-            reviewSettings: state.knowledgeReviewSettings,
-            refreshData: loadKnowledgeData,
-            render,
-            setMessage,
-          })}${knowledgeEntryListVisible(state.projects) ? loadMoreHTML("knowledge") : ""}`)
-          : shell(chunkLoadingHTML(t("chunk.loading"))),
+      // The knowledge navigation is always the vault page. A disabled or
+      // not-yet-migrated instance gets the vault chunk's blocked landing with
+      // a settings CTA; it never falls back to the legacy workspace UI.
+      knowledge: () => shell(renderKnowledgeVaultPage({render, setMessage, announce: announceStatus})),
       prompts: () => advancedSubview(renderPromptAdmin()),
       proxy: () => advancedSubview(renderProxySettings(
         state.proxySettings,
@@ -7869,18 +7860,7 @@ function bindTaskToolsAndPanels(): void {
   if (state.taskTool === "browser" && state.selectedTask) bindDesktopPanel(state.selectedTask, setMessage);
   if (state.taskTool === "channel" && state.selectedTask) bindTaskChannelPanel();
   if (state.view === "knowledge" && !state.selectedProject && !state.selectedTask) {
-    if (state.knowledgeVaultEnabled === true) bindKnowledgeVaultPage({render, setMessage, announce: announceStatus});
-    else if (state.knowledgeVaultEnabled === false) bindKnowledgeWorkspace({
-      projects: state.projects,
-      workspaces: state.workspaces,
-      knowledge: state.knowledge,
-      libraries: state.knowledgeLibraries,
-      proposals: state.knowledgeProposals,
-      reviewSettings: state.knowledgeReviewSettings,
-      refreshData: loadKnowledgeData,
-      render,
-      setMessage,
-    });
+    bindKnowledgeVaultPage({render, setMessage, announce: announceStatus});
   }
   if (state.view === "mcp") bindMCPView();
   if (state.view === "advanced") bindLanguageSetting();
@@ -8529,6 +8509,26 @@ window.visualViewport?.addEventListener("scroll", () => {
   restoreComposerConversationBottom();
 });
 window.setInterval(updateSystemUptime, 30_000);
+window.addEventListener("aha:open-vault-settings", () => {
+  // The blocked vault page sends the Owner here. The settings panel is lazy, so
+  // wait for its first render before scrolling it into view.
+  switchView("other");
+  void ensureViewData("other").then(() => {
+    const deadline = Date.now() + 5000;
+    const reveal = () => {
+      const panel = document.querySelector<HTMLElement>(".knowledge-vault-settings-panel");
+      if (panel) {
+        panel.scrollIntoView({block: "start", behavior: "smooth"});
+        // Move keyboard/reader focus to the panel heading, not just the scroll
+        // position, so the destination is announced after the CTA jump.
+        panel.querySelector<HTMLElement>("#knowledge-vault-settings-title")?.focus({preventScroll: true});
+        return;
+      }
+      if (Date.now() < deadline) requestAnimationFrame(reveal);
+    };
+    requestAnimationFrame(reveal);
+  });
+});
 window.addEventListener("aha:open-pet-settings", () => {
   cancelTaskOpen();
   petWorkbenchTab = "settings";

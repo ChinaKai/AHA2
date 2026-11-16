@@ -34,6 +34,9 @@ func TestEvaluateReadinessStates(t *testing.T) {
 		if result.Status != ReadinessReady || !result.CanEnable || !result.DefaultEnabled || result.SwitchVisible {
 			t.Fatalf("fresh ready readiness = %+v", result)
 		}
+		if result.RollbackAllowed {
+			t.Fatalf("a fresh install has no legacy knowledge to roll back to: %+v", result)
+		}
 		if len(result.Missing) != 0 {
 			t.Fatalf("ready missing = %v", result.Missing)
 		}
@@ -65,6 +68,9 @@ func TestEvaluateReadinessStates(t *testing.T) {
 		if result.Status != ReadinessNeedsMigration || result.CanEnable || !result.SwitchVisible || result.DefaultEnabled {
 			t.Fatalf("upgrade readiness = %+v", result)
 		}
+		if !result.RollbackAllowed {
+			t.Fatalf("an upgrade that still owns unmigrated legacy knowledge keeps the rollback concept: %+v", result)
+		}
 		if result.Missing == nil || result.Missing[0] != "migration" {
 			t.Fatalf("missing = %v, want migration", result.Missing)
 		}
@@ -78,7 +84,7 @@ func TestEvaluateReadinessStates(t *testing.T) {
 			t.Fatalf("verified upgrade readiness = %+v", result)
 		}
 	})
-	t.Run("enabled in-use upgrade keeps legacy as a read-only rollback", func(t *testing.T) {
+	t.Run("enabled in-use upgrade keeps legacy as a read-only backup", func(t *testing.T) {
 		input := readyInput
 		input.LegacyEntries = 4
 		input.LegacySkills = 2
@@ -87,6 +93,9 @@ func TestEvaluateReadinessStates(t *testing.T) {
 		result := EvaluateReadiness(input)
 		if result.Status != ReadinessReady || !result.CanEnable {
 			t.Fatalf("in-use upgrade readiness = %+v", result)
+		}
+		if result.RollbackAllowed {
+			t.Fatalf("an in-use upgrade must not allow a rollback: %+v", result)
 		}
 		if hasCheck(result.Checks, "migration", checkFail) {
 			t.Fatalf("in-use upgrade must not report a migration failure: %+v", result.Checks)
@@ -97,8 +106,8 @@ func TestEvaluateReadinessStates(t *testing.T) {
 		if result.Missing != nil {
 			t.Fatalf("in-use upgrade missing = %v, want none", result.Missing)
 		}
-		if !strings.Contains(result.Message, "只读回滚") {
-			t.Fatalf("in-use message = %q, want a rollback-copy explanation", result.Message)
+		if !strings.Contains(result.Message, "只读备份") {
+			t.Fatalf("in-use message = %q, want a read-only-backup explanation", result.Message)
 		}
 	})
 	t.Run("in-use upgrade with a degraded project still avoids migration", func(t *testing.T) {
@@ -112,8 +121,11 @@ func TestEvaluateReadinessStates(t *testing.T) {
 		if result.Status != ReadinessDegraded || !result.CanEnable {
 			t.Fatalf("in-use degraded readiness = %+v", result)
 		}
-		if hasCheck(result.Checks, "migration", checkFail) || !strings.Contains(result.Message, "只读回滚") {
-			t.Fatalf("in-use degraded must keep the rollback copy: %+v", result)
+		if hasCheck(result.Checks, "migration", checkFail) || !strings.Contains(result.Message, "只读备份") {
+			t.Fatalf("in-use degraded must keep the read-only backup: %+v", result)
+		}
+		if result.RollbackAllowed {
+			t.Fatalf("an in-use degraded upgrade must not allow a rollback: %+v", result)
 		}
 	})
 	t.Run("configured but disabled upgrade still needs migration", func(t *testing.T) {
@@ -144,8 +156,11 @@ func TestEvaluateReadinessStates(t *testing.T) {
 		if result.Status != ReadinessReady || !result.CanEnable {
 			t.Fatalf("configured fresh install readiness = %+v", result)
 		}
-		if strings.Contains(result.Message, "只读回滚") {
-			t.Fatalf("fresh install message mentions a legacy rollback: %q", result.Message)
+		if strings.Contains(result.Message, "只读备份") {
+			t.Fatalf("fresh install message mentions a legacy backup: %q", result.Message)
+		}
+		if result.RollbackAllowed {
+			t.Fatalf("a configured fresh install has no legacy knowledge to return to: %+v", result)
 		}
 	})
 	t.Run("in-use upgrade with an empty index still needs migration", func(t *testing.T) {
@@ -198,4 +213,58 @@ func TestEvaluateReadinessStates(t *testing.T) {
 			t.Fatalf("unverified upgrade must not be enableable: %+v", result)
 		}
 	})
+}
+
+// rollback_allowed is the API contract the Web switch and the PUT handler both
+// rely on: once the instance commits to the vault, a close must be refused.
+func TestRollbackAllowedStates(t *testing.T) {
+	base := ReadinessInput{
+		VaultInitialized: true, VaultWritable: true,
+		IndexReady: true, IndexWritable: true, EntryCount: 3,
+	}
+	build := func(mutate func(*ReadinessInput)) ReadinessInput {
+		in := base
+		mutate(&in)
+		return in
+	}
+	cases := []struct {
+		name string
+		in   ReadinessInput
+		want bool
+	}{
+		{"fresh install before any switch", base, false},
+		{"fresh install after sample init", build(func(in *ReadinessInput) {
+			in.Configured, in.Enabled = true, true
+		}), false},
+		{"upgrade still owning unmigrated legacy", build(func(in *ReadinessInput) {
+			in.LegacyEntries = 4
+		}), true},
+		{"upgrade with verified migration", build(func(in *ReadinessInput) {
+			in.LegacyEntries = 4
+			in.MigrationVerified = true
+		}), false},
+		{"upgrade with verified import", build(func(in *ReadinessInput) {
+			in.LegacyEntries = 4
+			in.ImportVerified = true
+		}), false},
+		{"configured in-use upgrade", build(func(in *ReadinessInput) {
+			in.LegacyEntries = 4
+			in.Configured, in.Enabled = true, true
+		}), false},
+		{"configured upgrade that was switched off", build(func(in *ReadinessInput) {
+			in.LegacyEntries = 4
+			in.Configured = true
+		}), false},
+		{"configured instance after legacy cleanup", build(func(in *ReadinessInput) {
+			in.Configured, in.Enabled = true, true
+		}), false},
+	}
+	for _, item := range cases {
+		if got := item.in.RollbackAllowed(); got != item.want {
+			t.Errorf("%s: RollbackAllowed() = %v, want %v", item.name, got, item.want)
+		}
+		if got := EvaluateReadiness(item.in).RollbackAllowed; got != item.want {
+			t.Errorf("%s: readiness.rollback_allowed = %v, want %v", item.name, got, item.want)
+		}
+	}
 }
