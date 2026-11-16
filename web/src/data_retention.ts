@@ -34,6 +34,7 @@ export interface DataRetentionViewState {
   compactionPlan: DatabaseCompactionPlan | null;
   compactionResult: DatabaseCompactionResult | null;
   compactionBusy: boolean;
+  compactionError: string;
   openDialog: string;
 }
 
@@ -322,7 +323,14 @@ function compactionDialog(state: DataRetentionViewState): string {
   const plan = state.compactionPlan;
   const busy = state.compactionBusy;
   let body: string;
-  if (!plan) {
+  if (!plan && state.compactionError) {
+    // The plan request is independent of the stats panel; when the DB read
+    // fails we surface the error here instead of an endless "reading" line.
+    body = `<p class="form-error" data-compact-error>${escapeHTML(t("data.db.compactLoadFailed", {message: state.compactionError}))}</p>
+      <div class="data-cleanup-actions">
+        <button type="button" data-compact-refresh ${busy ? "disabled" : ""}>${t("common.retry")}</button>
+      </div>`;
+  } else if (!plan) {
     body = `<p class="field-help">${t("data.db.compactReading")}</p>`;
   } else {
     const blocked = plan.blocking_reasons.length
@@ -363,6 +371,7 @@ export function renderDatabasePanel(state: DataRetentionViewState): string {
       <div class="panel-head"><strong>${t("data.db.title")}</strong></div>
       ${error}
       <p class="field-help data-cleanup-note">${state.loading ? t("data.db.reading") : t("data.db.unavailable")}</p>
+      ${compactionDialog(state)}
     </section>`;
   }
   const collected = t(stats.cached ? "data.db.collectedCached" : "data.db.collected", {ms: stats.duration_ms, time: escapeHTML(formatTime(stats.collected_at))});

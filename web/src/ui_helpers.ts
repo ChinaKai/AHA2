@@ -996,3 +996,43 @@ export function renderModelHealthCell(modelID: string, health?: ModelHealthView)
   const checking = health?.status === "checking";
   return `<div class="model-health">${renderModelHealthBadge(health)}<button type="button" data-check-model="${escapeWorkspaceHTML(modelID)}" class="health-check-button"${checking ? " disabled" : ""}>${checking ? "检测中…" : "检测"}</button></div>`;
 }
+
+export interface LatestRequestOptions<T> {
+  load: () => Promise<T>;
+  onResolve: (value: T) => void;
+  onError: (message: string) => void;
+  // Runs once for the newest request only, whether it resolved or failed.
+  // Callers use it to render after the outcome lands.
+  onSettled?: () => void;
+}
+
+export interface LatestRequestController {
+  start: () => void;
+  invalidate: () => void;
+}
+
+// createLatestRequest keeps a modal's async state from being written by an
+// older response. A second start (retry, reopen) or invalidate (close) makes
+// every earlier promise a no-op, so a slow failure cannot overwrite a newer
+// preview and a late success cannot reopen a closed dialog.
+export function createLatestRequest<T>(options: LatestRequestOptions<T>): LatestRequestController {
+  let token = 0;
+  return {
+    start() {
+      const current = ++token;
+      void options.load().then(value => {
+        if (current !== token) return;
+        options.onResolve(value);
+      }, error => {
+        if (current !== token) return;
+        options.onError(error instanceof Error ? error.message : String(error));
+      }).finally(() => {
+        if (current !== token) return;
+        options.onSettled?.();
+      });
+    },
+    invalidate() {
+      token++;
+    },
+  };
+}

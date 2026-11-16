@@ -47,7 +47,7 @@ function viewState(overrides = {}) {
   return {
     database: stats(), loading: false, error: "", plan: null, result: null, busy: "",
     conversationPlan: null, conversationResult: null, conversationBusy: "",
-    compactionPlan: null, compactionResult: null, compactionBusy: false, openDialog: "",
+    compactionPlan: null, compactionResult: null, compactionBusy: false, compactionError: "", openDialog: "",
     ...overrides,
   };
 }
@@ -213,6 +213,28 @@ test("compaction dialog shows preflight numbers and blocks when preflight fails"
     },
   }));
   assert.match(done, /压缩完成：4.8 GB → 3.7 GB，释放 1.1 GB；完整性 ok/);
+});
+
+test("compaction dialog renders even when database stats are unavailable", () => {
+  i18n.applyLocale("zh-CN");
+  const unavailable = panel.renderDatabasePanel(viewState({database: null, error: "database_unavailable", loading: false}));
+  assert.match(unavailable, /data-compact-dialog/, "the compaction entry must not depend on the stats card");
+  assert.match(unavailable, /正在读取压缩预检/);
+
+  const failed = panel.renderDatabasePanel(viewState({database: null, error: "database_unavailable", compactionError: "database is locked"}));
+  const compact = failed.match(/<dialog[^>]*data-compact-dialog[\s\S]*?<\/dialog>/)[0];
+  assert.match(compact, /data-compact-error/);
+  assert.match(compact, /读取压缩预检失败：database is locked/);
+  assert.match(compact, /data-compact-refresh[^>]*>重试<\/button>/);
+});
+
+test("B dialog keeps each checkbox attached to its label row", () => {
+  i18n.applyLocale("zh-CN");
+  const html = panel.renderDatabasePanel(viewState());
+  const b = dialog(html, "B");
+  assert.match(b, /<div class="data-cleanup-note data-db-checks">/);
+  assert.match(b, /<label><input id="data-conversation-tool" type="checkbox"[^>]*> 清理 tool 事件<\/label>/);
+  assert.match(b, /<label><input id="data-conversation-update" type="checkbox"[^>]*> 同时清理 agent update<\/label>/);
 });
 
 test("database panel strings are translated in English", () => {

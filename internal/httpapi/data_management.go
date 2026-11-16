@@ -62,6 +62,15 @@ type DataBackupPreview struct {
 // "reading" dialog.
 const backupPreviewTimeout = 10 * time.Second
 
+// backupPreviewErrorStatus separates a bounded scan timeout (retryable
+// gateway timeout) from a real filesystem error.
+func backupPreviewErrorStatus(err error) int {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return http.StatusGatewayTimeout
+	}
+	return http.StatusInternalServerError
+}
+
 func (s *Server) previewBackupCleanup(writer http.ResponseWriter, request *http.Request) {
 	root := strings.TrimSpace(s.store.DataDir())
 	if root == "" {
@@ -72,11 +81,7 @@ func (s *Server) previewBackupCleanup(writer http.ResponseWriter, request *http.
 	defer cancel()
 	preview, err := previewBackupCleanup(ctx, root)
 	if err != nil {
-		status := http.StatusInternalServerError
-		if errors.Is(err, context.DeadlineExceeded) {
-			status = http.StatusGatewayTimeout
-		}
-		writeJSON(writer, status, map[string]any{"ok": false, "error": "data_cleanup_preview_failed", "message": err.Error()})
+		writeJSON(writer, backupPreviewErrorStatus(err), map[string]any{"ok": false, "error": "data_cleanup_preview_failed", "message": err.Error()})
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "preview": preview})

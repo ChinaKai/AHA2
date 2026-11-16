@@ -29,7 +29,7 @@ import {DEFAULT_TASK_STATUS_FILTERS, LOCAL_TASK_DEVICE_FILTER, TASK_STATUS_GROUP
 import type {TaskStatusGroup} from "./task_filters.js";
 import {TASK_TOOL_DEFAULT_WIDTH, normalizePinnedTaskTool, normalizeTaskToolMode, normalizeTaskToolWidth, renderTaskToolButtons, renderTaskToolContent, renderTaskToolPanel} from "./task_tools.js";
 import type {TaskTool, TaskToolMode} from "./task_tools.js";
-import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, createListRefreshScheduler, createResourceLoader, createStatusAnnouncer, eventRefreshesTaskList, taskStatusNeedsAnnouncement, exactSlashCommand, executeAgentSessionAction, installDialogEntryFocus, loadNavigationSnapshot, matchingSlashCommands, paginateItems, paginationHTML, planKeyedNodes, stableTextSignature, protoBadges, readPerfPanelPreference, renderModelHealthCell, renderProtocolProbeStatus, renderWorkspaceDetection, replaceInteractiveRegion, restoreInteractiveRegion, saveNavigationSnapshot, staleViewHashTarget, textMatchesQuery, writePerfPanelPreference} from "./ui_helpers.js";
+import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, createLatestRequest, createListRefreshScheduler, createResourceLoader, createStatusAnnouncer, eventRefreshesTaskList, taskStatusNeedsAnnouncement, exactSlashCommand, executeAgentSessionAction, installDialogEntryFocus, loadNavigationSnapshot, matchingSlashCommands, paginateItems, paginationHTML, planKeyedNodes, stableTextSignature, protoBadges, readPerfPanelPreference, renderModelHealthCell, renderProtocolProbeStatus, renderWorkspaceDetection, replaceInteractiveRegion, restoreInteractiveRegion, saveNavigationSnapshot, staleViewHashTarget, textMatchesQuery, writePerfPanelPreference} from "./ui_helpers.js";
 import type {InteractiveRegionState, ModelHealthView} from "./ui_helpers.js";
 import {
   compactNumber,
@@ -623,7 +623,7 @@ const state: State = {
   dataRetention: {
     database: null, loading: false, error: "", plan: null, result: null, busy: "",
     conversationPlan: null, conversationResult: null, conversationBusy: "",
-    compactionPlan: null, compactionResult: null, compactionBusy: false, openDialog: "",
+    compactionPlan: null, compactionResult: null, compactionBusy: false, compactionError: "", openDialog: "",
   },
   syncSettings: {scope:"default",enabled:false,endpoint:"",device_id:"",device_name:"",interval_seconds:300,token_configured:false,passphrase_configured:false},
   syncSettingsReady: false,
@@ -4465,27 +4465,22 @@ function dataCategoryText(category: {id: string; label: string; note?: string}, 
 }
 
 // A preview request can outlive the dialog (Owner closes it or reopens). The
-// token makes only the newest request able to write state, so a slow response
+// controller only lets the newest request write state, so a slow response
 // never reopens a closed dialog or overwrites a newer retry.
-let dataBackupPreviewToken = 0;
+const dataBackupPreviewRequest = createLatestRequest<DataBackupPreview>({
+  load: () => api.previewBackupCleanup().then(result => result.preview),
+  onResolve: preview => { state.dataBackupPreview = preview; },
+  // Keep the dialog open with a retry action. Closing it here would hide the
+  // only explanation for a failed scan.
+  onError: message => { state.dataBackupError = message; },
+  onSettled: () => render(),
+});
 
 function requestBackupPreview(): void {
-  const token = ++dataBackupPreviewToken;
   state.dataBackupPreview = null;
   state.dataBackupError = "";
   render();
-  void api.previewBackupCleanup().then(result => {
-    if (token !== dataBackupPreviewToken) return;
-    state.dataBackupPreview = result.preview;
-  }).catch((error: unknown) => {
-    if (token !== dataBackupPreviewToken) return;
-    // Keep the dialog open with a retry action. Closing it here would hide the
-    // only explanation for a failed scan.
-    state.dataBackupError = error instanceof Error ? error.message : String(error);
-  }).finally(() => {
-    if (token !== dataBackupPreviewToken) return;
-    render();
-  });
+  dataBackupPreviewRequest.start();
 }
 
 function dataBackupDialog(): string {
@@ -4645,14 +4640,14 @@ function bindBackupCleanupDialog(): void {
   }
   dialog.querySelector("[data-backup-close]")?.addEventListener("click", () => {
     state.dataBackupDialogOpen = false;
-    dataBackupPreviewToken++;
+    dataBackupPreviewRequest.invalidate();
     dialog.close();
   });
   dialog.addEventListener("close", () => {
     // A render replaces the whole dialog while it is open; the detached node's
     // close event must not clear the error state of the replacement.
     if (!dialog.isConnected) return;
-    dataBackupPreviewToken++;
+    dataBackupPreviewRequest.invalidate();
     state.dataBackupDialogOpen = false;
     state.dataBackupError = "";
   });
@@ -4852,22 +4847,27 @@ function bindConversationPurgeForm(view: DataRetentionViewState): void {
   });
 }
 
+function requestCompactionPlan(view: DataRetentionViewState): void {
+  view.compactionResult = null;
+  view.compactionPlan = null;
+  view.compactionBusy = true;
+  view.compactionError = "";
+  render();
+  void api.databaseCompactionPlan().then(result => {
+    view.compactionPlan = result.plan;
+  }).catch((error: unknown) => {
+    view.compactionError = error instanceof Error ? error.message : String(error);
+  }).finally(() => {
+    view.compactionBusy = false;
+    render();
+  });
+}
+
 function bindCompactionDialog(view: DataRetentionViewState): void {
   const open = document.querySelector<HTMLButtonElement>("[data-db-compact]");
   open?.addEventListener("click", () => {
     view.openDialog = "compact";
-    view.compactionResult = null;
-    view.compactionPlan = null;
-    view.compactionBusy = true;
-    render();
-    void api.databaseCompactionPlan().then(result => {
-      view.compactionPlan = result.plan;
-    }).catch((error: unknown) => {
-      setMessage("error", error instanceof Error ? error.message : String(error));
-    }).finally(() => {
-      view.compactionBusy = false;
-      render();
-    });
+    requestCompactionPlan(view);
   });
   const dialog = document.querySelector<HTMLDialogElement>("[data-compact-dialog]");
   if (!dialog) return;
@@ -4881,16 +4881,7 @@ function bindCompactionDialog(view: DataRetentionViewState): void {
   const refresh = dialog.querySelector<HTMLButtonElement>("[data-compact-refresh]");
   refresh?.addEventListener("click", () => {
     if (view.compactionBusy) return;
-    view.compactionBusy = true;
-    render();
-    void api.databaseCompactionPlan().then(result => {
-      view.compactionPlan = result.plan;
-    }).catch((error: unknown) => {
-      setMessage("error", error instanceof Error ? error.message : String(error));
-    }).finally(() => {
-      view.compactionBusy = false;
-      render();
-    });
+    requestCompactionPlan(view);
   });
   const run = dialog.querySelector<HTMLButtonElement>("[data-compact-run]");
   run?.addEventListener("click", () => {

@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -54,6 +55,18 @@ func TestDataInventoryCountsKnownCategories(t *testing.T) {
 	}
 	if inventory.TotalBytes != 286 {
 		t.Fatalf("total=%d", inventory.TotalBytes)
+	}
+}
+
+func TestBackupPreviewDeadlineMapsToGatewayTimeout(t *testing.T) {
+	if backupPreviewTimeout != 10*time.Second {
+		t.Fatalf("backupPreviewTimeout=%s, want 10s", backupPreviewTimeout)
+	}
+	if got := backupPreviewErrorStatus(context.DeadlineExceeded); got != http.StatusGatewayTimeout {
+		t.Fatalf("deadline status=%d, want %d", got, http.StatusGatewayTimeout)
+	}
+	if got := backupPreviewErrorStatus(errors.New("permission denied")); got != http.StatusInternalServerError {
+		t.Fatalf("generic error status=%d, want %d", got, http.StatusInternalServerError)
 	}
 }
 
