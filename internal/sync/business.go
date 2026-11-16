@@ -101,10 +101,20 @@ func skillFilesMatch(current, incoming []domain.SkillFile) bool {
 	}
 	byPath := make(map[string]string, len(current))
 	for _, file := range current {
-		byPath[path.Clean(strings.TrimSpace(file.Path))] = file.Content
+		name := path.Clean(strings.TrimSpace(file.Path))
+		if _, duplicate := byPath[name]; duplicate {
+			return false
+		}
+		byPath[name] = file.Content
 	}
+	seen := make(map[string]bool, len(incoming))
 	for _, file := range incoming {
-		content, ok := byPath[path.Clean(strings.TrimSpace(file.Path))]
+		name := path.Clean(strings.TrimSpace(file.Path))
+		if seen[name] {
+			return false
+		}
+		seen[name] = true
+		content, ok := byPath[name]
 		if !ok || content != file.Content {
 			return false
 		}
@@ -581,6 +591,10 @@ func applyBusinessObject(ctx context.Context, database *store.Store, obj domain.
 		return err
 	}
 	if obj.Operation == "delete" {
+		// Known gap, keep it in the release notes: a peer whose local version
+		// is already above the delete's source version keeps its copy and
+		// records a conflict instead. Only the deleting device is guaranteed
+		// to stay deleted; the tombstone never resurrects it there.
 		if exists && obj.SourceVersion != "" && sharedVersionNewer(obj.Type, localVersion, obj.SourceVersion) {
 			return &ConflictError{LocalPayload: localPayload, LocalVersion: localVersion, Cause: fmt.Errorf("%w: older delete for %s %s", ErrConflict, obj.Type, obj.ID)}
 		}
@@ -817,23 +831,34 @@ func upsertBusinessObject(ctx context.Context, database *store.Store, obj domain
 			if !skillPayloadIncludesAutoAttach(obj.Payload) {
 				p.Skill.AutoAttach = current.AutoAttach
 			}
+			remote := skillPayloadVersion(obj, p.Skill.Version)
 			// Applying an object that changes nothing must not rewrite the
 			// package: every re-delivery used to bump the version, and since
 			// the export identity embeds that version, each bump queued
 			// another upload and another pull — an unbounded version churn.
+			// The version still advances to what the sender has seen, because
+			// it is the watermark that keeps a later, lower-versioned event
+			// from overwriting the content this device already received.
 			if skillPayloadMatches(current, p.Skill, p.Files) {
-				return nil
+				return database.AdvanceSkillVersion(ctx, obj.ID, current.Version, remote)
 			}
 			// An event produced before a newer local edit must not overwrite
 			// it. The payload's version is what the sending device exported;
 			// older peers omit it, so fall back to the wire source version.
-			if remote := skillPayloadVersion(obj, p.Skill.Version); remote > 0 && remote < current.Version {
+			// With no version at all the event cannot be judged stale and the
+			// content comparison above is the only defence.
+			if remote > 0 && remote < current.Version {
 				return nil
 			}
 			p.Skill.Version = current.Version
 			p.Skill.PackageSlug = current.PackageSlug
-			_, err = database.UpdateSkillPackage(ctx, p.Skill, current.Version, p.Files)
-			return err
+			updated, err := database.UpdateSkillPackage(ctx, p.Skill, current.Version, p.Files)
+			if err != nil {
+				return err
+			}
+			// Keep the watermark at the highest version seen, even when the
+			// applied content came from a much newer event than local + 1.
+			return database.AdvanceSkillVersion(ctx, obj.ID, updated.Version, remote)
 		}
 		desired := p.Skill.Version
 		if desired < 1 {

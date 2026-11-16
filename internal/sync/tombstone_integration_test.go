@@ -235,6 +235,70 @@ func TestDeletedSkillIsNotResurrectedByPeerUpsert(t *testing.T) {
 	}
 }
 
+// TestRebuiltSkillReplacesItsTombstoneAndSyncs pins the recovery path a review
+// found missing: rebuilding a deleted skill ID locally must drop the tombstone
+// in the same transaction, so the export carries only the upsert and a peer
+// that has not seen the delete yet ends up with the rebuilt skill.
+func TestRebuiltSkillReplacesItsTombstoneAndSyncs(t *testing.T) {
+	ctx := context.Background()
+	center, err := centersync.Open(ctx, filepath.Join(t.TempDir(), "center.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer center.Close()
+	server := httptest.NewServer(center.Handler())
+	defer server.Close()
+	deviceA := newSkillSyncDevice(t, center, server.URL, "device-rebuild-a", "token-rebuild-a")
+	deviceB := newSkillSyncDevice(t, center, server.URL, "device-rebuild-b", "token-rebuild-b")
+
+	now := time.Now().UTC()
+	skill := domain.Skill{ID: "skill-rebuild", Scope: "global", Name: "demo", Description: "demo", Instructions: "old body", Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now}
+	if err := deviceA.database.CreateSkill(ctx, skill); err != nil {
+		t.Fatal(err)
+	}
+	for _, runner := range []*syncer.Runner{&deviceA.runner, &deviceB.runner, &deviceA.runner} {
+		if err := runner.RunOnce(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := deviceB.database.Skill(ctx, skill.ID); err != nil {
+		t.Fatalf("skill did not synchronize: %v", err)
+	}
+
+	// Delete, then rebuild the same ID before the next sync, the way a legacy
+	// re-import does after a cleanup.
+	if err := deviceA.database.DeleteSkill(ctx, skill.ID); err != nil {
+		t.Fatal(err)
+	}
+	rebuilt := domain.Skill{ID: skill.ID, Scope: "global", Name: "demo", Description: "demo", Instructions: "rebuilt body", Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now.Add(time.Minute)}
+	if err := deviceA.database.CreateSkill(ctx, rebuilt); err != nil {
+		t.Fatal(err)
+	}
+	objects, err := syncer.ExportBusinessObjects(ctx, deviceA.database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, object := range objects {
+		if object.Type == syncer.TypeSkill && object.ID == skill.ID && object.Operation == "delete" {
+			t.Fatal("rebuilt skill still exports its tombstone")
+		}
+	}
+
+	if err := deviceA.runner.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := deviceB.runner.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	applied, err := deviceB.database.Skill(ctx, skill.ID)
+	if err != nil {
+		t.Fatalf("peer did not receive the rebuilt skill: %v", err)
+	}
+	if applied.Version != 2 || applied.Instructions != "rebuilt body" {
+		t.Fatalf("peer skill=%#v", applied)
+	}
+}
+
 func TestCodexDeleteQuarantinedByOldBuildReplaysAfterUpgrade(t *testing.T) {
 	ctx := context.Background()
 	center, err := centersync.Open(ctx, filepath.Join(t.TempDir(), "center.db"))

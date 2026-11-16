@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"strconv"
 	"time"
 
@@ -103,14 +105,75 @@ func (s *Store) CreateSkill(ctx context.Context, item domain.Skill) error {
 	if err := s.writeSkillPackage(&item); err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO skills(id,package_slug,scope,project_id,name,description,instructions,version,status,enabled,auto_attach,source_path,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, item.ID, item.PackageSlug, item.Scope, item.ProjectID, item.Name, item.Description, item.Instructions,
-		item.Version, item.Status, boolInt(item.Enabled), boolInt(item.AutoAttach), item.SourcePath, timeString(item.CreatedAt), timeString(item.UpdatedAt))
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		_ = s.removeSkillPackage(item)
+		return err
 	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO skills(id,package_slug,scope,project_id,name,description,instructions,version,status,enabled,auto_attach,source_path,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, item.ID, item.PackageSlug, item.Scope, item.ProjectID, item.Name, item.Description, item.Instructions,
+		item.Version, item.Status, boolInt(item.Enabled), boolInt(item.AutoAttach), item.SourcePath, timeString(item.CreatedAt), timeString(item.UpdatedAt)); err != nil {
+		_ = s.removeSkillPackage(item)
+		return err
+	}
+	if err := clearSupersededSkillTombstone(ctx, tx, item.ID, item.Version); err != nil {
+		_ = s.removeSkillPackage(item)
+		return err
+	}
+	// A delete enqueued by an earlier run but not pushed yet would recreate the
+	// tombstone on peers right before this upsert, making it a no-op there.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sync_outbox WHERE object_type='skill' AND object_id=? AND operation='delete' AND status='pending'`, item.ID); err != nil {
+		_ = s.removeSkillPackage(item)
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		// The row may already be committed; keep the package on disk rather
+		// than leaving a row whose files were removed under it.
+		return err
+	}
+	return nil
+}
+
+// clearSupersededSkillTombstone lets a deliberate local create reuse a skill
+// ID that was deleted earlier: sharedNumericVersion has already raised the new
+// version above the deleted one, so the row and the tombstone cannot both be
+// exported. Inbound upserts are unaffected -- they are still blocked by every
+// tombstone a peer holds, which is what keeps a deleted skill deleted.
+func clearSupersededSkillTombstone(ctx context.Context, tx *sql.Tx, id string, version int) error {
+	var deleted string
+	err := tx.QueryRowContext(ctx, `SELECT version FROM sync_tombstones WHERE object_type='skill' AND object_id=?`, id).Scan(&deleted)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if deletedVersion, convErr := strconv.Atoi(deleted); convErr == nil && version <= deletedVersion {
+		return nil
+	}
+	_, err = tx.ExecContext(ctx, `DELETE FROM sync_tombstones WHERE object_type='skill' AND object_id=?`, id)
 	return err
+}
+
+// AdvanceSkillVersion raises the sync version of an existing skill without
+// rewriting its package. Sync uses it when an inbound object carries a higher
+// version but identical content: the content is unchanged, yet the version is
+// the watermark stale events are compared against, so a later lower-versioned
+// event must not overwrite what this device has already seen.
+func (s *Store) AdvanceSkillVersion(ctx context.Context, id string, baseVersion, version int) error {
+	if version <= baseVersion {
+		return nil
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE skills SET version=? WHERE id=? AND version=?`, version, id, baseVersion)
+	if err != nil {
+		return err
+	}
+	if rows, _ := result.RowsAffected(); rows != 1 {
+		return fmt.Errorf("skill version conflict")
+	}
+	return nil
 }
 
 func (s *Store) ListSkills(ctx context.Context, scope, projectID string, enabledOnly bool) ([]domain.Skill, error) {

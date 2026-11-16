@@ -530,41 +530,93 @@ func TestApplySkillTombstoneBlocksNewerUpsert(t *testing.T) {
 	}
 }
 
+func exportedSkillPayload(t *testing.T, db *store.Store, id string) skillPayload {
+	t.Helper()
+	objects, err := ExportBusinessObjects(context.Background(), db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, object := range objects {
+		if object.Type != TypeSkill || object.ID != id {
+			continue
+		}
+		var payload skillPayload
+		if err := json.Unmarshal(object.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		return payload
+	}
+	t.Fatalf("exported skill payload %s not found", id)
+	return skillPayload{}
+}
+
+func applySkillPayload(t *testing.T, ctx context.Context, db *store.Store, id string, payload skillPayload, sourceVersion string) {
+	t.Helper()
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applyBusinessObject(ctx, db, domain.SyncObject{Type: TypeSkill, ID: id, Operation: "upsert", Payload: raw, SourceVersion: sourceVersion}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestApplySkillIdenticalContentDoesNotBumpVersion(t *testing.T) {
 	ctx, db, now := context.Background(), businessStore(t), time.Now().UTC()
 	if err := db.CreateSkill(ctx, domain.Skill{ID: "s-same", Scope: "global", Name: "demo", Description: "demo", Instructions: "body", Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	objects, err := ExportBusinessObjects(ctx, db)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var payload skillPayload
-	for _, object := range objects {
-		if object.Type == TypeSkill && object.ID == "s-same" {
-			if err := json.Unmarshal(object.Payload, &payload); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-	if payload.Skill.ID != "s-same" {
-		t.Fatal("exported skill payload not found")
-	}
-	raw, err := json.Marshal(payload)
-	if err != nil {
-		t.Fatal(err)
-	}
+	payload := exportedSkillPayload(t, db, "s-same")
 	for delivery := 0; delivery < 3; delivery++ {
-		if err := applyBusinessObject(ctx, db, domain.SyncObject{Type: TypeSkill, ID: "s-same", Operation: "upsert", Payload: raw, SourceVersion: "1"}); err != nil {
-			t.Fatal(err)
-		}
+		applySkillPayload(t, ctx, db, "s-same", payload, "1")
 	}
 	got, err := db.Skill(ctx, "s-same")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Version != 1 {
-		t.Fatalf("identical content bumped version to %d", got.Version)
+	if got.Version != 1 || got.Instructions != "body" {
+		t.Fatalf("identical content rewrote the skill: %#v", got)
+	}
+}
+
+// TestApplySkillNoopAdvancesVersionWatermark pins the review finding that a
+// no-op delivery still has to move the version watermark: otherwise an older
+// event arriving next would compare against the stale local version and
+// overwrite content this device already superseded.
+func TestApplySkillNoopAdvancesVersionWatermark(t *testing.T) {
+	ctx, db, now := context.Background(), businessStore(t), time.Now().UTC()
+	if err := db.CreateSkill(ctx, domain.Skill{ID: "s-watermark", Scope: "global", Name: "demo", Description: "demo", Instructions: "body", Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	current := exportedSkillPayload(t, db, "s-watermark")
+
+	newer := current
+	newer.Skill.Version = 10
+	applySkillPayload(t, ctx, db, "s-watermark", newer, "10")
+	got, err := db.Skill(ctx, "s-watermark")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Instructions != "body" || len(got.PackageFiles) != 1 {
+		t.Fatalf("identical newer delivery rewrote the package: %#v", got)
+	}
+
+	// The stale event compares against the watermark the no-op established,
+	// not against the untouched local version.
+	stale := current
+	stale.Skill.Version = 5
+	stale.Skill.Instructions = "stale body"
+	stale.Files = skillSyncFiles("stale body")
+	applySkillPayload(t, ctx, db, "s-watermark", stale, "5")
+	got, err = db.Skill(ctx, "s-watermark")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Instructions != "body" {
+		t.Fatalf("older delivery overwrote the watermark: %#v", got)
+	}
+	if got.Version < 10 {
+		t.Fatalf("no-op did not advance the version watermark: %d", got.Version)
 	}
 }
 
@@ -573,18 +625,7 @@ func TestApplySkillStaleVersionDoesNotOverwriteNewerLocalEdit(t *testing.T) {
 	if err := db.CreateSkill(ctx, domain.Skill{ID: "s-stale", Scope: "global", Name: "demo", Description: "demo", Instructions: "old body", Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	objects, err := ExportBusinessObjects(ctx, db)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var stale skillPayload
-	for _, object := range objects {
-		if object.Type == TypeSkill && object.ID == "s-stale" {
-			if err := json.Unmarshal(object.Payload, &stale); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
+	stale := exportedSkillPayload(t, db, "s-stale")
 	current, err := db.Skill(ctx, "s-stale")
 	if err != nil {
 		t.Fatal(err)
@@ -592,13 +633,7 @@ func TestApplySkillStaleVersionDoesNotOverwriteNewerLocalEdit(t *testing.T) {
 	if _, err := db.UpdateSkillPackage(ctx, current, current.Version, []domain.SkillFile{{Path: "SKILL.md", Content: "---\nname: \"demo\"\ndescription: \"demo\"\n---\n\nnew body\n"}}); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := json.Marshal(stale)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := applyBusinessObject(ctx, db, domain.SyncObject{Type: TypeSkill, ID: "s-stale", Operation: "upsert", Payload: raw, SourceVersion: "1"}); err != nil {
-		t.Fatal(err)
-	}
+	applySkillPayload(t, ctx, db, "s-stale", stale, "1")
 	got, err := db.Skill(ctx, "s-stale")
 	if err != nil {
 		t.Fatal(err)
