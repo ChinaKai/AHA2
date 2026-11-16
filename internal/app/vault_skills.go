@@ -297,11 +297,14 @@ func (s *Service) vaultAutoAttachSkillKeys(ctx context.Context, projectID string
 }
 
 // vaultAutoAttachSelection resolves the vault skills that should be
-// pre-selected for a new task. It applies only when the vault read gate, the
-// project's manifest binding, and the index are all ready. Preferences that can
-// no longer be honoured are logged instead of silently disappearing.
+// pre-selected for a new task. For normal projects it applies only when the
+// vault read gate, the project's manifest binding, and the index are all ready.
+// Infrastructure projects own no project space, so only global vault
+// preferences apply and they are gated by the global read source. Preferences
+// that can no longer be honoured are logged instead of silently disappearing.
 func (s *Service) vaultAutoAttachSelection(ctx context.Context, projectID string) vaultAutoAttachSelection {
 	selection := vaultAutoAttachSelection{slugs: map[string]bool{}}
+	infrastructure := s.projectHasNoKnowledgeSpace(ctx, projectID)
 	preferences, err := s.store.ListVaultSkillPreferences(ctx)
 	if err != nil {
 		log.Printf("knowledge vault auto-attach preferences for project %s: %v", projectID, err)
@@ -318,7 +321,10 @@ func (s *Service) vaultAutoAttachSelection(ctx context.Context, projectID string
 				applicable = append(applicable, item)
 			}
 		case "project":
-			if item.ProjectID == projectID {
+			// A retained non-empty legacy space is still not a knowledge
+			// source for infrastructure projects; their tasks load global
+			// vault skills only (task-541).
+			if !infrastructure && item.ProjectID == projectID {
 				applicable = append(applicable, item)
 			}
 		}
@@ -326,7 +332,12 @@ func (s *Service) vaultAutoAttachSelection(ctx context.Context, projectID string
 	if len(applicable) == 0 {
 		return selection
 	}
-	if !s.vaultReadEnabled(projectID) {
+	if infrastructure {
+		if !s.vaultGlobalReadEnabled() {
+			log.Printf("knowledge vault auto-attach for project %s: %d global preference(s) not applied (global vault read is unavailable)", projectID, len(applicable))
+			return selection
+		}
+	} else if !s.vaultReadEnabled(projectID) {
 		log.Printf("knowledge vault auto-attach for project %s: %d preference(s) not applied (%s)", projectID, len(applicable), s.vaultReadDisabledReason(projectID))
 		return selection
 	}
@@ -337,7 +348,7 @@ func (s *Service) vaultAutoAttachSelection(ctx context.Context, projectID string
 			return err
 		}
 		for _, skill := range response.Skills {
-			if skill.Scope == "global" || (skill.Scope == "project" && skill.ProjectID == projectID) {
+			if skill.Scope == "global" || (!infrastructure && skill.Scope == "project" && skill.ProjectID == projectID) {
 				available[skill.Key] = skill
 			}
 		}
@@ -608,7 +619,11 @@ func (s *Service) vaultSkillExistsInProject(ctx context.Context, projectID, id s
 			case skill.Scope == "global":
 				found = true
 			case skill.Scope == "project" && skill.ProjectID == projectID:
-				found = projectRead
+				// A retained non-empty legacy space (task-535 keeps it and its
+				// manifest mapping) must not make project scope valid again:
+				// runtime task skills for infrastructure projects are global
+				// only, so saving a project skill must be rejected here too.
+				found = !infrastructure && projectRead
 			}
 			break
 		}

@@ -725,7 +725,14 @@ func (s *Service) autoAttachSkillIDs(ctx context.Context, projectID string) ([]s
 	// auto-attach selection comes exclusively from vault preferences. The
 	// legacy skills.AutoAttach rows are the fallback for projects still on the
 	// old store; merging both mounted the same package twice under two IDs.
-	if s.vaultReadEnabled(projectID) {
+	vaultSource := s.vaultReadEnabled(projectID)
+	if !vaultSource && s.projectHasNoKnowledgeSpace(ctx, projectID) {
+		// Infrastructure projects own no project vault space, so only global
+		// vault preferences apply and the global read source decides whether
+		// they are available (task-541).
+		vaultSource = s.vaultGlobalReadEnabled()
+	}
+	if vaultSource {
 		selection := s.vaultAutoAttachSelection(ctx, projectID)
 		for _, item := range s.supersededLegacyAutoAttach(ctx, projectID, selection.slugs) {
 			log.Printf("knowledge vault auto-attach for project %s: legacy skill %s (%q) has no vault counterpart and is not auto-attached because the project uses the vault source", projectID, item.ID, item.Name)

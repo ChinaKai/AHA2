@@ -679,3 +679,65 @@ func TestVaultSkillExistsInProjectFollowsInfrastructureScope(t *testing.T) {
 		t.Fatal("unbound normal project accepted a vault skill")
 	}
 }
+
+// task-535 keeps a non-empty infrastructure space and its manifest mapping.
+// That must not make project-scoped skills usable: saving, auto-attach and
+// runtime resolution all stay global-only, and the repeated warning stays gone.
+func vaultInfrastructureRetainedFiles() map[string]string {
+	files := vaultSkillFiles()
+	files["projects/pet/skills/pet-skill/SKILL.md"] = "---\nname: Pet Skill\ndescription: Retained pet project skill\n---\n\n# Pet Skill\n"
+	return files
+}
+
+func TestVaultInfrastructureRetainedSpaceUsesGlobalSkillsOnly(t *testing.T) {
+	withUnsetEnv(t, knowledgeVaultReadProjectsEnv)
+	fixture := newVaultSkillsFixtureForProject(t, buildVaultReadManager(t, true, vaultInfrastructureRetainedFiles()), domain.Project{
+		ID: petProjectID, Name: "宠物", ProjectType: "system", KnowledgePolicy: "none",
+	})
+	ctx := fixture.ctx
+	if !fixture.service.vaultReadEnabled(fixture.project.ID) {
+		t.Fatal("precondition: a retained non-empty space should keep the project vault read enabled")
+	}
+	globalKey := "vault-skill:global:demo"
+	projectKey := "vault-skill:project:" + petProjectID + ":pet-skill"
+	if !fixture.service.vaultSkillExistsInProject(ctx, fixture.project.ID, globalKey) {
+		t.Fatal("infrastructure project rejected a global vault skill")
+	}
+	if fixture.service.vaultSkillExistsInProject(ctx, fixture.project.ID, projectKey) {
+		t.Fatal("infrastructure project accepted a project vault skill from its retained space")
+	}
+	if _, err := fixture.service.SetVaultSkillAutoAttach(ctx, globalKey, true, true); err != nil {
+		t.Fatal(err)
+	}
+	// A stale project preference remains in the store (the space was kept), but
+	// it must not reach a new infrastructure task.
+	if _, err := fixture.service.SetVaultSkillAutoAttach(ctx, projectKey, true, false); err != nil {
+		t.Fatal(err)
+	}
+	if keys := fixture.service.vaultAutoAttachSkillKeys(ctx, fixture.project.ID); len(keys) != 1 || keys[0] != globalKey {
+		t.Fatalf("infrastructure auto-attach = %#v, want only %s", keys, globalKey)
+	}
+	task := fixture.createTask(t, nil)
+	if !hasTaskSkill(task, globalKey) || hasTaskSkill(task, projectKey) {
+		t.Fatalf("infrastructure task skills = %#v, want only the global vault skill", task.SkillIDs)
+	}
+	if _, err := fixture.service.UpdateTaskSkills(ctx, task.ID, []string{globalKey, projectKey}); err == nil || !strings.Contains(err.Error(), projectKey) {
+		t.Fatalf("saving a project vault skill on an infrastructure project err = %v", err)
+	}
+	logs := captureLog(t)
+	for attempt := 0; attempt < 3; attempt++ {
+		byID := map[string]domain.Skill{}
+		for _, item := range fixture.service.activeTaskSkills(ctx, task) {
+			byID[item.ID] = item
+		}
+		if _, ok := byID[globalKey]; !ok {
+			t.Fatalf("attempt %d lost the global vault skill: %#v", attempt, byID)
+		}
+		if _, ok := byID[projectKey]; ok {
+			t.Fatalf("attempt %d loaded a project skill from the retained space: %#v", attempt, byID)
+		}
+	}
+	if out := logs.String(); strings.Contains(out, "knowledge vault task skills") {
+		t.Fatalf("infrastructure project repeated a vault skill warning: %s", out)
+	}
+}
