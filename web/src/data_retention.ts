@@ -329,7 +329,7 @@ function compactionDialog(state: DataRetentionViewState): string {
         <div><span class="field-help">${t("data.db.compactReclaim")}</span><strong>${formatBytes(plan.estimated_reclaimed_bytes)}</strong></div>
         <div><span class="field-help">${t("data.db.compactRequired")}</span><strong>${formatBytes(plan.required_temp_bytes)}</strong></div>
         <div><span class="field-help">${t("data.db.compactDisk")}</span><strong>${formatBytes(plan.disk_free_bytes)}</strong></div>
-        <div><span class="field-help">${t("data.db.compactWriters")}</span><strong>${t("data.db.compactActive", {tasks: plan.active_tasks, turns: plan.active_turns, approvals: plan.pending_approvals})}</strong></div>
+        <div><span class="field-help">${t("data.db.compactWriters")}</span><strong>${t("data.db.compactActive", {tasks: plan.active_tasks, turns: plan.active_turns, approvals: plan.pending_approvals + plan.pet_approvals})}</strong></div>
       </div>
       <p class="field-help data-cleanup-note">${t("data.db.compactStop")}</p>
       ${blocked}

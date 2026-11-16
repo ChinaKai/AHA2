@@ -274,6 +274,22 @@ func TestDatabaseCompactionEndpointsCheckAndRun(t *testing.T) {
 	if _, err := raw.ExecContext(ctx, `UPDATE tasks SET status='completed' WHERE id=?`, task.ID); err != nil {
 		t.Fatal(err)
 	}
+	// A pending pet approval also blocks compaction, even with no active task.
+	if _, err := raw.ExecContext(ctx, `
+		INSERT INTO pet_approvals(id,task_id,kind,title,summary,status,created_at)
+		VALUES(?,?,?,?,?,?,?)`,
+		domain.NewID("pet_approval"), task.ID, "shell", "Pet approval", "waiting", "pending",
+		time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/system/data/database/compaction", nil, "")
+	decodeResponse(t, response, &plan)
+	if response.StatusCode != http.StatusOK || plan.Plan.CanCompact || plan.Plan.PetApprovals != 1 {
+		t.Fatalf("pet approval plan status=%d plan=%#v", response.StatusCode, plan.Plan)
+	}
+	if _, err := raw.ExecContext(ctx, `UPDATE pet_approvals SET status='approved',resolution='ok'`); err != nil {
+		t.Fatal(err)
+	}
 	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/system/data/database/compaction", nil, "")
 	decodeResponse(t, response, &plan)
 	if response.StatusCode != http.StatusOK || !plan.Plan.CanCompact {
@@ -283,6 +299,12 @@ func TestDatabaseCompactionEndpointsCheckAndRun(t *testing.T) {
 	response.Body.Close()
 	if response.StatusCode != http.StatusBadRequest {
 		t.Fatalf("unconfirmed compaction status=%d", response.StatusCode)
+	}
+	// The fixture's raw pool also shares the file; drain it so the exclusive
+	// maintenance lock is not blocked by an idle connection.
+	raw.SetMaxIdleConns(0)
+	for deadline := time.Now().Add(time.Second); raw.Stats().Idle > 0 && time.Now().Before(deadline); {
+		time.Sleep(5 * time.Millisecond)
 	}
 	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/system/data/database/compaction", map[string]any{"confirm": true}, csrf)
 	var compacted struct {

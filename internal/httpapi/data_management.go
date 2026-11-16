@@ -115,7 +115,7 @@ func buildDataInventory(root string) (DataInventory, error) {
 	root = filepath.Clean(root)
 	known := map[string]DataCategory{
 		"attachments":   {ID: "attachments", Label: "附件", Note: "消息附件和图片"},
-		"backups":       {ID: "backups", Label: "安装备份", SafeCleanup: true, Note: "旧版本安装备份，可保留最近几份后清理"},
+		"backups":       {ID: "backups", Label: "安装备份", SafeCleanup: true, Note: "旧版本安装备份，固定保留最新 1 份后清理其余"},
 		"channels":      {ID: "channels", Label: "渠道运行时", Note: "渠道插件与实例文件"},
 		"plugins":       {ID: "plugins", Label: "插件", Note: "渠道插件二进制和清单"},
 		"node":          {ID: "node", Label: "Node 运行时", Note: "内置 Node，不是可清理缓存"},
@@ -130,7 +130,7 @@ func buildDataInventory(root string) (DataInventory, error) {
 		note  string
 	}{
 		{dir: "attachments", label: "附件", note: "消息附件和图片"},
-		{dir: "backups", label: "安装备份", note: "旧版本安装备份，可保留最近几份后清理"},
+		{dir: "backups", label: "安装备份", note: "旧版本安装备份，固定保留最新 1 份后清理其余"},
 		{dir: "channels", label: "渠道运行时", note: "渠道插件与实例文件"},
 		{dir: "plugins", label: "插件", note: "渠道插件二进制和清单"},
 		{dir: "node", label: "Node 运行时", note: "内置 Node，不是可清理缓存"},

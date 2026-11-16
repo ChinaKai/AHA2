@@ -255,6 +255,7 @@ type DatabaseCompactionPlan struct {
 	ActiveTasks             int       `json:"active_tasks"`
 	ActiveTurns             int       `json:"active_turns"`
 	PendingApprovals        int       `json:"pending_approvals"`
+	PetApprovals            int       `json:"pet_approvals"`
 	CanCompact              bool      `json:"can_compact"`
 	BlockingReasons         []string  `json:"blocking_reasons"`
 	CheckedAt               time.Time `json:"checked_at"`

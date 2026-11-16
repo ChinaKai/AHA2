@@ -3808,18 +3808,25 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	var hasV145 bool
 	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=145)`).Scan(&hasV145)
-	if !hasV145 || !s.tableHasColumn(ctx, "data_retention_settings", "conversation_retention_days") {
-		// Manual conversation cleanup on the data management page keeps its
-		// settings in the same single row as hardware_io retention. main used
-		// v142-v144 for knowledge model A, so this migration is v145.
-		for _, column := range []struct {
-			name       string
-			definition string
-		}{
-			{"conversation_retention_days", "INTEGER NOT NULL DEFAULT 30"},
-			{"conversation_purge_tool", "INTEGER NOT NULL DEFAULT 1"},
-			{"conversation_purge_update", "INTEGER NOT NULL DEFAULT 0"},
-		} {
+	// Manual conversation cleanup on the data management page keeps its
+	// settings in the same single row as hardware_io retention. main used
+	// v142-v144 for knowledge model A, so this migration is v145.
+	conversationColumns := []struct {
+		name       string
+		definition string
+	}{
+		{"conversation_retention_days", "INTEGER NOT NULL DEFAULT 30"},
+		{"conversation_purge_tool", "INTEGER NOT NULL DEFAULT 1"},
+		{"conversation_purge_update", "INTEGER NOT NULL DEFAULT 0"},
+	}
+	needsV145 := !hasV145
+	for _, column := range conversationColumns {
+		if !s.tableHasColumn(ctx, "data_retention_settings", column.name) {
+			needsV145 = true
+		}
+	}
+	if needsV145 {
+		for _, column := range conversationColumns {
 			if s.tableHasColumn(ctx, "data_retention_settings", column.name) {
 				continue
 			}

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -22,8 +23,8 @@ var databaseCompactMu sync.Mutex
 var databaseDiskFree = diskSpaceFree
 
 // databaseCompactAfterVacuum is a test hook that runs after VACUUM and before
-// verification. It lets a test force the rollback path (for example by writing
-// a row and returning an error).
+// verification, while the exclusive maintenance lock is held. It lets a test
+// force the rollback path or observe that external writes are refused.
 var databaseCompactAfterVacuum func(context.Context, *Store) error
 
 // databaseCompactRowCountTables are the tables whose counts must survive the
@@ -83,10 +84,14 @@ func (s *Store) DatabaseCompactionPlan(ctx context.Context) (domain.DatabaseComp
 		SELECT COUNT(*) FROM task_permission_requests WHERE status='pending'`).Scan(&plan.PendingApprovals); err != nil {
 		return plan, fmt.Errorf("count pending approvals: %w", err)
 	}
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM pet_approvals WHERE status IN ('pending','executing')`).Scan(&plan.PetApprovals); err != nil {
+		return plan, fmt.Errorf("count pending pet approvals: %w", err)
+	}
 	if plan.ActiveTasks > 0 || plan.ActiveTurns > 0 {
 		plan.BlockingReasons = append(plan.BlockingReasons, domain.DatabaseCompactionSkipActive)
 	}
-	if plan.PendingApprovals > 0 {
+	if plan.PendingApprovals > 0 || plan.PetApprovals > 0 {
 		plan.BlockingReasons = append(plan.BlockingReasons, "pending_approvals")
 	}
 	free, err := databaseDiskFree(filepath.Dir(s.path))
@@ -103,14 +108,16 @@ func (s *Store) DatabaseCompactionPlan(ctx context.Context) (domain.DatabaseComp
 
 // CompactDatabase performs one manual, confirmed compaction:
 //
-//	backup (VACUUM INTO) -> wal_checkpoint(TRUNCATE) -> VACUUM in place ->
-//	integrity_check + key table row counts.
+//	exclusive lock -> backup (VACUUM INTO) -> wal_checkpoint(TRUNCATE) ->
+//	VACUUM in place -> integrity_check + key table row counts.
 //
-// It refuses when a task, turn or permission request is active, when another
+// The exclusive lock (PRAGMA locking_mode=EXCLUSIVE on a dedicated connection)
+// is taken before the backup and held through verification, so no other
+// connection or process can commit a write that a rollback would erase. It
+// refuses when a task, turn or permission request is active, when another
 // compaction is running, or when free disk space is below the plan's
 // requirement. A failed rebuild or verification restores every table from the
-// backup. It never runs automatically and never touches the database before the
-// preflight passes.
+// backup while the lock is still held. It never runs automatically.
 func (s *Store) CompactDatabase(ctx context.Context) (domain.DatabaseCompactionResult, error) {
 	started := time.Now()
 	result := domain.DatabaseCompactionResult{}
@@ -135,24 +142,37 @@ func (s *Store) CompactDatabase(ctx context.Context) (domain.DatabaseCompactionR
 		result.DurationMS = time.Since(started).Milliseconds()
 		return result, nil
 	}
-	backupPath, err := s.backupDatabaseForCompaction(ctx)
+	lock, err := s.acquireCompactionLock(ctx)
+	if err != nil {
+		// A reader/writer beat the idle drain or another process holds the
+		// file. Refuse rather than risk a write slipping in after the backup.
+		result.SkipReason = domain.DatabaseCompactionSkipActiveWrites
+		result.Error = err.Error()
+		result.DurationMS = time.Since(started).Milliseconds()
+		return result, nil
+	}
+	defer s.releaseCompactionLock(lock)
+
+	backupPath, err := s.backupDatabaseTo(ctx, lock.conn, "database-compact")
 	if err != nil {
 		result.Error = err.Error()
 		result.DurationMS = time.Since(started).Milliseconds()
 		return result, err
 	}
+	// Keep only the newest full-database compaction snapshot so repeated runs
+	// cannot pile up multi-gigabyte copies.
+	s.pruneOldCleanupBackups("database-compact", backupPath)
 	result.BackupPath = backupPath
 	result.BeforeBytes = plan.FileBytes
 	result.WALBeforeBytes = plan.WALBytes
-	beforeCounts, err := s.countTablesForCompaction(ctx, "main")
+	beforeCounts, err := s.countTablesForCompaction(ctx, lock.conn, "main")
 	if err != nil {
 		result.Error = err.Error()
 		result.DurationMS = time.Since(started).Milliseconds()
 		return result, err
 	}
 	result.BeforeRowCounts = beforeCounts
-
-	busy, _, _, err := s.walCheckpointTruncate(ctx)
+	busy, _, _, err := s.walCheckpointTruncate(ctx, lock.conn)
 	if err != nil {
 		result.Error = err.Error()
 		result.DurationMS = time.Since(started).Milliseconds()
@@ -163,7 +183,7 @@ func (s *Store) CompactDatabase(ctx context.Context) (domain.DatabaseCompactionR
 		result.DurationMS = time.Since(started).Milliseconds()
 		return result, nil
 	}
-	if _, err := s.db.ExecContext(ctx, `VACUUM`); err != nil {
+	if _, err := lock.conn.ExecContext(ctx, `VACUUM`); err != nil {
 		result.SkipReason = domain.DatabaseCompactionSkipVacuumFailed
 		if ctx.Err() != nil {
 			result.SkipReason = domain.DatabaseCompactionSkipCanceled
@@ -174,25 +194,25 @@ func (s *Store) CompactDatabase(ctx context.Context) (domain.DatabaseCompactionR
 	}
 	if databaseCompactAfterVacuum != nil {
 		if err := databaseCompactAfterVacuum(ctx, s); err != nil {
-			return s.rollbackCompaction(ctx, result, err, started)
+			return s.rollbackCompaction(ctx, lock.conn, result, err, started)
 		}
 	}
-	integrity, err := s.integrityCheck(ctx)
+	integrity, err := s.integrityCheck(ctx, lock.conn)
 	if err != nil {
-		return s.rollbackCompaction(ctx, result, err, started)
+		return s.rollbackCompaction(ctx, lock.conn, result, err, started)
 	}
 	result.IntegrityCheck = integrity
 	if !strings.EqualFold(integrity, "ok") {
-		return s.rollbackCompaction(ctx, result,
+		return s.rollbackCompaction(ctx, lock.conn, result,
 			fmt.Errorf("integrity_check returned %q", integrity), started)
 	}
-	afterCounts, err := s.countTablesForCompaction(ctx, "main")
+	afterCounts, err := s.countTablesForCompaction(ctx, lock.conn, "main")
 	if err != nil {
-		return s.rollbackCompaction(ctx, result, err, started)
+		return s.rollbackCompaction(ctx, lock.conn, result, err, started)
 	}
 	result.AfterRowCounts = afterCounts
 	if mismatch := compareRowCounts(beforeCounts, afterCounts); mismatch != "" {
-		return s.rollbackCompaction(ctx, result,
+		return s.rollbackCompaction(ctx, lock.conn, result,
 			fmt.Errorf("row counts changed across compaction: %s", mismatch), started)
 	}
 	result.AfterBytes = fileSize(s.path)
@@ -203,10 +223,116 @@ func (s *Store) CompactDatabase(ctx context.Context) (domain.DatabaseCompactionR
 	return result, nil
 }
 
+type compactionLock struct {
+	db   *sql.DB
+	conn *sql.Conn
+}
+
+// DrainIdleConnections closes idle pooled connections so compaction can take
+// SQLite's exclusive lock. Callers should restore them with
+// RestoreIdleConnections after compaction. Active queries are unaffected.
+func (s *Store) DrainIdleConnections() {
+	if s == nil || s.db == nil {
+		return
+	}
+	s.db.SetMaxIdleConns(0)
+}
+
+// RestoreIdleConnections returns the pool to its configured open-connection
+// ceiling after DrainIdleConnections.
+func (s *Store) RestoreIdleConnections() {
+	if s == nil || s.db == nil {
+		return
+	}
+	maxOpen := s.db.Stats().MaxOpenConnections
+	if maxOpen < 1 {
+		maxOpen = webPoolConnections
+	}
+	s.db.SetMaxIdleConns(maxOpen)
+}
+
+// acquireCompactionLock drains the idle pool connections and holds a SQLite
+// exclusive lock on a dedicated single connection. With locking_mode=EXCLUSIVE
+// the first write keeps the file locked until the connection is closed, which
+// blocks every other connection and process for the whole backup/VACUUM/
+// verification window. An idle connection in another pool can make the lock
+// attempt busy, so it retries briefly before refusing.
+func (s *Store) acquireCompactionLock(ctx context.Context) (*compactionLock, error) {
+	if s.path == "" || isMemoryDatabase(s.path) {
+		return nil, errors.New("compaction requires a file-backed database")
+	}
+	s.DrainIdleConnections()
+	deadline := time.Now().Add(2 * time.Second)
+	for s.db.Stats().Idle > 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	var lastErr error
+	for attempt := 0; attempt < 6; attempt++ {
+		lock, err := s.tryCompactionLock(ctx)
+		if err == nil {
+			return lock, nil
+		}
+		lastErr = err
+		if !IsSQLiteBusy(err) || ctx.Err() != nil {
+			break
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	s.RestoreIdleConnections()
+	return nil, lastErr
+}
+
+func (s *Store) tryCompactionLock(ctx context.Context) (*compactionLock, error) {
+	lockDB, err := openSQLitePool(s.path, 1)
+	if err != nil {
+		return nil, err
+	}
+	lockDB.SetMaxIdleConns(1)
+	conn, err := lockDB.Conn(ctx)
+	if err != nil {
+		_ = lockDB.Close()
+		return nil, err
+	}
+	closeLock := func() {
+		_ = conn.Close()
+		_ = lockDB.Close()
+	}
+	// Keep each lock attempt short: acquireCompactionLock retries and then
+	// refuses, rather than making the owner wait out the pool's 5s timeout six
+	// times when another pool still holds an idle connection.
+	if _, err := conn.ExecContext(ctx, `PRAGMA busy_timeout=250`); err != nil {
+		closeLock()
+		return nil, fmt.Errorf("set compaction lock timeout: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `PRAGMA locking_mode=EXCLUSIVE`); err != nil {
+		closeLock()
+		return nil, fmt.Errorf("set exclusive locking mode: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		closeLock()
+		return nil, fmt.Errorf("acquire exclusive write lock: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		closeLock()
+		return nil, fmt.Errorf("commit exclusive lock: %w", err)
+	}
+	return &compactionLock{db: lockDB, conn: conn}, nil
+}
+
+func (s *Store) releaseCompactionLock(lock *compactionLock) {
+	if lock == nil {
+		return
+	}
+	_, _ = lock.conn.ExecContext(context.Background(), `PRAGMA locking_mode=NORMAL`)
+	_ = lock.conn.Close()
+	_ = lock.db.Close()
+	s.RestoreIdleConnections()
+}
+
 // rollbackCompaction restores the pre-compaction tables from the backup after a
-// failed verification. The backup is always kept, so a failed restore still
-// leaves the owner a recoverable snapshot.
-func (s *Store) rollbackCompaction(ctx context.Context, result domain.DatabaseCompactionResult, cause error, started time.Time) (domain.DatabaseCompactionResult, error) {
+// failed verification. The caller still holds the exclusive lock, so no write
+// can have committed since the backup and the restore cannot erase one.
+func (s *Store) rollbackCompaction(ctx context.Context, conn *sql.Conn, result domain.DatabaseCompactionResult, cause error, started time.Time) (domain.DatabaseCompactionResult, error) {
 	result.SkipReason = domain.DatabaseCompactionSkipIntegrity
 	if strings.Contains(cause.Error(), "row counts") {
 		result.SkipReason = domain.DatabaseCompactionSkipRowCount
@@ -214,7 +340,7 @@ func (s *Store) rollbackCompaction(ctx context.Context, result domain.DatabaseCo
 	result.Error = cause.Error()
 	if result.BackupPath != "" {
 		restoreCtx := context.WithoutCancel(ctx)
-		if restoreErr := s.restoreTablesFromBackup(restoreCtx, result.BackupPath); restoreErr != nil {
+		if restoreErr := s.restoreTablesFromBackup(restoreCtx, conn, result.BackupPath); restoreErr != nil {
 			result.RestoreError = restoreErr.Error()
 		} else {
 			result.Restored = true
@@ -226,15 +352,15 @@ func (s *Store) rollbackCompaction(ctx context.Context, result domain.DatabaseCo
 	return result, cause
 }
 
-// backupDatabaseForCompaction writes a consistent snapshot to a fresh
-// backups/database-compact-* directory and returns the database file path.
-func (s *Store) backupDatabaseForCompaction(ctx context.Context) (string, error) {
-	return s.backupDatabaseTo(ctx, "database-compact")
+// sqlExecer is *sql.DB or *sql.Conn. Compaction runs its backup through the
+// exclusive-lock connection while B/C cleanup uses the ordinary pool.
+type sqlExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
 }
 
 // backupDatabaseTo writes a consistent VACUUM INTO snapshot under
 // <dataDir>/backups/<prefix>-<timestamp>/aha2.db and returns its path.
-func (s *Store) backupDatabaseTo(ctx context.Context, prefix string) (string, error) {
+func (s *Store) backupDatabaseTo(ctx context.Context, exec sqlExecer, prefix string) (string, error) {
 	if s.path == "" || isMemoryDatabase(s.path) {
 		return "", errors.New("cleanup backup requires a file-backed database")
 	}
@@ -254,7 +380,7 @@ func (s *Store) backupDatabaseTo(ctx context.Context, prefix string) (string, er
 		return "", fmt.Errorf("create %s backup directory: %w", prefix, err)
 	}
 	backupPath := filepath.Join(target, "aha2.db")
-	if _, err := s.db.ExecContext(ctx, `VACUUM INTO ?`, backupPath); err != nil {
+	if _, err := exec.ExecContext(ctx, `VACUUM INTO ?`, backupPath); err != nil {
 		return "", fmt.Errorf("backup database before %s: %w", prefix, err)
 	}
 	if err := os.Chmod(backupPath, 0o600); err != nil {
@@ -291,14 +417,14 @@ func (s *Store) pruneOldCleanupBackups(prefix, keepPath string) {
 // walCheckpointTruncate flushes and truncates the WAL. busy is non-zero when
 // another connection holds a read or write transaction; the caller then refuses
 // to rebuild.
-func (s *Store) walCheckpointTruncate(ctx context.Context) (busy, logFrames, checkpointed int64, err error) {
-	err = s.db.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &logFrames, &checkpointed)
+func (s *Store) walCheckpointTruncate(ctx context.Context, conn *sql.Conn) (busy, logFrames, checkpointed int64, err error) {
+	err = conn.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &logFrames, &checkpointed)
 	return busy, logFrames, checkpointed, err
 }
 
-func (s *Store) integrityCheck(ctx context.Context) (string, error) {
+func (s *Store) integrityCheck(ctx context.Context, conn *sql.Conn) (string, error) {
 	var result string
-	if err := s.db.QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&result); err != nil {
+	if err := conn.QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&result); err != nil {
 		return "", fmt.Errorf("integrity_check: %w", err)
 	}
 	return result, nil
@@ -306,12 +432,7 @@ func (s *Store) integrityCheck(ctx context.Context) (string, error) {
 
 // countTablesForCompaction counts the key tables in the given schema ("main"
 // or an attached backup) on one dedicated connection.
-func (s *Store) countTablesForCompaction(ctx context.Context, schema string) (map[string]int64, error) {
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
+func (s *Store) countTablesForCompaction(ctx context.Context, conn *sql.Conn, schema string) (map[string]int64, error) {
 	counts := map[string]int64{}
 	for _, table := range databaseCompactRowCountTables {
 		var exists int
@@ -332,15 +453,18 @@ func (s *Store) countTablesForCompaction(ctx context.Context, schema string) (ma
 	return counts, nil
 }
 
-// compareRowCounts reports a table whose rows decreased across the rebuild.
-// Rows added by a background writer after the backup are allowed: rolling the
-// database back to the snapshot would silently drop them. A VACUUM never
-// deletes rows, so a decrease means the rebuilt file lost data.
+// compareRowCounts reports any table whose row count changed across the
+// rebuild. Compaction holds the exclusive lock from before the backup through
+// verification, so no legitimate write can explain a difference.
 func compareRowCounts(before, after map[string]int64) string {
 	for table, count := range before {
-		afterCount, ok := after[table]
-		if !ok || afterCount < count {
-			return fmt.Sprintf("row counts for %s before=%d after=%d", table, count, afterCount)
+		if after[table] != count {
+			return fmt.Sprintf("row counts for %s before=%d after=%d", table, count, after[table])
+		}
+	}
+	for table, count := range after {
+		if _, ok := before[table]; !ok && count != 0 {
+			return fmt.Sprintf("%s appeared with %d rows", table, count)
 		}
 	}
 	return ""
@@ -348,12 +472,7 @@ func compareRowCounts(before, after map[string]int64) string {
 
 // restoreTablesFromBackup copies every table from the attached backup back into
 // main, deferring foreign-key checks to COMMIT. It never deletes the backup.
-func (s *Store) restoreTablesFromBackup(ctx context.Context, backupPath string) error {
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
+func (s *Store) restoreTablesFromBackup(ctx context.Context, conn *sql.Conn, backupPath string) error {
 	if _, err := conn.ExecContext(ctx, `ATTACH DATABASE ? AS compact_backup`, backupPath); err != nil {
 		return fmt.Errorf("attach compaction backup: %w", err)
 	}

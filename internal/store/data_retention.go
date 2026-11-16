@@ -114,7 +114,7 @@ var databaseMaintenanceGate sync.RWMutex
 // to exercise the abort path.
 var databasePurgeBackup = func(ctx context.Context, s *Store, category string) (string, error) {
 	prefix := "database-cleanup-" + category
-	path, err := s.backupDatabaseTo(ctx, prefix)
+	path, err := s.backupDatabaseTo(ctx, s.db, prefix)
 	if err != nil {
 		return "", err
 	}
@@ -259,6 +259,7 @@ func conversationPurgeScope(settings domain.ConversationRetentionSettings, cutof
 		AND t.status IN ('completed','failed','cancelled')
 		AND (c.turn_id='' OR tn.id IS NULL OR tn.status IN ('succeeded','failed','interrupted','blocked'))
 		AND NOT EXISTS (SELECT 1 FROM task_permission_requests r WHERE r.task_id=c.task_id AND r.status='pending')
+		AND NOT EXISTS (SELECT 1 FROM pet_approvals pa WHERE pa.task_id=c.task_id AND pa.status IN ('pending','executing'))
 		AND NOT EXISTS (SELECT 1 FROM attachments a WHERE a.task_id=c.task_id AND a.message_id=c.id)`
 	return scope, args
 }

@@ -31,6 +31,19 @@ func (s *Server) compactDatabase(writer http.ResponseWriter, request *http.Reque
 		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "confirmation_required", "message": "压缩数据库需要明确确认"})
 		return
 	}
+	// Drain every Store pool that shares this file so the dedicated exclusive
+	// lock can be acquired; CompactDatabase restores the primary pool itself,
+	// and the sync pool is restored here after the operation.
+	s.store.DrainIdleConnections()
+	if s.syncStore != nil {
+		s.syncStore.DrainIdleConnections()
+	}
+	defer func() {
+		s.store.RestoreIdleConnections()
+		if s.syncStore != nil {
+			s.syncStore.RestoreIdleConnections()
+		}
+	}()
 	result, compactErr := s.store.CompactDatabase(request.Context())
 	auditRequest := request.WithContext(context.WithoutCancel(request.Context()))
 	auditData := map[string]any{

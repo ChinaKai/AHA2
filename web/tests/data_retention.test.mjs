@@ -78,7 +78,7 @@ function compactionPlan(overrides = {}) {
     page_size: 4096, page_count: 1_260_000, freelist_count: 1000,
     free_bytes: 4_096_000, estimated_reclaimed_bytes: 4_096_000,
     required_temp_bytes: 11_352_064_000, disk_free_bytes: 80_000_000_000,
-    active_tasks: 0, active_turns: 0, pending_approvals: 0,
+    active_tasks: 0, active_turns: 0, pending_approvals: 0, pet_approvals: 0,
     can_compact: true, blocking_reasons: [], checked_at: "2026-11-16T00:00:00Z",
     ...overrides,
   };

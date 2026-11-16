@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -129,6 +130,16 @@ func TestConversationPurgePlanProtectsActiveApprovalsFinalAnswersAndAttachments(
 	}); err != nil {
 		t.Fatal(err)
 	}
+	petApprovalTask := createStoreTestTask(t, database)
+	setStoreTestTaskStatus(t, database, petApprovalTask.ID, domain.TaskCompleted)
+	petApprovalItem := seedConversationItem(t, database, petApprovalTask.ID, "tool", "agent_command_finished", old)
+	if _, err := database.db.Exec(`
+		INSERT INTO pet_approvals(id,task_id,kind,title,summary,status,created_at)
+		VALUES(?,?,?,?,?,?,?)`,
+		domain.NewID("pet_approval"), petApprovalTask.ID, "shell", "Pet approval", "waiting", "executing",
+		timeString(old)); err != nil {
+		t.Fatal(err)
+	}
 
 	// Tool only: one row per terminal task, and only the unattached old tool
 	// item is eligible.
@@ -217,6 +228,7 @@ func TestConversationPurgePlanProtectsActiveApprovalsFinalAnswersAndAttachments(
 		"attached tool":    attachedTool,
 		"active task tool": activeTool,
 		"pending approval": pendingTool,
+		"pet approval":     petApprovalItem,
 	} {
 		if !conversationItemExists(t, database, id) {
 			t.Fatalf("%s was deleted", label)
@@ -288,6 +300,23 @@ func TestDatabaseCompactionPlanBlocksActiveTasksAndLowDisk(t *testing.T) {
 	}
 
 	setStoreTestTaskStatus(t, database, task.ID, domain.TaskCompleted)
+	if _, err := database.db.Exec(`
+		INSERT INTO pet_approvals(id,task_id,kind,title,summary,status,created_at)
+		VALUES(?,?,?,?,?,?,?)`,
+		domain.NewID("pet_approval"), task.ID, "shell", "Pet approval", "waiting", "pending",
+		timeString(time.Now().UTC())); err != nil {
+		t.Fatal(err)
+	}
+	plan, err = database.DatabaseCompactionPlan(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.CanCompact || plan.PetApprovals != 1 {
+		t.Fatalf("pet approval was not counted: %#v", plan)
+	}
+	if _, err := database.db.Exec(`UPDATE pet_approvals SET status='approved',resolution='ok'`); err != nil {
+		t.Fatal(err)
+	}
 	plan, err = database.DatabaseCompactionPlan(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -370,18 +399,8 @@ func TestCompactDatabaseRestoresFromBackupWhenVerificationFails(t *testing.T) {
 	task := createStoreTestTask(t, database)
 	setStoreTestTaskStatus(t, database, task.ID, domain.TaskCompleted)
 	original := seedConversationItem(t, database, task.ID, "tool", "agent_command_finished", time.Now().UTC())
-	extraID := domain.NewID("conversation")
 	originalHook := databaseCompactAfterVacuum
-	databaseCompactAfterVacuum = func(ctx context.Context, store *Store) error {
-		if _, err := store.db.ExecContext(ctx, `
-			INSERT INTO conversation_items(
-				id,task_id,round_id,turn_id,agent_id,stream_agent_id,from_agent_id,to_agent_id,route_kind,
-				category,kind,summary,payload_json,created_at
-			) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			extraID, task.ID, "", "", "main", "main", "main", "main", "",
-			"tool", "agent_command_finished", "injected after VACUUM", "{}", timeString(time.Now().UTC())); err != nil {
-			t.Fatal(err)
-		}
+	databaseCompactAfterVacuum = func(context.Context, *Store) error {
 		return errors.New("injected verification failure")
 	}
 	t.Cleanup(func() { databaseCompactAfterVacuum = originalHook })
@@ -398,9 +417,6 @@ func TestCompactDatabaseRestoresFromBackupWhenVerificationFails(t *testing.T) {
 	}
 	if _, err := os.Stat(result.BackupPath); err != nil {
 		t.Fatalf("backup must be kept after rollback: %v", err)
-	}
-	if conversationItemExists(t, database, extraID) {
-		t.Fatal("the injected row survived the restore")
 	}
 	if !conversationItemExists(t, database, original) {
 		t.Fatal("the pre-compaction row was lost")
@@ -514,34 +530,48 @@ func TestDatabaseCleanupBacksUpBeforeDeletingAndAbortsOnBackupFailure(t *testing
 	}
 }
 
-// A background writer may add rows while VACUUM runs. The row-count check must
-// fail only when a table lost rows; otherwise compaction would roll back to the
-// pre-VACUUM snapshot and silently drop the new rows.
-func TestCompactDatabaseAllowsRowsAddedAfterBackup(t *testing.T) {
+// Compaction holds a SQLite exclusive lock from before the backup through
+// verification. An external writer attempted after VACUUM must be refused, and
+// a verification failure must restore the pre-compaction rows without a
+// phantom "new write" to lose.
+func TestCompactDatabaseBlocksWritesAndRestoresWithoutLosingData(t *testing.T) {
 	database := openDataRetentionTestStore(t)
 	task := createStoreTestTask(t, database)
 	setStoreTestTaskStatus(t, database, task.ID, domain.TaskCompleted)
+	original := seedConversationItem(t, database, task.ID, "tool", "agent_command_finished", time.Now().UTC())
+	external, err := sql.Open("sqlite", database.path+"?_pragma=busy_timeout(100)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { external.Close() })
+	var writeErr error
 	originalHook := databaseCompactAfterVacuum
-	databaseCompactAfterVacuum = func(ctx context.Context, store *Store) error {
-		_, err := store.db.ExecContext(ctx, `
+	databaseCompactAfterVacuum = func(ctx context.Context, _ *Store) error {
+		_, writeErr = external.ExecContext(ctx, `
 			INSERT INTO conversation_items(
 				id,task_id,round_id,turn_id,agent_id,stream_agent_id,from_agent_id,to_agent_id,route_kind,
 				category,kind,summary,payload_json,created_at
 			) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			domain.NewID("conversation"), task.ID, "", "", "main", "main", "main", "main", "",
-			"tool", "agent_command_finished", "written during VACUUM", "{}", timeString(time.Now().UTC()))
-		return err
+			"conversation_during_compaction", task.ID, "", "", "main", "main", "main", "main", "",
+			"tool", "agent_command_finished", "must not commit", "{}", timeString(time.Now().UTC()))
+		return errors.New("injected verification failure")
 	}
 	t.Cleanup(func() { databaseCompactAfterVacuum = originalHook })
 	result, err := database.CompactDatabase(context.Background())
-	if err != nil {
-		t.Fatalf("compaction rejected a concurrent insert: %v result=%#v", err, result)
+	if err == nil {
+		t.Fatal("expected the injected verification failure")
 	}
-	if result.Restored {
-		t.Fatal("compaction rolled back and dropped the concurrent insert")
+	if writeErr == nil || !IsSQLiteBusy(writeErr) {
+		t.Fatalf("external write was not blocked by the maintenance lock: %v", writeErr)
 	}
-	if result.AfterRowCounts["conversation_items"] != result.BeforeRowCounts["conversation_items"]+1 {
-		t.Fatalf("counts=%#v -> %#v", result.BeforeRowCounts, result.AfterRowCounts)
+	if !result.Restored {
+		t.Fatalf("restore did not run: %#v", result)
+	}
+	if conversationItemExists(t, database, "conversation_during_compaction") {
+		t.Fatal("a write committed despite the exclusive lock")
+	}
+	if !conversationItemExists(t, database, original) {
+		t.Fatal("the pre-compaction row was lost")
 	}
 }
 

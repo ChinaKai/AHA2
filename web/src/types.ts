@@ -169,6 +169,7 @@ export interface DatabaseCompactionPlan {
   active_tasks: number;
   active_turns: number;
   pending_approvals: number;
+  pet_approvals: number;
   can_compact: boolean;
   blocking_reasons: string[];
   checked_at: string;
