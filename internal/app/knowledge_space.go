@@ -64,6 +64,15 @@ func (s *Service) CreateProject(ctx context.Context, project domain.Project) (do
 		// keep the pre-model-A behavior. Production always wires a manager.
 		return project, s.store.CreateProject(ctx, project)
 	}
+	// A deleted project's knowledge lives on under its old project ID in
+	// archive_names/archives. Reusing that ID would silently merge two
+	// histories (and the manifest only has one archive slot per ID), so a
+	// reused ID is refused with a stable code instead of overwriting.
+	if archivedSlug, archived := s.archivedProjectSpace(project.ID); archived {
+		return domain.Project{}, knowledgeSpaceError(
+			"project_id_archived",
+			fmt.Sprintf("项目 ID 已被归档知识空间 %q 使用，不能复用；请新建项目或使用其他 ID", archivedSlug), nil)
+	}
 	if !s.knowledgeVault.Enabled() {
 		return domain.Project{}, knowledgeSpaceError(
 			"knowledge_vault_disabled",
@@ -84,6 +93,22 @@ func (s *Service) CreateProject(ctx context.Context, project domain.Project) (do
 	}
 	project.KnowledgeState = domain.KnowledgeStateReady
 	return project, nil
+}
+
+// archivedProjectSpace reports the archive slug already registered for one
+// project ID. A missing vault or an unreadable manifest means "not archived":
+// provisioning will surface a broken vault through its own prerequisite check.
+func (s *Service) archivedProjectSpace(projectID string) (string, bool) {
+	projectID = strings.TrimSpace(projectID)
+	if s == nil || s.knowledgeVault == nil || projectID == "" {
+		return "", false
+	}
+	manifest, err := knowledgevault.ReadManifest(s.knowledgeVault.Config().VaultPath)
+	if err != nil {
+		return "", false
+	}
+	slug := strings.TrimSpace(manifest.Archives[projectID])
+	return slug, slug != ""
 }
 
 func (s *Service) provisionProjectKnowledgeSpace(ctx context.Context, project domain.Project) error {
@@ -179,9 +204,13 @@ func (s *Service) ReconcileKnowledgeSpaces(ctx context.Context) (KnowledgeSpaceR
 		byID[project.ID] = project
 	}
 	manifestProjects := map[string]string{}
+	manifestArchives := map[string]string{}
 	indexedRoots := map[string]bool{}
+	indexedArchiveRoots := map[string]bool{}
+	projectEntries := map[string]bool{}
 	_ = s.knowledgeVault.WithReader(func(reader *knowledgevault.Reader) error {
 		manifestProjects = reader.Manifest().Projects
+		manifestArchives = reader.Manifest().Archives
 		if !reader.IndexReady() {
 			return nil
 		}
@@ -190,8 +219,20 @@ func (s *Service) ReconcileKnowledgeSpaces(ctx context.Context) (KnowledgeSpaceR
 			return err
 		}
 		for _, entry := range entries {
+			if entry.ProjectID != "" {
+				projectEntries[entry.ProjectID] = true
+			}
 			if entry.IsIndex && entry.ProjectID != "" {
 				indexedRoots[entry.ProjectID] = true
+			}
+		}
+		archiveEntries, err := reader.Entries(ctx, "archive", "")
+		if err != nil {
+			return err
+		}
+		for _, entry := range archiveEntries {
+			if entry.IsIndex && entry.ProjectID != "" {
+				indexedArchiveRoots[entry.ProjectID] = true
 			}
 		}
 		return nil
@@ -247,6 +288,22 @@ func (s *Service) ReconcileKnowledgeSpaces(ctx context.Context) (KnowledgeSpaceR
 			report.Warnings = append(report.Warnings, fmt.Sprintf("项目 %s 的知识空间缺少索引根条目，已安排重建", projectID))
 		}
 		report.Ready++
+	}
+	// An archive can be registered while the index still shows the old
+	// project entries: the archive rename and manifest update succeeded but
+	// the rebuild failed. The project mapping is already gone, so this state
+	// is invisible to the project loop above. One rebuild reconciles both the
+	// missing archive root and the stale project rows.
+	for _, archiveID := range knowledgevault.SortedProjectIDs(manifestArchives) {
+		if !indexedArchiveRoots[archiveID] {
+			rebuildNeeded = true
+			report.Warnings = append(report.Warnings, fmt.Sprintf("归档 %s 缺少索引根条目，已安排重建", archiveID))
+			continue
+		}
+		if projectEntries[archiveID] {
+			rebuildNeeded = true
+			report.Warnings = append(report.Warnings, fmt.Sprintf("归档 %s 仍残留旧项目索引条目，已安排重建", archiveID))
+		}
 	}
 	for _, project := range projects {
 		if manifestKnown[project.ID] {

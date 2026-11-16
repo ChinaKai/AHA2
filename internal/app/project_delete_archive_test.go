@@ -69,6 +69,13 @@ func TestDeleteProjectArchivesVaultSpaceAndCleansBindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	otherProject, err := service.CreateProject(ctx, domain.Project{
+		ID: "p529keep", Name: "Keep Me", ProjectType: "folder",
+		KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	manifest, err := knowledgevault.ReadManifest(config.VaultPath)
 	if err != nil {
 		t.Fatal(err)
@@ -89,6 +96,9 @@ func TestDeleteProjectArchivesVaultSpaceAndCleansBindings(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if _, err := database.ReplaceKnowledgeBindings(ctx, domain.KnowledgeBindingChannelInstance, "channel-keep", []domain.KnowledgeBinding{{SpaceProject: otherProject.ID}}); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := service.deleteProjectNow(ctx, project.ID); err != nil {
 		t.Fatal(err)
@@ -107,6 +117,13 @@ func TestDeleteProjectArchivesVaultSpaceAndCleansBindings(t *testing.T) {
 		if len(bindings) != 0 {
 			t.Fatalf("%s bindings survived the project delete: %#v", consumer.kind, bindings)
 		}
+	}
+	keptBindings, err := database.ListKnowledgeBindings(ctx, domain.KnowledgeBindingChannelInstance, "channel-keep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keptBindings) != 1 || keptBindings[0].SpaceProject != otherProject.ID {
+		t.Fatalf("another project's binding was removed: %#v", keptBindings)
 	}
 	if _, err := os.Stat(filepath.Join(config.VaultPath, "projects", slug)); !os.IsNotExist(err) {
 		t.Fatalf("live knowledge directory still exists: %v", err)
@@ -188,7 +205,7 @@ func TestDeleteProjectArchiveFailureIsReportedAndRetriedByReconcile(t *testing.T
 	}
 
 	err = service.deleteProjectNow(ctx, project.ID)
-	if err == nil || !strings.Contains(err.Error(), "项目已删除") || !strings.Contains(err.Error(), "归档失败") {
+	if err == nil || !strings.Contains(err.Error(), "已删除") || !strings.Contains(err.Error(), "归档失败") {
 		t.Fatalf("delete error = %v, want a retryable archive error", err)
 	}
 	if _, lookupErr := database.Project(ctx, project.ID); lookupErr == nil {
@@ -248,7 +265,7 @@ func TestDeleteProjectArchiveFailureIsReportedAndRetriedByReconcile(t *testing.T
 }
 
 func TestReconcileArchivesManifestOrphans(t *testing.T) {
-	service, database, _, config := newSpaceTestService(t)
+	service, database, manager, config := newSpaceTestService(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
 	project, err := service.CreateProject(ctx, domain.Project{
@@ -268,6 +285,33 @@ func TestReconcileArchivesManifestOrphans(t *testing.T) {
 	if err := database.DeleteProjectWithSyncTombstone(ctx, project.ID); err != nil {
 		t.Fatal(err)
 	}
+	// A failed archive attempt stays in Orphans and retries next startup.
+	service.knowledgeVault = archiveFailureVault{
+		knowledgeVaultBackend: manager,
+		err:                   errors.New("simulated orphan archive failure"),
+	}
+	failed, err := service.ReconcileKnowledgeSpaces(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stillOrphan := false
+	for _, id := range failed.Orphans {
+		if id == project.ID {
+			stillOrphan = true
+		}
+	}
+	if !stillOrphan {
+		t.Fatalf("failed orphan archive was dropped from the report: %#v", failed)
+	}
+	preserved, err := knowledgevault.ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preserved.Projects[project.ID] == "" {
+		t.Fatalf("failed orphan archive removed the manifest mapping: %#v", preserved.Projects)
+	}
+
+	service.knowledgeVault = manager
 	report, err := service.ReconcileKnowledgeSpaces(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -296,5 +340,125 @@ func TestReconcileArchivesManifestOrphans(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(config.VaultPath, "projects", slug)); !os.IsNotExist(err) {
 		t.Fatalf("orphan live directory still exists: %v", err)
+	}
+}
+
+func TestReconcileRepairsIndexAfterArchiveRebuildFailure(t *testing.T) {
+	service, database, manager, config := newSpaceTestService(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	project, err := service.CreateProject(ctx, domain.Project{
+		ID: "p529stale", Name: "Stale Index", ProjectType: "folder",
+		KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := knowledgevault.ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slug := manifest.Projects[project.ID]
+	writeProjectKnowledgeDoc(t, config, "projects/"+slug+"/notes/retained.md", "重建失败后保留", "stale-archive-marker-529")
+	if _, err := manager.Rebuild(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate the exact partial state: the directory move and manifest update
+	// succeeded, but the index rebuild failed before the rows were replaced.
+	if _, err := knowledgevault.ArchiveProjectSpace(config, project.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.SetEnabled(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.SetEnabled(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.WithReader(func(reader *knowledgevault.Reader) error {
+		stale, err := reader.Entries(ctx, "project", project.ID)
+		if err != nil {
+			return err
+		}
+		if len(stale) == 0 {
+			t.Fatal("test setup did not retain the stale project index rows")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.DeleteProjectWithSyncTombstone(ctx, project.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := service.ReconcileKnowledgeSpaces(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Warnings) == 0 || !strings.Contains(strings.Join(report.Warnings, "\n"), project.ID) {
+		t.Fatalf("stale archive index was not reported: %#v", report)
+	}
+	if err := manager.WithReader(func(reader *knowledgevault.Reader) error {
+		live, err := reader.Entries(ctx, "project", project.ID)
+		if err != nil {
+			return err
+		}
+		if len(live) != 0 {
+			t.Fatalf("old project entries survived the reconcile rebuild: %#v", live)
+		}
+		found, err := reader.Search(ctx, knowledgevault.DocumentSearchOptions{
+			Query: "stale-archive-marker-529", Limit: 10, IncludeArchives: true,
+		})
+		if err != nil {
+			return err
+		}
+		if len(found.Results) != 1 || found.Results[0].Scope != "archive" {
+			t.Fatalf("archived knowledge is not searchable after repair: %#v", found.Results)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCreateProjectRejectsReusedArchivedProjectID(t *testing.T) {
+	service, database, _, config := newSpaceTestService(t)
+	ctx := context.Background()
+	enablePetProjectAdmin(t, service)
+	now := time.Now().UTC()
+	project, err := service.CreateProject(ctx, domain.Project{
+		ID: "p529reuse", Name: "Reuse Me", ProjectType: "folder",
+		KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := knowledgevault.ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalSlug := manifest.Projects[project.ID]
+	if err := service.deleteProjectNow(ctx, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.CreateProject(ctx, domain.Project{
+		ID: project.ID, Name: "Reused ID", ProjectType: "folder",
+		KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now,
+	})
+	var spaceErr *KnowledgeSpaceError
+	if !errors.As(err, &spaceErr) || spaceErr.Code != "project_id_archived" {
+		t.Fatalf("reused archived project id error = %#v", err)
+	}
+	if _, lookupErr := database.Project(ctx, project.ID); lookupErr == nil {
+		t.Fatal("reused archived project id still created a project row")
+	}
+	after, err := knowledgevault.ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Archives[project.ID] == "" {
+		t.Fatalf("archived mapping disappeared: %#v", after.Archives)
+	}
+	if _, err := os.Stat(filepath.Join(config.VaultPath, "archive", filepath.FromSlash(after.Archives[project.ID]))); err != nil {
+		t.Fatalf("original archive missing: %v (old slug %s)", err, originalSlug)
 	}
 }
