@@ -1599,14 +1599,23 @@ test("built web contains responsive application", async () => {
 	for (const marker of ["渠道设置", "channel_runtime", "notify_task_status", "普通 Task 状态变更推送到飞书私聊助手", "knowledge_entry_id"]) assert.match(channels, new RegExp(marker));
 	for (const marker of ["data-channel-settings-open", "data-channel-conversations-open", "channelConversations", "channel-conversation-card", "绑定任务", "最近入站", "最近出站"] ) assert.match(channels, new RegExp(marker));
 	for (const marker of ["data-channel-policy-select-all", "data-channel-policy-clear", "knowledge_scope_mode", "data-channel-knowledge-selected", "全部项目知识与知识库"]) assert.match(channels, new RegExp(marker));
-	assert.match(channels, /私聊默认全部/);
+	assert.match(channels, /私聊不限制；群聊可选全局知识 \+ 项目知识库/);
 	assert.match(channels, /policy\.endpoint === "group_digital_human"/);
 	// The channels view follows the live knowledge source instead of always
 	// loading the legacy lists, and the vault branch hides legacy sources.
 	assert.match(script, /jobs\.push\(loadChannelKnowledgeSources\(force\)\)/);
 	assert.match(channels, /data-channel-vault-knowledge/);
-	assert.match(channels, /渠道只读取已绑定的项目空间/);
-	assert.match(channels, /replaceChannelKnowledgeBindings/);
+	assert.match(channels, /全局知识与项目知识库均可选/);
+	assert.match(channels, /name="include_global"/);
+	assert.match(channels, /include_global: includeGlobal/);
+	assert.match(channels, /replaceChannelGroupKnowledgeBindings/);
+	// The group save is one atomic request; the client never writes the
+	// retired instance default or splits the save across two calls.
+	assert.match(channels, /channelGroupKnowledgeSelectionPayload/);
+	// Save stays disabled until the group selection has loaded.
+	assert.match(channels, /if \(saveButton\) saveButton\.disabled = true;/);
+	assert.doesNotMatch(channels, /channelGroupKnowledgeSavePayloads/);
+	assert.doesNotMatch(channels, /replaceChannelKnowledgeBindings\(instance\.id, "",/);
 	assert.doesNotMatch(channels, /group_operation_scope_mode|group_allowed_project_ids|group_allowed_workspace_ids/);
 	assert.doesNotMatch(channels, /name="operation_scope_mode"|name="allowed_project_ids"|name="allowed_workspace_ids"/);
 	assert.doesNotMatch(channels, /data-channel-activity|Owner 收件箱与投递/);

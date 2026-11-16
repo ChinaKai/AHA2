@@ -111,22 +111,69 @@ func TestChannelKnowledgeBindingReplacesLegacyPolicyForVaultChannel(t *testing.T
 
 	bindingURL := server.URL + "/api/v1/channel-instances/" + instance.ID + "/knowledge-bindings"
 	response = channelJSON(t, client, http.MethodPut, bindingURL, map[string]any{
-		"endpoint": "group_digital_human",
-		"bindings": []map[string]any{{"space_project_id": "project_other", "access_mode": "read"}},
+		"endpoint":       "group_digital_human",
+		"include_global": true,
+		"bindings":       []map[string]any{{"space_project_id": "project_other", "access_mode": "read"}},
 	}, map[string]string{"X-CSRF-Token": csrf})
 	var bindingPayload map[string]any
 	decodeResponse(t, response, &bindingPayload)
-	if response.StatusCode != http.StatusOK || len(bindingPayload["bindings"].([]any)) != 1 {
+	if response.StatusCode != http.StatusOK || len(bindingPayload["bindings"].([]any)) != 1 || bindingPayload["include_global"] != true {
 		t.Fatalf("binding write status=%d payload=%#v", response.StatusCode, bindingPayload)
 	}
 	resolved, err := database.ResolveChannelKnowledgeBindings(ctx, instance.ID, domain.ChannelEndpointGroupDigitalHuman)
 	if err != nil || len(resolved) != 1 || resolved[0].SpaceProject != "project_other" {
 		t.Fatalf("resolved binding = %#v err=%v", resolved, err)
 	}
-	// Replacing with an empty list clears the binding; there is no implicit
-	// host-space fallback.
+	if enabled, err := database.ResolveChannelKnowledgeGlobalBinding(ctx, instance.ID, domain.ChannelEndpointGroupDigitalHuman); err != nil || !enabled {
+		t.Fatalf("resolved include_global = %v err=%v", enabled, err)
+	}
+	response = requestJSON(t, client, http.MethodGet, bindingURL+"?endpoint=group_digital_human", nil, "")
+	var listed map[string]any
+	decodeResponse(t, response, &listed)
+	if response.StatusCode != http.StatusOK || listed["include_global"] != true || len(listed["bindings"].([]any)) != 1 {
+		t.Fatalf("binding list status=%d payload=%#v", response.StatusCode, listed)
+	}
+	// Omitting include_global preserves the stored value instead of clearing it.
 	response = channelJSON(t, client, http.MethodPut, bindingURL, map[string]any{
-		"endpoint": "group_digital_human", "bindings": []any{},
+		"endpoint": "group_digital_human",
+		"bindings": []map[string]any{{"space_project_id": "project_other", "access_mode": "read"}},
+	}, map[string]string{"X-CSRF-Token": csrf})
+	var preserved map[string]any
+	decodeResponse(t, response, &preserved)
+	if response.StatusCode != http.StatusOK || preserved["include_global"] != true {
+		t.Fatalf("omitted include_global status=%d payload=%#v", response.StatusCode, preserved)
+	}
+	// The atomic group save writes the endpoint selection and clears both
+	// instance defaults in one request; global-only must not fall back.
+	response = channelJSON(t, client, http.MethodPut, bindingURL, map[string]any{
+		"endpoint": "", "include_global": true,
+		"bindings": []map[string]any{{"space_project_id": "project_other", "access_mode": "read"}},
+	}, map[string]string{"X-CSRF-Token": csrf})
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("seed instance selection status=%d", response.StatusCode)
+	}
+	response = channelJSON(t, client, http.MethodPut, bindingURL+"/group", map[string]any{
+		"include_global": true, "bindings": []any{},
+	}, map[string]string{"X-CSRF-Token": csrf})
+	var atomicPayload map[string]any
+	decodeResponse(t, response, &atomicPayload)
+	if response.StatusCode != http.StatusOK || atomicPayload["include_global"] != true || len(atomicPayload["bindings"].([]any)) != 0 {
+		t.Fatalf("group atomic save status=%d payload=%#v", response.StatusCode, atomicPayload)
+	}
+	if instanceBindings, err := database.ListKnowledgeBindings(ctx, domain.KnowledgeBindingChannelInstance, instance.ID); err != nil || len(instanceBindings) != 0 {
+		t.Fatalf("atomic save kept instance spaces = %#v err=%v", instanceBindings, err)
+	}
+	if _, found, err := database.KnowledgeGlobalBinding(ctx, domain.KnowledgeBindingChannelInstance, instance.ID); err != nil || found {
+		t.Fatalf("atomic save kept instance global row: found=%v err=%v", found, err)
+	}
+	if selection, err := database.ResolveChannelKnowledgeBindingSelection(ctx, instance.ID, domain.ChannelEndpointGroupDigitalHuman); err != nil || len(selection.Bindings) != 0 || !selection.IncludeGlobal {
+		t.Fatalf("atomic global-only selection = %#v err=%v", selection, err)
+	}
+	// Replacing with an empty list clears the binding and global together; there
+	// is no implicit host-space or global fallback.
+	response = channelJSON(t, client, http.MethodPut, bindingURL, map[string]any{
+		"endpoint": "group_digital_human", "include_global": false, "bindings": []any{},
 	}, map[string]string{"X-CSRF-Token": csrf})
 	response.Body.Close()
 	if response.StatusCode != http.StatusOK {
@@ -135,5 +182,8 @@ func TestChannelKnowledgeBindingReplacesLegacyPolicyForVaultChannel(t *testing.T
 	resolved, err = database.ResolveChannelKnowledgeBindings(ctx, instance.ID, domain.ChannelEndpointGroupDigitalHuman)
 	if err != nil || len(resolved) != 0 {
 		t.Fatalf("cleared binding = %#v err=%v", resolved, err)
+	}
+	if enabled, err := database.ResolveChannelKnowledgeGlobalBinding(ctx, instance.ID, domain.ChannelEndpointGroupDigitalHuman); err != nil || enabled {
+		t.Fatalf("cleared include_global = %v err=%v", enabled, err)
 	}
 }

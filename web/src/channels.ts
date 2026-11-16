@@ -171,6 +171,24 @@ export interface ChannelKnowledgeSource {
 	projectId?: string;
 }
 
+export interface ChannelGroupBindingPayload {
+	space_project_id: string;
+	access_mode: string;
+	scope_mode: string;
+}
+
+export interface ChannelGroupKnowledgeSelectionPayload {
+	include_global: boolean;
+	bindings: ChannelGroupBindingPayload[];
+}
+
+// The group picker saves in one atomic request: the server writes the endpoint
+// selection and removes the instance defaults in the same transaction, so an
+// empty group choice cannot fall back to a space list the owner just revoked.
+export function channelGroupKnowledgeSelectionPayload(spaces: ChannelGroupBindingPayload[], includeGlobal: boolean): ChannelGroupKnowledgeSelectionPayload {
+  return {include_global: includeGlobal, bindings: spaces};
+}
+
 type ChannelKnowledgePolicy = {
 	revision: number;
 	scope_mode: "all" | "selected" | string;
@@ -179,9 +197,9 @@ type ChannelKnowledgePolicy = {
 
 // The channel scope picker reads the source that is live. With the vault on it
 // lists the vault project roots (root_id, not the picker key) and never touches
-// /knowledge/indexes or /knowledge/libraries. A vault channel has no implicit
-// grant: the owner has to select the roots explicitly. With the vault off the
-// legacy list is unchanged.
+// /knowledge/indexes or /knowledge/libraries. These roots only scope the group
+// digital human: the private chat has no implicit or explicit restriction. With
+// the vault off the legacy list is unchanged.
 export function channelKnowledgeSources(context: ChannelUIContext): ChannelKnowledgeSource[] {
   if (context.knowledgeVaultEnabled === true) {
     return (context.vaultLibraries || [])
@@ -199,15 +217,24 @@ export function channelKnowledgeSources(context: ChannelUIContext): ChannelKnowl
   return [...projectSources, ...librarySources].map(item => ({...item, kind: "legacy" as const, selectable: true}));
 }
 
-function channelKnowledgePolicyEditor(sources: ChannelKnowledgeSource[], policy: ChannelKnowledgePolicy | undefined, hint = ""): string {
+function channelKnowledgePolicyEditor(sources: ChannelKnowledgeSource[], policy: ChannelKnowledgePolicy | undefined, hint = "", includeGlobal?: boolean): string {
   const granted = new Set((policy?.grants || []).map(grant => grant.knowledge_entry_id));
   const scopeMode = policy?.scope_mode === "all" ? "all" : "selected";
   const revision = policy?.revision || 0;
   const choices = sources.map(source => `<label class="channel-check"><input type="checkbox" name="knowledge_entry_id" value="${escapeHTML(source.root)}" ${granted.has(source.root) ? "checked" : ""}${source.selectable ? "" : " disabled"}>${escapeHTML(source.label)}</label>`).join("");
-  return `<div data-channel-settings-policy data-revision="${revision}">${hint}<label>范围模式<select name="knowledge_scope_mode"><option value="all" ${scopeMode === "all" ? "selected" : ""}>全部项目知识与知识库</option><option value="selected" ${scopeMode === "selected" ? "selected" : ""}>限制到所选知识源</option></select></label><div data-channel-knowledge-selected ${scopeMode === "all" ? "hidden" : ""}><div class="channel-batch-toolbar"><button type="button" data-channel-policy-select-all>全选</button><button type="button" data-channel-policy-clear>清空</button></div><div class="channel-checkbox-list">${choices || "<small>暂无可选知识源</small>"}</div></div><small>固定渠道索引始终可读。</small></div>`;
+  const vaultMode = includeGlobal !== undefined;
+  const globalChoice = vaultMode ? `<label class="channel-check"><input type="checkbox" name="include_global" ${includeGlobal ? "checked" : ""}>全局知识（跨项目共享）</label>` : "";
+  // The vault selection is exactly the checked global and project spaces, so
+  // the legacy all/selected mode switch would be misleading there.
+  const scopeEditor = vaultMode
+    ? ""
+    : `<label>范围模式<select name="knowledge_scope_mode"><option value="all" ${scopeMode === "all" ? "selected" : ""}>全部项目知识与知识库</option><option value="selected" ${scopeMode === "selected" ? "selected" : ""}>限制到所选知识源</option></select></label>`;
+  const selectedHidden = !vaultMode && scopeMode === "all" ? "hidden" : "";
+  const footer = vaultMode ? "" : "<small>固定渠道索引始终可读。</small>";
+  return `<div data-channel-settings-policy data-revision="${revision}">${hint}${globalChoice}${scopeEditor}<div data-channel-knowledge-selected ${selectedHidden}><div class="channel-batch-toolbar"><button type="button" data-channel-policy-select-all>全选</button><button type="button" data-channel-policy-clear>清空</button></div><div class="channel-checkbox-list">${choices || "<small>暂无可选知识源</small>"}</div></div>${footer}</div>`;
 }
 
-function channelVaultKnowledgeSection(context: ChannelUIContext, bindings: Array<{space_project_id: string}>): string {
+export function channelVaultKnowledgeSection(context: ChannelUIContext, bindings: Array<{space_project_id: string}>, includeGlobal: boolean): string {
   const sources = channelKnowledgeSources(context);
   const bound = new Set(bindings.map(binding => binding.space_project_id));
   const policy: ChannelKnowledgePolicy = {
@@ -217,10 +244,10 @@ function channelVaultKnowledgeSection(context: ChannelUIContext, bindings: Array
       .filter(source => source.projectId && bound.has(source.projectId))
       .map(source => ({knowledge_entry_id: source.root, grant_scope: "subtree"})),
   };
-  const notice = bindings.length > 0
-    ? `<p><strong>文件知识库（vault）已启用</strong></p><p>渠道只读取已绑定的项目空间；未绑定任何空间时渠道知识为空，不会隐式借用宿主空间。</p>`
-    : `<p><strong>该实例尚未绑定知识空间</strong></p><p>请选择要授予群聊的项目空间；未绑定时群聊与私聊的渠道知识都为空。</p>`;
-  return `<div data-channel-vault-knowledge>${channelKnowledgePolicyEditor(sources, policy, notice)}</div>`;
+  const notice = bindings.length > 0 || includeGlobal
+    ? `<p><strong>文件知识库（vault）已启用</strong></p><p>群聊只读取勾选的知识：全局知识与项目知识库均可选；私聊不受限制，始终读取全部知识。</p>`
+    : `<p><strong>该实例尚未选择群聊知识</strong></p><p>请勾选要授予群聊的全局知识和项目空间；都不勾选时群聊知识为空，私聊仍读取全部知识。</p>`;
+  return `<div data-channel-vault-knowledge>${channelKnowledgePolicyEditor(sources, policy, notice, includeGlobal)}</div>`;
 }
 
 function formatChannelTime(value?: string): string {
@@ -229,13 +256,15 @@ function formatChannelTime(value?: string): string {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 
-function bindChannelKnowledgeScope(container: HTMLElement): void {
+export function bindChannelKnowledgeScope(container: HTMLElement): void {
   const mode = container.querySelector<HTMLSelectElement>('select[name="knowledge_scope_mode"]');
   const selected = container.querySelector<HTMLElement>("[data-channel-knowledge-selected]");
-  const setAll = (checked: boolean) => container.querySelectorAll<HTMLInputElement>('input[name="knowledge_entry_id"]').forEach(input => { input.checked = checked; });
+  const setAll = (checked: boolean) => container.querySelectorAll<HTMLInputElement>('input[name="knowledge_entry_id"], input[name="include_global"]').forEach(input => { input.checked = checked; });
   container.querySelector<HTMLElement>("[data-channel-policy-select-all]")?.addEventListener("click", () => setAll(true));
   container.querySelector<HTMLElement>("[data-channel-policy-clear]")?.addEventListener("click", () => setAll(false));
-  const syncMode = () => { if (selected) selected.hidden = mode?.value !== "selected"; };
+  // The vault picker has no scope select: its checkbox list must stay visible.
+  // Only the legacy editor hides the list when the mode is "all".
+  const syncMode = () => { if (selected && mode) selected.hidden = mode.value !== "selected"; };
   mode?.addEventListener("change", syncMode);
   syncMode();
 }
@@ -250,7 +279,7 @@ function openChannelSettings(instance: ChannelInstance, context: ChannelUIContex
     <div class="dialog-body">
       ${channelRuntimeEditor(config, context)}
       <fieldset><legend>消息通知</legend><label class="channel-check"><input type="checkbox" name="notify_task_status" ${config.notify_task_status === true ? "checked" : ""}>普通 Task 状态变更推送到飞书私聊助手</label><small>仅推送等待处理、完成、失败或中断等状态；不会推送普通消息、过程输出或渠道宿主 Task。</small></fieldset>
-      <section class="channel-settings-knowledge"><div class="panel-head"><strong>Knowledge 访问范围</strong><span>私聊默认全部；此处只限制群聊电子人</span></div><div data-channel-settings-knowledge><small>加载中…</small></div></section>
+      <section class="channel-settings-knowledge"><div class="panel-head"><strong>Knowledge 访问范围</strong><span>私聊不限制；群聊可选全局知识 + 项目知识库</span></div><div data-channel-settings-knowledge><small>加载中…</small></div></section>
     </div>
     <div class="dialog-actions"><button type="button" data-close>取消</button><button type="button" class="primary" data-save>保存设置</button></div>`;
   document.body.append(dialog);
@@ -260,16 +289,19 @@ function openChannelSettings(instance: ChannelInstance, context: ChannelUIContex
   dialog.addEventListener("cancel", event => { event.preventDefault(); close(); });
   const knowledgeHost = dialog.querySelector<HTMLElement>("[data-channel-settings-knowledge]");
   const saveButton = dialog.querySelector<HTMLButtonElement>("[data-save]");
+  // Saving before the group selection has loaded would skip the knowledge
+  // write while still reporting success. A failed load keeps it disabled.
+  if (saveButton) saveButton.disabled = true;
   if (context.knowledgeVaultEnabled === true) {
-    // The vault picker is editable: grants store the vault root id. A missing
-    // group policy is a real unconfigured state (new instances created while
-    // the vault is on); revision 0 asks the server to create the policy on the
-    // owner's first explicit selection.
+    // The vault picker is editable: the saved rows are project space IDs plus
+    // the global choice. A missing selection is a real empty state, not an
+    // implicit host-space grant.
     void api.channelKnowledgeBindings(instance.id, "group_digital_human").then(result => {
       if (!dialog.isConnected || !knowledgeHost) return;
-      knowledgeHost.innerHTML = channelVaultKnowledgeSection(context, result.bindings || []);
+      knowledgeHost.innerHTML = channelVaultKnowledgeSection(context, result.bindings || [], result.include_global === true);
       const policyContainer = knowledgeHost.querySelector<HTMLElement>("[data-channel-settings-policy]");
       if (policyContainer) bindChannelKnowledgeScope(policyContainer);
+      if (saveButton) saveButton.disabled = false;
     }).catch(error => {
       if (knowledgeHost) knowledgeHost.textContent = error instanceof Error ? error.message : String(error);
     });
@@ -279,12 +311,14 @@ function openChannelSettings(instance: ChannelInstance, context: ChannelUIContex
       const groupPolicy = policies.policies.find(policy => policy.endpoint === "group_digital_human");
       if (!groupPolicy) {
         knowledgeHost.innerHTML = `<small>暂无群聊 Knowledge 策略。</small>`;
+        if (saveButton) saveButton.disabled = false;
         return;
       }
       const sources = channelKnowledgeSources(context);
       knowledgeHost.innerHTML = channelKnowledgePolicyEditor(sources, groupPolicy);
       const policyContainer = knowledgeHost.querySelector<HTMLElement>("[data-channel-settings-policy]");
       if (policyContainer) bindChannelKnowledgeScope(policyContainer);
+      if (saveButton) saveButton.disabled = false;
     }).catch(error => {
       if (knowledgeHost) knowledgeHost.textContent = error instanceof Error ? error.message : String(error);
     });
@@ -311,11 +345,11 @@ function openChannelSettings(instance: ChannelInstance, context: ChannelUIContex
             .map(input => sourceByRoot.get(input.value)?.projectId)
             .filter((projectID): projectID is string => Boolean(projectID))
             .map(projectID => ({space_project_id: projectID, access_mode: "read", scope_mode: "all"}));
-          // Save the instance default first (private chat reads it) and the
-          // group endpoint override second, so both consumers see the same
-          // explicit list of bound spaces.
-          await api.replaceChannelKnowledgeBindings(instance.id, "", spaces);
-          await api.replaceChannelKnowledgeBindings(instance.id, "group_digital_human", spaces);
+          const includeGlobal = Boolean(policy.querySelector<HTMLInputElement>('input[name="include_global"]')?.checked);
+          // One atomic request writes the group endpoint selection and clears
+          // the instance defaults, so revoking every space fails closed.
+          const selection = channelGroupKnowledgeSelectionPayload(spaces, includeGlobal);
+          await api.replaceChannelGroupKnowledgeBindings(instance.id, selection.bindings, selection.include_global);
         } else if (policy) {
           const mode = policy.querySelector<HTMLSelectElement>('select[name="knowledge_scope_mode"]')?.value === "selected" ? "selected" : "all";
           const grants = [...policy.querySelectorAll<HTMLInputElement>('input[name="knowledge_entry_id"]:checked')].map(input => ({knowledge_entry_id: input.value, grant_scope: "subtree"}));

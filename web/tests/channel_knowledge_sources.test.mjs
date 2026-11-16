@@ -62,3 +62,31 @@ test("vault project libraries without a root id are not offered as grants", () =
   const sources = channels.channelKnowledgeSources({...vaultContext, vaultLibraries: [{id: "project:p2", kind: "project", name: "No root", project_id: "p2", count: 1}]});
   assert.deepEqual(sources, []);
 });
+
+test("group knowledge payload carries the global choice and project spaces", () => {
+  const spaces = [{space_project_id: "p1", access_mode: "read", scope_mode: "all"}];
+  // One atomic payload; instance defaults are cleared server-side in the same
+  // transaction, so there is no second client call that can fail open.
+  assert.deepEqual(channels.channelGroupKnowledgeSelectionPayload(spaces, true), {
+    include_global: true, bindings: spaces,
+  });
+  assert.deepEqual(channels.channelGroupKnowledgeSelectionPayload([], false), {
+    include_global: false, bindings: [],
+  });
+  // Global alone is a valid group selection and must not carry project spaces.
+  assert.deepEqual(channels.channelGroupKnowledgeSelectionPayload([], true), {
+    include_global: true, bindings: [],
+  });
+});
+
+test("the group picker renders the global checkbox from the stored selection", () => {
+  const html = channels.channelVaultKnowledgeSection(vaultContext, [], true);
+  assert.match(html, /name="include_global" checked/);
+  assert.match(html, /全局知识（跨项目共享）/);
+  const unchecked = channels.channelVaultKnowledgeSection(vaultContext, [], false);
+  assert.match(unchecked, /name="include_global" >/);
+  assert.doesNotMatch(unchecked, /name="include_global" checked/);
+  // The legacy all/selected switch has no effect in the vault save path, so
+  // the vault picker must not offer it.
+  assert.doesNotMatch(unchecked, /name="knowledge_scope_mode"/);
+});

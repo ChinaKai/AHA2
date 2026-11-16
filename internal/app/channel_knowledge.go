@@ -88,21 +88,33 @@ func (s *Service) vaultProjectRootEntry(ctx context.Context, projectID string) (
 	return entry, err
 }
 
-// channelAllowedKnowledge is the single read path for channel knowledge. The
-// policy and its grants stay in the configuration tables, but every granted ID
-// is resolved against the current read source of the project that owns it.
-// Legacy grants that point at a document of a vault-routed project therefore
-// stop granting anything; a vault read failure aborts the whole read instead of
-// returning legacy rows.
+// channelAllowedKnowledge is the single read path for channel knowledge.
+// The private chat is the verified bound Owner and is never scoped by channel
+// bindings: it reads global plus every ready project space, like an
+// unrestricted Task. Only the group digital human is scoped. With the vault as
+// the read source that scope is stored in knowledge_bindings (endpoint list
+// first, instance default as the compatibility fallback) and an empty selection
+// stays empty; with the legacy tables it is the per-entry policy below. Every
+// selected ID is resolved against the source that currently owns its project,
+// so a vault read failure aborts the read instead of returning legacy rows.
 func (s *Service) channelAllowedKnowledge(ctx context.Context, instanceID, endpointKind, conversationID string) ([]domain.KnowledgeEntry, error) {
-	// Model A bindings point at whole project spaces. When any binding exists
-	// for this consumer it is authoritative; only a consumer without a binding
-	// falls through to the legacy per-entry policy below (which is removed by
-	// the cutover migration).
-	if bindings, bindErr := s.store.ResolveChannelKnowledgeBindings(ctx, instanceID, endpointKind); bindErr != nil {
-		return nil, bindErr
-	} else if len(bindings) > 0 {
-		return s.channelBindingEntries(ctx, bindings)
+	if endpointKind == domain.ChannelEndpointAssistantDM {
+		return s.channelDmKnowledge(ctx)
+	}
+	// Model A bindings point at whole project spaces and are the group scope
+	// whenever the vault is the configured read source. The endpoint list
+	// replaces the instance default; global is an explicit companion selection
+	// with the same precedence. An empty selection stays empty, never an
+	// implicit host-space or global grant.
+	if s.channelKnowledgeBindingsEnabled() {
+		selection, err := s.ChannelKnowledgeBindingSelection(ctx, instanceID, endpointKind)
+		if err != nil {
+			return nil, err
+		}
+		if len(selection.Bindings) == 0 && !selection.IncludeGlobal {
+			return []domain.KnowledgeEntry{}, nil
+		}
+		return s.channelGroupBindingEntries(ctx, selection)
 	}
 	if s.knowledgeLegacyDisabled.Load() {
 		// No binding and no legacy tables: an explicit empty selection. The
@@ -122,11 +134,6 @@ func (s *Service) channelAllowedKnowledge(ctx context.Context, instanceID, endpo
 		return nil, err
 	}
 	scopeMode := selection.ScopeMode
-	if endpointKind == domain.ChannelEndpointAssistantDM {
-		// The private chat is verified as the bound Owner; it always sees all
-		// normal project knowledge. Only the group digital human is scoped.
-		scopeMode = "all"
-	}
 	result := []domain.KnowledgeEntry{}
 	seen := map[string]bool{}
 	appendEntry := func(entry domain.KnowledgeEntry) {
@@ -199,6 +206,84 @@ func (s *Service) channelAllowedKnowledge(ctx context.Context, instanceID, endpo
 		}
 	}
 	return result, nil
+}
+
+// channelKnowledgeBindingsEnabled reports whether knowledge_bindings is the
+// configured source of the group scope. It follows the manager switch rather
+// than a transient index state: once the vault is enabled the owner selects
+// group sources as project spaces, and a temporarily unready index must not
+// resurrect the retired per-entry policy.
+func (s *Service) channelKnowledgeBindingsEnabled() bool {
+	return s != nil && s.knowledgeVault != nil && s.knowledgeVault.Enabled()
+}
+
+// channelDmKnowledge implements the private-chat rule. The DM is the verified
+// bound Owner, so channel bindings never restrict it: it reads global plus
+// every ready project space. Channel and system hosts are infrastructure rather
+// than knowledge sources and stay excluded; a dedicated library is only
+// included once its space is ready and has an indexed root.
+func (s *Service) channelDmKnowledge(ctx context.Context) ([]domain.KnowledgeEntry, error) {
+	result := []domain.KnowledgeEntry{}
+	seen := map[string]bool{}
+	appendEntries := func(entries []domain.KnowledgeEntry) {
+		appendUniqueKnowledgeEntries(&result, seen, entries)
+	}
+	global, err := s.channelScopeEntries(ctx, "global", "")
+	if err != nil {
+		return nil, err
+	}
+	appendEntries(global)
+	projects, err := s.store.ListProjects(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// A per-project KnowledgePolicy=disabled is deliberately not consulted: the
+	// private chat is the Owner's all-knowledge view, and the legacy "all" rule
+	// never filtered by that policy either.
+	for _, project := range projects {
+		switch project.ProjectType {
+		case "channel", "system":
+			continue
+		}
+		// Only a vault-routed space has a lifecycle gate. A v142-era legacy
+		// project can still be uninitialized while the vault is off (startup
+		// reconciliation returns early), and the old "all" read included it; a
+		// ready-state check here would silently drop every upgraded project.
+		if s.readSourceIsVault("project", project.ID) {
+			if project.KnowledgeState != domain.KnowledgeStateReady {
+				continue
+			}
+			if project.ProjectType == "knowledge" {
+				root, rootErr := s.vaultProjectRootEntry(ctx, project.ID)
+				if rootErr != nil {
+					return nil, vaultReadFailure("project", project.ID, rootErr)
+				}
+				if strings.TrimSpace(root.ID) == "" {
+					continue
+				}
+			}
+		}
+		entries, sourceErr := s.channelScopeEntries(ctx, "project", project.ID)
+		if sourceErr != nil {
+			return nil, sourceErr
+		}
+		appendEntries(entries)
+	}
+	return result, nil
+}
+
+// appendUniqueKnowledgeEntries appends entries that have not been seen yet.
+// Both knowledge sources use globally unique IDs, but the channel read paths
+// merge global, project and grant subtrees, so the guard is what keeps a
+// repeated ID from being served twice.
+func appendUniqueKnowledgeEntries(result *[]domain.KnowledgeEntry, seen map[string]bool, entries []domain.KnowledgeEntry) {
+	for _, entry := range entries {
+		if strings.TrimSpace(entry.ID) == "" || seen[entry.ID] {
+			continue
+		}
+		seen[entry.ID] = true
+		*result = append(*result, entry)
+	}
 }
 
 // channelScopeEntries returns the verified entries of one scope from the

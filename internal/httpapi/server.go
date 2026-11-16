@@ -368,6 +368,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/channel-deliveries/{id}/skip", s.withAuth(http.HandlerFunc(s.skipChannelDelivery)))
 	mux.Handle("GET /api/v1/channel-instances/{id}/knowledge-bindings", s.withAuth(http.HandlerFunc(s.channelKnowledgeBindings)))
 	mux.Handle("PUT /api/v1/channel-instances/{id}/knowledge-bindings", s.withAuth(http.HandlerFunc(s.updateChannelKnowledgeBindings)))
+	mux.Handle("PUT /api/v1/channel-instances/{id}/knowledge-bindings/group", s.withAuth(http.HandlerFunc(s.updateChannelGroupKnowledgeBindings)))
 	mux.Handle("GET /api/v1/channel-instances/{id}/knowledge-policy", s.withAuth(http.HandlerFunc(s.channelKnowledgePolicy)))
 	mux.Handle("PUT /api/v1/channel-instances/{id}/knowledge-policy", s.withAuth(http.HandlerFunc(s.updateChannelKnowledgePolicy)))
 	mux.Handle("GET /api/v1/projects", s.withAuth(http.HandlerFunc(s.listProjects)))

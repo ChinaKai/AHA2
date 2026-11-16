@@ -3848,6 +3848,31 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("record schema v145: %w", err)
 		}
 	}
+	var hasV146 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=146)`).Scan(&hasV146)
+	var hasGlobalBindings bool
+	_ = s.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='knowledge_global_bindings')`).Scan(&hasGlobalBindings)
+	if !hasV146 || !hasGlobalBindings {
+		// Global has no projects row, so it cannot be expressed as a
+		// knowledge_bindings.space_project_id without breaking that foreign key.
+		// This companion table keeps the same consumer keys and lets an endpoint
+		// row override the instance default, including an explicit "off".
+		if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS knowledge_global_bindings(
+			consumer_type TEXT NOT NULL CHECK(consumer_type IN ('channel_instance','channel_endpoint')),
+			consumer_id TEXT NOT NULL,
+			enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0,1)),
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY(consumer_type,consumer_id)
+		)`); err != nil {
+			return fmt.Errorf("apply schema v146 knowledge global bindings: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(146, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return fmt.Errorf("record schema v146: %w", err)
+		}
+	}
 	return nil
 }
 
