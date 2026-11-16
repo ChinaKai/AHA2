@@ -1870,6 +1870,45 @@ export interface KnowledgeVaultTree {
   warning?: string;
 }
 
+export interface KnowledgeVaultFileEntry {
+  name: string;
+  path: string;
+  absolute_path: string;
+  is_dir: boolean;
+  size: number;
+  modified?: string;
+  kind: string;
+}
+
+export interface KnowledgeVaultFileList {
+  ok: boolean;
+  path: string;
+  count: number;
+  entries: KnowledgeVaultFileEntry[];
+}
+
+export interface KnowledgeVaultFile {
+  path: string;
+  absolute_path: string;
+  name: string;
+  title?: string;
+  kind: string;
+  content: string;
+  size: number;
+  modified_at?: string;
+}
+
+export interface KnowledgeVaultFileResponse {
+  ok: boolean;
+  file: KnowledgeVaultFile;
+}
+
+export interface KnowledgeVaultOpenInfo {
+  ok: boolean;
+  open_available: boolean;
+  vault_path: string;
+}
+
 export interface KnowledgeVaultOutlineItem {
   level: number;
   text: string;

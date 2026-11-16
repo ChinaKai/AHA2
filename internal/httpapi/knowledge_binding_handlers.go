@@ -1,0 +1,68 @@
+package httpapi
+
+import (
+	"errors"
+	"net/http"
+	"strings"
+
+	"github.com/ChinaKai/AHA2/internal/app"
+	"github.com/ChinaKai/AHA2/internal/domain"
+)
+
+func (s *Server) channelKnowledgeBindings(writer http.ResponseWriter, request *http.Request) {
+	if s.app == nil {
+		writeError(writer, http.StatusServiceUnavailable, "app_unavailable")
+		return
+	}
+	endpoint := strings.TrimSpace(request.URL.Query().Get("endpoint"))
+	items, err := s.app.ChannelKnowledgeBindings(request.Context(), request.PathValue("id"), endpoint)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "list_knowledge_bindings_failed")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"ok": true, "endpoint": endpoint, "bindings": items,
+	})
+}
+
+func (s *Server) updateChannelKnowledgeBindings(writer http.ResponseWriter, request *http.Request) {
+	if s.app == nil {
+		writeError(writer, http.StatusServiceUnavailable, "app_unavailable")
+		return
+	}
+	var payload struct {
+		Endpoint string `json:"endpoint"`
+		Bindings []struct {
+			SpaceProject string `json:"space_project_id"`
+			AccessMode   string `json:"access_mode"`
+			ScopeMode    string `json:"scope_mode"`
+		} `json:"bindings"`
+	}
+	if err := decodeJSON(request, &payload); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	bindings := make([]domain.KnowledgeBinding, 0, len(payload.Bindings))
+	for _, item := range payload.Bindings {
+		bindings = append(bindings, domain.KnowledgeBinding{
+			SpaceProject: strings.TrimSpace(item.SpaceProject),
+			AccessMode:   strings.TrimSpace(item.AccessMode),
+			ScopeMode:    strings.TrimSpace(item.ScopeMode),
+		})
+	}
+	updated, err := s.app.ReplaceChannelKnowledgeBindings(request.Context(), request.PathValue("id"), strings.TrimSpace(payload.Endpoint), bindings)
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, app.ErrKnowledgeSpaceNotReady) {
+			status = http.StatusConflict
+		}
+		writeJSON(writer, status, map[string]any{"ok": false, "error": "knowledge_binding_invalid", "message": err.Error()})
+		return
+	}
+	s.audit(request, "channel.knowledge_bindings.update", "channel_instance", request.PathValue("id"), map[string]any{
+		"endpoint": payload.Endpoint, "count": len(updated),
+	})
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"ok": true, "endpoint": strings.TrimSpace(payload.Endpoint), "bindings": updated,
+	})
+}

@@ -31,6 +31,9 @@ import type {
   KnowledgeProposal,
   KnowledgeReviewSettings,
   KnowledgeVaultDoc,
+  KnowledgeVaultFileList,
+  KnowledgeVaultFileResponse,
+  KnowledgeVaultOpenInfo,
   KnowledgeVaultDiffResponse,
   KnowledgeVaultInbox,
   KnowledgeVaultInitResponse,
@@ -1023,6 +1026,27 @@ class APIClient {
     if (library) query.set("library", library);
     if (projectID) query.set("project", projectID);
     return this.request(`/api/v1/knowledge-vault/tree?${query}`);
+  }
+
+  knowledgeVaultFiles(path = ""): Promise<KnowledgeVaultFileList> {
+    const query = path ? `?path=${encodeURIComponent(path)}` : "";
+    return this.request(`/api/v1/knowledge-vault/files${query}`);
+  }
+
+  knowledgeVaultFile(path: string): Promise<KnowledgeVaultFileResponse> {
+    return this.request(`/api/v1/knowledge-vault/file?path=${encodeURIComponent(path)}`);
+  }
+
+  knowledgeVaultFileDownloadURL(path: string): string {
+    return `/api/v1/knowledge-vault/file/download?path=${encodeURIComponent(path)}`;
+  }
+
+  knowledgeVaultOpenInfo(): Promise<KnowledgeVaultOpenInfo> {
+    return this.request("/api/v1/knowledge-vault/open-info");
+  }
+
+  revealKnowledgeVaultPath(path: string): Promise<{ok: boolean; path: string}> {
+    return this.request(`/api/v1/knowledge-vault/reveal?path=${encodeURIComponent(path)}`, {method: "POST"});
   }
 
   knowledgeVaultDoc(id: string): Promise<{ok: boolean; doc: KnowledgeVaultDoc}> {

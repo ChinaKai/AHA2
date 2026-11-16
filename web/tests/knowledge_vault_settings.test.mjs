@@ -66,7 +66,7 @@ function emptyVault(patch = {}) {
       default_enabled: true,
       switch_visible: false,
       rollback_allowed: false,
-      message: "知识库或索引尚未就绪，请先重建索引。",
+      message: "知识库或索引尚未就绪，索引会自动修复。",
       missing: ["vault_initialized", "index_schema"],
       checks: [
         {id: "vault_initialized", status: "fail", message: "知识库尚未初始化（缺少 .aha-vault.json）"},
@@ -175,7 +175,7 @@ test("settings panel shows vault, index and source for an enabled vault", async 
     // Rebuilding moved to the knowledge page's gear panel; the advanced panel
     // keeps only the switch, sample init, status and path.
     assert.doesNotMatch(html, /knowledge-vault-rebuild/);
-    assert.match(html, /知识库页的齿轮设置中重建索引/);
+    assert.match(html, /索引会随写入、文件变化和启动对账自动维护/);
     assert.equal(ctx.applied.length, 1);
     assert.equal(ctx.applied[0].enabled, true);
   } finally {
@@ -194,7 +194,7 @@ test("an empty vault offers sample initialization before enabling the index acti
     assert.match(html, /状态来源：启动默认/);
     assert.match(html, /class="knowledge-vault-badge is-warn">待初始化</);
     assert.match(html, /目录未初始化/);
-    assert.match(html, /知识库或索引尚未就绪，请先重建索引/);
+    assert.match(html, /知识库或索引尚未就绪，请先重建索引|知识库或索引尚未就绪，索引会自动修复/);
     assert.match(html, /未满足：/);
     assert.match(html, /id="knowledge-vault-init"/);
     assert.doesNotMatch(html, /knowledge-vault-rebuild/);
@@ -499,7 +499,7 @@ test("an enabled vault with a broken index shows an Agent fallback error", async
       can_enable: false,
       default_enabled: true,
       switch_visible: true,
-      message: "知识库或索引尚未就绪，请先重建索引。",
+      message: "知识库或索引尚未就绪，索引会自动修复。",
       missing: ["index_schema"],
       checks: [{id: "index_schema", status: "fail", message: "索引尚未建立或不可读"}],
     },
@@ -511,7 +511,7 @@ test("an enabled vault with a broken index shows an Agent fallback error", async
     const html = panel.renderKnowledgeVaultSettingsPanel(ctx);
     assert.match(html, /role="alert"/);
     assert.match(html, /文件知识库已启用，但索引尚未就绪/);
-    assert.match(html, /Agent 本次会回退旧知识库/);
+    assert.match(html, /Agent 本次不会回退旧知识库/);
     assert.match(html, /索引未建立或不可读/);
   } finally {
     restore();

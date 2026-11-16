@@ -347,6 +347,13 @@ func (f failingKnowledgeVault) WriteKnowledge(context.Context, knowledgevault.Wr
 func (f failingKnowledgeVault) KnowledgeFeedback(context.Context, knowledgevault.FeedbackRequest) (knowledgevault.FeedbackResult, error) {
 	return knowledgevault.FeedbackResult{}, f.err
 }
+func (f failingKnowledgeVault) CheckProjectSpacePrerequisites() error { return f.err }
+func (f failingKnowledgeVault) ProvisionProjectSpace(context.Context, string, string) (knowledgevault.ProjectSpaceResult, error) {
+	return knowledgevault.ProjectSpaceResult{}, f.err
+}
+func (f failingKnowledgeVault) Rebuild(context.Context) (knowledgevault.RebuildReport, error) {
+	return knowledgevault.RebuildReport{}, f.err
+}
 
 func TestKnowledgeReadFailsClosedWhenTheVaultIsUnreadable(t *testing.T) {
 	withUnsetEnv(t, knowledgeVaultReadProjectsEnv)

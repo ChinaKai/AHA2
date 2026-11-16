@@ -69,6 +69,9 @@ type knowledgeVaultBackend interface {
 	RuntimeWriteEnabled() bool
 	WriteKnowledge(context.Context, knowledgevault.WriteRequest) (knowledgevault.WriteResult, error)
 	KnowledgeFeedback(context.Context, knowledgevault.FeedbackRequest) (knowledgevault.FeedbackResult, error)
+	CheckProjectSpacePrerequisites() error
+	ProvisionProjectSpace(context.Context, string, string) (knowledgevault.ProjectSpaceResult, error)
+	Rebuild(context.Context) (knowledgevault.RebuildReport, error)
 }
 
 type vaultKnowledgeSnapshot struct {
@@ -97,6 +100,9 @@ func (s *Service) knowledgeReadDecision(scope, projectID string) knowledgeReadDe
 	scope = strings.ToLower(strings.TrimSpace(scope))
 	projectID = strings.TrimSpace(projectID)
 	if s == nil || s.knowledgeVault == nil || !s.knowledgeVault.Enabled() {
+		if s != nil && s.knowledgeLegacyDisabled {
+			return knowledgeReadDecision{Vault: true, Err: fmt.Errorf("%w: vault disabled after legacy cutover", ErrKnowledgeSpaceNotReady)}
+		}
 		return knowledgeReadDecision{}
 	}
 	if !s.knowledgeVaultRuntimeRead {
@@ -127,6 +133,14 @@ func (s *Service) knowledgeReadDecision(scope, projectID string) knowledgeReadDe
 		// silently serve the old tables the owner moved away from.
 		decision.Vault = true
 		decision.Err = err
+	}
+	if s.knowledgeLegacyDisabled && !decision.Vault && decision.Err == nil {
+		// The old tables are gone. An unbound or index-less space must fail
+		// explicitly instead of returning an "empty legacy" result that hides
+		// the missing space.
+		decision.Vault = true
+		decision.Warning = ""
+		decision.Err = fmt.Errorf("%w: %s/%s", ErrKnowledgeSpaceNotReady, scope, projectID)
 	}
 	return decision
 }

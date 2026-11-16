@@ -279,9 +279,11 @@ func (s *Service) PetCreateProject(ctx context.Context, input PetCreateProjectIn
 		DefaultBranch: strings.TrimSpace(input.DefaultBranch), KnowledgePolicy: policy,
 		CreatedAt: now, UpdatedAt: now,
 	}
-	if err := s.store.CreateProject(ctx, project); err != nil {
+	created, err := s.CreateProject(ctx, project)
+	if err != nil {
 		return domain.Project{}, err
 	}
+	project = created
 	_ = s.store.AppendPetEvent(ctx, domain.PetEvent{
 		ID: domain.NewID("pet_event"), At: now, Actor: "pet", Kind: "project_created",
 		Detail: project.ID, Status: project.Name,

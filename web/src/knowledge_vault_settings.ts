@@ -82,7 +82,7 @@ const localText: Record<string, [zhCN: string, enUS: string]> = {
   "kvs.check.indexWritableOk": ["索引目录可写", "Index directory writable"],
   "kvs.check.indexWritableFail": ["索引目录不可写", "Index directory not writable"],
   "kvs.check.indexFreshOk": ["索引与文件一致", "Index matches files"],
-  "kvs.check.indexStale": ["知识文件比索引新，需重建", "Knowledge files are newer than the index; rebuild"],
+  "kvs.check.indexStale": ["知识文件比索引新，索引会自动修复", "Knowledge files are newer than the index; it will be repaired automatically"],
   "kvs.check.indexMissing": ["索引缺失", "Index missing"],
   "kvs.check.indexWarnings": ["{count} 条索引警告", "{count} index warnings"],
   "kvs.check.indexWarningsOne": ["1 条索引警告", "1 index warning"],
@@ -92,12 +92,12 @@ const localText: Record<string, [zhCN: string, enUS: string]> = {
   "kvs.health.unboundOne": ["1 个项目未绑定，继续使用旧库。", "1 project is unbound and keeps using the legacy knowledge base."],
 
   "kvs.attention.uninitialized": ["文件知识库尚未初始化；创建示例或导入已有知识库后开始索引。", "The vault is not initialized yet; create the samples or import an existing vault to start indexing."],
-  "kvs.attention.runtimeRebuild": ["文件知识库已启用，但索引尚未就绪；Agent 本次会回退旧知识库，请重建索引。", "The vault is enabled but the index is not ready; Agents fall back to legacy knowledge for now. Rebuild the index."],
+  "kvs.attention.runtimeRebuild": ["文件知识库已启用，但索引尚未就绪；Agent 本次不会回退旧知识库，索引会自动修复。", "The vault is enabled but the index is not ready; Agents do not fall back to legacy knowledge, and the index is repaired automatically."],
   "kvs.attention.runtimeError": ["文件知识库已启用，但知识库或索引不可读写；Agent 本次会回退旧知识库，请检查目录权限。", "The vault is enabled but its directory or index is not readable/writable; Agents fall back to legacy knowledge for now. Check directory permissions."],
   "kvs.attention.blocked": ["当前状态不能启用文件知识库。", "The vault cannot be enabled in the current state."],
   "kvs.attention.missing": ["未满足：{items}", "Missing: {items}"],
   "kvs.status.needsMigration": ["升级后需要先迁移旧知识库，或导入已有知识库，才能启用文件知识库。", "After an upgrade, migrate legacy knowledge or import an existing vault before enabling the file knowledge vault."],
-  "kvs.status.needsRebuild": ["知识库或索引尚未就绪，请先重建索引。", "The vault or index is not ready; rebuild the index first."],
+  "kvs.status.needsRebuild": ["知识库或索引尚未就绪，索引会自动修复。", "The vault or index is not ready; the index is repaired automatically."],
   "kvs.status.error": ["知识库或索引不可写或不可读，请检查目录权限。", "The vault or index is not writable or readable; check directory permissions."],
   "kvs.missing.vault_initialized": ["知识库初始化", "vault initialization"],
   "kvs.missing.vault_writable": ["目录可写", "directory writability"],
@@ -166,7 +166,7 @@ const localText: Record<string, [zhCN: string, enUS: string]> = {
   "kvs.import.branch": ["分支（可选）", "Branch (optional)"],
   "kvs.import.branchPlaceholder": ["留空使用远端默认分支", "Leave blank for the remote default branch"],
   "kvs.import.help": ["目标知识库目录必须为空；导入不会合并已有文件，也不会读取 Git 密码（仅支持 SSH 密钥）。", "The target vault directory must be empty; imports never merge existing files and never read Git passwords (SSH keys only)."],
-  "kvs.footer": ["文件是知识正本；请用 VSCode 或 Obsidian 编辑，然后在知识库页的齿轮设置中重建索引（Git pull 后会自动重建）。", "Files are the source of truth; edit them in VS Code or Obsidian, then rebuild the index from the knowledge page gear settings (pulled changes rebuild automatically)."],
+  "kvs.footer": ["文件是知识正本；请用 VSCode 或 Obsidian 编辑，索引会随写入、文件变化和启动对账自动维护。", "Files are the source of truth; edit them in VS Code or Obsidian. The index is maintained automatically on writes, file changes, and startup reconciliation."],
 };
 
 function kt(key: string, values: Record<string, string | number> = {}): string {

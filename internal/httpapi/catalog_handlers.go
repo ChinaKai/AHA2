@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/domain"
 	workspacepkg "github.com/ChinaKai/AHA2/internal/workspace"
 )
@@ -94,12 +96,57 @@ func (s *Server) createProject(writer http.ResponseWriter, request *http.Request
 		KnowledgePolicy: normalizeProjectKnowledgePolicy(payload.KnowledgePolicy),
 		CreatedAt:       now, UpdatedAt: now,
 	}
-	if err := s.store.CreateProject(request.Context(), item); err != nil {
+	var createErr error
+	if s.app != nil {
+		item, createErr = s.app.CreateProject(request.Context(), item)
+	} else {
+		createErr = s.store.CreateProject(request.Context(), item)
+	}
+	if createErr != nil {
+		var spaceErr *app.KnowledgeSpaceError
+		if errors.As(createErr, &spaceErr) {
+			status := http.StatusInternalServerError
+			if app.IsKnowledgeSpaceNotReadyError(createErr) {
+				status = http.StatusConflict
+			}
+			writeJSON(writer, status, map[string]any{
+				"ok": false, "error": spaceErr.Code, "message": spaceErr.Message,
+				"project": item,
+			})
+			return
+		}
 		writeError(writer, http.StatusInternalServerError, "create_project_failed")
 		return
 	}
 	s.audit(request, "project.create", "project", item.ID, map[string]any{"name": item.Name, "project_type": item.ProjectType})
 	writeJSON(writer, http.StatusCreated, map[string]any{"ok": true, "project": item})
+}
+
+// retryProjectKnowledgeSpace re-runs space initialization after an error
+// state. It never creates a legacy knowledge root.
+func (s *Server) retryProjectKnowledgeSpace(writer http.ResponseWriter, request *http.Request) {
+	if s.app == nil {
+		writeError(writer, http.StatusServiceUnavailable, "knowledge_vault_unavailable")
+		return
+	}
+	project, err := s.app.RetryProjectKnowledgeSpace(request.Context(), request.PathValue("id"))
+	if err != nil {
+		var spaceErr *app.KnowledgeSpaceError
+		if errors.As(err, &spaceErr) {
+			status := http.StatusInternalServerError
+			if app.IsKnowledgeSpaceNotReadyError(err) {
+				status = http.StatusConflict
+			}
+			writeJSON(writer, status, map[string]any{
+				"ok": false, "error": spaceErr.Code, "message": spaceErr.Message, "project": project,
+			})
+			return
+		}
+		writeError(writer, http.StatusNotFound, "project_not_found")
+		return
+	}
+	s.audit(request, "project.knowledge_space.retry", "project", project.ID, nil)
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "project": project})
 }
 
 func (s *Server) updateProject(writer http.ResponseWriter, request *http.Request) {

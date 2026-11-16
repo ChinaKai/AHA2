@@ -202,6 +202,10 @@ type Service struct {
 	// writes the legacy tables unless runtimeWrite is explicitly enabled.
 	knowledgeVaultRuntimeRead  bool
 	knowledgeVaultRuntimeWrite bool
+	// knowledgeLegacyDisabled is set once schema v143 removed the old
+	// knowledge tables. Runtime reads and writes then fail explicitly for an
+	// unready space instead of falling back to a table that no longer exists.
+	knowledgeLegacyDisabled bool
 	// agentKnowledgeBudget keeps the legacy fallback on the same per-Turn
 	// write budget as the vault engine, which tracks its own counter durably.
 	agentKnowledgeBudgetMu sync.Mutex
