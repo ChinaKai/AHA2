@@ -176,10 +176,14 @@ func (s *Service) LegacyKnowledgeRootsEnabled(projectID string) bool {
 		// rollback must not seed a root that can never be read.
 		return false
 	}
-	if s == nil || s.knowledgeVault == nil || !s.knowledgeVault.Enabled() || !s.knowledgeVaultRuntimeRead {
+	if s == nil || s.knowledgeVault == nil || !s.knowledgeVault.Enabled() {
 		return true
 	}
-	return !knowledgeVaultReadAllowed(projectID)
+	// Project creation always provisions the vault space in model A, so a
+	// legacy root must never be seeded eagerly. A true legacy fallback (if the
+	// support gates are narrowed before the cutover) still creates its root
+	// lazily on the first legacy write.
+	return false
 }
 
 // vaultProjectNames returns authoritative display names from the AHA2 projects

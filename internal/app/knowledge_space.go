@@ -157,9 +157,9 @@ type KnowledgeSpaceReconciliation struct {
 
 // ReconcileKnowledgeSpaces validates every space at startup: a manifest
 // project must have its directory and root index, a ready project must have an
-// indexed root, and system/channel hosts get their empty space back if it is
-// missing. Unbound normal projects stay uninitialized until the owner creates
-// them through the normal path; AHA1 archive residue is not given a new space.
+// indexed root, and every non-knowledge project that predates model A gets its
+// empty space created (a previous failure is retried). AHA1 archive residue is
+// never given a new active space.
 func (s *Service) ReconcileKnowledgeSpaces(ctx context.Context) (KnowledgeSpaceReconciliation, error) {
 	report := KnowledgeSpaceReconciliation{}
 	if !s.projectKnowledgeSpaceEnabled() || !s.knowledgeVault.Enabled() {

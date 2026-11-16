@@ -296,3 +296,19 @@ func TestReconcileKnowledgeSpacesProvisionsLegacyAndChannelHosts(t *testing.T) {
 		t.Fatalf("retry after missing root = %#v err=%v", retried, err)
 	}
 }
+
+func TestLegacyCutoverFailsClosedAndStopsLegacyRootSeeding(t *testing.T) {
+	service, _, _, _ := newSpaceTestService(t)
+	service.SetLegacyKnowledgeDisabled(true)
+	decision := service.knowledgeReadDecision("project", "project-unbound")
+	if !decision.Vault || decision.Err == nil {
+		t.Fatalf("post-cutover unbound read = %#v, want a fail-closed vault error", decision)
+	}
+	if service.LegacyKnowledgeRootsEnabled("project-unbound") {
+		t.Fatal("post-cutover project creation would still seed a legacy knowledge root")
+	}
+	decision = service.knowledgeReadDecision("global", "")
+	if !decision.Vault {
+		t.Fatalf("post-cutover global read = %#v", decision)
+	}
+}
