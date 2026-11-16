@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -208,6 +210,64 @@ func TestRemoveEmptyProjectSpaceLeavesStateUntouchedWhenManifestIsBroken(t *test
 	}
 	if info.Size() == 0 {
 		t.Fatal("failed cleanup rewrote the manifest")
+	}
+}
+
+func TestRemoveEmptyProjectSpaceRestoresDirectoryWhenManifestWriteFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod-based write failure is not portable to Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses the directory permission this test relies on")
+	}
+	ctx := context.Background()
+	manager, config := newCleanupManager(t)
+	projectID := "project-rollback-infra"
+	if _, err := manager.ProvisionProjectSpace(ctx, projectID, "Rollback Infra"); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slug := manifest.Projects[projectID]
+	if slug == "" {
+		t.Fatalf("project was not provisioned: %#v", manifest.Projects)
+	}
+	spaceDir := filepath.Join(config.VaultPath, "projects", slug)
+	// Pre-create .trash so the only failing step is the manifest write.
+	if err := os.MkdirAll(filepath.Join(config.VaultPath, ".trash"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(config.VaultPath, 0o755) })
+	if err := os.Chmod(config.VaultPath, 0o555); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := manager.RemoveEmptyProjectSpace(ctx, projectID); err == nil {
+		t.Fatal("cleanup succeeded although the manifest could not be written")
+	}
+	if err := os.Chmod(config.VaultPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, statErr := os.Stat(spaceDir); statErr != nil {
+		t.Fatalf("rollback did not restore the project directory: %v", statErr)
+	}
+	manifest, err = ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Projects[projectID] != slug {
+		t.Fatalf("failed cleanup changed the mapping: %#v", manifest.Projects)
+	}
+	trash, err := os.ReadDir(filepath.Join(config.VaultPath, ".trash"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range trash {
+		if strings.HasPrefix(entry.Name(), "infra-space-") {
+			t.Fatalf("failed cleanup left trash entry %s", entry.Name())
+		}
 	}
 }
 
