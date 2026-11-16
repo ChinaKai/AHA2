@@ -123,36 +123,33 @@ func (s *Store) createSkill(ctx context.Context, item domain.Skill, files []doma
 		if validated, err = validateSkillPackageFiles(files); err != nil {
 			return domain.Skill{}, err
 		}
-	} else if err := s.writeSkillPackage(&item); err != nil {
-		return domain.Skill{}, err
-	}
-	cleanup := func() { _ = s.removeSkillPackage(item) }
-	if len(validated) > 0 {
-		cleanup = func() { s.rollbackSkillPackage(item) }
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		cleanup()
 		return domain.Skill{}, err
 	}
 	defer tx.Rollback()
 	item.SourcePath = s.SkillPackagePath(item)
+	// The row is inserted before anything touches the filesystem: a rejected
+	// insert (duplicate ID or package slug) must leave an existing skill's
+	// package exactly as it was.
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO skills(id,package_slug,scope,project_id,name,description,instructions,version,status,enabled,auto_attach,source_path,created_at,updated_at)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, item.ID, item.PackageSlug, item.Scope, item.ProjectID, item.Name, item.Description, item.Instructions,
 		item.Version, item.Status, boolInt(item.Enabled), boolInt(item.AutoAttach), item.SourcePath, timeString(item.CreatedAt), timeString(item.UpdatedAt)); err != nil {
-		cleanup()
 		return domain.Skill{}, err
 	}
-	if len(validated) > 0 {
-		if err := s.replaceSkillPackage(item, validated); err != nil {
-			cleanup()
-			return domain.Skill{}, err
-		}
+	packageFiles := validated
+	if len(packageFiles) == 0 {
+		packageFiles = []domain.SkillFile{{Path: "SKILL.md", Content: skillMarkdown(item)}}
+	}
+	swap, err := s.replaceSkillPackage(item, packageFiles)
+	if err != nil {
+		return domain.Skill{}, err
 	}
 	resurrectToken, err := supersedeSkillTombstoneTx(ctx, tx, item.ID, item.Version)
 	if err != nil {
-		cleanup()
+		swap.rollback()
 		return domain.Skill{}, err
 	}
 	// A delete enqueued by an earlier run but not pushed yet would recreate the
@@ -160,31 +157,24 @@ func (s *Store) createSkill(ctx context.Context, item domain.Skill, files []doma
 	// no-op there. The object identity is scope independent, so the withdrawal
 	// applies to every queued scope.
 	if _, err := tx.ExecContext(ctx, `DELETE FROM sync_outbox WHERE object_type='skill' AND object_id=? AND operation='delete' AND status='pending'`, item.ID); err != nil {
-		cleanup()
+		swap.rollback()
 		return domain.Skill{}, err
 	}
 	if resurrectToken != "" {
-		resurrectFiles := validated
-		if len(resurrectFiles) == 0 {
-			resurrectFiles = []domain.SkillFile{{Path: "SKILL.md", Content: skillMarkdown(item)}}
-		}
-		if err := enqueueSkillResurrectTx(ctx, tx, item, resurrectFiles, resurrectToken); err != nil {
-			cleanup()
+		if err := enqueueSkillResurrectTx(ctx, tx, item, packageFiles, resurrectToken); err != nil {
+			swap.rollback()
 			return domain.Skill{}, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		// The row may already be committed; keep the package on disk rather
-		// than leaving a row whose files were removed under it.
+		swap.rollback()
 		return domain.Skill{}, err
 	}
-	if len(validated) > 0 {
-		s.commitSkillPackage(item)
-		item.PackageFiles = validated
-		item.Files = make([]string, 0, len(validated))
-		for _, file := range validated {
-			item.Files = append(item.Files, file.Path)
-		}
+	swap.commit()
+	item.PackageFiles = packageFiles
+	item.Files = make([]string, 0, len(packageFiles))
+	for _, file := range packageFiles {
+		item.Files = append(item.Files, file.Path)
 	}
 	return item, nil
 }
@@ -242,19 +232,19 @@ func (s *Store) ResurrectSkillPackage(ctx context.Context, item domain.Skill, fi
 		item.Version, item.Status, boolInt(item.Enabled), boolInt(item.AutoAttach), item.SourcePath, timeString(item.CreatedAt), timeString(item.UpdatedAt)); err != nil {
 		return domain.Skill{}, err
 	}
-	if err := s.replaceSkillPackage(item, validated); err != nil {
-		s.rollbackSkillPackage(item)
+	swap, err := s.replaceSkillPackage(item, validated)
+	if err != nil {
 		return domain.Skill{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM sync_outbox WHERE object_type='skill' AND object_id=? AND operation='delete' AND status='pending'`, item.ID); err != nil {
-		s.rollbackSkillPackage(item)
+		swap.rollback()
 		return domain.Skill{}, err
 	}
 	if err := tx.Commit(); err != nil {
-		s.rollbackSkillPackage(item)
+		swap.rollback()
 		return domain.Skill{}, err
 	}
-	s.commitSkillPackage(item)
+	swap.commit()
 	item.PackageFiles = validated
 	item.Files = make([]string, 0, len(validated))
 	for _, file := range validated {
@@ -307,6 +297,9 @@ type skillWirePayload struct {
 // enqueueSkillResurrectTx queues one explicit rebuild event. Shipping the event
 // with its own identity (instead of only a snapshot upsert) is what lets peers
 // tell a deliberate resurrection from an ordinary, possibly stale, upsert.
+// The event is queued for the one configured sync scope. A device with several
+// scopes would need one event per scope (the outbox idempotency key is global),
+// which is out of scope for the single "default" scope deployments today.
 func enqueueSkillResurrectTx(ctx context.Context, tx *sql.Tx, item domain.Skill, files []domain.SkillFile, token string) error {
 	var scope string
 	err := tx.QueryRowContext(ctx, `SELECT scope FROM sync_state ORDER BY scope LIMIT 1`).Scan(&scope)
