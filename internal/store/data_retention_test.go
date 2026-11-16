@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -396,6 +397,12 @@ func TestPurgeHardwareIODeletesOnlyOldRowsInBatches(t *testing.T) {
 	}
 	if result.DeletedRows != 22_000 || result.Batches != 3 || result.BatchSize != 10_000 || result.Partial {
 		t.Fatalf("first run=%#v", result)
+	}
+	if result.BackupPath == "" {
+		t.Fatal("hardware cleanup did not report a backup")
+	}
+	if _, err := os.Stat(result.BackupPath); err != nil {
+		t.Fatalf("hardware cleanup backup missing: %v", err)
 	}
 	if result.Plan.RemainingEligibleEstimate != 23_559-22_000 {
 		t.Fatalf("remaining=%d", result.Plan.RemainingEligibleEstimate)

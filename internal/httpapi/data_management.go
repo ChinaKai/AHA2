@@ -123,10 +123,7 @@ func buildDataInventory(root string) (DataInventory, error) {
 		"knowledge":     {ID: "knowledge", Label: "知识库", Note: "共享知识文件"},
 	}
 	inventory := DataInventory{DataDir: root, Categories: make([]DataCategory, 0, len(known)+3)}
-	backups, backupsErr := listInstallBackups(root)
-	if backupsErr == nil {
-		inventory.BackupCount = len(backups)
-	}
+	inventory.BackupCount = countInstallBackups(root)
 	for _, category := range []struct {
 		dir   string
 		label string
@@ -207,6 +204,22 @@ func directorySize(root string) int64 {
 // backupCleanupKeep is fixed for the first version: the newest install backup
 // is always kept.
 const backupCleanupKeep = 1
+
+// countInstallBackups counts user-installed-* directories without walking
+// them; the inventory already sizes the whole backups directory in one pass.
+func countInstallBackups(root string) int {
+	entries, err := os.ReadDir(filepath.Join(filepath.Clean(root), "backups"))
+	if err != nil {
+		return 0
+	}
+	count := 0
+	for _, entry := range entries {
+		if entry.IsDir() && strings.HasPrefix(entry.Name(), "user-installed-") {
+			count++
+		}
+	}
+	return count
+}
 
 // listInstallBackups returns user-installed-* backup directories, newest first.
 func listInstallBackups(root string) ([]DataBackupItem, error) {

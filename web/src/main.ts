@@ -504,6 +504,13 @@ function compactionBlockedText(...args: Parameters<DataRetentionPageModule["comp
   return "";
 }
 
+function compactionReasonText(...args: Parameters<DataRetentionPageModule["compactionReasonText"]>): string {
+  const module = dataRetentionPage.loaded();
+  if (module) return module.compactionReasonText(...args);
+  void dataRetentionPage.load();
+  return String(args[0] ?? "");
+}
+
 function skipReasonText(...args: Parameters<DataRetentionPageModule["skipReasonText"]>): string {
   const module = dataRetentionPage.loaded();
   if (module) return module.skipReasonText(...args);
@@ -4869,7 +4876,19 @@ function bindCompactionDialog(view: DataRetentionViewState): void {
           integrity: response.result.integrity_check || "—",
         }));
     }).catch((error: unknown) => {
-      setMessage("error", error instanceof Error ? error.message : String(error));
+      const message = error instanceof Error ? error.message : String(error);
+      const code = (error as {code?: string}).code;
+      if (code === "database_compaction_blocked") {
+        const reasons = message.split(",").map(compactionReasonText).join("；");
+        setMessage("error", t("data.db.compactBlocked", {reasons}));
+        return;
+      }
+      // A failed rebuild still returns its result (backup path, whether it was
+      // restored), so keep it in the dialog instead of dropping it with the
+      // error.
+      const failed = (error as {body?: {result?: typeof view.compactionResult}}).body?.result;
+      if (failed) view.compactionResult = failed;
+      setMessage("error", failed?.restored ? t("data.db.compactRestored") : message);
     }).finally(() => {
       view.compactionBusy = false;
       render();

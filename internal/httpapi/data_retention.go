@@ -120,6 +120,7 @@ func (s *Server) purgeHardwareIO(writer http.ResponseWriter, request *http.Reque
 		"run_end_sequence": result.Plan.RunEndSequence, "planned_rows": result.Plan.RunRows,
 		"deleted_rows": result.DeletedRows, "batches": result.Batches, "partial": result.Partial,
 		"skip_reason": result.SkipReason, "duration_ms": result.DurationMS,
+		"backup_path": result.BackupPath,
 	}
 	if purgeErr != nil {
 		auditData["error"] = purgeErr.Error()
@@ -243,7 +244,7 @@ func (s *Server) purgeConversation(writer http.ResponseWriter, request *http.Req
 		"purge_update": settings.PurgeUpdate, "cutoff": result.Plan.Cutoff,
 		"planned_rows": result.Plan.EligibleRows, "deleted_rows": result.DeletedRows,
 		"batches": result.Batches, "partial": result.Partial, "skip_reason": result.SkipReason,
-		"duration_ms": result.DurationMS,
+		"duration_ms": result.DurationMS, "backup_path": result.BackupPath,
 	}
 	if purgeErr != nil {
 		auditData["error"] = purgeErr.Error()

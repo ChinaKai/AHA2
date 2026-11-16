@@ -209,6 +209,12 @@ func TestConversationCleanupEndpointsProtectActiveApprovalsAndReplies(t *testing
 	if response.StatusCode != http.StatusOK || purged.Result.DeletedRows != 2 || purged.Audit["action"] != "data.conversation.purge" {
 		t.Fatalf("purge status=%d body=%#v", response.StatusCode, purged)
 	}
+	if purged.Result.BackupPath == "" {
+		t.Fatal("conversation purge did not report a pre-delete backup")
+	}
+	if _, err := os.Stat(purged.Result.BackupPath); err != nil {
+		t.Fatalf("conversation purge backup missing: %v", err)
+	}
 	for label, id := range map[string]string{
 		"eligible tool": eligible, "update": updateItem,
 	} {

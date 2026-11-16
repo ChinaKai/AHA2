@@ -50,18 +50,16 @@ func (s *Server) compactDatabase(writer http.ResponseWriter, request *http.Reque
 		"resource_id": "aha2.db", "occurred_at": occurredAt,
 	}
 	if compactErr != nil {
-		status := http.StatusInternalServerError
-		if result.SkipReason == "active_tasks" || result.SkipReason == "disk_space" ||
-			result.SkipReason == "pending_approvals" || result.SkipReason == "already_running" {
-			status = http.StatusConflict
-		}
-		writeJSON(writer, status, map[string]any{
+		writeJSON(writer, http.StatusInternalServerError, map[string]any{
 			"ok": false, "error": "database_compaction_failed", "message": compactErr.Error(),
 			"result": result, "audit": audit,
 		})
 		return
 	}
 	if result.SkipReason != "" {
+		// Every preflight refusal (active tasks/turns, pending approvals, low
+		// disk, active writes, another compaction) is a conflict, not a server
+		// error. The reasons are comma-separated in result.SkipReason.
 		writeJSON(writer, http.StatusConflict, map[string]any{
 			"ok": false, "error": "database_compaction_blocked", "message": result.SkipReason,
 			"result": result, "audit": audit,

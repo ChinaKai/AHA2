@@ -119,6 +119,12 @@ func (s *Store) CompactDatabase(ctx context.Context) (domain.DatabaseCompactionR
 		return result, nil
 	}
 	defer databaseCompactMu.Unlock()
+	if !databaseMaintenanceGate.TryLock() {
+		result.SkipReason = domain.DatabaseCompactionSkipAlreadyRunning
+		result.DurationMS = time.Since(started).Milliseconds()
+		return result, nil
+	}
+	defer databaseMaintenanceGate.Unlock()
 	plan, err := s.DatabaseCompactionPlan(ctx)
 	result.Plan = plan
 	if err != nil {
@@ -223,11 +229,17 @@ func (s *Store) rollbackCompaction(ctx context.Context, result domain.DatabaseCo
 // backupDatabaseForCompaction writes a consistent snapshot to a fresh
 // backups/database-compact-* directory and returns the database file path.
 func (s *Store) backupDatabaseForCompaction(ctx context.Context) (string, error) {
+	return s.backupDatabaseTo(ctx, "database-compact")
+}
+
+// backupDatabaseTo writes a consistent VACUUM INTO snapshot under
+// <dataDir>/backups/<prefix>-<timestamp>/aha2.db and returns its path.
+func (s *Store) backupDatabaseTo(ctx context.Context, prefix string) (string, error) {
 	if s.path == "" || isMemoryDatabase(s.path) {
-		return "", errors.New("compaction requires a file-backed database")
+		return "", errors.New("cleanup backup requires a file-backed database")
 	}
 	root := filepath.Join(filepath.Dir(s.path), "backups")
-	base := filepath.Join(root, "database-compact-"+time.Now().UTC().Format("20060102-150405"))
+	base := filepath.Join(root, prefix+"-"+time.Now().UTC().Format("20060102-150405"))
 	target := base
 	for attempt := 2; ; attempt++ {
 		if _, err := os.Stat(target); errors.Is(err, os.ErrNotExist) {
@@ -235,20 +247,45 @@ func (s *Store) backupDatabaseForCompaction(ctx context.Context) (string, error)
 		}
 		target = fmt.Sprintf("%s-%d", base, attempt)
 		if attempt > 100 {
-			return "", fmt.Errorf("could not find a free compaction backup directory under %s", root)
+			return "", fmt.Errorf("could not find a free %s backup directory under %s", prefix, root)
 		}
 	}
 	if err := os.MkdirAll(target, 0o700); err != nil {
-		return "", fmt.Errorf("create compaction backup directory: %w", err)
+		return "", fmt.Errorf("create %s backup directory: %w", prefix, err)
 	}
 	backupPath := filepath.Join(target, "aha2.db")
 	if _, err := s.db.ExecContext(ctx, `VACUUM INTO ?`, backupPath); err != nil {
-		return "", fmt.Errorf("backup database before compaction: %w", err)
+		return "", fmt.Errorf("backup database before %s: %w", prefix, err)
 	}
 	if err := os.Chmod(backupPath, 0o600); err != nil {
 		return "", err
 	}
 	return backupPath, nil
+}
+
+// pruneOldCleanupBackups keeps only the newest safety snapshot for prefix. It
+// is best effort: a locked old directory must not fail the cleanup that just
+// completed its backup.
+func (s *Store) pruneOldCleanupBackups(prefix, keepPath string) {
+	if s.path == "" || isMemoryDatabase(s.path) {
+		return
+	}
+	root := filepath.Join(filepath.Dir(s.path), "backups")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	keepDir := filepath.Dir(keepPath)
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), prefix+"-") {
+			continue
+		}
+		path := filepath.Join(root, entry.Name())
+		if path == keepDir {
+			continue
+		}
+		_ = os.RemoveAll(path)
+	}
 }
 
 // walCheckpointTruncate flushes and truncates the WAL. busy is non-zero when
@@ -295,15 +332,15 @@ func (s *Store) countTablesForCompaction(ctx context.Context, schema string) (ma
 	return counts, nil
 }
 
+// compareRowCounts reports a table whose rows decreased across the rebuild.
+// Rows added by a background writer after the backup are allowed: rolling the
+// database back to the snapshot would silently drop them. A VACUUM never
+// deletes rows, so a decrease means the rebuilt file lost data.
 func compareRowCounts(before, after map[string]int64) string {
 	for table, count := range before {
-		if after[table] != count {
-			return fmt.Sprintf("%s before=%d after=%d", table, count, after[table])
-		}
-	}
-	for table, count := range after {
-		if _, ok := before[table]; !ok && count != 0 {
-			return fmt.Sprintf("%s appeared with %d rows", table, count)
+		afterCount, ok := after[table]
+		if !ok || afterCount < count {
+			return fmt.Sprintf("row counts for %s before=%d after=%d", table, count, afterCount)
 		}
 	}
 	return ""

@@ -191,9 +191,10 @@ class APIClient {
         // Mail routes use {"ok":false,"error":{"code","message"}}; other routes
         // use a string error code. Normalize both so callers can branch on code.
         const nested = body.error && typeof body.error === "object" ? body.error as Record<string, unknown> : null;
-        const error = new Error(String(body.message || nested?.message || body.error || `HTTP ${response.status}`)) as Error & {code?: string; status?: number};
+        const error = new Error(String(body.message || nested?.message || body.error || `HTTP ${response.status}`)) as Error & {code?: string; status?: number; body?: Record<string, unknown>};
         error.code = String(nested?.code || (typeof body.error === "string" ? body.error : ""));
         error.status = response.status;
+        error.body = body;
         throw error;
       }
       return body as T;

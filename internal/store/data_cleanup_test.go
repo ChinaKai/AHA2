@@ -173,7 +173,10 @@ func TestConversationPurgePlanProtectsActiveApprovalsFinalAnswersAndAttachments(
 			t.Fatal(err)
 		}
 	}
-	protectedTables := []string{"messages", "events", "audit_events", "attachments", "tasks", "projects", "task_permission_requests"}
+	protectedTables := []string{
+		"messages", "events", "audit_events", "attachments", "tasks", "projects",
+		"task_permission_requests", "knowledge_entries", "channel_instances", "prompt_template_overrides",
+	}
 	protectedBefore := map[string]int64{}
 	for _, table := range protectedTables {
 		var count int64
@@ -445,4 +448,141 @@ func TestConversationPurgeQueriesUseCleanupIndex(t *testing.T) {
 			t.Fatalf("%s does not use the cleanup index:\n%s", label, plan)
 		}
 	}
+}
+
+// Database cleanups must snapshot the database before deleting. A backup
+// failure aborts the run with every row intact.
+func TestDatabaseCleanupBacksUpBeforeDeletingAndAbortsOnBackupFailure(t *testing.T) {
+	ctx := context.Background()
+	database := openDataRetentionTestStore(t)
+	now := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-40 * 24 * time.Hour)
+	terminal := createStoreTestTask(t, database)
+	setStoreTestTaskStatus(t, database, terminal.ID, domain.TaskCompleted)
+	seedConversationItem(t, database, terminal.ID, "tool", "agent_command_finished", old)
+
+	settings := domain.ConversationRetentionSettings{RetentionDays: 30, PurgeTool: true}
+	result, err := database.PurgeConversationItems(ctx, settings, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.BackupPath == "" {
+		t.Fatal("conversation cleanup did not report a backup")
+	}
+	if _, err := os.Stat(result.BackupPath); err != nil {
+		t.Fatalf("conversation cleanup backup missing: %v", err)
+	}
+	if _, err := database.db.Exec(`ATTACH DATABASE ? AS backup_check`, result.BackupPath); err != nil {
+		t.Fatal(err)
+	}
+	var backedUp int
+	if err := database.db.QueryRow(`SELECT COUNT(*) FROM backup_check.conversation_items`).Scan(&backedUp); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.Exec(`DETACH DATABASE backup_check`); err != nil {
+		t.Fatal(err)
+	}
+	if backedUp != 1 {
+		t.Fatalf("backup was taken after the delete: %d rows", backedUp)
+	}
+
+	// A failed backup must abort before any DELETE.
+	seedConversationItem(t, database, terminal.ID, "tool", "agent_command_finished", old)
+	originalBackup := databasePurgeBackup
+	databasePurgeBackup = func(context.Context, *Store, string) (string, error) {
+		return "", errors.New("injected backup failure")
+	}
+	t.Cleanup(func() { databasePurgeBackup = originalBackup })
+	result, err = database.PurgeConversationItems(ctx, settings, now)
+	if err == nil || result.DeletedRows != 0 {
+		t.Fatalf("backup failure did not abort: result=%#v err=%v", result, err)
+	}
+	var remaining int
+	if err := database.db.QueryRow(`SELECT COUNT(*) FROM conversation_items`).Scan(&remaining); err != nil || remaining != 1 {
+		t.Fatalf("rows after failed backup=%d err=%v", remaining, err)
+	}
+
+	// hardware_io uses the same pre-delete backup.
+	seedHardwareIO(t, database, terminal.ID, 100, old, time.Hour)
+	resultHardware, err := database.PurgeHardwareIO(ctx,
+		domain.HardwareIORetentionSettings{RetentionDays: 30, MaxDeleteRows: 1000}, now)
+	if err == nil || resultHardware.DeletedRows != 0 {
+		t.Fatalf("hardware backup failure did not abort: result=%#v err=%v", resultHardware, err)
+	}
+	if hardwareIOCount(t, database) != 100 {
+		t.Fatalf("hardware rows deleted despite backup failure: %d", hardwareIOCount(t, database))
+	}
+}
+
+// A background writer may add rows while VACUUM runs. The row-count check must
+// fail only when a table lost rows; otherwise compaction would roll back to the
+// pre-VACUUM snapshot and silently drop the new rows.
+func TestCompactDatabaseAllowsRowsAddedAfterBackup(t *testing.T) {
+	database := openDataRetentionTestStore(t)
+	task := createStoreTestTask(t, database)
+	setStoreTestTaskStatus(t, database, task.ID, domain.TaskCompleted)
+	originalHook := databaseCompactAfterVacuum
+	databaseCompactAfterVacuum = func(ctx context.Context, store *Store) error {
+		_, err := store.db.ExecContext(ctx, `
+			INSERT INTO conversation_items(
+				id,task_id,round_id,turn_id,agent_id,stream_agent_id,from_agent_id,to_agent_id,route_kind,
+				category,kind,summary,payload_json,created_at
+			) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			domain.NewID("conversation"), task.ID, "", "", "main", "main", "main", "main", "",
+			"tool", "agent_command_finished", "written during VACUUM", "{}", timeString(time.Now().UTC()))
+		return err
+	}
+	t.Cleanup(func() { databaseCompactAfterVacuum = originalHook })
+	result, err := database.CompactDatabase(context.Background())
+	if err != nil {
+		t.Fatalf("compaction rejected a concurrent insert: %v result=%#v", err, result)
+	}
+	if result.Restored {
+		t.Fatal("compaction rolled back and dropped the concurrent insert")
+	}
+	if result.AfterRowCounts["conversation_items"] != result.BeforeRowCounts["conversation_items"]+1 {
+		t.Fatalf("counts=%#v -> %#v", result.BeforeRowCounts, result.AfterRowCounts)
+	}
+}
+
+// A running compaction holds the maintenance gate exclusively; a cleanup
+// started at the same time reports already_running instead of blocking or
+// deleting rows.
+func TestMaintenanceGateSkipsCleanupWhileCompactionRuns(t *testing.T) {
+	ctx := context.Background()
+	database := openDataRetentionTestStore(t)
+	now := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	task := createStoreTestTask(t, database)
+	setStoreTestTaskStatus(t, database, task.ID, domain.TaskCompleted)
+	seedConversationItem(t, database, task.ID, "tool", "agent_command_finished", now.Add(-40*24*time.Hour))
+	seedHardwareIO(t, database, task.ID, 10, now.Add(-40*24*time.Hour), time.Hour)
+
+	databaseMaintenanceGate.Lock()
+	defer databaseMaintenanceGate.Unlock()
+	conversation, err := database.PurgeConversationItems(ctx,
+		domain.ConversationRetentionSettings{RetentionDays: 30, PurgeTool: true}, now)
+	if err != nil || conversation.SkipReason != domain.ConversationPurgeSkipAlreadyRunning || conversation.DeletedRows != 0 {
+		t.Fatalf("conversation=%#v err=%v", conversation, err)
+	}
+	hardware, err := database.PurgeHardwareIO(ctx,
+		domain.HardwareIORetentionSettings{RetentionDays: 30, MaxDeleteRows: 1000}, now)
+	if err != nil || hardware.SkipReason != domain.HardwareIOPurgeSkipAlreadyRunning || hardware.DeletedRows != 0 {
+		t.Fatalf("hardware=%#v err=%v", hardware, err)
+	}
+	compaction, err := database.CompactDatabase(ctx)
+	if err != nil || compaction.SkipReason != domain.DatabaseCompactionSkipAlreadyRunning {
+		t.Fatalf("compaction=%#v err=%v", compaction, err)
+	}
+	if !conversationItemPresentInStore(t, database, task.ID) || hardwareIOCount(t, database) != 10 {
+		t.Fatal("a skipped cleanup deleted rows")
+	}
+}
+
+func conversationItemPresentInStore(t *testing.T, database *Store, taskID string) bool {
+	t.Helper()
+	var count int64
+	if err := database.db.QueryRow(`SELECT COUNT(*) FROM conversation_items WHERE task_id=?`, taskID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count == 1
 }

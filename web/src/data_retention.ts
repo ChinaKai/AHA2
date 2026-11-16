@@ -162,7 +162,11 @@ function hardwarePlanSummary(plan: HardwareIOPurgePlan): string {
 function hardwareResultSummary(result: HardwareIOPurgeResult): string {
   const skip = result.skip_reason ? ` ${escapeHTML(skipReasonText(result.skip_reason))}` : "";
   const partial = result.partial ? ` ${t("data.db.resultPartial")}` : "";
-  return `<p class="data-db-result" data-db-result>${t("data.db.resultDeleted", {rows: formatLocaleNumber(result.deleted_rows), batches: result.batches})}${partial}${skip}</p>`;
+  const backup = result.backup_path ? `<p class="field-help">${escapeHTML(t("data.db.resultBackup", {path: result.backup_path}))}</p>` : "";
+  return `<div class="data-db-result" data-db-result>
+    <p>${t("data.db.resultDeleted", {rows: formatLocaleNumber(result.deleted_rows), batches: result.batches})}${partial}${skip}</p>
+    ${backup}
+  </div>`;
 }
 
 function conversationPlanSummary(plan: ConversationPurgePlan): string {
@@ -178,7 +182,11 @@ function conversationPlanSummary(plan: ConversationPurgePlan): string {
 function conversationResultSummary(result: ConversationPurgeResult): string {
   const skip = result.skip_reason ? ` ${escapeHTML(skipReasonText(result.skip_reason))}` : "";
   const partial = result.partial ? ` ${t("data.db.resultPartial")}` : "";
-  return `<p class="data-db-result" data-conversation-result>${t("data.db.resultDeleted", {rows: formatLocaleNumber(result.deleted_rows), batches: result.batches})}${partial}${skip}</p>`;
+  const backup = result.backup_path ? `<p class="field-help">${escapeHTML(t("data.db.resultBackup", {path: result.backup_path}))}</p>` : "";
+  return `<div class="data-db-result" data-conversation-result>
+    <p>${t("data.db.resultDeleted", {rows: formatLocaleNumber(result.deleted_rows), batches: result.batches})}${partial}${skip}</p>
+    ${backup}
+  </div>`;
 }
 
 // purgeEnabled is true only for a preview that would delete rows and matches
@@ -195,12 +203,14 @@ export function conversationPurgeEnabled(state: DataRetentionViewState, days: nu
     && plan.retention_days === days && plan.purge_tool === tool && plan.purge_update === update);
 }
 
+export function compactionReasonText(reason: string): string {
+  const key = `data.db.compactReason.${reason}`;
+  const text = t(key);
+  return text === key ? reason : text;
+}
+
 export function compactionBlockedText(plan: DatabaseCompactionPlan): string {
-  return plan.blocking_reasons.map(reason => {
-    const key = `data.db.compactReason.${reason}`;
-    const text = t(key);
-    return text === key ? reason : text;
-  }).join("；");
+  return plan.blocking_reasons.map(compactionReasonText).join("；");
 }
 
 function dialogShell(id: string, title: string, body: string): string {
@@ -315,12 +325,13 @@ function compactionDialog(state: DataRetentionViewState): string {
     body = `<p class="data-cleanup-note">${t("data.db.compactIntro")}</p>
       <div class="data-db-files data-db-compact-plan">
         <div><span class="field-help">${t("data.db.compactFile")}</span><strong>${formatBytes(plan.file_bytes)}</strong></div>
-        <div><span class="field-help">${t("data.db.compactFree")}</span><strong>${formatBytes(plan.free_bytes)}</strong></div>
+        <div><span class="field-help">${t("data.db.compactFree")}</span><strong>${t("data.db.compactFreeValue", {pages: formatLocaleNumber(plan.freelist_count), size: formatBytes(plan.free_bytes)})}</strong></div>
         <div><span class="field-help">${t("data.db.compactReclaim")}</span><strong>${formatBytes(plan.estimated_reclaimed_bytes)}</strong></div>
         <div><span class="field-help">${t("data.db.compactRequired")}</span><strong>${formatBytes(plan.required_temp_bytes)}</strong></div>
         <div><span class="field-help">${t("data.db.compactDisk")}</span><strong>${formatBytes(plan.disk_free_bytes)}</strong></div>
         <div><span class="field-help">${t("data.db.compactWriters")}</span><strong>${t("data.db.compactActive", {tasks: plan.active_tasks, turns: plan.active_turns, approvals: plan.pending_approvals})}</strong></div>
       </div>
+      <p class="field-help data-cleanup-note">${t("data.db.compactStop")}</p>
       ${blocked}
       <div class="data-cleanup-actions">
         <button type="button" data-compact-refresh ${busy ? "disabled" : ""}>${t("common.refresh")}</button>

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -138,6 +139,12 @@ func TestHardwareIORetentionEndpoints(t *testing.T) {
 	decodeResponse(t, response, &purged)
 	if response.StatusCode != http.StatusOK || purged.Result.DeletedRows != 30 || purged.Audit["action"] != "data.hardware_io.purge" || purged.Database == nil {
 		t.Fatalf("purge status=%d body=%#v", response.StatusCode, purged)
+	}
+	if purged.Result.BackupPath == "" {
+		t.Fatal("hardware purge did not report a pre-delete backup")
+	}
+	if _, err := os.Stat(purged.Result.BackupPath); err != nil {
+		t.Fatalf("hardware purge backup missing: %v", err)
 	}
 	if hardwareIORows(t, raw) != 20 {
 		t.Fatalf("rows after purge=%d", hardwareIORows(t, raw))

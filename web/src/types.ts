@@ -144,6 +144,7 @@ export interface ConversationPurgePlan {
 
 export interface ConversationPurgeResult {
   plan: ConversationPurgePlan;
+  backup_path?: string;
   deleted_rows: number;
   batches: number;
   batch_size: number;
@@ -220,6 +221,7 @@ export interface HardwareIOPurgePlan {
 
 export interface HardwareIOPurgeResult {
   plan: HardwareIOPurgePlan;
+  backup_path?: string;
   deleted_rows: number;
   batches: number;
   batch_size: number;

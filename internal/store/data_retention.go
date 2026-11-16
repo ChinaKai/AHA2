@@ -101,6 +101,27 @@ var hardwareIOPurgeMu sync.Mutex
 // conversationPurgeMu keeps manual conversation cleanups from overlapping.
 var conversationPurgeMu sync.Mutex
 
+// databaseMaintenanceGate keeps an in-place VACUUM from racing a B/C cleanup.
+// Purges take a read lock (they may run together), compaction takes the write
+// lock. Without it a compaction snapshot or rollback taken around a purge could
+// resurrect deleted rows or compare counts against a moving target.
+var databaseMaintenanceGate sync.RWMutex
+
+// databasePurgeBackup snapshots a file-backed database before a B/C cleanup
+// deletes rows. If the backup fails the cleanup aborts without deleting
+// anything. Only the newest safety snapshot per category is kept so repeated
+// cleanups cannot fill the disk with full copies. Tests override the function
+// to exercise the abort path.
+var databasePurgeBackup = func(ctx context.Context, s *Store, category string) (string, error) {
+	prefix := "database-cleanup-" + category
+	path, err := s.backupDatabaseTo(ctx, prefix)
+	if err != nil {
+		return "", err
+	}
+	s.pruneOldCleanupBackups(prefix, path)
+	return path, nil
+}
+
 func (s *Store) HardwareIORetentionSettings(ctx context.Context) (domain.HardwareIORetentionSettings, error) {
 	item := domain.DefaultHardwareIORetentionSettings()
 	var updatedAt string
@@ -256,7 +277,7 @@ func (s *Store) ConversationPurgePlan(ctx context.Context, settings domain.Conve
 		Categories:    conversationPurgeCategories(settings),
 		Cutoff:        now.UTC().Add(-time.Duration(settings.RetentionDays) * 24 * time.Hour).Truncate(time.Second),
 	}
-	scope, args := conversationPurgeScope(settings, hardwareIOCutoffKey(plan.Cutoff))
+	scope, args := conversationPurgeScope(settings, retentionCutoffKey(plan.Cutoff))
 	var hasRows int
 	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM conversation_items LIMIT 1)`).
 		Scan(&hasRows); err != nil {
@@ -312,6 +333,12 @@ func (s *Store) PurgeConversationItems(ctx context.Context, settings domain.Conv
 		return result, nil
 	}
 	defer conversationPurgeMu.Unlock()
+	if !databaseMaintenanceGate.TryRLock() {
+		result.SkipReason = domain.ConversationPurgeSkipAlreadyRunning
+		result.DurationMS = time.Since(started).Milliseconds()
+		return result, nil
+	}
+	defer databaseMaintenanceGate.RUnlock()
 	plan, err := s.ConversationPurgePlan(ctx, settings, now)
 	result.Plan = plan
 	if err != nil {
@@ -322,7 +349,13 @@ func (s *Store) PurgeConversationItems(ctx context.Context, settings domain.Conv
 		result.DurationMS = time.Since(started).Milliseconds()
 		return result, nil
 	}
-	scope, args := conversationPurgeScope(settings, hardwareIOCutoffKey(plan.Cutoff))
+	backupPath, err := databasePurgeBackup(ctx, s, "conversation")
+	if err != nil {
+		result.DurationMS = time.Since(started).Milliseconds()
+		return result, fmt.Errorf("backup before conversation cleanup: %w", err)
+	}
+	result.BackupPath = backupPath
+	scope, args := conversationPurgeScope(settings, retentionCutoffKey(plan.Cutoff))
 	batchArgs := append(append([]any{}, args...), domain.ConversationPurgeBatchRows)
 	deleteQuery := `DELETE FROM conversation_items WHERE sequence IN (
 		SELECT c.sequence FROM conversation_items c
@@ -707,7 +740,7 @@ func (s *Store) HardwareIOPurgePlan(ctx context.Context, settings domain.Hardwar
 	if err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM hardware_io
 		WHERE sequence>=? AND sequence<? AND substr(created_at,1,19)<?`,
-		plan.RunStartSequence, plan.RunEndSequence, hardwareIOCutoffKey(plan.Cutoff),
+		plan.RunStartSequence, plan.RunEndSequence, retentionCutoffKey(plan.Cutoff),
 	).Scan(&plan.RunRows); err != nil {
 		return plan, fmt.Errorf("count hardware_io run: %w", err)
 	}
@@ -741,6 +774,12 @@ func (s *Store) PurgeHardwareIO(ctx context.Context, settings domain.HardwareIOR
 		return result, nil
 	}
 	defer hardwareIOPurgeMu.Unlock()
+	if !databaseMaintenanceGate.TryRLock() {
+		result.SkipReason = domain.HardwareIOPurgeSkipAlreadyRunning
+		result.DurationMS = time.Since(started).Milliseconds()
+		return result, nil
+	}
+	defer databaseMaintenanceGate.RUnlock()
 	plan, err := s.HardwareIOPurgePlan(ctx, settings, now)
 	result.Plan = plan
 	if err != nil {
@@ -751,7 +790,13 @@ func (s *Store) PurgeHardwareIO(ctx context.Context, settings domain.HardwareIOR
 		result.DurationMS = time.Since(started).Milliseconds()
 		return result, nil
 	}
-	cutoffKey := hardwareIOCutoffKey(plan.Cutoff)
+	backupPath, err := databasePurgeBackup(ctx, s, "hardware-io")
+	if err != nil {
+		result.DurationMS = time.Since(started).Milliseconds()
+		return result, fmt.Errorf("backup before hardware_io cleanup: %w", err)
+	}
+	result.BackupPath = backupPath
+	cutoffKey := retentionCutoffKey(plan.Cutoff)
 	for start := plan.RunStartSequence; start < plan.RunEndSequence; start += domain.HardwareIOPurgeBatchRows {
 		if ctx.Err() != nil {
 			result.Partial = true
@@ -784,10 +829,10 @@ func (s *Store) PurgeHardwareIO(ctx context.Context, settings domain.HardwareIOR
 	return result, nil
 }
 
-// hardwareIOCutoffKey is the second-precision UTC prefix compared against
+// retentionCutoffKey is the second-precision UTC prefix compared against
 // substr(created_at,1,19). Stored values are RFC3339Nano in UTC with a variable
 // fraction, so whole-string comparison would misorder rows within one second.
-func hardwareIOCutoffKey(cutoff time.Time) string {
+func retentionCutoffKey(cutoff time.Time) string {
 	return cutoff.UTC().Format("2006-01-02T15:04:05")
 }
 

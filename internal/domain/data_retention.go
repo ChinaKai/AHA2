@@ -102,6 +102,7 @@ type ConversationPurgePlan struct {
 
 type ConversationPurgeResult struct {
 	Plan        ConversationPurgePlan `json:"plan"`
+	BackupPath  string                `json:"backup_path,omitempty"`
 	DeletedRows int64                 `json:"deleted_rows"`
 	Batches     int                   `json:"batches"`
 	BatchSize   int                   `json:"batch_size"`
@@ -219,6 +220,7 @@ type HardwareIOPurgePlan struct {
 
 type HardwareIOPurgeResult struct {
 	Plan        HardwareIOPurgePlan `json:"plan"`
+	BackupPath  string              `json:"backup_path,omitempty"`
 	DeletedRows int64               `json:"deleted_rows"`
 	Batches     int                 `json:"batches"`
 	BatchSize   int                 `json:"batch_size"`
