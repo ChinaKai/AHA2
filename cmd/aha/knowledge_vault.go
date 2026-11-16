@@ -42,7 +42,7 @@ func (options knowledgeVaultCommon) config() (knowledgevault.Config, error) {
 
 func knowledgeVault(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: aha2 knowledge-vault <init|export|rebuild-index|search|status|migrate-legacy|import|delete-prep> [flags]")
+		return fmt.Errorf("usage: aha2 knowledge-vault <init|export|rebuild-index|search|status|migrate-legacy|import|delete-prep|delete> [flags]")
 	}
 	switch args[0] {
 	case "init":
@@ -61,6 +61,8 @@ func knowledgeVault(args []string) error {
 		return knowledgeVaultImport(args[1:])
 	case "delete-prep":
 		return knowledgeVaultDeletePrep(args[1:])
+	case "delete":
+		return knowledgeVaultDelete(args[1:])
 	default:
 		return fmt.Errorf("unknown knowledge-vault command %q", args[0])
 	}
@@ -403,6 +405,86 @@ func knowledgeVaultDeletePrep(args []string) error {
 		return err
 	}
 	return writeKnowledgeVaultReport(os.Stdout, report)
+}
+
+func knowledgeVaultDelete(args []string) error {
+	flags := flag.NewFlagSet("aha2 knowledge-vault delete", flag.ContinueOnError)
+	options := knowledgeVaultCommon{}
+	options.register(flags)
+	databasePath := flags.String("database", "", "AHA2 database path (default <data-dir>/aha2.db)")
+	prepDir := flags.String("prep", "", "delete-prep directory containing backup.json and delete-plan.json (required)")
+	execute := flags.Bool("execute", false, "write the reviewed deletion to the database (default dry-run)")
+	confirm := flags.String("confirm", "", "SHA256 of <prep>/delete-plan.json (required with -execute)")
+	healthURL := flags.String("health-url", "http://127.0.0.1:8766/healthz", "health endpoint checked before -execute; HTTP 200 refuses")
+	deleteSkills := flags.Bool("delete-skills", false, "delete all legacy skills rows in the same transaction")
+	deleteSkillFiles := flags.Bool("delete-skill-files", false, "delete legacy skill package directories (requires -delete-skills)")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
+	}
+	if *deleteSkillFiles && !*deleteSkills {
+		return fmt.Errorf("-delete-skill-files requires -delete-skills: package files are never removed without their skill rows")
+	}
+	if strings.TrimSpace(*prepDir) == "" {
+		return fmt.Errorf("-prep is required: point it at the delete-prep directory")
+	}
+	config, err := options.config()
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(*databasePath) == "" {
+		*databasePath = filepath.Join(config.DataDir, "aha2.db")
+	}
+	if info, statErr := os.Stat(*databasePath); statErr != nil || info.IsDir() {
+		if statErr == nil {
+			statErr = fmt.Errorf("path is a directory")
+		}
+		return fmt.Errorf("AHA2 database does not exist at %s: %w", *databasePath, statErr)
+	}
+	ctx := context.Background()
+	vaultEnabled, indexReady, err := knowledgeVaultDeleteGate(ctx, config, *databasePath)
+	if err != nil {
+		return err
+	}
+	report, err := knowledgevault.ExecuteKnowledgeDeletion(ctx, knowledgevault.DeleteExecuteOptions{
+		DataDir: config.DataDir, DatabasePath: *databasePath, VaultPath: config.VaultPath,
+		PrepDir: *prepDir, Execute: *execute, Confirm: *confirm,
+		DeleteSkills: *deleteSkills, DeleteSkillFiles: *deleteSkillFiles, HealthURL: *healthURL,
+		VaultEnabled: vaultEnabled, IndexReady: indexReady,
+	})
+	if err != nil {
+		return err
+	}
+	return writeKnowledgeVaultReport(os.Stdout, report)
+}
+
+// knowledgeVaultDeleteGate reuses the service startup gate and vault probe so
+// the delete command agrees with what the running system considers enabled and
+// ready. It deliberately has no override flag.
+func knowledgeVaultDeleteGate(ctx context.Context, config knowledgevault.Config, databasePath string) (bool, bool, error) {
+	database, err := store.Open(ctx, databasePath)
+	if err != nil {
+		return false, false, err
+	}
+	defer database.Close()
+	settings, err := database.KnowledgeVaultSettings(ctx)
+	if err != nil {
+		return false, false, fmt.Errorf("read knowledge vault settings: %w", err)
+	}
+	inventory, err := database.LegacyKnowledgeInventory(ctx)
+	if err != nil {
+		return false, false, fmt.Errorf("read legacy knowledge inventory: %w", err)
+	}
+	startupDefault := knowledgevault.DefaultVaultEnabled(inventory.HasLegacy(), settings.VaultPopulated())
+	enabled, _ := knowledgevault.EffectiveStartupSwitch(settings.Configured, settings.Enabled, startupDefault)
+	manager, err := knowledgevault.NewManager(config)
+	if err != nil {
+		return false, false, err
+	}
+	defer manager.Close()
+	return enabled, manager.Probe(ctx).IndexReady, nil
 }
 
 func dirExists(path string) bool {

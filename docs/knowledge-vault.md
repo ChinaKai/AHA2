@@ -104,6 +104,34 @@ Agent 读取、技能加载和写入都跟随同一个 owner 总开关，没有�
 - `POST /api/v1/agent/knowledge/feedback` 支持 `helped|stale|wrong`。`stale`/`wrong` 只改 frontmatter `status` 并进入待修订队列，不改正文、不增加 revision；`helped` 只记录正向反馈。两种来源都不会因反馈改写正文。反馈按条目 ID 跟随实际读取源：global 条目不依赖项目绑定，全局知识读 vault 时就写 vault；不会因为项目未绑定而写旧表。
 - 原子性：临时文件写入并 fsync 后 rename，随后重建索引；任一步失败会恢复旧文件并回滚索引重建，不留下半写文件。审计（`source_task`、`source_turn`、旧 revision、diff 摘要、writer）与幂等键、每 Task/Turn 默认 3 条写入预算保存在 vault 内 `.aha/agent-writes.json`。
 
+## 删除旧知识（受控，默认 dry-run）
+
+`delete-prep` 只生成备份、导出和删除计划，不会删除任何行。真正删除使用 `knowledge-vault delete`；默认 dry-run，只有 `--execute` 才写库：
+
+```sh
+# 只读预演：打印计划、策略 ID、skills 清单和阻断项，不写数据库、不写 delete-result.json
+aha2 knowledge-vault delete --prep <data-dir>/backups/knowledge-delete-<timestamp>
+
+# 执行：必须先停服务；confirm 必须是 <prep>/delete-plan.json 的 SHA256
+aha2 knowledge-vault delete --prep <prep> --execute --confirm <sha256> \
+  --delete-skills --delete-skill-files
+```
+
+主要参数：`-data-dir`、`-database`、`-prep`（必需）、`-execute`、`-confirm`、`-health-url`（默认 `http://127.0.0.1:8766/healthz`）、`-delete-skills`、`-delete-skill-files`（默认 false，必须同时给 `-delete-skills`）。
+
+执行前逐项校验，任一不满足即拒绝，且没有绕过开关：
+
+- `backup.json` 与 `delete-plan.json` 存在；两者 mode 都是 `backup-and-dry-run`、`delete_executed=false`、完整性为 `ok`，备份 SHA256/大小/路径一致，备份文件存在且大小匹配。
+- 当前库与 plan 的 in-scope 表行数**动态**一致；`skills` 行数单独与 plan 的 skills 行一致。两个数字都从 plan 读取，不写死。
+- `channel_knowledge_policies` 恰好 4 行、`channel_knowledge_grants` 总数为 0；遗留 `channel_knowledge_records` 必须为 0。
+- vault 已启用且索引 ready（复用服务启动时的开关与 readiness 判断）。
+- `--execute` 必须同时提供 `--confirm`，且等于 `delete-plan.json` 的 SHA256。
+- 执行时若 `-health-url` 返回 HTTP 200，拒绝执行，必须先停服务。
+- 行删除在单个 SQLite 事务内完成：策略 → proposals → entries → bindings → libraries → skills；任何错误整体回滚。
+- `-delete-skills` 会扫描仍处于 draft/active/waiting_user/blocked/failed 的任务；只要 `skill_ids_json` 仍引用将被删除的旧 `skill_*` ID，就拒绝整个 execute 并列出任务，需要先迁移到 vault-skill key 或清空选择。
+- `-delete-skill-files` 会在事务前逐个校验：目录位于 `<data-dir>/knowledge/skills` 内、不是符号链接/不越界、delete-prep 备份中有同名目录、vault 中有对应 slug 的 `SKILL.md`。文件删除在数据库事务提交后执行。
+- 成功写 `<prep>/delete-result.json`，包含前后行数、删除的策略 ID、`skills_deleted`、`skill_files_deleted`、`blocking_task_refs`（成功时应为空）、`delete_executed=true`、确认哈希和时间。
+
 ## 示例知识库（体验数据，可删除）
 
 新 vault 可以在面板里点「初始化示例知识库」创建，也可以运行：
@@ -130,4 +158,4 @@ aha2 knowledge-vault rebuild-index
 aha2 knowledge-vault search <关键词>
 ```
 
-索引只服务于新知识页；旧知识表和旧知识页保持原样。旧知识迁移、已有 vault 导入和 Git 同步均已实现，但任何流程都不会自动删除旧知识库；需要清理时由 owner 自行确认后手动处理。
+索引只服务于新知识页；旧知识表和旧知识页保持原样。旧知识迁移、已有 vault 导入和 Git 同步均已实现，但任何流程都不会自动删除旧知识库；需要清理时由 owner 审批后使用上面的受控 `knowledge-vault delete` 命令。

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -145,6 +146,86 @@ func TestKnowledgeVaultMigrateLegacyRefusesExistingVaultContent(t *testing.T) {
 	inventory, err := database.LegacyKnowledgeInventory(ctx)
 	if err != nil || inventory.Entries != 1 {
 		t.Fatalf("CLI refused migration changed legacy data: %+v err=%v", inventory, err)
+	}
+}
+
+func runKnowledgeVaultDelete(t *testing.T, args ...string) (map[string]any, error) {
+	t.Helper()
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := os.Stdout
+	os.Stdout = writer
+	runErr := knowledgeVault(append([]string{"delete"}, args...))
+	os.Stdout = original
+	if closeErr := writer.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	output, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader.Close()
+	if runErr != nil {
+		return nil, runErr
+	}
+	var report map[string]any
+	if err := json.Unmarshal(output, &report); err != nil {
+		t.Fatalf("delete output %q is not JSON: %v", output, err)
+	}
+	return report, nil
+}
+
+func TestKnowledgeVaultDeleteDryRunReportsWithoutWriting(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	databasePath := filepath.Join(dataDir, "aha2.db")
+	database, err := store.Open(ctx, databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	config, err := knowledgevault.DefaultConfig(dataDir).Normalized()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prep, err := knowledgevault.PrepareKnowledgeDeletion(ctx, knowledgevault.DeletePrepOptions{
+		DataDir: dataDir, DatabasePath: databasePath, VaultPath: config.VaultPath,
+		BackupDir: filepath.Join(t.TempDir(), "backups"),
+	})
+	if err != nil {
+		t.Fatalf("prepare deletion: %v", err)
+	}
+	report, err := runKnowledgeVaultDelete(t, "--data-dir", dataDir, "--prep", prep.BackupPath)
+	if err != nil {
+		t.Fatalf("CLI delete dry-run: %v", err)
+	}
+	if report["mode"] != knowledgevault.DeleteDryRunMode || report["delete_executed"] != false {
+		t.Fatalf("report = %#v", report)
+	}
+	if report["scope"] != knowledgevault.DeleteScope {
+		t.Fatalf("scope = %#v", report["scope"])
+	}
+	if report["plan_sha256"] == nil || report["plan_sha256"] == "" {
+		t.Fatalf("plan sha missing: %#v", report)
+	}
+	if _, err := os.Stat(filepath.Join(prep.BackupPath, "delete-result.json")); !os.IsNotExist(err) {
+		t.Fatalf("dry-run wrote delete-result.json: %v", err)
+	}
+}
+
+func TestKnowledgeVaultDeleteRequiresPrep(t *testing.T) {
+	_, err := runKnowledgeVaultDelete(t, "--data-dir", t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "-prep is required") {
+		t.Fatalf("error = %v, want -prep requirement", err)
+	}
+}
+
+func TestKnowledgeVaultDeleteRejectsSkillFilesWithoutSkills(t *testing.T) {
+	_, err := runKnowledgeVaultDelete(t, "--prep", t.TempDir(), "--delete-skill-files")
+	if err == nil || !strings.Contains(err.Error(), "requires -delete-skills") {
+		t.Fatalf("error = %v, want -delete-skills requirement", err)
 	}
 }
 
