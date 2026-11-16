@@ -256,13 +256,15 @@ function formatChannelTime(value?: string): string {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 
-function bindChannelKnowledgeScope(container: HTMLElement): void {
+export function bindChannelKnowledgeScope(container: HTMLElement): void {
   const mode = container.querySelector<HTMLSelectElement>('select[name="knowledge_scope_mode"]');
   const selected = container.querySelector<HTMLElement>("[data-channel-knowledge-selected]");
   const setAll = (checked: boolean) => container.querySelectorAll<HTMLInputElement>('input[name="knowledge_entry_id"], input[name="include_global"]').forEach(input => { input.checked = checked; });
   container.querySelector<HTMLElement>("[data-channel-policy-select-all]")?.addEventListener("click", () => setAll(true));
   container.querySelector<HTMLElement>("[data-channel-policy-clear]")?.addEventListener("click", () => setAll(false));
-  const syncMode = () => { if (selected) selected.hidden = mode?.value !== "selected"; };
+  // The vault picker has no scope select: its checkbox list must stay visible.
+  // Only the legacy editor hides the list when the mode is "all".
+  const syncMode = () => { if (selected && mode) selected.hidden = mode.value !== "selected"; };
   mode?.addEventListener("change", syncMode);
   syncMode();
 }
