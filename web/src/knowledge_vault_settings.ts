@@ -50,6 +50,10 @@ const localText: Record<string, [zhCN: string, enUS: string]> = {
   "kvs.switch.help": ["开启后 Web、Agent 读写与技能使用文件知识库（vault）；关闭后立即回到旧知识库。", "When on, the Web UI, Agents, and skills read and write the vault; when off, they return to the legacy knowledge base immediately."],
   "kvs.switch.blockedMigration": ["检测到旧知识；迁移或导入验证后才能开启。", "Legacy knowledge detected; migrate or import and verify before enabling."],
   "kvs.switch.fresh": ["全新安装默认使用文件知识库，不需要切换。", "Fresh installs use the file knowledge vault by default; no switch is needed."],
+  "kvs.switch.lockedBadge": ["已锁定", "Locked"],
+  "kvs.switch.lockedMigrated": ["已迁移到文件知识库，不能回退旧库。", "Migrated to the file knowledge vault; rollback to the legacy knowledge base is not allowed."],
+  "kvs.switch.lockedNoLegacy": ["文件知识库已启用并锁定；此实例固定使用文件知识库，不能关闭。", "The file knowledge vault is enabled and locked; this instance always uses it and cannot switch it off."],
+  "kvs.switch.lockedEnable": ["已完成迁移或导入；请重新启用文件知识库，不能回退旧库。", "Migration or import is complete; turn the vault back on. Rollback to legacy knowledge is not allowed."],
   "kvs.source.line": ["状态来源：{source}", "State source: {source}"],
   "kvs.source.database": ["数据库设置", "saved setting"],
   "kvs.source.startup": ["启动默认", "startup default"],
@@ -101,8 +105,8 @@ const localText: Record<string, [zhCN: string, enUS: string]> = {
   "kvs.missing.index_writable": ["索引可写", "index writability"],
   "kvs.missing.index_fresh": ["索引一致", "index freshness"],
 
-  "kvs.legacy.title": ["旧库回退", "Legacy fallback"],
-  "kvs.legacy.badge": ["仅回滚", "Rollback only"],
+  "kvs.legacy.title": ["旧库保留", "Legacy backup"],
+  "kvs.legacy.badge": ["只读保留", "Read-only"],
   "kvs.legacy.entries": ["旧知识", "Legacy entries"],
   "kvs.legacy.entriesValue": ["{count} 条", "{count} entries"],
   "kvs.legacy.entriesOne": ["1 条", "1 entry"],
@@ -117,9 +121,9 @@ const localText: Record<string, [zhCN: string, enUS: string]> = {
   "kvs.legacy.migrationPending": ["未验证", "Not verified"],
   "kvs.legacy.migrationVerified": ["已迁移验证", "Migrated and verified"],
   "kvs.legacy.importVerified": ["已导入验证", "Imported and verified"],
-  "kvs.legacy.rollbackOnly": ["仅作只读回滚", "Read-only rollback only"],
-  "kvs.legacy.inUseNote": ["文件知识库已启用；旧知识库仅作只读回滚保留，不会被迁移覆盖，关闭开关后立即回到这里。", "The vault is enabled; legacy knowledge is kept read-only for rollback and will not be overwritten by migration. Turn the switch off to return to it immediately."],
-  "kvs.legacy.populatedNote": ["旧数据仍保留，可随时回退。", "Legacy data is kept and can be used for rollback."],
+  "kvs.legacy.rollbackOnly": ["已迁移，仅作只读保留", "Migrated; read-only backup"],
+  "kvs.legacy.inUseNote": ["文件知识库已启用；旧知识库仅作只读备份保留，不会被迁移覆盖，也不能通过开关回退。", "The vault is enabled; legacy knowledge is kept read-only as a backup, is not overwritten by migration, and cannot be restored through the switch."],
+  "kvs.legacy.populatedNote": ["旧数据仅作只读备份保留，不能回退。", "Legacy data is kept read-only as a backup and cannot be used for rollback."],
 
   "kvs.action.migrate": ["迁移旧知识库并校验", "Migrate legacy knowledge and verify"],
   "kvs.action.migrating": ["迁移中…", "Migrating…"],
@@ -133,6 +137,7 @@ const localText: Record<string, [zhCN: string, enUS: string]> = {
   "kvs.msg.enabled": ["文件知识库已启用", "File knowledge vault enabled"],
   "kvs.msg.enabledDegraded": ["文件知识库已启用；部分项目仍会回退旧知识库", "File knowledge vault enabled; some projects still fall back to legacy knowledge"],
   "kvs.msg.disabled": ["文件知识库已关闭，已立即回到旧知识库", "File knowledge vault disabled; back on legacy knowledge immediately"],
+  "kvs.msg.rollbackLocked": ["文件知识库已迁移并锁定，不能关闭回退旧库", "The file knowledge vault is migrated and locked; it cannot be switched off"],
   "kvs.msg.toggleFailed": ["切换文件知识库失败：{error}", "Failed to switch the file knowledge vault: {error}"],
   "kvs.msg.initConfirm": ["将创建知识库目录骨架和 4 篇示例文档，并自动启用文件知识库。示例仅用于体验，可随时删除；不会导入或修改旧知识库。继续？", "Create the vault directory skeleton and 4 sample documents, then enable the vault. Samples are only for trying it out and can be deleted; legacy knowledge is neither imported nor changed. Continue?"],
   "kvs.msg.initDone": ["已创建 {count} 个示例文档，文件知识库已启用", "Created {count} sample documents; the file knowledge vault is enabled"],
@@ -178,6 +183,9 @@ const IMPORT_STYLES = `
 .knowledge-vault-settings-panel .knowledge-vault-toggle { margin: 0; }
 .knowledge-vault-settings-panel .knowledge-vault-toggle input { cursor: pointer; }
 .knowledge-vault-settings-panel .knowledge-vault-toggle input:disabled { cursor: progress; }
+.knowledge-vault-settings-panel .knowledge-vault-toggle.is-locked { cursor: default; }
+.knowledge-vault-settings-panel .knowledge-vault-toggle.is-locked input:disabled { cursor: not-allowed; }
+.knowledge-vault-toggle.is-locked small { color: var(--color-text-muted); }
 .knowledge-vault-settings-panel .panel-head > .knowledge-vault-state { flex: 0 0 auto; }
 .knowledge-vault-state { flex: 0 0 auto; padding: 2px 8px; border-radius: var(--radius-pill); background: var(--color-surface-muted); color: var(--color-text-muted); font-size: 10px; font-weight: 700; white-space: nowrap; }
 .knowledge-vault-state.is-on { background: var(--color-success-soft); color: var(--color-success-ink); }
@@ -277,6 +285,24 @@ function inUseUpgrade(settings: KnowledgeVaultSettings): boolean {
   return hasLegacy(settings) && settings.configured && settings.enabled && settings.entry_count > 0;
 }
 
+// The backend closes rollback permanently once the instance has committed to
+// the vault; the switch then stays on and the API refuses a direct close. Older
+// servers do not send rollback_allowed, so mirror the same rule from the facts
+// this payload already carries instead of making the switch closable again.
+function rollbackAllowed(settings: KnowledgeVaultSettings): boolean {
+  const reported = settings.readiness.rollback_allowed;
+  if (typeof reported === "boolean") return reported;
+  return !settings.configured && !hasTimestamp(settings.migration_verified_at) &&
+    !hasTimestamp(settings.import_verified_at) && !inUseUpgrade(settings);
+}
+
+// Go serializes a zero time.Time as "0001-01-01T00:00:00Z" even with
+// omitempty, so a missing verification timestamp still arrives as a truthy
+// string. Treat the zero value as "not verified".
+function hasTimestamp(value: string | undefined): boolean {
+  return Boolean(value) && !String(value).startsWith("0001-01-01");
+}
+
 function populationRequest<T>(action: "migrate" | "import", options?: {kind: "local" | "git"; path?: string; remote?: string; branch?: string}): Promise<T> {
   return api.request<T>(`/api/v1/settings/knowledge-vault/${action}`, {method: "POST", body: options ? JSON.stringify(options) : undefined});
 }
@@ -337,6 +363,20 @@ export async function refreshKnowledgeVaultSettingsPanel(context: KnowledgeVault
 async function setEnabled(enabled: boolean): Promise<void> {
   const context = activeContext;
   if (state.busy || context === null || state.settings?.enabled === enabled) return;
+  if (!enabled && state.settings && !rollbackAllowed(state.settings)) {
+    // The rendered checkbox is disabled in this state, but the action is the
+    // single entry point for a change event; keep the decision here too so a
+    // programmatic click can never reach the API. The shell's region restore
+    // keeps a control's live value across a re-render, so put the
+    // authoritative checked state back after rendering.
+    context.setMessage("error", kt("kvs.msg.rollbackLocked"));
+    context.render();
+    if (typeof document !== "undefined") {
+      const toggle = document.querySelector<HTMLInputElement>("#knowledge-vault-enabled");
+      if (toggle) toggle.checked = state.settings.enabled;
+    }
+    return;
+  }
   if (enabled && !state.settings?.readiness.can_enable) {
     context.setMessage("error", kt("kvs.action.enableBlocked"));
     context.render();
@@ -600,16 +640,16 @@ function legacyHTML(settings: KnowledgeVaultSettings, busy: string): string {
   const inUse = inUseUpgrade(settings);
   const unbound = settings.readiness.unbound_projects ?? [];
   const skills = legacySkillCount(settings);
-  const verified = settings.migration_verified_at
+  const verified = hasTimestamp(settings.migration_verified_at)
     ? kt("kvs.legacy.migrationVerified")
-    : settings.import_verified_at
+    : hasTimestamp(settings.import_verified_at)
       ? kt("kvs.legacy.importVerified")
       : inUse
         ? kt("kvs.legacy.rollbackOnly")
         : kt("kvs.legacy.migrationPending");
   const note = inUse
     ? kt("kvs.legacy.inUseNote")
-    : settings.migration_verified_at || settings.import_verified_at
+    : hasTimestamp(settings.migration_verified_at) || hasTimestamp(settings.import_verified_at)
       ? kt("kvs.legacy.populatedNote")
       : "";
   const migrate = settings.readiness.status === "needs_migration"
@@ -621,7 +661,7 @@ function legacyHTML(settings: KnowledgeVaultSettings, busy: string): string {
       <div><dt>${kt("kvs.legacy.entries")}</dt><dd>${kt(settings.legacy.entries === 1 ? "kvs.legacy.entriesOne" : "kvs.legacy.entriesValue", {count: settings.legacy.entries})}</dd></div>
       ${skills > 0 ? `<div><dt>${kt("kvs.legacy.skills")}</dt><dd>${kt(skills === 1 ? "kvs.legacy.skillsOne" : "kvs.legacy.skillsValue", {count: skills})}</dd></div>` : ""}
       <div><dt>${kt("kvs.legacy.unbound")}</dt><dd>${unbound.length ? kt(unbound.length === 1 ? "kvs.legacy.unboundOne" : "kvs.legacy.unboundValue", {count: unbound.length}) : kt("kvs.legacy.allBound")}</dd></div>
-      ${!inUse || settings.migration_verified_at || settings.import_verified_at ? `<div><dt>${kt("kvs.legacy.migration")}</dt><dd>${verified}</dd></div>` : ""}
+      ${!inUse || hasTimestamp(settings.migration_verified_at) || hasTimestamp(settings.import_verified_at) ? `<div><dt>${kt("kvs.legacy.migration")}</dt><dd>${verified}</dd></div>` : ""}
     </dl>
     ${note ? `<p class="knowledge-vault-legacy-note">${note}</p>` : ""}
     ${migrate}
@@ -639,12 +679,23 @@ function switchHTML(settings: KnowledgeVaultSettings, busy: string, blocked: boo
       ${sourceLine}
     </div>`;
   }
-  const hint = settings.readiness.status === "needs_migration"
-    ? kt("kvs.switch.blockedMigration")
-    : kt("kvs.switch.help");
+  // Once migration/import commits the instance to the vault, the switch is a
+  // locked-on status rather than a control: a disabled checked box plus the
+  // explicit no-rollback copy, so the owner never reads it as "off is one
+  // click away".
+  const rollbackLocked = !rollbackAllowed(settings);
+  const lockedOn = rollbackLocked && settings.enabled;
+  const hint = lockedOn
+    ? kt(hasLegacy(settings) ? "kvs.switch.lockedMigrated" : "kvs.switch.lockedNoLegacy")
+    : rollbackLocked
+      ? kt("kvs.switch.lockedEnable")
+      : settings.readiness.status === "needs_migration"
+        ? kt("kvs.switch.blockedMigration")
+        : kt("kvs.switch.help");
+  const lockedBadge = lockedOn ? `<span class="knowledge-vault-badge">${kt("kvs.switch.lockedBadge")}</span>` : "";
   return `<div class="knowledge-vault-group knowledge-vault-source">
-    <div class="knowledge-vault-group-head"><h3>${kt("kvs.source.title")}</h3></div>
-    <label class="security-setting-toggle knowledge-vault-toggle"><input id="knowledge-vault-enabled" name="knowledge_vault_enabled" type="checkbox" ${settings.enabled ? "checked" : ""} ${busy || blocked ? "disabled" : ""}><span><strong>${kt("kvs.switch.title")}</strong><small>${hint}</small></span></label>
+    <div class="knowledge-vault-group-head"><h3>${kt("kvs.source.title")}</h3>${lockedBadge}</div>
+    <label class="security-setting-toggle knowledge-vault-toggle${lockedOn ? " is-locked" : ""}"><input id="knowledge-vault-enabled" name="knowledge_vault_enabled" type="checkbox" ${settings.enabled ? "checked" : ""} ${busy || blocked || lockedOn ? "disabled" : ""}><span><strong>${kt("kvs.switch.title")}</strong><small>${hint}</small></span></label>
     ${sourceLine}
   </div>`;
 }
