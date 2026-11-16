@@ -22,14 +22,34 @@ var (
 	ErrProjectSpaceUnconfirmed = errors.New("project knowledge space cannot be confirmed empty")
 )
 
+// projectSpaceTrashPrefix marks the .trash entries written by the empty-space
+// cleanup. Only entries with this prefix are ever swept at startup; anything
+// else in .trash belongs to another feature or to the owner.
+const projectSpaceTrashPrefix = "infra-space-"
+
 // ProjectSpaceCleanupResult reports one cleanup attempt. Removed is true when
 // the manifest mapping (and directory, when it existed) is gone. BlockingPaths
 // lists the files that prevented deletion so the owner can inspect them.
+// Warning reports a directory kept in .trash after the mapping was already
+// removed: the cleanup succeeded, but unconfirmed content appeared in the last
+// window before deletion and was preserved instead of deleted.
 type ProjectSpaceCleanupResult struct {
 	ProjectID     string   `json:"project_id"`
 	Slug          string   `json:"slug,omitempty"`
 	Removed       bool     `json:"removed"`
 	BlockingPaths []string `json:"blocking_paths,omitempty"`
+	Warning       string   `json:"warning,omitempty"`
+}
+
+// cleanupHooks are test seams around the two filesystem windows of a space
+// removal. Production passes the zero value.
+type cleanupHooks struct {
+	// afterRename runs after the directory was moved into .trash and before
+	// the space is re-confirmed there.
+	afterRename func(trashPath string)
+	// beforeRemove runs after the manifest update and before the final
+	// emptiness confirmation and deletion.
+	beforeRemove func(trashPath string)
 }
 
 // RemoveEmptyProjectSpace removes the vault space of an infrastructure project
@@ -54,6 +74,13 @@ func RemoveEmptyProjectSpace(cfg Config, projectID string, now time.Time) (Proje
 // removeEmptyProjectSpace is the implementation; needsRebuild is true whenever
 // the manifest changed and the index projection has to be refreshed.
 func removeEmptyProjectSpace(cfg Config, projectID string, now time.Time) (result ProjectSpaceCleanupResult, needsRebuild bool, err error) {
+	return removeEmptyProjectSpaceWithHooks(cfg, projectID, now, cleanupHooks{})
+}
+
+// removeEmptyProjectSpaceWithHooks is removeEmptyProjectSpace with the test
+// seams described by cleanupHooks. The hooks only widen the two windows where
+// an external writer can race the removal; production never sets them.
+func removeEmptyProjectSpaceWithHooks(cfg Config, projectID string, now time.Time, hooks cleanupHooks) (result ProjectSpaceCleanupResult, needsRebuild bool, err error) {
 	cfg, err = cfg.Normalized()
 	if err != nil {
 		return ProjectSpaceCleanupResult{}, false, err
@@ -131,6 +158,25 @@ func removeEmptyProjectSpace(cfg Config, projectID string, now time.Time) (resul
 	if err != nil {
 		return result, false, err
 	}
+	if hooks.afterRename != nil {
+		hooks.afterRename(trashPath)
+	}
+	// Re-confirm the tree at its new location. A writer can add a file to the
+	// source directory after the check above and before the rename; the rename
+	// carries it into .trash. The manifest still maps the project here, so a
+	// mismatch is rolled back by renaming the directory back and nothing is
+	// deleted.
+	lateBlocking, lateErr := emptyInfrastructureSpaceFiles(trashPath, projectID)
+	if lateErr != nil || len(lateBlocking) > 0 {
+		result.BlockingPaths = lateBlocking
+		if restoreErr := os.Rename(trashPath, directory); restoreErr != nil {
+			return result, false, fmt.Errorf("project space %s changed while it was moved to .trash and %s could not be restored: %w", relative, trashPath, restoreErr)
+		}
+		if lateErr != nil {
+			return result, false, lateErr
+		}
+		return result, false, fmt.Errorf("%w: %s gained %d file(s) while it was being removed", ErrProjectSpaceNotEmpty, relative, len(lateBlocking))
+	}
 	delete(manifest.Projects, projectID)
 	delete(manifest.ProjectNames, projectID)
 	manifest.UpdatedAt = now.Format(time.RFC3339)
@@ -144,6 +190,23 @@ func removeEmptyProjectSpace(cfg Config, projectID string, now time.Time) (resul
 		return result, false, fmt.Errorf("write vault manifest: %w", err)
 	}
 	result.Removed = true
+	if hooks.beforeRemove != nil {
+		hooks.beforeRemove(trashPath)
+	}
+	// One more confirmation immediately before deletion. Content that appears
+	// after the post-rename check is kept in .trash and reported; it is never
+	// deleted. The manifest mapping is already gone, so the cleanup itself
+	// counts as done and the warning is not an error.
+	lateBlocking, lateErr = emptyInfrastructureSpaceFiles(trashPath, projectID)
+	if lateErr != nil || len(lateBlocking) > 0 {
+		result.BlockingPaths = lateBlocking
+		reason := strings.Join(lateBlocking, ", ")
+		if lateErr != nil {
+			reason = lateErr.Error()
+		}
+		result.Warning = fmt.Sprintf("project space %s gained unconfirmed content after the manifest update; kept %s for inspection (%s)", relative, trashPath, reason)
+		return result, true, nil
+	}
 	// The manifest no longer references the space, so a leftover .trash
 	// directory is invisible to the index. Report it only if the platform
 	// refused the final removal.
@@ -153,20 +216,30 @@ func removeEmptyProjectSpace(cfg Config, projectID string, now time.Time) (resul
 	return result, true, nil
 }
 
+// spaceRootProjectID reads the project attribution from a space's root index.
+// An unreadable or unattributable root means the directory cannot be treated
+// as generated scaffolding.
+func spaceRootProjectID(directory string) (string, error) {
+	raw, err := os.ReadFile(filepath.Join(directory, "index.md"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("%w: root index.md is missing", ErrProjectSpaceUnconfirmed)
+		}
+		return "", fmt.Errorf("%w: read root index.md: %v", ErrProjectSpaceUnconfirmed, err)
+	}
+	return strings.TrimSpace(ParseDocument(string(raw)).Frontmatter.ProjectID), nil
+}
+
 // emptyInfrastructureSpaceFiles confirms the directory is generated
 // scaffolding and returns the files that are not. The root index must exist
 // and declare this project: without it the directory cannot be attributed to
 // the project and is treated as unconfirmed instead of deleted.
 func emptyInfrastructureSpaceFiles(directory, projectID string) ([]string, error) {
-	raw, err := os.ReadFile(filepath.Join(directory, "index.md"))
+	declared, err := spaceRootProjectID(directory)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("%w: root index.md is missing", ErrProjectSpaceUnconfirmed)
-		}
-		return nil, fmt.Errorf("%w: read root index.md: %v", ErrProjectSpaceUnconfirmed, err)
+		return nil, err
 	}
-	document := ParseDocument(string(raw))
-	if strings.TrimSpace(document.Frontmatter.ProjectID) != projectID {
+	if declared != projectID {
 		return nil, fmt.Errorf("%w: root index.md does not declare project %s", ErrProjectSpaceUnconfirmed, projectID)
 	}
 	blocking := []string{}
@@ -204,7 +277,7 @@ func moveToVaultTrash(vaultPath, slug string, now time.Time) (string, error) {
 	if err := os.MkdirAll(trashDir, 0o755); err != nil {
 		return "", fmt.Errorf("create vault trash directory: %w", err)
 	}
-	base := filepath.Join(trashDir, "infra-space-"+SafeSegment(slug, "project")+"-"+now.Format("20060102T150405Z"))
+	base := filepath.Join(trashDir, projectSpaceTrashPrefix+SafeSegment(slug, "project")+"-"+now.Format("20060102T150405Z"))
 	target := base
 	for attempt := 2; attempt <= 100; attempt++ {
 		if _, err := os.Lstat(target); os.IsNotExist(err) {
@@ -224,6 +297,110 @@ func moveToVaultTrash(vaultPath, slug string, now time.Time) (string, error) {
 		return "", fmt.Errorf("move project space %s to trash: %w", slug, err)
 	}
 	return target, nil
+}
+
+// ProjectSpaceTrashSweepResult reports the startup sweep of crash residue below
+// .trash. Removed lists the .trash entries that were confirmed generated
+// scaffolding and deleted; Retained lists the entries left alone and Warnings
+// explains why.
+type ProjectSpaceTrashSweepResult struct {
+	Removed  []string `json:"removed,omitempty"`
+	Retained []string `json:"retained,omitempty"`
+	Warnings []string `json:"warnings,omitempty"`
+}
+
+// SweepProjectSpaceTrash deletes leftover .trash/infra-space-* directories from
+// an interrupted empty-space cleanup. A previous process can die between the
+// rename into .trash and the final deletion, leaving a directory that the
+// manifest no longer references.
+//
+// Only directories that are positively confirmed as generated scaffolding are
+// removed: a root index.md declaring a project, .gitkeep markers and empty
+// directories. Anything unknown, unreadable or non-empty is kept and reported
+// so the owner can inspect it. The sweep is idempotent; a repeated startup
+// finds nothing left to remove.
+func SweepProjectSpaceTrash(cfg Config) (ProjectSpaceTrashSweepResult, error) {
+	var result ProjectSpaceTrashSweepResult
+	cfg, err := cfg.Normalized()
+	if err != nil {
+		return result, err
+	}
+	if !VaultInitialized(cfg.VaultPath) {
+		return result, nil
+	}
+	trashDir := filepath.Join(cfg.VaultPath, ".trash")
+	entries, err := os.ReadDir(trashDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return result, nil
+		}
+		return result, fmt.Errorf("read vault trash directory: %w", err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, projectSpaceTrashPrefix) {
+			continue
+		}
+		relative := path.Join(".trash", name)
+		entryPath := filepath.Join(trashDir, name)
+		info, statErr := os.Lstat(entryPath)
+		if statErr != nil {
+			if os.IsNotExist(statErr) {
+				// Another process finished the sweep between ReadDir and Lstat.
+				continue
+			}
+			result.Retained = append(result.Retained, relative)
+			result.Warnings = append(result.Warnings, fmt.Sprintf("%s 无法读取，已保留：%v", relative, statErr))
+			continue
+		}
+		if !info.IsDir() {
+			result.Retained = append(result.Retained, relative)
+			result.Warnings = append(result.Warnings, fmt.Sprintf("%s 不是目录，已保留", relative))
+			continue
+		}
+		projectID, confirmErr := spaceRootProjectID(entryPath)
+		if confirmErr != nil {
+			result.Retained = append(result.Retained, relative)
+			result.Warnings = append(result.Warnings, fmt.Sprintf("%s 无法确认是空脚手架，已保留：%v", relative, confirmErr))
+			continue
+		}
+		if projectID == "" {
+			result.Retained = append(result.Retained, relative)
+			result.Warnings = append(result.Warnings, fmt.Sprintf("%s 的根 index.md 未声明项目，已保留", relative))
+			continue
+		}
+		blocking, confirmErr := emptyInfrastructureSpaceFiles(entryPath, projectID)
+		if confirmErr != nil {
+			result.Retained = append(result.Retained, relative)
+			result.Warnings = append(result.Warnings, fmt.Sprintf("%s 无法确认是空脚手架，已保留：%v", relative, confirmErr))
+			continue
+		}
+		if len(blocking) > 0 {
+			result.Retained = append(result.Retained, relative)
+			result.Warnings = append(result.Warnings, fmt.Sprintf("%s 包含未确认内容，已保留：%s", relative, strings.Join(blocking, ", ")))
+			continue
+		}
+		if removeErr := os.RemoveAll(entryPath); removeErr != nil {
+			result.Retained = append(result.Retained, relative)
+			result.Warnings = append(result.Warnings, fmt.Sprintf("%s 删除失败，已保留并将在下次启动重试：%v", relative, removeErr))
+			continue
+		}
+		result.Removed = append(result.Removed, relative)
+	}
+	sort.Strings(result.Removed)
+	sort.Strings(result.Retained)
+	return result, nil
+}
+
+// ManagerSweepProjectSpaceTrash is the Manager entry point. The write lock
+// keeps the sweep from racing a provision or removal on the same vault.
+func (m *Manager) SweepProjectSpaceTrash() (ProjectSpaceTrashSweepResult, error) {
+	if m == nil {
+		return ProjectSpaceTrashSweepResult{}, nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return SweepProjectSpaceTrash(m.config)
 }
 
 // ManagerRemoveEmptyProjectSpace is the Manager entry point. The manager holds

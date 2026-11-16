@@ -15,11 +15,13 @@ const legacyContext = {
   projects: [
     {id: "project-1", name: "Project One", project_type: "folder"},
     {id: "channel-project", name: "Channel Host", project_type: "channel"},
+    {id: "system-project", name: "Pet", project_type: "system"},
   ],
   workspaces: [],
   knowledgeIndexes: [
     {id: "knowledge_root_project_project-1", project_id: "project-1"},
     {id: "knowledge_root_project_container-1", project_id: "container-1"},
+    {id: "knowledge_root_project_system-project", project_id: "system-project"},
   ],
   libraries: [{id: "library-1", container_project_id: "container-1", name: "Imported"}],
   knowledgeVaultEnabled: false,
@@ -41,6 +43,9 @@ test("vault off keeps the legacy project and library sources", () => {
   assert.deepEqual(sources.map(item => item.root), ["knowledge_root_project_project-1", "knowledge_root_project_container-1"]);
   assert.ok(sources.every(item => item.kind === "legacy" && item.selectable));
   assert.ok(sources.every(item => !item.root.startsWith("project:")), "legacy mode must not surface vault library ids");
+  // The pet's system project has an index root in the fixture but must never
+  // be granted as a channel knowledge source, same as channel hosts.
+  assert.ok(sources.every(item => item.root !== "knowledge_root_project_system-project"), "system project must not be offered as a legacy knowledge source");
 });
 
 test("vault on lists project roots by index entry id and never legacy roots", () => {

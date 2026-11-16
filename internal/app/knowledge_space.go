@@ -196,15 +196,16 @@ func (s *Service) RetryProjectKnowledgeSpace(ctx context.Context, projectID stri
 // project deletion is retried. Orphans lists only the spaces whose archive
 // attempt failed and therefore still need attention.
 type KnowledgeSpaceReconciliation struct {
-	Enabled     bool     `json:"enabled"`
-	Checked     int      `json:"checked"`
-	Ready       int      `json:"ready"`
-	Provisioned []string `json:"provisioned,omitempty"`
-	Cleaned     []string `json:"cleaned,omitempty"`
-	Archived    []string `json:"archived,omitempty"`
-	MarkedError []string `json:"marked_error,omitempty"`
-	Orphans     []string `json:"orphans,omitempty"`
-	Warnings    []string `json:"warnings,omitempty"`
+	Enabled      bool     `json:"enabled"`
+	Checked      int      `json:"checked"`
+	Ready        int      `json:"ready"`
+	Provisioned  []string `json:"provisioned,omitempty"`
+	Cleaned      []string `json:"cleaned,omitempty"`
+	TrashRemoved []string `json:"trash_removed,omitempty"`
+	Archived     []string `json:"archived,omitempty"`
+	MarkedError  []string `json:"marked_error,omitempty"`
+	Orphans      []string `json:"orphans,omitempty"`
+	Warnings     []string `json:"warnings,omitempty"`
 }
 
 // ReconcileKnowledgeSpaces validates every space at startup: a manifest
@@ -218,6 +219,15 @@ func (s *Service) ReconcileKnowledgeSpaces(ctx context.Context) (KnowledgeSpaceR
 		return report, nil
 	}
 	report.Enabled = true
+	// A crash between the rename into .trash and the final deletion leaves an
+	// empty infrastructure space there. Sweep confirmed scaffolding only; any
+	// unknown or non-empty entry is kept and reported.
+	if sweep, sweepErr := s.knowledgeVault.SweepProjectSpaceTrash(); sweepErr != nil {
+		report.Warnings = append(report.Warnings, fmt.Sprintf("知识库 .trash 残留清理失败，将在下次启动重试：%v", sweepErr))
+	} else {
+		report.TrashRemoved = append(report.TrashRemoved, sweep.Removed...)
+		report.Warnings = append(report.Warnings, sweep.Warnings...)
+	}
 	projects, err := s.store.ListProjects(ctx)
 	if err != nil {
 		return report, err
@@ -281,6 +291,9 @@ func (s *Service) ReconcileKnowledgeSpaces(ctx context.Context) (KnowledgeSpaceR
 			delete(manifestProjects, project.ID)
 			report.Cleaned = append(report.Cleaned, project.ID)
 			_ = s.store.SetProjectKnowledgeState(ctx, project.ID, domain.KnowledgeStateUninitialized)
+			if result.Warning != "" {
+				report.Warnings = append(report.Warnings, fmt.Sprintf("基础设施项目 %s：%s", project.ID, result.Warning))
+			}
 			if cleanupErr != nil {
 				report.Warnings = append(report.Warnings, fmt.Sprintf("基础设施项目 %s 的空知识空间已从 manifest 移除，但索引重建失败：%v", project.ID, cleanupErr))
 			}

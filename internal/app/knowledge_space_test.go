@@ -463,6 +463,74 @@ func TestReconcileRetainsNonEmptyInfrastructureSpace(t *testing.T) {
 	}
 }
 
+func writeAppTrashScaffolding(t *testing.T, directory, projectID string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(directory, "empty"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	index := "---\ntitle: Scaffold\nslug: scaffold\nscope: project\nproject_id: " + projectID + "\ntype: index\nstatus: verified\n---\n# Scaffold\n"
+	if err := os.WriteFile(filepath.Join(directory, "index.md"), []byte(index), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, ".gitkeep"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReconcileSweepsInfraSpaceTrashAtStartup(t *testing.T) {
+	service, _, _, config := newSpaceTestService(t)
+	ctx := context.Background()
+	trashDir := filepath.Join(config.VaultPath, ".trash")
+	crashed := filepath.Join(trashDir, "infra-space-crashed-20260101T000000Z")
+	writeAppTrashScaffolding(t, crashed, "project-crashed-infra")
+	busy := filepath.Join(trashDir, "infra-space-busy-20260101T000000Z")
+	writeAppTrashScaffolding(t, busy, "project-busy-infra")
+	if err := os.MkdirAll(filepath.Join(busy, "notes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(busy, "notes", "keep.md"), []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := service.ReconcileKnowledgeSpaces(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, relative := range report.TrashRemoved {
+		if relative == ".trash/"+filepath.Base(crashed) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("crashed infra-space trash was not swept: %#v", report.TrashRemoved)
+	}
+	if _, statErr := os.Stat(crashed); !os.IsNotExist(statErr) {
+		t.Fatalf("crashed infra-space trash still exists: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(busy, "notes", "keep.md")); statErr != nil {
+		t.Fatalf("non-empty trash content was touched: %v", statErr)
+	}
+	warned := false
+	for _, warning := range report.Warnings {
+		if strings.Contains(warning, "infra-space-busy-20260101T000000Z") && strings.Contains(warning, "已保留") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Fatalf("non-empty trash entry was not reported: %#v", report.Warnings)
+	}
+
+	// Idempotent: every later startup finds only the retained entry.
+	again, err := service.ReconcileKnowledgeSpaces(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(again.TrashRemoved) != 0 {
+		t.Fatalf("second startup removed %#v", again.TrashRemoved)
+	}
+}
+
 func TestPetSystemProjectTaskKnowledgeIsGlobalOnly(t *testing.T) {
 	service, database, manager, config := newSpaceTestService(t)
 	ctx := context.Background()

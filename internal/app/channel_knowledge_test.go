@@ -653,6 +653,9 @@ func (f failingKnowledgeVault) ArchiveProjectSpace(context.Context, string) (str
 func (f failingKnowledgeVault) RemoveEmptyProjectSpace(context.Context, string) (knowledgevault.ProjectSpaceCleanupResult, error) {
 	return knowledgevault.ProjectSpaceCleanupResult{}, f.err
 }
+func (f failingKnowledgeVault) SweepProjectSpaceTrash() (knowledgevault.ProjectSpaceTrashSweepResult, error) {
+	return knowledgevault.ProjectSpaceTrashSweepResult{}, nil
+}
 
 func TestKnowledgeReadFailsClosedWhenTheVaultIsUnreadable(t *testing.T) {
 	withUnsetEnv(t, knowledgeVaultReadProjectsEnv)

@@ -271,6 +271,212 @@ func TestRemoveEmptyProjectSpaceRestoresDirectoryWhenManifestWriteFails(t *testi
 	}
 }
 
+func TestRemoveEmptyProjectSpaceRestoresWhenFilesAppearAfterRename(t *testing.T) {
+	manager, config := newCleanupManager(t)
+	ctx := context.Background()
+	projectID := "project-rename-race-infra"
+	if _, err := manager.ProvisionProjectSpace(ctx, projectID, "Rename Race Infra"); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slug := manifest.Projects[projectID]
+	if slug == "" {
+		t.Fatalf("project was not provisioned: %#v", manifest.Projects)
+	}
+	spaceDir := filepath.Join(config.VaultPath, "projects", slug)
+	lateRelative := "late-write.md"
+	result, needsRebuild, err := removeEmptyProjectSpaceWithHooks(config, projectID, time.Now().UTC(), cleanupHooks{
+		afterRename: func(trashPath string) {
+			// Simulate a writer that added a file between the pre-rename check
+			// and the rename: the rename carries the file into .trash.
+			if writeErr := os.WriteFile(filepath.Join(trashPath, lateRelative), []byte("late"), 0o644); writeErr != nil {
+				t.Errorf("write late file: %v", writeErr)
+			}
+		},
+	})
+	if !errors.Is(err, ErrProjectSpaceNotEmpty) {
+		t.Fatalf("error = %v, want ErrProjectSpaceNotEmpty", err)
+	}
+	if result.Removed || needsRebuild {
+		t.Fatalf("result = %#v needsRebuild = %v", result, needsRebuild)
+	}
+	if !cleanupContainsPath(result.BlockingPaths, lateRelative) {
+		t.Fatalf("blocking paths = %#v", result.BlockingPaths)
+	}
+	// The directory is restored with the late file intact and the manifest
+	// mapping is unchanged.
+	if _, statErr := os.Stat(filepath.Join(spaceDir, lateRelative)); statErr != nil {
+		t.Fatalf("late file was not restored with the directory: %v", statErr)
+	}
+	manifest, err = ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Projects[projectID] != slug {
+		t.Fatalf("restored cleanup changed the mapping: %#v", manifest.Projects)
+	}
+	trash, err := os.ReadDir(filepath.Join(config.VaultPath, ".trash"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range trash {
+		if strings.HasPrefix(entry.Name(), projectSpaceTrashPrefix) {
+			t.Fatalf("failed cleanup left trash entry %s", entry.Name())
+		}
+	}
+}
+
+func TestRemoveEmptyProjectSpaceKeepsLateTrashContent(t *testing.T) {
+	manager, config := newCleanupManager(t)
+	ctx := context.Background()
+	projectID := "project-remove-race-infra"
+	if _, err := manager.ProvisionProjectSpace(ctx, projectID, "Remove Race Infra"); err != nil {
+		t.Fatal(err)
+	}
+	result, needsRebuild, err := removeEmptyProjectSpaceWithHooks(config, projectID, time.Now().UTC(), cleanupHooks{
+		beforeRemove: func(trashPath string) {
+			// A file appears after the post-rename confirmation. It must be
+			// kept, never deleted, even though the mapping is already gone.
+			if writeErr := os.WriteFile(filepath.Join(trashPath, "late-write.md"), []byte("late"), 0o644); writeErr != nil {
+				t.Errorf("write late file: %v", writeErr)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("keeping late content must not fail the cleanup: %v", err)
+	}
+	if !result.Removed || !needsRebuild {
+		t.Fatalf("result = %#v needsRebuild = %v", result, needsRebuild)
+	}
+	if result.Warning == "" || !cleanupContainsPath(result.BlockingPaths, "late-write.md") {
+		t.Fatalf("result = %#v", result)
+	}
+	manifest, err := ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, mapped := manifest.Projects[projectID]; mapped {
+		t.Fatalf("manifest still maps the project: %#v", manifest.Projects)
+	}
+	trash, err := os.ReadDir(filepath.Join(config.VaultPath, ".trash"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept := 0
+	for _, entry := range trash {
+		if !strings.HasPrefix(entry.Name(), projectSpaceTrashPrefix) {
+			continue
+		}
+		kept++
+		if _, statErr := os.Stat(filepath.Join(config.VaultPath, ".trash", entry.Name(), "late-write.md")); statErr != nil {
+			t.Fatalf("late file was deleted: %v", statErr)
+		}
+	}
+	if kept != 1 {
+		t.Fatalf("kept trash entries = %d, want 1", kept)
+	}
+}
+
+func writeTrashScaffolding(t *testing.T, directory, projectID string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(directory, "empty"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	index := "---\ntitle: Scaffold\nslug: scaffold\nscope: project\nproject_id: " + projectID + "\ntype: index\nstatus: verified\n---\n# Scaffold\n"
+	if err := os.WriteFile(filepath.Join(directory, "index.md"), []byte(index), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, ".gitkeep"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSweepProjectSpaceTrashRemovesOnlyConfirmedScaffolding(t *testing.T) {
+	manager, config := newCleanupManager(t)
+	trashDir := filepath.Join(config.VaultPath, ".trash")
+
+	empty := filepath.Join(trashDir, "infra-space-empty-20260101T000000Z")
+	writeTrashScaffolding(t, empty, "project-trash-empty")
+
+	busy := filepath.Join(trashDir, "infra-space-busy-20260101T000000Z")
+	writeTrashScaffolding(t, busy, "project-trash-busy")
+	if err := os.MkdirAll(filepath.Join(busy, "notes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(busy, "notes", "keep.md"), []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	unknown := filepath.Join(trashDir, "infra-space-unknown-20260101T000000Z")
+	if err := os.MkdirAll(unknown, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(unknown, "index.md"), []byte("---\ntitle: Unknown\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fileEntry := filepath.Join(trashDir, "infra-space-file")
+	if err := os.WriteFile(fileEntry, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	unrelated := filepath.Join(trashDir, "manual")
+	if err := os.MkdirAll(unrelated, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(unrelated, "note.md"), []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := manager.SweepProjectSpaceTrash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRemoved := ".trash/" + filepath.Base(empty)
+	if len(result.Removed) != 1 || result.Removed[0] != wantRemoved {
+		t.Fatalf("removed = %#v, want [%s]", result.Removed, wantRemoved)
+	}
+	for _, want := range []string{".trash/" + filepath.Base(busy), ".trash/" + filepath.Base(unknown), ".trash/infra-space-file"} {
+		found := false
+		for _, retained := range result.Retained {
+			if retained == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("retained = %#v, missing %s", result.Retained, want)
+		}
+	}
+	if len(result.Warnings) != 3 {
+		t.Fatalf("warnings = %#v", result.Warnings)
+	}
+	if _, statErr := os.Stat(empty); !os.IsNotExist(statErr) {
+		t.Fatalf("confirmed scaffolding was not removed: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(busy, "notes", "keep.md")); statErr != nil {
+		t.Fatalf("non-empty trash content was touched: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(unrelated, "note.md")); statErr != nil {
+		t.Fatalf("unrelated trash content was touched: %v", statErr)
+	}
+
+	// Idempotent: a second startup removes nothing and reports the same
+	// retained entries again.
+	again, err := SweepProjectSpaceTrash(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(again.Removed) != 0 {
+		t.Fatalf("second sweep removed %#v", again.Removed)
+	}
+	if len(again.Retained) != len(result.Retained) {
+		t.Fatalf("second sweep retained = %#v", again.Retained)
+	}
+}
+
 func TestRemoveEmptyProjectSpaceDropsStaleMappingWithoutDirectory(t *testing.T) {
 	ctx := context.Background()
 	manager, config := newCleanupManager(t)

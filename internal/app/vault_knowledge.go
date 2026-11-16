@@ -74,6 +74,7 @@ type knowledgeVaultBackend interface {
 	RenameProjectSpace(string, string) error
 	ArchiveProjectSpace(context.Context, string) (string, error)
 	RemoveEmptyProjectSpace(context.Context, string) (knowledgevault.ProjectSpaceCleanupResult, error)
+	SweepProjectSpaceTrash() (knowledgevault.ProjectSpaceTrashSweepResult, error)
 	Rebuild(context.Context) (knowledgevault.RebuildReport, error)
 }
 
