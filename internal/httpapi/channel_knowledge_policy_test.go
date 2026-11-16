@@ -21,7 +21,7 @@ import (
 // A channel created while the vault is the read source has no policy. The API
 // must report that explicitly and accept the owner's first explicit selection
 // with If-Match "0" (create), then require the concrete revision afterwards.
-func TestChannelKnowledgePolicyReportsUnconfiguredAndCreatesVaultSelection(t *testing.T) {
+func TestChannelKnowledgeBindingReplacesLegacyPolicyForVaultChannel(t *testing.T) {
 	previous, existed := os.LookupEnv("AHA2_KNOWLEDGE_VAULT_READ_PROJECTS")
 	if err := os.Unsetenv("AHA2_KNOWLEDGE_VAULT_READ_PROJECTS"); err != nil {
 		t.Fatal(err)
@@ -66,9 +66,11 @@ func TestChannelKnowledgePolicyReportsUnconfiguredAndCreatesVaultSelection(t *te
 	if csrf == "" || ownerID == "" {
 		t.Fatalf("registration=%#v", registration)
 	}
-	// The vault manager already has project_other; the database needs the same
-	// project for KnowledgeIndexSources to offer its vault root.
 	seedRouteProject(t, database, "project_other")
+	// Model A: a binding only targets a ready space.
+	if err := database.SetProjectKnowledgeState(ctx, "project_other", domain.KnowledgeStateReady); err != nil {
+		t.Fatal(err)
+	}
 	now := time.Now().UTC()
 	plugin := domain.ChannelPlugin{
 		ID: "plugin-http-vault", ProviderKey: "feishu", DisplayName: "Feishu",
@@ -90,7 +92,6 @@ func TestChannelKnowledgePolicyReportsUnconfiguredAndCreatesVaultSelection(t *te
 	if len(policies) != 0 {
 		t.Fatalf("vault-era instance seeded policies: %#v", policies)
 	}
-
 	policyURL := server.URL + "/api/v1/channel-instances/" + instance.ID + "/knowledge-policy"
 	response = requestJSON(t, client, http.MethodGet, policyURL, nil, "")
 	var initial map[string]any
@@ -98,30 +99,41 @@ func TestChannelKnowledgePolicyReportsUnconfiguredAndCreatesVaultSelection(t *te
 	if response.StatusCode != http.StatusOK || len(initial["policies"].([]any)) != 0 || initial["configured"] != false {
 		t.Fatalf("unconfigured policy response=%#v", initial)
 	}
-
+	// A vault-bound channel host refuses to write the legacy per-entry policy.
 	response = channelJSON(t, client, http.MethodPut, policyURL, map[string]any{
 		"endpoint": "group_digital_human", "scope_mode": "selected",
 		"grants": []map[string]any{{"knowledge_entry_id": "knowledge_root_project_other", "grant_scope": "subtree"}},
 	}, map[string]string{"X-CSRF-Token": csrf, "If-Match": `"0"`})
-	var created map[string]any
-	decodeResponse(t, response, &created)
-	if response.StatusCode != http.StatusOK || created["configured"] != true {
-		t.Fatalf("create policy response=%#v", created)
-	}
-	selection, err := database.ChannelKnowledgeSelection(ctx, instance.ID, domain.ChannelEndpointGroupDigitalHuman)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !selection.Configured || selection.FixedIndexEntryID != "" || selection.ScopeMode != "selected" || len(selection.Grants) != 1 {
-		t.Fatalf("stored selection=%#v", selection)
+	response.Body.Close()
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("legacy policy write on a vault host status=%d", response.StatusCode)
 	}
 
-	// Revision 0 is only for the first selection: a second create must conflict.
-	response = channelJSON(t, client, http.MethodPut, policyURL, map[string]any{
-		"endpoint": "group_digital_human", "scope_mode": "selected", "grants": []any{},
-	}, map[string]string{"X-CSRF-Token": csrf, "If-Match": `"0"`})
+	bindingURL := server.URL + "/api/v1/channel-instances/" + instance.ID + "/knowledge-bindings"
+	response = channelJSON(t, client, http.MethodPut, bindingURL, map[string]any{
+		"endpoint": "group_digital_human",
+		"bindings": []map[string]any{{"space_project_id": "project_other", "access_mode": "read"}},
+	}, map[string]string{"X-CSRF-Token": csrf})
+	var bindingPayload map[string]any
+	decodeResponse(t, response, &bindingPayload)
+	if response.StatusCode != http.StatusOK || len(bindingPayload["bindings"].([]any)) != 1 {
+		t.Fatalf("binding write status=%d payload=%#v", response.StatusCode, bindingPayload)
+	}
+	resolved, err := database.ResolveChannelKnowledgeBindings(ctx, instance.ID, domain.ChannelEndpointGroupDigitalHuman)
+	if err != nil || len(resolved) != 1 || resolved[0].SpaceProject != "project_other" {
+		t.Fatalf("resolved binding = %#v err=%v", resolved, err)
+	}
+	// Replacing with an empty list clears the binding; there is no implicit
+	// host-space fallback.
+	response = channelJSON(t, client, http.MethodPut, bindingURL, map[string]any{
+		"endpoint": "group_digital_human", "bindings": []any{},
+	}, map[string]string{"X-CSRF-Token": csrf})
 	response.Body.Close()
-	if response.StatusCode != http.StatusPreconditionFailed {
-		t.Fatalf("second create status=%d, want %d", response.StatusCode, http.StatusPreconditionFailed)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("clear bindings status=%d", response.StatusCode)
+	}
+	resolved, err = database.ResolveChannelKnowledgeBindings(ctx, instance.ID, domain.ChannelEndpointGroupDigitalHuman)
+	if err != nil || len(resolved) != 0 {
+		t.Fatalf("cleared binding = %#v err=%v", resolved, err)
 	}
 }
