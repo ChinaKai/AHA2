@@ -38,7 +38,7 @@ type Target interface {
 	UpdateKnowledge(context.Context, domain.KnowledgeEntry) error
 	DeleteKnowledge(context.Context, string) error
 	ImportKnowledgeProposal(context.Context, domain.KnowledgeProposal) error
-	CreateSkill(context.Context, domain.Skill) error
+	CreateSkillPackage(context.Context, domain.Skill, []domain.SkillFile) (domain.Skill, error)
 	UpdateSkillPackage(context.Context, domain.Skill, int, []domain.SkillFile) (domain.Skill, error)
 }
 
@@ -279,12 +279,11 @@ func Execute(ctx context.Context, target Target, plan *Plan) (Report, error) {
 	for _, item := range plan.skills {
 		switch item.Action {
 		case "create":
-			if err := target.CreateSkill(ctx, item.Skill); err != nil {
+			// One atomic call: the create may raise the version above a
+			// tombstone, so the plan's version is already stale for a
+			// follow-up CAS write.
+			if _, err := target.CreateSkillPackage(ctx, item.Skill, item.Files); err != nil {
 				return report, fmt.Errorf("create skill %s: %w", item.Skill.Name, err)
-			}
-			created := item.Skill
-			if _, err := target.UpdateSkillPackage(ctx, created, created.Version, item.Files); err != nil {
-				return report, fmt.Errorf("write skill package %s: %w", item.Skill.Name, err)
 			}
 		case "update":
 			if _, err := target.UpdateSkillPackage(ctx, item.Skill, item.Skill.Version, item.Files); err != nil {

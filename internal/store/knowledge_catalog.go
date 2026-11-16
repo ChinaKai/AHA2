@@ -3,6 +3,9 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"strconv"
 	"time"
 
@@ -96,21 +99,255 @@ func (s *Store) DeleteProductLine(ctx context.Context, id string) error {
 }
 
 func (s *Store) CreateSkill(ctx context.Context, item domain.Skill) error {
+	_, err := s.createSkill(ctx, item, nil)
+	return err
+}
+
+// CreateSkillPackage creates a skill together with its complete package and
+// returns the row that was actually written. Callers that have package files
+// must use this instead of CreateSkill followed by UpdateSkillPackage: the
+// create may raise the version above a tombstone, so the caller's own copy is
+// already stale and a follow-up CAS write would be rejected.
+func (s *Store) CreateSkillPackage(ctx context.Context, item domain.Skill, files []domain.SkillFile) (domain.Skill, error) {
+	return s.createSkill(ctx, item, files)
+}
+
+func (s *Store) createSkill(ctx context.Context, item domain.Skill, files []domain.SkillFile) (domain.Skill, error) {
 	item.Version = s.sharedNumericVersion(ctx, "skill", item.ID, item.Version)
 	if item.PackageSlug == "" {
 		item.PackageSlug = s.uniqueSkillSlug(item.Name, item.ID)
 	}
-	if err := s.writeSkillPackage(&item); err != nil {
-		return err
+	var validated []domain.SkillFile
+	if len(files) > 0 {
+		var err error
+		if validated, err = validateSkillPackageFiles(files); err != nil {
+			return domain.Skill{}, err
+		}
 	}
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.Skill{}, err
+	}
+	defer tx.Rollback()
+	item.SourcePath = s.SkillPackagePath(item)
+	// The row is inserted before anything touches the filesystem: a rejected
+	// insert (duplicate ID or package slug) must leave an existing skill's
+	// package exactly as it was.
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO skills(id,package_slug,scope,project_id,name,description,instructions,version,status,enabled,auto_attach,source_path,created_at,updated_at)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, item.ID, item.PackageSlug, item.Scope, item.ProjectID, item.Name, item.Description, item.Instructions,
-		item.Version, item.Status, boolInt(item.Enabled), boolInt(item.AutoAttach), item.SourcePath, timeString(item.CreatedAt), timeString(item.UpdatedAt))
-	if err != nil {
-		_ = s.removeSkillPackage(item)
+		item.Version, item.Status, boolInt(item.Enabled), boolInt(item.AutoAttach), item.SourcePath, timeString(item.CreatedAt), timeString(item.UpdatedAt)); err != nil {
+		return domain.Skill{}, err
 	}
+	packageFiles := validated
+	if len(packageFiles) == 0 {
+		packageFiles = []domain.SkillFile{{Path: "SKILL.md", Content: skillMarkdown(item)}}
+	}
+	swap, err := s.replaceSkillPackage(item, packageFiles)
+	if err != nil {
+		return domain.Skill{}, err
+	}
+	resurrectToken, err := supersedeSkillTombstoneTx(ctx, tx, item.ID, item.Version)
+	if err != nil {
+		swap.rollback()
+		return domain.Skill{}, err
+	}
+	// A delete enqueued by an earlier run but not pushed yet would recreate the
+	// tombstone on peers right before the rebuild reaches them, making it a
+	// no-op there. The object identity is scope independent, so the withdrawal
+	// applies to every queued scope.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sync_outbox WHERE object_type='skill' AND object_id=? AND operation='delete' AND status='pending'`, item.ID); err != nil {
+		swap.rollback()
+		return domain.Skill{}, err
+	}
+	if resurrectToken != "" {
+		if err := enqueueSkillResurrectTx(ctx, tx, item, packageFiles, resurrectToken); err != nil {
+			swap.rollback()
+			return domain.Skill{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		swap.rollback()
+		return domain.Skill{}, err
+	}
+	swap.commit()
+	item.PackageFiles = packageFiles
+	item.Files = make([]string, 0, len(packageFiles))
+	for _, file := range packageFiles {
+		item.Files = append(item.Files, file.Path)
+	}
+	return item, nil
+}
+
+// ResurrectSkillPackage supersedes a skill tombstone and recreates the skill in
+// one transaction: the tombstone, the row and the package either all change or
+// none of them do. A failure leaves the tombstone in place, so ordinary
+// upserts stay blocked and the object cannot be revived by accident.
+//
+// expectedTombstoneVersion pins the tombstone the caller judged the event
+// against; a concurrent delete that changed it aborts the resurrect. A package
+// slug already taken by another skill, an invalid package or any database error
+// also aborts the whole transaction, leaving the tombstone to keep blocking.
+func (s *Store) ResurrectSkillPackage(ctx context.Context, item domain.Skill, files []domain.SkillFile, expectedTombstoneVersion string) (domain.Skill, error) {
+	if item.Version < 1 {
+		return domain.Skill{}, fmt.Errorf("skill %s: resurrect requires a positive version", item.ID)
+	}
+	if item.PackageSlug == "" {
+		item.PackageSlug = s.uniqueSkillSlug(item.Name, item.ID)
+	}
+	validated, err := validateSkillPackageFiles(files)
+	if err != nil {
+		return domain.Skill{}, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.Skill{}, err
+	}
+	defer tx.Rollback()
+	var deleted string
+	err = tx.QueryRowContext(ctx, `SELECT version FROM sync_tombstones WHERE object_type='skill' AND object_id=?`, item.ID).Scan(&deleted)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Skill{}, fmt.Errorf("skill %s: tombstone disappeared before the resurrect", item.ID)
+	}
+	if err != nil {
+		return domain.Skill{}, err
+	}
+	if deleted != expectedTombstoneVersion {
+		return domain.Skill{}, fmt.Errorf("skill %s: tombstone changed from %q to %q during the resurrect", item.ID, expectedTombstoneVersion, deleted)
+	}
+	deletedVersion, convErr := strconv.Atoi(deleted)
+	if convErr != nil {
+		return domain.Skill{}, fmt.Errorf("skill %s: tombstone version %q is not numeric; refusing to resurrect", item.ID, deleted)
+	}
+	if item.Version <= deletedVersion {
+		return domain.Skill{}, fmt.Errorf("skill %s: version %d does not exceed tombstone version %d", item.ID, item.Version, deletedVersion)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sync_tombstones WHERE object_type='skill' AND object_id=?`, item.ID); err != nil {
+		return domain.Skill{}, err
+	}
+	item.SourcePath = s.SkillPackagePath(item)
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO skills(id,package_slug,scope,project_id,name,description,instructions,version,status,enabled,auto_attach,source_path,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, item.ID, item.PackageSlug, item.Scope, item.ProjectID, item.Name, item.Description, item.Instructions,
+		item.Version, item.Status, boolInt(item.Enabled), boolInt(item.AutoAttach), item.SourcePath, timeString(item.CreatedAt), timeString(item.UpdatedAt)); err != nil {
+		return domain.Skill{}, err
+	}
+	swap, err := s.replaceSkillPackage(item, validated)
+	if err != nil {
+		return domain.Skill{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sync_outbox WHERE object_type='skill' AND object_id=? AND operation='delete' AND status='pending'`, item.ID); err != nil {
+		swap.rollback()
+		return domain.Skill{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		swap.rollback()
+		return domain.Skill{}, err
+	}
+	swap.commit()
+	item.PackageFiles = validated
+	item.Files = make([]string, 0, len(validated))
+	for _, file := range validated {
+		item.Files = append(item.Files, file.Path)
+	}
+	return item, nil
+}
+
+// supersedeSkillTombstoneTx lets a deliberate local create reuse a skill ID
+// that was deleted earlier: sharedNumericVersion has already raised the new
+// version above the deleted one, so the row and the tombstone cannot both be
+// exported. It returns the generation token of the resurrection this create
+// represents, which the caller queues as an explicit resurrect event so peers
+// holding their own tombstone can accept the rebuild.
+//
+// A tombstone whose version cannot be parsed, or which the new row does not
+// exceed, is never removed: silently dropping it would let a stale rebuild
+// resurrect an object whose deletion order is unknown.
+func supersedeSkillTombstoneTx(ctx context.Context, tx *sql.Tx, id string, version int) (string, error) {
+	var deleted string
+	err := tx.QueryRowContext(ctx, `SELECT version FROM sync_tombstones WHERE object_type='skill' AND object_id=?`, id).Scan(&deleted)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	deletedVersion, convErr := strconv.Atoi(deleted)
+	if convErr != nil {
+		return "", fmt.Errorf("skill %s: tombstone version %q is not numeric; refusing to rebuild over it", id, deleted)
+	}
+	if version <= deletedVersion {
+		return "", fmt.Errorf("skill %s: version %d does not exceed tombstone version %d", id, version, deletedVersion)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sync_tombstones WHERE object_type='skill' AND object_id=?`, id); err != nil {
+		return "", err
+	}
+	return domain.NewID("resurrect"), nil
+}
+
+// skillWirePayload mirrors the skill payload written by internal/sync. The
+// resurrect token is the only additive field: peers that predate it ignore the
+// unknown key and keep blocking the object, which is the safe outcome.
+type skillWirePayload struct {
+	Skill     domain.Skill       `json:"skill"`
+	Files     []domain.SkillFile `json:"files"`
+	Resurrect string             `json:"resurrect,omitempty"`
+}
+
+// enqueueSkillResurrectTx queues one explicit rebuild event. Shipping the event
+// with its own identity (instead of only a snapshot upsert) is what lets peers
+// tell a deliberate resurrection from an ordinary, possibly stale, upsert.
+// The event is queued for the one configured sync scope. A device with several
+// scopes would need one event per scope (the outbox idempotency key is global),
+// which is out of scope for the single "default" scope deployments today.
+func enqueueSkillResurrectTx(ctx context.Context, tx *sql.Tx, item domain.Skill, files []domain.SkillFile, token string) error {
+	var scope string
+	err := tx.QueryRowContext(ctx, `SELECT scope FROM sync_state ORDER BY scope LIMIT 1`).Scan(&scope)
+	if errors.Is(err, sql.ErrNoRows) {
+		// Sync is not configured on this device; nothing to propagate.
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	payloadItem := item
+	payloadItem.SourcePath = ""
+	payloadItem.Files = nil
+	payloadItem.PackageFiles = nil
+	payload, err := json.Marshal(skillWirePayload{
+		Skill:     payloadItem,
+		Files:     files,
+		Resurrect: token,
+	})
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO sync_outbox(id,scope,object_type,object_id,operation,payload_json,base_version,source_version,idempotency_key,status,attempts,next_attempt_at,last_error,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		domain.NewID("sync"), scope, "skill", item.ID, "upsert", string(payload), "",
+		strconv.Itoa(item.Version), "skill:"+item.ID+":resurrect:"+token, "pending", 0, "", "",
+		timeString(now), timeString(now))
 	return err
+}
+
+// AdvanceSkillVersion raises the sync version of an existing skill without
+// rewriting its package. Sync uses it when an inbound object carries a higher
+// version but identical content: the content is unchanged, yet the version is
+// the watermark stale events are compared against, so a later lower-versioned
+// event must not overwrite what this device has already seen.
+func (s *Store) AdvanceSkillVersion(ctx context.Context, id string, baseVersion, version int) error {
+	if version <= baseVersion {
+		return nil
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE skills SET version=? WHERE id=? AND version=?`, version, id, baseVersion)
+	if err != nil {
+		return err
+	}
+	if rows, _ := result.RowsAffected(); rows != 1 {
+		return fmt.Errorf("skill version conflict")
+	}
+	return nil
 }
 
 func (s *Store) ListSkills(ctx context.Context, scope, projectID string, enabledOnly bool) ([]domain.Skill, error) {

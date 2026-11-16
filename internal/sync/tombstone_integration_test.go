@@ -3,9 +3,11 @@ package sync_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -122,6 +124,297 @@ func TestKnowledgeDeleteWinsOverLateOldUpsertAndFullReplay(t *testing.T) {
 	}
 	if _, err := deviceB.database.Knowledge(ctx, entry.ID); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("full replay resurrected deleted knowledge: %v", err)
+	}
+}
+
+type skillSyncDevice struct {
+	database *store.Store
+	runner   syncer.Runner
+}
+
+func newSkillSyncDevice(t *testing.T, center *centersync.Store, endpoint, id, token string) skillSyncDevice {
+	t.Helper()
+	ctx := context.Background()
+	dir := t.TempDir()
+	database, err := store.Open(ctx, filepath.Join(dir, "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	secretStore, err := secrets.Open(filepath.Join(dir, "secrets.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := secretStore.PutMany(map[string]string{syncer.DefaultTokenRef: token}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.PutSyncSettings(ctx, domain.SyncSettings{Scope: "default", Enabled: true, Endpoint: endpoint, DeviceID: id, IntervalSeconds: 60}); err != nil {
+		t.Fatal(err)
+	}
+	if err := center.PutDeviceToken(ctx, id, token); err != nil {
+		t.Fatal(err)
+	}
+	return skillSyncDevice{database: database, runner: syncer.Runner{Store: database, Secrets: secretStore, TokenRef: syncer.DefaultTokenRef}}
+}
+
+func peerSkillEvent(t *testing.T, eventID, id string, version int, body string) centersync.Event {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{
+		"skill": domain.Skill{ID: id, Scope: "global", Name: "demo", Description: "demo", Instructions: body, Version: version, Status: "active", Enabled: true},
+		"files": []domain.SkillFile{{Path: "SKILL.md", Content: "---\nname: \"demo\"\ndescription: \"demo\"\n---\n\n" + body + "\n"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return centersync.Event{EventID: eventID, ObjectID: id, ObjectType: syncer.TypeSkill, Operation: "upsert", Payload: payload, Version: 1, SourceVersion: strconv.Itoa(version)}
+}
+
+// TestDeletedSkillIsNotResurrectedByPeerUpsert reproduces the field report:
+// after a local skill delete, the center replays a peer's upsert whose source
+// version is far above the tombstone. That upsert used to win, recreating the
+// skill and restarting an unbounded version increase on every sync cycle.
+func TestDeletedSkillIsNotResurrectedByPeerUpsert(t *testing.T) {
+	ctx := context.Background()
+	center, err := centersync.Open(ctx, filepath.Join(t.TempDir(), "center.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer center.Close()
+	server := httptest.NewServer(center.Handler())
+	defer server.Close()
+	device := newSkillSyncDevice(t, center, server.URL, "device-skill", "token-skill")
+
+	now := time.Now().UTC()
+	skill := domain.Skill{ID: "skill-delete-wins", Scope: "global", Name: "demo", Description: "demo", Instructions: "body", Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now}
+	if err := device.database.CreateSkill(ctx, skill); err != nil {
+		t.Fatal(err)
+	}
+	// The center echoes the device's own upsert. Re-applying identical content
+	// must not count as a change and must not raise the version.
+	if err := device.runner.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	applied, err := device.database.Skill(ctx, skill.ID)
+	if err != nil || applied.Version != 1 {
+		t.Fatalf("echo of own skill bumped the version: %#v err=%v", applied, err)
+	}
+
+	if err := device.database.DeleteSkill(ctx, skill.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := device.runner.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// A peer that kept churning the (now deleted) skill pushes the same
+	// content at a much higher version, then a differently shaped one.
+	if _, err := center.Push(ctx, "peer-device", []centersync.Event{
+		peerSkillEvent(t, "peer-skill-same", skill.ID, 9, "body"),
+		peerSkillEvent(t, "peer-skill-other", skill.ID, 12, "peer body"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for cycle := 0; cycle < 3; cycle++ {
+		if err := device.runner.RunOnce(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := device.database.Skill(ctx, skill.ID); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("cycle %d resurrected the deleted skill: %v", cycle, err)
+		}
+		tombstone, err := device.database.SyncTombstone(ctx, syncer.TypeSkill, skill.ID)
+		if err != nil || tombstone.Version != "1" {
+			t.Fatalf("cycle %d tombstone=%#v err=%v", cycle, tombstone, err)
+		}
+	}
+	pending, err := device.database.SyncOutboxCount(ctx, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending != 0 {
+		t.Fatalf("deleted skill keeps re-entering the outbox: %d pending", pending)
+	}
+}
+
+// TestRebuiltSkillReplacesItsTombstoneAndSyncs pins the recovery path a review
+// found missing: rebuilding a deleted skill ID locally must drop the tombstone
+// in the same transaction, so the export carries only the upsert and a peer
+// that has not seen the delete yet ends up with the rebuilt skill.
+func TestRebuiltSkillReplacesItsTombstoneAndSyncs(t *testing.T) {
+	ctx := context.Background()
+	center, err := centersync.Open(ctx, filepath.Join(t.TempDir(), "center.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer center.Close()
+	server := httptest.NewServer(center.Handler())
+	defer server.Close()
+	deviceA := newSkillSyncDevice(t, center, server.URL, "device-rebuild-a", "token-rebuild-a")
+	deviceB := newSkillSyncDevice(t, center, server.URL, "device-rebuild-b", "token-rebuild-b")
+
+	now := time.Now().UTC()
+	skill := domain.Skill{ID: "skill-rebuild", Scope: "global", Name: "demo", Description: "demo", Instructions: "old body", Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now}
+	if err := deviceA.database.CreateSkill(ctx, skill); err != nil {
+		t.Fatal(err)
+	}
+	for _, runner := range []*syncer.Runner{&deviceA.runner, &deviceB.runner, &deviceA.runner} {
+		if err := runner.RunOnce(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := deviceB.database.Skill(ctx, skill.ID); err != nil {
+		t.Fatalf("skill did not synchronize: %v", err)
+	}
+
+	// Delete, then rebuild the same ID before the next sync, the way a legacy
+	// re-import does after a cleanup.
+	if err := deviceA.database.DeleteSkill(ctx, skill.ID); err != nil {
+		t.Fatal(err)
+	}
+	rebuilt := domain.Skill{ID: skill.ID, Scope: "global", Name: "demo", Description: "demo", Instructions: "rebuilt body", Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now.Add(time.Minute)}
+	if err := deviceA.database.CreateSkill(ctx, rebuilt); err != nil {
+		t.Fatal(err)
+	}
+	objects, err := syncer.ExportBusinessObjects(ctx, deviceA.database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, object := range objects {
+		if object.Type == syncer.TypeSkill && object.ID == skill.ID && object.Operation == "delete" {
+			t.Fatal("rebuilt skill still exports its tombstone")
+		}
+	}
+
+	if err := deviceA.runner.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := deviceB.runner.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	applied, err := deviceB.database.Skill(ctx, skill.ID)
+	if err != nil {
+		t.Fatalf("peer did not receive the rebuilt skill: %v", err)
+	}
+	if applied.Version != 2 || applied.Instructions != "rebuilt body" {
+		t.Fatalf("peer skill=%#v", applied)
+	}
+}
+
+// TestResurrectReachesPeerThatAlreadyAppliedDelete covers the real recovery
+// path: the delete has already propagated (so the peer holds a tombstone), then
+// the skill is rebuilt locally under the same ID. Only an explicit resurrect
+// event may clear the peer's tombstone; an ordinary upsert -- however high its
+// version -- must stay blocked.
+func TestResurrectReachesPeerThatAlreadyAppliedDelete(t *testing.T) {
+	ctx := context.Background()
+	center, err := centersync.Open(ctx, filepath.Join(t.TempDir(), "center.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer center.Close()
+	server := httptest.NewServer(center.Handler())
+	defer server.Close()
+	deviceA := newSkillSyncDevice(t, center, server.URL, "device-resurrect-a", "token-resurrect-a")
+	deviceB := newSkillSyncDevice(t, center, server.URL, "device-resurrect-b", "token-resurrect-b")
+
+	now := time.Now().UTC()
+	skill := domain.Skill{ID: "skill-resurrect", Scope: "global", Name: "demo", Description: "demo", Instructions: "old body", Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now}
+	if err := deviceA.database.CreateSkill(ctx, skill); err != nil {
+		t.Fatal(err)
+	}
+	for _, runner := range []*syncer.Runner{&deviceA.runner, &deviceB.runner, &deviceA.runner} {
+		if err := runner.RunOnce(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Delete first and let it reach the peer, the way the field incident
+	// looked: B really holds a tombstone before the rebuild happens.
+	if err := deviceA.database.DeleteSkill(ctx, skill.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := deviceA.runner.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := deviceB.runner.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deviceB.database.Skill(ctx, skill.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("peer still has the deleted skill: %v", err)
+	}
+	if _, err := deviceB.database.SyncTombstone(ctx, syncer.TypeSkill, skill.ID); err != nil {
+		t.Fatalf("peer did not record the tombstone: %v", err)
+	}
+
+	rebuilt := domain.Skill{ID: skill.ID, Scope: "global", Name: "demo", Description: "demo", Instructions: "rebuilt body", Version: 1, Status: "active", Enabled: true, CreatedAt: now.Add(time.Minute), UpdatedAt: now.Add(time.Minute)}
+	if err := deviceA.database.CreateSkill(ctx, rebuilt); err != nil {
+		t.Fatal(err)
+	}
+	if err := deviceA.runner.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := deviceB.runner.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	applied, err := deviceB.database.Skill(ctx, skill.ID)
+	if err != nil {
+		t.Fatalf("peer did not receive the resurrected skill: %v", err)
+	}
+	if applied.Version != 2 || applied.Instructions != "rebuilt body" {
+		t.Fatalf("peer skill=%#v", applied)
+	}
+	if _, err := deviceB.database.SyncTombstone(ctx, syncer.TypeSkill, skill.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("peer tombstone survived the resurrect: %v", err)
+	}
+
+	// A replayed old delete must not swallow the rebuild again.
+	if _, err := center.Push(ctx, "peer-replay", []centersync.Event{{
+		EventID: "replay-old-delete", ObjectID: skill.ID, ObjectType: syncer.TypeSkill,
+		Operation: "delete", Version: 1, SourceVersion: "1",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := deviceB.runner.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deviceB.database.Skill(ctx, skill.ID); err != nil {
+		t.Fatalf("replayed old delete removed the rebuilt skill: %v", err)
+	}
+
+	// A later, higher-versioned delete still wins.
+	if err := deviceA.database.DeleteSkill(ctx, skill.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := deviceA.runner.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := deviceB.runner.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deviceB.database.Skill(ctx, skill.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("later delete did not remove the rebuilt skill: %v", err)
+	}
+
+	// Re-delivering the resurrect at the same version must not undo the new
+	// delete: only a version above the tombstone may resurrect.
+	payload, err := json.Marshal(map[string]any{
+		"skill":     domain.Skill{ID: skill.ID, Scope: "global", Name: "demo", Description: "demo", Instructions: "rebuilt body", Version: 2, Status: "active", Enabled: true},
+		"files":     []domain.SkillFile{{Path: "SKILL.md", Content: "---\nname: \"demo\"\ndescription: \"demo\"\n---\n\nrebuilt body\n"}},
+		"resurrect": "resurrect:replay",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := center.Push(ctx, "peer-replay", []centersync.Event{{
+		EventID: "replay-resurrect", ObjectID: skill.ID, ObjectType: syncer.TypeSkill,
+		Operation: "upsert", Payload: payload, Version: 1, SourceVersion: "2",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := deviceB.runner.RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := deviceB.database.Skill(ctx, skill.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("replayed resurrect undid the later delete: %v", err)
 	}
 }
 

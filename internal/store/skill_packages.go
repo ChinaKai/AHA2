@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -152,79 +153,165 @@ func (s *Store) removeSkillPackage(item domain.Skill) error {
 	return os.RemoveAll(absoluteRoot)
 }
 
-func (s *Store) UpdateSkillPackage(ctx context.Context, item domain.Skill, baseVersion int, files []domain.SkillFile) (domain.Skill, error) {
-	if item.Version != baseVersion {
-		return domain.Skill{}, fmt.Errorf("skill version conflict")
-	}
+// validateSkillPackageFiles normalises and checks one complete package before
+// anything is written to disk. Duplicate paths and oversized or binary content
+// are rejected here so every writer shares the same rules.
+func validateSkillPackageFiles(files []domain.SkillFile) ([]domain.SkillFile, error) {
 	validated := make([]domain.SkillFile, 0, len(files))
 	seen := map[string]bool{}
 	hasEntry := false
 	for _, file := range files {
 		name := path.Clean(strings.ReplaceAll(strings.TrimSpace(file.Path), `\`, "/"))
 		if name == "." || strings.HasPrefix(name, "/") || name == ".." || strings.HasPrefix(name, "../") {
-			return domain.Skill{}, fmt.Errorf("invalid skill package path %q", file.Path)
+			return nil, fmt.Errorf("invalid skill package path %q", file.Path)
 		}
 		if seen[name] || len(file.Content) > maxSkillPackageFileSize || strings.ContainsRune(file.Content, '\x00') {
-			return domain.Skill{}, fmt.Errorf("invalid skill package file %q", name)
+			return nil, fmt.Errorf("invalid skill package file %q", name)
 		}
 		seen[name] = true
 		hasEntry = hasEntry || name == "SKILL.md"
 		validated = append(validated, domain.SkillFile{Path: name, Content: file.Content})
 	}
 	if !hasEntry {
-		return domain.Skill{}, fmt.Errorf("SKILL.md is required")
+		return nil, fmt.Errorf("SKILL.md is required")
 	}
 	for _, file := range validated {
 		if file.Path == "SKILL.md" && !validSkillEntry(file.Content) {
-			return domain.Skill{}, fmt.Errorf("SKILL.md frontmatter requires name and description")
+			return nil, fmt.Errorf("SKILL.md frontmatter requires name and description")
 		}
 	}
+	return validated, nil
+}
+
+// skillPackageRename is the final swap of a staged package onto the live
+// directory. It is a variable so tests can prove that a failed rename leaves
+// the previous package intact; production always uses os.Rename.
+var skillPackageRename = os.Rename
+
+// skillPackageSwap records one completed package replacement. Only a swap that
+// reports changed=true may be rolled back, and rollback is idempotent: a caller
+// that retries the compensation cannot remove a package it already restored.
+type skillPackageSwap struct {
+	root    string
+	backup  string
+	changed bool
+}
+
+// replaceSkillPackage stages the package beside the live directory and swaps it
+// in. A missing live directory is not an error: a resurrected skill has no
+// package left over from the delete. When the swap itself fails the previous
+// package is restored before returning, and the returned swap reports that
+// nothing changed so the caller leaves the directory alone.
+func (s *Store) replaceSkillPackage(item domain.Skill, files []domain.SkillFile) (skillPackageSwap, error) {
+	swap := skillPackageSwap{root: s.SkillPackagePath(item), backup: s.SkillPackagePath(item) + ".backup"}
 	base := filepath.Join(s.dataDir, "knowledge", "skills")
 	if err := os.MkdirAll(base, 0o700); err != nil {
-		return domain.Skill{}, err
+		return swap, err
 	}
 	stage, err := os.MkdirTemp(base, ".skill-stage-")
 	if err != nil {
-		return domain.Skill{}, err
+		return swap, err
 	}
 	defer os.RemoveAll(stage)
-	for _, file := range validated {
+	for _, file := range files {
 		target := filepath.Join(stage, filepath.FromSlash(file.Path))
 		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
-			return domain.Skill{}, err
+			return swap, err
 		}
 		if err := os.WriteFile(target, []byte(file.Content), 0o600); err != nil {
-			return domain.Skill{}, err
+			return swap, err
 		}
 	}
-	root := s.SkillPackagePath(item)
-	backup := root + ".backup"
-	_ = os.RemoveAll(backup)
-	if err := os.Rename(root, backup); err != nil {
+	if err := os.RemoveAll(swap.backup); err != nil {
+		return swap, err
+	}
+	rootExists := true
+	if _, err := os.Stat(swap.root); errors.Is(err, os.ErrNotExist) {
+		rootExists = false
+	} else if err != nil {
+		return swap, err
+	}
+	if rootExists {
+		if err := os.Rename(swap.root, swap.backup); err != nil {
+			return swap, err
+		}
+	}
+	if err := skillPackageRename(stage, swap.root); err != nil {
+		if rootExists {
+			_ = os.Rename(swap.backup, swap.root)
+		}
+		return swap, err
+	}
+	swap.changed = true
+	// Every package keeps the same skeleton so callers can drop files into
+	// scripts/, assets/ or agents/ without creating them first.
+	if err := ensureSkillPackageDirs(swap.root); err != nil {
+		swap.rollback()
+		return swap, err
+	}
+	return swap, nil
+}
+
+func ensureSkillPackageDirs(root string) error {
+	for _, name := range []string{"scripts", "assets", "agents"} {
+		if err := os.MkdirAll(filepath.Join(root, name), 0o700); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// commit drops the backup this swap created. It is safe on a failed swap.
+func (swap *skillPackageSwap) commit() {
+	if !swap.changed {
+		return
+	}
+	_ = os.RemoveAll(swap.backup)
+	swap.changed = false
+}
+
+// rollback restores the directory this swap replaced, and removes the one it
+// installed. It only ever touches the root and backup of this swap, and a
+// second call is a no-op.
+func (swap *skillPackageSwap) rollback() {
+	if !swap.changed {
+		return
+	}
+	_ = os.RemoveAll(swap.root)
+	if _, err := os.Stat(swap.backup); err == nil {
+		_ = os.Rename(swap.backup, swap.root)
+	}
+	swap.changed = false
+}
+
+func (s *Store) UpdateSkillPackage(ctx context.Context, item domain.Skill, baseVersion int, files []domain.SkillFile) (domain.Skill, error) {
+	if item.Version != baseVersion {
+		return domain.Skill{}, fmt.Errorf("skill version conflict")
+	}
+	validated, err := validateSkillPackageFiles(files)
+	if err != nil {
 		return domain.Skill{}, err
 	}
-	if err := os.Rename(stage, root); err != nil {
-		_ = os.Rename(backup, root)
+	swap, err := s.replaceSkillPackage(item, validated)
+	if err != nil {
 		return domain.Skill{}, err
 	}
 	item.Version++
-	item.SourcePath = root
+	item.SourcePath = s.SkillPackagePath(item)
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE skills SET package_slug=?,scope=?,project_id=?,name=?,description=?,instructions=?,version=?,status=?,enabled=?,auto_attach=?,source_path=?,updated_at=? WHERE id=? AND version=?`,
 		item.PackageSlug, item.Scope, item.ProjectID, item.Name, item.Description, item.Instructions, item.Version,
-		item.Status, boolInt(item.Enabled), boolInt(item.AutoAttach), root, timeString(item.UpdatedAt), item.ID, baseVersion,
+		item.Status, boolInt(item.Enabled), boolInt(item.AutoAttach), item.SourcePath, timeString(item.UpdatedAt), item.ID, baseVersion,
 	)
 	if err != nil {
-		_ = os.RemoveAll(root)
-		_ = os.Rename(backup, root)
+		swap.rollback()
 		return domain.Skill{}, err
 	}
 	if rows, _ := result.RowsAffected(); rows != 1 {
-		_ = os.RemoveAll(root)
-		_ = os.Rename(backup, root)
+		swap.rollback()
 		return domain.Skill{}, fmt.Errorf("skill version conflict")
 	}
-	_ = os.RemoveAll(backup)
+	swap.commit()
 	item.PackageFiles = validated
 	item.Files = make([]string, 0, len(validated))
 	for _, file := range validated {

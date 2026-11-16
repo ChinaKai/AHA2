@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -44,6 +45,10 @@ var errSyncedKnowledgeProjectDeleted = errors.New("synced knowledge project was 
 type skillPayload struct {
 	Skill domain.Skill       `json:"skill"`
 	Files []domain.SkillFile `json:"files"`
+	// Resurrect carries the generation token of a deliberate local rebuild.
+	// Only such an event may clear a skill tombstone on the receiving peer;
+	// ordinary upserts stay blocked whether or not their version is higher.
+	Resurrect string `json:"resurrect,omitempty"`
 }
 
 // skillPayloadIncludesAutoAttach reports whether the exported skill object
@@ -64,6 +69,80 @@ func skillPayloadIncludesAutoAttach(payload json.RawMessage) bool {
 	}
 	_, present := fields["auto_attach"]
 	return present
+}
+
+// skillResurrectVersion reports the version of an explicit rebuild event. The
+// resurrect token is what separates a deliberate local re-create from an
+// ordinary upsert, which must stay blocked by the tombstone no matter how high
+// its version climbed.
+func skillResurrectVersion(obj domain.SyncObject) (string, bool) {
+	if obj.Operation != "upsert" {
+		return "", false
+	}
+	var payload skillPayload
+	if err := decodePayload(obj, &payload); err != nil || strings.TrimSpace(payload.Resurrect) == "" {
+		return "", false
+	}
+	version := skillPayloadVersion(obj, payload.Skill.Version)
+	if version < 1 {
+		return "", false
+	}
+	return strconv.Itoa(version), true
+}
+
+// skillPayloadVersion is the version the sending device had when it exported
+// the payload. Payloads produced before the version became part of the object
+// carry the same value in the wire source version.
+func skillPayloadVersion(obj domain.SyncObject, payloadVersion int) int {
+	if payloadVersion > 0 {
+		return payloadVersion
+	}
+	value, err := strconv.Atoi(strings.TrimSpace(obj.SourceVersion))
+	if err != nil || value < 0 {
+		return 0
+	}
+	return value
+}
+
+// skillPayloadMatches reports whether applying the payload would change
+// anything it carries. Repeated deliveries of the same content must be a
+// no-op: bumping the version on every delivery makes the next export identity
+// differ and fuels an endless upload/pull loop.
+func skillPayloadMatches(current domain.Skill, incoming domain.Skill, files []domain.SkillFile) bool {
+	if current.Name != incoming.Name || current.Description != incoming.Description ||
+		current.Instructions != incoming.Instructions || current.Scope != incoming.Scope ||
+		current.ProjectID != incoming.ProjectID || current.Status != incoming.Status ||
+		current.Enabled != incoming.Enabled || current.AutoAttach != incoming.AutoAttach {
+		return false
+	}
+	return skillFilesMatch(current.PackageFiles, files)
+}
+
+func skillFilesMatch(current, incoming []domain.SkillFile) bool {
+	if len(current) != len(incoming) {
+		return false
+	}
+	byPath := make(map[string]string, len(current))
+	for _, file := range current {
+		name := path.Clean(strings.TrimSpace(file.Path))
+		if _, duplicate := byPath[name]; duplicate {
+			return false
+		}
+		byPath[name] = file.Content
+	}
+	seen := make(map[string]bool, len(incoming))
+	for _, file := range incoming {
+		name := path.Clean(strings.TrimSpace(file.Path))
+		if seen[name] {
+			return false
+		}
+		seen[name] = true
+		content, ok := byPath[name]
+		if !ok || content != file.Content {
+			return false
+		}
+	}
+	return true
 }
 
 // modelPayload keeps the runtime-only default env association portable without
@@ -512,12 +591,34 @@ func applyBusinessObject(ctx context.Context, database *store.Store, obj domain.
 	if obj.Operation == "delete" && (obj.Type == TypeTask || obj.Type == TypeWorkspace) {
 		return applyTaskGraphObject(ctx, database, obj)
 	}
+	// resurrectTombstone is the skill tombstone version this event is allowed
+	// to supersede. The tombstone is not removed here: the create that follows
+	// does it in the same transaction as the row and the package.
+	resurrectTombstone := ""
 	if tombstone, err := database.SyncTombstone(ctx, obj.Type, obj.ID); err == nil {
-		if obj.Operation == "delete" || !sharedVersionNewer(obj.Type, obj.SourceVersion, tombstone.Version) {
+		if obj.Operation == "delete" {
 			return nil
 		}
-		if err := database.DeleteSyncTombstone(ctx, obj.Type, obj.ID); err != nil {
-			return err
+		if obj.Type == TypeSkill {
+			// A Skill this device deleted is only recreated by an explicit
+			// resurrect event: a deliberate local rebuild carries a unique
+			// token and a version above the tombstone. Ordinary replays --
+			// including the higher-versioned churn that resurrected skills in
+			// the field -- never clear the tombstone. The tombstone itself is
+			// exported with every snapshot, so peers keep blocking the same
+			// object until they see the resurrect.
+			version, resurrects := skillResurrectVersion(obj)
+			if !resurrects || !sharedVersionNewer(TypeSkill, version, tombstone.Version) {
+				return nil
+			}
+			resurrectTombstone = tombstone.Version
+		} else {
+			if !sharedVersionNewer(obj.Type, obj.SourceVersion, tombstone.Version) {
+				return nil
+			}
+			if err := database.DeleteSyncTombstone(ctx, obj.Type, obj.ID); err != nil {
+				return err
+			}
 		}
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return err
@@ -527,6 +628,10 @@ func applyBusinessObject(ctx context.Context, database *store.Store, obj domain.
 		return err
 	}
 	if obj.Operation == "delete" {
+		// Known gap, keep it in the release notes: a peer whose local version
+		// is already above the delete's source version keeps its copy and
+		// records a conflict instead. Only the deleting device is guaranteed
+		// to stay deleted; the tombstone never resurrects it there.
 		if exists && obj.SourceVersion != "" && sharedVersionNewer(obj.Type, localVersion, obj.SourceVersion) {
 			return &ConflictError{LocalPayload: localPayload, LocalVersion: localVersion, Cause: fmt.Errorf("%w: older delete for %s %s", ErrConflict, obj.Type, obj.ID)}
 		}
@@ -538,7 +643,7 @@ func applyBusinessObject(ctx context.Context, database *store.Store, obj domain.
 	if obj.Operation != "upsert" {
 		return fmt.Errorf("unsupported operation %q", obj.Operation)
 	}
-	return upsertBusinessObject(ctx, database, obj, exists)
+	return upsertBusinessObject(ctx, database, obj, exists, resurrectTombstone)
 }
 
 func currentBusinessObject(ctx context.Context, database *store.Store, kind, id string) (json.RawMessage, string, bool, error) {
@@ -625,7 +730,7 @@ func currentBusinessObject(ctx context.Context, database *store.Store, kind, id 
 	return raw, version, true, err
 }
 
-func upsertBusinessObject(ctx context.Context, database *store.Store, obj domain.SyncObject, exists bool) error {
+func upsertBusinessObject(ctx context.Context, database *store.Store, obj domain.SyncObject, exists bool, resurrectTombstone string) error {
 	now := time.Now().UTC()
 	switch obj.Type {
 	case TypeProject, TypeWorkspace, TypeTask, TypeTaskAgent, TypeRound, TypeTurn, TypeConversation, TypeTaskMemory, TypeHardware:
@@ -757,33 +862,57 @@ func upsertBusinessObject(ctx context.Context, database *store.Store, obj domain
 			if err != nil {
 				return err
 			}
-			p.Skill.Version = current.Version
-			p.Skill.PackageSlug = current.PackageSlug
 			// A peer predating portable auto_attach omits the field. Preserve
 			// the local value in that case instead of importing the zero value
 			// as an explicit disable.
 			if !skillPayloadIncludesAutoAttach(obj.Payload) {
 				p.Skill.AutoAttach = current.AutoAttach
 			}
-			_, err = database.UpdateSkillPackage(ctx, p.Skill, current.Version, p.Files)
-			return err
+			remote := skillPayloadVersion(obj, p.Skill.Version)
+			// Applying an object that changes nothing must not rewrite the
+			// package: every re-delivery used to bump the version, and since
+			// the export identity embeds that version, each bump queued
+			// another upload and another pull — an unbounded version churn.
+			// The version still advances to what the sender has seen, because
+			// it is the watermark that keeps a later, lower-versioned event
+			// from overwriting the content this device already received.
+			if skillPayloadMatches(current, p.Skill, p.Files) {
+				return database.AdvanceSkillVersion(ctx, obj.ID, current.Version, remote)
+			}
+			// An event produced before a newer local edit must not overwrite
+			// it. The payload's version is what the sending device exported;
+			// older peers omit it, so fall back to the wire source version.
+			// With no version at all the event cannot be judged stale and the
+			// content comparison above is the only defence.
+			if remote > 0 && remote < current.Version {
+				return nil
+			}
+			p.Skill.Version = current.Version
+			p.Skill.PackageSlug = current.PackageSlug
+			updated, err := database.UpdateSkillPackage(ctx, p.Skill, current.Version, p.Files)
+			if err != nil {
+				return err
+			}
+			// Keep the watermark at the highest version seen, even when the
+			// applied content came from a much newer event than local + 1.
+			return database.AdvanceSkillVersion(ctx, obj.ID, updated.Version, remote)
 		}
 		desired := p.Skill.Version
 		if desired < 1 {
 			desired = 1
 		}
-		p.Skill.Version = desired - 1
-		if err := database.CreateSkill(ctx, p.Skill); err != nil {
+		if resurrectTombstone != "" {
+			// A tombstoned object that still has a row is inconsistent state;
+			// keep the tombstone blocking rather than guessing.
+			if exists {
+				return nil
+			}
+			p.Skill.Version = desired
+			_, err := database.ResurrectSkillPackage(ctx, p.Skill, p.Files, resurrectTombstone)
 			return err
 		}
-		created, err := database.Skill(ctx, obj.ID)
-		if err != nil {
-			return err
-		}
-		created.Scope, created.ProjectID = p.Skill.Scope, p.Skill.ProjectID
-		created.Name, created.Description, created.Instructions = p.Skill.Name, p.Skill.Description, p.Skill.Instructions
-		created.Status, created.Enabled, created.UpdatedAt = p.Skill.Status, p.Skill.Enabled, p.Skill.UpdatedAt
-		_, err = database.UpdateSkillPackage(ctx, created, desired-1, p.Files)
+		p.Skill.Version = desired
+		_, err := database.CreateSkillPackage(ctx, p.Skill, p.Files)
 		return err
 	case TypeProvider:
 		var v domain.Provider
