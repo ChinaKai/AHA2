@@ -52,6 +52,16 @@ const localText: Record<string, [zhCN: string, enUS: string]> = {
   "kv.skillGlobalConfirmRequired": ["全局启用需要二次确认，请重试并确认弹窗。", "Global enabling needs the second confirmation; retry and confirm the dialog."],
   "kv.skillNotFound": ["该 vault 技能已不存在，请刷新后重试。", "This vault skill no longer exists. Refresh and try again."],
   "kv.skillVaultDisabled": ["知识库功能未启用，无法修改任务自动启用。", "The knowledge vault is disabled, so auto-enable cannot be changed."],
+  "kv.blocked.title": ["知识库暂时不可用", "Knowledge vault unavailable"],
+  "kv.blocked.statusMigration": ["待迁移", "Migration needed"],
+  "kv.blocked.statusInit": ["待初始化", "Not initialized"],
+  "kv.blocked.statusDisabled": ["已关闭", "Disabled"],
+  "kv.blocked.migration": ["升级后还没有迁移或导入知识。请先完成迁移或导入，旧知识库的内容才会出现在这里。", "This upgrade has not migrated or imported knowledge yet. Complete the migration or import first; legacy knowledge will then appear here."],
+  "kv.blocked.uninitialized": ["文件知识库还没有初始化，或索引尚未就绪。可以创建示例知识库、迁移或导入已有知识库。", "The file knowledge vault is not initialized or its index is not ready. Create the sample vault, migrate, or import an existing vault."],
+  "kv.blocked.disabled": ["文件知识库当前已关闭。可以重新启用，或迁移/导入已有知识库。", "The file knowledge vault is off. Re-enable it, or migrate/import an existing vault."],
+  "kv.blocked.action": ["去高级设置迁移或导入", "Open advanced settings to migrate or import"],
+  "kv.blocked.actionInit": ["去高级设置初始化、迁移或导入", "Open advanced settings to initialize, migrate, or import"],
+  "kv.blocked.note": ["旧知识库只作为迁移来源，不再在知识库页展示。", "The legacy knowledge base is only a migration source and is no longer shown on this page."],
   "kv.settingsIndexAction": ["索引操作", "Index action"],
   "kv.settingsRebuild": ["重建索引", "Rebuild index"],
   "kv.settingsRebuilding": ["重建中…", "Rebuilding…"],
@@ -400,6 +410,12 @@ interface VaultState {
   initialized: boolean;
   loading: LoadState;
   error: string;
+  // The main knowledge route always renders this page. When the vault switch
+  // is off the libraries call reports knowledge_vault_disabled; the page then
+  // shows a blocked state with a migration/import entry instead of falling
+  // back to the legacy workspace UI.
+  blocked: boolean;
+  blockedStatus: string;
   libraries: KnowledgeVaultLibrary[];
   projects: KnowledgeVaultLibrary[];
   vaultReady: boolean;
@@ -549,6 +565,7 @@ function initialSidebarWidth(): number {
 function initialState(): VaultState {
   return {
     initialized: false, loading: "idle", error: "",
+    blocked: false, blockedStatus: "",
     libraries: [], projects: [], vaultReady: false, indexReady: false,
     vaultName: "", vaultPath: "", obsidianVault: "", obsidianReady: false,
     rebuiltAt: "", warning: "",
@@ -1036,9 +1053,40 @@ function vaultRootAttributes(): string {
   return `style="--kv-tree-width:${treeWidth}px;--kv-resizer-width:${resizerWidth}px" data-kv-sidebar-collapsed="${state.sidebarCollapsed}"`;
 }
 
+function blockedPageHTML(): string {
+  const migration = state.blockedStatus === "needs_migration";
+  const uninitialized = state.blockedStatus === "needs_rebuild";
+  const body = migration
+    ? kt("kv.blocked.migration")
+    : uninitialized
+      ? kt("kv.blocked.uninitialized")
+      : kt("kv.blocked.disabled");
+  const status = migration
+    ? `<span class="kv-badge kv-badge-warn">${kt("kv.blocked.statusMigration")}</span>`
+    : uninitialized
+      ? `<span class="kv-badge kv-badge-warn">${kt("kv.blocked.statusInit")}</span>`
+      : `<span class="kv-badge">${kt("kv.blocked.statusDisabled")}</span>`;
+  const kind = migration ? "needs_migration" : uninitialized ? "needs_rebuild" : "disabled";
+  const action = migration ? kt("kv.blocked.action") : kt("kv.blocked.actionInit");
+  return `<div class="knowledge-vault knowledge-vault-blocked" data-kv-blocked="${kind}">
+    <header class="kv-topbar"><div class="kv-topbar-main"><div class="kv-heading"><strong>${t("kv.title")}</strong><small>${t("kv.subtitle")}</small></div></div></header>
+    <div class="kv-state kv-state-blocked" role="status">
+      ${status}
+      <strong>${kt("kv.blocked.title")}</strong>
+      <p>${escapeVaultHTML(body)}</p>
+      <div class="kv-blocked-actions"><button type="button" class="primary" data-kv-open-vault-settings>${action}</button></div>
+      <p class="kv-blocked-note">${kt("kv.blocked.note")}</p>
+    </div>
+  </div>`;
+}
+
 export function renderKnowledgeVaultPage(_context: KnowledgeVaultContext): string {
   installTreeStyles();
   installPreviewStyles();
+  // The main knowledge navigation always renders this page. A disabled vault
+  // gets an explicit blocked state and a migration/import entry; it never
+  // falls back to the legacy workspace UI.
+  if (state.blocked) return blockedPageHTML();
   if (!state.initialized || state.loading === "loading") {
     return `<div class="knowledge-vault" data-kv-tab="${state.tab}" ${vaultRootAttributes()}>${vaultEmptyState("loading")}</div>`;
   }
@@ -1953,6 +2001,18 @@ function applyLibraries(payload: KnowledgeVaultLibraries): void {
   }
 }
 
+// The blocked page is still the real vault route, so it asks the settings API
+// which blocked state this instance is in (upgrade awaiting migration vs a
+// plain disabled vault). A failure only costs the more specific copy.
+async function loadBlockedReadiness(): Promise<void> {
+  try {
+    const result = await api.knowledgeVaultSettings();
+    state.blockedStatus = result.settings?.readiness?.status || "";
+  } catch {
+    state.blockedStatus = "";
+  }
+}
+
 async function loadLibraries(): Promise<boolean> {
   state.loading = "loading";
   rerender();
@@ -1962,9 +2022,29 @@ async function loadLibraries(): Promise<boolean> {
     state.initialized = true;
     state.loading = "ready";
     state.error = "";
+    if (!payload.vault_ready) {
+      // Enabled but not initialized yet: keep the vault route and explain the
+      // init/migrate/import choices instead of showing an empty workspace.
+      state.blocked = true;
+      state.blockedStatus = "needs_rebuild";
+      await loadBlockedReadiness();
+      if (!state.blockedStatus || state.blockedStatus === "ready") state.blockedStatus = "needs_rebuild";
+      rerender();
+      return false;
+    }
     rerender();
     return true;
   } catch (error) {
+    const detail = error as {code?: string; status?: number} | null;
+    if (detail?.code === "knowledge_vault_disabled" || detail?.status === 404) {
+      state.blocked = true;
+      state.initialized = true;
+      state.loading = "ready";
+      state.error = "";
+      await loadBlockedReadiness();
+      rerender();
+      return false;
+    }
     state.initialized = true;
     state.loading = "error";
     state.error = error instanceof Error ? error.message : String(error);
@@ -2667,12 +2747,18 @@ export function bindKnowledgeVaultPage(context: KnowledgeVaultContext): void {
         void loadDoc(parsed.id).then(() => { syncHash(state.doc); decorateDocBody(); });
       }
     });
-  } else if (state.initialized && state.loading === "ready") {
+  } else if (!state.blocked && state.initialized && state.loading === "ready") {
     loadTab(state.tab);
   }
 
   const root = document.querySelector<HTMLElement>(".knowledge-vault");
   if (!root) return;
+
+  // The blocked landing stays on this route and sends the Owner to the one
+  // place that can migrate, import or re-enable the vault.
+  root.querySelector<HTMLButtonElement>("[data-kv-open-vault-settings]")?.addEventListener("click", () => {
+    window.dispatchEvent(new CustomEvent("aha:open-vault-settings"));
+  });
 
   bindSidebarViewport();
   bindSidebarResizer(root);

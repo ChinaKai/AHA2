@@ -2,7 +2,8 @@
 // against a fixture API and covers: the two top tabs plus the fixed activity
 // entry, one real directory tree rooted at global/projects, tree links, editor
 // URIs, search scopes/deep links, activity recent/inbox/skills, mobile
-// two-level navigation, overflow, axe, and the switch-off legacy page.
+// two-level navigation, overflow, axe, and the switch-off blocked landing
+// (the main knowledge route never falls back to the legacy workspace).
 import assert from "node:assert/strict";
 import {createServer} from "node:http";
 import {readFile, mkdir} from "node:fs/promises";
@@ -210,6 +211,20 @@ window.__vaultRecentRequests = [];
 window.__vaultInboxRequests = [];
 window.__vaultDelays = {};
 window.__vaultSettings = ${JSON.stringify(SETTINGS)};
+if (OFF) {
+  window.__vaultSettings.settings = {
+    ...window.__vaultSettings.settings,
+    enabled: false, configured: false,
+    readiness: {
+      status: "needs_migration", can_enable: false, default_enabled: false,
+      switch_visible: true, rollback_allowed: true,
+      message: "升级后需要先迁移旧知识库，或导入已有知识库，才能启用文件知识库。",
+      missing: ["migration"],
+      checks: [{id: "migration", status: "fail", message: "检测到旧知识库（3 条知识）"}],
+    },
+    legacy: {entries: 3, skills: 0, skill_packages: 0},
+  };
+}
 window.__vaultGit = ${JSON.stringify(GIT_STATUS)};
 window.__vaultRebuildCount = 0;
 window.__vaultRebuildFail = false;
@@ -1780,16 +1795,27 @@ try {
   await unavailablePreview.screenshot({path: resolve(screenshots, "knowledge-vault-diff-unavailable-390.png"), fullPage: false});
   await unavailablePreview.close();
 
-  // Switch off: the legacy knowledge page is exactly what renders; the new
-  // endpoints 404 and no vault chunk is mounted.
+  // Switch off: there is no dual page. The knowledge route still renders the
+  // vault chunk, now as a blocked landing that explains the migration and
+  // links into the settings panel; the legacy workspace structure is gone.
   const off = await browser.newPage({viewport: {width: 1280, height: 900}, locale: "zh-CN"});
   await off.goto(`${url}/off`, {waitUntil: "networkidle"});
   await off.evaluate(() => document.querySelector("[data-view=knowledge]")?.click());
-  await off.waitForSelector("[data-knowledge-scope=global]", {timeout: 15000});
-  assert.equal(await off.locator(".knowledge-vault").count(), 0);
+  await off.waitForSelector("[data-kv-blocked=needs_migration]", {timeout: 15000});
+  assert.equal(await off.locator(".knowledge-vault").count(), 1, "the vault route stays mounted when the switch is off");
+  assert.equal(await off.locator("[data-knowledge-scope=global]").count(), 0, "the legacy workspace structure is not rendered");
+  assert.match(await off.locator("[data-kv-blocked]").innerText(), /待迁移/);
   assert.ok(await off.evaluate(() => window.__vaultRequests.some(item => item === "/api/v1/knowledge-vault/libraries")));
   const offStatus = await off.evaluate(async () => (await fetch("/api/v1/knowledge-vault/libraries")).status);
   assert.equal(offStatus, 404);
+  // The CTA navigates to the vault settings panel that owns migration/import.
+  await off.locator("[data-kv-open-vault-settings]").click();
+  await off.waitForSelector(".knowledge-vault-settings-panel", {timeout: 15000});
+  assert.doesNotMatch(await off.evaluate(() => location.hash), /^#knowledge/, "the CTA leaves the knowledge hash");
+  assert.equal(await off.locator("#knowledge-vault-settings-title").count(), 1, "the CTA opens the vault settings panel");
+  assert.match(await off.locator(".knowledge-vault-settings-panel").innerText(), /文件知识库/);
+  assert.equal(await off.locator(".knowledge-vault-blocked").count(), 0, "the blocked landing is replaced by the settings view");
+  assert.equal(await off.locator("[data-knowledge-scope=global]").count(), 0, "settings navigation leaves the legacy UI gone");
   await off.screenshot({path: resolve(screenshots, "knowledge-vault-switch-off.png"), fullPage: false});
   assert.deepEqual(errors, []);
   console.log("knowledge vault browser checks passed");

@@ -1180,3 +1180,52 @@ test("loadRecent only requests timestamp-only rows after the switch is enabled",
     api.knowledgeVaultRecent = original;
   }
 });
+
+test("a disabled vault renders the blocked landing with a settings CTA, not the legacy workspace", () => {
+  reset({blocked: true, blockedStatus: "needs_migration", blockedMessage: "升级后需要先迁移旧知识库。"});
+  const html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /data-kv-blocked="needs_migration"/);
+  assert.match(html, /class="kv-badge kv-badge-warn">待迁移</);
+  assert.match(html, /升级后还没有迁移或导入知识/);
+  assert.match(html, /data-kv-open-vault-settings/);
+  assert.match(html, /去高级设置迁移或导入/);
+  assert.match(html, /旧知识库只作为迁移来源/);
+  // No vault workbench and no legacy workspace UI on the blocked route.
+  assert.doesNotMatch(html, /kv-tree|kv-tabs|kv-search-trigger|知识首页|待绑定/);
+});
+
+test("a plain disabled vault says it is off and still offers the migration entry", () => {
+  reset({blocked: true, blockedStatus: "", blockedMessage: ""});
+  const html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /data-kv-blocked="disabled"/);
+  assert.match(html, /class="kv-badge">已关闭</);
+  assert.match(html, /文件知识库当前已关闭/);
+  assert.match(html, /data-kv-open-vault-settings/);
+});
+
+test("the blocked landing follows the active locale", async () => {
+  const panelSource = await readFile(resolve(root, "build", "knowledge_vault.js"), "utf8");
+  const version = panelSource.match(/from "\.\/i18n\.js(\?v=[^"]+)"/)?.[1] || "";
+  const i18nVersioned = await import(pathToFileURL(resolve(root, "build", "i18n.js")).href + version);
+  const previous = i18nVersioned.currentLocale();
+  try {
+    i18nVersioned.applyLocale("en-US");
+    reset({blocked: true, blockedStatus: "needs_migration"});
+    const html = vault.renderKnowledgeVaultPage(context());
+    assert.match(html, /Knowledge vault unavailable/);
+    assert.match(html, /Open advanced settings to migrate or import/);
+    assert.match(html, /The legacy knowledge base is only a migration source/);
+    assert.doesNotMatch(html, /去高级设置迁移或导入|旧知识库只作为迁移来源/);
+  } finally {
+    i18nVersioned.applyLocale(previous);
+  }
+});
+
+test("an uninitialized vault shows the initialization entry instead of an empty workspace", () => {
+  reset({blocked: true, blockedStatus: "needs_rebuild"});
+  const html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /data-kv-blocked="needs_rebuild"/);
+  assert.match(html, /class="kv-badge kv-badge-warn">待初始化</);
+  assert.match(html, /文件知识库还没有初始化/);
+  assert.match(html, /去高级设置初始化、迁移或导入/);
+});

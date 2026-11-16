@@ -3301,6 +3301,10 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
 .kv-state p { margin: 0; max-width: 62ch; font-size: var(--font-size-13); }
 .kv-state-error { border-color: var(--color-danger, #b24a3f); background: var(--color-danger-soft); }
 .kv-state-loading strong::after { content: "…"; }
+/* A switched-off vault keeps the knowledge route and explains the next step. */
+.kv-state-blocked { max-width: 760px; border-style: solid; }
+.kv-blocked-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 2px; }
+.kv-state-blocked .kv-blocked-note { color: var(--color-text-muted); font-size: var(--font-size-11); }
 
 .kv-feed, .kv-inbox, .kv-skills { max-width: 980px; }
 .kv-feed-day { margin-bottom: var(--space-5); }
