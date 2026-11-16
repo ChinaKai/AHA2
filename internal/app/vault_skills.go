@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"path/filepath"
 	"sort"
@@ -434,6 +435,13 @@ func (s *Service) vaultTaskSkills(ctx context.Context, projectID string, ids []s
 	if len(ids) == 0 {
 		return nil
 	}
+	if s.projectHasNoKnowledgeSpace(ctx, projectID) {
+		// Channel hosts and the pet's system project have no project vault
+		// space by design (task-535 removed the generated ones). Global vault
+		// skills still apply, but a stale project-scoped selection must not
+		// repeat the unbound-project warning on every Turn.
+		return s.vaultInfrastructureTaskSkills(ctx, projectID, ids)
+	}
 	if !s.vaultReadEnabled(projectID) {
 		log.Printf("knowledge vault task skills for project %s: %d selected skill(s) unavailable (%s)", projectID, len(ids), s.vaultReadDisabledReason(projectID))
 		return nil
@@ -490,9 +498,100 @@ func (s *Service) vaultTaskSkills(ctx context.Context, projectID string, ids []s
 	return result
 }
 
+// vaultInfrastructureTaskSkills loads the selected vault skills that can apply
+// to an infrastructure project. Only global vault skills can: project and
+// archive packages need the project space these projects do not own. Anything
+// that cannot load is reported once per project and selection instead of on
+// every Turn, because "no project space" is the designed state, not an error.
+func (s *Service) vaultInfrastructureTaskSkills(ctx context.Context, projectID string, ids []string) []domain.Skill {
+	if !s.vaultGlobalReadEnabled() {
+		s.warnVaultTaskSkillsOnce(projectID, ids, fmt.Sprintf("%d selected skill(s) unavailable because the global vault read is unavailable; task continues with the remaining skills", len(ids)))
+		return nil
+	}
+	wanted := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		wanted[id] = true
+	}
+	result := make([]domain.Skill, 0, len(ids))
+	seen := make(map[string]bool, len(ids))
+	_ = s.knowledgeVault.WithReader(func(reader *knowledgevault.Reader) error {
+		response, err := reader.Skills(ctx)
+		if err != nil {
+			return err
+		}
+		for _, skill := range response.Skills {
+			if !wanted[skill.Key] || seen[skill.Key] {
+				continue
+			}
+			// Project and archive skills require a project vault space that
+			// infrastructure projects do not own; a stale selection is skipped
+			// below and reported once.
+			if skill.Scope != "global" {
+				continue
+			}
+			files, err := reader.SkillFiles(skill.RelativePath)
+			if err != nil {
+				continue
+			}
+			packageFiles := make([]domain.SkillFile, 0, len(files))
+			names := make([]string, 0, len(files))
+			for _, file := range files {
+				packageFiles = append(packageFiles, domain.SkillFile{Path: file.Path, Content: file.Content})
+				names = append(names, file.Path)
+			}
+			result = append(result, domain.Skill{
+				ID: skill.Key, PackageSlug: skill.Slug, Scope: skill.Scope, ProjectID: skill.ProjectID,
+				Name: skill.Name, Description: skill.Description, Version: 1, Status: "active", Enabled: true,
+				SourcePath: filepath.Join(reader.Config().VaultPath, filepath.FromSlash(skill.RelativePath)),
+				Files:      names, PackageFiles: packageFiles,
+			})
+			seen[skill.Key] = true
+		}
+		return nil
+	})
+	missing := make([]string, 0)
+	seenMissing := map[string]bool{}
+	for _, id := range ids {
+		if !seen[id] && !seenMissing[id] {
+			seenMissing[id] = true
+			missing = append(missing, id)
+		}
+	}
+	if len(missing) > 0 {
+		s.warnVaultTaskSkillsOnce(projectID, missing, fmt.Sprintf("%d selected skill(s) cannot load for this infrastructure project: it has no project vault space, so only available global vault skills apply (%s); task continues with the remaining skills", len(missing), strings.Join(missing, ", ")))
+	}
+	return result
+}
+
+// warnVaultTaskSkillsOnce logs an expected-state vault skill diagnostic at most
+// once per project, selection and reason. Infrastructure Task turns run
+// repeatedly, so the same unavailable selection must not flood the log.
+func (s *Service) warnVaultTaskSkillsOnce(projectID string, ids []string, message string) {
+	if s == nil {
+		return
+	}
+	keyIDs := append([]string(nil), ids...)
+	sort.Strings(keyIDs)
+	key := strings.TrimSpace(projectID) + "\x00" + strings.Join(keyIDs, "\x00") + "\x00" + message
+	if _, loaded := s.vaultSkillWarnOnce.LoadOrStore(key, struct{}{}); loaded {
+		return
+	}
+	log.Printf("knowledge vault task skills for project %s: %s", projectID, message)
+}
+
 // vaultSkillExistsInProject validates one selected vault id for task updates.
 func (s *Service) vaultSkillExistsInProject(ctx context.Context, projectID, id string) bool {
-	if !s.vaultReadEnabled(projectID) {
+	infrastructure := s.projectHasNoKnowledgeSpace(ctx, projectID)
+	projectRead := s.vaultReadEnabled(projectID)
+	globalRead := s.vaultGlobalReadEnabled()
+	if infrastructure {
+		// Infrastructure projects have no project space, so only global vault
+		// skills are valid. This keeps a pet Task's global skill selection
+		// editable even though project_pet is never bound in the manifest.
+		if !globalRead {
+			return false
+		}
+	} else if !projectRead {
 		return false
 	}
 	found := false
@@ -505,8 +604,11 @@ func (s *Service) vaultSkillExistsInProject(ctx context.Context, projectID, id s
 			if skill.Key != id {
 				continue
 			}
-			if skill.Scope == "global" || (skill.Scope == "project" && skill.ProjectID == projectID) {
+			switch {
+			case skill.Scope == "global":
 				found = true
+			case skill.Scope == "project" && skill.ProjectID == projectID:
+				found = projectRead
 			}
 			break
 		}

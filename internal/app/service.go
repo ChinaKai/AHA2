@@ -211,9 +211,13 @@ type Service struct {
 	// write budget as the vault engine, which tracks its own counter durably.
 	agentKnowledgeBudgetMu sync.Mutex
 	agentKnowledgeBudget   map[string]legacyKnowledgeBudget
-	buildVersion           string
-	webVersion             string
-	startedAt              time.Time
+	// vaultSkillWarnOnce deduplicates expected-state vault skill diagnostics.
+	// Infrastructure projects own no vault space, so a selected project skill
+	// can never load; that is reported once instead of on every Turn.
+	vaultSkillWarnOnce sync.Map
+	buildVersion       string
+	webVersion         string
+	startedAt          time.Time
 
 	// These four are detection seams. Production uses the workspace probe and
 	// the real host enumeration; tests substitute them so address selection can be

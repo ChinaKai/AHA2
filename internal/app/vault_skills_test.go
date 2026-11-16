@@ -1,8 +1,10 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -73,6 +75,11 @@ func buildVaultSkillManagerWithoutIndex(t *testing.T) *knowledgevault.Manager {
 
 func newVaultSkillsFixtureWithManager(t *testing.T, manager *knowledgevault.Manager) vaultSkillsFixture {
 	t.Helper()
+	return newVaultSkillsFixtureForProject(t, manager, domain.Project{ID: vaultSkillsProjectID, Name: "Vault Skills"})
+}
+
+func newVaultSkillsFixtureForProject(t *testing.T, manager *knowledgevault.Manager, project domain.Project) vaultSkillsFixture {
+	t.Helper()
 	ctx := context.Background()
 	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
 	if err != nil {
@@ -84,12 +91,20 @@ func newVaultSkillsFixtureWithManager(t *testing.T, manager *knowledgevault.Mana
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	project := domain.Project{ID: vaultSkillsProjectID, Name: "Vault Skills", CreatedAt: now, UpdatedAt: now}
+	if project.Name == "" {
+		project.Name = project.ID
+	}
+	if project.CreatedAt.IsZero() {
+		project.CreatedAt = now
+	}
+	if project.UpdatedAt.IsZero() {
+		project.UpdatedAt = now
+	}
 	if err := database.CreateProject(ctx, project); err != nil {
 		t.Fatal(err)
 	}
 	workspace := domain.Workspace{
-		ID: "workspace-vault-skills", ProjectID: project.ID, Name: "local", Locality: "local", Transport: "native",
+		ID: "workspace-" + strings.ReplaceAll(project.ID, "_", "-"), ProjectID: project.ID, Name: "local", Locality: "local", Transport: "native",
 		RootPath: t.TempDir(), Health: "ready", AgentAPIMode: "auto", CreatedAt: now, UpdatedAt: now,
 	}
 	if err := database.CreateWorkspace(ctx, workspace); err != nil {
@@ -113,6 +128,7 @@ func (f vaultSkillsFixture) createTask(t *testing.T, skillIDs []string) domain.T
 	task, err := f.service.CreateTask(f.ctx, CreateTaskInput{
 		ProjectID: f.project.ID, WorkspaceID: f.workspace.ID, Title: "vault skills",
 		Request: "vault skills", SkillIDs: skillIDs, ModelID: "model-vault-skills",
+		AllowSystemProject: domain.IsSystemManagedProject(f.project),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -527,5 +543,139 @@ func TestVaultSkillAutoAttachRequiresIndexReady(t *testing.T) {
 	task := fixture.createTask(t, nil)
 	if hasTaskSkill(task, "vault-skill:global:demo") {
 		t.Fatalf("task inherited a vault skill while the index was unavailable: %#v", task.SkillIDs)
+	}
+}
+
+// captureLog redirects the standard logger for the duration of one test. The
+// package's parallel tests are paused while a sequential test runs, so the
+// process-wide logger cannot interleave with them.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buffer bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&buffer)
+	t.Cleanup(func() { log.SetOutput(previous) })
+	return &buffer
+}
+
+const vaultSystemProjectID = "project_system_skills"
+
+// A system project has no project vault space by design (task-535). Its
+// selected global vault skills must still load, and repeating the Turn must not
+// repeat the old "selected skills unavailable" warning.
+func TestVaultTaskSkillsForSystemProjectLoadsGlobalSkillsQuietly(t *testing.T) {
+	withUnsetEnv(t, knowledgeVaultReadProjectsEnv)
+	fixture := newVaultSkillsFixtureForProject(t, buildVaultReadManager(t, true, vaultSkillFiles()), domain.Project{
+		ID: vaultSystemProjectID, Name: "System Skills", ProjectType: "system", KnowledgePolicy: "none",
+	})
+	ctx := fixture.ctx
+	now := time.Now().UTC()
+	legacy := domain.Skill{
+		ID: "skill-system-global", Scope: "global", Name: "System Global", Instructions: "legacy global",
+		Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := fixture.database.CreateSkill(ctx, legacy); err != nil {
+		t.Fatal(err)
+	}
+	task := fixture.createTask(t, []string{"vault-skill:global:demo", legacy.ID})
+	for _, want := range []string{"vault-skill:global:demo", legacy.ID} {
+		if !hasTaskSkill(task, want) {
+			t.Fatalf("system project rejected %s: %#v", want, task.SkillIDs)
+		}
+	}
+
+	logs := captureLog(t)
+	for attempt := 0; attempt < 3; attempt++ {
+		active := fixture.service.activeTaskSkills(ctx, task)
+		if len(active) != 2 {
+			t.Fatalf("attempt %d active skills = %#v, want the global vault skill and the legacy global skill", attempt, active)
+		}
+		byID := map[string]domain.Skill{}
+		for _, item := range active {
+			byID[item.ID] = item
+		}
+		demo, ok := byID["vault-skill:global:demo"]
+		if !ok || len(demo.PackageFiles) != 2 || demo.PackageFiles[0].Path != "SKILL.md" {
+			t.Fatalf("attempt %d global vault package = %#v", attempt, demo.PackageFiles)
+		}
+		if _, ok := byID[legacy.ID]; !ok {
+			t.Fatalf("attempt %d lost the legacy global skill: %#v", attempt, active)
+		}
+	}
+	if out := logs.String(); strings.Contains(out, "unavailable") || strings.Contains(out, "knowledge vault task skills") {
+		t.Fatalf("system project repeated a vault skill warning: %s", out)
+	}
+	// Re-saving the same selection must keep validating; the pet Task edits its
+	// own Skill list through this path.
+	if _, err := fixture.service.UpdateTaskSkills(ctx, task.ID, []string{"vault-skill:global:demo", legacy.ID}); err != nil {
+		t.Fatalf("update system project task skills: %v", err)
+	}
+}
+
+// A stale project-scoped vault selection on a system project can never load
+// because the space is intentionally absent. That is reported once, not on
+// every Turn, and it does not fail the skill load.
+func TestVaultTaskSkillsForSystemProjectReportsStaleProjectSkillOnce(t *testing.T) {
+	withUnsetEnv(t, knowledgeVaultReadProjectsEnv)
+	fixture := newVaultSkillsFixtureForProject(t, buildVaultReadManager(t, true, vaultSkillFiles()), domain.Project{
+		ID: vaultSystemProjectID, Name: "System Skills", ProjectType: "system", KnowledgePolicy: "none",
+	})
+	staleID := "vault-skill:project:" + vaultSkillsProjectID + ":vault-review"
+	logs := captureLog(t)
+	for attempt := 0; attempt < 3; attempt++ {
+		if got := fixture.service.vaultTaskSkills(fixture.ctx, fixture.project.ID, []string{staleID}); len(got) != 0 {
+			t.Fatalf("attempt %d loaded a project skill without a project space: %#v", attempt, got)
+		}
+	}
+	out := logs.String()
+	if count := strings.Count(out, "knowledge vault task skills"); count != 1 {
+		t.Fatalf("stale project skill warnings = %d, want 1; logs=%s", count, out)
+	}
+	if !strings.Contains(out, "has no project vault space") {
+		t.Fatalf("warning did not explain the infrastructure reason: %s", out)
+	}
+}
+
+// A normal project whose index is not ready keeps the diagnostic warning, and
+// because the source has not changed it repeats each Turn exactly as before.
+func TestVaultTaskSkillsNormalProjectIndexNotReadyKeepsDiagnostic(t *testing.T) {
+	withUnsetEnv(t, knowledgeVaultReadProjectsEnv)
+	fixture := newVaultSkillsFixtureWithManager(t, buildVaultSkillManagerWithoutIndex(t))
+	logs := captureLog(t)
+	for attempt := 0; attempt < 2; attempt++ {
+		if got := fixture.service.vaultTaskSkills(fixture.ctx, fixture.project.ID, []string{"vault-skill:global:demo"}); len(got) != 0 {
+			t.Fatalf("attempt %d loaded a skill without an index: %#v", attempt, got)
+		}
+	}
+	out := logs.String()
+	if count := strings.Count(out, "selected skill(s) unavailable"); count != 2 {
+		t.Fatalf("normal project warnings = %d, want 2 (one per Turn); logs=%s", count, out)
+	}
+	if !strings.Contains(out, "index is not ready") {
+		t.Fatalf("normal project warning lost the index diagnostic: %s", out)
+	}
+}
+
+// Global vault skills are valid for an infrastructure project; project-scoped
+// ones are not. Normal unbound projects keep the old rejection.
+func TestVaultSkillExistsInProjectFollowsInfrastructureScope(t *testing.T) {
+	withUnsetEnv(t, knowledgeVaultReadProjectsEnv)
+	fixture := newVaultSkillsFixtureForProject(t, buildVaultReadManager(t, true, vaultSkillFiles()), domain.Project{
+		ID: vaultSystemProjectID, Name: "System Skills", ProjectType: "system", KnowledgePolicy: "none",
+	})
+	ctx := fixture.ctx
+	if !fixture.service.vaultSkillExistsInProject(ctx, fixture.project.ID, "vault-skill:global:demo") {
+		t.Fatal("system project rejected a global vault skill")
+	}
+	if fixture.service.vaultSkillExistsInProject(ctx, fixture.project.ID, "vault-skill:project:"+vaultSkillsProjectID+":vault-review") {
+		t.Fatal("system project accepted a project vault skill from another project")
+	}
+	// A normal project that the manifest does not bind keeps the old rule.
+	unbound := domain.Project{ID: "project_skill_unbound", Name: "Unbound", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	if err := fixture.database.CreateProject(ctx, unbound); err != nil {
+		t.Fatal(err)
+	}
+	if fixture.service.vaultSkillExistsInProject(ctx, unbound.ID, "vault-skill:global:demo") {
+		t.Fatal("unbound normal project accepted a vault skill")
 	}
 }
