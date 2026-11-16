@@ -16,6 +16,8 @@ const panel = await import(pathToFileURL(panelPath).href);
 const panelSource = await readFile(panelPath, "utf8");
 const apiVersion = panelSource.match(/from "\.\/api\.js(\?v=[^"]+)?"/)?.[1] ?? "";
 const {api} = await import(`${pathToFileURL(resolve(root, "build", "api.js")).href}${apiVersion}`);
+const i18nVersion = panelSource.match(/from "\.\/i18n\.js(\?v=[^"]+)?"/)?.[1] ?? "";
+const i18n = await import(`${pathToFileURL(resolve(root, "build", "i18n.js")).href}${i18nVersion}`);
 
 const ready = {
   enabled: true,
@@ -60,7 +62,15 @@ function emptyVault(patch = {}) {
       switch_visible: false,
       message: "知识库或索引尚未就绪，请先重建索引。",
       missing: ["vault_initialized", "index_schema"],
-      checks: [{id: "index_fresh", status: "fail", message: "索引尚未建立"}],
+      checks: [
+        {id: "vault_initialized", status: "fail", message: "知识库尚未初始化（缺少 .aha-vault.json）"},
+        {id: "vault_writable", status: "ok", message: "知识库目录可写"},
+        {id: "index_schema", status: "fail", message: "索引尚未建立或不可读"},
+        {id: "index_writable", status: "ok", message: "索引目录可写"},
+        {id: "index_fresh", status: "fail", message: "索引尚未建立"},
+        {id: "manifest_binding", status: "ok", message: "所有项目都已绑定到知识库"},
+        {id: "migration", status: "ok", message: "没有检测到旧知识库"},
+      ],
     },
     legacy: {entries: 0, skills: 0, skill_packages: 0},
     ...patch,
@@ -136,11 +146,19 @@ test("settings panel shows vault, index and source for an enabled vault", async 
     const ctx = context();
     await panel.refreshKnowledgeVaultSettingsPanel(ctx);
     const html = panel.renderKnowledgeVaultSettingsPanel(ctx);
-    assert.match(html, /已启用 · 来源：数据库设置/);
-    assert.match(html, /已就绪（AHA2 Knowledge）/);
-    assert.match(html, /已就绪 · 5 条/);
+    assert.match(html, /class="knowledge-vault-state is-on">已启用</);
+    assert.match(html, /状态来源：数据库设置/);
+    assert.match(html, /Vault 路径<\/dt><dd><code>\/srv\/vault<\/code>/);
+    assert.match(html, /索引路径<\/dt><dd><code>\/srv\/index\.db<\/code>/);
+    assert.match(html, /索引条数<\/dt><dd>5 条/);
+    assert.match(html, /class="knowledge-vault-badge is-ok">正常</);
     assert.match(html, /type="checkbox" checked/);
-    assert.match(html, /\/srv\/vault/);
+    // The health checks are one compact list instead of 16px block rows.
+    assert.match(html, /knowledge-vault-checks-passed/);
+    assert.doesNotMatch(html, /class="knowledge-vault-status"/);
+    // No legacy data means no legacy section and no legacy counts.
+    assert.doesNotMatch(html, /knowledge-vault-legacy/);
+    assert.doesNotMatch(html, /旧知识<\/dt>/);
     // An initialized vault must not offer the destructive-ish init action.
     assert.doesNotMatch(html, /knowledge-vault-init/);
     // Rebuilding moved to the knowledge page's gear panel; the advanced panel
@@ -161,11 +179,15 @@ test("an empty vault offers sample initialization before enabling the index acti
     const ctx = context();
     await panel.refreshKnowledgeVaultSettingsPanel(ctx);
     const html = panel.renderKnowledgeVaultSettingsPanel(ctx);
-    assert.match(html, /已关闭 · 来源：启动默认/);
-    assert.match(html, /未初始化/);
+    assert.match(html, /class="knowledge-vault-state">已关闭</);
+    assert.match(html, /状态来源：启动默认/);
+    assert.match(html, /class="knowledge-vault-badge is-warn">待初始化</);
+    assert.match(html, /目录未初始化/);
+    assert.match(html, /知识库或索引尚未就绪，请先重建索引/);
+    assert.match(html, /未满足：/);
     assert.match(html, /id="knowledge-vault-init"/);
     assert.doesNotMatch(html, /knowledge-vault-rebuild/);
-    assert.match(html, /索引尚未建立/);
+    assert.doesNotMatch(html, /knowledge-vault-legacy/);
   } finally {
     restore();
   }
@@ -185,7 +207,7 @@ test("the toggle persists through the API and updates the shell switch state", a
     await panel.__knowledgeVaultSettingsActionsForTest.setEnabled(false);
     assert.deepEqual(calls, [false]);
     assert.equal(ctx.applied.at(-1).enabled, false);
-    assert.match(panel.renderKnowledgeVaultSettingsPanel(ctx), /已关闭 · 来源：数据库设置/);
+    assert.match(panel.renderKnowledgeVaultSettingsPanel(ctx), /class="knowledge-vault-state">已关闭</);
     assert.ok(ctx.messages.some(message => message.kind === "notice" && message.message.includes("已关闭，已立即回到旧知识库")));
   } finally {
     restoreGet();
@@ -233,8 +255,14 @@ test("fresh install hides the switch and keeps the vault as the read-only defaul
     const html = panel.renderKnowledgeVaultSettingsPanel(ctx);
     assert.doesNotMatch(html, /id="knowledge-vault-enabled"/);
     assert.match(html, /新安装默认使用文件知识库/);
-    assert.match(html, /就绪度：待初始化或重建索引/);
+    assert.match(html, /class="knowledge-vault-badge is-warn">待初始化</);
     assert.match(html, /id="knowledge-vault-init"/);
+    // A fresh install must not show the legacy section or the migration action.
+    assert.doesNotMatch(html, /knowledge-vault-legacy/);
+    assert.doesNotMatch(html, /id="knowledge-vault-migrate"/);
+    // An enabled-but-uninitialized vault is an expected fresh state, not the
+    // broken-index alert.
+    assert.doesNotMatch(html, /role="alert"/);
   } finally {
     restore();
   }
@@ -247,12 +275,16 @@ test("an upgrade shows the legacy rollback switch, blocks enabling and offers mi
     const ctx = context();
     await panel.refreshKnowledgeVaultSettingsPanel(ctx);
     const html = panel.renderKnowledgeVaultSettingsPanel(ctx);
-    assert.match(html, /当前使用旧知识库回退/);
+    assert.match(html, /升级后需要先迁移旧知识库，或导入已有知识库/);
     assert.match(html, /type="checkbox"[^>]*disabled/);
     assert.match(html, /id="knowledge-vault-migrate"/);
     assert.doesNotMatch(html, /id="knowledge-vault-init"/);
-    assert.match(html, /未满足：migration/);
-    assert.match(html, /3 条 · 1 个技能/);
+    // The missing list stays out of the migration state: the message already
+    // says what is missing, and the raw id `migration` must not leak.
+    assert.doesNotMatch(html, /未满足：migration/);
+    assert.match(html, /knowledge-vault-legacy/);
+    assert.match(html, /旧知识<\/dt><dd>3 条/);
+    assert.match(html, /旧技能<\/dt><dd>1 个/);
   } finally {
     restore();
   }
@@ -272,9 +304,14 @@ test("an enabled in-use upgrade hides migration and explains the legacy rollback
     assert.doesNotMatch(html, /id="knowledge-vault-migrate"/);
     assert.doesNotMatch(html, /id="knowledge-vault-init"/);
     assert.match(html, /旧知识库仅作只读回滚保留，不会被迁移覆盖/);
-    assert.match(html, /仅作只读回滚保留/);
-    assert.match(html, /已就绪 · 992 条/);
-    assert.match(html, /就绪度：已就绪/);
+    assert.match(html, /class="knowledge-vault-badge">仅回滚</);
+    assert.match(html, /索引条数<\/dt><dd>992 条/);
+    assert.match(html, /class="knowledge-vault-badge is-ok">正常</);
+    // The rollback sentence appeared four times before the regroup; it is now
+    // stated exactly once in the legacy section.
+    assert.equal((html.match(/仅作只读回滚保留/g) ?? []).length, 1);
+    // Migration is represented by the legacy facts row, not a duplicate check.
+    assert.doesNotMatch(html, /文件知识库已启用并在使用；旧知识库/);
   } finally {
     restore();
   }
@@ -302,9 +339,14 @@ test("an enabled degraded upgrade warns about unbound projects without offering 
     const ctx = context();
     await panel.refreshKnowledgeVaultSettingsPanel(ctx);
     const html = panel.renderKnowledgeVaultSettingsPanel(ctx);
-    assert.match(html, /文件知识库已启用，但/);
-    assert.match(html, /1 个项目未绑定/);
-    assert.doesNotMatch(html, /可以启用，但/);
+    assert.match(html, /class="knowledge-vault-badge is-warn">需关注</);
+    assert.match(html, /未绑定项目<\/dt><dd>1 个，继续使用旧库/);
+    // The degraded explanation is now carried by the badge, the unbound row and
+    // the legacy note; it must not also render as a second amber paragraph.
+    assert.doesNotMatch(html, /文件知识库已启用，但部分项目仍回退旧知识库/);
+    assert.doesNotMatch(html, /knowledge-vault-attention/);
+    assert.equal((html.match(/1 个，继续使用旧库/g) ?? []).length, 1);
+    assert.equal((html.match(/仅作只读回滚保留/g) ?? []).length, 1);
     assert.doesNotMatch(html, /id="knowledge-vault-migrate"/);
   } finally {
     restore();
@@ -413,7 +455,9 @@ test("a degraded vault can be enabled with an explicit fallback warning", async 
     const ctx = context();
     await panel.refreshKnowledgeVaultSettingsPanel(ctx);
     const html = panel.renderKnowledgeVaultSettingsPanel(ctx);
-    assert.match(html, /可以启用，但/);
+    assert.match(html, /class="knowledge-vault-badge is-warn">需关注</);
+    assert.match(html, /1 个项目未绑定，继续使用旧库/);
+    assert.doesNotMatch(html, /可以启用，但/);
     assert.doesNotMatch(html, /type="checkbox"[^>]*disabled/);
     await panel.__knowledgeVaultSettingsActionsForTest.setEnabled(true);
     assert.equal(ctx.applied.at(-1).enabled, true);
@@ -446,8 +490,9 @@ test("an enabled vault with a broken index shows an Agent fallback error", async
     await panel.refreshKnowledgeVaultSettingsPanel(ctx);
     const html = panel.renderKnowledgeVaultSettingsPanel(ctx);
     assert.match(html, /role="alert"/);
+    assert.match(html, /文件知识库已启用，但索引尚未就绪/);
     assert.match(html, /Agent 本次会回退旧知识库/);
-    assert.match(html, /索引尚未建立或不可读/);
+    assert.match(html, /索引未建立或不可读/);
   } finally {
     restore();
   }
@@ -491,7 +536,9 @@ test("a failing status request is shown once and retried explicitly, not in a re
     fail = false;
     await panel.refreshKnowledgeVaultSettingsPanel(ctx);
     assert.equal(calls, 2);
-    assert.match(panel.renderKnowledgeVaultSettingsPanel(ctx), /已启用 · 来源：数据库设置/);
+    const html = panel.renderKnowledgeVaultSettingsPanel(ctx);
+    assert.match(html, /class="knowledge-vault-state is-on">已启用</);
+    assert.match(html, /状态来源：数据库设置/);
   } finally {
     restore();
   }
@@ -584,6 +631,80 @@ test("the import form labels its fields and only shows the selected source mode"
     assert.doesNotMatch(html, /class="knowledge-vault-import-fields">\s*<label></);
   } finally {
     globalThis.document = originalDocument;
+    restore();
+  }
+});
+
+test("the panel groups source, health and legacy in order without a mixed state word", async () => {
+  panel.__resetKnowledgeVaultSettingsForTest();
+  const restore = stub("knowledgeVaultSettings", async () => ({ok: true, settings: inUseUpgradeVault({
+    readiness: {
+      status: "degraded", can_enable: true, default_enabled: false, switch_visible: true,
+      message: "文件知识库已启用，但部分项目仍回退旧知识库或索引需要关注；旧知识库仅作只读回滚保留，不会被迁移覆盖。",
+      unbound_projects: ["p1"],
+      checks: [
+        {id: "vault_initialized", status: "ok", message: "知识库目录已初始化"},
+        {id: "index_schema", status: "ok", message: "索引 schema 可读"},
+        {id: "manifest_binding", status: "warn", message: "1 个项目未绑定，这些项目继续使用旧知识库"},
+        {id: "migration", status: "ok", message: "文件知识库已启用并在使用；旧知识库仅作只读回滚保留，不会被迁移覆盖"},
+      ],
+    },
+  })}));
+  try {
+    const ctx = context();
+    await panel.refreshKnowledgeVaultSettingsPanel(ctx);
+    const html = panel.renderKnowledgeVaultSettingsPanel(ctx);
+    const source = html.indexOf("knowledge-vault-source");
+    const health = html.indexOf("knowledge-vault-health");
+    const legacy = html.indexOf("knowledge-vault-legacy");
+    assert.ok(source >= 0 && health > source && legacy > health, "source → health → legacy order");
+    // The panel head only says enabled/disabled; readiness lives in the health
+    // badge, so "已启用 · 可启用（部分项目回退）" can no longer appear.
+    assert.match(html, /class="knowledge-vault-state is-on">已启用</);
+    assert.doesNotMatch(html, /已启用 ·/);
+    assert.match(html, /class="knowledge-vault-badge is-warn">需关注</);
+  } finally {
+    restore();
+  }
+});
+
+test("long vault and index paths stay escaped inside their value cells", async () => {
+  panel.__resetKnowledgeVaultSettingsForTest();
+  const longVault = "/srv/build/users/kk/知识库/项目知识/<project>&name/一个非常长的目录名称";
+  const longIndex = "/srv/build/users/kk/data/knowledge-vault/index.sqlite3";
+  const restore = stub("knowledgeVaultSettings", async () => ({ok: true, settings: {...ready, vault_path: longVault, index_path: longIndex}}));
+  try {
+    const ctx = context();
+    await panel.refreshKnowledgeVaultSettingsPanel(ctx);
+    const html = panel.renderKnowledgeVaultSettingsPanel(ctx);
+    assert.ok(html.includes("&lt;project&gt;&amp;name"));
+    assert.ok(html.includes(longIndex));
+    assert.doesNotMatch(html, /<project>/);
+    assert.match(html, /Vault 路径<\/dt><dd><code>/);
+    assert.match(html, /索引路径<\/dt><dd><code>/);
+  } finally {
+    restore();
+  }
+});
+
+test("the panel copy follows the active locale", async () => {
+  panel.__resetKnowledgeVaultSettingsForTest();
+  const restore = stub("knowledgeVaultSettings", async () => ({ok: true, settings: ready}));
+  const previous = i18n.currentLocale();
+  try {
+    i18n.applyLocale("en-US");
+    const ctx = context();
+    await panel.refreshKnowledgeVaultSettingsPanel(ctx);
+    const html = panel.renderKnowledgeVaultSettingsPanel(ctx);
+    assert.match(html, /File knowledge vault/);
+    assert.match(html, /Knowledge source/);
+    assert.match(html, /Vault health/);
+    assert.match(html, /Vault path/);
+    assert.match(html, /Indexed entries/);
+    assert.match(html, /State source: saved setting/);
+    assert.doesNotMatch(html, /文件知识库/);
+  } finally {
+    i18n.applyLocale(previous);
     restore();
   }
 });
