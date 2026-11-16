@@ -104,7 +104,7 @@ func (s *Service) channelAllowedKnowledge(ctx context.Context, instanceID, endpo
 	} else if len(bindings) > 0 {
 		return s.channelBindingEntries(ctx, bindings)
 	}
-	if s.knowledgeLegacyDisabled {
+	if s.knowledgeLegacyDisabled.Load() {
 		// No binding and no legacy tables: an explicit empty selection. The
 		// channel does not borrow its host space implicitly.
 		return []domain.KnowledgeEntry{}, nil

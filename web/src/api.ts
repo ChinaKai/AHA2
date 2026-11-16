@@ -1070,13 +1070,16 @@ class APIClient {
     return this.request(`/api/v1/knowledge-vault/doc/${encodeURIComponent(id)}/diff`);
   }
 
-  knowledgeVaultSearch(options: {q?: string; library?: string; project?: string; type?: string; status?: string; tag?: string; limit?: number} = {}): Promise<KnowledgeVaultSearch> {
+  knowledgeVaultSearch(options: {q?: string; library?: string; project?: string; type?: string; status?: string; tag?: string; limit?: number; includeArchives?: boolean} = {}): Promise<KnowledgeVaultSearch> {
     const query = new URLSearchParams();
     for (const key of ["q", "library", "project", "type", "status", "tag"] as const) {
       const value = options[key];
       if (value) query.set(key, value);
     }
     if (options.limit) query.set("limit", String(options.limit));
+    // Archive entries are part of the searchable knowledge base; results keep
+    // their archive marker. Callers can still opt out explicitly.
+    query.set("include_archives", options.includeArchives === false ? "false" : "true");
     return this.request(`/api/v1/knowledge-vault/search?${query}`);
   }
 

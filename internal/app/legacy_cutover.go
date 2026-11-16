@@ -11,8 +11,9 @@ import (
 )
 
 // LegacyExportResult reports how many legacy entries were written into one
-// project space. Exportable counts non-index rows; Written counts successful
-// file writes. A mismatch aborts the cutover.
+// project space. Exportable counts substantive rows (non-index, non-navigation);
+// Written counts successful file writes. Cutover compares the exported ID set
+// with the whole legacy inventory and aborts on any mismatch.
 type LegacyExportResult struct {
 	ProjectID  string   `json:"project_id"`
 	Exportable int      `json:"exportable"`
@@ -45,6 +46,12 @@ func (s *Service) ExportLegacyKnowledgeToProjectSpace(ctx context.Context, proje
 		if entry.IsIndex || strings.TrimSpace(entry.Title) == "" {
 			continue
 		}
+		// Navigation roots and category pages are schema seeds, not knowledge;
+		// the inventory excludes them too, so exporting them would make the
+		// safety count disagree with what actually needs preserving.
+		if strings.EqualFold(strings.TrimSpace(entry.Type), "navigation") {
+			continue
+		}
 		result.Exportable++
 		canonicalType, _ := knowledgevault.NormalizeType(entry.Type, "")
 		if canonicalType == "" {
@@ -65,6 +72,13 @@ func (s *Service) ExportLegacyKnowledgeToProjectSpace(ctx context.Context, proje
 		result.EntryIDs = append(result.EntryIDs, writeResult.ID)
 	}
 	return result, nil
+}
+
+func firstStrings(values []string, limit int) []string {
+	if len(values) <= limit {
+		return values
+	}
+	return values[:limit]
 }
 
 func legacyExportTitle(value string) string {
@@ -119,20 +133,43 @@ func (s *Service) CutoverLegacyKnowledge(ctx context.Context, projectID string, 
 		// that were already removed.
 		return store.LegacyCutoverReport{Applied: true}, nil
 	}
+	policies, err := s.store.CountChannelKnowledgePolicies(ctx)
+	if err != nil {
+		return store.LegacyCutoverReport{}, err
+	}
+	if policies > 0 {
+		bindings, bindErr := s.store.CountKnowledgeBindings(ctx)
+		if bindErr != nil {
+			return store.LegacyCutoverReport{}, bindErr
+		}
+		if bindings == 0 {
+			return store.LegacyCutoverReport{}, fmt.Errorf("旧渠道仍有 %d 条 per-entry knowledge policy，但没有 knowledge_binding；请先为渠道配置空间绑定再切黑", policies)
+		}
+	}
 	exported, err := s.ExportLegacyKnowledgeToProjectSpace(ctx, projectID)
 	if err != nil {
 		return store.LegacyCutoverReport{}, err
 	}
-	inventory, err := s.store.LegacyKnowledgeInventory(ctx)
+	allSubstantive, err := s.store.LegacySubstantiveEntryIDs(ctx)
 	if err != nil {
 		return store.LegacyCutoverReport{}, err
 	}
-	// Refuse to drop substantive legacy documents that this export did not
-	// account for. Navigation roots and index rows are schema seeds, not
-	// knowledge; the dedicated library's root is recreated by the space
-	// initializer.
-	if inventory.Entries > exported.Exportable {
-		return store.LegacyCutoverReport{}, fmt.Errorf("旧库仍有 %d 条实质知识，但只导出 %d 条；已中止切黑", inventory.Entries, exported.Exportable)
+	exportedIDs := make(map[string]bool, len(exported.EntryIDs))
+	for _, id := range exported.EntryIDs {
+		exportedIDs[id] = true
+	}
+	missing := make([]string, 0)
+	for id := range allSubstantive {
+		if !exportedIDs[id] {
+			missing = append(missing, id)
+		}
+	}
+	if len(missing) > 0 || len(exportedIDs) != len(allSubstantive) {
+		// Refuse to drop substantive legacy documents that this export did
+		// not account for. Comparing ID sets (not a total that mixes index,
+		// navigation, and real documents) is what makes this safe.
+		return store.LegacyCutoverReport{}, fmt.Errorf("旧库仍有 %d 条实质知识未导出（目标导出 %d 条）；已中止切黑，示例 ID：%s",
+			len(missing), len(exportedIDs), strings.Join(firstStrings(missing, 3), ", "))
 	}
 	report, err := s.store.CutoverLegacyKnowledge(ctx, store.LegacyCutoverOptions{
 		BackupDir: backupDir,
@@ -149,6 +186,10 @@ func (s *Service) CutoverLegacyKnowledge(ctx context.Context, projectID string, 
 	if err != nil {
 		return report, err
 	}
+	// The current process must fail closed immediately: the tables are gone,
+	// so any later read that still believes legacy knowledge exists would
+	// error halfway through a Turn instead of routing to the vault.
+	s.SetLegacyKnowledgeDisabled(true)
 	if _, err := s.knowledgeVault.Rebuild(ctx); err != nil {
 		return report, fmt.Errorf("rebuild knowledge index after cutover: %w", err)
 	}

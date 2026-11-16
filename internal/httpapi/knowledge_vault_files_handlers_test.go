@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/ChinaKai/AHA2/internal/app"
+	"github.com/ChinaKai/AHA2/internal/knowledgevault"
 	"github.com/ChinaKai/AHA2/internal/store"
 )
 
@@ -129,5 +131,66 @@ func TestKnowledgeCutoverRequiresExplicitConfirmation(t *testing.T) {
 	server.cutoverLegacyKnowledge(recorder, httptest.NewRequest(http.MethodPost, "/api/v1/settings/knowledge-vault/cutover-legacy", body))
 	if recorder.Code != http.StatusConflict {
 		t.Fatalf("cutover without confirmation status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestKnowledgeVaultSearchIncludesArchiveByDefault(t *testing.T) {
+	ctx := context.Background()
+	config := knowledgevault.DefaultConfig(t.TempDir())
+	if _, err := knowledgevault.Bootstrap(config, knowledgevault.InitOptions{VaultName: "Archive HTTP"}); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(config.VaultPath, "archive", "old", "doc.md")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("---\nid: knowledge_archive_doc\nscope: archive\ntype: reference\nstatus: verified\ntitle: 归档文档\n---\n# 归档文档\n\n归档搜索内容。\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	index, err := knowledgevault.OpenIndex(ctx, config.IndexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := index.Rebuild(ctx, config.VaultPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := index.Close(); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := knowledgevault.NewManager(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.SetEnabled(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	server := &Server{knowledgeVault: manager}
+
+	recorder := httptest.NewRecorder()
+	server.knowledgeVaultSearch(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/knowledge-vault/search?q=%E5%BD%92%E6%A1%A3%E6%90%9C%E7%B4%A2", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("search status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var payload struct {
+		Results []struct {
+			Path    string `json:"path"`
+			Archive bool   `json:"archive"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Results) != 1 || !payload.Results[0].Archive || payload.Results[0].Path != "archive/old/doc.md" {
+		t.Fatalf("archive-inclusive HTTP search = %#v", payload.Results)
+	}
+
+	recorder = httptest.NewRecorder()
+	server.knowledgeVaultSearch(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/knowledge-vault/search?q=%E5%BD%92%E6%A1%A3%E6%90%9C%E7%B4%A2&include_archives=false", nil))
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Results) != 0 {
+		t.Fatalf("include_archives=false returned %#v", payload.Results)
 	}
 }

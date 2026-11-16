@@ -66,7 +66,7 @@ type AgentKnowledgeFeedbackResult struct {
 // SetLegacyKnowledgeDisabled marks the one-way cutover (schema v143). It is
 // set from the persisted schema version at startup, not from a user switch.
 func (s *Service) SetLegacyKnowledgeDisabled(disabled bool) {
-	s.knowledgeLegacyDisabled = disabled
+	s.knowledgeLegacyDisabled.Store(disabled)
 }
 
 func (s *Service) SetKnowledgeVaultRuntimeWrite(enabled bool) {

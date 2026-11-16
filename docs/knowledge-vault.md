@@ -160,5 +160,7 @@ aha2 knowledge-vault search <关键词>
 
 索引只服务于新知识页。旧表切黑是独立的一次性迁移（备份 → 导出 → 校验 → 删除旧表），不再提供运行时回退；删除动作不可逆，必须由 owner 在受控流程中执行：
 
+当前 `knowledge_bindings` 的支持边界：binding 的粒度是整个项目空间，`access_mode` 字段会被保存但渠道读取暂不区分 `read`/`read_write`，`scope_mode=selected` 的子树/条目限制尚未实现（按 `all` 读取整个空间）。切黑端点只负责保留已有的 binding 行，不会把旧 per-entry policy 自动转换；若旧 policy 非空但没有任何 binding，端点会拒绝执行并要求先完成绑定。
+
 `POST /api/v1/settings/knowledge-vault/cutover-legacy`，请求体
 `{"project_id":"<专用库项目>","backup_dir":"","confirm":true}`。服务端先导出该项目旧知识到其空间，再 `VACUUM INTO` 备份并校验行数；任一校验失败都不会删除旧表。

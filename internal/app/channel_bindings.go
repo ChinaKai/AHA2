@@ -65,8 +65,11 @@ func (s *Service) ReplaceChannelKnowledgeBindings(ctx context.Context, instanceI
 }
 
 // channelBindingEntries is the read path for explicit channel bindings. Each
-// binding reads the complete verified content of its project space, which is
-// the same source a project Turn would see. Failures fail closed.
+// binding currently reads the complete verified content of its project space,
+// which is the same source a project Turn would see. access_mode is stored for
+// a future write path but does not change reads yet, and scope_mode=selected
+// has no sub-scope table, so it also reads the whole space. Failures fail
+// closed.
 func (s *Service) channelBindingEntries(ctx context.Context, bindings []domain.KnowledgeBinding) ([]domain.KnowledgeEntry, error) {
 	result := []domain.KnowledgeEntry{}
 	seen := map[string]bool{}

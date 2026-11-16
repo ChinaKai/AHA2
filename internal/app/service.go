@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/agentapi"
@@ -203,9 +204,9 @@ type Service struct {
 	knowledgeVaultRuntimeRead  bool
 	knowledgeVaultRuntimeWrite bool
 	// knowledgeLegacyDisabled is set once schema v143 removed the old
-	// knowledge tables. Runtime reads and writes then fail explicitly for an
-	// unready space instead of falling back to a table that no longer exists.
-	knowledgeLegacyDisabled bool
+	// knowledge tables. It is atomic because the cutover endpoint can set it
+	// in a live process while reads run on other goroutines.
+	knowledgeLegacyDisabled atomic.Bool
 	// agentKnowledgeBudget keeps the legacy fallback on the same per-Turn
 	// write budget as the vault engine, which tracks its own counter durably.
 	agentKnowledgeBudgetMu sync.Mutex

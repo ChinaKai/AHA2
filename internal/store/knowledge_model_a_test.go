@@ -90,8 +90,12 @@ func TestKnowledgeModelAClassifiesLegacyDedicatedLibrary(t *testing.T) {
 	}
 	defer database.Close()
 	now := time.Now().UTC()
-	project := domain.Project{ID: "project_2d75test", Name: "Dedicated", ProjectType: "folder", CreatedAt: now, UpdatedAt: now}
+	project := domain.Project{ID: "project_2d75fd0e267704c87d20", Name: "Dedicated", ProjectType: "folder", CreatedAt: now, UpdatedAt: now}
 	if err := database.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	lookalike := domain.Project{ID: "project_2d75other", Name: "Lookalike", ProjectType: "folder", CreatedAt: now, UpdatedAt: now}
+	if err := database.CreateProject(ctx, lookalike); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := database.db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version=144`); err != nil {
@@ -103,5 +107,9 @@ func TestKnowledgeModelAClassifiesLegacyDedicatedLibrary(t *testing.T) {
 	stored, err := database.Project(ctx, project.ID)
 	if err != nil || stored.ProjectType != "knowledge" {
 		t.Fatalf("project type = %q err=%v", stored.ProjectType, err)
+	}
+	other, err := database.Project(ctx, lookalike.ID)
+	if err != nil || other.ProjectType != "folder" {
+		t.Fatalf("same-prefix project type = %q err=%v", other.ProjectType, err)
 	}
 }

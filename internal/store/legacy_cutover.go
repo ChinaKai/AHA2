@@ -219,3 +219,54 @@ func (s *Store) LegacyCutoverApplied(ctx context.Context) (bool, error) {
 		`SELECT COUNT(*) FROM schema_migrations WHERE version=143`).Scan(&exists)
 	return exists > 0, err
 }
+
+// LegacySubstantiveEntryIDs returns every non-index, non-navigation legacy
+// entry keyed by ID. Navigation roots/categories are schema seeds, not
+// knowledge; everything else must be exported before the tables can be
+// dropped.
+func (s *Store) LegacySubstantiveEntryIDs(ctx context.Context) (map[string]string, error) {
+	result := map[string]string{}
+	exists, err := s.tableExists(ctx, "knowledge_entries")
+	if err != nil || !exists {
+		return result, err
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id,project_id FROM knowledge_entries WHERE is_index=0 AND type<>'navigation'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, projectID string
+		if err := rows.Scan(&id, &projectID); err != nil {
+			return nil, err
+		}
+		result[id] = projectID
+	}
+	return result, rows.Err()
+}
+
+// CountChannelKnowledgePolicies reports how many legacy per-entry policies
+// still exist. A missing table (after the cutover) counts as zero.
+func (s *Store) CountChannelKnowledgePolicies(ctx context.Context) (int, error) {
+	exists, err := s.tableExists(ctx, "channel_knowledge_policies")
+	if err != nil || !exists {
+		return 0, err
+	}
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM channel_knowledge_policies`).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+// CountKnowledgeBindings reports how many explicit channel space bindings
+// exist. A missing table cannot happen while the core schema is current, but a
+// query error is returned instead of being hidden.
+func (s *Store) CountKnowledgeBindings(ctx context.Context) (int, error) {
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM knowledge_bindings`).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}

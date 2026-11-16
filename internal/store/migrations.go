@@ -3785,12 +3785,13 @@ func (s *Store) migrate(ctx context.Context) error {
 	var hasV144 bool
 	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=144)`).Scan(&hasV144)
 	if !hasV144 {
-		// The owner-created dedicated channel library (project_2d75...) was a
-		// normal folder project before model A. Classify it as a knowledge
-		// project so it is hidden from normal project pickers; the cutover still
-		// owns its space creation and legacy export.
+		// The owner-created dedicated channel library
+		// project_2d75fd0e267704c87d20 was a normal folder project before model
+		// A. It is an exact ID, not a prefix match: other projects that happen
+		// to start with project_2d75 must keep their real type. The cutover
+		// still owns this library's space creation and legacy export.
 		if _, err := s.db.ExecContext(ctx, `UPDATE projects SET project_type='knowledge',updated_at=?
-			WHERE id LIKE 'project_2d75%' AND project_type='folder'`, timeString(time.Now().UTC())); err != nil {
+			WHERE id='project_2d75fd0e267704c87d20' AND project_type='folder'`, timeString(time.Now().UTC())); err != nil {
 			return fmt.Errorf("apply schema v144 knowledge project classification: %w", err)
 		}
 		if _, err := s.db.ExecContext(ctx,

@@ -101,7 +101,7 @@ func (s *Service) knowledgeReadDecision(scope, projectID string) knowledgeReadDe
 	scope = strings.ToLower(strings.TrimSpace(scope))
 	projectID = strings.TrimSpace(projectID)
 	if s == nil || s.knowledgeVault == nil || !s.knowledgeVault.Enabled() {
-		if s != nil && s.knowledgeLegacyDisabled {
+		if s != nil && s.knowledgeLegacyDisabled.Load() {
 			return knowledgeReadDecision{Vault: true, Err: fmt.Errorf("%w: vault disabled after legacy cutover", ErrKnowledgeSpaceNotReady)}
 		}
 		return knowledgeReadDecision{}
@@ -135,7 +135,7 @@ func (s *Service) knowledgeReadDecision(scope, projectID string) knowledgeReadDe
 		decision.Vault = true
 		decision.Err = err
 	}
-	if s.knowledgeLegacyDisabled && !decision.Vault && decision.Err == nil {
+	if s.knowledgeLegacyDisabled.Load() && !decision.Vault && decision.Err == nil {
 		// The old tables are gone. An unbound or index-less space must fail
 		// explicitly instead of returning an "empty legacy" result that hides
 		// the missing space.
@@ -171,7 +171,7 @@ func (s *Service) KnowledgeVaultEntry(ctx context.Context, id string) (domain.Kn
 // projects must not seed the legacy tables; if a legacy write ever falls back,
 // EnsureKnowledgeRoot still creates the root lazily on demand.
 func (s *Service) LegacyKnowledgeRootsEnabled(projectID string) bool {
-	if s != nil && s.knowledgeLegacyDisabled {
+	if s != nil && s.knowledgeLegacyDisabled.Load() {
 		// The legacy tables no longer exist; even a diagnostic runtime-read
 		// rollback must not seed a root that can never be read.
 		return false
