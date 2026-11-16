@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ChinaKai/AHA2/internal/store"
 )
 
 type deleteTestFixture struct {
@@ -64,6 +67,15 @@ func newDeleteTestFixture(t *testing.T) *deleteTestFixture {
 	execTestSQL(t, databasePath, `DELETE FROM knowledge_entries`)
 
 	now := "2026-11-16T00:00:00Z"
+	// Real databases always carry managed knowledge roots. They are in the
+	// delete scope but must not get automatic sync tombstones, so keep them in
+	// the shared fixture instead of only in the root-specific test.
+	execTestSQL(t, databasePath, `INSERT INTO knowledge_entries(id,scope,project_id,type,title,body,status,is_index,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		"knowledge_root_global", "global", "", "navigation", "全局知识", "", "verified", 1, now, now)
+	execTestSQL(t, databasePath, `INSERT INTO knowledge_entries(id,scope,project_id,type,title,body,status,is_index,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		"knowledge_root_project_bound", "project", "project-bound", "navigation", "项目知识", "", "verified", 1, now, now)
 	for index := 1; index <= 3; index++ {
 		execTestSQL(t, databasePath, `INSERT INTO knowledge_entries(id,scope,project_id,slug,type,title,body,status,created_at,updated_at)
 			VALUES(?,?,?,?,?,?,?,?,?,?)`,
@@ -307,7 +319,7 @@ func TestExecuteKnowledgeDeletionDryRunDoesNotWrite(t *testing.T) {
 	if len(report.Skills) != fixture.skillsRows || report.SkillsDeleted != 0 {
 		t.Fatalf("skills report = %d deleted=%d", len(report.Skills), report.SkillsDeleted)
 	}
-	if report.Before.Tables["knowledge_entries"] != 3 {
+	if report.Before.Tables["knowledge_entries"] != 5 {
 		t.Fatalf("before entries = %d", report.Before.Tables["knowledge_entries"])
 	}
 	if report.PlanScopeRows != fixture.scopeRows || report.PlanSkillsRows != fixture.skillsRows {
@@ -325,7 +337,7 @@ func TestExecuteKnowledgeDeletionDryRunDoesNotWrite(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(fixture.prepDir, deleteResultFileName)); !os.IsNotExist(err) {
 		t.Fatalf("dry-run wrote %s: %v", deleteResultFileName, err)
 	}
-	fixture.assertKnowledgeCounts(t, 2, 3, 2, 2, 15, 4)
+	fixture.assertKnowledgeCounts(t, 2, 5, 2, 2, 15, 4)
 }
 
 func TestExecuteKnowledgeDeletionRequiresConfirmAndVaultGate(t *testing.T) {
@@ -351,7 +363,7 @@ func TestExecuteKnowledgeDeletionRequiresConfirmAndVaultGate(t *testing.T) {
 			if report.DeleteExecuted {
 				t.Fatal("refused execute reported delete_executed=true")
 			}
-			fixture.assertKnowledgeCounts(t, 2, 3, 2, 2, 15, 4)
+			fixture.assertKnowledgeCounts(t, 2, 5, 2, 2, 15, 4)
 			if _, err := os.Stat(filepath.Join(fixture.prepDir, deleteResultFileName)); !os.IsNotExist(err) {
 				t.Fatalf("refused execute wrote %s", deleteResultFileName)
 			}
@@ -371,7 +383,7 @@ func TestExecuteKnowledgeDeletionRejectsRowCountAndPolicyDrift(t *testing.T) {
 				execTestSQL(t, fixture.databasePath, `INSERT INTO knowledge_entries(id,scope,project_id,slug,type,title,body,status,created_at,updated_at)
 					VALUES(?,?,?,?,?,?,?,?,?,?)`, "knowledge_extra", "global", "", "extra", "practice", "额外", "正文", "verified", "2026-11-16T00:00:00Z", "2026-11-16T00:00:00Z")
 			},
-			want: "knowledge_entries has 4 rows, delete-plan expects 3",
+			want: "knowledge_entries has 6 rows, delete-plan expects 5",
 		},
 		{
 			name: "skills row drift",
@@ -425,7 +437,7 @@ func TestExecuteKnowledgeDeletionRejectsLiveHealthEndpoint(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "HTTP 200") {
 		t.Fatalf("error = %v, want health refusal", err)
 	}
-	fixture.assertKnowledgeCounts(t, 2, 3, 2, 2, 15, 4)
+	fixture.assertKnowledgeCounts(t, 2, 5, 2, 2, 15, 4)
 }
 
 func TestExecuteKnowledgeDeletionRejectsTamperedPrep(t *testing.T) {
@@ -494,7 +506,7 @@ func TestExecuteKnowledgeDeletionRejectsTamperedPrep(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), testCase.want) {
 				t.Fatalf("error = %v, want %q", err, testCase.want)
 			}
-			fixture.assertKnowledgeCounts(t, 2, 3, 2, 2, 15, 4)
+			fixture.assertKnowledgeCounts(t, 2, 5, 2, 2, 15, 4)
 		})
 	}
 }
@@ -596,7 +608,7 @@ func TestExecuteKnowledgeDeletionRollsBackOnInjectedError(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "injected entry delete failure") {
 		t.Fatalf("error = %v, want injected failure", err)
 	}
-	fixture.assertKnowledgeCounts(t, 2, 3, 2, 2, 15, 4)
+	fixture.assertKnowledgeCounts(t, 2, 5, 2, 2, 15, 4)
 	if _, err := os.Stat(filepath.Join(fixture.prepDir, deleteResultFileName)); !os.IsNotExist(err) {
 		t.Fatalf("rollback wrote %s", deleteResultFileName)
 	}
@@ -648,7 +660,7 @@ func TestExecuteKnowledgeDeletionDryRunWritesNoSyncTombstones(t *testing.T) {
 	if got := deleteTestTableCount(t, fixture.databasePath, "sync_tombstones"); got != 0 {
 		t.Fatalf("dry-run wrote %d sync tombstones", got)
 	}
-	fixture.assertKnowledgeCounts(t, 2, 3, 2, 2, 15, 4)
+	fixture.assertKnowledgeCounts(t, 2, 5, 2, 2, 15, 4)
 }
 
 func TestExecuteKnowledgeDeletionWritesNoSkillTombstonesWithoutFlag(t *testing.T) {
@@ -681,7 +693,7 @@ func TestExecuteKnowledgeDeletionRollsBackWhenTombstoneWriteFails(t *testing.T) 
 	if err == nil || !strings.Contains(err.Error(), "injected tombstone failure") {
 		t.Fatalf("error = %v, want injected tombstone failure", err)
 	}
-	fixture.assertKnowledgeCounts(t, 2, 3, 2, 2, 15, 4)
+	fixture.assertKnowledgeCounts(t, 2, 5, 2, 2, 15, 4)
 	if got := deleteTestTableCount(t, fixture.databasePath, "sync_tombstones"); got != 0 {
 		t.Fatalf("rollback left %d sync tombstones", got)
 	}
@@ -706,6 +718,69 @@ func TestExecuteKnowledgeDeletionUpsertsExistingSyncTombstones(t *testing.T) {
 	if got := deleteTestTableCount(t, fixture.databasePath, "sync_tombstones"); got != 3+2+2 {
 		t.Fatalf("sync_tombstones = %d, want 7 (existing row upserted, not duplicated)", got)
 	}
+}
+
+func TestExecuteKnowledgeDeletionSkipsKnowledgeRootSyncTombstones(t *testing.T) {
+	fixture := newDeleteTestFixture(t)
+	if _, err := ExecuteKnowledgeDeletion(context.Background(), fixture.options(true)); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	for _, rootID := range []string{"knowledge_root_global", "knowledge_root_project_bound"} {
+		if _, _, found := deleteTestSyncTombstone(t, fixture.databasePath, deleteSyncKnowledge, rootID); found {
+			t.Fatalf("knowledge root %s got a sync tombstone", rootID)
+		}
+	}
+	if got := deleteTestTableCount(t, fixture.databasePath, "sync_tombstones"); got != 3+2+2 {
+		t.Fatalf("sync_tombstones = %d, want 7 (roots excluded)", got)
+	}
+	for index := 1; index <= 3; index++ {
+		deleteTestAssertTombstone(t, fixture.databasePath, deleteSyncKnowledge,
+			fmt.Sprintf("knowledge_test_%d", index), "1", time.Date(2026, 11, 16, 1, 0, 0, 0, time.UTC))
+	}
+
+	// Apply the produced tombstones where the entries still exist. A root
+	// tombstone would be rejected with ErrKnowledgeRootManaged instead.
+	receiver, receiverPath := openTestStore(t)
+	now := "2026-11-16T00:00:00Z"
+	for index := 1; index <= 3; index++ {
+		execTestSQL(t, receiverPath, `INSERT INTO knowledge_entries(id,scope,project_id,type,title,body,status,is_index,created_at,updated_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?)`,
+			fmt.Sprintf("knowledge_test_%d", index), "project", "project-bound", "practice",
+			fmt.Sprintf("知识 %d", index), "正文", "verified", 0, now, now)
+	}
+	// store.Open already seeds knowledge_root_global, which is the managed root
+	// the negative control below needs.
+	ctx := context.Background()
+	deletedAt := time.Date(2026, 11, 16, 1, 0, 0, 0, time.UTC)
+	for index := 1; index <= 3; index++ {
+		id := fmt.Sprintf("knowledge_test_%d", index)
+		version, syncKey, found := deleteTestSyncTombstone(t, fixture.databasePath, deleteSyncKnowledge, id)
+		if !found {
+			t.Fatalf("missing tombstone for %s", id)
+		}
+		if _, err := receiver.ApplySyncTombstone(ctx, deleteSyncKnowledge, id, syncKey, version, deletedAt); err != nil {
+			t.Fatalf("apply produced tombstone for %s: %v", id, err)
+		}
+	}
+	// Negative control: prove this receiver really would reject a root delete,
+	// so the assertions above have teeth.
+	if _, err := receiver.ApplySyncTombstone(ctx, deleteSyncKnowledge, "knowledge_root_global",
+		"root-delete-key", "1", deletedAt); !errors.Is(err, store.ErrKnowledgeRootManaged) {
+		t.Fatalf("root tombstone error = %v, want ErrKnowledgeRootManaged", err)
+	}
+}
+
+func TestExecuteKnowledgeDeletionProposalTombstoneFallsBackToCreatedAt(t *testing.T) {
+	fixture := newDeleteTestFixture(t)
+	createdAt := "2026-09-07T09:40:41.3609763Z"
+	execTestSQL(t, fixture.databasePath, `UPDATE knowledge_proposals SET updated_at='', created_at=? WHERE id='proposal_test_1'`, createdAt)
+	if _, err := ExecuteKnowledgeDeletion(context.Background(), fixture.options(true)); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	deletedAt := time.Date(2026, 11, 16, 1, 0, 0, 0, time.UTC)
+	deleteTestAssertTombstone(t, fixture.databasePath, deleteSyncKnowledgeProposal, "proposal_test_1", createdAt, deletedAt)
+	// The other proposal keeps using its updated_at.
+	deleteTestAssertTombstone(t, fixture.databasePath, deleteSyncKnowledgeProposal, "proposal_test_2", "2026-11-16T00:00:00Z", deletedAt)
 }
 
 func TestExecuteKnowledgeDeletionRejectsOpenTaskSkillRefs(t *testing.T) {
@@ -741,7 +816,7 @@ func TestExecuteKnowledgeDeletionRejectsOpenTaskSkillRefs(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "open task") {
 		t.Fatalf("error = %v, want open-task refusal", err)
 	}
-	fixture.assertKnowledgeCounts(t, 2, 3, 2, 2, 15, 4)
+	fixture.assertKnowledgeCounts(t, 2, 5, 2, 2, 15, 4)
 
 	execTestSQL(t, fixture.databasePath, `UPDATE tasks SET status='completed' WHERE id='task_open'`)
 	report, err := ExecuteKnowledgeDeletion(context.Background(), options)
@@ -785,7 +860,7 @@ func TestExecuteKnowledgeDeletionRejectsPreparingTaskSkillRefs(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "open task") {
 		t.Fatalf("error = %v, want open-task refusal", err)
 	}
-	fixture.assertKnowledgeCounts(t, 2, 3, 2, 2, 15, 4)
+	fixture.assertKnowledgeCounts(t, 2, 5, 2, 2, 15, 4)
 
 	// A preparing task that only selects a vault skill key must not block.
 	execTestSQL(t, fixture.databasePath, `UPDATE tasks SET skill_ids_json=? WHERE id='task_preparing_legacy'`, vaultKey)
@@ -813,7 +888,7 @@ func TestExecuteKnowledgeDeletionSkillFileValidation(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "vault has no SKILL.md") {
 			t.Fatalf("error = %v", err)
 		}
-		fixture.assertKnowledgeCounts(t, 2, 3, 2, 2, 15, 4)
+		fixture.assertKnowledgeCounts(t, 2, 5, 2, 2, 15, 4)
 	})
 
 	t.Run("missing backup package", func(t *testing.T) {
@@ -829,7 +904,7 @@ func TestExecuteKnowledgeDeletionSkillFileValidation(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "delete-prep backup") {
 			t.Fatalf("error = %v", err)
 		}
-		fixture.assertKnowledgeCounts(t, 2, 3, 2, 2, 15, 4)
+		fixture.assertKnowledgeCounts(t, 2, 5, 2, 2, 15, 4)
 	})
 
 	t.Run("path traversal slug", func(t *testing.T) {
@@ -842,7 +917,7 @@ func TestExecuteKnowledgeDeletionSkillFileValidation(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "single path segment") {
 			t.Fatalf("error = %v", err)
 		}
-		fixture.assertKnowledgeCounts(t, 2, 3, 2, 2, 15, 4)
+		fixture.assertKnowledgeCounts(t, 2, 5, 2, 2, 15, 4)
 	})
 
 	t.Run("symbolic link", func(t *testing.T) {
@@ -862,7 +937,7 @@ func TestExecuteKnowledgeDeletionSkillFileValidation(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "symbolic link") {
 			t.Fatalf("error = %v", err)
 		}
-		fixture.assertKnowledgeCounts(t, 2, 3, 2, 2, 15, 4)
+		fixture.assertKnowledgeCounts(t, 2, 5, 2, 2, 15, 4)
 	})
 }
 

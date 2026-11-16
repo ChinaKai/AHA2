@@ -616,9 +616,17 @@ type deleteSyncTombstone struct {
 // execute path is about to remove. Skills are only included with -delete-skills,
 // matching the row delete. knowledge_libraries is intentionally absent: it has
 // no Profile Sync object type, so there is no center object to tombstone.
+//
+// Knowledge roots (is_index=1) are also skipped. They are managed rows:
+// ApplySyncTombstone rejects a global root and a root of a non-knowledge
+// project with ErrKnowledgeRootManaged, and a bare root delete would surface as
+// a sync conflict on every peer. The execute still deletes the rows locally;
+// only the automatic broadcast is limited to ordinary entries. A library root
+// that needs to disappear from peers must be handled by the library/project
+// delete path with its container, not as a lone knowledge object.
 func collectDeleteSyncTombstones(ctx context.Context, queryer deleteQueryer, includeSkills bool) ([]deleteSyncTombstone, error) {
 	tombstones := []deleteSyncTombstone{}
-	rows, err := queryer.QueryContext(ctx, `SELECT id,revision FROM `+quoteIdentifier("knowledge_entries")+` ORDER BY id`)
+	rows, err := queryer.QueryContext(ctx, `SELECT id,revision FROM `+quoteIdentifier("knowledge_entries")+` WHERE is_index=0 ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("read knowledge sync identities: %w", err)
 	}
