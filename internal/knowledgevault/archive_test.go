@@ -180,6 +180,54 @@ func TestArchiveProjectSpaceIsIdempotentWithoutSpace(t *testing.T) {
 	}
 }
 
+func TestFlatArchiveLibraryNamedProjectsKeepsItsScope(t *testing.T) {
+	ctx := context.Background()
+	config, manager := newArchiveTestVault(t)
+	flatDir := filepath.Join(config.VaultPath, "archive", "projects")
+	if err := os.MkdirAll(flatDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rootPage := "---\ntitle: Flat Archive\nslug: index\nscope: archive\nproject_id: archive-flat\ntype: navigation\nstatus: verified\nis_index: true\n---\n# Flat Archive\n"
+	if err := os.WriteFile(filepath.Join(flatDir, "index.md"), []byte(rootPage), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	note := "---\ntitle: Flat Note\nslug: flat-note\nproject_id: archive-flat\n---\nflat-archive-marker-529\n"
+	if err := os.WriteFile(filepath.Join(flatDir, "flat-note.md"), []byte(note), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.Archives["archive-flat"] = "projects"
+	manifest.ArchiveNames["archive-flat"] = "Flat Archive"
+	if err := writeManifest(config.VaultPath, manifest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Rebuild(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.WithReader(func(reader *Reader) error {
+		entries, err := reader.Entries(ctx, "archive", "archive-flat")
+		if err != nil {
+			return err
+		}
+		if len(entries) != 2 {
+			t.Fatalf("flat archive named projects entries = %#v", entries)
+		}
+		found, err := reader.Search(ctx, DocumentSearchOptions{Query: "flat-archive-marker-529", Limit: 10, IncludeArchives: true})
+		if err != nil {
+			return err
+		}
+		if len(found.Results) != 1 || found.Results[0].Scope != "archive" || found.Results[0].ProjectID != "archive-flat" {
+			t.Fatalf("flat archive search = %#v", found.Results)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestArchiveProjectSpaceWithoutVaultIsNoOp(t *testing.T) {
 	config := DefaultConfig(t.TempDir())
 	archivedPath, err := ArchiveProjectSpace(config, "p529missing", time.Now().UTC())
