@@ -307,7 +307,9 @@ test("the sidebar defaults to 270px, collapses to a rail and exposes a 6px separ
   // The resize guide line is always visible and only darkens on hover/focus.
   assert.match(css, /\.kv-tree-resizer::after \{[^}]*background: var\(--color-border-strong\); opacity: 1;/);
   assert.match(css, /\.kv-tree-resizer:hover::after, \.kv-tree-resizer:focus-visible::after \{ background: var\(--color-text-muted\); opacity: 1; \}/);
-  assert.match(css, /@media \(max-width: 760px\)[\s\S]*\.kv-sidebar-toggle, \.kv-tree-resizer \{ display: none; \}/);
+  // Phones hide the collapse rail but keep the file/tree mode toggle.
+  assert.match(css, /@media \(max-width: 760px\)[\s\S]*\.kv-sidebar-toggle\[data-kv-sidebar-toggle\], \.kv-tree-resizer \{ display: none; \}/);
+  assert.match(css, /\.kv-tree-panel\.collapsed \.kv-panel-head \.kv-panel-actions \{ display: none; \}/);
   assert.match(css, /@media \(max-width: 760px\)[\s\S]*\.kv-tree-panel\.collapsed \.kv-tree-body \{ display: block; \}/);
   // Collapsed pages omit the resizer element, so the grid drops its track as
   // well; otherwise the reader would be laid into the 0px resizer column.
@@ -1260,4 +1262,23 @@ test("a file preview offers copy path and hides the file-manager action when rem
   html = vault.renderKnowledgeVaultPage(context());
   assert.match(html, /data-kv-reveal="projects\/demo\/notes.md"/);
   assert.match(html, /在文件管理器中打开/);
+});
+
+test("the directory header copies and reveals the vault/current folder, not the open document", () => {
+  reset({vaultPath: "C:\\知识库", openAvailable: false});
+  let html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /class="kv-panel-actions kv-open-actions"[\s\S]*?data-kv-copy="C:\\知识库"/);
+  assert.doesNotMatch(html, /data-kv-reveal=/, "remote access never shows the file-manager action");
+
+  reset({vaultPath: "/srv/vault", filesMode: true, filesPath: "projects/demo", filesState: "ready", files: [], openAvailable: true});
+  html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /data-kv-copy="\/srv\/vault\/projects\/demo"/, "file mode copies the current directory");
+  assert.match(html, /data-kv-reveal="projects\/demo"/, "file mode reveals the current directory");
+
+  // The indexed tree always describes the vault root, even after the file
+  // browser remembers a nested directory.
+  reset({vaultPath: "/srv/vault", filesMode: false, filesPath: "projects/demo", openAvailable: true});
+  html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /data-kv-copy="\/srv\/vault"/);
+  assert.match(html, /data-kv-reveal=""/);
 });

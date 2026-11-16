@@ -199,6 +199,11 @@ const TREE_STYLES = `
 }
 .kv-panel-head { align-items: center; }
 .kv-panel-head span { margin-right: auto; }
+/* The directory title swaps the current document for the directory itself:
+   copy the vault/current folder path and, on loopback only, reveal it in the
+   OS file manager. The collapsed rail is too narrow for these controls. */
+.kv-panel-actions { flex: 0 0 auto; margin-left: 2px; }
+.kv-tree-panel.collapsed .kv-panel-head .kv-panel-actions { display: none; }
 .kv-sidebar-toggle {
   flex: 0 0 auto; display: inline-grid; place-items: center; width: 28px; height: 28px;
   padding: 0; border: 1px solid var(--color-border-subtle); border-radius: 5px; background: var(--color-surface);
@@ -306,10 +311,16 @@ body.kv-resizing { cursor: col-resize; user-select: none; }
   .knowledge-vault { --kv-tree-toggle-size: 32px; }
   .kv-workspace { grid-template-columns: minmax(0, 1fr); gap: 0; }
   .kv-tree-toggle, .kv-tree-toggle-space, .kv-tree-folder-title { height: 36px; }
-  .kv-sidebar-toggle, .kv-tree-resizer { display: none; }
+  /* Phones stack the directory and reader. The collapse control has no rail to
+     collapse into, but the file/tree mode toggle is the only way to reach the
+     real file browser on a phone, so it must stay visible. */
+  .kv-sidebar-toggle[data-kv-sidebar-toggle], .kv-tree-resizer { display: none; }
   .kv-tree-panel.collapsed { padding: 0; overflow: visible; }
   .kv-tree-panel.collapsed .kv-panel-head { justify-content: space-between; padding: 2px 6px 8px; border-bottom: 1px solid var(--color-border-subtle); }
   .kv-tree-panel.collapsed .kv-panel-head span, .kv-tree-panel.collapsed .kv-panel-head small { display: inline; }
+  /* A desktop-collapsed rail preference must not hide the directory actions
+     on a phone, where the panel is always full width. */
+  .kv-tree-panel.collapsed .kv-panel-head .kv-panel-actions { display: inline-flex; }
   .kv-tree-panel.collapsed .kv-tree-body { display: block; }
   .kv-activity-head { flex-wrap: wrap; }
   .kv-activity-block-head { flex-wrap: wrap; }
@@ -1286,9 +1297,34 @@ function isActivitySelected(): boolean {
   return state.selectedID === VAULT_ACTIVITY_ID;
 }
 
+// The directory header's copy/reveal actions always target the directory the
+// tree is browsing: the real file path in file mode, and the vault root while
+// the indexed tree is shown.
+function directoryRelativePath(): string {
+  return state.filesMode ? normalizeTreePath(state.filesPath) : "";
+}
+
+function directoryAbsolutePath(): string {
+  const root = String(state.vaultPath || "").replace(/[\\/]+$/, "");
+  const relative = directoryRelativePath();
+  if (!root) return "";
+  if (!relative) return root;
+  const separator = root.includes("\\") ? "\\" : "/";
+  return `${root}${separator}${relative.split("/").join(separator)}`;
+}
+
 function knowledgeBodyHTML(): string {
   const sidebarLabel = state.sidebarCollapsed ? kt("kv.sidebarExpand") : kt("kv.sidebarCollapse");
   const activity = isActivitySelected();
+  const directoryPath = directoryAbsolutePath();
+  const directoryActions = `<div class="kv-panel-actions kv-open-actions">
+    ${directoryPath
+      ? `<button type="button" class="kv-open kv-copy" data-kv-copy="${escapeVaultHTML(directoryPath)}" title="${escapeVaultHTML(kt("kv.copyPath"))}" aria-label="${escapeVaultHTML(kt("kv.copyPath"))}">${icon("copy")}</button>`
+      : ""}
+    ${state.openAvailable
+      ? `<button type="button" class="kv-open" data-kv-reveal="${escapeVaultHTML(directoryRelativePath())}" title="${escapeVaultHTML(kt("kv.fileOpenManager"))}" aria-label="${escapeVaultHTML(kt("kv.fileOpenManager"))}">${icon("folder")}</button>`
+      : ""}
+  </div>`;
   // The activity page consumes the reader column only; keeping an empty
   // context column beside it would leave a dead gutter at wide widths.
   return `<div class="kv-workspace${activity ? " kv-workspace-activity" : ""}" data-kv-mobile-pane="${state.mobilePane}">
@@ -1297,6 +1333,7 @@ function knowledgeBodyHTML(): string {
         <button type="button" class="kv-sidebar-toggle icon-button" data-kv-sidebar-toggle aria-expanded="${!state.sidebarCollapsed}" aria-controls="kv-tree-panel" aria-label="${escapeVaultHTML(sidebarLabel)}" title="${escapeVaultHTML(sidebarLabel)}">${icon(state.sidebarCollapsed ? "chevron-right" : "chevron-left")}</button>
         <span>${t("kv.tree")}</span>
         <small>${state.filesMode ? (state.filesState === "ready" ? String(state.files.length) : "") : (state.treeState === "ready" ? `${state.tree.length} ${t("kv.groups")}` : "")}</small>
+        ${directoryActions}
         <button type="button" class="kv-sidebar-toggle icon-button" data-kv-files-toggle aria-pressed="${state.filesMode}" aria-label="${escapeVaultHTML(kt("kv.filesToggle"))}" title="${escapeVaultHTML(kt("kv.filesToggle"))}">${icon("folder")}</button>
       </div>
       <div class="kv-tree-body">${state.filesMode ? filesBodyHTML() : treeBodyHTML()}</div>
@@ -2852,6 +2889,10 @@ export function bindKnowledgeVaultPage(context: KnowledgeVaultContext): void {
     binding = true;
     void loadLibraries().then(ok => {
       if (!ok) return;
+      // The directory header shows copy/reveal actions in both the indexed
+      // tree and the file browser, so resolve the vault path before the first
+      // files-mode toggle.
+      void loadOpenInfo();
       const parsed = parseDocHash(window.location.hash);
       if (parsed?.library && state.libraries.some(item => item.id === parsed.library)) state.libraryID = parsed.library;
       if (parsed?.id) {

@@ -342,7 +342,7 @@ function renderDirectory(context: KnowledgeWorkspaceContext | null, groups: Know
     : "";
   const empty = groups.length ? "" : renderEmpty(knowledgeSearch.trim() ? t("knowledge.searchEmpty") : t("knowledge.emptyDirectory"));
   return `<aside class="panel knowledge-directory" aria-label="${t("knowledge.expandDirectory")}">
-    <div class="knowledge-directory-head">${projectSelect}<div class="knowledge-directory-actions"><button type="button" class="icon-button" data-knowledge-directory-collapse title="${t("knowledge.collapseDirectory")}">${icon("panel")}</button>${newButton}</div><small>${t("knowledge.documentCount", {count: total})}</small></div>
+    <div class="knowledge-directory-head">${projectSelect}<div class="knowledge-directory-actions"><button type="button" class="icon-button" data-knowledge-directory-collapse title="${t("knowledge.collapseDirectory")}" aria-label="${t("knowledge.collapseDirectory")}" aria-expanded="true">${icon("chevron-left")}</button>${newButton}</div><small>${t("knowledge.documentCount", {count: total})}</small></div>
     ${sourceToolbar}
     ${knowledgeSearch.trim() ? `<p class="knowledge-directory-search-hint">${t("knowledge.searchHint", {query: escapeHTML(knowledgeSearch.trim())})}</p>` : ""}
     <nav class="knowledge-tree" aria-label="${t("knowledge.expandDirectory")}">${groups.map(group => {

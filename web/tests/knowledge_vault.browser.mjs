@@ -1435,6 +1435,7 @@ try {
   assert.equal(await page.locator(".kv-tree-panel").isVisible(), true);
   assert.equal(await page.locator(".kv-tree-resizer").isVisible(), false, "phones have no drag handle");
   assert.equal(await page.locator("[data-kv-sidebar-toggle]").isVisible(), false, "phones hide the collapse control");
+  assert.equal(await page.locator("[data-kv-files-toggle]").isVisible(), true, "phones keep the file/tree mode toggle");
   await page.screenshot({path: resolve(screenshots, "knowledge-vault-mobile-list.png"), fullPage: false});
   assert.equal(await page.locator(".kv-doc-panel").isVisible(), false);
   layout = await topbarLayout(page);
