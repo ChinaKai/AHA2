@@ -4748,22 +4748,24 @@ function bindCategoryDialogs(view: DataRetentionViewState): void {
 
 function bindHardwareIOPurgeForm(view: DataRetentionViewState): void {
   const daysInput = document.querySelector<HTMLInputElement>("#data-hardware-io-days");
-  const rowsInput = document.querySelector<HTMLInputElement>("#data-hardware-io-rows");
   const save = document.querySelector<HTMLButtonElement>("[data-hardware-io-save]");
   const preview = document.querySelector<HTMLButtonElement>("[data-hardware-io-preview]");
   const purge = document.querySelector<HTMLButtonElement>("[data-hardware-io-purge]");
   const formError = document.querySelector<HTMLElement>("[data-hardware-io-form-error]");
-  if (!daysInput || !rowsInput || !save || !preview || !purge) return;
+  if (!daysInput || !save || !preview || !purge) return;
+  // The batch cap is an internal safety limit now: the dialog exposes only the
+  // retention window, so send the stored cap (or the server-side default).
+  const maxDeleteRows = view.database?.retention?.max_delete_rows || 200000;
   // Re-check the form on every edit: invalid values disable every action, and
   // a preview only enables cleanup while the form still matches it.
   const formValues = (): {retention_days: number; max_delete_rows: number} | null => {
-    const message = retentionFormError(daysInput.value, rowsInput.value);
+    const message = retentionFormError(daysInput.value);
     if (formError) {
       formError.textContent = message;
       formError.hidden = !message;
     }
     if (message) return null;
-    return {retention_days: Number(daysInput.value), max_delete_rows: Number(rowsInput.value)};
+    return {retention_days: Number(daysInput.value), max_delete_rows: maxDeleteRows};
   };
   const syncButtons = (): void => {
     const values = formValues();
@@ -4775,7 +4777,6 @@ function bindHardwareIOPurgeForm(view: DataRetentionViewState): void {
     purge.title = stale ? t("data.db.previewStale") : "";
   };
   daysInput.addEventListener("input", syncButtons);
-  rowsInput.addEventListener("input", syncButtons);
   syncButtons();
   const run = (kind: DataRetentionViewState["busy"], button: HTMLButtonElement, action: (values: {retention_days: number; max_delete_rows: number}) => Promise<void>): void => {
     const values = formValues();

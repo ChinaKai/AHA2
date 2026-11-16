@@ -63,7 +63,15 @@ function bootstrap() {
 const INVENTORY = ${JSON.stringify(INVENTORY)};
 const STATS = ${JSON.stringify(STATS)};
 const COMPACTION_PLAN = ${JSON.stringify(COMPACTION_PLAN)};
+const HARDWARE_PLAN = {
+  retention_days: 30, max_delete_rows: 200000, cutoff: "2026-10-17T00:00:00Z",
+  min_sequence: 1, max_sequence: 12_000_000, cutoff_sequence: 6_000_001,
+  eligible_rows_estimate: 6_000_000, run_start_sequence: 1, run_end_sequence: 200_001,
+  run_rows: 200000, avg_row_bytes: 180, run_bytes_estimate: 36_000_000,
+  eligible_bytes_estimate: 1_080_000_000, remaining_eligible_estimate: 5_800_000,
+};
 window.__compactionResolvers = [];
+window.__hardwareCalls = [];
 window.__backupMode = "ok";
 const json = (value, status = 200) => new Response(JSON.stringify(value), {status, headers: {"Content-Type": "application/json"}});
 window.fetch = async (input, init = {}) => {
@@ -79,6 +87,16 @@ window.fetch = async (input, init = {}) => {
   if (path === "/api/v1/events") return json({events: [], cursor: 0});
   if (path === "/api/v1/system/data") return json({ok: true, inventory: INVENTORY});
   if (path === "/api/v1/system/data/database") return json({ok: true, database: STATS});
+  if (path === "/api/v1/system/data/hardware-io/retention") {
+    const body = JSON.parse(init.body || "{}");
+    window.__hardwareCalls.push({kind: "save", body});
+    return json({ok: true, retention: {retention_days: body.retention_days, max_delete_rows: body.max_delete_rows}});
+  }
+  if (path === "/api/v1/system/data/hardware-io/preview") {
+    const body = JSON.parse(init.body || "{}");
+    window.__hardwareCalls.push({kind: "preview", body});
+    return json({ok: true, plan: {...HARDWARE_PLAN, retention_days: body.retention_days, max_delete_rows: body.max_delete_rows}});
+  }
   if (path === "/api/v1/system/data/backups") {
     if (window.__backupMode === "error") return json({ok: false, error: "data_cleanup_preview_failed", message: "backup scan failed"}, 500);
     return json({ok: true, preview: {
@@ -185,6 +203,71 @@ try {
   await page.screenshot({path: resolve(screenshots, "data-management-b-dialog-390.png"), fullPage: false});
   await page.locator('dialog[data-db-dialog="B"] [data-db-dialog-close]').click();
   await page.waitForFunction(() => document.querySelector('dialog[data-db-dialog="B"]')?.open === false);
+
+  // Hardware IO: only the retention input remains, and the save/preview/purge
+  // buttons sit on their own row instead of sharing the input row.
+  await page.locator('[data-db-cleanup="C"]').click();
+  await page.waitForSelector('dialog[data-db-dialog="C"][open]', {timeout: 15000});
+  const hardwareLayout = await page.evaluate(() => {
+    const dialog = document.querySelector('dialog[data-db-dialog="C"]');
+    const daysRow = dialog.querySelector(".data-db-form");
+    const actionRow = dialog.querySelector(".data-cleanup-actions:not(.data-db-form)");
+    const box = node => node.getBoundingClientRect();
+    return {
+      inputs: [...dialog.querySelectorAll("input")].map(node => ({id: node.id, type: node.type})),
+      rowsInput: dialog.querySelector("#data-hardware-io-rows") !== null,
+      daysRow: box(daysRow),
+      actionRow: box(actionRow),
+      actions: [...actionRow.querySelectorAll("button")].map(node => ({label: node.textContent.trim(), top: box(node).top, bottom: box(node).bottom})),
+      dialogOverflow: dialog.scrollWidth - dialog.clientWidth,
+      pageOverflow: document.documentElement.scrollWidth - window.innerWidth,
+    };
+  });
+  assert.deepEqual(hardwareLayout.inputs, [{id: "data-hardware-io-days", type: "number"}], "hardware IO exposes only the retention input");
+  assert.equal(hardwareLayout.rowsInput, false, "the max-rows input is gone");
+  assert.match(hardwareLayout.actions.map(action => action.label).join(","), /保存设置,预览,确认清理/);
+  assert.ok(hardwareLayout.actionRow.top >= hardwareLayout.daysRow.bottom - 1, "the action buttons start on the row below the input");
+  assert.ok(hardwareLayout.actions.every(action => action.top >= hardwareLayout.daysRow.bottom - 1), "no action shares the input row");
+  assert.ok(hardwareLayout.dialogOverflow <= 1, `C dialog overflows by ${hardwareLayout.dialogOverflow}px at 390px`);
+  assert.ok(hardwareLayout.pageOverflow <= 1, `page overflows by ${hardwareLayout.pageOverflow}px at 390px`);
+
+  // On a desktop viewport the three actions collapse onto one row of their
+  // own, still below the retention input.
+  await page.setViewportSize({width: 1280, height: 900});
+  await page.waitForTimeout(80);
+  const desktopActions = await page.evaluate(() => {
+    const dialog = document.querySelector('dialog[data-db-dialog="C"]');
+    const daysRow = dialog.querySelector(".data-db-form").getBoundingClientRect();
+    const actionRow = dialog.querySelector(".data-cleanup-actions:not(.data-db-form)").getBoundingClientRect();
+    const tops = [...dialog.querySelectorAll("[data-hardware-io-save], [data-hardware-io-preview], [data-hardware-io-purge]")].map(node => node.getBoundingClientRect().top);
+    return {daysBottom: daysRow.bottom, actionTop: actionRow.top, spread: Math.max(...tops) - Math.min(...tops)};
+  });
+  assert.ok(desktopActions.actionTop >= desktopActions.daysBottom - 1, "desktop action row stays below the input");
+  assert.ok(desktopActions.spread <= 2, "desktop save/preview/purge share one row");
+  await page.setViewportSize({width: 390, height: 844});
+  await page.waitForTimeout(80);
+
+  // Save and preview still work and send the internal 200000-row safety cap.
+  await page.locator("[data-hardware-io-save]").click();
+  await page.waitForFunction(() => window.__hardwareCalls.length === 1);
+  await page.locator("[data-hardware-io-preview]").click();
+  await page.waitForFunction(() => window.__hardwareCalls.length === 2);
+  const hardwareCalls = await page.evaluate(() => window.__hardwareCalls);
+  assert.deepEqual(hardwareCalls.map(call => call.kind), ["save", "preview"]);
+  for (const call of hardwareCalls) {
+    assert.deepEqual(call.body, {retention_days: 30, max_delete_rows: 200000}, `${call.kind} sends the internal batch cap`);
+  }
+  // An open modal defers page renders, so the preview summary appears after
+  // closing and reopening the dialog (the plan itself is retained in state).
+  await page.locator('dialog[data-db-dialog="C"] [data-db-dialog-close]').click();
+  await page.waitForFunction(() => document.querySelector('dialog[data-db-dialog="C"]')?.open === false);
+  await page.locator('[data-db-cleanup="C"]').click();
+  await page.waitForSelector('dialog[data-db-dialog="C"][open]');
+  await page.waitForSelector('dialog[data-db-dialog="C"] [data-db-plan]');
+  assert.equal(await page.locator('dialog[data-db-dialog="C"] [data-hardware-io-purge]').isDisabled(), false, "a matching preview enables cleanup");
+  await page.screenshot({path: resolve(screenshots, "data-management-c-dialog-390.png"), fullPage: false});
+  await page.locator('dialog[data-db-dialog="C"] [data-db-dialog-close]').click();
+  await page.waitForFunction(() => document.querySelector('dialog[data-db-dialog="C"]')?.open === false);
 
   // Backup preview must replace "reading" in place while the dialog stays
   // open, then fail into a retry that can recover.

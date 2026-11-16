@@ -18,8 +18,9 @@ import type {
 // these only drive the form state.
 export const RETENTION_MIN_DAYS = 1;
 export const RETENTION_MAX_DAYS = 3650;
-export const PURGE_MIN_ROWS = 1000;
-export const PURGE_MAX_ROWS = 1000000;
+// Hardware IO no longer asks for a batch size in the UI. The server still
+// enforces its own bounds, so the client sends the stored (or default) cap.
+export const PURGE_DEFAULT_MAX_ROWS = 200000;
 
 export interface DataRetentionViewState {
   database: DatabaseStats | null;
@@ -70,14 +71,10 @@ function formatTime(value?: string): string {
 
 // retentionFormError returns the message for an invalid form, or "" when the
 // values can be sent. Empty, fractional and out-of-range values are rejected.
-export function retentionFormError(days: string, rows: string): string {
+export function retentionFormError(days: string): string {
   const dayValue = Number(days);
   if (!days.trim() || !Number.isInteger(dayValue) || dayValue < RETENTION_MIN_DAYS || dayValue > RETENTION_MAX_DAYS) {
     return t("data.db.invalidDays", {min: RETENTION_MIN_DAYS, max: RETENTION_MAX_DAYS});
-  }
-  const rowValue = Number(rows);
-  if (!rows.trim() || !Number.isInteger(rowValue) || rowValue < PURGE_MIN_ROWS || rowValue > PURGE_MAX_ROWS) {
-    return t("data.db.invalidRows", {min: formatLocaleNumber(PURGE_MIN_ROWS), max: formatLocaleNumber(PURGE_MAX_ROWS)});
   }
   return "";
 }
@@ -231,10 +228,12 @@ function dialogShell(id: string, title: string, body: string): string {
 }
 
 function hardwareDialogBody(state: DataRetentionViewState, category: DatabaseCategory): string {
-  const retention: HardwareIORetentionSettings = state.database?.retention ?? {retention_days: 30, max_delete_rows: 200000};
+  const retention: HardwareIORetentionSettings = state.database?.retention ?? {retention_days: 30, max_delete_rows: PURGE_DEFAULT_MAX_ROWS};
   const range = state.database?.hardware_io;
   const days = retention.retention_days;
-  const rows = retention.max_delete_rows;
+  // The batch cap stays an internal safety value; the dialog only lets the
+  // Owner choose the retention window.
+  const rows = retention.max_delete_rows || PURGE_DEFAULT_MAX_ROWS;
   const busy = Boolean(state.busy);
   const canPurge = purgeEnabled(state, days, rows);
   return `<p class="data-cleanup-note">${categoryNote(category, safetyKey(category.safety))}</p>
@@ -243,7 +242,8 @@ function hardwareDialogBody(state: DataRetentionViewState, category: DatabaseCat
       : t("data.db.rangeEmpty")}</p>
     <div class="data-cleanup-actions data-db-form">
       <label>${t("data.db.retentionDays")} <input id="data-hardware-io-days" type="number" min="${RETENTION_MIN_DAYS}" max="${RETENTION_MAX_DAYS}" step="1" value="${days}" ${busy ? "disabled" : ""}></label>
-      <label>${t("data.db.maxRows")} <input id="data-hardware-io-rows" type="number" min="${PURGE_MIN_ROWS}" max="${PURGE_MAX_ROWS}" step="1000" value="${rows}" ${busy ? "disabled" : ""}></label>
+    </div>
+    <div class="data-cleanup-actions">
       <button type="button" data-hardware-io-save ${busy ? "disabled" : ""}>${t("data.db.save")}</button>
       <button type="button" data-hardware-io-preview ${busy ? "disabled" : ""}>${t("data.db.preview")}</button>
       <button type="button" class="danger" data-hardware-io-purge ${canPurge ? "" : "disabled"}>${t("data.db.purge")}</button>

@@ -154,8 +154,17 @@ test("C dialog keeps the hardware_io preview/confirm flow", () => {
   const html = panel.renderDatabasePanel(viewState());
   const c = dialog(html, "C");
   assert.match(c, /id="data-hardware-io-days"[^>]*value="30"/);
-  assert.match(c, /id="data-hardware-io-rows"[^>]*value="200000"/);
+  // The batch cap is internal now: no rows input and no rows validation copy.
+  assert.doesNotMatch(c, /data-hardware-io-rows|单次最多删除行数|data\.db\.maxRows/);
   assert.match(button(c, "data-hardware-io-purge"), /disabled/);
+  const daysRow = c.match(/<div class="data-cleanup-actions data-db-form">[\s\S]*?<\/div>/)?.[0] || "";
+  assert.match(daysRow, /id="data-hardware-io-days"/);
+  assert.doesNotMatch(daysRow, /data-hardware-io-(?:save|preview|purge)/, "inputs and actions live on separate rows");
+  const actionRow = c.match(/<div class="data-cleanup-actions">[\s\S]*?<\/div>/)?.[0] || "";
+  assert.match(actionRow, /data-hardware-io-save/);
+  assert.match(actionRow, /data-hardware-io-preview/);
+  assert.match(actionRow, /data-hardware-io-purge/);
+  assert.doesNotMatch(actionRow, /<input/, "the action row has no inline input");
 
   const preview = panel.renderDatabasePanel(viewState({plan: hardwarePlan()}));
   assert.doesNotMatch(button(dialog(preview, "C"), "data-hardware-io-purge"), /disabled/);
@@ -177,10 +186,10 @@ test("conversation cleanup is enabled only for a matching, non-empty preview", (
 
 test("form validation rejects out-of-range values and an empty selection", () => {
   i18n.applyLocale("zh-CN");
-  assert.equal(panel.retentionFormError("30", "200000"), "");
-  assert.match(panel.retentionFormError("0", "200000"), /保留天数/);
-  assert.match(panel.retentionFormError("1.5", "200000"), /保留天数/);
-  assert.match(panel.retentionFormError("30", "999"), /单次最多删除行数/);
+  assert.equal(panel.retentionFormError("30"), "");
+  assert.match(panel.retentionFormError("0"), /保留天数/);
+  assert.match(panel.retentionFormError("1.5"), /保留天数/);
+  assert.match(panel.retentionFormError(""), /保留天数/);
   assert.equal(panel.conversationFormError("30", true, false), "");
   assert.equal(panel.conversationFormError("30", false, true), "");
   assert.match(panel.conversationFormError("30", false, false), /tool 事件或 agent update/);

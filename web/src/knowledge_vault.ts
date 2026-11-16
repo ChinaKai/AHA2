@@ -37,6 +37,8 @@ type GitBusy = "" | "init" | "remote" | "commit" | "pull" | "push" | "sync";
 // loaded, and keeping them here preserves the first-screen size budget.
 const localText: Record<string, [zhCN: string, enUS: string]> = {
   "kv.filesToggle": ["切换到真实文件目录", "Switch to the real file directory"],
+  "kv.filesMode": ["文件模式", "Files mode"],
+  "kv.filesModeHint": ["在知识索引与真实文件目录之间切换", "Switch between the knowledge index and the real file directory"],
   "kv.filesRoot": ["vault 根目录", "Vault root"],
   "kv.filesUp": ["上一级目录", "Parent directory"],
   "kv.filesEmpty": ["这个目录没有可显示的文件。", "This directory has no visible files."],
@@ -199,12 +201,27 @@ const TREE_STYLES = `
   .knowledge-vault[data-kv-sidebar-collapsed="true"] .kv-workspace { grid-template-columns: var(--kv-tree-width) minmax(0, 1fr) var(--kv-context-width); }
 }
 .kv-panel-head { align-items: center; }
-.kv-panel-head span { margin-right: auto; }
+.kv-panel-head > span { margin-right: auto; }
+/* The header's left control is the only collapse affordance: a direction
+   chevron. The files-mode toggle is a separate labeled pill so it never reads
+   as a second "collapse" button. */
+.kv-files-mode {
+  flex: 0 0 auto; display: inline-flex; align-items: center; gap: 4px; height: 28px; padding: 0 9px;
+  border: 1px solid var(--color-border-subtle); border-radius: 999px; background: var(--color-surface);
+  color: var(--color-text-muted); font: inherit; font-size: var(--font-size-11); font-weight: 600; cursor: pointer;
+}
+.kv-files-mode .icon { width: 14px; height: 14px; }
+.kv-files-mode:hover { background: var(--color-surface-muted); color: var(--color-text); border-color: var(--color-border); }
+.kv-files-mode[aria-pressed="true"] { background: var(--color-accent-soft); border-color: var(--color-accent); color: var(--color-accent-ink); }
 /* The directory title swaps the current document for the directory itself:
-   copy the vault/current folder path and, on loopback only, reveal it in the
-   OS file manager. The collapsed rail is too narrow for these controls. */
-.kv-panel-actions { flex: 0 0 auto; margin-left: 2px; }
-.kv-tree-panel.collapsed .kv-panel-head .kv-panel-actions { display: none; }
+   copy the vault/current folder path and, on loopback only, open it in VSCode
+   or Obsidian. The collapsed rail is too narrow for these controls, so it
+   keeps just the expand chevron. */
+.kv-panel-tools { display: flex; align-items: center; min-width: 0; padding: 6px 6px 4px; }
+.kv-panel-actions { flex: 0 0 auto; margin-left: auto; }
+.kv-tree-panel.collapsed .kv-panel-head .kv-panel-actions,
+.kv-tree-panel.collapsed .kv-panel-tools,
+.kv-tree-panel.collapsed .kv-files-mode { display: none; }
 .kv-sidebar-toggle {
   flex: 0 0 auto; display: inline-grid; place-items: center; width: 28px; height: 28px;
   padding: 0; border: 1px solid var(--color-border-subtle); border-radius: 5px; background: var(--color-surface);
@@ -214,8 +231,8 @@ const TREE_STYLES = `
 .kv-sidebar-toggle .icon { width: 15px; height: 15px; }
 .kv-tree-panel.collapsed { padding: 8px 5px; overflow: hidden; }
 .kv-tree-panel.collapsed .kv-panel-head { justify-content: center; padding: 2px 0 8px; border-bottom: 0; }
-.kv-tree-panel.collapsed .kv-panel-head span,
-.kv-tree-panel.collapsed .kv-panel-head small,
+.kv-tree-panel.collapsed .kv-panel-head > span,
+.kv-tree-panel.collapsed .kv-panel-head > small,
 .kv-tree-panel.collapsed .kv-tree-body { display: none; }
 .kv-tree-resizer {
   position: relative; align-self: stretch; width: 6px; min-height: 180px;
@@ -318,10 +335,11 @@ body.kv-resizing { cursor: col-resize; user-select: none; }
   .kv-sidebar-toggle[data-kv-sidebar-toggle], .kv-tree-resizer { display: none; }
   .kv-tree-panel.collapsed { padding: 0; overflow: visible; }
   .kv-tree-panel.collapsed .kv-panel-head { justify-content: space-between; padding: 2px 6px 8px; border-bottom: 1px solid var(--color-border-subtle); }
-  .kv-tree-panel.collapsed .kv-panel-head span, .kv-tree-panel.collapsed .kv-panel-head small { display: inline; }
-  /* A desktop-collapsed rail preference must not hide the directory actions
-     on a phone, where the panel is always full width. */
-  .kv-tree-panel.collapsed .kv-panel-head .kv-panel-actions { display: inline-flex; }
+  .kv-tree-panel.collapsed .kv-panel-head > span, .kv-tree-panel.collapsed .kv-panel-head > small { display: inline; }
+  /* A desktop-collapsed rail preference must not hide the directory tools or
+     the files-mode switch on a phone, where the panel is always full width. */
+  .kv-tree-panel.collapsed .kv-files-mode { display: inline-flex; }
+  .kv-tree-panel.collapsed .kv-panel-tools { display: flex; }
   .kv-tree-panel.collapsed .kv-tree-body { display: block; }
   .kv-activity-head { flex-wrap: wrap; }
   .kv-activity-block-head { flex-wrap: wrap; }
@@ -805,20 +823,27 @@ function openActionLabel(base: string, context = ""): string {
   return context ? t("kv.openActionContext", {action: base, name: context}) : base;
 }
 
+// Editor hand-offs only work when AHA runs on the same machine as the browser.
+// `open_available` is the server's loopback verdict; remote sessions keep the
+// copy action and never render a VSCode/Obsidian link or an empty placeholder.
 function openActions(absolutePath: string, relativePath: string, obsidianFile = "", options: {compact?: boolean; context?: string; copyKey?: string} = {}): string {
+  const copyLabel = openActionLabel(t(options.copyKey || "kv.copyPath"), options.context);
+  const copy = `<button type="button" class="kv-open kv-copy" data-kv-copy="${escapeVaultHTML(absolutePath)}" title="${escapeVaultHTML(copyLabel)}" aria-label="${escapeVaultHTML(copyLabel)}">${icon("copy")}</button>`;
+  if (!state.openAvailable) {
+    return `<div class="kv-open-actions${options.compact ? " compact" : ""}">${copy}</div>`;
+  }
   const local = vscodeLocalURI(absolutePath);
   const obsidian = state.obsidianVault ? obsidianURI(state.obsidianVault, obsidianFile || relativePath) : "";
   const obsidianEnabled = Boolean(obsidian) && state.obsidianReady;
   const vscodeLabel = openActionLabel(t("kv.openVSCodeLocal"), options.context);
   const obsidianLabel = openActionLabel(t("kv.openObsidian"), options.context);
-  const copyLabel = openActionLabel(t(options.copyKey || "kv.copyPath"), options.context);
   const obsidianHint = `${obsidianLabel}：${t("kv.obsidianUnregistered")}`;
   return `<div class="kv-open-actions${options.compact ? " compact" : ""}">
-    <a class="kv-open" href="${escapeVaultHTML(local)}" target="_blank" rel="noopener" title="${escapeVaultHTML(vscodeLabel)}" aria-label="${escapeVaultHTML(vscodeLabel)}">${icon("monitor")}</a>
+    <a class="kv-open" href="${escapeVaultHTML(local)}" target="_blank" rel="noopener" title="${escapeVaultHTML(vscodeLabel)}" aria-label="${escapeVaultHTML(vscodeLabel)}">${VSCODE_ICON}</a>
     ${obsidianEnabled
-      ? `<a class="kv-open" href="${escapeVaultHTML(obsidian)}" target="_blank" rel="noopener" title="${escapeVaultHTML(obsidianLabel)}" aria-label="${escapeVaultHTML(obsidianLabel)}">${icon("branch")}</a>`
-      : `<button type="button" class="kv-open" disabled title="${escapeVaultHTML(obsidianHint)}" aria-label="${escapeVaultHTML(obsidianHint)}">${icon("branch")}</button>`}
-    <button type="button" class="kv-open kv-copy" data-kv-copy="${escapeVaultHTML(absolutePath)}" title="${escapeVaultHTML(copyLabel)}" aria-label="${escapeVaultHTML(copyLabel)}">${icon("copy")}</button>
+      ? `<a class="kv-open" href="${escapeVaultHTML(obsidian)}" target="_blank" rel="noopener" title="${escapeVaultHTML(obsidianLabel)}" aria-label="${escapeVaultHTML(obsidianLabel)}">${OBSIDIAN_ICON}</a>`
+      : `<button type="button" class="kv-open" disabled title="${escapeVaultHTML(obsidianHint)}" aria-label="${escapeVaultHTML(obsidianHint)}">${OBSIDIAN_ICON}</button>`}
+    ${copy}
   </div>`;
 }
 
@@ -1314,29 +1339,48 @@ function directoryAbsolutePath(): string {
   return `${root}${separator}${relative.split("/").join(separator)}`;
 }
 
+// Directory actions describe the folder the tree is browsing, not the open
+// document, and match the document header: VSCode + Obsidian + copy, no
+// file-manager entry. Both editors need a local desktop, so remote sessions
+// keep only the copy action. VSCode opens the absolute folder and Obsidian
+// opens the vault with the vault-relative folder (empty at the root).
+function directoryOpenActionsHTML(): string {
+  const absolute = directoryAbsolutePath();
+  const copy = absolute
+    ? `<button type="button" class="kv-open kv-copy" data-kv-copy="${escapeVaultHTML(absolute)}" title="${escapeVaultHTML(kt("kv.copyDirectoryPath"))}" aria-label="${escapeVaultHTML(kt("kv.copyDirectoryPath"))}">${icon("copy")}</button>`
+    : "";
+  if (!state.openAvailable || !absolute) {
+    return copy ? `<div class="kv-panel-actions kv-open-actions">${copy}</div>` : "";
+  }
+  const relative = directoryRelativePath();
+  const obsidian = state.obsidianVault ? obsidianURI(state.obsidianVault, relative) : "";
+  const obsidianEnabled = Boolean(obsidian) && state.obsidianReady;
+  const obsidianLabel = kt("kv.openObsidian");
+  const obsidianHint = `${obsidianLabel}：${kt("kv.obsidianUnregistered")}`;
+  return `<div class="kv-panel-actions kv-open-actions">
+    <a class="kv-open" href="${escapeVaultHTML(vscodeLocalURI(absolute))}" target="_blank" rel="noopener" title="${escapeVaultHTML(kt("kv.openVSCodeLocal"))}" aria-label="${escapeVaultHTML(kt("kv.openVSCodeLocal"))}">${VSCODE_ICON}</a>
+    ${obsidianEnabled
+      ? `<a class="kv-open" href="${escapeVaultHTML(obsidian)}" target="_blank" rel="noopener" title="${escapeVaultHTML(obsidianLabel)}" aria-label="${escapeVaultHTML(obsidianLabel)}">${OBSIDIAN_ICON}</a>`
+      : `<button type="button" class="kv-open" disabled title="${escapeVaultHTML(obsidianHint)}" aria-label="${escapeVaultHTML(obsidianHint)}">${OBSIDIAN_ICON}</button>`}
+    ${copy}
+  </div>`;
+}
+
 function knowledgeBodyHTML(): string {
   const sidebarLabel = state.sidebarCollapsed ? kt("kv.sidebarExpand") : kt("kv.sidebarCollapse");
   const activity = isActivitySelected();
-  const directoryPath = directoryAbsolutePath();
-  const directoryActions = `<div class="kv-panel-actions kv-open-actions">
-    ${directoryPath
-      ? `<button type="button" class="kv-open kv-copy" data-kv-copy="${escapeVaultHTML(directoryPath)}" title="${escapeVaultHTML(kt("kv.copyDirectoryPath"))}" aria-label="${escapeVaultHTML(kt("kv.copyDirectoryPath"))}">${icon("copy")}</button>`
-      : ""}
-    ${state.openAvailable
-      ? `<button type="button" class="kv-open" data-kv-reveal="${escapeVaultHTML(directoryRelativePath())}" title="${escapeVaultHTML(kt("kv.fileOpenManager"))}" aria-label="${escapeVaultHTML(kt("kv.fileOpenManager"))}">${icon("folder")}</button>`
-      : ""}
-  </div>`;
+  const directoryActions = directoryOpenActionsHTML();
   // The activity page consumes the reader column only; keeping an empty
   // context column beside it would leave a dead gutter at wide widths.
   return `<div class="kv-workspace${activity ? " kv-workspace-activity" : ""}" data-kv-mobile-pane="${state.mobilePane}">
     <nav id="kv-tree-panel" class="kv-tree-panel${state.sidebarCollapsed ? " collapsed" : ""}" aria-label="${t("kv.tree")}">
       <div class="kv-panel-head">
         <button type="button" class="kv-sidebar-toggle icon-button" data-kv-sidebar-toggle aria-expanded="${!state.sidebarCollapsed}" aria-controls="kv-tree-panel" aria-label="${escapeVaultHTML(sidebarLabel)}" title="${escapeVaultHTML(sidebarLabel)}">${icon(state.sidebarCollapsed ? "chevron-right" : "chevron-left")}</button>
-        <span>${t("kv.tree")}</span>
+        <span class="kv-panel-title">${t("kv.tree")}</span>
         <small>${state.filesMode ? (state.filesState === "ready" ? String(state.files.length) : "") : (state.treeState === "ready" ? `${state.tree.length} ${t("kv.groups")}` : "")}</small>
-        ${directoryActions}
-        <button type="button" class="kv-sidebar-toggle icon-button" data-kv-files-toggle aria-pressed="${state.filesMode}" aria-label="${escapeVaultHTML(kt("kv.filesToggle"))}" title="${escapeVaultHTML(kt("kv.filesToggle"))}">${icon("folder")}</button>
+        <button type="button" class="kv-files-mode" data-kv-files-toggle aria-pressed="${state.filesMode}" aria-label="${escapeVaultHTML(kt("kv.filesMode"))}" title="${escapeVaultHTML(`${kt("kv.filesMode")}：${kt("kv.filesModeHint")}`)}">${icon("folder")}<span>${kt("kv.filesMode")}</span></button>
       </div>
+      ${directoryActions ? `<div class="kv-panel-tools">${directoryActions}</div>` : ""}
       <div class="kv-tree-body">${state.filesMode ? filesBodyHTML() : treeBodyHTML()}</div>
     </nav>
     ${state.sidebarCollapsed ? "" : `<div class="kv-tree-resizer" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${escapeVaultHTML(kt("kv.resizeSidebar"))}" aria-valuemin="${SIDEBAR_MIN_WIDTH}" aria-valuemax="${sidebarMaximumWidth()}" aria-valuenow="${state.sidebarWidth}" data-kv-resizer></div>`}
@@ -1352,6 +1396,12 @@ function knowledgeBodyHTML(): string {
 // Kept local instead of joining the shared icon table: that table is part of
 // the first-screen entry chunk, which sits exactly on its gzip budget.
 const ACTIVITY_ICON = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>';
+
+// Brand marks are filled (Simple Icons) and only this lazy route needs them.
+// Keeping them here rather than in icons.ts preserves the first-screen gzip
+// budget, which that shared table is measured against.
+const VSCODE_ICON = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path fill="currentColor" stroke="none" d="M23.15 2.587L18.21.21a1.494 1.494 0 0 0-1.705.29l-9.46 8.63-4.12-3.128a.999.999 0 0 0-1.276.057L.327 7.261A1 1 0 0 0 .326 8.74L3.899 12 .326 15.26a1 1 0 0 0 .001 1.479L1.65 17.94a.999.999 0 0 0 1.276.057l4.12-3.128 9.46 8.63a1.492 1.492 0 0 0 1.704.29l4.942-2.377A1.5 1.5 0 0 0 24 20.06V3.939a1.5 1.5 0 0 0-.85-1.352zm-5.146 14.861L10.826 12l7.178-5.448v10.896z"/></svg>';
+const OBSIDIAN_ICON = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path fill="currentColor" stroke="none" d="M19.355 18.538a68.967 68.959 0 0 0 1.858-2.954.81.81 0 0 0-.062-.9c-.516-.685-1.504-2.075-2.042-3.362-.553-1.321-.636-3.375-.64-4.377a1.707 1.707 0 0 0-.358-1.05l-3.198-4.064a3.744 3.744 0 0 1-.076.543c-.106.503-.307 1.004-.536 1.5-.134.29-.29.6-.446.914l-.31.626c-.516 1.068-.997 2.227-1.132 3.59-.124 1.26.046 2.73.815 4.481.128.011.257.025.386.044a6.363 6.363 0 0 1 3.326 1.505c.916.79 1.744 1.922 2.415 3.5zM8.199 22.569c.073.012.146.02.22.02.78.024 2.095.092 3.16.29.87.16 2.593.64 4.01 1.055 1.083.316 2.198-.548 2.355-1.664.114-.814.33-1.735.725-2.58l-.01.005c-.67-1.87-1.522-3.078-2.416-3.849a5.295 5.295 0 0 0-2.778-1.257c-1.54-.216-2.952.19-3.84.45.532 2.218.368 4.829-1.425 7.531zM5.533 9.938c-.023.1-.056.197-.098.29L2.82 16.059a1.602 1.602 0 0 0 .313 1.772l4.116 4.24c2.103-3.101 1.796-6.02.836-8.3-.728-1.73-1.832-3.081-2.55-3.831zM9.32 14.01c.615-.183 1.606-.465 2.745-.534-.683-1.725-.848-3.233-.716-4.577.154-1.552.7-2.847 1.235-3.95.113-.235.223-.454.328-.664.149-.297.288-.577.419-.86.217-.47.379-.885.46-1.27.08-.38.08-.72-.014-1.043-.095-.325-.297-.675-.68-1.06a1.6 1.6 0 0 0-1.475.36l-4.95 4.452a1.602 1.602 0 0 0-.513.952l-.427 2.83c.672.59 2.328 2.316 3.335 4.711.09.21.175.43.253.653z"/></svg>';
 
 function activityEntryHTML(): string {
   const selected = isActivitySelected();

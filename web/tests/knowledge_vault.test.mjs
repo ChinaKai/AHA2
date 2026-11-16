@@ -26,6 +26,8 @@ function reset(patch = {}) {
     vaultPath: "/srv/vault",
     obsidianVault: "AHA2 Knowledge",
     obsidianReady: true,
+    // Loopback is the default fixture; remote tests opt out explicitly.
+    openAvailable: true,
     libraries: [
       {id: "global", kind: "global", name: "全局知识", count: 2},
       {id: "project:p1", kind: "project", name: "Demo", project_id: "p1", count: 3},
@@ -309,8 +311,15 @@ test("the sidebar defaults to 270px, collapses to a rail and exposes a 6px separ
   assert.match(css, /\.kv-tree-resizer:hover::after, \.kv-tree-resizer:focus-visible::after \{ background: var\(--color-text-muted\); opacity: 1; \}/);
   // Phones hide the collapse rail but keep the file/tree mode toggle.
   assert.match(css, /@media \(max-width: 760px\)[\s\S]*\.kv-sidebar-toggle\[data-kv-sidebar-toggle\], \.kv-tree-resizer \{ display: none; \}/);
-  assert.match(css, /\.kv-tree-panel\.collapsed \.kv-panel-head \.kv-panel-actions \{ display: none; \}/);
+  assert.match(css, /\.kv-tree-panel\.collapsed \.kv-panel-tools,\s*\.kv-tree-panel\.collapsed \.kv-files-mode \{ display: none; \}/);
   assert.match(css, /@media \(max-width: 760px\)[\s\S]*\.kv-tree-panel\.collapsed \.kv-tree-body \{ display: block; \}/);
+  // The files-mode switch is a labeled pill, not a second square collapse
+  // icon: it must not borrow the collapse button's class.
+  const expandedHead = html.slice(html.indexOf('<div class="kv-panel-head">'), html.indexOf('<div class="kv-panel-tools">'));
+  assert.match(expandedHead, /class="kv-files-mode" data-kv-files-toggle aria-pressed="false"/);
+  assert.doesNotMatch(expandedHead, /class="kv-sidebar-toggle icon-button" data-kv-files-toggle/);
+  assert.match(expandedHead, /<span>文件模式<\/span>/);
+  assert.equal((expandedHead.match(/data-kv-sidebar-toggle/g) || []).length, 1, "one collapse control only");
   // Collapsed pages omit the resizer element, so the grid drops its track as
   // well; otherwise the reader would be laid into the 0px resizer column.
   assert.match(css, /@media \(min-width: 1181px\) \{\s*\.knowledge-vault\[data-kv-sidebar-collapsed="true"\] \.kv-workspace \{ grid-template-columns: var\(--kv-tree-width\) minmax\(0, 1fr\) var\(--kv-context-width\); \}/);
@@ -1232,7 +1241,7 @@ test("an uninitialized vault shows the initialization entry instead of an empty 
 
 test("the real file directory lists folders, markdown and binary downloads", () => {
   reset({
-    filesMode: true, filesPath: "projects/demo", filesState: "ready",
+    filesMode: true, filesPath: "projects/demo", filesState: "ready", openAvailable: false,
     files: [
       {name: "topics", path: "projects/demo/topics", absolute_path: "/vault/projects/demo/topics", is_dir: true, size: 0, kind: "folder"},
       {name: "notes.md", path: "projects/demo/notes.md", absolute_path: "/vault/projects/demo/notes.md", is_dir: false, size: 12, kind: "markdown"},
@@ -1264,22 +1273,50 @@ test("a file preview offers copy path and hides the file-manager action when rem
   assert.match(html, /在文件管理器中打开/);
 });
 
-test("the directory header copies and reveals the vault/current folder, not the open document", () => {
+test("the directory header copies and opens the vault/current folder, not the open document", () => {
   reset({vaultPath: "C:\\知识库", openAvailable: false});
   let html = vault.renderKnowledgeVaultPage(context());
   assert.match(html, /class="kv-panel-actions kv-open-actions"[\s\S]*?data-kv-copy="C:\\知识库"[^>]*title="复制目录路径"[^>]*aria-label="复制目录路径"/);
-  assert.doesNotMatch(html, /data-kv-reveal=/, "remote access never shows the file-manager action");
+  assert.doesNotMatch(html, /data-kv-reveal=/, "remote access never shows a file-manager action");
+  assert.doesNotMatch(html, /href="vscode:\/\/|href="obsidian:\/\//, "remote access never shows editor links");
   assert.doesNotMatch(html, /复制文档路径/, "the directory copy action must not use the document-path label");
 
-  reset({vaultPath: "/srv/vault", filesMode: true, filesPath: "projects/demo", filesState: "ready", files: [], openAvailable: true});
+  reset({vaultPath: "/srv/vault", filesMode: true, filesPath: "projects/demo", filesState: "ready", files: []});
   html = vault.renderKnowledgeVaultPage(context());
-  assert.match(html, /data-kv-copy="\/srv\/vault\/projects\/demo"/, "file mode copies the current directory");
-  assert.match(html, /data-kv-reveal="projects\/demo"/, "file mode reveals the current directory");
+  const tools = html.slice(html.indexOf('<div class="kv-panel-tools">'), html.indexOf('<div class="kv-tree-body">'));
+  assert.match(tools, /data-kv-copy="\/srv\/vault\/projects\/demo"/, "file mode copies the current directory");
+  assert.match(tools, /href="vscode:\/\/file\/srv\/vault\/projects\/demo"/, "VSCode opens the current folder");
+  assert.match(tools, /href="obsidian:\/\/open\?vault=AHA2%20Knowledge&amp;file=projects%2Fdemo"/, "Obsidian opens the vault at the current folder");
+  assert.deepEqual((tools.match(/aria-label="[^"]+"/g) || []).map(value => value.slice(12, -1)), ["在本地 VSCode 打开", "在 Obsidian 打开", "复制目录路径"]);
+  assert.doesNotMatch(tools, /data-kv-reveal=|在文件管理器中打开/, "the directory header has no file-manager entry");
+  assert.equal((tools.match(/class="kv-open(?: kv-copy)?"/g) || []).length, 3, "two editors plus copy");
 
   // The indexed tree always describes the vault root, even after the file
   // browser remembers a nested directory.
-  reset({vaultPath: "/srv/vault", filesMode: false, filesPath: "projects/demo", openAvailable: true});
+  reset({vaultPath: "/srv/vault", filesMode: false, filesPath: "projects/demo"});
   html = vault.renderKnowledgeVaultPage(context());
-  assert.match(html, /data-kv-copy="\/srv\/vault"/);
-  assert.match(html, /data-kv-reveal=""/);
+  const rootTools = html.slice(html.indexOf('<div class="kv-panel-tools">'), html.indexOf('<div class="kv-tree-body">'));
+  assert.match(rootTools, /data-kv-copy="\/srv\/vault"/);
+  assert.match(rootTools, /href="vscode:\/\/file\/srv\/vault"/);
+  assert.match(rootTools, /href="obsidian:\/\/open\?vault=AHA2%20Knowledge&amp;file="/);
+  assert.doesNotMatch(rootTools, /data-kv-reveal=/);
+});
+
+test("remote sessions hide directory editor actions and keep only copy", () => {
+  reset({vaultPath: "/srv/vault", openAvailable: false, filesMode: true, filesPath: "projects/demo", filesState: "ready", files: []});
+  const html = vault.renderKnowledgeVaultPage(context());
+  const tools = html.slice(html.indexOf('<div class="kv-panel-tools">'), html.indexOf('<div class="kv-tree-body">'));
+  assert.equal((tools.match(/class="kv-open(?: kv-copy)?"/g) || []).length, 1, "only the copy action remains");
+  assert.match(tools, /data-kv-copy="\/srv\/vault\/projects\/demo"/);
+  assert.doesNotMatch(tools, /data-kv-reveal=|vscode:\/\/|obsidian:\/\//, "no hidden or empty editor controls");
+});
+
+test("remote document actions keep the copy button and drop VSCode/Obsidian", () => {
+  reset({selectedID: "doc-1", docState: "ready", doc, openAvailable: false});
+  const html = vault.renderKnowledgeVaultPage(context());
+  const toolbar = html.slice(html.indexOf('<div class="kv-doc-toolbar">'), html.indexOf('<div class="kv-doc-head">'));
+  assert.equal((toolbar.match(/class="kv-open(?: kv-copy)?"/g) || []).length, 1, "only the document copy action remains");
+  assert.match(toolbar, /data-kv-copy="\/srv\/vault\/项目 知识\/projects\/p1\/guides\/build\.md"/);
+  assert.doesNotMatch(toolbar, /vscode:\/\/|obsidian:\/\//);
+  assert.doesNotMatch(toolbar, /(?:title|aria-label)="[^"]*\/srv\//, "remote controls never leak local paths");
 });

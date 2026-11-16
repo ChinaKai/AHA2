@@ -180,6 +180,7 @@ function bootstrap(off) {
   return `
 const OFF = ${off};
 const LIBS = ${JSON.stringify(LIBS)};
+const REMOTE = location.search.includes("remote=1");
 if (location.search.includes("obsidian=off")) LIBS.obsidian_ready = false;
 const TREES = ${JSON.stringify({all: allTree})};
 const DOC = ${JSON.stringify(DOC)};
@@ -252,6 +253,7 @@ window.fetch = async (input, init = {}) => {
   if (path === "/api/v1/workspaces") return json({workspaces: []});
   if (path === "/api/v1/events") return json({events: [], cursor: 0});
   if (path === "/api/v1/knowledge-vault/libraries") return OFF ? json({ok: false, error: "knowledge_vault_disabled"}, 404) : json(LIBS);
+  if (path === "/api/v1/knowledge-vault/open-info") return json({ok: true, open_available: !REMOTE, vault_path: LIBS.vault_path});
   if (path === "/api/v1/knowledge-vault/tree") {
     const library = url.searchParams.get("library") || "all";
     window.__vaultTreeRequests.push(library);
@@ -464,6 +466,59 @@ try {
   assert.equal(await page.locator("text=从左侧选择文档").count(), 0, "the default page is not the empty reader");
   await page.waitForSelector(".kv-feed-day");
   assert.match(await page.locator(".kv-feed").innerText(), /构建指南[\s\S]*Demo[\s\S]*全局指南[\s\S]*全局知识/);
+
+  // Directory header: one direction-arrow collapse control on the left, a
+  // clearly labeled files-mode pill on the right, and three local open
+  // actions plus copy on their own row. Remote sessions are checked below.
+  await page.waitForFunction(() => document.querySelectorAll(".kv-panel-tools .kv-open").length === 3);
+  const panelHead = page.locator(".kv-panel-head");
+  assert.equal(await panelHead.locator("[data-kv-sidebar-toggle]").count(), 1, "only the arrow collapses the sidebar");
+  assert.equal(await panelHead.locator("[data-kv-files-toggle]").getAttribute("aria-pressed"), "false");
+  assert.equal((await panelHead.locator("[data-kv-files-toggle]").innerText()).trim(), "文件模式");
+  assert.equal(await page.locator(".kv-files-mode.kv-sidebar-toggle").count(), 0, "the files switch is not styled as a second collapse button");
+  const headGeometry = await page.evaluate(() => {
+    const box = selector => document.querySelector(selector).getBoundingClientRect();
+    const collapse = box(".kv-panel-head [data-kv-sidebar-toggle]");
+    const files = box(".kv-panel-head [data-kv-files-toggle]");
+    const tools = box(".kv-panel-tools");
+    const head = box(".kv-panel-head");
+    const panel = box(".kv-tree-panel");
+    return {
+      collapse, files, tools, head, panel,
+      toolsCount: document.querySelectorAll(".kv-panel-tools .kv-open").length,
+      overflow: document.documentElement.scrollWidth - window.innerWidth,
+    };
+  });
+  assert.ok(headGeometry.collapse.right <= headGeometry.files.left + 1, "the arrow and the files pill sit on opposite ends");
+  assert.ok(headGeometry.files.width > headGeometry.collapse.width + 15, "the files switch is a labeled pill, not a square icon");
+  assert.ok(headGeometry.tools.top >= headGeometry.head.bottom - 1, "directory open actions have their own row");
+  assert.ok(headGeometry.tools.right <= headGeometry.panel.right + 1, "directory actions stay inside the sidebar");
+  assert.ok(headGeometry.overflow <= 1, "the directory header does not overflow the page");
+  const directoryTools = await page.locator(".kv-panel-tools .kv-open").evaluateAll(nodes => nodes.map(node => ({
+    tag: node.tagName,
+    label: node.getAttribute("aria-label"),
+    href: node.getAttribute("href"),
+    reveal: node.getAttribute("data-kv-reveal"),
+    copy: node.getAttribute("data-kv-copy"),
+  })));
+  assert.deepEqual(directoryTools.map(item => item.label), ["在本地 VSCode 打开", "在 Obsidian 打开", "复制目录路径"]);
+  assert.equal(await page.locator(".kv-panel-tools [data-kv-reveal]").count(), 0, "the directory header has no file-manager entry");
+  assert.ok(directoryTools.every(item => item.reveal === null));
+  assert.equal(directoryTools[0].href, "vscode://file/srv/vault", "VSCode opens the vault folder");
+  assert.equal(directoryTools[1].href, "obsidian://open?vault=AHA2%20Knowledge&file=", "Obsidian opens the vault root");
+  assert.equal(directoryTools[2].copy, "/srv/vault");
+  await axe(page, "knowledge directory header");
+
+  // The pill switches the panel to the real file directory and back without
+  // touching the collapse state.
+  await page.locator("[data-kv-files-toggle]").click();
+  await page.waitForSelector(".kv-files-path");
+  assert.equal(await page.locator("[data-kv-files-toggle]").getAttribute("aria-pressed"), "true");
+  assert.equal(await page.locator(".knowledge-vault").getAttribute("data-kv-sidebar-collapsed"), "false", "files mode never collapses the sidebar");
+  assert.match(await page.locator(".kv-files-path").innerText(), /vault 根目录/);
+  await page.locator("[data-kv-files-toggle]").click();
+  await page.waitForSelector(".kv-tree-list");
+  assert.equal(await page.locator("[data-kv-files-toggle]").getAttribute("aria-pressed"), "false");
 
   // Timestamp-only rows are hidden until the owner asks for them, and an
   // unknown content state stays visible with an explicit label.
@@ -835,6 +890,12 @@ try {
   assert.ok(Math.abs((await treeWidth()) - 48) < 1, "collapsed rail is 48px");
   assert.equal(await page.locator(".kv-tree-resizer").count(), 0, "collapsed panel has no drag handle");
   assert.equal(await page.locator(".kv-tree-body").isVisible(), false);
+  // The rail keeps exactly one control: the expand arrow. Neither the files
+  // pill nor the directory actions may masquerade as a second collapse icon.
+  assert.equal(await page.locator("[data-kv-files-toggle]").isVisible(), false, "the collapsed rail hides the files-mode pill");
+  assert.equal(await page.locator(".kv-panel-tools").isVisible(), false, "the collapsed rail hides directory actions");
+  const railControls = await page.evaluate(() => [...document.querySelectorAll(".kv-panel-head button")].filter(node => node.offsetParent).map(node => node.getAttribute("data-kv-sidebar-toggle") !== null));
+  assert.deepEqual(railControls, [true], "only the expand arrow remains reachable in the rail");
   let collapsedLayout = await workspaceLayout();
   assert.equal(collapsedLayout.tracks, 3, "collapsed drops the resizer track instead of shifting the reader into it");
   assert.ok(collapsedLayout.docWidth >= expandedLayout.docWidth + 100, `collapsed reader reclaims the rail: ${collapsedLayout.docWidth} vs ${expandedLayout.docWidth}`);
@@ -869,6 +930,8 @@ try {
   assert.equal(await page.locator("[data-kv-sidebar-toggle]").getAttribute("aria-expanded"), "true");
   assert.equal(await page.locator("[data-kv-sidebar-toggle]").getAttribute("aria-label"), "收起目录栏");
   assert.equal(await page.locator(".kv-tree-body").isVisible(), true);
+  assert.equal(await page.locator("[data-kv-files-toggle]").isVisible(), true, "expanding restores the files-mode pill");
+  assert.equal(await page.locator(".kv-panel-tools").isVisible(), true, "expanding restores the directory actions");
   assert.ok(Math.abs((await treeWidth()) - 270) < 1, "expanding restores the saved width");
   const restoredLayout = await workspaceLayout();
   assert.equal(restoredLayout.tracks, 4, "expanding restores the resizer track");
@@ -937,8 +1000,8 @@ try {
   const actionNames = await actions.evaluateAll(nodes => nodes.map(node => node.getAttribute("aria-label")));
   assert.deepEqual(actionNames, ["在本地 VSCode 打开", "在 Obsidian 打开", "复制文档路径"]);
   assert.equal(await actions.locator("span").count(), 0, "open actions are icon-only");
-  const local = page.locator('a.kv-open[href^="vscode://file/"]');
-  const obsidian = page.locator('a.kv-open[href^="obsidian://open"]');
+  const local = page.locator('.kv-doc-toolbar a.kv-open[href^="vscode://file/"]');
+  const obsidian = page.locator('.kv-doc-toolbar a.kv-open[href^="obsidian://open"]');
   assert.equal(await local.count(), 1);
   assert.equal(await obsidian.count(), 1);
   assert.match(await local.getAttribute("href"), /%E9%A1%B9%E7%9B%AE%20%E7%9F%A5%E8%AF%86/);
@@ -1201,6 +1264,23 @@ try {
   assert.equal(await page.locator('.kv-doc-toolbar a.kv-open[href^="vscode://file/"]').count(), 1);
   assert.equal(await page.locator(".kv-doc-toolbar .kv-open").count(), 3);
 
+  // Remote access: the server reports open_available=false, so the document
+  // toolbar and the directory header keep only the copy action. No editor
+  // links, disabled placeholders, or local paths in titles may remain.
+  await page.goto(`${url}/?remote=1#knowledge?doc=doc-1&scope=project&project=p1`, {waitUntil: "networkidle"});
+  await page.waitForSelector(".kv-doc-body");
+  await page.waitForFunction(() => document.querySelectorAll(".kv-panel-tools .kv-open").length === 1);
+  assert.equal(await page.locator(".kv-doc-toolbar .kv-open").count(), 1, "remote document header keeps only copy");
+  assert.equal(await page.locator(".kv-doc-toolbar .kv-open[data-kv-copy]").count(), 1);
+  assert.equal(await page.locator('.kv-doc-toolbar a.kv-open[href^="vscode://"], .kv-doc-toolbar a.kv-open[href^="obsidian://"]').count(), 0);
+  assert.equal(await page.locator(".kv-panel-tools .kv-open").count(), 1, "remote directory header keeps only copy");
+  assert.equal(await page.locator(".kv-panel-tools [data-kv-reveal]").count(), 0);
+  assert.equal(await page.locator('.kv-panel-tools a.kv-open[href^="vscode://"], .kv-panel-tools a.kv-open[href^="obsidian://"]').count(), 0);
+  assert.equal(await page.locator(".kv-panel-tools .kv-open[disabled]").count(), 0, "no disabled editor placeholders");
+  const remoteTitles = await page.locator(".kv-doc-toolbar .kv-open, .kv-panel-tools .kv-open").evaluateAll(nodes => nodes.map(node => [node.getAttribute("title"), node.getAttribute("aria-label")].join("|")));
+  assert.ok(remoteTitles.every(text => !text.includes("/srv/")), `remote controls never expose local paths: ${remoteTitles.join(", ")}`);
+  await axe(page, "knowledge remote header");
+
   // Address bar: opening a document updates the hash in place (no reload, no
   // history growth); every top-level view switch drops the knowledge hash so a
   // refresh restores the view the user is actually on.
@@ -1408,6 +1488,27 @@ try {
   assert.equal(await page.locator(".kv-tree-resizer").isVisible(), false, "phones have no drag handle");
   assert.equal(await page.locator("[data-kv-sidebar-toggle]").isVisible(), false, "phones hide the collapse control");
   assert.equal(await page.locator("[data-kv-files-toggle]").isVisible(), true, "phones keep the file/tree mode toggle");
+  await page.waitForFunction(() => document.querySelectorAll(".kv-panel-tools .kv-open").length === 3);
+  const mobileHeader = await page.evaluate(() => {
+    const box = selector => document.querySelector(selector).getBoundingClientRect();
+    const head = box(".kv-panel-head");
+    const files = box(".kv-panel-head [data-kv-files-toggle]");
+    const tools = box(".kv-panel-tools");
+    const panel = box(".kv-tree-panel");
+    return {head, files, tools, panel, overflow: document.documentElement.scrollWidth - window.innerWidth};
+  });
+  assert.ok(mobileHeader.files.right <= mobileHeader.panel.right + 1, "390px keeps the files pill inside the panel");
+  assert.ok(mobileHeader.tools.right <= mobileHeader.panel.right + 1, "390px keeps directory actions inside the panel");
+  assert.ok(mobileHeader.overflow <= 1, "390px directory header does not overflow");
+  // The files-mode pill still switches the phone panel to the real directory.
+  await page.locator("[data-kv-files-toggle]").click();
+  await page.waitForSelector(".kv-files-path");
+  assert.equal(await page.locator("[data-kv-files-toggle]").getAttribute("aria-pressed"), "true");
+  assert.equal((await page.locator("[data-kv-files-toggle]").innerText()).trim(), "文件模式");
+  assert.match(await page.locator(".kv-files-path").innerText(), /vault 根目录/);
+  await page.locator("[data-kv-files-toggle]").click();
+  await page.waitForSelector(".kv-tree-list");
+  assert.equal(await page.locator("[data-kv-files-toggle]").getAttribute("aria-pressed"), "false");
   await page.screenshot({path: resolve(screenshots, "knowledge-vault-mobile-list.png"), fullPage: false});
   assert.equal(await page.locator(".kv-doc-panel").isVisible(), false);
   layout = await topbarLayout(page);
