@@ -112,6 +112,30 @@ func (s *Service) PetDeleteProject(ctx context.Context, projectID string, reason
 	})
 }
 
+// projectDeleteCleanupError reports that the destructive part of a project
+// delete committed but a best-effort cleanup step failed. The approval layer
+// treats it as success with a warning instead of returning the card to
+// pending, because re-running the approval would fail on the now-missing
+// project row. Startup reconciliation retries the archive.
+type projectDeleteCleanupError struct {
+	ProjectID string
+	Err       error
+}
+
+func (e *projectDeleteCleanupError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return fmt.Sprintf("项目 %s 已删除，但知识库空间归档失败；重启时的知识空间对账会自动重试：%v", e.ProjectID, e.Err)
+}
+
+func (e *projectDeleteCleanupError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
 func (s *Service) deleteProjectNow(ctx context.Context, projectID string) error {
 	project, _, err := s.petManageableProject(ctx, projectID)
 	if err != nil {
@@ -156,7 +180,7 @@ func (s *Service) deleteProjectNow(ctx context.Context, projectID string) error 
 	if s != nil && s.knowledgeVault != nil {
 		archivedPath, err := s.knowledgeVault.ArchiveProjectSpace(ctx, project.ID)
 		if err != nil {
-			archiveErr = fmt.Errorf("项目已删除，但知识库空间归档失败；重启时的知识空间对账会自动重试：%w", err)
+			archiveErr = &projectDeleteCleanupError{ProjectID: project.ID, Err: err}
 			_ = s.store.AppendPetEvent(ctx, domain.PetEvent{
 				ID: domain.NewID("pet_event"), At: s.now().UTC(), Actor: "pet",
 				Kind: "project_delete_cleanup", Detail: project.ID, Status: err.Error(),
