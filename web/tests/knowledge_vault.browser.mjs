@@ -1242,49 +1242,21 @@ try {
   assert.match(await page.evaluate(() => location.hash), /^#knowledge\?doc=doc-1/);
   assert.equal((await page.locator(".kv-doc-head h1").textContent()).trim(), "构建指南");
 
-  // Settings integration: the gear dialog owns index rebuild and Git. The old
-  // advanced-settings rebuild button and the remote-host row are both gone.
+  // Settings integration: the gear dialog reports health and owns Git. Index
+  // maintenance is automatic now, so the removed rebuild button must stay
+  // gone; the long vault path proves the freshly loaded settings reached the
+  // dialog.
   await page.locator(".kv-settings-trigger").click();
   await page.waitForSelector("#kv-settings-dialog", {state: "visible"});
-  await page.waitForSelector("#kv-settings-rebuild:not([disabled])");
-  await page.waitForSelector("#kv-git-init");
+  await page.waitForSelector(".kv-settings-section.kv-git", {timeout: 5000});
+  await page.waitForFunction(() => document.querySelector("#kv-settings-dialog")?.innerText.includes("一个很长的目录名称"));
+  const settingsText = await page.locator("#kv-settings-dialog").innerText();
+  assert.match(settingsText, /索引操作/);
+  assert.equal(await page.locator("#kv-settings-rebuild").count(), 0, "index maintenance is automatic; no rebuild button");
   assert.equal(await page.locator("#knowledge-vault-rebuild").count(), 0, "advanced settings duplicate rebuild is out of this page");
-  assert.doesNotMatch(await page.locator("#kv-settings-dialog").innerText(), /远程主机|Remote host/);
+  assert.doesNotMatch(settingsText, /远程主机|Remote host/);
   assert.equal(await page.locator("#kv-settings-dialog").getByText("远程主机").count(), 0);
   assert.equal(await page.locator("#kv-settings-dialog [href*='vscode-remote']").count(), 0);
-
-  // Rebuild keeps the dialog, selection and deep link alive while refreshing
-  // every cached projection in place.
-  await page.waitForFunction(() => document.querySelector("#kv-settings-dialog")?.innerText.includes("一个很长的目录名称"));
-  const rebuildBefore = await page.evaluate(() => ({
-    hash: location.hash,
-    tree: window.__vaultTreeRequests.length,
-    doc: window.__vaultRequests.filter(item => item.startsWith("/api/v1/knowledge-vault/doc/doc-1")).length,
-    recent: window.__vaultRecentRequests.length,
-    inbox: window.__vaultInboxRequests.length,
-    rebuilds: window.__vaultRebuildCount,
-  }));
-  await page.evaluate(() => { window.__deepLinkMarker = "still-here"; });
-  await page.locator("#kv-settings-rebuild").click();
-  await page.waitForSelector("#kv-settings-dialog .kv-settings-notice.success", {timeout: 5000});
-  assert.match(await page.locator("#kv-settings-dialog .kv-settings-notice.success").innerText(), /已重建 7 条/);
-  await page.waitForFunction(count => window.__vaultTreeRequests.length > count, rebuildBefore.tree);
-  await page.waitForFunction(count => window.__vaultRequests.filter(item => item.startsWith("/api/v1/knowledge-vault/doc/doc-1")).length > count, rebuildBefore.doc);
-  await page.waitForFunction(count => window.__vaultRecentRequests.length > count, rebuildBefore.recent);
-  await page.waitForFunction(count => window.__vaultInboxRequests.length > count, rebuildBefore.inbox);
-  assert.equal(await page.locator("#kv-settings-dialog").evaluate(dialog => dialog.open), true, "rebuild keeps the dialog open");
-  assert.equal(await page.evaluate(() => location.hash), rebuildBefore.hash, "rebuild preserves the deep link");
-  assert.equal(await page.evaluate(() => window.__deepLinkMarker), "still-here", "rebuild does not reload the page");
-  assert.equal((await page.locator(".kv-doc-head h1").textContent()).trim(), "构建指南", "rebuild keeps the selected document");
-  assert.equal(await page.evaluate(() => window.__vaultRebuildCount), rebuildBefore.rebuilds + 1);
-
-  await page.evaluate(() => { window.__vaultRebuildFail = true; });
-  await page.locator("#kv-settings-rebuild").click();
-  await page.waitForSelector("#kv-settings-dialog .kv-settings-notice.error[role='alert']", {timeout: 5000});
-  assert.match(await page.locator("#kv-settings-dialog .kv-settings-notice.error[role='alert']").innerText(), /重建索引失败/);
-  await page.waitForSelector("#kv-settings-rebuild:not([disabled])", {timeout: 5000});
-  assert.equal(await page.locator("#kv-settings-dialog").evaluate(dialog => dialog.open), true, "failed rebuild keeps the dialog open");
-  await page.evaluate(() => { window.__vaultRebuildFail = false; });
 
   // Git starts uninitialized, then init/remote/commit/push/sync all run from
   // the same panel. The authenticated status now carries the full SSH remote
