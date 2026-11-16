@@ -20,6 +20,11 @@ import (
 
 func newDataManagementTestServer(t *testing.T) (*httptest.Server, *store.Store, *sql.DB, string) {
 	t.Helper()
+	return newDataManagementTestServerWithConfig(t, nil)
+}
+
+func newDataManagementTestServerWithConfig(t *testing.T, configure func(*Config)) (*httptest.Server, *store.Store, *sql.DB, string) {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "aha2.db")
 	database, err := store.Open(context.Background(), path)
 	if err != nil {
@@ -27,7 +32,11 @@ func newDataManagementTestServer(t *testing.T) (*httptest.Server, *store.Store, 
 	}
 	t.Cleanup(func() { database.Close() })
 	authService := auth.NewService(database, "setup-test", time.Hour)
-	server := httptest.NewServer(New(Config{Store: database, Auth: authService, App: app.NewService(database, nil, app.StubExecutor{})}).Handler())
+	config := Config{Store: database, Auth: authService, App: app.NewService(database, nil, app.StubExecutor{})}
+	if configure != nil {
+		configure(&config)
+	}
+	server := httptest.NewServer(New(config).Handler())
 	t.Cleanup(server.Close)
 	raw, err := sql.Open("sqlite", path)
 	if err != nil {

@@ -73,7 +73,11 @@ type Config struct {
 	// production so routes can stay registered and report "disabled" with a
 	// 404 while the switch is off. The legacy knowledge routes never change.
 	KnowledgeVault *knowledgevault.Manager
-	StartedAt      time.Time
+	// BackupPreviewTimeout overrides the data-management backup scan deadline.
+	// Zero keeps the production default; tests use a very short value to
+	// exercise the 504 response without waiting ten seconds.
+	BackupPreviewTimeout time.Duration
+	StartedAt            time.Time
 }
 
 type Server struct {
@@ -109,6 +113,7 @@ type Server struct {
 	probeSSHHostKey          func(context.Context, string) (hardware.SSHHostKeyInfo, error)
 	trustSSHHostKey          func(context.Context, string, string) (hardware.SSHHostKeyInfo, error)
 	pairADB                  func(context.Context, string, string) (string, error)
+	backupPreviewTimeout     time.Duration
 	executeADB               func(context.Context, string, []string, []byte, time.Duration) (hardware.ADBExecResult, error)
 	version                  string
 	webVersion               string
@@ -228,6 +233,7 @@ func New(config Config) *Server {
 		authLimiter:              newAuthLimiter(),
 		modelDetectionJobs:       newModelDetectionJobs(),
 		knowledgeVault:           config.KnowledgeVault,
+		backupPreviewTimeout:     config.BackupPreviewTimeout,
 	}
 	if server.webVersion == "" {
 		server.webVersion = server.version

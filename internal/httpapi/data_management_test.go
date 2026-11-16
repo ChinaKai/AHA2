@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -67,6 +68,29 @@ func TestBackupPreviewDeadlineMapsToGatewayTimeout(t *testing.T) {
 	}
 	if got := backupPreviewErrorStatus(errors.New("permission denied")); got != http.StatusInternalServerError {
 		t.Fatalf("generic error status=%d, want %d", got, http.StatusInternalServerError)
+	}
+}
+
+func TestBackupCleanupPreviewTimeoutReturnsGatewayTimeout(t *testing.T) {
+	server, _, _, path := newDataManagementTestServerWithConfig(t, func(config *Config) {
+		config.BackupPreviewTimeout = time.Nanosecond
+	})
+	writeTestFile(t, filepath.Join(filepath.Dir(path), "backups", "user-installed-1", "aha2.exe"), 10)
+	client := newCookieClient(t)
+	registerOwner(t, client, server.URL)
+
+	response := requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/system/data/backups", nil, "")
+	var payload struct {
+		OK      bool   `json:"ok"`
+		Error   string `json:"error"`
+		Message string `json:"message"`
+	}
+	decodeResponse(t, response, &payload)
+	if response.StatusCode != http.StatusGatewayTimeout {
+		t.Fatalf("timeout status=%d body=%+v, want %d", response.StatusCode, payload, http.StatusGatewayTimeout)
+	}
+	if payload.OK || payload.Error != "data_cleanup_preview_failed" || !strings.Contains(payload.Message, "deadline exceeded") {
+		t.Fatalf("timeout body=%+v", payload)
 	}
 }
 

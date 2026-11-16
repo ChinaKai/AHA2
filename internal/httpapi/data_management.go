@@ -77,7 +77,11 @@ func (s *Server) previewBackupCleanup(writer http.ResponseWriter, request *http.
 		writeError(writer, http.StatusServiceUnavailable, "data_dir_unavailable")
 		return
 	}
-	ctx, cancel := context.WithTimeout(request.Context(), backupPreviewTimeout)
+	timeout := s.backupPreviewTimeout
+	if timeout <= 0 {
+		timeout = backupPreviewTimeout
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), timeout)
 	defer cancel()
 	preview, err := previewBackupCleanup(ctx, root)
 	if err != nil {
