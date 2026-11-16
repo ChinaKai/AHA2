@@ -171,6 +171,24 @@ export interface ChannelKnowledgeSource {
 	projectId?: string;
 }
 
+export interface ChannelGroupBindingPayload {
+	space_project_id: string;
+	access_mode: string;
+	scope_mode: string;
+}
+
+// Bindings configure the group digital human only. The endpoint list is written
+// first so a failed clear never leaves the group without its selection; the
+// empty instance list then removes the old default that used to act as a
+// private-chat and group fallback. The private chat itself always reads every
+// project space and never consults these rows.
+export function channelGroupKnowledgeSavePayloads(spaces: ChannelGroupBindingPayload[]): Array<{endpoint: string; bindings: ChannelGroupBindingPayload[]}> {
+  return [
+    {endpoint: "group_digital_human", bindings: spaces},
+    {endpoint: "", bindings: []},
+  ];
+}
+
 type ChannelKnowledgePolicy = {
 	revision: number;
 	scope_mode: "all" | "selected" | string;
@@ -179,9 +197,9 @@ type ChannelKnowledgePolicy = {
 
 // The channel scope picker reads the source that is live. With the vault on it
 // lists the vault project roots (root_id, not the picker key) and never touches
-// /knowledge/indexes or /knowledge/libraries. A vault channel has no implicit
-// grant: the owner has to select the roots explicitly. With the vault off the
-// legacy list is unchanged.
+// /knowledge/indexes or /knowledge/libraries. These roots only scope the group
+// digital human: the private chat has no implicit or explicit restriction. With
+// the vault off the legacy list is unchanged.
 export function channelKnowledgeSources(context: ChannelUIContext): ChannelKnowledgeSource[] {
   if (context.knowledgeVaultEnabled === true) {
     return (context.vaultLibraries || [])
@@ -218,8 +236,8 @@ function channelVaultKnowledgeSection(context: ChannelUIContext, bindings: Array
       .map(source => ({knowledge_entry_id: source.root, grant_scope: "subtree"})),
   };
   const notice = bindings.length > 0
-    ? `<p><strong>文件知识库（vault）已启用</strong></p><p>渠道只读取已绑定的项目空间；未绑定任何空间时渠道知识为空，不会隐式借用宿主空间。</p>`
-    : `<p><strong>该实例尚未绑定知识空间</strong></p><p>请选择要授予群聊的项目空间；未绑定时群聊与私聊的渠道知识都为空。</p>`;
+    ? `<p><strong>文件知识库（vault）已启用</strong></p><p>群聊只读取已选的项目空间；私聊不受限制，始终读取全部知识。</p>`
+    : `<p><strong>该实例尚未选择群聊知识空间</strong></p><p>请选择要授予群聊的项目空间；未选择时群聊知识为空，私聊仍读取全部知识。</p>`;
   return `<div data-channel-vault-knowledge>${channelKnowledgePolicyEditor(sources, policy, notice)}</div>`;
 }
 
@@ -250,7 +268,7 @@ function openChannelSettings(instance: ChannelInstance, context: ChannelUIContex
     <div class="dialog-body">
       ${channelRuntimeEditor(config, context)}
       <fieldset><legend>消息通知</legend><label class="channel-check"><input type="checkbox" name="notify_task_status" ${config.notify_task_status === true ? "checked" : ""}>普通 Task 状态变更推送到飞书私聊助手</label><small>仅推送等待处理、完成、失败或中断等状态；不会推送普通消息、过程输出或渠道宿主 Task。</small></fieldset>
-      <section class="channel-settings-knowledge"><div class="panel-head"><strong>Knowledge 访问范围</strong><span>私聊默认全部；此处只限制群聊电子人</span></div><div data-channel-settings-knowledge><small>加载中…</small></div></section>
+      <section class="channel-settings-knowledge"><div class="panel-head"><strong>Knowledge 访问范围</strong><span>私聊不限制；此处只配置群聊</span></div><div data-channel-settings-knowledge><small>加载中…</small></div></section>
     </div>
     <div class="dialog-actions"><button type="button" data-close>取消</button><button type="button" class="primary" data-save>保存设置</button></div>`;
   document.body.append(dialog);
@@ -311,11 +329,12 @@ function openChannelSettings(instance: ChannelInstance, context: ChannelUIContex
             .map(input => sourceByRoot.get(input.value)?.projectId)
             .filter((projectID): projectID is string => Boolean(projectID))
             .map(projectID => ({space_project_id: projectID, access_mode: "read", scope_mode: "all"}));
-          // Save the instance default first (private chat reads it) and the
-          // group endpoint override second, so both consumers see the same
-          // explicit list of bound spaces.
-          await api.replaceChannelKnowledgeBindings(instance.id, "", spaces);
-          await api.replaceChannelKnowledgeBindings(instance.id, "group_digital_human", spaces);
+          // The private chat is unrestricted, so these rows only scope the
+          // group. Clearing the instance default after the group endpoint
+          // keeps old data from acting as a fallback.
+          for (const payload of channelGroupKnowledgeSavePayloads(spaces)) {
+            await api.replaceChannelKnowledgeBindings(instance.id, payload.endpoint, payload.bindings);
+          }
         } else if (policy) {
           const mode = policy.querySelector<HTMLSelectElement>('select[name="knowledge_scope_mode"]')?.value === "selected" ? "selected" : "all";
           const grants = [...policy.querySelectorAll<HTMLInputElement>('input[name="knowledge_entry_id"]:checked')].map(input => ({knowledge_entry_id: input.value, grant_scope: "subtree"}));

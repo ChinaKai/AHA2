@@ -15,9 +15,11 @@ import (
 )
 
 const (
-	channelVaultProjectID  = "project_pet"
-	channelLegacyProjectID = "project_legacy"
-	channelHostProjectID   = "project_channel_host"
+	channelVaultProjectID   = "project_pet"
+	channelLegacyProjectID  = "project_legacy"
+	channelHostProjectID    = "project_channel_host"
+	channelLibraryProjectID = "project_channel_library"
+	channelSystemProjectID  = "project_channel_system"
 )
 
 type channelKnowledgeFixture struct {
@@ -100,9 +102,11 @@ func newChannelKnowledgeFixtureWithPolicies(t *testing.T, seedPolicies bool) *ch
 		}
 	}
 
-	vaultProject := domain.Project{ID: channelVaultProjectID, Name: "Pet", ProjectType: "folder", KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now}
-	legacyProject := domain.Project{ID: channelLegacyProjectID, Name: "Legacy", ProjectType: "folder", KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now}
-	for _, project := range []domain.Project{vaultProject, legacyProject} {
+	vaultProject := domain.Project{ID: channelVaultProjectID, Name: "Pet", ProjectType: "folder", KnowledgePolicy: "enabled", KnowledgeState: domain.KnowledgeStateReady, CreatedAt: now, UpdatedAt: now}
+	legacyProject := domain.Project{ID: channelLegacyProjectID, Name: "Legacy", ProjectType: "folder", KnowledgePolicy: "enabled", KnowledgeState: domain.KnowledgeStateReady, CreatedAt: now, UpdatedAt: now}
+	libraryProject := domain.Project{ID: channelLibraryProjectID, Name: "Library", ProjectType: "knowledge", KnowledgePolicy: "enabled", KnowledgeState: domain.KnowledgeStateReady, CreatedAt: now, UpdatedAt: now}
+	systemProject := domain.Project{ID: channelSystemProjectID, Name: "Pet System", ProjectType: "system", KnowledgePolicy: "none", KnowledgeState: domain.KnowledgeStateReady, CreatedAt: now, UpdatedAt: now}
+	for _, project := range []domain.Project{vaultProject, legacyProject, libraryProject, systemProject} {
 		if err := database.CreateProject(ctx, project); err != nil {
 			t.Fatal(err)
 		}
@@ -123,6 +127,14 @@ func newChannelKnowledgeFixtureWithPolicies(t *testing.T, seedPolicies bool) *ch
 	if err != nil {
 		t.Fatal(err)
 	}
+	libraryRoot, err := database.EnsureKnowledgeRoot(ctx, "project", libraryProject.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	systemRoot, err := database.EnsureKnowledgeRoot(ctx, "project", systemProject.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	// These legacy rows must never be served for the vault-bound project, but
 	// remain the source for the unbound project.
 	for _, item := range []domain.KnowledgeEntry{
@@ -134,6 +146,16 @@ func newChannelKnowledgeFixtureWithPolicies(t *testing.T, seedPolicies bool) *ch
 		{
 			ID: "knowledge_legacy_readable", Scope: "project", ProjectID: legacyProject.ID, ParentID: legacyRoot.ID,
 			Slug: "legacy-readable", Type: "practice", Title: "Legacy readable", Body: "still legacy",
+			Status: domain.KnowledgeVerified, Revision: 1, CreatedAt: now, UpdatedAt: now,
+		},
+		{
+			ID: "knowledge_library_note", Scope: "project", ProjectID: libraryProject.ID, ParentID: libraryRoot.ID,
+			Slug: "library-note", Type: "practice", Title: "Library", Body: "dedicated library",
+			Status: domain.KnowledgeVerified, Revision: 1, CreatedAt: now, UpdatedAt: now,
+		},
+		{
+			ID: "knowledge_system_note", Scope: "project", ProjectID: systemProject.ID, ParentID: systemRoot.ID,
+			Slug: "system-note", Type: "practice", Title: "System", Body: "infrastructure",
 			Status: domain.KnowledgeVerified, Revision: 1, CreatedAt: now, UpdatedAt: now,
 		},
 	} {
@@ -165,6 +187,14 @@ func newChannelKnowledgeFixtureWithPolicies(t *testing.T, seedPolicies bool) *ch
 	if seedPolicies {
 		hostRoot, err := database.EnsureKnowledgeRoot(ctx, "project", hostProject.ID)
 		if err != nil {
+			t.Fatal(err)
+		}
+		hostEntry := domain.KnowledgeEntry{
+			ID: "knowledge_channel_host_note", Scope: "project", ProjectID: hostProject.ID, ParentID: hostRoot.ID,
+			Slug: "host-note", Type: "practice", Title: "Host", Body: "channel infrastructure",
+			Status: domain.KnowledgeVerified, Revision: 1, CreatedAt: now, UpdatedAt: now,
+		}
+		if err := database.CreateKnowledge(ctx, hostEntry); err != nil {
 			t.Fatal(err)
 		}
 		if err := database.EnsureChannelKnowledgePolicies(ctx, instance.ID, hostRoot.ID, now); err != nil {
@@ -212,25 +242,135 @@ func knowledgeEntryIDs(items []domain.KnowledgeEntry) map[string]bool {
 	return result
 }
 
-func TestChannelKnowledgeReadsVaultForBoundProjectAndLegacyForUnbound(t *testing.T) {
-	fixture := newChannelKnowledgeFixture(t)
-	entries, err := fixture.service.channelAllowedKnowledge(fixture.ctx, fixture.instance.ID, domain.ChannelEndpointGroupDigitalHuman, "")
-	if err != nil {
+func replaceChannelBindings(t *testing.T, fixture *channelKnowledgeFixture, endpoint string, projectIDs ...string) {
+	t.Helper()
+	bindings := make([]domain.KnowledgeBinding, 0, len(projectIDs))
+	for _, projectID := range projectIDs {
+		bindings = append(bindings, domain.KnowledgeBinding{SpaceProject: projectID, AccessMode: "read", ScopeMode: "all"})
+	}
+	if _, err := fixture.service.ReplaceChannelKnowledgeBindings(fixture.ctx, fixture.instance.ID, endpoint, bindings); err != nil {
 		t.Fatal(err)
-	}
-	ids := knowledgeEntryIDs(entries)
-	for _, want := range []string{"knowledge_pet_note", "knowledge_legacy_readable"} {
-		if !ids[want] {
-			t.Fatalf("channel knowledge missing %s: %#v", want, entries)
-		}
-	}
-	if ids["knowledge_pet_legacy_only"] {
-		t.Fatalf("channel knowledge served the legacy row of a vault-routed project: %#v", entries)
 	}
 }
 
-func TestChannelKnowledgeSelectedGrantsFollowTheReadSource(t *testing.T) {
+func channelEntries(t *testing.T, fixture *channelKnowledgeFixture, endpoint string) []domain.KnowledgeEntry {
+	t.Helper()
+	entries, err := fixture.service.channelAllowedKnowledge(fixture.ctx, fixture.instance.ID, endpoint, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return entries
+}
+
+// The group digital human falls back to the instance binding while it has no
+// endpoint list of its own, and each bound project resolves through its current
+// read source. Global and the channel host are not implied.
+func TestChannelKnowledgeGroupReadsInstanceBindingAcrossSources(t *testing.T) {
 	fixture := newChannelKnowledgeFixture(t)
+	replaceChannelBindings(t, fixture, "", fixture.vaultProject.ID, fixture.legacyProject.ID)
+	entries := channelEntries(t, fixture, domain.ChannelEndpointGroupDigitalHuman)
+	ids := knowledgeEntryIDs(entries)
+	for _, want := range []string{"knowledge_pet_note", "knowledge_legacy_readable"} {
+		if !ids[want] {
+			t.Fatalf("group knowledge missing %s: %#v", want, entries)
+		}
+	}
+	for _, unwanted := range []string{"knowledge_shared", "knowledge_channel_host_note", "knowledge_system_note", "knowledge_pet_legacy_only"} {
+		if ids[unwanted] {
+			t.Fatalf("group knowledge leaked %s: %#v", unwanted, entries)
+		}
+	}
+}
+
+// An endpoint binding replaces the instance default, and a bound dedicated
+// library contributes only its own space.
+func TestChannelKnowledgeGroupBindingOverridesInstanceAndStaysInOneSpace(t *testing.T) {
+	fixture := newChannelKnowledgeFixture(t)
+	replaceChannelBindings(t, fixture, "", fixture.vaultProject.ID)
+	replaceChannelBindings(t, fixture, domain.ChannelEndpointGroupDigitalHuman, channelLibraryProjectID)
+	entries := channelEntries(t, fixture, domain.ChannelEndpointGroupDigitalHuman)
+	ids := knowledgeEntryIDs(entries)
+	if !ids["knowledge_library_note"] {
+		t.Fatalf("group binding did not read the dedicated library: %#v", entries)
+	}
+	for _, entry := range entries {
+		if entry.ProjectID != channelLibraryProjectID {
+			t.Fatalf("group binding leaked another space: %#v", entry)
+		}
+	}
+	for _, unwanted := range []string{"knowledge_pet_note", "knowledge_legacy_readable", "knowledge_shared", "knowledge_channel_host_note"} {
+		if ids[unwanted] {
+			t.Fatalf("group endpoint binding fell back to %s: %#v", unwanted, entries)
+		}
+	}
+}
+
+// A private chat is the bound Owner and reads everything no matter what
+// bindings exist. Channel and system hosts stay out; a ready dedicated library
+// is included.
+func TestChannelDmKnowledgeReadsAllSpacesRegardlessOfBindings(t *testing.T) {
+	cases := []struct {
+		name  string
+		apply func(t *testing.T, fixture *channelKnowledgeFixture)
+	}{
+		{"no binding", func(*testing.T, *channelKnowledgeFixture) {}},
+		{"instance binding", func(t *testing.T, fixture *channelKnowledgeFixture) {
+			replaceChannelBindings(t, fixture, "", fixture.vaultProject.ID)
+		}},
+		{"endpoint binding", func(t *testing.T, fixture *channelKnowledgeFixture) {
+			replaceChannelBindings(t, fixture, domain.ChannelEndpointAssistantDM, fixture.legacyProject.ID)
+		}},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := newChannelKnowledgeFixture(t)
+			testCase.apply(t, fixture)
+			entries := channelEntries(t, fixture, domain.ChannelEndpointAssistantDM)
+			ids := knowledgeEntryIDs(entries)
+			if len(ids) != len(entries) {
+				t.Fatalf("private chat returned duplicate entries: %#v", entries)
+			}
+			for _, want := range []string{"knowledge_shared", "knowledge_pet_note", "knowledge_legacy_readable", "knowledge_library_note"} {
+				if !ids[want] {
+					t.Fatalf("private chat missing %s: %#v", want, entries)
+				}
+			}
+			for _, unwanted := range []string{"knowledge_pet_legacy_only", "knowledge_pet_stale", "knowledge_channel_host_note", "knowledge_system_note"} {
+				if ids[unwanted] {
+					t.Fatalf("private chat leaked %s: %#v", unwanted, entries)
+				}
+			}
+		})
+	}
+}
+
+// The two endpoints on the same instance read different scopes and changing
+// one selection never changes the other.
+func TestChannelDmAndGroupKnowledgeStayIndependent(t *testing.T) {
+	fixture := newChannelKnowledgeFixture(t)
+	replaceChannelBindings(t, fixture, "", fixture.vaultProject.ID)
+	groupIDs := knowledgeEntryIDs(channelEntries(t, fixture, domain.ChannelEndpointGroupDigitalHuman))
+	if !groupIDs["knowledge_pet_note"] || groupIDs["knowledge_shared"] || groupIDs["knowledge_legacy_readable"] {
+		t.Fatalf("group scope = %#v", groupIDs)
+	}
+	dmIDs := knowledgeEntryIDs(channelEntries(t, fixture, domain.ChannelEndpointAssistantDM))
+	for _, want := range []string{"knowledge_shared", "knowledge_pet_note", "knowledge_legacy_readable", "knowledge_library_note"} {
+		if !dmIDs[want] {
+			t.Fatalf("private chat missing %s after group-binding read: %#v", want, dmIDs)
+		}
+	}
+	replaceChannelBindings(t, fixture, domain.ChannelEndpointGroupDigitalHuman, channelLibraryProjectID)
+	dmAfter := knowledgeEntryIDs(channelEntries(t, fixture, domain.ChannelEndpointAssistantDM))
+	if len(dmAfter) != len(dmIDs) {
+		t.Fatalf("group binding change altered the private chat: before=%#v after=%#v", dmIDs, dmAfter)
+	}
+}
+
+func TestLegacyChannelKnowledgeKeepsDmAllAndGroupSelected(t *testing.T) {
+	fixture := newChannelKnowledgeFixture(t)
+	// A legacy deployment has no vault binding source at all.
+	fixture.service.SetKnowledgeVault(nil, false)
+	now := time.Now().UTC()
 	policies, err := fixture.database.ChannelKnowledgePolicies(fixture.ctx, fixture.instance.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -244,35 +384,25 @@ func TestChannelKnowledgeSelectedGrantsFollowTheReadSource(t *testing.T) {
 	if revision == 0 {
 		t.Fatal("group knowledge policy missing")
 	}
-	// A legacy grant for a vault-routed project must stop granting its old row.
-	legacyGrant := []domain.ChannelKnowledgeGrant{{KnowledgeEntryID: "knowledge_pet_legacy_only", GrantScope: "node"}}
-	if err := fixture.database.ReplaceChannelKnowledgeGrants(fixture.ctx, fixture.instance.ID, domain.ChannelEndpointGroupDigitalHuman, fixture.owner.ID, "selected", revision, legacyGrant, nil, time.Now().UTC()); err != nil {
+	grant := []domain.ChannelKnowledgeGrant{{KnowledgeEntryID: knowledgeRootIDForTest(fixture, fixture.legacyProject.ID), GrantScope: "subtree"}}
+	if err := fixture.database.ReplaceChannelKnowledgeGrants(fixture.ctx, fixture.instance.ID, domain.ChannelEndpointGroupDigitalHuman, fixture.owner.ID, "selected", revision, grant, nil, now); err != nil {
 		t.Fatal(err)
 	}
-	entries, err := fixture.service.channelAllowedKnowledge(fixture.ctx, fixture.instance.ID, domain.ChannelEndpointGroupDigitalHuman, "")
-	if err != nil {
-		t.Fatal(err)
+	groupIDs := knowledgeEntryIDs(channelEntries(t, fixture, domain.ChannelEndpointGroupDigitalHuman))
+	if !groupIDs["knowledge_legacy_readable"] {
+		t.Fatalf("legacy group selection lost its grant: %#v", groupIDs)
 	}
-	if knowledgeEntryIDs(entries)["knowledge_pet_legacy_only"] {
-		t.Fatalf("expired legacy grant still granted old content: %#v", entries)
+	if groupIDs["knowledge_pet_legacy_only"] {
+		t.Fatalf("legacy group selection leaked an ungranted project: %#v", groupIDs)
 	}
-
-	// The vault root is grantable and covers its subtree.
-	vaultGrant := []domain.ChannelKnowledgeGrant{{KnowledgeEntryID: "knowledge_root_project_pet", GrantScope: "subtree"}}
-	vaultIDs := map[string]bool{"knowledge_root_project_pet": true}
-	if err := fixture.database.ReplaceChannelKnowledgeGrants(fixture.ctx, fixture.instance.ID, domain.ChannelEndpointGroupDigitalHuman, fixture.owner.ID, "selected", revision+1, vaultGrant, vaultIDs, time.Now().UTC()); err != nil {
-		t.Fatal(err)
+	dmIDs := knowledgeEntryIDs(channelEntries(t, fixture, domain.ChannelEndpointAssistantDM))
+	for _, want := range []string{"knowledge_pet_legacy_only", "knowledge_legacy_readable"} {
+		if !dmIDs[want] {
+			t.Fatalf("legacy private chat missing %s: %#v", want, dmIDs)
+		}
 	}
-	entries, err = fixture.service.channelAllowedKnowledge(fixture.ctx, fixture.instance.ID, domain.ChannelEndpointGroupDigitalHuman, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	ids := knowledgeEntryIDs(entries)
-	if !ids["knowledge_root_project_pet"] || !ids["knowledge_pet_note"] {
-		t.Fatalf("vault grant did not cover the vault subtree: %#v", entries)
-	}
-	if ids["knowledge_pet_legacy_only"] {
-		t.Fatalf("vault grant leaked a legacy row: %#v", entries)
+	if dmIDs["knowledge_channel_host_note"] || dmIDs["knowledge_system_note"] {
+		t.Fatalf("legacy private chat leaked infrastructure: %#v", dmIDs)
 	}
 }
 
@@ -449,7 +579,7 @@ func TestChannelKnowledgeWithoutReadyIndexKeepsLegacyAndDoesNotPanic(t *testing.
 	if _, found, err := fixture.service.vaultEntryByID(fixture.ctx, "knowledge_pet_legacy_only"); err != nil || found {
 		t.Fatalf("unready vault lookup found=%v err=%v", found, err)
 	}
-	entries, err := fixture.service.channelAllowedKnowledge(fixture.ctx, fixture.instance.ID, domain.ChannelEndpointGroupDigitalHuman, "")
+	entries, err := fixture.service.channelAllowedKnowledge(fixture.ctx, fixture.instance.ID, domain.ChannelEndpointAssistantDM, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -467,7 +597,7 @@ func TestChannelKnowledgeRuntimeReadOffBypassesBrokenVaultProbe(t *testing.T) {
 	// runtimeRead=off forces the legacy source. The resolver must not touch a
 	// broken vault reader, otherwise a forced legacy read becomes an error.
 	fixture.service.SetKnowledgeVault(failingKnowledgeVault{err: readerErr}, false)
-	entries, err := fixture.service.channelAllowedKnowledge(fixture.ctx, fixture.instance.ID, domain.ChannelEndpointGroupDigitalHuman, "")
+	entries, err := fixture.service.channelAllowedKnowledge(fixture.ctx, fixture.instance.ID, domain.ChannelEndpointAssistantDM, "")
 	if err != nil {
 		t.Fatalf("runtimeRead=off channel read failed: %v", err)
 	}
@@ -477,7 +607,7 @@ func TestChannelKnowledgeRuntimeReadOffBypassesBrokenVaultProbe(t *testing.T) {
 	// With runtimeRead on the same broken reader is authoritative, so the
 	// channel read must fail closed rather than serving the legacy rows.
 	fixture.service.SetKnowledgeVault(failingKnowledgeVault{err: readerErr}, true)
-	if _, err := fixture.service.channelAllowedKnowledge(fixture.ctx, fixture.instance.ID, domain.ChannelEndpointGroupDigitalHuman, ""); err == nil {
+	if _, err := fixture.service.channelAllowedKnowledge(fixture.ctx, fixture.instance.ID, domain.ChannelEndpointAssistantDM, ""); err == nil {
 		t.Fatal("runtimeRead=on channel read silently fell back to legacy")
 	}
 }
@@ -549,10 +679,11 @@ func TestPetKnowledgeProposalsFollowTheReadSource(t *testing.T) {
 	}
 }
 
-// A channel created while the vault is the read source has no policy. The read
-// must be an explicit empty selection even though the vault and legacy tables
-// both hold entries: no implicit grant and no generic ErrNoRows failure.
-func TestChannelKnowledgeUnconfiguredVaultInstanceReturnsExplicitEmptySelection(t *testing.T) {
+// A channel created while the vault is the read source has no group selection.
+// The group read is an explicit empty selection even though the vault and
+// legacy tables both hold entries; the private chat is never scoped and still
+// reads everything.
+func TestChannelKnowledgeUnconfiguredVaultInstanceKeepsGroupEmptyAndDmAll(t *testing.T) {
 	fixture := newChannelKnowledgeFixtureWithoutPolicies(t)
 	policies, err := fixture.database.ChannelKnowledgePolicies(fixture.ctx, fixture.instance.ID)
 	if err != nil {
@@ -561,59 +692,47 @@ func TestChannelKnowledgeUnconfiguredVaultInstanceReturnsExplicitEmptySelection(
 	if len(policies) != 0 {
 		t.Fatalf("fixture unexpectedly seeded policies: %#v", policies)
 	}
-	for _, endpoint := range []string{domain.ChannelEndpointGroupDigitalHuman, domain.ChannelEndpointAssistantDM} {
-		entries, err := fixture.service.channelAllowedKnowledge(fixture.ctx, fixture.instance.ID, endpoint, "")
-		if err != nil {
-			t.Fatalf("endpoint %s unconfigured read failed instead of returning an empty selection: %v", endpoint, err)
-		}
-		if len(entries) != 0 {
-			t.Fatalf("endpoint %s unconfigured read granted %d entries: %#v", endpoint, len(entries), entries)
+	groupEntries, err := fixture.service.channelAllowedKnowledge(fixture.ctx, fixture.instance.ID, domain.ChannelEndpointGroupDigitalHuman, "")
+	if err != nil {
+		t.Fatalf("unconfigured group read failed instead of returning an empty selection: %v", err)
+	}
+	if len(groupEntries) != 0 {
+		t.Fatalf("unconfigured group read granted %d entries: %#v", len(groupEntries), groupEntries)
+	}
+	dmIDs := knowledgeEntryIDs(channelEntries(t, fixture, domain.ChannelEndpointAssistantDM))
+	for _, want := range []string{"knowledge_shared", "knowledge_pet_note", "knowledge_legacy_readable", "knowledge_library_note"} {
+		if !dmIDs[want] {
+			t.Fatalf("unconfigured private chat missing %s: %#v", want, dmIDs)
 		}
 	}
 }
 
-// The owner's first explicit vault-root selection creates the policy and is
-// the only source of channel knowledge; other vault projects and legacy rows
-// stay out of the selection.
-func TestExplicitVaultRootSelectionConfiguresUnconfiguredChannel(t *testing.T) {
+// The owner's first explicit group binding is the only source of the group
+// scope; other spaces stay out of it while the private chat still reads all.
+func TestExplicitGroupBindingConfiguresUnconfiguredChannel(t *testing.T) {
 	fixture := newChannelKnowledgeFixtureWithoutPolicies(t)
-	now := time.Now().UTC()
-	vaultRootID := "knowledge_root_project_pet"
-	vaultIDs := map[string]bool{vaultRootID: true}
-	grants := []domain.ChannelKnowledgeGrant{{KnowledgeEntryID: vaultRootID, GrantScope: "subtree"}}
-	if err := fixture.database.ReplaceChannelKnowledgeGrants(fixture.ctx, fixture.instance.ID, domain.ChannelEndpointGroupDigitalHuman, fixture.owner.ID, "selected", 0, grants, vaultIDs, now); err != nil {
-		t.Fatal(err)
+	replaceChannelBindings(t, fixture, domain.ChannelEndpointGroupDigitalHuman, fixture.vaultProject.ID)
+	ids := knowledgeEntryIDs(channelEntries(t, fixture, domain.ChannelEndpointGroupDigitalHuman))
+	if !ids["knowledge_root_project_pet"] || !ids["knowledge_pet_note"] {
+		t.Fatalf("explicit group binding did not read its bound space: %#v", ids)
 	}
-	entries, err := fixture.service.channelAllowedKnowledge(fixture.ctx, fixture.instance.ID, domain.ChannelEndpointGroupDigitalHuman, "")
-	if err != nil {
-		t.Fatal(err)
+	if ids["knowledge_legacy_readable"] || ids["knowledge_pet_legacy_only"] || ids["knowledge_shared"] {
+		t.Fatalf("explicit group binding leaked unselected knowledge: %#v", ids)
 	}
-	ids := knowledgeEntryIDs(entries)
-	if !ids[vaultRootID] || !ids["knowledge_pet_note"] {
-		t.Fatalf("explicit vault root did not grant its verified subtree: %#v", entries)
-	}
-	if ids["knowledge_legacy_readable"] || ids["knowledge_pet_legacy_only"] {
-		t.Fatalf("explicit vault selection leaked legacy or unselected knowledge: %#v", entries)
-	}
-	// The private chat is the bound Owner and keeps the documented "always all"
-	// rule once the channel has a policy; it still never serves the vault
-	// project's legacy rows.
-	dmEntries, err := fixture.service.channelAllowedKnowledge(fixture.ctx, fixture.instance.ID, domain.ChannelEndpointAssistantDM, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	dmIDs := knowledgeEntryIDs(dmEntries)
+	// The private chat is the bound Owner and is never scoped by the group
+	// selection; it still never serves the vault project's legacy rows.
+	dmIDs := knowledgeEntryIDs(channelEntries(t, fixture, domain.ChannelEndpointAssistantDM))
 	if !dmIDs["knowledge_pet_note"] || !dmIDs["knowledge_legacy_readable"] {
-		t.Fatalf("private chat did not read all sources after configuration: %#v", dmEntries)
+		t.Fatalf("private chat did not read all sources after group configuration: %#v", dmIDs)
 	}
 	if dmIDs["knowledge_pet_legacy_only"] {
-		t.Fatalf("private chat served a vault project's legacy row: %#v", dmEntries)
+		t.Fatalf("private chat served a vault project's legacy row: %#v", dmIDs)
 	}
-	selection, err := fixture.database.ChannelKnowledgeSelection(fixture.ctx, fixture.instance.ID, domain.ChannelEndpointGroupDigitalHuman)
+	instanceBindings, err := fixture.service.ChannelKnowledgeBindings(fixture.ctx, fixture.instance.ID, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !selection.Configured || selection.FixedIndexEntryID != "" || selection.ScopeMode != "selected" {
-		t.Fatalf("explicit selection stored an unexpected policy: %#v", selection)
+	if len(instanceBindings) != 0 {
+		t.Fatalf("group selection wrote an instance default: %#v", instanceBindings)
 	}
 }

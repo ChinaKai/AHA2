@@ -62,3 +62,23 @@ test("vault project libraries without a root id are not offered as grants", () =
   const sources = channels.channelKnowledgeSources({...vaultContext, vaultLibraries: [{id: "project:p2", kind: "project", name: "No root", project_id: "p2", count: 1}]});
   assert.deepEqual(sources, []);
 });
+
+test("group knowledge save writes the group endpoint and clears the instance default", () => {
+  const spaces = [{space_project_id: "p1", access_mode: "read", scope_mode: "all"}];
+  const payloads = channels.channelGroupKnowledgeSavePayloads(spaces);
+  // The endpoint must be written before the instance clear, otherwise a failed
+  // save would drop the previous group selection as well.
+  assert.deepEqual(payloads, [
+    {endpoint: "group_digital_human", bindings: spaces},
+    {endpoint: "", bindings: []},
+  ]);
+  assert.equal(payloads.filter(payload => payload.endpoint === "assistant_dm").length, 0);
+  assert.equal(payloads.filter(payload => payload.endpoint === "" && payload.bindings.length > 0).length, 0);
+});
+
+test("clearing the group selection still clears the old instance default", () => {
+  assert.deepEqual(channels.channelGroupKnowledgeSavePayloads([]), [
+    {endpoint: "group_digital_human", bindings: []},
+    {endpoint: "", bindings: []},
+  ]);
+});
