@@ -1,13 +1,20 @@
 package knowledgevault
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
+
+// ErrProjectIDArchived reports that a new project tried to reuse the ID of an
+// existing archived vault space. The ID stays reserved so a second archive can
+// never overwrite or silently merge with the first.
+var ErrProjectIDArchived = errors.New("knowledge vault project id is already archived")
 
 // archiveTimestampLayout is the UTC stamp in an archived project directory
 // name. It is compact, sortable and safe on Windows.
@@ -137,6 +144,91 @@ func existingArchiveDir(vaultPath, archivedSlug string) (string, bool) {
 		return "", false
 	}
 	return relative, true
+}
+
+// ArchivedProjectSpace reports whether projectID already owns an archive
+// directory. It is the read-only variant used before project creation; the
+// provisioning path uses the same lookup and may additionally drop a stale
+// manifest entry.
+func ArchivedProjectSpace(cfg Config, projectID string) (string, bool) {
+	cfg, err := cfg.Normalized()
+	if err != nil {
+		return "", false
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return "", false
+	}
+	manifest, err := ReadManifest(cfg.VaultPath)
+	if err != nil {
+		return "", false
+	}
+	return archivedProjectSpace(manifest, cfg.VaultPath, projectID)
+}
+
+// archivedProjectSpace combines the manifest mapping with a scan of archive
+// root pages. The scan is what catches a crash between the directory rename
+// and the manifest write, when manifest.projects still points at the moved (now
+// missing) project directory and manifest.archives has no entry yet. A mapping
+// whose directory no longer exists is ignored.
+func archivedProjectSpace(manifest Manifest, vaultPath, projectID string) (string, bool) {
+	if archivedSlug := strings.TrimSpace(manifest.Archives[projectID]); archivedSlug != "" {
+		relative := path.Join("archive", archivedSlug)
+		if info, err := os.Stat(filepath.Join(vaultPath, filepath.FromSlash(relative))); err == nil && info.IsDir() {
+			return relative, true
+		}
+	}
+	return archiveDirectoryClaimingProject(vaultPath, projectID)
+}
+
+// archiveDirectoryClaimingProject walks flat archive libraries and the nested
+// archive/projects area for a root index.md whose frontmatter declares the
+// project ID. Archive directories without a root page cannot claim an ID.
+func archiveDirectoryClaimingProject(vaultPath, projectID string) (string, bool) {
+	archiveRoot := filepath.Join(vaultPath, "archive")
+	children, err := os.ReadDir(archiveRoot)
+	if err != nil {
+		return "", false
+	}
+	sort.Slice(children, func(left, right int) bool { return children[left].Name() < children[right].Name() })
+	claims := func(relative string) (string, bool) {
+		raw, err := os.ReadFile(filepath.Join(vaultPath, filepath.FromSlash(path.Join(relative, "index.md"))))
+		if err != nil {
+			return "", false
+		}
+		document := ParseDocument(string(raw))
+		if strings.TrimSpace(document.Frontmatter.ProjectID) != projectID {
+			return "", false
+		}
+		return relative, true
+	}
+	for _, child := range children {
+		name := child.Name()
+		if !child.IsDir() || strings.HasPrefix(name, ".") {
+			continue
+		}
+		relative := path.Join("archive", name)
+		if found, ok := claims(relative); ok {
+			return found, true
+		}
+		if name != "projects" {
+			continue
+		}
+		nested, nestedErr := os.ReadDir(filepath.Join(archiveRoot, "projects"))
+		if nestedErr != nil {
+			continue
+		}
+		sort.Slice(nested, func(left, right int) bool { return nested[left].Name() < nested[right].Name() })
+		for _, item := range nested {
+			if !item.IsDir() || strings.HasPrefix(item.Name(), ".") {
+				continue
+			}
+			if found, ok := claims(path.Join(relative, item.Name())); ok {
+				return found, true
+			}
+		}
+	}
+	return "", false
 }
 
 // allocateProjectArchiveSlug builds archive/projects/<slug>-<project8>-<UTC>

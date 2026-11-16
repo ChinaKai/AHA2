@@ -50,6 +50,25 @@ func EnsureProjectSpace(cfg Config, projectID, projectName string, now time.Time
 		now = time.Now().UTC()
 	}
 	result := ProjectSpaceResult{ProjectID: projectID}
+	// A stale archive mapping whose directory was deleted by hand must not
+	// block a new project with the same ID. Drop it before checking whether a
+	// real archive still claims the ID.
+	if archivedSlug := strings.TrimSpace(manifest.Archives[projectID]); archivedSlug != "" {
+		relative := path.Join("archive", archivedSlug)
+		if info, statErr := os.Stat(filepath.Join(cfg.VaultPath, filepath.FromSlash(relative))); statErr != nil || !info.IsDir() {
+			delete(manifest.Archives, projectID)
+			delete(manifest.ArchiveNames, projectID)
+		}
+	}
+	// Reusing an archived project ID would merge two histories. The check is
+	// here, in the shared provisioning entry, so imports and sync mirror rows
+	// that bypass Service.CreateProject are rejected too. It also covers a
+	// crash after the archive rename but before the manifest write: the old
+	// projects mapping is still present, but an archive root page already
+	// claims the ID.
+	if archivedPath, archived := archivedProjectSpace(manifest, cfg.VaultPath, projectID); archived {
+		return result, fmt.Errorf("%w: project %s is archived at %s", ErrProjectIDArchived, projectID, archivedPath)
+	}
 	slug := strings.TrimSpace(manifest.Projects[projectID])
 	if slug == "" {
 		// A previous attempt may have created the directory and root page but

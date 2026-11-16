@@ -2,6 +2,7 @@ package knowledgevault
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -289,5 +290,101 @@ func TestArchiveProjectSpaceFailureLeavesLiveSpaceIntact(t *testing.T) {
 	}
 	if manifest.Projects["p529alpha"] != "alpha-project" {
 		t.Fatalf("manifest mapping was dropped on failure: %#v", manifest.Projects)
+	}
+}
+
+func TestEnsureProjectSpaceRejectsArchivedProjectID(t *testing.T) {
+	ctx := context.Background()
+	config, manager := newArchiveTestVault(t)
+	stamp := time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC)
+	if _, err := EnsureProjectSpace(config, "p529reuse", "Reuse Me", stamp); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ArchiveProjectSpace(config, "p529reuse", stamp.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EnsureProjectSpace(config, "p529reuse", "Reused", stamp.Add(time.Hour)); !errors.Is(err, ErrProjectIDArchived) {
+		t.Fatalf("EnsureProjectSpace reused id error = %v", err)
+	}
+	if _, err := manager.ProvisionProjectSpace(ctx, "p529reuse", "Reused"); !errors.Is(err, ErrProjectIDArchived) {
+		t.Fatalf("ProvisionProjectSpace reused id error = %v", err)
+	}
+	manifest, err := ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := manifest.Projects["p529reuse"]; exists {
+		t.Fatalf("reused ID was written back into projects: %#v", manifest.Projects)
+	}
+	if manifest.Archives["p529reuse"] == "" {
+		t.Fatalf("archive mapping disappeared: %#v", manifest.Archives)
+	}
+}
+
+func TestEnsureProjectSpaceRejectsReuseAfterManifestWriteFailure(t *testing.T) {
+	config, _ := newArchiveTestVault(t)
+	stamp := time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC)
+	if _, err := EnsureProjectSpace(config, "p529reuse", "Reuse Me", stamp); err != nil {
+		t.Fatal(err)
+	}
+	before, err := ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ArchiveProjectSpace(config, "p529reuse", stamp.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a crash after the directory rename but before the manifest
+	// write: the old projects mapping is back and archives has no entry.
+	if err := writeManifest(config.VaultPath, before); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EnsureProjectSpace(config, "p529reuse", "Reused", stamp.Add(time.Hour)); !errors.Is(err, ErrProjectIDArchived) {
+		t.Fatalf("manifest-window reuse error = %v", err)
+	}
+	manifest, err := ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Archives["p529reuse"] != "" {
+		t.Fatalf("failed window unexpectedly gained an archive mapping: %#v", manifest.Archives)
+	}
+	if _, exists := manifest.Projects["p529reuse"]; !exists {
+		t.Fatalf("failed window lost its old projects mapping: %#v", manifest.Projects)
+	}
+}
+
+func TestEnsureProjectSpaceAllowsReuseAfterArchiveDirectoryDeleted(t *testing.T) {
+	config, manager := newArchiveTestVault(t)
+	stamp := time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC)
+	if _, err := EnsureProjectSpace(config, "p529reuse", "Reuse Me", stamp); err != nil {
+		t.Fatal(err)
+	}
+	archivedPath, err := ArchiveProjectSpace(config, "p529reuse", stamp.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(config.VaultPath, filepath.FromSlash(archivedPath))); err != nil {
+		t.Fatal(err)
+	}
+	result, err := EnsureProjectSpace(config, "p529reuse", "Reused", stamp.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("stale archive mapping blocked reuse: %v", err)
+	}
+	if result.Slug == "" {
+		t.Fatalf("reused project got no slug: %#v", result)
+	}
+	manifest, err := ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Projects["p529reuse"] != result.Slug {
+		t.Fatalf("reused project mapping = %#v", manifest.Projects)
+	}
+	if manifest.Archives["p529reuse"] != "" {
+		t.Fatalf("stale archive mapping was kept: %#v", manifest.Archives)
+	}
+	if _, err := manager.Rebuild(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }
