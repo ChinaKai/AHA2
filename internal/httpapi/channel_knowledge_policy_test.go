@@ -111,22 +111,32 @@ func TestChannelKnowledgeBindingReplacesLegacyPolicyForVaultChannel(t *testing.T
 
 	bindingURL := server.URL + "/api/v1/channel-instances/" + instance.ID + "/knowledge-bindings"
 	response = channelJSON(t, client, http.MethodPut, bindingURL, map[string]any{
-		"endpoint": "group_digital_human",
-		"bindings": []map[string]any{{"space_project_id": "project_other", "access_mode": "read"}},
+		"endpoint":       "group_digital_human",
+		"include_global": true,
+		"bindings":       []map[string]any{{"space_project_id": "project_other", "access_mode": "read"}},
 	}, map[string]string{"X-CSRF-Token": csrf})
 	var bindingPayload map[string]any
 	decodeResponse(t, response, &bindingPayload)
-	if response.StatusCode != http.StatusOK || len(bindingPayload["bindings"].([]any)) != 1 {
+	if response.StatusCode != http.StatusOK || len(bindingPayload["bindings"].([]any)) != 1 || bindingPayload["include_global"] != true {
 		t.Fatalf("binding write status=%d payload=%#v", response.StatusCode, bindingPayload)
 	}
 	resolved, err := database.ResolveChannelKnowledgeBindings(ctx, instance.ID, domain.ChannelEndpointGroupDigitalHuman)
 	if err != nil || len(resolved) != 1 || resolved[0].SpaceProject != "project_other" {
 		t.Fatalf("resolved binding = %#v err=%v", resolved, err)
 	}
-	// Replacing with an empty list clears the binding; there is no implicit
-	// host-space fallback.
+	if enabled, err := database.ResolveChannelKnowledgeGlobalBinding(ctx, instance.ID, domain.ChannelEndpointGroupDigitalHuman); err != nil || !enabled {
+		t.Fatalf("resolved include_global = %v err=%v", enabled, err)
+	}
+	response = requestJSON(t, client, http.MethodGet, bindingURL+"?endpoint=group_digital_human", nil, "")
+	var listed map[string]any
+	decodeResponse(t, response, &listed)
+	if response.StatusCode != http.StatusOK || listed["include_global"] != true || len(listed["bindings"].([]any)) != 1 {
+		t.Fatalf("binding list status=%d payload=%#v", response.StatusCode, listed)
+	}
+	// Replacing with an empty list clears the binding and global together; there
+	// is no implicit host-space or global fallback.
 	response = channelJSON(t, client, http.MethodPut, bindingURL, map[string]any{
-		"endpoint": "group_digital_human", "bindings": []any{},
+		"endpoint": "group_digital_human", "include_global": false, "bindings": []any{},
 	}, map[string]string{"X-CSRF-Token": csrf})
 	response.Body.Close()
 	if response.StatusCode != http.StatusOK {
@@ -135,5 +145,8 @@ func TestChannelKnowledgeBindingReplacesLegacyPolicyForVaultChannel(t *testing.T
 	resolved, err = database.ResolveChannelKnowledgeBindings(ctx, instance.ID, domain.ChannelEndpointGroupDigitalHuman)
 	if err != nil || len(resolved) != 0 {
 		t.Fatalf("cleared binding = %#v err=%v", resolved, err)
+	}
+	if enabled, err := database.ResolveChannelKnowledgeGlobalBinding(ctx, instance.ID, domain.ChannelEndpointGroupDigitalHuman); err != nil || enabled {
+		t.Fatalf("cleared include_global = %v err=%v", enabled, err)
 	}
 }

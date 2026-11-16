@@ -244,11 +244,16 @@ func knowledgeEntryIDs(items []domain.KnowledgeEntry) map[string]bool {
 
 func replaceChannelBindings(t *testing.T, fixture *channelKnowledgeFixture, endpoint string, projectIDs ...string) {
 	t.Helper()
+	replaceChannelBindingsWithGlobal(t, fixture, endpoint, false, projectIDs...)
+}
+
+func replaceChannelBindingsWithGlobal(t *testing.T, fixture *channelKnowledgeFixture, endpoint string, includeGlobal bool, projectIDs ...string) {
+	t.Helper()
 	bindings := make([]domain.KnowledgeBinding, 0, len(projectIDs))
 	for _, projectID := range projectIDs {
 		bindings = append(bindings, domain.KnowledgeBinding{SpaceProject: projectID, AccessMode: "read", ScopeMode: "all"})
 	}
-	if _, err := fixture.service.ReplaceChannelKnowledgeBindings(fixture.ctx, fixture.instance.ID, endpoint, bindings); err != nil {
+	if _, err := fixture.service.ReplaceChannelKnowledgeBindings(fixture.ctx, fixture.instance.ID, endpoint, bindings, includeGlobal); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -363,6 +368,97 @@ func TestChannelDmAndGroupKnowledgeStayIndependent(t *testing.T) {
 	dmAfter := knowledgeEntryIDs(channelEntries(t, fixture, domain.ChannelEndpointAssistantDM))
 	if len(dmAfter) != len(dmIDs) {
 		t.Fatalf("group binding change altered the private chat: before=%#v after=%#v", dmIDs, dmAfter)
+	}
+}
+
+// Global is an explicit part of the group selection: it can be chosen alone,
+// together with project spaces, or not at all. An empty selection stays empty.
+func TestChannelKnowledgeGroupGlobalSelection(t *testing.T) {
+	cases := []struct {
+		name          string
+		includeGlobal bool
+		projectIDs    []string
+		want          []string
+		unwanted      []string
+	}{
+		{
+			name: "global only", includeGlobal: true,
+			want: []string{"knowledge_shared"}, unwanted: []string{"knowledge_pet_note", "knowledge_legacy_readable"},
+		},
+		{
+			name: "global and project", includeGlobal: true, projectIDs: []string{channelVaultProjectID},
+			want: []string{"knowledge_shared", "knowledge_pet_note"}, unwanted: []string{"knowledge_legacy_readable", "knowledge_channel_host_note"},
+		},
+		{
+			name: "project only", includeGlobal: false, projectIDs: []string{channelVaultProjectID},
+			want: []string{"knowledge_pet_note"}, unwanted: []string{"knowledge_shared", "knowledge_legacy_readable"},
+		},
+		{
+			name: "nothing selected", includeGlobal: false,
+			want: nil, unwanted: []string{"knowledge_shared", "knowledge_pet_note"},
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := newChannelKnowledgeFixture(t)
+			replaceChannelBindingsWithGlobal(t, fixture, domain.ChannelEndpointGroupDigitalHuman, testCase.includeGlobal, testCase.projectIDs...)
+			entries := channelEntries(t, fixture, domain.ChannelEndpointGroupDigitalHuman)
+			ids := knowledgeEntryIDs(entries)
+			if len(ids) != len(entries) {
+				t.Fatalf("group returned duplicate entries: %#v", entries)
+			}
+			for _, want := range testCase.want {
+				if !ids[want] {
+					t.Fatalf("group selection missing %s: %#v", want, entries)
+				}
+			}
+			for _, unwanted := range testCase.unwanted {
+				if ids[unwanted] {
+					t.Fatalf("group selection leaked %s: %#v", unwanted, entries)
+				}
+			}
+			if testCase.name == "nothing selected" && len(entries) != 0 {
+				t.Fatalf("empty group selection returned entries: %#v", entries)
+			}
+		})
+	}
+}
+
+// include_global follows endpoint-over-instance precedence, including an
+// endpoint "off" row overriding an instance "on" default.
+func TestChannelKnowledgeGroupGlobalInstanceFallbackAndEndpointOverride(t *testing.T) {
+	fixture := newChannelKnowledgeFixture(t)
+	replaceChannelBindingsWithGlobal(t, fixture, "", true, channelVaultProjectID)
+	ids := knowledgeEntryIDs(channelEntries(t, fixture, domain.ChannelEndpointGroupDigitalHuman))
+	if !ids["knowledge_shared"] || !ids["knowledge_pet_note"] {
+		t.Fatalf("instance include_global fallback = %#v", ids)
+	}
+	// The endpoint list and its explicit off replace the instance defaults.
+	replaceChannelBindingsWithGlobal(t, fixture, domain.ChannelEndpointGroupDigitalHuman, false, channelLibraryProjectID)
+	ids = knowledgeEntryIDs(channelEntries(t, fixture, domain.ChannelEndpointGroupDigitalHuman))
+	if ids["knowledge_shared"] || ids["knowledge_pet_note"] || !ids["knowledge_library_note"] {
+		t.Fatalf("endpoint override = %#v", ids)
+	}
+	// Global can be turned back on at the endpoint. An empty endpoint space
+	// list still falls back to the instance spaces, so clear the instance
+	// default first (the Web save does the same after writing the endpoint).
+	replaceChannelBindingsWithGlobal(t, fixture, domain.ChannelEndpointGroupDigitalHuman, true)
+	replaceChannelBindingsWithGlobal(t, fixture, "", false)
+	ids = knowledgeEntryIDs(channelEntries(t, fixture, domain.ChannelEndpointGroupDigitalHuman))
+	if !ids["knowledge_shared"] || ids["knowledge_library_note"] || ids["knowledge_pet_note"] || ids["knowledge_legacy_readable"] {
+		t.Fatalf("endpoint global-only selection = %#v", ids)
+	}
+}
+
+// Group global settings never narrow the private chat, which is unrestricted.
+func TestChannelDmKnowledgeIgnoresGroupGlobalSelection(t *testing.T) {
+	fixture := newChannelKnowledgeFixture(t)
+	replaceChannelBindingsWithGlobal(t, fixture, domain.ChannelEndpointGroupDigitalHuman, false, channelLibraryProjectID)
+	dmIDs := knowledgeEntryIDs(channelEntries(t, fixture, domain.ChannelEndpointAssistantDM))
+	for _, want := range []string{"knowledge_shared", "knowledge_pet_note", "knowledge_legacy_readable", "knowledge_library_note"} {
+		if !dmIDs[want] {
+			t.Fatalf("private chat missing %s after group global off: %#v", want, dmIDs)
+		}
 	}
 }
 

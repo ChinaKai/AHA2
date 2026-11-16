@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -58,10 +59,12 @@ func (s *Store) ProjectsWithKnowledgeState(ctx context.Context, state string) ([
 	return result, rows.Err()
 }
 
-// ReplaceKnowledgeBindings replaces every binding owned by one consumer. It is
-// a full replacement so an endpoint-level list can become authoritative
-// without leaving stale spaces behind.
-func (s *Store) ReplaceKnowledgeBindings(ctx context.Context, consumerType, consumerID string, bindings []domain.KnowledgeBinding) ([]domain.KnowledgeBinding, error) {
+// ReplaceKnowledgeBindings replaces every binding owned by one consumer and
+// its explicit global-selection row in one transaction. It is a full
+// replacement so an endpoint-level list can become authoritative without
+// leaving stale spaces behind, and an endpoint "global off" row can override an
+// instance "global on" default.
+func (s *Store) ReplaceKnowledgeBindings(ctx context.Context, consumerType, consumerID string, bindings []domain.KnowledgeBinding, includeGlobal bool) ([]domain.KnowledgeBinding, error) {
 	consumerType = strings.TrimSpace(consumerType)
 	consumerID = strings.TrimSpace(consumerID)
 	if consumerType != domain.KnowledgeBindingChannelInstance && consumerType != domain.KnowledgeBindingChannelEndpoint {
@@ -102,6 +105,17 @@ func (s *Store) ReplaceKnowledgeBindings(ctx context.Context, consumerType, cons
 			consumerType, consumerID, space, access, scope, timeString(now), timeString(now)); err != nil {
 			return nil, err
 		}
+	}
+	enabled := 0
+	if includeGlobal {
+		enabled = 1
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO knowledge_global_bindings(consumer_type,consumer_id,enabled,created_at,updated_at)
+		 VALUES(?,?,?,?,?)
+		 ON CONFLICT(consumer_type,consumer_id) DO UPDATE SET enabled=excluded.enabled,updated_at=excluded.updated_at`,
+		consumerType, consumerID, enabled, timeString(now), timeString(now)); err != nil {
+		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
@@ -155,4 +169,46 @@ func (s *Store) ResolveChannelKnowledgeBindings(ctx context.Context, instanceID,
 		}
 	}
 	return s.ListKnowledgeBindings(ctx, domain.KnowledgeBindingChannelInstance, strings.TrimSpace(instanceID))
+}
+
+// KnowledgeGlobalBinding reads one consumer's explicit global selection. The
+// second return value reports whether a row exists; an explicit off row is a
+// real value, not a missing default.
+func (s *Store) KnowledgeGlobalBinding(ctx context.Context, consumerType, consumerID string) (bool, bool, error) {
+	var enabled int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT enabled FROM knowledge_global_bindings WHERE consumer_type=? AND consumer_id=?`,
+		strings.TrimSpace(consumerType), strings.TrimSpace(consumerID)).Scan(&enabled)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	return enabled != 0, true, nil
+}
+
+// ResolveChannelKnowledgeGlobalBinding applies the same endpoint-over-instance
+// precedence as ResolveChannelKnowledgeBindings, including an endpoint "off"
+// row overriding an instance "on" default. No row anywhere means global is not
+// selected.
+func (s *Store) ResolveChannelKnowledgeGlobalBinding(ctx context.Context, instanceID, endpointKind string) (bool, error) {
+	endpoint := strings.TrimSpace(endpointKind)
+	if endpoint != "" {
+		enabled, found, err := s.KnowledgeGlobalBinding(ctx, domain.KnowledgeBindingChannelEndpoint, ChannelEndpointConsumerID(instanceID, endpoint))
+		if err != nil {
+			return false, err
+		}
+		if found {
+			return enabled, nil
+		}
+	}
+	enabled, found, err := s.KnowledgeGlobalBinding(ctx, domain.KnowledgeBindingChannelInstance, strings.TrimSpace(instanceID))
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		return false, nil
+	}
+	return enabled, nil
 }

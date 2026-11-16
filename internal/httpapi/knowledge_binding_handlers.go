@@ -15,13 +15,13 @@ func (s *Server) channelKnowledgeBindings(writer http.ResponseWriter, request *h
 		return
 	}
 	endpoint := strings.TrimSpace(request.URL.Query().Get("endpoint"))
-	items, err := s.app.ChannelKnowledgeBindings(request.Context(), request.PathValue("id"), endpoint)
+	selection, err := s.app.ChannelKnowledgeBindingSelection(request.Context(), request.PathValue("id"), endpoint)
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, "list_knowledge_bindings_failed")
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{
-		"ok": true, "endpoint": endpoint, "bindings": items,
+		"ok": true, "endpoint": endpoint, "bindings": selection.Bindings, "include_global": selection.IncludeGlobal,
 	})
 }
 
@@ -31,8 +31,9 @@ func (s *Server) updateChannelKnowledgeBindings(writer http.ResponseWriter, requ
 		return
 	}
 	var payload struct {
-		Endpoint string `json:"endpoint"`
-		Bindings []struct {
+		Endpoint      string `json:"endpoint"`
+		IncludeGlobal bool   `json:"include_global"`
+		Bindings      []struct {
 			SpaceProject string `json:"space_project_id"`
 			AccessMode   string `json:"access_mode"`
 			ScopeMode    string `json:"scope_mode"`
@@ -50,7 +51,7 @@ func (s *Server) updateChannelKnowledgeBindings(writer http.ResponseWriter, requ
 			ScopeMode:    strings.TrimSpace(item.ScopeMode),
 		})
 	}
-	updated, err := s.app.ReplaceChannelKnowledgeBindings(request.Context(), request.PathValue("id"), strings.TrimSpace(payload.Endpoint), bindings)
+	updated, err := s.app.ReplaceChannelKnowledgeBindings(request.Context(), request.PathValue("id"), strings.TrimSpace(payload.Endpoint), bindings, payload.IncludeGlobal)
 	if err != nil {
 		status := http.StatusBadRequest
 		if errors.Is(err, app.ErrKnowledgeSpaceNotReady) {
@@ -60,9 +61,9 @@ func (s *Server) updateChannelKnowledgeBindings(writer http.ResponseWriter, requ
 		return
 	}
 	s.audit(request, "channel.knowledge_bindings.update", "channel_instance", request.PathValue("id"), map[string]any{
-		"endpoint": payload.Endpoint, "count": len(updated),
+		"endpoint": payload.Endpoint, "count": len(updated), "include_global": payload.IncludeGlobal,
 	})
 	writeJSON(writer, http.StatusOK, map[string]any{
-		"ok": true, "endpoint": strings.TrimSpace(payload.Endpoint), "bindings": updated,
+		"ok": true, "endpoint": strings.TrimSpace(payload.Endpoint), "bindings": updated, "include_global": payload.IncludeGlobal,
 	})
 }

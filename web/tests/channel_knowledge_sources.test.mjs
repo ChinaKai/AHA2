@@ -65,20 +65,34 @@ test("vault project libraries without a root id are not offered as grants", () =
 
 test("group knowledge save writes the group endpoint and clears the instance default", () => {
   const spaces = [{space_project_id: "p1", access_mode: "read", scope_mode: "all"}];
-  const payloads = channels.channelGroupKnowledgeSavePayloads(spaces);
+  const payloads = channels.channelGroupKnowledgeSavePayloads(spaces, true);
   // The endpoint must be written before the instance clear, otherwise a failed
   // save would drop the previous group selection as well.
   assert.deepEqual(payloads, [
-    {endpoint: "group_digital_human", bindings: spaces},
-    {endpoint: "", bindings: []},
+    {endpoint: "group_digital_human", include_global: true, bindings: spaces},
+    {endpoint: "", include_global: false, bindings: []},
   ]);
   assert.equal(payloads.filter(payload => payload.endpoint === "assistant_dm").length, 0);
   assert.equal(payloads.filter(payload => payload.endpoint === "" && payload.bindings.length > 0).length, 0);
 });
 
 test("clearing the group selection still clears the old instance default", () => {
-  assert.deepEqual(channels.channelGroupKnowledgeSavePayloads([]), [
-    {endpoint: "group_digital_human", bindings: []},
-    {endpoint: "", bindings: []},
+  assert.deepEqual(channels.channelGroupKnowledgeSavePayloads([], false), [
+    {endpoint: "group_digital_human", include_global: false, bindings: []},
+    {endpoint: "", include_global: false, bindings: []},
   ]);
+  // Global alone is a valid group selection and must not carry project spaces.
+  assert.deepEqual(channels.channelGroupKnowledgeSavePayloads([], true), [
+    {endpoint: "group_digital_human", include_global: true, bindings: []},
+    {endpoint: "", include_global: false, bindings: []},
+  ]);
+});
+
+test("the group picker renders the global checkbox from the stored selection", () => {
+  const html = channels.channelVaultKnowledgeSection(vaultContext, [], true);
+  assert.match(html, /name="include_global" checked/);
+  assert.match(html, /全局知识（跨项目共享）/);
+  const unchecked = channels.channelVaultKnowledgeSection(vaultContext, [], false);
+  assert.match(unchecked, /name="include_global" >/);
+  assert.doesNotMatch(unchecked, /name="include_global" checked/);
 });

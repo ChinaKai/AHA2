@@ -103,17 +103,18 @@ func (s *Service) channelAllowedKnowledge(ctx context.Context, instanceID, endpo
 	}
 	// Model A bindings point at whole project spaces and are the group scope
 	// whenever the vault is the configured read source. The endpoint list
-	// replaces the instance default; an empty result is an explicit empty
-	// selection, never an implicit host-space or global grant.
+	// replaces the instance default; global is an explicit companion selection
+	// with the same precedence. An empty selection stays empty, never an
+	// implicit host-space or global grant.
 	if s.channelKnowledgeBindingsEnabled() {
-		bindings, err := s.store.ResolveChannelKnowledgeBindings(ctx, instanceID, endpointKind)
+		selection, err := s.ChannelKnowledgeBindingSelection(ctx, instanceID, endpointKind)
 		if err != nil {
 			return nil, err
 		}
-		if len(bindings) == 0 {
+		if len(selection.Bindings) == 0 && !selection.IncludeGlobal {
 			return []domain.KnowledgeEntry{}, nil
 		}
-		return s.channelBindingEntries(ctx, bindings)
+		return s.channelGroupBindingEntries(ctx, selection)
 	}
 	if s.knowledgeLegacyDisabled.Load() {
 		// No binding and no legacy tables: an explicit empty selection. The

@@ -53,7 +53,7 @@ var databaseCatalog = []databaseCategoryDef{
 	}},
 	{"G", "knowledge", domain.DatabaseSafetyKeep, "", []string{
 		"knowledge_entries", "knowledge_libraries", "knowledge_proposals", "knowledge_review_settings",
-		"project_knowledge_bindings", "knowledge_bindings", "skills", "prompt_template_overrides",
+		"project_knowledge_bindings", "knowledge_bindings", "knowledge_global_bindings", "skills", "prompt_template_overrides",
 	}},
 	{"H", "settings", domain.DatabaseSafetyKeep, "", []string{
 		"models", "providers", "env_groups", "codex_accounts", "backend_settings", "agent_api_settings",
