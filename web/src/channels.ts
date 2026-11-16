@@ -311,6 +311,10 @@ function openChannelSettings(instance: ChannelInstance, context: ChannelUIContex
             .map(input => sourceByRoot.get(input.value)?.projectId)
             .filter((projectID): projectID is string => Boolean(projectID))
             .map(projectID => ({space_project_id: projectID, access_mode: "read", scope_mode: "all"}));
+          // Save the instance default first (private chat reads it) and the
+          // group endpoint override second, so both consumers see the same
+          // explicit list of bound spaces.
+          await api.replaceChannelKnowledgeBindings(instance.id, "", spaces);
           await api.replaceChannelKnowledgeBindings(instance.id, "group_digital_human", spaces);
         } else if (policy) {
           const mode = policy.querySelector<HTMLSelectElement>('select[name="knowledge_scope_mode"]')?.value === "selected" ? "selected" : "all";
