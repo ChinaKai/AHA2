@@ -204,13 +204,13 @@ func TestChannelBindingsReplaceAndRejectUnreadySpaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	bindings, err := service.ReplaceChannelKnowledgeBindings(ctx, "chan-bind", "",
-		[]domain.KnowledgeBinding{{SpaceProject: first.ID, AccessMode: "read_write"}}, false)
+		[]domain.KnowledgeBinding{{SpaceProject: first.ID, AccessMode: "read_write"}}, boolPointer(false))
 	if err != nil || len(bindings) != 1 || bindings[0].SpaceProject != first.ID {
 		t.Fatalf("instance bindings = %#v err=%v", bindings, err)
 	}
 	// Endpoint-level binding replaces the instance default.
 	bindings, err = service.ReplaceChannelKnowledgeBindings(ctx, "chan-bind", "assistant_dm",
-		[]domain.KnowledgeBinding{{SpaceProject: second.ID}}, false)
+		[]domain.KnowledgeBinding{{SpaceProject: second.ID}}, boolPointer(false))
 	if err != nil || len(bindings) != 1 || bindings[0].SpaceProject != second.ID {
 		t.Fatalf("endpoint bindings = %#v err=%v", bindings, err)
 	}
@@ -227,7 +227,7 @@ func TestChannelBindingsReplaceAndRejectUnreadySpaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := service.ReplaceChannelKnowledgeBindings(ctx, "chan-bind", "assistant_dm",
-		[]domain.KnowledgeBinding{{SpaceProject: second.ID}}, false); !errors.Is(err, ErrKnowledgeSpaceNotReady) {
+		[]domain.KnowledgeBinding{{SpaceProject: second.ID}}, boolPointer(false)); !errors.Is(err, ErrKnowledgeSpaceNotReady) {
 		t.Fatalf("unready binding error = %v", err)
 	}
 }

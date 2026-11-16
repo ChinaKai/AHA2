@@ -222,6 +222,11 @@ func (s *Store) PurgeRetiredChannelInstance(ctx context.Context, id, ownerID str
 	if _, err := tx.ExecContext(ctx, `DELETE FROM channel_instances WHERE id=? AND owner_id=? AND revision=? AND retired_at<>''`, id, ownerID, expectedRevision); err != nil {
 		return domain.ChannelInstance{}, err
 	}
+	// The binding tables use consumer IDs, not a foreign key, so the instance
+	// and endpoint-default rows must be removed explicitly with the instance.
+	if err := deleteChannelKnowledgeBindingsTx(ctx, tx, id); err != nil {
+		return domain.ChannelInstance{}, err
+	}
 	if err := deleteMailBindingsForProjectTx(ctx, tx, instance.HostProjectID); err != nil {
 		return domain.ChannelInstance{}, err
 	}

@@ -1074,6 +1074,13 @@ class APIClient {
     });
   }
 
+  replaceChannelGroupKnowledgeBindings(instanceID: string, bindings: Array<{space_project_id: string; access_mode?: string; scope_mode?: string}>, includeGlobal: boolean): Promise<{ok: boolean; endpoint: string; bindings: ChannelKnowledgeBinding[]; include_global: boolean}> {
+    return this.request(`/api/v1/channel-instances/${encodeURIComponent(instanceID)}/knowledge-bindings/group`, {
+      method: "PUT",
+      body: JSON.stringify({bindings, include_global: includeGlobal}),
+    });
+  }
+
   knowledgeVaultFiles(path = ""): Promise<KnowledgeVaultFileList> {
     const query = path ? `?path=${encodeURIComponent(path)}` : "";
     return this.request(`/api/v1/knowledge-vault/files${query}`);

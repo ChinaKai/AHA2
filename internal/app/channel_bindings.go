@@ -24,17 +24,14 @@ type ChannelKnowledgeBindingSelection struct {
 }
 
 // ChannelKnowledgeBindingSelection lists the effective group selection for one
-// consumer. Endpoint-level rows replace the instance default when present.
+// consumer from a single store snapshot. Endpoint-level rows replace the
+// instance default when present.
 func (s *Service) ChannelKnowledgeBindingSelection(ctx context.Context, instanceID, endpointKind string) (ChannelKnowledgeBindingSelection, error) {
-	bindings, err := s.store.ResolveChannelKnowledgeBindings(ctx, instanceID, endpointKind)
+	selection, err := s.store.ResolveChannelKnowledgeBindingSelection(ctx, instanceID, endpointKind)
 	if err != nil {
 		return ChannelKnowledgeBindingSelection{}, err
 	}
-	includeGlobal, err := s.store.ResolveChannelKnowledgeGlobalBinding(ctx, instanceID, endpointKind)
-	if err != nil {
-		return ChannelKnowledgeBindingSelection{}, err
-	}
-	return ChannelKnowledgeBindingSelection{Bindings: bindings, IncludeGlobal: includeGlobal}, nil
+	return ChannelKnowledgeBindingSelection{Bindings: selection.Bindings, IncludeGlobal: selection.IncludeGlobal}, nil
 }
 
 // ChannelKnowledgeBindings lists the effective space bindings for one consumer.
@@ -43,10 +40,10 @@ func (s *Service) ChannelKnowledgeBindings(ctx context.Context, instanceID, endp
 }
 
 // ReplaceChannelKnowledgeBindings replaces the endpoint (or instance) binding
-// list and its explicit global selection. Every space must be a ready project
-// space; unknown or uninitialized projects are rejected before anything is
-// written. bindings and includeGlobal commit together.
-func (s *Service) ReplaceChannelKnowledgeBindings(ctx context.Context, instanceID, endpointKind string, bindings []domain.KnowledgeBinding, includeGlobal bool) ([]domain.KnowledgeBinding, error) {
+// list and, when includeGlobal is non-nil, its explicit global selection. Every
+// space must be a ready project space; unknown or uninitialized projects are
+// rejected before anything is written.
+func (s *Service) ReplaceChannelKnowledgeBindings(ctx context.Context, instanceID, endpointKind string, bindings []domain.KnowledgeBinding, includeGlobal *bool) ([]domain.KnowledgeBinding, error) {
 	instanceID = strings.TrimSpace(instanceID)
 	if instanceID == "" {
 		return nil, fmt.Errorf("channel instance id is required")
@@ -57,6 +54,31 @@ func (s *Service) ReplaceChannelKnowledgeBindings(ctx context.Context, instanceI
 		consumerType = domain.KnowledgeBindingChannelEndpoint
 		consumerID = store.ChannelEndpointConsumerID(instanceID, endpointKind)
 	}
+	validated, err := s.validateChannelKnowledgeBindings(ctx, consumerType, consumerID, bindings)
+	if err != nil {
+		return nil, err
+	}
+	return s.store.ReplaceKnowledgeBindings(ctx, consumerType, consumerID, validated, includeGlobal)
+}
+
+// ReplaceChannelGroupKnowledgeBindings is the Web save path. It writes the
+// group endpoint selection and clears both instance defaults in one store
+// transaction, so "global only" and "nothing selected" fail closed instead of
+// falling back to a space list the owner just removed.
+func (s *Service) ReplaceChannelGroupKnowledgeBindings(ctx context.Context, instanceID string, bindings []domain.KnowledgeBinding, includeGlobal bool) ([]domain.KnowledgeBinding, error) {
+	instanceID = strings.TrimSpace(instanceID)
+	if instanceID == "" {
+		return nil, fmt.Errorf("channel instance id is required")
+	}
+	consumerID := store.ChannelEndpointConsumerID(instanceID, domain.ChannelEndpointGroupDigitalHuman)
+	validated, err := s.validateChannelKnowledgeBindings(ctx, domain.KnowledgeBindingChannelEndpoint, consumerID, bindings)
+	if err != nil {
+		return nil, err
+	}
+	return s.store.ReplaceChannelGroupKnowledgeBindings(ctx, instanceID, validated, includeGlobal)
+}
+
+func (s *Service) validateChannelKnowledgeBindings(ctx context.Context, consumerType, consumerID string, bindings []domain.KnowledgeBinding) ([]domain.KnowledgeBinding, error) {
 	validated := make([]domain.KnowledgeBinding, 0, len(bindings))
 	for _, binding := range bindings {
 		space := strings.TrimSpace(binding.SpaceProject)
@@ -83,7 +105,7 @@ func (s *Service) ReplaceChannelKnowledgeBindings(ctx context.Context, instanceI
 			SpaceProject: project.ID, AccessMode: access, ScopeMode: scope,
 		})
 	}
-	return s.store.ReplaceKnowledgeBindings(ctx, consumerType, consumerID, validated, includeGlobal)
+	return validated, nil
 }
 
 // channelGroupBindingEntries is the group read path. Global is optional and

@@ -21,6 +21,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/auth"
 	"github.com/ChinaKai/AHA2/internal/channel"
+	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/secrets"
 	"github.com/ChinaKai/AHA2/internal/store"
 )
@@ -175,6 +176,17 @@ func TestChannelOwnerAndRuntimeAPIBoundaries(t *testing.T) {
 	if response.StatusCode != http.StatusOK || previewResponse["preview"].(map[string]any)["name"] != "Team" {
 		t.Fatalf("purge preview=%#v", previewResponse)
 	}
+	// Binding rows use consumer IDs without a foreign key to the instance; the
+	// purge must remove them instead of leaving orphans behind.
+	globalEnabled := true
+	if _, err := database.ReplaceKnowledgeBindings(ctx, domain.KnowledgeBindingChannelInstance, instanceID,
+		[]domain.KnowledgeBinding{{SpaceProject: projectID}}, &globalEnabled); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ReplaceKnowledgeBindings(ctx, domain.KnowledgeBindingChannelEndpoint,
+		store.ChannelEndpointConsumerID(instanceID, domain.ChannelEndpointGroupDigitalHuman), nil, &globalEnabled); err != nil {
+		t.Fatal(err)
+	}
 	response = channelJSON(t, client, http.MethodPost, server.URL+"/api/v1/channel-instances/"+instanceID+"/purge", map[string]any{"confirmation_name": "wrong"}, map[string]string{"X-CSRF-Token": csrf, "If-Match": fmt.Sprintf(`"%d"`, archivedRevision)})
 	if response.StatusCode != http.StatusBadRequest {
 		t.Fatalf("purge accepted wrong confirmation: %d", response.StatusCode)
@@ -189,6 +201,14 @@ func TestChannelOwnerAndRuntimeAPIBoundaries(t *testing.T) {
 	response.Body.Close()
 	if _, err := database.Project(ctx, projectID); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("purge retained project: %v", err)
+	}
+	for _, consumer := range []struct{ consumerType, consumerID string }{
+		{domain.KnowledgeBindingChannelInstance, instanceID},
+		{domain.KnowledgeBindingChannelEndpoint, store.ChannelEndpointConsumerID(instanceID, domain.ChannelEndpointGroupDigitalHuman)},
+	} {
+		if _, found, err := database.KnowledgeGlobalBinding(ctx, consumer.consumerType, consumer.consumerID); err != nil || found {
+			t.Fatalf("purge left a global binding for %s/%s: found=%v err=%v", consumer.consumerType, consumer.consumerID, found, err)
+		}
 	}
 }
 

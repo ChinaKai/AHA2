@@ -253,7 +253,7 @@ func replaceChannelBindingsWithGlobal(t *testing.T, fixture *channelKnowledgeFix
 	for _, projectID := range projectIDs {
 		bindings = append(bindings, domain.KnowledgeBinding{SpaceProject: projectID, AccessMode: "read", ScopeMode: "all"})
 	}
-	if _, err := fixture.service.ReplaceChannelKnowledgeBindings(fixture.ctx, fixture.instance.ID, endpoint, bindings, includeGlobal); err != nil {
+	if _, err := fixture.service.ReplaceChannelKnowledgeBindings(fixture.ctx, fixture.instance.ID, endpoint, bindings, &includeGlobal); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -459,6 +459,72 @@ func TestChannelDmKnowledgeIgnoresGroupGlobalSelection(t *testing.T) {
 		if !dmIDs[want] {
 			t.Fatalf("private chat missing %s after group global off: %#v", want, dmIDs)
 		}
+	}
+}
+
+// A v142-era legacy project can still be uninitialized while the vault is off.
+// The private chat must keep serving its legacy knowledge instead of dropping
+// every upgraded project until reconciliation runs.
+func TestChannelDmKnowledgeIncludesLegacyProjectsWithoutReadyState(t *testing.T) {
+	fixture := newChannelKnowledgeFixture(t)
+	fixture.service.SetKnowledgeVault(nil, false)
+	for _, projectID := range []string{channelVaultProjectID, channelLegacyProjectID, channelLibraryProjectID} {
+		if err := fixture.database.SetProjectKnowledgeState(fixture.ctx, projectID, domain.KnowledgeStateUninitialized); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dmIDs := knowledgeEntryIDs(channelEntries(t, fixture, domain.ChannelEndpointAssistantDM))
+	for _, want := range []string{"knowledge_pet_legacy_only", "knowledge_legacy_readable", "knowledge_library_note"} {
+		if !dmIDs[want] {
+			t.Fatalf("private chat dropped uninitialized legacy project knowledge %s: %#v", want, dmIDs)
+		}
+	}
+	if dmIDs["knowledge_channel_host_note"] || dmIDs["knowledge_system_note"] {
+		t.Fatalf("private chat leaked infrastructure: %#v", dmIDs)
+	}
+}
+
+// The atomic group save writes the endpoint selection and removes the instance
+// defaults together. An empty selection must not fall back to a space list the
+// owner just revoked, and a validation error must leave everything unchanged.
+func TestReplaceChannelGroupKnowledgeBindingsIsAtomic(t *testing.T) {
+	fixture := newChannelKnowledgeFixture(t)
+	replaceChannelBindingsWithGlobal(t, fixture, "", true, channelVaultProjectID)
+	if _, err := fixture.service.ReplaceChannelGroupKnowledgeBindings(fixture.ctx, fixture.instance.ID, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	ids := knowledgeEntryIDs(channelEntries(t, fixture, domain.ChannelEndpointGroupDigitalHuman))
+	if !ids["knowledge_shared"] || ids["knowledge_pet_note"] {
+		t.Fatalf("global-only atomic save = %#v", ids)
+	}
+	instanceBindings, err := fixture.service.ChannelKnowledgeBindings(fixture.ctx, fixture.instance.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(instanceBindings) != 0 {
+		t.Fatalf("atomic save kept instance spaces: %#v", instanceBindings)
+	}
+	if _, found, err := fixture.database.KnowledgeGlobalBinding(fixture.ctx, domain.KnowledgeBindingChannelInstance, fixture.instance.ID); err != nil || found {
+		t.Fatalf("atomic save kept instance global row: found=%v err=%v", found, err)
+	}
+	before := knowledgeEntryIDs(channelEntries(t, fixture, domain.ChannelEndpointGroupDigitalHuman))
+	if _, err := fixture.service.ReplaceChannelGroupKnowledgeBindings(fixture.ctx, fixture.instance.ID,
+		[]domain.KnowledgeBinding{{SpaceProject: "project-does-not-exist"}}, false); err == nil {
+		t.Fatal("invalid group binding was accepted")
+	}
+	after := knowledgeEntryIDs(channelEntries(t, fixture, domain.ChannelEndpointGroupDigitalHuman))
+	if len(after) != len(before) || !after["knowledge_shared"] {
+		t.Fatalf("failed save changed the group selection: before=%#v after=%#v", before, after)
+	}
+}
+
+func TestAppendUniqueKnowledgeEntriesDropsOverlap(t *testing.T) {
+	result := []domain.KnowledgeEntry{}
+	seen := map[string]bool{}
+	appendUniqueKnowledgeEntries(&result, seen, []domain.KnowledgeEntry{{ID: "a"}, {ID: "b"}})
+	appendUniqueKnowledgeEntries(&result, seen, []domain.KnowledgeEntry{{ID: "b"}, {ID: "c"}, {ID: ""}})
+	if len(result) != 3 || result[0].ID != "a" || result[1].ID != "b" || result[2].ID != "c" {
+		t.Fatalf("dedupe result = %#v", result)
 	}
 }
 

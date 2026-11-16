@@ -63,29 +63,20 @@ test("vault project libraries without a root id are not offered as grants", () =
   assert.deepEqual(sources, []);
 });
 
-test("group knowledge save writes the group endpoint and clears the instance default", () => {
+test("group knowledge payload carries the global choice and project spaces", () => {
   const spaces = [{space_project_id: "p1", access_mode: "read", scope_mode: "all"}];
-  const payloads = channels.channelGroupKnowledgeSavePayloads(spaces, true);
-  // The endpoint must be written before the instance clear, otherwise a failed
-  // save would drop the previous group selection as well.
-  assert.deepEqual(payloads, [
-    {endpoint: "group_digital_human", include_global: true, bindings: spaces},
-    {endpoint: "", include_global: false, bindings: []},
-  ]);
-  assert.equal(payloads.filter(payload => payload.endpoint === "assistant_dm").length, 0);
-  assert.equal(payloads.filter(payload => payload.endpoint === "" && payload.bindings.length > 0).length, 0);
-});
-
-test("clearing the group selection still clears the old instance default", () => {
-  assert.deepEqual(channels.channelGroupKnowledgeSavePayloads([], false), [
-    {endpoint: "group_digital_human", include_global: false, bindings: []},
-    {endpoint: "", include_global: false, bindings: []},
-  ]);
+  // One atomic payload; instance defaults are cleared server-side in the same
+  // transaction, so there is no second client call that can fail open.
+  assert.deepEqual(channels.channelGroupKnowledgeSelectionPayload(spaces, true), {
+    include_global: true, bindings: spaces,
+  });
+  assert.deepEqual(channels.channelGroupKnowledgeSelectionPayload([], false), {
+    include_global: false, bindings: [],
+  });
   // Global alone is a valid group selection and must not carry project spaces.
-  assert.deepEqual(channels.channelGroupKnowledgeSavePayloads([], true), [
-    {endpoint: "group_digital_human", include_global: true, bindings: []},
-    {endpoint: "", include_global: false, bindings: []},
-  ]);
+  assert.deepEqual(channels.channelGroupKnowledgeSelectionPayload([], true), {
+    include_global: true, bindings: [],
+  });
 });
 
 test("the group picker renders the global checkbox from the stored selection", () => {
@@ -95,4 +86,7 @@ test("the group picker renders the global checkbox from the stored selection", (
   const unchecked = channels.channelVaultKnowledgeSection(vaultContext, [], false);
   assert.match(unchecked, /name="include_global" >/);
   assert.doesNotMatch(unchecked, /name="include_global" checked/);
+  // The legacy all/selected switch has no effect in the vault save path, so
+  // the vault picker must not offer it.
+  assert.doesNotMatch(unchecked, /name="knowledge_scope_mode"/);
 });

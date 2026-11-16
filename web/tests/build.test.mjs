@@ -1608,11 +1608,14 @@ test("built web contains responsive application", async () => {
 	assert.match(channels, /全局知识与项目知识库均可选/);
 	assert.match(channels, /name="include_global"/);
 	assert.match(channels, /include_global: includeGlobal/);
-	assert.match(channels, /replaceChannelKnowledgeBindings/);
-	// Group bindings must never be written as the instance default; the only
-	// instance write is the cleanup of the retired fallback.
-	assert.match(channels, /channelGroupKnowledgeSavePayloads/);
-	assert.doesNotMatch(channels, /replaceChannelKnowledgeBindings\(instance\.id, "", spaces\)/);
+	assert.match(channels, /replaceChannelGroupKnowledgeBindings/);
+	// The group save is one atomic request; the client never writes the
+	// retired instance default or splits the save across two calls.
+	assert.match(channels, /channelGroupKnowledgeSelectionPayload/);
+	// Save stays disabled until the group selection has loaded.
+	assert.match(channels, /if \(saveButton\) saveButton\.disabled = true;/);
+	assert.doesNotMatch(channels, /channelGroupKnowledgeSavePayloads/);
+	assert.doesNotMatch(channels, /replaceChannelKnowledgeBindings\(instance\.id, "",/);
 	assert.doesNotMatch(channels, /group_operation_scope_mode|group_allowed_project_ids|group_allowed_workspace_ids/);
 	assert.doesNotMatch(channels, /name="operation_scope_mode"|name="allowed_project_ids"|name="allowed_workspace_ids"/);
 	assert.doesNotMatch(channels, /data-channel-activity|Owner 收件箱与投递/);

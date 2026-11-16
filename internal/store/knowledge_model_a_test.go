@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -50,7 +51,7 @@ func TestKnowledgeModelASchemaAndBindings(t *testing.T) {
 		t.Fatal(err)
 	}
 	instance := []domain.KnowledgeBinding{{SpaceProject: project.ID, AccessMode: "read_write"}}
-	replaced, err := database.ReplaceKnowledgeBindings(ctx, domain.KnowledgeBindingChannelInstance, "chan-1", instance, false)
+	replaced, err := database.ReplaceKnowledgeBindings(ctx, domain.KnowledgeBindingChannelInstance, "chan-1", instance, boolPointer(false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +61,7 @@ func TestKnowledgeModelASchemaAndBindings(t *testing.T) {
 	// Endpoint bindings override the instance default, not merge with it.
 	if _, err := database.ReplaceKnowledgeBindings(ctx, domain.KnowledgeBindingChannelEndpoint,
 		ChannelEndpointConsumerID("chan-1", "assistant_dm"),
-		[]domain.KnowledgeBinding{{SpaceProject: other.ID}}, false); err != nil {
+		[]domain.KnowledgeBinding{{SpaceProject: other.ID}}, boolPointer(false)); err != nil {
 		t.Fatal(err)
 	}
 	resolved, err := database.ResolveChannelKnowledgeBindings(ctx, "chan-1", "assistant_dm")
@@ -73,7 +74,7 @@ func TestKnowledgeModelASchemaAndBindings(t *testing.T) {
 	}
 	// An empty replacement clears the binding: no binding means an empty
 	// knowledge selection, never an implicit host-project grant.
-	if _, err := database.ReplaceKnowledgeBindings(ctx, domain.KnowledgeBindingChannelInstance, "chan-1", nil, false); err != nil {
+	if _, err := database.ReplaceKnowledgeBindings(ctx, domain.KnowledgeBindingChannelInstance, "chan-1", nil, boolPointer(false)); err != nil {
 		t.Fatal(err)
 	}
 	resolved, err = database.ResolveChannelKnowledgeBindings(ctx, "chan-1", "group_digital_human")
@@ -128,7 +129,7 @@ func TestKnowledgeGlobalBindingMigrationAndResolution(t *testing.T) {
 	}
 	endpointID := ChannelEndpointConsumerID("chan-global", "group_digital_human")
 	// Instance on, endpoint absent: the group falls back to the instance value.
-	if _, err := database.ReplaceKnowledgeBindings(ctx, domain.KnowledgeBindingChannelInstance, "chan-global", nil, true); err != nil {
+	if _, err := database.ReplaceKnowledgeBindings(ctx, domain.KnowledgeBindingChannelInstance, "chan-global", nil, boolPointer(true)); err != nil {
 		t.Fatal(err)
 	}
 	enabled, found, err := database.KnowledgeGlobalBinding(ctx, domain.KnowledgeBindingChannelInstance, "chan-global")
@@ -139,7 +140,7 @@ func TestKnowledgeGlobalBindingMigrationAndResolution(t *testing.T) {
 		t.Fatalf("resolved instance fallback = %v err=%v", enabled, err)
 	}
 	// An explicit endpoint off overrides the instance default.
-	if _, err := database.ReplaceKnowledgeBindings(ctx, domain.KnowledgeBindingChannelEndpoint, endpointID, nil, false); err != nil {
+	if _, err := database.ReplaceKnowledgeBindings(ctx, domain.KnowledgeBindingChannelEndpoint, endpointID, nil, boolPointer(false)); err != nil {
 		t.Fatal(err)
 	}
 	enabled, err = database.ResolveChannelKnowledgeGlobalBinding(ctx, "chan-global", "group_digital_human")
@@ -147,7 +148,7 @@ func TestKnowledgeGlobalBindingMigrationAndResolution(t *testing.T) {
 		t.Fatalf("endpoint off did not override instance: enabled=%v err=%v", enabled, err)
 	}
 	// Turning it back on at the endpoint keeps the instance row untouched.
-	if _, err := database.ReplaceKnowledgeBindings(ctx, domain.KnowledgeBindingChannelEndpoint, endpointID, nil, true); err != nil {
+	if _, err := database.ReplaceKnowledgeBindings(ctx, domain.KnowledgeBindingChannelEndpoint, endpointID, nil, boolPointer(true)); err != nil {
 		t.Fatal(err)
 	}
 	if enabled, err := database.ResolveChannelKnowledgeGlobalBinding(ctx, "chan-global", "group_digital_human"); err != nil || !enabled {
@@ -173,5 +174,93 @@ func TestKnowledgeGlobalBindingMigrationAndResolution(t *testing.T) {
 	}
 	if enabled, err := database.ResolveChannelKnowledgeGlobalBinding(ctx, "chan-global", "group_digital_human"); err != nil || !enabled {
 		t.Fatalf("global selection after reopen = %v err=%v", enabled, err)
+	}
+}
+
+func boolPointer(value bool) *bool { return &value }
+
+func TestKnowledgeGlobalBindingNilPreservesAndGroupReplacementClearsInstance(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Now().UTC()
+	project := domain.Project{ID: "project-group-atomic", Name: "Atomic", ProjectType: "folder", KnowledgeState: domain.KnowledgeStateReady, CreatedAt: now, UpdatedAt: now}
+	if err := database.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	endpointID := ChannelEndpointConsumerID("chan-atomic", domain.ChannelEndpointGroupDigitalHuman)
+	// An omitted include_global must preserve the existing row.
+	if _, err := database.ReplaceKnowledgeBindings(ctx, domain.KnowledgeBindingChannelEndpoint, endpointID, nil, boolPointer(true)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ReplaceKnowledgeBindings(ctx, domain.KnowledgeBindingChannelEndpoint, endpointID, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if enabled, err := database.ResolveChannelKnowledgeGlobalBinding(ctx, "chan-atomic", domain.ChannelEndpointGroupDigitalHuman); err != nil || !enabled {
+		t.Fatalf("nil include_global did not preserve the row: enabled=%v err=%v", enabled, err)
+	}
+	// Seed an instance default, then save a global-only group selection.
+	if _, err := database.ReplaceKnowledgeBindings(ctx, domain.KnowledgeBindingChannelInstance, "chan-atomic",
+		[]domain.KnowledgeBinding{{SpaceProject: project.ID}}, boolPointer(true)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ReplaceChannelGroupKnowledgeBindings(ctx, "chan-atomic", nil, true); err != nil {
+		t.Fatal(err)
+	}
+	instanceBindings, err := database.ListKnowledgeBindings(ctx, domain.KnowledgeBindingChannelInstance, "chan-atomic")
+	if err != nil || len(instanceBindings) != 0 {
+		t.Fatalf("instance bindings after atomic save = %#v err=%v", instanceBindings, err)
+	}
+	if _, found, err := database.KnowledgeGlobalBinding(ctx, domain.KnowledgeBindingChannelInstance, "chan-atomic"); err != nil || found {
+		t.Fatalf("instance global row after atomic save: found=%v err=%v", found, err)
+	}
+	selection, err := database.ResolveChannelKnowledgeBindingSelection(ctx, "chan-atomic", domain.ChannelEndpointGroupDigitalHuman)
+	if err != nil || len(selection.Bindings) != 0 || !selection.IncludeGlobal {
+		t.Fatalf("atomic global-only selection = %#v err=%v", selection, err)
+	}
+}
+
+func TestKnowledgeGlobalBindingMigrationFromV145(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "aha2.db")
+	database, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a database that stopped at v145: the table and version row from
+	// v146 are absent, and reopening must apply exactly one migration.
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `DROP TABLE knowledge_global_bindings`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version=146`); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	database, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var migrated, tableCount int
+	if err := database.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version=146`).Scan(&migrated); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='knowledge_global_bindings'`).Scan(&tableCount); err != nil {
+		t.Fatal(err)
+	}
+	if migrated != 1 || tableCount != 1 {
+		t.Fatalf("v146 upgrade = migrations:%d tables:%d", migrated, tableCount)
 	}
 }

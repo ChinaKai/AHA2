@@ -59,12 +59,11 @@ func (s *Store) ProjectsWithKnowledgeState(ctx context.Context, state string) ([
 	return result, rows.Err()
 }
 
-// ReplaceKnowledgeBindings replaces every binding owned by one consumer and
-// its explicit global-selection row in one transaction. It is a full
-// replacement so an endpoint-level list can become authoritative without
-// leaving stale spaces behind, and an endpoint "global off" row can override an
-// instance "global on" default.
-func (s *Store) ReplaceKnowledgeBindings(ctx context.Context, consumerType, consumerID string, bindings []domain.KnowledgeBinding, includeGlobal bool) ([]domain.KnowledgeBinding, error) {
+// ReplaceKnowledgeBindings replaces every binding owned by one consumer and,
+// when includeGlobal is provided, its explicit global-selection row in one
+// transaction. nil means "leave the global row unchanged", which keeps a PUT
+// that omits the field from silently clearing an existing selection.
+func (s *Store) ReplaceKnowledgeBindings(ctx context.Context, consumerType, consumerID string, bindings []domain.KnowledgeBinding, includeGlobal *bool) ([]domain.KnowledgeBinding, error) {
 	consumerType = strings.TrimSpace(consumerType)
 	consumerID = strings.TrimSpace(consumerID)
 	if consumerType != domain.KnowledgeBindingChannelInstance && consumerType != domain.KnowledgeBindingChannelEndpoint {
@@ -73,16 +72,28 @@ func (s *Store) ReplaceKnowledgeBindings(ctx context.Context, consumerType, cons
 	if consumerID == "" {
 		return nil, fmt.Errorf("knowledge binding consumer id is required")
 	}
-	now := time.Now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := replaceConsumerKnowledgeBindings(ctx, tx, consumerType, consumerID, bindings, includeGlobal, time.Now().UTC()); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return s.ListKnowledgeBindings(ctx, consumerType, consumerID)
+}
+
+// replaceConsumerKnowledgeBindings rewrites one consumer's rows inside an
+// existing transaction. It is shared by the generic replacement and the atomic
+// group write so both apply identical normalization.
+func replaceConsumerKnowledgeBindings(ctx context.Context, tx *sql.Tx, consumerType, consumerID string, bindings []domain.KnowledgeBinding, includeGlobal *bool, now time.Time) error {
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM knowledge_bindings WHERE consumer_type=? AND consumer_id=?`,
 		consumerType, consumerID); err != nil {
-		return nil, err
+		return err
 	}
 	seen := map[string]bool{}
 	for _, binding := range bindings {
@@ -103,11 +114,14 @@ func (s *Store) ReplaceKnowledgeBindings(ctx context.Context, consumerType, cons
 			`INSERT INTO knowledge_bindings(consumer_type,consumer_id,space_project_id,access_mode,scope_mode,created_at,updated_at)
 			 VALUES(?,?,?,?,?,?,?)`,
 			consumerType, consumerID, space, access, scope, timeString(now), timeString(now)); err != nil {
-			return nil, err
+			return err
 		}
 	}
+	if includeGlobal == nil {
+		return nil
+	}
 	enabled := 0
-	if includeGlobal {
+	if *includeGlobal {
 		enabled = 1
 	}
 	if _, err := tx.ExecContext(ctx,
@@ -115,18 +129,76 @@ func (s *Store) ReplaceKnowledgeBindings(ctx context.Context, consumerType, cons
 		 VALUES(?,?,?,?,?)
 		 ON CONFLICT(consumer_type,consumer_id) DO UPDATE SET enabled=excluded.enabled,updated_at=excluded.updated_at`,
 		consumerType, consumerID, enabled, timeString(now), timeString(now)); err != nil {
+		return err
+	}
+	return nil
+}
+
+// deleteChannelKnowledgeBindingsTx removes the instance default and every
+// endpoint binding/global row for one channel instance. consumer_id has no
+// foreign key to channel_instances, so a purge has to delete these rows itself.
+func deleteChannelKnowledgeBindingsTx(ctx context.Context, tx *sql.Tx, instanceID string) error {
+	instanceID = strings.TrimSpace(instanceID)
+	if instanceID == "" {
+		return nil
+	}
+	endpointPattern := instanceID + "::%"
+	for _, table := range []string{"knowledge_bindings", "knowledge_global_bindings"} {
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM `+table+` WHERE (consumer_type=? AND consumer_id=?) OR (consumer_type=? AND consumer_id LIKE ?)`,
+			domain.KnowledgeBindingChannelInstance, instanceID,
+			domain.KnowledgeBindingChannelEndpoint, endpointPattern); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ReplaceChannelGroupKnowledgeBindings atomically writes the group endpoint
+// selection and removes both instance defaults. An empty group selection can
+// therefore never fall back to an instance list the owner just revoked, even
+// if the process dies midway through a multi-call save.
+func (s *Store) ReplaceChannelGroupKnowledgeBindings(ctx context.Context, instanceID string, bindings []domain.KnowledgeBinding, includeGlobal bool) ([]domain.KnowledgeBinding, error) {
+	instanceID = strings.TrimSpace(instanceID)
+	if instanceID == "" {
+		return nil, fmt.Errorf("channel instance id is required")
+	}
+	consumerID := ChannelEndpointConsumerID(instanceID, domain.ChannelEndpointGroupDigitalHuman)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM knowledge_bindings WHERE consumer_type=? AND consumer_id=?`,
+		domain.KnowledgeBindingChannelInstance, instanceID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM knowledge_global_bindings WHERE consumer_type=? AND consumer_id=?`,
+		domain.KnowledgeBindingChannelInstance, instanceID); err != nil {
+		return nil, err
+	}
+	if err := replaceConsumerKnowledgeBindings(ctx, tx, domain.KnowledgeBindingChannelEndpoint, consumerID, bindings, &includeGlobal, time.Now().UTC()); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	return s.ListKnowledgeBindings(ctx, consumerType, consumerID)
+	return s.ListKnowledgeBindings(ctx, domain.KnowledgeBindingChannelEndpoint, consumerID)
 }
 
 // ListKnowledgeBindings returns the bindings for one consumer ordered by
 // project ID so callers get a stable replacement result.
 func (s *Store) ListKnowledgeBindings(ctx context.Context, consumerType, consumerID string) ([]domain.KnowledgeBinding, error) {
-	rows, err := s.db.QueryContext(ctx,
+	return listKnowledgeBindings(ctx, s.db, consumerType, consumerID)
+}
+
+// listKnowledgeBindings reads one consumer's space list. The queryer is the
+// shared *sql.DB/*sql.Tx surface so the selection snapshot can run every query
+// inside one transaction.
+func listKnowledgeBindings(ctx context.Context, queryer knowledgeQueryer, consumerType, consumerID string) ([]domain.KnowledgeBinding, error) {
+	rows, err := queryer.QueryContext(ctx,
 		`SELECT consumer_type,consumer_id,space_project_id,access_mode,scope_mode,created_at,updated_at
 		 FROM knowledge_bindings WHERE consumer_type=? AND consumer_id=? ORDER BY space_project_id`,
 		strings.TrimSpace(consumerType), strings.TrimSpace(consumerID))
@@ -175,8 +247,12 @@ func (s *Store) ResolveChannelKnowledgeBindings(ctx context.Context, instanceID,
 // second return value reports whether a row exists; an explicit off row is a
 // real value, not a missing default.
 func (s *Store) KnowledgeGlobalBinding(ctx context.Context, consumerType, consumerID string) (bool, bool, error) {
+	return knowledgeGlobalBinding(ctx, s.db, consumerType, consumerID)
+}
+
+func knowledgeGlobalBinding(ctx context.Context, queryer knowledgeQueryer, consumerType, consumerID string) (bool, bool, error) {
 	var enabled int
-	err := s.db.QueryRowContext(ctx,
+	err := queryer.QueryRowContext(ctx,
 		`SELECT enabled FROM knowledge_global_bindings WHERE consumer_type=? AND consumer_id=?`,
 		strings.TrimSpace(consumerType), strings.TrimSpace(consumerID)).Scan(&enabled)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -186,6 +262,58 @@ func (s *Store) KnowledgeGlobalBinding(ctx context.Context, consumerType, consum
 		return false, false, err
 	}
 	return enabled != 0, true, nil
+}
+
+// ChannelKnowledgeBindingSelection is one consumer's effective group selection read
+// from a single snapshot.
+type ChannelKnowledgeBindingSelection struct {
+	Bindings      []domain.KnowledgeBinding
+	IncludeGlobal bool
+}
+
+// ResolveChannelKnowledgeBindingSelection reads the space list and include_global in
+// one transaction, so a concurrent PUT cannot produce a torn pair (for example
+// the new global value with the old endpoint list).
+func (s *Store) ResolveChannelKnowledgeBindingSelection(ctx context.Context, instanceID, endpointKind string) (ChannelKnowledgeBindingSelection, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ChannelKnowledgeBindingSelection{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	endpoint := strings.TrimSpace(endpointKind)
+	instanceID = strings.TrimSpace(instanceID)
+	bindings := []domain.KnowledgeBinding{}
+	if endpoint != "" {
+		items, err := listKnowledgeBindings(ctx, tx, domain.KnowledgeBindingChannelEndpoint, ChannelEndpointConsumerID(instanceID, endpoint))
+		if err != nil {
+			return ChannelKnowledgeBindingSelection{}, err
+		}
+		bindings = items
+	}
+	if len(bindings) == 0 {
+		items, err := listKnowledgeBindings(ctx, tx, domain.KnowledgeBindingChannelInstance, instanceID)
+		if err != nil {
+			return ChannelKnowledgeBindingSelection{}, err
+		}
+		bindings = items
+	}
+	includeGlobal := false
+	if endpoint != "" {
+		enabled, found, err := knowledgeGlobalBinding(ctx, tx, domain.KnowledgeBindingChannelEndpoint, ChannelEndpointConsumerID(instanceID, endpoint))
+		if err != nil {
+			return ChannelKnowledgeBindingSelection{}, err
+		}
+		if found {
+			includeGlobal = enabled
+			return ChannelKnowledgeBindingSelection{Bindings: bindings, IncludeGlobal: includeGlobal}, nil
+		}
+	}
+	if enabled, found, err := knowledgeGlobalBinding(ctx, tx, domain.KnowledgeBindingChannelInstance, instanceID); err != nil {
+		return ChannelKnowledgeBindingSelection{}, err
+	} else if found {
+		includeGlobal = enabled
+	}
+	return ChannelKnowledgeBindingSelection{Bindings: bindings, IncludeGlobal: includeGlobal}, nil
 }
 
 // ResolveChannelKnowledgeGlobalBinding applies the same endpoint-over-instance

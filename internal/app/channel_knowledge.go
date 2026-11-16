@@ -226,13 +226,7 @@ func (s *Service) channelDmKnowledge(ctx context.Context) ([]domain.KnowledgeEnt
 	result := []domain.KnowledgeEntry{}
 	seen := map[string]bool{}
 	appendEntries := func(entries []domain.KnowledgeEntry) {
-		for _, entry := range entries {
-			if strings.TrimSpace(entry.ID) == "" || seen[entry.ID] {
-				continue
-			}
-			seen[entry.ID] = true
-			result = append(result, entry)
-		}
+		appendUniqueKnowledgeEntries(&result, seen, entries)
 	}
 	global, err := s.channelScopeEntries(ctx, "global", "")
 	if err != nil {
@@ -243,21 +237,30 @@ func (s *Service) channelDmKnowledge(ctx context.Context) ([]domain.KnowledgeEnt
 	if err != nil {
 		return nil, err
 	}
+	// A per-project KnowledgePolicy=disabled is deliberately not consulted: the
+	// private chat is the Owner's all-knowledge view, and the legacy "all" rule
+	// never filtered by that policy either.
 	for _, project := range projects {
 		switch project.ProjectType {
 		case "channel", "system":
 			continue
 		}
-		if project.KnowledgeState != domain.KnowledgeStateReady {
-			continue
-		}
-		if project.ProjectType == "knowledge" {
-			indexed, indexErr := s.channelProjectIndexed(ctx, project.ID)
-			if indexErr != nil {
-				return nil, indexErr
-			}
-			if !indexed {
+		// Only a vault-routed space has a lifecycle gate. A v142-era legacy
+		// project can still be uninitialized while the vault is off (startup
+		// reconciliation returns early), and the old "all" read included it; a
+		// ready-state check here would silently drop every upgraded project.
+		if s.readSourceIsVault("project", project.ID) {
+			if project.KnowledgeState != domain.KnowledgeStateReady {
 				continue
+			}
+			if project.ProjectType == "knowledge" {
+				root, rootErr := s.vaultProjectRootEntry(ctx, project.ID)
+				if rootErr != nil {
+					return nil, vaultReadFailure("project", project.ID, rootErr)
+				}
+				if strings.TrimSpace(root.ID) == "" {
+					continue
+				}
 			}
 		}
 		entries, sourceErr := s.channelScopeEntries(ctx, "project", project.ID)
@@ -269,28 +272,18 @@ func (s *Service) channelDmKnowledge(ctx context.Context) ([]domain.KnowledgeEnt
 	return result, nil
 }
 
-// channelProjectIndexed reports whether a dedicated library has a readable root
-// index in the source that currently owns it.
-func (s *Service) channelProjectIndexed(ctx context.Context, projectID string) (bool, error) {
-	decision := s.knowledgeReadDecision("project", projectID)
-	if decision.Err != nil {
-		return false, vaultReadFailure("project", projectID, decision.Err)
-	}
-	if decision.Vault {
-		entry, err := s.vaultProjectRootEntry(ctx, projectID)
-		if err != nil {
-			return false, vaultReadFailure("project", projectID, err)
+// appendUniqueKnowledgeEntries appends entries that have not been seen yet.
+// Both knowledge sources use globally unique IDs, but the channel read paths
+// merge global, project and grant subtrees, so the guard is what keeps a
+// repeated ID from being served twice.
+func appendUniqueKnowledgeEntries(result *[]domain.KnowledgeEntry, seen map[string]bool, entries []domain.KnowledgeEntry) {
+	for _, entry := range entries {
+		if strings.TrimSpace(entry.ID) == "" || seen[entry.ID] {
+			continue
 		}
-		return strings.TrimSpace(entry.ID) != "", nil
+		seen[entry.ID] = true
+		*result = append(*result, entry)
 	}
-	entry, err := s.store.KnowledgeRootForProject(ctx, projectID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return strings.TrimSpace(entry.ID) != "", nil
 }
 
 // channelScopeEntries returns the verified entries of one scope from the
