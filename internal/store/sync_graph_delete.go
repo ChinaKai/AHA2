@@ -323,7 +323,7 @@ func (s *Store) DeleteProjectWithSyncTombstone(ctx context.Context, id string) e
 		}
 		if err := insertSyncTombstone(ctx, tx, domain.SyncTombstone{
 			ObjectType: "knowledge_binding", ObjectID: binding.libraryID, Version: version,
-			SyncKey:   fmt.Sprintf("tombstone:v1:knowledge_binding:%s:%d", binding.libraryID, now.UTC().UnixNano()),
+			SyncKey:   SyncTombstoneKey("knowledge_binding", binding.libraryID, now),
 			DeletedAt: now,
 		}); err != nil {
 			return err
@@ -335,7 +335,7 @@ func (s *Store) DeleteProjectWithSyncTombstone(ctx context.Context, id string) e
 	}
 	projectTombstone := domain.SyncTombstone{
 		ObjectType: "project", ObjectID: id, Version: updatedAt,
-		SyncKey: fmt.Sprintf("tombstone:v1:project:%s:%d", id, now.UTC().UnixNano()), DeletedAt: now,
+		SyncKey: SyncTombstoneKey("project", id, now), DeletedAt: now,
 	}
 	affected, err := deleteSharedRow(ctx, tx, "project", id, now)
 	if err != nil {

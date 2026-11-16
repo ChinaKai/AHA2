@@ -3,6 +3,7 @@ package knowledgevault
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -198,6 +199,38 @@ func deleteTestTableCount(t *testing.T, databasePath, table string) int {
 		t.Fatal(err)
 	}
 	return count
+}
+
+func deleteTestSyncTombstone(t *testing.T, databasePath, objectType, objectID string) (version, syncKey string, found bool) {
+	t.Helper()
+	database, err := openReadOnlySQLite(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	err = database.QueryRow(`SELECT version,sync_key FROM sync_tombstones WHERE object_type=? AND object_id=?`, objectType, objectID).Scan(&version, &syncKey)
+	if err == sql.ErrNoRows {
+		return "", "", false
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return version, syncKey, true
+}
+
+func deleteTestAssertTombstone(t *testing.T, databasePath, objectType, objectID, wantVersion string, deletedAt time.Time) {
+	t.Helper()
+	version, syncKey, found := deleteTestSyncTombstone(t, databasePath, objectType, objectID)
+	if !found {
+		t.Fatalf("missing %s tombstone for %s", objectType, objectID)
+	}
+	if version != wantVersion {
+		t.Fatalf("%s tombstone for %s version = %q, want %q", objectType, objectID, version, wantVersion)
+	}
+	wantKey := fmt.Sprintf("tombstone:v1:%s:%s:%d", objectType, objectID, deletedAt.UnixNano())
+	if syncKey != wantKey {
+		t.Fatalf("%s tombstone for %s sync_key = %q, want %q", objectType, objectID, syncKey, wantKey)
+	}
 }
 
 func (fixture *deleteTestFixture) assertKnowledgeCounts(t *testing.T, proposals, entries, bindings, libraries, skills, policies int) {
@@ -566,6 +599,112 @@ func TestExecuteKnowledgeDeletionRollsBackOnInjectedError(t *testing.T) {
 	fixture.assertKnowledgeCounts(t, 2, 3, 2, 2, 15, 4)
 	if _, err := os.Stat(filepath.Join(fixture.prepDir, deleteResultFileName)); !os.IsNotExist(err) {
 		t.Fatalf("rollback wrote %s", deleteResultFileName)
+	}
+}
+
+func TestExecuteKnowledgeDeletionWritesSyncTombstones(t *testing.T) {
+	fixture := newDeleteTestFixture(t)
+	options := fixture.options(true)
+	options.DeleteSkills = true
+	report, err := ExecuteKnowledgeDeletion(context.Background(), options)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if !report.DeleteExecuted {
+		t.Fatalf("report = %+v", report)
+	}
+	fixture.assertKnowledgeCounts(t, 0, 0, 0, 0, 0, 0)
+
+	deletedAt := time.Date(2026, 11, 16, 1, 0, 0, 0, time.UTC)
+	for index := 1; index <= 3; index++ {
+		deleteTestAssertTombstone(t, fixture.databasePath, deleteSyncKnowledge,
+			fmt.Sprintf("knowledge_test_%d", index), "1", deletedAt)
+	}
+	for index := 1; index <= 2; index++ {
+		deleteTestAssertTombstone(t, fixture.databasePath, deleteSyncKnowledgeProposal,
+			fmt.Sprintf("proposal_test_%d", index), "2026-11-16T00:00:00Z", deletedAt)
+	}
+	for _, projectID := range []string{"project-bound", "project-unbound"} {
+		deleteTestAssertTombstone(t, fixture.databasePath, deleteSyncKnowledgeBinding,
+			"library_"+projectID, "2026-11-16T00:00:00Z", deletedAt)
+	}
+	for _, skill := range fixture.skills {
+		deleteTestAssertTombstone(t, fixture.databasePath, deleteSyncSkill, skill.ID, "1", deletedAt)
+	}
+	if got := deleteTestTableCount(t, fixture.databasePath, "sync_tombstones"); got != 3+2+2+15 {
+		t.Fatalf("sync_tombstones = %d, want 22", got)
+	}
+}
+
+func TestExecuteKnowledgeDeletionDryRunWritesNoSyncTombstones(t *testing.T) {
+	fixture := newDeleteTestFixture(t)
+	report, err := ExecuteKnowledgeDeletion(context.Background(), fixture.options(false))
+	if err != nil {
+		t.Fatalf("dry-run: %v", err)
+	}
+	if report.DeleteExecuted {
+		t.Fatalf("dry-run report = %+v", report)
+	}
+	if got := deleteTestTableCount(t, fixture.databasePath, "sync_tombstones"); got != 0 {
+		t.Fatalf("dry-run wrote %d sync tombstones", got)
+	}
+	fixture.assertKnowledgeCounts(t, 2, 3, 2, 2, 15, 4)
+}
+
+func TestExecuteKnowledgeDeletionWritesNoSkillTombstonesWithoutFlag(t *testing.T) {
+	fixture := newDeleteTestFixture(t)
+	report, err := ExecuteKnowledgeDeletion(context.Background(), fixture.options(true))
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if !report.DeleteExecuted {
+		t.Fatalf("report = %+v", report)
+	}
+	fixture.assertKnowledgeCounts(t, 0, 0, 0, 0, 15, 0)
+	if got := deleteTestTableCount(t, fixture.databasePath, "sync_tombstones"); got != 3+2+2 {
+		t.Fatalf("sync_tombstones = %d, want 7 (no skill tombstones)", got)
+	}
+	for _, skill := range fixture.skills {
+		if _, _, found := deleteTestSyncTombstone(t, fixture.databasePath, deleteSyncSkill, skill.ID); found {
+			t.Fatalf("skill %s got a tombstone without -delete-skills", skill.ID)
+		}
+	}
+}
+
+func TestExecuteKnowledgeDeletionRollsBackWhenTombstoneWriteFails(t *testing.T) {
+	fixture := newDeleteTestFixture(t)
+	execTestSQL(t, fixture.databasePath, `CREATE TRIGGER delete_test_fail_tombstones
+		BEFORE INSERT ON sync_tombstones BEGIN SELECT RAISE(ABORT,'injected tombstone failure'); END`)
+	options := fixture.options(true)
+	options.DeleteSkills = true
+	_, err := ExecuteKnowledgeDeletion(context.Background(), options)
+	if err == nil || !strings.Contains(err.Error(), "injected tombstone failure") {
+		t.Fatalf("error = %v, want injected tombstone failure", err)
+	}
+	fixture.assertKnowledgeCounts(t, 2, 3, 2, 2, 15, 4)
+	if got := deleteTestTableCount(t, fixture.databasePath, "sync_tombstones"); got != 0 {
+		t.Fatalf("rollback left %d sync tombstones", got)
+	}
+	if _, err := os.Stat(filepath.Join(fixture.prepDir, deleteResultFileName)); !os.IsNotExist(err) {
+		t.Fatalf("rollback wrote %s", deleteResultFileName)
+	}
+}
+
+func TestExecuteKnowledgeDeletionUpsertsExistingSyncTombstones(t *testing.T) {
+	fixture := newDeleteTestFixture(t)
+	execTestSQL(t, fixture.databasePath, `INSERT INTO sync_tombstones(object_type,object_id,version,sync_key,deleted_at)
+		VALUES('knowledge','knowledge_test_1','0','existing-key','2026-11-15T00:00:00Z')`)
+	report, err := ExecuteKnowledgeDeletion(context.Background(), fixture.options(true))
+	if err != nil {
+		t.Fatalf("execute with an existing tombstone: %v", err)
+	}
+	if !report.DeleteExecuted {
+		t.Fatalf("report = %+v", report)
+	}
+	deletedAt := time.Date(2026, 11, 16, 1, 0, 0, 0, time.UTC)
+	deleteTestAssertTombstone(t, fixture.databasePath, deleteSyncKnowledge, "knowledge_test_1", "1", deletedAt)
+	if got := deleteTestTableCount(t, fixture.databasePath, "sync_tombstones"); got != 3+2+2 {
+		t.Fatalf("sync_tombstones = %d, want 7 (existing row upserted, not duplicated)", got)
 	}
 }
 

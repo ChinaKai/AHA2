@@ -14,8 +14,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ChinaKai/AHA2/internal/domain"
+	"github.com/ChinaKai/AHA2/internal/store"
 )
 
 // The delete command is the only writer of legacy knowledge tables. delete-prep
@@ -35,6 +39,16 @@ const (
 	deleteGrantTable   = "channel_knowledge_grants"
 	deleteRecordsTable = "channel_knowledge_records"
 	deleteSkillsTable  = "skills"
+
+	// Profile Sync object types written as tombstones by an execute. They use
+	// the same wire types as internal/sync's business objects. knowledge_libraries
+	// has no sync type: internal/sync never exports it (there is no
+	// TypeKnowledgeLibrary constant or registered handler), so only the binding
+	// rows that point at a library are tombstoned.
+	deleteSyncKnowledge         = "knowledge"
+	deleteSyncKnowledgeProposal = "knowledge_proposal"
+	deleteSyncKnowledgeBinding  = "knowledge_binding"
+	deleteSyncSkill             = "skill"
 
 	defaultDeleteHealthURL = "http://127.0.0.1:8766/healthz"
 	// The owner decision covers the four channel policies that point at the two
@@ -303,7 +317,7 @@ func ExecuteKnowledgeDeletion(ctx context.Context, options DeleteExecuteOptions)
 		if err := ensureDeleteResultWritable(paths.prepDir); err != nil {
 			return report, err
 		}
-		return executeKnowledgeDeletion(ctx, paths, options, plan, planTables, report)
+		return executeKnowledgeDeletion(ctx, paths, options, plan, planTables, report, now)
 	}
 	return inspectKnowledgeDeletion(ctx, paths, options, plan, planTables, report)
 }
@@ -477,7 +491,7 @@ func inspectKnowledgeDeletion(ctx context.Context, paths deleteExecutePaths, opt
 	return report, nil
 }
 
-func executeKnowledgeDeletion(ctx context.Context, paths deleteExecutePaths, options DeleteExecuteOptions, plan DeletePrepReport, planTables []DeleteTablePlan, report DeleteExecuteReport) (DeleteExecuteReport, error) {
+func executeKnowledgeDeletion(ctx context.Context, paths deleteExecutePaths, options DeleteExecuteOptions, plan DeletePrepReport, planTables []DeleteTablePlan, report DeleteExecuteReport, now time.Time) (DeleteExecuteReport, error) {
 	database, err := openReadWriteSQLite(paths.databasePath)
 	if err != nil {
 		return report, err
@@ -514,6 +528,14 @@ func executeKnowledgeDeletion(ctx context.Context, paths deleteExecutePaths, opt
 		report.SkillFilesPlanned = len(filePlans)
 	}
 
+	// Read the sync identity of every row before it disappears. The tombstones
+	// are written in the same transaction as the deletes, so a failed write
+	// rolls the deletes back instead of leaving local-only deletions behind.
+	tombstones, err := collectDeleteSyncTombstones(ctx, tx, options.DeleteSkills)
+	if err != nil {
+		return report, err
+	}
+
 	for _, policy := range policies {
 		report.DeletedPolicyIDs = append(report.DeletedPolicyIDs, policy.ID)
 	}
@@ -546,6 +568,9 @@ func executeKnowledgeDeletion(ctx context.Context, paths deleteExecutePaths, opt
 			return report, fmt.Errorf("delete skills removed %d rows, delete-plan expects %d", affected, plan.Skills.Rows)
 		}
 	}
+	if err := writeDeleteSyncTombstones(ctx, tx, tombstones, now); err != nil {
+		return report, err
+	}
 	if err := tx.Commit(); err != nil {
 		return report, fmt.Errorf("commit delete transaction: %w", err)
 	}
@@ -576,6 +601,137 @@ func executeKnowledgeDeletion(ctx context.Context, paths deleteExecutePaths, opt
 		return report, fmt.Errorf("database deletion committed but %s could not be written: %w", deleteResultFileName, err)
 	}
 	return report, nil
+}
+
+// deleteSyncTombstone is the sync identity of one row this command removes.
+// The row itself is the only place its revision/timestamp version lives, so
+// these values are read before the DELETE statements run.
+type deleteSyncTombstone struct {
+	ObjectType string
+	ObjectID   string
+	Version    string
+}
+
+// collectDeleteSyncTombstones reads the identity of every synchronized row the
+// execute path is about to remove. Skills are only included with -delete-skills,
+// matching the row delete. knowledge_libraries is intentionally absent: it has
+// no Profile Sync object type, so there is no center object to tombstone.
+func collectDeleteSyncTombstones(ctx context.Context, queryer deleteQueryer, includeSkills bool) ([]deleteSyncTombstone, error) {
+	tombstones := []deleteSyncTombstone{}
+	rows, err := queryer.QueryContext(ctx, `SELECT id,revision FROM `+quoteIdentifier("knowledge_entries")+` ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("read knowledge sync identities: %w", err)
+	}
+	for rows.Next() {
+		var id string
+		var revision int
+		if err := rows.Scan(&id, &revision); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		tombstones = append(tombstones, deleteSyncTombstone{
+			ObjectType: deleteSyncKnowledge, ObjectID: id, Version: strconv.Itoa(revision),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	rows, err = queryer.QueryContext(ctx, `SELECT id,updated_at,created_at FROM `+quoteIdentifier("knowledge_proposals")+` ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("read knowledge proposal sync identities: %w", err)
+	}
+	for rows.Next() {
+		var id, updatedAt, createdAt string
+		if err := rows.Scan(&id, &updatedAt, &createdAt); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		version := updatedAt
+		if version == "" {
+			version = createdAt
+		}
+		tombstones = append(tombstones, deleteSyncTombstone{
+			ObjectType: deleteSyncKnowledgeProposal, ObjectID: id, Version: version,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	// A library can have more than one binding row in older schemas; the sync
+	// object is the library, so collapse them into one tombstone per library_id.
+	rows, err = queryer.QueryContext(ctx, `SELECT library_id,COALESCE(MAX(updated_at),'') FROM `+quoteIdentifier("project_knowledge_bindings")+` GROUP BY library_id ORDER BY library_id`)
+	if err != nil {
+		return nil, fmt.Errorf("read knowledge binding sync identities: %w", err)
+	}
+	for rows.Next() {
+		var libraryID, updatedAt string
+		if err := rows.Scan(&libraryID, &updatedAt); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		tombstones = append(tombstones, deleteSyncTombstone{
+			ObjectType: deleteSyncKnowledgeBinding, ObjectID: libraryID, Version: updatedAt,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	if !includeSkills {
+		return tombstones, nil
+	}
+	rows, err = queryer.QueryContext(ctx, `SELECT id,version FROM `+quoteIdentifier(deleteSkillsTable)+` ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("read skill sync identities: %w", err)
+	}
+	for rows.Next() {
+		var id string
+		var version int
+		if err := rows.Scan(&id, &version); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		tombstones = append(tombstones, deleteSyncTombstone{
+			ObjectType: deleteSyncSkill, ObjectID: id, Version: strconv.Itoa(version),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	return tombstones, nil
+}
+
+// writeDeleteSyncTombstones records one Profile Sync tombstone per deleted
+// object inside the delete transaction, so the sync push sees exactly the rows
+// this command removed.
+func writeDeleteSyncTombstones(ctx context.Context, tx *sql.Tx, tombstones []deleteSyncTombstone, deletedAt time.Time) error {
+	deletedAt = deletedAt.UTC()
+	fallbackVersion := deletedAt.Format(time.RFC3339Nano)
+	for _, item := range tombstones {
+		version := item.Version
+		if version == "" {
+			version = fallbackVersion
+		}
+		err := store.InsertSyncTombstoneTx(ctx, tx, domain.SyncTombstone{
+			ObjectType: item.ObjectType, ObjectID: item.ObjectID, Version: version,
+			SyncKey:   store.SyncTombstoneKey(item.ObjectType, item.ObjectID, deletedAt),
+			DeletedAt: deletedAt,
+		})
+		if err != nil {
+			return fmt.Errorf("write %s tombstone for %s: %w", item.ObjectType, item.ObjectID, err)
+		}
+	}
+	return nil
 }
 
 func readDeleteState(ctx context.Context, queryer deleteQueryer, planTables []DeleteTablePlan) (DeleteCounts, []DeletePolicyRecord, []DeleteSkillRecord, []BlockingTaskRef, error) {

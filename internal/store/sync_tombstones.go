@@ -74,6 +74,22 @@ func insertSyncTombstone(ctx context.Context, tx *sql.Tx, item domain.SyncTombst
 	return err
 }
 
+// InsertSyncTombstoneTx records one owner-side delete inside the caller's
+// transaction. It is exported for maintenance tools that remove synchronized
+// rows outside the regular handlers (for example the legacy knowledge delete
+// command) so their deletes still reach the sync center and other devices.
+// Re-recording an existing tombstone upserts it instead of failing.
+func InsertSyncTombstoneTx(ctx context.Context, tx *sql.Tx, item domain.SyncTombstone) error {
+	return insertSyncTombstone(ctx, tx, item)
+}
+
+// SyncTombstoneKey returns the sync_key this device writes when it deletes a
+// shared object. Keeping the format in one place means an offline maintenance
+// delete produces the same wire identity as the regular delete handlers.
+func SyncTombstoneKey(objectType, objectID string, deletedAt time.Time) string {
+	return fmt.Sprintf("tombstone:v1:%s:%s:%d", objectType, objectID, deletedAt.UTC().UnixNano())
+}
+
 func deleteSharedRow(ctx context.Context, tx *sql.Tx, objectType, objectID string, deletedAt time.Time) (int64, error) {
 	var result sql.Result
 	var err error
@@ -181,7 +197,7 @@ func (s *Store) deleteSharedObject(ctx context.Context, objectType, objectID, lo
 	}
 	item := domain.SyncTombstone{
 		ObjectType: objectType, ObjectID: objectID, Version: logicalVersion, DeletedAt: deletedAt.UTC(),
-		SyncKey: fmt.Sprintf("tombstone:v1:%s:%s:%d", objectType, objectID, deletedAt.UTC().UnixNano()),
+		SyncKey: SyncTombstoneKey(objectType, objectID, deletedAt),
 	}
 	affected, err := deleteSharedRow(ctx, tx, objectType, objectID, deletedAt)
 	if err != nil {
