@@ -462,3 +462,181 @@ func TestCreateProjectRejectsReusedArchivedProjectID(t *testing.T) {
 		t.Fatalf("original archive missing: %v (old slug %s)", err, originalSlug)
 	}
 }
+
+func TestReconcileRefusesSyncProjectReusingArchivedID(t *testing.T) {
+	service, database, _, config := newSpaceTestService(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	project, err := service.CreateProject(ctx, domain.Project{
+		ID: "p529sync", Name: "Sync Reuse", ProjectType: "folder",
+		KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := knowledgevault.ArchiveProjectSpace(config, project.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.DeleteProjectWithSyncTombstone(ctx, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	// A sync/import replay calls store.CreateProject directly, bypassing the
+	// Service.CreateProject guard. Provisioning must still refuse the ID.
+	replay := domain.Project{
+		ID: project.ID, Name: "Sync Replay", ProjectType: "folder",
+		KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now,
+	}
+	if err := database.CreateProject(ctx, replay); err != nil {
+		t.Fatal(err)
+	}
+	report, err := service.ReconcileKnowledgeSpaces(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := database.Project(ctx, project.ID)
+	if err != nil || stored.KnowledgeState != domain.KnowledgeStateError {
+		t.Fatalf("sync replay project state = %q err=%v", stored.KnowledgeState, err)
+	}
+	manifest, err := knowledgevault.ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := manifest.Projects[project.ID]; exists {
+		t.Fatalf("sync replay created a live mapping beside the archive: %#v", manifest.Projects)
+	}
+	if manifest.Archives[project.ID] == "" {
+		t.Fatalf("archive mapping disappeared: %#v", manifest.Archives)
+	}
+	warnings := strings.Join(report.Warnings, "\n")
+	if !strings.Contains(warnings, project.ID) {
+		t.Fatalf("sync replay refusal was not reported: %#v", report)
+	}
+}
+
+func TestCreateProjectRejectsReuseDuringArchiveManifestWindow(t *testing.T) {
+	service, database, _, config := newSpaceTestService(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	project, err := service.CreateProject(ctx, domain.Project{
+		ID: "p529window", Name: "Window Reuse", ProjectType: "folder",
+		KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(config.VaultPath, ".aha-vault.json")
+	beforeArchive, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.DeleteProjectWithSyncTombstone(ctx, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	archivedPath, err := knowledgevault.ArchiveProjectSpace(config, project.ID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate the write failure window: the directory moved, but the old
+	// manifest (projects mapping, no archive mapping) is still on disk.
+	if err := os.WriteFile(manifestPath, beforeArchive, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if archived, ok := knowledgevault.ArchivedProjectSpace(config, project.ID); !ok {
+		t.Fatalf("archive directory scan did not claim the moved ID: %s", archived)
+	}
+	_, err = service.CreateProject(ctx, domain.Project{
+		ID: project.ID, Name: "Reused", ProjectType: "folder",
+		KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now,
+	})
+	var spaceErr *KnowledgeSpaceError
+	if !errors.As(err, &spaceErr) || spaceErr.Code != "project_id_archived" {
+		t.Fatalf("window reuse error = %#v", err)
+	}
+	if _, err := os.Stat(filepath.Join(config.VaultPath, filepath.FromSlash(archivedPath), "index.md")); err != nil {
+		t.Fatalf("archived files were disturbed: %v", err)
+	}
+	if _, err := database.Project(ctx, project.ID); err == nil {
+		t.Fatal("window reuse created a project row")
+	}
+	manifest, err := knowledgevault.ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Archives[project.ID] != "" {
+		t.Fatalf("window reuse wrote an archive mapping: %#v", manifest.Archives)
+	}
+}
+
+func TestCreateProjectAllowsReuseAfterArchiveDirectoryRemoved(t *testing.T) {
+	service, database, _, config := newSpaceTestService(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	project, err := service.CreateProject(ctx, domain.Project{
+		ID: "p529deletedarchive", Name: "Deleted Archive", ProjectType: "folder",
+		KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	archivedPath, err := knowledgevault.ArchiveProjectSpace(config, project.ID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.DeleteProjectWithSyncTombstone(ctx, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(config.VaultPath, filepath.FromSlash(archivedPath))); err != nil {
+		t.Fatal(err)
+	}
+	reused, err := service.CreateProject(ctx, domain.Project{
+		ID: project.ID, Name: "Reused", ProjectType: "folder",
+		KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("stale archive mapping blocked reuse: %v", err)
+	}
+	if reused.KnowledgeState != domain.KnowledgeStateReady {
+		t.Fatalf("reused project state = %q", reused.KnowledgeState)
+	}
+	manifest, err := knowledgevault.ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Projects[project.ID] == "" {
+		t.Fatalf("reused project has no live mapping: %#v", manifest.Projects)
+	}
+	if manifest.Archives[project.ID] != "" {
+		t.Fatalf("stale archive mapping survived: %#v", manifest.Archives)
+	}
+}
+
+func TestReconcileWarnsAboutArchiveWithoutRootIndex(t *testing.T) {
+	service, database, _, config := newSpaceTestService(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	project, err := service.CreateProject(ctx, domain.Project{
+		ID: "p529noroot", Name: "No Root", ProjectType: "folder",
+		KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	archivedPath, err := knowledgevault.ArchiveProjectSpace(config, project.ID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.DeleteProjectWithSyncTombstone(ctx, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(config.VaultPath, filepath.FromSlash(archivedPath), "index.md")
+	if err := os.Remove(root); err != nil {
+		t.Fatal(err)
+	}
+	report, err := service.ReconcileKnowledgeSpaces(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(report.Warnings, "\n"), "缺少根 index.md") {
+		t.Fatalf("missing archive root was not reported: %#v", report)
+	}
+}

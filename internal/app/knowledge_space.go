@@ -103,17 +103,17 @@ func (s *Service) archivedProjectSpace(projectID string) (string, bool) {
 	if s == nil || s.knowledgeVault == nil || projectID == "" {
 		return "", false
 	}
-	manifest, err := knowledgevault.ReadManifest(s.knowledgeVault.Config().VaultPath)
-	if err != nil {
-		return "", false
-	}
-	slug := strings.TrimSpace(manifest.Archives[projectID])
-	return slug, slug != ""
+	return knowledgevault.ArchivedProjectSpace(s.knowledgeVault.Config(), projectID)
 }
 
 func (s *Service) provisionProjectKnowledgeSpace(ctx context.Context, project domain.Project) error {
 	if _, err := s.knowledgeVault.ProvisionProjectSpace(ctx, project.ID, project.Name); err != nil {
 		_ = s.store.SetProjectKnowledgeState(ctx, project.ID, domain.KnowledgeStateError)
+		if errors.Is(err, knowledgevault.ErrProjectIDArchived) {
+			return knowledgeSpaceError(
+				"project_id_archived",
+				"项目 ID 已被归档知识空间占用，不能复用；请新建项目或使用其他 ID："+err.Error(), err)
+		}
 		return knowledgeSpaceError(
 			"knowledge_space_init_failed",
 			"项目已创建，但知识空间初始化失败，可重试："+err.Error(), err)
@@ -205,12 +205,19 @@ func (s *Service) ReconcileKnowledgeSpaces(ctx context.Context) (KnowledgeSpaceR
 	}
 	manifestProjects := map[string]string{}
 	manifestArchives := map[string]string{}
+	config := s.knowledgeVault.Config()
+	// Reconcile from the manifest currently on disk. The live Reader may have
+	// been opened before an archive/provision step, and a stale snapshot would
+	// make reconciliation act on mappings that no longer exist (or miss ones
+	// that do).
+	if manifest, manifestErr := knowledgevault.ReadManifest(config.VaultPath); manifestErr == nil {
+		manifestProjects = manifest.Projects
+		manifestArchives = manifest.Archives
+	}
 	indexedRoots := map[string]bool{}
 	indexedArchives := map[string]bool{}
 	projectEntries := map[string]bool{}
 	_ = s.knowledgeVault.WithReader(func(reader *knowledgevault.Reader) error {
-		manifestProjects = reader.Manifest().Projects
-		manifestArchives = reader.Manifest().Archives
 		if !reader.IndexReady() {
 			return nil
 		}
@@ -237,7 +244,6 @@ func (s *Service) ReconcileKnowledgeSpaces(ctx context.Context) (KnowledgeSpaceR
 		}
 		return nil
 	})
-	config := s.knowledgeVault.Config()
 	rebuildNeeded := false
 	ids := knowledgevault.SortedProjectIDs(manifestProjects)
 	manifestKnown := map[string]bool{}
@@ -295,6 +301,21 @@ func (s *Service) ReconcileKnowledgeSpaces(ctx context.Context) (KnowledgeSpaceR
 	// is invisible to the project loop above. One rebuild reconciles both the
 	// missing archive root and the stale project rows.
 	for _, archiveID := range knowledgevault.SortedProjectIDs(manifestArchives) {
+		archiveSlug := strings.TrimSpace(manifestArchives[archiveID])
+		archiveDir := filepath.Join(config.VaultPath, "archive", filepath.FromSlash(archiveSlug))
+		if info, statErr := os.Stat(archiveDir); statErr != nil || !info.IsDir() {
+			// The files were removed by hand; a rebuild drops the residual
+			// manifest mapping instead of keeping a dead archive library.
+			rebuildNeeded = true
+			report.Warnings = append(report.Warnings, fmt.Sprintf("归档 %s 的目录不存在，重建会移除残留映射", archiveID))
+			continue
+		}
+		if _, rootErr := os.Stat(filepath.Join(archiveDir, "index.md")); os.IsNotExist(rootErr) {
+			// createMissingIndexPages deliberately skips archive/, so a
+			// rebuild cannot create this page. Report it instead of silently
+			// accepting an archive whose documents have no browsable root.
+			report.Warnings = append(report.Warnings, fmt.Sprintf("归档 %s 缺少根 index.md；重建不会为 archive/ 自动补根页，需要手工补", archiveID))
+		}
 		if !indexedArchives[archiveID] {
 			rebuildNeeded = true
 			report.Warnings = append(report.Warnings, fmt.Sprintf("归档 %s 缺少索引条目，已安排重建", archiveID))
@@ -374,4 +395,18 @@ func IsKnowledgeSpaceNotReadyError(err error) bool {
 	default:
 		return false
 	}
+}
+
+// IsKnowledgeSpaceConflictError reports a client-correctable project/space
+// conflict: the vault is unavailable, or the requested project ID is already
+// reserved by an archived space. HTTP handlers return 409 for these.
+func IsKnowledgeSpaceConflictError(err error) bool {
+	if IsKnowledgeSpaceNotReadyError(err) {
+		return true
+	}
+	var spaceErr *KnowledgeSpaceError
+	if !errors.As(err, &spaceErr) {
+		return false
+	}
+	return spaceErr.Code == "project_id_archived"
 }
