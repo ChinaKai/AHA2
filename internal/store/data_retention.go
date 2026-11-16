@@ -259,7 +259,14 @@ func conversationPurgeScope(settings domain.ConversationRetentionSettings, cutof
 		AND t.status IN ('completed','failed','cancelled')
 		AND (c.turn_id='' OR tn.id IS NULL OR tn.status IN ('succeeded','failed','interrupted','blocked'))
 		AND NOT EXISTS (SELECT 1 FROM task_permission_requests r WHERE r.task_id=c.task_id AND r.status='pending')
-		AND NOT EXISTS (SELECT 1 FROM pet_approvals pa WHERE pa.task_id=c.task_id AND pa.status IN ('pending','executing'))
+		AND NOT EXISTS (
+			SELECT 1 FROM pet_approvals pa
+			WHERE pa.status IN ('pending','executing')
+				AND (
+					pa.task_id=c.task_id
+					OR json_extract(CASE WHEN json_valid(pa.payload_json) THEN pa.payload_json ELSE '{}' END,'$.task_id')=c.task_id
+				)
+		)
 		AND NOT EXISTS (SELECT 1 FROM attachments a WHERE a.task_id=c.task_id AND a.message_id=c.id)`
 	return scope, args
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -276,9 +277,10 @@ func TestDatabaseCompactionEndpointsCheckAndRun(t *testing.T) {
 	}
 	// A pending pet approval also blocks compaction, even with no active task.
 	if _, err := raw.ExecContext(ctx, `
-		INSERT INTO pet_approvals(id,task_id,kind,title,summary,status,created_at)
-		VALUES(?,?,?,?,?,?,?)`,
-		domain.NewID("pet_approval"), task.ID, "shell", "Pet approval", "waiting", "pending",
+		INSERT INTO pet_approvals(id,task_id,kind,title,summary,payload_json,status,created_at)
+		VALUES(?,?,?,?,?,?,?,?)`,
+		domain.NewID("pet_approval"), "task_pet", "delete_task", "Delete task", "waiting",
+		fmt.Sprintf(`{"task_id":%q}`, task.ID), "pending",
 		time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}

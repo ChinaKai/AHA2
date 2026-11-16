@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -133,11 +134,13 @@ func TestConversationPurgePlanProtectsActiveApprovalsFinalAnswersAndAttachments(
 	petApprovalTask := createStoreTestTask(t, database)
 	setStoreTestTaskStatus(t, database, petApprovalTask.ID, domain.TaskCompleted)
 	petApprovalItem := seedConversationItem(t, database, petApprovalTask.ID, "tool", "agent_command_finished", old)
+	// Production shape: the approval row belongs to the pet Task and names the
+	// real target only inside payload_json.
 	if _, err := database.db.Exec(`
-		INSERT INTO pet_approvals(id,task_id,kind,title,summary,status,created_at)
-		VALUES(?,?,?,?,?,?,?)`,
-		domain.NewID("pet_approval"), petApprovalTask.ID, "shell", "Pet approval", "waiting", "executing",
-		timeString(old)); err != nil {
+		INSERT INTO pet_approvals(id,task_id,kind,title,summary,payload_json,status,created_at)
+		VALUES(?,?,?,?,?,?,?,?)`,
+		domain.NewID("pet_approval"), "task_pet", "delete_task", "Delete task", "waiting",
+		fmt.Sprintf(`{"task_id":%q}`, petApprovalTask.ID), "executing", timeString(old)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -311,10 +314,10 @@ func TestDatabaseCompactionPlanBlocksActiveTasksAndLowDisk(t *testing.T) {
 
 	setStoreTestTaskStatus(t, database, task.ID, domain.TaskCompleted)
 	if _, err := database.db.Exec(`
-		INSERT INTO pet_approvals(id,task_id,kind,title,summary,status,created_at)
-		VALUES(?,?,?,?,?,?,?)`,
-		domain.NewID("pet_approval"), task.ID, "shell", "Pet approval", "waiting", "pending",
-		timeString(time.Now().UTC())); err != nil {
+		INSERT INTO pet_approvals(id,task_id,kind,title,summary,payload_json,status,created_at)
+		VALUES(?,?,?,?,?,?,?,?)`,
+		domain.NewID("pet_approval"), "task_pet", "delete_task", "Delete task", "waiting",
+		fmt.Sprintf(`{"task_id":%q}`, task.ID), "pending", timeString(time.Now().UTC())); err != nil {
 		t.Fatal(err)
 	}
 	plan, err = database.DatabaseCompactionPlan(context.Background())
@@ -440,7 +443,7 @@ func TestCompactDatabaseRestoresFromBackupWhenVerificationFails(t *testing.T) {
 	}
 }
 
-// The conversation preview and the batched DELETE must use the v142 expression
+// The conversation preview and the batched DELETE must use the v145 expression
 // index, not scan conversation_items on the largest database.
 func TestConversationPurgeQueriesUseCleanupIndex(t *testing.T) {
 	t.Parallel()
@@ -625,4 +628,92 @@ func conversationItemPresentInStore(t *testing.T, database *Store, taskID string
 		t.Fatal(err)
 	}
 	return count == 1
+}
+
+// A writer that already holds a SQLite write transaction blocks the exclusive
+// maintenance lock. Compaction must refuse with active_writes, before creating
+// any backup or VACUUM.
+func TestCompactDatabaseRefusesWhenAnActiveWriteTransactionExists(t *testing.T) {
+	ctx := context.Background()
+	database := openDataRetentionTestStore(t)
+	task := createStoreTestTask(t, database)
+	setStoreTestTaskStatus(t, database, task.ID, domain.TaskCompleted)
+	external, err := sql.Open("sqlite", database.path+"?_pragma=busy_timeout(100)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer external.Close()
+	conn, err := external.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(ctx, `UPDATE tasks SET updated_at=updated_at WHERE id=?`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	result, err := database.CompactDatabase(ctx)
+	if err != nil {
+		t.Fatalf("busy lock surfaced as an error instead of a skip: %v result=%#v", err, result)
+	}
+	if result.SkipReason != domain.DatabaseCompactionSkipActiveWrites {
+		t.Fatalf("skip reason=%q result=%#v", result.SkipReason, result)
+	}
+	if result.BackupPath != "" {
+		t.Fatalf("backup was created before the lock was acquired: %s", result.BackupPath)
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("busy lock took %s to refuse", elapsed)
+	}
+	if _, err := conn.ExecContext(ctx, `ROLLBACK`); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(filepath.Join(filepath.Dir(database.path), "backups"))
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() && strings.HasPrefix(entry.Name(), "database-compact-") {
+			t.Fatalf("compaction left a backup after refusing: %s", entry.Name())
+		}
+	}
+}
+
+// Repeated compactions keep only the newest full-database snapshot.
+func TestCompactDatabaseKeepsOnlyNewestBackup(t *testing.T) {
+	ctx := context.Background()
+	database := openDataRetentionTestStore(t)
+	task := createStoreTestTask(t, database)
+	setStoreTestTaskStatus(t, database, task.ID, domain.TaskCompleted)
+	first, err := database.CompactDatabase(ctx)
+	if err != nil || first.BackupPath == "" {
+		t.Fatalf("first compaction=%#v err=%v", first, err)
+	}
+	firstDir := filepath.Dir(first.BackupPath)
+	second, err := database.CompactDatabase(ctx)
+	if err != nil || second.BackupPath == "" {
+		t.Fatalf("second compaction=%#v err=%v", second, err)
+	}
+	if _, err := os.Stat(firstDir); !os.IsNotExist(err) {
+		t.Fatalf("old compaction backup still exists: %v", err)
+	}
+	if _, err := os.Stat(second.BackupPath); err != nil {
+		t.Fatalf("new compaction backup missing: %v", err)
+	}
+	entries, err := os.ReadDir(filepath.Join(filepath.Dir(database.path), "backups"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, entry := range entries {
+		if entry.IsDir() && strings.HasPrefix(entry.Name(), "database-compact-") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("database-compact backups=%d, want 1", count)
+	}
 }
