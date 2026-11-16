@@ -615,6 +615,51 @@ func TestExecuteKnowledgeDeletionRejectsOpenTaskSkillRefs(t *testing.T) {
 	fixture.assertKnowledgeCounts(t, 0, 0, 0, 0, 0, 0)
 }
 
+func TestExecuteKnowledgeDeletionRejectsPreparingTaskSkillRefs(t *testing.T) {
+	fixture := newDeleteTestFixture(t)
+	now := "2026-11-16T00:00:00Z"
+	legacyID := fixture.skills[0].ID
+	vaultKey := `["vault-skill:global:embedded-change-review"]`
+	insertTask := func(id, status, skillIDs string) {
+		execTestSQL(t, fixture.databasePath, `INSERT INTO tasks(id,project_id,workspace_id,title,original_request,current_goal,status,runtime_config_snapshot_id,skill_ids_json,created_at,updated_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?)`, id, "project-bound", "workspace-test", "任务 "+id, "请求", "目标", status, "snapshot-test", skillIDs, now, now)
+	}
+	insertTask("task_preparing_legacy", "preparing", fmt.Sprintf(`["%s"]`, legacyID))
+	insertTask("task_preparing_vault", "preparing", vaultKey)
+
+	dryOptions := fixture.options(false)
+	dryOptions.DeleteSkills = true
+	dryReport, err := ExecuteKnowledgeDeletion(context.Background(), dryOptions)
+	if err != nil {
+		t.Fatalf("dry-run: %v", err)
+	}
+	if len(dryReport.BlockingTaskRefs) != 1 || dryReport.BlockingTaskRefs[0].TaskID != "task_preparing_legacy" {
+		t.Fatalf("blocking refs = %+v, want the preparing task with a legacy skill", dryReport.BlockingTaskRefs)
+	}
+	if dryReport.ReadyToExecute {
+		t.Fatal("dry-run should not be ready while a preparing task references a legacy skill")
+	}
+
+	options := fixture.options(true)
+	options.DeleteSkills = true
+	_, err = ExecuteKnowledgeDeletion(context.Background(), options)
+	if err == nil || !strings.Contains(err.Error(), "open task") {
+		t.Fatalf("error = %v, want open-task refusal", err)
+	}
+	fixture.assertKnowledgeCounts(t, 2, 3, 2, 2, 15, 4)
+
+	// A preparing task that only selects a vault skill key must not block.
+	execTestSQL(t, fixture.databasePath, `UPDATE tasks SET skill_ids_json=? WHERE id='task_preparing_legacy'`, vaultKey)
+	report, err := ExecuteKnowledgeDeletion(context.Background(), options)
+	if err != nil {
+		t.Fatalf("execute with only vault skill keys: %v", err)
+	}
+	if !report.DeleteExecuted || len(report.BlockingTaskRefs) != 0 {
+		t.Fatalf("report = %+v", report)
+	}
+	fixture.assertKnowledgeCounts(t, 0, 0, 0, 0, 0, 0)
+}
+
 func TestExecuteKnowledgeDeletionSkillFileValidation(t *testing.T) {
 	t.Run("missing vault package", func(t *testing.T) {
 		fixture := newDeleteTestFixture(t)

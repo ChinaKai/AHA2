@@ -128,7 +128,7 @@ aha2 knowledge-vault delete --prep <prep> --execute --confirm <sha256> \
 - `--execute` 必须同时提供 `--confirm`，且等于 `delete-plan.json` 的 SHA256。
 - 执行时若 `-health-url` 返回 HTTP 200，拒绝执行，必须先停服务。
 - 行删除在单个 SQLite 事务内完成：策略 → proposals → entries → bindings → libraries → skills；任何错误整体回滚。
-- `-delete-skills` 会扫描仍处于 draft/active/waiting_user/blocked/failed 的任务；只要 `skill_ids_json` 仍引用将被删除的旧 `skill_*` ID，就拒绝整个 execute 并列出任务，需要先迁移到 vault-skill key 或清空选择。
+- `-delete-skills` 会扫描仍处于 draft/preparing/active/waiting_user/blocked/failed 的任务；只要 `skill_ids_json` 仍引用将被删除的旧 `skill_*` ID，就拒绝整个 execute 并列出任务，需要先迁移到 vault-skill key 或清空选择。
 - `-delete-skill-files` 会在事务前逐个校验：目录位于 `<data-dir>/knowledge/skills` 内、不是符号链接/不越界、delete-prep 备份中有同名目录、vault 中有对应 slug 的 `SKILL.md`。文件删除在数据库事务提交后执行。
 - 成功写 `<prep>/delete-result.json`，包含前后行数、删除的策略 ID、`skills_deleted`、`skill_files_deleted`、`blocking_task_refs`（成功时应为空）、`delete_executed=true`、确认哈希和时间。
 

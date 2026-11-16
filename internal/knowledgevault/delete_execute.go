@@ -694,7 +694,7 @@ func readBlockingTaskRefs(ctx context.Context, queryer deleteQueryer, skills []D
 		skillIDs[skill.ID] = true
 	}
 	rows, err := queryer.QueryContext(ctx, `SELECT id,title,status,skill_ids_json FROM tasks
-		WHERE status IN ('draft','active','waiting_user','blocked','failed') ORDER BY id`)
+		WHERE status IN ('draft','preparing','active','waiting_user','blocked','failed') ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("scan open task skill references: %w", err)
 	}
