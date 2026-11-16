@@ -355,6 +355,9 @@ func (f failingKnowledgeVault) Rebuild(context.Context) (knowledgevault.RebuildR
 	return knowledgevault.RebuildReport{}, f.err
 }
 func (f failingKnowledgeVault) RenameProjectSpace(string, string) error { return f.err }
+func (f failingKnowledgeVault) ArchiveProjectSpace(context.Context, string) (string, error) {
+	return "", f.err
+}
 
 func TestKnowledgeReadFailsClosedWhenTheVaultIsUnreadable(t *testing.T) {
 	withUnsetEnv(t, knowledgeVaultReadProjectsEnv)

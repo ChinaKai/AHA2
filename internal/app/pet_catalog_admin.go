@@ -148,11 +148,28 @@ func (s *Service) deleteProjectNow(ctx context.Context, projectID string) error 
 			s.deleteWorkspaceSecret(workspace)
 		}
 	}
+	// The project row and its channel knowledge bindings are gone after the
+	// transaction (knowledge_bindings cascades from projects). Archive the
+	// vault space last so a failure is reported against a project that is
+	// already deleted instead of leaving a half-deleted graph.
+	var archiveErr error
+	if s != nil && s.knowledgeVault != nil {
+		archivedPath, err := s.knowledgeVault.ArchiveProjectSpace(ctx, project.ID)
+		if err != nil {
+			archiveErr = fmt.Errorf("项目已删除，但知识库空间归档失败；重启时的知识空间对账会自动重试：%w", err)
+			_ = s.store.AppendPetEvent(ctx, domain.PetEvent{
+				ID: domain.NewID("pet_event"), At: s.now().UTC(), Actor: "pet",
+				Kind: "project_delete_cleanup", Detail: project.ID, Status: err.Error(),
+			})
+		} else if archivedPath != "" {
+			log.Printf("archived knowledge space for deleted project %s at %s", project.ID, archivedPath)
+		}
+	}
 	_ = s.store.AppendPetEvent(ctx, domain.PetEvent{
 		ID: domain.NewID("pet_event"), At: s.now().UTC(), Actor: "pet", Kind: "project_deleted",
 		Detail: project.ID, Status: project.Name,
 	})
-	return nil
+	return archiveErr
 }
 
 func (s *Service) petManageableWorkspace(ctx context.Context, workspaceID string) (domain.Workspace, domain.OwnerAssistant, error) {

@@ -144,12 +144,15 @@ func (s *Service) RetryProjectKnowledgeSpace(ctx context.Context, projectID stri
 }
 
 // KnowledgeSpaceReconciliation is the startup report. Orphans are manifest
-// spaces without a project row; they are reported, never deleted.
+// spaces without a project row; they are archived (never deleted) so a failed
+// project deletion is retried. Orphans lists only the spaces whose archive
+// attempt failed and therefore still need attention.
 type KnowledgeSpaceReconciliation struct {
 	Enabled     bool     `json:"enabled"`
 	Checked     int      `json:"checked"`
 	Ready       int      `json:"ready"`
 	Provisioned []string `json:"provisioned,omitempty"`
+	Archived    []string `json:"archived,omitempty"`
 	MarkedError []string `json:"marked_error,omitempty"`
 	Orphans     []string `json:"orphans,omitempty"`
 	Warnings    []string `json:"warnings,omitempty"`
@@ -201,7 +204,19 @@ func (s *Service) ReconcileKnowledgeSpaces(ctx context.Context) (KnowledgeSpaceR
 		manifestKnown[projectID] = true
 		project, exists := byID[projectID]
 		if !exists {
-			report.Orphans = append(report.Orphans, projectID)
+			// The project row is gone but its space is still registered. This
+			// is the retry path for a deletion whose archive step failed (or
+			// for a pre-existing orphan). Archive it; never delete files.
+			archivedPath, archiveErr := s.knowledgeVault.ArchiveProjectSpace(ctx, projectID)
+			if archiveErr != nil {
+				report.Orphans = append(report.Orphans, projectID)
+				report.Warnings = append(report.Warnings, fmt.Sprintf("项目 %s 已不存在，但知识空间归档失败，将在下次启动重试：%v", projectID, archiveErr))
+				continue
+			}
+			report.Archived = append(report.Archived, projectID)
+			if archivedPath != "" {
+				report.Warnings = append(report.Warnings, fmt.Sprintf("项目 %s 已不存在，知识空间已归档到 %s", projectID, archivedPath))
+			}
 			continue
 		}
 		rootRelative, _ := knowledgevault.SpaceRootPath(config, projectID)
