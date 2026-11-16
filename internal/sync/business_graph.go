@@ -305,12 +305,23 @@ func applyTaskGraphObject(ctx context.Context, database *store.Store, obj domain
 		}
 		project.ID = envelope.ProjectID
 		project.DefaultWorkspaceID = ""
-		if _, err := database.Project(ctx, project.ID); errors.Is(err, sql.ErrNoRows) {
+		local, lookupErr := database.Project(ctx, project.ID)
+		switch {
+		case errors.Is(lookupErr, sql.ErrNoRows):
+			// knowledge_state describes this device's vault space, not the
+			// synced project. A replayed project must be provisioned locally;
+			// trusting the exporter's ready state would let an archived ID
+			// bypass that check and leave a live/archive mapping collision.
+			project.KnowledgeState = domain.KnowledgeStateUninitialized
 			return database.CreateProject(ctx, project)
-		} else if err != nil {
-			return err
+		case lookupErr != nil:
+			return lookupErr
+		default:
+			// Updates keep the local lifecycle: the remote snapshot cannot
+			// mark a local space ready or reset a healthy one.
+			project.KnowledgeState = local.KnowledgeState
+			return database.UpdateProject(ctx, project)
 		}
-		return database.UpdateProject(ctx, project)
 	}
 	if envelope.OwnerDeviceID == "" {
 		return errors.New("remote task graph object has no owner_device_id")
