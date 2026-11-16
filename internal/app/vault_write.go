@@ -63,6 +63,12 @@ type AgentKnowledgeFeedbackResult struct {
 // cutoff. It never enables or disables the vault itself: the owner-visible
 // manager switch decides whether reads, writes, skills and Web pages use the
 // vault, and writes simply follow the source that reads use.
+// SetLegacyKnowledgeDisabled marks the one-way cutover (schema v143). It is
+// set from the persisted schema version at startup, not from a user switch.
+func (s *Service) SetLegacyKnowledgeDisabled(disabled bool) {
+	s.knowledgeLegacyDisabled.Store(disabled)
+}
+
 func (s *Service) SetKnowledgeVaultRuntimeWrite(enabled bool) {
 	s.knowledgeVaultRuntimeWrite = enabled
 	if s.knowledgeVault != nil {

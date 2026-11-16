@@ -955,6 +955,8 @@ CREATE TABLE IF NOT EXISTS projects (
     repository_identity TEXT NOT NULL DEFAULT '',
     default_workspace_id TEXT NOT NULL DEFAULT '',
     default_branch TEXT NOT NULL DEFAULT '',
+    knowledge_state TEXT NOT NULL DEFAULT 'uninitialized'
+        CHECK(knowledge_state IN ('uninitialized','initializing','ready','error')),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -3780,9 +3782,36 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	var hasV142 bool
 	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=142)`).Scan(&hasV142)
-	if !hasV142 || !s.tableHasColumn(ctx, "data_retention_settings", "conversation_retention_days") {
+	var hasKnowledgeState bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pragma_table_info('projects') WHERE name='knowledge_state')`).Scan(&hasKnowledgeState)
+	if !hasV142 || !hasKnowledgeState {
+		if err := s.migrateKnowledgeModelA(ctx, hasKnowledgeState); err != nil {
+			return fmt.Errorf("apply schema v142 knowledge model A: %w", err)
+		}
+	}
+	var hasV144 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=144)`).Scan(&hasV144)
+	if !hasV144 {
+		// The owner-created dedicated channel library
+		// project_2d75fd0e267704c87d20 was a normal folder project before model
+		// A. It is an exact ID, not a prefix match: other projects that happen
+		// to start with project_2d75 must keep their real type. The cutover
+		// still owns this library's space creation and legacy export.
+		if _, err := s.db.ExecContext(ctx, `UPDATE projects SET project_type='knowledge',updated_at=?
+			WHERE id='project_2d75fd0e267704c87d20' AND project_type='folder'`, timeString(time.Now().UTC())); err != nil {
+			return fmt.Errorf("apply schema v144 knowledge project classification: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(144, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return fmt.Errorf("record schema v144: %w", err)
+		}
+	}
+	var hasV145 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=145)`).Scan(&hasV145)
+	if !hasV145 || !s.tableHasColumn(ctx, "data_retention_settings", "conversation_retention_days") {
 		// Manual conversation cleanup on the data management page keeps its
-		// settings in the same single row as hardware_io retention.
+		// settings in the same single row as hardware_io retention. main used
+		// v142-v144 for knowledge model A, so this migration is v145.
 		for _, column := range []struct {
 			name       string
 			definition string
@@ -3797,7 +3826,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			if _, err := s.db.ExecContext(ctx,
 				`ALTER TABLE data_retention_settings ADD COLUMN `+column.name+` `+column.definition); err != nil &&
 				!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
-				return fmt.Errorf("apply schema v142 conversation retention: %w", err)
+				return fmt.Errorf("apply schema v145 conversation retention: %w", err)
 			}
 		}
 		// Conversation cleanup filters by category and a second-precision
@@ -3805,12 +3834,49 @@ func (s *Store) migrate(ctx context.Context) error {
 		// batched DELETE off a full table scan.
 		if _, err := s.db.ExecContext(ctx,
 			`CREATE INDEX IF NOT EXISTS idx_conversation_items_cleanup ON conversation_items(category, substr(created_at,1,19))`); err != nil {
-			return fmt.Errorf("apply schema v142 conversation cleanup index: %w", err)
+			return fmt.Errorf("apply schema v145 conversation cleanup index: %w", err)
 		}
 		if _, err := s.db.ExecContext(ctx,
-			`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(142, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
-			return fmt.Errorf("record schema v142: %w", err)
+			`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(145, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return fmt.Errorf("record schema v145: %w", err)
 		}
+	}
+	return nil
+}
+
+// migrateKnowledgeModelA adds the project knowledge-space state and the
+// channel-to-space bindings that replace per-entry channel grants. The column
+// check keeps the migration reentrant when a test or repair recreated the
+// projects table while the version row survived.
+func (s *Store) migrateKnowledgeModelA(ctx context.Context, hasKnowledgeState bool) error {
+	if !hasKnowledgeState {
+		if _, err := s.db.ExecContext(ctx,
+			`ALTER TABLE projects ADD COLUMN knowledge_state TEXT NOT NULL DEFAULT 'uninitialized'
+			 CHECK(knowledge_state IN ('uninitialized','initializing','ready','error'))`); err != nil &&
+			!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("add projects.knowledge_state: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS knowledge_bindings(
+		consumer_type TEXT NOT NULL CHECK(consumer_type IN ('channel_instance','channel_endpoint')),
+		consumer_id TEXT NOT NULL,
+		space_project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+		access_mode TEXT NOT NULL DEFAULT 'read' CHECK(access_mode IN ('read','read_write')),
+		scope_mode TEXT NOT NULL DEFAULT 'all' CHECK(scope_mode IN ('all','selected')),
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL,
+		UNIQUE(consumer_type,consumer_id,space_project_id)
+	)`); err != nil {
+		return fmt.Errorf("create knowledge_bindings: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`CREATE INDEX IF NOT EXISTS idx_knowledge_bindings_consumer
+		 ON knowledge_bindings(consumer_type,consumer_id)`); err != nil {
+		return fmt.Errorf("index knowledge_bindings: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(142, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v142: %w", err)
 	}
 	return nil
 }

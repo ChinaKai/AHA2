@@ -343,13 +343,37 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	vaultEnabled, vaultSource := knowledgevault.EffectiveStartupSwitch(
 		vaultSettings.Configured, vaultSettings.Enabled, startupDefault,
 	)
+	legacyCutoverApplied := false
+	if applied, cutoverErr := database.LegacyCutoverApplied(ctx); cutoverErr == nil {
+		legacyCutoverApplied = applied
+	} else {
+		logger.Warn("read legacy knowledge cutover state", "error", cutoverErr)
+	}
+	if legacyCutoverApplied && !vaultEnabled {
+		// After the old tables are dropped there is no usable legacy source.
+		// Keeping the vault closed would make every knowledge read fail, so the
+		// one-way cutover pins the runtime to the vault.
+		vaultEnabled = true
+		vaultSource = knowledgevault.SourceDatabase
+		logger.Warn("legacy knowledge tables are gone; forcing the file vault on")
+	}
 	knowledgeVaultManager.SetSource(vaultSource)
 	knowledgeVaultManager.SetRuntimeWrite(options.knowledgeVaultRuntimeWrite)
 	if err := knowledgeVaultManager.SetEnabled(ctx, vaultEnabled); err != nil {
-		// A broken index must not keep the whole control plane from starting;
-		// the owner can rebuild it from the settings panel or the CLI.
-		logger.Warn("knowledge vault could not be opened; starting with it disabled",
-			"vault", knowledgeVaultConfig.VaultPath, "index", knowledgeVaultConfig.IndexPath, "error", err)
+		// A broken index must not keep the whole control plane from starting.
+		// The index is derived, so quarantine and rebuild it from the files
+		// once; if that also fails, report it and keep the vault closed.
+		if _, recoverErr := knowledgeVaultManager.RecoverIndex(ctx); recoverErr == nil {
+			if reopenErr := knowledgeVaultManager.SetEnabled(ctx, vaultEnabled); reopenErr == nil {
+				logger.Warn("knowledge vault index was repaired automatically", "error", err)
+			} else {
+				logger.Warn("knowledge vault could not be opened after index repair", "error", reopenErr)
+			}
+		} else {
+			logger.Warn("knowledge vault could not be opened; starting with it disabled",
+				"vault", knowledgeVaultConfig.VaultPath, "index", knowledgeVaultConfig.IndexPath,
+				"error", err, "recovery_error", recoverErr)
+		}
 	}
 	logger.Info("knowledge vault switch",
 		"enabled", knowledgeVaultManager.Enabled(), "source", vaultSource,
@@ -421,8 +445,22 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 		Settings: database,
 	}
 	appService := app.NewService(database, secretStore, executor)
+	knowledgeVaultManager.StartAutoIndex(ctx, 0)
+	appService.SetLegacyKnowledgeDisabled(legacyCutoverApplied)
 	appService.SetKnowledgeVault(knowledgeVaultManager, options.knowledgeVaultRuntimeRead)
 	appService.SetKnowledgeVaultRuntimeWrite(options.knowledgeVaultRuntimeWrite)
+	// Model A startup reconciliation: manifest spaces must have their root
+	// index, ready projects must be indexed, and channel/system hosts get their
+	// empty identity space back. Failures are reported and left retryable; a
+	// broken space never silently falls back to the legacy knowledge tables.
+	if reconcile, reconcileErr := appService.ReconcileKnowledgeSpaces(ctx); reconcileErr != nil {
+		logger.Warn("knowledge space reconciliation incomplete", "error", reconcileErr)
+	} else if reconcile.Enabled {
+		logger.Info("knowledge space reconciliation",
+			"checked", reconcile.Checked, "ready", reconcile.Ready,
+			"provisioned", reconcile.Provisioned, "errors", reconcile.MarkedError,
+			"orphans", reconcile.Orphans, "warnings", len(reconcile.Warnings))
+	}
 	appService.SetBuildInfo(version, webVersion, time.Now().UTC())
 	appService.MigratePetTaskGoal(ctx)
 	appService.StartPetTaskNotifications()

@@ -36,7 +36,11 @@ import type {
   KnowledgeLibrary,
   KnowledgeProposal,
   KnowledgeReviewSettings,
+  ChannelKnowledgeBinding,
   KnowledgeVaultDoc,
+  KnowledgeVaultFileList,
+  KnowledgeVaultFileResponse,
+  KnowledgeVaultOpenInfo,
   KnowledgeVaultDiffResponse,
   KnowledgeVaultInbox,
   KnowledgeVaultInitResponse,
@@ -1056,6 +1060,39 @@ class APIClient {
     return this.request(`/api/v1/knowledge-vault/tree?${query}`);
   }
 
+  channelKnowledgeBindings(instanceID: string, endpoint = ""): Promise<{ok: boolean; endpoint: string; bindings: ChannelKnowledgeBinding[]}> {
+    const query = endpoint ? `?endpoint=${encodeURIComponent(endpoint)}` : "";
+    return this.request(`/api/v1/channel-instances/${encodeURIComponent(instanceID)}/knowledge-bindings${query}`);
+  }
+
+  replaceChannelKnowledgeBindings(instanceID: string, endpoint: string, bindings: Array<{space_project_id: string; access_mode?: string; scope_mode?: string}>): Promise<{ok: boolean; bindings: ChannelKnowledgeBinding[]}> {
+    return this.request(`/api/v1/channel-instances/${encodeURIComponent(instanceID)}/knowledge-bindings`, {
+      method: "PUT",
+      body: JSON.stringify({endpoint, bindings}),
+    });
+  }
+
+  knowledgeVaultFiles(path = ""): Promise<KnowledgeVaultFileList> {
+    const query = path ? `?path=${encodeURIComponent(path)}` : "";
+    return this.request(`/api/v1/knowledge-vault/files${query}`);
+  }
+
+  knowledgeVaultFile(path: string): Promise<KnowledgeVaultFileResponse> {
+    return this.request(`/api/v1/knowledge-vault/file?path=${encodeURIComponent(path)}`);
+  }
+
+  knowledgeVaultFileDownloadURL(path: string): string {
+    return `/api/v1/knowledge-vault/file/download?path=${encodeURIComponent(path)}`;
+  }
+
+  knowledgeVaultOpenInfo(): Promise<KnowledgeVaultOpenInfo> {
+    return this.request("/api/v1/knowledge-vault/open-info");
+  }
+
+  revealKnowledgeVaultPath(path: string): Promise<{ok: boolean; path: string}> {
+    return this.request(`/api/v1/knowledge-vault/reveal?path=${encodeURIComponent(path)}`, {method: "POST"});
+  }
+
   knowledgeVaultDoc(id: string): Promise<{ok: boolean; doc: KnowledgeVaultDoc}> {
     return this.request(`/api/v1/knowledge-vault/doc/${encodeURIComponent(id)}`);
   }
@@ -1064,13 +1101,16 @@ class APIClient {
     return this.request(`/api/v1/knowledge-vault/doc/${encodeURIComponent(id)}/diff`);
   }
 
-  knowledgeVaultSearch(options: {q?: string; library?: string; project?: string; type?: string; status?: string; tag?: string; limit?: number} = {}): Promise<KnowledgeVaultSearch> {
+  knowledgeVaultSearch(options: {q?: string; library?: string; project?: string; type?: string; status?: string; tag?: string; limit?: number; includeArchives?: boolean} = {}): Promise<KnowledgeVaultSearch> {
     const query = new URLSearchParams();
     for (const key of ["q", "library", "project", "type", "status", "tag"] as const) {
       const value = options[key];
       if (value) query.set(key, value);
     }
     if (options.limit) query.set("limit", String(options.limit));
+    // Archive entries are part of the searchable knowledge base; results keep
+    // their archive marker. Callers can still opt out explicitly.
+    query.set("include_archives", options.includeArchives === false ? "false" : "true");
     return this.request(`/api/v1/knowledge-vault/search?${query}`);
   }
 

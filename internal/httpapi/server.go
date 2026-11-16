@@ -126,6 +126,10 @@ type Server struct {
 	systemCache              map[string]any
 	runtimeContextCache      runtimeContextCache
 	knowledgeVault           *knowledgevault.Manager
+	// revealPath opens a vault path in the host file manager. It is nil in
+	// production (the platform opener is used) and injectable in tests so a
+	// loopback request never launches a real file manager under `go test`.
+	revealPath func(string) error
 }
 
 func New(config Config) *Server {
@@ -356,6 +360,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/channel-deliveries/{id}/attempts", s.withAuth(http.HandlerFunc(s.channelDeliveryAttempts)))
 	mux.Handle("POST /api/v1/channel-deliveries/{id}/replay", s.withAuth(http.HandlerFunc(s.replayChannelDelivery)))
 	mux.Handle("POST /api/v1/channel-deliveries/{id}/skip", s.withAuth(http.HandlerFunc(s.skipChannelDelivery)))
+	mux.Handle("GET /api/v1/channel-instances/{id}/knowledge-bindings", s.withAuth(http.HandlerFunc(s.channelKnowledgeBindings)))
+	mux.Handle("PUT /api/v1/channel-instances/{id}/knowledge-bindings", s.withAuth(http.HandlerFunc(s.updateChannelKnowledgeBindings)))
 	mux.Handle("GET /api/v1/channel-instances/{id}/knowledge-policy", s.withAuth(http.HandlerFunc(s.channelKnowledgePolicy)))
 	mux.Handle("PUT /api/v1/channel-instances/{id}/knowledge-policy", s.withAuth(http.HandlerFunc(s.updateChannelKnowledgePolicy)))
 	mux.Handle("GET /api/v1/projects", s.withAuth(http.HandlerFunc(s.listProjects)))
@@ -549,6 +555,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/knowledge/libraries/{id}/bind", s.withAuth(http.HandlerFunc(s.bindKnowledgeLibrary)))
 	mux.Handle("POST /api/v1/knowledge/libraries/{id}/unbind", s.withAuth(http.HandlerFunc(s.unbindKnowledgeLibrary)))
 	mux.Handle("DELETE /api/v1/knowledge/libraries/{id}", s.withAuth(http.HandlerFunc(s.deleteKnowledgeLibrary)))
+	mux.Handle("POST /api/v1/projects/{id}/knowledge-space", s.withAuth(http.HandlerFunc(s.retryProjectKnowledgeSpace)))
 	mux.Handle("POST /api/v1/projects/{id}/knowledge/detach", s.withAuth(http.HandlerFunc(s.detachProjectKnowledge)))
 	mux.Handle("DELETE /api/v1/projects/{id}/knowledge", s.withAuth(http.HandlerFunc(s.deleteProjectKnowledge)))
 	mux.Handle("POST /api/v1/knowledge", s.withAuth(http.HandlerFunc(s.createKnowledge)))
@@ -567,6 +574,11 @@ func (s *Server) Handler() http.Handler {
 	if s.knowledgeVault != nil {
 		mux.Handle("GET /api/v1/knowledge-vault/libraries", s.withAuth(http.HandlerFunc(s.knowledgeVaultLibraries)))
 		mux.Handle("GET /api/v1/knowledge-vault/tree", s.withAuth(http.HandlerFunc(s.knowledgeVaultTree)))
+		mux.Handle("GET /api/v1/knowledge-vault/files", s.withAuth(http.HandlerFunc(s.knowledgeVaultFiles)))
+		mux.Handle("GET /api/v1/knowledge-vault/file", s.withAuth(http.HandlerFunc(s.knowledgeVaultFile)))
+		mux.Handle("GET /api/v1/knowledge-vault/file/download", s.withAuth(http.HandlerFunc(s.knowledgeVaultFileDownload)))
+		mux.Handle("GET /api/v1/knowledge-vault/open-info", s.withAuth(http.HandlerFunc(s.knowledgeVaultOpenInfo)))
+		mux.Handle("POST /api/v1/knowledge-vault/reveal", s.withAuth(http.HandlerFunc(s.revealKnowledgeVaultPath)))
 		mux.Handle("GET /api/v1/knowledge-vault/doc/{id}", s.withAuth(http.HandlerFunc(s.knowledgeVaultDocument)))
 		mux.Handle("GET /api/v1/knowledge-vault/doc/{id}/diff", s.withAuth(http.HandlerFunc(s.knowledgeVaultDocumentDiff)))
 		mux.Handle("GET /api/v1/knowledge-vault/search", s.withAuth(http.HandlerFunc(s.knowledgeVaultSearch)))
@@ -578,6 +590,7 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("PUT /api/v1/settings/knowledge-vault", s.withAuth(http.HandlerFunc(s.updateKnowledgeVaultSettings)))
 		mux.Handle("POST /api/v1/settings/knowledge-vault/init", s.withAuth(http.HandlerFunc(s.initializeKnowledgeVault)))
 		mux.Handle("POST /api/v1/settings/knowledge-vault/rebuild", s.withAuth(http.HandlerFunc(s.rebuildKnowledgeVaultIndex)))
+		mux.Handle("POST /api/v1/settings/knowledge-vault/cutover-legacy", s.withAuth(http.HandlerFunc(s.cutoverLegacyKnowledge)))
 		mux.Handle("POST /api/v1/settings/knowledge-vault/migrate", s.withAuth(http.HandlerFunc(s.migrateKnowledgeVault)))
 		mux.Handle("POST /api/v1/settings/knowledge-vault/import", s.withAuth(http.HandlerFunc(s.importKnowledgeVault)))
 		mux.Handle("GET /api/v1/knowledge-vault/git/status", s.withAuth(http.HandlerFunc(s.knowledgeVaultGitStatus)))

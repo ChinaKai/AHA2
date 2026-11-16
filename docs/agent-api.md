@@ -151,8 +151,8 @@ GET  /api/v1/agent/skills/{id}
 PUT  /api/v1/agent/skills/{id}
 ```
 
-`GET /api/v1/agent/knowledge/guide` returns the vault usage guide at
-`global/general/knowledge-base-guide.md` with `path`, `title`, full `content`
+`GET /api/v1/agent/knowledge/guide` returns the vault usage guide at the vault root
+`knowledge-base-guide.md` with `path`, `title`, full `content`
 and the slim `prompt` block injected into Task Prompts. It reads the file
 directly, so it still works while the index is rebuilding; when the file is
 missing the endpoint returns 404 and Task Prompts use the built-in fallback.

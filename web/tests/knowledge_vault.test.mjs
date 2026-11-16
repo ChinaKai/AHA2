@@ -686,7 +686,7 @@ test("document header keeps three icon actions on the breadcrumb row and drops r
   assert.doesNotMatch(html, /window\.open/);
 });
 
-test("the settings dialog drops the remote host row and offers the index rebuild", () => {
+test("the settings dialog drops the remote host row and the manual index rebuild", () => {
   reset({
     selectedID: "doc-1", docState: "ready", doc,
     settingsState: "ready",
@@ -700,14 +700,16 @@ test("the settings dialog drops the remote host row and offers the index rebuild
   assert.doesNotMatch(html, /远程主机/);
   assert.doesNotMatch(html, /Remote host/);
   assert.doesNotMatch(html, /remoteHost|remote_host/);
-  assert.match(html, /id="kv-settings-rebuild"(?![^>]*disabled)/);
+  assert.doesNotMatch(html, /id="kv-settings-rebuild"/);
   assert.match(html, /索引操作/);
+  assert.match(html, /已就绪/);
 });
 
-test("the gear rebuild stays disabled before settings load or without an initialized vault", () => {
+test("the gear dialog shows read-only index health instead of a rebuild control", () => {
   reset({settingsState: "loading", settings: null});
   let html = vault.renderKnowledgeVaultPage(context());
-  assert.match(html, /id="kv-settings-rebuild"[^>]*disabled/);
+  assert.doesNotMatch(html, /id="kv-settings-rebuild"/);
+  assert.match(html, /索引操作/);
 
   reset({
     settingsState: "ready",
@@ -717,30 +719,26 @@ test("the gear rebuild stays disabled before settings load or without an initial
     },
   });
   html = vault.renderKnowledgeVaultPage(context());
-  assert.match(html, /id="kv-settings-rebuild"[^>]*disabled/);
+  assert.doesNotMatch(html, /id="kv-settings-rebuild"/);
+  assert.match(html, /索引待自动修复|未就绪/);
 });
 
-test("the gear dialog shows rebuild busy, success and failure states", () => {
+test("the gear dialog reports automatic index health without a rebuild action", () => {
   const settings = {
     enabled: true, source: "database", vault_ready: true, vault_initialized: true,
     index_ready: true, vault_name: "AHA2 Knowledge", vault_path: "/srv/vault",
     index_path: "/srv/index.db", entry_count: 5, rebuilt_at: "2026-11-14T13:38:42Z",
   };
-  reset({settingsState: "ready", settings, rebuildBusy: true});
+  reset({settingsState: "ready", settings});
   let html = vault.renderKnowledgeVaultPage(context());
-  assert.match(html, /aria-busy="true"/);
-  assert.match(html, /重建中/);
-  assert.match(html, /id="kv-settings-rebuild"[^>]*disabled/);
+  assert.doesNotMatch(html, /id="kv-settings-rebuild"/);
+  assert.match(html, /索引操作/);
+  assert.match(html, /已就绪/);
 
-  reset({settingsState: "ready", settings, rebuildNotice: {kind: "notice", message: "已重建 7 条 · 2026/11/14 21:00"}});
+  reset({settingsState: "ready", settings: {...settings, index_stale: true}});
   html = vault.renderKnowledgeVaultPage(context());
-  assert.match(html, /role="status">已重建 7 条/);
-  assert.doesNotMatch(html, /远程主机/);
-
-  reset({settingsState: "ready", settings, rebuildNotice: {kind: "error", message: "重建索引失败：磁盘只读"}});
-  html = vault.renderKnowledgeVaultPage(context());
-  assert.match(html, /role="alert">重建索引失败：磁盘只读/);
-  assert.match(html, /id="kv-settings-rebuild"(?![^>]*disabled)/);
+  assert.match(html, /索引待自动修复/);
+  assert.doesNotMatch(html, /id="kv-settings-rebuild"/);
 });
 
 test("a settings load failure is explicit and retryable without breaking the dialog", () => {
@@ -855,7 +853,7 @@ test("vault API requests carry library, project, type, status and tag filters", 
   await api.knowledgeVaultSearch({q: "构建 指南", library: "project:p1", project: "p1", type: "practice", status: "verified", tag: "build", limit: 20});
   await api.knowledgeVaultDoc("doc/1");
   assert.equal(calls[0], "/api/v1/knowledge-vault/tree?library=project%3Ap+1&project=p+1");
-  assert.equal(calls[1], "/api/v1/knowledge-vault/search?q=%E6%9E%84%E5%BB%BA+%E6%8C%87%E5%8D%97&library=project%3Ap1&project=p1&type=practice&status=verified&tag=build&limit=20");
+  assert.equal(calls[1], "/api/v1/knowledge-vault/search?q=%E6%9E%84%E5%BB%BA+%E6%8C%87%E5%8D%97&library=project%3Ap1&project=p1&type=practice&status=verified&tag=build&limit=20&include_archives=true");
   assert.equal(calls[2], "/api/v1/knowledge-vault/doc/doc%2F1");
 });
 const gitStatus = {
@@ -1228,4 +1226,38 @@ test("an uninitialized vault shows the initialization entry instead of an empty 
   assert.match(html, /class="kv-badge kv-badge-warn">待初始化</);
   assert.match(html, /文件知识库还没有初始化/);
   assert.match(html, /去高级设置初始化、迁移或导入/);
+});
+
+test("the real file directory lists folders, markdown and binary downloads", () => {
+  reset({
+    filesMode: true, filesPath: "projects/demo", filesState: "ready",
+    files: [
+      {name: "topics", path: "projects/demo/topics", absolute_path: "/vault/projects/demo/topics", is_dir: true, size: 0, kind: "folder"},
+      {name: "notes.md", path: "projects/demo/notes.md", absolute_path: "/vault/projects/demo/notes.md", is_dir: false, size: 12, kind: "markdown"},
+      {name: "raw.bin", path: "projects/demo/raw.bin", absolute_path: "/vault/projects/demo/raw.bin", is_dir: false, size: 99, kind: "binary"},
+    ],
+  });
+  const html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /data-kv-files-dir="projects\/demo\/topics"/);
+  assert.match(html, /data-kv-files-dir="projects\/demo"/);
+  assert.match(html, /data-kv-files-dir="projects"/);
+  assert.match(html, /data-kv-files-open="projects\/demo\/notes.md"/);
+  assert.match(html, /\/api\/v1\/knowledge-vault\/file\/download\?path=projects%2Fdemo%2Fraw.bin/);
+  assert.doesNotMatch(html, /data-kv-reveal=/);
+});
+
+test("a file preview offers copy path and hides the file-manager action when remote", () => {
+  const file = {
+    path: "projects/demo/notes.md", absolute_path: "/vault/projects/demo/notes.md",
+    name: "notes.md", title: "笔记", kind: "markdown", content: "---\ntitle: 笔记\n---\n# 笔记\n", size: 30,
+  };
+  reset({filesMode: true, selectedID: "doc-1", filesPath: "projects/demo", filesState: "ready", files: [], file, fileState: "ready", openAvailable: false});
+  let html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /data-kv-copy="\/vault\/projects\/demo\/notes.md"/);
+  assert.doesNotMatch(html, /data-kv-reveal=/);
+
+  reset({filesMode: true, selectedID: "doc-1", filesPath: "projects/demo", filesState: "ready", files: [], file, fileState: "ready", openAvailable: true});
+  html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /data-kv-reveal="projects\/demo\/notes.md"/);
+  assert.match(html, /在文件管理器中打开/);
 });

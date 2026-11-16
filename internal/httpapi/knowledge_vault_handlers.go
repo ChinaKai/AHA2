@@ -140,6 +140,15 @@ func (s *Server) knowledgeVaultSearch(writer http.ResponseWriter, request *http.
 			limit = parsed
 		}
 	}
+	includeArchives := true
+	if value := strings.TrimSpace(query.Get("include_archives")); value != "" {
+		switch strings.ToLower(value) {
+		case "0", "false", "no", "off":
+			includeArchives = false
+		default:
+			includeArchives = true
+		}
+	}
 	var result knowledgevault.SearchResponse
 	err := s.withKnowledgeVaultReader(func(reader *knowledgevault.Reader) error {
 		var readErr error
@@ -148,6 +157,7 @@ func (s *Server) knowledgeVaultSearch(writer http.ResponseWriter, request *http.
 			ProjectID: strings.TrimSpace(query.Get("project")),
 			Type:      strings.TrimSpace(query.Get("type")), Status: strings.TrimSpace(query.Get("status")),
 			Tag: strings.TrimSpace(query.Get("tag")), Limit: limit,
+			IncludeArchives: includeArchives,
 		})
 		return readErr
 	})

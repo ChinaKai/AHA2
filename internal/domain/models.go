@@ -175,21 +175,51 @@ type Session struct {
 }
 
 type Project struct {
-	ID                 string    `json:"id"`
-	Name               string    `json:"name"`
-	Description        string    `json:"description"`
-	ProjectType        string    `json:"project_type,omitempty"`
-	RepositoryIdentity string    `json:"repository_identity,omitempty"`
-	DefaultWorkspaceID string    `json:"default_workspace_id,omitempty"`
-	DefaultBranch      string    `json:"default_branch,omitempty"`
-	KnowledgePolicy    string    `json:"knowledge_policy"`
-	KnowledgeRevision  int       `json:"knowledge_revision"`
-	ChannelInstanceID  string    `json:"channel_instance_id,omitempty"`
-	ChannelRetired     bool      `json:"channel_retired,omitempty"`
-	ReadOnlyReason     string    `json:"read_only_reason,omitempty"`
-	CreatedAt          time.Time `json:"created_at"`
-	UpdatedAt          time.Time `json:"updated_at"`
+	ID                 string `json:"id"`
+	Name               string `json:"name"`
+	Description        string `json:"description"`
+	ProjectType        string `json:"project_type,omitempty"`
+	RepositoryIdentity string `json:"repository_identity,omitempty"`
+	DefaultWorkspaceID string `json:"default_workspace_id,omitempty"`
+	DefaultBranch      string `json:"default_branch,omitempty"`
+	KnowledgePolicy    string `json:"knowledge_policy"`
+	KnowledgeRevision  int    `json:"knowledge_revision"`
+	// KnowledgeState tracks the file-vault space lifecycle for this project:
+	// uninitialized, initializing, ready or error. project_id is the space_id.
+	KnowledgeState    string    `json:"knowledge_state"`
+	ChannelInstanceID string    `json:"channel_instance_id,omitempty"`
+	ChannelRetired    bool      `json:"channel_retired,omitempty"`
+	ReadOnlyReason    string    `json:"read_only_reason,omitempty"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
+
+// Knowledge space lifecycle states. project_id is the space ID; there is no
+// separate knowledge_spaces entity in model A.
+const (
+	KnowledgeStateUninitialized = "uninitialized"
+	KnowledgeStateInitializing  = "initializing"
+	KnowledgeStateReady         = "ready"
+	KnowledgeStateError         = "error"
+)
+
+// KnowledgeBinding grants a channel consumer (a whole instance or one
+// endpoint of it) access to a project knowledge space. In model A the space is
+// the project itself, so space_project_id is also the space ID.
+type KnowledgeBinding struct {
+	ConsumerType string    `json:"consumer_type"`
+	ConsumerID   string    `json:"consumer_id"`
+	SpaceProject string    `json:"space_project_id"`
+	AccessMode   string    `json:"access_mode"`
+	ScopeMode    string    `json:"scope_mode"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+const (
+	KnowledgeBindingChannelInstance = "channel_instance"
+	KnowledgeBindingChannelEndpoint = "channel_endpoint"
+)
 
 // IsSystemManagedProject reports whether AHA owns the project lifecycle. The
 // pet project and channel host projects are system-managed; their Projects and

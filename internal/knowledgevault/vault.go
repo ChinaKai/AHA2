@@ -156,7 +156,7 @@ func defaultManifest(vaultPath, vaultName string, now time.Time) Manifest {
 			"projects/*/skills", "projects/*/inbox",
 			"archive/*/skills", "archive/*/inbox",
 		},
-		ReservedFiles: []string{manifestFileName, readmeFileName, ".gitignore"},
+		ReservedFiles: []string{manifestFileName, readmeFileName, ".gitignore", "knowledge-base-guide.md"},
 		CreatedAt:     now.UTC().Format(time.RFC3339),
 		UpdatedAt:     now.UTC().Format(time.RFC3339),
 	}
@@ -199,7 +199,48 @@ func ReadManifest(vaultPath string) (Manifest, error) {
 	if manifest.Skills == nil {
 		manifest.Skills = map[string]SkillLocation{}
 	}
+	normalizeReserved(&manifest)
 	return manifest, nil
+}
+
+// normalizeReserved keeps upgrade-time manifests in sync with the reserved
+// names the current release requires. It is applied on read so an existing
+// vault immediately reports the root guide as reserved; the next rebuild
+// persists the same values.
+func normalizeReserved(manifest *Manifest) {
+	if manifest == nil {
+		return
+	}
+	for _, name := range []string{
+		".trash", ".aha", ".git", ".obsidian", "orphans", "skills",
+		"global/skills", "global/inbox",
+	} {
+		if !containsString(manifest.Reserved, name) {
+			manifest.Reserved = append(manifest.Reserved, name)
+		}
+	}
+	for _, pattern := range []string{
+		"projects/*/skills", "projects/*/inbox",
+		"archive/*/skills", "archive/*/inbox",
+	} {
+		if !containsString(manifest.ReservedPatterns, pattern) {
+			manifest.ReservedPatterns = append(manifest.ReservedPatterns, pattern)
+		}
+	}
+	for _, name := range []string{manifestFileName, readmeFileName, ".gitignore", GuideRelativePath} {
+		if !containsString(manifest.ReservedFiles, name) {
+			manifest.ReservedFiles = append(manifest.ReservedFiles, name)
+		}
+	}
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func writeManifest(vaultPath string, manifest Manifest) error {
@@ -337,6 +378,7 @@ func vaultReadme(manifest Manifest) string {
 
 ## 结构
 
+- ` + "`knowledge-base-guide.md`" + `：vault 根目录的知识库使用指南，唯一正本。
 - ` + "`global/index.md`" + `：全局知识入口。
 - ` + "`global/general/`" + `：面向人类阅读的跨项目参考资料。
 - ` + "`global/agent-lessons/`" + `：可复用的 Agent 技术诊断与行为教训。

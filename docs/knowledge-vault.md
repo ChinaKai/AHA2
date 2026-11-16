@@ -1,6 +1,6 @@
 # 文件知识库
 
-文件知识库（knowledge vault）把知识以 Markdown 文件保存为正本，SQLite 只保存可重建的索引。Web 知识页只读；编辑在 VSCode 或 Obsidian 中完成，然后重建索引。
+文件知识库（knowledge vault）把知识以 Markdown 文件保存为正本，SQLite 只保存可重建的索引。Web 知识页只读；编辑在 VSCode 或 Obsidian 中完成，索引由写路径、文件变更监听和启动对账自动维护。
 
 ## 启用与关闭
 
@@ -67,15 +67,15 @@ aha2 knowledge-vault import --database <data-dir>/aha2.db --kind git --remote gi
 
 ## 使用指南
 
-`global/general/knowledge-base-guide.md` 是完整的知识库使用指南，也是唯一的规范入口。初始化 vault 时如果文件不存在会自动创建，已有文件不会被覆盖。
+`knowledge-base-guide.md`（vault 根目录）是完整的知识库使用指南，也是唯一的规范入口。初始化 vault 时如果文件不存在会自动创建；旧版本位于 `global/general/` 的指南会在启动时一次性迁移到根目录，写入只写根路径。
 
 - `GET /api/v1/agent/knowledge/guide` 直接读取该文件，返回 `path`、`title`、完整 `content` 和精简 `prompt`；不依赖索引是否已重建。
 - Task Prompt 只注入文件内 `<!-- aha-vault:prompt:start -->` 到 `<!-- aha-vault:prompt:end -->` 之间的精简区块，避免把完整指南塞进每轮上下文。
 - 标记缺失或文件缺失时使用内置精简版并继续运行；指南不会作为普通知识条目重复注入 Agent 知识列表。
 
-## 重建索引的自动维护
+## 索引自动维护
 
-每次 `rebuild-index` 会同时更新可重建的索引与 vault 元数据，不修改知识正文：
+索引是可重建的派生缓存，不需要 owner 手动触发。写入路径同步更新，外部编辑由文件轮询增量发现，启动时对账并按需重建；同一时间只运行一个索引任务，重复重建幂等：
 
 - 自动生成 `.aha-vault.json` 的 `projects`、`project_names`、`skills`、`archives`（及归档名称）。项目 slug 与项目 ID 的绑定来自 `projects/<slug>/index.md` 的 frontmatter `project_id`；缺失时标记为 unbound 并给出 warning，不会猜测归属。
 - manifest 使用稳定排序和同目录临时文件加改名原子写入；内容未变化时不写，重复执行幂等，也不会删除任何知识或技能文件。
@@ -86,8 +86,8 @@ aha2 knowledge-vault import --database <data-dir>/aha2.db --kind git --remote gi
 
 Agent 读取、技能加载和写入都跟随同一个 owner 总开关，没有额外的用户可见开关：
 
-- 总开关开启且就绪：Turn 知识块、Agent 知识列表和技能优先使用 vault。每个项目还需索引 ready 且 manifest 已绑定；未绑定项目继续按 legacy 处理，并在面板和 Agent 响应中给出 warning。
-- 总开关关闭、索引未 ready、项目未绑定或读取被回退名单排除：立即使用旧知识表和旧技能目录，不阻塞 Turn。`AgentKnowledgeEntryResult`/`AgentKnowledgeFeedbackResult` 的 `warning` 字段说明回退原因，服务端同时记录日志。
+- 总开关开启且就绪：Turn 知识块、Agent 知识列表和技能优先使用 vault。每个项目还需索引 ready 且 manifest 已绑定；新建项目在同一流程初始化空间，未就绪的空间会明确报错并允许重试。旧表删除迁移（schema v143）执行后，任何入口都不再回退旧库。
+- 旧表删除迁移执行前，总开关关闭、索引未 ready、项目未绑定或读取被回退名单排除仍可读取旧表作为迁移过渡；`AgentKnowledgeEntryResult`/`AgentKnowledgeFeedbackResult` 的 `warning` 字段说明回退原因。迁移后这些路径改为明确错误，不再静默返回旧知识。
 - 项目已绑定且索引 ready 后，vault 读取失败必须 fail-closed：Turn 知识块留空、Agent 知识列表返回错误，并记录/返回 warning，**不回退旧库**。全局知识同理，且与项目绑定独立判断：全局读 vault 时即使项目仍未绑定，也只读 vault global。
 - 渠道知识按每个来源项目各自当前生效的读取源解析；vault 项目的旧 grants 不再授权旧库内容，渠道可授权根来自当前读取源（vault 项目的根是 vault 索引 ID）。vault 生效时新建的渠道实例默认未配置知识访问范围：不会自动继承旧库，也不会自动授权 vault 内容；owner 在渠道设置中显式选择 vault 项目根后才读取，未配置时知识块为空且界面会明确提示。
 - 技能优先从 `global/skills/<slug>/` 或 `projects/<slug>/skills/<slug>/` 加载；vault 中缺少对应包时回退到旧的 `<data-dir>/knowledge/skills`，旧目录不删除。
@@ -147,15 +147,20 @@ aha2 knowledge-vault init --samples --commit=false
 - `global/general/示例/写作约定.md`
 - `global/agent-lessons/示例-Agent经验.md`
 
-示例只会写进尚未初始化（没有 `.aha-vault.json`）的 vault；已有 vault 调用 `--samples` 或初始化接口会跳过或返回 409，不会覆盖任何文件。验证满意后可以直接删除 `global/general/示例/` 和 `global/agent-lessons/示例-Agent经验.md`，再点「重建索引」。
+示例只会写进尚未初始化（没有 `.aha-vault.json`）的 vault；已有 vault 调用 `--samples` 或初始化接口会跳过或返回 409，不会覆盖任何文件。验证满意后可以直接删除 `global/general/示例/` 和 `global/agent-lessons/示例-Agent经验.md`，索引会在下次自动对账时更新。
 
-## 编辑与重建
+## 编辑与索引
 
-当前没有文件监听。用 VSCode 或 Obsidian 打开 vault 目录，保存后到「高级设置 → 其他设置 → 文件知识库」点「重建索引」，或在服务器上运行：
+用 VSCode 或 Obsidian 打开 vault 目录，保存文件即可。写路径会同步更新索引；外部编辑由文件变更轮询（约 3 秒）发现，启动时还会对账并修复缺失或损坏的索引。只有一个单写者索引队列，重复任务会被合并。CLI 仍可用于诊断：
 
 ```sh
 aha2 knowledge-vault rebuild-index
 aha2 knowledge-vault search <关键词>
 ```
 
-索引只服务于新知识页；旧知识表和旧知识页保持原样。旧知识迁移、已有 vault 导入和 Git 同步均已实现，但任何流程都不会自动删除旧知识库；需要清理时由 owner 审批后使用上面的受控 `knowledge-vault delete` 命令。
+索引只服务于新知识页。旧表切黑是独立的一次性迁移（备份 → 导出 → 校验 → 删除旧表），不再提供运行时回退；删除动作不可逆，必须由 owner 在受控流程中执行：
+
+当前 `knowledge_bindings` 的支持边界：binding 的粒度是整个项目空间，`access_mode` 字段会被保存但渠道读取暂不区分 `read`/`read_write`，`scope_mode=selected` 的子树/条目限制尚未实现（按 `all` 读取整个空间）。切黑端点只负责保留已有的 binding 行，不会把旧 per-entry policy 自动转换；若旧 policy 非空但没有任何 binding，端点会拒绝执行并要求先完成绑定。
+
+`POST /api/v1/settings/knowledge-vault/cutover-legacy`，请求体
+`{"project_id":"<专用库项目>","backup_dir":"","confirm":true}`。服务端先导出该项目旧知识到其空间，再 `VACUUM INTO` 备份并校验行数；任一校验失败都不会删除旧表。

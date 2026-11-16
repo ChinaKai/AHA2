@@ -166,7 +166,7 @@ func EvaluateReadiness(in ReadinessInput) Readiness {
 	if !in.IndexReady {
 		add("index_fresh", checkFail, "索引尚未建立")
 	} else if in.IndexStale {
-		add("index_fresh", checkFail, "知识文件比索引新，需要重建索引")
+		add("index_fresh", checkFail, "知识文件比索引新，索引会自动修复")
 	} else {
 		add("index_fresh", checkOK, "索引与知识文件一致")
 	}
@@ -202,7 +202,7 @@ func EvaluateReadiness(in ReadinessInput) Readiness {
 		result.Message = "升级后需要先迁移旧知识库，或导入已有知识库，才能启用文件知识库。"
 	case hasCheck(result.Checks, "index_schema", checkFail) || hasCheck(result.Checks, "index_fresh", checkFail) || !in.VaultInitialized:
 		result.Status = ReadinessNeedsRebuild
-		result.Message = "知识库或索引尚未就绪，请先重建索引。"
+		result.Message = "知识库或索引尚未就绪，索引会自动修复。"
 	case hasCheck(result.Checks, "vault_writable", checkFail) || hasCheck(result.Checks, "index_writable", checkFail) || in.IndexError != "":
 		result.Status = ReadinessError
 		result.Message = "知识库或索引不可写/不可读，请检查目录权限。"

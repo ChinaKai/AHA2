@@ -633,6 +633,10 @@ type DocumentSearchOptions struct {
 	Status    string
 	Tag       string
 	Limit     int
+	// IncludeArchives controls whether archive/ entries are searchable. The
+	// Web directory passes true so archived knowledge is findable with its
+	// archive marker; API callers can explicitly exclude it.
+	IncludeArchives bool
 }
 
 type SearchResponse struct {
@@ -655,6 +659,7 @@ func (r *Reader) Search(ctx context.Context, options DocumentSearchOptions) (Sea
 	results, err := r.index.Search(ctx, options.Query, SearchOptions{
 		Scope: scope, ProjectID: projectID, Type: options.Type,
 		Status: options.Status, Tag: options.Tag, Limit: options.Limit,
+		IncludeArchives: options.IncludeArchives || strings.HasPrefix(strings.TrimSpace(options.Library), "archive:"),
 	})
 	if err != nil {
 		return result, err

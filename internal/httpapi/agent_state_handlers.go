@@ -253,6 +253,33 @@ func (s *Server) agentKnowledgeGuide(writer http.ResponseWriter, request *http.R
 		writeError(writer, http.StatusNotFound, "knowledge_guide_not_found")
 		return
 	}
+	// The guide is resolved by its fixed slug (or, when an id is supplied, by
+	// checking that the indexed entry really is the root guide). It is never
+	// resolved by a filesystem path from the client.
+	query := request.URL.Query()
+	if slug := strings.TrimSpace(query.Get("slug")); slug != "" && slug != "knowledge-base-guide" {
+		writeError(writer, http.StatusNotFound, "knowledge_guide_not_found")
+		return
+	}
+	if id := strings.TrimSpace(query.Get("id")); id != "" {
+		found := false
+		_ = s.knowledgeVault.WithReader(func(reader *knowledgevault.Reader) error {
+			entries, err := reader.Entries(request.Context(), "global", "")
+			if err != nil {
+				return err
+			}
+			for _, entry := range entries {
+				if entry.ID == id && entry.Path == knowledgevault.GuideRelativePath {
+					found = true
+				}
+			}
+			return nil
+		})
+		if !found {
+			writeError(writer, http.StatusNotFound, "knowledge_guide_not_found")
+			return
+		}
+	}
 	guide, err := s.knowledgeVault.Guide()
 	if err != nil {
 		if errors.Is(err, knowledgevault.ErrGuideNotFound) {

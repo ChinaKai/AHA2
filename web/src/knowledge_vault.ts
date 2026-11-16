@@ -5,6 +5,8 @@ import {renderMarkdown} from "./markdown.js";
 import type {
   KnowledgeVaultDoc,
   KnowledgeVaultDocDiff,
+  KnowledgeVaultFile,
+  KnowledgeVaultFileEntry,
   KnowledgeVaultDiffLine,
   KnowledgeVaultGitResponse,
   KnowledgeVaultGitStatus,
@@ -34,6 +36,16 @@ type GitBusy = "" | "init" | "remote" | "commit" | "pull" | "push" | "sync";
 // first-screen i18n catalog: they are only needed once the knowledge page has
 // loaded, and keeping them here preserves the first-screen size budget.
 const localText: Record<string, [zhCN: string, enUS: string]> = {
+  "kv.filesToggle": ["切换到真实文件目录", "Switch to the real file directory"],
+  "kv.filesRoot": ["vault 根目录", "Vault root"],
+  "kv.filesUp": ["上一级目录", "Parent directory"],
+  "kv.filesEmpty": ["这个目录没有可显示的文件。", "This directory has no visible files."],
+  "kv.fileOpenManager": ["在文件管理器中打开", "Open in file manager"],
+  "kv.fileDownload": ["下载文件", "Download file"],
+  "kv.fileBinary": ["该文件不是文本，已提供下载。", "This file is not text; download it instead."],
+  "kv.fileTooLarge": ["该文件过大，已提供下载。", "This file is too large to preview; download it instead."],
+  "kv.archiveBadge": ["归档", "Archived"],
+  "kv.filesSelect": ["从左侧文件目录中选择一个文件。", "Choose a file from the directory on the left."],
   "kv.skillsAutoHint": ["开启后，新建任务会默认选中该技能；创建任务时仍可手动取消。", "When on, new tasks select this skill by default; you can still remove it while creating a task."],
   "kv.skillAutoAttach": ["任务自动启用", "Auto-enable for tasks"],
   "kv.skillAutoToggleAria": ["切换「{name}」任务自动启用", "Toggle auto-enable for {name}"],
@@ -63,10 +75,7 @@ const localText: Record<string, [zhCN: string, enUS: string]> = {
   "kv.blocked.actionInit": ["去高级设置初始化、迁移或导入", "Open advanced settings to initialize, migrate, or import"],
   "kv.blocked.note": ["旧知识库只作为迁移来源，不再在知识库页展示。", "The legacy knowledge base is only a migration source and is no longer shown on this page."],
   "kv.settingsIndexAction": ["索引操作", "Index action"],
-  "kv.settingsRebuild": ["重建索引", "Rebuild index"],
-  "kv.settingsRebuilding": ["重建中…", "Rebuilding…"],
-  "kv.settingsRebuildDone": ["已重建 {count} 条 · {time}", "Rebuilt {count} entries · {time}"],
-  "kv.settingsRebuildFailed": ["重建索引失败", "Index rebuild failed"],
+  "kv.settingsIndexStale": ["索引待自动修复", "Index will be repaired automatically"],
   "kv.gitTitle": ["Git 同步", "Git sync"],
   "kv.gitRepo": ["仓库", "Repository"],
   "kv.gitUninitialized": ["未初始化", "Not initialized"],
@@ -235,6 +244,9 @@ body.kv-resizing { cursor: col-resize; user-select: none; }
 }
 .kv-tree-title { padding-left: 6px; }
 .kv-tree-link { padding: 5px 6px; }
+.kv-files-path { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 2px 4px 6px; font-size: 12px; color: var(--color-text-muted); }
+.kv-files-list { margin-top: 4px; }
+.kv-file-text { margin: 0; padding: 12px; overflow-x: auto; white-space: pre-wrap; word-break: break-word; font-size: 12px; }
 .kv-tree-doc-link { padding-left: 0; }
 /* The activity entry is pinned above the real directory list, outside the
    tree's folder/leaf model. It uses the same selected pill as tree rows. */
@@ -435,6 +447,16 @@ interface VaultState {
   treeState: LoadState;
   treeError: string;
   treeKey: string;
+  filesMode: boolean;
+  filesPath: string;
+  files: KnowledgeVaultFileEntry[];
+  filesState: LoadState;
+  filesError: string;
+  file: KnowledgeVaultFile | null;
+  fileRequestPath: string;
+  fileState: LoadState;
+  fileError: string;
+  openAvailable: boolean;
   recentKey: string;
   recentIncludeUnchanged: boolean;
   inboxKey: string;
@@ -479,8 +501,6 @@ interface VaultState {
   settingsState: LoadState;
   settings: KnowledgeVaultSettings | null;
   settingsError: string;
-  rebuildBusy: boolean;
-  rebuildNotice: {kind: "notice" | "error"; message: string} | null;
   gitState: LoadState;
   git: KnowledgeVaultGitStatus | null;
   gitError: string;
@@ -572,6 +592,8 @@ function initialState(): VaultState {
     tab: "knowledge", libraryID: "global",
     typeFilter: "", statusFilter: "", tagFilter: "",
     tree: [], treeState: "idle", treeError: "", treeKey: "", expanded: new Set(),
+    filesMode: false, filesPath: "", files: [], filesState: "idle", filesError: "",
+    file: null, fileRequestPath: "", fileState: "idle", fileError: "", openAvailable: false,
     recentKey: "", recentIncludeUnchanged: false, inboxKey: "",
     selectedID: VAULT_ACTIVITY_ID, doc: null, docState: "idle", docError: "",
     recent: [], recentState: "idle", recentError: "",
@@ -585,7 +607,6 @@ function initialState(): VaultState {
     searchState: "idle", searchError: "", searchResults: [],
     feedback: "", contextOpen: false,
     settingsOpen: false, settingsState: "idle", settings: null, settingsError: "",
-    rebuildBusy: false, rebuildNotice: null,
     gitState: "idle", git: null, gitError: "", gitBusy: "", gitNotice: null,
     gitRemoteDraft: "", gitBranchDraft: "", gitCommitDraft: "",
     mobilePane: "list", listScroll: 0, docScroll: 0, pendingSearch: 0,
@@ -1257,7 +1278,7 @@ function searchResultsHTML(): string {
       <span class="kv-search-result-main"><strong>${highlightVaultText(item.title, state.searchQuery)}</strong><small>${escapeVaultHTML(item.scope || "")}${item.project_id ? ` · ${escapeVaultHTML(item.project_id)}` : ""} · ${highlightVaultText(item.path, state.searchQuery)}</small></span>
       ${item.snippet ? `<p>${highlightVaultText(item.snippet, state.searchQuery)}</p>` : ""}
     </a>
-    <span class="kv-search-result-meta">${metaBadges(item)}${item.tags?.length ? item.tags.map(tag => `<button type="button" class="kv-tag" data-kv-tag="${escapeVaultHTML(tag)}">#${escapeVaultHTML(tag)}</button>`).join("") : ""}</span>
+    <span class="kv-search-result-meta">${metaBadges(item)}${item.archive || item.scope === "archive" ? badge(kt("kv.archiveBadge"), "warn") : ""}${item.tags?.length ? item.tags.map(tag => `<button type="button" class="kv-tag" data-kv-tag="${escapeVaultHTML(tag)}">#${escapeVaultHTML(tag)}</button>`).join("") : ""}</span>
   </div>`).join("");
 }
 
@@ -1275,13 +1296,14 @@ function knowledgeBodyHTML(): string {
       <div class="kv-panel-head">
         <button type="button" class="kv-sidebar-toggle icon-button" data-kv-sidebar-toggle aria-expanded="${!state.sidebarCollapsed}" aria-controls="kv-tree-panel" aria-label="${escapeVaultHTML(sidebarLabel)}" title="${escapeVaultHTML(sidebarLabel)}">${icon(state.sidebarCollapsed ? "chevron-right" : "chevron-left")}</button>
         <span>${t("kv.tree")}</span>
-        <small>${state.treeState === "ready" ? `${state.tree.length} ${t("kv.groups")}` : ""}</small>
+        <small>${state.filesMode ? (state.filesState === "ready" ? String(state.files.length) : "") : (state.treeState === "ready" ? `${state.tree.length} ${t("kv.groups")}` : "")}</small>
+        <button type="button" class="kv-sidebar-toggle icon-button" data-kv-files-toggle aria-pressed="${state.filesMode}" aria-label="${escapeVaultHTML(kt("kv.filesToggle"))}" title="${escapeVaultHTML(kt("kv.filesToggle"))}">${icon("folder")}</button>
       </div>
-      <div class="kv-tree-body">${treeBodyHTML()}</div>
+      <div class="kv-tree-body">${state.filesMode ? filesBodyHTML() : treeBodyHTML()}</div>
     </nav>
     ${state.sidebarCollapsed ? "" : `<div class="kv-tree-resizer" role="separator" aria-orientation="vertical" tabindex="0" aria-label="${escapeVaultHTML(kt("kv.resizeSidebar"))}" aria-valuemin="${SIDEBAR_MIN_WIDTH}" aria-valuemax="${sidebarMaximumWidth()}" aria-valuenow="${state.sidebarWidth}" data-kv-resizer></div>`}
     <article class="kv-doc-panel${activity ? " kv-activity-panel" : ""}">
-      ${activity ? activityBodyHTML() : docBodyHTML()}
+      ${activity ? activityBodyHTML() : (state.filesMode ? filePanelHTML() : docBodyHTML())}
     </article>
     ${activity ? "" : `<aside class="kv-context-panel" aria-label="${t("kv.context")}">
       ${contextBodyHTML()}
@@ -1359,6 +1381,139 @@ function treeNodeHTML(node: KnowledgeVaultTreeNode, depth = 0): string {
     </div>
     ${expanded && canToggle ? `<ul class="kv-tree-list">${children.map(child => treeNodeHTML(child, depth + 1)).join("")}</ul>` : ""}
   </li>`;
+}
+
+
+/* Real file browser ------------------------------------------------------ */
+// The directory is a navigable view of the real vault: directories are
+// fetched one level at a time, files are previewed from disk, and nothing
+// requires the file to have been indexed first.
+function filesParentPath(value: string): string {
+  const normalized = normalizeTreePath(value);
+  const separator = normalized.lastIndexOf("/");
+  return separator < 0 ? "" : normalized.slice(0, separator);
+}
+
+function filesBreadcrumbHTML(): string {
+  const current = normalizeTreePath(state.filesPath);
+  const segments = current ? current.split("/") : [];
+  const parts = [`<button type="button" class="kv-tag" data-kv-files-dir="">${escapeVaultHTML(kt("kv.filesRoot"))}</button>`];
+  let accumulated = "";
+  for (const segment of segments) {
+    accumulated = accumulated ? `${accumulated}/${segment}` : segment;
+    parts.push(`<span aria-hidden="true">/</span><button type="button" class="kv-tag" data-kv-files-dir="${escapeVaultHTML(accumulated)}">${escapeVaultHTML(segment)}</button>`);
+  }
+  return `<div class="kv-files-path">${parts.join("")}</div>`;
+}
+
+function filesBodyHTML(): string {
+  if (state.filesState === "loading") return vaultEmptyState("loading");
+  if (state.filesState === "error") return `${vaultEmptyState("error", state.filesError)}<button type="button" class="secondary" data-kv-files-retry>${t("kv.retry")}</button>`;
+  const rows = state.files.length === 0
+    ? `<li class="kv-empty-inline">${escapeVaultHTML(kt("kv.filesEmpty"))}</li>`
+    : state.files.map(entry => {
+      if (entry.is_dir) {
+        return `<li class="kv-tree-node kv-tree-folder"><button type="button" class="kv-tree-link kv-tree-folder-link" data-kv-files-dir="${escapeVaultHTML(entry.path)}"><span class="kv-tree-folder-icon" aria-hidden="true">${icon("folder")}</span><span class="kv-tree-title">${escapeVaultHTML(entry.name)}</span></button></li>`;
+      }
+      if (entry.kind === "binary") {
+        return `<li class="kv-tree-node kv-tree-doc"><a class="kv-tree-link kv-tree-doc-link" href="${escapeVaultHTML(api.knowledgeVaultFileDownloadURL(entry.path))}" data-kv-files-download="${escapeVaultHTML(entry.path)}"><span class="kv-tree-doc-icon" aria-hidden="true">${icon("file")}</span><span class="kv-tree-title">${escapeVaultHTML(entry.name)}</span>${badge(kt("kv.fileDownload"), "type")}</a></li>`;
+      }
+      return `<li class="kv-tree-node kv-tree-doc"><button type="button" class="kv-tree-link kv-tree-doc-link${state.file?.path === entry.path ? " selected" : ""}" data-kv-files-open="${escapeVaultHTML(entry.path)}"><span class="kv-tree-doc-icon" aria-hidden="true">${icon("file")}</span><span class="kv-tree-title">${escapeVaultHTML(entry.name)}</span></button></li>`;
+    }).join("");
+  const up = state.filesPath ? `<button type="button" class="kv-back" data-kv-files-dir="${escapeVaultHTML(filesParentPath(state.filesPath))}">${icon("chevron-up")}<span>${escapeVaultHTML(kt("kv.filesUp"))}</span></button>` : "";
+  const reveal = state.openAvailable && state.filesPath
+    ? `<button type="button" class="secondary" data-kv-reveal="${escapeVaultHTML(state.filesPath)}">${icon("folder")}<span>${escapeVaultHTML(kt("kv.fileOpenManager"))}</span></button>`
+    : "";
+  return `${filesBreadcrumbHTML()}${up}${reveal}<ul class="kv-tree-list kv-files-list">${rows}</ul>`;
+}
+
+function stripFrontmatterForPreview(value: string): string {
+  const match = String(value ?? "").match(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/);
+  return match ? value.slice(match[0].length) : value;
+}
+
+function filePanelHTML(): string {
+  if (state.fileState === "loading") return vaultEmptyState("loading");
+  if (state.fileState === "error") return `${vaultEmptyState("error", state.fileError)}<button type="button" class="secondary" data-kv-file-retry>${t("kv.retry")}</button>`;
+  if (state.file) return fileBodyHTML();
+  return vaultEmptyState("empty", kt("kv.filesSelect"));
+}
+
+function fileBodyHTML(): string {
+  const file = state.file;
+  if (!file) return docBodyHTML();
+  const copyAbsolute = `<button type="button" class="kv-open kv-copy" data-kv-copy="${escapeVaultHTML(file.absolute_path)}" title="${escapeVaultHTML(t("kv.copyPath"))}" aria-label="${escapeVaultHTML(t("kv.copyPath"))}">${icon("copy")}</button>`;
+  const reveal = state.openAvailable
+    ? `<button type="button" class="secondary" data-kv-reveal="${escapeVaultHTML(file.path)}">${icon("folder")}<span>${escapeVaultHTML(kt("kv.fileOpenManager"))}</span></button>`
+    : "";
+  const download = `<a class="secondary" href="${escapeVaultHTML(api.knowledgeVaultFileDownloadURL(file.path))}" download>${icon("file")}<span>${escapeVaultHTML(kt("kv.fileDownload"))}</span></a>`;
+  const body = file.kind === "markdown"
+    ? `<div class="markdown-body kv-doc-body" data-kv-doc-body>${renderMarkdown(stripFrontmatterForPreview(file.content))}</div>`
+    : `<pre class="kv-file-text">${escapeVaultHTML(file.content)}</pre>`;
+  return `<header class="kv-doc-head"><div class="kv-doc-title-row"><h1 id="kv-file-title">${escapeVaultHTML(file.title || file.name)}</h1><div class="kv-open-actions">${copyAbsolute}</div></div><div class="kv-doc-meta-badges">${badge(file.kind, "type")}</div></header>${body}<footer class="kv-doc-footer"><div class="kv-open-actions">${reveal}${download}</div></footer>`;
+}
+
+async function loadFiles(path: string, force = false): Promise<void> {
+  const key = normalizeTreePath(path);
+  if (!force && state.filesState === "ready" && state.filesPath === key) return;
+  state.filesPath = key;
+  state.filesState = "loading";
+  state.filesError = "";
+  rerender();
+  try {
+    const payload = await api.knowledgeVaultFiles(key);
+    if (state.filesPath !== key) return;
+    state.files = payload.entries || [];
+    state.filesState = "ready";
+  } catch (error) {
+    if (state.filesPath !== key) return;
+    state.filesState = "error";
+    state.filesError = error instanceof Error ? error.message : String(error);
+  }
+  rerender();
+}
+
+async function loadFile(path: string): Promise<void> {
+  // A file preview takes over the reading pane; clear the activity/doc
+  // selection so the file panel is what renders.
+  state.selectedID = "";
+  state.fileRequestPath = normalizeTreePath(path);
+  state.fileState = "loading";
+  state.fileError = "";
+  state.file = null;
+  state.filesMode = true;
+  state.mobilePane = "doc";
+  rerender();
+  try {
+    const payload = await api.knowledgeVaultFile(path);
+    state.file = payload.file;
+    state.fileState = "ready";
+    state.openAvailable = state.openAvailable || false;
+  } catch (error) {
+    state.fileState = "error";
+    state.fileError = error instanceof Error ? error.message : String(error);
+  }
+  rerender();
+}
+
+async function loadOpenInfo(): Promise<void> {
+  try {
+    const payload = await api.knowledgeVaultOpenInfo();
+    state.openAvailable = Boolean(payload.open_available);
+    if (payload.vault_path && !state.vaultPath) state.vaultPath = payload.vault_path;
+  } catch {
+    state.openAvailable = false;
+  }
+  rerender();
+}
+
+async function revealVaultPath(path: string): Promise<void> {
+  try {
+    await api.revealKnowledgeVaultPath(path);
+  } catch (error) {
+    state.filesError = error instanceof Error ? error.message : String(error);
+    rerender();
+  }
 }
 
 function docBodyHTML(): string {
@@ -1578,30 +1733,30 @@ function settingsCopyHTML(value: string, labelKey: string): string {
 function settingsDialogHTML(): string {
   const ready = (value: boolean) => value ? t("kv.settingsReady") : t("kv.settingsNotReady");
   const settings = state.settings;
-  // The gear panel offers the only rebuild action. It needs an initialized vault,
-  // not an enabled switch: the backend allows a rebuild while the manager is off
-  // so migration/import/Git pull can refresh the projection first.
-  const canRebuild = Boolean(settings?.vault_initialized) && !state.rebuildBusy;
   // The settings endpoint is authoritative for these three fields. Library and
   // document payloads also carry them, but may lag behind a rebuild; prefer the
   // freshly loaded settings so the dialog and the rebuild notice agree.
   const vaultPath = settings?.vault_path || state.vaultPath;
   const indexReady = settings ? Boolean(settings.index_ready) : state.indexReady;
   const rebuiltAt = settings?.rebuilt_at || state.rebuiltAt;
-  const rebuildLabel = state.rebuildBusy ? kt("kv.settingsRebuilding") : kt("kv.settingsRebuild");
-  const notice = state.rebuildNotice
-    ? `<p class="kv-settings-notice ${state.rebuildNotice.kind === "error" ? "error" : "success"}" role="${state.rebuildNotice.kind === "error" ? "alert" : "status"}">${escapeVaultHTML(state.rebuildNotice.message)}</p>`
-    : "";
+  // Index maintenance is automatic (write path, file watcher, startup
+  // reconciliation). The gear panel only reports health; there is deliberately
+  // no owner-facing rebuild switch or button.
+  const health = !settings
+    ? t("kv.settingsNotReady")
+    : indexReady
+      ? (settings.index_stale ? kt("kv.settingsIndexStale") : t("kv.settingsReady"))
+      : t("kv.settingsNotReady");
   const settingsError = state.settingsError
     ? `<p class="kv-settings-notice error" role="alert">${escapeVaultHTML(state.settingsError)}</p><button type="button" class="secondary" data-kv-settings-retry>${t("kv.retry")}</button>`
     : "";
-  return `<dialog id="kv-settings-dialog" class="kv-settings"${state.rebuildBusy ? ' aria-busy="true"' : ""}>
+  return `<dialog id="kv-settings-dialog" class="kv-settings">
     <header><h2>${t("kv.settings")}</h2><button type="button" class="icon-button" data-kv-settings-close aria-label="${t("kv.close")}">${icon("close")}</button></header>
     <dl>
       <div><dt>${t("kv.settingsVault")}</dt><dd class="kv-settings-value kv-settings-copy"><span>${escapeVaultHTML(vaultPath || t("kv.none"))}</span>${settingsCopyHTML(vaultPath, "kv.copyVaultPath")}</dd></div>
       <div><dt>${t("kv.settingsIndex")}</dt><dd class="kv-settings-value">${escapeVaultHTML(indexReady ? t("kv.settingsReady") : t("kv.settingsNotReady"))}</dd></div>
       <div><dt>${t("kv.settingsRebuilt")}</dt><dd class="kv-settings-value">${escapeVaultHTML(rebuiltAt ? safeDateTime(rebuiltAt) : t("kv.none"))}</dd></div>
-      <div class="kv-settings-action-row"><dt>${kt("kv.settingsIndexAction")}</dt><dd class="kv-settings-value"><button type="button" id="kv-settings-rebuild" class="secondary" ${canRebuild ? "" : "disabled"}>${rebuildLabel}</button>${notice}</dd></div>
+      <div><dt>${kt("kv.settingsIndexAction")}</dt><dd class="kv-settings-value">${escapeVaultHTML(health)}</dd></div>
       <div><dt>${t("kv.settingsObsidian")}</dt><dd class="kv-settings-value">${escapeVaultHTML(state.obsidianVault || t("kv.none"))} · ${escapeVaultHTML(ready(state.obsidianReady))}</dd></div>
     </dl>
     ${settingsError}
@@ -1647,7 +1802,6 @@ function reopenSettingsDialog(): void {
 
 function openSettingsDialog(): void {
   state.settingsOpen = true;
-  state.rebuildNotice = null;
   rerender();
   if (state.settingsState === "idle" || state.settingsState === "error") void loadVaultSettings();
   void loadVaultGitStatus();
@@ -1673,42 +1827,6 @@ function handleSettingsDialogDismissed(event: Event): void {
 // The files changed on disk; every projection the page cached is one index
 // generation old. Reload them in place so the selected document, its deep link
 // and the open settings dialog all survive.
-async function refreshAfterIndexRebuild(): Promise<void> {
-  await Promise.all([
-    loadTree(true, true),
-    state.selectedID && !isActivitySelected() ? loadDoc(state.selectedID, true) : Promise.resolve(),
-    loadRecent(true),
-    loadInbox(true),
-  ]);
-}
-
-async function rebuildSettingsIndex(): Promise<void> {
-  if (state.rebuildBusy || !state.settings?.enabled || !state.settings.vault_initialized) return;
-  state.rebuildBusy = true;
-  state.rebuildNotice = null;
-  rerender();
-  try {
-    const result = await api.rebuildKnowledgeVaultIndex();
-    applyVaultSettings(result.settings);
-    const rebuiltAt = safeDateTime(result.rebuild.rebuilt_at || result.settings.rebuilt_at);
-    state.rebuildNotice = {kind: "notice", message: kt("kv.settingsRebuildDone", {count: result.rebuild.entries, time: rebuiltAt})};
-    await refreshAfterIndexRebuild();
-  } catch (error) {
-    state.rebuildNotice = {kind: "error", message: `${kt("kv.settingsRebuildFailed")}：${error instanceof Error ? error.message : String(error)}`};
-    // The failed rebuild may have changed which index generation is readable.
-    try {
-      const current = await api.knowledgeVaultSettings();
-      applyVaultSettings(current.settings);
-    } catch {
-      // Keep the previous status; the error itself is the actionable message.
-    }
-  } finally {
-    state.rebuildBusy = false;
-    rerender();
-    reopenSettingsDialog();
-  }
-}
-
 /* Git settings ---------------------------------------------------------- */
 
 const GIT_BUSY_LABEL: Record<Exclude<GitBusy, "">, string> = {
@@ -2096,6 +2214,8 @@ async function loadTree(force = false, preserveExpansion = false): Promise<void>
 
 async function loadDoc(id: string, force = false): Promise<void> {
   if (!id) return;
+  state.filesMode = false;
+  state.file = null;
   // Any route into the reader dismisses the in-page preview first.
   const hadPreview = Boolean(state.previewID);
   clearPreviewState();
@@ -2776,7 +2896,6 @@ export function bindKnowledgeVaultPage(context: KnowledgeVaultContext): void {
   const settingsDialog = root.querySelector<HTMLDialogElement>("#kv-settings-dialog");
   settingsDialog?.addEventListener("cancel", handleSettingsDialogDismissed);
   settingsDialog?.addEventListener("close", handleSettingsDialogDismissed);
-  root.querySelector<HTMLButtonElement>("#kv-settings-rebuild")?.addEventListener("click", () => { void rebuildSettingsIndex(); });
   root.querySelector<HTMLButtonElement>("[data-kv-settings-retry]")?.addEventListener("click", () => { void loadVaultSettings(); });
   root.querySelector<HTMLButtonElement>("[data-kv-git-retry]")?.addEventListener("click", () => { void loadVaultGitStatus(); });
   root.querySelector<HTMLButtonElement>("#kv-git-init")?.addEventListener("click", () => { void initializeVaultGit(); });
@@ -2823,6 +2942,44 @@ export function bindKnowledgeVaultPage(context: KnowledgeVaultContext): void {
     if (handleDocLink(event)) return;
     if (handleMissingWikilink(event)) return;
     const target = event.target as HTMLElement | null;
+    if (target?.closest("[data-kv-files-toggle]")) {
+      state.filesMode = !state.filesMode;
+      if (state.filesMode) {
+        rerender();
+        void loadFiles(state.filesPath);
+        void loadOpenInfo();
+      } else {
+        rerender();
+      }
+      return;
+    }
+    const fileRetry = target?.closest("[data-kv-file-retry]");
+    if (fileRetry && state.fileRequestPath) {
+      void loadFile(state.fileRequestPath);
+      return;
+    }
+    const filesRetry = target?.closest("[data-kv-files-retry]");
+    if (filesRetry) {
+      void loadFiles(state.filesPath, true);
+      return;
+    }
+    const filesDir = target?.closest<HTMLElement>("[data-kv-files-dir]");
+    if (filesDir) {
+      const path = filesDir.dataset.kvFilesDir || "";
+      state.file = null;
+      void loadFiles(path);
+      return;
+    }
+    const filesOpen = target?.closest<HTMLElement>("[data-kv-files-open]");
+    if (filesOpen) {
+      void loadFile(filesOpen.dataset.kvFilesOpen || "");
+      return;
+    }
+    const reveal = target?.closest<HTMLElement>("[data-kv-reveal]");
+    if (reveal) {
+      void revealVaultPath(reveal.dataset.kvReveal || "");
+      return;
+    }
     if (target?.closest("[data-kv-preview-close]")) {
       closePreview();
       return;

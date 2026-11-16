@@ -419,3 +419,53 @@ func (s *Server) rollbackKnowledgeVaultSwitch(enabled bool, source string) {
 	}
 	s.knowledgeVault.SetSource(source)
 }
+
+// cutoverLegacyKnowledge is the one-way removal of the pre-vault knowledge
+// tables. It requires an explicit owner confirmation, exports the dedicated
+// library into its project space first, and aborts before any drop when the
+// backup or export verification fails.
+func (s *Server) cutoverLegacyKnowledge(writer http.ResponseWriter, request *http.Request) {
+	if s.knowledgeVault == nil || s.app == nil {
+		writeKnowledgeVaultDisabled(writer)
+		return
+	}
+	var payload struct {
+		ProjectID string `json:"project_id"`
+		BackupDir string `json:"backup_dir"`
+		Confirm   bool   `json:"confirm"`
+	}
+	if err := decodeJSON(request, &payload); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	if !payload.Confirm {
+		writeJSON(writer, http.StatusConflict, map[string]any{
+			"ok": false, "error": "knowledge_cutover_confirmation_required",
+			"message": "旧库删除不可回退；请先备份并导出，再以 confirm=true 执行",
+		})
+		return
+	}
+	projectID := strings.TrimSpace(payload.ProjectID)
+	if projectID == "" {
+		writeError(writer, http.StatusBadRequest, "project_id_required")
+		return
+	}
+	report, err := s.app.CutoverLegacyKnowledge(request.Context(), projectID, strings.TrimSpace(payload.BackupDir))
+	if err != nil {
+		writeJSON(writer, http.StatusConflict, map[string]any{
+			"ok": false, "error": "knowledge_cutover_failed", "message": err.Error(),
+		})
+		return
+	}
+	if report.BackupPath != "" {
+		if settings, settingsErr := s.store.KnowledgeVaultSettings(request.Context()); settingsErr == nil {
+			settings.LastBackupPath = report.BackupPath
+			_, _ = s.store.UpdateKnowledgeVaultSettings(request.Context(), settings)
+		}
+	}
+	s.audit(request, "knowledge_vault.cutover_legacy", "knowledge_vault", projectID, map[string]any{
+		"backup_path": report.BackupPath, "backed_up_rows": report.BackedUpRows,
+		"tables": report.TablesDropped,
+	})
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "cutover": report})
+}

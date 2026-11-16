@@ -69,6 +69,10 @@ type knowledgeVaultBackend interface {
 	RuntimeWriteEnabled() bool
 	WriteKnowledge(context.Context, knowledgevault.WriteRequest) (knowledgevault.WriteResult, error)
 	KnowledgeFeedback(context.Context, knowledgevault.FeedbackRequest) (knowledgevault.FeedbackResult, error)
+	CheckProjectSpacePrerequisites() error
+	ProvisionProjectSpace(context.Context, string, string) (knowledgevault.ProjectSpaceResult, error)
+	RenameProjectSpace(string, string) error
+	Rebuild(context.Context) (knowledgevault.RebuildReport, error)
 }
 
 type vaultKnowledgeSnapshot struct {
@@ -97,6 +101,9 @@ func (s *Service) knowledgeReadDecision(scope, projectID string) knowledgeReadDe
 	scope = strings.ToLower(strings.TrimSpace(scope))
 	projectID = strings.TrimSpace(projectID)
 	if s == nil || s.knowledgeVault == nil || !s.knowledgeVault.Enabled() {
+		if s != nil && s.knowledgeLegacyDisabled.Load() {
+			return knowledgeReadDecision{Vault: true, Err: fmt.Errorf("%w: vault disabled after legacy cutover", ErrKnowledgeSpaceNotReady)}
+		}
 		return knowledgeReadDecision{}
 	}
 	if !s.knowledgeVaultRuntimeRead {
@@ -128,6 +135,14 @@ func (s *Service) knowledgeReadDecision(scope, projectID string) knowledgeReadDe
 		decision.Vault = true
 		decision.Err = err
 	}
+	if s.knowledgeLegacyDisabled.Load() && !decision.Vault && decision.Err == nil {
+		// The old tables are gone. An unbound or index-less space must fail
+		// explicitly instead of returning an "empty legacy" result that hides
+		// the missing space.
+		decision.Vault = true
+		decision.Warning = ""
+		decision.Err = fmt.Errorf("%w: %s/%s", ErrKnowledgeSpaceNotReady, scope, projectID)
+	}
 	return decision
 }
 
@@ -156,10 +171,19 @@ func (s *Service) KnowledgeVaultEntry(ctx context.Context, id string) (domain.Kn
 // projects must not seed the legacy tables; if a legacy write ever falls back,
 // EnsureKnowledgeRoot still creates the root lazily on demand.
 func (s *Service) LegacyKnowledgeRootsEnabled(projectID string) bool {
-	if s == nil || s.knowledgeVault == nil || !s.knowledgeVault.Enabled() || !s.knowledgeVaultRuntimeRead {
+	if s != nil && s.knowledgeLegacyDisabled.Load() {
+		// The legacy tables no longer exist; even a diagnostic runtime-read
+		// rollback must not seed a root that can never be read.
+		return false
+	}
+	if s == nil || s.knowledgeVault == nil || !s.knowledgeVault.Enabled() {
 		return true
 	}
-	return !knowledgeVaultReadAllowed(projectID)
+	// Project creation always provisions the vault space in model A, so a
+	// legacy root must never be seeded eagerly. A true legacy fallback (if the
+	// support gates are narrowed before the cutover) still creates its root
+	// lazily on the first legacy write.
+	return false
 }
 
 // vaultProjectNames returns authoritative display names from the AHA2 projects

@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -490,6 +491,15 @@ func (s *Service) CreateInstance(ctx context.Context, ownerID, pluginID, name, i
 	}
 	if err := s.store.CreateChannelInstanceWithHost(ctx, project, workspace, item, endpoints); err != nil {
 		return domain.ChannelInstance{}, err
+	}
+	// Model A: the channel host is also its identity knowledge space. The
+	// project row was inserted by the dedicated host transaction, so initialize
+	// the vault space now; a failure leaves the project in error and the next
+	// startup reconciliation retries, without deleting the channel.
+	if s.application != nil && s.application.KnowledgeVaultAvailable() {
+		if _, spaceErr := s.application.RetryProjectKnowledgeSpace(ctx, projectID); spaceErr != nil {
+			log.Printf("initialize channel host knowledge space %s: %v", projectID, spaceErr)
+		}
 	}
 	if s.legacyKnowledgeRootsEnabled(projectID) {
 		knowledgeRoot, err := s.store.EnsureKnowledgeRoot(ctx, "project", projectID)
