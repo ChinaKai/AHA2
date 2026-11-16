@@ -155,6 +155,9 @@ test("settings panel shows vault, index and source for an enabled vault", async 
     await panel.refreshKnowledgeVaultSettingsPanel(ctx);
     const html = panel.renderKnowledgeVaultSettingsPanel(ctx);
     assert.match(html, /class="knowledge-vault-state is-on">已启用</);
+    // The blocked-page CTA focuses this heading, so it must be focusable
+    // without entering the normal tab order.
+    assert.match(html, /id="knowledge-vault-settings-title" tabindex="-1"/);
     assert.match(html, /状态来源：数据库设置/);
     assert.match(html, /Vault 路径<\/dt><dd><code>\/srv\/vault<\/code>/);
     assert.match(html, /索引路径<\/dt><dd><code>\/srv\/index\.db<\/code>/);

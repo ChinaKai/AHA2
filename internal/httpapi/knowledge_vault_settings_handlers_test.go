@@ -409,3 +409,62 @@ func TestKnowledgeVaultImportEndpointLocalAndCredentialSafety(t *testing.T) {
 		t.Fatalf("credential import response leaked the token: %#v", failed)
 	}
 }
+
+// A committed vault can start disabled when its directory or index cannot be
+// opened. The persisted row still carries enabled=1/configured=1, so a close
+// must stay refused; otherwise the next restart silently serves legacy
+// knowledge again. This regression used to be masked by gating the refusal on
+// the runtime switch, which is exactly what startup degradation turns off.
+func TestKnowledgeVaultRollbackRefusedAfterStartupDegraded(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	manager, err := knowledgevault.NewManager(knowledgevault.DefaultConfig(dataDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	server, client, csrf, database := knowledgeVaultServerAt(t, manager, dataDir)
+
+	if _, err := manager.Initialize(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	// A verified import is the committed state the reviewer cares about: the
+	// persisted row is enabled+configured even though the manager will start
+	// degraded below.
+	if err := database.RecordKnowledgeVaultImport(ctx, knowledgevault.ImportSourceExisting, time.Now().UTC(), "", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.SetEnabled(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+
+	settings := knowledgeVaultSettingsSnapshot(t, client, server.URL)
+	if settings["enabled"] != false || settings["configured"] != true {
+		t.Fatalf("degraded startup settings = %#v", settings)
+	}
+	readiness := settings["readiness"].(map[string]any)
+	if readiness["rollback_allowed"] != false {
+		t.Fatalf("a committed vault must not allow rollback even while degraded: %#v", readiness)
+	}
+	if settings["import_verified_at"].(string) == "0001-01-01T00:00:00Z" {
+		t.Fatalf("import verification missing: %#v", settings["import_verified_at"])
+	}
+
+	response := requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/settings/knowledge-vault", map[string]any{"enabled": false}, csrf)
+	var locked map[string]any
+	decodeResponse(t, response, &locked)
+	if response.StatusCode != http.StatusConflict || locked["error"] != "knowledge_vault_rollback_locked" {
+		t.Fatalf("degraded close status=%d payload=%#v", response.StatusCode, locked)
+	}
+
+	stored, err := database.KnowledgeVaultSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stored.Enabled || !stored.Configured {
+		t.Fatalf("refused close persisted a legacy fallback: %+v", stored)
+	}
+	if manager.Enabled() {
+		t.Fatal("a refused close changed the runtime switch")
+	}
+}

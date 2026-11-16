@@ -8519,6 +8519,9 @@ window.addEventListener("aha:open-vault-settings", () => {
       const panel = document.querySelector<HTMLElement>(".knowledge-vault-settings-panel");
       if (panel) {
         panel.scrollIntoView({block: "start", behavior: "smooth"});
+        // Move keyboard/reader focus to the panel heading, not just the scroll
+        // position, so the destination is announced after the CTA jump.
+        panel.querySelector<HTMLElement>("#knowledge-vault-settings-title")?.focus({preventScroll: true});
         return;
       }
       if (Date.now() < deadline) requestAnimationFrame(reveal);

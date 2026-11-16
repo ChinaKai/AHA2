@@ -139,13 +139,17 @@ func (s *Server) updateKnowledgeVaultSettings(writer http.ResponseWriter, reques
 			})
 			return
 		}
-	} else if s.knowledgeVault.Enabled() && !readiness.RollbackAllowed {
+	} else if !readiness.RollbackAllowed {
 		// Once the instance has committed to the vault (configured switch,
 		// verified migration/import, or a live vault) the legacy database is a
 		// read-only backup. Disabling it directly through the API would undo the
 		// owner's no-rollback decision, so the backend refuses the transition
-		// instead of relying on the disabled Web switch alone. The payload keeps
-		// the full settings view so older clients still render their error path.
+		// instead of relying on the disabled Web switch alone. This check is
+		// deliberately independent of the runtime switch: a vault whose
+		// directory/index failed to open starts disabled while the DB still says
+		// enabled=1/configured=1, and a close in that state would persist a
+		// legacy fallback for the next restart. The payload keeps the full
+		// settings view so older clients still render their error path.
 		writeJSON(writer, http.StatusConflict, map[string]any{
 			"ok": false, "error": "knowledge_vault_rollback_locked",
 			"message":  "文件知识库已迁移或启用，不能关闭回退到旧知识库。",

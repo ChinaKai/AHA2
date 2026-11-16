@@ -756,7 +756,7 @@ export function renderKnowledgeVaultSettingsPanel(context: KnowledgeVaultSetting
         : kt("kvs.state.loading");
   const stateClass = state.settings?.enabled ? " is-on" : "";
   return `<section class="panel spaced account-security-panel knowledge-vault-settings-panel" aria-labelledby="knowledge-vault-settings-title"${state.busy ? ` aria-busy="true"` : ""}>
-    <div class="panel-head"><strong id="knowledge-vault-settings-title">${kt("kvs.title")}</strong><span class="knowledge-vault-state${stateClass}">${statusLabel}</span></div>
+    <div class="panel-head"><strong id="knowledge-vault-settings-title" tabindex="-1">${kt("kvs.title")}</strong><span class="knowledge-vault-state${stateClass}">${statusLabel}</span></div>
     ${settingsBody()}
   </section>`;
 }

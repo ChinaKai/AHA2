@@ -1814,6 +1814,7 @@ try {
   assert.doesNotMatch(await off.evaluate(() => location.hash), /^#knowledge/, "the CTA leaves the knowledge hash");
   assert.equal(await off.locator("#knowledge-vault-settings-title").count(), 1, "the CTA opens the vault settings panel");
   assert.match(await off.locator(".knowledge-vault-settings-panel").innerText(), /文件知识库/);
+  assert.equal(await off.evaluate(() => document.activeElement?.id), "knowledge-vault-settings-title", "the CTA moves focus to the panel heading");
   assert.equal(await off.locator(".knowledge-vault-blocked").count(), 0, "the blocked landing is replaced by the settings view");
   assert.equal(await off.locator("[data-knowledge-scope=global]").count(), 0, "settings navigation leaves the legacy UI gone");
   await off.screenshot({path: resolve(screenshots, "knowledge-vault-switch-off.png"), fullPage: false});
