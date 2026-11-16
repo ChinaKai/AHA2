@@ -10,9 +10,12 @@ import (
 
 const (
 	// GuideRelativePath is the canonical, human-readable vault usage guide. It
-	// stays a normal vault document so it shows up in Obsidian and in the Web
-	// knowledge tree, while the Agent API and the Task Prompt read it directly.
-	GuideRelativePath = "global/general/knowledge-base-guide.md"
+	// lives at the vault root so it is a single top-level navigation page, not
+	// a project/global topic document. Writes only ever target this path.
+	GuideRelativePath = "knowledge-base-guide.md"
+	// LegacyGuideRelativePath is where older releases kept the guide. Reads
+	// still fall back to it until the one-time migration moves it to the root.
+	LegacyGuideRelativePath = "global/general/knowledge-base-guide.md"
 	// GuideTitle is used when the guide file has no readable title.
 	GuideTitle = "知识库使用指南"
 
@@ -41,20 +44,13 @@ func ReadGuide(vaultPath string) (Guide, error) {
 	if vaultPath == "" {
 		return Guide{}, ErrGuideNotFound
 	}
-	target := filepath.Join(vaultPath, filepath.FromSlash(GuideRelativePath))
-	// Check existence before resolving symlinks: EvalSymlinks fails for a
-	// missing file, and treating that as a path escape turns a vault without
-	// a guide (the normal upgrade state) into a security error and a 500.
-	if _, err := os.Lstat(target); err != nil {
-		if os.IsNotExist(err) {
-			return Guide{}, ErrGuideNotFound
-		}
-		return Guide{}, fmt.Errorf("read knowledge guide: %w", err)
+	data, err := readGuideFile(vaultPath, GuideRelativePath)
+	if err != nil && os.IsNotExist(err) {
+		// Compatibility read for a vault that has not migrated yet. The API
+		// still reports the canonical root path; writes never target the old
+		// location.
+		data, err = readGuideFile(vaultPath, LegacyGuideRelativePath)
 	}
-	if !IsInsideRoot(vaultPath, target) {
-		return Guide{}, fmt.Errorf("knowledge guide escapes the vault root")
-	}
-	data, err := os.ReadFile(target)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return Guide{}, ErrGuideNotFound
@@ -77,6 +73,55 @@ func ReadGuide(vaultPath string) (Guide, error) {
 	return Guide{Path: GuideRelativePath, Title: title, Content: content, Prompt: prompt}, nil
 }
 
+// readGuideFile reads one guide location with the same escape checks as the
+// canonical path. A directory at the target is reported as missing.
+func readGuideFile(vaultPath, relative string) ([]byte, error) {
+	target := filepath.Join(vaultPath, filepath.FromSlash(relative))
+	// Check existence before resolving symlinks: a missing file must stay a
+	// "not found" instead of a security error.
+	info, err := os.Lstat(target)
+	if err != nil {
+		return nil, err
+	}
+	if info.IsDir() {
+		return nil, os.ErrNotExist
+	}
+	if !IsInsideRoot(vaultPath, target) {
+		return nil, fmt.Errorf("knowledge guide escapes the vault root")
+	}
+	return os.ReadFile(target)
+}
+
+// migrateLegacyGuide moves an older guide from global/general to the vault
+// root. It is idempotent and never overwrites a root guide that already
+// exists; the old file is removed only after the root copy is durable.
+func migrateLegacyGuide(vaultPath string) (bool, error) {
+	root := filepath.Join(vaultPath, filepath.FromSlash(GuideRelativePath))
+	if _, err := os.Lstat(root); err == nil {
+		return false, nil
+	} else if !os.IsNotExist(err) {
+		return false, fmt.Errorf("stat knowledge guide: %w", err)
+	}
+	data, err := readGuideFile(vaultPath, LegacyGuideRelativePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read legacy knowledge guide: %w", err)
+	}
+	if err := ensureSafeWriteTarget(vaultPath, root); err != nil {
+		return false, fmt.Errorf("migrate knowledge guide: %w", err)
+	}
+	if err := os.WriteFile(root, data, 0o644); err != nil {
+		return false, fmt.Errorf("write root knowledge guide: %w", err)
+	}
+	legacy := filepath.Join(vaultPath, filepath.FromSlash(LegacyGuideRelativePath))
+	if err := os.Remove(legacy); err != nil && !os.IsNotExist(err) {
+		return true, fmt.Errorf("remove legacy knowledge guide: %w", err)
+	}
+	return true, nil
+}
+
 // EnsureGuide creates the canonical system guide when the vault does not have
 // one yet. It never overwrites an existing guide, so a hand-written replacement
 // survives startup and rebuild, and repeated calls are a no-op. It reports
@@ -85,6 +130,11 @@ func EnsureGuide(vaultPath string, now time.Time) (bool, error) {
 	vaultPath = strings.TrimSpace(vaultPath)
 	if vaultPath == "" {
 		return false, fmt.Errorf("ensure knowledge guide: empty vault path")
+	}
+	if migrated, err := migrateLegacyGuide(vaultPath); err != nil {
+		return false, err
+	} else if migrated {
+		return true, nil
 	}
 	target := filepath.Join(vaultPath, filepath.FromSlash(GuideRelativePath))
 	if _, err := os.Lstat(target); err == nil {
@@ -207,8 +257,9 @@ func defaultGuideContent(now time.Time) string {
 
 ## 目录结构
 
+- ` + "`knowledge-base-guide.md`" + `：vault 根目录的本指南，唯一正本。
 - ` + "`global/index.md`" + `：全局知识入口。
-- ` + "`global/general/`" + `：跨项目通用知识；本指南位于 ` + "`global/general/knowledge-base-guide.md`" + `。
+- ` + "`global/general/`" + `：跨项目通用知识。
 - ` + "`global/agent-lessons/`" + `：可复用的 Agent 技术诊断与行为教训。
 - ` + "`global/inbox/`" + `：尚未归入主题组的全局文档。
 - ` + "`projects/<slug>/index.md`" + `：项目知识入口；主题组是子目录，根下叶子文档放 ` + "`projects/<slug>/inbox/`" + `。

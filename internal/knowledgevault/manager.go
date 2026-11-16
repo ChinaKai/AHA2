@@ -37,6 +37,11 @@ type Manager struct {
 	// writeHook is a test seam called after the file write and before the
 	// index rebuild. Production leaves it nil.
 	writeHook func() error
+	// autoMu guards the single-writer auto-index loop and its health snapshot.
+	// It is separate from mu so Status never waits behind a long rebuild.
+	autoMu     sync.Mutex
+	auto       autoIndexState
+	autoCancel context.CancelFunc
 }
 
 // The effective switch comes either from the persisted database row or from
@@ -226,6 +231,7 @@ type Status struct {
 	IndexWarnings    int               `json:"index_warnings,omitempty"`
 	RebuiltAt        string            `json:"rebuilt_at,omitempty"`
 	ProjectBindings  map[string]string `json:"project_bindings,omitempty"`
+	AutoIndex        *AutoIndexHealth  `json:"auto_index,omitempty"`
 	Warning          string            `json:"warning,omitempty"`
 }
 
@@ -244,6 +250,8 @@ func (m *Manager) Status(ctx context.Context) Status {
 		IndexWarnings: probe.IndexWarnings, RebuiltAt: probe.RebuiltAt,
 		ProjectBindings: probe.Manifest.Projects,
 	}
+	health := m.AutoIndexHealth()
+	status.AutoIndex = &health
 	if reader != nil {
 		status.VaultName = reader.Manifest().VaultName
 	} else if probe.ManifestOK {
@@ -257,6 +265,33 @@ func (m *Manager) Status(ctx context.Context) Status {
 		status.Warning = "index_stale"
 	}
 	return status
+}
+
+// CheckProjectSpacePrerequisites is the preflight a project creation uses
+// before it inserts a row. It refuses a vault that is not initialized or not
+// writable instead of leaving a half-created project behind.
+func (m *Manager) CheckProjectSpacePrerequisites() error {
+	return CheckProjectSpacePrerequisites(m.config)
+}
+
+// ProvisionProjectSpace creates the project's manifest mapping, directory and
+// root index, then rebuilds the index so the new space is immediately
+// searchable. It works while the owner-visible switch is off (migration and
+// import need it); callers decide whether the project may be created.
+func (m *Manager) ProvisionProjectSpace(ctx context.Context, projectID, projectName string) (ProjectSpaceResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !VaultInitialized(m.config.VaultPath) {
+		return ProjectSpaceResult{}, ErrVaultNotInitialized
+	}
+	result, err := EnsureProjectSpace(m.config, projectID, projectName, time.Now().UTC())
+	if err != nil {
+		return result, err
+	}
+	if _, err := m.rebuildLocked(ctx); err != nil {
+		return result, err
+	}
+	return result, nil
 }
 
 // Rebuild closes the Reader, rebuilds the index from files, then opens a fresh
@@ -398,6 +433,7 @@ func (m *Manager) reopenLocked(ctx context.Context) {
 
 // Close releases the Reader on process shutdown.
 func (m *Manager) Close() error {
+	m.stopAutoIndex()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	reader := m.reader

@@ -488,6 +488,11 @@ func buildScannedRecord(relative, raw string, document Document, manifest Manife
 			projectID = strings.TrimSpace(frontmatter.ProjectID)
 		}
 	}
+	// The root guide is a global navigation page even though it lives outside
+	// global/. It must not be indexed as an unknown-scope orphan.
+	if relative == GuideRelativePath {
+		scope, projectID, archive = "global", "", false
+	}
 	body := StripGeneratedIndex(document.Body)
 	if document.Warning != "" {
 		record.warnings = append(record.warnings, document.Warning)
@@ -540,7 +545,7 @@ func buildScannedRecord(relative, raw string, document Document, manifest Manife
 	if scope == "archive" {
 		archive = true
 	}
-	if scopeForPathIsUnknown(relative) {
+	if scopeForPathIsUnknown(relative) && relative != GuideRelativePath {
 		scope = "unknown"
 		record.warnings = append(record.warnings, "path is outside global/projects/archive; indexed as unknown scope")
 	}
