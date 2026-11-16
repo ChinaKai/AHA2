@@ -208,7 +208,7 @@ export function channelKnowledgeSources(context: ChannelUIContext): ChannelKnowl
   }
   const rootByProject = new Map(context.knowledgeIndexes.map(entry => [entry.project_id, entry.id]));
   const projectSources = context.projects
-    .filter(project => !["channel", "knowledge"].includes(project.project_type || ""))
+    .filter(project => !["channel", "system", "knowledge"].includes(project.project_type || ""))
     .map(project => ({label: `项目知识 · ${project.name}`, root: rootByProject.get(project.id) || ""}))
     .filter(item => item.root);
   const librarySources = context.libraries

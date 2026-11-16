@@ -458,7 +458,8 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	} else if reconcile.Enabled {
 		logger.Info("knowledge space reconciliation",
 			"checked", reconcile.Checked, "ready", reconcile.Ready,
-			"provisioned", reconcile.Provisioned, "errors", reconcile.MarkedError,
+			"provisioned", reconcile.Provisioned, "cleaned", reconcile.Cleaned,
+			"errors", reconcile.MarkedError,
 			"orphans", reconcile.Orphans, "warnings", len(reconcile.Warnings))
 	}
 	appService.SetBuildInfo(version, webVersion, time.Now().UTC())

@@ -59,6 +59,13 @@ func (s *Service) KnowledgeVaultAvailable() bool {
 // the project in error so the owner can retry; it never falls back to the
 // legacy knowledge tables.
 func (s *Service) CreateProject(ctx context.Context, project domain.Project) (domain.Project, error) {
+	// Infrastructure projects (channel hosts and the pet's system project) do
+	// not own a vault space in model A. Their knowledge comes from
+	// knowledge_bindings or global knowledge, so creating the row must not
+	// provision a space that the owner would only have to clean up again.
+	if domain.IsSystemManagedProject(project) {
+		return project, s.store.CreateProject(ctx, project)
+	}
 	if !s.projectKnowledgeSpaceEnabled() {
 		// Tests and support tools that construct the service without a vault
 		// keep the pre-model-A behavior. Production always wires a manager.
@@ -153,6 +160,11 @@ func (s *Service) RetryProjectKnowledgeSpace(ctx context.Context, projectID stri
 	if err != nil {
 		return domain.Project{}, err
 	}
+	if domain.IsSystemManagedProject(project) {
+		return project, knowledgeSpaceError(
+			"knowledge_space_not_applicable",
+			"渠道/宠物等系统管理项目不拥有独立知识空间，无需初始化", nil)
+	}
 	if project.KnowledgeState == domain.KnowledgeStateReady {
 		// A synced project can arrive marked ready while this device only has
 		// an archive for its ID. Trusting the flag would report success and
@@ -188,6 +200,7 @@ type KnowledgeSpaceReconciliation struct {
 	Checked     int      `json:"checked"`
 	Ready       int      `json:"ready"`
 	Provisioned []string `json:"provisioned,omitempty"`
+	Cleaned     []string `json:"cleaned,omitempty"`
 	Archived    []string `json:"archived,omitempty"`
 	MarkedError []string `json:"marked_error,omitempty"`
 	Orphans     []string `json:"orphans,omitempty"`
@@ -255,6 +268,49 @@ func (s *Service) ReconcileKnowledgeSpaces(ctx context.Context) (KnowledgeSpaceR
 		}
 		return nil
 	})
+	// Infrastructure projects no longer own a vault space. Remove generated
+	// scaffolding left by older releases before the manifest loop below can
+	// treat it as a normal project space. A non-empty or unattributable space is
+	// kept and reported; it is never deleted automatically.
+	for _, project := range projects {
+		if !domain.IsSystemManagedProject(project) {
+			continue
+		}
+		result, cleanupErr := s.knowledgeVault.RemoveEmptyProjectSpace(ctx, project.ID)
+		if result.Removed {
+			delete(manifestProjects, project.ID)
+			report.Cleaned = append(report.Cleaned, project.ID)
+			_ = s.store.SetProjectKnowledgeState(ctx, project.ID, domain.KnowledgeStateUninitialized)
+			if cleanupErr != nil {
+				report.Warnings = append(report.Warnings, fmt.Sprintf("基础设施项目 %s 的空知识空间已从 manifest 移除，但索引重建失败：%v", project.ID, cleanupErr))
+			}
+			continue
+		}
+		switch {
+		case errors.Is(cleanupErr, knowledgevault.ErrProjectSpaceNotEmpty):
+			// Keep real knowledge and make it visible to the owner, but do not
+			// offer it as a knowledge source (lists and bindings exclude
+			// infrastructure projects).
+			_ = s.store.SetProjectKnowledgeState(ctx, project.ID, domain.KnowledgeStateReady)
+			paths := ""
+			if len(result.BlockingPaths) > 0 {
+				paths = "：" + strings.Join(result.BlockingPaths, ", ")
+			}
+			report.Warnings = append(report.Warnings, fmt.Sprintf("基础设施项目 %s 的知识空间包含文件，已保留且不再作为知识源%s", project.ID, paths))
+		case errors.Is(cleanupErr, knowledgevault.ErrProjectSpaceUnconfirmed):
+			report.Warnings = append(report.Warnings, fmt.Sprintf("基础设施项目 %s 的知识空间无法确认是空空间，已保留：%v", project.ID, cleanupErr))
+		case cleanupErr != nil:
+			// An I/O or permission failure is retryable and must not turn the
+			// infrastructure project into a knowledge error.
+			report.Warnings = append(report.Warnings, fmt.Sprintf("基础设施项目 %s 的知识空间清理未完成，将在下次启动重试：%v", project.ID, cleanupErr))
+		default:
+			// No space exists (the normal state). Keep the lifecycle state
+			// truthful without rewriting it on every startup.
+			if project.KnowledgeState != "" && project.KnowledgeState != domain.KnowledgeStateUninitialized {
+				_ = s.store.SetProjectKnowledgeState(ctx, project.ID, domain.KnowledgeStateUninitialized)
+			}
+		}
+	}
 	rebuildNeeded := false
 	ids := knowledgevault.SortedProjectIDs(manifestProjects)
 	manifestKnown := map[string]bool{}
@@ -275,6 +331,12 @@ func (s *Service) ReconcileKnowledgeSpaces(ctx context.Context) (KnowledgeSpaceR
 			if archivedPath != "" {
 				report.Warnings = append(report.Warnings, fmt.Sprintf("项目 %s 已不存在，知识空间已归档到 %s", projectID, archivedPath))
 			}
+			continue
+		}
+		if domain.IsSystemManagedProject(project) {
+			// A non-empty infrastructure space is intentionally retained (the
+			// cleanup stage above already warned). It is not provisioned,
+			// re-indexed or reported as unbound/error here.
 			continue
 		}
 		rootRelative, _ := knowledgevault.SpaceRootPath(config, projectID)
@@ -352,19 +414,12 @@ func (s *Service) ReconcileKnowledgeSpaces(ctx context.Context) (KnowledgeSpaceR
 		}
 		switch project.ProjectType {
 		case "channel", "system":
-			// The channel host is a default/identity space and the pet keeps
-			// its own space. Both are infrastructure and are never selected as
-			// ordinary projects, but their spaces must exist.
-			_ = s.store.SetProjectKnowledgeState(ctx, project.ID, domain.KnowledgeStateInitializing)
-			if _, err := s.knowledgeVault.ProvisionProjectSpace(ctx, project.ID, project.Name); err != nil {
-				_ = s.store.SetProjectKnowledgeState(ctx, project.ID, domain.KnowledgeStateError)
-				report.MarkedError = append(report.MarkedError, project.ID)
-				report.Warnings = append(report.Warnings, knowledgeSpaceProvisionWarning(project.ID, err))
-				continue
+			// Infrastructure projects do not own a vault space. The cleanup
+			// stage above removes generated leftovers; nothing is provisioned
+			// here and the project is never reported as unbound or in error.
+			if project.KnowledgeState != "" && project.KnowledgeState != domain.KnowledgeStateUninitialized {
+				_ = s.store.SetProjectKnowledgeState(ctx, project.ID, domain.KnowledgeStateUninitialized)
 			}
-			_ = s.store.SetProjectKnowledgeState(ctx, project.ID, domain.KnowledgeStateReady)
-			report.Provisioned = append(report.Provisioned, project.ID)
-			report.Ready++
 		case "knowledge":
 			// AHA1 archive residue has no workspace and no knowledge; the
 			// dedicated channel library is provisioned by the cutover, not by
@@ -437,8 +492,9 @@ func IsKnowledgeSpaceNotReadyError(err error) bool {
 }
 
 // IsKnowledgeSpaceConflictError reports a client-correctable project/space
-// conflict: the vault is unavailable, or the requested project ID is already
-// reserved by an archived space. HTTP handlers return 409 for these.
+// conflict: the vault is unavailable, the requested project ID is already
+// reserved by an archived space, or the project is infrastructure that has no
+// space at all. HTTP handlers return 409 for these.
 func IsKnowledgeSpaceConflictError(err error) bool {
 	if IsKnowledgeSpaceNotReadyError(err) {
 		return true
@@ -447,5 +503,5 @@ func IsKnowledgeSpaceConflictError(err error) bool {
 	if !errors.As(err, &spaceErr) {
 		return false
 	}
-	return spaceErr.Code == "project_id_archived"
+	return spaceErr.Code == "project_id_archived" || spaceErr.Code == "knowledge_space_not_applicable"
 }

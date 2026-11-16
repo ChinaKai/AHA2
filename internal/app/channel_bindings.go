@@ -89,8 +89,8 @@ func (s *Service) validateChannelKnowledgeBindings(ctx context.Context, consumer
 		if project.KnowledgeState != domain.KnowledgeStateReady {
 			return nil, fmt.Errorf("%w: 项目 %s 的知识空间状态为 %s", ErrKnowledgeSpaceNotReady, project.ID, project.KnowledgeState)
 		}
-		if project.ProjectType == "system" {
-			return nil, fmt.Errorf("系统项目 %s 不能作为渠道知识库", project.ID)
+		if domain.IsSystemManagedProject(project) {
+			return nil, fmt.Errorf("系统管理的渠道/宠物项目 %s 不能作为渠道知识库", project.ID)
 		}
 		access := strings.TrimSpace(binding.AccessMode)
 		if access != "read_write" {

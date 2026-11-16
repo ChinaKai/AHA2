@@ -21,7 +21,8 @@ func TestPrepareKnowledgeDeletionBacksUpExportsAndPlans(t *testing.T) {
 	createTestProject(t, database, "project-bound", "Bound Project", "folder")
 	createTestProject(t, database, "project-archived", "Archived Project", "archive")
 	createTestProject(t, database, "project-unbound-a", "未绑定甲", "folder")
-	createTestProject(t, database, "project-unbound-b", "未绑定乙", "channel")
+	createTestProject(t, database, "project-unbound-b", "未绑定乙", "folder")
+	createTestProject(t, database, "project-infra", "渠道宿主", "channel")
 
 	now := "2026-11-15T12:00:00Z"
 	insertKnowledge := func(id, scope, projectID, title, body string) {
@@ -33,6 +34,7 @@ func TestPrepareKnowledgeDeletionBacksUpExportsAndPlans(t *testing.T) {
 	insertKnowledge("knowledge_unbound_a1", "project", "project-unbound-a", "未绑定甲一", "甲正文一")
 	insertKnowledge("knowledge_unbound_a2", "project", "project-unbound-a", "未绑定甲二", "甲正文二")
 	insertKnowledge("knowledge_unbound_b1", "project", "project-unbound-b", "未绑定乙一", "乙正文")
+	insertKnowledge("knowledge_infra", "project", "project-infra", "渠道宿主知识", "基础设施正文")
 	insertKnowledge("knowledge_ghost", "project", "ghost-project", "孤儿知识", "孤儿正文")
 
 	execTestSQL(t, databasePath, `INSERT INTO knowledge_libraries(id,container_project_id,name,description,source_identity,created_at,updated_at)
@@ -106,22 +108,36 @@ func TestPrepareKnowledgeDeletionBacksUpExportsAndPlans(t *testing.T) {
 		}
 	}
 	want := map[string]int{
-		"knowledge_entries": 10, "knowledge_proposals": 2, "knowledge_libraries": 1,
-		"project_knowledge_bindings": 0, "skills": 2, "projects": 4,
+		"knowledge_entries": 12, "knowledge_proposals": 2, "knowledge_libraries": 1,
+		"project_knowledge_bindings": 0, "skills": 2, "projects": 5,
 	}
 	for table, count := range want {
 		if rowsByTable[table] != count {
 			t.Fatalf("%s rows = %d, want %d", table, rowsByTable[table], count)
 		}
 	}
-	if report.ScopeRows != 13 {
-		t.Fatalf("scope rows = %d, want 13", report.ScopeRows)
+	if report.ScopeRows != 15 {
+		t.Fatalf("scope rows = %d, want 15", report.ScopeRows)
 	}
 	if len(report.UnboundProjects) != 2 {
 		t.Fatalf("unbound projects = %+v", report.UnboundProjects)
 	}
+	for _, project := range report.UnboundProjects {
+		if project.ProjectType == "channel" || project.ProjectType == "system" {
+			t.Fatalf("infrastructure project counted as unbound: %+v", project)
+		}
+	}
 	if report.UnboundEntries != 5 {
 		t.Fatalf("unbound entries = %d", report.UnboundEntries)
+	}
+	infraWarning := false
+	for _, warning := range report.Warnings {
+		if strings.Contains(warning, "project-infra") && strings.Contains(warning, "未计入未绑定项目") {
+			infraWarning = true
+		}
+	}
+	if !infraWarning {
+		t.Fatalf("infrastructure legacy rows were not reported: %+v", report.Warnings)
 	}
 	if len(report.OrphanProjectIDs) != 1 || report.OrphanProjectIDs[0] != "ghost-project" || report.OrphanEntries != 1 {
 		t.Fatalf("orphans = %+v entries=%d", report.OrphanProjectIDs, report.OrphanEntries)
@@ -169,7 +185,7 @@ func TestPrepareKnowledgeDeletionBacksUpExportsAndPlans(t *testing.T) {
 	if err := json.Unmarshal(planData, &planJSON); err != nil {
 		t.Fatal(err)
 	}
-	if planJSON.BackupSHA256 != report.BackupSHA256 || planJSON.ScopeRows != 13 {
+	if planJSON.BackupSHA256 != report.BackupSHA256 || planJSON.ScopeRows != 15 {
 		t.Fatalf("plan json mismatch: %+v", planJSON)
 	}
 

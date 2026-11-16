@@ -93,11 +93,11 @@ func TestDeleteProjectArchivesVaultSpaceAndCleansBindings(t *testing.T) {
 		{domain.KnowledgeBindingChannelInstance, "channel-529"},
 		{domain.KnowledgeBindingChannelEndpoint, "channel-529::assistant_dm"},
 	} {
-		if _, err := database.ReplaceKnowledgeBindings(ctx, consumer.kind, consumer.id, []domain.KnowledgeBinding{{SpaceProject: project.ID}}); err != nil {
+		if _, err := database.ReplaceKnowledgeBindings(ctx, consumer.kind, consumer.id, []domain.KnowledgeBinding{{SpaceProject: project.ID}}, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := database.ReplaceKnowledgeBindings(ctx, domain.KnowledgeBindingChannelInstance, "channel-keep", []domain.KnowledgeBinding{{SpaceProject: otherProject.ID}}); err != nil {
+	if _, err := database.ReplaceKnowledgeBindings(ctx, domain.KnowledgeBindingChannelInstance, "channel-keep", []domain.KnowledgeBinding{{SpaceProject: otherProject.ID}}, nil); err != nil {
 		t.Fatal(err)
 	}
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -232,7 +233,7 @@ func TestChannelBindingsReplaceAndRejectUnreadySpaces(t *testing.T) {
 	}
 }
 
-func TestReconcileKnowledgeSpacesProvisionsLegacyAndChannelHosts(t *testing.T) {
+func TestReconcileKnowledgeSpacesProvisionsNormalProjectsAndSkipsInfrastructure(t *testing.T) {
 	service, database, _, config := newSpaceTestService(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -242,6 +243,10 @@ func TestReconcileKnowledgeSpacesProvisionsLegacyAndChannelHosts(t *testing.T) {
 	}
 	channelHost := domain.Project{ID: "project-channel-host", Name: "Channel Host", ProjectType: "channel", KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now}
 	if err := database.CreateProject(ctx, channelHost); err != nil {
+		t.Fatal(err)
+	}
+	systemProject := domain.Project{ID: "project-system-host", Name: "Pet", ProjectType: "system", KnowledgePolicy: "none", CreatedAt: now, UpdatedAt: now}
+	if err := database.CreateProject(ctx, systemProject); err != nil {
 		t.Fatal(err)
 	}
 	report, err := service.ReconcileKnowledgeSpaces(ctx)
@@ -255,26 +260,46 @@ func TestReconcileKnowledgeSpacesProvisionsLegacyAndChannelHosts(t *testing.T) {
 	for _, id := range report.Provisioned {
 		provisioned[id] = true
 	}
-	for _, id := range []string{legacy.ID, channelHost.ID} {
-		if !provisioned[id] {
-			t.Fatalf("project %s was not provisioned: %#v", id, report)
+	if !provisioned[legacy.ID] {
+		t.Fatalf("normal project %s was not provisioned: %#v", legacy.ID, report)
+	}
+	stored, err := database.Project(ctx, legacy.ID)
+	if err != nil || stored.KnowledgeState != domain.KnowledgeStateReady {
+		t.Fatalf("project %s state=%q err=%v", legacy.ID, stored.KnowledgeState, err)
+	}
+	root, ok := knowledgevault.SpaceRootPath(config, legacy.ID)
+	if !ok {
+		t.Fatalf("project %s has no manifest mapping", legacy.ID)
+	}
+	if _, err := os.Stat(filepath.Join(config.VaultPath, filepath.FromSlash(root))); err != nil {
+		t.Fatalf("project %s root missing: %v", legacy.ID, err)
+	}
+
+	// Infrastructure projects never get a space, are not reported as errors,
+	// and keep no manifest mapping or directory.
+	for _, project := range []domain.Project{channelHost, systemProject} {
+		if provisioned[project.ID] {
+			t.Fatalf("infrastructure project %s was provisioned: %#v", project.ID, report)
 		}
-		stored, err := database.Project(ctx, id)
-		if err != nil || stored.KnowledgeState != domain.KnowledgeStateReady {
-			t.Fatalf("project %s state=%q err=%v", id, stored.KnowledgeState, err)
+		for _, id := range report.MarkedError {
+			if id == project.ID {
+				t.Fatalf("infrastructure project %s was marked error: %#v", project.ID, report)
+			}
 		}
-		root, ok := knowledgevault.SpaceRootPath(config, id)
-		if !ok {
-			t.Fatalf("project %s has no manifest mapping", id)
+		if _, mapped := knowledgevault.SpaceRootPath(config, project.ID); mapped {
+			t.Fatalf("infrastructure project %s has a vault mapping", project.ID)
 		}
-		if _, err := os.Stat(filepath.Join(config.VaultPath, filepath.FromSlash(root))); err != nil {
-			t.Fatalf("project %s root missing: %v", id, err)
+		stored, err := database.Project(ctx, project.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stored.KnowledgeState == domain.KnowledgeStateError {
+			t.Fatalf("infrastructure project %s was left in error state", project.ID)
 		}
 	}
 
 	// A manifest project whose root page disappeared is marked error for a
 	// retry; reconciliation never silently reports it ready.
-	root, _ := knowledgevault.SpaceRootPath(config, legacy.ID)
 	if err := os.Remove(filepath.Join(config.VaultPath, filepath.FromSlash(root))); err != nil {
 		t.Fatal(err)
 	}
@@ -294,6 +319,239 @@ func TestReconcileKnowledgeSpacesProvisionsLegacyAndChannelHosts(t *testing.T) {
 	retried, err := service.RetryProjectKnowledgeSpace(ctx, legacy.ID)
 	if err != nil || retried.KnowledgeState != domain.KnowledgeStateReady {
 		t.Fatalf("retry after missing root = %#v err=%v", retried, err)
+	}
+}
+
+func TestReconcileCleansEmptyInfrastructureSpaces(t *testing.T) {
+	service, database, manager, config := newSpaceTestService(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	channelHost := domain.Project{ID: "project-empty-channel", Name: "Empty Channel", ProjectType: "channel", KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now}
+	if err := database.CreateProject(ctx, channelHost); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate the space an older release provisioned for the channel host.
+	if _, err := manager.ProvisionProjectSpace(ctx, channelHost.ID, channelHost.Name); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := knowledgevault.ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slug := manifest.Projects[channelHost.ID]
+	if slug == "" {
+		t.Fatalf("channel space was not provisioned: %#v", manifest.Projects)
+	}
+	spaceDir := filepath.Join(config.VaultPath, "projects", slug)
+	if err := os.WriteFile(filepath.Join(spaceDir, ".gitkeep"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(spaceDir, "empty"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := service.ReconcileKnowledgeSpaces(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, id := range report.Cleaned {
+		if id == channelHost.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("empty infrastructure space was not cleaned: %#v", report)
+	}
+	manifest, err = knowledgevault.ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, mapped := manifest.Projects[channelHost.ID]; mapped {
+		t.Fatalf("empty infrastructure space is still mapped: %#v", manifest.Projects)
+	}
+	if _, statErr := os.Stat(spaceDir); !os.IsNotExist(statErr) {
+		t.Fatalf("empty infrastructure directory still exists: %v", statErr)
+	}
+	stored, err := database.Project(ctx, channelHost.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.KnowledgeState != domain.KnowledgeStateUninitialized {
+		t.Fatalf("cleaned project state = %q", stored.KnowledgeState)
+	}
+	if err := manager.WithReader(func(reader *knowledgevault.Reader) error {
+		entries, entryErr := reader.Entries(ctx, "project", channelHost.ID)
+		if entryErr != nil {
+			return entryErr
+		}
+		if len(entries) != 0 {
+			t.Fatalf("cleaned project still has index entries: %#v", entries)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Idempotent: a second startup has nothing to clean and does not fail.
+	report, err = service.ReconcileKnowledgeSpaces(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range report.Cleaned {
+		if id == channelHost.ID {
+			t.Fatalf("cleanup was not idempotent: %#v", report)
+		}
+	}
+}
+
+func TestReconcileRetainsNonEmptyInfrastructureSpace(t *testing.T) {
+	service, database, manager, config := newSpaceTestService(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	channelHost := domain.Project{ID: "project-nonempty-channel", Name: "Busy Channel", ProjectType: "channel", KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now}
+	if err := database.CreateProject(ctx, channelHost); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.ProvisionProjectSpace(ctx, channelHost.ID, channelHost.Name); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := knowledgevault.ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slug := manifest.Projects[channelHost.ID]
+	writeProjectKnowledgeDoc(t, config, "projects/"+slug+"/notes/keep.md", "Keep", "retained-infra-marker")
+	if _, err := manager.Rebuild(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := service.ReconcileKnowledgeSpaces(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range report.Cleaned {
+		if id == channelHost.ID {
+			t.Fatalf("non-empty infrastructure space was deleted: %#v", report)
+		}
+	}
+	warned := false
+	for _, warning := range report.Warnings {
+		if strings.Contains(warning, channelHost.ID) && strings.Contains(warning, "已保留") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Fatalf("non-empty infrastructure space was not reported: %#v", report.Warnings)
+	}
+	manifest, err = knowledgevault.ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Projects[channelHost.ID] != slug {
+		t.Fatalf("non-empty infrastructure mapping changed: %#v", manifest.Projects)
+	}
+	if _, err := os.Stat(filepath.Join(config.VaultPath, "projects", slug, "notes", "keep.md")); err != nil {
+		t.Fatalf("non-empty infrastructure document was removed: %v", err)
+	}
+}
+
+func TestPetSystemProjectTaskKnowledgeIsGlobalOnly(t *testing.T) {
+	service, database, manager, config := newSpaceTestService(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	petProject := domain.Project{ID: petProjectID, Name: "宠物", ProjectType: "system", KnowledgePolicy: "none", CreatedAt: now, UpdatedAt: now}
+	if err := database.CreateProject(ctx, petProject); err != nil {
+		t.Fatal(err)
+	}
+	global := "---\ntitle: Global Note\nslug: global-note\nscope: global\ntype: reference\nstatus: verified\n---\n# Global Note\n\nglobal-marker\n"
+	if err := os.WriteFile(filepath.Join(config.VaultPath, "global", "note.md"), []byte(global), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Rebuild(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	projectActive, projectStale, _, err := service.projectKnowledgeForTask(ctx, petProject.ID, domain.ProductLine{}, true)
+	if err != nil {
+		t.Fatalf("system project knowledge read failed: %v", err)
+	}
+	if len(projectActive) != 0 || len(projectStale) != 0 {
+		t.Fatalf("system project knowledge = %#v stale=%#v", projectActive, projectStale)
+	}
+	globalActive, _, _, err := service.globalKnowledgeForTask(ctx, true)
+	if err != nil {
+		t.Fatalf("global knowledge read failed: %v", err)
+	}
+	found := false
+	for _, entry := range globalActive {
+		if entry.Title == "Global Note" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("global knowledge was not injected: %#v", globalActive)
+	}
+}
+
+func TestRetryProjectKnowledgeSpaceRefusesInfrastructureProjects(t *testing.T) {
+	service, database, _, config := newSpaceTestService(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	channelHost := domain.Project{ID: "project-retry-channel", Name: "Retry Channel", ProjectType: "channel", KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now}
+	if err := database.CreateProject(ctx, channelHost); err != nil {
+		t.Fatal(err)
+	}
+	_, err := service.RetryProjectKnowledgeSpace(ctx, channelHost.ID)
+	var spaceErr *KnowledgeSpaceError
+	if !errors.As(err, &spaceErr) || spaceErr.Code != "knowledge_space_not_applicable" {
+		t.Fatalf("error = %#v", err)
+	}
+	if !IsKnowledgeSpaceConflictError(err) {
+		t.Fatal("infrastructure retry was not reported as a conflict")
+	}
+	if _, mapped := knowledgevault.SpaceRootPath(config, channelHost.ID); mapped {
+		t.Fatal("infrastructure retry created a vault mapping")
+	}
+}
+
+func TestVaultLibrariesHideInfrastructureProjects(t *testing.T) {
+	service, database, manager, _ := newSpaceTestService(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	normal := domain.Project{ID: "project-visible", Name: "Visible", ProjectType: "folder", KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now}
+	channelHost := domain.Project{ID: "project-hidden-channel", Name: "Hidden Channel", ProjectType: "channel", KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now}
+	systemProject := domain.Project{ID: "project-hidden-system", Name: "Hidden Pet", ProjectType: "system", KnowledgePolicy: "none", CreatedAt: now, UpdatedAt: now}
+	for _, project := range []domain.Project{normal, channelHost, systemProject} {
+		if err := database.CreateProject(ctx, project); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, project := range []domain.Project{normal, channelHost, systemProject} {
+		if _, err := manager.ProvisionProjectSpace(ctx, project.ID, project.Name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	libraries, err := service.VaultLibraries(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	visible := map[string]bool{}
+	for _, item := range libraries.Projects {
+		visible[item.ProjectID] = true
+	}
+	if !visible[normal.ID] {
+		t.Fatalf("normal project is missing from the picker: %#v", libraries.Projects)
+	}
+	for _, id := range []string{channelHost.ID, systemProject.ID} {
+		if visible[id] {
+			t.Fatalf("infrastructure project %s is offered as a library: %#v", id, libraries.Projects)
+		}
+		for _, item := range libraries.Libraries {
+			if item.Kind == "project" && item.ProjectID == id {
+				t.Fatalf("infrastructure project %s is in the combined library list: %#v", id, libraries.Libraries)
+			}
+		}
 	}
 }
 

@@ -58,6 +58,7 @@ func TestCreateInstanceSkipsLegacyKnowledgeRootsWhenVaultReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertNoLegacyChannelKnowledge(t, ctx, database, instance)
+	assertNoVaultChannelSpace(t, vaultConfig, instance.HostProjectID)
 
 	// Replaying the same idempotency key runs the re-ensure branch too; it must
 	// not create the root or policies either.
@@ -66,6 +67,7 @@ func TestCreateInstanceSkipsLegacyKnowledgeRootsWhenVaultReads(t *testing.T) {
 		t.Fatalf("idempotent instance=%#v err=%v", repeated, err)
 	}
 	assertNoLegacyChannelKnowledge(t, ctx, database, repeated)
+	assertNoVaultChannelSpace(t, vaultConfig, repeated.HostProjectID)
 
 	// Fallback: with the switch off the historical root and per-endpoint
 	// policies come back, so an unbound/read-fallback deployment is unchanged.
@@ -89,6 +91,18 @@ func TestCreateInstanceSkipsLegacyKnowledgeRootsWhenVaultReads(t *testing.T) {
 	}
 	if len(policies) != 2 {
 		t.Fatalf("fallback channel policies=%#v, want two endpoints", policies)
+	}
+}
+
+func assertNoVaultChannelSpace(t *testing.T, config knowledgevault.Config, projectID string) {
+	t.Helper()
+	manifest, err := knowledgevault.ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slug := manifest.Projects[projectID]
+	if slug != "" {
+		t.Fatalf("channel host %s was provisioned a vault space: %#v", projectID, manifest.Projects)
 	}
 }
 

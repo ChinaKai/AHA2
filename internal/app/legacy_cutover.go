@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/knowledgevault"
 	"github.com/ChinaKai/AHA2/internal/store"
 )
@@ -35,6 +36,11 @@ func (s *Service) ExportLegacyKnowledgeToProjectSpace(ctx context.Context, proje
 	project, err := s.store.Project(ctx, result.ProjectID)
 	if err != nil {
 		return result, err
+	}
+	if domain.IsSystemManagedProject(project) {
+		return result, knowledgeSpaceError(
+			"knowledge_space_not_applicable",
+			"渠道/宠物等系统管理项目不拥有独立知识空间，不能作为旧库导出目标", nil)
 	}
 	if _, err := s.knowledgeVault.ProvisionProjectSpace(ctx, project.ID, project.Name); err != nil {
 		if errors.Is(err, knowledgevault.ErrProjectIDArchived) {

@@ -640,6 +640,17 @@ func deletePrepProjectScope(ctx context.Context, db *sql.DB, vaultPath string, r
 		if bound[project.ID] {
 			continue
 		}
+		if project.Type == "channel" || project.Type == "system" {
+			// Infrastructure projects have no vault space by design. They are
+			// not unbound; if legacy rows still exist, report them as a warning
+			// so deleting the old tables is not silent about them.
+			if entryCounts[project.ID] > 0 {
+				report.Warnings = append(report.Warnings, fmt.Sprintf(
+					"基础设施项目 %s（%s）有 %d 条旧知识条目；它不拥有 vault 知识空间，未计入未绑定项目",
+					project.ID, project.Type, entryCounts[project.ID]))
+			}
+			continue
+		}
 		item := UnboundProjectPlan{
 			ProjectID: project.ID, Name: project.Name, ProjectType: project.Type,
 			Entries: entryCounts[project.ID],

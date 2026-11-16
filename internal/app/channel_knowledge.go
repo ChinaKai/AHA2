@@ -33,6 +33,11 @@ func (s *Service) KnowledgeIndexSources(ctx context.Context) ([]KnowledgeIndexSo
 	}
 	result := make([]KnowledgeIndexSource, 0, len(projects))
 	for _, project := range projects {
+		// Channel hosts and the pet's system project are infrastructure, not
+		// knowledge sources; they have no vault space to offer.
+		if domain.IsSystemManagedProject(project) {
+			continue
+		}
 		decision := s.knowledgeReadDecision("project", project.ID)
 		if decision.Err != nil {
 			return nil, vaultReadFailure("project", project.ID, decision.Err)
@@ -158,9 +163,10 @@ func (s *Service) channelAllowedKnowledge(ctx context.Context, instanceID, endpo
 			return nil, err
 		}
 		for _, project := range projects {
-			// A channel host project is infrastructure, not a knowledge
-			// source; the legacy "all" rule excluded it the same way.
-			if project.ProjectType == "channel" {
+			// Channel hosts and system projects are infrastructure, not
+			// knowledge sources; the legacy "all" rule excluded them the same
+			// way.
+			if domain.IsSystemManagedProject(project) {
 				continue
 			}
 			entries, sourceErr := s.channelScopeEntries(ctx, "project", project.ID)

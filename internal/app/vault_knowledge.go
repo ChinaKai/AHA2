@@ -73,6 +73,7 @@ type knowledgeVaultBackend interface {
 	ProvisionProjectSpace(context.Context, string, string) (knowledgevault.ProjectSpaceResult, error)
 	RenameProjectSpace(string, string) error
 	ArchiveProjectSpace(context.Context, string) (string, error)
+	RemoveEmptyProjectSpace(context.Context, string) (knowledgevault.ProjectSpaceCleanupResult, error)
 	Rebuild(context.Context) (knowledgevault.RebuildReport, error)
 }
 
@@ -226,7 +227,51 @@ func (s *Service) VaultLibraries(ctx context.Context) (knowledgevault.LibraryLis
 	if err != nil {
 		return knowledgevault.LibraryList{}, err
 	}
+	// Channel hosts and the pet's system project do not own knowledge spaces.
+	// A leftover non-empty space may still be mapped in the manifest until the
+	// owner moves its files, but it must never be offered as a knowledge source.
+	removeInfrastructureLibraries(&result, s.infrastructureProjectIDs(ctx))
 	return result, nil
+}
+
+// infrastructureProjectIDs lists the projects AHA2 manages itself. They are
+// visible as projects but have no project knowledge space.
+func (s *Service) infrastructureProjectIDs(ctx context.Context) map[string]bool {
+	result := map[string]bool{}
+	if s == nil || s.store == nil {
+		return result
+	}
+	projects, err := s.store.ListProjects(ctx)
+	if err != nil {
+		log.Printf("list projects for infrastructure knowledge filter: %v", err)
+		return result
+	}
+	for _, project := range projects {
+		if domain.IsSystemManagedProject(project) {
+			result[project.ID] = true
+		}
+	}
+	return result
+}
+
+// removeInfrastructureLibraries drops every project-kind library that belongs
+// to a system-managed project from both the picker and the project list view.
+func removeInfrastructureLibraries(result *knowledgevault.LibraryList, infrastructure map[string]bool) {
+	if result == nil || len(infrastructure) == 0 {
+		return
+	}
+	filter := func(items []knowledgevault.Library) []knowledgevault.Library {
+		kept := make([]knowledgevault.Library, 0, len(items))
+		for _, item := range items {
+			if item.Kind == "project" && infrastructure[item.ProjectID] {
+				continue
+			}
+			kept = append(kept, item)
+		}
+		return kept
+	}
+	result.Projects = filter(result.Projects)
+	result.Libraries = filter(result.Libraries)
 }
 
 // applyVaultLibraryNames replaces manifest-derived names in place. It covers
@@ -409,6 +454,12 @@ func (s *Service) pendingKnowledgeIDs(ctx context.Context, vault bool) map[strin
 // The returned source tells the caller which pending set applies. Vault errors
 // are returned, never turned into a legacy fallback.
 func (s *Service) projectKnowledgeForTask(ctx context.Context, projectID string, productLine domain.ProductLine, excludePending bool) ([]domain.KnowledgeEntry, []domain.KnowledgeEntry, string, error) {
+	if s.projectHasNoKnowledgeSpace(ctx, projectID) {
+		// Infrastructure projects have no project knowledge by design. Return
+		// an empty project half instead of an unbound error so the pet Task can
+		// still receive global knowledge without a warning on every Turn.
+		return nil, nil, "vault", nil
+	}
 	snapshot, vault, err := s.readVaultProjectKnowledge(ctx, projectID)
 	if err != nil {
 		return nil, nil, "vault", err
@@ -427,6 +478,20 @@ func (s *Service) projectKnowledgeForTask(ctx context.Context, projectID string,
 		stale = filterPendingStale(stale, s.pendingKnowledgeIDs(ctx, false))
 	}
 	return active, stale, "legacy", nil
+}
+
+// projectHasNoKnowledgeSpace reports whether a project is system-managed and
+// therefore has no project knowledge space in model A. A missing project row
+// is not treated as infrastructure: the caller's normal routing reports that.
+func (s *Service) projectHasNoKnowledgeSpace(ctx context.Context, projectID string) bool {
+	if s == nil || s.store == nil {
+		return false
+	}
+	project, err := s.store.Project(ctx, strings.TrimSpace(projectID))
+	if err != nil {
+		return false
+	}
+	return domain.IsSystemManagedProject(project)
 }
 
 // globalKnowledgeForTask is the global half. It routes independently from the

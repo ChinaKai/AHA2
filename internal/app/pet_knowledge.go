@@ -114,6 +114,11 @@ func (s *Service) PetListKnowledge(ctx context.Context, scope, projectID string,
 	var entries []domain.KnowledgeEntry
 	var err error
 	if scope == "project" {
+		if s.projectHasNoKnowledgeSpace(ctx, projectID) {
+			// Infrastructure projects have no knowledge space; an empty result
+			// is the honest answer, not an unbound error.
+			return PetKnowledgeView{}, nil
+		}
 		if snapshot, vault, readErr := s.readVaultProjectKnowledge(ctx, projectID); readErr != nil {
 			return PetKnowledgeView{}, readErr
 		} else if vault {

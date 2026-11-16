@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -492,15 +491,9 @@ func (s *Service) CreateInstance(ctx context.Context, ownerID, pluginID, name, i
 	if err := s.store.CreateChannelInstanceWithHost(ctx, project, workspace, item, endpoints); err != nil {
 		return domain.ChannelInstance{}, err
 	}
-	// Model A: the channel host is also its identity knowledge space. The
-	// project row was inserted by the dedicated host transaction, so initialize
-	// the vault space now; a failure leaves the project in error and the next
-	// startup reconciliation retries, without deleting the channel.
-	if s.application != nil && s.application.KnowledgeVaultAvailable() {
-		if _, spaceErr := s.application.RetryProjectKnowledgeSpace(ctx, projectID); spaceErr != nil {
-			log.Printf("initialize channel host knowledge space %s: %v", projectID, spaceErr)
-		}
-	}
+	// Model A: infrastructure projects (channel hosts and the pet's system
+	// project) do not own a vault space. Channel knowledge comes from
+	// knowledge_bindings and global knowledge, so no space is provisioned here.
 	if s.legacyKnowledgeRootsEnabled(projectID) {
 		knowledgeRoot, err := s.store.EnsureKnowledgeRoot(ctx, "project", projectID)
 		if err != nil {
@@ -897,7 +890,7 @@ func (s *Service) channelKnowledgeSourceRoots(ctx context.Context) (map[string]b
 			if projectID == "" {
 				continue
 			}
-			if libraryProjects[projectID] || (projectTypes[projectID] != "channel" && projectTypes[projectID] != "knowledge") {
+			if libraryProjects[projectID] || (projectTypes[projectID] != "channel" && projectTypes[projectID] != "system" && projectTypes[projectID] != "knowledge") {
 				allowedRoots[source.Entry.ID] = true
 				if source.Vault {
 					vaultRoots[source.Entry.ID] = true
@@ -929,7 +922,7 @@ func (s *Service) channelKnowledgeSourceRoots(ctx context.Context) (map[string]b
 			continue
 		}
 		project, projectErr := s.store.Project(ctx, entry.ProjectID)
-		if projectErr == nil && project.ProjectType != "channel" && project.ProjectType != "knowledge" {
+		if projectErr == nil && !domain.IsSystemManagedProject(project) && project.ProjectType != "knowledge" {
 			allowedRoots[entry.ID] = true
 		}
 	}

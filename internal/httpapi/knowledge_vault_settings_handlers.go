@@ -50,6 +50,11 @@ func (s *Server) knowledgeVaultView(ctx context.Context) (knowledgeVaultSettings
 	}
 	known := make([]string, 0, len(projects))
 	for _, project := range projects {
+		// Channel hosts and the pet's system project do not own knowledge
+		// spaces, so they are never "unbound" projects in readiness.
+		if domain.IsSystemManagedProject(project) {
+			continue
+		}
 		known = append(known, project.ID)
 	}
 	readiness := knowledgevault.EvaluateReadiness(knowledgevault.ReadinessInput{
@@ -343,6 +348,11 @@ func (s *Server) importKnowledgeVault(writer http.ResponseWriter, request *http.
 	}
 	known := make([]string, 0, len(projects))
 	for _, project := range projects {
+		// Channel hosts and the pet's system project do not own knowledge
+		// spaces, so they are never "unbound" projects in readiness.
+		if domain.IsSystemManagedProject(project) {
+			continue
+		}
 		known = append(known, project.ID)
 	}
 	previousEnabled, previousSource := s.knowledgeVault.Enabled(), s.knowledgeVault.Source()
