@@ -112,6 +112,13 @@ func legacyExportBody(body string) string {
 // knowledge tables. VerifyExport is evaluated inside the store cutover after
 // the backup, so a failed export leaves every table intact.
 func (s *Service) CutoverLegacyKnowledge(ctx context.Context, projectID string, backupDir string) (store.LegacyCutoverReport, error) {
+	if applied, err := s.store.LegacyCutoverApplied(ctx); err != nil {
+		return store.LegacyCutoverReport{}, err
+	} else if applied {
+		// Repeated startup/support calls must not try to export from tables
+		// that were already removed.
+		return store.LegacyCutoverReport{Applied: true}, nil
+	}
 	exported, err := s.ExportLegacyKnowledgeToProjectSpace(ctx, projectID)
 	if err != nil {
 		return store.LegacyCutoverReport{}, err

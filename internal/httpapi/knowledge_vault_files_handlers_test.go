@@ -1,10 +1,16 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/ChinaKai/AHA2/internal/app"
+	"github.com/ChinaKai/AHA2/internal/store"
 )
 
 func TestKnowledgeVaultFilesHandlersReadRealTree(t *testing.T) {
@@ -105,5 +111,23 @@ func TestKnowledgeVaultRevealIsLoopbackOnly(t *testing.T) {
 	}
 	if payload["open_available"] != false {
 		t.Fatalf("remote open_available=%v", payload["open_available"])
+	}
+}
+
+func TestKnowledgeCutoverRequiresExplicitConfirmation(t *testing.T) {
+	manager := knowledgeVaultManagerFixture(t)
+	database, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	service := app.NewService(database, nil, nil)
+	service.SetKnowledgeVault(manager, true)
+	server := &Server{store: database, app: service, knowledgeVault: manager}
+	recorder := httptest.NewRecorder()
+	body := strings.NewReader(`{"project_id":"project_legacy","confirm":false}`)
+	server.cutoverLegacyKnowledge(recorder, httptest.NewRequest(http.MethodPost, "/api/v1/settings/knowledge-vault/cutover-legacy", body))
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("cutover without confirmation status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }

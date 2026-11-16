@@ -584,6 +584,7 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("PUT /api/v1/settings/knowledge-vault", s.withAuth(http.HandlerFunc(s.updateKnowledgeVaultSettings)))
 		mux.Handle("POST /api/v1/settings/knowledge-vault/init", s.withAuth(http.HandlerFunc(s.initializeKnowledgeVault)))
 		mux.Handle("POST /api/v1/settings/knowledge-vault/rebuild", s.withAuth(http.HandlerFunc(s.rebuildKnowledgeVaultIndex)))
+		mux.Handle("POST /api/v1/settings/knowledge-vault/cutover-legacy", s.withAuth(http.HandlerFunc(s.cutoverLegacyKnowledge)))
 		mux.Handle("POST /api/v1/settings/knowledge-vault/migrate", s.withAuth(http.HandlerFunc(s.migrateKnowledgeVault)))
 		mux.Handle("POST /api/v1/settings/knowledge-vault/import", s.withAuth(http.HandlerFunc(s.importKnowledgeVault)))
 		mux.Handle("GET /api/v1/knowledge-vault/git/status", s.withAuth(http.HandlerFunc(s.knowledgeVaultGitStatus)))
