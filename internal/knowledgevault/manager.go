@@ -294,6 +294,30 @@ func (m *Manager) ProvisionProjectSpace(ctx context.Context, projectID, projectN
 	return result, nil
 }
 
+// ArchiveProjectSpace moves a deleted project's space into archive/projects,
+// drops its manifest mapping and rebuilds the index so the archived documents
+// stay searchable while the live project entries disappear. It works while the
+// owner-visible switch is off, matching provisioning and import. A vault that
+// was never initialized has no space, so the call is a successful no-op.
+func (m *Manager) ArchiveProjectSpace(ctx context.Context, projectID string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !VaultInitialized(m.config.VaultPath) {
+		return "", nil
+	}
+	archivedPath, needsRebuild, err := archiveProjectSpace(m.config, projectID, time.Now().UTC())
+	if err != nil {
+		return archivedPath, err
+	}
+	if !needsRebuild {
+		return archivedPath, nil
+	}
+	if _, err := m.rebuildLocked(ctx); err != nil {
+		return archivedPath, fmt.Errorf("rebuild index after archiving project space: %w", err)
+	}
+	return archivedPath, nil
+}
+
 // RenameProjectSpace records a project rename in the manifest without moving
 // its files or changing its slug.
 func (m *Manager) RenameProjectSpace(projectID, name string) error {
