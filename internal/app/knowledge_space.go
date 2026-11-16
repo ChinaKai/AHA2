@@ -206,7 +206,7 @@ func (s *Service) ReconcileKnowledgeSpaces(ctx context.Context) (KnowledgeSpaceR
 	manifestProjects := map[string]string{}
 	manifestArchives := map[string]string{}
 	indexedRoots := map[string]bool{}
-	indexedArchiveRoots := map[string]bool{}
+	indexedArchives := map[string]bool{}
 	projectEntries := map[string]bool{}
 	_ = s.knowledgeVault.WithReader(func(reader *knowledgevault.Reader) error {
 		manifestProjects = reader.Manifest().Projects
@@ -231,8 +231,8 @@ func (s *Service) ReconcileKnowledgeSpaces(ctx context.Context) (KnowledgeSpaceR
 			return err
 		}
 		for _, entry := range archiveEntries {
-			if entry.IsIndex && entry.ProjectID != "" {
-				indexedArchiveRoots[entry.ProjectID] = true
+			if entry.ProjectID != "" {
+				indexedArchives[entry.ProjectID] = true
 			}
 		}
 		return nil
@@ -295,9 +295,9 @@ func (s *Service) ReconcileKnowledgeSpaces(ctx context.Context) (KnowledgeSpaceR
 	// is invisible to the project loop above. One rebuild reconciles both the
 	// missing archive root and the stale project rows.
 	for _, archiveID := range knowledgevault.SortedProjectIDs(manifestArchives) {
-		if !indexedArchiveRoots[archiveID] {
+		if !indexedArchives[archiveID] {
 			rebuildNeeded = true
-			report.Warnings = append(report.Warnings, fmt.Sprintf("归档 %s 缺少索引根条目，已安排重建", archiveID))
+			report.Warnings = append(report.Warnings, fmt.Sprintf("归档 %s 缺少索引条目，已安排重建", archiveID))
 			continue
 		}
 		if projectEntries[archiveID] {
