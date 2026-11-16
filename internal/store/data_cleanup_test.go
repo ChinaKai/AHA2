@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -154,12 +155,49 @@ func TestConversationPurgePlanProtectsActiveApprovalsFinalAnswersAndAttachments(
 		t.Fatalf("tool+update plan=%#v", plan)
 	}
 
+	// Seed rows in the neighbouring B tables and in protected tables, then
+	// snapshot their counts. Conversation cleanup must only write
+	// conversation_items.
+	for _, statement := range []struct {
+		query string
+		args  []any
+	}{
+		{`INSERT INTO messages(id,task_id,turn_id,role,sender,content,created_at) VALUES(?,?,?,?,?,?,?)`,
+			[]any{"message-1", terminal.ID, "", "assistant", "main", "final reply", timeString(old)}},
+		{`INSERT INTO events(id,aggregate_type,aggregate_id,type,data_json,occurred_at) VALUES(?,?,?,?,?,?)`,
+			[]any{"event-1", "task", terminal.ID, "test", "{}", timeString(old)}},
+		{`INSERT INTO audit_events(id,owner_id,action,resource_type,resource_id,data_json,occurred_at) VALUES(?,?,?,?,?,?,?)`,
+			[]any{"audit-1", "owner", "seed", "test", "x", "{}", timeString(old)}},
+	} {
+		if _, err := database.db.Exec(statement.query, statement.args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	protectedTables := []string{"messages", "events", "audit_events", "attachments", "tasks", "projects", "task_permission_requests"}
+	protectedBefore := map[string]int64{}
+	for _, table := range protectedTables {
+		var count int64
+		if err := database.db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		protectedBefore[table] = count
+	}
+
 	result, err := database.PurgeConversationItems(ctx, settings, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.DeletedRows != 2 || result.Batches != 1 {
 		t.Fatalf("purge result=%#v", result)
+	}
+	for table, before := range protectedBefore {
+		var after int64
+		if err := database.db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&after); err != nil {
+			t.Fatal(err)
+		}
+		if after != before {
+			t.Fatalf("conversation cleanup changed %s: %d -> %d", table, before, after)
+		}
 	}
 	for label, id := range map[string]string{
 		"eligible tool": eligibleTool, "eligible update": eligibleUpdate,
@@ -180,13 +218,6 @@ func TestConversationPurgePlanProtectsActiveApprovalsFinalAnswersAndAttachments(
 		if !conversationItemExists(t, database, id) {
 			t.Fatalf("%s was deleted", label)
 		}
-	}
-	// Messages, events and audit rows are never touched by conversation
-	// cleanup; the fixture had none, so assert the audit table still holds
-	// whatever was written before the purge.
-	var audits int
-	if err := database.db.QueryRow(`SELECT COUNT(*) FROM audit_events`).Scan(&audits); err != nil || audits != 0 {
-		t.Fatalf("conversation purge wrote or removed audit rows: %d %v", audits, err)
 	}
 }
 
@@ -377,5 +408,41 @@ func TestCompactDatabaseRestoresFromBackupWhenVerificationFails(t *testing.T) {
 	}
 	if len(result.BeforeRowCounts) == 0 {
 		t.Fatal("before row counts should be reported")
+	}
+}
+
+// The conversation preview and the batched DELETE must use the v142 expression
+// index, not scan conversation_items on the largest database.
+func TestConversationPurgeQueriesUseCleanupIndex(t *testing.T) {
+	t.Parallel()
+	database := openDataRetentionTestStore(t)
+	settings := domain.ConversationRetentionSettings{RetentionDays: 30, PurgeTool: true, PurgeUpdate: true}
+	scope, args := conversationPurgeScope(settings, "2026-10-08T00:00:00")
+	base := ` FROM conversation_items c
+		JOIN tasks t ON t.id=c.task_id
+		LEFT JOIN turns tn ON tn.id=c.turn_id AND c.turn_id<>''
+		WHERE ` + scope
+	cases := map[string]struct {
+		query string
+		args  []any
+	}{
+		"count": {
+			query: `SELECT COUNT(*),COUNT(DISTINCT c.task_id)` + base,
+			args:  args,
+		},
+		"delete": {
+			query: `DELETE FROM conversation_items WHERE sequence IN (
+				SELECT c.sequence` + base + ` ORDER BY c.sequence LIMIT ?)`,
+			args: append(append([]any{}, args...), domain.ConversationPurgeBatchRows),
+		},
+	}
+	for label, item := range cases {
+		plan := strings.Join(explainQueryPlan(t, database, item.query, item.args...), "\n")
+		if strings.Contains(plan, "SCAN c") {
+			t.Fatalf("%s scans conversation_items:\n%s", label, plan)
+		}
+		if !strings.Contains(plan, "idx_conversation_items_cleanup") {
+			t.Fatalf("%s does not use the cleanup index:\n%s", label, plan)
+		}
 	}
 }

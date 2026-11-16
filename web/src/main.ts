@@ -65,6 +65,7 @@ import type {
   ChannelTaskRoute,
   ConversationCategory,
   ConversationItem,
+  DataBackupPreview,
   DataInventory,
   DetectedModel,
   EnvGroup,
@@ -130,6 +131,9 @@ interface State extends ModelHealthState {
   dataInventory: DataInventory | null;
   dataInventoryLoading: boolean;
   dataInventoryError: string;
+  dataBackupPreview: DataBackupPreview | null;
+  dataBackupDialogOpen: boolean;
+  dataBackupBusy: boolean;
   dataRetention: DataRetentionViewState;
   syncSettings: SyncSettings;
   syncSettingsReady: boolean;
@@ -479,6 +483,27 @@ function purgeEnabled(...args: Parameters<DataRetentionPageModule["purgeEnabled"
   return false;
 }
 
+function conversationFormError(...args: Parameters<DataRetentionPageModule["conversationFormError"]>): string {
+  const module = dataRetentionPage.loaded();
+  if (module) return module.conversationFormError(...args);
+  void dataRetentionPage.load();
+  return "";
+}
+
+function conversationPurgeEnabled(...args: Parameters<DataRetentionPageModule["conversationPurgeEnabled"]>): boolean {
+  const module = dataRetentionPage.loaded();
+  if (module) return module.conversationPurgeEnabled(...args);
+  void dataRetentionPage.load();
+  return false;
+}
+
+function compactionBlockedText(...args: Parameters<DataRetentionPageModule["compactionBlockedText"]>): string {
+  const module = dataRetentionPage.loaded();
+  if (module) return module.compactionBlockedText(...args);
+  void dataRetentionPage.load();
+  return "";
+}
+
 function skipReasonText(...args: Parameters<DataRetentionPageModule["skipReasonText"]>): string {
   const module = dataRetentionPage.loaded();
   if (module) return module.skipReasonText(...args);
@@ -583,7 +608,14 @@ const state: State = {
   dataInventory: null,
   dataInventoryLoading: false,
   dataInventoryError: "",
-  dataRetention: {database: null, loading: false, error: "", plan: null, result: null, busy: ""},
+  dataBackupPreview: null,
+  dataBackupDialogOpen: false,
+  dataBackupBusy: false,
+  dataRetention: {
+    database: null, loading: false, error: "", plan: null, result: null, busy: "",
+    conversationPlan: null, conversationResult: null, conversationBusy: "",
+    compactionPlan: null, compactionResult: null, compactionBusy: false, openDialog: "",
+  },
   syncSettings: {scope:"default",enabled:false,endpoint:"",device_id:"",device_name:"",interval_seconds:300,token_configured:false,passphrase_configured:false},
   syncSettingsReady: false,
   syncState: {scope:"default",cursor:"",last_error:""},
@@ -4423,12 +4455,40 @@ function dataCategoryText(category: {id: string; label: string; note?: string}, 
   return field === "note" ? (category.note || "") : category.label;
 }
 
+function dataBackupDialog(): string {
+  const preview = state.dataBackupPreview;
+  let body = `<p class="field-help">${t("data.backupsReading")}</p>`;
+  if (preview) {
+    if (preview.candidates.length === 0) {
+      body = `<p class="data-cleanup-note">${t("data.backupsNone")}</p>`;
+    } else {
+      const retained = preview.retained
+        ? `<p class="field-help">${escapeHTML(t("data.backupsRetained", {name: preview.retained.name, size: formatDataSize(preview.retained.bytes)}))}</p>`
+        : "";
+      body = `<p class="data-cleanup-note">${escapeHTML(t("data.backupsPreviewIntro", {keep: preview.keep}))}</p>
+        ${retained}
+        <p>${escapeHTML(t("data.backupsCandidates", {count: preview.candidates.length, size: formatDataSize(preview.freed_bytes)}))}</p>
+        <ul class="data-backup-list">${preview.candidates.map(item => `<li><code>${escapeHTML(item.name)}</code><span class="field-help">${formatDataSize(item.bytes)}</span></li>`).join("")}</ul>
+        <div class="data-cleanup-actions">
+          <button type="button" class="danger" data-backup-confirm ${state.dataBackupBusy ? "disabled" : ""}>${t("data.backupsConfirm")}</button>
+        </div>`;
+    }
+  }
+  return `<dialog class="data-db-dialog" data-backup-dialog aria-labelledby="data-backup-title">
+    <header class="data-db-dialog-head">
+      <strong id="data-backup-title">${t("data.cleanBackups")}</strong>
+      <button type="button" class="icon-button" data-backup-close aria-label="${t("data.db.close")}">×</button>
+    </header>
+    <div class="data-db-dialog-body">${body}</div>
+  </dialog>`;
+}
+
 function dataManagementView(): string {
   const inventory = state.dataInventory;
   const rows = inventory
     ? inventory.categories.map(category => {
       const cleanup = category.id === "backups"
-        ? `<div class="data-cleanup-actions"><label>${t("data.keepRecent")} <input id="data-backup-keep" type="number" min="1" max="50" value="5" aria-label="${t("data.keepRecent")}"> ${t("data.copies")}</label><button type="button" data-data-cleanup="backups" ${category.bytes === 0 ? "disabled" : ""}>${t("data.cleanBackups")}</button></div>`
+        ? `<button type="button" data-data-cleanup="backups" ${category.bytes === 0 || (inventory?.backup_count ?? 0) <= 1 ? "disabled" : ""}>${t("data.cleanBackups")}</button>`
         : category.id === "logs"
           ? `<button type="button" data-data-cleanup="logs" ${category.bytes === 0 ? "disabled" : ""}>${t("data.cleanLogs")}</button>`
           : `<span class="field-help">${t("common.readOnly")}</span>`;
@@ -4451,6 +4511,7 @@ function dataManagementView(): string {
       <div class="panel-head"><strong>${t("data.details")}</strong><small class="field-help">${t("data.detailsNote")}</small></div>
       <div class="table-wrap"><table class="data-table"><thead><tr><th>${t("data.category")}</th><th>${t("data.size")}</th><th>${t("data.safeAction")}</th></tr></thead><tbody>${rows || `<tr><td colspan="3" class="field-help">${t("data.reading")}</td></tr>`}</tbody></table></div>
     </section>
+    ${dataBackupDialog()}
     ${renderDatabasePanel(state.dataRetention)}
     <section class="panel spaced">
       <div class="panel-head"><strong>${t("data.cleanupScope")}</strong></div>
@@ -4511,15 +4572,15 @@ function bindDataManagementPage(): void {
     button.addEventListener("click", () => {
       const category = button.dataset.dataCleanup || "";
       if (category === "backups") {
-        const keepInput = document.querySelector<HTMLInputElement>("#data-backup-keep");
-        const keep = Math.max(1, Math.min(50, Number(keepInput?.value) || 5));
-        const backups = state.dataInventory?.categories.find(item => item.id === "backups");
-        if (!window.confirm(t("data.confirmBackups", {keep, size: formatDataSize(backups?.bytes || 0)}))) return;
-        void runWithFeedback(button, t("data.cleaning"), async () => {
-          const result = await api.cleanupData({category, keep, confirm: true});
-          state.dataInventory = result.result.inventory;
-          const skipped = result.result.skipped ? t("data.skipped", {count: result.result.skipped}) : "";
-          setMessage("notice", `${t("data.cleanedBackups", {count: result.result.removed, size: formatDataSize(result.result.freed_bytes)})}${skipped}`);
+        state.dataBackupPreview = null;
+        state.dataBackupDialogOpen = true;
+        render();
+        void api.previewBackupCleanup().then(result => {
+          state.dataBackupPreview = result.preview;
+          render();
+        }).catch((error: unknown) => {
+          state.dataBackupDialogOpen = false;
+          setMessage("error", error instanceof Error ? error.message : String(error));
           render();
         });
         return;
@@ -4537,10 +4598,76 @@ function bindDataManagementPage(): void {
       }
     });
   });
+  bindBackupCleanupDialog();
+}
+
+// bindBackupCleanupDialog wires the preview dialog. The preview is fetched
+// when the button is clicked; confirming always keeps the newest backup.
+function bindBackupCleanupDialog(): void {
+  const dialog = document.querySelector<HTMLDialogElement>("[data-backup-dialog]");
+  if (!dialog) {
+    if (state.dataBackupDialogOpen) state.dataBackupDialogOpen = false;
+    return;
+  }
+  dialog.querySelector("[data-backup-close]")?.addEventListener("click", () => {
+    state.dataBackupDialogOpen = false;
+    dialog.close();
+  });
+  dialog.addEventListener("close", () => { state.dataBackupDialogOpen = false; });
+  const confirm = dialog.querySelector<HTMLButtonElement>("[data-backup-confirm]");
+  confirm?.addEventListener("click", () => {
+    if (!state.dataBackupPreview?.can_clean || state.dataBackupBusy) return;
+    state.dataBackupBusy = true;
+    void runWithFeedback(confirm, t("data.cleaning"), async () => {
+      const result = await api.cleanupData({category: "backups", confirm: true});
+      state.dataInventory = result.result.inventory;
+      const skipped = result.result.skipped ? t("data.skipped", {count: result.result.skipped}) : "";
+      setMessage("notice", `${t("data.cleanedBackups", {count: result.result.removed, size: formatDataSize(result.result.freed_bytes)})}${skipped}`);
+    }).finally(() => {
+      state.dataBackupBusy = false;
+      state.dataBackupDialogOpen = false;
+      state.dataBackupPreview = null;
+      render();
+    });
+  });
+  if (state.dataBackupDialogOpen && !dialog.open) dialog.showModal();
+  if (!state.dataBackupDialogOpen && dialog.open) dialog.close();
 }
 
 function bindDataRetentionPanel(): void {
   const view = state.dataRetention;
+  bindCategoryDialogs(view);
+  bindHardwareIOPurgeForm(view);
+  bindConversationPurgeForm(view);
+  bindCompactionDialog(view);
+}
+
+// bindCategoryDialogs opens one independent dialog per A-K category row. The
+// cleanup button lives inside <summary>, so its click must not also toggle the
+// details element.
+function bindCategoryDialogs(view: DataRetentionViewState): void {
+  document.querySelectorAll<HTMLButtonElement>("[data-db-cleanup]").forEach(button => {
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      view.openDialog = button.dataset.dbCleanup || "";
+      render();
+    });
+  });
+  document.querySelectorAll<HTMLDialogElement>("dialog[data-db-dialog]").forEach(dialog => {
+    const id = dialog.dataset.dbDialog || "";
+    dialog.querySelector("[data-db-dialog-close]")?.addEventListener("click", () => {
+      view.openDialog = "";
+      dialog.close();
+    });
+    dialog.addEventListener("close", () => {
+      if (view.openDialog === id) view.openDialog = "";
+    });
+    if (view.openDialog === id && !dialog.open) dialog.showModal();
+  });
+}
+
+function bindHardwareIOPurgeForm(view: DataRetentionViewState): void {
   const daysInput = document.querySelector<HTMLInputElement>("#data-hardware-io-days");
   const rowsInput = document.querySelector<HTMLInputElement>("#data-hardware-io-rows");
   const save = document.querySelector<HTMLButtonElement>("[data-hardware-io-save]");
@@ -4605,6 +4732,150 @@ function bindDataRetentionPanel(): void {
       setMessage("notice", `${t("data.db.resultDeleted", {rows: response.result.deleted_rows, batches: response.result.batches})}${skip}`);
     });
   });
+}
+
+function bindConversationPurgeForm(view: DataRetentionViewState): void {
+  const daysInput = document.querySelector<HTMLInputElement>("#data-conversation-days");
+  const tool = document.querySelector<HTMLInputElement>("#data-conversation-tool");
+  const update = document.querySelector<HTMLInputElement>("#data-conversation-update");
+  const save = document.querySelector<HTMLButtonElement>("[data-conversation-save]");
+  const preview = document.querySelector<HTMLButtonElement>("[data-conversation-preview]");
+  const purge = document.querySelector<HTMLButtonElement>("[data-conversation-purge]");
+  const formError = document.querySelector<HTMLElement>("[data-conversation-form-error]");
+  if (!daysInput || !tool || !update || !save || !preview || !purge) return;
+  const formValues = (): {retention_days: number; purge_tool: boolean; purge_update: boolean} | null => {
+    const message = conversationFormError(daysInput.value, tool.checked, update.checked);
+    if (formError) {
+      formError.textContent = message;
+      formError.hidden = !message;
+    }
+    if (message) return null;
+    return {retention_days: Number(daysInput.value), purge_tool: tool.checked, purge_update: update.checked};
+  };
+  const syncButtons = (): void => {
+    const values = formValues();
+    const busy = Boolean(view.conversationBusy);
+    save.disabled = busy || !values;
+    preview.disabled = busy || !values;
+    purge.disabled = !values || !conversationPurgeEnabled(view, values.retention_days, values.purge_tool, values.purge_update);
+    const stale = Boolean(values && view.conversationPlan
+      && (view.conversationPlan.retention_days !== values.retention_days
+        || view.conversationPlan.purge_tool !== values.purge_tool
+        || view.conversationPlan.purge_update !== values.purge_update));
+    purge.title = stale ? t("data.db.previewStale") : "";
+  };
+  daysInput.addEventListener("input", syncButtons);
+  tool.addEventListener("change", syncButtons);
+  update.addEventListener("change", syncButtons);
+  syncButtons();
+  const run = (kind: DataRetentionViewState["conversationBusy"], button: HTMLButtonElement, action: (values: {retention_days: number; purge_tool: boolean; purge_update: boolean}) => Promise<void>): void => {
+    const values = formValues();
+    if (!values || view.conversationBusy) return;
+    view.conversationBusy = kind;
+    void runWithFeedback(button, t("common.loading"), () => action(values)).finally(() => {
+      view.conversationBusy = "";
+      render();
+    });
+  };
+  save.addEventListener("click", () => run("save", save, async values => {
+    const result = await api.updateConversationRetention(values);
+    if (view.database) view.database.conversation_retention = result.retention;
+    setMessage("notice", t("data.db.conversationSaved"));
+  }));
+  preview.addEventListener("click", () => run("preview", preview, async values => {
+    view.conversationResult = null;
+    view.conversationPlan = (await api.previewConversationPurge(values)).plan;
+    if (view.database) view.database.conversation_retention = {...view.database.conversation_retention, ...values};
+  }));
+  purge.addEventListener("click", () => {
+    const values = formValues();
+    const plan = view.conversationPlan;
+    if (!values || !plan || !conversationPurgeEnabled(view, values.retention_days, values.purge_tool, values.purge_update)) return;
+    if (!window.confirm(t("data.db.conversationConfirm", {
+      rows: plan.run_rows,
+      cutoff: new Date(plan.cutoff).toLocaleString(),
+      size: formatBytes(plan.run_bytes_estimate),
+    }))) return;
+    run("purge", purge, async confirmed => {
+      const response = await api.purgeConversation({...confirmed, confirm: true});
+      view.conversationResult = response.result;
+      view.conversationPlan = null;
+      if (response.database) view.database = {...response.database, conversation_retention: {...response.database.conversation_retention, ...confirmed}};
+      const skip = response.result.skip_reason ? ` ${skipReasonText(response.result.skip_reason)}` : "";
+      setMessage("notice", `${t("data.db.resultDeleted", {rows: response.result.deleted_rows, batches: response.result.batches})}${skip}`);
+    });
+  });
+}
+
+function bindCompactionDialog(view: DataRetentionViewState): void {
+  const open = document.querySelector<HTMLButtonElement>("[data-db-compact]");
+  open?.addEventListener("click", () => {
+    view.openDialog = "compact";
+    view.compactionResult = null;
+    view.compactionPlan = null;
+    view.compactionBusy = true;
+    render();
+    void api.databaseCompactionPlan().then(result => {
+      view.compactionPlan = result.plan;
+    }).catch((error: unknown) => {
+      setMessage("error", error instanceof Error ? error.message : String(error));
+    }).finally(() => {
+      view.compactionBusy = false;
+      render();
+    });
+  });
+  const dialog = document.querySelector<HTMLDialogElement>("[data-compact-dialog]");
+  if (!dialog) return;
+  dialog.querySelector("[data-compact-close]")?.addEventListener("click", () => {
+    view.openDialog = "";
+    dialog.close();
+  });
+  dialog.addEventListener("close", () => {
+    if (view.openDialog === "compact") view.openDialog = "";
+  });
+  const refresh = dialog.querySelector<HTMLButtonElement>("[data-compact-refresh]");
+  refresh?.addEventListener("click", () => {
+    if (view.compactionBusy) return;
+    view.compactionBusy = true;
+    render();
+    void api.databaseCompactionPlan().then(result => {
+      view.compactionPlan = result.plan;
+    }).catch((error: unknown) => {
+      setMessage("error", error instanceof Error ? error.message : String(error));
+    }).finally(() => {
+      view.compactionBusy = false;
+      render();
+    });
+  });
+  const run = dialog.querySelector<HTMLButtonElement>("[data-compact-run]");
+  run?.addEventListener("click", () => {
+    const plan = view.compactionPlan;
+    if (!plan || !plan.can_compact || view.compactionBusy) return;
+    if (!window.confirm(t("data.db.compactConfirm", {
+      size: formatBytes(plan.file_bytes),
+      reclaim: formatBytes(plan.estimated_reclaimed_bytes),
+    }))) return;
+    view.compactionBusy = true;
+    void runWithFeedback(run, t("common.loading"), async () => {
+      const response = await api.compactDatabase({confirm: true});
+      view.compactionResult = response.result;
+      if (response.database) view.database = response.database;
+      setMessage("notice", response.result.restored
+        ? t("data.db.compactRestored")
+        : t("data.db.compactResult", {
+          before: formatBytes(response.result.before_bytes),
+          after: formatBytes(response.result.after_bytes),
+          freed: formatBytes(response.result.freed_bytes),
+          integrity: response.result.integrity_check || "—",
+        }));
+    }).catch((error: unknown) => {
+      setMessage("error", error instanceof Error ? error.message : String(error));
+    }).finally(() => {
+      view.compactionBusy = false;
+      render();
+    });
+  });
+  if (view.openDialog === "compact" && !dialog.open) dialog.showModal();
 }
 
 function otherSettingsView(): string {

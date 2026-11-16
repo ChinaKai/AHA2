@@ -58,6 +58,7 @@ export interface DataCategory {
 export interface DataInventory {
   data_dir: string;
   total_bytes: number;
+  backup_count: number;
   categories: DataCategory[];
 }
 
@@ -93,6 +94,7 @@ export interface DatabaseCategory {
   id: string;
   key: string;
   safety: DatabaseSafety;
+  cleanup?: "hardware_io" | "conversation";
   rows: number;
   rows_exact: boolean;
   estimated_bytes: number;
@@ -113,8 +115,89 @@ export interface DatabaseStats {
   cached: boolean;
   hardware_io: {min_sequence: number; max_sequence: number; estimated_rows: number; oldest_at?: string; newest_at?: string};
   retention: HardwareIORetentionSettings;
+  conversation_retention: ConversationRetentionSettings;
   collected_at: string;
   duration_ms: number;
+}
+
+export interface ConversationRetentionSettings {
+  retention_days: number;
+  purge_tool: boolean;
+  purge_update: boolean;
+  updated_at?: string;
+}
+
+export interface ConversationPurgePlan {
+  retention_days: number;
+  purge_tool: boolean;
+  purge_update: boolean;
+  categories: string[];
+  cutoff: string;
+  eligible_rows: number;
+  run_rows: number;
+  tasks_affected: number;
+  avg_row_bytes: number;
+  run_bytes_estimate: number;
+  remaining_eligible: number;
+  skip_reason?: string;
+}
+
+export interface ConversationPurgeResult {
+  plan: ConversationPurgePlan;
+  deleted_rows: number;
+  batches: number;
+  batch_size: number;
+  partial: boolean;
+  skip_reason?: string;
+  duration_ms: number;
+}
+
+export interface DatabaseCompactionPlan {
+  mode: string;
+  database_path: string;
+  file_bytes: number;
+  wal_bytes: number;
+  shm_bytes: number;
+  page_size: number;
+  page_count: number;
+  freelist_count: number;
+  free_bytes: number;
+  estimated_reclaimed_bytes: number;
+  required_temp_bytes: number;
+  disk_free_bytes: number;
+  active_tasks: number;
+  active_turns: number;
+  pending_approvals: number;
+  can_compact: boolean;
+  blocking_reasons: string[];
+  checked_at: string;
+}
+
+export interface DatabaseCompactionResult {
+  plan: DatabaseCompactionPlan;
+  backup_path?: string;
+  before_bytes: number;
+  after_bytes: number;
+  freed_bytes: number;
+  wal_before_bytes: number;
+  wal_after_bytes: number;
+  integrity_check?: string;
+  before_row_counts?: Record<string, number>;
+  after_row_counts?: Record<string, number>;
+  restored: boolean;
+  restore_error?: string;
+  restart_required: boolean;
+  skip_reason?: string;
+  error?: string;
+  duration_ms: number;
+}
+
+export interface DataBackupPreview {
+  keep: number;
+  retained?: {name: string; bytes: number; mod_time: string};
+  candidates: {name: string; bytes: number; mod_time: string}[];
+  freed_bytes: number;
+  can_clean: boolean;
 }
 
 export interface HardwareIOPurgePlan {

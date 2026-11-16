@@ -3475,7 +3475,9 @@ test("data management shows scoped sizes and safe cleanup actions", async () => 
   assert.match(main, /function bindDataManagementPage/);
   assert.match(main, /data-data-cleanup="backups"/);
   assert.match(main, /data-data-cleanup="logs"/);
-  assert.match(main, /data-backup-keep/);
+  assert.match(main, /api\.previewBackupCleanup\(\)/);
+  assert.doesNotMatch(main, /data-backup-keep/);
+  assert.match(main, /data-backup-dialog/);
   assert.match(main, /window\.confirm/);
   assert.match(main, /class="data-category"/);
   // The summary card and table notes must not inherit the form helper's
@@ -3758,7 +3760,10 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   // on a number the new code cannot meet. task-497 added +128 for the live
   // approval-list refresh (SSE-driven background reload, keep-the-old-list
   // error state, and a re-read when entering approvals); measured 256,568.
-  //
+  // task-523 opened the data management cleanup dialogs (per-category B-K
+  // dialogs, conversation cleanup, fixed one-backup preview, database
+  // compaction) and added their zh/en copy; measured 261,096, ceiling 262,144.
+  const FIRST_SCREEN_GZIP_BUDGET = 262144;
   // The version query parameter is a content hash and its hex digits change
   // how the same code gzips: main already sits exactly on the budget, so a
   // hash-only change could trip it without growing the payload. Mask the
@@ -3766,12 +3771,12 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   // tracks the code rather than hash luck.
   const firstScreenGzip = text => gzipSync(Buffer.from(text.replace(/\?v=[a-f0-9]{12}/g, "?v=3f9a1c7e5b2d")), {level: 5}).length;
   const gzipped = [...seen.values()].reduce((total, text) => total + firstScreenGzip(text), 0);
-  assert.ok(gzipped <= 256640, `first-screen JS gzip is ${gzipped} bytes`);
+  assert.ok(gzipped <= FIRST_SCREEN_GZIP_BUDGET, `first-screen JS gzip is ${gzipped} bytes`);
   const stylesheet = index.match(/rel="stylesheet" href="([^"]+)"/)?.[1];
   assert.match(stylesheet, /^\/styles\.[a-f0-9]{12}\.css$/);
   // The first paint transfers the stylesheet too; budget the whole screen.
   const stylesheetGzip = firstScreenGzip(await readFile(resolve(dist, stylesheet.slice(1)), "utf8"));
-  assert.ok(gzipped + stylesheetGzip <= 256640, `first-screen JS+CSS gzip is ${gzipped + stylesheetGzip} bytes`);
+  assert.ok(gzipped + stylesheetGzip <= FIRST_SCREEN_GZIP_BUDGET, `first-screen JS+CSS gzip is ${gzipped + stylesheetGzip} bytes`);
   assert.equal((index.match(/<script\b/g) || []).length, 1, "index must load one module script");
   assert.ok(!index.includes('src="/app.js"'));
 });

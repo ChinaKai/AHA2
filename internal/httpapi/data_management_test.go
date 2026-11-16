@@ -41,6 +41,9 @@ func TestDataInventoryCountsKnownCategories(t *testing.T) {
 	if byID["attachments"] != 40 || byID["backups"] != 70 || byID["pet-workspace"] != 9 {
 		t.Fatalf("categories=%#v", byID)
 	}
+	if inventory.BackupCount != 1 {
+		t.Fatalf("backup count=%d", inventory.BackupCount)
+	}
 	if byID["logs"] != 12 {
 		t.Fatalf("logs bytes=%d", byID["logs"])
 	}

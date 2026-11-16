@@ -19,9 +19,13 @@ type DataCategory struct {
 }
 
 type DataInventory struct {
-	DataDir    string         `json:"data_dir"`
-	TotalBytes int64          `json:"total_bytes"`
-	Categories []DataCategory `json:"categories"`
+	DataDir    string `json:"data_dir"`
+	TotalBytes int64  `json:"total_bytes"`
+	// BackupCount is the number of user-installed-* install backups. The page
+	// disables cleanup when it is 1 or less, because version one always keeps
+	// the newest backup.
+	BackupCount int            `json:"backup_count"`
+	Categories  []DataCategory `json:"categories"`
 }
 
 type DataCleanupResult struct {
@@ -119,6 +123,10 @@ func buildDataInventory(root string) (DataInventory, error) {
 		"knowledge":     {ID: "knowledge", Label: "知识库", Note: "共享知识文件"},
 	}
 	inventory := DataInventory{DataDir: root, Categories: make([]DataCategory, 0, len(known)+3)}
+	backups, backupsErr := listInstallBackups(root)
+	if backupsErr == nil {
+		inventory.BackupCount = len(backups)
+	}
 	for _, category := range []struct {
 		dir   string
 		label string

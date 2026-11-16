@@ -219,36 +219,27 @@ func conversationPurgeScope(settings domain.ConversationRetentionSettings, cutof
 	placeholders := strings.TrimRight(strings.Repeat("?,", len(categories)), ",")
 	updateKinds := strings.TrimRight(strings.Repeat("?,", len(conversationPurgeUpdateKinds)), ",")
 	args := make([]any, 0, len(categories)+1+len(conversationPurgeUpdateKinds))
-	// Build the arguments in SQL order: the category-scope placeholders come
-	// first, then the cutoff.
+	for _, category := range categories {
+		args = append(args, category)
+	}
+	// The category IN list uses idx_conversation_items_cleanup. When updates
+	// are in scope, only the agent-progress kinds are accepted; tool items are
+	// always accepted.
+	scope := `c.category IN (` + placeholders + `)`
 	if settings.PurgeUpdate {
+		scope += ` AND (c.category='tool' OR c.kind IN (` + updateKinds + `))`
 		for _, kind := range conversationPurgeUpdateKinds {
 			args = append(args, kind)
 		}
-	} else {
-		for _, category := range categories {
-			args = append(args, category)
-		}
 	}
 	args = append(args, cutoffKey)
-	scope := conversationPurgeCategoryScope(settings, placeholders, updateKinds) + `
+	scope += `
 		AND substr(c.created_at,1,19)<?
 		AND t.status IN ('completed','failed','cancelled')
 		AND (c.turn_id='' OR tn.id IS NULL OR tn.status IN ('succeeded','failed','interrupted','blocked'))
 		AND NOT EXISTS (SELECT 1 FROM task_permission_requests r WHERE r.task_id=c.task_id AND r.status='pending')
 		AND NOT EXISTS (SELECT 1 FROM attachments a WHERE a.task_id=c.task_id AND a.message_id=c.id)`
 	return scope, args
-}
-
-func conversationPurgeCategoryScope(settings domain.ConversationRetentionSettings, placeholders, updateKinds string) string {
-	switch {
-	case settings.PurgeTool && settings.PurgeUpdate:
-		return `(c.category='tool' OR (c.category='update' AND c.kind IN (` + updateKinds + `)))`
-	case settings.PurgeUpdate:
-		return `(c.category='update' AND c.kind IN (` + updateKinds + `))`
-	default:
-		return `c.category IN (` + placeholders + `)`
-	}
 }
 
 // ConversationPurgePlan computes what one manual cleanup would delete. The
@@ -266,12 +257,12 @@ func (s *Store) ConversationPurgePlan(ctx context.Context, settings domain.Conve
 		Cutoff:        now.UTC().Add(-time.Duration(settings.RetentionDays) * 24 * time.Hour).Truncate(time.Second),
 	}
 	scope, args := conversationPurgeScope(settings, hardwareIOCutoffKey(plan.Cutoff))
-	var total int64
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM conversation_items c`).
-		Scan(&total); err != nil {
-		return plan, fmt.Errorf("count conversation_items: %w", err)
+	var hasRows int
+	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM conversation_items LIMIT 1)`).
+		Scan(&hasRows); err != nil {
+		return plan, fmt.Errorf("probe conversation_items: %w", err)
 	}
-	if total == 0 {
+	if hasRows == 0 {
 		plan.SkipReason = domain.ConversationPurgeSkipEmpty
 		return plan, nil
 	}

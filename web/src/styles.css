@@ -2852,6 +2852,19 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
 .data-db-files { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; padding: 14px 16px; }
 .data-db-files > div { display: grid; gap: 4px; }
 .data-db-files strong { font-variant-numeric: tabular-nums; }
+.data-db-files > .data-db-file-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.data-db-file-row > div { display: grid; gap: 4px; min-width: 0; }
+.data-db-cleanup-button { margin-left: 4px; }
+.data-db-checks { display: grid; gap: 6px; padding: 0 16px 8px; }
+.data-db-checks label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+.data-db-dialog { width: min(640px, calc(100vw - 32px)); }
+.data-db-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 18px 10px; border-bottom: 1px solid var(--line); }
+.data-db-dialog-body { padding: 12px 18px 18px; }
+.data-db-dialog-body .data-db-files { padding: 12px 0; }
+.data-db-dialog-body .data-db-plan, .data-db-dialog-body .data-db-result, .data-db-dialog-body .data-db-form { padding: 0; }
+.data-backup-list { display: grid; gap: 4px; margin: 8px 0 12px; padding: 0; list-style: none; }
+.data-backup-list li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; }
+.data-db-compact-plan { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
 .data-db-table td small { display: block; }
 .data-db-categories { display: grid; gap: 8px; padding: 0 16px 8px; }
 .data-db-category { border: 1px solid var(--line); border-radius: 8px; }

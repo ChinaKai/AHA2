@@ -22,7 +22,13 @@ import type {
   ChannelTaskRoute,
   DataCleanupResult,
   DataInventory,
+  DataBackupPreview,
   DatabaseStats,
+  DatabaseCompactionPlan,
+  DatabaseCompactionResult,
+  ConversationRetentionSettings,
+  ConversationPurgePlan,
+  ConversationPurgeResult,
   DetectedModel,
   EnvGroup,
   GeneralSettings,
@@ -242,8 +248,32 @@ class APIClient {
     return this.request("/api/v1/system/data");
   }
 
-  cleanupData(payload: {category: string; keep?: number; confirm: boolean}): Promise<{ok: boolean; result: DataCleanupResult}> {
+  cleanupData(payload: {category: string; confirm: boolean}): Promise<{ok: boolean; result: DataCleanupResult}> {
     return this.request("/api/v1/system/data/cleanup", {method: "POST", body: JSON.stringify(payload)});
+  }
+
+  previewBackupCleanup(): Promise<{ok: boolean; preview: DataBackupPreview}> {
+    return this.request("/api/v1/system/data/backups");
+  }
+
+  updateConversationRetention(payload: {retention_days: number; purge_tool: boolean; purge_update: boolean}): Promise<{ok: boolean; retention: ConversationRetentionSettings}> {
+    return this.request("/api/v1/system/data/conversation/retention", {method: "PUT", body: JSON.stringify(payload)});
+  }
+
+  previewConversationPurge(payload: {retention_days: number; purge_tool: boolean; purge_update: boolean}): Promise<{ok: boolean; plan: ConversationPurgePlan}> {
+    return this.request("/api/v1/system/data/conversation/preview", {method: "POST", body: JSON.stringify(payload)});
+  }
+
+  purgeConversation(payload: {retention_days: number; purge_tool: boolean; purge_update: boolean; confirm: boolean}): Promise<{ok: boolean; result: ConversationPurgeResult; database?: DatabaseStats}> {
+    return this.request("/api/v1/system/data/conversation/purge", {method: "POST", body: JSON.stringify(payload)});
+  }
+
+  databaseCompactionPlan(): Promise<{ok: boolean; plan: DatabaseCompactionPlan}> {
+    return this.request("/api/v1/system/data/database/compaction");
+  }
+
+  compactDatabase(payload: {confirm: boolean}): Promise<{ok: boolean; result: DatabaseCompactionResult; database?: DatabaseStats}> {
+    return this.request("/api/v1/system/data/database/compaction", {method: "POST", body: JSON.stringify(payload)});
   }
 
   databaseStats(refresh = false): Promise<{ok: boolean; database: DatabaseStats}> {
