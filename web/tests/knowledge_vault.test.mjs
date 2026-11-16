@@ -366,6 +366,48 @@ test("the mixed tree roots at the real global and projects directories", () => {
   assert.doesNotMatch(html, /<span class="kv-tree-title">inbox<\/span>/);
 });
 
+test("container navigation pages make projects and archive titles clickable", () => {
+  const tree = vault.buildVaultDirectoryTree([
+    treeFixture("g-root", "全局知识首页", "global/index.md", [
+      treeFixture("g-general", "通用知识", "global/general/index.md", []),
+    ]),
+    treeFixture("nav-projects", "项目知识", "projects/index.md", [
+      treeFixture("p-root", "Demo 索引", "projects/demo/index.md", [], {scope: "project", project_id: "demo"}),
+    ], {scope: ""}),
+    treeFixture("nav-archive", "归档知识", "archive/index.md", [], {scope: ""}),
+    treeFixture("nav-archive-projects", "归档项目", "archive/projects/index.md", [], {scope: ""}),
+  ], "all");
+
+  assert.deepEqual(tree.map(node => node.title), ["archive", "global", "projects"]);
+  const archive = tree.find(node => node.title === "archive");
+  const projects = tree.find(node => node.title === "projects");
+  assert.equal(projects.path, "projects");
+  assert.equal(projects.id, "nav-projects", "the container page is the folder row");
+  assert.equal(projects.has_index, true, "the container navigation page makes the folder clickable");
+  assert.deepEqual(projects.children.map(node => node.title), ["demo"], "the navigation page is not repeated as a leaf");
+  assert.equal(archive.has_index, true);
+  const nested = archive.children.find(node => node.title === "projects");
+  assert.equal(nested.has_index, true, "archive/projects is its own clickable container");
+  assert.equal(nested.children.length, 0);
+
+  reset({tree, expanded: new Set(["nav-archive"])});
+  let html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /data-kv-title-open="nav-projects"/);
+  assert.match(html, /data-kv-title-toggle="nav-projects"/, "the folder still expands and collapses");
+  assert.match(html, /data-kv-title-open="nav-archive"/);
+  assert.match(html, /data-kv-title-open="nav-archive-projects"/);
+  assert.doesNotMatch(html, /data-kv-doc="nav-projects"/, "the navigation page never becomes a file leaf");
+  assert.doesNotMatch(html, /data-kv-doc="nav-archive"/);
+  assert.doesNotMatch(html, /<span class="kv-tree-title">index<\/span>/);
+
+  // A folder whose container page is missing stays a plain, non-clickable row.
+  reset({tree: vault.buildVaultDirectoryTree([
+    treeFixture("p-root", "Demo 索引", "projects/demo/index.md", [], {scope: "project", project_id: "demo"}),
+  ], "all")});
+  html = vault.renderKnowledgeVaultPage(context());
+  assert.doesNotMatch(html, /data-kv-title-open="vault-dir:projects"/);
+});
+
 test("inbox path segments are filtered from global, project and archive trees", () => {
   const tree = vault.buildVaultDirectoryTree([
     treeFixture("g-root", "全局知识首页", "global/index.md", [

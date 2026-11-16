@@ -3,6 +3,7 @@ package knowledgevault
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -709,5 +710,103 @@ func BenchmarkReaderSearchLIKE1000Documents(b *testing.B) {
 		if len(result.Results) == 0 {
 			b.Fatal("search returned no results")
 		}
+	}
+}
+
+// TestReaderTreeSynthesizesContainerNavigation covers the Web all-libraries
+// tree: projects/ and archive/ are real directories with a navigation page,
+// but those pages are intentionally absent from the index. The tree has to
+// expose them as folder nodes so clicking the title opens the page.
+func TestReaderTreeSynthesizesContainerNavigation(t *testing.T) {
+	_, reader, ctx := readerFixture(t)
+	tree, err := reader.Tree(ctx, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects := findTreeNodeByPath(tree.Nodes, projectsRootIndexPath)
+	if projects == nil {
+		t.Fatalf("projects container page missing from the all-libraries tree: %+v", tree.Nodes)
+	}
+	if !projects.IsIndex || !projects.System {
+		t.Fatalf("projects container was not promoted to a folder node: %+v", projects)
+	}
+	if projects.ID != vaultNavigationID(projectsRootIndexPath) {
+		t.Fatalf("projects container id = %q, want the tree-only navigation id", projects.ID)
+	}
+	if projects.Title == "" {
+		t.Fatal("projects container has no title")
+	}
+	if findTreeNodeByPath(projects.Children, "projects/demo-project/index.md") == nil {
+		t.Fatalf("project folder is not nested under the projects container: %+v", projects.Children)
+	}
+	if findTreeNodeByPath(tree.Nodes, archiveRootIndexPath) == nil {
+		t.Fatalf("archive container page missing from the all-libraries tree: %+v", tree.Nodes)
+	}
+	counted := 0
+	walkTree(tree.Nodes, func(TreeNode) { counted++ })
+	if counted != tree.Count {
+		t.Fatalf("tree exposes %d nodes but reports count %d", counted, tree.Count)
+	}
+
+	doc, err := reader.Document(ctx, projects.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc.Path != projectsRootIndexPath || !doc.IsIndex || !doc.System {
+		t.Fatalf("container document = %+v", doc)
+	}
+	if !strings.Contains(doc.Body, "[[projects/demo-project/index") {
+		t.Fatalf("container document body does not keep the generated directory list:\n%s", doc.Body)
+	}
+	if doc.ObsidianFile != "projects/index" {
+		t.Fatalf("obsidian file = %q", doc.ObsidianFile)
+	}
+
+	// Navigation pages stay out of search even though the tree exposes them.
+	search, err := reader.Search(ctx, DocumentSearchOptions{Query: doc.Title, Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range search.Results {
+		if item.Path == projectsRootIndexPath || item.Path == archiveRootIndexPath {
+			t.Fatalf("navigation page leaked into search: %+v", item)
+		}
+	}
+
+	// A crafted navigation id cannot escape the three known container pages.
+	if _, err := reader.Document(ctx, "vault-navigation:..:etc:passwd", ""); !errors.Is(err, ErrDocumentNotFound) {
+		t.Fatalf("unknown navigation id error = %v, want ErrDocumentNotFound", err)
+	}
+
+	// A single-library tree has no container folder; global behavior stays as
+	// it was and never gains a synthetic projects node.
+	global, err := reader.Tree(ctx, "global", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	walkTree(global.Nodes, func(node TreeNode) {
+		if strings.HasPrefix(node.ID, vaultNavigationIDPrefix) {
+			t.Fatalf("navigation node leaked into the global tree: %+v", node)
+		}
+	})
+}
+
+func TestReaderDocumentReadsArchiveProjectsContainer(t *testing.T) {
+	config, reader, ctx := readerFixture(t)
+	writeVaultTestFile(t, config.VaultPath, archiveProjectsIndexPath, "---\ntitle: 归档项目\n---\n\n手写归档项目导语。\n")
+	tree, err := reader.Tree(ctx, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := findTreeNodeByPath(tree.Nodes, archiveProjectsIndexPath)
+	if node == nil {
+		t.Fatalf("archive/projects container missing from tree: %+v", tree.Nodes)
+	}
+	doc, err := reader.Document(ctx, node.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc.Path != archiveProjectsIndexPath || !strings.Contains(doc.Body, "手写归档项目导语。") {
+		t.Fatalf("archive/projects container document = %+v", doc)
 	}
 }

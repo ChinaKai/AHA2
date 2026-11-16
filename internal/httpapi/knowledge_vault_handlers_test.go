@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -489,5 +490,70 @@ func TestKnowledgeVaultRecentFiltersContentChanges(t *testing.T) {
 	}
 	if items[0]["path"] != "global/general/deploy.md" || items[0]["content_changed"] != true || items[0]["change_kind"] != "uncommitted" {
 		t.Fatalf("uncommitted item = %#v", items[0])
+	}
+}
+
+func findVaultTreeNodeByPath(nodes []any, target string) map[string]any {
+	for _, value := range nodes {
+		node, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		if node["path"] == target {
+			return node
+		}
+		if children, ok := node["children"].([]any); ok {
+			if found := findVaultTreeNodeByPath(children, target); found != nil {
+				return found
+			}
+		}
+	}
+	return nil
+}
+
+// TestKnowledgeVaultAPIResolvesContainerNavigationPage guards the all-libraries
+// tree + document pair: the container page is not an indexed document, so the
+// tree supplies a tree-only id and the document endpoint must read it from the
+// vault instead of returning 404.
+func TestKnowledgeVaultAPIResolvesContainerNavigationPage(t *testing.T) {
+	manager := knowledgeVaultManagerFixture(t)
+	server, client, _ := knowledgeVaultServer(t, manager)
+
+	response := requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/knowledge-vault/tree?library=all", nil, "")
+	var tree map[string]any
+	decodeResponse(t, response, &tree)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("tree status=%d payload=%#v", response.StatusCode, tree)
+	}
+	node := findVaultTreeNodeByPath(tree["nodes"].([]any), "projects/index.md")
+	if node == nil {
+		t.Fatalf("projects container missing from the all-libraries tree: %#v", tree["nodes"])
+	}
+	id, _ := node["id"].(string)
+	if id == "" || !strings.HasPrefix(id, "vault-navigation:") {
+		t.Fatalf("container id = %q", id)
+	}
+	if node["is_index"] != true || node["system"] != true {
+		t.Fatalf("container node = %#v", node)
+	}
+
+	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/knowledge-vault/doc/"+url.PathEscape(id), nil, "")
+	var payload map[string]any
+	decodeResponse(t, response, &payload)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("container doc status=%d payload=%#v", response.StatusCode, payload)
+	}
+	document := payload["doc"].(map[string]any)
+	if document["path"] != "projects/index.md" || document["is_index"] != true {
+		t.Fatalf("container doc = %#v", document)
+	}
+	if !strings.Contains(document["body"].(string), "[[projects/demo/index") {
+		t.Fatalf("container doc body = %#v", document["body"])
+	}
+
+	// Unknown navigation ids stay not-found instead of reading arbitrary paths.
+	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/knowledge-vault/doc/"+url.PathEscape("vault-navigation:..:secret.md"), nil, "")
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown navigation id status=%d", response.StatusCode)
 	}
 }

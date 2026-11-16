@@ -416,6 +416,23 @@ func (r *Reader) Tree(ctx context.Context, library, projectID string) (TreeResul
 		}
 		filtered = append(filtered, entry)
 	}
+	// The all-libraries tree shows the projects/ and archive/ container
+	// directories. Their navigation pages stay out of the index and search, so
+	// synthesize tree-only entries here: the folder becomes clickable while
+	// Document() still has to read the page straight from the vault. An index
+	// written by an older build may still contain the page; never add a
+	// duplicate path in that case.
+	if scope == "" {
+		indexedPaths := make(map[string]bool, len(filtered))
+		for _, entry := range filtered {
+			indexedPaths[entry.Path] = true
+		}
+		for _, navigation := range r.containerNavigationEntries() {
+			if !indexedPaths[navigation.Path] {
+				filtered = append(filtered, navigation)
+			}
+		}
+	}
 	result.Count = len(filtered)
 	result.Nodes = buildReaderTree(filtered)
 	return result, nil
@@ -469,6 +486,9 @@ type Backlink struct {
 func (r *Reader) Document(ctx context.Context, id, relativePath string) (Doc, error) {
 	if !r.indexReady {
 		return Doc{}, ErrReaderNotReady
+	}
+	if relative, ok := vaultNavigationRelativePath(strings.TrimSpace(id)); ok {
+		return r.navigationDocument(relative)
 	}
 	var entry IndexEntry
 	var err error
@@ -1097,6 +1117,117 @@ func (r *Reader) libraryScope(library, projectID string) (string, string, error)
 // the only stable directory marker.
 func isIndexDocumentPath(relative string) bool {
 	return strings.EqualFold(path.Base(filepath.ToSlash(relative)), "index.md")
+}
+
+// Container navigation pages (projects/index.md, archive/index.md and
+// archive/projects/index.md) are maintained on disk but deliberately stay out
+// of the index and search. The Web tree still needs a clickable folder for
+// them, so Tree synthesizes a tree-only entry with this ID prefix and
+// Document reads the file from the vault instead of the index. The ID avoids
+// "/" so it survives a single HTTP path segment.
+const vaultNavigationIDPrefix = "vault-navigation:"
+
+var vaultNavigationPaths = []string{
+	projectsRootIndexPath,
+	archiveRootIndexPath,
+	archiveProjectsIndexPath,
+}
+
+func vaultNavigationID(relative string) string {
+	return vaultNavigationIDPrefix + strings.ReplaceAll(filepath.ToSlash(relative), "/", ":")
+}
+
+func vaultNavigationRelativePath(id string) (string, bool) {
+	for _, relative := range vaultNavigationPaths {
+		if id == vaultNavigationID(relative) {
+			return relative, true
+		}
+	}
+	return "", false
+}
+
+func navigationPageTitle(relative string, document Document) string {
+	if title := strings.TrimSpace(document.Frontmatter.Title); title != "" {
+		return title
+	}
+	return humanizeSegment(path.Base(path.Dir(filepath.ToSlash(relative))))
+}
+
+// containerNavigationEntries reports the container pages that exist on disk for
+// the all-libraries tree. A flat archive actually named "projects" is a real
+// library, not a container; isContainerVaultIndexPath keeps that distinction.
+func (r *Reader) containerNavigationEntries() []IndexEntry {
+	result := make([]IndexEntry, 0, len(vaultNavigationPaths))
+	for _, relative := range vaultNavigationPaths {
+		if !isContainerVaultIndexPath(r.config.VaultPath, relative) {
+			continue
+		}
+		absolute := filepath.Join(r.config.VaultPath, filepath.FromSlash(relative))
+		if !IsInsideRoot(r.config.VaultPath, absolute) {
+			continue
+		}
+		info, err := os.Stat(absolute)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		title := ""
+		if raw, readErr := os.ReadFile(absolute); readErr == nil {
+			title = strings.TrimSpace(ParseDocument(string(raw)).Frontmatter.Title)
+		}
+		if title == "" {
+			title = humanizeSegment(path.Base(path.Dir(relative)))
+		}
+		result = append(result, IndexEntry{
+			ID: vaultNavigationID(relative), Path: relative, Type: TypeNavigation,
+			Title: title, IsIndex: true, Updated: info.ModTime().UTC().Format(time.RFC3339Nano),
+		})
+	}
+	return result
+}
+
+// navigationDocument builds the reader payload for a container navigation page
+// without an index row. Only the three known container paths are accepted, so
+// a crafted ID cannot read arbitrary vault files.
+func (r *Reader) navigationDocument(relative string) (Doc, error) {
+	relative = filepath.ToSlash(strings.TrimSpace(relative))
+	if !isContainerVaultIndexPath(r.config.VaultPath, relative) {
+		return Doc{}, ErrDocumentNotFound
+	}
+	if err := ValidateRelativePath(relative); err != nil {
+		return Doc{}, ErrDocumentNotFound
+	}
+	absolute := filepath.Join(r.config.VaultPath, filepath.FromSlash(relative))
+	if !IsInsideRoot(r.config.VaultPath, absolute) {
+		return Doc{}, ErrDocumentNotFound
+	}
+	raw, err := os.ReadFile(absolute)
+	if os.IsNotExist(err) {
+		return Doc{}, ErrDocumentNotFound
+	}
+	if err != nil {
+		return Doc{}, err
+	}
+	document := ParseDocument(string(raw))
+	modified := ""
+	if info, statErr := os.Stat(absolute); statErr == nil {
+		modified = info.ModTime().UTC().Format(time.RFC3339Nano)
+	}
+	updated := strings.TrimSpace(document.Frontmatter.Updated)
+	if updated == "" {
+		updated = modified
+	}
+	return Doc{
+		ID: vaultNavigationID(relative), Title: navigationPageTitle(relative, document),
+		Path: relative, RelativePath: relative, AbsolutePath: absolute,
+		LibraryID: "", LibraryName: "知识库",
+		Type: TypeNavigation, Status: strings.TrimSpace(document.Frontmatter.Status),
+		Body: document.Body, Updated: updated, Created: strings.TrimSpace(document.Frontmatter.Created),
+		ModifiedAt: modified, IsIndex: true, System: true, Warning: document.Warning,
+		Outline: outlineItems(document.Body), Backlinks: []Backlink{},
+		ObsidianVault: r.manifest.ObsidianVault, ObsidianReady: r.obsidianRegistered(),
+		ObsidianFile: strings.TrimSuffix(relative, path.Ext(relative)),
+		VaultPath:    r.config.VaultPath,
+	}, nil
 }
 
 // buildReaderTree renders the vault's on-disk directory hierarchy instead of
