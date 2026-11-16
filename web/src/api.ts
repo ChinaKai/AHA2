@@ -257,8 +257,10 @@ class APIClient {
     return this.request("/api/v1/system/data/cleanup", {method: "POST", body: JSON.stringify(payload)});
   }
 
-  previewBackupCleanup(): Promise<{ok: boolean; preview: DataBackupPreview}> {
-    return this.request("/api/v1/system/data/backups");
+  // The preview walks every backup directory. A stalled filesystem must fail
+  // into the retryable dialog instead of leaving the Web on "reading" forever.
+  previewBackupCleanup(timeoutMs = 20_000): Promise<{ok: boolean; preview: DataBackupPreview}> {
+    return this.request("/api/v1/system/data/backups", {signal: AbortSignal.timeout(timeoutMs)});
   }
 
   updateConversationRetention(payload: {retention_days: number; purge_tool: boolean; purge_update: boolean}): Promise<{ok: boolean; retention: ConversationRetentionSettings}> {

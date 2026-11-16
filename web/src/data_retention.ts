@@ -133,6 +133,12 @@ function categoryNote(category: DatabaseCategory, safety: DatabaseSafety): strin
 function categoryCard(category: DatabaseCategory): string {
   const safety = safetyKey(category.safety);
   const note = categoryNote(category, safety);
+  // Only categories with an executable cleanup kind (B conversation, C
+  // hardware_io) get the button. A/H/K and every read-only category still get
+  // their dialog from the server payload, but there is nothing to launch.
+  const cleanup = category.cleanup
+    ? `<button type="button" class="data-db-cleanup-button" data-db-cleanup="${escapeHTML(category.id)}" aria-label="${t("data.db.cleanup")} ${categoryName(category)}">${t("data.db.cleanup")}</button>`
+    : "";
   const tables = category.tables.length
     ? `<div class="table-wrap"><table class="data-table data-db-table"><thead><tr><th>${t("data.db.table")}</th><th>${t("data.db.rows")}</th><th>${t("data.db.size")}</th></tr></thead>
         <tbody>${category.tables.map(tableRow).join("")}</tbody></table></div>`
@@ -142,7 +148,7 @@ function categoryCard(category: DatabaseCategory): string {
       <strong>${categoryName(category)}</strong>
       <span class="data-db-badge data-db-badge-${safety}">${t(`data.db.safety.${safety}`)}</span>
       <span class="data-db-category-stats field-help">${t("data.db.categoryStats", {tables: category.tables.length, rows: formatRows(category.rows, category.rows_exact), size: formatBytes(category.estimated_bytes)})}</span>
-      <button type="button" class="data-db-cleanup-button" data-db-cleanup="${escapeHTML(category.id)}" aria-label="${t("data.db.cleanup")} ${categoryName(category)}">${t("data.db.cleanup")}</button>
+      ${cleanup}
     </summary>
     <p class="field-help data-cleanup-note" data-db-category-note>${note}</p>
     ${tables}
@@ -366,7 +372,6 @@ export function renderDatabasePanel(state: DataRetentionViewState): string {
     <div class="data-db-files">
       <div class="data-db-file-row">
         <div><span class="field-help">${t("data.db.file")}</span><strong>${formatBytes(stats.file_bytes)}</strong></div>
-        <button type="button" data-db-compact>${t("data.db.compact")}</button>
       </div>
       <div><span class="field-help">WAL</span><strong>${formatBytes(stats.wal_bytes)}</strong></div>
       <div><span class="field-help">SHM</span><strong>${formatBytes(stats.shm_bytes)}</strong></div>

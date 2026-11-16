@@ -1,6 +1,8 @@
 package httpapi
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -55,6 +57,17 @@ func TestDataInventoryCountsKnownCategories(t *testing.T) {
 	}
 }
 
+func TestPreviewBackupCleanupStopsWhenContextEnds(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "backups", "user-installed-1", "aha2.exe"), 10)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	preview, err := previewBackupCleanup(ctx, root)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("preview err=%v preview=%#v, want context.Canceled so the HTTP handler can return a retryable timeout", err, preview)
+	}
+}
+
 func TestCleanupDataKeepsOnlyTheNewestBackupAndOnlyTouchesSafeFiles(t *testing.T) {
 	root := t.TempDir()
 	backupRoot := filepath.Join(root, "backups")
@@ -73,7 +86,7 @@ func TestCleanupDataKeepsOnlyTheNewestBackupAndOnlyTouchesSafeFiles(t *testing.T
 	writeTestFile(t, filepath.Join(root, "attachments", "a.bin"), 40)
 
 	// Preview lists the two older backups and never deletes anything.
-	preview, err := previewBackupCleanup(root)
+	preview, err := previewBackupCleanup(context.Background(), root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +100,7 @@ func TestCleanupDataKeepsOnlyTheNewestBackupAndOnlyTouchesSafeFiles(t *testing.T
 		t.Fatalf("preview deleted a backup: %v", err)
 	}
 
-	result, err := cleanupDataDir(root, "backups")
+	result, err := cleanupDataDir(context.Background(), root, "backups")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,15 +118,15 @@ func TestCleanupDataKeepsOnlyTheNewestBackupAndOnlyTouchesSafeFiles(t *testing.T
 		}
 	}
 	// With only one backup left the preview is empty and cleanup is a no-op.
-	preview, err = previewBackupCleanup(root)
+	preview, err = previewBackupCleanup(context.Background(), root)
 	if err != nil || preview.CanClean || len(preview.Candidates) != 0 {
 		t.Fatalf("single-backup preview=%#v err=%v", preview, err)
 	}
-	if result, err = cleanupDataDir(root, "backups"); err != nil || result.Removed != 0 {
+	if result, err = cleanupDataDir(context.Background(), root, "backups"); err != nil || result.Removed != 0 {
 		t.Fatalf("single-backup cleanup=%#v err=%v", result, err)
 	}
 
-	logResult, err := cleanupDataDir(root, "logs")
+	logResult, err := cleanupDataDir(context.Background(), root, "logs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +142,7 @@ func TestCleanupDataKeepsOnlyTheNewestBackupAndOnlyTouchesSafeFiles(t *testing.T
 	if _, err := os.Stat(filepath.Join(root, "attachments", "a.bin")); err != nil {
 		t.Fatalf("attachments should be preserved: %v", err)
 	}
-	if _, err := cleanupDataDir(root, "attachments"); err == nil {
+	if _, err := cleanupDataDir(context.Background(), root, "attachments"); err == nil {
 		t.Fatal("expected protected category cleanup to be rejected")
 	}
 }

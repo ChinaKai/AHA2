@@ -92,7 +92,7 @@ function dialog(html, id) {
   return html.match(new RegExp(`<dialog[^>]*data-db-dialog="${id}"[\\s\\S]*?</dialog>`))?.[0] ?? "";
 }
 
-test("database panel renders file stats, a compaction button and the VACUUM note", () => {
+test("database panel renders file stats and the VACUUM note without a second compaction entry", () => {
   i18n.applyLocale("zh-CN");
   const html = panel.renderDatabasePanel(viewState());
   assert.match(html, /data-db-table="hardware_io"/);
@@ -101,18 +101,21 @@ test("database panel renders file stats, a compaction button and the VACUUM note
   assert.match(html, /data-db-range|C\. 硬件 I\/O/);
   assert.match(html, /文件不一定变小/);
   assert.match(html, /VACUUM/);
-  assert.match(html, /data-db-compact/);
-  assert.match(html, /压缩数据库/);
+  // The single compaction entry lives on the inventory database row, next to
+  // the other cleanup actions, not on this details card.
+  assert.doesNotMatch(html, /data-db-compact/);
 });
 
-test("every A-K category row has a cleanup button and its own dialog", () => {
+test("only categories with an executable cleanup show a cleanup button, but every category keeps its dialog", () => {
   i18n.applyLocale("zh-CN");
   const html = panel.renderDatabasePanel(viewState());
-  for (const id of ["A", "B", "C", "D", "J", "other"]) {
-    assert.match(html, new RegExp(`data-db-cleanup="${id}"`), `${id} cleanup button`);
+  assert.match(html, /data-db-cleanup="B"/);
+  assert.match(html, /data-db-cleanup="C"/);
+  for (const id of ["A", "D", "J", "other"]) {
+    assert.doesNotMatch(html, new RegExp(`data-db-cleanup="${id}"`), `${id} is read-only and must not offer cleanup`);
     assert.ok(dialog(html, id), `${id} dialog`);
   }
-  assert.equal((html.match(/data-db-cleanup="/g) || []).length, 6);
+  assert.equal((html.match(/data-db-cleanup="/g) || []).length, 2);
 
   const readOnlyA = dialog(html, "A");
   assert.match(readOnlyA, /A\. 任务与执行/);

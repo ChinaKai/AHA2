@@ -2856,7 +2856,11 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
 .data-db-file-row > div { display: grid; gap: 4px; min-width: 0; }
 .data-db-cleanup-button { margin-left: 4px; }
 .data-db-checks { display: grid; gap: 6px; padding: 0 16px 8px; }
-.data-db-checks label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+/* The global input rule makes every control 100% wide and 38px tall. Reset the
+   checkboxes explicitly or the phone dialog stretches them across the row and
+   separates the label from its box. */
+.data-db-checks label { display: flex; align-items: center; justify-content: flex-start; gap: 8px; min-width: 0; margin: 0; color: var(--muted); font-weight: 400; }
+.data-db-checks input[type="checkbox"] { flex: 0 0 auto; width: 16px; height: 16px; min-width: 16px; margin: 0; padding: 0; accent-color: var(--color-accent); }
 .data-db-dialog { width: min(640px, calc(100vw - 32px)); }
 .data-db-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 18px 10px; border-bottom: 1px solid var(--line); }
 .data-db-dialog-body { padding: 12px 18px 18px; }

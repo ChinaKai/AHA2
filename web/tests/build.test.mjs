@@ -1877,6 +1877,9 @@ test("knowledge workspace opens in reading mode with four equal top-level sectio
   assert.match(html, /knowledge-mode-read/);
   assert.match(html, /knowledge-read-layout directory-open/);
   assert.match(html, /knowledge-directory/);
+  // The collapse control uses a directional chevron, not the device/panel
+  // glyph, and still reports its expanded state.
+  assert.match(html, /data-knowledge-directory-collapse[^>]*aria-expanded="true"[^>]*><svg[^>]*><path d="m15 18-6-6 6-6"\/>/);
   assert.match(html, /knowledge-tree-group/);
   assert.match(html, />系统索引</);
   assert.match(html, />实践</);
@@ -3476,7 +3479,13 @@ test("data management shows scoped sizes and safe cleanup actions", async () => 
   assert.match(main, /function bindDataManagementPage/);
   assert.match(main, /data-data-cleanup="backups"/);
   assert.match(main, /data-data-cleanup="logs"/);
+  // The single compaction entry sits on the inventory database row, next to
+  // the other cleanup actions.
+  assert.match(main, /category\.id === "database"[\s\S]{0,160}data-db-compact/);
   assert.match(main, /api\.previewBackupCleanup\(\)/);
+  assert.match(main, /data-backup-retry/);
+  assert.match(main, /data-backup-error/);
+  assert.match(main, /state\.dataBackupError/);
   assert.doesNotMatch(main, /data-backup-keep/);
   assert.match(main, /data-backup-dialog/);
   assert.match(main, /window\.confirm/);
@@ -3487,6 +3496,10 @@ test("data management shows scoped sizes and safe cleanup actions", async () => 
   assert.ok(styles.includes(".data-summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 16px; }"));
   assert.match(styles, /@media \(max-width: 640px\) \{[\s\S]*?\.data-table thead \{ display: none; \}/);
   assert.match(styles, /\.data-table tr \{ display: block; padding: 12px 16px;/);
+  // The global input rule makes checkboxes full-width; the B dialog resets
+  // them so the label stays attached on phones.
+  assert.ok(styles.includes('.data-db-checks input[type="checkbox"] { flex: 0 0 auto; width: 16px; height: 16px; min-width: 16px; margin: 0; padding: 0; accent-color: var(--color-accent); }'));
+  assert.ok(styles.includes('.data-db-checks label { display: flex; align-items: center; justify-content: flex-start; gap: 8px; min-width: 0; margin: 0; color: var(--muted); font-weight: 400; }'));
   assert.match(api, /\/api\/v1\/system\/data/);
   assert.match(api, /\/api\/v1\/system\/data\/cleanup/);
   assert.match(types, /interface DataInventory/);
@@ -3496,6 +3509,11 @@ test("data management shows scoped sizes and safe cleanup actions", async () => 
   assert.match(backend, /strings\.HasPrefix\(entry\.Name\(\), "user-installed-"\)/);
   assert.match(backend, /case "backups":/);
   assert.match(backend, /case "logs":/);
+  // A stalled backup scan returns a retryable error instead of an endless
+  // dialog.
+  assert.match(backend, /backupPreviewTimeout = 10 \* time\.Second/);
+  assert.match(backend, /http\.StatusGatewayTimeout/);
+  assert.match(backend, /directorySizeContext/);
   assert.doesNotMatch(backend, /case "attachments":/);
   assert.doesNotMatch(backend, /case "database":/);
 });

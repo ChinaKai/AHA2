@@ -1,6 +1,8 @@
 package httpapi
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -54,15 +56,27 @@ type DataBackupPreview struct {
 	CanClean   bool             `json:"can_clean"`
 }
 
+// backupPreviewTimeout bounds the recursive size walk. The scan is normally
+// instant, but a roaming profile, network data directory or antivirus scanner
+// can stall it; the Web must get a retryable error instead of an endless
+// "reading" dialog.
+const backupPreviewTimeout = 10 * time.Second
+
 func (s *Server) previewBackupCleanup(writer http.ResponseWriter, request *http.Request) {
 	root := strings.TrimSpace(s.store.DataDir())
 	if root == "" {
 		writeError(writer, http.StatusServiceUnavailable, "data_dir_unavailable")
 		return
 	}
-	preview, err := previewBackupCleanup(root)
+	ctx, cancel := context.WithTimeout(request.Context(), backupPreviewTimeout)
+	defer cancel()
+	preview, err := previewBackupCleanup(ctx, root)
 	if err != nil {
-		writeJSON(writer, http.StatusInternalServerError, map[string]any{"ok": false, "error": "data_cleanup_preview_failed", "message": err.Error()})
+		status := http.StatusInternalServerError
+		if errors.Is(err, context.DeadlineExceeded) {
+			status = http.StatusGatewayTimeout
+		}
+		writeJSON(writer, status, map[string]any{"ok": false, "error": "data_cleanup_preview_failed", "message": err.Error()})
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "preview": preview})
@@ -100,7 +114,7 @@ func (s *Server) cleanupData(writer http.ResponseWriter, request *http.Request) 
 		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "confirmation_required", "message": "清理需要明确确认"})
 		return
 	}
-	result, err := cleanupDataDir(root, payload.Category)
+	result, err := cleanupDataDir(request.Context(), root, payload.Category)
 	if err != nil {
 		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "data_cleanup_failed", "message": err.Error()})
 		return
@@ -180,8 +194,19 @@ func buildDataInventory(root string) (DataInventory, error) {
 }
 
 func directorySize(root string) int64 {
+	total, _ := directorySizeContext(context.Background(), root)
+	return total
+}
+
+// directorySizeContext is directorySize with cancellation. WalkDir only stops
+// when the callback returns an error, so the context is checked on every
+// entry; a timed-out preview then fails instead of blocking the HTTP handler.
+func directorySizeContext(ctx context.Context, root string) (int64, error) {
 	var total int64
-	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		if err != nil {
 			return nil
 		}
@@ -198,7 +223,7 @@ func directorySize(root string) int64 {
 		}
 		return nil
 	})
-	return total
+	return total, err
 }
 
 // backupCleanupKeep is fixed for the first version: the newest install backup
@@ -222,7 +247,7 @@ func countInstallBackups(root string) int {
 }
 
 // listInstallBackups returns user-installed-* backup directories, newest first.
-func listInstallBackups(root string) ([]DataBackupItem, error) {
+func listInstallBackups(ctx context.Context, root string) ([]DataBackupItem, error) {
 	backupRoot := filepath.Join(filepath.Clean(root), "backups")
 	entries, err := os.ReadDir(backupRoot)
 	if err != nil {
@@ -245,8 +270,12 @@ func listInstallBackups(root string) ([]DataBackupItem, error) {
 			continue
 		}
 		path := filepath.Join(backupRoot, entry.Name())
+		size, sizeErr := directorySizeContext(ctx, path)
+		if sizeErr != nil {
+			return nil, sizeErr
+		}
 		items = append(items, backupItem{
-			DataBackupItem: DataBackupItem{Name: entry.Name(), Bytes: directorySize(path), ModTime: info.ModTime()},
+			DataBackupItem: DataBackupItem{Name: entry.Name(), Bytes: size, ModTime: info.ModTime()},
 			path:           path,
 		})
 	}
@@ -258,8 +287,8 @@ func listInstallBackups(root string) ([]DataBackupItem, error) {
 	return result, nil
 }
 
-func previewBackupCleanup(root string) (DataBackupPreview, error) {
-	items, err := listInstallBackups(root)
+func previewBackupCleanup(ctx context.Context, root string) (DataBackupPreview, error) {
+	items, err := listInstallBackups(ctx, root)
 	if err != nil {
 		return DataBackupPreview{}, err
 	}
@@ -277,13 +306,13 @@ func previewBackupCleanup(root string) (DataBackupPreview, error) {
 	return preview, nil
 }
 
-func cleanupDataDir(root, category string) (DataCleanupResult, error) {
+func cleanupDataDir(ctx context.Context, root, category string) (DataCleanupResult, error) {
 	root = filepath.Clean(root)
 	category = strings.ToLower(strings.TrimSpace(category))
 	result := DataCleanupResult{}
 	switch category {
 	case "backups":
-		items, err := listInstallBackups(root)
+		items, err := listInstallBackups(ctx, root)
 		if err != nil {
 			return result, err
 		}

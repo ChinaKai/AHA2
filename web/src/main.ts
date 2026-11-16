@@ -134,6 +134,7 @@ interface State extends ModelHealthState {
   dataBackupPreview: DataBackupPreview | null;
   dataBackupDialogOpen: boolean;
   dataBackupBusy: boolean;
+  dataBackupError: string;
   dataRetention: DataRetentionViewState;
   syncSettings: SyncSettings;
   syncSettingsReady: boolean;
@@ -618,6 +619,7 @@ const state: State = {
   dataBackupPreview: null,
   dataBackupDialogOpen: false,
   dataBackupBusy: false,
+  dataBackupError: "",
   dataRetention: {
     database: null, loading: false, error: "", plan: null, result: null, busy: "",
     conversationPlan: null, conversationResult: null, conversationBusy: "",
@@ -4462,10 +4464,39 @@ function dataCategoryText(category: {id: string; label: string; note?: string}, 
   return field === "note" ? (category.note || "") : category.label;
 }
 
+// A preview request can outlive the dialog (Owner closes it or reopens). The
+// token makes only the newest request able to write state, so a slow response
+// never reopens a closed dialog or overwrites a newer retry.
+let dataBackupPreviewToken = 0;
+
+function requestBackupPreview(): void {
+  const token = ++dataBackupPreviewToken;
+  state.dataBackupPreview = null;
+  state.dataBackupError = "";
+  render();
+  void api.previewBackupCleanup().then(result => {
+    if (token !== dataBackupPreviewToken) return;
+    state.dataBackupPreview = result.preview;
+  }).catch((error: unknown) => {
+    if (token !== dataBackupPreviewToken) return;
+    // Keep the dialog open with a retry action. Closing it here would hide the
+    // only explanation for a failed scan.
+    state.dataBackupError = error instanceof Error ? error.message : String(error);
+  }).finally(() => {
+    if (token !== dataBackupPreviewToken) return;
+    render();
+  });
+}
+
 function dataBackupDialog(): string {
   const preview = state.dataBackupPreview;
   let body = `<p class="field-help">${t("data.backupsReading")}</p>`;
-  if (preview) {
+  if (state.dataBackupError) {
+    body = `<p class="form-error" data-backup-error>${escapeHTML(t("data.backupsError", {message: state.dataBackupError}))}</p>
+      <div class="data-cleanup-actions">
+        <button type="button" data-backup-retry>${t("data.backupsRetry")}</button>
+      </div>`;
+  } else if (preview) {
     if (preview.candidates.length === 0) {
       body = `<p class="data-cleanup-note">${t("data.backupsNone")}</p>`;
     } else {
@@ -4498,7 +4529,11 @@ function dataManagementView(): string {
         ? `<button type="button" data-data-cleanup="backups" ${category.bytes === 0 || (inventory?.backup_count ?? 0) <= 1 ? "disabled" : ""}>${t("data.cleanBackups")}</button>`
         : category.id === "logs"
           ? `<button type="button" data-data-cleanup="logs" ${category.bytes === 0 ? "disabled" : ""}>${t("data.cleanLogs")}</button>`
-          : `<span class="field-help">${t("common.readOnly")}</span>`;
+          // Compaction belongs beside the other cleanup entries, not on the
+          // database-details card below. The same dialog is reused.
+          : category.id === "database"
+            ? `<button type="button" data-db-compact>${t("data.db.compact")}</button>`
+            : `<span class="field-help">${t("common.readOnly")}</span>`;
       const note = dataCategoryText(category, "note");
       return `<tr>
         <td><div class="data-category"><strong>${escapeHTML(dataCategoryText(category, "label"))}</strong>${note ? `<small class="field-help">${escapeHTML(note)}</small>` : ""}</div></td>
@@ -4579,17 +4614,9 @@ function bindDataManagementPage(): void {
     button.addEventListener("click", () => {
       const category = button.dataset.dataCleanup || "";
       if (category === "backups") {
-        state.dataBackupPreview = null;
         state.dataBackupDialogOpen = true;
         render();
-        void api.previewBackupCleanup().then(result => {
-          state.dataBackupPreview = result.preview;
-          render();
-        }).catch((error: unknown) => {
-          state.dataBackupDialogOpen = false;
-          setMessage("error", error instanceof Error ? error.message : String(error));
-          render();
-        });
+        requestBackupPreview();
         return;
       }
       if (category === "logs") {
@@ -4618,9 +4645,20 @@ function bindBackupCleanupDialog(): void {
   }
   dialog.querySelector("[data-backup-close]")?.addEventListener("click", () => {
     state.dataBackupDialogOpen = false;
+    dataBackupPreviewToken++;
     dialog.close();
   });
-  dialog.addEventListener("close", () => { state.dataBackupDialogOpen = false; });
+  dialog.addEventListener("close", () => {
+    // A render replaces the whole dialog while it is open; the detached node's
+    // close event must not clear the error state of the replacement.
+    if (!dialog.isConnected) return;
+    dataBackupPreviewToken++;
+    state.dataBackupDialogOpen = false;
+    state.dataBackupError = "";
+  });
+  dialog.querySelector("[data-backup-retry]")?.addEventListener("click", () => {
+    requestBackupPreview();
+  });
   const confirm = dialog.querySelector<HTMLButtonElement>("[data-backup-confirm]");
   confirm?.addEventListener("click", () => {
     if (!state.dataBackupPreview?.can_clean || state.dataBackupBusy) return;
