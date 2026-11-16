@@ -45,6 +45,13 @@ func (s *Service) projectKnowledgeSpaceEnabled() bool {
 	return s != nil && s.knowledgeVault != nil
 }
 
+// KnowledgeVaultAvailable reports whether the file vault is the active
+// knowledge source. Callers that provision spaces opportunistically use it to
+// stay quiet in legacy/test configurations.
+func (s *Service) KnowledgeVaultAvailable() bool {
+	return s != nil && s.knowledgeVault != nil && s.knowledgeVault.Enabled()
+}
+
 // CreateProject creates a project row and initializes its knowledge space in
 // the same operation. Model A has no separate space entity: the project row
 // itself is the space, and a project is only usable once its manifest mapping,
