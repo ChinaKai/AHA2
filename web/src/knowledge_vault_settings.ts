@@ -524,7 +524,7 @@ function attentionFor(settings: KnowledgeVaultSettings): Attention | null {
     const missing = (readiness.missing ?? []).map(id => {
       const key = `kvs.missing.${id}`;
       const label = kt(key);
-      return escapeHTML(label === key ? id : label);
+      return label === key ? id : label;
     });
     return {
       tone: readiness.status === "error" ? "is-error" : "is-warn",

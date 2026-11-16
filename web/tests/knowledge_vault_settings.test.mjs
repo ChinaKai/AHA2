@@ -11,12 +11,16 @@ const root = resolve(import.meta.dirname, "..");
 const panelPath = resolve(root, "build", "knowledge_vault_settings.js");
 const panel = await import(pathToFileURL(panelPath).href);
 // The build appends one shared ?v= to every module URL so the browser keeps a
-// single API singleton. Import the exact same URL or the stubs below would land
-// on a second instance that the panel never calls.
+// single API and i18n singleton. Import the exact same URL or the stubs below
+// would land on a second instance that the panel never calls.
 const panelSource = await readFile(panelPath, "utf8");
 const apiVersion = panelSource.match(/from "\.\/api\.js(\?v=[^"]+)?"/)?.[1] ?? "";
 const {api} = await import(`${pathToFileURL(resolve(root, "build", "api.js")).href}${apiVersion}`);
 const i18nVersion = panelSource.match(/from "\.\/i18n\.js(\?v=[^"]+)?"/)?.[1] ?? "";
+// A bare import would silently create a second i18n instance; the panel would
+// stay zh-CN after the shell applied en-US, and this file's locale tests would
+// import the same bare URL and pass for the wrong reason.
+assert.match(i18nVersion, /^\?v=[a-f0-9]{12}$/, "knowledge_vault_settings.js must import the versioned i18n singleton");
 const i18n = await import(`${pathToFileURL(resolve(root, "build", "i18n.js")).href}${i18nVersion}`);
 
 const ready = {
@@ -705,6 +709,77 @@ test("the panel copy follows the active locale", async () => {
     assert.doesNotMatch(html, /文件知识库/);
   } finally {
     i18n.applyLocale(previous);
+    restore();
+  }
+});
+
+test("a configured vault keeps the switch visible without legacy knowledge", async () => {
+  panel.__resetKnowledgeVaultSettingsForTest();
+  const configured = {
+    ...ready,
+    configured: true,
+    readiness: {...ready.readiness, switch_visible: false},
+    legacy: {entries: 0, skills: 0, skill_packages: 0},
+  };
+  const restore = stub("knowledgeVaultSettings", async () => ({ok: true, settings: configured}));
+  try {
+    const ctx = context();
+    await panel.refreshKnowledgeVaultSettingsPanel(ctx);
+    const html = panel.renderKnowledgeVaultSettingsPanel(ctx);
+    // switchVisible = readiness.switch_visible || settings.configured: no legacy
+    // and switch_visible=false must still render the switch once the owner has
+    // configured the vault.
+    assert.match(html, /id="knowledge-vault-enabled"/);
+    assert.match(html, /type="checkbox" checked/);
+    assert.doesNotMatch(html, /全新安装默认使用文件知识库/);
+    assert.doesNotMatch(html, /knowledge-vault-legacy/);
+    assert.match(html, /class="knowledge-vault-state is-on">已启用</);
+  } finally {
+    restore();
+  }
+});
+
+test("an unknown readiness check is escaped before it reaches the checklist", async () => {
+  panel.__resetKnowledgeVaultSettingsForTest();
+  const future = {
+    ...ready,
+    readiness: {
+      ...ready.readiness,
+      checks: [
+        ...ready.readiness.checks,
+        {id: "future_check", status: "warn", message: "<未来 & 检查>"},
+      ],
+    },
+  };
+  const restore = stub("knowledgeVaultSettings", async () => ({ok: true, settings: future}));
+  try {
+    const ctx = context();
+    await panel.refreshKnowledgeVaultSettingsPanel(ctx);
+    const html = panel.renderKnowledgeVaultSettingsPanel(ctx);
+    assert.match(html, /&lt;未来 &amp; 检查&gt;/);
+    assert.doesNotMatch(html, /<未来/);
+  } finally {
+    restore();
+  }
+});
+
+test("an unknown missing id is escaped exactly once", async () => {
+  panel.__resetKnowledgeVaultSettingsForTest();
+  const blocked = {
+    ...emptyVault(),
+    readiness: {
+      status: "needs_rebuild", can_enable: false, default_enabled: true, switch_visible: true,
+      missing: ["<odd&id>"], checks: [],
+    },
+  };
+  const restore = stub("knowledgeVaultSettings", async () => ({ok: true, settings: blocked}));
+  try {
+    const ctx = context();
+    await panel.refreshKnowledgeVaultSettingsPanel(ctx);
+    const html = panel.renderKnowledgeVaultSettingsPanel(ctx);
+    assert.ok(html.includes("&lt;odd&amp;id&gt;"));
+    assert.doesNotMatch(html, /&amp;lt;/);
+  } finally {
     restore();
   }
 });

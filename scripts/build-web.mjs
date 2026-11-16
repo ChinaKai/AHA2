@@ -89,7 +89,7 @@ async function buildModules() {
     "codex_accounts.js": ["api", "icons"],
     "knowledge_workspace.js": ["api", "icons", "i18n", "markdown"],
     "knowledge_vault.js": ["api", "icons", "i18n", "markdown"],
-    "knowledge_vault_settings.js": ["api"],
+    "knowledge_vault_settings.js": ["api", "i18n"],
     "task_vault_skills.js": ["api"],
     "channels.js": ["api", "icons"],
     "assistant.js": ["api", "pet_bubble", "pet_navigation"],

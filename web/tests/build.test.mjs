@@ -3775,3 +3775,18 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   assert.equal((index.match(/<script\b/g) || []).length, 1, "index must load one module script");
   assert.ok(!index.includes('src="/app.js"'));
 });
+
+test("the lazy knowledge vault settings panel shares the versioned i18n singleton", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const [appSource, panelSource] = await Promise.all([
+    readFile(resolve(root, "build", "app.js"), "utf8"),
+    readFile(resolve(root, "build", "knowledge_vault_settings.js"), "utf8"),
+  ]);
+  const appImport = appSource.match(/from "\.\/(i18n\.js\?v=[a-f0-9]{12})"/)?.[1];
+  const panelImport = panelSource.match(/from "\.\/(i18n\.js\?v=[a-f0-9]{12})"/)?.[1];
+  assert.ok(appImport, "app.js must import the versioned i18n singleton");
+  assert.ok(panelImport, "knowledge_vault_settings.js must import the versioned i18n singleton");
+  // The lazy panel is loaded after the shell applied the saved locale. Sharing
+  // the exact URL keeps one i18n instance, so applyLocale("en-US") reaches it.
+  assert.equal(panelImport, appImport);
+});
