@@ -1267,8 +1267,9 @@ test("a file preview offers copy path and hides the file-manager action when rem
 test("the directory header copies and reveals the vault/current folder, not the open document", () => {
   reset({vaultPath: "C:\\知识库", openAvailable: false});
   let html = vault.renderKnowledgeVaultPage(context());
-  assert.match(html, /class="kv-panel-actions kv-open-actions"[\s\S]*?data-kv-copy="C:\\知识库"/);
+  assert.match(html, /class="kv-panel-actions kv-open-actions"[\s\S]*?data-kv-copy="C:\\知识库"[^>]*title="复制目录路径"[^>]*aria-label="复制目录路径"/);
   assert.doesNotMatch(html, /data-kv-reveal=/, "remote access never shows the file-manager action");
+  assert.doesNotMatch(html, /复制文档路径/, "the directory copy action must not use the document-path label");
 
   reset({vaultPath: "/srv/vault", filesMode: true, filesPath: "projects/demo", filesState: "ready", files: [], openAvailable: true});
   html = vault.renderKnowledgeVaultPage(context());

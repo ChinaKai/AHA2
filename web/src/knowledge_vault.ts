@@ -41,6 +41,7 @@ const localText: Record<string, [zhCN: string, enUS: string]> = {
   "kv.filesUp": ["上一级目录", "Parent directory"],
   "kv.filesEmpty": ["这个目录没有可显示的文件。", "This directory has no visible files."],
   "kv.fileOpenManager": ["在文件管理器中打开", "Open in file manager"],
+  "kv.copyDirectoryPath": ["复制目录路径", "Copy directory path"],
   "kv.fileDownload": ["下载文件", "Download file"],
   "kv.fileBinary": ["该文件不是文本，已提供下载。", "This file is not text; download it instead."],
   "kv.fileTooLarge": ["该文件过大，已提供下载。", "This file is too large to preview; download it instead."],
@@ -1319,7 +1320,7 @@ function knowledgeBodyHTML(): string {
   const directoryPath = directoryAbsolutePath();
   const directoryActions = `<div class="kv-panel-actions kv-open-actions">
     ${directoryPath
-      ? `<button type="button" class="kv-open kv-copy" data-kv-copy="${escapeVaultHTML(directoryPath)}" title="${escapeVaultHTML(kt("kv.copyPath"))}" aria-label="${escapeVaultHTML(kt("kv.copyPath"))}">${icon("copy")}</button>`
+      ? `<button type="button" class="kv-open kv-copy" data-kv-copy="${escapeVaultHTML(directoryPath)}" title="${escapeVaultHTML(kt("kv.copyDirectoryPath"))}" aria-label="${escapeVaultHTML(kt("kv.copyDirectoryPath"))}">${icon("copy")}</button>`
       : ""}
     ${state.openAvailable
       ? `<button type="button" class="kv-open" data-kv-reveal="${escapeVaultHTML(directoryRelativePath())}" title="${escapeVaultHTML(kt("kv.fileOpenManager"))}" aria-label="${escapeVaultHTML(kt("kv.fileOpenManager"))}">${icon("folder")}</button>`
