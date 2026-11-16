@@ -95,3 +95,24 @@ test("the group picker renders the global checkbox from the stored selection", (
   // the vault picker must not offer it.
   assert.doesNotMatch(unchecked, /name="knowledge_scope_mode"/);
 });
+
+function emptyWarningState(html) {
+  const match = html.match(/<p class="channel-knowledge-empty-warning" data-channel-knowledge-empty-warning([^>]*)>([^<]*)<\/p>/);
+  assert.ok(match, "vault editor must render the empty-selection warning element");
+  return {hidden: match[1].includes("hidden"), text: match[2]};
+}
+
+test("vault editor warns only for an empty selection with global off", () => {
+  const emptyOff = emptyWarningState(channels.channelVaultKnowledgeSection(vaultContext, [], false));
+  assert.equal(emptyOff.hidden, false);
+  assert.match(emptyOff.text, /群聊将没有可读知识/);
+
+  const withSpace = emptyWarningState(channels.channelVaultKnowledgeSection(vaultContext, [{space_project_id: "p1"}], false));
+  assert.equal(withSpace.hidden, true, "a selected project space keeps the group readable");
+
+  const globalOnly = emptyWarningState(channels.channelVaultKnowledgeSection(vaultContext, [], true));
+  assert.equal(globalOnly.hidden, true, "global knowledge alone keeps the group readable");
+
+  const globalWithSpace = emptyWarningState(channels.channelVaultKnowledgeSection(vaultContext, [{space_project_id: "p1"}], true));
+  assert.equal(globalWithSpace.hidden, true);
+});

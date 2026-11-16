@@ -182,6 +182,15 @@ export interface ChannelGroupKnowledgeSelectionPayload {
 	bindings: ChannelGroupBindingPayload[];
 }
 
+export const channelEmptyGroupKnowledgeWarning = "群聊将没有可读知识；保存后会清空当前选择。";
+
+// An empty vault group selection is a legal save that grants the group nothing.
+// The editor warns about it inline instead of blocking the save, and the same
+// check drives the live update as the owner toggles spaces and global knowledge.
+export function channelGroupKnowledgeIsEmpty(selectedProjectSpaces: number, includeGlobal: boolean): boolean {
+	return selectedProjectSpaces <= 0 && !includeGlobal;
+}
+
 // The group picker saves in one atomic request: the server writes the endpoint
 // selection and removes the instance defaults in the same transaction, so an
 // empty group choice cannot fall back to a space list the owner just revoked.
@@ -231,7 +240,13 @@ function channelKnowledgePolicyEditor(sources: ChannelKnowledgeSource[], policy:
     : `<label>范围模式<select name="knowledge_scope_mode"><option value="all" ${scopeMode === "all" ? "selected" : ""}>全部项目知识与知识库</option><option value="selected" ${scopeMode === "selected" ? "selected" : ""}>限制到所选知识源</option></select></label>`;
   const selectedHidden = !vaultMode && scopeMode === "all" ? "hidden" : "";
   const footer = vaultMode ? "" : "<small>固定渠道索引始终可读。</small>";
-  return `<div data-channel-settings-policy data-revision="${revision}">${hint}${globalChoice}${scopeEditor}<div data-channel-knowledge-selected ${selectedHidden}><div class="channel-batch-toolbar"><button type="button" data-channel-policy-select-all>全选</button><button type="button" data-channel-policy-clear>清空</button></div><div class="channel-checkbox-list">${choices || "<small>暂无可选知识源</small>"}</div></div>${footer}</div>`;
+  // The warning follows the rendered checkboxes, not the stored policy: the
+  // owner sees it the moment the last project space is cleared.
+  const checkedSpaces = sources.filter(source => granted.has(source.root)).length;
+  const emptyWarning = vaultMode
+    ? `<p class="channel-knowledge-empty-warning" data-channel-knowledge-empty-warning ${channelGroupKnowledgeIsEmpty(checkedSpaces, includeGlobal === true) ? "" : "hidden"}>${channelEmptyGroupKnowledgeWarning}</p>`
+    : "";
+  return `<div data-channel-settings-policy data-revision="${revision}">${hint}${globalChoice}${scopeEditor}${emptyWarning}<div data-channel-knowledge-selected ${selectedHidden}><div class="channel-batch-toolbar"><button type="button" data-channel-policy-select-all>全选</button><button type="button" data-channel-policy-clear>清空</button></div><div class="channel-checkbox-list">${choices || "<small>暂无可选知识源</small>"}</div></div>${footer}</div>`;
 }
 
 export function channelVaultKnowledgeSection(context: ChannelUIContext, bindings: Array<{space_project_id: string}>, includeGlobal: boolean): string {
@@ -259,7 +274,21 @@ function formatChannelTime(value?: string): string {
 export function bindChannelKnowledgeScope(container: HTMLElement): void {
   const mode = container.querySelector<HTMLSelectElement>('select[name="knowledge_scope_mode"]');
   const selected = container.querySelector<HTMLElement>("[data-channel-knowledge-selected]");
-  const setAll = (checked: boolean) => container.querySelectorAll<HTMLInputElement>('input[name="knowledge_entry_id"], input[name="include_global"]').forEach(input => { input.checked = checked; });
+  const emptyWarning = container.querySelector<HTMLElement>("[data-channel-knowledge-empty-warning]");
+  const projectInputs = () => [...container.querySelectorAll<HTMLInputElement>('input[name="knowledge_entry_id"]')];
+  // The vault editor shows an inline warning instead of blocking an empty
+  // save; legacy has no warning element and this stays a no-op there.
+  const syncWarning = () => {
+    if (!emptyWarning) return;
+    const checkedSpaces = projectInputs().filter(input => input.checked).length;
+    const includeGlobal = Boolean(container.querySelector<HTMLInputElement>('input[name="include_global"]')?.checked);
+    emptyWarning.hidden = !channelGroupKnowledgeIsEmpty(checkedSpaces, includeGlobal);
+  };
+  const setAll = (checked: boolean) => {
+    container.querySelectorAll<HTMLInputElement>('input[name="knowledge_entry_id"], input[name="include_global"]').forEach(input => { input.checked = checked; });
+    syncWarning();
+  };
+  container.querySelectorAll<HTMLInputElement>('input[name="knowledge_entry_id"], input[name="include_global"]').forEach(input => input.addEventListener("change", syncWarning));
   container.querySelector<HTMLElement>("[data-channel-policy-select-all]")?.addEventListener("click", () => setAll(true));
   container.querySelector<HTMLElement>("[data-channel-policy-clear]")?.addEventListener("click", () => setAll(false));
   // The vault picker has no scope select: its checkbox list must stay visible.
@@ -267,6 +296,7 @@ export function bindChannelKnowledgeScope(container: HTMLElement): void {
   const syncMode = () => { if (selected && mode) selected.hidden = mode.value !== "selected"; };
   mode?.addEventListener("change", syncMode);
   syncMode();
+  syncWarning();
 }
 
 function openChannelSettings(instance: ChannelInstance, context: ChannelUIContext, uiOptions: {refresh: () => Promise<void>; setMessage: (kind: "error" | "success", message: string) => void}): void {
