@@ -52,7 +52,7 @@ func TestDataInventoryCountsKnownCategories(t *testing.T) {
 	}
 }
 
-func TestCleanupDataKeepsRecentBackupsAndOnlyTouchesSafeFiles(t *testing.T) {
+func TestCleanupDataKeepsOnlyTheNewestBackupAndOnlyTouchesSafeFiles(t *testing.T) {
 	root := t.TempDir()
 	backupRoot := filepath.Join(root, "backups")
 	base := time.Now().Add(-48 * time.Hour)
@@ -69,23 +69,48 @@ func TestCleanupDataKeepsRecentBackupsAndOnlyTouchesSafeFiles(t *testing.T) {
 	writeTestFile(t, filepath.Join(root, "aha2.db"), 50)
 	writeTestFile(t, filepath.Join(root, "attachments", "a.bin"), 40)
 
-	result, err := cleanupDataDir(root, "backups", 2)
+	// Preview lists the two older backups and never deletes anything.
+	preview, err := previewBackupCleanup(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Removed != 1 || result.FreedBytes != 100 {
+	if preview.Keep != 1 || len(preview.Candidates) != 2 || preview.FreedBytes != 200 || !preview.CanClean {
+		t.Fatalf("preview=%#v", preview)
+	}
+	if preview.Retained == nil || preview.Retained.Name != "user-installed-3" {
+		t.Fatalf("retained=%#v", preview.Retained)
+	}
+	if _, err := os.Stat(filepath.Join(backupRoot, "user-installed-1")); err != nil {
+		t.Fatalf("preview deleted a backup: %v", err)
+	}
+
+	result, err := cleanupDataDir(root, "backups")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Removed != 2 || result.FreedBytes != 200 {
 		t.Fatalf("result=%#v", result)
 	}
-	if _, err := os.Stat(filepath.Join(backupRoot, "user-installed-1")); !os.IsNotExist(err) {
-		t.Fatalf("oldest backup still exists: %v", err)
+	for _, name := range []string{"user-installed-1", "user-installed-2"} {
+		if _, err := os.Stat(filepath.Join(backupRoot, name)); !os.IsNotExist(err) {
+			t.Fatalf("old backup %s still exists: %v", name, err)
+		}
 	}
-	for _, name := range []string{"user-installed-2", "user-installed-3", "keep-me"} {
+	for _, name := range []string{"user-installed-3", "keep-me"} {
 		if _, err := os.Stat(filepath.Join(backupRoot, name)); err != nil {
 			t.Fatalf("backup %s missing: %v", name, err)
 		}
 	}
+	// With only one backup left the preview is empty and cleanup is a no-op.
+	preview, err = previewBackupCleanup(root)
+	if err != nil || preview.CanClean || len(preview.Candidates) != 0 {
+		t.Fatalf("single-backup preview=%#v err=%v", preview, err)
+	}
+	if result, err = cleanupDataDir(root, "backups"); err != nil || result.Removed != 0 {
+		t.Fatalf("single-backup cleanup=%#v err=%v", result, err)
+	}
 
-	logResult, err := cleanupDataDir(root, "logs", 0)
+	logResult, err := cleanupDataDir(root, "logs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +126,7 @@ func TestCleanupDataKeepsRecentBackupsAndOnlyTouchesSafeFiles(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "attachments", "a.bin")); err != nil {
 		t.Fatalf("attachments should be preserved: %v", err)
 	}
-	if _, err := cleanupDataDir(root, "attachments", 0); err == nil {
+	if _, err := cleanupDataDir(root, "attachments"); err == nil {
 		t.Fatal("expected protected category cleanup to be rejected")
 	}
 }

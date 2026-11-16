@@ -31,6 +31,39 @@ type DataCleanupResult struct {
 	Inventory  DataInventory `json:"inventory"`
 }
 
+// DataBackupItem is one user-installed-* install backup shown in the preview.
+// Path is intentionally not serialized; the UI only needs the name, size and
+// time.
+type DataBackupItem struct {
+	Name    string    `json:"name"`
+	Bytes   int64     `json:"bytes"`
+	ModTime time.Time `json:"mod_time"`
+}
+
+// DataBackupPreview is what "清理旧备份" would delete. The newest backup is
+// always retained; Keep is fixed at 1 for the first version.
+type DataBackupPreview struct {
+	Keep       int              `json:"keep"`
+	Retained   *DataBackupItem  `json:"retained,omitempty"`
+	Candidates []DataBackupItem `json:"candidates"`
+	FreedBytes int64            `json:"freed_bytes"`
+	CanClean   bool             `json:"can_clean"`
+}
+
+func (s *Server) previewBackupCleanup(writer http.ResponseWriter, request *http.Request) {
+	root := strings.TrimSpace(s.store.DataDir())
+	if root == "" {
+		writeError(writer, http.StatusServiceUnavailable, "data_dir_unavailable")
+		return
+	}
+	preview, err := previewBackupCleanup(root)
+	if err != nil {
+		writeJSON(writer, http.StatusInternalServerError, map[string]any{"ok": false, "error": "data_cleanup_preview_failed", "message": err.Error()})
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "preview": preview})
+}
+
 func (s *Server) dataInventory(writer http.ResponseWriter, request *http.Request) {
 	root := strings.TrimSpace(s.store.DataDir())
 	if root == "" {
@@ -53,7 +86,6 @@ func (s *Server) cleanupData(writer http.ResponseWriter, request *http.Request) 
 	}
 	var payload struct {
 		Category string `json:"category"`
-		Keep     int    `json:"keep"`
 		Confirm  bool   `json:"confirm"`
 	}
 	if err := decodeJSON(request, &payload); err != nil {
@@ -64,7 +96,7 @@ func (s *Server) cleanupData(writer http.ResponseWriter, request *http.Request) 
 		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "confirmation_required", "message": "清理需要明确确认"})
 		return
 	}
-	result, err := cleanupDataDir(root, payload.Category, payload.Keep)
+	result, err := cleanupDataDir(root, payload.Category)
 	if err != nil {
 		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "data_cleanup_failed", "message": err.Error()})
 		return
@@ -164,56 +196,87 @@ func directorySize(root string) int64 {
 	return total
 }
 
-func cleanupDataDir(root, category string, keep int) (DataCleanupResult, error) {
+// backupCleanupKeep is fixed for the first version: the newest install backup
+// is always kept.
+const backupCleanupKeep = 1
+
+// listInstallBackups returns user-installed-* backup directories, newest first.
+func listInstallBackups(root string) ([]DataBackupItem, error) {
+	backupRoot := filepath.Join(filepath.Clean(root), "backups")
+	entries, err := os.ReadDir(backupRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	type backupItem struct {
+		DataBackupItem
+		path string
+	}
+	items := make([]backupItem, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "user-installed-") {
+			continue
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			continue
+		}
+		path := filepath.Join(backupRoot, entry.Name())
+		items = append(items, backupItem{
+			DataBackupItem: DataBackupItem{Name: entry.Name(), Bytes: directorySize(path), ModTime: info.ModTime()},
+			path:           path,
+		})
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].ModTime.After(items[j].ModTime) })
+	result := make([]DataBackupItem, len(items))
+	for index, item := range items {
+		result[index] = item.DataBackupItem
+	}
+	return result, nil
+}
+
+func previewBackupCleanup(root string) (DataBackupPreview, error) {
+	items, err := listInstallBackups(root)
+	if err != nil {
+		return DataBackupPreview{}, err
+	}
+	preview := DataBackupPreview{Keep: backupCleanupKeep, Candidates: []DataBackupItem{}}
+	if len(items) == 0 {
+		return preview, nil
+	}
+	retained := items[0]
+	preview.Retained = &retained
+	for _, item := range items[backupCleanupKeep:] {
+		preview.Candidates = append(preview.Candidates, item)
+		preview.FreedBytes += item.Bytes
+	}
+	preview.CanClean = len(preview.Candidates) > 0
+	return preview, nil
+}
+
+func cleanupDataDir(root, category string) (DataCleanupResult, error) {
 	root = filepath.Clean(root)
 	category = strings.ToLower(strings.TrimSpace(category))
 	result := DataCleanupResult{}
 	switch category {
 	case "backups":
-		if keep <= 0 {
-			keep = 5
-		}
-		if keep > 50 {
-			keep = 50
-		}
-		backupRoot := filepath.Join(root, "backups")
-		entries, err := os.ReadDir(backupRoot)
+		items, err := listInstallBackups(root)
 		if err != nil {
-			if os.IsNotExist(err) {
-				result.Inventory, _ = buildDataInventory(root)
-				return result, nil
-			}
 			return result, err
 		}
-		type backupItem struct {
-			path    string
-			modTime time.Time
-			size    int64
-		}
-		items := make([]backupItem, 0, len(entries))
-		for _, entry := range entries {
-			if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "user-installed-") {
-				continue
-			}
-			info, infoErr := entry.Info()
-			if infoErr != nil {
-				continue
-			}
-			path := filepath.Join(backupRoot, entry.Name())
-			items = append(items, backupItem{path: path, modTime: info.ModTime(), size: directorySize(path)})
-		}
-		sort.Slice(items, func(i, j int) bool { return items[i].modTime.After(items[j].modTime) })
 		for index, item := range items {
-			if index < keep {
+			if index < backupCleanupKeep {
 				continue
 			}
-			if err := os.RemoveAll(item.path); err != nil {
+			if err := os.RemoveAll(filepath.Join(root, "backups", item.Name)); err != nil {
 				// A backup can be held open by the installer or a scanner. Keep
 				// going so one locked directory does not block the rest.
 				result.Skipped++
 				continue
 			}
-			result.FreedBytes += item.size
+			result.FreedBytes += item.Bytes
 			result.Removed++
 		}
 	case "logs":

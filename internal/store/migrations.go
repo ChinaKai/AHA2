@@ -1619,6 +1619,13 @@ ALTER TABLE turns ADD COLUMN stalled_at TEXT NOT NULL DEFAULT '';
 ALTER TABLE turns ADD COLUMN backend_finished_at TEXT NOT NULL DEFAULT '';
 `
 
+func (s *Store) tableHasColumn(ctx context.Context, table, column string) bool {
+	var exists bool
+	_ = s.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM pragma_table_info(?) WHERE name=?)`, table, column).Scan(&exists)
+	return exists
+}
+
 func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, schemaV1); err != nil {
 		return fmt.Errorf("apply schema v1: %w", err)
@@ -3769,6 +3776,40 @@ func (s *Store) migrate(ctx context.Context) error {
 		// selection can create the policy without seeding legacy rows.
 		if err := s.migrateChannelKnowledgePolicyVaultIndex(ctx); err != nil {
 			return fmt.Errorf("apply schema v141 channel knowledge vault policy index: %w", err)
+		}
+	}
+	var hasV142 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=142)`).Scan(&hasV142)
+	if !hasV142 || !s.tableHasColumn(ctx, "data_retention_settings", "conversation_retention_days") {
+		// Manual conversation cleanup on the data management page keeps its
+		// settings in the same single row as hardware_io retention.
+		for _, column := range []struct {
+			name       string
+			definition string
+		}{
+			{"conversation_retention_days", "INTEGER NOT NULL DEFAULT 30"},
+			{"conversation_purge_tool", "INTEGER NOT NULL DEFAULT 1"},
+			{"conversation_purge_update", "INTEGER NOT NULL DEFAULT 0"},
+		} {
+			if s.tableHasColumn(ctx, "data_retention_settings", column.name) {
+				continue
+			}
+			if _, err := s.db.ExecContext(ctx,
+				`ALTER TABLE data_retention_settings ADD COLUMN `+column.name+` `+column.definition); err != nil &&
+				!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+				return fmt.Errorf("apply schema v142 conversation retention: %w", err)
+			}
+		}
+		// Conversation cleanup filters by category and a second-precision
+		// created_at prefix, so the expression index keeps the preview and the
+		// batched DELETE off a full table scan.
+		if _, err := s.db.ExecContext(ctx,
+			`CREATE INDEX IF NOT EXISTS idx_conversation_items_cleanup ON conversation_items(category, substr(created_at,1,19))`); err != nil {
+			return fmt.Errorf("apply schema v142 conversation cleanup index: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(142, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return fmt.Errorf("record schema v142: %w", err)
 		}
 	}
 	return nil

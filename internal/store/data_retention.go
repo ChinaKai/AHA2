@@ -14,8 +14,8 @@ import (
 )
 
 type databaseCategoryDef struct {
-	id, key, safety string
-	tables          []string
+	id, key, safety, cleanup string
+	tables                   []string
 }
 
 // databaseCatalog groups every table into the A-K categories of the data
@@ -24,22 +24,22 @@ type databaseCategoryDef struct {
 // pet and mail_attachments to mail, so category totals never double count.
 // Tables missing here are reported under "other" as read-only.
 var databaseCatalog = []databaseCategoryDef{
-	{"A", "tasks", domain.DatabaseSafetyKeep, []string{
+	{"A", "tasks", domain.DatabaseSafetyKeep, "", []string{
 		"tasks", "task_agents", "task_rounds", "turns", "task_goal_events", "task_memory",
 		"task_permission_requests", "collaboration_batches", "collaboration_events",
 		"collaboration_members", "agent_session_handoffs", "runtime_config_snapshots", "backend_sessions",
 	}},
-	{"B", "conversation", domain.DatabaseSafetyReadOnly, []string{
+	{"B", "conversation", domain.DatabaseSafetyPreviewPurge, domain.DatabaseCleanupConversation, []string{
 		"conversation_items", "messages", "events", "audit_events", "agent_inbox",
 	}},
-	{"C", "hardware", domain.DatabaseSafetyPreviewPurge, []string{
+	{"C", "hardware", domain.DatabaseSafetyPreviewPurge, domain.DatabaseCleanupHardwareIO, []string{
 		"hardware_io", "hardware_resources", "hardware_groups", "task_hardware_bindings",
 	}},
-	{"D", "sync", domain.DatabaseSafetyRetire, []string{
+	{"D", "sync", domain.DatabaseSafetyRetire, "", []string{
 		"sync_remote_task_objects", "sync_applied", "sync_tombstones", "sync_conflicts",
 		"sync_outbox", "sync_settings", "sync_state", "retired_workspace_mirrors",
 	}},
-	{"E", "channels", domain.DatabaseSafetyReadOnly, []string{
+	{"E", "channels", domain.DatabaseSafetyReadOnly, "", []string{
 		"channel_instances", "channel_conversations", "channel_conversation_members", "channel_endpoints",
 		"channel_identity_links", "channel_inbox_dedup", "channel_delivery_outbox", "channel_delivery_attempts",
 		"channel_source_events", "channel_plugins", "channel_plugin_commands", "channel_service_capabilities",
@@ -47,27 +47,27 @@ var databaseCatalog = []databaseCategoryDef{
 		"channel_onboarding_sessions", "channel_pending_actions", "channel_knowledge_grants",
 		"channel_knowledge_policies", "channel_handoffs",
 	}},
-	{"F", "mail", domain.DatabaseSafetyKeep, []string{
+	{"F", "mail", domain.DatabaseSafetyKeep, "", []string{
 		"mail_accounts", "mail_account_aliases", "mail_templates", "mail_template_versions", "mail_bindings",
 		"mail_messages", "mail_attachments", "mail_deliveries", "mail_delivery_attempts",
 	}},
-	{"G", "knowledge", domain.DatabaseSafetyKeep, []string{
+	{"G", "knowledge", domain.DatabaseSafetyKeep, "", []string{
 		"knowledge_entries", "knowledge_libraries", "knowledge_proposals", "knowledge_review_settings",
 		"project_knowledge_bindings", "skills", "prompt_template_overrides",
 	}},
-	{"H", "settings", domain.DatabaseSafetyKeep, []string{
+	{"H", "settings", domain.DatabaseSafetyKeep, "", []string{
 		"models", "providers", "env_groups", "codex_accounts", "backend_settings", "agent_api_settings",
 		"general_settings", "security_settings", "network_settings", "proxy_settings", "mcp_servers",
 		"data_retention_settings", "knowledge_vault_settings", "vault_skill_preferences",
 	}},
-	{"I", "pet", domain.DatabaseSafetyKeep, []string{
+	{"I", "pet", domain.DatabaseSafetyKeep, "", []string{
 		"owner_assistants", "pet_states", "pet_approvals", "pet_events", "pet_task_watches", "pet_navigation_actions",
 		"pet_code_reviews",
 	}},
-	{"J", "attachments", domain.DatabaseSafetyReadOnly, []string{
+	{"J", "attachments", domain.DatabaseSafetyReadOnly, "", []string{
 		"attachments", "build_artifacts",
 	}},
-	{"K", "metadata", domain.DatabaseSafetyKeep, []string{
+	{"K", "metadata", domain.DatabaseSafetyKeep, "", []string{
 		"projects", "workspaces", "product_lines", "owners", "sessions", "schema_migrations",
 		"sqlite_sequence", "assistant_messages", "assistant_hint_dismissals",
 	}},
@@ -94,7 +94,12 @@ const statSampleRows = 500
 
 // hardwareIOPurgeMu keeps manual cleanups from overlapping. A second request
 // is reported as skipped instead of queueing behind the first.
+// hardware_io purge lock. Conversation cleanup uses its own lock so a long
+// conversation run does not block a hardware terminal purge.
 var hardwareIOPurgeMu sync.Mutex
+
+// conversationPurgeMu keeps manual conversation cleanups from overlapping.
+var conversationPurgeMu sync.Mutex
 
 func (s *Store) HardwareIORetentionSettings(ctx context.Context) (domain.HardwareIORetentionSettings, error) {
 	item := domain.DefaultHardwareIORetentionSettings()
@@ -132,7 +137,236 @@ func (s *Store) UpdateHardwareIORetentionSettings(ctx context.Context, item doma
 	return item, err
 }
 
-// DatabaseStats returns the cached statistics when they are younger than
+// ConversationRetentionSettings reads the B-category cleanup settings. The
+// row is shared with the hardware_io settings; a missing row reads as defaults.
+func (s *Store) ConversationRetentionSettings(ctx context.Context) (domain.ConversationRetentionSettings, error) {
+	item := domain.DefaultConversationRetentionSettings()
+	var updatedAt string
+	var purgeTool, purgeUpdate int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT conversation_retention_days,conversation_purge_tool,conversation_purge_update,updated_at
+		FROM data_retention_settings WHERE id=1`).
+		Scan(&item.RetentionDays, &purgeTool, &purgeUpdate, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.DefaultConversationRetentionSettings(), nil
+	}
+	if err != nil {
+		return domain.ConversationRetentionSettings{}, err
+	}
+	item.PurgeTool, item.PurgeUpdate = purgeTool != 0, purgeUpdate != 0
+	item.UpdatedAt = parseTime(updatedAt)
+	return item, nil
+}
+
+func (s *Store) UpdateConversationRetentionSettings(ctx context.Context, item domain.ConversationRetentionSettings) (domain.ConversationRetentionSettings, error) {
+	if err := item.Validate(); err != nil {
+		return domain.ConversationRetentionSettings{}, err
+	}
+	if item.UpdatedAt.IsZero() {
+		item.UpdatedAt = time.Now().UTC()
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO data_retention_settings(
+			id,hardware_io_retention_days,hardware_io_max_delete_rows,
+			conversation_retention_days,conversation_purge_tool,conversation_purge_update,updated_at
+		) VALUES(1,?,?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET
+			conversation_retention_days=excluded.conversation_retention_days,
+			conversation_purge_tool=excluded.conversation_purge_tool,
+			conversation_purge_update=excluded.conversation_purge_update,
+			updated_at=excluded.updated_at`,
+		domain.HardwareIORetentionDefaultDays, domain.HardwareIOPurgeDefaultRows,
+		item.RetentionDays, boolInt(item.PurgeTool), boolInt(item.PurgeUpdate), timeString(item.UpdatedAt),
+	)
+	return item, err
+}
+
+// conversationPurgeCategories maps the settings to the conversation_item
+// categories in scope. It also defines the update-kind allowlist: only agent
+// progress updates are eligible, never channel cards, orchestration routes,
+// collaboration results or a sub-agent's result (agent_result).
+func conversationPurgeCategories(settings domain.ConversationRetentionSettings) []string {
+	categories := make([]string, 0, 2)
+	if settings.PurgeTool {
+		categories = append(categories, "tool")
+	}
+	if settings.PurgeUpdate {
+		categories = append(categories, "update")
+	}
+	return categories
+}
+
+// conversationPurgeUpdateKinds are the update kinds that are pure agent
+// progress. Channel status cards, mail cards, orchestration dispatches,
+// collaboration routes and agent_result are deliberately excluded because the
+// first version only opens "agent update" history, not routing state.
+var conversationPurgeUpdateKinds = []string{
+	"agent_progress", "agent_reasoning_update", "agent_message_update",
+	"agent_stalled", "agent_stalled_heartbeat", "agent_resumed",
+	"agent_retry", "turn_duration",
+}
+
+// conversationPurgeScope is the shared WHERE clause of the plan count, the
+// batch selection and the batch delete. Every protection lives here so the
+// preview and the deletion cannot drift:
+//   - only terminal tasks (completed, failed, cancelled) and terminal turns;
+//   - never a task with a pending permission request;
+//   - never an item an attachment points at;
+//   - never category chat (the final replies), error or mail items;
+//   - only the explicit agent-progress update kinds when update is enabled.
+func conversationPurgeScope(settings domain.ConversationRetentionSettings, cutoffKey string) (string, []any) {
+	categories := conversationPurgeCategories(settings)
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(categories)), ",")
+	updateKinds := strings.TrimRight(strings.Repeat("?,", len(conversationPurgeUpdateKinds)), ",")
+	args := make([]any, 0, len(categories)+1+len(conversationPurgeUpdateKinds))
+	// Build the arguments in SQL order: the category-scope placeholders come
+	// first, then the cutoff.
+	if settings.PurgeUpdate {
+		for _, kind := range conversationPurgeUpdateKinds {
+			args = append(args, kind)
+		}
+	} else {
+		for _, category := range categories {
+			args = append(args, category)
+		}
+	}
+	args = append(args, cutoffKey)
+	scope := conversationPurgeCategoryScope(settings, placeholders, updateKinds) + `
+		AND substr(c.created_at,1,19)<?
+		AND t.status IN ('completed','failed','cancelled')
+		AND (c.turn_id='' OR tn.id IS NULL OR tn.status IN ('succeeded','failed','interrupted','blocked'))
+		AND NOT EXISTS (SELECT 1 FROM task_permission_requests r WHERE r.task_id=c.task_id AND r.status='pending')
+		AND NOT EXISTS (SELECT 1 FROM attachments a WHERE a.task_id=c.task_id AND a.message_id=c.id)`
+	return scope, args
+}
+
+func conversationPurgeCategoryScope(settings domain.ConversationRetentionSettings, placeholders, updateKinds string) string {
+	switch {
+	case settings.PurgeTool && settings.PurgeUpdate:
+		return `(c.category='tool' OR (c.category='update' AND c.kind IN (` + updateKinds + `)))`
+	case settings.PurgeUpdate:
+		return `(c.category='update' AND c.kind IN (` + updateKinds + `))`
+	default:
+		return `c.category IN (` + placeholders + `)`
+	}
+}
+
+// ConversationPurgePlan computes what one manual cleanup would delete. The
+// count is exact for the whole eligible set; the plan reports every eligible
+// row as one run because execution batches internally.
+func (s *Store) ConversationPurgePlan(ctx context.Context, settings domain.ConversationRetentionSettings, now time.Time) (domain.ConversationPurgePlan, error) {
+	if err := settings.Validate(); err != nil {
+		return domain.ConversationPurgePlan{}, err
+	}
+	plan := domain.ConversationPurgePlan{
+		RetentionDays: settings.RetentionDays,
+		PurgeTool:     settings.PurgeTool,
+		PurgeUpdate:   settings.PurgeUpdate,
+		Categories:    conversationPurgeCategories(settings),
+		Cutoff:        now.UTC().Add(-time.Duration(settings.RetentionDays) * 24 * time.Hour).Truncate(time.Second),
+	}
+	scope, args := conversationPurgeScope(settings, hardwareIOCutoffKey(plan.Cutoff))
+	var total int64
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM conversation_items c`).
+		Scan(&total); err != nil {
+		return plan, fmt.Errorf("count conversation_items: %w", err)
+	}
+	if total == 0 {
+		plan.SkipReason = domain.ConversationPurgeSkipEmpty
+		return plan, nil
+	}
+	base := ` FROM conversation_items c
+		JOIN tasks t ON t.id=c.task_id
+		LEFT JOIN turns tn ON tn.id=c.turn_id AND c.turn_id<>''
+		WHERE ` + scope
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*),COUNT(DISTINCT c.task_id)`+base, args...).
+		Scan(&plan.EligibleRows, &plan.TasksAffected); err != nil {
+		return plan, fmt.Errorf("count eligible conversation items: %w", err)
+	}
+	if plan.EligibleRows == 0 {
+		plan.SkipReason = domain.ConversationPurgeSkipNothingEligible
+		return plan, nil
+	}
+	plan.RunRows = plan.EligibleRows
+	columns, err := s.tableColumns(ctx, "conversation_items")
+	if err != nil {
+		return plan, err
+	}
+	if len(columns) > 0 {
+		sampleArgs := append(append([]any{}, args...), statSampleRows*4)
+		if err := s.db.QueryRowContext(ctx, `SELECT IFNULL(CAST(AVG(row_bytes) AS INTEGER),0) FROM (
+			SELECT `+rowBytesExpressionFor("c", columns)+` AS row_bytes`+base+`
+			ORDER BY c.sequence LIMIT ?)`, sampleArgs...).Scan(&plan.AvgRowBytes); err != nil {
+			return plan, fmt.Errorf("sample conversation items: %w", err)
+		}
+	}
+	plan.RunBytesEstimate = plan.AvgRowBytes * plan.RunRows
+	return plan, nil
+}
+
+// PurgeConversationItems deletes eligible conversation_items in sequence
+// batches of domain.ConversationPurgeBatchRows. Each batch is a short
+// statement so the write lock is released between batches. Only
+// conversation_items is touched; messages, events, audit_events, agent_inbox,
+// attachments, knowledge and channel tables are never written. A canceled
+// context stops after the current batch and reports a partial result.
+func (s *Store) PurgeConversationItems(ctx context.Context, settings domain.ConversationRetentionSettings, now time.Time) (domain.ConversationPurgeResult, error) {
+	started := time.Now()
+	result := domain.ConversationPurgeResult{BatchSize: domain.ConversationPurgeBatchRows}
+	if err := settings.Validate(); err != nil {
+		return result, err
+	}
+	if !conversationPurgeMu.TryLock() {
+		result.SkipReason = domain.ConversationPurgeSkipAlreadyRunning
+		return result, nil
+	}
+	defer conversationPurgeMu.Unlock()
+	plan, err := s.ConversationPurgePlan(ctx, settings, now)
+	result.Plan = plan
+	if err != nil {
+		return result, err
+	}
+	if plan.SkipReason != "" {
+		result.SkipReason = plan.SkipReason
+		result.DurationMS = time.Since(started).Milliseconds()
+		return result, nil
+	}
+	scope, args := conversationPurgeScope(settings, hardwareIOCutoffKey(plan.Cutoff))
+	batchArgs := append(append([]any{}, args...), domain.ConversationPurgeBatchRows)
+	deleteQuery := `DELETE FROM conversation_items WHERE sequence IN (
+		SELECT c.sequence FROM conversation_items c
+		JOIN tasks t ON t.id=c.task_id
+		LEFT JOIN turns tn ON tn.id=c.turn_id AND c.turn_id<>''
+		WHERE ` + scope + `
+		ORDER BY c.sequence LIMIT ?)`
+	for {
+		if ctx.Err() != nil {
+			result.Partial = true
+			result.SkipReason = domain.ConversationPurgeSkipCanceled
+			break
+		}
+		deleted, err := s.db.ExecContext(ctx, deleteQuery, batchArgs...)
+		if err != nil {
+			if ctx.Err() != nil {
+				result.Partial = true
+				result.SkipReason = domain.ConversationPurgeSkipCanceled
+				break
+			}
+			result.Partial = true
+			result.DurationMS = time.Since(started).Milliseconds()
+			return result, fmt.Errorf("delete conversation_items batch: %w", err)
+		}
+		count, _ := deleted.RowsAffected()
+		result.DeletedRows += count
+		result.Batches++
+		if count < int64(domain.ConversationPurgeBatchRows) {
+			break
+		}
+	}
+	result.DurationMS = time.Since(started).Milliseconds()
+	return result, nil
+}
+
 // databaseStatsTTL and refresh is false. The retention settings are always
 // read fresh so a saved change shows immediately.
 func (s *Store) DatabaseStats(ctx context.Context, refresh bool) (domain.DatabaseStats, error) {
@@ -145,7 +379,12 @@ func (s *Store) DatabaseStats(ctx context.Context, refresh bool) (domain.Databas
 		if err != nil {
 			return domain.DatabaseStats{}, err
 		}
+		conversation, err := s.ConversationRetentionSettings(ctx)
+		if err != nil {
+			return domain.DatabaseStats{}, err
+		}
 		stats.Retention = retention
+		stats.Conversation = conversation
 		stats.Cached = true
 		return stats, nil
 	}
@@ -197,6 +436,11 @@ func (s *Store) collectDatabaseStats(ctx context.Context) (domain.DatabaseStats,
 		return domain.DatabaseStats{}, err
 	}
 	stats.Retention = retention
+	conversation, err := s.ConversationRetentionSettings(ctx)
+	if err != nil {
+		return domain.DatabaseStats{}, err
+	}
+	stats.Conversation = conversation
 	stats.DurationMS = time.Since(started).Milliseconds()
 	return stats, nil
 }
@@ -236,7 +480,7 @@ func (s *Store) databaseCategories(ctx context.Context) ([]domain.DatabaseCatego
 	listed := map[string]bool{}
 	categories := make([]domain.DatabaseCategory, 0, len(databaseCatalog)+1)
 	for _, def := range databaseCatalog {
-		category := domain.DatabaseCategory{ID: def.id, Key: def.key, Safety: def.safety, RowsExact: true}
+		category := domain.DatabaseCategory{ID: def.id, Key: def.key, Safety: def.safety, Cleanup: def.cleanup, RowsExact: true}
 		for _, table := range def.tables {
 			listed[table] = true
 			definition, ok := existing[table]
@@ -277,7 +521,7 @@ func (s *Store) addTableStat(ctx context.Context, category *domain.DatabaseCateg
 }
 
 func (s *Store) tableStat(ctx context.Context, table, definition string) (domain.DatabaseTableStat, error) {
-	item := domain.DatabaseTableStat{Name: table, Deletable: table == "hardware_io"}
+	item := domain.DatabaseTableStat{Name: table, Deletable: table == "hardware_io" || table == "conversation_items"}
 	// Virtual and WITHOUT ROWID tables have no rowid to seek, and counting
 	// them could scan. None exist in the AHA schema; report them without
 	// estimates rather than risk a slow query.
@@ -369,6 +613,20 @@ func rowBytesExpression(columns []string) string {
 	terms := make([]string, 0, len(columns))
 	for _, name := range columns {
 		terms = append(terms, `IFNULL(length(CAST(`+quoteIdentifier(name)+` AS BLOB)),0)`)
+	}
+	return strings.Join(terms, "+")
+}
+
+// rowBytesExpression qualifies every column with the table alias so a join
+// cannot make a bare column name ambiguous.
+func rowBytesExpressionFor(alias string, columns []string) string {
+	prefix := ""
+	if alias != "" {
+		prefix = quoteIdentifier(alias) + "."
+	}
+	terms := make([]string, 0, len(columns))
+	for _, name := range columns {
+		terms = append(terms, `IFNULL(length(CAST(`+prefix+quoteIdentifier(name)+` AS BLOB)),0)`)
 	}
 	return strings.Join(terms, "+")
 }

@@ -142,3 +142,127 @@ func (s *Server) purgeHardwareIO(writer http.ResponseWriter, request *http.Reque
 	}
 	writeJSON(writer, http.StatusOK, response)
 }
+
+// conversationRetentionPayload carries optional overrides of the stored
+// conversation cleanup settings. A missing field uses the stored value.
+type conversationRetentionPayload struct {
+	RetentionDays *int  `json:"retention_days"`
+	PurgeTool     *bool `json:"purge_tool"`
+	PurgeUpdate   *bool `json:"purge_update"`
+	Confirm       bool  `json:"confirm"`
+}
+
+func (payload conversationRetentionPayload) apply(base domain.ConversationRetentionSettings) domain.ConversationRetentionSettings {
+	if payload.RetentionDays != nil {
+		base.RetentionDays = *payload.RetentionDays
+	}
+	if payload.PurgeTool != nil {
+		base.PurgeTool = *payload.PurgeTool
+	}
+	if payload.PurgeUpdate != nil {
+		base.PurgeUpdate = *payload.PurgeUpdate
+	}
+	return base
+}
+
+func (s *Server) updateConversationRetention(writer http.ResponseWriter, request *http.Request) {
+	var payload conversationRetentionPayload
+	if err := decodeJSON(request, &payload); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	current, err := s.store.ConversationRetentionSettings(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "retention_settings_failed")
+		return
+	}
+	next := payload.apply(current)
+	next.UpdatedAt = time.Now().UTC()
+	if err := next.Validate(); err != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid_retention_settings", "message": err.Error()})
+		return
+	}
+	saved, err := s.store.UpdateConversationRetentionSettings(request.Context(), next)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "update_retention_settings_failed")
+		return
+	}
+	s.audit(request, "data.conversation.retention.update", "data_retention_settings", "conversation_items", map[string]any{
+		"retention_days": saved.RetentionDays, "purge_tool": saved.PurgeTool, "purge_update": saved.PurgeUpdate,
+		"previous_retention_days": current.RetentionDays, "previous_purge_tool": current.PurgeTool,
+		"previous_purge_update": current.PurgeUpdate,
+	})
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "retention": saved})
+}
+
+func (s *Server) conversationRetentionRequest(writer http.ResponseWriter, request *http.Request) (conversationRetentionPayload, domain.ConversationRetentionSettings, bool) {
+	var payload conversationRetentionPayload
+	if err := decodeJSON(request, &payload); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_json")
+		return payload, domain.ConversationRetentionSettings{}, false
+	}
+	stored, err := s.store.ConversationRetentionSettings(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "retention_settings_failed")
+		return payload, domain.ConversationRetentionSettings{}, false
+	}
+	settings := payload.apply(stored)
+	if err := settings.Validate(); err != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid_retention_settings", "message": err.Error()})
+		return payload, domain.ConversationRetentionSettings{}, false
+	}
+	return payload, settings, true
+}
+
+func (s *Server) previewConversationPurge(writer http.ResponseWriter, request *http.Request) {
+	_, settings, ok := s.conversationRetentionRequest(writer, request)
+	if !ok {
+		return
+	}
+	plan, err := s.store.ConversationPurgePlan(request.Context(), settings, time.Now().UTC())
+	if err != nil {
+		writeJSON(writer, http.StatusInternalServerError, map[string]any{"ok": false, "error": "conversation_preview_failed", "message": err.Error()})
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "plan": plan})
+}
+
+func (s *Server) purgeConversation(writer http.ResponseWriter, request *http.Request) {
+	payload, settings, ok := s.conversationRetentionRequest(writer, request)
+	if !ok {
+		return
+	}
+	if !payload.Confirm {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "confirmation_required", "message": "清理需要明确确认"})
+		return
+	}
+	result, purgeErr := s.store.PurgeConversationItems(request.Context(), settings, time.Now().UTC())
+	auditRequest := request.WithContext(context.WithoutCancel(request.Context()))
+	auditData := map[string]any{
+		"retention_days": settings.RetentionDays, "purge_tool": settings.PurgeTool,
+		"purge_update": settings.PurgeUpdate, "cutoff": result.Plan.Cutoff,
+		"planned_rows": result.Plan.EligibleRows, "deleted_rows": result.DeletedRows,
+		"batches": result.Batches, "partial": result.Partial, "skip_reason": result.SkipReason,
+		"duration_ms": result.DurationMS,
+	}
+	if purgeErr != nil {
+		auditData["error"] = purgeErr.Error()
+	}
+	occurredAt := time.Now().UTC()
+	s.audit(auditRequest, "data.conversation.purge", "database_table", "conversation_items", auditData)
+	audit := map[string]any{
+		"action": "data.conversation.purge", "resource_type": "database_table",
+		"resource_id": "conversation_items", "occurred_at": occurredAt,
+	}
+	if purgeErr != nil {
+		writeJSON(writer, http.StatusInternalServerError, map[string]any{
+			"ok": false, "error": "conversation_purge_failed", "message": purgeErr.Error(), "result": result, "audit": audit,
+		})
+		return
+	}
+	response := map[string]any{"ok": true, "result": result, "audit": audit}
+	if stats, err := s.store.DatabaseStats(auditRequest.Context(), true); err == nil {
+		response["database"] = stats
+	}
+	writeJSON(writer, http.StatusOK, response)
+}

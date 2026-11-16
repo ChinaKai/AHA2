@@ -215,15 +215,20 @@ func TestDatabaseCatalogCoversSchemaOnce(t *testing.T) {
 			t.Fatalf("uncategorized tables: %#v", category.Tables)
 		}
 		for _, table := range category.Tables {
-			if table.Deletable != (table.Name == "hardware_io") {
-				t.Fatalf("only hardware_io may be deletable: %#v", table)
+			deletable := table.Name == "hardware_io" || table.Name == "conversation_items"
+			if table.Deletable != deletable {
+				t.Fatalf("only hardware_io and conversation_items may be deletable: %#v", table)
 			}
 		}
-		wantSafety := map[string]string{"B": domain.DatabaseSafetyReadOnly, "C": domain.DatabaseSafetyPreviewPurge, "D": domain.DatabaseSafetyRetire}
+		wantSafety := map[string]string{"B": domain.DatabaseSafetyPreviewPurge, "C": domain.DatabaseSafetyPreviewPurge, "D": domain.DatabaseSafetyRetire}
 		if want, ok := wantSafety[category.ID]; ok && category.Safety != want {
 			t.Fatalf("category %s safety=%s", category.ID, category.Safety)
 		}
-		if category.ID != "C" && category.Safety == domain.DatabaseSafetyPreviewPurge {
+		wantCleanup := map[string]string{"B": domain.DatabaseCleanupConversation, "C": domain.DatabaseCleanupHardwareIO}
+		if category.Cleanup != wantCleanup[category.ID] {
+			t.Fatalf("category %s cleanup=%q", category.ID, category.Cleanup)
+		}
+		if category.ID != "B" && category.ID != "C" && category.Safety == domain.DatabaseSafetyPreviewPurge {
 			t.Fatalf("category %s allows purge", category.ID)
 		}
 	}

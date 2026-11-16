@@ -5,8 +5,9 @@ import (
 	"time"
 )
 
-// hardware_io retention limits. The table is append-only terminal output and is
-// the only database table the data management page may delete from.
+// hardware_io retention limits. The table is append-only terminal output; the
+// data management page may delete old rows from it and from conversation_items
+// (see ConversationRetentionSettings).
 const (
 	HardwareIORetentionDefaultDays = 30
 	HardwareIORetentionMinDays     = 1
@@ -40,6 +41,82 @@ func (s HardwareIORetentionSettings) Validate() error {
 	return nil
 }
 
+// Conversation retention limits. Only conversation_items of terminal tasks are
+// eligible; chat items (the owner's and the agent's final replies), messages,
+// events, audit events and that task's attachments are never deleted here.
+const (
+	ConversationRetentionDefaultDays = 30
+	ConversationRetentionMinDays     = 1
+	ConversationRetentionMaxDays     = 3650
+	ConversationPurgeBatchRows       = 2_000
+)
+
+// ConversationRetentionSettings controls the B-category cleanup. PurgeTool
+// removes category "tool" items (backend command start/finish events);
+// PurgeUpdate additionally removes the agent progress update kinds. At least
+// one must be enabled.
+type ConversationRetentionSettings struct {
+	RetentionDays int       `json:"retention_days"`
+	PurgeTool     bool      `json:"purge_tool"`
+	PurgeUpdate   bool      `json:"purge_update"`
+	UpdatedAt     time.Time `json:"updated_at,omitempty"`
+}
+
+func DefaultConversationRetentionSettings() ConversationRetentionSettings {
+	return ConversationRetentionSettings{
+		RetentionDays: ConversationRetentionDefaultDays,
+		PurgeTool:     true,
+		PurgeUpdate:   false,
+	}
+}
+
+func (s ConversationRetentionSettings) Validate() error {
+	if s.RetentionDays < ConversationRetentionMinDays || s.RetentionDays > ConversationRetentionMaxDays {
+		return fmt.Errorf("conversation retention_days must be between %d and %d", ConversationRetentionMinDays, ConversationRetentionMaxDays)
+	}
+	if !s.PurgeTool && !s.PurgeUpdate {
+		return fmt.Errorf("conversation cleanup must include tool or update events")
+	}
+	return nil
+}
+
+// ConversationPurgePlan is what one manual conversation cleanup would delete.
+// Categories lists the conversation_item categories in scope ("tool" and
+// optionally "update"). Eligible rows belong to terminal tasks, are older than
+// Cutoff, are not the task's final answer, have no attachment and have no
+// pending permission request.
+type ConversationPurgePlan struct {
+	RetentionDays     int       `json:"retention_days"`
+	PurgeTool         bool      `json:"purge_tool"`
+	PurgeUpdate       bool      `json:"purge_update"`
+	Categories        []string  `json:"categories"`
+	Cutoff            time.Time `json:"cutoff"`
+	EligibleRows      int64     `json:"eligible_rows"`
+	RunRows           int64     `json:"run_rows"`
+	TasksAffected     int64     `json:"tasks_affected"`
+	AvgRowBytes       int64     `json:"avg_row_bytes"`
+	RunBytesEstimate  int64     `json:"run_bytes_estimate"`
+	RemainingEligible int64     `json:"remaining_eligible"`
+	SkipReason        string    `json:"skip_reason,omitempty"`
+}
+
+type ConversationPurgeResult struct {
+	Plan        ConversationPurgePlan `json:"plan"`
+	DeletedRows int64                 `json:"deleted_rows"`
+	Batches     int                   `json:"batches"`
+	BatchSize   int                   `json:"batch_size"`
+	Partial     bool                  `json:"partial"`
+	SkipReason  string                `json:"skip_reason,omitempty"`
+	DurationMS  int64                 `json:"duration_ms"`
+}
+
+const (
+	ConversationPurgeSkipEmpty           = "empty"
+	ConversationPurgeSkipNothingEligible = "nothing_eligible"
+	ConversationPurgeSkipAlreadyRunning  = "already_running"
+	ConversationPurgeSkipCanceled        = "canceled"
+)
+
 // DatabaseTableStat describes one table without scanning it. Rows is exact only
 // when RowsExact is true; otherwise it is MAX(rowid)-MIN(rowid)+1, an upper
 // bound that over-counts deleted gaps. EstimatedBytes is the average payload of
@@ -66,14 +143,23 @@ const (
 	DatabaseSafetyRetire       = "retire"
 )
 
+// Cleanup kinds a category exposes on the data management page. Only these
+// categories have an executable cleanup; every other category row opens a
+// read-only explanation dialog.
+const (
+	DatabaseCleanupHardwareIO   = "hardware_io"
+	DatabaseCleanupConversation = "conversation"
+)
+
 // DatabaseCategory groups tables by what they hold. ID is the catalog letter
 // (A-K) or "other" for tables the catalog does not list. Rows and
 // EstimatedBytes are sums of the table estimates; RowsExact is true only when
-// every table count is exact.
+// every table count is exact. Cleanup is empty for read-only categories.
 type DatabaseCategory struct {
 	ID             string              `json:"id"`
 	Key            string              `json:"key"`
 	Safety         string              `json:"safety"`
+	Cleanup        string              `json:"cleanup,omitempty"`
 	Rows           int64               `json:"rows"`
 	RowsExact      bool                `json:"rows_exact"`
 	EstimatedBytes int64               `json:"estimated_bytes"`
@@ -89,20 +175,21 @@ type HardwareIORange struct {
 }
 
 type DatabaseStats struct {
-	FileBytes     int64                       `json:"file_bytes"`
-	WALBytes      int64                       `json:"wal_bytes"`
-	SHMBytes      int64                       `json:"shm_bytes"`
-	PageSize      int64                       `json:"page_size"`
-	PageCount     int64                       `json:"page_count"`
-	FreelistCount int64                       `json:"freelist_count"`
-	UsedBytes     int64                       `json:"used_bytes"`
-	FreeBytes     int64                       `json:"free_bytes"`
-	TableCount    int                         `json:"table_count"`
-	Categories    []DatabaseCategory          `json:"categories"`
-	HardwareIO    HardwareIORange             `json:"hardware_io"`
-	Retention     HardwareIORetentionSettings `json:"retention"`
-	CollectedAt   time.Time                   `json:"collected_at"`
-	DurationMS    int64                       `json:"duration_ms"`
+	FileBytes     int64                         `json:"file_bytes"`
+	WALBytes      int64                         `json:"wal_bytes"`
+	SHMBytes      int64                         `json:"shm_bytes"`
+	PageSize      int64                         `json:"page_size"`
+	PageCount     int64                         `json:"page_count"`
+	FreelistCount int64                         `json:"freelist_count"`
+	UsedBytes     int64                         `json:"used_bytes"`
+	FreeBytes     int64                         `json:"free_bytes"`
+	TableCount    int                           `json:"table_count"`
+	Categories    []DatabaseCategory            `json:"categories"`
+	HardwareIO    HardwareIORange               `json:"hardware_io"`
+	Retention     HardwareIORetentionSettings   `json:"retention"`
+	Conversation  ConversationRetentionSettings `json:"conversation_retention"`
+	CollectedAt   time.Time                     `json:"collected_at"`
+	DurationMS    int64                         `json:"duration_ms"`
 	// Cached is true when the table estimates come from an earlier collection;
 	// Retention is always read fresh.
 	Cached bool `json:"cached"`
@@ -146,3 +233,64 @@ const (
 	HardwareIOPurgeSkipAlreadyRunning  = "already_running"
 	HardwareIOPurgeSkipCanceled        = "canceled"
 )
+
+// DatabaseCompactionPlan is the preflight report of one manual database
+// compaction. It never changes the database. RequiredTempBytes covers the
+// VACUUM temporary file plus the backup copy (~2.2x the database file).
+type DatabaseCompactionPlan struct {
+	Mode                    string    `json:"mode"`
+	DatabasePath            string    `json:"database_path"`
+	FileBytes               int64     `json:"file_bytes"`
+	WALBytes                int64     `json:"wal_bytes"`
+	SHMBytes                int64     `json:"shm_bytes"`
+	PageSize                int64     `json:"page_size"`
+	PageCount               int64     `json:"page_count"`
+	FreelistCount           int64     `json:"freelist_count"`
+	FreeBytes               int64     `json:"free_bytes"`
+	EstimatedReclaimedBytes int64     `json:"estimated_reclaimed_bytes"`
+	RequiredTempBytes       int64     `json:"required_temp_bytes"`
+	DiskFreeBytes           int64     `json:"disk_free_bytes"`
+	ActiveTasks             int       `json:"active_tasks"`
+	ActiveTurns             int       `json:"active_turns"`
+	PendingApprovals        int       `json:"pending_approvals"`
+	CanCompact              bool      `json:"can_compact"`
+	BlockingReasons         []string  `json:"blocking_reasons"`
+	CheckedAt               time.Time `json:"checked_at"`
+}
+
+const (
+	DatabaseCompactionModeVacuumInPlace = "vacuum_in_place"
+
+	DatabaseCompactionSkipAlreadyRunning = "already_running"
+	DatabaseCompactionSkipNotFile        = "not_file_database"
+	DatabaseCompactionSkipActive         = "active_tasks"
+	DatabaseCompactionSkipDisk           = "disk_space"
+	DatabaseCompactionSkipActiveWrites   = "active_writes"
+	DatabaseCompactionSkipCanceled       = "canceled"
+	DatabaseCompactionSkipVacuumFailed   = "vacuum_failed"
+	DatabaseCompactionSkipIntegrity      = "integrity_failed"
+	DatabaseCompactionSkipRowCount       = "row_count_mismatch"
+)
+
+// DatabaseCompactionResult reports the backup, size change, integrity result
+// and key table row counts so the owner can compare before and after. The
+// operation runs VACUUM in place, so it does not need a restart; a failure after
+// the rebuild restores every table from BackupPath.
+type DatabaseCompactionResult struct {
+	Plan            DatabaseCompactionPlan `json:"plan"`
+	BackupPath      string                 `json:"backup_path,omitempty"`
+	BeforeBytes     int64                  `json:"before_bytes"`
+	AfterBytes      int64                  `json:"after_bytes"`
+	FreedBytes      int64                  `json:"freed_bytes"`
+	WALBeforeBytes  int64                  `json:"wal_before_bytes"`
+	WALAfterBytes   int64                  `json:"wal_after_bytes"`
+	IntegrityCheck  string                 `json:"integrity_check,omitempty"`
+	BeforeRowCounts map[string]int64       `json:"before_row_counts,omitempty"`
+	AfterRowCounts  map[string]int64       `json:"after_row_counts,omitempty"`
+	Restored        bool                   `json:"restored"`
+	RestoreError    string                 `json:"restore_error,omitempty"`
+	RestartRequired bool                   `json:"restart_required"`
+	SkipReason      string                 `json:"skip_reason,omitempty"`
+	Error           string                 `json:"error,omitempty"`
+	DurationMS      int64                  `json:"duration_ms"`
+}
