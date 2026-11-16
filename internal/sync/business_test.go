@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -494,6 +495,116 @@ func TestApplySkillPackageAndVersionConflict(t *testing.T) {
 	obj.BaseVersion = "0"
 	if err := applyBusinessObject(ctx, db, obj); !errors.Is(err, ErrConflict) {
 		t.Fatalf("skill conflict=%v", err)
+	}
+}
+
+func TestApplySkillTombstoneBlocksNewerUpsert(t *testing.T) {
+	ctx, db, now := context.Background(), businessStore(t), time.Now().UTC()
+	if err := db.CreateSkill(ctx, domain.Skill{ID: "s-deleted", Scope: "global", Name: "demo", Description: "demo", Instructions: "body", Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteSkill(ctx, "s-deleted"); err != nil {
+		t.Fatal(err)
+	}
+	// A peer still exporting the skill, and one that churned it far past the
+	// tombstone version, both arrive as ordinary upserts.
+	for _, version := range []int{1, 9} {
+		payload := skillPayload{Skill: domain.Skill{ID: "s-deleted", Scope: "global", Name: "demo", Description: "demo", Instructions: "body", Version: version, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now}, Files: skillSyncFiles("body")}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := applyBusinessObject(ctx, db, domain.SyncObject{Type: TypeSkill, ID: "s-deleted", Operation: "upsert", Payload: raw, SourceVersion: strconv.Itoa(version)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Skill(ctx, "s-deleted"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("tombstoned skill was recreated: %v", err)
+	}
+	tombstone, err := db.SyncTombstone(ctx, TypeSkill, "s-deleted")
+	if err != nil {
+		t.Fatalf("skill tombstone was consumed: %v", err)
+	}
+	if tombstone.Version != "1" {
+		t.Fatalf("tombstone version=%q", tombstone.Version)
+	}
+}
+
+func TestApplySkillIdenticalContentDoesNotBumpVersion(t *testing.T) {
+	ctx, db, now := context.Background(), businessStore(t), time.Now().UTC()
+	if err := db.CreateSkill(ctx, domain.Skill{ID: "s-same", Scope: "global", Name: "demo", Description: "demo", Instructions: "body", Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	objects, err := ExportBusinessObjects(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload skillPayload
+	for _, object := range objects {
+		if object.Type == TypeSkill && object.ID == "s-same" {
+			if err := json.Unmarshal(object.Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if payload.Skill.ID != "s-same" {
+		t.Fatal("exported skill payload not found")
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for delivery := 0; delivery < 3; delivery++ {
+		if err := applyBusinessObject(ctx, db, domain.SyncObject{Type: TypeSkill, ID: "s-same", Operation: "upsert", Payload: raw, SourceVersion: "1"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := db.Skill(ctx, "s-same")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Version != 1 {
+		t.Fatalf("identical content bumped version to %d", got.Version)
+	}
+}
+
+func TestApplySkillStaleVersionDoesNotOverwriteNewerLocalEdit(t *testing.T) {
+	ctx, db, now := context.Background(), businessStore(t), time.Now().UTC()
+	if err := db.CreateSkill(ctx, domain.Skill{ID: "s-stale", Scope: "global", Name: "demo", Description: "demo", Instructions: "old body", Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	objects, err := ExportBusinessObjects(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stale skillPayload
+	for _, object := range objects {
+		if object.Type == TypeSkill && object.ID == "s-stale" {
+			if err := json.Unmarshal(object.Payload, &stale); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	current, err := db.Skill(ctx, "s-stale")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.UpdateSkillPackage(ctx, current, current.Version, []domain.SkillFile{{Path: "SKILL.md", Content: "---\nname: \"demo\"\ndescription: \"demo\"\n---\n\nnew body\n"}}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applyBusinessObject(ctx, db, domain.SyncObject{Type: TypeSkill, ID: "s-stale", Operation: "upsert", Payload: raw, SourceVersion: "1"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.Skill(ctx, "s-stale")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Version != 2 || got.Instructions != "new body" {
+		t.Fatalf("stale event overwrote local edit: %#v", got)
 	}
 }
 

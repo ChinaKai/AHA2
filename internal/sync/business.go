@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -64,6 +65,51 @@ func skillPayloadIncludesAutoAttach(payload json.RawMessage) bool {
 	}
 	_, present := fields["auto_attach"]
 	return present
+}
+
+// skillPayloadVersion is the version the sending device had when it exported
+// the payload. Payloads produced before the version became part of the object
+// carry the same value in the wire source version.
+func skillPayloadVersion(obj domain.SyncObject, payloadVersion int) int {
+	if payloadVersion > 0 {
+		return payloadVersion
+	}
+	value, err := strconv.Atoi(strings.TrimSpace(obj.SourceVersion))
+	if err != nil || value < 0 {
+		return 0
+	}
+	return value
+}
+
+// skillPayloadMatches reports whether applying the payload would change
+// anything it carries. Repeated deliveries of the same content must be a
+// no-op: bumping the version on every delivery makes the next export identity
+// differ and fuels an endless upload/pull loop.
+func skillPayloadMatches(current domain.Skill, incoming domain.Skill, files []domain.SkillFile) bool {
+	if current.Name != incoming.Name || current.Description != incoming.Description ||
+		current.Instructions != incoming.Instructions || current.Scope != incoming.Scope ||
+		current.ProjectID != incoming.ProjectID || current.Status != incoming.Status ||
+		current.Enabled != incoming.Enabled || current.AutoAttach != incoming.AutoAttach {
+		return false
+	}
+	return skillFilesMatch(current.PackageFiles, files)
+}
+
+func skillFilesMatch(current, incoming []domain.SkillFile) bool {
+	if len(current) != len(incoming) {
+		return false
+	}
+	byPath := make(map[string]string, len(current))
+	for _, file := range current {
+		byPath[path.Clean(strings.TrimSpace(file.Path))] = file.Content
+	}
+	for _, file := range incoming {
+		content, ok := byPath[path.Clean(strings.TrimSpace(file.Path))]
+		if !ok || content != file.Content {
+			return false
+		}
+	}
+	return true
 }
 
 // modelPayload keeps the runtime-only default env association portable without
@@ -513,7 +559,15 @@ func applyBusinessObject(ctx context.Context, database *store.Store, obj domain.
 		return applyTaskGraphObject(ctx, database, obj)
 	}
 	if tombstone, err := database.SyncTombstone(ctx, obj.Type, obj.ID); err == nil {
-		if obj.Operation == "delete" || !sharedVersionNewer(obj.Type, obj.SourceVersion, tombstone.Version) {
+		// A Skill this device deleted is never recreated from an inbound
+		// object. Unlike knowledge, a skill has no revision content that would
+		// justify "newer upsert wins": every device replays its own history
+		// through the center, so an in-flight or version-churning upsert
+		// would otherwise resurrect the deleted skill on the next pull and
+		// restart the churn. The tombstone is exported with every snapshot, so
+		// peers keep blocking the same object. Re-creating a skill under the
+		// same ID therefore needs its tombstone cleared deliberately first.
+		if obj.Operation == "delete" || obj.Type == TypeSkill || !sharedVersionNewer(obj.Type, obj.SourceVersion, tombstone.Version) {
 			return nil
 		}
 		if err := database.DeleteSyncTombstone(ctx, obj.Type, obj.ID); err != nil {
@@ -757,14 +811,27 @@ func upsertBusinessObject(ctx context.Context, database *store.Store, obj domain
 			if err != nil {
 				return err
 			}
-			p.Skill.Version = current.Version
-			p.Skill.PackageSlug = current.PackageSlug
 			// A peer predating portable auto_attach omits the field. Preserve
 			// the local value in that case instead of importing the zero value
 			// as an explicit disable.
 			if !skillPayloadIncludesAutoAttach(obj.Payload) {
 				p.Skill.AutoAttach = current.AutoAttach
 			}
+			// Applying an object that changes nothing must not rewrite the
+			// package: every re-delivery used to bump the version, and since
+			// the export identity embeds that version, each bump queued
+			// another upload and another pull — an unbounded version churn.
+			if skillPayloadMatches(current, p.Skill, p.Files) {
+				return nil
+			}
+			// An event produced before a newer local edit must not overwrite
+			// it. The payload's version is what the sending device exported;
+			// older peers omit it, so fall back to the wire source version.
+			if remote := skillPayloadVersion(obj, p.Skill.Version); remote > 0 && remote < current.Version {
+				return nil
+			}
+			p.Skill.Version = current.Version
+			p.Skill.PackageSlug = current.PackageSlug
 			_, err = database.UpdateSkillPackage(ctx, p.Skill, current.Version, p.Files)
 			return err
 		}
