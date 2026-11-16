@@ -171,6 +171,11 @@ func (s *Service) KnowledgeVaultEntry(ctx context.Context, id string) (domain.Kn
 // projects must not seed the legacy tables; if a legacy write ever falls back,
 // EnsureKnowledgeRoot still creates the root lazily on demand.
 func (s *Service) LegacyKnowledgeRootsEnabled(projectID string) bool {
+	if s != nil && s.knowledgeLegacyDisabled {
+		// The legacy tables no longer exist; even a diagnostic runtime-read
+		// rollback must not seed a root that can never be read.
+		return false
+	}
 	if s == nil || s.knowledgeVault == nil || !s.knowledgeVault.Enabled() || !s.knowledgeVaultRuntimeRead {
 		return true
 	}

@@ -81,9 +81,11 @@ func (s *Store) RecordKnowledgeVaultImport(ctx context.Context, source string, v
 // directory is counted separately; the vault and its index are not consulted.
 func (s *Store) LegacyKnowledgeInventory(ctx context.Context) (domain.LegacyKnowledgeInventory, error) {
 	var inventory domain.LegacyKnowledgeInventory
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM knowledge_entries
-		WHERE is_index=0 AND type<>'navigation'`).Scan(&inventory.Entries); err != nil {
-		return inventory, err
+	if exists, err := s.tableExists(ctx, "knowledge_entries"); err == nil && exists {
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM knowledge_entries
+			WHERE is_index=0 AND type<>'navigation'`).Scan(&inventory.Entries); err != nil {
+			return inventory, err
+		}
 	}
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM skills`).Scan(&inventory.Skills); err != nil {
 		return inventory, err

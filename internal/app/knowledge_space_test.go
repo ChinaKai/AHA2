@@ -231,3 +231,68 @@ func TestChannelBindingsReplaceAndRejectUnreadySpaces(t *testing.T) {
 		t.Fatalf("unready binding error = %v", err)
 	}
 }
+
+func TestReconcileKnowledgeSpacesProvisionsLegacyAndChannelHosts(t *testing.T) {
+	service, database, _, config := newSpaceTestService(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	legacy := domain.Project{ID: "project-reconcile", Name: "Reconcile", ProjectType: "folder", KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now}
+	if err := database.CreateProject(ctx, legacy); err != nil {
+		t.Fatal(err)
+	}
+	channelHost := domain.Project{ID: "project-channel-host", Name: "Channel Host", ProjectType: "channel", KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now}
+	if err := database.CreateProject(ctx, channelHost); err != nil {
+		t.Fatal(err)
+	}
+	report, err := service.ReconcileKnowledgeSpaces(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Enabled {
+		t.Fatal("reconciliation did not run")
+	}
+	provisioned := map[string]bool{}
+	for _, id := range report.Provisioned {
+		provisioned[id] = true
+	}
+	for _, id := range []string{legacy.ID, channelHost.ID} {
+		if !provisioned[id] {
+			t.Fatalf("project %s was not provisioned: %#v", id, report)
+		}
+		stored, err := database.Project(ctx, id)
+		if err != nil || stored.KnowledgeState != domain.KnowledgeStateReady {
+			t.Fatalf("project %s state=%q err=%v", id, stored.KnowledgeState, err)
+		}
+		root, ok := knowledgevault.SpaceRootPath(config, id)
+		if !ok {
+			t.Fatalf("project %s has no manifest mapping", id)
+		}
+		if _, err := os.Stat(filepath.Join(config.VaultPath, filepath.FromSlash(root))); err != nil {
+			t.Fatalf("project %s root missing: %v", id, err)
+		}
+	}
+
+	// A manifest project whose root page disappeared is marked error for a
+	// retry; reconciliation never silently reports it ready.
+	root, _ := knowledgevault.SpaceRootPath(config, legacy.ID)
+	if err := os.Remove(filepath.Join(config.VaultPath, filepath.FromSlash(root))); err != nil {
+		t.Fatal(err)
+	}
+	report, err = service.ReconcileKnowledgeSpaces(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, id := range report.MarkedError {
+		if id == legacy.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("missing root was not reported: %#v", report)
+	}
+	retried, err := service.RetryProjectKnowledgeSpace(ctx, legacy.ID)
+	if err != nil || retried.KnowledgeState != domain.KnowledgeStateReady {
+		t.Fatalf("retry after missing root = %#v err=%v", retried, err)
+	}
+}

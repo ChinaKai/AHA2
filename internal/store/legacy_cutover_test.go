@@ -63,6 +63,10 @@ func TestCutoverLegacyKnowledgeBacksUpVerifiesAndDrops(t *testing.T) {
 	if rows, err := database.LegacyKnowledgeRows(ctx); err != nil || rows != 0 {
 		t.Fatalf("legacy rows after cutover = %d err=%v", rows, err)
 	}
+	inventory, err := database.LegacyKnowledgeInventory(ctx)
+	if err != nil || inventory.Entries != 0 {
+		t.Fatalf("legacy inventory after cutover = %#v err=%v", inventory, err)
+	}
 }
 
 func TestCutoverLegacyKnowledgeAbortsWhenExportVerificationFails(t *testing.T) {

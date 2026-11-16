@@ -258,9 +258,22 @@ func (s *Service) ReconcileKnowledgeSpaces(ctx context.Context) (KnowledgeSpaceR
 			// every startup. Only report here.
 			report.Warnings = append(report.Warnings, project.ID+" 是知识项目但尚无 vault 空间，等待迁移/清理")
 		default:
-			if project.KnowledgeState == "" || project.KnowledgeState == domain.KnowledgeStateUninitialized {
-				report.Warnings = append(report.Warnings, project.ID+" 尚未初始化知识空间")
+			// Model A gives every normal project an empty space. Projects that
+			// predate the model are initialized here once; a previous failure is
+			// retried on every startup until it reaches ready.
+			if project.KnowledgeState == domain.KnowledgeStateReady {
+				continue
 			}
+			_ = s.store.SetProjectKnowledgeState(ctx, project.ID, domain.KnowledgeStateInitializing)
+			if _, err := s.knowledgeVault.ProvisionProjectSpace(ctx, project.ID, project.Name); err != nil {
+				_ = s.store.SetProjectKnowledgeState(ctx, project.ID, domain.KnowledgeStateError)
+				report.MarkedError = append(report.MarkedError, project.ID)
+				report.Warnings = append(report.Warnings, fmt.Sprintf("%s 空间初始化失败：%v", project.ID, err))
+				continue
+			}
+			_ = s.store.SetProjectKnowledgeState(ctx, project.ID, domain.KnowledgeStateReady)
+			report.Provisioned = append(report.Provisioned, project.ID)
+			report.Ready++
 		}
 	}
 	if rebuildNeeded {
