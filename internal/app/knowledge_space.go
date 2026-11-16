@@ -169,8 +169,21 @@ func (s *Service) ReconcileKnowledgeSpaces(ctx context.Context) (KnowledgeSpaceR
 		byID[project.ID] = project
 	}
 	manifestProjects := map[string]string{}
+	indexedRoots := map[string]bool{}
 	_ = s.knowledgeVault.WithReader(func(reader *knowledgevault.Reader) error {
 		manifestProjects = reader.Manifest().Projects
+		if !reader.IndexReady() {
+			return nil
+		}
+		entries, err := reader.Entries(ctx, "project", "")
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			if entry.IsIndex && entry.ProjectID != "" {
+				indexedRoots[entry.ProjectID] = true
+			}
+		}
 		return nil
 	})
 	config := s.knowledgeVault.Config()
@@ -205,6 +218,11 @@ func (s *Service) ReconcileKnowledgeSpaces(ctx context.Context) (KnowledgeSpaceR
 		if project.KnowledgeState != domain.KnowledgeStateReady {
 			_ = s.store.SetProjectKnowledgeState(ctx, projectID, domain.KnowledgeStateReady)
 			rebuildNeeded = true
+		} else if !indexedRoots[projectID] {
+			// Ready in the project row but missing from the index: the file
+			// exists, so one rebuild restores the root entry.
+			rebuildNeeded = true
+			report.Warnings = append(report.Warnings, fmt.Sprintf("项目 %s 的知识空间缺少索引根条目，已安排重建", projectID))
 		}
 		report.Ready++
 	}

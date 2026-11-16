@@ -104,6 +104,14 @@ func (r *Reader) resolveVaultEntry(relative string) (string, string, os.FileInfo
 	if info.Mode()&os.ModeSymlink != 0 {
 		return "", "", nil, ErrDocumentNotFound
 	}
+	// Reject intermediate symlinks too: a lexical IsInsideRoot check would let
+	// a symlinked directory point the resolved file outside the vault.
+	if resolved, evalErr := filepath.EvalSymlinks(absolute); evalErr == nil {
+		vaultReal, vaultErr := filepath.EvalSymlinks(r.config.VaultPath)
+		if vaultErr != nil || !IsInsideRoot(vaultReal, resolved) {
+			return "", "", nil, ErrDocumentNotFound
+		}
+	}
 	return absolute, clean, info, nil
 }
 

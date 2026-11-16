@@ -1474,6 +1474,9 @@ async function loadFiles(path: string, force = false): Promise<void> {
 }
 
 async function loadFile(path: string): Promise<void> {
+  // A file preview takes over the reading pane; clear the activity/doc
+  // selection so the file panel is what renders.
+  state.selectedID = "";
   state.fileRequestPath = normalizeTreePath(path);
   state.fileState = "loading";
   state.fileError = "";

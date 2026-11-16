@@ -52,12 +52,21 @@ func EnsureProjectSpace(cfg Config, projectID, projectName string, now time.Time
 	result := ProjectSpaceResult{ProjectID: projectID}
 	slug := strings.TrimSpace(manifest.Projects[projectID])
 	if slug == "" {
-		slug, err = allocateProjectSpaceSlug(cfg.VaultPath, manifest, projectID, projectName)
-		if err != nil {
-			return result, err
+		// A previous attempt may have created the directory and root page but
+		// failed before the manifest write. Reuse that page instead of
+		// allocating a second directory for the same project.
+		if existing, ok := projectSlugFromRootIndex(cfg.VaultPath, projectID); ok {
+			slug = existing
+			manifest.Projects[projectID] = slug
+			result.Created = true
+		} else {
+			slug, err = allocateProjectSpaceSlug(cfg.VaultPath, manifest, projectID, projectName)
+			if err != nil {
+				return result, err
+			}
+			manifest.Projects[projectID] = slug
+			result.Created = true
 		}
-		manifest.Projects[projectID] = slug
-		result.Created = true
 	}
 	result.Slug = slug
 	result.RootPath = path.Join("projects", slug)
@@ -93,6 +102,31 @@ func EnsureProjectSpace(cfg Config, projectID, projectName string, now time.Time
 		return result, fmt.Errorf("write vault manifest: %w", err)
 	}
 	return result, nil
+}
+
+// projectSlugFromRootIndex finds a manifest-less project directory whose root
+// index already declares this project id. It is the repair path for a crash
+// between directory creation and the manifest write.
+func projectSlugFromRootIndex(vaultPath, projectID string) (string, bool) {
+	entries, err := os.ReadDir(filepath.Join(vaultPath, "projects"))
+	if err != nil {
+		return "", false
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		root := filepath.Join(vaultPath, "projects", entry.Name(), "index.md")
+		raw, readErr := os.ReadFile(root)
+		if readErr != nil {
+			continue
+		}
+		document := ParseDocument(string(raw))
+		if strings.TrimSpace(document.Frontmatter.ProjectID) == projectID {
+			return entry.Name(), true
+		}
+	}
+	return "", false
 }
 
 // allocateProjectSpaceSlug derives a stable slug from the display name and
