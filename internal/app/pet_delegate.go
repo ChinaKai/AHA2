@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -387,6 +388,20 @@ func (s *Service) runPetApprovalExecution(ctx context.Context, item domain.PetAp
 		execErr = s.executePetApproval(ctx, item)
 	}
 	executionDuration := time.Since(executionStarted)
+	// A destructive delete that committed but failed only in cleanup must not
+	// go back to pending: re-approving it would hit the missing project row.
+	// Approve it with the cleanup warning attached so the owner sees the
+	// remaining work and startup reconciliation can finish it.
+	var cleanupErr *projectDeleteCleanupError
+	if execErr != nil && errors.As(execErr, &cleanupErr) {
+		note = strings.TrimSpace(note)
+		if note != "" {
+			note += "；"
+		}
+		note += cleanupErr.Error()
+		log.Printf("pet approval %s (%s): destructive action committed, cleanup pending: %v", item.ID, item.Kind, cleanupErr.Err)
+		execErr = nil
+	}
 	if execErr != nil {
 		failure := "执行失败：" + execErr.Error()
 		commitStarted := time.Now()

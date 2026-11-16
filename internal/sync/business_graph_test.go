@@ -191,3 +191,42 @@ func TestBusinessHandlersIgnoreLegacyChannelBotIdentity(t *testing.T) {
 		t.Fatalf("legacy channel bot identity blocked sync: %v", err)
 	}
 }
+
+func TestProjectSyncReplayResetsKnowledgeState(t *testing.T) {
+	ctx, db := context.Background(), businessStore(t)
+	now := time.Now().UTC()
+	remote := domain.Project{
+		ID: "project-replay", Name: "Replay", ProjectType: "folder",
+		KnowledgePolicy: "enabled", KnowledgeState: domain.KnowledgeStateReady,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := applyBusinessObject(ctx, db, graphObject(t, TypeProject, remote.ID, "device-a", remote.ID, "", remote)); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := db.Project(ctx, remote.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.KnowledgeState != domain.KnowledgeStateUninitialized {
+		t.Fatalf("replayed knowledge_state = %q, want uninitialized", stored.KnowledgeState)
+	}
+	// A later update must preserve the local lifecycle instead of resetting it.
+	if err := db.SetProjectKnowledgeState(ctx, remote.ID, domain.KnowledgeStateReady); err != nil {
+		t.Fatal(err)
+	}
+	remote.Name = "Renamed Remotely"
+	remote.KnowledgeState = domain.KnowledgeStateUninitialized
+	if err := applyBusinessObject(ctx, db, graphObject(t, TypeProject, remote.ID, "device-a", remote.ID, "", remote)); err != nil {
+		t.Fatal(err)
+	}
+	stored, err = db.Project(ctx, remote.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.KnowledgeState != domain.KnowledgeStateReady {
+		t.Fatalf("update overwrote local knowledge_state: %q", stored.KnowledgeState)
+	}
+	if stored.Name != "Renamed Remotely" {
+		t.Fatalf("update was not applied: %#v", stored)
+	}
+}

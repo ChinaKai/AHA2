@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/knowledgevault"
 )
@@ -452,6 +453,16 @@ func (s *Server) cutoverLegacyKnowledge(writer http.ResponseWriter, request *htt
 	}
 	report, err := s.app.CutoverLegacyKnowledge(request.Context(), projectID, strings.TrimSpace(payload.BackupDir))
 	if err != nil {
+		// Project/space failures carry a stable client-facing code (for
+		// example project_id_archived); generic cutover failures stay under
+		// knowledge_cutover_failed.
+		var spaceErr *app.KnowledgeSpaceError
+		if errors.As(err, &spaceErr) {
+			writeJSON(writer, http.StatusConflict, map[string]any{
+				"ok": false, "error": spaceErr.Code, "message": spaceErr.Message,
+			})
+			return
+		}
 		writeJSON(writer, http.StatusConflict, map[string]any{
 			"ok": false, "error": "knowledge_cutover_failed", "message": err.Error(),
 		})

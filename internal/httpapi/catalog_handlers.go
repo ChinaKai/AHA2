@@ -106,7 +106,7 @@ func (s *Server) createProject(writer http.ResponseWriter, request *http.Request
 		var spaceErr *app.KnowledgeSpaceError
 		if errors.As(createErr, &spaceErr) {
 			status := http.StatusInternalServerError
-			if app.IsKnowledgeSpaceNotReadyError(createErr) {
+			if app.IsKnowledgeSpaceConflictError(createErr) {
 				status = http.StatusConflict
 			}
 			writeJSON(writer, status, map[string]any{
@@ -134,7 +134,7 @@ func (s *Server) retryProjectKnowledgeSpace(writer http.ResponseWriter, request 
 		var spaceErr *app.KnowledgeSpaceError
 		if errors.As(err, &spaceErr) {
 			status := http.StatusInternalServerError
-			if app.IsKnowledgeSpaceNotReadyError(err) {
+			if app.IsKnowledgeSpaceConflictError(err) {
 				status = http.StatusConflict
 			}
 			writeJSON(writer, status, map[string]any{

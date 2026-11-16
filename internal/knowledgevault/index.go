@@ -627,6 +627,17 @@ func scopeForPath(relative string, manifest Manifest, reverseProjects, reverseAr
 		}
 		slug := segments[1]
 		if segments[0] == "archive" {
+			// Deleted project spaces are archived below archive/projects/ so
+			// the flat archive libraries keep their original layout. The
+			// manifest slug carries both segments ("projects/<dir>"). Only
+			// take this branch when that nested mapping exists; otherwise a
+			// hand-authored flat archive named "projects" keeps its own
+			// mapping (archive/projects/index.md).
+			if slug == "projects" && len(segments) >= 3 {
+				if projectID := reverseArchives[path.Join("projects", segments[2])]; projectID != "" {
+					return "archive", projectID, true
+				}
+			}
 			return "archive", reverseArchives[slug], true
 		}
 		return "project", reverseProjects[slug], false
@@ -683,12 +694,19 @@ func isRootIndexPath(relative string) bool {
 	if len(segments) == 2 && segments[0] == "global" && segments[1] == "index.md" {
 		return true
 	}
-	return len(segments) == 3 && (segments[0] == "projects" || segments[0] == "archive") && segments[2] == "index.md"
+	if len(segments) == 3 && (segments[0] == "projects" || segments[0] == "archive") && segments[2] == "index.md" {
+		return true
+	}
+	// Archived project spaces live one level deeper: archive/projects/<dir>.
+	return len(segments) == 4 && segments[0] == "archive" && segments[1] == "projects" && segments[3] == "index.md"
 }
 
 func prefixFromPath(relative string) string {
 	segments := strings.Split(relative, "/")
 	if len(segments) >= 2 && (segments[0] == "projects" || segments[0] == "archive") {
+		if segments[0] == "archive" && segments[1] == "projects" && len(segments) >= 4 {
+			return "archive/projects/" + segments[2]
+		}
 		return segments[0] + "/" + segments[1]
 	}
 	return segments[0]

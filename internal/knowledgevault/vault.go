@@ -222,6 +222,7 @@ func normalizeReserved(manifest *Manifest) {
 	for _, pattern := range []string{
 		"projects/*/skills", "projects/*/inbox",
 		"archive/*/skills", "archive/*/inbox",
+		"archive/projects/*/skills", "archive/projects/*/inbox",
 	} {
 		if !containsString(manifest.ReservedPatterns, pattern) {
 			manifest.ReservedPatterns = append(manifest.ReservedPatterns, pattern)

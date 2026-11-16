@@ -67,12 +67,7 @@ func deriveLibraries(vaultPath string, manifest Manifest) (map[string]string, ma
 		}
 		sort.Slice(children, func(left, right int) bool { return children[left].Name() < children[right].Name() })
 		usedSlugs := map[string]string{}
-		for _, child := range children {
-			slug := child.Name()
-			if !child.IsDir() || strings.HasPrefix(slug, ".") {
-				continue
-			}
-			relative := path.Join(root.directory, slug)
+		bind := func(relative, slug string) {
 			indexPath := filepath.Join(vaultPath, filepath.FromSlash(path.Join(relative, "index.md")))
 			raw, readErr := os.ReadFile(indexPath)
 			if readErr != nil {
@@ -81,17 +76,17 @@ func deriveLibraries(vaultPath string, manifest Manifest) (map[string]string, ma
 				} else {
 					warnings = append(warnings, fmt.Sprintf("%s: unbound (read index.md: %v); no %s mapping was generated", relative, readErr, root.kind))
 				}
-				continue
+				return
 			}
 			document := ParseDocument(string(raw))
 			projectID := strings.TrimSpace(document.Frontmatter.ProjectID)
 			if projectID == "" {
 				warnings = append(warnings, fmt.Sprintf("%s: unbound (index.md frontmatter project_id is missing); no %s mapping was generated", relative, root.kind))
-				continue
+				return
 			}
 			if other, exists := usedSlugs[projectID]; exists {
 				warnings = append(warnings, fmt.Sprintf("%s: duplicate %s binding %q already used by %s; mapping skipped", relative, root.kind, projectID, other))
-				continue
+				return
 			}
 			usedSlugs[projectID] = relative
 			root.byID[projectID] = slug
@@ -100,6 +95,38 @@ func deriveLibraries(vaultPath string, manifest Manifest) (map[string]string, ma
 				title = FirstHeading(document.Body)
 			}
 			root.names[projectID] = resolveLibraryName(root.existing[projectID], title, slug, projectID)
+		}
+		for _, child := range children {
+			slug := child.Name()
+			if !child.IsDir() || strings.HasPrefix(slug, ".") {
+				continue
+			}
+			if root.directory == "archive" && slug == "projects" {
+				// Archived project spaces: archive/projects/<slug-id8-ts>/.
+				// The container directory has no index.md of its own, so it
+				// must not be reported as an unbound archive library. A
+				// hand-authored flat archive that happens to use this slug
+				// keeps its mapping when it has its own root page.
+				if _, statErr := os.Stat(filepath.Join(vaultPath, "archive", "projects", "index.md")); statErr == nil {
+					bind(path.Join("archive", "projects"), "projects")
+				}
+				nested, nestedErr := os.ReadDir(filepath.Join(vaultPath, "archive", "projects"))
+				if nestedErr != nil {
+					if !os.IsNotExist(nestedErr) {
+						warnings = append(warnings, fmt.Sprintf("archive/projects: read archived spaces: %v", nestedErr))
+					}
+					continue
+				}
+				sort.Slice(nested, func(left, right int) bool { return nested[left].Name() < nested[right].Name() })
+				for _, item := range nested {
+					if !item.IsDir() || strings.HasPrefix(item.Name(), ".") {
+						continue
+					}
+					bind(path.Join("archive", "projects", item.Name()), path.Join("projects", item.Name()))
+				}
+				continue
+			}
+			bind(path.Join(root.directory, slug), slug)
 		}
 	}
 	return projects, projectNames, archives, archiveNames, warnings, nil

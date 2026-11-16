@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -36,6 +37,11 @@ func (s *Service) ExportLegacyKnowledgeToProjectSpace(ctx context.Context, proje
 		return result, err
 	}
 	if _, err := s.knowledgeVault.ProvisionProjectSpace(ctx, project.ID, project.Name); err != nil {
+		if errors.Is(err, knowledgevault.ErrProjectIDArchived) {
+			return result, knowledgeSpaceError(
+				"project_id_archived",
+				"旧库导出目标使用了已归档的项目 ID，不能复用；请删除这个项目行或改用新的项目 ID："+err.Error(), err)
+		}
 		return result, knowledgeSpaceError("knowledge_space_init_failed", "知识空间初始化失败："+err.Error(), err)
 	}
 	entries, err := s.store.ListKnowledge(ctx, "project", project.ID, nil)

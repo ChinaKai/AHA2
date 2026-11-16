@@ -1,0 +1,390 @@
+package knowledgevault
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func newArchiveTestVault(t *testing.T) (Config, *Manager) {
+	t.Helper()
+	config := DefaultConfig(t.TempDir())
+	if _, err := Bootstrap(config, InitOptions{VaultName: "Archive Vault"}); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewManager(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.SetEnabled(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	return config, manager
+}
+
+func writeArchiveTestDocument(t *testing.T, config Config, relative, title, body string) {
+	t.Helper()
+	raw := "---\n" +
+		"title: " + title + "\n" +
+		"slug: test-doc\n" +
+		"scope: project\n" +
+		"project_id: p529alpha\n" +
+		"type: reference\n" +
+		"status: verified\n" +
+		"---\n# " + title + "\n\n" + body + "\n"
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(config.VaultPath, filepath.FromSlash(relative))), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(config.VaultPath, filepath.FromSlash(relative)), []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestArchiveProjectSpaceMovesFilesAndRebuildsArchiveIndex(t *testing.T) {
+	ctx := context.Background()
+	config, manager := newArchiveTestVault(t)
+	stamp := time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC)
+	if _, err := EnsureProjectSpace(config, "p529alpha", "Alpha Project", stamp); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EnsureProjectSpace(config, "p529other", "Other Project", stamp); err != nil {
+		t.Fatal(err)
+	}
+	writeArchiveTestDocument(t, config, "projects/alpha-project/notes/first.md", "归档笔记", "archive-search-marker-529")
+	if _, err := manager.Rebuild(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// A hand-written manifest field must survive the archive rewrite.
+	manifest, err := ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.ObsidianVault = "hand-written-obsidian"
+	if err := writeManifest(config.VaultPath, manifest); err != nil {
+		t.Fatal(err)
+	}
+
+	archivedPath, err := ArchiveProjectSpace(config, "p529alpha", stamp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const wantPrefix = "archive/projects/alpha-project-p529alph-20261116T100000Z"
+	if archivedPath != wantPrefix {
+		t.Fatalf("archived path = %q, want %q", archivedPath, wantPrefix)
+	}
+	if _, err := manager.Rebuild(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(config.VaultPath, "projects", "alpha-project")); !os.IsNotExist(err) {
+		t.Fatalf("live project directory still exists: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(config.VaultPath, filepath.FromSlash(archivedPath), "notes", "first.md")); err != nil {
+		t.Fatalf("archived document missing: %v", err)
+	}
+
+	after, err := ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := after.Projects["p529alpha"]; exists {
+		t.Fatalf("archived project still in manifest.projects: %#v", after.Projects)
+	}
+	if _, exists := after.ProjectNames["p529alpha"]; exists {
+		t.Fatalf("archived project still in manifest.project_names: %#v", after.ProjectNames)
+	}
+	if after.Archives["p529alpha"] != "projects/alpha-project-p529alph-20261116T100000Z" {
+		t.Fatalf("manifest archive mapping = %#v", after.Archives)
+	}
+	if after.ArchiveNames["p529alpha"] != "Alpha Project" {
+		t.Fatalf("manifest archive name = %#v", after.ArchiveNames)
+	}
+	if after.Projects["p529other"] != "other-project" || after.ProjectNames["p529other"] != "Other Project" {
+		t.Fatalf("other project mapping was not preserved: %#v", after.Projects)
+	}
+	if after.VaultID != manifest.VaultID || after.VaultName != "Archive Vault" || after.ObsidianVault != "hand-written-obsidian" {
+		t.Fatalf("hand-written manifest fields changed: %#v", after)
+	}
+
+	if err := manager.WithReader(func(reader *Reader) error {
+		entries, err := reader.Entries(ctx, "project", "p529alpha")
+		if err != nil {
+			return err
+		}
+		if len(entries) != 0 {
+			t.Fatalf("archived project still has live entries: %#v", entries)
+		}
+		plain, err := reader.Search(ctx, DocumentSearchOptions{Query: "archive-search-marker-529", Limit: 10})
+		if err != nil {
+			return err
+		}
+		if len(plain.Results) != 0 {
+			t.Fatalf("default search leaked archived knowledge: %#v", plain.Results)
+		}
+		archived, err := reader.Search(ctx, DocumentSearchOptions{Query: "archive-search-marker-529", Limit: 10, IncludeArchives: true})
+		if err != nil {
+			return err
+		}
+		if len(archived.Results) != 1 || !archived.Results[0].Archive || archived.Results[0].Scope != "archive" {
+			t.Fatalf("archived knowledge is not searchable: %#v", archived.Results)
+		}
+		if archived.Results[0].ProjectID != "p529alpha" {
+			t.Fatalf("archived entry project = %q", archived.Results[0].ProjectID)
+		}
+		libraryEntries, err := reader.Entries(ctx, "archive", "p529alpha")
+		if err != nil {
+			return err
+		}
+		paths := map[string]bool{}
+		for _, entry := range libraryEntries {
+			paths[entry.Path] = true
+		}
+		if !paths["archive/projects/alpha-project-p529alph-20261116T100000Z/index.md"] ||
+			!paths["archive/projects/alpha-project-p529alph-20261116T100000Z/notes/first.md"] {
+			t.Fatalf("archive library entries = %#v", paths)
+		}
+		library := reader.Libraries(ctx)
+		found := false
+		for _, item := range library.Archived {
+			if item.ProjectID == "p529alpha" && item.Name == "Alpha Project" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("archived library not listed: %#v", library.Archived)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestArchiveProjectSpaceIsIdempotentWithoutSpace(t *testing.T) {
+	ctx := context.Background()
+	config, manager := newArchiveTestVault(t)
+	stamp := time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC)
+	for attempt := 0; attempt < 2; attempt++ {
+		archivedPath, err := ArchiveProjectSpace(config, "p529missing", stamp)
+		if err != nil || archivedPath != "" {
+			t.Fatalf("attempt %d = %q err=%v", attempt, archivedPath, err)
+		}
+	}
+	if archivedPath, err := manager.ArchiveProjectSpace(ctx, "p529missing"); err != nil || archivedPath != "" {
+		t.Fatalf("manager no-op = %q err=%v", archivedPath, err)
+	}
+	if _, err := os.Stat(filepath.Join(config.VaultPath, "archive", "projects")); !os.IsNotExist(err) {
+		t.Fatalf("idempotent call created an archive directory: %v", err)
+	}
+}
+
+func TestFlatArchiveLibraryNamedProjectsKeepsItsScope(t *testing.T) {
+	ctx := context.Background()
+	config, manager := newArchiveTestVault(t)
+	flatDir := filepath.Join(config.VaultPath, "archive", "projects")
+	if err := os.MkdirAll(flatDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rootPage := "---\ntitle: Flat Archive\nslug: index\nscope: archive\nproject_id: archive-flat\ntype: navigation\nstatus: verified\nis_index: true\n---\n# Flat Archive\n"
+	if err := os.WriteFile(filepath.Join(flatDir, "index.md"), []byte(rootPage), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	note := "---\ntitle: Flat Note\nslug: flat-note\nproject_id: archive-flat\n---\nflat-archive-marker-529\n"
+	if err := os.WriteFile(filepath.Join(flatDir, "flat-note.md"), []byte(note), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.Archives["archive-flat"] = "projects"
+	manifest.ArchiveNames["archive-flat"] = "Flat Archive"
+	if err := writeManifest(config.VaultPath, manifest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Rebuild(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.WithReader(func(reader *Reader) error {
+		entries, err := reader.Entries(ctx, "archive", "archive-flat")
+		if err != nil {
+			return err
+		}
+		if len(entries) != 2 {
+			t.Fatalf("flat archive named projects entries = %#v", entries)
+		}
+		found, err := reader.Search(ctx, DocumentSearchOptions{Query: "flat-archive-marker-529", Limit: 10, IncludeArchives: true})
+		if err != nil {
+			return err
+		}
+		if len(found.Results) != 1 || found.Results[0].Scope != "archive" || found.Results[0].ProjectID != "archive-flat" {
+			t.Fatalf("flat archive search = %#v", found.Results)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestArchiveProjectSpaceWithoutVaultIsNoOp(t *testing.T) {
+	config := DefaultConfig(t.TempDir())
+	archivedPath, err := ArchiveProjectSpace(config, "p529missing", time.Now().UTC())
+	if err != nil || archivedPath != "" {
+		t.Fatalf("no-vault archive = %q err=%v", archivedPath, err)
+	}
+}
+
+func TestArchiveProjectSpaceNeverOverwritesExistingArchive(t *testing.T) {
+	config, _ := newArchiveTestVault(t)
+	stamp := time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC)
+	if _, err := EnsureProjectSpace(config, "p529alpha", "Alpha Project", stamp); err != nil {
+		t.Fatal(err)
+	}
+	existing := filepath.Join(config.VaultPath, "archive", "projects", "alpha-project-p529alph-20261116T100000Z")
+	if err := os.MkdirAll(existing, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(existing, "keep.md"), []byte("older archive"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	archivedPath, err := ArchiveProjectSpace(config, "p529alpha", stamp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if archivedPath != "archive/projects/alpha-project-p529alph-20261116T100000Z-2" {
+		t.Fatalf("conflict suffix = %q", archivedPath)
+	}
+	raw, err := os.ReadFile(filepath.Join(existing, "keep.md"))
+	if err != nil || string(raw) != "older archive" {
+		t.Fatalf("existing archive was overwritten: %q err=%v", raw, err)
+	}
+}
+
+func TestArchiveProjectSpaceFailureLeavesLiveSpaceIntact(t *testing.T) {
+	config, _ := newArchiveTestVault(t)
+	stamp := time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC)
+	if _, err := EnsureProjectSpace(config, "p529alpha", "Alpha Project", stamp); err != nil {
+		t.Fatal(err)
+	}
+	// A file where archive/projects should be makes the target directory
+	// impossible to create, so the move fails before any file is touched.
+	if err := os.MkdirAll(filepath.Join(config.VaultPath, "archive"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(config.VaultPath, "archive", "projects"), []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	archivedPath, err := ArchiveProjectSpace(config, "p529alpha", stamp)
+	if err == nil || !strings.Contains(err.Error(), "is not a directory") {
+		t.Fatalf("archive error = %v (path %q)", err, archivedPath)
+	}
+	if _, statErr := os.Stat(filepath.Join(config.VaultPath, "projects", "alpha-project", "index.md")); statErr != nil {
+		t.Fatalf("live space was changed by a failed archive: %v", statErr)
+	}
+	manifest, readErr := ReadManifest(config.VaultPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if manifest.Projects["p529alpha"] != "alpha-project" {
+		t.Fatalf("manifest mapping was dropped on failure: %#v", manifest.Projects)
+	}
+}
+
+func TestEnsureProjectSpaceRejectsArchivedProjectID(t *testing.T) {
+	ctx := context.Background()
+	config, manager := newArchiveTestVault(t)
+	stamp := time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC)
+	if _, err := EnsureProjectSpace(config, "p529reuse", "Reuse Me", stamp); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ArchiveProjectSpace(config, "p529reuse", stamp.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EnsureProjectSpace(config, "p529reuse", "Reused", stamp.Add(time.Hour)); !errors.Is(err, ErrProjectIDArchived) {
+		t.Fatalf("EnsureProjectSpace reused id error = %v", err)
+	}
+	if _, err := manager.ProvisionProjectSpace(ctx, "p529reuse", "Reused"); !errors.Is(err, ErrProjectIDArchived) {
+		t.Fatalf("ProvisionProjectSpace reused id error = %v", err)
+	}
+	manifest, err := ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := manifest.Projects["p529reuse"]; exists {
+		t.Fatalf("reused ID was written back into projects: %#v", manifest.Projects)
+	}
+	if manifest.Archives["p529reuse"] == "" {
+		t.Fatalf("archive mapping disappeared: %#v", manifest.Archives)
+	}
+}
+
+func TestEnsureProjectSpaceRejectsReuseAfterManifestWriteFailure(t *testing.T) {
+	config, _ := newArchiveTestVault(t)
+	stamp := time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC)
+	if _, err := EnsureProjectSpace(config, "p529reuse", "Reuse Me", stamp); err != nil {
+		t.Fatal(err)
+	}
+	before, err := ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ArchiveProjectSpace(config, "p529reuse", stamp.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a crash after the directory rename but before the manifest
+	// write: the old projects mapping is back and archives has no entry.
+	if err := writeManifest(config.VaultPath, before); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EnsureProjectSpace(config, "p529reuse", "Reused", stamp.Add(time.Hour)); !errors.Is(err, ErrProjectIDArchived) {
+		t.Fatalf("manifest-window reuse error = %v", err)
+	}
+	manifest, err := ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Archives["p529reuse"] != "" {
+		t.Fatalf("failed window unexpectedly gained an archive mapping: %#v", manifest.Archives)
+	}
+	if _, exists := manifest.Projects["p529reuse"]; !exists {
+		t.Fatalf("failed window lost its old projects mapping: %#v", manifest.Projects)
+	}
+}
+
+func TestEnsureProjectSpaceAllowsReuseAfterArchiveDirectoryDeleted(t *testing.T) {
+	config, manager := newArchiveTestVault(t)
+	stamp := time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC)
+	if _, err := EnsureProjectSpace(config, "p529reuse", "Reuse Me", stamp); err != nil {
+		t.Fatal(err)
+	}
+	archivedPath, err := ArchiveProjectSpace(config, "p529reuse", stamp.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(config.VaultPath, filepath.FromSlash(archivedPath))); err != nil {
+		t.Fatal(err)
+	}
+	result, err := EnsureProjectSpace(config, "p529reuse", "Reused", stamp.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("stale archive mapping blocked reuse: %v", err)
+	}
+	if result.Slug == "" {
+		t.Fatalf("reused project got no slug: %#v", result)
+	}
+	manifest, err := ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Projects["p529reuse"] != result.Slug {
+		t.Fatalf("reused project mapping = %#v", manifest.Projects)
+	}
+	if manifest.Archives["p529reuse"] != "" {
+		t.Fatalf("stale archive mapping was kept: %#v", manifest.Archives)
+	}
+	if _, err := manager.Rebuild(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
