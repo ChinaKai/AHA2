@@ -815,7 +815,7 @@ func petToolAllowed(assistant domain.OwnerAssistant, name string) bool {
 		return assistant.PetAllowManageSystem
 	case "aha_list_projects":
 		return assistant.PetAllowViewTasks || assistant.PetAllowCreateTasks || assistant.PetAllowCreateWorkspaces
-	case "aha_create_task", "aha_start_task", "aha_takeover_remote_task", "aha_complete_task", "aha_finalize_task_worktree", "aha_request_code_review", "aha_delete_task", "aha_reopen_task", "aha_interrupt_task", "aha_update_task", "aha_update_task_agent", "aha_upload_task_attachment", "aha_delete_task_attachment", "aha_update_task_hardware", "aha_bind_task_channel", "aha_unbind_task_channel", "aha_retire_remote_task_mirror", "aha_compact_task_session", "aha_reset_task_session":
+	case "aha_create_task", "aha_start_task", "aha_takeover_remote_task", "aha_complete_task", "aha_finalize_task_worktree", "aha_request_code_review", "aha_delete_task", "aha_reopen_task", "aha_interrupt_task", "aha_update_task", "aha_update_task_agent", "aha_upload_task_attachment", "aha_delete_task_attachment", "aha_copy_task_attachment", "aha_update_task_hardware", "aha_bind_task_channel", "aha_unbind_task_channel", "aha_retire_remote_task_mirror", "aha_compact_task_session", "aha_reset_task_session":
 		return assistant.PetAllowCreateTasks
 	case "aha_create_project", "aha_create_workspace", "aha_takeover_remote_workspace", "aha_update_project", "aha_delete_project", "aha_update_workspace", "aha_delete_workspace", "aha_detect_workspace", "aha_retire_remote_workspace_mirror":
 		return assistant.PetAllowCreateWorkspaces
@@ -1297,6 +1297,12 @@ func ahaPetTools() []gateway.ChatTool {
 			}, "required": []string{"task_id", "content_base64"},
 		}},
 		{Name: "aha_delete_task_attachment", Description: "删除尚未绑定到消息的 Task 附件", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"task_id":       map[string]any{"type": "string"},
+				"attachment_id": map[string]any{"type": "string"},
+			}, "required": []string{"task_id", "attachment_id"},
+		}},
+		{Name: "aha_copy_task_attachment", Description: "把同一 Task 内的一个附件克隆成新的未绑定附件（复用同一文件内容，不重新上传）；返回新附件 ID，可随后用 aha_send_task_message 发送。原附件记录及其消息绑定不受影响", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"task_id":       map[string]any{"type": "string"},
 				"attachment_id": map[string]any{"type": "string"},
@@ -2460,6 +2466,17 @@ func (s *Service) PetMCPTool(ctx context.Context, name string, args json.RawMess
 			return "", err
 		}
 		return `{"ok":true}`, nil
+	case "aha_copy_task_attachment":
+		var input PetCopyAttachmentInput
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid copy attachment request")
+		}
+		item, err := s.PetCopyTaskAttachment(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(item)
+		return string(data), nil
 	case "aha_delete_hardware_resource":
 		var input struct {
 			ResourceID string `json:"resource_id"`

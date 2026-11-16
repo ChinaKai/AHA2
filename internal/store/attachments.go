@@ -182,6 +182,36 @@ func (s *Store) AttachmentContent(item domain.Attachment) ([]byte, error) {
 	return os.ReadFile(filepath.Join(s.dataDir, "attachments", "blobs", item.SHA256[:2], item.SHA256))
 }
 
+// CloneAttachment creates a new, unbound attachment in the same Task that
+// reuses the source attachment's content-addressed blob. The source row is
+// never modified, so an attachment that is already bound to a message keeps
+// that binding while the clone can be sent with a later message. The source
+// lookup and the insert are both scoped to taskID, so an attachment owned by
+// another Task is rejected with sql.ErrNoRows.
+func (s *Store) CloneAttachment(ctx context.Context, taskID, sourceID string, now time.Time) (domain.Attachment, error) {
+	source, err := s.Attachment(ctx, taskID, sourceID)
+	if err != nil {
+		return domain.Attachment{}, err
+	}
+	if len(source.SHA256) != 64 || strings.ContainsAny(source.SHA256, `/\\`) {
+		return domain.Attachment{}, fmt.Errorf("invalid attachment hash")
+	}
+	blob := filepath.Join(s.dataDir, "attachments", "blobs", source.SHA256[:2], source.SHA256)
+	if _, err := os.Stat(blob); err != nil {
+		return domain.Attachment{}, fmt.Errorf("attachment content is missing: %w", err)
+	}
+	item := domain.Attachment{
+		ID: domain.NewID("attachment"), TaskID: source.TaskID,
+		Name: source.Name, MediaType: source.MediaType, Size: source.Size,
+		SHA256: source.SHA256, CreatedAt: now.UTC(),
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO attachments(id,task_id,message_id,name,media_type,size_bytes,sha256,created_at) VALUES(?,?,'',?,?,?,?,?)`,
+		item.ID, item.TaskID, item.Name, item.MediaType, item.Size, item.SHA256, timeString(item.CreatedAt)); err != nil {
+		return domain.Attachment{}, err
+	}
+	return s.Attachment(ctx, taskID, item.ID)
+}
+
 // OpenAttachmentContent opens the controlled blob for streaming. The caller
 // must close it. The hash is validated as a path component, so no client
 // supplied path can escape the blob directory.

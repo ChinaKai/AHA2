@@ -78,6 +78,7 @@ func petMCPAllowedTools(task domain.Task) []string {
 		"mcp__aha2-pet__aha_list_task_attachments",
 		"mcp__aha2-pet__aha_upload_task_attachment",
 		"mcp__aha2-pet__aha_delete_task_attachment",
+		"mcp__aha2-pet__aha_copy_task_attachment",
 		"mcp__aha2-pet__aha_hardware_resources",
 		"mcp__aha2-pet__aha_create_hardware_resource",
 		"mcp__aha2-pet__aha_update_hardware_resource",
