@@ -315,6 +315,10 @@ func (i *Index) Rebuild(ctx context.Context, vaultPath string) (RebuildReport, e
 		}
 		manifest = derived
 	}
+	// The projects container page needs the derived slug/name bindings, so it
+	// is maintained after the manifest refresh. It is excluded from scanning
+	// below: a path with no project slug must not become an unbound document.
+	report.Warnings = append(report.Warnings, maintainProjectsRootIndex(absoluteVault, manifest)...)
 	reverseProjects := reverseSlugMap(manifest.Projects)
 	reverseArchives := reverseSlugMap(manifest.Archives)
 
@@ -350,6 +354,11 @@ func (i *Index) Rebuild(ctx context.Context, vaultPath string) (RebuildReport, e
 			return nil
 		}
 		if relative == readmeFileName {
+			return nil
+		}
+		// The projects container page is vault navigation, not a project
+		// document; maintainProjectsRootIndex owns it.
+		if relative == projectsRootIndexPath {
 			return nil
 		}
 		if !IsInsideRoot(absoluteVault, filePath) {

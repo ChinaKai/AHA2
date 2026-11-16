@@ -192,6 +192,12 @@ func deriveSkills(vaultPath string, projects, archives map[string]string) (map[s
 	return result, warnings, nil
 }
 
+// projectsRootIndexPath is the container index for the whole projects tree.
+// It is a vault navigation file, not a project document: the indexer skips it
+// (its path has no project slug), and maintainProjectsRootIndex keeps its
+// generated block in sync with the project directories.
+const projectsRootIndexPath = "projects/index.md"
+
 // missingIndexSkipNames are directory names that never receive an automatic
 // index.md. They are reserved vault areas or directories the knowledge tree
 // deliberately keeps out of the generated navigation.
@@ -287,6 +293,95 @@ func createMissingIndexPages(vaultPath string, manifest Manifest) []string {
 		if err := createVaultIndexPage(vaultPath, relative, frontmatter); err != nil {
 			warnings = append(warnings, fmt.Sprintf("%s: create missing index page: %v", relative, err))
 		}
+	}
+	return warnings
+}
+
+// maintainProjectsRootIndex creates or refreshes projects/index.md. Clicking
+// projects in a file browser or Obsidian should land on a page listing every
+// project entry, just like global/index.md. The page lives outside the indexed
+// document set because it has no single project_id; only the marker block is
+// machine-written, so a hand-written intro or frontmatter survives rebuilds.
+func maintainProjectsRootIndex(vaultPath string, manifest Manifest) []string {
+	warnings := []string{}
+	projectsRoot := filepath.Join(vaultPath, "projects")
+	info, err := os.Lstat(projectsRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return warnings
+		}
+		return append(warnings, fmt.Sprintf("projects: inspect root: %v", err))
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return warnings
+	}
+	children, err := os.ReadDir(projectsRoot)
+	if err != nil {
+		return append(warnings, fmt.Sprintf("projects: read root: %v", err))
+	}
+	nameBySlug := map[string]string{}
+	for projectID, slug := range manifest.Projects {
+		if slug != "" {
+			nameBySlug[slug] = manifest.ProjectNames[projectID]
+		}
+	}
+	slugs := make([]string, 0, len(children))
+	for _, child := range children {
+		slug := child.Name()
+		if !child.IsDir() || strings.HasPrefix(slug, ".") || child.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		if _, statErr := os.Lstat(filepath.Join(projectsRoot, slug, "index.md")); statErr != nil {
+			continue
+		}
+		slugs = append(slugs, slug)
+	}
+	sort.Strings(slugs)
+	lines := []string{indexBlockStart, "## 文档", ""}
+	if len(slugs) == 0 {
+		lines = append(lines, "_暂无文档。_")
+	}
+	for _, slug := range slugs {
+		title := strings.TrimSpace(nameBySlug[slug])
+		if title == "" || isKnowledgeHomeTitle(title) {
+			title = humanizeSegment(slug)
+		}
+		lines = append(lines, indexListLine(path.Join("projects", slug, "index"), title, ""))
+	}
+	lines = append(lines, indexBlockEnd)
+	block := strings.Join(lines, "\n")
+
+	target := filepath.Join(projectsRoot, "index.md")
+	raw, readErr := os.ReadFile(target)
+	if readErr != nil {
+		if !os.IsNotExist(readErr) {
+			return append(warnings, fmt.Sprintf("%s: read index page: %v", projectsRootIndexPath, readErr))
+		}
+		frontmatter := Frontmatter{Title: "项目知识", Scope: "global", Type: TypeNavigation, Status: "verified", IsIndex: boolPointer(true)}
+		content, renderErr := renderDocument(frontmatter, block)
+		if renderErr != nil {
+			return append(warnings, fmt.Sprintf("%s: render index page: %v", projectsRootIndexPath, renderErr))
+		}
+		if writeErr := writeVaultFileIfChanged(vaultPath, target, []byte(content), 0o644); writeErr != nil {
+			return append(warnings, fmt.Sprintf("%s: create index page: %v", projectsRootIndexPath, writeErr))
+		}
+		return warnings
+	}
+	start := strings.Index(string(raw), indexBlockStart)
+	if start < 0 {
+		return append(warnings, fmt.Sprintf("%s: generated index markers are missing; page left unchanged", projectsRootIndexPath))
+	}
+	endRelative := strings.Index(string(raw)[start:], indexBlockEnd)
+	if endRelative < 0 {
+		return append(warnings, fmt.Sprintf("%s: generated index markers are incomplete; page left unchanged", projectsRootIndexPath))
+	}
+	end := start + endRelative + len(indexBlockEnd)
+	next := string(raw[:start]) + block + string(raw[end:])
+	if next == string(raw) {
+		return warnings
+	}
+	if writeErr := writeVaultFileIfChanged(vaultPath, target, []byte(next), 0o644); writeErr != nil {
+		warnings = append(warnings, fmt.Sprintf("%s: update generated index: %v", projectsRootIndexPath, writeErr))
 	}
 	return warnings
 }

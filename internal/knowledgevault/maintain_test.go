@@ -74,6 +74,76 @@ is_index: true
 	}
 }
 
+func TestRebuildCreatesAndMaintainsProjectsRootIndex(t *testing.T) {
+	config, index, ctx := exportSeedVault(t)
+	if _, err := index.Rebuild(ctx, config.VaultPath); err != nil {
+		t.Fatal(err)
+	}
+	rootIndex := filepath.Join(config.VaultPath, "projects", "index.md")
+	raw, err := os.ReadFile(rootIndex)
+	if err != nil {
+		t.Fatalf("projects/index.md was not created: %v", err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, indexBlockStart) || !strings.Contains(text, "[[projects/demo-project/index|Demo Project]]") {
+		t.Fatalf("projects root index does not list the project entry:\n%s", text)
+	}
+	if strings.Contains(text, "projects/index|") {
+		t.Fatalf("projects root index must not link itself:\n%s", text)
+	}
+	// The container page is navigation, not a project document.
+	entries, err := index.Entries(ctx, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.Path == projectsRootIndexPath {
+			t.Fatalf("projects root index leaked into the indexed documents: %+v", entry)
+		}
+	}
+
+	// A second rebuild is byte-stable.
+	if _, err := index.Rebuild(ctx, config.VaultPath); err != nil {
+		t.Fatal(err)
+	}
+	again, err := os.ReadFile(rootIndex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw, again) {
+		t.Fatalf("projects root index is not idempotent:\n%s\n---\n%s", raw, again)
+	}
+
+	// Hand-written text outside the generated block survives, and the block is
+	// refreshed when the project set changes.
+	writeVaultTestFile(t, config.VaultPath, "projects/index.md", "---\ntitle: 项目导航\n---\n\n手写导语，不要覆盖。\n\n"+indexBlockStart+"\n"+indexBlockEnd+"\n")
+	writeVaultTestFile(t, config.VaultPath, "projects/second-project/index.md", "---\nproject_id: project-second\ntitle: Second Project\ntype: navigation\nis_index: true\n---\n")
+	if _, err := index.Rebuild(ctx, config.VaultPath); err != nil {
+		t.Fatal(err)
+	}
+	handWritten, err := os.ReadFile(rootIndex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(handWritten), "手写导语，不要覆盖。") {
+		t.Fatalf("hand-written intro was overwritten:\n%s", handWritten)
+	}
+	if !strings.Contains(string(handWritten), "[[projects/second-project/index|Second Project]]") {
+		t.Fatalf("generated block was not refreshed for a new project:\n%s", handWritten)
+	}
+}
+
+func TestMaintainProjectsRootIndexSkipsMissingProjectsDirectory(t *testing.T) {
+	vaultPath := t.TempDir()
+	warnings := maintainProjectsRootIndex(vaultPath, Manifest{})
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %v", warnings)
+	}
+	if _, err := os.Stat(filepath.Join(vaultPath, "projects", "index.md")); !os.IsNotExist(err) {
+		t.Fatalf("projects/index.md was created without a projects directory: %v", err)
+	}
+}
+
 func TestRebuildNeverStoresKnowledgeHomeAsProjectName(t *testing.T) {
 	config, index, ctx := exportSeedVault(t)
 	// The database names are authoritative on export; a rebuild must not
