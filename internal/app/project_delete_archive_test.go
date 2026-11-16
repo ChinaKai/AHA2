@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -484,7 +485,8 @@ func TestReconcileRefusesSyncProjectReusingArchivedID(t *testing.T) {
 	// Service.CreateProject guard. Provisioning must still refuse the ID.
 	replay := domain.Project{
 		ID: project.ID, Name: "Sync Replay", ProjectType: "folder",
-		KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now,
+		KnowledgePolicy: "enabled", KnowledgeState: domain.KnowledgeStateReady,
+		CreatedAt: now, UpdatedAt: now,
 	}
 	if err := database.CreateProject(ctx, replay); err != nil {
 		t.Fatal(err)
@@ -508,8 +510,20 @@ func TestReconcileRefusesSyncProjectReusingArchivedID(t *testing.T) {
 		t.Fatalf("archive mapping disappeared: %#v", manifest.Archives)
 	}
 	warnings := strings.Join(report.Warnings, "\n")
-	if !strings.Contains(warnings, project.ID) {
+	if !strings.Contains(warnings, project.ID) || !strings.Contains(warnings, "project_id_archived") {
 		t.Fatalf("sync replay refusal was not reported: %#v", report)
+	}
+	markedError := false
+	for _, id := range report.MarkedError {
+		if id == project.ID {
+			markedError = true
+		}
+	}
+	if !markedError {
+		t.Fatalf("ready sync replay was not marked error: %#v", report)
+	}
+	if !strings.Contains(warnings, "删除这个项目行或改用新的项目 ID") {
+		t.Fatalf("sync replay has no recovery path in the warning: %#v", report)
 	}
 }
 
@@ -638,5 +652,118 @@ func TestReconcileWarnsAboutArchiveWithoutRootIndex(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(report.Warnings, "\n"), "缺少根 index.md") {
 		t.Fatalf("missing archive root was not reported: %#v", report)
+	}
+}
+
+func TestReconcileDoesNotRebuildUnfixableArchiveRoot(t *testing.T) {
+	service, database, manager, config := newSpaceTestService(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	project, err := service.CreateProject(ctx, domain.Project{
+		ID: "p529unfixable", Name: "Unfixable Root", ProjectType: "folder",
+		KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	archivedPath, err := knowledgevault.ArchiveProjectSpace(config, project.ID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.DeleteProjectWithSyncTombstone(ctx, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	archiveDir := filepath.Join(config.VaultPath, filepath.FromSlash(archivedPath))
+	if err := os.RemoveAll(archiveDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(archiveDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Rebuild(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Re-register the now-empty archive in the manifest: no root page and no
+	// indexable documents, so a rebuild cannot make it browsable.
+	manifestPath := filepath.Join(config.VaultPath, ".aha-vault.json")
+	raw, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(raw, &document); err != nil {
+		t.Fatal(err)
+	}
+	archives, _ := document["archives"].(map[string]any)
+	if archives == nil {
+		archives = map[string]any{}
+	}
+	archives[project.ID] = strings.TrimPrefix(archivedPath, "archive/")
+	document["archives"] = archives
+	encoded, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestPath, append(encoded, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	before := manager.Status(ctx).RebuiltAt
+	report, err := service.ReconcileKnowledgeSpaces(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after := manager.Status(ctx).RebuiltAt; after != before {
+		t.Fatalf("unfixable archive root still triggered a rebuild: %q -> %q", before, after)
+	}
+	warnings := strings.Join(report.Warnings, "\n")
+	if !strings.Contains(warnings, "不可自动修复") {
+		t.Fatalf("unfixable archive root warning missing: %#v", report)
+	}
+}
+
+func TestReconcileNonReadySyncReplayShowsRecoveryPath(t *testing.T) {
+	service, database, _, config := newSpaceTestService(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	project, err := service.CreateProject(ctx, domain.Project{
+		ID: "p529syncuninit", Name: "Sync Unready", ProjectType: "folder",
+		KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := knowledgevault.ArchiveProjectSpace(config, project.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.DeleteProjectWithSyncTombstone(ctx, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	// Sync replay without a local knowledge state: provisioning fails and the
+	// row stays in error until the owner removes it or uses a new ID.
+	if err := database.CreateProject(ctx, domain.Project{
+		ID: project.ID, Name: "Sync Replay", ProjectType: "folder",
+		KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	report, err := service.ReconcileKnowledgeSpaces(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := database.Project(ctx, project.ID)
+	if err != nil || stored.KnowledgeState != domain.KnowledgeStateError {
+		t.Fatalf("non-ready replay state = %q err=%v", stored.KnowledgeState, err)
+	}
+	warnings := strings.Join(report.Warnings, "\n")
+	if !strings.Contains(warnings, "project_id_archived") || !strings.Contains(warnings, "删除这个项目行或改用新的项目 ID") {
+		t.Fatalf("non-ready replay warning has no recovery path: %#v", report)
+	}
+	manifest, err := knowledgevault.ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := manifest.Projects[project.ID]; exists {
+		t.Fatalf("non-ready replay created a live mapping: %#v", manifest.Projects)
 	}
 }

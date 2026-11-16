@@ -112,7 +112,7 @@ func (s *Service) provisionProjectKnowledgeSpace(ctx context.Context, project do
 		if errors.Is(err, knowledgevault.ErrProjectIDArchived) {
 			return knowledgeSpaceError(
 				"project_id_archived",
-				"项目 ID 已被归档知识空间占用，不能复用；请新建项目或使用其他 ID："+err.Error(), err)
+				"项目 ID 已被归档知识空间占用，不能复用，也无法自动恢复；请删除这个项目行或改用新的项目 ID。归档内容仍可在知识库中浏览："+err.Error(), err)
 		}
 		return knowledgeSpaceError(
 			"knowledge_space_init_failed",
@@ -154,6 +154,17 @@ func (s *Service) RetryProjectKnowledgeSpace(ctx context.Context, projectID stri
 		return domain.Project{}, err
 	}
 	if project.KnowledgeState == domain.KnowledgeStateReady {
+		// A synced project can arrive marked ready while this device only has
+		// an archive for its ID. Trusting the flag would report success and
+		// defer the failure to the first knowledge write.
+		if archivedPath, archived := s.archivedProjectSpace(project.ID); archived {
+			_ = s.store.SetProjectKnowledgeState(ctx, project.ID, domain.KnowledgeStateError)
+			project.KnowledgeState = domain.KnowledgeStateError
+			return project, knowledgeSpaceError(
+				"project_id_archived",
+				fmt.Sprintf("项目标记为 ready，但本地 live 知识空间不在 manifest 中，且项目 ID 已被归档空间 %s 占用，无法自动恢复；请删除这个项目行或改用新的项目 ID。归档内容仍可在知识库中浏览。", archivedPath),
+				knowledgevault.ErrProjectIDArchived)
+		}
 		return project, nil
 	}
 	if err := s.store.SetProjectKnowledgeState(ctx, project.ID, domain.KnowledgeStateInitializing); err != nil {
@@ -310,13 +321,22 @@ func (s *Service) ReconcileKnowledgeSpaces(ctx context.Context) (KnowledgeSpaceR
 			report.Warnings = append(report.Warnings, fmt.Sprintf("归档 %s 的目录不存在，重建会移除残留映射", archiveID))
 			continue
 		}
+		hasRootIndex := true
 		if _, rootErr := os.Stat(filepath.Join(archiveDir, "index.md")); os.IsNotExist(rootErr) {
+			hasRootIndex = false
 			// createMissingIndexPages deliberately skips archive/, so a
 			// rebuild cannot create this page. Report it instead of silently
 			// accepting an archive whose documents have no browsable root.
-			report.Warnings = append(report.Warnings, fmt.Sprintf("归档 %s 缺少根 index.md；重建不会为 archive/ 自动补根页，需要手工补", archiveID))
+			report.Warnings = append(report.Warnings, fmt.Sprintf("归档 %s 缺少根 index.md；重建不会为 archive/ 自动补根页，这是不可自动修复状态，需要手工补", archiveID))
 		}
 		if !indexedArchives[archiveID] {
+			// Without a root page a rebuild cannot make the archive fully
+			// browsable. Do not trigger a full rebuild on every startup just
+			// for that state; a rebuild is still needed when stale live rows
+			// exist.
+			if !hasRootIndex && !projectEntries[archiveID] {
+				continue
+			}
 			rebuildNeeded = true
 			report.Warnings = append(report.Warnings, fmt.Sprintf("归档 %s 缺少索引条目，已安排重建", archiveID))
 			continue
@@ -339,7 +359,7 @@ func (s *Service) ReconcileKnowledgeSpaces(ctx context.Context) (KnowledgeSpaceR
 			if _, err := s.knowledgeVault.ProvisionProjectSpace(ctx, project.ID, project.Name); err != nil {
 				_ = s.store.SetProjectKnowledgeState(ctx, project.ID, domain.KnowledgeStateError)
 				report.MarkedError = append(report.MarkedError, project.ID)
-				report.Warnings = append(report.Warnings, fmt.Sprintf("%s 空间初始化失败：%v", project.ID, err))
+				report.Warnings = append(report.Warnings, knowledgeSpaceProvisionWarning(project.ID, err))
 				continue
 			}
 			_ = s.store.SetProjectKnowledgeState(ctx, project.ID, domain.KnowledgeStateReady)
@@ -355,13 +375,22 @@ func (s *Service) ReconcileKnowledgeSpaces(ctx context.Context) (KnowledgeSpaceR
 			// predate the model are initialized here once; a previous failure is
 			// retried on every startup until it reaches ready.
 			if project.KnowledgeState == domain.KnowledgeStateReady {
+				// Do not trust ready blindly: a sync replay can resurrect a
+				// ready row whose ID only exists as an archive on this device.
+				if archivedPath, archived := s.archivedProjectSpace(project.ID); archived {
+					_ = s.store.SetProjectKnowledgeState(ctx, project.ID, domain.KnowledgeStateError)
+					report.MarkedError = append(report.MarkedError, project.ID)
+					report.Warnings = append(report.Warnings, fmt.Sprintf(
+						"%s 状态为 ready，但 live 知识空间不在 manifest 中且项目 ID 已被归档空间 %s 占用（project_id_archived）；请删除这个项目行或改用新的项目 ID",
+						project.ID, archivedPath))
+				}
 				continue
 			}
 			_ = s.store.SetProjectKnowledgeState(ctx, project.ID, domain.KnowledgeStateInitializing)
 			if _, err := s.knowledgeVault.ProvisionProjectSpace(ctx, project.ID, project.Name); err != nil {
 				_ = s.store.SetProjectKnowledgeState(ctx, project.ID, domain.KnowledgeStateError)
 				report.MarkedError = append(report.MarkedError, project.ID)
-				report.Warnings = append(report.Warnings, fmt.Sprintf("%s 空间初始化失败：%v", project.ID, err))
+				report.Warnings = append(report.Warnings, knowledgeSpaceProvisionWarning(project.ID, err))
 				continue
 			}
 			_ = s.store.SetProjectKnowledgeState(ctx, project.ID, domain.KnowledgeStateReady)
@@ -375,6 +404,16 @@ func (s *Service) ReconcileKnowledgeSpaces(ctx context.Context) (KnowledgeSpaceR
 		}
 	}
 	return report, nil
+}
+
+// knowledgeSpaceProvisionWarning turns a provisioning error into a startup
+// warning. An archived ID is not retryable: the row must be removed or renamed
+// to a new ID, so the warning carries that recovery path explicitly.
+func knowledgeSpaceProvisionWarning(projectID string, err error) string {
+	if errors.Is(err, knowledgevault.ErrProjectIDArchived) {
+		return fmt.Sprintf("%s 的项目 ID 已被归档知识空间占用（project_id_archived），无法自动初始化；请删除这个项目行或改用新的项目 ID", projectID)
+	}
+	return fmt.Sprintf("%s 空间初始化失败：%v", projectID, err)
 }
 
 // KnowledgeSpaceStatus reports readiness for one project without mutating it.
