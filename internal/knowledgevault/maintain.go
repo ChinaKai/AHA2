@@ -103,11 +103,11 @@ func deriveLibraries(vaultPath string, manifest Manifest) (map[string]string, ma
 			}
 			if root.directory == "archive" && slug == "projects" {
 				// Archived project spaces: archive/projects/<slug-id8-ts>/.
-				// The container directory has no index.md of its own, so it
-				// must not be reported as an unbound archive library. A
-				// hand-authored flat archive that happens to use this slug
-				// keeps its mapping when it has its own root page.
-				if _, statErr := os.Stat(filepath.Join(vaultPath, "archive", "projects", "index.md")); statErr == nil {
+				// archive/projects is the container for those spaces; its
+				// generated index.md is directory navigation, never a flat
+				// archive library binding. A hand-authored page that declares
+				// its own project_id keeps the historical flat-library binding.
+				if indexPageProjectID(vaultPath, path.Join("archive", "projects", "index.md")) != "" {
 					bind(path.Join("archive", "projects"), "projects")
 				}
 				nested, nestedErr := os.ReadDir(filepath.Join(vaultPath, "archive", "projects"))
@@ -219,30 +219,64 @@ func deriveSkills(vaultPath string, projects, archives map[string]string) (map[s
 	return result, warnings, nil
 }
 
-// projectsRootIndexPath is the container index for the whole projects tree.
-// It is a vault navigation file, not a project document: the indexer skips it
-// (its path has no project slug), and maintainProjectsRootIndex keeps its
-// generated block in sync with the project directories.
-const projectsRootIndexPath = "projects/index.md"
+// Container index pages for the projects and archive trees. They are vault
+// navigation, not project documents: the indexer skips them (they have no
+// single scope/project), and their dedicated maintain functions keep the
+// generated block in sync with the library directories.
+const (
+	projectsRootIndexPath    = "projects/index.md"
+	archiveRootIndexPath     = "archive/index.md"
+	archiveProjectsIndexPath = "archive/projects/index.md"
+)
+
+// vaultIndexContainers are directories whose index.md is a container
+// navigation page maintained by a dedicated function instead of the generic
+// directory backfill.
+var vaultIndexContainers = map[string]bool{
+	"projects":         true,
+	"archive":          true,
+	"archive/projects": true,
+}
+
+// isContainerVaultIndexPath reports whether a vault-relative path is one of
+// the generated container navigation pages. archive/projects/index.md is a
+// container only when it has no project binding: a hand-authored flat archive
+// named "projects" keeps its page and stays indexed as an archive library.
+func isContainerVaultIndexPath(vaultPath, relative string) bool {
+	switch filepath.ToSlash(relative) {
+	case projectsRootIndexPath, archiveRootIndexPath:
+		return true
+	case archiveProjectsIndexPath:
+		return indexPageProjectID(vaultPath, relative) == ""
+	default:
+		return false
+	}
+}
 
 // missingIndexSkipNames are directory names that never receive an automatic
 // index.md. They are reserved vault areas or directories the knowledge tree
-// deliberately keeps out of the generated navigation.
+// deliberately keeps out of the generated navigation. "archive" is reserved
+// inside a project or global subtree; the top-level archive tree is recognized
+// by path and exempted by the walker.
 var missingIndexSkipNames = map[string]bool{
 	"inbox": true, "skills": true, "index": true,
 	".trash": true, ".aha": true, ".git": true, ".obsidian": true,
 	"archive": true, "orphans": true,
 }
 
-// createMissingIndexPages creates a canonical index.md for every directory
-// under global/ and projects/<slug>/ that holds knowledge documents but has no
-// index page yet. Existing pages are never touched, reserved directories are
-// skipped, and any failure is reported as a warning so a broken page cannot
-// abort the rebuild. The generated navigation block stays empty here;
-// maintainVaultIndexes fills it from the records scanned by this rebuild.
+// createMissingIndexPages creates a canonical index.md for every directory in
+// the knowledge tree (global/, projects/<slug>/ and archive/...), including
+// empty directories with no documents. Existing pages are never touched,
+// reserved directories are skipped, and any failure is reported as a warning
+// so a broken page cannot abort the rebuild. Container pages (projects/,
+// archive/ and archive/projects/) are maintained by their own functions. The
+// generated navigation block stays empty here; maintainVaultIndexes fills it
+// from the records scanned by this rebuild.
 func createMissingIndexPages(vaultPath string, manifest Manifest) []string {
 	warnings := []string{}
-	directoriesWithDocuments := map[string]bool{}
+	reverseProjects := reverseSlugMap(manifest.Projects)
+	reverseArchives := reverseSlugMap(manifest.Archives)
+	candidates := map[string]bool{}
 	walkErr := filepath.WalkDir(vaultPath, func(filePath string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			// The main scan reports walk errors; page creation is best-effort.
@@ -253,54 +287,38 @@ func createMissingIndexPages(vaultPath string, manifest Manifest) []string {
 			return nil
 		}
 		relative = filepath.ToSlash(relative)
-		if entry.IsDir() {
-			name := entry.Name()
-			if strings.HasPrefix(name, ".") || missingIndexSkipNames[strings.ToLower(name)] {
-				return fs.SkipDir
-			}
-			if !autoIndexDirectoryAllowed(relative) {
-				return fs.SkipDir
-			}
+		if !entry.IsDir() {
 			return nil
 		}
-		if !strings.HasSuffix(strings.ToLower(entry.Name()), ".md") || relative == readmeFileName {
+		name := entry.Name()
+		if strings.HasPrefix(name, ".") {
+			return fs.SkipDir
+		}
+		if missingIndexSkipNames[strings.ToLower(name)] && relative != "archive" {
+			return fs.SkipDir
+		}
+		if !autoIndexDirectoryAllowed(relative) {
+			return fs.SkipDir
+		}
+		if vaultIndexContainers[relative] {
 			return nil
 		}
-		directory := path.Dir(relative)
-		// Documents directly under global/ count too; projects/ itself is only
-		// the container for project directories, not a knowledge directory.
-		if directory != "projects" && autoIndexDirectoryAllowed(directory) {
-			directoriesWithDocuments[directory] = true
-		}
+		candidates[relative] = true
 		return nil
 	})
 	if walkErr != nil {
 		return append(warnings, fmt.Sprintf("scan for missing index pages: %v", walkErr))
 	}
 
-	// A directory that only contains subdirectories needs an index page too so
-	// the parent can link to it; walk the ancestors of each document directory.
-	candidates := map[string]bool{}
-	for directory := range directoriesWithDocuments {
-		for directory != "" && directory != "." && directory != "projects" {
-			if !autoIndexDirectoryAllowed(directory) {
-				break
-			}
-			candidates[directory] = true
-			parent := path.Dir(directory)
-			if parent == directory {
-				break
-			}
-			directory = parent
-		}
-	}
 	paths := make([]string, 0, len(candidates))
 	for directory := range candidates {
 		paths = append(paths, directory)
 	}
 	sort.Strings(paths)
 
-	reverseProjects := reverseSlugMap(manifest.Projects)
+	// A directory tree with no attributable library root cannot be bound to a
+	// project; report it once at the root instead of once per subdirectory.
+	failedRoots := map[string]bool{}
 	for _, directory := range paths {
 		relative := path.Join(directory, "index.md")
 		target := filepath.Join(vaultPath, filepath.FromSlash(relative))
@@ -310,12 +328,21 @@ func createMissingIndexPages(vaultPath string, manifest Manifest) []string {
 			warnings = append(warnings, fmt.Sprintf("%s: inspect missing index page: %v", relative, err))
 			continue
 		}
-		frontmatter, warning, ok := missingIndexFrontmatter(vaultPath, manifest, reverseProjects, directory)
-		if warning != "" {
-			warnings = append(warnings, warning)
-		}
+		frontmatter, warning, ok := missingIndexFrontmatter(vaultPath, manifest, reverseProjects, reverseArchives, directory)
+		root, _, _, hasRoot := autoIndexLibraryRoot(directory)
 		if !ok {
+			if hasRoot && !failedRoots[root] {
+				failedRoots[root] = true
+				if warning != "" {
+					warnings = append(warnings, warning)
+				}
+			}
 			continue
+		}
+		// An unattributable library root warns once; its subdirectories inherit
+		// the same missing binding and would only repeat the message.
+		if warning != "" && (!hasRoot || directory == root) {
+			warnings = append(warnings, warning)
 		}
 		if err := createVaultIndexPage(vaultPath, relative, frontmatter); err != nil {
 			warnings = append(warnings, fmt.Sprintf("%s: create missing index page: %v", relative, err))
@@ -326,25 +353,25 @@ func createMissingIndexPages(vaultPath string, manifest Manifest) []string {
 
 // maintainProjectsRootIndex creates or refreshes projects/index.md. Clicking
 // projects in a file browser or Obsidian should land on a page listing every
-// project entry, just like global/index.md. The page lives outside the indexed
-// document set because it has no single project_id; only the marker block is
-// machine-written, so a hand-written intro or frontmatter survives rebuilds.
+// directory entry, just like global/index.md. The page lives outside the
+// indexed document set because it has no single project_id; only the marker
+// block is machine-written, so a hand-written intro or frontmatter survives
+// rebuilds.
 func maintainProjectsRootIndex(vaultPath string, manifest Manifest) []string {
-	warnings := []string{}
 	projectsRoot := filepath.Join(vaultPath, "projects")
 	info, err := os.Lstat(projectsRoot)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return warnings
+			return nil
 		}
-		return append(warnings, fmt.Sprintf("projects: inspect root: %v", err))
+		return []string{fmt.Sprintf("projects: inspect root: %v", err)}
 	}
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return warnings
+		return nil
 	}
 	children, err := os.ReadDir(projectsRoot)
 	if err != nil {
-		return append(warnings, fmt.Sprintf("projects: read root: %v", err))
+		return []string{fmt.Sprintf("projects: read root: %v", err)}
 	}
 	nameBySlug := map[string]string{}
 	for projectID, slug := range manifest.Projects {
@@ -364,76 +391,230 @@ func maintainProjectsRootIndex(vaultPath string, manifest Manifest) []string {
 		slugs = append(slugs, slug)
 	}
 	sort.Strings(slugs)
-	lines := []string{indexBlockStart, "## 文档", ""}
-	if len(slugs) == 0 {
-		lines = append(lines, "_暂无文档。_")
-	}
+	links := make([]string, 0, len(slugs))
 	for _, slug := range slugs {
 		title := strings.TrimSpace(nameBySlug[slug])
 		if title == "" || isKnowledgeHomeTitle(title) {
 			title = humanizeSegment(slug)
 		}
-		lines = append(lines, indexListLine(path.Join("projects", slug, "index"), title, ""))
+		links = append(links, indexListLine(path.Join("projects", slug, "index"), title, ""))
 	}
-	lines = append(lines, indexBlockEnd)
-	block := strings.Join(lines, "\n")
+	return writeContainerIndexPage(vaultPath, projectsRootIndexPath, "项目知识", links)
+}
 
-	target := filepath.Join(projectsRoot, "index.md")
-	raw, readErr := os.ReadFile(target)
-	if readErr != nil {
-		if !os.IsNotExist(readErr) {
-			return append(warnings, fmt.Sprintf("%s: read index page: %v", projectsRootIndexPath, readErr))
+// maintainArchiveRootIndex creates or refreshes archive/index.md and, when the
+// archive/projects container exists, archive/projects/index.md. Both are
+// directory navigation: they list the archived libraries (flat archive/<slug>
+// and nested archive/projects/<dir>), only the marker block is machine-written,
+// and neither page enters the index.
+func maintainArchiveRootIndex(vaultPath string, manifest Manifest) []string {
+	archiveRoot := filepath.Join(vaultPath, "archive")
+	info, err := os.Lstat(archiveRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
 		}
-		frontmatter := Frontmatter{Title: "项目知识", Scope: "global", Type: TypeNavigation, Status: "verified", IsIndex: boolPointer(true)}
-		content, renderErr := renderDocument(frontmatter, block)
-		if renderErr != nil {
-			return append(warnings, fmt.Sprintf("%s: render index page: %v", projectsRootIndexPath, renderErr))
+		return []string{fmt.Sprintf("archive: inspect root: %v", err)}
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil
+	}
+	children, err := os.ReadDir(archiveRoot)
+	if err != nil {
+		return []string{fmt.Sprintf("archive: read root: %v", err)}
+	}
+	nameBySlug := map[string]string{}
+	for projectID, slug := range manifest.Archives {
+		if slug != "" {
+			nameBySlug[slug] = manifest.ArchiveNames[projectID]
 		}
-		if writeErr := writeVaultFileIfChanged(vaultPath, target, []byte(content), 0o644); writeErr != nil {
-			return append(warnings, fmt.Sprintf("%s: create index page: %v", projectsRootIndexPath, writeErr))
+	}
+	flat := []string{}
+	nested := []string{}
+	containerIsLibrary := false
+	for _, child := range children {
+		slug := child.Name()
+		if !child.IsDir() || strings.HasPrefix(slug, ".") || child.Type()&os.ModeSymlink != 0 {
+			continue
 		}
-		return warnings
+		if missingIndexSkipNames[strings.ToLower(slug)] && slug != "projects" {
+			continue
+		}
+		if slug == "projects" {
+			nested = archiveProjectIndexLinks(vaultPath, nameBySlug)
+			if indexPageProjectID(vaultPath, archiveProjectsIndexPath) != "" {
+				// A hand-authored flat archive named "projects" keeps its root
+				// page; it is listed as a library and its page is not rewritten
+				// as the nested container.
+				containerIsLibrary = true
+				title := strings.TrimSpace(nameBySlug["projects"])
+				if title == "" || isKnowledgeHomeTitle(title) {
+					title = humanizeSegment("projects")
+				}
+				flat = append(flat, indexListLine(path.Join("archive", "projects", "index"), title, ""))
+			}
+			continue
+		}
+		if _, statErr := os.Lstat(filepath.Join(archiveRoot, slug, "index.md")); statErr != nil {
+			continue
+		}
+		title := strings.TrimSpace(nameBySlug[slug])
+		if title == "" || isKnowledgeHomeTitle(title) {
+			title = humanizeSegment(slug)
+		}
+		flat = append(flat, indexListLine(path.Join("archive", slug, "index"), title, ""))
 	}
-	start := strings.Index(string(raw), indexBlockStart)
-	if start < 0 {
-		return append(warnings, fmt.Sprintf("%s: generated index markers are missing; page left unchanged", projectsRootIndexPath))
-	}
-	endRelative := strings.Index(string(raw)[start:], indexBlockEnd)
-	if endRelative < 0 {
-		return append(warnings, fmt.Sprintf("%s: generated index markers are incomplete; page left unchanged", projectsRootIndexPath))
-	}
-	end := start + endRelative + len(indexBlockEnd)
-	next := string(raw[:start]) + block + string(raw[end:])
-	if next == string(raw) {
-		return warnings
-	}
-	if writeErr := writeVaultFileIfChanged(vaultPath, target, []byte(next), 0o644); writeErr != nil {
-		warnings = append(warnings, fmt.Sprintf("%s: update generated index: %v", projectsRootIndexPath, writeErr))
+	sort.Strings(flat)
+	links := append(append([]string{}, flat...), nested...)
+	warnings := writeContainerIndexPage(vaultPath, archiveRootIndexPath, "归档知识", links)
+	if !containerIsLibrary {
+		if info, statErr := os.Lstat(filepath.Join(archiveRoot, "projects")); statErr == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+			warnings = append(warnings, writeContainerIndexPage(vaultPath, archiveProjectsIndexPath, "归档项目", nested)...)
+		}
 	}
 	return warnings
 }
 
+// archiveProjectIndexLinks lists the archived project spaces below
+// archive/projects. The manifest slug carries both segments ("projects/<dir>"),
+// so the display-name cache is keyed the same way.
+func archiveProjectIndexLinks(vaultPath string, nameBySlug map[string]string) []string {
+	projectsRoot := filepath.Join(vaultPath, "archive", "projects")
+	entries, err := os.ReadDir(projectsRoot)
+	if err != nil {
+		return nil
+	}
+	links := []string{}
+	for _, item := range entries {
+		name := item.Name()
+		if !item.IsDir() || strings.HasPrefix(name, ".") || item.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		if missingIndexSkipNames[strings.ToLower(name)] {
+			continue
+		}
+		if _, statErr := os.Lstat(filepath.Join(projectsRoot, name, "index.md")); statErr != nil {
+			continue
+		}
+		title := strings.TrimSpace(nameBySlug[path.Join("projects", name)])
+		if title == "" || isKnowledgeHomeTitle(title) {
+			title = humanizeSegment(name)
+		}
+		links = append(links, indexListLine(path.Join("archive", "projects", name, "index"), title, ""))
+	}
+	sort.Strings(links)
+	return links
+}
+
+// writeContainerIndexPage creates or refreshes one container navigation page.
+// Only the marker block is machine-written, so a hand-written intro or
+// frontmatter survives rebuilds. A page without markers is reported and left
+// unchanged; a missing parent directory means there is nothing to maintain.
+func writeContainerIndexPage(vaultPath, relative, title string, links []string) []string {
+	target := filepath.Join(vaultPath, filepath.FromSlash(relative))
+	parent := filepath.Dir(target)
+	info, err := os.Lstat(parent)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return []string{fmt.Sprintf("%s: inspect container root: %v", relative, err)}
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil
+	}
+	lines := []string{indexBlockStart, "## 文档", ""}
+	if len(links) == 0 {
+		lines = append(lines, "_暂无文档。_")
+	}
+	lines = append(lines, links...)
+	lines = append(lines, indexBlockEnd)
+	block := strings.Join(lines, "\n")
+
+	raw, readErr := os.ReadFile(target)
+	if readErr != nil {
+		if !os.IsNotExist(readErr) {
+			return []string{fmt.Sprintf("%s: read index page: %v", relative, readErr)}
+		}
+		frontmatter := Frontmatter{Title: title, Scope: "global", Type: TypeNavigation, Status: "verified", IsIndex: boolPointer(true)}
+		content, renderErr := renderDocument(frontmatter, block)
+		if renderErr != nil {
+			return []string{fmt.Sprintf("%s: render index page: %v", relative, renderErr)}
+		}
+		if writeErr := writeVaultFileIfChanged(vaultPath, target, []byte(content), 0o644); writeErr != nil {
+			return []string{fmt.Sprintf("%s: create index page: %v", relative, writeErr)}
+		}
+		return nil
+	}
+	start := strings.Index(string(raw), indexBlockStart)
+	if start < 0 {
+		return []string{fmt.Sprintf("%s: generated index markers are missing; page left unchanged", relative)}
+	}
+	endRelative := strings.Index(string(raw)[start:], indexBlockEnd)
+	if endRelative < 0 {
+		return []string{fmt.Sprintf("%s: generated index markers are incomplete; page left unchanged", relative)}
+	}
+	end := start + endRelative + len(indexBlockEnd)
+	next := string(raw[:start]) + block + string(raw[end:])
+	if next == string(raw) {
+		return nil
+	}
+	if writeErr := writeVaultFileIfChanged(vaultPath, target, []byte(next), 0o644); writeErr != nil {
+		return []string{fmt.Sprintf("%s: update generated index: %v", relative, writeErr)}
+	}
+	return nil
+}
+
 // autoIndexDirectoryAllowed reports whether a vault-relative directory belongs
-// to the global or project knowledge trees. Excluded names are pruned while
-// walking, so this only has to recognise the two roots.
+// to the global, project or archive knowledge trees. Excluded names are pruned
+// while walking, so this only has to recognise the three roots.
 func autoIndexDirectoryAllowed(relative string) bool {
-	if relative == "global" || strings.HasPrefix(relative, "global/") {
-		return true
+	for _, root := range []string{"global", "projects", "archive"} {
+		if relative == root || strings.HasPrefix(relative, root+"/") {
+			return true
+		}
 	}
-	if relative == "projects" {
-		return true
+	return false
+}
+
+// autoIndexLibraryRoot maps a directory in the knowledge tree to the library
+// root that owns it. Subdirectories inherit the project/archive binding of
+// their library root. A directory directly under projects/ or archive/ is its
+// own root even when no manifest mapping exists yet; the caller then reports it
+// as unbound instead of leaving it without a navigation page.
+func autoIndexLibraryRoot(directory string) (root, slugKey, scope string, ok bool) {
+	segments := strings.Split(filepath.ToSlash(directory), "/")
+	switch segments[0] {
+	case "projects":
+		if len(segments) < 2 || segments[1] == "" {
+			return "", "", "", false
+		}
+		slug := segments[1]
+		return path.Join("projects", slug), slug, "project", true
+	case "archive":
+		if len(segments) >= 2 && segments[1] == "projects" {
+			if len(segments) < 3 || segments[2] == "" {
+				// archive/projects is the container, not a library.
+				return "", "", "", false
+			}
+			name := segments[2]
+			return path.Join("archive", "projects", name), path.Join("projects", name), "archive", true
+		}
+		if len(segments) < 2 || segments[1] == "" {
+			return "", "", "", false
+		}
+		slug := segments[1]
+		return path.Join("archive", slug), slug, "archive", true
+	default:
+		return "", "", "", false
 	}
-	if !strings.HasPrefix(relative, "projects/") {
-		return false
-	}
-	slug := strings.SplitN(strings.TrimPrefix(relative, "projects/"), "/", 2)[0]
-	return slug != ""
 }
 
 // missingIndexFrontmatter builds the canonical page metadata for a missing
-// directory index. A project page without a trustworthy project id is skipped:
-// guessing would bind documents to the wrong project.
-func missingIndexFrontmatter(vaultPath string, manifest Manifest, reverseProjects map[string]string, directory string) (Frontmatter, string, bool) {
+// directory index. A directory without a trustworthy project id still gets a
+// navigation page so the tree is browsable; the returned warning names the
+// unbound root instead of silently skipping it.
+func missingIndexFrontmatter(vaultPath string, manifest Manifest, reverseProjects, reverseArchives map[string]string, directory string) (Frontmatter, string, bool) {
 	frontmatter := Frontmatter{Type: TypeNavigation, Status: "verified", IsIndex: boolPointer(true)}
 	if directory == "global" || strings.HasPrefix(directory, "global/") {
 		frontmatter.Scope = "global"
@@ -444,25 +625,48 @@ func missingIndexFrontmatter(vaultPath string, manifest Manifest, reverseProject
 		}
 		return frontmatter, "", true
 	}
-	projectSlug := strings.SplitN(strings.TrimPrefix(directory, "projects/"), "/", 2)[0]
-	projectID := reverseProjects[projectSlug]
-	if projectID == "" {
-		projectID = inferProjectIDFromDocuments(vaultPath, path.Join("projects", projectSlug))
+	root, slugKey, scope, ok := autoIndexLibraryRoot(directory)
+	if !ok {
+		return Frontmatter{}, "", false
+	}
+	projectID := ""
+	if scope == "project" {
+		projectID = reverseProjects[slugKey]
+	} else {
+		projectID = reverseArchives[slugKey]
 	}
 	if projectID == "" {
-		return Frontmatter{}, fmt.Sprintf("projects/%s: index.md is missing and the project id cannot be determined; page not created", projectSlug), false
+		projectID = inferProjectIDFromDocuments(vaultPath, root)
 	}
-	frontmatter.Scope = "project"
+	frontmatter.Scope = scope
 	frontmatter.ProjectID = projectID
-	if directory == path.Join("projects", projectSlug) {
-		frontmatter.Title = strings.TrimSpace(manifest.ProjectNames[projectID])
+	if directory == root {
+		if scope == "project" {
+			frontmatter.Title = strings.TrimSpace(manifest.ProjectNames[projectID])
+		} else {
+			frontmatter.Title = strings.TrimSpace(manifest.ArchiveNames[projectID])
+		}
 		if frontmatter.Title == "" || isKnowledgeHomeTitle(frontmatter.Title) {
-			frontmatter.Title = humanizeSegment(projectSlug)
+			frontmatter.Title = humanizeSegment(path.Base(root))
 		}
 	} else {
 		frontmatter.Title = humanizeSegment(path.Base(directory))
 	}
+	if projectID == "" {
+		return frontmatter, fmt.Sprintf("%s: index.md is missing and no project id can be determined; page created as unbound navigation", root), true
+	}
 	return frontmatter, "", true
+}
+
+// indexPageProjectID reads the project binding declared by an existing index
+// page. It returns "" for a missing page or a page without project_id, which
+// is how a generated container page differs from a hand-authored library.
+func indexPageProjectID(vaultPath, relative string) string {
+	raw, err := os.ReadFile(filepath.Join(vaultPath, filepath.FromSlash(relative)))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(ParseDocument(string(raw)).Frontmatter.ProjectID)
 }
 
 // inferProjectIDFromDocuments recovers a project binding from the documents

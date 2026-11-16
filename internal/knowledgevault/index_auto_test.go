@@ -134,13 +134,13 @@ func TestRebuildSkipsReservedDirectoriesWhenCreatingIndexes(t *testing.T) {
 		"global/inbox/loose.md",
 		"global/skills/demo/SKILL.md",
 		"global/.cache/note.md",
-		"archive/aha1-archive/topic/note.md",
 		"orphans/legacy/note.md",
 	}
 	for _, relative := range excluded {
 		writeVaultTestFile(t, config.VaultPath, relative, "# 保留目录\n\n不应生成目录页。\n")
 	}
 	writeVaultTestFile(t, config.VaultPath, "projects/demo-project/topics/note.md", "# 主题\n\n应生成目录页。\n")
+	writeVaultTestFile(t, config.VaultPath, "archive/aha1-archive/topic/note.md", "# 归档主题\n\n应生成目录页。\n")
 	if _, err := index.Rebuild(ctx, config.VaultPath); err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +149,7 @@ func TestRebuildSkipsReservedDirectoriesWhenCreatingIndexes(t *testing.T) {
 		"projects/demo-project/inbox", "projects/demo-project/skills", "projects/demo-project/.hidden",
 		"projects/demo-project/archive", "projects/demo-project/orphans",
 		"global/inbox", "global/skills", "global/.cache",
-		"archive/aha1-archive/topic", "orphans/legacy",
+		"archive/aha1-archive/inbox", "orphans/legacy",
 	} {
 		if vaultPathExists(t, config.VaultPath, directory+"/index.md") {
 			t.Fatalf("%s received an automatic index page", directory)
@@ -161,6 +161,13 @@ func TestRebuildSkipsReservedDirectoriesWhenCreatingIndexes(t *testing.T) {
 	assertIndexFrontmatter(t, readExportedFile(t, config.VaultPath, "projects/demo-project/topics/index.md"), "project", "project-demo")
 	if !strings.Contains(readExportedFile(t, config.VaultPath, "projects/demo-project/topics/index.md"), "topics/note|主题") {
 		t.Fatalf("created directory page does not list its document:\n%s", readExportedFile(t, config.VaultPath, "projects/demo-project/topics/index.md"))
+	}
+	if !vaultPathExists(t, config.VaultPath, "archive/aha1-archive/topic/index.md") {
+		t.Fatal("archive directory did not receive an index page")
+	}
+	assertIndexFrontmatter(t, readExportedFile(t, config.VaultPath, "archive/aha1-archive/topic/index.md"), "archive", "project-archive")
+	if !strings.Contains(readExportedFile(t, config.VaultPath, "archive/aha1-archive/topic/index.md"), "topic/note|归档主题") {
+		t.Fatalf("created archive page does not list its document:\n%s", readExportedFile(t, config.VaultPath, "archive/aha1-archive/topic/index.md"))
 	}
 }
 
@@ -256,6 +263,8 @@ func TestRebuildBackfillsOldVaultWithoutIndexPages(t *testing.T) {
 		"global/index.md", "global/general/index.md",
 		"projects/demo-project/index.md",
 		"projects/demo-project/navigation-group/index.md",
+		"archive/aha1-archive/index.md",
+		"archive/index.md",
 	}
 	for _, relative := range created {
 		if !vaultPathExists(t, config.VaultPath, relative) {
@@ -266,9 +275,9 @@ func TestRebuildBackfillsOldVaultWithoutIndexPages(t *testing.T) {
 		t.Fatalf("global root does not list its subdirectory:\n%s", raw)
 	}
 	assertIndexFrontmatter(t, readExportedFile(t, config.VaultPath, "global/index.md"), "global", "")
+	assertIndexFrontmatter(t, readExportedFile(t, config.VaultPath, "archive/aha1-archive/index.md"), "archive", "project-archive")
 	for _, relative := range []string{
 		"projects/demo-project/inbox/index.md",
-		"archive/aha1-archive/index.md",
 		"archive/aha1-archive/inbox/index.md",
 		"orphans/index.md",
 	} {

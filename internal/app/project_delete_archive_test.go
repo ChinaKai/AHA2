@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -655,12 +654,12 @@ func TestReconcileWarnsAboutArchiveWithoutRootIndex(t *testing.T) {
 	}
 }
 
-func TestReconcileDoesNotRebuildUnfixableArchiveRoot(t *testing.T) {
+func TestReconcileRepairsMissingArchiveRoot(t *testing.T) {
 	service, database, manager, config := newSpaceTestService(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
 	project, err := service.CreateProject(ctx, domain.Project{
-		ID: "p529unfixable", Name: "Unfixable Root", ProjectType: "folder",
+		ID: "p529repair", Name: "Missing Root", ProjectType: "folder",
 		KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now,
 	})
 	if err != nil {
@@ -680,45 +679,32 @@ func TestReconcileDoesNotRebuildUnfixableArchiveRoot(t *testing.T) {
 	if err := os.MkdirAll(archiveDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// A rebuild backfills the archive root page from the manifest mapping, so
+	// remove it again to simulate a page that disappeared after indexing.
 	if _, err := manager.Rebuild(ctx); err != nil {
 		t.Fatal(err)
 	}
-	// Re-register the now-empty archive in the manifest: no root page and no
-	// indexable documents, so a rebuild cannot make it browsable.
-	manifestPath := filepath.Join(config.VaultPath, ".aha-vault.json")
-	raw, err := os.ReadFile(manifestPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var document map[string]any
-	if err := json.Unmarshal(raw, &document); err != nil {
-		t.Fatal(err)
-	}
-	archives, _ := document["archives"].(map[string]any)
-	if archives == nil {
-		archives = map[string]any{}
-	}
-	archives[project.ID] = strings.TrimPrefix(archivedPath, "archive/")
-	document["archives"] = archives
-	encoded, err := json.MarshalIndent(document, "", "  ")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(manifestPath, append(encoded, '\n'), 0o644); err != nil {
+	if err := os.Remove(filepath.Join(archiveDir, "index.md")); err != nil {
 		t.Fatal(err)
 	}
 
-	before := manager.Status(ctx).RebuiltAt
 	report, err := service.ReconcileKnowledgeSpaces(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after := manager.Status(ctx).RebuiltAt; after != before {
-		t.Fatalf("unfixable archive root still triggered a rebuild: %q -> %q", before, after)
+	if _, statErr := os.Stat(filepath.Join(archiveDir, "index.md")); statErr != nil {
+		t.Fatalf("archive root page was not recreated: %v", statErr)
 	}
 	warnings := strings.Join(report.Warnings, "\n")
-	if !strings.Contains(warnings, "不可自动修复") {
-		t.Fatalf("unfixable archive root warning missing: %#v", report)
+	if !strings.Contains(warnings, "缺少根 index.md") || !strings.Contains(warnings, "已安排重建补全目录页") {
+		t.Fatalf("missing archive root was not reported as repairable: %#v", report)
+	}
+	manifest, err := knowledgevault.ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Archives[project.ID] == "" {
+		t.Fatalf("archive mapping was lost during repair: %#v", manifest.Archives)
 	}
 }
 

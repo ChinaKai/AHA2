@@ -383,22 +383,13 @@ func (s *Service) ReconcileKnowledgeSpaces(ctx context.Context) (KnowledgeSpaceR
 			report.Warnings = append(report.Warnings, fmt.Sprintf("归档 %s 的目录不存在，重建会移除残留映射", archiveID))
 			continue
 		}
-		hasRootIndex := true
 		if _, rootErr := os.Stat(filepath.Join(archiveDir, "index.md")); os.IsNotExist(rootErr) {
-			hasRootIndex = false
-			// createMissingIndexPages deliberately skips archive/, so a
-			// rebuild cannot create this page. Report it instead of silently
-			// accepting an archive whose documents have no browsable root.
-			report.Warnings = append(report.Warnings, fmt.Sprintf("归档 %s 缺少根 index.md；重建不会为 archive/ 自动补根页，这是不可自动修复状态，需要手工补", archiveID))
+			// The rebuild backfills archive root pages, so a missing page is
+			// repairable as long as the directory is still mapped.
+			rebuildNeeded = true
+			report.Warnings = append(report.Warnings, fmt.Sprintf("归档 %s 缺少根 index.md，已安排重建补全目录页", archiveID))
 		}
 		if !indexedArchives[archiveID] {
-			// Without a root page a rebuild cannot make the archive fully
-			// browsable. Do not trigger a full rebuild on every startup just
-			// for that state; a rebuild is still needed when stale live rows
-			// exist.
-			if !hasRootIndex && !projectEntries[archiveID] {
-				continue
-			}
 			rebuildNeeded = true
 			report.Warnings = append(report.Warnings, fmt.Sprintf("归档 %s 缺少索引条目，已安排重建", archiveID))
 			continue

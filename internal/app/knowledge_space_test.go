@@ -373,6 +373,13 @@ func TestReconcileCleansEmptyInfrastructureSpaces(t *testing.T) {
 	if _, statErr := os.Stat(spaceDir); !os.IsNotExist(statErr) {
 		t.Fatalf("empty infrastructure directory still exists: %v", statErr)
 	}
+	projectsRoot, err := os.ReadFile(filepath.Join(config.VaultPath, "projects", "index.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(projectsRoot), "[[projects/"+slug+"/index") {
+		t.Fatalf("cleaned project is still listed in projects/index.md:\n%s", projectsRoot)
+	}
 	stored, err := database.Project(ctx, channelHost.ID)
 	if err != nil {
 		t.Fatal(err)

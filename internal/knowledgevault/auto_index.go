@@ -15,9 +15,11 @@ import (
 // the same and no extra native dependency ships with the control plane.
 const AutoIndexInterval = 3 * time.Second
 
-// autoIndexFingerprint summarizes every Markdown file the index reads. Sizes
-// and mtimes are enough to notice an editor save; content hashes would reread
-// the whole vault every tick.
+// autoIndexFingerprint summarizes every Markdown file and directory the index
+// reads. File sizes and mtimes are enough to notice an editor save; directory
+// entries are included so creating an empty folder (which gets a generated
+// index.md) still triggers a rebuild. Content hashes would reread the whole
+// vault every tick.
 func autoIndexFingerprint(vaultPath string) (string, error) {
 	var builder strings.Builder
 	err := filepath.WalkDir(vaultPath, func(filePath string, entry os.DirEntry, walkErr error) error {
@@ -28,6 +30,10 @@ func autoIndexFingerprint(vaultPath string) (string, error) {
 			name := strings.ToLower(entry.Name())
 			if strings.HasPrefix(name, ".") || skippedDirectoryNames[name] {
 				return filepath.SkipDir
+			}
+			if relative, err := filepath.Rel(vaultPath, filePath); err == nil && relative != "." {
+				builder.WriteString(filepath.ToSlash(relative))
+				builder.WriteString("|dir\n")
 			}
 			return nil
 		}

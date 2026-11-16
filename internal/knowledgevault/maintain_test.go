@@ -133,6 +133,197 @@ func TestRebuildCreatesAndMaintainsProjectsRootIndex(t *testing.T) {
 	}
 }
 
+func TestRebuildCreatesAndMaintainsArchiveRootIndex(t *testing.T) {
+	config, index, ctx := exportSeedVault(t)
+	if _, err := index.Rebuild(ctx, config.VaultPath); err != nil {
+		t.Fatal(err)
+	}
+	rootPath := filepath.Join(config.VaultPath, filepath.FromSlash(archiveRootIndexPath))
+	raw, err := os.ReadFile(rootPath)
+	if err != nil {
+		t.Fatalf("archive/index.md was not created: %v", err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, indexBlockStart) || !strings.Contains(text, "[[archive/aha1-archive/index|AHA1 Archive]]") {
+		t.Fatalf("archive root index does not list the archive entry:\n%s", text)
+	}
+	if strings.Contains(text, "[[archive/index|") {
+		t.Fatalf("archive root index must not link itself:\n%s", text)
+	}
+	entries, err := index.Entries(ctx, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if isContainerVaultIndexPath(config.VaultPath, entry.Path) {
+			t.Fatalf("container index page leaked into the indexed documents: %+v", entry)
+		}
+	}
+
+	if _, err := index.Rebuild(ctx, config.VaultPath); err != nil {
+		t.Fatal(err)
+	}
+	again, err := os.ReadFile(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw, again) {
+		t.Fatalf("archive root index is not idempotent:\n%s\n---\n%s", raw, again)
+	}
+
+	// Hand-written text outside the generated block survives, and the block is
+	// refreshed when the archive set changes.
+	writeVaultTestFile(t, config.VaultPath, archiveRootIndexPath, "---\ntitle: 归档导航\n---\n\n手写归档导语，不要覆盖。\n\n"+indexBlockStart+"\n"+indexBlockEnd+"\n")
+	writeVaultTestFile(t, config.VaultPath, "archive/second-archive/index.md", "---\nproject_id: project-second-archive\ntitle: Second Archive\ntype: navigation\nis_index: true\n---\n")
+	if _, err := index.Rebuild(ctx, config.VaultPath); err != nil {
+		t.Fatal(err)
+	}
+	handWritten, err := os.ReadFile(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(handWritten), "手写归档导语，不要覆盖。") || !strings.Contains(string(handWritten), "title: 归档导航") {
+		t.Fatalf("hand-written archive frontmatter/intro was overwritten:\n%s", handWritten)
+	}
+	if !strings.Contains(string(handWritten), "[[archive/second-archive/index|Second Archive]]") {
+		t.Fatalf("generated archive block was not refreshed:\n%s", handWritten)
+	}
+}
+
+func TestRebuildCreatesIndexPagesForEmptyDirectories(t *testing.T) {
+	config, index, ctx := exportSeedVault(t)
+	if _, err := index.Rebuild(ctx, config.VaultPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(config.VaultPath, "projects", "demo-project", "empty-group", "nested-empty"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(config.VaultPath, "archive", "aha1-archive", "empty-archive"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.Archives["project-flat-new"] = "flat-new"
+	manifest.ArchiveNames["project-flat-new"] = "Flat New"
+	if err := writeManifest(config.VaultPath, manifest); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(config.VaultPath, "archive", "flat-new"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := index.Rebuild(ctx, config.VaultPath); err != nil {
+		t.Fatal(err)
+	}
+	for relative, want := range map[string][2]string{
+		"projects/demo-project/empty-group/index.md":              {"project", "project-demo"},
+		"projects/demo-project/empty-group/nested-empty/index.md": {"project", "project-demo"},
+		"archive/aha1-archive/empty-archive/index.md":             {"archive", "project-archive"},
+		"archive/flat-new/index.md":                               {"archive", "project-flat-new"},
+	} {
+		raw, readErr := os.ReadFile(filepath.Join(config.VaultPath, filepath.FromSlash(relative)))
+		if readErr != nil {
+			t.Fatalf("%s was not created for an empty directory: %v", relative, readErr)
+		}
+		assertIndexFrontmatter(t, string(raw), want[0], want[1])
+	}
+	if raw := readExportedFile(t, config.VaultPath, "projects/demo-project/empty-group/index.md"); !strings.Contains(raw, "[[projects/demo-project/empty-group/nested-empty/index|Nested Empty]]") {
+		t.Fatalf("empty directory page does not list its empty child:\n%s", raw)
+	}
+	if raw := readExportedFile(t, config.VaultPath, "projects/demo-project/index.md"); !strings.Contains(raw, "[[projects/demo-project/empty-group/index|Empty Group]]") {
+		t.Fatalf("project root does not list the new empty directory:\n%s", raw)
+	}
+	if raw := readExportedFile(t, config.VaultPath, archiveRootIndexPath); !strings.Contains(raw, "[[archive/flat-new/index|Flat New]]") {
+		t.Fatalf("archive root does not list the new empty archive:\n%s", raw)
+	}
+}
+
+func TestRebuildCreatesIndexInNonProjectFolderUnderProjects(t *testing.T) {
+	config, index, ctx := exportSeedVault(t)
+	writeVaultTestFile(t, config.VaultPath, "projects/loose-folder/child/note.md", "# 随手目录\n\n没有 project 映射。\n")
+	if err := os.MkdirAll(filepath.Join(config.VaultPath, "projects", "loose-empty", "empty-child"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	report, err := index.Rebuild(ctx, config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, relative := range []string{
+		"projects/loose-folder/index.md",
+		"projects/loose-folder/child/index.md",
+		"projects/loose-empty/index.md",
+		"projects/loose-empty/empty-child/index.md",
+	} {
+		raw, readErr := os.ReadFile(filepath.Join(config.VaultPath, filepath.FromSlash(relative)))
+		if readErr != nil {
+			t.Fatalf("%s was not created for a non-project folder: %v", relative, readErr)
+		}
+		assertIndexFrontmatter(t, string(raw), "project", "")
+	}
+	if raw := readExportedFile(t, config.VaultPath, "projects/index.md"); !strings.Contains(raw, "[[projects/loose-folder/index|Loose Folder]]") || !strings.Contains(raw, "[[projects/loose-empty/index|Loose Empty]]") {
+		t.Fatalf("projects root does not list the non-project folders:\n%s", raw)
+	}
+	warned := map[string]bool{}
+	for _, warning := range report.Warnings {
+		if strings.Contains(warning, "no project id") {
+			for _, root := range []string{"projects/loose-folder", "projects/loose-empty"} {
+				if strings.Contains(warning, root) {
+					warned[root] = true
+				}
+			}
+		}
+	}
+	for _, root := range []string{"projects/loose-folder", "projects/loose-empty"} {
+		if !warned[root] {
+			t.Fatalf("unattributable folder %s was not reported: %v", root, report.Warnings)
+		}
+	}
+}
+
+func TestRebuildMaintainsNestedArchiveContainerIndex(t *testing.T) {
+	config, index, ctx := exportSeedVault(t)
+	writeVaultTestFile(t, config.VaultPath, "archive/projects/old-lib/index.md", "---\nproject_id: project-old\ntitle: Old Lib\ntype: navigation\nis_index: true\n---\n")
+	writeVaultTestFile(t, config.VaultPath, "archive/projects/old-lib/note.md", "# 旧库\r\n\r\n正文。\r\n")
+	report, err := index.Rebuild(ctx, config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if raw := readExportedFile(t, config.VaultPath, archiveProjectsIndexPath); !strings.Contains(raw, "[[archive/projects/old-lib/index|Old Lib]]") {
+		t.Fatalf("archive/projects container does not list the nested archive:\n%s", raw)
+	}
+	if raw := readExportedFile(t, config.VaultPath, archiveRootIndexPath); !strings.Contains(raw, "[[archive/projects/old-lib/index|Old Lib]]") {
+		t.Fatalf("archive root does not list the nested archive:\n%s", raw)
+	}
+	manifest, err := ReadManifest(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Archives["project-old"] != "projects/old-lib" {
+		t.Fatalf("nested archive binding = %#v", manifest.Archives)
+	}
+	for projectID, slug := range manifest.Archives {
+		if slug == "projects" {
+			t.Fatalf("container page was bound as archive library (%s)", projectID)
+		}
+	}
+	entries, err := index.Entries(ctx, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if isContainerVaultIndexPath(config.VaultPath, entry.Path) {
+			t.Fatalf("container page leaked into the index: %+v", entry)
+		}
+	}
+	for _, warning := range report.Warnings {
+		if strings.Contains(warning, "archive/projects") && strings.Contains(warning, "unbound") {
+			t.Fatalf("container page was reported unbound: %v", report.Warnings)
+		}
+	}
+}
+
 func TestMaintainProjectsRootIndexSkipsMissingProjectsDirectory(t *testing.T) {
 	vaultPath := t.TempDir()
 	warnings := maintainProjectsRootIndex(vaultPath, Manifest{})
