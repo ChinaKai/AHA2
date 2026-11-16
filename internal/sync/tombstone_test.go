@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -209,4 +210,78 @@ func TestCreateSkillClearsSupersededTombstone(t *testing.T) {
 		t.Fatalf("older delete error=%v", err)
 	}
 
+}
+
+func TestApplySkillResurrectClearsTombstoneBothWays(t *testing.T) {
+	t.Parallel()
+	ctx, database, now := context.Background(), businessStore(t), time.Now().UTC()
+	if _, err := database.ApplySyncTombstone(ctx, TypeSkill, "skill-resurrect", "delete:skill-resurrect", "1", now); err != nil {
+		t.Fatal(err)
+	}
+	newPayload := func(version int, token string) json.RawMessage {
+		raw, err := json.Marshal(skillPayload{
+			Skill:     domain.Skill{ID: "skill-resurrect", Scope: "global", Name: "demo", Description: "demo", Instructions: "rebuilt body", Version: version, Status: "active", Enabled: true},
+			Files:     []domain.SkillFile{{Path: "SKILL.md", Content: "---\nname: \"demo\"\ndescription: \"demo\"\n---\n\nrebuilt body\n"}},
+			Resurrect: token,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	// A resurrect below the tombstone version must stay blocked.
+	if err := applyBusinessObject(ctx, database, domain.SyncObject{Type: TypeSkill, ID: "skill-resurrect", Operation: "upsert", Payload: newPayload(1, "resurrect:old"), SourceVersion: "1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.SyncTombstone(ctx, TypeSkill, "skill-resurrect"); err != nil {
+		t.Fatal(err)
+	}
+	// A resurrect above it clears the tombstone and recreates the skill.
+	if err := applyBusinessObject(ctx, database, domain.SyncObject{Type: TypeSkill, ID: "skill-resurrect", Operation: "upsert", Payload: newPayload(2, "resurrect:new"), SourceVersion: "2"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.SyncTombstone(ctx, TypeSkill, "skill-resurrect"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("resurrect did not clear the tombstone: %v", err)
+	}
+	rebuilt, err := database.Skill(ctx, "skill-resurrect")
+	if err != nil || rebuilt.Version != 2 || rebuilt.Instructions != "rebuilt body" {
+		t.Fatalf("resurrected skill=%#v err=%v", rebuilt, err)
+	}
+}
+
+func TestCreateSkillRefusesUnknownVersionTombstone(t *testing.T) {
+	t.Parallel()
+	ctx, database, now := context.Background(), businessStore(t), time.Now().UTC()
+	if _, err := database.ApplySyncTombstone(ctx, TypeSkill, "skill-unknown", "delete:skill-unknown", "", now); err != nil {
+		t.Fatal(err)
+	}
+	err := database.CreateSkill(ctx, domain.Skill{ID: "skill-unknown", Scope: "global", Name: "demo", Description: "demo", Instructions: "body", Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now})
+	if err == nil {
+		t.Fatal("rebuild over an unknown-version tombstone was accepted")
+	}
+	if !strings.Contains(err.Error(), "not numeric") {
+		t.Fatalf("error=%v", err)
+	}
+	if _, err := database.SyncTombstone(ctx, TypeSkill, "skill-unknown"); err != nil {
+		t.Fatalf("unknown-version tombstone was removed: %v", err)
+	}
+	if _, err := database.Skill(ctx, "skill-unknown"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("skill row was created despite the refused rebuild: %v", err)
+	}
+}
+
+func TestSkillFilesMatchRejectsDuplicatePaths(t *testing.T) {
+	t.Parallel()
+	current := []domain.SkillFile{{Path: "SKILL.md", Content: "a"}, {Path: "assets/x.txt", Content: "b"}}
+	incoming := []domain.SkillFile{{Path: "SKILL.md", Content: "a"}, {Path: "./SKILL.md", Content: "a"}}
+	if skillFilesMatch(current, incoming) {
+		t.Fatal("duplicate path was treated as identical")
+	}
+	duplicated := []domain.SkillFile{{Path: "SKILL.md", Content: "a"}, {Path: "SKILL.md", Content: "a"}}
+	if skillFilesMatch(duplicated, duplicated) {
+		t.Fatal("duplicate current path was treated as identical")
+	}
+	if !skillFilesMatch(current, []domain.SkillFile{{Path: "./SKILL.md", Content: "a"}, {Path: "assets/x.txt", Content: "b"}}) {
+		t.Fatal("clean identical package was treated as different")
+	}
 }

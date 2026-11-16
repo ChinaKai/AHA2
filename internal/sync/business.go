@@ -45,6 +45,10 @@ var errSyncedKnowledgeProjectDeleted = errors.New("synced knowledge project was 
 type skillPayload struct {
 	Skill domain.Skill       `json:"skill"`
 	Files []domain.SkillFile `json:"files"`
+	// Resurrect carries the generation token of a deliberate local rebuild.
+	// Only such an event may clear a skill tombstone on the receiving peer;
+	// ordinary upserts stay blocked whether or not their version is higher.
+	Resurrect string `json:"resurrect,omitempty"`
 }
 
 // skillPayloadIncludesAutoAttach reports whether the exported skill object
@@ -65,6 +69,25 @@ func skillPayloadIncludesAutoAttach(payload json.RawMessage) bool {
 	}
 	_, present := fields["auto_attach"]
 	return present
+}
+
+// skillResurrectVersion reports the version of an explicit rebuild event. The
+// resurrect token is what separates a deliberate local re-create from an
+// ordinary upsert, which must stay blocked by the tombstone no matter how high
+// its version climbed.
+func skillResurrectVersion(obj domain.SyncObject) (string, bool) {
+	if obj.Operation != "upsert" {
+		return "", false
+	}
+	var payload skillPayload
+	if err := decodePayload(obj, &payload); err != nil || strings.TrimSpace(payload.Resurrect) == "" {
+		return "", false
+	}
+	version := skillPayloadVersion(obj, payload.Skill.Version)
+	if version < 1 {
+		return "", false
+	}
+	return strconv.Itoa(version), true
 }
 
 // skillPayloadVersion is the version the sending device had when it exported
@@ -569,15 +592,22 @@ func applyBusinessObject(ctx context.Context, database *store.Store, obj domain.
 		return applyTaskGraphObject(ctx, database, obj)
 	}
 	if tombstone, err := database.SyncTombstone(ctx, obj.Type, obj.ID); err == nil {
-		// A Skill this device deleted is never recreated from an inbound
-		// object. Unlike knowledge, a skill has no revision content that would
-		// justify "newer upsert wins": every device replays its own history
-		// through the center, so an in-flight or version-churning upsert
-		// would otherwise resurrect the deleted skill on the next pull and
-		// restart the churn. The tombstone is exported with every snapshot, so
-		// peers keep blocking the same object. Re-creating a skill under the
-		// same ID therefore needs its tombstone cleared deliberately first.
-		if obj.Operation == "delete" || obj.Type == TypeSkill || !sharedVersionNewer(obj.Type, obj.SourceVersion, tombstone.Version) {
+		if obj.Operation == "delete" {
+			return nil
+		}
+		if obj.Type == TypeSkill {
+			// A Skill this device deleted is only recreated by an explicit
+			// resurrect event: a deliberate local rebuild carries a unique
+			// token and a version above the tombstone. Ordinary replays --
+			// including the higher-versioned churn that resurrected skills in
+			// the field -- never clear the tombstone. The tombstone itself is
+			// exported with every snapshot, so peers keep blocking the same
+			// object until they see the resurrect.
+			version, resurrects := skillResurrectVersion(obj)
+			if !resurrects || !sharedVersionNewer(TypeSkill, version, tombstone.Version) {
+				return nil
+			}
+		} else if !sharedVersionNewer(obj.Type, obj.SourceVersion, tombstone.Version) {
 			return nil
 		}
 		if err := database.DeleteSyncTombstone(ctx, obj.Type, obj.ID); err != nil {
