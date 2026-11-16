@@ -71,6 +71,7 @@ type knowledgeVaultBackend interface {
 	KnowledgeFeedback(context.Context, knowledgevault.FeedbackRequest) (knowledgevault.FeedbackResult, error)
 	CheckProjectSpacePrerequisites() error
 	ProvisionProjectSpace(context.Context, string, string) (knowledgevault.ProjectSpaceResult, error)
+	RenameProjectSpace(string, string) error
 	Rebuild(context.Context) (knowledgevault.RebuildReport, error)
 }
 

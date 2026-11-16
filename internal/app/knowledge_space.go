@@ -92,6 +92,21 @@ func (s *Service) provisionProjectKnowledgeSpace(ctx context.Context, project do
 	return nil
 }
 
+// UpdateProject persists a project edit and, when the project already has a
+// vault space, refreshes the manifest display name. The slug and files never
+// move on rename.
+func (s *Service) UpdateProject(ctx context.Context, project domain.Project) error {
+	if err := s.store.UpdateProject(ctx, project); err != nil {
+		return err
+	}
+	if s.projectKnowledgeSpaceEnabled() && s.knowledgeVault.Enabled() && project.KnowledgeState == domain.KnowledgeStateReady {
+		if err := s.knowledgeVault.RenameProjectSpace(project.ID, project.Name); err != nil {
+			return fmt.Errorf("项目已保存，但更新知识库显示名失败：%w", err)
+		}
+	}
+	return nil
+}
+
 // RetryProjectKnowledgeSpace re-runs the whole initialization for a project
 // whose first attempt failed. It is idempotent: an existing manifest mapping,
 // directory and root index are reused.
@@ -181,6 +196,11 @@ func (s *Service) ReconcileKnowledgeSpaces(ctx context.Context) (KnowledgeSpaceR
 				report.Warnings = append(report.Warnings, fmt.Sprintf("项目 %s 的根 index.md 不可读：%v", projectID, statErr))
 			}
 			continue
+		}
+		// The project row is authoritative for the display name; refresh the
+		// manifest cache so a rename survives even if no rebuild happens.
+		if err := s.knowledgeVault.RenameProjectSpace(projectID, project.Name); err != nil {
+			report.Warnings = append(report.Warnings, fmt.Sprintf("项目 %s 的 manifest 显示名更新失败：%v", projectID, err))
 		}
 		if project.KnowledgeState != domain.KnowledgeStateReady {
 			_ = s.store.SetProjectKnowledgeState(ctx, projectID, domain.KnowledgeStateReady)

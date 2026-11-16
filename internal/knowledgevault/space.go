@@ -138,6 +138,36 @@ func allocateProjectSpaceSlug(vaultPath string, manifest Manifest, projectID, pr
 	return candidate, nil
 }
 
+// RenameProjectSpace updates only the manifest display-name cache. The slug and
+// every file stay where they are; a rename never moves knowledge.
+func RenameProjectSpace(cfg Config, projectID, name string) error {
+	cfg, err := cfg.Normalized()
+	if err != nil {
+		return err
+	}
+	projectID = strings.TrimSpace(projectID)
+	name = strings.TrimSpace(name)
+	if projectID == "" || name == "" {
+		return nil
+	}
+	manifest, err := ReadManifest(cfg.VaultPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if strings.TrimSpace(manifest.Projects[projectID]) == "" {
+		return nil
+	}
+	if manifest.ProjectNames[projectID] == name {
+		return nil
+	}
+	manifest.ProjectNames[projectID] = name
+	manifest.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	return writeManifest(cfg.VaultPath, manifest)
+}
+
 // ProjectSpaceDir returns the absolute directory for a project's vault space.
 func ProjectSpaceDir(cfg Config, projectID string) (string, bool) {
 	cfg, err := cfg.Normalized()

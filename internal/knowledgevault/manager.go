@@ -294,6 +294,14 @@ func (m *Manager) ProvisionProjectSpace(ctx context.Context, projectID, projectN
 	return result, nil
 }
 
+// RenameProjectSpace records a project rename in the manifest without moving
+// its files or changing its slug.
+func (m *Manager) RenameProjectSpace(projectID, name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return RenameProjectSpace(m.config, projectID, name)
+}
+
 // Rebuild closes the Reader, rebuilds the index from files, then opens a fresh
 // Reader when the manager is on. It also works while the switch is off so a
 // migration, import or Git pull can refresh the projection before the owner

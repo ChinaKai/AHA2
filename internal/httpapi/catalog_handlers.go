@@ -198,7 +198,13 @@ func (s *Server) updateProject(writer http.ResponseWriter, request *http.Request
 	existing.DefaultBranch = strings.TrimSpace(payload.DefaultBranch)
 	existing.KnowledgePolicy = normalizeProjectKnowledgePolicy(payload.KnowledgePolicy)
 	existing.UpdatedAt = time.Now().UTC()
-	if err := s.store.UpdateProject(request.Context(), existing); err != nil {
+	updateErr := error(nil)
+	if s.app != nil {
+		updateErr = s.app.UpdateProject(request.Context(), existing)
+	} else {
+		updateErr = s.store.UpdateProject(request.Context(), existing)
+	}
+	if updateErr != nil {
 		writeError(writer, http.StatusInternalServerError, "update_project_failed")
 		return
 	}
