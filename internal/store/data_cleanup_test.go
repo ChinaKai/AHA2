@@ -234,6 +234,16 @@ func TestConversationPurgePlanProtectsActiveApprovalsFinalAnswersAndAttachments(
 			t.Fatalf("%s was deleted", label)
 		}
 	}
+
+	// A cleanup deletes every eligible row, so a fresh preview reports none
+	// left rather than a stale "remaining" count.
+	after, err := database.ConversationPurgePlan(ctx, settings, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.EligibleRows != 0 || after.SkipReason != domain.ConversationPurgeSkipNothingEligible {
+		t.Fatalf("post-purge plan=%#v", after)
+	}
 }
 
 func TestPurgeConversationItemsBatchesUntilDone(t *testing.T) {

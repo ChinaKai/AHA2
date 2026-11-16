@@ -138,7 +138,6 @@ export interface ConversationPurgePlan {
   tasks_affected: number;
   avg_row_bytes: number;
   run_bytes_estimate: number;
-  remaining_eligible: number;
   skip_reason?: string;
 }
 

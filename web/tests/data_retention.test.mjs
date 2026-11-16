@@ -66,7 +66,7 @@ function conversationPlan(overrides = {}) {
   return {
     retention_days: 30, purge_tool: true, purge_update: false, categories: ["tool"],
     cutoff: "2026-10-08T00:00:00Z", eligible_rows: 1200, run_rows: 1200, tasks_affected: 7,
-    avg_row_bytes: 180, run_bytes_estimate: 216_000, remaining_eligible: 0,
+    avg_row_bytes: 180, run_bytes_estimate: 216_000,
     ...overrides,
   };
 }

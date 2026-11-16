@@ -83,21 +83,23 @@ func (s ConversationRetentionSettings) Validate() error {
 // ConversationPurgePlan is what one manual conversation cleanup would delete.
 // Categories lists the conversation_item categories in scope ("tool" and
 // optionally "update"). Eligible rows belong to terminal tasks, are older than
-// Cutoff, are not the task's final answer, have no attachment and have no
-// pending permission request.
+// Cutoff, are not the task's final answer, have no attachment and are not
+// blocked by a pending approval. One confirmed run deletes every eligible row
+// (batched internally), so RunRows always equals EligibleRows; there is no
+// remaining-for-later field. A later preview reports whatever new rows have
+// passed the cutoff by then.
 type ConversationPurgePlan struct {
-	RetentionDays     int       `json:"retention_days"`
-	PurgeTool         bool      `json:"purge_tool"`
-	PurgeUpdate       bool      `json:"purge_update"`
-	Categories        []string  `json:"categories"`
-	Cutoff            time.Time `json:"cutoff"`
-	EligibleRows      int64     `json:"eligible_rows"`
-	RunRows           int64     `json:"run_rows"`
-	TasksAffected     int64     `json:"tasks_affected"`
-	AvgRowBytes       int64     `json:"avg_row_bytes"`
-	RunBytesEstimate  int64     `json:"run_bytes_estimate"`
-	RemainingEligible int64     `json:"remaining_eligible"`
-	SkipReason        string    `json:"skip_reason,omitempty"`
+	RetentionDays    int       `json:"retention_days"`
+	PurgeTool        bool      `json:"purge_tool"`
+	PurgeUpdate      bool      `json:"purge_update"`
+	Categories       []string  `json:"categories"`
+	Cutoff           time.Time `json:"cutoff"`
+	EligibleRows     int64     `json:"eligible_rows"`
+	RunRows          int64     `json:"run_rows"`
+	TasksAffected    int64     `json:"tasks_affected"`
+	AvgRowBytes      int64     `json:"avg_row_bytes"`
+	RunBytesEstimate int64     `json:"run_bytes_estimate"`
+	SkipReason       string    `json:"skip_reason,omitempty"`
 }
 
 type ConversationPurgeResult struct {
