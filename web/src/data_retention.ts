@@ -319,7 +319,7 @@ function compactionResultSummary(result: DatabaseCompactionResult): string {
   </div>`;
 }
 
-function compactionDialog(state: DataRetentionViewState): string {
+export function compactionDialogBody(state: DataRetentionViewState): string {
   const plan = state.compactionPlan;
   const busy = state.compactionBusy;
   let body: string;
@@ -354,12 +354,16 @@ function compactionDialog(state: DataRetentionViewState): string {
       <p class="field-help data-cleanup-note">${t("data.db.compactHelp")}</p>
       ${state.compactionResult ? compactionResultSummary(state.compactionResult) : ""}`;
   }
+  return body;
+}
+
+function compactionDialog(state: DataRetentionViewState): string {
   return `<dialog class="data-db-dialog" data-compact-dialog aria-labelledby="data-compact-title">
     <header class="data-db-dialog-head">
       <strong id="data-compact-title">${t("data.db.compactTitle")}</strong>
       <button type="button" class="icon-button" data-compact-close aria-label="${t("data.db.close")}">×</button>
     </header>
-    <div class="data-db-dialog-body">${body}</div>
+    <div class="data-db-dialog-body">${compactionDialogBody(state)}</div>
   </dialog>`;
 }
 

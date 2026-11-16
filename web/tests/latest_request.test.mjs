@@ -49,7 +49,7 @@ test("only the newest request writes state; an older slow success is ignored", a
   assert.deepEqual(settled, ["settled"], "only the newest request renders");
 });
 
-test("a failure is retryable and a late failure cannot clear the newer success", async () => {
+test("a failure is retryable", async () => {
   const resolved = [];
   const errors = [];
   const {latest, loads} = controller(value => resolved.push(value), message => errors.push(message));
@@ -65,12 +65,27 @@ test("a failure is retryable and a late failure cannot clear the newer success",
   await Promise.resolve();
   await Promise.resolve();
   assert.deepEqual(resolved, ["preview"]);
+});
 
-  // A delayed failure from the first attempt must not reopen the error state.
+test("a late failure from an older request cannot clear the newer success", async () => {
+  const resolved = [];
+  const errors = [];
+  const {latest, loads} = controller(value => resolved.push(value), message => errors.push(message));
+  latest.start();
+  latest.start();
+  loads[1].resolve("new preview");
+  await loads[1].promise;
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(resolved, ["new preview"]);
+
+  // The first request is still pending and fails only now.
   loads[0].reject(new Error("old failure"));
+  await loads[0].promise.catch(() => {});
   await Promise.resolve();
   await Promise.resolve();
-  assert.deepEqual(errors, ["network down"]);
+  assert.deepEqual(errors, [], "the older failure must not replace the newer success");
+  assert.deepEqual(resolved, ["new preview"]);
 });
 
 test("invalidate (dialog close) makes every in-flight response a no-op", async () => {
@@ -85,4 +100,38 @@ test("invalidate (dialog close) makes every in-flight response a no-op", async (
   await Promise.resolve();
   assert.deepEqual(resolved, []);
   assert.deepEqual(settled, []);
+});
+
+test("compaction close/reopen keeps the newer failure when the old plan succeeds later", async () => {
+  // Mirrors requestCompactionPlan: shared view fields plus explicit invalidate
+  // on close, then a new request after reopening.
+  const view = {compactionPlan: null, compactionError: "", compactionBusy: false};
+  const loads = [];
+  const latest = createLatestRequest({
+    load: () => {
+      const next = deferred();
+      loads.push(next);
+      return next.promise;
+    },
+    onResolve: plan => { view.compactionPlan = plan; },
+    onError: message => { view.compactionError = message; },
+    onSettled: () => { view.compactionBusy = false; },
+  });
+  latest.start(); // A is in flight
+  latest.invalidate(); // Owner closes the dialog
+  latest.start(); // Owner reopens immediately; B starts
+  loads[1].reject(new Error("B preflight failed"));
+  await loads[1].promise.catch(() => {});
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(view.compactionPlan, null);
+  assert.equal(view.compactionError, "B preflight failed");
+  assert.equal(view.compactionBusy, false);
+
+  loads[0].resolve({can_compact: true, blocking_reasons: []});
+  await loads[0].promise;
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(view.compactionPlan, null, "the old plan must not replace B's failure");
+  assert.equal(view.compactionError, "B preflight failed");
 });

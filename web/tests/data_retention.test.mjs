@@ -292,6 +292,10 @@ test("data page wires backup preview, database cleanup and compaction without a 
   assert.match(main, /api\.previewConversationPurge/);
   assert.match(main, /api\.purgeConversation\(\{\.\.\.confirmed, confirm: true\}\)/);
   assert.match(main, /api\.databaseCompactionPlan\(\)/);
+  // Compaction preflight uses the same latest-request guard as the backup
+  // preview and invalidates it when the dialog closes.
+  assert.match(main, /const compactionPlanRequest = createLatestRequest\(/);
+  assert.match(main, /compactionPlanRequest\.invalidate\(\)/);
   assert.match(main, /api\.compactDatabase\(\{confirm: true\}\)/);
   assert.match(api, /\/api\/v1\/system\/data\/backups/);
   assert.match(api, /\/api\/v1\/system\/data\/conversation\/preview/);

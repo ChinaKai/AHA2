@@ -463,6 +463,13 @@ function renderDatabasePanel(...args: Parameters<DataRetentionPageModule["render
   return module.renderDatabasePanel(...args);
 }
 
+function compactionDialogBody(...args: Parameters<DataRetentionPageModule["compactionDialogBody"]>): string {
+  const module = dataRetentionPage.loaded();
+  if (module) return module.compactionDialogBody(...args);
+  void dataRetentionPage.load();
+  return "";
+}
+
 function formatBytes(...args: Parameters<DataRetentionPageModule["formatBytes"]>): string {
   const module = dataRetentionPage.loaded();
   if (module) return module.formatBytes(...args);
@@ -4473,17 +4480,48 @@ const dataBackupPreviewRequest = createLatestRequest<DataBackupPreview>({
   // Keep the dialog open with a retry action. Closing it here would hide the
   // only explanation for a failed scan.
   onError: message => { state.dataBackupError = message; },
-  onSettled: () => render(),
+  onSettled: () => refreshBackupDialog(),
 });
 
 function requestBackupPreview(): void {
   state.dataBackupPreview = null;
   state.dataBackupError = "";
-  render();
+  refreshBackupDialog();
   dataBackupPreviewRequest.start();
 }
 
+// Global render() deliberately defers while a modal dialog is open. Dialog
+// state (preview, plan, error) must therefore be refreshed in place; otherwise
+// the dialog would stay on "reading" forever. The helpers below replace only
+// the dialog body and rebind the buttons inside it.
+function updateOpenDialogBody(selector: string, html: string): HTMLDialogElement | null {
+  const dialog = document.querySelector<HTMLDialogElement>(selector);
+  const body = dialog?.querySelector<HTMLElement>(".data-db-dialog-body");
+  if (!dialog?.open || !body) return null;
+  body.innerHTML = html;
+  return dialog;
+}
+
 function dataBackupDialog(): string {
+  return `<dialog class="data-db-dialog" data-backup-dialog aria-labelledby="data-backup-title">
+    <header class="data-db-dialog-head">
+      <strong id="data-backup-title">${t("data.cleanBackups")}</strong>
+      <button type="button" class="icon-button" data-backup-close aria-label="${t("data.db.close")}">×</button>
+    </header>
+    <div class="data-db-dialog-body">${dataBackupDialogBody()}</div>
+  </dialog>`;
+}
+
+function refreshBackupDialog(): void {
+  const dialog = updateOpenDialogBody("[data-backup-dialog]", dataBackupDialogBody());
+  if (!dialog) {
+    render();
+    return;
+  }
+  bindBackupDialogBodyActions(dialog);
+}
+
+function dataBackupDialogBody(): string {
   const preview = state.dataBackupPreview;
   let body = `<p class="field-help">${t("data.backupsReading")}</p>`;
   if (state.dataBackupError) {
@@ -4507,13 +4545,7 @@ function dataBackupDialog(): string {
         </div>`;
     }
   }
-  return `<dialog class="data-db-dialog" data-backup-dialog aria-labelledby="data-backup-title">
-    <header class="data-db-dialog-head">
-      <strong id="data-backup-title">${t("data.cleanBackups")}</strong>
-      <button type="button" class="icon-button" data-backup-close aria-label="${t("data.db.close")}">×</button>
-    </header>
-    <div class="data-db-dialog-body">${body}</div>
-  </dialog>`;
+  return body;
 }
 
 function dataManagementView(): string {
@@ -4651,6 +4683,12 @@ function bindBackupCleanupDialog(): void {
     state.dataBackupDialogOpen = false;
     state.dataBackupError = "";
   });
+  bindBackupDialogBodyActions(dialog);
+  if (state.dataBackupDialogOpen && !dialog.open) dialog.showModal();
+  if (!state.dataBackupDialogOpen && dialog.open) dialog.close();
+}
+
+function bindBackupDialogBodyActions(dialog: HTMLDialogElement): void {
   dialog.querySelector("[data-backup-retry]")?.addEventListener("click", () => {
     requestBackupPreview();
   });
@@ -4667,11 +4705,12 @@ function bindBackupCleanupDialog(): void {
       state.dataBackupBusy = false;
       state.dataBackupDialogOpen = false;
       state.dataBackupPreview = null;
+      // Closing before render lets the deferred page refresh apply; render()
+      // intentionally refuses to tear down an open modal.
+      if (dialog.open) dialog.close();
       render();
     });
   });
-  if (state.dataBackupDialogOpen && !dialog.open) dialog.showModal();
-  if (!state.dataBackupDialogOpen && dialog.open) dialog.close();
 }
 
 function bindDataRetentionPanel(): void {
@@ -4847,20 +4886,34 @@ function bindConversationPurgeForm(view: DataRetentionViewState): void {
   });
 }
 
+// Compaction preflight has the same close/reopen race as the backup preview:
+// an older request must never overwrite a newer plan or error.
+const compactionPlanRequest = createLatestRequest({
+  load: () => api.databaseCompactionPlan().then(result => result.plan),
+  onResolve: plan => { state.dataRetention.compactionPlan = plan; },
+  onError: message => { state.dataRetention.compactionError = message; },
+  onSettled: () => {
+    state.dataRetention.compactionBusy = false;
+    refreshCompactionDialog();
+  },
+});
+
+function refreshCompactionDialog(): void {
+  const dialog = updateOpenDialogBody("[data-compact-dialog]", compactionDialogBody(state.dataRetention));
+  if (!dialog) {
+    render();
+    return;
+  }
+  bindCompactionDialogBodyActions(dialog, state.dataRetention);
+}
+
 function requestCompactionPlan(view: DataRetentionViewState): void {
   view.compactionResult = null;
   view.compactionPlan = null;
   view.compactionBusy = true;
   view.compactionError = "";
-  render();
-  void api.databaseCompactionPlan().then(result => {
-    view.compactionPlan = result.plan;
-  }).catch((error: unknown) => {
-    view.compactionError = error instanceof Error ? error.message : String(error);
-  }).finally(() => {
-    view.compactionBusy = false;
-    render();
-  });
+  refreshCompactionDialog();
+  compactionPlanRequest.start();
 }
 
 function bindCompactionDialog(view: DataRetentionViewState): void {
@@ -4872,12 +4925,22 @@ function bindCompactionDialog(view: DataRetentionViewState): void {
   const dialog = document.querySelector<HTMLDialogElement>("[data-compact-dialog]");
   if (!dialog) return;
   dialog.querySelector("[data-compact-close]")?.addEventListener("click", () => {
+    compactionPlanRequest.invalidate();
     view.openDialog = "";
     dialog.close();
   });
   dialog.addEventListener("close", () => {
+    // A render replaces the dialog while it is open; the detached node's close
+    // event must not cancel the replacement's in-flight preflight.
+    if (!dialog.isConnected) return;
+    compactionPlanRequest.invalidate();
     if (view.openDialog === "compact") view.openDialog = "";
   });
+  bindCompactionDialogBodyActions(dialog, view);
+  if (view.openDialog === "compact" && !dialog.open) dialog.showModal();
+}
+
+function bindCompactionDialogBodyActions(dialog: HTMLDialogElement, view: DataRetentionViewState): void {
   const refresh = dialog.querySelector<HTMLButtonElement>("[data-compact-refresh]");
   refresh?.addEventListener("click", () => {
     if (view.compactionBusy) return;
@@ -4920,10 +4983,9 @@ function bindCompactionDialog(view: DataRetentionViewState): void {
       setMessage("error", failed?.restored ? t("data.db.compactRestored") : message);
     }).finally(() => {
       view.compactionBusy = false;
-      render();
+      refreshCompactionDialog();
     });
   });
-  if (view.openDialog === "compact" && !dialog.open) dialog.showModal();
 }
 
 function otherSettingsView(): string {
