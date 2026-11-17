@@ -955,8 +955,10 @@ class APIClient {
     return this.request(`/api/v1/hardware-resources/${encodeURIComponent(id)}`, {method: "DELETE"});
   }
 
-  browserProfiles(): Promise<{profiles: BrowserProfile[]}> {
-    return this.request("/api/v1/browser/profiles");
+  // Resource-sheet reads are bounded: a missing or wedged host must surface as
+  // an explicit error instead of leaving the browser tab pending forever.
+  browserProfiles(timeoutMs = 10_000): Promise<{profiles: BrowserProfile[]}> {
+    return this.request("/api/v1/browser/profiles", {signal: AbortSignal.timeout(timeoutMs)});
   }
 
   createBrowserProfile(payload: {name: string; browser_kind?: string}): Promise<{profile: BrowserProfile}> {
@@ -983,8 +985,8 @@ class APIClient {
     return this.request(`/api/v1/browser/profiles/${encodeURIComponent(id)}/session`, {method: "DELETE"});
   }
 
-  browserHost(): Promise<{host: BrowserHostView}> {
-    return this.request("/api/v1/browser/host");
+  browserHost(timeoutMs = 10_000): Promise<{host: BrowserHostView}> {
+    return this.request("/api/v1/browser/host", {signal: AbortSignal.timeout(timeoutMs)});
   }
 
   taskBrowser(taskID: string): Promise<{browser: TaskBrowserState}> {

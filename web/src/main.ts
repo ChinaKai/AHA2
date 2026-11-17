@@ -110,7 +110,15 @@ import type {
   Workspace,
 } from "./types.js";
 type View = "projects" | "channels" | "models" | "resources" | "tasks" | "knowledge" | "prompts" | "proxy" | "sync" | "advanced" | "data" | "other" | "mcp" | "pet-settings" | "pet-workbench";
-type ResourceKey = "projects" | "workspaces" | "tasks" | "system" | "providers" | "models" | "env" | "accounts" | "skills" | "channels" | "hardware" | "browser" | "mail-accounts" | "mail-templates" | "mail-messages" | "knowledge" | "proxy" | "advanced" | "sync" | "prompts" | "mcp" | "data";
+// The key list is the single source of truth: resourceStates is built from it
+// and ResourceKey is derived from it, so a new key can never exist in one place
+// and be missing from the state map (which used to crash the Resources render).
+const RESOURCE_KEYS = [
+  "projects", "workspaces", "tasks", "system", "providers", "models", "env", "accounts", "skills",
+  "channels", "hardware", "browser", "mail-accounts", "mail-templates", "mail-messages",
+  "knowledge", "proxy", "advanced", "sync", "prompts", "mcp", "data",
+] as const;
+type ResourceKey = typeof RESOURCE_KEYS[number];
 type TaskFilterKind = "project" | "status" | "device";
 interface ResourceState {loading: boolean; loaded: boolean; error: string; updatedAt: number}
 interface TaskChannelState {
@@ -1196,10 +1204,9 @@ document.addEventListener("keydown", event => {
   });
 });
 
-const resourceStates = Object.fromEntries([
-  "projects", "workspaces", "tasks", "system", "providers", "models", "env", "accounts", "skills",
-  "channels", "hardware", "mail-accounts", "mail-templates", "mail-messages", "knowledge", "proxy", "advanced", "sync", "prompts", "mcp", "data",
-].map(key => [key, {loading: false, loaded: false, error: "", updatedAt: 0}])) as Record<ResourceKey, ResourceState>;
+const resourceStates = Object.fromEntries(
+  RESOURCE_KEYS.map(key => [key, {loading: false, loaded: false, error: "", updatedAt: 0}]),
+) as Record<ResourceKey, ResourceState>;
 const resourceRequests = new Map<ResourceKey, Promise<void>>();
 const listPages: Record<"projects" | "tasks" | "knowledge", {cursor: string; hasMore: boolean; loadingMore: boolean}> = {
   projects: {cursor: "", hasMore: false, loadingMore: false},
@@ -1897,6 +1904,10 @@ function setMessage(type: "error" | "notice", value: string): void {
   // Feedback banners are re-created by the next render, so announce from the
   // persistent region instead of relying on a newly inserted live node.
   announceStatus(String(value));
+  // Render now: an action that only reports a failure (opening a browser
+  // login window, a rejected delete) has no follow-up reload, so waiting for
+  // the clearing timer would hide the message before it was ever shown.
+  if (state.auth?.authenticated && !state.loading) render();
   window.setTimeout(() => {
     if (state[type] === value) {
       state[type] = "";
@@ -3148,19 +3159,29 @@ async function reloadHardwareResources(): Promise<void> {
   });
 }
 
+// The browser tab must fail closed with an owner-facing message. A timed-out
+// read (the API client bounds these requests) is not a host diagnostic and
+// should tell the owner to retry instead of echoing "signal timed out".
+function browserLoadError(error: unknown): string {
+  if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
+    return "浏览器资源加载超时，请刷新重试";
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
 async function fetchBrowserResources(): Promise<void> {
   state.browserResourcesLoading = true;
   state.browserResourcesError = "";
   try {
     const [profiles, host] = await Promise.all([
       api.browserProfiles().catch(error => {
-        state.browserResourcesError = error instanceof Error ? error.message : String(error);
+        state.browserResourcesError = browserLoadError(error);
         return {profiles: [] as BrowserProfile[]};
       }),
       api.browserHost().then(result => result.host).catch(error => ({
         available: false, host_id: "", edge_available: false,
         code: "browser_host_unavailable",
-        error: error instanceof Error ? error.message : String(error),
+        error: browserLoadError(error),
       }) as BrowserHostView),
     ]);
     state.browserProfiles = profiles.profiles || [];
@@ -9026,6 +9047,9 @@ window.addEventListener("aha-resources-tab", event => {
   state.resourcesTab = tab;
   // Tab switches are display-only; the address bar stays untouched. The tab is
   // also not persisted, so a refresh starts at the default hardware tab.
+  // Render immediately: the new panel must not wait for slow or pending
+  // resource reads (a missing browser host used to leave the click inert).
+  render();
   void ensureViewData("resources").then(() => render());
 });
 window.addEventListener("aha-mail-subtab", event => {

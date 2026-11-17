@@ -66,8 +66,11 @@ function lastUsedLabel(profile: BrowserProfile): string {
   return `最近使用 ${date.toLocaleString()}`;
 }
 
-export function renderBrowserHostBanner(host: BrowserHostView | null): string {
+export function renderBrowserHostBanner(host: BrowserHostView | null, loading = false): string {
   if (!host) {
+    if (loading) {
+      return `<p class="browser-host-banner" role="status" aria-busy="true">${icon("spinner", true)}正在读取浏览器宿主状态…</p>`;
+    }
     return `<p class="browser-host-banner error" role="status">${icon("browser")}尚未读取浏览器宿主状态。</p>`;
   }
   if (!host.available) {
@@ -95,12 +98,15 @@ export function renderBrowserResources(data: BrowserResourcesData): string {
     <div class="hardware-resource-actions">${action}<button type="button" class="icon-button" data-browser-profile-rename="${escapeHTML(profile.id)}" title="重命名" aria-label="重命名">${icon("edit")}</button><button type="button" class="icon-button danger" data-browser-profile-delete="${escapeHTML(profile.id)}" title="删除 Profile" aria-label="删除 Profile">${icon("close")}</button></div>
   </article>`;
   }).join("");
+  const loading = data.loading && !data.error;
   const body = data.profiles.length
     ? `<div class="hardware-resource-list">${rows}</div>`
-    : `<div class="empty-state hardware-resource-empty">${icon("browser")}<strong>还没有浏览器 Profile</strong><span>创建后打开可见登录窗口，登录一次即可被 Task 复用。</span><button type="button" class="primary" data-browser-profile-add-empty>${icon("plus")}新建 Profile</button></div>`;
+    : loading
+      ? `<div class="empty-state hardware-resource-empty" role="status" aria-busy="true">${icon("spinner", true)}<strong>正在读取浏览器资源…</strong><span>等待浏览器宿主状态与 Profile 列表返回。</span></div>`
+      : `<div class="empty-state hardware-resource-empty">${icon("browser")}<strong>还没有浏览器 Profile</strong><span>创建后打开可见登录窗口，登录一次即可被 Task 复用。</span><button type="button" class="primary" data-browser-profile-add-empty>${icon("plus")}新建 Profile</button></div>`;
   return `<section class="hardware-resources-view browser-resources-view">
     <div class="resource-panel-toolbar"><div><strong>浏览器</strong><p>Profile 保存网站登录态，真实用户数据目录由浏览器宿主管理；AHA 和 Web 只接触逻辑标识。</p></div><div class="browser-resource-toolbar-actions"><button type="button" id="refresh-browser-profiles" class="icon-button" title="刷新状态" aria-label="刷新状态">${icon("refresh")}</button><button type="button" id="add-browser-profile" class="primary">${icon("plus")}新建 Profile</button></div></div>
-    ${renderBrowserHostBanner(data.host)}
+    ${renderBrowserHostBanner(data.host, loading)}
     ${data.error ? `<p class="browser-resource-error" role="alert">${escapeHTML(data.error)}</p>` : ""}
     ${body}
   </section>`;
