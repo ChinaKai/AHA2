@@ -49,7 +49,7 @@ function viewState(overrides = {}) {
     actionError: "", progress: null,
     conversationPlan: null, conversationResult: null, conversationBusy: "",
     conversationActionError: "", conversationProgress: null,
-    compactionPlan: null, compactionResult: null, compactionBusy: false, compactionError: "", openDialog: "",
+    offlineCompaction: null, offlineCompactionLoading: false, offlineCompactionError: "", openDialog: "",
     ...overrides,
   };
 }
@@ -73,15 +73,27 @@ function conversationPlan(overrides = {}) {
   };
 }
 
-function compactionPlan(overrides = {}) {
+function offlineInfo(overrides = {}) {
   return {
-    mode: "vacuum_in_place", database_path: "/data/aha2.db",
+    data_dir: "/srv/aha2/data", database_path: "/srv/aha2/data/aha2.db",
+    backup_dir: "/srv/aha2/data/backups", command: 'aha2 db compact --data-dir "/srv/aha2/data"',
     file_bytes: 5_160_000_000, wal_bytes: 4_000_000, shm_bytes: 32_768,
-    page_size: 4096, page_count: 1_260_000, freelist_count: 1000,
-    free_bytes: 4_096_000, estimated_reclaimed_bytes: 4_096_000,
-    required_temp_bytes: 11_352_064_000, disk_free_bytes: 80_000_000_000,
-    active_tasks: 0, active_turns: 0, pending_approvals: 0, pet_approvals: 0,
-    can_compact: true, blocking_reasons: [], checked_at: "2026-11-16T00:00:00Z",
+    required_bytes: 11_352_064_000, disk_free_bytes: 80_000_000_000,
+    database_exists: true,
+    ...overrides,
+  };
+}
+
+function offlineResult(overrides = {}) {
+  return {
+    status: "ok", data_dir: "/srv/aha2/data", database_path: "/srv/aha2/data/aha2.db",
+    backup_path: "/srv/aha2/data/backups/offline-compact-20261116-120000", backup_kept: true, keep_backup: true,
+    before_bytes: 5_160_000_000, wal_before_bytes: 4_000_000, shm_before_bytes: 32_768,
+    after_bytes: 4_000_000_000, wal_after_bytes: 0, shm_after_bytes: 32_768,
+    before_total_bytes: 5_164_032_768, after_total_bytes: 4_000_032_768,
+    freed_bytes: 1_164_000_000, required_bytes: 11_352_064_000, disk_free_bytes: 80_000_000_000,
+    integrity_check: "ok", integrity_ok: true, row_counts_ok: true,
+    started_at: "2026-11-16T11:59:00Z", finished_at: "2026-11-16T12:00:00Z", duration_ms: 60_000,
     ...overrides,
   };
 }
@@ -238,45 +250,61 @@ test("form validation rejects out-of-range values and an empty selection", () =>
   assert.match(panel.conversationFormError("0", true, false), /保留天数/);
 });
 
-test("compaction dialog shows preflight numbers and blocks when preflight fails", () => {
+test("offline compaction dialog shows sizes, steps and a copyable command", () => {
   i18n.applyLocale("zh-CN");
-  const ready = panel.renderDatabasePanel(viewState({compactionPlan: compactionPlan()}));
-  const readyDialog = ready.match(/<dialog[^>]*data-compact-dialog[\s\S]*?<\/dialog>/)[0];
-  assert.match(readyDialog, /当前文件/);
-  assert.match(readyDialog, /空闲页/);
-  assert.match(readyDialog, /所需临时空间/);
-  assert.match(readyDialog, /磁盘可用/);
-  assert.doesNotMatch(button(readyDialog, "data-compact-run"), /disabled/, "ready plan enables compaction");
-
-  const blockedPlan = compactionPlan({can_compact: false, blocking_reasons: ["active_tasks", "disk_space"]});
-  const blocked = panel.renderDatabasePanel(viewState({compactionPlan: blockedPlan}));
-  const blockedDialog = blocked.match(/<dialog[^>]*data-compact-dialog[\s\S]*?<\/dialog>/)[0];
-  assert.match(blockedDialog, /当前不能压缩：有活动、等待或阻塞任务或 Turn；磁盘可用空间不足/);
-  assert.match(button(blockedDialog, "data-compact-run"), /disabled/);
-
-  const done = panel.renderDatabasePanel(viewState({
-    compactionPlan: compactionPlan(),
-    compactionResult: {
-      plan: compactionPlan(), backup_path: "/data/backups/database-compact-1/aha2.db",
-      before_bytes: 5_160_000_000, after_bytes: 4_000_000_000, freed_bytes: 1_160_000_000,
-      wal_before_bytes: 4_000_000, wal_after_bytes: 0, integrity_check: "ok",
-      restored: false, restart_required: false, duration_ms: 1200,
-    },
-  }));
-  assert.match(done, /压缩完成：4.8 GB → 3.7 GB，释放 1.1 GB；完整性 ok/);
+  const html = panel.renderDatabasePanel(viewState({offlineCompaction: offlineInfo()}));
+  const compact = html.match(/<dialog[^>]*data-offline-compact-dialog[\s\S]*?<\/dialog>/)[0];
+  assert.match(compact, /数据库文件/);
+  assert.match(compact, /WAL/);
+  assert.match(compact, /预计所需空间/);
+  assert.match(compact, /磁盘可用/);
+  assert.match(compact, /\/srv\/aha2\/data/);
+  assert.match(compact, /操作步骤/);
+  assert.match(compact, /停止 AHA2 服务/);
+  assert.match(compact, /data-offline-command[^>]*>aha2 db compact --data-dir/);
+  assert.match(compact, /data-offline-copy/);
+  assert.match(compact, /还没有离线压缩记录/);
+  // The page is a guide only: there is no button that could start a VACUUM.
+  assert.doesNotMatch(compact, /data-offline-run/);
+  assert.doesNotMatch(compact, /确认压缩/);
 });
 
-test("compaction dialog renders even when database stats are unavailable", () => {
+test("offline compaction dialog renders the latest result and keeps failure details", () => {
+  i18n.applyLocale("zh-CN");
+  const done = panel.renderDatabasePanel(viewState({
+    offlineCompaction: offlineInfo({latest_result: offlineResult()}),
+  }));
+  assert.match(done, /结果：成功/);
+  assert.match(done, /4\.8 GB → 3\.7 GB，释放 1\.1 GB/);
+  assert.match(done, /完整性：ok/);
+  assert.match(done, /关键表行数校验通过/);
+  assert.match(done, /备份：\/srv\/aha2\/data\/backups\/offline-compact-20261116-120000/);
+
+  const failed = panel.renderDatabasePanel(viewState({
+    offlineCompaction: offlineInfo({latest_result: offlineResult({
+      status: "failed", reason: "integrity_failed", integrity_check: "corrupted", integrity_ok: false,
+      row_counts_ok: false, error: "integrity_check returned \"corrupted\"",
+    })}),
+  }));
+  assert.match(failed, /结果：失败（数据库和备份保留）/);
+  assert.match(failed, /完整性校验失败/);
+  assert.match(failed, /说明：integrity_check returned/);
+  assert.match(failed, /备份：/);
+});
+
+test("offline compaction dialog has explicit loading and error states without the stats card", () => {
   i18n.applyLocale("zh-CN");
   const unavailable = panel.renderDatabasePanel(viewState({database: null, error: "database_unavailable", loading: false}));
-  assert.match(unavailable, /data-compact-dialog/, "the compaction entry must not depend on the stats card");
-  assert.match(unavailable, /正在读取压缩预检/);
+  assert.match(unavailable, /data-offline-compact-dialog/, "the guide must not depend on the stats card");
+  assert.match(unavailable, /正在读取离线压缩信息/);
 
-  const failed = panel.renderDatabasePanel(viewState({database: null, error: "database_unavailable", compactionError: "database is locked"}));
-  const compact = failed.match(/<dialog[^>]*data-compact-dialog[\s\S]*?<\/dialog>/)[0];
-  assert.match(compact, /data-compact-error/);
-  assert.match(compact, /读取压缩预检失败：database is locked/);
-  assert.match(compact, /data-compact-refresh[^>]*>重试<\/button>/);
+  const failed = panel.renderDatabasePanel(viewState({
+    database: null, error: "database_unavailable", offlineCompactionError: "database is locked",
+  }));
+  const compact = failed.match(/<dialog[^>]*data-offline-compact-dialog[\s\S]*?<\/dialog>/)[0];
+  assert.match(compact, /data-offline-compaction-error/);
+  assert.match(compact, /读取离线压缩信息失败：database is locked/);
+  assert.match(compact, /data-offline-compaction-refresh[^>]*>重试<\/button>/);
 });
 
 test("B dialog keeps each checkbox attached to its label row", () => {
@@ -294,7 +322,7 @@ test("database panel strings are translated in English", () => {
     const html = panel.renderDatabasePanel(viewState({
       plan: hardwarePlan(),
       conversationPlan: conversationPlan(),
-      compactionPlan: compactionPlan({can_compact: false, blocking_reasons: ["active_tasks"]}),
+      offlineCompaction: offlineInfo({latest_result: offlineResult({status: "refused", reason: "service_running", backup_path: undefined})}),
     }));
     assert.match(html, /Database details/);
     assert.match(html, /C\. Hardware I\/O/);
@@ -302,7 +330,9 @@ test("database panel strings are translated in English", () => {
     assert.match(html, /Preview cleanup/);
     assert.match(html, /Conversation event cleanup/);
     assert.match(html, /Clean up/);
-    assert.match(html, /Compaction is blocked: active, waiting, or blocked tasks or Turns/);
+    assert.match(html, /Offline database compaction/);
+    assert.match(html, /the AHA2 service is still running/);
+    assert.match(html, /AHA2 never runs VACUUM while it is serving/);
     assert.match(html, /does not necessarily shrink/);
     assert.doesNotMatch(html, /[一-鿿]/, "no Chinese text leaks into the English panel");
     assert.match(panel.conversationFormError("30", false, false), /Select at least/);
@@ -328,7 +358,7 @@ test("every database panel key exists in both catalogs", async () => {
   }
 });
 
-test("data page wires backup preview, database cleanup and compaction without a keep input", async () => {
+test("data page wires backup preview, database cleanup and the offline guide", async () => {
   const root = resolve(import.meta.dirname, "..");
   const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
   const api = await readFile(resolve(root, "src", "api.ts"), "utf8");
@@ -342,16 +372,19 @@ test("data page wires backup preview, database cleanup and compaction without a 
   assert.match(main, /api\.cleanupData\(\{category: "backups", confirm: true\}\)/);
   assert.match(main, /api\.previewConversationPurge/);
   assert.match(main, /api\.purgeConversation\(\{\.\.\.confirmed, confirm: true\}\)/);
-  assert.match(main, /api\.databaseCompactionPlan\(\)/);
-  // Compaction preflight uses the same latest-request guard as the backup
-  // preview and invalidates it when the dialog closes.
-  assert.match(main, /const compactionPlanRequest = createLatestRequest\(/);
-  assert.match(main, /compactionPlanRequest\.invalidate\(\)/);
-  assert.match(main, /api\.compactDatabase\(\{confirm: true\}\)/);
+  // The inventory entry opens a read-only guided dialog. There must be no
+  // client path that posts a compaction request.
+  assert.match(main, /category\.id === "database"[\s\S]{0,200}data-db-offline-compact/);
+  assert.match(main, /api\.offlineCompactionInfo\(\)/);
+  assert.match(main, /const offlineCompactionInfoRequest = createLatestRequest\(/);
+  assert.match(main, /offlineCompactionInfoRequest\.invalidate\(\)/);
+  assert.match(main, /data-offline-copy/);
+  assert.doesNotMatch(main, /compactDatabase|databaseCompactionPlan/);
+  assert.doesNotMatch(api, /database\/compaction/);
+  assert.match(api, /\/api\/v1\/system\/data\/database\/offline-compaction/);
   assert.match(api, /\/api\/v1\/system\/data\/backups/);
   assert.match(api, /\/api\/v1\/system\/data\/conversation\/preview/);
   assert.match(api, /\/api\/v1\/system\/data\/conversation\/purge/);
-  assert.match(api, /\/api\/v1\/system\/data\/database\/compaction/);
   assert.match(build, /"data_retention"/);
   // app.js and the panel must load the same versioned i18n.js.
   const appI18n = app.match(/from "(\.\/i18n\.js[^"]*)"/)?.[1];

@@ -269,64 +269,6 @@ const (
 	DatabasePurgePhaseFailed    = "failed"
 )
 
-// DatabaseCompactionPlan is the preflight report of one manual database
-// compaction. It never changes the database. RequiredTempBytes covers the
-// VACUUM temporary file plus the backup copy (~2.2x the database file).
-type DatabaseCompactionPlan struct {
-	Mode                    string    `json:"mode"`
-	DatabasePath            string    `json:"database_path"`
-	FileBytes               int64     `json:"file_bytes"`
-	WALBytes                int64     `json:"wal_bytes"`
-	SHMBytes                int64     `json:"shm_bytes"`
-	PageSize                int64     `json:"page_size"`
-	PageCount               int64     `json:"page_count"`
-	FreelistCount           int64     `json:"freelist_count"`
-	FreeBytes               int64     `json:"free_bytes"`
-	EstimatedReclaimedBytes int64     `json:"estimated_reclaimed_bytes"`
-	RequiredTempBytes       int64     `json:"required_temp_bytes"`
-	DiskFreeBytes           int64     `json:"disk_free_bytes"`
-	ActiveTasks             int       `json:"active_tasks"`
-	ActiveTurns             int       `json:"active_turns"`
-	PendingApprovals        int       `json:"pending_approvals"`
-	PetApprovals            int       `json:"pet_approvals"`
-	CanCompact              bool      `json:"can_compact"`
-	BlockingReasons         []string  `json:"blocking_reasons"`
-	CheckedAt               time.Time `json:"checked_at"`
-}
-
-const (
-	DatabaseCompactionModeVacuumInPlace = "vacuum_in_place"
-
-	DatabaseCompactionSkipAlreadyRunning = "already_running"
-	DatabaseCompactionSkipNotFile        = "not_file_database"
-	DatabaseCompactionSkipActive         = "active_tasks"
-	DatabaseCompactionSkipDisk           = "disk_space"
-	DatabaseCompactionSkipActiveWrites   = "active_writes"
-	DatabaseCompactionSkipCanceled       = "canceled"
-	DatabaseCompactionSkipVacuumFailed   = "vacuum_failed"
-	DatabaseCompactionSkipIntegrity      = "integrity_failed"
-	DatabaseCompactionSkipRowCount       = "row_count_mismatch"
-)
-
-// DatabaseCompactionResult reports the backup, size change, integrity result
-// and key table row counts so the owner can compare before and after. The
-// operation runs VACUUM in place, so it does not need a restart; a failure after
-// the rebuild restores every table from BackupPath.
-type DatabaseCompactionResult struct {
-	Plan            DatabaseCompactionPlan `json:"plan"`
-	BackupPath      string                 `json:"backup_path,omitempty"`
-	BeforeBytes     int64                  `json:"before_bytes"`
-	AfterBytes      int64                  `json:"after_bytes"`
-	FreedBytes      int64                  `json:"freed_bytes"`
-	WALBeforeBytes  int64                  `json:"wal_before_bytes"`
-	WALAfterBytes   int64                  `json:"wal_after_bytes"`
-	IntegrityCheck  string                 `json:"integrity_check,omitempty"`
-	BeforeRowCounts map[string]int64       `json:"before_row_counts,omitempty"`
-	AfterRowCounts  map[string]int64       `json:"after_row_counts,omitempty"`
-	Restored        bool                   `json:"restored"`
-	RestoreError    string                 `json:"restore_error,omitempty"`
-	RestartRequired bool                   `json:"restart_required"`
-	SkipReason      string                 `json:"skip_reason,omitempty"`
-	Error           string                 `json:"error,omitempty"`
-	DurationMS      int64                  `json:"duration_ms"`
-}
+// Offline database compaction types live in offline_compaction.go. Compaction
+// only runs from the CLI after the AHA2 service has stopped; the Web page is a
+// read-only guide and never starts a VACUUM.

@@ -24,8 +24,7 @@ import type {
   DataInventory,
   DataBackupPreview,
   DatabaseStats,
-  DatabaseCompactionPlan,
-  DatabaseCompactionResult,
+  OfflineCompactionInfo,
   DatabasePurgeProgress,
   ConversationRetentionSettings,
   ConversationPurgePlan,
@@ -280,12 +279,8 @@ class APIClient {
     return this.request("/api/v1/system/data/conversation/purge/progress");
   }
 
-  databaseCompactionPlan(): Promise<{ok: boolean; plan: DatabaseCompactionPlan}> {
-    return this.request("/api/v1/system/data/database/compaction");
-  }
-
-  compactDatabase(payload: {confirm: boolean}): Promise<{ok: boolean; result: DatabaseCompactionResult; database?: DatabaseStats}> {
-    return this.request("/api/v1/system/data/database/compaction", {method: "POST", body: JSON.stringify(payload)});
+  offlineCompactionInfo(timeoutMs = 10_000): Promise<{ok: boolean; info: OfflineCompactionInfo}> {
+    return this.request("/api/v1/system/data/database/offline-compaction", {signal: AbortSignal.timeout(timeoutMs)});
   }
 
   databaseStats(refresh = false): Promise<{ok: boolean; database: DatabaseStats}> {

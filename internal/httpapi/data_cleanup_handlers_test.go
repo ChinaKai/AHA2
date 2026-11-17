@@ -4,11 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -55,8 +55,7 @@ func TestDataManagementCleanupRoutesRequireAuth(t *testing.T) {
 		{http.MethodPut, "/api/v1/system/data/conversation/retention"},
 		{http.MethodPost, "/api/v1/system/data/conversation/preview"},
 		{http.MethodPost, "/api/v1/system/data/conversation/purge"},
-		{http.MethodGet, "/api/v1/system/data/database/compaction"},
-		{http.MethodPost, "/api/v1/system/data/database/compaction"},
+		{http.MethodGet, "/api/v1/system/data/database/offline-compaction"},
 	} {
 		response := requestJSON(t, anonymous, route.method, server.URL+route.path, map[string]any{"confirm": true}, "")
 		response.Body.Close()
@@ -256,92 +255,69 @@ func TestConversationCleanupEndpointsProtectActiveApprovalsAndReplies(t *testing
 	}
 }
 
-func TestDatabaseCompactionEndpointsCheckAndRun(t *testing.T) {
+func TestOfflineCompactionInfoIsReadOnlyAndReadsTheLastResult(t *testing.T) {
 	ctx := context.Background()
-	server, database, raw, path := newDataManagementTestServer(t)
+	server, _, raw, path := newDataManagementTestServer(t)
 	client := newCookieClient(t)
-	csrf := registerOwner(t, client, server.URL)
-	// createHardwareAPITask leaves an active task, which must block compaction.
-	task := createHardwareAPITask(t, database)
+	registerOwner(t, client, server.URL)
+	dataDir := filepath.Dir(path)
 
-	response := requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/system/data/database/compaction", nil, "")
-	var plan struct {
-		Plan domain.DatabaseCompactionPlan `json:"plan"`
+	response := requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/system/data/database/offline-compaction", nil, "")
+	var info struct {
+		Info domain.OfflineCompactionInfo `json:"info"`
 	}
-	decodeResponse(t, response, &plan)
-	if response.StatusCode != http.StatusOK || plan.Plan.CanCompact || plan.Plan.ActiveTasks == 0 {
-		t.Fatalf("active plan status=%d plan=%#v", response.StatusCode, plan.Plan)
+	decodeResponse(t, response, &info)
+	if response.StatusCode != http.StatusOK || !info.Info.DatabaseExists || info.Info.FileBytes == 0 {
+		t.Fatalf("info status=%d info=%#v", response.StatusCode, info.Info)
 	}
-	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/system/data/database/compaction", map[string]any{"confirm": true}, csrf)
-	var blocked struct {
-		Error string `json:"error"`
+	if !strings.Contains(info.Info.Command, "aha2 db compact") || !strings.Contains(info.Info.Command, dataDir) {
+		t.Fatalf("command=%q", info.Info.Command)
 	}
-	decodeResponse(t, response, &blocked)
-	if response.StatusCode != http.StatusConflict || blocked.Error != "database_compaction_blocked" {
-		t.Fatalf("blocked compaction status=%d body=%#v", response.StatusCode, blocked)
+	if info.Info.LatestResult != nil {
+		t.Fatalf("unexpected latest result before the CLI ran: %#v", info.Info.LatestResult)
 	}
 
-	if _, err := raw.ExecContext(ctx, `UPDATE tasks SET status='completed' WHERE id=?`, task.ID); err != nil {
-		t.Fatal(err)
-	}
-	// A pending pet approval also blocks compaction, even with no active task.
-	if _, err := raw.ExecContext(ctx, `
-		INSERT INTO pet_approvals(id,task_id,kind,title,summary,payload_json,status,created_at)
-		VALUES(?,?,?,?,?,?,?,?)`,
-		domain.NewID("pet_approval"), "task_pet", "delete_task", "Delete task", "waiting",
-		fmt.Sprintf(`{"task_id":%q}`, task.ID), "pending",
-		time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
-		t.Fatal(err)
-	}
-	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/system/data/database/compaction", nil, "")
-	decodeResponse(t, response, &plan)
-	if response.StatusCode != http.StatusOK || plan.Plan.CanCompact || plan.Plan.PetApprovals != 1 {
-		t.Fatalf("pet approval plan status=%d plan=%#v", response.StatusCode, plan.Plan)
-	}
-	if _, err := raw.ExecContext(ctx, `UPDATE pet_approvals SET status='approved',resolution='ok'`); err != nil {
-		t.Fatal(err)
-	}
-	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/system/data/database/compaction", nil, "")
-	decodeResponse(t, response, &plan)
-	if response.StatusCode != http.StatusOK || !plan.Plan.CanCompact {
-		t.Fatalf("idle plan status=%d plan=%#v", response.StatusCode, plan.Plan)
-	}
-	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/system/data/database/compaction", map[string]any{}, csrf)
+	// The old online entry point is gone in both directions: POST must not
+	// reach a handler that could VACUUM while the service is serving.
+	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/system/data/database/offline-compaction", map[string]any{"confirm": true}, "")
 	response.Body.Close()
-	if response.StatusCode != http.StatusBadRequest {
-		t.Fatalf("unconfirmed compaction status=%d", response.StatusCode)
+	if response.StatusCode != http.StatusMethodNotAllowed && response.StatusCode != http.StatusNotFound {
+		t.Fatalf("POST offline-compaction status=%d, want 404 or 405", response.StatusCode)
 	}
-	// The fixture's raw pool also shares the file; drain it so the exclusive
-	// maintenance lock is not blocked by an idle connection.
-	raw.SetMaxIdleConns(0)
-	for deadline := time.Now().Add(time.Second); raw.Stats().Idle > 0 && time.Now().Before(deadline); {
-		time.Sleep(5 * time.Millisecond)
+	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/system/data/database/compaction", map[string]any{"confirm": true}, "")
+	response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("removed online compaction status=%d, want 404", response.StatusCode)
 	}
-	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/system/data/database/compaction", map[string]any{"confirm": true}, csrf)
-	var compacted struct {
-		Result   domain.DatabaseCompactionResult `json:"result"`
-		Audit    map[string]any                  `json:"audit"`
-		Database domain.DatabaseStats            `json:"database"`
+
+	backupPath := filepath.Join(dataDir, "backups", "offline-compact-test")
+	result := domain.OfflineCompactionResult{
+		Status: domain.OfflineCompactionStatusOK, DataDir: dataDir, DatabasePath: path,
+		BackupPath: backupPath, BackupKept: true, KeepBackup: true,
+		BeforeBytes: 1000, AfterBytes: 800, FreedBytes: 200,
+		IntegrityCheck: "ok", IntegrityOK: true, RowCountsOK: true,
+		StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(),
 	}
-	decodeResponse(t, response, &compacted)
-	if response.StatusCode != http.StatusOK || compacted.Result.IntegrityCheck != "ok" || compacted.Result.BackupPath == "" {
-		t.Fatalf("compaction status=%d result=%#v", response.StatusCode, compacted.Result)
+	encoded, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if compacted.Audit["action"] != "data.database.compact" {
-		t.Fatalf("audit=%#v", compacted.Audit)
+	if err := os.WriteFile(filepath.Join(dataDir, domain.OfflineCompactionResultFile), append(encoded, '\n'), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(compacted.Result.BackupPath); err != nil {
-		t.Fatalf("compaction backup missing: %v", err)
+	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/system/data/database/offline-compaction", nil, "")
+	decodeResponse(t, response, &info)
+	if response.StatusCode != http.StatusOK || info.Info.LatestResult == nil {
+		t.Fatalf("latest result missing: status=%d info=%#v", response.StatusCode, info.Info)
 	}
-	if compacted.Result.BeforeRowCounts["tasks"] != 1 {
-		t.Fatalf("row counts=%#v", compacted.Result.BeforeRowCounts)
+	if info.Info.LatestResult.BackupPath != backupPath || info.Info.LatestResult.FreedBytes != 200 {
+		t.Fatalf("latest result=%#v", info.Info.LatestResult)
 	}
+
+	// The endpoint is read-only: no audit event and no schema/VACUUM writes.
 	var audits int
-	if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM audit_events WHERE action='data.database.compact'`).Scan(&audits); err != nil || audits != 2 {
-		t.Fatalf("compaction audit=%d err=%v, want the blocked and the successful run", audits, err)
-	}
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("database file missing: %v", err)
+	if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM audit_events WHERE action='data.database.compact'`).Scan(&audits); err != nil || audits != 0 {
+		t.Fatalf("compaction audit=%d err=%v", audits, err)
 	}
 }
 

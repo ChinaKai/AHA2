@@ -101,10 +101,10 @@ var hardwareIOPurgeMu sync.Mutex
 // conversationPurgeMu keeps manual conversation cleanups from overlapping.
 var conversationPurgeMu sync.Mutex
 
-// databaseMaintenanceGate keeps an in-place VACUUM from racing a B/C cleanup.
-// Purges take a read lock (they may run together), compaction takes the write
-// lock. Without it a compaction snapshot or rollback taken around a purge could
-// resurrect deleted rows or compare counts against a moving target.
+// databaseMaintenanceGate lets a future exclusive maintenance operation exclude
+// the B/C cleanups. Purges take a read lock so they may run together; a writer
+// takes the write lock (offline compaction itself runs with the service
+// stopped, so it does not use this gate).
 var databaseMaintenanceGate sync.RWMutex
 
 // purgeProgressTracker holds the last/happening cleanup snapshot per kind. The

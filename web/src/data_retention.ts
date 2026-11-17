@@ -4,8 +4,6 @@ import type {
   ConversationPurgeResult,
   ConversationRetentionSettings,
   DatabaseCategory,
-  DatabaseCompactionPlan,
-  DatabaseCompactionResult,
   DatabasePurgeProgress,
   DatabaseSafety,
   DatabaseStats,
@@ -13,6 +11,8 @@ import type {
   HardwareIOPurgePlan,
   HardwareIOPurgeResult,
   HardwareIORetentionSettings,
+  OfflineCompactionInfo,
+  OfflineCompactionResult,
 } from "./types.js";
 
 // Limits mirror internal/domain/data_retention.go. The server re-validates;
@@ -39,10 +39,9 @@ export interface DataRetentionViewState {
   conversationBusy: "" | "save" | "preview" | "purge";
   conversationActionError: string;
   conversationProgress: DatabasePurgeProgress | null;
-  compactionPlan: DatabaseCompactionPlan | null;
-  compactionResult: DatabaseCompactionResult | null;
-  compactionBusy: boolean;
-  compactionError: string;
+  offlineCompaction: OfflineCompactionInfo | null;
+  offlineCompactionLoading: boolean;
+  offlineCompactionError: string;
   openDialog: string;
 }
 
@@ -239,14 +238,17 @@ export function conversationPurgeEnabled(state: DataRetentionViewState, days: nu
     && plan.retention_days === days && plan.purge_tool === tool && plan.purge_update === update);
 }
 
-export function compactionReasonText(reason: string): string {
-  const key = `data.db.compactReason.${reason}`;
+export function offlineCompactionReasonText(reason: string): string {
+  if (!reason) return "";
+  const key = `data.db.offlineReason.${reason}`;
   const text = t(key);
   return text === key ? reason : text;
 }
 
-export function compactionBlockedText(plan: DatabaseCompactionPlan): string {
-  return plan.blocking_reasons.map(compactionReasonText).join("；");
+function offlineCompactionStatusText(status: string): string {
+  const key = `data.db.offlineResultStatus.${status}`;
+  const text = t(key);
+  return text === key ? status : text;
 }
 
 function dialogShell(id: string, title: string, body: string): string {
@@ -341,71 +343,91 @@ function categoryDialog(state: DataRetentionViewState, category: DatabaseCategor
   return dialogShell(category.id, title, categoryDialogBody(state, category));
 }
 
-function compactionResultSummary(result: DatabaseCompactionResult): string {
-  if (result.error) {
-    const restored = result.restored
-      ? `<p class="field-help" data-compact-restored>${t("data.db.compactRestored")}</p>`
-      : result.restore_error
-        ? `<p class="form-error" data-compact-restore-error>${escapeHTML(t("data.db.compactRestoreFailed", {path: result.backup_path || "—"}))}: ${escapeHTML(result.restore_error)}</p>`
-        : "";
-    return `<div class="data-db-result" data-compact-result>
-      <p class="form-error">${escapeHTML(t("data.db.compactFailed", {message: result.error}))}</p>
-      ${result.backup_path ? `<p class="field-help">${escapeHTML(t("data.db.compactBackup", {path: result.backup_path}))}</p>` : ""}
-      ${restored}
-    </div>`;
-  }
-  return `<div class="data-db-result" data-compact-result>
-    <p>${t("data.db.compactResult", {before: formatBytes(result.before_bytes), after: formatBytes(result.after_bytes), freed: formatBytes(result.freed_bytes), integrity: escapeHTML(result.integrity_check || "—")})}</p>
-    <p class="field-help">${t("data.db.compactResultCounts")}</p>
-    ${result.backup_path ? `<p class="field-help">${escapeHTML(t("data.db.compactBackup", {path: result.backup_path}))}</p>` : ""}
+function offlineCompactionResultSummary(result: OfflineCompactionResult): string {
+  const reason = result.reason
+    ? `<p class="field-help" data-offline-result-reason>${escapeHTML(offlineCompactionReasonText(result.reason))}</p>`
+    : "";
+  const sizes = result.before_total_bytes > 0
+    ? `<p data-offline-result-size>${t("data.db.offlineResultSize", {
+      before: formatBytes(result.before_total_bytes),
+      after: formatBytes(result.after_total_bytes),
+      freed: formatBytes(result.freed_bytes),
+    })}</p>`
+    : "";
+  const integrity = result.integrity_check
+    ? `<p class="field-help" data-offline-result-integrity>${escapeHTML(t("data.db.offlineResultIntegrity", {integrity: result.integrity_check}))}</p>`
+    : "";
+  const rows = result.row_counts_ok
+    ? `<p class="field-help" data-offline-result-rows>${t("data.db.offlineResultRows")}</p>`
+    : "";
+  const backup = result.backup_path
+    ? `<p class="field-help" data-offline-result-backup>${escapeHTML(result.backup_kept
+      ? t("data.db.offlineResultBackup", {path: result.backup_path})
+      : t("data.db.offlineResultBackupDeleted", {path: result.backup_path}))}</p>`
+    : "";
+  const failure = result.error
+    ? `<p class="form-error" data-offline-result-error>${escapeHTML(t("data.db.offlineResultError", {message: result.error}))}</p>`
+    : "";
+  return `<div class="data-db-result" data-offline-result data-offline-result-status="${escapeHTML(result.status)}">
+    <p data-offline-result-status-text><strong>${escapeHTML(t("data.db.offlineResult", {status: offlineCompactionStatusText(result.status)}))}</strong></p>
+    <p class="field-help" data-offline-result-time>${escapeHTML(t("data.db.offlineResultTime", {time: formatTime(result.finished_at)}))}</p>
+    ${reason}${sizes}${integrity}${rows}${backup}${failure}
   </div>`;
 }
 
-export function compactionDialogBody(state: DataRetentionViewState): string {
-  const plan = state.compactionPlan;
-  const busy = state.compactionBusy;
-  let body: string;
-  if (!plan && state.compactionError) {
-    // The plan request is independent of the stats panel; when the DB read
-    // fails we surface the error here instead of an endless "reading" line.
-    body = `<p class="form-error" data-compact-error>${escapeHTML(t("data.db.compactLoadFailed", {message: state.compactionError}))}</p>
+export function offlineCompactionDialogBody(state: DataRetentionViewState): string {
+  const info = state.offlineCompaction;
+  if (!info && state.offlineCompactionError) {
+    return `<p class="form-error" data-offline-compaction-error>${escapeHTML(t("data.db.offlineLoadFailed", {message: state.offlineCompactionError}))}</p>
       <div class="data-cleanup-actions">
-        <button type="button" data-compact-refresh ${busy ? "disabled" : ""}>${t("common.retry")}</button>
+        <button type="button" data-offline-compaction-refresh ${state.offlineCompactionLoading ? "disabled" : ""}>${t("common.retry")}</button>
       </div>`;
-  } else if (!plan) {
-    body = `<p class="field-help">${t("data.db.compactReading")}</p>`;
-  } else {
-    const blocked = plan.blocking_reasons.length
-      ? `<p class="form-error" data-compact-blocked>${escapeHTML(t("data.db.compactBlocked", {reasons: compactionBlockedText(plan)}))}</p>`
-      : `<p class="field-help" data-compact-ready>${t("data.db.compactReady")}</p>`;
-    body = `<p class="data-cleanup-note">${t("data.db.compactIntro")}</p>
-      <div class="data-db-files data-db-compact-plan">
-        <div><span class="field-help">${t("data.db.compactFile")}</span><strong>${formatBytes(plan.file_bytes)}</strong></div>
-        <div><span class="field-help">${t("data.db.compactFree")}</span><strong>${t("data.db.compactFreeValue", {pages: formatLocaleNumber(plan.freelist_count), size: formatBytes(plan.free_bytes)})}</strong></div>
-        <div><span class="field-help">${t("data.db.compactReclaim")}</span><strong>${formatBytes(plan.estimated_reclaimed_bytes)}</strong></div>
-        <div><span class="field-help">${t("data.db.compactRequired")}</span><strong>${formatBytes(plan.required_temp_bytes)}</strong></div>
-        <div><span class="field-help">${t("data.db.compactDisk")}</span><strong>${formatBytes(plan.disk_free_bytes)}</strong></div>
-        <div><span class="field-help">${t("data.db.compactWriters")}</span><strong>${t("data.db.compactActive", {tasks: plan.active_tasks, turns: plan.active_turns, approvals: plan.pending_approvals + plan.pet_approvals})}</strong></div>
-      </div>
-      <p class="field-help data-cleanup-note">${t("data.db.compactStop")}</p>
-      ${blocked}
-      <div class="data-cleanup-actions">
-        <button type="button" data-compact-refresh ${busy ? "disabled" : ""}>${t("common.refresh")}</button>
-        <button type="button" class="danger" data-compact-run ${plan.can_compact && !busy ? "" : "disabled"}>${t("data.db.compactRun")}</button>
-      </div>
-      <p class="field-help data-cleanup-note">${t("data.db.compactHelp")}</p>
-      ${state.compactionResult ? compactionResultSummary(state.compactionResult) : ""}`;
   }
-  return body;
+  if (!info) {
+    return `<p class="field-help" data-offline-compaction-reading>${t("data.db.offlineReading")}</p>`;
+  }
+  const latest = info.latest_result
+    ? offlineCompactionResultSummary(info.latest_result)
+    : `<p class="field-help" data-offline-no-result>${t("data.db.offlineNoResult")}</p>`;
+  return `<p class="data-cleanup-note">${t("data.db.offlineIntro")}</p>
+    <div class="data-db-files data-db-offline-plan">
+      <div><span class="field-help">${t("data.db.offlineFile")}</span><strong>${formatBytes(info.file_bytes)}</strong></div>
+      <div><span class="field-help">${t("data.db.offlineWAL")}</span><strong>${formatBytes(info.wal_bytes)}</strong></div>
+      <div><span class="field-help">${t("data.db.offlineSHM")}</span><strong>${formatBytes(info.shm_bytes)}</strong></div>
+      <div><span class="field-help">${t("data.db.offlineRequired")}</span><strong>${formatBytes(info.required_bytes)}</strong></div>
+      <div><span class="field-help">${t("data.db.offlineDisk")}</span><strong>${formatBytes(info.disk_free_bytes)}</strong></div>
+      <div class="data-db-path"><span class="field-help">${t("data.db.offlineDataDir")}</span><code>${escapeHTML(info.data_dir)}</code></div>
+      <div class="data-db-path"><span class="field-help">${t("data.db.offlineBackupDir")}</span><code>${escapeHTML(info.backup_dir)}</code></div>
+    </div>
+    <h4 class="data-offline-steps-title">${t("data.db.offlineStepsTitle")}</h4>
+    <ol class="data-offline-steps">
+      <li>${t("data.db.offlineStep1")}</li>
+      <li>${t("data.db.offlineStep2")}</li>
+      <li>${t("data.db.offlineStep3")}</li>
+      <li>${t("data.db.offlineStep4")}</li>
+    </ol>
+    <div class="data-offline-command">
+      <span class="field-help">${t("data.db.offlineCommand")}</span>
+      <pre><code data-offline-command>${escapeHTML(info.command)}</code></pre>
+      <button type="button" data-offline-copy>${t("data.db.offlineCopy")}</button>
+    </div>
+    <p class="field-help data-cleanup-note">${t("data.db.offlineHelp")}</p>
+    <div class="data-cleanup-actions">
+      <button type="button" data-offline-compaction-refresh ${state.offlineCompactionLoading ? "disabled" : ""}>${state.offlineCompactionLoading ? t("common.loading") : t("common.refresh")}</button>
+    </div>
+    <section class="data-offline-latest" data-offline-latest>
+      <strong>${t("data.db.offlineLatest")}</strong>
+      ${latest}
+    </section>`;
 }
 
-function compactionDialog(state: DataRetentionViewState): string {
-  return `<dialog class="data-db-dialog" data-compact-dialog aria-labelledby="data-compact-title">
+function offlineCompactionDialog(state: DataRetentionViewState): string {
+  return `<dialog class="data-db-dialog" data-offline-compact-dialog aria-labelledby="data-offline-compact-title">
     <header class="data-db-dialog-head">
-      <strong id="data-compact-title">${t("data.db.compactTitle")}</strong>
-      <button type="button" class="icon-button" data-compact-close aria-label="${t("data.db.close")}">×</button>
+      <strong id="data-offline-compact-title">${t("data.db.offlineTitle")}</strong>
+      <button type="button" class="icon-button" data-offline-compact-close aria-label="${t("data.db.close")}">×</button>
     </header>
-    <div class="data-db-dialog-body">${compactionDialogBody(state)}</div>
+    <div class="data-db-dialog-body">${offlineCompactionDialogBody(state)}</div>
   </dialog>`;
 }
 
@@ -417,7 +439,7 @@ export function renderDatabasePanel(state: DataRetentionViewState): string {
       <div class="panel-head"><strong>${t("data.db.title")}</strong></div>
       ${error}
       <p class="field-help data-cleanup-note">${state.loading ? t("data.db.reading") : t("data.db.unavailable")}</p>
-      ${compactionDialog(state)}
+      ${offlineCompactionDialog(state)}
     </section>`;
   }
   const collected = t(stats.cached ? "data.db.collectedCached" : "data.db.collected", {ms: stats.duration_ms, time: escapeHTML(formatTime(stats.collected_at))});
@@ -438,6 +460,6 @@ export function renderDatabasePanel(state: DataRetentionViewState): string {
     <p class="field-help data-cleanup-note">${t("data.db.estimateNote")}</p>
     <p class="field-help data-cleanup-note">${t("data.db.vacuumNote")}</p>
     ${stats.categories.map(category => categoryDialog(state, category)).join("")}
-    ${compactionDialog(state)}
+    ${offlineCompactionDialog(state)}
   </section>`;
 }

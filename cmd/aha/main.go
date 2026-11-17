@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -26,6 +27,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/execution"
 	"github.com/ChinaKai/AHA2/internal/hardware"
 	"github.com/ChinaKai/AHA2/internal/httpapi"
+	"github.com/ChinaKai/AHA2/internal/instancelock"
 	"github.com/ChinaKai/AHA2/internal/knowledgevault"
 	mailpkg "github.com/ChinaKai/AHA2/internal/mail"
 	"github.com/ChinaKai/AHA2/internal/mailworker"
@@ -75,6 +77,9 @@ func main() {
 		}
 		return
 	}
+	if command == "db" {
+		os.Exit(dbCommand(args, os.Stdout, os.Stderr))
+	}
 	switch command {
 	case "serve":
 		err = serve(args)
@@ -113,6 +118,8 @@ func parseCommand(args []string) (string, []string, error) {
 		return "import-aha1-knowledge", args[1:], nil
 	case "knowledge-vault":
 		return "knowledge-vault", args[1:], nil
+	case "db":
+		return "db", args[1:], nil
 	case "service":
 		if len(args) < 2 || args[1] != "run" {
 			return "", nil, fmt.Errorf("usage: aha2 service run [serve flags]")
@@ -295,6 +302,17 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	if err := os.MkdirAll(absoluteDataDir, 0o700); err != nil {
 		return fmt.Errorf("create data dir: %w", err)
 	}
+	// The offline compaction CLI takes the same lock. An idle control plane
+	// keeps no SQLite transaction open, so this advisory lock is what makes
+	// "stop AHA2 first" enforceable instead of a best-effort instruction.
+	instanceLock, err := instancelock.Acquire(absoluteDataDir)
+	if err != nil {
+		if errors.Is(err, instancelock.ErrHeld) {
+			return fmt.Errorf("data directory %s is already in use by another AHA2 process: %w", absoluteDataDir, err)
+		}
+		return fmt.Errorf("lock data directory: %w", err)
+	}
+	defer instanceLock.Close()
 	knowledgeVaultConfig, err := (knowledgevault.Config{
 		Enabled: options.knowledgeVaultEnabled, DataDir: absoluteDataDir,
 		VaultPath: options.knowledgeVaultPath, IndexPath: options.knowledgeVaultIndex,

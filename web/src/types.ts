@@ -152,45 +152,56 @@ export interface ConversationPurgeResult {
   duration_ms: number;
 }
 
-export interface DatabaseCompactionPlan {
-  mode: string;
+export interface OfflineCompactionFile {
+  name: string;
+  path: string;
+  bytes: number;
+  sha256: string;
+}
+
+export interface OfflineCompactionResult {
+  status: "ok" | "refused" | "failed";
+  reason?: string;
+  data_dir: string;
   database_path: string;
+  backup_path?: string;
+  backup_files?: OfflineCompactionFile[];
+  backup_kept: boolean;
+  keep_backup: boolean;
+  before_bytes: number;
+  wal_before_bytes: number;
+  shm_before_bytes: number;
+  after_bytes: number;
+  wal_after_bytes: number;
+  shm_after_bytes: number;
+  before_total_bytes: number;
+  after_total_bytes: number;
+  freed_bytes: number;
+  required_bytes: number;
+  disk_free_bytes: number;
+  integrity_check?: string;
+  integrity_ok: boolean;
+  before_row_counts?: Record<string, number>;
+  after_row_counts?: Record<string, number>;
+  row_counts_ok: boolean;
+  error?: string;
+  started_at: string;
+  finished_at: string;
+  duration_ms: number;
+}
+
+export interface OfflineCompactionInfo {
+  data_dir: string;
+  database_path: string;
+  backup_dir: string;
+  command: string;
   file_bytes: number;
   wal_bytes: number;
   shm_bytes: number;
-  page_size: number;
-  page_count: number;
-  freelist_count: number;
-  free_bytes: number;
-  estimated_reclaimed_bytes: number;
-  required_temp_bytes: number;
+  required_bytes: number;
   disk_free_bytes: number;
-  active_tasks: number;
-  active_turns: number;
-  pending_approvals: number;
-  pet_approvals: number;
-  can_compact: boolean;
-  blocking_reasons: string[];
-  checked_at: string;
-}
-
-export interface DatabaseCompactionResult {
-  plan: DatabaseCompactionPlan;
-  backup_path?: string;
-  before_bytes: number;
-  after_bytes: number;
-  freed_bytes: number;
-  wal_before_bytes: number;
-  wal_after_bytes: number;
-  integrity_check?: string;
-  before_row_counts?: Record<string, number>;
-  after_row_counts?: Record<string, number>;
-  restored: boolean;
-  restore_error?: string;
-  restart_required: boolean;
-  skip_reason?: string;
-  error?: string;
-  duration_ms: number;
+  database_exists: boolean;
+  latest_result?: OfflineCompactionResult;
 }
 
 export interface DataBackupPreview {

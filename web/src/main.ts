@@ -29,7 +29,7 @@ import {DEFAULT_TASK_STATUS_FILTERS, LOCAL_TASK_DEVICE_FILTER, TASK_STATUS_GROUP
 import type {TaskStatusGroup} from "./task_filters.js";
 import {TASK_TOOL_DEFAULT_WIDTH, normalizePinnedTaskTool, normalizeTaskToolMode, normalizeTaskToolWidth, renderTaskToolButtons, renderTaskToolContent, renderTaskToolPanel} from "./task_tools.js";
 import type {TaskTool, TaskToolMode} from "./task_tools.js";
-import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, createLatestRequest, createListRefreshScheduler, createResourceLoader, createStatusAnnouncer, eventRefreshesTaskList, taskStatusNeedsAnnouncement, exactSlashCommand, executeAgentSessionAction, installDialogEntryFocus, loadNavigationSnapshot, matchingSlashCommands, paginateItems, paginationHTML, planKeyedNodes, stableTextSignature, protoBadges, readPerfPanelPreference, renderModelHealthCell, renderProtocolProbeStatus, renderWorkspaceDetection, replaceInteractiveRegion, restoreInteractiveRegion, saveNavigationSnapshot, staleViewHashTarget, textMatchesQuery, writePerfPanelPreference} from "./ui_helpers.js";
+import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, createLatestRequest, createListRefreshScheduler, createResourceLoader, copyText, createStatusAnnouncer, eventRefreshesTaskList, taskStatusNeedsAnnouncement, exactSlashCommand, executeAgentSessionAction, installDialogEntryFocus, loadNavigationSnapshot, matchingSlashCommands, paginateItems, paginationHTML, planKeyedNodes, stableTextSignature, protoBadges, readPerfPanelPreference, renderModelHealthCell, renderProtocolProbeStatus, renderWorkspaceDetection, replaceInteractiveRegion, restoreInteractiveRegion, saveNavigationSnapshot, staleViewHashTarget, textMatchesQuery, writePerfPanelPreference} from "./ui_helpers.js";
 import type {InteractiveRegionState, ModelHealthView} from "./ui_helpers.js";
 import {
   compactNumber,
@@ -474,9 +474,9 @@ function categoryDialogBody(...args: Parameters<DataRetentionPageModule["categor
   return "";
 }
 
-function compactionDialogBody(...args: Parameters<DataRetentionPageModule["compactionDialogBody"]>): string {
+function offlineCompactionDialogBody(...args: Parameters<DataRetentionPageModule["offlineCompactionDialogBody"]>): string {
   const module = dataRetentionPage.loaded();
-  if (module) return module.compactionDialogBody(...args);
+  if (module) return module.offlineCompactionDialogBody(...args);
   void dataRetentionPage.load();
   return "";
 }
@@ -514,20 +514,6 @@ function conversationPurgeEnabled(...args: Parameters<DataRetentionPageModule["c
   if (module) return module.conversationPurgeEnabled(...args);
   void dataRetentionPage.load();
   return false;
-}
-
-function compactionBlockedText(...args: Parameters<DataRetentionPageModule["compactionBlockedText"]>): string {
-  const module = dataRetentionPage.loaded();
-  if (module) return module.compactionBlockedText(...args);
-  void dataRetentionPage.load();
-  return "";
-}
-
-function compactionReasonText(...args: Parameters<DataRetentionPageModule["compactionReasonText"]>): string {
-  const module = dataRetentionPage.loaded();
-  if (module) return module.compactionReasonText(...args);
-  void dataRetentionPage.load();
-  return String(args[0] ?? "");
 }
 
 function skipReasonText(...args: Parameters<DataRetentionPageModule["skipReasonText"]>): string {
@@ -643,7 +629,7 @@ const state: State = {
     actionError: "", progress: null,
     conversationPlan: null, conversationResult: null, conversationBusy: "",
     conversationActionError: "", conversationProgress: null,
-    compactionPlan: null, compactionResult: null, compactionBusy: false, compactionError: "", openDialog: "",
+    offlineCompaction: null, offlineCompactionLoading: false, offlineCompactionError: "", openDialog: "",
   },
   syncSettings: {scope:"default",enabled:false,endpoint:"",device_id:"",device_name:"",interval_seconds:300,token_configured:false,passphrase_configured:false},
   syncSettingsReady: false,
@@ -4574,10 +4560,11 @@ function dataManagementView(): string {
         ? `<button type="button" data-data-cleanup="backups" ${category.bytes === 0 || (inventory?.backup_count ?? 0) <= 1 ? "disabled" : ""}>${t("data.cleanBackups")}</button>`
         : category.id === "logs"
           ? `<button type="button" data-data-cleanup="logs" ${category.bytes === 0 ? "disabled" : ""}>${t("data.cleanLogs")}</button>`
-          // Compaction belongs beside the other cleanup entries, not on the
-          // database-details card below. The same dialog is reused.
+          // Offline compaction belongs beside the other cleanup entries, not
+          // on the database-details card below. The dialog only explains the
+          // steps and prints the CLI command; it never starts a VACUUM.
           : category.id === "database"
-            ? `<button type="button" data-db-compact>${t("data.db.compact")}</button>`
+            ? `<button type="button" data-db-offline-compact>${t("data.db.offlineCompact")}</button>`
             : `<span class="field-help">${t("common.readOnly")}</span>`;
       const note = dataCategoryText(category, "note");
       return `<tr>
@@ -4734,7 +4721,7 @@ function bindBackupDialogBodyActions(dialog: HTMLDialogElement): void {
 function bindDataRetentionPanel(): void {
   const view = state.dataRetention;
   bindCategoryDialogs(view);
-  bindCompactionDialog(view);
+  bindOfflineCompactionDialog(view);
 }
 
 function retentionCategory(view: DataRetentionViewState, categoryId: string): DatabaseCategory | null {
@@ -5036,104 +5023,75 @@ function bindConversationPurgeForm(view: DataRetentionViewState, categoryId: str
   });
 }
 
-// Compaction preflight has the same close/reopen race as the backup preview:
-// an older request must never overwrite a newer plan or error.
-const compactionPlanRequest = createLatestRequest({
-  load: () => api.databaseCompactionPlan().then(result => result.plan),
-  onResolve: plan => { state.dataRetention.compactionPlan = plan; },
-  onError: message => { state.dataRetention.compactionError = message; },
+// The offline guide has the same close/reopen race as the backup preview: an
+// older request must never overwrite a newer info response or error.
+const offlineCompactionInfoRequest = createLatestRequest({
+  load: () => api.offlineCompactionInfo().then(result => result.info),
+  onResolve: info => { state.dataRetention.offlineCompaction = info; },
+  onError: message => { state.dataRetention.offlineCompactionError = message; },
   onSettled: () => {
-    state.dataRetention.compactionBusy = false;
-    refreshCompactionDialog();
+    state.dataRetention.offlineCompactionLoading = false;
+    refreshOfflineCompactionDialog();
   },
 });
 
-function refreshCompactionDialog(): void {
-  const dialog = updateOpenDialogBody("[data-compact-dialog]", compactionDialogBody(state.dataRetention));
+function refreshOfflineCompactionDialog(): void {
+  const dialog = updateOpenDialogBody("[data-offline-compact-dialog]", offlineCompactionDialogBody(state.dataRetention));
   if (!dialog) {
     render();
     return;
   }
-  bindCompactionDialogBodyActions(dialog, state.dataRetention);
+  bindOfflineCompactionDialogBodyActions(dialog, state.dataRetention);
 }
 
-function requestCompactionPlan(view: DataRetentionViewState): void {
-  view.compactionResult = null;
-  view.compactionPlan = null;
-  view.compactionBusy = true;
-  view.compactionError = "";
-  refreshCompactionDialog();
-  compactionPlanRequest.start();
+function requestOfflineCompactionInfo(view: DataRetentionViewState): void {
+  view.offlineCompaction = null;
+  view.offlineCompactionLoading = true;
+  view.offlineCompactionError = "";
+  refreshOfflineCompactionDialog();
+  offlineCompactionInfoRequest.start();
 }
 
-function bindCompactionDialog(view: DataRetentionViewState): void {
-  const open = document.querySelector<HTMLButtonElement>("[data-db-compact]");
+function bindOfflineCompactionDialog(view: DataRetentionViewState): void {
+  const open = document.querySelector<HTMLButtonElement>("[data-db-offline-compact]");
   open?.addEventListener("click", () => {
-    view.openDialog = "compact";
-    requestCompactionPlan(view);
+    view.openDialog = "offline-compact";
+    requestOfflineCompactionInfo(view);
   });
-  const dialog = document.querySelector<HTMLDialogElement>("[data-compact-dialog]");
+  const dialog = document.querySelector<HTMLDialogElement>("[data-offline-compact-dialog]");
   if (!dialog) return;
-  dialog.querySelector("[data-compact-close]")?.addEventListener("click", () => {
-    compactionPlanRequest.invalidate();
+  dialog.querySelector("[data-offline-compact-close]")?.addEventListener("click", () => {
+    offlineCompactionInfoRequest.invalidate();
     view.openDialog = "";
     dialog.close();
   });
   dialog.addEventListener("close", () => {
     // A render replaces the dialog while it is open; the detached node's close
-    // event must not cancel the replacement's in-flight preflight.
+    // event must not cancel the replacement's in-flight request.
     if (!dialog.isConnected) return;
-    compactionPlanRequest.invalidate();
-    if (view.openDialog === "compact") view.openDialog = "";
+    offlineCompactionInfoRequest.invalidate();
+    if (view.openDialog === "offline-compact") view.openDialog = "";
   });
-  bindCompactionDialogBodyActions(dialog, view);
-  if (view.openDialog === "compact" && !dialog.open) dialog.showModal();
+  bindOfflineCompactionDialogBodyActions(dialog, view);
+  if (view.openDialog === "offline-compact" && !dialog.open) dialog.showModal();
 }
 
-function bindCompactionDialogBodyActions(dialog: HTMLDialogElement, view: DataRetentionViewState): void {
-  const refresh = dialog.querySelector<HTMLButtonElement>("[data-compact-refresh]");
-  refresh?.addEventListener("click", () => {
-    if (view.compactionBusy) return;
-    requestCompactionPlan(view);
+function bindOfflineCompactionDialogBodyActions(dialog: HTMLDialogElement, view: DataRetentionViewState): void {
+  dialog.querySelector<HTMLButtonElement>("[data-offline-compaction-refresh]")?.addEventListener("click", () => {
+    if (view.offlineCompactionLoading) return;
+    requestOfflineCompactionInfo(view);
   });
-  const run = dialog.querySelector<HTMLButtonElement>("[data-compact-run]");
-  run?.addEventListener("click", () => {
-    const plan = view.compactionPlan;
-    if (!plan || !plan.can_compact || view.compactionBusy) return;
-    if (!window.confirm(t("data.db.compactConfirm", {
-      size: formatBytes(plan.file_bytes),
-      reclaim: formatBytes(plan.estimated_reclaimed_bytes),
-    }))) return;
-    view.compactionBusy = true;
-    void runWithFeedback(run, t("common.loading"), async () => {
-      const response = await api.compactDatabase({confirm: true});
-      view.compactionResult = response.result;
-      if (response.database) view.database = response.database;
-      setMessage("notice", response.result.restored
-        ? t("data.db.compactRestored")
-        : t("data.db.compactResult", {
-          before: formatBytes(response.result.before_bytes),
-          after: formatBytes(response.result.after_bytes),
-          freed: formatBytes(response.result.freed_bytes),
-          integrity: response.result.integrity_check || "—",
-        }));
-    }).catch((error: unknown) => {
-      const message = error instanceof Error ? error.message : String(error);
-      const code = (error as {code?: string}).code;
-      if (code === "database_compaction_blocked") {
-        const reasons = message.split(",").map(compactionReasonText).join("；");
-        setMessage("error", t("data.db.compactBlocked", {reasons}));
-        return;
-      }
-      // A failed rebuild still returns its result (backup path, whether it was
-      // restored), so keep it in the dialog instead of dropping it with the
-      // error.
-      const failed = (error as {body?: {result?: typeof view.compactionResult}}).body?.result;
-      if (failed) view.compactionResult = failed;
-      setMessage("error", failed?.restored ? t("data.db.compactRestored") : message);
-    }).finally(() => {
-      view.compactionBusy = false;
-      refreshCompactionDialog();
+  const copy = dialog.querySelector<HTMLButtonElement>("[data-offline-copy]");
+  copy?.addEventListener("click", () => {
+    const command = dialog.querySelector<HTMLElement>("[data-offline-command]")?.textContent || "";
+    if (!command) return;
+    void copyText(command).then(() => {
+      copy.textContent = t("data.db.offlineCopied");
+      window.setTimeout(() => {
+        if (copy.isConnected) copy.textContent = t("data.db.offlineCopy");
+      }, 1600);
+    }).catch(() => {
+      setMessage("error", t("data.db.offlineCopyFailed"));
     });
   });
 }

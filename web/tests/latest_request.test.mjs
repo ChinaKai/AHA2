@@ -102,10 +102,10 @@ test("invalidate (dialog close) makes every in-flight response a no-op", async (
   assert.deepEqual(settled, []);
 });
 
-test("compaction close/reopen keeps the newer failure when the old plan succeeds later", async () => {
-  // Mirrors requestCompactionPlan: shared view fields plus explicit invalidate
-  // on close, then a new request after reopening.
-  const view = {compactionPlan: null, compactionError: "", compactionBusy: false};
+test("offline compaction close/reopen keeps the newer failure when the old info succeeds later", async () => {
+  // Mirrors requestOfflineCompactionInfo: shared view fields plus explicit
+  // invalidate on close, then a new request after reopening.
+  const view = {offlineCompaction: null, offlineCompactionError: "", offlineCompactionLoading: false};
   const loads = [];
   const latest = createLatestRequest({
     load: () => {
@@ -113,25 +113,25 @@ test("compaction close/reopen keeps the newer failure when the old plan succeeds
       loads.push(next);
       return next.promise;
     },
-    onResolve: plan => { view.compactionPlan = plan; },
-    onError: message => { view.compactionError = message; },
-    onSettled: () => { view.compactionBusy = false; },
+    onResolve: info => { view.offlineCompaction = info; },
+    onError: message => { view.offlineCompactionError = message; },
+    onSettled: () => { view.offlineCompactionLoading = false; },
   });
   latest.start(); // A is in flight
   latest.invalidate(); // Owner closes the dialog
   latest.start(); // Owner reopens immediately; B starts
-  loads[1].reject(new Error("B preflight failed"));
+  loads[1].reject(new Error("B info failed"));
   await loads[1].promise.catch(() => {});
   await Promise.resolve();
   await Promise.resolve();
-  assert.equal(view.compactionPlan, null);
-  assert.equal(view.compactionError, "B preflight failed");
-  assert.equal(view.compactionBusy, false);
+  assert.equal(view.offlineCompaction, null);
+  assert.equal(view.offlineCompactionError, "B info failed");
+  assert.equal(view.offlineCompactionLoading, false);
 
-  loads[0].resolve({can_compact: true, blocking_reasons: []});
+  loads[0].resolve({command: "aha2 db compact"});
   await loads[0].promise;
   await Promise.resolve();
   await Promise.resolve();
-  assert.equal(view.compactionPlan, null, "the old plan must not replace B's failure");
-  assert.equal(view.compactionError, "B preflight failed");
+  assert.equal(view.offlineCompaction, null, "the old info must not replace B's failure");
+  assert.equal(view.offlineCompactionError, "B info failed");
 });

@@ -23,14 +23,12 @@ const screenshots = process.env.AHA_BROWSER_SCREENSHOT_DIR || resolve(tools, "sc
 await mkdir(screenshots, {recursive: true});
 
 const NOW = "2026-11-16T00:00:00Z";
-const COMPACTION_PLAN = {
-  mode: "vacuum_in_place", database_path: "/srv/aha2/data/aha2.db",
+const OFFLINE_INFO = {
+  data_dir: "/srv/aha2/data", database_path: "/srv/aha2/data/aha2.db",
+  backup_dir: "/srv/aha2/data/backups", command: 'aha2 db compact --data-dir "/srv/aha2/data"',
   file_bytes: 5_000_000_000, wal_bytes: 4_000_000, shm_bytes: 32_768,
-  page_size: 4096, page_count: 1_220_000, freelist_count: 100,
-  free_bytes: 409_600, estimated_reclaimed_bytes: 409_600,
-  required_temp_bytes: 11_000_000_000, disk_free_bytes: 80_000_000_000,
-  active_tasks: 0, active_turns: 0, pending_approvals: 0, pet_approvals: 0,
-  can_compact: true, blocking_reasons: [], checked_at: NOW,
+  required_bytes: 11_000_000_000, disk_free_bytes: 80_000_000_000,
+  database_exists: true,
 };
 const INVENTORY = {
   data_dir: "/srv/aha2/data", total_bytes: 5_200_000_000, backup_count: 2,
@@ -62,7 +60,7 @@ function bootstrap() {
   return `
 const INVENTORY = ${JSON.stringify(INVENTORY)};
 const STATS = ${JSON.stringify(STATS)};
-const COMPACTION_PLAN = ${JSON.stringify(COMPACTION_PLAN)};
+const OFFLINE_INFO = ${JSON.stringify(OFFLINE_INFO)};
 const HARDWARE_PLAN = {
   retention_days: 30, max_delete_rows: 200000, cutoff: "2026-10-17T00:00:00Z",
   min_sequence: 1, max_sequence: 12_000_000, cutoff_sequence: 6_000_001,
@@ -75,7 +73,7 @@ const CONVERSATION_PLAN = {
   cutoff: "2026-10-17T00:00:00Z", eligible_rows: 1200, run_rows: 1200,
   tasks_affected: 7, avg_row_bytes: 180, run_bytes_estimate: 216_000,
 };
-window.__compactionResolvers = [];
+window.__offlineResolvers = [];
 window.__hardwareCalls = [];
 window.__purgeResolvers = {};
 window.__purgeProgress = {
@@ -85,7 +83,7 @@ window.__purgeProgress = {
 window.__resolvePurge = (kind, body, status = 200) => {
   window.__purgeResolvers[kind](new Response(JSON.stringify(body), {status, headers: {"Content-Type": "application/json"}}));
 };
-window.__compactionResolvers = [];
+window.__offlineResolvers = [];
 window.__hardwareCalls = [];
 window.__backupMode = "ok";
 const json = (value, status = 200) => new Response(JSON.stringify(value), {status, headers: {"Content-Type": "application/json"}});
@@ -141,9 +139,9 @@ window.fetch = async (input, init = {}) => {
       can_clean: true,
     }});
   }
-  if (path === "/api/v1/system/data/database/compaction" && String(init.method || "GET").toUpperCase() === "GET") {
+  if (path === "/api/v1/system/data/database/offline-compaction" && String(init.method || "GET").toUpperCase() === "GET") {
     return new Promise(resolve => {
-      window.__compactionResolvers.push(payload => resolve(payload.ok === false ? json(payload, 500) : json(payload)));
+      window.__offlineResolvers.push(payload => resolve(payload.ok === false ? json(payload, 500) : json(payload)));
     });
   }
   if (path.startsWith("/api/v1/")) return json({});
@@ -411,36 +409,50 @@ try {
   await page.locator("dialog[data-backup-dialog] [data-backup-close]").click();
   await page.waitForFunction(() => document.querySelector("dialog[data-backup-dialog]")?.open === false);
 
-  // Compaction close/reopen race: A is in flight, the Owner closes and
-  // reopens, B fails, then A succeeds late. B's error must win and A's plan
-  // must never enable compaction.
-  await page.locator("[data-db-compact]").click();
-  await page.waitForSelector("dialog[data-compact-dialog][open]", {timeout: 15000});
-  await page.waitForFunction(() => window.__compactionResolvers.length === 1);
-  await page.locator("dialog[data-compact-dialog] [data-compact-close]").click();
-  await page.waitForFunction(() => document.querySelector("dialog[data-compact-dialog]")?.open === false);
-  await page.locator("[data-db-compact]").click();
-  await page.waitForSelector("dialog[data-compact-dialog][open]", {timeout: 15000});
-  await page.waitForFunction(() => window.__compactionResolvers.length === 2);
-  await page.evaluate(() => window.__compactionResolvers[1]({ok: false, error: "compaction_preflight_failed", message: "B preflight failed"}));
-  await page.waitForSelector("[data-compact-error]", {timeout: 15000});
-  assert.match(await page.locator("[data-compact-error]").innerText(), /B preflight failed/);
-  await page.evaluate(plan => window.__compactionResolvers[0]({ok: true, plan}), COMPACTION_PLAN);
+  // Offline compaction is a read-only guide. It must show sizes, the data
+  // directory, steps and the copyable command, and it must not expose a button
+  // that starts a VACUUM while the service is serving.
+  await page.locator("[data-db-offline-compact]").click();
+  await page.waitForSelector("dialog[data-offline-compact-dialog][open]", {timeout: 15000});
+  await page.waitForFunction(() => window.__offlineResolvers.length === 1);
+  await page.evaluate(info => window.__offlineResolvers[0]({ok: true, info}), OFFLINE_INFO);
+  await page.waitForSelector("[data-offline-command]", {timeout: 15000});
+  const guide = await page.locator("dialog[data-offline-compact-dialog]").innerText();
+  assert.match(guide, /\/srv\/aha2\/data/);
+  assert.match(guide, /操作步骤/);
+  assert.match(guide, /aha2 db compact --data-dir/);
+  assert.match(guide, /还没有离线压缩记录/);
+  assert.doesNotMatch(guide, /确认压缩/, "the online run button must be gone");
+  assert.equal(await page.locator("dialog[data-offline-compact-dialog] [data-offline-run]").count(), 0);
+  await page.locator("dialog[data-offline-compact-dialog] [data-offline-compact-close]").click();
+  await page.waitForFunction(() => document.querySelector("dialog[data-offline-compact-dialog]")?.open === false);
+
+  // Close/reopen race: A is in flight, the Owner closes and reopens, B fails,
+  // then A succeeds late. B's error must win and A's info must never render.
+  await page.locator("[data-db-offline-compact]").click();
+  await page.waitForSelector("dialog[data-offline-compact-dialog][open]", {timeout: 15000});
+  await page.waitForFunction(() => window.__offlineResolvers.length === 2);
+  await page.locator("dialog[data-offline-compact-dialog] [data-offline-compact-close]").click();
+  await page.waitForFunction(() => document.querySelector("dialog[data-offline-compact-dialog]")?.open === false);
+  await page.locator("[data-db-offline-compact]").click();
+  await page.waitForSelector("dialog[data-offline-compact-dialog][open]", {timeout: 15000});
+  await page.waitForFunction(() => window.__offlineResolvers.length === 3);
+  await page.evaluate(() => window.__offlineResolvers[2]({ok: false, error: "offline_info_failed", message: "B info failed"}));
+  await page.waitForSelector("[data-offline-compaction-error]", {timeout: 15000});
+  assert.match(await page.locator("[data-offline-compaction-error]").innerText(), /B info failed/);
+  await page.evaluate(info => window.__offlineResolvers[1]({ok: true, info}), OFFLINE_INFO);
   await page.waitForTimeout(100);
-  const afterLatePlan = await page.evaluate(() => {
-    const dialog = document.querySelector("dialog[data-compact-dialog]");
+  const afterLateInfo = await page.evaluate(() => {
+    const dialog = document.querySelector("dialog[data-offline-compact-dialog]");
     return {
       text: dialog.innerText,
-      runDisabled: dialog.querySelector("[data-compact-run]")?.disabled !== false,
-      hasReady: Boolean(dialog.querySelector("[data-compact-ready]")),
+      hasCommand: Boolean(dialog.querySelector("[data-offline-command]")),
     };
   });
-  assert.match(afterLatePlan.text, /B preflight failed/, "the newer failure must survive the old success");
-  assert.doesNotMatch(afterLatePlan.text, /可以压缩/, "the old plan must not be shown");
-  assert.equal(afterLatePlan.hasReady, false, "the old plan must not render the ready state");
-  assert.equal(afterLatePlan.runDisabled, true, "compaction must stay disabled after B failed");
+  assert.match(afterLateInfo.text, /B info failed/, "the newer failure must survive the old success");
+  assert.equal(afterLateInfo.hasCommand, false, "the old info must not render the guide");
+  console.log("offline compaction guide checks passed");
   console.log("data management B dialog phone geometry checks passed");
-  console.log("compaction close/reopen race checks passed");
 } finally {
   await browser?.close();
   server.close();

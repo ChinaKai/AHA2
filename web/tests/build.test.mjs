@@ -3490,9 +3490,9 @@ test("data management shows scoped sizes and safe cleanup actions", async () => 
   assert.match(main, /function bindDataManagementPage/);
   assert.match(main, /data-data-cleanup="backups"/);
   assert.match(main, /data-data-cleanup="logs"/);
-  // The single compaction entry sits on the inventory database row, next to
-  // the other cleanup actions.
-  assert.match(main, /category\.id === "database"[\s\S]{0,160}data-db-compact/);
+  // The single offline-compaction guide entry sits on the inventory database
+  // row, next to the other cleanup actions.
+  assert.match(main, /category\.id === "database"[\s\S]{0,200}data-db-offline-compact/);
   assert.match(main, /api\.previewBackupCleanup\(\)/);
   assert.match(main, /data-backup-retry/);
   assert.match(main, /data-backup-error/);
@@ -3794,7 +3794,7 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   // error state, and a re-read when entering approvals); measured 256,568.
   // task-523 opened the data management cleanup dialogs (per-category B-K
   // dialogs, conversation cleanup, fixed one-backup preview, database
-  // compaction) and added their zh/en copy; measured 261,096, ceiling 262,144.
+  // offline compaction guide) and added their zh/en copy; measured 261,096, ceiling 262,144.
   // task-546 grouped the task-picker skills into global/project sections with
   // owning-project sub-groups; measured 262,569, ceiling 263,168.
   // task-554 added in-place data-management dialog progress/result refresh;
