@@ -249,6 +249,7 @@ type Service struct {
 	mergeMu             sync.Mutex
 	mergeDelay          time.Duration
 	mergeTimers         map[string]*time.Timer
+	mergeReadFailures   map[string]int
 	collaborationMu     sync.Mutex
 	collaborationDelay  time.Duration
 	collaborationTimers map[string]*time.Timer
@@ -266,6 +267,13 @@ type Service struct {
 	// scheduleSnapshotHook is a test seam that runs after scheduleAgent has read
 	// the pending inbox snapshot and before it claims it. Production leaves it nil.
 	scheduleSnapshotHook func()
+	// readRoundFailure is a test seam that forces a transient Round read failure
+	// in the Main-result merge path. Production leaves it nil.
+	readRoundFailure func(roundID string) error
+	// retryRoundCheckHook is a test seam that runs after retryTurn's optimistic
+	// Round read and before CreateAgentTurn re-checks the Round inside its
+	// transaction. Production leaves it nil.
+	retryRoundCheckHook func(roundID string)
 	// agentAPIProxyStartFn is the SSH stdio setup seam. Production leaves it nil
 	// and uses the real transport; tests substitute it to exercise the fallback
 	// order without an SSH host.
@@ -395,6 +403,7 @@ func NewService(database *store.Store, secretStore *secrets.FileStore, executor 
 		activities:           map[string]*domain.TurnActivityState{},
 		mergeDelay:           time.Second,
 		mergeTimers:          map[string]*time.Timer{},
+		mergeReadFailures:    map[string]int{},
 		collaborationDelay:   350 * time.Millisecond,
 		collaborationTimers:  map[string]*time.Timer{},
 		sharedContexts:       map[string]*sharedContextState{},
@@ -993,38 +1002,67 @@ func (s *Service) InterruptRound(ctx context.Context, roundID string) error {
 	if err != nil {
 		return err
 	}
-	if round.Status.Terminal() {
-		return nil
+	now := s.now().UTC()
+	closed := false
+	if !round.Status.Terminal() {
+		// Close the Round before cancelling its Turns. afterTurnTerminal calls
+		// scheduleAgent, which reuses a running Round and would create a new Turn
+		// from a pending message while this interrupt is settling. With a
+		// terminal Round, scheduleAgent cancels those items instead.
+		previous := round.Status
+		round.Status = domain.RoundInterrupted
+		round.FinishedAt = now
+		if err := s.store.UpdateRound(ctx, round, previous); err != nil {
+			// A concurrent settlement may have closed the Round after our read.
+			// That already satisfies the interrupt request; anything else is a
+			// genuine conflict and is reported to the caller.
+			current, readErr := s.store.Round(ctx, roundID)
+			if readErr != nil {
+				return err
+			}
+			if !current.Status.Terminal() {
+				return err
+			}
+			return nil
+		}
+		closed = true
+		s.cancelMainResultMerge(round.TaskID)
+		_ = s.store.CancelPendingInboxForRound(ctx, round.ID, now)
 	}
+	// The terminal fast path is a full idempotent close: a previous attempt may
+	// have closed the Round and then failed while settling its Turns. Re-read
+	// and settle every non-terminal Turn with the same rules as the first pass,
+	// drain the inbox again (afterTurnTerminal requeues claimed items), and make
+	// sure the Task is waiting for the owner.
 	turns, err := s.store.TurnsForRound(ctx, roundID)
 	if err != nil {
 		return err
 	}
-	now := s.now().UTC()
-	previous := round.Status
-	round.Status = domain.RoundInterrupted
-	round.FinishedAt = now
-	if err := s.store.UpdateRound(ctx, round, previous); err != nil {
-		return err
+	for _, turn := range turns {
+		if turn.Status.Terminal() {
+			continue
+		}
+		// A live goroutine only needs its cancel handle; a queued/preparing
+		// orphan has none, so InterruptTurn's stored-status fallback settles it.
+		if err := s.InterruptTurn(ctx, turn.ID); err != nil {
+			return err
+		}
 	}
+	// InterruptTurn settlement may have re-armed the merge timer or requeued a
+	// claimed inbox item; the interrupted Round must not schedule Main work.
 	s.cancelMainResultMerge(round.TaskID)
-	_ = s.store.CancelPendingInboxForRound(ctx, round.ID, now)
+	if err := s.store.CancelPendingInboxForRound(ctx, round.ID, s.now().UTC()); err != nil {
+		log.Printf("interrupt round %s: cancel pending inbox: %v", roundID, err)
+	}
 	task, err := s.store.Task(ctx, round.TaskID)
 	if err == nil && !task.Status.Terminal() && task.Status != domain.TaskWaitingUser {
 		_ = s.store.UpdateTaskStatus(ctx, task.ID, task.Status, domain.TaskWaitingUser, timeString(now), "")
 	}
-	s.mu.Lock()
-	for _, turn := range turns {
-		if !turn.Status.Terminal() {
-			if cancel := s.cancels[turn.ID]; cancel != nil {
-				cancel()
-			}
-		}
+	if closed {
+		s.emit(ctx, round.TaskID, "round", round.ID, "round_interrupted", map[string]any{
+			"round_id": round.ID, "round_sequence": round.Sequence,
+		})
 	}
-	s.mu.Unlock()
-	s.emit(ctx, round.TaskID, "round", round.ID, "round_interrupted", map[string]any{
-		"round_id": round.ID, "round_sequence": round.Sequence,
-	})
 	return nil
 }
 
