@@ -468,3 +468,63 @@ func TestKnowledgeVaultRollbackRefusedAfterStartupDegraded(t *testing.T) {
 		t.Fatal("a refused close changed the runtime switch")
 	}
 }
+
+func TestKnowledgeVaultAutoSyncSwitchPersistsAndReportsStatus(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	config := knowledgevault.DefaultConfig(dataDir)
+	manager, err := knowledgevault.NewManager(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	server, client, csrf, database := knowledgeVaultServerAt(t, manager, dataDir)
+
+	settings := knowledgeVaultSettingsSnapshot(t, client, server.URL)
+	autoSync, ok := settings["auto_sync"].(map[string]any)
+	if !ok {
+		t.Fatalf("settings has no auto_sync status: %#v", settings)
+	}
+	// The migration default is on and visible before the loop starts.
+	if autoSync["enabled"] != true {
+		t.Fatalf("auto_sync default = %#v", autoSync)
+	}
+
+	response := requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/settings/knowledge-vault", map[string]any{"auto_sync": false}, csrf)
+	var updated map[string]any
+	decodeResponse(t, response, &updated)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("disable auto-sync status=%d payload=%#v", response.StatusCode, updated)
+	}
+	if updated["settings"].(map[string]any)["auto_sync"].(map[string]any)["enabled"] != false {
+		t.Fatalf("auto_sync still visible as on: %#v", updated["settings"])
+	}
+	stored, err := database.KnowledgeVaultSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.AutoSync {
+		t.Fatalf("auto_sync=false was not persisted: %+v", stored)
+	}
+
+	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/settings/knowledge-vault", map[string]any{"auto_sync": true}, csrf)
+	decodeResponse(t, response, &updated)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("re-enable auto-sync status=%d payload=%#v", response.StatusCode, updated)
+	}
+	stored, err = database.KnowledgeVaultSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stored.AutoSync {
+		t.Fatalf("auto_sync=true was not persisted: %+v", stored)
+	}
+
+	// An empty body is rejected instead of being read as "disable everything".
+	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/settings/knowledge-vault", map[string]any{}, csrf)
+	var invalid map[string]any
+	decodeResponse(t, response, &invalid)
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("empty update status=%d payload=%#v", response.StatusCode, invalid)
+	}
+}

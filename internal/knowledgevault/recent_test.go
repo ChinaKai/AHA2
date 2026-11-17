@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -182,5 +183,41 @@ func TestRecentContentChangesSpecialCases(t *testing.T) {
 	nonGitChanges := nonGit.recentContentChanges(ctx, []recentCandidate{{path: "a.md"}})
 	if change := nonGitChanges["a.md"]; change.kind != RecentChangeUnknown || !change.contentChanged() {
 		t.Fatalf("non-git change = %+v", change)
+	}
+}
+
+func TestRecentTreatsCRLFWorktreeAsUnchangedWithLFEolPolicy(t *testing.T) {
+	config, reader, ctx := recentGitFixture(t)
+	// Pin the same policy the auto-sync preflight writes, then commit it.
+	testGitCommand(t, config.VaultPath, "config", "core.autocrlf", "false")
+	writeGitTestFile(t, config.VaultPath, ".gitattributes", "* text=auto eol=lf\n")
+	testGitCommand(t, config.VaultPath, "add", ".gitattributes")
+	testGitCommand(t, config.VaultPath, "commit", "-m", "lf policy")
+
+	target := filepath.Join(config.VaultPath, filepath.FromSlash(recentModuleA))
+	content, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	crlf := strings.ReplaceAll(string(content), "\n", "\r\n")
+	if err := os.WriteFile(target, []byte(crlf), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The clean filter converts CRLF back to LF, so there is no content diff.
+	// `git status` may still mention the path because its stat cache changed;
+	// the Recent feed must compare blob ids, not raw worktree bytes.
+	if diff := strings.TrimSpace(string(gitOutputBytes(t, config.VaultPath, "diff", "--name-only"))); diff != "" {
+		t.Fatalf("CRLF worktree has a real diff:\n%s", diff)
+	}
+	recent, err := reader.Recent(ctx, "", 120, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, ok := recentItemByPath(recent.Items, recentModuleA)
+	if !ok {
+		t.Fatalf("recent feed lost %s", recentModuleA)
+	}
+	if item.ContentChanged || item.ChangeKind != RecentChangeNone {
+		t.Fatalf("CRLF worktree reported as changed: %+v", item)
 	}
 }

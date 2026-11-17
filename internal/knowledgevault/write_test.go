@@ -676,3 +676,25 @@ func TestWriteKnowledgeRuntimeGateDefaultsClosed(t *testing.T) {
 		t.Fatalf("feedback with gate off = %v", err)
 	}
 }
+
+func TestWriteAndFeedbackRequestAutoCommit(t *testing.T) {
+	manager, _, ctx := newWriteTestManager(t)
+	requests := 0
+	manager.SetAutoCommitRequester(func() { requests++ })
+	created, err := manager.WriteKnowledge(ctx, writeTestCreate("自动提交请求"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 1 {
+		t.Fatalf("write requested auto commit %d times, want 1", requests)
+	}
+	if _, err := manager.KnowledgeFeedback(ctx, FeedbackRequest{
+		Scope: WriteScopeProject, ProjectID: "project-demo", EntryID: created.ID,
+		Kind: FeedbackHelped,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 2 {
+		t.Fatalf("feedback requested auto commit %d times, want 2", requests)
+	}
+}

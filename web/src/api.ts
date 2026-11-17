@@ -1218,6 +1218,10 @@ class APIClient {
     return this.request("/api/v1/settings/knowledge-vault", {method: "PUT", body: JSON.stringify({enabled})});
   }
 
+  updateKnowledgeVaultAutoSync(enabled: boolean): Promise<KnowledgeVaultSettingsResponse> {
+    return this.request("/api/v1/settings/knowledge-vault", {method: "PUT", body: JSON.stringify({auto_sync: enabled})});
+  }
+
   initializeKnowledgeVaultSamples(samples = true): Promise<KnowledgeVaultInitResponse> {
     return this.request("/api/v1/settings/knowledge-vault/init", {method: "POST", body: JSON.stringify({samples})});
   }

@@ -3875,10 +3875,30 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	var hasV147 bool
 	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=147)`).Scan(&hasV147)
+	if !hasV147 || !s.tableHasColumn(ctx, "knowledge_vault_settings", "auto_sync") {
+		// Auto-sync defaults to on for both fresh installs and upgrades; the
+		// owner switch is stored next to the knowledge source switch and read
+		// by the background syncer.
+		if _, err := s.db.ExecContext(ctx,
+			`ALTER TABLE knowledge_vault_settings ADD COLUMN auto_sync INTEGER NOT NULL DEFAULT 1 CHECK(auto_sync IN (0,1))`); err != nil &&
+			!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("apply schema v147 knowledge vault auto-sync: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(147, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return fmt.Errorf("record schema v147: %w", err)
+		}
+	}
+
+	var hasV148 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=148)`).Scan(&hasV148)
 	var hasBrowserProfiles bool
 	_ = s.db.QueryRowContext(ctx,
 		`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='browser_profiles')`).Scan(&hasBrowserProfiles)
-	if !hasV147 || !hasBrowserProfiles {
+	var hasBrowserGrantUnique bool
+	_ = s.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_browser_task_grants_one_active')`).Scan(&hasBrowserGrantUnique)
+	if !hasV148 || !hasBrowserProfiles || !hasBrowserGrantUnique {
 		// Shared-browser POC. AHA stores only logical identifiers; the host owns
 		// the real user-data directories. The partial unique index is the database
 		// backstop for "one active session per profile" — the host's directory
@@ -3893,7 +3913,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		)`); err != nil {
-			return fmt.Errorf("apply schema v147 browser profiles: %w", err)
+			return fmt.Errorf("apply schema v148 browser profiles: %w", err)
 		}
 		if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS browser_sessions(
 			id TEXT PRIMARY KEY,
@@ -3908,12 +3928,12 @@ func (s *Store) migrate(ctx context.Context) error {
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		)`); err != nil {
-			return fmt.Errorf("apply schema v147 browser sessions: %w", err)
+			return fmt.Errorf("apply schema v148 browser sessions: %w", err)
 		}
 		if _, err := s.db.ExecContext(ctx,
 			`CREATE UNIQUE INDEX IF NOT EXISTS idx_browser_sessions_one_active
 			 ON browser_sessions(profile_id) WHERE state <> 'closed'`); err != nil {
-			return fmt.Errorf("apply schema v147 browser session uniqueness: %w", err)
+			return fmt.Errorf("apply schema v148 browser session uniqueness: %w", err)
 		}
 		if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS browser_task_grants(
 			id TEXT PRIMARY KEY,
@@ -3926,11 +3946,11 @@ func (s *Store) migrate(ctx context.Context) error {
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		)`); err != nil {
-			return fmt.Errorf("apply schema v147 browser task grants: %w", err)
+			return fmt.Errorf("apply schema v148 browser task grants: %w", err)
 		}
 		if _, err := s.db.ExecContext(ctx,
 			`CREATE INDEX IF NOT EXISTS idx_browser_task_grants_task ON browser_task_grants(task_id,profile_id)`); err != nil {
-			return fmt.Errorf("apply schema v147 browser grant index: %w", err)
+			return fmt.Errorf("apply schema v148 browser grant index: %w", err)
 		}
 		if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS browser_tabs(
 			id TEXT PRIMARY KEY,
@@ -3943,23 +3963,12 @@ func (s *Store) migrate(ctx context.Context) error {
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		)`); err != nil {
-			return fmt.Errorf("apply schema v147 browser tabs: %w", err)
+			return fmt.Errorf("apply schema v148 browser tabs: %w", err)
 		}
 		if _, err := s.db.ExecContext(ctx,
 			`CREATE INDEX IF NOT EXISTS idx_browser_tabs_grant ON browser_tabs(grant_id)`); err != nil {
-			return fmt.Errorf("apply schema v147 browser tab index: %w", err)
+			return fmt.Errorf("apply schema v148 browser tab index: %w", err)
 		}
-		if _, err := s.db.ExecContext(ctx,
-			`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(147, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
-			return fmt.Errorf("record schema v147: %w", err)
-		}
-	}
-	var hasV148 bool
-	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=148)`).Scan(&hasV148)
-	var hasBrowserGrantUnique bool
-	_ = s.db.QueryRowContext(ctx,
-		`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_browser_task_grants_one_active')`).Scan(&hasBrowserGrantUnique)
-	if !hasV148 || !hasBrowserGrantUnique {
 		// Database-level backstop for the one-active-grant-per-Task/Profile
 		// invariant. Older rows may already contain duplicates from the first
 		// POC commit, so revoke all but the newest before creating the index.

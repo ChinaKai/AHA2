@@ -94,6 +94,21 @@ func (s *Store) CreateAgentTurn(ctx context.Context, item domain.Turn) (domain.T
 		return domain.Turn{}, err
 	}
 	defer tx.Rollback()
+	// Recheck the Round inside the write transaction. A caller's optimistic
+	// read can race InterruptRound; without this check the INSERT would attach a
+	// retry Turn to a Round that is already terminal. Rows without a Round (old
+	// fixtures and legacy Turns) keep working because the missing row is not a
+	// terminal signal.
+	if item.RoundID != "" {
+		var status string
+		err := tx.QueryRowContext(ctx, `SELECT status FROM task_rounds WHERE id=?`, item.RoundID).Scan(&status)
+		switch {
+		case err == nil && domain.RoundStatus(status).Terminal():
+			return domain.Turn{}, ErrRoundTerminal
+		case err != nil && !errors.Is(err, sql.ErrNoRows):
+			return domain.Turn{}, err
+		}
+	}
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence),0)+1 FROM turns WHERE task_id=?`, item.TaskID).
 		Scan(&item.Sequence); err != nil {
 		return domain.Turn{}, err

@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -105,15 +106,44 @@ type Git struct {
 	vaultPath        string
 	allowLocalRemote bool
 	timeout          time.Duration
+	// mu serializes every mutating git operation (manual sync, auto commit,
+	// renormalize, init) for this vault. It is shared by all Git views that
+	// Manager.Git returns. Nil means "standalone view" (read-only tests).
+	mu *sync.Mutex
+	// manager lets auto-commit wait for an in-flight vault write before it
+	// reads the worktree. It is nil for standalone views.
+	manager *Manager
 }
 
-// Git returns a stateless view over the vault directory. Tests enable local
-// remotes through Config.AllowLocalRemote; production keeps the SSH-only rule.
+// Git returns a view over the vault directory. Tests enable local remotes
+// through Config.AllowLocalRemote; production keeps the SSH-only rule.
 func (m *Manager) Git() *Git {
 	return &Git{
 		vaultPath: m.config.VaultPath, allowLocalRemote: m.config.AllowLocalRemote,
-		timeout: gitCommandTimeout,
+		timeout: gitCommandTimeout, mu: &m.gitMu, manager: m,
 	}
+}
+
+// lockRepo takes the vault-wide git mutex. Every mutating entry point uses it
+// so a manual push and the background auto-sync can never run concurrently.
+func (g *Git) lockRepo() func() {
+	if g.mu == nil {
+		return func() {}
+	}
+	g.mu.Lock()
+	return g.mu.Unlock
+}
+
+// lockWriterBlocks new git work until no knowledge write holds the manager
+// write lock. Writes publish files with an atomic rename, so this closes the
+// remaining window where a multi-file skill update could be committed half
+// written.
+func (g *Git) lockWriterBlocks() func() {
+	if g.manager == nil {
+		return func() {}
+	}
+	g.manager.mu.RLock()
+	return g.manager.mu.RUnlock
 }
 
 func (g *Git) gitBinary() (string, error) {
@@ -429,16 +459,36 @@ func (g *Git) remoteURL(ctx context.Context) (string, error) {
 	return remote, nil
 }
 
+// fetchOrigin refreshes origin/<branch> without touching the local branch or
+// the worktree. The explicit refspec makes the update independent of the
+// remote's configured fetch rules; the '+' only rewinds the remote-tracking
+// ref, never local history.
+func (g *Git) fetchOrigin(ctx context.Context, branch string) error {
+	remote, err := g.remoteURL(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = g.command(ctx, "fetch", "--no-tags", "origin",
+		"+refs/heads/"+branch+":refs/remotes/origin/"+branch)
+	return redactGitError(err, remote)
+}
+
+// isClean reports content changes, not git's stat cache: a CRLF rewrite that
+// the eol=lf clean filter normalizes back to the same blob is clean even
+// though `git status` may mention the path.
 func (g *Git) isClean(ctx context.Context) (bool, int, error) {
-	output, err := g.command(ctx, "status", "--porcelain")
+	changes, err := g.worktreeChanges(ctx)
 	if err != nil {
 		return false, 0, err
 	}
-	if strings.TrimSpace(output) == "" {
-		return true, 0, nil
+	count := 0
+	for _, path := range changes.paths {
+		if autoCommitPathExclusion(path) == "internal" {
+			continue
+		}
+		count++
 	}
-	lines := strings.Split(strings.TrimSpace(output), "\n")
-	return false, len(lines), nil
+	return count == 0, count, nil
 }
 
 func (g *Git) requireClean(ctx context.Context) error {
@@ -789,6 +839,8 @@ func ensureGitignore(vaultPath string) error {
 // missing .gitignore is restored and a repository stuck without a first commit
 // is completed.
 func (g *Git) Init(ctx context.Context) (GitOpResult, error) {
+	unlock := g.lockRepo()
+	defer unlock()
 	if err := g.requireVault(ctx); err == nil {
 		// Already a repository.
 	} else if errors.Is(err, ErrNotGitRepository) {
@@ -820,6 +872,12 @@ func (g *Git) Init(ctx context.Context) (GitOpResult, error) {
 	if err := ensureGitignore(g.vaultPath); err != nil {
 		return GitOpResult{}, err
 	}
+	// Pin the text policy before the first commit so a fresh vault never
+	// records platform-dependent line endings. The upgrade path applies the
+	// same policy through the auto-sync preflight.
+	if _, err := g.ensureTextPolicy(ctx); err != nil {
+		return GitOpResult{}, err
+	}
 	created := false
 	if !g.hasCommit(ctx) {
 		if _, err := g.command(ctx, "add", "-A"); err != nil {
@@ -844,6 +902,8 @@ func (g *Git) Init(ctx context.Context) (GitOpResult, error) {
 // SetRemote validates and stores the SSH remote and branch target. Passing an
 // empty remote keeps the current remote so the owner can change only branch.
 func (g *Git) SetRemote(ctx context.Context, remote, branch string) (GitOpResult, error) {
+	unlock := g.lockRepo()
+	defer unlock()
 	if err := g.requireVault(ctx); err != nil {
 		return GitOpResult{}, err
 	}
@@ -917,6 +977,8 @@ func normalizeCommitMessage(message string) (string, error) {
 }
 
 func (g *Git) Commit(ctx context.Context, message string) (GitOpResult, error) {
+	unlock := g.lockRepo()
+	defer unlock()
 	if err := g.requireVault(ctx); err != nil {
 		return GitOpResult{}, err
 	}
@@ -953,10 +1015,23 @@ func (g *Git) Commit(ctx context.Context, message string) (GitOpResult, error) {
 }
 
 func (g *Git) Pull(ctx context.Context) (GitOpResult, error) {
+	unlock := g.lockRepo()
+	defer unlock()
 	return g.pull(ctx, true)
 }
 
 func (g *Git) pull(ctx context.Context, record bool) (GitOpResult, error) {
+	return g.pullWithPolicy(ctx, record, true)
+}
+
+// pullAllowDirty is the auto-sync variant. Blocked untracked files must not
+// prevent pulling remote commits, so it skips the clean-worktree gate; git
+// itself still refuses a pull that would overwrite a local file.
+func (g *Git) pullAllowDirty(ctx context.Context, record bool) (GitOpResult, error) {
+	return g.pullWithPolicy(ctx, record, false)
+}
+
+func (g *Git) pullWithPolicy(ctx context.Context, record, requireClean bool) (GitOpResult, error) {
 	if err := g.requireVault(ctx); err != nil {
 		return GitOpResult{}, err
 	}
@@ -964,8 +1039,10 @@ func (g *Git) pull(ctx context.Context, record bool) (GitOpResult, error) {
 	if err != nil {
 		return GitOpResult{}, err
 	}
-	if err := g.requireClean(ctx); err != nil {
-		return GitOpResult{}, err
+	if requireClean {
+		if err := g.requireClean(ctx); err != nil {
+			return GitOpResult{}, err
+		}
 	}
 	branch := g.configuredBranch(ctx)
 	if _, err := g.command(ctx, "pull", "--ff-only", "origin", branch); err != nil {
@@ -999,6 +1076,8 @@ func (g *Git) pull(ctx context.Context, record bool) (GitOpResult, error) {
 }
 
 func (g *Git) Push(ctx context.Context) (GitOpResult, error) {
+	unlock := g.lockRepo()
+	defer unlock()
 	return g.push(ctx, true)
 }
 
@@ -1041,6 +1120,8 @@ func (g *Git) push(ctx context.Context, record bool) (GitOpResult, error) {
 // Sync is pull --ff-only followed by push. It refuses a dirty worktree instead
 // of auto-committing the owner's edits, and it never forces or merges.
 func (g *Git) Sync(ctx context.Context) (GitOpResult, error) {
+	unlock := g.lockRepo()
+	defer unlock()
 	if err := g.requireVault(ctx); err != nil {
 		return GitOpResult{}, err
 	}
