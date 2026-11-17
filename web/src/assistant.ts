@@ -344,7 +344,14 @@ export function mountAssistant(): void {
     brain: (force?: boolean) => maybeRunPetBrain(Boolean(force)),
   };
   positionAtDock(false);
-  restoreLocalPetPosition();
+  // mountAssistant runs before the first shell render, so the bottom nav (and
+  // the lazy page content the pet must stay clear of) does not exist yet.
+  // Re-dock once the shell has finished loading, unless the owner already
+  // placed the pet themselves.
+  const restoredPosition = restoreLocalPetPosition();
+  if (!restoredPosition) {
+    window.requestAnimationFrame(() => settleInitialDock());
+  }
   void refreshAssistant();
   if (HINTS_ENABLED) {
     void refreshHints();
@@ -657,15 +664,17 @@ function saveLocalPetPosition(): void {
   }
 }
 
-function restoreLocalPetPosition(): void {
+function restoreLocalPetPosition(): boolean {
   try {
     const raw = localStorage.getItem(PET_POSITION_KEY);
-    if (!raw) return;
+    if (!raw) return false;
     const point = JSON.parse(raw) as {x?: number; y?: number};
-    if (typeof point.x !== "number" || typeof point.y !== "number") return;
+    if (typeof point.x !== "number" || typeof point.y !== "number") return false;
     setPetPosition(point.x * window.innerWidth, point.y * window.innerHeight);
+    return true;
   } catch {
     // Ignore malformed local state and keep the dock position.
+    return false;
   }
 }
 
@@ -1527,6 +1536,19 @@ function currentPetLayout(): PetLayout {
   };
 }
 
+// The first dock runs before the shell and lazy route have painted. Wait out
+// the boot/loading cards, then pick a corner that keeps the pet off the page
+// heading, toolbar and empty state. Bounded so a stuck loader cannot keep the
+// pet pinned to the top-left corner forever.
+function settleInitialDock(attempt = 0): void {
+  if (panelOpen || dragging) return;
+  if (document.querySelector(".boot-loading, .chunk-state") && attempt < 25) {
+    window.setTimeout(() => settleInitialDock(attempt + 1), 120);
+    return;
+  }
+  positionAtDock(false);
+}
+
 function dockPoint(): {x: number; y: number} {
   if (panelOpen && panel && !panel.hidden) {
     // Default: sit inside the chat panel, just under its header and clear of
@@ -1542,10 +1564,21 @@ function dockPoint(): {x: number; y: number} {
   const navHeight = nav && window.getComputedStyle(nav).display !== "none"
     ? nav.getBoundingClientRect().height
     : 0;
-  return {
-    x: Math.max(12, window.innerWidth - PET_SIZE - 22),
-    y: Math.max(12, window.innerHeight - navHeight - PET_SIZE - 12),
-  };
+  const maxY = Math.max(12, window.innerHeight - navHeight - PET_SIZE - 12);
+  const rightX = Math.max(12, window.innerWidth - PET_SIZE - 22);
+  const leftX = 12;
+  // A short landscape window has content right up to the bottom-right corner.
+  // Prefer the usual corner, then the opposite corner and the side edges,
+  // instead of parking the pet on top of a heading or an action button.
+  const candidates = [
+    {x: rightX, y: maxY},
+    {x: leftX, y: maxY},
+    {x: rightX, y: Math.max(12, Math.round((window.innerHeight - navHeight - PET_SIZE) / 2))},
+    {x: leftX, y: Math.max(12, Math.round((window.innerHeight - navHeight - PET_SIZE) / 2))},
+    {x: rightX, y: 12},
+    {x: leftX, y: 12},
+  ];
+  return candidates.find(point => !blockedAt(point.x, point.y)) || candidates[0];
 }
 
 function hintPoint(hint: AssistantHint): {x: number; y: number} | null {
@@ -1563,18 +1596,41 @@ function hintPoint(hint: AssistantHint): {x: number; y: number} | null {
 }
 
 function safePoint(): {x: number; y: number} {
-  // Global bottom layer: roam the entire viewport, including behind panels.
-  return {
-    x: 8 + Math.random() * Math.max(1, window.innerWidth - PET_SIZE - 16),
-    y: 8 + Math.random() * Math.max(1, window.innerHeight - PET_SIZE - 16),
-  };
+  // Global bottom layer: roam the viewport, but never park on top of the page
+  // heading, a resource toolbar/empty state or an actual control.
+  const maxX = Math.max(1, window.innerWidth - PET_SIZE - 16);
+  const maxY = Math.max(1, window.innerHeight - PET_SIZE - 16);
+  for (let attempt = 0; attempt < 24; attempt++) {
+    const point = {x: 8 + Math.random() * maxX, y: 8 + Math.random() * maxY};
+    if (!blockedAt(point.x, point.y)) return point;
+  }
+  return dockPoint();
 }
 
 function blockedAt(x: number, y: number): boolean {
-  const element = document.elementFromPoint(x, y);
-  if (!element) return false;
-  if (element.closest(".assistant-layer")) return false;
-  return Boolean(element.closest("button,a,input,select,textarea,[contenteditable='true'],.sidebar,.bottom-nav,.mobile-header,dialog,.assistant-panel"));
+  // Check the whole pet, not only its top-left point: its body can cover a
+  // control even when the anchor lands on empty text.
+  const size = pet?.getBoundingClientRect().width || PET_SIZE;
+  const points = [
+    [x + 2, y + 2],
+    [x + size - 2, y + 2],
+    [x + 2, y + size - 2],
+    [x + size - 2, y + size - 2],
+    [x + size / 2, y + size / 2],
+  ];
+  const controlSelector = "button,a,input,select,textarea,[contenteditable='true'],.sidebar,.bottom-nav,.mobile-header,dialog,.assistant-panel";
+  // Page headings and the resource copy/CTA are what the Owner reported the
+  // pet covering. Block their text boxes, but not the whole card: a short
+  // landscape viewport leaves no clear edge, and the blank part of a centered
+  // empty state is a perfectly good parking spot.
+  const textSelector = ".page-head h1,.page-head p,.resource-panel-toolbar strong,.resource-panel-toolbar p,.empty-state strong,.empty-state > span,.empty-state > button,.resource-tabs";
+  return points.some(([px, py]) => {
+    // elementsFromPoint, not elementFromPoint: the pet itself is hit-testable
+    // and would otherwise mask the content underneath its current position.
+    const element = document.elementsFromPoint(px, py).find(item => !item.closest(".assistant-layer"));
+    if (!element) return false;
+    return Boolean(element.closest(controlSelector) || element.closest(textSelector));
+  });
 }
 
 function setPetMotion(moving: boolean): void {

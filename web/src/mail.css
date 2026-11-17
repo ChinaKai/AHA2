@@ -171,10 +171,22 @@
 .mail-timeline-notice { display: grid; gap: 3px; font-size: 11px; }
 .mail-timeline-notice span { color: var(--muted); }
 .empty-state.compact { min-height: 96px; }
+/* Empty states are one stacked block. With no explicit layout the icon,
+   title, help text and CTA all flow inline; on a phone the CTA then sits in
+   the middle of the wrapped paragraph. Keep the copy and action on separate
+   rows and center the group. */
+.hardware-resource-empty { display: grid; align-content: center; justify-items: center; gap: 8px; padding: 28px 18px; text-align: center; }
+.hardware-resource-empty > .icon { width: 30px; height: 30px; color: var(--muted); }
+.hardware-resource-empty strong { font-size: 15px; }
+.hardware-resource-empty > span { max-width: 46ch; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.hardware-resource-empty > button { margin-top: 4px; }
 @media (max-width: 760px) {
   .resource-tabs, .mail-subtabs { flex-wrap: nowrap; }
   .resource-panel-toolbar { display: grid; gap: 8px; }
   .resource-panel-toolbar button { justify-self: start; }
+  /* The actions are their own row; keep them left-aligned and let a narrow
+     phone wrap the refresh + create pair instead of squeezing the copy. */
+  .resource-panel-toolbar .browser-resource-toolbar-actions { justify-self: start; flex-wrap: wrap; }
   .mail-resource-row { grid-template-columns: minmax(0,1fr) auto; gap: 9px; }
   .mail-resource-meta { grid-column: 1 / 2; justify-content: flex-start; }
   /* Keep the action bar horizontal on <=760px; vertical stacks widened the

@@ -32,11 +32,15 @@ export function renderResourcesPage(data: ResourcesPageData): string {
   const panel = data.tab === "mail" ? renderMailResources(data.mail)
     : data.tab === "browser" ? renderBrowserResources(data.browser)
     : renderHardwareResources(data.hardware);
-  return `<section class="resources-view">
+  // Every view except Resources already owns a .page container. Without it the
+  // content sits flush against the screen edge on phones and the toolbar has
+  // no horizontal padding, so keep the same shell here instead of styling the
+  // section itself.
+  return `<section class="page resources-page"><section class="resources-view">
     <header class="page-head"><div><h1>资源</h1><p>系统级硬件、邮件与浏览器能力集中在这里维护；Task 只选择绑定，不复制凭据。</p></div></header>
     <div class="resource-tabs" role="tablist" aria-label="资源类型">${tabButton(data.tab, "hardware", "硬件", "hardware")}${tabButton(data.tab, "mail", "邮件", "mail")}${tabButton(data.tab, "browser", "浏览器", "browser")}</div>
     <div class="resources-panel" role="tabpanel">${panel}</div>
-  </section>`;
+  </section></section>`;
 }
 
 export function bindResourcesPage(data: ResourcesPageData, actions: ResourcesPageActions): void {

@@ -207,6 +207,15 @@ function kt(key: string, values: Record<string, string | number> = {}): string {
 // Git is only rendered by this lazy route, so its layout CSS rides in the same
 // chunk instead of growing the first-screen stylesheet.
 const GIT_STYLES = `
+/* The gear dialog also only renders inside this lazy route, so its height
+   behaviour stays out of the first-screen stylesheet. The header and footer
+   stay put while the body scrolls, so the close control and bottom action
+   remain reachable on a short landscape viewport. */
+.kv-settings { overflow: hidden; }
+.kv-settings[open] { display: flex; flex-direction: column; }
+.kv-settings > header { flex: 0 0 auto; padding-bottom: var(--space-2); background: var(--color-surface-raised); }
+.kv-settings-body { flex: 1 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto; }
+.kv-settings > footer { flex: 0 0 auto; padding-top: var(--space-2); background: var(--color-surface-raised); }
 .kv-settings-notice { margin: var(--space-2) 0 0; font-size: var(--font-size-12); line-height: 1.5; overflow-wrap: anywhere; }
 .kv-settings-notice.error { color: var(--color-danger); }
 .kv-settings-section { margin-top: var(--space-4); padding-top: var(--space-3); border-top: 1px solid var(--color-border); min-width: 0; }
@@ -224,9 +233,13 @@ const GIT_STYLES = `
 .kv-settings-badge.is-ok { background: var(--color-success-soft); color: var(--color-success-ink); }
 .kv-settings-badge.is-warn { background: var(--color-warning-soft); color: var(--color-warning-ink); }
 .kv-settings-badge.is-bad { background: var(--color-danger-soft); color: var(--color-danger-ink); }
-.kv-autosync-toggle { display: flex; align-items: flex-start; gap: 8px; margin-top: var(--space-2); font-size: var(--font-size-13); }
-.kv-autosync-toggle input { flex: 0 0 auto; margin-top: 3px; cursor: pointer; }
+.kv-autosync-toggle { display: flex; align-items: flex-start; gap: 8px; min-width: 0; margin-top: var(--space-2); font-size: var(--font-size-13); }
+/* The global input rule stretches every control to width:100%/38px. A
+   checkbox must keep its intrinsic size or it fills the row, pushes the copy
+   off the dialog edge and reads as a giant tick. */
+.kv-autosync-toggle input[type="checkbox"] { flex: 0 0 auto; width: 16px; min-width: 16px; height: 16px; min-height: 0; margin: 3px 0 0; padding: 0; cursor: pointer; accent-color: var(--color-accent); }
 .kv-autosync-toggle input:disabled { cursor: progress; }
+.kv-autosync-toggle > span { min-width: 0; }
 .kv-autosync-toggle small { display: block; margin-top: 2px; color: var(--color-text-muted); font-size: var(--font-size-12); line-height: 1.5; }
 .kv-autosync dl { margin-top: var(--space-2); }
 .kv-settings-copy { display: flex; align-items: flex-start; gap: 6px; }
@@ -1956,6 +1969,7 @@ function settingsDialogHTML(): string {
     : "";
   return `<dialog id="kv-settings-dialog" class="kv-settings">
     <header><h2>${t("kv.settings")}</h2><button type="button" class="icon-button" data-kv-settings-close aria-label="${t("kv.close")}">${icon("close")}</button></header>
+    <div class="kv-settings-body">
     <dl>
       <div><dt>${t("kv.settingsVault")}</dt><dd class="kv-settings-value kv-settings-copy"><span>${escapeVaultHTML(vaultPath || t("kv.none"))}</span>${settingsCopyHTML(vaultPath, "kv.copyVaultPath")}</dd></div>
       <div><dt>${t("kv.settingsIndex")}</dt><dd class="kv-settings-value">${escapeVaultHTML(indexReady ? t("kv.settingsReady") : t("kv.settingsNotReady"))}</dd></div>
@@ -1967,6 +1981,7 @@ function settingsDialogHTML(): string {
     ${gitSectionHTML()}
     ${autoSyncSectionHTML()}
     <p class="kv-hint">${t("kv.settingsHint")}</p>
+    </div>
     <footer><button type="button" data-kv-settings-close>${t("kv.close")}</button></footer>
   </dialog>`;
 }
