@@ -44,8 +44,8 @@ var errOfflineBackupVerify = errors.New("offline compaction backup verification 
 // service has stopped:
 //
 //	instance lock -> SQLite exclusive lock -> size/disk checks ->
-//	verified DB/WAL/SHM backup -> row counts -> WAL checkpoint -> VACUUM ->
-//	integrity_check -> row counts.
+//	verified single-file snapshot backup -> row counts -> WAL checkpoint ->
+//	VACUUM -> integrity_check -> row counts.
 //
 // It never migrates the schema and never starts online compaction. A refused
 // run leaves the database untouched. A failed run keeps the database and the

@@ -116,7 +116,10 @@ test("database panel renders file stats and the VACUUM note without a second com
   assert.match(html, /文件不一定变小/);
   assert.match(html, /VACUUM/);
   assert.match(html, /aha2 db compact --data-dir/);
+  assert.match(html, /单文件数据库快照/);
   assert.doesNotMatch(html, /「压缩数据库」/);
+  assert.doesNotMatch(html, /「压缩数据库」只重建数据库文件并保留备份/);
+  assert.doesNotMatch(html, /备份 DB\/WAL\/SHM/);
   assert.doesNotMatch(html, /原地 VACUUM/);
   // The single compaction entry lives on the inventory database row, next to
   // the other cleanup actions, not on this details card.
@@ -338,6 +341,8 @@ test("database panel strings are translated in English", () => {
     assert.match(html, /AHA2 never runs VACUUM while it is serving/);
     assert.match(html, /does not necessarily shrink/);
     assert.match(html, /aha2 db compact --data-dir/);
+    assert.match(html, /single-file database snapshot/);
+    assert.doesNotMatch(html, /backs up DB\/WAL\/SHM/i);
     assert.doesNotMatch(html, /brief write freeze|Compact database to rebuild/);
     assert.doesNotMatch(html, /[一-鿿]/, "no Chinese text leaks into the English panel");
     assert.match(panel.conversationFormError("30", false, false), /Select at least/);
@@ -368,6 +373,7 @@ test("data page wires backup preview, database cleanup and the offline guide", a
   const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
   const api = await readFile(resolve(root, "src", "api.ts"), "utf8");
   const build = await readFile(resolve(root, "..", "scripts", "build-web.mjs"), "utf8");
+  const i18nSource = await readFile(resolve(root, "src", "i18n.ts"), "utf8");
   const app = await readFile(resolve(modulesDir, "app.js"), "utf8");
   assert.match(main, /renderDatabasePanel\(state\.dataRetention\)/);
   assert.match(main, /api\.previewBackupCleanup\(\)/);
@@ -380,6 +386,11 @@ test("data page wires backup preview, database cleanup and the offline guide", a
   // The inventory entry opens a read-only guided dialog. There must be no
   // client path that posts a compaction request.
   assert.match(main, /category\.id === "database"[\s\S]{0,200}data-db-offline-compact/);
+  // The old online-compaction button copy and the DB/WAL/SHM backup wording
+  // must not come back anywhere in the source catalog.
+  assert.doesNotMatch(i18nSource, /「压缩数据库」/);
+  assert.doesNotMatch(i18nSource, /备份 DB\/WAL\/SHM/);
+  assert.doesNotMatch(i18nSource, /backs up DB\/WAL\/SHM/i);
   assert.match(main, /api\.offlineCompactionInfo\(\)/);
   assert.match(main, /const offlineCompactionInfoRequest = createLatestRequest\(/);
   assert.match(main, /offlineCompactionInfoRequest\.invalidate\(\)/);
