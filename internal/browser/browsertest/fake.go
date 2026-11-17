@@ -6,6 +6,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -47,6 +49,7 @@ type FakeHost struct {
 	BookmarkCalls     int
 	FailActivate      error
 	FailBookmarks     error
+	FailSetFence      error
 	BookmarkList      []browser.HostBookmark
 	Sessions          map[string]*session
 	nextID            int
@@ -65,7 +68,17 @@ func (f *FakeHost) unavailable() error {
 }
 
 func (f *FakeHost) fenceLocked(profileID, fence string) error {
-	if current := f.Fences[profileID]; current != "" && fence != current {
+	current := f.Fences[profileID]
+	if current == "" {
+		return nil
+	}
+	if index := strings.LastIndex(current, "@"); index > 0 {
+		if expiresAt, err := strconv.ParseInt(current[index+1:], 10, 64); err == nil &&
+			!f.Now().Before(time.UnixMilli(expiresAt)) {
+			return &browser.Error{Code: "browser_fence_expired", Message: "lease fence expired", Status: http.StatusConflict}
+		}
+	}
+	if fence != current {
 		return &browser.Error{Code: "browser_fence_stale", Message: "lease fence changed", Status: http.StatusConflict}
 	}
 	return nil
@@ -74,6 +87,9 @@ func (f *FakeHost) fenceLocked(profileID, fence string) error {
 func (f *FakeHost) SetFence(_ context.Context, profileID, sessionID, expectedFence, fence string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.FailSetFence != nil {
+		return f.FailSetFence
+	}
 	value, ok := f.Sessions[profileID]
 	if !ok {
 		return &browser.Error{Code: "browser_session_not_found", Message: "no session", Status: http.StatusNotFound}

@@ -163,6 +163,63 @@ async function listSessionPages(session) {
   return result.filter(Boolean);
 }
 
+const FENCE_WAIT_TIMEOUT_MS = 5000;
+const OPERATION_WAIT_TIMEOUT_MS = 30_000;
+
+function gateError(code, message) {
+  return Object.assign(new Error(message), {code});
+}
+
+// Per-session reader/writer gate. Mutating page operations hold a read slot
+// until the Playwright call finishes; fence switches take the write slot and
+// wait for all in-flight page operations. A write that cannot be isolated in
+// time fails closed without changing the fence.
+function createSessionGate() {
+  let readers = 0;
+  let writer = false;
+  const readQueue = [];
+  const writeQueue = [];
+  const pump = () => {
+    while (!writer && readQueue.length) {
+      const request = readQueue.shift();
+      readers++;
+      clearTimeout(request.timer);
+      request.resolve(() => { readers--; pump(); });
+    }
+    if (!writer && readers === 0 && writeQueue.length) {
+      const request = writeQueue.shift();
+      writer = true;
+      clearTimeout(request.timer);
+      request.resolve(() => { writer = false; pump(); });
+    }
+  };
+  const acquire = (type, timeoutMs) => new Promise((resolve, reject) => {
+    const request = {type, resolve};
+    if (timeoutMs > 0) {
+      request.timer = setTimeout(() => {
+        const queue = type === "write" ? writeQueue : readQueue;
+        const index = queue.indexOf(request);
+        if (index < 0) return;
+        queue.splice(index, 1);
+        reject(gateError(type === "write" ? "browser_fence_timeout" : "browser_operation_busy",
+          "timed out waiting for in-flight browser operations"));
+      }, timeoutMs);
+    }
+    (type === "write" ? writeQueue : readQueue).push(request);
+    pump();
+  });
+  return {acquire};
+}
+
+async function withSessionGate(session, type, timeoutMs, fn) {
+  const release = await session.gate.acquire(type, timeoutMs);
+  try {
+    return await fn();
+  } finally {
+    release();
+  }
+}
+
 const MAX_BOOKMARKS = 500;
 const MAX_BOOKMARK_DEPTH = 8;
 const MAX_BOOKMARK_FILE = 16 * 1024 * 1024;
@@ -175,7 +232,7 @@ function bookmarkPathError(message) {
 // folder names leave the host; the file path never appears in a response.
 // Symlinked profiles/Default/Bookmarks are rejected so Profile A cannot read
 // Profile B's file through a link or a .. traversal.
-async function readProfileBookmarks(root, profileID, directory) {
+async function readProfileBookmarks(root, profileID, directory, beforeBookmarkOpen) {
   let rootReal;
   try {
     rootReal = await fs.realpath(root);
@@ -224,9 +281,31 @@ async function readProfileBookmarks(root, profileID, directory) {
   if (realFile !== join(profileReal, "Default", "Bookmarks")) {
     throw bookmarkPathError("bookmark file resolves outside the profile");
   }
+  if (typeof beforeBookmarkOpen === "function") {
+    await beforeBookmarkOpen({profileID, directory});
+  }
   const handle = await fs.open(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
   let raw;
   try {
+    // Re-validate the actual opened object, not just the path. A parent
+    // directory replaced between lstat and open changes the opened dev/ino and
+    // the real path; fail closed instead of returning another Profile's data.
+    const openedStat = await handle.stat();
+    const sameFile = String(openedStat.dev) === String(fileStat.dev) &&
+      String(openedStat.ino) === String(fileStat.ino) &&
+      openedStat.size === fileStat.size &&
+      openedStat.mtimeMs === fileStat.mtimeMs;
+    if (!sameFile) throw bookmarkPathError("bookmark file identity changed during open");
+    const defaultAfter = await fs.lstat(defaultDir);
+    if (defaultAfter.isSymbolicLink() || !defaultAfter.isDirectory() ||
+        String(defaultAfter.dev) !== String(defaultStat.dev) ||
+        String(defaultAfter.ino) !== String(defaultStat.ino)) {
+      throw bookmarkPathError("bookmark directory changed during open");
+    }
+    const realAfter = await fs.realpath(file);
+    if (realAfter !== join(profileReal, "Default", "Bookmarks")) {
+      throw bookmarkPathError("bookmark file moved outside the profile during open");
+    }
     raw = await handle.readFile("utf8");
   } finally {
     await handle.close();
@@ -256,8 +335,46 @@ async function readProfileBookmarks(root, profileID, directory) {
   return result;
 }
 
-function fenceRejected(response) {
-  return json(response, 409, fail(409, "browser_fence_stale", "browser control lease changed").body);
+function fenceExpired(fence) {
+  const index = String(fence || "").lastIndexOf("@");
+  if (index <= 0) return false;
+  const expiresAt = Number(String(fence).slice(index + 1));
+  return Number.isFinite(expiresAt) && Date.now() > expiresAt;
+}
+
+// Returns "" when the call may proceed, otherwise the fence error code.
+function fenceStatus(session, supplied) {
+  if (!session.fence) return "";
+  if (fenceExpired(session.fence)) return "browser_fence_expired";
+  if (String(supplied || "") !== session.fence) return "browser_fence_stale";
+  return "";
+}
+
+function fenceFailure(response, code) {
+  const message = code === "browser_fence_expired"
+    ? "browser control lease expired"
+    : "browser control lease changed";
+  return json(response, 409, fail(409, code, message).body);
+}
+
+async function runMutation(response, session, suppliedFence, beforeMutation, fn) {
+  try {
+    return await withSessionGate(session, "read", OPERATION_WAIT_TIMEOUT_MS, async () => {
+      let code = fenceStatus(session, suppliedFence);
+      if (code) return fenceFailure(response, code);
+      if (typeof beforeMutation === "function") {
+        await beforeMutation({session, fence: suppliedFence});
+      }
+      code = fenceStatus(session, suppliedFence);
+      if (code) return fenceFailure(response, code);
+      return fn();
+    });
+  } catch (error) {
+    if (error && error.code === "browser_operation_busy") {
+      return json(response, 409, fail(409, "browser_operation_busy", "browser is busy").body);
+    }
+    throw error;
+  }
 }
 
 function sessionPayload(session, reused = false) {
@@ -289,7 +406,7 @@ function sendFrame(response, buffer, cached) {
 
 // options: root, token, hostID, chromium (Playwright namespace), edgeExecutable
 export function createHostServer(options) {
-  const {root, token, hostID = "local", chromium, edgeExecutable, onShutdown} = options;
+  const {root, token, hostID = "local", chromium, edgeExecutable, onShutdown, fenceWaitTimeoutMs = FENCE_WAIT_TIMEOUT_MS, beforeBookmarkOpen, beforeMutation} = options;
   if (!chromium || typeof chromium.launchPersistentContext !== "function") {
     throw new Error("createHostServer requires a Playwright-compatible chromium");
   }
@@ -415,6 +532,7 @@ export function createHostServer(options) {
             tabs: new Map(),
             lock,
             fence: "",
+            gate: createSessionGate(),
           };
           // A persistent context starts with an initial page and the Owner can
           // open more at any time. Register them now and on every new page so a
@@ -464,9 +582,24 @@ export function createHostServer(options) {
         return json(response, 409, fail(409, "browser_session_changed", "session id mismatch").body);
       }
       const expected = String(body.expected_fence || "");
-      if ((session.fence || "") !== expected) return fenceRejected(response);
-      session.fence = String(body.fence || "");
-      return json(response, 200, {ok: true});
+      const nextFence = String(body.fence || "");
+      if ((session.fence || "") !== expected) return fenceFailure(response, "browser_fence_stale");
+      // Invalidate the old fence immediately so paused operations abort at
+      // their side-effect boundary, then wait for in-flight operations. New
+      // readers may still run (and fail if their fence is stale), which lets
+      // the next holder take a snapshot while an old operation is paused.
+      session.fence = nextFence;
+      try {
+        const release = await session.gate.acquire("write", fenceWaitTimeoutMs);
+        release();
+        return json(response, 200, {ok: true});
+      } catch (error) {
+        if (error && error.code === "browser_fence_timeout") {
+          if (session.fence === nextFence) session.fence = expected;
+          return json(response, 409, fail(409, "browser_fence_timeout", "timed out waiting for in-flight browser operations").body);
+        }
+        throw error;
+      }
     }
 
     // /v1/profiles/{id}/bookmarks
@@ -478,7 +611,7 @@ export function createHostServer(options) {
         return json(response, 409, fail(409, "browser_session_changed", "session id mismatch").body);
       }
       try {
-        return json(response, 200, {bookmarks: await readProfileBookmarks(root, profileID, directory)});
+        return json(response, 200, {bookmarks: await readProfileBookmarks(root, profileID, directory, beforeBookmarkOpen)});
       } catch (error) {
         console.error(`bookmarks failed profile=${profileID} diagnostic=${diagnostics(error, root, "")}`);
         return json(response, 502, fail(502, "browser_bookmarks_failed", "读取收藏夹失败").body);
@@ -504,58 +637,61 @@ export function createHostServer(options) {
       if (parts.length === 4 && request.method === "POST") {
         const target = validateURL(body.url);
         if (!target) return json(response, 400, fail(400, "browser_url_invalid", "only http/https URLs are accepted").body);
-        if (session.fence && String(body.fence || "") !== session.fence) return fenceRejected(response);
-        try {
-          const id = newTabID();
-          const opened = await openTabPage(session.context, target, id);
-          const tab = attachPage(session, opened.page, id);
-          tab.url = opened.url;
-          tab.title = opened.title;
-          return json(response, 201, tabPayload(tab));
-        } catch (error) {
-          // Do not reference Edge here: this path must work even when the
-          // failure happened outside a launch, and the variable does not exist
-          // in this scope.
-          console.error(`tab open failed profile=${profileID} diagnostic=${diagnostics(error, root, "")}`);
-          return json(response, 502, fail(502, "browser_navigation_failed",
-            "页面打开失败或超时").body);
-        }
+        return runMutation(response, session, body.fence, beforeMutation, async () => {
+          try {
+            const id = newTabID();
+            const opened = await openTabPage(session.context, target, id);
+            const tab = attachPage(session, opened.page, id);
+            tab.url = opened.url;
+            tab.title = opened.title;
+            return json(response, 201, tabPayload(tab));
+          } catch (error) {
+            // Do not reference Edge here: this path must work even when the
+            // failure happened outside a launch, and the variable does not exist
+            // in this scope.
+            console.error(`tab open failed profile=${profileID} diagnostic=${diagnostics(error, root, "")}`);
+            return json(response, 502, fail(502, "browser_navigation_failed",
+              "页面打开失败或超时").body);
+          }
+        });
       }
       const tab = parts[4] ? session.tabs.get(parts[4]) : null;
       if (!tab) return json(response, 404, fail(404, "browser_tab_not_found", "tab not found").body);
       if (parts.length === 5 && request.method === "DELETE") {
-        const fence = String(url.searchParams.get("fence") || "");
-        if (session.fence && fence !== session.fence) return fenceRejected(response);
-        await tab.page.close().catch(() => {});
-        session.tabs.delete(tab.id);
-        return json(response, 200, {ok: true});
+        return runMutation(response, session, url.searchParams.get("fence") || "", beforeMutation, async () => {
+          await tab.page.close().catch(() => {});
+          session.tabs.delete(tab.id);
+          return json(response, 200, {ok: true});
+        });
       }
       if (parts.length === 6 && parts[5] === "navigate" && request.method === "POST") {
         const target = validateURL(body.url);
         if (!target) return json(response, 400, fail(400, "browser_url_invalid", "only http/https URLs are accepted").body);
-        if (session.fence && String(body.fence || "") !== session.fence) return fenceRejected(response);
-        try {
-          const navigated = await navigatePage(tab.page, target);
-          tab.url = navigated.url;
-          tab.title = navigated.title;
-          tab.frame = null;
-          tab.framePending = null;
-          return json(response, 200, tabPayload(tab));
-        } catch (error) {
-          console.error(`tab navigation failed profile=${profileID} diagnostic=${diagnostics(error, root, "")}`);
-          return json(response, 502, fail(502, "browser_navigation_failed",
-            "页面打开失败或超时").body);
-        }
+        return runMutation(response, session, body.fence, beforeMutation, async () => {
+          try {
+            const navigated = await navigatePage(tab.page, target);
+            tab.url = navigated.url;
+            tab.title = navigated.title;
+            tab.frame = null;
+            tab.framePending = null;
+            return json(response, 200, tabPayload(tab));
+          } catch (error) {
+            console.error(`tab navigation failed profile=${profileID} diagnostic=${diagnostics(error, root, "")}`);
+            return json(response, 502, fail(502, "browser_navigation_failed",
+              "页面打开失败或超时").body);
+          }
+        });
       }
       if (parts.length === 6 && parts[5] === "activate" && request.method === "POST") {
-        if (session.fence && String(body.fence || "") !== session.fence) return fenceRejected(response);
-        try {
-          await tab.page.bringToFront();
-          return json(response, 200, tabPayload(tab));
-        } catch (error) {
-          console.error(`tab activate failed profile=${profileID} diagnostic=${diagnostics(error, root, "")}`);
-          return json(response, 502, fail(502, "browser_activation_failed", "切换浏览器页面失败").body);
-        }
+        return runMutation(response, session, body.fence, beforeMutation, async () => {
+          try {
+            await tab.page.bringToFront();
+            return json(response, 200, tabPayload(tab));
+          } catch (error) {
+            console.error(`tab activate failed profile=${profileID} diagnostic=${diagnostics(error, root, "")}`);
+            return json(response, 502, fail(502, "browser_activation_failed", "切换浏览器页面失败").body);
+          }
+        });
       }
       if (parts.length === 6 && parts[5] === "frame" && request.method === "GET") {
         // Read-only preview: one JPEG of the page viewport. Frames are throttled

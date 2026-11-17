@@ -154,6 +154,12 @@ func hostErrorMessage(code string) string {
 		return "读取收藏夹失败"
 	case "browser_fence_stale":
 		return "浏览器控制权已变化，请重新获取独占控制"
+	case "browser_fence_expired":
+		return "浏览器独占控制已过期，请重新获取"
+	case "browser_fence_timeout":
+		return "切换浏览器控制权超时，旧控制仍保留"
+	case "browser_operation_busy":
+		return "浏览器正在执行其他操作，请稍后重试"
 	case "browser_session_not_found":
 		return "浏览器会话不存在或已关闭"
 	case "browser_session_changed":

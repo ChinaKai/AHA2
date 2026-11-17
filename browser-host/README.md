@@ -116,7 +116,7 @@ AHA 侧业务请求客户端超时 60s，覆盖 host 的 30s 页面导航期限�
 | GET | `/v1/health` | `host_id`、`platform`、`edge_available`、活跃 profile 列表 |
 | POST | `/v1/shutdown` | 关闭所有浏览器会话并退出（AHA 停止时调用） |
 | POST | `/v1/profiles/{id}/session` | 启动或复用持久化 Edge 窗口（`{"browser_kind":"edge"}`） |
-| POST | `/v1/profiles/{id}/fence` | CAS 安装租约 fence（`{"session_id","expected_fence","fence"}`） |
+| POST | `/v1/profiles/{id}/fence` | CAS 安装租约 fence（`{"session_id","expected_fence","fence"}`；切换会等待在途页面操作） |
 | GET | `/v1/profiles/{id}/session` | 当前会话状态；没有则 404 `browser_session_not_found` |
 | DELETE | `/v1/profiles/{id}/session` | 关闭窗口并释放目录锁 |
 | GET | `/v1/profiles/{id}/tabs?session_id=` | 列出窗口内当前 http/https 页面（`id/url/title/active`），供独占 Task 枚举 |
@@ -139,7 +139,9 @@ AHA 侧业务请求客户端超时 60s，覆盖 host 的 30s 页面导航期限�
 - `browser_tab_list_failed`：读取当前页面列表失败（页面已崩溃或上下文不可用）；
 - `browser_activation_failed`：切换前台页面失败；
 - `browser_bookmarks_failed`：收藏夹文件不可读、是 symlink/reparse point 或格式异常；
-- `browser_fence_stale`：控制租约已变化，拒绝在途旧操作的页面副作用。
+- `browser_fence_stale`：控制租约已变化，拒绝在途旧操作的页面副作用；
+- `browser_fence_expired`：租约已过截止时间，拒绝在途旧操作；
+- `browser_fence_timeout`：fence 切换等待在途操作超时，旧 fence 保留。
 
 ## 自动化测试
 

@@ -5,7 +5,7 @@ import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {createHostServer} from "./server.mjs";
 
-async function startHost({launchFailure = false, tabGoto = null, screenshotFailure = false, initialURL = "https://example.com/final", initialURLs = null} = {}) {
+async function startHost({launchFailure = false, tabGoto = null, screenshotFailure = false, initialURL = "https://example.com/final", initialURLs = null, beforeMutation = null, fenceWaitTimeoutMs, beforeBookmarkOpen = null} = {}) {
   const root = await mkdtemp(join(tmpdir(), "aha2-browser-host-"));
   let screenshots = 0;
   let shutdownCalls = 0;
@@ -58,6 +58,9 @@ async function startHost({launchFailure = false, tabGoto = null, screenshotFailu
     root, token: "test-token", hostID: "test-host", chromium,
     edgeExecutable: () => "C:\\Program Files\\msedge.exe",
     onShutdown: () => { shutdownCalls++; },
+    beforeMutation,
+    beforeBookmarkOpen,
+    ...(fenceWaitTimeoutMs ? {fenceWaitTimeoutMs} : {}),
   });
   await new Promise(resolve => host.server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${host.server.address().port}`;
@@ -388,6 +391,155 @@ test("mutating calls require the current lease fence", async () => {
     assert.equal(result.body.error.code, "browser_fence_stale");
     result = await host.call("DELETE", `/v1/profiles/browser_profile_1/tabs/${tabID}?fence=grant-1`);
     assert.equal(result.status, 200);
+  } finally {
+    await host.close();
+  }
+});
+
+test("fence switch invalidates a paused old mutation before new holder reads", async () => {
+  let pause = false;
+  let enteredResolve;
+  let releaseMutation;
+  const host = await startHost({
+    beforeMutation: async () => {
+      if (!pause) return;
+      pause = false;
+      enteredResolve();
+      await new Promise(resolve => { releaseMutation = resolve; });
+    },
+  });
+  try {
+    let result = await host.call("POST", "/v1/profiles/browser_profile_1/session", {browser_kind: "edge"});
+    const sessionID = result.body.session.id;
+    result = await host.call("POST", "/v1/profiles/browser_profile_1/tabs", {url: "https://example.com"});
+    const tabID = result.body.tab.id;
+    result = await host.call("POST", "/v1/profiles/browser_profile_1/fence", {
+      session_id: sessionID, expected_fence: "", fence: "grant-1@future",
+    });
+    assert.equal(result.status, 200);
+
+    let entered = new Promise(resolve => { enteredResolve = resolve; });
+    pause = true;
+    const closePromise = host.call("DELETE", `/v1/profiles/browser_profile_1/tabs/${tabID}?fence=grant-1@future`);
+    await entered;
+    // New holder takes the fence while the old close is paused. The switch
+    // waits for the old operation, but reader calls remain available.
+    const switchPromise = host.call("POST", "/v1/profiles/browser_profile_1/fence", {
+      session_id: sessionID, expected_fence: "grant-1@future", fence: "grant-2@future",
+    });
+    const tabs = await host.call("GET", "/v1/profiles/browser_profile_1/tabs");
+    assert.equal(tabs.status, 200);
+    assert.ok(tabs.body.tabs.some(tab => tab.id === tabID));
+    releaseMutation();
+    const closed = await closePromise;
+    const switched = await switchPromise;
+    assert.equal(closed.status, 409);
+    assert.equal(closed.body.error.code, "browser_fence_stale");
+    assert.equal(switched.status, 200);
+    const after = await host.call("GET", "/v1/profiles/browser_profile_1/tabs");
+    assert.ok(after.body.tabs.some(tab => tab.id === tabID), "stale close must not remove the page");
+    const session = await host.call("GET", "/v1/profiles/browser_profile_1/session");
+    assert.equal(session.body.session.fence, "grant-2@future");
+  } finally {
+    await host.close();
+  }
+});
+
+test("fence switch times out without changing the old fence", async () => {
+  let pause = false;
+  let enteredResolve;
+  let releaseMutation;
+  const host = await startHost({
+    fenceWaitTimeoutMs: 50,
+    beforeMutation: async () => {
+      if (!pause) return;
+      pause = false;
+      enteredResolve();
+      await new Promise(resolve => { releaseMutation = resolve; });
+    },
+  });
+  try {
+    let result = await host.call("POST", "/v1/profiles/browser_profile_1/session", {browser_kind: "edge"});
+    const sessionID = result.body.session.id;
+    result = await host.call("POST", "/v1/profiles/browser_profile_1/tabs", {url: "https://example.com"});
+    const tabID = result.body.tab.id;
+    await host.call("POST", "/v1/profiles/browser_profile_1/fence", {
+      session_id: sessionID, expected_fence: "", fence: "grant-1@future",
+    });
+    const entered = new Promise(resolve => { enteredResolve = resolve; });
+    pause = true;
+    const closePromise = host.call("DELETE", `/v1/profiles/browser_profile_1/tabs/${tabID}?fence=grant-1@future`);
+    await entered;
+    const switched = await host.call("POST", "/v1/profiles/browser_profile_1/fence", {
+      session_id: sessionID, expected_fence: "grant-1@future", fence: "grant-2@future",
+    });
+    assert.equal(switched.status, 409);
+    assert.equal(switched.body.error.code, "browser_fence_timeout");
+    const session = await host.call("GET", "/v1/profiles/browser_profile_1/session");
+    assert.equal(session.body.session.fence, "grant-1@future");
+    releaseMutation();
+    assert.equal((await closePromise).status, 200);
+  } finally {
+    await host.close();
+  }
+});
+
+test("expired fence rejects a paused old mutation", async () => {
+  let pause = false;
+  let enteredResolve;
+  let releaseMutation;
+  const host = await startHost({
+    beforeMutation: async () => {
+      if (!pause) return;
+      pause = false;
+      enteredResolve();
+      await new Promise(resolve => { releaseMutation = resolve; });
+    },
+  });
+  try {
+    let result = await host.call("POST", "/v1/profiles/browser_profile_1/session", {browser_kind: "edge"});
+    const sessionID = result.body.session.id;
+    result = await host.call("POST", "/v1/profiles/browser_profile_1/tabs", {url: "https://example.com"});
+    const tabID = result.body.tab.id;
+    const expiring = `grant-1@${Date.now() + 250}`;
+    result = await host.call("POST", "/v1/profiles/browser_profile_1/fence", {
+      session_id: sessionID, expected_fence: "", fence: expiring,
+    });
+    assert.equal(result.status, 200);
+    const entered = new Promise(resolve => { enteredResolve = resolve; });
+    pause = true;
+    const closePromise = host.call("DELETE", `/v1/profiles/browser_profile_1/tabs/${tabID}?fence=${encodeURIComponent(expiring)}`);
+    await entered;
+    await new Promise(resolve => setTimeout(resolve, 300));
+    releaseMutation();
+    const closed = await closePromise;
+    assert.equal(closed.status, 409);
+    assert.equal(closed.body.error.code, "browser_fence_expired");
+    const after = await host.call("GET", "/v1/profiles/browser_profile_1/tabs");
+    assert.ok(after.body.tabs.some(tab => tab.id === tabID));
+  } finally {
+    await host.close();
+  }
+});
+
+test("rejects a parent directory swapped after the bookmark path check", async () => {
+  let swapped = false;
+  const host = await startHost({
+    beforeBookmarkOpen: async ({directory}) => {
+      if (swapped) return;
+      swapped = true;
+      await rm(`${directory}/Default`, {recursive: true, force: true});
+      await symlink(`${host.root}/browser_profile_2/Default`, `${directory}/Default`);
+    },
+  });
+  try {
+    await host.call("POST", "/v1/profiles/browser_profile_1/session", {browser_kind: "edge"});
+    await writeBookmarkFile(host, "browser_profile_1", "A bookmarks");
+    await writeBookmarkFile(host, "browser_profile_2", "Secret B");
+    const result = await host.call("GET", "/v1/profiles/browser_profile_1/bookmarks");
+    assert.notEqual(result.status, 200);
+    assert.doesNotMatch(JSON.stringify(result.body), /Secret B|secret\.example/);
+    assert.equal(swapped, true);
   } finally {
     await host.close();
   }

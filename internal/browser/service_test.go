@@ -37,6 +37,7 @@ func newFixture(t *testing.T) *fixture {
 	service := browser.NewService(database, host, "local")
 	now := time.Date(2026, 11, 17, 6, 0, 0, 0, time.UTC)
 	service.SetNowForTest(func() time.Time { return now })
+	host.Now = func() time.Time { return now }
 	return &fixture{store: database, host: host, service: service, task: createTask(t, database), now: now}
 }
 
@@ -44,6 +45,7 @@ func (f *fixture) setNow(value time.Time) {
 	f.now = value
 	// The clock is captured by value above; reinstall it so tests can move time.
 	f.service.SetNowForTest(func() time.Time { return value })
+	f.host.Now = func() time.Time { return value }
 }
 
 func createTask(t *testing.T, database *store.Store) domain.Task {
@@ -1214,5 +1216,106 @@ func TestTransferRejectsTargetHoldingAnotherProfile(t *testing.T) {
 	stillB, err := f.service.Grant(ctx, grantB.ID)
 	if err != nil || stillB.Status != domain.BrowserGrantStatusActive {
 		t.Fatalf("target profile lease changed: %#v err=%v", stillB, err)
+	}
+}
+
+func TestLeaseExpiryFencesInFlightClose(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	profile := createProfile(t, f)
+	grant, err := f.service.CreateGrant(ctx, "owner", f.task.ID, profile.ID, nil, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.host.SetCurrentPages(profile.ID, []browser.HostTab{
+		{ID: "host-page-owner", URL: "https://owner.example/work", Title: "Work", Active: true},
+	})
+	tabs, err := f.service.SyncTabs(ctx, grant.ID)
+	if err != nil || len(tabs) != 1 {
+		t.Fatalf("tabs=%#v err=%v", tabs, err)
+	}
+	closeStarted := make(chan struct{}, 1)
+	closeRelease := make(chan struct{})
+	f.host.CloseTabStarted = closeStarted
+	f.host.CloseTabRelease = closeRelease
+	f.host.CloseTabGateTabID = tabs[0].HostTabID
+	closeResult := make(chan error, 1)
+	go func() {
+		closeResult <- f.service.CloseTab(ctx, "owner", grant.ID, tabs[0].ID)
+	}()
+	<-closeStarted
+	f.setNow(f.now.Add(2 * time.Minute))
+	close(closeRelease)
+	if err := <-closeResult; browser.Code(err) != "browser_fence_expired" {
+		t.Fatalf("expired in-flight close returned %v", err)
+	}
+	pages, err := f.host.ListTabs(ctx, profile.ID, grant.Session.HostSessionID)
+	if err != nil || len(pages) != 1 {
+		t.Fatalf("expired close removed page: %#v err=%v", pages, err)
+	}
+}
+
+func TestReleaseFailsClosedWhenFenceCannotBeInstalled(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	profile := createProfile(t, f)
+	grant, err := f.service.CreateGrant(ctx, "owner", f.task.ID, profile.ID, nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.host.SetCurrentPages(profile.ID, []browser.HostTab{
+		{ID: "host-page-owner", URL: "https://owner.example/work", Title: "Work", Active: true},
+	})
+	tabs, err := f.service.SyncTabs(ctx, grant.ID)
+	if err != nil || len(tabs) != 1 {
+		t.Fatalf("tabs=%#v err=%v", tabs, err)
+	}
+	closeStarted := make(chan struct{}, 1)
+	closeRelease := make(chan struct{})
+	f.host.CloseTabStarted = closeStarted
+	f.host.CloseTabRelease = closeRelease
+	f.host.CloseTabGateTabID = tabs[0].HostTabID
+	closeResult := make(chan error, 1)
+	go func() {
+		closeResult <- f.service.CloseTab(ctx, "owner", grant.ID, tabs[0].ID)
+	}()
+	<-closeStarted
+	f.host.FailSetFence = &browser.Error{Code: "browser_fence_timeout", Message: "fence blocked", Status: http.StatusConflict}
+	_, err = f.service.RevokeGrant(ctx, "owner", grant.ID)
+	if err == nil {
+		t.Fatal("release succeeded while the fence could not be installed")
+	}
+	still, grantErr := f.service.Grant(ctx, grant.ID)
+	if grantErr != nil || still.Status != domain.BrowserGrantStatusActive {
+		t.Fatalf("lease was revoked after failed release: %#v err=%v", still, grantErr)
+	}
+	if pages, _ := f.host.ListTabs(ctx, profile.ID, grant.Session.HostSessionID); len(pages) != 1 {
+		t.Fatalf("page disappeared before the in-flight close was released: %#v", pages)
+	}
+	close(closeRelease)
+	<-closeResult
+}
+
+func TestIdempotentAcquireRefreshesFenceExpiry(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	profile := createProfile(t, f)
+	grant, err := f.service.CreateGrant(ctx, "owner", f.task.ID, profile.ID, nil, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.host.SetCurrentPages(profile.ID, []browser.HostTab{
+		{ID: "host-page-owner", URL: "https://owner.example/", Title: "Owner", Active: true},
+	})
+	if _, err := f.service.SyncTabs(ctx, grant.ID); err != nil {
+		t.Fatal(err)
+	}
+	refreshed, err := f.service.CreateGrant(ctx, "owner", f.task.ID, profile.ID, nil, time.Hour)
+	if err != nil || refreshed.ID != grant.ID {
+		t.Fatalf("refresh=%#v err=%v", refreshed, err)
+	}
+	f.setNow(f.now.Add(2 * time.Minute))
+	if _, err := f.service.SyncTabs(ctx, grant.ID); err != nil {
+		t.Fatalf("fence did not follow the refreshed expiry: %v", err)
 	}
 }

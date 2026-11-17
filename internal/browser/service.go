@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -43,6 +44,12 @@ func NewService(st *store.Store, host Host, hostID string) *Service {
 }
 
 func (s *Service) HostID() string { return s.hostID }
+
+// fenceToken binds the lease id to its expiry so a paused in-flight host call
+// fails after the lease expires instead of relying on a string-only fence.
+func (s *Service) fenceToken(grant domain.BrowserTaskGrant) string {
+	return grant.ID + "@" + strconv.FormatInt(grant.ExpiresAt.UnixMilli(), 10)
+}
 
 func (s *Service) Enabled() bool { return s.host != nil }
 
@@ -692,13 +699,16 @@ func (s *Service) CreateGrant(ctx context.Context, actor, taskID, profileID stri
 			if hostErr != nil {
 				return GrantView{}, sanitizeHostError(hostErr)
 			}
-			if hostSession.Fence != holder.ID {
-				if fenceErr := s.host.SetFence(ctx, profile.ID, session.HostSessionID, hostSession.Fence, holder.ID); fenceErr != nil {
+			expiresAt := now.Add(ttl)
+			holderFence := holder.ID + "@" + strconv.FormatInt(expiresAt.UnixMilli(), 10)
+			if hostSession.Fence != holderFence {
+				if fenceErr := s.host.SetFence(ctx, profile.ID, session.HostSessionID, hostSession.Fence, holderFence); fenceErr != nil {
 					return GrantView{}, s.fenceError(ctx, fenceErr)
 				}
 			}
-			refreshed, refreshErr := s.store.RefreshBrowserTaskGrantLease(ctx, holder.ID, caps, now.Add(ttl), now)
+			refreshed, refreshErr := s.store.RefreshBrowserTaskGrantLease(ctx, holder.ID, caps, expiresAt, now)
 			if refreshErr != nil {
+				_ = s.host.SetFence(ctx, profile.ID, session.HostSessionID, holderFence, hostSession.Fence)
 				if errors.Is(refreshErr, sql.ErrNoRows) {
 					return GrantView{}, conflict("browser_profile_in_use", "独占控制已变化，请刷新后重试")
 				}
@@ -728,18 +738,18 @@ func (s *Service) CreateGrant(ctx context.Context, actor, taskID, profileID stri
 		SessionID: session.ID, Capabilities: caps, ExpiresAt: now.Add(ttl),
 		CreatedAt: now, UpdatedAt: now,
 	}
-	if err := s.host.SetFence(ctx, profile.ID, session.HostSessionID, hostSession.Fence, grant.ID); err != nil {
+	if err := s.host.SetFence(ctx, profile.ID, session.HostSessionID, hostSession.Fence, s.fenceToken(grant)); err != nil {
 		return GrantView{}, s.fenceError(ctx, err)
 	}
 	created, revoked, reusedLease, err := s.store.AcquireBrowserTaskGrantExclusive(ctx, grant, now)
 	if err != nil {
-		_ = s.host.SetFence(ctx, profile.ID, session.HostSessionID, grant.ID, hostSession.Fence)
+		_ = s.host.SetFence(ctx, profile.ID, session.HostSessionID, s.fenceToken(grant), hostSession.Fence)
 		return GrantView{}, s.acquireError(ctx, err)
 	}
 	if reusedLease {
 		// A concurrent/racing acquire created the same Task/Profile lease. Keep
 		// its fence and return it instead of rebuilding.
-		_ = s.host.SetFence(ctx, profile.ID, session.HostSessionID, grant.ID, created.ID)
+		_ = s.host.SetFence(ctx, profile.ID, session.HostSessionID, s.fenceToken(grant), s.fenceToken(created))
 		return s.grantView(ctx, created), nil
 	}
 	for _, previous := range revoked {
@@ -757,8 +767,15 @@ func (s *Service) CreateGrant(ctx context.Context, actor, taskID, profileID stri
 }
 
 func (s *Service) fenceError(ctx context.Context, err error) error {
-	if Code(err) == "browser_fence_stale" {
+	switch Code(err) {
+	case "browser_fence_stale":
 		return conflict("browser_profile_in_use", "浏览器控制权已变化，请刷新后重试")
+	case "browser_fence_expired":
+		return conflict("browser_fence_expired", "浏览器独占控制已过期，请重新获取")
+	case "browser_fence_timeout":
+		return conflict("browser_fence_timeout", "无法隔离在途浏览器操作，旧控制仍保留，请稍后重试")
+	case "browser_operation_busy":
+		return conflict("browser_operation_busy", "浏览器正在执行其他操作，请稍后重试")
 	}
 	return sanitizeHostError(err)
 }
@@ -847,17 +864,18 @@ func (s *Service) TransferProfileControl(ctx context.Context, actor, profileID, 
 	if err != nil {
 		return GrantView{}, sanitizeHostError(err)
 	}
-	if err := s.host.SetFence(ctx, profile.ID, session.HostSessionID, hostSession.Fence, newGrant.ID); err != nil {
+	newFence := s.fenceToken(newGrant)
+	if err := s.host.SetFence(ctx, profile.ID, session.HostSessionID, hostSession.Fence, newFence); err != nil {
 		return GrantView{}, s.fenceError(ctx, err)
 	}
 	if len(active) == 0 {
 		created, revoked, reusedLease, err := s.store.AcquireBrowserTaskGrantExclusive(ctx, newGrant, now)
 		if err != nil {
-			_ = s.host.SetFence(ctx, profile.ID, session.HostSessionID, newGrant.ID, hostSession.Fence)
+			_ = s.host.SetFence(ctx, profile.ID, session.HostSessionID, newFence, hostSession.Fence)
 			return GrantView{}, s.acquireError(ctx, err)
 		}
 		if reusedLease {
-			_ = s.host.SetFence(ctx, profile.ID, session.HostSessionID, newGrant.ID, created.ID)
+			_ = s.host.SetFence(ctx, profile.ID, session.HostSessionID, newFence, s.fenceToken(created))
 			return s.grantView(ctx, created), nil
 		}
 		for _, previous := range revoked {
@@ -874,7 +892,7 @@ func (s *Service) TransferProfileControl(ctx context.Context, actor, profileID, 
 	}
 	previous, err := s.store.TransferBrowserTaskGrantExclusive(ctx, active[0].ID, newGrant, now)
 	if err != nil {
-		_ = s.host.SetFence(ctx, profile.ID, session.HostSessionID, newGrant.ID, hostSession.Fence)
+		_ = s.host.SetFence(ctx, profile.ID, session.HostSessionID, newFence, hostSession.Fence)
 		if errors.Is(err, store.ErrBrowserAccessInactive) {
 			return GrantView{}, conflict("browser_profile_in_use", "独占控制已变化，请刷新后重试")
 		}
@@ -950,11 +968,23 @@ func (s *Service) RevokeGrant(ctx context.Context, actor, id string) (GrantView,
 		hostFence, hostSessionID := "", ""
 		if session, sessionErr := s.store.BrowserSession(ctx, grant.SessionID); sessionErr == nil && s.host != nil {
 			hostSessionID = session.HostSessionID
-			if hostSession, hostErr := s.host.Session(ctx, grant.ProfileID); hostErr == nil {
+			hostSession, hostErr := s.host.Session(ctx, grant.ProfileID)
+			switch {
+			case hostErr == nil:
 				hostFence = hostSession.Fence
-				if fenceErr := s.host.SetFence(ctx, grant.ProfileID, hostSessionID, hostFence, releaseFence); fenceErr == nil {
-					fenced = true
+				if fenceErr := s.host.SetFence(ctx, grant.ProfileID, hostSessionID, hostFence, releaseFence); fenceErr != nil {
+					// We could not isolate in-flight host calls. Do not revoke the
+					// lease and do not report a successful release.
+					return GrantView{}, s.fenceError(ctx, fenceErr)
 				}
+				fenced = true
+			case Code(hostErr) == "browser_session_not_found":
+				// No host session can be executing calls for this lease.
+			case isHostUnavailable(hostErr):
+				// The execution endpoint is unreachable. There is nothing to
+				// fence; revoke the DB lease so no future call is authorized.
+			default:
+				return GrantView{}, sanitizeHostError(hostErr)
 			}
 		}
 		if err := s.store.RevokeBrowserTaskGrant(ctx, grant.ID, s.now()); err != nil {
@@ -1155,7 +1185,7 @@ func (s *Service) OpenTab(ctx context.Context, actor, grantID, targetURL string)
 	if err != nil {
 		return domain.BrowserTab{}, err
 	}
-	hostTab, err := s.host.OpenTab(ctx, grant.ProfileID, session.HostSessionID, targetURL, grant.ID)
+	hostTab, err := s.host.OpenTab(ctx, grant.ProfileID, session.HostSessionID, targetURL, s.fenceToken(grant))
 	if err != nil {
 		return domain.BrowserTab{}, sanitizeHostError(err)
 	}
@@ -1169,7 +1199,7 @@ func (s *Service) OpenTab(ctx context.Context, actor, grantID, targetURL string)
 	}
 	stored, err := s.store.UpsertBrowserTabForActiveGrant(ctx, tab, s.now())
 	if err != nil {
-		_ = s.host.CloseTab(ctx, grant.ProfileID, session.HostSessionID, hostTab.ID, grant.ID)
+		_ = s.host.CloseTab(ctx, grant.ProfileID, session.HostSessionID, hostTab.ID, s.fenceToken(grant))
 		if errors.Is(err, store.ErrBrowserAccessInactive) {
 			return domain.BrowserTab{}, s.inactiveAccessError(ctx, grant.ID)
 		}
@@ -1332,7 +1362,7 @@ func (s *Service) ActivateTab(ctx context.Context, actor, grantID, tabID string)
 	if err != nil {
 		return domain.BrowserTab{}, err
 	}
-	hostTab, err := s.host.Activate(ctx, grant.ProfileID, session.HostSessionID, tab.HostTabID, grant.ID)
+	hostTab, err := s.host.Activate(ctx, grant.ProfileID, session.HostSessionID, tab.HostTabID, s.fenceToken(grant))
 	if err != nil {
 		return domain.BrowserTab{}, sanitizeHostError(err)
 	}
@@ -1392,7 +1422,7 @@ func (s *Service) NavigateTab(ctx context.Context, actor, grantID, tabID, target
 	if err != nil {
 		return domain.BrowserTab{}, err
 	}
-	hostTab, err := s.host.Navigate(ctx, grant.ProfileID, session.HostSessionID, tab.HostTabID, targetURL, grant.ID)
+	hostTab, err := s.host.Navigate(ctx, grant.ProfileID, session.HostSessionID, tab.HostTabID, targetURL, s.fenceToken(grant))
 	if err != nil {
 		return domain.BrowserTab{}, sanitizeHostError(err)
 	}
@@ -1478,7 +1508,7 @@ func (s *Service) CloseTab(ctx context.Context, actor, grantID, tabID string) er
 	// Under profile-exclusive control the Task may close any tab in the
 	// Profile, including a page the Owner opened by hand. origin is display
 	// metadata only and must not block the current holder.
-	if err := s.host.CloseTab(ctx, grant.ProfileID, session.HostSessionID, tab.HostTabID, grant.ID); err != nil &&
+	if err := s.host.CloseTab(ctx, grant.ProfileID, session.HostSessionID, tab.HostTabID, s.fenceToken(grant)); err != nil &&
 		Code(err) != "browser_tab_not_found" {
 		return sanitizeHostError(err)
 	}

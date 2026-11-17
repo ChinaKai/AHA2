@@ -55,10 +55,13 @@ Profile 独占控制（profile_exclusive）：
   面板显示等待/转移入口。
 
 租约 fencing：每次获取/转移/释放都会通过 host `POST /v1/profiles/{id}/fence`
-用 CAS 安装新的 fence（旧值匹配才写入），所有 open/activate/navigate/close 都带
-当前 grant id 作为 fence；host 在产生页面副作用前校验。transfer/revoke/release
-先切换 fence，因此在途的旧 Task 操作返回 409 `browser_fence_stale`，不会在控制权
-变化后关闭/导航/打开页面。读操作仍每步重新鉴权。
+用 CAS 安装新的 fence（旧值匹配才写入），token 形如 `<grantID>@<expiresAtMs>`；
+所有 open/activate/navigate/close 都带当前 token。host 为每个 session 维护读写门：
+页面操作拿读槽并持有到副作用完成，fence 切换先立即失效旧 token，再拿写槽等待
+在途操作；超时（默认 5s）返回 409 `browser_fence_timeout` 并恢复旧 fence，不能宣称
+切换成功。操作在副作用边界会再次校验 fence，因此在途的旧 Task 操作返回
+409 `browser_fence_stale`/`browser_fence_expired`，不会在控制权变化或过期后关闭/
+导航/打开页面。读操作仍每步重新鉴权。
 
 标签页操作（Owner 与当前独占 Task 共用同一服务层；不再有 per-tab grant 归属）：
 
@@ -87,7 +90,9 @@ host 收藏夹读取 `<profile>/Default/Bookmarks`，只解析
 `bookmark_bar/other/synced` 下的 title/url/folder，最多 500 条、深度 8；文件不存在
 时返回空列表。读取前用 lstat/realpath 校验 profile 根、Default 目录和 Bookmarks
 本体：symlink、junction/reparse point、目录链接或 `..` 越界一律失败关闭，不返回
-任何收藏内容；响应和日志都不含 profile 目录。
+任何收藏内容。打开前记录文件 dev/ino/size/mtime，打开后用已打开句柄 fstat、
+父目录再次 lstat 和二次 realpath 对比实际对象身份；检查后替换父目录的 TOCTOU
+也会失败关闭。响应和日志都不含 profile 目录。
 
 Task Agent HTTP API（Bearer capability 绑定当前 Task/Turn；每个 grant 路由先校验
 `grant.TaskID == claims.TaskID`，跨 Task 返回 `browser_grant_forbidden`）：
@@ -128,6 +133,8 @@ Agent 只有只读 snapshot/frame/bookmarks 与 open/activate/close/navigate 控
 - 同一 Profile 已被其他 Task 独占控制：`browser_profile_in_use`（409）；
 - 同一 Task 已持有另一个 Profile lease：`browser_task_profile_limit`（409）；
 - 控制权已转移/释放后仍在途的旧操作：`browser_fence_stale`（409）；
+- lease 过期后仍在途的旧操作：`browser_fence_expired`（409）；
+- fence 切换等待在途操作超时：`browser_fence_timeout`（409），旧 lease/fence 保留；
 - 跨 Profile 的 tab：`browser_tab_forbidden`（403）；
 - 授权缺少能力：`browser_capability_denied`（403）；
 - 非 http/https 网址：`browser_url_invalid`（400）；
