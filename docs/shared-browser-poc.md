@@ -16,8 +16,9 @@
 同一 profile 单实例有三层约束：
 
 1. host 的用户数据目录 `.aha2-host.lock`：锁文件带随机 owner token，只有 token
-   匹配才允许删除；host 内按 profile 串行化 acquire/release，进程崩溃后按 pid
-   回收 stale 锁；
+   匹配才允许删除；host 内按 profile 串行化 acquire/release；stale 锁的回收通过
+   `.reclaim` 文件仲裁，只有回收者能删除，避免两个 host 进程互相删掉活锁；profile
+   root 另有单实例锁，第二个 host 直接拒绝启动；
 2. host 内存注册表（重复打开直接复用同一窗口）；
 3. SQLite 部分唯一索引 `browser_sessions(profile_id) WHERE state <> 'closed'`。
 
@@ -39,7 +40,15 @@ Task 授权：
 
 - `POST/GET /api/v1/tasks/{id}/browser-grants`（别名 `/browser-sessions`）。创建时
   supersede + insert 在同一个 immediate SQLite 事务内完成；进程内另有 `grantMu`
-  串行化创建/撤销。并发创建始终只保留一个 active grant，重复撤销幂等。
+  串行化创建/撤销。schema v148 的 `(task_id,profile_id) WHERE revoked_at=''`
+  部分唯一索引是数据库兜底；并发创建始终只保留一个 active grant，重复撤销幂等。
+- 标签页插入使用 `CreateBrowserTabForActiveGrant` 事务：host 调用返回后，只有
+  grant 仍 active、session 未关闭且仍是 profile 当前会话时才写 `browser_tabs`；
+  失败会关闭刚创建的 host tab。`touchSession` 只更新 `last_used_at`，不会覆盖
+  并发关闭写入的 `state/closed_at`。
+- v148 迁移按 `julianday()` 比较去重（RFC3339Nano 字符串词法顺序不可靠），删除
+  已撤销 grant 的 AHA tab 记录；host 中可能残留的可见页面需等会话关闭。v148
+  只前进：旧版本不认识唯一索引，回滚需先删除索引。
 - `GET/DELETE /api/v1/browser-grants/{id}`
 - `GET /api/v1/tasks/{id}/browser`：Task 详情合并视图（可选的 profile、当前授权、会话、本 Task 标签页）
 

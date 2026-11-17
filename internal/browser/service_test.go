@@ -570,3 +570,98 @@ func TestConcurrentGrantRevocationIsIdempotent(t *testing.T) {
 		t.Fatalf("grant after concurrent revoke=%#v err=%v", updated, err)
 	}
 }
+
+func TestSuccessfulHostSessionPayloadCannotPersistDiagnosticPaths(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	profile := createProfile(t, f)
+	f.host.OpenError = `C:\Users\owner\AppData\Local\AHA2\browser-profiles\browser_profile_1`
+	session, _, err := f.service.StartSession(ctx, "owner", profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(session.Error, "browser-profiles") || strings.Contains(session.Error, `C:\`) {
+		t.Fatalf("session view leaked: %q", session.Error)
+	}
+	stored, err := f.store.ActiveBrowserSession(ctx, profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(stored.Error, "browser-profiles") || strings.Contains(stored.Error, `C:\`) {
+		t.Fatalf("persisted session leaked: %q", stored.Error)
+	}
+}
+
+func blockNextOpenTab(f *fixture) (started <-chan struct{}, release chan<- struct{}) {
+	startedCh := make(chan struct{}, 1)
+	releaseCh := make(chan struct{})
+	f.host.OpenTabStarted = startedCh
+	f.host.OpenTabRelease = releaseCh
+	return startedCh, releaseCh
+}
+
+func TestOpenTabInFlightCloseDoesNotResurrectSessionOrInsertTab(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	profile := createProfile(t, f)
+	grant, err := f.service.CreateGrant(ctx, "owner", f.task.ID, profile.ID, nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, release := blockNextOpenTab(f)
+	result := make(chan error, 1)
+	go func() {
+		_, openErr := f.service.OpenTab(ctx, "owner", grant.ID, "https://example.com")
+		result <- openErr
+	}()
+	<-started
+	if _, err := f.service.CloseSession(ctx, "owner", grant.Session.ID); err != nil {
+		t.Fatal(err)
+	}
+	release <- struct{}{}
+	err = <-result
+	if err == nil {
+		t.Fatal("open tab succeeded after the session was closed")
+	}
+	if code := browser.Code(err); code != "browser_grant_revoked" && code != "browser_session_closed" {
+		t.Fatalf("unexpected error after close: %v", err)
+	}
+	session, err := f.store.BrowserSession(ctx, grant.Session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.State != domain.BrowserSessionStateClosed || session.ClosedAt.IsZero() {
+		t.Fatalf("session state was overwritten: %#v", session)
+	}
+	tabs, err := f.store.BrowserTabsForGrant(ctx, grant.ID)
+	if err != nil || len(tabs) != 0 {
+		t.Fatalf("tabs after in-flight close=%#v err=%v", tabs, err)
+	}
+}
+
+func TestOpenTabInFlightRevokeDoesNotInsertTab(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	profile := createProfile(t, f)
+	grant, err := f.service.CreateGrant(ctx, "owner", f.task.ID, profile.ID, nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, release := blockNextOpenTab(f)
+	result := make(chan error, 1)
+	go func() {
+		_, openErr := f.service.OpenTab(ctx, "owner", grant.ID, "https://example.com")
+		result <- openErr
+	}()
+	<-started
+	if _, err := f.service.RevokeGrant(ctx, "owner", grant.ID); err != nil {
+		t.Fatal(err)
+	}
+	release <- struct{}{}
+	err = <-result
+	requireCode(t, err, "browser_grant_revoked")
+	tabs, err := f.store.BrowserTabsForGrant(ctx, grant.ID)
+	if err != nil || len(tabs) != 0 {
+		t.Fatalf("tabs after in-flight revoke=%#v err=%v", tabs, err)
+	}
+}

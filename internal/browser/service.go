@@ -362,7 +362,7 @@ func (s *Service) ensureSession(ctx context.Context, actor, profileID string) (d
 	}
 	session.HostSessionID = hostSession.ID
 	session.State = hostSession.State
-	session.Error = hostSession.Error
+	session.Error = hostSessionErrorText(hostSession)
 	session.LastUsedAt = s.now()
 	if err := s.store.UpdateBrowserSession(ctx, session); err != nil {
 		return domain.BrowserSession{}, false, err
@@ -394,14 +394,18 @@ func (s *Service) adoptHostSession(ctx context.Context, session *domain.BrowserS
 		session.State = domain.BrowserSessionStateError
 	}
 	session.HostSessionID = hostSession.ID
-	if hostSession.Error != "" {
-		// The host's diagnostic text may contain paths; keep only a stable
-		// owner-facing state in AHA.
-		session.Error = "浏览器会话不可用，请刷新状态"
-	} else {
-		session.Error = ""
-	}
+	session.Error = hostSessionErrorText(hostSession)
 	session.LastUsedAt = s.now()
+}
+
+// hostSessionErrorText never persists the host payload: Playwright and host
+// diagnostics can contain the real user-data directory. The owner only needs a
+// stable state.
+func hostSessionErrorText(hostSession HostSession) string {
+	if strings.TrimSpace(hostSession.Error) == "" {
+		return ""
+	}
+	return "浏览器会话不可用，请查看宿主日志"
 }
 
 func (s *Service) syncProfileState(ctx context.Context, profileID, sessionState string, lastUsed time.Time) {
@@ -898,9 +902,30 @@ func (s *Service) authorize(ctx context.Context, grantID, capability, tabID stri
 
 func (s *Service) touchSession(ctx context.Context, session domain.BrowserSession) {
 	now := s.now()
-	session.LastUsedAt = now
-	_ = s.store.UpdateBrowserSession(ctx, session)
-	_ = s.store.UpdateBrowserProfileState(ctx, session.ProfileID, session.State, now)
+	// Touch-only writes: a slow host call must not overwrite a newer
+	// state/closed_at or resurrect a session that was closed in parallel.
+	_ = s.store.TouchBrowserSession(ctx, session.ID, now)
+	_ = s.store.TouchBrowserProfile(ctx, session.ProfileID, now)
+}
+
+// inactiveAccessError explains why a guarded tab write failed after the host
+// call. It always fails closed; the caller closes any newly created host tab.
+func (s *Service) inactiveAccessError(ctx context.Context, grantID string) error {
+	grant, err := s.store.BrowserTaskGrant(ctx, grantID)
+	if err != nil {
+		return conflict("browser_session_changed", "浏览器会话已换代，请重新授权")
+	}
+	switch grant.Status(s.now()) {
+	case domain.BrowserGrantStatusRevoked:
+		return forbidden("browser_grant_revoked", "浏览器授权已撤销")
+	case domain.BrowserGrantStatusExpired:
+		return forbidden("browser_grant_expired", "浏览器授权已过期")
+	}
+	session, err := s.store.BrowserSession(ctx, grant.SessionID)
+	if err == nil && session.State == domain.BrowserSessionStateClosed {
+		return conflict("browser_session_closed", "浏览器会话已关闭，请重新附加")
+	}
+	return conflict("browser_session_changed", "浏览器会话已换代，请重新授权")
 }
 
 func (s *Service) sessionForGrant(ctx context.Context, grant domain.BrowserTaskGrant) (domain.BrowserSession, error) {
@@ -935,8 +960,11 @@ func (s *Service) OpenTab(ctx context.Context, actor, grantID, targetURL string)
 	if tab.URL == "" {
 		tab.URL = targetURL
 	}
-	if err := s.store.CreateBrowserTab(ctx, tab); err != nil {
+	if err := s.store.CreateBrowserTabForActiveGrant(ctx, tab, s.now()); err != nil {
 		_ = s.host.CloseTab(ctx, grant.ProfileID, session.HostSessionID, hostTab.ID)
+		if errors.Is(err, store.ErrBrowserAccessInactive) {
+			return domain.BrowserTab{}, s.inactiveAccessError(ctx, grant.ID)
+		}
 		return domain.BrowserTab{}, err
 	}
 	s.touchSession(ctx, session)
@@ -962,6 +990,9 @@ func (s *Service) NavigateTab(ctx context.Context, actor, grantID, tabID, target
 	hostTab, err := s.host.Navigate(ctx, grant.ProfileID, session.HostSessionID, tab.HostTabID, targetURL)
 	if err != nil {
 		return domain.BrowserTab{}, sanitizeHostError(err)
+	}
+	if _, _, err := s.authorize(ctx, grantID, domain.BrowserCapabilityNavigate, tabID); err != nil {
+		return domain.BrowserTab{}, err
 	}
 	if hostTab.URL != "" {
 		tab.URL = hostTab.URL
@@ -991,6 +1022,9 @@ func (s *Service) SnapshotTab(ctx context.Context, actor, grantID, tabID string)
 	snapshot, err := s.host.Snapshot(ctx, grant.ProfileID, session.HostSessionID, tab.HostTabID)
 	if err != nil {
 		return HostSnapshot{}, sanitizeHostError(err)
+	}
+	if _, _, err := s.authorize(ctx, grantID, domain.BrowserCapabilitySnapshot, tabID); err != nil {
+		return HostSnapshot{}, err
 	}
 	s.touchSession(ctx, session)
 	s.audit(ctx, actor, "browser_tab.snapshot", "browser_tab", tab.ID, map[string]any{

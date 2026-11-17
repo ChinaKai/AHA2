@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -163,6 +164,28 @@ func (s *Store) CreateBrowserSession(ctx context.Context, item domain.BrowserSes
 	return err
 }
 
+// ErrBrowserAccessInactive is returned by the guarded tab writes when the
+// grant, session or active-session ownership changed between authorize and the
+// database write.
+var ErrBrowserAccessInactive = errors.New("browser access is inactive")
+
+// TouchBrowserSession updates only the usage timestamp. It deliberately never
+// writes state/closed_at: a slow host call must not resurrect a session that
+// was closed while the call was in flight.
+func (s *Store) TouchBrowserSession(ctx context.Context, id string, lastUsedAt time.Time) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE browser_sessions SET last_used_at=?,updated_at=? WHERE id=? AND state<>'closed'`,
+		timeString(lastUsedAt), timeString(time.Now().UTC()), id)
+	return err
+}
+
+func (s *Store) TouchBrowserProfile(ctx context.Context, id string, lastUsedAt time.Time) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE browser_profiles SET last_used_at=?,updated_at=? WHERE id=?`,
+		timeString(lastUsedAt), timeString(time.Now().UTC()), id)
+	return err
+}
+
 func (s *Store) UpdateBrowserSession(ctx context.Context, item domain.BrowserSession) error {
 	item.UpdatedAt = time.Now().UTC()
 	result, err := s.db.ExecContext(ctx, `
@@ -262,6 +285,15 @@ func (s *Store) CreateBrowserTaskGrant(ctx context.Context, item domain.BrowserT
 		return fmt.Errorf("browser grant id is required")
 	}
 	now := time.Now().UTC()
+	// Compatibility for callers that only revoke "active" grants: an expired
+	// but unrevoked row would otherwise occupy the v148 unique slot and make
+	// the new insert fail. Revoking expired rows here is still forward-only.
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE browser_task_grants SET revoked_at=?,updated_at=?
+		 WHERE task_id=? AND profile_id=? AND revoked_at='' AND expires_at<=?`,
+		timeString(now), timeString(now), item.TaskID, item.ProfileID, timeString(now)); err != nil {
+		return err
+	}
 	if item.CreatedAt.IsZero() {
 		item.CreatedAt = now
 	}
@@ -431,6 +463,53 @@ func (s *Store) BrowserTabsForTask(ctx context.Context, taskID string) ([]domain
 		result = append(result, item)
 	}
 	return result, rows.Err()
+}
+
+// CreateBrowserTabForActiveGrant inserts a tab only if the grant is still
+// unrevoked/unexpired, its session is open, and that session is still the
+// profile's active session. The check and insert share one transaction so a
+// revoke or close that lands during the host call cannot leave an orphan tab.
+func (s *Store) CreateBrowserTabForActiveGrant(ctx context.Context, item domain.BrowserTab, now time.Time) error {
+	if strings.TrimSpace(item.ID) == "" {
+		return fmt.Errorf("browser tab id is required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var active int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM browser_task_grants g
+		JOIN browser_sessions s ON s.id=g.session_id
+		WHERE g.id=? AND g.task_id=? AND g.session_id=?
+		  AND g.revoked_at='' AND g.expires_at>?
+		  AND s.state<>'closed'
+		  AND NOT EXISTS(
+			SELECT 1 FROM browser_sessions other
+			WHERE other.profile_id=g.profile_id AND other.state<>'closed' AND other.id<>g.session_id
+		  )`,
+		item.GrantID, item.TaskID, item.SessionID, timeString(now)).Scan(&active); err != nil {
+		return err
+	}
+	if active != 1 {
+		return ErrBrowserAccessInactive
+	}
+	now = now.UTC()
+	if item.CreatedAt.IsZero() {
+		item.CreatedAt = now
+	}
+	item.UpdatedAt = now
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO browser_tabs(id,session_id,grant_id,task_id,host_tab_id,url,title,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?)`,
+		item.ID, item.SessionID, item.GrantID, item.TaskID, item.HostTabID, item.URL, item.Title,
+		timeString(item.CreatedAt), timeString(item.UpdatedAt),
+	); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) CreateBrowserTab(ctx context.Context, item domain.BrowserTab) error {

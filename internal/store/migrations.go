@@ -3963,24 +3963,69 @@ func (s *Store) migrate(ctx context.Context) error {
 		// Database-level backstop for the one-active-grant-per-Task/Profile
 		// invariant. Older rows may already contain duplicates from the first
 		// POC commit, so revoke all but the newest before creating the index.
-		if _, err := s.db.ExecContext(ctx, `UPDATE browser_task_grants
-			SET revoked_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),
-			    updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
-			WHERE revoked_at='' AND EXISTS(
-				SELECT 1 FROM browser_task_grants newer
-				WHERE newer.task_id=browser_task_grants.task_id
-				  AND newer.profile_id=browser_task_grants.profile_id
-				  AND newer.revoked_at=''
-				  AND (newer.created_at>browser_task_grants.created_at
-				       OR (newer.created_at=browser_task_grants.created_at AND newer.id>browser_task_grants.id))
-			)`); err != nil {
+		// Dedupe in Go: RFC3339Nano text is not lexically ordered (trailing zeros
+		// are trimmed) and SQLite's date functions lose sub-millisecond precision.
+		type grantRow struct {
+			id, taskID, profileID, createdAt string
+		}
+		rows, err := s.db.QueryContext(ctx,
+			`SELECT id,task_id,profile_id,created_at FROM browser_task_grants WHERE revoked_at=''`)
+		if err != nil {
 			return fmt.Errorf("apply schema v148 browser grant dedupe: %w", err)
+		}
+		groups := map[string][]grantRow{}
+		for rows.Next() {
+			var row grantRow
+			if err := rows.Scan(&row.id, &row.taskID, &row.profileID, &row.createdAt); err != nil {
+				rows.Close()
+				return fmt.Errorf("apply schema v148 browser grant dedupe scan: %w", err)
+			}
+			key := row.taskID + "\x00" + row.profileID
+			groups[key] = append(groups[key], row)
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("apply schema v148 browser grant dedupe close: %w", err)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("apply schema v148 browser grant dedupe rows: %w", err)
+		}
+		nowText := timeString(time.Now().UTC())
+		for _, group := range groups {
+			if len(group) < 2 {
+				continue
+			}
+			keep := group[0]
+			for _, candidate := range group[1:] {
+				keepTime, candidateTime := parseTime(keep.createdAt), parseTime(candidate.createdAt)
+				if candidateTime.After(keepTime) || (candidateTime.Equal(keepTime) && candidate.id > keep.id) {
+					keep = candidate
+				}
+			}
+			for _, obsolete := range group {
+				if obsolete.id == keep.id {
+					continue
+				}
+				if _, err := s.db.ExecContext(ctx,
+					`UPDATE browser_task_grants SET revoked_at=?,updated_at=? WHERE id=? AND revoked_at=''`,
+					nowText, nowText, obsolete.id); err != nil {
+					return fmt.Errorf("apply schema v148 browser grant dedupe update: %w", err)
+				}
+			}
+		}
+		// Tabs of revoked/duplicate grants can no longer be authorized. The
+		// migration cannot call the browser host, so it removes the AHA records;
+		// the host may keep the visible page until the session is closed.
+		if _, err := s.db.ExecContext(ctx,
+			`DELETE FROM browser_tabs WHERE grant_id IN (SELECT id FROM browser_task_grants WHERE revoked_at<>'')`); err != nil {
+			return fmt.Errorf("apply schema v148 browser tab cleanup: %w", err)
 		}
 		if _, err := s.db.ExecContext(ctx,
 			`CREATE UNIQUE INDEX IF NOT EXISTS idx_browser_task_grants_one_active
 			 ON browser_task_grants(task_id,profile_id) WHERE revoked_at=''`); err != nil {
 			return fmt.Errorf("apply schema v148 browser grant uniqueness: %w", err)
 		}
+		// v148 is forward-only. A pre-v148 binary does not know the unique index
+		// and can hit a UNIQUE error; rolling back requires dropping the index.
 		if _, err := s.db.ExecContext(ctx,
 			`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(148, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 			return fmt.Errorf("record schema v148: %w", err)

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {mkdtemp, mkdir, readFile, writeFile, access} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
-import {createProfileLocks, profileDir, safeProfileID} from "./lock.mjs";
+import {createInstanceLock, createProfileLocks, profileDir, safeProfileID} from "./lock.mjs";
 
 const root = () => mkdtemp(join(tmpdir(), "aha2-browser-lock-"));
 
@@ -58,4 +58,13 @@ test("release never deletes a lock owned by a newer token", async () => {
   assert.equal(current.token, lock.token);
   await locks.release(lock);
   await assert.rejects(access(lock.lockPath));
+});
+
+test("only one host process may own a profile root", async () => {
+  const base = await root();
+  const first = await createInstanceLock(base);
+  await assert.rejects(createInstanceLock(base), error => error.code === "browser_host_already_running");
+  await first.release();
+  const second = await createInstanceLock(base);
+  await second.release();
 });

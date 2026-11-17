@@ -136,3 +136,80 @@ func TestBrowserGrantsTabsAndCascade(t *testing.T) {
 		t.Fatalf("tabs after cascade=%#v err=%v", tabs, err)
 	}
 }
+
+func TestBrowserGrantMigrationDedupeUsesRealTimeAndCleansTabs(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "aha2.db")
+	database, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := createStoreTestTask(t, database)
+	now := time.Now().UTC()
+	profile := domain.BrowserProfile{
+		ID: domain.NewID("browser_profile"), Name: "Work", BrowserKind: domain.BrowserKindEdge,
+		HostID: "local", State: domain.BrowserProfileStateReady, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := database.UpsertBrowserProfile(ctx, profile); err != nil {
+		t.Fatal(err)
+	}
+	session := domain.BrowserSession{
+		ID: domain.NewID("browser_session"), ProfileID: profile.ID, HostID: "local",
+		State: domain.BrowserSessionStateReady, StartedAt: now, CreatedAt: now,
+	}
+	if err := database.CreateBrowserSession(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx, `DROP INDEX IF EXISTS idx_browser_task_grants_one_active`); err != nil {
+		t.Fatal(err)
+	}
+	// Lexical order of these RFC3339Nano strings disagrees with real time:
+	// ".12345678Z" sorts after ".123456789Z" even though it is earlier.
+	older := "2026-11-17T06:00:00.12345678Z"
+	newer := "2026-11-17T06:00:00.123456789Z"
+	insert := func(id, created string) {
+		if _, err := database.db.ExecContext(ctx, `
+			INSERT INTO browser_task_grants(id,task_id,profile_id,session_id,capabilities_json,
+				expires_at,revoked_at,created_at,updated_at)
+			VALUES(?,?,?,?,?,?,?,?,?)`,
+			id, task.ID, profile.ID, session.ID, `["snapshot"]`,
+			"2027-11-17T06:00:00Z", "", created, created); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldID := domain.NewID("browser_grant")
+	newID := domain.NewID("browser_grant")
+	insert(oldID, older)
+	insert(newID, newer)
+	if _, err := database.db.ExecContext(ctx, `
+		INSERT INTO browser_tabs(id,session_id,grant_id,task_id,host_tab_id,url,title,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?)`,
+		domain.NewID("browser_tab"), session.ID, oldID, task.ID, "host-tab-old",
+		"https://example.com", "Old", older, older); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version=148`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	database, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	oldGrant, err := database.BrowserTaskGrant(ctx, oldID)
+	if err != nil || oldGrant.RevokedAt.IsZero() {
+		t.Fatalf("older grant should be revoked: %#v err=%v", oldGrant, err)
+	}
+	newGrant, err := database.BrowserTaskGrant(ctx, newID)
+	if err != nil || !newGrant.RevokedAt.IsZero() {
+		t.Fatalf("newer grant should remain active: %#v err=%v", newGrant, err)
+	}
+	tabs, err := database.BrowserTabsForTask(ctx, task.ID)
+	if err != nil || len(tabs) != 0 {
+		t.Fatalf("revoked grant tabs should be removed: %#v err=%v", tabs, err)
+	}
+}

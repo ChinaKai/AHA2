@@ -52,7 +52,9 @@ $env:AHA2_EDGE_PATH = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.
 profile 根目录建议放在 AHA2 数据目录下的独立子目录，并把 ACL 限制为 owner。
 host 为每个 profile 创建 `0700` 子目录和 `.aha2-host.lock` 锁文件。锁文件带随机
 owner token，只有 token 匹配时释放才会删除；同 profile 的 acquire/release 在
-host 内串行化，崩溃遗留的 stale 锁按 pid 回收。
+host 内串行化。崩溃遗留的 stale 锁通过 `.reclaim` 文件仲裁回收，两个 host 进程
+不会互相删除刚创建的活锁；profile root 另有 `.aha2-host.instance` 单实例锁，
+第二个 host 会拒绝启动。
 
 AHA 侧 host 客户端超时 60s，host 的页面导航超时 30s；导航失败会关闭刚创建的
 page，不会留下 AHA 无法管理的孤立页面。

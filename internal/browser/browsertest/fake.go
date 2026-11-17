@@ -20,18 +20,22 @@ type session struct {
 }
 
 type FakeHost struct {
-	mu            sync.Mutex
-	HostID        string
-	EdgeAvailable bool
-	Unavailable   bool
-	Locked        map[string]bool
-	FailOpen      error
-	FailOpenTab   error
-	OpenCalls     int
-	CloseCalls    int
-	Sessions      map[string]*session
-	nextID        int
-	Now           func() time.Time
+	mu             sync.Mutex
+	HostID         string
+	EdgeAvailable  bool
+	Unavailable    bool
+	Locked         map[string]bool
+	FailOpen       error
+	FailOpenTab    error
+	OpenState      string
+	OpenError      string
+	OpenTabStarted chan struct{}
+	OpenTabRelease chan struct{}
+	OpenCalls      int
+	CloseCalls     int
+	Sessions       map[string]*session
+	nextID         int
+	Now            func() time.Time
 }
 
 func New() *FakeHost {
@@ -81,12 +85,16 @@ func (f *FakeHost) Open(_ context.Context, profileID, browserKind string) (brows
 		return browser.HostSession{}, &browser.Error{Code: "browser_profile_locked", Message: "profile directory is locked", Status: http.StatusConflict}
 	}
 	f.nextID++
+	state := f.OpenState
+	if state == "" {
+		state = browserSessionReady
+	}
 	value := &session{
 		id: fmt.Sprintf("host-session-%d", f.nextID), profileID: profileID,
-		state: browserSessionReady, tabs: map[string]browser.HostTab{},
+		state: state, tabs: map[string]browser.HostTab{},
 	}
 	f.Sessions[profileID] = value
-	return browser.HostSession{ID: value.id, ProfileID: profileID, State: value.state}, nil
+	return browser.HostSession{ID: value.id, ProfileID: profileID, State: state, Error: f.OpenError}, nil
 }
 
 const browserSessionReady = "ready"
@@ -136,14 +144,31 @@ func (f *FakeHost) sessionLocked(profileID, sessionID string) (*session, error) 
 
 func (f *FakeHost) OpenTab(_ context.Context, profileID, sessionID, targetURL string) (browser.HostTab, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	if f.FailOpenTab != nil {
-		return browser.HostTab{}, f.FailOpenTab
+		err := f.FailOpenTab
+		f.mu.Unlock()
+		return browser.HostTab{}, err
 	}
 	value, err := f.sessionLocked(profileID, sessionID)
+	started, release := f.OpenTabStarted, f.OpenTabRelease
+	f.mu.Unlock()
 	if err != nil {
 		return browser.HostTab{}, err
 	}
+	// A deterministic hook for TOCTOU tests: the host call is in flight while
+	// the test closes the session or revokes the grant. The captured session
+	// still succeeds, so only AHA's post-call guard can prevent an orphan tab.
+	if started != nil {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+	}
+	if release != nil {
+		<-release
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.nextID++
 	tab := browser.HostTab{ID: fmt.Sprintf("host-tab-%d", f.nextID), URL: targetURL, Title: "Tab"}
 	value.tabs[tab.ID] = tab
