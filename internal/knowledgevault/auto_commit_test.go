@@ -303,6 +303,22 @@ func TestAutoCommitFindsSecretBeyondTheFirstSixtyFourKiB(t *testing.T) {
 	}
 }
 
+func TestAutoCommitBlocksAnthropicStyleKeys(t *testing.T) {
+	ctx := context.Background()
+	config, git := newGitTestVault(t)
+	if _, err := git.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	writeGitTestFile(t, config.VaultPath, "notes/provider.md", "key = \"sk-ant-api03-abcdefghijklmnopqrstuvwxyz012345\"\n")
+	scan, err := git.ScanAutoCommit(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scan.BlockedTotal != 1 || scan.Blocked[0].Reason != "secret" {
+		t.Fatalf("Anthropic-style key was not blocked: %+v", scan)
+	}
+}
+
 func TestAutoCommitAllowsEnvTemplatesAndPublicKeys(t *testing.T) {
 	ctx := context.Background()
 	config, git := newGitTestVault(t)
