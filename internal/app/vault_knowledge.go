@@ -69,6 +69,9 @@ type knowledgeVaultBackend interface {
 	RuntimeWriteEnabled() bool
 	WriteKnowledge(context.Context, knowledgevault.WriteRequest) (knowledgevault.WriteResult, error)
 	KnowledgeFeedback(context.Context, knowledgevault.FeedbackRequest) (knowledgevault.FeedbackResult, error)
+	CreateSkillPackage(context.Context, knowledgevault.SkillWriteRequest) (knowledgevault.SkillWriteResult, error)
+	UpdateSkillPackage(context.Context, knowledgevault.SkillWriteRequest) (knowledgevault.SkillWriteResult, error)
+	DeleteSkillPackage(context.Context, string) (knowledgevault.SkillWriteResult, error)
 	CheckProjectSpacePrerequisites() error
 	ProvisionProjectSpace(context.Context, string, string) (knowledgevault.ProjectSpaceResult, error)
 	RenameProjectSpace(string, string) error
@@ -384,6 +387,49 @@ func (s *Service) vaultGlobalSnapshot(ctx context.Context) ([]domain.KnowledgeEn
 	return active, stale, nil
 }
 
+// vaultRootSnapshot reads every filesystem-managed root library. It is only
+// used for the pet Task: ordinary tasks stay on their project space + global,
+// and channel inbound knowledge never includes root libraries.
+func (s *Service) vaultRootSnapshot(ctx context.Context) ([]domain.KnowledgeEntry, []domain.KnowledgeEntry, error) {
+	if s == nil || s.knowledgeVault == nil {
+		return nil, nil, nil
+	}
+	var active, stale []domain.KnowledgeEntry
+	err := s.knowledgeVault.WithReader(func(reader *knowledgevault.Reader) error {
+		if !reader.IndexReady() {
+			return knowledgevault.ErrReaderNotReady
+		}
+		entries, err := reader.Entries(ctx, "root", "")
+		if err != nil {
+			return err
+		}
+		active, stale = splitVaultKnowledge(mapVaultKnowledge(entries))
+		return nil
+	})
+	if errors.Is(err, knowledgevault.ErrDisabled) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	return active, stale, nil
+}
+
+// isPetKnowledgeTask reports whether this Turn belongs to the pet's own Task.
+// Root libraries are read-only pet context and must not leak into ordinary
+// project tasks or channel inbound routes.
+func (s *Service) isPetKnowledgeTask(ctx context.Context, task domain.Task) bool {
+	if strings.TrimSpace(task.ProjectID) == petProjectID || strings.TrimSpace(task.ID) == petTaskID {
+		return true
+	}
+	ownerID, err := s.store.PrimaryOwnerID(ctx)
+	if err != nil {
+		return false
+	}
+	assistant, err := s.store.OwnerAssistant(ctx, ownerID)
+	return err == nil && assistant.PetTaskID != "" && assistant.PetTaskID == task.ID
+}
+
 // readVaultProjectKnowledge returns (snapshot, true, nil) when the vault is the
 // current source, (zero, false, nil) when the legacy tables are, and an error
 // when the vault is authoritative but unreadable. Callers must stop on the
@@ -548,7 +594,7 @@ func mapVaultKnowledgeEntry(entry knowledgevault.IndexEntry) (domain.KnowledgeEn
 		return domain.KnowledgeEntry{}, false
 	}
 	switch entry.Scope {
-	case "global", "project":
+	case "global", "project", "root":
 	default:
 		return domain.KnowledgeEntry{}, false
 	}

@@ -238,6 +238,7 @@ func (r *Reader) Libraries(ctx context.Context) LibraryList {
 		result.Libraries = append(result.Libraries, Library{ID: "global", Kind: "global", Name: "全局知识"})
 		result.Projects = r.manifestProjects()
 		result.Libraries = append(result.Libraries, result.Projects...)
+		result.Libraries = append(result.Libraries, r.rootLibraries(nil)...)
 		return result
 	}
 
@@ -248,6 +249,7 @@ func (r *Reader) Libraries(ctx context.Context) LibraryList {
 	}
 	counts := map[string]int{}
 	rootIDs := map[string]string{}
+	rootCounts := map[string]int{}
 	orphans := 0
 	for _, entry := range entries {
 		if entry.IsIndex {
@@ -268,6 +270,8 @@ func (r *Reader) Libraries(ctx context.Context) LibraryList {
 			counts["project:"+entry.ProjectID]++
 		case "archive":
 			counts["archive:"+entry.ProjectID]++
+		case "root":
+			rootCounts[entry.Prefix]++
 		case "orphan":
 			orphans++
 		}
@@ -284,12 +288,28 @@ func (r *Reader) Libraries(ctx context.Context) LibraryList {
 		result.Archived[index].Count = counts[result.Archived[index].ID]
 		result.Libraries = append(result.Libraries, result.Archived[index])
 	}
+	result.Libraries = append(result.Libraries, r.rootLibraries(rootCounts)...)
 	if orphans > 0 {
 		result.Orphans = orphans
 		result.Libraries = append(result.Libraries, Library{ID: "orphan", Kind: "orphan", Name: "未归类", Count: orphans})
 	}
 	if status, statusErr := r.index.Status(ctx); statusErr == nil {
 		result.RebuiltAt = status.RebuiltAt
+	}
+	return result
+}
+
+func (r *Reader) rootLibraries(counts map[string]int) []Library {
+	directories := RootLibraryDirectories(r.config.VaultPath)
+	if len(directories) == 0 {
+		return nil
+	}
+	result := make([]Library, 0, len(directories))
+	for _, directory := range directories {
+		result = append(result, Library{
+			ID: "root:" + directory, Kind: "root", Name: rootLibraryTitle(r.config.VaultPath, directory),
+			RootID: vaultNavigationID(RootLibraryIndexRelative(directory)), Count: counts[directory],
+		})
 	}
 	return result
 }
@@ -400,6 +420,7 @@ func (r *Reader) Tree(ctx context.Context, library, projectID string) (TreeResul
 	if libraryErr != nil {
 		return result, libraryErr
 	}
+	rootDirectory := rootLibraryScopeDirectory(library)
 	result.ProjectID = scopedProjectID
 	if !r.indexReady {
 		result.Warning = "index_missing"
@@ -414,20 +435,26 @@ func (r *Reader) Tree(ctx context.Context, library, projectID string) (TreeResul
 		if isReservedVaultPath(entry.Path) {
 			continue
 		}
+		if rootDirectory != "" && entry.Prefix != rootDirectory {
+			continue
+		}
 		filtered = append(filtered, entry)
 	}
-	// The all-libraries tree shows the projects/ and archive/ container
-	// directories. Their navigation pages stay out of the index and search, so
-	// synthesize tree-only entries here: the folder becomes clickable while
-	// Document() still has to read the page straight from the vault. An index
-	// written by an older build may still contain the page; never add a
+	// The all-libraries tree shows the projects/, archive/ and root library
+	// container directories. Their own navigation pages stay out of the index
+	// and search, so synthesize tree-only entries here: the folder becomes
+	// clickable while Document() reads the page straight from the vault. An
+	// index written by an older build may still contain a page; never add a
 	// duplicate path in that case.
-	if scope == "" {
+	if scope == "" || rootDirectory != "" {
 		indexedPaths := make(map[string]bool, len(filtered))
 		for _, entry := range filtered {
 			indexedPaths[entry.Path] = true
 		}
 		for _, navigation := range r.containerNavigationEntries() {
+			if rootDirectory != "" && navigation.Path != RootLibraryIndexRelative(rootDirectory) {
+				continue
+			}
 			if !indexedPaths[navigation.Path] {
 				filtered = append(filtered, navigation)
 			}
@@ -638,6 +665,9 @@ func (r *Reader) libraryForEntry(entry IndexEntry) (string, string) {
 		return "archive:" + entry.ProjectID, r.archiveName(entry.ProjectID)
 	case "orphan":
 		return "orphan", "未归类"
+	case "root":
+		directory := strings.SplitN(entry.Path, "/", 2)[0]
+		return "root:" + directory, rootLibraryTitle(r.config.VaultPath, directory)
 	default:
 		return "", "知识库"
 	}
@@ -677,8 +707,8 @@ func (r *Reader) Search(ctx context.Context, options DocumentSearchOptions) (Sea
 		return result, err
 	}
 	results, err := r.index.Search(ctx, options.Query, SearchOptions{
-		Scope: scope, ProjectID: projectID, Type: options.Type,
-		Status: options.Status, Tag: options.Tag, Limit: options.Limit,
+		Scope: scope, ProjectID: projectID, Prefix: rootLibraryScopeDirectory(options.Library),
+		Type: options.Type, Status: options.Status, Tag: options.Tag, Limit: options.Limit,
 		IncludeArchives: options.IncludeArchives || strings.HasPrefix(strings.TrimSpace(options.Library), "archive:"),
 	})
 	if err != nil {
@@ -918,6 +948,10 @@ type SkillPackage struct {
 	ProjectID    string   `json:"project_id,omitempty"`
 	Library      string   `json:"library"`
 	Description  string   `json:"description,omitempty"`
+	Instructions string   `json:"instructions,omitempty"`
+	Version      int      `json:"version"`
+	Enabled      bool     `json:"enabled"`
+	Status       string   `json:"status"`
 	FileCount    int      `json:"file_count"`
 	Files        []string `json:"files,omitempty"`
 	RelativePath string   `json:"relative_path"`
@@ -1037,10 +1071,28 @@ func (r *Reader) skillPackage(relative, scope, projectID, library string) (Skill
 		return nil
 	})
 	slug := childName(relative)
+	version := 1
+	if value, ok := document.Frontmatter.Extra["version"]; ok {
+		if parsed, ok := intFromAny(value); ok && parsed > 0 {
+			version = parsed
+		}
+	}
+	enabled := true
+	if value, ok := document.Frontmatter.Extra["enabled"]; ok {
+		if parsed, ok := boolFromAny(value); ok {
+			enabled = parsed
+		}
+	}
+	status := "active"
+	if value, ok := document.Frontmatter.Extra["status"].(string); ok && strings.TrimSpace(value) != "" {
+		status = strings.ToLower(strings.TrimSpace(value))
+	}
 	return SkillPackage{
 		ID: "vault-skill:" + strings.ReplaceAll(relative, "/", ":"), Key: SkillKey(scope, projectID, slug, relative),
 		Slug: slug, Name: name,
 		Scope: scope, ProjectID: projectID, Library: library, Description: description,
+		Instructions: strings.TrimSpace(document.Body),
+		Version:      version, Enabled: enabled, Status: status,
 		FileCount: fileCount, Files: files, RelativePath: relative,
 		AbsolutePath: directory, OpenPath: skillPath,
 	}, true
@@ -1105,9 +1157,25 @@ func (r *Reader) libraryScope(library, projectID string) (string, string, error)
 			return "", "", fmt.Errorf("invalid library %q", library)
 		}
 		return "archive", id, nil
+	case strings.HasPrefix(library, "root:"):
+		directory := strings.TrimPrefix(library, "root:")
+		if !rootLibraryNameAllowed(directory) || strings.Contains(directory, "/") {
+			return "", "", fmt.Errorf("invalid library %q", library)
+		}
+		return "root", "", nil
 	default:
 		return "", "", fmt.Errorf("unknown library %q", library)
 	}
+}
+
+// rootLibraryScopeDirectory returns the directory name of a root:<dir>
+// library selector. It is empty for every other selector.
+func rootLibraryScopeDirectory(library string) string {
+	library = strings.TrimSpace(library)
+	if !strings.HasPrefix(library, "root:") {
+		return ""
+	}
+	return strings.TrimPrefix(library, "root:")
 }
 
 // isIndexDocumentPath reports whether a vault-relative path is a directory's
@@ -1138,10 +1206,22 @@ func vaultNavigationID(relative string) string {
 }
 
 func vaultNavigationRelativePath(id string) (string, bool) {
-	for _, relative := range vaultNavigationPaths {
-		if id == vaultNavigationID(relative) {
+	id = strings.TrimSpace(id)
+	if !strings.HasPrefix(id, vaultNavigationIDPrefix) {
+		return "", false
+	}
+	relative := strings.ReplaceAll(strings.TrimPrefix(id, vaultNavigationIDPrefix), ":", "/")
+	for _, known := range vaultNavigationPaths {
+		if relative == known {
 			return relative, true
 		}
+	}
+	// Root library navigation pages are discovered from the filesystem, so the
+	// ID is accepted here and the concrete page is validated against the vault
+	// by navigationDocument.
+	segments := strings.Split(relative, "/")
+	if len(segments) == 2 && segments[1] == "index.md" && rootLibraryNameAllowed(segments[0]) {
+		return relative, true
 	}
 	return "", false
 }
@@ -1158,7 +1238,11 @@ func navigationPageTitle(relative string, document Document) string {
 // library, not a container; isContainerVaultIndexPath keeps that distinction.
 func (r *Reader) containerNavigationEntries() []IndexEntry {
 	result := make([]IndexEntry, 0, len(vaultNavigationPaths))
-	for _, relative := range vaultNavigationPaths {
+	paths := append([]string{}, vaultNavigationPaths...)
+	for _, directory := range RootLibraryDirectories(r.config.VaultPath) {
+		paths = append(paths, RootLibraryIndexRelative(directory))
+	}
+	for _, relative := range paths {
 		if !isContainerVaultIndexPath(r.config.VaultPath, relative) {
 			continue
 		}
@@ -1216,10 +1300,16 @@ func (r *Reader) navigationDocument(relative string) (Doc, error) {
 	if updated == "" {
 		updated = modified
 	}
+	libraryID, libraryName := "", "知识库"
+	segments := strings.Split(filepath.ToSlash(relative), "/")
+	if len(segments) == 2 && segments[1] == "index.md" && isRootLibraryDirectory(r.config.VaultPath, segments[0]) {
+		libraryID = "root:" + segments[0]
+		libraryName = rootLibraryTitle(r.config.VaultPath, segments[0])
+	}
 	return Doc{
 		ID: vaultNavigationID(relative), Title: navigationPageTitle(relative, document),
 		Path: relative, RelativePath: relative, AbsolutePath: absolute,
-		LibraryID: "", LibraryName: "知识库",
+		LibraryID: libraryID, LibraryName: libraryName,
 		Type: TypeNavigation, Status: strings.TrimSpace(document.Frontmatter.Status),
 		Body: document.Body, Updated: updated, Created: strings.TrimSpace(document.Frontmatter.Created),
 		ModifiedAt: modified, IsIndex: true, System: true, Warning: document.Warning,

@@ -98,7 +98,7 @@ func TestCompletedTaskRejectsEditsUntilReopened(t *testing.T) {
 	}
 	response.Body.Close()
 	stored, err := database.Task(ctx, task.ID)
-	if err != nil || stored.Title != "Renamed" || stored.KnowledgePolicy != "inherit" {
+	if err != nil || stored.Title != "Renamed" || stored.KnowledgePolicy != "enabled" {
 		t.Fatalf("completed task was modified: %#v err=%v", stored, err)
 	}
 	// Reopening thaws it, and editing works again.

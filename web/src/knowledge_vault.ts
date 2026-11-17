@@ -719,6 +719,9 @@ export function vaultQuery(params: Record<string, string | number | undefined | 
 }
 
 export function docHash(doc: {id: string; scope?: string; project_id?: string}): string {
+  // Root libraries have no project_id; their document id is enough to reopen
+  // the page, so the scope stays out of the hash instead of becoming an
+  // unparsable bare "root" library selector.
   const scope = doc.scope === "global" || doc.scope === "project" || doc.scope === "archive" ? doc.scope : "";
   return `#knowledge?${vaultQuery({doc: doc.id, scope, project: doc.project_id || ""})}`;
 }
@@ -998,6 +1001,10 @@ export function vaultTreeRoot(documents: KnowledgeVaultTreeNode[], libraryID = "
   if (libraryID.startsWith("project:") || libraryID.startsWith("archive:") || libraryID === "orphan") {
     const roots = new Set(documents.map(doc => treeScopeRoot(doc.path)).filter(root => root && root !== "global"));
     return roots.size === 1 ? [...roots][0] : "";
+  }
+  if (libraryID.startsWith("root:")) {
+    const directory = libraryID.slice("root:".length);
+    return documents.some(doc => normalizeTreePath(doc.path).startsWith(`${directory}/`)) ? directory : "";
   }
   return "";
 }

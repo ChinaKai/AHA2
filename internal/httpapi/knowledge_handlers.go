@@ -675,37 +675,58 @@ func (s *Server) deleteProductLine(writer http.ResponseWriter, request *http.Req
 }
 
 func (s *Server) listSkills(writer http.ResponseWriter, request *http.Request) {
-	items, err := s.store.ListSkills(request.Context(), request.URL.Query().Get("scope"), request.URL.Query().Get("project_id"), request.URL.Query().Get("enabled") == "1")
-	if err != nil {
+	// Skills are vault packages after the cutover. The legacy table is never
+	// listed here: the task picker and the skill editor share this response.
+	items, err := s.app.ListVaultSkills(request.Context())
+	if err != nil && !errors.Is(err, knowledgevault.ErrDisabled) {
 		writeError(writer, http.StatusInternalServerError, "list_skills_failed")
 		return
 	}
-	// The task picker merges this list with vault skills. A source field makes
-	// the two origins explicit without changing the stored skill shape.
-	type skillListItem struct {
-		domain.Skill
-		Source string `json:"source"`
-	}
-	result := make([]skillListItem, 0, len(items))
+	scope := strings.TrimSpace(request.URL.Query().Get("scope"))
+	projectID := strings.TrimSpace(request.URL.Query().Get("project_id"))
+	enabledOnly := request.URL.Query().Get("enabled") == "1"
+	result := make([]map[string]any, 0, len(items))
 	for _, item := range items {
-		result = append(result, skillListItem{Skill: item, Source: "legacy"})
+		if scope != "" && item.Scope != scope {
+			continue
+		}
+		if projectID != "" && item.ProjectID != projectID {
+			continue
+		}
+		if enabledOnly && !item.Enabled {
+			continue
+		}
+		result = append(result, map[string]any{
+			"id": item.ID, "package_slug": item.PackageSlug, "scope": item.Scope,
+			"project_id": item.ProjectID, "name": item.Name, "description": item.Description,
+			"instructions": item.Instructions, "version": item.Version, "status": item.Status,
+			"enabled": item.Enabled, "auto_attach": item.AutoAttach, "source": "vault",
+			"source_path": item.SourcePath, "files": item.Files,
+			"created_at": item.CreatedAt, "updated_at": item.UpdatedAt,
+		})
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "skills": result})
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "source": "vault", "skills": result})
 }
 
 type skillPayload struct {
-	Scope        string `json:"scope"`
-	ProjectID    string `json:"project_id"`
-	Name         string `json:"name"`
-	Description  string `json:"description"`
-	Instructions string `json:"instructions"`
-	Status       string `json:"status"`
-	Enabled      *bool  `json:"enabled"`
-	AutoAttach   *bool  `json:"auto_attach"`
+	Scope         string `json:"scope"`
+	ProjectID     string `json:"project_id"`
+	Slug          string `json:"slug"`
+	Name          string `json:"name"`
+	Description   string `json:"description"`
+	Instructions  string `json:"instructions"`
+	Status        string `json:"status"`
+	Enabled       *bool  `json:"enabled"`
+	AutoAttach    *bool  `json:"auto_attach"`
+	ConfirmGlobal bool   `json:"confirm_global"`
+	BaseVersion   int    `json:"base_version"`
 }
 
 func normalizeSkillPayload(payload *skillPayload) error {
-	payload.Scope = strings.TrimSpace(payload.Scope)
+	payload.Scope = strings.ToLower(strings.TrimSpace(payload.Scope))
+	if payload.Scope == "" {
+		payload.Scope = "project"
+	}
 	if payload.Scope != "project" {
 		payload.Scope = "global"
 		payload.ProjectID = ""
@@ -733,59 +754,135 @@ func (s *Server) createSkill(writer http.ResponseWriter, request *http.Request) 
 		writeError(writer, http.StatusBadRequest, err.Error())
 		return
 	}
-	enabled := true
-	if payload.Enabled != nil {
-		enabled = *payload.Enabled
-	}
-	autoAttach := false
-	if payload.AutoAttach != nil {
-		autoAttach = *payload.AutoAttach
-	}
-	now := time.Now().UTC()
-	item := domain.Skill{ID: domain.NewID("skill"), Scope: payload.Scope, ProjectID: strings.TrimSpace(payload.ProjectID), Name: payload.Name, Description: strings.TrimSpace(payload.Description), Instructions: payload.Instructions, Version: 1, Status: payload.Status, Enabled: enabled, AutoAttach: autoAttach, CreatedAt: now, UpdatedAt: now}
-	if err := s.store.CreateSkill(request.Context(), item); err != nil {
-		writeError(writer, http.StatusInternalServerError, "create_skill_failed")
+	if payload.AutoAttach != nil && *payload.AutoAttach && payload.Scope == "global" && !payload.ConfirmGlobal {
+		// Refuse before creating the package: a global auto-enable needs the
+		// explicit second confirmation, and a half-created skill would be worse.
+		writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": "global_confirmation_required", "message": "全局 vault 技能自动启用需要二次确认"})
 		return
 	}
+	item, err := s.app.CreateVaultSkill(request.Context(), app.VaultSkillWriteInput{
+		Scope: payload.Scope, ProjectID: strings.TrimSpace(payload.ProjectID), Slug: payload.Slug,
+		Name: payload.Name, Description: strings.TrimSpace(payload.Description),
+		Instructions: payload.Instructions, Status: payload.Status, Enabled: payload.Enabled,
+		AllowGlobal: true,
+	})
+	if err != nil {
+		writeVaultSkillHTTPError(writer, err, "create_skill_failed")
+		return
+	}
+	// Auto-attach is a preference, not package content. A create starts without
+	// one; an explicit owner request applies it after the package is durable.
+	if payload.AutoAttach != nil && *payload.AutoAttach {
+		if _, err := s.app.SetVaultSkillAutoAttach(request.Context(), item.ID, true, payload.ConfirmGlobal); err != nil {
+			writeVaultSkillHTTPError(writer, err, "create_skill_auto_attach_failed")
+			return
+		}
+	}
+	s.audit(request, "skill.create", "vault_skill", item.ID, map[string]any{"scope": item.Scope, "project_id": item.ProjectID})
 	writeJSON(writer, http.StatusCreated, map[string]any{"ok": true, "skill": item})
 }
 
 func (s *Server) updateSkill(writer http.ResponseWriter, request *http.Request) {
-	item, err := s.store.Skill(request.Context(), request.PathValue("id"))
-	if err != nil {
-		writeError(writer, http.StatusNotFound, "skill_not_found")
-		return
-	}
 	var payload skillPayload
 	if err := decodeJSON(request, &payload); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	if err := normalizeSkillPayload(&payload); err != nil {
+	requestedScope := strings.TrimSpace(payload.Scope)
+	if requestedScope == "" {
+		// An update may omit scope/project and inherit the package it resolved.
+		// Validate only the editable fields in that case.
+		payload.Scope, payload.ProjectID = "", ""
+		payload.Name = strings.TrimSpace(payload.Name)
+		payload.Instructions = strings.TrimSpace(payload.Instructions)
+		if payload.Name == "" || payload.Instructions == "" {
+			writeError(writer, http.StatusBadRequest, "skill_name_and_instructions_required")
+			return
+		}
+		if strings.TrimSpace(payload.Status) == "" {
+			payload.Status = "active"
+		}
+	} else if err := normalizeSkillPayload(&payload); err != nil {
 		writeError(writer, http.StatusBadRequest, err.Error())
 		return
 	}
-	item.Scope, item.ProjectID, item.Name = payload.Scope, strings.TrimSpace(payload.ProjectID), payload.Name
-	item.Description, item.Instructions = strings.TrimSpace(payload.Description), payload.Instructions
-	item.Status, item.UpdatedAt = payload.Status, time.Now().UTC()
-	if payload.Enabled != nil {
-		item.Enabled = *payload.Enabled
-	}
-	if payload.AutoAttach != nil {
-		item.AutoAttach = *payload.AutoAttach
-	}
-	item.Version++
-	if err := s.store.UpdateSkill(request.Context(), item); err != nil {
-		writeError(writer, http.StatusInternalServerError, "update_skill_failed")
+	item, err := s.app.UpdateVaultSkill(request.Context(), request.PathValue("id"), app.VaultSkillWriteInput{
+		Scope: payload.Scope, ProjectID: strings.TrimSpace(payload.ProjectID),
+		Name: payload.Name, Description: strings.TrimSpace(payload.Description),
+		Instructions: payload.Instructions, Status: payload.Status, Enabled: payload.Enabled,
+		BaseVersion: payload.BaseVersion, AllowGlobal: true,
+	})
+	if err != nil {
+		writeVaultSkillHTTPError(writer, err, "update_skill_failed")
 		return
 	}
+	if payload.AutoAttach != nil {
+		if _, err := s.app.SetVaultSkillAutoAttach(request.Context(), item.ID, *payload.AutoAttach, payload.ConfirmGlobal); err != nil {
+			writeVaultSkillHTTPError(writer, err, "update_skill_auto_attach_failed")
+			return
+		}
+		refreshed, refreshErr := s.app.ListVaultSkills(request.Context())
+		if refreshErr == nil {
+			for _, candidate := range refreshed {
+				if candidate.ID == item.ID {
+					item = candidate
+					break
+				}
+			}
+		}
+	}
+	s.audit(request, "skill.update", "vault_skill", item.ID, map[string]any{"version": item.Version, "scope": item.Scope})
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "skill": item})
 }
 
 func (s *Server) deleteSkill(writer http.ResponseWriter, request *http.Request) {
-	if err := s.store.DeleteSkill(request.Context(), request.PathValue("id")); err != nil {
-		writeError(writer, http.StatusInternalServerError, "delete_skill_failed")
+	if err := s.app.DeleteVaultSkill(request.Context(), request.PathValue("id"), true); err != nil {
+		writeVaultSkillHTTPError(writer, err, "delete_skill_failed")
 		return
 	}
+	s.audit(request, "skill.delete", "vault_skill", request.PathValue("id"), nil)
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true})
+}
+
+// writeVaultSkillHTTPError maps vault skill write failures to the Web API's
+// stable error shape.
+func writeVaultSkillHTTPError(writer http.ResponseWriter, err error, fallback string) {
+	switch {
+	case errors.Is(err, knowledgevault.ErrDisabled):
+		writeError(writer, http.StatusNotFound, "knowledge_vault_disabled")
+		return
+	case errors.Is(err, app.ErrVaultSkillNotFound):
+		writeError(writer, http.StatusNotFound, "skill_not_found")
+		return
+	case errors.Is(err, app.ErrVaultSkillForbidden):
+		writeError(writer, http.StatusForbidden, "skill_scope_forbidden")
+		return
+	case errors.Is(err, app.ErrVaultSkillReadOnly):
+		writeError(writer, http.StatusForbidden, "skill_read_only")
+		return
+	case errors.Is(err, app.ErrVaultGlobalConfirmationRequired):
+		writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": "global_confirmation_required", "message": "全局 vault 技能自动启用需要二次确认"})
+		return
+	}
+	var writeErr *knowledgevault.SkillWriteError
+	if errors.As(err, &writeErr) {
+		switch writeErr.Code {
+		case knowledgevault.SkillWriteErrorConflictCode():
+			writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": "skill_version_conflict", "current_version": writeErr.CurrentVersion, "message": writeErr.Message})
+			return
+		case knowledgevault.SkillWriteErrorDuplicateCode():
+			writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": "skill_already_exists", "message": writeErr.Message})
+			return
+		case knowledgevault.SkillWriteErrorNotFoundCode():
+			writeError(writer, http.StatusNotFound, "skill_not_found")
+			return
+		case knowledgevault.SkillWriteErrorForbiddenCode():
+			writeError(writer, http.StatusForbidden, "skill_scope_forbidden")
+			return
+		case knowledgevault.SkillWriteErrorDisabledCode(), knowledgevault.SkillWriteErrorUnavailableCode():
+			writeJSON(writer, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "knowledge_vault_unavailable", "message": writeErr.Message})
+			return
+		}
+	}
+	writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": fallback, "message": err.Error()})
 }

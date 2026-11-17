@@ -1730,8 +1730,13 @@ function autoTaskSkillIDs(projectID: string): string[] {
 }
 
 function availableTaskSkills(projectID: string, includeIDs: string[] = []): Skill[] {
-  const legacy = state.skills.filter(item => item.enabled && item.status === "active" && (item.scope === "global" || item.project_id === projectID || item.bound_project_id === projectID));
-  return [...legacy, ...availableVaultTaskSkills(projectID, includeIDs)];
+  // Skills are vault packages only. The lazy module carries the exact
+  // applicability gate (project binding and runtime read); when it failed to
+  // load, the same vault catalog returned by GET /api/v1/skills is the
+  // fallback. The legacy skills table is never merged here.
+  if (vaultTaskSkillsModule) return availableVaultTaskSkills(projectID, includeIDs);
+  return state.skills.filter(item => item.enabled && item.status === "active" && item.scope !== "archive" && item.can_update !== false &&
+    (item.scope === "global" || item.project_id === projectID || item.bound_project_id === projectID));
 }
 
 function taskSkillSourceHint(projectID: string): string {
@@ -5399,7 +5404,7 @@ function taskDialog(): string {
       <section class="agent-config-section agent-config-task">
         <h3>任务设置</h3>
         <div class="two"><label>协作模式<select name="collaboration_mode"><option value="auto">Auto</option><option value="single">Single</option></select></label><label>最大 Agent 数<input name="max_agents" type="number" min="1" value="3"></label></div>
-        <label>Knowledge<select name="knowledge_policy"><option value="inherit">继承 Project</option><option value="enabled">开启</option><option value="disabled">关闭</option></select></label>
+        <label>Knowledge<select name="knowledge_policy"><option value="enabled">开启</option><option value="disabled">关闭</option></select></label>
         <div id="task-git-isolation"><label>任务隔离<select name="isolation" id="task-isolation"><option value="inplace" selected>原地执行（默认）</option><option value="worktree">独立 Worktree</option></select></label><div id="task-worktree-settings"><label>Worktree 根目录<input name="worktree_dir" id="task-worktree-dir" placeholder="默认：仓库上一级/.aha2-worktrees"></label><div class="field-help">系统会在根目录下追加 Task ID；切换为原地执行后不使用此配置。</div></div><div class="two" id="task-branches"><label>目标分支<input name="target_branch" placeholder="默认当前分支"></label><label>任务分支<input name="task_branch" placeholder="aha/task-name"></label></div></div>
       </section>
     </div>
@@ -7824,7 +7829,7 @@ function bindCommon(): void {
         mcp_server_ids: form.getAll("mcp_server_ids").map(String),
         collaboration_mode: String(form.get("collaboration_mode") || "auto"),
         max_agents: Number(form.get("max_agents") || 3),
-        knowledge_policy: String(form.get("knowledge_policy") || "inherit"),
+        knowledge_policy: String(form.get("knowledge_policy") || "enabled"),
         skill_ids: form.getAll("skill_ids").map(String),
       });
     }

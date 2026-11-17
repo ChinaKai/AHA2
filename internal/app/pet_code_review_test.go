@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
@@ -204,8 +205,65 @@ func TestPetRequestCodeReviewAutoAttachesTieredSkill(t *testing.T) {
 	}
 }
 
-// A missing auto-attach Skill must not be fabricated: the Review Task is still
-// created and the result explains why the Skill was not attached.
+// The review skill is resolved from vault packages now. The source project's
+// copy wins over global, a historical skill_d942... row resolves through the
+// read-only alias, and an existing task that still stores the legacy id loads
+// the vault package.
+func TestPetRequestCodeReviewResolvesVaultTieredSkillAndLegacyAlias(t *testing.T) {
+	fixture, project, workspace := petReviewFixture(t)
+	reviewModel := addReviewModel(t, fixture)
+	legacyID := "skill_d942c3b4b3eb28b77dc7"
+	createReviewSkill(t, fixture, legacyID, petCodeReviewTieredSkillName, "project", project.ID, true)
+
+	manager := buildVaultReadManager(t, true, map[string]string{
+		"projects/review-project/index.md":                           "---\nid: knowledge_root_review_project\ntitle: 代码评审项目\nscope: project\nproject_id: " + project.ID + "\ntype: navigation\nstatus: verified\nis_index: true\n---\nReview project.\n",
+		"projects/review-project/skills/tiered-code-review/SKILL.md": "---\nname: " + petCodeReviewTieredSkillName + "\ndescription: project review\n---\n\nproject review\n",
+		"global/skills/tiered-code-review/SKILL.md":                  "---\nname: " + petCodeReviewTieredSkillName + "\ndescription: global review\n---\n\nglobal review\n",
+	})
+	fixture.service.SetKnowledgeVault(manager, true)
+	fixture.service.SetKnowledgeVaultRuntimeWrite(true)
+	projectKey := "vault-skill:project:" + project.ID + ":tiered-code-review"
+
+	keys, warning, err := fixture.service.petCodeReviewSkillIDs(fixture.ctx, project.ID, nil)
+	if err != nil || warning != "" || !reflect.DeepEqual(keys, []string{projectKey}) {
+		t.Fatalf("vault review skill = %#v warning=%q err=%v", keys, warning, err)
+	}
+	aliased, warning, err := fixture.service.petCodeReviewSkillIDs(fixture.ctx, project.ID, []string{legacyID})
+	if err != nil || warning != "" || !reflect.DeepEqual(aliased, []string{projectKey}) {
+		t.Fatalf("legacy review skill alias = %#v warning=%q err=%v", aliased, warning, err)
+	}
+
+	source, err := fixture.service.PetCreateTask(fixture.ctx, PetCreateTaskInput{
+		ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "vault review",
+		Request: "修改代码", ModelID: fixture.model.ID, Start: boolPointer(false),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A task created before the cutover still stores the legacy id directly.
+	if err := fixture.database.UpdateTaskSkills(fixture.ctx, source.ID, []string{legacyID}, fixture.createdAt.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	storedSource, err := fixture.database.Task(fixture.ctx, source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := fixture.service.activeTaskSkills(fixture.ctx, storedSource)
+	if len(active) != 1 || active[0].ID != projectKey || len(active[0].PackageFiles) == 0 || !strings.Contains(active[0].PackageFiles[0].Content, "project review") {
+		t.Fatalf("historical legacy id did not load the vault package: %#v", active)
+	}
+
+	review, err := fixture.service.PetRequestCodeReview(fixture.ctx, PetRequestCodeReviewInput{
+		TaskID: source.ID, ReviewModelID: reviewModel.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{projectKey}; !reflect.DeepEqual(review.SkillIDs, want) {
+		t.Fatalf("review auto-attached skill_ids=%#v want %#v", review.SkillIDs, want)
+	}
+}
+
 func TestPetRequestCodeReviewWarnsWhenTieredSkillMissing(t *testing.T) {
 	fixture, project, workspace := petReviewFixture(t)
 	reviewModel := addReviewModel(t, fixture)
@@ -465,5 +523,19 @@ func completeTaskWithReview(t *testing.T, filesystem, effort string) {
 	}
 	if completed.ReviewDecision != "required" || completed.ReviewTaskID != review.ID || completed.ReviewDecidedBy != "pet" || completed.ReviewDecidedAt.IsZero() {
 		t.Fatalf("required decision not persisted: %#v", completed.TaskReviewDecision)
+	}
+}
+
+func TestPetCodeReviewSkillFallsBackToGlobalVaultPackage(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	manager := buildVaultReadManager(t, true, map[string]string{
+		"projects/review-project/index.md":          "---\nid: knowledge_root_review_project\ntitle: Review\nscope: project\nproject_id: project-review-global-only\ntype: navigation\nstatus: verified\nis_index: true\n---\nReview.\n",
+		"global/skills/tiered-code-review/SKILL.md": "---\nname: " + petCodeReviewTieredSkillName + "\ndescription: global review\n---\n\nglobal review\n",
+	})
+	fixture.service.SetKnowledgeVault(manager, true)
+	fixture.service.SetKnowledgeVaultRuntimeWrite(true)
+	keys, warning, err := fixture.service.petCodeReviewSkillIDs(fixture.ctx, "project-review-global-only", nil)
+	if err != nil || warning != "" || !reflect.DeepEqual(keys, []string{"vault-skill:global:tiered-code-review"}) {
+		t.Fatalf("global review fallback = %#v warning=%q err=%v", keys, warning, err)
 	}
 }

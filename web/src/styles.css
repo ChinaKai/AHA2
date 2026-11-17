@@ -1511,6 +1511,11 @@ dialog.agent-config-dialog { width: min(760px,calc(100vw - 32px)); }
 .task-skill-option strong, .task-skill-option small { display: block; overflow: hidden; text-overflow: ellipsis; }
 .task-skill-option strong { font-size: 10px; }
 .task-skill-option small { margin-top: 3px; color: var(--muted); font-size: 9px; white-space: nowrap; }
+.task-skill-group { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 7px; }
+.task-skill-group > header { grid-column: 1 / -1; display: flex; align-items: baseline; justify-content: space-between; padding-bottom: 4px; border-bottom: 1px solid var(--color-border); }
+.task-skill-group > header strong { font-size: 10px; }
+.task-skill-group > header span { color: var(--muted); font-size: 9px; }
+.task-skill-project { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 7px; }
 
 .knowledge-page { width: min(1500px,100%); }
 .knowledge-workspace-layout, .knowledge-workspace-layout.top-level { display: grid; grid-template-columns: 220px minmax(0,1fr); gap: 14px; align-items: start; }
@@ -1602,6 +1607,11 @@ dialog.agent-config-dialog { width: min(760px,calc(100vw - 32px)); }
 .knowledge-advanced[open] summary { margin-bottom: 12px; }
 .knowledge-empty { min-height: 100px; border: 1px dashed var(--color-border-strong); border-radius: var(--radius-card); background: var(--color-surface-muted); color: var(--color-text-muted); }
 .skill-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; }
+.knowledge-skill-groups { display: grid; gap: 16px; }
+.knowledge-skill-group > header { display: flex; align-items: baseline; justify-content: space-between; margin: 0 0 8px; padding-bottom: 6px; border-bottom: 1px solid var(--color-border); }
+.knowledge-skill-group > header strong { font-size: 12px; }
+.knowledge-skill-group > header span { color: var(--muted); font-size: 10px; }
+.skill-card.read-only { background: var(--color-surface-muted, #f8fafc); }
 .skill-card { min-width: 0; padding: 14px; border: 1px solid var(--color-border); border-radius: var(--radius-card); background: var(--color-surface); box-shadow: var(--shadow-xs); }
 .skill-card.disabled { opacity: .62; }
 .skill-card header { display: grid; grid-template-columns: 34px minmax(0,1fr) auto; align-items: center; gap: 9px; }

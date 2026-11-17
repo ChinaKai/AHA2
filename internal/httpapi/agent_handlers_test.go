@@ -8,6 +8,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/hardware"
+	"github.com/ChinaKai/AHA2/internal/knowledgevault"
 	"github.com/ChinaKai/AHA2/internal/managedprocess"
 	"github.com/ChinaKai/AHA2/internal/secrets"
 	"github.com/ChinaKai/AHA2/internal/store"
@@ -194,10 +196,42 @@ func TestAgentStateKnowledgeAndSkillAPIs(t *testing.T) {
 	defer database.Close()
 	task := createHardwareAPITask(t, database)
 	now := time.Now().UTC()
-	skill := domain.Skill{ID: "skill-agent-api", Scope: "global", Name: "Build", Description: "Build", Instructions: "Build only.", Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now}
-	if err := database.CreateSkill(ctx, skill); err != nil {
+	// Skills are vault packages. Bind the hardware task's project and seed the
+	// global Build package the update step modifies.
+	vaultConfig := knowledgevault.DefaultConfig(t.TempDir())
+	if _, err := knowledgevault.Bootstrap(vaultConfig, knowledgevault.InitOptions{VaultName: "Agent API"}); err != nil {
 		t.Fatal(err)
 	}
+	writeVault := func(relative, content string) {
+		target := filepath.Join(vaultConfig.VaultPath, filepath.FromSlash(relative))
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeVault("projects/agent-api/index.md", "---\nid: knowledge_root_agent_api\ntitle: Agent API\nscope: project\nproject_id: "+task.ProjectID+"\ntype: navigation\nstatus: verified\nis_index: true\n---\nAgent API entry.\n")
+	writeVault("global/skills/build/SKILL.md", "---\nname: Build\ndescription: Build\nversion: 1\n---\n\nBuild only.\n")
+	index, err := knowledgevault.OpenIndex(ctx, vaultConfig.IndexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := index.Rebuild(ctx, vaultConfig.VaultPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := index.Close(); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := knowledgevault.NewManager(vaultConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.SetEnabled(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	skillID := "vault-skill:global:build"
 	secretStore, err := secrets.Open(filepath.Join(t.TempDir(), "secrets.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -229,9 +263,15 @@ func TestAgentStateKnowledgeAndSkillAPIs(t *testing.T) {
 	}
 	executor := &blockingAgentAPIExecutor{started: make(chan app.ExecutionRequest, 4), release: make(chan struct{}), done: make(chan struct{})}
 	service := app.NewService(database, secretStore, executor)
-	if _, err := service.UpdateTaskSkills(ctx, task.ID, []string{skill.ID}); err != nil {
+	service.SetKnowledgeVault(manager, true)
+	service.SetKnowledgeVaultRuntimeWrite(true)
+	if _, err := service.UpdateTaskSkills(ctx, task.ID, []string{skillID}); err != nil {
 		t.Fatal(err)
 	}
+	// The knowledge section below still exercises the legacy tables: keep the
+	// vault write engine available for skills but route knowledge reads/writes
+	// to legacy until the skill API section re-enables vault reads.
+	service.SetKnowledgeVault(manager, false)
 	turn, err := service.SubmitMessage(ctx, task.ID, "exercise Agent API")
 	if err != nil {
 		t.Fatal(err)
@@ -254,7 +294,7 @@ func TestAgentStateKnowledgeAndSkillAPIs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(New(Config{Store: database, App: service, AgentCapabilities: capabilities}).Handler())
+	server := httptest.NewServer(New(Config{Store: database, App: service, AgentCapabilities: capabilities, KnowledgeVault: manager}).Handler())
 	defer server.Close()
 
 	response := agentRequest(t, server.URL+"/api/v1/agent/capabilities", http.MethodGet, token, nil)
@@ -585,6 +625,8 @@ func TestAgentStateKnowledgeAndSkillAPIs(t *testing.T) {
 		t.Fatalf("stale knowledge by id status=%d payload=%#v", response.StatusCode, knowledgePayload)
 	}
 
+	service.SetKnowledgeVault(manager, true)
+	service.SetKnowledgeVaultRuntimeWrite(true)
 	response = agentRequest(t, server.URL+"/api/v1/agent/skills", http.MethodPost, token, map[string]any{
 		"name": "Release checks", "description": "Verify an AHA2 release", "instructions": "Run the release verification suite.",
 	})
@@ -644,7 +686,7 @@ func TestAgentStateKnowledgeAndSkillAPIs(t *testing.T) {
 		t.Fatalf("created skill was not immediately readable: status=%d payload=%#v", response.StatusCode, selectedSkillPayload)
 	}
 
-	response = agentRequest(t, server.URL+"/api/v1/agent/skills/"+skill.ID, http.MethodPut, token, map[string]any{
+	response = agentRequest(t, server.URL+"/api/v1/agent/skills/"+skillID, http.MethodPut, token, map[string]any{
 		"base_version": 1, "name": "Build and deploy", "description": "Build and deploy AHA2",
 		"files": []map[string]any{{"path": "SKILL.md", "content": "---\nname: build-and-deploy\ndescription: Build and deploy AHA2\n---\n\nDeploy safely.\n"}, {"path": "scripts/deploy.ps1", "content": "Write-Output 'deploy'\n"}},
 	})
@@ -653,9 +695,12 @@ func TestAgentStateKnowledgeAndSkillAPIs(t *testing.T) {
 	if response.StatusCode != http.StatusOK || skillPayload["skill"].(map[string]any)["version"] != float64(2) {
 		t.Fatalf("skill status=%d payload=%#v", response.StatusCode, skillPayload)
 	}
-	storedSkill, err := database.Skill(ctx, skill.ID)
-	if err != nil || storedSkill.Version != 2 || len(storedSkill.PackageFiles) != 2 {
-		t.Fatalf("stored skill=%#v err=%v", storedSkill, err)
+	response = agentRequest(t, server.URL+"/api/v1/agent/skills/"+skillID, http.MethodGet, token, nil)
+	var storedSkillPayload map[string]any
+	decodeResponse(t, response, &storedSkillPayload)
+	storedSkill := storedSkillPayload["skill"].(map[string]any)
+	if response.StatusCode != http.StatusOK || storedSkill["version"] != float64(2) || len(storedSkillPayload["files"].([]any)) != 2 {
+		t.Fatalf("stored skill status=%d payload=%#v", response.StatusCode, storedSkillPayload)
 	}
 
 	response = agentMultipartRequest(t, server.URL+"/api/v1/agent/turn/attachments", token, "generated.png", []byte("\x89PNG\r\ngenerated"))

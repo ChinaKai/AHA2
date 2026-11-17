@@ -547,36 +547,43 @@ func (s *Service) CreateAgentSkill(ctx context.Context, claims agentapi.Claims, 
 	if scope != "project" && scope != "global" {
 		return domain.Skill{}, fmt.Errorf(`skill scope must be "project" or "global"`)
 	}
+	allowGlobal := false
 	projectID := call.Project.ID
 	if scope == "global" {
 		if !s.AgentGlobalSkillAllowed(ctx, call) {
 			return domain.Skill{}, ErrGlobalSkillForbidden
 		}
-		// A global skill belongs to no Project; that is how the existing global
-		// skills are stored, and what the scope listings filter on.
+		allowGlobal = true
 		projectID = ""
 	}
-	now := s.now().UTC()
-	item := domain.Skill{
-		ID: domain.NewID("skill"), Scope: scope, ProjectID: projectID,
-		Name: input.Name, Description: input.Description, Instructions: input.Instructions,
-		Version: 1, Status: "active", Enabled: true, AutoAttach: input.AutoAttach, CreatedAt: now, UpdatedAt: now,
-	}
-	if err := s.store.CreateSkill(ctx, item); err != nil {
+	// Auto-attach is intentionally not applied here: a new skill starts with
+	// no preference row. The owner can enable it from the Web vault Skills tab.
+	item, err := s.CreateVaultSkill(ctx, VaultSkillWriteInput{
+		Scope: scope, ProjectID: projectID, Name: input.Name,
+		Description: input.Description, Instructions: input.Instructions,
+		AllowGlobal: allowGlobal,
+	})
+	if err != nil {
 		return domain.Skill{}, err
 	}
 	skillIDs := append(append([]string(nil), call.Task.SkillIDs...), item.ID)
 	if _, err := s.UpdateTaskSkills(ctx, call.Task.ID, skillIDs); err != nil {
-		_ = s.store.DeleteSkill(ctx, item.ID)
-		return domain.Skill{}, err
+		// The package is already durable; report the task update failure instead
+		// of deleting user content that the next Turn can still select.
+		return domain.Skill{}, fmt.Errorf("skill created in the vault but attaching it to the task failed: %w", err)
 	}
-	return s.store.Skill(ctx, item.ID)
+	return item, nil
 }
 
 func (s *Service) ApplicableAgentKnowledge(ctx context.Context, claims agentapi.Claims) ([]domain.KnowledgeEntry, error) {
 	call, err := s.AgentCallContext(ctx, claims, false)
 	if err != nil {
 		return nil, err
+	}
+	if !knowledgeEnabled(call.Project, call.Task) {
+		// A Task with knowledge switched off must not read knowledge through any
+		// surface, including the Agent API.
+		return []domain.KnowledgeEntry{}, nil
 	}
 	if channelContext, channelErr := s.store.ChannelContextForInboxBatch(ctx, call.Turn.InboxBatchID); channelErr == nil {
 		if channelRouteMode(channelContext) != "task_route" {
@@ -609,6 +616,13 @@ func (s *Service) ApplicableAgentKnowledge(ctx context.Context, claims agentapi.
 	items = append(items, projectStale...)
 	items = append(items, global...)
 	items = append(items, globalStale...)
+	// Root libraries are read-only and only visible to the pet's own Task.
+	if s.isPetKnowledgeTask(ctx, call.Task) {
+		if rootActive, rootStale, rootErr := s.vaultRootSnapshot(ctx); rootErr == nil {
+			items = append(items, rootActive...)
+			items = append(items, rootStale...)
+		}
+	}
 	markAgentKnowledgeWritable(items, s.AgentKnowledgePublishAllowed(ctx, call))
 	return items, nil
 }

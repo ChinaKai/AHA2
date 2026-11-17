@@ -600,7 +600,9 @@ func (s *Service) executePetApproval(ctx context.Context, item domain.PetApprova
 		s.recordPetWork(ctx, "knowledge_deleted", payload.KnowledgeID, "approved")
 		return nil
 	case "delete_skill":
-		if err := s.store.DeleteSkill(ctx, payload.SkillID); err != nil {
+		// Move the package into the vault trash. The legacy skills table is not
+		// touched; a historical legacy id resolves through the read-only alias.
+		if err := s.DeleteVaultSkill(ctx, payload.SkillID, false); err != nil {
 			return err
 		}
 		s.recordPetWork(ctx, "skill_deleted", payload.SkillID, "approved")

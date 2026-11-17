@@ -248,9 +248,14 @@ func isContainerVaultIndexPath(vaultPath, relative string) bool {
 		return true
 	case archiveProjectsIndexPath:
 		return indexPageProjectID(vaultPath, relative) == ""
-	default:
-		return false
 	}
+	// A root library's own navigation page is generated on disk but stays out
+	// of the index and search; Tree synthesizes a tree-only node for it.
+	segments := strings.Split(filepath.ToSlash(relative), "/")
+	if len(segments) == 2 && segments[1] == "index.md" {
+		return isRootLibraryDirectory(vaultPath, segments[0])
+	}
+	return false
 }
 
 // missingIndexSkipNames are directory names that never receive an automatic
@@ -574,6 +579,13 @@ func autoIndexDirectoryAllowed(relative string) bool {
 			return true
 		}
 	}
+	// Top-level root libraries and their subdirectories also get generated
+	// index pages, including empty ones.
+	segments := strings.Split(filepath.ToSlash(relative), "/")
+	if len(segments) >= 1 && rootLibraryNameAllowed(segments[0]) &&
+		!skippedDirectoryNames[strings.ToLower(segments[0])] {
+		return true
+	}
 	return false
 }
 
@@ -606,6 +618,10 @@ func autoIndexLibraryRoot(directory string) (root, slugKey, scope string, ok boo
 		slug := segments[1]
 		return path.Join("archive", slug), slug, "archive", true
 	default:
+		if len(segments) >= 1 && rootLibraryNameAllowed(segments[0]) &&
+			!skippedDirectoryNames[strings.ToLower(segments[0])] {
+			return segments[0], segments[0], "root", true
+		}
 		return "", "", "", false
 	}
 }
@@ -628,6 +644,14 @@ func missingIndexFrontmatter(vaultPath string, manifest Manifest, reverseProject
 	root, slugKey, scope, ok := autoIndexLibraryRoot(directory)
 	if !ok {
 		return Frontmatter{}, "", false
+	}
+	if scope == "root" {
+		// Root libraries are filesystem-managed: no project binding and no
+		// project/archive name cache. The directory name is the title source.
+		frontmatter.Scope = "root"
+		frontmatter.ProjectID = ""
+		frontmatter.Title = humanizeSegment(path.Base(directory))
+		return frontmatter, "", true
 	}
 	projectID := ""
 	if scope == "project" {
@@ -740,6 +764,81 @@ func createVaultIndexPage(vaultPath, relative string, frontmatter Frontmatter) e
 // maintainVaultIndexes rewrites only the machine-generated block inside
 // existing index.md files. It never creates a page and never touches content
 // outside the markers, including frontmatter and hand-written intros.
+// maintainRootLibraryIndexes fills the generated block of every root library's
+// own navigation page. Those pages are deliberately excluded from the index, so
+// maintainVaultIndexes never sees them; their subdirectory index pages are
+// indexed normally and contribute folder nodes to the tree.
+func maintainRootLibraryIndexes(vaultPath string, records []*scannedRecord) []string {
+	warnings := []string{}
+	byPath := make(map[string]*scannedRecord, len(records))
+	for _, record := range records {
+		byPath[record.entry.Path] = record
+	}
+	for _, root := range RootLibraryDirectories(vaultPath) {
+		relativeIndex := RootLibraryIndexRelative(root)
+		target := filepath.Join(vaultPath, filepath.FromSlash(relativeIndex))
+		if info, err := os.Lstat(target); err != nil || info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		subdirectories := map[string]string{}
+		docPaths := make([]string, 0)
+		for record := range byPath {
+			if !strings.HasPrefix(record, root+"/") {
+				continue
+			}
+			if path.Dir(record) == root {
+				if path.Base(record) != "index.md" && !isReservedVaultPath(record) {
+					docPaths = append(docPaths, record)
+				}
+				continue
+			}
+			// Immediate subdirectory index pages become folder links.
+			if path.Base(record) == "index.md" && path.Dir(path.Dir(record)) == root {
+				subdirectories[path.Dir(record)] = byPath[record].entry.Title
+			}
+		}
+		subdirPaths := make([]string, 0, len(subdirectories))
+		for candidate := range subdirectories {
+			subdirPaths = append(subdirPaths, candidate)
+		}
+		sort.Strings(subdirPaths)
+		sort.Strings(docPaths)
+		block := generatedIndexBlockForEntries(byPath, subdirPaths, docPaths)
+		warnings = append(warnings, writeMaintainedIndexBlock(vaultPath, relativeIndex, block)...)
+	}
+	return warnings
+}
+
+// writeMaintainedIndexBlock replaces only the machine-generated marker block
+// inside an existing page. A missing page or missing markers is left alone.
+func writeMaintainedIndexBlock(vaultPath, relative, block string) []string {
+	target := filepath.Join(vaultPath, filepath.FromSlash(relative))
+	raw, err := os.ReadFile(target)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return []string{fmt.Sprintf("%s: read index page: %v", relative, err)}
+	}
+	start := strings.Index(string(raw), indexBlockStart)
+	if start < 0 {
+		return []string{fmt.Sprintf("%s: generated index markers are missing; page left unchanged", relative)}
+	}
+	endRelative := strings.Index(string(raw)[start:], indexBlockEnd)
+	if endRelative < 0 {
+		return []string{fmt.Sprintf("%s: generated index markers are incomplete; page left unchanged", relative)}
+	}
+	end := start + endRelative + len(indexBlockEnd)
+	next := string(raw[:start]) + block + string(raw[end:])
+	if next == string(raw) {
+		return nil
+	}
+	if err := writeVaultFileIfChanged(vaultPath, target, []byte(next), 0o644); err != nil {
+		return []string{fmt.Sprintf("%s: update generated index: %v", relative, err)}
+	}
+	return nil
+}
+
 func maintainVaultIndexes(vaultPath string, records []*scannedRecord) []string {
 	warnings := []string{}
 	byPath := make(map[string]*scannedRecord, len(records))

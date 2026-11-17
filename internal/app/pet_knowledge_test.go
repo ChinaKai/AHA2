@@ -79,6 +79,15 @@ func TestPetKnowledgeSkillAndPromptManagement(t *testing.T) {
 		t.Fatal("approved knowledge deletion did not delete the entry")
 	}
 
+	// Skills are vault packages. Bind this newly-created project right before
+	// the skill section so the earlier legacy knowledge proposal flow keeps its
+	// legacy fixture.
+	manager := buildVaultReadManager(t, true, map[string]string{
+		"projects/knowledge/index.md": "---\nid: knowledge_root_project_knowledge\ntitle: 知识项目\nscope: project\nproject_id: " + project.ID + "\ntype: navigation\nstatus: verified\nis_index: true\n---\n知识项目入口。\n",
+	})
+	fixture.service.SetKnowledgeVault(manager, true)
+	fixture.service.SetKnowledgeVaultRuntimeWrite(true)
+
 	skill, err := fixture.service.PetCreateSkill(fixture.ctx, PetSkillInput{
 		ProjectID: project.ID, Name: "发布检查", Instructions: "部署前运行测试。",
 	})
@@ -289,7 +298,7 @@ func TestPetListSkillsAllowedWithCreateTasksOnly(t *testing.T) {
 	skills := petSkillsFromMCP(t, fixture)
 	found := false
 	for _, skill := range skills {
-		if skill.ID == "skill-pet-project" {
+		if skill.ID == fixture.skillKey("project") {
 			found = true
 		}
 	}
@@ -308,12 +317,12 @@ func TestPetListSkillsAllowedWithCreateTasksOnly(t *testing.T) {
 		t.Fatalf("aha_create_skill was not permission-gated: %v", err)
 	}
 	if _, err := fixture.service.PetMCPTool(fixture.ctx, "aha_update_skill",
-		json.RawMessage(`{"skill_id":"skill-pet-project","name":"越权修改"}`)); err == nil ||
+		json.RawMessage(`{"skill_id":"`+fixture.skillKey("project")+`","name":"越权修改"}`)); err == nil ||
 		!strings.Contains(err.Error(), "未开启该工具权限") {
 		t.Fatalf("aha_update_skill was not permission-gated: %v", err)
 	}
 	if _, err := fixture.service.PetMCPTool(fixture.ctx, "aha_skill_detail",
-		json.RawMessage(`{"skill_id":"skill-pet-project"}`)); err == nil ||
+		json.RawMessage(`{"skill_id":"`+fixture.skillKey("project")+`"}`)); err == nil ||
 		!strings.Contains(err.Error(), "未开启该工具权限") {
 		t.Fatalf("aha_skill_detail unexpectedly widened: %v", err)
 	}
@@ -359,7 +368,7 @@ func TestPetListSkillsKeepsViewAndManagePermission(t *testing.T) {
 				t.Fatal("Skill listing returned no Skills")
 			}
 			if _, err := fixture.service.PetMCPTool(fixture.ctx, "aha_skill_detail",
-				json.RawMessage(`{"skill_id":"skill-pet-project"}`)); err != nil {
+				json.RawMessage(`{"skill_id":"`+fixture.skillKey("project")+`"}`)); err != nil {
 				t.Fatalf("aha_skill_detail regressed: %v", err)
 			}
 		})

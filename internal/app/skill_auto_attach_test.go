@@ -2,11 +2,13 @@ package app
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
+	"github.com/ChinaKai/AHA2/internal/knowledgevault"
 	"github.com/ChinaKai/AHA2/internal/secrets"
 	"github.com/ChinaKai/AHA2/internal/store"
 )
@@ -53,19 +55,65 @@ func TestCreateTaskAppliesAutoAttachSkills(t *testing.T) {
 	if err := database.UpsertModel(ctx, model); err != nil {
 		t.Fatal(err)
 	}
-	skills := []domain.Skill{
-		{ID: "skill-global-auto", Scope: "global", Name: "Global Auto", Instructions: "global auto", Version: 1, Status: "active", Enabled: true, AutoAttach: true, CreatedAt: now, UpdatedAt: now},
-		{ID: "skill-project-auto", Scope: "project", ProjectID: project.ID, Name: "Project Auto", Instructions: "project auto", Version: 1, Status: "active", Enabled: true, AutoAttach: true, CreatedAt: now, UpdatedAt: now},
-		{ID: "skill-other-auto", Scope: "project", ProjectID: "project-other", Name: "Other Auto", Instructions: "other auto", Version: 1, Status: "active", Enabled: true, AutoAttach: true, CreatedAt: now, UpdatedAt: now},
-		{ID: "skill-manual", Scope: "global", Name: "Manual", Instructions: "manual", Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now},
-		{ID: "skill-disabled-auto", Scope: "global", Name: "Disabled Auto", Instructions: "disabled", Version: 1, Status: "active", Enabled: false, AutoAttach: true, CreatedAt: now, UpdatedAt: now},
+	// Skills are vault packages. Auto-attach comes from vault preferences only;
+	// a legacy AutoAttach row must not be merged into the task selection.
+	vaultConfig := knowledgevault.DefaultConfig(t.TempDir())
+	if _, err := knowledgevault.Bootstrap(vaultConfig, knowledgevault.InitOptions{VaultName: "Auto Attach"}); err != nil {
+		t.Fatal(err)
 	}
-	for _, item := range skills {
-		if err := database.CreateSkill(ctx, item); err != nil {
+	write := func(relative, content string) {
+		target := filepath.Join(vaultConfig.VaultPath, filepath.FromSlash(relative))
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
+	write("projects/auto/index.md", "---\nid: knowledge_root_project_auto\ntitle: Auto\nscope: project\nproject_id: "+project.ID+"\ntype: navigation\nstatus: verified\nis_index: true\n---\nAuto.\n")
+	write("projects/auto/skills/project-auto/SKILL.md", "---\nname: Project Auto\ndescription: project auto\n---\n\nproject auto\n")
+	write("projects/other/index.md", "---\nid: knowledge_root_project_other\ntitle: Other\nscope: project\nproject_id: project-other\ntype: navigation\nstatus: verified\nis_index: true\n---\nOther.\n")
+	write("projects/other/skills/other-auto/SKILL.md", "---\nname: Other Auto\ndescription: other auto\n---\n\nother auto\n")
+	write("global/skills/global-auto/SKILL.md", "---\nname: Global Auto\ndescription: global auto\n---\n\nglobal auto\n")
+	write("global/skills/manual/SKILL.md", "---\nname: Manual\ndescription: manual\n---\n\nmanual\n")
+	index, err := knowledgevault.OpenIndex(ctx, vaultConfig.IndexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := index.Rebuild(ctx, vaultConfig.VaultPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := index.Close(); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := knowledgevault.NewManager(vaultConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.SetEnabled(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
 	service := NewService(database, secretStore, &stubExecutor{})
+	service.SetKnowledgeVault(manager, true)
+	service.SetKnowledgeVaultRuntimeWrite(true)
+	globalKey := "vault-skill:global:global-auto"
+	projectKey := "vault-skill:project:" + project.ID + ":project-auto"
+	otherKey := "vault-skill:project:project-other:other-auto"
+	manualKey := "vault-skill:global:manual"
+	if _, err := service.SetVaultSkillAutoAttach(ctx, globalKey, true, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.SetVaultSkillAutoAttach(ctx, projectKey, true, false); err != nil {
+		t.Fatal(err)
+	}
+	// Retired legacy row: it must be ignored even though AutoAttach is true.
+	if err := database.CreateSkill(ctx, domain.Skill{
+		ID: "skill-legacy-auto", Scope: "global", Name: "Legacy Auto", Instructions: "legacy",
+		Version: 1, Status: "active", Enabled: true, AutoAttach: true, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	task, err := service.CreateTask(ctx, CreateTaskInput{
 		ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "auto", Request: "auto skills", ModelID: model.ID,
@@ -73,10 +121,10 @@ func TestCreateTaskAppliesAutoAttachSkills(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !hasSkillID(task.SkillIDs, "skill-global-auto") || !hasSkillID(task.SkillIDs, "skill-project-auto") {
-		t.Fatalf("auto skills were not applied: %#v", task.SkillIDs)
+	if !hasSkillID(task.SkillIDs, globalKey) || !hasSkillID(task.SkillIDs, projectKey) {
+		t.Fatalf("vault auto skills were not applied: %#v", task.SkillIDs)
 	}
-	for _, id := range []string{"skill-other-auto", "skill-manual", "skill-disabled-auto"} {
+	for _, id := range []string{otherKey, manualKey, "skill-legacy-auto"} {
 		if hasSkillID(task.SkillIDs, id) {
 			t.Fatalf("unexpected auto skill %s in %#v", id, task.SkillIDs)
 		}
@@ -85,12 +133,12 @@ func TestCreateTaskAppliesAutoAttachSkills(t *testing.T) {
 	explicit := false
 	task, err = service.CreateTask(ctx, CreateTaskInput{
 		ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "explicit", Request: "explicit skills",
-		ModelID: model.ID, SkillIDs: []string{"skill-global-auto"}, ApplyAutoSkills: &explicit,
+		ModelID: model.ID, SkillIDs: []string{globalKey}, ApplyAutoSkills: &explicit,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(task.SkillIDs) != 1 || task.SkillIDs[0] != "skill-global-auto" {
+	if len(task.SkillIDs) != 1 || task.SkillIDs[0] != globalKey {
 		t.Fatalf("explicit selection was changed: %#v", task.SkillIDs)
 	}
 
@@ -101,10 +149,10 @@ func TestCreateTaskAppliesAutoAttachSkills(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !hasSkillID(petTask.SkillIDs, "skill-global-auto") {
+	if !hasSkillID(petTask.SkillIDs, globalKey) {
 		t.Fatalf("system task did not receive the global auto skill: %#v", petTask.SkillIDs)
 	}
-	if hasSkillID(petTask.SkillIDs, "skill-project-auto") {
+	if hasSkillID(petTask.SkillIDs, projectKey) {
 		t.Fatalf("system task received another project's skill: %#v", petTask.SkillIDs)
 	}
 }

@@ -1521,7 +1521,13 @@ func (s *Server) updateTaskTitle(writer http.ResponseWriter, request *http.Reque
 	}
 	if payload.KnowledgePolicy != nil {
 		policy := strings.TrimSpace(*payload.KnowledgePolicy)
-		if policy != "inherit" && policy != "enabled" && policy != "disabled" {
+		// "inherit" is retired. Accepting it keeps an older Web tab working and
+		// normalizes it to the enabled switch without a data migration.
+		switch policy {
+		case "inherit":
+			policy = "enabled"
+		case "enabled", "disabled":
+		default:
 			writeError(writer, http.StatusBadRequest, "invalid_knowledge_policy")
 			return
 		}

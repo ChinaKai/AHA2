@@ -160,8 +160,7 @@ func (s *Service) PetCreateTask(ctx context.Context, input PetCreateTaskInput) (
 	default:
 		return domain.Task{}, fmt.Errorf("isolation 必须是 worktree 或 inplace")
 	}
-	project, err := s.store.Project(ctx, projectID)
-	if err != nil {
+	if _, err := s.store.Project(ctx, projectID); err != nil {
 		return domain.Task{}, fmt.Errorf("项目不存在")
 	}
 	workspace, err := s.store.Workspace(ctx, workspaceID)
@@ -174,7 +173,7 @@ func (s *Service) PetCreateTask(ctx context.Context, input PetCreateTaskInput) (
 	task, err := s.CreateTask(ctx, CreateTaskInput{
 		ProjectID: projectID, WorkspaceID: workspaceID, Title: title, Request: request,
 		ModelID: modelID, ReasoningEffort: reasoningEffort, Filesystem: filesystem, Approval: approval,
-		Isolation: isolation, CollaborationMode: "single", MaxAgents: 1, KnowledgePolicy: project.KnowledgePolicy,
+		Isolation: isolation, CollaborationMode: "single", MaxAgents: 1, KnowledgePolicy: "enabled",
 		StartMode: "manual", SkillIDs: input.SkillIDs,
 	})
 	if err != nil {

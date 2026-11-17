@@ -639,6 +639,15 @@ func (f failingKnowledgeVault) WriteKnowledge(context.Context, knowledgevault.Wr
 func (f failingKnowledgeVault) KnowledgeFeedback(context.Context, knowledgevault.FeedbackRequest) (knowledgevault.FeedbackResult, error) {
 	return knowledgevault.FeedbackResult{}, f.err
 }
+func (f failingKnowledgeVault) CreateSkillPackage(context.Context, knowledgevault.SkillWriteRequest) (knowledgevault.SkillWriteResult, error) {
+	return knowledgevault.SkillWriteResult{}, f.err
+}
+func (f failingKnowledgeVault) UpdateSkillPackage(context.Context, knowledgevault.SkillWriteRequest) (knowledgevault.SkillWriteResult, error) {
+	return knowledgevault.SkillWriteResult{}, f.err
+}
+func (f failingKnowledgeVault) DeleteSkillPackage(context.Context, string) (knowledgevault.SkillWriteResult, error) {
+	return knowledgevault.SkillWriteResult{}, f.err
+}
 func (f failingKnowledgeVault) CheckProjectSpacePrerequisites() error { return f.err }
 func (f failingKnowledgeVault) ProvisionProjectSpace(context.Context, string, string) (knowledgevault.ProjectSpaceResult, error) {
 	return knowledgevault.ProjectSpaceResult{}, f.err

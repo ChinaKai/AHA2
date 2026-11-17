@@ -342,7 +342,7 @@ func (i *Index) Rebuild(ctx context.Context, vaultPath string) (RebuildReport, e
 		}
 		relative = filepath.ToSlash(relative)
 		if entry.IsDir() {
-			if skippedDirectoryNames[strings.ToLower(entry.Name())] {
+			if strings.HasPrefix(entry.Name(), ".") || skippedDirectoryNames[strings.ToLower(entry.Name())] {
 				return fs.SkipDir
 			}
 			return nil
@@ -400,6 +400,7 @@ func (i *Index) Rebuild(ctx context.Context, vaultPath string) (RebuildReport, e
 	// Fill the generated navigation on disk before inserting rows, then re-read
 	// those pages so the projection carries the same block the Web renders.
 	report.Warnings = append(report.Warnings, maintainVaultIndexes(absoluteVault, records)...)
+	report.Warnings = append(report.Warnings, maintainRootLibraryIndexes(absoluteVault, records)...)
 	report.Warnings = append(report.Warnings, refreshIndexRecordBodies(absoluteVault, records)...)
 
 	tx, err := i.db.BeginTx(ctx, nil)
@@ -558,7 +559,7 @@ func buildScannedRecord(relative, raw string, document Document, manifest Manife
 	}
 	if scopeForPathIsUnknown(relative) && relative != GuideRelativePath {
 		scope = "unknown"
-		record.warnings = append(record.warnings, "path is outside global/projects/archive; indexed as unknown scope")
+		record.warnings = append(record.warnings, "path is outside global/projects/archive/root libraries; indexed as unknown scope")
 	}
 	if (scope == "project" || scope == "archive") && projectID == "" {
 		record.warnings = append(record.warnings, "project slug is missing from the manifest")
@@ -644,13 +645,27 @@ func scopeForPath(relative string, manifest Manifest, reverseProjects, reverseAr
 		}
 		return "project", reverseProjects[slug], false
 	default:
+		// Any other top-level directory is a filesystem-managed root library.
+		// The vault root index and loose root files are handled separately.
+		if len(segments) >= 2 && rootLibraryNameAllowed(segments[0]) &&
+			!skippedDirectoryNames[strings.ToLower(segments[0])] {
+			return "root", "", false
+		}
 		return "unknown", "", false
 	}
 }
 
 func scopeForPathIsUnknown(relative string) bool {
-	first := strings.SplitN(relative, "/", 2)[0]
-	return first != "global" && first != "projects" && first != "archive" && first != "orphans"
+	segments := strings.Split(relative, "/")
+	if len(segments) < 2 {
+		return true
+	}
+	first := segments[0]
+	switch first {
+	case "global", "projects", "archive", "orphans":
+		return false
+	}
+	return !rootLibraryNameAllowed(first) || skippedDirectoryNames[strings.ToLower(first)]
 }
 
 func reverseSlugMap(values map[string]string) map[string]string {
@@ -808,8 +823,12 @@ func resolveParents(records []*scannedRecord, byPath map[string]*scannedRecord, 
 }
 
 type SearchOptions struct {
-	Scope           string
-	ProjectID       string
+	Scope     string
+	ProjectID string
+	// Prefix filters by the top-level directory of a root library. Root
+	// libraries keep project_id empty, so the prefix is the only way to scope
+	// a search to one filesystem-managed library.
+	Prefix          string
 	Type            string
 	Status          string
 	Tag             string
@@ -853,6 +872,10 @@ func (i *Index) Search(ctx context.Context, query string, options SearchOptions)
 	if options.ProjectID != "" {
 		sqlQuery += ` AND project_id=?`
 		args = append(args, options.ProjectID)
+	}
+	if options.Prefix != "" {
+		sqlQuery += ` AND prefix=?`
+		args = append(args, options.Prefix)
 	}
 	if options.Type != "" {
 		sqlQuery += ` AND type=?`

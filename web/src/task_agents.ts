@@ -587,15 +587,41 @@ export function validateAgentConfigInput(input: AgentConfigValidationInput): str
 }
 
 export function renderTaskSkills(skills: Skill[], projectID: string, selected: string[]): string {
-  const visible = skills.filter(item => item.enabled && item.status === "active" && (item.scope === "global" || item.project_id === projectID || item.bound_project_id === projectID));
-  return visible.map(item => {
+  const visible = skills
+    .filter(item => item.enabled && item.status === "active" && item.scope !== "archive" && item.can_update !== false &&
+      (item.scope === "global" || item.project_id === projectID || item.bound_project_id === projectID))
+    .sort((left, right) => {
+      if (left.scope !== right.scope) return left.scope === "global" ? -1 : 1;
+      return left.name.localeCompare(right.name) || left.id.localeCompare(right.id);
+    });
+  if (!visible.length) return `<div class="field-help">当前 Project 没有可用 Skill。</div>`;
+  const renderOption = (item: Skill): string => {
     const auto = item.auto_attach ? ' <span class="capability-badge">自动</span>' : "";
-    // Legacy database skills and vault packages are both offered here, so the
-    // source is always spelled out instead of implying two systems run at once.
-    const source = item.source === "vault" ? "vault 技能" : "旧技能";
-    const scope = item.scope === "global" ? "全局" : "项目";
+    const source = "vault 技能";
+    const scope = item.scope === "global" ? "全局" : `项目 · ${item.bound_project_id || item.project_id || ""}`;
     return `<label class="task-skill-option"><input type="checkbox" name="skill_ids" value="${escapeHTML(item.id)}" ${selected.includes(item.id) ? "checked" : ""}><span><strong>${escapeHTML(item.name)}${auto}</strong><small>${escapeHTML(source)} · ${escapeHTML(scope)} · ${escapeHTML(item.description || "无描述")}</small></span></label>`;
-  }).join("") || `<div class="field-help">当前 Project 没有可用 Skill。</div>`;
+  };
+  // The picker reuses the skill page grouping: global first, then project
+  // skills grouped by their owning project so the same package name under two
+  // projects is never ambiguous.
+  const global = visible.filter(item => item.scope === "global");
+  const projectSkills = visible.filter(item => item.scope === "project");
+  const sections: string[] = [];
+  if (global.length) {
+    sections.push(`<section class="task-skill-group" data-task-skill-group="global"><header><strong>${escapeHTML(t("knowledge.skill.group.global"))}</strong><span>${global.length}</span></header>${global.map(renderOption).join("")}</section>`);
+  }
+  if (projectSkills.length) {
+    const byProject = new Map<string, Skill[]>();
+    for (const item of projectSkills) {
+      const key = item.bound_project_id || item.project_id || "project";
+      byProject.set(key, [...(byProject.get(key) || []), item]);
+    }
+    const groups = [...byProject.entries()]
+      .sort((left, right) => left[0].localeCompare(right[0]))
+      .map(([key, items]) => `<div class="task-skill-project" data-task-skill-project="${escapeHTML(key)}">${items.map(renderOption).join("")}</div>`);
+    sections.push(`<section class="task-skill-group" data-task-skill-group="project"><header><strong>${escapeHTML(t("knowledge.skill.group.projects"))}</strong><span>${projectSkills.length}</span></header>${groups.join("")}</section>`);
+  }
+  return sections.join("");
 }
 
 export type MCPOptionsResult = {body: string; total: number};
@@ -723,7 +749,7 @@ function renderTaskPolicySection(detail: TaskDetail): string {
       <label>协作模式<select name="collaboration_mode"><option value="single" ${detail.task.collaboration_mode === "single" ? "selected" : ""}>Single</option><option value="auto" ${detail.task.collaboration_mode !== "single" ? "selected" : ""}>Auto</option></select></label>
       <label>最大 Agent 数<input name="max_agents" type="number" min="1" value="${Math.max(1, Number(detail.task.max_agents || 3))}"></label>
     </div>
-    <label>Knowledge<select name="knowledge_policy"><option value="inherit" ${detail.task.knowledge_policy === "inherit" ? "selected" : ""}>继承 Project</option><option value="enabled" ${detail.task.knowledge_policy === "enabled" ? "selected" : ""}>开启</option><option value="disabled" ${detail.task.knowledge_policy === "disabled" ? "selected" : ""}>关闭</option></select></label>
+    <label>Knowledge<select name="knowledge_policy"><option value="enabled" ${detail.task.knowledge_policy !== "disabled" ? "selected" : ""}>开启</option><option value="disabled" ${detail.task.knowledge_policy === "disabled" ? "selected" : ""}>关闭</option></select></label>
   </section>`;
 }
 

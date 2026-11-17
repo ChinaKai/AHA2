@@ -3,11 +3,13 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
+	"github.com/ChinaKai/AHA2/internal/knowledgevault"
 	"github.com/ChinaKai/AHA2/internal/store"
 )
 
@@ -390,12 +392,26 @@ func (s *Service) PetListSkills(ctx context.Context, scope, projectID string, li
 	if limit <= 0 || limit > 50 {
 		limit = 20
 	}
-	items, err := s.store.ListSkills(ctx, scope, projectID, false)
+	// Skills are vault packages. The legacy table is only a fallback when no
+	// vault manager is configured at all (unit tests and old embeddings).
+	var items []domain.Skill
+	var err error
+	if s.knowledgeVault == nil {
+		items, err = s.store.ListSkills(ctx, scope, projectID, false)
+	} else {
+		items, err = s.ListVaultSkills(ctx)
+	}
 	if err != nil {
 		return nil, err
 	}
 	result := make([]PetSkillBrief, 0, limit)
 	for _, item := range items {
+		if scope != "" && item.Scope != scope {
+			continue
+		}
+		if scope == "project" && item.ProjectID != projectID {
+			continue
+		}
 		if len(result) == limit {
 			break
 		}
@@ -408,9 +424,16 @@ func (s *Service) PetSkillDetail(ctx context.Context, id string) (PetSkillDetail
 	if _, err := s.petKnowledgeReadable(ctx); err != nil {
 		return PetSkillDetail{}, err
 	}
-	item, err := s.store.Skill(ctx, strings.TrimSpace(id))
+	id = strings.TrimSpace(id)
+	item, err := s.vaultSkillByKey(ctx, id)
 	if err != nil {
-		return PetSkillDetail{}, fmt.Errorf("Skill 不存在")
+		if s.knowledgeVault != nil {
+			return PetSkillDetail{}, fmt.Errorf("Skill 不存在")
+		}
+		item, err = s.store.Skill(ctx, id)
+		if err != nil {
+			return PetSkillDetail{}, fmt.Errorf("Skill 不存在")
+		}
 	}
 	instructions := item.Instructions
 	truncated := false
@@ -459,20 +482,22 @@ func (s *Service) PetCreateSkill(ctx context.Context, input PetSkillInput) (PetS
 	if status == "" {
 		status = "active"
 	}
-	if status != "active" && status != "draft" && status != "disabled" {
+	if status != "active" && status != "draft" && status != "disabled" && status != "archived" {
 		return PetSkillDetail{}, fmt.Errorf("Skill 状态无效")
 	}
 	enabled := true
 	if input.Enabled != nil {
 		enabled = *input.Enabled
 	}
-	now := s.now().UTC()
-	item := domain.Skill{
-		ID: domain.NewID("skill"), Scope: "project", ProjectID: projectID, Name: name,
+	item, err := s.CreateVaultSkill(ctx, VaultSkillWriteInput{
+		Scope: knowledgevault.SkillScopeProject, ProjectID: projectID, Name: name,
 		Description: strings.TrimSpace(input.Description), Instructions: instructions,
-		Version: 1, Status: status, Enabled: enabled, CreatedAt: now, UpdatedAt: now,
-	}
-	if err := s.store.CreateSkill(ctx, item); err != nil {
+		Status: status, Enabled: &enabled,
+	})
+	if err != nil {
+		if errors.Is(err, knowledgevault.ErrDisabled) {
+			return PetSkillDetail{}, fmt.Errorf("知识库未启用，Skill 只能写入 vault")
+		}
 		return PetSkillDetail{}, err
 	}
 	s.recordPetWork(ctx, "skill_created", item.ID, name)
@@ -483,43 +508,29 @@ func (s *Service) PetUpdateSkill(ctx context.Context, input PetSkillInput) (PetS
 	if _, err := s.petKnowledgeWritable(ctx); err != nil {
 		return PetSkillDetail{}, err
 	}
-	item, err := s.store.Skill(ctx, strings.TrimSpace(input.SkillID))
+	existing, err := s.vaultSkillByKey(ctx, strings.TrimSpace(input.SkillID))
 	if err != nil {
 		return PetSkillDetail{}, fmt.Errorf("Skill 不存在")
 	}
-	if item.Scope != "project" {
+	if existing.Scope != knowledgevault.SkillScopeProject {
 		return PetSkillDetail{}, fmt.Errorf("宠物不能修改全局 Skill")
 	}
-	if item.BoundProjectID != "" && item.BoundProjectID != item.ProjectID && !item.CanUpdate {
-		return PetSkillDetail{}, fmt.Errorf("该 Skill 来自只读知识库，不能修改")
+	if name := strings.TrimSpace(input.Name); name != "" && len([]rune(name)) > 200 {
+		return PetSkillDetail{}, fmt.Errorf("Skill 名称过长")
 	}
-	if name := strings.TrimSpace(input.Name); name != "" {
-		if len([]rune(name)) > 200 {
-			return PetSkillDetail{}, fmt.Errorf("Skill 名称过长")
-		}
-		item.Name = name
+	if instructions := strings.TrimSpace(input.Instructions); instructions != "" && len([]rune(instructions)) > petKnowledgeTextLimit {
+		return PetSkillDetail{}, fmt.Errorf("Skill 说明过长")
 	}
-	if input.Description != "" {
-		item.Description = strings.TrimSpace(input.Description)
+	status := strings.TrimSpace(input.Status)
+	if status != "" && status != "active" && status != "draft" && status != "disabled" && status != "archived" {
+		return PetSkillDetail{}, fmt.Errorf("Skill 状态无效")
 	}
-	if instructions := strings.TrimSpace(input.Instructions); instructions != "" {
-		if len([]rune(instructions)) > petKnowledgeTextLimit {
-			return PetSkillDetail{}, fmt.Errorf("Skill 说明过长")
-		}
-		item.Instructions = instructions
-	}
-	if status := strings.TrimSpace(input.Status); status != "" {
-		if status != "active" && status != "draft" && status != "disabled" {
-			return PetSkillDetail{}, fmt.Errorf("Skill 状态无效")
-		}
-		item.Status = status
-	}
-	if input.Enabled != nil {
-		item.Enabled = *input.Enabled
-	}
-	item.Version++
-	item.UpdatedAt = s.now().UTC()
-	if err := s.store.UpdateSkill(ctx, item); err != nil {
+	item, err := s.UpdateVaultSkill(ctx, existing.ID, VaultSkillWriteInput{
+		ProjectID: existing.ProjectID, BaseVersion: existing.Version,
+		Name: strings.TrimSpace(input.Name), Description: strings.TrimSpace(input.Description),
+		Instructions: strings.TrimSpace(input.Instructions), Status: status, Enabled: input.Enabled,
+	})
+	if err != nil {
 		return PetSkillDetail{}, err
 	}
 	s.recordPetWork(ctx, "skill_updated", item.ID, item.Name)
@@ -534,20 +545,17 @@ func (s *Service) PetDeleteSkill(ctx context.Context, skillID, reason string) (d
 	if err != nil {
 		return domain.PetApproval{}, err
 	}
-	item, err := s.store.Skill(ctx, strings.TrimSpace(skillID))
+	item, err := s.vaultSkillByKey(ctx, strings.TrimSpace(skillID))
 	if err != nil {
 		return domain.PetApproval{}, fmt.Errorf("Skill 不存在")
 	}
-	if item.Scope != "project" {
+	if item.Scope != knowledgevault.SkillScopeProject {
 		return domain.PetApproval{}, fmt.Errorf("宠物不能删除全局 Skill")
 	}
-	if item.BoundProjectID != "" && item.BoundProjectID != item.ProjectID && !item.CanUpdate {
-		return domain.PetApproval{}, fmt.Errorf("该 Skill 来自只读知识库，不能删除")
-	}
-	payload, _ := json.Marshal(map[string]string{"skill_id": item.ID})
+	payload, _ := json.Marshal(map[string]string{"skill_id": item.ID, "project_id": item.ProjectID})
 	return s.CreatePetApproval(ctx, PetApprovalInput{
 		Kind: "delete_skill", Title: "删除 Skill：" + item.Name,
-		Summary: fmt.Sprintf("宠物申请删除项目 Skill「%s」（%s，版本 %d）。批准后才执行。", item.Name, item.ID, item.Version),
+		Summary: fmt.Sprintf("宠物申请删除项目 Skill「%s」（%s，版本 %d）。批准后移入知识库回收站，可恢复。", item.Name, item.ID, item.Version),
 		Reason:  reason, Risk: "high", Payload: string(payload),
 	})
 }

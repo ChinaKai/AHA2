@@ -262,9 +262,9 @@ func TestVaultAutoAttachUsesVaultSourceAndLoadsPackageFiles(t *testing.T) {
 	}
 }
 
-// When the runtime read gate is off the vault preference is not effective, so
-// the legacy AutoAttach rule keeps working.
-func TestVaultAutoAttachFallsBackToLegacyWhenRuntimeReadOff(t *testing.T) {
+// When the runtime read gate is off the vault preference is not effective and
+// the legacy AutoAttach rule is no longer consulted: skills are vault-only.
+func TestVaultAutoAttachIgnoresLegacyWhenRuntimeReadOff(t *testing.T) {
 	withUnsetEnv(t, knowledgeVaultReadProjectsEnv)
 	fixture := newVaultSkillsFixture(t)
 	ctx := fixture.ctx
@@ -283,17 +283,14 @@ func TestVaultAutoAttachFallsBackToLegacyWhenRuntimeReadOff(t *testing.T) {
 	fixture.service.knowledgeVaultRuntimeRead = false
 
 	task := fixture.createTask(t, nil)
-	if len(task.SkillIDs) != 2 || !hasTaskSkill(task, "skill-legacy-global") || !hasTaskSkill(task, "skill-legacy-project") {
-		t.Fatalf("legacy auto-attach did not apply after the vault read was turned off: %#v", task.SkillIDs)
-	}
-	if hasTaskSkill(task, "vault-skill:global:demo") {
-		t.Fatalf("vault auto-attach applied while the runtime read was off: %#v", task.SkillIDs)
+	if len(task.SkillIDs) != 0 {
+		t.Fatalf("a legacy AutoAttach row was applied after the vault read was turned off: %#v", task.SkillIDs)
 	}
 }
 
-// An unbound project is not vault-effective even though the vault itself is
-// ready, so it keeps the legacy AutoAttach source.
-func TestVaultAutoAttachFallsBackToLegacyForUnboundProject(t *testing.T) {
+// An unbound project is not vault-effective and the retired legacy AutoAttach
+// rows are not a fallback source any more.
+func TestVaultAutoAttachIgnoresLegacyForUnboundProject(t *testing.T) {
 	withUnsetEnv(t, knowledgeVaultReadProjectsEnv)
 	fixture := newVaultSkillsFixture(t)
 	ctx := fixture.ctx
@@ -328,17 +325,14 @@ func TestVaultAutoAttachFallsBackToLegacyForUnboundProject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(task.SkillIDs) != 2 || !hasTaskSkill(task, "skill-unbound-global") || !hasTaskSkill(task, "skill-unbound-project") {
-		t.Fatalf("unbound project did not keep legacy auto-attach: %#v", task.SkillIDs)
-	}
-	if hasTaskSkill(task, "vault-skill:global:demo") {
-		t.Fatalf("unbound project received vault auto-attach: %#v", task.SkillIDs)
+	if len(task.SkillIDs) != 0 {
+		t.Fatalf("an unbound project received a legacy auto-attach skill: %#v", task.SkillIDs)
 	}
 }
 
-// A legacy AutoAttach row without a vault counterpart is not silently mounted
-// alongside the vault source: it is excluded and reported as superseded.
-func TestVaultAutoAttachReportsLegacySkillsWithoutVaultCounterpart(t *testing.T) {
+// A legacy AutoAttach row is never merged: the vault preference is the only
+// auto-attach source.
+func TestVaultAutoAttachIgnoresLegacyRowsWithoutVaultCounterpart(t *testing.T) {
 	withUnsetEnv(t, knowledgeVaultReadProjectsEnv)
 	fixture := newVaultSkillsFixture(t)
 	ctx := fixture.ctx
@@ -358,10 +352,6 @@ func TestVaultAutoAttachReportsLegacySkillsWithoutVaultCounterpart(t *testing.T)
 	selection := fixture.service.vaultAutoAttachSelection(ctx, fixture.project.ID)
 	if len(selection.keys) != 1 || selection.keys[0] != "vault-skill:global:demo" {
 		t.Fatalf("vault auto-attach selection = %#v", selection.keys)
-	}
-	superseded := fixture.service.supersededLegacyAutoAttach(ctx, fixture.project.ID, selection.slugs)
-	if len(superseded) != 1 || superseded[0].ID != "skill-legacy-only" {
-		t.Fatalf("unreported legacy auto-attach = %#v", superseded)
 	}
 	task := fixture.createTask(t, nil)
 	if len(task.SkillIDs) != 1 || task.SkillIDs[0] != "vault-skill:global:demo" {
@@ -739,5 +729,31 @@ func TestVaultInfrastructureRetainedSpaceUsesGlobalSkillsOnly(t *testing.T) {
 	}
 	if out := logs.String(); strings.Contains(out, "knowledge vault task skills") {
 		t.Fatalf("infrastructure project repeated a vault skill warning: %s", out)
+	}
+}
+
+// With the vault read gate off, a historical legacy id keeps loading its
+// legacy package instead of being rewritten to a vault key that cannot load.
+func TestHistoricalLegacySkillKeepsLegacyContentWhenVaultReadOff(t *testing.T) {
+	withUnsetEnv(t, knowledgeVaultReadProjectsEnv)
+	fixture := newVaultSkillsFixture(t)
+	ctx := fixture.ctx
+	now := time.Now().UTC()
+	legacy := domain.Skill{
+		ID: "skill-legacy-demo", PackageSlug: "demo", Scope: "global", Name: "Demo",
+		Instructions: "legacy demo", Version: 1, Status: "active", Enabled: true,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := fixture.database.CreateSkill(ctx, legacy); err != nil {
+		t.Fatal(err)
+	}
+	fixture.service.knowledgeVaultRuntimeRead = false
+	task := fixture.createTask(t, []string{legacy.ID})
+	if len(task.SkillIDs) != 1 || task.SkillIDs[0] != legacy.ID {
+		t.Fatalf("legacy selection was rewritten while the vault read was off: %#v", task.SkillIDs)
+	}
+	active := fixture.service.activeTaskSkills(ctx, task)
+	if len(active) != 1 || active[0].ID != legacy.ID || active[0].Instructions != "legacy demo" {
+		t.Fatalf("historical legacy skill did not keep its legacy content: %#v", active)
 	}
 }

@@ -558,6 +558,8 @@ export interface Task {
   task_workspace_path?: string;
   collaboration_mode: "single" | "auto";
   max_agents: number;
+  // Task knowledge switch. "inherit" is a retired legacy value that the
+  // backend runs as "enabled"; new writes only use enabled/disabled.
   knowledge_policy: "inherit" | "enabled" | "disabled" | string;
   skill_ids: string[];
   agent_capabilities: Record<string, boolean>;

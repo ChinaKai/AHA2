@@ -642,6 +642,7 @@ function skillProjectName(context: KnowledgeWorkspaceContext, item: Skill): stri
 
 function skillScopeLabel(context: KnowledgeWorkspaceContext, item: Skill): string {
   if (item.scope === "global") return t("knowledge.skill.scopeGlobal");
+  if (item.scope === "archive") return t("knowledge.skill.scopeArchive", {name: skillProjectName(context, item)});
   if (item.bound_project_id || item.binding_mode) return t("knowledge.skill.scopeExternal", {name: skillProjectName(context, item)});
   return t("knowledge.skill.scopeProject", {name: skillProjectName(context, item)});
 }
@@ -652,6 +653,7 @@ function filteredSkillList(context: KnowledgeWorkspaceContext): Skill[] {
     if (query && ![item.name, item.description].some(value => String(value || "").toLowerCase().includes(query))) return false;
     if (skillScopeFilter === "global" && item.scope !== "global") return false;
     if (skillScopeFilter === "project" && item.scope !== "project") return false;
+    if (skillScopeFilter === "archive" && item.scope !== "archive") return false;
     if (skillScopeFilter === "bound" && !item.bound_project_id && !item.binding_mode) return false;
     if (skillProjectFilter && item.project_id !== skillProjectFilter && item.bound_project_id !== skillProjectFilter) return false;
     if (skillStatusFilter !== "all" && item.status !== skillStatusFilter) return false;
@@ -659,9 +661,48 @@ function filteredSkillList(context: KnowledgeWorkspaceContext): Skill[] {
   });
 }
 
+function compareSkills(left: Skill, right: Skill): number {
+  if (left.name !== right.name) return left.name.localeCompare(right.name);
+  return left.id.localeCompare(right.id);
+}
+
+type SkillGroupSection = {key: string; label: string; items: Skill[]};
+
+// skillGroupSections keeps the global / archived / project split after search,
+// scope filtering and pagination. Archived skills are read-only and never fold
+// into a project group; project skills are grouped by their owning project.
+export function skillGroupSections(context: KnowledgeWorkspaceContext, visible: Skill[]): SkillGroupSection[] {
+  const global = visible.filter(item => item.scope === "global").sort(compareSkills);
+  const archive = visible.filter(item => item.scope === "archive").sort(compareSkills);
+  const projectSkills = visible.filter(item => item.scope === "project");
+  const byProject = new Map<string, {label: string; items: Skill[]}>();
+  for (const item of projectSkills) {
+    const key = item.bound_project_id || item.project_id || "project";
+    const label = skillProjectName(context, item) || key;
+    const group = byProject.get(key) || {label, items: []};
+    group.items.push(item);
+    byProject.set(key, group);
+  }
+  const projects = [...byProject.entries()]
+    .sort((left, right) => left[1].label.localeCompare(right[1].label) || left[0].localeCompare(right[0]))
+    .flatMap(([, group]) => group.items.sort(compareSkills));
+  const sections: SkillGroupSection[] = [];
+  if (global.length) sections.push({key: "global", label: t("knowledge.skill.group.global"), items: global});
+  if (archive.length) sections.push({key: "archive", label: t("knowledge.skill.group.archive"), items: archive});
+  if (projects.length) sections.push({key: "project", label: t("knowledge.skill.group.projects"), items: projects});
+  return sections;
+}
+
 function skillCard(context: KnowledgeWorkspaceContext, item: Skill): string {
   const auto = item.auto_attach ? `<span class="capability-badge">${t("knowledge.skill.auto")}</span>` : "";
-  return `<article class="skill-card ${item.enabled ? "" : "disabled"}"><header><div class="skill-mark">${icon("bot")}</div><div><strong>${escapeHTML(item.name)}${auto}</strong><small>${escapeHTML(skillScopeLabel(context, item))} · v${item.version} · ${escapeHTML(item.status)}</small></div><label class="skill-switch"><input type="checkbox" data-skill-toggle="${item.id}" ${item.enabled ? "checked" : ""}><span></span></label></header><p>${escapeHTML(item.description || t("knowledge.skill.noDescription"))}</p><div class="skill-package-files"><strong>Skill Package</strong><span>${(item.files || []).map(file => `<code>${escapeHTML(file)}</code>`).join("") || "<code>SKILL.md</code>"}</span></div><footer><span title="${escapeHTML(item.source_path || "")}">${escapeHTML(item.source_path || "AHA managed package")}</span><div><button class="icon-button" type="button" data-skill-view="${item.id}" title="${t("knowledge.skill.view")}">${icon("eye")}</button><button class="icon-button" type="button" data-skill-edit="${item.id}">${icon("edit")}</button><button class="icon-button" type="button" data-skill-delete="${item.id}">${icon("close")}</button></div></footer></article>`;
+  const readOnly = item.scope === "archive" || item.can_update === false;
+  const toggle = readOnly
+    ? `<span class="capability-badge">${t("knowledge.skill.readOnly")}</span>`
+    : `<label class="skill-switch"><input type="checkbox" data-skill-toggle="${item.id}" ${item.enabled ? "checked" : ""}><span></span></label>`;
+  const actions = readOnly
+    ? `<button class="icon-button" type="button" data-skill-view="${item.id}" title="${t("knowledge.skill.view")}">${icon("eye")}</button>`
+    : `<button class="icon-button" type="button" data-skill-view="${item.id}" title="${t("knowledge.skill.view")}">${icon("eye")}</button><button class="icon-button" type="button" data-skill-edit="${item.id}">${icon("edit")}</button><button class="icon-button" type="button" data-skill-delete="${item.id}">${icon("close")}</button>`;
+  return `<article class="skill-card ${item.enabled ? "" : "disabled"} ${readOnly ? "read-only" : ""}"><header><div class="skill-mark">${icon("bot")}</div><div><strong>${escapeHTML(item.name)}${auto}</strong><small>${escapeHTML(skillScopeLabel(context, item))} · v${item.version} · ${escapeHTML(item.status)}</small></div>${toggle}</header><p>${escapeHTML(item.description || t("knowledge.skill.noDescription"))}</p><div class="skill-package-files"><strong>Skill Package</strong><span>${(item.files || []).map(file => `<code>${escapeHTML(file)}</code>`).join("") || "<code>SKILL.md</code>"}</span></div><footer><span title="${escapeHTML(item.source_path || "")}">${escapeHTML(item.source_path || "AHA managed package")}</span><div>${actions}</div></footer></article>`;
 }
 
 function renderSkills(context: KnowledgeWorkspaceContext): string {
@@ -670,12 +711,15 @@ function renderSkills(context: KnowledgeWorkspaceContext): string {
   const projectOptions = context.projects.map(project => `<option value="${escapeHTML(project.id)}" ${project.id === skillProjectFilter ? "selected" : ""}>${escapeHTML(project.name)}</option>`).join("");
   const filtering = Boolean(skillSearch.trim()) || skillScopeFilter !== "all" || Boolean(skillProjectFilter) || skillStatusFilter !== "all";
   const totalLabel = filtering ? t("knowledge.skill.matchTotal", {matched: visible.length, total: skills.length}) : t("knowledge.skill.total", {total: skills.length});
+  const sections = skillGroupSections(context, shown);
+  const grouped = sections.map(section => `<section class="knowledge-skill-group" data-skill-group="${escapeHTML(section.key)}"><header><strong>${escapeHTML(section.label)}</strong><span>${section.items.length}</span></header><div class="skill-grid">${section.items.map(item => skillCard(context, item)).join("")}</div></section>`).join("");
   return `<div class="knowledge-section-head"><div><h2>${t("knowledge.skill.heading")}</h2><p>${t("knowledge.skill.subtitle")}</p></div><button class="primary" type="button" data-skill-new>${icon("plus")}${t("knowledge.skill.new")}</button></div>
     <div class="knowledge-skill-toolbar">
       <input id="knowledge-skill-search" type="search" autocomplete="off" data-allow-rerender="true" placeholder="${t("knowledge.skill.search")}" value="${escapeHTML(skillSearch)}">
       <select id="knowledge-skill-scope" aria-label="${t("knowledge.skill.scopeAria")}">
         <option value="all" ${skillScopeFilter === "all" ? "selected" : ""}>${t("knowledge.skill.scope.all")}</option>
         <option value="global" ${skillScopeFilter === "global" ? "selected" : ""}>${t("knowledge.skill.scope.global")}</option>
+        <option value="archive" ${skillScopeFilter === "archive" ? "selected" : ""}>${t("knowledge.skill.scope.archive")}</option>
         <option value="project" ${skillScopeFilter === "project" ? "selected" : ""}>${t("knowledge.skill.scope.project")}</option>
         <option value="bound" ${skillScopeFilter === "bound" ? "selected" : ""}>${t("knowledge.skill.scope.external")}</option>
       </select>
@@ -689,7 +733,7 @@ function renderSkills(context: KnowledgeWorkspaceContext): string {
         <option value="archived" ${skillStatusFilter === "archived" ? "selected" : ""}>archived</option>
       </select>
     </div>
-    <div class="skill-grid">${shown.map(item => skillCard(context, item)).join("") || renderEmpty(t("knowledge.skill.empty"))}</div>
+    <div class="knowledge-skill-groups">${grouped || renderEmpty(t("knowledge.skill.empty"))}</div>
     ${knowledgeListFooter(shown.length, visible.length, totalLabel)}`;
 }
 
@@ -733,6 +777,21 @@ export function renderKnowledgeProjectSettings(context: KnowledgeWorkspaceContex
 }
 
 /** Skills keep their own layered catalog; this is a top-level section, not a management tab. */
+/** Test-only seam: load a deterministic skill catalog without an API round trip. */
+export function __setKnowledgeSkillsForTest(items: Skill[]): void {
+  skills = items;
+  catalogProjectID = "test";
+}
+
+/** Test-only seam: reset the skill filters used by the grouped list. */
+export function __resetKnowledgeSkillFiltersForTest(): void {
+  skillSearch = "";
+  skillScopeFilter = "all";
+  skillProjectFilter = "";
+  skillStatusFilter = "all";
+  skillLimit = 6;
+}
+
 export function renderKnowledgeSkillsPage(context: KnowledgeWorkspaceContext): string {
   return `<section class="knowledge-skills">${renderSkills(context)}</section>`;
 }
@@ -985,6 +1044,7 @@ function scheduleKnowledgeFilterRender(context: KnowledgeWorkspaceContext): void
 }
 
 function openSkillEditor(context: KnowledgeWorkspaceContext, item?: Skill): void {
+  if (item && (item.scope === "archive" || item.can_update === false)) return;
   const form = document.querySelector<HTMLFormElement>("#skill-editor-form");
   if (!form) return;
   form.reset();
@@ -1006,7 +1066,11 @@ function openSkillDetail(context: KnowledgeWorkspaceContext, id: string): void {
   const updated = item.updated_at ? formatDate(item.updated_at) : t("knowledge.skill.unknown");
   body.innerHTML = `<div class="skill-detail-meta"><span class="capability-badge">${escapeHTML(skillScopeLabel(context, item))}</span>${item.auto_attach ? '<span class="capability-badge">自动启用</span>' : ""}</div><p>${escapeHTML(item.description || t("knowledge.skill.noDescription"))}</p><dl class="mcp-detail-meta"><dt>${t("knowledge.skill.version")}</dt><dd>v${item.version}</dd><dt>${t("knowledge.skill.statusLabel")}</dt><dd>${escapeHTML(item.status)} · ${item.enabled ? t("knowledge.skill.enabledState") : t("knowledge.skill.disabledState")}</dd><dt>${t("knowledge.skill.source")}</dt><dd>${escapeHTML(item.source_path || "AHA managed package")}</dd><dt>${t("knowledge.skill.updated")}</dt><dd>${escapeHTML(updated)}</dd></dl><h3>SKILL.md</h3><div class="markdown-body skill-detail-instructions">${renderMarkdown(item.instructions || "")}</div><h3>Skill Package</h3><div class="skill-package-files"><span>${(item.files || []).map(file => `<code>${escapeHTML(file)}</code>`).join("") || "<code>SKILL.md</code>"}</span></div>`;
   const edit = dialog.querySelector<HTMLButtonElement>("#skill-detail-edit");
-  if (edit) edit.onclick = () => { dialog.close(); openSkillEditor(context, item); };
+  if (edit) {
+    const readOnly = item.scope === "archive" || item.can_update === false;
+    edit.disabled = readOnly;
+    edit.onclick = readOnly ? null : () => { dialog.close(); openSkillEditor(context, item); };
+  }
   dialog.showModal();
 }
 
@@ -1383,6 +1447,12 @@ export function bindKnowledgeWorkspace(context: KnowledgeWorkspaceContext): void
     payload.enabled = form.get("enabled") === "on";
     payload.auto_attach = form.get("auto_attach") === "on";
     if (payload.scope === "global") payload.project_id = "";
+    // A global auto-enable needs the owner's explicit second confirmation.
+    const wantsGlobalAuto = payload.scope === "global" && payload.auto_attach === true;
+    if (wantsGlobalAuto && !window.confirm(t("kv.skillGlobalConfirm", {name: String(payload.name || "")}))) {
+      payload.auto_attach = false;
+    }
+    payload.confirm_global = wantsGlobalAuto && payload.auto_attach === true;
     void mutate(context, () => id ? api.updateSkill(id, payload) : api.createSkill(payload), id ? t("knowledge.skill.updatedMessage") : t("knowledge.skill.createdMessage"), event.currentTarget, t("knowledge.edit.saving"));
   });
   document.querySelectorAll<HTMLInputElement>("[data-skill-toggle]").forEach(input => input.addEventListener("change", () => {

@@ -563,22 +563,6 @@ func (s *Server) updateAgentSkill(writer http.ResponseWriter, request *http.Requ
 		writeAgentControlError(writer, err)
 		return
 	}
-	items, _, err := s.app.SelectedAgentSkills(request.Context(), claims)
-	if err != nil {
-		writeAgentControlError(writer, err)
-		return
-	}
-	var skill domain.Skill
-	for _, item := range items {
-		if item.ID == request.PathValue("skill") {
-			skill = item
-			break
-		}
-	}
-	if skill.ID == "" {
-		writeError(writer, http.StatusNotFound, "skill_not_found")
-		return
-	}
 	var payload struct {
 		BaseVersion int                `json:"base_version"`
 		Name        string             `json:"name"`
@@ -593,36 +577,74 @@ func (s *Server) updateAgentSkill(writer http.ResponseWriter, request *http.Requ
 		writeError(writer, http.StatusBadRequest, "skill_update_invalid")
 		return
 	}
-	if skill.Scope == "project" && skill.ProjectID != call.Project.ID && !(skill.BoundProjectID == call.Project.ID && skill.BindingMode == "project") {
-		writeError(writer, http.StatusForbidden, "skill_scope_forbidden")
+	// Keep the historical permission boundary: an Agent may update only a Skill
+	// selected on its own Task. Switching to the vault must not expose every
+	// global package to any Turn that happens to know its key.
+	selected, _, err := s.app.SelectedAgentSkills(request.Context(), claims)
+	if err != nil {
+		writeAgentControlError(writer, err)
 		return
 	}
-	if strings.TrimSpace(payload.Name) != "" {
-		skill.Name = strings.TrimSpace(payload.Name)
-	}
-	if strings.TrimSpace(payload.Description) != "" {
-		skill.Description = strings.TrimSpace(payload.Description)
-	}
-	for _, file := range payload.Files {
-		if file.Path == "SKILL.md" {
-			parts := strings.SplitN(file.Content, "---", 3)
-			if len(parts) == 3 {
-				skill.Instructions = strings.TrimSpace(parts[2])
-			}
+	allowed := false
+	for _, item := range selected {
+		if item.ID == request.PathValue("skill") {
+			allowed = true
+			break
 		}
 	}
-	skill.UpdatedAt = time.Now().UTC()
-	updated, err := s.store.UpdateSkillPackage(request.Context(), skill, payload.BaseVersion, payload.Files)
+	if !allowed {
+		writeError(writer, http.StatusNotFound, "skill_not_found")
+		return
+	}
+	files := make([]knowledgevault.SkillPackageFile, 0, len(payload.Files))
+	for _, file := range payload.Files {
+		files = append(files, knowledgevault.SkillPackageFile{Path: file.Path, Content: file.Content})
+	}
+	updated, err := s.app.UpdateVaultSkill(request.Context(), request.PathValue("skill"), app.VaultSkillWriteInput{
+		ProjectID: call.Project.ID, BaseVersion: payload.BaseVersion,
+		Name: strings.TrimSpace(payload.Name), Description: strings.TrimSpace(payload.Description),
+		Files: files, AllowGlobal: true,
+	})
 	if err != nil {
-		if strings.Contains(err.Error(), "version conflict") {
-			writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": "skill_version_conflict", "current_version": skill.Version})
+		writeAgentSkillWriteError(writer, err)
+		return
+	}
+	s.audit(request, "agent.skill.update", "vault_skill", updated.ID, map[string]any{"version": updated.Version, "files": len(files)})
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "skill": updated, "files": updated.PackageFiles})
+}
+
+// writeAgentSkillWriteError maps a vault skill write failure to the stable
+// Agent Control API error shape. The legacy in-place update returned a version
+// conflict as 409 and everything else as 400; keep that contract.
+func writeAgentSkillWriteError(writer http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, app.ErrVaultSkillNotFound):
+		writeError(writer, http.StatusNotFound, "skill_not_found")
+	case errors.Is(err, app.ErrVaultSkillForbidden):
+		writeError(writer, http.StatusForbidden, "skill_scope_forbidden")
+	case errors.Is(err, app.ErrVaultSkillReadOnly):
+		writeError(writer, http.StatusForbidden, "skill_read_only")
+	}
+	var writeErr *knowledgevault.SkillWriteError
+	if errors.As(err, &writeErr) {
+		switch writeErr.Code {
+		case knowledgevault.SkillWriteErrorConflictCode():
+			writeJSON(writer, http.StatusConflict, map[string]any{
+				"ok": false, "error": "skill_version_conflict", "current_version": writeErr.CurrentVersion,
+			})
+			return
+		case knowledgevault.SkillWriteErrorNotFoundCode():
+			writeError(writer, http.StatusNotFound, "skill_not_found")
+			return
+		case knowledgevault.SkillWriteErrorForbiddenCode():
+			writeError(writer, http.StatusForbidden, "skill_scope_forbidden")
+			return
+		case knowledgevault.SkillWriteErrorDuplicateCode():
+			writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": "skill_already_exists", "message": writeErr.Message})
 			return
 		}
-		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "skill_update_failed", "message": err.Error()})
-		return
 	}
-	s.audit(request, "agent.skill.update", "skill", updated.ID, map[string]any{"version": updated.Version, "files": len(payload.Files)})
-	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "skill": updated})
+	writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "skill_update_failed", "message": err.Error()})
 }
 
 func writeAgentControlError(writer http.ResponseWriter, err error) {

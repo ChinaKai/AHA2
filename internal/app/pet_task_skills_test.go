@@ -14,6 +14,11 @@ type petSkillFixture struct {
 	*petTaskFixture
 	project   domain.Project
 	workspace domain.Workspace
+	keys      map[string]string
+}
+
+func (f petSkillFixture) skillKey(name string) string {
+	return f.keys[name]
 }
 
 func newPetSkillFixture(t *testing.T) petSkillFixture {
@@ -40,18 +45,30 @@ func newPetSkillFixture(t *testing.T) petSkillFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := fixture.createdAt
-	for _, item := range []domain.Skill{
-		{ID: "skill-pet-project", Scope: "project", ProjectID: project.ID, Name: "Project Manual", Instructions: "project manual", Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now},
-		{ID: "skill-pet-global", Scope: "global", Name: "Global Manual", Instructions: "global manual", Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now},
-		{ID: "skill-pet-auto", Scope: "project", ProjectID: project.ID, Name: "Project Auto", Instructions: "project auto", Version: 1, Status: "active", Enabled: true, AutoAttach: true, CreatedAt: now, UpdatedAt: now},
-		{ID: "skill-pet-other", Scope: "project", ProjectID: "project-other", Name: "Other Project", Instructions: "other", Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now},
-	} {
-		if err := fixture.database.CreateSkill(fixture.ctx, item); err != nil {
-			t.Fatal(err)
-		}
+	// Skills are vault packages now. The fixture binds the pet project and one
+	// foreign project, then sets only the project "auto" package as
+	// auto-attach: legacy AutoAttach rows no longer feed task selection.
+	files := map[string]string{
+		"projects/skill-project/index.md":                       "---\nid: knowledge_root_skill_project\ntitle: Skill 项目\nscope: project\nproject_id: " + project.ID + "\ntype: navigation\nstatus: verified\nis_index: true\n---\nSkill 项目入口。\n",
+		"projects/skill-project/skills/project-manual/SKILL.md": "---\nname: Project Manual\ndescription: project manual\n---\n\nproject manual\n",
+		"projects/skill-project/skills/project-auto/SKILL.md":   "---\nname: Project Auto\ndescription: project auto\n---\n\nproject auto\n",
+		"global/skills/global-manual/SKILL.md":                  "---\nname: Global Manual\ndescription: global manual\n---\n\nglobal manual\n",
+		"projects/other/index.md":                               "---\nid: knowledge_root_other\ntitle: Other Project\nscope: project\nproject_id: project-other\ntype: navigation\nstatus: verified\nis_index: true\n---\nOther.\n",
+		"projects/other/skills/other-project/SKILL.md":          "---\nname: Other Project\ndescription: other\n---\n\nother\n",
 	}
-	return petSkillFixture{petTaskFixture: fixture, project: project, workspace: workspace}
+	manager := buildVaultReadManager(t, true, files)
+	fixture.service.SetKnowledgeVault(manager, true)
+	fixture.service.SetKnowledgeVaultRuntimeWrite(true)
+	keys := map[string]string{
+		"global":  "vault-skill:global:global-manual",
+		"project": "vault-skill:project:" + project.ID + ":project-manual",
+		"auto":    "vault-skill:project:" + project.ID + ":project-auto",
+		"other":   "vault-skill:project:project-other:other-project",
+	}
+	if _, err := fixture.service.SetVaultSkillAutoAttach(fixture.ctx, keys["auto"], true, false); err != nil {
+		t.Fatal(err)
+	}
+	return petSkillFixture{petTaskFixture: fixture, project: project, workspace: workspace, keys: keys}
 }
 
 func (f petSkillFixture) storedSkillIDs(t *testing.T, taskID string) []string {
@@ -70,12 +87,12 @@ func TestPetCreateTaskPersistsRequestedSkillsBeforeFirstTurn(t *testing.T) {
 	task, err := fixture.service.PetCreateTask(fixture.ctx, PetCreateTaskInput{
 		ProjectID: fixture.project.ID, WorkspaceID: fixture.workspace.ID, Title: "带 Skill 的任务",
 		Request: "按 Skill 执行", Filesystem: "read-only", Start: boolPointer(true),
-		SkillIDs: []string{"skill-pet-global", " skill-pet-project ", "skill-pet-global"},
+		SkillIDs: []string{fixture.skillKey("global"), " " + fixture.skillKey("project") + " ", fixture.skillKey("global")},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"skill-pet-global", "skill-pet-project", "skill-pet-auto"}
+	want := []string{fixture.skillKey("global"), fixture.skillKey("project"), fixture.skillKey("auto")}
 	if !reflect.DeepEqual(task.SkillIDs, want) {
 		t.Fatalf("returned skill_ids=%#v want %#v", task.SkillIDs, want)
 	}
@@ -112,21 +129,21 @@ func TestPetCreateTaskWithoutSkillIDsKeepsAutoAttachDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"skill-pet-auto"}; !reflect.DeepEqual(task.SkillIDs, want) {
+	if want := []string{fixture.skillKey("auto")}; !reflect.DeepEqual(task.SkillIDs, want) {
 		t.Fatalf("skill_ids=%#v want %#v", task.SkillIDs, want)
 	}
 }
 
 func TestPetCreateTaskRejectsUnavailableSkills(t *testing.T) {
 	fixture := newPetSkillFixture(t)
-	for _, id := range []string{"skill-pet-other", "skill-missing"} {
+	for _, id := range []string{fixture.skillKey("other"), "skill-missing"} {
 		before, err := fixture.database.ListTasks(fixture.ctx, fixture.project.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
 		_, err = fixture.service.PetCreateTask(fixture.ctx, PetCreateTaskInput{
 			ProjectID: fixture.project.ID, WorkspaceID: fixture.workspace.ID, Title: "非法 Skill",
-			Request: "应被拒绝", Start: boolPointer(false), SkillIDs: []string{"skill-pet-project", id},
+			Request: "应被拒绝", Start: boolPointer(false), SkillIDs: []string{fixture.skillKey("project"), id},
 		})
 		if err == nil || !strings.Contains(err.Error(), id) {
 			t.Fatalf("skill %s: err=%v", id, err)
@@ -150,7 +167,7 @@ func TestPetUpdateTaskSkillsOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	skills := []string{"skill-pet-global", "skill-pet-project"}
+	skills := []string{fixture.skillKey("global"), fixture.skillKey("project")}
 	updated, err := fixture.service.PetUpdateTask(fixture.ctx, PetUpdateTaskInput{TaskID: task.ID, SkillIDs: &skills})
 	if err != nil {
 		t.Fatal(err)
@@ -165,10 +182,10 @@ func TestPetUpdateTaskSkillsOnly(t *testing.T) {
 	}
 
 	title := "不应写入的标题"
-	invalid := []string{"skill-pet-global", "skill-pet-other"}
+	invalid := []string{fixture.skillKey("global"), fixture.skillKey("other")}
 	if _, err := fixture.service.PetUpdateTask(fixture.ctx, PetUpdateTaskInput{
 		TaskID: task.ID, Title: &title, SkillIDs: &invalid,
-	}); err == nil || !strings.Contains(err.Error(), "skill-pet-other") {
+	}); err == nil || !strings.Contains(err.Error(), fixture.skillKey("other")) {
 		t.Fatalf("cross-project skill update err=%v", err)
 	}
 	current, err := fixture.database.Task(fixture.ctx, task.ID)
@@ -211,7 +228,7 @@ func TestPetMCPTaskToolsAcceptSkillIDs(t *testing.T) {
 
 	args, _ := json.Marshal(map[string]any{
 		"project_id": fixture.project.ID, "workspace_id": fixture.workspace.ID, "title": "MCP Skill",
-		"request": "通过 MCP 创建", "start": false, "skill_ids": []string{"skill-pet-global"},
+		"request": "通过 MCP 创建", "start": false, "skill_ids": []string{fixture.skillKey("global")},
 	})
 	raw, err := fixture.service.PetMCPTool(fixture.ctx, "aha_create_task", args)
 	if err != nil {
@@ -221,12 +238,12 @@ func TestPetMCPTaskToolsAcceptSkillIDs(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &created); err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"skill-pet-global", "skill-pet-auto"}; !reflect.DeepEqual(created.SkillIDs, want) {
+	if want := []string{fixture.skillKey("global"), fixture.skillKey("auto")}; !reflect.DeepEqual(created.SkillIDs, want) {
 		t.Fatalf("mcp create skill_ids=%#v want %#v", created.SkillIDs, want)
 	}
 
 	raw, err = fixture.service.PetMCPTool(fixture.ctx, "aha_update_task",
-		json.RawMessage(`{"task_id":"`+created.ID+`","skill_ids":["skill-pet-project"]}`))
+		json.RawMessage(`{"task_id":"`+created.ID+`","skill_ids":["`+fixture.skillKey("project")+`"]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +251,7 @@ func TestPetMCPTaskToolsAcceptSkillIDs(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &updated); err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"skill-pet-project"}; !reflect.DeepEqual(updated.SkillIDs, want) || updated.Title != created.Title {
+	if want := []string{fixture.skillKey("project")}; !reflect.DeepEqual(updated.SkillIDs, want) || updated.Title != created.Title {
 		t.Fatalf("mcp update task=%#v", updated)
 	}
 	if _, err := fixture.service.PetMCPTool(fixture.ctx, "aha_update_task",
@@ -252,7 +269,7 @@ func TestPetMCPTaskToolsAcceptSkillIDs(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &updated); err != nil {
 		t.Fatal(err)
 	}
-	if updated.Title != title || !reflect.DeepEqual(updated.SkillIDs, []string{"skill-pet-project"}) {
+	if updated.Title != title || !reflect.DeepEqual(updated.SkillIDs, []string{fixture.skillKey("project")}) {
 		t.Fatalf("title-only update task=%#v", updated)
 	}
 }
@@ -274,7 +291,7 @@ func TestPetTaskSkillToolsRequireCreateTaskPermission(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	skills := []string{"skill-pet-global"}
+	skills := []string{fixture.skillKey("global")}
 	if _, err := fixture.service.PetUpdateTask(fixture.ctx, PetUpdateTaskInput{TaskID: task.ID, SkillIDs: &skills}); err == nil {
 		t.Fatal("skill update was allowed without the create_tasks permission")
 	}
@@ -284,7 +301,7 @@ func TestPetTaskSkillToolsRequireCreateTaskPermission(t *testing.T) {
 	}); err == nil {
 		t.Fatal("create with skills was allowed without the create_tasks permission")
 	}
-	if got := fixture.storedSkillIDs(t, task.ID); !reflect.DeepEqual(got, []string{"skill-pet-auto"}) {
+	if got := fixture.storedSkillIDs(t, task.ID); !reflect.DeepEqual(got, []string{fixture.skillKey("auto")}) {
 		t.Fatalf("skills changed without permission: %#v", got)
 	}
 }

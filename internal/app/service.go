@@ -660,30 +660,41 @@ func (s *Service) prepareAndActivateTask(ctx context.Context, workspace domain.W
 	return task, nil
 }
 
+// normalizeKnowledgePolicy keeps the retired "inherit" value working as the
+// Task's enabled switch. Project-level KnowledgePolicy is no longer a Task
+// inheritance source; it stays for project-space and pet submission rules.
 func normalizeKnowledgePolicy(value string) string {
 	switch strings.TrimSpace(value) {
-	case "enabled":
-		return "enabled"
 	case "disabled":
 		return "disabled"
 	default:
-		return "inherit"
+		// "enabled", "inherit" and any unknown legacy value all run as enabled.
+		return "enabled"
 	}
 }
 
-func knowledgeEnabled(project domain.Project, task domain.Task) bool {
-	if task.KnowledgePolicy == "enabled" {
+func knowledgeEnabled(_ domain.Project, task domain.Task) bool {
+	switch strings.TrimSpace(task.KnowledgePolicy) {
+	case "disabled":
+		return false
+	case "enabled", "inherit", "":
+		return true
+	default:
+		// A legacy or hand-written value must not silently disable knowledge.
 		return true
 	}
-	if task.KnowledgePolicy == "disabled" {
-		return false
-	}
-	return project.KnowledgePolicy != "disabled"
 }
 
 func (s *Service) validateTaskSkillIDs(ctx context.Context, projectID string, ids []string) ([]string, error) {
 	result := make([]string, 0, len(ids))
 	seen := map[string]bool{}
+	appendID := func(id string) {
+		if id == "" || seen[id] {
+			return
+		}
+		seen[id] = true
+		result = append(result, id)
+	}
 	for _, id := range ids {
 		id = strings.TrimSpace(id)
 		if id == "" || seen[id] {
@@ -693,19 +704,26 @@ func (s *Service) validateTaskSkillIDs(ctx context.Context, projectID string, id
 			if !s.vaultSkillExistsInProject(ctx, projectID, id) {
 				return nil, fmt.Errorf("vault skill %s is unavailable for this project", id)
 			}
-			seen[id] = true
-			result = append(result, id)
+			appendID(id)
 			continue
 		}
 		item, err := s.store.Skill(ctx, id)
 		if err != nil {
 			return nil, fmt.Errorf("skill %s is unavailable", id)
 		}
+		// Read-only compatibility: a task created before the vault cutover may
+		// still name a legacy row. If the equivalent vault package exists, save
+		// its stable key so the next Turn loads the file-first copy.
+		if s.vaultSkillReadableForProject(ctx, projectID) {
+			if aliasKey, ok := s.vaultSkillKeyForLegacy(ctx, item); ok && s.vaultSkillExistsInProject(ctx, projectID, aliasKey) {
+				appendID(aliasKey)
+				continue
+			}
+		}
 		if !item.Enabled || item.Status != "active" || !skillAppliesToProject(item, projectID) {
 			return nil, fmt.Errorf("skill %s is not enabled for this project", id)
 		}
-		seen[id] = true
-		result = append(result, id)
+		appendID(id)
 	}
 	return result, nil
 }
@@ -721,45 +739,10 @@ func skillAppliesToProject(item domain.Skill, projectID string) bool {
 }
 
 func (s *Service) autoAttachSkillIDs(ctx context.Context, projectID string) ([]string, error) {
-	// Source routing: once the vault read is effective for the project, the
-	// auto-attach selection comes exclusively from vault preferences. The
-	// legacy skills.AutoAttach rows are the fallback for projects still on the
-	// old store; merging both mounted the same package twice under two IDs.
-	vaultSource := s.vaultReadEnabled(projectID)
-	if !vaultSource && s.projectHasNoKnowledgeSpace(ctx, projectID) {
-		// Infrastructure projects own no project vault space, so only global
-		// vault preferences apply and the global read source decides whether
-		// they are available (task-541).
-		vaultSource = s.vaultGlobalReadEnabled()
-	}
-	if vaultSource {
-		selection := s.vaultAutoAttachSelection(ctx, projectID)
-		for _, item := range s.supersededLegacyAutoAttach(ctx, projectID, selection.slugs) {
-			log.Printf("knowledge vault auto-attach for project %s: legacy skill %s (%q) has no vault counterpart and is not auto-attached because the project uses the vault source", projectID, item.ID, item.Name)
-		}
-		return selection.keys, nil
-	}
-	return s.legacyAutoAttachSkillIDs(ctx, projectID)
-}
-
-// legacyAutoAttachSkillIDs is the old-store auto-attach rule. It stays
-// unchanged for projects whose vault read is not effective (vault off, read
-// rolled back, index not ready or project not bound).
-func (s *Service) legacyAutoAttachSkillIDs(ctx context.Context, projectID string) ([]string, error) {
-	items, err := s.store.ListSkills(ctx, "", "", true)
-	if err != nil {
-		return nil, err
-	}
-	result := make([]string, 0)
-	for _, item := range items {
-		// Auto-attach follows the skill's own Project. Bound external skills are
-		// available for manual selection in the bound project, but they are
-		// read-only mirrors and must not be enabled implicitly.
-		if item.AutoAttach && (item.Scope == "global" || (item.Scope == "project" && item.ProjectID == projectID)) {
-			result = append(result, item.ID)
-		}
-	}
-	return result, nil
+	// Skills are vault-only after the cutover. The legacy AutoAttach column is
+	// never read here: a task either receives the vault preference or nothing.
+	selection := s.vaultAutoAttachSelection(ctx, projectID)
+	return selection.keys, nil
 }
 
 func mergeSkillIDs(existing, extra []string) []string {
@@ -799,9 +782,20 @@ func (s *Service) activeTaskSkills(ctx context.Context, task domain.Task) []doma
 	for _, id := range task.SkillIDs {
 		if knowledgevault.IsVaultSkillID(id) {
 			vaultIDs = append(vaultIDs, id)
-		} else {
-			dbIDs = append(dbIDs, id)
+			continue
 		}
+		// Historical tasks can still carry a legacy skill id. When the vault
+		// exposes the same package, load the file-first copy through the alias
+		// instead of failing or serving stale instructions.
+		if s.vaultSkillReadableForProject(ctx, task.ProjectID) {
+			if legacy, err := s.store.Skill(ctx, id); err == nil {
+				if aliasKey, ok := s.vaultSkillKeyForLegacy(ctx, legacy); ok {
+					vaultIDs = append(vaultIDs, aliasKey)
+					continue
+				}
+			}
+		}
+		dbIDs = append(dbIDs, id)
 	}
 	items, err := s.store.SkillsByIDs(ctx, dbIDs)
 	if err != nil {
@@ -1282,6 +1276,17 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		} else {
 			globalKB = globalActive
 			staleKB = append(staleKB, globalStale...)
+		}
+		// The pet Task can read every filesystem-managed root library. Ordinary
+		// tasks and channel inbound routes never reach this branch.
+		if s.isPetKnowledgeTask(ctx, task) {
+			rootActive, rootStale, rootErr := s.vaultRootSnapshot(ctx)
+			if rootErr != nil {
+				log.Printf("turn %s root knowledge read failed; root block left empty: %v", turn.ID, rootErr)
+			} else {
+				projectKB = append(projectKB, rootActive...)
+				staleKB = append(staleKB, rootStale...)
+			}
 		}
 	}
 	skills = s.activeTaskSkills(ctx, task)

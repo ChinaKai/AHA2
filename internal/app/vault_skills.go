@@ -16,8 +16,8 @@ import (
 
 // Vault skills are file packages, not rows in the legacy skills table. A
 // preference row remembers the owner's auto-attach choice; task resolution
-// merges eligible vault skills with legacy AutoAttach skills and reads the
-// package through the existing Reader.SkillFiles path.
+// reads only vault packages (with a read-only alias for historical legacy ids)
+// and reads the package through the existing Reader.SkillFiles path.
 
 var (
 	// ErrVaultSkillNotFound reports a key that the current vault does not
@@ -283,11 +283,9 @@ func (s *Service) SetVaultSkillAutoAttach(ctx context.Context, key string, autoA
 }
 
 // vaultAutoAttachSelection is the auto-attach result for a project that reads
-// from the vault. Slugs is the set of package slugs covered by the selection,
-// which lets the caller explain legacy AutoAttach rows that no longer apply.
+// from the vault.
 type vaultAutoAttachSelection struct {
-	keys  []string
-	slugs map[string]bool
+	keys []string
 }
 
 // vaultAutoAttachSkillKeys returns the vault skills that should be pre-selected
@@ -303,7 +301,7 @@ func (s *Service) vaultAutoAttachSkillKeys(ctx context.Context, projectID string
 // preferences apply and they are gated by the global read source. Preferences
 // that can no longer be honoured are logged instead of silently disappearing.
 func (s *Service) vaultAutoAttachSelection(ctx context.Context, projectID string) vaultAutoAttachSelection {
-	selection := vaultAutoAttachSelection{slugs: map[string]bool{}}
+	selection := vaultAutoAttachSelection{}
 	infrastructure := s.projectHasNoKnowledgeSpace(ctx, projectID)
 	preferences, err := s.store.ListVaultSkillPreferences(ctx)
 	if err != nil {
@@ -348,6 +346,9 @@ func (s *Service) vaultAutoAttachSelection(ctx context.Context, projectID string
 			return err
 		}
 		for _, skill := range response.Skills {
+			if !skill.Enabled || skill.Status != "active" {
+				continue
+			}
 			if skill.Scope == "global" || (!infrastructure && skill.Scope == "project" && skill.ProjectID == projectID) {
 				available[skill.Key] = skill
 			}
@@ -384,39 +385,8 @@ func (s *Service) vaultAutoAttachSelection(ctx context.Context, projectID string
 	selection.keys = make([]string, 0, len(order))
 	for _, slug := range order {
 		selection.keys = append(selection.keys, bySlug[slug])
-		selection.slugs[slug] = true
 	}
 	return selection
-}
-
-// supersededLegacyAutoAttach lists the legacy AutoAttach rows that used to be
-// merged into a task but are now excluded because the project reads auto-attach
-// from the vault. Rows whose slug is covered by the vault selection are not
-// reported: the same package is still attached, just under its vault id. The
-// returned rows have no vault counterpart, so the task silently loses them
-// unless the caller reports why.
-func (s *Service) supersededLegacyAutoAttach(ctx context.Context, projectID string, vaultSlugs map[string]bool) []domain.Skill {
-	items, err := s.store.ListSkills(ctx, "", "", true)
-	if err != nil {
-		log.Printf("knowledge vault auto-attach for project %s: list legacy skills: %v", projectID, err)
-		return nil
-	}
-	result := make([]domain.Skill, 0)
-	for _, item := range items {
-		if !item.AutoAttach || !(item.Scope == "global" || (item.Scope == "project" && item.ProjectID == projectID)) {
-			continue
-		}
-		slug := strings.TrimSpace(item.PackageSlug)
-		if slug == "" {
-			slug = knowledgevault.Slugify(item.Name)
-		}
-		slug = knowledgevault.SafeSegment(slug, "skill")
-		if vaultSlugs[slug] {
-			continue
-		}
-		result = append(result, item)
-	}
-	return result
 }
 
 func (s *Service) vaultReadDisabledReason(projectID string) string {
@@ -468,7 +438,7 @@ func (s *Service) vaultTaskSkills(ctx context.Context, projectID string, ids []s
 			return err
 		}
 		for _, skill := range response.Skills {
-			if !wanted[skill.Key] {
+			if !wanted[skill.Key] || !skill.Enabled || skill.Status != "active" {
 				continue
 			}
 			if skill.Scope != "global" && !(skill.Scope == "project" && skill.ProjectID == projectID) {
@@ -488,7 +458,8 @@ func (s *Service) vaultTaskSkills(ctx context.Context, projectID string, ids []s
 			}
 			result = append(result, domain.Skill{
 				ID: skill.Key, PackageSlug: skill.Slug, Scope: skill.Scope, ProjectID: skill.ProjectID,
-				Name: skill.Name, Description: skill.Description, Version: 1, Status: "active", Enabled: true,
+				Name: skill.Name, Description: skill.Description, Instructions: skill.Instructions,
+				Version: skill.Version, Status: skill.Status, Enabled: skill.Enabled,
 				SourcePath: filepath.Join(reader.Config().VaultPath, filepath.FromSlash(skill.RelativePath)),
 				Files:      names, PackageFiles: packageFiles,
 			})
@@ -531,7 +502,7 @@ func (s *Service) vaultInfrastructureTaskSkills(ctx context.Context, projectID s
 			return err
 		}
 		for _, skill := range response.Skills {
-			if !wanted[skill.Key] || seen[skill.Key] {
+			if !wanted[skill.Key] || seen[skill.Key] || !skill.Enabled || skill.Status != "active" {
 				continue
 			}
 			// Project and archive skills require a project vault space that
@@ -552,7 +523,8 @@ func (s *Service) vaultInfrastructureTaskSkills(ctx context.Context, projectID s
 			}
 			result = append(result, domain.Skill{
 				ID: skill.Key, PackageSlug: skill.Slug, Scope: skill.Scope, ProjectID: skill.ProjectID,
-				Name: skill.Name, Description: skill.Description, Version: 1, Status: "active", Enabled: true,
+				Name: skill.Name, Description: skill.Description, Instructions: skill.Instructions,
+				Version: skill.Version, Status: skill.Status, Enabled: skill.Enabled,
 				SourcePath: filepath.Join(reader.Config().VaultPath, filepath.FromSlash(skill.RelativePath)),
 				Files:      names, PackageFiles: packageFiles,
 			})
@@ -614,6 +586,9 @@ func (s *Service) vaultSkillExistsInProject(ctx context.Context, projectID, id s
 		for _, skill := range response.Skills {
 			if skill.Key != id {
 				continue
+			}
+			if !skill.Enabled || skill.Status != "active" {
+				break
 			}
 			switch {
 			case skill.Scope == "global":
