@@ -489,6 +489,11 @@ func TestKnowledgeVaultAutoSyncSwitchPersistsAndReportsStatus(t *testing.T) {
 	if autoSync["enabled"] != true {
 		t.Fatalf("auto_sync default = %#v", autoSync)
 	}
+	// pending_known distinguishes "no changes" from "never scanned"; without
+	// it the panel has to treat the zero value as a real count.
+	if _, ok := autoSync["pending_known"]; !ok {
+		t.Fatalf("auto_sync status has no pending_known field: %#v", autoSync)
+	}
 
 	response := requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/settings/knowledge-vault", map[string]any{"auto_sync": false}, csrf)
 	var updated map[string]any
@@ -526,5 +531,76 @@ func TestKnowledgeVaultAutoSyncSwitchPersistsAndReportsStatus(t *testing.T) {
 	decodeResponse(t, response, &invalid)
 	if response.StatusCode != http.StatusBadRequest {
 		t.Fatalf("empty update status=%d payload=%#v", response.StatusCode, invalid)
+	}
+}
+
+// A paused syncer does not scan, and the shipped 0.5.533 state file predates
+// the pending/blocked fields. The settings view must count the worktree from
+// a read-only scan instead of echoing the missing pause-time value as 0.
+func TestKnowledgeVaultSettingsReportsLivePendingWhilePaused(t *testing.T) {
+	config := knowledgevault.DefaultConfig(t.TempDir())
+	if _, err := knowledgevault.Bootstrap(config, knowledgevault.InitOptions{VaultName: "Paused Vault", Commit: true}); err != nil {
+		t.Fatal(err)
+	}
+	// Reproduce the upgrade state: a paused pause_reason without pending or
+	// blocked details.
+	statePath := filepath.Join(config.VaultPath, ".aha", "auto-sync.json")
+	legacy := []byte("{\n  \"preflight_version\": 0,\n  \"pause_reason\": \"preflight_failed\",\n  \"last_error\": \"有 1 个改动无法自动提交（二进制/密钥/超大文件）；preflight 已暂停并保留现场\"\n}\n")
+	if err := os.WriteFile(statePath, legacy, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	write := func(relative, content string) {
+		path := filepath.Join(config.VaultPath, filepath.FromSlash(relative))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("global/general/one.md", "# One\n\nbody\n")
+	write("global/general/two.md", "# Two\n\nbody\n")
+	write("global/general/token-note.md", "# Note\n\ntoken = abcdefgh12345678\n")
+
+	manager, err := knowledgevault.NewManager(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	server, client, _, _ := knowledgeVaultServerAt(t, manager, t.TempDir())
+
+	settings := knowledgeVaultSettingsSnapshot(t, client, server.URL)
+	autoSync, ok := settings["auto_sync"].(map[string]any)
+	if !ok {
+		t.Fatalf("settings has no auto_sync status: %#v", settings)
+	}
+	if autoSync["paused"] != true || autoSync["pause_reason"] != "preflight_failed" {
+		t.Fatalf("paused fixture was not restored: %#v", autoSync)
+	}
+	if autoSync["pending_known"] != true {
+		t.Fatalf("paused status did not count the worktree: %#v", autoSync)
+	}
+	if pending := autoSync["pending"].(float64); pending != 3 {
+		t.Fatalf("paused pending = %v, want 3", pending)
+	}
+	if blocked := autoSync["blocked"].(float64); blocked != 1 {
+		t.Fatalf("paused blocked = %v, want 1", blocked)
+	}
+	files := autoSync["blocked_files"].([]any)
+	if len(files) != 1 || files[0].(map[string]any)["reason"] != "secret" {
+		t.Fatalf("paused blocked_files = %#v", autoSync["blocked_files"])
+	}
+	// The legacy state has no stage. The live scan proves a blocked file, so the
+	// panel must describe the pending-changes step rather than line endings.
+	if autoSync["preflight_stage"] != "pending_changes" {
+		t.Fatalf("paused preflight_stage = %#v", autoSync["preflight_stage"])
+	}
+	// The read-only render must not change the pause snapshot or commit.
+	stateAfter, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(stateAfter) != string(legacy) {
+		t.Fatalf("settings read rewrote the pause state:\n%s", stateAfter)
 	}
 }

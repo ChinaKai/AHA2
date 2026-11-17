@@ -54,18 +54,54 @@ func TestEnsureTextPolicyWritesAttributesAndRepoLocalAutocrlf(t *testing.T) {
 	if again.AttributesChanged {
 		t.Fatal("second policy application rewrote an already-correct .gitattributes")
 	}
+	if !again.AttributesExisted {
+		t.Fatalf("second policy application did not report the existing file: %+v", again)
+	}
 
-	// Owner rules survive; only missing AHA2 lines are appended.
+	// An owner-authored file is never rewritten, not even to add AHA2 defaults.
 	path := filepath.Join(config.VaultPath, ".gitattributes")
-	if err := os.WriteFile(path, []byte("*.custom text\n"), 0o644); err != nil {
+	owner := "*.custom text\n"
+	if err := os.WriteFile(path, []byte(owner), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := git.EnsureTextPolicy(ctx); err != nil {
+	ownerResult, err := git.EnsureTextPolicy(ctx)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if ownerResult.AttributesChanged || !ownerResult.AttributesExisted {
+		t.Fatalf("owner policy file was modified: %+v", ownerResult)
 	}
 	content, _ = os.ReadFile(path)
-	if !strings.Contains(string(content), "*.custom text\n") || !strings.Contains(string(content), "* text=auto eol=lf\n") {
-		t.Fatalf("owner rule or required line missing:\n%s", content)
+	if string(content) != owner {
+		t.Fatalf("owner .gitattributes was rewritten:\n%s", content)
+	}
+}
+
+func TestEnsureTextPolicyReportsCRLFBlobsWithoutWritingPolicy(t *testing.T) {
+	ctx := context.Background()
+	config, git := newGitTestVault(t)
+	testGitCommand(t, config.VaultPath, "init", "-b", "main")
+	testGitCommand(t, config.VaultPath, "config", "core.autocrlf", "false")
+	writeGitTestFile(t, config.VaultPath, "global/general/crlf.md", "# CRLF\r\n\r\nbody\r\n")
+	testGitCommand(t, config.VaultPath, "add", "-A")
+	testGitCommand(t, config.VaultPath, "commit", "-m", "crlf baseline")
+	blobBefore := gitOutputBytes(t, config.VaultPath, "show", "HEAD:global/general/crlf.md")
+
+	result, err := git.EnsureTextPolicy(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IndexCRLF != 1 {
+		t.Fatalf("index CRLF count = %d, want 1: %+v", result.IndexCRLF, result)
+	}
+	if result.AttributesChanged || result.AttributesExisted {
+		t.Fatalf("policy was written over CRLF blobs: %+v", result)
+	}
+	if _, err := os.Stat(filepath.Join(config.VaultPath, ".gitattributes")); !os.IsNotExist(err) {
+		t.Fatalf("policy file appeared despite CRLF blobs: %v", err)
+	}
+	if blobAfter := gitOutputBytes(t, config.VaultPath, "show", "HEAD:global/general/crlf.md"); string(blobAfter) != string(blobBefore) {
+		t.Fatalf("policy check rewrote the CRLF blob: %q -> %q", blobBefore, blobAfter)
 	}
 }
 
@@ -83,9 +119,10 @@ func TestRenormalizeCommitsOnceAndSecondRunIsNoop(t *testing.T) {
 		t.Fatalf("test baseline is not CRLF: %q", blobBefore)
 	}
 
-	if _, err := git.EnsureTextPolicy(ctx); err != nil {
-		t.Fatal(err)
-	}
+	// Renormalize is the explicit migration entry point. The auto-sync
+	// preflight refuses to create the policy over CRLF blobs, so a caller that
+	// wants the migration supplies the policy file directly.
+	writeGitTestFile(t, config.VaultPath, ".gitattributes", GitAttributesContent())
 	headBefore := testGitCommand(t, config.VaultPath, "rev-parse", "HEAD")
 	result, err := git.Renormalize(ctx)
 	if err != nil {
@@ -121,6 +158,61 @@ func TestRenormalizeCommitsOnceAndSecondRunIsNoop(t *testing.T) {
 	}
 	if head := testGitCommand(t, config.VaultPath, "rev-parse", "HEAD"); head != headAfter {
 		t.Fatalf("second renormalize changed HEAD: %s -> %s", headAfter, head)
+	}
+}
+
+func TestRenormalizeAllLFVaultCommitsPolicyWithoutMigration(t *testing.T) {
+	ctx := context.Background()
+	config, git := newGitTestVault(t)
+	if _, err := git.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Upgrade fixture: policy file missing, all blobs already LF.
+	if err := os.Remove(filepath.Join(config.VaultPath, ".gitattributes")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git.Commit(ctx, "drop policy for upgrade fixture"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git.EnsureTextPolicy(ctx); err != nil {
+		t.Fatal(err)
+	}
+	headBefore := testGitCommand(t, config.VaultPath, "rev-parse", "HEAD")
+	result, err := git.Renormalize(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The policy file still needs a commit, but no blob was renormalized: no
+	// migration claim, no backup tag, no line-ending state file.
+	if result.Ran || !result.Committed || result.Files != 0 {
+		t.Fatalf("all-LF vault reported a migration: %+v", result)
+	}
+	if result.Tag != "" {
+		t.Fatalf("all-LF vault created a backup tag: %+v", result)
+	}
+	if strings.Contains(result.Message, "已规范化") {
+		t.Fatalf("all-LF vault claimed renormalization: %q", result.Message)
+	}
+	headAfter := testGitCommand(t, config.VaultPath, "rev-parse", "HEAD")
+	if headAfter == headBefore {
+		t.Fatal("policy commit did not move HEAD")
+	}
+	commitMessage := testGitCommand(t, config.VaultPath, "log", "-1", "--format=%s")
+	if !strings.Contains(commitMessage, "Add knowledge vault LF line-ending policy") {
+		t.Fatalf("policy commit message = %q", commitMessage)
+	}
+	if _, err := os.Stat(filepath.Join(config.VaultPath, stateDirectory, lineEndingStateFile)); !os.IsNotExist(err) {
+		t.Fatalf("all-LF vault recorded a line-ending migration: %v", err)
+	}
+	if dirty := testGitCommand(t, config.VaultPath, "status", "--porcelain"); dirty != "" {
+		t.Fatalf("worktree not clean after the policy commit:\n%s", dirty)
+	}
+	second, err := git.Renormalize(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Committed || second.Files != 0 {
+		t.Fatalf("second renormalize was not a no-op: %+v", second)
 	}
 }
 
@@ -171,40 +263,33 @@ func TestRenormalizeRefusesRealEditsAndMergeStateWithoutResetting(t *testing.T) 
 	}
 }
 
-func gitCheckAttr(t *testing.T, directory, attr, target string) string {
-	t.Helper()
-	output := testGitCommand(t, directory, "check-attr", attr, "--", target)
-	parts := strings.SplitN(output, ": ", 3)
-	if len(parts) != 3 {
-		t.Fatalf("unexpected check-attr output for %s %s: %q", attr, target, output)
-	}
-	return parts[2]
-}
-
-func TestEnsureTextPolicyKeepsAuthorRulesWinning(t *testing.T) {
+func TestEnsureTextPolicyNeverOverwritesExistingAttributes(t *testing.T) {
 	ctx := context.Background()
 	config, git := newGitTestVault(t)
 	testGitCommand(t, config.VaultPath, "init", "-b", "main")
-	writeGitTestFile(t, config.VaultPath, ".gitattributes", strings.Join([]string{
+	owner := strings.Join([]string{
 		"*.md text eol=crlf",
 		"*.custom -text",
 		"*.png text eol=lf",
 		"",
-	}, "\n"))
+	}, "\n")
+	writeGitTestFile(t, config.VaultPath, ".gitattributes", owner)
 	writeGitTestFile(t, config.VaultPath, "note.md", "# Note\n")
 	writeGitTestFile(t, config.VaultPath, "asset.custom", "payload")
 	writeGitTestFile(t, config.VaultPath, "logo.png", "png")
-	if _, err := git.EnsureTextPolicy(ctx); err != nil {
+	result, err := git.EnsureTextPolicy(ctx)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !result.AttributesExisted || result.AttributesChanged {
+		t.Fatalf("existing policy was not left alone: %+v", result)
 	}
 	content, err := os.ReadFile(filepath.Join(config.VaultPath, ".gitattributes"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	ahaIndex := strings.Index(string(content), "* text=auto eol=lf")
-	authorIndex := strings.Index(string(content), "*.md text eol=crlf")
-	if ahaIndex < 0 || authorIndex < 0 || ahaIndex > authorIndex {
-		t.Fatalf("AHA default must precede author rules:\n%s", content)
+	if string(content) != owner {
+		t.Fatalf("existing .gitattributes was rewritten:\n%s", content)
 	}
 	if eol := gitCheckAttr(t, config.VaultPath, "eol", "note.md"); eol != "crlf" {
 		t.Fatalf("author eol rule lost: %q", eol)
@@ -218,12 +303,22 @@ func TestEnsureTextPolicyKeepsAuthorRulesWinning(t *testing.T) {
 	if eol := gitCheckAttr(t, config.VaultPath, "eol", "logo.png"); eol != "lf" {
 		t.Fatalf("author eol override lost: %q", eol)
 	}
-	// Rewriting an already-canonical file must be a no-op.
+	// A second call is still a no-op.
 	again, err := git.EnsureTextPolicy(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if again.AttributesChanged {
-		t.Fatalf("policy rewrite was not idempotent:\n%s", content)
+	if again.AttributesChanged || !again.AttributesExisted {
+		t.Fatalf("second policy call changed the owner file: %+v", again)
 	}
+}
+
+func gitCheckAttr(t *testing.T, directory, attr, target string) string {
+	t.Helper()
+	output := testGitCommand(t, directory, "check-attr", attr, "--", target)
+	parts := strings.SplitN(output, ": ", 3)
+	if len(parts) != 3 {
+		t.Fatalf("unexpected check-attr output for %s %s: %q", attr, target, output)
+	}
+	return parts[2]
 }

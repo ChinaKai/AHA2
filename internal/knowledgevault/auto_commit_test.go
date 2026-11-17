@@ -183,6 +183,48 @@ func TestAutoCommitGateShapeOfReportedPreflightFiles(t *testing.T) {
 	}
 }
 
+// Git for Windows defaults to core.autocrlf=true globally. Diffing an ordinary
+// LF edit then prints "LF will be replaced by CRLF the next time Git touches
+// it" on stderr. The scan parses stdout as a NUL-separated path list, so that
+// warning must never become a change path: it used to be blocked as
+// invalid_path, which left a single modified document with an empty eligible
+// set and paused the auto-sync preflight.
+func TestScanAutoCommitIgnoresGitEOLWarnings(t *testing.T) {
+	global := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(global, []byte("[core]\n\tautocrlf = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	ctx := context.Background()
+	config, git := newGitTestVault(t)
+	if _, err := git.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Upgrade fixture: no policy file and no repo-local autocrlf pin, like the
+	// Git for Windows vault that paused.
+	if err := os.Remove(filepath.Join(config.VaultPath, ".gitattributes")); err != nil {
+		t.Fatal(err)
+	}
+	testGitCommand(t, config.VaultPath, "config", "--local", "--unset", "core.autocrlf")
+	writeGitTestFile(t, config.VaultPath, "global/general/one.md", "# One\n\nbody\n")
+	if _, err := git.Commit(ctx, "seed"); err != nil {
+		t.Fatal(err)
+	}
+	writeGitTestFile(t, config.VaultPath, "global/general/one.md", "# One\n\nedited\n")
+
+	scan, err := git.ScanAutoCommit(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scan.Pending != 1 || scan.BlockedTotal != 0 || len(scan.Blocked) != 0 {
+		t.Fatalf("scan = %+v, want one pending text change and no blocked paths", scan)
+	}
+	if len(scan.Eligible) != 1 || scan.Eligible[0] != "global/general/one.md" {
+		t.Fatalf("eligible = %v, want the edited document", scan.Eligible)
+	}
+}
+
 func padDocToSize(base string, size int) string {
 	if len(base) >= size {
 		return base

@@ -142,13 +142,19 @@ const localText: Record<string, [zhCN: string, enUS: string]> = {
   "kv.autoSyncLastError": ["最近错误", "Last error"],
   "kv.autoSyncWarning": ["同步警告", "Sync warning"],
   "kv.autoSyncPending": ["待提交文件", "Pending files"],
+  "kv.autoSyncPendingUnknown": ["未知（暂停时未统计）", "Unknown (not counted while paused)"],
+  "kv.autoSyncRecheck": ["重新检查", "Recheck"],
+  "kv.autoSyncRecheckHint": ["重新检查只刷新统计，不会解除暂停；恢复自动同步请切换一次开关，或执行一次手动同步。", "Recheck only refreshes the count and does not resume sync. Toggle the switch or run a manual sync to resume."],
   "kv.autoSyncLastSync": ["最后同步", "Last sync"],
   "kv.autoSyncNever": ["尚未同步", "Never synced"],
   "kv.autoSyncNone": ["无", "None"],
   "kv.autoSyncBlocked": ["被阻止文件", "Blocked files"],
   "kv.autoSyncBlockedValue": ["{count} 个：{files}", "{count}: {files}"],
   "kv.autoSyncBlockedNoPaths": ["{count} 个（旧状态未记录路径，下次检查会补齐）", "{count} (old state has no paths; the next check fills them in)"],
-  "kv.autoSyncReason.preflight_failed": ["行尾迁移 preflight 失败", "Line-ending preflight failed"],
+  "kv.autoSyncReason.preflight_failed": ["自动同步预检失败", "Auto-sync preflight failed"],
+  "kv.autoSyncReason.preflight_pending_changes": ["预检发现无法自动提交的改动", "Preflight found changes it cannot auto-commit"],
+  "kv.autoSyncReason.preflight_line_endings": ["行尾迁移预检失败", "Line-ending preflight failed"],
+  "kv.autoSyncReason.preflight_worktree": ["预检读取工作区失败", "Preflight could not read the worktree"],
   "kv.autoSyncReason.vault_not_initialized": ["知识库未初始化", "Vault not initialized"],
   "kv.autoSyncReason.not_git_repository": ["知识库不是 Git 仓库", "Vault is not a Git repository"],
   "kv.autoSyncReason.no_commit": ["仓库还没有提交", "Repository has no commit"],
@@ -2146,9 +2152,16 @@ function gitSectionHTML(): string {
   </section>`;
 }
 
-function autoSyncPauseReasonLabel(reason?: string): string {
+const preflightStages = new Set(["pending_changes", "line_endings", "worktree"]);
+
+function autoSyncPauseReasonLabel(reason?: string, stage?: string): string {
   if (!reason) return "";
-  const key = `kv.autoSyncReason.${reason}`;
+  // preflight_failed is an umbrella: the failing step decides the copy. Only a
+  // real line-ending failure may say so; a blocked binary/secret file must not.
+  let key = `kv.autoSyncReason.${reason}`;
+  if (reason === "preflight_failed" && stage && preflightStages.has(stage)) {
+    key = `kv.autoSyncReason.preflight_${stage}`;
+  }
   const label = kt(key);
   return label && label !== key ? label : reason;
 }
@@ -2182,7 +2195,7 @@ function autoSyncSectionHTML(): string {
       ? `<p class="kv-settings-notice ${state.autoSyncNotice.kind === "error" ? "error" : "success"}" role="${state.autoSyncNotice.kind === "error" ? "alert" : "status"}">${escapeVaultHTML(state.autoSyncNotice.message)}</p>`
       : "";
     const pauseReason = auto.paused && auto.pause_reason
-      ? `<div><dt>${kt("kv.autoSyncPauseReason")}</dt><dd class="kv-settings-value">${escapeVaultHTML(autoSyncPauseReasonLabel(auto.pause_reason))}</dd></div>`
+      ? `<div><dt>${kt("kv.autoSyncPauseReason")}</dt><dd class="kv-settings-value">${escapeVaultHTML(autoSyncPauseReasonLabel(auto.pause_reason, auto.preflight_stage))}</dd></div>`
       : "";
     // Divergence details are assembled from commit ids and file names; they
     // are still untrusted input and must stay escaped. An empty detail keeps
@@ -2207,14 +2220,23 @@ function autoSyncSectionHTML(): string {
         : kt("kv.autoSyncBlockedNoPaths", {count: blockedTotal})}</dd></div>`
       : "";
     const lastSync = auto.last_sync_at ? safeDateTime(auto.last_sync_at) : kt("kv.autoSyncNever");
+    // A paused loop skips scanning, and an upgraded state file has no pending
+    // field at all. Without pending_known that missing value arrived as 0 and
+    // the panel claimed there was nothing to commit while the worktree had
+    // real changes. Old payloads only trust a non-paused 0.
+    const pendingKnown = auto.pending_known !== undefined ? auto.pending_known : !auto.paused;
+    const pendingValue = pendingKnown ? `${auto.pending ?? 0}` : kt("kv.autoSyncPendingUnknown");
+    const recheck = auto.paused
+      ? `<div class="kv-autosync-recheck"><button type="button" id="kv-auto-sync-recheck" class="secondary"${state.settingsState === "loading" ? " disabled" : ""}>${kt("kv.autoSyncRecheck")}</button><p class="kv-hint">${kt("kv.autoSyncRecheckHint")}</p></div>`
+      : "";
     body = `<div class="kv-autosync-head"><span class="kv-settings-badge ${badge.tone}">${badge.label}</span></div>
       <label class="kv-autosync-toggle"><input id="kv-auto-sync" name="knowledge_vault_auto_sync" type="checkbox" ${auto.enabled ? "checked" : ""}${disabled}><span><strong>${state.autoSyncBusy ? kt("kv.autoSyncBusy") : kt("kv.autoSyncSwitch")}</strong><small>${kt("kv.autoSyncHint")}</small></span></label>
       <dl>
         <div><dt>${kt("kv.autoSyncLastSync")}</dt><dd class="kv-settings-value">${escapeVaultHTML(lastSync)}</dd></div>
-        <div><dt>${kt("kv.autoSyncPending")}</dt><dd class="kv-settings-value">${auto.pending ?? 0}</dd></div>
+        <div><dt>${kt("kv.autoSyncPending")}</dt><dd class="kv-settings-value">${escapeVaultHTML(pendingValue)}</dd></div>
         ${pauseReason}${conflict}${lastError}${warning}${blocked}
       </dl>
-      ${notice}`;
+      ${notice}${recheck}`;
   }
   return `<section class="kv-settings-section kv-autosync" aria-labelledby="kv-autosync-title">
     <h3 id="kv-autosync-title">${kt("kv.autoSyncTitle")}</h3>
@@ -3290,6 +3312,7 @@ export function bindKnowledgeVaultPage(context: KnowledgeVaultContext): void {
   settingsDialog?.addEventListener("cancel", handleSettingsDialogDismissed);
   settingsDialog?.addEventListener("close", handleSettingsDialogDismissed);
   root.querySelector<HTMLButtonElement>("[data-kv-settings-retry]")?.addEventListener("click", () => { void loadVaultSettings(); });
+  root.querySelector<HTMLButtonElement>("#kv-auto-sync-recheck")?.addEventListener("click", () => { void loadVaultSettings(); });
   root.querySelector<HTMLButtonElement>("[data-kv-git-retry]")?.addEventListener("click", () => { void loadVaultGitStatus(); });
   root.querySelector<HTMLInputElement>("#kv-auto-sync")?.addEventListener("change", event => {
     void setVaultAutoSync((event.target as HTMLInputElement).checked);

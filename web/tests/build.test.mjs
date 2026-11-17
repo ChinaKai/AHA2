@@ -3808,7 +3808,9 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   // state a stacked layout, and taught the pet to dock clear of headings,
   // toolbars and empty-state actions; measured 266,308, then 266,371 after
   // task-576's saved-position occlusion check; ceiling 266,496.
-  const FIRST_SCREEN_GZIP_BUDGET = 266496;
+  // task-580 added stage-specific preflight labels plus the paused pending
+  // "unknown"/recheck copy; measured 266,728, ceiling 267,008.
+  const FIRST_SCREEN_GZIP_BUDGET = 267008;
   // The version query parameter is a content hash and its hex digits change
   // how the same code gzips: main already sits exactly on the budget, so a
   // hash-only change could trip it without growing the payload. Mask the

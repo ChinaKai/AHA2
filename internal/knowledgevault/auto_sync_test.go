@@ -94,7 +94,7 @@ func markPreflightDone(syncer *Syncer) {
 	syncer.mu.Unlock()
 }
 
-func TestSyncerPreflightCommitsExternalChangesThenNormalizesOnce(t *testing.T) {
+func TestSyncerPreflightReportsCRLFBlobsWithoutRewriting(t *testing.T) {
 	ctx := context.Background()
 	config, manager := newAutoSyncTestManager(t)
 	git := manager.Git()
@@ -111,38 +111,150 @@ func TestSyncerPreflightCommitsExternalChangesThenNormalizesOnce(t *testing.T) {
 	testGitCommand(t, config.VaultPath, "add", "-A")
 	testGitCommand(t, config.VaultPath, "commit", "-m", "crlf baseline")
 	writeGitTestFile(t, config.VaultPath, "global/general/edit.md", "# Edited externally\n")
+	blobBefore := gitOutputBytes(t, config.VaultPath, "show", "HEAD:global/general/crlf.md")
 
-	commitBefore := headSHA(t, config.VaultPath)
 	var events []SyncEvent
 	syncer, _, _ := newTestSyncer(t, manager, func(event SyncEvent) { events = append(events, event) })
 	syncer.RunOnce(ctx)
 
-	headAfter := headSHA(t, config.VaultPath)
-	if headAfter == commitBefore {
-		t.Fatal("preflight made no commit")
-	}
-	if count := testGitCommand(t, config.VaultPath, "rev-list", "--count", commitBefore+"..HEAD"); count != "2" {
-		t.Fatalf("preflight commits = %s, want 2 (external change + rename normalize)", count)
-	}
-	if message := testGitCommand(t, config.VaultPath, "log", "-1", "--format=%s"); !strings.Contains(message, "Normalize knowledge vault line endings") {
-		t.Fatalf("last preflight commit = %q", message)
-	}
-	blob := gitOutputBytes(t, config.VaultPath, "show", "HEAD:global/general/crlf.md")
-	if strings.Contains(string(blob), "\r\n") {
-		t.Fatalf("preflight did not normalize the CRLF blob: %q", blob)
-	}
-	if dirty := testGitCommand(t, config.VaultPath, "status", "--porcelain"); dirty != "" {
-		t.Fatalf("worktree dirty after preflight:\n%s", dirty)
-	}
 	status := syncer.Status()
-	if !status.PreflightDone || status.Paused {
-		t.Fatalf("unexpected status after preflight: %+v", status)
+	if !status.Paused || status.PreflightStage != PreflightStageLineEndings {
+		t.Fatalf("CRLF vault did not pause at the line-ending stage: %+v", status)
 	}
-	if len(events) != 0 {
-		t.Fatalf("clean preflight emitted events: %+v", events)
+	if !strings.Contains(status.LastError, "1 个索引文件仍含 CRLF") {
+		t.Fatalf("pause did not report the CRLF count: %q", status.LastError)
 	}
-	if _, err := git.ScanAutoCommit(ctx); err != nil {
+	// The repair hint must be actionable even without an existing policy file,
+	// and must not imply that "重新检查" resumes sync.
+	for _, required := range []string{"* text=auto eol=lf", "git add --renormalize .", "切换一次自动同步开关", "“重新检查”只刷新统计"} {
+		if !strings.Contains(status.LastError, required) {
+			t.Fatalf("pause hint missing %q: %q", required, status.LastError)
+		}
+	}
+	// No silent bulk rewrite: the policy file stays absent, the CRLF blob is
+	// byte-identical, and the eligible edit is not committed either because the
+	// preflight stops before the commit loop.
+	if _, err := os.Stat(filepath.Join(config.VaultPath, ".gitattributes")); !os.IsNotExist(err) {
+		t.Fatalf("policy file was created over CRLF blobs: %v", err)
+	}
+	blobAfter := gitOutputBytes(t, config.VaultPath, "show", "HEAD:global/general/crlf.md")
+	if string(blobAfter) != string(blobBefore) {
+		t.Fatalf("preflight rewrote the CRLF blob: %q -> %q", blobBefore, blobAfter)
+	}
+	if message := testGitCommand(t, config.VaultPath, "log", "-1", "--format=%s"); strings.Contains(message, "Normalize") {
+		t.Fatalf("preflight created a normalization commit: %q", message)
+	}
+	if len(events) != 1 || events[0].Kind != SyncEventPaused {
+		t.Fatalf("preflight pause events = %+v", events)
+	}
+	if !strings.Contains(events[0].Detail, "CRLF") {
+		t.Fatalf("pause event did not report the CRLF count: %q", events[0].Detail)
+	}
+}
+
+// A Windows-edited note can contain both CRLF and LF. git reports it as
+// i/mixed, which must be treated exactly like i/crlf: pause before the commit
+// loop instead of silently rewriting the blob to LF.
+func TestSyncerPreflightPausesOnMixedBlobWithoutRewriting(t *testing.T) {
+	ctx := context.Background()
+	config, manager := newAutoSyncTestManager(t)
+	git := manager.Git()
+	// Commit the mixed blob without the LF policy, otherwise `git add` would
+	// normalize it before the preflight ever sees it.
+	if err := os.Remove(filepath.Join(config.VaultPath, ".gitattributes")); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := git.Commit(ctx, "drop policy for mixed fixture"); err != nil {
+		t.Fatal(err)
+	}
+	writeGitTestFile(t, config.VaultPath, "global/general/mixed.md", "# Mixed\r\n\r\nbody\n")
+	testGitCommand(t, config.VaultPath, "add", "-A")
+	testGitCommand(t, config.VaultPath, "commit", "-m", "mixed baseline")
+	blobBefore := testGitCommand(t, config.VaultPath, "rev-parse", "HEAD:global/general/mixed.md")
+	headBefore := headSHA(t, config.VaultPath)
+
+	syncer, _, _ := newTestSyncer(t, manager, nil)
+	syncer.RunOnce(ctx)
+
+	status := syncer.Status()
+	if !status.Paused || status.PreflightStage != PreflightStageLineEndings {
+		t.Fatalf("mixed-line-ending vault did not pause at the line-ending stage: %+v", status)
+	}
+	if !strings.Contains(status.LastError, "混合行尾 1") {
+		t.Fatalf("pause did not report the mixed count: %q", status.LastError)
+	}
+	if head := headSHA(t, config.VaultPath); head != headBefore {
+		t.Fatalf("mixed-ending preflight committed: %s -> %s", headBefore, head)
+	}
+	if blobAfter := testGitCommand(t, config.VaultPath, "rev-parse", "HEAD:global/general/mixed.md"); blobAfter != blobBefore {
+		t.Fatalf("mixed blob was rewritten: %s -> %s", blobBefore, blobAfter)
+	}
+	if message := testGitCommand(t, config.VaultPath, "log", "-1", "--format=%s"); strings.Contains(message, "Normalize") {
+		t.Fatalf("preflight created a normalization commit: %q", message)
+	}
+}
+
+// An owner-authored `-text` or `eol=crlf` rule is a deliberate line-ending
+// policy. Those files may legitimately have CRLF blobs, but they are not
+// migration candidates: the preflight must neither pause nor renormalize them.
+func TestSyncerPreflightAllowsExplicitCRLFPolicy(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name  string
+		attrs string
+		path  string
+		body  string
+	}{
+		{"minus_text", "*.raw -text\n", "global/general/report.raw", "a\r\nb\r\n"},
+		{"eol_crlf", "*.crlf text eol=crlf\n", "global/general/report.crlf", "a\r\nb\r\n"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			config, manager := newAutoSyncTestManager(t)
+			// Commit the CRLF blob before the owner rule so the index really
+			// contains CRLF (i/crlf) and the attr column carries the policy.
+			writeGitTestFile(t, config.VaultPath, ".gitattributes", "# owner policy pending\n")
+			testGitCommand(t, config.VaultPath, "add", "-A")
+			testGitCommand(t, config.VaultPath, "commit", "-m", "placeholder policy")
+			writeGitTestFile(t, config.VaultPath, testCase.path, testCase.body)
+			testGitCommand(t, config.VaultPath, "add", "-A")
+			testGitCommand(t, config.VaultPath, "commit", "-m", "crlf baseline")
+			writeGitTestFile(t, config.VaultPath, ".gitattributes", testCase.attrs)
+			// Stage only the policy file: `git add -A` would normalize the
+			// eol=crlf blob immediately and hide the case under test.
+			testGitCommand(t, config.VaultPath, "add", "--", ".gitattributes")
+			testGitCommand(t, config.VaultPath, "commit", "-m", "owner line-ending policy", "--", ".gitattributes")
+			eol := testGitCommand(t, config.VaultPath, "ls-files", "--eol", "--", testCase.path)
+			if !strings.Contains(eol, "i/crlf") || !strings.Contains(eol, "attr/") {
+				t.Fatalf("fixture is not an explicit CRLF-attr blob: %q", eol)
+			}
+			headBefore := headSHA(t, config.VaultPath)
+			blobBefore := testGitCommand(t, config.VaultPath, "rev-parse", "HEAD:"+testCase.path)
+
+			syncer, _, _ := newTestSyncer(t, manager, nil)
+			syncer.RunOnce(ctx)
+
+			status := syncer.Status()
+			if status.Paused {
+				t.Fatalf("explicit CRLF policy paused the preflight: stage=%q error=%q", status.PreflightStage, status.LastError)
+			}
+			if !status.PreflightDone || status.PreflightStage != "" {
+				t.Fatalf("preflight did not finish cleanly: %+v", status)
+			}
+			if head := headSHA(t, config.VaultPath); head != headBefore {
+				t.Fatalf("explicit CRLF policy preflight committed: %s -> %s", headBefore, head)
+			}
+			if blobAfter := testGitCommand(t, config.VaultPath, "rev-parse", "HEAD:"+testCase.path); blobAfter != blobBefore {
+				t.Fatalf("explicit CRLF blob was rewritten: %s -> %s", blobBefore, blobAfter)
+			}
+			content, err := os.ReadFile(filepath.Join(config.VaultPath, ".gitattributes"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(content) != testCase.attrs {
+				t.Fatalf("owner .gitattributes was rewritten:\n%s", content)
+			}
+		})
 	}
 }
 
@@ -374,6 +486,11 @@ func TestSyncerPreflightFailureExposesBlockedPathReasonAndPersists(t *testing.T)
 	if !status.Paused || status.PauseReason != "preflight_failed" {
 		t.Fatalf("unexpected preflight failure status: %+v", status)
 	}
+	// This pause happens before the LF policy is touched. The stage must say so
+	// instead of letting the settings panel blame the line-ending migration.
+	if status.PreflightStage != PreflightStagePendingChanges {
+		t.Fatalf("preflight stage = %q, want %q", status.PreflightStage, PreflightStagePendingChanges)
+	}
 	if status.Blocked != 1 || len(status.BlockedFiles) != 1 {
 		t.Fatalf("blocked files not reported: %+v", status)
 	}
@@ -408,6 +525,12 @@ func TestSyncerPreflightFailureExposesBlockedPathReasonAndPersists(t *testing.T)
 	if saved.PauseReason != "preflight_failed" || saved.BlockedTotal != 1 || len(saved.Blocked) != 1 {
 		t.Fatalf("persisted blocked state = %+v", saved)
 	}
+	if saved.PreflightStage != PreflightStagePendingChanges {
+		t.Fatalf("persisted preflight stage = %q", saved.PreflightStage)
+	}
+	if !saved.PendingKnown || saved.Pending != 1 {
+		t.Fatalf("persisted pending = %+v, want a known count of 1", saved)
+	}
 	if saved.Blocked[0].Path != "global/general/token-note.md" || saved.Blocked[0].Reason != "secret" {
 		t.Fatalf("persisted blocked entry = %+v", saved.Blocked[0])
 	}
@@ -419,6 +542,12 @@ func TestSyncerPreflightFailureExposesBlockedPathReasonAndPersists(t *testing.T)
 	}
 	if restored.Blocked != 1 || len(restored.BlockedFiles) != 1 || restored.BlockedFiles[0].Reason != "secret" {
 		t.Fatalf("reloaded blocked state = %+v", restored)
+	}
+	if !restored.PendingKnown || restored.Pending != 1 {
+		t.Fatalf("reloaded pending = %+v, want a known count of 1", restored)
+	}
+	if restored.PreflightStage != PreflightStagePendingChanges {
+		t.Fatalf("reloaded preflight stage = %q", restored.PreflightStage)
 	}
 }
 
@@ -437,8 +566,169 @@ func TestSyncerLoadsLegacyStateWithoutBlockedFields(t *testing.T) {
 	if status.Blocked != 0 || len(status.BlockedFiles) != 0 || status.Pending != 0 {
 		t.Fatalf("legacy state invented blocked fields: %+v", status)
 	}
+	if status.PendingKnown {
+		t.Fatalf("legacy state without a pending field reported a known zero: %+v", status)
+	}
+	if status.PreflightStage != "" {
+		t.Fatalf("legacy state without blocked files invented a preflight stage: %+v", status)
+	}
 	if !strings.Contains(status.LastError, "有 1 个改动无法自动提交") {
 		t.Fatalf("legacy last_error lost: %q", status.LastError)
+	}
+}
+
+// A paused loop returns before scanning, so the persisted pause-time count is
+// the only thing Status() can report. An upgraded state file has no pending
+// field at all; rendering that as 0 told the owner there was nothing to
+// commit while git status listed real changes. StatusLive fills the panel from
+// one read-only scan and never commits or rewrites the state file.
+func TestSyncerStatusLiveCountsPendingWhilePaused(t *testing.T) {
+	ctx := context.Background()
+	config, manager := newAutoSyncTestManager(t)
+	statePath := filepath.Join(config.VaultPath, stateDirectory, AutoSyncStateFile)
+	legacy := []byte("{\n  \"preflight_version\": 0,\n  \"pause_reason\": \"preflight_failed\",\n  \"last_error\": \"有 1 个改动无法自动提交（二进制/密钥/超大文件）；preflight 已暂停并保留现场\"\n}\n")
+	if err := os.WriteFile(statePath, legacy, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Changes that appeared after the pause: two ordinary documents and one
+	// credential-looking note that the commit gate still refuses.
+	writeGitTestFile(t, config.VaultPath, "global/general/one.md", "# One\n\nbody\n")
+	writeGitTestFile(t, config.VaultPath, "global/general/two.md", "# Two\n\nbody\n")
+	writeGitTestFile(t, config.VaultPath, "global/general/token-note.md", "# Note\n\ntoken = abcdefgh12345678\n")
+
+	syncer := NewSyncer(manager, nil, SyncerConfig{Now: newTestClock().Now})
+	paused := syncer.Status()
+	if !paused.Paused || paused.Pending != 0 || paused.PendingKnown {
+		t.Fatalf("paused snapshot = %+v, want an unknown zero", paused)
+	}
+	headBefore := headSHA(t, config.VaultPath)
+	stateBefore, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	live := syncer.StatusLive(ctx)
+	if live.Pending != 3 || !live.PendingKnown {
+		t.Fatalf("live pending = %+v, want 3 known changes", live)
+	}
+	if live.Blocked != 1 || len(live.BlockedFiles) != 1 {
+		t.Fatalf("live blocked = %+v, want the token note", live)
+	}
+	if blocked := live.BlockedFiles[0]; blocked.Path != "global/general/token-note.md" || blocked.Reason != "secret" {
+		t.Fatalf("live blocked entry = %+v", blocked)
+	}
+	// Read-only: no commit, no state rewrite, and Status() keeps the pause-time
+	// snapshot for anything that is not the settings render.
+	if head := headSHA(t, config.VaultPath); head != headBefore {
+		t.Fatalf("StatusLive committed: %s -> %s", headBefore, head)
+	}
+	stateAfter, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(stateAfter) != string(stateBefore) {
+		t.Fatalf("StatusLive rewrote the state file:\n%s\n---\n%s", stateBefore, stateAfter)
+	}
+	if after := syncer.Status(); after.Pending != 0 || after.PendingKnown {
+		t.Fatalf("Status changed after a live render: %+v", after)
+	}
+}
+
+// A Windows host usually has core.autocrlf=true in the global git config. An
+// upgraded vault without the policy file must still finish the LF preflight
+// instead of pausing on phantom line-ending changes.
+func TestSyncerPreflightLFVaultIgnoresGlobalAutocrlf(t *testing.T) {
+	global := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(global, []byte("[core]\n\tautocrlf = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	ctx := context.Background()
+	config, manager := newAutoSyncTestManager(t)
+	git := manager.Git()
+	// Upgrade fixture: no policy file and no repo-local autocrlf pin, like the
+	// Windows vault that paused.
+	if err := os.Remove(filepath.Join(config.VaultPath, ".gitattributes")); err != nil {
+		t.Fatal(err)
+	}
+	testGitCommand(t, config.VaultPath, "config", "--local", "--unset", "core.autocrlf")
+	writeGitTestFile(t, config.VaultPath, "global/general/one.md", "# One\n\nbody\n")
+	writeGitTestFile(t, config.VaultPath, "global/general/two.md", "# Two\n\nbody\n")
+	if _, err := git.Commit(ctx, "drop policy for upgrade fixture"); err != nil {
+		t.Fatal(err)
+	}
+	// Tracked LF edits: git prints "LF will be replaced by CRLF" for each
+	// modified file while diffing under autocrlf=true.
+	writeGitTestFile(t, config.VaultPath, "global/general/one.md", "# One\n\nLF body\n")
+	writeGitTestFile(t, config.VaultPath, "global/general/two.md", "# Two\n\nLF body\n")
+
+	syncer, _, _ := newTestSyncer(t, manager, nil)
+	syncer.RunOnce(ctx)
+
+	status := syncer.Status()
+	if status.Paused {
+		t.Fatalf("autocrlf=true paused an LF vault: reason=%q error=%q", status.PauseReason, status.LastError)
+	}
+	if !status.PreflightDone {
+		t.Fatalf("preflight did not finish under autocrlf=true: %+v", status)
+	}
+	if configured := testGitCommand(t, config.VaultPath, "config", "--local", "--get", "core.autocrlf"); configured != "false" {
+		t.Fatalf("repo-local core.autocrlf = %q, want false", configured)
+	}
+	attributes, err := os.ReadFile(filepath.Join(config.VaultPath, ".gitattributes"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(attributes), "* text=auto eol=lf") {
+		t.Fatalf(".gitattributes lost the LF policy:\n%s", attributes)
+	}
+	for _, path := range []string{"global/general/one.md", "global/general/two.md"} {
+		blob := gitOutputBytes(t, config.VaultPath, "show", "HEAD:"+path)
+		if strings.Contains(string(blob), "\r\n") {
+			t.Fatalf("%s committed CRLF line endings", path)
+		}
+	}
+	// The only line-ending commit allowed here installs the policy; an all-LF
+	// vault must not be reported as renormalized.
+	if message := testGitCommand(t, config.VaultPath, "log", "-1", "--format=%s"); strings.Contains(message, "Normalize") {
+		t.Fatalf("all-LF vault was reported as a line-ending migration: %q", message)
+	}
+	if status.PreflightStage != "" {
+		t.Fatalf("successful preflight kept a failure stage: %+v", status)
+	}
+}
+
+// When the LF policy itself cannot be written, the pause must be attributed to
+// the line-ending step. That is the only case where "行尾迁移预检失败" is true.
+func TestSyncerPreflightLineEndingFailureReportsStage(t *testing.T) {
+	ctx := context.Background()
+	config, manager := newAutoSyncTestManager(t)
+	git := manager.Git()
+	// Upgrade fixture: no policy file. A directory at that path makes the
+	// policy write fail without touching any document content.
+	if err := os.Remove(filepath.Join(config.VaultPath, ".gitattributes")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git.Commit(ctx, "drop policy for upgrade fixture"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(config.VaultPath, ".gitattributes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	syncer, _, _ := newTestSyncer(t, manager, nil)
+	syncer.RunOnce(ctx)
+
+	status := syncer.Status()
+	if !status.Paused || status.PauseReason != "preflight_failed" {
+		t.Fatalf("unexpected pause status: %+v", status)
+	}
+	if status.PreflightStage != PreflightStageLineEndings {
+		t.Fatalf("preflight stage = %q, want %q", status.PreflightStage, PreflightStageLineEndings)
+	}
+	if status.PendingKnown {
+		t.Fatalf("line-ending failure skipped the scan but reported a known pending count: %+v", status)
 	}
 }
 
@@ -585,43 +875,33 @@ func TestSyncerPushRejectionWithAncestorLocalDoesNotConflict(t *testing.T) {
 	}
 }
 
-func TestSyncerTagWarningSurvivesSuccessfulSync(t *testing.T) {
+func TestRenormalizeMissingBackupTagIsWarning(t *testing.T) {
 	ctx := context.Background()
-	config, manager := newAutoSyncTestManager(t)
-	git := manager.Git()
-	remote := newBareRemote(t)
-	if _, err := git.SetRemote(ctx, remote, "main"); err != nil {
-		t.Fatal(err)
-	}
-	// Pre-policy fixture: CRLF baseline without .gitattributes.
-	if err := os.Remove(filepath.Join(config.VaultPath, ".gitattributes")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := git.Commit(ctx, "drop policy for upgrade fixture"); err != nil {
-		t.Fatal(err)
-	}
+	config, git := newGitTestVault(t)
+	testGitCommand(t, config.VaultPath, "init", "-b", "main")
 	testGitCommand(t, config.VaultPath, "config", "core.autocrlf", "false")
 	writeGitTestFile(t, config.VaultPath, "global/general/crlf.md", "# CRLF\r\n\r\nbody\r\n")
 	testGitCommand(t, config.VaultPath, "add", "-A")
 	testGitCommand(t, config.VaultPath, "commit", "-m", "crlf baseline")
+	// The auto-sync preflight no longer renormalizes a vault with CRLF blobs
+	// (it reports the count instead), so the explicit migration entry point is
+	// covered directly here. The existing policy file is never rewritten.
+	writeGitTestFile(t, config.VaultPath, ".gitattributes", GitAttributesContent())
 	// A broken ref makes `git tag` fail while `rev-parse --verify` also fails,
 	// so Renormalize records the backup-tag warning and still commits.
 	brokenRef := filepath.Join(config.VaultPath, ".git", "refs", "tags", lineEndingBackupTag)
 	if err := os.WriteFile(brokenRef, []byte("garbage\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	syncer, _, _ := newTestSyncer(t, manager, nil)
-	syncer.RunOnce(ctx)
-
-	status := syncer.Status()
-	if !strings.Contains(status.Warning, "备份 tag 创建失败") {
-		t.Fatalf("tag warning missing from status: %+v", status)
+	result, err := git.Renormalize(ctx)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if status.LastError != "" {
-		t.Fatalf("successful sync did not clear last_error: %+v", status)
+	if !strings.Contains(result.Warning, "备份 tag 创建失败") {
+		t.Fatalf("tag warning missing from renormalize result: %+v", result)
 	}
-	if status.Paused {
-		t.Fatalf("tag warning paused the syncer: %+v", status)
+	if !result.Committed {
+		t.Fatalf("tag warning aborted the migration: %+v", result)
 	}
 	state, err := os.ReadFile(filepath.Join(config.VaultPath, ".aha", lineEndingStateFile))
 	if err != nil {
@@ -629,8 +909,5 @@ func TestSyncerTagWarningSurvivesSuccessfulSync(t *testing.T) {
 	}
 	if !strings.Contains(string(state), "备份 tag 创建失败") {
 		t.Fatalf("line-ending state lost the warning: %s", state)
-	}
-	if remoteHead, local := testGitCommand(t, remote, "rev-parse", "refs/heads/main"), headSHA(t, config.VaultPath); remoteHead != local {
-		t.Fatalf("preflight sync did not push: remote=%s local=%s", remoteHead, local)
 	}
 }

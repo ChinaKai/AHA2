@@ -803,7 +803,8 @@ test("the gear dialog shows auto-sync state and sanitized blocked files", () => 
       enabled: true, running: false, paused: true, pause_reason: "preflight_failed",
       conflict: false,
       last_error: `有 1 个改动无法自动提交（二进制/密钥/超大文件）；preflight 已暂停并保留现场。受阻文件：${blockedPath}(secret)`,
-      pending: 1, blocked: 1,
+      pending: 1, pending_known: true, blocked: 1,
+      preflight_stage: "pending_changes",
       blocked_files: [{path: blockedPath, reason: "secret"}],
       preflight_done: false,
     },
@@ -812,14 +813,70 @@ test("the gear dialog shows auto-sync state and sanitized blocked files", () => 
   let html = vault.renderKnowledgeVaultPage(context());
   assert.match(html, /id="kv-autosync-title">自动同步/);
   assert.match(html, /id="kv-auto-sync"[^>]*checked/);
-  assert.match(html, /行尾迁移 preflight 失败/);
+  // The pause reason names the failing step: a binary/secret file stopped the
+  // first commit, so this must not be reported as a line-ending failure.
+  assert.match(html, /暂停原因<\/dt><dd class="kv-settings-value">预检发现无法自动提交的改动/);
+  assert.doesNotMatch(html, /行尾迁移/);
+  assert.match(html, /待提交文件<\/dt><dd class="kv-settings-value">1</);
   assert.match(html, /最近错误/);
   assert.match(html, /device-report-visibility-log-branch-and-queue\.md \(密钥或凭据\)/);
   assert.doesNotMatch(html, /knowledge-vault-auto-sync/, "the advanced panel must not offer a second switch");
 
+  // Only the line-ending step may carry the line-ending label.
+  reset({settingsState: "ready", settings: {...settings, auto_sync: {...settings.auto_sync, preflight_stage: "line_endings"}}});
+  html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /暂停原因<\/dt><dd class="kv-settings-value">行尾迁移预检失败/);
+
+  // A state written before preflight_stage existed falls back to the accurate
+  // umbrella label instead of guessing a stage.
+  reset({settingsState: "ready", settings: {...settings, auto_sync: {...settings.auto_sync, preflight_stage: undefined}}});
+  html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /暂停原因<\/dt><dd class="kv-settings-value">自动同步预检失败/);
+  assert.doesNotMatch(html, /行尾迁移/);
+
   reset({settingsState: "ready", settings: {...settings, auto_sync: {...settings.auto_sync, blocked: 3, blocked_files: []}}});
   html = vault.renderKnowledgeVaultPage(context());
   assert.match(html, /3 个（旧状态未记录路径/);
+});
+
+test("a paused dialog never renders a missing pending count as zero", () => {
+  const pausedBase = {
+    enabled: true, running: false, paused: true, pause_reason: "preflight_failed",
+    conflict: false, blocked: 0, preflight_done: false,
+  };
+  const withAuto = auto_sync => ({
+    enabled: true, source: "database", vault_ready: true, vault_initialized: true,
+    index_ready: true, vault_path: "/srv/vault", index_path: "/srv/index.db", entry_count: 5,
+    auto_sync,
+  });
+
+  // An upgraded .aha/auto-sync.json has pause_reason but no pending field; the
+  // old server also reported that missing value as `pending: 0`.
+  reset({settingsState: "ready", settings: withAuto(pausedBase)});
+  let html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /待提交文件<\/dt><dd class="kv-settings-value">未知（暂停时未统计）/);
+  assert.doesNotMatch(html, /待提交文件<\/dt><dd class="kv-settings-value">0</);
+  assert.match(html, /id="kv-auto-sync-recheck"/);
+  // The button refreshes only the count; the copy must not imply it resumes.
+  assert.match(html, /只刷新统计，不会解除暂停/);
+  assert.match(html, /切换一次开关/);
+
+  // A known zero is still rendered as a real zero.
+  reset({settingsState: "ready", settings: withAuto({...pausedBase, pending: 0, pending_known: true})});
+  html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /待提交文件<\/dt><dd class="kv-settings-value">0</);
+  assert.doesNotMatch(html, /未知（暂停时未统计）/);
+
+  // A read-only scan count wins over the missing pause-time snapshot.
+  reset({settingsState: "ready", settings: withAuto({...pausedBase, pending: 15, pending_known: true})});
+  html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /待提交文件<\/dt><dd class="kv-settings-value">15</);
+
+  // The recheck entry exists only while paused, where the loop does not scan.
+  reset({settingsState: "ready", settings: withAuto({...pausedBase, paused: false, pending: 0, pending_known: true})});
+  html = vault.renderKnowledgeVaultPage(context());
+  assert.doesNotMatch(html, /id="kv-auto-sync-recheck"/);
+  assert.doesNotMatch(html, /只刷新统计/);
 });
 
 test("the auto-sync switch calls the dedicated status API", async () => {
