@@ -12,9 +12,17 @@ import {pathToFileURL} from "node:url";
 // resource actions produce visible results.
 const root = resolve(import.meta.dirname, "../..");
 const tools = resolve(root, ".tools/web-validation");
-const {chromium} = await import(pathToFileURL(resolve(tools, "node_modules/playwright/index.mjs")));
-const {default: binary} = await import(pathToFileURL(resolve(tools, "node_modules/@sparticuz/chromium/build/index.js")));
-const output = resolve(tools, "screenshots");
+// Dependencies stay in .tools/web-validation; a machine without that directory
+// can point AHA_PLAYWRIGHT_MODULE / AHA_BROWSER_EXECUTABLE at a local install.
+const playwrightModule = process.env.AHA_PLAYWRIGHT_MODULE || resolve(tools, "node_modules/playwright/index.mjs");
+const {chromium} = await import(pathToFileURL(playwrightModule));
+const launchOptions = process.env.AHA_BROWSER_EXECUTABLE
+  ? {executablePath: process.env.AHA_BROWSER_EXECUTABLE, args: ["--no-sandbox"]}
+  : await (async () => {
+      const {default: binary} = await import(pathToFileURL(resolve(tools, "node_modules/@sparticuz/chromium/build/index.js")));
+      return {executablePath: await binary.executablePath(), args: binary.args};
+    })();
+const output = process.env.AHA_BROWSER_SCREENSHOT_DIR || resolve(tools, "screenshots");
 await mkdir(output, {recursive: true});
 const csp = (await readFile(resolve(root, "internal/httpapi/server.go"), "utf8")).match(/Set\("Content-Security-Policy", "([^"]+)"\)/)[1];
 
@@ -23,6 +31,13 @@ const hardware = {
   id: "hardware_1", description: "主控板串口", mode: "serial", access: "read_write",
   serial: {device: "COM3", baudrate: 115200},
   network: {host: "", port: 0, protocol: "telnet", ssh_auth: "auto"},
+  username: "", password_configured: false, binding_count: 0,
+  created_at: now, updated_at: now,
+};
+// An older/partial row without serial or network blocks must render as
+// "not configured" instead of crashing the whole Resources page.
+const partialHardware = {
+  id: "hardware_2", description: "旧版资源", mode: "serial", access: "read_only",
   username: "", password_configured: false, binding_count: 0,
   created_at: now, updated_at: now,
 };
@@ -35,6 +50,7 @@ const bootstrap = `
 const json = (value, status = 200) => new Response(JSON.stringify(value), {status, headers: {"Content-Type": "application/json"}});
 const NOW = ${JSON.stringify(now)};
 const HARDWARE = ${JSON.stringify(hardware)};
+const PARTIAL_HARDWARE = ${JSON.stringify(partialHardware)};
 const PROFILE = ${JSON.stringify(profile)};
 // The profile read stays pending until the test releases it, so the loading
 // state is deterministic instead of a timing guess.
@@ -52,7 +68,7 @@ window.fetch = async (input, init = {}) => {
   if (path === "/api/v1/projects") return json({projects: [], has_more: false});
   if (path === "/api/v1/workspaces") return json({workspaces: []});
   if (path === "/api/v1/tasks") return json({tasks: [], has_more: false, counts: {}});
-  if (path === "/api/v1/hardware-resources" && method === "GET") return json({resources: [HARDWARE]});
+  if (path === "/api/v1/hardware-resources" && method === "GET") return json({resources: [HARDWARE, PARTIAL_HARDWARE]});
   // No AHA2_BROWSER_HOST_URL: the server reports an unavailable host, not a
   // hanging request. The page must still open and explain why.
   if (path === "/api/v1/browser/host") return json({ok: true, host: {
@@ -95,7 +111,7 @@ const base = `http://127.0.0.1:${server.address().port}`;
 
 let browser;
 try {
-  browser = await chromium.launch({executablePath: await binary.executablePath(), args: binary.args, headless: true});
+  browser = await chromium.launch({...launchOptions, headless: true});
   const page = await browser.newPage({viewport: {width: 1280, height: 900}});
   const errors = [];
   page.on("pageerror", error => errors.push(error.message));
@@ -120,7 +136,10 @@ try {
   assert.match(await page.locator(".browser-resources-view").innerText(), /正在读取浏览器资源/);
   await page.click('[data-resources-tab="hardware"]');
   await page.waitForSelector(".hardware-resources-view");
+  assert.equal(await page.locator(".hardware-resource-row").count(), 2);
   assert.match(await page.locator(".hardware-resource-row").first().innerText(), /主控板串口/);
+  // Missing serial/network: readable fallback, not a render crash.
+  assert.match(await page.locator('[data-hardware-resource="hardware_2"]').innerText(), /未配置端点/);
   await page.click('[data-resources-tab="browser"]');
   await page.waitForSelector(".browser-resources-view");
 
@@ -148,6 +167,25 @@ try {
   assert.match(await dialog.innerText(), /编辑硬件资源/);
   await dialog.locator("[data-close]").first().click();
   await page.waitForSelector("dialog.hardware-resource-dialog", {state: "detached"});
+
+  // Rapid repeated navigation into Resources used to re-enter the crashing
+  // render on every click and leave the page stuck on the previous view. Each
+  // click now re-renders in place, and the last one still lands on Resources.
+  await page.click('[data-view="projects"]');
+  await page.waitForSelector('button[data-view="projects"].active');
+  await page.evaluate(() => {
+    for (let index = 0; index < 8; index++) {
+      // render() replaces the nav after each click, so re-query every time.
+      document.querySelector('button[data-view="resources"]')?.click();
+    }
+  });
+  await page.waitForSelector(".resources-view");
+  // The nav renders twice (sidebar and mobile bar); every copy must be active.
+  const activeResourcesNav = await page.locator('button[data-view="resources"].active').count();
+  const allResourcesNav = await page.locator('button[data-view="resources"]').count();
+  assert.ok(activeResourcesNav >= 1 && activeResourcesNav === allResourcesNav);
+  assert.equal(await page.locator(".chunk-state").count(), 0, "repeated clicks must not leave a loading/error card");
+  assert.match(await page.locator(".resources-view").innerText(), /浏览器/);
 
   await page.screenshot({path: resolve(output, "resources-page.png")});
   assert.deepEqual(errors, []);

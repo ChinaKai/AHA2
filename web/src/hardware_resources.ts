@@ -28,10 +28,24 @@ function defaultNetworkPort(protocol: HardwareResource["network"]["protocol"]): 
   return 23;
 }
 
+// A row from an older server or a partial fixture may omit a whole config
+// block. One malformed row must not take down the entire Resources page, so
+// reads go through these defaults instead of dereferencing `serial`/`network`
+// directly.
+function serialConfig(resource: HardwareResource): HardwareResource["serial"] {
+  return resource.serial || {device: "", baudrate: 115200};
+}
+
+function networkConfig(resource: HardwareResource): HardwareResource["network"] {
+  return resource.network || {host: "", port: 0, protocol: "telnet", ssh_auth: "auto"};
+}
+
 function endpointLabel(resource: HardwareResource): string {
+  const serial = serialConfig(resource);
+  const network = networkConfig(resource);
   const endpoints: string[] = [];
-  if (resource.serial.device) endpoints.push(resource.serial.device);
-  if (resource.network.host) endpoints.push(`${resource.network.host}:${resource.network.port || defaultNetworkPort(resource.network.protocol)}`);
+  if (serial.device) endpoints.push(serial.device);
+  if (network.host) endpoints.push(`${network.host}:${network.port || defaultNetworkPort(network.protocol)}`);
   return endpoints.join(" / ") || "未配置端点";
 }
 
@@ -41,14 +55,15 @@ function recoverySecretPlaceholder(resource?: HardwareResource): string {
 
 export function renderHardwareResources(resources: HardwareResource[]): string {
   const rows = resources.map(resource => {
-    const adbPair = resource.network.protocol === "adb"
+    const network = networkConfig(resource);
+    const adbPair = network.protocol === "adb"
       ? `<button type="button" class="icon-button" data-hardware-adb-pair="${escapeHTML(resource.id)}" title="配对 ADB 设备" aria-label="配对 ADB 设备">${icon("link")}</button>`
       : "";
-    const pairState = resource.network.protocol === "adb"
+    const pairState = network.protocol === "adb"
       ? `<span class="hardware-resource-pair-state ${resource.adb_paired_at ? "paired" : ""}">${resource.adb_paired_at ? "已配对" : "未配对"}</span>`
       : "";
     return `<article class="hardware-resource-row" data-hardware-resource="${escapeHTML(resource.id)}">
-    <div class="hardware-resource-identity"><span class="hardware-resource-glyph">${icon("hardware")}</span><div><strong>${escapeHTML(resource.description || resource.id)}</strong><small>${escapeHTML(modeLabel(resource.mode))}${resource.mode === "network" ? ` · ${escapeHTML(networkProtocolLabel(resource.network.protocol))}` : ""} · ${escapeHTML(endpointLabel(resource))}</small></div></div>
+    <div class="hardware-resource-identity"><span class="hardware-resource-glyph">${icon("hardware")}</span><div><strong>${escapeHTML(resource.description || resource.id)}</strong><small>${escapeHTML(modeLabel(resource.mode))}${resource.mode === "network" ? ` · ${escapeHTML(networkProtocolLabel(network.protocol))}` : ""} · ${escapeHTML(endpointLabel(resource))}</small></div></div>
     <div class="hardware-resource-meta">${pairState}<span>${escapeHTML(accessLabel(resource.access))}</span><span>${resource.password_configured ? "凭据已配置" : "无保存凭据"}</span><span>${resource.binding_count} 个任务启用</span></div>
     <div class="hardware-resource-actions">${adbPair}<button type="button" class="icon-button" data-hardware-resource-edit="${escapeHTML(resource.id)}" title="编辑硬件资源" aria-label="编辑硬件资源">${icon("edit")}</button><button type="button" class="icon-button danger" data-hardware-resource-delete="${escapeHTML(resource.id)}" title="删除硬件资源" aria-label="删除硬件资源">${icon("close")}</button></div>
   </article>`;
@@ -91,6 +106,8 @@ function sshAuthOptions(value: string): string {
 }
 
 function resourceDialog(resource?: HardwareResource, ports: SerialPort[] = []): HTMLDialogElement {
+  const serial = resource ? serialConfig(resource) : null;
+  const network = resource ? networkConfig(resource) : null;
   const dialog = document.createElement("dialog");
   dialog.className = "wide hardware-resource-dialog";
   dialog.innerHTML = `<form id="hardware-resource-form">
@@ -98,12 +115,12 @@ function resourceDialog(resource?: HardwareResource, ports: SerialPort[] = []): 
     <label>名称<input name="description" maxlength="2000" required value="${escapeHTML(resource?.description || "")}" placeholder="例如：主控板串口"></label>
     <div class="two"><label>连接方式<select name="mode">${modeOptions(resource?.mode === "network" ? "network" : "serial")}</select></label><label>权限<select name="access">${accessOptions(resource?.access || "read_write")}</select></label></div>
     <section data-resource-config="serial">
-      <div class="two"><label>串口设备<input name="serial_device" list="hardware-resource-ports" value="${escapeHTML(resource?.serial.device || "")}" placeholder="COM3 或 /dev/ttyUSB0"></label><label>波特率<input name="serial_baudrate" type="number" min="1" value="${Number(resource?.serial.baudrate || 115200)}"></label></div>
+      <div class="two"><label>串口设备<input name="serial_device" list="hardware-resource-ports" value="${escapeHTML(serial?.device || "")}" placeholder="COM3 或 /dev/ttyUSB0"></label><label>波特率<input name="serial_baudrate" type="number" min="1" value="${Number(serial?.baudrate || 115200)}"></label></div>
       <datalist id="hardware-resource-ports">${ports.map(port => `<option value="${escapeHTML(port.device)}">${escapeHTML(port.description || port.device)}</option>`).join("")}</datalist>
     </section>
     <section data-resource-config="network">
-      <div class="two"><label>地址<input name="network_host" value="${escapeHTML(resource?.network.host || "")}" placeholder="192.168.1.20"></label><label>端口<input name="network_port" type="number" min="1" max="65535" value="${Number(resource?.network.port || defaultNetworkPort(resource?.network.protocol || "telnet"))}"></label></div>
-      <div class="two"><label>协议<select name="network_protocol">${protocolOptions(resource?.network.protocol || "telnet")}</select></label><label data-resource-config="ssh">SSH 登录方式<select name="ssh_auth">${sshAuthOptions(resource?.network.ssh_auth || "auto")}</select></label></div>
+      <div class="two"><label>地址<input name="network_host" value="${escapeHTML(network?.host || "")}" placeholder="192.168.1.20"></label><label>端口<input name="network_port" type="number" min="1" max="65535" value="${Number(network?.port || defaultNetworkPort(network?.protocol || "telnet"))}"></label></div>
+      <div class="two"><label>协议<select name="network_protocol">${protocolOptions(network?.protocol || "telnet")}</select></label><label data-resource-config="ssh">SSH 登录方式<select name="ssh_auth">${sshAuthOptions(network?.ssh_auth || "auto")}</select></label></div>
       <p class="field-help" data-resource-config="adb">保存资源后使用资源行的配对按钮。配对端口和六位配对码由手机无线调试页同时生成，不会保存。</p>
     </section>
     <section data-resource-config="login">
@@ -207,7 +224,8 @@ export function bindHardwareResources(
     closeDialog();
     dialog = document.createElement("dialog");
     dialog.className = "hardware-pair-dialog";
-    const connectionEndpoint = `${resource.network.host}:${resource.network.port || 5555}`;
+    const network = networkConfig(resource);
+    const connectionEndpoint = `${network.host}:${network.port || 5555}`;
     dialog.innerHTML = `<form id="adb-pair-form">
       <div class="dialog-head"><h2>配对 Android 设备</h2><button type="button" data-close class="icon-button" aria-label="关闭">${icon("close")}</button></div>
       <p class="field-help">连接端点：${escapeHTML(connectionEndpoint)}</p>
