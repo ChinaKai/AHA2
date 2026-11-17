@@ -239,6 +239,8 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): () => v
       paintFrameStatus();
     } catch (error) {
       if (disposed || (error instanceof DOMException && error.name === "AbortError")) return;
+      // A stale tab's 403/404/409 must not hide or stop the new tab's stream.
+      if (generation !== streamGeneration) return;
       state.frameLive = false;
       state.frameError = error instanceof Error ? error.message : String(error);
       paintFrameStatus();

@@ -44,6 +44,10 @@ const bootstrap = `
 const json = (value, status = 200) => new Response(JSON.stringify(value), {status, headers: {"Content-Type": "application/json"}});
 window.__frames = 0;
 window.__hostAvailable = true;
+window.__staleError = false;
+window.__staleErrors = 0;
+window.__staleErrorAt = 0;
+window.__switchAt = 0;
 const HOST_UP = {available: true, host_id: "local", version: "0.1.0", platform: "win32", edge_available: true};
 const HOST_DOWN = {available: false, host_id: "local", edge_available: false, code: "browser_host_start_failed", error: "浏览器宿主自动启动失败（端口被占用或依赖缺失），请查看 AHA2 日志"};
 const STATE_UP = ${JSON.stringify(browserState({available: true, host_id: "local", version: "0.1.0", platform: "win32", edge_available: true}))};
@@ -53,6 +57,13 @@ window.fetch = async (input, init = {}) => {
   const path = url.pathname;
   if (path === "/api/v1/tasks/task-1/browser") return json({ok: true, browser: window.__hostAvailable ? STATE_UP : STATE_DOWN});
   if (/\\/tabs\\/browser_tab_[12]\\/frame$/.test(path)) {
+    // A late 404 for the previous tab must not hide or stop the new tab.
+    if (window.__staleError && path.includes("browser_tab_1")) {
+      window.__staleErrors++;
+      await new Promise(resolve => setTimeout(resolve, 1200));
+      window.__staleErrorAt = performance.now();
+      return json({error: {code: "browser_tab_not_found", message: "标签页已关闭"}}, 404);
+    }
     window.__frames++;
     // Two different payloads so the adaptive interval sees a change.
     const body = new Uint8Array([0xff, 0xd8, 0xff, window.__frames % 2, 0xff, 0xd9]);
@@ -151,6 +162,38 @@ try {
   await page.waitForTimeout(400);
   assert.match(await page.locator("#desktop-browser-status").innerText(), /浏览器宿主不可用/);
   assert.equal(await page.evaluate(() => window.__frames), after);
+  await page.evaluate(() => window.__panel());
+
+  // A late 404 from the previous tab must not hide or stop the new tab.
+  await page.evaluate(() => {
+    window.__hostAvailable = true;
+    window.__staleError = true;
+    window.__frames = 0;
+    document.querySelector("#desktop-browser-target").innerHTML = "";
+    window.__panel = window.mountBrowserTaskPanel({
+      container: document.querySelector("#desktop-browser-target"),
+      taskID: "task-1",
+      notify: () => {},
+      onChange: () => {},
+    });
+  });
+  await page.waitForSelector("[data-browser-tab='browser_tab_2']", {timeout: 5000});
+  await page.evaluate(() => {
+    document.querySelector("[data-browser-tab='browser_tab_2']")
+      .addEventListener("click", () => { window.__switchAt = performance.now(); }, {capture: true});
+  });
+  await page.click("[data-browser-tab='browser_tab_2']");
+  const switchedFrames = await page.evaluate(() => window.__frames);
+  await page.waitForTimeout(1800);
+  const staleFrames = await page.evaluate(() => window.__frames);
+  assert.equal(await page.evaluate(() => window.__staleErrors), 1, "the stale 404 should have fired");
+  assert.ok(await page.evaluate(() => window.__staleErrorAt > window.__switchAt),
+    "the 404 arrived before the tab switch; the late-error case was not exercised");
+  assert.ok(staleFrames > switchedFrames + 2,
+    `new tab stream stopped after the stale error: ${switchedFrames} -> ${staleFrames}`);
+  const staleStatus = await page.locator("#desktop-browser-frame-status").innerText();
+  assert.match(staleStatus, /实时画面/);
+  assert.doesNotMatch(staleStatus, /画面暂不可用/);
   await page.evaluate(() => window.__panel());
   assert.deepEqual(errors, []);
   console.log("browser task panel preview verified");

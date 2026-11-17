@@ -16,6 +16,8 @@ set -euo pipefail
 #   aha2-tray-windows-amd64.exe
 #   plugins/feishu/windows-amd64/aha2-channel-feishu.exe
 #   plugins/feishu/windows-amd64/plugin.json
+#   browser-host/ (host sources + Playwright Node package)
+#   node/node.exe + node/LICENSE (bundled Node.js LTS runtime)
 #   release-manifest.json
 
 usage() {
@@ -37,6 +39,10 @@ Options:
 
 Environment overrides:
   VERSION, GO_BIN, AHA2_BUILD_DATE, AHA2_GIT_HASH
+  AHA2_NODE_RUNTIME_VERSION  bundled Node.js LTS version (default 22.23.5)
+  AHA2_NODE_RUNTIME_CACHE    pre-downloaded archive/SHASUMS256.txt directory
+  AHA2_NODE_EXE              reuse an already extracted node.exe
+  AHA2_NODE_LICENSE          license file to pair with AHA2_NODE_EXE
 EOF
 }
 
@@ -303,6 +309,80 @@ rm -f -- "$browser_host_out/node_modules/.package-lock.json"
   exit 1
 }
 
+# A clean Windows machine must not need a system Node/npm install. Ship the
+# official Node.js LTS runtime next to the host and let AHA find it at
+# <install>/node/node.exe. Only node.exe and its license are staged; Playwright
+# lives in browser-host/node_modules and the host launches the installed Edge.
+printf '==> Stage bundled Node runtime\n'
+node_runtime_version="${AHA2_NODE_RUNTIME_VERSION:-22.23.5}"
+node_out="$output_dir/node"
+rm -rf -- "$node_out"
+mkdir -p -- "$node_out"
+if [[ -n "${AHA2_NODE_EXE:-}" ]]; then
+  [[ -f "$AHA2_NODE_EXE" ]] || {
+    printf 'AHA2_NODE_EXE does not exist: %s\n' "$AHA2_NODE_EXE" >&2
+    exit 1
+  }
+  cp -a -- "$AHA2_NODE_EXE" "$node_out/node.exe"
+  if [[ -n "${AHA2_NODE_LICENSE:-}" ]]; then
+    cp -a -- "$AHA2_NODE_LICENSE" "$node_out/LICENSE"
+  fi
+else
+  command -v unzip >/dev/null 2>&1 || {
+    printf 'unzip is required to stage the bundled Node runtime.\n' >&2
+    exit 1
+  }
+  command -v curl >/dev/null 2>&1 || {
+    printf 'curl is required to download the bundled Node runtime.\n' >&2
+    exit 1
+  }
+  node_cache="${AHA2_NODE_RUNTIME_CACHE:-$build_dir/node-runtime-cache}"
+  mkdir -p -- "$node_cache"
+  archive_name="node-v${node_runtime_version}-win-x64.zip"
+  archive="$node_cache/$archive_name"
+  sums="$node_cache/SHASUMS256.txt"
+  if [[ ! -f "$archive" ]]; then
+    printf 'Downloading %s\n' "https://nodejs.org/dist/v${node_runtime_version}/${archive_name}"
+    curl -fsSL --retry 3 -o "$archive.download" \
+      "https://nodejs.org/dist/v${node_runtime_version}/${archive_name}"
+    mv -- "$archive.download" "$archive"
+  fi
+  curl -fsSL --retry 3 -o "$sums.tmp" "https://nodejs.org/dist/v${node_runtime_version}/SHASUMS256.txt"
+  mv -- "$sums.tmp" "$sums"
+  expected_sha="$(awk -v name="$archive_name" '$2 == name {print $1}' "$sums")"
+  [[ -n "$expected_sha" ]] || {
+    printf 'Node runtime checksum is missing from SHASUMS256.txt: %s\n' "$archive_name" >&2
+    exit 1
+  }
+  actual_sha="$(sha256sum "$archive" | awk '{print $1}')"
+  [[ "$actual_sha" == "$expected_sha" ]] || {
+    printf 'Node runtime checksum mismatch: got %s want %s\n' "$actual_sha" "$expected_sha" >&2
+    exit 1
+  }
+  node_prefix="node-v${node_runtime_version}-win-x64"
+  unzip -p "$archive" "$node_prefix/node.exe" > "$node_out/node.exe"
+  unzip -p "$archive" "$node_prefix/LICENSE" > "$node_out/LICENSE"
+fi
+[[ -s "$node_out/node.exe" ]] || {
+  printf 'Bundled node.exe was not staged.\n' >&2
+  exit 1
+}
+[[ -s "$node_out/LICENSE" ]] || {
+  printf 'Bundled Node LICENSE was not staged.\n' >&2
+  exit 1
+}
+assert_pe "$node_out/node.exe"
+# The official Windows build is Authenticode-signed by the OpenJS Foundation.
+# Verify that when the build host has a PE signature inspection tool; the
+# SHA-256 check above already pins the exact archive.
+if command -v sbverify >/dev/null 2>&1; then
+  sbverify --list "$node_out/node.exe" 2>/dev/null | grep -q "OpenJS Foundation" || {
+    printf 'Bundled node.exe is missing the OpenJS Foundation signature.\n' >&2
+    exit 1
+  }
+fi
+printf 'Bundled Node runtime: %s (%s)\n' "$node_runtime_version" "$(du -h "$node_out/node.exe" | cut -f1)"
+
 printf '==> Write release manifest\n'
 # Record the full invocation so replaying from a source snapshot (no .git) can
 # reproduce the same package: the commit and test options are part of the
@@ -319,7 +399,7 @@ package_files=(
 )
 while IFS= read -r rel; do
   package_files+=("$rel")
-done < <(cd "$output_dir" && find browser-host -type f | LC_ALL=C sort)
+done < <(cd "$output_dir" && find browser-host node -type f | LC_ALL=C sort)
 
 "$node_bin" "$build_dir/scripts/release-manifest.mjs" \
   --root "$output_dir" \
@@ -348,6 +428,8 @@ const expected = [
   "browser-host/server.mjs",
   "browser-host/package.json",
   "browser-host/node_modules/playwright/package.json",
+  "node/node.exe",
+  "node/LICENSE",
 ];
 if (manifest.version !== version) throw new Error(`manifest version ${manifest.version} != ${version}`);
 if (manifest.commit !== commit) throw new Error(`manifest commit ${manifest.commit} != ${commit}`);
@@ -355,14 +437,16 @@ const paths = manifest.files.map((file) => file.path);
 for (const path of expected) {
   if (!paths.includes(path)) throw new Error(`manifest is missing ${path}`);
 }
-// Every packaged browser-host file (Node modules included) must be covered by
-// the manifest so the installer can verify the exact install tree.
+// Every packaged browser-host and Node runtime file must be covered by the
+// manifest so the installer can verify the exact install tree.
 const {execFileSync} = require("node:child_process");
-const hostFiles = execFileSync("find", ["browser-host", "-type", "f"], {
-  cwd: require("node:path").dirname(manifestPath), encoding: "utf8",
-}).trim().split("\n").filter(Boolean);
-for (const path of hostFiles) {
-  if (!paths.includes(path)) throw new Error(`manifest is missing browser-host file ${path}`);
+for (const root of ["browser-host", "node"]) {
+  const files = execFileSync("find", [root, "-type", "f"], {
+    cwd: require("node:path").dirname(manifestPath), encoding: "utf8",
+  }).trim().split("\n").filter(Boolean);
+  for (const path of files) {
+    if (!paths.includes(path)) throw new Error(`manifest is missing ${path}`);
+  }
 }
 for (const file of manifest.files) {
   if (!/^[0-9a-f]{64}$/.test(file.sha256)) throw new Error(`manifest has a malformed sha256 for ${file.path}`);

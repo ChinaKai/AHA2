@@ -65,9 +65,12 @@ Task 授权：
 
 能力集合固定为 `open_tab | navigate | snapshot`；未知能力在创建授权时拒绝。
 
-运行时前置：安装包携带 `browser-host/`（含 `playwright` Node 依赖，约 12 MB），
-但**不内置 Node.js 运行时**；机器需有 Node 20+（或设置 `AHA2_NODE_PATH`）。缺失
-时资源页返回 `browser_host_node_missing` 并失败关闭，不会退回公开端口或 CDP。
+运行时前置：安装包携带 `browser-host/`（含 `playwright` Node 依赖，约 12 MB）和
+`node/node.exe`（官方 Node.js LTS，默认 22.23.5，约 84 MB；安装包压缩后约增加
+25–30 MB），安装到 `{app}\browser-host` 与 `{app}\node`。AHA 优先使用内置
+`node.exe`，干净的 Windows 机器不需要系统 Node/npm；`AHA2_NODE_PATH` 仍是覆盖项。
+内置运行时缺失/损坏时资源页返回 `browser_host_node_missing` 并失败关闭，不会
+退回公开端口或 CDP。
 
 ## 3. 失败关闭
 - host 未配置/不可达：`browser_host_unavailable`（HTTP 503）；
@@ -78,9 +81,12 @@ Task 授权：
 - 跨 Task 标签页：`browser_tab_forbidden`（403）；
 - 授权缺少能力：`browser_capability_denied`（403）；
 - 非 http/https 网址：`browser_url_invalid`（400）；
-- host 操作超过 60s：`browser_host_timeout`（504），与连接失败
-  `browser_host_unavailable` 区分。host 的页面导航是 30s，AHA 客户端超时 60s，
-  避免 AHA 先失败而 host 仍在提交导航。
+- host 业务操作超过 60s：`browser_host_timeout`（504），与连接失败
+  `browser_host_unavailable` 区分。host 的页面导航是 30s，AHA 业务客户端超时
+  60s，避免 AHA 先失败而 host 仍在提交导航；启动就绪探针单独使用 5s 客户端
+  （每次探测上下文 2s），只约束启动期。
+- 崩溃/重启预算跨单次重启保留，只有新 host 稳定运行 60s 后才重置；达到上限
+  （默认 5 次）返回 `browser_host_start_failed`，不会无限重启。
 
 host 返回的原始 Playwright 诊断只留在 host 本地日志（替换 profile 根目录和 Edge
 路径）；AHA 对 host 错误只使用稳定文案和错误码，不持久化、不返回任意 host 文本。

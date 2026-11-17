@@ -50,17 +50,21 @@ func (p *fakeChild) Kill() error {
 func (p *fakeChild) PID() int { return 0 }
 
 type launchRecorder struct {
-	mu          sync.Mutex
-	specs       []LaunchSpec
-	children    []*fakeChild
-	failFor     int
-	rejectToken bool
+	mu            sync.Mutex
+	specs         []LaunchSpec
+	children      []*fakeChild
+	spawnedAt     []time.Time
+	failFor       int
+	rejectToken   bool
+	healthDelay   time.Duration
+	navigateDelay time.Duration
 }
 
 func (r *launchRecorder) spawn(_ context.Context, spec LaunchSpec) (HostProcess, error) {
 	r.mu.Lock()
 	attempt := len(r.specs)
 	r.specs = append(r.specs, spec)
+	r.spawnedAt = append(r.spawnedAt, time.Now())
 	fail := attempt < r.failFor
 	r.mu.Unlock()
 	if fail {
@@ -81,9 +85,32 @@ func (r *launchRecorder) spawn(_ context.Context, spec LaunchSpec) (HostProcess,
 			writer.WriteHeader(http.StatusUnauthorized)
 			return
 		}
+		if r.healthDelay > 0 {
+			select {
+			case <-request.Context().Done():
+				return
+			case <-time.After(r.healthDelay):
+			}
+		}
 		_ = json.NewEncoder(writer).Encode(map[string]any{
 			"host_id": "local", "version": "fake", "platform": "test", "edge_available": true,
 		})
+	})
+	mux.HandleFunc("/v1/profiles/", func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/navigate") {
+			if r.navigateDelay > 0 {
+				select {
+				case <-request.Context().Done():
+					return
+				case <-time.After(r.navigateDelay):
+				}
+			}
+			_ = json.NewEncoder(writer).Encode(map[string]any{"tab": map[string]string{
+				"id": "tab_1", "url": "https://example.com/final", "title": "Final",
+			}})
+			return
+		}
+		writer.WriteHeader(http.StatusNotFound)
 	})
 	mux.HandleFunc("/v1/shutdown", func(writer http.ResponseWriter, request *http.Request) {
 		writer.WriteHeader(http.StatusAccepted)
@@ -104,6 +131,12 @@ func (r *launchRecorder) snapshot() ([]LaunchSpec, []*fakeChild) {
 	return append([]LaunchSpec(nil), r.specs...), append([]*fakeChild(nil), r.children...)
 }
 
+func (r *launchRecorder) spawnTimes() []time.Time {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]time.Time(nil), r.spawnedAt...)
+}
+
 func managerFixture(t *testing.T, recorder *launchRecorder, tweak func(*HostManagerOptions)) (*HostManager, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -121,7 +154,8 @@ func managerFixture(t *testing.T, recorder *launchRecorder, tweak func(*HostMana
 	options := HostManagerOptions{
 		Script: script, Node: node, DataDir: filepath.Join(dir, "profiles"), HostID: "local",
 		ReadyTimeout: 2 * time.Second, StopGrace: 300 * time.Millisecond,
-		RestartDelay: 10 * time.Millisecond, MaxRestarts: 3, PortAttempts: 3,
+		RestartDelay: 10 * time.Millisecond, StableResetAfter: time.Hour,
+		MaxRestarts: 3, PortAttempts: 3,
 		Logger: discardLogger(), Spawn: recorder.spawn,
 	}
 	if tweak != nil {

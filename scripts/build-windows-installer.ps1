@@ -4,6 +4,8 @@ param(
     [string]$InputExe = "",
     [string]$InputTrayExe = "",
     [string]$InputBrowserHost = "",
+    [string]$InputNodeExe = "",
+    [string]$InputNodeLicense = "",
 	[string]$InputFeishuPlugin = "",
 	[string]$InputFeishuManifest = "",
     [string]$OutputDir = "",
@@ -38,6 +40,12 @@ if ([string]::IsNullOrWhiteSpace($InputTrayExe)) {
 if ([string]::IsNullOrWhiteSpace($InputBrowserHost)) {
     $InputBrowserHost = Join-Path $repo "dist\browser-host"
 }
+if ([string]::IsNullOrWhiteSpace($InputNodeExe)) {
+    $InputNodeExe = Join-Path $repo "dist\node\node.exe"
+}
+if ([string]::IsNullOrWhiteSpace($InputNodeLicense)) {
+    $InputNodeLicense = Join-Path $repo "dist\node\LICENSE"
+}
 $defaultFeishuDir = Join-Path $repo "dist\plugins\feishu\windows-amd64"
 if ([string]::IsNullOrWhiteSpace($InputFeishuPlugin) -and [string]::IsNullOrWhiteSpace($InputFeishuManifest)) {
 	$defaultPlugin = Join-Path $defaultFeishuDir "aha2-channel-feishu.exe"
@@ -56,6 +64,8 @@ if ([string]::IsNullOrWhiteSpace($OutputDir)) {
 $inputPath = [IO.Path]::GetFullPath($InputExe)
 $trayInputPath = [IO.Path]::GetFullPath($InputTrayExe)
 $browserHostPath = [IO.Path]::GetFullPath($InputBrowserHost)
+$nodeInputPath = [IO.Path]::GetFullPath($InputNodeExe)
+$nodeLicensePath = [IO.Path]::GetFullPath($InputNodeLicense)
 $feishuPluginPath = if ([string]::IsNullOrWhiteSpace($InputFeishuPlugin)) { "" } else { [IO.Path]::GetFullPath($InputFeishuPlugin) }
 $feishuManifestPath = if ([string]::IsNullOrWhiteSpace($InputFeishuManifest)) { "" } else { [IO.Path]::GetFullPath($InputFeishuManifest) }
 $outputPath = [IO.Path]::GetFullPath($OutputDir)
@@ -77,6 +87,10 @@ $requiredContracts = @(
     'DestDir: "{app}\browser-host"',
     "recursesubdirs",
     "SourceBrowserHost",
+    '#define SourceNodeExe',
+    'DestDir: "{app}\node"',
+    "SourceNodeExe",
+    "SourceNodeLicense",
 	'DestName: "Hysteria-LICENSE.txt"',
 	'DestName: "yaml-v3-LICENSE.txt"',
 	'DestName: "Xray-core-MPL-2.0.txt"',
@@ -143,9 +157,10 @@ if ($ValidateOnly) {
     $serverState = if (Test-Path -LiteralPath $inputPath -PathType Leaf) {"found"} else {"not present"}
     $trayState = if (Test-Path -LiteralPath $trayInputPath -PathType Leaf) {"found"} else {"not present"}
     $browserHostState = if (Test-Path -LiteralPath (Join-Path $browserHostPath "host.mjs") -PathType Leaf) {"found"} else {"not present"}
+    $nodeState = if ((Test-Path -LiteralPath $nodeInputPath -PathType Leaf) -and (Test-Path -LiteralPath $nodeLicensePath -PathType Leaf)) {"found"} else {"not present"}
 	$feishuState = if ($feishuPluginPath -and (Test-Path -LiteralPath $feishuPluginPath -PathType Leaf) -and (Test-Path -LiteralPath $feishuManifestPath -PathType Leaf)) { "found" } else { "not bundled" }
 	$mode = if ($PerUser) { "per-user" } else { "per-machine" }
-	Write-Output "Installer definition valid ($mode); server input $serverState; tray input $trayState; browser host $browserHostState; Feishu plugin $feishuState."
+	Write-Output "Installer definition valid ($mode); server input $serverState; tray input $trayState; browser host $browserHostState; node runtime $nodeState; Feishu plugin $feishuState."
     exit 0
 }
 
@@ -157,6 +172,12 @@ if (-not (Test-Path -LiteralPath $trayInputPath -PathType Leaf)) {
 }
 if (-not (Test-Path -LiteralPath (Join-Path $browserHostPath "host.mjs") -PathType Leaf)) {
     throw "Browser host package not found: $browserHostPath\host.mjs"
+}
+if (-not (Test-Path -LiteralPath $nodeInputPath -PathType Leaf)) {
+    throw "Bundled Node runtime not found: $nodeInputPath"
+}
+if (-not (Test-Path -LiteralPath $nodeLicensePath -PathType Leaf)) {
+    throw "Bundled Node runtime license not found: $nodeLicensePath"
 }
 if ($feishuPluginPath -and ((-not (Test-Path -LiteralPath $feishuPluginPath -PathType Leaf)) -or (-not (Test-Path -LiteralPath $feishuManifestPath -PathType Leaf)))) {
 	throw "Feishu plugin bundle inputs were not found."
@@ -211,6 +232,8 @@ $compilerArgs = @(
 	"/DSourceExe=$inputPath",
 	"/DSourceTrayExe=$trayInputPath",
 	"/DSourceBrowserHost=$browserHostPath",
+	"/DSourceNodeExe=$nodeInputPath",
+	"/DSourceNodeLicense=$nodeLicensePath",
 	"/DOutputDir=$outputPath"
 )
 if ($feishuPluginPath) {

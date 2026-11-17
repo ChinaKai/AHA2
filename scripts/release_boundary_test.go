@@ -256,6 +256,8 @@ func TestWindowsPackageBuildProducesAllArtifacts(t *testing.T) {
 		filepath.Join("browser-host", "server.mjs"),
 		filepath.Join("browser-host", "package.json"),
 		filepath.Join("browser-host", "node_modules", "playwright", "package.json"),
+		filepath.Join("node", "node.exe"),
+		filepath.Join("node", "LICENSE"),
 	}
 	for _, rel := range required {
 		data, err := os.ReadFile(filepath.Join(output, rel))
@@ -324,27 +326,29 @@ func TestWindowsPackageBuildProducesAllArtifacts(t *testing.T) {
 	if _, ok := got["release-manifest.json"]; ok {
 		t.Error("manifest must not list itself")
 	}
-	// The browser host is supervised from the installed tree, so every shipped
-	// file (including Playwright) must be covered by the manifest.
-	hostRoot := filepath.Join(output, "browser-host")
-	if err := filepath.WalkDir(hostRoot, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if entry.IsDir() {
+	// The browser host and its bundled Node runtime are supervised from the
+	// installed tree, so every shipped file must be covered by the manifest.
+	for _, root := range []string{"browser-host", "node"} {
+		rootDir := filepath.Join(output, root)
+		if err := filepath.WalkDir(rootDir, func(path string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if entry.IsDir() {
+				return nil
+			}
+			rel, err := filepath.Rel(output, path)
+			if err != nil {
+				return err
+			}
+			slash := filepath.ToSlash(rel)
+			if _, ok := got[slash]; !ok {
+				t.Errorf("manifest is missing %s file %s", root, slash)
+			}
 			return nil
+		}); err != nil {
+			t.Fatalf("walk %s package: %v", root, err)
 		}
-		rel, err := filepath.Rel(output, path)
-		if err != nil {
-			return err
-		}
-		slash := filepath.ToSlash(rel)
-		if _, ok := got[slash]; !ok {
-			t.Errorf("manifest is missing browser-host file %s", slash)
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("walk browser-host package: %v", err)
 	}
 	for _, rel := range required {
 		entry, ok := got[rel]

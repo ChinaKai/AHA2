@@ -106,7 +106,7 @@ func hostErrorMessage(code string) string {
 	case "browser_host_unauthorized":
 		return "浏览器宿主拒绝了 AHA 的本地凭据，请核对 host token"
 	case "browser_host_node_missing":
-		return "未找到 Node.js；请安装 Node.js 20+ 或设置 AHA2_NODE_PATH"
+		return "未找到可用的 Node.js（安装包内置运行时缺失或已损坏）；可设置 AHA2_NODE_PATH 覆盖"
 	case "browser_host_script_missing":
 		return "安装目录缺少 browser-host/host.mjs，请重新安装 AHA2"
 	case "browser_host_starting":

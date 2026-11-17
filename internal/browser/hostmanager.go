@@ -44,6 +44,10 @@ type HostManager struct {
 	portAttempts  int
 	executableDir string
 	workDir       string
+	// restarts counts restart attempts since the host last stayed healthy for
+	// StableResetAfter. It survives across individual crashes so a crash loop
+	// cannot reset its own budget.
+	restarts int
 }
 
 // LaunchSpec describes one browser-host child launch. Token is never logged.
@@ -70,29 +74,35 @@ type SpawnFunc func(ctx context.Context, spec LaunchSpec) (HostProcess, error)
 // HostManagerOptions configures discovery and lifecycle. Zero values select
 // production defaults; tests override the spawner, timeouts and discovery.
 type HostManagerOptions struct {
-	Script        string
-	Node          string
-	DataDir       string
-	HostID        string
-	Logger        *slog.Logger
-	ExecutableDir string
-	WorkDir       string
-	ReadyTimeout  time.Duration
-	StopGrace     time.Duration
-	RestartDelay  time.Duration
-	MaxRestarts   int
-	PortAttempts  int
-	Spawn         SpawnFunc
-	ReservePort   func() (int, error)
+	Script           string
+	Node             string
+	DataDir          string
+	HostID           string
+	Logger           *slog.Logger
+	ExecutableDir    string
+	WorkDir          string
+	ReadyTimeout     time.Duration
+	StopGrace        time.Duration
+	RestartDelay     time.Duration
+	StableResetAfter time.Duration
+	MaxRestarts      int
+	PortAttempts     int
+	Spawn            SpawnFunc
+	ReservePort      func() (int, error)
 }
 
 const (
-	defaultReadyTimeout = 15 * time.Second
-	defaultStopGrace    = 5 * time.Second
-	defaultRestartDelay = 500 * time.Millisecond
-	defaultMaxRestarts  = 5
-	defaultPortAttempts = 3
-	hostTokenBytes      = 32
+	defaultReadyTimeout     = 15 * time.Second
+	defaultStopGrace        = 5 * time.Second
+	defaultRestartDelay     = 500 * time.Millisecond
+	defaultStableResetAfter = 60 * time.Second
+	defaultMaxRestarts      = 5
+	defaultPortAttempts     = 3
+	hostTokenBytes          = 32
+	// hostProbeTimeout bounds a single /v1/health call. Business requests use
+	// DefaultHostTimeout so a real navigation (host-side deadline 30s) is never
+	// cut off by a short probe timeout.
+	hostProbeTimeout = 5 * time.Second
 )
 
 // NewHostManager returns a manager in the not-yet-started state.
@@ -108,6 +118,9 @@ func NewHostManager(options HostManagerOptions) *HostManager {
 	}
 	if options.RestartDelay <= 0 {
 		options.RestartDelay = defaultRestartDelay
+	}
+	if options.StableResetAfter <= 0 {
+		options.StableResetAfter = defaultStableResetAfter
 	}
 	if options.MaxRestarts <= 0 {
 		options.MaxRestarts = defaultMaxRestarts
@@ -220,7 +233,7 @@ func (m *HostManager) Start(ctx context.Context) error {
 
 // prepare resolves Node, the packaged script and the profile root.
 func (m *HostManager) prepare() (string, string, error) {
-	node, err := discoverNode(m.opts.Node)
+	node, err := discoverNode(m.opts.Node, m.executableDir)
 	if err != nil {
 		return "", "", &Error{Code: "browser_host_node_missing", Status: http.StatusServiceUnavailable,
 			Message: hostErrorMessage("browser_host_node_missing")}
@@ -269,13 +282,18 @@ func (m *HostManager) launch(ctx context.Context, script, node string) (HostProc
 			lastErr = fmt.Errorf("spawn browser host: %w", err)
 			continue
 		}
-		host := NewHTTPHostWithTimeout(fmt.Sprintf("http://127.0.0.1:%d", port), token, 5*time.Second)
-		if err := m.waitReady(ctx, host, proc); err != nil {
+		baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+		// Readiness uses a short-lived probe client; every business call must
+		// stay above the host's 30s navigation deadline or AHA would report a
+		// timeout while the host has already committed the navigation.
+		probe := NewHTTPHostWithTimeout(baseURL, token, hostProbeTimeout)
+		if err := m.waitReady(ctx, probe, proc); err != nil {
 			lastErr = err
 			_ = proc.Kill()
 			_ = proc.Wait()
 			continue
 		}
+		host := NewHTTPHostWithTimeout(baseURL, token, DefaultHostTimeout)
 		return proc, host, spec, nil
 	}
 	if lastErr == nil {
@@ -343,15 +361,34 @@ func (m *HostManager) watch(proc HostProcess) {
 	m.current = nil
 	stopping := m.stopping
 	script := m.spec.Script
+	attempt := 0
+	if !stopping {
+		// The crash consumes one unit of the restart budget. It is only reset
+		// after the replacement host has stayed up for StableResetAfter, so a
+		// ready-then-crash loop cannot restart forever.
+		m.restarts++
+		attempt = m.restarts
+	}
 	m.mu.Unlock()
 	if stopping {
 		return
 	}
-	m.log.Warn("browser host exited; restarting", "error", sanitizeManagerLog(fmt.Sprint(err), m.opts.DataDir, script))
-	go m.restart()
+	if attempt > m.opts.MaxRestarts {
+		m.setFailure(&Error{Code: "browser_host_start_failed", Status: http.StatusServiceUnavailable,
+			Message: hostErrorMessage("browser_host_start_failed")})
+		m.log.Error("browser host crash budget exhausted; browser features fail closed",
+			"attempts", attempt, "limit", m.opts.MaxRestarts)
+		return
+	}
+	m.log.Warn("browser host exited; restarting", "attempt", attempt, "limit", m.opts.MaxRestarts,
+		"error", sanitizeManagerLog(fmt.Sprint(err), m.opts.DataDir, script))
+	go m.restart(attempt)
 }
 
-func (m *HostManager) restart() {
+// restart launches a replacement host. budget is the number of restart
+// attempts already consumed since the last stable period; failed launches
+// consume further units, so MaxRestarts bounds the whole unstable run.
+func (m *HostManager) restart(budget int) {
 	failures := 0
 	m.mu.RLock()
 	runCtx := m.runCtx
@@ -360,7 +397,8 @@ func (m *HostManager) restart() {
 		runCtx = context.Background()
 	}
 	for {
-		delay := m.opts.RestartDelay << min(failures, 4)
+		attempt := budget + failures
+		delay := m.opts.RestartDelay << min(attempt-1, 4)
 		if !m.sleep(delay) {
 			return
 		}
@@ -382,20 +420,56 @@ func (m *HostManager) restart() {
 				m.spec = spec
 				m.failure = nil
 				m.mu.Unlock()
-				m.log.Info("browser host restarted", "port", spec.Port)
+				m.log.Info("browser host restarted", "port", spec.Port, "attempt", attempt)
 				go m.watch(proc)
+				go m.markStable(proc)
 				return
 			}
 		}
 		failures++
+		m.mu.Lock()
+		m.restarts = budget + failures
+		used := m.restarts
+		m.mu.Unlock()
 		m.log.Warn("browser host restart failed",
-			"attempt", failures, "error", sanitizeManagerLog(fmt.Sprint(err), m.opts.DataDir, script))
-		if failures >= m.opts.MaxRestarts {
+			"attempt", used, "error", sanitizeManagerLog(fmt.Sprint(err), m.opts.DataDir, script))
+		if used > m.opts.MaxRestarts {
 			m.setFailure(err)
-			m.log.Error("browser host restart limit reached; browser features fail closed")
+			m.log.Error("browser host restart limit reached; browser features fail closed",
+				"attempts", used, "limit", m.opts.MaxRestarts)
 			return
 		}
 	}
+}
+
+// markStable clears the restart budget only when the same child is still
+// running after StableResetAfter. A replacement that dies sooner keeps the
+// budget it inherited.
+func (m *HostManager) markStable(proc HostProcess) {
+	m.mu.RLock()
+	stopCh := m.stopCh
+	runCtx := m.runCtx
+	m.mu.RUnlock()
+	if stopCh == nil {
+		return
+	}
+	timer := time.NewTimer(m.opts.StableResetAfter)
+	defer timer.Stop()
+	if runCtx == nil {
+		runCtx = context.Background()
+	}
+	select {
+	case <-stopCh:
+		return
+	case <-runCtx.Done():
+		return
+	case <-timer.C:
+	}
+	m.mu.Lock()
+	if m.proc == proc && !m.stopping {
+		m.restarts = 0
+	}
+	m.mu.Unlock()
 }
 
 func (m *HostManager) sleep(delay time.Duration) bool {
@@ -465,12 +539,13 @@ func (m *HostManager) Stop(ctx context.Context) error {
 	}
 }
 
-// discoverNode prefers the explicit setting, then PATH, then the usual Windows
-// install locations. It intentionally does not bundle a Node runtime: a missing
-// interpreter fails closed with an actionable status instead of downloading one.
-func discoverNode(explicit string) (string, error) {
-	// An explicit setting is authoritative: silently falling back to PATH after
-	// the owner configured a broken path would hide the misconfiguration.
+// discoverNode prefers an explicit override, then the Node runtime shipped with
+// the Windows installer, then PATH and the usual Windows install locations.
+// The packaged runtime is what makes a clean machine work without a manual
+// Node/npm install; AHA2_NODE_PATH remains the troubleshooting override.
+func discoverNode(explicit, executableDir string) (string, error) {
+	// An explicit setting is authoritative: silently falling back after the
+	// owner configured a broken path would hide the misconfiguration.
 	configured := []string{strings.TrimSpace(explicit), strings.TrimSpace(os.Getenv("AHA2_NODE_PATH"))}
 	var candidates []string
 	for _, candidate := range configured {
@@ -479,6 +554,9 @@ func discoverNode(explicit string) (string, error) {
 		}
 	}
 	if len(candidates) == 0 {
+		if executableDir != "" {
+			candidates = append(candidates, filepath.Join(executableDir, "node", "node.exe"))
+		}
 		if path, err := exec.LookPath("node"); err == nil {
 			candidates = append(candidates, path)
 		}
@@ -534,7 +612,9 @@ func discoverHostScript(explicit, executableDir, workDir string) (string, error)
 // dependency tree needs Node 20+; an older interpreter would fail later with a
 // syntax error that is much harder to diagnose from the resources page.
 func nodeMajorVersion(node string) (int, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	// A freshly installed 84 MB node.exe can take a while on a cold disk or
+	// under antivirus scanning; a false "Node missing" would disable the host.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	output, err := exec.CommandContext(ctx, node, "--version").Output()
 	if err != nil {
