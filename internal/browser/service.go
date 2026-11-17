@@ -61,7 +61,7 @@ type HostView struct {
 func (s *Service) hostView(ctx context.Context) HostView {
 	view := HostView{HostID: s.hostID}
 	if s.host == nil {
-		view.Error = "浏览器宿主未配置（AHA2_BROWSER_HOST_URL）"
+		view.Error = "浏览器宿主未启动（自动启动失败或已停止）"
 		view.Code = "browser_host_unavailable"
 		return view
 	}
@@ -265,7 +265,7 @@ func (s *Service) StartSession(ctx context.Context, actor, profileID string) (Se
 func (s *Service) ensureSession(ctx context.Context, actor, profileID string) (domain.BrowserSession, bool, error) {
 	if s.host == nil {
 		return domain.BrowserSession{}, false, newError(http.StatusServiceUnavailable,
-			"browser_host_unavailable", "浏览器宿主未配置，请设置 AHA2_BROWSER_HOST_URL")
+			"browser_host_unavailable", "浏览器宿主未启动，请查看 AHA2 日志")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -887,7 +887,7 @@ func (s *Service) authorize(ctx context.Context, grantID, capability, tabID stri
 	}
 	if s.host == nil {
 		return domain.BrowserTaskGrant{}, nil, newError(http.StatusServiceUnavailable,
-			"browser_host_unavailable", "浏览器宿主未配置")
+			"browser_host_unavailable", "浏览器宿主未启动")
 	}
 	if strings.TrimSpace(tabID) == "" {
 		return grant, nil, nil
@@ -1041,6 +1041,30 @@ func (s *Service) SnapshotTab(ctx context.Context, actor, grantID, tabID string)
 		"task_id": tab.TaskID, "profile_id": grant.ProfileID, "url": snapshot.URL,
 	})
 	return snapshot, nil
+}
+
+// TabFrame returns one read-only preview image for an authorized tab. Frames
+// are not audited and never persisted: the preview stream can run at a few
+// frames per second, and page content must not enter AHA's storage.
+func (s *Service) TabFrame(ctx context.Context, actor, grantID, tabID string) (HostFrame, error) {
+	grant, tab, err := s.authorize(ctx, grantID, domain.BrowserCapabilitySnapshot, tabID)
+	if err != nil {
+		return HostFrame{}, err
+	}
+	session, err := s.sessionForGrant(ctx, grant)
+	if err != nil {
+		return HostFrame{}, err
+	}
+	frame, err := s.host.Frame(ctx, grant.ProfileID, session.HostSessionID, tab.HostTabID)
+	if err != nil {
+		return HostFrame{}, sanitizeHostError(err)
+	}
+	// Re-authorize after the host call so a grant revoked while the screenshot
+	// was in flight does not receive one more frame.
+	if _, _, err := s.authorize(ctx, grantID, domain.BrowserCapabilitySnapshot, tabID); err != nil {
+		return HostFrame{}, err
+	}
+	return frame, nil
 }
 
 func (s *Service) CloseTab(ctx context.Context, actor, grantID, tabID string) error {

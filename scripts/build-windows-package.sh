@@ -277,6 +277,29 @@ if grep -q "SET_BY_PACKAGING" "$feishu_manifest"; then
   exit 1
 fi
 
+# AHA auto-starts the browser host from <install>/browser-host/host.mjs. Ship the
+# host sources plus the Playwright Node package (not its browser downloads: the
+# host launches the owner's installed Edge via executablePath). Node.js itself
+# is a documented prerequisite and is not bundled here; adding a runtime would
+# grow the installer by roughly 30 MB compressed.
+printf '==> Stage browser host\n'
+browser_host_out="$output_dir/browser-host"
+rm -rf -- "$browser_host_out"
+mkdir -p -- "$browser_host_out"
+for host_file in host.mjs server.mjs tabs.mjs lock.mjs package.json README.md; do
+  cp -a -- "$build_dir/browser-host/$host_file" "$browser_host_out/$host_file"
+done
+(
+  cd "$browser_host_out"
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install --omit=dev --ignore-scripts \
+    --no-audit --no-fund --no-save --package-lock=false playwright@1.49.0
+)
+rm -rf -- "$browser_host_out/node_modules/.bin"
+[[ -f "$browser_host_out/node_modules/playwright/package.json" ]] || {
+  printf 'browser host Playwright dependency was not installed.\n' >&2
+  exit 1
+}
+
 printf '==> Write release manifest\n'
 # Record the full invocation so replaying from a source snapshot (no .git) can
 # reproduce the same package: the commit and test options are part of the
@@ -285,6 +308,16 @@ generator_command="bash scripts/build-windows-package.sh --version $version --co
 if ((run_web_test == 0)); then
   generator_command+=" --skip-web-test"
 fi
+package_files=(
+  aha2-windows-amd64.exe
+  aha2-tray-windows-amd64.exe
+  plugins/feishu/windows-amd64/aha2-channel-feishu.exe
+  plugins/feishu/windows-amd64/plugin.json
+)
+while IFS= read -r rel; do
+  package_files+=("$rel")
+done < <(cd "$output_dir" && find browser-host -type f | LC_ALL=C sort)
+
 "$node_bin" "$build_dir/scripts/release-manifest.mjs" \
   --root "$output_dir" \
   --version "$version" \
@@ -296,10 +329,7 @@ fi
   --web-version "$web_version" \
   --go-version "$go_version" \
   --node-version "$node_version" \
-  aha2-windows-amd64.exe \
-  aha2-tray-windows-amd64.exe \
-  plugins/feishu/windows-amd64/aha2-channel-feishu.exe \
-  plugins/feishu/windows-amd64/plugin.json
+  "${package_files[@]}"
 
 printf '==> Verify release manifest\n'
 "$node_bin" - "$manifest_path" "$version" "$commit" <<'NODE'
@@ -311,12 +341,25 @@ const expected = [
   "aha2-tray-windows-amd64.exe",
   "plugins/feishu/windows-amd64/aha2-channel-feishu.exe",
   "plugins/feishu/windows-amd64/plugin.json",
+  "browser-host/host.mjs",
+  "browser-host/server.mjs",
+  "browser-host/package.json",
+  "browser-host/node_modules/playwright/package.json",
 ];
 if (manifest.version !== version) throw new Error(`manifest version ${manifest.version} != ${version}`);
 if (manifest.commit !== commit) throw new Error(`manifest commit ${manifest.commit} != ${commit}`);
 const paths = manifest.files.map((file) => file.path);
 for (const path of expected) {
   if (!paths.includes(path)) throw new Error(`manifest is missing ${path}`);
+}
+// Every packaged browser-host file (Node modules included) must be covered by
+// the manifest so the installer can verify the exact install tree.
+const {execFileSync} = require("node:child_process");
+const hostFiles = execFileSync("find", ["browser-host", "-type", "f"], {
+  cwd: require("node:path").dirname(manifestPath), encoding: "utf8",
+}).trim().split("\n").filter(Boolean);
+for (const path of hostFiles) {
+  if (!paths.includes(path)) throw new Error(`manifest is missing browser-host file ${path}`);
 }
 for (const file of manifest.files) {
   if (!/^[0-9a-f]{64}$/.test(file.sha256)) throw new Error(`manifest has a malformed sha256 for ${file.path}`);

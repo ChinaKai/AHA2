@@ -252,13 +252,17 @@ func TestWindowsPackageBuildProducesAllArtifacts(t *testing.T) {
 		"aha2-tray-windows-amd64.exe",
 		filepath.Join("plugins", "feishu", "windows-amd64", "aha2-channel-feishu.exe"),
 		filepath.Join("plugins", "feishu", "windows-amd64", "plugin.json"),
+		filepath.Join("browser-host", "host.mjs"),
+		filepath.Join("browser-host", "server.mjs"),
+		filepath.Join("browser-host", "package.json"),
+		filepath.Join("browser-host", "node_modules", "playwright", "package.json"),
 	}
 	for _, rel := range required {
 		data, err := os.ReadFile(filepath.Join(output, rel))
 		if err != nil {
 			t.Fatalf("package artifact %s: %v", rel, err)
 		}
-		if rel != filepath.Join("plugins", "feishu", "windows-amd64", "plugin.json") {
+		if strings.HasSuffix(rel, ".exe") {
 			if len(data) < 2 || data[0] != 'M' || data[1] != 'Z' {
 				t.Errorf("%s is not a Windows PE executable", rel)
 			}
@@ -314,11 +318,33 @@ func TestWindowsPackageBuildProducesAllArtifacts(t *testing.T) {
 	for _, file := range manifest.Files {
 		got[filepath.FromSlash(file.Path)] = file
 	}
-	if len(got) != len(required) {
-		t.Errorf("manifest lists %d files, want %d", len(got), len(required))
+	if len(got) < len(required) {
+		t.Errorf("manifest lists %d files, want at least %d", len(got), len(required))
 	}
 	if _, ok := got["release-manifest.json"]; ok {
 		t.Error("manifest must not list itself")
+	}
+	// The browser host is supervised from the installed tree, so every shipped
+	// file (including Playwright) must be covered by the manifest.
+	hostRoot := filepath.Join(output, "browser-host")
+	if err := filepath.WalkDir(hostRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(output, path)
+		if err != nil {
+			return err
+		}
+		slash := filepath.ToSlash(rel)
+		if _, ok := got[slash]; !ok {
+			t.Errorf("manifest is missing browser-host file %s", slash)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("walk browser-host package: %v", err)
 	}
 	for _, rel := range required {
 		entry, ok := got[rel]

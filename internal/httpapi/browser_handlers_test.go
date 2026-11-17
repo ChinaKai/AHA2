@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -125,6 +126,55 @@ func TestBrowserHostHealthReportsAvailabilityForTheUI(t *testing.T) {
 	view = payload["host"].(map[string]any)
 	if view["available"] != false || view["code"] != "browser_host_unavailable" {
 		t.Fatalf("unavailable host view=%#v", view)
+	}
+}
+
+func TestBrowserTabFrameReturnsAuthorizedImageAndStopsAfterRevoke(t *testing.T) {
+	host := browsertest.New()
+	f := newBrowserAPIFixture(t, host)
+	_, payload := f.do(t, http.MethodPost, "/api/v1/browser/profiles", map[string]any{"name": "Work"})
+	profileID := payload["profile"].(map[string]any)["id"].(string)
+	response, payload := f.do(t, http.MethodPost, "/api/v1/tasks/"+f.task.ID+"/browser-sessions", map[string]any{
+		"profile_id": profileID,
+	})
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("create grant: %d %#v", response.StatusCode, payload)
+	}
+	grantID := payload["grant"].(map[string]any)["id"].(string)
+	response, payload = f.do(t, http.MethodPost, "/api/v1/browser-grants/"+grantID+"/tabs", map[string]any{
+		"url": "https://example.com/login",
+	})
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("open tab: %d %#v", response.StatusCode, payload)
+	}
+	tabID := payload["tab"].(map[string]any)["id"].(string)
+
+	frameResponse, err := f.client.Get(f.server.URL + "/api/v1/browser-grants/" + grantID + "/tabs/" + tabID + "/frame")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(frameResponse.Body)
+	frameResponse.Body.Close()
+	if frameResponse.StatusCode != http.StatusOK {
+		t.Fatalf("frame: %d %s", frameResponse.StatusCode, body)
+	}
+	if frameResponse.Header.Get("Content-Type") != "image/jpeg" || frameResponse.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("frame headers: %#v", frameResponse.Header)
+	}
+	if len(body) != 4 || body[0] != 0xff {
+		t.Fatalf("frame body=%v", body)
+	}
+
+	if response, payload := f.do(t, http.MethodDelete, "/api/v1/browser-grants/"+grantID, nil); response.StatusCode != http.StatusOK {
+		t.Fatalf("revoke: %d %#v", response.StatusCode, payload)
+	}
+	revokedResponse, err := f.client.Get(f.server.URL + "/api/v1/browser-grants/" + grantID + "/tabs/" + tabID + "/frame")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer revokedResponse.Body.Close()
+	if revokedResponse.StatusCode != http.StatusForbidden {
+		t.Fatalf("frame after revoke: %d", revokedResponse.StatusCode)
 	}
 }
 

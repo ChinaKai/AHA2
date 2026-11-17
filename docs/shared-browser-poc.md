@@ -11,7 +11,7 @@
 | Session | `browser_sessions`；属于 profile，不归 Task。`starting/ready/auth_required/busy/closed/error`。 |
 | Task 授权 | `browser_task_grants`；`task_id/profile_id/session_id/capabilities/expires_at/revoked_at`。 |
 | Tab | `browser_tabs`；带 `task_id/grant_id/session_id`，每次操作同时校验授权、会话与标签页归属。 |
-| Host | 独立 Node 进程 `browser-host/host.mjs`，Playwright persistent context + 可见 Edge；仅 loopback + Bearer token。 |
+| Host | 独立 Node 进程 `browser-host/host.mjs`，Playwright persistent context + 可见 Edge；仅 loopback + Bearer token。AHA 启动时自动发现并拉起，随机端口 + 每次启动重新生成的短期 token；崩溃自动重启，AHA 停止时先请求 host 关闭会话再清理子进程。 |
 
 同一 profile 单实例有三层约束：
 
@@ -58,12 +58,18 @@ Task 授权：
 - `POST /api/v1/browser-grants/{id}/tabs`
 - `POST /api/v1/browser-grants/{id}/tabs/{tab}/navigate`
 - `GET /api/v1/browser-grants/{id}/tabs/{tab}/snapshot`
+- `GET /api/v1/browser-grants/{id}/tabs/{tab}/frame`：只读 JPEG 预览（2–5 fps，
+  页面不变时自动降帧）。AHA 只转发当前授权且属于该 Task 的标签页；帧不落盘、
+  不写审计正文，关闭面板即停止拉取。
 - `DELETE /api/v1/browser-grants/{id}/tabs/{tab}`
 
 能力集合固定为 `open_tab | navigate | snapshot`；未知能力在创建授权时拒绝。
 
-## 3. 失败关闭
+运行时前置：安装包携带 `browser-host/`（含 `playwright` Node 依赖，约 12 MB），
+但**不内置 Node.js 运行时**；机器需有 Node 20+（或设置 `AHA2_NODE_PATH`）。缺失
+时资源页返回 `browser_host_node_missing` 并失败关闭，不会退回公开端口或 CDP。
 
+## 3. 失败关闭
 - host 未配置/不可达：`browser_host_unavailable`（HTTP 503）；
 - Edge 缺失：`browser_edge_unavailable`（503），不自动换浏览器；
 - profile 目录被其他进程占用：`browser_profile_locked`（409）；

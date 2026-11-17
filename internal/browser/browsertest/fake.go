@@ -38,6 +38,7 @@ type FakeHost struct {
 	FailCloseTab      error
 	OpenCalls         int
 	CloseCalls        int
+	FrameCalls        int
 	Sessions          map[string]*session
 	nextID            int
 	Now               func() time.Time
@@ -209,6 +210,20 @@ func (f *FakeHost) Snapshot(_ context.Context, profileID, sessionID, tabID strin
 		return browser.HostSnapshot{}, &browser.Error{Code: "browser_tab_not_found", Message: "no tab", Status: http.StatusNotFound}
 	}
 	return browser.HostSnapshot{URL: tab.URL, Title: tab.Title, Text: "page text"}, nil
+}
+
+func (f *FakeHost) Frame(_ context.Context, profileID, sessionID, tabID string) (browser.HostFrame, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	value, err := f.sessionLocked(profileID, sessionID)
+	if err != nil {
+		return browser.HostFrame{}, err
+	}
+	if _, ok := value.tabs[tabID]; !ok {
+		return browser.HostFrame{}, &browser.Error{Code: "browser_tab_not_found", Message: "no tab", Status: http.StatusNotFound}
+	}
+	f.FrameCalls++
+	return browser.HostFrame{ContentType: "image/jpeg", Data: []byte{0xff, 0xd8, 0xff, 0xd9}}, nil
 }
 
 func (f *FakeHost) CloseTab(_ context.Context, profileID, sessionID, tabID string) error {

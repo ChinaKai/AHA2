@@ -13,35 +13,63 @@ Session 0，不能可靠显示窗口；因此本目录提供的是一个**独立
 - Windows 10/11 桌面会话；
 - Microsoft Edge 已安装（POC 只支持 `browser_kind=edge`，启动失败不会换
   Chrome/Chromium）；
-- Node.js 20+；
-- 在 `browser-host/` 下安装依赖：
+- Node.js 20+（当前安装包不内置 Node 运行时，见下文“打包与运行时”）。
+
+AHA 启动时会自动发现 `<安装目录>\browser-host\host.mjs`，随机分配
+`127.0.0.1` 端口和短期 token 并拉起 host；用户不再需要配置 URL。
+
+## 自动启动（默认）
+
+正常安装后无需手工启动 host。AHA 负责：
+
+- 通过 `AHA2_NODE_PATH`、`PATH`、`%ProgramFiles%\nodejs`、
+  `%LOCALAPPDATA%\Programs\nodejs` 等位置查找 Node；
+- 每次启动（含崩溃重启）重新生成 256-bit token，token 只通过子进程环境传递，
+  不写入磁盘、不进入 AHA 日志；
+- host 崩溃后按退避自动重启，AHA 退出时先请求 host 关闭浏览器会话，再清理子进程；
+- 启动失败、缺少 Node、缺少 host 脚本、端口被占用时按稳定错误码失败关闭，
+  不阻塞 AHA 主服务。
+
+资源页和 Task 面板不再要求或读取 `AHA2_BROWSER_HOST_URL`。
+
+仅供测试/排障的覆盖项：
 
 ```powershell
-cd browser-host
-npm install
+$env:AHA2_BROWSER_HOST_URL = "http://127.0.0.1:8765"   # 使用已手工启动的 host
+$env:AHA2_BROWSER_HOST_TOKEN_FILE = "D:\...\token"      # 与上面的 URL 搭配
+$env:AHA2_BROWSER_HOST_ID = "local"
+$env:AHA2_BROWSER_HOST_SCRIPT = "D:\...\browser-host\host.mjs"
+$env:AHA2_NODE_PATH = "C:\Program Files\nodejs\node.exe"
+$env:AHA2_EDGE_PATH = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 ```
 
-## 启动
+## 打包与运行时
+
+`scripts/build-windows-package.sh` 会把 host 源码和 `playwright@1.49.0` 的 Node
+依赖一起放进 `dist/browser-host/`，安装器原样复制到 `{app}\browser-host`。
+安装包会跳过 Playwright 自带浏览器下载（host 启动的是本机 Edge），依赖目录约
+12 MB（452 个文件，主要是 `playwright-core` 的 JS）。
+
+**Node.js 运行时当前不随安装包分发**：内置一份 Node 20 会让安装包增加约
+30 MB（压缩后），且需要额外的签名/升级策略。当前实现优先复用机器上的 Node；
+未找到时资源页显示 `browser_host_node_missing` 并保持失败关闭。如果后续要求
+“无 Node 机器也能用”，建议在安装器中增加可选的 Node 运行时组件，或将 host
+改写为独立可执行文件；这是独立的打包改动，不在本 Task 内静默引入。
+
+## 手工启动（排障）
 
 ```powershell
 $env:AHA2_BROWSER_HOST_TOKEN = "<随机长 token>"
 $env:AHA2_BROWSER_PROFILE_ROOT = "D:\ProgramData\AHA2\browser-profiles"
 $env:AHA2_BROWSER_HOST_ID = "local"
-node host.mjs --port 8765
+node host.mjs --port 8765 --data-dir "D:\ProgramData\AHA2\browser-profiles"
 ```
 
-同时给 AHA2 进程设置**同一个** token。推荐用只允许 owner 读取的 token 文件，
-避免 token 进入 AHA 子进程环境：
-
-```powershell
-$env:AHA2_BROWSER_HOST_URL = "http://127.0.0.1:8765"
-$env:AHA2_BROWSER_HOST_TOKEN_FILE = "D:\ProgramData\AHA2\browser-host.token"
-$env:AHA2_BROWSER_HOST_ID = "local"
-```
-
-`AHA2_BROWSER_HOST_TOKEN` 直接传值也可用，但 AHA2 启动后会立即从自身环境删除它，
-避免 Task 子进程继承。host 侧同样支持 `--token-file <path>`。token 缺失时 host
-拒绝启动；host 只监听 `127.0.0.1`，没有监听地址参数。日志不会打印 token。
+同时给 AHA2 进程设置**同一个** token 和上面的
+`AHA2_BROWSER_HOST_URL`。`AHA2_BROWSER_HOST_TOKEN` 直接传值也可用，但 AHA2
+启动后会立即从自身环境删除它，避免 Task 子进程继承。host 侧同样支持
+`--token-file <path>`。token 缺失时 host 拒绝启动；host 只监听 `127.0.0.1`，
+没有监听地址参数。日志不会打印 token。
 
 可选的 Edge 路径覆盖：
 
@@ -66,12 +94,14 @@ page，不会留下 AHA 无法管理的孤立页面。
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/v1/health` | `host_id`、`platform`、`edge_available`、活跃 profile 列表 |
+| POST | `/v1/shutdown` | 关闭所有浏览器会话并退出（AHA 停止时调用） |
 | POST | `/v1/profiles/{id}/session` | 启动或复用持久化 Edge 窗口（`{"browser_kind":"edge"}`） |
 | GET | `/v1/profiles/{id}/session` | 当前会话状态；没有则 404 `browser_session_not_found` |
 | DELETE | `/v1/profiles/{id}/session` | 关闭窗口并释放目录锁 |
 | POST | `/v1/profiles/{id}/tabs` | 打开 Task 标签页（`{"session_id","url"}`） |
 | POST | `/v1/profiles/{id}/tabs/{tab}/navigate` | 导航（`{"session_id","url"}`） |
 | GET | `/v1/profiles/{id}/tabs/{tab}/snapshot?session_id=` | 返回 `{url,title,text}`，不含 HTML/cookie |
+| GET | `/v1/profiles/{id}/tabs/{tab}/frame?session_id=` | 返回只读 JPEG 画面；200ms 内复用上一帧 |
 | DELETE | `/v1/profiles/{id}/tabs/{tab}?session_id=` | 关闭标签页 |
 
 错误统一为 `{"error":{"code","message"}}`。重点错误码：
@@ -97,10 +127,10 @@ npm test
 本仓库的 Linux 构建机无法运行真实 Edge，因此以下步骤必须由 owner 在浏览器
 主机上手工执行，不能当作已自动验证：
 
-1. 按上面命令启动 host，确认日志只有 `listening on http://127.0.0.1:8765`，
-   没有 token；`GET /v1/health` 返回 `edge_available:true`。
-2. 启动 AHA2（带相同的 `AHA2_BROWSER_HOST_URL/TOKEN`），在资源页创建
-   「工作浏览器」profile。
+1. 不设置 `AHA2_BROWSER_HOST_URL`，正常启动 AHA2；确认日志出现
+   `browser host started`，资源页宿主横幅显示可用且 Edge 可用，页面不再提示
+   配置 URL。
+2. 在资源页创建「工作浏览器」profile。
 3. 点「打开登录窗口」：宿主桌面出现可见 Edge 窗口；登录任意测试站点。
 4. 正常关闭窗口（不是强杀进程）；刷新资源页，状态回到「未初始化」。
 5. 再次打开登录窗口并访问该站点，确认仍是登录态（persistent context 生效）。
@@ -112,6 +142,8 @@ npm test
    - 授权到期时间约为 30 分钟后。
 7. 用同一个 profile 给第二个 Task 建立授权，确认复用了同一个可见窗口，
    且两个 Task 的标签页互不可见/不可操作。
+8. 在面板中打开/选择标签页，确认只读画面出现且 URL/标题正确；切回显示模式或
+   关闭面板后，网络请求停止（Network 面板无新的 frame 请求）。
 8. 关闭会话后，两个 Task 的授权都变为已撤销，操作返回
    `browser_session_closed` / `browser_grant_revoked`。
 9. 停掉 host 再打开登录窗口：AHA 明确返回 `browser_host_unavailable`，

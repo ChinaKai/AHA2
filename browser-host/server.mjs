@@ -12,6 +12,9 @@ export const VERSION = "0.1.0";
 export const LOOPBACK = "127.0.0.1";
 const MAX_BODY = 64 * 1024;
 const MAX_SNAPSHOT_TEXT = 200_000;
+const MAX_FRAME_BYTES = 4 * 1024 * 1024;
+const FRAME_MIN_INTERVAL_MS = 200;
+const FRAME_QUALITY = 55;
 
 function fail(status, code, message) {
   return {status, body: {error: {code, message}}};
@@ -87,9 +90,19 @@ function tabPayload(tab) {
   return {tab: {id: tab.id, url: tab.url, title: tab.title}};
 }
 
+function sendFrame(response, buffer, cached) {
+  response.writeHead(200, {
+    "Content-Type": "image/jpeg",
+    "Cache-Control": "no-store",
+    "Content-Length": buffer.length,
+    "X-AHA2-Frame-Cached": cached ? "1" : "0",
+  });
+  response.end(buffer);
+}
+
 // options: root, token, hostID, chromium (Playwright namespace), edgeExecutable
 export function createHostServer(options) {
-  const {root, token, hostID = "local", chromium, edgeExecutable} = options;
+  const {root, token, hostID = "local", chromium, edgeExecutable, onShutdown} = options;
   if (!chromium || typeof chromium.launchPersistentContext !== "function") {
     throw new Error("createHostServer requires a Playwright-compatible chromium");
   }
@@ -135,6 +148,22 @@ export function createHostServer(options) {
     }
     if (!authorized(request)) {
       return json(response, 401, fail(401, "host_unauthorized", "invalid host token").body);
+    }
+    // AHA's supervisor asks the host to close every browser session and exit
+    // before it falls back to killing the process tree.
+    if (request.url === "/v1/shutdown" && request.method === "POST") {
+      await shutdown();
+      json(response, 202, {ok: true});
+      if (typeof onShutdown === "function") {
+        setTimeout(() => {
+          try {
+            onShutdown();
+          } catch {
+            // The supervisor still has the process kill as a fallback.
+          }
+        }, 10);
+      }
+      return;
     }
     const url = new URL(request.url, `http://${LOOPBACK}`);
     const parts = url.pathname.split("/").filter(Boolean);
@@ -265,11 +294,48 @@ export function createHostServer(options) {
           const navigated = await navigatePage(tab.page, target);
           tab.url = navigated.url;
           tab.title = navigated.title;
+          tab.frame = null;
+          tab.framePending = null;
           return json(response, 200, tabPayload(tab));
         } catch (error) {
           console.error(`tab navigation failed profile=${profileID} diagnostic=${diagnostics(error, root, "")}`);
           return json(response, 502, fail(502, "browser_navigation_failed",
             "页面打开失败或超时").body);
+        }
+      }
+      if (parts.length === 6 && parts[5] === "frame" && request.method === "GET") {
+        // Read-only preview: one JPEG of the page viewport. Frames are throttled
+        // to FRAME_MIN_INTERVAL_MS and reused while the tab is unchanged, so a
+        // fast client cannot turn into an unbounded screenshot loop.
+        const now = Date.now();
+        if (tab.frame && now - tab.frame.at < FRAME_MIN_INTERVAL_MS) {
+          return sendFrame(response, tab.frame.buffer, true);
+        }
+        try {
+          if (!tab.framePending) {
+            const capture = (async () => {
+              const buffer = await tab.page.screenshot({
+                type: "jpeg", quality: FRAME_QUALITY, timeout: 5000,
+              });
+              if (!Buffer.isBuffer(buffer) || buffer.length === 0) {
+                throw new Error("browser screenshot returned no data");
+              }
+              if (buffer.length > MAX_FRAME_BYTES) {
+                throw new Error("browser screenshot exceeded the frame size limit");
+              }
+              return buffer;
+            })();
+            tab.framePending = capture;
+            capture.finally(() => {
+              if (tab.framePending === capture) tab.framePending = null;
+            }).catch(() => {});
+          }
+          const buffer = await tab.framePending;
+          tab.frame = {at: Date.now(), buffer};
+          return sendFrame(response, buffer, false);
+        } catch (error) {
+          console.error(`tab frame failed profile=${profileID} diagnostic=${diagnostics(error, root, "")}`);
+          return json(response, 502, fail(502, "browser_frame_failed", "读取页面画面失败").body);
         }
       }
       if (parts.length === 6 && parts[5] === "snapshot" && request.method === "GET") {

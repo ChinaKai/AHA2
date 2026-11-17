@@ -3,6 +3,7 @@ param(
     [string]$RepoPath = (Split-Path -Parent $PSScriptRoot),
     [string]$InputExe = "",
     [string]$InputTrayExe = "",
+    [string]$InputBrowserHost = "",
 	[string]$InputFeishuPlugin = "",
 	[string]$InputFeishuManifest = "",
     [string]$OutputDir = "",
@@ -34,6 +35,9 @@ if ([string]::IsNullOrWhiteSpace($InputExe)) {
 if ([string]::IsNullOrWhiteSpace($InputTrayExe)) {
     $InputTrayExe = Join-Path $repo "dist\aha2-tray-windows-amd64.exe"
 }
+if ([string]::IsNullOrWhiteSpace($InputBrowserHost)) {
+    $InputBrowserHost = Join-Path $repo "dist\browser-host"
+}
 $defaultFeishuDir = Join-Path $repo "dist\plugins\feishu\windows-amd64"
 if ([string]::IsNullOrWhiteSpace($InputFeishuPlugin) -and [string]::IsNullOrWhiteSpace($InputFeishuManifest)) {
 	$defaultPlugin = Join-Path $defaultFeishuDir "aha2-channel-feishu.exe"
@@ -51,6 +55,7 @@ if ([string]::IsNullOrWhiteSpace($OutputDir)) {
 }
 $inputPath = [IO.Path]::GetFullPath($InputExe)
 $trayInputPath = [IO.Path]::GetFullPath($InputTrayExe)
+$browserHostPath = [IO.Path]::GetFullPath($InputBrowserHost)
 $feishuPluginPath = if ([string]::IsNullOrWhiteSpace($InputFeishuPlugin)) { "" } else { [IO.Path]::GetFullPath($InputFeishuPlugin) }
 $feishuManifestPath = if ([string]::IsNullOrWhiteSpace($InputFeishuManifest)) { "" } else { [IO.Path]::GetFullPath($InputFeishuManifest) }
 $outputPath = [IO.Path]::GetFullPath($OutputDir)
@@ -69,6 +74,9 @@ $requiredContracts = @(
     '#define SourceTrayExe',
     'DestName: "aha2.exe"',
     'DestName: "aha2-tray.exe"',
+    'DestDir: "{app}\browser-host"',
+    "recursesubdirs",
+    "SourceBrowserHost",
 	'DestName: "Hysteria-LICENSE.txt"',
 	'DestName: "yaml-v3-LICENSE.txt"',
 	'DestName: "Xray-core-MPL-2.0.txt"',
@@ -134,9 +142,10 @@ foreach ($forbidden in @("service run --listen", "actions= restart/", "Configure
 if ($ValidateOnly) {
     $serverState = if (Test-Path -LiteralPath $inputPath -PathType Leaf) {"found"} else {"not present"}
     $trayState = if (Test-Path -LiteralPath $trayInputPath -PathType Leaf) {"found"} else {"not present"}
+    $browserHostState = if (Test-Path -LiteralPath (Join-Path $browserHostPath "host.mjs") -PathType Leaf) {"found"} else {"not present"}
 	$feishuState = if ($feishuPluginPath -and (Test-Path -LiteralPath $feishuPluginPath -PathType Leaf) -and (Test-Path -LiteralPath $feishuManifestPath -PathType Leaf)) { "found" } else { "not bundled" }
 	$mode = if ($PerUser) { "per-user" } else { "per-machine" }
-	Write-Output "Installer definition valid ($mode); server input $serverState; tray input $trayState; Feishu plugin $feishuState."
+	Write-Output "Installer definition valid ($mode); server input $serverState; tray input $trayState; browser host $browserHostState; Feishu plugin $feishuState."
     exit 0
 }
 
@@ -145,6 +154,9 @@ if (-not (Test-Path -LiteralPath $inputPath -PathType Leaf)) {
 }
 if (-not (Test-Path -LiteralPath $trayInputPath -PathType Leaf)) {
     throw "Windows amd64 tray executable not found: $trayInputPath"
+}
+if (-not (Test-Path -LiteralPath (Join-Path $browserHostPath "host.mjs") -PathType Leaf)) {
+    throw "Browser host package not found: $browserHostPath\host.mjs"
 }
 if ($feishuPluginPath -and ((-not (Test-Path -LiteralPath $feishuPluginPath -PathType Leaf)) -or (-not (Test-Path -LiteralPath $feishuManifestPath -PathType Leaf)))) {
 	throw "Feishu plugin bundle inputs were not found."
@@ -198,6 +210,7 @@ $compilerArgs = @(
 	"/DMyAppVersion=$normalizedVersion",
 	"/DSourceExe=$inputPath",
 	"/DSourceTrayExe=$trayInputPath",
+	"/DSourceBrowserHost=$browserHostPath",
 	"/DOutputDir=$outputPath"
 )
 if ($feishuPluginPath) {

@@ -18,15 +18,30 @@ import {createHostServer, LOOPBACK, VERSION} from "./server.mjs";
 import {createInstanceLock} from "./lock.mjs";
 
 function parseArgs(argv) {
-  const options = {port: 8765, dataDir: process.env.AHA2_BROWSER_PROFILE_ROOT || "", tokenFile: ""};
+  const options = {port: 8765, dataDir: process.env.AHA2_BROWSER_PROFILE_ROOT || "", tokenFile: "", parentPID: 0};
   for (let index = 0; index < argv.length; index++) {
     const value = argv[index];
     if (value === "--port") options.port = Number(argv[++index]);
     else if (value === "--data-dir") options.dataDir = argv[++index];
     else if (value === "--token-file") options.tokenFile = argv[++index];
+    else if (value === "--parent-pid") options.parentPID = Number(argv[++index]);
     else if (value === "--help" || value === "-h") options.help = true;
   }
   return options;
+}
+
+// AHA starts the host as a child; if AHA is killed without running its shutdown
+// path, the host must not keep an invisible Edge session alive forever.
+function watchParent(parentPID, onGone) {
+  if (!Number.isInteger(parentPID) || parentPID <= 0) return;
+  setInterval(() => {
+    try {
+      process.kill(parentPID, 0);
+    } catch {
+      console.error("parent process is gone; shutting down");
+      onGone();
+    }
+  }, 3000).unref();
 }
 
 function readToken(options) {
@@ -64,7 +79,7 @@ export function edgeExecutable() {
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options.help) {
-    console.log("usage: node host.mjs --port 8765 --data-dir <profile-root>");
+    console.log("usage: node host.mjs --port 8765 --data-dir <profile-root> [--parent-pid <pid>]");
     console.log("token: AHA2_BROWSER_HOST_TOKEN (required)");
     return;
   }
@@ -90,14 +105,15 @@ async function main() {
     process.exit(3);
   }
   const {chromium} = await import("playwright");
+  let shuttingDown = false;
   const host = createHostServer({
     root,
     token,
     hostID: process.env.AHA2_BROWSER_HOST_ID || "local",
     chromium,
     edgeExecutable,
+    onShutdown: () => void shutdown("http"),
   });
-  let shuttingDown = false;
   const shutdown = async signal => {
     if (shuttingDown) return;
     shuttingDown = true;
@@ -109,6 +125,7 @@ async function main() {
   };
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  watchParent(options.parentPID, () => void shutdown("parent-exit"));
 
   host.server.on("error", async error => {
     console.error("browser host listen failed", String(error && error.message || error));

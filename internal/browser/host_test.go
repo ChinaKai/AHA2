@@ -132,3 +132,35 @@ func TestHostClientTimeoutExceedsNavigationDeadline(t *testing.T) {
 		t.Fatalf("client timeout %v must exceed the host's 30s navigation deadline", browser.DefaultHostTimeout)
 	}
 }
+
+func TestHTTPHostFrameReturnsImageAndMapsHostFailures(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/v1/profiles/profile_1/tabs/tab_1/frame":
+			writer.Header().Set("Content-Type", "image/jpeg")
+			_, _ = writer.Write([]byte{0xff, 0xd8, 0xff, 0xd9})
+		default:
+			writer.Header().Set("Content-Type", "application/json")
+			writer.WriteHeader(http.StatusBadGateway)
+			_ = json.NewEncoder(writer).Encode(map[string]any{"error": map[string]string{
+				"code": "browser_frame_failed", "message": "C:\\Users\\owner\\screenshot failed",
+			}})
+		}
+	}))
+	defer server.Close()
+	host := browser.NewHTTPHost(server.URL, "token")
+	frame, err := host.Frame(context.Background(), "profile_1", "session_1", "tab_1")
+	if err != nil {
+		t.Fatalf("frame: %v", err)
+	}
+	if frame.ContentType != "image/jpeg" || len(frame.Data) != 4 || frame.Data[0] != 0xff {
+		t.Fatalf("frame=%#v", frame)
+	}
+	_, err = host.Frame(context.Background(), "profile_1", "session_1", "tab_2")
+	if browser.Code(err) != "browser_frame_failed" {
+		t.Fatalf("frame error mapping: %v", err)
+	}
+	if strings.Contains(err.Error(), "screenshot failed") || strings.Contains(err.Error(), `C:\`) {
+		t.Fatalf("frame diagnostics leaked: %v", err)
+	}
+}

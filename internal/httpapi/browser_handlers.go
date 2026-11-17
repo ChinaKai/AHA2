@@ -3,6 +3,7 @@ package httpapi
 import (
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,6 +34,7 @@ func (s *Server) registerBrowserRoutes(mux *http.ServeMux) {
 	mux.Handle("DELETE /api/v1/browser-grants/{id}/tabs/{tab}", s.withAuth(http.HandlerFunc(s.closeBrowserTab)))
 	mux.Handle("POST /api/v1/browser-grants/{id}/tabs/{tab}/navigate", s.withAuth(http.HandlerFunc(s.navigateBrowserTab)))
 	mux.Handle("GET /api/v1/browser-grants/{id}/tabs/{tab}/snapshot", s.withAuth(http.HandlerFunc(s.snapshotBrowserTab)))
+	mux.Handle("GET /api/v1/browser-grants/{id}/tabs/{tab}/frame", s.withAuth(http.HandlerFunc(s.browserTabFrame)))
 }
 
 func (s *Server) browserServiceOrError(writer http.ResponseWriter) *browser.Service {
@@ -367,6 +369,27 @@ func (s *Server) snapshotBrowserTab(writer http.ResponseWriter, request *http.Re
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "snapshot": snapshot})
+}
+
+// browserTabFrame streams one read-only preview image. Frames are not audited,
+// not cached by the browser and never written to disk; the client stops
+// polling when the owner closes the panel.
+func (s *Server) browserTabFrame(writer http.ResponseWriter, request *http.Request) {
+	service := s.browserServiceOrError(writer)
+	if service == nil {
+		return
+	}
+	frame, err := service.TabFrame(request.Context(), browserActor(request),
+		request.PathValue("id"), request.PathValue("tab"))
+	if err != nil {
+		writeBrowserFailure(writer, err)
+		return
+	}
+	writer.Header().Set("Content-Type", frame.ContentType)
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.Header().Set("Content-Length", strconv.Itoa(len(frame.Data)))
+	writer.WriteHeader(http.StatusOK)
+	_, _ = writer.Write(frame.Data)
 }
 
 func (s *Server) closeBrowserTab(writer http.ResponseWriter, request *http.Request) {

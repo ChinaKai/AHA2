@@ -195,6 +195,44 @@ func TestHostFailuresAreTypedAndRecoverable(t *testing.T) {
 	}
 }
 
+func TestTabFrameFollowsGrantAndTabOwnership(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	profile := createProfile(t, f)
+	grant, err := f.service.CreateGrant(ctx, "owner", f.task.ID, profile.ID,
+		[]string{domain.BrowserCapabilityOpenTab, domain.BrowserCapabilitySnapshot}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tab, err := f.service.OpenTab(ctx, "owner", grant.ID, "https://example.com/login")
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame, err := f.service.TabFrame(ctx, "owner", grant.ID, tab.ID)
+	if err != nil || frame.ContentType != "image/jpeg" || len(frame.Data) == 0 {
+		t.Fatalf("frame=%#v err=%v", frame, err)
+	}
+	if f.host.FrameCalls != 1 {
+		t.Fatalf("host frame calls=%d, want 1", f.host.FrameCalls)
+	}
+	// Preview reads must not be audited per frame.
+	events, err := f.store.BrowserAuditEvents(ctx, "browser_tab.frame", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("frame polling wrote %d audit rows", len(events))
+	}
+	if _, err := f.service.RevokeGrant(ctx, "owner", grant.ID); err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.service.TabFrame(ctx, "owner", grant.ID, tab.ID)
+	requireCode(t, err, "browser_grant_revoked")
+	if f.host.FrameCalls != 1 {
+		t.Fatalf("host was called after revocation: %d", f.host.FrameCalls)
+	}
+}
+
 func TestGrantExpiryAndRevocationFailClosed(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)
