@@ -230,6 +230,22 @@ export interface HardwareIOPurgeResult {
   duration_ms: number;
 }
 
+// Mirrors domain.DatabasePurgeProgress: the live phase and counters of a
+// manual B/C cleanup while the purge request is still running.
+export interface DatabasePurgeProgress {
+  kind: "hardware_io" | "conversation" | string;
+  running: boolean;
+  phase: "idle" | "preparing" | "backup" | "deleting" | "done" | "skipped" | "failed" | string;
+  planned_rows: number;
+  deleted_rows: number;
+  batches: number;
+  started_at: string;
+  updated_at: string;
+  duration_ms: number;
+  skip_reason?: string;
+  error?: string;
+}
+
 export interface ProxySettings {
   mode: "off" | "external" | "managed_hysteria2";
   http_proxy: string;

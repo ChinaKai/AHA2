@@ -101,6 +101,20 @@ func (s *Server) previewHardwareIOPurge(writer http.ResponseWriter, request *htt
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "plan": plan})
 }
 
+// purgeProgress is a read-only snapshot for the Web's progress poll. The purge
+// request itself stays synchronous; this only mirrors its phase and counters.
+func (s *Server) purgeProgress(writer http.ResponseWriter, kind string) {
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "progress": s.store.PurgeProgress(kind)})
+}
+
+func (s *Server) hardwareIOPurgeProgress(writer http.ResponseWriter, request *http.Request) {
+	s.purgeProgress(writer, domain.DatabasePurgeKindHardwareIO)
+}
+
+func (s *Server) conversationPurgeProgress(writer http.ResponseWriter, request *http.Request) {
+	s.purgeProgress(writer, domain.DatabasePurgeKindConversation)
+}
+
 func (s *Server) purgeHardwareIO(writer http.ResponseWriter, request *http.Request) {
 	payload, settings, ok := s.retentionRequest(writer, request)
 	if !ok {

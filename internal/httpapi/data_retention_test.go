@@ -39,6 +39,8 @@ func TestHardwareIORetentionEndpoints(t *testing.T) {
 		{http.MethodPut, "/api/v1/system/data/hardware-io/retention"},
 		{http.MethodPost, "/api/v1/system/data/hardware-io/preview"},
 		{http.MethodPost, "/api/v1/system/data/hardware-io/purge"},
+		{http.MethodGet, "/api/v1/system/data/hardware-io/purge/progress"},
+		{http.MethodGet, "/api/v1/system/data/conversation/purge/progress"},
 	} {
 		response := requestJSON(t, anonymous, route.method, server.URL+route.path, map[string]any{"confirm": true}, "")
 		response.Body.Close()
@@ -148,6 +150,15 @@ func TestHardwareIORetentionEndpoints(t *testing.T) {
 	}
 	if hardwareIORows(t, raw) != 20 {
 		t.Fatalf("rows after purge=%d", hardwareIORows(t, raw))
+	}
+	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/system/data/hardware-io/purge/progress", nil, "")
+	var progress struct {
+		Progress domain.DatabasePurgeProgress `json:"progress"`
+	}
+	decodeResponse(t, response, &progress)
+	if response.StatusCode != http.StatusOK || progress.Progress.Running || progress.Progress.Phase != domain.DatabasePurgePhaseDone ||
+		progress.Progress.DeletedRows != 30 || progress.Progress.Batches != 1 {
+		t.Fatalf("purge progress status=%d body=%#v", response.StatusCode, progress.Progress)
 	}
 	var oldest string
 	if err := raw.QueryRowContext(ctx, `SELECT created_at FROM hardware_io ORDER BY sequence LIMIT 1`).Scan(&oldest); err != nil {

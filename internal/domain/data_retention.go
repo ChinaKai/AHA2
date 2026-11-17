@@ -238,6 +238,37 @@ const (
 	HardwareIOPurgeSkipCanceled        = "canceled"
 )
 
+// DatabasePurgeProgress is the live state of one manual B/C cleanup. The purge
+// request itself stays synchronous; this snapshot lets the Web show the phase,
+// deleted rows and batch count while that request is still running. It carries
+// only counts and phases, never row contents or file paths.
+type DatabasePurgeProgress struct {
+	Kind        string    `json:"kind"`
+	Running     bool      `json:"running"`
+	Phase       string    `json:"phase"`
+	PlannedRows int64     `json:"planned_rows"`
+	DeletedRows int64     `json:"deleted_rows"`
+	Batches     int       `json:"batches"`
+	StartedAt   time.Time `json:"started_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	DurationMS  int64     `json:"duration_ms"`
+	SkipReason  string    `json:"skip_reason,omitempty"`
+	Error       string    `json:"error,omitempty"`
+}
+
+const (
+	DatabasePurgeKindHardwareIO   = "hardware_io"
+	DatabasePurgeKindConversation = "conversation"
+
+	DatabasePurgePhaseIdle      = "idle"
+	DatabasePurgePhasePreparing = "preparing"
+	DatabasePurgePhaseBackup    = "backup"
+	DatabasePurgePhaseDeleting  = "deleting"
+	DatabasePurgePhaseDone      = "done"
+	DatabasePurgePhaseSkipped   = "skipped"
+	DatabasePurgePhaseFailed    = "failed"
+)
+
 // DatabaseCompactionPlan is the preflight report of one manual database
 // compaction. It never changes the database. RequiredTempBytes covers the
 // VACUUM temporary file plus the backup copy (~2.2x the database file).

@@ -407,6 +407,10 @@ func TestPurgeHardwareIODeletesOnlyOldRowsInBatches(t *testing.T) {
 	if result.Plan.RemainingEligibleEstimate != 23_559-22_000 {
 		t.Fatalf("remaining=%d", result.Plan.RemainingEligibleEstimate)
 	}
+	progress := database.PurgeProgress(domain.DatabasePurgeKindHardwareIO)
+	if progress.Running || progress.Phase != domain.DatabasePurgePhaseDone || progress.PlannedRows != 22_000 || progress.DeletedRows != 22_000 || progress.Batches != 3 {
+		t.Fatalf("progress after run=%#v", progress)
+	}
 	if hardwareIOCount(t, database) != 3_000 {
 		t.Fatalf("rows after first run=%d", hardwareIOCount(t, database))
 	}
@@ -432,6 +436,10 @@ func TestPurgeHardwareIODeletesOnlyOldRowsInBatches(t *testing.T) {
 	result, err = database.PurgeHardwareIO(ctx, settings, now)
 	if err != nil || result.DeletedRows != 0 || result.SkipReason != domain.HardwareIOPurgeSkipNothingEligible {
 		t.Fatalf("third run=%#v err=%v", result, err)
+	}
+	progress = database.PurgeProgress(domain.DatabasePurgeKindHardwareIO)
+	if progress.Running || progress.Phase != domain.DatabasePurgePhaseSkipped || progress.SkipReason != domain.HardwareIOPurgeSkipNothingEligible {
+		t.Fatalf("progress after skip=%#v", progress)
 	}
 	var audits int
 	if err := database.db.QueryRow(`SELECT COUNT(*) FROM audit_events`).Scan(&audits); err != nil || audits != 1 {

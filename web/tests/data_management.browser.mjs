@@ -70,6 +70,21 @@ const HARDWARE_PLAN = {
   run_rows: 200000, avg_row_bytes: 180, run_bytes_estimate: 36_000_000,
   eligible_bytes_estimate: 1_080_000_000, remaining_eligible_estimate: 5_800_000,
 };
+const CONVERSATION_PLAN = {
+  retention_days: 30, purge_tool: true, purge_update: false, categories: ["tool"],
+  cutoff: "2026-10-17T00:00:00Z", eligible_rows: 1200, run_rows: 1200,
+  tasks_affected: 7, avg_row_bytes: 180, run_bytes_estimate: 216_000,
+};
+window.__compactionResolvers = [];
+window.__hardwareCalls = [];
+window.__purgeResolvers = {};
+window.__purgeProgress = {
+  hardware_io: {kind: "hardware_io", running: false, phase: "idle", planned_rows: 0, deleted_rows: 0, batches: 0, duration_ms: 0},
+  conversation: {kind: "conversation", running: false, phase: "idle", planned_rows: 0, deleted_rows: 0, batches: 0, duration_ms: 0},
+};
+window.__resolvePurge = (kind, body, status = 200) => {
+  window.__purgeResolvers[kind](new Response(JSON.stringify(body), {status, headers: {"Content-Type": "application/json"}}));
+};
 window.__compactionResolvers = [];
 window.__hardwareCalls = [];
 window.__backupMode = "ok";
@@ -96,6 +111,22 @@ window.fetch = async (input, init = {}) => {
     const body = JSON.parse(init.body || "{}");
     window.__hardwareCalls.push({kind: "preview", body});
     return json({ok: true, plan: {...HARDWARE_PLAN, retention_days: body.retention_days, max_delete_rows: body.max_delete_rows}});
+  }
+  if (path === "/api/v1/system/data/hardware-io/purge/progress") {
+    return json({ok: true, progress: window.__purgeProgress.hardware_io});
+  }
+  if (path === "/api/v1/system/data/hardware-io/purge") {
+    return new Promise(resolve => { window.__purgeResolvers.hardware = resolve; });
+  }
+  if (path === "/api/v1/system/data/conversation/preview") {
+    const body = JSON.parse(init.body || "{}");
+    return json({ok: true, plan: {...CONVERSATION_PLAN, retention_days: body.retention_days, purge_tool: body.purge_tool, purge_update: body.purge_update}});
+  }
+  if (path === "/api/v1/system/data/conversation/purge/progress") {
+    return json({ok: true, progress: window.__purgeProgress.conversation});
+  }
+  if (path === "/api/v1/system/data/conversation/purge") {
+    return new Promise(resolve => { window.__purgeResolvers.conversation = resolve; });
   }
   if (path === "/api/v1/system/data/backups") {
     if (window.__backupMode === "error") return json({ok: false, error: "data_cleanup_preview_failed", message: "backup scan failed"}, 500);
@@ -257,17 +288,106 @@ try {
   for (const call of hardwareCalls) {
     assert.deepEqual(call.body, {retention_days: 30, max_delete_rows: 200000}, `${call.kind} sends the internal batch cap`);
   }
-  // An open modal defers page renders, so the preview summary appears after
-  // closing and reopening the dialog (the plan itself is retained in state).
-  await page.locator('dialog[data-db-dialog="C"] [data-db-dialog-close]').click();
-  await page.waitForFunction(() => document.querySelector('dialog[data-db-dialog="C"]')?.open === false);
-  await page.locator('[data-db-cleanup="C"]').click();
-  await page.waitForSelector('dialog[data-db-dialog="C"][open]');
-  await page.waitForSelector('dialog[data-db-dialog="C"] [data-db-plan]');
+  // The preview writes its plan into the open dialog in place: no close/reopen
+  // and no page refresh are allowed to be required.
+  await page.waitForSelector('dialog[data-db-dialog="C"] [data-db-plan]', {timeout: 15000});
+  const previewText = await page.locator('dialog[data-db-dialog="C"]').innerText();
+  assert.match(previewText, /截止时间/, "the preview cutoff appears while the dialog stays open");
+  assert.match(previewText, /本次将删除 200,000 行/, "the preview run size appears in place");
   assert.equal(await page.locator('dialog[data-db-dialog="C"] [data-hardware-io-purge]').isDisabled(), false, "a matching preview enables cleanup");
   await page.screenshot({path: resolve(screenshots, "data-management-c-dialog-390.png"), fullPage: false});
+
+  // Confirmed cleanup: the server keeps the request open, so the dialog polls
+  // the progress endpoint and shows phase + deleted rows + batches.
+  await page.evaluate(() => {
+    window.__purgeProgress.hardware_io = {
+      kind: "hardware_io", running: true, phase: "deleting", planned_rows: 200000,
+      deleted_rows: 30000, batches: 3, started_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(), duration_ms: 2500,
+    };
+  });
+  await page.locator('dialog[data-db-dialog="C"] [data-hardware-io-purge]').click();
+  await page.waitForSelector('dialog[data-db-dialog="C"] [data-db-progress]', {timeout: 15000});
+  await page.waitForFunction(
+    () => (document.querySelector('dialog[data-db-dialog="C"] [data-db-progress]')?.textContent || "").includes("30,000"),
+    null,
+    {timeout: 15000},
+  );
+  const progressText = await page.locator('dialog[data-db-dialog="C"] [data-db-progress]').innerText();
+  assert.match(progressText, /正在删除旧数据/);
+  assert.match(progressText, /已删除 30,000 行，共 3 批/);
+  assert.match(progressText, /本次计划删除 200,000 行/);
+
+  await page.evaluate(() => {
+    window.__purgeProgress.hardware_io = {...window.__purgeProgress.hardware_io, running: false, phase: "done", deleted_rows: 200000, batches: 20};
+    window.__resolvePurge("hardware", {
+      ok: true,
+      result: {plan: {}, backup_path: "/srv/aha2/backups/hardware-io-1/aha2.db", deleted_rows: 200000, batches: 20, batch_size: 10000, partial: false, duration_ms: 5000},
+      database: STATS,
+    });
+  });
+  await page.waitForSelector('dialog[data-db-dialog="C"] [data-db-result]', {timeout: 15000});
+  const resultText = await page.locator('dialog[data-db-dialog="C"] [data-db-result]').innerText();
+  assert.match(resultText, /已删除 200,000 行，共 20 批/);
+  assert.match(resultText, /hardware-io-1/);
+  assert.equal(await page.locator('dialog[data-db-dialog="C"] [data-db-progress]').count(), 0, "the finished run replaces progress with its result");
+
+  // A failed run keeps the message and any partial result in the dialog and
+  // releases every button instead of spinning forever.
+  await page.locator('dialog[data-db-dialog="C"] [data-hardware-io-preview]').click();
+  await page.waitForSelector('dialog[data-db-dialog="C"] [data-db-plan]', {timeout: 15000});
+  await page.evaluate(() => { delete window.__purgeResolvers.hardware; });
+  await page.locator('dialog[data-db-dialog="C"] [data-hardware-io-purge]').click();
+  await page.waitForFunction(() => Boolean(window.__purgeResolvers.hardware), null, {timeout: 15000});
+  await page.evaluate(() => {
+    window.__purgeProgress.hardware_io = {...window.__purgeProgress.hardware_io, running: false, phase: "failed"};
+    window.__resolvePurge("hardware", {
+      ok: false, error: "hardware_io_purge_failed", message: "backup failed",
+      result: {plan: {}, deleted_rows: 5000, batches: 1, batch_size: 10000, partial: true, duration_ms: 900},
+    }, 500);
+  });
+  await page.waitForSelector('dialog[data-db-dialog="C"] [data-hardware-io-action-error]', {timeout: 15000});
+  const failedText = await page.locator('dialog[data-db-dialog="C"]').innerText();
+  assert.match(failedText, /backup failed/);
+  assert.match(failedText, /只完成了一部分/);
+  assert.equal(await page.locator('dialog[data-db-dialog="C"] [data-db-progress]').count(), 0, "a failed run clears the progress block");
+  assert.equal(await page.locator('dialog[data-db-dialog="C"] [data-hardware-io-preview]').isDisabled(), false, "a failed run releases the dialog buttons");
   await page.locator('dialog[data-db-dialog="C"] [data-db-dialog-close]').click();
   await page.waitForFunction(() => document.querySelector('dialog[data-db-dialog="C"]')?.open === false);
+
+  // B conversation cleanup has the same in-place preview, progress and result.
+  await page.locator('[data-db-cleanup="B"]').click();
+  await page.waitForSelector('dialog[data-db-dialog="B"][open]', {timeout: 15000});
+  await page.locator('dialog[data-db-dialog="B"] [data-conversation-preview]').click();
+  await page.waitForSelector('dialog[data-db-dialog="B"] [data-conversation-plan]', {timeout: 15000});
+  assert.equal(await page.locator('dialog[data-db-dialog="B"] [data-conversation-purge]').isDisabled(), false, "the B preview enables cleanup in place");
+  await page.evaluate(() => {
+    window.__purgeProgress.conversation = {
+      kind: "conversation", running: true, phase: "deleting", planned_rows: 1200,
+      deleted_rows: 400, batches: 1, started_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(), duration_ms: 1500,
+    };
+    delete window.__purgeResolvers.conversation;
+  });
+  await page.locator('dialog[data-db-dialog="B"] [data-conversation-purge]').click();
+  await page.waitForSelector('dialog[data-db-dialog="B"] [data-db-progress]', {timeout: 15000});
+  await page.waitForFunction(
+    () => (document.querySelector('dialog[data-db-dialog="B"] [data-db-progress]')?.textContent || "").includes("400"),
+    null,
+    {timeout: 15000},
+  );
+  await page.evaluate(() => {
+    window.__purgeProgress.conversation = {...window.__purgeProgress.conversation, running: false, phase: "done", deleted_rows: 1200, batches: 2};
+    window.__resolvePurge("conversation", {
+      ok: true,
+      result: {plan: {}, deleted_rows: 1200, batches: 2, batch_size: 10000, partial: false, duration_ms: 2000},
+      database: STATS,
+    });
+  });
+  await page.waitForSelector('dialog[data-db-dialog="B"] [data-conversation-result]', {timeout: 15000});
+  assert.match(await page.locator('dialog[data-db-dialog="B"] [data-conversation-result]').innerText(), /已删除 1,200 行，共 2 批/);
+  await page.locator('dialog[data-db-dialog="B"] [data-db-dialog-close]').click();
+  await page.waitForFunction(() => document.querySelector('dialog[data-db-dialog="B"]')?.open === false);
 
   // Backup preview must replace "reading" in place while the dialog stays
   // open, then fail into a retry that can recover.

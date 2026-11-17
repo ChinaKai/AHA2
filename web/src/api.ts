@@ -26,6 +26,7 @@ import type {
   DatabaseStats,
   DatabaseCompactionPlan,
   DatabaseCompactionResult,
+  DatabasePurgeProgress,
   ConversationRetentionSettings,
   ConversationPurgePlan,
   ConversationPurgeResult,
@@ -275,6 +276,10 @@ class APIClient {
     return this.request("/api/v1/system/data/conversation/purge", {method: "POST", body: JSON.stringify(payload)});
   }
 
+  conversationPurgeProgress(): Promise<{ok: boolean; progress: DatabasePurgeProgress}> {
+    return this.request("/api/v1/system/data/conversation/purge/progress");
+  }
+
   databaseCompactionPlan(): Promise<{ok: boolean; plan: DatabaseCompactionPlan}> {
     return this.request("/api/v1/system/data/database/compaction");
   }
@@ -297,6 +302,10 @@ class APIClient {
 
   purgeHardwareIO(payload: {retention_days: number; max_delete_rows: number; confirm: boolean}): Promise<{ok: boolean; result: HardwareIOPurgeResult; database?: DatabaseStats}> {
     return this.request("/api/v1/system/data/hardware-io/purge", {method: "POST", body: JSON.stringify(payload)});
+  }
+
+  hardwareIOPurgeProgress(): Promise<{ok: boolean; progress: DatabasePurgeProgress}> {
+    return this.request("/api/v1/system/data/hardware-io/purge/progress");
   }
 
   proxySettings(): Promise<{proxy: ProxySettings; managed?: ManagedProxyView}> {

@@ -6,6 +6,7 @@ import type {
   DatabaseCategory,
   DatabaseCompactionPlan,
   DatabaseCompactionResult,
+  DatabasePurgeProgress,
   DatabaseSafety,
   DatabaseStats,
   DatabaseTableStat,
@@ -29,9 +30,15 @@ export interface DataRetentionViewState {
   plan: HardwareIOPurgePlan | null;
   result: HardwareIOPurgeResult | null;
   busy: "" | "save" | "preview" | "purge";
+  // Last server-side failure for the C dialog. Kept in state so it survives
+  // the in-place body refresh instead of only living in the global banner.
+  actionError: string;
+  progress: DatabasePurgeProgress | null;
   conversationPlan: ConversationPurgePlan | null;
   conversationResult: ConversationPurgeResult | null;
   conversationBusy: "" | "save" | "preview" | "purge";
+  conversationActionError: string;
+  conversationProgress: DatabasePurgeProgress | null;
   compactionPlan: DatabaseCompactionPlan | null;
   compactionResult: DatabaseCompactionResult | null;
   compactionBusy: boolean;
@@ -193,6 +200,31 @@ function conversationResultSummary(result: ConversationPurgeResult): string {
   </div>`;
 }
 
+// purgeProgressSummary mirrors the server's live purge phase. It is rendered
+// only while the cleanup request is in flight: the phase, deleted rows, batch
+// count and elapsed seconds keep changing instead of freezing on "reading".
+function purgePhaseText(phase: string): string {
+  const fallback = "preparing";
+  const key = `data.db.phase.${phase || fallback}`;
+  const text = t(key);
+  return text === key ? t(`data.db.phase.${fallback}`) : text;
+}
+
+function purgeProgressSummary(progress: DatabasePurgeProgress | null): string {
+  const rows = Math.max(0, progress?.deleted_rows || 0);
+  const batches = Math.max(0, progress?.batches || 0);
+  const seconds = Math.max(0, Math.floor((progress?.duration_ms || 0) / 1000));
+  const planned = Math.max(0, progress?.planned_rows || 0);
+  const plannedLine = planned > 0
+    ? `<p class="field-help">${t("data.db.purgePlanned", {rows: formatLocaleNumber(planned)})}</p>`
+    : "";
+  return `<div class="data-db-progress" data-db-progress>
+    <p><strong>${escapeHTML(purgePhaseText(progress?.phase || "preparing"))}</strong></p>
+    <p>${t("data.db.purgeProgress", {rows: formatLocaleNumber(rows), batches, seconds})}</p>
+    ${plannedLine}
+  </div>`;
+}
+
 // purgeEnabled is true only for a preview that would delete rows and matches
 // the values currently in the form, so the confirmed run is the one previewed.
 export function purgeEnabled(state: DataRetentionViewState, days: number, rows: number): boolean {
@@ -246,10 +278,12 @@ function hardwareDialogBody(state: DataRetentionViewState, category: DatabaseCat
     <div class="data-cleanup-actions">
       <button type="button" data-hardware-io-save ${busy ? "disabled" : ""}>${t("data.db.save")}</button>
       <button type="button" data-hardware-io-preview ${busy ? "disabled" : ""}>${t("data.db.preview")}</button>
-      <button type="button" class="danger" data-hardware-io-purge ${canPurge ? "" : "disabled"}>${t("data.db.purge")}</button>
+      <button type="button" class="danger" data-hardware-io-purge ${canPurge ? "" : "disabled"}>${state.busy === "purge" ? t("data.db.purging") : t("data.db.purge")}</button>
     </div>
     <p class="form-error" data-hardware-io-form-error hidden></p>
+    ${state.actionError ? `<p class="form-error" data-hardware-io-action-error>${escapeHTML(state.actionError)}</p>` : ""}
     <p class="field-help data-cleanup-note">${t("data.db.purgeHelp")}</p>
+    ${state.busy === "purge" ? purgeProgressSummary(state.progress) : ""}
     ${state.plan ? hardwarePlanSummary(state.plan) : ""}
     ${state.result ? hardwareResultSummary(state.result) : ""}
     <p class="field-help data-cleanup-note">${t("data.db.vacuumNote")}</p>`;
@@ -271,10 +305,12 @@ function conversationDialogBody(state: DataRetentionViewState, category: Databas
     <div class="data-cleanup-actions">
       <button type="button" data-conversation-save ${busy ? "disabled" : ""}>${t("data.db.save")}</button>
       <button type="button" data-conversation-preview ${busy ? "disabled" : ""}>${t("data.db.preview")}</button>
-      <button type="button" class="danger" data-conversation-purge ${canPurge ? "" : "disabled"}>${t("data.db.purge")}</button>
+      <button type="button" class="danger" data-conversation-purge ${canPurge ? "" : "disabled"}>${state.conversationBusy === "purge" ? t("data.db.purging") : t("data.db.purge")}</button>
     </div>
     <p class="form-error" data-conversation-form-error hidden></p>
+    ${state.conversationActionError ? `<p class="form-error" data-conversation-action-error>${escapeHTML(state.conversationActionError)}</p>` : ""}
     <p class="field-help data-cleanup-note">${t("data.db.conversationHelp")}</p>
+    ${state.conversationBusy === "purge" ? purgeProgressSummary(state.conversationProgress) : ""}
     ${state.conversationPlan ? conversationPlanSummary(state.conversationPlan) : ""}
     ${state.conversationResult ? conversationResultSummary(state.conversationResult) : ""}
     <p class="field-help data-cleanup-note">${t("data.db.vacuumNote")}</p>`;
@@ -286,17 +322,23 @@ function readOnlyDialogBody(category: DatabaseCategory): string {
     <p class="field-help data-cleanup-note">${t("data.db.readOnlyProtect")}</p>`;
 }
 
+// categoryDialogBody is the inner body shared by the full panel render and the
+// in-place dialog refresh. main.ts replaces only `.data-db-dialog-body` while a
+// modal is open, because the global render deliberately defers then.
+export function categoryDialogBody(state: DataRetentionViewState, category: DatabaseCategory): string {
+  if (category.cleanup === "hardware_io") return hardwareDialogBody(state, category);
+  if (category.cleanup === "conversation") return conversationDialogBody(state, category);
+  return readOnlyDialogBody(category);
+}
+
 function categoryDialog(state: DataRetentionViewState, category: DatabaseCategory): string {
-  let body = readOnlyDialogBody(category);
   let title = categoryName(category);
   if (category.cleanup === "hardware_io") {
-    body = hardwareDialogBody(state, category);
     title = `${categoryName(category)} · ${t("data.db.hardwareTitle")}`;
   } else if (category.cleanup === "conversation") {
-    body = conversationDialogBody(state, category);
     title = `${categoryName(category)} · ${t("data.db.conversationTitle")}`;
   }
-  return dialogShell(category.id, title, body);
+  return dialogShell(category.id, title, categoryDialogBody(state, category));
 }
 
 function compactionResultSummary(result: DatabaseCompactionResult): string {

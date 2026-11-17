@@ -63,6 +63,10 @@ type Store struct {
 	legacyRootsGate func(projectID string) bool
 
 	databaseStats databaseStatsCache
+
+	// purgeProgress is the in-memory snapshot served while a manual B/C
+	// cleanup is still running. It is never persisted; a restart clears it.
+	purgeProgress purgeProgressTracker
 }
 
 // SetLegacyKnowledgeRootsGuard installs the predicate that decides whether
