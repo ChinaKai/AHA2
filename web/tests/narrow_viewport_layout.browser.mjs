@@ -191,6 +191,81 @@ async function checkResources(page, width, height) {
   await page.screenshot({path: resolve(screenshots, `narrow-resources-${width}x${height}.png`)});
 }
 
+// A saved pet position is restored long before the shell exists. Roaming and
+// every completed move persist coordinates, so an old point can cover the
+// Resources toolbar/empty state. Loading that point must re-dock the pet; a
+// saved point that is already clear must stay where the owner put it.
+async function checkPetRestore(page, width, height) {
+  const measure = () => page.evaluate(() => {
+    const read = selector => {
+      const element = document.querySelector(selector);
+      if (!element) return null;
+      const rect = element.getBoundingClientRect();
+      return {x: rect.x, y: rect.y, width: rect.width, height: rect.height, right: rect.right, bottom: rect.bottom};
+    };
+    const nav = document.querySelector(".bottom-nav");
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem("aha2.pet.position.v1") || "null"); } catch {}
+    return {
+      pet: read("#assistant-pet"),
+      title: read(".resource-panel-toolbar strong"),
+      desc: read(".resource-panel-toolbar p"),
+      refresh: read("#refresh-browser-profiles"),
+      add: read("#add-browser-profile"),
+      emptyTitle: read(".hardware-resource-empty strong"),
+      emptyText: read(".hardware-resource-empty > span"),
+      emptyButton: read("[data-browser-profile-add-empty]"),
+      nav: read(".bottom-nav"),
+      navVisible: Boolean(nav && getComputedStyle(nav).display !== "none"),
+      saved,
+    };
+  });
+  const openResources = async () => {
+    await page.goto(`${base}/#resources?tab=browser`, {waitUntil: "networkidle"});
+    await page.waitForSelector(".browser-resources-view", {timeout: 15000});
+    await page.waitForSelector(".hardware-resource-empty", {timeout: 15000});
+    await page.waitForTimeout(600);
+  };
+
+  await openResources();
+  const initial = await measure();
+  const overlap = {x: initial.desc.x + initial.desc.width / 2, y: initial.desc.y + initial.desc.height / 2};
+  await page.evaluate(({x, y}) => localStorage.setItem("aha2.pet.position.v1", JSON.stringify({x: x / innerWidth, y: y / innerHeight})), overlap);
+
+  await page.reload({waitUntil: "networkidle"});
+  await page.waitForSelector(".hardware-resource-empty", {timeout: 15000});
+  await page.waitForTimeout(700);
+  const moved = await measure();
+  const label = `${width}x${height} saved pet position`;
+  const keyElements = ["title", "desc", "refresh", "add", "emptyTitle", "emptyText", "emptyButton"];
+  for (const name of keyElements) {
+    assert.ok(moved[name], `${label}: ${name} exists`);
+    assert.equal(intersects(moved.pet, moved[name]), false, `${label}: pet moved off ${name} (pet ${JSON.stringify(moved.pet)}, ${name} ${JSON.stringify(moved[name])})`);
+  }
+  assert.ok(Math.hypot(moved.pet.x - overlap.x, moved.pet.y - overlap.y) > 40,
+    `${label}: overlapping saved point is not kept (${moved.pet.x},${moved.pet.y} vs ${overlap.x},${overlap.y})`);
+  if (moved.navVisible) {
+    assert.ok(moved.pet.bottom <= moved.nav.y + 1, `${label}: pet stays above the bottom navigation`);
+  }
+  assert.ok(moved.saved && Number.isFinite(moved.saved.x) && Number.isFinite(moved.saved.y),
+    `${label}: a safe position is persisted`);
+  assert.ok(Math.abs(moved.saved.x * width - moved.pet.x) <= 2 && Math.abs(moved.saved.y * height - moved.pet.y) <= 2,
+    `${label}: persisted point matches the re-docked pet (${JSON.stringify(moved.saved)})`);
+
+  // Reload with the now-safe point: it must survive instead of being parked
+  // elsewhere again.
+  const safePet = moved.pet;
+  await page.reload({waitUntil: "networkidle"});
+  await page.waitForSelector(".hardware-resource-empty", {timeout: 15000});
+  await page.waitForTimeout(700);
+  const kept = await measure();
+  assert.ok(Math.abs(kept.pet.x - safePet.x) <= 3 && Math.abs(kept.pet.y - safePet.y) <= 3,
+    `${label}: clear saved position is kept (${JSON.stringify(kept.pet)} vs ${JSON.stringify(safePet)})`);
+  for (const name of keyElements) {
+    assert.equal(intersects(kept.pet, kept[name]), false, `${label}: kept position still avoids ${name}`);
+  }
+}
+
 async function checkKnowledgeSettings(page, width, height) {
   await page.goto(`${base}/#knowledge`, {waitUntil: "networkidle"});
   await page.waitForSelector(".kv-tree-link", {timeout: 15000});
@@ -246,6 +321,9 @@ try {
     const errors = [];
     page.on("pageerror", error => errors.push(error.message));
     await checkResources(page, width, height);
+    if ((width === 390 && height === 844) || (width === 844 && height === 390)) {
+      await checkPetRestore(page, width, height);
+    }
     await checkKnowledgeSettings(page, width, height);
     assert.deepEqual(errors, [], `${width}x${height}: no page errors`);
     await page.close();

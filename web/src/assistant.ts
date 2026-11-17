@@ -344,14 +344,14 @@ export function mountAssistant(): void {
     brain: (force?: boolean) => maybeRunPetBrain(Boolean(force)),
   };
   positionAtDock(false);
-  // mountAssistant runs before the first shell render, so the bottom nav (and
-  // the lazy page content the pet must stay clear of) does not exist yet.
-  // Re-dock once the shell has finished loading, unless the owner already
-  // placed the pet themselves.
+  // mountAssistant runs before the first shell render, so neither the bottom
+  // nav nor the lazy page content exists yet. After the boot/route cards are
+  // gone, validate the restored point against the real layout: keep a saved
+  // position only when it does not cover the heading, toolbar or empty state.
+  // Roaming and completed moves persist coordinates, so a stale/old point is
+  // common; a blocked one is re-docked and the safe point is saved instead.
   const restoredPosition = restoreLocalPetPosition();
-  if (!restoredPosition) {
-    window.requestAnimationFrame(() => settleInitialDock());
-  }
+  window.requestAnimationFrame(() => settleInitialDock(0, restoredPosition));
   void refreshAssistant();
   if (HINTS_ENABLED) {
     void refreshHints();
@@ -1537,13 +1537,25 @@ function currentPetLayout(): PetLayout {
 }
 
 // The first dock runs before the shell and lazy route have painted. Wait out
-// the boot/loading cards, then pick a corner that keeps the pet off the page
-// heading, toolbar and empty state. Bounded so a stuck loader cannot keep the
-// pet pinned to the top-left corner forever.
-function settleInitialDock(attempt = 0): void {
+// the boot/loading cards, then validate the restored position (or pick a
+// corner when there is none) against the real layout. A saved position is kept
+// only when it is clear; otherwise the pet is re-docked and the safe point is
+// persisted so the next load does not restore the occluding one again.
+// Bounded so a stuck loader cannot keep the pet pinned to a corner forever.
+function settleInitialDock(attempt = 0, savedPosition = false): void {
   if (panelOpen || dragging) return;
   if (document.querySelector(".boot-loading, .chunk-state") && attempt < 25) {
-    window.setTimeout(() => settleInitialDock(attempt + 1), 120);
+    window.setTimeout(() => settleInitialDock(attempt + 1, savedPosition), 120);
+    return;
+  }
+  if (savedPosition) {
+    if (!blockedAt(petX, petY)) return;
+    // Force the correction even if a queued brain move would otherwise make
+    // positionAtDock() back off, and persist it so the next load starts here.
+    const point = dockPoint();
+    stopPetMove();
+    setPetPosition(point.x, point.y);
+    saveLocalPetPosition();
     return;
   }
   positionAtDock(false);
