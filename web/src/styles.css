@@ -2897,6 +2897,8 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
 .data-db-dialog-body .data-db-form + .data-cleanup-actions { margin-top: 10px; }
 .data-db-retention .form-error { padding: 8px 16px 0; margin: 0; }
 .data-db-plan, .data-db-result { padding: 0 16px; }
+.data-db-progress { padding: 0 16px; }
+.data-db-progress p { margin: 4px 0; line-height: 1.6; font-variant-numeric: tabular-nums; }
 .data-db-plan p { margin: 4px 0; line-height: 1.6; }
 @media (max-width: 640px) {
   .language-settings-panel { grid-template-columns: 1fr; align-items: stretch; }

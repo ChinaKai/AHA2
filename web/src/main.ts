@@ -65,12 +65,16 @@ import type {
   ChannelTaskRoute,
   ConversationCategory,
   ConversationItem,
+  ConversationPurgeResult,
   DataBackupPreview,
   DataInventory,
+  DatabaseCategory,
+  DatabasePurgeProgress,
   DetectedModel,
   EnvGroup,
   GeneralSettings,
   HardwareResource,
+  HardwareIOPurgeResult,
   Knowledge,
   KnowledgeLibrary,
   NetworkSettings,
@@ -463,6 +467,13 @@ function renderDatabasePanel(...args: Parameters<DataRetentionPageModule["render
   return module.renderDatabasePanel(...args);
 }
 
+function categoryDialogBody(...args: Parameters<DataRetentionPageModule["categoryDialogBody"]>): string {
+  const module = dataRetentionPage.loaded();
+  if (module) return module.categoryDialogBody(...args);
+  void dataRetentionPage.load();
+  return "";
+}
+
 function compactionDialogBody(...args: Parameters<DataRetentionPageModule["compactionDialogBody"]>): string {
   const module = dataRetentionPage.loaded();
   if (module) return module.compactionDialogBody(...args);
@@ -629,7 +640,9 @@ const state: State = {
   dataBackupError: "",
   dataRetention: {
     database: null, loading: false, error: "", plan: null, result: null, busy: "",
+    actionError: "", progress: null,
     conversationPlan: null, conversationResult: null, conversationBusy: "",
+    conversationActionError: "", conversationProgress: null,
     compactionPlan: null, compactionResult: null, compactionBusy: false, compactionError: "", openDialog: "",
   },
   syncSettings: {scope:"default",enabled:false,endpoint:"",device_id:"",device_name:"",interval_seconds:300,token_configured:false,passphrase_configured:false},
@@ -4721,9 +4734,55 @@ function bindBackupDialogBodyActions(dialog: HTMLDialogElement): void {
 function bindDataRetentionPanel(): void {
   const view = state.dataRetention;
   bindCategoryDialogs(view);
-  bindHardwareIOPurgeForm(view);
-  bindConversationPurgeForm(view);
   bindCompactionDialog(view);
+}
+
+function retentionCategory(view: DataRetentionViewState, categoryId: string): DatabaseCategory | null {
+  return view.database?.categories.find(category => category.id === categoryId) ?? null;
+}
+
+function findCategoryDialog(categoryId: string): HTMLDialogElement | null {
+  return [...document.querySelectorAll<HTMLDialogElement>("dialog[data-db-dialog]")]
+    .find(node => node.dataset.dbDialog === categoryId) ?? null;
+}
+
+// refreshCategoryDialog replaces only the open dialog body and rebinds its
+// buttons. The global render() defers while a modal is open, so without this a
+// preview or purge result written to view state never reached the DOM until the
+// Owner closed the dialog.
+function refreshCategoryDialog(view: DataRetentionViewState, categoryId: string): void {
+  const dialog = findCategoryDialog(categoryId);
+  const category = retentionCategory(view, categoryId);
+  const body = dialog?.querySelector<HTMLElement>(".data-db-dialog-body");
+  if (!dialog?.open || !body || !category) {
+    render();
+    return;
+  }
+  // The body is regenerated from state, which holds the saved settings. Keep
+  // whatever the Owner has typed so a failed preview does not silently reset
+  // the form while the dialog stays open.
+  const previousDays = dialog.querySelector<HTMLInputElement>("#data-hardware-io-days, #data-conversation-days")?.value;
+  const previousTool = dialog.querySelector<HTMLInputElement>("#data-conversation-tool")?.checked;
+  const previousUpdate = dialog.querySelector<HTMLInputElement>("#data-conversation-update")?.checked;
+  const html = categoryDialogBody(view, category);
+  if (!html) {
+    render();
+    return;
+  }
+  body.innerHTML = html;
+  const daysInput = dialog.querySelector<HTMLInputElement>("#data-hardware-io-days, #data-conversation-days");
+  if (daysInput && previousDays !== undefined) daysInput.value = previousDays;
+  const tool = dialog.querySelector<HTMLInputElement>("#data-conversation-tool");
+  if (tool && previousTool !== undefined) tool.checked = previousTool;
+  const update = dialog.querySelector<HTMLInputElement>("#data-conversation-update");
+  if (update && previousUpdate !== undefined) update.checked = previousUpdate;
+  bindCategoryDialogBodyActions(view, categoryId);
+}
+
+function bindCategoryDialogBodyActions(view: DataRetentionViewState, categoryId: string): void {
+  const category = retentionCategory(view, categoryId);
+  if (category?.cleanup === "hardware_io") bindHardwareIOPurgeForm(view, categoryId);
+  else if (category?.cleanup === "conversation") bindConversationPurgeForm(view, categoryId);
 }
 
 // bindCategoryDialogs opens one independent dialog per A-K category row. The
@@ -4747,11 +4806,49 @@ function bindCategoryDialogs(view: DataRetentionViewState): void {
     dialog.addEventListener("close", () => {
       if (view.openDialog === id) view.openDialog = "";
     });
+    bindCategoryDialogBodyActions(view, id);
     if (view.openDialog === id && !dialog.open) dialog.showModal();
   });
 }
 
-function bindHardwareIOPurgeForm(view: DataRetentionViewState): void {
+// The purge request stays synchronous on the server; this poll mirrors its
+// phase and counters so the open dialog can show deleting progress instead of
+// an indefinite "reading" button.
+function purgeProgressPlaceholder(kind: "hardware_io" | "conversation"): DatabasePurgeProgress {
+  const now = new Date().toISOString();
+  return {kind, running: true, phase: "preparing", planned_rows: 0, deleted_rows: 0, batches: 0, started_at: now, updated_at: now, duration_ms: 0};
+}
+
+const purgePollTimers = new Map<string, number>();
+
+function stopPurgePoll(kind: string): void {
+  const timer = purgePollTimers.get(kind);
+  if (timer !== undefined) window.clearInterval(timer);
+  purgePollTimers.delete(kind);
+}
+
+function startPurgePoll(view: DataRetentionViewState, kind: "hardware_io" | "conversation", categoryId: string): void {
+  stopPurgePoll(kind);
+  const read = kind === "hardware_io"
+    ? () => api.hardwareIOPurgeProgress()
+    : () => api.conversationPurgeProgress();
+  const timer = window.setInterval(() => {
+    void read().then(response => {
+      if (kind === "hardware_io") view.progress = response.progress;
+      else view.conversationProgress = response.progress;
+      if (!response.progress.running) stopPurgePoll(kind);
+      // While the dialog is closed nothing is visible; the next open render
+      // reads the latest snapshot. Avoid a full page render every second.
+      if (findCategoryDialog(categoryId)?.open) refreshCategoryDialog(view, categoryId);
+    }).catch(() => {
+      // Keep the last snapshot. The purge request's own completion or failure
+      // still refreshes the dialog and clears the busy state.
+    });
+  }, 1000);
+  purgePollTimers.set(kind, timer);
+}
+
+function bindHardwareIOPurgeForm(view: DataRetentionViewState, categoryId: string): void {
   const daysInput = document.querySelector<HTMLInputElement>("#data-hardware-io-days");
   const save = document.querySelector<HTMLButtonElement>("[data-hardware-io-save]");
   const preview = document.querySelector<HTMLButtonElement>("[data-hardware-io-preview]");
@@ -4783,13 +4880,20 @@ function bindHardwareIOPurgeForm(view: DataRetentionViewState): void {
   };
   daysInput.addEventListener("input", syncButtons);
   syncButtons();
-  const run = (kind: DataRetentionViewState["busy"], button: HTMLButtonElement, action: (values: {retention_days: number; max_delete_rows: number}) => Promise<void>): void => {
+  const run = (kind: DataRetentionViewState["busy"], button: HTMLButtonElement, action: (values: {retention_days: number; max_delete_rows: number}) => Promise<void>, onStarted?: () => void): void => {
     const values = formValues();
     if (!values || view.busy) return;
     view.busy = kind;
-    void runWithFeedback(button, t("common.loading"), () => action(values)).finally(() => {
+    view.actionError = "";
+    if (kind !== "purge") view.progress = null;
+    refreshCategoryDialog(view, categoryId);
+    onStarted?.();
+    void runWithFeedback(button, kind === "purge" ? t("data.db.purging") : t("common.loading"), () => action(values), message => {
+      view.actionError = message;
+    }).finally(() => {
       view.busy = "";
-      render();
+      stopPurgePoll("hardware_io");
+      refreshCategoryDialog(view, categoryId);
     });
   };
   save.addEventListener("click", () => run("save", save, async values => {
@@ -4797,29 +4901,46 @@ function bindHardwareIOPurgeForm(view: DataRetentionViewState): void {
     if (view.database) view.database.retention = result.retention;
     setMessage("notice", t("data.db.saved"));
   }));
-  preview.addEventListener("click", () => run("preview", preview, async values => {
+  preview.addEventListener("click", () => {
+    if (view.busy) return;
     view.result = null;
-    view.plan = (await api.previewHardwareIOPurge(values)).plan;
-    // Keep the previewed values in the form after the re-render.
-    if (view.database) view.database.retention = {...view.database.retention, ...values};
-  }));
+    view.plan = null;
+    run("preview", preview, async values => {
+      view.plan = (await api.previewHardwareIOPurge(values)).plan;
+      // Keep the previewed values in the form after the in-place refresh.
+      if (view.database) view.database.retention = {...view.database.retention, ...values};
+    });
+  });
   purge.addEventListener("click", () => {
     const values = formValues();
     const plan = view.plan;
     if (!values || !plan || !purgeEnabled(view, values.retention_days, values.max_delete_rows)) return;
     if (!window.confirm(t("data.db.confirmPurge", {rows: plan.run_rows, cutoff: new Date(plan.cutoff).toLocaleString(), size: formatBytes(plan.run_bytes_estimate)}))) return;
     run("purge", purge, async confirmed => {
-      const response = await api.purgeHardwareIO({...confirmed, confirm: true});
-      view.result = response.result;
-      view.plan = null;
-      if (response.database) view.database = {...response.database, retention: {...response.database.retention, ...confirmed}};
-      const skip = response.result.skip_reason ? ` ${skipReasonText(response.result.skip_reason)}` : "";
-      setMessage("notice", `${t("data.db.resultDeleted", {rows: response.result.deleted_rows, batches: response.result.batches})}${skip}`);
+      try {
+        const response = await api.purgeHardwareIO({...confirmed, confirm: true});
+        view.result = response.result;
+        view.plan = null;
+        if (response.database) view.database = {...response.database, retention: {...response.database.retention, ...confirmed}};
+        const skip = response.result.skip_reason ? ` ${skipReasonText(response.result.skip_reason)}` : "";
+        setMessage("notice", `${t("data.db.resultDeleted", {rows: response.result.deleted_rows, batches: response.result.batches})}${skip}`);
+      } catch (error) {
+        // A failed run still reports its partial result; keep it in the dialog.
+        const failed = (error as {body?: {result?: HardwareIOPurgeResult}}).body?.result;
+        if (failed) {
+          view.result = failed;
+          view.plan = null;
+        }
+        throw error;
+      }
+    }, () => {
+      view.progress = purgeProgressPlaceholder("hardware_io");
+      startPurgePoll(view, "hardware_io", categoryId);
     });
   });
 }
 
-function bindConversationPurgeForm(view: DataRetentionViewState): void {
+function bindConversationPurgeForm(view: DataRetentionViewState, categoryId: string): void {
   const daysInput = document.querySelector<HTMLInputElement>("#data-conversation-days");
   const tool = document.querySelector<HTMLInputElement>("#data-conversation-tool");
   const update = document.querySelector<HTMLInputElement>("#data-conversation-update");
@@ -4853,13 +4974,20 @@ function bindConversationPurgeForm(view: DataRetentionViewState): void {
   tool.addEventListener("change", syncButtons);
   update.addEventListener("change", syncButtons);
   syncButtons();
-  const run = (kind: DataRetentionViewState["conversationBusy"], button: HTMLButtonElement, action: (values: {retention_days: number; purge_tool: boolean; purge_update: boolean}) => Promise<void>): void => {
+  const run = (kind: DataRetentionViewState["conversationBusy"], button: HTMLButtonElement, action: (values: {retention_days: number; purge_tool: boolean; purge_update: boolean}) => Promise<void>, onStarted?: () => void): void => {
     const values = formValues();
     if (!values || view.conversationBusy) return;
     view.conversationBusy = kind;
-    void runWithFeedback(button, t("common.loading"), () => action(values)).finally(() => {
+    view.conversationActionError = "";
+    if (kind !== "purge") view.conversationProgress = null;
+    refreshCategoryDialog(view, categoryId);
+    onStarted?.();
+    void runWithFeedback(button, kind === "purge" ? t("data.db.purging") : t("common.loading"), () => action(values), message => {
+      view.conversationActionError = message;
+    }).finally(() => {
       view.conversationBusy = "";
-      render();
+      stopPurgePoll("conversation");
+      refreshCategoryDialog(view, categoryId);
     });
   };
   save.addEventListener("click", () => run("save", save, async values => {
@@ -4867,11 +4995,15 @@ function bindConversationPurgeForm(view: DataRetentionViewState): void {
     if (view.database) view.database.conversation_retention = result.retention;
     setMessage("notice", t("data.db.conversationSaved"));
   }));
-  preview.addEventListener("click", () => run("preview", preview, async values => {
+  preview.addEventListener("click", () => {
+    if (view.conversationBusy) return;
     view.conversationResult = null;
-    view.conversationPlan = (await api.previewConversationPurge(values)).plan;
-    if (view.database) view.database.conversation_retention = {...view.database.conversation_retention, ...values};
-  }));
+    view.conversationPlan = null;
+    run("preview", preview, async values => {
+      view.conversationPlan = (await api.previewConversationPurge(values)).plan;
+      if (view.database) view.database.conversation_retention = {...view.database.conversation_retention, ...values};
+    });
+  });
   purge.addEventListener("click", () => {
     const values = formValues();
     const plan = view.conversationPlan;
@@ -4882,12 +5014,24 @@ function bindConversationPurgeForm(view: DataRetentionViewState): void {
       size: formatBytes(plan.run_bytes_estimate),
     }))) return;
     run("purge", purge, async confirmed => {
-      const response = await api.purgeConversation({...confirmed, confirm: true});
-      view.conversationResult = response.result;
-      view.conversationPlan = null;
-      if (response.database) view.database = {...response.database, conversation_retention: {...response.database.conversation_retention, ...confirmed}};
-      const skip = response.result.skip_reason ? ` ${skipReasonText(response.result.skip_reason)}` : "";
-      setMessage("notice", `${t("data.db.resultDeleted", {rows: response.result.deleted_rows, batches: response.result.batches})}${skip}`);
+      try {
+        const response = await api.purgeConversation({...confirmed, confirm: true});
+        view.conversationResult = response.result;
+        view.conversationPlan = null;
+        if (response.database) view.database = {...response.database, conversation_retention: {...response.database.conversation_retention, ...confirmed}};
+        const skip = response.result.skip_reason ? ` ${skipReasonText(response.result.skip_reason)}` : "";
+        setMessage("notice", `${t("data.db.resultDeleted", {rows: response.result.deleted_rows, batches: response.result.batches})}${skip}`);
+      } catch (error) {
+        const failed = (error as {body?: {result?: ConversationPurgeResult}}).body?.result;
+        if (failed) {
+          view.conversationResult = failed;
+          view.conversationPlan = null;
+        }
+        throw error;
+      }
+    }, () => {
+      view.conversationProgress = purgeProgressPlaceholder("conversation");
+      startPurgePoll(view, "conversation", categoryId);
     });
   });
 }

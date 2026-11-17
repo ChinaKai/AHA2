@@ -286,6 +286,10 @@ func TestPurgeConversationItemsBatchesUntilDone(t *testing.T) {
 	if result.DeletedRows != total || result.Batches != 3 {
 		t.Fatalf("result=%#v", result)
 	}
+	progress := database.PurgeProgress(domain.DatabasePurgeKindConversation)
+	if progress.Running || progress.Phase != domain.DatabasePurgePhaseDone || progress.PlannedRows != total || progress.DeletedRows != total || progress.Batches != 3 {
+		t.Fatalf("progress=%#v", progress)
+	}
 	var remaining int
 	if err := database.db.QueryRow(`SELECT COUNT(*) FROM conversation_items`).Scan(&remaining); err != nil || remaining != 0 {
 		t.Fatalf("remaining=%d err=%v", remaining, err)

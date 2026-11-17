@@ -46,7 +46,9 @@ function stats(overrides = {}) {
 function viewState(overrides = {}) {
   return {
     database: stats(), loading: false, error: "", plan: null, result: null, busy: "",
+    actionError: "", progress: null,
     conversationPlan: null, conversationResult: null, conversationBusy: "",
+    conversationActionError: "", conversationProgress: null,
     compactionPlan: null, compactionResult: null, compactionBusy: false, compactionError: "", openDialog: "",
     ...overrides,
   };
@@ -171,6 +173,46 @@ test("C dialog keeps the hardware_io preview/confirm flow", () => {
   assert.equal(panel.purgeEnabled(viewState({plan: hardwarePlan()}), 30, 200000), true);
   assert.equal(panel.purgeEnabled(viewState({plan: hardwarePlan()}), 31, 200000), false);
   assert.equal(panel.purgeEnabled(viewState({plan: hardwarePlan({run_rows: 0, skip_reason: "nothing_eligible"})}), 30, 200000), false);
+});
+
+test("open category dialog body renders purge progress, results and errors in place", () => {
+  i18n.applyLocale("zh-CN");
+  const category = stats().categories.find(item => item.id === "C");
+  const progress = {
+    kind: "hardware_io", running: true, phase: "deleting", planned_rows: 200000,
+    deleted_rows: 12345, batches: 2, started_at: "2026-11-16T00:00:00Z",
+    updated_at: "2026-11-16T00:00:02Z", duration_ms: 2500,
+  };
+  const body = panel.categoryDialogBody(viewState({busy: "purge", plan: hardwarePlan(), progress}), category);
+  assert.match(body, /data-db-progress/);
+  assert.match(body, /正在删除旧数据…/);
+  assert.match(body, /已删除 12,345 行，共 2 批，已用时 2 秒/);
+  assert.match(body, /本次计划删除 200,000 行/);
+  assert.match(body, /正在清理…/, "the purge button reports the busy phase instead of staying generic");
+  assert.doesNotMatch(body, /data-db-result/, "no result before the run finishes");
+
+  const result = {
+    plan: hardwarePlan(), backup_path: "/data/backups/hardware-io-1/aha2.db",
+    deleted_rows: 200000, batches: 20, batch_size: 10000, partial: false, duration_ms: 1200,
+  };
+  const done = panel.categoryDialogBody(viewState({result}), category);
+  assert.match(done, /data-db-result/);
+  assert.match(done, /已删除 200,000 行，共 20 批/);
+  assert.match(done, /hardware-io-1/);
+  assert.doesNotMatch(done, /data-db-progress/, "progress is replaced by the result");
+
+  const failed = panel.categoryDialogBody(viewState({actionError: "backup failed", result: {...result, partial: true}}), category);
+  assert.match(failed, /data-hardware-io-action-error/);
+  assert.match(failed, /backup failed/);
+  assert.match(failed, /只完成了一部分/);
+
+  const bCategory = stats().categories.find(item => item.id === "B");
+  const bBody = panel.categoryDialogBody(viewState({
+    conversationBusy: "purge",
+    conversationProgress: {...progress, kind: "conversation", deleted_rows: 400, batches: 1},
+  }), bCategory);
+  assert.match(bBody, /已删除 400 行，共 1 批/);
+  assert.match(bBody, /正在清理…/);
 });
 
 test("conversation cleanup is enabled only for a matching, non-empty preview", () => {

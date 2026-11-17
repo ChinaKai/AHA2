@@ -107,6 +107,83 @@ var conversationPurgeMu sync.Mutex
 // resurrect deleted rows or compare counts against a moving target.
 var databaseMaintenanceGate sync.RWMutex
 
+// purgeProgressTracker holds the last/happening cleanup snapshot per kind. The
+// purge methods stay synchronous; this only mirrors their phase and counters
+// for the Web's progress poll. The zero value is ready to use.
+type purgeProgressTracker struct {
+	mu     sync.Mutex
+	states map[string]domain.DatabasePurgeProgress
+}
+
+// beginPurgeProgress marks a cleanup as running. It is called only after the
+// purge lock is held, so a rejected overlapping request never overwrites the
+// progress of the run that is actually deleting rows.
+func (s *Store) beginPurgeProgress(kind string) {
+	now := time.Now().UTC()
+	s.purgeProgress.mu.Lock()
+	defer s.purgeProgress.mu.Unlock()
+	if s.purgeProgress.states == nil {
+		s.purgeProgress.states = make(map[string]domain.DatabasePurgeProgress)
+	}
+	s.purgeProgress.states[kind] = domain.DatabasePurgeProgress{
+		Kind: kind, Running: true, Phase: domain.DatabasePurgePhasePreparing,
+		StartedAt: now, UpdatedAt: now,
+	}
+}
+
+func (s *Store) updatePurgeProgress(kind string, update func(*domain.DatabasePurgeProgress)) {
+	s.purgeProgress.mu.Lock()
+	defer s.purgeProgress.mu.Unlock()
+	state, ok := s.purgeProgress.states[kind]
+	if !ok {
+		return
+	}
+	update(&state)
+	state.UpdatedAt = time.Now().UTC()
+	s.purgeProgress.states[kind] = state
+}
+
+// finishPurgeProgress records the terminal state. DurationMS is measured from
+// the run start so the Web can show the total even after the HTTP response is
+// lost.
+func (s *Store) finishPurgeProgress(kind, phase, skipReason, errorMessage string, plannedRows, deletedRows int64, batches int) {
+	s.purgeProgress.mu.Lock()
+	defer s.purgeProgress.mu.Unlock()
+	state := s.purgeProgress.states[kind]
+	now := time.Now().UTC()
+	state.Kind = kind
+	state.Running = false
+	state.Phase = phase
+	state.PlannedRows = plannedRows
+	state.DeletedRows = deletedRows
+	state.Batches = batches
+	state.SkipReason = skipReason
+	state.Error = errorMessage
+	state.UpdatedAt = now
+	if !state.StartedAt.IsZero() {
+		state.DurationMS = now.Sub(state.StartedAt).Milliseconds()
+	}
+	if s.purgeProgress.states == nil {
+		s.purgeProgress.states = make(map[string]domain.DatabasePurgeProgress)
+	}
+	s.purgeProgress.states[kind] = state
+}
+
+// PurgeProgress returns the current snapshot. A running run reports the elapsed
+// time up to now instead of the last batch update.
+func (s *Store) PurgeProgress(kind string) domain.DatabasePurgeProgress {
+	s.purgeProgress.mu.Lock()
+	defer s.purgeProgress.mu.Unlock()
+	state, ok := s.purgeProgress.states[kind]
+	if !ok {
+		return domain.DatabasePurgeProgress{Kind: kind, Phase: domain.DatabasePurgePhaseIdle}
+	}
+	if state.Running && !state.StartedAt.IsZero() {
+		state.DurationMS = time.Since(state.StartedAt).Milliseconds()
+	}
+	return state
+}
+
 // databasePurgeBackup snapshots a file-backed database before a B/C cleanup
 // deletes rows. If the backup fails the cleanup aborts without deleting
 // anything. Only the newest safety snapshot per category is kept so repeated
@@ -330,10 +407,10 @@ func (s *Store) ConversationPurgePlan(ctx context.Context, settings domain.Conve
 // conversation_items is touched; messages, events, audit_events, agent_inbox,
 // attachments, knowledge and channel tables are never written. A canceled
 // context stops after the current batch and reports a partial result.
-func (s *Store) PurgeConversationItems(ctx context.Context, settings domain.ConversationRetentionSettings, now time.Time) (domain.ConversationPurgeResult, error) {
+func (s *Store) PurgeConversationItems(ctx context.Context, settings domain.ConversationRetentionSettings, now time.Time) (result domain.ConversationPurgeResult, err error) {
 	started := time.Now()
-	result := domain.ConversationPurgeResult{BatchSize: domain.ConversationPurgeBatchRows}
-	if err := settings.Validate(); err != nil {
+	result = domain.ConversationPurgeResult{BatchSize: domain.ConversationPurgeBatchRows}
+	if err = settings.Validate(); err != nil {
 		return result, err
 	}
 	if !conversationPurgeMu.TryLock() {
@@ -347,6 +424,20 @@ func (s *Store) PurgeConversationItems(ctx context.Context, settings domain.Conv
 		return result, nil
 	}
 	defer databaseMaintenanceGate.RUnlock()
+	s.beginPurgeProgress(domain.DatabasePurgeKindConversation)
+	defer func() {
+		phase := domain.DatabasePurgePhaseDone
+		errorMessage := ""
+		switch {
+		case err != nil:
+			phase = domain.DatabasePurgePhaseFailed
+			errorMessage = err.Error()
+		case result.SkipReason != "" && result.DeletedRows == 0:
+			phase = domain.DatabasePurgePhaseSkipped
+		}
+		s.finishPurgeProgress(domain.DatabasePurgeKindConversation, phase, result.SkipReason, errorMessage,
+			result.Plan.RunRows, result.DeletedRows, result.Batches)
+	}()
 	plan, err := s.ConversationPurgePlan(ctx, settings, now)
 	result.Plan = plan
 	if err != nil {
@@ -357,12 +448,20 @@ func (s *Store) PurgeConversationItems(ctx context.Context, settings domain.Conv
 		result.DurationMS = time.Since(started).Milliseconds()
 		return result, nil
 	}
+	s.updatePurgeProgress(domain.DatabasePurgeKindConversation, func(progress *domain.DatabasePurgeProgress) {
+		progress.Phase = domain.DatabasePurgePhaseBackup
+		progress.PlannedRows = plan.RunRows
+	})
 	backupPath, err := databasePurgeBackup(ctx, s, "conversation")
 	if err != nil {
 		result.DurationMS = time.Since(started).Milliseconds()
 		return result, fmt.Errorf("backup before conversation cleanup: %w", err)
 	}
 	result.BackupPath = backupPath
+	s.updatePurgeProgress(domain.DatabasePurgeKindConversation, func(progress *domain.DatabasePurgeProgress) {
+		progress.Phase = domain.DatabasePurgePhaseDeleting
+		progress.PlannedRows = plan.RunRows
+	})
 	scope, args := conversationPurgeScope(settings, retentionCutoffKey(plan.Cutoff))
 	batchArgs := append(append([]any{}, args...), domain.ConversationPurgeBatchRows)
 	deleteQuery := `DELETE FROM conversation_items WHERE sequence IN (
@@ -377,8 +476,8 @@ func (s *Store) PurgeConversationItems(ctx context.Context, settings domain.Conv
 			result.SkipReason = domain.ConversationPurgeSkipCanceled
 			break
 		}
-		deleted, err := s.db.ExecContext(ctx, deleteQuery, batchArgs...)
-		if err != nil {
+		deleted, execErr := s.db.ExecContext(ctx, deleteQuery, batchArgs...)
+		if execErr != nil {
 			if ctx.Err() != nil {
 				result.Partial = true
 				result.SkipReason = domain.ConversationPurgeSkipCanceled
@@ -386,11 +485,15 @@ func (s *Store) PurgeConversationItems(ctx context.Context, settings domain.Conv
 			}
 			result.Partial = true
 			result.DurationMS = time.Since(started).Milliseconds()
-			return result, fmt.Errorf("delete conversation_items batch: %w", err)
+			return result, fmt.Errorf("delete conversation_items batch: %w", execErr)
 		}
 		count, _ := deleted.RowsAffected()
 		result.DeletedRows += count
 		result.Batches++
+		s.updatePurgeProgress(domain.DatabasePurgeKindConversation, func(progress *domain.DatabasePurgeProgress) {
+			progress.DeletedRows = result.DeletedRows
+			progress.Batches = result.Batches
+		})
 		if count < int64(domain.ConversationPurgeBatchRows) {
 			break
 		}
@@ -771,10 +874,10 @@ func (s *Store) HardwareIOPurgePlan(ctx context.Context, settings domain.Hardwar
 // write lock is released between batches and terminal recording can continue.
 // Only hardware_io is touched. A canceled context stops after the current batch
 // and reports a partial result.
-func (s *Store) PurgeHardwareIO(ctx context.Context, settings domain.HardwareIORetentionSettings, now time.Time) (domain.HardwareIOPurgeResult, error) {
+func (s *Store) PurgeHardwareIO(ctx context.Context, settings domain.HardwareIORetentionSettings, now time.Time) (result domain.HardwareIOPurgeResult, err error) {
 	started := time.Now()
-	result := domain.HardwareIOPurgeResult{BatchSize: domain.HardwareIOPurgeBatchRows}
-	if err := settings.Validate(); err != nil {
+	result = domain.HardwareIOPurgeResult{BatchSize: domain.HardwareIOPurgeBatchRows}
+	if err = settings.Validate(); err != nil {
 		return result, err
 	}
 	if !hardwareIOPurgeMu.TryLock() {
@@ -788,6 +891,20 @@ func (s *Store) PurgeHardwareIO(ctx context.Context, settings domain.HardwareIOR
 		return result, nil
 	}
 	defer databaseMaintenanceGate.RUnlock()
+	s.beginPurgeProgress(domain.DatabasePurgeKindHardwareIO)
+	defer func() {
+		phase := domain.DatabasePurgePhaseDone
+		errorMessage := ""
+		switch {
+		case err != nil:
+			phase = domain.DatabasePurgePhaseFailed
+			errorMessage = err.Error()
+		case result.SkipReason != "" && result.DeletedRows == 0:
+			phase = domain.DatabasePurgePhaseSkipped
+		}
+		s.finishPurgeProgress(domain.DatabasePurgeKindHardwareIO, phase, result.SkipReason, errorMessage,
+			result.Plan.RunRows, result.DeletedRows, result.Batches)
+	}()
 	plan, err := s.HardwareIOPurgePlan(ctx, settings, now)
 	result.Plan = plan
 	if err != nil {
@@ -798,12 +915,20 @@ func (s *Store) PurgeHardwareIO(ctx context.Context, settings domain.HardwareIOR
 		result.DurationMS = time.Since(started).Milliseconds()
 		return result, nil
 	}
+	s.updatePurgeProgress(domain.DatabasePurgeKindHardwareIO, func(progress *domain.DatabasePurgeProgress) {
+		progress.Phase = domain.DatabasePurgePhaseBackup
+		progress.PlannedRows = plan.RunRows
+	})
 	backupPath, err := databasePurgeBackup(ctx, s, "hardware-io")
 	if err != nil {
 		result.DurationMS = time.Since(started).Milliseconds()
 		return result, fmt.Errorf("backup before hardware_io cleanup: %w", err)
 	}
 	result.BackupPath = backupPath
+	s.updatePurgeProgress(domain.DatabasePurgeKindHardwareIO, func(progress *domain.DatabasePurgeProgress) {
+		progress.Phase = domain.DatabasePurgePhaseDeleting
+		progress.PlannedRows = plan.RunRows
+	})
 	cutoffKey := retentionCutoffKey(plan.Cutoff)
 	for start := plan.RunStartSequence; start < plan.RunEndSequence; start += domain.HardwareIOPurgeBatchRows {
 		if ctx.Err() != nil {
@@ -814,12 +939,12 @@ func (s *Store) PurgeHardwareIO(ctx context.Context, settings domain.HardwareIOR
 		end := min(start+domain.HardwareIOPurgeBatchRows, plan.RunEndSequence)
 		// The created_at check is a guard on top of the sequence range: a row
 		// written with a clock that jumped backwards is never deleted early.
-		deleted, err := s.db.ExecContext(ctx, `
+		deleted, execErr := s.db.ExecContext(ctx, `
 			DELETE FROM hardware_io
 			WHERE sequence>=? AND sequence<? AND substr(created_at,1,19)<?`,
 			start, end, cutoffKey,
 		)
-		if err != nil {
+		if execErr != nil {
 			if ctx.Err() != nil {
 				result.Partial = true
 				result.SkipReason = domain.HardwareIOPurgeSkipCanceled
@@ -827,11 +952,15 @@ func (s *Store) PurgeHardwareIO(ctx context.Context, settings domain.HardwareIOR
 			}
 			result.Partial = true
 			result.DurationMS = time.Since(started).Milliseconds()
-			return result, fmt.Errorf("delete hardware_io batch %d-%d: %w", start, end, err)
+			return result, fmt.Errorf("delete hardware_io batch %d-%d: %w", start, end, execErr)
 		}
 		count, _ := deleted.RowsAffected()
 		result.DeletedRows += count
 		result.Batches++
+		s.updatePurgeProgress(domain.DatabasePurgeKindHardwareIO, func(progress *domain.DatabasePurgeProgress) {
+			progress.DeletedRows = result.DeletedRows
+			progress.Batches = result.Batches
+		})
 	}
 	result.DurationMS = time.Since(started).Milliseconds()
 	return result, nil

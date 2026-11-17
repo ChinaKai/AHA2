@@ -3797,7 +3797,9 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   // compaction) and added their zh/en copy; measured 261,096, ceiling 262,144.
   // task-546 grouped the task-picker skills into global/project sections with
   // owning-project sub-groups; measured 262,569, ceiling 263,168.
-  const FIRST_SCREEN_GZIP_BUDGET = 263168;
+  // task-554 added in-place data-management dialog progress/result refresh;
+  // measured 263,933, ceiling 264,192.
+  const FIRST_SCREEN_GZIP_BUDGET = 264192;
   // The version query parameter is a content hash and its hex digits change
   // how the same code gzips: main already sits exactly on the budget, so a
   // hash-only change could trip it without growing the payload. Mask the
