@@ -79,3 +79,80 @@ func TestKnowledgeVaultSettingsMigrationDefaultsAndPersistence(t *testing.T) {
 		t.Fatalf("schema v136 recorded %d times, want 1", recorded)
 	}
 }
+
+func TestKnowledgeVaultAutoSyncMigrationFromV146(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "aha2.db")
+	database, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Rebuild the settings row without the v147 column to reproduce an
+	// upgraded v146 database. CREATE TABLE AS avoids SQLite's refusal to drop a
+	// column referenced by its own CHECK constraint.
+	for _, statement := range []string{
+		`CREATE TABLE kv_v146 AS SELECT id,enabled,configured,import_source,migration_verified_at,import_verified_at,last_backup_path,updated_at FROM knowledge_vault_settings`,
+		`DROP TABLE knowledge_vault_settings`,
+		`ALTER TABLE kv_v146 RENAME TO knowledge_vault_settings`,
+		`DELETE FROM schema_migrations WHERE version=147`,
+	} {
+		if _, err := database.db.ExecContext(ctx, statement); err != nil {
+			t.Fatalf("%s: %v", statement, err)
+		}
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	upgraded, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, err := upgraded.KnowledgeVaultSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !settings.AutoSync {
+		t.Fatalf("v147 upgrade did not default auto_sync to on: %+v", settings)
+	}
+	if count := migrationCount(t, ctx, upgraded, 147); count != 1 {
+		t.Fatalf("v147 recorded %d times after upgrade", count)
+	}
+
+	// A partial v147 that already has the column with the owner's explicit 0
+	// must keep that value and record the version exactly once.
+	if _, err := upgraded.db.ExecContext(ctx, `UPDATE knowledge_vault_settings SET auto_sync=0`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := upgraded.db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version=147`); err != nil {
+		t.Fatal(err)
+	}
+	if err := upgraded.Close(); err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resumed.Close()
+	settings, err = resumed.KnowledgeVaultSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.AutoSync {
+		t.Fatalf("v147 re-run overwrote the stored auto_sync=0: %+v", settings)
+	}
+	if count := migrationCount(t, ctx, resumed, 147); count != 1 {
+		t.Fatalf("v147 recorded %d times after re-run", count)
+	}
+}
+
+func migrationCount(t *testing.T, ctx context.Context, database *Store, version int) int {
+	t.Helper()
+	var count int
+	if err := database.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM schema_migrations WHERE version=?`, version).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count
+}

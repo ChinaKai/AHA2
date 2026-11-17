@@ -103,6 +103,7 @@ type GeneralSettings struct {
 type KnowledgeVaultSettings struct {
 	Enabled             bool      `json:"enabled"`
 	Configured          bool      `json:"configured"`
+	AutoSync            bool      `json:"auto_sync"`
 	ImportSource        string    `json:"import_source,omitempty"`
 	MigrationVerifiedAt time.Time `json:"migration_verified_at,omitempty"`
 	ImportVerifiedAt    time.Time `json:"import_verified_at,omitempty"`

@@ -143,7 +143,9 @@ func (m *Manager) CreateSkillPackage(ctx context.Context, request SkillWriteRequ
 	if err := m.writeSkillPackageLocked(target, files); err != nil {
 		return SkillWriteResult{}, err
 	}
-	return m.skillWriteResultLocked(request.Scope, request.ProjectID, slug, target, files), nil
+	result := m.skillWriteResultLocked(request.Scope, request.ProjectID, slug, target, files)
+	m.requestAutoCommit()
+	return result, nil
 }
 
 // UpdateSkillPackage replaces a package in place. A positive BaseVersion is a
@@ -226,6 +228,7 @@ func (m *Manager) UpdateSkillPackage(ctx context.Context, request SkillWriteRequ
 		if err != nil {
 			return SkillWriteResult{}, err
 		}
+		m.requestAutoCommit()
 		return skillResultFromPackage(refreshed), nil
 	}
 	if err := m.writeSkillPackageLocked(target, files); err != nil {
@@ -235,6 +238,7 @@ func (m *Manager) UpdateSkillPackage(ctx context.Context, request SkillWriteRequ
 	if err != nil {
 		return SkillWriteResult{}, err
 	}
+	m.requestAutoCommit()
 	return skillResultFromPackage(refreshed), nil
 }
 
@@ -290,6 +294,7 @@ func (m *Manager) DeleteSkillPackage(ctx context.Context, key string) (SkillWrit
 		ProjectID: existing.ProjectID, Name: existing.Name, Description: existing.Description,
 		Version: existing.Version, RelativePath: existing.RelativePath, Files: existing.Files,
 	}
+	m.requestAutoCommit()
 	return result, nil
 }
 

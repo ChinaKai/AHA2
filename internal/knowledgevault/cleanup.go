@@ -400,7 +400,12 @@ func (m *Manager) SweepProjectSpaceTrash() (ProjectSpaceTrashSweepResult, error)
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return SweepProjectSpaceTrash(m.config)
+	result, err := SweepProjectSpaceTrash(m.config)
+	if err != nil {
+		return result, err
+	}
+	m.requestAutoCommit()
+	return result, nil
 }
 
 // ManagerRemoveEmptyProjectSpace is the Manager entry point. The manager holds
@@ -421,5 +426,6 @@ func (m *Manager) RemoveEmptyProjectSpace(ctx context.Context, projectID string)
 			return result, fmt.Errorf("rebuild index after removing project space: %w", err)
 		}
 	}
+	m.requestAutoCommit()
 	return result, nil
 }

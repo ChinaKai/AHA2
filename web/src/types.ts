@@ -1816,6 +1816,26 @@ export interface KnowledgeVaultLegacyInventory {
   skill_packages: number;
 }
 
+export interface KnowledgeVaultAutoSyncStatus {
+  enabled: boolean;
+  running: boolean;
+  paused: boolean;
+  pause_reason?: string;
+  conflict: boolean;
+  conflict_detail?: string;
+  last_sync_at?: string;
+  last_commit_at?: string;
+  last_commit?: string;
+  last_error?: string;
+  warning?: string;
+  pending: number;
+  blocked: number;
+  blocked_files?: {path: string; reason: string}[];
+  failures?: number;
+  next_retry_at?: string;
+  preflight_done: boolean;
+}
+
 export interface KnowledgeVaultSettings {
   enabled: boolean;
   source: "database" | "startup";
@@ -1837,6 +1857,7 @@ export interface KnowledgeVaultSettings {
   readiness: KnowledgeVaultReadiness;
   legacy: KnowledgeVaultLegacyInventory;
   configured: boolean;
+  auto_sync?: KnowledgeVaultAutoSyncStatus;
   import_source?: string;
   migration_verified_at?: string;
   import_verified_at?: string;

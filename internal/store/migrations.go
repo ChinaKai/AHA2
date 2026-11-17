@@ -3873,6 +3873,22 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("record schema v146: %w", err)
 		}
 	}
+	var hasV147 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=147)`).Scan(&hasV147)
+	if !hasV147 || !s.tableHasColumn(ctx, "knowledge_vault_settings", "auto_sync") {
+		// Auto-sync defaults to on for both fresh installs and upgrades; the
+		// owner switch is stored next to the knowledge source switch and read
+		// by the background syncer.
+		if _, err := s.db.ExecContext(ctx,
+			`ALTER TABLE knowledge_vault_settings ADD COLUMN auto_sync INTEGER NOT NULL DEFAULT 1 CHECK(auto_sync IN (0,1))`); err != nil &&
+			!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("apply schema v147 knowledge vault auto-sync: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(147, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return fmt.Errorf("record schema v147: %w", err)
+		}
+	}
 	return nil
 }
 
