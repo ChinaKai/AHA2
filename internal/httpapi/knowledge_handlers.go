@@ -714,13 +714,17 @@ func (s *Server) listSkills(writer http.ResponseWriter, request *http.Request) {
 // The routes stay registered only so old clients get an explicit 405 instead of
 // falling through to the SPA catch-all.
 func (s *Server) rejectRemovedSkillWrite(writer http.ResponseWriter, request *http.Request) {
+	// The only surviving operation in this namespace is the read-only GET
+	// collection. Individual skill paths have no readable endpoint, so their
+	// Allow list is explicitly empty instead of advertising the collection's GET.
+	allow := ""
 	if request.PathValue("id") == "" {
-		// Only the collection still supports GET; the write routes are gone.
-		writer.Header().Set("Allow", http.MethodGet)
+		allow = http.MethodGet
 	}
+	writer.Header().Set("Allow", allow)
 	writeJSON(writer, http.StatusMethodNotAllowed, map[string]any{
 		"ok":      false,
 		"error":   "skill_write_api_removed",
-		"message": "Web 技能写接口已移除；技能由 Agent Control API (/api/v1/agent/skills) 或 vault 文件编辑维护",
+		"message": "旧 Web 技能写接口已移除；请通过 Agent Control API (/api/v1/agent/skills)、宠物技能管理或直接编辑 vault 技能包写入",
 	})
 }
