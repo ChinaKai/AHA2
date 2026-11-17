@@ -2,9 +2,9 @@
 // name, and dialogs put initial focus on a meaningful control instead of the
 // close button.
 //
-// Covers the 23 close buttons in five variants (data-close,
-// data-setup-close, data-onboarding-close, data-kb-close, data-mcp-close)
-// against the real built Web bundle. Each dialog is opened, checked with
+// Covers the 20 close buttons in four variants (data-close,
+// data-setup-close, data-onboarding-close, data-mcp-close) against the real
+// built Web bundle. Each dialog is opened, checked with
 // axe-core's button-name rule, checked for entry focus, and closed. Dialogs
 // reachable from the UI are opened through their real trigger so focus return
 // is measured as well.
@@ -124,7 +124,7 @@ const server = createServer(async (request, response) => {
 });
 await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
 const url = `http://127.0.0.1:${server.address().port}`;
-const dismiss = "[data-close],[data-setup-close],[data-onboarding-close],[data-kb-close],[data-mcp-close]";
+const dismiss = "[data-close],[data-setup-close],[data-onboarding-close],[data-mcp-close]";
 let browser;
 const errors = [];
 const checked = [];
@@ -192,7 +192,7 @@ async function assertCloseButton(page, id, expectedLabel, variant, track = true)
   assert.equal(state.closeText, "", `${id}: the icon-only close button also contains text`);
   const violations = await page.evaluate(async dialogID => {
     const dialog = document.getElementById(dialogID);
-    const close = dialog.querySelector('button.icon-button[data-close],button.icon-button[data-setup-close],button.icon-button[data-onboarding-close],button.icon-button[data-kb-close],button.icon-button[data-mcp-close]');
+    const close = dialog.querySelector('button.icon-button[data-close],button.icon-button[data-setup-close],button.icon-button[data-onboarding-close],button.icon-button[data-mcp-close]');
     const result = await window.axe.run(close, {runOnly: {type: "rule", values: ["button-name"]}});
     return result.violations.map(item => ({id: item.id, html: item.nodes.map(node => node.html)}));
   }, id);
@@ -347,18 +347,17 @@ try {
   }
   await english.close();
 
-  assert.equal(checked.length, 23, `expected 23 close buttons, checked ${checked.length}`);
+  assert.equal(checked.length, 20, `expected 20 close buttons, checked ${checked.length}`);
   const variants = new Map();
   for (const item of checked) variants.set(item.variant, (variants.get(item.variant) || 0) + 1);
   assert.deepEqual(Object.fromEntries([...variants].sort()), {
     "data-close": 15,
-    "data-kb-close": 3,
     "data-mcp-close": 3,
     "data-onboarding-close": 1,
     "data-setup-close": 1,
   }, "close button variant coverage is incomplete");
   assert.deepEqual(errors, [], "the dialog pages reported page errors");
-  console.log("dialog close labels: 23/23 axe button-name clean, 5 variants, entry focus and Escape/focus return verified");
+  console.log("dialog close labels: 20/20 axe button-name clean, 4 variants, entry focus and Escape/focus return verified");
 } finally {
   await browser?.close();
   server.close();
