@@ -14,6 +14,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/agentapi"
 	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/auth"
+	"github.com/ChinaKai/AHA2/internal/browser"
 	"github.com/ChinaKai/AHA2/internal/channel"
 	"github.com/ChinaKai/AHA2/internal/codexaccount"
 	"github.com/ChinaKai/AHA2/internal/desktop"
@@ -43,6 +44,7 @@ type Config struct {
 	DetectWorkspace   func(context.Context, domain.Workspace) (domain.Workspace, error)
 	Secrets           SecretStore
 	Hardware          *hardware.Manager
+	Browser           *browser.Service
 	Desktop           *desktop.Manager
 	CodexAccounts     *codexaccount.Manager
 	AgentCapabilities *agentapi.Capabilities
@@ -96,6 +98,7 @@ type Server struct {
 	detectWorkspace          func(context.Context, domain.Workspace) (domain.Workspace, error)
 	secrets                  SecretStore
 	hardware                 *hardware.Manager
+	browser                  *browser.Service
 	desktop                  *desktop.Manager
 	codexAccounts            *codexaccount.Manager
 	agentCapabilities        *agentapi.Capabilities
@@ -208,6 +211,7 @@ func New(config Config) *Server {
 		detectWorkspace:          config.DetectWorkspace,
 		secrets:                  config.Secrets,
 		hardware:                 config.Hardware,
+		browser:                  config.Browser,
 		desktop:                  config.Desktop,
 		codexAccounts:            config.CodexAccounts,
 		agentCapabilities:        config.AgentCapabilities,
@@ -422,6 +426,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/v1/hardware-resources/{id}", s.withAuth(http.HandlerFunc(s.updateHardwareResource)))
 	mux.Handle("DELETE /api/v1/hardware-resources/{id}", s.withAuth(http.HandlerFunc(s.deleteHardwareResource)))
 	mux.Handle(hardwareADBPairRoute, s.withAuth(http.HandlerFunc(s.pairHardwareADB)))
+	s.registerBrowserRoutes(mux)
 
 	// Mail resources phase one task B: Owner-only account/template/binding
 	// management, preview and connection test. Agent capability routes are

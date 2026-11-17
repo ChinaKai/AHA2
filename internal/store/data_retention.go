@@ -70,6 +70,7 @@ var databaseCatalog = []databaseCategoryDef{
 	{"K", "metadata", domain.DatabaseSafetyKeep, "", []string{
 		"projects", "workspaces", "product_lines", "owners", "sessions", "schema_migrations",
 		"sqlite_sequence", "assistant_messages", "assistant_hint_dismissals",
+		"browser_profiles", "browser_sessions", "browser_task_grants", "browser_tabs",
 	}},
 }
 

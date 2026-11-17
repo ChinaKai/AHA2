@@ -4,6 +4,7 @@
 dist/
 coverage/
 web/node_modules/
+browser-host/node_modules/
 web/dist/
 web/.edge-profile-*/
 !internal/webassets/dist/

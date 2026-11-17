@@ -3873,6 +3873,87 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("record schema v146: %w", err)
 		}
 	}
+	var hasV147 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=147)`).Scan(&hasV147)
+	var hasBrowserProfiles bool
+	_ = s.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='browser_profiles')`).Scan(&hasBrowserProfiles)
+	if !hasV147 || !hasBrowserProfiles {
+		// Shared-browser POC. AHA stores only logical identifiers; the host owns
+		// the real user-data directories. The partial unique index is the database
+		// backstop for "one active session per profile" — the host's directory
+		// lock and process state remain authoritative at runtime.
+		if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS browser_profiles(
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			browser_kind TEXT NOT NULL CHECK(browser_kind IN ('edge','chrome','chromium')),
+			host_id TEXT NOT NULL,
+			state TEXT NOT NULL DEFAULT 'idle' CHECK(state IN ('idle','starting','ready','auth_required','busy','error')),
+			last_used_at TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`); err != nil {
+			return fmt.Errorf("apply schema v147 browser profiles: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS browser_sessions(
+			id TEXT PRIMARY KEY,
+			profile_id TEXT NOT NULL REFERENCES browser_profiles(id) ON DELETE CASCADE,
+			host_id TEXT NOT NULL,
+			host_session_id TEXT NOT NULL DEFAULT '',
+			state TEXT NOT NULL CHECK(state IN ('starting','ready','auth_required','busy','closed','error')),
+			error TEXT NOT NULL DEFAULT '',
+			started_at TEXT NOT NULL,
+			last_used_at TEXT NOT NULL DEFAULT '',
+			closed_at TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`); err != nil {
+			return fmt.Errorf("apply schema v147 browser sessions: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_browser_sessions_one_active
+			 ON browser_sessions(profile_id) WHERE state <> 'closed'`); err != nil {
+			return fmt.Errorf("apply schema v147 browser session uniqueness: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS browser_task_grants(
+			id TEXT PRIMARY KEY,
+			task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+			profile_id TEXT NOT NULL REFERENCES browser_profiles(id) ON DELETE CASCADE,
+			session_id TEXT NOT NULL REFERENCES browser_sessions(id) ON DELETE CASCADE,
+			capabilities_json TEXT NOT NULL DEFAULT '[]',
+			expires_at TEXT NOT NULL,
+			revoked_at TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`); err != nil {
+			return fmt.Errorf("apply schema v147 browser task grants: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`CREATE INDEX IF NOT EXISTS idx_browser_task_grants_task ON browser_task_grants(task_id,profile_id)`); err != nil {
+			return fmt.Errorf("apply schema v147 browser grant index: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS browser_tabs(
+			id TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL REFERENCES browser_sessions(id) ON DELETE CASCADE,
+			grant_id TEXT NOT NULL REFERENCES browser_task_grants(id) ON DELETE CASCADE,
+			task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+			host_tab_id TEXT NOT NULL DEFAULT '',
+			url TEXT NOT NULL DEFAULT '',
+			title TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`); err != nil {
+			return fmt.Errorf("apply schema v147 browser tabs: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`CREATE INDEX IF NOT EXISTS idx_browser_tabs_grant ON browser_tabs(grant_id)`); err != nil {
+			return fmt.Errorf("apply schema v147 browser tab index: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(147, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return fmt.Errorf("record schema v147: %w", err)
+		}
+	}
 	return nil
 }
 

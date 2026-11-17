@@ -95,6 +95,11 @@ import type {
   HardwareIORetentionSettings,
   HardwareResource,
   HardwareTerminalStatus,
+  BrowserProfile,
+  BrowserSession,
+  BrowserTaskGrant,
+  BrowserHostView,
+  TaskBrowserState,
   SerialPort,
 	SSHHostKeyInfo,
   Workspace,
@@ -953,6 +958,48 @@ class APIClient {
 
   deleteHardwareResource(id: string): Promise<{deleted_bindings: number}> {
     return this.request(`/api/v1/hardware-resources/${encodeURIComponent(id)}`, {method: "DELETE"});
+  }
+
+  browserProfiles(): Promise<{profiles: BrowserProfile[]}> {
+    return this.request("/api/v1/browser/profiles");
+  }
+
+  createBrowserProfile(payload: {name: string; browser_kind?: string}): Promise<{profile: BrowserProfile}> {
+    return this.request("/api/v1/browser/profiles", {method: "POST", body: JSON.stringify(payload)});
+  }
+
+  renameBrowserProfile(id: string, name: string): Promise<{profile: BrowserProfile}> {
+    return this.request(`/api/v1/browser/profiles/${encodeURIComponent(id)}`, {
+      method: "PATCH", body: JSON.stringify({name}),
+    });
+  }
+
+  deleteBrowserProfile(id: string): Promise<{ok: boolean}> {
+    return this.request(`/api/v1/browser/profiles/${encodeURIComponent(id)}?confirm=1`, {method: "DELETE"});
+  }
+
+  openBrowserLoginWindow(id: string): Promise<{session: BrowserSession; reused: boolean}> {
+    return this.request(`/api/v1/browser/profiles/${encodeURIComponent(id)}/login-window`, {
+      method: "POST", body: "{}",
+    });
+  }
+
+  closeBrowserProfileSession(id: string): Promise<{session: BrowserSession | null}> {
+    return this.request(`/api/v1/browser/profiles/${encodeURIComponent(id)}/session`, {method: "DELETE"});
+  }
+
+  browserHost(): Promise<{host: BrowserHostView}> {
+    return this.request("/api/v1/browser/host");
+  }
+
+  taskBrowser(taskID: string): Promise<{browser: TaskBrowserState}> {
+    return this.request(`/api/v1/tasks/${encodeURIComponent(taskID)}/browser`);
+  }
+
+  createTaskBrowserGrant(taskID: string, payload: {profile_id: string; capabilities?: string[]; expires_in_seconds?: number}): Promise<{grant: BrowserTaskGrant; session: BrowserSession | null}> {
+    return this.request(`/api/v1/tasks/${encodeURIComponent(taskID)}/browser-sessions`, {
+      method: "POST", body: JSON.stringify(payload),
+    });
   }
 
   pairHardwareADB(id: string, pairingPort: number, pairingCode: string): Promise<{message: string; output: string; resource: HardwareResource}> {

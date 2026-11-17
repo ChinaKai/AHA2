@@ -1,0 +1,19 @@
+{
+  "name": "aha2-browser-host",
+  "private": true,
+  "version": "0.1.0",
+  "description": "AHA2 shared-browser host: visible Edge persistent context behind a loopback token API",
+  "type": "module",
+  "bin": {
+    "aha2-browser-host": "host.mjs"
+  },
+  "scripts": {
+    "start": "node host.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.49.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

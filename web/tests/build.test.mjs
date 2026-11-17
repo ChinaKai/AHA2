@@ -1048,7 +1048,7 @@ test("mail phase two keeps navigation stable, one mail entry, and table tools", 
   assert.doesNotMatch(script, /saved\.mailSubTab/);
   // Legacy #hardware redirect and the #resources?tab=mail deep-link read remain.
   assert.match(script, /if \(name === "hardware"\) \{[\s\S]{0,120}replaceState\(null, "", "#resources\?tab=hardware"\)/);
-  assert.match(script, /params\.get\("tab"\) === "mail" \? "mail" : "hardware"/);
+  assert.match(script, /params\.get\("tab"\) === "browser" \? "browser" : "hardware"/);
   // The header mail icon and the timeline action binding are gone.
   assert.doesNotMatch(script, /taskSendMailButton/);
   assert.doesNotMatch(script, /id="task-send-mail"/);
@@ -3799,7 +3799,10 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   // owning-project sub-groups; measured 262,569, ceiling 263,168.
   // task-554 added in-place data-management dialog progress/result refresh;
   // measured 263,933, ceiling 264,192.
-  const FIRST_SCREEN_GZIP_BUDGET = 264192;
+  // task-560 added the shared-browser resource sheet, the manual shared-control
+  // mode switch and its lazy Task panel entry; measured 265,275, ceiling
+  // 266,240.
+  const FIRST_SCREEN_GZIP_BUDGET = 266240;
   // The version query parameter is a content hash and its hex digits change
   // how the same code gzips: main already sits exactly on the budget, so a
   // hash-only change could trip it without growing the payload. Mask the

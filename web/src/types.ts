@@ -830,6 +830,83 @@ export interface HardwareResource {
   updated_at: string;
 }
 
+export type BrowserProfileState = "idle" | "starting" | "ready" | "auth_required" | "busy" | "error";
+export type BrowserSessionState = "starting" | "ready" | "auth_required" | "busy" | "closed" | "error";
+export type BrowserGrantStatus = "active" | "expired" | "revoked";
+
+export interface BrowserSession {
+  id: string;
+  profile_id: string;
+  host_id: string;
+  state: BrowserSessionState;
+  error?: string;
+  started_at: string;
+  last_used_at?: string;
+  closed_at?: string;
+  created_at: string;
+  updated_at: string;
+  host_reachable?: boolean;
+}
+
+export interface BrowserProfile {
+  id: string;
+  name: string;
+  browser_kind: "edge" | "chrome" | "chromium";
+  host_id: string;
+  state: BrowserProfileState;
+  last_used_at?: string;
+  created_at: string;
+  updated_at: string;
+  host_available: boolean;
+  session?: BrowserSession | null;
+}
+
+export interface BrowserTab {
+  id: string;
+  session_id: string;
+  grant_id: string;
+  task_id: string;
+  url: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BrowserTaskGrant {
+  id: string;
+  task_id: string;
+  profile_id: string;
+  session_id: string;
+  capabilities: string[];
+  expires_at: string;
+  revoked_at?: string;
+  created_at: string;
+  updated_at: string;
+  status: BrowserGrantStatus;
+  session?: BrowserSession | null;
+  tabs?: BrowserTab[];
+}
+
+export interface BrowserHostView {
+  available: boolean;
+  host_id: string;
+  version?: string;
+  platform?: string;
+  edge_available: boolean;
+  error?: string;
+  code?: string;
+}
+
+export interface TaskBrowserState {
+  task_id: string;
+  profiles: BrowserProfile[];
+  grants: BrowserTaskGrant[];
+  tabs: BrowserTab[];
+  session?: BrowserSession | null;
+  host_available: boolean;
+  host: BrowserHostView;
+}
+
 export interface HardwareTerminalStatus {
   task_id: string;
   hardware_id: string;
