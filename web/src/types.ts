@@ -1827,6 +1827,7 @@ export interface KnowledgeVaultAutoSyncStatus {
   last_commit_at?: string;
   last_commit?: string;
   last_error?: string;
+  warning?: string;
   pending: number;
   blocked: number;
   blocked_files?: {path: string; reason: string}[];

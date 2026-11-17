@@ -71,6 +71,7 @@ const localText: Record<string, [zhCN: string, enUS: string]> = {
   "kvs.autosync.pendingValue": ["{count} 个", "{count} files"],
   "kvs.autosync.pendingOne": ["1 个", "1 file"],
   "kvs.autosync.lastError": ["上次错误", "Last error"],
+  "kvs.autosync.warning": ["同步警告", "Sync warning"],
   "kvs.autosync.none": ["无", "None"],
   "kvs.autosync.pauseReason": ["暂停原因", "Pause reason"],
   "kvs.autosync.conflictState": ["冲突状态", "Conflict status"],
@@ -674,6 +675,7 @@ function autoSyncHTML(settings: KnowledgeVaultSettings, busy: string): string {
   const lastSync = syncTimeLabel(auto.last_sync_at) || kt("kvs.autosync.never");
   const pending = kt(auto.pending === 1 ? "kvs.autosync.pendingOne" : "kvs.autosync.pendingValue", {count: auto.pending});
   const lastError = auto.last_error ? escapeHTML(auto.last_error) : kt("kvs.autosync.none");
+  const warning = auto.warning ? `<div><dt>${kt("kvs.autosync.warning")}</dt><dd>${escapeHTML(auto.warning)}</dd></div>` : "";
   const pauseReason = auto.paused ? pauseReasonLabel(auto.pause_reason) : "";
   const conflict = auto.conflict
     ? escapeHTML(auto.conflict_detail || kt("kvs.autosync.conflictStopped"))
@@ -692,6 +694,7 @@ function autoSyncHTML(settings: KnowledgeVaultSettings, busy: string): string {
       <div><dt>${kt("kvs.autosync.lastSync")}</dt><dd>${escapeHTML(lastSync)}</dd></div>
       <div><dt>${kt("kvs.autosync.pending")}</dt><dd>${pending}</dd></div>
       <div><dt>${kt("kvs.autosync.lastError")}</dt><dd>${lastError}</dd></div>
+      ${warning}
       ${pauseReason ? `<div><dt>${kt("kvs.autosync.pauseReason")}</dt><dd>${escapeHTML(pauseReason)}</dd></div>` : ""}
       <div><dt>${kt("kvs.autosync.conflictState")}</dt><dd>${conflict}</dd></div>
       ${blocked}

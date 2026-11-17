@@ -421,3 +421,31 @@ func TestAutoCommitReportsBlockedTotalBeyondTheReportCap(t *testing.T) {
 		t.Fatalf("blocked report length = %d, want cap %d", len(scan.Blocked), maxAutoCommitBlockedReport)
 	}
 }
+
+func TestAutoCommitBlocksBareTokenAndOpenAIProjectKeys(t *testing.T) {
+	ctx := context.Background()
+	config, git := newGitTestVault(t)
+	if _, err := git.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	writeGitTestFile(t, config.VaultPath, "notes/bare-token.md", "token = \"abcdefgh12345678\"\n")
+	writeGitTestFile(t, config.VaultPath, "notes/project-key.md", "key sk-proj-abcdefghijklmnopqrstuvwxyz012345\n")
+	writeGitTestFile(t, config.VaultPath, "notes/token-prose.md", "调用前需要先获取 token，再放入请求头。\n")
+	scan, err := git.ScanAutoCommit(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked := map[string]string{}
+	for _, item := range scan.Blocked {
+		blocked[item.Path] = item.Reason
+	}
+	if blocked["notes/bare-token.md"] != "secret" || blocked["notes/project-key.md"] != "secret" {
+		t.Fatalf("bare token / sk-proj key not blocked: %+v", scan.Blocked)
+	}
+	if scan.BlockedTotal != 2 {
+		t.Fatalf("blocked total = %d, want 2", scan.BlockedTotal)
+	}
+	if len(scan.Eligible) != 1 || scan.Eligible[0] != "notes/token-prose.md" {
+		t.Fatalf("normal token prose was not eligible: %+v", scan.Eligible)
+	}
+}

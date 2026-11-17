@@ -459,6 +459,20 @@ func (g *Git) remoteURL(ctx context.Context) (string, error) {
 	return remote, nil
 }
 
+// fetchOrigin refreshes origin/<branch> without touching the local branch or
+// the worktree. The explicit refspec makes the update independent of the
+// remote's configured fetch rules; the '+' only rewinds the remote-tracking
+// ref, never local history.
+func (g *Git) fetchOrigin(ctx context.Context, branch string) error {
+	remote, err := g.remoteURL(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = g.command(ctx, "fetch", "--no-tags", "origin",
+		"+refs/heads/"+branch+":refs/remotes/origin/"+branch)
+	return redactGitError(err, remote)
+}
+
 // isClean reports content changes, not git's stat cache: a CRLF rewrite that
 // the eol=lf clean filter normalizes back to the same blob is clean even
 // though `git status` may mention the path.

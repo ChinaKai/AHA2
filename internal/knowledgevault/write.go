@@ -259,10 +259,10 @@ var forbiddenKnowledgePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`),
 	regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9]{20,}\b`),
 	regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}\b`),
-	regexp.MustCompile(`\bsk-[A-Za-z0-9]{20,}\b`),
+	regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{20,}\b`),
 	regexp.MustCompile(`\bsk-ant-[A-Za-z0-9_-]{20,}\b`),
 	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.`),
-	regexp.MustCompile(`(?i)\b(password|passwd|secret|api[_-]?key|access[_-]?token)\s*[:=]\s*["']?[^\s"']{8,}`),
+	regexp.MustCompile(`(?i)\b(password|passwd|secret|token|api[_-]?key|access[_-]?token)\s*[:=]\s*["']?[^\s"']{8,}`),
 }
 
 // WriteKnowledge creates or revises one vault document. It is intentionally

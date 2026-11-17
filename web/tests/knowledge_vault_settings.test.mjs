@@ -814,6 +814,7 @@ test("auto-sync section shows the persisted switch, pause reason and blocked fil
     conflict: true,
     conflict_detail: "本地 abc，远端 def 已分叉",
     last_sync_at: "2026-11-16T10:00:00Z",
+    warning: "备份 tag 创建失败：ref locked",
     pending: 2,
     blocked: 75,
     blocked_files: [{path: "assets/logo.png", reason: "binary"}],
@@ -838,6 +839,7 @@ test("auto-sync section shows the persisted switch, pause reason and blocked fil
     assert.match(html, /本地 abc，远端 def 已分叉/);
     assert.match(html, /75 个：assets\/logo\.png \(二进制\)/);
     assert.match(html, /待提交文件<\/dt><dd>2 个/);
+    assert.match(html, /同步警告<\/dt><dd>备份 tag 创建失败：ref locked/);
 
     await panel.__knowledgeVaultSettingsActionsForTest.setAutoSync(false);
     assert.deepEqual(calls, [false]);

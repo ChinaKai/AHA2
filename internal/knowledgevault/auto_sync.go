@@ -63,6 +63,7 @@ type AutoSyncStatus struct {
 	LastCommitAt   string          `json:"last_commit_at,omitempty"`
 	LastCommit     string          `json:"last_commit,omitempty"`
 	LastError      string          `json:"last_error,omitempty"`
+	Warning        string          `json:"warning,omitempty"`
 	Pending        int             `json:"pending"`
 	Blocked        int             `json:"blocked"`
 	BlockedFiles   []BlockedChange `json:"blocked_files,omitempty"`
@@ -98,6 +99,7 @@ type autoSyncState struct {
 	lastCommitAt             time.Time
 	lastCommit               string
 	lastError                string
+	warning                  string
 	pending                  int
 	blocked                  []BlockedChange
 	blockedTotal             int
@@ -121,6 +123,7 @@ type autoSyncStateFile struct {
 	LastCommitAt       string `json:"last_commit_at,omitempty"`
 	LastCommit         string `json:"last_commit,omitempty"`
 	LastError          string `json:"last_error,omitempty"`
+	Warning            string `json:"warning,omitempty"`
 	PauseReason        string `json:"pause_reason,omitempty"`
 	ConflictKey        string `json:"conflict_key,omitempty"`
 	ConflictDetail     string `json:"conflict_detail,omitempty"`
@@ -316,6 +319,7 @@ func (s *Syncer) Status() AutoSyncStatus {
 		Paused: s.state.paused, PauseReason: s.state.pauseReason,
 		Conflict: s.state.conflict, ConflictDetail: s.state.conflictDetail,
 		LastCommit: s.state.lastCommit, LastError: s.state.lastError,
+		Warning: s.state.warning,
 		Pending: s.state.pending, Blocked: s.state.blockedTotal,
 		BlockedFiles:  append([]BlockedChange{}, s.state.blocked...),
 		Failures:      s.state.failures,
@@ -418,15 +422,7 @@ func (s *Syncer) cycle(ctx context.Context, force bool) {
 		}
 		s.mu.Unlock()
 		if shouldLog {
-			names := make([]string, 0, len(scan.Blocked))
-			for index, blocked := range scan.Blocked {
-				if index >= 10 {
-					names = append(names, "…")
-					break
-				}
-				names = append(names, blocked.Path+"("+blocked.Reason+")")
-			}
-			log.Printf("knowledge auto-sync blocked %d file(s): %s", len(scan.Blocked), strings.Join(names, ", "))
+			log.Printf("knowledge auto-sync blocked %d file(s): %s", scan.BlockedTotal, blockedLogSummary(scan.Blocked))
 		}
 	}
 
@@ -581,21 +577,39 @@ func (s *Syncer) remoteSync(ctx context.Context, git *Git, now time.Time) {
 	}
 	if _, err := git.push(ctx, false); err != nil {
 		if errors.Is(err, ErrGitPushRejected) {
-			if pullBlocked {
-				// The pull could not fast-forward because a local file is in
-				// the way. If there is no local commit to send, this is a safe
-				// wait, not a divergence; a real ahead+behind pair still needs
-				// the owner and keeps the conflict event.
-				branch := git.configuredBranch(ctx)
-				ahead, behind, countsOK := git.aheadBehind(ctx, branch)
-				if countsOK && !(ahead > 0 && behind > 0) {
-					s.mu.Lock()
-					s.state.lastError = "拉取被本地文件阻止；远端有新提交，暂不推送"
-					s.mu.Unlock()
-					return
-				}
+			// A push can be rejected even though the pull just succeeded: the
+			// remote may advance between the two commands (another writer, a
+			// pre-push hook). Always fetch the latest ref before deciding, and
+			// only report a divergence when both sides have commits.
+			branch := git.configuredBranch(ctx)
+			if fetchErr := git.fetchOrigin(ctx, branch); fetchErr != nil {
+				s.backoff("push_rejected", fetchErr)
+				return
 			}
-			s.handleConflict(ctx, git)
+			ahead, behind, countsOK := git.aheadBehind(ctx, branch)
+			if !countsOK {
+				s.backoff("push_rejected", err)
+				return
+			}
+			switch {
+			case ahead > 0 && behind > 0:
+				s.handleConflict(ctx, git)
+			case ahead == 0 && behind > 0:
+				// Local is an ancestor of the remote: nothing to send and no
+				// divergence. Retry the pull on the next tick.
+				message := "远端已前进；下次自动拉取"
+				if pullBlocked {
+					message = "拉取被本地文件阻止；" + message
+				}
+				s.mu.Lock()
+				s.state.lastError = message
+				s.state.lastRemoteAttempt = time.Time{}
+				s.mu.Unlock()
+			default:
+				// A hook or server policy rejected an otherwise equal/forward
+				// push. Back off and report it instead of inventing a conflict.
+				s.backoff("push_rejected", err)
+			}
 			return
 		}
 		s.backoff("push_failed", err)
@@ -680,11 +694,11 @@ func (s *Syncer) runPreflight(ctx context.Context) error {
 	}
 	if renormalized.Warning != "" {
 		log.Printf("knowledge auto-sync preflight warning: %s", renormalized.Warning)
-		s.mu.Lock()
-		s.state.lastError = sanitizeSyncDetail(renormalized.Warning)
-		s.mu.Unlock()
 	}
 	s.mu.Lock()
+	// A warning is durable: a normal sync success must not hide a failed
+	// backup-tag creation. A later clean preflight clears it.
+	s.state.warning = sanitizeSyncDetail(renormalized.Warning)
 	s.state.preflightVersion = AutoSyncPreflightVersion
 	s.mu.Unlock()
 	s.saveState()
@@ -754,6 +768,21 @@ func conflictDetail(ctx context.Context, git *Git, local, remote, branch string)
 		}
 	}
 	return detail
+}
+
+// blockedLogSummary renders at most ten blocked paths for one log line. Paths
+// go through the same control-character sanitizer as commit messages so a
+// newline in a file name cannot forge extra log records.
+func blockedLogSummary(blocked []BlockedChange) string {
+	names := make([]string, 0, len(blocked))
+	for index, item := range blocked {
+		if index >= 10 {
+			names = append(names, "…")
+			break
+		}
+		names = append(names, sanitizeCommitPath(item.Path)+"("+item.Reason+")")
+	}
+	return strings.Join(names, ", ")
 }
 
 func (s *Syncer) applyScan(scan AutoCommitScan) {
@@ -868,6 +897,7 @@ func (s *Syncer) loadState() {
 	s.state.lastCommitAt = parseSyncTime(file.LastCommitAt)
 	s.state.lastCommit = file.LastCommit
 	s.state.lastError = file.LastError
+	s.state.warning = file.Warning
 	s.state.pauseReason = file.PauseReason
 	s.state.paused = strings.TrimSpace(file.PauseReason) != ""
 	s.state.conflictKey = file.ConflictKey
@@ -892,6 +922,7 @@ func (s *Syncer) saveState() {
 		LastCommitAt:       formatSyncTime(s.state.lastCommitAt),
 		LastCommit:         s.state.lastCommit,
 		LastError:          s.state.lastError,
+		Warning:            s.state.warning,
 		PauseReason:        s.state.pauseReason,
 		ConflictKey:        s.state.conflictKey,
 		ConflictDetail:     s.state.conflictDetail,

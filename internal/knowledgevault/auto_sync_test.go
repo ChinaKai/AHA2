@@ -2,8 +2,10 @@ package knowledgevault
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -429,5 +431,114 @@ func TestSyncerPushesLocalCommitsWithBlockedFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(config.VaultPath, ".env")); err != nil {
 		t.Fatalf("pull overwrote the blocked local file: %v", err)
+	}
+}
+
+func TestBlockedLogSummarySanitizesControlCharacters(t *testing.T) {
+	summary := blockedLogSummary([]BlockedChange{{Path: "bad\nname\r\t.md", Reason: "invalid_path"}})
+	if strings.ContainsAny(summary, "\n\r\t") {
+		t.Fatalf("blocked log summary kept control characters: %q", summary)
+	}
+	if !strings.Contains(summary, "badname.md(invalid_path)") {
+		t.Fatalf("blocked log summary lost the path: %q", summary)
+	}
+}
+
+func TestSyncerPushRejectionWithAncestorLocalDoesNotConflict(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("git hooks need an executable bit on Windows")
+	}
+	ctx := context.Background()
+	config, manager := newAutoSyncTestManager(t)
+	git := manager.Git()
+	remote := newBareRemote(t)
+	if _, err := git.SetRemote(ctx, remote, "main"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git.Push(ctx); err != nil {
+		t.Fatal(err)
+	}
+	clone := cloneRemote(t, remote, "hook-writer")
+	// The pre-push hook advances the remote after the sync's pull succeeded
+	// and before its push lands, reproducing the rejection race.
+	hookPath := filepath.Join(config.VaultPath, ".git", "hooks", "pre-push")
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hook := fmt.Sprintf("#!/bin/sh\nset -e\ncd %q\nprintf 'advanced\\n' > remote-advance.md\ngit add -A\ngit -c user.name=Hook -c user.email=hook@example.com commit -q -m advance\ngit push -q origin main\necho 'rejected by pre-push hook' >&2\nexit 1\n", clone)
+	if err := os.WriteFile(hookPath, []byte(hook), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	localHead := headSHA(t, config.VaultPath)
+	var events []SyncEvent
+	syncer, _, _ := newTestSyncer(t, manager, func(event SyncEvent) { events = append(events, event) })
+	markPreflightDone(syncer)
+	syncer.RunOnce(ctx)
+
+	if len(events) != 0 {
+		t.Fatalf("ancestor push rejection emitted a conflict event: %+v", events)
+	}
+	status := syncer.Status()
+	if status.Paused || status.Conflict || status.PauseReason != "" {
+		t.Fatalf("ancestor push rejection paused the syncer: %+v", status)
+	}
+	if !strings.Contains(status.LastError, "远端已前进") {
+		t.Fatalf("ancestor push rejection was not reported: %+v", status)
+	}
+	if head := headSHA(t, config.VaultPath); head != localHead {
+		t.Fatalf("safe rejection moved local HEAD: %s -> %s", localHead, head)
+	}
+	if remoteHead, local := testGitCommand(t, remote, "rev-parse", "refs/heads/main"), headSHA(t, config.VaultPath); remoteHead == local {
+		t.Fatal("hook did not advance the remote before the rejected push")
+	}
+}
+
+func TestSyncerTagWarningSurvivesSuccessfulSync(t *testing.T) {
+	ctx := context.Background()
+	config, manager := newAutoSyncTestManager(t)
+	git := manager.Git()
+	remote := newBareRemote(t)
+	if _, err := git.SetRemote(ctx, remote, "main"); err != nil {
+		t.Fatal(err)
+	}
+	// Pre-policy fixture: CRLF baseline without .gitattributes.
+	if err := os.Remove(filepath.Join(config.VaultPath, ".gitattributes")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git.Commit(ctx, "drop policy for upgrade fixture"); err != nil {
+		t.Fatal(err)
+	}
+	testGitCommand(t, config.VaultPath, "config", "core.autocrlf", "false")
+	writeGitTestFile(t, config.VaultPath, "global/general/crlf.md", "# CRLF\r\n\r\nbody\r\n")
+	testGitCommand(t, config.VaultPath, "add", "-A")
+	testGitCommand(t, config.VaultPath, "commit", "-m", "crlf baseline")
+	// A broken ref makes `git tag` fail while `rev-parse --verify` also fails,
+	// so Renormalize records the backup-tag warning and still commits.
+	brokenRef := filepath.Join(config.VaultPath, ".git", "refs", "tags", lineEndingBackupTag)
+	if err := os.WriteFile(brokenRef, []byte("garbage\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	syncer, _, _ := newTestSyncer(t, manager, nil)
+	syncer.RunOnce(ctx)
+
+	status := syncer.Status()
+	if !strings.Contains(status.Warning, "备份 tag 创建失败") {
+		t.Fatalf("tag warning missing from status: %+v", status)
+	}
+	if status.LastError != "" {
+		t.Fatalf("successful sync did not clear last_error: %+v", status)
+	}
+	if status.Paused {
+		t.Fatalf("tag warning paused the syncer: %+v", status)
+	}
+	state, err := os.ReadFile(filepath.Join(config.VaultPath, ".aha", lineEndingStateFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(state), "备份 tag 创建失败") {
+		t.Fatalf("line-ending state lost the warning: %s", state)
+	}
+	if remoteHead, local := testGitCommand(t, remote, "rev-parse", "refs/heads/main"), headSHA(t, config.VaultPath); remoteHead != local {
+		t.Fatalf("preflight sync did not push: remote=%s local=%s", remoteHead, local)
 	}
 }
