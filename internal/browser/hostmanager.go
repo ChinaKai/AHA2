@@ -200,6 +200,14 @@ func (m *HostManager) Start(ctx context.Context) error {
 	}
 	m.mu.Lock()
 	m.starting = false
+	// Stop may have run while the child was starting. It saw no process to
+	// kill, so the manager still owns this one.
+	if m.stopping {
+		m.mu.Unlock()
+		_ = proc.Kill()
+		_ = proc.Wait()
+		return nil
+	}
 	m.proc = proc
 	m.current = host
 	m.spec = spec
@@ -262,7 +270,7 @@ func (m *HostManager) launch(ctx context.Context, script, node string) (HostProc
 			continue
 		}
 		host := NewHTTPHostWithTimeout(fmt.Sprintf("http://127.0.0.1:%d", port), token, 5*time.Second)
-		if err := m.waitReady(ctx, host); err != nil {
+		if err := m.waitReady(ctx, host, proc); err != nil {
 			lastErr = err
 			_ = proc.Kill()
 			_ = proc.Wait()
@@ -292,7 +300,15 @@ func (m *HostManager) spawn(ctx context.Context, spec LaunchSpec) (HostProcess, 
 	return m.spawnProcess(ctx, spec)
 }
 
-func (m *HostManager) waitReady(ctx context.Context, host *HTTPHost) error {
+func (m *HostManager) waitReady(ctx context.Context, host *HTTPHost, proc HostProcess) error {
+	// A child that exits during startup (missing dependency, bind failure,
+	// rejected token) must fail the attempt immediately instead of burning the
+	// whole readiness timeout against a port nobody serves.
+	exited := make(chan struct{})
+	go func() {
+		_ = proc.Wait()
+		close(exited)
+	}()
 	deadline := time.Now().Add(m.opts.ReadyTimeout)
 	for {
 		probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
@@ -307,6 +323,8 @@ func (m *HostManager) waitReady(ctx context.Context, host *HTTPHost) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-exited:
+			return errors.New("browser host exited during startup")
 		case <-time.After(150 * time.Millisecond):
 		}
 	}

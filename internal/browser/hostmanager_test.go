@@ -50,10 +50,11 @@ func (p *fakeChild) Kill() error {
 func (p *fakeChild) PID() int { return 0 }
 
 type launchRecorder struct {
-	mu       sync.Mutex
-	specs    []LaunchSpec
-	children []*fakeChild
-	failFor  int
+	mu          sync.Mutex
+	specs       []LaunchSpec
+	children    []*fakeChild
+	failFor     int
+	rejectToken bool
 }
 
 func (r *launchRecorder) spawn(_ context.Context, spec LaunchSpec) (HostProcess, error) {
@@ -72,7 +73,11 @@ func (r *launchRecorder) spawn(_ context.Context, spec LaunchSpec) (HostProcess,
 	child := &fakeChild{spec: spec, exit: make(chan struct{})}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/health", func(writer http.ResponseWriter, request *http.Request) {
-		if request.Header.Get("Authorization") != "Bearer "+spec.Token {
+		expected := spec.Token
+		if r.rejectToken {
+			expected = "not-the-issued-token"
+		}
+		if request.Header.Get("Authorization") != "Bearer "+expected {
 			writer.WriteHeader(http.StatusUnauthorized)
 			return
 		}
@@ -245,6 +250,78 @@ func TestHostManagerRetriesPortAllocationAndFailsClosed(t *testing.T) {
 	}
 }
 
+// exitedProcess models a host that dies before it ever listens. Waiting must
+// report the exit instead of blocking readiness against a dead port.
+type exitedProcess struct{}
+
+func (exitedProcess) Wait() error { return errors.New("exited before listening") }
+func (exitedProcess) Kill() error { return nil }
+func (exitedProcess) PID() int    { return 0 }
+
+func TestHostManagerFailsFastWhenTheChildExitsDuringStartup(t *testing.T) {
+	manager, _ := managerFixture(t, &launchRecorder{}, func(options *HostManagerOptions) {
+		options.ReadyTimeout = 5 * time.Second
+		options.Spawn = func(context.Context, LaunchSpec) (HostProcess, error) {
+			return exitedProcess{}, nil
+		}
+	})
+	started := time.Now()
+	if err := manager.Start(context.Background()); Code(err) != "browser_host_start_failed" {
+		t.Fatalf("start error=%v, want browser_host_start_failed", err)
+	}
+	if elapsed := time.Since(started); elapsed > 3*time.Second {
+		t.Fatalf("a dead child burned the readiness timeout: %v", elapsed)
+	}
+}
+
+func TestHostManagerStopDuringStartupKillsTheLateChild(t *testing.T) {
+	recorder := &launchRecorder{}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	manager, _ := managerFixture(t, recorder, func(options *HostManagerOptions) {
+		options.ReadyTimeout = 5 * time.Second
+		options.Spawn = func(ctx context.Context, spec LaunchSpec) (HostProcess, error) {
+			close(entered)
+			<-release
+			return recorder.spawn(ctx, spec)
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- manager.Start(ctx) }()
+	<-entered
+	// Stop sees no process yet; the child appears afterwards and must still be
+	// killed by the manager instead of outliving AHA.
+	if err := manager.Stop(ctx); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	close(release)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("start: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("start did not return after stop")
+	}
+	_, children := recorder.snapshot()
+	if len(children) != 1 {
+		t.Fatalf("children=%d, want 1", len(children))
+	}
+	waitFor(t, time.Second, func() bool {
+		select {
+		case <-children[0].exit:
+			return true
+		default:
+			return false
+		}
+	})
+	if _, err := manager.Health(ctx); Code(err) != "browser_host_not_ready" {
+		t.Fatalf("health after stop-during-start: %v", err)
+	}
+}
+
 func TestHostManagerReportsMissingNodeAndScript(t *testing.T) {
 	recorder := &launchRecorder{}
 	manager, _ := managerFixture(t, recorder, func(options *HostManagerOptions) {
@@ -332,14 +409,27 @@ func TestHostManagerLaunchesRealNodeHost(t *testing.T) {
 	if err := os.MkdirAll(playwright, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(playwright, "index.mjs"),
-		[]byte("export const chromium = {launchPersistentContext: async () => { throw new Error('no browser'); }};\n"), 0o644); err != nil {
+	// The stub records the environment Playwright would hand to Edge, then
+	// fails the launch. The probe must show no host token: the host consumes it
+	// and removes it from the environment before importing Playwright.
+	if err := os.WriteFile(filepath.Join(playwright, "index.mjs"), []byte(`import {writeFileSync} from "node:fs";
+export const chromium = {launchPersistentContext: async () => {
+  const probe = process.env.AHA2_TEST_ENV_PROBE;
+  if (probe) writeFileSync(probe, JSON.stringify({token: process.env.AHA2_BROWSER_HOST_TOKEN || ""}));
+  throw new Error("no browser");
+}};
+`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(playwright, "package.json"),
 		[]byte(`{"name":"playwright","type":"module","main":"index.mjs"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	probe := filepath.Join(t.TempDir(), "env-probe.json")
+	t.Setenv("AHA2_TEST_ENV_PROBE", probe)
+	// The stub never launches a browser, but the host first has to believe Edge
+	// exists; any existing file is enough for that check.
+	t.Setenv("AHA2_EDGE_PATH", node)
 	manager := NewHostManager(HostManagerOptions{
 		Script: script, Node: node, DataDir: filepath.Join(dir, "profiles"), HostID: "local",
 		Logger: discardLogger(), ReadyTimeout: 15 * time.Second, StopGrace: 2 * time.Second,
@@ -349,9 +439,28 @@ func TestHostManagerLaunchesRealNodeHost(t *testing.T) {
 	if err := manager.Start(ctx); err != nil {
 		t.Fatalf("start real host: %v", err)
 	}
+	// AHA2_EDGE_PATH points at a stand-in file for the environment probe, so
+	// this host reports Edge as available; the health payload itself is covered
+	// by the fake-host and safety tests.
 	health, err := manager.Health(ctx)
-	if err != nil || health.HostID != "local" || health.EdgeAvailable {
+	if err != nil || health.HostID != "local" {
 		t.Fatalf("health=%#v err=%v", health, err)
+	}
+	if _, err := manager.Open(ctx, "browser_profile_1", "edge"); err == nil {
+		t.Fatal("stub browser launch unexpectedly succeeded")
+	}
+	data, err := os.ReadFile(probe)
+	if err != nil {
+		t.Fatalf("Playwright stub did not run: %v", err)
+	}
+	var environment struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(data, &environment); err != nil {
+		t.Fatal(err)
+	}
+	if environment.Token != "" {
+		t.Fatalf("host token leaked into the browser environment: %q", environment.Token)
 	}
 	if err := manager.Stop(ctx); err != nil {
 		t.Fatalf("stop real host: %v", err)

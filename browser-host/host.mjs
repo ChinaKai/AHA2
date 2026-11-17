@@ -88,6 +88,9 @@ async function main() {
     console.error("AHA2_BROWSER_HOST_TOKEN is required; refusing to start without a local token");
     process.exit(2);
   }
+  // The host needs the token, but Playwright hands its environment to Edge.
+  // Drop it before the browser is launched so the token stops at this process.
+  delete process.env.AHA2_BROWSER_HOST_TOKEN;
   const root = resolve(options.dataDir || join(process.cwd(), ".data", "browser-profiles"));
   if (!options.dataDir) {
     console.error(`AHA2_BROWSER_PROFILE_ROOT not set; using ${root}`);

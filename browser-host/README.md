@@ -144,14 +144,17 @@ npm test
    且两个 Task 的标签页互不可见/不可操作。
 8. 在面板中打开/选择标签页，确认只读画面出现且 URL/标题正确；切回显示模式或
    关闭面板后，网络请求停止（Network 面板无新的 frame 请求）。
-8. 关闭会话后，两个 Task 的授权都变为已撤销，操作返回
+9. 关闭会话后，两个 Task 的授权都变为已撤销，操作返回
    `browser_session_closed` / `browser_grant_revoked`。
-9. 停掉 host 再打开登录窗口：AHA 明确返回 `browser_host_unavailable`，
-   不会换 profile 或浏览器。
+10. 停掉 host 再打开登录窗口：AHA 明确返回 `browser_host_unavailable`，
+    不会换 profile 或浏览器。
 
 ## 已知边界（POC）
 
-- 使用一个共享 loopback token，不是每个 Task 的短期 token；尚未实现 token 轮换。
+- host 使用每次启动重新生成的共享 loopback token，不是每个 Task 的短期 token；
+  AHA 进程内不做 token 轮换（崩溃重启会换新 token）。
+- 只读画面是授权标签页的页面 viewport（不含浏览器外壳），不是整窗桌面截屏；
+  也不提供 CDP 预览通道。需要整窗画面时另走共享控制桌面链路。
 - 不检测登录过期；`auth_required` 状态与登录检测属于后续里程碑。
 - 不做远程 host 注册、不实现 headless、不支持 Chrome/Chromium。
 - 标签页快照只返回渲染文本，仍可能包含已授权页面上的账号数据；这是“Task 不使用

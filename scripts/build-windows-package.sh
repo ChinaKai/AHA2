@@ -295,6 +295,9 @@ done
     --no-audit --no-fund --no-save --package-lock=false playwright@1.49.0
 )
 rm -rf -- "$browser_host_out/node_modules/.bin"
+# npm's internal metadata is not needed at runtime and would only add hidden
+# files to the installer manifest.
+rm -f -- "$browser_host_out/node_modules/.package-lock.json"
 [[ -f "$browser_host_out/node_modules/playwright/package.json" ]] || {
   printf 'browser host Playwright dependency was not installed.\n' >&2
   exit 1

@@ -212,12 +212,16 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): () => v
       paintFrameStatus();
       return;
     }
-    frameAbort = new AbortController();
+    const controller = new AbortController();
+    frameAbort = controller;
     const generation = streamGeneration;
     try {
-      const blob = await api.browserTabFrame(grant.id, tab.id, frameAbort.signal);
-      if (disposed) return;
+      const blob = await api.browserTabFrame(grant.id, tab.id, controller.signal);
+      // The owner may have switched tabs or closed the panel while this frame
+      // was in flight; a stale tab screenshot must never reach the new view.
+      if (disposed || generation !== streamGeneration) return;
       const buffer = new Uint8Array(await blob.arrayBuffer());
+      if (disposed || generation !== streamGeneration) return;
       const nextSignature = browserFrameSignature(buffer);
       frameDelay = nextBrowserFrameDelay(frameSignature, nextSignature, frameDelay);
       frameSignature = nextSignature;
@@ -247,7 +251,7 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): () => v
       }
       frameDelay = 2000;
     } finally {
-      frameAbort = null;
+      if (frameAbort === controller) frameAbort = null;
       // A tab switch, panel close or visibility pause bumps the generation;
       // the stale loop must not schedule another frame.
       if (!disposed && generation === streamGeneration) schedule(frameDelay);
