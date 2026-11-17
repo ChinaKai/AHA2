@@ -103,16 +103,30 @@ func (item BrowserTaskGrant) Has(capability string) bool {
 	return false
 }
 
-// BrowserTab records which Task owns a tab so another Task's grant cannot
-// operate on it even when both tasks share the same session.
+const (
+	// BrowserTabOriginAgent is a page AHA opened. BrowserTabOriginOwner is a
+	// page discovered in the visible browser that the Owner opened. Under the
+	// profile-exclusive model origin is display metadata only; it never blocks
+	// the current lease holder from operating the tab.
+	BrowserTabOriginAgent = "agent"
+	BrowserTabOriginOwner = "owner"
+)
+
+// BrowserTab records the visible tab's current lease holder and host identity.
+// Tab authorization is by exclusive Profile lease and session, not by tab
+// ownership.
 type BrowserTab struct {
-	ID        string    `json:"id"`
-	SessionID string    `json:"session_id"`
-	GrantID   string    `json:"grant_id"`
-	TaskID    string    `json:"task_id"`
-	HostTabID string    `json:"-"`
-	URL       string    `json:"url"`
-	Title     string    `json:"title"`
+	ID        string `json:"id"`
+	SessionID string `json:"session_id"`
+	GrantID   string `json:"grant_id"`
+	TaskID    string `json:"task_id"`
+	HostTabID string `json:"-"`
+	URL       string `json:"url"`
+	Title     string `json:"title"`
+	Origin    string `json:"origin"`
+	// Active is a transient view field from the host's page list; it is not
+	// stored in browser_tabs.
+	Active    bool      `json:"active,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }

@@ -20,11 +20,18 @@ type Host interface {
 	Open(ctx context.Context, profileID, browserKind string) (HostSession, error)
 	Session(ctx context.Context, profileID string) (HostSession, error)
 	Close(ctx context.Context, profileID string) error
-	OpenTab(ctx context.Context, profileID, sessionID, targetURL string) (HostTab, error)
-	Navigate(ctx context.Context, profileID, sessionID, tabID, targetURL string) (HostTab, error)
+	OpenTab(ctx context.Context, profileID, sessionID, targetURL, fence string) (HostTab, error)
+	ListTabs(ctx context.Context, profileID, sessionID string) ([]HostTab, error)
+	Activate(ctx context.Context, profileID, sessionID, tabID, fence string) (HostTab, error)
+	Navigate(ctx context.Context, profileID, sessionID, tabID, targetURL, fence string) (HostTab, error)
 	Snapshot(ctx context.Context, profileID, sessionID, tabID string) (HostSnapshot, error)
 	Frame(ctx context.Context, profileID, sessionID, tabID string) (HostFrame, error)
-	CloseTab(ctx context.Context, profileID, sessionID, tabID string) error
+	CloseTab(ctx context.Context, profileID, sessionID, tabID, fence string) error
+	Bookmarks(ctx context.Context, profileID, sessionID string) ([]HostBookmark, error)
+	// SetFence installs the current lease fence on the host session. Mutating
+	// host calls carry the same value; a stale value is rejected before any
+	// page side effect.
+	SetFence(ctx context.Context, profileID, sessionID, expectedFence, fence string) error
 }
 
 type Health struct {
@@ -40,18 +47,30 @@ type HostSession struct {
 	State     string `json:"state"`
 	Error     string `json:"error,omitempty"`
 	Reused    bool   `json:"reused,omitempty"`
+	// Fence is the lease token currently installed on the host session. AHA
+	// installs it with SetFence; mutating host calls must carry the same value.
+	Fence string `json:"fence,omitempty"`
 }
 
 type HostTab struct {
-	ID    string `json:"id"`
-	URL   string `json:"url"`
-	Title string `json:"title"`
+	ID     string `json:"id"`
+	URL    string `json:"url"`
+	Title  string `json:"title"`
+	Active bool   `json:"active,omitempty"`
 }
 
 type HostSnapshot struct {
 	URL   string `json:"url"`
 	Title string `json:"title"`
 	Text  string `json:"text"`
+}
+
+// HostBookmark is one read-only Edge bookmark. The host resolves the real
+// profile file; the path is never part of the response.
+type HostBookmark struct {
+	Title  string `json:"title"`
+	URL    string `json:"url"`
+	Folder string `json:"folder,omitempty"`
 }
 
 // HostFrame is a single read-only preview image of an authorized tab. It is
@@ -127,6 +146,14 @@ func hostErrorMessage(code string) string {
 		return "页面打开失败或超时"
 	case "browser_snapshot_failed":
 		return "读取页面失败"
+	case "browser_tab_list_failed":
+		return "读取当前页面列表失败"
+	case "browser_activation_failed":
+		return "切换浏览器页面失败"
+	case "browser_bookmarks_failed":
+		return "读取收藏夹失败"
+	case "browser_fence_stale":
+		return "浏览器控制权已变化，请重新获取独占控制"
 	case "browser_session_not_found":
 		return "浏览器会话不存在或已关闭"
 	case "browser_session_changed":
@@ -149,8 +176,11 @@ var hostCodes = map[string]bool{
 	"browser_edge_unavailable": true, "browser_profile_locked": true,
 	"browser_profile_unavailable": true, "browser_profile_invalid": true,
 	"browser_launch_failed": true, "browser_navigation_failed": true,
-	"browser_snapshot_failed": true, "browser_session_not_found": true,
-	"browser_session_changed": true, "browser_tab_not_found": true,
+	"browser_snapshot_failed": true, "browser_tab_list_failed": true,
+	"browser_activation_failed": true, "browser_bookmarks_failed": true,
+	"browser_fence_stale":       true,
+	"browser_session_not_found": true,
+	"browser_session_changed":   true, "browser_tab_not_found": true,
 }
 
 // sanitizeHostError replaces a host-originated error's text with the stable AHA
@@ -294,22 +324,60 @@ func (h *HTTPHost) Close(ctx context.Context, profileID string) error {
 	return h.call(ctx, http.MethodDelete, profilePath(profileID)+"/session", nil, nil)
 }
 
-func (h *HTTPHost) OpenTab(ctx context.Context, profileID, sessionID, targetURL string) (HostTab, error) {
+func (h *HTTPHost) OpenTab(ctx context.Context, profileID, sessionID, targetURL, fence string) (HostTab, error) {
 	var result struct {
 		Tab HostTab `json:"tab"`
 	}
 	err := h.call(ctx, http.MethodPost, profilePath(profileID)+"/tabs",
-		map[string]string{"session_id": sessionID, "url": targetURL}, &result)
+		map[string]string{"session_id": sessionID, "url": targetURL, "fence": fence}, &result)
 	return result.Tab, err
 }
 
-func (h *HTTPHost) Navigate(ctx context.Context, profileID, sessionID, tabID, targetURL string) (HostTab, error) {
+func (h *HTTPHost) SetFence(ctx context.Context, profileID, sessionID, expectedFence, fence string) error {
+	return h.call(ctx, http.MethodPost, profilePath(profileID)+"/fence",
+		map[string]string{"session_id": sessionID, "expected_fence": expectedFence, "fence": fence}, nil)
+}
+
+// ListTabs returns the ordinary web pages currently open in the session's
+// visible browser. It is the only way AHA can discover a page the Owner opened
+// by hand; the host never exposes a CDP endpoint or a profile path.
+func (h *HTTPHost) ListTabs(ctx context.Context, profileID, sessionID string) ([]HostTab, error) {
+	var result struct {
+		Tabs []HostTab `json:"tabs"`
+	}
+	path := profilePath(profileID) + "/tabs?session_id=" + url.QueryEscape(sessionID)
+	err := h.call(ctx, http.MethodGet, path, nil, &result)
+	return result.Tabs, err
+}
+
+func (h *HTTPHost) Activate(ctx context.Context, profileID, sessionID, tabID, fence string) (HostTab, error) {
+	var result struct {
+		Tab HostTab `json:"tab"`
+	}
+	err := h.call(ctx, http.MethodPost,
+		profilePath(profileID)+"/tabs/"+url.PathEscape(tabID)+"/activate",
+		map[string]string{"session_id": sessionID, "fence": fence}, &result)
+	return result.Tab, err
+}
+
+// Bookmarks reads the Edge bookmark file for the Profile through the host. The
+// response contains titles, URLs and folder names only; no local path.
+func (h *HTTPHost) Bookmarks(ctx context.Context, profileID, sessionID string) ([]HostBookmark, error) {
+	var result struct {
+		Bookmarks []HostBookmark `json:"bookmarks"`
+	}
+	path := profilePath(profileID) + "/bookmarks?session_id=" + url.QueryEscape(sessionID)
+	err := h.call(ctx, http.MethodGet, path, nil, &result)
+	return result.Bookmarks, err
+}
+
+func (h *HTTPHost) Navigate(ctx context.Context, profileID, sessionID, tabID, targetURL, fence string) (HostTab, error) {
 	var result struct {
 		Tab HostTab `json:"tab"`
 	}
 	err := h.call(ctx, http.MethodPost,
 		profilePath(profileID)+"/tabs/"+url.PathEscape(tabID)+"/navigate",
-		map[string]string{"session_id": sessionID, "url": targetURL}, &result)
+		map[string]string{"session_id": sessionID, "url": targetURL, "fence": fence}, &result)
 	return result.Tab, err
 }
 
@@ -322,8 +390,9 @@ func (h *HTTPHost) Snapshot(ctx context.Context, profileID, sessionID, tabID str
 	return result.Snapshot, err
 }
 
-func (h *HTTPHost) CloseTab(ctx context.Context, profileID, sessionID, tabID string) error {
-	path := profilePath(profileID) + "/tabs/" + url.PathEscape(tabID) + "?session_id=" + url.QueryEscape(sessionID)
+func (h *HTTPHost) CloseTab(ctx context.Context, profileID, sessionID, tabID, fence string) error {
+	path := profilePath(profileID) + "/tabs/" + url.PathEscape(tabID) +
+		"?session_id=" + url.QueryEscape(sessionID) + "&fence=" + url.QueryEscape(fence)
 	return h.call(ctx, http.MethodDelete, path, nil, nil)
 }
 

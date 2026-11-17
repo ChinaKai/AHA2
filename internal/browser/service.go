@@ -93,6 +93,10 @@ type ProfileView struct {
 	domain.BrowserProfile
 	Session       *domain.BrowserSession `json:"session,omitempty"`
 	HostAvailable bool                   `json:"host_available"`
+	// LeaseTaskID/Title identify another Task's exclusive lease for the Owner
+	// panel. AgentBrowserState removes non-held Profiles before returning.
+	LeaseTaskID    string `json:"lease_task_id,omitempty"`
+	LeaseTaskTitle string `json:"lease_task_title,omitempty"`
 }
 
 type SessionView struct {
@@ -145,7 +149,14 @@ func (s *Service) Profiles(ctx context.Context) ([]ProfileView, error) {
 				}
 			}
 		}
-		result = append(result, s.profileView(ctx, profile, true))
+		view := s.profileView(ctx, profile, true)
+		if holders, err := s.store.BrowserTaskGrantsForProfileActive(ctx, profile.ID, s.now()); err == nil && len(holders) > 0 {
+			view.LeaseTaskID = holders[0].TaskID
+			if task, err := s.store.Task(ctx, holders[0].TaskID); err == nil {
+				view.LeaseTaskTitle = task.Title
+			}
+		}
+		result = append(result, view)
 	}
 	return result, nil
 }
@@ -653,10 +664,11 @@ func (s *Service) CreateGrant(ctx context.Context, actor, taskID, profileID stri
 		return GrantView{}, conflict("browser_session_not_ready", "浏览器会话当前不可用（%s）", session.State)
 	}
 
-	// One active grant per Task/Profile keeps ownership unambiguous. The service
-	// lock serializes creates/revokes in this process, and the store transaction
-	// is the cross-process backstop: it revokes the previous active grant and
-	// inserts the new one under one immediate write lock.
+	// One active grant per Profile is the profile_exclusive lease. The service
+	// lock serializes creates/revokes in this process; the store transaction
+	// plus the profile_id unique index is the cross-process backstop. The host
+	// fence is CAS-installed before the DB write so in-flight old operations are
+	// rejected instead of producing a page side effect after transfer/release.
 	now := s.now()
 	s.grantMu.Lock()
 	defer s.grantMu.Unlock()
@@ -668,53 +680,215 @@ func (s *Service) CreateGrant(ctx context.Context, actor, taskID, profileID stri
 	if activeErr != nil || active.ID != session.ID {
 		return GrantView{}, conflict("browser_session_changed", "Profile 已切换到新的会话，请重新授权")
 	}
+	holders, err := s.store.BrowserTaskGrantsForProfileActive(ctx, profile.ID, now)
+	if err != nil {
+		return GrantView{}, err
+	}
+	for _, holder := range holders {
+		if holder.TaskID == taskID {
+			// Re-selecting the same Profile reuses the lease row and fence; only
+			// capabilities/TTL are refreshed. No revoke/rebuild churn.
+			hostSession, hostErr := s.host.Session(ctx, profile.ID)
+			if hostErr != nil {
+				return GrantView{}, sanitizeHostError(hostErr)
+			}
+			if hostSession.Fence != holder.ID {
+				if fenceErr := s.host.SetFence(ctx, profile.ID, session.HostSessionID, hostSession.Fence, holder.ID); fenceErr != nil {
+					return GrantView{}, s.fenceError(ctx, fenceErr)
+				}
+			}
+			refreshed, refreshErr := s.store.RefreshBrowserTaskGrantLease(ctx, holder.ID, caps, now.Add(ttl), now)
+			if refreshErr != nil {
+				if errors.Is(refreshErr, sql.ErrNoRows) {
+					return GrantView{}, conflict("browser_profile_in_use", "独占控制已变化，请刷新后重试")
+				}
+				return GrantView{}, refreshErr
+			}
+			return s.grantView(ctx, refreshed), nil
+		}
+		return GrantView{}, conflict("browser_profile_in_use",
+			"该 Profile 正由其他 Task 独占控制；请先让原 Task 释放，或由 Owner 显式转移控制权")
+	}
+	taskGrants, err := s.store.BrowserTaskGrants(ctx, taskID)
+	if err != nil {
+		return GrantView{}, err
+	}
+	for _, existing := range taskGrants {
+		if existing.RevokedAt.IsZero() && existing.ExpiresAt.After(now) && existing.ProfileID != profile.ID {
+			return GrantView{}, conflict("browser_task_profile_limit",
+				"当前 Task 已独占另一个 Profile；请先释放该 Profile，再获取新的 Profile")
+		}
+	}
+	hostSession, err := s.host.Session(ctx, profile.ID)
+	if err != nil {
+		return GrantView{}, sanitizeHostError(err)
+	}
 	grant := domain.BrowserTaskGrant{
 		ID: domain.NewID("browser_grant"), TaskID: taskID, ProfileID: profile.ID,
 		SessionID: session.ID, Capabilities: caps, ExpiresAt: now.Add(ttl),
 		CreatedAt: now, UpdatedAt: now,
 	}
-	var revoked []domain.BrowserTaskGrant
-	for attempt := 0; attempt < 2; attempt++ {
-		revoked, err = s.store.CreateBrowserTaskGrantSuperseding(ctx, grant, now)
-		if err == nil {
-			break
-		}
-		// The immediate transaction should serialize writers. If a driver
-		// still surfaces the unique active-grant index, retry once so the
-		// transaction revokes the winner before inserting.
-		if !isUniqueConstraintError(err) || attempt == 1 {
-			return GrantView{}, err
-		}
+	if err := s.host.SetFence(ctx, profile.ID, session.HostSessionID, hostSession.Fence, grant.ID); err != nil {
+		return GrantView{}, s.fenceError(ctx, err)
+	}
+	created, revoked, reusedLease, err := s.store.AcquireBrowserTaskGrantExclusive(ctx, grant, now)
+	if err != nil {
+		_ = s.host.SetFence(ctx, profile.ID, session.HostSessionID, grant.ID, hostSession.Fence)
+		return GrantView{}, s.acquireError(ctx, err)
+	}
+	if reusedLease {
+		// A concurrent/racing acquire created the same Task/Profile lease. Keep
+		// its fence and return it instead of rebuilding.
+		_ = s.host.SetFence(ctx, profile.ID, session.HostSessionID, grant.ID, created.ID)
+		return s.grantView(ctx, created), nil
 	}
 	for _, previous := range revoked {
-		s.closeGrantTabs(ctx, actor, previous, "superseded")
 		s.audit(ctx, actor, "browser_grant.revoke", "browser_task_grant", previous.ID, map[string]any{
 			"task_id": previous.TaskID, "profile_id": previous.ProfileID, "session_id": previous.SessionID,
-			"reason": "superseded",
+			"reason": "expired_or_superseded",
 		})
 	}
-	s.audit(ctx, actor, "browser_grant.create", "browser_task_grant", grant.ID, map[string]any{
+	s.audit(ctx, actor, "browser_grant.create", "browser_task_grant", created.ID, map[string]any{
 		"task_id": taskID, "profile_id": profile.ID, "session_id": session.ID,
-		"capabilities": caps, "expires_at": grant.ExpiresAt, "reused_session": reused,
+		"capabilities": caps, "expires_at": created.ExpiresAt, "reused_session": reused,
+		"exclusive": true,
 	})
-	return s.grantView(ctx, grant), nil
+	return s.grantView(ctx, created), nil
 }
 
-func (s *Service) closeGrantTabs(ctx context.Context, actor string, grant domain.BrowserTaskGrant, reason string) {
-	tabs, err := s.store.BrowserTabsForGrant(ctx, grant.ID)
-	if err != nil {
-		return
+func (s *Service) fenceError(ctx context.Context, err error) error {
+	if Code(err) == "browser_fence_stale" {
+		return conflict("browser_profile_in_use", "浏览器控制权已变化，请刷新后重试")
 	}
-	session, sessionErr := s.store.BrowserSession(ctx, grant.SessionID)
-	for _, tab := range tabs {
-		if sessionErr == nil && s.host != nil && tab.HostTabID != "" {
-			_ = s.host.CloseTab(ctx, grant.ProfileID, session.HostSessionID, tab.HostTabID)
+	return sanitizeHostError(err)
+}
+
+func (s *Service) acquireError(ctx context.Context, err error) error {
+	var inUse *store.BrowserProfileInUseError
+	if errors.As(err, &inUse) {
+		return conflict("browser_profile_in_use",
+			"该 Profile 正由其他 Task 独占控制；请先让原 Task 释放，或由 Owner 显式转移控制权")
+	}
+	var limit *store.BrowserTaskProfileLimitError
+	if errors.As(err, &limit) {
+		return conflict("browser_task_profile_limit",
+			"当前 Task 已独占另一个 Profile；请先释放该 Profile，再获取新的 Profile")
+	}
+	if isUniqueConstraintError(err) {
+		return conflict("browser_profile_in_use", "浏览器控制权已变化，请刷新后重试")
+	}
+	return err
+}
+
+// TransferProfileControl is an Owner action: it moves the Profile's exclusive
+// lease from the current Task to targetTaskID. A Task cannot call this; the
+// HTTP route is owner-authenticated only. If nobody holds the lease it simply
+// creates it for the target.
+func (s *Service) TransferProfileControl(ctx context.Context, actor, profileID, targetTaskID string, capabilities []string, ttl time.Duration) (GrantView, error) {
+	profileID = strings.TrimSpace(profileID)
+	targetTaskID = strings.TrimSpace(targetTaskID)
+	if targetTaskID == "" {
+		return GrantView{}, badRequest("browser_grant_invalid", "缺少目标 Task")
+	}
+	if _, err := s.store.Task(ctx, targetTaskID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return GrantView{}, notFound("browser_task_not_found", "Task 不存在")
 		}
-		_ = s.store.DeleteBrowserTab(ctx, tab.ID)
-		s.audit(ctx, actor, "browser_tab.close", "browser_tab", tab.ID, map[string]any{
-			"task_id": tab.TaskID, "url": tab.URL, "reason": reason,
-		})
+		return GrantView{}, err
 	}
+	caps, err := normalizeCapabilities(capabilities)
+	if err != nil {
+		return GrantView{}, err
+	}
+	if ttl <= 0 {
+		ttl = DefaultGrantTTL
+	}
+	if ttl < MinGrantTTL || ttl > MaxGrantTTL {
+		return GrantView{}, badRequest("browser_grant_invalid", "授权有效期必须在 1 分钟到 24 小时之间")
+	}
+	profile, err := s.store.BrowserProfile(ctx, profileID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return GrantView{}, notFound("browser_profile_not_found", "浏览器 Profile 不存在")
+	}
+	if err != nil {
+		return GrantView{}, err
+	}
+	if profile.HostID != s.hostID {
+		return GrantView{}, conflict("browser_profile_host_mismatch",
+			"该 Profile 绑定在浏览器宿主 %s 上，当前 AHA 只连接 %s", profile.HostID, s.hostID)
+	}
+	session, reused, err := s.ensureSession(ctx, actor, profile.ID)
+	if err != nil {
+		return GrantView{}, err
+	}
+	if session.State != domain.BrowserSessionStateReady && session.State != domain.BrowserSessionStateBusy {
+		return GrantView{}, conflict("browser_session_not_ready", "浏览器会话当前不可用（%s）", session.State)
+	}
+	now := s.now()
+	s.grantMu.Lock()
+	defer s.grantMu.Unlock()
+	current, err := s.store.BrowserSession(ctx, session.ID)
+	if err != nil || current.State == domain.BrowserSessionStateClosed {
+		return GrantView{}, conflict("browser_session_changed", "浏览器会话已关闭，请重新附加")
+	}
+	active, err := s.store.BrowserTaskGrantsForProfileActive(ctx, profile.ID, now)
+	if err != nil {
+		return GrantView{}, err
+	}
+	if len(active) > 0 && active[0].TaskID == targetTaskID {
+		return s.grantView(ctx, active[0]), nil
+	}
+	newGrant := domain.BrowserTaskGrant{
+		ID: domain.NewID("browser_grant"), TaskID: targetTaskID, ProfileID: profile.ID,
+		SessionID: session.ID, Capabilities: caps, ExpiresAt: now.Add(ttl),
+		CreatedAt: now, UpdatedAt: now,
+	}
+	hostSession, err := s.host.Session(ctx, profile.ID)
+	if err != nil {
+		return GrantView{}, sanitizeHostError(err)
+	}
+	if err := s.host.SetFence(ctx, profile.ID, session.HostSessionID, hostSession.Fence, newGrant.ID); err != nil {
+		return GrantView{}, s.fenceError(ctx, err)
+	}
+	if len(active) == 0 {
+		created, revoked, reusedLease, err := s.store.AcquireBrowserTaskGrantExclusive(ctx, newGrant, now)
+		if err != nil {
+			_ = s.host.SetFence(ctx, profile.ID, session.HostSessionID, newGrant.ID, hostSession.Fence)
+			return GrantView{}, s.acquireError(ctx, err)
+		}
+		if reusedLease {
+			_ = s.host.SetFence(ctx, profile.ID, session.HostSessionID, newGrant.ID, created.ID)
+			return s.grantView(ctx, created), nil
+		}
+		for _, previous := range revoked {
+			s.audit(ctx, actor, "browser_grant.release", "browser_task_grant", previous.ID, map[string]any{
+				"task_id": previous.TaskID, "profile_id": previous.ProfileID, "session_id": previous.SessionID,
+				"reason": "transferred_expired",
+			})
+		}
+		s.audit(ctx, actor, "browser_grant.transfer", "browser_task_grant", created.ID, map[string]any{
+			"task_id": targetTaskID, "profile_id": profile.ID, "session_id": session.ID,
+			"from_task_id": "", "reused_session": reused,
+		})
+		return s.grantView(ctx, created), nil
+	}
+	previous, err := s.store.TransferBrowserTaskGrantExclusive(ctx, active[0].ID, newGrant, now)
+	if err != nil {
+		_ = s.host.SetFence(ctx, profile.ID, session.HostSessionID, newGrant.ID, hostSession.Fence)
+		if errors.Is(err, store.ErrBrowserAccessInactive) {
+			return GrantView{}, conflict("browser_profile_in_use", "独占控制已变化，请刷新后重试")
+		}
+		return GrantView{}, s.acquireError(ctx, err)
+	}
+	s.audit(ctx, actor, "browser_grant.release", "browser_task_grant", previous.ID, map[string]any{
+		"task_id": previous.TaskID, "profile_id": previous.ProfileID, "session_id": previous.SessionID,
+		"reason": "transferred",
+	})
+	s.audit(ctx, actor, "browser_grant.transfer", "browser_task_grant", newGrant.ID, map[string]any{
+		"task_id": targetTaskID, "profile_id": profile.ID, "session_id": session.ID,
+		"from_task_id": previous.TaskID, "reused_session": reused,
+	})
+	return s.grantView(ctx, newGrant), nil
 }
 
 func (s *Service) grantView(ctx context.Context, grant domain.BrowserTaskGrant) GrantView {
@@ -768,25 +942,36 @@ func (s *Service) RevokeGrant(ctx context.Context, actor, id string) (GrantView,
 		return GrantView{}, err
 	}
 	if grant.RevokedAt.IsZero() {
-		// Revoke in the database before touching host tabs. While CloseTab is
-		// slow, a concurrent OpenTab must already see the grant as revoked; the
-		// guarded tab insert then refuses it. Closing tabs first left a window
-		// where a new tab could be inserted after the tab list was read.
+		// Releasing the lease only revokes AHA's control. Install a released
+		// fence first so an in-flight old operation cannot mutate a page after
+		// release; the visible browser and tabs stay open for the Owner.
+		releaseFence := "released:" + grant.ID
+		fenced := false
+		hostFence, hostSessionID := "", ""
+		if session, sessionErr := s.store.BrowserSession(ctx, grant.SessionID); sessionErr == nil && s.host != nil {
+			hostSessionID = session.HostSessionID
+			if hostSession, hostErr := s.host.Session(ctx, grant.ProfileID); hostErr == nil {
+				hostFence = hostSession.Fence
+				if fenceErr := s.host.SetFence(ctx, grant.ProfileID, hostSessionID, hostFence, releaseFence); fenceErr == nil {
+					fenced = true
+				}
+			}
+		}
 		if err := s.store.RevokeBrowserTaskGrant(ctx, grant.ID, s.now()); err != nil {
+			if fenced {
+				_ = s.host.SetFence(ctx, grant.ProfileID, hostSessionID, releaseFence, hostFence)
+			}
 			if !errors.Is(err, sql.ErrNoRows) {
 				return GrantView{}, err
 			}
 		} else {
-			s.audit(ctx, actor, "browser_grant.revoke", "browser_task_grant", grant.ID, map[string]any{
+			s.audit(ctx, actor, "browser_grant.release", "browser_task_grant", grant.ID, map[string]any{
 				"task_id": grant.TaskID, "profile_id": grant.ProfileID, "session_id": grant.SessionID,
-				"reason": "owner_revoked",
+				"reason": "released",
 			})
 		}
 		grant, _ = s.store.BrowserTaskGrant(ctx, grant.ID)
 	}
-	// Clean up any tab records even when the grant was already revoked; this is
-	// also the retry path after a host CloseTab failure.
-	s.closeGrantTabs(ctx, actor, grant, "revoked")
 	return s.grantView(ctx, grant), nil
 }
 
@@ -808,22 +993,25 @@ func (s *Service) TaskBrowserState(ctx context.Context, taskID string) (TaskBrow
 	if err != nil {
 		return TaskBrowserView{}, err
 	}
-	tabs, err := s.store.BrowserTabsForTask(ctx, taskID)
-	if err != nil {
-		return TaskBrowserView{}, err
-	}
 	view := TaskBrowserView{
-		TaskID: taskID, Profiles: profiles, Grants: grants, Tabs: tabs,
+		TaskID: taskID, Profiles: profiles, Grants: grants, Tabs: []domain.BrowserTab{},
 		HostAvailable: s.host != nil, Host: s.hostView(ctx),
 	}
 	for _, grant := range grants {
 		if grant.Status != domain.BrowserGrantStatusActive || grant.Session == nil {
 			continue
 		}
-		if grant.Session.State != domain.BrowserSessionStateClosed {
+		if grant.Session.State == domain.BrowserSessionStateClosed {
+			continue
+		}
+		if view.Session == nil {
 			session := *grant.Session
 			view.Session = &session
-			break
+			// Sync every visible page under the exclusive lease so an
+			// Owner-opened tab appears without a separate bind step.
+			if tabs, err := s.syncSessionTabs(ctx, grant.BrowserTaskGrant); err == nil {
+				view.Tabs = tabs
+			}
 		}
 	}
 	return view, nil
@@ -885,6 +1073,18 @@ func (s *Service) authorize(ctx context.Context, grantID, capability, tabID stri
 	if err != nil || active.ID != grant.SessionID {
 		return domain.BrowserTaskGrant{}, nil, conflict("browser_session_changed", "Profile 已切换到新的会话，请重新授权")
 	}
+	// The Task must still be the Profile's single exclusive holder. A legacy
+	// duplicate or a transferred lease fails closed here even if this grant row
+	// itself was not revoked yet.
+	holders, err := s.store.BrowserTaskGrantsForProfileActive(ctx, grant.ProfileID, s.now())
+	if err != nil {
+		return domain.BrowserTaskGrant{}, nil, err
+	}
+	holdsLease := len(holders) == 1 && holders[0].ID == grant.ID
+	if !holdsLease {
+		return domain.BrowserTaskGrant{}, nil, conflict("browser_profile_in_use",
+			"该 Profile 已由其他 Task 独占控制")
+	}
 	if s.host == nil {
 		return domain.BrowserTaskGrant{}, nil, newError(http.StatusServiceUnavailable,
 			"browser_host_unavailable", "浏览器宿主未启动")
@@ -899,9 +1099,9 @@ func (s *Service) authorize(ctx context.Context, grantID, capability, tabID stri
 	if err != nil {
 		return domain.BrowserTaskGrant{}, nil, err
 	}
-	if tab.SessionID != grant.SessionID || tab.GrantID != grant.ID || tab.TaskID != grant.TaskID {
+	if tab.SessionID != grant.SessionID {
 		return domain.BrowserTaskGrant{}, nil, forbidden("browser_tab_forbidden",
-			"该标签页不属于当前 Task 的授权")
+			"该标签页不属于当前独占的浏览器会话")
 	}
 	return grant, &tab, nil
 }
@@ -955,29 +1155,228 @@ func (s *Service) OpenTab(ctx context.Context, actor, grantID, targetURL string)
 	if err != nil {
 		return domain.BrowserTab{}, err
 	}
-	hostTab, err := s.host.OpenTab(ctx, grant.ProfileID, session.HostSessionID, targetURL)
+	hostTab, err := s.host.OpenTab(ctx, grant.ProfileID, session.HostSessionID, targetURL, grant.ID)
 	if err != nil {
 		return domain.BrowserTab{}, sanitizeHostError(err)
 	}
 	tab := domain.BrowserTab{
 		ID: domain.NewID("browser_tab"), SessionID: grant.SessionID, GrantID: grant.ID,
 		TaskID: grant.TaskID, HostTabID: hostTab.ID, URL: hostTab.URL, Title: hostTab.Title,
+		Origin: domain.BrowserTabOriginAgent, Active: hostTab.Active,
 	}
 	if tab.URL == "" {
 		tab.URL = targetURL
 	}
-	if err := s.store.CreateBrowserTabForActiveGrant(ctx, tab, s.now()); err != nil {
-		_ = s.host.CloseTab(ctx, grant.ProfileID, session.HostSessionID, hostTab.ID)
+	stored, err := s.store.UpsertBrowserTabForActiveGrant(ctx, tab, s.now())
+	if err != nil {
+		_ = s.host.CloseTab(ctx, grant.ProfileID, session.HostSessionID, hostTab.ID, grant.ID)
 		if errors.Is(err, store.ErrBrowserAccessInactive) {
 			return domain.BrowserTab{}, s.inactiveAccessError(ctx, grant.ID)
 		}
 		return domain.BrowserTab{}, err
 	}
+	tab = stored
+	tab.Active = hostTab.Active
 	s.touchSession(ctx, session)
 	s.audit(ctx, actor, "browser_tab.open", "browser_tab", tab.ID, map[string]any{
 		"task_id": tab.TaskID, "profile_id": grant.ProfileID, "session_id": grant.SessionID, "url": tab.URL,
 	})
 	return tab, nil
+}
+
+// AgentBrowserState is the Agent-facing view of TaskBrowserState. It only
+// exposes profiles that currently have an active grant for this Task, so a Task
+// cannot enumerate other profiles or sessions.
+func (s *Service) AgentBrowserState(ctx context.Context, taskID string) (TaskBrowserView, error) {
+	view, err := s.TaskBrowserState(ctx, taskID)
+	if err != nil {
+		return TaskBrowserView{}, err
+	}
+	grants := make([]GrantView, 0, len(view.Grants))
+	allowedProfiles := map[string]bool{}
+	allowedGrants := map[string]bool{}
+	for _, grant := range view.Grants {
+		if grant.Status != domain.BrowserGrantStatusActive || grant.Session == nil ||
+			grant.Session.State == domain.BrowserSessionStateClosed {
+			continue
+		}
+		grants = append(grants, grant)
+		allowedProfiles[grant.ProfileID] = true
+		allowedGrants[grant.ID] = true
+	}
+	profiles := make([]ProfileView, 0, len(view.Profiles))
+	for _, profile := range view.Profiles {
+		if allowedProfiles[profile.ID] {
+			profiles = append(profiles, profile)
+		}
+	}
+	tabs := make([]domain.BrowserTab, 0, len(view.Tabs))
+	for _, tab := range view.Tabs {
+		if allowedGrants[tab.GrantID] {
+			tabs = append(tabs, tab)
+		}
+	}
+	view.Grants = grants
+	view.Profiles = profiles
+	view.Tabs = tabs
+	return view, nil
+}
+
+// isWebPageURL restricts tab rows to ordinary http(s) pages. Internal browser
+// surfaces (edge://, devtools://, about:) must never become AHA tabs.
+func isWebPageURL(raw string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	return parsed.Scheme == "http" || parsed.Scheme == "https"
+}
+
+// syncSessionTabs reconciles the Profile's visible browser pages into
+// browser_tabs under the current exclusive lease. A newly discovered page is an
+// Owner-opened page (origin=owner); an AHA-opened page already has its row. The
+// Task/grant assignment follows the lease, which is why transfer does not need
+// to rewrite every tab explicitly.
+func (s *Service) syncSessionTabs(ctx context.Context, grant domain.BrowserTaskGrant) ([]domain.BrowserTab, error) {
+	session, err := s.sessionForGrant(ctx, grant)
+	if err != nil {
+		return nil, err
+	}
+	pages, err := s.host.ListTabs(ctx, grant.ProfileID, session.HostSessionID)
+	if err != nil {
+		return nil, sanitizeHostError(err)
+	}
+	existing, err := s.store.BrowserTabsForSession(ctx, grant.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	byHost := map[string]domain.BrowserTab{}
+	for _, tab := range existing {
+		if tab.HostTabID != "" {
+			byHost[tab.HostTabID] = tab
+		}
+	}
+	seen := map[string]bool{}
+	result := make([]domain.BrowserTab, 0, len(pages))
+	for _, page := range pages {
+		if strings.TrimSpace(page.ID) == "" || !isWebPageURL(page.URL) {
+			continue
+		}
+		seen[page.ID] = true
+		tab, ok := byHost[page.ID]
+		if !ok {
+			tab = domain.BrowserTab{
+				ID: domain.NewID("browser_tab"), HostTabID: page.ID,
+				Origin: domain.BrowserTabOriginOwner,
+			}
+		}
+		tab.SessionID = grant.SessionID
+		tab.GrantID = grant.ID
+		tab.TaskID = grant.TaskID
+		tab.URL = page.URL
+		tab.Title = page.Title
+		stored, err := s.store.UpsertBrowserTabForActiveGrant(ctx, tab, s.now())
+		if err != nil {
+			if errors.Is(err, store.ErrBrowserAccessInactive) {
+				return nil, s.inactiveAccessError(ctx, grant.ID)
+			}
+			return nil, err
+		}
+		stored.Active = page.Active
+		result = append(result, stored)
+	}
+	for _, tab := range existing {
+		if tab.HostTabID != "" && !seen[tab.HostTabID] {
+			_ = s.store.DeleteBrowserTab(ctx, tab.ID)
+		}
+	}
+	s.touchSession(ctx, session)
+	return result, nil
+}
+
+// SyncTabs returns every http(s) tab currently open in the exclusively
+// controlled Profile, including pages the Owner opened manually.
+func (s *Service) SyncTabs(ctx context.Context, grantID string) ([]domain.BrowserTab, error) {
+	grant, _, err := s.authorize(ctx, grantID, domain.BrowserCapabilitySnapshot, "")
+	if err != nil {
+		return nil, err
+	}
+	return s.syncSessionTabs(ctx, grant)
+}
+
+// CurrentTab is the page the Owner is looking at, or the first tab when the
+// host cannot report visibility. It does not change the page.
+func (s *Service) CurrentTab(ctx context.Context, grantID string) (domain.BrowserTab, error) {
+	tabs, err := s.SyncTabs(ctx, grantID)
+	if err != nil {
+		return domain.BrowserTab{}, err
+	}
+	if len(tabs) == 0 {
+		return domain.BrowserTab{}, notFound("browser_no_current_page",
+			"当前可见窗口还没有打开网页；请先在浏览器窗口打开页面，或在这里直接打开一个页面")
+	}
+	for _, tab := range tabs {
+		if tab.Active {
+			return tab, nil
+		}
+	}
+	return tabs[0], nil
+}
+
+func (s *Service) ActivateTab(ctx context.Context, actor, grantID, tabID string) (domain.BrowserTab, error) {
+	grant, tab, err := s.authorize(ctx, grantID, domain.BrowserCapabilityNavigate, tabID)
+	if err != nil {
+		return domain.BrowserTab{}, err
+	}
+	session, err := s.sessionForGrant(ctx, grant)
+	if err != nil {
+		return domain.BrowserTab{}, err
+	}
+	hostTab, err := s.host.Activate(ctx, grant.ProfileID, session.HostSessionID, tab.HostTabID, grant.ID)
+	if err != nil {
+		return domain.BrowserTab{}, sanitizeHostError(err)
+	}
+	if _, _, err := s.authorize(ctx, grantID, domain.BrowserCapabilityNavigate, tabID); err != nil {
+		return domain.BrowserTab{}, err
+	}
+	tab.URL = hostTab.URL
+	tab.Title = hostTab.Title
+	tab.Active = true
+	if err := s.store.UpdateBrowserTab(ctx, *tab); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return domain.BrowserTab{}, err
+	}
+	s.touchSession(ctx, session)
+	s.audit(ctx, actor, "browser_tab.activate", "browser_tab", tab.ID, map[string]any{
+		"task_id": tab.TaskID, "profile_id": grant.ProfileID, "session_id": grant.SessionID, "url": tab.URL,
+	})
+	return *tab, nil
+}
+
+// Bookmarks reads the exclusively controlled Profile's Edge bookmarks. The host
+// returns only titles, URLs and folder names; no local path, cookie or password
+// can cross this boundary.
+func (s *Service) Bookmarks(ctx context.Context, actor, grantID string) ([]HostBookmark, error) {
+	grant, _, err := s.authorize(ctx, grantID, domain.BrowserCapabilitySnapshot, "")
+	if err != nil {
+		return nil, err
+	}
+	session, err := s.sessionForGrant(ctx, grant)
+	if err != nil {
+		return nil, err
+	}
+	bookmarks, err := s.host.Bookmarks(ctx, grant.ProfileID, session.HostSessionID)
+	if err != nil {
+		return nil, sanitizeHostError(err)
+	}
+	if _, _, err := s.authorize(ctx, grantID, domain.BrowserCapabilitySnapshot, ""); err != nil {
+		return nil, err
+	}
+	s.touchSession(ctx, session)
+	s.audit(ctx, actor, "browser_bookmark.read", "browser_profile", grant.ProfileID, map[string]any{
+		"task_id": grant.TaskID, "profile_id": grant.ProfileID, "session_id": grant.SessionID,
+		"count": len(bookmarks),
+	})
+	return bookmarks, nil
 }
 
 func (s *Service) NavigateTab(ctx context.Context, actor, grantID, tabID, targetURL string) (domain.BrowserTab, error) {
@@ -993,7 +1392,7 @@ func (s *Service) NavigateTab(ctx context.Context, actor, grantID, tabID, target
 	if err != nil {
 		return domain.BrowserTab{}, err
 	}
-	hostTab, err := s.host.Navigate(ctx, grant.ProfileID, session.HostSessionID, tab.HostTabID, targetURL)
+	hostTab, err := s.host.Navigate(ctx, grant.ProfileID, session.HostSessionID, tab.HostTabID, targetURL, grant.ID)
 	if err != nil {
 		return domain.BrowserTab{}, sanitizeHostError(err)
 	}
@@ -1076,28 +1475,28 @@ func (s *Service) CloseTab(ctx context.Context, actor, grantID, tabID string) er
 	if err != nil {
 		return err
 	}
-	if err := s.host.CloseTab(ctx, grant.ProfileID, session.HostSessionID, tab.HostTabID); err != nil &&
+	// Under profile-exclusive control the Task may close any tab in the
+	// Profile, including a page the Owner opened by hand. origin is display
+	// metadata only and must not block the current holder.
+	if err := s.host.CloseTab(ctx, grant.ProfileID, session.HostSessionID, tab.HostTabID, grant.ID); err != nil &&
 		Code(err) != "browser_tab_not_found" {
 		return sanitizeHostError(err)
 	}
 	if err := s.store.DeleteBrowserTab(ctx, tab.ID); err != nil {
 		return err
 	}
+	reason := "owner_closed"
+	if strings.HasPrefix(strings.TrimSpace(actor), "agent:") {
+		reason = "agent_closed"
+	}
 	s.audit(ctx, actor, "browser_tab.close", "browser_tab", tab.ID, map[string]any{
-		"task_id": tab.TaskID, "profile_id": grant.ProfileID, "url": tab.URL, "reason": "owner_closed",
+		"task_id": tab.TaskID, "profile_id": grant.ProfileID, "url": tab.URL, "reason": reason,
 	})
 	return nil
 }
 
 func (s *Service) Tabs(ctx context.Context, grantID string) ([]domain.BrowserTab, error) {
-	grant, err := s.store.BrowserTaskGrant(ctx, strings.TrimSpace(grantID))
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, notFound("browser_grant_not_found", "浏览器授权不存在")
-	}
-	if err != nil {
-		return nil, err
-	}
-	return s.store.BrowserTabsForGrant(ctx, grant.ID)
+	return s.SyncTabs(ctx, grantID)
 }
 
 func (s *Service) audit(ctx context.Context, actor, action, resourceType, resourceID string, data map[string]any) {

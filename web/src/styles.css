@@ -888,12 +888,23 @@ body.task-tool-resizing { cursor: col-resize; user-select: none; }
 .browser-profile-dialog { width: min(520px, calc(100vw - 32px)); }
 .browser-profile-dialog form { display: grid; gap: 12px; }
 .desktop-browser-target { display: grid; gap: 8px; }
+.desktop-browser-open { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
+.desktop-browser-open input { min-width: 0; }
 #desktop-display-target { display: grid; gap: 10px; }
 .desktop-browser-surface { display: grid; gap: 8px; padding: 14px; border: 1px solid var(--line); border-radius: 6px; background: #f8fafc; }
 .desktop-browser-surface p { margin: 0; }
 .desktop-browser-tabs { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
 .desktop-browser-tabs li { display: grid; gap: 2px; padding: 0; border: 1px solid var(--line); border-radius: 5px; background: #fff; }
 .desktop-browser-tabs li.desktop-empty { padding: 6px 8px; }
+.desktop-browser-tabs li.desktop-browser-tab-item { grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
+.desktop-browser-tab-item .desktop-browser-tab { min-width: 0; }
+.desktop-browser-tab-close { margin-right: 4px; }
+.desktop-browser-bookmarks { display: grid; gap: 4px; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+.desktop-browser-bookmarks-head { display: flex; align-items: center; justify-content: space-between; }
+.desktop-browser-bookmarks ul { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; max-height: 30vh; overflow: auto; }
+.desktop-browser-bookmarks li { display: grid; }
+.desktop-browser-bookmarks li button { display: grid; gap: 2px; width: 100%; padding: 5px 7px; border: 1px solid var(--line); border-radius: 5px; background: #f8fafc; color: inherit; text-align: left; }
+.desktop-browser-bookmarks small { color: var(--muted); overflow-wrap: anywhere; }
 .desktop-browser-tab { display: grid; gap: 2px; width: 100%; padding: 6px 8px; border: 0; border-radius: 5px; background: transparent; color: inherit; text-align: left; }
 .desktop-browser-tab.active { background: #edf4ff; box-shadow: inset 0 0 0 1px #bfdbfe; color: #1d4ed8; }
 .desktop-browser-tabs small { color: var(--muted); overflow-wrap: anywhere; }

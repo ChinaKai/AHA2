@@ -870,6 +870,8 @@ export interface BrowserProfile {
   updated_at: string;
   host_available: boolean;
   session?: BrowserSession | null;
+  lease_task_id?: string;
+  lease_task_title?: string;
 }
 
 export interface BrowserTab {
@@ -879,8 +881,16 @@ export interface BrowserTab {
   task_id: string;
   url: string;
   title: string;
+  origin?: "agent" | "owner";
+  active?: boolean;
   created_at: string;
   updated_at: string;
+}
+
+export interface BrowserBookmark {
+  title: string;
+  url: string;
+  folder?: string;
 }
 
 export interface BrowserTaskGrant {

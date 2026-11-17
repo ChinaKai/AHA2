@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ChinaKai/AHA2/internal/agentapi"
 	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/auth"
 	"github.com/ChinaKai/AHA2/internal/browser"
@@ -30,6 +31,7 @@ type browserAPIFixture struct {
 	host    *browsertest.FakeHost
 	service *browser.Service
 	task    domain.Task
+	agents  *agentapi.Capabilities
 }
 
 func newBrowserAPIFixture(t *testing.T, host *browsertest.FakeHost) *browserAPIFixture {
@@ -43,15 +45,17 @@ func newBrowserAPIFixture(t *testing.T, host *browsertest.FakeHost) *browserAPIF
 	service := browser.NewService(database, host, "local")
 	authService := auth.NewService(database, "setup-test", time.Hour)
 	appService := app.NewService(database, nil, app.StubExecutor{})
+	agents := agentapi.NewCapabilities()
 	server := httptest.NewServer(New(Config{
 		Store: database, Auth: authService, App: appService, Browser: service,
+		AgentCapabilities: agents,
 	}).Handler())
 	t.Cleanup(server.Close)
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{Jar: jar}
 	fixture := &browserAPIFixture{
 		server: server, client: client, store: database, host: host, service: service,
-		task: createHardwareAPITask(t, database),
+		task: createHardwareAPITask(t, database), agents: agents,
 	}
 	fixture.csrf = registerOwner(t, client, server.URL)
 	return fixture
@@ -196,59 +200,6 @@ func TestBrowserHostFailuresReturnActionableStatus(t *testing.T) {
 	}
 }
 
-func TestBrowserGrantExpiryAndCrossTaskTabOverHTTP(t *testing.T) {
-	host := browsertest.New()
-	f := newBrowserAPIFixture(t, host)
-	now := time.Date(2026, 11, 17, 6, 0, 0, 0, time.UTC)
-	f.service.SetNowForTest(func() time.Time { return now })
-
-	_, payload := f.do(t, http.MethodPost, "/api/v1/browser/profiles", map[string]any{"name": "Work"})
-	profileID := payload["profile"].(map[string]any)["id"].(string)
-	response, payload := f.do(t, http.MethodPost, "/api/v1/tasks/"+f.task.ID+"/browser-sessions", map[string]any{
-		"profile_id": profileID, "expires_in_seconds": 60,
-	})
-	if response.StatusCode != http.StatusCreated {
-		t.Fatalf("create grant: %d %#v", response.StatusCode, payload)
-	}
-	grant := payload["grant"].(map[string]any)
-	grantID := grant["id"].(string)
-
-	response, payload = f.do(t, http.MethodPost, "/api/v1/browser-grants/"+grantID+"/tabs", map[string]any{
-		"url": "https://example.com/a",
-	})
-	if response.StatusCode != http.StatusCreated {
-		t.Fatalf("open tab: %d %#v", response.StatusCode, payload)
-	}
-	tabID := payload["tab"].(map[string]any)["id"].(string)
-
-	// A second Task attaches to the same session but may not touch Task A's tab.
-	secondTask := createHardwareAPITask(t, f.store)
-	response, payload = f.do(t, http.MethodPost, "/api/v1/tasks/"+secondTask.ID+"/browser-sessions", map[string]any{
-		"profile_id": profileID,
-	})
-	if response.StatusCode != http.StatusCreated {
-		t.Fatalf("second grant: %d %#v", response.StatusCode, payload)
-	}
-	secondGrantID := payload["grant"].(map[string]any)["id"].(string)
-	response, payload = f.do(t, http.MethodPost,
-		"/api/v1/browser-grants/"+secondGrantID+"/tabs/"+tabID+"/navigate", map[string]any{"url": "https://example.com/b"})
-	if response.StatusCode != http.StatusForbidden || payload["error"] != "browser_tab_forbidden" {
-		t.Fatalf("cross-task navigate: %d %#v", response.StatusCode, payload)
-	}
-
-	now = now.Add(2 * time.Minute)
-	response, payload = f.do(t, http.MethodGet,
-		"/api/v1/browser-grants/"+grantID+"/tabs/"+tabID+"/snapshot", nil)
-	if response.StatusCode != http.StatusForbidden || payload["error"] != "browser_grant_expired" {
-		t.Fatalf("expired snapshot: %d %#v", response.StatusCode, payload)
-	}
-	response, payload = f.do(t, http.MethodPost,
-		"/api/v1/browser-grants/"+grantID+"/tabs/"+tabID+"/navigate", map[string]any{"url": "https://example.com/c"})
-	if response.StatusCode != http.StatusForbidden || payload["error"] != "browser_grant_expired" {
-		t.Fatalf("expired navigate: %d %#v", response.StatusCode, payload)
-	}
-}
-
 func TestTaskBrowserStateAndGrantRevocationAPI(t *testing.T) {
 	host := browsertest.New()
 	f := newBrowserAPIFixture(t, host)
@@ -335,5 +286,353 @@ func TestBrowserAPINeverReturnsHostDiagnosticPaths(t *testing.T) {
 	message, _ := payload["message"].(string)
 	if strings.Contains(message, "browser-profiles") || strings.Contains(message, `C:\`) {
 		t.Fatalf("host diagnostic leaked through API: %q", message)
+	}
+}
+
+func (f *browserAPIFixture) agentToken(t *testing.T, taskID string) string {
+	t.Helper()
+	token, err := f.agents.Issue(taskID, "main", "turn-1", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return token
+}
+
+func (f *browserAPIFixture) agentDo(t *testing.T, method, path, token string, body any) (*http.Response, map[string]any) {
+	t.Helper()
+	response := agentRequest(t, f.server.URL+path, method, token, body)
+	var payload map[string]any
+	decodeResponse(t, response, &payload)
+	return response, payload
+}
+
+func TestBindCurrentPageWithoutAWebPageIsAnExplicitEmptyState(t *testing.T) {
+	host := browsertest.New()
+	f := newBrowserAPIFixture(t, host)
+	_, payload := f.do(t, http.MethodPost, "/api/v1/browser/profiles", map[string]any{"name": "Work"})
+	profileID := payload["profile"].(map[string]any)["id"].(string)
+	response, payload := f.do(t, http.MethodPost, "/api/v1/tasks/"+f.task.ID+"/browser-grants", map[string]any{"profile_id": profileID})
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("create grant: %d %#v", response.StatusCode, payload)
+	}
+	grantID := payload["grant"].(map[string]any)["id"].(string)
+	host.SetCurrentPages(profileID, []browser.HostTab{{ID: "host-tab-blank", URL: "about:blank"}})
+	response, payload = f.do(t, http.MethodPost, "/api/v1/browser-grants/"+grantID+"/tabs/current", nil)
+	if response.StatusCode != http.StatusNotFound || payload["error"] != "browser_no_current_page" {
+		t.Fatalf("expected browser_no_current_page, got %d %#v", response.StatusCode, payload)
+	}
+	if message, _ := payload["message"].(string); !strings.Contains(message, "打开页面") {
+		t.Fatalf("empty-state message should tell the Owner how to open a page: %q", message)
+	}
+}
+
+func TestAgentBrowserAPIControlsItsOwnGrantAndFailsClosed(t *testing.T) {
+	host := browsertest.New()
+	f := newBrowserAPIFixture(t, host)
+	_, payload := f.do(t, http.MethodPost, "/api/v1/browser/profiles", map[string]any{"name": "Work"})
+	profileID := payload["profile"].(map[string]any)["id"].(string)
+	response, payload := f.do(t, http.MethodPost, "/api/v1/tasks/"+f.task.ID+"/browser-grants", map[string]any{
+		"profile_id": profileID, "capabilities": []string{"navigate", "open_tab", "snapshot"},
+	})
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("create grant: %d %#v", response.StatusCode, payload)
+	}
+	grantID := payload["grant"].(map[string]any)["id"].(string)
+	host.SetCurrentPages(profileID, []browser.HostTab{
+		{ID: "host-tab-owner", URL: "https://example.com/login", Title: "Login", Active: true},
+	})
+	token := f.agentToken(t, f.task.ID)
+
+	// The Agent only sees profiles it is actually granted.
+	response, payload = f.agentDo(t, http.MethodGet, "/api/v1/agent/browser", token, nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("agent browser state: %d %#v", response.StatusCode, payload)
+	}
+	state := payload["browser"].(map[string]any)
+	if profiles := state["profiles"].([]any); len(profiles) != 1 {
+		t.Fatalf("agent profiles=%#v", profiles)
+	}
+
+	// Binding, opening, navigating, snapshot and frame all work with the grant.
+	response, payload = f.agentDo(t, http.MethodPost,
+		"/api/v1/agent/browser/grants/"+grantID+"/tabs/current", token, nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("agent bind: %d %#v", response.StatusCode, payload)
+	}
+	tabID := payload["tab"].(map[string]any)["id"].(string)
+	response, payload = f.agentDo(t, http.MethodPost,
+		"/api/v1/agent/browser/grants/"+grantID+"/tabs", token, map[string]any{"url": "https://example.com/agent"})
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("agent open: %d %#v", response.StatusCode, payload)
+	}
+	openedTabID := payload["tab"].(map[string]any)["id"].(string)
+	response, payload = f.agentDo(t, http.MethodPost,
+		"/api/v1/agent/browser/grants/"+grantID+"/tabs/"+openedTabID+"/navigate", token,
+		map[string]any{"url": "https://example.com/next"})
+	if response.StatusCode != http.StatusOK || payload["tab"].(map[string]any)["url"] != "https://example.com/next" {
+		t.Fatalf("agent navigate: %d %#v", response.StatusCode, payload)
+	}
+	response, payload = f.agentDo(t, http.MethodGet,
+		"/api/v1/agent/browser/grants/"+grantID+"/tabs/"+tabID+"/snapshot", token, nil)
+	if response.StatusCode != http.StatusOK || payload["snapshot"].(map[string]any)["text"] != "page text" {
+		t.Fatalf("agent snapshot: %d %#v", response.StatusCode, payload)
+	}
+	frameRequest, err := http.NewRequest(http.MethodGet,
+		f.server.URL+"/api/v1/agent/browser/grants/"+grantID+"/tabs/"+tabID+"/frame", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frameRequest.Header.Set("Authorization", "Bearer "+token)
+	frameResponse, err := http.DefaultClient.Do(frameRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frameBody, _ := io.ReadAll(frameResponse.Body)
+	frameResponse.Body.Close()
+	if frameResponse.StatusCode != http.StatusOK || len(frameBody) == 0 || frameResponse.Header.Get("Content-Type") != "image/jpeg" {
+		t.Fatalf("agent frame: %d %q %d bytes", frameResponse.StatusCode, frameResponse.Header.Get("Content-Type"), len(frameBody))
+	}
+
+	// A capability from another Task can neither list this grant nor use it.
+	otherTask := createHardwareAPITask(t, f.store)
+	otherToken := f.agentToken(t, otherTask.ID)
+	response, payload = f.agentDo(t, http.MethodGet, "/api/v1/agent/browser", otherToken, nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("other agent state: %d %#v", response.StatusCode, payload)
+	}
+	if profiles := payload["browser"].(map[string]any)["profiles"].([]any); len(profiles) != 0 {
+		t.Fatalf("cross-task state leaked profiles: %#v", profiles)
+	}
+	response, payload = f.agentDo(t, http.MethodGet,
+		"/api/v1/agent/browser/grants/"+grantID+"/tabs", otherToken, nil)
+	if response.StatusCode != http.StatusForbidden || payload["error"] != "browser_grant_forbidden" {
+		t.Fatalf("cross-task grant access: %d %#v", response.StatusCode, payload)
+	}
+
+	// The Task can release its own lease; afterwards every action fails closed.
+	response, payload = f.agentDo(t, http.MethodDelete,
+		"/api/v1/agent/browser/grants/"+grantID, token, nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("agent release: %d %#v", response.StatusCode, payload)
+	}
+	response, payload = f.agentDo(t, http.MethodGet,
+		"/api/v1/agent/browser/grants/"+grantID+"/tabs/"+tabID+"/snapshot", token, nil)
+	if response.StatusCode != http.StatusForbidden || payload["error"] != "browser_grant_revoked" {
+		t.Fatalf("revoked snapshot: %d %#v", response.StatusCode, payload)
+	}
+}
+
+func TestAgentBrowserGrantExpiryIsFailClosed(t *testing.T) {
+	host := browsertest.New()
+	f := newBrowserAPIFixture(t, host)
+	_, payload := f.do(t, http.MethodPost, "/api/v1/browser/profiles", map[string]any{"name": "Work"})
+	profileID := payload["profile"].(map[string]any)["id"].(string)
+	response, payload := f.do(t, http.MethodPost, "/api/v1/tasks/"+f.task.ID+"/browser-grants", map[string]any{
+		"profile_id": profileID, "expires_in_seconds": 60,
+	})
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("create grant: %d %#v", response.StatusCode, payload)
+	}
+	grantID := payload["grant"].(map[string]any)["id"].(string)
+	host.SetCurrentPages(profileID, []browser.HostTab{
+		{ID: "host-tab-owner", URL: "https://example.com/login", Title: "Login", Active: true},
+	})
+	token := f.agentToken(t, f.task.ID)
+	response, payload = f.agentDo(t, http.MethodPost,
+		"/api/v1/agent/browser/grants/"+grantID+"/tabs/current", token, nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("bind: %d %#v", response.StatusCode, payload)
+	}
+	tabID := payload["tab"].(map[string]any)["id"].(string)
+
+	f.service.SetNowForTest(func() time.Time { return time.Now().UTC().Add(2 * time.Minute) })
+	response, payload = f.agentDo(t, http.MethodGet,
+		"/api/v1/agent/browser/grants/"+grantID+"/tabs/"+tabID+"/snapshot", token, nil)
+	if response.StatusCode != http.StatusForbidden || payload["error"] != "browser_grant_expired" {
+		t.Fatalf("expired snapshot: %d %#v", response.StatusCode, payload)
+	}
+}
+
+func TestProfileExclusiveLeaseConflictReleaseAndTransferOverHTTP(t *testing.T) {
+	host := browsertest.New()
+	f := newBrowserAPIFixture(t, host)
+	_, payload := f.do(t, http.MethodPost, "/api/v1/browser/profiles", map[string]any{"name": "Work"})
+	profileID := payload["profile"].(map[string]any)["id"].(string)
+	response, payload := f.do(t, http.MethodPost, "/api/v1/tasks/"+f.task.ID+"/browser-grants", map[string]any{"profile_id": profileID})
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("Task A lease: %d %#v", response.StatusCode, payload)
+	}
+	grantA := payload["grant"].(map[string]any)["id"].(string)
+
+	otherTask := createHardwareAPITask(t, f.store)
+	response, payload = f.do(t, http.MethodPost, "/api/v1/tasks/"+otherTask.ID+"/browser-grants", map[string]any{"profile_id": profileID})
+	if response.StatusCode != http.StatusConflict || payload["error"] != "browser_profile_in_use" {
+		t.Fatalf("Task B lease conflict: %d %#v", response.StatusCode, payload)
+	}
+
+	// Release by the holder frees the Profile for Task B.
+	response, payload = f.do(t, http.MethodDelete, "/api/v1/browser-grants/"+grantA, nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("release: %d %#v", response.StatusCode, payload)
+	}
+	response, payload = f.do(t, http.MethodPost, "/api/v1/tasks/"+otherTask.ID+"/browser-grants", map[string]any{"profile_id": profileID})
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("Task B after release: %d %#v", response.StatusCode, payload)
+	}
+	grantB := payload["grant"].(map[string]any)["id"].(string)
+
+	// Owner transfer moves control back to Task A without Task A asking.
+	response, payload = f.do(t, http.MethodPost, "/api/v1/browser/profiles/"+profileID+"/transfer",
+		map[string]any{"task_id": f.task.ID})
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("transfer: %d %#v", response.StatusCode, payload)
+	}
+	transferred := payload["grant"].(map[string]any)
+	if transferred["task_id"] != f.task.ID || transferred["status"] != "active" {
+		t.Fatalf("transferred grant=%#v", transferred)
+	}
+	response, payload = f.do(t, http.MethodGet, "/api/v1/browser-grants/"+grantB, nil)
+	if response.StatusCode != http.StatusOK || payload["grant"].(map[string]any)["status"] != "revoked" {
+		t.Fatalf("old grant after transfer: %d %#v", response.StatusCode, payload)
+	}
+}
+
+func TestExclusiveTaskControlsOwnerOpenedTabsOverHTTP(t *testing.T) {
+	host := browsertest.New()
+	f := newBrowserAPIFixture(t, host)
+	_, payload := f.do(t, http.MethodPost, "/api/v1/browser/profiles", map[string]any{"name": "Work"})
+	profileID := payload["profile"].(map[string]any)["id"].(string)
+	response, payload := f.do(t, http.MethodPost, "/api/v1/tasks/"+f.task.ID+"/browser-grants", map[string]any{"profile_id": profileID})
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("lease: %d %#v", response.StatusCode, payload)
+	}
+	grantID := payload["grant"].(map[string]any)["id"].(string)
+	host.SetCurrentPages(profileID, []browser.HostTab{
+		{ID: "host-page-one", URL: "https://owner.example/one", Title: "One", Active: true},
+		{ID: "host-page-two", URL: "https://owner.example/two", Title: "Two"},
+	})
+	response, payload = f.do(t, http.MethodGet, "/api/v1/tasks/"+f.task.ID+"/browser", nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("task browser state: %d %#v", response.StatusCode, payload)
+	}
+	tabs := payload["browser"].(map[string]any)["tabs"].([]any)
+	if len(tabs) != 2 {
+		t.Fatalf("owner tabs=%#v", tabs)
+	}
+	byURL := map[string]string{}
+	for _, raw := range tabs {
+		tab := raw.(map[string]any)
+		byURL[tab["url"].(string)] = tab["id"].(string)
+	}
+	response, payload = f.do(t, http.MethodPost, "/api/v1/browser-grants/"+grantID+"/tabs/"+byURL["https://owner.example/two"]+"/activate", nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("activate: %d %#v", response.StatusCode, payload)
+	}
+	response, payload = f.do(t, http.MethodPost, "/api/v1/browser-grants/"+grantID+"/tabs/"+byURL["https://owner.example/one"]+"/navigate",
+		map[string]any{"url": "https://owner.example/next"})
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("navigate: %d %#v", response.StatusCode, payload)
+	}
+	response, payload = f.do(t, http.MethodGet, "/api/v1/browser-grants/"+grantID+"/tabs/"+byURL["https://owner.example/two"]+"/snapshot", nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("snapshot: %d %#v", response.StatusCode, payload)
+	}
+	response, payload = f.do(t, http.MethodDelete, "/api/v1/browser-grants/"+grantID+"/tabs/"+byURL["https://owner.example/one"], nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("close: %d %#v", response.StatusCode, payload)
+	}
+	if host.CloseTabCalls != 1 {
+		t.Fatalf("owner tab close calls=%d", host.CloseTabCalls)
+	}
+}
+
+func TestAgentBookmarksActivateAndOwnerTabCloseOverHTTP(t *testing.T) {
+	host := browsertest.New()
+	f := newBrowserAPIFixture(t, host)
+	_, payload := f.do(t, http.MethodPost, "/api/v1/browser/profiles", map[string]any{"name": "Work"})
+	profileID := payload["profile"].(map[string]any)["id"].(string)
+	response, payload := f.do(t, http.MethodPost, "/api/v1/tasks/"+f.task.ID+"/browser-grants", map[string]any{"profile_id": profileID})
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("lease: %d %#v", response.StatusCode, payload)
+	}
+	grantID := payload["grant"].(map[string]any)["id"].(string)
+	host.SetCurrentPages(profileID, []browser.HostTab{
+		{ID: "host-page-owner", URL: "https://owner.example/work", Title: "Work", Active: true},
+	})
+	host.BookmarkList = []browser.HostBookmark{
+		{Title: "Mail", URL: "https://mail.example/", Folder: "Bookmarks bar"},
+	}
+	token := f.agentToken(t, f.task.ID)
+
+	response, payload = f.agentDo(t, http.MethodGet,
+		"/api/v1/agent/browser/grants/"+grantID+"/bookmarks", token, nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("bookmarks: %d %#v", response.StatusCode, payload)
+	}
+	bookmarks := payload["bookmarks"].([]any)
+	if len(bookmarks) != 1 || bookmarks[0].(map[string]any)["url"] != "https://mail.example/" {
+		t.Fatalf("bookmarks=%#v", bookmarks)
+	}
+	encoded, _ := json.Marshal(payload)
+	if strings.Contains(strings.ToLower(string(encoded)), "appdata") {
+		t.Fatalf("bookmarks leaked a path: %#v", payload)
+	}
+	response, payload = f.agentDo(t, http.MethodGet,
+		"/api/v1/agent/browser/grants/"+grantID+"/tabs", token, nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("tabs: %d %#v", response.StatusCode, payload)
+	}
+	tabs := payload["tabs"].([]any)
+	ownerTabID := tabs[0].(map[string]any)["id"].(string)
+	response, payload = f.agentDo(t, http.MethodPost,
+		"/api/v1/agent/browser/grants/"+grantID+"/tabs/"+ownerTabID+"/activate", token, nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("agent activate: %d %#v", response.StatusCode, payload)
+	}
+	response, payload = f.agentDo(t, http.MethodPost,
+		"/api/v1/agent/browser/grants/"+grantID+"/tabs", token, map[string]any{"url": "https://mail.example/"})
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("open bookmark URL: %d %#v", response.StatusCode, payload)
+	}
+	response, payload = f.agentDo(t, http.MethodDelete,
+		"/api/v1/agent/browser/grants/"+grantID+"/tabs/"+ownerTabID, token, nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("agent close owner tab: %d %#v", response.StatusCode, payload)
+	}
+	if host.CloseTabCalls != 1 {
+		t.Fatalf("agent close owner tab calls=%d", host.CloseTabCalls)
+	}
+}
+
+func TestExclusiveLeaseDoesNotCrossProfiles(t *testing.T) {
+	host := browsertest.New()
+	f := newBrowserAPIFixture(t, host)
+	_, payload := f.do(t, http.MethodPost, "/api/v1/browser/profiles", map[string]any{"name": "One"})
+	profileOne := payload["profile"].(map[string]any)["id"].(string)
+	_, payload = f.do(t, http.MethodPost, "/api/v1/browser/profiles", map[string]any{"name": "Two"})
+	profileTwo := payload["profile"].(map[string]any)["id"].(string)
+	response, payload := f.do(t, http.MethodPost, "/api/v1/tasks/"+f.task.ID+"/browser-grants", map[string]any{"profile_id": profileOne})
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("profile one lease: %d %#v", response.StatusCode, payload)
+	}
+	grantOne := payload["grant"].(map[string]any)["id"].(string)
+	response, payload = f.do(t, http.MethodPost, "/api/v1/browser-grants/"+grantOne+"/tabs", map[string]any{"url": "https://one.example/"})
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("profile one tab: %d %#v", response.StatusCode, payload)
+	}
+	tabOne := payload["tab"].(map[string]any)["id"].(string)
+	otherTask := createHardwareAPITask(t, f.store)
+	response, payload = f.do(t, http.MethodPost, "/api/v1/tasks/"+otherTask.ID+"/browser-grants", map[string]any{"profile_id": profileTwo})
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("profile two lease: %d %#v", response.StatusCode, payload)
+	}
+	grantTwo := payload["grant"].(map[string]any)["id"].(string)
+	response, payload = f.do(t, http.MethodGet, "/api/v1/browser-grants/"+grantTwo+"/tabs/"+tabOne+"/snapshot", nil)
+	if response.StatusCode != http.StatusForbidden || payload["error"] != "browser_tab_forbidden" {
+		t.Fatalf("cross-profile snapshot: %d %#v", response.StatusCode, payload)
+	}
+	response, payload = f.do(t, http.MethodPost, "/api/v1/browser-grants/"+grantTwo+"/tabs", map[string]any{"url": "https://two.example/"})
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("profile two open: %d %#v", response.StatusCode, payload)
 	}
 }

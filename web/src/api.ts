@@ -94,8 +94,10 @@ import type {
   HardwareIORetentionSettings,
   HardwareResource,
   HardwareTerminalStatus,
+  BrowserBookmark,
   BrowserProfile,
   BrowserSession,
+  BrowserTab,
   BrowserTaskGrant,
   BrowserHostView,
   TaskBrowserState,
@@ -1014,6 +1016,38 @@ class APIClient {
   createTaskBrowserGrant(taskID: string, payload: {profile_id: string; capabilities?: string[]; expires_in_seconds?: number}): Promise<{grant: BrowserTaskGrant; session: BrowserSession | null}> {
     return this.request(`/api/v1/tasks/${encodeURIComponent(taskID)}/browser-sessions`, {
       method: "POST", body: JSON.stringify(payload),
+    });
+  }
+
+  openTaskBrowserTab(grantID: string, url: string): Promise<{tab: BrowserTab}> {
+    return this.request(`/api/v1/browser-grants/${encodeURIComponent(grantID)}/tabs`, {
+      method: "POST", body: JSON.stringify({url}),
+    });
+  }
+
+  closeTaskBrowserTab(grantID: string, tabID: string): Promise<{ok: boolean}> {
+    return this.request(`/api/v1/browser-grants/${encodeURIComponent(grantID)}/tabs/${encodeURIComponent(tabID)}`, {
+      method: "DELETE",
+    });
+  }
+
+  activateTaskBrowserTab(grantID: string, tabID: string): Promise<{tab: BrowserTab}> {
+    return this.request(`/api/v1/browser-grants/${encodeURIComponent(grantID)}/tabs/${encodeURIComponent(tabID)}/activate`, {
+      method: "POST", body: "{}",
+    });
+  }
+
+  taskBrowserBookmarks(grantID: string): Promise<{bookmarks: BrowserBookmark[]}> {
+    return this.request(`/api/v1/browser-grants/${encodeURIComponent(grantID)}/bookmarks`);
+  }
+
+  releaseTaskBrowserGrant(grantID: string): Promise<{grant: BrowserTaskGrant}> {
+    return this.request(`/api/v1/browser-grants/${encodeURIComponent(grantID)}`, {method: "DELETE"});
+  }
+
+  transferBrowserProfile(profileID: string, taskID: string): Promise<{grant: BrowserTaskGrant; session: BrowserSession | null}> {
+    return this.request(`/api/v1/browser/profiles/${encodeURIComponent(profileID)}/transfer`, {
+      method: "POST", body: JSON.stringify({task_id: taskID}),
     });
   }
 

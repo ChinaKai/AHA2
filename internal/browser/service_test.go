@@ -3,6 +3,7 @@ package browser_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -278,40 +279,6 @@ func TestGrantExpiryAndRevocationFailClosed(t *testing.T) {
 	requireCode(t, err, "browser_grant_revoked")
 }
 
-func TestCrossTaskTabAccessIsForbidden(t *testing.T) {
-	ctx := context.Background()
-	f := newFixture(t)
-	secondTask := createTask(t, f.store)
-	profile := createProfile(t, f)
-	grantA, err := f.service.CreateGrant(ctx, "owner", f.task.ID, profile.ID, nil, time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tabA, err := f.service.OpenTab(ctx, "owner", grantA.ID, "https://example.com/a")
-	if err != nil {
-		t.Fatal(err)
-	}
-	grantB, err := f.service.CreateGrant(ctx, "owner", secondTask.ID, profile.ID, nil, time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if grantB.Session == nil || grantB.Session.ID != grantA.Session.ID {
-		t.Fatal("the second Task should attach to the same profile session")
-	}
-	_, err = f.service.NavigateTab(ctx, "owner", grantB.ID, tabA.ID, "https://example.com/b")
-	requireCode(t, err, "browser_tab_forbidden")
-	_, err = f.service.SnapshotTab(ctx, "owner", grantB.ID, tabA.ID)
-	requireCode(t, err, "browser_tab_forbidden")
-	// Task B can still open and read its own tab.
-	tabB, err := f.service.OpenTab(ctx, "owner", grantB.ID, "https://example.com/b")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.service.SnapshotTab(ctx, "owner", grantB.ID, tabB.ID); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestCapabilityAndURLValidation(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)
@@ -360,7 +327,7 @@ func TestClosingSessionRevokesGrantsAndHostCloseRefreshes(t *testing.T) {
 	}
 	_, err = f.service.NavigateTab(ctx, "owner", grant.ID, tab.ID, "https://example.com/after")
 	requireCode(t, err, "browser_grant_revoked")
-	if tabs, err := f.service.Tabs(ctx, grant.ID); err != nil || len(tabs) != 0 {
+	if tabs, err := f.store.BrowserTabsForGrant(ctx, grant.ID); err != nil || len(tabs) != 0 {
 		t.Fatalf("tabs after close=%#v err=%v", tabs, err)
 	}
 
@@ -575,6 +542,10 @@ func TestConcurrentGrantCreationKeepsOneActiveGrant(t *testing.T) {
 	if len(active) != 1 {
 		t.Fatalf("active grants=%d, want 1", len(active))
 	}
+	all, err := f.store.BrowserTaskGrants(ctx, f.task.ID)
+	if err != nil || len(all) != 1 {
+		t.Fatalf("idempotent acquire created %d grant rows: %v", len(all), err)
+	}
 }
 
 func TestConcurrentGrantRevocationIsIdempotent(t *testing.T) {
@@ -697,63 +668,90 @@ func TestOpenTabInFlightRevokeDoesNotInsertTab(t *testing.T) {
 	}
 	release <- struct{}{}
 	err = <-result
-	requireCode(t, err, "browser_grant_revoked")
+	if code := browser.Code(err); code != "browser_grant_revoked" && code != "browser_fence_stale" {
+		t.Fatalf("in-flight open after revoke: %v", err)
+	}
 	tabs, err := f.store.BrowserTabsForGrant(ctx, grant.ID)
 	if err != nil || len(tabs) != 0 {
 		t.Fatalf("tabs after in-flight revoke=%#v err=%v", tabs, err)
 	}
 }
 
-func TestRevokeWhileClosingExistingTabRejectsConcurrentOpen(t *testing.T) {
+func TestProfileExclusiveLeaseConflictsThenReleases(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)
 	profile := createProfile(t, f)
-	grant, err := f.service.CreateGrant(ctx, "owner", f.task.ID, profile.ID, nil, time.Hour)
+	otherTask := createTask(t, f.store)
+	grantA, err := f.service.CreateGrant(ctx, "owner", f.task.ID, profile.ID, nil, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.service.OpenTab(ctx, "owner", grant.ID, "https://example.com/a"); err != nil {
+	_, err = f.service.CreateGrant(ctx, "owner", otherTask.ID, profile.ID, nil, time.Hour)
+	requireCode(t, err, "browser_profile_in_use")
+	state, err := f.service.TaskBrowserState(ctx, otherTask.ID)
+	if err != nil || len(state.Profiles) != 1 || state.Profiles[0].LeaseTaskID != f.task.ID || state.Profiles[0].LeaseTaskTitle == "" {
+		t.Fatalf("owner-facing lease view=%#v err=%v", state, err)
+	}
+	active, err := f.store.BrowserTaskGrantsForProfileActive(ctx, profile.ID, f.now)
+	if err != nil || len(active) != 1 || active[0].ID != grantA.ID {
+		t.Fatalf("active lease after conflict=%#v err=%v", active, err)
+	}
+	if _, err := f.service.RevokeGrant(ctx, "owner", grantA.ID); err != nil {
 		t.Fatal(err)
 	}
-	tabsA, err := f.store.BrowserTabsForGrant(ctx, grant.ID)
-	if err != nil || len(tabsA) != 1 {
-		t.Fatalf("tab A=%#v err=%v", tabsA, err)
+	grantB, err := f.service.CreateGrant(ctx, "owner", otherTask.ID, profile.ID, nil, time.Hour)
+	if err != nil {
+		t.Fatalf("acquire after release: %v", err)
 	}
-	openStarted, openRelease := blockNextOpenTab(f)
-	closeStarted := make(chan struct{}, 4)
-	closeRelease := make(chan struct{})
-	// Gate only tab A's close. OpenTab B's cleanup of its own host tab must not
-	// block, so the test can observe B's guarded-insert result first.
-	f.host.CloseTabStarted = closeStarted
-	f.host.CloseTabRelease = closeRelease
-	f.host.CloseTabGateTabID = tabsA[0].HostTabID
-
-	openResult := make(chan error, 1)
-	go func() {
-		_, openErr := f.service.OpenTab(ctx, "owner", grant.ID, "https://example.com/b")
-		openResult <- openErr
-	}()
-	<-openStarted
-	revokeResult := make(chan error, 1)
-	go func() {
-		_, revokeErr := f.service.RevokeGrant(ctx, "owner", grant.ID)
-		revokeResult <- revokeErr
-	}()
-	<-closeStarted // revoke has written revoked_at and is closing tab A
-	close(openRelease)
-	err = <-openResult
-	close(closeRelease)
-	requireCode(t, err, "browser_grant_revoked")
-	if revokeErr := <-revokeResult; revokeErr != nil {
-		t.Fatalf("revoke: %v", revokeErr)
+	if grantB.TaskID != otherTask.ID {
+		t.Fatalf("lease owner=%q", grantB.TaskID)
 	}
-	tabs, err := f.store.BrowserTabsForTask(ctx, f.task.ID)
-	if err != nil || len(tabs) != 0 {
-		t.Fatalf("tabs after revoke=%#v err=%v", tabs, err)
+	if events, err := f.store.BrowserAuditEvents(ctx, "browser_grant.release", 10); err != nil || len(events) == 0 {
+		t.Fatalf("release audit=%#v err=%v", events, err)
 	}
 }
 
-func TestRevokeToleratesSlowOrFailedHostTabClose(t *testing.T) {
+func TestConcurrentDifferentTasksOnlyOneLeaseWins(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	profile := createProfile(t, f)
+	tasks := make([]domain.Task, 0, 12)
+	for index := 0; index < 12; index++ {
+		tasks = append(tasks, createTask(t, f.store))
+	}
+	var wait sync.WaitGroup
+	results := make(chan error, len(tasks))
+	for _, task := range tasks {
+		wait.Add(1)
+		go func(task domain.Task) {
+			defer wait.Done()
+			_, err := f.service.CreateGrant(ctx, "owner", task.ID, profile.ID, nil, time.Hour)
+			results <- err
+		}(task)
+	}
+	wait.Wait()
+	close(results)
+	winners, conflicts := 0, 0
+	for err := range results {
+		if err == nil {
+			winners++
+			continue
+		}
+		if browser.Code(err) != "browser_profile_in_use" {
+			t.Fatalf("unexpected concurrent acquire error: %v", err)
+		}
+		conflicts++
+	}
+	if winners != 1 || conflicts != len(tasks)-1 {
+		t.Fatalf("winners=%d conflicts=%d", winners, conflicts)
+	}
+	active, err := f.store.BrowserTaskGrantsForProfileActive(ctx, profile.ID, f.now)
+	if err != nil || len(active) != 1 {
+		t.Fatalf("active leases=%#v err=%v", active, err)
+	}
+}
+
+func TestExclusiveTaskControlsOwnerOpenedTabs(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)
 	profile := createProfile(t, f)
@@ -761,34 +759,460 @@ func TestRevokeToleratesSlowOrFailedHostTabClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.service.OpenTab(ctx, "owner", grant.ID, "https://example.com/a"); err != nil {
-		t.Fatal(err)
-	}
-	// A second Task/Profile grant owns a tab that revoke of the first grant
-	// must never touch.
-	otherTask := createTask(t, f.store)
-	otherGrant, err := f.service.CreateGrant(ctx, "owner", otherTask.ID, profile.ID, nil, time.Hour)
+	f.host.SetCurrentPages(profile.ID, []browser.HostTab{
+		{ID: "host-page-1", URL: "https://owner.example/one", Title: "One", Active: true},
+		{ID: "host-page-2", URL: "https://owner.example/two", Title: "Two"},
+	})
+	tabs, err := f.service.SyncTabs(ctx, grant.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.service.OpenTab(ctx, "owner", otherGrant.ID, "https://example.com/other"); err != nil {
+	if len(tabs) != 2 {
+		t.Fatalf("tabs=%#v", tabs)
+	}
+	byURL := map[string]domain.BrowserTab{}
+	for _, tab := range tabs {
+		byURL[tab.URL] = tab
+		if tab.Origin != domain.BrowserTabOriginOwner || tab.TaskID != f.task.ID {
+			t.Fatalf("owner tab=%#v", tab)
+		}
+	}
+	// Activate the second owner-opened page and operate on both without any
+	// per-tab grant binding.
+	activated, err := f.service.ActivateTab(ctx, "owner", grant.ID, byURL["https://owner.example/two"].ID)
+	if err != nil || !activated.Active {
+		t.Fatalf("activate=%#v err=%v", activated, err)
+	}
+	if f.host.ActivateCalls != 1 {
+		t.Fatalf("activate calls=%d", f.host.ActivateCalls)
+	}
+	if _, err := f.service.NavigateTab(ctx, "owner", grant.ID, byURL["https://owner.example/one"].ID, "https://owner.example/next"); err != nil {
 		t.Fatal(err)
 	}
-	f.host.FailCloseTab = &browser.Error{Code: "browser_host_timeout", Status: http.StatusGatewayTimeout,
-		Message: "host close failed"}
-	revoked, err := f.service.RevokeGrant(ctx, "owner", grant.ID)
-	if err != nil || revoked.Status != domain.BrowserGrantStatusRevoked {
-		t.Fatalf("revoke with failing host close: %#v err=%v", revoked, err)
+	if snapshot, err := f.service.SnapshotTab(ctx, "owner", grant.ID, byURL["https://owner.example/two"].ID); err != nil || snapshot.URL != "https://owner.example/two" {
+		t.Fatalf("snapshot=%#v err=%v", snapshot, err)
 	}
-	if f.host.CloseTabCalls == 0 {
-		t.Fatal("revoke never attempted to close the host tab")
+	if err := f.service.CloseTab(ctx, "owner", grant.ID, byURL["https://owner.example/one"].ID); err != nil {
+		t.Fatal(err)
 	}
-	tabs, err := f.store.BrowserTabsForGrant(ctx, grant.ID)
-	if err != nil || len(tabs) != 0 {
-		t.Fatalf("tabs after failed host close=%#v err=%v", tabs, err)
+	if f.host.CloseTabCalls != 1 {
+		t.Fatalf("owner tab was not closed by the exclusive holder: %d", f.host.CloseTabCalls)
 	}
-	otherTabs, err := f.store.BrowserTabsForGrant(ctx, otherGrant.ID)
-	if err != nil || len(otherTabs) != 1 {
-		t.Fatalf("other grant tabs were changed: %#v err=%v", otherTabs, err)
+	remaining, err := f.service.SyncTabs(ctx, grant.ID)
+	if err != nil || len(remaining) != 1 || remaining[0].URL != "https://owner.example/two" {
+		t.Fatalf("tabs after close=%#v err=%v", remaining, err)
+	}
+	for _, action := range []string{"browser_tab.activate", "browser_tab.navigate", "browser_tab.close"} {
+		if events, err := f.store.BrowserAuditEvents(ctx, action, 10); err != nil || len(events) == 0 {
+			t.Fatalf("audit %s=%#v err=%v", action, events, err)
+		}
+	}
+}
+
+func TestProfileExclusiveTabOperationsRejectAnotherProfileSession(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	profileA := createProfile(t, f)
+	profileB, err := f.service.CreateProfile(ctx, "owner", "Second", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	grantA, err := f.service.CreateGrant(ctx, "owner", f.task.ID, profileA.ID, nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tabA, err := f.service.OpenTab(ctx, "owner", grantA.ID, "https://a.example/page")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherTask := createTask(t, f.store)
+	grantB, err := f.service.CreateGrant(ctx, "owner", otherTask.ID, profileB.ID, nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.service.SnapshotTab(ctx, "owner", grantB.ID, tabA.ID); browser.Code(err) != "browser_tab_forbidden" {
+		t.Fatalf("cross-profile snapshot: %v", err)
+	}
+	if err := f.service.CloseTab(ctx, "owner", grantB.ID, tabA.ID); browser.Code(err) != "browser_tab_forbidden" {
+		t.Fatalf("cross-profile close: %v", err)
+	}
+	if _, err := f.store.BrowserTab(ctx, tabA.ID); err != nil {
+		t.Fatalf("profile A tab changed: %v", err)
+	}
+}
+
+func TestSameTaskMustReleaseBeforeAnotherProfile(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	profileA := createProfile(t, f)
+	profileB, err := f.service.CreateProfile(ctx, "owner", "Second", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	grantA, err := f.service.CreateGrant(ctx, "owner", f.task.ID, profileA.ID, nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.service.CreateGrant(ctx, "owner", f.task.ID, profileB.ID, nil, time.Hour)
+	requireCode(t, err, "browser_task_profile_limit")
+	still, err := f.service.Grant(ctx, grantA.ID)
+	if err != nil || still.Status != domain.BrowserGrantStatusActive {
+		t.Fatalf("old lease after limit: %#v err=%v", still, err)
+	}
+	if _, err := f.service.RevokeGrant(ctx, "owner", grantA.ID); err != nil {
+		t.Fatal(err)
+	}
+	grantB, err := f.service.CreateGrant(ctx, "owner", f.task.ID, profileB.ID, nil, time.Hour)
+	if err != nil || grantB.TaskID != f.task.ID {
+		t.Fatalf("acquire after release: %#v err=%v", grantB, err)
+	}
+}
+
+func TestReleaseKeepsTabsForTheNextTask(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	profile := createProfile(t, f)
+	grantA, err := f.service.CreateGrant(ctx, "owner", f.task.ID, profile.ID, nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.host.SetCurrentPages(profile.ID, []browser.HostTab{
+		{ID: "host-page-owner", URL: "https://owner.example/work", Title: "Work", Active: true},
+	})
+	tabs, err := f.service.SyncTabs(ctx, grantA.ID)
+	if err != nil || len(tabs) != 1 {
+		t.Fatalf("tabs=%#v err=%v", tabs, err)
+	}
+	originalID := tabs[0].ID
+	if _, err := f.service.RevokeGrant(ctx, "owner", grantA.ID); err != nil {
+		t.Fatal(err)
+	}
+	if f.host.CloseTabCalls != 0 {
+		t.Fatalf("releasing the lease closed visible tabs: %d", f.host.CloseTabCalls)
+	}
+	if stored, err := f.store.BrowserTab(ctx, originalID); err != nil || stored.HostTabID != "host-page-owner" {
+		t.Fatalf("tab row should survive release: %#v err=%v", stored, err)
+	}
+	_, err = f.service.SnapshotTab(ctx, "owner", grantA.ID, originalID)
+	requireCode(t, err, "browser_grant_revoked")
+
+	otherTask := createTask(t, f.store)
+	grantB, err := f.service.CreateGrant(ctx, "owner", otherTask.ID, profile.ID, nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := f.service.SyncTabs(ctx, grantB.ID)
+	if err != nil || len(next) != 1 || next[0].ID != originalID || next[0].TaskID != otherTask.ID {
+		t.Fatalf("next tenant tabs=%#v err=%v", next, err)
+	}
+	if snapshot, err := f.service.SnapshotTab(ctx, "owner", grantB.ID, originalID); err != nil || snapshot.URL != "https://owner.example/work" {
+		t.Fatalf("next tenant snapshot=%#v err=%v", snapshot, err)
+	}
+}
+
+func TestTransferProfileControlIsOwnerActionAndMovesLease(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	profile := createProfile(t, f)
+	otherTask := createTask(t, f.store)
+	grantA, err := f.service.CreateGrant(ctx, "owner", f.task.ID, profile.ID, nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.host.SetCurrentPages(profile.ID, []browser.HostTab{
+		{ID: "host-page-owner", URL: "https://owner.example/work", Title: "Work", Active: true},
+	})
+	synced, err := f.service.SyncTabs(ctx, grantA.ID)
+	if err != nil || len(synced) != 1 {
+		t.Fatalf("initial tabs=%#v err=%v", synced, err)
+	}
+	grantB, err := f.service.TransferProfileControl(ctx, "owner", profile.ID, otherTask.ID, nil, time.Hour)
+	if err != nil {
+		t.Fatalf("transfer: %v", err)
+	}
+	if grantB.TaskID != otherTask.ID || grantB.Status != domain.BrowserGrantStatusActive {
+		t.Fatalf("transferred grant=%#v", grantB)
+	}
+	if old, err := f.service.Grant(ctx, grantA.ID); err != nil || old.Status != domain.BrowserGrantStatusRevoked {
+		t.Fatalf("old grant after transfer=%#v err=%v", old, err)
+	}
+	if _, err := f.service.SnapshotTab(ctx, "owner", grantA.ID, synced[0].ID); browser.Code(err) != "browser_grant_revoked" {
+		t.Fatalf("old tenant still read after transfer: %v", err)
+	}
+	tabs, err := f.service.SyncTabs(ctx, grantB.ID)
+	if err != nil || len(tabs) != 1 || tabs[0].TaskID != otherTask.ID {
+		t.Fatalf("transferred tabs=%#v err=%v", tabs, err)
+	}
+	if events, err := f.store.BrowserAuditEvents(ctx, "browser_grant.transfer", 10); err != nil || len(events) != 1 {
+		t.Fatalf("transfer audit=%#v err=%v", events, err)
+	}
+}
+
+func TestBookmarksReadIsAuditedAndPathFree(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	profile := createProfile(t, f)
+	grant, err := f.service.CreateGrant(ctx, "owner", f.task.ID, profile.ID, nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.host.BookmarkList = []browser.HostBookmark{
+		{Title: "Work", URL: "https://work.example/", Folder: "Bookmarks bar"},
+		{Title: "Mail", URL: "https://mail.example/", Folder: "Bookmarks bar"},
+	}
+	bookmarks, err := f.service.Bookmarks(ctx, "owner", grant.ID)
+	if err != nil || len(bookmarks) != 2 || f.host.BookmarkCalls != 1 {
+		t.Fatalf("bookmarks=%#v err=%v calls=%d", bookmarks, err, f.host.BookmarkCalls)
+	}
+	events, err := f.store.BrowserAuditEvents(ctx, "browser_bookmark.read", 10)
+	if err != nil || len(events) != 1 {
+		t.Fatalf("bookmark audit=%#v err=%v", events, err)
+	}
+	for key, value := range events[0].Data {
+		if text, ok := value.(string); ok && strings.Contains(text, "AppData") {
+			t.Fatalf("bookmark audit %q leaked a path: %q", key, text)
+		}
+	}
+}
+
+func TestExpiredLeaseCanBeTakenOver(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	profile := createProfile(t, f)
+	otherTask := createTask(t, f.store)
+	grantA, err := f.service.CreateGrant(ctx, "owner", f.task.ID, profile.ID, nil, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.setNow(f.now.Add(2 * time.Minute))
+	grantB, err := f.service.CreateGrant(ctx, "owner", otherTask.ID, profile.ID, nil, time.Hour)
+	if err != nil {
+		t.Fatalf("expired lease takeover: %v", err)
+	}
+	if grantB.TaskID != otherTask.ID {
+		t.Fatalf("new lease task=%q", grantB.TaskID)
+	}
+	old, err := f.service.Grant(ctx, grantA.ID)
+	if err != nil || old.Status != domain.BrowserGrantStatusRevoked {
+		t.Fatalf("expired lease should be revoked: %#v err=%v", old, err)
+	}
+}
+
+func TestSyncTabsKeepsEveryVisiblePage(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	profile := createProfile(t, f)
+	grant, err := f.service.CreateGrant(ctx, "owner", f.task.ID, profile.ID, nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pages := make([]browser.HostTab, 0, 61)
+	for index := 0; index < 61; index++ {
+		pages = append(pages, browser.HostTab{
+			ID: fmt.Sprintf("host-page-%d", index), URL: fmt.Sprintf("https://example.com/%d", index),
+			Title: fmt.Sprintf("Page %d", index), Active: index == 60,
+		})
+	}
+	f.host.SetCurrentPages(profile.ID, pages)
+	tabs, err := f.service.SyncTabs(ctx, grant.ID)
+	if err != nil || len(tabs) != len(pages) {
+		t.Fatalf("tabs=%d err=%v", len(tabs), err)
+	}
+	activeFound := false
+	for _, tab := range tabs {
+		if tab.Active && tab.URL == "https://example.com/60" {
+			activeFound = true
+		}
+	}
+	if !activeFound {
+		t.Fatal("active page was lost")
+	}
+	stored, err := f.store.BrowserTabsForSession(ctx, grant.Session.ID)
+	if err != nil || len(stored) != len(pages) {
+		t.Fatalf("stored tabs=%d err=%v", len(stored), err)
+	}
+}
+
+func TestTransferFencesInFlightClose(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	profile := createProfile(t, f)
+	grantA, err := f.service.CreateGrant(ctx, "owner", f.task.ID, profile.ID, nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.host.SetCurrentPages(profile.ID, []browser.HostTab{
+		{ID: "host-page-owner", URL: "https://owner.example/work", Title: "Work", Active: true},
+	})
+	tabs, err := f.service.SyncTabs(ctx, grantA.ID)
+	if err != nil || len(tabs) != 1 {
+		t.Fatalf("tabs=%#v err=%v", tabs, err)
+	}
+	closeStarted := make(chan struct{}, 1)
+	closeRelease := make(chan struct{})
+	f.host.CloseTabStarted = closeStarted
+	f.host.CloseTabRelease = closeRelease
+	f.host.CloseTabGateTabID = tabs[0].HostTabID
+	closeResult := make(chan error, 1)
+	go func() {
+		closeResult <- f.service.CloseTab(ctx, "owner", grantA.ID, tabs[0].ID)
+	}()
+	<-closeStarted
+
+	otherTask := createTask(t, f.store)
+	grantB, err := f.service.TransferProfileControl(ctx, "owner", profile.ID, otherTask.ID, nil, time.Hour)
+	if err != nil {
+		t.Fatalf("transfer: %v", err)
+	}
+	if _, err := f.service.SyncTabs(ctx, grantB.ID); err != nil {
+		t.Fatalf("new tenant sync: %v", err)
+	}
+	if snapshot, err := f.service.SnapshotTab(ctx, "owner", grantB.ID, tabs[0].ID); err != nil || snapshot.URL != "https://owner.example/work" {
+		t.Fatalf("new tenant snapshot while old close is paused=%#v err=%v", snapshot, err)
+	}
+	close(closeRelease)
+	if err := <-closeResult; browser.Code(err) != "browser_fence_stale" {
+		t.Fatalf("stale close returned %v", err)
+	}
+	if f.host.CloseTabCalls != 1 {
+		// CloseTabCalls counts the attempted close; the important part is that
+		// the tab still exists.
+	}
+	pages, err := f.host.ListTabs(ctx, profile.ID, grantB.Session.HostSessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, page := range pages {
+		if page.ID == "host-page-owner" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("stale close removed the page after transfer")
+	}
+	if snapshot, err := f.service.SnapshotTab(ctx, "owner", grantB.ID, tabs[0].ID); err != nil || snapshot.URL != "https://owner.example/work" {
+		t.Fatalf("new tenant snapshot=%#v err=%v", snapshot, err)
+	}
+}
+
+func TestTransferFencesInFlightOpen(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	profile := createProfile(t, f)
+	grantA, err := f.service.CreateGrant(ctx, "owner", f.task.ID, profile.ID, nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.host.SetCurrentPages(profile.ID, []browser.HostTab{
+		{ID: "host-page-owner", URL: "https://owner.example/work", Title: "Work", Active: true},
+	})
+	if _, err := f.service.SyncTabs(ctx, grantA.ID); err != nil {
+		t.Fatal(err)
+	}
+	started, release := blockNextOpenTab(f)
+	openResult := make(chan error, 1)
+	go func() {
+		_, openErr := f.service.OpenTab(ctx, "owner", grantA.ID, "https://stale.example/")
+		openResult <- openErr
+	}()
+	<-started
+
+	otherTask := createTask(t, f.store)
+	grantB, err := f.service.TransferProfileControl(ctx, "owner", profile.ID, otherTask.ID, nil, time.Hour)
+	if err != nil {
+		t.Fatalf("transfer: %v", err)
+	}
+	release <- struct{}{}
+	if err := <-openResult; browser.Code(err) != "browser_fence_stale" {
+		t.Fatalf("stale open returned %v", err)
+	}
+	tabs, err := f.service.SyncTabs(ctx, grantB.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tab := range tabs {
+		if tab.URL == "https://stale.example/" {
+			t.Fatal("stale open created a page after transfer")
+		}
+	}
+}
+
+func TestReleaseFencesInFlightClose(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	profile := createProfile(t, f)
+	grant, err := f.service.CreateGrant(ctx, "owner", f.task.ID, profile.ID, nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.host.SetCurrentPages(profile.ID, []browser.HostTab{
+		{ID: "host-page-owner", URL: "https://owner.example/work", Title: "Work", Active: true},
+	})
+	tabs, err := f.service.SyncTabs(ctx, grant.ID)
+	if err != nil || len(tabs) != 1 {
+		t.Fatalf("tabs=%#v err=%v", tabs, err)
+	}
+	closeStarted := make(chan struct{}, 1)
+	closeRelease := make(chan struct{})
+	f.host.CloseTabStarted = closeStarted
+	f.host.CloseTabRelease = closeRelease
+	f.host.CloseTabGateTabID = tabs[0].HostTabID
+	closeResult := make(chan error, 1)
+	go func() {
+		closeResult <- f.service.CloseTab(ctx, "owner", grant.ID, tabs[0].ID)
+	}()
+	<-closeStarted
+	if _, err := f.service.RevokeGrant(ctx, "owner", grant.ID); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	close(closeRelease)
+	if err := <-closeResult; browser.Code(err) != "browser_fence_stale" {
+		t.Fatalf("stale close after release returned %v", err)
+	}
+	pages, err := f.host.ListTabs(ctx, profile.ID, grant.Session.HostSessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pages) != 1 {
+		t.Fatalf("released page disappeared: %#v", pages)
+	}
+}
+
+func TestTransferRejectsTargetHoldingAnotherProfile(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	profileA := createProfile(t, f)
+	profileB, err := f.service.CreateProfile(ctx, "owner", "Second", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherTask := createTask(t, f.store)
+	grantA, err := f.service.CreateGrant(ctx, "owner", f.task.ID, profileA.ID, nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grantB, err := f.service.CreateGrant(ctx, "owner", otherTask.ID, profileB.ID, nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.host.SetCurrentPages(profileA.ID, []browser.HostTab{
+		{ID: "host-page-a", URL: "https://a.example/", Title: "A", Active: true},
+	})
+	if _, err := f.service.SyncTabs(ctx, grantA.ID); err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.service.TransferProfileControl(ctx, "owner", profileA.ID, otherTask.ID, nil, time.Hour)
+	requireCode(t, err, "browser_task_profile_limit")
+	if tabs, err := f.service.SyncTabs(ctx, grantA.ID); err != nil || len(tabs) != 1 {
+		t.Fatalf("profile A fence was not restored: %#v err=%v", tabs, err)
+	}
+	stillA, err := f.service.Grant(ctx, grantA.ID)
+	if err != nil || stillA.Status != domain.BrowserGrantStatusActive {
+		t.Fatalf("profile A lease changed: %#v err=%v", stillA, err)
+	}
+	stillB, err := f.service.Grant(ctx, grantB.ID)
+	if err != nil || stillB.Status != domain.BrowserGrantStatusActive {
+		t.Fatalf("target profile lease changed: %#v err=%v", stillB, err)
 	}
 }

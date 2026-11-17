@@ -3,7 +3,7 @@
 // here avoids growing the first-screen bundle for a panel most Tasks never open.
 import {api} from "./api.js";
 import {icon} from "./icons.js";
-import type {BrowserHostView, BrowserProfile, BrowserSession, BrowserTab, BrowserTaskGrant} from "./types.js";
+import type {BrowserBookmark, BrowserHostView, BrowserProfile, BrowserSession, BrowserTab, BrowserTaskGrant} from "./types.js";
 
 type Notice = (type: "error" | "notice", message: string) => void;
 
@@ -19,9 +19,15 @@ interface PanelState {
   host: BrowserHostView | null;
   grant: BrowserTaskGrant | null;
   tabs: BrowserTab[];
+  bookmarks: BrowserBookmark[];
   profileID: string;
   selectedTabID: string;
   loading: boolean;
+  binding: boolean;
+  bookmarksOpen: boolean;
+  bookmarksLoading: boolean;
+  inUseProfileID: string;
+  urlDraft: string;
   error: string;
   frameError: string;
   frameLive: boolean;
@@ -84,17 +90,23 @@ function statusText(state: PanelState, session: BrowserSession | null): string {
   }
   if (state.host && !state.host.edge_available) return "浏览器宿主在线，但未找到 Microsoft Edge";
   if (!state.profiles.length) return "还没有浏览器 Profile，请先到资源页创建";
-  if (!session) return "尚未附加会话；启动/附加后 Owner 可在宿主可见窗口中登录";
-  const reachable = session.host_reachable === false ? " · 宿主不可达" : "";
-  const error = session.error ? `：${session.error}` : "";
-  return `会话 ${stateLabel(session.state)}${reachable}${error}`;
+  if (state.grant) {
+    const reachable = session?.host_reachable === false ? " · 宿主不可达" : "";
+    const error = session?.error ? `：${session.error}` : "";
+    return `当前 Task 独占控制中 · 会话 ${stateLabel(session?.state || "ready")}${reachable}${error}`;
+  }
+  if (state.inUseProfileID && state.inUseProfileID === state.profileID) {
+    return "该 Profile 正由其他 Task 独占控制；请等它释放，或由 Owner 在本面板转移控制权。";
+  }
+  return "选择 Profile 后点「获取独占控制」；获取成功后 Agent 可操作这个浏览器的全部页面。";
 }
 
 export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): () => void {
   const {container, taskID, notify, onChange} = options;
   const state: PanelState = {
-    profiles: [], host: null, grant: null, tabs: [], profileID: "", selectedTabID: "",
-    loading: true, error: "", frameError: "", frameLive: false,
+    profiles: [], host: null, grant: null, tabs: [], bookmarks: [], profileID: "", selectedTabID: "",
+    loading: true, binding: false, bookmarksOpen: false, bookmarksLoading: false, inUseProfileID: "",
+    urlDraft: "", error: "", frameError: "", frameLive: false,
   };
 
   let disposed = false;
@@ -110,11 +122,14 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): () => v
     state.tabs.find(tab => tab.id === state.selectedTabID) || null;
 
   const frameStatusText = (): string => {
-    if (!state.grant) return "附加会话后可查看授权标签页的实时画面";
+    if (!state.grant) return "先选择 Profile 并获取独占控制，之后可查看并操作全部页面";
+    if (state.binding) return "正在处理浏览器操作…";
     if (state.host && !state.host.available) return "浏览器宿主不可用，无法获取画面";
     if (state.frameError) return `画面暂不可用：${state.frameError}`;
-    if (!state.tabs.length) return "这个 Task 还没有自己的标签页";
-    if (!selectedTab()) return "选择标签页后显示画面";
+    if (!state.tabs.length) {
+      return "当前浏览器窗口还没有网页；可以在这里打开页面，或从收藏夹打开。";
+    }
+    if (!selectedTab()) return "选择页面后显示画面";
     if (!state.frameLive) return "正在获取画面…";
     return "实时画面 · 只读（不会转发点击或输入）";
   };
@@ -143,16 +158,39 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): () => v
     const session = state.grant?.session || state.profiles.find(item => item.id === state.profileID)?.session || null;
     const selectedProfile = state.profiles.find(item => item.id === state.profileID);
     const tabs = state.tabs.length
-      ? state.tabs.map(tab => `<li><button type="button" class="desktop-browser-tab ${tab.id === state.selectedTabID ? "active" : ""}" data-browser-tab="${escapeHTML(tab.id)}" aria-pressed="${tab.id === state.selectedTabID}"><span>${escapeHTML(tab.title || "未命名页面")}</span><small>${escapeHTML(tab.url)}</small></button></li>`).join("")
-      : `<li class="desktop-empty">这个 Task 还没有自己的标签页</li>`;
+      ? state.tabs.map(tab => `<li class="desktop-browser-tab-item"><button type="button" class="desktop-browser-tab ${tab.id === state.selectedTabID ? "active" : ""}" data-browser-tab="${escapeHTML(tab.id)}" aria-pressed="${tab.id === state.selectedTabID}"><span>${escapeHTML(tab.title || "未命名页面")}</span><small>${tab.active ? "当前 · " : ""}${tab.origin === "owner" ? "Owner 页面 · " : ""}${escapeHTML(tab.url)}</small></button><button type="button" class="icon-button desktop-browser-tab-close" data-browser-tab-close="${escapeHTML(tab.id)}" title="关闭页面" aria-label="关闭页面">${icon("close")}</button></li>`).join("")
+      : `<li class="desktop-empty">${state.grant
+        ? "当前浏览器窗口还没有网页。可以在这里打开页面，或从收藏夹打开。"
+        : "选择 Profile 并获取独占控制后，这里会列出浏览器当前的全部页面。"}</li>`;
+    const busy = state.loading || state.binding;
+    const canUseGrant = Boolean(state.grant) && state.host?.available !== false;
+    const canTransfer = Boolean(state.inUseProfileID) && state.inUseProfileID === state.profileID;
+    const bookmarks = state.bookmarksOpen
+      ? `<section id="desktop-browser-bookmarks" class="desktop-browser-bookmarks" aria-label="收藏夹">
+          <div class="desktop-browser-bookmarks-head"><strong>收藏夹</strong><button type="button" id="desktop-browser-bookmarks-close" class="icon-button" title="收起收藏夹" aria-label="收起收藏夹">${icon("close")}</button></div>
+          ${state.bookmarksLoading
+            ? '<p class="desktop-empty" role="status">正在读取收藏夹…</p>'
+            : state.bookmarks.length
+              ? `<ul>${state.bookmarks.map(bookmark => `<li><button type="button" data-browser-bookmark="${escapeHTML(bookmark.url)}"><span>${escapeHTML(bookmark.title || bookmark.url)}</span><small>${bookmark.folder ? `${escapeHTML(bookmark.folder)} · ` : ""}${escapeHTML(bookmark.url)}</small></button></li>`).join("")}</ul>`
+              : '<p class="desktop-empty">收藏夹为空或暂时读不到。</p>'}
+        </section>`
+      : "";
     container.innerHTML = `
       <label class="desktop-window-label">浏览器 Profile<select id="desktop-browser-profile" aria-label="浏览器 Profile">${profileOptions(state.profiles, state.profileID)}</select></label>
       <div class="desktop-target-actions">
-        <button type="button" id="desktop-browser-refresh" class="icon-button" title="刷新浏览器状态" aria-label="刷新浏览器状态" ${state.loading ? "disabled" : ""}>${icon("refresh")}</button>
-        <button type="button" id="desktop-browser-attach" class="primary" ${state.loading || !state.profiles.length ? "disabled" : ""}>${icon("link")}<span>启动 / 附加会话</span></button>
+        <button type="button" id="desktop-browser-refresh" class="icon-button" title="刷新浏览器状态" aria-label="刷新浏览器状态" ${busy ? "disabled" : ""}>${icon("refresh")}</button>
+        <button type="button" id="desktop-browser-attach" class="primary" ${busy || !state.profiles.length ? "disabled" : ""}>${icon("link")}<span>获取独占控制</span></button>
+        ${state.grant ? `<button type="button" id="desktop-browser-release" ${busy ? "disabled" : ""}>释放控制</button>
+        <button type="button" id="desktop-browser-bookmarks-toggle" ${busy ? "disabled" : ""}>${icon("browser")}<span>收藏夹</span></button>` : ""}
+        ${canTransfer ? `<button type="button" id="desktop-browser-transfer" class="primary" ${busy ? "disabled" : ""}>由 Owner 转移控制权</button>` : ""}
       </div>
       <p id="desktop-browser-status" class="desktop-empty" role="status">${escapeHTML(statusText(state, session))}</p>
-      <ul id="desktop-browser-tabs" class="desktop-browser-tabs" aria-label="Task 标签页">${tabs}</ul>
+      <form id="desktop-browser-open-form" class="desktop-browser-open">
+        <input id="desktop-browser-url" type="url" inputmode="url" placeholder="https://example.com" aria-label="要打开的网址" value="${escapeHTML(state.urlDraft)}" ${busy || !canUseGrant ? "disabled" : ""}>
+        <button type="submit" ${busy || !canUseGrant ? "disabled" : ""}>打开页面</button>
+      </form>
+      ${bookmarks}
+      <ul id="desktop-browser-tabs" class="desktop-browser-tabs" aria-label="浏览器页面">${tabs}</ul>
       <figure class="desktop-browser-preview">
         <img id="desktop-browser-frame" alt="内置浏览器只读画面" draggable="false" hidden>
         <p id="desktop-browser-frame-status" class="desktop-empty" role="status">${escapeHTML(frameStatusText())}</p>
@@ -166,6 +204,27 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): () => v
     container.querySelector("#desktop-browser-attach")?.addEventListener("click", () => {
       if (!state.loading) void attach();
     });
+    container.querySelector("#desktop-browser-release")?.addEventListener("click", () => {
+      if (!state.binding) void releaseControl();
+    });
+    container.querySelector("#desktop-browser-bookmarks-toggle")?.addEventListener("click", () => {
+      if (!state.binding) void toggleBookmarks();
+    });
+    container.querySelector("#desktop-browser-bookmarks-close")?.addEventListener("click", () => {
+      state.bookmarksOpen = false;
+      paint();
+    });
+    container.querySelector("#desktop-browser-transfer")?.addEventListener("click", () => {
+      if (!state.binding) void transferControl();
+    });
+    const urlInput = container.querySelector<HTMLInputElement>("#desktop-browser-url");
+    urlInput?.addEventListener("input", () => {
+      state.urlDraft = urlInput.value;
+    });
+    container.querySelector("#desktop-browser-open-form")?.addEventListener("submit", event => {
+      event.preventDefault();
+      if (!state.binding) void openPage();
+    });
     container.querySelectorAll<HTMLElement>("[data-browser-tab]").forEach(button => {
       button.addEventListener("click", () => {
         const tabID = button.dataset.browserTab || "";
@@ -175,6 +234,26 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): () => v
         state.frameLive = false;
         paint();
         startStream();
+        if (state.grant) {
+          void api.activateTaskBrowserTab(state.grant.id, tabID).catch(error => {
+            const details = errorDetails(error);
+            state.error = details.message;
+            paint();
+          });
+        }
+      });
+    });
+    container.querySelectorAll<HTMLElement>("[data-browser-tab-close]").forEach(button => {
+      button.addEventListener("click", event => {
+        event.stopPropagation();
+        const tabID = button.dataset.browserTabClose || "";
+        if (!state.binding && tabID) void closeTab(tabID);
+      });
+    });
+    container.querySelectorAll<HTMLElement>("[data-browser-bookmark]").forEach(button => {
+      button.addEventListener("click", () => {
+        const target = button.dataset.browserBookmark || "";
+        if (!state.binding && target) void openPage(target);
       });
     });
     paintFrameStatus();
@@ -282,16 +361,25 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): () => v
       state.profiles = data.profiles || [];
       state.host = data.host || null;
       const active = (data.grants || []).find(grant => grant.status === "active") || null;
+      const previousGrant = state.grant?.id || "";
       state.grant = active;
-      // The Task view returns every tab this Task owns. The preview only asks
-      // for tabs under the active grant; anything else would be rejected by
-      // the server's tab-ownership check.
-      state.tabs = active ? (data.tabs || []).filter(tab => tab.grant_id === active.id) : (data.tabs || []);
+      // The server syncs every visible http(s) page under the exclusive lease,
+      // including pages the Owner opened by hand.
+      state.tabs = active ? (data.tabs || []) : [];
+      if (active) state.inUseProfileID = "";
+      if (active && active.id !== previousGrant) {
+        state.bookmarks = [];
+        state.bookmarksOpen = false;
+      }
       if (!state.profiles.some(item => item.id === state.profileID)) {
         state.profileID = active?.profile_id || state.profiles[0]?.id || "";
       }
+      if (!active) {
+        const selected = state.profiles.find(item => item.id === state.profileID);
+        if (selected?.lease_task_id) state.inUseProfileID = selected.id;
+      }
       if (!state.tabs.some(tab => tab.id === state.selectedTabID)) {
-        state.selectedTabID = state.tabs[0]?.id || "";
+        state.selectedTabID = (state.tabs.find(tab => tab.active) || state.tabs[0])?.id || "";
       }
     } catch (error) {
       state.error = error instanceof Error ? error.message : String(error);
@@ -304,6 +392,140 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): () => v
 
   const reload = async (): Promise<void> => {
     await load();
+  };
+
+  const errorDetails = (error: unknown): {message: string; code: string} => ({
+    message: error instanceof Error ? error.message : String(error),
+    code: String((error as {code?: unknown})?.code || ""),
+  });
+
+  const selectTab = (tabID: string): void => {
+    if (!tabID) return;
+    state.selectedTabID = tabID;
+    state.frameError = "";
+    state.frameLive = false;
+  };
+
+  // The exclusive holder may close any visible page, including one the Owner
+  // opened by hand. origin is only a display label.
+  const closeTab = async (tabID: string): Promise<void> => {
+    if (!state.grant) return;
+    state.binding = true;
+    state.error = "";
+    paint();
+    try {
+      await api.closeTaskBrowserTab(state.grant.id, tabID);
+      await load();
+      notify("notice", "页面已关闭");
+    } catch (error) {
+      const details = errorDetails(error);
+      state.error = details.message;
+      notify("error", details.message);
+    } finally {
+      state.binding = false;
+    }
+    paint();
+    startStream();
+  };
+
+  const openPage = async (targetOverride?: string): Promise<void> => {
+    if (!state.grant) return;
+    const target = (targetOverride ?? state.urlDraft).trim();
+    if (!target) {
+      state.error = "请填写要打开的网址";
+      paint();
+      return;
+    }
+    state.binding = true;
+    state.error = "";
+    paint();
+    try {
+      const result = await api.openTaskBrowserTab(state.grant.id, target);
+      if (targetOverride === undefined) state.urlDraft = "";
+      await load();
+      selectTab(result.tab.id);
+      paint();
+      startStream();
+      notify("notice", "页面已在内置浏览器中打开");
+    } catch (error) {
+      const details = errorDetails(error);
+      state.error = details.message;
+      notify("error", details.message);
+    } finally {
+      state.binding = false;
+    }
+    paint();
+    startStream();
+  };
+
+  const releaseControl = async (): Promise<void> => {
+    if (!state.grant) return;
+    state.binding = true;
+    state.error = "";
+    paint();
+    try {
+      await api.releaseTaskBrowserGrant(state.grant.id);
+      state.grant = null;
+      state.tabs = [];
+      state.bookmarks = [];
+      state.bookmarksOpen = false;
+      await load();
+      notify("notice", "已释放独占控制；浏览器页面保持打开，其他 Task 可以接手");
+    } catch (error) {
+      const details = errorDetails(error);
+      state.error = details.message;
+      notify("error", details.message);
+    } finally {
+      state.binding = false;
+    }
+    paint();
+    startStream();
+  };
+
+  const transferControl = async (): Promise<void> => {
+    if (!state.inUseProfileID) return;
+    state.binding = true;
+    state.error = "";
+    paint();
+    try {
+      await api.transferBrowserProfile(state.inUseProfileID, taskID);
+      state.inUseProfileID = "";
+      await load();
+      notify("notice", "Owner 已把该 Profile 的独占控制转移给当前 Task");
+    } catch (error) {
+      const details = errorDetails(error);
+      state.error = details.message;
+      notify("error", details.message);
+    } finally {
+      state.binding = false;
+    }
+    paint();
+    startStream();
+  };
+
+  const toggleBookmarks = async (): Promise<void> => {
+    if (!state.grant) return;
+    if (state.bookmarksOpen) {
+      state.bookmarksOpen = false;
+      paint();
+      return;
+    }
+    state.bookmarksOpen = true;
+    state.bookmarksLoading = true;
+    state.error = "";
+    paint();
+    try {
+      const result = await api.taskBrowserBookmarks(state.grant.id);
+      state.bookmarks = result.bookmarks || [];
+    } catch (error) {
+      const details = errorDetails(error);
+      state.bookmarks = [];
+      state.error = details.message;
+      notify("error", details.message);
+    } finally {
+      state.bookmarksLoading = false;
+    }
+    paint();
   };
 
   const attach = async (): Promise<void> => {
@@ -321,16 +543,24 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): () => v
         capabilities: ["open_tab", "navigate", "snapshot"],
         expires_in_seconds: 1800,
       });
+      state.inUseProfileID = "";
       state.grant = result.grant;
-      state.tabs = (result.grant.tabs || []).filter(tab => tab.grant_id === result.grant.id);
       state.profileID = result.grant.profile_id;
-      state.selectedTabID = state.tabs[0]?.id || "";
+      await load();
       notify("notice", result.session
-        ? `已附加浏览器会话（${stateLabel(result.session.state)}）`
-        : "已附加浏览器 Profile");
+        ? `已获取独占控制（会话 ${stateLabel(result.session.state)}）`
+        : "已获取该 Profile 的独占控制");
     } catch (error) {
-      state.error = error instanceof Error ? error.message : String(error);
-      notify("error", state.error);
+      const details = errorDetails(error);
+      state.error = details.message;
+      if (details.code === "browser_profile_in_use") {
+        state.inUseProfileID = state.profileID;
+        notify("notice", "该 Profile 正由其他 Task 独占控制；等它释放，或由 Owner 在这里转移控制权。");
+      } else if (details.code === "browser_task_profile_limit") {
+        notify("notice", "当前 Task 已独占另一个 Profile；请先释放它，再获取新的 Profile。");
+      } else {
+        notify("error", details.message);
+      }
     } finally {
       state.loading = false;
     }

@@ -136,7 +136,7 @@ func TestHostManagerBusinessCallsSurviveSlowNavigation(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	started := time.Now()
-	tab, err := manager.Navigate(ctx, "browser_profile_1", "session_1", "tab_1", "https://example.com/next")
+	tab, err := manager.Navigate(ctx, "browser_profile_1", "session_1", "tab_1", "https://example.com/next", "fence-1")
 	elapsed := time.Since(started)
 	if err != nil {
 		t.Fatalf("slow navigation failed after %v: %v", elapsed, err)

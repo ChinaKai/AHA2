@@ -38,6 +38,36 @@ func TestHTTPHostMapsErrorsAndSessionPayloads(t *testing.T) {
 			_ = json.NewEncoder(writer).Encode(map[string]any{"session": map[string]any{
 				"id": "host-session-1", "profile_id": "profile_1", "state": "closed",
 			}})
+		case "/v1/profiles/profile_1/bookmarks":
+			if request.URL.Query().Get("session_id") != "host-session-1" {
+				writer.WriteHeader(http.StatusConflict)
+				_ = json.NewEncoder(writer).Encode(map[string]any{"error": map[string]string{
+					"code": "browser_session_changed", "message": "session mismatch",
+				}})
+				return
+			}
+			_ = json.NewEncoder(writer).Encode(map[string]any{"bookmarks": []map[string]any{
+				{"title": "Mail", "url": "https://mail.example/", "folder": "Bar"},
+			}})
+		case "/v1/profiles/profile_1/tabs/tab_1/activate":
+			if request.Method != http.MethodPost {
+				writer.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			_ = json.NewEncoder(writer).Encode(map[string]any{"tab": map[string]any{
+				"id": "tab_1", "url": "https://example.com/login", "title": "Login",
+			}})
+		case "/v1/profiles/profile_1/tabs":
+			if request.URL.Query().Get("session_id") != "host-session-1" {
+				writer.WriteHeader(http.StatusConflict)
+				_ = json.NewEncoder(writer).Encode(map[string]any{"error": map[string]string{
+					"code": "browser_session_changed", "message": "session mismatch",
+				}})
+				return
+			}
+			_ = json.NewEncoder(writer).Encode(map[string]any{"tabs": []map[string]any{
+				{"id": "host-tab-1", "url": "https://example.com/login", "title": "Login", "active": true},
+			}})
 		default:
 			writer.WriteHeader(http.StatusServiceUnavailable)
 			_ = json.NewEncoder(writer).Encode(map[string]any{"error": map[string]string{
@@ -59,6 +89,18 @@ func TestHTTPHostMapsErrorsAndSessionPayloads(t *testing.T) {
 	closed, err := host.Session(ctx, "profile_1")
 	if err != nil || closed.State != "closed" {
 		t.Fatalf("session=%#v err=%v", closed, err)
+	}
+	tabs, err := host.ListTabs(ctx, "profile_1", "host-session-1")
+	if err != nil || len(tabs) != 1 || tabs[0].ID != "host-tab-1" || !tabs[0].Active {
+		t.Fatalf("tabs=%#v err=%v", tabs, err)
+	}
+	activated, err := host.Activate(ctx, "profile_1", "host-session-1", "tab_1", "fence-1")
+	if err != nil || activated.ID != "tab_1" {
+		t.Fatalf("activate=%#v err=%v", activated, err)
+	}
+	bookmarks, err := host.Bookmarks(ctx, "profile_1", "host-session-1")
+	if err != nil || len(bookmarks) != 1 || bookmarks[0].URL != "https://mail.example/" {
+		t.Fatalf("bookmarks=%#v err=%v", bookmarks, err)
 	}
 	_, err = host.Open(ctx, "profile_2", "edge")
 	if browser.Code(err) != "browser_edge_unavailable" {

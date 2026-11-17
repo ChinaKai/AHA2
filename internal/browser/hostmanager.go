@@ -818,20 +818,52 @@ func (m *HostManager) Close(ctx context.Context, profileID string) error {
 	return host.Close(ctx, profileID)
 }
 
-func (m *HostManager) OpenTab(ctx context.Context, profileID, sessionID, targetURL string) (HostTab, error) {
+func (m *HostManager) OpenTab(ctx context.Context, profileID, sessionID, targetURL, fence string) (HostTab, error) {
 	host, err := m.available()
 	if err != nil {
 		return HostTab{}, err
 	}
-	return host.OpenTab(ctx, profileID, sessionID, targetURL)
+	return host.OpenTab(ctx, profileID, sessionID, targetURL, fence)
 }
 
-func (m *HostManager) Navigate(ctx context.Context, profileID, sessionID, tabID, targetURL string) (HostTab, error) {
+func (m *HostManager) ListTabs(ctx context.Context, profileID, sessionID string) ([]HostTab, error) {
+	host, err := m.available()
+	if err != nil {
+		return nil, err
+	}
+	return host.ListTabs(ctx, profileID, sessionID)
+}
+
+func (m *HostManager) Activate(ctx context.Context, profileID, sessionID, tabID, fence string) (HostTab, error) {
 	host, err := m.available()
 	if err != nil {
 		return HostTab{}, err
 	}
-	return host.Navigate(ctx, profileID, sessionID, tabID, targetURL)
+	return host.Activate(ctx, profileID, sessionID, tabID, fence)
+}
+
+func (m *HostManager) SetFence(ctx context.Context, profileID, sessionID, expectedFence, fence string) error {
+	host, err := m.available()
+	if err != nil {
+		return err
+	}
+	return host.SetFence(ctx, profileID, sessionID, expectedFence, fence)
+}
+
+func (m *HostManager) Bookmarks(ctx context.Context, profileID, sessionID string) ([]HostBookmark, error) {
+	host, err := m.available()
+	if err != nil {
+		return nil, err
+	}
+	return host.Bookmarks(ctx, profileID, sessionID)
+}
+
+func (m *HostManager) Navigate(ctx context.Context, profileID, sessionID, tabID, targetURL, fence string) (HostTab, error) {
+	host, err := m.available()
+	if err != nil {
+		return HostTab{}, err
+	}
+	return host.Navigate(ctx, profileID, sessionID, tabID, targetURL, fence)
 }
 
 func (m *HostManager) Snapshot(ctx context.Context, profileID, sessionID, tabID string) (HostSnapshot, error) {
@@ -850,10 +882,10 @@ func (m *HostManager) Frame(ctx context.Context, profileID, sessionID, tabID str
 	return host.Frame(ctx, profileID, sessionID, tabID)
 }
 
-func (m *HostManager) CloseTab(ctx context.Context, profileID, sessionID, tabID string) error {
+func (m *HostManager) CloseTab(ctx context.Context, profileID, sessionID, tabID, fence string) error {
 	host, err := m.available()
 	if err != nil {
 		return err
 	}
-	return host.CloseTab(ctx, profileID, sessionID, tabID)
+	return host.CloseTab(ctx, profileID, sessionID, tabID, fence)
 }

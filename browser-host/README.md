@@ -116,13 +116,17 @@ AHA 侧业务请求客户端超时 60s，覆盖 host 的 30s 页面导航期限�
 | GET | `/v1/health` | `host_id`、`platform`、`edge_available`、活跃 profile 列表 |
 | POST | `/v1/shutdown` | 关闭所有浏览器会话并退出（AHA 停止时调用） |
 | POST | `/v1/profiles/{id}/session` | 启动或复用持久化 Edge 窗口（`{"browser_kind":"edge"}`） |
+| POST | `/v1/profiles/{id}/fence` | CAS 安装租约 fence（`{"session_id","expected_fence","fence"}`） |
 | GET | `/v1/profiles/{id}/session` | 当前会话状态；没有则 404 `browser_session_not_found` |
 | DELETE | `/v1/profiles/{id}/session` | 关闭窗口并释放目录锁 |
+| GET | `/v1/profiles/{id}/tabs?session_id=` | 列出窗口内当前 http/https 页面（`id/url/title/active`），供独占 Task 枚举 |
 | POST | `/v1/profiles/{id}/tabs` | 打开 Task 标签页（`{"session_id","url"}`） |
+| POST | `/v1/profiles/{id}/tabs/{tab}/activate` | 切换/激活标签页（`bringToFront`） |
 | POST | `/v1/profiles/{id}/tabs/{tab}/navigate` | 导航（`{"session_id","url"}`） |
 | GET | `/v1/profiles/{id}/tabs/{tab}/snapshot?session_id=` | 返回 `{url,title,text}`，不含 HTML/cookie |
 | GET | `/v1/profiles/{id}/tabs/{tab}/frame?session_id=` | 返回只读 JPEG 画面；200ms 内复用上一帧 |
 | DELETE | `/v1/profiles/{id}/tabs/{tab}?session_id=` | 关闭标签页 |
+| GET | `/v1/profiles/{id}/bookmarks?session_id=` | 读取 Edge 收藏夹，只返回 title/url/folder，不含路径 |
 
 错误统一为 `{"error":{"code","message"}}`。重点错误码：
 
@@ -131,7 +135,11 @@ AHA 侧业务请求客户端超时 60s，覆盖 host 的 30s 页面导航期限�
 - `browser_edge_unavailable`：找不到 Edge；
 - `browser_profile_locked`：用户数据目录被另一个进程占用；
 - `browser_session_not_found` / `browser_session_changed`：窗口已关闭或会话已换代；
-- `browser_tab_not_found`：标签页不存在或已关闭。
+- `browser_tab_not_found`：标签页不存在或已关闭；
+- `browser_tab_list_failed`：读取当前页面列表失败（页面已崩溃或上下文不可用）；
+- `browser_activation_failed`：切换前台页面失败；
+- `browser_bookmarks_failed`：收藏夹文件不可读、是 symlink/reparse point 或格式异常；
+- `browser_fence_stale`：控制租约已变化，拒绝在途旧操作的页面副作用。
 
 ## 自动化测试
 

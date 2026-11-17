@@ -9,8 +9,8 @@
 | --- | --- |
 | Profile | `browser_profiles`；只存逻辑 ID、名称、`browser_kind=edge`、`host_id`、状态、`last_used_at`。真实用户数据目录由 host 解析，AHA 不保存、不返回。 |
 | Session | `browser_sessions`；属于 profile，不归 Task。`starting/ready/auth_required/busy/closed/error`。 |
-| Task 授权 | `browser_task_grants`；`task_id/profile_id/session_id/capabilities/expires_at/revoked_at`。 |
-| Tab | `browser_tabs`；带 `task_id/grant_id/session_id`，每次操作同时校验授权、会话与标签页归属。 |
+| Task 独占控制 | `browser_task_grants`；一个 Profile 同时只有一个 active lease，带 `task_id/profile_id/session_id/capabilities/expires_at/revoked_at`。 |
+| Tab | `browser_tabs`；属于 session，记录当前持有者和 `host_tab_id` 用于枚举/画面/审计；操作只校验独占 lease 与会话，不再逐 tab 校验 grant。 |
 | Host | 独立 Node 进程 `browser-host/host.mjs`，Playwright persistent context + 可见 Edge；仅 loopback + Bearer token。AHA 启动时自动发现并拉起，随机端口 + 每次启动重新生成的短期 token；崩溃自动重启，AHA 停止时先请求 host 关闭会话再清理子进程。 |
 
 同一 profile 单实例有三层约束：
@@ -36,32 +36,76 @@
 - `POST /api/v1/browser-sessions/{id}/close`
 - `GET /api/v1/browser/host`：host 健康状态
 
-Task 授权：
+Profile 独占控制（profile_exclusive）：
 
-- `POST/GET /api/v1/tasks/{id}/browser-grants`（别名 `/browser-sessions`）。创建时
-  supersede + insert 在同一个 immediate SQLite 事务内完成；进程内另有 `grantMu`
-  串行化创建/撤销。schema v148 的 `(task_id,profile_id) WHERE revoked_at=''`
-  部分唯一索引是数据库兜底；并发创建始终只保留一个 active grant，重复撤销幂等。
-- 标签页插入使用 `CreateBrowserTabForActiveGrant` 事务：host 调用返回后，只有
-  grant 仍 active、session 未关闭且仍是 profile 当前会话时才写 `browser_tabs`；
-  失败会关闭刚创建的 host tab。撤销授权时先写 `revoked_at`，再关闭/清理 tab，
-  因此 host 的 `CloseTab` 再慢，并发的 `OpenTab` 也已经无法插入。`touchSession`
-  只更新 `last_used_at`，不会覆盖并发关闭写入的 `state/closed_at`。
-- v148 迁移在 Go 中用 `parseTime` 的纳秒精度比较去重（RFC3339Nano 字符串词法顺序不可靠），删除
-  已撤销 grant 的 AHA tab 记录；host 中可能残留的可见页面需等会话关闭。v148
-  只前进：旧版本不认识唯一索引，回滚需先删除索引。
-- `GET/DELETE /api/v1/browser-grants/{id}`
-- `GET /api/v1/tasks/{id}/browser`：Task 详情合并视图（可选的 profile、当前授权、会话、本 Task 标签页）
+- `POST/GET /api/v1/tasks/{id}/browser-grants`（别名 `/browser-sessions`）。一个
+  Profile 同时只允许一个 active lease，一个 Task 也同时只持有一个 Profile lease。
+  获取在 SQLite 事务内完成：同一 Task 对同一 Profile 的重复获取幂等复用原 lease
+  （只刷新 capabilities/TTL），不会撤销重建；同一 Task 已持有另一个 Profile 时
+  返回 409 `browser_task_profile_limit`，旧 lease 保留，必须先显式释放；其他 Task
+  的未过期 lease 返回 409 `browser_profile_in_use`，不会静默抢占。schema v151 把唯一索引从
+  `(task_id,profile_id)` 改为 `browser_task_grants(profile_id) WHERE revoked_at=''`，
+  迁移会按 Profile 保留最新 lease 并撤销其余旧记录。
+- `DELETE /api/v1/browser-grants/{id}`：释放控制。只撤销 lease，不关闭可见页面；
+  其他 Task 之后可以获取。
+- `POST /api/v1/browser/profiles/{id}/transfer`（Owner 会话）：显式把控制权转移给
+  `{"task_id":"..."}`。Task Agent 没有这个端点，不能自行抢占。
+- `GET /api/v1/tasks/{id}/browser`：Task 详情合并视图；持有 lease 时同步返回该
+  Profile 当前全部 http(s) tab；Profile 列表会带占用 Task 的 id/title，供 Owner
+  面板显示等待/转移入口。
 
-标签页操作（为后续 Agent API/技能预留，当前只有受控 Owner API）：
+租约 fencing：每次获取/转移/释放都会通过 host `POST /v1/profiles/{id}/fence`
+用 CAS 安装新的 fence（旧值匹配才写入），所有 open/activate/navigate/close 都带
+当前 grant id 作为 fence；host 在产生页面副作用前校验。transfer/revoke/release
+先切换 fence，因此在途的旧 Task 操作返回 409 `browser_fence_stale`，不会在控制权
+变化后关闭/导航/打开页面。读操作仍每步重新鉴权。
 
-- `POST /api/v1/browser-grants/{id}/tabs`
+标签页操作（Owner 与当前独占 Task 共用同一服务层；不再有 per-tab grant 归属）：
+
+- `POST /api/v1/browser-grants/{id}/tabs`：打开新 tab
+- `POST /api/v1/browser-grants/{id}/tabs/current`：返回当前活动页（并同步 tab 列表）
+- `POST /api/v1/browser-grants/{id}/tabs/{tab}/activate`：切换/激活 tab
 - `POST /api/v1/browser-grants/{id}/tabs/{tab}/navigate`
 - `GET /api/v1/browser-grants/{id}/tabs/{tab}/snapshot`
 - `GET /api/v1/browser-grants/{id}/tabs/{tab}/frame`：只读 JPEG 预览（2–5 fps，
-  页面不变时自动降帧）。AHA 只转发当前授权且属于该 Task 的标签页；帧不落盘、
-  不写审计正文，关闭面板即停止拉取。
-- `DELETE /api/v1/browser-grants/{id}/tabs/{tab}`
+  页面不变时自动降帧）。帧不落盘、不写审计正文，关闭面板即停止拉取。
+- `DELETE /api/v1/browser-grants/{id}/tabs/{tab}`：关闭任意 tab（包括 Owner 手动
+  打开的页面），origin 仅作展示标签。
+- `GET /api/v1/browser-grants/{id}/bookmarks`：读取该 Profile 的 Edge 收藏夹，
+  只返回 title/url/folder，不返回文件路径。
+
+`GET /api/v1/browser-grants/{id}/tabs` 和 Task 视图会调用 host
+`GET /v1/profiles/{id}/tabs?session_id=`，完整枚举窗口当前的 http(s) 页面
+（不再截断到固定条数，页面元数据有界并发读取），再同步进
+`browser_tabs`：新发现的页面标记 `origin=owner`，已有 AHA 页面保留 `agent`。
+`devtools://`、`edge://`、`chrome://`、`about:` 不会出现。schema v150 的
+`browser_tabs(session_id, host_tab_id) WHERE host_tab_id <> ''` 唯一索引保留，
+迁移会去重旧行；它只防止同一 host 页面出现重复记录，不阻止当前独占 Task 操作
+Owner 手动打开的页面。
+
+host 收藏夹读取 `<profile>/Default/Bookmarks`，只解析
+`bookmark_bar/other/synced` 下的 title/url/folder，最多 500 条、深度 8；文件不存在
+时返回空列表。读取前用 lstat/realpath 校验 profile 根、Default 目录和 Bookmarks
+本体：symlink、junction/reparse point、目录链接或 `..` 越界一律失败关闭，不返回
+任何收藏内容；响应和日志都不含 profile 目录。
+
+Task Agent HTTP API（Bearer capability 绑定当前 Task/Turn；每个 grant 路由先校验
+`grant.TaskID == claims.TaskID`，跨 Task 返回 `browser_grant_forbidden`）：
+
+- `GET /api/v1/agent/browser`
+- `GET|POST /api/v1/agent/browser/grants/{grant}/tabs`
+- `POST /api/v1/agent/browser/grants/{grant}/tabs/current`
+- `POST /api/v1/agent/browser/grants/{grant}/tabs/{tab}/activate`
+- `POST /api/v1/agent/browser/grants/{grant}/tabs/{tab}/navigate`
+- `GET /api/v1/agent/browser/grants/{grant}/tabs/{tab}/snapshot`
+- `GET /api/v1/agent/browser/grants/{grant}/tabs/{tab}/frame`
+- `DELETE /api/v1/agent/browser/grants/{grant}/tabs/{tab}`
+- `GET /api/v1/agent/browser/grants/{grant}/bookmarks`
+- `DELETE /api/v1/agent/browser/grants/{grant}`：Task 主动释放自己的 lease
+
+Agent 只有只读 snapshot/frame/bookmarks 与 open/activate/close/navigate 控制动作；
+不提供 CDP、页内点击/输入/滚动、cookie/storage、profile 路径或下载接口。lease
+撤销、过期、转移或不属于本 Task 时所有操作失败关闭。
 
 能力集合固定为 `open_tab | navigate | snapshot`；未知能力在创建授权时拒绝。
 
@@ -81,9 +125,14 @@ Task 授权：
 - profile 目录被其他进程占用：`browser_profile_locked`（409）；
 - 授权过期/撤销：`browser_grant_expired` / `browser_grant_revoked`（403）；
 - 会话已关闭或已换代：`browser_session_closed` / `browser_session_changed`（409）；
-- 跨 Task 标签页：`browser_tab_forbidden`（403）；
+- 同一 Profile 已被其他 Task 独占控制：`browser_profile_in_use`（409）；
+- 同一 Task 已持有另一个 Profile lease：`browser_task_profile_limit`（409）；
+- 控制权已转移/释放后仍在途的旧操作：`browser_fence_stale`（409）；
+- 跨 Profile 的 tab：`browser_tab_forbidden`（403）；
 - 授权缺少能力：`browser_capability_denied`（403）；
 - 非 http/https 网址：`browser_url_invalid`（400）；
+- 没有可见 http/https 页面：`browser_no_current_page`（404），面板显示空状态；
+- Agent capability 指向其他 Task 的 grant：`browser_grant_forbidden`（403）；
 - host 业务操作超过 60s：`browser_host_timeout`（504），与连接失败
   `browser_host_unavailable` 区分。host 的页面导航是 30s，AHA 业务客户端超时
   60s，避免 AHA 先失败而 host 仍在提交导航；启动就绪探针单独使用 5s 客户端
@@ -107,7 +156,9 @@ host 返回的原始 Playwright 诊断只留在 host 本地日志（替换 profi
 ## 5. 审计
 
 `audit_events` 记录 profile 创建/重命名/删除、会话启动/关闭、授权创建/撤销，以及
-标签页 open/navigate/snapshot/close。审计只包含 ID、能力、到期时间、URL 和动作，
+标签页 open/activate/close/navigate/snapshot、收藏夹读取、lease 获取/释放/转移。
+审计记录 profile/session、task、动作、tab id、URL 和结果；Agent actor 形如
+`agent:<agent>@<turn>`，因此能追溯到 turn。审计只包含 ID、能力、到期时间、URL 和动作，
 不写页面正文、cookie、storage 或 profile 路径。
 
 ## 6. 威胁边界与未覆盖风险

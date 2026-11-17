@@ -4,7 +4,8 @@
 
 import {createServer} from "node:http";
 import {timingSafeEqual} from "node:crypto";
-import {promises as fs} from "node:fs";
+import {constants as fsConstants, promises as fs} from "node:fs";
+import {basename, dirname, join} from "node:path";
 import {createProfileLocks, profileDir, safeProfileID} from "./lock.mjs";
 import {navigatePage, openTabPage} from "./tabs.mjs";
 
@@ -74,6 +75,191 @@ class HostState {
   }
 }
 
+const PAGE_METADATA_TIMEOUT_MS = 1500;
+
+// A page can be wedged by a dialog or a crashed renderer. Never let one page's
+// title/visibility probe hold up the whole Owner-facing page list.
+function settleWithin(promise, timeoutMs, fallback) {
+  return new Promise(resolve => {
+    let done = false;
+    const finish = value => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(fallback), timeoutMs);
+    Promise.resolve(promise).then(finish).catch(() => finish(fallback));
+  });
+}
+
+function newTabID() {
+  return `host-tab-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+// Owner-opened pages live only in the Playwright context. Give every page a
+// stable host tab id the first time it is seen so AHA can bind and address it
+// without ever receiving a CDP endpoint or a profile path.
+function attachPage(session, page, id = "") {
+  for (const tab of session.tabs.values()) {
+    if (tab.page === page) return tab;
+  }
+  const tab = {id: id || newTabID(), page, url: "", title: "", frame: null, framePending: null};
+  try {
+    tab.url = page.url();
+  } catch {
+    // A page that is already gone is listed only if its URL can still be read.
+  }
+  session.tabs.set(tab.id, tab);
+  try {
+    page.on("close", () => session.tabs.delete(tab.id));
+  } catch {
+    // A page that cannot accept listeners is still addressable until it closes.
+  }
+  return tab;
+}
+
+// The list is the Owner-visible page picker. Only ordinary web pages are
+// returned: devtools://, edge://, chrome:// and about: pages must never appear
+// in AHA or the Web UI. Every page is enumerated (no silent truncation), with
+// bounded concurrency so one wedged page does not serialize the whole list.
+async function describePage(tab) {
+  let page;
+  try {
+    page = tab.page;
+    if (typeof page.isClosed === "function" && page.isClosed()) return null;
+  } catch {
+    return null;
+  }
+  let url = "";
+  try {
+    url = page.url();
+  } catch {
+    return null;
+  }
+  if (!/^https?:\/\//i.test(url)) return null;
+  const title = await settleWithin(page.title(), PAGE_METADATA_TIMEOUT_MS, "");
+  const active = (await settleWithin(
+    page.evaluate(() => document.visibilityState),
+    PAGE_METADATA_TIMEOUT_MS,
+    "",
+  )) === "visible";
+  return {id: tab.id, url, title, active};
+}
+
+async function listSessionPages(session) {
+  const tabs = [...session.tabs.values()];
+  const result = new Array(tabs.length);
+  let next = 0;
+  const worker = async () => {
+    while (true) {
+      const index = next++;
+      if (index >= tabs.length) return;
+      result[index] = await describePage(tabs[index]);
+    }
+  };
+  const workers = Math.min(8, Math.max(1, tabs.length));
+  await Promise.all(Array.from({length: workers}, worker));
+  return result.filter(Boolean);
+}
+
+const MAX_BOOKMARKS = 500;
+const MAX_BOOKMARK_DEPTH = 8;
+const MAX_BOOKMARK_FILE = 16 * 1024 * 1024;
+
+function bookmarkPathError(message) {
+  return Object.assign(new Error(message), {code: "browser_bookmarks_failed"});
+}
+
+// Edge stores bookmarks in <profile>/Default/Bookmarks. Only title, URL and
+// folder names leave the host; the file path never appears in a response.
+// Symlinked profiles/Default/Bookmarks are rejected so Profile A cannot read
+// Profile B's file through a link or a .. traversal.
+async function readProfileBookmarks(root, profileID, directory) {
+  let rootReal;
+  try {
+    rootReal = await fs.realpath(root);
+  } catch (error) {
+    if (error && error.code === "ENOENT") return [];
+    throw error;
+  }
+  let profileReal;
+  try {
+    profileReal = await fs.realpath(directory);
+  } catch (error) {
+    if (error && error.code === "ENOENT") return [];
+    throw error;
+  }
+  if (dirname(profileReal) !== rootReal || basename(profileReal) !== profileID) {
+    throw bookmarkPathError("profile directory resolves outside the profile root");
+  }
+  const defaultDir = join(profileReal, "Default");
+  const file = join(defaultDir, "Bookmarks");
+  let defaultStat;
+  try {
+    defaultStat = await fs.lstat(defaultDir);
+  } catch (error) {
+    if (error && error.code === "ENOENT") return [];
+    throw error;
+  }
+  if (defaultStat.isSymbolicLink() || !defaultStat.isDirectory()) {
+    throw bookmarkPathError("bookmark directory must be a real directory");
+  }
+  const defaultReal = await fs.realpath(defaultDir);
+  if (defaultReal !== join(profileReal, "Default")) {
+    throw bookmarkPathError("bookmark directory resolves outside the profile");
+  }
+  let fileStat;
+  try {
+    fileStat = await fs.lstat(file);
+  } catch (error) {
+    if (error && error.code === "ENOENT") return [];
+    throw error;
+  }
+  if (fileStat.isSymbolicLink() || !fileStat.isFile()) {
+    throw bookmarkPathError("bookmark file must be a real file");
+  }
+  if (fileStat.size > MAX_BOOKMARK_FILE) throw bookmarkPathError("bookmark file is too large");
+  const realFile = await fs.realpath(file);
+  if (realFile !== join(profileReal, "Default", "Bookmarks")) {
+    throw bookmarkPathError("bookmark file resolves outside the profile");
+  }
+  const handle = await fs.open(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  let raw;
+  try {
+    raw = await handle.readFile("utf8");
+  } finally {
+    await handle.close();
+  }
+  const parsed = JSON.parse(raw);
+  const result = [];
+  const walk = (node, folder, depth) => {
+    if (!node || depth > MAX_BOOKMARK_DEPTH || result.length >= MAX_BOOKMARKS) return;
+    if (node.type === "url") {
+      const target = validateURL(node.url);
+      if (!target) return;
+      result.push({
+        title: String(node.name || "").slice(0, 300),
+        url: target,
+        folder: String(folder || "").slice(0, 300),
+      });
+      return;
+    }
+    if (!Array.isArray(node.children)) return;
+    const next = node.name ? (folder ? `${folder}/${String(node.name).slice(0, 120)}` : String(node.name).slice(0, 120)) : folder;
+    for (const child of node.children) walk(child, next, depth + 1);
+  };
+  const roots = parsed && parsed.roots ? parsed.roots : {};
+  for (const key of ["bookmark_bar", "other", "synced"]) {
+    walk(roots[key], "", 0);
+  }
+  return result;
+}
+
+function fenceRejected(response) {
+  return json(response, 409, fail(409, "browser_fence_stale", "browser control lease changed").body);
+}
+
 function sessionPayload(session, reused = false) {
   return {
     session: {
@@ -81,6 +267,7 @@ function sessionPayload(session, reused = false) {
       profile_id: session.profileID,
       state: session.state,
       error: session.error || "",
+      fence: session.fence || "",
       reused,
     },
   };
@@ -227,7 +414,21 @@ export function createHostServer(options) {
             context,
             tabs: new Map(),
             lock,
+            fence: "",
           };
+          // A persistent context starts with an initial page and the Owner can
+          // open more at any time. Register them now and on every new page so a
+          // later Task binding can address the page the Owner is looking at.
+          try {
+            for (const page of context.pages()) attachPage(session, page);
+          } catch {
+            // Older test doubles may not implement pages(); tab open still works.
+          }
+          try {
+            context.on("page", page => attachPage(session, page));
+          } catch {
+            // Listener support is optional for injected fakes.
+          }
           context.on("close", () => {
             if (state.get(profileID) === session) {
               state.sessions.delete(profileID);
@@ -254,6 +455,36 @@ export function createHostServer(options) {
       }
     }
 
+    // /v1/profiles/{id}/fence
+    if (parts[3] === "fence" && parts.length === 4 && request.method === "POST") {
+      const session = state.get(profileID);
+      if (!session) return json(response, 404, fail(404, "browser_session_not_found", "no active session").body);
+      const suppliedSession = String(body.session_id || "");
+      if (suppliedSession && suppliedSession !== session.id) {
+        return json(response, 409, fail(409, "browser_session_changed", "session id mismatch").body);
+      }
+      const expected = String(body.expected_fence || "");
+      if ((session.fence || "") !== expected) return fenceRejected(response);
+      session.fence = String(body.fence || "");
+      return json(response, 200, {ok: true});
+    }
+
+    // /v1/profiles/{id}/bookmarks
+    if (parts[3] === "bookmarks" && parts.length === 4 && request.method === "GET") {
+      const session = state.get(profileID);
+      if (!session) return json(response, 404, fail(404, "browser_session_not_found", "no active session").body);
+      const suppliedSession = String(url.searchParams.get("session_id") || "");
+      if (suppliedSession && suppliedSession !== session.id) {
+        return json(response, 409, fail(409, "browser_session_changed", "session id mismatch").body);
+      }
+      try {
+        return json(response, 200, {bookmarks: await readProfileBookmarks(root, profileID, directory)});
+      } catch (error) {
+        console.error(`bookmarks failed profile=${profileID} diagnostic=${diagnostics(error, root, "")}`);
+        return json(response, 502, fail(502, "browser_bookmarks_failed", "读取收藏夹失败").body);
+      }
+    }
+
     // /v1/profiles/{id}/tabs and /v1/profiles/{id}/tabs/{tab}[/...]
     if (parts[3] === "tabs") {
       const session = state.get(profileID);
@@ -262,14 +493,24 @@ export function createHostServer(options) {
       if (suppliedSession && suppliedSession !== session.id) {
         return json(response, 409, fail(409, "browser_session_changed", "session id mismatch").body);
       }
+      if (parts.length === 4 && request.method === "GET") {
+        try {
+          return json(response, 200, {tabs: await listSessionPages(session)});
+        } catch (error) {
+          console.error(`tab list failed profile=${profileID} diagnostic=${diagnostics(error, root, "")}`);
+          return json(response, 502, fail(502, "browser_tab_list_failed", "读取当前页面失败").body);
+        }
+      }
       if (parts.length === 4 && request.method === "POST") {
         const target = validateURL(body.url);
         if (!target) return json(response, 400, fail(400, "browser_url_invalid", "only http/https URLs are accepted").body);
+        if (session.fence && String(body.fence || "") !== session.fence) return fenceRejected(response);
         try {
-          const id = `host-tab-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-          const tab = await openTabPage(session.context, target, id);
-          session.tabs.set(tab.id, tab);
-          tab.page.on("close", () => session.tabs.delete(tab.id));
+          const id = newTabID();
+          const opened = await openTabPage(session.context, target, id);
+          const tab = attachPage(session, opened.page, id);
+          tab.url = opened.url;
+          tab.title = opened.title;
           return json(response, 201, tabPayload(tab));
         } catch (error) {
           // Do not reference Edge here: this path must work even when the
@@ -283,6 +524,8 @@ export function createHostServer(options) {
       const tab = parts[4] ? session.tabs.get(parts[4]) : null;
       if (!tab) return json(response, 404, fail(404, "browser_tab_not_found", "tab not found").body);
       if (parts.length === 5 && request.method === "DELETE") {
+        const fence = String(url.searchParams.get("fence") || "");
+        if (session.fence && fence !== session.fence) return fenceRejected(response);
         await tab.page.close().catch(() => {});
         session.tabs.delete(tab.id);
         return json(response, 200, {ok: true});
@@ -290,6 +533,7 @@ export function createHostServer(options) {
       if (parts.length === 6 && parts[5] === "navigate" && request.method === "POST") {
         const target = validateURL(body.url);
         if (!target) return json(response, 400, fail(400, "browser_url_invalid", "only http/https URLs are accepted").body);
+        if (session.fence && String(body.fence || "") !== session.fence) return fenceRejected(response);
         try {
           const navigated = await navigatePage(tab.page, target);
           tab.url = navigated.url;
@@ -301,6 +545,16 @@ export function createHostServer(options) {
           console.error(`tab navigation failed profile=${profileID} diagnostic=${diagnostics(error, root, "")}`);
           return json(response, 502, fail(502, "browser_navigation_failed",
             "页面打开失败或超时").body);
+        }
+      }
+      if (parts.length === 6 && parts[5] === "activate" && request.method === "POST") {
+        if (session.fence && String(body.fence || "") !== session.fence) return fenceRejected(response);
+        try {
+          await tab.page.bringToFront();
+          return json(response, 200, tabPayload(tab));
+        } catch (error) {
+          console.error(`tab activate failed profile=${profileID} diagnostic=${diagnostics(error, root, "")}`);
+          return json(response, 502, fail(502, "browser_activation_failed", "切换浏览器页面失败").body);
         }
       }
       if (parts.length === 6 && parts[5] === "frame" && request.method === "GET") {

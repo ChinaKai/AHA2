@@ -3895,10 +3895,7 @@ func (s *Store) migrate(ctx context.Context) error {
 	var hasBrowserProfiles bool
 	_ = s.db.QueryRowContext(ctx,
 		`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='browser_profiles')`).Scan(&hasBrowserProfiles)
-	var hasBrowserGrantUnique bool
-	_ = s.db.QueryRowContext(ctx,
-		`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_browser_task_grants_one_active')`).Scan(&hasBrowserGrantUnique)
-	if !hasV148 || !hasBrowserProfiles || !hasBrowserGrantUnique {
+	if !hasV148 || !hasBrowserProfiles {
 		// Shared-browser POC. AHA stores only logical identifiers; the host owns
 		// the real user-data directories. The partial unique index is the database
 		// backstop for "one active session per profile" — the host's directory
@@ -4028,16 +4025,175 @@ func (s *Store) migrate(ctx context.Context) error {
 			`DELETE FROM browser_tabs WHERE grant_id IN (SELECT id FROM browser_task_grants WHERE revoked_at<>'')`); err != nil {
 			return fmt.Errorf("apply schema v148 browser tab cleanup: %w", err)
 		}
-		if _, err := s.db.ExecContext(ctx,
-			`CREATE UNIQUE INDEX IF NOT EXISTS idx_browser_task_grants_one_active
-			 ON browser_task_grants(task_id,profile_id) WHERE revoked_at=''`); err != nil {
-			return fmt.Errorf("apply schema v148 browser grant uniqueness: %w", err)
-		}
-		// v148 is forward-only. A pre-v148 binary does not know the unique index
-		// and can hit a UNIQUE error; rolling back requires dropping the index.
+		// The per-Task index is deliberately not created here: schema v151 replaces
+		// it with the profile-exclusive lease index. v148's dedupe/cleanup still
+		// runs for old data, then v151 installs the current index.
 		if _, err := s.db.ExecContext(ctx,
 			`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(148, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 			return fmt.Errorf("record schema v148: %w", err)
+		}
+	}
+	var hasV149 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=149)`).Scan(&hasV149)
+	if !hasV149 || !s.tableHasColumn(ctx, "browser_tabs", "origin") {
+		// Owner-bound pages must survive grant supersede/revoke: closing the
+		// visible page the Owner is looking at would recreate the blank-panel
+		// failure. Existing rows are AHA-opened tabs, hence the default.
+		if _, err := s.db.ExecContext(ctx,
+			`ALTER TABLE browser_tabs ADD COLUMN origin TEXT NOT NULL DEFAULT 'agent'
+			 CHECK(origin IN ('agent','owner'))`); err != nil &&
+			!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("apply schema v149 browser tab origin: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(149, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return fmt.Errorf("record schema v149: %w", err)
+		}
+	}
+	var hasV150 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=150)`).Scan(&hasV150)
+	var hasBrowserTabHostUnique bool
+	_ = s.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_browser_tabs_session_host')`).
+		Scan(&hasBrowserTabHostUnique)
+	if !hasV150 || !hasBrowserTabHostUnique {
+		// One host page belongs to at most one Task grant in a session. Before
+		// adding the index, collapse duplicates left by the first POC: keep the
+		// oldest row deterministically. The service also filters occupied pages,
+		// but this index is the cross-process backstop.
+		if _, err := s.db.ExecContext(ctx, `
+			DELETE FROM browser_tabs
+			WHERE host_tab_id <> '' AND rowid NOT IN (
+				SELECT MIN(rowid) FROM browser_tabs
+				WHERE host_tab_id <> ''
+				GROUP BY session_id, host_tab_id
+			)`); err != nil {
+			return fmt.Errorf("apply schema v150 browser tab dedupe: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx, `
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_browser_tabs_session_host
+			ON browser_tabs(session_id, host_tab_id) WHERE host_tab_id <> ''`); err != nil {
+			return fmt.Errorf("apply schema v150 browser tab host uniqueness: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(150, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return fmt.Errorf("record schema v150: %w", err)
+		}
+	}
+	var hasV151 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=151)`).Scan(&hasV151)
+	var hasBrowserProfileUnique bool
+	_ = s.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_browser_task_grants_profile_active')`).
+		Scan(&hasBrowserProfileUnique)
+	var hasBrowserPerTaskUnique bool
+	_ = s.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_browser_task_grants_one_active')`).
+		Scan(&hasBrowserPerTaskUnique)
+	if !hasV151 || !hasBrowserProfileUnique || hasBrowserPerTaskUnique {
+		// profile_exclusive: one active Task grant owns the whole visible
+		// browser. An older database can have several active grants on the same
+		// Profile (one per Task); keep the newest and revoke the rest before the
+		// uniqueness index is created. parseTime is used because RFC3339Nano
+		// strings are not lexically ordered.
+		type grantRow struct {
+			id, profileID, createdAt string
+		}
+		rows, err := s.db.QueryContext(ctx,
+			`SELECT id,profile_id,created_at FROM browser_task_grants WHERE revoked_at=''`)
+		if err != nil {
+			return fmt.Errorf("apply schema v151 browser grant dedupe: %w", err)
+		}
+		groups := map[string][]grantRow{}
+		for rows.Next() {
+			var row grantRow
+			if err := rows.Scan(&row.id, &row.profileID, &row.createdAt); err != nil {
+				rows.Close()
+				return fmt.Errorf("apply schema v151 browser grant dedupe scan: %w", err)
+			}
+			groups[row.profileID] = append(groups[row.profileID], row)
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("apply schema v151 browser grant dedupe close: %w", err)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("apply schema v151 browser grant dedupe rows: %w", err)
+		}
+		nowText := timeString(time.Now().UTC())
+		for _, group := range groups {
+			keep := group[0]
+			for _, candidate := range group[1:] {
+				keepTime, candidateTime := parseTime(keep.createdAt), parseTime(candidate.createdAt)
+				if candidateTime.After(keepTime) || (candidateTime.Equal(keepTime) && candidate.id > keep.id) {
+					keep = candidate
+				}
+			}
+			for _, obsolete := range group {
+				if obsolete.id == keep.id {
+					continue
+				}
+				if _, err := s.db.ExecContext(ctx,
+					`UPDATE browser_task_grants SET revoked_at=?,updated_at=? WHERE id=? AND revoked_at=''`,
+					nowText, nowText, obsolete.id); err != nil {
+					return fmt.Errorf("apply schema v151 browser grant dedupe update: %w", err)
+				}
+			}
+		}
+		// A Task also holds only one Profile lease. The Profile pass above may
+		// have left several Profiles active for one Task; keep the newest.
+		type taskGrantRow struct {
+			id, taskID, createdAt string
+		}
+		taskRows, err := s.db.QueryContext(ctx,
+			`SELECT id,task_id,created_at FROM browser_task_grants WHERE revoked_at=''`)
+		if err != nil {
+			return fmt.Errorf("apply schema v151 task grant dedupe: %w", err)
+		}
+		taskGroups := map[string][]taskGrantRow{}
+		for taskRows.Next() {
+			var row taskGrantRow
+			if err := taskRows.Scan(&row.id, &row.taskID, &row.createdAt); err != nil {
+				taskRows.Close()
+				return fmt.Errorf("apply schema v151 task grant dedupe scan: %w", err)
+			}
+			taskGroups[row.taskID] = append(taskGroups[row.taskID], row)
+		}
+		if err := taskRows.Close(); err != nil {
+			return fmt.Errorf("apply schema v151 task grant dedupe close: %w", err)
+		}
+		if err := taskRows.Err(); err != nil {
+			return fmt.Errorf("apply schema v151 task grant dedupe rows: %w", err)
+		}
+		for _, group := range taskGroups {
+			keep := group[0]
+			for _, candidate := range group[1:] {
+				keepTime, candidateTime := parseTime(keep.createdAt), parseTime(candidate.createdAt)
+				if candidateTime.After(keepTime) || (candidateTime.Equal(keepTime) && candidate.id > keep.id) {
+					keep = candidate
+				}
+			}
+			for _, obsolete := range group {
+				if obsolete.id == keep.id {
+					continue
+				}
+				if _, err := s.db.ExecContext(ctx,
+					`UPDATE browser_task_grants SET revoked_at=?,updated_at=? WHERE id=? AND revoked_at=''`,
+					nowText, nowText, obsolete.id); err != nil {
+					return fmt.Errorf("apply schema v151 task grant dedupe update: %w", err)
+				}
+			}
+		}
+		if _, err := s.db.ExecContext(ctx, `DROP INDEX IF EXISTS idx_browser_task_grants_one_active`); err != nil {
+			return fmt.Errorf("apply schema v151 drop per-task grant index: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx, `
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_browser_task_grants_profile_active
+			ON browser_task_grants(profile_id) WHERE revoked_at=''`); err != nil {
+			return fmt.Errorf("apply schema v151 profile grant uniqueness: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(151, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return fmt.Errorf("record schema v151: %w", err)
 		}
 	}
 	return nil

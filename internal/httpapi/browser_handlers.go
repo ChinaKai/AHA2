@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/browser"
+	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
 func (s *Server) registerBrowserRoutes(mux *http.ServeMux) {
@@ -31,10 +32,14 @@ func (s *Server) registerBrowserRoutes(mux *http.ServeMux) {
 	mux.Handle("DELETE /api/v1/browser-grants/{id}", s.withAuth(http.HandlerFunc(s.revokeBrowserGrant)))
 	mux.Handle("GET /api/v1/browser-grants/{id}/tabs", s.withAuth(http.HandlerFunc(s.listBrowserGrantTabs)))
 	mux.Handle("POST /api/v1/browser-grants/{id}/tabs", s.withAuth(http.HandlerFunc(s.openBrowserTab)))
+	mux.Handle("POST /api/v1/browser-grants/{id}/tabs/current", s.withAuth(http.HandlerFunc(s.adoptBrowserCurrentTab)))
 	mux.Handle("DELETE /api/v1/browser-grants/{id}/tabs/{tab}", s.withAuth(http.HandlerFunc(s.closeBrowserTab)))
+	mux.Handle("POST /api/v1/browser-grants/{id}/tabs/{tab}/activate", s.withAuth(http.HandlerFunc(s.activateBrowserTab)))
 	mux.Handle("POST /api/v1/browser-grants/{id}/tabs/{tab}/navigate", s.withAuth(http.HandlerFunc(s.navigateBrowserTab)))
 	mux.Handle("GET /api/v1/browser-grants/{id}/tabs/{tab}/snapshot", s.withAuth(http.HandlerFunc(s.snapshotBrowserTab)))
 	mux.Handle("GET /api/v1/browser-grants/{id}/tabs/{tab}/frame", s.withAuth(http.HandlerFunc(s.browserTabFrame)))
+	mux.Handle("GET /api/v1/browser-grants/{id}/bookmarks", s.withAuth(http.HandlerFunc(s.browserGrantBookmarks)))
+	mux.Handle("POST /api/v1/browser/profiles/{id}/transfer", s.withAuth(http.HandlerFunc(s.transferBrowserProfile)))
 }
 
 func (s *Server) browserServiceOrError(writer http.ResponseWriter) *browser.Service {
@@ -63,7 +68,11 @@ func browserActor(request *http.Request) string {
 		return session.OwnerID
 	}
 	if claims, ok := agentClaimsFromContext(request.Context()); ok {
-		return "agent:" + claims.AgentID
+		actor := "agent:" + claims.AgentID
+		if claims.TurnID != "" {
+			actor += "@" + claims.TurnID
+		}
+		return actor
 	}
 	return "system"
 }
@@ -336,6 +345,82 @@ func (s *Server) openBrowserTab(writer http.ResponseWriter, request *http.Reques
 	writeJSON(writer, http.StatusCreated, map[string]any{"ok": true, "tab": tab})
 }
 
+// adoptBrowserCurrentTab returns the page the Owner is looking at after syncing
+// every visible page into the Task's exclusive tab list. It no longer creates a
+// per-Task tab binding; the tab already exists in the Profile.
+func (s *Server) adoptBrowserCurrentTab(writer http.ResponseWriter, request *http.Request) {
+	service := s.browserServiceOrError(writer)
+	if service == nil {
+		return
+	}
+	tab, err := service.CurrentTab(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeBrowserFailure(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "tab": tab})
+}
+
+func (s *Server) activateBrowserTab(writer http.ResponseWriter, request *http.Request) {
+	service := s.browserServiceOrError(writer)
+	if service == nil {
+		return
+	}
+	tab, err := service.ActivateTab(request.Context(), browserActor(request),
+		request.PathValue("id"), request.PathValue("tab"))
+	if err != nil {
+		writeBrowserFailure(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "tab": tab})
+}
+
+func (s *Server) browserGrantBookmarks(writer http.ResponseWriter, request *http.Request) {
+	service := s.browserServiceOrError(writer)
+	if service == nil {
+		return
+	}
+	bookmarks, err := service.Bookmarks(request.Context(), browserActor(request), request.PathValue("id"))
+	if err != nil {
+		writeBrowserFailure(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "bookmarks": bookmarks})
+}
+
+// transferBrowserProfile is an Owner-only action: it moves the Profile's
+// exclusive control to a target Task. A Task capability cannot call this route.
+func (s *Server) transferBrowserProfile(writer http.ResponseWriter, request *http.Request) {
+	service := s.browserServiceOrError(writer)
+	if service == nil {
+		return
+	}
+	var payload struct {
+		TaskID        string   `json:"task_id"`
+		Capabilities  []string `json:"capabilities"`
+		ExpiresInSecs int      `json:"expires_in_seconds"`
+	}
+	if err := decodeJSON(request, &payload); err != nil {
+		writeErrorDetail(writer, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	ttl := browser.DefaultGrantTTL
+	if payload.ExpiresInSecs < 0 {
+		writeErrorDetail(writer, http.StatusBadRequest, "browser_grant_invalid", "授权有效期不能为负数")
+		return
+	}
+	if payload.ExpiresInSecs > 0 {
+		ttl = time.Duration(payload.ExpiresInSecs) * time.Second
+	}
+	grant, err := service.TransferProfileControl(request.Context(), browserActor(request),
+		request.PathValue("id"), payload.TaskID, payload.Capabilities, ttl)
+	if err != nil {
+		writeBrowserFailure(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "grant": grant, "session": grant.Session})
+}
+
 func (s *Server) navigateBrowserTab(writer http.ResponseWriter, request *http.Request) {
 	service := s.browserServiceOrError(writer)
 	if service == nil {
@@ -385,11 +470,7 @@ func (s *Server) browserTabFrame(writer http.ResponseWriter, request *http.Reque
 		writeBrowserFailure(writer, err)
 		return
 	}
-	writer.Header().Set("Content-Type", frame.ContentType)
-	writer.Header().Set("Cache-Control", "no-store")
-	writer.Header().Set("Content-Length", strconv.Itoa(len(frame.Data)))
-	writer.WriteHeader(http.StatusOK)
-	_, _ = writer.Write(frame.Data)
+	writeBrowserFrame(writer, frame)
 }
 
 func (s *Server) closeBrowserTab(writer http.ResponseWriter, request *http.Request) {
@@ -403,4 +484,215 @@ func (s *Server) closeBrowserTab(writer http.ResponseWriter, request *http.Reque
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true})
+}
+
+// --- Task-scoped Agent browser API ---------------------------------------
+//
+// Agent capabilities are bound to one Task/Turn. Every grant-addressed handler
+// re-checks grant.TaskID so a capability from Task A can never read or control
+// Task B's page, even if it learns the grant id.
+
+func (s *Server) agentBrowserState(writer http.ResponseWriter, request *http.Request) {
+	service := s.browserServiceOrError(writer)
+	if service == nil {
+		return
+	}
+	claims, ok := agentClaimsFromContext(request.Context())
+	if !ok || claims.TaskID == "" {
+		writeError(writer, http.StatusUnauthorized, "agent_capability_invalid")
+		return
+	}
+	state, err := service.AgentBrowserState(request.Context(), claims.TaskID)
+	if err != nil {
+		writeBrowserFailure(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "browser": state})
+}
+
+func (s *Server) agentBrowserGrantTarget(writer http.ResponseWriter, request *http.Request) (*browser.Service, browser.GrantView, bool) {
+	service := s.browserServiceOrError(writer)
+	if service == nil {
+		return nil, browser.GrantView{}, false
+	}
+	claims, ok := agentClaimsFromContext(request.Context())
+	if !ok || claims.TaskID == "" {
+		writeError(writer, http.StatusUnauthorized, "agent_capability_invalid")
+		return nil, browser.GrantView{}, false
+	}
+	grant, err := service.Grant(request.Context(), request.PathValue("grant"))
+	if err != nil {
+		writeBrowserFailure(writer, err)
+		return nil, browser.GrantView{}, false
+	}
+	if grant.TaskID != claims.TaskID {
+		writeErrorDetail(writer, http.StatusForbidden, "browser_grant_forbidden",
+			"该浏览器授权不属于当前 Task")
+		return nil, browser.GrantView{}, false
+	}
+	switch grant.Status {
+	case domain.BrowserGrantStatusRevoked:
+		writeErrorDetail(writer, http.StatusForbidden, "browser_grant_revoked", "浏览器授权已撤销")
+		return nil, browser.GrantView{}, false
+	case domain.BrowserGrantStatusExpired:
+		writeErrorDetail(writer, http.StatusForbidden, "browser_grant_expired", "浏览器授权已过期")
+		return nil, browser.GrantView{}, false
+	}
+	return service, grant, true
+}
+
+func (s *Server) agentBrowserTabs(writer http.ResponseWriter, request *http.Request) {
+	service, grant, ok := s.agentBrowserGrantTarget(writer, request)
+	if !ok {
+		return
+	}
+	tabs, err := service.Tabs(request.Context(), grant.ID)
+	if err != nil {
+		writeBrowserFailure(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "tabs": tabs})
+}
+
+func (s *Server) agentBrowserOpenTab(writer http.ResponseWriter, request *http.Request) {
+	service, grant, ok := s.agentBrowserGrantTarget(writer, request)
+	if !ok {
+		return
+	}
+	var payload struct {
+		URL string `json:"url"`
+	}
+	if err := decodeJSON(request, &payload); err != nil {
+		writeErrorDetail(writer, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	tab, err := service.OpenTab(request.Context(), browserActor(request), grant.ID, payload.URL)
+	if err != nil {
+		writeBrowserFailure(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, map[string]any{"ok": true, "tab": tab})
+}
+
+func (s *Server) agentBrowserBindCurrent(writer http.ResponseWriter, request *http.Request) {
+	service, grant, ok := s.agentBrowserGrantTarget(writer, request)
+	if !ok {
+		return
+	}
+	tab, err := service.CurrentTab(request.Context(), grant.ID)
+	if err != nil {
+		writeBrowserFailure(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "tab": tab})
+}
+
+func (s *Server) agentBrowserActivate(writer http.ResponseWriter, request *http.Request) {
+	service, grant, ok := s.agentBrowserGrantTarget(writer, request)
+	if !ok {
+		return
+	}
+	tab, err := service.ActivateTab(request.Context(), browserActor(request), grant.ID,
+		request.PathValue("tab"))
+	if err != nil {
+		writeBrowserFailure(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "tab": tab})
+}
+
+func (s *Server) agentBrowserRelease(writer http.ResponseWriter, request *http.Request) {
+	service, grant, ok := s.agentBrowserGrantTarget(writer, request)
+	if !ok {
+		return
+	}
+	released, err := service.RevokeGrant(request.Context(), browserActor(request), grant.ID)
+	if err != nil {
+		writeBrowserFailure(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "grant": released})
+}
+
+func (s *Server) agentBrowserBookmarks(writer http.ResponseWriter, request *http.Request) {
+	service, grant, ok := s.agentBrowserGrantTarget(writer, request)
+	if !ok {
+		return
+	}
+	bookmarks, err := service.Bookmarks(request.Context(), browserActor(request), grant.ID)
+	if err != nil {
+		writeBrowserFailure(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "bookmarks": bookmarks})
+}
+
+func (s *Server) agentBrowserNavigate(writer http.ResponseWriter, request *http.Request) {
+	service, grant, ok := s.agentBrowserGrantTarget(writer, request)
+	if !ok {
+		return
+	}
+	var payload struct {
+		URL string `json:"url"`
+	}
+	if err := decodeJSON(request, &payload); err != nil {
+		writeErrorDetail(writer, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	tab, err := service.NavigateTab(request.Context(), browserActor(request), grant.ID,
+		request.PathValue("tab"), payload.URL)
+	if err != nil {
+		writeBrowserFailure(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "tab": tab})
+}
+
+func (s *Server) agentBrowserSnapshot(writer http.ResponseWriter, request *http.Request) {
+	service, grant, ok := s.agentBrowserGrantTarget(writer, request)
+	if !ok {
+		return
+	}
+	snapshot, err := service.SnapshotTab(request.Context(), browserActor(request), grant.ID,
+		request.PathValue("tab"))
+	if err != nil {
+		writeBrowserFailure(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "snapshot": snapshot})
+}
+
+func (s *Server) agentBrowserFrame(writer http.ResponseWriter, request *http.Request) {
+	service, grant, ok := s.agentBrowserGrantTarget(writer, request)
+	if !ok {
+		return
+	}
+	frame, err := service.TabFrame(request.Context(), browserActor(request), grant.ID,
+		request.PathValue("tab"))
+	if err != nil {
+		writeBrowserFailure(writer, err)
+		return
+	}
+	writeBrowserFrame(writer, frame)
+}
+
+func (s *Server) agentBrowserCloseTab(writer http.ResponseWriter, request *http.Request) {
+	service, grant, ok := s.agentBrowserGrantTarget(writer, request)
+	if !ok {
+		return
+	}
+	if err := service.CloseTab(request.Context(), browserActor(request), grant.ID,
+		request.PathValue("tab")); err != nil {
+		writeBrowserFailure(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true})
+}
+
+func writeBrowserFrame(writer http.ResponseWriter, frame browser.HostFrame) {
+	writer.Header().Set("Content-Type", frame.ContentType)
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.Header().Set("Content-Length", strconv.Itoa(len(frame.Data)))
+	writer.WriteHeader(http.StatusOK)
+	_, _ = writer.Write(frame.Data)
 }

@@ -280,6 +280,213 @@ func (s *Store) BrowserGrantsForSession(ctx context.Context, sessionID string) (
 	return result, rows.Err()
 }
 
+// BrowserProfileInUseError means another Task already holds the exclusive
+// lease for this Profile. The service maps it to 409 browser_profile_in_use.
+type BrowserProfileInUseError struct {
+	Grant domain.BrowserTaskGrant
+}
+
+func (e *BrowserProfileInUseError) Error() string {
+	return "browser profile is already controlled by another task"
+}
+
+// BrowserTaskProfileLimitError means the Task already holds an active lease on
+// another Profile. It must release that one first; acquisition never silently
+// revokes it.
+type BrowserTaskProfileLimitError struct {
+	Grant domain.BrowserTaskGrant
+}
+
+func (e *BrowserTaskProfileLimitError) Error() string {
+	return "task already controls another browser profile"
+}
+
+// AcquireBrowserTaskGrantExclusive creates the Profile's single active lease.
+// A same-Task or expired lease is revoked; a live lease owned by another Task
+// aborts the transaction. The partial unique index on profile_id is the
+// cross-process backstop.
+func (s *Store) AcquireBrowserTaskGrantExclusive(ctx context.Context, item domain.BrowserTaskGrant, now time.Time) (domain.BrowserTaskGrant, []domain.BrowserTaskGrant, bool, error) {
+	if strings.TrimSpace(item.ID) == "" {
+		return domain.BrowserTaskGrant{}, nil, false, fmt.Errorf("browser grant id is required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.BrowserTaskGrant{}, nil, false, err
+	}
+	defer tx.Rollback()
+	// A Task holds at most one Profile lease. An active same-Profile lease is
+	// reused idempotently; an active lease on another Profile rejects the
+	// acquisition instead of silently revoking it. Expired rows are cleaned up
+	// in this transaction.
+	rows, err := tx.QueryContext(ctx,
+		`SELECT `+browserGrantColumns+` FROM browser_task_grants
+		 WHERE revoked_at='' AND (profile_id=? OR task_id=?)
+		 ORDER BY created_at,id`, item.ProfileID, item.TaskID)
+	if err != nil {
+		return domain.BrowserTaskGrant{}, nil, false, err
+	}
+	revoked := make([]domain.BrowserTaskGrant, 0)
+	var existingLease *domain.BrowserTaskGrant
+	for rows.Next() {
+		existing, scanErr := scanBrowserGrant(rows)
+		if scanErr != nil {
+			rows.Close()
+			return domain.BrowserTaskGrant{}, nil, false, scanErr
+		}
+		if existing.TaskID == item.TaskID {
+			if existing.ProfileID == item.ProfileID {
+				if existing.ExpiresAt.After(now) {
+					copy := existing
+					existingLease = &copy
+					continue
+				}
+				revoked = append(revoked, existing)
+				continue
+			}
+			if existing.ExpiresAt.After(now) {
+				rows.Close()
+				return domain.BrowserTaskGrant{}, nil, false, &BrowserTaskProfileLimitError{Grant: existing}
+			}
+			revoked = append(revoked, existing)
+			continue
+		}
+		if existing.ExpiresAt.After(now) {
+			rows.Close()
+			return domain.BrowserTaskGrant{}, nil, false, &BrowserProfileInUseError{Grant: existing}
+		}
+		revoked = append(revoked, existing)
+	}
+	if err := rows.Close(); err != nil {
+		return domain.BrowserTaskGrant{}, nil, false, err
+	}
+	if err := rows.Err(); err != nil {
+		return domain.BrowserTaskGrant{}, nil, false, err
+	}
+	if existingLease != nil {
+		// Still clean up any expired rows seen for this Task/Profile.
+		for _, existing := range revoked {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE browser_task_grants SET revoked_at=?,updated_at=? WHERE id=? AND revoked_at=''`,
+				timeString(now), timeString(now), existing.ID); err != nil {
+				return domain.BrowserTaskGrant{}, nil, false, err
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return domain.BrowserTaskGrant{}, nil, false, err
+		}
+		return *existingLease, nil, true, nil
+	}
+	for _, existing := range revoked {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE browser_task_grants SET revoked_at=?,updated_at=? WHERE id=? AND revoked_at=''`,
+			timeString(now), timeString(now), existing.ID); err != nil {
+			return domain.BrowserTaskGrant{}, nil, false, err
+		}
+	}
+	if item.CreatedAt.IsZero() {
+		item.CreatedAt = now
+	}
+	item.UpdatedAt = now
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO browser_task_grants(id,task_id,profile_id,session_id,capabilities_json,
+			expires_at,revoked_at,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?)`,
+		item.ID, item.TaskID, item.ProfileID, item.SessionID, encodeJSON(item.Capabilities),
+		timeString(item.ExpiresAt), timeString(item.RevokedAt),
+		timeString(item.CreatedAt), timeString(item.UpdatedAt),
+	); err != nil {
+		return domain.BrowserTaskGrant{}, nil, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.BrowserTaskGrant{}, nil, false, err
+	}
+	for index := range revoked {
+		revoked[index].RevokedAt = now
+		revoked[index].UpdatedAt = now
+	}
+	return item, revoked, false, nil
+}
+
+// TransferBrowserTaskGrantExclusive revokes oldGrantID and inserts the new
+// lease in one transaction. The caller only reaches this after an Owner action.
+func (s *Store) TransferBrowserTaskGrantExclusive(ctx context.Context, oldGrantID string, item domain.BrowserTaskGrant, now time.Time) (domain.BrowserTaskGrant, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.BrowserTaskGrant{}, err
+	}
+	defer tx.Rollback()
+	old, err := scanBrowserGrant(tx.QueryRowContext(ctx,
+		`SELECT `+browserGrantColumns+` FROM browser_task_grants WHERE id=?`, oldGrantID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.BrowserTaskGrant{}, ErrBrowserAccessInactive
+	}
+	if err != nil {
+		return domain.BrowserTaskGrant{}, err
+	}
+	if !old.RevokedAt.IsZero() || !old.ExpiresAt.After(now) || old.ProfileID != item.ProfileID {
+		return domain.BrowserTaskGrant{}, ErrBrowserAccessInactive
+	}
+	// The target Task must not already control another Profile; the Owner can
+	// release that lease first. This avoids a transfer silently revoking it.
+	other, err := tx.QueryContext(ctx,
+		`SELECT `+browserGrantColumns+` FROM browser_task_grants
+		 WHERE task_id=? AND revoked_at='' AND profile_id<>? ORDER BY created_at,id`,
+		item.TaskID, item.ProfileID)
+	if err != nil {
+		return domain.BrowserTaskGrant{}, err
+	}
+	var otherLeases []domain.BrowserTaskGrant
+	for other.Next() {
+		lease, scanErr := scanBrowserGrant(other)
+		if scanErr != nil {
+			other.Close()
+			return domain.BrowserTaskGrant{}, scanErr
+		}
+		otherLeases = append(otherLeases, lease)
+	}
+	if err := other.Close(); err != nil {
+		return domain.BrowserTaskGrant{}, err
+	}
+	if err := other.Err(); err != nil {
+		return domain.BrowserTaskGrant{}, err
+	}
+	for _, lease := range otherLeases {
+		if lease.ExpiresAt.After(now) {
+			return domain.BrowserTaskGrant{}, &BrowserTaskProfileLimitError{Grant: lease}
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE browser_task_grants SET revoked_at=?,updated_at=? WHERE id=? AND revoked_at=''`,
+			timeString(now), timeString(now), lease.ID); err != nil {
+			return domain.BrowserTaskGrant{}, err
+		}
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE browser_task_grants SET revoked_at=?,updated_at=? WHERE id=? AND revoked_at=''`,
+		timeString(now), timeString(now), old.ID); err != nil {
+		return domain.BrowserTaskGrant{}, err
+	}
+	if item.CreatedAt.IsZero() {
+		item.CreatedAt = now
+	}
+	item.UpdatedAt = now
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO browser_task_grants(id,task_id,profile_id,session_id,capabilities_json,
+			expires_at,revoked_at,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?)`,
+		item.ID, item.TaskID, item.ProfileID, item.SessionID, encodeJSON(item.Capabilities),
+		timeString(item.ExpiresAt), timeString(item.RevokedAt),
+		timeString(item.CreatedAt), timeString(item.UpdatedAt),
+	); err != nil {
+		return domain.BrowserTaskGrant{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.BrowserTaskGrant{}, err
+	}
+	old.RevokedAt = now
+	old.UpdatedAt = now
+	return old, nil
+}
+
 func (s *Store) CreateBrowserTaskGrant(ctx context.Context, item domain.BrowserTaskGrant) error {
 	if strings.TrimSpace(item.ID) == "" {
 		return fmt.Errorf("browser grant id is required")
@@ -309,70 +516,22 @@ func (s *Store) CreateBrowserTaskGrant(ctx context.Context, item domain.BrowserT
 	return err
 }
 
-// CreateBrowserTaskGrantSuperseding revokes the Task/Profile's currently active
-// grants and inserts the new one in a single immediate transaction. The write
-// lock is what makes "one active grant per Task/Profile" hold under concurrent
-// creates; the caller uses the returned grants to close tabs and audit.
-func (s *Store) CreateBrowserTaskGrantSuperseding(ctx context.Context, item domain.BrowserTaskGrant, now time.Time) ([]domain.BrowserTaskGrant, error) {
-	if strings.TrimSpace(item.ID) == "" {
-		return nil, fmt.Errorf("browser grant id is required")
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
+// RefreshBrowserTaskGrantLease keeps the same active lease row while applying
+// the caller's capabilities/TTL. Idempotent re-acquire must not revoke and
+// rebuild the lease.
+func (s *Store) RefreshBrowserTaskGrantLease(ctx context.Context, id string, capabilities []string, expiresAt time.Time, now time.Time) (domain.BrowserTaskGrant, error) {
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE browser_task_grants SET capabilities_json=?,expires_at=?,updated_at=?
+		 WHERE id=? AND revoked_at=''`,
+		encodeJSON(capabilities), timeString(expiresAt), timeString(now), id)
 	if err != nil {
-		return nil, err
+		return domain.BrowserTaskGrant{}, err
 	}
-	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx,
-		`SELECT `+browserGrantColumns+` FROM browser_task_grants
-		 WHERE task_id=? AND profile_id=? AND revoked_at=''
-		 ORDER BY created_at,id`, item.TaskID, item.ProfileID)
-	if err != nil {
-		return nil, err
+	affected, _ := result.RowsAffected()
+	if affected != 1 {
+		return domain.BrowserTaskGrant{}, sql.ErrNoRows
 	}
-	revoked := make([]domain.BrowserTaskGrant, 0)
-	for rows.Next() {
-		existing, scanErr := scanBrowserGrant(rows)
-		if scanErr != nil {
-			rows.Close()
-			return nil, scanErr
-		}
-		revoked = append(revoked, existing)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	for _, existing := range revoked {
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE browser_task_grants SET revoked_at=?,updated_at=? WHERE id=? AND revoked_at=''`,
-			timeString(now), timeString(now), existing.ID); err != nil {
-			return nil, err
-		}
-	}
-	if item.CreatedAt.IsZero() {
-		item.CreatedAt = now
-	}
-	item.UpdatedAt = now
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO browser_task_grants(id,task_id,profile_id,session_id,capabilities_json,
-			expires_at,revoked_at,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?)`,
-		item.ID, item.TaskID, item.ProfileID, item.SessionID, encodeJSON(item.Capabilities),
-		timeString(item.ExpiresAt), timeString(item.RevokedAt),
-		timeString(item.CreatedAt), timeString(item.UpdatedAt),
-	); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-	for index := range revoked {
-		revoked[index].RevokedAt = now
-		revoked[index].UpdatedAt = now
-	}
-	return revoked, nil
+	return s.BrowserTaskGrant(ctx, id)
 }
 
 func (s *Store) RevokeBrowserTaskGrant(ctx context.Context, id string, revokedAt time.Time) error {
@@ -394,13 +553,20 @@ func (s *Store) DeleteBrowserTaskGrant(ctx context.Context, id string) error {
 	return err
 }
 
-const browserTabColumns = `id,session_id,grant_id,task_id,host_tab_id,url,title,created_at,updated_at`
+const browserTabColumns = `id,session_id,grant_id,task_id,host_tab_id,url,title,origin,created_at,updated_at`
+
+func browserTabOrigin(item domain.BrowserTab) string {
+	if item.Origin == domain.BrowserTabOriginOwner {
+		return domain.BrowserTabOriginOwner
+	}
+	return domain.BrowserTabOriginAgent
+}
 
 func scanBrowserTab(scanner interface{ Scan(...any) error }) (domain.BrowserTab, error) {
 	var item domain.BrowserTab
 	var createdAt, updatedAt string
 	err := scanner.Scan(&item.ID, &item.SessionID, &item.GrantID, &item.TaskID, &item.HostTabID,
-		&item.URL, &item.Title, &createdAt, &updatedAt)
+		&item.URL, &item.Title, &item.Origin, &createdAt, &updatedAt)
 	item.CreatedAt = parseTime(createdAt)
 	item.UpdatedAt = parseTime(updatedAt)
 	return item, err
@@ -465,17 +631,20 @@ func (s *Store) BrowserTabsForTask(ctx context.Context, taskID string) ([]domain
 	return result, rows.Err()
 }
 
-// CreateBrowserTabForActiveGrant inserts a tab only if the grant is still
-// unrevoked/unexpired, its session is open, and that session is still the
-// profile's active session. The check and insert share one transaction so a
-// revoke or close that lands during the host call cannot leave an orphan tab.
-func (s *Store) CreateBrowserTabForActiveGrant(ctx context.Context, item domain.BrowserTab, now time.Time) error {
+// UpsertBrowserTabForActiveGrant registers a host page under the exclusive
+// lease. Existing rows are re-assigned to the current Task/grant and refreshed;
+// the row ID and origin stay stable. The grant/session check and write share one
+// transaction so a revoke during the host call cannot leave an orphan binding.
+func (s *Store) UpsertBrowserTabForActiveGrant(ctx context.Context, item domain.BrowserTab, now time.Time) (domain.BrowserTab, error) {
 	if strings.TrimSpace(item.ID) == "" {
-		return fmt.Errorf("browser tab id is required")
+		return domain.BrowserTab{}, fmt.Errorf("browser tab id is required")
+	}
+	if strings.TrimSpace(item.HostTabID) == "" {
+		return domain.BrowserTab{}, fmt.Errorf("browser host tab id is required")
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return domain.BrowserTab{}, err
 	}
 	defer tx.Rollback()
 	var active int
@@ -491,10 +660,10 @@ func (s *Store) CreateBrowserTabForActiveGrant(ctx context.Context, item domain.
 			WHERE other.profile_id=g.profile_id AND other.state<>'closed' AND other.id<>g.session_id
 		  )`,
 		item.GrantID, item.TaskID, item.SessionID, timeString(now)).Scan(&active); err != nil {
-		return err
+		return domain.BrowserTab{}, err
 	}
 	if active != 1 {
-		return ErrBrowserAccessInactive
+		return domain.BrowserTab{}, ErrBrowserAccessInactive
 	}
 	now = now.UTC()
 	if item.CreatedAt.IsZero() {
@@ -502,14 +671,26 @@ func (s *Store) CreateBrowserTabForActiveGrant(ctx context.Context, item domain.
 	}
 	item.UpdatedAt = now
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO browser_tabs(id,session_id,grant_id,task_id,host_tab_id,url,title,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?)`,
+		INSERT INTO browser_tabs(id,session_id,grant_id,task_id,host_tab_id,url,title,origin,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(session_id,host_tab_id) WHERE host_tab_id <> '' DO UPDATE SET
+			grant_id=excluded.grant_id,task_id=excluded.task_id,url=excluded.url,
+			title=excluded.title,updated_at=excluded.updated_at`,
 		item.ID, item.SessionID, item.GrantID, item.TaskID, item.HostTabID, item.URL, item.Title,
-		timeString(item.CreatedAt), timeString(item.UpdatedAt),
+		browserTabOrigin(item), timeString(item.CreatedAt), timeString(item.UpdatedAt),
 	); err != nil {
-		return err
+		return domain.BrowserTab{}, err
 	}
-	return tx.Commit()
+	stored, err := scanBrowserTab(tx.QueryRowContext(ctx,
+		`SELECT `+browserTabColumns+` FROM browser_tabs WHERE session_id=? AND host_tab_id=?`,
+		item.SessionID, item.HostTabID))
+	if err != nil {
+		return domain.BrowserTab{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.BrowserTab{}, err
+	}
+	return stored, nil
 }
 
 func (s *Store) CreateBrowserTab(ctx context.Context, item domain.BrowserTab) error {
@@ -522,10 +703,10 @@ func (s *Store) CreateBrowserTab(ctx context.Context, item domain.BrowserTab) er
 	}
 	item.UpdatedAt = now
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO browser_tabs(id,session_id,grant_id,task_id,host_tab_id,url,title,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?)`,
+		INSERT INTO browser_tabs(id,session_id,grant_id,task_id,host_tab_id,url,title,origin,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?)`,
 		item.ID, item.SessionID, item.GrantID, item.TaskID, item.HostTabID, item.URL, item.Title,
-		timeString(item.CreatedAt), timeString(item.UpdatedAt),
+		browserTabOrigin(item), timeString(item.CreatedAt), timeString(item.UpdatedAt),
 	)
 	return err
 }
