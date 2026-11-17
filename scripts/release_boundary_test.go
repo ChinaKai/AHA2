@@ -252,13 +252,19 @@ func TestWindowsPackageBuildProducesAllArtifacts(t *testing.T) {
 		"aha2-tray-windows-amd64.exe",
 		filepath.Join("plugins", "feishu", "windows-amd64", "aha2-channel-feishu.exe"),
 		filepath.Join("plugins", "feishu", "windows-amd64", "plugin.json"),
+		filepath.Join("browser-host", "host.mjs"),
+		filepath.Join("browser-host", "server.mjs"),
+		filepath.Join("browser-host", "package.json"),
+		filepath.Join("browser-host", "node_modules", "playwright", "package.json"),
+		filepath.Join("node", "node.exe"),
+		filepath.Join("node", "LICENSE"),
 	}
 	for _, rel := range required {
 		data, err := os.ReadFile(filepath.Join(output, rel))
 		if err != nil {
 			t.Fatalf("package artifact %s: %v", rel, err)
 		}
-		if rel != filepath.Join("plugins", "feishu", "windows-amd64", "plugin.json") {
+		if strings.HasSuffix(rel, ".exe") {
 			if len(data) < 2 || data[0] != 'M' || data[1] != 'Z' {
 				t.Errorf("%s is not a Windows PE executable", rel)
 			}
@@ -314,11 +320,35 @@ func TestWindowsPackageBuildProducesAllArtifacts(t *testing.T) {
 	for _, file := range manifest.Files {
 		got[filepath.FromSlash(file.Path)] = file
 	}
-	if len(got) != len(required) {
-		t.Errorf("manifest lists %d files, want %d", len(got), len(required))
+	if len(got) < len(required) {
+		t.Errorf("manifest lists %d files, want at least %d", len(got), len(required))
 	}
 	if _, ok := got["release-manifest.json"]; ok {
 		t.Error("manifest must not list itself")
+	}
+	// The browser host and its bundled Node runtime are supervised from the
+	// installed tree, so every shipped file must be covered by the manifest.
+	for _, root := range []string{"browser-host", "node"} {
+		rootDir := filepath.Join(output, root)
+		if err := filepath.WalkDir(rootDir, func(path string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if entry.IsDir() {
+				return nil
+			}
+			rel, err := filepath.Rel(output, path)
+			if err != nil {
+				return err
+			}
+			slash := filepath.ToSlash(rel)
+			if _, ok := got[slash]; !ok {
+				t.Errorf("manifest is missing %s file %s", root, slash)
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("walk %s package: %v", root, err)
+		}
 	}
 	for _, rel := range required {
 		entry, ok := got[rel]
@@ -612,6 +642,59 @@ func copySourceTree(t *testing.T, source, dest string) {
 	})
 	if err != nil {
 		t.Fatalf("copy source tree: %v", err)
+	}
+}
+
+// TestWindowsPackageBuildRejectsTamperedCachedNode exercises the AHA2_NODE_EXE
+// cache entry: it is pinned to the official node.exe hash for the selected
+// version, so a tampered file must fail the build before it can claim to stage
+// runtime 22.23.5. It fails fast (Node staging runs before the Web build).
+func TestWindowsPackageBuildRejectsTamperedCachedNode(t *testing.T) {
+	bash := requirePackageBuildTools(t)
+	root := repoRoot(t)
+	dir := t.TempDir()
+	node := filepath.Join(dir, "node.exe")
+	// Prefer a real official node.exe when the caller provides one, so the
+	// regression is the exact "official file with one byte changed" case.
+	nodeBytes := []byte("not the official node runtime")
+	if official := strings.TrimSpace(os.Getenv("AHA2_TEST_OFFICIAL_NODE_EXE")); official != "" {
+		data, err := os.ReadFile(official)
+		if err != nil {
+			t.Fatalf("read AHA2_TEST_OFFICIAL_NODE_EXE: %v", err)
+		}
+		data[len(data)/2] ^= 0xFF
+		nodeBytes = data
+	}
+	if err := os.WriteFile(node, nodeBytes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	license := filepath.Join(dir, "LICENSE")
+	if err := os.WriteFile(license, []byte("test license"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(dir, "package")
+	cmd := exec.Command(bash, buildScriptPath(root),
+		"--version", "1.2.3",
+		"--commit", "0123456789abcdef0123456789abcdef01234567",
+		"--output-dir", output,
+		"--skip-web-test",
+	)
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(),
+		"VERSION=",
+		"AHA2_NODE_EXE="+node,
+		"AHA2_NODE_LICENSE="+license,
+		"AHA2_NODE_SIGNATURE_POLICY=warn",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("tampered cached node.exe was accepted:\n%s", out)
+	}
+	if !strings.Contains(string(out), "Cached node.exe SHA-256 mismatch") {
+		t.Fatalf("build failed for the wrong reason:\n%s", out)
+	}
+	if strings.Contains(string(out), "Bundled Node runtime:") {
+		t.Fatalf("build claimed to stage the tampered runtime:\n%s", out)
 	}
 }
 

@@ -23,6 +23,7 @@ type Host interface {
 	OpenTab(ctx context.Context, profileID, sessionID, targetURL string) (HostTab, error)
 	Navigate(ctx context.Context, profileID, sessionID, tabID, targetURL string) (HostTab, error)
 	Snapshot(ctx context.Context, profileID, sessionID, tabID string) (HostSnapshot, error)
+	Frame(ctx context.Context, profileID, sessionID, tabID string) (HostFrame, error)
 	CloseTab(ctx context.Context, profileID, sessionID, tabID string) error
 }
 
@@ -52,6 +53,15 @@ type HostSnapshot struct {
 	Title string `json:"title"`
 	Text  string `json:"text"`
 }
+
+// HostFrame is a single read-only preview image of an authorized tab. It is
+// transient: AHA never writes it to disk or into an audit row.
+type HostFrame struct {
+	ContentType string
+	Data        []byte
+}
+
+const maxHostFrameBytes = 4 << 20
 
 // HTTPHost talks to the loopback browser host over authenticated HTTP. The
 // token is sent only in the Authorization header and is never included in an
@@ -95,6 +105,18 @@ func hostErrorMessage(code string) string {
 		return "浏览器宿主操作超时，请刷新状态后再试"
 	case "browser_host_unauthorized":
 		return "浏览器宿主拒绝了 AHA 的本地凭据，请核对 host token"
+	case "browser_host_node_missing":
+		return "未找到可用的 Node.js（安装包内置运行时缺失或已损坏）；可设置 AHA2_NODE_PATH 覆盖"
+	case "browser_host_script_missing":
+		return "安装目录缺少 browser-host/host.mjs，请重新安装 AHA2"
+	case "browser_host_starting":
+		return "浏览器宿主正在启动，请稍候"
+	case "browser_host_not_ready":
+		return "浏览器宿主尚未就绪"
+	case "browser_host_start_failed":
+		return "浏览器宿主自动启动失败（端口被占用或依赖缺失），请查看 AHA2 日志"
+	case "browser_frame_failed":
+		return "读取页面画面失败"
 	case "browser_edge_unavailable":
 		return "未找到 Microsoft Edge；POC 不会换用 Chrome/Chromium"
 	case "browser_profile_locked":
@@ -121,6 +143,9 @@ func hostErrorMessage(code string) string {
 var hostCodes = map[string]bool{
 	"browser_host_unavailable": true, "browser_host_timeout": true,
 	"browser_host_unauthorized": true, "browser_host_bad_response": true,
+	"browser_host_node_missing": true, "browser_host_script_missing": true,
+	"browser_host_starting": true, "browser_host_not_ready": true,
+	"browser_host_start_failed": true, "browser_frame_failed": true,
 	"browser_edge_unavailable": true, "browser_profile_locked": true,
 	"browser_profile_unavailable": true, "browser_profile_invalid": true,
 	"browser_launch_failed": true, "browser_navigation_failed": true,
@@ -300,6 +325,72 @@ func (h *HTTPHost) Snapshot(ctx context.Context, profileID, sessionID, tabID str
 func (h *HTTPHost) CloseTab(ctx context.Context, profileID, sessionID, tabID string) error {
 	path := profilePath(profileID) + "/tabs/" + url.PathEscape(tabID) + "?session_id=" + url.QueryEscape(sessionID)
 	return h.call(ctx, http.MethodDelete, path, nil, nil)
+}
+
+// Shutdown asks the host to close every browser session and exit. The manager
+// uses it before falling back to killing the child process tree.
+func (h *HTTPHost) Shutdown(ctx context.Context) error {
+	return h.call(ctx, http.MethodPost, "/v1/shutdown", nil, nil)
+}
+
+// Frame fetches one JPEG/PNG preview of an authorized tab. Unlike the JSON
+// calls it reads the raw body, but it still maps host failures to the same
+// static, path-free error codes.
+func (h *HTTPHost) Frame(ctx context.Context, profileID, sessionID, tabID string) (HostFrame, error) {
+	path := profilePath(profileID) + "/tabs/" + url.PathEscape(tabID) + "/frame?session_id=" + url.QueryEscape(sessionID)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, h.baseURL+path, nil)
+	if err != nil {
+		return HostFrame{}, newError(http.StatusServiceUnavailable, "browser_host_unavailable", "浏览器宿主地址无效")
+	}
+	request.Header.Set("Accept", "image/jpeg, image/png")
+	if h.token != "" {
+		request.Header.Set("Authorization", "Bearer "+h.token)
+	}
+	response, err := h.client.Do(request)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || isTimeout(err) {
+			return HostFrame{}, &Error{Code: "browser_host_timeout", Status: http.StatusGatewayTimeout,
+				Message: hostErrorMessage("browser_host_timeout")}
+		}
+		return HostFrame{}, &Error{Code: "browser_host_unavailable", Status: http.StatusServiceUnavailable,
+			Message: hostErrorMessage("browser_host_unavailable")}
+	}
+	defer response.Body.Close()
+	payload, err := io.ReadAll(io.LimitReader(response.Body, maxHostFrameBytes+1))
+	if err != nil {
+		return HostFrame{}, newError(http.StatusBadGateway, "browser_host_bad_response", "读取浏览器宿主响应失败")
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		var failure hostErrorBody
+		_ = json.Unmarshal(payload, &failure)
+		code := strings.TrimSpace(failure.Error.Code)
+		if code == "" {
+			code = "browser_frame_failed"
+		}
+		status := http.StatusBadGateway
+		switch response.StatusCode {
+		case http.StatusUnauthorized, http.StatusForbidden:
+			status = http.StatusServiceUnavailable
+			code = "browser_host_unauthorized"
+		case http.StatusNotFound:
+			status = http.StatusNotFound
+		case http.StatusConflict:
+			status = http.StatusConflict
+		case http.StatusServiceUnavailable:
+			status = http.StatusServiceUnavailable
+		case http.StatusGatewayTimeout:
+			status = http.StatusGatewayTimeout
+		}
+		return HostFrame{}, &Error{Code: code, Message: hostErrorMessage(code), Status: status}
+	}
+	contentType := strings.ToLower(strings.TrimSpace(strings.Split(response.Header.Get("Content-Type"), ";")[0]))
+	if contentType != "image/jpeg" && contentType != "image/png" {
+		return HostFrame{}, newError(http.StatusBadGateway, "browser_frame_failed", "浏览器宿主返回了非图片画面")
+	}
+	if len(payload) == 0 || len(payload) > maxHostFrameBytes {
+		return HostFrame{}, newError(http.StatusBadGateway, "browser_frame_failed", "浏览器宿主返回的画面大小无效")
+	}
+	return HostFrame{ContentType: contentType, Data: payload}, nil
 }
 
 func isHostUnavailable(err error) bool {

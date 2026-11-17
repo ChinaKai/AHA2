@@ -533,8 +533,9 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	appService.SetPetHardwareDisconnector(hardwareManager)
 	defer hardwareManager.Close()
 	// The shared browser lives in a separate host process so it can run in the
-	// owner's interactive Windows session. AHA only needs a loopback URL and the
-	// host token; the token is never logged.
+	// owner's interactive Windows session. Unless an explicit loopback URL is
+	// supplied for troubleshooting, AHA discovers the packaged host, allocates a
+	// random loopback port and a fresh token, and supervises the child itself.
 	browserHostURL := strings.TrimSpace(os.Getenv("AHA2_BROWSER_HOST_URL"))
 	browserHostToken := strings.TrimSpace(os.Getenv("AHA2_BROWSER_HOST_TOKEN"))
 	if browserHostToken == "" {
@@ -552,16 +553,38 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	_ = os.Unsetenv("AHA2_BROWSER_HOST_TOKEN_FILE")
 	browserHostID := envOr("AHA2_BROWSER_HOST_ID", browser.DefaultHostID)
 	var browserHost browser.Host
+	var browserHostManager *browser.HostManager
 	if browserHostURL != "" {
+		// Test/troubleshooting override: use an already-running host.
 		browserHost = browser.NewHTTPHost(browserHostURL, browserHostToken)
+		logger.Info("shared browser host configured", "host_id", browserHostID, "source", "AHA2_BROWSER_HOST_URL")
+	} else {
+		browserHostManager = browser.NewHostManager(browser.HostManagerOptions{
+			DataDir: filepath.Join(absoluteDataDir, "browser-profiles"),
+			HostID:  browserHostID,
+			Logger:  logger,
+		})
+		browserHost = browserHostManager
+		go func() {
+			// Starting the host must never block or fail AHA's own startup. A
+			// failure leaves the manager fail-closed and the resources page shows
+			// the actionable status instead of a configured-URL prompt.
+			if startErr := browserHostManager.Start(ctx); startErr != nil {
+				logger.Warn("browser host auto-start failed; browser features fail closed",
+					"code", browser.Code(startErr), "detail", browser.PublicMessage(startErr))
+				return
+			}
+			logger.Info("browser host auto-started", "host_id", browserHostID)
+		}()
+		defer func() {
+			stopContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if stopErr := browserHostManager.Stop(stopContext); stopErr != nil {
+				logger.Warn("browser host shutdown incomplete", "error", stopErr)
+			}
+		}()
 	}
 	browserService := browser.NewService(database, browserHost, browserHostID)
-	if browserHost == nil {
-		logger.Info("shared browser host not configured; browser features fail closed",
-			"env", "AHA2_BROWSER_HOST_URL")
-	} else {
-		logger.Info("shared browser host configured", "host_id", browserHostID)
-	}
 	if err := appService.ResumePending(ctx); err != nil {
 		return fmt.Errorf("resume pending agent inbox: %w", err)
 	}

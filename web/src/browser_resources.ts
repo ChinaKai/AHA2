@@ -74,7 +74,10 @@ export function renderBrowserHostBanner(host: BrowserHostView | null, loading = 
     return `<p class="browser-host-banner error" role="status">${icon("browser")}尚未读取浏览器宿主状态。</p>`;
   }
   if (!host.available) {
-    return `<p class="browser-host-banner error" role="status">${icon("browser")}浏览器宿主不可用：${escapeHTML(host.error || host.code || "请启动 host 进程")}。Profile 可以创建，但打开登录窗口会明确失败，不会换用其他浏览器。</p>`;
+    if (host.code === "browser_host_starting") {
+      return `<p class="browser-host-banner" role="status" aria-busy="true">${icon("spinner", true)}浏览器宿主正在启动，请稍候…</p>`;
+    }
+    return `<p class="browser-host-banner error" role="status">${icon("browser")}浏览器宿主不可用：${escapeHTML(host.error || host.code || "请查看 AHA2 启动日志")}。AHA 启动时会自动拉起随安装包分发的宿主；Profile 仍可创建，但打开登录窗口会明确失败，不会换用其他浏览器。</p>`;
   }
   if (!host.edge_available) {
     return `<p class="browser-host-banner error" role="status">${icon("browser")}浏览器宿主在线，但未找到 Microsoft Edge。POC 只支持 Edge，不会静默换用 Chrome/Chromium。</p>`;

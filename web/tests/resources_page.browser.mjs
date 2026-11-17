@@ -69,12 +69,13 @@ window.fetch = async (input, init = {}) => {
   if (path === "/api/v1/workspaces") return json({workspaces: []});
   if (path === "/api/v1/tasks") return json({tasks: [], has_more: false, counts: {}});
   if (path === "/api/v1/hardware-resources" && method === "GET") return json({resources: [HARDWARE, PARTIAL_HARDWARE]});
-  // No AHA2_BROWSER_HOST_URL: the server reports an unavailable host, not a
-  // hanging request. The page must still open and explain why.
+  // No packaged browser host: the server reports an unavailable host, not a
+  // hanging request. The page must still open and explain why without asking
+  // the owner to configure a URL.
   if (path === "/api/v1/browser/host") return json({ok: true, host: {
     available: false, host_id: "local", edge_available: false,
-    code: "browser_host_unavailable",
-    error: "浏览器宿主未配置（AHA2_BROWSER_HOST_URL）",
+    code: "browser_host_start_failed",
+    error: "浏览器宿主自动启动失败（端口被占用或依赖缺失），请查看 AHA2 日志",
   }});
   if (path === "/api/v1/browser/profiles" && method === "GET") return window.__profilesGate;
   if (path === "/api/v1/browser/profiles/browser_profile_1/login-window" && method === "POST") {
@@ -150,7 +151,8 @@ try {
   assert.match(await page.locator('[data-browser-profile="browser_profile_1"]').innerText(), /工作浏览器/);
   assert.equal(await page.locator(".browser-resources-view [aria-busy='true']").count(), 0);
   assert.match(await banner.innerText(), /浏览器宿主不可用/);
-  assert.match(await banner.innerText(), /AHA2_BROWSER_HOST_URL/);
+  assert.match(await banner.innerText(), /自动启动失败/);
+  assert.doesNotMatch(await banner.innerText(), /AHA2_BROWSER_HOST_URL/);
 
   // A failed action must surface an error banner immediately, not disappear
   // without feedback.

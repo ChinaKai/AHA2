@@ -7,6 +7,15 @@
 #ifndef SourceTrayExe
   #define SourceTrayExe "..\..\dist\aha2-tray-windows-amd64.exe"
 #endif
+#ifndef SourceBrowserHost
+  #define SourceBrowserHost "..\..\dist\browser-host"
+#endif
+#ifndef SourceNodeExe
+  #define SourceNodeExe "..\..\dist\node\node.exe"
+#endif
+#ifndef SourceNodeLicense
+  #define SourceNodeLicense "..\..\dist\node\LICENSE"
+#endif
 #ifndef OutputDir
   #define OutputDir "..\..\dist\installer"
 #endif
@@ -55,6 +64,9 @@ RestartApplications=no
 [Files]
 Source: "{#SourceExe}"; DestDir: "{app}"; DestName: "aha2.exe"; Flags: ignoreversion
 Source: "{#SourceTrayExe}"; DestDir: "{app}"; DestName: "aha2-tray.exe"; Flags: ignoreversion
+Source: "{#SourceBrowserHost}\*"; DestDir: "{app}\browser-host"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SourceNodeExe}"; DestDir: "{app}\node"; DestName: "node.exe"; Flags: ignoreversion
+Source: "{#SourceNodeLicense}"; DestDir: "{app}\node"; DestName: "LICENSE"; Flags: ignoreversion
 Source: "Register-AHA2UserTask.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "Prepare-AHA2DataDir.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\third_party\hysteria\LICENSE.md"; DestDir: "{app}\licenses"; DestName: "Hysteria-LICENSE.txt"; Flags: ignoreversion
@@ -69,6 +81,12 @@ Source: "{#SourceFeishuManifest}"; DestDir: "{code:SelectedDataDir}\plugins\chan
 
 [InstallDelete]
 Type: files; Name: "{app}\Run-AHA2User.vbs"
+; The packaged browser host is upgraded as a whole directory. Remove the old
+; tree first so a dependency dropped by a newer Playwright version does not
+; linger and shadow the new one.
+Type: filesandordirs; Name: "{app}\browser-host"
+; The bundled Node runtime is upgraded as a whole directory as well.
+Type: filesandordirs; Name: "{app}\node"
 ; Older releases installed prebuilt Agent API stdio helpers here. The helper is
 ; now a Node script embedded in aha2.exe, so the directory is dead weight (tens
 ; of megabytes) and is removed on upgrade.

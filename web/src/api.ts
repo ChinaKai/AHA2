@@ -993,6 +993,24 @@ class APIClient {
     return this.request(`/api/v1/tasks/${encodeURIComponent(taskID)}/browser`);
   }
 
+  // Read-only preview frame. The endpoint returns image/jpeg and is never
+  // cached; callers own the object URL and must revoke it when they stop.
+  async browserTabFrame(grantID: string, tabID: string, signal?: AbortSignal): Promise<Blob> {
+    const response = await fetch(
+      `/api/v1/browser-grants/${encodeURIComponent(grantID)}/tabs/${encodeURIComponent(tabID)}/frame`,
+      {method: "GET", credentials: "same-origin", cache: "no-store", signal},
+    );
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({})) as {error?: unknown; message?: string};
+      const nested = body.error && typeof body.error === "object" ? body.error as {code?: string; message?: string} : null;
+      const error = new Error(String(nested?.message || body.message || `HTTP ${response.status}`)) as Error & {code?: string; status?: number};
+      error.code = String(nested?.code || (typeof body.error === "string" ? body.error : ""));
+      error.status = response.status;
+      throw error;
+    }
+    return response.blob();
+  }
+
   createTaskBrowserGrant(taskID: string, payload: {profile_id: string; capabilities?: string[]; expires_in_seconds?: number}): Promise<{grant: BrowserTaskGrant; session: BrowserSession | null}> {
     return this.request(`/api/v1/tasks/${encodeURIComponent(taskID)}/browser-sessions`, {
       method: "POST", body: JSON.stringify(payload),

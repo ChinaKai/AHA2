@@ -11,7 +11,7 @@
 | Session | `browser_sessions`；属于 profile，不归 Task。`starting/ready/auth_required/busy/closed/error`。 |
 | Task 授权 | `browser_task_grants`；`task_id/profile_id/session_id/capabilities/expires_at/revoked_at`。 |
 | Tab | `browser_tabs`；带 `task_id/grant_id/session_id`，每次操作同时校验授权、会话与标签页归属。 |
-| Host | 独立 Node 进程 `browser-host/host.mjs`，Playwright persistent context + 可见 Edge；仅 loopback + Bearer token。 |
+| Host | 独立 Node 进程 `browser-host/host.mjs`，Playwright persistent context + 可见 Edge；仅 loopback + Bearer token。AHA 启动时自动发现并拉起，随机端口 + 每次启动重新生成的短期 token；崩溃自动重启，AHA 停止时先请求 host 关闭会话再清理子进程。 |
 
 同一 profile 单实例有三层约束：
 
@@ -58,12 +58,24 @@ Task 授权：
 - `POST /api/v1/browser-grants/{id}/tabs`
 - `POST /api/v1/browser-grants/{id}/tabs/{tab}/navigate`
 - `GET /api/v1/browser-grants/{id}/tabs/{tab}/snapshot`
+- `GET /api/v1/browser-grants/{id}/tabs/{tab}/frame`：只读 JPEG 预览（2–5 fps，
+  页面不变时自动降帧）。AHA 只转发当前授权且属于该 Task 的标签页；帧不落盘、
+  不写审计正文，关闭面板即停止拉取。
 - `DELETE /api/v1/browser-grants/{id}/tabs/{tab}`
 
 能力集合固定为 `open_tab | navigate | snapshot`；未知能力在创建授权时拒绝。
 
-## 3. 失败关闭
+运行时前置：安装包携带 `browser-host/`（含 `playwright` Node 依赖，约 12 MB）和
+`node/node.exe`（官方 Node.js LTS，默认 22.23.5，约 84 MB；安装包压缩后约增加
+25–30 MB），安装到 `{app}\browser-host` 与 `{app}\node`。AHA 优先使用内置
+`node.exe`，干净的 Windows 机器不需要系统 Node/npm；`AHA2_NODE_PATH` 仍是覆盖项。
+构建时官方归档按 SHASUMS256.txt 校验 SHA-256；`AHA2_NODE_EXE` 缓存入口必须匹配
+从该版本官方归档推导的固定 node.exe SHA-256；有 osslsigncode/signtool 时执行
+真实 Authenticode 验签，没有验签工具时显式标记未验证（可用
+`AHA2_NODE_SIGNATURE_POLICY=require` 改为失败）。内置运行时缺失/损坏时资源页
+返回 `browser_host_node_missing` 并失败关闭，不会退回公开端口或 CDP。
 
+## 3. 失败关闭
 - host 未配置/不可达：`browser_host_unavailable`（HTTP 503）；
 - Edge 缺失：`browser_edge_unavailable`（503），不自动换浏览器；
 - profile 目录被其他进程占用：`browser_profile_locked`（409）；
@@ -72,9 +84,12 @@ Task 授权：
 - 跨 Task 标签页：`browser_tab_forbidden`（403）；
 - 授权缺少能力：`browser_capability_denied`（403）；
 - 非 http/https 网址：`browser_url_invalid`（400）；
-- host 操作超过 60s：`browser_host_timeout`（504），与连接失败
-  `browser_host_unavailable` 区分。host 的页面导航是 30s，AHA 客户端超时 60s，
-  避免 AHA 先失败而 host 仍在提交导航。
+- host 业务操作超过 60s：`browser_host_timeout`（504），与连接失败
+  `browser_host_unavailable` 区分。host 的页面导航是 30s，AHA 业务客户端超时
+  60s，避免 AHA 先失败而 host 仍在提交导航；启动就绪探针单独使用 5s 客户端
+  （每次探测上下文 2s），只约束启动期。
+- 崩溃/重启预算跨单次重启保留，只有新 host 稳定运行 60s 后才重置；达到上限
+  （默认 5 次）返回 `browser_host_start_failed`，不会无限重启。
 
 host 返回的原始 Playwright 诊断只留在 host 本地日志（替换 profile 根目录和 Edge
 路径）；AHA 对 host 错误只使用稳定文案和错误码，不持久化、不返回任意 host 文本。

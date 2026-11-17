@@ -114,6 +114,7 @@ interface Binding {
   removeLayout: () => void;
   previewWidth: number; previewHeight: number;
   removePopover: () => void;
+  browserDispose: (() => void) | null;
   listeners: Array<() => void>;
 }
 
@@ -410,7 +411,7 @@ export function renderDesktopPanel(detail: TaskDetail, header = ""): string {
       <section id="desktop-browser-surface" class="desktop-browser-surface" hidden>
         <strong>${icon("browser")}内置浏览器</strong>
         <p id="desktop-browser-surface-status" role="status"></p>
-        <p class="field-help">浏览器窗口运行在宿主机的可见桌面中；本面板只显示会话状态，不向 Web 传输页面画面或 cookie。</p>
+        <p class="field-help">浏览器窗口运行在宿主机的可见桌面中；下方画面只读转发当前 Task 已授权标签页的截图，不写入磁盘，也不转发点击、输入或滚动。</p>
       </section>
       <div class="desktop-observation">
         <div id="desktop-viewport" class="desktop-viewport" title="移动端：单指双击为双击，双指轻点为右键，双指平行滑动为滚轮，双指捏合为缩放"><div id="desktop-preview" class="desktop-preview" hidden>
@@ -1961,18 +1962,39 @@ function shareTarget(binding: Binding, createDesktop = false): void {
 
 // The Task browser controls live in a lazy chunk; loading them only when the
 // Owner switches the shared-control mode keeps the first-screen bundle flat.
+// The returned dispose stops the frame polling and revokes its object URLs.
 function mountBrowserTaskPanel(binding: Binding): void {
   const container = binding.root.querySelector<HTMLElement>("#desktop-browser-target");
-  if (!container || container.dataset.mounted === "true") return;
+  if (!container || binding.browserDispose) return;
   container.dataset.mounted = "true";
-  void import("./browser_task_panel.js").then(module => module.mountBrowserTaskPanel({
-    container,
-    taskID: binding.state.taskID,
-    notify: binding.notify,
-    onChange: () => updateDOM(binding),
-  })).catch(error => {
+  let cancelled = false;
+  binding.browserDispose = () => { cancelled = true; };
+  void import("./browser_task_panel.js").then(module => {
+    if (cancelled || !container.isConnected) return;
+    const dispose = module.mountBrowserTaskPanel({
+      container,
+      taskID: binding.state.taskID,
+      notify: binding.notify,
+      onChange: () => updateDOM(binding),
+    });
+    if (cancelled) { dispose(); return; }
+    binding.browserDispose = () => {
+      dispose();
+      container.dataset.mounted = "";
+    };
+  }).catch(error => {
+    binding.browserDispose = null;
+    container.dataset.mounted = "";
     container.innerHTML = `<p class="desktop-empty" role="alert">浏览器控制面板加载失败：${escapeHTML(error instanceof Error ? error.message : String(error))}</p>`;
   });
+}
+
+function disposeBrowserPanel(binding: Binding): void {
+  const dispose = binding.browserDispose;
+  binding.browserDispose = null;
+  dispose?.();
+  const container = binding.root.querySelector<HTMLElement>("#desktop-browser-target");
+  if (container) container.dataset.mounted = "";
 }
 
 export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
@@ -1992,7 +2014,7 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
     viewID: randomID(), socket: null, socketKey: "", socketGeneration: 0, socketReady: false, socketTimer: 0,
     retries: 0, retryAt: 0, retryKey: "", decoding: false, decoder: null, decodeTimer: 0, blobURLs: new Set(),
     imageURL: "", lastFrameAt: 0, lastStatusAt: 0, decodePending: 0, pendingText: null, removeLayout: () => {},
-    previewWidth: 0, previewHeight: 0, removePopover: () => {}, listeners: []};
+    previewWidth: 0, previewHeight: 0, removePopover: () => {}, browserDispose: null, listeners: []};
   active = binding;
   root.querySelectorAll<HTMLInputElement | HTMLButtonElement | HTMLTextAreaElement>(
     ".desktop-picture-bar button, .desktop-picture-bar input, .desktop-input-bar button, .desktop-input-bar textarea, .desktop-mouse button, .desktop-mouse input",
@@ -2006,6 +2028,7 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
   listen(binding, root.querySelector("#desktop-control-mode"), "change", event => {
     state.browserMode = (event.target as HTMLSelectElement).value === "browser";
     if (state.browserMode) mountBrowserTaskPanel(binding);
+    else disposeBrowserPanel(binding);
     updateDOM(binding);
   });
   const layout = () => {
@@ -2331,6 +2354,7 @@ export function stopDesktopPanel(): void {
   const binding = active;
   active = null;
   if (!binding) return;
+  disposeBrowserPanel(binding);
   for (const remove of binding.listeners.splice(0)) remove();
   window.clearTimeout(binding.timer);
   binding.removeVisibility();
