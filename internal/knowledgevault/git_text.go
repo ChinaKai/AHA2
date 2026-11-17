@@ -74,8 +74,11 @@ type CRLFCounts struct {
 	// IndexMixed counts blobs with both CRLF and LF. Git reports `i/mixed`;
 	// they are just as unsafe to touch automatically as `i/crlf`.
 	IndexMixed int `json:"index_mixed"`
-	// ExplicitCRLF counts files whose attributes explicitly ask for CRLF or
-	// binary handling (`eol=crlf`, `-text`). Renormalize must not touch them.
+	// ExplicitCRLF counts files whose attributes mark them binary (`-text`,
+	// including `binary`/`-crlf`). Git never reports those as modified and
+	// renormalize never stages them, so they are safe to leave alone.
+	// `eol=crlf` is deliberately NOT included: its CRLF blob is reported as
+	// modified and would be rewritten by the next ordinary add.
 	ExplicitCRLF int `json:"explicit_crlf"`
 	// WorktreeCRLF counts checked-out files with CRLF or mixed endings. When
 	// the index is already LF those are clean under the new policy (the clean
@@ -179,9 +182,10 @@ func (g *Git) ensureTextPolicy(ctx context.Context) (GitTextPolicyResult, error)
 
 // countCRLF parses `git ls-files --eol`. A record looks like
 // `i/crlf w/crlf attr/-text\tpath` (columns padded with spaces); the attr
-// column may itself contain spaces (`text eol=crlf`). Files whose attributes
-// explicitly require CRLF or binary handling are excluded from the migration
-// counts: they are the owner's policy, not something AHA2 may rewrite.
+// column may itself contain spaces (`text eol=crlf`). Only `-text` records are
+// excluded from the migration counts: git never reports them as modified.
+// `eol=crlf` records with CRLF blobs stay in the counts and trigger the
+// preflight pause, because any ordinary add would rewrite their blob to LF.
 func (g *Git) countCRLF(ctx context.Context) (CRLFCounts, error) {
 	counts := CRLFCounts{}
 	output, err := g.commandRawConfig(ctx, lineEndingGitConfig, "ls-files", "--eol", "-z", "--cached", "--others", "--exclude-standard")
@@ -202,7 +206,14 @@ func (g *Git) countCRLF(ctx context.Context) (CRLFCounts, error) {
 			if index == 0 {
 				field = strings.TrimPrefix(field, "attr/")
 			}
-			if field == "-text" || field == "eol=crlf" {
+			// Only `-text` (including `binary`/`-crlf`) is a real exclusion:
+			// git treats those files as binary, never reports them modified and
+			// `git add --renormalize` never stages them. `eol=crlf` is NOT
+			// safe to exclude: git reports the CRLF blob as modified and the
+			// next ordinary `git add` (including the quiet-period auto-commit)
+			// rewrites the index blob to LF. It must stay in the rewrite count
+			// so the preflight pauses instead.
+			if field == "-text" {
 				explicit = true
 				break
 			}

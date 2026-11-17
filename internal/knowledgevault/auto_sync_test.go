@@ -194,68 +194,116 @@ func TestSyncerPreflightPausesOnMixedBlobWithoutRewriting(t *testing.T) {
 	}
 }
 
-// An owner-authored `-text` or `eol=crlf` rule is a deliberate line-ending
-// policy. Those files may legitimately have CRLF blobs, but they are not
-// migration candidates: the preflight must neither pause nor renormalize them.
-func TestSyncerPreflightAllowsExplicitCRLFPolicy(t *testing.T) {
+// A `-text` rule marks a file as binary. git never reports it as modified and
+// renormalize never stages it, so it is safe to leave out of the migration
+// counts; the quiet-period auto-commit must not touch its blob either.
+func TestSyncerPreflightAllowsBinaryTextPolicy(t *testing.T) {
 	ctx := context.Background()
-	cases := []struct {
-		name  string
-		attrs string
-		path  string
-		body  string
-	}{
-		{"minus_text", "*.raw -text\n", "global/general/report.raw", "a\r\nb\r\n"},
-		{"eol_crlf", "*.crlf text eol=crlf\n", "global/general/report.crlf", "a\r\nb\r\n"},
-	}
-	for _, testCase := range cases {
-		t.Run(testCase.name, func(t *testing.T) {
-			config, manager := newAutoSyncTestManager(t)
-			// Commit the CRLF blob before the owner rule so the index really
-			// contains CRLF (i/crlf) and the attr column carries the policy.
-			writeGitTestFile(t, config.VaultPath, ".gitattributes", "# owner policy pending\n")
-			testGitCommand(t, config.VaultPath, "add", "-A")
-			testGitCommand(t, config.VaultPath, "commit", "-m", "placeholder policy")
-			writeGitTestFile(t, config.VaultPath, testCase.path, testCase.body)
-			testGitCommand(t, config.VaultPath, "add", "-A")
-			testGitCommand(t, config.VaultPath, "commit", "-m", "crlf baseline")
-			writeGitTestFile(t, config.VaultPath, ".gitattributes", testCase.attrs)
-			// Stage only the policy file: `git add -A` would normalize the
-			// eol=crlf blob immediately and hide the case under test.
-			testGitCommand(t, config.VaultPath, "add", "--", ".gitattributes")
-			testGitCommand(t, config.VaultPath, "commit", "-m", "owner line-ending policy", "--", ".gitattributes")
-			eol := testGitCommand(t, config.VaultPath, "ls-files", "--eol", "--", testCase.path)
-			if !strings.Contains(eol, "i/crlf") || !strings.Contains(eol, "attr/") {
-				t.Fatalf("fixture is not an explicit CRLF-attr blob: %q", eol)
-			}
-			headBefore := headSHA(t, config.VaultPath)
-			blobBefore := testGitCommand(t, config.VaultPath, "rev-parse", "HEAD:"+testCase.path)
+	config, manager := newAutoSyncTestManager(t)
+	path := commitExplicitCRLFFixture(t, config.VaultPath, "*.raw -text\n", "global/general/report.raw", "a\r\nb\r\n")
+	headBefore := headSHA(t, config.VaultPath)
+	blobBefore := testGitCommand(t, config.VaultPath, "rev-parse", "HEAD:"+path)
 
-			syncer, _, _ := newTestSyncer(t, manager, nil)
-			syncer.RunOnce(ctx)
+	syncer, _, clock := newTestSyncer(t, manager, nil)
+	syncer.RunOnce(ctx)
 
-			status := syncer.Status()
-			if status.Paused {
-				t.Fatalf("explicit CRLF policy paused the preflight: stage=%q error=%q", status.PreflightStage, status.LastError)
-			}
-			if !status.PreflightDone || status.PreflightStage != "" {
-				t.Fatalf("preflight did not finish cleanly: %+v", status)
-			}
-			if head := headSHA(t, config.VaultPath); head != headBefore {
-				t.Fatalf("explicit CRLF policy preflight committed: %s -> %s", headBefore, head)
-			}
-			if blobAfter := testGitCommand(t, config.VaultPath, "rev-parse", "HEAD:"+testCase.path); blobAfter != blobBefore {
-				t.Fatalf("explicit CRLF blob was rewritten: %s -> %s", blobBefore, blobAfter)
-			}
-			content, err := os.ReadFile(filepath.Join(config.VaultPath, ".gitattributes"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if string(content) != testCase.attrs {
-				t.Fatalf("owner .gitattributes was rewritten:\n%s", content)
-			}
-		})
+	status := syncer.Status()
+	if status.Paused {
+		t.Fatalf("-text policy paused the preflight: stage=%q error=%q", status.PreflightStage, status.LastError)
 	}
+	if !status.PreflightDone || status.PreflightStage != "" {
+		t.Fatalf("preflight did not finish cleanly: %+v", status)
+	}
+	if head := headSHA(t, config.VaultPath); head != headBefore {
+		t.Fatalf("-text policy preflight committed: %s -> %s", headBefore, head)
+	}
+	// Several quiet-period cycles must not stage the CRLF blob either.
+	for cycle := 0; cycle < 4; cycle++ {
+		clock.Advance(31 * time.Second)
+		syncer.RunOnce(ctx)
+	}
+	if head := headSHA(t, config.VaultPath); head != headBefore {
+		t.Fatalf("quiet-period auto-commit touched the -text blob: %s -> %s", headBefore, head)
+	}
+	if blobAfter := testGitCommand(t, config.VaultPath, "rev-parse", "HEAD:"+path); blobAfter != blobBefore {
+		t.Fatalf("-text blob was rewritten: %s -> %s", blobBefore, blobAfter)
+	}
+	if content, err := os.ReadFile(filepath.Join(config.VaultPath, ".gitattributes")); err != nil {
+		t.Fatal(err)
+	} else if string(content) != "*.raw -text\n" {
+		t.Fatalf("owner .gitattributes was rewritten:\n%s", content)
+	}
+}
+
+// `eol=crlf` is NOT a safe exclusion: git reports the CRLF blob as modified and
+// the next ordinary add (including the quiet-period auto-commit) rewrites the
+// index blob to LF. The preflight must pause and leave the blob untouched.
+func TestSyncerPreflightPausesOnExplicitCRLFPolicy(t *testing.T) {
+	ctx := context.Background()
+	config, manager := newAutoSyncTestManager(t)
+	path := commitExplicitCRLFFixture(t, config.VaultPath, "*.crlf text eol=crlf\n", "global/general/report.crlf", "a\r\nb\r\n")
+	headBefore := headSHA(t, config.VaultPath)
+	blobBefore := testGitCommand(t, config.VaultPath, "rev-parse", "HEAD:"+path)
+
+	syncer, _, clock := newTestSyncer(t, manager, nil)
+	syncer.RunOnce(ctx)
+
+	status := syncer.Status()
+	if !status.Paused || status.PreflightStage != PreflightStageLineEndings {
+		t.Fatalf("eol=crlf CRLF blob did not pause at the line-ending stage: %+v", status)
+	}
+	if head := headSHA(t, config.VaultPath); head != headBefore {
+		t.Fatalf("eol=crlf preflight committed: %s -> %s", headBefore, head)
+	}
+	// The quiet period must not rewrite the blob while the syncer is paused.
+	for cycle := 0; cycle < 4; cycle++ {
+		clock.Advance(31 * time.Second)
+		syncer.RunOnce(ctx)
+	}
+	if head := headSHA(t, config.VaultPath); head != headBefore {
+		t.Fatalf("paused eol=crlf vault still committed: %s -> %s", headBefore, head)
+	}
+	if blobAfter := testGitCommand(t, config.VaultPath, "rev-parse", "HEAD:"+path); blobAfter != blobBefore {
+		t.Fatalf("eol=crlf blob was rewritten: %s -> %s", blobBefore, blobAfter)
+	}
+	if message := testGitCommand(t, config.VaultPath, "log", "-1", "--format=%s"); strings.Contains(message, "Normalize") {
+		t.Fatalf("preflight created a normalization commit: %q", message)
+	}
+
+	// After the owner follows the hint (renormalize + commit) the blob becomes
+	// i/lf w/crlf, the gate releases and the preflight finishes.
+	testGitCommand(t, config.VaultPath, "add", "--renormalize", ".")
+	testGitCommand(t, config.VaultPath, "commit", "-m", "owner renormalized line endings")
+	if eol := testGitCommand(t, config.VaultPath, "ls-files", "--eol", "--", path); !strings.Contains(eol, "i/lf") || !strings.Contains(eol, "w/crlf") {
+		t.Fatalf("manual renormalize did not produce i/lf w/crlf: %q", eol)
+	}
+	syncer.ResetPause()
+	syncer.RunOnce(ctx)
+	released := syncer.Status()
+	if released.Paused || !released.PreflightDone {
+		t.Fatalf("preflight stayed paused after the owner renormalized: %+v", released)
+	}
+}
+
+// commitExplicitCRLFFixture builds a repo where path is an i/crlf blob whose
+// attr column matches attrs. The policy file is committed separately without
+// staging the CRLF file, otherwise `git add -A` would normalize it first.
+func commitExplicitCRLFFixture(t *testing.T, vaultPath, attrs, path, body string) string {
+	t.Helper()
+	writeGitTestFile(t, vaultPath, ".gitattributes", "# owner policy pending\n")
+	testGitCommand(t, vaultPath, "add", "-A")
+	testGitCommand(t, vaultPath, "commit", "-m", "placeholder policy")
+	writeGitTestFile(t, vaultPath, path, body)
+	testGitCommand(t, vaultPath, "add", "-A")
+	testGitCommand(t, vaultPath, "commit", "-m", "crlf baseline")
+	writeGitTestFile(t, vaultPath, ".gitattributes", attrs)
+	testGitCommand(t, vaultPath, "add", "--", ".gitattributes")
+	testGitCommand(t, vaultPath, "commit", "-m", "owner line-ending policy", "--", ".gitattributes")
+	eol := testGitCommand(t, vaultPath, "ls-files", "--eol", "--", path)
+	if !strings.Contains(eol, "i/crlf") || !strings.Contains(eol, "attr/") {
+		t.Fatalf("fixture is not an explicit CRLF-attr blob: %q", eol)
+	}
+	return path
 }
 
 func TestSyncerDetectsExternalChangeAfterQuietPeriod(t *testing.T) {

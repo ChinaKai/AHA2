@@ -747,45 +747,40 @@ func (s *Syncer) runPreflight(ctx context.Context) (string, error) {
 	}
 	// 1. Commit every existing text change before touching the line-ending
 	//    policy. Blocked files abort the migration instead of being discarded.
-	//    Files with an explicit owner line-ending policy (`-text`, `eol=crlf`)
-	//    are excluded from the migration counts, but git still reports an
-	//    eol=crlf blob as modified and the preflight commit would rewrite it.
-	//    Skip the automatic commit loop entirely for such vaults; the normal
-	//    quiet-period auto-commit handles genuine content edits afterwards.
-	if counts.ExplicitCRLF == 0 {
-		for attempt := 0; attempt < 32; attempt++ {
-			scan, err := git.ScanAutoCommit(ctx)
-			if err != nil {
-				return PreflightStageWorktree, err
-			}
-			if scan.Clean {
-				break
-			}
-			if scan.Unmerged {
-				return PreflightStageWorktree, ErrGitUnmerged
-			}
-			if len(scan.Eligible) == 0 {
-				// Keep the aggregate sentence as the stable prefix, then name the
-				// exact blocked paths and machine reason codes. The same list is
-				// copied into the syncer state so the settings status and
-				// .aha/auto-sync.json stay actionable after a restart.
-				s.applyScan(scan)
-				return PreflightStagePendingChanges, fmt.Errorf("有 %d 个改动无法自动提交（二进制/密钥/超大文件）；preflight 已暂停并保留现场。%s", scan.Pending, blockedDetailText(scan.Blocked))
-			}
-			result, err := git.AutoCommit(ctx, "preflight", scan.Fingerprint)
-			if err != nil {
-				return PreflightStagePendingChanges, err
-			}
-			if !result.Committed && result.Pending >= scan.Pending {
-				s.applyScan(scan)
-				return PreflightStagePendingChanges, fmt.Errorf("preflight 自动提交没有进展；保留现场并暂停。%s", blockedDetailText(scan.Blocked))
-			}
-		}
-		if clean, changed, err := git.isClean(ctx); err != nil {
+	//    `-text` files never appear as modified, so they cannot be committed
+	//    here; `eol=crlf` files with CRLF blobs are caught by step 0 above.
+	for attempt := 0; attempt < 32; attempt++ {
+		scan, err := git.ScanAutoCommit(ctx)
+		if err != nil {
 			return PreflightStageWorktree, err
-		} else if !clean {
-			return PreflightStagePendingChanges, fmt.Errorf("%w：仍有 %d 个改动", ErrGitDirty, changed)
 		}
+		if scan.Clean {
+			break
+		}
+		if scan.Unmerged {
+			return PreflightStageWorktree, ErrGitUnmerged
+		}
+		if len(scan.Eligible) == 0 {
+			// Keep the aggregate sentence as the stable prefix, then name the
+			// exact blocked paths and machine reason codes. The same list is
+			// copied into the syncer state so the settings status and
+			// .aha/auto-sync.json stay actionable after a restart.
+			s.applyScan(scan)
+			return PreflightStagePendingChanges, fmt.Errorf("有 %d 个改动无法自动提交（二进制/密钥/超大文件）；preflight 已暂停并保留现场。%s", scan.Pending, blockedDetailText(scan.Blocked))
+		}
+		result, err := git.AutoCommit(ctx, "preflight", scan.Fingerprint)
+		if err != nil {
+			return PreflightStagePendingChanges, err
+		}
+		if !result.Committed && result.Pending >= scan.Pending {
+			s.applyScan(scan)
+			return PreflightStagePendingChanges, fmt.Errorf("preflight 自动提交没有进展；保留现场并暂停。%s", blockedDetailText(scan.Blocked))
+		}
+	}
+	if clean, changed, err := git.isClean(ctx); err != nil {
+		return PreflightStageWorktree, err
+	} else if !clean {
+		return PreflightStagePendingChanges, fmt.Errorf("%w：仍有 %d 个改动", ErrGitDirty, changed)
 	}
 	// 2. Policy file and repo-local autocrlf. A missing .gitattributes is
 	//    created with `* text=auto eol=lf`; an existing one is never rewritten.
@@ -803,19 +798,12 @@ func (s *Syncer) runPreflight(ctx context.Context) (string, error) {
 		log.Printf("knowledge auto-sync preflight: %d worktree file(s) use CRLF with an LF index; no content rewrite needed", policy.WorktreeCRLF)
 	}
 	// 3. One-time renormalization. It is idempotent: a second run stages
-	//    nothing and creates no commit. Files whose attributes explicitly ask
-	//    for CRLF/binary (`eol=crlf`, `-text`) are excluded from the migration
-	//    counts, but `git add --renormalize` can still stage some of them, so
-	//    skip the automatic migration entirely when they exist. The policy file
-	//    (if newly created) is committed by the normal auto-commit cycle.
-	var renormalized RenormalizeResult
-	if policy.ExplicitCRLF > 0 {
-		log.Printf("knowledge auto-sync preflight: %d file(s) have an explicit CRLF/binary attribute; skipping automatic renormalization", policy.ExplicitCRLF)
-	} else {
-		renormalized, err = git.Renormalize(ctx)
-		if err != nil {
-			return PreflightStageLineEndings, err
-		}
+	//    nothing and creates no commit. `-text` files are never staged by
+	//    renormalize, and any `eol=crlf` file with a CRLF blob already failed
+	//    the step-0 gate, so this cannot silently rewrite an owner policy.
+	renormalized, err := git.Renormalize(ctx)
+	if err != nil {
+		return PreflightStageLineEndings, err
 	}
 	if renormalized.Warning != "" {
 		log.Printf("knowledge auto-sync preflight warning: %s", renormalized.Warning)
