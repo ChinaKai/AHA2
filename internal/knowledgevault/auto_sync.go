@@ -100,6 +100,7 @@ type autoSyncState struct {
 	lastError                string
 	pending                  int
 	blocked                  []BlockedChange
+	blockedTotal             int
 	failures                 int
 	nextAttempt              time.Time
 	lastFingerprint          string
@@ -315,7 +316,7 @@ func (s *Syncer) Status() AutoSyncStatus {
 		Paused: s.state.paused, PauseReason: s.state.pauseReason,
 		Conflict: s.state.conflict, ConflictDetail: s.state.conflictDetail,
 		LastCommit: s.state.lastCommit, LastError: s.state.lastError,
-		Pending: s.state.pending, Blocked: len(s.state.blocked),
+		Pending: s.state.pending, Blocked: s.state.blockedTotal,
 		BlockedFiles:  append([]BlockedChange{}, s.state.blocked...),
 		Failures:      s.state.failures,
 		PreflightDone: s.state.preflightVersion >= AutoSyncPreflightVersion,
@@ -486,6 +487,7 @@ func (s *Syncer) cycle(ctx context.Context, force bool) {
 		}
 		s.state.pending = result.Pending
 		s.state.blocked = result.Blocked
+		s.state.blockedTotal = result.BlockedTotal
 		s.mu.Unlock()
 		s.saveState()
 		if result.Committed {
@@ -498,15 +500,24 @@ func (s *Syncer) cycle(ctx context.Context, force bool) {
 	}
 
 	// Refresh the visible pending count even when nothing was committed.
+	latest := scan
 	if after, scanErr := git.ScanAutoCommit(ctx); scanErr == nil {
+		latest = after
 		s.applyScan(after)
 		dirty = !after.Clean
 	}
-	if dirty {
-		// A blocked file or a second batch keeps the worktree dirty. Pulling or
-		// pushing now would either fail or risk the owner's files, so wait.
+	if latest.Unmerged {
+		s.pause("unmerged", "知识库工作区存在未解决冲突")
 		return
 	}
+	if dirty && len(latest.Eligible) > 0 {
+		// A pending auto-committable change (quiet period or the next batch)
+		// must land first; pulling over it is not useful yet.
+		return
+	}
+	// Dirty here means only blocked files remain. They must not stop the local
+	// commits from reaching the remote: push is unconditional and pull is
+	// attempted with git's own overwrite protection.
 	if _, err := git.remoteURL(ctx); err != nil {
 		return
 	}
@@ -542,20 +553,27 @@ func (s *Syncer) remoteSync(ctx context.Context, git *Git, now time.Time) {
 	s.mu.Unlock()
 
 	// One repository lock covers the whole pull+push pair so a manual sync or
-	// auto-commit cannot interleave. Pull/push do not record the sync timestamp
-	// individually: only a fully successful pair updates it.
+	// auto-commit cannot interleave. A push can succeed even when a blocked
+	// local file prevents the pull from fast-forwarding; the pull error stays
+	// visible in the status for the next retry.
 	unlock := git.lockRepo()
 	defer unlock()
-	if _, err := git.pull(ctx, false); err != nil {
+	pullBlocked := false
+	if _, err := git.pullAllowDirty(ctx, false); err != nil {
 		switch {
 		case errors.Is(err, ErrGitDiverged):
 			s.handleConflict(ctx, git)
 			return
 		case errors.Is(err, ErrGitRemoteBranchMissing), errors.Is(err, ErrGitNoCommit):
 			// First push: the remote branch does not exist yet.
-		case errors.Is(err, ErrGitDirty):
-			// A knowledge write landed after the clean scan; try next cycle.
-			return
+		case pullBlockedByWorktree(err):
+			// A blocked file (or a local edit git refuses to overwrite) keeps
+			// the pull from fast-forwarding. That is not a remote failure: keep
+			// the local commits pushable and retry the pull next round.
+			pullBlocked = true
+			s.mu.Lock()
+			s.state.lastError = sanitizeSyncDetail("拉取被本地文件阻止：" + err.Error())
+			s.mu.Unlock()
 		default:
 			s.backoff("pull_failed", err)
 			return
@@ -563,6 +581,20 @@ func (s *Syncer) remoteSync(ctx context.Context, git *Git, now time.Time) {
 	}
 	if _, err := git.push(ctx, false); err != nil {
 		if errors.Is(err, ErrGitPushRejected) {
+			if pullBlocked {
+				// The pull could not fast-forward because a local file is in
+				// the way. If there is no local commit to send, this is a safe
+				// wait, not a divergence; a real ahead+behind pair still needs
+				// the owner and keeps the conflict event.
+				branch := git.configuredBranch(ctx)
+				ahead, behind, countsOK := git.aheadBehind(ctx, branch)
+				if countsOK && !(ahead > 0 && behind > 0) {
+					s.mu.Lock()
+					s.state.lastError = "拉取被本地文件阻止；远端有新提交，暂不推送"
+					s.mu.Unlock()
+					return
+				}
+			}
 			s.handleConflict(ctx, git)
 			return
 		}
@@ -572,13 +604,37 @@ func (s *Syncer) remoteSync(ctx context.Context, git *Git, now time.Time) {
 	s.mu.Lock()
 	s.state.lastSyncAt = s.now()
 	s.state.failures = 0
-	s.state.lastError = ""
 	s.state.nextAttempt = time.Time{}
+	if !pullBlocked {
+		s.state.lastError = ""
+	}
 	s.mu.Unlock()
 	s.saveState()
 	if err := git.recordSync(); err != nil {
 		log.Printf("record knowledge sync timestamp: %v", err)
 	}
+}
+
+// pullBlockedByWorktree recognizes git's safe refusal to overwrite local or
+// untracked files. The caller still pushes and retries the pull later instead
+// of entering a permanent backoff/pause.
+func pullBlockedByWorktree(err error) bool {
+	var commandErr *GitCommandError
+	if !errors.As(err, &commandErr) {
+		return false
+	}
+	detail := strings.ToLower(commandErr.Detail)
+	for _, marker := range []string{
+		"would be overwritten",
+		"untracked working tree files",
+		"local changes to the following files",
+		"please commit your changes or stash them",
+	} {
+		if strings.Contains(detail, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Syncer) runPreflight(ctx context.Context) error {
@@ -618,8 +674,15 @@ func (s *Syncer) runPreflight(ctx context.Context) error {
 	}
 	// 3. One-time renormalization. It is idempotent: a second run stages
 	//    nothing and creates no commit.
-	if _, err := git.Renormalize(ctx); err != nil {
+	renormalized, err := git.Renormalize(ctx)
+	if err != nil {
 		return err
+	}
+	if renormalized.Warning != "" {
+		log.Printf("knowledge auto-sync preflight warning: %s", renormalized.Warning)
+		s.mu.Lock()
+		s.state.lastError = sanitizeSyncDetail(renormalized.Warning)
+		s.mu.Unlock()
 	}
 	s.mu.Lock()
 	s.state.preflightVersion = AutoSyncPreflightVersion
@@ -697,6 +760,7 @@ func (s *Syncer) applyScan(scan AutoCommitScan) {
 	s.mu.Lock()
 	s.state.pending = scan.Pending
 	s.state.blocked = append([]BlockedChange{}, scan.Blocked...)
+	s.state.blockedTotal = scan.BlockedTotal
 	s.mu.Unlock()
 }
 
@@ -864,4 +928,16 @@ func (g *Git) commandOrEmpty(ctx context.Context, args ...string) string {
 		return ""
 	}
 	return output
+}
+
+// aheadBehind reports the local/remote commit counts against origin/<branch>.
+func (g *Git) aheadBehind(ctx context.Context, branch string) (ahead, behind int, ok bool) {
+	output, err := g.command(ctx, "rev-list", "--left-right", "--count", "origin/"+branch+"...HEAD")
+	if err != nil {
+		return 0, 0, false
+	}
+	if _, scanErr := fmt.Sscan(output, &behind, &ahead); scanErr != nil {
+		return 0, 0, false
+	}
+	return ahead, behind, true
 }

@@ -3,11 +3,13 @@ package knowledgevault
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func headSHA(t *testing.T, directory string) string {
@@ -277,5 +279,129 @@ func TestAutoCommitCommitsAlreadyStagedRename(t *testing.T) {
 	tree := testGitCommand(t, config.VaultPath, "ls-tree", "-r", "--name-only", "HEAD")
 	if strings.Contains(tree, "staged.md") || !strings.Contains(tree, "staged-renamed.md") {
 		t.Fatalf("unexpected tree:\n%s", tree)
+	}
+}
+
+func TestAutoCommitFindsSecretBeyondTheFirstSixtyFourKiB(t *testing.T) {
+	ctx := context.Background()
+	config, git := newGitTestVault(t)
+	if _, err := git.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	body := strings.Repeat("# harmless filler line\n", 4000) // ~88 KiB
+	body += "password = \"supersecretvalue\"\n"
+	writeGitTestFile(t, config.VaultPath, "notes/late-secret.md", body)
+	scan, err := git.ScanAutoCommit(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scan.Eligible) != 0 || scan.BlockedTotal != 1 || len(scan.Blocked) != 1 {
+		t.Fatalf("late secret not blocked: %+v", scan)
+	}
+	if scan.Blocked[0].Reason != "secret" {
+		t.Fatalf("late secret reason = %q", scan.Blocked[0].Reason)
+	}
+}
+
+func TestAutoCommitAllowsEnvTemplatesAndPublicKeys(t *testing.T) {
+	ctx := context.Background()
+	config, git := newGitTestVault(t)
+	if _, err := git.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	writeGitTestFile(t, config.VaultPath, ".env.example", "EXAMPLE=1\n")
+	writeGitTestFile(t, config.VaultPath, "keys/id_rsa.pub", "ssh-rsa AAAA example\n")
+	scan, err := git.ScanAutoCommit(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scan.BlockedTotal != 0 || len(scan.Eligible) != 2 {
+		t.Fatalf("templates/public keys were misclassified: %+v", scan)
+	}
+	result, err := git.AutoCommit(ctx, "external", scan.Fingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Committed || len(result.Files) != 2 {
+		t.Fatalf("templates/public keys were not committed: %+v", result)
+	}
+}
+
+func TestAutoCommitDoesNotReadHugeUntrackedFiles(t *testing.T) {
+	ctx := context.Background()
+	config, git := newGitTestVault(t)
+	if _, err := git.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(config.VaultPath, "huge.bin")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(2 << 30); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	scan, err := git.ScanAutoCommit(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("scanning a sparse 2GiB file took %s", elapsed)
+	}
+	if scan.BlockedTotal != 1 || scan.Blocked[0].Reason != "too_large" {
+		t.Fatalf("huge file classification = %+v", scan)
+	}
+	if len(scan.Eligible) != 0 {
+		t.Fatalf("huge file became eligible: %+v", scan.Eligible)
+	}
+}
+
+func TestAutoCommitRejectsControlCharacterPaths(t *testing.T) {
+	ctx := context.Background()
+	config, git := newGitTestVault(t)
+	if _, err := git.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(config.VaultPath, "notes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(config.VaultPath, "notes", "bad\nname.md"), []byte("# Bad\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	scan, err := git.ScanAutoCommit(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scan.Eligible) != 0 || scan.BlockedTotal != 1 || scan.Blocked[0].Reason != "invalid_path" {
+		t.Fatalf("control-character path was not blocked: %+v", scan)
+	}
+	if cleaned := sanitizeCommitPath("a\nb\tc.md"); cleaned != "abc.md" {
+		t.Fatalf("commit path was not sanitized: %q", cleaned)
+	}
+}
+
+func TestAutoCommitReportsBlockedTotalBeyondTheReportCap(t *testing.T) {
+	ctx := context.Background()
+	config, git := newGitTestVault(t)
+	if _, err := git.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < maxAutoCommitBlockedReport+10; index++ {
+		writeGitTestFile(t, config.VaultPath, fmt.Sprintf(".env.secret%d", index), "VALUE=1\n")
+	}
+	scan, err := git.ScanAutoCommit(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scan.BlockedTotal != maxAutoCommitBlockedReport+10 {
+		t.Fatalf("blocked total = %d, want %d", scan.BlockedTotal, maxAutoCommitBlockedReport+10)
+	}
+	if len(scan.Blocked) != maxAutoCommitBlockedReport {
+		t.Fatalf("blocked report length = %d, want cap %d", len(scan.Blocked), maxAutoCommitBlockedReport)
 	}
 }

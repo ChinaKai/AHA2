@@ -87,3 +87,14 @@ func TestPathGuardRejectsEscape(t *testing.T) {
 		t.Fatal("guard accepted a path outside the vault")
 	}
 }
+
+func TestValidateRelativePathRejectsControlCharacters(t *testing.T) {
+	for _, value := range []string{"a\nb.md", "a\tb.md", "a\rb.md", "a\x7fb.md", "a\u0085b.md"} {
+		if err := ValidateRelativePath(value); err == nil {
+			t.Errorf("path %q with a control character was accepted", value)
+		}
+	}
+	if err := ValidateRelativePath("projects/demo/正常笔记.md"); err != nil {
+		t.Errorf("normal Unicode path rejected: %v", err)
+	}
+}

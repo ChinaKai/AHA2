@@ -170,3 +170,60 @@ func TestRenormalizeRefusesRealEditsAndMergeStateWithoutResetting(t *testing.T) 
 		t.Fatalf("refused renormalize changed HEAD: %s -> %s", headBeforeMerge, head)
 	}
 }
+
+func gitCheckAttr(t *testing.T, directory, attr, target string) string {
+	t.Helper()
+	output := testGitCommand(t, directory, "check-attr", attr, "--", target)
+	parts := strings.SplitN(output, ": ", 3)
+	if len(parts) != 3 {
+		t.Fatalf("unexpected check-attr output for %s %s: %q", attr, target, output)
+	}
+	return parts[2]
+}
+
+func TestEnsureTextPolicyKeepsAuthorRulesWinning(t *testing.T) {
+	ctx := context.Background()
+	config, git := newGitTestVault(t)
+	testGitCommand(t, config.VaultPath, "init", "-b", "main")
+	writeGitTestFile(t, config.VaultPath, ".gitattributes", strings.Join([]string{
+		"*.md text eol=crlf",
+		"*.custom -text",
+		"*.png text eol=lf",
+		"",
+	}, "\n"))
+	writeGitTestFile(t, config.VaultPath, "note.md", "# Note\n")
+	writeGitTestFile(t, config.VaultPath, "asset.custom", "payload")
+	writeGitTestFile(t, config.VaultPath, "logo.png", "png")
+	if _, err := git.EnsureTextPolicy(ctx); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(filepath.Join(config.VaultPath, ".gitattributes"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ahaIndex := strings.Index(string(content), "* text=auto eol=lf")
+	authorIndex := strings.Index(string(content), "*.md text eol=crlf")
+	if ahaIndex < 0 || authorIndex < 0 || ahaIndex > authorIndex {
+		t.Fatalf("AHA default must precede author rules:\n%s", content)
+	}
+	if eol := gitCheckAttr(t, config.VaultPath, "eol", "note.md"); eol != "crlf" {
+		t.Fatalf("author eol rule lost: %q", eol)
+	}
+	if text := gitCheckAttr(t, config.VaultPath, "text", "asset.custom"); text != "unset" {
+		t.Fatalf("author custom binary rule lost: %q", text)
+	}
+	if text := gitCheckAttr(t, config.VaultPath, "text", "logo.png"); text != "set" {
+		t.Fatalf("author override of a default binary extension lost: %q", text)
+	}
+	if eol := gitCheckAttr(t, config.VaultPath, "eol", "logo.png"); eol != "lf" {
+		t.Fatalf("author eol override lost: %q", eol)
+	}
+	// Rewriting an already-canonical file must be a no-op.
+	again, err := git.EnsureTextPolicy(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.AttributesChanged {
+		t.Fatalf("policy rewrite was not idempotent:\n%s", content)
+	}
+}

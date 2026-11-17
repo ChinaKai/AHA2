@@ -1007,6 +1007,17 @@ func (g *Git) Pull(ctx context.Context) (GitOpResult, error) {
 }
 
 func (g *Git) pull(ctx context.Context, record bool) (GitOpResult, error) {
+	return g.pullWithPolicy(ctx, record, true)
+}
+
+// pullAllowDirty is the auto-sync variant. Blocked untracked files must not
+// prevent pulling remote commits, so it skips the clean-worktree gate; git
+// itself still refuses a pull that would overwrite a local file.
+func (g *Git) pullAllowDirty(ctx context.Context, record bool) (GitOpResult, error) {
+	return g.pullWithPolicy(ctx, record, false)
+}
+
+func (g *Git) pullWithPolicy(ctx context.Context, record, requireClean bool) (GitOpResult, error) {
 	if err := g.requireVault(ctx); err != nil {
 		return GitOpResult{}, err
 	}
@@ -1014,8 +1025,10 @@ func (g *Git) pull(ctx context.Context, record bool) (GitOpResult, error) {
 	if err != nil {
 		return GitOpResult{}, err
 	}
-	if err := g.requireClean(ctx); err != nil {
-		return GitOpResult{}, err
+	if requireClean {
+		if err := g.requireClean(ctx); err != nil {
+			return GitOpResult{}, err
+		}
 	}
 	branch := g.configuredBranch(ctx)
 	if _, err := g.command(ctx, "pull", "--ff-only", "origin", branch); err != nil {

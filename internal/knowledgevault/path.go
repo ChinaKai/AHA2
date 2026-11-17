@@ -117,6 +117,14 @@ func ValidateRelativePath(relative string) error {
 	if strings.ContainsRune(relative, 0) {
 		return fmt.Errorf("path contains NUL")
 	}
+	for _, char := range relative {
+		// Newlines and tabs break `git status -z`/`hash-object --stdin-paths`
+		// framing and could forge extra paths in a commit message; C1 controls
+		// are likewise never valid in a vault document path.
+		if char < 0x20 || char == 0x7f || (char >= 0x80 && char <= 0x9f) {
+			return fmt.Errorf("path contains a control character: %q", relative)
+		}
+	}
 	if strings.ContainsRune(relative, '\\') {
 		return fmt.Errorf("backslashes are not allowed in vault paths: %s", relative)
 	}

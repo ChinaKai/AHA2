@@ -78,6 +78,14 @@ const localText: Record<string, [zhCN: string, enUS: string]> = {
   "kvs.autosync.conflictStopped": ["检测到远端分叉，已停止自动同步；本地提交未改动", "Remote divergence detected; automatic sync stopped without touching local commits"],
   "kvs.autosync.blockedFiles": ["被阻止文件", "Blocked files"],
   "kvs.autosync.blockedValue": ["{count} 个：{files}", "{count}: {files}"],
+  "kvs.autosync.blocked.binary": ["二进制", "binary"],
+  "kvs.autosync.blocked.secret": ["密钥或凭据", "secret"],
+  "kvs.autosync.blocked.too_large": ["超过 1MB", "over 1MB"],
+  "kvs.autosync.blocked.symlink": ["符号链接", "symlink"],
+  "kvs.autosync.blocked.not_regular": ["特殊文件", "special file"],
+  "kvs.autosync.blocked.invalid_path": ["路径无效", "invalid path"],
+  "kvs.autosync.blocked.unreadable": ["无法读取", "unreadable"],
+  "kvs.autosync.blocked.unmerged": ["未解决冲突", "unmerged"],
   "kvs.autosync.reason.vault_not_initialized": ["知识库未初始化", "Vault not initialized"],
   "kvs.autosync.reason.not_git_repository": ["知识库不是 Git 仓库", "Vault is not a Git repository"],
   "kvs.autosync.reason.no_commit": ["仓库还没有提交", "Repository has no commit"],
@@ -646,6 +654,12 @@ function syncTimeLabel(value?: string): string {
   return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString(currentLocale());
 }
 
+function blockedReasonLabel(reason: string): string {
+  const key = `kvs.autosync.blocked.${reason}`;
+  const label = kt(key);
+  return label && label !== key ? label : reason;
+}
+
 function autoSyncHTML(settings: KnowledgeVaultSettings, busy: string): string {
   const auto = settings.auto_sync;
   // Older servers do not send the status block at all; keep the panel usable.
@@ -668,7 +682,7 @@ function autoSyncHTML(settings: KnowledgeVaultSettings, busy: string): string {
   const blocked = blockedFiles.length
     ? `<div><dt>${kt("kvs.autosync.blockedFiles")}</dt><dd>${kt("kvs.autosync.blockedValue", {
       count: auto.blocked || blockedFiles.length,
-      files: escapeHTML(blockedFiles.slice(0, 5).map(item => `${item.path} (${item.reason})`).join("、")),
+      files: escapeHTML(blockedFiles.slice(0, 5).map(item => `${item.path} (${blockedReasonLabel(item.reason)})`).join("、")),
     })}</dd></div>`
     : "";
   return `<div class="knowledge-vault-group knowledge-vault-autosync">

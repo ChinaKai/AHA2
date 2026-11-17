@@ -255,12 +255,28 @@ func TestSyncerDivergedRemoteEmitsConflictOnceAndKeepsLocal(t *testing.T) {
 	if head := headSHA(t, config.VaultPath); head != localHead {
 		t.Fatalf("conflict handling moved local HEAD: %s -> %s", localHead, head)
 	}
+	// A real second pull attempt with the same pair must not emit again.
+	syncer.ResetPause()
 	syncer.RunOnce(ctx)
 	if len(events) != 1 {
-		t.Fatalf("repeated cycle emitted another event: %+v", events)
+		t.Fatalf("same conflict pair emitted another event: %+v", events)
 	}
 	if head := headSHA(t, config.VaultPath); head != localHead {
 		t.Fatalf("repeated conflict handling moved local HEAD: %s -> %s", localHead, head)
+	}
+	// A genuinely new remote commit creates a new conflict pair and one more
+	// event; local history is still untouched.
+	writeGitTestFile(t, clone, "global/general/remote-two.md", "# Remote two\n")
+	testGitCommand(t, clone, "add", "-A")
+	testGitCommand(t, clone, "commit", "-m", "remote side two")
+	testGitCommand(t, clone, "push", "origin", "main")
+	syncer.ResetPause()
+	syncer.RunOnce(ctx)
+	if len(events) != 2 || events[1].Kind != SyncEventConflict {
+		t.Fatalf("new conflict pair did not emit exactly once: %+v", events)
+	}
+	if head := headSHA(t, config.VaultPath); head != localHead {
+		t.Fatalf("new conflict handling moved local HEAD: %s -> %s", localHead, head)
 	}
 }
 
@@ -357,5 +373,61 @@ func TestSyncerSingleFlightCommitsOneBatch(t *testing.T) {
 	}
 	if dirty := testGitCommand(t, config.VaultPath, "status", "--porcelain"); dirty != "" {
 		t.Fatalf("worktree dirty after single-flight commit:\n%s", dirty)
+	}
+}
+
+func TestSyncerPushesLocalCommitsWithBlockedFiles(t *testing.T) {
+	ctx := context.Background()
+	config, manager := newAutoSyncTestManager(t)
+	git := manager.Git()
+	remote := newBareRemote(t)
+	if _, err := git.SetRemote(ctx, remote, "main"); err != nil {
+		t.Fatal(err)
+	}
+	writeGitTestFile(t, config.VaultPath, "global/general/base.md", "# Base\n")
+	if _, err := git.Commit(ctx, "base"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git.Push(ctx); err != nil {
+		t.Fatal(err)
+	}
+	writeGitTestFile(t, config.VaultPath, "global/general/local.md", "# Local\n")
+	if _, err := git.Commit(ctx, "local commit"); err != nil {
+		t.Fatal(err)
+	}
+	localHead := headSHA(t, config.VaultPath)
+	writeGitTestFile(t, config.VaultPath, ".env", "TOKEN=secret\n")
+	syncer, _, _ := newTestSyncer(t, manager, nil)
+	markPreflightDone(syncer)
+	syncer.RunOnce(ctx)
+
+	if remoteHead := testGitCommand(t, remote, "rev-parse", "refs/heads/main"); remoteHead != localHead {
+		t.Fatalf("blocked file prevented pushing local commits: remote=%s local=%s", remoteHead, localHead)
+	}
+	status := syncer.Status()
+	if status.Paused || status.Blocked != 1 || status.LastSyncAt == "" {
+		t.Fatalf("unexpected status after blocked-file push: %+v", status)
+	}
+
+	// A remote file colliding with the untracked blocked file makes pull fail
+	// safely; the syncer must record it, stay unpaused, and still push.
+	clone := cloneRemote(t, remote, "remote-writer")
+	writeGitTestFile(t, clone, ".env", "REMOTE=1\n")
+	testGitCommand(t, clone, "add", "-f", ".env")
+	testGitCommand(t, clone, "commit", "-m", "remote env")
+	testGitCommand(t, clone, "push", "origin", "main")
+	syncer.RunOnce(ctx)
+	status = syncer.Status()
+	if status.Paused || status.Failures != 0 {
+		t.Fatalf("safe pull refusal paused the syncer: %+v", status)
+	}
+	if !strings.Contains(status.LastError, "拉取被本地文件阻止") {
+		t.Fatalf("safe pull refusal was not reported: %+v", status)
+	}
+	if head := headSHA(t, config.VaultPath); head != localHead {
+		t.Fatalf("safe pull refusal moved local HEAD: %s -> %s", localHead, head)
+	}
+	if _, err := os.Stat(filepath.Join(config.VaultPath, ".env")); err != nil {
+		t.Fatalf("pull overwrote the blocked local file: %v", err)
 	}
 }

@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -27,7 +27,6 @@ const (
 	// naming enough files for the owner to act on.
 	maxAutoCommitBlockedReport = 50
 	maxAutoCommitMessageFiles  = 20
-	secretScanBytes            = 64 << 10
 )
 
 var (
@@ -48,22 +47,24 @@ type BlockedChange struct {
 // detection and by the settings status. Eligible is already capped to one
 // batch; Pending counts every changed path git reported, blocked ones included.
 type AutoCommitScan struct {
-	Clean       bool            `json:"clean"`
-	Unmerged    bool            `json:"unmerged"`
-	Pending     int             `json:"pending"`
-	Eligible    []string        `json:"eligible,omitempty"`
-	Blocked     []BlockedChange `json:"blocked,omitempty"`
-	Fingerprint string          `json:"-"`
+	Clean        bool            `json:"clean"`
+	Unmerged     bool            `json:"unmerged"`
+	Pending      int             `json:"pending"`
+	Eligible     []string        `json:"eligible,omitempty"`
+	Blocked      []BlockedChange `json:"blocked,omitempty"`
+	BlockedTotal int             `json:"blocked_total"`
+	Fingerprint  string          `json:"-"`
 }
 
 // AutoCommitResult is the outcome of one gated batch.
 type AutoCommitResult struct {
-	Committed bool            `json:"committed"`
-	Commit    string          `json:"commit,omitempty"`
-	Files     []string        `json:"files,omitempty"`
-	Blocked   []BlockedChange `json:"blocked,omitempty"`
-	Pending   int             `json:"pending"`
-	Message   string          `json:"message,omitempty"`
+	Committed    bool            `json:"committed"`
+	Commit       string          `json:"commit,omitempty"`
+	Files        []string        `json:"files,omitempty"`
+	Blocked      []BlockedChange `json:"blocked,omitempty"`
+	BlockedTotal int             `json:"blocked_total"`
+	Pending      int             `json:"pending"`
+	Message      string          `json:"message,omitempty"`
 }
 
 // worktreeChangeSet is the content-accurate change view. `git status` alone
@@ -116,12 +117,25 @@ func (g *Git) worktreeChanges(ctx context.Context) (worktreeChangeSet, error) {
 	set.unmerged = uniqueSortedPaths(unmergedPaths(unmergedRaw))
 
 	hashInput := make([]string, 0, len(untracked))
+	signatures := make(map[string]string, len(untracked))
 	for _, path := range untracked {
-		if strings.Contains(path, "\n") {
-			continue
-		}
-		if info, statErr := os.Lstat(filepath.Join(g.vaultPath, filepath.FromSlash(path))); statErr == nil && !info.IsDir() {
-			hashInput = append(hashInput, path)
+		absolute := filepath.Join(g.vaultPath, filepath.FromSlash(path))
+		info, statErr := os.Lstat(absolute)
+		switch {
+		case statErr != nil:
+			signatures[path] = "missing"
+		case !info.Mode().IsRegular():
+			// Never hand a FIFO/device/socket to hash-object: opening it can
+			// block forever. Size and mode still participate in the fingerprint.
+			signatures[path] = fmt.Sprintf("mode:%d:size:%d:mtime:%d", info.Mode(), info.Size(), info.ModTime().UnixNano())
+		case info.Size() > maxAutoCommitFileBytes:
+			// Large files are blocked by the commit gate; hashing them every
+			// poll would read gigabytes and starve knowledge writes.
+			signatures[path] = fmt.Sprintf("large:size:%d:mtime:%d", info.Size(), info.ModTime().UnixNano())
+		default:
+			if !strings.Contains(path, "\n") {
+				hashInput = append(hashInput, path)
+			}
 		}
 	}
 	hashes := g.hashWorktreePaths(ctx, hashInput)
@@ -131,7 +145,11 @@ func (g *Git) worktreeChanges(ctx context.Context) (worktreeChangeSet, error) {
 	for _, path := range untracked {
 		fingerprint.WriteString(path)
 		fingerprint.WriteByte('=')
-		fingerprint.WriteString(hashes[path])
+		if signature, ok := signatures[path]; ok {
+			fingerprint.WriteString(signature)
+		} else {
+			fingerprint.WriteString(hashes[path])
+		}
 		fingerprint.WriteByte(0)
 	}
 	set.fingerprint = hashBytes([]byte(fingerprint.String()))
@@ -182,12 +200,10 @@ func (g *Git) hashWorktreePaths(ctx context.Context, paths []string) map[string]
 }
 
 // ScanAutoCommit reads the content-accurate change set once and classifies
-// every change. It is safe to call concurrently with a knowledge write: git
-// only observes atomically renamed files. No lock is taken so status refreshes
-// stay cheap.
+// every change. It takes no manager lock: git only observes atomically renamed
+// files, and a status refresh must not block a knowledge write while it hashes
+// untracked content.
 func (g *Git) ScanAutoCommit(ctx context.Context) (AutoCommitScan, error) {
-	unlock := g.lockWriterBlocks()
-	defer unlock()
 	return g.scanAutoCommit(ctx)
 }
 
@@ -204,6 +220,7 @@ func (g *Git) scanAutoCommit(ctx context.Context) (AutoCommitScan, error) {
 			return
 		}
 		seen[path] = true
+		scan.BlockedTotal++
 		if len(scan.Blocked) >= maxAutoCommitBlockedReport {
 			return
 		}
@@ -263,6 +280,10 @@ func (g *Git) classifyAutoCommitFile(absolute string) string {
 		return "symlink"
 	case info.IsDir():
 		return "invalid_path"
+	case !info.Mode().IsRegular():
+		// FIFOs, sockets and device nodes can block a read forever; never open
+		// them during a background poll.
+		return "not_regular"
 	}
 	if info.Size() > maxAutoCommitFileBytes {
 		return "too_large"
@@ -273,9 +294,12 @@ func (g *Git) classifyAutoCommitFile(absolute string) string {
 	if reason := autoCommitBlockedPath(absolute); reason != "" {
 		return reason
 	}
-	content, err := readPrefix(absolute, secretScanBytes)
+	content, tooLarge, err := readBoundedRegularFile(absolute, maxAutoCommitFileBytes)
 	if err != nil {
 		return "unreadable"
+	}
+	if tooLarge {
+		return "too_large"
 	}
 	if looksBinary(content) {
 		return "binary"
@@ -309,7 +333,7 @@ func (g *Git) autoCommitLocked(ctx context.Context, reason, expectedFingerprint 
 	if err != nil {
 		return result, err
 	}
-	result.Blocked, result.Pending = scan.Blocked, scan.Pending
+	result.Blocked, result.Pending, result.BlockedTotal = scan.Blocked, scan.Pending, scan.BlockedTotal
 	if scan.Unmerged {
 		return result, ErrGitUnmerged
 	}
@@ -378,6 +402,7 @@ func (g *Git) autoCommitLocked(ctx context.Context, reason, expectedFingerprint 
 	if scanErr == nil {
 		result.Pending = after.Pending
 		result.Blocked = after.Blocked
+		result.BlockedTotal = after.BlockedTotal
 	}
 	return result, nil
 }
@@ -422,11 +447,21 @@ func autoCommitMessage(reason string, files []string) string {
 }
 
 func sanitizeCommitPath(path string) string {
-	if utf8.RuneCountInString(path) > 240 {
-		runes := []rune(path)
+	cleaned := strings.Map(func(char rune) rune {
+		if char < 0x20 || char == 0x7f || (char >= 0x80 && char <= 0x9f) {
+			return -1
+		}
+		return char
+	}, path)
+	cleaned = strings.TrimSpace(cleaned)
+	if cleaned == "" {
+		return "(invalid path)"
+	}
+	if utf8.RuneCountInString(cleaned) > 240 {
+		runes := []rune(cleaned)
 		return string(runes[:240]) + "…"
 	}
-	return path
+	return cleaned
 }
 
 // autoCommitPathExclusion reports "internal" for AHA/git metadata, which is
@@ -445,10 +480,13 @@ func autoCommitPathExclusion(path string) string {
 	return ""
 }
 
-var secretPathPatterns = []string{
-	".env", ".netrc", ".git-credentials", ".npmrc", ".pypirc",
-	"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "credentials.json",
+var secretBasenames = []string{
+	".netrc", ".git-credentials", ".npmrc", ".pypirc", "credentials.json",
 }
+
+// secretIdentityNames are private key files; the matching public key
+// (`id_rsa.pub`) is harmless and must stay auto-committable.
+var secretIdentityNames = []string{"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"}
 
 // autoCommitBinaryExtensions mirrors the -text rules in .gitattributes so a
 // binary file whose first bytes happen to look like text is still refused.
@@ -477,11 +515,24 @@ func autoCommitBlockedPath(path string) string {
 	if index := strings.LastIndex(lower, "/"); index >= 0 {
 		base = lower[index+1:]
 	}
-	if strings.HasPrefix(base, ".env.") || base == ".env" {
+	if base == ".env" {
 		return "secret"
 	}
-	for _, pattern := range secretPathPatterns {
-		if base == pattern || strings.HasPrefix(base, pattern+".") {
+	if strings.HasPrefix(base, ".env.") {
+		// Templates carry no live values and are common in a knowledge vault.
+		switch strings.TrimPrefix(base, ".env.") {
+		case "example", "sample", "template", "dist", "md":
+		default:
+			return "secret"
+		}
+	}
+	for _, name := range secretBasenames {
+		if base == name {
+			return "secret"
+		}
+	}
+	for _, name := range secretIdentityNames {
+		if base == name {
 			return "secret"
 		}
 	}
@@ -493,21 +544,18 @@ func autoCommitBlockedPath(path string) string {
 	return ""
 }
 
-var (
-	privateKeyPattern   = regexp.MustCompile(`-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----`)
-	awsKeyPattern       = regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`)
-	githubTokenPattern  = regexp.MustCompile(`\b(ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b`)
-	slackTokenPattern   = regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}\b`)
-	anthropicKeyPattern = regexp.MustCompile(`\bsk-ant-[A-Za-z0-9_-]{20,}\b`)
-)
-
+// containsSecretMaterial reuses the exact patterns the Agent write path already
+// rejects, so the background commit gate cannot be looser than the front door.
 func containsSecretMaterial(content []byte) bool {
 	if len(content) == 0 {
 		return false
 	}
-	return privateKeyPattern.Match(content) || awsKeyPattern.Match(content) ||
-		githubTokenPattern.Match(content) || slackTokenPattern.Match(content) ||
-		anthropicKeyPattern.Match(content)
+	for _, pattern := range forbiddenKnowledgePatterns {
+		if pattern.Match(content) {
+			return true
+		}
+	}
+	return false
 }
 
 func looksBinary(content []byte) bool {
@@ -525,18 +573,23 @@ func looksBinary(content []byte) bool {
 	return false
 }
 
-func readPrefix(path string, limit int) ([]byte, error) {
+// readBoundedRegularFile reads at most limit bytes and reports when the file
+// grew past the limit. LimitReader + ReadAll avoids the short-read trap of a
+// single Read call.
+func readBoundedRegularFile(path string, limit int) ([]byte, bool, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer file.Close()
-	buffer := make([]byte, limit)
-	read, err := file.Read(buffer)
-	if err != nil && read == 0 {
-		return nil, err
+	content, err := io.ReadAll(io.LimitReader(file, int64(limit)+1))
+	if err != nil {
+		return nil, false, err
 	}
-	return buffer[:read], nil
+	if len(content) > limit {
+		return content[:limit], true, nil
+	}
+	return content, false, nil
 }
 
 func isUnmergedCode(code string) bool {

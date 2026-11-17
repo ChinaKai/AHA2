@@ -815,7 +815,7 @@ test("auto-sync section shows the persisted switch, pause reason and blocked fil
     conflict_detail: "本地 abc，远端 def 已分叉",
     last_sync_at: "2026-11-16T10:00:00Z",
     pending: 2,
-    blocked: 1,
+    blocked: 75,
     blocked_files: [{path: "assets/logo.png", reason: "binary"}],
     failures: 1,
     preflight_done: true,
@@ -836,7 +836,7 @@ test("auto-sync section shows the persisted switch, pause reason and blocked fil
     assert.match(html, /class="knowledge-vault-badge is-bad">冲突</);
     assert.match(html, /暂停原因<\/dt><dd>远端分叉/);
     assert.match(html, /本地 abc，远端 def 已分叉/);
-    assert.match(html, /assets\/logo\.png \(binary\)/);
+    assert.match(html, /75 个：assets\/logo\.png \(二进制\)/);
     assert.match(html, /待提交文件<\/dt><dd>2 个/);
 
     await panel.__knowledgeVaultSettingsActionsForTest.setAutoSync(false);

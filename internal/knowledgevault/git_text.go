@@ -98,27 +98,42 @@ func (g *Git) ensureTextPolicy(ctx context.Context) (GitTextPolicyResult, error)
 	if err != nil && !os.IsNotExist(err) {
 		return result, err
 	}
+	ahaLines := append(append([]string{}, gitAttributesRequiredLines...), gitAttributesBinaryLines...)
 	content := string(existing)
 	changed := false
 	if strings.TrimSpace(content) == "" {
 		content = GitAttributesContent()
 		changed = true
 	} else {
-		present := map[string]bool{}
-		for _, line := range strings.Split(content, "\n") {
-			present[strings.TrimSpace(line)] = true
+		// gitattributes is last-match-wins. AHA2's defaults must therefore come
+		// first so an owner rule such as `*.md text eol=crlf` or a custom
+		// binary extension keeps winning. Move any AHA2-owned line that an
+		// older version appended to the end back to the front.
+		ahaSet := make(map[string]bool, len(ahaLines))
+		for _, line := range ahaLines {
+			ahaSet[line] = true
 		}
-		var appended []string
-		for _, line := range append(append([]string{}, gitAttributesRequiredLines...), gitAttributesBinaryLines...) {
-			if !present[line] {
-				appended = append(appended, line)
+		authorLines := make([]string, 0, 32)
+		for _, line := range strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n") {
+			if ahaSet[strings.TrimSpace(line)] {
+				continue
 			}
+			authorLines = append(authorLines, line)
 		}
-		if len(appended) > 0 {
-			if !strings.HasSuffix(content, "\n") {
-				content += "\n"
-			}
-			content += strings.Join(appended, "\n") + "\n"
+		for len(authorLines) > 0 && strings.TrimSpace(authorLines[0]) == "" {
+			authorLines = authorLines[1:]
+		}
+		for len(authorLines) > 0 && strings.TrimSpace(authorLines[len(authorLines)-1]) == "" {
+			authorLines = authorLines[:len(authorLines)-1]
+		}
+		authorText := strings.Join(authorLines, "\n")
+		merged := strings.Join(ahaLines, "\n")
+		if authorText != "" {
+			merged += "\n" + authorText
+		}
+		merged += "\n"
+		if merged != content {
+			content = merged
 			changed = true
 		}
 	}
@@ -139,6 +154,7 @@ type RenormalizeResult struct {
 	After     string `json:"after,omitempty"`
 	Files     int    `json:"files"`
 	Tag       string `json:"tag,omitempty"`
+	Warning   string `json:"warning,omitempty"`
 	Message   string `json:"message,omitempty"`
 }
 
@@ -211,7 +227,12 @@ func (g *Git) Renormalize(ctx context.Context) (RenormalizeResult, error) {
 		return result, nil
 	}
 	result.Ran = true
-	if tagErr := g.ensureLineEndingBackupTag(ctx); tagErr == nil {
+	if tagErr := g.ensureLineEndingBackupTag(ctx); tagErr != nil {
+		// The exact pre-migration HEAD is still recorded in Before and in
+		// .aha/line-endings.json, so the missing convenience tag is a warning,
+		// not a reason to leave the migration half done.
+		result.Warning = "备份 tag 创建失败：" + tagErr.Error()
+	} else {
 		result.Tag = lineEndingBackupTag
 	}
 	message := fmt.Sprintf("Normalize knowledge vault line endings to LF\n\nOne-time migration: * text=auto eol=lf, core.autocrlf=false.\nBefore: %s\nFiles: %d\n", result.Before, result.Files)
@@ -378,9 +399,11 @@ func (g *Git) recordLineEndingState(result RenormalizeResult) error {
 		After        string `json:"after"`
 		Files        int    `json:"files"`
 		Tag          string `json:"tag,omitempty"`
+		Warning      string `json:"warning,omitempty"`
 	}{
 		Version: 1, NormalizedAt: time.Now().UTC().Format(time.RFC3339),
 		Before: result.Before, After: result.After, Files: result.Files, Tag: result.Tag,
+		Warning: result.Warning,
 	}
 	payload, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
