@@ -677,11 +677,18 @@ func TestRevokeWhileClosingExistingTabRejectsConcurrentOpen(t *testing.T) {
 	if _, err := f.service.OpenTab(ctx, "owner", grant.ID, "https://example.com/a"); err != nil {
 		t.Fatal(err)
 	}
+	tabsA, err := f.store.BrowserTabsForGrant(ctx, grant.ID)
+	if err != nil || len(tabsA) != 1 {
+		t.Fatalf("tab A=%#v err=%v", tabsA, err)
+	}
 	openStarted, openRelease := blockNextOpenTab(f)
 	closeStarted := make(chan struct{}, 4)
 	closeRelease := make(chan struct{})
+	// Gate only tab A's close. OpenTab B's cleanup of its own host tab must not
+	// block, so the test can observe B's guarded-insert result first.
 	f.host.CloseTabStarted = closeStarted
 	f.host.CloseTabRelease = closeRelease
+	f.host.CloseTabGateTabID = tabsA[0].HostTabID
 
 	openResult := make(chan error, 1)
 	go func() {
@@ -696,8 +703,8 @@ func TestRevokeWhileClosingExistingTabRejectsConcurrentOpen(t *testing.T) {
 	}()
 	<-closeStarted // revoke has written revoked_at and is closing tab A
 	close(openRelease)
-	close(closeRelease)
 	err = <-openResult
+	close(closeRelease)
 	requireCode(t, err, "browser_grant_revoked")
 	if revokeErr := <-revokeResult; revokeErr != nil {
 		t.Fatalf("revoke: %v", revokeErr)
@@ -719,14 +726,31 @@ func TestRevokeToleratesSlowOrFailedHostTabClose(t *testing.T) {
 	if _, err := f.service.OpenTab(ctx, "owner", grant.ID, "https://example.com/a"); err != nil {
 		t.Fatal(err)
 	}
+	// A second Task/Profile grant owns a tab that revoke of the first grant
+	// must never touch.
+	otherTask := createTask(t, f.store)
+	otherGrant, err := f.service.CreateGrant(ctx, "owner", otherTask.ID, profile.ID, nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.service.OpenTab(ctx, "owner", otherGrant.ID, "https://example.com/other"); err != nil {
+		t.Fatal(err)
+	}
 	f.host.FailCloseTab = &browser.Error{Code: "browser_host_timeout", Status: http.StatusGatewayTimeout,
 		Message: "host close failed"}
 	revoked, err := f.service.RevokeGrant(ctx, "owner", grant.ID)
 	if err != nil || revoked.Status != domain.BrowserGrantStatusRevoked {
 		t.Fatalf("revoke with failing host close: %#v err=%v", revoked, err)
 	}
-	tabs, err := f.store.BrowserTabsForTask(ctx, f.task.ID)
+	if f.host.CloseTabCalls == 0 {
+		t.Fatal("revoke never attempted to close the host tab")
+	}
+	tabs, err := f.store.BrowserTabsForGrant(ctx, grant.ID)
 	if err != nil || len(tabs) != 0 {
 		t.Fatalf("tabs after failed host close=%#v err=%v", tabs, err)
+	}
+	otherTabs, err := f.store.BrowserTabsForGrant(ctx, otherGrant.ID)
+	if err != nil || len(otherTabs) != 1 {
+		t.Fatalf("other grant tabs were changed: %#v err=%v", otherTabs, err)
 	}
 }
