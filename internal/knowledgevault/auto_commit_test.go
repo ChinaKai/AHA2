@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func headSHA(t *testing.T, directory string) string {
@@ -97,6 +98,129 @@ func TestAutoCommitSelectsTextAndBlocksUnsafeChanges(t *testing.T) {
 	}
 	if after.Clean || len(after.Eligible) != 0 || after.Pending != 4 {
 		t.Fatalf("blocked files should remain pending-only: %+v", after)
+	}
+}
+
+// TestAutoCommitGateShapeOfReportedPreflightFiles recreates the path, size,
+// line-ending, frontmatter and body shape of the two files reported in the
+// Windows vault (not their real content). Path, size, extension and binary
+// rules do not block this shape. The second half shows that the broad
+// forbiddenKnowledgePatterns assignment rule can flag a token-like line; the
+// production blocker still needs the reported path/reason to confirm.
+func TestAutoCommitGateShapeOfReportedPreflightFiles(t *testing.T) {
+	ctx := context.Background()
+	config, git := newGitTestVault(t)
+	if _, err := git.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	const devicePath = "global/agent-lessons/technical-diagnostics/serial-hardware-board/device-report-visibility-log-branch-and-queue.md"
+	const inboxPath = "projects/aha2/inbox/远程部署 wrapper 被 AHA 重启打断：deploy-aha2-remote-last.json 会停在旧版本，以 worker 结果 JSON 为准.md"
+	writeGitTestFile(t, config.VaultPath, devicePath, "# seed\n")
+	if _, err := git.Commit(ctx, "seed"); err != nil {
+		t.Fatal(err)
+	}
+
+	deviceDoc := padDocToSize("---\nstatus: stale\ntype: diagnostic\n---\n\n# 设备上报是否可见：先核实日志分支与发送队列\n\n判断设备有没有上报某个属性时，不能只看日志里是否出现 payload；日志分支本身可能屏蔽 data。\n", 1803)
+	longLine := strings.Repeat("远程部署结果以 worker 为准。", 12) + "\n"
+	if len([]byte(longLine)) != 457 {
+		t.Fatalf("long line = %d bytes, want 457", len([]byte(longLine)))
+	}
+	inboxDoc := padDocToSize("---\ntype: diagnostic\nstatus: draft\n---\n\n# 远程部署 wrapper 被 AHA 重启打断\n\ndeploy-aha2-remote-last.json 会停在旧版本。\n"+longLine, 2117)
+	writeGitTestFile(t, config.VaultPath, devicePath, deviceDoc)
+	writeGitTestFile(t, config.VaultPath, inboxPath, inboxDoc)
+
+	for path, size := range map[string]int{devicePath: 1803, inboxPath: 2117} {
+		content, err := os.ReadFile(filepath.Join(config.VaultPath, filepath.FromSlash(path)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(content) != size {
+			t.Fatalf("%s = %d bytes, want %d", path, len(content), size)
+		}
+		if strings.ContainsRune(string(content), '\r') || strings.ContainsRune(string(content), 0) {
+			t.Fatalf("%s is not LF/plain text", path)
+		}
+		if !utf8.Valid(content) {
+			t.Fatalf("%s is not valid UTF-8", path)
+		}
+		if reason := autoCommitPathExclusion(path); reason != "" {
+			t.Fatalf("%s is blocked by path rule %q", path, reason)
+		}
+		if isAutoCommitBinaryPath(path) {
+			t.Fatalf("%s is classified binary by extension", path)
+		}
+		if looksBinary(content) || containsSecretMaterial(content) {
+			t.Fatalf("%s unexpectedly trips a content rule", path)
+		}
+	}
+
+	scan, err := git.ScanAutoCommit(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scan.Pending != 2 || len(scan.Blocked) != 0 || len(scan.Eligible) != 2 {
+		t.Fatalf("reported-shape scan = %+v, want both files eligible", scan)
+	}
+
+	// A token assignment is one content-level case the broad assignment rule
+	// catches. The gate stays; the status now names this reason.
+	secretDoc := inboxDoc + "\ntoken = 0123456789abcdef\n"
+	writeGitTestFile(t, config.VaultPath, inboxPath, secretDoc)
+	blockedScan, err := git.ScanAutoCommit(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blockedScan.BlockedTotal != 1 || len(blockedScan.Blocked) != 1 {
+		t.Fatalf("secret scan = %+v, want one blocked file", blockedScan)
+	}
+	if entry := blockedScan.Blocked[0]; entry.Path != inboxPath || entry.Reason != "secret" {
+		t.Fatalf("blocked entry = %+v, want %s (secret)", entry, inboxPath)
+	}
+	for _, path := range blockedScan.Eligible {
+		if path == inboxPath {
+			t.Fatalf("secret document stayed eligible: %+v", blockedScan.Eligible)
+		}
+	}
+}
+
+func padDocToSize(base string, size int) string {
+	if len(base) >= size {
+		return base
+	}
+	var builder strings.Builder
+	builder.WriteString(base)
+	filler := "补充说明：这是一行用于复现文件形状的普通正文。\n"
+	for builder.Len()+len(filler) <= size {
+		builder.WriteString(filler)
+	}
+	if remaining := size - builder.Len(); remaining > 0 {
+		if remaining == 1 {
+			builder.WriteByte('\n')
+		} else {
+			builder.WriteString(strings.Repeat("x", remaining-1))
+			builder.WriteByte('\n')
+		}
+	}
+	return builder.String()
+}
+
+func TestNormalizeBlockedChangesSanitizesAndDeduplicates(t *testing.T) {
+	normalized, total := normalizeBlockedChanges([]BlockedChange{
+		{Path: "bad\nname\r\t.md", Reason: "Secret!"},
+		{Path: "bad\nname\r\t.md", Reason: "binary"},
+		{Path: "ok.md", Reason: "not regular"},
+	}, 2)
+	if total != 2 {
+		t.Fatalf("total = %d, want 2", total)
+	}
+	if len(normalized) != 2 {
+		t.Fatalf("normalized = %+v, want two deduplicated entries", normalized)
+	}
+	if normalized[0].Path != "badname.md" || normalized[0].Reason != "secret" {
+		t.Fatalf("first entry = %+v", normalized[0])
+	}
+	if normalized[1].Path != "ok.md" || normalized[1].Reason != "notregular" {
+		t.Fatalf("second entry = %+v", normalized[1])
 	}
 }
 

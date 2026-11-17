@@ -1,7 +1,7 @@
 // Phase 2 knowledge vault: editor URI generation, deep links, grouping and
 // read-only rendering. The URI helpers are pure so these assertions do not
 // depend on VSCode, Obsidian or any desktop environment being installed.
-import test from "node:test";
+import test, {mock} from "node:test";
 import assert from "node:assert/strict";
 import {pathToFileURL} from "node:url";
 import {resolve} from "node:path";
@@ -792,6 +792,192 @@ test("the gear dialog reports automatic index health without a rebuild action", 
   html = vault.renderKnowledgeVaultPage(context());
   assert.match(html, /索引待自动修复/);
   assert.doesNotMatch(html, /id="kv-settings-rebuild"/);
+});
+
+test("the gear dialog shows auto-sync state and sanitized blocked files", () => {
+  const blockedPath = "global/agent-lessons/technical-diagnostics/serial-hardware-board/device-report-visibility-log-branch-and-queue.md";
+  const settings = {
+    enabled: true, source: "database", vault_ready: true, vault_initialized: true,
+    index_ready: true, vault_path: "/srv/vault", index_path: "/srv/index.db", entry_count: 5,
+    auto_sync: {
+      enabled: true, running: false, paused: true, pause_reason: "preflight_failed",
+      conflict: false,
+      last_error: `有 1 个改动无法自动提交（二进制/密钥/超大文件）；preflight 已暂停并保留现场。受阻文件：${blockedPath}(secret)`,
+      pending: 1, blocked: 1,
+      blocked_files: [{path: blockedPath, reason: "secret"}],
+      preflight_done: false,
+    },
+  };
+  reset({settingsState: "ready", settings});
+  let html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /id="kv-autosync-title">自动同步/);
+  assert.match(html, /id="kv-auto-sync"[^>]*checked/);
+  assert.match(html, /行尾迁移 preflight 失败/);
+  assert.match(html, /最近错误/);
+  assert.match(html, /device-report-visibility-log-branch-and-queue\.md \(密钥或凭据\)/);
+  assert.doesNotMatch(html, /knowledge-vault-auto-sync/, "the advanced panel must not offer a second switch");
+
+  reset({settingsState: "ready", settings: {...settings, auto_sync: {...settings.auto_sync, blocked: 3, blocked_files: []}}});
+  html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /3 个（旧状态未记录路径/);
+});
+
+test("the auto-sync switch calls the dedicated status API", async () => {
+  const autoSync = {
+    enabled: true, running: false, paused: false, conflict: false,
+    pending: 0, blocked: 0, preflight_done: true,
+  };
+  const settings = {
+    enabled: true, source: "database", vault_ready: true, vault_initialized: true,
+    index_ready: true, vault_path: "/srv/vault", index_path: "/srv/index.db", entry_count: 5,
+    auto_sync: autoSync,
+  };
+  reset({settingsState: "ready", settings});
+  const calls = [];
+  const original = api.updateKnowledgeVaultAutoSync;
+  api.updateKnowledgeVaultAutoSync = async enabled => {
+    calls.push(enabled);
+    return {ok: true, settings: {...settings, auto_sync: {...autoSync, enabled}}};
+  };
+  try {
+    await vault.__setVaultAutoSyncForTest(false);
+  } finally {
+    api.updateKnowledgeVaultAutoSync = original;
+  }
+  assert.deepEqual(calls, [false]);
+  const state = vault.__getKnowledgeVaultStateForTest();
+  assert.equal(state.settings.auto_sync.enabled, false);
+  assert.equal(state.autoSyncBusy, false);
+  assert.equal(state.autoSyncNotice.kind, "notice");
+});
+
+const autoSyncSettingsBase = {
+  enabled: true, source: "database", vault_ready: true, vault_initialized: true,
+  index_ready: true, vault_path: "/srv/vault", index_path: "/srv/index.db", entry_count: 5,
+};
+
+test("the gear dialog escapes a non-empty conflict detail", () => {
+  reset({
+    settingsState: "ready",
+    settings: {
+      ...autoSyncSettingsBase,
+      auto_sync: {
+        enabled: true, running: false, paused: true, pause_reason: "conflict", conflict: true,
+        conflict_detail: "本地 abc <b>远端</b> def 已分叉", pending: 0, blocked: 0, preflight_done: true,
+      },
+    },
+  });
+  const html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /冲突状态<\/dt><dd class="kv-settings-value">本地 abc &lt;b&gt;远端&lt;\/b&gt; def 已分叉/);
+  assert.doesNotMatch(html, /<b>远端<\/b>/);
+});
+
+test("an empty conflict detail keeps the stopped-automatic-sync fallback", () => {
+  reset({
+    settingsState: "ready",
+    settings: {
+      ...autoSyncSettingsBase,
+      auto_sync: {
+        enabled: true, running: false, paused: true, pause_reason: "conflict", conflict: true,
+        conflict_detail: "", pending: 0, blocked: 0, preflight_done: true,
+      },
+    },
+  });
+  const html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /冲突状态<\/dt><dd class="kv-settings-value">检测到远端分叉，已停止自动同步；本地提交未改动/);
+});
+
+test("sync_unavailable renders the localized pause reason without the raw key", () => {
+  reset({
+    settingsState: "ready",
+    settings: {
+      ...autoSyncSettingsBase,
+      auto_sync: {
+        enabled: true, running: false, paused: true, pause_reason: "sync_unavailable", conflict: false,
+        pending: 0, blocked: 0, preflight_done: true,
+      },
+    },
+  });
+  const html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /暂停原因<\/dt><dd class="kv-settings-value">自动同步运行时未启动/);
+  assert.doesNotMatch(html, /sync_unavailable/);
+});
+
+async function flushMicrotasks(rounds = 8) {
+  for (let index = 0; index < rounds; index++) await Promise.resolve();
+}
+
+test("a settings request that never resolves becomes an explicit timeout", async () => {
+  mock.timers.enable({apis: ["setTimeout"]});
+  const ctx = context();
+  vault.__setKnowledgeVaultContextForTest(ctx);
+  const original = api.knowledgeVaultSettings;
+  api.knowledgeVaultSettings = () => new Promise(() => {});
+  try {
+    reset({settingsState: "idle", settings: null});
+    void vault.__loadVaultSettingsForTest();
+    mock.timers.tick(12000);
+    await flushMicrotasks();
+    const state = vault.__getKnowledgeVaultStateForTest();
+    assert.equal(state.settingsState, "error");
+    assert.match(state.settingsError, /加载超时/);
+    assert.match(vault.renderKnowledgeVaultPage(ctx), /data-kv-settings-retry/);
+  } finally {
+    api.knowledgeVaultSettings = original;
+    mock.timers.reset();
+  }
+});
+
+test("a Git status request that never resolves becomes an explicit timeout", async () => {
+  mock.timers.enable({apis: ["setTimeout"]});
+  const ctx = context();
+  vault.__setKnowledgeVaultContextForTest(ctx);
+  const original = api.request;
+  api.request = () => new Promise(() => {});
+  try {
+    reset({settingsState: "ready", settings: autoSyncSettingsBase, gitState: "idle", git: null});
+    void vault.__loadVaultGitStatusForTest();
+    mock.timers.tick(12000);
+    await flushMicrotasks();
+    const state = vault.__getKnowledgeVaultStateForTest();
+    assert.equal(state.gitState, "error");
+    assert.match(state.gitError, /加载超时/);
+    assert.match(vault.renderKnowledgeVaultPage(ctx), /data-kv-git-retry/);
+  } finally {
+    api.request = original;
+    mock.timers.reset();
+  }
+});
+
+test("a hanging auto-sync toggle clears the busy flag and reports a timeout", async () => {
+  mock.timers.enable({apis: ["setTimeout"]});
+  const ctx = context();
+  vault.__setKnowledgeVaultContextForTest(ctx);
+  const original = api.updateKnowledgeVaultAutoSync;
+  api.updateKnowledgeVaultAutoSync = () => new Promise(() => {});
+  try {
+    reset({
+      settingsState: "ready",
+      settings: {
+        ...autoSyncSettingsBase,
+        auto_sync: {
+          enabled: true, running: false, paused: false, conflict: false,
+          pending: 0, blocked: 0, preflight_done: true,
+        },
+      },
+      autoSyncBusy: false, autoSyncNotice: null,
+    });
+    void vault.__setVaultAutoSyncForTest(false);
+    mock.timers.tick(12000);
+    await flushMicrotasks();
+    const state = vault.__getKnowledgeVaultStateForTest();
+    assert.equal(state.autoSyncBusy, false);
+    assert.equal(state.autoSyncNotice.kind, "error");
+    assert.match(state.autoSyncNotice.message, /加载超时/);
+  } finally {
+    api.updateKnowledgeVaultAutoSync = original;
+    mock.timers.reset();
+  }
 });
 
 test("a settings load failure is explicit and retryable without breaking the dialog", () => {
