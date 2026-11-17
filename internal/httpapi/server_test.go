@@ -1340,23 +1340,8 @@ func TestKnowledgeWorkspaceAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	authService := auth.NewService(database, "setup-test", time.Hour)
-	// The skill editor writes vault packages. Runtime knowledge reads stay on
-	// the legacy tables for this test so its knowledge assertions are unchanged;
-	// the manager write engine is still available for skills.
-	vaultConfig := knowledgevault.DefaultConfig(t.TempDir())
-	if _, err := knowledgevault.Bootstrap(vaultConfig, knowledgevault.InitOptions{VaultName: "Workspace"}); err != nil {
-		t.Fatal(err)
-	}
-	manager, err := knowledgevault.NewManager(vaultConfig)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := manager.SetEnabled(ctx, true); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = manager.Close() })
 	appService := app.NewService(database, secretStore, app.StubExecutor{})
-	server := httptest.NewServer(New(Config{Store: database, Auth: authService, App: appService, KnowledgeVault: manager}).Handler())
+	server := httptest.NewServer(New(Config{Store: database, Auth: authService, App: appService}).Handler())
 	defer server.Close()
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{Jar: jar}
@@ -1372,21 +1357,6 @@ func TestKnowledgeWorkspaceAPI(t *testing.T) {
 	if response.StatusCode != http.StatusCreated || project["knowledge_policy"] != "disabled" {
 		t.Fatalf("knowledge project creation failed: %d %#v", response.StatusCode, payload)
 	}
-	// Bind the project to a vault library so the skill editor can write there.
-	indexPath := filepath.Join(vaultConfig.VaultPath, "projects", "knowledge", "index.md")
-	if err := os.MkdirAll(filepath.Dir(indexPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(indexPath, []byte("---\nid: knowledge_root_project_knowledge\ntitle: Knowledge\nscope: project\nproject_id: "+projectID+"\ntype: navigation\nstatus: verified\nis_index: true\n---\nKnowledge.\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := manager.Rebuild(ctx); err != nil {
-		t.Fatal(err)
-	}
-	// Enable the vault write engine for the skill editor after the legacy
-	// project root has been seeded. Knowledge reads stay on legacy (false).
-	appService.SetKnowledgeVault(manager, false)
-	appService.SetKnowledgeVaultRuntimeWrite(true)
 
 	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/projects/"+projectID+"/product-lines", map[string]any{
 		"name": "Main", "branch_pattern": "main", "default": true,
@@ -1395,25 +1365,6 @@ func TestKnowledgeWorkspaceAPI(t *testing.T) {
 	lineID := payload["product_line"].(map[string]any)["id"].(string)
 	if response.StatusCode != http.StatusCreated {
 		t.Fatalf("product line creation failed: %d %#v", response.StatusCode, payload)
-	}
-
-	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/skills", map[string]any{
-		"scope": "project", "project_id": projectID, "name": "Review", "description": "Review changes",
-		"instructions": "Run focused tests.", "enabled": true,
-	}, csrf)
-	decodeResponse(t, response, &payload)
-	skill := payload["skill"].(map[string]any)
-	skillID := skill["id"].(string)
-	if response.StatusCode != http.StatusCreated || skill["version"].(float64) != 1 {
-		t.Fatalf("skill creation failed: %d %#v", response.StatusCode, payload)
-	}
-	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/skills/"+skillID, map[string]any{
-		"scope": "project", "project_id": projectID, "name": "Review", "description": "Updated",
-		"instructions": "Run all tests.", "status": "active", "enabled": false,
-	}, csrf)
-	decodeResponse(t, response, &payload)
-	if response.StatusCode != http.StatusOK || payload["skill"].(map[string]any)["version"].(float64) != 2 {
-		t.Fatalf("skill update failed: %d %#v", response.StatusCode, payload)
 	}
 
 	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/knowledge?scope=project&project_id="+projectID, nil, "")

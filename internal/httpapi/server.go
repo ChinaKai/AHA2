@@ -612,9 +612,11 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/projects/{id}/product-lines", s.withAuth(http.HandlerFunc(s.createProductLine)))
 	mux.Handle("DELETE /api/v1/projects/{id}/product-lines/{line}", s.withAuth(http.HandlerFunc(s.deleteProductLine)))
 	mux.Handle("GET /api/v1/skills", s.withAuth(http.HandlerFunc(s.listSkills)))
-	mux.Handle("POST /api/v1/skills", s.withAuth(http.HandlerFunc(s.createSkill)))
-	mux.Handle("PUT /api/v1/skills/{id}", s.withAuth(http.HandlerFunc(s.updateSkill)))
-	mux.Handle("DELETE /api/v1/skills/{id}", s.withAuth(http.HandlerFunc(s.deleteSkill)))
+	// The Web skills page is read-only. Keep the old write paths registered so
+	// legacy clients get an explicit 405 instead of the SPA catch-all's HTML.
+	mux.Handle("POST /api/v1/skills", s.withAuth(http.HandlerFunc(s.rejectRemovedSkillWrite)))
+	mux.Handle("PUT /api/v1/skills/{id}", s.withAuth(http.HandlerFunc(s.rejectRemovedSkillWrite)))
+	mux.Handle("DELETE /api/v1/skills/{id}", s.withAuth(http.HandlerFunc(s.rejectRemovedSkillWrite)))
 
 	mux.HandleFunc("/", s.serveWeb)
 	return s.securityHeaders(s.requestLog(s.slowRequestLog(s.enforceAccessScope(s.repairTextEncoding(mux)))))

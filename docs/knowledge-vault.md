@@ -1,6 +1,8 @@
 # 文件知识库
 
-文件知识库（knowledge vault）把知识以 Markdown 文件保存为正本，SQLite 只保存可重建的索引。Web 知识页只读；编辑在 VSCode 或 Obsidian 中完成，索引由写路径、文件变更监听和启动对账自动维护。
+文件知识库（knowledge vault）把知识以 Markdown 文件保存为正本，SQLite 只保存可重建的索引。Web 知识页与技能页都只读；编辑在 VSCode 或 Obsidian 中完成，索引由写路径、文件变更监听和启动对账自动维护。
+
+`GET /api/v1/skills` 是任务选择和技能页共用的只读技能列表。旧 Web 技能写接口 `POST /api/v1/skills`、`PUT /api/v1/skills/{id}`、`DELETE /api/v1/skills/{id}` 已移除，统一返回 405 `skill_write_api_removed`；技能写入只走 Agent Control API（`/api/v1/agent/skills`）或直接编辑 vault 技能包。
 
 ## 启用与关闭
 

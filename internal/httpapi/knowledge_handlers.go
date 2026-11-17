@@ -676,7 +676,7 @@ func (s *Server) deleteProductLine(writer http.ResponseWriter, request *http.Req
 
 func (s *Server) listSkills(writer http.ResponseWriter, request *http.Request) {
 	// Skills are vault packages after the cutover. The legacy table is never
-	// listed here: the task picker and the skill editor share this response.
+	// listed here: the task picker and the read-only skills page share this response.
 	items, err := s.app.ListVaultSkills(request.Context())
 	if err != nil && !errors.Is(err, knowledgevault.ErrDisabled) {
 		writeError(writer, http.StatusInternalServerError, "list_skills_failed")
@@ -708,181 +708,19 @@ func (s *Server) listSkills(writer http.ResponseWriter, request *http.Request) {
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "source": "vault", "skills": result})
 }
 
-type skillPayload struct {
-	Scope         string `json:"scope"`
-	ProjectID     string `json:"project_id"`
-	Slug          string `json:"slug"`
-	Name          string `json:"name"`
-	Description   string `json:"description"`
-	Instructions  string `json:"instructions"`
-	Status        string `json:"status"`
-	Enabled       *bool  `json:"enabled"`
-	AutoAttach    *bool  `json:"auto_attach"`
-	ConfirmGlobal bool   `json:"confirm_global"`
-	BaseVersion   int    `json:"base_version"`
-}
-
-func normalizeSkillPayload(payload *skillPayload) error {
-	payload.Scope = strings.ToLower(strings.TrimSpace(payload.Scope))
-	if payload.Scope == "" {
-		payload.Scope = "project"
+// rejectRemovedSkillWrite keeps the legacy Web skill write routes closed. The
+// owner-facing skills page is read-only after the vault cutover; skills are
+// written by Agents through the Agent Control API and by direct vault edits.
+// The routes stay registered only so old clients get an explicit 405 instead of
+// falling through to the SPA catch-all.
+func (s *Server) rejectRemovedSkillWrite(writer http.ResponseWriter, request *http.Request) {
+	if request.PathValue("id") == "" {
+		// Only the collection still supports GET; the write routes are gone.
+		writer.Header().Set("Allow", http.MethodGet)
 	}
-	if payload.Scope != "project" {
-		payload.Scope = "global"
-		payload.ProjectID = ""
-	} else if strings.TrimSpace(payload.ProjectID) == "" {
-		return fmt.Errorf("project_id_required")
-	}
-	payload.Name = strings.TrimSpace(payload.Name)
-	payload.Instructions = strings.TrimSpace(payload.Instructions)
-	if payload.Name == "" || payload.Instructions == "" {
-		return fmt.Errorf("skill_name_and_instructions_required")
-	}
-	if strings.TrimSpace(payload.Status) == "" {
-		payload.Status = "active"
-	}
-	return nil
-}
-
-func (s *Server) createSkill(writer http.ResponseWriter, request *http.Request) {
-	var payload skillPayload
-	if err := decodeJSON(request, &payload); err != nil {
-		writeError(writer, http.StatusBadRequest, "invalid_json")
-		return
-	}
-	if err := normalizeSkillPayload(&payload); err != nil {
-		writeError(writer, http.StatusBadRequest, err.Error())
-		return
-	}
-	if payload.AutoAttach != nil && *payload.AutoAttach && payload.Scope == "global" && !payload.ConfirmGlobal {
-		// Refuse before creating the package: a global auto-enable needs the
-		// explicit second confirmation, and a half-created skill would be worse.
-		writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": "global_confirmation_required", "message": "全局 vault 技能自动启用需要二次确认"})
-		return
-	}
-	item, err := s.app.CreateVaultSkill(request.Context(), app.VaultSkillWriteInput{
-		Scope: payload.Scope, ProjectID: strings.TrimSpace(payload.ProjectID), Slug: payload.Slug,
-		Name: payload.Name, Description: strings.TrimSpace(payload.Description),
-		Instructions: payload.Instructions, Status: payload.Status, Enabled: payload.Enabled,
-		AllowGlobal: true,
+	writeJSON(writer, http.StatusMethodNotAllowed, map[string]any{
+		"ok":      false,
+		"error":   "skill_write_api_removed",
+		"message": "Web 技能写接口已移除；技能由 Agent Control API (/api/v1/agent/skills) 或 vault 文件编辑维护",
 	})
-	if err != nil {
-		writeVaultSkillHTTPError(writer, err, "create_skill_failed")
-		return
-	}
-	// Auto-attach is a preference, not package content. A create starts without
-	// one; an explicit owner request applies it after the package is durable.
-	if payload.AutoAttach != nil && *payload.AutoAttach {
-		if _, err := s.app.SetVaultSkillAutoAttach(request.Context(), item.ID, true, payload.ConfirmGlobal); err != nil {
-			writeVaultSkillHTTPError(writer, err, "create_skill_auto_attach_failed")
-			return
-		}
-	}
-	s.audit(request, "skill.create", "vault_skill", item.ID, map[string]any{"scope": item.Scope, "project_id": item.ProjectID})
-	writeJSON(writer, http.StatusCreated, map[string]any{"ok": true, "skill": item})
-}
-
-func (s *Server) updateSkill(writer http.ResponseWriter, request *http.Request) {
-	var payload skillPayload
-	if err := decodeJSON(request, &payload); err != nil {
-		writeError(writer, http.StatusBadRequest, "invalid_json")
-		return
-	}
-	requestedScope := strings.TrimSpace(payload.Scope)
-	if requestedScope == "" {
-		// An update may omit scope/project and inherit the package it resolved.
-		// Validate only the editable fields in that case.
-		payload.Scope, payload.ProjectID = "", ""
-		payload.Name = strings.TrimSpace(payload.Name)
-		payload.Instructions = strings.TrimSpace(payload.Instructions)
-		if payload.Name == "" || payload.Instructions == "" {
-			writeError(writer, http.StatusBadRequest, "skill_name_and_instructions_required")
-			return
-		}
-		if strings.TrimSpace(payload.Status) == "" {
-			payload.Status = "active"
-		}
-	} else if err := normalizeSkillPayload(&payload); err != nil {
-		writeError(writer, http.StatusBadRequest, err.Error())
-		return
-	}
-	item, err := s.app.UpdateVaultSkill(request.Context(), request.PathValue("id"), app.VaultSkillWriteInput{
-		Scope: payload.Scope, ProjectID: strings.TrimSpace(payload.ProjectID),
-		Name: payload.Name, Description: strings.TrimSpace(payload.Description),
-		Instructions: payload.Instructions, Status: payload.Status, Enabled: payload.Enabled,
-		BaseVersion: payload.BaseVersion, AllowGlobal: true,
-	})
-	if err != nil {
-		writeVaultSkillHTTPError(writer, err, "update_skill_failed")
-		return
-	}
-	if payload.AutoAttach != nil {
-		if _, err := s.app.SetVaultSkillAutoAttach(request.Context(), item.ID, *payload.AutoAttach, payload.ConfirmGlobal); err != nil {
-			writeVaultSkillHTTPError(writer, err, "update_skill_auto_attach_failed")
-			return
-		}
-		refreshed, refreshErr := s.app.ListVaultSkills(request.Context())
-		if refreshErr == nil {
-			for _, candidate := range refreshed {
-				if candidate.ID == item.ID {
-					item = candidate
-					break
-				}
-			}
-		}
-	}
-	s.audit(request, "skill.update", "vault_skill", item.ID, map[string]any{"version": item.Version, "scope": item.Scope})
-	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "skill": item})
-}
-
-func (s *Server) deleteSkill(writer http.ResponseWriter, request *http.Request) {
-	if err := s.app.DeleteVaultSkill(request.Context(), request.PathValue("id"), true); err != nil {
-		writeVaultSkillHTTPError(writer, err, "delete_skill_failed")
-		return
-	}
-	s.audit(request, "skill.delete", "vault_skill", request.PathValue("id"), nil)
-	writeJSON(writer, http.StatusOK, map[string]any{"ok": true})
-}
-
-// writeVaultSkillHTTPError maps vault skill write failures to the Web API's
-// stable error shape.
-func writeVaultSkillHTTPError(writer http.ResponseWriter, err error, fallback string) {
-	switch {
-	case errors.Is(err, knowledgevault.ErrDisabled):
-		writeError(writer, http.StatusNotFound, "knowledge_vault_disabled")
-		return
-	case errors.Is(err, app.ErrVaultSkillNotFound):
-		writeError(writer, http.StatusNotFound, "skill_not_found")
-		return
-	case errors.Is(err, app.ErrVaultSkillForbidden):
-		writeError(writer, http.StatusForbidden, "skill_scope_forbidden")
-		return
-	case errors.Is(err, app.ErrVaultSkillReadOnly):
-		writeError(writer, http.StatusForbidden, "skill_read_only")
-		return
-	case errors.Is(err, app.ErrVaultGlobalConfirmationRequired):
-		writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": "global_confirmation_required", "message": "全局 vault 技能自动启用需要二次确认"})
-		return
-	}
-	var writeErr *knowledgevault.SkillWriteError
-	if errors.As(err, &writeErr) {
-		switch writeErr.Code {
-		case knowledgevault.SkillWriteErrorConflictCode():
-			writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": "skill_version_conflict", "current_version": writeErr.CurrentVersion, "message": writeErr.Message})
-			return
-		case knowledgevault.SkillWriteErrorDuplicateCode():
-			writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": "skill_already_exists", "message": writeErr.Message})
-			return
-		case knowledgevault.SkillWriteErrorNotFoundCode():
-			writeError(writer, http.StatusNotFound, "skill_not_found")
-			return
-		case knowledgevault.SkillWriteErrorForbiddenCode():
-			writeError(writer, http.StatusForbidden, "skill_scope_forbidden")
-			return
-		case knowledgevault.SkillWriteErrorDisabledCode(), knowledgevault.SkillWriteErrorUnavailableCode():
-			writeJSON(writer, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "knowledge_vault_unavailable", "message": writeErr.Message})
-			return
-		}
-	}
-	writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": fallback, "message": err.Error()})
 }

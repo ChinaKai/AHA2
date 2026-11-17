@@ -1256,18 +1256,6 @@ class APIClient {
     return this.request(`/api/v1/skills?${query}`);
   }
 
-  createSkill(payload: Record<string, unknown>): Promise<{skill: Skill}> {
-    return this.request("/api/v1/skills", {method: "POST", body: JSON.stringify(payload)});
-  }
-
-  updateSkill(id: string, payload: Record<string, unknown>): Promise<{skill: Skill}> {
-    return this.request(`/api/v1/skills/${encodeURIComponent(id)}`, {method: "PUT", body: JSON.stringify(payload)});
-  }
-
-  deleteSkill(id: string): Promise<{ok: boolean}> {
-    return this.request(`/api/v1/skills/${encodeURIComponent(id)}`, {method: "DELETE"});
-  }
-
   promptTemplates(): Promise<{templates: PromptTemplate[]}> {
     return this.request("/api/v1/prompts/templates");
   }
