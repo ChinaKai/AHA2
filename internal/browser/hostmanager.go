@@ -544,47 +544,79 @@ func (m *HostManager) Stop(ctx context.Context) error {
 // The packaged runtime is what makes a clean machine work without a manual
 // Node/npm install; AHA2_NODE_PATH remains the troubleshooting override.
 func discoverNode(explicit, executableDir string) (string, error) {
+	return discoverNodeWith(explicit, executableDir, defaultCommonNodeCandidates())
+}
+
+// discoverNodeWith enumerates every fallback even when an earlier candidate is
+// present in the list but missing on disk. The packaged runtime path is always
+// tried first, but a missing file must not suppress the PATH or Windows
+// install-location candidates.
+func discoverNodeWith(explicit, executableDir string, common []string) (string, error) {
 	// An explicit setting is authoritative: silently falling back after the
 	// owner configured a broken path would hide the misconfiguration.
 	configured := []string{strings.TrimSpace(explicit), strings.TrimSpace(os.Getenv("AHA2_NODE_PATH"))}
-	var candidates []string
+	var configuredCandidates []string
 	for _, candidate := range configured {
 		if candidate != "" {
-			candidates = append(candidates, candidate)
+			configuredCandidates = append(configuredCandidates, candidate)
 		}
 	}
-	if len(candidates) == 0 {
-		if executableDir != "" {
-			candidates = append(candidates, filepath.Join(executableDir, "node", "node.exe"))
-		}
-		if path, err := exec.LookPath("node"); err == nil {
-			candidates = append(candidates, path)
-		}
-		if path, err := exec.LookPath("node.exe"); err == nil {
-			candidates = append(candidates, path)
-		}
-	}
-	if len(candidates) == 0 && os.PathSeparator == '\\' {
-		programFiles := os.Getenv("ProgramFiles")
-		programFilesX86 := os.Getenv("ProgramFiles(x86)")
-		localAppData := os.Getenv("LOCALAPPDATA")
-		for _, base := range []string{programFiles, programFilesX86, localAppData} {
-			if base == "" {
-				continue
+	if len(configuredCandidates) > 0 {
+		for _, candidate := range configuredCandidates {
+			if usableNode(candidate) {
+				return candidate, nil
 			}
-			candidates = append(candidates, filepath.Join(base, "Programs", "nodejs", "node.exe"))
-			candidates = append(candidates, filepath.Join(base, "nodejs", "node.exe"))
 		}
+		return "", errors.New("configured node executable not found")
 	}
+	var candidates []string
+	if executableDir != "" {
+		candidates = append(candidates, filepath.Join(executableDir, "node", "node.exe"))
+	}
+	if path, err := exec.LookPath("node"); err == nil {
+		candidates = append(candidates, path)
+	}
+	if path, err := exec.LookPath("node.exe"); err == nil {
+		candidates = append(candidates, path)
+	}
+	candidates = append(candidates, common...)
 	for _, candidate := range candidates {
-		if candidate == "" {
-			continue
-		}
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+		if usableNode(candidate) {
 			return candidate, nil
 		}
 	}
 	return "", errors.New("node executable not found")
+}
+
+func usableNode(path string) bool {
+	if path == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+// defaultCommonNodeCandidates lists the usual Windows per-machine and per-user
+// Node install locations. Other platforms have no extra fallback because PATH
+// and the packaged runtime cover them.
+func defaultCommonNodeCandidates() []string {
+	if os.PathSeparator != '\\' {
+		return nil
+	}
+	return windowsNodeCandidates(
+		os.Getenv("ProgramFiles"), os.Getenv("ProgramFiles(x86)"), os.Getenv("LOCALAPPDATA"))
+}
+
+func windowsNodeCandidates(programFiles, programFilesX86, localAppData string) []string {
+	var candidates []string
+	for _, base := range []string{programFiles, programFilesX86, localAppData} {
+		if base == "" {
+			continue
+		}
+		candidates = append(candidates, filepath.Join(base, "Programs", "nodejs", "node.exe"))
+		candidates = append(candidates, filepath.Join(base, "nodejs", "node.exe"))
+	}
+	return candidates
 }
 
 // discoverHostScript checks the explicit override, the packaged install layout

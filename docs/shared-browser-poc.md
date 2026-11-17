@@ -69,8 +69,11 @@ Task 授权：
 `node/node.exe`（官方 Node.js LTS，默认 22.23.5，约 84 MB；安装包压缩后约增加
 25–30 MB），安装到 `{app}\browser-host` 与 `{app}\node`。AHA 优先使用内置
 `node.exe`，干净的 Windows 机器不需要系统 Node/npm；`AHA2_NODE_PATH` 仍是覆盖项。
-内置运行时缺失/损坏时资源页返回 `browser_host_node_missing` 并失败关闭，不会
-退回公开端口或 CDP。
+构建时官方归档按 SHASUMS256.txt 校验 SHA-256；`AHA2_NODE_EXE` 缓存入口必须匹配
+从该版本官方归档推导的固定 node.exe SHA-256；有 osslsigncode/signtool 时执行
+真实 Authenticode 验签，没有验签工具时显式标记未验证（可用
+`AHA2_NODE_SIGNATURE_POLICY=require` 改为失败）。内置运行时缺失/损坏时资源页
+返回 `browser_host_node_missing` 并失败关闭，不会退回公开端口或 CDP。
 
 ## 3. 失败关闭
 - host 未配置/不可达：`browser_host_unavailable`（HTTP 503）；

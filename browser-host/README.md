@@ -55,18 +55,24 @@ $env:AHA2_EDGE_PATH = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.
   下载，host 启动的是本机 Edge。
 - `dist/node/node.exe` + `dist/node/LICENSE`：官方 Node.js LTS 运行时
   （默认固定 `22.23.5`，可用 `AHA2_NODE_RUNTIME_VERSION` 改版本）。构建时从
-  nodejs.org 下载并按官方 `SHASUMS256.txt` 校验 SHA-256，也可用
-  `AHA2_NODE_EXE`/`AHA2_NODE_LICENSE` 指向已缓存的官方文件。`node.exe` 约
-  84 MB，安装包压缩后预计增加约 25–30 MB。
+  nodejs.org 下载官方归档，并按该版本的 `SHASUMS256.txt` 校验 SHA-256；
+  `AHA2_NODE_RUNTIME_CACHE` 可指向已缓存的官方归档（同样校验 SHASUMS）。
+  `AHA2_NODE_EXE`/`AHA2_NODE_LICENSE` 只接受默认固定版本，且 node.exe 必须
+  匹配从该官方归档推导的固定 SHA-256（nodejs.org 不单独发布 node.exe 的
+  checksum），改一个字节就会失败；非固定版本请走归档路径。缓存入口仍会拉取
+  该版本的 `SHASUMS256.txt` 做交叉校验，因此构建机需要能访问 nodejs.org。
+  `node.exe` 约 84 MB，安装包压缩后预计增加约 25–30 MB。
 - `release-manifest.json`：覆盖 `browser-host/` 与 `node/` 下的全部文件。
 
 安装器把它们复制到 `{app}\browser-host` 和 `{app}\node`，升级时先删除这两个
 目录再整体替换，避免旧依赖残留。AHA 启动时优先使用 `{app}\node\node.exe`，
 所以干净的 Windows 机器不需要系统 Node/npm，也不需要用户手工安装依赖；
-`AHA2_NODE_PATH` 仍可覆盖。`node.exe` 来自官方发布包：构建时校验 SHA-256，
-构建机装有 `sbverify` 时还会检查 OpenJS Foundation 的 Authenticode 签名；
-它随安装包一起受 Inno Setup 安装包签名/升级流程约束。如果 CI 需要更严格的
-签名策略，可在构建机上加签或接入固定的证书校验步骤。
+`AHA2_NODE_PATH` 仍可覆盖。`node.exe` 来自官方发布包：SHA-256 来自
+nodejs.org；构建机有 `osslsigncode`（或 Windows `signtool`）时会真正执行
+Authenticode 验签并检查 OpenJS Foundation 签名者，失败即构建失败；没有验签
+工具时明确输出“未验证”，不会把证书列举当成验签结果。`AHA2_OSSLSIGNCODE`
+可指定验签工具，`AHA2_NODE_SIGNATURE_POLICY=require` 可要求没有验签工具时
+直接失败。安装包本身的 Authenticode 签名/升级仍由 Windows 发布流程负责。
 若内置运行时缺失或损坏，资源页显示 `browser_host_node_missing` 并失败关闭。
 
 ## 手工启动（排障）

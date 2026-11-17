@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -165,6 +166,67 @@ func TestHostManagerReadinessProbeStaysShort(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed > 4*time.Second {
 		t.Fatalf("readiness probe waited %v; it must stay on the short probe timeout", elapsed)
+	}
+}
+
+// TestDiscoverNodeFallsBackToCommonPaths models a Windows machine where the
+// packaged runtime is missing, PATH has no Node, but %ProgramFiles%\nodejs
+// exists. The packaged-path candidate being absent must not suppress the
+// common install-location candidates.
+func TestDiscoverNodeFallsBackToCommonPaths(t *testing.T) {
+	executableDir := t.TempDir() // no node/node.exe under the install dir
+	pathDir := t.TempDir()
+	t.Setenv("PATH", pathDir)
+	t.Setenv("AHA2_NODE_PATH", "")
+	common := filepath.Join(t.TempDir(), "node.exe")
+	if err := os.WriteFile(common, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	node, err := discoverNodeWith("", executableDir, []string{common})
+	if err != nil || node != common {
+		t.Fatalf("fallback runtime=%q err=%v, want %q", node, err, common)
+	}
+}
+
+func TestDiscoverNodeExplicitOverrideFailsClosed(t *testing.T) {
+	executableDir := t.TempDir()
+	bundled := filepath.Join(executableDir, "node", "node.exe")
+	if err := os.MkdirAll(filepath.Dir(bundled), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bundled, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	common := filepath.Join(t.TempDir(), "node.exe")
+	if err := os.WriteFile(common, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(t.TempDir(), "missing-node")
+	t.Setenv("AHA2_NODE_PATH", "")
+	if _, err := discoverNodeWith(missing, executableDir, []string{common}); err == nil {
+		t.Fatal("invalid explicit override fell back to a working runtime")
+	}
+	t.Setenv("AHA2_NODE_PATH", missing)
+	if _, err := discoverNode("", executableDir); err == nil {
+		t.Fatal("invalid AHA2_NODE_PATH fell back to a working runtime")
+	}
+}
+
+func TestWindowsNodeCandidatesCoverInstallLocations(t *testing.T) {
+	programFiles := "/Program Files"
+	programFilesX86 := "/Program Files (x86)"
+	localAppData := "/Users/owner/AppData/Local"
+	got := windowsNodeCandidates(programFiles, programFilesX86, localAppData)
+	want := []string{
+		filepath.Join(programFiles, "Programs", "nodejs", "node.exe"),
+		filepath.Join(programFiles, "nodejs", "node.exe"),
+		filepath.Join(programFilesX86, "Programs", "nodejs", "node.exe"),
+		filepath.Join(programFilesX86, "nodejs", "node.exe"),
+		filepath.Join(localAppData, "Programs", "nodejs", "node.exe"),
+		filepath.Join(localAppData, "nodejs", "node.exe"),
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("windows candidates=%v, want %v", got, want)
 	}
 }
 

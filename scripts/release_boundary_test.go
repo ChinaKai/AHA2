@@ -645,6 +645,59 @@ func copySourceTree(t *testing.T, source, dest string) {
 	}
 }
 
+// TestWindowsPackageBuildRejectsTamperedCachedNode exercises the AHA2_NODE_EXE
+// cache entry: it is pinned to the official node.exe hash for the selected
+// version, so a tampered file must fail the build before it can claim to stage
+// runtime 22.23.5. It fails fast (Node staging runs before the Web build).
+func TestWindowsPackageBuildRejectsTamperedCachedNode(t *testing.T) {
+	bash := requirePackageBuildTools(t)
+	root := repoRoot(t)
+	dir := t.TempDir()
+	node := filepath.Join(dir, "node.exe")
+	// Prefer a real official node.exe when the caller provides one, so the
+	// regression is the exact "official file with one byte changed" case.
+	nodeBytes := []byte("not the official node runtime")
+	if official := strings.TrimSpace(os.Getenv("AHA2_TEST_OFFICIAL_NODE_EXE")); official != "" {
+		data, err := os.ReadFile(official)
+		if err != nil {
+			t.Fatalf("read AHA2_TEST_OFFICIAL_NODE_EXE: %v", err)
+		}
+		data[len(data)/2] ^= 0xFF
+		nodeBytes = data
+	}
+	if err := os.WriteFile(node, nodeBytes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	license := filepath.Join(dir, "LICENSE")
+	if err := os.WriteFile(license, []byte("test license"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(dir, "package")
+	cmd := exec.Command(bash, buildScriptPath(root),
+		"--version", "1.2.3",
+		"--commit", "0123456789abcdef0123456789abcdef01234567",
+		"--output-dir", output,
+		"--skip-web-test",
+	)
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(),
+		"VERSION=",
+		"AHA2_NODE_EXE="+node,
+		"AHA2_NODE_LICENSE="+license,
+		"AHA2_NODE_SIGNATURE_POLICY=warn",
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("tampered cached node.exe was accepted:\n%s", out)
+	}
+	if !strings.Contains(string(out), "Cached node.exe SHA-256 mismatch") {
+		t.Fatalf("build failed for the wrong reason:\n%s", out)
+	}
+	if strings.Contains(string(out), "Bundled Node runtime:") {
+		t.Fatalf("build claimed to stage the tampered runtime:\n%s", out)
+	}
+}
+
 func buildScriptPath(root string) string {
 	return filepath.Join(root, "scripts", "build-windows-package.sh")
 }
