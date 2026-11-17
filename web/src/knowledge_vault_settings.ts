@@ -21,7 +21,7 @@ interface SettingsPanelState {
   settings: KnowledgeVaultSettings | null;
   error: string;
   unsupported: boolean;
-  busy: "" | "toggle" | "init" | "migrate" | "import";
+  busy: "" | "toggle" | "init" | "migrate" | "import" | "auto-sync";
   // The import fold is re-rendered when a request starts, so its mode, open
   // state and draft survive that render instead of collapsing mid-import.
   importKind: "local" | "git";
@@ -57,6 +57,41 @@ const localText: Record<string, [zhCN: string, enUS: string]> = {
   "kvs.source.line": ["状态来源：{source}", "State source: {source}"],
   "kvs.source.database": ["数据库设置", "saved setting"],
   "kvs.source.startup": ["启动默认", "startup default"],
+
+  "kvs.autosync.title": ["自动同步", "Auto-sync"],
+  "kvs.autosync.switch": ["自动提交、拉取和推送", "Auto commit, pull and push"],
+  "kvs.autosync.help": ["外部编辑安静 30 秒后自动提交；AHA 写入立即提交。只提交 vault 根内的文本文件，冲突时停止自动流程并只通知一次。", "External edits commit after 30 quiet seconds; AHA writes commit immediately. Only text files inside the vault root are committed; a conflict stops the automatic flow and notifies once."],
+  "kvs.autosync.on": ["已开启", "On"],
+  "kvs.autosync.off": ["已关闭", "Off"],
+  "kvs.autosync.paused": ["已暂停", "Paused"],
+  "kvs.autosync.conflictBadge": ["冲突", "Conflict"],
+  "kvs.autosync.lastSync": ["最后同步", "Last sync"],
+  "kvs.autosync.never": ["尚未同步", "Never synced"],
+  "kvs.autosync.pending": ["待提交文件", "Pending files"],
+  "kvs.autosync.pendingValue": ["{count} 个", "{count} files"],
+  "kvs.autosync.pendingOne": ["1 个", "1 file"],
+  "kvs.autosync.lastError": ["上次错误", "Last error"],
+  "kvs.autosync.none": ["无", "None"],
+  "kvs.autosync.pauseReason": ["暂停原因", "Pause reason"],
+  "kvs.autosync.conflictState": ["冲突状态", "Conflict status"],
+  "kvs.autosync.conflictNone": ["无冲突", "No conflict"],
+  "kvs.autosync.conflictStopped": ["检测到远端分叉，已停止自动同步；本地提交未改动", "Remote divergence detected; automatic sync stopped without touching local commits"],
+  "kvs.autosync.blockedFiles": ["被阻止文件", "Blocked files"],
+  "kvs.autosync.blockedValue": ["{count} 个：{files}", "{count}: {files}"],
+  "kvs.autosync.reason.vault_not_initialized": ["知识库未初始化", "Vault not initialized"],
+  "kvs.autosync.reason.not_git_repository": ["知识库不是 Git 仓库", "Vault is not a Git repository"],
+  "kvs.autosync.reason.no_commit": ["仓库还没有提交", "Repository has no commit"],
+  "kvs.autosync.reason.preflight_failed": ["行尾迁移 preflight 失败", "Line-ending preflight failed"],
+  "kvs.autosync.reason.conflict": ["远端分叉", "Remote divergence"],
+  "kvs.autosync.reason.unmerged": ["工作区有未解决冲突", "Unresolved worktree conflict"],
+  "kvs.autosync.reason.pull_failed": ["拉取失败", "Pull failed"],
+  "kvs.autosync.reason.push_failed": ["推送失败", "Push failed"],
+  "kvs.autosync.reason.scan_failed": ["读取工作区失败", "Worktree scan failed"],
+  "kvs.autosync.reason.commit_failed": ["自动提交失败", "Auto commit failed"],
+  "kvs.autosync.reason.sync_unavailable": ["自动同步运行时未启动", "Auto-sync runtime is not running"],
+  "kvs.msg.autoSyncOn": ["自动同步已开启", "Auto-sync enabled"],
+  "kvs.msg.autoSyncOff": ["自动同步已关闭；仍可手动同步", "Auto-sync disabled; manual sync is still available"],
+  "kvs.msg.autoSyncFailed": ["切换自动同步失败：{error}", "Failed to change auto-sync: {error}"],
 
   "kvs.health.title": ["Vault 健康", "Vault health"],
   "kvs.health.ok": ["正常", "Healthy"],
@@ -400,6 +435,26 @@ async function setEnabled(enabled: boolean): Promise<void> {
   }
 }
 
+async function setAutoSync(enabled: boolean): Promise<void> {
+  const context = activeContext;
+  if (state.busy || context === null || state.settings?.auto_sync?.enabled === enabled) return;
+  state.busy = "auto-sync";
+  state.error = "";
+  context.render();
+  try {
+    const result = await api.updateKnowledgeVaultAutoSync(enabled);
+    applySettings(result.settings, context);
+    context.setMessage("notice", kt(enabled ? "kvs.msg.autoSyncOn" : "kvs.msg.autoSyncOff"));
+  } catch (error) {
+    state.error = errorMessage(error);
+    context.setMessage("error", kt("kvs.msg.autoSyncFailed", {error: state.error}));
+    await loadSettings(context);
+  } finally {
+    state.busy = "";
+    context.render();
+  }
+}
+
 async function initializeSamples(): Promise<void> {
   const context = activeContext;
   if (state.busy || context === null) return;
@@ -578,6 +633,58 @@ function attentionFor(settings: KnowledgeVaultSettings): Attention | null {
   return null;
 }
 
+function pauseReasonLabel(reason?: string): string {
+  if (!reason) return "";
+  const key = `kvs.autosync.reason.${reason}`;
+  const label = kt(key);
+  return label && label !== key ? label : reason;
+}
+
+function syncTimeLabel(value?: string): string {
+  if (!value) return "";
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString(currentLocale());
+}
+
+function autoSyncHTML(settings: KnowledgeVaultSettings, busy: string): string {
+  const auto = settings.auto_sync;
+  // Older servers do not send the status block at all; keep the panel usable.
+  if (!auto) return "";
+  const badge = auto.conflict
+    ? {label: kt("kvs.autosync.conflictBadge"), tone: "is-bad"}
+    : !auto.enabled
+      ? {label: kt("kvs.autosync.off"), tone: ""}
+      : auto.paused
+        ? {label: kt("kvs.autosync.paused"), tone: "is-warn"}
+        : {label: kt("kvs.autosync.on"), tone: "is-ok"};
+  const lastSync = syncTimeLabel(auto.last_sync_at) || kt("kvs.autosync.never");
+  const pending = kt(auto.pending === 1 ? "kvs.autosync.pendingOne" : "kvs.autosync.pendingValue", {count: auto.pending});
+  const lastError = auto.last_error ? escapeHTML(auto.last_error) : kt("kvs.autosync.none");
+  const pauseReason = auto.paused ? pauseReasonLabel(auto.pause_reason) : "";
+  const conflict = auto.conflict
+    ? escapeHTML(auto.conflict_detail || kt("kvs.autosync.conflictStopped"))
+    : kt("kvs.autosync.conflictNone");
+  const blockedFiles = (auto.blocked_files ?? []);
+  const blocked = blockedFiles.length
+    ? `<div><dt>${kt("kvs.autosync.blockedFiles")}</dt><dd>${kt("kvs.autosync.blockedValue", {
+      count: auto.blocked || blockedFiles.length,
+      files: escapeHTML(blockedFiles.slice(0, 5).map(item => `${item.path} (${item.reason})`).join("、")),
+    })}</dd></div>`
+    : "";
+  return `<div class="knowledge-vault-group knowledge-vault-autosync">
+    <div class="knowledge-vault-group-head"><h3>${kt("kvs.autosync.title")}</h3><span class="knowledge-vault-badge ${badge.tone}">${badge.label}</span></div>
+    <label class="security-setting-toggle knowledge-vault-toggle"><input id="knowledge-vault-auto-sync" name="knowledge_vault_auto_sync" type="checkbox" ${auto.enabled ? "checked" : ""} ${busy ? "disabled" : ""}><span><strong>${kt("kvs.autosync.switch")}</strong><small>${kt("kvs.autosync.help")}</small></span></label>
+    <dl class="knowledge-vault-facts">
+      <div><dt>${kt("kvs.autosync.lastSync")}</dt><dd>${escapeHTML(lastSync)}</dd></div>
+      <div><dt>${kt("kvs.autosync.pending")}</dt><dd>${pending}</dd></div>
+      <div><dt>${kt("kvs.autosync.lastError")}</dt><dd>${lastError}</dd></div>
+      ${pauseReason ? `<div><dt>${kt("kvs.autosync.pauseReason")}</dt><dd>${escapeHTML(pauseReason)}</dd></div>` : ""}
+      <div><dt>${kt("kvs.autosync.conflictState")}</dt><dd>${conflict}</dd></div>
+      ${blocked}
+    </dl>
+  </div>`;
+}
+
 function attentionHTML(attention: Attention | null): string {
   if (!attention) return "";
   const missing = attention.missing.length
@@ -736,6 +843,7 @@ function settingsBody(): string {
   const blocked = !settings.enabled && !settings.readiness.can_enable;
   return `
     ${switchHTML(settings, busy, blocked)}
+    ${autoSyncHTML(settings, busy)}
     ${healthHTML(settings, busy)}
     ${legacyHTML(settings, busy)}
     ${state.error ? `<div class="security-warning active" role="alert">${escapeHTML(state.error)}</div>` : ""}
@@ -765,6 +873,8 @@ export function bindKnowledgeVaultSettingsPanel(context: KnowledgeVaultSettingsC
   activeContext = context;
   const toggle = document.querySelector<HTMLInputElement>("#knowledge-vault-enabled");
   toggle?.addEventListener("change", () => { void setEnabled(toggle.checked); });
+  const autoSync = document.querySelector<HTMLInputElement>("#knowledge-vault-auto-sync");
+  autoSync?.addEventListener("change", () => { void setAutoSync(autoSync.checked); });
   document.querySelector<HTMLButtonElement>("#knowledge-vault-init")?.addEventListener("click", () => { void initializeSamples(); });
   document.querySelector<HTMLButtonElement>("#knowledge-vault-migrate")?.addEventListener("click", () => { void migrateLegacy(); });
   document.querySelector<HTMLButtonElement>("#knowledge-vault-import")?.addEventListener("click", () => { void importExistingVault(); });
@@ -797,4 +907,4 @@ export function __resetKnowledgeVaultSettingsForTest(): void {
   pendingLoad = null;
 }
 
-export const __knowledgeVaultSettingsActionsForTest = {setEnabled, initializeSamples, migrateLegacy, importExistingVault};
+export const __knowledgeVaultSettingsActionsForTest = {setEnabled, setAutoSync, initializeSamples, migrateLegacy, importExistingVault};

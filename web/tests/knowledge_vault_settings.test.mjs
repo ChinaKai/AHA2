@@ -803,3 +803,48 @@ test("an unknown missing id is escaped exactly once", async () => {
     restore();
   }
 });
+
+test("auto-sync section shows the persisted switch, pause reason and blocked files", async () => {
+  panel.__resetKnowledgeVaultSettingsForTest();
+  const autoSync = {
+    enabled: true,
+    running: false,
+    paused: true,
+    pause_reason: "conflict",
+    conflict: true,
+    conflict_detail: "本地 abc，远端 def 已分叉",
+    last_sync_at: "2026-11-16T10:00:00Z",
+    pending: 2,
+    blocked: 1,
+    blocked_files: [{path: "assets/logo.png", reason: "binary"}],
+    failures: 1,
+    preflight_done: true,
+  };
+  const settings = {...ready, auto_sync: autoSync};
+  const calls = [];
+  const restoreGet = stub("knowledgeVaultSettings", async () => ({ok: true, settings}));
+  const restorePut = stub("updateKnowledgeVaultAutoSync", async enabled => {
+    calls.push(enabled);
+    return {ok: true, settings: {...settings, auto_sync: {...autoSync, enabled}}};
+  });
+  try {
+    const ctx = context();
+    await panel.refreshKnowledgeVaultSettingsPanel(ctx);
+    const html = panel.renderKnowledgeVaultSettingsPanel(ctx);
+    assert.match(html, /<h3>自动同步<\/h3>/);
+    assert.match(html, /id="knowledge-vault-auto-sync"[^>]*checked/);
+    assert.match(html, /class="knowledge-vault-badge is-bad">冲突</);
+    assert.match(html, /暂停原因<\/dt><dd>远端分叉/);
+    assert.match(html, /本地 abc，远端 def 已分叉/);
+    assert.match(html, /assets\/logo\.png \(binary\)/);
+    assert.match(html, /待提交文件<\/dt><dd>2 个/);
+
+    await panel.__knowledgeVaultSettingsActionsForTest.setAutoSync(false);
+    assert.deepEqual(calls, [false]);
+    assert.equal(ctx.applied.at(-1).auto_sync.enabled, false);
+    assert.ok(ctx.messages.some(message => message.kind === "notice" && message.message.includes("自动同步已关闭")));
+  } finally {
+    restoreGet();
+    restorePut();
+  }
+});

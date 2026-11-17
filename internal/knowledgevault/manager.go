@@ -42,6 +42,13 @@ type Manager struct {
 	autoMu     sync.Mutex
 	auto       autoIndexState
 	autoCancel context.CancelFunc
+	// gitMu serializes every mutating git operation on this vault. Manual Git
+	// operations and the background auto-sync share it.
+	gitMu sync.Mutex
+	// autoCommitMu guards the requester field only. requestAutoCommit is called
+	// while m.mu is write-locked, so it cannot use m.mu itself.
+	autoCommitMu        sync.RWMutex
+	autoCommitRequester func()
 }
 
 // The effective switch comes either from the persisted database row or from
@@ -129,6 +136,25 @@ func (m *Manager) RuntimeWriteEnabled() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.runtimeWrite
+}
+
+// SetAutoCommitRequester installs the background auto-sync hook. It is called
+// by the syncer wiring; a nil hook keeps every write purely local. The hook
+// must return immediately and must not take Manager.mu (writers call it while
+// holding the write lock).
+func (m *Manager) SetAutoCommitRequester(fn func()) {
+	m.autoCommitMu.Lock()
+	m.autoCommitRequester = fn
+	m.autoCommitMu.Unlock()
+}
+
+func (m *Manager) requestAutoCommit() {
+	m.autoCommitMu.RLock()
+	fn := m.autoCommitRequester
+	m.autoCommitMu.RUnlock()
+	if fn != nil {
+		fn()
+	}
 }
 
 func (m *Manager) setWriteBudgetForTest(budget int) {
@@ -291,6 +317,7 @@ func (m *Manager) ProvisionProjectSpace(ctx context.Context, projectID, projectN
 	if _, err := m.rebuildLocked(ctx); err != nil {
 		return result, err
 	}
+	m.requestAutoCommit()
 	return result, nil
 }
 
@@ -310,11 +337,13 @@ func (m *Manager) ArchiveProjectSpace(ctx context.Context, projectID string) (st
 		return archivedPath, err
 	}
 	if !needsRebuild {
+		m.requestAutoCommit()
 		return archivedPath, nil
 	}
 	if _, err := m.rebuildLocked(ctx); err != nil {
 		return archivedPath, fmt.Errorf("rebuild index after archiving project space: %w", err)
 	}
+	m.requestAutoCommit()
 	return archivedPath, nil
 }
 
@@ -323,7 +352,11 @@ func (m *Manager) ArchiveProjectSpace(ctx context.Context, projectID string) (st
 func (m *Manager) RenameProjectSpace(projectID, name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return RenameProjectSpace(m.config, projectID, name)
+	if err := RenameProjectSpace(m.config, projectID, name); err != nil {
+		return err
+	}
+	m.requestAutoCommit()
+	return nil
 }
 
 // Rebuild closes the Reader, rebuilds the index from files, then opens a fresh
@@ -446,6 +479,7 @@ func (m *Manager) Initialize(ctx context.Context, samples bool) (SampleInitResul
 	}
 	m.reader = reader
 	m.enabled = true
+	m.requestAutoCommit()
 	return result, nil
 }
 

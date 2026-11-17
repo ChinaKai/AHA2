@@ -73,6 +73,10 @@ type Config struct {
 	// production so routes can stay registered and report "disabled" with a
 	// 404 while the switch is off. The legacy knowledge routes never change.
 	KnowledgeVault *knowledgevault.Manager
+	// KnowledgeVaultSync is the background auto-sync engine. Nil keeps the
+	// settings panel informative but without automatic Git operations (tests
+	// and support commands do not need a loop).
+	KnowledgeVaultSync *knowledgevault.Syncer
 	// BackupPreviewTimeout overrides the data-management backup scan deadline.
 	// Zero keeps the production default; tests use a very short value to
 	// exercise the 504 response without waiting ten seconds.
@@ -131,6 +135,7 @@ type Server struct {
 	systemCache              map[string]any
 	runtimeContextCache      runtimeContextCache
 	knowledgeVault           *knowledgevault.Manager
+	knowledgeVaultSync       *knowledgevault.Syncer
 	// revealPath opens a vault path in the host file manager. It is nil in
 	// production (the platform opener is used) and injectable in tests so a
 	// loopback request never launches a real file manager under `go test`.
@@ -233,6 +238,7 @@ func New(config Config) *Server {
 		authLimiter:              newAuthLimiter(),
 		modelDetectionJobs:       newModelDetectionJobs(),
 		knowledgeVault:           config.KnowledgeVault,
+		knowledgeVaultSync:       config.KnowledgeVaultSync,
 		backupPreviewTimeout:     config.BackupPreviewTimeout,
 	}
 	if server.webVersion == "" {

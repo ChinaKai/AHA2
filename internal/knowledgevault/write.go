@@ -349,6 +349,7 @@ func (m *Manager) WriteKnowledge(ctx context.Context, request WriteRequest) (Wri
 		// instead of pretending the write did not happen.
 		return result, fmt.Errorf("record agent knowledge write: %w", err)
 	}
+	m.requestAutoCommit()
 	return result, nil
 }
 
@@ -446,6 +447,7 @@ func (m *Manager) KnowledgeFeedback(ctx context.Context, request FeedbackRequest
 	if err := m.saveAgentStateLocked(state); err != nil {
 		return result, fmt.Errorf("record agent knowledge feedback: %w", err)
 	}
+	m.requestAutoCommit()
 	return result, nil
 }
 

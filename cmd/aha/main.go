@@ -462,6 +462,18 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 			"errors", reconcile.MarkedError,
 			"orphans", reconcile.Orphans, "warnings", len(reconcile.Warnings))
 	}
+	// Background auto-sync commits gated text changes, runs pull --ff-only and
+	// pushes. The syncer is wired only after reconciliation so its first
+	// preflight sees the final space layout; it never runs without the owner
+	// switch and never merges, resets or force-pushes.
+	knowledgeVaultSyncer := knowledgevault.NewSyncer(knowledgeVaultManager, database, knowledgevault.SyncerConfig{
+		Emit: func(event knowledgevault.SyncEvent) {
+			appService.RecordKnowledgeSyncEvent(context.Background(), event.Kind, event.Detail)
+		},
+	})
+	knowledgeVaultManager.SetAutoCommitRequester(knowledgeVaultSyncer.NotifyWrite)
+	knowledgeVaultSyncer.Start(ctx)
+	defer knowledgeVaultSyncer.Stop()
 	appService.SetBuildInfo(version, webVersion, time.Now().UTC())
 	appService.MigratePetTaskGoal(ctx)
 	appService.StartPetTaskNotifications()
@@ -533,6 +545,7 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 		ListenAddress:       options.listen,
 		LocalOwnerIngest:    options.localOwnerIngest,
 		KnowledgeVault:      knowledgeVaultManager,
+		KnowledgeVaultSync:  knowledgeVaultSyncer,
 	})
 	if options.allowCrossOrigin {
 		logger.Warn("Origin host validation disabled")
