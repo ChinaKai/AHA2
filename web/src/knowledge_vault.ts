@@ -129,6 +129,8 @@ const localText: Record<string, [zhCN: string, enUS: string]> = {
   "kv.autoSyncOff": ["已关闭", "Off"],
   "kv.autoSyncPaused": ["已暂停", "Paused"],
   "kv.autoSyncConflict": ["冲突", "Conflict"],
+  "kv.autoSyncConflictState": ["冲突状态", "Conflict status"],
+  "kv.autoSyncConflictStopped": ["检测到远端分叉，已停止自动同步；本地提交未改动", "Remote divergence detected; automatic sync stopped without touching local commits"],
   "kv.autoSyncBusy": ["保存中…", "Saving…"],
   "kv.autoSyncEnabledNotice": ["自动同步已开启", "Auto-sync enabled"],
   "kv.autoSyncDisabledNotice": ["自动同步已关闭；手动 Git 操作仍可用", "Auto-sync disabled; manual Git actions still work"],
@@ -152,6 +154,7 @@ const localText: Record<string, [zhCN: string, enUS: string]> = {
   "kv.autoSyncReason.no_commit": ["仓库还没有提交", "Repository has no commit"],
   "kv.autoSyncReason.conflict": ["远端分叉", "Remote divergence"],
   "kv.autoSyncReason.unmerged": ["工作区有未解决冲突", "Unresolved worktree conflict"],
+  "kv.autoSyncReason.sync_unavailable": ["自动同步运行时未启动", "Auto-sync runtime is not running"],
   "kv.autoSyncReason.pull_failed": ["拉取失败", "Pull failed"],
   "kv.autoSyncReason.push_failed": ["推送失败", "Push failed"],
   "kv.autoSyncReason.push_rejected": ["推送被拒绝", "Push rejected"],
@@ -2166,6 +2169,12 @@ function autoSyncSectionHTML(): string {
     const pauseReason = auto.paused && auto.pause_reason
       ? `<div><dt>${kt("kv.autoSyncPauseReason")}</dt><dd class="kv-settings-value">${escapeVaultHTML(autoSyncPauseReasonLabel(auto.pause_reason))}</dd></div>`
       : "";
+    // Divergence details are assembled from commit ids and file names; they
+    // are still untrusted input and must stay escaped. An empty detail keeps
+    // the fact that automatic sync stopped instead of hiding the row.
+    const conflict = auto.conflict === true
+      ? `<div><dt>${kt("kv.autoSyncConflictState")}</dt><dd class="kv-settings-value">${escapeVaultHTML(auto.conflict_detail || kt("kv.autoSyncConflictStopped"))}</dd></div>`
+      : "";
     const lastError = auto.last_error
       ? `<div><dt>${kt("kv.autoSyncLastError")}</dt><dd class="kv-settings-value">${escapeVaultHTML(auto.last_error)}</dd></div>`
       : "";
@@ -2188,7 +2197,7 @@ function autoSyncSectionHTML(): string {
       <dl>
         <div><dt>${kt("kv.autoSyncLastSync")}</dt><dd class="kv-settings-value">${escapeVaultHTML(lastSync)}</dd></div>
         <div><dt>${kt("kv.autoSyncPending")}</dt><dd class="kv-settings-value">${auto.pending ?? 0}</dd></div>
-        ${pauseReason}${lastError}${warning}${blocked}
+        ${pauseReason}${conflict}${lastError}${warning}${blocked}
       </dl>
       ${notice}`;
   }
@@ -3491,6 +3500,8 @@ export function __getKnowledgeVaultStateForTest(): VaultState {
 }
 
 export const __setVaultAutoSyncForTest = setVaultAutoSync;
+export const __loadVaultSettingsForTest = loadVaultSettings;
+export const __loadVaultGitStatusForTest = loadVaultGitStatus;
 export const __loadTreeForTest = loadTree;
 export const __loadRecentForTest = loadRecent;
 export const __loadInboxForTest = loadInbox;

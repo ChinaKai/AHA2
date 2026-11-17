@@ -103,9 +103,10 @@ func TestAutoCommitSelectsTextAndBlocksUnsafeChanges(t *testing.T) {
 
 // TestAutoCommitGateShapeOfReportedPreflightFiles recreates the path, size,
 // line-ending, frontmatter and body shape of the two files reported in the
-// Windows vault. Neither path nor size nor LF/UTF-8/no-NUL content trips a
-// gate, which leaves the content secret scan as the only rule that can block
-// such a file. The second half proves that a real secret-looking line does.
+// Windows vault (not their real content). Path, size, extension and binary
+// rules do not block this shape. The second half shows that the broad
+// forbiddenKnowledgePatterns assignment rule can flag a token-like line; the
+// production blocker still needs the reported path/reason to confirm.
 func TestAutoCommitGateShapeOfReportedPreflightFiles(t *testing.T) {
 	ctx := context.Background()
 	config, git := newGitTestVault(t)
@@ -161,8 +162,8 @@ func TestAutoCommitGateShapeOfReportedPreflightFiles(t *testing.T) {
 		t.Fatalf("reported-shape scan = %+v, want both files eligible", scan)
 	}
 
-	// A token assignment is the content-level rule that can block an otherwise
-	// valid markdown file. The gate stays; the status now names this reason.
+	// A token assignment is one content-level case the broad assignment rule
+	// catches. The gate stays; the status now names this reason.
 	secretDoc := inboxDoc + "\ntoken = 0123456789abcdef\n"
 	writeGitTestFile(t, config.VaultPath, inboxPath, secretDoc)
 	blockedScan, err := git.ScanAutoCommit(ctx)
