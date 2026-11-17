@@ -5,7 +5,7 @@ import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {createHostServer} from "./server.mjs";
 
-async function startHost({launchFailure = false, tabGoto = null, pageClose = null, screenshotFailure = false, initialURL = "https://example.com/final", initialURLs = null, beforeMutation = null, fenceWaitTimeoutMs, beforeBookmarkOpen = null} = {}) {
+async function startHost({launchFailure = false, tabGoto = null, pageClose = null, screenshotFailure = false, initialURL = "https://example.com/final", initialURLs = null, beforeMutation = null, fenceWaitTimeoutMs, beforeBookmarkOpen = null, failLeaseHold = false} = {}) {
   const root = await mkdtemp(join(tmpdir(), "aha2-browser-host-"));
   let screenshots = 0;
   let shutdownCalls = 0;
@@ -63,6 +63,7 @@ async function startHost({launchFailure = false, tabGoto = null, pageClose = nul
     onShutdown: () => { shutdownCalls++; },
     beforeMutation,
     beforeBookmarkOpen,
+    failLeaseHold,
     ...(fenceWaitTimeoutMs ? {fenceWaitTimeoutMs} : {}),
   });
   await new Promise(resolve => host.server.listen(0, "127.0.0.1", resolve));
@@ -489,7 +490,7 @@ test("fence switch times out without changing the old fence", async () => {
   }
 });
 
-test("expired fence rejects a paused old mutation", async () => {
+test("lease hold lets a paused mutation finish after the original expiry, then expires", async () => {
   let pause = false;
   let enteredResolve;
   let releaseMutation;
@@ -518,17 +519,63 @@ test("expired fence rejects a paused old mutation", async () => {
     await new Promise(resolve => setTimeout(resolve, 300));
     releaseMutation();
     const closed = await closePromise;
-    assert.equal(closed.status, 409);
-    assert.equal(closed.body.error.code, "browser_fence_expired");
+    assert.equal(closed.status, 200, "an operation admitted while the lease was live may finish");
     const after = await host.call("GET", "/v1/profiles/browser_profile_1/tabs");
-    assert.ok(after.body.tabs.some(tab => tab.id === tabID));
+    assert.ok(!after.body.tabs.some(tab => tab.id === tabID));
+    const late = await host.call("POST", "/v1/profiles/browser_profile_1/tabs", {
+      url: "https://example.com/late", fence: expiring,
+    });
+    assert.equal(late.status, 409);
+    assert.equal(late.body.error.code, "browser_fence_expired", "the hold must end with the operation");
   } finally {
     await host.close();
   }
 });
 
+test("a fence switch waits for an admitted page.close and closes exactly once", async () => {
+  let enteredResolve;
+  let releaseClose;
+  let pause = false;
+  const host = await startHost({
+    pageClose: async () => {
+      if (!pause) return;
+      pause = false;
+      enteredResolve();
+      await new Promise(resolve => { releaseClose = resolve; });
+    },
+  });
+  try {
+    let result = await host.call("POST", "/v1/profiles/browser_profile_1/session", {browser_kind: "edge"});
+    const sessionID = result.body.session.id;
+    result = await host.call("POST", "/v1/profiles/browser_profile_1/tabs", {url: "https://example.com"});
+    const tabID = result.body.tab.id;
+    const fence = `grant-1@${Date.now() + 60_000}`;
+    await host.call("POST", "/v1/profiles/browser_profile_1/fence", {
+      session_id: sessionID, expected_fence: "", fence,
+    });
+    const entered = new Promise(resolve => { enteredResolve = resolve; });
+    pause = true;
+    const closePromise = host.call("DELETE", `/v1/profiles/browser_profile_1/tabs/${tabID}?fence=${encodeURIComponent(fence)}`);
+    await entered;
+    const switchPromise = host.call("POST", "/v1/profiles/browser_profile_1/fence", {
+      session_id: sessionID, expected_fence: fence, fence: `grant-2@${Date.now() + 60_000}`,
+    });
+    const sessionDuring = await host.call("GET", "/v1/profiles/browser_profile_1/session");
+    assert.match(sessionDuring.body.session.fence, /^grant-2@/, "the new fence is visible before the writer takes over");
+    releaseClose();
+    const closed = await closePromise;
+    const switched = await switchPromise;
+    assert.equal(closed.status, 200, "the admitted close must not be invalidated by the switch");
+    assert.equal(switched.status, 200);
+    assert.equal(host.page().closed, 1);
+    const after = await host.call("GET", "/v1/profiles/browser_profile_1/tabs");
+    assert.ok(!after.body.tabs.some(tab => tab.id === tabID));
+  } finally {
+    await host.close();
+  }
+});
 
-test("expired fence detected after page.close reopens the page and rejects the close", async () => {
+test("lease hold keeps page.close valid past the original expiry", async () => {
   let enteredResolve;
   let releaseClose;
   let pause = false;
@@ -556,17 +603,21 @@ test("expired fence detected after page.close reopens the page and rejects the c
     await new Promise(resolve => setTimeout(resolve, 300));
     releaseClose();
     const closed = await closePromise;
-    assert.equal(closed.status, 409);
-    assert.equal(closed.body.error.code, "browser_fence_expired");
+    assert.equal(closed.status, 200);
+    assert.equal(host.page().closed, 1);
     const after = await host.call("GET", "/v1/profiles/browser_profile_1/tabs");
-    assert.ok(after.body.tabs.some(tab => tab.id === tabID && tab.url === "https://example.com/"),
-      "a close that expires inside page.close must restore the page");
+    assert.ok(!after.body.tabs.some(tab => tab.id === tabID));
+    const late = await host.call("POST", "/v1/profiles/browser_profile_1/tabs", {
+      url: "https://example.com/late", fence: expiring,
+    });
+    assert.equal(late.status, 409);
+    assert.equal(late.body.error.code, "browser_fence_expired");
   } finally {
     await host.close();
   }
 });
 
-test("expired fence detected after tab open closes the new page and rejects it", async () => {
+test("lease hold keeps a slow tab open valid past the original expiry", async () => {
   let enteredResolve;
   let releaseGoto;
   let pause = false;
@@ -594,17 +645,23 @@ test("expired fence detected after tab open closes the new page and rejects it",
     await new Promise(resolve => setTimeout(resolve, 300));
     releaseGoto();
     const opened = await openedPromise;
-    assert.equal(opened.status, 409);
-    assert.equal(opened.body.error.code, "browser_fence_expired");
-    assert.equal(host.page().closed, 1, "the late page must be closed");
+    assert.equal(opened.status, 201);
+    assert.equal(host.page().closed, 0);
     const after = await host.call("GET", "/v1/profiles/browser_profile_1/tabs");
-    assert.ok(!after.body.tabs.some(tab => tab.url === "https://example.com/late"));
+    assert.ok(after.body.tabs.some(tab => tab.url === "https://example.com/late"));
+    assert.equal(new Set(after.body.tabs.map(tab => tab.id)).size, after.body.tabs.length,
+      "one real page must map to exactly one host tab id");
+    const late = await host.call("POST", "/v1/profiles/browser_profile_1/tabs", {
+      url: "https://example.com/later", fence: expiring,
+    });
+    assert.equal(late.status, 409);
+    assert.equal(late.body.error.code, "browser_fence_expired");
   } finally {
     await host.close();
   }
 });
 
-test("expired fence detected after navigation restores the previous URL", async () => {
+test("lease hold keeps a slow navigation valid past the original expiry", async () => {
   let enteredResolve;
   let releaseGoto;
   let pause = false;
@@ -634,16 +691,58 @@ test("expired fence detected after navigation restores the previous URL", async 
     await new Promise(resolve => setTimeout(resolve, 300));
     releaseGoto();
     const navigated = await navigatePromise;
-    assert.equal(navigated.status, 409);
-    assert.equal(navigated.body.error.code, "browser_fence_expired");
+    assert.equal(navigated.status, 200);
     const after = await host.call("GET", "/v1/profiles/browser_profile_1/tabs");
     const tab = after.body.tabs.find(candidate => candidate.id === tabID);
     assert.ok(tab);
-    assert.equal(tab.url, "https://example.com/original");
+    assert.equal(tab.url, "https://example.com/late");
   } finally {
     await host.close();
   }
 });
+
+test("a mutation is rejected before page side effects when the lease hold cannot be established", async () => {
+  const host = await startHost({failLeaseHold: true});
+  try {
+    let result = await host.call("POST", "/v1/profiles/browser_profile_1/session", {browser_kind: "edge"});
+    const sessionID = result.body.session.id;
+    result = await host.call("POST", "/v1/profiles/browser_profile_1/tabs", {url: "https://example.com"});
+    const tabID = result.body.tab.id;
+    const fence = `grant-1@${Date.now() + 60_000}`;
+    await host.call("POST", "/v1/profiles/browser_profile_1/fence", {
+      session_id: sessionID, expected_fence: "", fence,
+    });
+    result = await host.call("DELETE", `/v1/profiles/browser_profile_1/tabs/${tabID}?fence=${encodeURIComponent(fence)}`);
+    assert.equal(result.status, 409);
+    assert.equal(result.body.error.code, "browser_lease_hold_failed");
+    assert.equal(host.page().closed, 0);
+    const after = await host.call("GET", "/v1/profiles/browser_profile_1/tabs");
+    assert.ok(after.body.tabs.some(tab => tab.id === tabID));
+  } finally {
+    await host.close();
+  }
+});
+test("an already-expired fence is rejected before opening a page", async () => {
+  const host = await startHost();
+  try {
+    let result = await host.call("POST", "/v1/profiles/browser_profile_1/session", {browser_kind: "edge"});
+    const sessionID = result.body.session.id;
+    const expired = `grant-1@${Date.now() - 1000}`;
+    await host.call("POST", "/v1/profiles/browser_profile_1/fence", {
+      session_id: sessionID, expected_fence: "", fence: expired,
+    });
+    result = await host.call("POST", "/v1/profiles/browser_profile_1/tabs", {
+      url: "https://example.com/late", fence: expired,
+    });
+    assert.equal(result.status, 409);
+    assert.equal(result.body.error.code, "browser_fence_expired");
+    const after = await host.call("GET", "/v1/profiles/browser_profile_1/tabs");
+    assert.ok(!after.body.tabs.some(tab => tab.url === "https://example.com/late"));
+  } finally {
+    await host.close();
+  }
+});
+
 test("rejects a parent directory swapped after the bookmark path check", async () => {
   let swapped = false;
   const host = await startHost({

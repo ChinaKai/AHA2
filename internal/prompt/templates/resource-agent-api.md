@@ -333,13 +333,15 @@ visible JPEG preview is read-only; it does not forward clicks or keystrokes.
 The Task may close any tab in the Profile, including an Owner-opened page, while
 it holds the lease. Releasing the lease (the DELETE above) does not close the
 visible browser; ask the Owner if you should keep it.
-Operations that were already in flight when control transfers/releases or the
-lease expires fail closed with `browser_fence_stale` / `browser_fence_expired`;
-do not retry them with the old grant.
+A control operation admitted while the lease is live holds its expiry until it
+finishes, so a close/navigate/open is never half-applied. A paused operation is
+still rejected with `browser_fence_stale` if transfer/release changes the fence
+before it starts, and any new operation after expiry fails with
+`browser_fence_expired`; do not retry either with the old grant.
 `browser_profile_in_use`, `browser_task_profile_limit`, `browser_grant_forbidden`,
 `browser_grant_revoked`, `browser_grant_expired`, `browser_fence_stale`, `browser_fence_expired`,
-`browser_fence_timeout` and `browser_capability_denied` are final: stop and ask the Owner instead of
-retrying or looking for another route.
+`browser_fence_timeout`, `browser_lease_hold_failed` and `browser_capability_denied` are final:
+stop and ask the Owner instead of retrying or looking for another route.
 
 ## Hardware
 

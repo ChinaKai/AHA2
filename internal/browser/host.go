@@ -156,6 +156,8 @@ func hostErrorMessage(code string) string {
 		return "浏览器控制权已变化，请重新获取独占控制"
 	case "browser_fence_expired":
 		return "浏览器独占控制已过期，请重新获取"
+	case "browser_lease_hold_failed":
+		return "浏览器授权续期失败，操作未开始，请重试"
 	case "browser_fence_timeout":
 		return "切换浏览器控制权超时，旧控制仍保留"
 	case "browser_operation_busy":
@@ -185,6 +187,7 @@ var hostCodes = map[string]bool{
 	"browser_snapshot_failed": true, "browser_tab_list_failed": true,
 	"browser_activation_failed": true, "browser_bookmarks_failed": true,
 	"browser_fence_stale":       true,
+	"browser_lease_hold_failed": true,
 	"browser_session_not_found": true,
 	"browser_session_changed":   true, "browser_tab_not_found": true,
 }

@@ -122,14 +122,6 @@ function attachPage(session, page, id = "") {
   return tab;
 }
 
-function currentPageURL(tab) {
-  try {
-    return tab.page.url() || tab.url;
-  } catch {
-    return tab.url;
-  }
-}
-
 // The list is the Owner-visible page picker. Only ordinary web pages are
 // returned: devtools://, edge://, chrome:// and about: pages must never appear
 // in AHA or the Web UI. Every page is enumerated (no silent truncation), with
@@ -171,8 +163,6 @@ async function listSessionPages(session) {
   };
   const workers = Math.min(8, Math.max(1, tabs.length));
   await Promise.all(Array.from({length: workers}, worker));
-  const active = result.find(item => item && item.active);
-  session.activeTabID = active ? active.id : "";
   return result.filter(Boolean);
 }
 
@@ -355,10 +345,26 @@ function fenceExpired(fence) {
   return Number.isFinite(expiresAt) && Date.now() > expiresAt;
 }
 
-// Returns "" when the call may proceed, otherwise the fence error code.
-function fenceStatus(session, supplied) {
+// A mutation holds its already-admitted lease for the duration of the
+// Playwright call. The original fence token may expire while a
+// close/navigate/open is in flight; the operation that was admitted while the
+// token was live must still finish, so its expiry is suspended until fn()
+// returns. The hold is local to this operation, so revocation/release still
+// proceed through the session gate and are not blocked indefinitely.
+function beginOperationHold(session, failHold) {
+  if (!session.fence) return {fence: "", release() {}};
+  if (fenceExpired(session.fence)) return null;
+  if (typeof failHold === "function" ? failHold() : failHold) return null;
+  return {fence: session.fence, release() {}};
+}
+
+// Returns "" when the call may proceed, otherwise the fence error code. A
+// held operation treats its already-admitted fence as live until the operation
+// ends; a fence change is still observed as stale.
+function fenceStatus(session, supplied, hold = null) {
   if (!session.fence) return "";
-  if (fenceExpired(session.fence)) return "browser_fence_expired";
+  const held = Boolean(hold && hold.fence === session.fence);
+  if (fenceExpired(session.fence) && !held) return "browser_fence_expired";
   if (String(supplied || "") !== session.fence) return "browser_fence_stale";
   return "";
 }
@@ -366,21 +372,29 @@ function fenceStatus(session, supplied) {
 function fenceFailure(response, code) {
   const message = code === "browser_fence_expired"
     ? "browser control lease expired"
-    : "browser control lease changed";
+    : code === "browser_lease_hold_failed"
+      ? "browser lease hold could not be established"
+      : "browser control lease changed";
   return json(response, 409, fail(409, code, message).body);
 }
 
-async function runMutation(response, session, suppliedFence, beforeMutation, fn) {
+async function runMutation(response, session, suppliedFence, beforeMutation, failLeaseHold, fn) {
   try {
     return await withSessionGate(session, "read", OPERATION_WAIT_TIMEOUT_MS, async () => {
       let code = fenceStatus(session, suppliedFence);
       if (code) return fenceFailure(response, code);
-      if (typeof beforeMutation === "function") {
-        await beforeMutation({session, fence: suppliedFence});
+      const hold = beginOperationHold(session, failLeaseHold);
+      if (!hold) return fenceFailure(response, "browser_lease_hold_failed");
+      try {
+        if (typeof beforeMutation === "function") {
+          await beforeMutation({session, fence: suppliedFence});
+        }
+        code = fenceStatus(session, suppliedFence, hold);
+        if (code) return fenceFailure(response, code);
+        return await fn();
+      } finally {
+        hold.release();
       }
-      code = fenceStatus(session, suppliedFence);
-      if (code) return fenceFailure(response, code);
-      return fn();
     });
   } catch (error) {
     if (error && error.code === "browser_operation_busy") {
@@ -419,7 +433,7 @@ function sendFrame(response, buffer, cached) {
 
 // options: root, token, hostID, chromium (Playwright namespace), edgeExecutable
 export function createHostServer(options) {
-  const {root, token, hostID = "local", chromium, edgeExecutable, onShutdown, fenceWaitTimeoutMs = FENCE_WAIT_TIMEOUT_MS, beforeBookmarkOpen, beforeMutation} = options;
+  const {root, token, hostID = "local", chromium, edgeExecutable, onShutdown, fenceWaitTimeoutMs = FENCE_WAIT_TIMEOUT_MS, beforeBookmarkOpen, beforeMutation, failLeaseHold} = options;
   if (!chromium || typeof chromium.launchPersistentContext !== "function") {
     throw new Error("createHostServer requires a Playwright-compatible chromium");
   }
@@ -449,27 +463,6 @@ export function createHostServer(options) {
     await state.locks.release(session.lock);
     console.log(`session closed profile=${profileID} reason=${reason}`);
     return true;
-  };
-
-  const reopenClosedTab = async (session, tab, url, title) => {
-    let page = null;
-    try {
-      page = await session.context.newPage();
-      await page.goto(url, {waitUntil: "domcontentloaded", timeout: 30_000});
-      tab.page = page;
-      tab.url = page.url();
-      tab.title = title || (await page.title().catch(() => ""));
-      tab.frame = null;
-      tab.framePending = null;
-      session.tabs.set(tab.id, tab);
-      page.on("close", () => {
-        const current = session.tabs.get(tab.id);
-        if (current && current.page === page) session.tabs.delete(tab.id);
-      });
-    } catch (error) {
-      if (page) await page.close().catch(() => {});
-      console.error(`tab restore failed diagnostic=${diagnostics(error, root, "")}`);
-    }
   };
 
   const route = async (request, response) => {
@@ -671,19 +664,13 @@ export function createHostServer(options) {
       if (parts.length === 4 && request.method === "POST") {
         const target = validateURL(body.url);
         if (!target) return json(response, 400, fail(400, "browser_url_invalid", "only http/https URLs are accepted").body);
-        return runMutation(response, session, body.fence, beforeMutation, async () => {
+        return runMutation(response, session, body.fence, beforeMutation, failLeaseHold, async () => {
           try {
             const id = newTabID();
             const opened = await openTabPage(session.context, target, id);
-            const code = fenceStatus(session, body.fence);
-            if (code) {
-              await opened.page.close().catch(() => {});
-              return fenceFailure(response, code);
-            }
             const tab = attachPage(session, opened.page, id);
             tab.url = opened.url;
             tab.title = opened.title;
-            session.activeTabID = tab.id;
             return json(response, 201, tabPayload(tab));
           } catch (error) {
             // Do not reference Edge here: this path must work even when the
@@ -698,35 +685,18 @@ export function createHostServer(options) {
       const tab = parts[4] ? session.tabs.get(parts[4]) : null;
       if (!tab) return json(response, 404, fail(404, "browser_tab_not_found", "tab not found").body);
       if (parts.length === 5 && request.method === "DELETE") {
-        return runMutation(response, session, url.searchParams.get("fence") || "", beforeMutation, async () => {
-          const savedURL = currentPageURL(tab);
-          const savedTitle = tab.title;
+        return runMutation(response, session, url.searchParams.get("fence") || "", beforeMutation, failLeaseHold, async () => {
           await tab.page.close().catch(() => {});
-          const code = fenceStatus(session, url.searchParams.get("fence") || "");
-          if (code) {
-            if (savedURL) await reopenClosedTab(session, tab, savedURL, savedTitle);
-            return fenceFailure(response, code);
-          }
           session.tabs.delete(tab.id);
-          if (session.activeTabID === tab.id) session.activeTabID = "";
           return json(response, 200, {ok: true});
         });
       }
       if (parts.length === 6 && parts[5] === "navigate" && request.method === "POST") {
         const target = validateURL(body.url);
         if (!target) return json(response, 400, fail(400, "browser_url_invalid", "only http/https URLs are accepted").body);
-        return runMutation(response, session, body.fence, beforeMutation, async () => {
+        return runMutation(response, session, body.fence, beforeMutation, failLeaseHold, async () => {
           try {
-            const savedURL = currentPageURL(tab);
-            const savedTitle = tab.title;
             const navigated = await navigatePage(tab.page, target);
-            const code = fenceStatus(session, body.fence);
-            if (code) {
-              if (savedURL) await navigatePage(tab.page, savedURL).catch(() => {});
-              tab.url = savedURL;
-              tab.title = savedTitle;
-              return fenceFailure(response, code);
-            }
             tab.url = navigated.url;
             tab.title = navigated.title;
             tab.frame = null;
@@ -740,18 +710,9 @@ export function createHostServer(options) {
         });
       }
       if (parts.length === 6 && parts[5] === "activate" && request.method === "POST") {
-        return runMutation(response, session, body.fence, beforeMutation, async () => {
+        return runMutation(response, session, body.fence, beforeMutation, failLeaseHold, async () => {
           try {
-            await listSessionPages(session);
-            const previousActiveID = session.activeTabID;
             await tab.page.bringToFront();
-            const code = fenceStatus(session, body.fence);
-            if (code) {
-              const previous = previousActiveID ? session.tabs.get(previousActiveID) : null;
-              if (previous && previous.page !== tab.page) await previous.page.bringToFront().catch(() => {});
-              return fenceFailure(response, code);
-            }
-            session.activeTabID = tab.id;
             return json(response, 200, tabPayload(tab));
           } catch (error) {
             console.error(`tab activate failed profile=${profileID} diagnostic=${diagnostics(error, root, "")}`);

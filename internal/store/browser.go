@@ -534,6 +534,24 @@ func (s *Store) RefreshBrowserTaskGrantLease(ctx context.Context, id string, cap
 	return s.BrowserTaskGrant(ctx, id)
 }
 
+// CompareAndSwapBrowserTaskGrantExpiry changes only the active lease expiry,
+// preserving capabilities and every other field. expected is the value read
+// before the operation, so a concurrent acquire/revoke cannot be overwritten.
+func (s *Store) CompareAndSwapBrowserTaskGrantExpiry(ctx context.Context, id string, expected, expiresAt, now time.Time) error {
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE browser_task_grants SET expires_at=?,updated_at=?
+		 WHERE id=? AND revoked_at='' AND expires_at=?`,
+		timeString(expiresAt), timeString(now), id, timeString(expected))
+	if err != nil {
+		return err
+	}
+	affected, _ := result.RowsAffected()
+	if affected != 1 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 func (s *Store) RevokeBrowserTaskGrant(ctx context.Context, id string, revokedAt time.Time) error {
 	result, err := s.db.ExecContext(ctx,
 		`UPDATE browser_task_grants SET revoked_at=?,updated_at=? WHERE id=? AND revoked_at=''`,

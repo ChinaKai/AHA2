@@ -51,6 +51,7 @@ type FakeHost struct {
 	FailBookmarks     error
 	FailSetFence      error
 	FailSession       error
+	OperationHold     time.Duration
 	BookmarkList      []browser.HostBookmark
 	Sessions          map[string]*session
 	nextID            int
@@ -68,15 +69,31 @@ func (f *FakeHost) unavailable() error {
 	return &browser.Error{Code: "browser_host_unavailable", Message: "fake host is down", Status: http.StatusServiceUnavailable}
 }
 
-func (f *FakeHost) fenceLocked(profileID, fence string) error {
+func (f *FakeHost) operationHold() (time.Time, time.Time) {
+	start := f.Now()
+	budget := f.OperationHold
+	if budget <= 0 {
+		budget = 5 * time.Minute
+	}
+	return start, start.Add(budget)
+}
+
+// fenceLocked models the host operation hold: a token that was live when the
+// call started may outlive its original expiry until the hold deadline, but a
+// token already expired at call start is never resurrected.
+func (f *FakeHost) fenceLocked(profileID, fence string, hold ...time.Time) error {
 	current := f.Fences[profileID]
 	if current == "" {
 		return nil
 	}
 	if index := strings.LastIndex(current, "@"); index > 0 {
-		if expiresAt, err := strconv.ParseInt(current[index+1:], 10, 64); err == nil &&
-			!f.Now().Before(time.UnixMilli(expiresAt)) {
-			return &browser.Error{Code: "browser_fence_expired", Message: "lease fence expired", Status: http.StatusConflict}
+		if expiresAt, err := strconv.ParseInt(current[index+1:], 10, 64); err == nil {
+			expiry := time.UnixMilli(expiresAt)
+			now := f.Now()
+			held := len(hold) >= 2 && now.Before(hold[1]) && expiry.After(hold[0])
+			if !now.Before(expiry) && !held {
+				return &browser.Error{Code: "browser_fence_expired", Message: "lease fence expired", Status: http.StatusConflict}
+			}
 		}
 	}
 	if fence != current {
@@ -211,6 +228,7 @@ func (f *FakeHost) OpenTab(_ context.Context, profileID, sessionID, targetURL, f
 	}
 	value, err := f.sessionLocked(profileID, sessionID)
 	started, release := f.OpenTabStarted, f.OpenTabRelease
+	holdStart, holdUntil := f.operationHold()
 	f.mu.Unlock()
 	if err != nil {
 		return browser.HostTab{}, err
@@ -229,7 +247,7 @@ func (f *FakeHost) OpenTab(_ context.Context, profileID, sessionID, targetURL, f
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if err := f.fenceLocked(profileID, fence); err != nil {
+	if err := f.fenceLocked(profileID, fence, holdStart, holdUntil); err != nil {
 		return browser.HostTab{}, err
 	}
 	f.nextID++
@@ -285,7 +303,8 @@ func (f *FakeHost) Activate(_ context.Context, profileID, sessionID, tabID, fenc
 	if err != nil {
 		return browser.HostTab{}, err
 	}
-	if err := f.fenceLocked(profileID, fence); err != nil {
+	holdStart, holdUntil := f.operationHold()
+	if err := f.fenceLocked(profileID, fence, holdStart, holdUntil); err != nil {
 		return browser.HostTab{}, err
 	}
 	tab, ok := value.tabs[tabID]
@@ -326,6 +345,7 @@ func (f *FakeHost) Navigate(_ context.Context, profileID, sessionID, tabID, targ
 		return browser.HostTab{}, &browser.Error{Code: "browser_tab_not_found", Message: "no tab", Status: http.StatusNotFound}
 	}
 	started, release := f.NavigateStarted, f.NavigateRelease
+	holdStart, holdUntil := f.operationHold()
 	f.mu.Unlock()
 	if started != nil {
 		select {
@@ -338,7 +358,7 @@ func (f *FakeHost) Navigate(_ context.Context, profileID, sessionID, tabID, targ
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if err := f.fenceLocked(profileID, fence); err != nil {
+	if err := f.fenceLocked(profileID, fence, holdStart, holdUntil); err != nil {
 		return browser.HostTab{}, err
 	}
 	tab, ok := value.tabs[tabID]
@@ -393,6 +413,7 @@ func (f *FakeHost) CloseTab(_ context.Context, profileID, sessionID, tabID, fenc
 	f.CloseTabCalls++
 	gated := f.CloseTabGateTabID == "" || f.CloseTabGateTabID == tabID
 	started, release, failure := f.CloseTabStarted, f.CloseTabRelease, f.FailCloseTab
+	holdStart, holdUntil := f.operationHold()
 	f.mu.Unlock()
 	if gated && started != nil {
 		select {
@@ -408,7 +429,7 @@ func (f *FakeHost) CloseTab(_ context.Context, profileID, sessionID, tabID, fenc
 	if failure != nil {
 		return failure
 	}
-	if err := f.fenceLocked(profileID, fence); err != nil {
+	if err := f.fenceLocked(profileID, fence, holdStart, holdUntil); err != nil {
 		return err
 	}
 	delete(value.tabs, tabID)

@@ -1219,7 +1219,7 @@ func TestTransferRejectsTargetHoldingAnotherProfile(t *testing.T) {
 	}
 }
 
-func TestLeaseExpiryFencesInFlightClose(t *testing.T) {
+func TestInFlightCloseHoldsLeasePastOriginalExpiry(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)
 	profile := createProfile(t, f)
@@ -1245,13 +1245,58 @@ func TestLeaseExpiryFencesInFlightClose(t *testing.T) {
 	}()
 	<-closeStarted
 	f.setNow(f.now.Add(2 * time.Minute))
+	// The active operation extended only this lease's expiry. An operation
+	// that starts now would be rejected, but the admitted close may finish.
+	during, err := f.service.Grant(ctx, grant.ID)
+	if err != nil || during.Status != domain.BrowserGrantStatusActive {
+		t.Fatalf("hold did not keep the admitted lease active: %#v err=%v", during, err)
+	}
 	close(closeRelease)
-	if err := <-closeResult; browser.Code(err) != "browser_fence_expired" {
-		t.Fatalf("expired in-flight close returned %v", err)
+	if err := <-closeResult; err != nil {
+		t.Fatalf("held in-flight close returned %v", err)
 	}
 	pages, err := f.host.ListTabs(ctx, profile.ID, grant.Session.HostSessionID)
-	if err != nil || len(pages) != 1 {
-		t.Fatalf("expired close removed page: %#v err=%v", pages, err)
+	if err != nil || len(pages) != 0 {
+		t.Fatalf("held close did not remove page: %#v err=%v", pages, err)
+	}
+	after, err := f.service.Grant(ctx, grant.ID)
+	if err != nil || after.Status != domain.BrowserGrantStatusExpired {
+		t.Fatalf("hold was not released after the operation: %#v err=%v", after, err)
+	}
+	if _, err := f.service.OpenTab(ctx, "owner", grant.ID, "https://late.example/"); browser.Code(err) != "browser_grant_expired" {
+		t.Fatalf("operation after hold returned %v", err)
+	}
+	if pages, listErr := f.host.ListTabs(ctx, profile.ID, grant.Session.HostSessionID); listErr != nil || len(pages) != 0 {
+		t.Fatalf("host was called after the lease expired: %#v err=%v", pages, listErr)
+	}
+}
+
+func TestHoldRenewalFailureRejectsBeforeHostSideEffect(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	profile := createProfile(t, f)
+	grant, err := f.service.CreateGrant(ctx, "owner", f.task.ID, profile.ID, nil, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.host.SetCurrentPages(profile.ID, []browser.HostTab{
+		{ID: "host-page-owner", URL: "https://owner.example/work", Title: "Work", Active: true},
+	})
+	tabs, err := f.service.SyncTabs(ctx, grant.ID)
+	if err != nil || len(tabs) != 1 {
+		t.Fatalf("tabs=%#v err=%v", tabs, err)
+	}
+	f.service.SetHoldForTest(func() error {
+		return &browser.Error{Code: "browser_lease_hold_failed", Message: "hold unavailable", Status: http.StatusConflict}
+	})
+	if err := f.service.CloseTab(ctx, "owner", grant.ID, tabs[0].ID); browser.Code(err) != "browser_lease_hold_failed" {
+		t.Fatalf("close without a hold returned %v", err)
+	}
+	if f.host.CloseTabCalls != 0 {
+		t.Fatalf("host close was called without a hold: %d", f.host.CloseTabCalls)
+	}
+	if pages, listErr := f.host.ListTabs(ctx, profile.ID, grant.Session.HostSessionID); listErr != nil || len(pages) != 1 {
+		t.Fatalf("page changed before the hold: %#v err=%v", pages, listErr)
 	}
 }
 

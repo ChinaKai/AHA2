@@ -139,10 +139,10 @@ AHA 侧业务请求客户端超时 60s，覆盖 host 的 30s 页面导航期限�
 - `browser_tab_list_failed`：读取当前页面列表失败（页面已崩溃或上下文不可用）；
 - `browser_activation_failed`：切换前台页面失败；
 - `browser_bookmarks_failed`：收藏夹文件不可读、是 symlink/reparse point 或格式异常；
-- `browser_fence_stale`：控制租约已变化，拒绝在途旧操作的页面副作用；
-- `browser_fence_expired`：租约已过截止时间，拒绝在途旧操作；底层
-  `page.close()`/`goto()` 返回后会再次校验并撤销副作用（重开被关闭的页、
-  回退导航、关闭刚打开的新页）；
+- `browser_fence_stale`：控制租约在操作开始前已变化，拒绝旧 token；
+- `browser_fence_expired`：租约已过截止时间，拒绝新操作；
+- `browser_lease_hold_failed`：无法为已开始的调用建立 lease hold 或续租失败，
+  在 Playwright 调用前拒绝，页面不变；
 - `browser_fence_timeout`：fence 切换等待在途操作超时，旧 fence 保留。
 
 ## 自动化测试
@@ -152,8 +152,8 @@ cd browser-host
 npm test
 ```
 
-覆盖锁并发/过期回收/token 保护、导航失败页面清理、fence 切换/过期与底层
-close/navigate/open 调用窗口；真实 Edge 仍需手工验收。
+覆盖锁并发/过期回收/token 保护、导航失败页面清理、fence 切换/过期、
+lease hold 与底层 close/navigate/open 调用窗口；真实 Edge 仍需手工验收。
 
 ## 手工验收（Windows + Edge）
 

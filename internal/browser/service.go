@@ -27,12 +27,13 @@ const (
 // authoritative for whether a real browser is running; the database state is a
 // cache plus the unique-session backstop.
 type Service struct {
-	store   *store.Store
-	host    Host
-	hostID  string
-	now     func() time.Time
-	mu      sync.Mutex
-	grantMu sync.Mutex
+	store       *store.Store
+	host        Host
+	hostID      string
+	now         func() time.Time
+	mu          sync.Mutex
+	grantMu     sync.Mutex
+	holdForTest func() error
 }
 
 func NewService(st *store.Store, host Host, hostID string) *Service {
@@ -54,6 +55,10 @@ func (s *Service) fenceToken(grant domain.BrowserTaskGrant) string {
 func (s *Service) Enabled() bool { return s.host != nil }
 
 func (s *Service) SetNowForTest(now func() time.Time) { s.now = now }
+
+// SetHoldForTest injects a lease-hold renewal failure so tests can prove the
+// operation is rejected before the host is called. Production never sets it.
+func (s *Service) SetHoldForTest(fn func() error) { s.holdForTest = fn }
 
 type HostView struct {
 	Available bool   `json:"available"`
@@ -1178,6 +1183,42 @@ func (s *Service) sessionForGrant(ctx context.Context, grant domain.BrowserTaskG
 	return session, nil
 }
 
+// operationHoldBudget covers the host's maximum page-operation budget. A
+// mutation extends only the active lease's expiry while it runs, so a close or
+// navigation that started before expiry cannot be admitted and then rejected
+// halfway through its Playwright call. The expiry is restored immediately
+// afterwards; a concurrent acquire/revoke wins the CAS and makes the hold fail
+// before any page side effect.
+const operationHoldBudget = 5 * time.Minute
+
+func (s *Service) withOperationHold(ctx context.Context, grant domain.BrowserTaskGrant, fn func() error) error {
+	now := s.now()
+	holdUntil := now.Add(operationHoldBudget)
+	if !grant.ExpiresAt.Before(holdUntil) {
+		return fn()
+	}
+	if s.holdForTest != nil {
+		if err := s.holdForTest(); err != nil {
+			return err
+		}
+	}
+	if err := s.store.CompareAndSwapBrowserTaskGrantExpiry(ctx, grant.ID, grant.ExpiresAt, holdUntil, now); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return conflict("browser_lease_hold_failed", "浏览器授权正在变化，操作未开始，请重试")
+		}
+		return err
+	}
+	defer func() {
+		// Restore the Owner-visible expiry even if the request context was
+		// canceled after the page side effect. If the lease was revoked or
+		// transferred meanwhile the CAS affects no row, which is exactly what
+		// we want: the new holder's state must not be overwritten.
+		restoreCtx := context.WithoutCancel(ctx)
+		_ = s.store.CompareAndSwapBrowserTaskGrantExpiry(restoreCtx, grant.ID, holdUntil, grant.ExpiresAt, s.now())
+	}()
+	return fn()
+}
+
 func (s *Service) OpenTab(ctx context.Context, actor, grantID, targetURL string) (domain.BrowserTab, error) {
 	grant, _, err := s.authorize(ctx, grantID, domain.BrowserCapabilityOpenTab, "")
 	if err != nil {
@@ -1191,28 +1232,35 @@ func (s *Service) OpenTab(ctx context.Context, actor, grantID, targetURL string)
 	if err != nil {
 		return domain.BrowserTab{}, err
 	}
-	hostTab, err := s.host.OpenTab(ctx, grant.ProfileID, session.HostSessionID, targetURL, s.fenceToken(grant))
-	if err != nil {
-		return domain.BrowserTab{}, sanitizeHostError(err)
-	}
-	tab := domain.BrowserTab{
-		ID: domain.NewID("browser_tab"), SessionID: grant.SessionID, GrantID: grant.ID,
-		TaskID: grant.TaskID, HostTabID: hostTab.ID, URL: hostTab.URL, Title: hostTab.Title,
-		Origin: domain.BrowserTabOriginAgent, Active: hostTab.Active,
-	}
-	if tab.URL == "" {
-		tab.URL = targetURL
-	}
-	stored, err := s.store.UpsertBrowserTabForActiveGrant(ctx, tab, s.now())
-	if err != nil {
-		_ = s.host.CloseTab(ctx, grant.ProfileID, session.HostSessionID, hostTab.ID, s.fenceToken(grant))
-		if errors.Is(err, store.ErrBrowserAccessInactive) {
-			return domain.BrowserTab{}, s.inactiveAccessError(ctx, grant.ID)
+	var tab domain.BrowserTab
+	err = s.withOperationHold(ctx, grant, func() error {
+		hostTab, callErr := s.host.OpenTab(ctx, grant.ProfileID, session.HostSessionID, targetURL, s.fenceToken(grant))
+		if callErr != nil {
+			return sanitizeHostError(callErr)
 		}
+		candidate := domain.BrowserTab{
+			ID: domain.NewID("browser_tab"), SessionID: grant.SessionID, GrantID: grant.ID,
+			TaskID: grant.TaskID, HostTabID: hostTab.ID, URL: hostTab.URL, Title: hostTab.Title,
+			Origin: domain.BrowserTabOriginAgent, Active: hostTab.Active,
+		}
+		if candidate.URL == "" {
+			candidate.URL = targetURL
+		}
+		stored, storeErr := s.store.UpsertBrowserTabForActiveGrant(ctx, candidate, s.now())
+		if storeErr != nil {
+			_ = s.host.CloseTab(ctx, grant.ProfileID, session.HostSessionID, hostTab.ID, s.fenceToken(grant))
+			if errors.Is(storeErr, store.ErrBrowserAccessInactive) {
+				return s.inactiveAccessError(ctx, grant.ID)
+			}
+			return storeErr
+		}
+		tab = stored
+		tab.Active = hostTab.Active
+		return nil
+	})
+	if err != nil {
 		return domain.BrowserTab{}, err
 	}
-	tab = stored
-	tab.Active = hostTab.Active
 	s.touchSession(ctx, session)
 	s.audit(ctx, actor, "browser_tab.open", "browser_tab", tab.ID, map[string]any{
 		"task_id": tab.TaskID, "profile_id": grant.ProfileID, "session_id": grant.SessionID, "url": tab.URL,
@@ -1368,17 +1416,23 @@ func (s *Service) ActivateTab(ctx context.Context, actor, grantID, tabID string)
 	if err != nil {
 		return domain.BrowserTab{}, err
 	}
-	hostTab, err := s.host.Activate(ctx, grant.ProfileID, session.HostSessionID, tab.HostTabID, s.fenceToken(grant))
+	err = s.withOperationHold(ctx, grant, func() error {
+		hostTab, callErr := s.host.Activate(ctx, grant.ProfileID, session.HostSessionID, tab.HostTabID, s.fenceToken(grant))
+		if callErr != nil {
+			return sanitizeHostError(callErr)
+		}
+		if _, _, authErr := s.authorize(ctx, grantID, domain.BrowserCapabilityNavigate, tabID); authErr != nil {
+			return authErr
+		}
+		tab.URL = hostTab.URL
+		tab.Title = hostTab.Title
+		tab.Active = true
+		if storeErr := s.store.UpdateBrowserTab(ctx, *tab); storeErr != nil && !errors.Is(storeErr, sql.ErrNoRows) {
+			return storeErr
+		}
+		return nil
+	})
 	if err != nil {
-		return domain.BrowserTab{}, sanitizeHostError(err)
-	}
-	if _, _, err := s.authorize(ctx, grantID, domain.BrowserCapabilityNavigate, tabID); err != nil {
-		return domain.BrowserTab{}, err
-	}
-	tab.URL = hostTab.URL
-	tab.Title = hostTab.Title
-	tab.Active = true
-	if err := s.store.UpdateBrowserTab(ctx, *tab); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return domain.BrowserTab{}, err
 	}
 	s.touchSession(ctx, session)
@@ -1428,24 +1482,30 @@ func (s *Service) NavigateTab(ctx context.Context, actor, grantID, tabID, target
 	if err != nil {
 		return domain.BrowserTab{}, err
 	}
-	hostTab, err := s.host.Navigate(ctx, grant.ProfileID, session.HostSessionID, tab.HostTabID, targetURL, s.fenceToken(grant))
-	if err != nil {
-		return domain.BrowserTab{}, sanitizeHostError(err)
-	}
-	if _, _, err := s.authorize(ctx, grantID, domain.BrowserCapabilityNavigate, tabID); err != nil {
-		return domain.BrowserTab{}, err
-	}
-	if hostTab.URL != "" {
-		tab.URL = hostTab.URL
-	} else {
-		tab.URL = targetURL
-	}
-	tab.Title = hostTab.Title
-	if err := s.store.UpdateBrowserTab(ctx, *tab); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			// A concurrent revoke/close removed the tab after the host call.
-			return domain.BrowserTab{}, s.inactiveAccessError(ctx, grant.ID)
+	err = s.withOperationHold(ctx, grant, func() error {
+		hostTab, callErr := s.host.Navigate(ctx, grant.ProfileID, session.HostSessionID, tab.HostTabID, targetURL, s.fenceToken(grant))
+		if callErr != nil {
+			return sanitizeHostError(callErr)
 		}
+		if _, _, authErr := s.authorize(ctx, grantID, domain.BrowserCapabilityNavigate, tabID); authErr != nil {
+			return authErr
+		}
+		if hostTab.URL != "" {
+			tab.URL = hostTab.URL
+		} else {
+			tab.URL = targetURL
+		}
+		tab.Title = hostTab.Title
+		if storeErr := s.store.UpdateBrowserTab(ctx, *tab); storeErr != nil {
+			if errors.Is(storeErr, sql.ErrNoRows) {
+				// A concurrent revoke/close removed the tab after the host call.
+				return s.inactiveAccessError(ctx, grant.ID)
+			}
+			return storeErr
+		}
+		return nil
+	})
+	if err != nil {
 		return domain.BrowserTab{}, err
 	}
 	s.touchSession(ctx, session)
@@ -1514,11 +1574,14 @@ func (s *Service) CloseTab(ctx context.Context, actor, grantID, tabID string) er
 	// Under profile-exclusive control the Task may close any tab in the
 	// Profile, including a page the Owner opened by hand. origin is display
 	// metadata only and must not block the current holder.
-	if err := s.host.CloseTab(ctx, grant.ProfileID, session.HostSessionID, tab.HostTabID, s.fenceToken(grant)); err != nil &&
-		Code(err) != "browser_tab_not_found" {
-		return sanitizeHostError(err)
-	}
-	if err := s.store.DeleteBrowserTab(ctx, tab.ID); err != nil {
+	err = s.withOperationHold(ctx, grant, func() error {
+		if hostErr := s.host.CloseTab(ctx, grant.ProfileID, session.HostSessionID, tab.HostTabID, s.fenceToken(grant)); hostErr != nil &&
+			Code(hostErr) != "browser_tab_not_found" {
+			return sanitizeHostError(hostErr)
+		}
+		return s.store.DeleteBrowserTab(ctx, tab.ID)
+	})
+	if err != nil {
 		return err
 	}
 	reason := "owner_closed"
