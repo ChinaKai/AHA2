@@ -44,6 +44,7 @@ func (s *Server) updateKnowledgeVaultGitRemote(writer http.ResponseWriter, reque
 		s.writeKnowledgeVaultGitError(writer, err)
 		return
 	}
+	s.resumeKnowledgeVaultAutoSync()
 	s.audit(request, "knowledge_vault.git_remote", "knowledge_vault_git", "origin", map[string]any{
 		"branch": result.Status.Branch, "remote": result.Status.Remote, "remote_set": result.Status.RemoteSet,
 	})
@@ -62,6 +63,7 @@ func (s *Server) initializeKnowledgeVaultGit(writer http.ResponseWriter, request
 		s.writeKnowledgeVaultGitError(writer, err)
 		return
 	}
+	s.resumeKnowledgeVaultAutoSync()
 	s.audit(request, "knowledge_vault.git_init", "knowledge_vault_git", "vault", map[string]any{
 		"branch": result.Status.Branch, "created": result.Created,
 	})
@@ -89,6 +91,9 @@ func (s *Server) commitKnowledgeVaultGit(writer http.ResponseWriter, request *ht
 		s.writeKnowledgeVaultGitError(writer, err)
 		return
 	}
+	// A manual commit usually resolves a local unmerged state; let auto-sync
+	// try again on the next tick.
+	s.resumeKnowledgeVaultAutoSync()
 	s.audit(request, "knowledge_vault.git_commit", "knowledge_vault_git", "vault", map[string]any{
 		"branch": result.Status.Branch, "commit": result.Status.LastCommit,
 	})
@@ -129,6 +134,7 @@ func (s *Server) runKnowledgeVaultGitOperation(writer http.ResponseWriter, reque
 		s.writeKnowledgeVaultGitError(writer, err)
 		return
 	}
+	s.resumeKnowledgeVaultAutoSync()
 	extra := map[string]any{"git": result.Status, "message": result.Message}
 	if rebuild {
 		report, rebuildErr := s.knowledgeVault.Rebuild(request.Context())

@@ -152,6 +152,9 @@ func knowledgeVaultServerAt(t *testing.T, manager *knowledgevault.Manager, dataD
 	config := Config{Store: database, Auth: authService, App: appService}
 	if manager != nil {
 		config.KnowledgeVault = manager
+		// The settings view reports the persisted auto-sync switch even when
+		// the background loop is not started in this test process.
+		config.KnowledgeVaultSync = knowledgevault.NewSyncer(manager, database, knowledgevault.SyncerConfig{})
 	}
 	server := httptest.NewServer(New(config).Handler())
 	t.Cleanup(server.Close)

@@ -1116,7 +1116,30 @@ func (s *Service) updateOrchestrationRouteStatus(ctx context.Context, turn domai
 	}
 }
 
+// maxMainResultMergeReadRetries bounds how many consecutive transient Round
+// read failures the Main-result merge timer tolerates before it gives up.
+const maxMainResultMergeReadRetries = 5
+
 func (s *Service) scheduleMainAfterAgentResult(ctx context.Context, taskID, roundID string) {
+	round, err := s.readRoundForMerge(ctx, roundID)
+	if err != nil {
+		// A failed read is not evidence that the Round is closed. Keep the merge
+		// timer alive so the routed result is retried instead of leaving a
+		// pending item behind, but stop after a bounded number of attempts.
+		s.retryMainResultMerge(taskID, roundID, err)
+		return
+	}
+	s.clearMainResultMergeFailures(taskID)
+	if round.Status.Terminal() {
+		s.cancelMainResultMerge(taskID)
+		// routeAgentOutcome can write this item after InterruptRound drained the
+		// Round's inbox. Cancel it again, or the next Owner message waits behind
+		// a terminal Round's stale item and never starts.
+		if err := s.store.CancelPendingInboxForRound(ctx, round.ID, s.now().UTC()); err != nil {
+			log.Printf("schedule main after agent result %s/%s: cancel round inbox: %v", taskID, roundID, err)
+		}
+		return
+	}
 	if _, err := s.store.ActiveTurnForAgent(ctx, taskID, "main"); err == nil {
 		return
 	} else if !errors.Is(err, sql.ErrNoRows) {
@@ -1134,9 +1157,53 @@ func (s *Service) scheduleMainAfterAgentResult(ctx context.Context, taskID, roun
 	s.armMainResultMerge(taskID, roundID)
 }
 
+// readRoundForMerge is the merge path's Round read. Tests substitute a
+// transient failure through readRoundFailure; production reads the store.
+func (s *Service) readRoundForMerge(ctx context.Context, roundID string) (domain.TaskRound, error) {
+	if s.readRoundFailure != nil {
+		if err := s.readRoundFailure(roundID); err != nil {
+			return domain.TaskRound{}, err
+		}
+	}
+	return s.store.Round(ctx, roundID)
+}
+
+// retryMainResultMerge re-arms the merge timer after a transient Round read
+// failure. The timer is left untouched when it is already armed, so a failing
+// direct call cannot shorten the existing retry window.
+func (s *Service) retryMainResultMerge(taskID, roundID string, cause error) {
+	s.mergeMu.Lock()
+	defer s.mergeMu.Unlock()
+	failures := s.mergeReadFailures[taskID] + 1
+	if failures > maxMainResultMergeReadRetries {
+		delete(s.mergeReadFailures, taskID)
+		if timer := s.mergeTimers[taskID]; timer != nil {
+			timer.Stop()
+			delete(s.mergeTimers, taskID)
+		}
+		log.Printf("schedule main after agent result %s/%s: giving up after %d round read failures: %v",
+			taskID, roundID, failures-1, cause)
+		return
+	}
+	s.mergeReadFailures[taskID] = failures
+	log.Printf("schedule main after agent result %s/%s: round read failed (attempt %d/%d): %v",
+		taskID, roundID, failures, maxMainResultMergeReadRetries, cause)
+	s.armMainResultMergeLocked(taskID, roundID)
+}
+
+func (s *Service) clearMainResultMergeFailures(taskID string) {
+	s.mergeMu.Lock()
+	delete(s.mergeReadFailures, taskID)
+	s.mergeMu.Unlock()
+}
+
 func (s *Service) armMainResultMerge(taskID, roundID string) {
 	s.mergeMu.Lock()
 	defer s.mergeMu.Unlock()
+	s.armMainResultMergeLocked(taskID, roundID)
+}
+
+func (s *Service) armMainResultMergeLocked(taskID, roundID string) {
 	if s.mergeTimers[taskID] != nil {
 		return
 	}
@@ -1162,6 +1229,7 @@ func (s *Service) cancelMainResultMerge(taskID string) {
 		timer.Stop()
 		delete(s.mergeTimers, taskID)
 	}
+	delete(s.mergeReadFailures, taskID)
 	s.mergeMu.Unlock()
 }
 
@@ -1326,6 +1394,19 @@ func (s *Service) retryTurn(ctx context.Context, turn domain.Turn) bool {
 	if turn.Status != domain.TurnFailed || turn.Attempt >= maxTurnAttempts || turn.AgentID == "main" && !mainRetryable {
 		return false
 	}
+	// An interrupted or otherwise settled Round must not accept a retry Turn.
+	// A failed read is not a terminal signal: CreateAgentTurn re-checks the
+	// Round inside its insert transaction and rejects the Turn there.
+	if turn.RoundID != "" {
+		if round, err := s.store.Round(ctx, turn.RoundID); err == nil && round.Status.Terminal() {
+			return false
+		} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("retry turn %s: read round %s: %v", turn.ID, turn.RoundID, err)
+		}
+	}
+	if s.retryRoundCheckHook != nil {
+		s.retryRoundCheckHook(turn.RoundID)
+	}
 	retry := turn
 	retry.ID = domain.NewID("turn")
 	retry.ParentTurnID = turn.ID
@@ -1350,6 +1431,9 @@ func (s *Service) retryTurn(ctx context.Context, turn domain.Turn) bool {
 	retry.PromptSnapshot = ""
 	created, err := s.store.CreateAgentTurn(ctx, retry)
 	if err != nil {
+		if !errors.Is(err, store.ErrRoundTerminal) {
+			log.Printf("retry turn %s: create retry: %v", turn.ID, err)
+		}
 		return false
 	}
 	_ = s.store.UpdateTaskAgentStatus(ctx, created.TaskID, created.AgentID, "queued", created.QueuedAt)

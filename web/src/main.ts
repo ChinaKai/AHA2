@@ -16,6 +16,7 @@ import {applyLocale, normalizeLanguagePreference, startUITranslationObserver, t,
 import {bindHardwarePanel, refreshHardwarePanel, stopHardwarePanel} from "./hardware_panel.js";
 import type {ResourcesTab} from "./resources.js";
 import type {MailResourcesData} from "./mail_resources.js";
+import type {BrowserResourcesData} from "./browser_resources.js";
 import {bindDesktopPanel, desktopPanelInteracting, refreshDesktopPanel, stopDesktopPanel} from "./desktop_panel.js";
 import {renderMarkdown} from "./markdown.js";
 import {forgetAllModelHealth as clearAllModelHealth, forgetModelHealth as clearModelHealth, runModelHealthCheck, runModelHealthChecks} from "./model_health.js";
@@ -75,6 +76,8 @@ import type {
   GeneralSettings,
   HardwareResource,
   HardwareIOPurgeResult,
+  BrowserProfile,
+  BrowserHostView,
   Knowledge,
   KnowledgeLibrary,
   NetworkSettings,
@@ -107,7 +110,7 @@ import type {
   Workspace,
 } from "./types.js";
 type View = "projects" | "channels" | "models" | "resources" | "tasks" | "knowledge" | "prompts" | "proxy" | "sync" | "advanced" | "data" | "other" | "mcp" | "pet-settings" | "pet-workbench";
-type ResourceKey = "projects" | "workspaces" | "tasks" | "system" | "providers" | "models" | "env" | "accounts" | "skills" | "channels" | "hardware" | "mail-accounts" | "mail-templates" | "mail-messages" | "knowledge" | "proxy" | "advanced" | "sync" | "prompts" | "mcp" | "data";
+type ResourceKey = "projects" | "workspaces" | "tasks" | "system" | "providers" | "models" | "env" | "accounts" | "skills" | "channels" | "hardware" | "browser" | "mail-accounts" | "mail-templates" | "mail-messages" | "knowledge" | "proxy" | "advanced" | "sync" | "prompts" | "mcp" | "data";
 type TaskFilterKind = "project" | "status" | "device";
 interface ResourceState {loading: boolean; loaded: boolean; error: string; updatedAt: number}
 interface TaskChannelState {
@@ -161,6 +164,10 @@ interface State extends ModelHealthState {
   providerPage: number;
   codexAccountPage: number;
   hardwareResources: HardwareResource[];
+  browserProfiles: BrowserProfile[];
+  browserHost: BrowserHostView | null;
+  browserResourcesLoading: boolean;
+  browserResourcesError: string;
   resourcesTab: ResourcesTab;
   mailSubTab: "accounts" | "templates" | "sent";
   mailAccounts: MailAccount[];
@@ -654,6 +661,10 @@ const state: State = {
   providerPage: 1,
   codexAccountPage: 1,
   hardwareResources: [],
+  browserProfiles: [],
+  browserHost: null,
+  browserResourcesLoading: false,
+  browserResourcesError: "",
   resourcesTab: "hardware",
   mailSubTab: "accounts",
   mailAccounts: [],
@@ -1233,7 +1244,7 @@ function resourcesForView(view: View): ResourceKey[] {
     case "tasks": return ["projects", "workspaces", "tasks", "models", "accounts", "skills"];
     case "channels": return ["channels", "projects", "workspaces", "models", "accounts", "knowledge"];
     case "models": return ["providers", "models", "env", "accounts"];
-    case "resources": return ["hardware", "mail-accounts", "mail-templates", "mail-messages"];
+    case "resources": return ["hardware", "browser", "mail-accounts", "mail-templates", "mail-messages"];
     case "knowledge": return ["projects", "workspaces", "knowledge"];
     case "prompts": return ["prompts"];
     case "proxy": return ["proxy"];
@@ -1943,7 +1954,7 @@ function applyLocationHash(): boolean {
   if (name === "pet-diary") window.history.replaceState(null, "", "#pet-workbench");
   if (view === "resources") {
     const params = new URLSearchParams(query);
-    state.resourcesTab = params.get("tab") === "mail" ? "mail" : "hardware";
+    state.resourcesTab = params.get("tab") === "mail" ? "mail" : params.get("tab") === "browser" ? "browser" : "hardware";
     if (name === "hardware") {
       window.history.replaceState(null, "", "#resources?tab=hardware");
     }
@@ -3003,6 +3014,7 @@ async function ensureViewData(view: View, force = false): Promise<void> {
     jobs.push(loadResource("hardware", force, async () => {
       state.hardwareResources = (await api.hardwareResources()).resources || [];
     }));
+    jobs.push(loadResource("browser", force, fetchBrowserResources));
     jobs.push(loadResource("mail-accounts", force, async () => {
       state.mailAccounts = (await api.mailAccounts()).accounts || [];
     }));
@@ -3094,6 +3106,16 @@ function mailResourcesData(): MailResourcesData {
   };
 }
 
+function browserResourcesData(): BrowserResourcesData {
+  const resource = resourceStates.browser;
+  return {
+    profiles: state.browserProfiles,
+    host: state.browserHost,
+    loading: state.browserResourcesLoading || ((resource.loading || !resource.loaded) && !state.browserResourcesError),
+    error: state.browserResourcesError || resource.error || "",
+  };
+}
+
 async function reloadMailResources(options: {status?: string; account?: string} = {}): Promise<void> {
   if (options.status !== undefined) state.mailFilterStatus = options.status;
   if (options.account !== undefined) state.mailFilterAccount = options.account;
@@ -3124,6 +3146,32 @@ async function reloadHardwareResources(): Promise<void> {
   await loadResource("hardware", true, async () => {
     state.hardwareResources = (await api.hardwareResources()).resources || [];
   });
+}
+
+async function fetchBrowserResources(): Promise<void> {
+  state.browserResourcesLoading = true;
+  state.browserResourcesError = "";
+  try {
+    const [profiles, host] = await Promise.all([
+      api.browserProfiles().catch(error => {
+        state.browserResourcesError = error instanceof Error ? error.message : String(error);
+        return {profiles: [] as BrowserProfile[]};
+      }),
+      api.browserHost().then(result => result.host).catch(error => ({
+        available: false, host_id: "", edge_available: false,
+        code: "browser_host_unavailable",
+        error: error instanceof Error ? error.message : String(error),
+      }) as BrowserHostView),
+    ]);
+    state.browserProfiles = profiles.profiles || [];
+    state.browserHost = host;
+  } finally {
+    state.browserResourcesLoading = false;
+  }
+}
+
+async function reloadBrowserResources(): Promise<void> {
+  await loadResource("browser", true, fetchBrowserResources);
 }
 
 function loadDataInventory(force = false): Promise<void> {
@@ -6947,6 +6995,7 @@ function render(): void {
         tab: state.resourcesTab,
         hardware: state.hardwareResources,
         mail: mailResourcesData(),
+        browser: browserResourcesData(),
       })),
       tasks: tasksView,
       // The knowledge navigation is always the vault page. A disabled or
@@ -8361,9 +8410,11 @@ function bindTaskToolsAndPanels(): void {
     tab: state.resourcesTab,
     hardware: state.hardwareResources,
     mail: mailResourcesData(),
+    browser: browserResourcesData(),
   }, {
     reloadHardware: reloadHardwareResources,
     mail: {reload: reloadMailResources, notify: setMessage},
+    browser: {reload: reloadBrowserResources, notify: setMessage},
     notify: setMessage,
   });
 }
@@ -8970,7 +9021,8 @@ function closeGlobalEvents(): void {
 }
 
 window.addEventListener("aha-resources-tab", event => {
-  const tab = (event as CustomEvent).detail === "mail" ? "mail" : "hardware";
+  const value = (event as CustomEvent).detail;
+  const tab: ResourcesTab = value === "mail" ? "mail" : value === "browser" ? "browser" : "hardware";
   state.resourcesTab = tab;
   // Tab switches are display-only; the address bar stays untouched. The tab is
   // also not persisted, so a refresh starts at the default hardware tab.

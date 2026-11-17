@@ -22,6 +22,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/auth"
 	"github.com/ChinaKai/AHA2/internal/backend"
+	"github.com/ChinaKai/AHA2/internal/browser"
 	"github.com/ChinaKai/AHA2/internal/channel"
 	"github.com/ChinaKai/AHA2/internal/codexaccount"
 	"github.com/ChinaKai/AHA2/internal/execution"
@@ -480,6 +481,18 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 			"errors", reconcile.MarkedError,
 			"orphans", reconcile.Orphans, "warnings", len(reconcile.Warnings))
 	}
+	// Background auto-sync commits gated text changes, runs pull --ff-only and
+	// pushes. The syncer is wired only after reconciliation so its first
+	// preflight sees the final space layout; it never runs without the owner
+	// switch and never merges, resets or force-pushes.
+	knowledgeVaultSyncer := knowledgevault.NewSyncer(knowledgeVaultManager, database, knowledgevault.SyncerConfig{
+		Emit: func(event knowledgevault.SyncEvent) {
+			appService.RecordKnowledgeSyncEvent(context.Background(), event.Kind, event.Detail)
+		},
+	})
+	knowledgeVaultManager.SetAutoCommitRequester(knowledgeVaultSyncer.NotifyWrite)
+	knowledgeVaultSyncer.Start(ctx)
+	defer knowledgeVaultSyncer.Stop()
 	appService.SetBuildInfo(version, webVersion, time.Now().UTC())
 	appService.MigratePetTaskGoal(ctx)
 	appService.StartPetTaskNotifications()
@@ -519,6 +532,36 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	hardwareManager := hardware.NewManager(database)
 	appService.SetPetHardwareDisconnector(hardwareManager)
 	defer hardwareManager.Close()
+	// The shared browser lives in a separate host process so it can run in the
+	// owner's interactive Windows session. AHA only needs a loopback URL and the
+	// host token; the token is never logged.
+	browserHostURL := strings.TrimSpace(os.Getenv("AHA2_BROWSER_HOST_URL"))
+	browserHostToken := strings.TrimSpace(os.Getenv("AHA2_BROWSER_HOST_TOKEN"))
+	if browserHostToken == "" {
+		if tokenFile := strings.TrimSpace(os.Getenv("AHA2_BROWSER_HOST_TOKEN_FILE")); tokenFile != "" {
+			if data, readErr := os.ReadFile(tokenFile); readErr == nil {
+				browserHostToken = strings.TrimSpace(string(data))
+			} else {
+				logger.Warn("browser host token file could not be read", "error", readErr)
+			}
+		}
+	}
+	// Backend/agent processes inherit this environment. Remove the secret so a
+	// Task shell cannot read the loopback host token from its parent process.
+	_ = os.Unsetenv("AHA2_BROWSER_HOST_TOKEN")
+	_ = os.Unsetenv("AHA2_BROWSER_HOST_TOKEN_FILE")
+	browserHostID := envOr("AHA2_BROWSER_HOST_ID", browser.DefaultHostID)
+	var browserHost browser.Host
+	if browserHostURL != "" {
+		browserHost = browser.NewHTTPHost(browserHostURL, browserHostToken)
+	}
+	browserService := browser.NewService(database, browserHost, browserHostID)
+	if browserHost == nil {
+		logger.Info("shared browser host not configured; browser features fail closed",
+			"env", "AHA2_BROWSER_HOST_URL")
+	} else {
+		logger.Info("shared browser host configured", "host_id", browserHostID)
+	}
 	if err := appService.ResumePending(ctx); err != nil {
 		return fmt.Errorf("resume pending agent inbox: %w", err)
 	}
@@ -539,6 +582,7 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 		DetectWorkspace:     workspace.Detect,
 		Secrets:             secretStore,
 		Hardware:            hardwareManager,
+		Browser:             browserService,
 		CodexAccounts:       codexAccounts,
 		AgentCapabilities:   agentCapabilities,
 		ManagedProcesses:    managedProcesses,
@@ -551,6 +595,7 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 		ListenAddress:       options.listen,
 		LocalOwnerIngest:    options.localOwnerIngest,
 		KnowledgeVault:      knowledgeVaultManager,
+		KnowledgeVaultSync:  knowledgeVaultSyncer,
 	})
 	if options.allowCrossOrigin {
 		logger.Warn("Origin host validation disabled")

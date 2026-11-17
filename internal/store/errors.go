@@ -9,6 +9,11 @@ var ErrActiveTurn = errors.New("task already has an active turn")
 // claim transaction so a terminal transition cannot race a new Turn into life.
 var ErrTaskNotRunnable = errors.New("task is not runnable")
 
+// ErrRoundTerminal rejects a new Turn for a Round that was already settled. It
+// is checked inside the insert transaction, because a caller's optimistic
+// Round read can race an interrupt or settlement that closes the Round.
+var ErrRoundTerminal = errors.New("round is terminal")
+
 var ErrChannelRevision = errors.New("channel resource revision conflict")
 var ErrChannelInboxDigest = errors.New("channel inbound event id has a different payload digest")
 var ErrChannelNotRetired = errors.New("channel instance is not retired")

@@ -3873,6 +3873,173 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("record schema v146: %w", err)
 		}
 	}
+	var hasV147 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=147)`).Scan(&hasV147)
+	if !hasV147 || !s.tableHasColumn(ctx, "knowledge_vault_settings", "auto_sync") {
+		// Auto-sync defaults to on for both fresh installs and upgrades; the
+		// owner switch is stored next to the knowledge source switch and read
+		// by the background syncer.
+		if _, err := s.db.ExecContext(ctx,
+			`ALTER TABLE knowledge_vault_settings ADD COLUMN auto_sync INTEGER NOT NULL DEFAULT 1 CHECK(auto_sync IN (0,1))`); err != nil &&
+			!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("apply schema v147 knowledge vault auto-sync: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(147, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return fmt.Errorf("record schema v147: %w", err)
+		}
+	}
+
+	var hasV148 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=148)`).Scan(&hasV148)
+	var hasBrowserProfiles bool
+	_ = s.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='browser_profiles')`).Scan(&hasBrowserProfiles)
+	var hasBrowserGrantUnique bool
+	_ = s.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_browser_task_grants_one_active')`).Scan(&hasBrowserGrantUnique)
+	if !hasV148 || !hasBrowserProfiles || !hasBrowserGrantUnique {
+		// Shared-browser POC. AHA stores only logical identifiers; the host owns
+		// the real user-data directories. The partial unique index is the database
+		// backstop for "one active session per profile" — the host's directory
+		// lock and process state remain authoritative at runtime.
+		if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS browser_profiles(
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			browser_kind TEXT NOT NULL CHECK(browser_kind IN ('edge','chrome','chromium')),
+			host_id TEXT NOT NULL,
+			state TEXT NOT NULL DEFAULT 'idle' CHECK(state IN ('idle','starting','ready','auth_required','busy','error')),
+			last_used_at TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`); err != nil {
+			return fmt.Errorf("apply schema v148 browser profiles: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS browser_sessions(
+			id TEXT PRIMARY KEY,
+			profile_id TEXT NOT NULL REFERENCES browser_profiles(id) ON DELETE CASCADE,
+			host_id TEXT NOT NULL,
+			host_session_id TEXT NOT NULL DEFAULT '',
+			state TEXT NOT NULL CHECK(state IN ('starting','ready','auth_required','busy','closed','error')),
+			error TEXT NOT NULL DEFAULT '',
+			started_at TEXT NOT NULL,
+			last_used_at TEXT NOT NULL DEFAULT '',
+			closed_at TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`); err != nil {
+			return fmt.Errorf("apply schema v148 browser sessions: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_browser_sessions_one_active
+			 ON browser_sessions(profile_id) WHERE state <> 'closed'`); err != nil {
+			return fmt.Errorf("apply schema v148 browser session uniqueness: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS browser_task_grants(
+			id TEXT PRIMARY KEY,
+			task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+			profile_id TEXT NOT NULL REFERENCES browser_profiles(id) ON DELETE CASCADE,
+			session_id TEXT NOT NULL REFERENCES browser_sessions(id) ON DELETE CASCADE,
+			capabilities_json TEXT NOT NULL DEFAULT '[]',
+			expires_at TEXT NOT NULL,
+			revoked_at TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`); err != nil {
+			return fmt.Errorf("apply schema v148 browser task grants: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`CREATE INDEX IF NOT EXISTS idx_browser_task_grants_task ON browser_task_grants(task_id,profile_id)`); err != nil {
+			return fmt.Errorf("apply schema v148 browser grant index: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS browser_tabs(
+			id TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL REFERENCES browser_sessions(id) ON DELETE CASCADE,
+			grant_id TEXT NOT NULL REFERENCES browser_task_grants(id) ON DELETE CASCADE,
+			task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+			host_tab_id TEXT NOT NULL DEFAULT '',
+			url TEXT NOT NULL DEFAULT '',
+			title TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`); err != nil {
+			return fmt.Errorf("apply schema v148 browser tabs: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`CREATE INDEX IF NOT EXISTS idx_browser_tabs_grant ON browser_tabs(grant_id)`); err != nil {
+			return fmt.Errorf("apply schema v148 browser tab index: %w", err)
+		}
+		// Database-level backstop for the one-active-grant-per-Task/Profile
+		// invariant. Older rows may already contain duplicates from the first
+		// POC commit, so revoke all but the newest before creating the index.
+		// Dedupe in Go: RFC3339Nano text is not lexically ordered (trailing zeros
+		// are trimmed) and SQLite's date functions lose sub-millisecond precision.
+		type grantRow struct {
+			id, taskID, profileID, createdAt string
+		}
+		rows, err := s.db.QueryContext(ctx,
+			`SELECT id,task_id,profile_id,created_at FROM browser_task_grants WHERE revoked_at=''`)
+		if err != nil {
+			return fmt.Errorf("apply schema v148 browser grant dedupe: %w", err)
+		}
+		groups := map[string][]grantRow{}
+		for rows.Next() {
+			var row grantRow
+			if err := rows.Scan(&row.id, &row.taskID, &row.profileID, &row.createdAt); err != nil {
+				rows.Close()
+				return fmt.Errorf("apply schema v148 browser grant dedupe scan: %w", err)
+			}
+			key := row.taskID + "\x00" + row.profileID
+			groups[key] = append(groups[key], row)
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("apply schema v148 browser grant dedupe close: %w", err)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("apply schema v148 browser grant dedupe rows: %w", err)
+		}
+		nowText := timeString(time.Now().UTC())
+		for _, group := range groups {
+			if len(group) < 2 {
+				continue
+			}
+			keep := group[0]
+			for _, candidate := range group[1:] {
+				keepTime, candidateTime := parseTime(keep.createdAt), parseTime(candidate.createdAt)
+				if candidateTime.After(keepTime) || (candidateTime.Equal(keepTime) && candidate.id > keep.id) {
+					keep = candidate
+				}
+			}
+			for _, obsolete := range group {
+				if obsolete.id == keep.id {
+					continue
+				}
+				if _, err := s.db.ExecContext(ctx,
+					`UPDATE browser_task_grants SET revoked_at=?,updated_at=? WHERE id=? AND revoked_at=''`,
+					nowText, nowText, obsolete.id); err != nil {
+					return fmt.Errorf("apply schema v148 browser grant dedupe update: %w", err)
+				}
+			}
+		}
+		// Tabs of revoked/duplicate grants can no longer be authorized. The
+		// migration cannot call the browser host, so it removes the AHA records;
+		// the host may keep the visible page until the session is closed.
+		if _, err := s.db.ExecContext(ctx,
+			`DELETE FROM browser_tabs WHERE grant_id IN (SELECT id FROM browser_task_grants WHERE revoked_at<>'')`); err != nil {
+			return fmt.Errorf("apply schema v148 browser tab cleanup: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_browser_task_grants_one_active
+			 ON browser_task_grants(task_id,profile_id) WHERE revoked_at=''`); err != nil {
+			return fmt.Errorf("apply schema v148 browser grant uniqueness: %w", err)
+		}
+		// v148 is forward-only. A pre-v148 binary does not know the unique index
+		// and can hit a UNIQUE error; rolling back requires dropping the index.
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(148, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return fmt.Errorf("record schema v148: %w", err)
+		}
+	}
 	return nil
 }
 

@@ -27,6 +27,7 @@ type knowledgeVaultSettingsView struct {
 	Readiness           knowledgevault.Readiness        `json:"readiness"`
 	Legacy              domain.LegacyKnowledgeInventory `json:"legacy"`
 	Configured          bool                            `json:"configured"`
+	AutoSync            knowledgevault.AutoSyncStatus   `json:"auto_sync"`
 	ImportSource        string                          `json:"import_source,omitempty"`
 	MigrationVerifiedAt time.Time                       `json:"migration_verified_at,omitempty"`
 	ImportVerifiedAt    time.Time                       `json:"import_verified_at,omitempty"`
@@ -76,9 +77,20 @@ func (s *Server) knowledgeVaultView(ctx context.Context) (knowledgeVaultSettings
 		MigrationVerified: !settings.MigrationVerifiedAt.IsZero(),
 		ImportVerified:    !settings.ImportVerifiedAt.IsZero(),
 	})
+	autoSync := knowledgevault.AutoSyncStatus{Enabled: settings.AutoSync, Paused: true, PauseReason: "sync_unavailable"}
+	if s.knowledgeVaultSync != nil {
+		autoSync = s.knowledgeVaultSync.Status()
+		// The database row is authoritative; the runtime snapshot only fills
+		// the operational fields.
+		autoSync.Enabled = settings.AutoSync
+		if !autoSync.Enabled {
+			autoSync.Paused = false
+			autoSync.PauseReason = ""
+		}
+	}
 	view := knowledgeVaultSettingsView{
 		Status: status, Readiness: readiness, Legacy: inventory,
-		Configured: settings.Configured, ImportSource: settings.ImportSource,
+		Configured: settings.Configured, AutoSync: autoSync, ImportSource: settings.ImportSource,
 		MigrationVerifiedAt: settings.MigrationVerifiedAt,
 		ImportVerifiedAt:    settings.ImportVerifiedAt,
 		LastBackupPath:      settings.LastBackupPath,
@@ -116,17 +128,17 @@ func (s *Server) updateKnowledgeVaultSettings(writer http.ResponseWriter, reques
 		return
 	}
 	var payload struct {
-		Enabled *bool `json:"enabled"`
+		Enabled  *bool `json:"enabled"`
+		AutoSync *bool `json:"auto_sync"`
 	}
 	if err := decodeJSON(request, &payload); err != nil {
 		writeErrorDetail(writer, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
-	if payload.Enabled == nil {
-		writeErrorDetail(writer, http.StatusBadRequest, "invalid_enabled", "enabled is required")
+	if payload.Enabled == nil && payload.AutoSync == nil {
+		writeErrorDetail(writer, http.StatusBadRequest, "invalid_enabled", "enabled or auto_sync is required")
 		return
 	}
-	enabled := *payload.Enabled
 	view, readiness, err := s.knowledgeVaultView(request.Context())
 	if err != nil {
 		writeJSON(writer, http.StatusInternalServerError, map[string]any{
@@ -134,6 +146,26 @@ func (s *Server) updateKnowledgeVaultSettings(writer http.ResponseWriter, reques
 		})
 		return
 	}
+	if payload.AutoSync != nil {
+		autoSync := *payload.AutoSync
+		if s.knowledgeVaultSync != nil {
+			err = s.knowledgeVaultSync.SetEnabled(request.Context(), autoSync)
+		} else {
+			err = s.store.SetAutoSyncEnabled(request.Context(), autoSync)
+		}
+		if err != nil {
+			writeJSON(writer, http.StatusInternalServerError, map[string]any{
+				"ok": false, "error": "knowledge_vault_auto_sync_failed", "message": err.Error(),
+			})
+			return
+		}
+		s.audit(request, "knowledge_vault.auto_sync", "knowledge_vault_settings", "1", map[string]any{"enabled": autoSync})
+	}
+	if payload.Enabled == nil {
+		s.writeKnowledgeVaultView(writer, request, nil)
+		return
+	}
+	enabled := *payload.Enabled
 	if enabled {
 		if !readiness.CanEnable {
 			// blocked (needs_migration / needs_rebuild / error) must not be
@@ -236,6 +268,7 @@ func (s *Server) initializeKnowledgeVault(writer http.ResponseWriter, request *h
 		return
 	}
 	s.knowledgeVault.SetSource(knowledgevault.SourceDatabase)
+	s.resumeKnowledgeVaultAutoSync()
 	s.audit(request, "knowledge_vault.init", "knowledge_vault", result.VaultPath, map[string]any{
 		"samples": result.Samples, "enabled": true,
 	})
@@ -315,6 +348,7 @@ func (s *Server) migrateKnowledgeVault(writer http.ResponseWriter, request *http
 	s.audit(request, "knowledge_vault.migrate", "knowledge_vault", report.VaultPath, map[string]any{
 		"entries": report.VerifiedEntries, "skills": report.VerifiedSkills, "backup": report.BackupPath,
 	})
+	s.resumeKnowledgeVaultAutoSync()
 	s.writeKnowledgeVaultView(writer, request, map[string]any{"migration": report})
 }
 
@@ -395,6 +429,7 @@ func (s *Server) importKnowledgeVault(writer http.ResponseWriter, request *http.
 	s.audit(request, "knowledge_vault.import", "knowledge_vault", report.VaultPath, map[string]any{
 		"kind": report.Kind, "entries": report.IndexedEntries, "files": report.ImportedFiles,
 	})
+	s.resumeKnowledgeVaultAutoSync()
 	s.writeKnowledgeVaultView(writer, request, map[string]any{"import": report})
 }
 
@@ -489,4 +524,15 @@ func (s *Server) cutoverLegacyKnowledge(writer http.ResponseWriter, request *htt
 		"tables": report.TablesDropped,
 	})
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "cutover": report})
+}
+
+// resumeKnowledgeVaultAutoSync clears a pause after a successful manual
+// operation that can have fixed the underlying cause (Git init, remote saved,
+// init/import/migrate, manual pull/push/sync). The syncer keeps its
+// conflict-event de-duplication key, so the same divergence never notifies the
+// pet twice.
+func (s *Server) resumeKnowledgeVaultAutoSync() {
+	if s.knowledgeVaultSync != nil {
+		s.knowledgeVaultSync.ResetPause()
+	}
 }

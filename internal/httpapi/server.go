@@ -14,6 +14,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/agentapi"
 	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/auth"
+	"github.com/ChinaKai/AHA2/internal/browser"
 	"github.com/ChinaKai/AHA2/internal/channel"
 	"github.com/ChinaKai/AHA2/internal/codexaccount"
 	"github.com/ChinaKai/AHA2/internal/desktop"
@@ -43,6 +44,7 @@ type Config struct {
 	DetectWorkspace   func(context.Context, domain.Workspace) (domain.Workspace, error)
 	Secrets           SecretStore
 	Hardware          *hardware.Manager
+	Browser           *browser.Service
 	Desktop           *desktop.Manager
 	CodexAccounts     *codexaccount.Manager
 	AgentCapabilities *agentapi.Capabilities
@@ -73,6 +75,10 @@ type Config struct {
 	// production so routes can stay registered and report "disabled" with a
 	// 404 while the switch is off. The legacy knowledge routes never change.
 	KnowledgeVault *knowledgevault.Manager
+	// KnowledgeVaultSync is the background auto-sync engine. Nil keeps the
+	// settings panel informative but without automatic Git operations (tests
+	// and support commands do not need a loop).
+	KnowledgeVaultSync *knowledgevault.Syncer
 	// BackupPreviewTimeout overrides the data-management backup scan deadline.
 	// Zero keeps the production default; tests use a very short value to
 	// exercise the 504 response without waiting ten seconds.
@@ -96,6 +102,7 @@ type Server struct {
 	detectWorkspace          func(context.Context, domain.Workspace) (domain.Workspace, error)
 	secrets                  SecretStore
 	hardware                 *hardware.Manager
+	browser                  *browser.Service
 	desktop                  *desktop.Manager
 	codexAccounts            *codexaccount.Manager
 	agentCapabilities        *agentapi.Capabilities
@@ -131,6 +138,7 @@ type Server struct {
 	systemCache              map[string]any
 	runtimeContextCache      runtimeContextCache
 	knowledgeVault           *knowledgevault.Manager
+	knowledgeVaultSync       *knowledgevault.Syncer
 	// revealPath opens a vault path in the host file manager. It is nil in
 	// production (the platform opener is used) and injectable in tests so a
 	// loopback request never launches a real file manager under `go test`.
@@ -208,6 +216,7 @@ func New(config Config) *Server {
 		detectWorkspace:          config.DetectWorkspace,
 		secrets:                  config.Secrets,
 		hardware:                 config.Hardware,
+		browser:                  config.Browser,
 		desktop:                  config.Desktop,
 		codexAccounts:            config.CodexAccounts,
 		agentCapabilities:        config.AgentCapabilities,
@@ -233,6 +242,7 @@ func New(config Config) *Server {
 		authLimiter:              newAuthLimiter(),
 		modelDetectionJobs:       newModelDetectionJobs(),
 		knowledgeVault:           config.KnowledgeVault,
+		knowledgeVaultSync:       config.KnowledgeVaultSync,
 		backupPreviewTimeout:     config.BackupPreviewTimeout,
 	}
 	if server.webVersion == "" {
@@ -421,6 +431,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/v1/hardware-resources/{id}", s.withAuth(http.HandlerFunc(s.updateHardwareResource)))
 	mux.Handle("DELETE /api/v1/hardware-resources/{id}", s.withAuth(http.HandlerFunc(s.deleteHardwareResource)))
 	mux.Handle(hardwareADBPairRoute, s.withAuth(http.HandlerFunc(s.pairHardwareADB)))
+	s.registerBrowserRoutes(mux)
 
 	// Mail resources phase one task B: Owner-only account/template/binding
 	// management, preview and connection test. Agent capability routes are

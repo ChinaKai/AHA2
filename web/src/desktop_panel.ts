@@ -44,6 +44,7 @@ interface PanelState {
   pointerX: number; pointerY: number; pointerVisible: boolean;
   targets: Targets | null; desktopID: string; monitorID: string; targetKind: TargetSelection["kind"];
   popover: "" | "targets" | "operations" | "keys";
+  browserMode: boolean;
 }
 interface Gesture { x: number; y: number; button: string; pointerID: number; observationID: string }
 type TouchGestureMode = "pending" | "pinch" | "scroll";
@@ -298,6 +299,7 @@ function stateFor(detail: TaskDetail): PanelState {
       mouseOpacity: defaultMouseOpacity,
       pointerX: -1, pointerY: -1, pointerVisible: false,
       targets: null, desktopID: "", monitorID: "", targetKind: "new-desktop", popover: "",
+      browserMode: false,
     };
     states.set(state.taskID, state);
   }
@@ -405,6 +407,11 @@ export function renderDesktopPanel(detail: TaskDetail, header = ""): string {
     </section>
     <div id="task-tool-panel-body" class="desktop-body">
       <p id="desktop-error" class="desktop-error desktop-alert" role="alert" hidden></p>
+      <section id="desktop-browser-surface" class="desktop-browser-surface" hidden>
+        <strong>${icon("browser")}内置浏览器</strong>
+        <p id="desktop-browser-surface-status" role="status"></p>
+        <p class="field-help">浏览器窗口运行在宿主机的可见桌面中；本面板只显示会话状态，不向 Web 传输页面画面或 cookie。</p>
+      </section>
       <div class="desktop-observation">
         <div id="desktop-viewport" class="desktop-viewport" title="移动端：单指双击为双击，双指轻点为右键，双指平行滑动为滚轮，双指捏合为缩放"><div id="desktop-preview" class="desktop-preview" hidden>
           <img id="desktop-image" alt="共享窗口画面" aria-label="共享画面控制区，移动端双指轻点为右键，双指平行滑动为滚轮，双指捏合为缩放" draggable="false" tabindex="-1">
@@ -452,15 +459,21 @@ export function renderDesktopPanel(detail: TaskDetail, header = ""): string {
     </section>
     <section id="desktop-targets-popover" class="desktop-popover" role="dialog" aria-label="共享目标" hidden>
       <div class="desktop-mode-row"><span id="desktop-mode-status"></span></div>
-      <div class="desktop-toolbar">
-        <label class="desktop-window-label">共享目标<select id="desktop-window" aria-label="共享目标" disabled><option value="">正在加载目标...</option></select></label>
-        <button type="button" id="desktop-refresh" class="icon-button" title="刷新目标与画面" aria-label="刷新目标与画面">${icon("refresh")}</button>
+      <label>控制方式<select id="desktop-control-mode" aria-label="控制方式"><option value="display">共享显示器或窗口</option><option value="browser">内置浏览器</option></select></label>
+      <div id="desktop-display-target">
+        <div class="desktop-toolbar">
+          <label class="desktop-window-label">共享目标<select id="desktop-window" aria-label="共享目标" disabled><option value="">正在加载目标...</option></select></label>
+          <button type="button" id="desktop-refresh" class="icon-button" title="刷新目标与画面" aria-label="刷新目标与画面">${icon("refresh")}</button>
+        </div>
+        <label>显示器<select id="desktop-monitor" aria-label="显示器" disabled><option value="">主显示器</option></select></label>
+        <p id="desktop-target-reason" class="desktop-empty" role="status"></p>
+        <div class="desktop-target-actions">
+          <button type="button" id="desktop-new-desktop">${icon("plus")}新建桌面</button>
+          <button type="button" id="desktop-share" class="primary" disabled>${icon("link")}<span>共享所选目标</span></button>
+        </div>
       </div>
-      <label>显示器<select id="desktop-monitor" aria-label="显示器" disabled><option value="">主显示器</option></select></label>
-      <p id="desktop-target-reason" class="desktop-empty" role="status"></p>
-      <div class="desktop-target-actions">
-        <button type="button" id="desktop-new-desktop">${icon("plus")}新建桌面</button>
-        <button type="button" id="desktop-share" class="primary" disabled>${icon("link")}<span>共享所选目标</span></button>
+      <div id="desktop-browser-target" class="desktop-browser-target" hidden>
+        <p class="desktop-empty" role="status">正在加载浏览器 Profile…</p>
       </div>
     </section>
     <section id="desktop-operations-popover" class="desktop-popover" role="dialog" aria-label="操作与状态" hidden>
@@ -688,6 +701,22 @@ function updateDOM(binding: Binding): void {
     if (chooser.disabled !== !canShare) chooser.disabled = !canShare;
   }
   text("#desktop-mode-status", session ? "前台 · 共享期间会影响宿主键鼠" : "");
+  const modeSelect = root.querySelector<HTMLSelectElement>("#desktop-control-mode");
+  if (modeSelect && document.activeElement !== modeSelect) {
+    modeSelect.value = state.browserMode ? "browser" : "display";
+  }
+  root.classList.toggle("browser-mode", state.browserMode);
+  const displayTarget = root.querySelector<HTMLElement>("#desktop-display-target");
+  if (displayTarget) displayTarget.hidden = state.browserMode;
+  const browserTarget = root.querySelector<HTMLElement>("#desktop-browser-target");
+  if (browserTarget) browserTarget.hidden = !state.browserMode;
+  const browserSurface = root.querySelector<HTMLElement>("#desktop-browser-surface");
+  if (browserSurface) browserSurface.hidden = !state.browserMode;
+  if (state.browserMode) {
+    text("#desktop-title", "内置浏览器");
+    text("#desktop-process", browserTarget?.dataset.profile || "");
+    text("#desktop-status", browserTarget?.dataset.status || "正在读取内置浏览器状态...");
+  }
   root.querySelector<HTMLButtonElement>("#desktop-share")!.disabled = !canShare || state.targetKind === "new-desktop"
     || (state.targetKind === "window" && !state.windows.some(item => item.id === state.windowID && windowSelectable(state, item)))
     || (state.targetKind === "desktop" && (!state.targets?.desktops.some(item =>
@@ -703,13 +732,17 @@ function updateDOM(binding: Binding): void {
   root.querySelector<HTMLButtonElement>("#desktop-new-desktop")!.disabled = !canShare
     || Boolean(state.targets && !state.targets.desktop_switch_supported);
   text("#desktop-target-reason", errorMessages[state.targets?.desktop_reason || ""] || state.targets?.desktop_reason || "");
-  root.querySelector<HTMLElement>("#desktop-empty-target")!.hidden = Boolean(session);
+  root.querySelector<HTMLElement>("#desktop-empty-target")!.hidden = Boolean(session) || state.browserMode;
   root.querySelector<HTMLButtonElement>("#desktop-refresh")!.disabled = Boolean(state.busy);
   // Revocation remains available even while a native operation is pending.
   root.querySelector<HTMLButtonElement>("#desktop-stop")!.disabled = !session || state.denied || state.busy === "正在停止共享...";
-  text("#desktop-title", session?.window.title || (session ? "无标题窗口" : "尚未共享窗口"));
-  text("#desktop-process", session?.window.process || "");
-  text("#desktop-status", statusText(state));
+  if (!state.browserMode) {
+    text("#desktop-title", session?.window.title || (session ? "无标题窗口" : "尚未共享窗口"));
+    text("#desktop-process", session?.window.process || "");
+  }
+  text("#desktop-status", state.browserMode
+    ? (browserTarget?.dataset.status || "正在读取内置浏览器状态...")
+    : statusText(state));
   const headerTitle = root.querySelector<HTMLElement>(".desktop-task-header h3");
   if (headerTitle) headerTitle.title = session ? `${session.window.title} · ${statusText(state)}` : statusText(state);
   text("#desktop-error", state.error);
@@ -1926,6 +1959,22 @@ function shareTarget(binding: Binding, createDesktop = false): void {
   }, session ? "正在切换共享目标..." : "正在共享目标...");
 }
 
+// The Task browser controls live in a lazy chunk; loading them only when the
+// Owner switches the shared-control mode keeps the first-screen bundle flat.
+function mountBrowserTaskPanel(binding: Binding): void {
+  const container = binding.root.querySelector<HTMLElement>("#desktop-browser-target");
+  if (!container || container.dataset.mounted === "true") return;
+  container.dataset.mounted = "true";
+  void import("./browser_task_panel.js").then(module => module.mountBrowserTaskPanel({
+    container,
+    taskID: binding.state.taskID,
+    notify: binding.notify,
+    onChange: () => updateDOM(binding),
+  })).catch(error => {
+    container.innerHTML = `<p class="desktop-empty" role="alert">浏览器控制面板加载失败：${escapeHTML(error instanceof Error ? error.message : String(error))}</p>`;
+  });
+}
+
 export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
   const root = document.querySelector<HTMLElement>("#desktop-tool");
   if (active?.root === root && active.state.taskID === detail.task.id && active.state.remote === Boolean(detail.task.read_only)) return;
@@ -1954,6 +2003,11 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
   }
   root.querySelectorAll<HTMLButtonElement>("[data-desktop-popover]").forEach(button => { button.disabled = false; });
   bindPopovers(binding);
+  listen(binding, root.querySelector("#desktop-control-mode"), "change", event => {
+    state.browserMode = (event.target as HTMLSelectElement).value === "browser";
+    if (state.browserMode) mountBrowserTaskPanel(binding);
+    updateDOM(binding);
+  });
   const layout = () => {
     if (state.popover === "keys" && !root.querySelector("#desktop-more-keys")?.getClientRects().length) setPopover(binding, "");
     layoutPreview(binding);
@@ -2268,6 +2322,7 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
     if (!document.hidden && current(binding)) void poll(binding);
   };
   listen(binding, document, "visibilitychange", visibility);
+  if (state.browserMode) mountBrowserTaskPanel(binding);
   updateDOM(binding);
   void poll(binding, true);
 }

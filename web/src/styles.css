@@ -876,6 +876,27 @@ body.task-tool-resizing { cursor: col-resize; user-select: none; }
 .hardware-resource-meta .hardware-resource-pair-state.paired { border-color: #b9e5c8; background: #edf9f1; color: var(--green); }
 .hardware-resource-actions { display: flex; gap: 5px; }
 .hardware-resource-empty { gap: 8px; min-height: 300px; }
+.browser-resource-toolbar-actions { display: flex; align-items: center; gap: 7px; }
+.browser-host-banner { margin: 0; padding: 9px 11px; border: 1px solid var(--line); border-radius: 6px; background: #f8fafc; color: var(--muted); font-size: var(--font-size-13); }
+.browser-host-banner.ready { border-color: #b9e5c8; background: #f2fbf5; color: #15803d; }
+.browser-host-banner.error { border-color: #f3c6c6; background: #fff5f5; color: #b91c1c; }
+.browser-resource-error { margin: 0; color: var(--red); font-size: var(--font-size-13); }
+.browser-state.ready { border-color: #b9e5c8; background: #edf9f1; color: #15803d; }
+.browser-state.attention { border-color: #f6d9a8; background: #fff8ec; color: #a16207; }
+.browser-state.error { border-color: #f3c6c6; background: #fff5f5; color: #b91c1c; }
+.browser-state.busy { border-color: #bfdbfe; background: #edf4ff; color: #1d4ed8; }
+.browser-profile-dialog { width: min(520px, calc(100vw - 32px)); }
+.browser-profile-dialog form { display: grid; gap: 12px; }
+.desktop-browser-target { display: grid; gap: 8px; }
+#desktop-display-target { display: grid; gap: 10px; }
+.desktop-browser-surface { display: grid; gap: 8px; padding: 14px; border: 1px solid var(--line); border-radius: 6px; background: #f8fafc; }
+.desktop-browser-surface p { margin: 0; }
+.desktop-browser-tabs { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.desktop-browser-tabs li { display: grid; gap: 2px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 5px; background: #fff; }
+.desktop-browser-tabs small { color: var(--muted); overflow-wrap: anywhere; }
+.desktop-tool.browser-mode #desktop-picture-controls,
+.desktop-tool.browser-mode .desktop-observation,
+.desktop-tool.browser-mode #desktop-input { display: none; }
 .hardware-console { display: grid; grid-template-rows: 46px minmax(0,1fr) auto auto; min-width: 0; min-height: 0; background: #11151b; }
 .hardware-console-toolbar { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 6px 8px; border-bottom: 1px solid #303743; background: #f8fafc; }
 .hardware-transport-switch { display: flex; overflow: hidden; border: 1px solid #cfd5dc; border-radius: 5px; }

@@ -841,6 +841,83 @@ export interface HardwareResource {
   updated_at: string;
 }
 
+export type BrowserProfileState = "idle" | "starting" | "ready" | "auth_required" | "busy" | "error";
+export type BrowserSessionState = "starting" | "ready" | "auth_required" | "busy" | "closed" | "error";
+export type BrowserGrantStatus = "active" | "expired" | "revoked";
+
+export interface BrowserSession {
+  id: string;
+  profile_id: string;
+  host_id: string;
+  state: BrowserSessionState;
+  error?: string;
+  started_at: string;
+  last_used_at?: string;
+  closed_at?: string;
+  created_at: string;
+  updated_at: string;
+  host_reachable?: boolean;
+}
+
+export interface BrowserProfile {
+  id: string;
+  name: string;
+  browser_kind: "edge" | "chrome" | "chromium";
+  host_id: string;
+  state: BrowserProfileState;
+  last_used_at?: string;
+  created_at: string;
+  updated_at: string;
+  host_available: boolean;
+  session?: BrowserSession | null;
+}
+
+export interface BrowserTab {
+  id: string;
+  session_id: string;
+  grant_id: string;
+  task_id: string;
+  url: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BrowserTaskGrant {
+  id: string;
+  task_id: string;
+  profile_id: string;
+  session_id: string;
+  capabilities: string[];
+  expires_at: string;
+  revoked_at?: string;
+  created_at: string;
+  updated_at: string;
+  status: BrowserGrantStatus;
+  session?: BrowserSession | null;
+  tabs?: BrowserTab[];
+}
+
+export interface BrowserHostView {
+  available: boolean;
+  host_id: string;
+  version?: string;
+  platform?: string;
+  edge_available: boolean;
+  error?: string;
+  code?: string;
+}
+
+export interface TaskBrowserState {
+  task_id: string;
+  profiles: BrowserProfile[];
+  grants: BrowserTaskGrant[];
+  tabs: BrowserTab[];
+  session?: BrowserSession | null;
+  host_available: boolean;
+  host: BrowserHostView;
+}
+
 export interface HardwareTerminalStatus {
   task_id: string;
   hardware_id: string;
@@ -1827,6 +1904,26 @@ export interface KnowledgeVaultLegacyInventory {
   skill_packages: number;
 }
 
+export interface KnowledgeVaultAutoSyncStatus {
+  enabled: boolean;
+  running: boolean;
+  paused: boolean;
+  pause_reason?: string;
+  conflict: boolean;
+  conflict_detail?: string;
+  last_sync_at?: string;
+  last_commit_at?: string;
+  last_commit?: string;
+  last_error?: string;
+  warning?: string;
+  pending: number;
+  blocked: number;
+  blocked_files?: {path: string; reason: string}[];
+  failures?: number;
+  next_retry_at?: string;
+  preflight_done: boolean;
+}
+
 export interface KnowledgeVaultSettings {
   enabled: boolean;
   source: "database" | "startup";
@@ -1848,6 +1945,7 @@ export interface KnowledgeVaultSettings {
   readiness: KnowledgeVaultReadiness;
   legacy: KnowledgeVaultLegacyInventory;
   configured: boolean;
+  auto_sync?: KnowledgeVaultAutoSyncStatus;
   import_source?: string;
   migration_verified_at?: string;
   import_verified_at?: string;
