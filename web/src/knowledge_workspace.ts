@@ -2,6 +2,7 @@ import {api} from "./api.js";
 import {t} from "./i18n.js";
 import {icon} from "./icons.js";
 import {renderMarkdown} from "./markdown.js";
+import {groupSkillCatalog} from "./skill_groups.js";
 import type {Knowledge, KnowledgeLibrary, KnowledgeProposal, KnowledgeReviewSettings, ProductLine, Project, Skill, Workspace} from "./types.js";
 
 type KnowledgeScope = "project" | "global";
@@ -671,38 +672,29 @@ type SkillGroupSection = {key: string; label: string; items: Skill[]};
 // skillGroupSections keeps the global / archived / project split after search,
 // scope filtering and pagination. Archived skills are read-only and never fold
 // into a project group; project skills are grouped by their owning project.
+// The bucket rules come from the same helper as the vault Skills tab.
 export function skillGroupSections(context: KnowledgeWorkspaceContext, visible: Skill[]): SkillGroupSection[] {
-  const global = visible.filter(item => item.scope === "global").sort(compareSkills);
-  const archive = visible.filter(item => item.scope === "archive").sort(compareSkills);
-  const projectSkills = visible.filter(item => item.scope === "project");
-  const byProject = new Map<string, {label: string; items: Skill[]}>();
-  for (const item of projectSkills) {
-    const key = item.bound_project_id || item.project_id || "project";
-    const label = skillProjectName(context, item) || key;
-    const group = byProject.get(key) || {label, items: []};
-    group.items.push(item);
-    byProject.set(key, group);
-  }
-  const projects = [...byProject.entries()]
-    .sort((left, right) => left[1].label.localeCompare(right[1].label) || left[0].localeCompare(right[0]))
-    .flatMap(([, group]) => group.items.sort(compareSkills));
+  const grouping = groupSkillCatalog(visible, {
+    scope: item => item.scope,
+    projectKey: item => item.bound_project_id || item.project_id || "project",
+    projectLabel: item => skillProjectName(context, item),
+    compare: compareSkills,
+  });
   const sections: SkillGroupSection[] = [];
-  if (global.length) sections.push({key: "global", label: t("knowledge.skill.group.global"), items: global});
-  if (archive.length) sections.push({key: "archive", label: t("knowledge.skill.group.archive"), items: archive});
+  if (grouping.global.length) sections.push({key: "global", label: t("knowledge.skill.group.global"), items: grouping.global});
+  if (grouping.archive.length) sections.push({key: "archive", label: t("knowledge.skill.group.archive"), items: grouping.archive});
+  const projects = grouping.projects.flatMap(group => group.items);
   if (projects.length) sections.push({key: "project", label: t("knowledge.skill.group.projects"), items: projects});
   return sections;
 }
 
 function skillCard(context: KnowledgeWorkspaceContext, item: Skill): string {
   const auto = item.auto_attach ? `<span class="capability-badge">${t("knowledge.skill.auto")}</span>` : "";
-  const readOnly = item.scope === "archive" || item.can_update === false;
-  const toggle = readOnly
-    ? `<span class="capability-badge">${t("knowledge.skill.readOnly")}</span>`
-    : `<label class="skill-switch"><input type="checkbox" data-skill-toggle="${item.id}" ${item.enabled ? "checked" : ""}><span></span></label>`;
-  const actions = readOnly
-    ? `<button class="icon-button" type="button" data-skill-view="${item.id}" title="${t("knowledge.skill.view")}">${icon("eye")}</button>`
-    : `<button class="icon-button" type="button" data-skill-view="${item.id}" title="${t("knowledge.skill.view")}">${icon("eye")}</button><button class="icon-button" type="button" data-skill-edit="${item.id}">${icon("edit")}</button><button class="icon-button" type="button" data-skill-delete="${item.id}">${icon("close")}</button>`;
-  return `<article class="skill-card ${item.enabled ? "" : "disabled"} ${readOnly ? "read-only" : ""}"><header><div class="skill-mark">${icon("bot")}</div><div><strong>${escapeHTML(item.name)}${auto}</strong><small>${escapeHTML(skillScopeLabel(context, item))} · v${item.version} · ${escapeHTML(item.status)}</small></div>${toggle}</header><p>${escapeHTML(item.description || t("knowledge.skill.noDescription"))}</p><div class="skill-package-files"><strong>Skill Package</strong><span>${(item.files || []).map(file => `<code>${escapeHTML(file)}</code>`).join("") || "<code>SKILL.md</code>"}</span></div><footer><span title="${escapeHTML(item.source_path || "")}">${escapeHTML(item.source_path || "AHA managed package")}</span><div>${actions}</div></footer></article>`;
+  // Skill content is read-only on the Web. Creation, updates and deletion go
+  // through the Agent API / pet MCP, so this page never renders an edit,
+  // delete or enabled toggle even for writable scopes.
+  const actions = `<button class="icon-button" type="button" data-skill-view="${item.id}" title="${t("knowledge.skill.view")}">${icon("eye")}</button>`;
+  return `<article class="skill-card ${item.enabled ? "" : "disabled"} read-only"><header><div class="skill-mark">${icon("bot")}</div><div><strong>${escapeHTML(item.name)}${auto}</strong><small>${escapeHTML(skillScopeLabel(context, item))} · v${item.version} · ${escapeHTML(item.status)}</small></div><span class="capability-badge">${t("knowledge.skill.readOnly")}</span></header><p>${escapeHTML(item.description || t("knowledge.skill.noDescription"))}</p><div class="skill-package-files"><strong>Skill Package</strong><span>${(item.files || []).map(file => `<code>${escapeHTML(file)}</code>`).join("") || "<code>SKILL.md</code>"}</span></div><footer><span title="${escapeHTML(item.source_path || "")}">${escapeHTML(item.source_path || "AHA managed package")}</span><div>${actions}</div></footer></article>`;
 }
 
 function renderSkills(context: KnowledgeWorkspaceContext): string {
@@ -713,7 +705,8 @@ function renderSkills(context: KnowledgeWorkspaceContext): string {
   const totalLabel = filtering ? t("knowledge.skill.matchTotal", {matched: visible.length, total: skills.length}) : t("knowledge.skill.total", {total: skills.length});
   const sections = skillGroupSections(context, shown);
   const grouped = sections.map(section => `<section class="knowledge-skill-group" data-skill-group="${escapeHTML(section.key)}"><header><strong>${escapeHTML(section.label)}</strong><span>${section.items.length}</span></header><div class="skill-grid">${section.items.map(item => skillCard(context, item)).join("")}</div></section>`).join("");
-  return `<div class="knowledge-section-head"><div><h2>${t("knowledge.skill.heading")}</h2><p>${t("knowledge.skill.subtitle")}</p></div><button class="primary" type="button" data-skill-new>${icon("plus")}${t("knowledge.skill.new")}</button></div>
+  return `<div class="knowledge-section-head"><div><h2>${t("knowledge.skill.heading")}</h2><p>${t("knowledge.skill.subtitle")}</p></div></div>
+    <p class="field-help skill-readonly-hint">${t("knowledge.skill.readOnlyHint")}</p>
     <div class="knowledge-skill-toolbar">
       <input id="knowledge-skill-search" type="search" autocomplete="off" data-allow-rerender="true" placeholder="${t("knowledge.skill.search")}" value="${escapeHTML(skillSearch)}">
       <select id="knowledge-skill-scope" aria-label="${t("knowledge.skill.scopeAria")}">
@@ -847,12 +840,8 @@ function renderTopbar(pendingCount: number): string {
 }
 
 
-function skillDialog(projects: Project[], projectID: string): string {
-  return `<dialog id="skill-editor-dialog" class="wide"><form id="skill-editor-form"><div class="dialog-head"><h2>Skill Package</h2><button type="button" data-kb-close class="icon-button" aria-label="${t("common.closeDialog")}">${icon("close")}</button></div><div class="dialog-body"><input type="hidden" name="id"><div class="two"><label>作用域<select name="scope"><option value="global">Global</option><option value="project">Project</option></select></label><label>状态<select name="status"><option value="active">active</option><option value="draft">draft</option><option value="archived">archived</option></select></label></div><label class="skill-project-field" hidden>Project<select name="project_id"><option value="">请选择</option>${projects.map(item => `<option value="${item.id}" ${item.id === projectID ? "selected" : ""}>${escapeHTML(item.name)}</option>`).join("")}</select></label><label>名称<input name="name" required></label><label>描述<input name="description" placeholder="用于 Task 选择时判断该 Skill 是否适用"></label><label>SKILL.md 指令<textarea name="instructions" rows="12" required></textarea></label><p class="field-help">AHA 会自动管理 Skill 目录。脚本放入该目录的 <code>scripts/</code> 后，会随选中的 Skill 一起进入 Task Context。</p><label class="skill-enabled"><input name="enabled" type="checkbox" checked>启用</label><label class="skill-enabled"><input name="auto_attach" type="checkbox">新建任务时自动启用</label><p class="field-help">自动启用默认勾选、创建任务时可取消；全局 Skill 对所有新任务生效（含宠物和渠道系统任务），项目 Skill 仅对该项目生效。外部绑定 Skill 不自动启用。</p></div><div class="dialog-actions"><button type="button" data-kb-close>取消</button><button class="primary" type="submit">保存</button></div></form></dialog>`;
-}
-
 function skillDetailDialog(): string {
-  return `<dialog id="skill-detail-dialog" class="wide"><div class="dialog-head"><h2 id="skill-detail-name">Skill</h2><button type="button" data-kb-close class="icon-button" aria-label="${t("common.closeDialog")}">${icon("close")}</button></div><div class="dialog-body" id="skill-detail-body"></div><div class="dialog-actions"><button type="button" id="skill-detail-edit">编辑</button><button type="button" class="primary" data-kb-close>关闭</button></div></dialog>`;
+  return `<dialog id="skill-detail-dialog" class="wide"><div class="dialog-head"><h2 id="skill-detail-name">Skill</h2><button type="button" data-kb-close class="icon-button" aria-label="${t("common.closeDialog")}">${icon("close")}</button></div><div class="dialog-body" id="skill-detail-body"></div><div class="dialog-actions"><button type="button" class="primary" data-kb-close>关闭</button></div></dialog>`;
 }
 
 function productLineDialog(): string {
@@ -950,7 +939,7 @@ export function renderKnowledgeWorkspace(context: KnowledgeWorkspaceContext): st
       : activeMode === "edit"
         ? renderEditWorkspace(context, project)
         : renderReadWorkspace(context, project);
-  return `<section class="page knowledge-page knowledge-mode-${activeMode}"><div class="knowledge-topbar-wrap">${renderTopbar(pendingCount)}</div>${body}${skillDialog(context.projects, project?.id || "")}${skillDetailDialog()}${productLineDialog()}</section>`;
+  return `<section class="page knowledge-page knowledge-mode-${activeMode}"><div class="knowledge-topbar-wrap">${renderTopbar(pendingCount)}</div>${body}${skillDetailDialog()}${productLineDialog()}</section>`;
 }
 
 async function loadCatalog(projectID: string): Promise<void> {
@@ -1014,23 +1003,9 @@ function openDialog(id: string): HTMLDialogElement | null {
   return dialog;
 }
 
-function fillForm(form: HTMLFormElement, values: Record<string, unknown>): void {
-  for (const [name, value] of Object.entries(values)) {
-    const input = form.elements.namedItem(name) as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | null;
-    if (!input) continue;
-    if (input instanceof HTMLInputElement && input.type === "checkbox") input.checked = Boolean(value);
-    else input.value = String(value ?? "");
-  }
-}
-
 function syncKnowledgeScope(form: HTMLFormElement): void {
   const scope = String(new FormData(form).get("scope") || "project");
   form.querySelectorAll<HTMLElement>(".knowledge-project-field").forEach(element => element.hidden = scope === "global");
-}
-
-function syncSkillScope(form: HTMLFormElement): void {
-  const scope = String(new FormData(form).get("scope") || "global");
-  form.querySelectorAll<HTMLElement>(".skill-project-field").forEach(element => element.hidden = scope !== "project");
 }
 
 let knowledgeFilterRenderTimer: number | null = null;
@@ -1043,19 +1018,6 @@ function scheduleKnowledgeFilterRender(context: KnowledgeWorkspaceContext): void
   }, 140);
 }
 
-function openSkillEditor(context: KnowledgeWorkspaceContext, item?: Skill): void {
-  if (item && (item.scope === "archive" || item.can_update === false)) return;
-  const form = document.querySelector<HTMLFormElement>("#skill-editor-form");
-  if (!form) return;
-  form.reset();
-  fillForm(form, item ? (item as unknown as Record<string, unknown>) : {
-    scope: "global", project_id: selectedProject(context.projects)?.id || "",
-    status: "active", enabled: true, auto_attach: false,
-  });
-  syncSkillScope(form);
-  openDialog("#skill-editor-dialog");
-}
-
 function openSkillDetail(context: KnowledgeWorkspaceContext, id: string): void {
   const item = skills.find(skill => skill.id === id);
   const dialog = document.querySelector<HTMLDialogElement>("#skill-detail-dialog");
@@ -1064,13 +1026,7 @@ function openSkillDetail(context: KnowledgeWorkspaceContext, id: string): void {
   if (!item || !dialog || !body || !name) return;
   name.textContent = item.name;
   const updated = item.updated_at ? formatDate(item.updated_at) : t("knowledge.skill.unknown");
-  body.innerHTML = `<div class="skill-detail-meta"><span class="capability-badge">${escapeHTML(skillScopeLabel(context, item))}</span>${item.auto_attach ? '<span class="capability-badge">自动启用</span>' : ""}</div><p>${escapeHTML(item.description || t("knowledge.skill.noDescription"))}</p><dl class="mcp-detail-meta"><dt>${t("knowledge.skill.version")}</dt><dd>v${item.version}</dd><dt>${t("knowledge.skill.statusLabel")}</dt><dd>${escapeHTML(item.status)} · ${item.enabled ? t("knowledge.skill.enabledState") : t("knowledge.skill.disabledState")}</dd><dt>${t("knowledge.skill.source")}</dt><dd>${escapeHTML(item.source_path || "AHA managed package")}</dd><dt>${t("knowledge.skill.updated")}</dt><dd>${escapeHTML(updated)}</dd></dl><h3>SKILL.md</h3><div class="markdown-body skill-detail-instructions">${renderMarkdown(item.instructions || "")}</div><h3>Skill Package</h3><div class="skill-package-files"><span>${(item.files || []).map(file => `<code>${escapeHTML(file)}</code>`).join("") || "<code>SKILL.md</code>"}</span></div>`;
-  const edit = dialog.querySelector<HTMLButtonElement>("#skill-detail-edit");
-  if (edit) {
-    const readOnly = item.scope === "archive" || item.can_update === false;
-    edit.disabled = readOnly;
-    edit.onclick = readOnly ? null : () => { dialog.close(); openSkillEditor(context, item); };
-  }
+  body.innerHTML = `<div class="skill-detail-meta"><span class="capability-badge">${escapeHTML(skillScopeLabel(context, item))}</span><span class="capability-badge">${t("knowledge.skill.readOnly")}</span>${item.auto_attach ? `<span class="capability-badge">${t("knowledge.skill.auto")}</span>` : ""}</div><p>${escapeHTML(item.description || t("knowledge.skill.noDescription"))}</p><dl class="mcp-detail-meta"><dt>${t("knowledge.skill.version")}</dt><dd>v${item.version}</dd><dt>${t("knowledge.skill.statusLabel")}</dt><dd>${escapeHTML(item.status)} · ${item.enabled ? t("knowledge.skill.enabledState") : t("knowledge.skill.disabledState")}</dd><dt>${t("knowledge.skill.source")}</dt><dd>${escapeHTML(item.source_path || "AHA managed package")}</dd><dt>${t("knowledge.skill.updated")}</dt><dd>${escapeHTML(updated)}</dd></dl><h3>SKILL.md</h3><div class="markdown-body skill-detail-instructions">${renderMarkdown(item.instructions || "")}</div><h3>Skill Package</h3><div class="skill-package-files"><span>${(item.files || []).map(file => `<code>${escapeHTML(file)}</code>`).join("") || "<code>SKILL.md</code>"}</span></div>`;
   dialog.showModal();
 }
 
@@ -1408,11 +1364,6 @@ export function bindKnowledgeWorkspace(context: KnowledgeWorkspaceContext): void
   });
 
   document.querySelectorAll<HTMLElement>("[data-skill-view]").forEach(button => button.addEventListener("click", () => openSkillDetail(context, button.dataset.skillView || "")));
-  document.querySelector<HTMLElement>("[data-skill-new]")?.addEventListener("click", () => openSkillEditor(context));
-  document.querySelectorAll<HTMLElement>("[data-skill-edit]").forEach(button => button.addEventListener("click", () => {
-    const item = skills.find(skill => skill.id === button.dataset.skillEdit);
-    if (item) openSkillEditor(context, item);
-  }));
   document.querySelector<HTMLElement>("#knowledge-skill-search")?.addEventListener("input", event => {
     skillSearch = (event.currentTarget as HTMLInputElement).value;
     skillLimit = SKILL_BATCH_SIZE;
@@ -1437,34 +1388,6 @@ export function bindKnowledgeWorkspace(context: KnowledgeWorkspaceContext): void
     skillLimit += SKILL_BATCH_SIZE;
     context.render();
   }));
-  document.querySelector<HTMLSelectElement>("#skill-editor-form [name=scope]")?.addEventListener("change", event => syncSkillScope(event.currentTarget.form!));
-  document.querySelector<HTMLFormElement>("#skill-editor-form")?.addEventListener("submit", event => {
-    event.preventDefault();
-    const form = new FormData(event.currentTarget);
-    const payload = Object.fromEntries(form.entries()) as Record<string, unknown>;
-    const id = String(payload.id || "");
-    delete payload.id;
-    payload.enabled = form.get("enabled") === "on";
-    payload.auto_attach = form.get("auto_attach") === "on";
-    if (payload.scope === "global") payload.project_id = "";
-    // A global auto-enable needs the owner's explicit second confirmation.
-    const wantsGlobalAuto = payload.scope === "global" && payload.auto_attach === true;
-    if (wantsGlobalAuto && !window.confirm(t("kv.skillGlobalConfirm", {name: String(payload.name || "")}))) {
-      payload.auto_attach = false;
-    }
-    payload.confirm_global = wantsGlobalAuto && payload.auto_attach === true;
-    void mutate(context, () => id ? api.updateSkill(id, payload) : api.createSkill(payload), id ? t("knowledge.skill.updatedMessage") : t("knowledge.skill.createdMessage"), event.currentTarget, t("knowledge.edit.saving"));
-  });
-  document.querySelectorAll<HTMLInputElement>("[data-skill-toggle]").forEach(input => input.addEventListener("change", () => {
-    const item = skills.find(skill => skill.id === input.dataset.skillToggle);
-    if (!item) return;
-    void mutate(context, () => api.updateSkill(item.id, {...item, enabled: input.checked}), input.checked ? t("knowledge.skill.enabledMessage") : t("knowledge.skill.disabledMessage"));
-  }));
-  document.querySelectorAll<HTMLElement>("[data-skill-delete]").forEach(button => button.addEventListener("click", () => {
-    if (!window.confirm(t("knowledge.skill.deleteConfirm"))) return;
-    void mutate(context, () => api.deleteSkill(button.dataset.skillDelete || ""), t("knowledge.skill.deleted"));
-  }));
-
   document.querySelectorAll<HTMLElement>("[data-knowledge-library-bind]").forEach(button => button.addEventListener("click", () => {
     const id = button.dataset.knowledgeLibraryBind || "";
     const select = document.querySelector<HTMLSelectElement>(`[data-knowledge-library-target="${CSS.escape(id)}"]`);

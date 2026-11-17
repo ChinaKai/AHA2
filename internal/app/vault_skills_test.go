@@ -366,27 +366,15 @@ func TestVaultAutoAttachKeepsExplicitManualSelection(t *testing.T) {
 	withUnsetEnv(t, knowledgeVaultReadProjectsEnv)
 	fixture := newVaultSkillsFixture(t)
 	ctx := fixture.ctx
-	now := time.Now().UTC()
-	for _, item := range []domain.Skill{
-		{ID: "skill-legacy-manual", Scope: "global", Name: "Legacy Manual", Instructions: "legacy", Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now},
-		{ID: "skill-legacy-auto", Scope: "global", Name: "Legacy Auto", Instructions: "legacy", Version: 1, Status: "active", Enabled: true, AutoAttach: true, CreatedAt: now, UpdatedAt: now},
-	} {
-		if err := fixture.database.CreateSkill(ctx, item); err != nil {
-			t.Fatal(err)
-		}
-	}
 	if _, err := fixture.service.SetVaultSkillAutoAttach(ctx, "vault-skill:global:demo", true, true); err != nil {
 		t.Fatal(err)
 	}
-
-	task := fixture.createTask(t, []string{"skill-legacy-manual"})
-	for _, want := range []string{"skill-legacy-manual", "vault-skill:global:demo"} {
+	manual := "vault-skill:project:" + fixture.project.ID + ":vault-review"
+	task := fixture.createTask(t, []string{manual})
+	for _, want := range []string{manual, "vault-skill:global:demo"} {
 		if !hasTaskSkill(task, want) {
 			t.Fatalf("explicit selection or vault auto-attach missing %s: %#v", want, task.SkillIDs)
 		}
-	}
-	if hasTaskSkill(task, "skill-legacy-auto") {
-		t.Fatalf("legacy auto-attach was merged with an explicit selection: %#v", task.SkillIDs)
 	}
 }
 
@@ -474,22 +462,6 @@ func TestVaultSkillAutoAttachDegradesForUnboundProject(t *testing.T) {
 	}
 }
 
-func TestApplyVaultSkillPackagesStillPrefersVaultAndFallsBack(t *testing.T) {
-	withUnsetEnv(t, knowledgeVaultReadProjectsEnv)
-	fixture := newVaultSkillsFixture(t)
-	legacy := []domain.SkillFile{{Path: "SKILL.md", Content: "legacy"}}
-	result := fixture.service.applyVaultSkillPackages(fixture.ctx, fixture.project.ID, []domain.Skill{
-		{ID: "skill_demo", Scope: "global", PackageSlug: "demo", PackageFiles: legacy},
-		{ID: "skill_missing", Scope: "global", PackageSlug: "missing", PackageFiles: legacy},
-	})
-	if len(result[0].PackageFiles) != 2 || result[0].PackageFiles[0].Content == "legacy" {
-		t.Fatalf("vault package was not substituted: %#v", result[0])
-	}
-	if len(result[1].PackageFiles) != 1 || result[1].PackageFiles[0].Content != "legacy" {
-		t.Fatalf("missing vault package did not fall back: %#v", result[1])
-	}
-}
-
 func TestVaultSkillAutoAttachRequiresIndexReady(t *testing.T) {
 	withUnsetEnv(t, knowledgeVaultReadProjectsEnv)
 	fixture := newVaultSkillsFixtureWithManager(t, buildVaultSkillManagerWithoutIndex(t))
@@ -559,37 +531,20 @@ func TestVaultTaskSkillsForSystemProjectLoadsGlobalSkillsQuietly(t *testing.T) {
 		ID: vaultSystemProjectID, Name: "System Skills", ProjectType: "system", KnowledgePolicy: "none",
 	})
 	ctx := fixture.ctx
-	now := time.Now().UTC()
-	legacy := domain.Skill{
-		ID: "skill-system-global", Scope: "global", Name: "System Global", Instructions: "legacy global",
-		Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now,
-	}
-	if err := fixture.database.CreateSkill(ctx, legacy); err != nil {
-		t.Fatal(err)
-	}
-	task := fixture.createTask(t, []string{"vault-skill:global:demo", legacy.ID})
-	for _, want := range []string{"vault-skill:global:demo", legacy.ID} {
-		if !hasTaskSkill(task, want) {
-			t.Fatalf("system project rejected %s: %#v", want, task.SkillIDs)
-		}
+	task := fixture.createTask(t, []string{"vault-skill:global:demo"})
+	if !hasTaskSkill(task, "vault-skill:global:demo") {
+		t.Fatalf("system project rejected the global vault skill: %#v", task.SkillIDs)
 	}
 
 	logs := captureLog(t)
 	for attempt := 0; attempt < 3; attempt++ {
 		active := fixture.service.activeTaskSkills(ctx, task)
-		if len(active) != 2 {
-			t.Fatalf("attempt %d active skills = %#v, want the global vault skill and the legacy global skill", attempt, active)
+		if len(active) != 1 {
+			t.Fatalf("attempt %d active skills = %#v, want only the global vault skill", attempt, active)
 		}
-		byID := map[string]domain.Skill{}
-		for _, item := range active {
-			byID[item.ID] = item
-		}
-		demo, ok := byID["vault-skill:global:demo"]
-		if !ok || len(demo.PackageFiles) != 2 || demo.PackageFiles[0].Path != "SKILL.md" {
-			t.Fatalf("attempt %d global vault package = %#v", attempt, demo.PackageFiles)
-		}
-		if _, ok := byID[legacy.ID]; !ok {
-			t.Fatalf("attempt %d lost the legacy global skill: %#v", attempt, active)
+		demo := active[0]
+		if demo.ID != "vault-skill:global:demo" || len(demo.PackageFiles) != 2 || demo.PackageFiles[0].Path != "SKILL.md" {
+			t.Fatalf("attempt %d global vault package = %#v", attempt, demo)
 		}
 	}
 	if out := logs.String(); strings.Contains(out, "unavailable") || strings.Contains(out, "knowledge vault task skills") {
@@ -597,7 +552,7 @@ func TestVaultTaskSkillsForSystemProjectLoadsGlobalSkillsQuietly(t *testing.T) {
 	}
 	// Re-saving the same selection must keep validating; the pet Task edits its
 	// own Skill list through this path.
-	if _, err := fixture.service.UpdateTaskSkills(ctx, task.ID, []string{"vault-skill:global:demo", legacy.ID}); err != nil {
+	if _, err := fixture.service.UpdateTaskSkills(ctx, task.ID, []string{"vault-skill:global:demo"}); err != nil {
 		t.Fatalf("update system project task skills: %v", err)
 	}
 }
@@ -734,7 +689,10 @@ func TestVaultInfrastructureRetainedSpaceUsesGlobalSkillsOnly(t *testing.T) {
 
 // With the vault read gate off, a historical legacy id keeps loading its
 // legacy package instead of being rewritten to a vault key that cannot load.
-func TestHistoricalLegacySkillKeepsLegacyContentWhenVaultReadOff(t *testing.T) {
+// A Task created before the cutover can still store a legacy skills-table id.
+// That id has no vault package, so it is unavailable: the runtime never falls
+// back to the legacy table and the selection cannot be saved again.
+func TestHistoricalLegacySkillIsUnavailable(t *testing.T) {
 	withUnsetEnv(t, knowledgeVaultReadProjectsEnv)
 	fixture := newVaultSkillsFixture(t)
 	ctx := fixture.ctx
@@ -747,13 +705,19 @@ func TestHistoricalLegacySkillKeepsLegacyContentWhenVaultReadOff(t *testing.T) {
 	if err := fixture.database.CreateSkill(ctx, legacy); err != nil {
 		t.Fatal(err)
 	}
-	fixture.service.knowledgeVaultRuntimeRead = false
-	task := fixture.createTask(t, []string{legacy.ID})
-	if len(task.SkillIDs) != 1 || task.SkillIDs[0] != legacy.ID {
-		t.Fatalf("legacy selection was rewritten while the vault read was off: %#v", task.SkillIDs)
+	task := fixture.createTask(t, nil)
+	if err := fixture.database.UpdateTaskSkills(ctx, task.ID, []string{legacy.ID}, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
 	}
-	active := fixture.service.activeTaskSkills(ctx, task)
-	if len(active) != 1 || active[0].ID != legacy.ID || active[0].Instructions != "legacy demo" {
-		t.Fatalf("historical legacy skill did not keep its legacy content: %#v", active)
+	stored, err := fixture.database.Task(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := fixture.service.activeTaskSkills(ctx, stored)
+	if len(active) != 0 {
+		t.Fatalf("legacy id was loaded from the retired skills table: %#v", active)
+	}
+	if _, err := fixture.service.UpdateTaskSkills(ctx, task.ID, []string{legacy.ID}); err == nil || !strings.Contains(err.Error(), legacy.ID) {
+		t.Fatalf("legacy id was accepted by task skill validation: %v", err)
 	}
 }

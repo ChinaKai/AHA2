@@ -165,9 +165,9 @@ func (s *Service) DeleteVaultSkill(ctx context.Context, key string, allowGlobal 
 	return nil
 }
 
-// ListVaultSkills maps every package the vault exposes into the legacy Skill
-// shape so the Web editor and task picker have one source. The legacy table is
-// not consulted.
+// ListVaultSkills maps every package the vault exposes into the shared Skill
+// shape so the read-only Web list and the task picker have one source. The
+// legacy table is neither read nor written.
 func (s *Service) ListVaultSkills(ctx context.Context) ([]domain.Skill, error) {
 	if s == nil || s.knowledgeVault == nil {
 		return []domain.Skill{}, nil
@@ -190,8 +190,8 @@ func (s *Service) ListVaultSkills(ctx context.Context) ([]domain.Skill, error) {
 	return result, nil
 }
 
-// vaultSkillByKey resolves one stable key into the API shape. A legacy skill
-// id is accepted as a read-only alias so a historical task keeps working.
+// vaultSkillByKey resolves one stable vault key into the API shape. Legacy
+// skills-table ids are not aliases: after the cutover they are unavailable.
 func (s *Service) vaultSkillByKey(ctx context.Context, key string) (domain.Skill, error) {
 	key = strings.TrimSpace(key)
 	if key == "" {
@@ -221,14 +221,6 @@ func (s *Service) vaultSkillByKey(ctx context.Context, key string) (domain.Skill
 		return domain.Skill{}, err
 	}
 	if !found {
-		// Compatibility alias: a task or approval created before the cutover
-		// still names a legacy row. Resolve it to the equivalent vault package
-		// without ever writing the legacy table.
-		if legacy, legacyErr := s.store.Skill(ctx, key); legacyErr == nil {
-			if aliasKey, ok := s.vaultSkillKeyForLegacy(ctx, legacy); ok {
-				return s.vaultSkillByKey(ctx, aliasKey)
-			}
-		}
 		return domain.Skill{}, ErrVaultSkillNotFound
 	}
 	return result, nil
@@ -239,13 +231,6 @@ func (s *Service) vaultSkillPackageByKey(ctx context.Context, key string) (knowl
 		return knowledgevault.SkillPackage{}, knowledgevault.ErrDisabled
 	}
 	key = strings.TrimSpace(key)
-	if key != "" && !knowledgevault.IsVaultSkillID(key) {
-		if legacy, err := s.store.Skill(ctx, key); err == nil {
-			if aliasKey, ok := s.vaultSkillKeyForLegacy(ctx, legacy); ok {
-				key = aliasKey
-			}
-		}
-	}
 	var result knowledgevault.SkillPackage
 	found := false
 	err := s.knowledgeVault.WithReader(func(reader *knowledgevault.Reader) error {
@@ -269,49 +254,6 @@ func (s *Service) vaultSkillPackageByKey(ctx context.Context, key string) (knowl
 		return knowledgevault.SkillPackage{}, ErrVaultSkillNotFound
 	}
 	return result, nil
-}
-
-// vaultSkillKeyForLegacy maps a legacy skills row to the package with the same
-// scope and slug. It is a read-only compatibility alias, never a migration.
-func (s *Service) vaultSkillKeyForLegacy(ctx context.Context, item domain.Skill) (string, bool) {
-	if s == nil || s.knowledgeVault == nil {
-		return "", false
-	}
-	slug := strings.TrimSpace(item.PackageSlug)
-	if slug == "" {
-		slug = knowledgevault.Slugify(item.Name)
-	}
-	slug = knowledgevault.SafeSegment(slug, "skill")
-	projectKey, globalKey := "", ""
-	_ = s.knowledgeVault.WithReader(func(reader *knowledgevault.Reader) error {
-		response, err := reader.Skills(ctx)
-		if err != nil {
-			return nil
-		}
-		for _, skill := range response.Skills {
-			if skill.Slug != slug {
-				continue
-			}
-			switch skill.Scope {
-			case knowledgevault.SkillScopeProject:
-				if skill.ProjectID == item.ProjectID {
-					projectKey = skill.Key
-				}
-			case knowledgevault.SkillScopeGlobal:
-				if globalKey == "" {
-					globalKey = skill.Key
-				}
-			}
-		}
-		return nil
-	})
-	if item.Scope == knowledgevault.SkillScopeProject && projectKey != "" {
-		return projectKey, true
-	}
-	if globalKey != "" {
-		return globalKey, true
-	}
-	return "", false
 }
 
 // vaultSkillKeyForName resolves a well-known skill (tiered-code-review) from

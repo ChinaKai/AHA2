@@ -186,8 +186,8 @@ func TestVaultKnowledgeRuntimeReadGateOffFallsBack(t *testing.T) {
 	manager := buildVaultReadManager(t, true, files)
 	ctx := context.Background()
 
-	// The CLI/env default is on, but an explicit false must keep both knowledge
-	// and skills on the legacy sources even when the allowlist is unset.
+	// The CLI/env default is on, but an explicit false must keep knowledge on
+	// the legacy sources even when the allowlist is unset.
 	service := &Service{knowledgeVault: manager}
 	for _, projectID := range []string{petProjectID, aha2ProjectID} {
 		if service.vaultReadEnabled(projectID) {
@@ -195,12 +195,6 @@ func TestVaultKnowledgeRuntimeReadGateOffFallsBack(t *testing.T) {
 		}
 		if _, ok := service.vaultKnowledgeForProject(ctx, projectID); ok {
 			t.Fatalf("runtime gate off still read vault knowledge for %s", projectID)
-		}
-		legacy := []domain.SkillFile{{Path: "SKILL.md", Content: "legacy"}}
-		skills := []domain.Skill{{ID: "skill_demo", Scope: "global", PackageSlug: "demo", PackageFiles: legacy}}
-		result := service.applyVaultSkillPackages(ctx, projectID, skills)
-		if len(result[0].PackageFiles) != 1 || result[0].PackageFiles[0].Content != "legacy" {
-			t.Fatalf("runtime gate off still loaded vault skills for %s: %#v", projectID, result[0].PackageFiles)
 		}
 	}
 
@@ -232,12 +226,6 @@ func TestVaultKnowledgeFallsBackWhenDisabledOrUnbound(t *testing.T) {
 	}
 	if _, ok := service.vaultKnowledgeForProject(context.Background(), petProjectID); ok {
 		t.Fatal("unbound vault project was treated as a read source")
-	}
-	legacy := []domain.SkillFile{{Path: "SKILL.md", Content: "legacy"}}
-	skills := []domain.Skill{{ID: "skill_project", Scope: "project", ProjectID: petProjectID, PackageSlug: "demo", PackageFiles: legacy}}
-	result := service.applyVaultSkillPackages(context.Background(), petProjectID, skills)
-	if len(result[0].PackageFiles) != 1 || result[0].PackageFiles[0].Content != "legacy" {
-		t.Fatalf("unbound project did not keep the legacy skill package: %#v", result[0].PackageFiles)
 	}
 }
 
@@ -277,38 +265,6 @@ func TestVaultKnowledgeWriteRequiresReadAndRuntimeGates(t *testing.T) {
 	disabled.SetRuntimeWrite(true)
 	if (&Service{knowledgeVault: disabled, knowledgeVaultRuntimeRead: true, knowledgeVaultRuntimeWrite: true}).vaultKnowledgeWriteEnabled(petProjectID) {
 		t.Fatal("disabled Web vault still routed writes to the vault")
-	}
-}
-
-func TestApplyVaultSkillPackagesUsesVaultAndFallsBack(t *testing.T) {
-	t.Setenv(knowledgeVaultReadProjectsEnv, petProjectID)
-	manager := buildVaultReadManager(t, true, map[string]string{
-		"global/skills/demo/SKILL.md":                 "---\nname: Demo\ndescription: Vault demo\n---\n\n# Vault Demo\n",
-		"global/skills/demo/scripts/run.sh":           "#!/bin/sh\necho vault\n",
-		"projects/pet/index.md":                       "---\nid: knowledge_root_project_pet\ntitle: 宠物项目\nscope: project\nproject_id: project_pet\ntype: navigation\nstatus: verified\nis_index: true\n---\n宠物入口。\n",
-		"projects/pet/skills/project-demo/SKILL.md":   "---\nname: Project Demo\ndescription: Project vault demo\n---\n\n# Project Vault Demo\n",
-		"projects/pet/skills/project-demo/scripts/go": "#!/bin/sh\necho project\n",
-	})
-	service := &Service{knowledgeVault: manager, knowledgeVaultRuntimeRead: true}
-	legacy := []domain.SkillFile{{Path: "SKILL.md", Content: "legacy"}}
-	skills := []domain.Skill{
-		{ID: "skill_demo", Scope: "global", PackageSlug: "demo", PackageFiles: legacy},
-		{ID: "skill_missing", Scope: "global", PackageSlug: "missing", PackageFiles: legacy},
-		{ID: "skill_project", Scope: "project", ProjectID: petProjectID, PackageSlug: "project-demo", PackageFiles: legacy},
-	}
-	result := service.applyVaultSkillPackages(context.Background(), petProjectID, skills)
-	if len(result[0].PackageFiles) != 2 || result[0].PackageFiles[1].Path != "scripts/run.sh" {
-		t.Fatalf("vault skill was not loaded: %#v", result[0])
-	}
-	if len(result[1].PackageFiles) != 1 || result[1].PackageFiles[0].Content != "legacy" {
-		t.Fatalf("legacy fallback was not preserved: %#v", result[1])
-	}
-	if len(result[2].PackageFiles) != 2 || result[2].PackageFiles[1].Path != "scripts/go" {
-		t.Fatalf("project vault skill was not loaded: %#v", result[2])
-	}
-	legacyDir := filepath.Join(manager.Config().DataDir, "knowledge", "skills")
-	if _, err := os.Stat(legacyDir); err == nil {
-		t.Fatal("test unexpectedly created a legacy skill directory")
 	}
 }
 

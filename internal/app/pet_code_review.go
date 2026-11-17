@@ -151,82 +151,42 @@ func (s *Service) PetRequestCodeReview(ctx context.Context, input PetRequestCode
 	return result, nil
 }
 
-// petCodeReviewSkillIDs keeps explicitly requested Skills as-is. When none are
+// petCodeReviewSkillIDs keeps explicitly requested vault Skills. When none are
 // requested it resolves the tiered-code-review package from the vault, with the
-// source project's library taking precedence over global. A historical
-// skill_d942... id is accepted as a read-only alias, and a missing Skill is
-// reported as a warning instead of being fabricated, so the Review Task can
-// still run.
+// source project's library taking precedence over global. Legacy skills-table
+// ids are not aliases: they are reported as unavailable, and a missing Skill is
+// a warning instead of a fabricated selection, so the Review Task can still run.
 func (s *Service) petCodeReviewSkillIDs(ctx context.Context, projectID string, requested []string) ([]string, string, error) {
 	ids := make([]string, 0, len(requested))
+	skipped := make([]string, 0)
 	for _, id := range requested {
 		id = strings.TrimSpace(id)
 		if id == "" {
 			continue
 		}
-		// Normalize a historical legacy id to the vault key so the review Task
-		// stores an identity that survives the legacy table disappearing.
-		if !knowledgevault.IsVaultSkillID(id) && s.vaultSkillReadableForProject(ctx, projectID) {
-			if item, err := s.store.Skill(ctx, id); err == nil {
-				if aliasKey, ok := s.vaultSkillKeyForLegacy(ctx, item); ok {
-					id = aliasKey
-				}
-			}
+		if !knowledgevault.IsVaultSkillID(id) {
+			// Never fall back to the legacy skills table after the cutover.
+			skipped = append(skipped, id)
+			continue
 		}
 		ids = append(ids, id)
 	}
+	warning := ""
+	if len(skipped) > 0 {
+		warning = fmt.Sprintf("旧技能 ID 已不可用，已忽略：%s", strings.Join(skipped, ", "))
+	}
 	if len(ids) > 0 {
-		return ids, "", nil
+		return ids, warning, nil
 	}
-	if s.vaultSkillReadableForProject(ctx, projectID) {
-		if key, ok := s.vaultSkillKeyForName(ctx, projectID, petCodeReviewTieredSkillName); ok &&
-			s.vaultSkillExistsInProject(ctx, projectID, key) {
-			return []string{key}, "", nil
-		}
+	if key, ok := s.vaultSkillKeyForName(ctx, projectID, petCodeReviewTieredSkillName); ok &&
+		s.vaultSkillExistsInProject(ctx, projectID, key) {
+		return []string{key}, warning, nil
 	}
-	// The vault package is authoritative, but a project whose vault read is not
-	// effective yet still has the legacy row. Keep the review workflow working
-	// during the cutover without ever writing the legacy table.
-	items, err := s.store.ListSkills(ctx, "", "", true)
-	if err != nil {
-		return nil, "", fmt.Errorf("查找评审 Skill 失败：%w", err)
+	missing := fmt.Sprintf("未找到可用的 %s Skill，Review Task 没有附加该 Skill", petCodeReviewTieredSkillName)
+	if warning != "" {
+		missing = warning + "；" + missing
 	}
-	globalID := ""
-	for _, item := range items {
-		if !strings.EqualFold(strings.TrimSpace(item.Name), petCodeReviewTieredSkillName) ||
-			(item.Scope != "global" && !(item.Scope == "project" && item.ProjectID == projectID)) {
-			continue
-		}
-		resolved := item.ID
-		if s.vaultSkillReadableForProject(ctx, projectID) {
-			if aliasKey, ok := s.vaultSkillKeyForLegacy(ctx, item); ok {
-				resolved = aliasKey
-			}
-		}
-		if item.Scope == "project" {
-			return []string{resolved}, "", nil
-		}
-		if globalID == "" {
-			globalID = resolved
-		}
-	}
-	if globalID != "" {
-		return []string{globalID}, "", nil
-	}
-	return nil, fmt.Sprintf("未找到可用的 %s Skill，Review Task 没有附加该 Skill", petCodeReviewTieredSkillName), nil
-}
-
-// vaultSkillReadableForProject mirrors the read gate used by the task picker:
-// an infrastructure project has only the global vault source, others need
-// their own project library to be readable.
-func (s *Service) vaultSkillReadableForProject(ctx context.Context, projectID string) bool {
-	if s == nil || s.knowledgeVault == nil {
-		return false
-	}
-	if s.projectHasNoKnowledgeSpace(ctx, projectID) {
-		return s.vaultGlobalReadEnabled()
-	}
-	return s.vaultReadEnabled(projectID)
+	return nil, missing, nil
 }
 
 func petCodeReviewRequest(source domain.Task, focus, sourceAgent string) string {

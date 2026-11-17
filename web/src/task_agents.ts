@@ -594,7 +594,6 @@ export function renderTaskSkills(skills: Skill[], projectID: string, selected: s
       if (left.scope !== right.scope) return left.scope === "global" ? -1 : 1;
       return left.name.localeCompare(right.name) || left.id.localeCompare(right.id);
     });
-  if (!visible.length) return `<div class="field-help">当前 Project 没有可用 Skill。</div>`;
   const renderOption = (item: Skill): string => {
     const auto = item.auto_attach ? ' <span class="capability-badge">自动</span>' : "";
     const source = "vault 技能";
@@ -621,7 +620,15 @@ export function renderTaskSkills(skills: Skill[], projectID: string, selected: s
       .map(([key, items]) => `<div class="task-skill-project" data-task-skill-project="${escapeHTML(key)}">${items.map(renderOption).join("")}</div>`);
     sections.push(`<section class="task-skill-group" data-task-skill-group="project"><header><strong>${escapeHTML(t("knowledge.skill.group.projects"))}</strong><span>${projectSkills.length}</span></header>${groups.join("")}</section>`);
   }
-  return sections.join("");
+  // A historical Task can still store a legacy skill id. After the vault-only
+  // cutover it cannot be resolved, so show it as unavailable instead of
+  // silently dropping it (and never fall back to the legacy skills table).
+  const visibleIDs = new Set(visible.map(item => item.id));
+  const unavailable = [...new Set(selected)].filter(id => !visibleIDs.has(id));
+  if (unavailable.length) {
+    sections.push(`<section class="task-skill-group" data-task-skill-group="unavailable"><header><strong>${escapeHTML(t("knowledge.skill.group.unavailable"))}</strong><span>${unavailable.length}</span></header>${unavailable.map(id => `<div class="task-skill-option task-skill-unavailable"><span><strong>${escapeHTML(id)}</strong><small>${escapeHTML(t("knowledge.skill.unavailableHint"))}</small></span></div>`).join("")}</section>`);
+  }
+  return sections.join("") || `<div class="field-help">当前 Project 没有可用 Skill。</div>`;
 }
 
 export type MCPOptionsResult = {body: string; total: number};

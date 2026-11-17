@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -665,67 +664,4 @@ func (s *Service) knowledgeGuidePrompt() string {
 		return ""
 	}
 	return guide.Prompt
-}
-
-// applyVaultSkillPackages replaces selected skill packages with the vault copy.
-// A missing or unreadable package keeps the legacy dataDir copy; the old skill
-// directories are never modified or removed.
-func (s *Service) applyVaultSkillPackages(ctx context.Context, projectID string, skills []domain.Skill) []domain.Skill {
-	if !s.vaultReadEnabled(projectID) || len(skills) == 0 {
-		return skills
-	}
-	result := append([]domain.Skill(nil), skills...)
-	_ = s.knowledgeVault.WithReader(func(reader *knowledgevault.Reader) error {
-		if !reader.VaultReady() {
-			return nil
-		}
-		manifest := reader.Manifest()
-		for index := range result {
-			skill := &result[index]
-			// Vault-selected skills already carry their package files; only
-			// migrated legacy skills need the vault copy substituted.
-			if knowledgevault.IsVaultSkillID(skill.ID) {
-				continue
-			}
-			slug := strings.TrimSpace(skill.PackageSlug)
-			if slug == "" {
-				slug = knowledgevault.Slugify(skill.Name)
-			}
-			slug = knowledgevault.SafeSegment(slug, "skill")
-			relative := ""
-			switch skill.Scope {
-			case "global":
-				relative = "global/skills/" + slug
-			case "project":
-				owner := strings.TrimSpace(skill.ProjectID)
-				if owner == "" {
-					owner = projectID
-				}
-				projectSlug := strings.TrimSpace(manifest.Projects[owner])
-				if projectSlug == "" {
-					log.Printf("knowledge vault skill %s: project %s has no vault slug; using legacy package", skill.ID, owner)
-					continue
-				}
-				relative = "projects/" + projectSlug + "/skills/" + slug
-			default:
-				continue
-			}
-			files, err := reader.SkillFiles(relative)
-			if err != nil {
-				log.Printf("knowledge vault skill %s not found at %s; using legacy package: %v", skill.ID, relative, err)
-				continue
-			}
-			packageFiles := make([]domain.SkillFile, 0, len(files))
-			names := make([]string, 0, len(files))
-			for _, file := range files {
-				packageFiles = append(packageFiles, domain.SkillFile{Path: file.Path, Content: file.Content})
-				names = append(names, file.Path)
-			}
-			skill.PackageFiles = packageFiles
-			skill.Files = names
-			skill.SourcePath = filepath.Join(reader.Config().VaultPath, filepath.FromSlash(relative))
-		}
-		return nil
-	})
-	return result
 }

@@ -24,7 +24,7 @@ try {
   throw new Error("esbuild is not installed; run `npm ci` in web/ before building");
 }
 
-const moduleNames = ["api", "i18n", "icons", "types", "lazy_page", "pet_bubble", "pet_navigation", "pet_approvals", "pet_workbench", "runtime_picker", "task_agents", "task_composer", "task_filters", "hardware_terminal", "hardware_panel", "hardware_resources", "mail_cards", "mail_editor", "mail_resources", "mail_task", "resources", "desktop_panel", "task_tools", "mcp_page", "markdown", "conversation_ui", "ui_helpers", "model_health", "model_selection", "prompt_admin", "proxy_settings", "data_retention", "sync_settings", "codex_accounts", "knowledge_workspace", "knowledge_vault", "knowledge_vault_settings", "task_vault_skills", "channels", "assistant", "backends", "command_palette", "main"];
+const moduleNames = ["api", "i18n", "icons", "types", "lazy_page", "pet_bubble", "pet_navigation", "pet_approvals", "pet_workbench", "runtime_picker", "task_agents", "task_composer", "task_filters", "hardware_terminal", "hardware_panel", "hardware_resources", "mail_cards", "mail_editor", "mail_resources", "mail_task", "resources", "desktop_panel", "task_tools", "mcp_page", "markdown", "conversation_ui", "ui_helpers", "model_health", "model_selection", "prompt_admin", "proxy_settings", "data_retention", "sync_settings", "codex_accounts", "skill_groups", "knowledge_workspace", "knowledge_vault", "knowledge_vault_settings", "task_vault_skills", "channels", "assistant", "backends", "command_palette", "main"];
 
 async function writeAssets(target) {
   await mkdir(resolve(target, "vendor"), {recursive: true});
@@ -87,8 +87,8 @@ async function buildModules() {
     "data_retention.js": ["i18n"],
     "sync_settings.js": ["api", "icons"],
     "codex_accounts.js": ["api", "icons"],
-    "knowledge_workspace.js": ["api", "icons", "i18n", "markdown"],
-    "knowledge_vault.js": ["api", "icons", "i18n", "markdown"],
+    "knowledge_workspace.js": ["api", "icons", "i18n", "markdown", "skill_groups"],
+    "knowledge_vault.js": ["api", "icons", "i18n", "markdown", "skill_groups"],
     "knowledge_vault_settings.js": ["api", "i18n"],
     "task_vault_skills.js": ["api"],
     "channels.js": ["api", "icons"],

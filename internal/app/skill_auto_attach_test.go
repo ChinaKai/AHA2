@@ -157,15 +157,6 @@ func TestCreateTaskAppliesAutoAttachSkills(t *testing.T) {
 	}
 }
 
-func TestBoundProjectSkillIsSelectable(t *testing.T) {
-	if !skillAppliesToProject(domain.Skill{Scope: "project", ProjectID: "container", BoundProjectID: "bound"}, "bound") {
-		t.Fatal("bound project skill was rejected")
-	}
-	if skillAppliesToProject(domain.Skill{Scope: "project", ProjectID: "other"}, "bound") {
-		t.Fatal("unrelated project skill was accepted")
-	}
-}
-
 func hasSkillID(ids []string, want string) bool {
 	for _, id := range ids {
 		if id == want {

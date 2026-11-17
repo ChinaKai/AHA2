@@ -1508,6 +1508,7 @@ dialog.agent-config-dialog { width: min(760px,calc(100vw - 32px)); }
 .task-skill-options { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 7px; max-height: 240px; overflow-y: auto; }
 .task-skill-option { display: grid; grid-template-columns: 18px minmax(0,1fr); align-items: start; gap: 7px; min-width: 0; margin: 0; padding: 8px; border: 1px solid #e2e8f0; border-radius: 5px; background: #fff; }
 .task-skill-option input { width: 15px; height: 15px; margin-top: 1px; }
+.task-skill-option.task-skill-unavailable { grid-template-columns: minmax(0,1fr); border-style: dashed; background: var(--color-surface-muted); }
 .task-skill-option strong, .task-skill-option small { display: block; overflow: hidden; text-overflow: ellipsis; }
 .task-skill-option strong { font-size: 10px; }
 .task-skill-option small { margin-top: 3px; color: var(--muted); font-size: 9px; white-space: nowrap; }
@@ -3355,6 +3356,12 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
 .kv-chip-static { cursor: default; }
 .kv-chip-static:hover { background: var(--color-surface); }
 
+.kv-skill-groups { display: grid; gap: var(--space-5); margin-top: var(--space-3); }
+.kv-skill-group > header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: var(--space-2); padding-bottom: 6px; border-bottom: 1px solid var(--color-border-subtle); }
+.kv-skill-group > header strong { font-size: var(--font-size-13); }
+.kv-skill-group > header span { color: var(--color-text-subtle); font-size: var(--font-size-12); }
+.kv-skill-project-groups { display: grid; gap: var(--space-4); }
+.kv-skill-project-group > h3 { margin: 0 0 var(--space-2); color: var(--color-text-muted); font-size: var(--font-size-12); }
 .kv-skill-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: var(--space-3); margin-top: var(--space-3); }
 .kv-skill-card { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-4); border: 1px solid var(--color-border-subtle); border-radius: var(--radius-card); background: var(--color-surface); min-width: 0; }
 .kv-skill-card header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; min-width: 0; }

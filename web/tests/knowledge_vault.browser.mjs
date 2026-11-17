@@ -1236,10 +1236,15 @@ try {
     text: document.activeElement?.textContent,
   })), {id: "kv-real-title", tag: "H2", text: "真标题"});
 
-  // An unknown deep link is an explicit error state, never a blank page.
+  // A deep link to a document deleted on disk clears the stale selection,
+  // returns to the activity list, refreshes the tree and explains why.
   await page.goto(`${url}/?deep=2#knowledge?doc=missing&scope=global`, {waitUntil: "networkidle"});
-  await page.waitForSelector(".kv-state-error");
-  assert.match(await page.locator(".kv-state-error").innerText(), /knowledge_vault_document_not_found/);
+  await page.waitForSelector(".kv-activity");
+  assert.equal(await page.locator(".kv-state-error").count(), 0, "a deleted document must not leave a dead error card");
+  assert.equal(await page.evaluate(() => location.hash), "#knowledge", "the stale document hash is cleared");
+  await page.waitForSelector(".banner.success");
+  assert.match(await page.locator(".banner.success").innerText(), /文件已不存在/);
+  assert.ok(await page.evaluate(() => window.__vaultTreeRequests.length) >= 1, "the directory tree is refreshed");
 
   // A long title wraps naturally on its own line instead of being squeezed by
   // the action buttons, and the three icons stay at the breadcrumb's right end.

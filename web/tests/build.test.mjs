@@ -2750,7 +2750,9 @@ test("skills and project settings are separate sections with no document body", 
   };
   const skillsHTML = module.renderKnowledgeSkillsPage(context);
   assert.equal((skillsHTML.match(/class="skill-card/g) || []).length, 0);
-  assert.match(skillsHTML, /新建 Skill/);
+  // The Web skills page is read-only: no create, edit, delete or enabled toggle.
+  assert.doesNotMatch(skillsHTML, /data-skill-new|data-skill-edit|data-skill-delete|data-skill-toggle/);
+  assert.match(skillsHTML, /技能内容在 Web 只读/);
   assert.match(skillsHTML, /id="knowledge-skill-search"/);
   assert.doesNotMatch(skillsHTML, /knowledge-manage-tabs/);
   assert.doesNotMatch(skillsHTML, /BODY_MUST_NOT_APPEAR/);
@@ -3631,7 +3633,7 @@ test("built-in channel MCP is read-only and auto-injected in the MCP page", asyn
   assert.match(agents, /!item\.auto_inject/);
 });
 
-test("knowledge page exposes local search, skill filtering, and auto-attach", async () => {
+test("knowledge page exposes local search and read-only skill filtering", async () => {
   const root = resolve(import.meta.dirname, "..");
   const knowledge = await readFile(resolve(root, "src", "knowledge_workspace.ts"), "utf8");
   const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
@@ -3646,8 +3648,10 @@ test("knowledge page exposes local search, skill filtering, and auto-attach", as
   assert.match(knowledge, /id="knowledge-skill-project"/);
   assert.match(knowledge, /data-skill-view/);
   assert.match(knowledge, /skill-detail-dialog/);
-  assert.match(knowledge, /name="auto_attach"/);
-  assert.match(knowledge, /payload\.auto_attach/);
+  // Web skill content is read-only; auto-attach remains a vault preference on
+  // the knowledge vault Skills tab, not a legacy editor field.
+  assert.doesNotMatch(knowledge, /id="skill-editor-form"|name="auto_attach"|data-skill-new|data-skill-edit|data-skill-delete/);
+  assert.match(knowledge, /knowledge\.skill\.readOnlyHint/);
   assert.match(types, /auto_attach\?: boolean/);
   assert.match(main, /autoTaskSkillIDs/);
   assert.match(main, /includeAutoDefaults/);

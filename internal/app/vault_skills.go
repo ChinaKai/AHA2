@@ -15,9 +15,9 @@ import (
 )
 
 // Vault skills are file packages, not rows in the legacy skills table. A
-// preference row remembers the owner's auto-attach choice; task resolution
-// reads only vault packages (with a read-only alias for historical legacy ids)
-// and reads the package through the existing Reader.SkillFiles path.
+// preference row remembers the owner's auto-attach choice; task selection and
+// resolution read only vault packages through Reader.SkillFiles. Legacy ids
+// from historical tasks are unavailable, never aliased or read from the table.
 
 var (
 	// ErrVaultSkillNotFound reports a key that the current vault does not

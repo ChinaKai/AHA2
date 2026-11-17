@@ -2,6 +2,7 @@ import {api} from "./api.js";
 import {t, currentLocale, formatLocaleDateTime} from "./i18n.js";
 import {icon} from "./icons.js";
 import {renderMarkdown} from "./markdown.js";
+import {groupSkillCatalog} from "./skill_groups.js";
 import type {
   KnowledgeVaultDoc,
   KnowledgeVaultDocDiff,
@@ -67,6 +68,8 @@ const localText: Record<string, [zhCN: string, enUS: string]> = {
   "kv.skillGlobalConfirmRequired": ["全局启用需要二次确认，请重试并确认弹窗。", "Global enabling needs the second confirmation; retry and confirm the dialog."],
   "kv.skillNotFound": ["该 vault 技能已不存在，请刷新后重试。", "This vault skill no longer exists. Refresh and try again."],
   "kv.skillVaultDisabled": ["知识库功能未启用，无法修改任务自动启用。", "The knowledge vault is disabled, so auto-enable cannot be changed."],
+  "kv.scope.archive": ["归档", "Archived"],
+  "kv.docMissingRefreshed": ["文件已不存在，已刷新目录。", "The file no longer exists; the directory was refreshed."],
   "kv.blocked.title": ["知识库暂时不可用", "Knowledge vault unavailable"],
   "kv.blocked.statusMigration": ["待迁移", "Migration needed"],
   "kv.blocked.statusInit": ["待初始化", "Not initialized"],
@@ -654,6 +657,7 @@ let treeRequest = 0;
 let recentRequest = 0;
 let inboxRequest = 0;
 let previewRequest = 0;
+let skillsRequest = 0;
 // Focus returns to the recent row after the preview is dismissed.
 let previewTriggerID = "";
 const pendingLoads = new Set<string>();
@@ -686,6 +690,7 @@ export function resetKnowledgeVaultPage(): void {
   treeRequest++;
   recentRequest++;
   inboxRequest++;
+  skillsRequest++;
 }
 
 /* Pure URI builders ------------------------------------------------------ */
@@ -1786,23 +1791,35 @@ function skillAutoHint(skill: KnowledgeVaultSkill): string {
   return skill.scope === "global" ? kt("kv.skillGlobalHint") : kt("kv.skillProjectHint");
 }
 
-function skillsBodyHTML(): string {
-  if (state.skillsState === "loading") return vaultEmptyState("loading");
-  if (state.skillsState === "error") return vaultEmptyState("error", state.skillsError, true);
-  if (state.skills.length === 0) return vaultEmptyState("empty", t("kv.skillsEmpty"));
-  const runtimeHint = state.skillRuntimeRead ? "" : `<p class="kv-hint kv-hint-warn">${kt("kv.skillRuntimeOff")}</p>`;
-  return `<section class="kv-skills" aria-label="${t("kv.tab.skills")}">
-    <p class="kv-hint">${t("kv.skillsReadonly")}</p>
-    ${runtimeHint}
-    <p class="kv-hint">${kt("kv.skillsAutoHint")}</p>
-    <div class="kv-skill-grid">${state.skills.map(skill => {
-      const scopeText = skill.scope === "global"
-        ? kt("kv.scope.global")
-        : `${kt("kv.scope.project")} · ${skill.project_name || vaultProjectName(skill.project_id)}`;
-      const busy = state.skillBusy === skill.key;
-      const disabled = !skill.can_update || busy;
-      return `<article class="kv-skill-card" data-kv-skill-card="${escapeVaultHTML(skill.key)}">
-      <header><div class="kv-skill-title"><strong>${escapeVaultHTML(skill.name)}</strong><small class="kv-skill-meta">${badge(kt("kv.skillSourceVault"), "type")} ${escapeVaultHTML(scopeText)}</small></div></header>
+function vaultSkillProjectLabel(skill: KnowledgeVaultSkill): string {
+  return skill.project_name || vaultProjectName(skill.project_id) || skill.project_id || skill.library || "";
+}
+
+// The Skills tab reuses the shared bucket rules from skill_groups.ts so the
+// vault view, the legacy Skills page and the task picker cannot drift apart:
+// global first, archived second (read-only), project packages grouped by their
+// owning project. Empty buckets are omitted.
+export function vaultSkillGrouping(items: KnowledgeVaultSkill[]) {
+  return groupSkillCatalog(items, {
+    scope: skill => skill.scope,
+    projectKey: skill => skill.project_id || "project",
+    projectLabel: vaultSkillProjectLabel,
+    compare: (left, right) => left.name.localeCompare(right.name) || left.key.localeCompare(right.key),
+  });
+}
+
+function vaultSkillScopeText(skill: KnowledgeVaultSkill): string {
+  if (skill.scope === "global") return kt("kv.scope.global");
+  const name = vaultSkillProjectLabel(skill);
+  if (skill.scope === "archive") return `${kt("kv.scope.archive")} · ${name}`;
+  return `${kt("kv.scope.project")} · ${name}`;
+}
+
+function vaultSkillCard(skill: KnowledgeVaultSkill): string {
+  const busy = state.skillBusy === skill.key;
+  const disabled = !skill.can_update || busy;
+  return `<article class="kv-skill-card" data-kv-skill-card="${escapeVaultHTML(skill.key)}">
+      <header><div class="kv-skill-title"><strong>${escapeVaultHTML(skill.name)}</strong><small class="kv-skill-meta">${badge(kt("kv.skillSourceVault"), "type")} ${escapeVaultHTML(vaultSkillScopeText(skill))}</small></div></header>
       <p>${escapeVaultHTML(skill.description || t("kv.noDescription"))}</p>
       <small>${escapeVaultHTML(skill.library)} · ${t("kv.skillFiles", {count: skill.file_count})}</small>
       <footer class="kv-skill-footer">
@@ -1815,7 +1832,40 @@ function skillsBodyHTML(): string {
       </footer>
       <p class="kv-skill-status">${escapeVaultHTML(skillAutoHint(skill))}</p>
     </article>`;
-    }).join("")}</div>
+}
+
+function vaultSkillGroupSection(key: string, label: string, items: KnowledgeVaultSkill[]): string {
+  return `<section class="kv-skill-group" data-kv-skill-group="${escapeVaultHTML(key)}">
+      <header><strong>${escapeVaultHTML(label)}</strong><span>${items.length}</span></header>
+      <div class="kv-skill-grid">${items.map(vaultSkillCard).join("")}</div>
+    </section>`;
+}
+
+function skillsBodyHTML(): string {
+  if (state.skillsState === "loading") return vaultEmptyState("loading");
+  if (state.skillsState === "error") return vaultEmptyState("error", state.skillsError, true);
+  if (state.skills.length === 0) return vaultEmptyState("empty", t("kv.skillsEmpty"));
+  const runtimeHint = state.skillRuntimeRead ? "" : `<p class="kv-hint kv-hint-warn">${kt("kv.skillRuntimeOff")}</p>`;
+  const grouping = vaultSkillGrouping(state.skills);
+  const sections: string[] = [];
+  if (grouping.global.length) sections.push(vaultSkillGroupSection("global", t("knowledge.skill.group.global"), grouping.global));
+  if (grouping.archive.length) sections.push(vaultSkillGroupSection("archive", t("knowledge.skill.group.archive"), grouping.archive));
+  if (grouping.projects.length) {
+    const projectCount = grouping.projects.reduce((total, group) => total + group.items.length, 0);
+    const projectGroups = grouping.projects.map(group => `<div class="kv-skill-project-group" data-kv-skill-project="${escapeVaultHTML(group.key)}">
+        <h3>${escapeVaultHTML(group.label)}</h3>
+        <div class="kv-skill-grid">${group.items.map(vaultSkillCard).join("")}</div>
+      </div>`).join("");
+    sections.push(`<section class="kv-skill-group" data-kv-skill-group="project">
+      <header><strong>${escapeVaultHTML(t("knowledge.skill.group.projects"))}</strong><span>${projectCount}</span></header>
+      <div class="kv-skill-project-groups">${projectGroups}</div>
+    </section>`);
+  }
+  return `<section class="kv-skills" aria-label="${t("kv.tab.skills")}">
+    <p class="kv-hint">${t("kv.skillsReadonly")}</p>
+    ${runtimeHint}
+    <p class="kv-hint">${kt("kv.skillsAutoHint")}</p>
+    <div class="kv-skill-groups">${sections.join("")}</div>
   </section>`;
 }
 
@@ -2307,6 +2357,34 @@ async function loadTree(force = false, preserveExpansion = false): Promise<void>
   if (state.doc && state.docState === "ready") decorateDocBody();
 }
 
+function isVaultDocumentMissing(error: unknown): boolean {
+  return (error as {code?: string} | null)?.code === "knowledge_vault_document_not_found";
+}
+
+// A file deleted in the filesystem can linger in the index until the watcher
+// rebuilds it. Refreshing the directory once lets the stale row disappear and
+// tells the owner why the reader changed, instead of leaving an error card.
+function refreshAfterMissingVaultDocument(): void {
+  activeContext.setMessage("notice", kt("kv.docMissingRefreshed"));
+  void loadTree(true, true);
+  void loadRecent(true);
+  void loadInbox(true);
+  if (state.tab === "skills") void loadSkills(true);
+}
+
+function recoverMissingVaultDocument(): void {
+  state.selectedID = VAULT_ACTIVITY_ID;
+  state.doc = null;
+  state.docState = "idle";
+  state.docError = "";
+  state.feedback = "";
+  state.mobilePane = "list";
+  state.searchOpen = false;
+  clearDocHash();
+  refreshAfterMissingVaultDocument();
+  rerender();
+}
+
 async function loadDoc(id: string, force = false): Promise<void> {
   if (!id) return;
   state.filesMode = false;
@@ -2334,6 +2412,10 @@ async function loadDoc(id: string, force = false): Promise<void> {
     state.docState = "ready";
   } catch (error) {
     if (state.selectedID !== id) return;
+    if (isVaultDocumentMissing(error)) {
+      recoverMissingVaultDocument();
+      return;
+    }
     state.docState = "error";
     state.docError = error instanceof Error ? error.message : String(error);
   }
@@ -2411,6 +2493,14 @@ async function loadPreview(id: string): Promise<void> {
     api.knowledgeVaultDiff(id),
   ]);
   if (ticket !== previewRequest || state.previewID !== id) return;
+  if (docResult.status === "rejected" && isVaultDocumentMissing(docResult.reason)) {
+    // The previewed file was removed from disk. Do not leave a dead dialog;
+    // close it and refresh the feeds/tree that still name the stale row.
+    clearPreviewState();
+    refreshAfterMissingVaultDocument();
+    rerender();
+    return;
+  }
   if (docResult.status === "fulfilled") {
     state.previewDoc = docResult.value.doc;
     state.previewState = "ready";
@@ -2465,15 +2555,18 @@ function closePreview(restoreFocus = true): void {
 }
 
 async function loadSkills(force = false): Promise<void> {
-  if (!force && state.skillsState === "ready") return;
+  if (!force && (state.skillsState === "ready" || state.skillsState === "loading")) return;
+  const ticket = ++skillsRequest;
   state.skillsState = "loading";
   rerender();
   try {
     const payload: KnowledgeVaultSkills = await api.knowledgeVaultSkills();
+    if (ticket !== skillsRequest) return;
     state.skills = payload.skills || [];
     state.skillRuntimeRead = Boolean(payload.runtime_read);
     state.skillsState = "ready";
   } catch (error) {
+    if (ticket !== skillsRequest) return;
     state.skillsState = "error";
     state.skillsError = error instanceof Error ? error.message : String(error);
   }
@@ -2712,6 +2805,14 @@ function setTab(tab: VaultTab): void {
   state.tab = tab;
   state.mobilePane = "list";
   clearPreviewState();
+  // Re-read the Skill catalog on every entry so a package removed on disk (or
+  // by an Agent) disappears instead of staying in the cached list. The forced
+  // load starts first, so the render-triggered non-forced load is a no-op.
+  if (tab === "skills") {
+    void loadSkills(true);
+    rerender();
+    return;
+  }
   rerender();
   loadTab(tab);
 }
@@ -3220,3 +3321,8 @@ export function __getKnowledgeVaultStateForTest(): VaultState {
 export const __loadTreeForTest = loadTree;
 export const __loadRecentForTest = loadRecent;
 export const __loadInboxForTest = loadInbox;
+export const __loadDocForTest = loadDoc;
+export const __loadPreviewForTest = loadPreview;
+export function __setKnowledgeVaultContextForTest(context: KnowledgeVaultContext): void {
+  activeContext = context;
+}

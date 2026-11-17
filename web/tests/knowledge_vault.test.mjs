@@ -894,6 +894,90 @@ test("project skill cards prefer the authoritative project name", () => {
   assert.match(html, /vault 技能[\s\S]*?全局<\/small>/);
 });
 
+test("a deleted vault document clears the reader and refreshes the tree", async t => {
+  reset({selectedID: "gone", docState: "idle", doc: null, mobilePane: "doc", tab: "knowledge"});
+  const notices = [];
+  vault.__setKnowledgeVaultContextForTest({
+    render: () => {},
+    setMessage: (kind, message) => notices.push([kind, message]),
+  });
+  const original = {
+    doc: api.knowledgeVaultDoc,
+    tree: api.knowledgeVaultTree,
+    recent: api.knowledgeVaultRecent,
+    inbox: api.knowledgeVaultInbox,
+  };
+  t.after(() => Object.assign(api, {
+    knowledgeVaultDoc: original.doc,
+    knowledgeVaultTree: original.tree,
+    knowledgeVaultRecent: original.recent,
+    knowledgeVaultInbox: original.inbox,
+  }));
+  const treeCalls = [];
+  api.knowledgeVaultDoc = async () => {
+    const error = new Error("加载失败");
+    error.code = "knowledge_vault_document_not_found";
+    throw error;
+  };
+  api.knowledgeVaultTree = async library => {
+    treeCalls.push(library);
+    return {ok: true, enabled: true, index_ready: true, library, count: 0, nodes: []};
+  };
+  api.knowledgeVaultRecent = async () => ({ok: true, enabled: true, index_ready: true, items: []});
+  api.knowledgeVaultInbox = async () => ({ok: true, enabled: true, index_ready: true, count: 0, counts: [], items: []});
+
+  await vault.__loadDocForTest("gone");
+
+  const state = vault.__getKnowledgeVaultStateForTest();
+  assert.equal(state.selectedID, "__kv_activity__", "the stale document selection is cleared");
+  assert.equal(state.doc, null);
+  assert.equal(state.docState, "idle");
+  assert.equal(state.docError, "");
+  assert.equal(state.mobilePane, "list");
+  assert.equal(state.previewID, "", "the preview of a deleted file is cleared");
+  assert.ok(treeCalls.length >= 1, "the directory tree is refreshed");
+  assert.ok(notices.some(([kind, message]) => kind === "notice" && /文件已不存在/.test(message)));
+});
+
+test("a deleted preview document closes the preview and refreshes the feeds", async t => {
+  reset({selectedID: "__kv_activity__", docState: "idle", previewID: "gone", previewState: "loading"});
+  const notices = [];
+  vault.__setKnowledgeVaultContextForTest({
+    render: () => {},
+    setMessage: (kind, message) => notices.push([kind, message]),
+  });
+  const original = {
+    doc: api.knowledgeVaultDoc,
+    diff: api.knowledgeVaultDiff,
+    tree: api.knowledgeVaultTree,
+    recent: api.knowledgeVaultRecent,
+    inbox: api.knowledgeVaultInbox,
+  };
+  t.after(() => Object.assign(api, {
+    knowledgeVaultDoc: original.doc,
+    knowledgeVaultDiff: original.diff,
+    knowledgeVaultTree: original.tree,
+    knowledgeVaultRecent: original.recent,
+    knowledgeVaultInbox: original.inbox,
+  }));
+  api.knowledgeVaultDoc = async () => {
+    const error = new Error("加载失败");
+    error.code = "knowledge_vault_document_not_found";
+    throw error;
+  };
+  api.knowledgeVaultDiff = async () => ({ok: true, enabled: true, diff: {available: false, reason: "missing"}});
+  api.knowledgeVaultTree = async library => ({ok: true, enabled: true, index_ready: true, library, count: 0, nodes: []});
+  api.knowledgeVaultRecent = async () => ({ok: true, enabled: true, index_ready: true, items: []});
+  api.knowledgeVaultInbox = async () => ({ok: true, enabled: true, index_ready: true, count: 0, counts: [], items: []});
+
+  await vault.__loadPreviewForTest("gone");
+
+  const state = vault.__getKnowledgeVaultStateForTest();
+  assert.equal(state.previewID, "");
+  assert.equal(state.previewState, "idle", "no dead error card remains");
+  assert.ok(notices.some(([kind, message]) => kind === "notice" && /文件已不存在/.test(message)));
+});
+
 test("vault API requests carry library, project, type, status and tag filters", async t => {
   const original = globalThis.fetch;
   const calls = [];

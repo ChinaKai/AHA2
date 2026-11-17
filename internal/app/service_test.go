@@ -15,6 +15,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/agentapi"
 	"github.com/ChinaKai/AHA2/internal/backend"
 	"github.com/ChinaKai/AHA2/internal/domain"
+	"github.com/ChinaKai/AHA2/internal/knowledgevault"
 	"github.com/ChinaKai/AHA2/internal/secrets"
 	"github.com/ChinaKai/AHA2/internal/store"
 	workspacepkg "github.com/ChinaKai/AHA2/internal/workspace"
@@ -828,31 +829,52 @@ func TestTaskMultiTurnFlow(t *testing.T) {
 	if err := database.UpsertEnvGroup(ctx, envGroup); err != nil {
 		t.Fatal(err)
 	}
-	selectedSkill := domain.Skill{ID: "skill-selected", Scope: "global", Name: "Selected", Description: "Selected skill", Instructions: "Use selected skill.", Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now}
-	otherSkill := domain.Skill{ID: "skill-other", Scope: "project", ProjectID: project.ID, Name: "Other", Description: "Other skill", Instructions: "Do not use this skill.", Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now}
-	if err := database.CreateSkill(ctx, selectedSkill); err != nil {
+	// Skills are vault packages after the cutover: the selected global package
+	// and the unselected project package both live in the vault.
+	vaultConfig := knowledgevault.DefaultConfig(t.TempDir())
+	if _, err := knowledgevault.Bootstrap(vaultConfig, knowledgevault.InitOptions{VaultName: "Task Flow"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.CreateSkill(ctx, otherSkill); err != nil {
-		t.Fatal(err)
+	writeVault := func(relative, content string) {
+		target := filepath.Join(vaultConfig.VaultPath, filepath.FromSlash(relative))
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
-	selectedSkill, err = database.Skill(ctx, selectedSkill.ID)
+	writeVault("global/skills/selected/SKILL.md", "---\nname: Selected\ndescription: Selected skill\n---\n\nUse selected skill.\n")
+	writeVault("global/skills/selected/scripts/check.sh", "echo selected\n")
+	writeVault("projects/aha/index.md", "---\nid: knowledge_root_project_aha\ntitle: AHA2\nscope: project\nproject_id: "+project.ID+"\ntype: navigation\nstatus: verified\nis_index: true\n---\nAHA2.\n")
+	writeVault("projects/aha/skills/other/SKILL.md", "---\nname: Other\ndescription: Other skill\n---\n\nDo not use this skill.\n")
+	index, err := knowledgevault.OpenIndex(ctx, vaultConfig.IndexPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	otherSkill, err = database.Skill(ctx, otherSkill.ID)
+	if _, err := index.Rebuild(ctx, vaultConfig.VaultPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := index.Close(); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := knowledgevault.NewManager(vaultConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(selectedSkill.SourcePath, "scripts", "check.sh"), []byte("echo selected\n"), 0o600); err != nil {
+	if err := manager.SetEnabled(ctx, true); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = manager.Close() })
+	selectedSkillID := "vault-skill:global:selected"
 	service := NewService(database, secretStore, &stubExecutor{})
+	service.SetKnowledgeVault(manager, true)
+	service.SetKnowledgeVaultRuntimeWrite(true)
 	capabilities := agentapi.NewCapabilities()
 	service.SetAgentAPI(capabilities, "https://aha.example.test")
 	task, err := service.CreateTask(ctx, CreateTaskInput{
 		ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "test", Request: "run test",
-		ModelID: model.ID, ProxyEnabled: true, SkillIDs: []string{selectedSkill.ID},
+		ModelID: model.ID, ProxyEnabled: true, SkillIDs: []string{selectedSkillID},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -953,14 +975,14 @@ func TestTaskMultiTurnFlow(t *testing.T) {
 	if sharedRoot == "" {
 		t.Fatalf("shared Context snapshot was not materialized: %#v", contextEntries)
 	}
-	selectedSkillEntry := filepath.Join(sharedRoot, "skills", selectedSkill.PackageSlug, "SKILL.md")
+	selectedSkillEntry := filepath.Join(sharedRoot, "skills", "selected", "SKILL.md")
 	if data, err := os.ReadFile(selectedSkillEntry); err != nil || !strings.Contains(string(data), "Use selected skill.") {
 		t.Fatalf("selected skill entry was not materialized: %q %v", data, err)
 	}
-	if data, err := os.ReadFile(filepath.Join(sharedRoot, "skills", selectedSkill.PackageSlug, "scripts", "check.sh")); err != nil || !strings.Contains(string(data), "selected") {
+	if data, err := os.ReadFile(filepath.Join(sharedRoot, "skills", "selected", "scripts", "check.sh")); err != nil || !strings.Contains(string(data), "selected") {
 		t.Fatalf("selected skill script was not materialized: %q %v", data, err)
 	}
-	if _, err := os.Stat(filepath.Join(sharedRoot, "skills", otherSkill.PackageSlug, "SKILL.md")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(sharedRoot, "skills", "other", "SKILL.md")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("unselected skill was materialized: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(sharedRoot, "agent-api.md")); err != nil {

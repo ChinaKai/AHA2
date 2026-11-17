@@ -439,14 +439,51 @@ func TestTaskAgentAPIIsolationAndConfigInheritance(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	appService := app.NewService(database, secretStore, app.StubExecutor{})
-	skill := domain.Skill{ID: "skill-task-api", Scope: "global", Name: "API skill", Description: "Task selected", Instructions: "Use it.", Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now}
-	if err := database.CreateSkill(ctx, skill); err != nil {
+	// Skills are vault packages only; the Task selection stores the stable key.
+	vaultConfig := knowledgevault.DefaultConfig(t.TempDir())
+	if _, err := knowledgevault.Bootstrap(vaultConfig, knowledgevault.InitOptions{VaultName: "Agent API"}); err != nil {
 		t.Fatal(err)
 	}
+	writeVaultSkill := func(content string) {
+		for relative, body := range map[string]string{
+			"projects/agents/index.md":         "---\nid: knowledge_root_project_agents\ntitle: Agents\nscope: project\nproject_id: " + project.ID + "\ntype: navigation\nstatus: verified\nis_index: true\n---\nAgents.\n",
+			"global/skills/api-skill/SKILL.md": content,
+		} {
+			target := filepath.Join(vaultConfig.VaultPath, filepath.FromSlash(relative))
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(target, []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	writeVaultSkill("---\nname: API skill\ndescription: Task selected\nenabled: true\n---\n\nUse it.\n")
+	index, err := knowledgevault.OpenIndex(ctx, vaultConfig.IndexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := index.Rebuild(ctx, vaultConfig.VaultPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := index.Close(); err != nil {
+		t.Fatal(err)
+	}
+	manager, err := knowledgevault.NewManager(vaultConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.SetEnabled(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = manager.Close() })
+	appService := app.NewService(database, secretStore, app.StubExecutor{})
+	appService.SetKnowledgeVault(manager, true)
+	appService.SetKnowledgeVaultRuntimeWrite(true)
+	skillID := "vault-skill:global:api-skill"
 	task, err := appService.CreateTask(ctx, app.CreateTaskInput{
 		ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "agent api", Request: "test routing",
-		ModelID: model1.ID, CollaborationMode: "auto", MaxAgents: 3, SkillIDs: []string{skill.ID},
+		ModelID: model1.ID, CollaborationMode: "auto", MaxAgents: 3, SkillIDs: []string{skillID},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -489,7 +526,7 @@ func TestTaskAgentAPIIsolationAndConfigInheritance(t *testing.T) {
 		t.Fatalf("new Task agent capabilities were not default-off: %#v", capabilities)
 	}
 	response = requestJSON(t, client, http.MethodPatch, server.URL+"/api/v1/tasks/"+task.ID, map[string]any{
-		"knowledge_policy": "disabled", "skill_ids": []string{skill.ID},
+		"knowledge_policy": "disabled", "skill_ids": []string{skillID},
 		"agent_capabilities": map[string]bool{"clone_hardware": true, "unknown": true},
 	}, csrf)
 	var updatedTask map[string]any
@@ -497,7 +534,7 @@ func TestTaskAgentAPIIsolationAndConfigInheritance(t *testing.T) {
 	if response.StatusCode != http.StatusOK || updatedTask["task"].(map[string]any)["knowledge_policy"] != "disabled" {
 		t.Fatalf("task knowledge policy update failed: %d %#v", response.StatusCode, updatedTask)
 	}
-	if ids := updatedTask["task"].(map[string]any)["skill_ids"].([]any); len(ids) != 1 || ids[0] != skill.ID {
+	if ids := updatedTask["task"].(map[string]any)["skill_ids"].([]any); len(ids) != 1 || ids[0] != skillID {
 		t.Fatalf("task skills update failed: %#v", updatedTask)
 	}
 	capabilities := updatedTask["task"].(map[string]any)["agent_capabilities"].(map[string]any)
@@ -507,12 +544,11 @@ func TestTaskAgentAPIIsolationAndConfigInheritance(t *testing.T) {
 	if _, ok := capabilities["unknown"]; ok {
 		t.Fatalf("unknown capability persisted: %#v", capabilities)
 	}
-	skill.Enabled = false
-	skill.UpdatedAt = now.Add(time.Second)
-	if err := database.UpdateSkill(ctx, skill); err != nil {
+	writeVaultSkill("---\nname: API skill\ndescription: Task selected\nenabled: false\n---\n\nUse it.\n")
+	if _, err := manager.Rebuild(ctx); err != nil {
 		t.Fatal(err)
 	}
-	response = requestJSON(t, client, http.MethodPatch, server.URL+"/api/v1/tasks/"+task.ID, map[string]any{"skill_ids": []string{skill.ID}}, csrf)
+	response = requestJSON(t, client, http.MethodPatch, server.URL+"/api/v1/tasks/"+task.ID, map[string]any{"skill_ids": []string{skillID}}, csrf)
 	if response.StatusCode != http.StatusBadRequest {
 		t.Fatalf("disabled skill update was accepted: %d", response.StatusCode)
 	}

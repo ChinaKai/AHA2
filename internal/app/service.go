@@ -700,42 +700,18 @@ func (s *Service) validateTaskSkillIDs(ctx context.Context, projectID string, id
 		if id == "" || seen[id] {
 			continue
 		}
-		if knowledgevault.IsVaultSkillID(id) {
-			if !s.vaultSkillExistsInProject(ctx, projectID, id) {
-				return nil, fmt.Errorf("vault skill %s is unavailable for this project", id)
-			}
-			appendID(id)
-			continue
+		// Skills are vault-only after the cutover. A legacy skills-table id is
+		// never resolved or rewritten: it is reported as unavailable so the
+		// caller reselects a vault package instead of resurrecting old content.
+		if !knowledgevault.IsVaultSkillID(id) {
+			return nil, fmt.Errorf("skill %s is unavailable: legacy skill ids no longer resolve after the vault cutover", id)
 		}
-		item, err := s.store.Skill(ctx, id)
-		if err != nil {
-			return nil, fmt.Errorf("skill %s is unavailable", id)
-		}
-		// Read-only compatibility: a task created before the vault cutover may
-		// still name a legacy row. If the equivalent vault package exists, save
-		// its stable key so the next Turn loads the file-first copy.
-		if s.vaultSkillReadableForProject(ctx, projectID) {
-			if aliasKey, ok := s.vaultSkillKeyForLegacy(ctx, item); ok && s.vaultSkillExistsInProject(ctx, projectID, aliasKey) {
-				appendID(aliasKey)
-				continue
-			}
-		}
-		if !item.Enabled || item.Status != "active" || !skillAppliesToProject(item, projectID) {
-			return nil, fmt.Errorf("skill %s is not enabled for this project", id)
+		if !s.vaultSkillExistsInProject(ctx, projectID, id) {
+			return nil, fmt.Errorf("vault skill %s is unavailable for this project", id)
 		}
 		appendID(id)
 	}
 	return result, nil
-}
-
-func skillAppliesToProject(item domain.Skill, projectID string) bool {
-	if item.Scope == "global" {
-		return true
-	}
-	if item.Scope != "project" {
-		return false
-	}
-	return item.ProjectID == projectID || item.BoundProjectID == projectID
 }
 
 func (s *Service) autoAttachSkillIDs(ctx context.Context, projectID string) ([]string, error) {
@@ -777,47 +753,18 @@ func (s *Service) UpdateTaskSkills(ctx context.Context, taskID string, ids []str
 }
 
 func (s *Service) activeTaskSkills(ctx context.Context, task domain.Task) []domain.Skill {
-	dbIDs := make([]string, 0, len(task.SkillIDs))
 	vaultIDs := make([]string, 0, len(task.SkillIDs))
 	for _, id := range task.SkillIDs {
-		if knowledgevault.IsVaultSkillID(id) {
-			vaultIDs = append(vaultIDs, id)
+		if !knowledgevault.IsVaultSkillID(id) {
+			// A historical Task may still store a legacy id. It has no vault
+			// package after the cutover, so it stays unavailable instead of
+			// falling back to the legacy skills table.
+			log.Printf("task %s skill %s is a legacy id and is unavailable after the vault cutover", task.ID, id)
 			continue
 		}
-		// Historical tasks can still carry a legacy skill id. When the vault
-		// exposes the same package, load the file-first copy through the alias
-		// instead of failing or serving stale instructions.
-		if s.vaultSkillReadableForProject(ctx, task.ProjectID) {
-			if legacy, err := s.store.Skill(ctx, id); err == nil {
-				if aliasKey, ok := s.vaultSkillKeyForLegacy(ctx, legacy); ok {
-					vaultIDs = append(vaultIDs, aliasKey)
-					continue
-				}
-			}
-		}
-		dbIDs = append(dbIDs, id)
+		vaultIDs = append(vaultIDs, id)
 	}
-	items, err := s.store.SkillsByIDs(ctx, dbIDs)
-	if err != nil {
-		items = nil
-		for _, id := range dbIDs {
-			item, itemErr := s.store.Skill(ctx, id)
-			if itemErr == nil {
-				items = append(items, item)
-			}
-		}
-	}
-	result := make([]domain.Skill, 0, len(items)+len(vaultIDs))
-	for _, item := range items {
-		if !item.Enabled || item.Status != "active" {
-			continue
-		}
-		if skillAppliesToProject(item, task.ProjectID) {
-			result = append(result, item)
-		}
-	}
-	result = append(result, s.vaultTaskSkills(ctx, task.ProjectID, vaultIDs)...)
-	return result
+	return s.vaultTaskSkills(ctx, task.ProjectID, vaultIDs)
 }
 
 func (s *Service) SubmitMessage(ctx context.Context, taskID, content string) (domain.Turn, error) {
@@ -1290,7 +1237,6 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		}
 	}
 	skills = s.activeTaskSkills(ctx, task)
-	skills = s.applyVaultSkillPackages(ctx, project.ID, skills)
 	knowledgeGuide := ""
 	if kbEnabled {
 		knowledgeGuide = s.knowledgeGuidePrompt()

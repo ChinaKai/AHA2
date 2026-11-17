@@ -289,17 +289,10 @@ try {
   await closeByButton(sync, "sync-conflict-dialog");
   await sync.close();
 
-  // 6. Knowledge: skill editor, skill detail, product line.
-  const knowledge = await openView("?view=knowledge", "#skill-editor-dialog");
-  for (const id of ["skill-editor-dialog", "skill-detail-dialog", "product-line-dialog"]) {
-    await openStatic(knowledge, id);
-    await assertEntryFocus(knowledge, id);
-    await assertCloseButton(knowledge, id, "关闭对话框", "data-kb-close");
-    assert.equal(await pressEscape(knowledge, id), false, `${id}: Escape did not close the dialog`);
-    await openStatic(knowledge, id);
-    await closeByButton(knowledge, id, "data-kb-close");
-  }
-  await knowledge.close();
+  // 6. Knowledge has no Web skill editor/detail/product-line dialogs after the
+  // vault cutover: skill content is read-only and edited through the Agent API
+  // or the pet MCP. The legacy workspace is no longer routed, so there is
+  // nothing to open here.
 
   // 7. MCP: edit, detail, delete.
   const mcp = await openView("?view=mcp", "#mcp-edit-dialog");

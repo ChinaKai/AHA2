@@ -374,3 +374,36 @@ func TestPetListSkillsKeepsViewAndManagePermission(t *testing.T) {
 		})
 	}
 }
+
+// The runtime Skill list is vault-only: a row that still exists in the legacy
+// skills table is never listed, even when no vault manager is configured.
+func TestPetListSkillsNeverReadsLegacyTable(t *testing.T) {
+	fixture := newPetSkillFixture(t)
+	if err := fixture.database.CreateSkill(fixture.ctx, domain.Skill{
+		ID: "skill-legacy-list", Scope: "global", Name: "Legacy Only",
+		Instructions: "legacy", Version: 1, Status: "active", Enabled: true,
+		CreatedAt: fixture.createdAt, UpdatedAt: fixture.createdAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	items, err := fixture.service.PetListSkills(fixture.ctx, "", "", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) == 0 {
+		t.Fatal("vault Skills were not listed")
+	}
+	for _, item := range items {
+		if item.ID == "skill-legacy-list" || item.Name == "Legacy Only" {
+			t.Fatalf("legacy skill leaked into the runtime list: %#v", item)
+		}
+	}
+	fixture.service.knowledgeVault = nil
+	items, err = fixture.service.PetListSkills(fixture.ctx, "", "", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("a nil vault fell back to the legacy skills table: %#v", items)
+	}
+}

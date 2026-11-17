@@ -392,15 +392,9 @@ func (s *Service) PetListSkills(ctx context.Context, scope, projectID string, li
 	if limit <= 0 || limit > 50 {
 		limit = 20
 	}
-	// Skills are vault packages. The legacy table is only a fallback when no
-	// vault manager is configured at all (unit tests and old embeddings).
-	var items []domain.Skill
-	var err error
-	if s.knowledgeVault == nil {
-		items, err = s.store.ListSkills(ctx, scope, projectID, false)
-	} else {
-		items, err = s.ListVaultSkills(ctx)
-	}
+	// Skills are vault packages only. The legacy skills table is never read,
+	// even when no vault manager is configured.
+	items, err := s.ListVaultSkills(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -425,15 +419,10 @@ func (s *Service) PetSkillDetail(ctx context.Context, id string) (PetSkillDetail
 		return PetSkillDetail{}, err
 	}
 	id = strings.TrimSpace(id)
+	// Vault packages are the only skill source; a legacy id is unavailable.
 	item, err := s.vaultSkillByKey(ctx, id)
 	if err != nil {
-		if s.knowledgeVault != nil {
-			return PetSkillDetail{}, fmt.Errorf("Skill 不存在")
-		}
-		item, err = s.store.Skill(ctx, id)
-		if err != nil {
-			return PetSkillDetail{}, fmt.Errorf("Skill 不存在")
-		}
+		return PetSkillDetail{}, fmt.Errorf("Skill 不存在")
 	}
 	instructions := item.Instructions
 	truncated := false

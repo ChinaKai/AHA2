@@ -59,6 +59,11 @@ test("skill page renders global, archived, and project groups in order", () => {
   assert.doesNotMatch(archiveCard, /data-skill-delete/);
   assert.doesNotMatch(archiveCard, /data-skill-toggle/);
   assert.match(archiveCard, /data-skill-view/);
+  // Writable scopes are read-only on the Web too: no new/edit/delete/toggle.
+  assert.doesNotMatch(html, /data-skill-new/);
+  const writableCard = html.slice(html.indexOf("Build Checks") - 400, html.indexOf("Build Checks") + 1200);
+  assert.doesNotMatch(writableCard, /data-skill-(edit|delete|toggle)/);
+  assert.match(writableCard, /data-skill-view/);
 });
 
 test("empty groups are omitted and filtering preserves the group split", () => {
@@ -83,6 +88,60 @@ test("task picker reuses the grouping and never offers archives", () => {
   assert.doesNotMatch(html, /Deploy Checks/);
   assert.match(html, /value="vault-skill:project:project-1:build" checked/);
   assert.doesNotMatch(html, /value="vault-skill:archive:project-9:old"/);
+});
+
+test("task picker marks a historical legacy id as unavailable", () => {
+  const html = agents.renderTaskSkills(skills, "project-1", ["vault-skill:project:project-1:build", "skill_legacy_old"]);
+  assert.match(html, /data-task-skill-group="unavailable"/);
+  assert.match(html, /<strong>skill_legacy_old<\/strong>/);
+  assert.match(html, /无法在 vault 中解析/);
+  // It is never turned into a selectable legacy option.
+  assert.doesNotMatch(html, /value="skill_legacy_old"/);
+});
+
+test("vault Skills tab groups global, archived, and per-project packages", () => {
+  const catalog = [
+    {key: "vault-skill:global:flat:flat-one", id: "vault-skill:global:flat:flat-one", slug: "flat-one", name: "Flat Global", scope: "global", library: "全局", file_count: 1, relative_path: "skills/flat-one", absolute_path: "/vault/skills/flat-one", open_path: "/vault/skills/flat-one/SKILL.md", source: "vault", auto_attach: false, auto_attach_effective: false, auto_attach_confirmed: false, can_update: true, project_bound: true},
+    {key: "vault-skill:global:global-two", id: "vault-skill:global:global-two", slug: "global-two", name: "Global Two", scope: "global", library: "全局", file_count: 1, relative_path: "global/skills/global-two", absolute_path: "/vault/global/skills/global-two", open_path: "/vault/global/skills/global-two/SKILL.md", source: "vault", auto_attach: true, auto_attach_effective: true, auto_attach_confirmed: true, can_update: true, project_bound: true},
+    {key: "vault-skill:archive:project-9:old", id: "vault-skill:archive:project-9:old", slug: "old", name: "Archived Review", scope: "archive", project_id: "project-9", project_name: "Archive Project", library: "Archive Project", file_count: 1, relative_path: "projects/old/skills/old", absolute_path: "/vault/projects/old/skills/old", open_path: "/vault/projects/old/skills/old/SKILL.md", source: "vault", auto_attach: false, auto_attach_effective: false, auto_attach_confirmed: false, can_update: false, project_bound: false, unavailable_reason: "archive_read_only"},
+    {key: "vault-skill:project:project-1:review", id: "vault-skill:project:project-1:review", slug: "review", name: "Review Checks", scope: "project", project_id: "project-1", project_name: "Project One", library: "Project One", file_count: 1, relative_path: "projects/one/skills/review", absolute_path: "/vault/projects/one/skills/review", open_path: "/vault/projects/one/skills/review/SKILL.md", source: "vault", auto_attach: false, auto_attach_effective: false, auto_attach_confirmed: false, can_update: true, project_bound: true},
+    {key: "vault-skill:project:project-1:build", id: "vault-skill:project:project-1:build", slug: "build", name: "Build Checks", scope: "project", project_id: "project-1", project_name: "Project One", library: "Project One", file_count: 1, relative_path: "projects/one/skills/build", absolute_path: "/vault/projects/one/skills/build", open_path: "/vault/projects/one/skills/build/SKILL.md", source: "vault", auto_attach: false, auto_attach_effective: false, auto_attach_confirmed: false, can_update: true, project_bound: true},
+    {key: "vault-skill:project:project-2:deploy", id: "vault-skill:project:project-2:deploy", slug: "deploy", name: "Deploy Checks", scope: "project", project_id: "project-2", project_name: "Project Two", library: "Project Two", file_count: 1, relative_path: "projects/two/skills/deploy", absolute_path: "/vault/projects/two/skills/deploy", open_path: "/vault/projects/two/skills/deploy/SKILL.md", source: "vault", auto_attach: false, auto_attach_effective: false, auto_attach_confirmed: false, can_update: true, project_bound: true},
+  ];
+  vault.__resetKnowledgeVaultStateForTest();
+  vault.__setKnowledgeVaultStateForTest({
+    initialized: true, loading: "ready", vaultReady: true, indexReady: true,
+    tab: "skills", skillsState: "ready", skillRuntimeRead: true,
+    projects: [{id: "project:project-1", kind: "project", name: "Project One", project_id: "project-1", count: 2}],
+    skills: catalog,
+  });
+  const html = vault.renderKnowledgeVaultPage(context());
+  const groups = [...html.matchAll(/data-kv-skill-group="([^"]+)"/g)].map(match => match[1]);
+  assert.deepEqual(groups, ["global", "archive", "project"]);
+  assert.match(html, /全局技能/);
+  assert.match(html, /归档技能/);
+  assert.match(html, /项目技能/);
+  // Project packages are grouped by project, project names are visible, and
+  // each project's cards are stably sorted.
+  const projectKeys = [...html.matchAll(/data-kv-skill-project="([^"]+)"/g)].map(match => match[1]);
+  assert.deepEqual(projectKeys, ["project-1", "project-2"]);
+  assert.match(html, /<h3>Project One<\/h3>/);
+  assert.match(html, /<h3>Project Two<\/h3>/);
+  const projectSection = html.slice(html.indexOf('data-kv-skill-group="project"'));
+  assert.ok(projectSection.indexOf("Build Checks") < projectSection.indexOf("Review Checks"));
+  // Archives stay read-only: the auto-attach switch is disabled and the scope
+  // label distinguishes archived from active projects.
+  assert.match(html, /归档 · Archive Project/);
+  const archiveCard = html.slice(html.indexOf("Archived Review") - 500, html.indexOf("Archived Review") + 1400);
+  assert.match(archiveCard, /data-kv-skill-auto="vault-skill:archive:project-9:old"[^>]*disabled/);
+  // No Web content editing exists on the vault Skills tab.
+  assert.doesNotMatch(html, /data-kv-skill-(new|edit|delete)/);
+
+  // Empty buckets are hidden, and per-project order does not depend on input order.
+  const grouping = vault.vaultSkillGrouping([catalog[4], catalog[3], catalog[0]]);
+  assert.deepEqual(grouping.archive, []);
+  assert.equal(grouping.projects.length, 1);
+  assert.deepEqual(grouping.projects[0].items.map(item => item.name), ["Build Checks", "Review Checks"]);
 });
 
 test("root library tree keeps the navigation page as the clickable folder", () => {
