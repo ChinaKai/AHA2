@@ -1,11 +1,15 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -218,5 +222,68 @@ func TestTaskBrowserStateAndGrantRevocationAPI(t *testing.T) {
 	response, payload = f.do(t, http.MethodDelete, "/api/v1/browser-grants/"+grantID, nil)
 	if response.StatusCode != http.StatusOK || payload["grant"].(map[string]any)["status"] != "revoked" {
 		t.Fatalf("revoke: %d %#v", response.StatusCode, payload)
+	}
+}
+
+func TestConcurrentBrowserGrantCreationOverHTTPKeepsOneActive(t *testing.T) {
+	host := browsertest.New()
+	f := newBrowserAPIFixture(t, host)
+	_, payload := f.do(t, http.MethodPost, "/api/v1/browser/profiles", map[string]any{"name": "Work"})
+	profileID := payload["profile"].(map[string]any)["id"].(string)
+
+	const workers = 24
+	statuses := make(chan int, workers)
+	var wait sync.WaitGroup
+	for index := 0; index < workers; index++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			body, _ := json.Marshal(map[string]any{"profile_id": profileID})
+			request, err := http.NewRequest(http.MethodPost,
+				f.server.URL+"/api/v1/tasks/"+f.task.ID+"/browser-sessions", bytes.NewReader(body))
+			if err != nil {
+				statuses <- 0
+				return
+			}
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("X-CSRF-Token", f.csrf)
+			response, err := f.client.Do(request)
+			if err != nil {
+				statuses <- 0
+				return
+			}
+			response.Body.Close()
+			statuses <- response.StatusCode
+		}()
+	}
+	wait.Wait()
+	close(statuses)
+	for status := range statuses {
+		if status != http.StatusCreated {
+			t.Fatalf("concurrent create status=%d", status)
+		}
+	}
+	active, err := f.store.BrowserTaskGrantsForProfileActive(context.Background(), profileID, time.Now().UTC())
+	if err != nil || len(active) != 1 {
+		t.Fatalf("active grants=%d err=%v", len(active), err)
+	}
+}
+
+func TestBrowserAPINeverReturnsHostDiagnosticPaths(t *testing.T) {
+	host := browsertest.New()
+	f := newBrowserAPIFixture(t, host)
+	_, payload := f.do(t, http.MethodPost, "/api/v1/browser/profiles", map[string]any{"name": "Work"})
+	profileID := payload["profile"].(map[string]any)["id"].(string)
+	host.FailOpen = &browser.Error{
+		Code: "browser_launch_failed", Status: http.StatusInternalServerError,
+		Message: `C:\Users\owner\AppData\Local\AHA2\browser-profiles\browser_profile_1`,
+	}
+	response, payload := f.do(t, http.MethodPost, "/api/v1/browser/profiles/"+profileID+"/login-window", map[string]any{})
+	if response.StatusCode == http.StatusOK {
+		t.Fatalf("launch should fail: %#v", payload)
+	}
+	message, _ := payload["message"].(string)
+	if strings.Contains(message, "browser-profiles") || strings.Contains(message, `C:\`) {
+		t.Fatalf("host diagnostic leaked through API: %q", message)
 	}
 }

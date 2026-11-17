@@ -3954,6 +3954,38 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("record schema v147: %w", err)
 		}
 	}
+	var hasV148 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=148)`).Scan(&hasV148)
+	var hasBrowserGrantUnique bool
+	_ = s.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_browser_task_grants_one_active')`).Scan(&hasBrowserGrantUnique)
+	if !hasV148 || !hasBrowserGrantUnique {
+		// Database-level backstop for the one-active-grant-per-Task/Profile
+		// invariant. Older rows may already contain duplicates from the first
+		// POC commit, so revoke all but the newest before creating the index.
+		if _, err := s.db.ExecContext(ctx, `UPDATE browser_task_grants
+			SET revoked_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+			    updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+			WHERE revoked_at='' AND EXISTS(
+				SELECT 1 FROM browser_task_grants newer
+				WHERE newer.task_id=browser_task_grants.task_id
+				  AND newer.profile_id=browser_task_grants.profile_id
+				  AND newer.revoked_at=''
+				  AND (newer.created_at>browser_task_grants.created_at
+				       OR (newer.created_at=browser_task_grants.created_at AND newer.id>browser_task_grants.id))
+			)`); err != nil {
+			return fmt.Errorf("apply schema v148 browser grant dedupe: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_browser_task_grants_one_active
+			 ON browser_task_grants(task_id,profile_id) WHERE revoked_at=''`); err != nil {
+			return fmt.Errorf("apply schema v148 browser grant uniqueness: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(148, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return fmt.Errorf("record schema v148: %w", err)
+		}
+	}
 	return nil
 }
 

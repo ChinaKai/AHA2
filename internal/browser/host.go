@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -63,12 +62,102 @@ type HTTPHost struct {
 	client  *http.Client
 }
 
+// DefaultHostTimeout is deliberately longer than every host-side operation:
+// page navigation uses a 30s deadline inside the host, so a client timeout that
+// fires first would report failure while the host still commits the navigation.
+const DefaultHostTimeout = 60 * time.Second
+
 func NewHTTPHost(baseURL, token string) *HTTPHost {
+	return NewHTTPHostWithTimeout(baseURL, token, DefaultHostTimeout)
+}
+
+// NewHTTPHostWithTimeout is used by tests to exercise slow-host behavior without
+// waiting a full minute.
+func NewHTTPHostWithTimeout(baseURL, token string, timeout time.Duration) *HTTPHost {
+	if timeout <= 0 {
+		timeout = DefaultHostTimeout
+	}
 	return &HTTPHost{
 		baseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
 		token:   strings.TrimSpace(token),
-		client:  &http.Client{Timeout: 25 * time.Second},
+		client:  &http.Client{Timeout: timeout},
 	}
+}
+
+// Host operations have a closed set of machine codes. AHA never forwards the
+// host's diagnostic text: Playwright errors can contain the user-data directory
+// or Edge executable path, which must not cross into AHA storage or the Web UI.
+func hostErrorMessage(code string) string {
+	switch code {
+	case "browser_host_unavailable":
+		return "浏览器宿主不可达，请确认 host 进程已启动且仅监听本机"
+	case "browser_host_timeout":
+		return "浏览器宿主操作超时，请刷新状态后再试"
+	case "browser_host_unauthorized":
+		return "浏览器宿主拒绝了 AHA 的本地凭据，请核对 host token"
+	case "browser_edge_unavailable":
+		return "未找到 Microsoft Edge；POC 不会换用 Chrome/Chromium"
+	case "browser_profile_locked":
+		return "该 Profile 的用户数据目录已被另一个浏览器进程占用"
+	case "browser_launch_failed":
+		return "浏览器启动失败，请查看浏览器宿主本地日志"
+	case "browser_navigation_failed":
+		return "页面打开失败或超时"
+	case "browser_snapshot_failed":
+		return "读取页面失败"
+	case "browser_session_not_found":
+		return "浏览器会话不存在或已关闭"
+	case "browser_session_changed":
+		return "浏览器会话已换代，请重新附加"
+	case "browser_tab_not_found":
+		return "浏览器标签页不存在或已关闭"
+	default:
+		return "浏览器宿主操作失败"
+	}
+}
+
+// hostCodes are the errors whose text comes from the host process. Their AHA
+// text is always the static message above, never the host's diagnostic string.
+var hostCodes = map[string]bool{
+	"browser_host_unavailable": true, "browser_host_timeout": true,
+	"browser_host_unauthorized": true, "browser_host_bad_response": true,
+	"browser_edge_unavailable": true, "browser_profile_locked": true,
+	"browser_profile_unavailable": true, "browser_profile_invalid": true,
+	"browser_launch_failed": true, "browser_navigation_failed": true,
+	"browser_snapshot_failed": true, "browser_session_not_found": true,
+	"browser_session_changed": true, "browser_tab_not_found": true,
+}
+
+// sanitizeHostError replaces a host-originated error's text with the stable AHA
+// message. Service return values therefore stay safe even if a host or fake
+// adapter sends a diagnostic containing local paths.
+func sanitizeHostError(err error) error {
+	var typed *Error
+	if errors.As(err, &typed) && hostCodes[typed.Code] {
+		return &Error{Code: typed.Code, Message: hostErrorMessage(typed.Code), Status: typed.Status}
+	}
+	return err
+}
+
+// PublicMessage is the only textual part of a typed browser error that may be
+// persisted or shown outside AHA. Host-originated errors and unknown errors get
+// a stable message; service validation errors keep their owner-facing text.
+func PublicMessage(err error) string {
+	var typed *Error
+	if !errors.As(err, &typed) {
+		return "浏览器操作失败"
+	}
+	message := strings.TrimSpace(typed.Message)
+	if hostCodes[typed.Code] {
+		message = hostErrorMessage(typed.Code)
+	}
+	if message == "" {
+		message = "浏览器操作失败"
+	}
+	if len([]rune(message)) > 240 {
+		message = string([]rune(message)[:240])
+	}
+	return message
 }
 
 type hostErrorBody struct {
@@ -100,8 +189,12 @@ func (h *HTTPHost) call(ctx context.Context, method, path string, body any, out 
 	}
 	response, err := h.client.Do(request)
 	if err != nil {
-		return newError(http.StatusServiceUnavailable, "browser_host_unavailable",
-			"浏览器宿主不可达，请确认 host 进程已启动且仅监听本机")
+		if errors.Is(err, context.DeadlineExceeded) || isTimeout(err) {
+			return &Error{Code: "browser_host_timeout", Status: http.StatusGatewayTimeout,
+				Message: hostErrorMessage("browser_host_timeout")}
+		}
+		return &Error{Code: "browser_host_unavailable", Status: http.StatusServiceUnavailable,
+			Message: hostErrorMessage("browser_host_unavailable")}
 	}
 	defer response.Body.Close()
 	payload, err := io.ReadAll(io.LimitReader(response.Body, 4<<20))
@@ -115,24 +208,21 @@ func (h *HTTPHost) call(ctx context.Context, method, path string, body any, out 
 		if code == "" {
 			code = "browser_host_error"
 		}
-		message := strings.TrimSpace(failure.Error.Message)
-		if message == "" {
-			message = fmt.Sprintf("浏览器宿主返回状态 %d", response.StatusCode)
-		}
 		status := http.StatusBadGateway
 		switch response.StatusCode {
 		case http.StatusUnauthorized, http.StatusForbidden:
 			status = http.StatusServiceUnavailable
 			code = "browser_host_unauthorized"
-			message = "浏览器宿主拒绝了 AHA 的本地凭据，请核对 host token"
 		case http.StatusNotFound:
 			status = http.StatusNotFound
 		case http.StatusConflict:
 			status = http.StatusConflict
 		case http.StatusServiceUnavailable:
 			status = http.StatusServiceUnavailable
+		case http.StatusGatewayTimeout:
+			status = http.StatusGatewayTimeout
 		}
-		return &Error{Code: code, Message: message, Status: status}
+		return &Error{Code: code, Message: hostErrorMessage(code), Status: status}
 	}
 	if out == nil {
 		return nil
@@ -141,6 +231,11 @@ func (h *HTTPHost) call(ctx context.Context, method, path string, body any, out 
 		return newError(http.StatusBadGateway, "browser_host_bad_response", "浏览器宿主返回了无法解析的响应")
 	}
 	return nil
+}
+
+func isTimeout(err error) bool {
+	var netErr interface{ Timeout() bool }
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 func profilePath(profileID string) string {

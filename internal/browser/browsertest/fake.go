@@ -26,6 +26,7 @@ type FakeHost struct {
 	Unavailable   bool
 	Locked        map[string]bool
 	FailOpen      error
+	FailOpenTab   error
 	OpenCalls     int
 	CloseCalls    int
 	Sessions      map[string]*session
@@ -136,6 +137,9 @@ func (f *FakeHost) sessionLocked(profileID, sessionID string) (*session, error) 
 func (f *FakeHost) OpenTab(_ context.Context, profileID, sessionID, targetURL string) (browser.HostTab, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.FailOpenTab != nil {
+		return browser.HostTab{}, f.FailOpenTab
+	}
 	value, err := f.sessionLocked(profileID, sessionID)
 	if err != nil {
 		return browser.HostTab{}, err

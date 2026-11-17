@@ -18,6 +18,8 @@ import {createHash, timingSafeEqual} from "node:crypto";
 import {promises as fs, readFileSync, existsSync} from "node:fs";
 import {join, resolve} from "node:path";
 import {chromium} from "playwright";
+import {createProfileLocks, profileDir, safeProfileID} from "./lock.mjs";
+import {navigatePage, openTabPage} from "./tabs.mjs";
 
 const VERSION = "0.1.0";
 const LOOPBACK = "127.0.0.1";
@@ -68,9 +70,7 @@ function edgeExecutable() {
   return "";
 }
 
-function safeID(value) {
-  return typeof value === "string" && /^[A-Za-z0-9_.:-]{1,160}$/.test(value);
-}
+const safeID = safeProfileID;
 
 function fail(status, code, message) {
   return {status, body: {error: {code, message}}};
@@ -110,71 +110,19 @@ function validateURL(raw) {
   return parsed.toString();
 }
 
-// The host, not AHA, owns the real user-data directory. AHA only sends the
-// logical profile ID, which is validated before touching the filesystem.
-function profileDir(root, profileID) {
-  if (!safeID(profileID)) return "";
-  return join(root, profileID);
-}
-
-async function lockOwnerAlive(lockPath) {
-  try {
-    const raw = await fs.readFile(lockPath, "utf8");
-    const pid = Number(JSON.parse(raw).pid);
-    if (!Number.isInteger(pid) || pid <= 0) return false;
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    // EPERM means the process exists but belongs to another account. Any parse
-    // or ESRCH failure means the recorded owner is gone.
-    return Boolean(error && error.code === "EPERM");
+function diagnostics(error, root, edge) {
+  let text = String(error && error.message || error);
+  for (const [value, label] of [[root, "[profile-root]"], [edge, "[edge]"]] ) {
+    if (value) text = text.split(value).join(label);
   }
+  return text.slice(0, 500);
 }
 
 class HostState {
   constructor(root) {
     this.root = root;
     this.sessions = new Map();
-  }
-
-  async lock(profileID) {
-    const directory = profileDir(this.root, profileID);
-    if (!directory) throw new Error("invalid profile id");
-    await fs.mkdir(directory, {recursive: true, mode: 0o700});
-    const lockPath = join(directory, ".aha2-host.lock");
-    try {
-      const handle = await fs.open(lockPath, "wx", 0o600);
-      await handle.writeFile(JSON.stringify({pid: process.pid, started_at: new Date().toISOString()}));
-      await handle.close();
-      return lockPath;
-    } catch (error) {
-      if (error && error.code === "EEXIST") {
-        // A crash can leave a stale lock behind. Only reclaim it when the
-        // recorded process is gone; a live Edge/host keeps the lock.
-        if (!(await lockOwnerAlive(lockPath))) {
-          await fs.unlink(lockPath).catch(() => {});
-          try {
-            const handle = await fs.open(lockPath, "wx", 0o600);
-            await handle.writeFile(JSON.stringify({pid: process.pid, started_at: new Date().toISOString()}));
-            await handle.close();
-            return lockPath;
-          } catch {
-            // The stale lock could not be reclaimed; fail closed below.
-          }
-        }
-        throw Object.assign(new Error("profile directory is locked by another browser process"), {code: "browser_profile_locked"});
-      }
-      throw error;
-    }
-  }
-
-  async unlock(lockPath) {
-    if (!lockPath) return;
-    try {
-      await fs.unlink(lockPath);
-    } catch {
-      // Best effort: the next start validates the user-data directory itself.
-    }
+    this.locks = createProfileLocks(root);
   }
 
   get(profileID) {
@@ -241,7 +189,7 @@ async function main() {
     } catch {
       // The browser may already be gone; the lock still has to be released.
     }
-    await state.unlock(session.lockPath);
+    await state.locks.release(session.lock);
     console.log(`session closed profile=${profileID} reason=${reason}`);
     return true;
   };
@@ -267,6 +215,10 @@ async function main() {
       return json(response, 404, fail(404, "not_found", "unknown route").body);
     }
     const profileID = parts[2];
+    const directory = profileDir(root, profileID);
+    if (!directory) {
+      return json(response, 400, fail(400, "browser_profile_invalid", "invalid profile id").body);
+    }
     let body = {};
     if (request.method === "POST") {
       try {
@@ -297,16 +249,16 @@ async function main() {
           return json(response, 503, fail(503, "browser_edge_unavailable",
             "Microsoft Edge was not found; set AHA2_EDGE_PATH. Refusing to fall back to Chrome/Chromium.").body);
         }
-        let lockPath = "";
+        let lock = null;
         try {
-          lockPath = await state.lock(profileID);
+          lock = await state.locks.acquire(profileID);
         } catch (error) {
           const code = error && error.code === "browser_profile_locked" ? "browser_profile_locked" : "browser_profile_unavailable";
           return json(response, 409, fail(409, code,
             "该 Profile 的用户数据目录已被另一个浏览器进程占用").body);
         }
         try {
-          const context = await chromium.launchPersistentContext(profileDir(root, profileID), {
+          const context = await chromium.launchPersistentContext(directory, {
             executablePath: edge,
             headless: false,
             viewport: null,
@@ -318,12 +270,12 @@ async function main() {
             state: "ready",
             context,
             tabs: new Map(),
-            lockPath,
+            lock,
           };
           context.on("close", () => {
             if (state.get(profileID) === session) {
               state.sessions.delete(profileID);
-              void state.unlock(lockPath);
+              void state.locks.release(lock);
               console.log(`browser window closed profile=${profileID}`);
             }
           });
@@ -331,10 +283,12 @@ async function main() {
           console.log(`session opened profile=${profileID}`);
           return json(response, 200, sessionPayload(session));
         } catch (error) {
-          await state.unlock(lockPath);
-          const message = String(error && error.message || error).slice(0, 500);
+          await state.locks.release(lock);
+          // Raw Playwright text can contain the user-data directory or Edge
+          // executable path; keep it in the host-local log only, sanitized.
+          console.error(`browser launch failed profile=${profileID} diagnostic=${diagnostics(error, root, edge)}`);
           return json(response, 500, fail(500, "browser_launch_failed",
-            `Edge 启动失败：${message}`).body);
+            "浏览器启动失败，请查看浏览器宿主本地日志").body);
         }
       }
       if (request.method === "DELETE") {
@@ -356,16 +310,15 @@ async function main() {
         const target = validateURL(body.url);
         if (!target) return json(response, 400, fail(400, "browser_url_invalid", "only http/https URLs are accepted").body);
         try {
-          const page = await session.context.newPage();
-          await page.goto(target, {waitUntil: "domcontentloaded", timeout: 30000});
-          const tab = {id: `host-tab-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`, page,
-            url: page.url(), title: await page.title()};
+          const id = `host-tab-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+          const tab = await openTabPage(session.context, target, id);
           session.tabs.set(tab.id, tab);
-          page.on("close", () => session.tabs.delete(tab.id));
+          tab.page.on("close", () => session.tabs.delete(tab.id));
           return json(response, 201, tabPayload(tab));
         } catch (error) {
+          console.error(`tab open failed profile=${profileID} diagnostic=${diagnostics(error, root, edge)}`);
           return json(response, 502, fail(502, "browser_navigation_failed",
-            `打开页面失败：${String(error && error.message || error).slice(0, 300)}`).body);
+            "页面打开失败或超时").body);
         }
       }
       const tab = parts[4] ? session.tabs.get(parts[4]) : null;
@@ -379,13 +332,14 @@ async function main() {
         const target = validateURL(body.url);
         if (!target) return json(response, 400, fail(400, "browser_url_invalid", "only http/https URLs are accepted").body);
         try {
-          await tab.page.goto(target, {waitUntil: "domcontentloaded", timeout: 30000});
-          tab.url = tab.page.url();
-          tab.title = await tab.page.title();
+          const navigated = await navigatePage(tab.page, target);
+          tab.url = navigated.url;
+          tab.title = navigated.title;
           return json(response, 200, tabPayload(tab));
         } catch (error) {
+          console.error(`tab navigation failed profile=${profileID} diagnostic=${diagnostics(error, root, edge)}`);
           return json(response, 502, fail(502, "browser_navigation_failed",
-            `页面导航失败：${String(error && error.message || error).slice(0, 300)}`).body);
+            "页面打开失败或超时").body);
         }
       }
       if (parts.length === 6 && parts[5] === "snapshot" && request.method === "GET") {
@@ -399,8 +353,9 @@ async function main() {
           }, MAX_SNAPSHOT_TEXT);
           return json(response, 200, {snapshot: {...current, text}});
         } catch (error) {
+          console.error(`tab snapshot failed profile=${profileID} diagnostic=${diagnostics(error, root, edge)}`);
           return json(response, 502, fail(502, "browser_snapshot_failed",
-            `读取页面失败：${String(error && error.message || error).slice(0, 300)}`).body);
+            "读取页面失败").body);
         }
       }
     }
@@ -409,7 +364,7 @@ async function main() {
 
   const server = createServer((request, response) => {
     route(request, response).catch(error => {
-      console.error("host request failed", String(error && error.message || error));
+      console.error("host request failed", diagnostics(error, root, ""));
       if (!response.headersSent) {
         json(response, 500, fail(500, "host_internal_error", "host request failed").body);
       }

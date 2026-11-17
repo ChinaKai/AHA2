@@ -92,6 +92,20 @@ func TestBrowserGrantsTabsAndCascade(t *testing.T) {
 	if err := database.CreateBrowserTaskGrant(ctx, grant); err != nil {
 		t.Fatal(err)
 	}
+	duplicate := grant
+	duplicate.ID = domain.NewID("browser_grant")
+	if err := database.CreateBrowserTaskGrant(ctx, duplicate); err == nil {
+		t.Fatal("the unique active-grant index accepted a second active grant")
+	}
+	// The superseding transaction is the supported path: it revokes the old
+	// grant and inserts the new one atomically.
+	replacement := grant
+	replacement.ID = domain.NewID("browser_grant")
+	revoked, err := database.CreateBrowserTaskGrantSuperseding(ctx, replacement, now)
+	if err != nil || len(revoked) != 1 || revoked[0].ID != grant.ID {
+		t.Fatalf("superseding insert: revoked=%#v err=%v", revoked, err)
+	}
+	grant = replacement
 	loaded, err := database.BrowserTaskGrant(ctx, grant.ID)
 	if err != nil || len(loaded.Capabilities) != 2 || !loaded.Has(domain.BrowserCapabilitySnapshot) {
 		t.Fatalf("grant=%#v err=%v", loaded, err)

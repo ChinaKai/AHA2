@@ -50,7 +50,7 @@ func newUnavailable() *browser.Error {
 func writeBrowserFailure(writer http.ResponseWriter, err error) {
 	var typed *browser.Error
 	if errors.As(err, &typed) {
-		writeErrorDetail(writer, typed.Status, typed.Code, typed.Message)
+		writeErrorDetail(writer, typed.Status, typed.Code, browser.PublicMessage(typed))
 		return
 	}
 	writeError(writer, http.StatusInternalServerError, "browser_operation_failed")

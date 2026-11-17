@@ -277,6 +277,72 @@ func (s *Store) CreateBrowserTaskGrant(ctx context.Context, item domain.BrowserT
 	return err
 }
 
+// CreateBrowserTaskGrantSuperseding revokes the Task/Profile's currently active
+// grants and inserts the new one in a single immediate transaction. The write
+// lock is what makes "one active grant per Task/Profile" hold under concurrent
+// creates; the caller uses the returned grants to close tabs and audit.
+func (s *Store) CreateBrowserTaskGrantSuperseding(ctx context.Context, item domain.BrowserTaskGrant, now time.Time) ([]domain.BrowserTaskGrant, error) {
+	if strings.TrimSpace(item.ID) == "" {
+		return nil, fmt.Errorf("browser grant id is required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx,
+		`SELECT `+browserGrantColumns+` FROM browser_task_grants
+		 WHERE task_id=? AND profile_id=? AND revoked_at=''
+		 ORDER BY created_at,id`, item.TaskID, item.ProfileID)
+	if err != nil {
+		return nil, err
+	}
+	revoked := make([]domain.BrowserTaskGrant, 0)
+	for rows.Next() {
+		existing, scanErr := scanBrowserGrant(rows)
+		if scanErr != nil {
+			rows.Close()
+			return nil, scanErr
+		}
+		revoked = append(revoked, existing)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, existing := range revoked {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE browser_task_grants SET revoked_at=?,updated_at=? WHERE id=? AND revoked_at=''`,
+			timeString(now), timeString(now), existing.ID); err != nil {
+			return nil, err
+		}
+	}
+	if item.CreatedAt.IsZero() {
+		item.CreatedAt = now
+	}
+	item.UpdatedAt = now
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO browser_task_grants(id,task_id,profile_id,session_id,capabilities_json,
+			expires_at,revoked_at,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?)`,
+		item.ID, item.TaskID, item.ProfileID, item.SessionID, encodeJSON(item.Capabilities),
+		timeString(item.ExpiresAt), timeString(item.RevokedAt),
+		timeString(item.CreatedAt), timeString(item.UpdatedAt),
+	); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	for index := range revoked {
+		revoked[index].RevokedAt = now
+		revoked[index].UpdatedAt = now
+	}
+	return revoked, nil
+}
+
 func (s *Store) RevokeBrowserTaskGrant(ctx context.Context, id string, revokedAt time.Time) error {
 	result, err := s.db.ExecContext(ctx,
 		`UPDATE browser_task_grants SET revoked_at=?,updated_at=? WHERE id=? AND revoked_at=''`,

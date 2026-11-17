@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -461,5 +463,110 @@ func TestProfilesRefreshAWindowClosedInTheHost(t *testing.T) {
 	updated, err := f.service.Grant(ctx, grant.ID)
 	if err != nil || updated.Status != domain.BrowserGrantStatusRevoked {
 		t.Fatalf("grant after host close=%#v err=%v", updated, err)
+	}
+}
+
+func TestHostDiagnosticTextIsNeverPersistedOrReturned(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	profile := createProfile(t, f)
+	f.host.FailOpen = &browser.Error{
+		Code: "browser_launch_failed", Status: http.StatusInternalServerError,
+		Message: `C:\Users\owner\AppData\Local\AHA2\browser-profiles\browser_profile_1`,
+	}
+	_, _, err := f.service.StartSession(ctx, "owner", profile.ID)
+	requireCode(t, err, "browser_launch_failed")
+	if strings.Contains(err.Error(), "browser-profiles") || strings.Contains(err.Error(), `C:\`) {
+		t.Fatalf("host diagnostic leaked from service error: %v", err)
+	}
+	session, lookupErr := f.store.ActiveBrowserSession(ctx, profile.ID)
+	if lookupErr != nil {
+		t.Fatal(lookupErr)
+	}
+	if strings.Contains(session.Error, "browser-profiles") || strings.Contains(session.Error, `C:\`) {
+		t.Fatalf("host diagnostic persisted: %q", session.Error)
+	}
+}
+
+func TestOpenTabHostTimeoutLeavesNoTabRecord(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	profile := createProfile(t, f)
+	grant, err := f.service.CreateGrant(ctx, "owner", f.task.ID, profile.ID, nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.host.FailOpenTab = &browser.Error{
+		Code: "browser_host_timeout", Status: http.StatusGatewayTimeout,
+		Message: "浏览器宿主操作超时",
+	}
+	_, err = f.service.OpenTab(ctx, "owner", grant.ID, "https://example.com")
+	requireCode(t, err, "browser_host_timeout")
+	tabs, err := f.store.BrowserTabsForGrant(ctx, grant.ID)
+	if err != nil || len(tabs) != 0 {
+		t.Fatalf("tabs after host timeout=%#v err=%v", tabs, err)
+	}
+}
+
+func TestConcurrentGrantCreationKeepsOneActiveGrant(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	profile := createProfile(t, f)
+	const workers = 24
+	var wait sync.WaitGroup
+	errs := make(chan error, workers)
+	for index := 0; index < workers; index++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			_, err := f.service.CreateGrant(ctx, "owner", f.task.ID, profile.ID, nil, time.Hour)
+			errs <- err
+		}()
+	}
+	wait.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent grant create: %v", err)
+		}
+	}
+	active, err := f.store.BrowserTaskGrantsForProfileActive(ctx, profile.ID, f.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 1 {
+		t.Fatalf("active grants=%d, want 1", len(active))
+	}
+}
+
+func TestConcurrentGrantRevocationIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	profile := createProfile(t, f)
+	grant, err := f.service.CreateGrant(ctx, "owner", f.task.ID, profile.ID, nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const workers = 24
+	var wait sync.WaitGroup
+	errs := make(chan error, workers)
+	for index := 0; index < workers; index++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			_, err := f.service.RevokeGrant(ctx, "owner", grant.ID)
+			errs <- err
+		}()
+	}
+	wait.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent grant revoke: %v", err)
+		}
+	}
+	updated, err := f.service.Grant(ctx, grant.ID)
+	if err != nil || updated.Status != domain.BrowserGrantStatusRevoked {
+		t.Fatalf("grant after concurrent revoke=%#v err=%v", updated, err)
 	}
 }

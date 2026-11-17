@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/ChinaKai/AHA2/internal/browser"
 )
@@ -84,5 +86,49 @@ func TestHTTPHostUnreachableIsTyped(t *testing.T) {
 	}
 	if browser.Status(err) != http.StatusServiceUnavailable {
 		t.Fatalf("unreachable status=%d", browser.Status(err))
+	}
+}
+
+func TestHTTPHostDistinguishesTimeoutFromUnavailable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		time.Sleep(150 * time.Millisecond)
+		_ = json.NewEncoder(writer).Encode(map[string]any{"ok": true})
+	}))
+	defer server.Close()
+	host := browser.NewHTTPHostWithTimeout(server.URL, "token", 30*time.Millisecond)
+	_, err := host.Health(context.Background())
+	if browser.Code(err) != "browser_host_timeout" {
+		t.Fatalf("timeout mapping: %v", err)
+	}
+	if browser.Status(err) != http.StatusGatewayTimeout {
+		t.Fatalf("timeout status=%d", browser.Status(err))
+	}
+}
+
+func TestHTTPHostNeverForwardsDiagnosticText(t *testing.T) {
+	const diagnostic = `C:\Users\owner\AppData\Local\AHA2\browser-profiles\browser_profile_1`
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(writer).Encode(map[string]any{"error": map[string]string{
+			"code": "browser_launch_failed", "message": diagnostic,
+		}})
+	}))
+	defer server.Close()
+	host := browser.NewHTTPHost(server.URL, "token")
+	_, err := host.Health(context.Background())
+	if browser.Code(err) != "browser_launch_failed" {
+		t.Fatalf("error code=%v", err)
+	}
+	if strings.Contains(err.Error(), "browser-profiles") || strings.Contains(err.Error(), `C:\`) {
+		t.Fatalf("diagnostic path leaked: %v", err)
+	}
+	if message := browser.PublicMessage(err); strings.Contains(message, "browser-profiles") || strings.Contains(message, `C:\`) {
+		t.Fatalf("public message leaked: %q", message)
+	}
+}
+
+func TestHostClientTimeoutExceedsNavigationDeadline(t *testing.T) {
+	if browser.DefaultHostTimeout <= 30*time.Second {
+		t.Fatalf("client timeout %v must exceed the host's 30s navigation deadline", browser.DefaultHostTimeout)
 	}
 }

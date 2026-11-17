@@ -15,7 +15,9 @@
 
 同一 profile 单实例有三层约束：
 
-1. host 的用户数据目录 `.aha2-host.lock`（进程崩溃时可回收 stale 锁）；
+1. host 的用户数据目录 `.aha2-host.lock`：锁文件带随机 owner token，只有 token
+   匹配才允许删除；host 内按 profile 串行化 acquire/release，进程崩溃后按 pid
+   回收 stale 锁；
 2. host 内存注册表（重复打开直接复用同一窗口）；
 3. SQLite 部分唯一索引 `browser_sessions(profile_id) WHERE state <> 'closed'`。
 
@@ -35,7 +37,9 @@
 
 Task 授权：
 
-- `POST/GET /api/v1/tasks/{id}/browser-grants`（别名 `/browser-sessions`）
+- `POST/GET /api/v1/tasks/{id}/browser-grants`（别名 `/browser-sessions`）。创建时
+  supersede + insert 在同一个 immediate SQLite 事务内完成；进程内另有 `grantMu`
+  串行化创建/撤销。并发创建始终只保留一个 active grant，重复撤销幂等。
 - `GET/DELETE /api/v1/browser-grants/{id}`
 - `GET /api/v1/tasks/{id}/browser`：Task 详情合并视图（可选的 profile、当前授权、会话、本 Task 标签页）
 
@@ -57,7 +61,14 @@ Task 授权：
 - 会话已关闭或已换代：`browser_session_closed` / `browser_session_changed`（409）；
 - 跨 Task 标签页：`browser_tab_forbidden`（403）；
 - 授权缺少能力：`browser_capability_denied`（403）；
-- 非 http/https 网址：`browser_url_invalid`（400）。
+- 非 http/https 网址：`browser_url_invalid`（400）；
+- host 操作超过 60s：`browser_host_timeout`（504），与连接失败
+  `browser_host_unavailable` 区分。host 的页面导航是 30s，AHA 客户端超时 60s，
+  避免 AHA 先失败而 host 仍在提交导航。
+
+host 返回的原始 Playwright 诊断只留在 host 本地日志（替换 profile 根目录和 Edge
+路径）；AHA 对 host 错误只使用稳定文案和错误码，不持久化、不返回任意 host 文本。
+导航失败时 host 关闭刚创建的 page，避免出现 AHA 无记录但 owner 能看到的孤立页面。
 
 任何失败都不会回退到其他 profile、其他浏览器或静默新建会话。
 

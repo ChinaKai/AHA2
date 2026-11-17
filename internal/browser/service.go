@@ -26,11 +26,12 @@ const (
 // authoritative for whether a real browser is running; the database state is a
 // cache plus the unique-session backstop.
 type Service struct {
-	store  *store.Store
-	host   Host
-	hostID string
-	now    func() time.Time
-	mu     sync.Mutex
+	store   *store.Store
+	host    Host
+	hostID  string
+	now     func() time.Time
+	mu      sync.Mutex
+	grantMu sync.Mutex
 }
 
 func NewService(st *store.Store, host Host, hostID string) *Service {
@@ -68,7 +69,7 @@ func (s *Service) hostView(ctx context.Context) HostView {
 	defer cancel()
 	health, err := s.host.Health(healthCtx)
 	if err != nil {
-		view.Error = err.Error()
+		view.Error = PublicMessage(err)
 		view.Code = Code(err)
 		if view.Code == "" {
 			view.Code = "browser_host_unavailable"
@@ -303,11 +304,11 @@ func (s *Service) ensureSession(ctx context.Context, actor, profileID string) (d
 			s.syncProfileState(ctx, profile.ID, active.State, active.LastUsedAt)
 			return active, true, nil
 		case isHostUnavailable(hostErr):
-			return domain.BrowserSession{}, false, hostErr
+			return domain.BrowserSession{}, false, sanitizeHostError(hostErr)
 		case Code(hostErr) == "browser_session_not_found":
 			s.closeSessionLocked(ctx, actor, active, "宿主已不再持有该会话")
 		default:
-			return domain.BrowserSession{}, false, hostErr
+			return domain.BrowserSession{}, false, sanitizeHostError(hostErr)
 		}
 	}
 
@@ -347,10 +348,10 @@ func (s *Service) ensureSession(ctx context.Context, actor, profileID string) (d
 			}
 		}
 		session.State = domain.BrowserSessionStateError
-		session.Error = err.Error()
+		session.Error = PublicMessage(err)
 		_ = s.store.UpdateBrowserSession(ctx, session)
 		_ = s.store.UpdateBrowserProfileState(ctx, profile.ID, domain.BrowserProfileStateError, time.Time{})
-		return domain.BrowserSession{}, false, err
+		return domain.BrowserSession{}, false, sanitizeHostError(err)
 	}
 	if hostSession.State == "" {
 		hostSession.State = domain.BrowserSessionStateReady
@@ -393,7 +394,13 @@ func (s *Service) adoptHostSession(ctx context.Context, session *domain.BrowserS
 		session.State = domain.BrowserSessionStateError
 	}
 	session.HostSessionID = hostSession.ID
-	session.Error = hostSession.Error
+	if hostSession.Error != "" {
+		// The host's diagnostic text may contain paths; keep only a stable
+		// owner-facing state in AHA.
+		session.Error = "浏览器会话不可用，请刷新状态"
+	} else {
+		session.Error = ""
+	}
 	session.LastUsedAt = s.now()
 }
 
@@ -443,7 +450,7 @@ func (s *Service) RefreshSession(ctx context.Context, profileID string) (*Sessio
 			s.mu.Unlock()
 			return nil, nil
 		}
-		return nil, hostErr
+		return nil, sanitizeHostError(hostErr)
 	}
 	if hostSession.State == domain.BrowserSessionStateClosed {
 		s.mu.Lock()
@@ -488,7 +495,7 @@ func (s *Service) CloseSession(ctx context.Context, actor, sessionID string) (do
 			// keep serving the session; any other failure leaves the record
 			// active so the owner can retry.
 			if !isHostUnavailable(err) && Code(err) != "browser_session_not_found" {
-				return domain.BrowserSession{}, err
+				return domain.BrowserSession{}, sanitizeHostError(err)
 			}
 		}
 	}
@@ -532,6 +539,11 @@ func (s *Service) closeSessionLocked(ctx context.Context, actor string, session 
 }
 
 func (s *Service) revokeGrantsForSessionLocked(ctx context.Context, actor, sessionID, reason string) {
+	// Serialize with grant creation. The session-close path holds s.mu and then
+	// takes grantMu; CreateGrant releases s.mu before taking grantMu, so the two
+	// lock orders cannot deadlock.
+	s.grantMu.Lock()
+	defer s.grantMu.Unlock()
 	grants, err := s.store.BrowserGrantsForSession(ctx, sessionID)
 	if err != nil {
 		return
@@ -551,6 +563,10 @@ func (s *Service) revokeGrantsForSessionLocked(ctx context.Context, actor, sessi
 			_ = s.store.DeleteBrowserTab(ctx, tab.ID)
 		}
 	}
+}
+
+func isUniqueConstraintError(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "unique constraint")
 }
 
 func normalizeCapabilities(values []string) ([]string, error) {
@@ -633,48 +649,51 @@ func (s *Service) CreateGrant(ctx context.Context, actor, taskID, profileID stri
 		return GrantView{}, conflict("browser_session_not_ready", "浏览器会话当前不可用（%s）", session.State)
 	}
 
-	// One active grant per Task/Profile keeps ownership unambiguous. Older
-	// grants are revoked and their tabs closed before the new grant is issued.
-	if err := s.supersedeGrants(ctx, actor, taskID, profile.ID); err != nil {
-		return GrantView{}, err
-	}
-
+	// One active grant per Task/Profile keeps ownership unambiguous. The service
+	// lock serializes creates/revokes in this process, and the store transaction
+	// is the cross-process backstop: it revokes the previous active grant and
+	// inserts the new one under one immediate write lock.
 	now := s.now()
+	s.grantMu.Lock()
+	defer s.grantMu.Unlock()
+	current, err := s.store.BrowserSession(ctx, session.ID)
+	if err != nil || current.State == domain.BrowserSessionStateClosed {
+		return GrantView{}, conflict("browser_session_changed", "浏览器会话已关闭，请重新附加")
+	}
+	active, activeErr := s.store.ActiveBrowserSession(ctx, profile.ID)
+	if activeErr != nil || active.ID != session.ID {
+		return GrantView{}, conflict("browser_session_changed", "Profile 已切换到新的会话，请重新授权")
+	}
 	grant := domain.BrowserTaskGrant{
 		ID: domain.NewID("browser_grant"), TaskID: taskID, ProfileID: profile.ID,
 		SessionID: session.ID, Capabilities: caps, ExpiresAt: now.Add(ttl),
 		CreatedAt: now, UpdatedAt: now,
 	}
-	if err := s.store.CreateBrowserTaskGrant(ctx, grant); err != nil {
-		return GrantView{}, err
+	var revoked []domain.BrowserTaskGrant
+	for attempt := 0; attempt < 2; attempt++ {
+		revoked, err = s.store.CreateBrowserTaskGrantSuperseding(ctx, grant, now)
+		if err == nil {
+			break
+		}
+		// The immediate transaction should serialize writers. If a driver
+		// still surfaces the unique active-grant index, retry once so the
+		// transaction revokes the winner before inserting.
+		if !isUniqueConstraintError(err) || attempt == 1 {
+			return GrantView{}, err
+		}
+	}
+	for _, previous := range revoked {
+		s.closeGrantTabs(ctx, actor, previous, "superseded")
+		s.audit(ctx, actor, "browser_grant.revoke", "browser_task_grant", previous.ID, map[string]any{
+			"task_id": previous.TaskID, "profile_id": previous.ProfileID, "session_id": previous.SessionID,
+			"reason": "superseded",
+		})
 	}
 	s.audit(ctx, actor, "browser_grant.create", "browser_task_grant", grant.ID, map[string]any{
 		"task_id": taskID, "profile_id": profile.ID, "session_id": session.ID,
 		"capabilities": caps, "expires_at": grant.ExpiresAt, "reused_session": reused,
 	})
 	return s.grantView(ctx, grant), nil
-}
-
-func (s *Service) supersedeGrants(ctx context.Context, actor, taskID, profileID string) error {
-	grants, err := s.store.BrowserTaskGrants(ctx, taskID)
-	if err != nil {
-		return err
-	}
-	now := s.now()
-	for _, grant := range grants {
-		if grant.ProfileID != profileID || grant.Status(now) != domain.BrowserGrantStatusActive {
-			continue
-		}
-		s.closeGrantTabs(ctx, actor, grant, "superseded")
-		if err := s.store.RevokeBrowserTaskGrant(ctx, grant.ID, now); err != nil {
-			return err
-		}
-		s.audit(ctx, actor, "browser_grant.revoke", "browser_task_grant", grant.ID, map[string]any{
-			"task_id": grant.TaskID, "profile_id": grant.ProfileID, "session_id": grant.SessionID,
-			"reason": "superseded",
-		})
-	}
-	return nil
 }
 
 func (s *Service) closeGrantTabs(ctx context.Context, actor string, grant domain.BrowserTaskGrant, reason string) {
@@ -735,6 +754,8 @@ func (s *Service) Grant(ctx context.Context, id string) (GrantView, error) {
 }
 
 func (s *Service) RevokeGrant(ctx context.Context, actor, id string) (GrantView, error) {
+	s.grantMu.Lock()
+	defer s.grantMu.Unlock()
 	grant, err := s.store.BrowserTaskGrant(ctx, strings.TrimSpace(id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return GrantView{}, notFound("browser_grant_not_found", "浏览器授权不存在")
@@ -905,7 +926,7 @@ func (s *Service) OpenTab(ctx context.Context, actor, grantID, targetURL string)
 	}
 	hostTab, err := s.host.OpenTab(ctx, grant.ProfileID, session.HostSessionID, targetURL)
 	if err != nil {
-		return domain.BrowserTab{}, err
+		return domain.BrowserTab{}, sanitizeHostError(err)
 	}
 	tab := domain.BrowserTab{
 		ID: domain.NewID("browser_tab"), SessionID: grant.SessionID, GrantID: grant.ID,
@@ -940,7 +961,7 @@ func (s *Service) NavigateTab(ctx context.Context, actor, grantID, tabID, target
 	}
 	hostTab, err := s.host.Navigate(ctx, grant.ProfileID, session.HostSessionID, tab.HostTabID, targetURL)
 	if err != nil {
-		return domain.BrowserTab{}, err
+		return domain.BrowserTab{}, sanitizeHostError(err)
 	}
 	if hostTab.URL != "" {
 		tab.URL = hostTab.URL
@@ -969,7 +990,7 @@ func (s *Service) SnapshotTab(ctx context.Context, actor, grantID, tabID string)
 	}
 	snapshot, err := s.host.Snapshot(ctx, grant.ProfileID, session.HostSessionID, tab.HostTabID)
 	if err != nil {
-		return HostSnapshot{}, err
+		return HostSnapshot{}, sanitizeHostError(err)
 	}
 	s.touchSession(ctx, session)
 	s.audit(ctx, actor, "browser_tab.snapshot", "browser_tab", tab.ID, map[string]any{
@@ -989,7 +1010,7 @@ func (s *Service) CloseTab(ctx context.Context, actor, grantID, tabID string) er
 	}
 	if err := s.host.CloseTab(ctx, grant.ProfileID, session.HostSessionID, tab.HostTabID); err != nil &&
 		Code(err) != "browser_tab_not_found" {
-		return err
+		return sanitizeHostError(err)
 	}
 	if err := s.store.DeleteBrowserTab(ctx, tab.ID); err != nil {
 		return err
