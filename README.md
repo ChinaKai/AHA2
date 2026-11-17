@@ -107,4 +107,5 @@ worktree 隔离的 Task 完成后，收尾会先把任务分支合并回目标�
 - [Sync Center 部署](docs/sync-center.md)
 - [Agent API](docs/agent-api.md)
 - [文件知识库](docs/knowledge-vault.md)
+- [离线数据库压缩](docs/offline-database-compaction.md)
 - [AHA1 知识库迁移](docs/aha1-knowledge-import.md)

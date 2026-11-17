@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/instancelock"
@@ -105,4 +107,54 @@ func TestDBCompactUsageAndMissingDatabaseExitCodes(t *testing.T) {
 	if result.Status != domain.OfflineCompactionStatusFailed || result.Reason != domain.OfflineCompactionReasonDatabaseMissing {
 		t.Fatalf("result=%#v", result)
 	}
+}
+
+func TestRunControlPlaneHoldsInstanceLockUntilShutdown(t *testing.T) {
+	dataDir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ready := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- runControlPlane(ctx, serveOptions{
+			listen: "127.0.0.1:0", dataDir: dataDir, logLevel: "error",
+		}, func() { close(ready) })
+	}()
+	select {
+	case <-ready:
+	case err := <-done:
+		t.Fatalf("runControlPlane stopped before ready: %v", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("runControlPlane did not become ready")
+	}
+
+	if lock, err := instancelock.Acquire(dataDir); !errors.Is(err, instancelock.ErrHeld) {
+		if lock != nil {
+			lock.Close()
+		}
+		t.Fatalf("Acquire while serve is running error=%v, want ErrHeld", err)
+	}
+	result, err := store.CompactDatabaseOffline(context.Background(), store.OfflineCompactionOptions{DataDir: dataDir, KeepBackup: true})
+	if err != nil {
+		t.Fatalf("offline compaction surfaced an error instead of a refusal: %v", err)
+	}
+	if result.Status != domain.OfflineCompactionStatusRefused || result.Reason != domain.OfflineCompactionReasonServiceRunning {
+		t.Fatalf("offline compaction while serve runs = %#v", result)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("runControlPlane shutdown error: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("runControlPlane did not stop")
+	}
+	// The lock must be released by the time runControlPlane returns.
+	lock, err := instancelock.Acquire(dataDir)
+	if err != nil {
+		t.Fatalf("Acquire after shutdown: %v", err)
+	}
+	lock.Close()
 }

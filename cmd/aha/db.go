@@ -134,7 +134,7 @@ func writeOfflineCompactionHuman(writer io.Writer, result domain.OfflineCompacti
 		}
 	}
 	if result.BackupKept && result.Status != domain.OfflineCompactionStatusOK {
-		fmt.Fprintf(writer, "恢复：停止服务后，把备份目录中的 aha2.db、aha2.db-wal、aha2.db-shm 复制回 %s\n", result.DataDir)
+		fmt.Fprintf(writer, "恢复：停止服务后，用备份目录中的 aha2.db 覆盖 %s 下的 aha2.db，并删除残留的 aha2.db-wal、aha2.db-shm\n", result.DataDir)
 	}
 	fmt.Fprintf(writer, "耗时：%d ms\n", result.DurationMS)
 }

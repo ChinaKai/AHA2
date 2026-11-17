@@ -115,6 +115,9 @@ test("database panel renders file stats and the VACUUM note without a second com
   assert.match(html, /data-db-range|C\. 硬件 I\/O/);
   assert.match(html, /文件不一定变小/);
   assert.match(html, /VACUUM/);
+  assert.match(html, /aha2 db compact --data-dir/);
+  assert.doesNotMatch(html, /「压缩数据库」/);
+  assert.doesNotMatch(html, /原地 VACUUM/);
   // The single compaction entry lives on the inventory database row, next to
   // the other cleanup actions, not on this details card.
   assert.doesNotMatch(html, /data-db-compact/);
@@ -334,6 +337,8 @@ test("database panel strings are translated in English", () => {
     assert.match(html, /the AHA2 service is still running/);
     assert.match(html, /AHA2 never runs VACUUM while it is serving/);
     assert.match(html, /does not necessarily shrink/);
+    assert.match(html, /aha2 db compact --data-dir/);
+    assert.doesNotMatch(html, /brief write freeze|Compact database to rebuild/);
     assert.doesNotMatch(html, /[一-鿿]/, "no Chinese text leaks into the English panel");
     assert.match(panel.conversationFormError("30", false, false), /Select at least/);
     assert.equal(panel.skipReasonText("nothing_eligible"), "No rows are older than the retention period.");

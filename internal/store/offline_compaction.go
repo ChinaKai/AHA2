@@ -188,8 +188,15 @@ func CompactDatabaseOffline(ctx context.Context, options OfflineCompactionOption
 	}
 	progress("磁盘空间检查通过（需要约 %s，可用 %s）。", formatByteCount(result.RequiredBytes), formatByteCount(free))
 
-	progress("备份数据库、WAL 和 SHM…")
-	backupPath, backupFiles, backupReason, backupErr := createOfflineCompactionBackup(ctx, databasePath, backupRoot, progress)
+	beforeCounts, countErr := countTablesForCompaction(ctx, conn, "main")
+	if countErr != nil {
+		result.Error = fmt.Sprintf("count tables before compaction: %v", countErr)
+		return result, countErr
+	}
+	result.BeforeRowCounts = beforeCounts
+
+	progress("创建数据库快照备份（VACUUM INTO）…")
+	backupPath, backupFiles, backupReason, backupErr := createOfflineCompactionBackup(ctx, conn, databasePath, backupRoot, beforeCounts, progress)
 	result.BackupPath = backupPath
 	result.BackupFiles = backupFiles
 	result.BackupKept = backupPath != ""
@@ -198,15 +205,7 @@ func CompactDatabaseOffline(ctx context.Context, options OfflineCompactionOption
 		result.Error = backupErr.Error()
 		return result, backupErr
 	}
-	progress("备份校验通过：%s", backupPath)
-
-	beforeCounts, countErr := countTablesForCompaction(ctx, conn, "main")
-	if countErr != nil {
-		result.Reason = domain.OfflineCompactionReasonBackupFailed
-		result.Error = fmt.Sprintf("count tables before compaction: %v", countErr)
-		return result, countErr
-	}
-	result.BeforeRowCounts = beforeCounts
+	progress("备份快照校验通过：%s", backupPath)
 
 	progress("写入 WAL 检查点…")
 	busy, _, _, checkpointErr := walCheckpointTruncate(ctx, conn)
@@ -352,17 +351,20 @@ func existingPath(path string) string {
 	}
 }
 
+// sameFilesystem reports whether both paths are on the same filesystem. It
+// compares the filesystem device, not the directory inode: os.SameFile on two
+// different directories is always false, which used to under-estimate the
+// space needed when the backup directory already existed.
 func sameFilesystem(first, second string) bool {
-	firstInfo, firstErr := os.Stat(existingPath(first))
-	secondInfo, secondErr := os.Stat(existingPath(second))
-	if firstErr != nil || secondErr != nil {
+	same, known := sameFilesystemByPlatform(existingPath(first), existingPath(second))
+	if !known {
 		// Unknown: assume the conservative same-filesystem requirement.
 		return true
 	}
-	return os.SameFile(firstInfo, secondInfo)
+	return same
 }
 
-func createOfflineCompactionBackup(ctx context.Context, databasePath, backupRoot string, progress func(string, ...any)) (string, []domain.OfflineCompactionFile, string, error) {
+func createOfflineCompactionBackup(ctx context.Context, conn *sql.Conn, databasePath, backupRoot string, expectedCounts map[string]int64, progress func(string, ...any)) (string, []domain.OfflineCompactionFile, string, error) {
 	if err := os.MkdirAll(backupRoot, 0o700); err != nil {
 		return "", nil, domain.OfflineCompactionReasonBackupFailed, fmt.Errorf("create backup root: %w", err)
 	}
@@ -381,48 +383,34 @@ func createOfflineCompactionBackup(ctx context.Context, databasePath, backupRoot
 			return "", nil, domain.OfflineCompactionReasonBackupFailed, fmt.Errorf("could not find a free backup directory under %s", backupRoot)
 		}
 	}
-	files := make([]domain.OfflineCompactionFile, 0, 3)
-	for _, item := range []struct {
-		name     string
-		suffix   string
-		required bool
-	}{
-		{name: "aha2.db", suffix: "", required: true},
-		{name: "aha2.db-wal", suffix: "-wal"},
-		{name: "aha2.db-shm", suffix: "-shm"},
-	} {
-		if err := ctx.Err(); err != nil {
-			return target, files, domain.OfflineCompactionReasonCanceled, err
-		}
-		source := databasePath + item.suffix
-		if _, err := os.Stat(source); err != nil {
-			if errors.Is(err, os.ErrNotExist) && !item.required {
-				continue
-			}
-			return target, files, domain.OfflineCompactionReasonBackupFailed, fmt.Errorf("stat backup source %s: %w", source, err)
-		}
-		destination := filepath.Join(target, item.name)
-		partial := destination + ".partial"
-		progress("  复制 %s…", item.name)
-		size, sum, err := copyFileWithSHA256(source, partial)
-		if err != nil {
-			return target, files, domain.OfflineCompactionReasonBackupFailed, fmt.Errorf("copy %s: %w", item.name, err)
-		}
-		verifiedSize, verifiedSum, err := hashFile(partial)
-		if err != nil {
-			return target, files, domain.OfflineCompactionReasonBackupVerifyFailed, fmt.Errorf("verify %s: %w", item.name, err)
-		}
-		if verifiedSize != size || verifiedSum != sum {
-			return target, files, domain.OfflineCompactionReasonBackupVerifyFailed, fmt.Errorf("%w: %s source size=%d sha256=%s, backup size=%d sha256=%s", errOfflineBackupVerify, item.name, size, sum, verifiedSize, verifiedSum)
-		}
-		if err := os.Rename(partial, destination); err != nil {
-			return target, files, domain.OfflineCompactionReasonBackupFailed, fmt.Errorf("finalize backup %s: %w", item.name, err)
-		}
-		files = append(files, domain.OfflineCompactionFile{Name: item.name, Path: destination, Bytes: size, SHA256: sum})
+	if err := ctx.Err(); err != nil {
+		return target, nil, domain.OfflineCompactionReasonCanceled, err
 	}
+	destination := filepath.Join(target, "aha2.db")
+	partial := destination + ".partial"
+	// VACUUM INTO reads the live database through this already-locked SQLite
+	// connection and writes a consistent snapshot. It avoids opening a second
+	// handle on the locked main DB: on Windows LockFileEx can make a plain
+	// io.Copy read of a >1 GiB database fail at PENDING_BYTE, and the snapshot
+	// already folds committed WAL contents into the main file.
+	progress("  生成一致快照 aha2.db…")
+	if _, err := conn.ExecContext(ctx, `VACUUM INTO ?`, partial); err != nil {
+		return target, nil, domain.OfflineCompactionReasonBackupFailed, fmt.Errorf("create database snapshot: %w", err)
+	}
+	size, sum, verifyErr := verifyOfflineCompactionSnapshot(ctx, partial, expectedCounts)
+	if verifyErr != nil {
+		return target, nil, domain.OfflineCompactionReasonBackupVerifyFailed, verifyErr
+	}
+	if err := os.Rename(partial, destination); err != nil {
+		return target, nil, domain.OfflineCompactionReasonBackupFailed, fmt.Errorf("finalize database snapshot: %w", err)
+	}
+	files := []domain.OfflineCompactionFile{{
+		Name: "aha2.db", Path: destination, Bytes: size, SHA256: sum,
+	}}
 	manifest := map[string]any{
 		"created_at": time.Now().UTC().Format(time.RFC3339Nano),
 		"database":   databasePath,
+		"format":     "vacuum_into_snapshot",
 		"files":      files,
 	}
 	encoded, err := json.MarshalIndent(manifest, "", "  ")
@@ -435,29 +423,54 @@ func createOfflineCompactionBackup(ctx context.Context, databasePath, backupRoot
 	return target, files, "", nil
 }
 
-func copyFileWithSHA256(source, destination string) (int64, string, error) {
-	input, err := os.Open(source)
+// verifyOfflineCompactionSnapshot proves the snapshot is readable and holds
+// the same key-table row counts as the source. The page count also gives an
+// independent size check for the SHA256 the caller records.
+func verifyOfflineCompactionSnapshot(ctx context.Context, path string, expectedCounts map[string]int64) (int64, string, error) {
+	size, sum, err := hashFile(path)
 	if err != nil {
-		return 0, "", err
+		return 0, "", fmt.Errorf("hash database snapshot: %w", err)
 	}
-	defer input.Close()
-	output, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if size <= 0 {
+		return size, sum, fmt.Errorf("%w: snapshot is empty", errOfflineBackupVerify)
+	}
+	backup, err := sql.Open("sqlite", sqliteDSN(path)+"&mode=ro")
 	if err != nil {
-		return 0, "", err
+		return size, sum, fmt.Errorf("open database snapshot: %w", err)
 	}
-	hasher := sha256.New()
-	written, copyErr := io.Copy(io.MultiWriter(output, hasher), input)
-	if copyErr == nil {
-		copyErr = output.Sync()
+	defer backup.Close()
+	backup.SetMaxOpenConns(1)
+	backup.SetMaxIdleConns(1)
+	backupConn, err := backup.Conn(ctx)
+	if err != nil {
+		return size, sum, fmt.Errorf("connect database snapshot: %w", err)
 	}
-	closeErr := output.Close()
-	if copyErr != nil {
-		return written, "", copyErr
+	defer backupConn.Close()
+	var pageCount, pageSize int64
+	if err := backupConn.QueryRowContext(ctx, `PRAGMA page_count`).Scan(&pageCount); err != nil {
+		return size, sum, fmt.Errorf("%w: read snapshot page_count: %v", errOfflineBackupVerify, err)
 	}
-	if closeErr != nil {
-		return written, "", closeErr
+	if err := backupConn.QueryRowContext(ctx, `PRAGMA page_size`).Scan(&pageSize); err != nil {
+		return size, sum, fmt.Errorf("%w: read snapshot page_size: %v", errOfflineBackupVerify, err)
 	}
-	return written, hex.EncodeToString(hasher.Sum(nil)), nil
+	if pageCount <= 0 || pageSize <= 0 || pageCount*pageSize != size {
+		return size, sum, fmt.Errorf("%w: snapshot size=%d but page_count*page_size=%d", errOfflineBackupVerify, size, pageCount*pageSize)
+	}
+	var integrity string
+	if err := backupConn.QueryRowContext(ctx, `PRAGMA quick_check`).Scan(&integrity); err != nil {
+		return size, sum, fmt.Errorf("%w: quick_check: %v", errOfflineBackupVerify, err)
+	}
+	if !strings.EqualFold(integrity, "ok") {
+		return size, sum, fmt.Errorf("%w: quick_check returned %q", errOfflineBackupVerify, integrity)
+	}
+	counts, err := countTablesForCompaction(ctx, backupConn, "main")
+	if err != nil {
+		return size, sum, fmt.Errorf("%w: count snapshot tables: %v", errOfflineBackupVerify, err)
+	}
+	if mismatch := compareRowCounts(expectedCounts, counts); mismatch != "" {
+		return size, sum, fmt.Errorf("%w: %s", errOfflineBackupVerify, mismatch)
+	}
+	return size, sum, nil
 }
 
 func hashFile(path string) (int64, string, error) {

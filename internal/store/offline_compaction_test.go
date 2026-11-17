@@ -164,6 +164,33 @@ func TestOfflineCompactionHoldsExclusiveDatabaseLock(t *testing.T) {
 	}
 }
 
+func TestOfflineCompactionSpaceCheckTreatsExistingBackupDirAsSameFilesystem(t *testing.T) {
+	dataDir := t.TempDir()
+	backupRoot := filepath.Join(dataDir, "backups")
+	if err := os.MkdirAll(backupRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if !sameFilesystem(dataDir, backupRoot) {
+		t.Fatalf("existing backup directory %s was not recognized as the same filesystem as %s", backupRoot, dataDir)
+	}
+	original := databaseDiskFree
+	databaseDiskFree = func(string) (int64, error) { return 12 << 30, nil }
+	t.Cleanup(func() { databaseDiskFree = original })
+
+	const fileBytes = int64(10 << 30)
+	required := offlineCompactionRequiredBytes(fileBytes, 0, 0)
+	if required < 2*fileBytes {
+		t.Fatalf("required bytes=%d, want at least 2x database", required)
+	}
+	hasSpace, err := offlineCompactionHasSpace(dataDir, backupRoot, required, fileBytes, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasSpace {
+		t.Fatalf("same-filesystem check allowed a 10 GiB database with only 12 GiB free; required=%d", required)
+	}
+}
+
 func TestOfflineCompactionRefusesWhenDatabaseIsLocked(t *testing.T) {
 	dataDir, _ := openOfflineCompactionFixture(t)
 	external, err := sql.Open("sqlite", filepath.Join(dataDir, "aha2.db")+"?_pragma=busy_timeout(100)")
