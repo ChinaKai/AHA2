@@ -20,22 +20,25 @@ type session struct {
 }
 
 type FakeHost struct {
-	mu             sync.Mutex
-	HostID         string
-	EdgeAvailable  bool
-	Unavailable    bool
-	Locked         map[string]bool
-	FailOpen       error
-	FailOpenTab    error
-	OpenState      string
-	OpenError      string
-	OpenTabStarted chan struct{}
-	OpenTabRelease chan struct{}
-	OpenCalls      int
-	CloseCalls     int
-	Sessions       map[string]*session
-	nextID         int
-	Now            func() time.Time
+	mu              sync.Mutex
+	HostID          string
+	EdgeAvailable   bool
+	Unavailable     bool
+	Locked          map[string]bool
+	FailOpen        error
+	FailOpenTab     error
+	OpenState       string
+	OpenError       string
+	OpenTabStarted  chan struct{}
+	OpenTabRelease  chan struct{}
+	CloseTabStarted chan struct{}
+	CloseTabRelease chan struct{}
+	FailCloseTab    error
+	OpenCalls       int
+	CloseCalls      int
+	Sessions        map[string]*session
+	nextID          int
+	Now             func() time.Time
 }
 
 func New() *FakeHost {
@@ -208,13 +211,30 @@ func (f *FakeHost) Snapshot(_ context.Context, profileID, sessionID, tabID strin
 
 func (f *FakeHost) CloseTab(_ context.Context, profileID, sessionID, tabID string) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	value, err := f.sessionLocked(profileID, sessionID)
 	if err != nil {
+		f.mu.Unlock()
 		return err
 	}
 	if _, ok := value.tabs[tabID]; !ok {
+		f.mu.Unlock()
 		return &browser.Error{Code: "browser_tab_not_found", Message: "no tab", Status: http.StatusNotFound}
+	}
+	started, release, failure := f.CloseTabStarted, f.CloseTabRelease, f.FailCloseTab
+	f.mu.Unlock()
+	if started != nil {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+	}
+	if release != nil {
+		<-release
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if failure != nil {
+		return failure
 	}
 	delete(value.tabs, tabID)
 	return nil

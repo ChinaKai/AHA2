@@ -768,7 +768,10 @@ func (s *Service) RevokeGrant(ctx context.Context, actor, id string) (GrantView,
 		return GrantView{}, err
 	}
 	if grant.RevokedAt.IsZero() {
-		s.closeGrantTabs(ctx, actor, grant, "revoked")
+		// Revoke in the database before touching host tabs. While CloseTab is
+		// slow, a concurrent OpenTab must already see the grant as revoked; the
+		// guarded tab insert then refuses it. Closing tabs first left a window
+		// where a new tab could be inserted after the tab list was read.
 		if err := s.store.RevokeBrowserTaskGrant(ctx, grant.ID, s.now()); err != nil {
 			if !errors.Is(err, sql.ErrNoRows) {
 				return GrantView{}, err
@@ -781,6 +784,9 @@ func (s *Service) RevokeGrant(ctx context.Context, actor, id string) (GrantView,
 		}
 		grant, _ = s.store.BrowserTaskGrant(ctx, grant.ID)
 	}
+	// Clean up any tab records even when the grant was already revoked; this is
+	// also the retry path after a host CloseTab failure.
+	s.closeGrantTabs(ctx, actor, grant, "revoked")
 	return s.grantView(ctx, grant), nil
 }
 
@@ -1001,6 +1007,10 @@ func (s *Service) NavigateTab(ctx context.Context, actor, grantID, tabID, target
 	}
 	tab.Title = hostTab.Title
 	if err := s.store.UpdateBrowserTab(ctx, *tab); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// A concurrent revoke/close removed the tab after the host call.
+			return domain.BrowserTab{}, s.inactiveAccessError(ctx, grant.ID)
+		}
 		return domain.BrowserTab{}, err
 	}
 	s.touchSession(ctx, session)

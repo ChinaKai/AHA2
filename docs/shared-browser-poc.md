@@ -44,9 +44,10 @@ Task 授权：
   部分唯一索引是数据库兜底；并发创建始终只保留一个 active grant，重复撤销幂等。
 - 标签页插入使用 `CreateBrowserTabForActiveGrant` 事务：host 调用返回后，只有
   grant 仍 active、session 未关闭且仍是 profile 当前会话时才写 `browser_tabs`；
-  失败会关闭刚创建的 host tab。`touchSession` 只更新 `last_used_at`，不会覆盖
-  并发关闭写入的 `state/closed_at`。
-- v148 迁移按 `julianday()` 比较去重（RFC3339Nano 字符串词法顺序不可靠），删除
+  失败会关闭刚创建的 host tab。撤销授权时先写 `revoked_at`，再关闭/清理 tab，
+  因此 host 的 `CloseTab` 再慢，并发的 `OpenTab` 也已经无法插入。`touchSession`
+  只更新 `last_used_at`，不会覆盖并发关闭写入的 `state/closed_at`。
+- v148 迁移在 Go 中用 `parseTime` 的纳秒精度比较去重（RFC3339Nano 字符串词法顺序不可靠），删除
   已撤销 grant 的 AHA tab 记录；host 中可能残留的可见页面需等会话关闭。v148
   只前进：旧版本不认识唯一索引，回滚需先删除索引。
 - `GET/DELETE /api/v1/browser-grants/{id}`
