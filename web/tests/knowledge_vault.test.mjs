@@ -794,6 +794,63 @@ test("the gear dialog reports automatic index health without a rebuild action", 
   assert.doesNotMatch(html, /id="kv-settings-rebuild"/);
 });
 
+test("the gear dialog shows auto-sync state and sanitized blocked files", () => {
+  const blockedPath = "global/agent-lessons/technical-diagnostics/serial-hardware-board/device-report-visibility-log-branch-and-queue.md";
+  const settings = {
+    enabled: true, source: "database", vault_ready: true, vault_initialized: true,
+    index_ready: true, vault_path: "/srv/vault", index_path: "/srv/index.db", entry_count: 5,
+    auto_sync: {
+      enabled: true, running: false, paused: true, pause_reason: "preflight_failed",
+      conflict: false,
+      last_error: `有 1 个改动无法自动提交（二进制/密钥/超大文件）；preflight 已暂停并保留现场。受阻文件：${blockedPath}(secret)`,
+      pending: 1, blocked: 1,
+      blocked_files: [{path: blockedPath, reason: "secret"}],
+      preflight_done: false,
+    },
+  };
+  reset({settingsState: "ready", settings});
+  let html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /id="kv-autosync-title">自动同步/);
+  assert.match(html, /id="kv-auto-sync"[^>]*checked/);
+  assert.match(html, /行尾迁移 preflight 失败/);
+  assert.match(html, /最近错误/);
+  assert.match(html, /device-report-visibility-log-branch-and-queue\.md \(密钥或凭据\)/);
+  assert.doesNotMatch(html, /knowledge-vault-auto-sync/, "the advanced panel must not offer a second switch");
+
+  reset({settingsState: "ready", settings: {...settings, auto_sync: {...settings.auto_sync, blocked: 3, blocked_files: []}}});
+  html = vault.renderKnowledgeVaultPage(context());
+  assert.match(html, /3 个（旧状态未记录路径/);
+});
+
+test("the auto-sync switch calls the dedicated status API", async () => {
+  const autoSync = {
+    enabled: true, running: false, paused: false, conflict: false,
+    pending: 0, blocked: 0, preflight_done: true,
+  };
+  const settings = {
+    enabled: true, source: "database", vault_ready: true, vault_initialized: true,
+    index_ready: true, vault_path: "/srv/vault", index_path: "/srv/index.db", entry_count: 5,
+    auto_sync: autoSync,
+  };
+  reset({settingsState: "ready", settings});
+  const calls = [];
+  const original = api.updateKnowledgeVaultAutoSync;
+  api.updateKnowledgeVaultAutoSync = async enabled => {
+    calls.push(enabled);
+    return {ok: true, settings: {...settings, auto_sync: {...autoSync, enabled}}};
+  };
+  try {
+    await vault.__setVaultAutoSyncForTest(false);
+  } finally {
+    api.updateKnowledgeVaultAutoSync = original;
+  }
+  assert.deepEqual(calls, [false]);
+  const state = vault.__getKnowledgeVaultStateForTest();
+  assert.equal(state.settings.auto_sync.enabled, false);
+  assert.equal(state.autoSyncBusy, false);
+  assert.equal(state.autoSyncNotice.kind, "notice");
+});
+
 test("a settings load failure is explicit and retryable without breaking the dialog", () => {
   reset({settingsState: "error", settingsError: "network down"});
   const html = vault.renderKnowledgeVaultPage(context());

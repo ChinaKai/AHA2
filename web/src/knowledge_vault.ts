@@ -121,7 +121,50 @@ const localText: Record<string, [zhCN: string, enUS: string]> = {
   "kv.gitSyncing": ["同步中…", "Syncing…"],
   "kv.gitUnavailable": ["当前环境没有可用的 git 命令，Git 管理已禁用。", "Git is not available in this environment; Git management is disabled."],
   "kv.gitLoadFailed": ["读取 Git 状态失败", "Failed to read Git status"],
-  "kv.gitHint": ["仅支持 SSH remote，使用系统 SSH agent 或默认密钥；Web 不保存密码或 token。所有同步均为手动操作，拉取只做 fast-forward，分叉时停止而不会合并或强推。", "SSH remotes only, using your system SSH agent or default key; the Web UI never stores passwords or tokens. Every sync is manual, pulls are fast-forward only, and divergence stops instead of merging or force pushing."],
+  "kv.gitHint": ["仅支持 SSH remote，使用系统 SSH agent 或默认密钥；Web 不保存密码或 token。上方按钮是手动操作，拉取只做 fast-forward，分叉时停止而不会合并或强推；自动同步在下方单独开关。", "SSH remotes only, using your system SSH agent or default key; the Web UI never stores passwords or tokens. The buttons above are manual; pulls are fast-forward only and divergence stops instead of merging or force pushing. Auto-sync has its own switch below."],
+  "kv.autoSyncTitle": ["自动同步", "Auto-sync"],
+  "kv.autoSyncHint": ["自动提交、拉取和推送 vault 里的文本改动，与上面的手动 Git 按钮相互独立。外部编辑安静 30 秒后自动提交，AHA 写入立即提交。", "Automatically commit, pull and push text changes in the vault, independent of the manual Git buttons above. External edits commit after 30 quiet seconds; AHA writes commit immediately."],
+  "kv.autoSyncSwitch": ["自动提交、拉取和推送", "Auto commit, pull and push"],
+  "kv.autoSyncOn": ["已开启", "On"],
+  "kv.autoSyncOff": ["已关闭", "Off"],
+  "kv.autoSyncPaused": ["已暂停", "Paused"],
+  "kv.autoSyncConflict": ["冲突", "Conflict"],
+  "kv.autoSyncBusy": ["保存中…", "Saving…"],
+  "kv.autoSyncEnabledNotice": ["自动同步已开启", "Auto-sync enabled"],
+  "kv.autoSyncDisabledNotice": ["自动同步已关闭；手动 Git 操作仍可用", "Auto-sync disabled; manual Git actions still work"],
+  "kv.autoSyncFailedNotice": ["切换自动同步失败：{error}", "Failed to change auto-sync: {error}"],
+  "kv.autoSyncUnavailable": ["当前服务没有返回自动同步状态，无法在这里开关。", "This server did not report auto-sync status, so it cannot be switched here."],
+  "kv.autoSyncLoading": ["正在读取自动同步状态…", "Reading auto-sync status…"],
+  "kv.loadTimeout": ["加载超时，请重试", "Loading timed out; try again"],
+  "kv.autoSyncPauseReason": ["暂停原因", "Pause reason"],
+  "kv.autoSyncLastError": ["最近错误", "Last error"],
+  "kv.autoSyncWarning": ["同步警告", "Sync warning"],
+  "kv.autoSyncPending": ["待提交文件", "Pending files"],
+  "kv.autoSyncLastSync": ["最后同步", "Last sync"],
+  "kv.autoSyncNever": ["尚未同步", "Never synced"],
+  "kv.autoSyncNone": ["无", "None"],
+  "kv.autoSyncBlocked": ["被阻止文件", "Blocked files"],
+  "kv.autoSyncBlockedValue": ["{count} 个：{files}", "{count}: {files}"],
+  "kv.autoSyncBlockedNoPaths": ["{count} 个（旧状态未记录路径，下次检查会补齐）", "{count} (old state has no paths; the next check fills them in)"],
+  "kv.autoSyncReason.preflight_failed": ["行尾迁移 preflight 失败", "Line-ending preflight failed"],
+  "kv.autoSyncReason.vault_not_initialized": ["知识库未初始化", "Vault not initialized"],
+  "kv.autoSyncReason.not_git_repository": ["知识库不是 Git 仓库", "Vault is not a Git repository"],
+  "kv.autoSyncReason.no_commit": ["仓库还没有提交", "Repository has no commit"],
+  "kv.autoSyncReason.conflict": ["远端分叉", "Remote divergence"],
+  "kv.autoSyncReason.unmerged": ["工作区有未解决冲突", "Unresolved worktree conflict"],
+  "kv.autoSyncReason.pull_failed": ["拉取失败", "Pull failed"],
+  "kv.autoSyncReason.push_failed": ["推送失败", "Push failed"],
+  "kv.autoSyncReason.push_rejected": ["推送被拒绝", "Push rejected"],
+  "kv.autoSyncReason.scan_failed": ["读取工作区失败", "Worktree scan failed"],
+  "kv.autoSyncReason.commit_failed": ["自动提交失败", "Auto commit failed"],
+  "kv.blockedReason.binary": ["二进制", "binary"],
+  "kv.blockedReason.secret": ["密钥或凭据", "credential-like content"],
+  "kv.blockedReason.too_large": ["超过 1MB", "over 1MB"],
+  "kv.blockedReason.symlink": ["符号链接", "symlink"],
+  "kv.blockedReason.not_regular": ["特殊文件", "special file"],
+  "kv.blockedReason.invalid_path": ["路径无效", "invalid path"],
+  "kv.blockedReason.unreadable": ["无法读取", "unreadable"],
+  "kv.blockedReason.unmerged": ["未解决冲突", "unmerged"],
   "kv.sidebarCollapse": ["收起目录栏", "Collapse contents sidebar"],
   "kv.sidebarExpand": ["展开目录栏", "Expand contents sidebar"],
   "kv.resizeSidebar": ["调整目录栏宽度", "Resize contents sidebar"],
@@ -173,6 +216,16 @@ const GIT_STYLES = `
 .kv-git-commit-label { grid-column: 1 / span 2; }
 #kv-git-commit { grid-column: 3; }
 .kv-git-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: var(--space-2); }
+.kv-autosync-head { margin-top: var(--space-2); }
+.kv-settings-badge { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: var(--radius-pill); background: var(--color-surface-muted); color: var(--color-text-muted); font-size: 10px; font-weight: 700; white-space: nowrap; }
+.kv-settings-badge.is-ok { background: var(--color-success-soft); color: var(--color-success-ink); }
+.kv-settings-badge.is-warn { background: var(--color-warning-soft); color: var(--color-warning-ink); }
+.kv-settings-badge.is-bad { background: var(--color-danger-soft); color: var(--color-danger-ink); }
+.kv-autosync-toggle { display: flex; align-items: flex-start; gap: 8px; margin-top: var(--space-2); font-size: var(--font-size-13); }
+.kv-autosync-toggle input { flex: 0 0 auto; margin-top: 3px; cursor: pointer; }
+.kv-autosync-toggle input:disabled { cursor: progress; }
+.kv-autosync-toggle small { display: block; margin-top: 2px; color: var(--color-text-muted); font-size: var(--font-size-12); line-height: 1.5; }
+.kv-autosync dl { margin-top: var(--space-2); }
 .kv-settings-copy { display: flex; align-items: flex-start; gap: 6px; }
 .kv-settings-copy > span { min-width: 0; overflow-wrap: anywhere; }
 .kv-settings-copy .kv-copy { flex: 0 0 auto; }
@@ -542,6 +595,8 @@ interface VaultState {
   gitRemoteDraft: string;
   gitBranchDraft: string;
   gitCommitDraft: string;
+  autoSyncBusy: boolean;
+  autoSyncNotice: {kind: "notice" | "error"; message: string} | null;
   mobilePane: MobilePane;
   listScroll: number;
   docScroll: number;
@@ -642,6 +697,7 @@ function initialState(): VaultState {
     settingsOpen: false, settingsState: "idle", settings: null, settingsError: "",
     gitState: "idle", git: null, gitError: "", gitBusy: "", gitNotice: null,
     gitRemoteDraft: "", gitBranchDraft: "", gitCommitDraft: "",
+    autoSyncBusy: false, autoSyncNotice: null,
     mobilePane: "list", listScroll: 0, docScroll: 0, pendingSearch: 0,
     sidebarWidth: initialSidebarWidth(), sidebarCollapsed: readStoredSidebarCollapsed(),
   };
@@ -1906,6 +1962,7 @@ function settingsDialogHTML(): string {
     </dl>
     ${settingsError}
     ${gitSectionHTML()}
+    ${autoSyncSectionHTML()}
     <p class="kv-hint">${t("kv.settingsHint")}</p>
     <footer><button type="button" data-kv-settings-close>${t("kv.close")}</button></footer>
   </dialog>`;
@@ -1923,13 +1980,25 @@ function applyVaultSettings(settings: KnowledgeVaultSettings): void {
   state.rebuiltAt = settings.rebuilt_at || "";
 }
 
+// The gear dialog must never spin forever. A stalled request becomes an
+// explicit error with the retry button instead of an endless loading row.
+function withTimeout<T>(promise: Promise<T>, milliseconds: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), milliseconds);
+    promise.then(
+      value => { clearTimeout(timer); resolve(value); },
+      error => { clearTimeout(timer); reject(error); },
+    );
+  });
+}
+
 async function loadVaultSettings(): Promise<void> {
   if (state.settingsState === "loading") return;
   state.settingsState = "loading";
   state.settingsError = "";
   rerender();
   try {
-    const result = await api.knowledgeVaultSettings();
+    const result = await withTimeout(api.knowledgeVaultSettings(), 12000, kt("kv.loadTimeout"));
     applyVaultSettings(result.settings);
   } catch (error) {
     state.settingsState = "error";
@@ -1947,8 +2016,13 @@ function reopenSettingsDialog(): void {
 
 function openSettingsDialog(): void {
   state.settingsOpen = true;
+  // A toggle notice belongs to one dialog session; never replay it on reopen.
+  state.autoSyncNotice = null;
   rerender();
-  if (state.settingsState === "idle" || state.settingsState === "error") void loadVaultSettings();
+  // Always refresh the snapshot: the gear dialog is the single auto-sync
+  // entry, so pause reason, last error and blocked files must not be a
+  // page-load memory.
+  void loadVaultSettings();
   void loadVaultGitStatus();
   requestAnimationFrame(reopenSettingsDialog);
 }
@@ -2054,6 +2128,76 @@ function gitSectionHTML(): string {
   </section>`;
 }
 
+function autoSyncPauseReasonLabel(reason?: string): string {
+  if (!reason) return "";
+  const key = `kv.autoSyncReason.${reason}`;
+  const label = kt(key);
+  return label && label !== key ? label : reason;
+}
+
+function blockedReasonLabel(reason: string): string {
+  const key = `kv.blockedReason.${reason}`;
+  const label = kt(key);
+  return label && label !== key ? label : reason;
+}
+
+// The gear dialog is the single auto-sync entry. It reads the same status the
+// settings API already returns, so the switch, pause reason, last error and the
+// sanitized blocked path/reason list stay next to the manual Git actions.
+function autoSyncSectionHTML(): string {
+  const auto = state.settings?.auto_sync;
+  let body = "";
+  if (state.settingsState === "loading" && !state.settings) {
+    body = `<p class="kv-hint" role="status">${kt("kv.autoSyncLoading")}</p>`;
+  } else if (!auto) {
+    body = `<p class="kv-hint">${kt("kv.autoSyncUnavailable")}</p>`;
+  } else {
+    const badge = auto.conflict
+      ? {label: kt("kv.autoSyncConflict"), tone: "is-bad"}
+      : !auto.enabled
+        ? {label: kt("kv.autoSyncOff"), tone: ""}
+        : auto.paused
+          ? {label: kt("kv.autoSyncPaused"), tone: "is-warn"}
+          : {label: kt("kv.autoSyncOn"), tone: "is-ok"};
+    const disabled = state.autoSyncBusy ? " disabled" : "";
+    const notice = state.autoSyncNotice
+      ? `<p class="kv-settings-notice ${state.autoSyncNotice.kind === "error" ? "error" : "success"}" role="${state.autoSyncNotice.kind === "error" ? "alert" : "status"}">${escapeVaultHTML(state.autoSyncNotice.message)}</p>`
+      : "";
+    const pauseReason = auto.paused && auto.pause_reason
+      ? `<div><dt>${kt("kv.autoSyncPauseReason")}</dt><dd class="kv-settings-value">${escapeVaultHTML(autoSyncPauseReasonLabel(auto.pause_reason))}</dd></div>`
+      : "";
+    const lastError = auto.last_error
+      ? `<div><dt>${kt("kv.autoSyncLastError")}</dt><dd class="kv-settings-value">${escapeVaultHTML(auto.last_error)}</dd></div>`
+      : "";
+    const warning = auto.warning
+      ? `<div><dt>${kt("kv.autoSyncWarning")}</dt><dd class="kv-settings-value">${escapeVaultHTML(auto.warning)}</dd></div>`
+      : "";
+    const blockedFiles = auto.blocked_files ?? [];
+    const blockedTotal = auto.blocked || blockedFiles.length;
+    const blocked = blockedTotal > 0
+      ? `<div><dt>${kt("kv.autoSyncBlocked")}</dt><dd class="kv-settings-value">${blockedFiles.length
+        ? kt("kv.autoSyncBlockedValue", {
+          count: blockedTotal,
+          files: escapeVaultHTML(blockedFiles.slice(0, 5).map(item => `${item.path} (${blockedReasonLabel(item.reason)})`).join("、")),
+        })
+        : kt("kv.autoSyncBlockedNoPaths", {count: blockedTotal})}</dd></div>`
+      : "";
+    const lastSync = auto.last_sync_at ? safeDateTime(auto.last_sync_at) : kt("kv.autoSyncNever");
+    body = `<div class="kv-autosync-head"><span class="kv-settings-badge ${badge.tone}">${badge.label}</span></div>
+      <label class="kv-autosync-toggle"><input id="kv-auto-sync" name="knowledge_vault_auto_sync" type="checkbox" ${auto.enabled ? "checked" : ""}${disabled}><span><strong>${state.autoSyncBusy ? kt("kv.autoSyncBusy") : kt("kv.autoSyncSwitch")}</strong><small>${kt("kv.autoSyncHint")}</small></span></label>
+      <dl>
+        <div><dt>${kt("kv.autoSyncLastSync")}</dt><dd class="kv-settings-value">${escapeVaultHTML(lastSync)}</dd></div>
+        <div><dt>${kt("kv.autoSyncPending")}</dt><dd class="kv-settings-value">${auto.pending ?? 0}</dd></div>
+        ${pauseReason}${lastError}${warning}${blocked}
+      </dl>
+      ${notice}`;
+  }
+  return `<section class="kv-settings-section kv-autosync" aria-labelledby="kv-autosync-title">
+    <h3 id="kv-autosync-title">${kt("kv.autoSyncTitle")}</h3>
+    ${body}
+  </section>`;
+}
+
 function applyGitStatus(git: KnowledgeVaultGitStatus): void {
   state.git = git;
   state.gitState = "ready";
@@ -2070,13 +2214,38 @@ async function loadVaultGitStatus(): Promise<void> {
   state.gitError = "";
   rerender();
   try {
-    const result = await knowledgeVaultGitRequest("status");
+    const result = await withTimeout(knowledgeVaultGitRequest("status"), 12000, kt("kv.loadTimeout"));
     applyGitStatus(result.git);
   } catch (error) {
     state.gitState = "error";
     state.gitError = error instanceof Error ? error.message : String(error);
   }
   rerender();
+}
+
+async function setVaultAutoSync(enabled: boolean): Promise<void> {
+  if (state.autoSyncBusy) return;
+  state.autoSyncBusy = true;
+  state.autoSyncNotice = null;
+  rerender();
+  try {
+    // The PUT answers with the live settings payload, so the switch, pause
+    // reason and blocked files all refresh from one authoritative response.
+    const result = await withTimeout(api.updateKnowledgeVaultAutoSync(enabled), 12000, kt("kv.loadTimeout"));
+    applyVaultSettings(result.settings);
+    state.autoSyncNotice = {
+      kind: "notice",
+      message: kt(enabled ? "kv.autoSyncEnabledNotice" : "kv.autoSyncDisabledNotice"),
+    };
+  } catch (error) {
+    state.autoSyncNotice = {
+      kind: "error",
+      message: kt("kv.autoSyncFailedNotice", {error: error instanceof Error ? error.message : String(error)}),
+    };
+  } finally {
+    state.autoSyncBusy = false;
+    rerender();
+  }
 }
 
 async function runGitOperation(kind: Exclude<GitBusy, "">, action: () => Promise<{git: KnowledgeVaultGitStatus; message?: string}>): Promise<void> {
@@ -3098,6 +3267,9 @@ export function bindKnowledgeVaultPage(context: KnowledgeVaultContext): void {
   settingsDialog?.addEventListener("close", handleSettingsDialogDismissed);
   root.querySelector<HTMLButtonElement>("[data-kv-settings-retry]")?.addEventListener("click", () => { void loadVaultSettings(); });
   root.querySelector<HTMLButtonElement>("[data-kv-git-retry]")?.addEventListener("click", () => { void loadVaultGitStatus(); });
+  root.querySelector<HTMLInputElement>("#kv-auto-sync")?.addEventListener("change", event => {
+    void setVaultAutoSync((event.target as HTMLInputElement).checked);
+  });
   root.querySelector<HTMLButtonElement>("#kv-git-init")?.addEventListener("click", () => { void initializeVaultGit(); });
   root.querySelector<HTMLButtonElement>("#kv-git-remote-save")?.addEventListener("click", () => { void saveVaultGitRemote(); });
   root.querySelector<HTMLButtonElement>("#kv-git-commit")?.addEventListener("click", () => { void commitVaultGit(); });
@@ -3318,6 +3490,7 @@ export function __getKnowledgeVaultStateForTest(): VaultState {
   return state;
 }
 
+export const __setVaultAutoSyncForTest = setVaultAutoSync;
 export const __loadTreeForTest = loadTree;
 export const __loadRecentForTest = loadRecent;
 export const __loadInboxForTest = loadInbox;

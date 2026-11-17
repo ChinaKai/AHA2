@@ -43,6 +43,51 @@ type BlockedChange struct {
 	Reason string `json:"reason"`
 }
 
+// normalizeBlockedChanges returns the defensive copy used for status and the
+// persisted auto-sync state. Paths go through sanitizeCommitPath so a newline in
+// a file name cannot forge extra log/state records, and reasons are restricted
+// to the stable machine-key alphabet so a hand-edited state file cannot inject
+// arbitrary copy. The reported list stays capped; total keeps the real count.
+func normalizeBlockedChanges(blocked []BlockedChange, total int) ([]BlockedChange, int) {
+	if len(blocked) > maxAutoCommitBlockedReport {
+		blocked = blocked[:maxAutoCommitBlockedReport]
+	}
+	result := make([]BlockedChange, 0, len(blocked))
+	seen := make(map[string]bool, len(blocked))
+	for _, item := range blocked {
+		path := sanitizeCommitPath(item.Path)
+		if seen[path] {
+			continue
+		}
+		seen[path] = true
+		result = append(result, BlockedChange{Path: path, Reason: sanitizeBlockedReason(item.Reason)})
+	}
+	if total < len(result) {
+		total = len(result)
+	}
+	return result, total
+}
+
+// sanitizeBlockedReason keeps only [a-z0-9_]; anything else (including a
+// localized or hand-edited value) collapses to "unknown" rather than flowing
+// into the API, the state file or a log line.
+func sanitizeBlockedReason(reason string) string {
+	reason = strings.ToLower(strings.TrimSpace(reason))
+	if reason == "" {
+		return "unknown"
+	}
+	var builder strings.Builder
+	for _, char := range reason {
+		if (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') || char == '_' {
+			builder.WriteRune(char)
+		}
+	}
+	if builder.Len() == 0 || builder.Len() > 40 {
+		return "unknown"
+	}
+	return builder.String()
+}
+
 // AutoCommitScan is the read-only view used both by the syncer's quiet-period
 // detection and by the settings status. Eligible is already capped to one
 // batch; Pending counts every changed path git reported, blocked ones included.

@@ -118,16 +118,19 @@ type autoSyncState struct {
 }
 
 type autoSyncStateFile struct {
-	PreflightVersion   int    `json:"preflight_version"`
-	LastSyncAt         string `json:"last_sync_at,omitempty"`
-	LastCommitAt       string `json:"last_commit_at,omitempty"`
-	LastCommit         string `json:"last_commit,omitempty"`
-	LastError          string `json:"last_error,omitempty"`
-	Warning            string `json:"warning,omitempty"`
-	PauseReason        string `json:"pause_reason,omitempty"`
-	ConflictKey        string `json:"conflict_key,omitempty"`
-	ConflictDetail     string `json:"conflict_detail,omitempty"`
-	ConflictEmittedKey string `json:"conflict_emitted_key,omitempty"`
+	PreflightVersion   int             `json:"preflight_version"`
+	LastSyncAt         string          `json:"last_sync_at,omitempty"`
+	LastCommitAt       string          `json:"last_commit_at,omitempty"`
+	LastCommit         string          `json:"last_commit,omitempty"`
+	LastError          string          `json:"last_error,omitempty"`
+	Warning            string          `json:"warning,omitempty"`
+	PauseReason        string          `json:"pause_reason,omitempty"`
+	Pending            int             `json:"pending,omitempty"`
+	Blocked            []BlockedChange `json:"blocked_files,omitempty"`
+	BlockedTotal       int             `json:"blocked_total,omitempty"`
+	ConflictKey        string          `json:"conflict_key,omitempty"`
+	ConflictDetail     string          `json:"conflict_detail,omitempty"`
+	ConflictEmittedKey string          `json:"conflict_emitted_key,omitempty"`
 }
 
 // Syncer owns the background loop. Manager owns the vault, Git owns the
@@ -667,14 +670,20 @@ func (s *Syncer) runPreflight(ctx context.Context) error {
 			return ErrGitUnmerged
 		}
 		if len(scan.Eligible) == 0 {
-			return fmt.Errorf("有 %d 个改动无法自动提交（二进制/密钥/超大文件）；preflight 已暂停并保留现场", scan.Pending)
+			// Keep the aggregate sentence as the stable prefix, then name the
+			// exact blocked paths and machine reason codes. The same list is
+			// copied into the syncer state so the settings status and
+			// .aha/auto-sync.json stay actionable after a restart.
+			s.applyScan(scan)
+			return fmt.Errorf("有 %d 个改动无法自动提交（二进制/密钥/超大文件）；preflight 已暂停并保留现场。%s", scan.Pending, blockedDetailText(scan.Blocked))
 		}
 		result, err := git.AutoCommit(ctx, "preflight", scan.Fingerprint)
 		if err != nil {
 			return err
 		}
 		if !result.Committed && result.Pending >= scan.Pending {
-			return fmt.Errorf("preflight 自动提交没有进展；保留现场并暂停")
+			s.applyScan(scan)
+			return fmt.Errorf("preflight 自动提交没有进展；保留现场并暂停。%s", blockedDetailText(scan.Blocked))
 		}
 	}
 	if clean, changed, err := git.isClean(ctx); err != nil {
@@ -700,6 +709,11 @@ func (s *Syncer) runPreflight(ctx context.Context) error {
 	// backup-tag creation. A later clean preflight clears it.
 	s.state.warning = sanitizeSyncDetail(renormalized.Warning)
 	s.state.preflightVersion = AutoSyncPreflightVersion
+	// Reaching this point proves the worktree is clean, so any blocked list
+	// remembered from an earlier failed attempt is stale.
+	s.state.pending = 0
+	s.state.blocked = nil
+	s.state.blockedTotal = 0
 	s.mu.Unlock()
 	s.saveState()
 	log.Printf("knowledge auto-sync preflight complete for %s", git.vaultPath)
@@ -775,21 +789,32 @@ func conflictDetail(ctx context.Context, git *Git, local, remote, branch string)
 // newline in a file name cannot forge extra log records.
 func blockedLogSummary(blocked []BlockedChange) string {
 	names := make([]string, 0, len(blocked))
-	for index, item := range blocked {
+	normalized, _ := normalizeBlockedChanges(blocked, len(blocked))
+	for index, item := range normalized {
 		if index >= 10 {
 			names = append(names, "…")
 			break
 		}
-		names = append(names, sanitizeCommitPath(item.Path)+"("+item.Reason+")")
+		names = append(names, item.Path+"("+item.Reason+")")
 	}
 	return strings.Join(names, ", ")
 }
 
+// blockedDetailText is the human-facing suffix for a preflight failure. It
+// carries paths plus the stable reason key only; file contents never appear.
+func blockedDetailText(blocked []BlockedChange) string {
+	if len(blocked) == 0 {
+		return "受阻文件：状态中没有可报告的路径"
+	}
+	return "受阻文件：" + strings.ReplaceAll(blockedLogSummary(blocked), ", ", "、")
+}
+
 func (s *Syncer) applyScan(scan AutoCommitScan) {
+	blocked, total := normalizeBlockedChanges(scan.Blocked, scan.BlockedTotal)
 	s.mu.Lock()
 	s.state.pending = scan.Pending
-	s.state.blocked = append([]BlockedChange{}, scan.Blocked...)
-	s.state.blockedTotal = scan.BlockedTotal
+	s.state.blocked = blocked
+	s.state.blockedTotal = total
 	s.mu.Unlock()
 }
 
@@ -899,6 +924,11 @@ func (s *Syncer) loadState() {
 	s.state.lastError = file.LastError
 	s.state.warning = file.Warning
 	s.state.pauseReason = file.PauseReason
+	// Old state files predate blocked_files/blocked_total; zero values keep the
+	// status usable. Values read back from disk are normalized again so a
+	// hand-edited file cannot inject control characters or free-form reasons.
+	s.state.pending = file.Pending
+	s.state.blocked, s.state.blockedTotal = normalizeBlockedChanges(file.Blocked, file.BlockedTotal)
 	s.state.paused = strings.TrimSpace(file.PauseReason) != ""
 	s.state.conflictKey = file.ConflictKey
 	s.state.conflictDetail = file.ConflictDetail
@@ -924,10 +954,14 @@ func (s *Syncer) saveState() {
 		LastError:          s.state.lastError,
 		Warning:            s.state.warning,
 		PauseReason:        s.state.pauseReason,
+		Pending:            s.state.pending,
+		Blocked:            append([]BlockedChange{}, s.state.blocked...),
+		BlockedTotal:       s.state.blockedTotal,
 		ConflictKey:        s.state.conflictKey,
 		ConflictDetail:     s.state.conflictDetail,
 		ConflictEmittedKey: s.state.conflictEmittedKey,
 	}
+	file.Blocked, file.BlockedTotal = normalizeBlockedChanges(file.Blocked, file.BlockedTotal)
 	s.mu.Unlock()
 	payload, err := json.MarshalIndent(file, "", "  ")
 	if err != nil {

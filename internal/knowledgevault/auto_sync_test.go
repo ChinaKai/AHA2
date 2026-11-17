@@ -2,6 +2,7 @@ package knowledgevault
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -347,6 +348,97 @@ func TestSyncerPreflightFailurePausesAndPreservesFiles(t *testing.T) {
 	}
 	if head := headSHA(t, config.VaultPath); head != commitBefore {
 		t.Fatalf("failed preflight committed: %s -> %s", commitBefore, head)
+	}
+}
+
+func TestSyncerPreflightFailureExposesBlockedPathReasonAndPersists(t *testing.T) {
+	ctx := context.Background()
+	config, manager := newAutoSyncTestManager(t)
+	git := manager.Git()
+	if err := os.Remove(filepath.Join(config.VaultPath, ".gitattributes")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git.Commit(ctx, "drop policy for upgrade fixture"); err != nil {
+		t.Fatal(err)
+	}
+	writeGitTestFile(t, config.VaultPath, "global/general/eligible.md", "# Eligible\n")
+	// The broad front-door pattern treats a bare token assignment as secret
+	// material. The file itself stays in the worktree; only path + rule are
+	// reported.
+	writeGitTestFile(t, config.VaultPath, "global/general/token-note.md", "# Note\n\ntoken = abcdefgh12345678\n")
+
+	syncer, settings, _ := newTestSyncer(t, manager, nil)
+	syncer.RunOnce(ctx)
+
+	status := syncer.Status()
+	if !status.Paused || status.PauseReason != "preflight_failed" {
+		t.Fatalf("unexpected preflight failure status: %+v", status)
+	}
+	if status.Blocked != 1 || len(status.BlockedFiles) != 1 {
+		t.Fatalf("blocked files not reported: %+v", status)
+	}
+	blocked := status.BlockedFiles[0]
+	if blocked.Path != "global/general/token-note.md" || blocked.Reason != "secret" {
+		t.Fatalf("blocked entry = %+v, want the token note with reason secret", blocked)
+	}
+	// The stable aggregate sentence stays as the prefix; the detail names the
+	// exact path and rule so the owner can act without reading the vault.
+	if !strings.Contains(status.LastError, "有 1 个改动无法自动提交（二进制/密钥/超大文件）") {
+		t.Fatalf("aggregate prefix lost: %q", status.LastError)
+	}
+	if !strings.Contains(status.LastError, "token-note.md") || !strings.Contains(status.LastError, "secret") {
+		t.Fatalf("last error does not name path/rule: %q", status.LastError)
+	}
+	if _, err := os.Stat(filepath.Join(config.VaultPath, "global/general/token-note.md")); err != nil {
+		t.Fatalf("blocked file was discarded: %v", err)
+	}
+	if dirty := testGitCommand(t, config.VaultPath, "status", "--porcelain", "--", "global/general/eligible.md"); dirty != "" {
+		t.Fatalf("eligible text change was not committed before the pause:\n%s", dirty)
+	}
+
+	// The state file must be actionable after a restart, not just in memory.
+	payload, err := os.ReadFile(filepath.Join(config.VaultPath, stateDirectory, AutoSyncStateFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved autoSyncStateFile
+	if err := json.Unmarshal(payload, &saved); err != nil {
+		t.Fatalf("auto-sync state is not JSON: %v\n%s", err, payload)
+	}
+	if saved.PauseReason != "preflight_failed" || saved.BlockedTotal != 1 || len(saved.Blocked) != 1 {
+		t.Fatalf("persisted blocked state = %+v", saved)
+	}
+	if saved.Blocked[0].Path != "global/general/token-note.md" || saved.Blocked[0].Reason != "secret" {
+		t.Fatalf("persisted blocked entry = %+v", saved.Blocked[0])
+	}
+
+	reloaded := NewSyncer(manager, settings, SyncerConfig{Now: newTestClock().Now})
+	restored := reloaded.Status()
+	if !restored.Paused || restored.PauseReason != "preflight_failed" {
+		t.Fatalf("reloaded pause state = %+v", restored)
+	}
+	if restored.Blocked != 1 || len(restored.BlockedFiles) != 1 || restored.BlockedFiles[0].Reason != "secret" {
+		t.Fatalf("reloaded blocked state = %+v", restored)
+	}
+}
+
+func TestSyncerLoadsLegacyStateWithoutBlockedFields(t *testing.T) {
+	config, manager := newAutoSyncTestManager(t)
+	statePath := filepath.Join(config.VaultPath, stateDirectory, AutoSyncStateFile)
+	legacy := []byte("{\n  \"preflight_version\": 0,\n  \"pause_reason\": \"preflight_failed\",\n  \"last_error\": \"有 1 个改动无法自动提交（二进制/密钥/超大文件）；preflight 已暂停并保留现场\"\n}\n")
+	if err := os.WriteFile(statePath, legacy, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	syncer := NewSyncer(manager, nil, SyncerConfig{Now: newTestClock().Now})
+	status := syncer.Status()
+	if !status.Paused || status.PauseReason != "preflight_failed" {
+		t.Fatalf("legacy state did not load: %+v", status)
+	}
+	if status.Blocked != 0 || len(status.BlockedFiles) != 0 || status.Pending != 0 {
+		t.Fatalf("legacy state invented blocked fields: %+v", status)
+	}
+	if !strings.Contains(status.LastError, "有 1 个改动无法自动提交") {
+		t.Fatalf("legacy last_error lost: %q", status.LastError)
 	}
 }
 
