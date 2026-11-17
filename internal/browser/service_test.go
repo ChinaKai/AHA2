@@ -1296,6 +1296,117 @@ func TestReleaseFailsClosedWhenFenceCannotBeInstalled(t *testing.T) {
 	<-closeResult
 }
 
+func TestReleaseFailsClosedWhenHostUnreachableOrTimesOut(t *testing.T) {
+	for _, hostCode := range []string{"browser_host_unavailable", "browser_host_timeout"} {
+		t.Run(hostCode, func(t *testing.T) {
+			ctx := context.Background()
+			f := newFixture(t)
+			profile := createProfile(t, f)
+			grant, err := f.service.CreateGrant(ctx, "owner", f.task.ID, profile.ID, nil, time.Hour)
+			if err != nil {
+				t.Fatal(err)
+			}
+			status := http.StatusServiceUnavailable
+			if hostCode == "browser_host_timeout" {
+				status = http.StatusGatewayTimeout
+			}
+			f.host.FailSession = &browser.Error{Code: hostCode, Message: "host cannot be reached", Status: status}
+			if _, err := f.service.RevokeGrant(ctx, "owner", grant.ID); err == nil {
+				t.Fatal("release reported success while the host could not be reached")
+			} else if browser.Code(err) != hostCode {
+				t.Fatalf("release error=%v, want %s", err, hostCode)
+			}
+			still, err := f.service.Grant(ctx, grant.ID)
+			if err != nil || still.Status != domain.BrowserGrantStatusActive {
+				t.Fatalf("lease must remain active after a failed release: %#v err=%v", still, err)
+			}
+			// The Owner can retry once the host is reachable again.
+			f.host.FailSession = nil
+			released, err := f.service.RevokeGrant(ctx, "owner", grant.ID)
+			if err != nil || released.Status != domain.BrowserGrantStatusRevoked {
+				t.Fatalf("retry release=%#v err=%v", released, err)
+			}
+		})
+	}
+}
+
+func TestReleaseAfterHostRecoveryStillFencesInFlightClose(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	profile := createProfile(t, f)
+	grant, err := f.service.CreateGrant(ctx, "owner", f.task.ID, profile.ID, nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.host.SetCurrentPages(profile.ID, []browser.HostTab{
+		{ID: "host-page-owner", URL: "https://owner.example/work", Title: "Work", Active: true},
+	})
+	tabs, err := f.service.SyncTabs(ctx, grant.ID)
+	if err != nil || len(tabs) != 1 {
+		t.Fatalf("tabs=%#v err=%v", tabs, err)
+	}
+	closeStarted := make(chan struct{}, 1)
+	closeRelease := make(chan struct{})
+	f.host.CloseTabStarted = closeStarted
+	f.host.CloseTabRelease = closeRelease
+	f.host.CloseTabGateTabID = tabs[0].HostTabID
+	closeResult := make(chan error, 1)
+	go func() {
+		closeResult <- f.service.CloseTab(ctx, "owner", grant.ID, tabs[0].ID)
+	}()
+	<-closeStarted
+	f.host.FailSession = &browser.Error{Code: "browser_host_unavailable", Message: "down", Status: http.StatusServiceUnavailable}
+	if _, err := f.service.RevokeGrant(ctx, "owner", grant.ID); err == nil {
+		t.Fatal("release succeeded while the host was unreachable")
+	}
+	f.host.FailSession = nil
+	released := make(chan error, 1)
+	go func() {
+		_, releaseErr := f.service.RevokeGrant(ctx, "owner", grant.ID)
+		released <- releaseErr
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		current, grantErr := f.service.Grant(ctx, grant.ID)
+		if grantErr == nil && current.Status == domain.BrowserGrantStatusRevoked {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("release did not install the released fence")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(closeRelease)
+	if err := <-closeResult; browser.Code(err) != "browser_fence_stale" {
+		t.Fatalf("old close after recovered release returned %v", err)
+	}
+	if err := <-released; err != nil {
+		t.Fatalf("retry release: %v", err)
+	}
+	if pages, err := f.host.ListTabs(ctx, profile.ID, grant.Session.HostSessionID); err != nil || len(pages) != 1 {
+		t.Fatalf("released page disappeared: %#v err=%v", pages, err)
+	}
+}
+
+func TestExplicitMissingHostSessionAllowsDatabaseOnlyRelease(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	profile := createProfile(t, f)
+	grant, err := f.service.CreateGrant(ctx, "owner", f.task.ID, profile.ID, nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An explicit 404 proves there is no execution endpoint left to fence.
+	f.host.FailSession = &browser.Error{Code: "browser_session_not_found", Message: "no session", Status: http.StatusNotFound}
+	released, err := f.service.RevokeGrant(ctx, "owner", grant.ID)
+	if err != nil {
+		t.Fatalf("explicit missing session must allow DB-only release: %v", err)
+	}
+	if released.Status != domain.BrowserGrantStatusRevoked {
+		t.Fatalf("grant status=%s, want revoked", released.Status)
+	}
+}
+
 func TestIdempotentAcquireRefreshesFenceExpiry(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)

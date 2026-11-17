@@ -50,6 +50,7 @@ type FakeHost struct {
 	FailActivate      error
 	FailBookmarks     error
 	FailSetFence      error
+	FailSession       error
 	BookmarkList      []browser.HostBookmark
 	Sessions          map[string]*session
 	nextID            int
@@ -159,6 +160,9 @@ func (f *FakeHost) Session(_ context.Context, profileID string) (browser.HostSes
 	defer f.mu.Unlock()
 	if f.Unavailable {
 		return browser.HostSession{}, f.unavailable()
+	}
+	if f.FailSession != nil {
+		return browser.HostSession{}, f.FailSession
 	}
 	value, ok := f.Sessions[profileID]
 	if !ok {

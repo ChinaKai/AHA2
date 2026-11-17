@@ -497,6 +497,43 @@ func TestProfileExclusiveLeaseConflictReleaseAndTransferOverHTTP(t *testing.T) {
 	}
 }
 
+func TestReleaseOverHTTPFailsClosedWhenHostUnreachable(t *testing.T) {
+	host := browsertest.New()
+	f := newBrowserAPIFixture(t, host)
+	_, payload := f.do(t, http.MethodPost, "/api/v1/browser/profiles", map[string]any{"name": "Work"})
+	profileID := payload["profile"].(map[string]any)["id"].(string)
+	response, payload := f.do(t, http.MethodPost, "/api/v1/tasks/"+f.task.ID+"/browser-grants", map[string]any{"profile_id": profileID})
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("lease: %d %#v", response.StatusCode, payload)
+	}
+	grantID := payload["grant"].(map[string]any)["id"].(string)
+
+	host.FailSession = &browser.Error{
+		Code: "browser_host_unavailable", Message: "host down", Status: http.StatusServiceUnavailable,
+	}
+	response, payload = f.do(t, http.MethodDelete, "/api/v1/browser-grants/"+grantID, nil)
+	if response.StatusCode != http.StatusServiceUnavailable || payload["error"] != "browser_host_unavailable" {
+		t.Fatalf("unreachable release must fail: %d %#v", response.StatusCode, payload)
+	}
+	response, payload = f.do(t, http.MethodGet, "/api/v1/browser-grants/"+grantID, nil)
+	if response.StatusCode != http.StatusOK || payload["grant"].(map[string]any)["status"] != "active" {
+		t.Fatalf("lease after failed release: %d %#v", response.StatusCode, payload)
+	}
+
+	// An explicit 404 means the host has no execution endpoint, so a DB-only
+	// release is allowed; the next acquire can then take the Profile.
+	host.FailSession = &browser.Error{
+		Code: "browser_session_not_found", Message: "no session", Status: http.StatusNotFound,
+	}
+	response, payload = f.do(t, http.MethodDelete, "/api/v1/browser-grants/"+grantID, nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("missing-session release: %d %#v", response.StatusCode, payload)
+	}
+	if payload["grant"].(map[string]any)["status"] != "revoked" {
+		t.Fatalf("released grant=%#v", payload["grant"])
+	}
+}
+
 func TestExclusiveTaskControlsOwnerOpenedTabsOverHTTP(t *testing.T) {
 	host := browsertest.New()
 	f := newBrowserAPIFixture(t, host)

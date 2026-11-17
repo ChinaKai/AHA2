@@ -47,7 +47,9 @@ Profile 独占控制（profile_exclusive）：
   `(task_id,profile_id)` 改为 `browser_task_grants(profile_id) WHERE revoked_at=''`，
   迁移会按 Profile 保留最新 lease 并撤销其余旧记录。
 - `DELETE /api/v1/browser-grants/{id}`：释放控制。只撤销 lease，不关闭可见页面；
-  其他 Task 之后可以获取。
+  其他 Task 之后可以获取。释放前必须先安装 released fence；host 不可达/超时时
+  返回原错误码且 lease 保持 active，避免在 host 仍可能执行旧操作时虚报释放成功。
+  只有 host 明确返回 `browser_session_not_found`（没有执行端）才允许仅撤销 DB。
 - `POST /api/v1/browser/profiles/{id}/transfer`（Owner 会话）：显式把控制权转移给
   `{"task_id":"..."}`。Task Agent 没有这个端点，不能自行抢占。
 - `GET /api/v1/tasks/{id}/browser`：Task 详情合并视图；持有 lease 时同步返回该
@@ -59,9 +61,11 @@ Profile 独占控制（profile_exclusive）：
 所有 open/activate/navigate/close 都带当前 token。host 为每个 session 维护读写门：
 页面操作拿读槽并持有到副作用完成，fence 切换先立即失效旧 token，再拿写槽等待
 在途操作；超时（默认 5s）返回 409 `browser_fence_timeout` 并恢复旧 fence，不能宣称
-切换成功。操作在副作用边界会再次校验 fence，因此在途的旧 Task 操作返回
-409 `browser_fence_stale`/`browser_fence_expired`，不会在控制权变化或过期后关闭/
-导航/打开页面。读操作仍每步重新鉴权。
+切换成功。操作在底层 `page.close()`/`goto()` 返回后再次校验 fence：若控制权已
+变化或已过期，返回 409 `browser_fence_stale`/`browser_fence_expired`，并撤销已
+发生的副作用（关闭刚打开的新页、恢复导航前的 URL、重新打开被关闭的页并保留原
+host tab id）。因此暂停在底层关闭/导航/打开调用内、等 token 过期再放行的旧操作
+也不会留下关闭/导航/新 tab。读操作仍每步重新鉴权。
 
 标签页操作（Owner 与当前独占 Task 共用同一服务层；不再有 per-tab grant 归属）：
 
@@ -125,7 +129,7 @@ Agent 只有只读 snapshot/frame/bookmarks 与 open/activate/close/navigate 控
 返回 `browser_host_node_missing` 并失败关闭，不会退回公开端口或 CDP。
 
 ## 3. 失败关闭
-- host 未配置/不可达：`browser_host_unavailable`（HTTP 503）；
+- host 未配置/不可达：`browser_host_unavailable`（HTTP 503）；释放时同样失败并保留 lease；
 - Edge 缺失：`browser_edge_unavailable`（503），不自动换浏览器；
 - profile 目录被其他进程占用：`browser_profile_locked`（409）；
 - 授权过期/撤销：`browser_grant_expired` / `browser_grant_revoked`（403）；
@@ -133,7 +137,7 @@ Agent 只有只读 snapshot/frame/bookmarks 与 open/activate/close/navigate 控
 - 同一 Profile 已被其他 Task 独占控制：`browser_profile_in_use`（409）；
 - 同一 Task 已持有另一个 Profile lease：`browser_task_profile_limit`（409）；
 - 控制权已转移/释放后仍在途的旧操作：`browser_fence_stale`（409）；
-- lease 过期后仍在途的旧操作：`browser_fence_expired`（409）；
+- lease 过期后仍在途的旧操作：`browser_fence_expired`（409，关闭会恢复页面、导航会回退 URL、打开会关闭新页）；
 - fence 切换等待在途操作超时：`browser_fence_timeout`（409），旧 lease/fence 保留；
 - 跨 Profile 的 tab：`browser_tab_forbidden`（403）；
 - 授权缺少能力：`browser_capability_denied`（403）；

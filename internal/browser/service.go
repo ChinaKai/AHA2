@@ -966,7 +966,11 @@ func (s *Service) RevokeGrant(ctx context.Context, actor, id string) (GrantView,
 		releaseFence := "released:" + grant.ID
 		fenced := false
 		hostFence, hostSessionID := "", ""
-		if session, sessionErr := s.store.BrowserSession(ctx, grant.SessionID); sessionErr == nil && s.host != nil {
+		session, sessionErr := s.store.BrowserSession(ctx, grant.SessionID)
+		if sessionErr != nil && !errors.Is(sessionErr, sql.ErrNoRows) {
+			return GrantView{}, sessionErr
+		}
+		if sessionErr == nil && s.host != nil {
 			hostSessionID = session.HostSessionID
 			hostSession, hostErr := s.host.Session(ctx, grant.ProfileID)
 			switch {
@@ -981,8 +985,10 @@ func (s *Service) RevokeGrant(ctx context.Context, actor, id string) (GrantView,
 			case Code(hostErr) == "browser_session_not_found":
 				// No host session can be executing calls for this lease.
 			case isHostUnavailable(hostErr):
-				// The execution endpoint is unreachable. There is nothing to
-				// fence; revoke the DB lease so no future call is authorized.
+				// An unreachable or timed-out host cannot prove that the
+				// execution endpoint stopped. Fail the release closed and keep
+				// the lease active; the Owner may retry once the host recovers.
+				return GrantView{}, sanitizeHostError(hostErr)
 			default:
 				return GrantView{}, sanitizeHostError(hostErr)
 			}

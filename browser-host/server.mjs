@@ -112,11 +112,22 @@ function attachPage(session, page, id = "") {
   }
   session.tabs.set(tab.id, tab);
   try {
-    page.on("close", () => session.tabs.delete(tab.id));
+    page.on("close", () => {
+      const current = session.tabs.get(tab.id);
+      if (current && current.page === page) session.tabs.delete(tab.id);
+    });
   } catch {
     // A page that cannot accept listeners is still addressable until it closes.
   }
   return tab;
+}
+
+function currentPageURL(tab) {
+  try {
+    return tab.page.url() || tab.url;
+  } catch {
+    return tab.url;
+  }
 }
 
 // The list is the Owner-visible page picker. Only ordinary web pages are
@@ -160,6 +171,8 @@ async function listSessionPages(session) {
   };
   const workers = Math.min(8, Math.max(1, tabs.length));
   await Promise.all(Array.from({length: workers}, worker));
+  const active = result.find(item => item && item.active);
+  session.activeTabID = active ? active.id : "";
   return result.filter(Boolean);
 }
 
@@ -438,6 +451,27 @@ export function createHostServer(options) {
     return true;
   };
 
+  const reopenClosedTab = async (session, tab, url, title) => {
+    let page = null;
+    try {
+      page = await session.context.newPage();
+      await page.goto(url, {waitUntil: "domcontentloaded", timeout: 30_000});
+      tab.page = page;
+      tab.url = page.url();
+      tab.title = title || (await page.title().catch(() => ""));
+      tab.frame = null;
+      tab.framePending = null;
+      session.tabs.set(tab.id, tab);
+      page.on("close", () => {
+        const current = session.tabs.get(tab.id);
+        if (current && current.page === page) session.tabs.delete(tab.id);
+      });
+    } catch (error) {
+      if (page) await page.close().catch(() => {});
+      console.error(`tab restore failed diagnostic=${diagnostics(error, root, "")}`);
+    }
+  };
+
   const route = async (request, response) => {
     if (request.url === "/v1/health" && request.method === "GET") {
       if (!authorized(request)) return json(response, 401, fail(401, "host_unauthorized", "invalid host token").body);
@@ -641,9 +675,15 @@ export function createHostServer(options) {
           try {
             const id = newTabID();
             const opened = await openTabPage(session.context, target, id);
+            const code = fenceStatus(session, body.fence);
+            if (code) {
+              await opened.page.close().catch(() => {});
+              return fenceFailure(response, code);
+            }
             const tab = attachPage(session, opened.page, id);
             tab.url = opened.url;
             tab.title = opened.title;
+            session.activeTabID = tab.id;
             return json(response, 201, tabPayload(tab));
           } catch (error) {
             // Do not reference Edge here: this path must work even when the
@@ -659,8 +699,16 @@ export function createHostServer(options) {
       if (!tab) return json(response, 404, fail(404, "browser_tab_not_found", "tab not found").body);
       if (parts.length === 5 && request.method === "DELETE") {
         return runMutation(response, session, url.searchParams.get("fence") || "", beforeMutation, async () => {
+          const savedURL = currentPageURL(tab);
+          const savedTitle = tab.title;
           await tab.page.close().catch(() => {});
+          const code = fenceStatus(session, url.searchParams.get("fence") || "");
+          if (code) {
+            if (savedURL) await reopenClosedTab(session, tab, savedURL, savedTitle);
+            return fenceFailure(response, code);
+          }
           session.tabs.delete(tab.id);
+          if (session.activeTabID === tab.id) session.activeTabID = "";
           return json(response, 200, {ok: true});
         });
       }
@@ -669,7 +717,16 @@ export function createHostServer(options) {
         if (!target) return json(response, 400, fail(400, "browser_url_invalid", "only http/https URLs are accepted").body);
         return runMutation(response, session, body.fence, beforeMutation, async () => {
           try {
+            const savedURL = currentPageURL(tab);
+            const savedTitle = tab.title;
             const navigated = await navigatePage(tab.page, target);
+            const code = fenceStatus(session, body.fence);
+            if (code) {
+              if (savedURL) await navigatePage(tab.page, savedURL).catch(() => {});
+              tab.url = savedURL;
+              tab.title = savedTitle;
+              return fenceFailure(response, code);
+            }
             tab.url = navigated.url;
             tab.title = navigated.title;
             tab.frame = null;
@@ -685,7 +742,16 @@ export function createHostServer(options) {
       if (parts.length === 6 && parts[5] === "activate" && request.method === "POST") {
         return runMutation(response, session, body.fence, beforeMutation, async () => {
           try {
+            await listSessionPages(session);
+            const previousActiveID = session.activeTabID;
             await tab.page.bringToFront();
+            const code = fenceStatus(session, body.fence);
+            if (code) {
+              const previous = previousActiveID ? session.tabs.get(previousActiveID) : null;
+              if (previous && previous.page !== tab.page) await previous.page.bringToFront().catch(() => {});
+              return fenceFailure(response, code);
+            }
+            session.activeTabID = tab.id;
             return json(response, 200, tabPayload(tab));
           } catch (error) {
             console.error(`tab activate failed profile=${profileID} diagnostic=${diagnostics(error, root, "")}`);
