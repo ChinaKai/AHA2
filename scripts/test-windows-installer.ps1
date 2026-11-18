@@ -254,6 +254,7 @@ foreach ($forbidden in @("delayed-auto Windows", "aha2.exe service run --listen"
 $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo ".github\workflows\release.yml")
 foreach ($contract in @(
     "runs-on: windows-latest", "cmd\aha-tray", "aha2-tray.exe", "-H windowsgui", "build-windows-installer.ps1", "-InputTrayExe",
+    "stage-windows-runtime.sh", "-InputBrowserHost", "-InputNodeExe", "-InputNodeLicense",
 	"AHA2-Setup-x64.exe", "AHA2-Setup-User-x64.exe", "build-feishu-plugin.sh", "build-linux-packages.sh", "build-linux-sync-packages.sh", "aha2-sync_", "build-macos-packages.sh",
     "ubuntu-24.04-arm", "SHA256SUMS", "merge-multiple: true", "pattern: package-*", "main.version=", "main.webVersion=", "gh release create"
 )) {
@@ -263,6 +264,21 @@ foreach ($contract in @(
 }
 if ($workflow.Contains("portable-release") -or $workflow.Contains("Upload portable artifacts")) {
     throw "Release workflow must not publish portable binaries."
+}
+# The 0.5.537 release run failed here: the Windows job built the application
+# and called the installer directly, so dist\browser-host and dist\node were
+# never staged. Staging must run first, and both installer builds must name the
+# inputs explicitly instead of relying on the default dist paths.
+$stagingProbe = $workflow.IndexOf("stage-windows-runtime.sh")
+$installerProbe = $workflow.IndexOf("build-windows-installer.ps1")
+if ($stagingProbe -lt 0 -or $installerProbe -lt 0 -or $stagingProbe -gt $installerProbe) {
+    throw "Release workflow must stage browser-host and Node runtime before building the Windows installer."
+}
+foreach ($inputContract in @("-InputBrowserHost", "-InputNodeExe", "-InputNodeLicense")) {
+    $inputCount = [regex]::Matches($workflow, [regex]::Escape($inputContract)).Count
+    if ($inputCount -lt 2) {
+        throw "Release workflow must pass $inputContract to both the per-machine and per-user installer builds."
+    }
 }
 # A tag is verified locally before it is pushed, so the release workflow only
 # packages. Re-adding a test job here would make releases depend on tests that
@@ -292,10 +308,25 @@ foreach ($contract in @(
     "scripts/build-web.mjs", "web/tests/build.test.mjs", "CGO_ENABLED=0 GOOS=windows GOARCH=amd64",
     "-H windowsgui", "plugins/feishu", "aha2-windows-amd64.exe", "aha2-tray-windows-amd64.exe",
     "release-manifest.json", "scripts/release-manifest.mjs", "mktemp -d", "test ./...", "vet ./...",
-    "Feishu plugin tests passed"
+    "Feishu plugin tests passed", "scripts/stage-windows-runtime.sh"
 )) {
     if (-not $packageBuilder.Contains($contract)) {
         throw "Windows package build contract is missing: $contract"
+    }
+}
+# The local package build and the Release job share one staging script, so the
+# host file list and the pinned Node hashes cannot drift between them.
+$runtimeStager = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo "scripts\stage-windows-runtime.sh")
+foreach ($contract in @(
+    "host.mjs", "server.mjs", "tabs.mjs", "lock.mjs", "package.json", "README.md",
+    "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1", "playwright@1.49.0",
+    "node_modules/.bin", "node_modules/.package-lock.json",
+    "SHASUMS256.txt", "22.23.5", "win-x64.zip", "node.exe", "LICENSE",
+    "4a191082e9706866830379d577d2cc8a50c776fcd9436a8d061b063ed0d9a0e3",
+    "247e9693d316da9857e44990e5e11709f596f18112251b8026ec6eed80bdf38a"
+)) {
+    if (-not $runtimeStager.Contains($contract)) {
+        throw "Windows runtime staging contract is missing: $contract"
     }
 }
 $manifestGenerator = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo "scripts\release-manifest.mjs")
