@@ -292,6 +292,14 @@ func secretAssignmentValueBlocks(value string) bool {
 }
 
 func isCJKProseRune(r rune) bool {
+	// Unicode number and symbol categories are never prose, even when they sit
+	// inside a CJK block: fullwidth currency/math signs (＄ U+FF04, ＋ U+FF0B),
+	// the postal mark (〒 U+3012) and Hangzhou numerals (〡 U+3021 …) are all
+	// credential material. Reject them before the script/range tests so that
+	// Script=Han characters in category Nl (〡, 〇) cannot slip through either.
+	if unicode.In(r, unicode.N, unicode.S) {
+		return false
+	}
 	if unicode.In(r, unicode.Han, unicode.Hiragana, unicode.Katakana, unicode.Hangul) {
 		return true
 	}

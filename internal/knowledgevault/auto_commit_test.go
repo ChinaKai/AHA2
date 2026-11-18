@@ -633,6 +633,9 @@ func TestAutoCommitKeepsChineseSecretProseEligible(t *testing.T) {
 	writeGitTestFile(t, config.VaultPath, "notes/real-secret.md", "token = \"abcdefgh12345678\"\n")
 	writeGitTestFile(t, config.VaultPath, "notes/accented-password.md", "password=\"pässwörd1234\"\n")
 	writeGitTestFile(t, config.VaultPath, "notes/accented-token.md", "token=abc123édef456\n")
+	writeGitTestFile(t, config.VaultPath, "notes/fullwidth-symbol-secret.md", "password=\"＄＄＄＄＋＋＋＋\"\n")
+	writeGitTestFile(t, config.VaultPath, "notes/postal-mark-secret.md", "token=〒〒〒〒〒〒〒〒\n")
+	writeGitTestFile(t, config.VaultPath, "notes/hangzhou-numeral-secret.md", "password=〡〢〣〤〥〦〧〨\n")
 	scan, err := git.ScanAutoCommit(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -641,13 +644,20 @@ func TestAutoCommitKeepsChineseSecretProseEligible(t *testing.T) {
 	for _, item := range scan.Blocked {
 		blocked[item.Path] = item.Reason
 	}
-	for _, path := range []string{"notes/real-secret.md", "notes/accented-password.md", "notes/accented-token.md"} {
+	for _, path := range []string{
+		"notes/real-secret.md",
+		"notes/accented-password.md",
+		"notes/accented-token.md",
+		"notes/fullwidth-symbol-secret.md",
+		"notes/postal-mark-secret.md",
+		"notes/hangzhou-numeral-secret.md",
+	} {
 		if blocked[path] != "secret" {
 			t.Fatalf("%s not blocked as secret: %+v", path, scan.Blocked)
 		}
 	}
-	if scan.BlockedTotal != 3 {
-		t.Fatalf("blocked total = %d, want 3", scan.BlockedTotal)
+	if scan.BlockedTotal != 6 {
+		t.Fatalf("blocked total = %d, want 6", scan.BlockedTotal)
 	}
 	if len(scan.Eligible) != 1 || scan.Eligible[0] != "notes/chinese-secret-prose.md" {
 		t.Fatalf("chinese prose was not eligible: %+v", scan.Eligible)

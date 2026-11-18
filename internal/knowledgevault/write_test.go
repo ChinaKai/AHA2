@@ -205,6 +205,15 @@ func TestWriteKnowledgeValidationTable(t *testing.T) {
 		{"unicode token in body", func(r *WriteRequest) {
 			r.Body = writeTestBody + " token=abc123édef456"
 		}, WriteErrorForbiddenContent},
+		{"full width symbol in body", func(r *WriteRequest) {
+			r.Body = writeTestBody + ` password="＄＄＄＄＋＋＋＋"`
+		}, WriteErrorForbiddenContent},
+		{"postal mark in body", func(r *WriteRequest) {
+			r.Body = writeTestBody + " token=〒〒〒〒〒〒〒〒"
+		}, WriteErrorForbiddenContent},
+		{"hangzhou numerals in body", func(r *WriteRequest) {
+			r.Body = writeTestBody + " password=〡〢〣〤〥〦〧〨"
+		}, WriteErrorForbiddenContent},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -252,6 +261,10 @@ func TestForbiddenContentSecretPatterns(t *testing.T) {
 		{"latin accented password", `password="pässwörd1234"`, true},
 		{"latin accented token", "token=abc123édef456", true},
 		{"full width latin value", "password=ＡＢＣＤＥＦＧＨ", true},
+		{"full width dollar and plus", `password="＄＄＄＄＋＋＋＋"`, true},
+		{"postal mark value", "token=〒〒〒〒〒〒〒〒", true},
+		{"hangzhou numerals", "password=〡〢〣〤〥〦〧〨", true},
+		{"ideographic zero is a number category", "token:〇〇〇〇〇〇〇〇", true},
 		{"chinese prose with digit", "password:至少8位以上字符组合", true},
 		{"openai style key", "sk-abcdefghijklmnopqrstuvwxyz012345", true},
 		{"github token", "ghp_abcdefghijklmnopqrstuvwxyz0123456789", true},
