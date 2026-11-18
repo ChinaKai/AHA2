@@ -714,6 +714,67 @@ test("TTL removal of a saving entry prevents the old capture from publishing", a
   await store.close();
 });
 
+test("a late fs.open after clear leaves no empty orphan artifact", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aha2-download-late-open-"));
+  const {Readable} = await import("node:stream");
+  const fsPromises = await import("node:fs/promises");
+  const directory = join(root, ".downloads", "profile", "session");
+  let releaseOpen;
+  let requestedResolve;
+  const openGate = new Promise(resolve => { releaseOpen = resolve; });
+  const requested = new Promise(resolve => { requestedResolve = resolve; });
+  const oldDownload = {
+    suggestedFilename: () => "late.bin",
+    createReadStream: async () => {
+      requestedResolve();
+      await openGate;
+      return Readable.from([Buffer.alloc(64 * 1024, 0x61)]);
+    },
+    cancel: async () => {},
+    delete: async () => {},
+  };
+  const store = createDownloadStore(root, "profile", "session", {
+    maxBytes: 10 * 1024 * 1024,
+    maxTotalBytes: 50 * 1024 * 1024,
+    ttlMs: 60_000,
+    clearGraceMs: 50,
+  });
+  const oldCapture = store.capture(oldDownload, "f").catch(error => error);
+  await requested;
+  assert.equal(store.stats().inFlight, 1, JSON.stringify(store.stats()));
+  // clear() returns within its grace even though the old capture is parked
+  // before fs.open(); its row and directory are gone.
+  await store.clear();
+  assert.deepEqual(await fsPromises.readdir(directory).catch(() => []), []);
+
+  // A fresh-generation download recreates the directory, so the old pending
+  // fs.open() will now succeed and create an empty artifact at its old path.
+  const fresh = await store.capture({
+    suggestedFilename: () => "fresh.bin",
+    createReadStream: async () => Readable.from([Buffer.alloc(1024 * 1024, 0x62)]),
+    cancel: async () => {},
+    delete: async () => {},
+  }, "f");
+  releaseOpen();
+  const outcome = await oldCapture;
+  assert.ok(outcome instanceof Error, "late capture unexpectedly succeeded");
+
+  const files = await fsPromises.readdir(directory);
+  assert.deepEqual(files, [fresh.id], "late fs.open left an empty orphan artifact");
+  const freshStat = await fsPromises.stat(join(directory, fresh.id));
+  assert.equal(freshStat.size, 1024 * 1024);
+  const stats = store.stats();
+  assert.equal(stats.entries, 1, JSON.stringify(stats));
+  assert.equal(stats.inFlight, 0, JSON.stringify(stats));
+  assert.equal(stats.totalBytes, 1024 * 1024, JSON.stringify(stats));
+  assert.equal(stats.pendingBytes, 0, JSON.stringify(stats));
+  const listed = await store.list("f");
+  assert.equal(listed.length, 1, JSON.stringify(listed));
+  assert.equal(listed[0].id, fresh.id);
+  assert.equal(listed[0].size, 1024 * 1024);
+  await store.close();
+});
+
 test("a stale raw scan cannot cancel a new-generation download", async () => {
   const root = await mkdtemp(join(tmpdir(), "aha2-download-raw-race-"));
   const fsPromises = await import("node:fs/promises");

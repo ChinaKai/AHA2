@@ -98,6 +98,18 @@ export function createDownloadStore(root, profileID, sessionID, options = {}) {
     await fs.rm(entry.path, {force: true}).catch(() => {});
   };
 
+  // A capture may finish fs.open() after clear()/close() already dropped its
+  // row; removeEntry() then no-ops on the identity guard and the empty
+  // artifact would survive. Delete the artifact this capture created unless a
+  // live entry owns the same path (paths are per-entry random ids, so this is
+  // only a safety net against stealing a newer generation's file).
+  const removeOrphanArtifact = async path => {
+    for (const current of entries.values()) {
+      if (current.path === path) return;
+    }
+    await fs.rm(path, {force: true}).catch(() => {});
+  };
+
   const discard = async download => {
     try {
       await download.cancel?.();
@@ -245,12 +257,24 @@ export function createDownloadStore(root, profileID, sessionID, options = {}) {
     let stream = null;
     let written = 0;
     let charged = 0;
+    let opened = false;
     try {
       await ensure();
       stream = await download.createReadStream();
       if (!stream) throw downloadFailure("download has no readable stream");
       const handle = await fs.open(entry.path, "w", 0o600);
+      // fs.open() creates the file, so from here on the artifact exists even if
+      // this capture is already stale.
+      opened = true;
       try {
+        if (captureGeneration !== generation || entries.get(entry.id) !== entry ||
+            entry.state !== "saving") {
+          // The row was cleared/pruned while open() was pending. Do not consume
+          // or write into a generation that no longer exists; detach from the
+          // browser stream so a later error has no owner.
+          stream.destroy?.();
+          throw downloadFailure("download entry was invalidated", "browser_download_canceled");
+        }
         for await (const chunk of stream) {
           if (captureGeneration !== generation) {
             throw downloadFailure("download store was cleared", "browser_download_canceled");
@@ -285,6 +309,10 @@ export function createDownloadStore(root, profileID, sessionID, options = {}) {
       if (captureGeneration === generation) failed += 1;
       if (entry.state === "saving") entry.state = "failed";
       await removeEntry(entry);
+      // removeEntry() is a no-op once the row is gone (clear/close may have run
+      // while open() was pending), so clean the artifact this capture created
+      // explicitly. New-generation files are protected by the path check.
+      if (opened) await removeOrphanArtifact(entry.path);
       await discard(download);
       throw error;
     } finally {
