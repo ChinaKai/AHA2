@@ -257,6 +257,28 @@ func TestKnowledgeSyncNotificationsReachPetWorkStateAndClearOnlyAfterSyncRecover
 	if state = petWorkStateHTTP(t, client, server.URL); len(state.Notifications) != 1 {
 		t.Fatalf("rejected ack changed notifications: %#v", state.Notifications)
 	}
+	// The tokenless compatibility path is read-only: another mutating tool must
+	// be refused before it can create anything, while a read-only tool still
+	// answers without a token.
+	approvalsBefore, err := appService.PetApprovals(ctx, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rejectText, rejected = petMCPToolCall(t, client, server.URL, "", "pet_submit_idea",
+		map[string]any{"title": "tokenless probe", "summary": "must not be created", "reason": "regression test"})
+	if !rejected || !strings.Contains(rejectText, "只读工具") {
+		t.Fatalf("tokenless mutating call text=%q rejected=%v", rejectText, rejected)
+	}
+	approvalsAfter, err := appService.PetApprovals(ctx, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(approvalsAfter) != len(approvalsBefore) {
+		t.Fatalf("tokenless mutating call created approvals: before=%d after=%d", len(approvalsBefore), len(approvalsAfter))
+	}
+	if text := petMCPToolText(t, client, server.URL, "aha_pet_work_state", map[string]any{}); !strings.Contains(text, notification.ID) {
+		t.Fatalf("tokenless read-only call failed: %s", text)
+	}
 	ackText := petMCPToolTextForToken(t, client, server.URL, petToken, "aha_ack_knowledge_sync_notification",
 		map[string]any{"ids": []string{notification.ID}})
 	if !strings.Contains(ackText, `"acknowledged":1`) {

@@ -1030,3 +1030,38 @@ func TestPetWorkStateBudgetTrimsNotificationBytesButKeepsIdentity(t *testing.T) 
 		}
 	}
 }
+
+func TestPetWorkStateNotificationTrimStopsAtDetailFloor(t *testing.T) {
+	detail25 := strings.Repeat("知", 25)
+	detail24 := strings.Repeat("识", 24)
+	detail23 := strings.Repeat("库", 23)
+	state := PetWorkState{Notifications: []PetNotification{
+		{ID: "n25", Kind: "knowledge_sync_conflict", At: "2026-11-18T00:00:00Z", Detail: detail25, Status: "open"},
+		{ID: "n24", Kind: "knowledge_sync_paused", At: "2026-11-18T00:00:01Z", Detail: detail24, Status: "open"},
+		{ID: "n23", Kind: "knowledge_sync_paused", At: "2026-11-18T00:00:02Z", Detail: detail23, Status: "open"},
+	}}
+	// A tiny budget forces the trim loop to run until nothing is eligible.
+	state.fitDefaultBudget(64)
+	if !state.NotificationsTruncated {
+		t.Fatal("notifications_truncated not set")
+	}
+	expected := []struct {
+		id   string
+		size int
+	}{{"n25", 24}, {"n24", 24}, {"n23", 23}}
+	for index, item := range expected {
+		got := state.Notifications[index]
+		if got.ID != item.id || got.Kind == "" || got.At == "" || got.Status != "open" {
+			t.Fatalf("notification %d identity/status changed: %#v", index, got)
+		}
+		if size := len([]rune(got.Detail)); size != item.size {
+			t.Fatalf("%s detail runes=%d want=%d", item.id, size, item.size)
+		}
+	}
+	if !strings.HasSuffix(state.Notifications[0].Detail, "…") {
+		t.Fatalf("25-rune detail not marked as shortened: %q", state.Notifications[0].Detail)
+	}
+	if state.Notifications[1].Detail != detail24 || state.Notifications[2].Detail != detail23 {
+		t.Fatalf("detail at or below floor changed: %#v", state.Notifications)
+	}
+}

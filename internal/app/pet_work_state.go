@@ -410,8 +410,9 @@ func (state *PetWorkState) fitDefaultBudget(limit int) {
 }
 
 // trimNotificationDetails halves every detail that is still longer than the
-// floor and reports whether anything changed. ID, kind, time and status are
-// left untouched.
+// floor and reports whether anything changed. The target never falls below the
+// floor, so a 25-rune detail becomes 24 runes, not 12. ID, kind, time and
+// status are left untouched.
 func trimNotificationDetails(state *PetWorkState) bool {
 	changed := false
 	for index := range state.Notifications {
@@ -420,7 +421,11 @@ func trimNotificationDetails(state *PetWorkState) bool {
 		if len(runes) <= knowledgeSyncNotificationMinDetailRunes {
 			continue
 		}
-		state.Notifications[index].Detail = truncateAssistantText(detail, len(runes)/2)
+		target := len(runes) / 2
+		if target < knowledgeSyncNotificationMinDetailRunes {
+			target = knowledgeSyncNotificationMinDetailRunes
+		}
+		state.Notifications[index].Detail = truncateAssistantText(detail, target)
 		changed = true
 	}
 	return changed
