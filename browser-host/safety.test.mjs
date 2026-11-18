@@ -11,12 +11,12 @@ async function startHost({launchFailure = false, tabGoto = null, pageClose = nul
   const root = await mkdtemp(join(tmpdir(), "aha2-browser-host-"));
   let screenshots = 0;
   let shutdownCalls = 0;
-  const makePage = (initialURL = "https://example.com/final", visible = true, focused = false, focusThrows = false) => {
+  const makePage = (initialURL = "https://example.com/final", visible = true, focused = false, focusThrows = false, hang = false) => {
     let currentURL = initialURL;
     const page = {
       closed: 0,
       url: () => currentURL,
-      title: async () => "Example",
+      title: async () => hang ? new Promise(() => {}) : "Example",
       goto: async target => {
         if (tabGoto) await tabGoto(target);
         currentURL = target;
@@ -30,6 +30,7 @@ async function startHost({launchFailure = false, tabGoto = null, pageClose = nul
       // no args. A page can be visible in its window without owning the
       // foreground focus, which is exactly the multi-window case.
       evaluate: async (fn, arg) => {
+        if (hang) return new Promise(() => {});
         if (typeof arg === "number") return "page text";
         if (String(fn).includes("hasFocus")) {
           if (focusThrows) throw new Error("hasFocus unavailable");
@@ -50,7 +51,7 @@ async function startHost({launchFailure = false, tabGoto = null, pageClose = nul
   // A persistent Edge context starts with one page; the Owner may then open
   // more. Both are listed as bindable pages by the host.
   const initialPages = pageStates
-    ? pageStates.map(state => makePage(state.url, state.visible !== false, state.focused === true, state.focusThrows === true))
+    ? pageStates.map(state => makePage(state.url, state.visible !== false, state.focused === true, state.focusThrows === true, state.hang === true))
     : (initialURLs || [initialURL]).map((url, index) => makePage(url, index === 0));
   const page = initialPages[0];
   let lastPage = page;
@@ -226,6 +227,31 @@ test("a page whose hasFocus probe throws is listed without focus", async () => {
     assert.equal(listed.body.tabs.length, 1);
     assert.equal(listed.body.tabs[0].active, true);
     assert.equal(listed.body.tabs[0].focused, false);
+  } finally {
+    await host.close();
+  }
+});
+
+test("hung pages keep one wait budget instead of serializing probes", async () => {
+  // 16 pages that never answer title/visibility. With 8 list workers the old
+  // serial title+visibility+focus chain cost ~9s; one shared budget per page
+  // costs two waves of PAGE_METADATA_TIMEOUT_MS (~3s).
+  const pageStates = Array.from({length: 16}, (_, index) => ({
+    url: `https://example.com/hung-${index}`, hang: true,
+  }));
+  const host = await startHost({pageStates});
+  try {
+    const opened = await host.call("POST", "/v1/profiles/browser_profile_1/session", {browser_kind: "edge"});
+    assert.equal(opened.status, 200);
+    const startedAt = Date.now();
+    const listed = await host.call("GET", "/v1/profiles/browser_profile_1/tabs");
+    const elapsed = Date.now() - startedAt;
+    assert.equal(listed.status, 200);
+    assert.equal(listed.body.tabs.length, 16);
+    assert.ok(listed.body.tabs.every(tab => tab.active === false && tab.focused === false),
+      "a hung page must fall back to active=false, focused=false");
+    console.log(`16 hung pages listed in ${elapsed}ms`);
+    assert.ok(elapsed < 6000, `hung pages must not serialize probes: ${elapsed}ms`);
   } finally {
     await host.close();
   }

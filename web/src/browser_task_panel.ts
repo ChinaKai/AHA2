@@ -202,17 +202,18 @@ export function browserBookmarkFolderLabel(folder: string): string {
 // Pick the tab the preview should show. `active` only means "visible in its
 // own window", so a Profile with several Edge windows has several active pages
 // and cannot say which window the Owner is looking at. `focused` is the
-// foreground-window signal and wins when exactly one page carries it. Without
-// one, fall back to exactly one active page. Anything ambiguous (several
-// focused, or no focus and several active) keeps the current selection instead
-// of guessing. A missing selection still falls back to the first page.
+// foreground-window signal. The order is strict: exactly one focused page wins,
+// otherwise exactly one active page wins, otherwise keep the current selection.
+// Several focused pages never outrank a single active page, because the extra
+// focus answers are stale or partial, while the single active page is the only
+// unambiguous window. A missing selection falls back to the first page.
 export function browserFollowTabID(tabs: BrowserTab[], selectedID: string, followActive = true): string {
   if (!tabs.length) return "";
   const focused = tabs.filter(tab => tab.focused);
   const active = tabs.filter(tab => tab.active);
   const target = focused.length === 1
     ? focused[0]
-    : focused.length === 0 && active.length === 1 ? active[0] : null;
+    : active.length === 1 ? active[0] : null;
   if (!tabs.some(tab => tab.id === selectedID)) {
     return (target || tabs[0]).id;
   }

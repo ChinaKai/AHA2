@@ -168,7 +168,11 @@ async function describePage(tab) {
     return null;
   }
   if (!/^https?:\/\//i.test(url)) return null;
-  const title = await settleWithin(page.title(), PAGE_METADATA_TIMEOUT_MS, "");
+  // Title and visibility are independent probes, so they start together.
+  // The whole page description shares PAGE_METADATA_TIMEOUT_MS as its wait
+  // budget: a wedged page costs one timeout instead of three serialized ones.
+  const startedAt = Date.now();
+  const titleProbe = settleWithin(page.title(), PAGE_METADATA_TIMEOUT_MS, "");
   const active = (await settleWithin(
     page.evaluate(() => document.visibilityState),
     PAGE_METADATA_TIMEOUT_MS,
@@ -178,13 +182,19 @@ async function describePage(tab) {
   // Profile with several windows has one visible tab in each. document.hasFocus
   // is per top-level browsing context, so only the foreground window's current
   // tab reports true. It is an independent field; `active` keeps its meaning.
-  // A fake or unusual page without hasFocus, or one that throws, is not focused.
-  const focused = (await settleWithin(
-    page.evaluate(() => (typeof document.hasFocus === "function" ? document.hasFocus() === true : false)),
-    PAGE_METADATA_TIMEOUT_MS,
-    false,
-  )) === true;
-  return {id: tab.id, url, title, active, focused};
+  // Only a visible page can own the focus, so hidden or timed-out pages skip
+  // the probe. It starts before the title settles and uses whatever budget is
+  // left; a page without hasFocus, or one that throws, is not focused.
+  let focusProbe = Promise.resolve(false);
+  if (active) {
+    focusProbe = settleWithin(
+      page.evaluate(() => (typeof document.hasFocus === "function" ? document.hasFocus() === true : false)),
+      Math.max(0, PAGE_METADATA_TIMEOUT_MS - (Date.now() - startedAt)),
+      false,
+    );
+  }
+  const [title, focusedValue] = await Promise.all([titleProbe, focusProbe]);
+  return {id: tab.id, url, title, active, focused: focusedValue === true};
 }
 
 async function listSessionPages(session) {

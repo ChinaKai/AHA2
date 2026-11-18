@@ -78,8 +78,21 @@ test("a focused change moves the selection and the preview stream key", () => {
 
 test("without a focused page the single active page still wins, ambiguity never guesses", () => {
   assert.equal(panel.browserFollowTabID([{id: "a", active: true}, {id: "b", active: false}], "b"), "a");
-  assert.equal(panel.browserFollowTabID([{id: "a", focused: true}, {id: "b", focused: true}], "b"), "b",
-    "several focused pages are ambiguous");
   assert.equal(panel.browserFollowTabID([{id: "a", active: true}, {id: "b", active: true}], "b"), "b",
     "several active pages without focus stay ambiguous");
+});
+
+test("several focused pages still fall back to the single active page", () => {
+  // Review case: a and b are both focused, only b is active -> b wins.
+  assert.equal(panel.browserFollowTabID([
+    {id: "a", focused: true},
+    {id: "b", focused: true, active: true},
+  ], "a"), "b");
+  // Several focused and several active is still ambiguous: keep the selection.
+  assert.equal(panel.browserFollowTabID([
+    {id: "a", focused: true, active: true},
+    {id: "b", focused: true, active: true},
+  ], "a"), "a");
+  // Several focused with no active page cannot pick a window either.
+  assert.equal(panel.browserFollowTabID([{id: "a", focused: true}, {id: "b", focused: true}], "b"), "b");
 });

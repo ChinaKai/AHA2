@@ -94,6 +94,14 @@ window.__syncHoldDone = false;
 window.__frameErrorTab = "";
 window.__frameErrorStatus = 404;
 window.__frameRequests = 0;
+// Frame provenance: which tab each served frame came from, so a test can prove
+// the picture matches the selected tab rather than some other window's page.
+window.__frameTabs = [];
+window.__lastFrameTab = "";
+window.__frameDelayTab = "";
+window.__frameDelayMs = 0;
+window.__frameDelayStarted = 0;
+window.__frameDelayDone = 0;
 window.__frameUnavailable = false;
 window.__frame503 = 0;
 window.__frameClosed = [];
@@ -104,13 +112,23 @@ const STATE_UP = ${JSON.stringify(browserState({available: true, host_id: "local
 const STATE_DOWN = ${JSON.stringify({...browserState({available: false, host_id: "local", edge_available: false, code: "browser_host_start_failed", error: "浏览器宿主自动启动失败（端口被占用或依赖缺失），请查看 AHA2 日志"}), grants: [], tabs: []})};
 const GRANT = ${JSON.stringify(grant)};
 const BOOKMARKS = ${JSON.stringify(bookmarks)};
+// Distinguishable 1x1 PNGs: tab 1 is red, every other tab is green. The test
+// reads the rendered pixel, so forcing all frame requests to tab 1 changes the
+// picture and fails the assertion instead of only the request bookkeeping.
+const FRAME_PNG = {
+  red: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+  green: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNg+M8AAAICAQB7CYF4AAAAAElFTkSuQmCC",
+};
 // Pages the Owner opened, closed, navigated or activated in the real browser
 // window appear here without going through the panel's own APIs.
 const ownerView = tabs => {
   let list = tabs.concat(window.__ownerTabs).filter(tab => !window.__ownerClosed.includes(tab.id)
     && !window.__frameClosed.includes(tab.id));
   if (window.__ownerActive) list = list.map(tab => ({...tab, active: tab.id === window.__ownerActive}));
-  if (window.__ownerFocused) list = list.map(tab => ({...tab, focused: tab.id === window.__ownerFocused}));
+  if (window.__ownerFocused) {
+    const focusedIDs = Array.isArray(window.__ownerFocused) ? window.__ownerFocused : [window.__ownerFocused];
+    list = list.map(tab => ({...tab, focused: focusedIDs.includes(tab.id)}));
+  }
   list = list.map(tab => window.__ownerNav[tab.id] ? {...tab, ...window.__ownerNav[tab.id]} : tab);
   return list;
 };
@@ -206,9 +224,19 @@ window.fetch = async (input, init = {}) => {
       window.__staleErrorAt = performance.now();
       return json({error: {code: "browser_tab_not_found", message: "标签页已关闭"}}, 404);
     }
+    const tabID = path.split("/").slice(-2)[0];
+    window.__lastFrameTab = tabID;
+    window.__frameTabs.push(tabID);
+    // Opt-in slow frame for the old tab: a switch must discard it on arrival.
+    if (window.__frameDelayTab && tabID === window.__frameDelayTab && window.__frameDelayMs > 0) {
+      window.__frameDelayStarted++;
+      await new Promise(resolve => setTimeout(resolve, window.__frameDelayMs));
+      window.__frameDelayDone++;
+    }
     window.__frames++;
-    const body = new Uint8Array([0xff, 0xd8, 0xff, window.__frames % 2, 0xff, 0xd9]);
-    return new Response(body, {status: 200, headers: {"Content-Type": "image/jpeg"}});
+    const png = tabID === "browser_tab_2" ? FRAME_PNG.green : FRAME_PNG.red;
+    const body = Uint8Array.from(atob(png), char => char.charCodeAt(0));
+    return new Response(body, {status: 200, headers: {"Content-Type": "image/png"}});
   }
   if (path.startsWith("/api/v1/")) return json({ok: true});
   return json({});
@@ -261,6 +289,35 @@ const waitFor = async (page, predicate, options = {}) => {
     await page.waitForTimeout(50);
   }
   throw new Error("timed out waiting for the browser panel condition");
+};
+// Reads the preview's rendered pixel. Frame fixtures are 1x1 PNGs (tab 1 red,
+// other tabs green), so the color proves which tab produced the visible picture
+// instead of trusting the request bookkeeping alone.
+const frameColor = async page => page.evaluate(async () => {
+  const image = document.querySelector("#desktop-browser-frame");
+  if (!image) return "none";
+  if (!image.complete) await new Promise(resolve => image.addEventListener("load", resolve, {once: true}));
+  if (!image.naturalWidth) return "broken";
+  const canvas = document.createElement("canvas");
+  canvas.width = 1;
+  canvas.height = 1;
+  const context = canvas.getContext("2d");
+  context.drawImage(image, 0, 0, 1, 1);
+  const [red, green] = context.getImageData(0, 0, 1, 1).data;
+  return red > 200 ? "red" : green > 200 ? "green" : "other";
+});
+const waitForFrameColor = async (page, color, timeout = 6000) => {
+  await waitFor(page, expected => {
+    const image = document.querySelector("#desktop-browser-frame");
+    if (!image || !image.complete || !image.naturalWidth) return false;
+    const canvas = document.createElement("canvas");
+    canvas.width = 1;
+    canvas.height = 1;
+    const context = canvas.getContext("2d");
+    context.drawImage(image, 0, 0, 1, 1);
+    const [red, green] = context.getImageData(0, 0, 1, 1).data;
+    return expected === "red" ? red > 200 : green > 200;
+  }, {arg: color, timeout});
 };
 const mount = async page => {
   await page.evaluate(() => {
@@ -344,18 +401,71 @@ try {
   assert.deepEqual(await page.locator("[data-browser-tab]").evaluateAll(items => items.map(item => item.getAttribute("aria-pressed"))), ["true", "false"]);
 
   // 2b. Two windows each stay active; the foreground one decides the preview.
-  // Switching focus moves the single highlight and restarts the frame stream on
-  // the new tab, so the strip can never point at a different page than the
-  // picture.
-  const beforeFocusFrames = await page.evaluate(() => window.__frames);
-  await page.evaluate(() => { window.__ownerFocused = "browser_tab_2"; });
+  // The picture itself is checked (tab 1 red, tab 2 green), not just the frame
+  // counter: forcing every frame request to tab 1 must fail these assertions.
+  const pressed = tab => page.evaluate(id =>
+    document.querySelector(`[data-browser-tab='${id}']`)?.getAttribute("aria-pressed") === "true", tab);
+  const assertSingleCurrent = async id => {
+    assert.equal(await pressed(id), true, `${id} should be current`);
+    assert.equal(await page.locator(".desktop-browser-tab.active").count(), 1);
+    assert.equal(await page.locator('[aria-current="page"]').count(), 1);
+    assert.equal(await page.locator("[data-browser-tab]").evaluateAll(items => items.find(item => item.getAttribute("aria-current") === "page")?.getAttribute("data-browser-tab")), id);
+  };
+  await waitForFrameColor(page, "red");
+  assert.equal(await page.evaluate(() => window.__lastFrameTab), "browser_tab_1");
+
+  // Start a slow tab-1 frame, then switch focus to tab 2 and force an immediate
+  // sync. The late tab-1 answer must be discarded, not painted over tab 2.
+  await page.evaluate(() => { window.__frameDelayTab = "browser_tab_1"; window.__frameDelayMs = 1500; });
+  await waitFor(page, () => window.__frameDelayStarted > 0, {timeout: 5000});
+  await page.evaluate(() => {
+    window.__ownerFocused = "browser_tab_2";
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
   await waitFor(page, () => document.querySelector("[data-browser-tab='browser_tab_2']")?.getAttribute("aria-pressed") === "true", {timeout: 8000});
-  assert.equal(await page.locator(".desktop-browser-tab.active").count(), 1);
-  assert.equal(await page.locator('[aria-current="page"]').count(), 1);
-  await waitFor(page, count => window.__frames > count, {arg: beforeFocusFrames, timeout: 5000});
-  await page.evaluate(() => { window.__ownerFocused = "browser_tab_1"; });
+  await assertSingleCurrent("browser_tab_2");
+  await waitForFrameColor(page, "green");
+  assert.equal(await page.evaluate(() => window.__lastFrameTab), "browser_tab_2", "frames must come from the selected tab");
+  await waitFor(page, () => window.__frameDelayDone > 0, {timeout: 8000});
+  await page.waitForTimeout(400);
+  assert.equal(await page.evaluate(() => window.__lastFrameTab), "browser_tab_2", "the late tab-1 frame must not be requested again");
+  assert.equal(await frameColor(page), "green", "the late tab-1 frame must not overwrite tab 2's picture");
+  await page.evaluate(() => { window.__frameDelayTab = ""; window.__frameDelayMs = 0; });
+
+  // Switching back follows the new foreground window in the same way.
+  await page.evaluate(() => { window.__ownerFocused = "browser_tab_1"; document.dispatchEvent(new Event("visibilitychange")); });
   await waitFor(page, () => document.querySelector("[data-browser-tab='browser_tab_1']")?.getAttribute("aria-pressed") === "true", {timeout: 8000});
-  await page.evaluate(() => { window.__ownerFocused = ""; });
+  await assertSingleCurrent("browser_tab_1");
+  await waitForFrameColor(page, "red");
+  assert.equal(await page.evaluate(() => window.__lastFrameTab), "browser_tab_1");
+
+  // Several focused pages must not outrank a single active page: both are
+  // focused, only tab 2 is active, so tab 2 wins.
+  await page.evaluate(() => {
+    window.__ownerFocused = ["browser_tab_1", "browser_tab_2"];
+    window.__ownerActive = "browser_tab_2";
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await waitFor(page, () => document.querySelector("[data-browser-tab='browser_tab_2']")?.getAttribute("aria-pressed") === "true", {timeout: 8000});
+  await assertSingleCurrent("browser_tab_2");
+  await waitForFrameColor(page, "green");
+
+  // Several focused and several active pages stay ambiguous: keep the current
+  // selection instead of jumping.
+  const syncsBeforeAmbiguous = await page.evaluate(() => window.__syncRequests);
+  await page.evaluate(() => {
+    window.__ownerActive = "";
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await waitFor(page, count => window.__syncRequests > count, {arg: syncsBeforeAmbiguous, timeout: 8000});
+  await page.waitForTimeout(150);
+  await assertSingleCurrent("browser_tab_2");
+  await waitForFrameColor(page, "green");
+
+  // Restore the initial single-window state for the remaining cases.
+  await page.evaluate(() => { window.__ownerFocused = "browser_tab_1"; document.dispatchEvent(new Event("visibilitychange")); });
+  await waitFor(page, () => document.querySelector("[data-browser-tab='browser_tab_1']")?.getAttribute("aria-pressed") === "true", {timeout: 8000});
+  await page.evaluate(() => { window.__ownerFocused = ""; window.__ownerActive = ""; });
 
   // The tab strip is horizontal, compact, and never renders the full URL.
   const longTab = page.locator("[data-browser-tab='browser_tab_1']");
