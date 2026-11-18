@@ -249,22 +249,22 @@ func latestUsageTurn(turns []domain.Turn) domain.Turn {
 
 func (s *Server) createTask(writer http.ResponseWriter, request *http.Request) {
 	var payload struct {
-		ProjectID           string           `json:"project_id"`
-		WorkspaceID         string           `json:"workspace_id"`
-		Title               string           `json:"title"`
-		Request             string           `json:"request"`
-		TargetBranch        string           `json:"target_branch"`
-		BaseCommit          string           `json:"base_commit"`
-		TaskBranch          string           `json:"task_branch"`
-		Isolation           string           `json:"isolation"`
-		WorktreeDir         string           `json:"worktree_dir"`
-		Backend             string           `json:"backend"`
-		ModelSource         string           `json:"model_source"`
-		ModelID             string           `json:"model_id"`
-		WireModel           string           `json:"wire_model"`
-		CodexAccountID      string           `json:"codex_account_id"`
-		ReasoningEffort     string           `json:"reasoning_effort"`
-		FastMode            bool             `json:"fast_mode"`
+		ProjectID       string `json:"project_id"`
+		WorkspaceID     string `json:"workspace_id"`
+		Title           string `json:"title"`
+		Request         string `json:"request"`
+		TargetBranch    string `json:"target_branch"`
+		BaseCommit      string `json:"base_commit"`
+		TaskBranch      string `json:"task_branch"`
+		Isolation       string `json:"isolation"`
+		WorktreeDir     string `json:"worktree_dir"`
+		Backend         string `json:"backend"`
+		ModelSource     string `json:"model_source"`
+		ModelID         string `json:"model_id"`
+		WireModel       string `json:"wire_model"`
+		CodexAccountID  string `json:"codex_account_id"`
+		ReasoningEffort string `json:"reasoning_effort"`
+		FastMode        bool   `json:"fast_mode"`
 		// StreamInput is accepted from older clients but ignored: live inbox
 		// delivery is always enabled when the runner can stream stdin.
 		StreamInput         bool             `json:"stream_input"`
@@ -1382,7 +1382,7 @@ func (s *Server) updateAgentConfig(writer http.ResponseWriter, request *http.Req
 		writeError(writer, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	agent, err := s.app.UpdateAgentConfig(
+	result, err := s.app.ApplyAgentConfig(
 		request.Context(), request.PathValue("id"), request.PathValue("agent"),
 		app.UpdateAgentConfigInput{
 			Backend: payload.Backend, ModelSource: payload.ModelSource, ModelID: payload.ModelID,
@@ -1393,13 +1393,28 @@ func (s *Server) updateAgentConfig(writer http.ResponseWriter, request *http.Req
 		},
 	)
 	if err != nil {
-		writeJSON(writer, http.StatusBadRequest, map[string]any{
-			"ok": false, "error": "update_agent_failed", "message": err.Error(),
-		})
+		status, code, message := http.StatusBadRequest, "update_agent_failed", err.Error()
+		if coded, ok := app.AsCodedError(err); ok {
+			status, code, message = coded.Status, coded.Code, coded.Message
+			if status == 0 {
+				status = http.StatusBadRequest
+			}
+		}
+		writeJSON(writer, status, map[string]any{"ok": false, "error": code, "message": message})
 		return
 	}
-	s.audit(request, "agent.update_config", "task_agent", agent.TaskID+":"+agent.AgentID, nil)
-	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "agent": agent})
+	auditData := map[string]any{
+		"task_id": result.Agent.TaskID, "agent_id": result.Agent.AgentID,
+		"changed": result.Changed, "status": result.Status,
+		"previous_model_source": result.Previous.ModelSource, "previous_model_id": result.Previous.ModelID,
+		"previous_wire_model": result.Previous.WireModel, "previous_codex_account_id": result.Previous.CodexAccountID,
+		"model_source": result.Current.ModelSource, "model_id": result.Current.ModelID,
+		"wire_model": result.Current.WireModel, "codex_account_id": result.Current.CodexAccountID,
+	}
+	s.audit(request, "agent.update_config", "task_agent", result.Agent.TaskID+":"+result.Agent.AgentID, auditData)
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"ok": true, "status": result.Status, "changed": result.Changed, "agent": result.Agent,
+	})
 }
 
 func (s *Server) compactAgentSession(writer http.ResponseWriter, request *http.Request) {

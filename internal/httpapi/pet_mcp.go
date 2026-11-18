@@ -113,9 +113,14 @@ func (s *Server) petMCP(writer http.ResponseWriter, request *http.Request) {
 	}
 }
 
-// petMCPCallerTaskID resolves the Task identity from the Turn capability that
-// the pet MCP client sends as a bearer token. An absent header yields an empty
-// Task and lets read-only tools run; an unusable header is rejected.
+func isLoopbackHost(host string) bool {
+	ip := net.ParseIP(strings.TrimSpace(host))
+	return ip != nil && ip.IsLoopback()
+}
+
+// petMCPCallerTaskID resolves the Task identity from the Turn capability the
+// pet MCP client sends as a bearer token. An absent header yields an empty
+// Task (the tokenless read-only path); an unusable header is rejected.
 func (s *Server) petMCPCallerTaskID(request *http.Request) (string, bool) {
 	authorization := strings.TrimSpace(request.Header.Get("Authorization"))
 	if authorization == "" {
@@ -133,11 +138,6 @@ func (s *Server) petMCPCallerTaskID(request *http.Request) (string, bool) {
 		return "", false
 	}
 	return claims.TaskID, true
-}
-
-func isLoopbackHost(host string) bool {
-	ip := net.ParseIP(strings.TrimSpace(host))
-	return ip != nil && ip.IsLoopback()
 }
 
 // compile-time guard that MCP schemas stay compatible with gateway tools.

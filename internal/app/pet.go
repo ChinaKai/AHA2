@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -1569,10 +1570,17 @@ func ahaPetTools() []gateway.ChatTool {
 				"skill_ids":          map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "可选；整体替换 Task 的 Skill 选择（该项目或全局可用的已启用 Skill ID），空数组表示清空；不传则保持不变；任一 ID 不可用则报错且不做任何修改"},
 			}, "required": []string{"task_id"},
 		}},
-		{Name: "aha_update_task_agent", Description: "修改 Task main Agent 的模型、推理强度、文件权限、审批方式或 Fast 模式", Parameters: map[string]any{
+		{Name: "aha_update_task_agent", Description: "修改 Task main Agent 的模型源、模型、推理强度、文件权限、审批方式或 Fast 模式。model_source=provider 用 model_id 选 Env 模型；model_source=claude_native 需要 wire_model；model_source=official 需要 wire_model 和 codex_account_id（或目录里的 official model_id）。不传 model_source 时按 model_id 所属模型源推断；模型切换无法确定来源会返回错误，不会假装成功。调用必须携带宠物 Task 自己的 Turn capability", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
-				"task_id":          map[string]any{"type": "string"},
-				"model_id":         map[string]any{"type": "string"},
+				"task_id": map[string]any{"type": "string"},
+				"model_source": map[string]any{
+					"type": "string", "enum": []string{"provider", "official", "claude_native", "env", "codex_official"},
+					"description": "provider/env=Env Provider 模型；official/codex_official=Codex 官方账号；claude_native=Claude Code 官方账号",
+				},
+				"model_id":         map[string]any{"type": "string", "description": "模型目录 ID；provider 必填，也可用于从目录推断 official/claude_native"},
+				"wire_model":       map[string]any{"type": "string", "description": "官方账号的实际模型名；official 和 claude_native 必填（可用 model_id 代替）"},
+				"codex_account_id": map[string]any{"type": "string", "description": "official 模型源使用的 Codex 官方账号；省略时选择提供该模型的已配置账号"},
+				"backend":          map[string]any{"type": "string"},
 				"reasoning_effort": map[string]any{"type": "string"},
 				"filesystem":       map[string]any{"type": "string", "enum": []string{"read-only", "workspace-write", "danger-full-access"}},
 				"approval":         map[string]any{"type": "string", "enum": []string{"never", "auto"}},
@@ -1742,7 +1750,13 @@ func (s *Service) PetMCPToolForTask(ctx context.Context, taskID, name string, ar
 	taskID = strings.TrimSpace(taskID)
 	name = strings.TrimSpace(strings.ToLower(name))
 	if !petMCPReadOnlyTools[name] && taskID != petTaskID {
-		return "", fmt.Errorf("只有宠物 Task 可以调用变更工具；无身份或非宠物 Task 仅允许只读工具")
+		// The HTTP endpoint is loopback-only but identifies the caller solely
+		// through this capability, so the rejection must carry the stable code
+		// the MCP client and tests expect.
+		return "", codedErrorf(
+			ErrCodePetIdentityRequired, http.StatusForbidden,
+			"只有宠物 Task 可以调用变更工具；无身份或非宠物 Task 仅允许只读工具",
+		)
 	}
 	return s.petMCPTool(ctx, taskID, name, args)
 }
@@ -1755,7 +1769,7 @@ func (s *Service) petMCPTool(ctx context.Context, callerTaskID, name string, arg
 			return "", err
 		}
 		if !petToolAllowed(assistant, name) {
-			return "", fmt.Errorf("主人未开启该工具权限")
+			return "", codedErrorf(ErrCodePetPermissionDenied, http.StatusForbidden, "主人未开启该工具权限")
 		}
 	}
 	switch name {
@@ -2878,11 +2892,16 @@ func (s *Service) petMCPTool(ctx context.Context, callerTaskID, name string, arg
 		if err := json.Unmarshal(args, &input); err != nil {
 			return "", fmt.Errorf("invalid update task agent request")
 		}
-		agent, err := s.PetUpdateTaskAgent(ctx, input)
+		result, err := s.PetApplyTaskAgent(ctx, callerTaskID, input)
 		if err != nil {
 			return "", err
 		}
-		data, _ := json.Marshal(agent)
+		data, _ := json.Marshal(struct {
+			domain.TaskAgent
+			OK      bool   `json:"ok"`
+			Status  string `json:"status"`
+			Changed bool   `json:"changed"`
+		}{TaskAgent: result.Agent, OK: true, Status: result.Status, Changed: result.Changed})
 		return string(data), nil
 	case "aha_compact_task_session":
 		var input struct {

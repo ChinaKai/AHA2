@@ -3,9 +3,11 @@ package app
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"strings"
 	"time"
 
@@ -18,18 +20,24 @@ func (s *Service) petManageableTask(ctx context.Context, taskID string) (domain.
 		return domain.Task{}, domain.OwnerAssistant{}, err
 	}
 	if !assistant.PetAllowCreateTasks {
-		return domain.Task{}, domain.OwnerAssistant{}, fmt.Errorf("主人未开启主动创建/管理任务权限")
+		return domain.Task{}, domain.OwnerAssistant{}, codedErrorf(
+			ErrCodePetPermissionDenied, http.StatusForbidden, "主人未开启主动创建/管理任务权限",
+		)
 	}
 	taskID = strings.TrimSpace(taskID)
 	if taskID == "" {
-		return domain.Task{}, domain.OwnerAssistant{}, fmt.Errorf("task_id 不能为空")
+		return domain.Task{}, domain.OwnerAssistant{}, newCodedError("task_id_required", "task_id 不能为空")
 	}
 	task, err := s.store.Task(ctx, taskID)
 	if err != nil {
-		return domain.Task{}, domain.OwnerAssistant{}, fmt.Errorf("Task 不存在")
+		return domain.Task{}, domain.OwnerAssistant{}, codedErrorf(
+			ErrCodeTaskNotFound, http.StatusNotFound, "Task 不存在",
+		)
 	}
 	if task.ReadOnly {
-		return domain.Task{}, domain.OwnerAssistant{}, fmt.Errorf("该 Task 只读")
+		return domain.Task{}, domain.OwnerAssistant{}, codedErrorf(
+			ErrCodeTaskReadOnly, http.StatusForbidden, "该 Task 只读",
+		)
 	}
 	return task, assistant, nil
 }
@@ -265,26 +273,61 @@ func (s *Service) deleteTaskNow(ctx context.Context, taskID string) error {
 
 type PetUpdateTaskAgentInput struct {
 	TaskID          string `json:"task_id"`
+	Backend         string `json:"backend"`
+	ModelSource     string `json:"model_source"`
 	ModelID         string `json:"model_id"`
+	WireModel       string `json:"wire_model"`
+	CodexAccountID  string `json:"codex_account_id"`
 	ReasoningEffort string `json:"reasoning_effort"`
 	Filesystem      string `json:"filesystem"`
 	Approval        string `json:"approval"`
 	FastMode        *bool  `json:"fast_mode"`
 }
 
-func (s *Service) PetUpdateTaskAgent(ctx context.Context, input PetUpdateTaskAgentInput) (domain.TaskAgent, error) {
+// PetApplyTaskAgent applies a model source / model change and reports whether it
+// actually changed the persisted runtime. Only the pet Task's own Turn
+// capability may reach it: the loopback HTTP boundary alone does not identify
+// the caller, and create_tasks is a pet-wide permission. The identity check is
+// deliberately first so a rejected call cannot read or write any Task state.
+func (s *Service) PetApplyTaskAgent(ctx context.Context, callerTaskID string, input PetUpdateTaskAgentInput) (AgentConfigUpdateResult, error) {
+	if strings.TrimSpace(callerTaskID) != petTaskID {
+		return AgentConfigUpdateResult{}, codedErrorf(
+			ErrCodePetIdentityRequired, http.StatusForbidden,
+			"只有宠物 Task 的 Turn Token 可以修改 Task Agent 配置",
+		)
+	}
 	task, _, err := s.petManageableTask(ctx, input.TaskID)
 	if err != nil {
-		return domain.TaskAgent{}, err
+		return AgentConfigUpdateResult{}, err
 	}
 	if task.Status == domain.TaskCompleted || task.Status == domain.TaskCancelled {
-		return domain.TaskAgent{}, fmt.Errorf("Task 已处于 %s，不能修改 Agent", task.Status)
+		return AgentConfigUpdateResult{}, codedErrorf(
+			ErrCodeTaskNotEditable, http.StatusConflict, "Task 已处于 %s，不能修改 Agent", task.Status,
+		)
 	}
-	return s.UpdateAgentConfig(ctx, task.ID, "main", UpdateAgentConfigInput{
-		ModelID: strings.TrimSpace(input.ModelID), ReasoningEffort: strings.TrimSpace(input.ReasoningEffort),
-		Filesystem: strings.TrimSpace(input.Filesystem), Approval: strings.TrimSpace(input.Approval),
+	result, err := s.ApplyAgentConfig(ctx, task.ID, "main", UpdateAgentConfigInput{
+		Backend: strings.TrimSpace(input.Backend), ModelSource: strings.TrimSpace(input.ModelSource),
+		ModelID: strings.TrimSpace(input.ModelID), WireModel: strings.TrimSpace(input.WireModel),
+		CodexAccountID:  strings.TrimSpace(input.CodexAccountID),
+		ReasoningEffort: strings.TrimSpace(input.ReasoningEffort),
+		Filesystem:      strings.TrimSpace(input.Filesystem), Approval: strings.TrimSpace(input.Approval),
 		FastMode: input.FastMode,
 	})
+	if err != nil {
+		return AgentConfigUpdateResult{}, err
+	}
+	// Persist an explicit pet audit record next to the conversation card. It
+	// carries identifiers only -- never environment values or credentials.
+	detail, _ := json.Marshal(map[string]any{
+		"task_id": task.ID, "agent_id": "main", "status": result.Status,
+		"changed":  result.Changed,
+		"previous": result.Previous, "current": result.Current,
+	})
+	_ = s.store.AppendPetEvent(ctx, domain.PetEvent{
+		ID: domain.NewID("pet_event"), At: s.now().UTC(), Actor: "pet",
+		Kind: "task_agent_config_updated", Detail: string(detail), Status: result.Status,
+	})
+	return result, nil
 }
 
 func (s *Service) PetCompactTaskSession(ctx context.Context, taskID string) (domain.BackendSession, error) {
