@@ -90,6 +90,8 @@ sudo rm /var/lib/aha2-sync/registration-code
 
 worktree 隔离的 Task 完成后，收尾会先把任务分支合并回目标分支，再检查 worktree 是否干净、HEAD 是否已合入目标分支、是否被 git lock、是否包含子模块；全部满足才删除，且不会使用 `--force`。Windows 上超过 260 字符的路径会用 `\\?\` 扩展路径删除，不需要调用方手工清理。
 
+收尾结果会返回合并方式与提交信息：`merge_strategy` 为 `fast_forward`、`merge_commit` 或 `none`，另外还有 `source_head`（任务分支合并前的 HEAD）、`target_head_before` / `target_head_after`（目标分支合并前后的 HEAD）和 `commits`。快进合并时 `target_head_after == source_head`；普通合并时 `target_head_after` 是新生成的 merge commit；没有提交可合并时策略为 `none`，且 `target_head_before == target_head_after`。worktree 脏、原工作区脏或合并冲突时函数报错并保留 worktree 和分支，返回结果不会填写未发生的 `target_head_after`。审计记录只包含合并策略、提交数和这些 SHA，不含凭据或路径。
+
 旧版本在收尾日志报 `Filename too long` 时可能留下未删除的 `.aha2-worktrees/<task>` 目录。AHA2 不会自动清理这些历史残留；确认以下条件后可以手工删除该目录：
 
 - `git worktree list` 已不再列出它（worktree 元数据已移除）；

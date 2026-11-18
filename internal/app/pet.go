@@ -1533,7 +1533,7 @@ func ahaPetTools() []gateway.ChatTool {
 				"review_task_id":  map[string]any{"type": "string", "description": "required 时必填（评审 Task 自身豁免）：已关联源 Task、已完成且最新结果为 Verdict: APPROVE 的独立 Review Task ID（high/xhigh/max 推理、不同模型、approval=never、inplace；评审不得修改源码）"},
 			}, "required": []string{"task_id", "review_decision"},
 		}},
-		{Name: "aha_finalize_task_worktree", Description: "仅用于已完成的 worktree Task：检查提交、合并回目标分支、删除临时 worktree 和分支；有未提交改动或冲突时保留并报错", Parameters: map[string]any{
+		{Name: "aha_finalize_task_worktree", Description: "仅用于已完成的 worktree Task：检查提交、合并回目标分支、删除临时 worktree 和分支；有未提交改动或冲突时保留并报错。返回 merge_strategy（fast_forward/merge_commit/none）、source_head、target_head_before、target_head_after 与 commits，可直接引用目标分支的新 HEAD", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"task_id": map[string]any{"type": "string"},
 			}, "required": []string{"task_id"},

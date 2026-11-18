@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -163,6 +165,11 @@ func TestPetFinalizeTaskWorktreeMergesAndCleans(t *testing.T) {
 	}
 	runGitTest(t, worktree, "add", "change.txt")
 	runGitTest(t, worktree, "commit", "-m", "task change")
+	mainBefore := strings.TrimSpace(runGitTest(t, root, "rev-parse", "main"))
+	sourceHead := strings.TrimSpace(runGitTest(t, worktree, "rev-parse", "HEAD"))
+	if mainBefore == sourceHead {
+		t.Fatal("test setup: task branch is not ahead of main")
+	}
 	completeTaskForTest(t, fixture, task)
 
 	result, err := fixture.service.PetFinalizeTaskWorktree(fixture.ctx, task.ID)
@@ -171,6 +178,21 @@ func TestPetFinalizeTaskWorktreeMergesAndCleans(t *testing.T) {
 	}
 	if !result.Merged || result.NoChanges || !result.WorktreeRemoved || !result.BranchDeleted || result.Commits != 1 {
 		t.Fatalf("finalize result=%#v", result)
+	}
+	if result.MergeStrategy != mergeStrategyFastForward {
+		t.Fatalf("merge strategy=%q, want %q", result.MergeStrategy, mergeStrategyFastForward)
+	}
+	if result.SourceHead != sourceHead {
+		t.Fatalf("source head=%q, want %q", result.SourceHead, sourceHead)
+	}
+	if result.TargetHeadBefore != mainBefore {
+		t.Fatalf("target head before=%q, want %q", result.TargetHeadBefore, mainBefore)
+	}
+	if result.TargetHeadAfter != sourceHead {
+		t.Fatalf("fast-forward target head after=%q, want source head %q", result.TargetHeadAfter, sourceHead)
+	}
+	if after := strings.TrimSpace(runGitTest(t, root, "rev-parse", "main")); after != result.TargetHeadAfter {
+		t.Fatalf("reported target head after=%q, actual main=%q", result.TargetHeadAfter, after)
 	}
 	if _, err := os.Stat(filepath.Join(root, "change.txt")); err != nil {
 		t.Fatalf("merged file missing from primary worktree: %v", err)
@@ -181,6 +203,115 @@ func TestPetFinalizeTaskWorktreeMergesAndCleans(t *testing.T) {
 	if err := exec.Command("git", "-C", root, "rev-parse", "--verify", task.TaskBranch).Run(); err == nil {
 		t.Fatalf("task branch %s still exists", task.TaskBranch)
 	}
+}
+
+func TestPetFinalizeTaskWorktreeRecordsMergeCommit(t *testing.T) {
+	fixture, project, ws, root := petGitFixture(t)
+	task, worktree := createPreparedPetWorktreeTask(t, fixture, project, ws)
+	if err := os.WriteFile(filepath.Join(worktree, "change.txt"), []byte("merged\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, worktree, "add", "change.txt")
+	runGitTest(t, worktree, "commit", "-m", "task change")
+	// Advance main independently so the task branch can no longer fast-forward.
+	if err := os.WriteFile(filepath.Join(root, "main-side.txt"), []byte("main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, root, "add", "main-side.txt")
+	runGitTest(t, root, "commit", "-m", "main side")
+	mainBefore := strings.TrimSpace(runGitTest(t, root, "rev-parse", "main"))
+	sourceHead := strings.TrimSpace(runGitTest(t, worktree, "rev-parse", "HEAD"))
+	completeTaskForTest(t, fixture, task)
+
+	result, err := fixture.service.PetFinalizeTaskWorktree(fixture.ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Merged || result.NoChanges || !result.WorktreeRemoved || !result.BranchDeleted {
+		t.Fatalf("finalize result=%#v", result)
+	}
+	if result.MergeStrategy != mergeStrategyMergeCommit {
+		t.Fatalf("merge strategy=%q, want %q", result.MergeStrategy, mergeStrategyMergeCommit)
+	}
+	if result.SourceHead != sourceHead || result.TargetHeadBefore != mainBefore {
+		t.Fatalf("heads before merge=%#v, want source=%s target=%s", result, sourceHead, mainBefore)
+	}
+	if result.TargetHeadAfter == "" || result.TargetHeadAfter == sourceHead || result.TargetHeadAfter == mainBefore {
+		t.Fatalf("merge commit head=%q must be a new commit", result.TargetHeadAfter)
+	}
+	if after := strings.TrimSpace(runGitTest(t, root, "rev-parse", "main")); after != result.TargetHeadAfter {
+		t.Fatalf("reported target head after=%q, actual main=%q", result.TargetHeadAfter, after)
+	}
+	parents := strings.Fields(runGitTest(t, root, "rev-list", "--parents", "-n", "1", result.TargetHeadAfter))
+	if len(parents) != 3 || parents[1] != mainBefore || parents[2] != sourceHead {
+		t.Fatalf("merge commit parents=%v, want [%s %s %s]", parents, result.TargetHeadAfter, mainBefore, sourceHead)
+	}
+	if output := runGitTest(t, root, "show", "main:change.txt"); !strings.Contains(output, "merged") {
+		t.Fatalf("main branch missing merged change: %q", output)
+	}
+}
+
+func TestPetFinalizeTaskWorktreeAuditsMergeShape(t *testing.T) {
+	fixture, project, ws, _ := petGitFixture(t)
+	task, worktree := createPreparedPetWorktreeTask(t, fixture, project, ws)
+	if err := os.WriteFile(filepath.Join(worktree, "change.txt"), []byte("merged\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, worktree, "add", "change.txt")
+	runGitTest(t, worktree, "commit", "-m", "task change")
+	completeTaskForTest(t, fixture, task)
+
+	result, err := fixture.service.PetFinalizeTaskWorktree(fixture.ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := worktreeFinalizeAuditRows(t, fixture.databasePath)
+	if len(rows) != 1 {
+		t.Fatalf("audit rows=%d, want 1", len(rows))
+	}
+	for field, want := range map[string]string{
+		"merge_strategy":     result.MergeStrategy,
+		"source_head":        result.SourceHead,
+		"target_head_before": result.TargetHeadBefore,
+		"target_head_after":  result.TargetHeadAfter,
+	} {
+		if got, _ := rows[0][field].(string); got != want {
+			t.Fatalf("audit %s=%q, want %q (row=%#v)", field, got, want, rows[0])
+		}
+	}
+	if commits, _ := rows[0]["commits"].(float64); int(commits) != result.Commits {
+		t.Fatalf("audit commits=%v, want %d", rows[0]["commits"], result.Commits)
+	}
+}
+
+func worktreeFinalizeAuditRows(t *testing.T, databasePath string) []map[string]any {
+	t.Helper()
+	db, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rows, err := db.Query(`SELECT data_json FROM audit_events WHERE action=? ORDER BY sequence`, "pet.worktree.finalize")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	result := []map[string]any{}
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			t.Fatal(err)
+		}
+		var data map[string]any
+		if err := json.Unmarshal([]byte(raw), &data); err != nil {
+			t.Fatalf("audit data %q: %v", raw, err)
+		}
+		result = append(result, data)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return result
 }
 
 func TestPetFinalizeTaskWorktreeRestoresCurrentBranch(t *testing.T) {
@@ -375,9 +506,12 @@ func TestPetFinalizeTaskWorktreeRefusesDirtyWorktree(t *testing.T) {
 	}
 	completeTaskForTest(t, fixture, task)
 
-	_, err := fixture.service.PetFinalizeTaskWorktree(fixture.ctx, task.ID)
+	result, err := fixture.service.PetFinalizeTaskWorktree(fixture.ctx, task.ID)
 	if err == nil {
 		t.Fatal("dirty worktree was finalized")
+	}
+	if result.MergeStrategy != "" || result.TargetHeadAfter != "" || result.Merged {
+		t.Fatalf("dirty finalize reported a merge: %#v", result)
 	}
 	if !strings.Contains(err.Error(), worktree) {
 		t.Fatalf("dirty worktree error does not include the retained path: %v", err)
@@ -416,6 +550,9 @@ func TestPetFinalizeTaskWorktreeRefusesUnmergedWorktree(t *testing.T) {
 	}
 	if result.WorktreeRemoved {
 		t.Fatalf("unmerged finalize reported worktree removal: %#v", result)
+	}
+	if result.Merged || result.MergeStrategy != "" || result.TargetHeadAfter != "" {
+		t.Fatalf("conflict finalize reported a fake merge: %#v", result)
 	}
 	if _, err := os.Stat(filepath.Join(worktree, "conflict.txt")); err != nil {
 		t.Fatalf("unmerged worktree was removed: %v", err)
@@ -456,6 +593,7 @@ func TestPetFinalizeTaskWorktreeRefusesPrimaryWorkspacePath(t *testing.T) {
 func TestPetFinalizeTaskWorktreeCleansUnchangedTask(t *testing.T) {
 	fixture, project, ws, root := petGitFixture(t)
 	task, worktree := createPreparedPetWorktreeTask(t, fixture, project, ws)
+	mainHead := strings.TrimSpace(runGitTest(t, root, "rev-parse", "main"))
 	completeTaskForTest(t, fixture, task)
 
 	result, err := fixture.service.PetFinalizeTaskWorktree(fixture.ctx, task.ID)
@@ -464,6 +602,12 @@ func TestPetFinalizeTaskWorktreeCleansUnchangedTask(t *testing.T) {
 	}
 	if !result.NoChanges || result.Merged || !result.WorktreeRemoved || !result.BranchDeleted {
 		t.Fatalf("finalize result=%#v", result)
+	}
+	if result.MergeStrategy != mergeStrategyNone {
+		t.Fatalf("merge strategy=%q, want %q", result.MergeStrategy, mergeStrategyNone)
+	}
+	if result.TargetHeadBefore != mainHead || result.TargetHeadAfter != mainHead || result.SourceHead != mainHead {
+		t.Fatalf("no-change heads=%#v, want all %s", result, mainHead)
 	}
 	if _, err := os.Stat(worktree); !os.IsNotExist(err) {
 		t.Fatalf("task worktree still exists: %v", err)
