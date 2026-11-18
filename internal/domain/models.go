@@ -14,6 +14,38 @@ const (
 	ModelSourceClaudeNative  = "claude_native"
 )
 
+// NormalizeModelSource maps request-facing aliases to the canonical runtime
+// source. An empty value stays empty so callers can tell "not asked" from an
+// explicit choice; ok is false for an unknown value.
+func NormalizeModelSource(value string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "":
+		return "", true
+	case "provider", "env":
+		return ModelSourceProvider, true
+	case "official", "codex_official":
+		return ModelSourceOfficial, true
+	case "claude_native":
+		return ModelSourceClaudeNative, true
+	default:
+		return "", false
+	}
+}
+
+// RuntimeModelSource identifies the source a stored snapshot belongs to. A
+// snapshot does not store the source itself; its env group and Codex account
+// association are unambiguous.
+func RuntimeModelSource(envGroupID, codexAccountID string) string {
+	switch {
+	case envGroupID == ClaudeNativeEnvGroupID:
+		return ModelSourceClaudeNative
+	case strings.TrimSpace(codexAccountID) != "":
+		return ModelSourceOfficial
+	default:
+		return ModelSourceProvider
+	}
+}
+
 type Owner struct {
 	ID           string    `json:"id"`
 	Username     string    `json:"username"`

@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
+
+	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
 type PetModelBrief struct {
@@ -11,6 +14,7 @@ type PetModelBrief struct {
 	DisplayName       string `json:"display_name"`
 	ProviderID        string `json:"provider_id"`
 	ProviderName      string `json:"provider_name,omitempty"`
+	Source            string `json:"source,omitempty"`
 	Backend           string `json:"backend"`
 	WireModel         string `json:"wire_model"`
 	WireAPI           string `json:"wire_api,omitempty"`
@@ -77,9 +81,13 @@ func (s *Service) PetModelCatalog(ctx context.Context) (PetModelCatalog, error) 
 		EnvGroups: make([]PetEnvGroupBrief, 0, len(groups)),
 	}
 	for _, model := range models {
+		source := strings.TrimSpace(model.Source)
+		if source == "" {
+			source = domain.ModelSourceProvider
+		}
 		catalog.Models = append(catalog.Models, PetModelBrief{
 			ID: model.ID, DisplayName: model.DisplayName, ProviderID: model.ProviderID,
-			ProviderName: providerNames[model.ProviderID], Backend: model.Backend,
+			ProviderName: providerNames[model.ProviderID], Source: source, Backend: model.Backend,
 			WireModel: model.WireModel, WireAPI: model.WireAPI,
 			ContextWindow: model.ContextWindow, MaxOutputTokens: model.MaxOutputTokens,
 			AutoCompactWindow: model.AutoCompactWindow,

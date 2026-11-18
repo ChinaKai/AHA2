@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"strings"
 	"time"
 
@@ -32,6 +33,37 @@ type UpdateAgentConfigInput struct {
 	ProxyEnabled        *bool
 	FastMode            *bool
 	InheritMain         *bool
+}
+
+// AgentRuntimeConfigSummary is the non-secret runtime identity used in audit
+// records. It deliberately contains no environment values or credential refs.
+type AgentRuntimeConfigSummary struct {
+	Backend        string `json:"backend,omitempty"`
+	ModelSource    string `json:"model_source,omitempty"`
+	ModelID        string `json:"model_id,omitempty"`
+	WireModel      string `json:"wire_model,omitempty"`
+	CodexAccountID string `json:"codex_account_id,omitempty"`
+}
+
+// AgentConfigUpdateResult tells callers whether the request actually persisted
+// a new runtime. An update that matches the current configuration returns
+// Changed=false and Status="unchanged" instead of pretending to write.
+type AgentConfigUpdateResult struct {
+	Agent    domain.TaskAgent
+	Status   string
+	Changed  bool
+	Previous AgentRuntimeConfigSummary
+	Current  AgentRuntimeConfigSummary
+}
+
+func summarizeRuntimeSnapshot(snapshot domain.RuntimeConfigSnapshot) AgentRuntimeConfigSummary {
+	return AgentRuntimeConfigSummary{
+		Backend:        snapshot.Backend,
+		ModelSource:    domain.RuntimeModelSource(snapshot.EnvGroupID, snapshot.CodexAccountID),
+		ModelID:        snapshot.ModelID,
+		WireModel:      snapshot.WireModel,
+		CodexAccountID: snapshot.CodexAccountID,
+	}
 }
 
 func (s *Service) CompactAgentSession(ctx context.Context, taskID, agentID string) (domain.BackendSession, error) {
@@ -158,12 +190,7 @@ func (s *Service) TaskAgents(ctx context.Context, taskID string) ([]domain.TaskA
 			continue
 		}
 		agents[index].Backend = snapshot.Backend
-		agents[index].ModelSource = domain.ModelSourceProvider
-		if snapshot.EnvGroupID == domain.ClaudeNativeEnvGroupID {
-			agents[index].ModelSource = domain.ModelSourceClaudeNative
-		} else if snapshot.CodexAccountID != "" {
-			agents[index].ModelSource = domain.ModelSourceOfficial
-		}
+		agents[index].ModelSource = domain.RuntimeModelSource(snapshot.EnvGroupID, snapshot.CodexAccountID)
 		agents[index].ModelID = snapshot.ModelID
 		agents[index].WireModel = snapshot.WireModel
 		agents[index].CodexAccountID = snapshot.CodexAccountID
@@ -279,13 +306,29 @@ func (s *Service) UpdateAgentConfig(
 	agentID string,
 	input UpdateAgentConfigInput,
 ) (domain.TaskAgent, error) {
+	result, err := s.ApplyAgentConfig(ctx, taskID, agentID, input)
+	return result.Agent, err
+}
+
+// ApplyAgentConfig is UpdateAgentConfig with an explicit outcome. A request that
+// resolves to the Agent's current runtime is reported as unchanged and writes
+// nothing; every rejected combination returns a CodedError.
+func (s *Service) ApplyAgentConfig(
+	ctx context.Context,
+	taskID string,
+	agentID string,
+	input UpdateAgentConfigInput,
+) (AgentConfigUpdateResult, error) {
 	task, err := s.store.Task(ctx, taskID)
 	if err != nil {
-		return domain.TaskAgent{}, err
+		if errors.Is(err, sql.ErrNoRows) {
+			return AgentConfigUpdateResult{}, codedErrorf(ErrCodeTaskNotFound, http.StatusNotFound, "Task 不存在")
+		}
+		return AgentConfigUpdateResult{}, err
 	}
 	agent, err := s.store.TaskAgent(ctx, taskID, agentID)
 	if err != nil {
-		return domain.TaskAgent{}, err
+		return AgentConfigUpdateResult{}, codedErrorf(ErrCodeAgentNotFound, http.StatusNotFound, "Agent 不存在")
 	}
 	now := s.now().UTC()
 	inheritMain := false
@@ -304,43 +347,59 @@ func (s *Service) UpdateAgentConfig(
 			}
 		}
 	}
+	unchanged := false
 	if agentID != "main" && input.InheritMain != nil && *input.InheritMain {
 		previousSnapshot, err = s.store.RuntimeSnapshot(ctx, agent.RuntimeConfigSnapshotID)
 		if err != nil {
-			return domain.TaskAgent{}, err
+			return AgentConfigUpdateResult{}, err
 		}
 		mainAgent, mainErr := s.store.TaskAgent(ctx, taskID, "main")
 		if mainErr != nil {
-			return domain.TaskAgent{}, mainErr
+			return AgentConfigUpdateResult{}, mainErr
 		}
 		snapshot, err = s.store.RuntimeSnapshot(ctx, mainAgent.RuntimeConfigSnapshotID)
 		inheritMain = true
+		unchanged = agent.InheritMain && agent.RuntimeConfigSnapshotID == snapshot.ID
 	} else {
 		base, baseErr := s.store.RuntimeSnapshot(ctx, agent.RuntimeConfigSnapshotID)
 		if baseErr != nil {
-			return domain.TaskAgent{}, baseErr
+			return AgentConfigUpdateResult{}, baseErr
 		}
 		previousSnapshot = base
 		snapshot, err = s.deriveRuntimeSnapshot(ctx, task, base, input)
 		if err == nil {
-			err = s.store.CreateRuntimeSnapshot(ctx, snapshot)
+			unchanged = runtimeConfigEquivalent(base, snapshot)
+			if unchanged {
+				snapshot = base
+			} else {
+				err = s.store.CreateRuntimeSnapshot(ctx, snapshot)
+			}
 		}
 	}
 	if err != nil {
-		return domain.TaskAgent{}, err
+		return AgentConfigUpdateResult{}, err
+	}
+	result := AgentConfigUpdateResult{
+		Status: "updated", Changed: true,
+		Previous: summarizeRuntimeSnapshot(previousSnapshot),
+		Current:  summarizeRuntimeSnapshot(snapshot),
+	}
+	if unchanged {
+		result.Status, result.Changed = "unchanged", false
+		return s.finishAgentConfigResult(ctx, taskID, agentID, result, now)
 	}
 	if err := s.store.UpdateTaskAgentSnapshot(ctx, taskID, agentID, snapshot.ID, inheritMain, now); err != nil {
-		return domain.TaskAgent{}, err
+		return AgentConfigUpdateResult{}, err
 	}
 	if s.backendSessionShouldRotate(ctx, previousSnapshot, snapshot) {
 		_ = s.store.CloseBackendSessionsForAgent(ctx, taskID, agentID)
 	}
 	if agentID == "main" {
 		if err := s.store.UpdateTaskRuntimeSnapshot(ctx, taskID, snapshot.ID, timeString(now)); err != nil {
-			return domain.TaskAgent{}, err
+			return AgentConfigUpdateResult{}, err
 		}
 		if err := s.store.UpdateInheritedTaskAgentSnapshots(ctx, taskID, snapshot.ID, now); err != nil {
-			return domain.TaskAgent{}, err
+			return AgentConfigUpdateResult{}, err
 		}
 		agents, _ := s.store.ListTaskAgents(ctx, taskID)
 		for _, child := range agents {
@@ -354,18 +413,55 @@ func (s *Service) UpdateAgentConfig(
 	}
 	agents, err := s.TaskAgents(ctx, taskID)
 	if err != nil {
-		return domain.TaskAgent{}, err
+		return AgentConfigUpdateResult{}, err
 	}
 	for _, item := range agents {
 		if item.AgentID == agentID {
-			s.recordAgentConfigUpdate(ctx, item, now)
+			s.recordAgentConfigUpdate(ctx, item, result.Previous, now)
 			s.emit(ctx, taskID, "agent", agentID, "agent_config_updated", map[string]any{
 				"agent_id": agentID, "runtime_config_snapshot_id": snapshot.ID, "inherit_main": inheritMain,
+				"previous": result.Previous, "current": result.Current,
 			})
-			return item, nil
+			result.Agent = item
+			return result, nil
 		}
 	}
-	return domain.TaskAgent{}, sql.ErrNoRows
+	return AgentConfigUpdateResult{}, sql.ErrNoRows
+}
+
+func (s *Service) finishAgentConfigResult(
+	ctx context.Context, taskID, agentID string, result AgentConfigUpdateResult, now time.Time,
+) (AgentConfigUpdateResult, error) {
+	agents, err := s.TaskAgents(ctx, taskID)
+	if err != nil {
+		return AgentConfigUpdateResult{}, err
+	}
+	for _, item := range agents {
+		if item.AgentID == agentID {
+			result.Agent = item
+			return result, nil
+		}
+	}
+	return AgentConfigUpdateResult{}, sql.ErrNoRows
+}
+
+// runtimeConfigEquivalent compares the parts of a snapshot that describe the
+// selected runtime. It intentionally ignores IDs and CreatedAt so a repeated
+// identical request is recognized as a no-op instead of minting a new snapshot.
+func runtimeConfigEquivalent(previous, next domain.RuntimeConfigSnapshot) bool {
+	return previous.WorkspaceID == next.WorkspaceID &&
+		previous.Backend == next.Backend &&
+		previous.ModelID == next.ModelID &&
+		previous.WireModel == next.WireModel &&
+		previous.EnvGroupID == next.EnvGroupID &&
+		previous.EnvGroupRevision == next.EnvGroupRevision &&
+		previous.CodexAccountID == next.CodexAccountID &&
+		previous.ReasoningEffort == next.ReasoningEffort &&
+		previous.StreamIdleTimeoutMS == next.StreamIdleTimeoutMS &&
+		previous.StreamMaxRetries == next.StreamMaxRetries &&
+		previous.ProxyEnabled == next.ProxyEnabled &&
+		previous.FastMode == next.FastMode &&
+		previous.PermissionsJSON == next.PermissionsJSON
 }
 
 func backendSessionIdentityChanged(previous, next domain.RuntimeConfigSnapshot) bool {
@@ -388,7 +484,9 @@ func (s *Service) backendSessionShouldRotate(ctx context.Context, previous, next
 	return !s.dshSnapshotsShareSessionDomain(ctx, previous, next)
 }
 
-func (s *Service) recordAgentConfigUpdate(ctx context.Context, agent domain.TaskAgent, now time.Time) {
+func (s *Service) recordAgentConfigUpdate(
+	ctx context.Context, agent domain.TaskAgent, previous AgentRuntimeConfigSummary, now time.Time,
+) {
 	modelName := agent.ModelName
 	if agent.ModelSource == domain.ModelSourceOfficial || agent.ModelSource == domain.ModelSourceClaudeNative || modelName == "" {
 		modelName = agent.WireModel
@@ -420,10 +518,14 @@ func (s *Service) recordAgentConfigUpdate(ctx context.Context, agent domain.Task
 		FromAgentID: "aha", ToAgentID: agent.AgentID, RouteKind: "config_update",
 		Category: "update", Kind: "agent_config_updated", Summary: summary,
 		Payload: map[string]any{
-			"agent_id": agent.AgentID, "backend": agent.Backend, "model_source": agent.ModelSource,
-			"model_id": agent.ModelID, "model_name": modelName, "wire_model": agent.WireModel,
-			"codex_account_id": agent.CodexAccountID, "codex_account_name": accountName,
-			"reasoning_effort": agent.ReasoningEffort, "filesystem": agent.Filesystem,
+			"task_id": agent.TaskID, "agent_id": agent.AgentID, "backend": agent.Backend,
+			"model_source": agent.ModelSource, "model_id": agent.ModelID, "model_name": modelName,
+			"wire_model": agent.WireModel, "codex_account_id": agent.CodexAccountID,
+			"codex_account_name": accountName,
+			"previous_backend":   previous.Backend, "previous_model_source": previous.ModelSource,
+			"previous_model_id": previous.ModelID, "previous_wire_model": previous.WireModel,
+			"previous_codex_account_id": previous.CodexAccountID,
+			"reasoning_effort":          agent.ReasoningEffort, "filesystem": agent.Filesystem,
 			"stream_idle_timeout_ms": agent.StreamIdleTimeoutMS, "stream_max_retries": agent.StreamMaxRetries,
 			"approval": agent.Approval, "proxy_enabled": agent.ProxyEnabled, "inherit_main": agent.InheritMain,
 			"fast_mode": agent.FastMode,
@@ -438,60 +540,171 @@ func (s *Service) deriveRuntimeSnapshot(
 	base domain.RuntimeConfigSnapshot,
 	input UpdateAgentConfigInput,
 ) (domain.RuntimeConfigSnapshot, error) {
-	modelSource := strings.TrimSpace(input.ModelSource)
-	if modelSource == "" {
-		modelSource = domain.ModelSourceProvider
-		if base.EnvGroupID == domain.ClaudeNativeEnvGroupID {
-			modelSource = domain.ModelSourceClaudeNative
-		} else if base.CodexAccountID != "" {
-			modelSource = domain.ModelSourceOfficial
-		}
+	requestedSource, ok := domain.NormalizeModelSource(input.ModelSource)
+	if !ok {
+		return domain.RuntimeConfigSnapshot{}, codedErrorf(
+			ErrCodeModelSourceInvalid, http.StatusBadRequest,
+			"model_source 必须是 provider、official 或 claude_native（也接受 env、codex_official）",
+		)
 	}
-	backend := strings.TrimSpace(input.Backend)
-	if backend == "" {
-		switch modelSource {
-		case domain.ModelSourceOfficial:
-			backend = "codex"
-		case domain.ModelSourceClaudeNative:
-			backend = "claude"
-		default:
-			backend = base.Backend
-			// A provider model fixes its backend. When the caller switches the
-			// model without naming a backend, inheriting the previous snapshot's
-			// backend rejects every cross-backend switch (for example a pet
-			// moving from a codex model to a claude model).
-			if modelID := strings.TrimSpace(input.ModelID); modelID != "" {
-				if model, err := s.store.Model(ctx, modelID); err == nil {
-					if value := strings.TrimSpace(model.Backend); value != "" {
-						backend = value
-					}
-				}
-			}
-		}
-	}
+	baseSource := domain.RuntimeModelSource(base.EnvGroupID, base.CodexAccountID)
+
 	modelID := strings.TrimSpace(input.ModelID)
+	var selectedModel domain.Model
+	modelFound := false
+	loadModel := func() error {
+		model, err := s.store.Model(ctx, modelID)
+		if err != nil {
+			return codedErrorf(ErrCodeModelNotFound, http.StatusBadRequest, "模型 %q 不存在或已删除", modelID)
+		}
+		if strings.TrimSpace(model.Source) == "" {
+			model.Source = domain.ModelSourceProvider
+		}
+		selectedModel, modelFound = model, true
+		return nil
+	}
+	if modelID != "" {
+		if err := loadModel(); err != nil {
+			return domain.RuntimeConfigSnapshot{}, err
+		}
+	}
+
+	// When the caller does not name a source, the catalog entry is the strongest
+	// signal: a provider model must select provider, a managed model must select
+	// its runtime source. Falling back to the old snapshot's source is only for
+	// edits that do not touch the model at all -- otherwise a cross-source switch
+	// would silently keep the old source.
+	modelSource := requestedSource
+	if modelSource == "" {
+		if modelFound {
+			modelSource = selectedModel.Source
+		} else {
+			modelSource = baseSource
+		}
+	}
+	if requestedSource != "" && modelFound && selectedModel.Source != requestedSource {
+		return domain.RuntimeConfigSnapshot{}, codedErrorf(
+			ErrCodeModelSourceMismatch, http.StatusBadRequest,
+			"模型 %q 属于模型源 %s，不能通过 model_source=%s 选择", modelID, selectedModel.Source, requestedSource,
+		)
+	}
+
+	backend := strings.TrimSpace(input.Backend)
 	wireModel := strings.TrimSpace(input.WireModel)
 	accountID := strings.TrimSpace(input.CodexAccountID)
-	if modelSource == domain.ModelSourceOfficial {
-		if wireModel == "" {
+
+	switch modelSource {
+	case domain.ModelSourceProvider:
+		if modelID == "" {
+			if baseSource != domain.ModelSourceProvider || base.ModelID == "" {
+				return domain.RuntimeConfigSnapshot{}, codedErrorf(
+					ErrCodeModelRequired, http.StatusBadRequest,
+					"选择 provider 模型源时必须提供 model_id",
+				)
+			}
+			modelID = base.ModelID
+			if err := loadModel(); err != nil {
+				return domain.RuntimeConfigSnapshot{}, err
+			}
+		}
+		if modelBackend := strings.TrimSpace(selectedModel.Backend); modelBackend != "" {
+			if backend != "" && backend != modelBackend {
+				return domain.RuntimeConfigSnapshot{}, codedErrorf(
+					ErrCodeModelSelectionInvalid, http.StatusBadRequest,
+					"backend=%s 与模型 %q 的 backend=%s 不一致", backend, modelID, modelBackend,
+				)
+			}
+			backend = modelBackend
+		}
+		if backend == "" {
+			backend = base.Backend
+		}
+		if wireModel != "" && selectedModel.WireModel != "" && wireModel != selectedModel.WireModel {
+			return domain.RuntimeConfigSnapshot{}, codedErrorf(
+				ErrCodeModelSelectionInvalid, http.StatusBadRequest,
+				"wire_model=%s 与模型 %q 的 wire_model=%s 不一致", wireModel, modelID, selectedModel.WireModel,
+			)
+		}
+		if modelID == "" {
+			return domain.RuntimeConfigSnapshot{}, codedErrorf(
+				ErrCodeModelRequired, http.StatusBadRequest, "选择 provider 模型源时必须提供 model_id",
+			)
+		}
+	case domain.ModelSourceClaudeNative:
+		if backend == "" {
+			backend = "claude"
+		}
+		if backend != "claude" {
+			return domain.RuntimeConfigSnapshot{}, codedErrorf(
+				ErrCodeModelSelectionInvalid, http.StatusBadRequest,
+				"claude_native 模型源只能使用 claude backend，不能使用 %s", backend,
+			)
+		}
+		if wireModel == "" && modelFound {
+			wireModel = selectedModel.WireModel
+		}
+		if wireModel == "" && baseSource == domain.ModelSourceClaudeNative {
 			wireModel = base.WireModel
 		}
-		if accountID == "" {
+		if wireModel == "" {
+			return domain.RuntimeConfigSnapshot{}, codedErrorf(
+				ErrCodeWireModelRequired, http.StatusBadRequest,
+				"选择 claude_native 时必须提供 wire_model（或 claude_native 目录模型的 model_id）",
+			)
+		}
+		if modelFound && selectedModel.WireModel != "" && !strings.EqualFold(selectedModel.WireModel, wireModel) {
+			return domain.RuntimeConfigSnapshot{}, codedErrorf(
+				ErrCodeModelSelectionInvalid, http.StatusBadRequest,
+				"wire_model=%s 与模型 %q 的 wire_model=%s 不一致", wireModel, modelID, selectedModel.WireModel,
+			)
+		}
+		// Native runtime never carries a Codex account association.
+		accountID = ""
+	case domain.ModelSourceOfficial:
+		if backend == "" {
+			backend = "codex"
+		}
+		if backend != "codex" {
+			return domain.RuntimeConfigSnapshot{}, codedErrorf(
+				ErrCodeModelSelectionInvalid, http.StatusBadRequest,
+				"official 模型源只能使用 codex backend，不能使用 %s", backend,
+			)
+		}
+		if wireModel == "" && modelFound {
+			wireModel = selectedModel.WireModel
+		}
+		if wireModel == "" && baseSource == domain.ModelSourceOfficial {
+			wireModel = base.WireModel
+		}
+		if wireModel == "" {
+			return domain.RuntimeConfigSnapshot{}, codedErrorf(
+				ErrCodeWireModelRequired, http.StatusBadRequest,
+				"选择 official 时必须提供 wire_model（或 official 目录模型的 model_id）",
+			)
+		}
+		if modelFound && selectedModel.WireModel != "" && wireModel != selectedModel.WireModel {
+			return domain.RuntimeConfigSnapshot{}, codedErrorf(
+				ErrCodeModelSelectionInvalid, http.StatusBadRequest,
+				"wire_model=%s 与模型 %q 的 wire_model=%s 不一致", wireModel, modelID, selectedModel.WireModel,
+			)
+		}
+		if accountID == "" && baseSource == domain.ModelSourceOfficial {
 			accountID = base.CodexAccountID
 		}
-	} else if modelSource == domain.ModelSourceClaudeNative {
-		if wireModel == "" {
-			wireModel = base.WireModel
+		if accountID == "" {
+			resolved, err := s.codexAccountForWireModel(ctx, wireModel)
+			if err != nil {
+				return domain.RuntimeConfigSnapshot{}, err
+			}
+			accountID = resolved
 		}
-	} else if modelID == "" {
-		modelID = base.ModelID
 	}
 	model, envGroup, accountID, err := s.resolveRuntimeSelection(ctx, runtimeSelectionInput{
 		WorkspaceID: task.WorkspaceID, Backend: backend, ModelSource: modelSource, ModelID: modelID,
 		WireModel: wireModel, CodexAccountID: accountID,
 	})
 	if err != nil {
-		return domain.RuntimeConfigSnapshot{}, err
+		return domain.RuntimeConfigSnapshot{}, wrapModelSelectionError(err)
 	}
 	effort := strings.TrimSpace(input.ReasoningEffort)
 	if effort == "" {
@@ -544,6 +757,43 @@ func (s *Service) deriveRuntimeSnapshot(
 		FastMode:        fastMode,
 		PermissionsJSON: permissionsJSON(filesystem, approval), CreatedAt: s.now().UTC(),
 	}, nil
+}
+
+// codexAccountForWireModel resolves the account to use when an official model
+// is selected by catalog model_id without naming an account. Only accounts with
+// configured credentials are considered; availability of the wire model itself
+// is validated again by resolveOfficialCodexSelection.
+func (s *Service) codexAccountForWireModel(ctx context.Context, wireModel string) (string, error) {
+	accounts, err := s.store.ListCodexAccounts(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, account := range accounts {
+		if !account.CredentialConfigured {
+			continue
+		}
+		for _, option := range account.AvailableModels {
+			if option.WireModel == wireModel {
+				return account.ID, nil
+			}
+		}
+	}
+	return "", codedErrorf(
+		ErrCodeCodexAccountUnavailable, http.StatusConflict,
+		"没有已配置凭据的 Codex 官方账号提供模型 %q", wireModel,
+	)
+}
+
+// wrapModelSelectionError keeps an existing stable code and classifies the
+// resolver's plain errors as an invalid selection instead of a generic 500.
+func wrapModelSelectionError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if _, ok := AsCodedError(err); ok {
+		return err
+	}
+	return codedErrorf(ErrCodeModelSelectionInvalid, http.StatusBadRequest, "%s", err.Error())
 }
 
 func validateCodexStreamSettings(idleTimeoutMS, maxRetries int) error {

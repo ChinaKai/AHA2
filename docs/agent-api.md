@@ -74,6 +74,11 @@ Secret，Secret 使用新 Task 专属引用且不会进入响应。新 Task 固�
 再原样提交 `backend`、`model_source`、`model_id`、`wire_model`、`codex_account_id` 和可选的
 `reasoning_effort`。服务端重新校验模型与账号，并始终继承当前 Main 的文件系统和审批权限。
 
+Task Agent 运行时的模型源切换（Owner `PATCH /api/v1/tasks/{id}/agents/{agent}` 与宠物 MCP
+`aha_update_task_agent`）的字段、校验规则、稳定错误码和审计格式见
+[Task Agent 模型源配置](task-agent-model-source.md)。跨模型源切换必须显式指定
+`model_source` 或目录中的 `model_id`；被拒绝或未产生变化的请求会返回明确状态，不会静默成功。
+
 ## Task 主渠道主动联系
 
 普通 Task 已连接群聊主渠道后，活动 Main Turn 可读取 Owner 在 Task 渠道右栏选定的联调人，
