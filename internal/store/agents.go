@@ -427,6 +427,20 @@ func (s *Store) enqueueUserMessage(
 	return round, inbox, createdRound, true, false, message.ID, nil
 }
 
+// AgentAssignmentExistsForTurn reports whether the agent already has an
+// assignment routed from this exact source Turn. It mirrors the partial unique
+// index idx_agent_inbox_routed_turn; callers use it to reject a duplicate
+// before doing any of the agent/config preparation that precedes the insert.
+func (s *Store) AgentAssignmentExistsForTurn(ctx context.Context, taskID, agentID, sourceTurnID string) (bool, error) {
+	var exists bool
+	err := s.db.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM agent_inbox
+			WHERE task_id=? AND target_agent_id=? AND source_turn_id=? AND source_kind='assignment'
+		)`, taskID, agentID, sourceTurnID).Scan(&exists)
+	return exists, err
+}
+
 func (s *Store) EnqueueAgentRoute(ctx context.Context, item domain.AgentInboxItem) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

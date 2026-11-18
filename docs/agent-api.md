@@ -62,6 +62,22 @@ Task Memory 的旧 decisions/facts/progress/verification/next_actions 数组只�
 只有 Main Agent 可以修改 Memory 和提交协作批次；协作请求提交后立即由 AHA 编排。
 最终回复只包含自然语言，不再携带 Turn checkpoint。
 
+### 协作批次重复 assignment
+
+同一个 Main Turn 内，同一个子 Agent 只能有一条 `assignment`；同一批次的 `actions`
+里也不能重复出现同一个 `agent_id`。重复派发不会静默丢弃：
+
+- 全部 action 被拒时返回 `409`，`ok=false`，`error` 固定为
+  `collaboration_assignment_duplicate`，`rejected_agents` 中给出被拒绝的
+  `agent_id`、`code`、`reason` 与 `message`。
+  `reason` 为 `duplicate_in_turn`（该 Turn 已派发过该 Agent）或
+  `duplicate_in_batch`（同一批次内重复）。同批判重按请求里的 `agent_id` 独立判断，
+  即使前一个同名 action 因配置错误没有入队，后一个也会被拒绝。
+- 部分 action 成功时仍返回 `409` 和同样的失败结构，但额外携带 `batch_id`、
+  `created_agents` 与 `accepted_agents`；已接受的 Agent 已经入队，可以继续等待该批次，
+  被拒的 Agent 需要在新的 Main Turn 重新派发。
+- 正常批次仍返回 `202`。新的 Main Turn 对同一子 Agent 的 assignment 不受影响。
+
 项目 Workspace 列表和 Task 创建能力仅对 Main 开放，并强制限定到当前 Project。
 `workspace_read`、`task_create`、`clone_hardware` 三项能力对 Main 默认可用，不再要求在
 Task 上显式开启持久化授权；`GET /api/v1/agent/capabilities` 仍返回这三个字段以兼容旧客户端。

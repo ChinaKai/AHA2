@@ -107,6 +107,68 @@ type AgentAction struct {
 	Approval        string `json:"approval"`
 }
 
+const (
+	// CollaborationAssignmentDuplicate is the stable code for a rejected
+	// collaboration action: the agent already has an assignment in this Turn,
+	// or the same agent appears twice in one submitted batch.
+	CollaborationAssignmentDuplicate = "collaboration_assignment_duplicate"
+
+	CollaborationAssignmentDuplicateInBatch = "duplicate_in_batch"
+	CollaborationAssignmentDuplicateInTurn  = "duplicate_in_turn"
+)
+
+// CollaborationAssignmentRejection describes one action that was not queued.
+// It is both the per-action error and the value surfaced in the API response,
+// so the rejected agent_id and reason cannot be lost between layers.
+type CollaborationAssignmentRejection struct {
+	AgentID string `json:"agent_id"`
+	Code    string `json:"code"`
+	Reason  string `json:"reason"`
+	Message string `json:"message"`
+}
+
+func (r *CollaborationAssignmentRejection) Error() string {
+	return fmt.Sprintf("%s: agent %s rejected (%s): %s", r.Code, r.AgentID, r.Reason, r.Message)
+}
+
+// CollaborationAssignmentError is returned when at least one action was
+// rejected. A partial submission still carries the batch that was created and
+// the agents that were queued, so the caller can tell the accepted work apart
+// from the rejected actions instead of treating the whole call as either
+// success or a no-op.
+type CollaborationAssignmentError struct {
+	BatchID  string                             `json:"batch_id,omitempty"`
+	Created  int                                `json:"created_agents"`
+	Accepted []string                           `json:"accepted_agents,omitempty"`
+	Rejected []CollaborationAssignmentRejection `json:"rejected_agents"`
+}
+
+func (e *CollaborationAssignmentError) Error() string {
+	agents := make([]string, 0, len(e.Rejected))
+	for _, rejection := range e.Rejected {
+		agents = append(agents, rejection.AgentID)
+	}
+	return fmt.Sprintf("%s: rejected agent(s) %s", CollaborationAssignmentDuplicate, strings.Join(agents, ", "))
+}
+
+func duplicateAssignmentRejection(agentID, turnID string) *CollaborationAssignmentRejection {
+	return &CollaborationAssignmentRejection{
+		AgentID: agentID,
+		Code:    CollaborationAssignmentDuplicate,
+		Reason:  CollaborationAssignmentDuplicateInTurn,
+		Message: fmt.Sprintf("子 Agent %s 在当前 Main Turn（%s）已有协作 assignment，不能在同一 Turn 内重复派发；请在新的 Main Turn 再派发。", agentID, turnID),
+	}
+}
+
+func withinBatchAssignmentRejection(agentID string) CollaborationAssignmentRejection {
+	return CollaborationAssignmentRejection{
+		AgentID: agentID,
+		Code:    CollaborationAssignmentDuplicate,
+		Reason:  CollaborationAssignmentDuplicateInBatch,
+		Message: fmt.Sprintf("子 Agent %s 在同一协作批次中出现多次；每个 Agent 只能有一条 assignment。", agentID),
+	}
+}
+
 type ExecutionResult struct {
 	Reply             string
 	ExitCode          int
@@ -191,8 +253,14 @@ type Service struct {
 	// test seams: production leaves the hook nil and uses the default budget.
 	petApprovalExecutionHook    func(context.Context, domain.PetApproval) error
 	petApprovalExecutionTimeout time.Duration
-	agentAPI                    *agentapi.Capabilities
-	agentAPIURL                 string
+	// assignmentInsertHook is a test seam: it runs after the duplicate
+	// pre-check and all agent preparation, immediately before the inbox
+	// insert. Tests use it to let two real dispatches race past the pre-check
+	// and prove the unique index conflict is still reported instead of
+	// silently dropping the second assignment. Production leaves it nil.
+	assignmentInsertHook func()
+	agentAPI             *agentapi.Capabilities
+	agentAPIURL          string
 	// knowledgeVault is the optional canary read source. Nil keeps every
 	// project on the legacy knowledge tables. knowledgeVaultRuntimeRead is a
 	// separate, default-off gate: the Web vault switch may be enabled while
@@ -2519,37 +2587,76 @@ func (s *Service) spawnAgentTurns(
 	actions []AgentAction,
 	integrationInstructions string,
 ) (string, int, error) {
-	seen := map[string]bool{}
 	var routed []string
 	var routes []map[string]any
 	var members []domain.CollaborationMember
+	var rejections []CollaborationAssignmentRejection
+	accepted := map[string]bool{}
+	// requested tracks explicit agent IDs in this batch. A repeated ID is an
+	// input error even when the earlier action never reached the queue (for
+	// example its model configuration failed), so it is checked before any
+	// dispatch instead of relying on the earlier insert succeeding.
+	requested := map[string]bool{}
 	batchID := domain.NewID("collaboration_batch")
 	for index, action := range actions {
-		agentID := normalizedSubAgentID(action.AgentID, index+1)
-		if seen[agentID] || strings.TrimSpace(action.Assignment) == "" {
+		if strings.TrimSpace(action.Assignment) == "" {
 			continue
 		}
-		seen[agentID] = true
-		if actualAgentID, ok := s.enqueueAgentAction(ctx, task, parent, action, index+1, batchID); ok {
-			routed = append(routed, actualAgentID)
-			now := s.now().UTC()
-			members = append(members, domain.CollaborationMember{
-				BatchID: batchID, AgentID: actualAgentID, Required: true,
-				Status: domain.CollaborationMemberQueued, CreatedAt: now, UpdatedAt: now,
-			})
-			title := strings.TrimSpace(action.Title)
-			if title == "" {
-				if agent, err := s.store.TaskAgent(ctx, task.ID, actualAgentID); err == nil {
-					title = agent.Title
-				}
+		requestedID := strings.ToLower(strings.TrimSpace(action.AgentID))
+		if task.CollaborationMode == "auto" && requestedID != "" && requestedID != "main" {
+			if requested[requestedID] {
+				rejections = append(rejections, withinBatchAssignmentRejection(
+					normalizedSubAgentID(action.AgentID, index+1),
+				))
+				continue
 			}
-			routes = append(routes, map[string]any{
-				"agent_id": actualAgentID, "title": title, "assignment": strings.TrimSpace(action.Assignment),
-				"status": string(domain.TurnQueued),
-			})
+			requested[requestedID] = true
 		}
+		actualAgentID, ok, enqueueErr := s.enqueueAgentAction(ctx, task, parent, action, index+1, batchID)
+		if enqueueErr != nil {
+			var rejection *CollaborationAssignmentRejection
+			if errors.As(enqueueErr, &rejection) {
+				item := *rejection
+				// A duplicate of an agent accepted earlier in this same call is
+				// a within-batch duplicate (for example a blank agent_id that
+				// resolved to the same slot as an explicit one); otherwise it
+				// came from an earlier submission in this Turn.
+				if accepted[item.AgentID] {
+					item = withinBatchAssignmentRejection(item.AgentID)
+				}
+				rejections = append(rejections, item)
+				continue
+			}
+			// Existing non-duplicate rejections (single mode, agent limit,
+			// permission ceiling) are already recorded as orchestration errors.
+			log.Printf("collaboration assignment for task %s turn %s: %v", task.ID, parent.ID, enqueueErr)
+			continue
+		}
+		if !ok {
+			continue
+		}
+		accepted[actualAgentID] = true
+		routed = append(routed, actualAgentID)
+		now := s.now().UTC()
+		members = append(members, domain.CollaborationMember{
+			BatchID: batchID, AgentID: actualAgentID, Required: true,
+			Status: domain.CollaborationMemberQueued, CreatedAt: now, UpdatedAt: now,
+		})
+		title := strings.TrimSpace(action.Title)
+		if title == "" {
+			if agent, err := s.store.TaskAgent(ctx, task.ID, actualAgentID); err == nil {
+				title = agent.Title
+			}
+		}
+		routes = append(routes, map[string]any{
+			"agent_id": actualAgentID, "title": title, "assignment": strings.TrimSpace(action.Assignment),
+			"status": string(domain.TurnQueued),
+		})
 	}
 	if len(routed) == 0 {
+		if len(rejections) > 0 {
+			return "", 0, &CollaborationAssignmentError{Rejected: rejections}
+		}
 		return "", 0, nil
 	}
 	now := s.now().UTC()
@@ -2592,6 +2699,11 @@ func (s *Service) spawnAgentTurns(
 	}
 	for _, agentID := range routed {
 		_, _, _ = s.scheduleAgent(ctx, task.ID, agentID)
+	}
+	if len(rejections) > 0 {
+		return batchID, len(routed), &CollaborationAssignmentError{
+			BatchID: batchID, Created: len(routed), Accepted: routed, Rejected: rejections,
+		}
 	}
 	return batchID, len(routed), nil
 }
