@@ -5,6 +5,8 @@ import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {createHostServer} from "./server.mjs";
 
+const futureFence = id => `${id}@${Date.now() + 60_000}`;
+
 async function startHost({launchFailure = false, tabGoto = null, pageClose = null, screenshotFailure = false, initialURL = "https://example.com/final", initialURLs = null, beforeMutation = null, fenceWaitTimeoutMs, beforeBookmarkOpen = null, failLeaseHold = false} = {}) {
   const root = await mkdtemp(join(tmpdir(), "aha2-browser-host-"));
   let screenshots = 0;
@@ -377,6 +379,57 @@ test("rejects a relative .. Bookmarks symlink", async () => {
   }
 });
 
+test("malformed operation deadlines fail closed without opening a page", async () => {
+  const host = await startHost();
+  try {
+    let result = await host.call("POST", "/v1/profiles/browser_profile_1/session", {browser_kind: "edge"});
+    const sessionID = result.body.session.id;
+    await host.call("POST", "/v1/profiles/browser_profile_1/fence", {
+      session_id: sessionID, expected_fence: "", fence: "grant-1",
+    });
+    const now = Date.now();
+    const bad = [
+      "grant-1",
+      "|123",
+      "grant-1|",
+      "grant-1|1.5",
+      "grant-1| 123",
+      "grant-1|NaN",
+      "grant-1|100|200",
+      "grant-1|Infinity",
+      "grant-1|-1",
+      "grant-1|0",
+      "grant-1|99999999999999999999",
+      `grant-1|${now + 6 * 60 * 1000}`,
+      "grant-1@NaN",
+      "grant-1@Infinity",
+      "grant-1@-1",
+      "grant-1@1@2",
+    ];
+    for (const fence of bad) {
+      result = await host.call("POST", "/v1/profiles/browser_profile_1/tabs", {
+        url: `https://example.com/late-${encodeURIComponent(fence)}`, fence,
+      });
+      assert.ok(result.status >= 400 && result.status < 500, `${fence} returned ${result.status}`);
+      assert.equal(result.body.error.code, "browser_fence_invalid", fence);
+    }
+    result = await host.call("POST", "/v1/profiles/browser_profile_1/tabs", {
+      url: "https://example.com/past", fence: `grant-1|${now - 1}`,
+    });
+    assert.equal(result.status, 409);
+    assert.equal(result.body.error.code, "browser_fence_expired");
+    const after = await host.call("GET", "/v1/profiles/browser_profile_1/tabs");
+    assert.ok(!after.body.tabs.some(tab => tab.url.includes("/late-") || tab.url.endsWith("/past")));
+
+    result = await host.call("POST", "/v1/profiles/browser_profile_1/tabs", {
+      url: "https://example.com/valid", fence: `grant-1|${now + 60_000}`,
+    });
+    assert.equal(result.status, 201);
+  } finally {
+    await host.close();
+  }
+});
+
 test("stable lease identity is separate from the per-operation deadline", async () => {
   const host = await startHost();
   try {
@@ -416,16 +469,18 @@ test("mutating calls require the current lease fence", async () => {
     assert.equal(result.status, 200);
     result = await host.call("POST", "/v1/profiles/browser_profile_1/tabs", {url: "https://example.com"});
     const tabID = result.body.tab.id;
+    const fence = futureFence("grant-1");
     result = await host.call("POST", "/v1/profiles/browser_profile_1/fence", {
       session_id: host.host.state.sessions.get("browser_profile_1").id,
       expected_fence: "",
-      fence: "grant-1",
+      fence,
     });
     assert.equal(result.status, 200);
-    result = await host.call("DELETE", `/v1/profiles/browser_profile_1/tabs/${tabID}?fence=old`);
+    const stale = futureFence("old");
+    result = await host.call("DELETE", `/v1/profiles/browser_profile_1/tabs/${tabID}?fence=${encodeURIComponent(stale)}`);
     assert.equal(result.status, 409);
     assert.equal(result.body.error.code, "browser_fence_stale");
-    result = await host.call("DELETE", `/v1/profiles/browser_profile_1/tabs/${tabID}?fence=grant-1`);
+    result = await host.call("DELETE", `/v1/profiles/browser_profile_1/tabs/${tabID}?fence=${encodeURIComponent(fence)}`);
     assert.equal(result.status, 200);
   } finally {
     await host.close();
@@ -449,19 +504,21 @@ test("fence switch invalidates a paused old mutation before new holder reads", a
     const sessionID = result.body.session.id;
     result = await host.call("POST", "/v1/profiles/browser_profile_1/tabs", {url: "https://example.com"});
     const tabID = result.body.tab.id;
+    const fence1 = futureFence("grant-1");
+    const fence2 = futureFence("grant-2");
     result = await host.call("POST", "/v1/profiles/browser_profile_1/fence", {
-      session_id: sessionID, expected_fence: "", fence: "grant-1@future",
+      session_id: sessionID, expected_fence: "", fence: fence1,
     });
     assert.equal(result.status, 200);
 
     let entered = new Promise(resolve => { enteredResolve = resolve; });
     pause = true;
-    const closePromise = host.call("DELETE", `/v1/profiles/browser_profile_1/tabs/${tabID}?fence=grant-1@future`);
+    const closePromise = host.call("DELETE", `/v1/profiles/browser_profile_1/tabs/${tabID}?fence=${encodeURIComponent(fence1)}`);
     await entered;
     // New holder takes the fence while the old close is paused. The switch
     // waits for the old operation, but reader calls remain available.
     const switchPromise = host.call("POST", "/v1/profiles/browser_profile_1/fence", {
-      session_id: sessionID, expected_fence: "grant-1@future", fence: "grant-2@future",
+      session_id: sessionID, expected_fence: fence1, fence: fence2,
     });
     const tabs = await host.call("GET", "/v1/profiles/browser_profile_1/tabs");
     assert.equal(tabs.status, 200);
@@ -477,7 +534,7 @@ test("fence switch invalidates a paused old mutation before new holder reads", a
     assert.ok(restored, "stale close must not remove the page");
     assert.equal(restored.url, "https://example.com/", "the restored page must keep its URL");
     const session = await host.call("GET", "/v1/profiles/browser_profile_1/session");
-    assert.equal(session.body.session.fence, "grant-2@future");
+    assert.equal(session.body.session.fence, fence2);
   } finally {
     await host.close();
   }
@@ -501,20 +558,22 @@ test("fence switch times out without changing the old fence", async () => {
     const sessionID = result.body.session.id;
     result = await host.call("POST", "/v1/profiles/browser_profile_1/tabs", {url: "https://example.com"});
     const tabID = result.body.tab.id;
+    const fence1 = futureFence("grant-1");
+    const fence2 = futureFence("grant-2");
     await host.call("POST", "/v1/profiles/browser_profile_1/fence", {
-      session_id: sessionID, expected_fence: "", fence: "grant-1@future",
+      session_id: sessionID, expected_fence: "", fence: fence1,
     });
     const entered = new Promise(resolve => { enteredResolve = resolve; });
     pause = true;
-    const closePromise = host.call("DELETE", `/v1/profiles/browser_profile_1/tabs/${tabID}?fence=grant-1@future`);
+    const closePromise = host.call("DELETE", `/v1/profiles/browser_profile_1/tabs/${tabID}?fence=${encodeURIComponent(fence1)}`);
     await entered;
     const switched = await host.call("POST", "/v1/profiles/browser_profile_1/fence", {
-      session_id: sessionID, expected_fence: "grant-1@future", fence: "grant-2@future",
+      session_id: sessionID, expected_fence: fence1, fence: fence2,
     });
     assert.equal(switched.status, 409);
     assert.equal(switched.body.error.code, "browser_fence_timeout");
     const session = await host.call("GET", "/v1/profiles/browser_profile_1/session");
-    assert.equal(session.body.session.fence, "grant-1@future");
+    assert.equal(session.body.session.fence, fence1);
     releaseMutation();
     assert.equal((await closePromise).status, 200);
   } finally {

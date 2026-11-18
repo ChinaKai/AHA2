@@ -66,7 +66,11 @@ open/activate/navigate/close 都带 `<leaseID>|<operationDeadlineMs>`。host 为
 Playwright 调用中途因原 expiry 到期而失败，也不需要事后重开页面或回滚 URL。
 host 的持久 fence 身份固定为 lease ID；每次 mutation 另带
 `<leaseID>|<operationDeadline>`，临时 deadline 不参与 fence 身份比较，因此同一
-lease 的并发请求不会互相误报 `browser_fence_stale`。
+lease 的并发请求不会互相误报 `browser_fence_stale`。deadline 必须是非空 lease ID
+后的有限正整数，且不超过 host 当前时间 + 5 分钟 + 30 秒时钟偏差；裸 lease ID、
+`NaN`/`Infinity`、多个分隔符、负值、零、溢出或超上限都返回 4xx 且不会调用
+Playwright。host 只把该值当作有上限的操作提示，不把它视为无限授权；旧
+`<leaseID>@<expiry>` 兼容格式也执行同样的严格校验。
 service 用带独立 `hold_id` 的 CAS 把 DB lease expiry 临时延长到当前操作预算：
 同一 lease 的并发操作共享同一 hold；结束后只恢复该 `hold_id` 写入的 expiry。
 owner 合法续租会清空 hold 身份并获胜，旧 hold 恢复不能覆盖新 TTL。续租失败在调用
@@ -146,6 +150,7 @@ Agent 只有只读 snapshot/frame/bookmarks 与 open/activate/close/navigate 控
 - 同一 Profile 已被其他 Task 独占控制：`browser_profile_in_use`（409）；
 - 同一 Task 已持有另一个 Profile lease：`browser_task_profile_limit`（409）；
 - 控制权在操作开始前已转移/释放：`browser_fence_stale`（409）；
+- mutation 的 lease/deadline 格式非法或超过 host 允许上限：`browser_fence_invalid`（400）；
 - lease 过期后的新操作：`browser_fence_expired`（409）；
 - 无法建立 lease hold/续租：`browser_lease_hold_failed`（409），操作在 Playwright 调用前失败；
 - hold 恢复失败：`browser_lease_hold_release_failed`（500），操作已完成但临时期限未能恢复；deadline 固定有界；

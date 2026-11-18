@@ -111,7 +111,10 @@ AHA 侧业务请求客户端超时 60s，覆盖 host 的 30s 页面导航期限�
 
 所有请求（含健康检查）都需要 `Authorization: Bearer <token>`。持久 fence
 身份是 lease ID；mutation 传入的 `<leaseID>|<operationDeadline>` 中只有前段参与
-身份比较，后段是本次操作的临时 deadline。
+身份比较，后段是本次操作的临时 deadline。deadline 必须是有限正整数，且不超过
+host 当前时间 + 5 分钟 + 30 秒偏差；裸 ID、NaN/Infinity、多分隔符、负值、零、
+溢出或超上限均返回 4xx 且不执行页面操作。host 不会把调用方声明的 deadline 当作
+无限授权。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
@@ -142,6 +145,7 @@ AHA 侧业务请求客户端超时 60s，覆盖 host 的 30s 页面导航期限�
 - `browser_activation_failed`：切换前台页面失败；
 - `browser_bookmarks_failed`：收藏夹文件不可读、是 symlink/reparse point 或格式异常；
 - `browser_fence_stale`：控制租约在操作开始前已变化，拒绝旧 token；
+- `browser_fence_invalid`：mutation 的 lease/deadline 格式非法或超过硬上限（400）；
 - `browser_fence_expired`：租约已过截止时间，拒绝新操作；
 - `browser_lease_hold_failed`：无法为已开始的调用建立 lease hold 或续租失败，
   在 Playwright 调用前拒绝，页面不变；

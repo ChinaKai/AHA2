@@ -338,33 +338,44 @@ async function readProfileBookmarks(root, profileID, directory, beforeBookmarkOp
   return result;
 }
 
-function fenceExpiry(fence) {
-  const raw = String(fence || "");
+const OPERATION_DEADLINE_MAX_MS = 5 * 60 * 1000;
+const OPERATION_CLOCK_SKEW_MS = 30 * 1000;
+
+// Parse the per-operation fence without ever treating a malformed deadline as
+// unlimited authority. Persistent session fences hold only the lease identity.
+function parseOperationFence(value) {
+  const raw = String(value || "");
+  if (!raw) return null;
   const pipe = raw.indexOf("|");
-  if (pipe > 0) {
-    const explicit = Number(raw.slice(pipe + 1));
-    return Number.isFinite(explicit) ? explicit : NaN;
+  if (pipe >= 0) {
+    if (pipe === 0 || raw.indexOf("|", pipe + 1) >= 0) return null;
+    const identity = raw.slice(0, pipe);
+    const deadlineText = raw.slice(pipe + 1);
+    if (!identity || identity.includes("@") || !/^[0-9]+$/.test(deadlineText)) return null;
+    const expiresAt = Number(deadlineText);
+    if (!Number.isSafeInteger(expiresAt) || expiresAt <= 0) return null;
+    return {identity, expiresAt};
   }
-  const index = raw.lastIndexOf("@");
-  if (index <= 0) return NaN;
-  const expiresAt = Number(raw.slice(index + 1));
-  return Number.isFinite(expiresAt) ? expiresAt : NaN;
+  // Legacy "<leaseID>@<expiry>" is accepted only with a strict numeric
+  // deadline; a bare lease ID is not a valid mutation token.
+  const at = raw.indexOf("@");
+  if (at <= 0 || raw.indexOf("@", at + 1) >= 0) return null;
+  const identity = raw.slice(0, at);
+  const deadlineText = raw.slice(at + 1);
+  if (!identity || identity.includes("|") || !/^[0-9]+$/.test(deadlineText)) return null;
+  const expiresAt = Number(deadlineText);
+  if (!Number.isSafeInteger(expiresAt) || expiresAt <= 0) return null;
+  return {identity, expiresAt};
 }
 
 function fenceIdentity(fence) {
+  const parsed = parseOperationFence(fence);
+  if (parsed) return parsed.identity;
   const raw = String(fence || "");
   const pipe = raw.indexOf("|");
   if (pipe > 0) return raw.slice(0, pipe);
-  // Legacy persistent tokens were "<leaseID>@<expiry>"; accept them during
-  // upgrade by comparing only the lease ID. New tokens keep the deadline in
-  // the "|" segment instead.
   const at = raw.lastIndexOf("@");
   return at > 0 ? raw.slice(0, at) : raw;
-}
-
-function fenceExpired(fence) {
-  const expiresAt = fenceExpiry(fence);
-  return Number.isFinite(expiresAt) && Date.now() > expiresAt;
 }
 
 // A mutation holds its already-admitted lease for the duration of the
@@ -379,21 +390,27 @@ function beginOperationHold(session, failHold) {
   return {fence: session.fence, release() {}};
 }
 
-// Returns "" when the call may proceed, otherwise the fence error code. A
-// held operation treats its already-admitted fence as live until the operation
-// ends; a fence change is still observed as stale.
+// Returns "" when the call may proceed, otherwise the fence error code. The
+// caller-provided deadline is a hint with a hard upper bound, never an
+// unlimited lease: malformed, oversized or expired values fail closed.
 function fenceStatus(session, supplied, hold = null) {
   if (!session.fence) return "";
-  const suppliedIdentity = fenceIdentity(supplied);
-  if (suppliedIdentity !== fenceIdentity(session.fence)) return "browser_fence_stale";
+  const parsed = parseOperationFence(supplied);
+  if (!parsed) return "browser_fence_invalid";
+  if (parsed.identity !== fenceIdentity(session.fence)) return "browser_fence_stale";
+  const now = Date.now();
+  if (parsed.expiresAt > now + OPERATION_DEADLINE_MAX_MS + OPERATION_CLOCK_SKEW_MS) {
+    return "browser_fence_invalid";
+  }
   const held = Boolean(hold && hold.fence === session.fence);
-  const expiresAt = fenceExpiry(supplied);
-  const expired = Number.isFinite(expiresAt) ? Date.now() > expiresAt : fenceExpired(session.fence);
-  if (expired && !held) return "browser_fence_expired";
+  if (parsed.expiresAt <= now && !held) return "browser_fence_expired";
   return "";
 }
 
 function fenceFailure(response, code) {
+  if (code === "browser_fence_invalid") {
+    return json(response, 400, fail(400, code, "operation fence deadline is invalid").body);
+  }
   const message = code === "browser_fence_expired"
     ? "browser control lease expired"
     : code === "browser_lease_hold_failed"

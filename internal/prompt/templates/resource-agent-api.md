@@ -334,7 +334,10 @@ The Task may close any tab in the Profile, including an Owner-opened page, while
 it holds the lease. Releasing the lease (the DELETE above) does not close the
 visible browser; ask the Owner if you should keep it.
 A control operation admitted while the lease is live holds its expiry until it
-finishes, so a close/navigate/open is never half-applied. A paused operation is
+finishes, so a close/navigate/open is never half-applied. The host treats the
+operation deadline as a bounded hint (at most five minutes plus clock skew),
+never as an unlimited authorization; malformed or oversized deadlines fail
+before the page operation. A paused operation is
 still rejected with `browser_fence_stale` if transfer/release changes the fence
 before it starts, and any new operation after expiry fails with
 `browser_fence_expired`; do not retry either with the old grant.

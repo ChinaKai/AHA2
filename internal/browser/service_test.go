@@ -1415,6 +1415,77 @@ func TestHoldRestoreFailureIsBoundedAndDoesNotRoll(t *testing.T) {
 	}
 }
 
+func TestNewOperationRebuildsHoldAfterOwnerRenewal(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	profile := createProfile(t, f)
+	grant, err := f.service.CreateGrant(ctx, "owner", f.task.ID, profile.ID, nil, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.host.SetCurrentPages(profile.ID, []browser.HostTab{
+		{ID: "host-page-owner", URL: "https://owner.example/work", Title: "Work", Active: true},
+	})
+	tabs, err := f.service.SyncTabs(ctx, grant.ID)
+	if err != nil || len(tabs) != 1 {
+		t.Fatalf("tabs=%#v err=%v", tabs, err)
+	}
+	closeStarted := make(chan struct{}, 1)
+	closeRelease := make(chan struct{})
+	f.host.CloseTabStarted = closeStarted
+	f.host.CloseTabRelease = closeRelease
+	f.host.CloseTabGateTabID = tabs[0].HostTabID
+	closeResult := make(chan error, 1)
+	go func() {
+		closeResult <- f.service.CloseTab(ctx, "owner", grant.ID, tabs[0].ID)
+	}()
+	<-closeStarted
+	oldHold, err := f.store.BrowserTaskGrant(ctx, grant.ID)
+	if err != nil || oldHold.HoldID == "" {
+		t.Fatalf("old hold=%#v err=%v", oldHold, err)
+	}
+
+	// Owner renewal clears the persisted hold generation while the old close
+	// is still running.
+	renewedExpiry := f.now.Add(2 * time.Minute)
+	if _, err := f.store.RefreshBrowserTaskGrantLease(ctx, grant.ID, oldHold.Capabilities, renewedExpiry, f.now); err != nil {
+		t.Fatal(err)
+	}
+	openStarted := make(chan struct{}, 1)
+	openRelease := make(chan struct{})
+	f.host.OpenTabStarted = openStarted
+	f.host.OpenTabRelease = openRelease
+	openResult := make(chan error, 1)
+	go func() {
+		_, err := f.service.OpenTab(ctx, "owner", grant.ID, "https://after-renew.example/")
+		openResult <- err
+	}()
+	<-openStarted
+	newHold, err := f.store.BrowserTaskGrant(ctx, grant.ID)
+	if err != nil || newHold.HoldID == "" || newHold.HoldID == oldHold.HoldID {
+		t.Fatalf("new operation reused old hold generation: %#v err=%v", newHold, err)
+	}
+
+	// Finishing the old generation must not delete the new hold cache/row.
+	close(closeRelease)
+	if err := <-closeResult; err != nil {
+		t.Fatalf("old close after owner renewal: %v", err)
+	}
+	stillHeld, err := f.store.BrowserTaskGrant(ctx, grant.ID)
+	if err != nil || stillHeld.HoldID != newHold.HoldID {
+		t.Fatalf("old generation cleanup removed new hold: %#v err=%v", stillHeld, err)
+	}
+
+	close(openRelease)
+	if err := <-openResult; err != nil {
+		t.Fatalf("open after owner renewal: %v", err)
+	}
+	finalGrant, err := f.store.BrowserTaskGrant(ctx, grant.ID)
+	if err != nil || finalGrant.HoldID != "" || !finalGrant.ExpiresAt.Equal(renewedExpiry) {
+		t.Fatalf("final hold/expiry=%#v err=%v", finalGrant, err)
+	}
+}
+
 func TestOwnerRenewalWinsOverOldHoldRestore(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)

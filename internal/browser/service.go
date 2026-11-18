@@ -1223,20 +1223,41 @@ func (s *Service) withOperationHold(ctx context.Context, grant domain.BrowserTas
 	holdUntil := now.Add(operationHoldBudget)
 	s.holdMu.Lock()
 	if held := s.holds[grant.ID]; held != nil {
-		// Service-level operations for one lease share the already-installed
-		// hold. The host fence identity stays the lease ID and both calls use
-		// the same operation deadline, so neither looks like a takeover.
-		held.refs++
-		expiresAt := held.expiresAt
-		s.holdMu.Unlock()
-		defer func() {
-			err = s.releaseOperationHold(ctx, grant.ID, held, err)
-		}()
-		return fn(expiresAt)
+		// The in-memory entry is only a cache of one persisted hold
+		// generation. Re-read the row before joining: the Owner may have
+		// renewed the lease and cleared hold_id while an older operation is
+		// still running. Reusing that generation would leave the new call
+		// without a persistent hold.
+		current, readErr := s.store.BrowserTaskGrant(ctx, grant.ID)
+		if readErr == nil && held.id != "" && current.HoldID == held.id &&
+			current.HoldExpiresAt.Equal(held.expiresAt) && held.expiresAt.After(now) {
+			held.refs++
+			expiresAt := held.expiresAt
+			s.holdMu.Unlock()
+			defer func() {
+				err = s.releaseOperationHold(ctx, grant.ID, held, err)
+			}()
+			return fn(expiresAt)
+		}
+		if readErr != nil {
+			s.holdMu.Unlock()
+			s.holdFailureAudit(context.WithoutCancel(ctx), grant.ID, "hold_read_failed")
+			return conflict("browser_lease_hold_failed", "浏览器授权正在变化，操作未开始，请重试")
+		}
+		// Detach only this generation. Older holders keep their own pointer
+		// and release it by hold_id; they must not delete a newer cache entry.
+		if s.holds[grant.ID] == held {
+			delete(s.holds, grant.ID)
+		}
+		grant = current
 	}
 	if grant.HoldID == "" && !grant.ExpiresAt.Before(holdUntil) {
 		s.holdMu.Unlock()
-		return fn(grant.ExpiresAt)
+		deadline := holdUntil
+		if grant.ExpiresAt.Before(deadline) {
+			deadline = grant.ExpiresAt
+		}
+		return fn(deadline)
 	}
 	if s.holdForTest != nil {
 		testErr := s.holdForTest()
@@ -1275,7 +1296,9 @@ func (s *Service) releaseOperationHold(ctx context.Context, grantID string, held
 		s.holdMu.Unlock()
 		return operationErr
 	}
-	delete(s.holds, grantID)
+	if s.holds[grantID] == held {
+		delete(s.holds, grantID)
+	}
 	s.holdMu.Unlock()
 
 	restoreCtx := context.WithoutCancel(ctx)
