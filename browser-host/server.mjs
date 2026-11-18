@@ -174,7 +174,17 @@ async function describePage(tab) {
     PAGE_METADATA_TIMEOUT_MS,
     "",
   )) === "visible";
-  return {id: tab.id, url, title, active};
+  // visibilityState is per page and cannot tell two browser windows apart: a
+  // Profile with several windows has one visible tab in each. document.hasFocus
+  // is per top-level browsing context, so only the foreground window's current
+  // tab reports true. It is an independent field; `active` keeps its meaning.
+  // A fake or unusual page without hasFocus, or one that throws, is not focused.
+  const focused = (await settleWithin(
+    page.evaluate(() => (typeof document.hasFocus === "function" ? document.hasFocus() === true : false)),
+    PAGE_METADATA_TIMEOUT_MS,
+    false,
+  )) === true;
+  return {id: tab.id, url, title, active, focused};
 }
 
 async function listSessionPages(session) {

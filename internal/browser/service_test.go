@@ -1040,6 +1040,43 @@ func TestSyncTabsKeepsEveryVisiblePage(t *testing.T) {
 	}
 }
 
+func TestSyncTabsPassesForegroundFocusWithoutPersistingIt(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	profile := createProfile(t, f)
+	grant, err := f.service.CreateGrant(ctx, "owner", f.task.ID, profile.ID, nil, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Two windows: both pages are visible, only one window owns the focus.
+	f.host.SetCurrentPages(profile.ID, []browser.HostTab{
+		{ID: "host-page-focus", URL: "https://example.com/notes", Title: "Notes", Active: true, Focused: true},
+		{ID: "host-page-other", URL: "https://example.com/other", Title: "Other", Active: true},
+	})
+	tabs, err := f.service.SyncTabs(ctx, grant.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byURL := map[string]domain.BrowserTab{}
+	for _, tab := range tabs {
+		byURL[tab.URL] = tab
+	}
+	focused, other := byURL["https://example.com/notes"], byURL["https://example.com/other"]
+	if !focused.Active || !focused.Focused || !other.Active || other.Focused {
+		t.Fatalf("focused=%#v other=%#v", focused, other)
+	}
+	// Focus is a transient host view, not browser_tabs state.
+	stored, err := f.store.BrowserTabsForSession(ctx, grant.Session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tab := range stored {
+		if tab.Focused {
+			t.Fatalf("focused leaked into storage: %#v", tab)
+		}
+	}
+}
+
 func TestTransferFencesInFlightClose(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)

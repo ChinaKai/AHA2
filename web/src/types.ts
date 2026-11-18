@@ -882,7 +882,12 @@ export interface BrowserTab {
   url: string;
   title: string;
   origin?: "agent" | "owner";
+  // Visible in its own browser window. Several windows can each have one
+  // active page, so this alone cannot identify the page the Owner is viewing.
   active?: boolean;
+  // The page's window is the foreground one. Only one page should carry it;
+  // the preview follows this before falling back to `active`.
+  focused?: boolean;
   created_at: string;
   updated_at: string;
 }

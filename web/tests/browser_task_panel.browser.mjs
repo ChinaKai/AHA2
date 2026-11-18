@@ -82,6 +82,8 @@ window.__ownerTabs = [];
 window.__ownerClosed = [];
 window.__ownerNav = {};
 window.__ownerActive = "";
+// Foreground window of a multi-window Profile; independent of active.
+window.__ownerFocused = "";
 window.__syncRequests = 0;
 // Explicit gate for delayed-response probes: arm {promise, release} before the
 // request that must be held; the fixture awaits it and the test releases it by
@@ -108,6 +110,7 @@ const ownerView = tabs => {
   let list = tabs.concat(window.__ownerTabs).filter(tab => !window.__ownerClosed.includes(tab.id)
     && !window.__frameClosed.includes(tab.id));
   if (window.__ownerActive) list = list.map(tab => ({...tab, active: tab.id === window.__ownerActive}));
+  if (window.__ownerFocused) list = list.map(tab => ({...tab, focused: tab.id === window.__ownerFocused}));
   list = list.map(tab => window.__ownerNav[tab.id] ? {...tab, ...window.__ownerNav[tab.id]} : tab);
   return list;
 };
@@ -339,6 +342,20 @@ try {
   assert.equal(await page.locator(".desktop-browser-tab.active").count(), 1);
   assert.equal(await page.locator('[aria-current="page"]').count(), 1);
   assert.deepEqual(await page.locator("[data-browser-tab]").evaluateAll(items => items.map(item => item.getAttribute("aria-pressed"))), ["true", "false"]);
+
+  // 2b. Two windows each stay active; the foreground one decides the preview.
+  // Switching focus moves the single highlight and restarts the frame stream on
+  // the new tab, so the strip can never point at a different page than the
+  // picture.
+  const beforeFocusFrames = await page.evaluate(() => window.__frames);
+  await page.evaluate(() => { window.__ownerFocused = "browser_tab_2"; });
+  await waitFor(page, () => document.querySelector("[data-browser-tab='browser_tab_2']")?.getAttribute("aria-pressed") === "true", {timeout: 8000});
+  assert.equal(await page.locator(".desktop-browser-tab.active").count(), 1);
+  assert.equal(await page.locator('[aria-current="page"]').count(), 1);
+  await waitFor(page, count => window.__frames > count, {arg: beforeFocusFrames, timeout: 5000});
+  await page.evaluate(() => { window.__ownerFocused = "browser_tab_1"; });
+  await waitFor(page, () => document.querySelector("[data-browser-tab='browser_tab_1']")?.getAttribute("aria-pressed") === "true", {timeout: 8000});
+  await page.evaluate(() => { window.__ownerFocused = ""; });
 
   // The tab strip is horizontal, compact, and never renders the full URL.
   const longTab = page.locator("[data-browser-tab='browser_tab_1']");

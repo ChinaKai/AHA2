@@ -51,3 +51,35 @@ test("tab selection follows a single real-window switch and leaves ambiguous win
   assert.equal(panel.browserFollowTabID([{id: "a"}, {id: "b"}], "missing"), "a");
   assert.equal(panel.browserFollowTabID([], "a"), "");
 });
+
+test("one focused page wins over several active pages from other windows", () => {
+  const tabs = [
+    {id: "a", active: true, focused: false},
+    {id: "b", active: true, focused: true},
+  ];
+  assert.equal(panel.browserFollowTabID(tabs, "a"), "b", "the foreground window wins");
+  assert.equal(panel.browserFollowTabID(tabs, ""), "b");
+  assert.equal(panel.browserFollowTabID(tabs, "a", false), "a", "manual selection is respected briefly");
+});
+
+test("a focused change moves the selection and the preview stream key", () => {
+  const before = [
+    {id: "a", active: true, focused: true},
+    {id: "b", active: true, focused: false},
+  ];
+  const after = before.map(tab => ({...tab, focused: tab.id === "b"}));
+  const next = panel.browserFollowTabID(after, "a");
+  assert.equal(panel.browserFollowTabID(before, "a"), "a");
+  assert.equal(next, "b", "selection follows the new foreground window");
+  assert.notEqual(panel.browserPreviewStreamKey("browser_grant_1", "a"),
+    panel.browserPreviewStreamKey("browser_grant_1", next),
+    "a new tab id must start a new preview stream");
+});
+
+test("without a focused page the single active page still wins, ambiguity never guesses", () => {
+  assert.equal(panel.browserFollowTabID([{id: "a", active: true}, {id: "b", active: false}], "b"), "a");
+  assert.equal(panel.browserFollowTabID([{id: "a", focused: true}, {id: "b", focused: true}], "b"), "b",
+    "several focused pages are ambiguous");
+  assert.equal(panel.browserFollowTabID([{id: "a", active: true}, {id: "b", active: true}], "b"), "b",
+    "several active pages without focus stay ambiguous");
+});

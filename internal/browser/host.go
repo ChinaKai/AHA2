@@ -69,6 +69,10 @@ type HostTab struct {
 	URL    string `json:"url"`
 	Title  string `json:"title"`
 	Active bool   `json:"active,omitempty"`
+	// Focused is the foreground-window signal. Active means "visible in its
+	// window"; a Profile with several Edge windows has one visible page per
+	// window, so only Focused identifies the page the Owner is looking at.
+	Focused bool `json:"focused,omitempty"`
 }
 
 type HostSnapshot struct {

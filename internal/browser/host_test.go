@@ -66,7 +66,7 @@ func TestHTTPHostMapsErrorsAndSessionPayloads(t *testing.T) {
 				return
 			}
 			_ = json.NewEncoder(writer).Encode(map[string]any{"tabs": []map[string]any{
-				{"id": "host-tab-1", "url": "https://example.com/login", "title": "Login", "active": true},
+				{"id": "host-tab-1", "url": "https://example.com/login", "title": "Login", "active": true, "focused": true},
 			}})
 		default:
 			writer.WriteHeader(http.StatusServiceUnavailable)
@@ -91,7 +91,7 @@ func TestHTTPHostMapsErrorsAndSessionPayloads(t *testing.T) {
 		t.Fatalf("session=%#v err=%v", closed, err)
 	}
 	tabs, err := host.ListTabs(ctx, "profile_1", "host-session-1")
-	if err != nil || len(tabs) != 1 || tabs[0].ID != "host-tab-1" || !tabs[0].Active {
+	if err != nil || len(tabs) != 1 || tabs[0].ID != "host-tab-1" || !tabs[0].Active || !tabs[0].Focused {
 		t.Fatalf("tabs=%#v err=%v", tabs, err)
 	}
 	activated, err := host.Activate(ctx, "profile_1", "host-session-1", "tab_1", "fence-1")

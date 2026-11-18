@@ -199,21 +199,32 @@ export function browserBookmarkFolderLabel(folder: string): string {
   return label || value;
 }
 
-// Pick the tab the preview should show. A missing selection falls back to the
-// one page the host reports as visible, then to the first page. When exactly
-// one page is active, follow the owner's real-window switch; several active
-// pages mean several browser windows, where guessing would fight the owner.
+// Pick the tab the preview should show. `active` only means "visible in its
+// own window", so a Profile with several Edge windows has several active pages
+// and cannot say which window the Owner is looking at. `focused` is the
+// foreground-window signal and wins when exactly one page carries it. Without
+// one, fall back to exactly one active page. Anything ambiguous (several
+// focused, or no focus and several active) keeps the current selection instead
+// of guessing. A missing selection still falls back to the first page.
 export function browserFollowTabID(tabs: BrowserTab[], selectedID: string, followActive = true): string {
   if (!tabs.length) return "";
+  const focused = tabs.filter(tab => tab.focused);
+  const active = tabs.filter(tab => tab.active);
+  const target = focused.length === 1
+    ? focused[0]
+    : focused.length === 0 && active.length === 1 ? active[0] : null;
   if (!tabs.some(tab => tab.id === selectedID)) {
-    const active = tabs.filter(tab => tab.active);
-    return (active.length === 1 ? active[0] : tabs[0]).id;
+    return (target || tabs[0]).id;
   }
-  if (followActive) {
-    const active = tabs.filter(tab => tab.active);
-    if (active.length === 1 && active[0].id !== selectedID) return active[0].id;
-  }
+  if (followActive && target && target.id !== selectedID) return target.id;
   return selectedID;
+}
+
+// The preview stream is keyed by lease + selected tab, so a focus change that
+// moves the selection also starts a new stream instead of reusing the old
+// page's frames.
+export function browserPreviewStreamKey(grantID: string, tabID: string): string {
+  return grantID && tabID ? `${grantID}:${tabID}` : "";
 }
 
 function groupBookmarks(bookmarks: BrowserBookmark[]): Map<string, BrowserBookmark[]> {
@@ -312,7 +323,7 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
   const selectedTab = (): BrowserTab | null =>
     state.tabs.find(tab => tab.id === state.selectedTabID) || null;
   const selectorTarget = (): HTMLElement | null => selector && selector.isConnected ? selector : null;
-  const streamKey = (): string => state.grant && state.selectedTabID ? `${state.grant.id}:${state.selectedTabID}` : "";
+  const streamKey = (): string => browserPreviewStreamKey(state.grant?.id || "", state.selectedTabID);
   // Called whenever the lease or the visible selection changes underneath an
   // in-flight state read; see stateSyncEpoch.
   const invalidateStateSync = (): void => { stateSyncEpoch++; };
@@ -523,10 +534,10 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
       ? state.tabs.map(tab => {
         const selected = tab.id === state.selectedTabID;
         const host = tabHost(tab.url);
-        // Only the page currently shown in the preview is "当前". The host's
-        // `active` flag means "visible in its window", and a Profile with two
-        // browser windows can legitimately report several at once, so it must
-        // never produce several "当前" labels or highlighted tabs.
+        // Only the page currently shown in the preview is "当前". Both the
+        // preview and this strip read state.selectedTabID, so they cannot
+        // diverge. The host's `active`/`focused` flags describe the real
+        // windows and must never produce several "当前" labels or highlights.
         return `<li class="desktop-browser-tab-item ${selected ? "active" : ""}" data-browser-tab-item="${escapeHTML(tab.id)}">
           <button type="button" class="desktop-browser-tab ${selected ? "active" : ""}" data-browser-tab="${escapeHTML(tab.id)}" aria-pressed="${selected}" ${selected ? 'aria-current="page"' : ""} title="${escapeHTML(tab.url)}">
             ${faviconMark(tab.url, "desktop-browser-tab-favicon")}
@@ -770,7 +781,7 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
   const applyBrowserState = (data: TaskBrowserState): AppliedBrowserState => {
     const beforeGrant = state.grant?.id || "";
     const beforeIDs = state.tabs.map(tab => tab.id).join("\n");
-    const beforeTabs = state.tabs.map(tab => `${tab.id}|${tab.url}|${tab.title}|${tab.active ? 1 : 0}`).join("\n");
+    const beforeTabs = state.tabs.map(tab => `${tab.id}|${tab.url}|${tab.title}|${tab.active ? 1 : 0}|${tab.focused ? 1 : 0}`).join("\n");
     const beforeProfile = state.profileID;
     const beforeHost = state.host ? `${state.host.available}|${state.host.edge_available}|${state.host.code || ""}` : "";
 
@@ -815,7 +826,7 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     const selected = selectedTab();
     if (selected && document.activeElement?.id !== "desktop-browser-url") state.urlDraft = selected.url;
     const afterIDs = state.tabs.map(tab => tab.id).join("\n");
-    const afterTabs = state.tabs.map(tab => `${tab.id}|${tab.url}|${tab.title}|${tab.active ? 1 : 0}`).join("\n");
+    const afterTabs = state.tabs.map(tab => `${tab.id}|${tab.url}|${tab.title}|${tab.active ? 1 : 0}|${tab.focused ? 1 : 0}`).join("\n");
     const afterHost = state.host ? `${state.host.available}|${state.host.edge_available}|${state.host.code || ""}` : "";
     return {
       changed: beforeGrant !== (active?.id || "") || beforeTabs !== afterTabs

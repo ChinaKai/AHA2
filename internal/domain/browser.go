@@ -144,9 +144,12 @@ type BrowserTab struct {
 	URL       string `json:"url"`
 	Title     string `json:"title"`
 	Origin    string `json:"origin"`
-	// Active is a transient view field from the host's page list; it is not
-	// stored in browser_tabs.
+	// Active and Focused are transient view fields from the host's page list;
+	// they are not stored in browser_tabs. Active means the page is visible in
+	// its window; Focused means its window is the foreground one, which is what
+	// the live preview should follow when several windows are open.
 	Active    bool      `json:"active,omitempty"`
+	Focused   bool      `json:"focused,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }

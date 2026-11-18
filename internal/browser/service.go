@@ -1367,7 +1367,7 @@ func (s *Service) OpenTab(ctx context.Context, actor, grantID, targetURL string)
 		candidate := domain.BrowserTab{
 			ID: domain.NewID("browser_tab"), SessionID: grant.SessionID, GrantID: grant.ID,
 			TaskID: grant.TaskID, HostTabID: hostTab.ID, URL: hostTab.URL, Title: hostTab.Title,
-			Origin: domain.BrowserTabOriginAgent, Active: hostTab.Active,
+			Origin: domain.BrowserTabOriginAgent, Active: hostTab.Active, Focused: hostTab.Focused,
 		}
 		if candidate.URL == "" {
 			candidate.URL = targetURL
@@ -1382,6 +1382,7 @@ func (s *Service) OpenTab(ctx context.Context, actor, grantID, targetURL string)
 		}
 		tab = stored
 		tab.Active = hostTab.Active
+		tab.Focused = hostTab.Focused
 		return nil
 	})
 	if err != nil {
@@ -1493,6 +1494,7 @@ func (s *Service) syncSessionTabs(ctx context.Context, grant domain.BrowserTaskG
 			return nil, err
 		}
 		stored.Active = page.Active
+		stored.Focused = page.Focused
 		result = append(result, stored)
 	}
 	for _, tab := range existing {

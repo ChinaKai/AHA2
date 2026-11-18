@@ -7,11 +7,11 @@ import {createHostServer} from "./server.mjs";
 
 const futureFence = id => `${id}@${Date.now() + 60_000}`;
 
-async function startHost({launchFailure = false, tabGoto = null, pageClose = null, screenshotFailure = false, initialURL = "https://example.com/final", initialURLs = null, beforeMutation = null, fenceWaitTimeoutMs, beforeBookmarkOpen = null, failLeaseHold = false} = {}) {
+async function startHost({launchFailure = false, tabGoto = null, pageClose = null, screenshotFailure = false, initialURL = "https://example.com/final", initialURLs = null, pageStates = null, beforeMutation = null, fenceWaitTimeoutMs, beforeBookmarkOpen = null, failLeaseHold = false} = {}) {
   const root = await mkdtemp(join(tmpdir(), "aha2-browser-host-"));
   let screenshots = 0;
   let shutdownCalls = 0;
-  const makePage = (initialURL = "https://example.com/final", visible = true) => {
+  const makePage = (initialURL = "https://example.com/final", visible = true, focused = false, focusThrows = false) => {
     let currentURL = initialURL;
     const page = {
       closed: 0,
@@ -26,8 +26,17 @@ async function startHost({launchFailure = false, tabGoto = null, pageClose = nul
         page.closed++;
       },
       bringToFront: async () => { page.broughtToFront = (page.broughtToFront || 0) + 1; },
-      // Snapshot passes a numeric limit; the visibility probe passes no args.
-      evaluate: async (_fn, arg) => (typeof arg === "number" ? "page text" : (visible ? "visible" : "hidden")),
+      // Snapshot passes a numeric limit; the visibility and focus probes pass
+      // no args. A page can be visible in its window without owning the
+      // foreground focus, which is exactly the multi-window case.
+      evaluate: async (fn, arg) => {
+        if (typeof arg === "number") return "page text";
+        if (String(fn).includes("hasFocus")) {
+          if (focusThrows) throw new Error("hasFocus unavailable");
+          return focused;
+        }
+        return visible ? "visible" : "hidden";
+      },
       isClosed: () => false,
       on: () => {},
       screenshot: async () => {
@@ -40,7 +49,9 @@ async function startHost({launchFailure = false, tabGoto = null, pageClose = nul
   };
   // A persistent Edge context starts with one page; the Owner may then open
   // more. Both are listed as bindable pages by the host.
-  const initialPages = (initialURLs || [initialURL]).map((url, index) => makePage(url, index === 0));
+  const initialPages = pageStates
+    ? pageStates.map(state => makePage(state.url, state.visible !== false, state.focused === true, state.focusThrows === true))
+    : (initialURLs || [initialURL]).map((url, index) => makePage(url, index === 0));
   const page = initialPages[0];
   let lastPage = page;
   const context = {
@@ -175,6 +186,46 @@ test("lists the page the Owner already has open, including its active state", as
     const again = await host.call("GET", "/v1/profiles/browser_profile_1/tabs");
     assert.equal(again.body.tabs.length, 2);
     assert.ok(again.body.tabs.some(tab => tab.id === created.body.tab.id && tab.url === "https://example.com/created"));
+  } finally {
+    await host.close();
+  }
+});
+
+test("reports foreground focus separately from visibility across browser windows", async () => {
+  // Two Edge windows: each has one visible page, only the foreground window's
+  // page has focus. Both stay active; focused identifies the Owner's window.
+  const host = await startHost({pageStates: [
+    {url: "https://example.com/notes", visible: true, focused: true},
+    {url: "https://example.com/other", visible: true, focused: false},
+  ]});
+  try {
+    const opened = await host.call("POST", "/v1/profiles/browser_profile_1/session", {browser_kind: "edge"});
+    assert.equal(opened.status, 200);
+    const listed = await host.call("GET", "/v1/profiles/browser_profile_1/tabs");
+    assert.equal(listed.status, 200);
+    assert.equal(listed.body.tabs.length, 2);
+    const byURL = Object.fromEntries(listed.body.tabs.map(tab => [tab.url, tab]));
+    assert.equal(byURL["https://example.com/notes"].active, true);
+    assert.equal(byURL["https://example.com/notes"].focused, true);
+    assert.equal(byURL["https://example.com/other"].active, true);
+    assert.equal(byURL["https://example.com/other"].focused, false);
+  } finally {
+    await host.close();
+  }
+});
+
+test("a page whose hasFocus probe throws is listed without focus", async () => {
+  const host = await startHost({pageStates: [
+    {url: "https://example.com/broken-focus", visible: true, focusThrows: true},
+  ]});
+  try {
+    const opened = await host.call("POST", "/v1/profiles/browser_profile_1/session", {browser_kind: "edge"});
+    assert.equal(opened.status, 200);
+    const listed = await host.call("GET", "/v1/profiles/browser_profile_1/tabs");
+    assert.equal(listed.status, 200);
+    assert.equal(listed.body.tabs.length, 1);
+    assert.equal(listed.body.tabs[0].active, true);
+    assert.equal(listed.body.tabs[0].focused, false);
   } finally {
     await host.close();
   }
