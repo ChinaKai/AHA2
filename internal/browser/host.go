@@ -28,6 +28,18 @@ type Host interface {
 	Frame(ctx context.Context, profileID, sessionID, tabID string) (HostFrame, error)
 	CloseTab(ctx context.Context, profileID, sessionID, tabID, fence string) error
 	Bookmarks(ctx context.Context, profileID, sessionID string) ([]HostBookmark, error)
+	// Action runs one page-level interaction against the authorized tab. The
+	// host accepts only element refs from a recent structured snapshot or
+	// viewport coordinates; it never accepts a selector, script or CDP call.
+	Action(ctx context.Context, profileID, sessionID, tabID string, action HostAction, fence string) (HostActionResult, error)
+	// Upload hands Agent-supplied bytes to one file input or file chooser.
+	// The bytes stay in memory; no caller-supplied or host path is accepted.
+	Upload(ctx context.Context, profileID, sessionID, tabID string, upload HostUpload, fence string) (HostUploadResult, error)
+	Downloads(ctx context.Context, profileID, sessionID string) ([]HostDownload, error)
+	Download(ctx context.Context, profileID, sessionID, downloadID string) (HostDownloadFile, error)
+	ClearDownloads(ctx context.Context, profileID, sessionID string) error
+	Cookies(ctx context.Context, profileID, sessionID, targetURL, domain string) ([]HostCookie, bool, error)
+	ImportCookies(ctx context.Context, profileID, sessionID string, cookies []HostCookie, fence string) (int, error)
 	// SetFence installs the current lease fence on the host session. Mutating
 	// host calls carry the same value; a stale value is rejected before any
 	// page side effect.
@@ -63,6 +75,95 @@ type HostSnapshot struct {
 	URL   string `json:"url"`
 	Title string `json:"title"`
 	Text  string `json:"text"`
+	// Elements is the structured, read-only list of actionable page elements.
+	// It never contains input values, cookies, HTML source or a CDP handle.
+	Elements []HostElement `json:"elements,omitempty"`
+}
+
+type HostBounds struct {
+	X      int `json:"x"`
+	Y      int `json:"y"`
+	Width  int `json:"width"`
+	Height int `json:"height"`
+}
+
+// HostElement is one ref-addressable element from a structured snapshot. Ref is
+// short-lived and invalidated by a newer snapshot or a navigation.
+type HostElement struct {
+	Ref     string     `json:"ref"`
+	Role    string     `json:"role"`
+	Name    string     `json:"name"`
+	Bounds  HostBounds `json:"bounds"`
+	Actions []string   `json:"actions"`
+}
+
+// HostAction is one page interaction. Kind is from the closed action set;
+// Ref addresses an element from the latest snapshot, X/Y are viewport
+// coordinates used only when the ActionEndpoint allows them. Text and Keys are
+// input payloads and must never be persisted or audited.
+type HostAction struct {
+	Kind   string   `json:"kind"`
+	Ref    string   `json:"ref,omitempty"`
+	X      *int     `json:"x,omitempty"`
+	Y      *int     `json:"y,omitempty"`
+	Text   string   `json:"text,omitempty"`
+	Keys   []string `json:"keys,omitempty"`
+	DeltaX int      `json:"delta_x,omitempty"`
+	DeltaY int      `json:"delta_y,omitempty"`
+}
+
+// HostActionResult echoes only non-sensitive addressing metadata. Page text,
+// typed input and key names are deliberately not part of the response.
+type HostActionResult struct {
+	Kind string `json:"kind"`
+	Ref  string `json:"ref,omitempty"`
+	X    *int   `json:"x,omitempty"`
+	Y    *int   `json:"y,omitempty"`
+}
+
+type HostUploadFile struct {
+	Filename      string `json:"filename"`
+	ContentBase64 string `json:"content_base64"`
+}
+
+type HostUpload struct {
+	Ref   string           `json:"ref,omitempty"`
+	X     *int             `json:"x,omitempty"`
+	Y     *int             `json:"y,omitempty"`
+	Files []HostUploadFile `json:"files"`
+}
+
+type HostUploadResult struct {
+	Ref        string `json:"ref"`
+	FileCount  int    `json:"file_count"`
+	TotalBytes int64  `json:"total_bytes"`
+}
+
+// HostDownload is download metadata. The host-local file path is never part of
+// the payload.
+type HostDownload struct {
+	ID        string `json:"id"`
+	Filename  string `json:"filename"`
+	Size      int64  `json:"size"`
+	CreatedAt string `json:"created_at,omitempty"`
+}
+
+type HostDownloadFile struct {
+	Download HostDownload
+	Data     []byte
+}
+
+// HostCookie is a browser cookie. Value is sensitive: it may be returned to the
+// authorized Task, but it must never enter an audit row, error message or log.
+type HostCookie struct {
+	Name     string `json:"name"`
+	Value    string `json:"value"`
+	Domain   string `json:"domain"`
+	Path     string `json:"path"`
+	Expires  int64  `json:"expires"`
+	HTTPOnly bool   `json:"http_only"`
+	Secure   bool   `json:"secure"`
+	SameSite string `json:"same_site,omitempty"`
 }
 
 // HostBookmark is one read-only Edge bookmark. The host resolves the real
@@ -80,7 +181,10 @@ type HostFrame struct {
 	Data        []byte
 }
 
-const maxHostFrameBytes = 4 << 20
+const (
+	maxHostFrameBytes    = 4 << 20
+	maxHostDownloadBytes = 10 << 20
+)
 
 // HTTPHost talks to the loopback browser host over authenticated HTTP. The
 // token is sent only in the Authorization header and is never included in an
@@ -170,6 +274,30 @@ func hostErrorMessage(code string) string {
 		return "浏览器会话已换代，请重新附加"
 	case "browser_tab_not_found":
 		return "浏览器标签页不存在或已关闭"
+	case "browser_element_not_found":
+		return "页面元素不存在或不属于当前页面，请重新获取页面快照"
+	case "browser_element_stale":
+		return "页面元素引用已过期，请重新获取页面快照后再操作"
+	case "browser_element_not_actionable":
+		return "该页面元素不支持此操作"
+	case "browser_action_invalid":
+		return "页面操作参数无效"
+	case "browser_action_failed":
+		return "页面操作执行失败"
+	case "browser_upload_invalid":
+		return "上传文件参数无效"
+	case "browser_upload_failed":
+		return "文件上传失败"
+	case "browser_download_not_found":
+		return "下载文件不存在或已过期"
+	case "browser_download_failed":
+		return "读取下载文件失败"
+	case "browser_cookie_invalid":
+		return "Cookie 参数无效"
+	case "browser_cookie_export_failed":
+		return "读取 Cookie 失败"
+	case "browser_cookie_import_failed":
+		return "写入 Cookie 失败"
 	default:
 		return "浏览器宿主操作失败"
 	}
@@ -193,6 +321,12 @@ var hostCodes = map[string]bool{
 	"browser_lease_hold_failed": true,
 	"browser_session_not_found": true,
 	"browser_session_changed":   true, "browser_tab_not_found": true,
+	"browser_element_not_found": true, "browser_element_stale": true,
+	"browser_element_not_actionable": true, "browser_action_invalid": true,
+	"browser_action_failed": true, "browser_upload_invalid": true,
+	"browser_upload_failed": true, "browser_download_not_found": true,
+	"browser_download_failed": true, "browser_cookie_invalid": true,
+	"browser_cookie_export_failed": true, "browser_cookie_import_failed": true,
 }
 
 // sanitizeHostError replaces a host-originated error's text with the stable AHA
@@ -406,6 +540,149 @@ func (h *HTTPHost) CloseTab(ctx context.Context, profileID, sessionID, tabID, fe
 	path := profilePath(profileID) + "/tabs/" + url.PathEscape(tabID) +
 		"?session_id=" + url.QueryEscape(sessionID) + "&fence=" + url.QueryEscape(fence)
 	return h.call(ctx, http.MethodDelete, path, nil, nil)
+}
+
+type hostActionWire struct {
+	SessionID string   `json:"session_id"`
+	Fence     string   `json:"fence"`
+	Kind      string   `json:"kind"`
+	Ref       string   `json:"ref,omitempty"`
+	X         *int     `json:"x,omitempty"`
+	Y         *int     `json:"y,omitempty"`
+	Text      string   `json:"text,omitempty"`
+	Keys      []string `json:"keys,omitempty"`
+	DeltaX    int      `json:"delta_x,omitempty"`
+	DeltaY    int      `json:"delta_y,omitempty"`
+}
+
+func (h *HTTPHost) Action(ctx context.Context, profileID, sessionID, tabID string, action HostAction, fence string) (HostActionResult, error) {
+	var result struct {
+		Action HostActionResult `json:"action"`
+	}
+	body := hostActionWire{
+		SessionID: sessionID, Fence: fence, Kind: action.Kind, Ref: action.Ref,
+		X: action.X, Y: action.Y, Text: action.Text, Keys: action.Keys,
+		DeltaX: action.DeltaX, DeltaY: action.DeltaY,
+	}
+	err := h.call(ctx, http.MethodPost,
+		profilePath(profileID)+"/tabs/"+url.PathEscape(tabID)+"/actions", body, &result)
+	return result.Action, err
+}
+
+func (h *HTTPHost) Upload(ctx context.Context, profileID, sessionID, tabID string, upload HostUpload, fence string) (HostUploadResult, error) {
+	var result struct {
+		Upload HostUploadResult `json:"upload"`
+	}
+	body := struct {
+		SessionID string           `json:"session_id"`
+		Fence     string           `json:"fence"`
+		Ref       string           `json:"ref,omitempty"`
+		X         *int             `json:"x,omitempty"`
+		Y         *int             `json:"y,omitempty"`
+		Files     []HostUploadFile `json:"files"`
+	}{SessionID: sessionID, Fence: fence, Ref: upload.Ref, X: upload.X, Y: upload.Y, Files: upload.Files}
+	err := h.call(ctx, http.MethodPost,
+		profilePath(profileID)+"/tabs/"+url.PathEscape(tabID)+"/uploads", body, &result)
+	return result.Upload, err
+}
+
+func (h *HTTPHost) Downloads(ctx context.Context, profileID, sessionID string) ([]HostDownload, error) {
+	var result struct {
+		Downloads []HostDownload `json:"downloads"`
+	}
+	path := profilePath(profileID) + "/downloads?session_id=" + url.QueryEscape(sessionID)
+	err := h.call(ctx, http.MethodGet, path, nil, &result)
+	return result.Downloads, err
+}
+
+// Download fetches one captured download as raw bytes. The host-local file path
+// never crosses this boundary; only the bounded file body does.
+func (h *HTTPHost) Download(ctx context.Context, profileID, sessionID, downloadID string) (HostDownloadFile, error) {
+	path := profilePath(profileID) + "/downloads/" + url.PathEscape(downloadID) + "?session_id=" + url.QueryEscape(sessionID)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, h.baseURL+path, nil)
+	if err != nil {
+		return HostDownloadFile{}, newError(http.StatusServiceUnavailable, "browser_host_unavailable", "浏览器宿主地址无效")
+	}
+	request.Header.Set("Accept", "application/octet-stream")
+	if h.token != "" {
+		request.Header.Set("Authorization", "Bearer "+h.token)
+	}
+	response, err := h.client.Do(request)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || isTimeout(err) {
+			return HostDownloadFile{}, &Error{Code: "browser_host_timeout", Status: http.StatusGatewayTimeout,
+				Message: hostErrorMessage("browser_host_timeout")}
+		}
+		return HostDownloadFile{}, &Error{Code: "browser_host_unavailable", Status: http.StatusServiceUnavailable,
+			Message: hostErrorMessage("browser_host_unavailable")}
+	}
+	defer response.Body.Close()
+	payload, err := io.ReadAll(io.LimitReader(response.Body, maxHostDownloadBytes+1))
+	if err != nil {
+		return HostDownloadFile{}, newError(http.StatusBadGateway, "browser_host_bad_response", "读取浏览器宿主响应失败")
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		code := "browser_download_failed"
+		var failure hostErrorBody
+		if json.Unmarshal(payload, &failure) == nil && strings.TrimSpace(failure.Error.Code) != "" {
+			code = strings.TrimSpace(failure.Error.Code)
+		}
+		status := http.StatusBadGateway
+		if response.StatusCode == http.StatusNotFound {
+			code = "browser_download_not_found"
+			status = http.StatusNotFound
+		}
+		return HostDownloadFile{}, &Error{Code: code, Message: hostErrorMessage(code), Status: status}
+	}
+	if len(payload) > maxHostDownloadBytes {
+		return HostDownloadFile{}, newError(http.StatusBadGateway, "browser_download_failed", "下载文件超过大小上限")
+	}
+	filename := ""
+	if raw := strings.TrimSpace(response.Header.Get("X-AHA2-Download-Filename")); raw != "" {
+		if decoded, decodeErr := url.PathUnescape(raw); decodeErr == nil {
+			filename = decoded
+		}
+	}
+	size := int64(len(payload))
+	return HostDownloadFile{
+		Download: HostDownload{ID: downloadID, Filename: filename, Size: size},
+		Data:     payload,
+	}, nil
+}
+
+func (h *HTTPHost) ClearDownloads(ctx context.Context, profileID, sessionID string) error {
+	path := profilePath(profileID) + "/downloads?session_id=" + url.QueryEscape(sessionID)
+	return h.call(ctx, http.MethodDelete, path, nil, nil)
+}
+
+func (h *HTTPHost) Cookies(ctx context.Context, profileID, sessionID, targetURL, domain string) ([]HostCookie, bool, error) {
+	query := url.Values{}
+	query.Set("session_id", sessionID)
+	if targetURL != "" {
+		query.Set("url", targetURL)
+	}
+	if domain != "" {
+		query.Set("domain", domain)
+	}
+	var result struct {
+		Cookies   []HostCookie `json:"cookies"`
+		Truncated bool         `json:"truncated"`
+	}
+	err := h.call(ctx, http.MethodGet, profilePath(profileID)+"/cookies?"+query.Encode(), nil, &result)
+	return result.Cookies, result.Truncated, err
+}
+
+func (h *HTTPHost) ImportCookies(ctx context.Context, profileID, sessionID string, cookies []HostCookie, fence string) (int, error) {
+	var result struct {
+		Count int `json:"count"`
+	}
+	body := struct {
+		SessionID string       `json:"session_id"`
+		Fence     string       `json:"fence"`
+		Cookies   []HostCookie `json:"cookies"`
+	}{SessionID: sessionID, Fence: fence, Cookies: cookies}
+	err := h.call(ctx, http.MethodPost, profilePath(profileID)+"/cookies", body, &result)
+	return result.Count, err
 }
 
 // Shutdown asks the host to close every browser session and exit. The manager

@@ -889,3 +889,59 @@ func (m *HostManager) CloseTab(ctx context.Context, profileID, sessionID, tabID,
 	}
 	return host.CloseTab(ctx, profileID, sessionID, tabID, fence)
 }
+
+func (m *HostManager) Action(ctx context.Context, profileID, sessionID, tabID string, action HostAction, fence string) (HostActionResult, error) {
+	host, err := m.available()
+	if err != nil {
+		return HostActionResult{}, err
+	}
+	return host.Action(ctx, profileID, sessionID, tabID, action, fence)
+}
+
+func (m *HostManager) Upload(ctx context.Context, profileID, sessionID, tabID string, upload HostUpload, fence string) (HostUploadResult, error) {
+	host, err := m.available()
+	if err != nil {
+		return HostUploadResult{}, err
+	}
+	return host.Upload(ctx, profileID, sessionID, tabID, upload, fence)
+}
+
+func (m *HostManager) Downloads(ctx context.Context, profileID, sessionID string) ([]HostDownload, error) {
+	host, err := m.available()
+	if err != nil {
+		return nil, err
+	}
+	return host.Downloads(ctx, profileID, sessionID)
+}
+
+func (m *HostManager) Download(ctx context.Context, profileID, sessionID, downloadID string) (HostDownloadFile, error) {
+	host, err := m.available()
+	if err != nil {
+		return HostDownloadFile{}, err
+	}
+	return host.Download(ctx, profileID, sessionID, downloadID)
+}
+
+func (m *HostManager) ClearDownloads(ctx context.Context, profileID, sessionID string) error {
+	host, err := m.available()
+	if err != nil {
+		return err
+	}
+	return host.ClearDownloads(ctx, profileID, sessionID)
+}
+
+func (m *HostManager) Cookies(ctx context.Context, profileID, sessionID, targetURL, domain string) ([]HostCookie, bool, error) {
+	host, err := m.available()
+	if err != nil {
+		return nil, false, err
+	}
+	return host.Cookies(ctx, profileID, sessionID, targetURL, domain)
+}
+
+func (m *HostManager) ImportCookies(ctx context.Context, profileID, sessionID string, cookies []HostCookie, fence string) (int, error) {
+	host, err := m.available()
+	if err != nil {
+		return 0, err
+	}
+	return host.ImportCookies(ctx, profileID, sessionID, cookies, fence)
+}

@@ -430,7 +430,7 @@ func TestHostManagerLaunchesRealNodeHost(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"host.mjs", "server.mjs", "tabs.mjs", "lock.mjs", "package.json"} {
+	for _, name := range []string{"host.mjs", "server.mjs", "tabs.mjs", "interact.mjs", "downloads.mjs", "cookies.mjs", "lock.mjs", "package.json"} {
 		data, err := os.ReadFile(filepath.Join(source, name))
 		if err != nil {
 			t.Fatal(err)

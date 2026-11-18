@@ -58,6 +58,22 @@ type FakeHost struct {
 	Sessions          map[string]*session
 	nextID            int
 	Now               func() time.Time
+
+	SnapshotElements []browser.HostElement
+	FailSnapshot     error
+	ActionCalls      []browser.HostAction
+	FailAction       error
+	UploadCalls      []browser.HostUpload
+	FailUpload       error
+	DownloadsList    []browser.HostDownload
+	DownloadFiles    map[string]browser.HostDownloadFile
+	FailDownloads    error
+	ClearDownload    int
+	CookieList       []browser.HostCookie
+	CookieTruncated  bool
+	FailCookies      error
+	ImportedCookies  []browser.HostCookie
+	FailImportCookie error
 }
 
 func New() *FakeHost {
@@ -399,6 +415,9 @@ func (f *FakeHost) Navigate(_ context.Context, profileID, sessionID, tabID, targ
 func (f *FakeHost) Snapshot(_ context.Context, profileID, sessionID, tabID string) (browser.HostSnapshot, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.FailSnapshot != nil {
+		return browser.HostSnapshot{}, f.FailSnapshot
+	}
 	value, err := f.sessionLocked(profileID, sessionID)
 	if err != nil {
 		return browser.HostSnapshot{}, err
@@ -407,7 +426,126 @@ func (f *FakeHost) Snapshot(_ context.Context, profileID, sessionID, tabID strin
 	if !ok {
 		return browser.HostSnapshot{}, &browser.Error{Code: "browser_tab_not_found", Message: "no tab", Status: http.StatusNotFound}
 	}
-	return browser.HostSnapshot{URL: tab.URL, Title: tab.Title, Text: "page text"}, nil
+	return browser.HostSnapshot{
+		URL: tab.URL, Title: tab.Title, Text: "page text",
+		Elements: append([]browser.HostElement(nil), f.SnapshotElements...),
+	}, nil
+}
+
+func (f *FakeHost) Action(_ context.Context, profileID, sessionID, tabID string, action browser.HostAction, fence string) (browser.HostActionResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ActionCalls = append(f.ActionCalls, action)
+	if f.FailAction != nil {
+		return browser.HostActionResult{}, f.FailAction
+	}
+	value, err := f.sessionLocked(profileID, sessionID)
+	if err != nil {
+		return browser.HostActionResult{}, err
+	}
+	if _, ok := value.tabs[tabID]; !ok {
+		return browser.HostActionResult{}, &browser.Error{Code: "browser_tab_not_found", Message: "no tab", Status: http.StatusNotFound}
+	}
+	holdStart, holdUntil := f.operationHold()
+	if err := f.fenceLocked(profileID, fence, holdStart, holdUntil); err != nil {
+		return browser.HostActionResult{}, err
+	}
+	return browser.HostActionResult{Kind: action.Kind, Ref: action.Ref, X: action.X, Y: action.Y}, nil
+}
+
+func (f *FakeHost) Upload(_ context.Context, profileID, sessionID, tabID string, upload browser.HostUpload, fence string) (browser.HostUploadResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.UploadCalls = append(f.UploadCalls, upload)
+	if f.FailUpload != nil {
+		return browser.HostUploadResult{}, f.FailUpload
+	}
+	value, err := f.sessionLocked(profileID, sessionID)
+	if err != nil {
+		return browser.HostUploadResult{}, err
+	}
+	if _, ok := value.tabs[tabID]; !ok {
+		return browser.HostUploadResult{}, &browser.Error{Code: "browser_tab_not_found", Message: "no tab", Status: http.StatusNotFound}
+	}
+	holdStart, holdUntil := f.operationHold()
+	if err := f.fenceLocked(profileID, fence, holdStart, holdUntil); err != nil {
+		return browser.HostUploadResult{}, err
+	}
+	var total int64
+	for _, file := range upload.Files {
+		total += int64(len(file.ContentBase64)) // base64 length is a safe upper bound
+	}
+	return browser.HostUploadResult{Ref: upload.Ref, FileCount: len(upload.Files), TotalBytes: total}, nil
+}
+
+func (f *FakeHost) Downloads(_ context.Context, profileID, sessionID string) ([]browser.HostDownload, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.FailDownloads != nil {
+		return nil, f.FailDownloads
+	}
+	if _, err := f.sessionLocked(profileID, sessionID); err != nil {
+		return nil, err
+	}
+	return append([]browser.HostDownload(nil), f.DownloadsList...), nil
+}
+
+func (f *FakeHost) Download(_ context.Context, profileID, sessionID, downloadID string) (browser.HostDownloadFile, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.FailDownloads != nil {
+		return browser.HostDownloadFile{}, f.FailDownloads
+	}
+	if _, err := f.sessionLocked(profileID, sessionID); err != nil {
+		return browser.HostDownloadFile{}, err
+	}
+	file, ok := f.DownloadFiles[downloadID]
+	if !ok {
+		return browser.HostDownloadFile{}, &browser.Error{
+			Code: "browser_download_not_found", Message: "no download", Status: http.StatusNotFound,
+		}
+	}
+	return file, nil
+}
+
+func (f *FakeHost) ClearDownloads(_ context.Context, profileID, sessionID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, err := f.sessionLocked(profileID, sessionID); err != nil {
+		return err
+	}
+	f.ClearDownload++
+	f.DownloadsList = nil
+	return nil
+}
+
+func (f *FakeHost) Cookies(_ context.Context, profileID, sessionID, targetURL, domainName string) ([]browser.HostCookie, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.FailCookies != nil {
+		return nil, false, f.FailCookies
+	}
+	if _, err := f.sessionLocked(profileID, sessionID); err != nil {
+		return nil, false, err
+	}
+	return append([]browser.HostCookie(nil), f.CookieList...), f.CookieTruncated, nil
+}
+
+func (f *FakeHost) ImportCookies(_ context.Context, profileID, sessionID string, cookies []browser.HostCookie, fence string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.FailImportCookie != nil {
+		return 0, f.FailImportCookie
+	}
+	if _, err := f.sessionLocked(profileID, sessionID); err != nil {
+		return 0, err
+	}
+	holdStart, holdUntil := f.operationHold()
+	if err := f.fenceLocked(profileID, fence, holdStart, holdUntil); err != nil {
+		return 0, err
+	}
+	f.ImportedCookies = append(f.ImportedCookies, cookies...)
+	return len(cookies), nil
 }
 
 func (f *FakeHost) Frame(_ context.Context, profileID, sessionID, tabID string) (browser.HostFrame, error) {

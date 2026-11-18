@@ -6,7 +6,11 @@ Session 0，不能可靠显示窗口；因此本目录提供的是一个**独立
 - AHA2 控制面只通过 `127.0.0.1` 上的 token API 操作浏览器；
 - host 自己管理 Edge 用户数据目录、单实例锁和可见窗口；
 - AHA2 数据库只保存逻辑 profile ID，不知道真实目录；
-- host 不向 AHA/Task/局域网暴露 CDP 端口，也不导出 cookie/storage。
+- host 不向 AHA/Task/局域网暴露 CDP 端口；cookie 只在 AHA 已授权的 Task 请求中
+  导入/导出，不写日志，profile 路径、CDP 地址和密码管理接口始终不离开 host。
+- 页面输入只接受结构化快照里的短期元素 ref 或 viewport 坐标；不接受选择器、
+  脚本或任意 URL 参数。文件上传只接受请求体里的字节，下载只会落到受控目录
+  并以不透明 ID 返回。
 
 ## 前置条件
 
@@ -128,10 +132,17 @@ host 当前时间 + 5 分钟 + 30 秒偏差；裸 ID、NaN/Infinity、多分隔�
 | POST | `/v1/profiles/{id}/tabs` | 打开 Task 标签页（`{"session_id","url"}`） |
 | POST | `/v1/profiles/{id}/tabs/{tab}/activate` | 切换/激活标签页（`bringToFront`） |
 | POST | `/v1/profiles/{id}/tabs/{tab}/navigate` | 导航（`{"session_id","url"}`） |
-| GET | `/v1/profiles/{id}/tabs/{tab}/snapshot?session_id=` | 返回 `{url,title,text}`，不含 HTML/cookie |
+| GET | `/v1/profiles/{id}/tabs/{tab}/snapshot?session_id=` | 返回 `{url,title,text,elements}`；elements 只含 role/name/bounds/ref/actions，不含输入值、HTML 或 cookie |
+| POST | `/v1/profiles/{id}/tabs/{tab}/actions` | 页面输入（`click`/`double_click`/`hover`/`type`/`key`/`scroll`），目标为快照 ref 或 viewport 坐标 |
+| POST | `/v1/profiles/{id}/tabs/{tab}/uploads` | 把请求体中的 base64 文件交给 file input 或文件选择框；不读宿主路径 |
 | GET | `/v1/profiles/{id}/tabs/{tab}/frame?session_id=` | 返回只读 JPEG 画面；200ms 内复用上一帧 |
 | DELETE | `/v1/profiles/{id}/tabs/{tab}?session_id=` | 关闭标签页 |
 | GET | `/v1/profiles/{id}/bookmarks?session_id=` | 读取 Edge 收藏夹，只返回 title/url/folder，不含路径 |
+| GET | `/v1/profiles/{id}/downloads?session_id=` | 列出本会话已捕获的下载（id/filename/size/created_at） |
+| GET | `/v1/profiles/{id}/downloads/{download}?session_id=` | 以原始字节返回一个下载；文件名经响应头传递 |
+| DELETE | `/v1/profiles/{id}/downloads?session_id=` | 清空本会话下载（释放租约/关闭会话时自动调用） |
+| GET | `/v1/profiles/{id}/cookies?session_id=&url=\|domain=` | 按 URL 或 domain 导出 cookie；必须限定范围 |
+| POST | `/v1/profiles/{id}/cookies` | 导入经过校验的 cookie；响应只返回数量 |
 
 错误统一为 `{"error":{"code","message"}}`。重点错误码：
 
@@ -141,6 +152,11 @@ host 当前时间 + 5 分钟 + 30 秒偏差；裸 ID、NaN/Infinity、多分隔�
 - `browser_profile_locked`：用户数据目录被另一个进程占用；
 - `browser_session_not_found` / `browser_session_changed`：窗口已关闭或会话已换代；
 - `browser_tab_not_found`：标签页不存在或已关闭；
+- `browser_element_not_found` / `browser_element_stale`：快照 ref 不在当前页面，
+  或来自更早的快照/导航；重新获取 snapshot 后再操作；
+- `browser_action_invalid` / `browser_upload_invalid`：动作/文件参数非法；
+- `browser_download_not_found`：下载 ID 不存在、已过期或不属于本会话；
+- `browser_cookie_invalid`：cookie 的 domain/path/sameSite/值校验失败；
 - `browser_tab_list_failed`：读取当前页面列表失败（页面已崩溃或上下文不可用）；
 - `browser_activation_failed`：切换前台页面失败；
 - `browser_bookmarks_failed`：收藏夹文件不可读、是 symlink/reparse point 或格式异常；
@@ -207,6 +223,11 @@ lease hold 与底层 close/navigate/open 调用窗口；真实 Edge 仍需手工
   也不提供 CDP 预览通道。需要整窗画面时另走共享控制桌面链路。
 - 不检测登录过期；`auth_required` 状态与登录检测属于后续里程碑。
 - 不做远程 host 注册、不实现 headless、不支持 Chrome/Chromium。
-- 标签页快照只返回渲染文本，仍可能包含已授权页面上的账号数据；这是“Task 不使用
-  cookie/storage 导出”而不是“Agent 看不到页面内容”。
+- 标签页快照的渲染文本与元素名称仍可能包含已授权页面上的账号数据；这是业务
+  授权结果，不是 storage 导出。cookie 只经显式、受 Task 能力约束的 API 传输，
+  不写审计、不写日志。
+- 页面输入与文件上传都在 Owner 可见的 Edge 窗口中发生；host 不读取 Edge 已保存
+  密码，也不提供密码管理器接口。
+- 下载文件保存在 `<profile-root>/.downloads/` 的会话目录，TTL 30 分钟、最多
+  20 个、单个 10 MiB；释放租约或关闭会话即清理。
 - profile 删除只删 AHA 逻辑记录，host 用户数据目录会保留，需后续提供受控清理。
