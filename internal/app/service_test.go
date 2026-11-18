@@ -1830,6 +1830,9 @@ func TestMultiAgentFallbackCanWakeAgainForNewUnreadResults(t *testing.T) {
 // lands before that wake fires and pushes it out, so Main is woken once with
 // every unread result instead of once per result.
 func TestMultiAgentFallbackCoalescesResultsWithinWakeWindow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("waits out a real multi-agent wake window")
+	}
 	t.Parallel()
 	ctx := context.Background()
 	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))

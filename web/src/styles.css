@@ -947,7 +947,7 @@ body.task-tool-resizing { cursor: col-resize; user-select: none; }
 .desktop-browser-bookmark-empty { padding: 2px 4px; color: var(--muted); font-size: 11px; }
 .desktop-browser-bookmarks-more { flex: 0 0 auto; width: 24px; min-width: 24px; height: 24px; min-height: 24px; padding: 0; }
 .desktop-browser-bookmarks-more[hidden] { display: none; }
-.desktop-browser-bookmark-menu { position: absolute; top: calc(100% + 4px); right: 0; z-index: 30; display: grid; gap: 4px; width: min(300px, 100%); max-height: min(45vh, 320px); overflow: auto; padding: 6px; border: 1px solid var(--color-border-strong); border-radius: var(--radius-card); background: var(--color-surface); box-shadow: var(--shadow-popover); }
+.desktop-browser-bookmark-menu { position: absolute; top: calc(100% + 1px); left: 0; right: auto; z-index: 30; display: grid; gap: 4px; width: min(300px, 100%); max-height: min(45vh, 320px); overflow: auto; padding: 6px; border: 1px solid var(--color-border-strong); border-radius: var(--radius-card); background: var(--color-surface); box-shadow: var(--shadow-popover); }
 .desktop-browser-bookmark-menu[hidden] { display: none; }
 .desktop-browser-bookmark-menu-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .desktop-browser-bookmark-menu-head strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
@@ -960,6 +960,10 @@ body.task-tool-resizing { cursor: col-resize; user-select: none; }
 .desktop-browser-bookmark-menu li button small { flex: 0 0 auto; max-width: 45%; overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .desktop-browser-bookmark-menu-folder { display: flex; align-items: center; gap: 4px; padding: 4px 6px 1px; color: var(--muted); font-size: 10px; font-weight: 700; }
 .desktop-browser-bookmark-menu-folder .icon { width: 12px; height: 12px; }
+.desktop-browser-bookmark-menu-section { padding: 4px 6px 1px; color: var(--muted); font-size: 10px; font-weight: 700; }
+.desktop-browser-bookmark-menu li button.desktop-browser-bookmark-menu-folder-entry { justify-content: flex-start; }
+.desktop-browser-bookmark-menu-folder-entry .icon { flex: 0 0 auto; width: 13px; height: 13px; color: var(--muted); }
+.desktop-browser-bookmark-menu li button.desktop-browser-bookmark-menu-folder-entry span { flex: 1 1 auto; }
 .desktop-browser-bookmark-menu-empty { padding: 6px; color: var(--muted); font-size: 11px; }
 /* The preview is the panel: it takes every pixel left below the tab strip,
    address and bookmark bars instead of stopping at a fixed 360px cap. */
