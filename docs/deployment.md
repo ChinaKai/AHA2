@@ -152,13 +152,15 @@ Web 构建和嵌入资源都写在副本中，仓库里只写 `--output-dir`；�
 （脚本、命令行、Web/Go/Node 版本）以及每个产物文件的相对路径、大小和 SHA256。它只是产物
 清单，不含部署步骤，也不包含自身。构建脚本写清单前会检查三个 PE 文件的 `MZ` 头、飞书
 清单里的打包占位符已被真实哈希替换，以及四个输入文件都存在；写完后还会校验清单的身份
-（版本、commit、Web 版本）、路径安全、必需文件范围和 `browser-host/`、`node/` 全量覆盖；
-缺一项就直接失败，不会产出不完整的包。
+（版本、commit、Web 版本）、路径安全、必需文件范围、`browser-host/` 全量覆盖以及
+`node/node.exe`、`node/LICENSE` 两个精确文件；缺一项或出现安装器不会复制的文件就直接
+失败，不会产出不完整的包。
 
 安装器构建使用同一份清单：`scripts/build-windows-installer.ps1` 读取
 `-InputManifest`（默认 `dist\release-manifest.json`），调用
 `scripts/verify-windows-package.mjs` 做双向校验：清单里的每一项都必须有安装输入，
-安装器会复制的每一个文件（包括递归的 `browser-host/` 和 `node/`）也必须在清单里；
+安装器会复制的每一个文件（包括递归的 `browser-host/` 以及 `node/node.exe`、
+`node/LICENSE`）也必须在清单里；
 随后逐文件比对大小和 SHA256。清单身份不止检查格式：版本、commit 和
 `generator.web_version` 必须互相一致，Web 版本里的 12 位哈希必须等于 commit 前缀，
 构建日期必须是真实日期。期望 commit 来自安装器所在 git 检出（`git rev-parse HEAD`）
@@ -170,7 +172,8 @@ Web 构建和嵌入资源都写在副本中，仓库里只写 `--output-dir`；�
 - `aha2-windows-amd64.exe` → `{app}\aha2.exe`
 - `aha2-tray-windows-amd64.exe` → `{app}\aha2-tray.exe`
 - `plugins/feishu/windows-amd64/*` → `<数据目录>\plugins\channels\feishu\*`
-- `browser-host/*`、`node/*` → `{app}\browser-host\*`、`{app}\node\*`（相对路径不变）
+- `browser-host/*` → `{app}\browser-host\*`（相对路径不变）
+- `node/node.exe`、`node/LICENSE` → `{app}\node\node.exe`、`{app}\node\LICENSE`
 
 ### Release 的可部署 Windows 包布局
 
@@ -200,7 +203,8 @@ AHA2-Windows-Package-x64.zip
 `dist/release-manifest.json` 必须存在；清单不能为空，必须包含完整的必需文件范围
 （`scripts/windows-package-scope.json`），commit 与 Web 版本必须和当前 Release 期望值
 一致；`dist/` 下的文件集合必须与清单双向一致，并逐个比对 zip 内的 SHA256。缺少
-`browser-host/` 或 `node/` 文件、清单为空、混入未列出文件或哈希不符都会让发布失败。
+缺少 `browser-host/` 或 `node/` 必需文件、清单为空、混入未列出文件、成员路径逃逸或
+重复、归档成员不是普通文件、哈希不符，都会让发布失败。
 
 Agent API stdio helper 不再需要单独构建或安装：它是一个只用 Node 标准库的单文件脚本，通过
 `go:embed` 打在 `aha2.exe` 里，运行时才上传到工作区 `.aha2-context/share/agent-proxy/`。因此

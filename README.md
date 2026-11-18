@@ -16,8 +16,8 @@ Project → Workspace → Task → Turn → Task Memory → Knowledge → Next T
 
 托盘会把 `aha2.exe serve` 的 stdout/stderr 写入 `<数据目录>\logs\aha2-server.log`，并记录启动命令行、PID、退出码或启动错误；文件上限 10 MB，超出后轮转为 `aha2-server.log.1`（最多保留两份）。排查启动失败或崩溃时优先查看该文件。
 
-在构建机上产出 Windows 包（两个 exe、飞书插件目录、`browser-host/`、固定版本 `node/` 和
-`release-manifest.json`）：
+在构建机上产出 Windows 包（两个 exe、飞书插件目录、`browser-host/`、固定版本的
+`node/node.exe` 与 `node/LICENSE`，以及 `release-manifest.json`）：
 
 ```bash
 ./local_build.sh --version 0.5.23

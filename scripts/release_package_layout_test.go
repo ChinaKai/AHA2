@@ -169,9 +169,17 @@ func TestManifestRequiredScopeMatchesInstallerMapping(t *testing.T) {
 			t.Errorf("windows-package-scope.json required files are missing %s", path)
 		}
 	}
-	for _, prefix := range []string{`"browser-host/"`, `"node/"`} {
-		if !strings.Contains(scope, prefix) {
-			t.Errorf("package path scope is missing prefix %s", prefix)
+	if !strings.Contains(scope, `"browser-host/"`) {
+		t.Error(`package path scope is missing prefix "browser-host/"`)
+	}
+	// Inno Setup copies exactly two files into {app}\node; a node/ prefix
+	// would let the manifest claim files the installer never writes.
+	if strings.Contains(scope, `"node/"`) {
+		t.Error(`package path scope must not grant a "node/" prefix`)
+	}
+	for _, exact := range []string{`"node/node.exe"`, `"node/LICENSE"`} {
+		if !strings.Contains(scope, exact) {
+			t.Errorf("package path scope is missing exact node file %s", exact)
 		}
 	}
 }

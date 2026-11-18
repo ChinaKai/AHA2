@@ -18,7 +18,9 @@ import datetime
 import hashlib
 import json
 import re
+import stat
 import sys
+import unicodedata
 import zipfile
 from pathlib import Path
 
@@ -26,11 +28,12 @@ SCOPE = json.loads((Path(__file__).resolve().parent / "windows-package-scope.jso
 REQUIRED_PACKAGE_FILES = SCOPE["required"]
 EXACT_PACKAGE_FILES = set(SCOPE["exact"])
 PACKAGE_FILE_PREFIXES = tuple(SCOPE["prefixes"])
-REQUIRED_ARCHIVE_FILES = {
+ALLOWED_INSTALLER_FILES = {
     "installer/AHA2-Setup-x64.exe",
     "installer/AHA2-Setup-User-x64.exe",
-    "dist/release-manifest.json",
 }
+REQUIRED_ARCHIVE_FILES = ALLOWED_INSTALLER_FILES | {"dist/release-manifest.json"}
+ALLOWED_ROOT_DIRS = {"dist", "installer"}
 MANIFEST_NAME = "dist/release-manifest.json"
 
 
@@ -62,6 +65,52 @@ def normalize_relative(value):
 
 def package_path_in_scope(path):
     return path in EXACT_PACKAGE_FILES or any(path.startswith(prefix) for prefix in PACKAGE_FILE_PREFIXES)
+
+
+def validate_member_name(name):
+    """Reject anything that would not extract to a file inside dist/ or installer/."""
+    if not isinstance(name, str) or not name:
+        fail("Windows package archive contains a member with an empty name")
+    if name != name.strip():
+        fail(f"Windows package archive member has surrounding whitespace: {name!r}")
+    if "\\" in name:
+        fail(f"Windows package archive member uses a Windows path separator: {name}")
+    if name.startswith("/") or re.match(r"^[A-Za-z]:", name):
+        fail(f"Windows package archive member is an absolute path: {name}")
+    if ":" in name or any(ord(character) < 0x20 for character in name):
+        fail(f"Windows package archive member has an invalid character: {name!r}")
+    parts = name.split("/")
+    if any(part in ("", ".", "..") for part in parts):
+        fail(f"Windows package archive member path is not normalized: {name}")
+    if any(part.endswith(".") or part.endswith(" ") for part in parts):
+        # Windows trims these when extracting, which could alias another member.
+        fail(f"Windows package archive member has a Windows-normalized segment: {name}")
+    if len(parts) < 2:
+        fail(f"Windows package archive member is not a file under dist/ or installer/: {name}")
+    if parts[0] not in ALLOWED_ROOT_DIRS:
+        fail(f"Windows package archive contains an unexpected root entry: {name}")
+    if parts[0] == "installer" and name not in ALLOWED_INSTALLER_FILES:
+        fail(f"Windows package archive contains an unexpected installer entry: {name}")
+    return name
+
+
+def validate_members(archive):
+    """Return the set of file members after checking type, safety and duplicates."""
+    seen = {}
+    for info in archive.infolist():
+        if info.is_dir():
+            fail(f"Windows package archive contains a directory entry: {info.filename}")
+        mode = (info.external_attr >> 16) & 0o170000
+        if mode not in (0, stat.S_IFREG):
+            fail(f"Windows package archive contains a non-regular member: {info.filename}")
+        name = validate_member_name(info.filename)
+        # Windows paths are case-insensitive and Unicode-normalizing archives
+        # could otherwise smuggle two members that extract to the same file.
+        key = unicodedata.normalize("NFC", name).casefold()
+        if key in seen:
+            fail(f"Windows package archive contains duplicate members: {seen[key]} and {name}")
+        seen[key] = name
+    return set(seen.values())
 
 
 def parse_identity(manifest, version, commit, expected_web_version):
@@ -141,12 +190,10 @@ def parse_files(manifest):
 
 def verify_archive(archive_path, version, commit, expected_web_version):
     with zipfile.ZipFile(archive_path) as archive:
-        names = set(archive.namelist())
+        names = validate_members(archive)
         for required in sorted(REQUIRED_ARCHIVE_FILES):
             if required not in names:
                 fail(f"Windows package archive is missing {required}")
-        if MANIFEST_NAME not in names:
-            fail(f"Windows package archive is missing {MANIFEST_NAME}")
         manifest = json.loads(archive.read(MANIFEST_NAME).decode("utf-8"))
         parse_identity(manifest, version, commit, expected_web_version)
         entries = parse_files(manifest)
@@ -154,7 +201,7 @@ def verify_archive(archive_path, version, commit, expected_web_version):
         archive_dist = {
             name[len("dist/"):]
             for name in names
-            if name.startswith("dist/") and not name.endswith("/") and name != MANIFEST_NAME
+            if name.startswith("dist/") and name != MANIFEST_NAME
         }
         for path in entries:
             if path not in archive_dist:

@@ -342,6 +342,8 @@ func TestWindowsPackageBuildProducesAllArtifacts(t *testing.T) {
 		"aha2-tray-windows-amd64.exe":                          true,
 		"plugins/feishu/windows-amd64/aha2-channel-feishu.exe": true,
 		"plugins/feishu/windows-amd64/plugin.json":             true,
+		"node/node.exe":                                        true,
+		"node/LICENSE":                                         true,
 	}
 	for _, path := range []string{
 		"aha2-windows-amd64.exe",
@@ -363,7 +365,7 @@ func TestWindowsPackageBuildProducesAllArtifacts(t *testing.T) {
 	}
 	for path := range got {
 		slash := filepath.ToSlash(path)
-		if allowedExact[slash] || strings.HasPrefix(slash, "browser-host/") || strings.HasPrefix(slash, "node/") {
+		if allowedExact[slash] || strings.HasPrefix(slash, "browser-host/") {
 			continue
 		}
 		t.Errorf("manifest lists %s, which the installer does not copy", slash)

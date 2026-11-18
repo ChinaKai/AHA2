@@ -17,10 +17,11 @@
     "aha2-windows-amd64.exe",
     "aha2-tray-windows-amd64.exe",
     "plugins/feishu/windows-amd64/aha2-channel-feishu.exe",
-    "plugins/feishu/windows-amd64/plugin.json"
+    "plugins/feishu/windows-amd64/plugin.json",
+    "node/node.exe",
+    "node/LICENSE"
   ],
   "prefixes": [
-    "browser-host/",
-    "node/"
+    "browser-host/"
   ]
 }

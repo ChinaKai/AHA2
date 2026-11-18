@@ -141,6 +141,30 @@ func rewriteFixtureManifest(t *testing.T, root string, mutate func(map[string]an
 	}
 }
 
+func addManifestEntry(t *testing.T, root, relative string) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(relative)))
+	if err != nil {
+		t.Fatalf("read %s: %v", relative, err)
+	}
+	sum := sha256.Sum256(data)
+	rewriteFixtureManifest(t, root, func(manifest map[string]any) {
+		files, _ := manifest["files"].([]any)
+		manifest["files"] = append(files, map[string]any{
+			"path":   relative,
+			"size":   len(data),
+			"sha256": hex.EncodeToString(sum[:]),
+		})
+	})
+}
+
+func replaceWithSymlink(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("cannot create symlink on this platform: %v", err)
+	}
+}
+
 func dropManifestEntry(manifest map[string]any, path string) {
 	files, _ := manifest["files"].([]any)
 	kept := files[:0]
@@ -262,7 +286,7 @@ func TestWindowsPackageVerifierExecutable(t *testing.T) {
 		if err == nil {
 			t.Fatalf("verifier accepted a missing node input:\n%s", out)
 		}
-		if !strings.Contains(out, "installer input is missing: node/LICENSE") {
+		if !strings.Contains(out, "installer input node/LICENSE is missing") {
 			t.Errorf("unexpected verifier error: %s", out)
 		}
 	})
@@ -325,6 +349,88 @@ func TestWindowsPackageVerifierExecutable(t *testing.T) {
 			t.Errorf("unexpected verifier error: %s", out)
 		}
 	})
+
+	t.Run("rejects a node file the installer does not copy", func(t *testing.T) {
+		root := writeFixturePackage(t)
+		if err := os.WriteFile(filepath.Join(root, "node", "extra.exe"), []byte("extra"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		addManifestEntry(t, root, "node/extra.exe")
+		out, err := runNodeVerifier(t, root)
+		if err == nil {
+			t.Fatalf("verifier accepted node/extra.exe, which Inno Setup does not copy:\n%s", out)
+		}
+		if !strings.Contains(out, "outside the package install scope: node/extra.exe") {
+			t.Errorf("unexpected verifier error: %s", out)
+		}
+	})
+
+	t.Run("rejects a symlinked server input", func(t *testing.T) {
+		root := writeFixturePackage(t)
+		server := filepath.Join(root, "aha2-windows-amd64.exe")
+		target := filepath.Join(root, "server-real.bin")
+		if err := os.Rename(server, target); err != nil {
+			t.Fatal(err)
+		}
+		replaceWithSymlink(t, target, server)
+		out, err := runNodeVerifier(t, root)
+		if err == nil {
+			t.Fatalf("verifier accepted a symlinked server input:\n%s", out)
+		}
+		if !strings.Contains(out, "installer input aha2-windows-amd64.exe is a symlink") {
+			t.Errorf("unexpected verifier error: %s", out)
+		}
+	})
+
+	t.Run("rejects a symlinked node runtime", func(t *testing.T) {
+		root := writeFixturePackage(t)
+		nodeExe := filepath.Join(root, "node", "node.exe")
+		target := filepath.Join(root, "node", "node-real.exe")
+		if err := os.Rename(nodeExe, target); err != nil {
+			t.Fatal(err)
+		}
+		replaceWithSymlink(t, target, nodeExe)
+		out, err := runNodeVerifier(t, root)
+		if err == nil {
+			t.Fatalf("verifier accepted a symlinked node runtime:\n%s", out)
+		}
+		if !strings.Contains(out, "installer input node/node.exe is a symlink") {
+			t.Errorf("unexpected verifier error: %s", out)
+		}
+	})
+
+	t.Run("rejects a symlinked browser-host root", func(t *testing.T) {
+		root := writeFixturePackage(t)
+		realDir := filepath.Join(root, "browser-host-real")
+		if err := os.Rename(filepath.Join(root, "browser-host"), realDir); err != nil {
+			t.Fatal(err)
+		}
+		replaceWithSymlink(t, realDir, filepath.Join(root, "browser-host"))
+		out, err := runNodeVerifier(t, root)
+		if err == nil {
+			t.Fatalf("verifier accepted a symlinked browser-host root:\n%s", out)
+		}
+		if !strings.Contains(out, "browser host root is a symlink") {
+			t.Errorf("unexpected verifier error: %s", out)
+		}
+	})
+
+	t.Run("rejects a symlinked release manifest", func(t *testing.T) {
+		root := writeFixturePackage(t)
+		manifest := filepath.Join(root, "release-manifest.json")
+		target := filepath.Join(root, "release-manifest.real.json")
+		if err := os.Rename(manifest, target); err != nil {
+			t.Fatal(err)
+		}
+		replaceWithSymlink(t, target, manifest)
+		out, err := runNodeVerifier(t, root)
+		if err == nil {
+			t.Fatalf("verifier accepted a symlinked release manifest:\n%s", out)
+		}
+		if !strings.Contains(out, "release manifest is a symlink") {
+			t.Errorf("unexpected verifier error: %s", out)
+		}
+	})
 }
 
 func archiveFixtureDist(t *testing.T, root string) map[string][]byte {
@@ -354,7 +460,13 @@ func archiveFixtureDist(t *testing.T, root string) map[string][]byte {
 	return files
 }
 
-func writeArchiveFixture(t *testing.T, zipPath string, mutateDist func(map[string][]byte), mutateManifest func(map[string]any)) {
+type archiveEntry struct {
+	name string
+	data []byte
+	mode os.FileMode
+}
+
+func writeArchiveFixture(t *testing.T, zipPath string, mutateDist func(map[string][]byte), mutateManifest func(map[string]any), extra ...archiveEntry) {
 	t.Helper()
 	root := writeFixturePackage(t)
 	files := archiveFixtureDist(t, root)
@@ -369,32 +481,34 @@ func writeArchiveFixture(t *testing.T, zipPath string, mutateDist func(map[strin
 	if err != nil {
 		t.Fatalf("marshal archive manifest: %v", err)
 	}
-	entries := map[string][]byte{
-		"dist/release-manifest.json":        append(encoded, '\n'),
-		"installer/AHA2-Setup-x64.exe":      []byte("machine-setup"),
-		"installer/AHA2-Setup-User-x64.exe": []byte("user-setup"),
+	entries := []archiveEntry{
+		{name: "dist/release-manifest.json", data: append(encoded, '\n')},
+		{name: "installer/AHA2-Setup-x64.exe", data: []byte("machine-setup")},
+		{name: "installer/AHA2-Setup-User-x64.exe", data: []byte("user-setup")},
 	}
 	for path, data := range files {
-		entries["dist/"+path] = data
+		entries = append(entries, archiveEntry{name: "dist/" + path, data: data})
 	}
+	entries = append(entries, extra...)
+	sort.SliceStable(entries, func(left, right int) bool { return entries[left].name < entries[right].name })
+
 	file, err := os.Create(zipPath)
 	if err != nil {
 		t.Fatalf("create zip: %v", err)
 	}
 	defer file.Close()
 	writer := zip.NewWriter(file)
-	names := make([]string, 0, len(entries))
-	for name := range entries {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		entry, err := writer.Create(name)
-		if err != nil {
-			t.Fatalf("create zip entry %s: %v", name, err)
+	for _, entry := range entries {
+		header := &zip.FileHeader{Name: entry.name, Method: zip.Deflate}
+		if entry.mode != 0 {
+			header.SetMode(entry.mode)
 		}
-		if _, err := entry.Write(entries[name]); err != nil {
-			t.Fatalf("write zip entry %s: %v", name, err)
+		zipEntry, err := writer.CreateHeader(header)
+		if err != nil {
+			t.Fatalf("create zip entry %s: %v", entry.name, err)
+		}
+		if _, err := zipEntry.Write(entry.data); err != nil {
+			t.Fatalf("write zip entry %s: %v", entry.name, err)
 		}
 	}
 	if err := writer.Close(); err != nil {
@@ -516,6 +630,207 @@ func TestWindowsPackageArchiveVerifierExecutable(t *testing.T) {
 		}
 		if !strings.Contains(out, "must look like v1.2.3") {
 			t.Errorf("unexpected archive verifier error: %s", out)
+		}
+	})
+
+	t.Run("rejects a member that escapes the package root", func(t *testing.T) {
+		zipPath := filepath.Join(t.TempDir(), "AHA2-Windows-Package-x64.zip")
+		writeArchiveFixture(t, zipPath, nil, nil, archiveEntry{name: "../outside.txt", data: []byte("outside")})
+		out, err := runArchiveVerifier(t, zipPath)
+		if err == nil {
+			t.Fatalf("archive verifier accepted an escaping member:\n%s", out)
+		}
+		if !strings.Contains(out, "member path is not normalized") {
+			t.Errorf("unexpected archive verifier error: %s", out)
+		}
+	})
+
+	t.Run("rejects an unexpected root member", func(t *testing.T) {
+		zipPath := filepath.Join(t.TempDir(), "AHA2-Windows-Package-x64.zip")
+		writeArchiveFixture(t, zipPath, nil, nil, archiveEntry{name: "unexpected.exe", data: []byte("unexpected")})
+		out, err := runArchiveVerifier(t, zipPath)
+		if err == nil {
+			t.Fatalf("archive verifier accepted a root member:\n%s", out)
+		}
+		if !strings.Contains(out, "not a file under dist/ or installer/") {
+			t.Errorf("unexpected archive verifier error: %s", out)
+		}
+	})
+
+	t.Run("rejects an unexpected top-level directory", func(t *testing.T) {
+		zipPath := filepath.Join(t.TempDir(), "AHA2-Windows-Package-x64.zip")
+		writeArchiveFixture(t, zipPath, nil, nil, archiveEntry{name: "plugins/evil.exe", data: []byte("evil")})
+		out, err := runArchiveVerifier(t, zipPath)
+		if err == nil {
+			t.Fatalf("archive verifier accepted an unexpected top-level directory:\n%s", out)
+		}
+		if !strings.Contains(out, "unexpected root entry") {
+			t.Errorf("unexpected archive verifier error: %s", out)
+		}
+	})
+
+	t.Run("rejects a duplicate member", func(t *testing.T) {
+		zipPath := filepath.Join(t.TempDir(), "AHA2-Windows-Package-x64.zip")
+		writeArchiveFixture(t, zipPath, nil, nil, archiveEntry{name: "dist/aha2-windows-amd64.exe", data: []byte("server-bytes")})
+		out, err := runArchiveVerifier(t, zipPath)
+		if err == nil {
+			t.Fatalf("archive verifier accepted a duplicate member:\n%s", out)
+		}
+		if !strings.Contains(out, "duplicate members") {
+			t.Errorf("unexpected archive verifier error: %s", out)
+		}
+	})
+
+	t.Run("rejects a case-insensitive duplicate member", func(t *testing.T) {
+		zipPath := filepath.Join(t.TempDir(), "AHA2-Windows-Package-x64.zip")
+		writeArchiveFixture(t, zipPath, nil, nil, archiveEntry{name: "dist/AHA2-WINDOWS-AMD64.EXE", data: []byte("server-bytes")})
+		out, err := runArchiveVerifier(t, zipPath)
+		if err == nil {
+			t.Fatalf("archive verifier accepted a case-insensitive duplicate:\n%s", out)
+		}
+		if !strings.Contains(out, "duplicate members") {
+			t.Errorf("unexpected archive verifier error: %s", out)
+		}
+	})
+
+	t.Run("rejects a Windows separator or drive path", func(t *testing.T) {
+		for _, name := range []string{`dist\evil.txt`, `/outside.txt`, `C:/outside.txt`} {
+			zipPath := filepath.Join(t.TempDir(), "AHA2-Windows-Package-x64.zip")
+			writeArchiveFixture(t, zipPath, nil, nil, archiveEntry{name: name, data: []byte("evil")})
+			out, err := runArchiveVerifier(t, zipPath)
+			if err == nil {
+				t.Fatalf("archive verifier accepted unsafe member name %q:\n%s", name, out)
+			}
+			if !strings.Contains(out, "Windows path separator") && !strings.Contains(out, "absolute path") {
+				t.Errorf("unexpected archive verifier error for %q: %s", name, out)
+			}
+		}
+	})
+
+	t.Run("rejects a member Windows would normalize", func(t *testing.T) {
+		zipPath := filepath.Join(t.TempDir(), "AHA2-Windows-Package-x64.zip")
+		writeArchiveFixture(t, zipPath, nil, nil, archiveEntry{name: "dist/evil.", data: []byte("evil")})
+		out, err := runArchiveVerifier(t, zipPath)
+		if err == nil {
+			t.Fatalf("archive verifier accepted a trailing-dot member:\n%s", out)
+		}
+		if !strings.Contains(out, "Windows-normalized segment") {
+			t.Errorf("unexpected archive verifier error: %s", out)
+		}
+	})
+
+	t.Run("rejects directory and symlink members", func(t *testing.T) {
+		for _, entry := range []archiveEntry{
+			{name: "dist/emptydir/"},
+			{name: "dist/link", data: []byte("outside"), mode: os.ModeSymlink | 0o777},
+		} {
+			zipPath := filepath.Join(t.TempDir(), "AHA2-Windows-Package-x64.zip")
+			writeArchiveFixture(t, zipPath, nil, nil, entry)
+			out, err := runArchiveVerifier(t, zipPath)
+			if err == nil {
+				t.Fatalf("archive verifier accepted a non-regular member %q:\n%s", entry.name, out)
+			}
+			if !strings.Contains(out, "directory entry") && !strings.Contains(out, "non-regular member") {
+				t.Errorf("unexpected archive verifier error for %q: %s", entry.name, out)
+			}
+		}
+	})
+
+	t.Run("rejects a node file the installer does not copy", func(t *testing.T) {
+		zipPath := filepath.Join(t.TempDir(), "AHA2-Windows-Package-x64.zip")
+		writeArchiveFixture(t, zipPath, nil, func(manifest map[string]any) {
+			files, _ := manifest["files"].([]any)
+			manifest["files"] = append(files, map[string]any{
+				"path": "node/extra.exe", "size": 1, "sha256": strings.Repeat("a", 64),
+			})
+		})
+		out, err := runArchiveVerifier(t, zipPath)
+		if err == nil {
+			t.Fatalf("archive verifier accepted node/extra.exe, which Inno Setup does not copy:\n%s", out)
+		}
+		if !strings.Contains(out, "outside the package install scope: node/extra.exe") {
+			t.Errorf("unexpected archive verifier error: %s", out)
+		}
+	})
+}
+
+func powershellForTest(t *testing.T) string {
+	t.Helper()
+	for _, name := range []string{"pwsh", "powershell"} {
+		if path, err := exec.LookPath(name); err == nil {
+			return path
+		}
+	}
+	t.Skip("PowerShell is not on PATH")
+	return ""
+}
+
+// runInstallerBuilder exercises the complete Windows builder, not just the
+// verifier: it must fail before Inno Setup runs when an installer input is a
+// symlink (including a Windows junction, which the verifier also rejects).
+func runInstallerBuilder(t *testing.T, root string) (string, error) {
+	t.Helper()
+	shell := powershellForTest(t)
+	pluginDir := filepath.Join(root, "plugins", "feishu", "windows-amd64")
+	args := []string{
+		"-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+		"-File", "scripts/build-windows-installer.ps1",
+		"-RepoPath", repoRoot(t),
+		"-InputExe", filepath.Join(root, "aha2-windows-amd64.exe"),
+		"-InputTrayExe", filepath.Join(root, "aha2-tray-windows-amd64.exe"),
+		"-InputBrowserHost", filepath.Join(root, "browser-host"),
+		"-InputNodeExe", filepath.Join(root, "node", "node.exe"),
+		"-InputNodeLicense", filepath.Join(root, "node", "LICENSE"),
+		"-InputFeishuPlugin", filepath.Join(pluginDir, "aha2-channel-feishu.exe"),
+		"-InputFeishuManifest", filepath.Join(pluginDir, "plugin.json"),
+		"-InputManifest", filepath.Join(root, "release-manifest.json"),
+		"-ExpectedCommit", fixtureCommit,
+		"-Version", fixtureVersion,
+		"-OutputDir", filepath.Join(t.TempDir(), "installer"),
+	}
+	cmd := exec.Command(shell, args...)
+	cmd.Dir = repoRoot(t)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+func TestWindowsInstallerBuilderRejectsSymlinkedInputs(t *testing.T) {
+	if _, err := exec.LookPath("pwsh"); err != nil {
+		if _, err := exec.LookPath("powershell"); err != nil {
+			t.Skip("PowerShell is not on PATH")
+		}
+	}
+
+	t.Run("rejects a symlinked server input", func(t *testing.T) {
+		root := writeFixturePackage(t)
+		server := filepath.Join(root, "aha2-windows-amd64.exe")
+		target := filepath.Join(root, "server-real.bin")
+		if err := os.Rename(server, target); err != nil {
+			t.Fatal(err)
+		}
+		replaceWithSymlink(t, target, server)
+		out, err := runInstallerBuilder(t, root)
+		if err == nil {
+			t.Fatalf("installer builder accepted a symlinked server input:\n%s", out)
+		}
+		if !strings.Contains(out, "is a symlink") {
+			t.Errorf("unexpected installer builder error: %s", out)
+		}
+	})
+
+	t.Run("rejects a symlinked browser-host root", func(t *testing.T) {
+		root := writeFixturePackage(t)
+		realDir := filepath.Join(root, "browser-host-real")
+		if err := os.Rename(filepath.Join(root, "browser-host"), realDir); err != nil {
+			t.Fatal(err)
+		}
+		replaceWithSymlink(t, realDir, filepath.Join(root, "browser-host"))
+		out, err := runInstallerBuilder(t, root)
+		if err == nil {
+			t.Fatalf("installer builder accepted a symlinked browser-host root:\n%s", out)
+		}
+		if !strings.Contains(out, "browser host root is a symlink") {
+			t.Errorf("unexpected installer builder error: %s", out)
 		}
 	})
 }

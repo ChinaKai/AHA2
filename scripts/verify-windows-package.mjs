@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import {createHash} from "node:crypto";
-import {createReadStream, readdirSync, readFileSync, statSync} from "node:fs";
+import {createReadStream, lstatSync, readdirSync, readFileSync, readlinkSync} from "node:fs";
 import {resolve} from "node:path";
 import {fileURLToPath} from "node:url";
 import {assertPackageManifest} from "./release-manifest.mjs";
@@ -22,24 +22,53 @@ function sha256File(path) {
   });
 }
 
+// lstat plus readlink catches both POSIX symlinks and Windows junctions or
+// other reparse points. Following one would let the installer copy bytes that
+// are not hashed by the manifest, so both are rejected before any file is read.
+function assertPlainEntry(path, label) {
+  let info;
+  try {
+    info = lstatSync(path);
+  } catch {
+    throw new Error(`${label} is missing: ${path}`);
+  }
+  if (info.isSymbolicLink()) {
+    throw new Error(`${label} is a symlink, which the installer would copy without a manifest hash: ${path}`);
+  }
+  let isReparsePoint = false;
+  try {
+    readlinkSync(path);
+    isReparsePoint = true;
+  } catch (error) {
+    if (!error || error.code !== "EINVAL") throw error;
+  }
+  if (isReparsePoint) {
+    throw new Error(`${label} is a reparse point, which the installer would copy without a manifest hash: ${path}`);
+  }
+  return info;
+}
+
 function addBrowserHost(inputs, browserHost) {
+  const root = resolve(browserHost);
+  const rootInfo = assertPlainEntry(root, "browser host root");
+  if (!rootInfo.isDirectory()) {
+    throw new Error(`browser host root is not a directory: ${root}`);
+  }
   function walk(directory, relativeDir) {
-    for (const entry of readdirSync(directory, {withFileTypes: true})) {
-      const relative = `${relativeDir}/${entry.name}`;
-      const absolute = resolve(directory, entry.name);
-      if (entry.isSymbolicLink()) {
-        throw new Error(`browser host input contains a symlink, which the installer would copy without a manifest hash: ${relative}`);
-      }
-      if (entry.isDirectory()) {
+    for (const name of readdirSync(directory)) {
+      const relative = `${relativeDir}/${name}`;
+      const absolute = resolve(directory, name);
+      const info = assertPlainEntry(absolute, `installer input ${relative}`);
+      if (info.isDirectory()) {
         walk(absolute, relative);
-      } else if (entry.isFile()) {
+      } else if (info.isFile()) {
         inputs.set(relative, absolute);
       } else {
-        throw new Error(`browser host input is not a regular file: ${relative}`);
+        throw new Error(`installer input ${relative} is not a regular file: ${absolute}`);
       }
     }
   }
-  walk(resolve(browserHost), "browser-host");
+  walk(root, "browser-host");
 }
 
 export function collectInstallInputs({
@@ -84,6 +113,7 @@ export async function verifyWindowsPackage({
   if (typeof root !== "string" || root === "") {
     throw new Error("package root is required");
   }
+  assertPlainEntry(resolve(manifestPath), "release manifest");
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
   assertPackageManifest(manifest, {
     version,
@@ -106,14 +136,9 @@ export async function verifyWindowsPackage({
   }
 
   for (const [path, absolutePath] of actual) {
-    let info;
-    try {
-      info = statSync(absolutePath);
-    } catch {
-      throw new Error(`installer input is missing: ${path} (${absolutePath})`);
-    }
+    const info = assertPlainEntry(absolutePath, `installer input ${path}`);
     if (!info.isFile()) {
-      throw new Error(`installer input is not a regular file: ${path}`);
+      throw new Error(`installer input ${path} is not a regular file: ${absolutePath}`);
     }
     const entry = entries.get(path);
     if (entry.size !== info.size) {

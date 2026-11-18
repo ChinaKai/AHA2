@@ -136,8 +136,11 @@ test("package manifest gate accepts the exact installer install scope", () => {
   for (const path of REQUIRED_PACKAGE_FILES) {
     assert.ok(packagePathInScope(path), `${path} must be in the installer install scope`);
   }
-  for (const path of ["secret.txt", "plugins/other/x.exe", "browser-host", "node-modules/x", "/absolute.exe", "C:/x.exe"]) {
+  for (const path of ["secret.txt", "plugins/other/x.exe", "browser-host", "node-modules/x", "node/extra.exe", "/absolute.exe", "C:/x.exe"]) {
     assert.ok(!packagePathInScope(path), `${path} must be outside the installer install scope`);
+  }
+  for (const path of ["node/node.exe", "node/LICENSE"]) {
+    assert.ok(packagePathInScope(path), `${path} must be inside the installer install scope`);
   }
 });
 
