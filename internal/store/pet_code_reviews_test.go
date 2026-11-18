@@ -179,3 +179,65 @@ func TestPetCodeReviewLinksMigrationAndPersistence(t *testing.T) {
 		t.Fatalf("link did not cascade: count=%d err=%v", count, err)
 	}
 }
+
+func TestPetCodeReviewLinksBySourceGroupsOldestFirst(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	firstSourceID := attachmentTestTask(t, database)
+	firstSource, err := database.Task(ctx, firstSourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondSource := firstSource
+	secondSource.ID = "task-source-second"
+	secondSource.CreatedAt = firstSource.CreatedAt.Add(time.Minute)
+	if err := database.CreateTask(ctx, secondSource); err != nil {
+		t.Fatal(err)
+	}
+	createReview := func(id string, source domain.Task, offset time.Duration) {
+		t.Helper()
+		review := firstSource
+		review.ID, review.Code, review.CreatedAt = id, "", source.CreatedAt.Add(offset)
+		if err := database.CreateTask(ctx, review); err != nil {
+			t.Fatal(err)
+		}
+		if err := database.CreatePetCodeReviewLink(ctx, review.ID, source.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	createReview("review-old", firstSource, 0)
+	createReview("review-tie-a", firstSource, time.Hour)
+	createReview("review-tie-b", firstSource, time.Hour)
+	createReview("review-new", firstSource, 2*time.Hour)
+	createReview("review-second", secondSource, 0)
+
+	grouped, err := database.PetCodeReviewLinksBySource(ctx, []string{firstSource.ID, secondSource.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := func(links []PetCodeReviewLink) []string {
+		result := make([]string, len(links))
+		for i, link := range links {
+			result[i] = link.ReviewTaskID
+		}
+		return result
+	}
+	if got := ids(grouped[firstSource.ID]); !slices.Equal(got, []string{"review-old", "review-tie-a", "review-tie-b", "review-new"}) {
+		t.Fatalf("first source order=%v", got)
+	}
+	if got := ids(grouped[secondSource.ID]); !slices.Equal(got, []string{"review-second"}) {
+		t.Fatalf("second source=%v", got)
+	}
+	onlyFirst, err := database.PetCodeReviewLinksBySource(ctx, []string{firstSource.ID})
+	if err != nil || len(onlyFirst) != 1 || len(onlyFirst[firstSource.ID]) != 4 {
+		t.Fatalf("unrequested source leaked: %#v %v", onlyFirst, err)
+	}
+	empty, err := database.PetCodeReviewLinksBySource(ctx, nil)
+	if err != nil || len(empty) != 0 {
+		t.Fatalf("empty source set=%#v %v", empty, err)
+	}
+}

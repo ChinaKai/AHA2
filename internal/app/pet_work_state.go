@@ -444,6 +444,10 @@ func (s *Service) petOpenTasks(ctx context.Context, tasks []domain.Task, pending
 	for _, task := range tasks {
 		tasksByID[task.ID] = task
 	}
+	activeReviews, err := s.petActiveReviewLabels(ctx, tasks)
+	if err != nil {
+		return nil, 0, 0, err
+	}
 	ids, err := s.store.PetCreatedTaskIDs(ctx)
 	if err != nil {
 		return nil, 0, 0, err
@@ -484,7 +488,11 @@ func (s *Service) petOpenTasks(ctx context.Context, tasks []domain.Task, pending
 		if approvalID := pendingByTask[task.ID]; approvalID != "" {
 			item.PendingApprovalID = approvalID
 		}
-		item.AttentionReason = petOpenTaskAttentionReason(task.Status, domain.TurnStatus(item.LastTurnStatus))
+		activeReview := ""
+		if task.Status == domain.TaskWaitingUser {
+			activeReview = activeReviews[task.ID]
+		}
+		item.AttentionReason = petOpenTaskAttentionReason(task.Status, domain.TurnStatus(item.LastTurnStatus), activeReview)
 		if item.AttentionReason != "" {
 			if item.PendingApprovalID != "" {
 				item.AttentionReason = "已提交待审批 " + item.PendingApprovalID
@@ -530,14 +538,63 @@ func petPendingApprovalTaskMap(pendingApprovals []domain.PetApproval) map[string
 	return pendingByTask
 }
 
+// petActiveReviewLabels returns, for each waiting source Task, the newest
+// linked Review Task that is still in flight. One store read serves every
+// source, so the query count does not grow with the number of waiting Tasks;
+// the newest preparing/active review is selected in memory. The link comes
+// from the durable pet_code_reviews relation written by the review creation
+// flow, never from titles or prompts. A review that already stopped running is
+// not progress: only preparing/active reviews describe an implementation Task
+// as under review.
+func (s *Service) petActiveReviewLabels(ctx context.Context, tasks []domain.Task) (map[string]string, error) {
+	waitingIDs := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		if task.Status == domain.TaskWaitingUser {
+			waitingIDs = append(waitingIDs, task.ID)
+		}
+	}
+	if len(waitingIDs) == 0 {
+		return nil, nil
+	}
+	linked, err := s.store.PetCodeReviewLinksBySource(ctx, waitingIDs)
+	if err != nil {
+		return nil, err
+	}
+	labels := make(map[string]string, len(linked))
+	for sourceTaskID, reviews := range linked {
+		for i := len(reviews) - 1; i >= 0; i-- {
+			review := reviews[i]
+			if !petCodeReviewInFlight(review.Status) {
+				continue
+			}
+			label := strings.TrimSpace(review.Code)
+			if label == "" {
+				label = review.ReviewTaskID
+			}
+			labels[sourceTaskID] = label
+			break
+		}
+	}
+	return labels, nil
+}
+
+func petCodeReviewInFlight(status domain.TaskStatus) bool {
+	return status == domain.TaskPreparing || status == domain.TaskActive
+}
+
 // petOpenTaskAttentionReason describes why an open Task is listed for the
 // owner's attention. A waiting Task whose latest Turn succeeded is only
 // waiting for the next message, so it must not claim the owner has to decide
-// something. lastTurnStatus may be empty when unknown (the attention total
-// deliberately ignores it, keeping that count's meaning unchanged).
-func petOpenTaskAttentionReason(status domain.TaskStatus, lastTurnStatus domain.TurnStatus) string {
+// something. An in-flight linked Review Task is reported first: the owner is
+// waiting on the review, not on a decision. lastTurnStatus may be empty when
+// unknown (the attention total deliberately ignores it, keeping that count's
+// meaning unchanged).
+func petOpenTaskAttentionReason(status domain.TaskStatus, lastTurnStatus domain.TurnStatus, activeReview string) string {
 	switch status {
 	case domain.TaskWaitingUser:
+		if activeReview != "" {
+			return "waiting_user：评审中 " + activeReview
+		}
 		if lastTurnStatus == domain.TurnSucceeded {
 			return "waiting_user：等待下一步指令"
 		}
@@ -572,7 +629,7 @@ func petOpenTaskCounts(ids []string, tasks []domain.Task, pendingApprovals []dom
 		// The count keeps its original meaning: every waiting_user Task without
 		// a pending approval counts, whether or not it is merely awaiting the
 		// next message. Only the displayed reason is refined.
-		if petOpenTaskAttentionReason(task.Status, "") != "" && pendingByTask[task.ID] == "" {
+		if petOpenTaskAttentionReason(task.Status, "", "") != "" && pendingByTask[task.ID] == "" {
 			attention++
 		}
 	}

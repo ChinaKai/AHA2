@@ -4220,6 +4220,20 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("record schema v152: %w", err)
 		}
 	}
+	var hasV153 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=153)`).Scan(&hasV153)
+	if !hasV153 {
+		// The work-state briefing joins review links by source Task. Without
+		// this index SQLite scans the whole link table before the in-memory
+		// newest-review selection can run.
+		if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_pet_code_reviews_source ON pet_code_reviews(source_task_id)`); err != nil {
+			return fmt.Errorf("apply schema v153 code review source index: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(153, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return fmt.Errorf("record schema v153: %w", err)
+		}
+	}
 	return nil
 }
 
