@@ -1,6 +1,7 @@
 package knowledgevault
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -170,6 +171,15 @@ func (g *Git) commandRaw(ctx context.Context, op string, args ...string) (string
 // feeds hundreds of vault-relative paths to one `git hash-object --stdin-paths`
 // process instead of starting git once per document.
 func (g *Git) commandInputRaw(ctx context.Context, op, input string, args ...string) (string, error) {
+	return g.commandInputRawConfig(ctx, op, input, nil, args...)
+}
+
+// commandInputRawConfig is commandInputRaw with command-scoped `-c` overrides.
+// The one-time line-ending migration uses it to pin core.autocrlf=false for
+// its own commands: a machine-wide autocrlf=true (the Git for Windows default)
+// must never decide whether a vault needs renormalization, even before the
+// repository-local policy exists.
+func (g *Git) commandInputRawConfig(ctx context.Context, op, input string, config []string, args ...string) (string, error) {
 	gitPath, err := g.gitBinary()
 	if err != nil {
 		return "", err
@@ -180,20 +190,58 @@ func (g *Git) commandInputRaw(ctx context.Context, op, input string, args ...str
 	}
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	command := exec.CommandContext(runCtx, gitPath, append([]string{"-C", g.vaultPath, op}, args...)...)
+	invocation := []string{"-C", g.vaultPath}
+	for _, setting := range config {
+		invocation = append(invocation, "-c", setting)
+	}
+	invocation = append(invocation, op)
+	invocation = append(invocation, args...)
+	command := exec.CommandContext(runCtx, gitPath, invocation...)
 	command.Env = gitEnvironment()
 	if input != "" {
 		command.Stdin = strings.NewReader(input)
 	}
-	output, runErr := command.CombinedOutput()
-	text := string(output)
+	// Keep stdout and stderr apart. Git writes diagnostic warnings to stderr
+	// (for example "LF will be replaced by CRLF the next time Git touches it"
+	// under a host-level core.autocrlf=true), while callers parse stdout as
+	// NUL-separated paths and raw diffs. Merging the two streams turned that
+	// warning into a phantom change path, which the auto-commit gate then
+	// refused as invalid_path; with a single modified file the vault paused on
+	// "有 1 个改动无法自动提交" even though the file was ordinary text.
+	var stdout, stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	runErr := command.Run()
+	output := stdout.String()
 	if runErr == nil {
-		return text, nil
+		return output, nil
 	}
 	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
-		return text, &GitCommandError{Op: op, Detail: "操作超时"}
+		return output, &GitCommandError{Op: op, Detail: "操作超时"}
 	}
-	return text, &GitCommandError{Op: op, Detail: sanitizeGitOutput(text)}
+	// stderr first: git puts the actual error there, and sanitizeGitOutput
+	// truncates long details before any trailing stdout could crowd it out.
+	detail := strings.TrimSpace(stderr.String())
+	if out := strings.TrimSpace(output); out != "" {
+		// Error classification still needs stdout markers such as "nothing to
+		// commit"; only the success path stays clean.
+		if detail != "" {
+			detail += "\n"
+		}
+		detail += out
+	}
+	return output, &GitCommandError{Op: op, Detail: sanitizeGitOutput(detail)}
+}
+
+// commandConfig is the trimmed convenience wrapper for commandInputRawConfig.
+func (g *Git) commandConfig(ctx context.Context, config []string, op string, args ...string) (string, error) {
+	text, err := g.commandInputRawConfig(ctx, op, "", config, args...)
+	return strings.TrimSpace(text), err
+}
+
+// commandRawConfig leaves output untouched, like commandRaw.
+func (g *Git) commandRawConfig(ctx context.Context, config []string, op string, args ...string) (string, error) {
+	return g.commandInputRawConfig(ctx, op, "", config, args...)
 }
 
 func gitEnvironment() []string {
@@ -874,8 +922,11 @@ func (g *Git) Init(ctx context.Context) (GitOpResult, error) {
 	}
 	// Pin the text policy before the first commit so a fresh vault never
 	// records platform-dependent line endings. The upgrade path applies the
-	// same policy through the auto-sync preflight.
-	if _, err := g.ensureTextPolicy(ctx); err != nil {
+	// same policy through the auto-sync preflight. An existing .gitattributes
+	// is never rewritten; a missing one is only created when no CRLF blob is
+	// already tracked, so initialization cannot silently rewrite line endings.
+	policy, err := g.ensureTextPolicy(ctx)
+	if err != nil {
 		return GitOpResult{}, err
 	}
 	created := false
@@ -895,6 +946,9 @@ func (g *Git) Init(ctx context.Context) (GitOpResult, error) {
 	message := "Git 仓库已就绪"
 	if created {
 		message = "Git 仓库已初始化并完成首次提交"
+	}
+	if policy.NeedsRewrite() > 0 {
+		message += fmt.Sprintf("；发现 %d 个索引文件仍含 CRLF 行尾（其中混合 %d 个），未自动写入 .gitattributes", policy.NeedsRewrite(), policy.IndexMixed)
 	}
 	return GitOpResult{Status: status, Message: message, Created: created}, nil
 }

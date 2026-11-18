@@ -183,6 +183,48 @@ func TestAutoCommitGateShapeOfReportedPreflightFiles(t *testing.T) {
 	}
 }
 
+// Git for Windows defaults to core.autocrlf=true globally. Diffing an ordinary
+// LF edit then prints "LF will be replaced by CRLF the next time Git touches
+// it" on stderr. The scan parses stdout as a NUL-separated path list, so that
+// warning must never become a change path: it used to be blocked as
+// invalid_path, which left a single modified document with an empty eligible
+// set and paused the auto-sync preflight.
+func TestScanAutoCommitIgnoresGitEOLWarnings(t *testing.T) {
+	global := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(global, []byte("[core]\n\tautocrlf = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	ctx := context.Background()
+	config, git := newGitTestVault(t)
+	if _, err := git.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Upgrade fixture: no policy file and no repo-local autocrlf pin, like the
+	// Git for Windows vault that paused.
+	if err := os.Remove(filepath.Join(config.VaultPath, ".gitattributes")); err != nil {
+		t.Fatal(err)
+	}
+	testGitCommand(t, config.VaultPath, "config", "--local", "--unset", "core.autocrlf")
+	writeGitTestFile(t, config.VaultPath, "global/general/one.md", "# One\n\nbody\n")
+	if _, err := git.Commit(ctx, "seed"); err != nil {
+		t.Fatal(err)
+	}
+	writeGitTestFile(t, config.VaultPath, "global/general/one.md", "# One\n\nedited\n")
+
+	scan, err := git.ScanAutoCommit(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scan.Pending != 1 || scan.BlockedTotal != 0 || len(scan.Blocked) != 0 {
+		t.Fatalf("scan = %+v, want one pending text change and no blocked paths", scan)
+	}
+	if len(scan.Eligible) != 1 || scan.Eligible[0] != "global/general/one.md" {
+		t.Fatalf("eligible = %v, want the edited document", scan.Eligible)
+	}
+}
+
 func padDocToSize(base string, size int) string {
 	if len(base) >= size {
 		return base
@@ -571,5 +613,53 @@ func TestAutoCommitBlocksBareTokenAndOpenAIProjectKeys(t *testing.T) {
 	}
 	if len(scan.Eligible) != 1 || scan.Eligible[0] != "notes/token-prose.md" {
 		t.Fatalf("normal token prose was not eligible: %+v", scan.Eligible)
+	}
+}
+
+// A document that explains token/password handling in Chinese must not be
+// blocked as a secret, while real credentials (ASCII or Unicode) in the same
+// batch still are.
+func TestAutoCommitKeepsChineseSecretProseEligible(t *testing.T) {
+	ctx := context.Background()
+	config, git := newGitTestVault(t)
+	if _, err := git.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	prose := "# 配置说明\n\n" +
+		"token:从环境变量读取不要写死\n" +
+		"password:至少八位以上字符组合\n" +
+		"鉴权token=设备上报的随机串\n"
+	writeGitTestFile(t, config.VaultPath, "notes/chinese-secret-prose.md", prose)
+	writeGitTestFile(t, config.VaultPath, "notes/real-secret.md", "token = \"abcdefgh12345678\"\n")
+	writeGitTestFile(t, config.VaultPath, "notes/accented-password.md", "password=\"pässwörd1234\"\n")
+	writeGitTestFile(t, config.VaultPath, "notes/accented-token.md", "token=abc123édef456\n")
+	writeGitTestFile(t, config.VaultPath, "notes/fullwidth-symbol-secret.md", "password=\"＄＄＄＄＋＋＋＋\"\n")
+	writeGitTestFile(t, config.VaultPath, "notes/postal-mark-secret.md", "token=〒〒〒〒〒〒〒〒\n")
+	writeGitTestFile(t, config.VaultPath, "notes/hangzhou-numeral-secret.md", "password=〡〢〣〤〥〦〧〨\n")
+	scan, err := git.ScanAutoCommit(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked := map[string]string{}
+	for _, item := range scan.Blocked {
+		blocked[item.Path] = item.Reason
+	}
+	for _, path := range []string{
+		"notes/real-secret.md",
+		"notes/accented-password.md",
+		"notes/accented-token.md",
+		"notes/fullwidth-symbol-secret.md",
+		"notes/postal-mark-secret.md",
+		"notes/hangzhou-numeral-secret.md",
+	} {
+		if blocked[path] != "secret" {
+			t.Fatalf("%s not blocked as secret: %+v", path, scan.Blocked)
+		}
+	}
+	if scan.BlockedTotal != 6 {
+		t.Fatalf("blocked total = %d, want 6", scan.BlockedTotal)
+	}
+	if len(scan.Eligible) != 1 || scan.Eligible[0] != "notes/chinese-secret-prose.md" {
+		t.Fatalf("chinese prose was not eligible: %+v", scan.Eligible)
 	}
 }

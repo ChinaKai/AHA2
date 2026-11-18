@@ -35,6 +35,15 @@ var gitAttributesRequiredLines = []string{
 	"* text=auto eol=lf",
 }
 
+// lineEndingGitConfig is passed as command-scoped `-c` overrides to every git
+// command the migration relies on. The repository-local policy is written
+// first, but pinning the same values per command keeps the decision stable if
+// a machine-wide core.autocrlf=true (the Git for Windows default) is present,
+// or if the repo-local setting is changed between two preflight steps.
+// safecrlf is disabled for the migration's own commands because rewriting
+// CRLF blobs to LF is exactly what it is asked to do.
+var lineEndingGitConfig = []string{"core.autocrlf=false", "core.safecrlf=false"}
+
 // gitAttributesBinaryLines marks formats that must never be line-converted.
 // The list is intentionally explicit instead of relying on content sniffing:
 // .gitattributes has to decide before git reads the blob.
@@ -53,12 +62,43 @@ var gitAttributesBinaryLines = []string{
 	"*.ttf -text", "*.otf -text", "*.eot -text", "*.icns -text",
 }
 
+// CRLFCounts is the read-only line-ending inventory of a vault. Only records
+// without an explicit owner line-ending policy are counted as migration
+// candidates; files whose attributes say `-text` or `eol=crlf` are the owner's
+// deliberate choice and are never rewritten.
+type CRLFCounts struct {
+	// IndexCRLF counts tracked blobs that contain CRLF. Creating an `eol=lf`
+	// policy while such blobs exist makes every one of them look modified and
+	// the next auto-commit would rewrite them in bulk.
+	IndexCRLF int `json:"index_crlf"`
+	// IndexMixed counts blobs with both CRLF and LF. Git reports `i/mixed`;
+	// they are just as unsafe to touch automatically as `i/crlf`.
+	IndexMixed int `json:"index_mixed"`
+	// ExplicitCRLF counts files whose attributes mark them binary (`-text`,
+	// including `binary`/`-crlf`). Git never reports those as modified and
+	// renormalize never stages them, so they are safe to leave alone.
+	// `eol=crlf` is deliberately NOT included: its CRLF blob is reported as
+	// modified and would be rewritten by the next ordinary add.
+	ExplicitCRLF int `json:"explicit_crlf"`
+	// WorktreeCRLF counts checked-out files with CRLF or mixed endings. When
+	// the index is already LF those are clean under the new policy (the clean
+	// filter normalizes them), so they are reported but do not block it.
+	WorktreeCRLF int `json:"worktree_crlf"`
+}
+
+// NeedsRewrite reports whether automatic migration would change blobs. Mixed
+// endings are included: the owner may have edited a note on Windows, and a
+// silent normalization would rewrite their content.
+func (c CRLFCounts) NeedsRewrite() int { return c.IndexCRLF + c.IndexMixed }
+
 // GitTextPolicyResult reports what EnsureTextPolicy changed so the settings
 // audit log can distinguish a first migration from a no-op upgrade check.
 type GitTextPolicyResult struct {
 	AttributesChanged bool   `json:"attributes_changed"`
+	AttributesExisted bool   `json:"attributes_existed"`
 	AttributesPath    string `json:"attributes_path"`
 	Autocrlf          string `json:"autocrlf"`
+	CRLFCounts
 }
 
 // GitAttributesContent returns the policy file AHA2 writes on a fresh vault.
@@ -68,9 +108,17 @@ func GitAttributesContent() string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
-// EnsureTextPolicy writes the missing text policy lines and pins the
-// repository-local core.autocrlf setting. It is idempotent and preserves any
-// owner-authored rules in an existing .gitattributes.
+// CountCRLF reports the line-ending inventory of the vault. It is a read-only
+// `git ls-files --eol` and includes untracked files, so an upgrade also notices
+// a CRLF document that has not been committed yet.
+func (g *Git) CountCRLF(ctx context.Context) (CRLFCounts, error) {
+	return g.countCRLF(ctx)
+}
+
+// EnsureTextPolicy pins the repository-local core.autocrlf setting and, only
+// when no .gitattributes exists yet, writes the AHA2 LF policy. An existing
+// policy file is owner-authored state and is never rewritten, not even to add
+// missing default lines. It is idempotent.
 func (g *Git) EnsureTextPolicy(ctx context.Context) (GitTextPolicyResult, error) {
 	unlock := g.lockRepo()
 	defer unlock()
@@ -87,63 +135,108 @@ func (g *Git) ensureTextPolicy(ctx context.Context) (GitTextPolicyResult, error)
 	if err := g.requireRepository(ctx); err != nil {
 		return result, err
 	}
+	path := filepath.Join(g.vaultPath, gitAttributesFile)
+	if info, err := os.Lstat(path); err == nil {
+		if !info.Mode().IsRegular() {
+			return result, fmt.Errorf("%s 不是普通文件", gitAttributesFile)
+		}
+		// Never overwrite an existing policy file. The owner may have authored
+		// rules that AHA2 must not reorder or extend behind their back.
+		result.AttributesExisted = true
+		if _, err := g.command(ctx, "config", "--local", "core.autocrlf", "false"); err != nil {
+			return result, err
+		}
+		result.Autocrlf = "false"
+		counts, err := g.countCRLF(ctx)
+		if err != nil {
+			return result, err
+		}
+		result.CRLFCounts = counts
+		return result, nil
+	} else if !os.IsNotExist(err) {
+		return result, err
+	}
 
+	counts, err := g.countCRLF(ctx)
+	if err != nil {
+		return result, err
+	}
+	result.CRLFCounts = counts
+	if result.NeedsRewrite() > 0 {
+		// Do not create the LF policy yet: with CRLF or mixed blobs in the index
+		// it would make them all look modified and the next commit would rewrite
+		// them in bulk. The preflight reports the count and leaves the vault
+		// untouched.
+		return result, nil
+	}
 	if _, err := g.command(ctx, "config", "--local", "core.autocrlf", "false"); err != nil {
 		return result, err
 	}
 	result.Autocrlf = "false"
-
-	path := filepath.Join(g.vaultPath, gitAttributesFile)
-	existing, err := os.ReadFile(path)
-	if err != nil && !os.IsNotExist(err) {
+	if err := writeVaultFileIfChanged(g.vaultPath, path, []byte(GitAttributesContent()), 0o644); err != nil {
 		return result, err
 	}
-	ahaLines := append(append([]string{}, gitAttributesRequiredLines...), gitAttributesBinaryLines...)
-	content := string(existing)
-	changed := false
-	if strings.TrimSpace(content) == "" {
-		content = GitAttributesContent()
-		changed = true
-	} else {
-		// gitattributes is last-match-wins. AHA2's defaults must therefore come
-		// first so an owner rule such as `*.md text eol=crlf` or a custom
-		// binary extension keeps winning. Move any AHA2-owned line that an
-		// older version appended to the end back to the front.
-		ahaSet := make(map[string]bool, len(ahaLines))
-		for _, line := range ahaLines {
-			ahaSet[line] = true
-		}
-		authorLines := make([]string, 0, 32)
-		for _, line := range strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n") {
-			if ahaSet[strings.TrimSpace(line)] {
-				continue
-			}
-			authorLines = append(authorLines, line)
-		}
-		for len(authorLines) > 0 && strings.TrimSpace(authorLines[0]) == "" {
-			authorLines = authorLines[1:]
-		}
-		for len(authorLines) > 0 && strings.TrimSpace(authorLines[len(authorLines)-1]) == "" {
-			authorLines = authorLines[:len(authorLines)-1]
-		}
-		authorText := strings.Join(authorLines, "\n")
-		merged := strings.Join(ahaLines, "\n")
-		if authorText != "" {
-			merged += "\n" + authorText
-		}
-		merged += "\n"
-		if merged != content {
-			content = merged
-			changed = true
-		}
-	}
-	if changed {
-		if err := writeVaultFileIfChanged(g.vaultPath, path, []byte(content), 0o644); err != nil {
-			return result, err
-		}
-	}
-	result.AttributesChanged = changed
+	result.AttributesChanged = true
 	return result, nil
+}
+
+// countCRLF parses `git ls-files --eol`. A record looks like
+// `i/crlf w/crlf attr/-text\tpath` (columns padded with spaces); the attr
+// column may itself contain spaces (`text eol=crlf`). Only `-text` records are
+// excluded from the migration counts: git never reports them as modified.
+// `eol=crlf` records with CRLF blobs stay in the counts and trigger the
+// preflight pause, because any ordinary add would rewrite their blob to LF.
+func (g *Git) countCRLF(ctx context.Context) (CRLFCounts, error) {
+	counts := CRLFCounts{}
+	output, err := g.commandRawConfig(ctx, lineEndingGitConfig, "ls-files", "--eol", "-z", "--cached", "--others", "--exclude-standard")
+	if err != nil {
+		return counts, err
+	}
+	for _, record := range splitNullList(output) {
+		tab := strings.IndexByte(record, '\t')
+		if tab < 0 {
+			continue
+		}
+		fields := strings.Fields(record[:tab])
+		if len(fields) < 2 {
+			continue
+		}
+		explicit := false
+		for index, field := range fields[2:] {
+			if index == 0 {
+				field = strings.TrimPrefix(field, "attr/")
+			}
+			// Only `-text` (including `binary`/`-crlf`) is a real exclusion:
+			// git treats those files as binary, never reports them modified and
+			// `git add --renormalize` never stages them. `eol=crlf` is NOT
+			// safe to exclude: git reports the CRLF blob as modified and the
+			// next ordinary `git add` (including the quiet-period auto-commit)
+			// rewrites the index blob to LF. It must stay in the rewrite count
+			// so the preflight pauses instead.
+			if field == "-text" {
+				explicit = true
+				break
+			}
+		}
+		indexCRLF := fields[0] == "i/crlf" || fields[0] == "i/mixed"
+		worktreeCRLF := fields[1] == "w/crlf" || fields[1] == "w/mixed"
+		if explicit {
+			if indexCRLF || worktreeCRLF {
+				counts.ExplicitCRLF++
+			}
+			continue
+		}
+		switch fields[0] {
+		case "i/crlf":
+			counts.IndexCRLF++
+		case "i/mixed":
+			counts.IndexMixed++
+		}
+		if worktreeCRLF {
+			counts.WorktreeCRLF++
+		}
+	}
+	return counts, nil
 }
 
 // RenormalizeResult describes the one-time line-ending migration.
@@ -202,7 +295,7 @@ func (g *Git) Renormalize(ctx context.Context) (RenormalizeResult, error) {
 		}
 		return result, err
 	}
-	before, err := g.command(ctx, "rev-parse", "--verify", "HEAD")
+	before, err := g.commandConfig(ctx, lineEndingGitConfig, "rev-parse", "--verify", "HEAD")
 	if err != nil {
 		return result, err
 	}
@@ -210,44 +303,61 @@ func (g *Git) Renormalize(ctx context.Context) (RenormalizeResult, error) {
 
 	// Stage the policy file explicitly (renormalize only covers tracked files)
 	// and then let git convert every tracked blob through the new filters.
-	if _, err := g.command(ctx, "add", "--", literalPathspec(gitAttributesFile)); err != nil {
+	if _, err := g.commandConfig(ctx, lineEndingGitConfig, "add", "--", literalPathspec(gitAttributesFile)); err != nil {
 		return result, err
 	}
-	if _, err := g.command(ctx, "add", "--renormalize", "."); err != nil {
+	if _, err := g.commandConfig(ctx, lineEndingGitConfig, "add", "--renormalize", "."); err != nil {
 		return result, err
 	}
-	staged, err := g.commandRaw(ctx, "diff", "--cached", "--name-only", "-z", "HEAD")
+	staged, err := g.commandRawConfig(ctx, lineEndingGitConfig, "diff", "--cached", "--name-only", "-z", "HEAD")
 	if err != nil {
 		return result, err
 	}
 	names := splitNullList(staged)
-	result.Files = len(names)
 	if len(names) == 0 {
 		result.Message = "行尾已经是 LF，无需规范化"
 		return result, nil
 	}
-	result.Ran = true
-	if tagErr := g.ensureLineEndingBackupTag(ctx); tagErr != nil {
-		// The exact pre-migration HEAD is still recorded in Before and in
-		// .aha/line-endings.json, so the missing convenience tag is a warning,
-		// not a reason to leave the migration half done.
-		result.Warning = "备份 tag 创建失败：" + tagErr.Error()
-	} else {
-		result.Tag = lineEndingBackupTag
+	// The policy file is staged explicitly above, so it is always part of the
+	// first commit. It is not a renormalized document: an all-LF vault needs a
+	// policy commit but no line-ending migration, and must not create a backup
+	// tag or claim that it rewrote files.
+	renormalized := make([]string, 0, len(names))
+	for _, name := range names {
+		if name != gitAttributesFile {
+			renormalized = append(renormalized, name)
+		}
 	}
-	message := fmt.Sprintf("Normalize knowledge vault line endings to LF\n\nOne-time migration: * text=auto eol=lf, core.autocrlf=false.\nBefore: %s\nFiles: %d\n", result.Before, result.Files)
-	if _, err := g.command(ctx, "commit", "-q", "-m", message); err != nil {
+	result.Files = len(renormalized)
+	message := "Add knowledge vault LF line-ending policy\n\nNo tracked blob needed renormalization: * text=auto eol=lf, core.autocrlf=false.\n"
+	if len(renormalized) > 0 {
+		result.Ran = true
+		if tagErr := g.ensureLineEndingBackupTag(ctx); tagErr != nil {
+			// The exact pre-migration HEAD is still recorded in Before and in
+			// .aha/line-endings.json, so the missing convenience tag is a warning,
+			// not a reason to leave the migration half done.
+			result.Warning = "备份 tag 创建失败：" + tagErr.Error()
+		} else {
+			result.Tag = lineEndingBackupTag
+		}
+		message = fmt.Sprintf("Normalize knowledge vault line endings to LF\n\nOne-time migration: * text=auto eol=lf, core.autocrlf=false.\nBefore: %s\nFiles: %d\n", result.Before, result.Files)
+	}
+	if _, err := g.commandConfig(ctx, lineEndingGitConfig, "commit", "-q", "-m", message); err != nil {
 		// The staged index and working tree are intentionally left in place:
 		// the next preflight or owner action can inspect them, and nothing here
 		// resets or overwrites the owner's files.
 		return result, err
 	}
-	after, err := g.command(ctx, "rev-parse", "--verify", "HEAD")
+	after, err := g.commandConfig(ctx, lineEndingGitConfig, "rev-parse", "--verify", "HEAD")
 	if err != nil {
 		return result, err
 	}
 	result.After = strings.TrimSpace(after)
 	result.Committed = true
+	if !result.Ran {
+		result.Message = "行尾策略已写入；现有文件已经是 LF，无需规范化"
+		return result, nil
+	}
 	result.Message = fmt.Sprintf("已规范化 %d 个文件的行尾", result.Files)
 	if err := g.recordLineEndingState(result); err != nil {
 		return result, err
@@ -256,16 +366,16 @@ func (g *Git) Renormalize(ctx context.Context) (RenormalizeResult, error) {
 }
 
 func (g *Git) ensureLineEndingBackupTag(ctx context.Context) error {
-	if _, err := g.command(ctx, "rev-parse", "--verify", "--quiet", "refs/tags/"+lineEndingBackupTag); err == nil {
+	if _, err := g.commandConfig(ctx, lineEndingGitConfig, "rev-parse", "--verify", "--quiet", "refs/tags/"+lineEndingBackupTag); err == nil {
 		return nil
 	}
-	_, err := g.command(ctx, "tag", lineEndingBackupTag, "HEAD")
+	_, err := g.commandConfig(ctx, lineEndingGitConfig, "tag", lineEndingBackupTag, "HEAD")
 	return err
 }
 
 func (g *Git) requireNoGitOperation(ctx context.Context) error {
 	gitDir := ""
-	if output, err := g.command(ctx, "rev-parse", "--git-dir"); err == nil {
+	if output, err := g.commandConfig(ctx, lineEndingGitConfig, "rev-parse", "--git-dir"); err == nil {
 		gitDir = strings.TrimSpace(output)
 	}
 	if gitDir == "" {
@@ -287,7 +397,7 @@ func (g *Git) requireNoGitOperation(ctx context.Context) error {
 }
 
 func (g *Git) requireNoUnmerged(ctx context.Context) error {
-	output, err := g.commandRaw(ctx, "ls-files", "-u", "-z")
+	output, err := g.commandRawConfig(ctx, lineEndingGitConfig, "ls-files", "-u", "-z")
 	if err != nil {
 		return err
 	}
@@ -303,7 +413,7 @@ func (g *Git) requireNoUnmerged(ctx context.Context) error {
 // modified; those are the renormalization targets. A file with a real content
 // edit still fails, so the migration can never swallow the owner's work.
 func (g *Git) requireCleanExceptAttributes(ctx context.Context) error {
-	output, err := g.commandRaw(ctx, "status", "--porcelain", "-z", "--untracked-files=all")
+	output, err := g.commandRawConfig(ctx, lineEndingGitConfig, "status", "--porcelain", "-z", "--untracked-files=all")
 	if err != nil {
 		return err
 	}
@@ -337,7 +447,7 @@ func (g *Git) requireCleanExceptAttributes(ctx context.Context) error {
 		return nil
 	}
 	args := append([]string{"diff", "--ignore-cr-at-eol", "--name-only", "-z", "--"}, autoCommitPathspecs(lineEndingOnly)...)
-	changed, err := g.commandRaw(ctx, args[0], args[1:]...)
+	changed, err := g.commandRawConfig(ctx, lineEndingGitConfig, args[0], args[1:]...)
 	if err != nil {
 		return err
 	}

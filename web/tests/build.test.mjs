@@ -3807,11 +3807,15 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   // task-573 gave the Resources page its .page container and the browser empty
   // state a stacked layout, and taught the pet to dock clear of headings,
   // toolbars and empty-state actions; measured 266,308, then 266,371 after
-  // task-576's saved-position occlusion check.
+  // task-576's saved-position occlusion check; ceiling 266,496.
+  // task-580 added stage-specific preflight labels plus the paused pending
+  // "unknown"/recheck copy; measured 266,728, ceiling 267,008.
   // task-579 moved the shared-control browser panel to profile-exclusive control
   // (tab activate/close, bookmarks, release/transfer) and its empty-state copy;
-  // measured 266,804, ceiling 267,264.
-  const FIRST_SCREEN_GZIP_BUDGET = 267264;
+  // its branch measured 266,804, ceiling 267,264. The merged first-screen
+  // payload measured 266,948 bytes; the ceiling is the next 256-byte boundary,
+  // keeping the task-580 and task-579 changes under one shared budget.
+  const FIRST_SCREEN_GZIP_BUDGET = 267008;
   // The version query parameter is a content hash and its hex digits change
   // how the same code gzips: main already sits exactly on the budget, so a
   // hash-only change could trip it without growing the payload. Mask the

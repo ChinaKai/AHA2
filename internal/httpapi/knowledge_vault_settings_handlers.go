@@ -79,7 +79,10 @@ func (s *Server) knowledgeVaultView(ctx context.Context) (knowledgeVaultSettings
 	})
 	autoSync := knowledgevault.AutoSyncStatus{Enabled: settings.AutoSync, Paused: true, PauseReason: "sync_unavailable"}
 	if s.knowledgeVaultSync != nil {
-		autoSync = s.knowledgeVaultSync.Status()
+		// While paused the loop does not scan; StatusLive fills pending and
+		// blocked files from a read-only scan so the panel cannot present a
+		// missing pause-time count as "0 files to commit".
+		autoSync = s.knowledgeVaultSync.StatusLive(ctx)
 		// The database row is authoritative; the runtime snapshot only fills
 		// the operational fields.
 		autoSync.Enabled = settings.AutoSync

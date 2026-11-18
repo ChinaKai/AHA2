@@ -1927,6 +1927,8 @@ export interface KnowledgeVaultAutoSyncStatus {
   last_error?: string;
   warning?: string;
   pending: number;
+  pending_known?: boolean;
+  preflight_stage?: "worktree" | "pending_changes" | "line_endings" | string;
   blocked: number;
   blocked_files?: {path: string; reason: string}[];
   failures?: number;

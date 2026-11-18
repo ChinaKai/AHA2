@@ -30,6 +30,15 @@ const (
 	AutoSyncStateFile             = "auto-sync.json"
 	AutoSyncPreflightVersion      = 1
 
+	// The preflight is a multi-step upgrade: commit pending text, then install
+	// the LF policy, then renormalize. A pause used to be labelled "line-ending
+	// migration failed" even when the first step stopped on a binary/secret
+	// file. PreflightStage records which step actually failed so the settings
+	// panel can name the stage instead of guessing from the reason key.
+	PreflightStageWorktree       = "worktree"
+	PreflightStagePendingChanges = "pending_changes"
+	PreflightStageLineEndings    = "line_endings"
+
 	// SyncEventConflict is the pet-facing conflict event. It fires once per
 	// (local HEAD, remote HEAD) pair and contains commits plus file names only.
 	SyncEventConflict = "knowledge_sync_conflict"
@@ -53,18 +62,26 @@ type SyncEvent struct {
 
 // AutoSyncStatus is the read model rendered by the settings panel.
 type AutoSyncStatus struct {
-	Enabled        bool            `json:"enabled"`
-	Running        bool            `json:"running"`
-	Paused         bool            `json:"paused"`
-	PauseReason    string          `json:"pause_reason,omitempty"`
-	Conflict       bool            `json:"conflict"`
-	ConflictDetail string          `json:"conflict_detail,omitempty"`
-	LastSyncAt     string          `json:"last_sync_at,omitempty"`
-	LastCommitAt   string          `json:"last_commit_at,omitempty"`
-	LastCommit     string          `json:"last_commit,omitempty"`
-	LastError      string          `json:"last_error,omitempty"`
-	Warning        string          `json:"warning,omitempty"`
-	Pending        int             `json:"pending"`
+	Enabled        bool   `json:"enabled"`
+	Running        bool   `json:"running"`
+	Paused         bool   `json:"paused"`
+	PauseReason    string `json:"pause_reason,omitempty"`
+	Conflict       bool   `json:"conflict"`
+	ConflictDetail string `json:"conflict_detail,omitempty"`
+	LastSyncAt     string `json:"last_sync_at,omitempty"`
+	LastCommitAt   string `json:"last_commit_at,omitempty"`
+	LastCommit     string `json:"last_commit,omitempty"`
+	LastError      string `json:"last_error,omitempty"`
+	Warning        string `json:"warning,omitempty"`
+	Pending        int    `json:"pending"`
+	// PendingKnown separates a real zero from "never scanned". A paused loop
+	// does not scan, and an upgraded state file has no pending field at all;
+	// rendering that as 0 told the owner there was nothing left to commit.
+	PendingKnown bool `json:"pending_known"`
+	// PreflightStage is set only when PauseReason is preflight_failed. It names
+	// the step that failed (worktree/pending_changes/line_endings) so the UI
+	// does not blame the line-ending migration for a blocked file.
+	PreflightStage string          `json:"preflight_stage,omitempty"`
 	Blocked        int             `json:"blocked"`
 	BlockedFiles   []BlockedChange `json:"blocked_files,omitempty"`
 	Failures       int             `json:"failures,omitempty"`
@@ -101,6 +118,8 @@ type autoSyncState struct {
 	lastError                string
 	warning                  string
 	pending                  int
+	pendingKnown             bool
+	preflightStage           string
 	blocked                  []BlockedChange
 	blockedTotal             int
 	failures                 int
@@ -126,6 +145,8 @@ type autoSyncStateFile struct {
 	Warning            string          `json:"warning,omitempty"`
 	PauseReason        string          `json:"pause_reason,omitempty"`
 	Pending            int             `json:"pending,omitempty"`
+	PendingKnown       bool            `json:"pending_known,omitempty"`
+	PreflightStage     string          `json:"preflight_stage,omitempty"`
 	Blocked            []BlockedChange `json:"blocked_files,omitempty"`
 	BlockedTotal       int             `json:"blocked_total,omitempty"`
 	ConflictKey        string          `json:"conflict_key,omitempty"`
@@ -276,6 +297,7 @@ func (s *Syncer) SetEnabled(ctx context.Context, enabled bool) error {
 	if enabled {
 		s.state.paused = false
 		s.state.pauseReason = ""
+		s.state.preflightStage = ""
 		s.state.conflict = false
 		s.state.failures = 0
 		s.state.nextAttempt = time.Time{}
@@ -296,6 +318,7 @@ func (s *Syncer) ResetPause() {
 	s.mu.Lock()
 	s.state.paused = false
 	s.state.pauseReason = ""
+	s.state.preflightStage = ""
 	s.state.conflict = false
 	s.state.conflictKey = ""
 	s.state.conflictDetail = ""
@@ -323,15 +346,62 @@ func (s *Syncer) Status() AutoSyncStatus {
 		Conflict: s.state.conflict, ConflictDetail: s.state.conflictDetail,
 		LastCommit: s.state.lastCommit, LastError: s.state.lastError,
 		Warning: s.state.warning,
-		Pending: s.state.pending, Blocked: s.state.blockedTotal,
-		BlockedFiles:  append([]BlockedChange{}, s.state.blocked...),
-		Failures:      s.state.failures,
-		PreflightDone: s.state.preflightVersion >= AutoSyncPreflightVersion,
+		Pending: s.state.pending, PendingKnown: s.state.pendingKnown,
+		PreflightStage: s.state.preflightStage,
+		Blocked:        s.state.blockedTotal,
+		BlockedFiles:   append([]BlockedChange{}, s.state.blocked...),
+		Failures:       s.state.failures,
+		PreflightDone:  s.state.preflightVersion >= AutoSyncPreflightVersion,
 	}
 	status.LastSyncAt = formatSyncTime(s.state.lastSyncAt)
 	status.LastCommitAt = formatSyncTime(s.state.lastCommitAt)
 	status.NextRetryAt = formatSyncTime(s.state.nextAttempt)
 	return status
+}
+
+// StatusLive is the settings read model. While paused it refreshes pending and
+// blocked files with one read-only scan: a paused loop never scans, so the
+// persisted snapshot can be hours old (and an upgraded state file has no
+// pending field at all) and the panel would keep showing the pause-time count.
+// ScanAutoCommit only reads (git status/diff plus untracked hashes); it does
+// not commit, stage or write the vault, and the refreshed values stay in this
+// response instead of being persisted back to .aha/auto-sync.json.
+func (s *Syncer) StatusLive(ctx context.Context) AutoSyncStatus {
+	status := s.Status()
+	if !status.Paused || s.manager == nil {
+		return status
+	}
+	scan, err := s.manager.Git().ScanAutoCommit(ctx)
+	if err != nil {
+		// The vault may be uninitialized or not a repository yet; keep the
+		// paused snapshot and let pending_known=false report "unknown".
+		return status
+	}
+	blocked, total := normalizeBlockedChanges(scan.Blocked, scan.BlockedTotal)
+	status.Pending = scan.Pending
+	status.PendingKnown = true
+	status.Blocked = total
+	status.BlockedFiles = blocked
+	// State files written before PreflightStage existed carry only
+	// pause_reason=preflight_failed. The live scan still knows whether a
+	// blocked file stopped the preflight, so old and new payloads agree.
+	if status.PreflightStage == "" && status.PauseReason == "preflight_failed" && total > 0 {
+		status.PreflightStage = PreflightStagePendingChanges
+	}
+	return status
+}
+
+// normalizePreflightStage keeps only the machine values AHA2 writes, so a
+// hand-edited state file cannot smuggle an arbitrary label into the settings
+// payload. Anything else means "unknown stage" and the UI falls back to the
+// generic preflight label.
+func normalizePreflightStage(value string) string {
+	switch strings.TrimSpace(value) {
+	case PreflightStageWorktree, PreflightStagePendingChanges, PreflightStageLineEndings:
+		return strings.TrimSpace(value)
+	default:
+		return ""
+	}
 }
 
 func formatSyncTime(value time.Time) string {
@@ -394,10 +464,15 @@ func (s *Syncer) cycle(ctx context.Context, force bool) {
 	preflightNeeded := s.state.preflightVersion < AutoSyncPreflightVersion
 	s.mu.Unlock()
 	if preflightNeeded {
-		if err := s.runPreflight(ctx); err != nil {
+		stage, err := s.runPreflight(ctx)
+		if err != nil {
 			detail := sanitizeSyncDetail(err.Error())
-			s.pause("preflight_failed", detail)
-			s.emitOnce("preflight:"+detail, SyncEventPaused, "行尾迁移 preflight 失败："+detail)
+			s.pausePreflight(stage, detail)
+			prefix := "自动同步预检失败："
+			if stage == PreflightStageLineEndings {
+				prefix = "知识库行尾迁移预检失败："
+			}
+			s.emitOnce("preflight:"+detail, SyncEventPaused, prefix+detail)
 			return
 		}
 	}
@@ -654,20 +729,36 @@ func pullBlockedByWorktree(err error) bool {
 	return false
 }
 
-func (s *Syncer) runPreflight(ctx context.Context) error {
+// runPreflight performs the one-time upgrade. The stage names the step that
+// failed so a pause can be attributed correctly: a blocked binary/secret file
+// is not a line-ending failure. An empty stage means success.
+func (s *Syncer) runPreflight(ctx context.Context) (string, error) {
 	git := s.manager.Git()
+	// 0. Refuse to run the automatic commit loop over CRLF or mixed blobs. With
+	//    an ambient core.autocrlf=true (the Git for Windows default) git reports
+	//    them as modified, and the loop below would rewrite all of them in one
+	//    silent batch. Report the count and leave the vault exactly as it is.
+	counts, err := git.CountCRLF(ctx)
+	if err != nil {
+		return PreflightStageWorktree, err
+	}
+	if counts.NeedsRewrite() > 0 {
+		return PreflightStageLineEndings, crlfBlobError(counts)
+	}
 	// 1. Commit every existing text change before touching the line-ending
 	//    policy. Blocked files abort the migration instead of being discarded.
+	//    `-text` files never appear as modified, so they cannot be committed
+	//    here; `eol=crlf` files with CRLF blobs are caught by step 0 above.
 	for attempt := 0; attempt < 32; attempt++ {
 		scan, err := git.ScanAutoCommit(ctx)
 		if err != nil {
-			return err
+			return PreflightStageWorktree, err
 		}
 		if scan.Clean {
 			break
 		}
 		if scan.Unmerged {
-			return ErrGitUnmerged
+			return PreflightStageWorktree, ErrGitUnmerged
 		}
 		if len(scan.Eligible) == 0 {
 			// Keep the aggregate sentence as the stable prefix, then name the
@@ -675,31 +766,44 @@ func (s *Syncer) runPreflight(ctx context.Context) error {
 			// copied into the syncer state so the settings status and
 			// .aha/auto-sync.json stay actionable after a restart.
 			s.applyScan(scan)
-			return fmt.Errorf("有 %d 个改动无法自动提交（二进制/密钥/超大文件）；preflight 已暂停并保留现场。%s", scan.Pending, blockedDetailText(scan.Blocked))
+			return PreflightStagePendingChanges, fmt.Errorf("有 %d 个改动无法自动提交（二进制/密钥/超大文件）；preflight 已暂停并保留现场。%s", scan.Pending, blockedDetailText(scan.Blocked))
 		}
 		result, err := git.AutoCommit(ctx, "preflight", scan.Fingerprint)
 		if err != nil {
-			return err
+			return PreflightStagePendingChanges, err
 		}
 		if !result.Committed && result.Pending >= scan.Pending {
 			s.applyScan(scan)
-			return fmt.Errorf("preflight 自动提交没有进展；保留现场并暂停。%s", blockedDetailText(scan.Blocked))
+			return PreflightStagePendingChanges, fmt.Errorf("preflight 自动提交没有进展；保留现场并暂停。%s", blockedDetailText(scan.Blocked))
 		}
 	}
 	if clean, changed, err := git.isClean(ctx); err != nil {
-		return err
+		return PreflightStageWorktree, err
 	} else if !clean {
-		return fmt.Errorf("%w：仍有 %d 个改动", ErrGitDirty, changed)
+		return PreflightStagePendingChanges, fmt.Errorf("%w：仍有 %d 个改动", ErrGitDirty, changed)
 	}
-	// 2. Policy file and repo-local autocrlf.
-	if _, err := git.EnsureTextPolicy(ctx); err != nil {
-		return err
+	// 2. Policy file and repo-local autocrlf. A missing .gitattributes is
+	//    created with `* text=auto eol=lf`; an existing one is never rewritten.
+	policy, err := git.EnsureTextPolicy(ctx)
+	if err != nil {
+		return PreflightStageLineEndings, err
+	}
+	if policy.NeedsRewrite() > 0 {
+		// Defensive re-check: the loop may have raced with an owner write.
+		return PreflightStageLineEndings, crlfBlobError(policy.CRLFCounts)
+	}
+	if policy.WorktreeCRLF > 0 {
+		// The index is already LF, so the clean filter treats these as
+		// unchanged; the policy normalizes the view without rewriting content.
+		log.Printf("knowledge auto-sync preflight: %d worktree file(s) use CRLF with an LF index; no content rewrite needed", policy.WorktreeCRLF)
 	}
 	// 3. One-time renormalization. It is idempotent: a second run stages
-	//    nothing and creates no commit.
+	//    nothing and creates no commit. `-text` files are never staged by
+	//    renormalize, and any `eol=crlf` file with a CRLF blob already failed
+	//    the step-0 gate, so this cannot silently rewrite an owner policy.
 	renormalized, err := git.Renormalize(ctx)
 	if err != nil {
-		return err
+		return PreflightStageLineEndings, err
 	}
 	if renormalized.Warning != "" {
 		log.Printf("knowledge auto-sync preflight warning: %s", renormalized.Warning)
@@ -712,12 +816,14 @@ func (s *Syncer) runPreflight(ctx context.Context) error {
 	// Reaching this point proves the worktree is clean, so any blocked list
 	// remembered from an earlier failed attempt is stale.
 	s.state.pending = 0
+	s.state.pendingKnown = true
+	s.state.preflightStage = ""
 	s.state.blocked = nil
 	s.state.blockedTotal = 0
 	s.mu.Unlock()
 	s.saveState()
 	log.Printf("knowledge auto-sync preflight complete for %s", git.vaultPath)
-	return nil
+	return "", nil
 }
 
 func (s *Syncer) handleConflict(ctx context.Context, git *Git) {
@@ -730,6 +836,7 @@ func (s *Syncer) handleConflict(ctx context.Context, git *Git) {
 	s.mu.Lock()
 	s.state.paused = true
 	s.state.pauseReason = "conflict"
+	s.state.preflightStage = ""
 	s.state.conflict = true
 	s.state.conflictKey = key
 	s.state.conflictDetail = detail
@@ -809,10 +916,22 @@ func blockedDetailText(blocked []BlockedChange) string {
 	return "受阻文件：" + strings.ReplaceAll(blockedLogSummary(blocked), ", ", "、")
 }
 
+// crlfBlobError is the preflight report for a vault whose index still stores
+// CRLF. The message names the count and the manual action; AHA2 never rewrites
+// those blobs on its own.
+// crlfBlobError is the preflight report for a vault whose index still stores
+// CRLF or mixed line endings. The message names the counts, the exact repair
+// steps (including creating the policy file when it is missing) and how to
+// leave the paused state; AHA2 never rewrites those blobs on its own.
+func crlfBlobError(counts CRLFCounts) error {
+	return fmt.Errorf("发现 %d 个索引文件仍含 CRLF 行尾（其中混合行尾 %d 个，工作区 CRLF/混合 %d 个）；未自动批量改写。修复方法：先在 vault 根目录确认 .gitattributes，没有就创建并写入 `* text=auto eol=lf`；已有则不要覆盖，是否追加或合并由你决定。然后执行 `git add --renormalize .` 并提交。完成后切换一次自动同步开关，或执行一次手动同步来解除暂停；“重新检查”只刷新统计，不会恢复同步", counts.NeedsRewrite(), counts.IndexMixed, counts.WorktreeCRLF)
+}
+
 func (s *Syncer) applyScan(scan AutoCommitScan) {
 	blocked, total := normalizeBlockedChanges(scan.Blocked, scan.BlockedTotal)
 	s.mu.Lock()
 	s.state.pending = scan.Pending
+	s.state.pendingKnown = true
 	s.state.blocked = blocked
 	s.state.blockedTotal = total
 	s.mu.Unlock()
@@ -823,10 +942,28 @@ func (s *Syncer) pause(reason, detail string) {
 	changed := !s.state.paused || s.state.pauseReason != reason
 	s.state.paused = true
 	s.state.pauseReason = reason
+	s.state.preflightStage = ""
 	s.state.lastError = sanitizeSyncDetail(detail)
 	s.mu.Unlock()
 	if changed {
 		log.Printf("knowledge auto-sync paused (%s): %s", reason, sanitizeSyncDetail(detail))
+	}
+	s.saveState()
+}
+
+// pausePreflight records both the reason and the failing step, so a later
+// settings read can say "blocked file" or "line endings" instead of blaming
+// the LF migration for every preflight failure.
+func (s *Syncer) pausePreflight(stage, detail string) {
+	s.mu.Lock()
+	changed := !s.state.paused || s.state.pauseReason != "preflight_failed" || s.state.preflightStage != stage
+	s.state.paused = true
+	s.state.pauseReason = "preflight_failed"
+	s.state.preflightStage = normalizePreflightStage(stage)
+	s.state.lastError = sanitizeSyncDetail(detail)
+	s.mu.Unlock()
+	if changed {
+		log.Printf("knowledge auto-sync paused (preflight_failed/%s): %s", normalizePreflightStage(stage), sanitizeSyncDetail(detail))
 	}
 	s.saveState()
 }
@@ -858,6 +995,7 @@ func (s *Syncer) backoff(reason string, err error) {
 	if paused {
 		s.state.paused = true
 		s.state.pauseReason = reason
+		s.state.preflightStage = ""
 	}
 	failures := s.state.failures
 	s.mu.Unlock()
@@ -924,11 +1062,22 @@ func (s *Syncer) loadState() {
 	s.state.lastError = file.LastError
 	s.state.warning = file.Warning
 	s.state.pauseReason = file.PauseReason
-	// Old state files predate blocked_files/blocked_total; zero values keep the
-	// status usable. Values read back from disk are normalized again so a
-	// hand-edited file cannot inject control characters or free-form reasons.
+	// Old state files predate blocked_files/blocked_total/pending_known; zero
+	// values keep the status usable, and pendingKnown=false lets the UI say
+	// "unknown" instead of claiming there are no pending files. Values read
+	// back from disk are normalized again so a hand-edited file cannot inject
+	// control characters or free-form reasons.
 	s.state.pending = file.Pending
+	s.state.pendingKnown = file.PendingKnown
+	s.state.preflightStage = normalizePreflightStage(file.PreflightStage)
 	s.state.blocked, s.state.blockedTotal = normalizeBlockedChanges(file.Blocked, file.BlockedTotal)
+	// Older AHA2 wrote pause_reason=preflight_failed without a stage. When the
+	// persisted state also names blocked files, the failing step is knowable:
+	// the preflight stopped before it could install the LF policy. Leave the
+	// stage empty when the evidence is missing instead of guessing.
+	if s.state.preflightStage == "" && file.PauseReason == "preflight_failed" && s.state.blockedTotal > 0 {
+		s.state.preflightStage = PreflightStagePendingChanges
+	}
 	s.state.paused = strings.TrimSpace(file.PauseReason) != ""
 	s.state.conflictKey = file.ConflictKey
 	s.state.conflictDetail = file.ConflictDetail
@@ -955,6 +1104,8 @@ func (s *Syncer) saveState() {
 		Warning:            s.state.warning,
 		PauseReason:        s.state.pauseReason,
 		Pending:            s.state.pending,
+		PendingKnown:       s.state.pendingKnown,
+		PreflightStage:     s.state.preflightStage,
 		Blocked:            append([]BlockedChange{}, s.state.blocked...),
 		BlockedTotal:       s.state.blockedTotal,
 		ConflictKey:        s.state.conflictKey,

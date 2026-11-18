@@ -589,18 +589,13 @@ func autoCommitBlockedPath(path string) string {
 	return ""
 }
 
-// containsSecretMaterial reuses the exact patterns the Agent write path already
-// rejects, so the background commit gate cannot be looser than the front door.
+// containsSecretMaterial reuses the Agent write gate (forbiddenContent) so the
+// background commit gate cannot be looser than the front door.
 func containsSecretMaterial(content []byte) bool {
 	if len(content) == 0 {
 		return false
 	}
-	for _, pattern := range forbiddenKnowledgePatterns {
-		if pattern.Match(content) {
-			return true
-		}
-	}
-	return false
+	return forbiddenContent(string(content))
 }
 
 func looksBinary(content []byte) bool {
