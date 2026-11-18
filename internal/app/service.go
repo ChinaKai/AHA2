@@ -160,6 +160,15 @@ func duplicateAssignmentRejection(agentID, turnID string) *CollaborationAssignme
 	}
 }
 
+func withinBatchAssignmentRejection(agentID string) CollaborationAssignmentRejection {
+	return CollaborationAssignmentRejection{
+		AgentID: agentID,
+		Code:    CollaborationAssignmentDuplicate,
+		Reason:  CollaborationAssignmentDuplicateInBatch,
+		Message: fmt.Sprintf("子 Agent %s 在同一协作批次中出现多次；每个 Agent 只能有一条 assignment。", agentID),
+	}
+}
+
 type ExecutionResult struct {
 	Reply             string
 	ExitCode          int
@@ -244,8 +253,14 @@ type Service struct {
 	// test seams: production leaves the hook nil and uses the default budget.
 	petApprovalExecutionHook    func(context.Context, domain.PetApproval) error
 	petApprovalExecutionTimeout time.Duration
-	agentAPI                    *agentapi.Capabilities
-	agentAPIURL                 string
+	// assignmentInsertHook is a test seam: it runs after the duplicate
+	// pre-check and all agent preparation, immediately before the inbox
+	// insert. Tests use it to let two real dispatches race past the pre-check
+	// and prove the unique index conflict is still reported instead of
+	// silently dropping the second assignment. Production leaves it nil.
+	assignmentInsertHook func()
+	agentAPI             *agentapi.Capabilities
+	agentAPIURL          string
 	// knowledgeVault is the optional canary read source. Nil keeps every
 	// project on the legacy knowledge tables. knowledgeVaultRuntimeRead is a
 	// separate, default-off gate: the Web vault switch may be enabled while
@@ -2577,10 +2592,25 @@ func (s *Service) spawnAgentTurns(
 	var members []domain.CollaborationMember
 	var rejections []CollaborationAssignmentRejection
 	accepted := map[string]bool{}
+	// requested tracks explicit agent IDs in this batch. A repeated ID is an
+	// input error even when the earlier action never reached the queue (for
+	// example its model configuration failed), so it is checked before any
+	// dispatch instead of relying on the earlier insert succeeding.
+	requested := map[string]bool{}
 	batchID := domain.NewID("collaboration_batch")
 	for index, action := range actions {
 		if strings.TrimSpace(action.Assignment) == "" {
 			continue
+		}
+		requestedID := strings.ToLower(strings.TrimSpace(action.AgentID))
+		if task.CollaborationMode == "auto" && requestedID != "" && requestedID != "main" {
+			if requested[requestedID] {
+				rejections = append(rejections, withinBatchAssignmentRejection(
+					normalizedSubAgentID(action.AgentID, index+1),
+				))
+				continue
+			}
+			requested[requestedID] = true
 		}
 		actualAgentID, ok, enqueueErr := s.enqueueAgentAction(ctx, task, parent, action, index+1, batchID)
 		if enqueueErr != nil {
@@ -2588,11 +2618,11 @@ func (s *Service) spawnAgentTurns(
 			if errors.As(enqueueErr, &rejection) {
 				item := *rejection
 				// A duplicate of an agent accepted earlier in this same call is
-				// a within-batch duplicate; otherwise it came from an earlier
-				// submission in this Turn.
+				// a within-batch duplicate (for example a blank agent_id that
+				// resolved to the same slot as an explicit one); otherwise it
+				// came from an earlier submission in this Turn.
 				if accepted[item.AgentID] {
-					item.Reason = CollaborationAssignmentDuplicateInBatch
-					item.Message = fmt.Sprintf("子 Agent %s 在同一协作批次中出现多次；每个 Agent 只能有一条 assignment。", item.AgentID)
+					item = withinBatchAssignmentRejection(item.AgentID)
 				}
 				rejections = append(rejections, item)
 				continue

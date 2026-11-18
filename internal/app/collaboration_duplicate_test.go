@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -209,6 +210,97 @@ func TestDuplicateAgentInSameBatchLeavesAcceptedActionsQueued(t *testing.T) {
 	waitForRoundAgentTurn(t, f.database, f.round.ID, "sub-002", domain.TurnSucceeded)
 	if turns := countAgentTurns(t, f.database, f.round.ID, "sub-001"); turns != 1 {
 		t.Fatalf("within-batch duplicate still produced %d sub-001 Turns", turns)
+	}
+}
+
+// A repeated agent_id in one batch is an input error even when the first
+// action never reaches the queue. Previously the within-batch verdict was
+// derived from a successful enqueue, so a configuration failure on the first
+// action let the second one dispatch and the batch looked successful.
+func TestDuplicateInBatchRejectedWhenFirstActionFailsConfiguration(t *testing.T) {
+	f := newCollaborationDuplicateFixture(t)
+	batchID, created, err := f.submit(
+		AgentAction{
+			AgentID: "sub-001", Title: "Broken", Assignment: "first assignment",
+			ModelID: "model-missing", Required: true,
+		},
+		AgentAction{AgentID: "sub-001", Title: "Valid", Assignment: "second assignment", Required: true},
+	)
+	rejected := requireAssignmentRejection(t, err)
+	if batchID != "" || created != 0 || rejected.BatchID != "" || rejected.Created != 0 {
+		t.Fatalf("batch reported dispatched work: batch=%q created=%d rejection=%#v", batchID, created, rejected)
+	}
+	if len(rejected.Rejected) != 1 {
+		t.Fatalf("rejected agents = %#v, want one", rejected.Rejected)
+	}
+	item := rejected.Rejected[0]
+	if item.AgentID != "sub-001" || item.Code != CollaborationAssignmentDuplicate ||
+		item.Reason != CollaborationAssignmentDuplicateInBatch {
+		t.Fatalf("within-batch rejection = %#v", item)
+	}
+	if turns := countAgentTurns(t, f.database, f.round.ID, "sub-001"); turns != 0 {
+		t.Fatalf("rejected duplicate still produced %d sub-001 Turns", turns)
+	}
+}
+
+// The pre-check is only an optimization: two dispatches can both pass it and
+// then race the INSERT. The partial unique index must decide, and the loser
+// must surface the same explicit rejection instead of an empty success.
+func TestConcurrentDispatchPastPrecheckIsRejectedByUniqueIndex(t *testing.T) {
+	f := newCollaborationDuplicateFixture(t)
+	var reached int32
+	bothReached := make(chan struct{})
+	release := make(chan struct{})
+	f.service.assignmentInsertHook = func() {
+		if atomic.AddInt32(&reached, 1) == 2 {
+			close(bothReached)
+		}
+		<-release
+	}
+	type dispatchResult struct {
+		batchID string
+		created int
+		err     error
+	}
+	results := make(chan dispatchResult, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			batchID, created, err := f.submit(AgentAction{
+				AgentID: "sub-001", Title: "Race", Assignment: "race assignment", Required: true,
+			})
+			results <- dispatchResult{batchID: batchID, created: created, err: err}
+		}()
+	}
+	select {
+	case <-bothReached:
+	case <-time.After(10 * time.Second):
+		t.Fatal("both dispatches did not reach the insert hook")
+	}
+	close(release)
+
+	successes, rejections := 0, 0
+	for i := 0; i < 2; i++ {
+		result := <-results
+		if result.err == nil {
+			successes++
+			if result.batchID == "" || result.created != 1 {
+				t.Fatalf("winning dispatch: batch=%q created=%d", result.batchID, result.created)
+			}
+			continue
+		}
+		rejected := requireAssignmentRejection(t, result.err)
+		if len(rejected.Rejected) != 1 || rejected.Rejected[0].AgentID != "sub-001" ||
+			rejected.Rejected[0].Reason != CollaborationAssignmentDuplicateInTurn {
+			t.Fatalf("losing dispatch rejection = %#v", rejected)
+		}
+		rejections++
+	}
+	if successes != 1 || rejections != 1 {
+		t.Fatalf("race outcome: %d success(es), %d rejection(s)", successes, rejections)
+	}
+	waitForRoundAgentTurn(t, f.database, f.round.ID, "sub-001", domain.TurnSucceeded)
+	if turns := countAgentTurns(t, f.database, f.round.ID, "sub-001"); turns != 1 {
+		t.Fatalf("race produced %d sub-001 Turns, want 1", turns)
 	}
 }
 

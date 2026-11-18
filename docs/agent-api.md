@@ -71,7 +71,8 @@ Task Memory 的旧 decisions/facts/progress/verification/next_actions 数组只�
   `collaboration_assignment_duplicate`，`rejected_agents` 中给出被拒绝的
   `agent_id`、`code`、`reason` 与 `message`。
   `reason` 为 `duplicate_in_turn`（该 Turn 已派发过该 Agent）或
-  `duplicate_in_batch`（同一批次内重复）。
+  `duplicate_in_batch`（同一批次内重复）。同批判重按请求里的 `agent_id` 独立判断，
+  即使前一个同名 action 因配置错误没有入队，后一个也会被拒绝。
 - 部分 action 成功时仍返回 `409` 和同样的失败结构，但额外携带 `batch_id`、
   `created_agents` 与 `accepted_agents`；已接受的 Agent 已经入队，可以继续等待该批次，
   被拒的 Agent 需要在新的 Main Turn 重新派发。

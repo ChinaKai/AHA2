@@ -121,4 +121,31 @@ func TestAgentCollaborationDuplicateAssignmentReturnsConflict(t *testing.T) {
 	if item["agent_id"] != "sub-002" || item["reason"] != app.CollaborationAssignmentDuplicateInBatch {
 		t.Fatalf("partial rejected detail = %#v", item)
 	}
+
+	// A repeated agent_id is a batch-level error even when the first action
+	// fails its configuration before reaching the queue: the second action
+	// must still be rejected instead of dispatching alone.
+	response, payload = post([]map[string]any{
+		{"agent_id": "sub-004", "title": "Broken", "assignment": "first assignment", "model_id": "model-missing", "required": true},
+		{"agent_id": "sub-004", "title": "Valid", "assignment": "second assignment", "required": true},
+	})
+	if response.StatusCode != http.StatusConflict || payload["ok"] != false ||
+		payload["error"] != app.CollaborationAssignmentDuplicate {
+		t.Fatalf("failed-first duplicate dispatch: %d %#v", response.StatusCode, payload)
+	}
+	if payload["created_agents"] != float64(0) {
+		t.Fatalf("failed-first duplicate created work: %#v", payload)
+	}
+	if _, ok := payload["batch_id"]; ok {
+		t.Fatalf("failed-first duplicate reported a batch: %#v", payload)
+	}
+	rejected, _ = payload["rejected_agents"].([]any)
+	if len(rejected) != 1 {
+		t.Fatalf("failed-first rejected agents = %#v", payload["rejected_agents"])
+	}
+	item, _ = rejected[0].(map[string]any)
+	if item["agent_id"] != "sub-004" || item["code"] != app.CollaborationAssignmentDuplicate ||
+		item["reason"] != app.CollaborationAssignmentDuplicateInBatch {
+		t.Fatalf("failed-first rejected detail = %#v", item)
+	}
 }

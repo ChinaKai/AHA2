@@ -1586,6 +1586,9 @@ func (s *Service) enqueueAgentAction(
 			_, _ = s.store.UpsertTaskAgent(ctx, current)
 		}
 	}
+	if hook := s.assignmentInsertHook; hook != nil {
+		hook()
+	}
 	now := s.now().UTC()
 	inserted, err := s.store.EnqueueAgentRoute(ctx, domain.AgentInboxItem{
 		ID: domain.NewID("inbox"), TaskID: task.ID, RoundID: parent.RoundID,
