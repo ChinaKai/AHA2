@@ -1696,66 +1696,35 @@ func ahaPetTools() []gateway.ChatTool {
 	}
 }
 
+// IsPetTaskID reports whether taskID is the system Pet Task. The pet MCP
+// endpoint authenticates every call against this identity; loopback alone is
+// never treated as a caller.
+func IsPetTaskID(taskID string) bool {
+	return strings.TrimSpace(taskID) == petTaskID
+}
+
 // PetMCPTool dispatches the pet MCP surface without a caller identity. It is
-// for in-process callers and tests; the loopback HTTP endpoint must use
-// PetMCPToolForTask so identity-gated tools can verify the agent capability
-// belongs to the pet Task.
+// for in-process callers and tests; the HTTP endpoint must use
+// PetMCPToolForTask so every tool verifies the agent capability belongs to the
+// pet Task.
 func (s *Service) PetMCPTool(ctx context.Context, name string, args json.RawMessage) (string, error) {
 	return s.petMCPTool(ctx, "", name, args)
 }
 
-// petMCPReadOnlyTools are the pet MCP tools that only read state. Read-only
-// tools accept any identity, including none, for compatibility; every tool
-// outside this set requires the pet Task's capability so another Task cannot
-// mutate or create approvals through this endpoint.
-var petMCPReadOnlyTools = map[string]bool{
-	"aha_overview":                  true,
-	"aha_pet_work_state":            true,
-	"aha_pet_permissions":           true,
-	"aha_capabilities":              true,
-	"aha_task_detail":               true,
-	"aha_task_conversation":         true,
-	"aha_task_turns":                true,
-	"aha_list_projects":             true,
-	"aha_list_remote_tasks":         true,
-	"aha_list_knowledge":            true,
-	"aha_knowledge_detail":          true,
-	"aha_list_skills":               true,
-	"aha_skill_detail":              true,
-	"aha_list_prompt_templates":     true,
-	"aha_prompt_template_detail":    true,
-	"aha_list_channels":             true,
-	"aha_channel_detail":            true,
-	"aha_list_channel_destinations": true,
-	"aha_channel_contacts":          true,
-	"aha_system_settings":           true,
-	"aha_model_catalog":             true,
-	"aha_list_task_attachments":     true,
-	"aha_hardware_resources":        true,
-	"aha_task_hardware":             true,
-	"aha_mail_resources":            true,
-	"aha_task_mail":                 true,
-	"aha_task_channel_route":        true,
-	"aha_list_mcp_servers":          true,
-	"aha_list_task_mcp_servers":     true,
-	"pet_list_approvals":            true,
-}
-
 // PetMCPToolForTask dispatches one pet MCP tool on behalf of the authenticated
 // taskID. The pet MCP client sends its Turn capability as a bearer token.
-// Read-only tools accept any identity, including none, for compatibility;
-// every mutating or approval-creating tool requires the pet Task's capability
-// and is rejected before dispatch for any other caller.
+// Every tool, including the read-only ones, requires the pet Task's capability
+// and is rejected before dispatch for any other caller: the endpoint is
+// loopback-reachable by other local and tunnelled processes, so the source
+// address is not an identity.
 func (s *Service) PetMCPToolForTask(ctx context.Context, taskID, name string, args json.RawMessage) (string, error) {
 	taskID = strings.TrimSpace(taskID)
 	name = strings.TrimSpace(strings.ToLower(name))
-	if !petMCPReadOnlyTools[name] && taskID != petTaskID {
-		// The HTTP endpoint is loopback-only but identifies the caller solely
-		// through this capability, so the rejection must carry the stable code
-		// the MCP client and tests expect.
+	if taskID != petTaskID {
+		// The rejection carries the stable code the MCP client and tests expect.
 		return "", codedErrorf(
 			ErrCodePetIdentityRequired, http.StatusForbidden,
-			"只有宠物 Task 可以调用变更工具；无身份或非宠物 Task 仅允许只读工具",
+			"只有携带宠物 Task capability 的调用可以访问宠物 MCP 工具",
 		)
 	}
 	return s.petMCPTool(ctx, taskID, name, args)

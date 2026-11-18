@@ -174,9 +174,9 @@ func TestPetMCPUpdateTaskAgentSwitchesModelSource(t *testing.T) {
 		t.Fatalf("invalid combination did not return %s: %#v", app.ErrCodeModelSourceMismatch, call)
 	}
 
-	// Mutating agent configuration needs the pet Task's own capability. The
-	// loopback endpoint alone and another Task's valid token must both be
-	// rejected before any read or write happens.
+	// Every pet MCP tool needs the pet Task's own capability. The loopback
+	// endpoint alone and another Task's valid token must both be rejected before
+	// any read or write happens.
 	agents, err = service.TaskAgents(ctx, task.ID)
 	if err != nil || len(agents) == 0 {
 		t.Fatalf("agents=%#v err=%v", agents, err)
@@ -207,15 +207,17 @@ func TestPetMCPUpdateTaskAgentSwitchesModelSource(t *testing.T) {
 	cardsBefore, eventsBefore := identityAuditCount()
 	escalate := `{"task_id":"` + task.ID + `","model_source":"official","wire_model":"gpt-official","codex_account_id":"` + account.ID + `"}`
 	for _, attempt := range []struct {
-		name  string
-		token string
+		name       string
+		token      string
+		wantStatus int
+		wantError  string
 	}{
-		{"no token", ""},
-		{"foreign task token", otherToken},
-		{"target task's own token", targetToken},
+		{"no token", "", http.StatusUnauthorized, "agent_capability_required"},
+		{"foreign task token", otherToken, http.StatusForbidden, app.ErrCodePetIdentityRequired},
+		{"target task's own token", targetToken, http.StatusForbidden, app.ErrCodePetIdentityRequired},
 	} {
 		call = callPetMCPTool(t, server, attempt.token, "aha_update_task_agent", escalate)
-		if call.Status != http.StatusOK || !call.IsError || !strings.Contains(call.Text, app.ErrCodePetIdentityRequired) {
+		if call.Status != attempt.wantStatus || call.Error != attempt.wantError {
 			t.Fatalf("%s was not rejected by identity: %#v", attempt.name, call)
 		}
 	}

@@ -379,6 +379,44 @@ func removeLocalFile(path string) error {
 	return err
 }
 
+// codexMCPServersForRequest filters the neutral MCP list down to what Codex can
+// render correctly. Claude and DSH expand URLFromEnv inside the workspace, so
+// they follow a reverse tunnel to whatever address it exposes at runtime.
+// Codex reads config.toml verbatim and the tunnel port does not exist until the
+// Turn starts, so an env-resolved AHA-hosted endpoint cannot be rendered before
+// then: writing the configured loopback URL would send every call to an address
+// the remote workspace cannot reach for the whole Turn. Those servers are left
+// out, and the caller reports each one instead of writing a dead URL.
+func codexMCPServersForRequest(request Request) ([]MCPServer, []string) {
+	if request.ReverseForward == nil {
+		return request.MCPServers, nil
+	}
+	servers := make([]MCPServer, 0, len(request.MCPServers))
+	skipped := make([]string, 0)
+	for _, server := range request.MCPServers {
+		if strings.EqualFold(strings.TrimSpace(server.Transport), "http") &&
+			strings.TrimSpace(server.URLFromEnv) != "" {
+			skipped = append(skipped, fmt.Sprintf("%s（地址由 %s 在运行期决定）",
+				strings.TrimSpace(server.Name), strings.TrimSpace(server.URLFromEnv)))
+			continue
+		}
+		servers = append(servers, server)
+	}
+	return servers, skipped
+}
+
+// codexMCPDiagnosticEvent reports MCP servers that could not be injected
+// because their address only exists at run time. It is emitted as ordinary
+// agent progress so the Owner can see why those tools are missing.
+func codexMCPDiagnosticEvent(skipped []string) Event {
+	return Event{Type: "agent_progress", Data: map[string]any{
+		"message": "Codex 无法在反向隧道建立前确定 MCP 地址，本 Turn 未注入：" +
+			strings.Join(skipped, "；") + "。相关工具本轮不可用",
+		"diagnostic":  "codex_mcp_address_unresolved",
+		"skipped_mcp": skipped,
+	}}
+}
+
 // codexMCPConfigTOML renders all neutral MCP registrations as Codex config
 // tables. The backend reads them from $CODEX_HOME/config.toml, so neither the
 // server command/args nor its env and headers reach the process command line.

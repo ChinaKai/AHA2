@@ -47,7 +47,13 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 	// Codex reads MCP servers from $CODEX_HOME/config.toml. Rendering them there
 	// keeps server env and headers out of the -c argv overrides, which the OS
 	// exposes to every local process. The file is restored when the run ends.
-	if content := codexMCPConfigTOML(request.MCPServers); content != "" {
+	mcpServers, skippedMCP := codexMCPServersForRequest(request)
+	if len(skippedMCP) > 0 && emit != nil {
+		// Never write a URL whose address is only assigned once the reverse tunnel
+		// comes up. Say which tools are missing for this Turn instead.
+		emit(codexMCPDiagnosticEvent(skippedMCP))
+	}
+	if content := codexMCPConfigTOML(mcpServers); content != "" {
 		config, err := prepareCodexMCPConfig(ctx, request, content)
 		if err != nil {
 			return Result{}, err

@@ -324,7 +324,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /api/v1/mcp-servers/{id}", s.withAuth(http.HandlerFunc(s.deleteMCPServer)))
 	mux.Handle("POST /api/v1/mcp-servers/test", s.withAuth(http.HandlerFunc(s.testMCPServer)))
 	mux.Handle("PUT /api/v1/tasks/{id}/mcp-servers", s.withAuth(http.HandlerFunc(s.setTaskMCPServers)))
-	mux.HandleFunc("POST /api/v1/pet/mcp", s.petMCP)
+	// The pet MCP surface is capability-authenticated like every other agent
+	// endpoint: the handler additionally enforces the pet Task identity and a
+	// direct loopback source. See pet_mcp.go.
+	mux.Handle("POST /api/v1/pet/mcp", s.withAgentCapability(http.HandlerFunc(s.petMCP)))
 	mux.Handle("GET /api/v1/settings/proxy", s.withAuth(http.HandlerFunc(s.proxySettings)))
 	mux.Handle("PUT /api/v1/settings/proxy", s.withAuth(http.HandlerFunc(s.updateProxySettings)))
 	mux.Handle("POST /api/v1/settings/proxy/test", s.withAuth(http.HandlerFunc(s.testProxySettings)))

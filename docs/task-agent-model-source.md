@@ -92,7 +92,9 @@ curl -sS -X PATCH \
 
 ## 宠物 MCP
 
-`POST /api/v1/pet/mcp` 只接受 loopback 请求。工具
+`POST /api/v1/pet/mcp` 只接受 loopback 请求，并且每个请求都必须携带宠物 Task 自己的
+Turn capability（`AHA2_AGENT_API_TOKEN`）；loopback 地址本身不是身份，匿名、其他
+Task 的 capability 以及带转发头的请求都会被拒绝。工具
 `aha_update_task_agent` 新增 `model_source`，参数与 Owner API 的模型字段一致：
 
 ```json

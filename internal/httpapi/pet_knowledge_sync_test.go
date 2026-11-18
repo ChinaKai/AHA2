@@ -64,16 +64,7 @@ func petMCPToolCall(t *testing.T, client *http.Client, baseURL, token, tool stri
 	return text, isError
 }
 
-func petMCPToolText(t *testing.T, client *http.Client, baseURL, tool string, arguments any) string {
-	t.Helper()
-	text, isError := petMCPToolCall(t, client, baseURL, "", tool, arguments)
-	if isError {
-		t.Fatalf("%s returned error: %s", tool, text)
-	}
-	return text
-}
-
-func petMCPToolTextForToken(t *testing.T, client *http.Client, baseURL, token, tool string, arguments any) string {
+func petMCPToolText(t *testing.T, client *http.Client, baseURL, token, tool string, arguments any) string {
 	t.Helper()
 	text, isError := petMCPToolCall(t, client, baseURL, token, tool, arguments)
 	if isError {
@@ -82,10 +73,9 @@ func petMCPToolTextForToken(t *testing.T, client *http.Client, baseURL, token, t
 	return text
 }
 
-// petMCPToolHTTPStatus posts one MCP call and returns only the HTTP status.
-// Authentication rejections answer before a JSON-RPC result exists, so they
-// cannot use petMCPToolCall.
-func petMCPToolHTTPStatus(t *testing.T, client *http.Client, baseURL, token, tool string, arguments any) int {
+// petMCPToolRejection posts one MCP call and returns the HTTP status and stable
+// error code for requests rejected before JSON-RPC dispatch.
+func petMCPToolRejection(t *testing.T, client *http.Client, baseURL, token, tool string, arguments any) (int, string) {
 	t.Helper()
 	payload, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -99,18 +89,33 @@ func petMCPToolHTTPStatus(t *testing.T, client *http.Client, baseURL, token, too
 		t.Fatal(err)
 	}
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Authorization", "Bearer "+token)
+	if token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
 	response, err := client.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	response.Body.Close()
-	return response.StatusCode
+	defer response.Body.Close()
+	var body struct {
+		Error string `json:"error"`
+	}
+	_ = json.NewDecoder(response.Body).Decode(&body)
+	return response.StatusCode, body.Error
 }
 
-func petWorkStateHTTP(t *testing.T, client *http.Client, baseURL string) app.PetWorkState {
+// petMCPToolHTTPStatus posts one MCP call and returns only the HTTP status.
+// Authentication rejections answer before a JSON-RPC result exists, so they
+// cannot use petMCPToolCall.
+func petMCPToolHTTPStatus(t *testing.T, client *http.Client, baseURL, token, tool string, arguments any) int {
 	t.Helper()
-	text := petMCPToolText(t, client, baseURL, "aha_pet_work_state", map[string]any{})
+	status, _ := petMCPToolRejection(t, client, baseURL, token, tool, arguments)
+	return status
+}
+
+func petWorkStateHTTP(t *testing.T, client *http.Client, baseURL, token string) app.PetWorkState {
+	t.Helper()
+	text := petMCPToolText(t, client, baseURL, token, "aha_pet_work_state", map[string]any{})
 	var state app.PetWorkState
 	if err := json.Unmarshal([]byte(text), &state); err != nil {
 		t.Fatalf("decode work state: %v\n%s", err, text)
@@ -222,7 +227,7 @@ func TestKnowledgeSyncNotificationsReachPetWorkStateAndClearOnlyAfterSyncRecover
 		t.Fatalf("expected conflict pause: %+v", status)
 	}
 
-	state := petWorkStateHTTP(t, client, server.URL)
+	state := petWorkStateHTTP(t, client, server.URL, petToken)
 	if len(state.Notifications) != 1 {
 		t.Fatalf("work state notifications=%#v", state.Notifications)
 	}
@@ -235,7 +240,7 @@ func TestKnowledgeSyncNotificationsReachPetWorkStateAndClearOnlyAfterSyncRecover
 	// second notification even though the syncer re-enters the conflict.
 	syncer.ResetPause()
 	syncer.RunOnce(ctx)
-	if state = petWorkStateHTTP(t, client, server.URL); len(state.Notifications) != 1 {
+	if state = petWorkStateHTTP(t, client, server.URL, petToken); len(state.Notifications) != 1 {
 		t.Fatalf("duplicate conflict notification: %#v", state.Notifications)
 	}
 
@@ -262,43 +267,49 @@ func TestKnowledgeSyncNotificationsReachPetWorkStateAndClearOnlyAfterSyncRecover
 	if status := syncer.Status(); !status.Paused || !status.Conflict {
 		t.Fatalf("divergence disappeared unexpectedly: %+v", status)
 	}
-	if state = petWorkStateHTTP(t, client, server.URL); len(state.Notifications) != 1 ||
+	if state = petWorkStateHTTP(t, client, server.URL, petToken); len(state.Notifications) != 1 ||
 		state.Notifications[0].ID != notification.ID {
 		t.Fatalf("remote/init hid unresolved conflict: %#v", state.Notifications)
 	}
 
 	// Acknowledging hides the notification from the next wake-up but must not
-	// resume the paused sync or touch the divergence. An unidentified caller or
-	// a capability for another Task must be rejected before any row changes.
-	rejectText, rejected := petMCPToolCall(t, client, server.URL, "", "aha_ack_knowledge_sync_notification",
-		map[string]any{"ids": []string{notification.ID}})
-	if !rejected || !strings.Contains(rejectText, "宠物 Task") {
-		t.Fatalf("unidentified ack text=%q rejected=%v", rejectText, rejected)
+	// resume the paused sync or touch the divergence. Every pet MCP tool,
+	// read-only included, requires the pet Task's own capability: the loopback
+	// source alone is not an identity, and a capability issued for another Task
+	// is rejected before any row changes.
+	rejectCall := func(label, token, tool string, arguments any, wantStatus int, wantError string) {
+		t.Helper()
+		status, code := petMCPToolRejection(t, client, server.URL, token, tool, arguments)
+		if status != wantStatus || code != wantError {
+			t.Fatalf("%s status=%d error=%q, want %d %q", label, status, code, wantStatus, wantError)
+		}
 	}
-	rejectText, rejected = petMCPToolCall(t, client, server.URL, otherToken, "aha_ack_knowledge_sync_notification",
-		map[string]any{"ids": []string{notification.ID}})
-	if !rejected || !strings.Contains(rejectText, "宠物 Task") {
-		t.Fatalf("foreign-task ack text=%q rejected=%v", rejectText, rejected)
-	}
-	if state = petWorkStateHTTP(t, client, server.URL); len(state.Notifications) != 1 {
+	rejectCall("unidentified ack", "", "aha_ack_knowledge_sync_notification",
+		map[string]any{"ids": []string{notification.ID}}, http.StatusUnauthorized, "agent_capability_required")
+	rejectCall("foreign-task ack", otherToken, "aha_ack_knowledge_sync_notification",
+		map[string]any{"ids": []string{notification.ID}}, http.StatusForbidden, app.ErrCodePetIdentityRequired)
+	if state = petWorkStateHTTP(t, client, server.URL, petToken); len(state.Notifications) != 1 {
 		t.Fatalf("rejected ack changed notifications: %#v", state.Notifications)
 	}
-	// Read-only tools accept any identity; mutating and approval-creating tools
-	// require the pet Task's capability. Neither a tokenless call nor a valid
-	// capability issued for another Task may change records.
+	// Mutating and approval-creating tools follow the same rule; neither a
+	// tokenless call nor a valid capability issued for another Task may change
+	// records.
 	approvalsBefore, err := appService.PetApprovals(ctx, 50)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, tc := range []struct{ label, token, want string }{
-		{"no token", "", "只读工具"},
-		{"foreign task", otherToken, "宠物 Task"},
+	for _, tc := range []struct {
+		label      string
+		token      string
+		wantStatus int
+		wantError  string
+	}{
+		{"no token", "", http.StatusUnauthorized, "agent_capability_required"},
+		{"foreign task", otherToken, http.StatusForbidden, app.ErrCodePetIdentityRequired},
 	} {
-		rejectText, rejected = petMCPToolCall(t, client, server.URL, tc.token, "pet_submit_idea",
-			map[string]any{"title": "denied probe", "summary": "must not be created", "reason": "regression test"})
-		if !rejected || !strings.Contains(rejectText, tc.want) {
-			t.Fatalf("%s mutating call text=%q rejected=%v", tc.label, rejectText, rejected)
-		}
+		rejectCall(tc.label+" mutating call", tc.token, "pet_submit_idea",
+			map[string]any{"title": "denied probe", "summary": "must not be created", "reason": "regression test"},
+			tc.wantStatus, tc.wantError)
 	}
 	approvalsAfter, err := appService.PetApprovals(ctx, 50)
 	if err != nil {
@@ -307,21 +318,22 @@ func TestKnowledgeSyncNotificationsReachPetWorkStateAndClearOnlyAfterSyncRecover
 	if len(approvalsAfter) != len(approvalsBefore) {
 		t.Fatalf("rejected mutating calls created approvals: before=%d after=%d", len(approvalsBefore), len(approvalsAfter))
 	}
-	if text := petMCPToolText(t, client, server.URL, "aha_pet_work_state", map[string]any{}); !strings.Contains(text, notification.ID) {
-		t.Fatalf("tokenless read-only call failed: %s", text)
-	}
-	if text := petMCPToolTextForToken(t, client, server.URL, otherToken, "aha_pet_work_state", map[string]any{}); !strings.Contains(text, notification.ID) {
-		t.Fatalf("foreign-task read-only call failed: %s", text)
-	}
+	rejectCall("anonymous read-only probe", "", "aha_pet_work_state", map[string]any{},
+		http.StatusUnauthorized, "agent_capability_required")
+	rejectCall("foreign-task read-only probe", otherToken, "aha_pet_work_state", map[string]any{},
+		http.StatusForbidden, app.ErrCodePetIdentityRequired)
 	if status := petMCPToolHTTPStatus(t, client, server.URL, "not-a-valid-capability", "aha_pet_work_state", map[string]any{}); status != http.StatusUnauthorized {
 		t.Fatalf("invalid bearer status=%d want=%d", status, http.StatusUnauthorized)
 	}
-	ackText := petMCPToolTextForToken(t, client, server.URL, petToken, "aha_ack_knowledge_sync_notification",
+	if text := petMCPToolText(t, client, server.URL, petToken, "aha_pet_work_state", map[string]any{}); !strings.Contains(text, notification.ID) {
+		t.Fatalf("pet read-only call failed: %s", text)
+	}
+	ackText := petMCPToolText(t, client, server.URL, petToken, "aha_ack_knowledge_sync_notification",
 		map[string]any{"ids": []string{notification.ID}})
 	if !strings.Contains(ackText, `"acknowledged":1`) {
 		t.Fatalf("ack response=%s", ackText)
 	}
-	if state = petWorkStateHTTP(t, client, server.URL); len(state.Notifications) != 0 {
+	if state = petWorkStateHTTP(t, client, server.URL, petToken); len(state.Notifications) != 0 {
 		t.Fatalf("acked notification still visible: %#v", state.Notifications)
 	}
 	if status := syncer.Status(); !status.Paused || !status.Conflict {
@@ -336,7 +348,7 @@ func TestKnowledgeSyncNotificationsReachPetWorkStateAndClearOnlyAfterSyncRecover
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if state = petWorkStateHTTP(t, client, server.URL); len(state.Notifications) != 1 ||
+	if state = petWorkStateHTTP(t, client, server.URL, petToken); len(state.Notifications) != 1 ||
 		state.Notifications[0].Kind != knowledgevault.SyncEventPaused {
 		t.Fatalf("paused notification missing: %#v", state.Notifications)
 	}
@@ -351,7 +363,7 @@ func TestKnowledgeSyncNotificationsReachPetWorkStateAndClearOnlyAfterSyncRecover
 	if status := syncer.Status(); status.Paused || status.Conflict {
 		t.Fatalf("manual push did not resume auto-sync: %+v", status)
 	}
-	if state = petWorkStateHTTP(t, client, server.URL); len(state.Notifications) != 0 {
+	if state = petWorkStateHTTP(t, client, server.URL, petToken); len(state.Notifications) != 0 {
 		t.Fatalf("notifications survived recovery: %#v", state.Notifications)
 	}
 	// The rows are closed, not deleted: the pet audited them once and the

@@ -28,24 +28,27 @@ type petMCPTool struct {
 	InputSchema map[string]any `json:"inputSchema"`
 }
 
-// petMCP is a local MCP endpoint for the pet Task backend. It is intentionally
-// loopback-only and exposes only the pet actions plus the owner-gated read-only
-// AHA overview/detail and approval-request tools.
+// petMCP is the MCP endpoint for the pet Task backend. It is loopback-only and
+// requires every request to carry a valid Turn capability for the pet Task:
+// read-only tools are not anonymous either, because the loopback address is
+// reachable by the SSH stdio proxy, the reverse tunnel and any local process.
 func (s *Server) petMCP(writer http.ResponseWriter, request *http.Request) {
-	host, _, err := net.SplitHostPort(request.RemoteAddr)
-	if err != nil || !isLoopbackHost(host) {
+	if !petMCPLocalRequest(request) {
 		writeError(writer, http.StatusForbidden, "pet_mcp_local_only")
 		return
 	}
-	// The pet MCP client sends the Turn's Agent API capability. Read-only tools
-	// accept any identity, including none, for compatibility; mutating tools
-	// require the pet Task's capability. A malformed token is an error rather
-	// than a silent downgrade.
-	callerTaskID, authorized := s.petMCPCallerTaskID(request)
-	if !authorized {
-		writeError(writer, http.StatusUnauthorized, "agent_capability_invalid")
+	claims, ok := agentClaimsFromContext(request.Context())
+	if !ok {
+		// The route is mounted behind withAgentCapability; reaching the handler
+		// without claims means it was called directly rather than through it.
+		writeError(writer, http.StatusUnauthorized, "agent_capability_required")
 		return
 	}
+	if !app.IsPetTaskID(claims.TaskID) {
+		writeError(writer, http.StatusForbidden, app.ErrCodePetIdentityRequired)
+		return
+	}
+	callerTaskID := claims.TaskID
 	request.Body = http.MaxBytesReader(writer, request.Body, petMCPMaxRequestBytes)
 	var payload petMCPRequest
 	if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
@@ -118,26 +121,21 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// petMCPCallerTaskID resolves the Task identity from the Turn capability the
-// pet MCP client sends as a bearer token. An absent header yields an empty
-// Task (the tokenless read-only path); an unusable header is rejected.
-func (s *Server) petMCPCallerTaskID(request *http.Request) (string, bool) {
-	authorization := strings.TrimSpace(request.Header.Get("Authorization"))
-	if authorization == "" {
-		return "", true
+// petMCPLocalRequest reports whether the request arrived directly over a
+// loopback socket. Proxy headers are rejected as well: a same-host reverse proxy
+// or the Agent API tunnel would otherwise make a LAN or workspace request look
+// local, and the transport must not launder the source address.
+func petMCPLocalRequest(request *http.Request) bool {
+	host, _, err := net.SplitHostPort(request.RemoteAddr)
+	if err != nil || !isLoopbackHost(host) {
+		return false
 	}
-	if s.agentCapabilities == nil {
-		return "", false
+	if request.Header.Get("Forwarded") != "" ||
+		request.Header.Get("X-Forwarded-For") != "" ||
+		request.Header.Get("X-Real-IP") != "" {
+		return false
 	}
-	scheme, token, ok := strings.Cut(authorization, " ")
-	if !ok || !strings.EqualFold(scheme, "Bearer") {
-		return "", false
-	}
-	claims, err := s.agentCapabilities.Authenticate(strings.TrimSpace(token))
-	if err != nil {
-		return "", false
-	}
-	return claims.TaskID, true
+	return true
 }
 
 // compile-time guard that MCP schemas stay compatible with gateway tools.
