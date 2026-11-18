@@ -72,6 +72,9 @@ func TestPetWorkStateShowsInspectionAndAllOpenTasks(t *testing.T) {
 	if len(state.OpenTasks) != 1 || state.OpenTasks[0].ID != openTask.ID || !state.OpenTasks[0].NeedsAttention {
 		t.Fatalf("open tasks=%#v", state.OpenTasks)
 	}
+	if reason := state.OpenTasks[0].AttentionReason; reason != "waiting_user：等待下一步指令" {
+		t.Fatalf("succeeded waiting task should await the next message, got %q", reason)
+	}
 	for _, item := range state.OpenTasks {
 		if item.ID == completedTask.ID {
 			t.Fatalf("completed task leaked into open tasks: %#v", state.OpenTasks)
@@ -95,8 +98,38 @@ func TestPetWorkStateShowsInspectionAndAllOpenTasks(t *testing.T) {
 	if len(state.OpenTasks) != 1 || state.OpenTasks[0].PendingApprovalID != approval.ID || state.OpenTasks[0].NeedsAttention {
 		t.Fatalf("open task approval link=%#v", state.OpenTasks)
 	}
+	if reason := state.OpenTasks[0].AttentionReason; reason != "已提交待审批 "+approval.ID {
+		t.Fatalf("pending owner decision should keep the approval wording, got %q", reason)
+	}
 	if state.Inspection.AttentionTasks != 0 {
 		t.Fatalf("attention should clear after approval: %#v", state.Inspection)
+	}
+}
+
+func TestPetOpenTaskAttentionReasonSeparatesWaitingKinds(t *testing.T) {
+	const (
+		awaitingDecision = "waiting_user：等待主人决定或补充信息"
+		awaitingNext     = "waiting_user：等待下一步指令"
+	)
+	for _, tc := range []struct {
+		name     string
+		status   domain.TaskStatus
+		lastTurn domain.TurnStatus
+		want     string
+	}{
+		{"succeeded turn awaits next message", domain.TaskWaitingUser, domain.TurnSucceeded, awaitingNext},
+		{"failed turn needs owner decision", domain.TaskWaitingUser, domain.TurnFailed, awaitingDecision},
+		{"interrupted turn needs owner decision", domain.TaskWaitingUser, domain.TurnInterrupted, awaitingDecision},
+		{"no turn recorded keeps owner decision", domain.TaskWaitingUser, "", awaitingDecision},
+		{"blocked unchanged", domain.TaskBlocked, domain.TurnSucceeded, "blocked：需要解除阻塞条件"},
+		{"failed unchanged", domain.TaskFailed, domain.TurnSucceeded, "failed：需要重试或决定是否继续"},
+		{"active has no attention reason", domain.TaskActive, domain.TurnSucceeded, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := petOpenTaskAttentionReason(tc.status, tc.lastTurn); got != tc.want {
+				t.Fatalf("reason=%q want %q", got, tc.want)
+			}
+		})
 	}
 }
 
