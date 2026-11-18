@@ -57,6 +57,17 @@ func writeFixturePackage(t *testing.T) string {
 	return root
 }
 
+func writeFixtureInstallers(t *testing.T) string {
+	t.Helper()
+	installerDir := t.TempDir()
+	for _, name := range []string{"AHA2-Setup-x64.exe", "AHA2-Setup-User-x64.exe"} {
+		if err := os.WriteFile(filepath.Join(installerDir, name), []byte("installer-"+name), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	return installerDir
+}
+
 func fixtureManifest(files map[string][]byte, commit, webVersion string) map[string]any {
 	paths := make([]string, 0, len(files))
 	for path := range files {
@@ -549,12 +560,7 @@ func TestWindowsPackageWorkflowAssemblyRoundTrip(t *testing.T) {
 		t.Skip("python3 is not on PATH")
 	}
 	packageDir := writeFixturePackage(t)
-	installerDir := t.TempDir()
-	for _, name := range []string{"AHA2-Setup-x64.exe", "AHA2-Setup-User-x64.exe"} {
-		if err := os.WriteFile(filepath.Join(installerDir, name), []byte("installer-"+name), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
+	installerDir := writeFixtureInstallers(t)
 	zipPath := filepath.Join(t.TempDir(), "AHA2-Windows-Package-x64.zip")
 	out, err := runPackageAssembly(t, packageDir, installerDir, zipPath)
 	if err != nil {
@@ -600,6 +606,106 @@ func TestWindowsPackageWorkflowAssemblyRoundTrip(t *testing.T) {
 	if !strings.Contains(out, "Windows package archive verified") {
 		t.Errorf("unexpected archive verifier output: %s", out)
 	}
+}
+
+// The assembler is the last step before the archive is published. Following a
+// link would package bytes the release manifest never hashed, and skipping a
+// directory link would publish a package with missing files, so every link must
+// fail the build with a path-specific error.
+func TestWindowsPackageAssemblyRejectsSymlinkedInputs(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 is not on PATH")
+	}
+
+	assemblerRejects := func(t *testing.T, packageDir, installerDir, want string) {
+		t.Helper()
+		zipPath := filepath.Join(t.TempDir(), "AHA2-Windows-Package-x64.zip")
+		out, err := runPackageAssembly(t, packageDir, installerDir, zipPath)
+		if err == nil {
+			t.Fatalf("assembler accepted a link input (package=%s installer=%s):\n%s", packageDir, installerDir, out)
+		}
+		if !strings.Contains(out, want) {
+			t.Errorf("assembler error does not name the rejected input; want %q in:\n%s", want, out)
+		}
+	}
+
+	t.Run("rejects a symlinked machine setup", func(t *testing.T) {
+		packageDir := writeFixturePackage(t)
+		installerDir := writeFixtureInstallers(t)
+		setup := filepath.Join(installerDir, "AHA2-Setup-x64.exe")
+		target := filepath.Join(installerDir, "AHA2-Setup-x64.real.exe")
+		if err := os.Rename(setup, target); err != nil {
+			t.Fatal(err)
+		}
+		replaceWithSymlink(t, target, setup)
+		assemblerRejects(t, packageDir, installerDir, "installer is a symlink: "+setup)
+	})
+
+	t.Run("rejects a symlinked user setup", func(t *testing.T) {
+		packageDir := writeFixturePackage(t)
+		installerDir := writeFixtureInstallers(t)
+		setup := filepath.Join(installerDir, "AHA2-Setup-User-x64.exe")
+		target := filepath.Join(installerDir, "AHA2-Setup-User-x64.real.exe")
+		if err := os.Rename(setup, target); err != nil {
+			t.Fatal(err)
+		}
+		replaceWithSymlink(t, target, setup)
+		assemblerRejects(t, packageDir, installerDir, "installer is a symlink: "+setup)
+	})
+
+	t.Run("rejects a symlinked installer directory", func(t *testing.T) {
+		packageDir := writeFixturePackage(t)
+		realDir := writeFixtureInstallers(t)
+		installerDir := filepath.Join(t.TempDir(), "installer")
+		replaceWithSymlink(t, realDir, installerDir)
+		assemblerRejects(t, packageDir, installerDir, "installer directory is a symlink: "+installerDir)
+	})
+
+	t.Run("rejects a symlinked package directory", func(t *testing.T) {
+		realDir := writeFixturePackage(t)
+		installerDir := writeFixtureInstallers(t)
+		packageDir := filepath.Join(t.TempDir(), "package")
+		replaceWithSymlink(t, realDir, packageDir)
+		assemblerRejects(t, packageDir, installerDir, "package directory is a symlink: "+packageDir)
+	})
+
+	t.Run("rejects a symlinked package manifest", func(t *testing.T) {
+		packageDir := writeFixturePackage(t)
+		installerDir := writeFixtureInstallers(t)
+		manifest := filepath.Join(packageDir, "release-manifest.json")
+		target := filepath.Join(packageDir, "release-manifest.real.json")
+		if err := os.Rename(manifest, target); err != nil {
+			t.Fatal(err)
+		}
+		replaceWithSymlink(t, target, manifest)
+		assemblerRejects(t, packageDir, installerDir, "package manifest is a symlink: "+manifest)
+	})
+
+	t.Run("rejects a symlinked file inside dist", func(t *testing.T) {
+		packageDir := writeFixturePackage(t)
+		installerDir := writeFixtureInstallers(t)
+		file := filepath.Join(packageDir, "browser-host", "tabs.mjs")
+		target := filepath.Join(packageDir, "browser-host", "tabs.real.mjs")
+		if err := os.Rename(file, target); err != nil {
+			t.Fatal(err)
+		}
+		replaceWithSymlink(t, target, file)
+		assemblerRejects(t, packageDir, installerDir, "package input is a symlink: "+file)
+	})
+
+	t.Run("rejects a directory link inside dist", func(t *testing.T) {
+		packageDir := writeFixturePackage(t)
+		installerDir := writeFixtureInstallers(t)
+		realDir := filepath.Join(t.TempDir(), "node_modules-real")
+		if err := os.Rename(filepath.Join(packageDir, "browser-host", "node_modules"), realDir); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(packageDir, "browser-host", "node_modules")
+		replaceWithSymlink(t, realDir, link)
+		// A directory link used to be skipped silently, which dropped every
+		// file below it from the archive without failing the build.
+		assemblerRejects(t, packageDir, installerDir, "package input directory is a symlink: "+link)
+	})
 }
 
 func TestWindowsPackageArchiveVerifierExecutable(t *testing.T) {
