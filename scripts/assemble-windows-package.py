@@ -18,6 +18,11 @@ junctions and other reparse points, and non-regular files are rejected rather
 than followed or skipped: following a link would package bytes that the
 release manifest never hashed, and silently skipping one would ship a package
 whose contents differ from what the installers were verified against.
+
+The same reasoning applies to the directory walk itself: os.walk swallows
+scandir failures unless onerror is supplied, which would publish a package
+missing every file below an unreadable directory. Scan errors are turned into
+a fatal error naming the path and the OS reason.
 """
 
 import argparse
@@ -85,9 +90,22 @@ def require_regular_file(path, label):
     return info
 
 
+def walk_error(error):
+    """Turn an os.walk scan failure into a fatal, path-specific error.
+
+    os.walk calls onerror() for a directory it cannot scan and otherwise
+    continues as if the directory were empty. Raising here stops assembly so
+    the release fails instead of shipping a package with silently missing
+    files.
+    """
+    path = error.filename or "<unknown>"
+    reason = error.strerror or str(error)
+    raise ValueError(f"package input directory cannot be listed: {path}: {reason}") from error
+
+
 def add_tree(archive, root, prefix):
     root = Path(root)
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False, onerror=walk_error):
         dirnames.sort()
         for name in dirnames:
             # os.walk(followlinks=False) lists a directory link but does not

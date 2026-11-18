@@ -184,7 +184,9 @@ Release 的 Windows 作业直接调用 `scripts/build-windows-package.sh` 生成
 出现无部署价值、却需要额外路径校验的目录条目；Release 与 Linux 测试执行同一脚本。
 写入前，包目录、安装器目录、两份 Setup 和 `dist/` 下每个条目都先做 `lstat` 检查：
 符号链接、Windows junction/reparse point 和其他非常规文件一律报错退出，既不跟随
-链接目标，也不静默跳过目录链接：
+链接目标，也不静默跳过目录链接。目录遍历同样不吞错：`os.walk` 扫到无法读取的
+子目录（权限不足、`scandir` 失败等）会带着路径和系统原因报错，组包以非 0 退出，
+不会打出缺文件的包。
 
 ```text
 AHA2-Windows-Package-x64.zip
