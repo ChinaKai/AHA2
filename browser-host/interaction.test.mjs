@@ -8,7 +8,7 @@ import {MAX_ACTION_TEXT_BYTES} from "./interact.mjs";
 
 const futureFence = id => `${id}@${Date.now() + 60_000}`;
 
-async function startHost({elements = [], cookieList = [], downloadBody = "download-body"} = {}) {
+async function startHost({elements = [], cookieList = [], downloadBody = "download-body", downloadOptions = null} = {}) {
   const root = await mkdtemp(join(tmpdir(), "aha2-browser-interaction-"));
   const calls = {actions: [], uploads: [], addedCookies: [], cookieURLs: null, chooserFiles: null};
   const listeners = {};
@@ -32,9 +32,9 @@ async function startHost({elements = [], cookieList = [], downloadBody = "downlo
       evaluate: async () => Boolean(entry && entry.fileInput),
       click: async () => {
         calls.actions.push({kind: "click", ref});
-        if (entry && entry.opensChooser) {
-          const chooser = listeners.chooserPromise;
-          if (chooser) chooser.resolve();
+        if (entry && entry.clickError) throw entry.clickError;
+        if (entry && entry.opensChooser && typeof listeners.filechooser === "function") {
+          listeners.filechooser(chooser);
         }
       },
       dblclick: async () => { calls.actions.push({kind: "double_click", ref}); },
@@ -43,7 +43,6 @@ async function startHost({elements = [], cookieList = [], downloadBody = "downlo
     };
     return locator;
   };
-  let resolveChooser = null;
   const chooser = {
     setFiles: async files => { calls.chooserFiles = files; },
   };
@@ -56,6 +55,8 @@ async function startHost({elements = [], cookieList = [], downloadBody = "downlo
     bringToFront: async () => {},
     isClosed: () => false,
     on: (event, fn) => { listeners[event] = fn; },
+    once: (event, fn) => { listeners[event] = fn; },
+    removeListener: event => { delete listeners[event]; },
     screenshot: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
     evaluate: async (fn, arg) => {
       if (typeof arg === "number") return "page text";
@@ -82,8 +83,7 @@ async function startHost({elements = [], cookieList = [], downloadBody = "downlo
     waitForEvent: async event => {
       if (event !== "filechooser") throw new Error(`unexpected event ${event}`);
       return new Promise(resolve => {
-        resolveChooser = resolve;
-        listeners.chooserPromise = {resolve: () => resolve(chooser)};
+        listeners.filechooser = resolve;
       });
     },
   };
@@ -99,6 +99,7 @@ async function startHost({elements = [], cookieList = [], downloadBody = "downlo
   const host = createHostServer({
     root, token: "test-token", hostID: "test-host", chromium,
     edgeExecutable: () => "C:\\Program Files\\msedge.exe",
+    downloadOptions,
   });
   await new Promise(resolve => host.server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${host.server.address().port}`;
@@ -119,7 +120,7 @@ async function startHost({elements = [], cookieList = [], downloadBody = "downlo
     await host.shutdown();
     await new Promise(resolve => host.server.close(resolve));
   };
-  return {root, calls, listeners, downloadBody, page, call, raw, close, resolveChooser};
+  return {root, calls, listeners, downloadBody, page, fixtureElements, chooser, call, raw, close};
 }
 
 async function openSession(host, fence = "") {
@@ -238,12 +239,16 @@ test("captured downloads list, fetch raw bytes, reject traversal and clear", asy
   const host = await startHost({downloadBody: "download-body"});
   try {
     const tabID = await openSession(host);
+    let deleted = 0;
+    let canceled = 0;
     const download = {
       suggestedFilename: () => "report.csv",
-      saveAs: async path => {
-        const {writeFile} = await import("node:fs/promises");
-        await writeFile(path, "download-body");
+      createReadStream: async () => {
+        const {Readable} = await import("node:stream");
+        return Readable.from([Buffer.from(host.downloadBody)]);
       },
+      cancel: async () => { canceled++; },
+      delete: async () => { deleted++; },
     };
     host.listeners.download(download);
     let listed = {body: {downloads: []}};
@@ -262,6 +267,9 @@ test("captured downloads list, fetch raw bytes, reject traversal and clear", asy
     assert.equal(fetched.status, 200);
     assert.equal(fetched.body.toString(), "download-body");
     assert.equal(decodeURIComponent(fetched.headers.get("x-aha2-download-filename")), "report.csv");
+    // The raw Playwright artifact is removed after the controlled copy exists.
+    assert.ok(deleted >= 1, "download artifact was not deleted");
+    assert.equal(canceled, 0);
 
     // A new lease fence cannot see the previous holder's download.
     const fenced = await host.call("POST", "/v1/profiles/browser_profile_1/fence",
@@ -327,6 +335,143 @@ test("cookie export is scoped and cookie import never echoes values", async () =
     assert.equal(result.status, 400);
     assert.equal(result.body.error.code, "browser_cookie_invalid");
     assert.doesNotMatch(JSON.stringify(result.body), /bad-secret/);
+  } finally {
+    await host.close();
+  }
+});
+
+test("file chooser upload succeeds and a failed click leaves the host alive", async () => {
+  const host = await startHost();
+  try {
+    const fence = futureFence("grant-1");
+    const tabID = await openSession(host, fence);
+    await host.call("GET", `/v1/profiles/browser_profile_1/tabs/${tabID}/snapshot`);
+    const button = host.fixtureElements[2];
+    button.opensChooser = true;
+
+    let result = await host.call("POST", `/v1/profiles/browser_profile_1/tabs/${tabID}/uploads`,
+      {fence, ref: "e1-3", files: [{filename: "note.txt", content_base64: "aGVsbG8="}]});
+    assert.equal(result.status, 200);
+    assert.equal(host.calls.chooserFiles[0].name, "note.txt");
+
+    // A disabled target makes Playwright's click fail. The chooser waiter must
+    // be canceled instead of surfacing an unhandled TimeoutError.
+    button.clickError = new Error("element is not enabled");
+    result = await host.call("POST", `/v1/profiles/browser_profile_1/tabs/${tabID}/uploads`,
+      {fence, ref: "e1-3", files: [{filename: "note.txt", content_base64: "aGVsbG8="}]});
+    assert.equal(result.status, 502);
+    assert.equal(result.body.error.code, "browser_upload_failed");
+    const alive = await host.call("GET", "/v1/profiles/browser_profile_1/tabs");
+    assert.equal(alive.status, 200);
+  } finally {
+    await host.close();
+  }
+});
+
+test("download store caps in-flight files and rejects beyond the declared count", async () => {
+  const host = await startHost({downloadOptions: {maxFiles: 2}});
+  const {Readable} = await import("node:stream");
+  try {
+    await openSession(host);
+    const gates = [];
+    const deleted = [];
+    const makeDownload = index => {
+      let release;
+      const gate = new Promise(resolve => { release = resolve; });
+      return {
+        release,
+        suggestedFilename: () => `f${index}.txt`,
+        createReadStream: async () => {
+          await gate;
+          return Readable.from([Buffer.from(`body-${index}`)]);
+        },
+        cancel: async () => {},
+        delete: async () => { deleted.push(index); },
+      };
+    };
+    const downloads = [1, 2, 3].map(makeDownload);
+    for (const download of downloads) host.listeners.download(download);
+    // Reservation is synchronous, so the third event must be rejected while
+    // the first two are still saving.
+    await new Promise(resolve => setTimeout(resolve, 20));
+    downloads[0].release();
+    downloads[1].release();
+    let listed = [];
+    for (let attempt = 0; attempt < 50; attempt++) {
+      listed = (await host.call("GET", "/v1/profiles/browser_profile_1/downloads")).body.downloads;
+      if (listed.length === 2) break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal(listed.length, 2, "in-flight count must stay within maxFiles");
+    assert.ok(deleted.includes(3), "rejected download artifact must be deleted");
+    assert.equal((await host.call("DELETE", "/v1/profiles/browser_profile_1/downloads")).status, 200);
+  } finally {
+    await host.close();
+  }
+});
+
+test("download TTL timer removes entries and files without a read", async () => {
+  const host = await startHost({downloadOptions: {ttlMs: 100}});
+  const {Readable} = await import("node:stream");
+  try {
+    await openSession(host);
+    const download = {
+      suggestedFilename: () => "ttl.txt",
+      createReadStream: async () => Readable.from([Buffer.from("ttl-body")]),
+      cancel: async () => {},
+      delete: async () => {},
+    };
+    host.listeners.download(download);
+    let listed = [];
+    for (let attempt = 0; attempt < 50; attempt++) {
+      listed = (await host.call("GET", "/v1/profiles/browser_profile_1/downloads")).body.downloads;
+      if (listed.length === 1) break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal(listed.length, 1);
+    await new Promise(resolve => setTimeout(resolve, 400));
+    const after = await host.call("GET", "/v1/profiles/browser_profile_1/downloads");
+    assert.deepEqual(after.body.downloads, []);
+    const directory = join(host.root, ".downloads", "browser_profile_1");
+    const {readdir} = await import("node:fs/promises");
+    const sessions = await readdir(directory).catch(() => []);
+    for (const session of sessions) {
+      assert.deepEqual(await readdir(join(directory, session)).catch(() => []), []);
+    }
+  } finally {
+    await host.close();
+  }
+});
+
+test("clearing downloads cancels an in-flight stream and deletes its artifact", async () => {
+  const host = await startHost({downloadOptions: {maxFiles: 5}});
+  const {PassThrough} = await import("node:stream");
+  try {
+    await openSession(host);
+    let stream = null;
+    let canceled = 0;
+    let deleted = 0;
+    const download = {
+      suggestedFilename: () => "slow.bin",
+      createReadStream: async () => {
+        stream = new PassThrough();
+        return stream;
+      },
+      cancel: async () => {
+        canceled++;
+        stream?.destroy(new Error("canceled by clear"));
+      },
+      delete: async () => { deleted++; },
+    };
+    host.listeners.download(download);
+    for (let attempt = 0; attempt < 50 && !stream; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.ok(stream, "stream did not start");
+    const cleared = await host.call("DELETE", "/v1/profiles/browser_profile_1/downloads");
+    assert.equal(cleared.status, 200);
+    assert.ok(canceled >= 1 && deleted >= 1);
+    assert.equal((await host.call("GET", "/v1/profiles/browser_profile_1/tabs")).status, 200);
   } finally {
     await host.close();
   }

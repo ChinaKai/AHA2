@@ -928,12 +928,17 @@ func TestTransferProfileControlIsOwnerActionAndMovesLease(t *testing.T) {
 	if err != nil || len(synced) != 1 {
 		t.Fatalf("initial tabs=%#v err=%v", synced, err)
 	}
+	clearedBefore := f.host.ClearDownload
 	grantB, err := f.service.TransferProfileControl(ctx, "owner", profile.ID, otherTask.ID, nil, time.Hour)
 	if err != nil {
 		t.Fatalf("transfer: %v", err)
 	}
 	if grantB.TaskID != otherTask.ID || grantB.Status != domain.BrowserGrantStatusActive {
 		t.Fatalf("transferred grant=%#v", grantB)
+	}
+	if f.host.ClearDownload != clearedBefore+1 {
+		t.Fatalf("transfer did not clear the previous holder's downloads: before=%d after=%d",
+			clearedBefore, f.host.ClearDownload)
 	}
 	if old, err := f.service.Grant(ctx, grantA.ID); err != nil || old.Status != domain.BrowserGrantStatusRevoked {
 		t.Fatalf("old grant after transfer=%#v err=%v", old, err)

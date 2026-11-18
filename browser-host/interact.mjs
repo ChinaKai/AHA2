@@ -270,6 +270,81 @@ function decodeUploadFile(file) {
   };
 }
 
+export const FILE_CHOOSER_TIMEOUT_MS = 5000;
+
+function uploadFailure(message) {
+  return Object.assign(new Error(message), {code: "browser_upload_failed"});
+}
+
+// A file-chooser wait and its click are two asynchronous operations. Either
+// can fail (disabled target, navigation, timeout) and whichever loses must not
+// leave an unhandled rejection: in a long-lived host that would terminate the
+// Node process. This waiter owns the listener and timer, and can be canceled
+// as soon as the click fails.
+export function createFileChooserWaiter(page, timeoutMs = FILE_CHOOSER_TIMEOUT_MS) {
+  let settled = false;
+  let timer = null;
+  let resolvePromise = null;
+  let rejectPromise = null;
+  const promise = new Promise((resolve, reject) => {
+    resolvePromise = resolve;
+    rejectPromise = reject;
+  });
+  const cleanup = () => {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    if (typeof page.removeListener === "function") page.removeListener("filechooser", listener);
+  };
+  const listener = chooser => {
+    if (settled) return;
+    settled = true;
+    cleanup();
+    resolvePromise(chooser);
+  };
+  timer = setTimeout(() => {
+    if (settled) return;
+    settled = true;
+    cleanup();
+    rejectPromise(uploadFailure("file chooser did not open"));
+  }, timeoutMs);
+  timer.unref?.();
+  if (typeof page.once === "function") page.once("filechooser", listener);
+  else if (typeof page.on === "function") page.on("filechooser", listener);
+  else {
+    cleanup();
+    rejectPromise(uploadFailure("file chooser is unavailable"));
+  }
+  // Keep the rejection handled even when the caller cancels after a click
+  // failure and never awaits it.
+  promise.catch(() => {});
+  return {
+    promise,
+    cancel(message = "upload target could not be clicked") {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      rejectPromise(uploadFailure(message));
+    },
+  };
+}
+
+async function clickAndWaitForChooser(page, clickFn, timeoutMs = FILE_CHOOSER_TIMEOUT_MS) {
+  const waiter = createFileChooserWaiter(page, timeoutMs);
+  try {
+    await clickFn();
+  } catch {
+    waiter.cancel();
+    throw uploadFailure("upload target could not be clicked");
+  }
+  try {
+    return await waiter.promise;
+  } catch {
+    throw uploadFailure("file chooser did not open");
+  }
+}
+
 export async function performUpload(page, tab, upload) {
   const files = Array.isArray(upload && upload.files) ? upload.files : [];
   if (files.length < 1 || files.length > MAX_UPLOAD_FILES) {
@@ -295,19 +370,17 @@ export async function performUpload(page, tab, upload) {
       fileInput = false;
     }
     if (fileInput) {
-      await locator.setInputFiles(payloads, {timeout: 5000});
+      await locator.setInputFiles(payloads, {timeout: FILE_CHOOSER_TIMEOUT_MS});
     } else {
-      const chooserPromise = page.waitForEvent("filechooser", {timeout: 5000});
-      await locator.click({timeout: 5000});
-      const chooser = await chooserPromise;
+      const chooser = await clickAndWaitForChooser(page,
+        () => locator.click({timeout: FILE_CHOOSER_TIMEOUT_MS}));
       await chooser.setFiles(payloads);
     }
     return {ref: String(upload.ref).trim(), file_count: payloads.length, total_bytes: total};
   }
   if (hasX) await checkViewport(page, upload.x, upload.y);
-  const chooserPromise = page.waitForEvent("filechooser", {timeout: 5000});
-  await page.mouse.click(upload.x, upload.y);
-  const chooser = await chooserPromise;
+  const chooser = await clickAndWaitForChooser(page,
+    () => page.mouse.click(upload.x, upload.y));
   await chooser.setFiles(payloads);
   return {file_count: payloads.length, total_bytes: total};
 }

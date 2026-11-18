@@ -358,7 +358,9 @@ File upload sends bytes, never a host path. JSON uses
 multipart uses one `file` part plus `ref` or `x`/`y` fields. At most five files,
 10 MiB each and 20 MiB total. Downloads triggered by the page are captured in a
 controlled per-session directory and addressed only by an opaque id; list them,
-then fetch the chosen id. Download ids are not portable across Tasks or
+then fetch the chosen id. Downloads are capped at 10 MiB each, 20 entries and
+50 MiB total; the host cancels over-limit and in-flight excess work and deletes
+the browser's raw artifact. Download ids are not portable across Tasks or
 sessions, expire after 30 minutes, and are removed when the lease is released.
 
 ```sh

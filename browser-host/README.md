@@ -229,5 +229,6 @@ lease hold 与底层 close/navigate/open 调用窗口；真实 Edge 仍需手工
 - 页面输入与文件上传都在 Owner 可见的 Edge 窗口中发生；host 不读取 Edge 已保存
   密码，也不提供密码管理器接口。
 - 下载文件保存在 `<profile-root>/.downloads/` 的会话目录，TTL 30 分钟、最多
-  20 个、单个 10 MiB；释放租约或关闭会话即清理。
+  20 个、单个 10 MiB、累计 50 MiB；超限/取消会终止并删除 Playwright 原始
+  artifact，释放租约或关闭会话即清理。
 - profile 删除只删 AHA 逻辑记录，host 用户数据目录会保留，需后续提供受控清理。

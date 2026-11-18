@@ -138,7 +138,9 @@ function attachPage(session, page, id = "") {
     // suggested name is metadata only; the file on disk uses an opaque id.
     page.on("download", download => {
       session.downloads.capture(download, session.fence).catch(error => {
-        console.error(`download capture failed profile=${session.profileID} diagnostic=${diagnostics(error, root, "")}`);
+        // Do not log the suggested name or any path: a download name can carry
+        // task content. Only the stable error code belongs in the host log.
+        console.error(`download capture failed profile=${session.profileID} code=${String(error && error.code || "error")}`);
       });
     });
   } catch {
@@ -246,6 +248,21 @@ async function withSessionGate(session, type, timeoutMs, fn) {
   } finally {
     release();
   }
+}
+
+// The session gate isolates fence switches; it deliberately allows concurrent
+// readers. Page input, however, is a compound gesture (focus/click then type)
+// that must not interleave with another input. This slot serializes whole
+// actions/uploads for one browser session.
+function createSerialSlot() {
+  let tail = Promise.resolve();
+  return {
+    run(fn) {
+      const next = tail.then(() => fn(), () => fn());
+      tail = next.then(() => {}, () => {});
+      return next;
+    },
+  };
 }
 
 const MAX_BOOKMARKS = 500;
@@ -457,7 +474,9 @@ async function runMutation(response, session, suppliedFence, beforeMutation, fai
         }
         code = fenceStatus(session, suppliedFence, hold);
         if (code) return fenceFailure(response, code);
-        return await fn();
+        // The callback receives the hold so a serialized operation can re-run
+        // the fence check inside the execution slot.
+        return await fn(hold);
       } finally {
         hold.release();
       }
@@ -499,7 +518,7 @@ function sendFrame(response, buffer, cached) {
 
 // options: root, token, hostID, chromium (Playwright namespace), edgeExecutable
 export function createHostServer(options) {
-  const {root, token, hostID = "local", chromium, edgeExecutable, onShutdown, fenceWaitTimeoutMs = FENCE_WAIT_TIMEOUT_MS, beforeBookmarkOpen, beforeMutation, failLeaseHold} = options;
+  const {root, token, hostID = "local", chromium, edgeExecutable, onShutdown, fenceWaitTimeoutMs = FENCE_WAIT_TIMEOUT_MS, beforeBookmarkOpen, beforeMutation, failLeaseHold, headless = false, downloadOptions = null} = options;
   if (!chromium || typeof chromium.launchPersistentContext !== "function") {
     throw new Error("createHostServer requires a Playwright-compatible chromium");
   }
@@ -529,7 +548,7 @@ export function createHostServer(options) {
     // Download artifacts are scoped to this browser session. Remove the
     // directory so a later session cannot address an old Task's files.
     try {
-      await session.downloads.clear();
+      await session.downloads.close();
     } catch {
       // Cleanup is best-effort; the directory is outside every profile.
     }
@@ -624,7 +643,9 @@ export function createHostServer(options) {
         try {
           const context = await chromium.launchPersistentContext(directory, {
             executablePath: edge,
-            headless: false,
+            // Production is always visible. The override exists only for the
+            // opt-in real-Chromium regression harness.
+            headless,
             viewport: null,
             args: ["--disable-features=msEdgeSidebar"],
           });
@@ -635,10 +656,11 @@ export function createHostServer(options) {
             state: "ready",
             context,
             tabs: new Map(),
-            downloads: createDownloadStore(root, profileID, sessionID),
+            downloads: createDownloadStore(root, profileID, sessionID, downloadOptions || {}),
             lock,
             fence: "",
             gate: createSessionGate(),
+            inputSlot: createSerialSlot(),
           };
           // A persistent context starts with an initial page and the Owner can
           // open more at any time. Register them now and on every new page so a
@@ -657,7 +679,7 @@ export function createHostServer(options) {
             if (state.get(profileID) === session) {
               state.sessions.delete(profileID);
               void state.locks.release(lock);
-              void session.downloads.clear().catch(() => {});
+              void session.downloads.close().catch(() => {});
               console.log(`browser window closed profile=${profileID}`);
             }
           });
@@ -973,35 +995,48 @@ export function createHostServer(options) {
           const code = error && error.code ? error.code : "browser_action_invalid";
           return json(response, 400, fail(400, code, "invalid page action").body);
         }
-        return runMutation(response, session, body.fence, beforeMutation, failLeaseHold, async () => {
-          try {
-            const result = await performAction(tab.page, tab, action);
-            tab.frame = null;
-            return json(response, 200, {action: result});
-          } catch (error) {
-            const code = error && error.code ? error.code : "browser_action_failed";
-            const status = code === "browser_element_not_found" ? 404
-              : code === "browser_element_stale" ? 409
-                : code === "browser_action_invalid" ? 400 : 502;
-            // Never echo Playwright's diagnostic: it can contain typed text or
-            // page-derived selectors.
-            return json(response, status, fail(status, code, "page action failed").body);
-          }
+        return runMutation(response, session, body.fence, beforeMutation, failLeaseHold, async hold => {
+          // Serialize the whole focused-click/type sequence. The session gate
+          // admits concurrent readers for fence isolation, so it cannot order
+          // two input gestures by itself.
+          return session.inputSlot.run(async () => {
+            // The fence may have changed while this request waited in the
+            // slot; re-check before touching the page.
+            const fenceCode = fenceStatus(session, body.fence, hold);
+            if (fenceCode) return fenceFailure(response, fenceCode);
+            try {
+              const result = await performAction(tab.page, tab, action);
+              tab.frame = null;
+              return json(response, 200, {action: result});
+            } catch (error) {
+              const code = error && error.code ? error.code : "browser_action_failed";
+              const status = code === "browser_element_not_found" ? 404
+                : code === "browser_element_stale" ? 409
+                  : code === "browser_action_invalid" ? 400 : 502;
+              // Never echo Playwright's diagnostic: it can contain typed text
+              // or page-derived selectors.
+              return json(response, status, fail(status, code, "page action failed").body);
+            }
+          });
         });
       }
       if (parts.length === 6 && parts[5] === "uploads" && request.method === "POST") {
-        return runMutation(response, session, body.fence, beforeMutation, failLeaseHold, async () => {
-          try {
-            const result = await performUpload(tab.page, tab, body);
-            tab.frame = null;
-            return json(response, 200, {upload: result});
-          } catch (error) {
-            const code = error && error.code ? error.code : "browser_upload_failed";
-            const status = code === "browser_element_not_found" ? 404
-              : code === "browser_element_stale" ? 409
-                : code === "browser_upload_invalid" ? 400 : 502;
-            return json(response, status, fail(status, code, "file upload failed").body);
-          }
+        return runMutation(response, session, body.fence, beforeMutation, failLeaseHold, async hold => {
+          return session.inputSlot.run(async () => {
+            const fenceCode = fenceStatus(session, body.fence, hold);
+            if (fenceCode) return fenceFailure(response, fenceCode);
+            try {
+              const result = await performUpload(tab.page, tab, body);
+              tab.frame = null;
+              return json(response, 200, {upload: result});
+            } catch (error) {
+              const code = error && error.code ? error.code : "browser_upload_failed";
+              const status = code === "browser_element_not_found" ? 404
+                : code === "browser_element_stale" ? 409
+                  : code === "browser_upload_invalid" ? 400 : 502;
+              return json(response, status, fail(status, code, "file upload failed").body);
+            }
+          });
         });
       }
     }
