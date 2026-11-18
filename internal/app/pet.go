@@ -1696,9 +1696,10 @@ func (s *Service) PetMCPTool(ctx context.Context, name string, args json.RawMess
 	return s.petMCPTool(ctx, "", name, args)
 }
 
-// petMCPReadOnlyTools are the pet MCP tools that only read state. The loopback
-// endpoint keeps a tokenless compatibility path, but that request has no caller
-// identity: mutating and approval-creating tools must not run through it.
+// petMCPReadOnlyTools are the pet MCP tools that only read state. Read-only
+// tools accept any identity, including none, for compatibility; every tool
+// outside this set requires the pet Task's capability so another Task cannot
+// mutate or create approvals through this endpoint.
 var petMCPReadOnlyTools = map[string]bool{
 	"aha_overview":                  true,
 	"aha_pet_work_state":            true,
@@ -1733,15 +1734,15 @@ var petMCPReadOnlyTools = map[string]bool{
 }
 
 // PetMCPToolForTask dispatches one pet MCP tool on behalf of the authenticated
-// taskID. The pet MCP client sends its Turn capability as a bearer token. A
-// request without one keeps working for read-only compatibility, but a
-// mutating tool needs the identity first; tools that change pet-wide state
-// additionally reject any caller that is not the pet Task.
+// taskID. The pet MCP client sends its Turn capability as a bearer token.
+// Read-only tools accept any identity, including none, for compatibility;
+// every mutating or approval-creating tool requires the pet Task's capability
+// and is rejected before dispatch for any other caller.
 func (s *Service) PetMCPToolForTask(ctx context.Context, taskID, name string, args json.RawMessage) (string, error) {
 	taskID = strings.TrimSpace(taskID)
 	name = strings.TrimSpace(strings.ToLower(name))
-	if taskID == "" && !petMCPReadOnlyTools[name] {
-		return "", fmt.Errorf("未携带宠物 Task 身份时只允许调用只读工具")
+	if !petMCPReadOnlyTools[name] && taskID != petTaskID {
+		return "", fmt.Errorf("只有宠物 Task 可以调用变更工具；无身份或非宠物 Task 仅允许只读工具")
 	}
 	return s.petMCPTool(ctx, taskID, name, args)
 }

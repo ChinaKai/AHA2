@@ -37,9 +37,10 @@ func (s *Server) petMCP(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusForbidden, "pet_mcp_local_only")
 		return
 	}
-	// The pet MCP client sends the Turn's Agent API capability. The tokenless
-	// compatibility path is restricted to read-only tools by the app layer; a
-	// malformed token is an error rather than a silent downgrade.
+	// The pet MCP client sends the Turn's Agent API capability. Read-only tools
+	// accept any identity, including none, for compatibility; mutating tools
+	// require the pet Task's capability. A malformed token is an error rather
+	// than a silent downgrade.
 	callerTaskID, authorized := s.petMCPCallerTaskID(request)
 	if !authorized {
 		writeError(writer, http.StatusUnauthorized, "agent_capability_invalid")

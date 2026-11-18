@@ -82,6 +82,32 @@ func petMCPToolTextForToken(t *testing.T, client *http.Client, baseURL, token, t
 	return text
 }
 
+// petMCPToolHTTPStatus posts one MCP call and returns only the HTTP status.
+// Authentication rejections answer before a JSON-RPC result exists, so they
+// cannot use petMCPToolCall.
+func petMCPToolHTTPStatus(t *testing.T, client *http.Client, baseURL, token, tool string, arguments any) int {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+		"params": map[string]any{"name": tool, "arguments": arguments},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodPost, baseURL+"/api/v1/pet/mcp", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+token)
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	return response.StatusCode
+}
+
 func petWorkStateHTTP(t *testing.T, client *http.Client, baseURL string) app.PetWorkState {
 	t.Helper()
 	text := petMCPToolText(t, client, baseURL, "aha_pet_work_state", map[string]any{})
@@ -257,27 +283,38 @@ func TestKnowledgeSyncNotificationsReachPetWorkStateAndClearOnlyAfterSyncRecover
 	if state = petWorkStateHTTP(t, client, server.URL); len(state.Notifications) != 1 {
 		t.Fatalf("rejected ack changed notifications: %#v", state.Notifications)
 	}
-	// The tokenless compatibility path is read-only: another mutating tool must
-	// be refused before it can create anything, while a read-only tool still
-	// answers without a token.
+	// Read-only tools accept any identity; mutating and approval-creating tools
+	// require the pet Task's capability. Neither a tokenless call nor a valid
+	// capability issued for another Task may change records.
 	approvalsBefore, err := appService.PetApprovals(ctx, 50)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rejectText, rejected = petMCPToolCall(t, client, server.URL, "", "pet_submit_idea",
-		map[string]any{"title": "tokenless probe", "summary": "must not be created", "reason": "regression test"})
-	if !rejected || !strings.Contains(rejectText, "只读工具") {
-		t.Fatalf("tokenless mutating call text=%q rejected=%v", rejectText, rejected)
+	for _, tc := range []struct{ label, token, want string }{
+		{"no token", "", "只读工具"},
+		{"foreign task", otherToken, "宠物 Task"},
+	} {
+		rejectText, rejected = petMCPToolCall(t, client, server.URL, tc.token, "pet_submit_idea",
+			map[string]any{"title": "denied probe", "summary": "must not be created", "reason": "regression test"})
+		if !rejected || !strings.Contains(rejectText, tc.want) {
+			t.Fatalf("%s mutating call text=%q rejected=%v", tc.label, rejectText, rejected)
+		}
 	}
 	approvalsAfter, err := appService.PetApprovals(ctx, 50)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(approvalsAfter) != len(approvalsBefore) {
-		t.Fatalf("tokenless mutating call created approvals: before=%d after=%d", len(approvalsBefore), len(approvalsAfter))
+		t.Fatalf("rejected mutating calls created approvals: before=%d after=%d", len(approvalsBefore), len(approvalsAfter))
 	}
 	if text := petMCPToolText(t, client, server.URL, "aha_pet_work_state", map[string]any{}); !strings.Contains(text, notification.ID) {
 		t.Fatalf("tokenless read-only call failed: %s", text)
+	}
+	if text := petMCPToolTextForToken(t, client, server.URL, otherToken, "aha_pet_work_state", map[string]any{}); !strings.Contains(text, notification.ID) {
+		t.Fatalf("foreign-task read-only call failed: %s", text)
+	}
+	if status := petMCPToolHTTPStatus(t, client, server.URL, "not-a-valid-capability", "aha_pet_work_state", map[string]any{}); status != http.StatusUnauthorized {
+		t.Fatalf("invalid bearer status=%d want=%d", status, http.StatusUnauthorized)
 	}
 	ackText := petMCPToolTextForToken(t, client, server.URL, petToken, "aha_ack_knowledge_sync_notification",
 		map[string]any{"ids": []string{notification.ID}})
