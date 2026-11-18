@@ -229,6 +229,9 @@ func TestDesktopStreamCreditBoundAndIndependentHTTPInput(t *testing.T) {
 }
 
 func TestDesktopStreamRevokedOnLogoutStopAndControlChange(t *testing.T) {
+	if testing.Short() {
+		t.Skip("four real websocket revocation round-trips")
+	}
 	for _, operation := range []string{"logout", "stop", "transfer", "terminal"} {
 		t.Run(operation, func(t *testing.T) {
 			h := newStreamHarness(t)
@@ -271,6 +274,9 @@ func TestDesktopStreamRevokedOnLogoutStopAndControlChange(t *testing.T) {
 }
 
 func TestDesktopStreamAuthExpiryClosesIdleConnection(t *testing.T) {
+	if testing.Short() {
+		t.Skip("waits for a real auth TTL")
+	}
 	h := newStreamHarness(t, 2*time.Second)
 	c := h.connect(t, h.server.URL)
 	startStream(t, h, c, "v")
