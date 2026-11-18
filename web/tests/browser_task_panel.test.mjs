@@ -42,6 +42,11 @@ test("bookmark folder labels keep only the first level below the Edge bar root",
   assert.equal(panel.browserBookmarkFolderLabel(" 收藏夹栏 ／ Docs / HUALAI "), "Docs");
   assert.equal(panel.browserBookmarkFolderLabel("Bar"), "Bar");
   assert.equal(panel.browserBookmarkFolderLabel(""), "");
+  // A bare root path is the bar itself, not a folder.
+  assert.equal(panel.browserBookmarkFolderLabel("收藏夹栏"), "");
+  assert.equal(panel.browserBookmarkFolderLabel("收藏夹"), "");
+  assert.equal(panel.browserBookmarkFolderLabel("Favorites"), "");
+  assert.equal(panel.browserBookmarkFolderLabel("favourites/"), "");
 });
 
 test("bookmarks group under one first-level folder without losing subfolder entries", () => {
@@ -51,12 +56,13 @@ test("bookmarks group under one first-level folder without losing subfolder entr
     {title: "蓝牙", url: "https://bluetooth.example/", folder: "收藏夹栏/Docs/蓝牙"},
     {title: "Bar", url: "https://bar.example/", folder: "收藏夹/Bar"},
     {title: "未归档", url: "https://unfiled.example/", folder: ""},
+    {title: "根目录直达", url: "https://root.example/", folder: "收藏夹栏"},
   ]);
-  assert.deepEqual([...grouped.keys()], ["Docs", "Bar", ""]);
-  assert.equal(grouped.get("Docs").length, 3);
-  assert.equal(grouped.get("Docs").filter(bookmark => bookmark.title === "文档中心").length, 1);
-  assert.equal(grouped.get("Bar").length, 1);
-  assert.equal(grouped.get("").length, 1);
+  assert.deepEqual([...grouped].map(([folder, items]) => [folder, items.map(bookmark => bookmark.title)]), [
+    ["Docs", ["文档中心", "HUALAI", "蓝牙"]],
+    ["Bar", ["Bar"]],
+    ["", ["未归档", "根目录直达"]],
+  ]);
 });
 
 test("tab selection follows a single real-window switch and leaves ambiguous windows alone", () => {
