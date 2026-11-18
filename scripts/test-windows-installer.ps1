@@ -323,10 +323,21 @@ foreach ($contract in @(
     "node_modules/.bin", "node_modules/.package-lock.json",
     "SHASUMS256.txt", "22.23.5", "win-x64.zip", "node.exe", "LICENSE",
     "4a191082e9706866830379d577d2cc8a50c776fcd9436a8d061b063ed0d9a0e3",
-    "247e9693d316da9857e44990e5e11709f596f18112251b8026ec6eed80bdf38a"
+    "247e9693d316da9857e44990e5e11709f596f18112251b8026ec6eed80bdf38a",
+    "extract-zip-member.sh"
 )) {
     if (-not $runtimeStager.Contains($contract)) {
         throw "Windows runtime staging contract is missing: $contract"
+    }
+}
+# Git for Windows can put GNU tar (which cannot read zip) before a usable
+# bsdtar on PATH, so the helper must probe every unzip/bsdtar/tar candidate
+# rather than trusting the first tar. Go tests cover the behavior with fake
+# tools; these checks keep the helper from being simplified back to one tar.
+$zipExtractor = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo "scripts\extract-zip-member.sh")
+foreach ($contract in @("bsdtar", "-xOf", "No ZIP extractor", "install unzip or bsdtar")) {
+    if (-not $zipExtractor.Contains($contract)) {
+        throw "ZIP extraction helper contract is missing: $contract"
     }
 }
 $manifestGenerator = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo "scripts\release-manifest.mjs")

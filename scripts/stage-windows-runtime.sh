@@ -38,7 +38,8 @@ Environment overrides:
 EOF
 }
 
-repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+repo_dir="$(cd -- "$script_dir/.." && pwd -P)"
 output_dir=""
 
 while (($# > 0)); do
@@ -76,6 +77,11 @@ output_dir="$(cd -- "$output_dir" && pwd -P)"
 
 command -v sha256sum >/dev/null 2>&1 || { printf 'sha256sum was not found.\n' >&2; exit 1; }
 command -v curl >/dev/null 2>&1 || { printf 'curl is required to verify the bundled Node runtime.\n' >&2; exit 1; }
+zip_extract="$script_dir/extract-zip-member.sh"
+[[ -f "$zip_extract" ]] || {
+  printf 'ZIP extraction helper is missing: %s\n' "$zip_extract" >&2
+  exit 1
+}
 
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/aha2-runtime.XXXXXX")"
 cleanup() {
@@ -146,19 +152,12 @@ verify_node_signature() {
   return 2
 }
 
-# Git for Windows does not always ship unzip, but its tar is bsdtar and can
-# read a zip archive. Every Linux build host has unzip, which is tried first
-# so a GNU tar on PATH is never asked to open a zip.
+# Git for Windows does not always ship unzip, and its PATH can put GNU tar
+# ahead of a usable bsdtar. The helper probes every unzip/bsdtar/tar candidate
+# and fails with a clear message when none can read the archive.
 extract_zip_member() {
   local archive="$1" member="$2" dest="$3"
-  if command -v unzip >/dev/null 2>&1; then
-    unzip -p "$archive" "$member" > "$dest"
-  elif tar -tf "$archive" >/dev/null 2>&1; then
-    tar -xOf "$archive" "$member" > "$dest"
-  else
-    printf 'unzip is required to stage the bundled Node runtime.\n' >&2
-    exit 1
-  fi
+  bash "$zip_extract" "$archive" "$member" > "$dest"
   [[ -s "$dest" ]] || {
     printf 'Node runtime archive member is missing: %s\n' "$member" >&2
     exit 1
