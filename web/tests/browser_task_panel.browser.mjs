@@ -46,6 +46,7 @@ const browserState = host => ({
 });
 const bookmarks = [
   {title: "Mail", url: "https://mail.example/", folder: "Bar"},
+  {title: "Wiki", url: "https://wiki.example/home", folder: "收藏夹/Wiki"},
   {title: "文档中心", url: "https://docs.example/very/long/path?token=abcdefghijklmnop&redirect=https%3A%2F%2Fexample.com", folder: ""},
   {title: "发布面板", url: "https://release.example/deploy?environment=production&region=ap-east-1", folder: ""},
   {title: "监控", url: "https://monitor.example/dashboard?range=last-24h&filters=service%3Dapi", folder: ""},
@@ -57,6 +58,7 @@ const bootstrap = `
 const json = (value, status = 200) => new Response(JSON.stringify(value), {status, headers: {"Content-Type": "application/json"}});
 window.__frames = 0;
 window.__hostAvailable = true;
+window.__hostOnlyDown = false;
 window.__staleError = false;
 window.__staleErrors = 0;
 window.__staleErrorAt = 0;
@@ -75,12 +77,31 @@ window.__granted = 0;
 window.__openTargets = 0;
 window.__openDelay = 0;
 window.__grantDeletes = 0;
+// Owner actions performed in the real browser window, outside the panel.
+window.__ownerTabs = [];
+window.__ownerClosed = [];
+window.__ownerNav = {};
+window.__ownerActive = "";
+window.__syncRequests = 0;
+window.__frameErrorTab = "";
+window.__frameErrorStatus = 404;
+window.__frameClosed = [];
+window.__vis = "visible";
 const HOST_UP = {available: true, host_id: "local", version: "0.1.0", platform: "win32", edge_available: true};
 const HOST_DOWN = {available: false, host_id: "local", edge_available: false, code: "browser_host_start_failed", error: "浏览器宿主自动启动失败（端口被占用或依赖缺失），请查看 AHA2 日志"};
 const STATE_UP = ${JSON.stringify(browserState({available: true, host_id: "local", version: "0.1.0", platform: "win32", edge_available: true}))};
 const STATE_DOWN = ${JSON.stringify({...browserState({available: false, host_id: "local", edge_available: false, code: "browser_host_start_failed", error: "浏览器宿主自动启动失败（端口被占用或依赖缺失），请查看 AHA2 日志"}), grants: [], tabs: []})};
 const GRANT = ${JSON.stringify(grant)};
 const BOOKMARKS = ${JSON.stringify(bookmarks)};
+// Pages the Owner opened, closed, navigated or activated in the real browser
+// window appear here without going through the panel's own APIs.
+const ownerView = tabs => {
+  let list = tabs.concat(window.__ownerTabs).filter(tab => !window.__ownerClosed.includes(tab.id)
+    && !window.__frameClosed.includes(tab.id));
+  if (window.__ownerActive) list = list.map(tab => ({...tab, active: tab.id === window.__ownerActive}));
+  list = list.map(tab => window.__ownerNav[tab.id] ? {...tab, ...window.__ownerNav[tab.id]} : tab);
+  return list;
+};
 const currentState = () => {
   if (window.__released || (window.__mode === "detached" && !window.__attached)) {
     return {...STATE_UP, grants: [], tabs: []};
@@ -91,8 +112,12 @@ const currentState = () => {
     }))};
   }
   if (!window.__hostAvailable) return STATE_DOWN;
+  if (window.__hostOnlyDown) {
+    const base = {...STATE_UP, host: HOST_DOWN};
+    return {...base, tabs: ownerView(base.tabs.concat(window.__openedTabs))};
+  }
   const base = window.__mode === "empty" ? {...STATE_UP, tabs: []} : {...STATE_UP};
-  return {...base, tabs: base.tabs.concat(window.__openedTabs)};
+  return {...base, tabs: ownerView(base.tabs.concat(window.__openedTabs))};
 };
 const newTab = (url, title) => {
   window.__opened += 1;
@@ -103,7 +128,10 @@ window.fetch = async (input, init = {}) => {
   const url = new URL(typeof input === "string" ? input : input.url, location.origin);
   const path = url.pathname;
   const method = String(init.method || "GET").toUpperCase();
-  if (path === "/api/v1/tasks/task-1/browser") return json({ok: true, browser: currentState()});
+  if (path === "/api/v1/tasks/task-1/browser") {
+    window.__syncRequests++;
+    return json({ok: true, browser: currentState()});
+  }
   if (path === "/api/v1/tasks/task-1/browser-sessions" && method === "POST") {
     window.__attached = true;
     window.__released = false;
@@ -142,6 +170,11 @@ window.fetch = async (input, init = {}) => {
     return json({ok: true});
   }
   if (/\\/tabs\\/[a-z0-9_]+\\/frame$/.test(path)) {
+    if (window.__frameErrorTab && path.includes(window.__frameErrorTab)) {
+      const failing = path.split("/").slice(-2)[0];
+      if (window.__frameErrorStatus === 404 || window.__frameErrorStatus === 410) window.__frameClosed.push(failing);
+      return json({error: {code: "browser_tab_not_found", message: "标签页已关闭"}}, window.__frameErrorStatus);
+    }
     if (window.__staleError && path.includes("browser_tab_1")) {
       window.__staleErrors++;
       await new Promise(resolve => setTimeout(resolve, 1200));
@@ -158,10 +191,11 @@ window.fetch = async (input, init = {}) => {
 window.EventSource = class { constructor() {} close() {} addEventListener() {} };
 `;
 
-const html = `<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="/styles.css"></head><body>
+const html = `<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="/styles.css">
+  <style>#desktop-tool{display:flex;flex-direction:column;height:780px;width:100%;}</style></head><body>
   <aside id="desktop-tool">
     <div id="desktop-browser-target"></div>
-    <div id="desktop-browser-control"></div>
+    <div id="desktop-browser-control" class="desktop-browser-main"></div>
   </aside>
   <script src="/fixture.js"></script><script type="module" src="/boot.js"></script>
 </body></html>`;
@@ -250,6 +284,21 @@ try {
   assert.equal(await main.locator("#desktop-browser-bookmarkbar").count(), 1);
   assert.equal(await main.locator(".desktop-browser-preview").count(), 1);
   assert.match(await main.locator("#desktop-browser-frame-status").innerText(), /实时画面/);
+  // No left "内置浏览器" column: the tab strip spans the panel and the preview
+  // takes the height left below the fixed bars instead of a 360px cap.
+  assert.equal(await page.locator("#desktop-browser-surface").count(), 0);
+  const fill = await page.evaluate(() => {
+    const panel = document.querySelector("#desktop-browser-control").getBoundingClientRect();
+    const tabs = document.querySelector("#desktop-browser-tabs").getBoundingClientRect();
+    const preview = document.querySelector(".desktop-browser-preview").getBoundingClientRect();
+    return {panelWidth: panel.width, tabsWidth: tabs.width, panelHeight: panel.height, previewHeight: preview.height};
+  });
+  assert.ok(fill.tabsWidth > fill.panelWidth * 0.8, `tabs must span the panel: ${JSON.stringify(fill)}`);
+  assert.ok(fill.previewHeight > fill.panelHeight * 0.5, `preview must fill the remaining height: ${JSON.stringify(fill)}`);
+  // The two status lines are one bar at the bottom of the preview.
+  const barText = await page.locator(".desktop-browser-statusbar").innerText();
+  assert.match(barText, /独占控制中/);
+  assert.match(barText, /实时画面/);
 
   // Edge order: tab strip, address bar, bookmark bar, preview.
   const order = await page.evaluate(() => {
@@ -282,8 +331,18 @@ try {
   await page.waitForSelector("[data-browser-bookmark-folder]");
   const bookmarkBar = page.locator("#desktop-browser-bookmarks");
   assert.equal(await page.locator("[data-browser-bookmark-folder='Bar']").count(), 1);
+  // A nested Edge folder arrives as "收藏夹/Wiki"; the repeated root is
+  // stripped from the visible label while the raw path stays the filter key.
+  assert.equal(await page.locator("[data-browser-bookmark-folder='收藏夹/Wiki'] .desktop-browser-bookmark-title").innerText(), "Wiki");
+  assert.equal(await page.locator("[data-browser-bookmark-folder='收藏夹/Wiki'] .icon").count(), 1);
   assert.match(await bookmarkBar.innerText(), /Mail|文档中心/);
-  assert.doesNotMatch(await bookmarkBar.innerText(), /token=|redirect=|environment=/);
+  assert.doesNotMatch(await bookmarkBar.innerText(), /token=|redirect=|environment=|收藏夹\//);
+  // One overflow entry only: the bar itself never scrolls horizontally.
+  assert.equal(await page.evaluate(() => getComputedStyle(document.querySelector("#desktop-browser-bookmarks")).overflowX), "hidden");
+  assert.equal(await page.evaluate(() => {
+    const items = document.querySelector("#desktop-browser-bookmarks");
+    return items.scrollWidth <= items.clientWidth + 1;
+  }), true);
   const barHeights = await page.evaluate(() => {
     const bar = document.querySelector("#desktop-browser-bookmarkbar").getBoundingClientRect();
     const preview = document.querySelector(".desktop-browser-preview").getBoundingClientRect();
@@ -431,6 +490,94 @@ try {
   await waitFor(page, () => window.__grantDeletes >= 1, {timeout: 5000});
   assert.equal(await page.evaluate(() => window.__released), true, "dispose must not cancel a requested release");
   await page.evaluate(() => { window.__openDelay = 0; });
+
+  // 11. While the panel is open, changes made in the real browser window are
+  // pulled in by the tab-sync timer: new page, switched page and navigation.
+  await reset(page, {__mode: "tabs", __hostAvailable: true, __staleError: false, __released: false,
+    __inUse: false, __transferred: false, __attached: true, __ownerTabs: [], __ownerClosed: [],
+    __ownerNav: {}, __ownerActive: "", __frameErrorTab: "", __frameClosed: [], __syncRequests: 0, __frames: 0, __granted: 0});
+  await page.waitForSelector("[data-browser-tab='browser_tab_1']", {timeout: 5000});
+  const syncBefore = await page.evaluate(() => window.__syncRequests);
+  await page.evaluate(() => window.__ownerTabs.push({id: "browser_tab_owner_3", session_id: "browser_session_1",
+    grant_id: "browser_grant_1", task_id: "task-1", url: "https://owner.example/new", title: "Owner 新页",
+    origin: "owner", active: false, created_at: new Date().toISOString(), updated_at: new Date().toISOString()}));
+  await page.waitForSelector("[data-browser-tab='browser_tab_owner_3']", {timeout: 8000});
+  assert.ok(await page.evaluate(() => window.__syncRequests) > syncBefore,
+    "the open panel must poll the tab list");
+
+  // The Owner switches to another page in the real window; the panel follows
+  // the single active page and restarts the preview on it.
+  await page.evaluate(() => { window.__ownerActive = "browser_tab_2"; });
+  await waitFor(page, () => document.querySelector("[data-browser-tab='browser_tab_2']")?.getAttribute("aria-pressed") === "true", {timeout: 8000});
+  const framesAfterOwnerSwitch = await page.evaluate(() => window.__frames);
+  await waitFor(page, count => window.__frames > count, {arg: framesAfterOwnerSwitch, timeout: 5000});
+
+  // Navigating inside that page updates its title and the address bar; the
+  // frame stream keeps going without a panel reload.
+  await page.evaluate(() => { window.__ownerNav["browser_tab_2"] = {url: "https://example.com/next", title: "下一页"}; });
+  await waitFor(page, () => document.querySelector("[data-browser-tab='browser_tab_2'] .desktop-browser-tab-title")?.textContent === "下一页"
+    && document.querySelector("#desktop-browser-url")?.value === "https://example.com/next", {timeout: 8000});
+
+  // Closing the page in the real window removes its tab and moves the preview
+  // to a remaining page.
+  await page.evaluate(() => { window.__ownerClosed.push("browser_tab_2"); });
+  await waitFor(page, () => !document.querySelector("[data-browser-tab='browser_tab_2']"), {timeout: 8000});
+  await waitFor(page, () => document.querySelector("[data-browser-tab='browser_tab_1']")?.getAttribute("aria-pressed") === "true", {timeout: 8000});
+
+  // A host outage clears the bitmap; once the host is reachable again the sync
+  // timer restarts the frame loop instead of leaving a frozen picture.
+  await page.evaluate(() => { window.__hostOnlyDown = true; });
+  await waitFor(page, () => document.querySelector("#desktop-browser-frame").hidden
+    && /浏览器宿主不可用/.test(document.querySelector("#desktop-browser-frame-status").textContent), {timeout: 8000});
+  await page.evaluate(() => { window.__hostOnlyDown = false; });
+  await page.waitForSelector("#desktop-browser-frame:not([hidden])", {timeout: 8000});
+  await page.evaluate(() => window.__panel.dispose());
+
+  // 12. A terminal frame answer (404) clears the bitmap, drops the closed tab
+  // and never leaves the last screenshot on screen. Closing every page leaves
+  // an explicit empty state instead of a frozen preview.
+  await reset(page, {__mode: "tabs", __hostAvailable: true, __staleError: false, __released: false,
+    __inUse: false, __transferred: false, __attached: true, __ownerTabs: [], __ownerClosed: ["browser_tab_1", "browser_tab_2"],
+    __ownerNav: {}, __ownerActive: "", __frameErrorTab: "browser_tab_", __frameErrorStatus: 404, __frameClosed: [], __syncRequests: 0, __frames: 0, __granted: 0});
+  await waitFor(page, () => !document.querySelector("[data-browser-tab]"), {timeout: 8000});
+  assert.equal(await page.evaluate(() => document.querySelector("#desktop-browser-frame").hidden), true);
+  assert.equal(await page.evaluate(() => document.querySelector("#desktop-browser-frame").getAttribute("src")), null);
+  assert.match(await page.locator("#desktop-browser-frame-status").innerText(), /没有打开的页面|画面暂不可用/);
+  await page.evaluate(() => window.__panel.dispose());
+
+  // 13. Hiding AHA Web pauses the stream and drops the bitmap; becoming
+  // visible again immediately re-syncs tabs and restarts the preview.
+  await reset(page, {__mode: "tabs", __hostAvailable: true, __staleError: false, __released: false,
+    __inUse: false, __transferred: false, __attached: true, __ownerTabs: [], __ownerClosed: [],
+    __ownerNav: {}, __ownerActive: "", __frameErrorTab: "", __frameClosed: [], __syncRequests: 0, __frames: 0, __granted: 0});
+  await page.waitForSelector("#desktop-browser-frame:not([hidden])", {timeout: 5000});
+  await page.evaluate(() => {
+    window.__vis = "visible";
+    Object.defineProperty(document, "visibilityState", {configurable: true, get: () => window.__vis});
+  });
+  await page.evaluate(() => { window.__vis = "hidden"; document.dispatchEvent(new Event("visibilitychange")); });
+  await waitFor(page, () => document.querySelector("#desktop-browser-frame").hidden);
+  await page.waitForTimeout(200);
+  const hiddenFrames = await page.evaluate(() => window.__frames);
+  const hiddenSyncs = await page.evaluate(() => window.__syncRequests);
+  await page.evaluate(() => window.__ownerTabs.push({id: "browser_tab_owner_hidden", session_id: "browser_session_1",
+    grant_id: "browser_grant_1", task_id: "task-1", url: "https://owner.example/hidden", title: "隐藏时新开",
+    origin: "owner", active: false, created_at: new Date().toISOString(), updated_at: new Date().toISOString()}));
+  // Long enough for at least one 3s sync tick: neither frames nor tab reads
+  // may run while the page is hidden.
+  await page.waitForTimeout(3300);
+  assert.equal(await page.locator("[data-browser-tab='browser_tab_owner_hidden']").count(), 0,
+    "hidden pages must not keep syncing in the background");
+  assert.equal(await page.evaluate(() => window.__syncRequests), hiddenSyncs,
+    "the tab-sync timer must pause while hidden");
+  assert.equal(await page.evaluate(() => window.__frames), hiddenFrames,
+    "the frame loop must pause while hidden");
+  await page.evaluate(() => { window.__vis = "visible"; document.dispatchEvent(new Event("visibilitychange")); });
+  await page.waitForSelector("[data-browser-tab='browser_tab_owner_hidden']", {timeout: 8000});
+  await page.waitForSelector("#desktop-browser-frame:not([hidden])", {timeout: 5000});
+  await waitFor(page, count => window.__frames > count, {arg: hiddenFrames, timeout: 5000});
+  await page.evaluate(() => { delete document.visibilityState; window.__vis = "visible"; });
+  await page.evaluate(() => window.__panel.dispose());
 
   // The start page must load under the production CSP as a plain http(s) page.
   const startPage = await browser.newPage();

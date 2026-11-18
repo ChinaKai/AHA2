@@ -889,8 +889,6 @@ body.task-tool-resizing { cursor: col-resize; user-select: none; }
 .browser-profile-dialog form { display: grid; gap: 12px; }
 .desktop-browser-target { position: relative; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 #desktop-display-target { display: grid; gap: 10px; }
-.desktop-browser-surface { display: grid; gap: 8px; padding: 14px; border: 1px solid var(--line); border-radius: 6px; background: #f8fafc; }
-.desktop-browser-surface p { margin: 0; }
 /* The targets popover keeps one compact row: profile picker, refresh, and
    exactly one of attach/transfer/switch. The browser surfaces live in the
    main panel below. */
@@ -914,9 +912,9 @@ body.task-tool-resizing { cursor: col-resize; user-select: none; }
 .desktop-browser-empty-state .desktop-browser-cta { align-self: center; margin-top: 2px; }
 /* The main panel is the browser: Edge-style tab strip on top, then address
    bar, bookmark bar and the read-only preview. */
-.desktop-browser-main { flex: 1 1 0; min-width: 0; min-height: 0; overflow-x: hidden; overflow-y: auto; padding: 8px; border-bottom: 1px solid var(--line); background: #f3f5f7; }
+.desktop-browser-main { display: flex; flex: 1 1 0; flex-direction: column; min-width: 0; min-height: 0; overflow-x: hidden; overflow-y: auto; padding: 8px; border-bottom: 1px solid var(--line); background: #f3f5f7; }
 .desktop-browser-main[hidden] { display: none; }
-.desktop-browser-shell { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.desktop-browser-shell { display: flex; flex: 1 1 0; flex-direction: column; gap: 6px; min-width: 0; min-height: 0; }
 .desktop-browser-tabstrip { display: flex; align-items: stretch; gap: 4px; min-width: 0; }
 .desktop-browser-tabs { flex: 1 1 0; display: flex; gap: 4px; min-width: 0; margin: 0; padding: 0 0 2px; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; list-style: none; scroll-snap-type: x proximity; }
 .desktop-browser-tabs li { flex: 0 0 auto; min-width: 0; padding: 0; scroll-snap-align: start; }
@@ -938,7 +936,10 @@ body.task-tool-resizing { cursor: col-resize; user-select: none; }
 /* One horizontal bookmark bar; long URLs stay in title attributes and folder
    chips open a menu instead of stacking full addresses vertically. */
 .desktop-browser-bookmarkbar { position: relative; display: flex; align-items: center; gap: 4px; min-width: 0; padding: 3px 4px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
-.desktop-browser-bookmark-items { flex: 1 1 0; display: flex; align-items: center; gap: 4px; min-width: 0; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; white-space: nowrap; }
+/* No horizontal scrolling: chips that do not fit are hidden by script and the
+   "更多" menu is the only overflow entry. */
+.desktop-browser-bookmark-items { flex: 1 1 0; display: flex; align-items: center; gap: 4px; min-width: 0; overflow: hidden; white-space: nowrap; }
+.desktop-browser-bookmark-items [hidden] { display: none; }
 .desktop-browser-bookmark { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 4px; max-width: 150px; min-height: 26px; padding: 2px 6px; border: 0; border-radius: 5px; background: transparent; color: inherit; font-size: 12px; }
 .desktop-browser-bookmark:hover { background: var(--color-surface-muted); }
 .desktop-browser-bookmark-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -957,12 +958,22 @@ body.task-tool-resizing { cursor: col-resize; user-select: none; }
 .desktop-browser-bookmark-menu li button:hover { background: var(--color-surface-muted); }
 .desktop-browser-bookmark-menu li button span { min-width: 0; overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .desktop-browser-bookmark-menu li button small { flex: 0 0 auto; max-width: 45%; overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-.desktop-browser-bookmark-menu-folder { padding: 4px 6px 1px; color: var(--muted); font-size: 10px; font-weight: 700; }
+.desktop-browser-bookmark-menu-folder { display: flex; align-items: center; gap: 4px; padding: 4px 6px 1px; color: var(--muted); font-size: 10px; font-weight: 700; }
+.desktop-browser-bookmark-menu-folder .icon { width: 12px; height: 12px; }
 .desktop-browser-bookmark-menu-empty { padding: 6px; color: var(--muted); font-size: 11px; }
-.desktop-browser-preview { flex: 0 0 auto; display: grid; gap: 6px; margin: 0; }
-.desktop-browser-preview img { display: block; width: 100%; max-height: min(48vh, 360px); border: 1px solid var(--line); border-radius: 6px; background: #0f172a; object-fit: contain; }
-.desktop-browser-preview img[hidden] { display: none; }
-.desktop-browser-preview p { margin: 0; }
+/* The preview is the panel: it takes every pixel left below the tab strip,
+   address and bookmark bars instead of stopping at a fixed 360px cap. */
+.desktop-browser-preview { flex: 1 1 0; display: flex; flex-direction: column; gap: 6px; min-height: 0; margin: 0; }
+.desktop-browser-frame-stage { position: relative; flex: 1 1 0; min-height: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 6px; background: #0f172a; }
+.desktop-browser-frame-stage img { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: contain; }
+.desktop-browser-frame-stage img[hidden] { display: none; }
+.desktop-browser-frame-empty { position: absolute; inset: 0; display: grid; place-items: center; margin: 0; padding: 12px; color: #cbd5e1; font-size: 12px; line-height: 1.5; text-align: center; }
+.desktop-browser-frame-empty[hidden] { display: none; }
+.desktop-browser-statusbar { display: flex; flex: 0 0 auto; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 2px 12px; min-width: 0; padding: 5px 7px; border: 1px solid var(--line); border-radius: 6px; background: #fff; font-size: 11px; line-height: 1.4; }
+.desktop-browser-control-status { min-width: 0; overflow: hidden; color: var(--color-text); font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.desktop-browser-control-status[data-tone="warning"] { color: var(--color-warning-ink); }
+.desktop-browser-control-status[data-tone="error"] { color: var(--color-danger-ink); }
+.desktop-browser-frame-status { min-width: 0; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
 /* Narrow panels: the profile picker takes its own row so the control buttons
    stay reachable instead of being squeezed off the edge. */
 @container shared-desktop (max-width: 380px) {
@@ -973,8 +984,12 @@ body.task-tool-resizing { cursor: col-resize; user-select: none; }
 .desktop-tool.browser-mode #desktop-picture-controls,
 .desktop-tool.browser-mode .desktop-observation,
 .desktop-tool.browser-mode #desktop-input { display: none; }
-.desktop-tool.browser-mode #desktop-browser-surface { padding: 8px 10px; }
-.desktop-tool.browser-mode #desktop-browser-surface .field-help { display: none; }
+/* Browser mode has no shared display window: the focus button and the
+   window-element inspector are irrelevant. Hiding them also leaves exactly one
+   close affordance next to the release-lease button. */
+.desktop-tool.browser-mode #desktop-focus,
+.desktop-tool.browser-mode [data-desktop-popover="operations"],
+.desktop-tool.browser-mode #desktop-operations-popover { display: none; }
 .hardware-console { display: grid; grid-template-rows: 46px minmax(0,1fr) auto auto; min-width: 0; min-height: 0; background: #11151b; }
 .hardware-console-toolbar { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 6px 8px; border-bottom: 1px solid #303743; background: #f8fafc; }
 .hardware-transport-switch { display: flex; overflow: hidden; border: 1px solid #cfd5dc; border-radius: 5px; }
