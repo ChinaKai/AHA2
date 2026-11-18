@@ -1,6 +1,8 @@
-// Lazy chunk for the Task shared-control "内置浏览器" mode. Keeping the
-// profile picker, attach flow, authorized tab list and read-only frame preview
-// here avoids growing the first-screen bundle for a panel most Tasks never open.
+// Lazy chunk for the Task shared-control "内置浏览器" mode. The targets
+// popover only renders the compact profile/attach form (`selector`); the tab
+// strip, address bar, bookmark bar and read-only preview live in the main
+// panel (`container`), so picking a target never grows the popover into a
+// second browser window.
 import {api} from "./api.js";
 import {icon} from "./icons.js";
 import type {BrowserBookmark, BrowserHostView, BrowserProfile, BrowserSession, BrowserTab, BrowserTaskGrant} from "./types.js";
@@ -8,10 +10,22 @@ import type {BrowserBookmark, BrowserHostView, BrowserProfile, BrowserSession, B
 type Notice = (type: "error" | "notice", message: string) => void;
 
 export interface BrowserTaskPanelOptions {
+  // Main-panel control surface: tab strip, address bar, bookmark bar, preview.
   container: HTMLElement;
+  // Compact "共享目标" popover surface: profile picker and one primary action.
+  selector?: HTMLElement | null;
   taskID: string;
   notify: Notice;
   onChange: () => void;
+  onOpenTargets?: () => void;
+  onGranted?: () => void;
+}
+
+export interface BrowserTaskPanelHandle {
+  dispose: () => void;
+  // Returns true when a live grant existed and a release has started.
+  release: () => boolean;
+  granted: () => boolean;
 }
 
 interface PanelState {
@@ -24,13 +38,17 @@ interface PanelState {
   selectedTabID: string;
   loading: boolean;
   binding: boolean;
-  bookmarksOpen: boolean;
   bookmarksLoading: boolean;
+  bookmarksLoaded: boolean;
+  bookmarksError: string;
+  bookmarksMenu: "" | "all" | "folder";
+  bookmarksMenuFolder: string;
   inUseProfileID: string;
   urlDraft: string;
   error: string;
   frameError: string;
   frameLive: boolean;
+  startPageGrantID: string;
 }
 
 // 300ms keeps the preview at ~3.3 fps; an unchanged page backs off to ~0.8 fps
@@ -40,6 +58,11 @@ export const BROWSER_FRAME_MAX_DELAY_MS = 1200;
 const httpStatusForbidden = 403;
 const httpStatusNotFound = 404;
 const httpStatusConflict = 409;
+const searchEngine = "https://www.bing.com/search";
+// AHA serves this page itself (see internal/httpapi/web.go). The host only
+// accepts http(s) URLs, so the new-tab page must never be about:blank or an
+// edge:// surface even though Edge can display those.
+export const BROWSER_START_PAGE_PATH = "/browser-newtab";
 
 // Comparing a small sample is enough to tell unchanged previews apart without
 // decoding the JPEG or keeping the full previous frame in memory.
@@ -59,6 +82,36 @@ export function nextBrowserFrameDelay(previous: string, current: string, delay: 
   if (!previous) return BROWSER_FRAME_MIN_DELAY_MS;
   if (previous === current) return Math.min(BROWSER_FRAME_MAX_DELAY_MS, Math.round(bounded * 1.7));
   return BROWSER_FRAME_MIN_DELAY_MS;
+}
+
+export function browserStartPageURL(origin: string): string {
+  try {
+    return new URL(BROWSER_START_PAGE_PATH, origin || "http://127.0.0.1").toString();
+  } catch {
+    return "http://127.0.0.1/browser-newtab";
+  }
+}
+
+// Edge's address bar doubles as a search box. A plain word becomes a search;
+// a host-like token gets https://; only http(s) reaches the host API.
+export function browserAddressTarget(raw: string): string {
+  const value = String(raw || "").trim();
+  if (!value) return "";
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") return parsed.toString();
+  } catch {
+    // Not an absolute URL; fall through to host-like/search handling.
+  }
+  if (!/\s/.test(value) && /^[^\s/:]+\.[^\s/:]+/.test(value)) {
+    try {
+      const parsed = new URL(`https://${value}`);
+      if (parsed.protocol === "https:" && parsed.hostname.includes(".")) return parsed.toString();
+    } catch {
+      // Fall through to search.
+    }
+  }
+  return `${searchEngine}?q=${encodeURIComponent(value)}`;
 }
 
 function escapeHTML(value: unknown): string {
@@ -84,6 +137,7 @@ function profileOptions(profiles: BrowserProfile[], selectedID: string): string 
 
 function statusText(state: PanelState, session: BrowserSession | null): string {
   if (state.error) return state.error;
+  if (state.loading && !state.host) return "正在读取浏览器状态…";
   if (state.host && !state.host.available) {
     if (state.host.code === "browser_host_starting") return "浏览器宿主正在启动，请稍候…";
     return `浏览器宿主不可用：${state.host.error || state.host.code || "请查看 AHA2 启动日志"}`;
@@ -103,6 +157,7 @@ function statusText(state: PanelState, session: BrowserSession | null): string {
 
 function statusTone(state: PanelState, session: BrowserSession | null): "ok" | "warning" | "error" | "muted" {
   if (state.error || (state.host && !state.host.available)) return "error";
+  if (state.loading && !state.host) return "muted";
   if (state.host && !state.host.edge_available) return "warning";
   if (!state.profiles.length) return "warning";
   if (state.grant) return session?.error || session?.host_reachable === false ? "warning" : "ok";
@@ -120,12 +175,76 @@ function tabHost(url: string): string {
   }
 }
 
-export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): () => void {
-  const {container, taskID, notify, onChange} = options;
+// Local, request-free favicon stand-in: loading the site's own favicon from the
+// AHA origin would leak every visited host before the Owner acts on the page.
+function faviconMark(url: string, className: string): string {
+  const host = tabHost(url).replace(/^www\./i, "");
+  const letter = (host.match(/[a-z0-9]/i)?.[0] || "?").toUpperCase();
+  return `<span class="${className}" aria-hidden="true">${escapeHTML(letter)}</span>`;
+}
+
+function groupBookmarks(bookmarks: BrowserBookmark[]): Map<string, BrowserBookmark[]> {
+  const groups = new Map<string, BrowserBookmark[]>();
+  for (const bookmark of bookmarks) {
+    const folder = bookmark.folder || "";
+    const items = groups.get(folder) || [];
+    items.push(bookmark);
+    groups.set(folder, items);
+  }
+  return groups;
+}
+
+function bookmarkChip(bookmark: BrowserBookmark): string {
+  const title = bookmark.title || tabHost(bookmark.url);
+  return `<button type="button" class="desktop-browser-bookmark" data-browser-bookmark="${escapeHTML(bookmark.url)}" title="${escapeHTML(bookmark.url)}">
+    ${faviconMark(bookmark.url, "desktop-browser-bookmark-favicon")}
+    <span class="desktop-browser-bookmark-title">${escapeHTML(title)}</span>
+  </button>`;
+}
+
+// The bar is a single horizontal row. Bookmarks with a folder collapse into a
+// folder chip; unfiled bookmarks stay as chips. Neither renders a full URL.
+function bookmarkBarHTML(bookmarks: BrowserBookmark[], loading: boolean, error: string): string {
+  if (loading) return '<span class="desktop-browser-bookmark-empty" role="status">正在读取收藏夹…</span>';
+  if (error) return `<span class="desktop-browser-bookmark-empty" role="status">收藏夹不可用：${escapeHTML(error)}</span>`;
+  if (!bookmarks.length) return '<span class="desktop-browser-bookmark-empty">收藏夹为空</span>';
+  const parts: string[] = [];
+  for (const [folder, items] of groupBookmarks(bookmarks)) {
+    if (!folder) {
+      parts.push(...items.map(bookmarkChip));
+      continue;
+    }
+    parts.push(`<button type="button" class="desktop-browser-bookmark desktop-browser-bookmark-folder" data-browser-bookmark-folder="${escapeHTML(folder)}" title="${escapeHTML(folder)}">
+      ${icon("folder")}<span class="desktop-browser-bookmark-title">${escapeHTML(folder)}</span>
+    </button>`);
+  }
+  return parts.join("");
+}
+
+function bookmarkMenuHTML(state: PanelState): string {
+  if (!state.bookmarksMenu) return "";
+  const all = state.bookmarksMenu === "all";
+  const visible = all
+    ? state.bookmarks
+    : state.bookmarks.filter(bookmark => (bookmark.folder || "") === state.bookmarksMenuFolder);
+  const heading = all ? "全部收藏" : state.bookmarksMenuFolder;
+  const items = visible.length
+    ? [...groupBookmarks(visible)].map(([folder, group]) => `${folder ? `<li class="desktop-browser-bookmark-menu-folder">${escapeHTML(folder)}</li>` : ""}
+      ${group.map(bookmark => `<li><button type="button" data-browser-bookmark="${escapeHTML(bookmark.url)}" title="${escapeHTML(bookmark.url)}"><span>${escapeHTML(bookmark.title || tabHost(bookmark.url))}</span><small>${escapeHTML(tabHost(bookmark.url))}</small></button></li>`).join("")}`).join("")
+    : '<li class="desktop-browser-bookmark-menu-empty">收藏夹为空</li>';
+  return `<div id="desktop-browser-bookmarks-menu" class="desktop-browser-bookmark-menu" role="menu" aria-label="${escapeHTML(heading)}">
+    <div class="desktop-browser-bookmark-menu-head"><strong>${escapeHTML(heading)}</strong><button type="button" id="desktop-browser-bookmarks-menu-close" class="icon-button" title="关闭收藏菜单" aria-label="关闭收藏菜单">${icon("close")}</button></div>
+    <ul>${items}</ul>
+  </div>`;
+}
+
+export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): BrowserTaskPanelHandle {
+  const {container, selector = null, taskID, notify, onChange, onOpenTargets, onGranted} = options;
   const state: PanelState = {
     profiles: [], host: null, grant: null, tabs: [], bookmarks: [], profileID: "", selectedTabID: "",
-    loading: true, binding: false, bookmarksOpen: false, bookmarksLoading: false, inUseProfileID: "",
-    urlDraft: "", error: "", frameError: "", frameLive: false,
+    loading: true, binding: false, bookmarksLoading: false, bookmarksLoaded: false, bookmarksError: "",
+    bookmarksMenu: "", bookmarksMenuFolder: "", inUseProfileID: "", urlDraft: "", error: "",
+    frameError: "", frameLive: false, startPageGrantID: "",
   };
 
   let disposed = false;
@@ -135,19 +254,21 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): () => v
   let frameSignature = "";
   let frameDelay = BROWSER_FRAME_MIN_DELAY_MS;
   let streamGeneration = 0;
+  let bookmarkRequest = 0;
+  let releaseTimer = 0;
+  const painted = new WeakMap<HTMLElement, string>();
 
   const current = (): boolean => container.isConnected && Boolean(container.closest("#desktop-tool"));
   const selectedTab = (): BrowserTab | null =>
     state.tabs.find(tab => tab.id === state.selectedTabID) || null;
+  const selectorTarget = (): HTMLElement | null => selector && selector.isConnected ? selector : null;
 
   const frameStatusText = (): string => {
     if (!state.grant) return "先选择 Profile 并获取独占控制，之后可查看并操作全部页面";
     if (state.binding) return "正在处理浏览器操作…";
     if (state.host && !state.host.available) return "浏览器宿主不可用，无法获取画面";
     if (state.frameError) return `画面暂不可用：${state.frameError}`;
-    if (!state.tabs.length) {
-      return "当前浏览器窗口还没有网页；可以在这里打开页面，或从收藏夹打开。";
-    }
+    if (!state.tabs.length) return "当前浏览器还没有可用网页，正在准备开始页…";
     if (!selectedTab()) return "选择页面后显示画面";
     if (!state.frameLive) return "正在获取画面…";
     return "实时画面 · 只读（不会转发点击或输入）";
@@ -165,122 +286,61 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): () => v
 
   const syncShell = (session: BrowserSession | null, profileName: string): void => {
     const status = statusText(state, session);
-    container.dataset.status = status;
-    container.dataset.profile = profileName;
+    const shell = selectorTarget() || container;
+    shell.dataset.status = status;
+    shell.dataset.profile = profileName;
+    shell.dataset.granted = String(Boolean(state.grant));
+    container.dataset.granted = String(Boolean(state.grant));
     const surfaceStatus = document.querySelector<HTMLElement>("#desktop-browser-surface-status");
     if (surfaceStatus) surfaceStatus.textContent = status;
     onChange();
   };
 
-  const paint = (): void => {
-    if (!current()) return;
-    const session = state.grant?.session || state.profiles.find(item => item.id === state.profileID)?.session || null;
-    const selectedProfile = state.profiles.find(item => item.id === state.profileID);
-    const tabs = state.tabs.length
-      ? state.tabs.map(tab => {
-        const selected = tab.id === state.selectedTabID;
-        const host = tabHost(tab.url);
-        // Only the page currently shown in the preview is "当前". The host's
-        // `active` flag means "visible in its window", and a Profile with two
-        // browser windows can legitimately report several at once, so it must
-        // never produce several "当前" labels.
-        return `<li class="desktop-browser-tab-item">
-          <button type="button" class="desktop-browser-tab ${selected ? "active" : ""}" data-browser-tab="${escapeHTML(tab.id)}" aria-pressed="${selected}" title="${escapeHTML(tab.url)}">
-            <span class="desktop-browser-tab-title">${escapeHTML(tab.title || host || "未命名页面")}</span>
-            <span class="desktop-browser-tab-meta">
-              <span class="desktop-browser-tab-host">${escapeHTML(host)}</span>
-              <span class="desktop-browser-tab-origin" title="页面来源">${tab.origin === "owner" ? "Owner" : "Agent"}</span>
-              ${selected ? '<span class="desktop-browser-tab-current">当前</span>' : ""}
-            </span>
-          </button>
-          <button type="button" class="icon-button desktop-browser-tab-close" data-browser-tab-close="${escapeHTML(tab.id)}" title="关闭页面" aria-label="关闭页面 ${escapeHTML(tab.title || host)}">${icon("close")}</button>
-        </li>`;
-      }).join("")
-      : `<li class="desktop-empty desktop-browser-tabs-empty">${state.grant
-        ? "打开页面后会显示在这里。"
-        : "选择 Profile 并获取独占控制后，这里会列出浏览器当前的全部页面。"}</li>`;
-    const busy = state.loading || state.binding;
-    const canUseGrant = Boolean(state.grant) && state.host?.available !== false;
-    const canTransfer = !state.grant && Boolean(state.inUseProfileID) && state.inUseProfileID === state.profileID;
-    const noProfiles = !state.profiles.length;
-    const hostDown = Boolean(state.host && !state.host.available);
-    const bookmarks = `<section id="desktop-browser-bookmarks" class="desktop-browser-bookmarks" role="dialog" aria-modal="false" aria-labelledby="desktop-browser-bookmarks-title" ${state.bookmarksOpen ? "" : "hidden"}>
-        <div class="desktop-browser-bookmarks-head">
-          <strong id="desktop-browser-bookmarks-title">收藏夹</strong>
-          <button type="button" id="desktop-browser-bookmarks-close" class="icon-button" title="收起收藏夹" aria-label="收起收藏夹">${icon("close")}</button>
-        </div>
-        ${state.bookmarksLoading
-          ? '<p class="desktop-empty" role="status">正在读取收藏夹…</p>'
-          : state.bookmarks.length
-            ? `<ul>${state.bookmarks.map(bookmark => `<li><button type="button" data-browser-bookmark="${escapeHTML(bookmark.url)}" title="${escapeHTML(bookmark.url)}"><span>${escapeHTML(bookmark.title || bookmark.url)}</span><small>${bookmark.folder ? `${escapeHTML(bookmark.folder)} · ` : ""}${escapeHTML(tabHost(bookmark.url))}</small></button></li>`).join("")}</ul>`
-            : '<p class="desktop-empty">收藏夹为空或暂时读不到。</p>'}
-      </section>`;
-    // Without a Profile or a reachable host there is nothing to preview; show
-    // one deliberate empty state with its own action instead of a disabled
-    // form and a large blank panel.
-    const blocked = noProfiles || hostDown;
-    // One compact control row: the exclusive control button and the bookmark
-    // drawer toggle are mutually exclusive with the "获取独占控制" action.
-    const controlButton = state.grant
-      ? `<button type="button" id="desktop-browser-release" class="desktop-browser-control" ${busy ? "disabled" : ""}>释放控制</button>
-        ${blocked ? "" : `<button type="button" id="desktop-browser-bookmarks-toggle" class="icon-button" title="收藏夹" aria-label="收藏夹" aria-expanded="${state.bookmarksOpen}" aria-controls="desktop-browser-bookmarks" ${busy ? "disabled" : ""}>${icon("browser")}</button>`}`
-      : canTransfer
-        ? `<button type="button" id="desktop-browser-transfer" class="primary desktop-browser-control" ${busy ? "disabled" : ""}>转移控制权</button>`
-        : `<button type="button" id="desktop-browser-attach" class="primary desktop-browser-control" ${busy || noProfiles || hostDown ? "disabled" : ""}>${icon("link")}<span>获取独占控制</span></button>`;
-    const emptyState = noProfiles
-      ? `<div class="desktop-browser-empty-state" role="note">
-          ${icon("browser")}
-          <strong>创建一个浏览器 Profile</strong>
-          <p>创建后即可选择 Profile、获取独占控制并查看实时画面。</p>
-          <a class="desktop-browser-cta" href="#resources?tab=browser">前往资源页创建 Profile</a>
-        </div>`
-      : `<div class="desktop-browser-empty-state" role="note">
-          ${icon("browser")}
-          <strong>重新连接浏览器宿主</strong>
-          <p>确认 AHA2 的浏览器宿主进程正在运行，然后重新检测。</p>
-          <button type="button" id="desktop-browser-retry" class="desktop-browser-cta">重新检测浏览器宿主</button>
-        </div>`;
-    container.innerHTML = `
-      <div class="desktop-browser-toolbar" role="group" aria-label="内置浏览器控制">
-        <label class="desktop-window-label desktop-browser-profile-label"><span>Profile</span><select id="desktop-browser-profile" aria-label="浏览器 Profile">${profileOptions(state.profiles, state.profileID)}</select></label>
-        <button type="button" id="desktop-browser-refresh" class="icon-button" title="刷新浏览器状态" aria-label="刷新浏览器状态" ${busy ? "disabled" : ""}>${icon("refresh")}</button>
-        ${controlButton}
-      </div>
-      <p id="desktop-browser-status" class="desktop-browser-status" data-tone="${statusTone(state, session)}" role="status">${escapeHTML(statusText(state, session))}</p>
-      ${blocked ? emptyState : `
-      <form id="desktop-browser-open-form" class="desktop-browser-open">
-        <input id="desktop-browser-url" type="url" inputmode="url" placeholder="https://example.com" aria-label="要打开的网址" value="${escapeHTML(state.urlDraft)}" ${busy || !canUseGrant ? "disabled" : ""}>
-        <button type="submit" ${busy || !canUseGrant ? "disabled" : ""}>打开页面</button>
-      </form>
-      <figure class="desktop-browser-preview">
-        <img id="desktop-browser-frame" alt="内置浏览器只读画面" draggable="false" hidden>
-        <p id="desktop-browser-frame-status" class="desktop-empty" role="status">${escapeHTML(frameStatusText())}</p>
-      </figure>
-      <ul id="desktop-browser-tabs" class="desktop-browser-tabs" aria-label="浏览器页面">${tabs}</ul>
-      <div class="desktop-browser-bookmarks-anchor">${bookmarks}</div>`}`;
-    container.querySelector("#desktop-browser-profile")?.addEventListener("change", event => {
+  const setNodeHTML = (node: HTMLElement, html: string): boolean => {
+    if (painted.get(node) === html) return false;
+    painted.set(node, html);
+    node.innerHTML = html;
+    return true;
+  };
+
+  const bindSelector = (): void => {
+    const node = selectorTarget();
+    if (!node) return;
+    node.querySelector("#desktop-browser-profile")?.addEventListener("change", event => {
       state.profileID = (event.target as HTMLSelectElement).value;
+      paint();
     });
-    container.querySelector("#desktop-browser-refresh")?.addEventListener("click", () => {
+    node.querySelector("#desktop-browser-refresh")?.addEventListener("click", () => {
       if (!state.loading) void reload();
     });
+    node.querySelector("#desktop-browser-attach")?.addEventListener("click", () => {
+      if (!state.loading) void attach();
+    });
+    node.querySelector("#desktop-browser-switch")?.addEventListener("click", () => {
+      if (!state.loading) void switchTarget();
+    });
+    node.querySelector("#desktop-browser-transfer")?.addEventListener("click", () => {
+      if (!state.binding) void transferControl();
+    });
+  };
+
+  const bindControl = (): void => {
     container.querySelector("#desktop-browser-retry")?.addEventListener("click", () => {
       if (!state.loading) void reload();
     });
-    container.querySelector("#desktop-browser-attach")?.addEventListener("click", () => {
-      if (!state.loading) void attach();
+    container.querySelector("#desktop-browser-open-targets")?.addEventListener("click", () => {
+      onOpenTargets?.();
     });
-    container.querySelector("#desktop-browser-release")?.addEventListener("click", () => {
-      if (!state.binding) void releaseControl();
+    container.querySelector("#desktop-browser-newtab")?.addEventListener("click", () => {
+      if (!state.binding) void openStartPage();
     });
-    container.querySelector("#desktop-browser-bookmarks-toggle")?.addEventListener("click", () => {
-      if (!state.binding) void toggleBookmarks();
+    container.querySelector("#desktop-browser-bookmarks-more")?.addEventListener("click", () => {
+      if (!state.grant) return;
+      if (state.bookmarksMenu) closeBookmarksMenu();
+      else openBookmarksMenu("all", "");
     });
-    container.querySelector("#desktop-browser-bookmarks-close")?.addEventListener("click", () => {
-      closeBookmarks();
-    });
-    container.querySelector("#desktop-browser-transfer")?.addEventListener("click", () => {
-      if (!state.binding) void transferControl();
+    container.querySelector("#desktop-browser-bookmarks-menu-close")?.addEventListener("click", () => {
+      closeBookmarksMenu();
     });
     const urlInput = container.querySelector<HTMLInputElement>("#desktop-browser-url");
     urlInput?.addEventListener("input", () => {
@@ -297,6 +357,8 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): () => v
         state.selectedTabID = tabID;
         state.frameError = "";
         state.frameLive = false;
+        const tab = selectedTab();
+        if (tab && document.activeElement?.id !== "desktop-browser-url") state.urlDraft = tab.url;
         paint();
         startStream();
         if (state.grant) {
@@ -318,9 +380,128 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): () => v
     container.querySelectorAll<HTMLElement>("[data-browser-bookmark]").forEach(button => {
       button.addEventListener("click", () => {
         const target = button.dataset.browserBookmark || "";
+        state.bookmarksMenu = "";
+        state.bookmarksMenuFolder = "";
         if (!state.binding && target) void openPage(target);
       });
     });
+    container.querySelectorAll<HTMLElement>("[data-browser-bookmark-folder]").forEach(button => {
+      button.addEventListener("click", () => {
+        openBookmarksMenu("folder", button.dataset.browserBookmarkFolder || "");
+      });
+    });
+  };
+
+  const selectorHTML = (session: BrowserSession | null): string => {
+    const busy = state.loading || state.binding;
+    const noProfiles = !state.profiles.length;
+    const hostDown = Boolean(state.host && !state.host.available);
+    const canTransfer = !state.grant && Boolean(state.inUseProfileID) && state.inUseProfileID === state.profileID;
+    let primary = "";
+    if (state.grant) {
+      primary = `<button type="button" id="desktop-browser-switch" class="primary desktop-browser-control" ${busy ? "disabled" : ""}>切换到所选目标</button>`;
+    } else if (canTransfer) {
+      primary = `<button type="button" id="desktop-browser-transfer" class="primary desktop-browser-control" ${busy ? "disabled" : ""}>转移控制权</button>`;
+    } else {
+      primary = `<button type="button" id="desktop-browser-attach" class="primary desktop-browser-control" ${busy || noProfiles || hostDown ? "disabled" : ""}>${icon("link")}<span>获取独占控制</span></button>`;
+    }
+    // This popover is only a target picker. No preview, tab strip, address bar
+    // or bookmark bar may be rendered here.
+    return `
+      <div class="desktop-browser-toolbar" role="group" aria-label="内置浏览器控制">
+        <label class="desktop-window-label desktop-browser-profile-label"><span>Profile</span><select id="desktop-browser-profile" aria-label="浏览器 Profile">${profileOptions(state.profiles, state.profileID)}</select></label>
+        <button type="button" id="desktop-browser-refresh" class="icon-button" title="刷新浏览器状态" aria-label="刷新浏览器状态" ${busy ? "disabled" : ""}>${icon("refresh")}</button>
+        ${primary}
+      </div>
+      <p id="desktop-browser-status" class="desktop-browser-status" data-tone="${statusTone(state, session)}" role="status">${escapeHTML(statusText(state, session))}</p>`;
+  };
+
+  const controlHTML = (): string => {
+    if (!state.grant) {
+      // Before the first status read lands there is no basis for "create a
+      // Profile" or "host down"; avoid a misleading flash in the main panel.
+      if (state.loading && !state.host) {
+        return `<p class="desktop-empty" role="status" aria-busy="true">正在读取浏览器状态…</p>`;
+      }
+      const noProfiles = !state.profiles.length;
+      const hostDown = Boolean(state.host && !state.host.available);
+      const title = noProfiles ? "创建一个浏览器 Profile" : hostDown ? "重新连接浏览器宿主" : "还没有获取浏览器控制";
+      const hint = noProfiles
+        ? "创建后即可选择 Profile、获取独占控制并查看实时画面。"
+        : hostDown ? "确认 AHA2 的浏览器宿主进程正在运行，然后重新检测。"
+          : "在「共享目标」里选择 Profile 并获取独占控制，之后这里会显示标签页、地址栏、收藏夹和实时画面。";
+      const action = noProfiles
+        ? `<a class="desktop-browser-cta" href="#resources?tab=browser">前往资源页创建 Profile</a>`
+        : hostDown
+          ? `<button type="button" id="desktop-browser-retry" class="desktop-browser-cta">重新检测浏览器宿主</button>`
+          : `<button type="button" id="desktop-browser-open-targets" class="desktop-browser-cta">选择共享目标</button>`;
+      return `<div class="desktop-browser-empty-state" role="note">
+        ${icon("browser")}
+        <strong>${title}</strong>
+        <p>${hint}</p>
+        ${action}
+      </div>`;
+    }
+    const tabs = state.tabs.length
+      ? state.tabs.map(tab => {
+        const selected = tab.id === state.selectedTabID;
+        const host = tabHost(tab.url);
+        // Only the page currently shown in the preview is "当前". The host's
+        // `active` flag means "visible in its window", and a Profile with two
+        // browser windows can legitimately report several at once, so it must
+        // never produce several "当前" labels or highlighted tabs.
+        return `<li class="desktop-browser-tab-item ${selected ? "active" : ""}" data-browser-tab-item="${escapeHTML(tab.id)}">
+          <button type="button" class="desktop-browser-tab ${selected ? "active" : ""}" data-browser-tab="${escapeHTML(tab.id)}" aria-pressed="${selected}" ${selected ? 'aria-current="page"' : ""} title="${escapeHTML(tab.url)}">
+            ${faviconMark(tab.url, "desktop-browser-tab-favicon")}
+            <span class="desktop-browser-tab-title">${escapeHTML(tab.title || host || "未命名页面")}</span>
+            <span class="desktop-browser-tab-origin" title="页面来源">${tab.origin === "owner" ? "Owner" : "Agent"}</span>
+          </button>
+          <button type="button" class="icon-button desktop-browser-tab-close" data-browser-tab-close="${escapeHTML(tab.id)}" title="关闭页面" aria-label="关闭页面 ${escapeHTML(tab.title || host)}">${icon("close")}</button>
+        </li>`;
+      }).join("")
+      : `<li class="desktop-empty desktop-browser-tabs-empty">正在打开开始页…</li>`;
+    const busy = state.binding;
+    const menuOpen = Boolean(state.bookmarksMenu);
+    return `<div class="desktop-browser-shell">
+      <div class="desktop-browser-tabstrip" role="group" aria-label="浏览器标签页">
+        <ul id="desktop-browser-tabs" class="desktop-browser-tabs" aria-label="浏览器页面">${tabs}</ul>
+        <button type="button" id="desktop-browser-newtab" class="desktop-browser-newtab" title="新建标签页（AHA 开始页）" aria-label="新建标签页" ${busy ? "disabled" : ""}>${icon("plus")}</button>
+      </div>
+      <form id="desktop-browser-open-form" class="desktop-browser-open">
+        <input id="desktop-browser-url" type="text" inputmode="url" placeholder="输入网址或搜索" aria-label="地址与搜索" value="${escapeHTML(state.urlDraft)}" ${busy ? "disabled" : ""} autocomplete="off" spellcheck="false">
+        <button type="submit" ${busy ? "disabled" : ""}>打开</button>
+      </form>
+      <div class="desktop-browser-bookmarkbar" id="desktop-browser-bookmarkbar">
+        <div class="desktop-browser-bookmark-items" id="desktop-browser-bookmarks">${bookmarkBarHTML(state.bookmarks, state.bookmarksLoading, state.bookmarksError)}</div>
+        <button type="button" id="desktop-browser-bookmarks-more" class="icon-button desktop-browser-bookmarks-more" title="更多收藏" aria-label="更多收藏" aria-expanded="${menuOpen}" hidden>${icon("chevron-down")}</button>
+        ${bookmarkMenuHTML(state)}
+      </div>
+      <figure class="desktop-browser-preview">
+        <img id="desktop-browser-frame" alt="内置浏览器只读画面" draggable="false" hidden>
+        <p id="desktop-browser-frame-status" class="desktop-empty" role="status">${escapeHTML(frameStatusText())}</p>
+      </figure>
+    </div>`;
+  };
+
+  const measureBookmarkOverflow = (): void => {
+    const items = container.querySelector<HTMLElement>("#desktop-browser-bookmarks");
+    const more = container.querySelector<HTMLElement>("#desktop-browser-bookmarks-more");
+    if (!items || !more) return;
+    more.hidden = items.scrollWidth <= items.clientWidth + 1;
+  };
+
+  const paint = (): void => {
+    if (!current()) return;
+    const session = state.grant?.session || state.profiles.find(item => item.id === state.profileID)?.session || null;
+    const selectedProfile = state.profiles.find(item => item.id === state.profileID);
+    const selectorNode = selectorTarget();
+    if (selectorNode && setNodeHTML(selectorNode, selectorHTML(session))) bindSelector();
+    if (setNodeHTML(container, controlHTML())) {
+      bindControl();
+      requestAnimationFrame(measureBookmarkOverflow);
+    } else {
+      measureBookmarkOverflow();
+    }
     paintFrameStatus();
     syncShell(session, selectedProfile?.name || "");
   };
@@ -415,12 +596,38 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): () => v
     schedule(0);
   };
 
+  const loadBookmarks = async (grant: BrowserTaskGrant): Promise<void> => {
+    const request = ++bookmarkRequest;
+    state.bookmarksLoading = true;
+    state.bookmarksError = "";
+    paint();
+    try {
+      const result = await api.taskBrowserBookmarks(grant.id);
+      if (request !== bookmarkRequest || state.grant?.id !== grant.id) return;
+      state.bookmarks = result.bookmarks || [];
+    } catch (error) {
+      if (request !== bookmarkRequest || state.grant?.id !== grant.id) return;
+      state.bookmarks = [];
+      state.bookmarksError = errorDetails(error).message;
+    } finally {
+      if (request === bookmarkRequest) {
+        state.bookmarksLoading = false;
+        state.bookmarksLoaded = true;
+        paint();
+      }
+    }
+  };
+
   const load = async (): Promise<void> => {
+    if (disposed) return;
     state.loading = true;
     state.error = "";
     paint();
     try {
       const result = await api.taskBrowser(taskID);
+      // The Owner may have left browser mode while this read was in flight;
+      // a disposed panel must not open a start page or repaint stale state.
+      if (disposed) return;
       const data = result?.browser;
       if (!data) throw new Error("浏览器状态不可用");
       state.profiles = data.profiles || [];
@@ -434,7 +641,15 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): () => v
       if (active) state.inUseProfileID = "";
       if (active && active.id !== previousGrant) {
         state.bookmarks = [];
-        state.bookmarksOpen = false;
+        state.bookmarksLoaded = false;
+        state.bookmarksError = "";
+        state.bookmarksMenu = "";
+        state.urlDraft = "";
+        state.startPageGrantID = "";
+      }
+      if (!active) {
+        state.bookmarksLoaded = false;
+        state.bookmarksMenu = "";
       }
       if (!state.profiles.some(item => item.id === state.profileID)) {
         state.profileID = active?.profile_id || state.profiles[0]?.id || "";
@@ -446,6 +661,8 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): () => v
       if (!state.tabs.some(tab => tab.id === state.selectedTabID)) {
         state.selectedTabID = (state.tabs.find(tab => tab.active) || state.tabs[0])?.id || "";
       }
+      const selected = selectedTab();
+      if (selected && document.activeElement?.id !== "desktop-browser-url") state.urlDraft = selected.url;
     } catch (error) {
       state.error = error instanceof Error ? error.message : String(error);
     } finally {
@@ -453,6 +670,8 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): () => v
     }
     paint();
     startStream();
+    if (state.grant && !state.bookmarksLoaded && !state.bookmarksLoading) void loadBookmarks(state.grant);
+    ensureStartPage();
   };
 
   const reload = async (): Promise<void> => {
@@ -493,11 +712,11 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): () => v
     startStream();
   };
 
-  const openPage = async (targetOverride?: string): Promise<void> => {
+  const openPage = async (targetOverride?: string, quiet = false): Promise<void> => {
     if (!state.grant) return;
-    const target = (targetOverride ?? state.urlDraft).trim();
+    const target = browserAddressTarget(targetOverride ?? state.urlDraft);
     if (!target) {
-      state.error = "请填写要打开的网址";
+      state.error = "请填写要打开的网址或搜索词";
       paint();
       return;
     }
@@ -511,7 +730,7 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): () => v
       selectTab(result.tab.id);
       paint();
       startStream();
-      notify("notice", "页面已在内置浏览器中打开");
+      if (!quiet) notify("notice", "页面已在内置浏览器中打开");
     } catch (error) {
       const details = errorDetails(error);
       state.error = details.message;
@@ -523,17 +742,35 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): () => v
     startStream();
   };
 
+  // The owner asked for a real http(s) start page instead of about:blank or an
+  // Edge internal surface. Open it once per grant when the profile has no
+  // enumerable page yet; never close pages the Owner opened by hand.
+  const ensureStartPage = (): void => {
+    const grant = state.grant;
+    if (!grant || state.tabs.length || state.startPageGrantID === grant.id) return;
+    state.startPageGrantID = grant.id;
+    void openPage(browserStartPageURL(window.location.origin), true);
+  };
+
+  const openStartPage = async (): Promise<void> => {
+    if (!state.grant) return;
+    await openPage(browserStartPageURL(window.location.origin), true);
+  };
+
   const releaseControl = async (): Promise<void> => {
     if (!state.grant) return;
+    const grantID = state.grant.id;
     state.binding = true;
     state.error = "";
     paint();
     try {
-      await api.releaseTaskBrowserGrant(state.grant.id);
-      state.grant = null;
+      await api.releaseTaskBrowserGrant(grantID);
+      if (state.grant?.id === grantID) state.grant = null;
       state.tabs = [];
       state.bookmarks = [];
-      state.bookmarksOpen = false;
+      state.bookmarksLoaded = false;
+      state.bookmarksMenu = "";
+      state.startPageGrantID = "";
       await load();
       notify("notice", "已释放独占控制；浏览器页面保持打开，其他 Task 可以接手");
     } catch (error) {
@@ -557,6 +794,7 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): () => v
       state.inUseProfileID = "";
       await load();
       notify("notice", "Owner 已把该 Profile 的独占控制转移给当前 Task");
+      onGranted?.();
     } catch (error) {
       const details = errorDetails(error);
       state.error = details.message;
@@ -568,45 +806,57 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): () => v
     startStream();
   };
 
-  const focusBookmarks = (): void => {
-    const target = container.querySelector<HTMLElement>("#desktop-browser-bookmarks [data-browser-bookmark]")
-      || container.querySelector<HTMLElement>("#desktop-browser-bookmarks-close");
-    // Focusing must not scroll the popover: that would move the preview out
-    // from under the Owner's cursor when the drawer opens.
-    target?.focus({preventScroll: true});
-  };
-
-  const closeBookmarks = (): void => {
-    if (!state.bookmarksOpen) return;
-    state.bookmarksOpen = false;
-    paint();
-    container.querySelector<HTMLElement>("#desktop-browser-bookmarks-toggle")?.focus();
-  };
-
-  const toggleBookmarks = async (): Promise<void> => {
+  // Same profile: just go back to the main controls. A different profile has to
+  // release the old lease first because the API allows one browser profile per
+  // Task; this is a UI sequence over the existing grant endpoints.
+  const switchTarget = async (): Promise<void> => {
     if (!state.grant) return;
-    if (state.bookmarksOpen) {
-      closeBookmarks();
+    if (state.profileID === state.grant.profile_id) {
+      onGranted?.();
       return;
     }
-    state.bookmarksOpen = true;
-    state.bookmarksLoading = true;
+    if (!state.profileID) {
+      state.error = "请先选择浏览器 Profile";
+      paint();
+      return;
+    }
+    const previousGrant = state.grant;
+    state.binding = true;
     state.error = "";
     paint();
-    focusBookmarks();
     try {
-      const result = await api.taskBrowserBookmarks(state.grant.id);
-      state.bookmarks = result.bookmarks || [];
+      await api.releaseTaskBrowserGrant(previousGrant.id);
+      if (state.grant?.id === previousGrant.id) state.grant = null;
+      state.tabs = [];
+      state.bookmarks = [];
+      state.bookmarksLoaded = false;
+      state.bookmarksMenu = "";
+      state.startPageGrantID = "";
+      await attach();
     } catch (error) {
       const details = errorDetails(error);
-      state.bookmarks = [];
       state.error = details.message;
       notify("error", details.message);
     } finally {
-      state.bookmarksLoading = false;
+      state.binding = false;
     }
     paint();
-    if (state.bookmarksOpen) focusBookmarks();
+    startStream();
+  };
+
+  const openBookmarksMenu = (kind: "all" | "folder", folder: string): void => {
+    state.bookmarksMenu = kind;
+    state.bookmarksMenuFolder = folder;
+    paint();
+    container.querySelector<HTMLElement>("#desktop-browser-bookmarks-menu button[data-browser-bookmark]")?.focus({preventScroll: true});
+  };
+
+  const closeBookmarksMenu = (): void => {
+    if (!state.bookmarksMenu) return;
+    state.bookmarksMenu = "";
+    state.bookmarksMenuFolder = "";
+    paint();
+    container.querySelector<HTMLElement>("[data-browser-bookmark-folder], #desktop-browser-bookmarks-more")?.focus({preventScroll: true});
   };
 
   const attach = async (): Promise<void> => {
@@ -627,10 +877,12 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): () => v
       state.inUseProfileID = "";
       state.grant = result.grant;
       state.profileID = result.grant.profile_id;
+      state.startPageGrantID = "";
       await load();
       notify("notice", result.session
         ? `已获取独占控制（会话 ${stateLabel(result.session.state)}）`
         : "已获取该 Profile 的独占控制");
+      onGranted?.();
     } catch (error) {
       const details = errorDetails(error);
       state.error = details.message;
@@ -659,23 +911,63 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): () => v
     }
   };
 
-  // The bookmark drawer is non-modal, so Escape is scoped to the panel and
-  // returns focus to the toolbar toggle.
+  // The bookmark menu is non-modal, so Escape is scoped to the panel and
+  // returns focus to the overflow toggle.
   const onKeydown = (event: KeyboardEvent): void => {
-    if (event.key !== "Escape" || !state.bookmarksOpen) return;
+    if (event.key !== "Escape" || !state.bookmarksMenu) return;
     event.stopPropagation();
-    closeBookmarks();
+    closeBookmarksMenu();
+  };
+
+  const onOutsidePointer = (event: Event): void => {
+    if (!state.bookmarksMenu || !(event.target instanceof Element)) return;
+    if (event.target.closest("#desktop-browser-bookmarkbar")) return;
+    // Close without repainting: this runs on pointerdown, and rebuilding the
+    // main surface here would detach the element that is about to receive the
+    // click (for example the new-tab button).
+    state.bookmarksMenu = "";
+    state.bookmarksMenuFolder = "";
+    container.querySelector("#desktop-browser-bookmarks-menu")?.remove();
+    container.querySelector("#desktop-browser-bookmarks-more")?.setAttribute("aria-expanded", "false");
   };
 
   paint();
   void load();
   document.addEventListener("visibilitychange", onVisibility);
+  document.addEventListener("pointerdown", onOutsidePointer, true);
   container.addEventListener("keydown", onKeydown);
+  const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => measureBookmarkOverflow());
+  observer?.observe(container);
+  window.addEventListener("resize", measureBookmarkOverflow);
 
-  return () => {
-    disposed = true;
-    document.removeEventListener("visibilitychange", onVisibility);
-    container.removeEventListener("keydown", onKeydown);
-    stopStream();
+  return {
+    dispose: () => {
+      disposed = true;
+      bookmarkRequest++;
+      window.clearTimeout(releaseTimer);
+      document.removeEventListener("visibilitychange", onVisibility);
+      document.removeEventListener("pointerdown", onOutsidePointer, true);
+      container.removeEventListener("keydown", onKeydown);
+      window.removeEventListener("resize", measureBookmarkOverflow);
+      observer?.disconnect();
+      stopStream();
+    },
+    release: () => {
+      if (!state.grant) return false;
+      // The header stop stays available while a tab open/close is in flight;
+      // release once the current operation settles instead of dropping it.
+      const waitRelease = () => {
+        if (disposed) return;
+        if (state.binding) {
+          window.clearTimeout(releaseTimer);
+          releaseTimer = window.setTimeout(waitRelease, 120);
+          return;
+        }
+        if (state.grant) void releaseControl();
+      };
+      waitRelease();
+      return true;
+    },
+    granted: () => Boolean(state.grant),
   };
 }

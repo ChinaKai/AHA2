@@ -30,7 +30,7 @@ test("vendor-only change bumps the production vendor URL but not the app hash", 
     await cp(join(repo, "scripts", "build-web.mjs"), join(workDir, "scripts", "build-web.mjs"));
     await cp(join(repo, "assets"), join(workDir, "assets"), {recursive: true});
     await mkdir(join(workDir, "web"), {recursive: true});
-    for (const name of ["src", "vendor", "package.json", "index.html"]) {
+    for (const name of ["src", "vendor", "package.json", "index.html", "browser-newtab.html"]) {
       await cp(join(web, name), join(workDir, "web", name), {recursive: true});
     }
 

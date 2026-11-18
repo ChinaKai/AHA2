@@ -4,9 +4,10 @@ import {readFile} from "node:fs/promises";
 import {resolve} from "node:path";
 import {pathToFileURL} from "node:url";
 
-// Verifies the profile-exclusive browser panel without a real Edge: one Task
-// owns every visible tab, can activate/close/navigate/open pages and read
-// bookmarks, and the preview keeps the existing frame/generation lifecycle.
+// Verifies the split browser panel without a real Edge: the targets popover
+// only picks a profile, while the main panel owns the Edge-style tab strip,
+// address bar, horizontal bookmark bar and read-only preview. A profile with no
+// http(s) page gets AHA's own /browser-newtab start page, never about:blank.
 const root = resolve(import.meta.dirname, "../..");
 const tools = resolve(root, ".tools/web-validation");
 const playwrightModule = process.env.AHA_PLAYWRIGHT_MODULE || resolve(tools, "node_modules/playwright/index.mjs");
@@ -43,6 +44,14 @@ const browserState = host => ({
   ],
   host,
 });
+const bookmarks = [
+  {title: "Mail", url: "https://mail.example/", folder: "Bar"},
+  {title: "文档中心", url: "https://docs.example/very/long/path?token=abcdefghijklmnop&redirect=https%3A%2F%2Fexample.com", folder: ""},
+  {title: "发布面板", url: "https://release.example/deploy?environment=production&region=ap-east-1", folder: ""},
+  {title: "监控", url: "https://monitor.example/dashboard?range=last-24h&filters=service%3Dapi", folder: ""},
+  {title: "日志", url: "https://logs.example/search?query=level%3Aerror&from=now-1h", folder: ""},
+  {title: "工单", url: "https://tickets.example/queue?assignee=owner&status=open", folder: ""},
+];
 
 const bootstrap = `
 const json = (value, status = 200) => new Response(JSON.stringify(value), {status, headers: {"Content-Type": "application/json"}});
@@ -54,18 +63,24 @@ window.__staleErrorAt = 0;
 window.__switchAt = 0;
 window.__mode = "tabs";
 window.__released = false;
+window.__attached = false;
 window.__inUse = false;
 window.__transferred = false;
+window.__opened = 0;
 window.__openedTabs = [];
 window.__activates = [];
 window.__deletes = [];
+window.__opens = [];
+window.__granted = 0;
+window.__openTargets = 0;
 const HOST_UP = {available: true, host_id: "local", version: "0.1.0", platform: "win32", edge_available: true};
 const HOST_DOWN = {available: false, host_id: "local", edge_available: false, code: "browser_host_start_failed", error: "浏览器宿主自动启动失败（端口被占用或依赖缺失），请查看 AHA2 日志"};
 const STATE_UP = ${JSON.stringify(browserState({available: true, host_id: "local", version: "0.1.0", platform: "win32", edge_available: true}))};
 const STATE_DOWN = ${JSON.stringify({...browserState({available: false, host_id: "local", edge_available: false, code: "browser_host_start_failed", error: "浏览器宿主自动启动失败（端口被占用或依赖缺失），请查看 AHA2 日志"}), grants: [], tabs: []})};
 const GRANT = ${JSON.stringify(grant)};
+const BOOKMARKS = ${JSON.stringify(bookmarks)};
 const currentState = () => {
-  if (window.__released) {
+  if (window.__released || (window.__mode === "detached" && !window.__attached)) {
     return {...STATE_UP, grants: [], tabs: []};
   }
   if (window.__inUse && !window.__transferred) {
@@ -77,14 +92,19 @@ const currentState = () => {
   const base = window.__mode === "empty" ? {...STATE_UP, tabs: []} : {...STATE_UP};
   return {...base, tabs: base.tabs.concat(window.__openedTabs)};
 };
+const newTab = (url, title) => {
+  window.__opened += 1;
+  return {id: "browser_tab_opened_" + window.__opened, session_id: "browser_session_1", grant_id: "browser_grant_1",
+    task_id: "task-1", url, title, origin: "owner", active: true, created_at: ${JSON.stringify(now)}, updated_at: ${JSON.stringify(now)}};
+};
 window.fetch = async (input, init = {}) => {
   const url = new URL(typeof input === "string" ? input : input.url, location.origin);
   const path = url.pathname;
   const method = String(init.method || "GET").toUpperCase();
-  if (path === "/api/v1/tasks/task-1/browser") {
-    return json({ok: true, browser: currentState()});
-  }
+  if (path === "/api/v1/tasks/task-1/browser") return json({ok: true, browser: currentState()});
   if (path === "/api/v1/tasks/task-1/browser-sessions" && method === "POST") {
+    window.__attached = true;
+    window.__released = false;
     if (window.__inUse && !window.__transferred) {
       return json({error: {code: "browser_profile_in_use", message: "该 Profile 正由其他 Task 独占控制；请先让原 Task 释放，或由 Owner 显式转移控制权"}}, 409);
     }
@@ -100,23 +120,24 @@ window.fetch = async (input, init = {}) => {
     return json({ok: true, grant: {...GRANT, status: "revoked"}});
   }
   if (path === "/api/v1/browser-grants/browser_grant_1/bookmarks") {
-    return json({ok: true, bookmarks: [{title: "Mail", url: "https://mail.example/", folder: "Bar"}]});
+    return json({ok: true, bookmarks: BOOKMARKS});
   }
   if (path === "/api/v1/browser-grants/browser_grant_1/tabs" && method === "POST") {
     const payload = JSON.parse(String(init.body || "{}"));
-    const tab = {...GRANT, id: "browser_tab_opened", url: payload.url || "https://example.com/opened", title: "打开的页面", origin: "owner", active: true};
+    window.__opens.push(payload.url);
+    const tab = newTab(payload.url || "https://example.com/opened", "打开的页面");
     window.__openedTabs.push(tab);
     return json({ok: true, tab});
   }
-  if (/\\/api\\/v1\\/browser-grants\\/browser_grant_1\\/tabs\\/browser_tab_[12]\\/activate$/.test(path) && method === "POST") {
+  if (/\\/api\\/v1\\/browser-grants\\/browser_grant_1\\/tabs\\/[a-z0-9_]+\\/activate$/.test(path) && method === "POST") {
     window.__activates.push(path);
     return json({ok: true, tab: {id: path.split("/")[6]}});
   }
-  if (method === "DELETE" && /\\/api\\/v1\\/browser-grants\\/browser_grant_1\\/tabs\\/browser_tab_[12]$/.test(path)) {
+  if (method === "DELETE" && /\\/api\\/v1\\/browser-grants\\/browser_grant_1\\/tabs\\/[a-z0-9_]+$/.test(path)) {
     window.__deletes.push(path);
     return json({ok: true});
   }
-  if (/\\/tabs\\/(?:browser_tab_[12]|browser_tab_opened)\\/frame$/.test(path)) {
+  if (/\\/tabs\\/[a-z0-9_]+\\/frame$/.test(path)) {
     if (window.__staleError && path.includes("browser_tab_1")) {
       window.__staleErrors++;
       await new Promise(resolve => setTimeout(resolve, 1200));
@@ -134,7 +155,10 @@ window.EventSource = class { constructor() {} close() {} addEventListener() {} }
 `;
 
 const html = `<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="/styles.css"></head><body>
-  <aside id="desktop-tool"><div id="desktop-browser-target"></div></aside>
+  <aside id="desktop-tool">
+    <div id="desktop-browser-target"></div>
+    <div id="desktop-browser-control"></div>
+  </aside>
   <script src="/fixture.js"></script><script type="module" src="/boot.js"></script>
 </body></html>`;
 const boot = `import {mountBrowserTaskPanel} from "/browser_task_panel.js"; window.mountBrowserTaskPanel = mountBrowserTaskPanel;`;
@@ -145,6 +169,9 @@ const server = createServer(async (request, response) => {
     if (name === "/" || name === "/index.html") {
       response.setHeader("Content-Type", "text/html");
       response.end(html);
+    } else if (name === "/browser-newtab") {
+      response.setHeader("Content-Type", "text/html");
+      response.end(await readFile(resolve(root, "web/build/browser-newtab.html")));
     } else if (name === "/fixture.js") {
       response.setHeader("Content-Type", "text/javascript");
       response.end(bootstrap);
@@ -152,7 +179,7 @@ const server = createServer(async (request, response) => {
       response.setHeader("Content-Type", "text/javascript");
       response.end(boot);
     } else {
-      if (!/^\/(?:vendor\/)?[a-z0-9_]+\.(?:js|css)$/.test(name)) { response.writeHead(404).end(); return; }
+      if (!/^\/(?:vendor\/)?[a-z0-9_-]+\.(?:js|css)$/.test(name)) { response.writeHead(404).end(); return; }
       const file = resolve(root, "web", "build", name.slice(1));
       response.setHeader("Content-Type", name.endsWith(".css") ? "text/css" : "text/javascript");
       response.end(await readFile(file));
@@ -175,13 +202,21 @@ const waitFor = async (page, predicate, options = {}) => {
 const mount = async page => {
   await page.evaluate(() => {
     document.querySelector("#desktop-browser-target").innerHTML = "";
+    document.querySelector("#desktop-browser-control").innerHTML = "";
     window.__panel = window.mountBrowserTaskPanel({
-      container: document.querySelector("#desktop-browser-target"),
+      container: document.querySelector("#desktop-browser-control"),
+      selector: document.querySelector("#desktop-browser-target"),
       taskID: "task-1",
       notify: () => {},
       onChange: () => {},
+      onOpenTargets: () => { window.__openTargets++; },
+      onGranted: () => { window.__granted++; },
     });
   });
+};
+const reset = async (page, values) => {
+  await page.evaluate(next => { Object.assign(window, next); }, values);
+  await mount(page);
 };
 try {
   browser = await chromium.launch({...launchOptions, headless: true});
@@ -190,33 +225,87 @@ try {
   page.on("pageerror", error => errors.push(error.message));
   await page.goto(base, {waitUntil: "networkidle"});
 
-  // Exclusive control: every visible page is listed under the lease.
+  // 1. The target popover only contains the profile picker and one button.
   await mount(page);
   await page.waitForSelector("#desktop-browser-frame:not([hidden])", {timeout: 5000});
   await waitFor(page, () => window.__frames >= 2);
   const firstFrames = await page.evaluate(() => window.__frames);
-  assert.match(await page.locator("#desktop-browser-status").innerText(), /独占控制中/);
-  assert.match(await page.locator("#desktop-browser-frame-status").innerText(), /实时画面/);
+  const selector = page.locator("#desktop-browser-target");
+  assert.equal(await selector.locator("#desktop-browser-profile").count(), 1);
+  assert.equal(await selector.locator("#desktop-browser-refresh").count(), 1);
+  assert.equal(await selector.locator("#desktop-browser-switch").innerText(), "切换到所选目标");
+  for (const forbidden of ["#desktop-browser-frame", "[data-browser-tab]", "#desktop-browser-url", "#desktop-browser-bookmarks", "#desktop-browser-open-form"]) {
+    assert.equal(await selector.locator(forbidden).count(), 0, `target popover must not render ${forbidden}`);
+  }
+  assert.match(await selector.locator("#desktop-browser-status").innerText(), /独占控制中/);
+
+  // The main panel owns the Edge-style surfaces.
+  const main = page.locator("#desktop-browser-control");
+  assert.equal(await main.locator("#desktop-browser-tabs").count(), 1);
+  assert.equal(await main.locator("#desktop-browser-open-form").count(), 1);
+  assert.equal(await main.locator("#desktop-browser-bookmarkbar").count(), 1);
+  assert.equal(await main.locator(".desktop-browser-preview").count(), 1);
+  assert.match(await main.locator("#desktop-browser-frame-status").innerText(), /实时画面/);
+
+  // Edge order: tab strip, address bar, bookmark bar, preview.
+  const order = await page.evaluate(() => {
+    const box = selector => document.querySelector(selector).getBoundingClientRect();
+    return {
+      tabs: box("#desktop-browser-tabs").top,
+      address: box("#desktop-browser-open-form").top,
+      bookmarks: box("#desktop-browser-bookmarkbar").top,
+      preview: box(".desktop-browser-preview").top,
+    };
+  });
+  assert.ok(order.tabs < order.address && order.address < order.bookmarks && order.bookmarks < order.preview, JSON.stringify(order));
+
+  // 2. Two host tabs may be active=true, but the UI highlights exactly one.
   assert.equal(await page.locator("[data-browser-tab]").count(), 2);
-  assert.match(await page.locator("[data-browser-tab='browser_tab_1']").innerText(), /当前/);
-  // Both host tabs are active=true (one visible page per browser window), but
-  // the panel previews exactly one page and must therefore label exactly one.
-  assert.equal(await page.locator(".desktop-browser-tab-current").count(), 1);
+  assert.equal(await page.locator(".desktop-browser-tab.active").count(), 1);
+  assert.equal(await page.locator('[aria-current="page"]').count(), 1);
   assert.deepEqual(await page.locator("[data-browser-tab]").evaluateAll(items => items.map(item => item.getAttribute("aria-pressed"))), ["true", "false"]);
-  // The compact strip shows title + host; the long OAuth URL stays in `title`.
+
+  // The tab strip is horizontal, compact, and never renders the full URL.
   const longTab = page.locator("[data-browser-tab='browser_tab_1']");
   assert.doesNotMatch(await longTab.innerText(), /redirect_uri|\?/);
-  assert.match(await longTab.locator(".desktop-browser-tab-host").innerText(), /^login\.dingtalk\.com$/);
+  assert.match(await longTab.locator(".desktop-browser-tab-origin").innerText(), /Owner/);
   assert.match(await longTab.getAttribute("title"), /redirect_uri=/);
+  assert.equal(await page.evaluate(() => getComputedStyle(document.querySelector("#desktop-browser-tabs")).overflowX), "auto");
   const tabHeights = await page.locator(".desktop-browser-tab-item").evaluateAll(items => items.map(item => item.getBoundingClientRect().height));
-  assert.ok(tabHeights.every(height => height < 60), `tab rows should stay compact: ${tabHeights}`);
-  assert.equal(await page.evaluate(() => {
-    const preview = document.querySelector(".desktop-browser-preview");
-    const tabs = document.querySelector("#desktop-browser-tabs");
-    return Boolean(preview.compareDocumentPosition(tabs) & Node.DOCUMENT_POSITION_FOLLOWING);
-  }), true, "the preview must come before the tab list");
+  assert.ok(tabHeights.every(height => height < 44), `tab rows should stay compact: ${tabHeights}`);
 
-  // Switching tab activates it in the visible browser and keeps the stream.
+  // 3. The bookmark bar is horizontal: folder chip + entries, no long URL.
+  await page.waitForSelector("[data-browser-bookmark-folder]");
+  const bookmarkBar = page.locator("#desktop-browser-bookmarks");
+  assert.equal(await page.locator("[data-browser-bookmark-folder='Bar']").count(), 1);
+  assert.match(await bookmarkBar.innerText(), /Mail|文档中心/);
+  assert.doesNotMatch(await bookmarkBar.innerText(), /token=|redirect=|environment=/);
+  const barHeights = await page.evaluate(() => {
+    const bar = document.querySelector("#desktop-browser-bookmarkbar").getBoundingClientRect();
+    const preview = document.querySelector(".desktop-browser-preview").getBoundingClientRect();
+    return {bar: bar.height, preview: preview.height};
+  });
+  assert.ok(barHeights.bar < 60, `bookmark bar must stay one horizontal row: ${JSON.stringify(barHeights)}`);
+  assert.ok(barHeights.preview > barHeights.bar, `the preview must remain the dominant surface: ${JSON.stringify(barHeights)}`);
+
+  // Narrow panel: the overflow menu appears instead of a vertical wall of URLs.
+  await page.locator("#desktop-tool").evaluate(node => { node.style.width = "260px"; });
+  await page.waitForTimeout(180);
+  assert.equal(await page.locator("#desktop-browser-bookmarks-more").isVisible(), true, "narrow bookmark bar needs an overflow menu");
+  await page.click("#desktop-browser-bookmarks-more");
+  await page.waitForSelector("#desktop-browser-bookmarks-menu");
+  assert.match(await page.locator("#desktop-browser-bookmarks-menu").innerText(), /全部收藏/);
+  await page.click("#desktop-browser-bookmarks-menu-close");
+  await page.locator("#desktop-tool").evaluate(node => { node.style.width = ""; });
+
+  // Folder chip opens just that folder's bookmarks.
+  await page.click("[data-browser-bookmark-folder='Bar']");
+  await page.waitForSelector("#desktop-browser-bookmarks-menu [data-browser-bookmark]");
+  assert.match(await page.locator("#desktop-browser-bookmarks-menu").innerText(), /Mail/);
+  await page.keyboard.press("Escape");
+  assert.equal(await page.locator("#desktop-browser-bookmarks-menu").count(), 0);
+
+  // 4. Switching a tab activates it in the visible browser and keeps frames.
   await page.click("[data-browser-tab='browser_tab_2']");
   await waitFor(page, () => window.__activates.length === 1);
   await waitFor(page, count => window.__frames > count, {arg: firstFrames});
@@ -225,87 +314,70 @@ try {
   await page.click("[data-browser-tab-close='browser_tab_2']");
   await waitFor(page, () => window.__deletes.length === 1);
 
-  // Bookmarks are read-only and open their URL through the normal tab API.
-  await page.waitForSelector("#desktop-browser-frame:not([hidden])");
-  await page.waitForTimeout(100);
-  const previewBeforeDrawer = await page.locator(".desktop-browser-preview").boundingBox();
-  await page.click("#desktop-browser-bookmarks-toggle");
-  await page.waitForSelector("[data-browser-bookmark]");
-  const previewAfterDrawer = await page.locator(".desktop-browser-preview").boundingBox();
-  const drawerBox = await page.locator("#desktop-browser-bookmarks").boundingBox();
-  assert.equal(previewAfterDrawer.y, previewBeforeDrawer.y, "opening bookmarks must not move the preview");
-  assert.equal(previewAfterDrawer.height, previewBeforeDrawer.height, "opening bookmarks must not resize the preview");
-  assert.ok(drawerBox.y >= previewAfterDrawer.y + previewAfterDrawer.height, "bookmarks must open below the preview");
-  assert.equal(await page.locator("#desktop-browser-bookmarks-toggle").getAttribute("aria-expanded"), "true");
-  await waitFor(page, () => document.querySelector("#desktop-browser-bookmarks").contains(document.activeElement));
-  await page.keyboard.press("Escape");
-  assert.equal(await page.locator("#desktop-browser-bookmarks").isHidden(), true);
-  assert.equal(await page.evaluate(() => document.activeElement?.id), "desktop-browser-bookmarks-toggle");
-  await page.click("#desktop-browser-bookmarks-toggle");
-  await page.waitForSelector("[data-browser-bookmark]");
-  assert.match(await page.locator("[data-browser-bookmark]").innerText(), /Mail/);
-  await page.click("[data-browser-bookmark]");
-  await page.waitForSelector("[data-browser-tab='browser_tab_opened']", {timeout: 5000});
+  // Folder entries open through the same tab API.
+  await page.click("[data-browser-bookmark-folder='Bar']");
+  await page.waitForSelector("#desktop-browser-bookmarks-menu [data-browser-bookmark='https://mail.example/']");
+  await page.click("#desktop-browser-bookmarks-menu [data-browser-bookmark='https://mail.example/']");
+  await waitFor(page, () => window.__opens.includes("https://mail.example/"));
 
-  // Release is explicit and leaves the visible browser open.
-  await page.click("#desktop-browser-release");
-  await waitFor(page, () => document.querySelector("#desktop-browser-release") === null);
+  // The + button opens AHA's local start page, never about:blank.
+  await page.click("#desktop-browser-newtab");
+  await waitFor(page, () => window.__opens.some(url => new URL(url).pathname === "/browser-newtab"));
+  assert.equal(await page.evaluate(() => window.__opens.some(url => url.startsWith("about:"))), false);
+
+  // The header stop calls this release path; the popover marker stays open.
+  const grantedBefore = await page.evaluate(() => window.__granted);
+  await page.evaluate(() => window.__panel.release());
+  await waitFor(page, () => document.querySelector("#desktop-browser-attach") !== null);
   assert.match(await page.locator("#desktop-browser-status").innerText(), /获取独占控制/);
-  await page.evaluate(() => window.__panel());
+  assert.equal(await page.evaluate(() => window.__granted), grantedBefore, "release must not fire the close-popover callback");
+  assert.equal(await page.locator("#desktop-browser-control .desktop-browser-empty-state").count(), 1);
+  await page.evaluate(() => window.__panel.dispose());
 
-  // Second Task: attach returns 409, then the Owner can transfer explicitly.
-  await page.evaluate(() => {
-    window.__released = false;
-    window.__inUse = true;
-    window.__transferred = false;
-    window.__frames = 0;
-  });
-  await mount(page);
+  // 5. Attaching from the popover closes it (onGranted) and shows the controls.
+  await reset(page, {__mode: "detached", __attached: false, __released: false, __granted: 0, __openTargets: 0});
+  await page.waitForSelector("#desktop-browser-attach", {timeout: 5000});
+  assert.doesNotMatch(await page.locator("#desktop-browser-control").innerText(), /浏览器标签页/);
+  const deletesBeforeAttach = await page.evaluate(() => window.__deletes.length);
+  await page.click("#desktop-browser-attach");
+  await waitFor(page, () => window.__granted === 1);
+  await page.waitForSelector("#desktop-browser-tabs");
+  assert.match(await page.locator("#desktop-browser-status").innerText(), /独占控制中/);
+  assert.equal(await page.evaluate(() => window.__deletes.length), deletesBeforeAttach, "acquiring must not close Owner pages");
+  await page.evaluate(() => window.__panel.dispose());
+
+  // 6. Empty profile: the start page opens automatically once.
+  await reset(page, {__mode: "empty", __released: false, __opened: 0, __openedTabs: [], __opens: [], __granted: 0});
+  await waitFor(page, () => window.__opens.length > 0);
+  assert.equal(await page.evaluate(() => new URL(window.__opens[0]).pathname), "/browser-newtab");
+  assert.equal(await page.evaluate(() => window.__opens[0].startsWith("about:")), false);
+  await page.waitForSelector("[data-browser-tab]");
+  assert.match(await page.locator("[data-browser-tab]").first().getAttribute("title"), /browser-newtab/);
+  assert.equal(await page.evaluate(() => window.__opens.length), 1, "the start page opens once per grant");
+  assert.equal(await page.evaluate(() => window.__deletes.length), deletesBeforeAttach, "the start page must not replace Owner pages");
+  await page.evaluate(() => window.__panel.dispose());
+
+  // 7. Transfer then release, without inventing a second control path.
+  await reset(page, {__mode: "tabs", __released: false, __inUse: true, __transferred: false, __opens: [], __opened: 0, __openedTabs: [], __granted: 0});
   await page.waitForSelector("#desktop-browser-transfer", {timeout: 5000});
   assert.match(await page.locator("#desktop-browser-status").innerText(), /其他 Task 独占控制/);
   await page.click("#desktop-browser-transfer");
-  await waitFor(page, () => document.querySelector("#desktop-browser-release") !== null);
-  assert.match(await page.locator("#desktop-browser-status").innerText(), /独占控制中/);
-  await page.evaluate(() => window.__panel());
+  await waitFor(page, () => document.querySelector("#desktop-browser-switch") !== null);
+  await waitFor(page, () => window.__granted === 1);
+  await page.evaluate(() => window.__panel.dispose());
 
-  // Empty tabs: explicit empty state, then open a page under the same lease.
-  await page.evaluate(() => {
-    window.__mode = "empty";
-    window.__inUse = false;
-    window.__transferred = false;
-    window.__openedTabs = [];
-    window.__frames = 0;
-  });
-  await mount(page);
-  await page.waitForSelector("#desktop-browser-open-form");
-  assert.match(await page.locator("#desktop-browser-frame-status").innerText(), /还没有网页/);
-  const beforeOpen = await page.evaluate(() => window.__frames);
-  await page.fill("#desktop-browser-url", "https://example.com/opened");
-  await page.click("#desktop-browser-open-form button[type='submit']");
-  await page.waitForSelector("[data-browser-tab='browser_tab_opened']", {timeout: 5000});
-  await waitFor(page, count => window.__frames > count, {arg: beforeOpen});
-  await page.evaluate(() => window.__panel());
-
-  // Missing host: no frame traffic, explicit status, no console errors.
+  // 8. Missing host: explicit status, no frame traffic, no console errors.
   const framesBeforeHostDown = await page.evaluate(() => window.__frames);
-  await page.evaluate(() => {
-    window.__mode = "tabs";
-    window.__hostAvailable = false;
-  });
-  await mount(page);
+  await reset(page, {__mode: "tabs", __hostAvailable: false, __inUse: false, __transferred: false, __granted: 0});
   await page.waitForSelector("#desktop-browser-status");
   await page.waitForTimeout(400);
   assert.match(await page.locator("#desktop-browser-status").innerText(), /浏览器宿主不可用/);
   assert.equal(await page.evaluate(() => window.__frames), framesBeforeHostDown);
-  await page.evaluate(() => window.__panel());
+  assert.equal(await page.locator("#desktop-browser-retry").count(), 1);
+  await page.evaluate(() => window.__panel.dispose());
 
-  // A late 404 from the previous tab must not hide or stop the new tab.
-  await page.evaluate(() => {
-    window.__hostAvailable = true;
-    window.__staleError = true;
-    window.__frames = 0;
-  });
-  await mount(page);
+  // 9. A late 404 from the previous tab must not hide or stop the new tab.
+  await reset(page, {__mode: "tabs", __hostAvailable: true, __staleError: true, __frames: 0, __granted: 0});
   await page.waitForSelector("[data-browser-tab='browser_tab_2']", {timeout: 5000});
   await page.evaluate(() => {
     document.querySelector("[data-browser-tab='browser_tab_2']")
@@ -323,9 +395,21 @@ try {
   const staleStatus = await page.locator("#desktop-browser-frame-status").innerText();
   assert.match(staleStatus, /实时画面/);
   assert.doesNotMatch(staleStatus, /画面暂不可用/);
-  await page.evaluate(() => window.__panel());
+  await page.evaluate(() => window.__panel.dispose());
+
+  // The start page must load under the production CSP as a plain http(s) page.
+  const startPage = await browser.newPage();
+  const startErrors = [];
+  startPage.on("pageerror", error => startErrors.push(error.message));
+  await startPage.goto(`${base}/browser-newtab`, {waitUntil: "networkidle"});
+  assert.match(await startPage.title(), /新标签页/);
+  assert.equal(await startPage.locator('input[name="q"]').count(), 1);
+  assert.equal(await startPage.locator('form[action="https://www.bing.com/search"]').count(), 1);
+  assert.deepEqual(startErrors, []);
+  await startPage.close();
+
   assert.deepEqual(errors, []);
-  console.log("browser task panel exclusive preview verified");
+  console.log("browser task panel split surfaces, start page and preview verified");
 } finally {
   await browser?.close();
   server.close();

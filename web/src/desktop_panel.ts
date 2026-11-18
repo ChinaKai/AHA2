@@ -95,6 +95,13 @@ interface PointerDrag {
   startedAt: number;
   moved: boolean;
 }
+// Structural copy of the lazy browser panel handle so this module never has to
+// import the chunk statically.
+interface BrowserPanelHandle {
+  dispose: () => void;
+  release: () => boolean;
+  granted: () => boolean;
+}
 interface Binding {
   root: HTMLElement; state: PanelState; notify: Notice; timer: number;
   read: AbortController | null; write: AbortController | null; epoch: number;
@@ -114,7 +121,7 @@ interface Binding {
   removeLayout: () => void;
   previewWidth: number; previewHeight: number;
   removePopover: () => void;
-  browserDispose: (() => void) | null;
+  browserHandle: BrowserPanelHandle | null;
   listeners: Array<() => void>;
 }
 
@@ -413,6 +420,7 @@ export function renderDesktopPanel(detail: TaskDetail, header = ""): string {
         <p id="desktop-browser-surface-status" role="status"></p>
         <p class="field-help">浏览器窗口运行在宿主机的可见桌面中；下方画面只读转发当前 Task 已授权标签页的截图，不写入磁盘，也不转发点击、输入或滚动。</p>
       </section>
+      <section id="desktop-browser-control" class="desktop-browser-main" hidden></section>
       <div class="desktop-observation">
         <div id="desktop-viewport" class="desktop-viewport" title="移动端：单指双击为双击，双指轻点为右键，双指平行滑动为滚轮，双指捏合为缩放"><div id="desktop-preview" class="desktop-preview" hidden>
           <img id="desktop-image" alt="共享窗口画面" aria-label="共享画面控制区，移动端双指轻点为右键，双指平行滑动为滚轮，双指捏合为缩放" draggable="false" tabindex="-1">
@@ -713,6 +721,9 @@ function updateDOM(binding: Binding): void {
   if (browserTarget) browserTarget.hidden = !state.browserMode;
   const browserSurface = root.querySelector<HTMLElement>("#desktop-browser-surface");
   if (browserSurface) browserSurface.hidden = !state.browserMode;
+  const browserControl = root.querySelector<HTMLElement>("#desktop-browser-control");
+  if (browserControl) browserControl.hidden = !state.browserMode;
+  const browserGranted = state.browserMode && browserTarget?.dataset.granted === "true";
   if (state.browserMode) {
     text("#desktop-title", "内置浏览器");
     text("#desktop-process", browserTarget?.dataset.profile || "");
@@ -736,7 +747,10 @@ function updateDOM(binding: Binding): void {
   root.querySelector<HTMLElement>("#desktop-empty-target")!.hidden = Boolean(session) || state.browserMode;
   root.querySelector<HTMLButtonElement>("#desktop-refresh")!.disabled = Boolean(state.busy);
   // Revocation remains available even while a native operation is pending.
-  root.querySelector<HTMLButtonElement>("#desktop-stop")!.disabled = !session || state.denied || state.busy === "正在停止共享...";
+  // In browser mode the same header button releases the browser lease.
+  root.querySelector<HTMLButtonElement>("#desktop-stop")!.disabled = state.browserMode
+    ? !browserGranted
+    : !session || state.denied || state.busy === "正在停止共享...";
   if (!state.browserMode) {
     text("#desktop-title", session?.window.title || (session ? "无标题窗口" : "尚未共享窗口"));
     text("#desktop-process", session?.window.process || "");
@@ -1964,37 +1978,61 @@ function shareTarget(binding: Binding, createDesktop = false): void {
 // Owner switches the shared-control mode keeps the first-screen bundle flat.
 // The returned dispose stops the frame polling and revokes its object URLs.
 function mountBrowserTaskPanel(binding: Binding): void {
-  const container = binding.root.querySelector<HTMLElement>("#desktop-browser-target");
-  if (!container || binding.browserDispose) return;
-  container.dataset.mounted = "true";
+  const selector = binding.root.querySelector<HTMLElement>("#desktop-browser-target");
+  const container = binding.root.querySelector<HTMLElement>("#desktop-browser-control");
+  if (!selector || !container || binding.browserHandle) return;
+  selector.dataset.mounted = "true";
   let cancelled = false;
-  binding.browserDispose = () => { cancelled = true; };
+  binding.browserHandle = {
+    dispose: () => { cancelled = true; },
+    release: () => false,
+    granted: () => false,
+  };
   void import("./browser_task_panel.js").then(module => {
-    if (cancelled || !container.isConnected) return;
-    const dispose = module.mountBrowserTaskPanel({
+    if (cancelled || !selector.isConnected || !container.isConnected) return;
+    const handle = module.mountBrowserTaskPanel({
       container,
+      selector,
       taskID: binding.state.taskID,
       notify: binding.notify,
       onChange: () => updateDOM(binding),
+      // The targets popover is a picker: once a profile is controlled, close it
+      // and let the main panel own the tab strip, address bar and preview.
+      onGranted: () => setPopover(binding, ""),
+      onOpenTargets: () => setPopover(binding, "targets"),
     });
-    if (cancelled) { dispose(); return; }
-    binding.browserDispose = () => {
-      dispose();
-      container.dataset.mounted = "";
+    if (cancelled) { handle.dispose(); return; }
+    binding.browserHandle = {
+      dispose: () => {
+        handle.dispose();
+        selector.dataset.mounted = "";
+        selector.dataset.granted = "false";
+        delete selector.dataset.status;
+        delete selector.dataset.profile;
+        updateDOM(binding);
+      },
+      release: handle.release,
+      granted: handle.granted,
     };
+    updateDOM(binding);
   }).catch(error => {
-    binding.browserDispose = null;
-    container.dataset.mounted = "";
+    binding.browserHandle = null;
+    selector.dataset.mounted = "";
     container.innerHTML = `<p class="desktop-empty" role="alert">浏览器控制面板加载失败：${escapeHTML(error instanceof Error ? error.message : String(error))}</p>`;
   });
 }
 
 function disposeBrowserPanel(binding: Binding): void {
-  const dispose = binding.browserDispose;
-  binding.browserDispose = null;
-  dispose?.();
-  const container = binding.root.querySelector<HTMLElement>("#desktop-browser-target");
-  if (container) container.dataset.mounted = "";
+  const handle = binding.browserHandle;
+  binding.browserHandle = null;
+  handle?.dispose();
+  const selector = binding.root.querySelector<HTMLElement>("#desktop-browser-target");
+  if (selector) {
+    selector.dataset.mounted = "";
+    selector.dataset.granted = "false";
+    delete selector.dataset.status;
+    delete selector.dataset.profile;
+  }
 }
 
 export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
@@ -2014,7 +2052,7 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
     viewID: randomID(), socket: null, socketKey: "", socketGeneration: 0, socketReady: false, socketTimer: 0,
     retries: 0, retryAt: 0, retryKey: "", decoding: false, decoder: null, decodeTimer: 0, blobURLs: new Set(),
     imageURL: "", lastFrameAt: 0, lastStatusAt: 0, decodePending: 0, pendingText: null, removeLayout: () => {},
-    previewWidth: 0, previewHeight: 0, removePopover: () => {}, browserDispose: null, listeners: []};
+    previewWidth: 0, previewHeight: 0, removePopover: () => {}, browserHandle: null, listeners: []};
   active = binding;
   root.querySelectorAll<HTMLInputElement | HTMLButtonElement | HTMLTextAreaElement>(
     ".desktop-picture-bar button, .desktop-picture-bar input, .desktop-input-bar button, .desktop-input-bar textarea, .desktop-mouse button, .desktop-mouse input",
@@ -2305,6 +2343,12 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
   listen(binding, root.querySelector("#desktop-share"), "click", () => shareTarget(binding));
   listen(binding, root.querySelector("#desktop-new-desktop"), "click", () => shareTarget(binding, true));
   listen(binding, root.querySelector("#desktop-stop"), "click", () => {
+    // In browser mode the header stop releases the exclusive browser lease,
+    // mirroring the shared-desktop stop button.
+    if (state.browserMode && binding.browserHandle?.release()) {
+      setPopover(binding, "");
+      return;
+    }
     const session = state.status?.session;
     if (session) {
       setPopover(binding, "");

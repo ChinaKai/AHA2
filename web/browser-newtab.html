@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>新标签页 · AHA</title>
+  <!-- Served without authentication at /browser-newtab so the shared Edge
+       profile's real new tab can be an ordinary http(s) page. It carries no
+       task, owner, token, profile or browsing data. -->
+  <style>
+    :root { color-scheme: light; font-family: "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; background: #f3f6f4; color: #20242a; }
+    main { width: min(560px, calc(100vw - 40px)); padding: 36px 32px 30px; border: 1px solid #dfe5e1; border-radius: 14px; background: #fff; box-shadow: 0 10px 30px rgba(32, 36, 42, .08); }
+    .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+    .mark { width: 34px; height: 34px; border-radius: 9px; background: #23584d; color: #fff; display: grid; place-items: center; font-weight: 700; }
+    h1 { margin: 0; font-size: 19px; letter-spacing: .2px; }
+    p.hint { margin: 0 0 22px; color: #5c6660; font-size: 13px; }
+    form { display: flex; gap: 8px; }
+    input[type="search"] { flex: 1 1 auto; min-width: 0; height: 42px; padding: 0 13px; border: 1px solid #cfd8d2; border-radius: 9px; font-size: 14px; }
+    input[type="search"]:focus { outline: 2px solid #9bc0b6; outline-offset: 1px; }
+    button { height: 42px; padding: 0 18px; border: 0; border-radius: 9px; background: #23584d; color: #fff; font-size: 14px; cursor: pointer; }
+    button:hover { background: #1c4a40; }
+    nav { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
+    nav a { padding: 7px 12px; border: 1px solid #dfe5e1; border-radius: 999px; color: #23584d; font-size: 13px; text-decoration: none; }
+    nav a:hover { background: #eef5f2; }
+    footer { margin-top: 22px; color: #8a938d; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="brand"><span class="mark">A</span><h1>AHA 内置浏览器</h1></div>
+    <p class="hint">这是 AHA 提供的本地开始页，只会加载你输入的内容。</p>
+    <form action="https://www.bing.com/search" method="get" role="search">
+      <input type="search" name="q" placeholder="搜索网页" aria-label="搜索网页" autocomplete="off" autofocus>
+      <button type="submit">搜索</button>
+    </form>
+    <nav aria-label="快捷入口">
+      <a href="#tasks">当前任务</a>
+      <a href="#resources?tab=browser">浏览器资源</a>
+      <a href="#knowledge">知识库</a>
+    </nav>
+    <footer>由 AHA2 浏览器宿主打开 · 页面不含账号或浏览器数据</footer>
+  </main>
+</body>
+</html>

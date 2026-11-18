@@ -24,6 +24,12 @@ func (s *Server) serveWeb(writer http.ResponseWriter, request *http.Request) {
 	if requestPath == "." || requestPath == "" {
 		requestPath = "index.html"
 	}
+	// The shared browser's start page is an ordinary http(s) URL because the
+	// host only accepts http/https tabs. It is a static, data-free page and does
+	// not go through the SPA fallback (which would boot the whole app).
+	if requestPath == "browser-newtab" {
+		requestPath = "browser-newtab.html"
+	}
 	data, err := fs.ReadFile(s.web, requestPath)
 	if err != nil && path.Ext(requestPath) == "" && !strings.HasPrefix(requestPath, "api/") {
 		requestPath = "index.html"

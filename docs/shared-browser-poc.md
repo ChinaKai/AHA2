@@ -98,10 +98,14 @@ Playwright 前返回 409 `browser_lease_hold_failed`；恢复 SQL 失败会记�
 `GET /v1/profiles/{id}/tabs?session_id=`，完整枚举窗口当前的 http(s) 页面
 （不再截断到固定条数，页面元数据有界并发读取），再同步进
 `browser_tabs`：新发现的页面标记 `origin=owner`，已有 AHA 页面保留 `agent`。
-`devtools://`、`edge://`、`chrome://`、`about:` 不会出现。schema v150 的
-`browser_tabs(session_id, host_tab_id) WHERE host_tab_id <> ''` 唯一索引保留，
-迁移会去重旧行；它只防止同一 host 页面出现重复记录，不阻止当前独占 Task 操作
-Owner 手动打开的页面。
+`devtools://`、`edge://`、`chrome://`、`about:` 不会出现。Web 面板的新标签页因此
+不使用 about:blank 或 edge://newtab，而是打开 AHA 自己的静态 http(s) 开始页
+`/browser-newtab`（`web/browser-newtab.html`，无账号、任务或浏览数据，Edge 可直接
+加载并在 host 的页面列表中枚举）。获取独占控制后若没有任何 http(s) 页面，面板会
+自动打开一次开始页；点击标签栏的“＋”也会打开它，且不会关闭 Owner 已开的页面。
+schema v150 的 `browser_tabs(session_id, host_tab_id) WHERE host_tab_id <> ''`
+唯一索引保留，迁移会去重旧行；它只防止同一 host 页面出现重复记录，不阻止当前
+独占 Task 操作 Owner 手动打开的页面。
 
 host 收藏夹读取 `<profile>/Default/Bookmarks`，只解析
 `bookmark_bar/other/synced` 下的 title/url/folder，最多 500 条、深度 8；文件不存在

@@ -32,6 +32,9 @@ async function writeAssets(target) {
   await copyFile(resolve(root, "assets", "aha-logo.svg"), resolve(target, "assets", "aha-logo.svg"));
   await copyFile(resolve(root, "assets", "aha2-logo.png"), resolve(target, "assets", "aha2-logo.png"));
   await copyFile(resolve(root, "assets", "aha2.ico"), resolve(target, "favicon.ico"));
+  // Static start page for the shared browser's new tabs. Served at
+  // /browser-newtab by internal/httpapi/web.go; no script or data.
+  await copyFile(resolve(source, "browser-newtab.html"), resolve(target, "browser-newtab.html"));
   for (const name of ["xterm.js", "xterm.css", "xterm.LICENSE"]) {
     await copyFile(resolve(source, "vendor", name), resolve(target, "vendor", name));
   }

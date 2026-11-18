@@ -888,13 +888,12 @@ body.task-tool-resizing { cursor: col-resize; user-select: none; }
 .browser-profile-dialog { width: min(520px, calc(100vw - 32px)); }
 .browser-profile-dialog form { display: grid; gap: 12px; }
 .desktop-browser-target { position: relative; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
-.desktop-browser-open { display: grid; flex: 0 0 auto; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
-.desktop-browser-open input { min-width: 0; }
 #desktop-display-target { display: grid; gap: 10px; }
 .desktop-browser-surface { display: grid; gap: 8px; padding: 14px; border: 1px solid var(--line); border-radius: 6px; background: #f8fafc; }
 .desktop-browser-surface p { margin: 0; }
-/* One compact toolbar row: profile picker, refresh, and exactly one of
-   attach/transfer/release plus the bookmark drawer toggle. */
+/* The targets popover keeps one compact row: profile picker, refresh, and
+   exactly one of attach/transfer/switch. The browser surfaces live in the
+   main panel below. */
 .desktop-browser-toolbar { display: flex; flex: 0 0 auto; flex-wrap: nowrap; align-items: center; gap: 6px; min-width: 0; }
 .desktop-browser-profile-label { display: flex; flex: 1 1 0; align-items: center; gap: 6px; min-width: 0; margin: 0; }
 .desktop-browser-profile-label > span { flex: 0 0 auto; color: var(--muted); font-size: 11px; font-weight: 650; }
@@ -913,54 +912,69 @@ body.task-tool-resizing { cursor: col-resize; user-select: none; }
 .desktop-browser-empty-state strong { color: var(--color-text); font-size: 13px; }
 .desktop-browser-empty-state p { margin: 0; max-width: 34ch; font-size: 12px; line-height: 1.55; }
 .desktop-browser-empty-state .desktop-browser-cta { align-self: center; margin-top: 2px; }
-/* The preview sits directly under the status/address bar so it is visible
-   before any list at the default panel size. */
-.desktop-browser-preview { flex: 0 0 auto; display: grid; gap: 6px; margin: 0; }
-.desktop-browser-preview img { display: block; width: 100%; max-height: min(52vh, 380px); border: 1px solid var(--line); border-radius: 6px; background: #0f172a; object-fit: contain; }
-.desktop-browser-preview img[hidden] { display: none; }
-.desktop-browser-preview p { margin: 0; }
-/* Tabs are one horizontally scrollable strip: title + host only, full URL in
-   the button title. This keeps OAuth URLs from wrapping over several lines. */
-.desktop-browser-tabs { flex: 0 0 auto; display: flex; gap: 6px; margin: 0; padding: 0 0 2px; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; list-style: none; scroll-snap-type: x proximity; }
-.desktop-browser-tabs li { flex: 0 0 auto; min-width: 0; padding: 0; border: 1px solid var(--line); border-radius: 6px; background: #fff; scroll-snap-align: start; }
-.desktop-browser-tabs li.desktop-empty { flex: 1 1 100%; padding: 6px 8px; border-style: dashed; }
-.desktop-browser-tabs li.desktop-browser-tab-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; width: clamp(160px, 58%, 230px); }
-.desktop-browser-tab-item .desktop-browser-tab { min-width: 0; }
-.desktop-browser-tab-close { flex: 0 0 auto; width: 26px; min-width: 26px; height: 100%; min-height: 26px; margin-right: 2px; padding: 0; border: 0; background: transparent; color: var(--muted); }
-.desktop-browser-tab { display: grid; grid-template-columns: minmax(0, 1fr); justify-content: stretch; justify-items: stretch; gap: 1px; width: 100%; min-height: 0; padding: 5px 7px; border: 0; border-radius: 5px; background: transparent; color: inherit; text-align: left; }
-.desktop-browser-tab-title { overflow: hidden; font-size: 12px; font-weight: 650; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
-.desktop-browser-tab-meta { display: flex; align-items: center; gap: 5px; min-width: 0; color: var(--muted); font-size: 11px; line-height: 1.35; }
-.desktop-browser-tab-host { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.desktop-browser-tab-origin { flex: 0 0 auto; padding: 0 4px; border-radius: 3px; background: var(--surface-soft); color: var(--color-text-subtle); font-size: 11px; }
-.desktop-browser-tab-current { flex: 0 0 auto; color: var(--color-info-ink); font-weight: 700; }
+/* The main panel is the browser: Edge-style tab strip on top, then address
+   bar, bookmark bar and the read-only preview. */
+.desktop-browser-main { flex: 1 1 0; min-width: 0; min-height: 0; overflow-x: hidden; overflow-y: auto; padding: 8px; border-bottom: 1px solid var(--line); background: #f3f5f7; }
+.desktop-browser-main[hidden] { display: none; }
+.desktop-browser-shell { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.desktop-browser-tabstrip { display: flex; align-items: stretch; gap: 4px; min-width: 0; }
+.desktop-browser-tabs { flex: 1 1 0; display: flex; gap: 4px; min-width: 0; margin: 0; padding: 0 0 2px; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; list-style: none; scroll-snap-type: x proximity; }
+.desktop-browser-tabs li { flex: 0 0 auto; min-width: 0; padding: 0; scroll-snap-align: start; }
+.desktop-browser-tabs li.desktop-empty { flex: 1 1 100%; padding: 6px 8px; border: 1px dashed var(--line-strong); border-radius: 6px; }
+.desktop-browser-tabs li.desktop-browser-tab-item { display: flex; align-items: center; width: clamp(132px, 46%, 200px); border: 1px solid var(--line); border-radius: 7px; background: #fff; }
+.desktop-browser-tab { display: flex; flex: 1 1 auto; align-items: center; gap: 6px; min-width: 0; min-height: 0; padding: 5px 6px; border: 0; border-radius: 6px; background: transparent; color: inherit; text-align: left; }
+.desktop-browser-tab-favicon, .desktop-browser-bookmark-favicon { flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; border-radius: 3px; background: var(--color-info-soft); color: var(--color-info-ink); font-size: 9px; font-weight: 700; line-height: 1; }
+.desktop-browser-tab-title { min-width: 0; flex: 1 1 auto; overflow: hidden; font-size: 12px; font-weight: 600; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
+.desktop-browser-tab-origin { flex: 0 0 auto; padding: 0 3px; border-radius: 3px; background: var(--surface-soft); color: var(--color-text-subtle); font-size: 9px; font-weight: 600; line-height: 1.5; }
+.desktop-browser-tab-close { flex: 0 0 auto; width: 22px; min-width: 22px; height: 22px; min-height: 22px; margin-right: 2px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--muted); }
+.desktop-browser-tab-close:hover { background: var(--color-surface-muted); color: var(--color-text); }
 .desktop-browser-tab.active { background: var(--color-info-soft); box-shadow: inset 0 0 0 1px #b9d2e8; color: var(--color-info-ink); }
 .desktop-browser-tab:hover:not(.active) { background: var(--color-surface-muted); }
-/* The bookmark drawer opens below the tab strip, after the preview in flow,
-   so expanding it never pushes or covers the live frame. */
-.desktop-browser-bookmarks-anchor { flex: 0 0 auto; display: grid; }
-.desktop-browser-bookmarks { display: grid; grid-template-rows: auto minmax(0, 1fr); gap: 6px; max-height: min(42vh, 320px); padding: 8px; border: 1px solid var(--color-border-strong); border-radius: var(--radius-card); background: var(--color-surface); box-shadow: var(--shadow-popover); }
-.desktop-browser-bookmarks[hidden] { display: none; }
-.desktop-browser-bookmarks-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.desktop-browser-bookmarks-head strong { font-size: 12px; }
-.desktop-browser-bookmarks-head .icon-button { width: 26px; min-width: 26px; height: 26px; min-height: 26px; padding: 0; }
-.desktop-browser-bookmarks ul { display: grid; gap: 4px; margin: 0; padding: 0; overflow-y: auto; overscroll-behavior: contain; list-style: none; }
-.desktop-browser-bookmarks li { display: grid; min-width: 0; }
-.desktop-browser-bookmarks li button { display: grid; grid-template-columns: minmax(0, 1fr); justify-content: stretch; justify-items: stretch; gap: 2px; width: 100%; min-width: 0; padding: 5px 7px; border: 1px solid var(--line); border-radius: 5px; background: var(--color-surface-muted); color: inherit; text-align: left; }
-.desktop-browser-bookmarks li button span { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.desktop-browser-bookmarks small { overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.desktop-browser-newtab { flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; width: 30px; min-width: 30px; height: 30px; min-height: 30px; padding: 0; border: 1px solid var(--line); border-radius: 7px; background: #fff; color: var(--muted); }
+.desktop-browser-newtab:hover { background: var(--color-surface-muted); color: var(--color-text); }
+.desktop-browser-open { display: grid; flex: 0 0 auto; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
+.desktop-browser-open input { min-width: 0; height: 30px; }
+.desktop-browser-open button { height: 30px; min-height: 30px; padding: 0 10px; font-size: 12px; }
+/* One horizontal bookmark bar; long URLs stay in title attributes and folder
+   chips open a menu instead of stacking full addresses vertically. */
+.desktop-browser-bookmarkbar { position: relative; display: flex; align-items: center; gap: 4px; min-width: 0; padding: 3px 4px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+.desktop-browser-bookmark-items { flex: 1 1 0; display: flex; align-items: center; gap: 4px; min-width: 0; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; white-space: nowrap; }
+.desktop-browser-bookmark { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 4px; max-width: 150px; min-height: 26px; padding: 2px 6px; border: 0; border-radius: 5px; background: transparent; color: inherit; font-size: 12px; }
+.desktop-browser-bookmark:hover { background: var(--color-surface-muted); }
+.desktop-browser-bookmark-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.desktop-browser-bookmark-folder .icon { width: 13px; height: 13px; color: var(--muted); }
+.desktop-browser-bookmark-empty { padding: 2px 4px; color: var(--muted); font-size: 11px; }
+.desktop-browser-bookmarks-more { flex: 0 0 auto; width: 24px; min-width: 24px; height: 24px; min-height: 24px; padding: 0; }
+.desktop-browser-bookmarks-more[hidden] { display: none; }
+.desktop-browser-bookmark-menu { position: absolute; top: calc(100% + 4px); right: 0; z-index: 30; display: grid; gap: 4px; width: min(300px, 100%); max-height: min(45vh, 320px); overflow: auto; padding: 6px; border: 1px solid var(--color-border-strong); border-radius: var(--radius-card); background: var(--color-surface); box-shadow: var(--shadow-popover); }
+.desktop-browser-bookmark-menu[hidden] { display: none; }
+.desktop-browser-bookmark-menu-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.desktop-browser-bookmark-menu-head strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.desktop-browser-bookmark-menu-head .icon-button { width: 22px; min-width: 22px; height: 22px; min-height: 22px; padding: 0; }
+.desktop-browser-bookmark-menu ul { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.desktop-browser-bookmark-menu li { min-width: 0; }
+.desktop-browser-bookmark-menu li button { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; min-width: 0; min-height: 28px; padding: 4px 6px; border: 0; border-radius: 5px; background: transparent; color: inherit; text-align: left; }
+.desktop-browser-bookmark-menu li button:hover { background: var(--color-surface-muted); }
+.desktop-browser-bookmark-menu li button span { min-width: 0; overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.desktop-browser-bookmark-menu li button small { flex: 0 0 auto; max-width: 45%; overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.desktop-browser-bookmark-menu-folder { padding: 4px 6px 1px; color: var(--muted); font-size: 10px; font-weight: 700; }
+.desktop-browser-bookmark-menu-empty { padding: 6px; color: var(--muted); font-size: 11px; }
+.desktop-browser-preview { flex: 0 0 auto; display: grid; gap: 6px; margin: 0; }
+.desktop-browser-preview img { display: block; width: 100%; max-height: min(48vh, 360px); border: 1px solid var(--line); border-radius: 6px; background: #0f172a; object-fit: contain; }
+.desktop-browser-preview img[hidden] { display: none; }
+.desktop-browser-preview p { margin: 0; }
 /* Narrow panels: the profile picker takes its own row so the control buttons
    stay reachable instead of being squeezed off the edge. */
 @container shared-desktop (max-width: 380px) {
   .desktop-browser-toolbar { flex-wrap: wrap; }
   .desktop-browser-profile-label { flex: 1 1 100%; }
 }
-/* Keep the grid rows at their natural height. Without this, the popover's
-   stretched auto rows redistribute free space when the bookmark drawer adds
-   content, which shifts the preview upward instead of growing the card. */
 .desktop-tool.browser-mode #desktop-targets-popover { align-content: start; }
 .desktop-tool.browser-mode #desktop-picture-controls,
 .desktop-tool.browser-mode .desktop-observation,
 .desktop-tool.browser-mode #desktop-input { display: none; }
+.desktop-tool.browser-mode #desktop-browser-surface { padding: 8px 10px; }
+.desktop-tool.browser-mode #desktop-browser-surface .field-help { display: none; }
 .hardware-console { display: grid; grid-template-rows: 46px minmax(0,1fr) auto auto; min-width: 0; min-height: 0; background: #11151b; }
 .hardware-console-toolbar { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 6px 8px; border-bottom: 1px solid #303743; background: #f8fafc; }
 .hardware-transport-switch { display: flex; overflow: hidden; border: 1px solid #cfd5dc; border-radius: 5px; }
