@@ -150,6 +150,15 @@ func (s *Service) mcpRuntimeForTask(ctx context.Context, task domain.Task, agent
 					seenNamespaces[normalizedMCPIdentifier("aha2-pet")] = server.ID
 					continue
 				}
+				// The whole normalized aha2_* range is reserved, not just the
+				// names of the built-in servers. Legacy rows can predate the
+				// save-time check, so stop before refresh, server append and
+				// allowlist construction; otherwise an unknown suffix such as
+				// AHA2-extra would be diagnosed by the catalog but still injected.
+				if reservedMCPIdentifier(server.ID) {
+					log.Printf("mcp server %s skipped: normalized namespace uses the reserved aha2_* range", server.ID)
+					continue
+				}
 				namespace := normalizedMCPIdentifier(server.ID)
 				if builtin, reserved := builtinNamespaces[namespace]; reserved {
 					log.Printf("mcp server %s skipped: normalized namespace collides with built-in %s", server.ID, builtin)

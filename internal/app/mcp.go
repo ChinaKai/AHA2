@@ -196,7 +196,9 @@ func isBuiltinMCPIdentifier(value string) bool {
 // reservedMCPIdentifier reports whether a server ID or display name falls in
 // the aha2_* namespace reserved for built-in, Turn-scoped MCP servers. A user
 // server must never shadow a built-in tool namespace, including a hyphen, dot
-// or case variant that a backend would normalize onto the same key.
+// or case variant that a backend would normalize onto the same key. Catalog
+// diagnostics and runtime injection both use this helper so a legacy row
+// cannot be diagnosed yet still injected.
 func reservedMCPIdentifier(value string) bool {
 	return strings.HasPrefix(normalizedMCPIdentifier(value), "aha2_")
 }

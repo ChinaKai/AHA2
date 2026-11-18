@@ -125,3 +125,81 @@ func TestLegacyMCPNamespaceConflictsAreDiagnosedAndSkipped(t *testing.T) {
 		t.Fatalf("diagnosed=%d want 3: %#v", diagnosed, listed)
 	}
 }
+
+func TestLegacyReservedNamespaceCannotEnterRuntime(t *testing.T) {
+	ctx, database, service, task, model := newStreamCompatFixture(t)
+	now := time.Now().UTC()
+	reservedIDs := []string{"AHA2-extra", "AHA2.extra", "aha2-extra", "AHA2_extra"}
+	items := make([]domain.MCPServer, 0, len(reservedIDs)+1)
+	for _, id := range reservedIDs {
+		items = append(items, domain.MCPServer{
+			ID: id, Name: "legacy " + id, Transport: "http", URL: "https://example.test/" + id,
+			Tools: []domain.MCPTool{{Name: "echo"}}, Enabled: true,
+			CreatedAt: now, UpdatedAt: now, LastCheckedAt: now,
+		})
+	}
+	items = append(items, domain.MCPServer{
+		ID: "mcp-local", Name: "legitimate local", Transport: "http", URL: "https://example.test/local",
+		Tools: []domain.MCPTool{{Name: "echo"}}, Enabled: true,
+		CreatedAt: now, UpdatedAt: now, LastCheckedAt: now,
+	})
+	for _, item := range items {
+		if err := database.UpsertMCPServer(ctx, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	selected := append(append([]string{}, reservedIDs...), "mcp-local")
+	runtimeTask, err := service.CreateTask(ctx, CreateTaskInput{
+		ProjectID: task.ProjectID, WorkspaceID: task.WorkspaceID, Title: "reserved legacy mcp",
+		Request: "reserved legacy mcp", ModelID: model.ID, Backend: "claude", Isolation: "inplace",
+		StartMode: "manual", MCPServerIDs: selected,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	servers, allowed := service.mcpRuntimeForTurn(ctx, runtimeTask, "main", "http://127.0.0.1:8766")
+	for _, server := range servers {
+		if normalizedMCPIdentifier(server.Name) == "aha2_extra" {
+			t.Fatalf("reserved legacy server entered runtime: %#v", servers)
+		}
+	}
+	for _, name := range allowed {
+		lower := strings.ToLower(name)
+		for _, fragment := range []string{"aha2-extra", "aha2.extra", "aha2_extra"} {
+			if strings.Contains(lower, fragment) {
+				t.Fatalf("reserved legacy namespace leaked into allowlist: %q", name)
+			}
+		}
+	}
+	legitimateServer, legitimateTool := false, false
+	for _, server := range servers {
+		if server.Name == "mcp-local" {
+			legitimateServer = true
+		}
+	}
+	for _, name := range allowed {
+		if name == "mcp__mcp-local__echo" {
+			legitimateTool = true
+		}
+	}
+	if !legitimateServer || !legitimateTool {
+		t.Fatalf("legitimate server was affected: server=%v tool=%v servers=%#v allowed=%#v",
+			legitimateServer, legitimateTool, servers, allowed)
+	}
+
+	listed, err := service.MCPServers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	diagnosed := map[string]bool{}
+	for _, item := range listed {
+		if item.Health == "error" && item.LastError != "" {
+			diagnosed[item.ID] = true
+		}
+	}
+	for _, id := range reservedIDs {
+		if !diagnosed[id] {
+			t.Fatalf("reserved legacy server %q was not diagnosed: %#v", id, listed)
+		}
+	}
+}
