@@ -489,6 +489,9 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 		Emit: func(event knowledgevault.SyncEvent) {
 			appService.RecordKnowledgeSyncEvent(context.Background(), event.Kind, event.Detail)
 		},
+		Recovered: func() {
+			_, _ = appService.ResolveKnowledgeSyncNotifications(context.Background())
+		},
 	})
 	knowledgeVaultManager.SetAutoCommitRequester(knowledgeVaultSyncer.NotifyWrite)
 	knowledgeVaultSyncer.Start(ctx)

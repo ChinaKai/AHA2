@@ -21,8 +21,13 @@ const (
 	petWorkStateMaxTurnResultChars  = 20000
 	// petWorkStateDefaultBudgetBytes is a safety net for unusually large
 	// approvals: when the default view would exceed it, the oldest history
-	// rows are dropped (never inspection/open_tasks/core/loops/agenda).
+	// rows are dropped (never inspection/open_tasks/core/loops/agenda) and
+	// notification details are shortened while their id/kind/at/status stay.
 	petWorkStateDefaultBudgetBytes = 16 * 1024
+	// knowledgeSyncNotificationMinDetailRunes is the floor used when the
+	// default budget has to shorten notification prose. Identity and status are
+	// never trimmed, so the pet can still ack or resolve the right row.
+	knowledgeSyncNotificationMinDetailRunes = 24
 	// Pet events include control/approval rows that are not part of the work
 	// list, so read a wider window than the requested item count.
 	petWorkStateEventWindowMin     = 100
@@ -132,22 +137,29 @@ type PetInspection struct {
 type PetWorkState struct {
 	PendingApprovals int                  `json:"pending_approvals"`
 	Approvals        []domain.PetApproval `json:"approvals"`
-	Work             []PetWorkItem        `json:"work"`
-	OpenTasks        []PetOpenTask        `json:"open_tasks"`
-	Inspection       PetInspection        `json:"inspection"`
-	Core             PetCoreDigest        `json:"core"`
-	OpenLoops        string               `json:"open_loops,omitempty"`
-	OpenLoopsPath    string               `json:"open_loops_path,omitempty"`
-	OpenLoopsNote    string               `json:"open_loops_note,omitempty"`
-	Agenda           string               `json:"agenda,omitempty"`
-	AgendaPath       string               `json:"agenda_path,omitempty"`
-	AgendaNote       string               `json:"agenda_note,omitempty"`
-	LabPath          string               `json:"lab_path,omitempty"`
-	Note             string               `json:"note,omitempty"`
+	// Notifications are unresolved background sync problems the pet must
+	// handle. They are kept separate from Work because Work treats Detail as a
+	// target id; a conflict detail is prose plus file names.
+	Notifications []PetNotification `json:"notifications"`
+	Work          []PetWorkItem     `json:"work"`
+	OpenTasks     []PetOpenTask     `json:"open_tasks"`
+	Inspection    PetInspection     `json:"inspection"`
+	Core          PetCoreDigest     `json:"core"`
+	OpenLoops     string            `json:"open_loops,omitempty"`
+	OpenLoopsPath string            `json:"open_loops_path,omitempty"`
+	OpenLoopsNote string            `json:"open_loops_note,omitempty"`
+	Agenda        string            `json:"agenda,omitempty"`
+	AgendaPath    string            `json:"agenda_path,omitempty"`
+	AgendaNote    string            `json:"agenda_note,omitempty"`
+	LabPath       string            `json:"lab_path,omitempty"`
+	Note          string            `json:"note,omitempty"`
 	// HistoryTruncated reports that the default 16 KB budget dropped older
 	// approvals/work rows. Callers can set history_limit=50 or
 	// include_turn_results=true to expand explicitly.
 	HistoryTruncated bool `json:"history_truncated,omitempty"`
+	// NotificationsTruncated reports that the default budget shortened some
+	// notification Detail text. Every notification keeps its id/kind/at/status.
+	NotificationsTruncated bool `json:"notifications_truncated,omitempty"`
 }
 
 // PetWorkStateOptions controls the size of the wake-up briefing. The zero value
@@ -227,10 +239,16 @@ func (s *Service) PetWorkStateWithOptions(ctx context.Context, opts PetWorkState
 		Core:      core,
 		Approvals: approvals, PendingApprovals: len(pendingApprovals),
 		OpenTasks: openTasks, Inspection: s.petInspection(ctx, tasks, pendingApprovals, openTaskTotal, attentionTasks),
-		Work:      make([]PetWorkItem, 0),
-		OpenLoops: loops, OpenLoopsPath: s.petOpenLoopsPath(ctx), OpenLoopsNote: petLoopsNote(loops),
+		Notifications: make([]PetNotification, 0),
+		Work:          make([]PetWorkItem, 0),
+		OpenLoops:     loops, OpenLoopsPath: s.petOpenLoopsPath(ctx), OpenLoopsNote: petLoopsNote(loops),
 		Agenda: agenda, AgendaPath: s.petAgendaPath(ctx), AgendaNote: petAgendaNote(agenda),
 		LabPath: s.petLabPath(ctx),
+	}
+	// A notification read failure must not take down the wake-up briefing: the
+	// pet can still work from approvals/tasks, and the next wake retries.
+	if notifications, notificationErr := s.KnowledgeSyncNotifications(ctx); notificationErr == nil {
+		state.Notifications = notifications
 	}
 	if opts.HistoryLimit > 0 {
 		eventWindow := opts.HistoryLimit * petWorkStateEventWindowPerItem
@@ -330,10 +348,11 @@ func (s *Service) PetWorkStateWithOptions(ctx context.Context, opts PetWorkState
 	return state, nil
 }
 
-// fitDefaultBudget drops the oldest approval/work rows until the marshaled
-// briefing fits the default MCP result budget. Fixed fields (inspection,
-// open_tasks, core, open_loops, agenda) are never trimmed because the pet
-// relies on them to make decisions.
+// fitDefaultBudget drops the oldest approval/work rows and shortens
+// notification detail until the marshaled briefing fits the default MCP result
+// budget. Fixed fields (inspection, open_tasks, core, open_loops, agenda) and
+// the notification identity/status are never removed because the pet relies on
+// them to make decisions and to acknowledge the right row.
 func (state *PetWorkState) fitDefaultBudget(limit int) {
 	data, err := json.Marshal(state)
 	if err != nil || len(data) <= limit {
@@ -362,10 +381,54 @@ func (state *PetWorkState) fitDefaultBudget(limit int) {
 			return
 		}
 	}
+	// Notification details are prose, not history rows: shrink them instead of
+	// dropping rows so an unresolved conflict still has its id, kind and status.
+	// Set the marker before measuring so its bytes count against the budget.
+	notificationsTrimmed := false
+	if len(data) > limit && len(state.Notifications) > 0 {
+		state.NotificationsTruncated = true
+		data, err = json.Marshal(state)
+		if err != nil {
+			return
+		}
+		for len(data) > limit && trimNotificationDetails(state) {
+			notificationsTrimmed = true
+			data, err = json.Marshal(state)
+			if err != nil {
+				return
+			}
+		}
+		// Turning the marker off only shrinks the payload, so the measured
+		// fitting result stays valid.
+		state.NotificationsTruncated = notificationsTrimmed
+	}
 	if len(state.Approvals) == fullApprovals && len(state.Work) == fullWork {
-		// Only fixed fields exceed the budget; no history row was dropped.
+		// No history row was dropped; only fixed fields or notification prose
+		// were trimmed, and the latter has its own flag.
 		state.HistoryTruncated = false
 	}
+}
+
+// trimNotificationDetails halves every detail that is still longer than the
+// floor and reports whether anything changed. The target never falls below the
+// floor, so a 25-rune detail becomes 24 runes, not 12. ID, kind, time and
+// status are left untouched.
+func trimNotificationDetails(state *PetWorkState) bool {
+	changed := false
+	for index := range state.Notifications {
+		detail := state.Notifications[index].Detail
+		runes := []rune(detail)
+		if len(runes) <= knowledgeSyncNotificationMinDetailRunes {
+			continue
+		}
+		target := len(runes) / 2
+		if target < knowledgeSyncNotificationMinDetailRunes {
+			target = knowledgeSyncNotificationMinDetailRunes
+		}
+		state.Notifications[index].Detail = truncateAssistantText(detail, target)
+		changed = true
+	}
+	return changed
 }
 
 func petWorkStateTurnResult(value string, chars int) string {

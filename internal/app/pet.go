@@ -781,7 +781,7 @@ func allPetMCPTools() []gateway.ChatTool {
 
 func petToolAllowed(assistant domain.OwnerAssistant, name string) bool {
 	switch name {
-	case "aha_overview", "aha_pet_work_state", "aha_pet_permissions", "aha_request_permission_change", "aha_capabilities", "pet_request_approval", "pet_list_approvals", "pet_submit_idea":
+	case "aha_overview", "aha_pet_work_state", "aha_pet_permissions", "aha_request_permission_change", "aha_capabilities", "pet_request_approval", "pet_list_approvals", "pet_submit_idea", "aha_ack_knowledge_sync_notification":
 		return true
 	case "pet_say", "pet_play", "pet_move_to", "pet_walk_path", "pet_mood", "pet_open_task", "pet_thinking", "pet_sleep", "pet_wake",
 		"pet_update_core", "pet_write_worklog":
@@ -844,7 +844,7 @@ func ahaPetTools() []gateway.ChatTool {
 		{Name: "aha_overview", Description: "只读查看 AHA2 项目、任务、渠道的汇总和需要关注的任务", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{},
 		}},
-		{Name: "aha_pet_work_state", Description: "开始工作前查看：巡检快照、所有未关闭的宠物任务、审批和最近 Task 进展。默认只返回最近 8 条审批/工作动态且不含 last_turn_result（响应控制在 16KB 内，history_truncated 表示默认预算压掉了历史）；需要完整历史时传 history_limit（最多 50）和 include_turn_results=true，单任务详情用 aha_task_detail/aha_task_turns", Parameters: map[string]any{
+		{Name: "aha_pet_work_state", Description: "开始工作前查看：巡检快照、所有未关闭的宠物任务、审批、未处理的知识库自动同步异常（notifications）和最近 Task 进展。默认只返回最近 8 条审批/工作动态且不含 last_turn_result（响应控制在 16KB 内，history_truncated 表示默认预算压掉了历史）；需要完整历史时传 history_limit（最多 50）和 include_turn_results=true，单任务详情用 aha_task_detail/aha_task_turns", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"history_limit": map[string]any{
 					"type": "integer", "minimum": 0, "maximum": 50,
@@ -859,6 +859,14 @@ func ahaPetTools() []gateway.ChatTool {
 					"description": "include_turn_results=true 时 last_turn_result 的最大字符数；0 或缺省表示不截断",
 				},
 			},
+		}},
+		{Name: "aha_ack_knowledge_sync_notification", Description: "把已看过的知识库自动同步通知标记为已处理（只改通知状态，不会恢复自动同步，也不解决 Git 分叉）；真正修复后仍需手动 pull/push/sync 或等自动同步成功", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"ids": map[string]any{
+					"type": "array", "minItems": 1, "items": map[string]any{"type": "string"},
+					"description": "aha_pet_work_state 返回的 notifications[].id",
+				},
+			}, "required": []string{"ids"},
 		}},
 		{Name: "aha_pet_permissions", Description: "只读查看当前宠物权限开关", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{},
@@ -1680,10 +1688,66 @@ func ahaPetTools() []gateway.ChatTool {
 	}
 }
 
-// PetMCPTool dispatches the pet MCP surface. Pet action tools still go through
-// the validated ControlOwnerPet path; AHA read tools and approval requests are
-// handled here.
+// PetMCPTool dispatches the pet MCP surface without a caller identity. It is
+// for in-process callers and tests; the loopback HTTP endpoint must use
+// PetMCPToolForTask so identity-gated tools can verify the agent capability
+// belongs to the pet Task.
 func (s *Service) PetMCPTool(ctx context.Context, name string, args json.RawMessage) (string, error) {
+	return s.petMCPTool(ctx, "", name, args)
+}
+
+// petMCPReadOnlyTools are the pet MCP tools that only read state. Read-only
+// tools accept any identity, including none, for compatibility; every tool
+// outside this set requires the pet Task's capability so another Task cannot
+// mutate or create approvals through this endpoint.
+var petMCPReadOnlyTools = map[string]bool{
+	"aha_overview":                  true,
+	"aha_pet_work_state":            true,
+	"aha_pet_permissions":           true,
+	"aha_capabilities":              true,
+	"aha_task_detail":               true,
+	"aha_task_conversation":         true,
+	"aha_task_turns":                true,
+	"aha_list_projects":             true,
+	"aha_list_remote_tasks":         true,
+	"aha_list_knowledge":            true,
+	"aha_knowledge_detail":          true,
+	"aha_list_skills":               true,
+	"aha_skill_detail":              true,
+	"aha_list_prompt_templates":     true,
+	"aha_prompt_template_detail":    true,
+	"aha_list_channels":             true,
+	"aha_channel_detail":            true,
+	"aha_list_channel_destinations": true,
+	"aha_channel_contacts":          true,
+	"aha_system_settings":           true,
+	"aha_model_catalog":             true,
+	"aha_list_task_attachments":     true,
+	"aha_hardware_resources":        true,
+	"aha_task_hardware":             true,
+	"aha_mail_resources":            true,
+	"aha_task_mail":                 true,
+	"aha_task_channel_route":        true,
+	"aha_list_mcp_servers":          true,
+	"aha_list_task_mcp_servers":     true,
+	"pet_list_approvals":            true,
+}
+
+// PetMCPToolForTask dispatches one pet MCP tool on behalf of the authenticated
+// taskID. The pet MCP client sends its Turn capability as a bearer token.
+// Read-only tools accept any identity, including none, for compatibility;
+// every mutating or approval-creating tool requires the pet Task's capability
+// and is rejected before dispatch for any other caller.
+func (s *Service) PetMCPToolForTask(ctx context.Context, taskID, name string, args json.RawMessage) (string, error) {
+	taskID = strings.TrimSpace(taskID)
+	name = strings.TrimSpace(strings.ToLower(name))
+	if !petMCPReadOnlyTools[name] && taskID != petTaskID {
+		return "", fmt.Errorf("只有宠物 Task 可以调用变更工具；无身份或非宠物 Task 仅允许只读工具")
+	}
+	return s.petMCPTool(ctx, taskID, name, args)
+}
+
+func (s *Service) petMCPTool(ctx context.Context, callerTaskID, name string, args json.RawMessage) (string, error) {
 	name = strings.TrimSpace(strings.ToLower(name))
 	if isAhaPetTool(name) {
 		assistant, err := s.petAssistant(ctx)
@@ -1724,6 +1788,32 @@ func (s *Service) PetMCPTool(ctx context.Context, name string, args json.RawMess
 			return "", err
 		}
 		data, _ := json.Marshal(state)
+		return string(data), nil
+	case "aha_ack_knowledge_sync_notification":
+		// Notifications describe background sync state for the whole install,
+		// so only a call carrying the pet Task's own Turn capability may clear
+		// them. The HTTP endpoint is loopback-only but that alone does not
+		// identify the caller.
+		if callerTaskID != petTaskID {
+			return "", fmt.Errorf("只有宠物 Task 可以处理知识库自动同步通知")
+		}
+		var input struct {
+			IDs []string `json:"ids"`
+		}
+		if len(args) > 0 {
+			if err := json.Unmarshal(args, &input); err != nil {
+				return "", fmt.Errorf("invalid notification acknowledgement request")
+			}
+		}
+		acknowledged, err := s.AcknowledgeKnowledgeSyncNotifications(ctx, input.IDs)
+		if err != nil {
+			return "", err
+		}
+		remaining, _ := s.KnowledgeSyncNotifications(ctx)
+		data, _ := json.Marshal(map[string]any{
+			"ok": true, "acknowledged": acknowledged, "remaining": remaining,
+			"note": "只标记通知已处理，不会恢复自动同步，也不解决 Git 分叉；确认分叉已解决后仍需手动 pull/push/sync。",
+		})
 		return string(data), nil
 	case "aha_pet_permissions":
 		permissions, err := s.PetPermissions(ctx)
