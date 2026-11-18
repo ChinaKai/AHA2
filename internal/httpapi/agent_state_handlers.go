@@ -485,6 +485,29 @@ func (s *Server) submitAgentCollaboration(writer http.ResponseWriter, request *h
 	}
 	batchID, created, err := s.app.SubmitAgentCollaboration(request.Context(), claims, payload.Actions, instructions)
 	if err != nil {
+		var rejected *app.CollaborationAssignmentError
+		if errors.As(err, &rejected) {
+			// Rejected actions must never be reported as a successful dispatch.
+			// A partial batch still returns the batch that was created, so the
+			// caller can keep the accepted work and only re-dispatch the
+			// rejected agents in a new Turn.
+			body := map[string]any{
+				"ok":              false,
+				"error":           app.CollaborationAssignmentDuplicate,
+				"message":         err.Error(),
+				"created_agents":  rejected.Created,
+				"rejected_agents": rejected.Rejected,
+			}
+			if rejected.BatchID != "" {
+				body["batch_id"] = rejected.BatchID
+				body["accepted_agents"] = rejected.Accepted
+			}
+			s.audit(request, "agent.collaboration.rejected", "turn", claims.TurnID, map[string]any{
+				"batch_id": rejected.BatchID, "accepted": rejected.Created, "rejected": len(rejected.Rejected),
+			})
+			writeJSON(writer, http.StatusConflict, body)
+			return
+		}
 		writeAgentControlError(writer, err)
 		return
 	}

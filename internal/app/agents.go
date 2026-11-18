@@ -1495,39 +1495,37 @@ func (s *Service) enqueueAgentAction(
 	action AgentAction,
 	fallback int,
 	collaborationBatchID string,
-) (string, bool) {
+) (string, bool, error) {
 	if task.CollaborationMode != "auto" {
 		s.recordOrchestrationError(ctx, task.ID, parent, "Task is in single-agent mode; sub-agent request was ignored")
-		return "", false
+		return "", false, nil
 	}
 	agents, err := s.store.ListTaskAgents(ctx, task.ID)
 	if err != nil {
-		return "", false
+		return "", false, err
 	}
 	existing := make(map[string]domain.TaskAgent, len(agents))
 	for _, item := range agents {
 		existing[item.AgentID] = item
 	}
-	agentID := normalizedSubAgentID(action.AgentID, fallback)
+	agentID := resolveAgentActionID(existing, action, fallback)
+	duplicate, err := s.store.AgentAssignmentExistsForTurn(ctx, task.ID, agentID, parent.ID)
+	if err != nil {
+		return "", false, err
+	}
+	if duplicate {
+		return agentID, false, duplicateAssignmentRejection(agentID, parent.ID)
+	}
 	if _, ok := existing[agentID]; !ok {
-		for index := 1; ; index++ {
-			candidate := fmt.Sprintf("sub-%03d", index)
-			if _, used := existing[candidate]; !used {
-				if strings.TrimSpace(action.AgentID) == "" || agentID == "main" || existing[agentID].AgentID != "" {
-					agentID = candidate
-				}
-				break
-			}
-		}
 		if len(agents) >= task.MaxAgents {
 			s.recordOrchestrationError(ctx, task.ID, parent, fmt.Sprintf(
 				"Agent limit reached: %d/%d", len(agents), task.MaxAgents,
 			))
-			return "", false
+			return "", false, nil
 		}
 		mainAgent, mainErr := s.store.TaskAgent(ctx, task.ID, "main")
 		if mainErr != nil {
-			return "", false
+			return "", false, mainErr
 		}
 		snapshotID := mainAgent.RuntimeConfigSnapshotID
 		inheritMain := true
@@ -1535,7 +1533,7 @@ func (s *Service) enqueueAgentAction(
 			action.Filesystem != "" || action.Approval != "" {
 			base, baseErr := s.store.RuntimeSnapshot(ctx, mainAgent.RuntimeConfigSnapshotID)
 			if baseErr != nil {
-				return "", false
+				return "", false, baseErr
 			}
 			snapshot, deriveErr := s.deriveRuntimeSnapshot(ctx, task, base, UpdateAgentConfigInput{
 				Backend: action.Backend, ModelID: action.ModelID, ReasoningEffort: action.ReasoningEffort,
@@ -1543,14 +1541,14 @@ func (s *Service) enqueueAgentAction(
 			})
 			if deriveErr != nil {
 				s.recordOrchestrationError(ctx, task.ID, parent, deriveErr.Error())
-				return "", false
+				return "", false, nil
 			}
 			if !runtimeWithinMain(base, snapshot) {
 				s.recordOrchestrationError(ctx, task.ID, parent, "sub-agent permissions exceed the main Agent security ceiling")
-				return "", false
+				return "", false, nil
 			}
 			if err := s.store.CreateRuntimeSnapshot(ctx, snapshot); err != nil {
-				return "", false
+				return "", false, err
 			}
 			snapshotID = snapshot.ID
 			inheritMain = false
@@ -1565,7 +1563,7 @@ func (s *Service) enqueueAgentAction(
 			RuntimeConfigSnapshotID: snapshotID, InheritMain: inheritMain, CreatedAt: now, UpdatedAt: now,
 		})
 		if err != nil {
-			return "", false
+			return "", false, err
 		}
 		s.emit(ctx, task.ID, "agent", agentID, "task_agent_created", map[string]any{
 			"agent_id": agentID, "title": title, "inherit_main": inheritMain,
@@ -1578,7 +1576,7 @@ func (s *Service) enqueueAgentAction(
 		})
 		if err != nil {
 			s.recordOrchestrationError(ctx, task.ID, parent, err.Error())
-			return "", false
+			return "", false, nil
 		}
 	}
 	if current, ok := existing[agentID]; ok {
@@ -1599,13 +1597,39 @@ func (s *Service) enqueueAgentAction(
 		},
 		Status: "pending", CreatedAt: now,
 	})
-	if err != nil || !inserted {
-		return "", false
+	if err != nil {
+		return "", false, err
+	}
+	if !inserted {
+		// The partial unique index is the final authority; the pre-check can
+		// lose a race with another dispatch. Surface the same explicit reason.
+		return agentID, false, duplicateAssignmentRejection(agentID, parent.ID)
 	}
 	s.emit(ctx, task.ID, "inbox", agentID, "agent_assignment_queued", map[string]any{
 		"round_id": parent.RoundID, "agent_id": agentID, "source_turn_id": parent.ID,
 	})
-	return agentID, true
+	return agentID, true, nil
+}
+
+// resolveAgentActionID mirrors the ID choice this path has always made: an
+// explicit sub-agent ID is kept, while an omitted one takes the first free
+// sub-NNN slot. Resolving before the duplicate check means the reported
+// agent_id is the one the assignment would actually have used.
+func resolveAgentActionID(existing map[string]domain.TaskAgent, action AgentAction, fallback int) string {
+	agentID := normalizedSubAgentID(action.AgentID, fallback)
+	if _, ok := existing[agentID]; ok {
+		return agentID
+	}
+	for index := 1; ; index++ {
+		candidate := fmt.Sprintf("sub-%03d", index)
+		if _, used := existing[candidate]; used {
+			continue
+		}
+		if strings.TrimSpace(action.AgentID) == "" || agentID == "main" {
+			return candidate
+		}
+		return agentID
+	}
 }
 
 func runtimeWithinMain(main, child domain.RuntimeConfigSnapshot) bool {
