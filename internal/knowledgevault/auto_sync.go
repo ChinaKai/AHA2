@@ -101,6 +101,10 @@ type SyncerConfig struct {
 	MaxFailures    int
 	Now            func() time.Time
 	Emit           func(SyncEvent)
+	// Recovered is called after a pull+push cycle succeeds, so the host can
+	// close stale sync notifications. It is idempotent and must be fast; the
+	// loop already throttles remote work, and no event is emitted on success.
+	Recovered func()
 }
 
 type autoSyncState struct {
@@ -705,6 +709,21 @@ func (s *Syncer) remoteSync(ctx context.Context, git *Git, now time.Time) {
 	if err := git.recordSync(); err != nil {
 		log.Printf("record knowledge sync timestamp: %v", err)
 	}
+	// The pull+push pair succeeding proves no divergence and no preflight
+	// failure remains, so any open sync notification is stale.
+	s.notifyRecovered()
+}
+
+// notifyRecovered runs the host callback without letting it break the sync
+// loop or panic the polling goroutine.
+func (s *Syncer) notifyRecovered() {
+	if s.config.Recovered == nil {
+		return
+	}
+	defer func() {
+		_ = recover()
+	}()
+	s.config.Recovered()
 }
 
 // pullBlockedByWorktree recognizes git's safe refusal to overwrite local or

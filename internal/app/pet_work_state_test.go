@@ -818,3 +818,138 @@ func TestPetWorkStateShowsApprovalsAndPriorWork(t *testing.T) {
 		t.Fatalf("task work item missing: %#v", state.Work)
 	}
 }
+
+func TestPetWorkStateExposesOpenKnowledgeSyncNotifications(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	ctx := fixture.ctx
+	now := fixture.service.now().UTC()
+	appendEvent := func(id, kind, detail, status string, at time.Time) {
+		t.Helper()
+		if err := fixture.database.AppendPetEvent(ctx, domain.PetEvent{
+			ID: id, At: at, Actor: "aha", Kind: kind, Detail: detail, Status: status,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	conflictID := "pet_event_conflict_open"
+	pausedID := "pet_event_paused_open"
+	appendEvent(conflictID, "knowledge_sync_conflict",
+		"本地 abcdef123456，远端 123456abcdef 已分叉；未合并、未 reset。差异文件：global/a.md", "open", now.Add(-time.Minute))
+	appendEvent(pausedID, "knowledge_sync_paused",
+		"知识库自动同步连续失败 3 次，已暂停：push failed", "open", now)
+	// Already handled rows and unrelated/legacy event kinds must not reappear
+	// as pending notifications.
+	appendEvent("pet_event_conflict_acked", "knowledge_sync_conflict", "旧冲突", "acknowledged", now.Add(-2*time.Minute))
+	appendEvent("pet_event_conflict_legacy", "knowledge_sync_conflict", "升级前的旧事件", "", now.Add(-3*time.Minute))
+	appendEvent("pet_event_control", "control", `{"say":"hi"}`, "open", now.Add(-4*time.Minute))
+
+	state, err := fixture.service.PetWorkState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Notifications) != 2 {
+		t.Fatalf("notifications=%#v, want two open sync events", state.Notifications)
+	}
+	// Newest first, and every field is the event row's own value: Detail is
+	// prose and never interpreted as a target id.
+	if state.Notifications[0].ID != pausedID || state.Notifications[0].Kind != "knowledge_sync_paused" ||
+		state.Notifications[0].Status != "open" || state.Notifications[0].At != now.Format(time.RFC3339) {
+		t.Fatalf("newest notification=%#v", state.Notifications[0])
+	}
+	if state.Notifications[1].ID != conflictID || !strings.Contains(state.Notifications[1].Detail, "已分叉") {
+		t.Fatalf("conflict notification=%#v", state.Notifications[1])
+	}
+	// history_limit=0 removes approvals/work but must keep unresolved sync
+	// notifications visible.
+	var noHistory PetWorkState
+	raw, err := fixture.service.PetMCPTool(ctx, "aha_pet_work_state", json.RawMessage(`{"history_limit":0}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(raw), &noHistory); err != nil {
+		t.Fatal(err)
+	}
+	if len(noHistory.Notifications) != 2 || len(noHistory.Work) != 0 {
+		t.Fatalf("history_limit=0 state notifications=%#v work=%#v", noHistory.Notifications, noHistory.Work)
+	}
+
+	// Acknowledging marks only the listed open rows; duplicates and unknown ids
+	// are ignored, and the paused notification stays visible.
+	ackRaw, err := fixture.service.PetMCPTool(ctx, "aha_ack_knowledge_sync_notification",
+		json.RawMessage(`{"ids":["`+conflictID+`","`+conflictID+`","pet_event_missing"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ack struct {
+		Acknowledged int               `json:"acknowledged"`
+		Remaining    []PetNotification `json:"remaining"`
+		Note         string            `json:"note"`
+	}
+	if err := json.Unmarshal([]byte(ackRaw), &ack); err != nil {
+		t.Fatal(err)
+	}
+	if ack.Acknowledged != 1 || len(ack.Remaining) != 1 || ack.Remaining[0].ID != pausedID || ack.Note == "" {
+		t.Fatalf("ack response=%s", ackRaw)
+	}
+	state, err = fixture.service.PetWorkState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Notifications) != 1 || state.Notifications[0].ID != pausedID {
+		t.Fatalf("after ack notifications=%#v", state.Notifications)
+	}
+	// Repeated acknowledgement is a no-op rather than an error or a new row.
+	ackRaw, err = fixture.service.PetMCPTool(ctx, "aha_ack_knowledge_sync_notification",
+		json.RawMessage(`{"ids":["`+conflictID+`"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(ackRaw, `"acknowledged":0`) {
+		t.Fatalf("repeat ack=%s", ackRaw)
+	}
+	// Acknowledging the last notification empties the work-state field.
+	if _, err := fixture.service.PetMCPTool(ctx, "aha_ack_knowledge_sync_notification",
+		json.RawMessage(`{"ids":["`+pausedID+`"]}`)); err != nil {
+		t.Fatal(err)
+	}
+	state, err = fixture.service.PetWorkState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Notifications) != 0 {
+		t.Fatalf("notifications after acking all=%#v", state.Notifications)
+	}
+	// Only whitelisted sync kinds are ever transitioned; unrelated open
+	// events keep their status.
+	events, err := fixture.database.ListPetEvents(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statuses := map[string]string{}
+	for _, event := range events {
+		statuses[event.ID] = event.Status
+	}
+	if statuses["pet_event_control"] != "open" {
+		t.Fatalf("unrelated event status=%q", statuses["pet_event_control"])
+	}
+	// Resolving closes nothing new once everything is closed, and an empty id
+	// list is rejected instead of silently acknowledging everything.
+	if resolved, err := fixture.service.ResolveKnowledgeSyncNotifications(ctx); err != nil || resolved != 0 {
+		t.Fatalf("resolve closed=%d err=%v", resolved, err)
+	}
+	if _, err := fixture.service.PetMCPTool(ctx, "aha_ack_knowledge_sync_notification", json.RawMessage(`{"ids":[]}`)); err == nil {
+		t.Fatal("empty ids must be rejected")
+	}
+	// The pet's MCP allowlist must expose the ack tool, otherwise the model can
+	// see the notification but has no way to clear it.
+	allowlisted := false
+	for _, name := range petMCPAllowedTools(domain.Task{ID: petTaskID}) {
+		if name == "mcp__aha2-pet__aha_ack_knowledge_sync_notification" {
+			allowlisted = true
+			break
+		}
+	}
+	if !allowlisted {
+		t.Fatal("ack tool missing from the pet MCP allowlist")
+	}
+}
