@@ -224,6 +224,16 @@ test("package manifest gate rejects unsafe, duplicate and out-of-scope entries",
     ]})),
     /malformed sha256/,
   );
+  for (const path of ["browser-host/CON.txt", "node/NUL", "browser-host/a|b.mjs", "browser-host/a?b.mjs"]) {
+    assert.throws(
+      () => assertPackageManifest(validPackageManifest({files: [
+        ...validPackageManifest().files,
+        {path, size: 1, sha256: "a".repeat(64)},
+      ]})),
+      /reserved Windows device name|invalid character/,
+      `${path} must be rejected as an invalid Windows file name`,
+    );
+  }
 });
 
 test("release manifest CLI writes the manifest and fails without required arguments", async () => {

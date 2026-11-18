@@ -35,6 +35,12 @@ ALLOWED_INSTALLER_FILES = {
 REQUIRED_ARCHIVE_FILES = ALLOWED_INSTALLER_FILES | {"dist/release-manifest.json"}
 ALLOWED_ROOT_DIRS = {"dist", "installer"}
 MANIFEST_NAME = "dist/release-manifest.json"
+WINDOWS_RESERVED_NAMES = {
+    "con", "prn", "aux", "nul",
+    *(f"com{number}" for number in range(1, 10)),
+    *(f"lpt{number}" for number in range(1, 10)),
+}
+WINDOWS_INVALID_CHARS = set('<>:"|?*')
 
 
 def fail(message):
@@ -52,6 +58,17 @@ def normalize_version(value):
     return normalized
 
 
+def windows_name_problem(part):
+    """Describe why a path segment is not usable as a Windows file name."""
+    if part.endswith(".") or part.endswith(" "):
+        return "ends with a dot or space"
+    if any(character in WINDOWS_INVALID_CHARS or ord(character) < 0x20 for character in part):
+        return "contains an invalid character"
+    if part.split(".", 1)[0].casefold() in WINDOWS_RESERVED_NAMES:
+        return "is a reserved Windows device name"
+    return None
+
+
 def normalize_relative(value):
     if not isinstance(value, str) or not value.strip():
         fail("manifest path must be a non-empty string")
@@ -60,6 +77,10 @@ def normalize_relative(value):
     parts = [part for part in re.split(r"[\\/]+", value) if part]
     if not parts or "." in parts or ".." in parts:
         fail(f"manifest path escapes the package root: {value}")
+    for part in parts:
+        problem = windows_name_problem(part)
+        if problem:
+            fail(f"manifest path segment {part!r} {problem}: {value}")
     return "/".join(parts)
 
 
@@ -82,9 +103,10 @@ def validate_member_name(name):
     parts = name.split("/")
     if any(part in ("", ".", "..") for part in parts):
         fail(f"Windows package archive member path is not normalized: {name}")
-    if any(part.endswith(".") or part.endswith(" ") for part in parts):
-        # Windows trims these when extracting, which could alias another member.
-        fail(f"Windows package archive member has a Windows-normalized segment: {name}")
+    for part in parts:
+        problem = windows_name_problem(part)
+        if problem:
+            fail(f"Windows package archive member segment {part!r} {problem}: {name}")
     if len(parts) < 2:
         fail(f"Windows package archive member is not a file under dist/ or installer/: {name}")
     if parts[0] not in ALLOWED_ROOT_DIRS:

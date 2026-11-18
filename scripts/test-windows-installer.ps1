@@ -256,11 +256,10 @@ $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo ".gith
 foreach ($contract in @(
     "runs-on: windows-latest", "build-windows-package.sh", "--output-dir", "build-windows-installer.ps1", "-InputTrayExe",
     "-InputBrowserHost", "-InputNodeExe", "-InputNodeLicense", "-InputFeishuPlugin", "-InputFeishuManifest", "-InputManifest", "-ExpectedCommit",
-	"AHA2-Setup-x64.exe", "AHA2-Setup-User-x64.exe", "AHA2-Windows-Package-x64.zip", "Compress-Archive",
+	"AHA2-Setup-x64.exe", "AHA2-Setup-User-x64.exe", "AHA2-Windows-Package-x64.zip", "assemble-windows-package.py",
     "verify-windows-package-archive.py",
     "build-linux-packages.sh", "build-linux-sync-packages.sh", "aha2-sync_", "build-macos-packages.sh",
-    "ubuntu-24.04-arm", "SHA256SUMS", "merge-multiple: true", "pattern: package-*", "gh release create",
-    "installer/AHA2-Setup-User-x64.exe", "dist/release-manifest.json"
+    "ubuntu-24.04-arm", "SHA256SUMS", "merge-multiple: true", "pattern: package-*", "gh release create"
 )) {
     if (-not $workflow.Contains($contract)) {
         throw "Release workflow contract is missing: $contract"
@@ -283,10 +282,13 @@ foreach ($inputContract in @("-InputBrowserHost", "-InputNodeExe", "-InputNodeLi
     }
 }
 # The archive is the deployable PackageDir layout: both installers under
-# installer/ and the exact package manifest under dist/.
-foreach ($archiveContract in @("AHA2-Windows-Package-x64.zip", "installer/AHA2-Setup-x64.exe", "installer/AHA2-Setup-User-x64.exe", "dist/release-manifest.json")) {
-    if (-not $workflow.Contains($archiveContract)) {
-        throw "Release workflow does not assemble the deployable Windows package layout: $archiveContract"
+# installer/ and the exact package manifest under dist/. The layout lives in
+# the shared Python assembler so the Linux round-trip test exercises it too.
+$assembler = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo "scripts\assemble-windows-package.py")
+foreach ($archiveContract in @("AHA2-Windows-Package-x64.zip", "AHA2-Setup-x64.exe", "AHA2-Setup-User-x64.exe", "release-manifest.json", 'add_tree(archive, package_dir, "dist")', 'f"installer/{name}"')) {
+    $source = if ($archiveContract -eq "AHA2-Windows-Package-x64.zip") { $workflow } else { $assembler }
+    if (-not $source.Contains($archiveContract)) {
+        throw "Windows package assembly does not produce the deployable layout: $archiveContract"
     }
 }
 if ($workflow -notmatch 'test "\$\(find dist -maxdepth 1 -type f \| wc -l\)" -eq 13') {

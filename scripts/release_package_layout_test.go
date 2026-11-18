@@ -113,11 +113,10 @@ func TestReleaseWorkflowPublishesPackageLayout(t *testing.T) {
 		}
 	}
 	for _, contract := range []string{
-		"Compress-Archive",
+		"assemble-windows-package.py",
+		"--package-dir",
+		"--installer-dir",
 		"AHA2-Windows-Package-x64.zip",
-		"installer/AHA2-Setup-x64.exe",
-		"installer/AHA2-Setup-User-x64.exe",
-		"dist/release-manifest.json",
 		"release-assets/*",
 		`test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 13`,
 		"verify-windows-package-archive.py",
@@ -125,6 +124,20 @@ func TestReleaseWorkflowPublishesPackageLayout(t *testing.T) {
 	} {
 		if !strings.Contains(workflow, contract) {
 			t.Errorf("Release workflow is missing the package layout contract: %s", contract)
+		}
+	}
+	// The layout itself lives in the shared assembler: it must place the two
+	// installers under installer/ and the whole package under dist/.
+	assembler := readRepoFile(t, root, "scripts/assemble-windows-package.py")
+	for _, contract := range []string{
+		`"AHA2-Setup-x64.exe"`,
+		`"AHA2-Setup-User-x64.exe"`,
+		`"release-manifest.json"`,
+		`add_tree(archive, package_dir, "dist")`,
+		`f"installer/{name}"`,
+	} {
+		if !strings.Contains(assembler, contract) {
+			t.Errorf("assemble-windows-package.py is missing the package layout contract: %s", contract)
 		}
 	}
 	// The archive carries the same installers that are also released on their

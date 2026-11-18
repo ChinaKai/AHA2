@@ -178,8 +178,10 @@ Web 构建和嵌入资源都写在副本中，仓库里只写 `--output-dir`；�
 ### Release 的可部署 Windows 包布局
 
 Release 的 Windows 作业直接调用 `scripts/build-windows-package.sh` 生成 `dist/package`
-（包内 `dist/`），再用其中的清单和文件构建机器级与 per-user 两个安装器，最后把官方
-PackageDir 布局打成 `AHA2-Windows-Package-x64.zip`：
+（包内 `dist/`），再用其中的清单和文件构建机器级与 per-user 两个安装器，最后由
+`scripts/assemble-windows-package.py` 把官方 PackageDir 布局打成
+`AHA2-Windows-Package-x64.zip`。该组包脚本只写文件条目，不写目录元数据，避免归档里
+出现无部署价值、却需要额外路径校验的目录条目；Release 与 Linux 测试执行同一脚本：
 
 ```text
 AHA2-Windows-Package-x64.zip
@@ -203,8 +205,9 @@ AHA2-Windows-Package-x64.zip
 `dist/release-manifest.json` 必须存在；清单不能为空，必须包含完整的必需文件范围
 （`scripts/windows-package-scope.json`），commit 与 Web 版本必须和当前 Release 期望值
 一致；`dist/` 下的文件集合必须与清单双向一致，并逐个比对 zip 内的 SHA256。缺少
-缺少 `browser-host/` 或 `node/` 必需文件、清单为空、混入未列出文件、成员路径逃逸或
-重复、归档成员不是普通文件、哈希不符，都会让发布失败。
+`browser-host/` 或 `node/` 必需文件、清单为空、混入未列出文件、成员路径逃逸或
+重复、目录或符号链接成员、Windows 保留名或非法字符（如 `CON.txt`、`NUL`、`a|b`、
+`a?b`）、哈希不符，都会让发布失败。
 
 Agent API stdio helper 不再需要单独构建或安装：它是一个只用 Node 标准库的单文件脚本，通过
 `go:embed` 打在 `aha2.exe` 里，运行时才上传到工作区 `.aha2-context/share/agent-proxy/`。因此

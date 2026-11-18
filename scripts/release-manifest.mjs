@@ -138,6 +138,20 @@ function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+const WINDOWS_RESERVED_NAMES = new Set([
+  "con", "prn", "aux", "nul",
+  ...Array.from({length: 9}, (_, index) => `com${index + 1}`),
+  ...Array.from({length: 9}, (_, index) => `lpt${index + 1}`),
+]);
+const WINDOWS_INVALID_NAME = /[<>:"|?*\u0000-\u001f]/;
+
+function windowsNameProblem(part) {
+  if (part.endsWith(".") || part.endsWith(" ")) return "ends with a dot or space";
+  if (WINDOWS_INVALID_NAME.test(part)) return "contains an invalid character";
+  if (WINDOWS_RESERVED_NAMES.has(part.split(".", 1)[0].toLowerCase())) return "is a reserved Windows device name";
+  return null;
+}
+
 function normalizeRelativePath(path) {
   if (typeof path !== "string" || path.trim() === "") {
     throw new Error("manifest input path must be a non-empty string");
@@ -149,6 +163,12 @@ function normalizeRelativePath(path) {
   const normalized = parts.join("/");
   if (normalized === "" || parts.includes(".") || parts.includes("..")) {
     throw new Error(`manifest input path escapes the package root: ${path}`);
+  }
+  for (const part of parts) {
+    const problem = windowsNameProblem(part);
+    if (problem) {
+      throw new Error(`manifest path segment ${part} ${problem}: ${path}`);
+    }
   }
   return normalized;
 }

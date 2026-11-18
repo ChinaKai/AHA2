@@ -529,6 +529,79 @@ func runArchiveVerifier(t *testing.T, zipPath string) (string, error) {
 	return string(out), err
 }
 
+func runPackageAssembly(t *testing.T, packageDir, installerDir, zipPath string) (string, error) {
+	t.Helper()
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is not on PATH")
+	}
+	cmd := exec.Command(python, "scripts/assemble-windows-package.py",
+		"--package-dir", packageDir,
+		"--installer-dir", installerDir,
+		"--output", zipPath)
+	cmd.Dir = repoRoot(t)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+func TestWindowsPackageWorkflowAssemblyRoundTrip(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 is not on PATH")
+	}
+	packageDir := writeFixturePackage(t)
+	installerDir := t.TempDir()
+	for _, name := range []string{"AHA2-Setup-x64.exe", "AHA2-Setup-User-x64.exe"} {
+		if err := os.WriteFile(filepath.Join(installerDir, name), []byte("installer-"+name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	zipPath := filepath.Join(t.TempDir(), "AHA2-Windows-Package-x64.zip")
+	out, err := runPackageAssembly(t, packageDir, installerDir, zipPath)
+	if err != nil {
+		t.Fatalf("workflow assembly failed: %v\n%s", err, out)
+	}
+
+	// The assembler must emit only file entries: directory metadata is not part
+	// of the deployable layout and the verifier rejects it.
+	reader, err := zip.OpenReader(zipPath)
+	if err != nil {
+		t.Fatalf("open assembled zip: %v", err)
+	}
+	defer reader.Close()
+	names := make([]string, 0, len(reader.File))
+	for _, file := range reader.File {
+		if file.FileInfo().IsDir() || strings.HasSuffix(file.Name, "/") {
+			t.Errorf("assembled archive contains directory metadata: %s", file.Name)
+		}
+		names = append(names, file.Name)
+	}
+	for _, required := range []string{
+		"installer/AHA2-Setup-x64.exe",
+		"installer/AHA2-Setup-User-x64.exe",
+		"dist/release-manifest.json",
+		"dist/browser-host/tabs.mjs",
+	} {
+		found := false
+		for _, name := range names {
+			if name == required {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("assembled archive is missing %s", required)
+		}
+	}
+
+	out, err = runArchiveVerifier(t, zipPath)
+	if err != nil {
+		t.Fatalf("archive verifier rejected the workflow assembly: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Windows package archive verified") {
+		t.Errorf("unexpected archive verifier output: %s", out)
+	}
+}
+
 func TestWindowsPackageArchiveVerifierExecutable(t *testing.T) {
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 is not on PATH")
@@ -714,8 +787,22 @@ func TestWindowsPackageArchiveVerifierExecutable(t *testing.T) {
 		if err == nil {
 			t.Fatalf("archive verifier accepted a trailing-dot member:\n%s", out)
 		}
-		if !strings.Contains(out, "Windows-normalized segment") {
+		if !strings.Contains(out, "ends with a dot or space") {
 			t.Errorf("unexpected archive verifier error: %s", out)
+		}
+	})
+
+	t.Run("rejects Windows reserved names and invalid characters", func(t *testing.T) {
+		for _, name := range []string{"dist/CON.txt", "dist/NUL", "dist/a|b.txt", "dist/a?b.txt"} {
+			zipPath := filepath.Join(t.TempDir(), "AHA2-Windows-Package-x64.zip")
+			writeArchiveFixture(t, zipPath, nil, nil, archiveEntry{name: name, data: []byte("evil")})
+			out, err := runArchiveVerifier(t, zipPath)
+			if err == nil {
+				t.Fatalf("archive verifier accepted invalid Windows name %q:\n%s", name, out)
+			}
+			if !strings.Contains(out, "reserved Windows device name") && !strings.Contains(out, "invalid character") {
+				t.Errorf("unexpected archive verifier error for %q: %s", name, out)
+			}
 		}
 	})
 

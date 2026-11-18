@@ -28,6 +28,10 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Install Inno Setup 6
         shell: powershell
         run: choco install innosetup --no-progress -y
@@ -56,25 +60,14 @@ jobs:
       #   <PackageDir>\dist\release-manifest.json and package files
       #   <PackageDir>\installer\AHA2-Setup-User-x64.exe
       # A GitHub Release holds one archive plus the standalone installers, so
-      # ship the layout as a zip and keep both exe assets unchanged.
+      # ship the layout as a zip and keep both exe assets unchanged. The shared
+      # assembler writes file entries only; directory metadata is rejected by
+      # the archive verifier in the publish job.
       - name: Assemble deployable Windows package
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $packageRoot = Join-Path $env:RUNNER_TEMP "windows-package"
-          New-Item -ItemType Directory -Force (Join-Path $packageRoot "dist") | Out-Null
-          New-Item -ItemType Directory -Force (Join-Path $packageRoot "installer") | Out-Null
-          Copy-Item -Path (Join-Path $PWD "dist\package\*") -Destination (Join-Path $packageRoot "dist") -Recurse -Force
-          foreach ($setup in @("AHA2-Setup-x64.exe", "AHA2-Setup-User-x64.exe")) {
-            Copy-Item -LiteralPath (Join-Path $PWD "dist\installer\$setup") -Destination (Join-Path $packageRoot "installer") -Force
-          }
-          foreach ($required in @("installer/AHA2-Setup-x64.exe", "installer/AHA2-Setup-User-x64.exe", "dist/release-manifest.json")) {
-            $path = Join-Path $packageRoot ($required -replace '/', '\')
-            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-              throw "Deployable Windows package is missing: $required"
-            }
-          }
-          Compress-Archive -Path (Join-Path $packageRoot "*") -DestinationPath (Join-Path $PWD "dist\AHA2-Windows-Package-x64.zip") -Force
+          python scripts/assemble-windows-package.py --package-dir dist/package --installer-dir dist/installer --output dist/AHA2-Windows-Package-x64.zip
 
       - name: Stage release assets
         shell: pwsh
