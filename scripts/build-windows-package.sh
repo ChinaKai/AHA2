@@ -325,49 +325,37 @@ done < <(cd "$output_dir" && find browser-host node -type f | LC_ALL=C sort)
   "${package_files[@]}"
 
 printf '==> Verify release manifest\n'
-"$node_bin" - "$manifest_path" "$version" "$commit" <<'NODE'
-const fs = require("node:fs");
-const [manifestPath, version, commit] = process.argv.slice(2);
+# Validate the generated manifest with the same release-side gate the tests use:
+# identity, path safety, required install scope and no entries the installer
+# would not copy.
+"$node_bin" --input-type=module - "$manifest_path" "$version" "$commit" "$web_version" "$build_dir/scripts/release-manifest.mjs" <<'NODE'
+import fs from "node:fs";
+import path from "node:path";
+import {pathToFileURL} from "node:url";
+
+const [manifestPath, version, commit, webVersion, modulePath] = process.argv.slice(2);
+const {assertPackageManifest} = await import(pathToFileURL(modulePath).href);
 const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-const expected = [
-  "aha2-windows-amd64.exe",
-  "aha2-tray-windows-amd64.exe",
-  "plugins/feishu/windows-amd64/aha2-channel-feishu.exe",
-  "plugins/feishu/windows-amd64/plugin.json",
-  "browser-host/host.mjs",
-  "browser-host/server.mjs",
-  "browser-host/tabs.mjs",
-  "browser-host/interact.mjs",
-  "browser-host/downloads.mjs",
-  "browser-host/cookies.mjs",
-  "browser-host/package.json",
-  "browser-host/node_modules/playwright/package.json",
-  "node/node.exe",
-  "node/LICENSE",
-];
-if (manifest.version !== version) throw new Error(`manifest version ${manifest.version} != ${version}`);
-if (manifest.commit !== commit) throw new Error(`manifest commit ${manifest.commit} != ${commit}`);
-const paths = manifest.files.map((file) => file.path);
-for (const path of expected) {
-  if (!paths.includes(path)) throw new Error(`manifest is missing ${path}`);
-}
+assertPackageManifest(manifest, {
+  version,
+  commit,
+  webVersion,
+  generatorScript: "scripts/build-windows-package.sh",
+});
 // Every packaged browser-host and Node runtime file must be covered by the
-// manifest so the installer can verify the exact install tree.
-const {execFileSync} = require("node:child_process");
-for (const root of ["browser-host", "node"]) {
-  const files = execFileSync("find", [root, "-type", "f"], {
-    cwd: require("node:path").dirname(manifestPath), encoding: "utf8",
-  }).trim().split("\n").filter(Boolean);
-  for (const path of files) {
-    if (!paths.includes(path)) throw new Error(`manifest is missing ${path}`);
+// manifest so the installer can verify the exact install tree. Walk with the
+// Node API instead of spawning `find`: on Windows, PATH may resolve `find` to
+// the System32 text-search tool, not the POSIX file finder.
+const packageRoot = path.dirname(manifestPath);
+const paths = new Set(manifest.files.map((file) => file.path));
+function walk(relativeDir) {
+  for (const entry of fs.readdirSync(path.join(packageRoot, relativeDir), {withFileTypes: true})) {
+    const relative = `${relativeDir}/${entry.name}`;
+    if (entry.isDirectory()) walk(relative);
+    else if (entry.isFile() && !paths.has(relative)) throw new Error(`manifest is missing ${relative}`);
   }
 }
-for (const file of manifest.files) {
-  if (!/^[0-9a-f]{64}$/.test(file.sha256)) throw new Error(`manifest has a malformed sha256 for ${file.path}`);
-}
-if (!manifest.generator || manifest.generator.script !== "scripts/build-windows-package.sh") {
-  throw new Error("manifest generator.script is not scripts/build-windows-package.sh");
-}
+for (const root of ["browser-host", "node"]) walk(root);
 NODE
 
 printf 'Package ready: %s\n' "$output_dir"

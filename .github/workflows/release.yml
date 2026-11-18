@@ -28,54 +28,61 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Build embedded Web
-        shell: powershell
-        run: |
-          npm ci --prefix web
-          node scripts/build-web.mjs
-          New-Item -ItemType Directory -Force internal\webassets\dist | Out-Null
-          Get-ChildItem internal\webassets\dist -Force | Remove-Item -Recurse -Force
-          Copy-Item web\dist\* internal\webassets\dist -Recurse -Force
-
-      - name: Build Windows application
-        shell: powershell
-        run: |
-          $version = $env:GITHUB_REF_NAME.TrimStart('v')
-          $webVersion = "v$version.$((Get-Date).ToUniversalTime().ToString('yyyyMMdd')).$((git rev-parse --short=12 HEAD).Trim())"
-          New-Item -ItemType Directory -Force dist\package-input | Out-Null
-          $env:CGO_ENABLED = '0'
-          $env:GOOS = 'windows'
-          $env:GOARCH = 'amd64'
-          go build -trimpath -ldflags "-s -w -X main.version=$version -X main.webVersion=$webVersion" -o dist\package-input\aha2.exe .\cmd\aha
-          go build -trimpath -ldflags "-s -w -H windowsgui -X main.version=$version" -o dist\package-input\aha2-tray.exe .\cmd\aha-tray
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
       - name: Install Inno Setup 6
         shell: powershell
         run: choco install innosetup --no-progress -y
 
-      # The installer bundles browser-host/ and node/ from dist/, but this job
-      # compiles the application itself and therefore never runs
-      # scripts/build-windows-package.sh. Stage the same tree here with the
-      # same pinned hashes before building the setup.
-      - name: Stage browser host and Node runtime
+      # One packaging path for local builds and Release: the package script
+      # builds Web, server, tray and the Feishu plugin, stages the pinned Node
+      # runtime and browser host, and writes release-manifest.json. The
+      # installers below consume that exact tree, so the manifest describes the
+      # bytes that end up installed.
+      - name: Build Windows package
         shell: bash
-        run: bash scripts/stage-windows-runtime.sh --output-dir dist
+        run: |
+          set -euo pipefail
+          GO_BIN=go bash scripts/build-windows-package.sh --version "$GITHUB_REF_NAME" --output-dir dist/package
 
       - name: Build Windows Setup
         shell: powershell
         run: |
           .\scripts\test-windows-installer.ps1 -RepoPath $PWD
-          bash -lc 'GO_BIN=go bash scripts/build-feishu-plugin.sh windows/amd64'
-          .\scripts\build-windows-installer.ps1 -RepoPath $PWD -InputExe .\dist\package-input\aha2.exe -InputTrayExe .\dist\package-input\aha2-tray.exe -InputBrowserHost .\dist\browser-host -InputNodeExe .\dist\node\node.exe -InputNodeLicense .\dist\node\LICENSE -OutputDir .\dist\release -Version $env:GITHUB_REF_NAME
-          .\scripts\build-windows-installer.ps1 -RepoPath $PWD -InputExe .\dist\package-input\aha2.exe -InputTrayExe .\dist\package-input\aha2-tray.exe -InputBrowserHost .\dist\browser-host -InputNodeExe .\dist\node\node.exe -InputNodeLicense .\dist\node\LICENSE -OutputDir .\dist\release -Version $env:GITHUB_REF_NAME -PerUser
+          $package = Join-Path $PWD "dist\package"
+          $plugin = Join-Path $package "plugins\feishu\windows-amd64"
+          .\scripts\build-windows-installer.ps1 -RepoPath $PWD -InputExe (Join-Path $package "aha2-windows-amd64.exe") -InputTrayExe (Join-Path $package "aha2-tray-windows-amd64.exe") -InputBrowserHost (Join-Path $package "browser-host") -InputNodeExe (Join-Path $package "node\node.exe") -InputNodeLicense (Join-Path $package "node\LICENSE") -InputFeishuPlugin (Join-Path $plugin "aha2-channel-feishu.exe") -InputFeishuManifest (Join-Path $plugin "plugin.json") -InputManifest (Join-Path $package "release-manifest.json") -ExpectedCommit $env:GITHUB_SHA -OutputDir (Join-Path $PWD "dist\installer") -Version $env:GITHUB_REF_NAME
+          .\scripts\build-windows-installer.ps1 -RepoPath $PWD -InputExe (Join-Path $package "aha2-windows-amd64.exe") -InputTrayExe (Join-Path $package "aha2-tray-windows-amd64.exe") -InputBrowserHost (Join-Path $package "browser-host") -InputNodeExe (Join-Path $package "node\node.exe") -InputNodeLicense (Join-Path $package "node\LICENSE") -InputFeishuPlugin (Join-Path $plugin "aha2-channel-feishu.exe") -InputFeishuManifest (Join-Path $plugin "plugin.json") -InputManifest (Join-Path $package "release-manifest.json") -ExpectedCommit $env:GITHUB_SHA -OutputDir (Join-Path $PWD "dist\installer") -Version $env:GITHUB_REF_NAME -PerUser
+
+      # Assemble the official PackageDir layout the deploy skill consumes:
+      #   <PackageDir>\dist\release-manifest.json and package files
+      #   <PackageDir>\installer\AHA2-Setup-User-x64.exe
+      # A GitHub Release holds one archive plus the standalone installers, so
+      # ship the layout as a zip and keep both exe assets unchanged. The shared
+      # assembler writes file entries only; directory metadata is rejected by
+      # the archive verifier in the publish job.
+      - name: Assemble deployable Windows package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          python scripts/assemble-windows-package.py --package-dir dist/package --installer-dir dist/installer --output dist/AHA2-Windows-Package-x64.zip
+
+      - name: Stage release assets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force "release-assets" | Out-Null
+          Copy-Item -Path "dist\installer\AHA2-Setup-x64.exe" -Destination "release-assets" -Force
+          Copy-Item -Path "dist\installer\AHA2-Setup-User-x64.exe" -Destination "release-assets" -Force
+          Copy-Item -Path "dist\AHA2-Windows-Package-x64.zip" -Destination "release-assets" -Force
 
       - name: Upload Windows package
         uses: actions/upload-artifact@v4
         with:
           name: package-windows-x64
-          path: |
-            dist/release/AHA2-Setup-x64.exe
-            dist/release/AHA2-Setup-User-x64.exe
+          path: release-assets/*
           if-no-files-found: error
 
   build-linux-packages:
@@ -221,10 +228,17 @@ jobs:
             "aha2-${version}-1.x86_64.rpm" "aha2-${version}-1.aarch64.rpm" \
             "aha2-sync_${version}_amd64.deb" "aha2-sync_${version}_arm64.deb" \
             "aha2-sync-${version}-1.x86_64.rpm" "aha2-sync-${version}-1.aarch64.rpm" \
-            AHA2-macos-amd64.pkg AHA2-macos-arm64.pkg; do
+            AHA2-macos-amd64.pkg AHA2-macos-arm64.pkg \
+            AHA2-Windows-Package-x64.zip; do
             test -f "dist/${package}" || { echo "Missing release package: ${package}" >&2; exit 1; }
           done
-          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 12
+          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 13
+          # The Windows archive must be the official PackageDir layout: both
+          # installers under installer/ and the complete package, including
+          # release-manifest.json, under dist/. The verifier rejects an empty
+          # manifest, missing required scope and any dist/ file the manifest
+          # does not cover, and re-checks every hash against the archive bytes.
+          python3 scripts/verify-windows-package-archive.py "dist/AHA2-Windows-Package-x64.zip" --version "${GITHUB_REF_NAME#v}" --commit "$GITHUB_SHA"
           cd dist
           find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | sort | while IFS= read -r file; do sha256sum "$file"; done > SHA256SUMS
           test -s SHA256SUMS

@@ -5,7 +5,13 @@ import {mkdir, mkdtemp, readFile, writeFile} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join, resolve} from "node:path";
 import {spawnSync} from "node:child_process";
-import {buildManifest, MANIFEST_SCHEMA_VERSION} from "../../scripts/release-manifest.mjs";
+import {
+  assertPackageManifest,
+  buildManifest,
+  MANIFEST_SCHEMA_VERSION,
+  packagePathInScope,
+  REQUIRED_PACKAGE_FILES,
+} from "../../scripts/release-manifest.mjs";
 
 const generatorScript = resolve(import.meta.dirname, "..", "..", "scripts", "release-manifest.mjs");
 
@@ -98,6 +104,136 @@ test("release manifest rejects empty file lists, duplicate entries and missing i
     buildManifest({root, version: "1.2.3", commit: "abc", generator: {}, files: ["aha2-windows-amd64.exe"]}),
     /generator\.script/,
   );
+});
+
+function validPackageManifest(overrides = {}) {
+  return {
+    schema_version: MANIFEST_SCHEMA_VERSION,
+    product: "AHA2",
+    version: "1.2.3",
+    commit: "abcdef0123456789abcdef0123456789abcdef01",
+    built_at: "2026-11-12T00:00:00.000Z",
+    generator: {
+      script: "scripts/build-windows-package.sh",
+      command: "bash scripts/build-windows-package.sh --version 1.2.3",
+      web_version: "v1.2.3.20261112.abcdef012345",
+      go_version: "go1.27.4",
+      node_version: "v24.21.0",
+    },
+    files: REQUIRED_PACKAGE_FILES.map((path) => ({path, size: 1, sha256: "a".repeat(64)})),
+    ...overrides,
+  };
+}
+
+test("package manifest gate accepts the exact installer install scope", () => {
+  const manifest = validPackageManifest();
+  assert.equal(assertPackageManifest(manifest, {
+    version: "v1.2.3",
+    commit: "abcdef0123456789abcdef0123456789abcdef01",
+    webVersion: "v1.2.3.20261112.abcdef012345",
+    generatorScript: "scripts/build-windows-package.sh",
+  }), manifest);
+  for (const path of REQUIRED_PACKAGE_FILES) {
+    assert.ok(packagePathInScope(path), `${path} must be in the installer install scope`);
+  }
+  for (const path of ["secret.txt", "plugins/other/x.exe", "browser-host", "node-modules/x", "node/extra.exe", "/absolute.exe", "C:/x.exe"]) {
+    assert.ok(!packagePathInScope(path), `${path} must be outside the installer install scope`);
+  }
+  for (const path of ["node/node.exe", "node/LICENSE"]) {
+    assert.ok(packagePathInScope(path), `${path} must be inside the installer install scope`);
+  }
+});
+
+test("package manifest gate rejects identity mismatches", () => {
+  assert.throws(() => assertPackageManifest(validPackageManifest(), {version: "1.2.4"}), /manifest version/);
+  assert.throws(() => assertPackageManifest(validPackageManifest(), {commit: "0000000000000000000000000000000000000000"}), /manifest commit/);
+  assert.throws(() => assertPackageManifest(validPackageManifest(), {webVersion: "v1.2.3.20261113.abcdef012345"}), /generator\.web_version/);
+  assert.throws(() => assertPackageManifest(validPackageManifest(), {generatorScript: "local_build.sh"}), /generator\.script/);
+  assert.ok(assertPackageManifest(validPackageManifest({version: "v1.2.3"}), {version: "1.2.3"}),
+    "the manifest version and expected.version are both normalized before comparison");
+});
+
+test("package manifest gate cross-checks version, commit and Web version without caller input", () => {
+  // The manifest's own fields must agree with each other even when no expected
+  // values are supplied, so a forged manifest cannot validate itself.
+  assert.throws(
+    () => assertPackageManifest(validPackageManifest({generator: {
+      ...validPackageManifest().generator,
+      web_version: "v9.9.9.20261112.abcdef012345",
+    }})),
+    /must look like v1\.2\.3/,
+  );
+  assert.throws(
+    () => assertPackageManifest(validPackageManifest({generator: {
+      ...validPackageManifest().generator,
+      web_version: "v1.2.3.20261112.ffffffffffff",
+    }})),
+    /does not match manifest commit/,
+  );
+  assert.throws(
+    () => assertPackageManifest(validPackageManifest({generator: {
+      ...validPackageManifest().generator,
+      web_version: "v1.2.3.20261312.abcdef012345",
+    }})),
+    /invalid build date/,
+  );
+  assert.throws(
+    () => assertPackageManifest(validPackageManifest({commit: "0000000000000000000000000000000000000000"})),
+    /does not match manifest commit 0000000000000000000000000000000000000000/,
+    "an all-zero commit cannot be paired with a real Web version hash",
+  );
+});
+
+test("package manifest gate rejects unsafe, duplicate and out-of-scope entries", () => {
+  assert.throws(() => assertPackageManifest(validPackageManifest({files: []})), /at least one package file/);
+  assert.throws(
+    () => assertPackageManifest(validPackageManifest({files: [
+      {path: "browser-host//host.mjs", size: 1, sha256: "a".repeat(64)},
+    ]})),
+    /not normalized/,
+  );
+  assert.throws(
+    () => assertPackageManifest(validPackageManifest({files: [
+      {path: "aha2-windows-amd64.exe", size: 1, sha256: "a".repeat(64)},
+      {path: "aha2-windows-amd64.exe", size: 2, sha256: "b".repeat(64)},
+    ]})),
+    /listed twice/,
+  );
+  assert.throws(
+    () => assertPackageManifest(validPackageManifest({files: [
+      ...validPackageManifest().files,
+      {path: "operator-deploy.ps1", size: 1, sha256: "a".repeat(64)},
+    ]})),
+    /outside the package install scope/,
+  );
+  assert.throws(
+    () => assertPackageManifest(validPackageManifest({files: [
+      ...validPackageManifest().files,
+      {path: "release-manifest.json", size: 1, sha256: "a".repeat(64)},
+    ]})),
+    /must not list itself/,
+  );
+  assert.throws(
+    () => assertPackageManifest(validPackageManifest({files: validPackageManifest().files.slice(1)})),
+    /missing required package file/,
+  );
+  assert.throws(
+    () => assertPackageManifest(validPackageManifest({files: [
+      ...validPackageManifest().files,
+      {path: "node/extra.exe", size: 1, sha256: "xyz"},
+    ]})),
+    /malformed sha256/,
+  );
+  for (const path of ["browser-host/CON.txt", "node/NUL", "browser-host/a|b.mjs", "browser-host/a?b.mjs"]) {
+    assert.throws(
+      () => assertPackageManifest(validPackageManifest({files: [
+        ...validPackageManifest().files,
+        {path, size: 1, sha256: "a".repeat(64)},
+      ]})),
+      /reserved Windows device name|invalid character/,
+      `${path} must be rejected as an invalid Windows file name`,
+    );
+  }
 });
 
 test("release manifest CLI writes the manifest and fails without required arguments", async () => {

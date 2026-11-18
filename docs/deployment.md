@@ -135,21 +135,79 @@ bash scripts/build-windows-package.sh --version 0.5.23 --output-dir dist
 Web 构建和嵌入资源都写在副本中，仓库里只写 `--output-dir`；没有 `.git` 的源码快照也能用
 `--commit` 构建。
 
-构建产物：
+构建产物（即官方 PackageDir 中的 `dist/` 目录）：
 
 ```text
 <output-dir>/aha2-windows-amd64.exe
 <output-dir>/aha2-tray-windows-amd64.exe
 <output-dir>/plugins/feishu/windows-amd64/aha2-channel-feishu.exe
 <output-dir>/plugins/feishu/windows-amd64/plugin.json
+<output-dir>/browser-host/            # host 源码 + Playwright 1.49.0
+<output-dir>/node/node.exe            # 固定版本 Node.js 运行时
+<output-dir>/node/LICENSE
 <output-dir>/release-manifest.json
 ```
 
 `release-manifest.json` 由构建步骤生成，记录 `version`、`commit`、`built_at`、生成方式
 （脚本、命令行、Web/Go/Node 版本）以及每个产物文件的相对路径、大小和 SHA256。它只是产物
 清单，不含部署步骤，也不包含自身。构建脚本写清单前会检查三个 PE 文件的 `MZ` 头、飞书
-清单里的打包占位符已被真实哈希替换，以及四个输入文件都存在；缺一项就直接失败，不会产出
-不完整的包。
+清单里的打包占位符已被真实哈希替换，以及四个输入文件都存在；写完后还会校验清单的身份
+（版本、commit、Web 版本）、路径安全、必需文件范围、`browser-host/` 全量覆盖以及
+`node/node.exe`、`node/LICENSE` 两个精确文件；缺一项或出现安装器不会复制的文件就直接
+失败，不会产出不完整的包。
+
+安装器构建使用同一份清单：`scripts/build-windows-installer.ps1` 读取
+`-InputManifest`（默认 `dist\release-manifest.json`），调用
+`scripts/verify-windows-package.mjs` 做双向校验：清单里的每一项都必须有安装输入，
+安装器会复制的每一个文件（包括递归的 `browser-host/` 以及 `node/node.exe`、
+`node/LICENSE`）也必须在清单里；
+随后逐文件比对大小和 SHA256。清单身份不止检查格式：版本、commit 和
+`generator.web_version` 必须互相一致，Web 版本里的 12 位哈希必须等于 commit 前缀，
+构建日期必须是真实日期。期望 commit 来自安装器所在 git 检出（`git rev-parse HEAD`）
+或调用方传入的 `-ExpectedCommit`（Release 作业传 `$GITHUB_SHA`），绝不使用清单自身
+的 commit 自证；因此构建需要 Node.js，且清单被篡改或安装输入被增删时构建会直接失败。
+安装器把清单原样安装到 `{app}\release-manifest.json`，因此目标机部署脚本校验的清单
+与实际安装的字节完全一致。清单枚举的包内路径是固定的：
+
+- `aha2-windows-amd64.exe` → `{app}\aha2.exe`
+- `aha2-tray-windows-amd64.exe` → `{app}\aha2-tray.exe`
+- `plugins/feishu/windows-amd64/*` → `<数据目录>\plugins\channels\feishu\*`
+- `browser-host/*` → `{app}\browser-host\*`（相对路径不变）
+- `node/node.exe`、`node/LICENSE` → `{app}\node\node.exe`、`{app}\node\LICENSE`
+
+### Release 的可部署 Windows 包布局
+
+Release 的 Windows 作业直接调用 `scripts/build-windows-package.sh` 生成 `dist/package`
+（包内 `dist/`），再用其中的清单和文件构建机器级与 per-user 两个安装器，最后由
+`scripts/assemble-windows-package.py` 把官方 PackageDir 布局打成
+`AHA2-Windows-Package-x64.zip`。该组包脚本只写文件条目，不写目录元数据，避免归档里
+出现无部署价值、却需要额外路径校验的目录条目；Release 与 Linux 测试执行同一脚本：
+
+```text
+AHA2-Windows-Package-x64.zip
+  dist/
+    aha2-windows-amd64.exe
+    aha2-tray-windows-amd64.exe
+    plugins/feishu/windows-amd64/
+    browser-host/
+    node/
+    release-manifest.json
+  installer/
+    AHA2-Setup-x64.exe
+    AHA2-Setup-User-x64.exe
+```
+
+部署侧以解压后的目录作为 `PackageDir`，需要
+`<PackageDir>\installer\AHA2-Setup-User-x64.exe` 和
+`<PackageDir>\dist\release-manifest.json`；单个安装器资产
+`AHA2-Setup-x64.exe`、`AHA2-Setup-User-x64.exe` 仍单独发布，Linux/macOS 资产不变。
+发布作业用 `scripts/verify-windows-package-archive.py` 检查 zip：两份安装器与
+`dist/release-manifest.json` 必须存在；清单不能为空，必须包含完整的必需文件范围
+（`scripts/windows-package-scope.json`），commit 与 Web 版本必须和当前 Release 期望值
+一致；`dist/` 下的文件集合必须与清单双向一致，并逐个比对 zip 内的 SHA256。缺少
+`browser-host/` 或 `node/` 必需文件、清单为空、混入未列出文件、成员路径逃逸或
+重复、目录或符号链接成员、Windows 保留名或非法字符（如 `CON.txt`、`NUL`、`a|b`、
+`a?b`）、哈希不符，都会让发布失败。
 
 Agent API stdio helper 不再需要单独构建或安装：它是一个只用 Node 标准库的单文件脚本，通过
 `go:embed` 打在 `aha2.exe` 里，运行时才上传到工作区 `.aha2-context/share/agent-proxy/`。因此
@@ -328,6 +386,7 @@ Release 只包含标准安装包，不发布裸二进制。`aha2-sync` 是单独
 ```text
 AHA2-Setup-x64.exe
 AHA2-Setup-User-x64.exe
+AHA2-Windows-Package-x64.zip
 aha2_<version>_amd64.deb
 aha2_<version>_arm64.deb
 aha2-<version>-1.x86_64.rpm
@@ -344,8 +403,10 @@ SHA256SUMS
 打包过程仍会生成临时目标平台二进制，但只作为安装包输入，不上传到 Release。
 
 构建机交付给本机安装器的是 Windows 包，由 `scripts/build-windows-package.sh` 生成，包含
-`aha2-windows-amd64.exe`、`aha2-tray-windows-amd64.exe`、飞书插件目录和
-`release-manifest.json`。包的构建和清单格式见“Windows per-user 安装与构建出包”。
+`aha2-windows-amd64.exe`、`aha2-tray-windows-amd64.exe`、飞书插件目录、`browser-host/`、
+`node/` 和 `release-manifest.json`。Release 把它们和两个安装器一起打成
+`AHA2-Windows-Package-x64.zip`，形成部署脚本直接消费的 PackageDir 布局。包的构建和清单
+格式见“Windows per-user 安装与构建出包”。
 
 本地仅校验安装器定义、不生成二进制：
 
@@ -363,15 +424,27 @@ bash scripts/build-all.sh
 该脚本不再产出预编译的 Agent API stdio helper：helper 是内嵌在 `aha2.exe` 里的 Node 脚本，
 安装包不含 `agent-proxy/` 目录。
 
-已有 Windows amd64 控制面和 tray 程序且安装了 Inno Setup 6 时，可构建安装包：
+已有完整 Windows 包（含 `release-manifest.json`、`browser-host/`、`node/` 和飞书插件）
+且安装了 Inno Setup 6 时，可构建安装包：
 
 ```powershell
 .\scripts\build-windows-installer.ps1 `
-  -InputExe .\dist\aha2-windows-amd64.exe `
-  -InputTrayExe .\dist\aha2-tray-windows-amd64.exe `
+  -InputExe .\dist\package\aha2-windows-amd64.exe `
+  -InputTrayExe .\dist\package\aha2-tray-windows-amd64.exe `
+  -InputBrowserHost .\dist\package\browser-host `
+  -InputNodeExe .\dist\package\node\node.exe `
+  -InputNodeLicense .\dist\package\node\LICENSE `
+  -InputFeishuPlugin .\dist\package\plugins\feishu\windows-amd64\aha2-channel-feishu.exe `
+  -InputFeishuManifest .\dist\package\plugins\feishu\windows-amd64\plugin.json `
+  -InputManifest .\dist\package\release-manifest.json `
   -OutputDir .\dist\installer `
   -Version 0.1.0
 ```
+
+`-InputManifest` 缺省为 `dist\release-manifest.json`。构建会从 git 检出读取期望
+commit；源码快照没有 `.git` 时必须显式传 `-ExpectedCommit`。若清单缺失、版本/commit/
+Web 版本不一致、安装输入与清单不是一一对应、或任一文件的 SHA256 不符，构建会直接失败，
+不会生成安装器。该步骤需要 Node.js 执行 `scripts/verify-windows-package.mjs`。
 
 ## 当前边界
 

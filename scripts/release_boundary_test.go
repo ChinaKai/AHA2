@@ -232,6 +232,7 @@ func TestWindowsPackageBuildProducesAllArtifacts(t *testing.T) {
 		"GO_BIN="+recorder,
 		"AHA2_REAL_GO="+realGo,
 		"AHA2_GO_CALL_LOG="+goCallLog,
+		"AHA2_BUILD_DATE=20260101",
 	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -308,6 +309,13 @@ func TestWindowsPackageBuildProducesAllArtifacts(t *testing.T) {
 	if manifest.Generator.Command == "" || manifest.Generator.WebVersion == "" || manifest.Generator.GoVersion == "" || manifest.Generator.NodeVersion == "" {
 		t.Errorf("manifest generator is incomplete: %+v", manifest.Generator)
 	}
+	// Pin the Web version derived from --commit and AHA2_BUILD_DATE. The
+	// installer rejects a manifest whose version it cannot match, and the
+	// deploy script compares the installed web_version too.
+	const wantWebVersion = "v1.2.3.20260101.0123456789ab"
+	if manifest.Generator.WebVersion != wantWebVersion {
+		t.Errorf("manifest web_version = %q, want %q", manifest.Generator.WebVersion, wantWebVersion)
+	}
 	// Replaying from a source snapshot needs the commit and test options in the
 	// recorded command, not just the version.
 	for _, want := range []string{"--version " + version, "--commit " + commit, "--output-dir", "--skip-web-test"} {
@@ -325,6 +333,42 @@ func TestWindowsPackageBuildProducesAllArtifacts(t *testing.T) {
 	}
 	if _, ok := got["release-manifest.json"]; ok {
 		t.Error("manifest must not list itself")
+	}
+	// The manifest is the installer's verification contract, so it may name
+	// only files the installer actually copies. Anything else would describe
+	// an install tree that does not exist.
+	allowedExact := map[string]bool{
+		"aha2-windows-amd64.exe":                               true,
+		"aha2-tray-windows-amd64.exe":                          true,
+		"plugins/feishu/windows-amd64/aha2-channel-feishu.exe": true,
+		"plugins/feishu/windows-amd64/plugin.json":             true,
+		"node/node.exe":                                        true,
+		"node/LICENSE":                                         true,
+	}
+	for _, path := range []string{
+		"aha2-windows-amd64.exe",
+		"aha2-tray-windows-amd64.exe",
+		"plugins/feishu/windows-amd64/aha2-channel-feishu.exe",
+		"plugins/feishu/windows-amd64/plugin.json",
+		"browser-host/host.mjs",
+		"browser-host/server.mjs",
+		"browser-host/tabs.mjs",
+		"browser-host/lock.mjs",
+		"browser-host/package.json",
+		"browser-host/node_modules/playwright/package.json",
+		"node/node.exe",
+		"node/LICENSE",
+	} {
+		if _, ok := got[path]; !ok {
+			t.Errorf("manifest is missing required install file %s", path)
+		}
+	}
+	for path := range got {
+		slash := filepath.ToSlash(path)
+		if allowedExact[slash] || strings.HasPrefix(slash, "browser-host/") {
+			continue
+		}
+		t.Errorf("manifest lists %s, which the installer does not copy", slash)
 	}
 	// The browser host and its bundled Node runtime are supervised from the
 	// installed tree, so every shipped file must be covered by the manifest.

@@ -8,6 +8,9 @@ param(
     [string]$InputNodeLicense = "",
 	[string]$InputFeishuPlugin = "",
 	[string]$InputFeishuManifest = "",
+    [string]$InputManifest = "",
+    [string]$ExpectedCommit = "",
+    [string]$ExpectedWebVersion = "",
     [string]$OutputDir = "",
     [string]$Version = "dev",
     [string]$ISCCPath = "",
@@ -46,6 +49,9 @@ if ([string]::IsNullOrWhiteSpace($InputNodeExe)) {
 if ([string]::IsNullOrWhiteSpace($InputNodeLicense)) {
     $InputNodeLicense = Join-Path $repo "dist\node\LICENSE"
 }
+if ([string]::IsNullOrWhiteSpace($InputManifest)) {
+    $InputManifest = Join-Path $repo "dist\release-manifest.json"
+}
 $defaultFeishuDir = Join-Path $repo "dist\plugins\feishu\windows-amd64"
 if ([string]::IsNullOrWhiteSpace($InputFeishuPlugin) -and [string]::IsNullOrWhiteSpace($InputFeishuManifest)) {
 	$defaultPlugin = Join-Path $defaultFeishuDir "aha2-channel-feishu.exe"
@@ -66,6 +72,7 @@ $trayInputPath = [IO.Path]::GetFullPath($InputTrayExe)
 $browserHostPath = [IO.Path]::GetFullPath($InputBrowserHost)
 $nodeInputPath = [IO.Path]::GetFullPath($InputNodeExe)
 $nodeLicensePath = [IO.Path]::GetFullPath($InputNodeLicense)
+$manifestInputPath = [IO.Path]::GetFullPath($InputManifest)
 $feishuPluginPath = if ([string]::IsNullOrWhiteSpace($InputFeishuPlugin)) { "" } else { [IO.Path]::GetFullPath($InputFeishuPlugin) }
 $feishuManifestPath = if ([string]::IsNullOrWhiteSpace($InputFeishuManifest)) { "" } else { [IO.Path]::GetFullPath($InputFeishuManifest) }
 $outputPath = [IO.Path]::GetFullPath($OutputDir)
@@ -84,6 +91,8 @@ $requiredContracts = @(
     '#define SourceTrayExe',
     'DestName: "aha2.exe"',
     'DestName: "aha2-tray.exe"',
+    'DestName: "release-manifest.json"',
+    'SourceManifest',
     'DestDir: "{app}\browser-host"',
     "recursesubdirs",
     "SourceBrowserHost",
@@ -159,8 +168,9 @@ if ($ValidateOnly) {
     $browserHostState = if (Test-Path -LiteralPath (Join-Path $browserHostPath "host.mjs") -PathType Leaf) {"found"} else {"not present"}
     $nodeState = if ((Test-Path -LiteralPath $nodeInputPath -PathType Leaf) -and (Test-Path -LiteralPath $nodeLicensePath -PathType Leaf)) {"found"} else {"not present"}
 	$feishuState = if ($feishuPluginPath -and (Test-Path -LiteralPath $feishuPluginPath -PathType Leaf) -and (Test-Path -LiteralPath $feishuManifestPath -PathType Leaf)) { "found" } else { "not bundled" }
+	$manifestState = if (Test-Path -LiteralPath $manifestInputPath -PathType Leaf) { "found" } else { "not present" }
 	$mode = if ($PerUser) { "per-user" } else { "per-machine" }
-	Write-Output "Installer definition valid ($mode); server input $serverState; tray input $trayState; browser host $browserHostState; node runtime $nodeState; Feishu plugin $feishuState."
+	Write-Output "Installer definition valid ($mode); server input $serverState; tray input $trayState; browser host $browserHostState; node runtime $nodeState; Feishu plugin $feishuState; release manifest $manifestState."
     exit 0
 }
 
@@ -181,6 +191,65 @@ if (-not (Test-Path -LiteralPath $nodeLicensePath -PathType Leaf)) {
 }
 if ($feishuPluginPath -and ((-not (Test-Path -LiteralPath $feishuPluginPath -PathType Leaf)) -or (-not (Test-Path -LiteralPath $feishuManifestPath -PathType Leaf)))) {
 	throw "Feishu plugin bundle inputs were not found."
+}
+
+# The installer writes {app}\release-manifest.json byte-for-byte. That manifest
+# is the deploy verification contract, so fail the build unless it describes
+# exactly the files the installer is about to copy. The verifier is shared with
+# the Node tests and the Release archive check: it validates identity, path
+# safety, required scope, per-file SHA256 and the bidirectional mapping between
+# manifest entries and the files Inno Setup actually copies (the browser-host
+# tree is copied recursively, so deleting one file from that tree must fail).
+if (-not (Test-Path -LiteralPath $manifestInputPath -PathType Leaf)) {
+    throw "Release manifest not found: $manifestInputPath. Run scripts\build-windows-package.sh first."
+}
+# The commit is the trusted anchor for the manifest identity. Derive it from the
+# checkout when the caller does not pass one; the manifest's own commit is
+# never used to validate itself.
+if ([string]::IsNullOrWhiteSpace($ExpectedCommit)) {
+    $gitCommand = Get-Command "git.exe" -ErrorAction SilentlyContinue
+    if (-not $gitCommand) {
+        $gitCommand = Get-Command "git" -ErrorAction SilentlyContinue
+    }
+    if ($gitCommand) {
+        $ExpectedCommit = (& $gitCommand.Source -C $repo rev-parse HEAD 2>$null | Out-String).Trim()
+    }
+    if ([string]::IsNullOrWhiteSpace($ExpectedCommit)) {
+        throw "Expected commit is required when the repository is not a git checkout; pass -ExpectedCommit."
+    }
+}
+$nodeCommand = Get-Command "node.exe" -ErrorAction SilentlyContinue
+if (-not $nodeCommand) {
+    $nodeCommand = Get-Command "node" -ErrorAction SilentlyContinue
+}
+if (-not $nodeCommand) {
+    throw "Node.js is required to verify the Windows package against release-manifest.json."
+}
+$verifier = Join-Path $repo "scripts\verify-windows-package.mjs"
+if (-not (Test-Path -LiteralPath $verifier -PathType Leaf)) {
+    throw "Windows package verifier is missing: $verifier"
+}
+$verifyArgs = @(
+    $verifier,
+    "--manifest", $manifestInputPath,
+    "--root", (Split-Path -Parent $manifestInputPath),
+    "--version", $normalizedVersion,
+    "--expected-commit", $ExpectedCommit,
+    "--server", $inputPath,
+    "--tray", $trayInputPath,
+    "--browser-host", $browserHostPath,
+    "--node-exe", $nodeInputPath,
+    "--node-license", $nodeLicensePath
+)
+if ($feishuPluginPath) {
+    $verifyArgs += @("--feishu-plugin", $feishuPluginPath, "--feishu-manifest", $feishuManifestPath)
+}
+if (-not [string]::IsNullOrWhiteSpace($ExpectedWebVersion)) {
+    $verifyArgs += @("--expected-web-version", $ExpectedWebVersion)
+}
+& $nodeCommand.Source @verifyArgs
+if ($LASTEXITCODE -ne 0) {
+    throw "Windows package verification failed for $manifestInputPath."
 }
 
 function Get-PEWindowsSubsystem([string]$Path) {
@@ -234,6 +303,7 @@ $compilerArgs = @(
 	"/DSourceBrowserHost=$browserHostPath",
 	"/DSourceNodeExe=$nodeInputPath",
 	"/DSourceNodeLicense=$nodeLicensePath",
+	"/DSourceManifest=$manifestInputPath",
 	"/DOutputDir=$outputPath"
 )
 if ($feishuPluginPath) {
@@ -283,3 +353,4 @@ $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $setup).Hash.ToLowerInvaria
 [IO.File]::WriteAllText($hashFile, "$hash  $setupName`n", [Text.UTF8Encoding]::new($false))
 Write-Output "Installer: $setup"
 Write-Output "SHA256: $hashFile"
+Write-Output "Release manifest: $manifestInputPath"

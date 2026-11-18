@@ -79,7 +79,8 @@ foreach ($contract in @(
 	"PrivilegesRequired=admin", "PrivilegesRequired=lowest", "PerUserInstall", "AHA2-Setup-User-x64", "{localappdata}\Programs\AHA2", "DisableDirPage=no", "ArchitecturesAllowed=x64compatible", "CurUninstallStepChanged", "DeinitializeSetup",
     '[Icons]', '[Run]', '[Files]', '[InstallDelete]', 'Type: files; Name: "{app}\Run-AHA2User.vbs"', 'CreateInputDirPage', 'CreateInputOptionPage', 'CreateInputQueryPage',
     'RegisterPreviousData', 'remoteip=localsubnet profile=private', '{code:LocalManagementURL}', '{commonappdata}\AHA2',
-    'DestName: "aha2.exe"', 'DestName: "aha2-tray.exe"', 'TrayParameters', '--server', '--listen', '--data-dir',
+    'DestName: "aha2.exe"', 'DestName: "aha2-tray.exe"', 'DestName: "release-manifest.json"', 'SourceManifest',
+    'TrayParameters', '--server', '--listen', '--data-dir',
 	'DestName: "Xray-core-MPL-2.0.txt"', 'DestName: "Xray-core-SOURCE.txt"',
     'runasoriginaluser', 'StopInstalledUserProcesses', "Get-Process -Name ''aha2-tray'',''aha2''",
     'DisableAndStopLegacyAHA2Service(True)', 'RemoveLegacyAHA2Service()', 'Register-AHA2UserTask.ps1',
@@ -253,10 +254,12 @@ foreach ($forbidden in @("delayed-auto Windows", "aha2.exe service run --listen"
 
 $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo ".github\workflows\release.yml")
 foreach ($contract in @(
-    "runs-on: windows-latest", "cmd\aha-tray", "aha2-tray.exe", "-H windowsgui", "build-windows-installer.ps1", "-InputTrayExe",
-    "stage-windows-runtime.sh", "-InputBrowserHost", "-InputNodeExe", "-InputNodeLicense",
-	"AHA2-Setup-x64.exe", "AHA2-Setup-User-x64.exe", "build-feishu-plugin.sh", "build-linux-packages.sh", "build-linux-sync-packages.sh", "aha2-sync_", "build-macos-packages.sh",
-    "ubuntu-24.04-arm", "SHA256SUMS", "merge-multiple: true", "pattern: package-*", "main.version=", "main.webVersion=", "gh release create"
+    "runs-on: windows-latest", "build-windows-package.sh", "--output-dir", "build-windows-installer.ps1", "-InputTrayExe",
+    "-InputBrowserHost", "-InputNodeExe", "-InputNodeLicense", "-InputFeishuPlugin", "-InputFeishuManifest", "-InputManifest", "-ExpectedCommit",
+	"AHA2-Setup-x64.exe", "AHA2-Setup-User-x64.exe", "AHA2-Windows-Package-x64.zip", "assemble-windows-package.py",
+    "verify-windows-package-archive.py",
+    "build-linux-packages.sh", "build-linux-sync-packages.sh", "aha2-sync_", "build-macos-packages.sh",
+    "ubuntu-24.04-arm", "SHA256SUMS", "merge-multiple: true", "pattern: package-*", "gh release create"
 )) {
     if (-not $workflow.Contains($contract)) {
         throw "Release workflow contract is missing: $contract"
@@ -265,20 +268,31 @@ foreach ($contract in @(
 if ($workflow.Contains("portable-release") -or $workflow.Contains("Upload portable artifacts")) {
     throw "Release workflow must not publish portable binaries."
 }
-# The 0.5.537 release run failed here: the Windows job built the application
-# and called the installer directly, so dist\browser-host and dist\node were
-# never staged. Staging must run first, and both installer builds must name the
-# inputs explicitly instead of relying on the default dist paths.
-$stagingProbe = $workflow.IndexOf("stage-windows-runtime.sh")
+# The Windows job must build the same official package the deploy skill
+# consumes (including release-manifest.json) before compiling the installers.
+$packageProbe = $workflow.IndexOf("build-windows-package.sh")
 $installerProbe = $workflow.IndexOf("build-windows-installer.ps1")
-if ($stagingProbe -lt 0 -or $installerProbe -lt 0 -or $stagingProbe -gt $installerProbe) {
-    throw "Release workflow must stage browser-host and Node runtime before building the Windows installer."
+if ($packageProbe -lt 0 -or $installerProbe -lt 0 -or $packageProbe -gt $installerProbe) {
+    throw "Release workflow must build the Windows package (with release-manifest.json) before building the Windows installers."
 }
-foreach ($inputContract in @("-InputBrowserHost", "-InputNodeExe", "-InputNodeLicense")) {
+foreach ($inputContract in @("-InputBrowserHost", "-InputNodeExe", "-InputNodeLicense", "-InputFeishuPlugin", "-InputFeishuManifest", "-InputManifest", "-ExpectedCommit")) {
     $inputCount = [regex]::Matches($workflow, [regex]::Escape($inputContract)).Count
     if ($inputCount -lt 2) {
         throw "Release workflow must pass $inputContract to both the per-machine and per-user installer builds."
     }
+}
+# The archive is the deployable PackageDir layout: both installers under
+# installer/ and the exact package manifest under dist/. The layout lives in
+# the shared Python assembler so the Linux round-trip test exercises it too.
+$assembler = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo "scripts\assemble-windows-package.py")
+foreach ($archiveContract in @("AHA2-Windows-Package-x64.zip", "AHA2-Setup-x64.exe", "AHA2-Setup-User-x64.exe", "release-manifest.json", 'add_tree(archive, package_dir, "dist")', 'f"installer/{name}"')) {
+    $source = if ($archiveContract -eq "AHA2-Windows-Package-x64.zip") { $workflow } else { $assembler }
+    if (-not $source.Contains($archiveContract)) {
+        throw "Windows package assembly does not produce the deployable layout: $archiveContract"
+    }
+}
+if ($workflow -notmatch 'test "\$\(find dist -maxdepth 1 -type f \| wc -l\)" -eq 13') {
+    throw "Release workflow must expect the new Windows package archive in its release-asset count."
 }
 # A tag is verified locally before it is pushed, so the release workflow only
 # packages. Re-adding a test job here would make releases depend on tests that
@@ -291,10 +305,13 @@ foreach ($testCommand in @("go test", "go vet", "node --test", "npm test")) {
 $installerBuilder = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo "scripts\build-windows-installer.ps1")
 foreach ($contract in @(
     "Get-PEWindowsSubsystem", "Windows GUI subsystem", "-H windowsgui",
-    "Start-Process", "-Wait", 'Remove-Item -LiteralPath $setup,$hashFile'
+    "Start-Process", "-Wait", 'Remove-Item -LiteralPath $setup,$hashFile',
+    "Release manifest not found", "/DSourceManifest=", "verify-windows-package.mjs",
+    "--expected-commit", "--browser-host", "Expected commit is required",
+    "Node.js is required", "Windows package verification failed"
 )) {
     if (-not $installerBuilder.Contains($contract)) {
-        throw "Windows installer builder does not enforce the GUI tray subsystem: $contract"
+        throw "Windows installer builder does not enforce the GUI tray subsystem or the release manifest contract: $contract"
     }
 }
 $localBuild = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo "scripts\build-all.sh")
@@ -341,7 +358,7 @@ foreach ($contract in @("bsdtar", "-xOf", "No ZIP extractor", "install unzip or 
     }
 }
 $manifestGenerator = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo "scripts\release-manifest.mjs")
-foreach ($contract in @("schema_version", "version", "commit", "built_at", "generator", "files", "sha256")) {
+foreach ($contract in @("schema_version", "version", "commit", "built_at", "generator", "files", "sha256", "REQUIRED_PACKAGE_FILES", "assertPackageManifest", "packagePathInScope")) {
     if (-not $manifestGenerator.Contains($contract)) {
         throw "Release manifest generator contract is missing: $contract"
     }
