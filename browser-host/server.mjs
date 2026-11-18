@@ -8,10 +8,19 @@ import {constants as fsConstants, promises as fs} from "node:fs";
 import {basename, dirname, join} from "node:path";
 import {createProfileLocks, profileDir, safeProfileID} from "./lock.mjs";
 import {navigatePage, openTabPage} from "./tabs.mjs";
+import {
+  captureElements, performAction, performUpload, normalizeAction, MAX_UPLOAD_BODY_BYTES,
+} from "./interact.mjs";
+import {createDownloadStore} from "./downloads.mjs";
+import {
+  cookieDomainMatches, exportCookie, normalizeCookie, normalizeCookieDomain,
+  toPlaywrightCookie, MAX_COOKIES,
+} from "./cookies.mjs";
 
 export const VERSION = "0.1.0";
 export const LOOPBACK = "127.0.0.1";
 const MAX_BODY = 64 * 1024;
+const MAX_COOKIE_BODY = 2 * 1024 * 1024;
 const MAX_SNAPSHOT_TEXT = 200_000;
 const MAX_FRAME_BYTES = 4 * 1024 * 1024;
 const FRAME_MIN_INTERVAL_MS = 200;
@@ -31,12 +40,12 @@ function json(response, status, body) {
   response.end(payload);
 }
 
-async function readJSON(request) {
+async function readJSON(request, limit = MAX_BODY) {
   const chunks = [];
   let size = 0;
   for await (const chunk of request) {
     size += chunk.length;
-    if (size > MAX_BODY) throw new Error("request body too large");
+    if (size > limit) throw new Error("request body too large");
     chunks.push(chunk);
   }
   if (!chunks.length) return {};
@@ -104,7 +113,12 @@ function attachPage(session, page, id = "") {
   for (const tab of session.tabs.values()) {
     if (tab.page === page) return tab;
   }
-  const tab = {id: id || newTabID(), page, url: "", title: "", frame: null, framePending: null};
+  const tab = {
+    id: id || newTabID(), page, url: "", title: "", frame: null, framePending: null,
+    // Structured-snapshot refs carry this generation; navigation and a newer
+    // snapshot invalidate every earlier ref.
+    refGeneration: 0, refsAt: 0,
+  };
   try {
     tab.url = page.url();
   } catch {
@@ -118,6 +132,19 @@ function attachPage(session, page, id = "") {
     });
   } catch {
     // A page that cannot accept listeners is still addressable until it closes.
+  }
+  try {
+    // Downloads are captured into the per-session controlled directory. The
+    // suggested name is metadata only; the file on disk uses an opaque id.
+    page.on("download", download => {
+      session.downloads.capture(download, session.fence).catch(error => {
+        // Do not log the suggested name or any path: a download name can carry
+        // task content. Only the stable error code belongs in the host log.
+        console.error(`download capture failed profile=${session.profileID} code=${String(error && error.code || "error")}`);
+      });
+    });
+  } catch {
+    // Fakes and unusual pages may not support download events.
   }
   return tab;
 }
@@ -221,6 +248,21 @@ async function withSessionGate(session, type, timeoutMs, fn) {
   } finally {
     release();
   }
+}
+
+// The session gate isolates fence switches; it deliberately allows concurrent
+// readers. Page input, however, is a compound gesture (focus/click then type)
+// that must not interleave with another input. This slot serializes whole
+// actions/uploads for one browser session.
+function createSerialSlot() {
+  let tail = Promise.resolve();
+  return {
+    run(fn) {
+      const next = tail.then(() => fn(), () => fn());
+      tail = next.then(() => {}, () => {});
+      return next;
+    },
+  };
 }
 
 const MAX_BOOKMARKS = 500;
@@ -432,7 +474,9 @@ async function runMutation(response, session, suppliedFence, beforeMutation, fai
         }
         code = fenceStatus(session, suppliedFence, hold);
         if (code) return fenceFailure(response, code);
-        return await fn();
+        // The callback receives the hold so a serialized operation can re-run
+        // the fence check inside the execution slot.
+        return await fn(hold);
       } finally {
         hold.release();
       }
@@ -474,7 +518,7 @@ function sendFrame(response, buffer, cached) {
 
 // options: root, token, hostID, chromium (Playwright namespace), edgeExecutable
 export function createHostServer(options) {
-  const {root, token, hostID = "local", chromium, edgeExecutable, onShutdown, fenceWaitTimeoutMs = FENCE_WAIT_TIMEOUT_MS, beforeBookmarkOpen, beforeMutation, failLeaseHold} = options;
+  const {root, token, hostID = "local", chromium, edgeExecutable, onShutdown, fenceWaitTimeoutMs = FENCE_WAIT_TIMEOUT_MS, beforeBookmarkOpen, beforeMutation, failLeaseHold, headless = false, downloadOptions = null} = options;
   if (!chromium || typeof chromium.launchPersistentContext !== "function") {
     throw new Error("createHostServer requires a Playwright-compatible chromium");
   }
@@ -500,6 +544,13 @@ export function createHostServer(options) {
       await session.context.close();
     } catch {
       // The browser may already be gone; the lock still has to be released.
+    }
+    // Download artifacts are scoped to this browser session. Remove the
+    // directory so a later session cannot address an old Task's files.
+    try {
+      await session.downloads.close();
+    } catch {
+      // Cleanup is best-effort; the directory is outside every profile.
     }
     await state.locks.release(session.lock);
     console.log(`session closed profile=${profileID} reason=${reason}`);
@@ -549,10 +600,14 @@ export function createHostServer(options) {
     }
     let body = {};
     if (request.method === "POST") {
+      const isUpload = parts[3] === "tabs" && parts.length === 6 && parts[5] === "uploads";
+      const isCookieImport = parts[3] === "cookies" && parts.length === 4;
+      const limit = isUpload ? MAX_UPLOAD_BODY_BYTES : isCookieImport ? MAX_COOKIE_BODY : MAX_BODY;
       try {
-        body = await readJSON(request);
+        body = await readJSON(request, limit);
       } catch {
-        return json(response, 400, fail(400, "invalid_json", "invalid request body").body);
+        const code = isUpload ? "browser_upload_invalid" : isCookieImport ? "browser_cookie_invalid" : "invalid_json";
+        return json(response, 400, fail(400, code, "invalid request body").body);
       }
     }
 
@@ -585,22 +640,34 @@ export function createHostServer(options) {
           return json(response, 409, fail(409, code,
             "该 Profile 的用户数据目录已被另一个浏览器进程占用").body);
         }
+        const sessionID = `host-session-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+        // Chromium writes raw download artifacts here (allowAndName). Keeping
+        // it inside the per-session controlled directory lets the store watch
+        // real on-disk growth while a download is still in progress.
+        const rawDownloads = join(root, ".downloads", profileID, sessionID, "raw");
         try {
+          await fs.mkdir(rawDownloads, {recursive: true, mode: 0o700});
           const context = await chromium.launchPersistentContext(directory, {
             executablePath: edge,
-            headless: false,
+            // Production is always visible. The override exists only for the
+            // opt-in real-Chromium regression harness.
+            headless,
             viewport: null,
+            downloadsPath: rawDownloads,
             args: ["--disable-features=msEdgeSidebar"],
           });
           const session = {
-            id: `host-session-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+            id: sessionID,
             profileID,
             state: "ready",
             context,
             tabs: new Map(),
+            downloads: createDownloadStore(root, profileID, sessionID,
+              {...(downloadOptions || {}), rawDir: rawDownloads}),
             lock,
             fence: "",
             gate: createSessionGate(),
+            inputSlot: createSerialSlot(),
           };
           // A persistent context starts with an initial page and the Owner can
           // open more at any time. Register them now and on every new page so a
@@ -619,6 +686,7 @@ export function createHostServer(options) {
             if (state.get(profileID) === session) {
               state.sessions.delete(profileID);
               void state.locks.release(lock);
+              void session.downloads.close().catch(() => {});
               console.log(`browser window closed profile=${profileID}`);
             }
           });
@@ -626,6 +694,7 @@ export function createHostServer(options) {
           console.log(`session opened profile=${profileID}`);
           return json(response, 200, sessionPayload(session));
         } catch (error) {
+          await fs.rm(rawDownloads, {recursive: true, force: true}).catch(() => {});
           await state.locks.release(lock);
           // Raw Playwright text can contain the user-data directory or Edge
           // executable path; keep it in the host-local log only, sanitized.
@@ -686,6 +755,107 @@ export function createHostServer(options) {
       }
     }
 
+    // /v1/profiles/{id}/downloads[/{download}]
+    if (parts[3] === "downloads" && parts.length >= 4 && parts.length <= 5) {
+      const session = state.get(profileID);
+      if (!session) return json(response, 404, fail(404, "browser_session_not_found", "no active session").body);
+      const suppliedSession = String(url.searchParams.get("session_id") || "");
+      if (suppliedSession && suppliedSession !== session.id) {
+        return json(response, 409, fail(409, "browser_session_changed", "session id mismatch").body);
+      }
+      if (parts.length === 4 && request.method === "GET") {
+        try {
+          return json(response, 200, {downloads: await session.downloads.list(session.fence)});
+        } catch {
+          return json(response, 502, fail(502, "browser_download_failed", "读取下载列表失败").body);
+        }
+      }
+      if (parts.length === 4 && request.method === "DELETE") {
+        await session.downloads.clear();
+        return json(response, 200, {ok: true});
+      }
+      if (parts.length === 5 && request.method === "GET") {
+        let item = null;
+        try {
+          item = await session.downloads.read(parts[4], session.fence);
+        } catch {
+          item = null;
+        }
+        if (!item) {
+          return json(response, 404, fail(404, "browser_download_not_found", "download not found").body);
+        }
+        response.writeHead(200, {
+          "Content-Type": "application/octet-stream",
+          "Content-Length": item.data.length,
+          "Cache-Control": "no-store",
+          "X-Content-Type-Options": "nosniff",
+          "X-AHA2-Download-Filename": encodeURIComponent(item.entry.name),
+        });
+        response.end(item.data);
+        return;
+      }
+    }
+
+    // /v1/profiles/{id}/cookies
+    if (parts[3] === "cookies" && parts.length === 4) {
+      const session = state.get(profileID);
+      if (!session) return json(response, 404, fail(404, "browser_session_not_found", "no active session").body);
+      const suppliedSession = String(body.session_id || url.searchParams.get("session_id") || "");
+      if (suppliedSession && suppliedSession !== session.id) {
+        return json(response, 409, fail(409, "browser_session_changed", "session id mismatch").body);
+      }
+      if (request.method === "GET") {
+        const targetURL = validateURL(url.searchParams.get("url") || "");
+        const rawDomain = String(url.searchParams.get("domain") || "").trim();
+        if (!targetURL && !rawDomain) {
+          return json(response, 400, fail(400, "browser_cookie_invalid", "url or domain is required").body);
+        }
+        let domain = "";
+        try {
+          if (rawDomain) domain = normalizeCookieDomain(rawDomain);
+        } catch {
+          return json(response, 400, fail(400, "browser_cookie_invalid", "invalid cookie domain").body);
+        }
+        let cookies;
+        try {
+          const raw = targetURL
+            ? await session.context.cookies([targetURL])
+            : await session.context.cookies();
+          cookies = (Array.isArray(raw) ? raw : []).map(exportCookie);
+        } catch {
+          return json(response, 502, fail(502, "browser_cookie_export_failed", "读取 Cookie 失败").body);
+        }
+        if (domain) cookies = cookies.filter(cookie => cookieDomainMatches(cookie.domain, domain));
+        let truncated = false;
+        if (cookies.length > MAX_COOKIES) {
+          cookies = cookies.slice(0, MAX_COOKIES);
+          truncated = true;
+        }
+        return json(response, 200, {cookies, truncated});
+      }
+      if (request.method === "POST") {
+        let cookies;
+        try {
+          if (!Array.isArray(body.cookies) || body.cookies.length < 1 || body.cookies.length > MAX_COOKIES) {
+            throw new Error("invalid cookie count");
+          }
+          cookies = body.cookies.map(cookie => normalizeCookie(cookie));
+        } catch {
+          return json(response, 400, fail(400, "browser_cookie_invalid", "invalid cookie body").body);
+        }
+        return runMutation(response, session, body.fence, beforeMutation, failLeaseHold, async () => {
+          try {
+            if (typeof session.context.addCookies !== "function") throw new Error("cookies unavailable");
+            await session.context.addCookies(cookies.map(toPlaywrightCookie));
+            return json(response, 200, {count: cookies.length});
+          } catch {
+            // Never include a cookie value in the response or a log line.
+            return json(response, 502, fail(502, "browser_cookie_import_failed", "写入 Cookie 失败").body);
+          }
+        });
+      }
+    }
+
     // /v1/profiles/{id}/tabs and /v1/profiles/{id}/tabs/{tab}[/...]
     if (parts[3] === "tabs") {
       const session = state.get(profileID);
@@ -742,6 +912,9 @@ export function createHostServer(options) {
             tab.title = navigated.title;
             tab.frame = null;
             tab.framePending = null;
+            // A document change invalidates every element ref from the old page.
+            tab.refGeneration += 1;
+            tab.refsAt = 0;
             return json(response, 200, tabPayload(tab));
           } catch (error) {
             console.error(`tab navigation failed profile=${profileID} diagnostic=${diagnostics(error, root, "")}`);
@@ -799,18 +972,80 @@ export function createHostServer(options) {
       if (parts.length === 6 && parts[5] === "snapshot" && request.method === "GET") {
         try {
           const current = {url: tab.page.url(), title: await tab.page.title()};
-          // Structured text only: no cookies, storage, HTML or CDP URL leave
-          // the host.
+          // Structured text and a bounded element list only: no cookies,
+          // storage, input values, HTML or CDP URL leave the host.
           const text = await tab.page.evaluate(limit => {
             const body = document.body ? document.body.innerText : "";
             return String(body || "").slice(0, limit);
           }, MAX_SNAPSHOT_TEXT);
-          return json(response, 200, {snapshot: {...current, text}});
+          let elements = [];
+          try {
+            tab.refGeneration += 1;
+            tab.refsAt = Date.now();
+            elements = await captureElements(tab.page, `e${tab.refGeneration}-`);
+          } catch {
+            // A page that cannot be introspected still yields its text; every
+            // earlier ref is stale because the generation advanced.
+            elements = [];
+          }
+          return json(response, 200, {snapshot: {...current, text, elements}});
         } catch (error) {
           console.error(`tab snapshot failed profile=${profileID} diagnostic=${diagnostics(error, root, "")}`);
           return json(response, 502, fail(502, "browser_snapshot_failed",
             "读取页面失败").body);
         }
+      }
+      if (parts.length === 6 && parts[5] === "actions" && request.method === "POST") {
+        let action = null;
+        try {
+          action = normalizeAction(body);
+        } catch (error) {
+          const code = error && error.code ? error.code : "browser_action_invalid";
+          return json(response, 400, fail(400, code, "invalid page action").body);
+        }
+        return runMutation(response, session, body.fence, beforeMutation, failLeaseHold, async hold => {
+          // Serialize the whole focused-click/type sequence. The session gate
+          // admits concurrent readers for fence isolation, so it cannot order
+          // two input gestures by itself.
+          return session.inputSlot.run(async () => {
+            // The fence may have changed while this request waited in the
+            // slot; re-check before touching the page.
+            const fenceCode = fenceStatus(session, body.fence, hold);
+            if (fenceCode) return fenceFailure(response, fenceCode);
+            try {
+              const result = await performAction(tab.page, tab, action);
+              tab.frame = null;
+              return json(response, 200, {action: result});
+            } catch (error) {
+              const code = error && error.code ? error.code : "browser_action_failed";
+              const status = code === "browser_element_not_found" ? 404
+                : code === "browser_element_stale" ? 409
+                  : code === "browser_action_invalid" ? 400 : 502;
+              // Never echo Playwright's diagnostic: it can contain typed text
+              // or page-derived selectors.
+              return json(response, status, fail(status, code, "page action failed").body);
+            }
+          });
+        });
+      }
+      if (parts.length === 6 && parts[5] === "uploads" && request.method === "POST") {
+        return runMutation(response, session, body.fence, beforeMutation, failLeaseHold, async hold => {
+          return session.inputSlot.run(async () => {
+            const fenceCode = fenceStatus(session, body.fence, hold);
+            if (fenceCode) return fenceFailure(response, fenceCode);
+            try {
+              const result = await performUpload(tab.page, tab, body);
+              tab.frame = null;
+              return json(response, 200, {upload: result});
+            } catch (error) {
+              const code = error && error.code ? error.code : "browser_upload_failed";
+              const status = code === "browser_element_not_found" ? 404
+                : code === "browser_element_stale" ? 409
+                  : code === "browser_upload_invalid" ? 400 : 502;
+              return json(response, status, fail(status, code, "file upload failed").body);
+            }
+          });
+        });
       }
     }
     return json(response, 404, fail(404, "not_found", "unknown route").body);

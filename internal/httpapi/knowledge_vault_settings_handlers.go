@@ -272,6 +272,7 @@ func (s *Server) initializeKnowledgeVault(writer http.ResponseWriter, request *h
 	}
 	s.knowledgeVault.SetSource(knowledgevault.SourceDatabase)
 	s.resumeKnowledgeVaultAutoSync()
+	s.resolveKnowledgeVaultSyncNotifications(request.Context())
 	s.audit(request, "knowledge_vault.init", "knowledge_vault", result.VaultPath, map[string]any{
 		"samples": result.Samples, "enabled": true,
 	})
@@ -352,6 +353,7 @@ func (s *Server) migrateKnowledgeVault(writer http.ResponseWriter, request *http
 		"entries": report.VerifiedEntries, "skills": report.VerifiedSkills, "backup": report.BackupPath,
 	})
 	s.resumeKnowledgeVaultAutoSync()
+	s.resolveKnowledgeVaultSyncNotifications(request.Context())
 	s.writeKnowledgeVaultView(writer, request, map[string]any{"migration": report})
 }
 
@@ -433,6 +435,7 @@ func (s *Server) importKnowledgeVault(writer http.ResponseWriter, request *http.
 		"kind": report.Kind, "entries": report.IndexedEntries, "files": report.ImportedFiles,
 	})
 	s.resumeKnowledgeVaultAutoSync()
+	s.resolveKnowledgeVaultSyncNotifications(request.Context())
 	s.writeKnowledgeVaultView(writer, request, map[string]any{"import": report})
 }
 
@@ -537,5 +540,17 @@ func (s *Server) cutoverLegacyKnowledge(writer http.ResponseWriter, request *htt
 func (s *Server) resumeKnowledgeVaultAutoSync() {
 	if s.knowledgeVaultSync != nil {
 		s.knowledgeVaultSync.ResetPause()
+	}
+}
+
+// resolveKnowledgeVaultSyncNotifications closes the pet's open sync
+// notifications after an operation that proves the cause is gone. It is
+// intentionally separate from resumeKnowledgeVaultAutoSync: a manual commit
+// can retry the loop but does not prove a divergence was resolved, so a
+// conflict notification must stay open until a pull/push/sync (or an
+// automatic sync) actually succeeds.
+func (s *Server) resolveKnowledgeVaultSyncNotifications(ctx context.Context) {
+	if s.app != nil {
+		_, _ = s.app.ResolveKnowledgeSyncNotifications(ctx)
 	}
 }

@@ -959,3 +959,65 @@ func TestRenormalizeMissingBackupTagIsWarning(t *testing.T) {
 		t.Fatalf("line-ending state lost the warning: %s", state)
 	}
 }
+
+func TestSyncerCallsRecoveredOnlyAfterSuccessfulSync(t *testing.T) {
+	ctx := context.Background()
+	config, manager := newAutoSyncTestManager(t)
+	git := manager.Git()
+	remote := newBareRemote(t)
+	if _, err := git.SetRemote(ctx, remote, "main"); err != nil {
+		t.Fatal(err)
+	}
+	writeGitTestFile(t, config.VaultPath, "global/general/base.md", "# Base\n")
+	if _, err := git.Commit(ctx, "base"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git.Push(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// A second writer advances the remote while the local repository also
+	// commits, so the pair genuinely diverges.
+	clone := cloneRemote(t, remote, "other-writer")
+	writeGitTestFile(t, clone, "global/general/remote.md", "# Remote\n")
+	testGitCommand(t, clone, "add", "-A")
+	testGitCommand(t, clone, "commit", "-m", "remote side")
+	testGitCommand(t, clone, "push", "origin", "main")
+	writeGitTestFile(t, config.VaultPath, "global/general/local.md", "# Local\n")
+	if _, err := git.Commit(ctx, "local side"); err != nil {
+		t.Fatal(err)
+	}
+
+	recovered := 0
+	settings := &testAutoSyncSettings{enabled: true}
+	clock := newTestClock()
+	syncer := NewSyncer(manager, settings, SyncerConfig{
+		Now: clock.Now, QuietPeriod: 30 * time.Second, WriteDebounce: time.Second,
+		RemoteInterval: time.Minute, RetryBase: 10 * time.Millisecond, RetryMax: time.Second,
+		MaxFailures: 2, Recovered: func() { recovered++ },
+	})
+	if err := syncer.SetEnabled(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	markPreflightDone(syncer)
+	syncer.RunOnce(ctx)
+	if status := syncer.Status(); !status.Paused || !status.Conflict {
+		t.Fatalf("expected a conflict pause, status=%+v", status)
+	}
+	if recovered != 0 {
+		t.Fatalf("conflict cycle reported recovery %d times", recovered)
+	}
+
+	// The owner resolves the divergence outside AHA2, then the next cycle
+	// succeeds and the host is told the notification is stale.
+	testGitCommand(t, config.VaultPath, "fetch", "origin", "main")
+	testGitCommand(t, config.VaultPath, "merge", "--no-edit", "origin/main")
+	syncer.ResetPause()
+	clock.Advance(time.Minute)
+	syncer.RunOnce(ctx)
+	if status := syncer.Status(); status.Paused || status.Conflict {
+		t.Fatalf("sync did not recover: %+v", status)
+	}
+	if recovered == 0 {
+		t.Fatal("successful sync did not close stale notifications")
+	}
+}

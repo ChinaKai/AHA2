@@ -26,11 +26,28 @@ const (
 	BrowserCapabilityOpenTab  = "open_tab"
 	BrowserCapabilityNavigate = "navigate"
 	BrowserCapabilitySnapshot = "snapshot"
+	BrowserCapabilityInteract = "interact"
+	BrowserCapabilityFiles    = "files"
+	BrowserCapabilityCookies  = "cookies"
 )
 
-// BrowserCapabilities is the POC's closed capability set. Anything else is
-// rejected at grant creation instead of being silently ignored.
+// BrowserCapabilities is the closed capability set. Anything else is rejected
+// at grant creation instead of being silently ignored. Existing grants keep
+// the capability array they were created with, so adding a capability here
+// never upgrades an old grant; the Owner must re-grant it explicitly.
 var BrowserCapabilities = []string{
+	BrowserCapabilityOpenTab,
+	BrowserCapabilityNavigate,
+	BrowserCapabilitySnapshot,
+	BrowserCapabilityInteract,
+	BrowserCapabilityFiles,
+	BrowserCapabilityCookies,
+}
+
+// BrowserDefaultCapabilities is granted when a caller names no capability. It
+// stays at the pre-interaction set so neither an old caller nor a re-granted
+// old lease can silently acquire interact/files/cookies.
+var BrowserDefaultCapabilities = []string{
 	BrowserCapabilityOpenTab,
 	BrowserCapabilityNavigate,
 	BrowserCapabilitySnapshot,

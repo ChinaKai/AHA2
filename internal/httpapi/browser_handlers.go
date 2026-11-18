@@ -1,7 +1,10 @@
 package httpapi
 
 import (
+	"encoding/base64"
 	"errors"
+	"io"
+	"mime"
 	"net/http"
 	"strconv"
 	"strings"
@@ -687,6 +690,236 @@ func (s *Server) agentBrowserCloseTab(writer http.ResponseWriter, request *http.
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) agentBrowserAction(writer http.ResponseWriter, request *http.Request) {
+	service, grant, ok := s.agentBrowserGrantTarget(writer, request)
+	if !ok {
+		return
+	}
+	var payload struct {
+		Kind   string   `json:"kind"`
+		Ref    string   `json:"ref"`
+		X      *int     `json:"x"`
+		Y      *int     `json:"y"`
+		Text   string   `json:"text"`
+		Keys   []string `json:"keys"`
+		DeltaX int      `json:"delta_x"`
+		DeltaY int      `json:"delta_y"`
+	}
+	if err := decodeJSON(request, &payload); err != nil {
+		writeErrorDetail(writer, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	result, err := service.Act(request.Context(), browserActor(request), grant.ID, request.PathValue("tab"),
+		browser.HostAction{
+			Kind: payload.Kind, Ref: payload.Ref, X: payload.X, Y: payload.Y,
+			Text: payload.Text, Keys: payload.Keys, DeltaX: payload.DeltaX, DeltaY: payload.DeltaY,
+		})
+	if err != nil {
+		writeBrowserFailure(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "action": result})
+}
+
+// agentBrowserUpload accepts exactly one request body containing Agent-supplied
+// bytes. A host path is never a field: bytes arrive as base64 JSON or one
+// multipart file and are handed to the page through the host.
+func (s *Server) agentBrowserUpload(writer http.ResponseWriter, request *http.Request) {
+	service, grant, ok := s.agentBrowserGrantTarget(writer, request)
+	if !ok {
+		return
+	}
+	if !grant.Has(domain.BrowserCapabilityFiles) {
+		// Reject before parsing up to 32 MiB of upload body.
+		writeErrorDetail(writer, http.StatusForbidden, "browser_capability_denied",
+			"当前授权不包含能力：files")
+		return
+	}
+	const maxBody = 32 << 20
+	var (
+		ref   string
+		x, y  *int
+		files []browser.UploadFile
+	)
+	if strings.HasPrefix(strings.ToLower(request.Header.Get("Content-Type")), "multipart/form-data") {
+		request.Body = http.MaxBytesReader(writer, request.Body, maxBody)
+		if err := request.ParseMultipartForm(maxBody); err != nil {
+			var tooLarge *http.MaxBytesError
+			if !errors.As(err, &tooLarge) {
+				writeErrorDetail(writer, http.StatusBadRequest, "browser_upload_invalid", "multipart 格式无效")
+				return
+			}
+			writeErrorDetail(writer, http.StatusRequestEntityTooLarge, "browser_upload_invalid",
+				"上传内容超过大小上限")
+			return
+		}
+		if request.MultipartForm != nil {
+			defer request.MultipartForm.RemoveAll()
+		}
+		ref = strings.TrimSpace(request.FormValue("ref"))
+		var err error
+		if x, err = optionalFormInt(request.FormValue("x")); err != nil {
+			writeErrorDetail(writer, http.StatusBadRequest, "browser_upload_invalid", "坐标 x 无效")
+			return
+		}
+		if y, err = optionalFormInt(request.FormValue("y")); err != nil {
+			writeErrorDetail(writer, http.StatusBadRequest, "browser_upload_invalid", "坐标 y 无效")
+			return
+		}
+		headers := request.MultipartForm.File["file"]
+		if len(headers) != 1 {
+			writeErrorDetail(writer, http.StatusBadRequest, "browser_upload_invalid", "请上传且只上传一个文件")
+			return
+		}
+		file, err := headers[0].Open()
+		if err != nil {
+			writeErrorDetail(writer, http.StatusBadRequest, "browser_upload_invalid", "无法读取上传文件")
+			return
+		}
+		defer file.Close()
+		data, err := io.ReadAll(io.LimitReader(file, browser.MaxUploadFileBytes+1))
+		if err != nil {
+			writeErrorDetail(writer, http.StatusBadRequest, "browser_upload_invalid", "无法读取上传文件")
+			return
+		}
+		files = []browser.UploadFile{{Filename: headers[0].Filename, Data: data}}
+	} else {
+		request.Body = http.MaxBytesReader(writer, request.Body, maxBody)
+		var payload struct {
+			Ref   string `json:"ref"`
+			X     *int   `json:"x"`
+			Y     *int   `json:"y"`
+			Files []struct {
+				Name          string `json:"name"`
+				ContentBase64 string `json:"content_base64"`
+			} `json:"files"`
+		}
+		if err := decodeJSONLimit(request, &payload, maxBody); err != nil {
+			var tooLarge *http.MaxBytesError
+			if errors.As(err, &tooLarge) {
+				writeErrorDetail(writer, http.StatusRequestEntityTooLarge, "browser_upload_invalid",
+					"上传内容超过大小上限")
+				return
+			}
+			writeErrorDetail(writer, http.StatusBadRequest, "invalid_json", err.Error())
+			return
+		}
+		ref, x, y = payload.Ref, payload.X, payload.Y
+		for _, item := range payload.Files {
+			data, err := base64.StdEncoding.DecodeString(strings.TrimSpace(item.ContentBase64))
+			if err != nil {
+				writeErrorDetail(writer, http.StatusBadRequest, "browser_upload_invalid", "文件内容不是有效的 base64")
+				return
+			}
+			files = append(files, browser.UploadFile{Filename: item.Name, Data: data})
+		}
+	}
+	result, err := service.Upload(request.Context(), browserActor(request), grant.ID,
+		request.PathValue("tab"), ref, x, y, files)
+	if err != nil {
+		writeBrowserFailure(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "upload": result})
+}
+
+func optionalFormInt(raw string) (*int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
+}
+
+func (s *Server) agentBrowserDownloads(writer http.ResponseWriter, request *http.Request) {
+	service, grant, ok := s.agentBrowserGrantTarget(writer, request)
+	if !ok {
+		return
+	}
+	downloads, err := service.Downloads(request.Context(), browserActor(request), grant.ID)
+	if err != nil {
+		writeBrowserFailure(writer, err)
+		return
+	}
+	writer.Header().Set("Cache-Control", "no-store")
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "downloads": downloads})
+}
+
+func (s *Server) agentBrowserDownload(writer http.ResponseWriter, request *http.Request) {
+	service, grant, ok := s.agentBrowserGrantTarget(writer, request)
+	if !ok {
+		return
+	}
+	file, err := service.Download(request.Context(), browserActor(request), grant.ID,
+		request.PathValue("download"))
+	if err != nil {
+		writeBrowserFailure(writer, err)
+		return
+	}
+	filename := file.Download.Filename
+	disposition := mime.FormatMediaType("attachment", map[string]string{"filename": filename})
+	if disposition == "" {
+		disposition = "attachment"
+	}
+	writer.Header().Set("Content-Type", "application/octet-stream")
+	writer.Header().Set("Content-Disposition", disposition)
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.Header().Set("X-Content-Type-Options", "nosniff")
+	writer.Header().Set("Content-Length", strconv.Itoa(len(file.Data)))
+	writer.WriteHeader(http.StatusOK)
+	_, _ = writer.Write(file.Data)
+}
+
+func (s *Server) agentBrowserCookies(writer http.ResponseWriter, request *http.Request) {
+	service, grant, ok := s.agentBrowserGrantTarget(writer, request)
+	if !ok {
+		return
+	}
+	cookies, truncated, err := service.ExportCookies(request.Context(), browserActor(request), grant.ID,
+		request.URL.Query().Get("url"), request.URL.Query().Get("domain"))
+	if err != nil {
+		writeBrowserFailure(writer, err)
+		return
+	}
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.Header().Set("Pragma", "no-cache")
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"ok": true, "cookies": cookies, "count": len(cookies), "truncated": truncated,
+	})
+}
+
+func (s *Server) agentBrowserImportCookies(writer http.ResponseWriter, request *http.Request) {
+	service, grant, ok := s.agentBrowserGrantTarget(writer, request)
+	if !ok {
+		return
+	}
+	if !grant.Has(domain.BrowserCapabilityCookies) {
+		writeErrorDetail(writer, http.StatusForbidden, "browser_capability_denied",
+			"当前授权不包含能力：cookies")
+		return
+	}
+	var payload struct {
+		Cookies []browser.HostCookie `json:"cookies"`
+	}
+	// Up to 300 cookies with 4 KiB values can exceed the default 1 MiB body.
+	request.Body = http.MaxBytesReader(writer, request.Body, 2<<20)
+	if err := decodeJSONLimit(request, &payload, 2<<20); err != nil {
+		writeErrorDetail(writer, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	count, err := service.ImportCookies(request.Context(), browserActor(request), grant.ID, payload.Cookies)
+	if err != nil {
+		writeBrowserFailure(writer, err)
+		return
+	}
+	writer.Header().Set("Cache-Control", "no-store")
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "imported": count})
 }
 
 func writeBrowserFrame(writer http.ResponseWriter, frame browser.HostFrame) {

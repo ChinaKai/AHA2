@@ -876,7 +876,9 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     try {
       const result = await api.createTaskBrowserGrant(taskID, {
         profile_id: state.profileID,
-        capabilities: ["open_tab", "navigate", "snapshot"],
+        // New grants carry the Owner-approved full interaction scope. Existing
+        // grants keep their stored capability array until the Owner re-grants.
+        capabilities: ["open_tab", "navigate", "snapshot", "interact", "files", "cookies"],
         expires_in_seconds: 1800,
       });
       state.inUseProfileID = "";

@@ -286,7 +286,7 @@ stage_browser_host() {
   rm -rf -- "$browser_host_out"
   mkdir -p -- "$browser_host_out"
   local host_file
-  for host_file in host.mjs server.mjs tabs.mjs lock.mjs package.json README.md; do
+  for host_file in host.mjs server.mjs tabs.mjs interact.mjs downloads.mjs cookies.mjs lock.mjs package.json README.md; do
     [[ -f "$repo_dir/browser-host/$host_file" ]] || {
       printf 'Browser host source is missing: %s\n' "$repo_dir/browser-host/$host_file" >&2
       exit 1

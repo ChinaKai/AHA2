@@ -123,17 +123,45 @@ Task Agent HTTP API（Bearer capability 绑定当前 Task/Turn；每个 grant �
 - `POST /api/v1/agent/browser/grants/{grant}/tabs/current`
 - `POST /api/v1/agent/browser/grants/{grant}/tabs/{tab}/activate`
 - `POST /api/v1/agent/browser/grants/{grant}/tabs/{tab}/navigate`
-- `GET /api/v1/agent/browser/grants/{grant}/tabs/{tab}/snapshot`
+- `GET /api/v1/agent/browser/grants/{grant}/tabs/{tab}/snapshot`：文本 + 结构化元素
 - `GET /api/v1/agent/browser/grants/{grant}/tabs/{tab}/frame`
+- `POST /api/v1/agent/browser/grants/{grant}/tabs/{tab}/actions`：click/type/key/scroll
+- `POST /api/v1/agent/browser/grants/{grant}/tabs/{tab}/files`：按内容上传文件
+- `GET /api/v1/agent/browser/grants/{grant}/downloads`
+- `GET /api/v1/agent/browser/grants/{grant}/downloads/{download}`
+- `GET|POST /api/v1/agent/browser/grants/{grant}/cookies`
 - `DELETE /api/v1/agent/browser/grants/{grant}/tabs/{tab}`
 - `GET /api/v1/agent/browser/grants/{grant}/bookmarks`
 - `DELETE /api/v1/agent/browser/grants/{grant}`：Task 主动释放自己的 lease
 
-Agent 只有只读 snapshot/frame/bookmarks 与 open/activate/close/navigate 控制动作；
-不提供 CDP、页内点击/输入/滚动、cookie/storage、profile 路径或下载接口。lease
-撤销、过期、转移或不属于本 Task 时所有操作失败关闭。
+能力集合为 `open_tab | navigate | snapshot | interact | files | cookies`；未知能力在
+创建授权时拒绝。未显式传能力时只授予旧的 `open_tab | navigate | snapshot`，因此
+旧客户端/旧 lease 不会静默获得新权限；要用新能力必须由 Owner 显式重新授权。
+lease 撤销、过期、转移或不属于本 Task 时所有操作失败关闭。
 
-能力集合固定为 `open_tab | navigate | snapshot`；未知能力在创建授权时拒绝。
+结构化快照：`snapshot.elements` 最多 200 项，每项只有 `ref/role/name/bounds/actions`，
+不含输入值、HTML、cookie 或 CDP 句柄。ref 带快照代际，只对最近一次快照有效
+（约 2 分钟），新快照或导航后旧 ref 返回 `browser_element_stale`。动作目标优先
+ref，其次 viewport 坐标；text ≤4096 字节、keys ≤4、滚动每轴 ≤4000 像素。审计
+不记录 text/keys 内容，只记录动作类型、目标与结果。
+
+文件上传只接受请求体中的 base64/multipart 字节，拒绝宿主路径；单个 ≤10 MiB、
+最多 5 个、总计 ≤20 MiB，host 用内存 payload 交给 file input 或文件选择框，不落
+临时文件。下载写入 `<profile-root>/.downloads/<profile>/<session>/`，文件名只作
+元数据、磁盘文件使用不透明 ID；单文件 ≤10 MiB、最多 20 个、累计 ≤50 MiB、
+TTL 30 分钟。host 把 Chromium `downloadsPath` 指向受控会话目录，并在下载进行中
+轮询原始 artifact 大小：单文件或累计预算超限立即 cancel/清理，不等下载结束。
+受控副本限额在流式写入时执行，在途数量同步预留，预算按实际获得额度的 chunk
+记账。clear/release 推进 generation，先 cancel 并等待旧 capture 退出（有整体期限）再重置；
+来不及退出的旧 capture 因代际不匹配也不能发布或释放新预算。prune 与 raw 扫描同样
+按代际/条目身份校验：旧快照不能删除新条目、重复扣账或取消新下载；发布前确认
+条目仍在 map 且仍为 saving。超限/取消/clear 会删除
+Playwright 原始 artifact。释放租约或关闭会话即清理，跨会话/跨 Task 的 ID 一律 404。
+
+Cookie 导入/导出只经当前 Task grant：导出必须带 `url` 或 `domain` 限定范围，最多
+300 条；导入校验 name/value/domain/path/sameSite/expiry，`SameSite=None` 必须
+`Secure`。cookie 值只出现在授权 Task 的响应里，不写审计/日志/错误文本，也不暴露
+profile 路径、CDP 或密码管理器。
 
 运行时前置：安装包携带 `browser-host/`（含 `playwright` Node 依赖，约 12 MB）和
 `node/node.exe`（官方 Node.js LTS，默认 22.23.5，约 84 MB；安装包压缩后约增加
@@ -161,6 +189,10 @@ Agent 只有只读 snapshot/frame/bookmarks 与 open/activate/close/navigate 控
 - fence 切换等待在途操作超时：`browser_fence_timeout`（409），旧 lease/fence 保留；
 - 跨 Profile 的 tab：`browser_tab_forbidden`（403）；
 - 授权缺少能力：`browser_capability_denied`（403）；
+- 快照 ref 不存在/已过期：`browser_element_not_found`（404）/`browser_element_stale`（409）；
+- 动作/上传参数非法或超限：`browser_action_invalid`/`browser_upload_invalid`（400）；
+- 下载 ID 不存在、过期或跨会话：`browser_download_not_found`（404/400）；
+- Cookie 校验失败：`browser_cookie_invalid`（400）；
 - 非 http/https 网址：`browser_url_invalid`（400）；
 - 没有可见 http/https 页面：`browser_no_current_page`（404），面板显示空状态；
 - Agent capability 指向其他 Task 的 grant：`browser_grant_forbidden`（403）；
@@ -187,10 +219,11 @@ host 返回的原始 Playwright 诊断只留在 host 本地日志（替换 profi
 ## 5. 审计
 
 `audit_events` 记录 profile 创建/重命名/删除、会话启动/关闭、授权创建/撤销，以及
-标签页 open/activate/close/navigate/snapshot、收藏夹读取、lease 获取/释放/转移。
-审计记录 profile/session、task、动作、tab id、URL 和结果；Agent actor 形如
-`agent:<agent>@<turn>`，因此能追溯到 turn。审计只包含 ID、能力、到期时间、URL 和动作，
-不写页面正文、cookie、storage 或 profile 路径。
+标签页 open/activate/close/navigate/snapshot、页面动作、文件上传、下载列表/取回、
+Cookie 导入/导出、收藏夹读取、lease 获取/释放/转移。审计记录 profile/session、
+task、动作、tab id、URL、目标 ref/坐标、文件数量/大小/文件名和结果；Agent actor
+形如 `agent:<agent>@<turn>`，因此能追溯到 turn。审计不写页面正文、输入 text、
+按键名、cookie 值、文件内容、storage 或 profile 路径。
 
 ## 6. 威胁边界与未覆盖风险
 
@@ -200,8 +233,11 @@ host 返回的原始 Playwright 诊断只留在 host 本地日志（替换 profi
   host token、CDP 地址或 profile 目录。
 - Task 只能操作自己授权内的 profile/session 和 `task_id + grant_id + session_id`
   全部匹配的标签页。
-- 登录只在 owner 可见窗口完成；AHA 不保存网站账号密码，不实现自动登录。
-- snapshot 只返回渲染文本，不返回 HTML、cookie 或 storage。
+- 登录只在 owner 可见窗口完成；AHA 不保存网站账号密码，不实现自动登录；
+  页面输入与 2FA 通过动作端点完成，不读取 Edge 已保存密码。
+- snapshot 只返回渲染文本与脱敏元素列表，不返回 HTML、输入值、cookie 或 storage。
+- 文件上传只接受请求体字节，不接受宿主路径；下载只落到受控目录并以 ID 取回。
+- cookie 只经 Task grant 的 `cookies` 能力导入/导出，审计与日志不含 cookie 值。
 
 未覆盖/残留风险：
 

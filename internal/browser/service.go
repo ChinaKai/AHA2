@@ -622,8 +622,11 @@ func isUniqueConstraintError(err error) bool {
 }
 
 func normalizeCapabilities(values []string) ([]string, error) {
+	// A caller that names no capability gets only the legacy set. New
+	// interact/files/cookies authority must be requested explicitly, so an old
+	// client or a re-granted old lease cannot silently gain it.
 	if len(values) == 0 {
-		return append([]string(nil), domain.BrowserCapabilities...), nil
+		return append([]string(nil), domain.BrowserDefaultCapabilities...), nil
 	}
 	seen := map[string]bool{}
 	result := make([]string, 0, len(values))
@@ -791,6 +794,10 @@ func (s *Service) CreateGrant(ctx context.Context, actor, taskID, profileID stri
 			"reason": "expired_or_superseded",
 		})
 	}
+	// A new holder must not inherit the previous lease's download artifacts.
+	// The host also tags each download with the lease fence, so this cleanup is
+	// a containment measure rather than the only boundary.
+	_ = s.host.ClearDownloads(context.WithoutCancel(ctx), profile.ID, session.HostSessionID)
 	s.audit(ctx, actor, "browser_grant.create", "browser_task_grant", created.ID, map[string]any{
 		"task_id": taskID, "profile_id": profile.ID, "session_id": session.ID,
 		"capabilities": caps, "expires_at": created.ExpiresAt, "reused_session": reused,
@@ -917,6 +924,7 @@ func (s *Service) TransferProfileControl(ctx context.Context, actor, profileID, 
 				"reason": "transferred_expired",
 			})
 		}
+		_ = s.host.ClearDownloads(context.WithoutCancel(ctx), profile.ID, session.HostSessionID)
 		s.audit(ctx, actor, "browser_grant.transfer", "browser_task_grant", created.ID, map[string]any{
 			"task_id": targetTaskID, "profile_id": profile.ID, "session_id": session.ID,
 			"from_task_id": "", "reused_session": reused,
@@ -931,6 +939,7 @@ func (s *Service) TransferProfileControl(ctx context.Context, actor, profileID, 
 		}
 		return GrantView{}, s.acquireError(ctx, err)
 	}
+	_ = s.host.ClearDownloads(context.WithoutCancel(ctx), profile.ID, session.HostSessionID)
 	s.audit(ctx, actor, "browser_grant.release", "browser_task_grant", previous.ID, map[string]any{
 		"task_id": previous.TaskID, "profile_id": previous.ProfileID, "session_id": previous.SessionID,
 		"reason": "transferred",
@@ -1038,6 +1047,13 @@ func (s *Service) RevokeGrant(ctx context.Context, actor, id string) (GrantView,
 				"task_id": grant.TaskID, "profile_id": grant.ProfileID, "session_id": grant.SessionID,
 				"reason": "released",
 			})
+			// Download artifacts belong to the lease's API surface. Drop them on
+			// release so a later holder cannot address an earlier Task's files by
+			// guessing an id. Best-effort: the host also expires/removes them on
+			// session close, and a failure here must not resurrect the lease.
+			if sessionErr == nil && s.host != nil {
+				_ = s.host.ClearDownloads(context.WithoutCancel(ctx), grant.ProfileID, session.HostSessionID)
+			}
 		}
 		grant, _ = s.store.BrowserTaskGrant(ctx, grant.ID)
 	}

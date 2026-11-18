@@ -208,6 +208,75 @@ func (s *Store) ListPetEvents(ctx context.Context, limit int) ([]domain.PetEvent
 	return result, rows.Err()
 }
 
+// ListOpenPetEventsByKind returns only rows of the given kinds that are still
+// status='open', newest first. Rows written by older AHA2 builds keep whatever
+// status they had; anything that is not exactly "open" stays out of the pet's
+// pending notifications instead of being revived.
+func (s *Store) ListOpenPetEventsByKind(ctx context.Context, kinds []string, limit int) ([]domain.PetEvent, error) {
+	if len(kinds) == 0 {
+		return []domain.PetEvent{}, nil
+	}
+	if limit <= 0 || limit > 1000 {
+		limit = 20
+	}
+	args := make([]any, 0, len(kinds)+1)
+	for _, kind := range kinds {
+		args = append(args, kind)
+	}
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id,at,device_id,actor,kind,page,detail,status FROM pet_events
+		WHERE status='open' AND kind IN (`+placeholders(len(kinds))+`)
+		ORDER BY at DESC,id DESC LIMIT ?`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []domain.PetEvent{}
+	for rows.Next() {
+		var item domain.PetEvent
+		var at string
+		if err := rows.Scan(&item.ID, &at, &item.DeviceID, &item.Actor, &item.Kind, &item.Page, &item.Detail, &item.Status); err != nil {
+			return nil, err
+		}
+		item.At = parseTime(at)
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+// MarkOpenPetEvents transitions open rows of the allowed kinds to status. An
+// empty ids slice updates every open row of those kinds (sync recovered); a
+// non-empty slice updates only the listed rows (the pet acknowledged them).
+// Only kind-whitelisted rows are ever touched, and already closed rows keep
+// their original status. Returns the number of rows actually changed.
+func (s *Store) MarkOpenPetEvents(ctx context.Context, kinds, ids []string, status string) (int, error) {
+	if len(kinds) == 0 || strings.TrimSpace(status) == "" {
+		return 0, nil
+	}
+	query := `UPDATE pet_events SET status=? WHERE status='open' AND kind IN (` + placeholders(len(kinds)) + `)`
+	args := make([]any, 0, 1+len(kinds)+len(ids))
+	args = append(args, status)
+	for _, kind := range kinds {
+		args = append(args, kind)
+	}
+	if len(ids) > 0 {
+		query += ` AND id IN (` + placeholders(len(ids)) + `)`
+		for _, id := range ids {
+			args = append(args, id)
+		}
+	}
+	result, err := s.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return int(changed), nil
+}
+
 // PetCreatedTaskIDs returns every Task id the pet created, oldest first. The
 // work-state briefing uses this instead of the bounded recent-event list so an
 // old, still-open Task cannot silently fall out of the pet's view.
