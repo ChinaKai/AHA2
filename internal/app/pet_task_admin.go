@@ -285,9 +285,17 @@ type PetUpdateTaskAgentInput struct {
 }
 
 // PetApplyTaskAgent applies a model source / model change and reports whether it
-// actually changed the persisted runtime. Callers must not turn an unchanged
-// result into a success message that implies a write happened.
-func (s *Service) PetApplyTaskAgent(ctx context.Context, input PetUpdateTaskAgentInput) (AgentConfigUpdateResult, error) {
+// actually changed the persisted runtime. Only the pet Task's own Turn
+// capability may reach it: the loopback HTTP boundary alone does not identify
+// the caller, and create_tasks is a pet-wide permission. The identity check is
+// deliberately first so a rejected call cannot read or write any Task state.
+func (s *Service) PetApplyTaskAgent(ctx context.Context, callerTaskID string, input PetUpdateTaskAgentInput) (AgentConfigUpdateResult, error) {
+	if strings.TrimSpace(callerTaskID) != petTaskID {
+		return AgentConfigUpdateResult{}, codedErrorf(
+			ErrCodePetIdentityRequired, http.StatusForbidden,
+			"只有宠物 Task 的 Turn Token 可以修改 Task Agent 配置",
+		)
+	}
 	task, _, err := s.petManageableTask(ctx, input.TaskID)
 	if err != nil {
 		return AgentConfigUpdateResult{}, err
@@ -320,11 +328,6 @@ func (s *Service) PetApplyTaskAgent(ctx context.Context, input PetUpdateTaskAgen
 		Kind: "task_agent_config_updated", Detail: string(detail), Status: result.Status,
 	})
 	return result, nil
-}
-
-func (s *Service) PetUpdateTaskAgent(ctx context.Context, input PetUpdateTaskAgentInput) (domain.TaskAgent, error) {
-	result, err := s.PetApplyTaskAgent(ctx, input)
-	return result.Agent, err
 }
 
 func (s *Service) PetCompactTaskSession(ctx context.Context, taskID string) (domain.BackendSession, error) {

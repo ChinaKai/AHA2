@@ -85,6 +85,10 @@ func (s *Service) mcpRuntimeForTask(ctx context.Context, task domain.Task, agent
 					}
 					servers = append(servers, backend.MCPServer{
 						Name: "aha2-pet", Transport: "http", URL: url,
+						// Mutating pet tools verify which Task is calling. The
+						// capability token is the only caller identity at this
+						// loopback endpoint, so the backend must send it.
+						BearerTokenEnv: "AHA2_AGENT_API_TOKEN",
 					})
 					allowed = append(allowed, petMCPAllowedTools(task)...)
 					continue

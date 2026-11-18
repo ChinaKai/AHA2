@@ -368,12 +368,17 @@ func (s *Service) ApplyAgentConfig(
 		previousSnapshot = base
 		snapshot, err = s.deriveRuntimeSnapshot(ctx, task, base, input)
 		if err == nil {
-			unchanged = runtimeConfigEquivalent(base, snapshot)
-			if unchanged {
+			configUnchanged := runtimeConfigEquivalent(base, snapshot)
+			if configUnchanged {
 				snapshot = base
 			} else {
 				err = s.store.CreateRuntimeSnapshot(ctx, snapshot)
 			}
+			// The snapshot identity and the inheritance edge are separate
+			// state. A child Agent detaching from Main (inherit_main=false) with
+			// an unchanged snapshot must still persist the detach; otherwise
+			// the next Main update keeps overwriting it.
+			unchanged = configUnchanged && !agent.InheritMain
 		}
 	}
 	if err != nil {

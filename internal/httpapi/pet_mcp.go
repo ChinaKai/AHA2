@@ -37,6 +37,14 @@ func (s *Server) petMCP(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusForbidden, "pet_mcp_local_only")
 		return
 	}
+	// The pet MCP client sends its Turn capability as a bearer token. A missing
+	// header keeps the tokenless read-only path; a malformed or expired token is
+	// rejected outright instead of silently downgrading to no identity.
+	callerTaskID, authorized := s.petMCPCallerTaskID(request)
+	if !authorized {
+		writeError(writer, http.StatusUnauthorized, "agent_capability_invalid")
+		return
+	}
 	request.Body = http.MaxBytesReader(writer, request.Body, petMCPMaxRequestBytes)
 	var payload petMCPRequest
 	if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
@@ -82,7 +90,7 @@ func (s *Server) petMCP(writer http.ResponseWriter, request *http.Request) {
 		if len(call.Arguments) == 0 {
 			call.Arguments = json.RawMessage(`{}`)
 		}
-		text, err := s.app.PetMCPTool(request.Context(), call.Name, call.Arguments)
+		text, err := s.app.PetMCPToolForTask(request.Context(), callerTaskID, call.Name, call.Arguments)
 		if err != nil {
 			respond(map[string]any{
 				"isError": true,
@@ -107,6 +115,28 @@ func (s *Server) petMCP(writer http.ResponseWriter, request *http.Request) {
 func isLoopbackHost(host string) bool {
 	ip := net.ParseIP(strings.TrimSpace(host))
 	return ip != nil && ip.IsLoopback()
+}
+
+// petMCPCallerTaskID resolves the Task identity from the Turn capability the
+// pet MCP client sends as a bearer token. An absent header yields an empty
+// Task (the tokenless read-only path); an unusable header is rejected.
+func (s *Server) petMCPCallerTaskID(request *http.Request) (string, bool) {
+	authorization := strings.TrimSpace(request.Header.Get("Authorization"))
+	if authorization == "" {
+		return "", true
+	}
+	if s.agentCapabilities == nil {
+		return "", false
+	}
+	scheme, token, ok := strings.Cut(authorization, " ")
+	if !ok || !strings.EqualFold(scheme, "Bearer") {
+		return "", false
+	}
+	claims, err := s.agentCapabilities.Authenticate(strings.TrimSpace(token))
+	if err != nil {
+		return "", false
+	}
+	return claims.TaskID, true
 }
 
 // compile-time guard that MCP schemas stay compatible with gateway tools.

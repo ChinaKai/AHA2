@@ -10,27 +10,31 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ChinaKai/AHA2/internal/agentapi"
 	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/store"
 )
 
 type petMCPAgentCallResult struct {
+	Status  int
 	IsError bool
+	Error   string
 	Text    string
 }
 
-func callPetMCPTool(t *testing.T, server *Server, name, args string) petMCPAgentCallResult {
+func callPetMCPTool(t *testing.T, server *Server, token, name, args string) petMCPAgentCallResult {
 	t.Helper()
 	payload := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"` + name + `","arguments":` + args + `}}`
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/pet/mcp", strings.NewReader(payload))
 	request.RemoteAddr = "127.0.0.1:12345"
+	if token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("pet mcp status=%d body=%q", recorder.Code, recorder.Body.String())
-	}
 	var body struct {
+		Error  string `json:"error"`
 		Result struct {
 			IsError bool `json:"isError"`
 			Content []struct {
@@ -45,7 +49,9 @@ func callPetMCPTool(t *testing.T, server *Server, name, args string) petMCPAgent
 	if len(body.Result.Content) > 0 {
 		text = body.Result.Content[0].Text
 	}
-	return petMCPAgentCallResult{IsError: body.Result.IsError, Text: text}
+	return petMCPAgentCallResult{
+		Status: recorder.Code, IsError: body.Result.IsError, Error: body.Error, Text: text,
+	}
 }
 
 func TestPetMCPUpdateTaskAgentSwitchesModelSource(t *testing.T) {
@@ -115,9 +121,25 @@ func TestPetMCPUpdateTaskAgentSwitchesModelSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := New(Config{Store: database, App: service})
+	capabilities := agentapi.NewCapabilities()
+	petToken, err := capabilities.Issue("task_pet", "main", "turn_pet", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherToken, err := capabilities.Issue("task_other", "main", "turn_other", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetToken, err := capabilities.Issue(task.ID, "main", "turn_target", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := New(Config{Store: database, App: service, AgentCapabilities: capabilities})
+	petCall := func(name, args string) petMCPAgentCallResult {
+		return callPetMCPTool(t, server, petToken, name, args)
+	}
 
-	call := callPetMCPTool(t, server, "aha_update_task_agent",
+	call := petCall("aha_update_task_agent",
 		`{"task_id":"`+task.ID+`","model_source":"official","wire_model":"gpt-official","codex_account_id":"`+account.ID+`"}`)
 	if call.IsError || !strings.Contains(call.Text, `"ok":true`) || !strings.Contains(call.Text, `"status":"updated"`) {
 		t.Fatalf("official switch through MCP failed: %#v", call)
@@ -131,7 +153,7 @@ func TestPetMCPUpdateTaskAgentSwitchesModelSource(t *testing.T) {
 	}
 	officialModelID := agents[0].ModelID
 
-	call = callPetMCPTool(t, server, "aha_update_task_agent",
+	call = petCall("aha_update_task_agent",
 		`{"task_id":"`+task.ID+`","model_source":"provider","model_id":"`+model.ID+`"}`)
 	if call.IsError || !strings.Contains(call.Text, `"ok":true`) {
 		t.Fatalf("provider switch through MCP failed: %#v", call)
@@ -146,15 +168,78 @@ func TestPetMCPUpdateTaskAgentSwitchesModelSource(t *testing.T) {
 
 	// A managed model selected as provider must surface a stable rejection code
 	// rather than a 200 no-op.
-	call = callPetMCPTool(t, server, "aha_update_task_agent",
+	call = petCall("aha_update_task_agent",
 		`{"task_id":"`+task.ID+`","model_source":"provider","model_id":"`+officialModelID+`"}`)
 	if !call.IsError || !strings.Contains(call.Text, app.ErrCodeModelSourceMismatch) {
 		t.Fatalf("invalid combination did not return %s: %#v", app.ErrCodeModelSourceMismatch, call)
 	}
 
+	// Mutating agent configuration needs the pet Task's own capability. The
+	// loopback endpoint alone and another Task's valid token must both be
+	// rejected before any read or write happens.
+	agents, err = service.TaskAgents(ctx, task.ID)
+	if err != nil || len(agents) == 0 {
+		t.Fatalf("agents=%#v err=%v", agents, err)
+	}
+	beforeIdentity := agents[0]
+	identityAuditCount := func() (cards, events int) {
+		t.Helper()
+		page, err := database.ConversationPage(ctx, task.ID, 0, 0, 100, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, item := range page.Items {
+			if item.Kind == "agent_config_updated" {
+				cards++
+			}
+		}
+		petEvents, err := database.ListPetEvents(ctx, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range petEvents {
+			if event.Kind == "task_agent_config_updated" {
+				events++
+			}
+		}
+		return cards, events
+	}
+	cardsBefore, eventsBefore := identityAuditCount()
+	escalate := `{"task_id":"` + task.ID + `","model_source":"official","wire_model":"gpt-official","codex_account_id":"` + account.ID + `"}`
+	for _, attempt := range []struct {
+		name  string
+		token string
+	}{
+		{"no token", ""},
+		{"foreign task token", otherToken},
+		{"target task's own token", targetToken},
+	} {
+		call = callPetMCPTool(t, server, attempt.token, "aha_update_task_agent", escalate)
+		if call.Status != http.StatusOK || !call.IsError || !strings.Contains(call.Text, app.ErrCodePetIdentityRequired) {
+			t.Fatalf("%s was not rejected by identity: %#v", attempt.name, call)
+		}
+	}
+	call = callPetMCPTool(t, server, "not-a-real-token", "aha_update_task_agent", escalate)
+	if call.Status != http.StatusUnauthorized || call.Error != "agent_capability_invalid" {
+		t.Fatalf("invalid token was not rejected at the endpoint: %#v", call)
+	}
+	agents, err = service.TaskAgents(ctx, task.ID)
+	if err != nil || len(agents) == 0 {
+		t.Fatalf("agents=%#v err=%v", agents, err)
+	}
+	if agents[0].ModelSource != domain.ModelSourceProvider || agents[0].ModelID != beforeIdentity.ModelID ||
+		agents[0].RuntimeConfigSnapshotID != beforeIdentity.RuntimeConfigSnapshotID {
+		t.Fatalf("rejected identity attempts changed the runtime: before=%#v after=%#v", beforeIdentity, agents[0])
+	}
+	cardsAfter, eventsAfter := identityAuditCount()
+	if cardsAfter != cardsBefore || eventsAfter != eventsBefore {
+		t.Fatalf("rejected identity attempts wrote audit success: cards %d→%d events %d→%d",
+			cardsBefore, cardsAfter, eventsBefore, eventsAfter)
+	}
+
 	// Permission denial must also be explicit.
 	enablePet(false)
-	call = callPetMCPTool(t, server, "aha_update_task_agent",
+	call = petCall("aha_update_task_agent",
 		`{"task_id":"`+task.ID+`","model_source":"provider","model_id":"`+model.ID+`"}`)
 	if !call.IsError || !strings.Contains(call.Text, app.ErrCodePetPermissionDenied) {
 		t.Fatalf("permission denial did not return %s: %#v", app.ErrCodePetPermissionDenied, call)

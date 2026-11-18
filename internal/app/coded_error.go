@@ -58,6 +58,7 @@ const (
 	ErrCodeCodexAccountUnavailable = "codex_account_unavailable"
 	ErrCodeModelSelectionInvalid   = "model_selection_invalid"
 	ErrCodePetPermissionDenied     = "pet_permission_denied"
+	ErrCodePetIdentityRequired     = "pet_identity_required"
 	ErrCodeTaskNotFound            = "task_not_found"
 	ErrCodeAgentNotFound           = "agent_not_found"
 	ErrCodeTaskReadOnly            = "task_read_only"

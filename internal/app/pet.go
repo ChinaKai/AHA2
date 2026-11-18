@@ -1562,7 +1562,7 @@ func ahaPetTools() []gateway.ChatTool {
 				"skill_ids":          map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "可选；整体替换 Task 的 Skill 选择（该项目或全局可用的已启用 Skill ID），空数组表示清空；不传则保持不变；任一 ID 不可用则报错且不做任何修改"},
 			}, "required": []string{"task_id"},
 		}},
-		{Name: "aha_update_task_agent", Description: "修改 Task main Agent 的模型源、模型、推理强度、文件权限、审批方式或 Fast 模式。model_source=provider 用 model_id 选 Env 模型；model_source=claude_native 需要 wire_model；model_source=official 需要 wire_model 和 codex_account_id（或目录里的 official model_id）。不传 model_source 时按 model_id 所属模型源推断；模型切换无法确定来源会返回错误，不会假装成功", Parameters: map[string]any{
+		{Name: "aha_update_task_agent", Description: "修改 Task main Agent 的模型源、模型、推理强度、文件权限、审批方式或 Fast 模式。model_source=provider 用 model_id 选 Env 模型；model_source=claude_native 需要 wire_model；model_source=official 需要 wire_model 和 codex_account_id（或目录里的 official model_id）。不传 model_source 时按 model_id 所属模型源推断；模型切换无法确定来源会返回错误，不会假装成功。调用必须携带宠物 Task 自己的 Turn capability", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"task_id": map[string]any{"type": "string"},
 				"model_source": map[string]any{
@@ -1692,6 +1692,19 @@ func ahaPetTools() []gateway.ChatTool {
 // the validated ControlOwnerPet path; AHA read tools and approval requests are
 // handled here.
 func (s *Service) PetMCPTool(ctx context.Context, name string, args json.RawMessage) (string, error) {
+	return s.petMCPTool(ctx, "", name, args)
+}
+
+// PetMCPToolForTask dispatches a pet MCP tool on behalf of the authenticated
+// caller Task. The HTTP boundary is loopback-only but does not identify who is
+// calling; tools that mutate another Task need this identity before doing any
+// work. An empty caller keeps the tokenless compatibility path and is rejected
+// by those tools.
+func (s *Service) PetMCPToolForTask(ctx context.Context, callerTaskID, name string, args json.RawMessage) (string, error) {
+	return s.petMCPTool(ctx, strings.TrimSpace(callerTaskID), name, args)
+}
+
+func (s *Service) petMCPTool(ctx context.Context, callerTaskID, name string, args json.RawMessage) (string, error) {
 	name = strings.TrimSpace(strings.ToLower(name))
 	if isAhaPetTool(name) {
 		assistant, err := s.petAssistant(ctx)
@@ -2796,7 +2809,7 @@ func (s *Service) PetMCPTool(ctx context.Context, name string, args json.RawMess
 		if err := json.Unmarshal(args, &input); err != nil {
 			return "", fmt.Errorf("invalid update task agent request")
 		}
-		result, err := s.PetApplyTaskAgent(ctx, input)
+		result, err := s.PetApplyTaskAgent(ctx, callerTaskID, input)
 		if err != nil {
 			return "", err
 		}

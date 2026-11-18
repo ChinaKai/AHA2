@@ -222,6 +222,69 @@ func TestApplyAgentConfigRejectsInvalidSourceCombinations(t *testing.T) {
 	}
 }
 
+func TestApplyAgentConfigPersistsInheritMainDetach(t *testing.T) {
+	fixture := newAgentSourceFixture(t)
+	mainAgent, err := fixture.store.TaskAgent(fixture.ctx, fixture.task.ID, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	childID := "sub-001"
+	if _, err := fixture.store.UpsertTaskAgent(fixture.ctx, domain.TaskAgent{
+		TaskID: fixture.task.ID, AgentID: childID, Role: "sub", Status: "idle", Title: "Child",
+		RuntimeConfigSnapshotID: mainAgent.RuntimeConfigSnapshotID, InheritMain: true,
+		CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	detach := false
+	result, err := fixture.service.ApplyAgentConfig(fixture.ctx, fixture.task.ID, childID, UpdateAgentConfigInput{
+		InheritMain: &detach,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Changed || result.Status != "updated" {
+		t.Fatalf("detaching inherit_main was reported as unchanged: %#v", result)
+	}
+	if result.Agent.InheritMain {
+		t.Fatalf("detach result still reports inherit_main=true: %#v", result.Agent)
+	}
+	child, err := fixture.store.TaskAgent(fixture.ctx, fixture.task.ID, childID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if child.InheritMain {
+		t.Fatal("inherit_main=false was not persisted")
+	}
+	if child.RuntimeConfigSnapshotID != mainAgent.RuntimeConfigSnapshotID {
+		t.Fatalf("association-only change minted a new snapshot: child=%s main=%s",
+			child.RuntimeConfigSnapshotID, mainAgent.RuntimeConfigSnapshotID)
+	}
+
+	mainUpdate, err := fixture.service.ApplyAgentConfig(fixture.ctx, fixture.task.ID, "main", UpdateAgentConfigInput{
+		ReasoningEffort: "medium",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !mainUpdate.Changed || mainUpdate.Agent.RuntimeConfigSnapshotID == mainAgent.RuntimeConfigSnapshotID {
+		t.Fatalf("main update did not produce a new snapshot: %#v", mainUpdate)
+	}
+	child, err = fixture.store.TaskAgent(fixture.ctx, fixture.task.ID, childID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if child.InheritMain {
+		t.Fatal("main update re-enabled inheritance")
+	}
+	if child.RuntimeConfigSnapshotID != mainAgent.RuntimeConfigSnapshotID {
+		t.Fatalf("main update overwrote the detached child: child=%s want=%s",
+			child.RuntimeConfigSnapshotID, mainAgent.RuntimeConfigSnapshotID)
+	}
+}
+
 func waitForTurnTerminal(t *testing.T, database *store.Store, turnID string) {
 	t.Helper()
 	deadline := time.Now().Add(15 * time.Second)

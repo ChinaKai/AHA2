@@ -64,6 +64,8 @@ PATCH /api/v1/tasks/{task}/agents/{agent}
 - `status=updated`、`changed=true`：新运行时已写入 Agent 和 Task，下一个 Turn 使用。
 - `status=unchanged`、`changed=false`：请求与当前运行时完全一致，没有写库，也不会
   生成重复的运行时快照。调用方应把这种情况视为“已经是目标状态”，而不是切换失败。
+  子 Agent 提交 `inherit_main=false` 属于关联状态变化：即使快照内容相同也会返回
+  `updated` 并落库，之后 Main 的更新不再覆盖它。
 
 示例：Official → Provider
 
@@ -123,6 +125,12 @@ curl -sS -X PATCH \
 }
 ```
 
+调用方必须携带宠物 Task 自己的 Turn capability（`Authorization: Bearer <AHA2_AGENT_API_TOKEN>`）。
+loopback 入口本身不识别调用者，`create_tasks` 又是宠物全局权限，所以该写工具还会校验
+Token 身份必须为 `task_pet`：无 Token、其他 Task 的合法 Token 都会在读写任何 Task 状态前
+返回 `pet_identity_required`；无效或过期 Token 在入口直接返回 401
+`agent_capability_invalid`，不会执行 JSON-RPC 工具。
+
 调用仍受宠物权限约束：需要 Owner 开启 `create_tasks`（与 `aha_update_task`、
 `aha_start_task` 等写操作相同）。权限不足、Task 不存在、Task 已完成/只读等都会返回
 MCP `isError: true`，并在文本中给出稳定错误码，不会返回成功。
@@ -149,6 +157,7 @@ MCP `isError: true`，并在文本中给出稳定错误码，不会返回成功�
 | `task_read_only` | 403 | Task 为只读（如跨机镜像） |
 | `task_not_editable` | 409 | Task 已完成或已取消 |
 | `pet_permission_denied` | 403 | 宠物未获得对应写权限（仅 MCP） |
+| `pet_identity_required` | 403 | MCP 写操作未携带宠物 Task 的 Turn capability（仅 MCP） |
 
 错误码是稳定契约；`message` 用于展示，可能措辞微调。调用方应按 `error` 分支处理。
 
