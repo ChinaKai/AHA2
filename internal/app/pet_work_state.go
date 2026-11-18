@@ -421,7 +421,7 @@ func (s *Service) petOpenTasks(ctx context.Context, tasks []domain.Task, pending
 		if approvalID := pendingByTask[task.ID]; approvalID != "" {
 			item.PendingApprovalID = approvalID
 		}
-		item.AttentionReason = petOpenTaskAttentionReason(task.Status)
+		item.AttentionReason = petOpenTaskAttentionReason(task.Status, domain.TurnStatus(item.LastTurnStatus))
 		if item.AttentionReason != "" {
 			if item.PendingApprovalID != "" {
 				item.AttentionReason = "已提交待审批 " + item.PendingApprovalID
@@ -467,9 +467,17 @@ func petPendingApprovalTaskMap(pendingApprovals []domain.PetApproval) map[string
 	return pendingByTask
 }
 
-func petOpenTaskAttentionReason(status domain.TaskStatus) string {
+// petOpenTaskAttentionReason describes why an open Task is listed for the
+// owner's attention. A waiting Task whose latest Turn succeeded is only
+// waiting for the next message, so it must not claim the owner has to decide
+// something. lastTurnStatus may be empty when unknown (the attention total
+// deliberately ignores it, keeping that count's meaning unchanged).
+func petOpenTaskAttentionReason(status domain.TaskStatus, lastTurnStatus domain.TurnStatus) string {
 	switch status {
 	case domain.TaskWaitingUser:
+		if lastTurnStatus == domain.TurnSucceeded {
+			return "waiting_user：等待下一步指令"
+		}
 		return "waiting_user：等待主人决定或补充信息"
 	case domain.TaskBlocked:
 		return "blocked：需要解除阻塞条件"
@@ -498,7 +506,10 @@ func petOpenTaskCounts(ids []string, tasks []domain.Task, pendingApprovals []dom
 			continue
 		}
 		open++
-		if petOpenTaskAttentionReason(task.Status) != "" && pendingByTask[task.ID] == "" {
+		// The count keeps its original meaning: every waiting_user Task without
+		// a pending approval counts, whether or not it is merely awaiting the
+		// next message. Only the displayed reason is refined.
+		if petOpenTaskAttentionReason(task.Status, "") != "" && pendingByTask[task.ID] == "" {
 			attention++
 		}
 	}
