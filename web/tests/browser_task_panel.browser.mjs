@@ -83,7 +83,12 @@ window.__ownerClosed = [];
 window.__ownerNav = {};
 window.__ownerActive = "";
 window.__syncRequests = 0;
-window.__syncDelayOnce = 0;
+// Explicit gate for delayed-response probes: arm {promise, release} before the
+// request that must be held; the fixture awaits it and the test releases it by
+// signal instead of guessing a timeout.
+window.__syncHold = null;
+window.__syncHoldTaken = false;
+window.__syncHoldDone = false;
 window.__frameErrorTab = "";
 window.__frameErrorStatus = 404;
 window.__frameRequests = 0;
@@ -137,10 +142,10 @@ window.fetch = async (input, init = {}) => {
     // Capture the answer before any hold: a request started before a release
     // must still carry the lease it was issued against.
     const snapshot = currentState();
-    if (window.__syncDelayOnce) {
-      const delay = window.__syncDelayOnce;
-      window.__syncDelayOnce = 0;
-      await new Promise(resolve => setTimeout(resolve, delay));
+    if (window.__syncHold && !window.__syncHoldTaken) {
+      window.__syncHoldTaken = true;
+      await window.__syncHold.promise;
+      window.__syncHoldDone = true;
     }
     return json({ok: true, browser: snapshot});
   }
@@ -618,28 +623,86 @@ try {
   await page.evaluate(() => window.__panel.dispose());
 
   // 14. A tab-sync read that started before release must not resurrect the
-  // lease it was issued against. The response is held until after the release
-  // has completed, then allowed to land while it still carries the old grant.
+  // lease it was issued against. The fixture holds the response on an explicit
+  // gate; the test releases it only after the release has completed.
   await reset(page, {__mode: "tabs", __hostAvailable: true, __hostOnlyDown: false, __staleError: false, __released: false,
     __inUse: false, __transferred: false, __attached: true, __ownerTabs: [], __ownerClosed: [],
     __ownerNav: {}, __ownerActive: "", __frameErrorTab: "", __frameClosed: [], __syncRequests: 0,
-    __syncDelayOnce: 0, __frames: 0, __granted: 0});
+    __syncHold: null, __syncHoldTaken: false, __syncHoldDone: false, __frames: 0, __granted: 0});
   await page.waitForSelector("#desktop-browser-switch", {timeout: 5000});
   await page.waitForSelector("#desktop-browser-frame:not([hidden])", {timeout: 5000});
-  await page.evaluate(() => { window.__syncDelayOnce = 2500; });
+  await page.evaluate(() => {
+    let release;
+    const promise = new Promise(resolve => { release = resolve; });
+    window.__syncHold = {promise, release};
+    window.__syncHoldTaken = false;
+    window.__syncHoldDone = false;
+  });
   const syncsBeforeHold = await page.evaluate(() => window.__syncRequests);
-  await waitFor(page, count => window.__syncRequests > count, {arg: syncsBeforeHold, timeout: 4500});
+  await waitFor(page, () => window.__syncHoldTaken, {timeout: 6000});
+  assert.ok(await page.evaluate(() => window.__syncRequests) > syncsBeforeHold, "a tab sync should have been requested");
   // The held sync carries the active grant; release while it is in flight.
   await page.evaluate(() => window.__panel.release());
   await page.waitForSelector("#desktop-browser-attach", {timeout: 5000});
   assert.equal(await page.evaluate(() => window.__panel.granted()), false, "release must clear the lease");
-  // Let the stale response resolve after the release finished.
-  await page.waitForTimeout(2800);
+  // Let the stale response land only after the release finished.
+  await page.evaluate(() => { window.__syncHold.release(); window.__syncHold = null; });
+  await waitFor(page, () => window.__syncHoldDone, {timeout: 3000});
+  await page.waitForTimeout(150);
   assert.equal(await page.evaluate(() => window.__panel.granted()), false,
     "an in-flight state read from before the release must not restore the lease");
   assert.equal(await page.locator("#desktop-browser-attach").count(), 1,
     "the released panel must stay on the attach action");
   assert.equal(await page.locator("#desktop-browser-control .desktop-browser-empty-state").count(), 1);
+  await page.evaluate(() => window.__panel.dispose());
+
+  // 14b. The explicit refresh path (load) must obey the same epoch. Hold the
+  // refresh's own read, release the lease, then let the old answer land.
+  await reset(page, {__mode: "tabs", __hostAvailable: true, __hostOnlyDown: false, __staleError: false, __released: false,
+    __inUse: false, __transferred: false, __attached: true, __ownerTabs: [], __ownerClosed: [],
+    __ownerNav: {}, __ownerActive: "", __frameErrorTab: "", __frameClosed: [], __syncRequests: 0,
+    __syncHold: null, __syncHoldTaken: false, __syncHoldDone: false, __frames: 0, __granted: 0});
+  await page.waitForSelector("#desktop-browser-switch", {timeout: 5000});
+  await page.waitForSelector("#desktop-browser-frame:not([hidden])", {timeout: 5000});
+  // Wait until a tab sync has just run, so the next read is the refresh click;
+  // arm the gate and click in the same step to make that request the held one.
+  const syncsBeforeRefresh = await page.evaluate(() => window.__syncRequests);
+  await waitFor(page, count => window.__syncRequests > count, {arg: syncsBeforeRefresh, timeout: 6000});
+  await page.evaluate(() => {
+    let release;
+    const promise = new Promise(resolve => { release = resolve; });
+    window.__syncHold = {promise, release};
+    window.__syncHoldTaken = false;
+    window.__syncHoldDone = false;
+    document.querySelector("#desktop-browser-refresh").click();
+  });
+  await waitFor(page, () => window.__syncHoldTaken, {timeout: 3000});
+  await page.evaluate(() => window.__panel.release());
+  await page.waitForSelector("#desktop-browser-attach", {timeout: 5000});
+  assert.equal(await page.evaluate(() => window.__panel.granted()), false, "release must clear the lease");
+  await page.evaluate(() => { window.__syncHold.release(); window.__syncHold = null; });
+  await waitFor(page, () => window.__syncHoldDone, {timeout: 3000});
+  await page.waitForTimeout(150);
+  assert.equal(await page.evaluate(() => window.__panel.granted()), false,
+    "a held refresh answer from before the release must not restore the lease");
+  assert.equal(await page.locator("#desktop-browser-attach").count(), 1,
+    "the released panel must keep the attach action after the stale refresh lands");
+  assert.equal(await page.locator("#desktop-browser-control .desktop-browser-empty-state").count(), 1);
+  await page.evaluate(() => window.__panel.dispose());
+
+  // 14c. A normal explicit refresh still applies: the lease and preview stay.
+  await reset(page, {__mode: "tabs", __hostAvailable: true, __hostOnlyDown: false, __staleError: false, __released: false,
+    __inUse: false, __transferred: false, __attached: true, __ownerTabs: [], __ownerClosed: [],
+    __ownerNav: {}, __ownerActive: "", __frameErrorTab: "", __frameClosed: [], __syncRequests: 0,
+    __syncHold: null, __syncHoldTaken: false, __syncHoldDone: false, __frames: 0, __granted: 0});
+  await page.waitForSelector("#desktop-browser-frame:not([hidden])", {timeout: 5000});
+  const syncsBeforeNormalRefresh = await page.evaluate(() => window.__syncRequests);
+  await page.click("#desktop-browser-refresh");
+  await waitFor(page, count => window.__syncRequests > count, {arg: syncsBeforeNormalRefresh, timeout: 3000});
+  await page.waitForSelector("[data-browser-tab='browser_tab_1']", {timeout: 5000});
+  assert.equal(await page.evaluate(() => window.__panel.granted()), true, "a normal refresh must keep the lease");
+  assert.equal(await page.evaluate(() => document.querySelector("#desktop-browser-frame").hidden), false,
+    "a normal refresh must keep the preview");
   await page.evaluate(() => window.__panel.dispose());
 
   // 15. A terminal frame answer (409/403) is never retried by the 2s error
@@ -649,7 +712,7 @@ try {
       __inUse: false, __transferred: false, __attached: true, __ownerTabs: [], __ownerClosed: [],
       __ownerNav: {}, __ownerActive: "", __frameErrorTab: "browser_tab_1", __frameErrorStatus: terminalStatus,
       __frameClosed: [], __frameRequests: 0, __frameUnavailable: false, __frame503: 0,
-      __syncRequests: 0, __syncDelayOnce: 0, __frames: 0, __granted: 0});
+      __syncRequests: 0, __syncHold: null, __syncHoldTaken: false, __syncHoldDone: false, __frames: 0, __granted: 0});
     await waitFor(page, () => /画面暂不可用/.test(document.querySelector("#desktop-browser-frame-status")?.textContent || ""),
       {timeout: 8000});
     const requestsAfterTerminal = await page.evaluate(() => window.__frameRequests);
@@ -682,7 +745,7 @@ try {
   await reset(page, {__mode: "tabs", __hostAvailable: true, __hostOnlyDown: false, __staleError: false, __released: false,
     __inUse: false, __transferred: false, __attached: true, __ownerTabs: [], __ownerClosed: [],
     __ownerNav: {}, __ownerActive: "", __frameErrorTab: "", __frameClosed: [], __frameRequests: 0,
-    __frameUnavailable: false, __frame503: 0, __syncRequests: 0, __syncDelayOnce: 0, __frames: 0, __granted: 0});
+    __frameUnavailable: false, __frame503: 0, __syncRequests: 0, __syncHold: null, __syncHoldTaken: false, __syncHoldDone: false, __frames: 0, __granted: 0});
   await page.waitForSelector("#desktop-browser-frame:not([hidden])", {timeout: 5000});
   await waitFor(page, () => window.__frames >= 2);
   await page.evaluate(() => { window.__frameUnavailable = true; });

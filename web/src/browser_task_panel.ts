@@ -296,6 +296,9 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
   // makes only the newest concurrent read win.
   let stateSyncEpoch = 0;
   let stateSyncRequest = 0;
+  // The explicit load() owns the loading flag through its own serial so a
+  // superseded read cannot clear it while a newer read is still in flight.
+  let stateLoadRequest = 0;
   // A terminal frame answer (403/404/409/410) must not be retried on the timer;
   // only a tab/lease change or an explicit reload clears this key.
   let terminalStreamKey = "";
@@ -887,24 +890,36 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
 
   const load = async (): Promise<void> => {
     if (disposed) return;
-    // An explicit read supersedes any tab-sync read already in flight.
-    stateSyncRequest++;
+    // An explicit read supersedes any tab-sync read already in flight. Capture
+    // the epoch and a request serial of its own: a response that lands after a
+    // release, tab switch or hide must not repaint the old lease, restart its
+    // preview or open a start page.
+    const epoch = stateSyncEpoch;
+    const request = ++stateSyncRequest;
+    const loadRequest = ++stateLoadRequest;
     state.loading = true;
     state.error = "";
     paint();
     try {
       const result = await api.taskBrowser(taskID);
-      // The Owner may have left browser mode while this read was in flight;
-      // a disposed panel must not open a start page or repaint stale state.
-      if (disposed) return;
+      // The Owner may have left browser mode, released the lease or switched
+      // tabs while this read was in flight; a stale answer must not be applied.
+      if (disposed || epoch !== stateSyncEpoch || request !== stateSyncRequest) return;
       const data = result?.browser;
       if (!data) throw new Error("浏览器状态不可用");
       applyBrowserState(data);
     } catch (error) {
+      // A failure from a superseded read is equally stale: it must not pin an
+      // error over the state the newer read already applied.
+      if (disposed || epoch !== stateSyncEpoch || request !== stateSyncRequest) return;
       state.error = error instanceof Error ? error.message : String(error);
     } finally {
-      state.loading = false;
+      // Only the newest load owns the loading flag; a superseded one must not
+      // clear it while the newer read is still in flight.
+      if (loadRequest === stateLoadRequest) state.loading = false;
     }
+    // Dropped answers returned above, so none of the repaint, frame restart or
+    // follow-up reads below can run for them.
     paint();
     startStream();
     if (state.grant && !state.bookmarksLoaded && !state.bookmarksLoading) void loadBookmarks(state.grant);
