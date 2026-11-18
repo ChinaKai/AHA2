@@ -617,7 +617,8 @@ func TestAutoCommitBlocksBareTokenAndOpenAIProjectKeys(t *testing.T) {
 }
 
 // A document that explains token/password handling in Chinese must not be
-// blocked as a secret, while a real credential in the same batch still is.
+// blocked as a secret, while real credentials (ASCII or Unicode) in the same
+// batch still are.
 func TestAutoCommitKeepsChineseSecretProseEligible(t *testing.T) {
 	ctx := context.Background()
 	config, git := newGitTestVault(t)
@@ -630,6 +631,8 @@ func TestAutoCommitKeepsChineseSecretProseEligible(t *testing.T) {
 		"鉴权token=设备上报的随机串\n"
 	writeGitTestFile(t, config.VaultPath, "notes/chinese-secret-prose.md", prose)
 	writeGitTestFile(t, config.VaultPath, "notes/real-secret.md", "token = \"abcdefgh12345678\"\n")
+	writeGitTestFile(t, config.VaultPath, "notes/accented-password.md", "password=\"pässwörd1234\"\n")
+	writeGitTestFile(t, config.VaultPath, "notes/accented-token.md", "token=abc123édef456\n")
 	scan, err := git.ScanAutoCommit(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -638,11 +641,13 @@ func TestAutoCommitKeepsChineseSecretProseEligible(t *testing.T) {
 	for _, item := range scan.Blocked {
 		blocked[item.Path] = item.Reason
 	}
-	if blocked["notes/real-secret.md"] != "secret" {
-		t.Fatalf("real secret not blocked: %+v", scan.Blocked)
+	for _, path := range []string{"notes/real-secret.md", "notes/accented-password.md", "notes/accented-token.md"} {
+		if blocked[path] != "secret" {
+			t.Fatalf("%s not blocked as secret: %+v", path, scan.Blocked)
+		}
 	}
-	if scan.BlockedTotal != 1 {
-		t.Fatalf("blocked total = %d, want 1", scan.BlockedTotal)
+	if scan.BlockedTotal != 3 {
+		t.Fatalf("blocked total = %d, want 3", scan.BlockedTotal)
 	}
 	if len(scan.Eligible) != 1 || scan.Eligible[0] != "notes/chinese-secret-prose.md" {
 		t.Fatalf("chinese prose was not eligible: %+v", scan.Eligible)

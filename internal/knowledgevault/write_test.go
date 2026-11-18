@@ -199,6 +199,12 @@ func TestWriteKnowledgeValidationTable(t *testing.T) {
 		{"group traversal", func(r *WriteRequest) { r.Group = "../escape" }, WriteErrorValidation},
 		{"secret in body", func(r *WriteRequest) { r.Body = writeTestBody + " password = supersecret123" }, WriteErrorForbiddenContent},
 		{"secret in summary", func(r *WriteRequest) { r.Summary = "这段摘要里包含 password=supersecret123 这样的内容" }, WriteErrorForbiddenContent},
+		{"unicode secret in body", func(r *WriteRequest) {
+			r.Body = writeTestBody + " password=\"pässwörd1234\""
+		}, WriteErrorForbiddenContent},
+		{"unicode token in body", func(r *WriteRequest) {
+			r.Body = writeTestBody + " token=abc123édef456"
+		}, WriteErrorForbiddenContent},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -227,6 +233,9 @@ func TestForbiddenContentSecretPatterns(t *testing.T) {
 		{"chinese token prose", "token:从环境变量读取不要写死", false},
 		{"chinese password prose", "password:至少八位以上字符组合", false},
 		{"chinese token after cjk word", "鉴权token=设备上报的随机串", false},
+		{"chinese prose with cjk punctuation", "token:从环境变量读取，不要写死。", false},
+		{"japanese prose", "token:トークンは環境変数から読み込みます", false},
+		{"korean prose", "password:환경변수에서읽습니다", false},
 		{"full width colon", "token：从环境变量读取不要写死", false},
 		{"non secret keyword", "status: stale", false},
 		{"english prose with spaces", "token: read from env", false},
@@ -240,6 +249,10 @@ func TestForbiddenContentSecretPatterns(t *testing.T) {
 		{"env assignment", "TOKEN=abcdef1234567890", true},
 		{"api key assignment", "api_key: 0123456789abcdef", true},
 		{"long random ascii", "access_token=Zx9Qw3Er7Ty1Ui5Op2As4Df6", true},
+		{"latin accented password", `password="pässwörd1234"`, true},
+		{"latin accented token", "token=abc123édef456", true},
+		{"full width latin value", "password=ＡＢＣＤＥＦＧＨ", true},
+		{"chinese prose with digit", "password:至少8位以上字符组合", true},
 		{"openai style key", "sk-abcdefghijklmnopqrstuvwxyz012345", true},
 		{"github token", "ghp_abcdefghijklmnopqrstuvwxyz0123456789", true},
 		{"aws access key", "AKIAIOSFODNN7EXAMPLE", true},

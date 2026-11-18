@@ -262,12 +262,60 @@ var forbiddenKnowledgePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{20,}\b`),
 	regexp.MustCompile(`\bsk-ant-[A-Za-z0-9_-]{20,}\b`),
 	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.`),
-	// The assignment form must not treat CJK prose as a credential value:
-	// `token:从环境变量读取不要写死` is documentation, not a secret. Real
-	// secret material is printable ASCII, so the value class is limited to
-	// ASCII 0x21-0x7E minus quotes ([!#-&(-~]) instead of any non-space run.
-	// The keyword, separator and 8-rune minimum are unchanged.
-	regexp.MustCompile(`(?i)\b(password|passwd|secret|token|api[_-]?key|access[_-]?token)\s*[:=]\s*["']?[!#-&(-~]{8,}`),
+}
+
+// secretAssignmentPattern captures `keyword: value` / `keyword=value`
+// candidates. The value shape decides whether it is a credential or CJK prose
+// (see secretAssignmentValueBlocks); a keyword followed by Chinese text such
+// as `token:从环境变量读取不要写死` is documentation, not a secret.
+var secretAssignmentPattern = regexp.MustCompile(`(?i)\b(password|passwd|secret|token|api[_-]?key|access[_-]?token)\s*[:=]\s*["']?([^\s"']+)`)
+
+// minSecretValueRunes is the shortest assignment value treated as a credential.
+const minSecretValueRunes = 8
+
+// secretAssignmentValueBlocks reports whether an assignment value is
+// credential material. Only a value made purely of CJK script (Han, Hiragana,
+// Katakana, Hangul) plus CJK punctuation is exempt as prose; any Latin letter
+// (including accented letters), digit, or symbol means it can be a secret and
+// must be blocked.
+func secretAssignmentValueBlocks(value string) bool {
+	runes := []rune(value)
+	if len(runes) < minSecretValueRunes {
+		return false
+	}
+	for _, r := range runes {
+		if !isCJKProseRune(r) {
+			return true
+		}
+	}
+	return false
+}
+
+func isCJKProseRune(r rune) bool {
+	if unicode.In(r, unicode.Han, unicode.Hiragana, unicode.Katakana, unicode.Hangul) {
+		return true
+	}
+	switch {
+	// CJK Symbols and Punctuation, CJK Compatibility Forms, vertical forms,
+	// and the punctuation subsets of Halfwidth/Fullwidth Forms. Fullwidth
+	// Latin letters (U+FF21-FF3A, U+FF41-FF5A) and digits (U+FF10-FF19) are
+	// deliberately left out: they are still credential material.
+	case r >= 0x3000 && r <= 0x303F,
+		r >= 0xFE10 && r <= 0xFE19,
+		r >= 0xFE30 && r <= 0xFE4F,
+		r >= 0xFF01 && r <= 0xFF0F,
+		r >= 0xFF1A && r <= 0xFF20,
+		r >= 0xFF3B && r <= 0xFF40,
+		r >= 0xFF5B && r <= 0xFF65:
+		return true
+	}
+	switch r {
+	case 0x00B7, 0x2014, 0x2018, 0x2019, 0x201C, 0x201D, 0x2026, 0x30FB:
+		return true
+	}
+	// Kana iteration marks, the prolonged sound mark and the double hyphen are
+	// Script=Common but belong to Japanese prose.
+	return (r >= 0x3099 && r <= 0x309F) || r == 0x30A0 || (r >= 0x30FC && r <= 0x30FE)
 }
 
 // WriteKnowledge creates or revises one vault document. It is intentionally
@@ -693,6 +741,11 @@ func validGroupName(value string) bool {
 func forbiddenContent(value string) bool {
 	for _, pattern := range forbiddenKnowledgePatterns {
 		if pattern.MatchString(value) {
+			return true
+		}
+	}
+	for _, match := range secretAssignmentPattern.FindAllStringSubmatch(value, -1) {
+		if secretAssignmentValueBlocks(match[2]) {
 			return true
 		}
 	}
