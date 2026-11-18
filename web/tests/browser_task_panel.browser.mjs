@@ -73,6 +73,8 @@ window.__deletes = [];
 window.__opens = [];
 window.__granted = 0;
 window.__openTargets = 0;
+window.__openDelay = 0;
+window.__grantDeletes = 0;
 const HOST_UP = {available: true, host_id: "local", version: "0.1.0", platform: "win32", edge_available: true};
 const HOST_DOWN = {available: false, host_id: "local", edge_available: false, code: "browser_host_start_failed", error: "浏览器宿主自动启动失败（端口被占用或依赖缺失），请查看 AHA2 日志"};
 const STATE_UP = ${JSON.stringify(browserState({available: true, host_id: "local", version: "0.1.0", platform: "win32", edge_available: true}))};
@@ -117,6 +119,7 @@ window.fetch = async (input, init = {}) => {
   }
   if (path === "/api/v1/browser-grants/browser_grant_1" && method === "DELETE") {
     window.__released = true;
+    window.__grantDeletes++;
     return json({ok: true, grant: {...GRANT, status: "revoked"}});
   }
   if (path === "/api/v1/browser-grants/browser_grant_1/bookmarks") {
@@ -125,6 +128,7 @@ window.fetch = async (input, init = {}) => {
   if (path === "/api/v1/browser-grants/browser_grant_1/tabs" && method === "POST") {
     const payload = JSON.parse(String(init.body || "{}"));
     window.__opens.push(payload.url);
+    if (window.__openDelay) await new Promise(resolve => setTimeout(resolve, window.__openDelay));
     const tab = newTab(payload.url || "https://example.com/opened", "打开的页面");
     window.__openedTabs.push(tab);
     return json({ok: true, tab});
@@ -302,6 +306,13 @@ try {
   await page.click("[data-browser-bookmark-folder='Bar']");
   await page.waitForSelector("#desktop-browser-bookmarks-menu [data-browser-bookmark]");
   assert.match(await page.locator("#desktop-browser-bookmarks-menu").innerText(), /Mail/);
+  // An outside click closes the menu without a repaint; reopening the same
+  // folder must render again instead of trusting the cached HTML.
+  await page.click("#desktop-browser-url");
+  assert.equal(await page.locator("#desktop-browser-bookmarks-menu").count(), 0);
+  await page.click("[data-browser-bookmark-folder='Bar']");
+  await page.waitForSelector("#desktop-browser-bookmarks-menu [data-browser-bookmark]");
+  assert.equal(await page.locator("#desktop-browser-bookmarks-menu").count(), 1, "external close must not break reopening");
   await page.keyboard.press("Escape");
   assert.equal(await page.locator("#desktop-browser-bookmarks-menu").count(), 0);
 
@@ -319,11 +330,13 @@ try {
   await page.waitForSelector("#desktop-browser-bookmarks-menu [data-browser-bookmark='https://mail.example/']");
   await page.click("#desktop-browser-bookmarks-menu [data-browser-bookmark='https://mail.example/']");
   await waitFor(page, () => window.__opens.includes("https://mail.example/"));
+  await waitFor(page, () => document.querySelector("#desktop-browser-url").value === "https://mail.example/");
 
   // The + button opens AHA's local start page, never about:blank.
   await page.click("#desktop-browser-newtab");
   await waitFor(page, () => window.__opens.some(url => new URL(url).pathname === "/browser-newtab"));
   assert.equal(await page.evaluate(() => window.__opens.some(url => url.startsWith("about:"))), false);
+  await waitFor(page, () => document.querySelector("#desktop-browser-url").value.endsWith("/browser-newtab"));
 
   // The header stop calls this release path; the popover marker stays open.
   const grantedBefore = await page.evaluate(() => window.__granted);
@@ -344,6 +357,12 @@ try {
   await page.waitForSelector("#desktop-browser-tabs");
   assert.match(await page.locator("#desktop-browser-status").innerText(), /独占控制中/);
   assert.equal(await page.evaluate(() => window.__deletes.length), deletesBeforeAttach, "acquiring must not close Owner pages");
+  // The address bar follows the page opened from it.
+  await page.fill("#desktop-browser-url", "https://manual.example/page");
+  await page.click("#desktop-browser-open-form button[type='submit']");
+  await waitFor(page, () => window.__opens.includes("https://manual.example/page"));
+  await waitFor(page, () => document.querySelector("#desktop-browser-url").value === "https://manual.example/page",
+    {timeout: 5000});
   await page.evaluate(() => window.__panel.dispose());
 
   // 6. Empty profile: the start page opens automatically once.
@@ -396,6 +415,22 @@ try {
   assert.match(staleStatus, /实时画面/);
   assert.doesNotMatch(staleStatus, /画面暂不可用/);
   await page.evaluate(() => window.__panel.dispose());
+
+  // 10. An accepted stop must survive the panel: start a delayed open, ask the
+  // header stop to release, then dispose (mode switch) before the open settles.
+  await reset(page, {__mode: "tabs", __hostAvailable: true, __staleError: false, __released: false,
+    __inUse: false, __transferred: false, __attached: true, __opens: [], __openDelay: 1200,
+    __grantDeletes: 0, __granted: 0, __frames: 0});
+  await page.waitForSelector("#desktop-browser-newtab", {timeout: 5000});
+  await page.click("#desktop-browser-newtab");
+  await waitFor(page, () => window.__opens.length === 1);
+  await page.evaluate(() => {
+    window.__panel.release();
+    window.__panel.dispose();
+  });
+  await waitFor(page, () => window.__grantDeletes >= 1, {timeout: 5000});
+  assert.equal(await page.evaluate(() => window.__released), true, "dispose must not cancel a requested release");
+  await page.evaluate(() => { window.__openDelay = 0; });
 
   // The start page must load under the production CSP as a plain http(s) page.
   const startPage = await browser.newPage();

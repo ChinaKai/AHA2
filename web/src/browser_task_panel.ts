@@ -256,6 +256,7 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
   let streamGeneration = 0;
   let bookmarkRequest = 0;
   let releaseTimer = 0;
+  let releaseRequested = false;
   const painted = new WeakMap<HTMLElement, string>();
 
   const current = (): boolean => container.isConnected && Boolean(container.closest("#desktop-tool"));
@@ -683,9 +684,13 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     code: String((error as {code?: unknown})?.code || ""),
   });
 
-  const selectTab = (tabID: string): void => {
+  // Selecting a freshly opened page must also refresh the address bar. load()
+  // still points urlDraft at the previously selected tab, and changing only
+  // the id would leave the old URL visible.
+  const selectTab = (tabID: string, url = ""): void => {
     if (!tabID) return;
     state.selectedTabID = tabID;
+    if (url) state.urlDraft = url;
     state.frameError = "";
     state.frameLive = false;
   };
@@ -727,7 +732,7 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
       const result = await api.openTaskBrowserTab(state.grant.id, target);
       if (targetOverride === undefined) state.urlDraft = "";
       await load();
-      selectTab(result.tab.id);
+      selectTab(result.tab.id, result.tab.url || target);
       paint();
       startStream();
       if (!quiet) notify("notice", "页面已在内置浏览器中打开");
@@ -929,6 +934,10 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     state.bookmarksMenuFolder = "";
     container.querySelector("#desktop-browser-bookmarks-menu")?.remove();
     container.querySelector("#desktop-browser-bookmarks-more")?.setAttribute("aria-expanded", "false");
+    // The menu was removed outside paint(); drop the cached HTML so reopening
+    // the same folder menu is not mistaken for an identical (already painted)
+    // tree and skipped.
+    painted.delete(container);
   };
 
   paint();
@@ -944,7 +953,9 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     dispose: () => {
       disposed = true;
       bookmarkRequest++;
-      window.clearTimeout(releaseTimer);
+      // An accepted stop outlives the panel: dispose must not cancel the
+      // pending release timer, or switching control mode mid-open would keep
+      // the exclusive lease alive with no UI to release it.
       document.removeEventListener("visibilitychange", onVisibility);
       document.removeEventListener("pointerdown", onOutsidePointer, true);
       container.removeEventListener("keydown", onKeydown);
@@ -954,15 +965,20 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     },
     release: () => {
       if (!state.grant) return false;
+      releaseRequested = true;
       // The header stop stays available while a tab open/close is in flight;
       // release once the current operation settles instead of dropping it.
+      // A wedged request must not delay the lease forever, so DELETE proceeds
+      // after a bounded wait as well.
+      const deadline = Date.now() + 15_000;
       const waitRelease = () => {
-        if (disposed) return;
-        if (state.binding) {
+        if (!releaseRequested) return;
+        if (state.binding && Date.now() < deadline) {
           window.clearTimeout(releaseTimer);
           releaseTimer = window.setTimeout(waitRelease, 120);
           return;
         }
+        releaseRequested = false;
         if (state.grant) void releaseControl();
       };
       waitRelease();

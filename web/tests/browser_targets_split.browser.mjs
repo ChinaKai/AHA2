@@ -34,6 +34,8 @@ const json = (value, status = 200) => new Response(JSON.stringify(value), {statu
 window.__granted = null;
 window.__frames = 0;
 window.__opens = [];
+window.__openDelay = 0;
+window.__grantDeletes = 0;
 const GRANT = ${JSON.stringify(grant)};
 const TAB = ${JSON.stringify(tab)};
 const HOST = ${JSON.stringify(host)};
@@ -60,12 +62,14 @@ window.fetch = async (input, init = {}) => {
   }
   if (path === "/api/v1/browser-grants/browser_grant_1" && method === "DELETE") {
     window.__granted = null;
+    window.__grantDeletes++;
     return json({ok: true, grant: {...GRANT, status: "revoked"}});
   }
   if (path === "/api/v1/browser-grants/browser_grant_1/bookmarks") return json({ok: true, bookmarks: []});
   if (path === "/api/v1/browser-grants/browser_grant_1/tabs" && method === "POST") {
     const payload = JSON.parse(String(init.body || "{}"));
     window.__opens.push(payload.url);
+    if (window.__openDelay) await new Promise(resolve => setTimeout(resolve, window.__openDelay));
     return json({ok: true, tab: {...TAB, id: "browser_tab_opened", url: payload.url}});
   }
   if (/\\/tabs\\/[a-z0-9_]+\\/frame$/.test(path)) {
@@ -87,7 +91,7 @@ window.unmountPanel = () => stopDesktopPanel();
 window.mountPanel();
 `;
 const html = `<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="/styles.css"></head><body>
-  <main id="fixture"></main><script type="module" src="/fixture.js"></script>
+  <main id="fixture" style="width:720px;height:860px"></main><script type="module" src="/fixture.js"></script>
 </body></html>`;
 const server = createServer(async (request, response) => {
   const name = new URL(request.url, "http://localhost").pathname;
@@ -177,6 +181,23 @@ try {
   assert.equal(await page.locator("#desktop-browser-attach").count(), 1);
   assert.equal(await popover.locator("#desktop-browser-frame").count(), 0);
   assert.equal(await popover.locator("#desktop-browser-bookmarks").count(), 0);
+
+  // Accepted stop survives a mode switch: start a delayed open, click the
+  // header stop while it is in flight, then leave browser mode. The pending
+  // release timer must not be cleared by dispose.
+  await page.evaluate(() => { window.__opens = []; window.__grantDeletes = 0; });
+  await page.click("#desktop-browser-attach");
+  await waitFor(page, () => window.__granted !== null);
+  await page.waitForSelector("#desktop-browser-newtab");
+  await page.evaluate(() => { window.__openDelay = 1200; });
+  await page.click("#desktop-browser-newtab");
+  await waitFor(page, () => window.__opens.length === 1);
+  await page.click("#desktop-stop");
+  await page.click('[data-desktop-popover="targets"]');
+  await page.selectOption("#desktop-control-mode", "display");
+  await waitFor(page, () => window.__granted === null, {timeout: 5000});
+  assert.ok(await page.evaluate(() => window.__grantDeletes >= 1), "the accepted stop must release the lease after dispose");
+  assert.equal(await page.locator("#desktop-browser-control").isVisible(), false);
   await page.evaluate(() => window.unmountPanel());
   assert.deepEqual(errors, []);
   console.log("shared-targets popover split and header release verified");
