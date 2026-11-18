@@ -1691,7 +1691,7 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 	}
 	filesystem, approval := parsePermissionsJSON(snapshot.PermissionsJSON)
 	latestSessionUsage := cloneUsageMap(sessionUsageBaseline)
-	mcpServers, allowedTools := s.mcpRuntimeForTurn(ctx, task, turn.AgentID, agentAPIURL)
+	mcpServers, allowedTools := s.mcpRuntimeForTurn(ctx, task, turn.AgentID, agentAPIURL, turn.InboxBatchID)
 	var liveInbox backend.LiveInbox
 	if snapshot.Backend == "claude" || snapshot.Backend == "codex" {
 		// The adapter claims this inbox when the runner can stream stdin. On a

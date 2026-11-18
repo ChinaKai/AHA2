@@ -170,7 +170,7 @@ func TestTaskRouteAddsNarrowChannelMCP(t *testing.T) {
 			// A channel-routed Turn resolves other Projects' knowledge, so the
 			// knowledge domain MCP must not be injected even though the Task's
 			// own switch is on.
-			turnServers, turnAllowed := fixture.service.mcpRuntimeForTurn(ctx, task, "main", "http://127.0.0.1:8766/")
+			turnServers, turnAllowed := fixture.service.mcpRuntimeForTurn(ctx, task, "main", "http://127.0.0.1:8766/", "")
 			for _, server := range turnServers {
 				if server.Name == knowledgeMCPName {
 					t.Fatalf("routed turn gained knowledge MCP: %#v", turnServers)
@@ -211,7 +211,7 @@ func TestCoreMCPRuntimeInjectionScopesTools(t *testing.T) {
 	}
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
-			servers, allowed := service.mcpRuntimeForTurn(ctx, scenario.task, scenario.agentID, scenario.apiURL)
+			servers, allowed := service.mcpRuntimeForTurn(ctx, scenario.task, scenario.agentID, scenario.apiURL, "")
 			var core backend.MCPServer
 			for _, server := range servers {
 				if server.Name == coreMCPName {
@@ -288,7 +288,7 @@ func TestKnowledgeMCPRuntimeInjectionScopesTools(t *testing.T) {
 	}
 	for _, scenario := range scenarios {
 		t.Run(scenario.name, func(t *testing.T) {
-			servers, allowed := service.mcpRuntimeForTurn(ctx, scenario.task, scenario.agentID, scenario.apiURL)
+			servers, allowed := service.mcpRuntimeForTurn(ctx, scenario.task, scenario.agentID, scenario.apiURL, "")
 			var knowledge backend.MCPServer
 			for _, server := range servers {
 				if server.Name == knowledgeMCPName {

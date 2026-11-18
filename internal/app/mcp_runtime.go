@@ -128,17 +128,14 @@ func KnowledgeMCPToolIsWrite(name string) bool {
 
 // knowledgeMCPInjected mirrors AgentKnowledgeMCPAllowed for the runtime path,
 // which has no AgentCallContext yet. The pet Task is excluded because its root
-// libraries are outside a Project, and channel-routed Turns are excluded
-// because ApplicableAgentKnowledge resolves their other Projects' libraries.
-func (s *Service) knowledgeMCPInjected(ctx context.Context, task domain.Task) bool {
+// libraries are outside a Project, and channel-bound Turns (task_route or
+// conversation_host) are excluded because their knowledge resolves from
+// another source. inboxBatchID is the Turn's actual batch, not just the Task.
+func (s *Service) knowledgeMCPInjected(ctx context.Context, task domain.Task, inboxBatchID string) bool {
 	if task.ID == petTaskID || task.ProjectID == petProjectID || !knowledgeEnabled(domain.Project{}, task) {
 		return false
 	}
-	routed, err := s.store.HasActiveChannelTaskRoute(ctx, task.ID)
-	if err != nil {
-		return false
-	}
-	return !routed
+	return !s.agentKnowledgeMCPChannelBound(ctx, task.ID, inboxBatchID)
 }
 
 // mcpRuntimeForTask returns the MCP servers a Turn should receive and the
@@ -283,7 +280,7 @@ func (s *Service) mcpRuntimeForTask(ctx context.Context, task domain.Task, agent
 // not the pet Task. A writable Main Turn receives all tools; everyone else —
 // non-Main collaborators and read-only review Tasks — receives read tools only.
 // This keeps one Turn from being offered the entire mutating surface at once.
-func (s *Service) mcpRuntimeForTurn(ctx context.Context, task domain.Task, agentID, agentAPIURL string) ([]backend.MCPServer, []string) {
+func (s *Service) mcpRuntimeForTurn(ctx context.Context, task domain.Task, agentID, agentAPIURL, inboxBatchID string) ([]backend.MCPServer, []string) {
 	servers, allowed := s.mcpRuntimeForTask(ctx, task, agentAPIURL)
 	agentAPIURL = strings.TrimSpace(agentAPIURL)
 	if agentAPIURL == "" || task.ID == petTaskID {
@@ -303,7 +300,7 @@ func (s *Service) mcpRuntimeForTurn(ctx context.Context, task domain.Task, agent
 	for _, tool := range coreMCPToolNames(write) {
 		allowed = append(allowed, "mcp__"+coreMCPName+"__"+tool)
 	}
-	if s.knowledgeMCPInjected(ctx, task) {
+	if s.knowledgeMCPInjected(ctx, task, inboxBatchID) {
 		servers = append(servers, backend.MCPServer{
 			Name: knowledgeMCPName, Transport: "http",
 			URL:            strings.TrimRight(agentAPIURL, "/") + knowledgeMCPPath,

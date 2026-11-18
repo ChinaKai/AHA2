@@ -79,7 +79,7 @@ func TestLegacyMCPNamespaceConflictsAreDiagnosedAndSkipped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	servers, allowed := service.mcpRuntimeForTurn(ctx, conflictTask, "main", "http://127.0.0.1:8766")
+	servers, allowed := service.mcpRuntimeForTurn(ctx, conflictTask, "main", "http://127.0.0.1:8766", "")
 	coreCount, localCount := 0, 0
 	for _, server := range servers {
 		switch normalizedMCPIdentifier(server.Name) {
@@ -157,7 +157,7 @@ func TestLegacyReservedNamespaceCannotEnterRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	servers, allowed := service.mcpRuntimeForTurn(ctx, runtimeTask, "main", "http://127.0.0.1:8766")
+	servers, allowed := service.mcpRuntimeForTurn(ctx, runtimeTask, "main", "http://127.0.0.1:8766", "")
 	for _, server := range servers {
 		if normalizedMCPIdentifier(server.Name) == "aha2_extra" {
 			t.Fatalf("reserved legacy server entered runtime: %#v", servers)

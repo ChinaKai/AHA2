@@ -2,7 +2,11 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"errors"
+	"log"
 	"strings"
 	"time"
 
@@ -21,20 +25,57 @@ var ErrKnowledgeMCPEntryNotFound = errors.New("knowledge entry not found")
 // Task. Skills are never resolved by a client-supplied vault key or path.
 var ErrKnowledgeMCPSkillNotFound = errors.New("skill not found")
 
+// ErrKnowledgeMCPGuideUnavailable is the safe sentinel for a guide read that
+// failed for a reason other than "not present". The underlying error may carry
+// a host filesystem path; it is logged in the service and never surfaced.
+var ErrKnowledgeMCPGuideUnavailable = errors.New("knowledge guide is unavailable")
+
 // AgentKnowledgeMCPAllowed is the single gate for the knowledge domain MCP.
 // The runtime injects the server only when this returns true, and every tool
 // call re-checks it server-side. A Task with knowledge switched off, the pet
-// Task (whose root libraries are outside a Project), and channel-routed Turns
-// (which resolve other Projects' knowledge) do not receive this domain.
+// Task (whose root libraries are outside a Project), and any channel-bound
+// Turn (which resolves other Projects' knowledge) do not receive this domain.
 func (s *Service) AgentKnowledgeMCPAllowed(ctx context.Context, call AgentCallContext) bool {
 	if call.Task.ID == petTaskID || call.Task.ProjectID == petProjectID || !knowledgeEnabled(call.Project, call.Task) {
 		return false
 	}
-	routed, err := s.store.HasActiveChannelTaskRoute(ctx, call.Task.ID)
-	if err != nil {
-		return false
+	return !s.agentKnowledgeMCPChannelBound(ctx, call.Task.ID, call.Turn.InboxBatchID)
+}
+
+// agentKnowledgeMCPChannelBound reports whether the Task or the actual Turn is
+// tied to a channel route. Both task_route and conversation_host resolve
+// knowledge from another source, so a channel-bound Turn stays outside this
+// project-scoped domain even after the route row is no longer active. A store
+// error fails closed: a gate that cannot prove the Turn is ordinary must not
+// expose the domain.
+func (s *Service) agentKnowledgeMCPChannelBound(ctx context.Context, taskID, inboxBatchID string) bool {
+	if strings.TrimSpace(inboxBatchID) != "" {
+		_, err := s.store.ChannelContextForInboxBatch(ctx, inboxBatchID)
+		switch {
+		case err == nil:
+			return true
+		case !errors.Is(err, sql.ErrNoRows):
+			return true
+		}
 	}
-	return !routed
+	routed, err := s.store.HasActiveChannelTaskRoute(ctx, taskID)
+	if err != nil {
+		return true
+	}
+	return routed
+}
+
+// knowledgeMCPDomainVisible narrows the broader Agent knowledge read set to
+// this domain's contract: the Turn's own Project plus global entries. Bound
+// libraries keep their container ProjectID, so the legacy ListApplicableKnowledge
+// path exposes them to the general Agent API; they stay outside this domain.
+// Global entries are readable but read-only. The pet root libraries never pass
+// the scope check.
+func knowledgeMCPDomainVisible(call AgentCallContext, item domain.KnowledgeEntry) bool {
+	if item.Scope == "global" {
+		return true
+	}
+	return item.Scope == "project" && item.ProjectID == call.Project.ID
 }
 
 func (s *Service) agentKnowledgeMCPReadContext(ctx context.Context, claims agentapi.Claims) (AgentCallContext, error) {
@@ -87,7 +128,8 @@ type AgentKnowledgeMCPListResult struct {
 }
 
 func (s *Service) AgentKnowledgeMCPList(ctx context.Context, claims agentapi.Claims, query, entryType string, limit, offset int) (AgentKnowledgeMCPListResult, error) {
-	if _, err := s.agentKnowledgeMCPReadContext(ctx, claims); err != nil {
+	call, err := s.agentKnowledgeMCPReadContext(ctx, claims)
+	if err != nil {
 		return AgentKnowledgeMCPListResult{}, err
 	}
 	items, err := s.ApplicableAgentKnowledge(ctx, claims)
@@ -98,6 +140,9 @@ func (s *Service) AgentKnowledgeMCPList(ctx context.Context, claims agentapi.Cla
 	entryType = strings.TrimSpace(entryType)
 	filtered := make([]AgentKnowledgeMCPListItem, 0, len(items))
 	for _, item := range items {
+		if !knowledgeMCPDomainVisible(call, item) {
+			continue
+		}
 		if entryType != "" && item.Type != entryType {
 			continue
 		}
@@ -133,7 +178,8 @@ type AgentKnowledgeMCPGetResult struct {
 }
 
 func (s *Service) AgentKnowledgeMCPGet(ctx context.Context, claims agentapi.Claims, entryID string) (AgentKnowledgeMCPGetResult, error) {
-	if _, err := s.agentKnowledgeMCPReadContext(ctx, claims); err != nil {
+	call, err := s.agentKnowledgeMCPReadContext(ctx, claims)
+	if err != nil {
 		return AgentKnowledgeMCPGetResult{}, err
 	}
 	entryID = strings.TrimSpace(entryID)
@@ -145,7 +191,7 @@ func (s *Service) AgentKnowledgeMCPGet(ctx context.Context, claims agentapi.Clai
 		return AgentKnowledgeMCPGetResult{}, err
 	}
 	for _, item := range items {
-		if item.ID != entryID {
+		if item.ID != entryID || !knowledgeMCPDomainVisible(call, item) {
 			continue
 		}
 		source := "legacy"
@@ -154,6 +200,12 @@ func (s *Service) AgentKnowledgeMCPGet(ctx context.Context, claims agentapi.Clai
 		} else if ok {
 			source = "vault"
 			item = vaultEntry
+		}
+		// The shared read set marks global entries writable for the broader
+		// Agent API. Revise is project-only here, so do not advertise a write
+		// capability this domain cannot honour.
+		if item.Scope == "global" {
+			item.CanProposeRevision = false
 		}
 		return AgentKnowledgeMCPGetResult{Source: source, Knowledge: item}, nil
 	}
@@ -181,7 +233,10 @@ func (s *Service) AgentKnowledgeMCPGuide(ctx context.Context, claims agentapi.Cl
 		return AgentKnowledgeMCPGuide{Available: false}, nil
 	}
 	if err != nil {
-		return AgentKnowledgeMCPGuide{}, err
+		// The reader wraps the open/read failure, which can contain the host
+		// vault path. Log it for operators and return a fixed sentinel.
+		log.Printf("knowledge MCP guide read failed: %v", err)
+		return AgentKnowledgeMCPGuide{}, ErrKnowledgeMCPGuideUnavailable
 	}
 	return AgentKnowledgeMCPGuide{
 		Available: true, Title: guide.Title, Content: guide.Content, Prompt: guide.Prompt,
@@ -205,9 +260,18 @@ type AgentKnowledgeMCPSkill struct {
 	Instructions string    `json:"instructions,omitempty"`
 }
 
+// agentKnowledgeMCPSkillID derives the stable, non-sensitive identifier this
+// domain exposes for a selected skill. The underlying domain ID is a vault
+// package key (vault-skill:...) that also identifies the on-disk package, so it
+// must never be returned to the model or used as a lookup credential.
+func agentKnowledgeMCPSkillID(vaultKey string) string {
+	sum := sha256.Sum256([]byte("aha2-knowledge-mcp-skill:" + vaultKey))
+	return "skill-" + hex.EncodeToString(sum[:12])
+}
+
 func agentKnowledgeMCPSkillView(item domain.Skill, withInstructions bool) AgentKnowledgeMCPSkill {
 	view := AgentKnowledgeMCPSkill{
-		ID: item.ID, Scope: item.Scope, ProjectID: item.ProjectID, Name: item.Name,
+		ID: agentKnowledgeMCPSkillID(item.ID), Scope: item.Scope, ProjectID: item.ProjectID, Name: item.Name,
 		Description: item.Description, Version: item.Version, Status: item.Status,
 		Enabled: item.Enabled, AutoAttach: item.AutoAttach, UpdatedAt: item.UpdatedAt,
 	}
@@ -242,7 +306,9 @@ func (s *Service) AgentKnowledgeMCPSkillGet(ctx context.Context, claims agentapi
 		return AgentKnowledgeMCPSkill{}, err
 	}
 	for _, item := range items {
-		if item.ID == skillID {
+		// Only the derived identifier is accepted. A client cannot use a raw
+		// vault key or path to resolve a skill it was never offered.
+		if agentKnowledgeMCPSkillID(item.ID) == skillID {
 			return agentKnowledgeMCPSkillView(item, true), nil
 		}
 	}
@@ -277,19 +343,23 @@ type AgentKnowledgeMCPWrittenEntry struct {
 }
 
 // AgentKnowledgeMCPWriteResult is the safe MCP shape of a knowledge write. It
-// omits the vault filesystem path. Source=legacy always means the returned
-// rows/proposals are pending candidates, not verified knowledge.
+// omits the vault filesystem path. Proposal is true only when a returned
+// proposal is still pending review; ReviewMode is the mode recorded on the
+// proposal, so an auto-approved write reports a verified entry and Proposal
+// false instead of hardcoding the manual outcome.
 type AgentKnowledgeMCPWriteResult struct {
-	Source    string                         `json:"source"`
-	Proposal  bool                           `json:"proposal,omitempty"`
-	Warning   string                         `json:"warning,omitempty"`
-	Entry     *AgentKnowledgeMCPWrittenEntry `json:"entry,omitempty"`
-	Knowledge []domain.KnowledgeEntry        `json:"knowledge,omitempty"`
-	Proposals []domain.KnowledgeProposal     `json:"proposals,omitempty"`
+	Source     string                         `json:"source"`
+	Proposal   bool                           `json:"proposal,omitempty"`
+	ReviewMode string                         `json:"review_mode,omitempty"`
+	Warning    string                         `json:"warning,omitempty"`
+	Entry      *AgentKnowledgeMCPWrittenEntry `json:"entry,omitempty"`
+	Knowledge  []domain.KnowledgeEntry        `json:"knowledge,omitempty"`
+	Proposals  []domain.KnowledgeProposal     `json:"proposals,omitempty"`
 }
 
 func (s *Service) SubmitAgentKnowledgeMCPEntry(ctx context.Context, claims agentapi.Claims, input AgentKnowledgeMCPSubmitInput) (AgentKnowledgeMCPWriteResult, error) {
-	if _, err := s.agentKnowledgeMCPWriteContext(ctx, claims); err != nil {
+	call, err := s.agentKnowledgeMCPWriteContext(ctx, claims)
+	if err != nil {
 		return AgentKnowledgeMCPWriteResult{}, err
 	}
 	mode := strings.ToLower(strings.TrimSpace(input.Mode))
@@ -318,7 +388,32 @@ func (s *Service) SubmitAgentKnowledgeMCPEntry(ctx context.Context, claims agent
 				Code: knowledgevault.WriteErrorValidation, Message: "revise requires entry_id and a positive base_revision",
 			}
 		}
+		items, readErr := s.ApplicableAgentKnowledge(ctx, claims)
+		if readErr != nil {
+			return AgentKnowledgeMCPWriteResult{}, readErr
+		}
+		var target *domain.KnowledgeEntry
+		for index := range items {
+			if items[index].ID == strings.TrimSpace(input.EntryID) {
+				target = &items[index]
+				break
+			}
+		}
+		if target == nil || !knowledgeMCPDomainVisible(call, *target) {
+			return AgentKnowledgeMCPWriteResult{}, ErrKnowledgeMCPEntryNotFound
+		}
+		if target.Scope != knowledgevault.WriteScopeProject || target.ProjectID != call.Project.ID {
+			// A global entry is readable, so it can be rejected explicitly
+			// without revealing any other Project's data.
+			return AgentKnowledgeMCPWriteResult{}, &knowledgevault.WriteError{
+				Code:    knowledgevault.WriteErrorForbiddenScope,
+				Message: "global knowledge is read-only; revise only entries in the current project",
+			}
+		}
 	}
+	// The domain is project-only in every mode. Passing the scope explicitly
+	// stops both write sources from inferring a broader scope from the target.
+	scope = knowledgevault.WriteScopeProject
 	result, err := s.SubmitAgentKnowledgeEntry(ctx, claims, AgentKnowledgeEntryInput{
 		Mode: mode, Scope: scope, EntryID: input.EntryID, BaseRevision: input.BaseRevision,
 		Type: input.Type, Title: input.Title, Summary: input.Summary, Body: input.Body,
@@ -329,16 +424,35 @@ func (s *Service) SubmitAgentKnowledgeMCPEntry(ctx context.Context, claims agent
 	}
 	view := AgentKnowledgeMCPWriteResult{
 		Source: result.Source, Warning: result.Warning,
-		Knowledge: result.Knowledge, Proposals: result.Proposals,
+		Knowledge: result.Knowledge,
 	}
-	if result.Source == "legacy" {
-		view.Proposal = true
+	for _, item := range result.Proposals {
+		// Project the state the database actually persisted. A concurrent review
+		// decision or auto-approval is reflected instead of assumed pending.
+		if current, readErr := s.store.KnowledgeProposal(ctx, item.ID); readErr == nil {
+			item = current
+		} else if !errors.Is(readErr, sql.ErrNoRows) {
+			log.Printf("knowledge MCP could not reload proposal %s: %v", item.ID, readErr)
+		}
+		if item.Status == domain.KnowledgeProposalPending {
+			view.Proposal = true
+		}
+		if view.ReviewMode == "" {
+			view.ReviewMode = item.ReviewMode
+		}
+		view.Proposals = append(view.Proposals, item)
 	}
 	if result.Entry != nil {
 		view.Entry = &AgentKnowledgeMCPWrittenEntry{
 			Mode: result.Entry.Mode, ID: result.Entry.ID, Scope: result.Entry.Scope,
 			Type: result.Entry.Type, Title: result.Entry.Title,
 			Revision: result.Entry.Revision, Status: result.Entry.Status,
+		}
+	} else if len(result.Knowledge) > 0 {
+		item := result.Knowledge[0]
+		view.Entry = &AgentKnowledgeMCPWrittenEntry{
+			Mode: mode, ID: item.ID, Scope: item.Scope, Type: item.Type, Title: item.Title,
+			Revision: item.Revision, Status: string(item.Status),
 		}
 	}
 	return view, nil
@@ -361,7 +475,8 @@ type AgentKnowledgeMCPFeedback struct {
 }
 
 func (s *Service) SubmitAgentKnowledgeMCPFeedback(ctx context.Context, claims agentapi.Claims, entryID, kind string) (AgentKnowledgeMCPFeedbackResult, error) {
-	if _, err := s.agentKnowledgeMCPWriteContext(ctx, claims); err != nil {
+	call, err := s.agentKnowledgeMCPWriteContext(ctx, claims)
+	if err != nil {
 		return AgentKnowledgeMCPFeedbackResult{}, err
 	}
 	entryID = strings.TrimSpace(entryID)
@@ -371,7 +486,7 @@ func (s *Service) SubmitAgentKnowledgeMCPFeedback(ctx context.Context, claims ag
 	}
 	readable := false
 	for _, item := range items {
-		if item.ID == entryID {
+		if item.ID == entryID && knowledgeMCPDomainVisible(call, item) {
 			readable = true
 			break
 		}

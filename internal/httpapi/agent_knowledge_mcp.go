@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -105,7 +106,15 @@ func (s *Server) callAgentKnowledgeMCPTool(writer http.ResponseWriter, request *
 			"jsonrpc": "2.0", "id": payload.ID, "result": result,
 		})
 	}
+	var input struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
 	toolError := func(err error) {
+		// Tool text is model-visible. Internal errors can carry host paths
+		// (guide/entry reads); operators get the detail in the server log and
+		// the model gets only the stable classification.
+		log.Printf("agent knowledge mcp tool %s failed: %v", input.Name, err)
 		code, message := knowledgeMCPErrorCode(err)
 		respond(map[string]any{
 			"isError": true,
@@ -147,10 +156,6 @@ func (s *Server) callAgentKnowledgeMCPTool(writer http.ResponseWriter, request *
 		}
 	}
 
-	var input struct {
-		Name      string          `json:"name"`
-		Arguments json.RawMessage `json:"arguments"`
-	}
 	if err := json.Unmarshal(payload.Params, &input); err != nil || strings.TrimSpace(input.Name) == "" {
 		writeJSON(writer, http.StatusOK, map[string]any{
 			"jsonrpc": "2.0", "id": payload.ID,
@@ -359,10 +364,14 @@ func knowledgeMCPErrorCode(err error) (string, string) {
 		return "knowledge_not_found", "knowledge entry is not in this Task's readable range"
 	case errors.Is(err, app.ErrKnowledgeMCPSkillNotFound):
 		return "skill_not_found", "skill is not selected on this Task"
+	case errors.Is(err, app.ErrKnowledgeMCPGuideUnavailable):
+		return "guide_unavailable", "knowledge guide is unavailable"
 	case errors.Is(err, app.ErrRevisionConflict):
 		return knowledgevault.WriteErrorRevisionConflict, "knowledge revision conflict"
 	default:
-		return "operation_failed", safeCoreToolMessage(err)
+		// A fixed copy here is deliberate: guide entry and vault file errors
+		// wrap absolute host paths, and those must only reach the server log.
+		return "operation_failed", "knowledge operation failed"
 	}
 }
 
@@ -455,7 +464,7 @@ func knowledgeMCPTools() []mcpTool {
 				"Create requires scope=project, type, title, summary, body and search_query or duplicate_ack. " +
 				"Revise requires entry_id and the fresh base_revision; a stale base is a conflict, never an " +
 				"overwrite. Global scope, publish, delete and review are not available. A legacy source result " +
-				"is a pending proposal, not verified knowledge.",
+				"reports the real review state: proposal=true only while a proposal is pending.",
 			InputSchema: object(map[string]any{
 				"mode": map[string]any{
 					"type": "string", "enum": []string{"create", "revise"},
