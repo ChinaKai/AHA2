@@ -38,8 +38,8 @@ const browserState = host => ({
   }],
   grants: [grant],
   tabs: [
-    {id: "browser_tab_1", session_id: "browser_session_1", grant_id: "browser_grant_1", task_id: "task-1", url: "https://example.com/login", title: "登录页", origin: "owner", active: true, created_at: now, updated_at: now},
-    {id: "browser_tab_2", session_id: "browser_session_1", grant_id: "browser_grant_1", task_id: "task-1", url: "https://example.com/home", title: "首页", origin: "owner", created_at: now, updated_at: now},
+    {id: "browser_tab_1", session_id: "browser_session_1", grant_id: "browser_grant_1", task_id: "task-1", url: "https://login.dingtalk.com/oauth2/auth?redirect_uri=https%3A%2F%2Fexample.com%2Fcallback&response_type=code&client_id=dingabcdefghijklmnop&scope=openid&state=1234567890abcdef", title: "登录页", origin: "owner", active: true, created_at: now, updated_at: now},
+    {id: "browser_tab_2", session_id: "browser_session_1", grant_id: "browser_grant_1", task_id: "task-1", url: "https://example.com/home", title: "首页", origin: "owner", active: true, created_at: now, updated_at: now},
   ],
   host,
 });
@@ -199,6 +199,22 @@ try {
   assert.match(await page.locator("#desktop-browser-frame-status").innerText(), /实时画面/);
   assert.equal(await page.locator("[data-browser-tab]").count(), 2);
   assert.match(await page.locator("[data-browser-tab='browser_tab_1']").innerText(), /当前/);
+  // Both host tabs are active=true (one visible page per browser window), but
+  // the panel previews exactly one page and must therefore label exactly one.
+  assert.equal(await page.locator(".desktop-browser-tab-current").count(), 1);
+  assert.deepEqual(await page.locator("[data-browser-tab]").evaluateAll(items => items.map(item => item.getAttribute("aria-pressed"))), ["true", "false"]);
+  // The compact strip shows title + host; the long OAuth URL stays in `title`.
+  const longTab = page.locator("[data-browser-tab='browser_tab_1']");
+  assert.doesNotMatch(await longTab.innerText(), /redirect_uri|\?/);
+  assert.match(await longTab.locator(".desktop-browser-tab-host").innerText(), /^login\.dingtalk\.com$/);
+  assert.match(await longTab.getAttribute("title"), /redirect_uri=/);
+  const tabHeights = await page.locator(".desktop-browser-tab-item").evaluateAll(items => items.map(item => item.getBoundingClientRect().height));
+  assert.ok(tabHeights.every(height => height < 60), `tab rows should stay compact: ${tabHeights}`);
+  assert.equal(await page.evaluate(() => {
+    const preview = document.querySelector(".desktop-browser-preview");
+    const tabs = document.querySelector("#desktop-browser-tabs");
+    return Boolean(preview.compareDocumentPosition(tabs) & Node.DOCUMENT_POSITION_FOLLOWING);
+  }), true, "the preview must come before the tab list");
 
   // Switching tab activates it in the visible browser and keeps the stream.
   await page.click("[data-browser-tab='browser_tab_2']");
@@ -210,6 +226,21 @@ try {
   await waitFor(page, () => window.__deletes.length === 1);
 
   // Bookmarks are read-only and open their URL through the normal tab API.
+  await page.waitForSelector("#desktop-browser-frame:not([hidden])");
+  await page.waitForTimeout(100);
+  const previewBeforeDrawer = await page.locator(".desktop-browser-preview").boundingBox();
+  await page.click("#desktop-browser-bookmarks-toggle");
+  await page.waitForSelector("[data-browser-bookmark]");
+  const previewAfterDrawer = await page.locator(".desktop-browser-preview").boundingBox();
+  const drawerBox = await page.locator("#desktop-browser-bookmarks").boundingBox();
+  assert.equal(previewAfterDrawer.y, previewBeforeDrawer.y, "opening bookmarks must not move the preview");
+  assert.equal(previewAfterDrawer.height, previewBeforeDrawer.height, "opening bookmarks must not resize the preview");
+  assert.ok(drawerBox.y >= previewAfterDrawer.y + previewAfterDrawer.height, "bookmarks must open below the preview");
+  assert.equal(await page.locator("#desktop-browser-bookmarks-toggle").getAttribute("aria-expanded"), "true");
+  await waitFor(page, () => document.querySelector("#desktop-browser-bookmarks").contains(document.activeElement));
+  await page.keyboard.press("Escape");
+  assert.equal(await page.locator("#desktop-browser-bookmarks").isHidden(), true);
+  assert.equal(await page.evaluate(() => document.activeElement?.id), "desktop-browser-bookmarks-toggle");
   await page.click("#desktop-browser-bookmarks-toggle");
   await page.waitForSelector("[data-browser-bookmark]");
   assert.match(await page.locator("[data-browser-bookmark]").innerText(), /Mail/);

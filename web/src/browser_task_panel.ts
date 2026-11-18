@@ -101,6 +101,25 @@ function statusText(state: PanelState, session: BrowserSession | null): string {
   return "选择 Profile 后点「获取独占控制」；获取成功后 Agent 可操作这个浏览器的全部页面。";
 }
 
+function statusTone(state: PanelState, session: BrowserSession | null): "ok" | "warning" | "error" | "muted" {
+  if (state.error || (state.host && !state.host.available)) return "error";
+  if (state.host && !state.host.edge_available) return "warning";
+  if (!state.profiles.length) return "warning";
+  if (state.grant) return session?.error || session?.host_reachable === false ? "warning" : "ok";
+  if (state.inUseProfileID && state.inUseProfileID === state.profileID) return "warning";
+  return "muted";
+}
+
+// The tab strip shows the page title and host only. A full OAuth URL would be
+// several wrapped lines wide; it stays in the button title for hover/inspection.
+function tabHost(url: string): string {
+  try {
+    return new URL(url).host || url;
+  } catch {
+    return url.replace(/^[a-z]+:\/\//i, "").split("/")[0] || url;
+  }
+}
+
 export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): () => void {
   const {container, taskID, notify, onChange} = options;
   const state: PanelState = {
@@ -158,47 +177,94 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): () => v
     const session = state.grant?.session || state.profiles.find(item => item.id === state.profileID)?.session || null;
     const selectedProfile = state.profiles.find(item => item.id === state.profileID);
     const tabs = state.tabs.length
-      ? state.tabs.map(tab => `<li class="desktop-browser-tab-item"><button type="button" class="desktop-browser-tab ${tab.id === state.selectedTabID ? "active" : ""}" data-browser-tab="${escapeHTML(tab.id)}" aria-pressed="${tab.id === state.selectedTabID}"><span>${escapeHTML(tab.title || "未命名页面")}</span><small>${tab.active ? "当前 · " : ""}${tab.origin === "owner" ? "Owner 页面 · " : ""}${escapeHTML(tab.url)}</small></button><button type="button" class="icon-button desktop-browser-tab-close" data-browser-tab-close="${escapeHTML(tab.id)}" title="关闭页面" aria-label="关闭页面">${icon("close")}</button></li>`).join("")
-      : `<li class="desktop-empty">${state.grant
-        ? "当前浏览器窗口还没有网页。可以在这里打开页面，或从收藏夹打开。"
+      ? state.tabs.map(tab => {
+        const selected = tab.id === state.selectedTabID;
+        const host = tabHost(tab.url);
+        // Only the page currently shown in the preview is "当前". The host's
+        // `active` flag means "visible in its window", and a Profile with two
+        // browser windows can legitimately report several at once, so it must
+        // never produce several "当前" labels.
+        return `<li class="desktop-browser-tab-item">
+          <button type="button" class="desktop-browser-tab ${selected ? "active" : ""}" data-browser-tab="${escapeHTML(tab.id)}" aria-pressed="${selected}" title="${escapeHTML(tab.url)}">
+            <span class="desktop-browser-tab-title">${escapeHTML(tab.title || host || "未命名页面")}</span>
+            <span class="desktop-browser-tab-meta">
+              <span class="desktop-browser-tab-host">${escapeHTML(host)}</span>
+              <span class="desktop-browser-tab-origin" title="页面来源">${tab.origin === "owner" ? "Owner" : "Agent"}</span>
+              ${selected ? '<span class="desktop-browser-tab-current">当前</span>' : ""}
+            </span>
+          </button>
+          <button type="button" class="icon-button desktop-browser-tab-close" data-browser-tab-close="${escapeHTML(tab.id)}" title="关闭页面" aria-label="关闭页面 ${escapeHTML(tab.title || host)}">${icon("close")}</button>
+        </li>`;
+      }).join("")
+      : `<li class="desktop-empty desktop-browser-tabs-empty">${state.grant
+        ? "打开页面后会显示在这里。"
         : "选择 Profile 并获取独占控制后，这里会列出浏览器当前的全部页面。"}</li>`;
     const busy = state.loading || state.binding;
     const canUseGrant = Boolean(state.grant) && state.host?.available !== false;
-    const canTransfer = Boolean(state.inUseProfileID) && state.inUseProfileID === state.profileID;
-    const bookmarks = state.bookmarksOpen
-      ? `<section id="desktop-browser-bookmarks" class="desktop-browser-bookmarks" aria-label="收藏夹">
-          <div class="desktop-browser-bookmarks-head"><strong>收藏夹</strong><button type="button" id="desktop-browser-bookmarks-close" class="icon-button" title="收起收藏夹" aria-label="收起收藏夹">${icon("close")}</button></div>
-          ${state.bookmarksLoading
-            ? '<p class="desktop-empty" role="status">正在读取收藏夹…</p>'
-            : state.bookmarks.length
-              ? `<ul>${state.bookmarks.map(bookmark => `<li><button type="button" data-browser-bookmark="${escapeHTML(bookmark.url)}"><span>${escapeHTML(bookmark.title || bookmark.url)}</span><small>${bookmark.folder ? `${escapeHTML(bookmark.folder)} · ` : ""}${escapeHTML(bookmark.url)}</small></button></li>`).join("")}</ul>`
-              : '<p class="desktop-empty">收藏夹为空或暂时读不到。</p>'}
-        </section>`
-      : "";
+    const canTransfer = !state.grant && Boolean(state.inUseProfileID) && state.inUseProfileID === state.profileID;
+    const noProfiles = !state.profiles.length;
+    const hostDown = Boolean(state.host && !state.host.available);
+    const bookmarks = `<section id="desktop-browser-bookmarks" class="desktop-browser-bookmarks" role="dialog" aria-modal="false" aria-labelledby="desktop-browser-bookmarks-title" ${state.bookmarksOpen ? "" : "hidden"}>
+        <div class="desktop-browser-bookmarks-head">
+          <strong id="desktop-browser-bookmarks-title">收藏夹</strong>
+          <button type="button" id="desktop-browser-bookmarks-close" class="icon-button" title="收起收藏夹" aria-label="收起收藏夹">${icon("close")}</button>
+        </div>
+        ${state.bookmarksLoading
+          ? '<p class="desktop-empty" role="status">正在读取收藏夹…</p>'
+          : state.bookmarks.length
+            ? `<ul>${state.bookmarks.map(bookmark => `<li><button type="button" data-browser-bookmark="${escapeHTML(bookmark.url)}" title="${escapeHTML(bookmark.url)}"><span>${escapeHTML(bookmark.title || bookmark.url)}</span><small>${bookmark.folder ? `${escapeHTML(bookmark.folder)} · ` : ""}${escapeHTML(tabHost(bookmark.url))}</small></button></li>`).join("")}</ul>`
+            : '<p class="desktop-empty">收藏夹为空或暂时读不到。</p>'}
+      </section>`;
+    // Without a Profile or a reachable host there is nothing to preview; show
+    // one deliberate empty state with its own action instead of a disabled
+    // form and a large blank panel.
+    const blocked = noProfiles || hostDown;
+    // One compact control row: the exclusive control button and the bookmark
+    // drawer toggle are mutually exclusive with the "获取独占控制" action.
+    const controlButton = state.grant
+      ? `<button type="button" id="desktop-browser-release" class="desktop-browser-control" ${busy ? "disabled" : ""}>释放控制</button>
+        ${blocked ? "" : `<button type="button" id="desktop-browser-bookmarks-toggle" class="icon-button" title="收藏夹" aria-label="收藏夹" aria-expanded="${state.bookmarksOpen}" aria-controls="desktop-browser-bookmarks" ${busy ? "disabled" : ""}>${icon("browser")}</button>`}`
+      : canTransfer
+        ? `<button type="button" id="desktop-browser-transfer" class="primary desktop-browser-control" ${busy ? "disabled" : ""}>转移控制权</button>`
+        : `<button type="button" id="desktop-browser-attach" class="primary desktop-browser-control" ${busy || noProfiles || hostDown ? "disabled" : ""}>${icon("link")}<span>获取独占控制</span></button>`;
+    const emptyState = noProfiles
+      ? `<div class="desktop-browser-empty-state" role="note">
+          ${icon("browser")}
+          <strong>创建一个浏览器 Profile</strong>
+          <p>创建后即可选择 Profile、获取独占控制并查看实时画面。</p>
+          <a class="desktop-browser-cta" href="#resources?tab=browser">前往资源页创建 Profile</a>
+        </div>`
+      : `<div class="desktop-browser-empty-state" role="note">
+          ${icon("browser")}
+          <strong>重新连接浏览器宿主</strong>
+          <p>确认 AHA2 的浏览器宿主进程正在运行，然后重新检测。</p>
+          <button type="button" id="desktop-browser-retry" class="desktop-browser-cta">重新检测浏览器宿主</button>
+        </div>`;
     container.innerHTML = `
-      <label class="desktop-window-label">浏览器 Profile<select id="desktop-browser-profile" aria-label="浏览器 Profile">${profileOptions(state.profiles, state.profileID)}</select></label>
-      <div class="desktop-target-actions">
+      <div class="desktop-browser-toolbar" role="group" aria-label="内置浏览器控制">
+        <label class="desktop-window-label desktop-browser-profile-label"><span>Profile</span><select id="desktop-browser-profile" aria-label="浏览器 Profile">${profileOptions(state.profiles, state.profileID)}</select></label>
         <button type="button" id="desktop-browser-refresh" class="icon-button" title="刷新浏览器状态" aria-label="刷新浏览器状态" ${busy ? "disabled" : ""}>${icon("refresh")}</button>
-        <button type="button" id="desktop-browser-attach" class="primary" ${busy || !state.profiles.length ? "disabled" : ""}>${icon("link")}<span>获取独占控制</span></button>
-        ${state.grant ? `<button type="button" id="desktop-browser-release" ${busy ? "disabled" : ""}>释放控制</button>
-        <button type="button" id="desktop-browser-bookmarks-toggle" ${busy ? "disabled" : ""}>${icon("browser")}<span>收藏夹</span></button>` : ""}
-        ${canTransfer ? `<button type="button" id="desktop-browser-transfer" class="primary" ${busy ? "disabled" : ""}>由 Owner 转移控制权</button>` : ""}
+        ${controlButton}
       </div>
-      <p id="desktop-browser-status" class="desktop-empty" role="status">${escapeHTML(statusText(state, session))}</p>
+      <p id="desktop-browser-status" class="desktop-browser-status" data-tone="${statusTone(state, session)}" role="status">${escapeHTML(statusText(state, session))}</p>
+      ${blocked ? emptyState : `
       <form id="desktop-browser-open-form" class="desktop-browser-open">
         <input id="desktop-browser-url" type="url" inputmode="url" placeholder="https://example.com" aria-label="要打开的网址" value="${escapeHTML(state.urlDraft)}" ${busy || !canUseGrant ? "disabled" : ""}>
         <button type="submit" ${busy || !canUseGrant ? "disabled" : ""}>打开页面</button>
       </form>
-      ${bookmarks}
-      <ul id="desktop-browser-tabs" class="desktop-browser-tabs" aria-label="浏览器页面">${tabs}</ul>
       <figure class="desktop-browser-preview">
         <img id="desktop-browser-frame" alt="内置浏览器只读画面" draggable="false" hidden>
         <p id="desktop-browser-frame-status" class="desktop-empty" role="status">${escapeHTML(frameStatusText())}</p>
-      </figure>`;
+      </figure>
+      <ul id="desktop-browser-tabs" class="desktop-browser-tabs" aria-label="浏览器页面">${tabs}</ul>
+      <div class="desktop-browser-bookmarks-anchor">${bookmarks}</div>`}`;
     container.querySelector("#desktop-browser-profile")?.addEventListener("change", event => {
       state.profileID = (event.target as HTMLSelectElement).value;
     });
     container.querySelector("#desktop-browser-refresh")?.addEventListener("click", () => {
+      if (!state.loading) void reload();
+    });
+    container.querySelector("#desktop-browser-retry")?.addEventListener("click", () => {
       if (!state.loading) void reload();
     });
     container.querySelector("#desktop-browser-attach")?.addEventListener("click", () => {
@@ -211,8 +277,7 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): () => v
       if (!state.binding) void toggleBookmarks();
     });
     container.querySelector("#desktop-browser-bookmarks-close")?.addEventListener("click", () => {
-      state.bookmarksOpen = false;
-      paint();
+      closeBookmarks();
     });
     container.querySelector("#desktop-browser-transfer")?.addEventListener("click", () => {
       if (!state.binding) void transferControl();
@@ -503,17 +568,32 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): () => v
     startStream();
   };
 
+  const focusBookmarks = (): void => {
+    const target = container.querySelector<HTMLElement>("#desktop-browser-bookmarks [data-browser-bookmark]")
+      || container.querySelector<HTMLElement>("#desktop-browser-bookmarks-close");
+    // Focusing must not scroll the popover: that would move the preview out
+    // from under the Owner's cursor when the drawer opens.
+    target?.focus({preventScroll: true});
+  };
+
+  const closeBookmarks = (): void => {
+    if (!state.bookmarksOpen) return;
+    state.bookmarksOpen = false;
+    paint();
+    container.querySelector<HTMLElement>("#desktop-browser-bookmarks-toggle")?.focus();
+  };
+
   const toggleBookmarks = async (): Promise<void> => {
     if (!state.grant) return;
     if (state.bookmarksOpen) {
-      state.bookmarksOpen = false;
-      paint();
+      closeBookmarks();
       return;
     }
     state.bookmarksOpen = true;
     state.bookmarksLoading = true;
     state.error = "";
     paint();
+    focusBookmarks();
     try {
       const result = await api.taskBrowserBookmarks(state.grant.id);
       state.bookmarks = result.bookmarks || [];
@@ -526,6 +606,7 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): () => v
       state.bookmarksLoading = false;
     }
     paint();
+    if (state.bookmarksOpen) focusBookmarks();
   };
 
   const attach = async (): Promise<void> => {
@@ -578,13 +659,23 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): () => v
     }
   };
 
+  // The bookmark drawer is non-modal, so Escape is scoped to the panel and
+  // returns focus to the toolbar toggle.
+  const onKeydown = (event: KeyboardEvent): void => {
+    if (event.key !== "Escape" || !state.bookmarksOpen) return;
+    event.stopPropagation();
+    closeBookmarks();
+  };
+
   paint();
   void load();
   document.addEventListener("visibilitychange", onVisibility);
+  container.addEventListener("keydown", onKeydown);
 
   return () => {
     disposed = true;
     document.removeEventListener("visibilitychange", onVisibility);
+    container.removeEventListener("keydown", onKeydown);
     stopStream();
   };
 }

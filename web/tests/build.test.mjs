@@ -3815,7 +3815,10 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   // its branch measured 266,804, ceiling 267,264. The merged first-screen
   // payload measured 266,948 bytes; the ceiling is the next 256-byte boundary,
   // keeping the task-580 and task-579 changes under one shared budget.
-  const FIRST_SCREEN_GZIP_BUDGET = 267008;
+  // task-589 reworked the browser panel's stylesheet rules (preview-first
+  // layout, compact horizontal tab strip, bookmark drawer, empty states);
+  // measured 267,624, ceiling is the next 256-byte boundary.
+  const FIRST_SCREEN_GZIP_BUDGET = 267776;
   // The version query parameter is a content hash and its hex digits change
   // how the same code gzips: main already sits exactly on the budget, so a
   // hash-only change could trip it without growing the payload. Mask the
