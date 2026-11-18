@@ -19,6 +19,25 @@ fi
 archive="$1"
 member="$2"
 [[ -f "$archive" ]] || { printf 'Archive not found: %s\n' "$archive" >&2; exit 1; }
+
+# unzip and tar parse a leading '-' as an option, so a relative archive such
+# as --archive.zip would make unzip print its help text with status 0 and the
+# non-empty check below would accept it. Resolve the archive to an absolute
+# path with shell builtins before any tool sees it; '--' is not portable here
+# and does not make unzip treat the next argument as a file.
+archive_dir="${archive%/*}"
+if [[ "$archive" != */* ]]; then
+  archive_dir="."
+elif [[ -z "$archive_dir" ]]; then
+  archive_dir="/"
+fi
+if ! archive_dir_abs="$(cd -- "$archive_dir" && pwd -P)"; then
+  printf 'Cannot resolve archive directory: %s\n' "$archive_dir" >&2
+  exit 1
+fi
+archive_name="${archive##*/}"
+archive="$archive_dir_abs/$archive_name"
+
 command -v mktemp >/dev/null 2>&1 || { printf 'mktemp is required to extract %s.\n' "$archive" >&2; exit 1; }
 command -v cat >/dev/null 2>&1 || { printf 'cat is required to extract %s.\n' "$archive" >&2; exit 1; }
 

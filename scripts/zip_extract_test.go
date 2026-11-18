@@ -1,6 +1,8 @@
 package scripts
 
 import (
+	"archive/zip"
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -92,6 +94,71 @@ func TestExtractZipMemberFailsClearlyWithoutZipTool(t *testing.T) {
 	}
 }
 
+// TestExtractZipMemberHandlesDashAndSpecialArchivePaths covers the review
+// finding that a relative archive named --archive.zip was passed to unzip as
+// an option: unzip printed its help text with status 0, and the non-empty
+// check accepted it. Every case asserts the exact member bytes, not just the
+// exit status or a non-empty output.
+func TestExtractZipMemberHandlesDashAndSpecialArchivePaths(t *testing.T) {
+	bash := requireZipExtractorTools(t)
+	root := repoRoot(t)
+	dir := t.TempDir()
+	base := makeZipToolBase(t, dir)
+	unzipBin, err := exec.LookPath("unzip")
+	if err != nil {
+		t.Skip("unzip is not available")
+	}
+	zipTools := filepath.Join(dir, "zip")
+	if err := os.MkdirAll(zipTools, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(unzipBin, filepath.Join(zipTools, "unzip")); err != nil {
+		t.Fatal(err)
+	}
+	tmpDir := filepath.Join(dir, "tmp")
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name    string
+		archive string
+		member  string
+		content []byte
+	}{
+		{"dash-prefixed", "--archive.zip", "dir/member.txt", []byte{0x00, 'A', '\n', 0xff}},
+		{"space", "archive with space.zip", "dir/member.txt", []byte("space path\n")},
+		{"single-quote", "archive'quote.zip", "dir/member.txt", []byte("quote path\n")},
+		{"dash-prefixed-in-subdir", "sub dir/--archive.zip", "dir/member.txt", []byte("subdir dash\n")},
+		{"absolute", filepath.Join(dir, "absolute.zip"), "dir/member.txt", []byte("absolute path\n")},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			work := t.TempDir()
+			archive := tc.archive
+			if !filepath.IsAbs(archive) {
+				archive = filepath.Join(work, archive)
+			}
+			writeZipMember(t, archive, tc.member, tc.content)
+
+			cmd := exec.Command(bash, filepath.Join(root, "scripts", "extract-zip-member.sh"), tc.archive, tc.member)
+			cmd.Dir = work
+			cmd.Env = zipExtractorEnv(tmpDir, zipTools, base)
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("extractor failed for archive %q: %v\nstderr: %s", tc.archive, err, stderr.String())
+			}
+			if !bytes.Equal(stdout.Bytes(), tc.content) {
+				t.Fatalf("extracted bytes for %q = %q (len %d), want %q (len %d)",
+					tc.archive, stdout.Bytes(), stdout.Len(), tc.content, len(tc.content))
+			}
+		})
+	}
+}
+
 func requireZipExtractorTools(t *testing.T) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -128,6 +195,31 @@ func zipExtractorEnv(tmpDir string, pathDirs ...string) []string {
 	return []string{
 		"PATH=" + strings.Join(pathDirs, string(os.PathListSeparator)),
 		"TMPDIR=" + tmpDir,
+	}
+}
+
+func writeZipMember(t *testing.T, path, member string, content []byte) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := zip.NewWriter(file)
+	entry, err := writer.Create(member)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := entry.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
