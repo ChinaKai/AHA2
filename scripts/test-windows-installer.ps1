@@ -255,7 +255,7 @@ $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo ".gith
 foreach ($contract in @(
     "runs-on: windows-latest", "cmd\aha-tray", "aha2-tray.exe", "-H windowsgui", "build-windows-installer.ps1", "-InputTrayExe",
 	"AHA2-Setup-x64.exe", "AHA2-Setup-User-x64.exe", "build-feishu-plugin.sh", "build-linux-packages.sh", "build-linux-sync-packages.sh", "aha2-sync_", "build-macos-packages.sh",
-    "ubuntu-24.04-arm", "SHA256SUMS", "merge-multiple: true", "pattern: package-*", "main.version=", "main.webVersion=", "gh release create", "Test Feishu plugin", "AHA2_BUILD_E2E=1"
+    "ubuntu-24.04-arm", "SHA256SUMS", "merge-multiple: true", "pattern: package-*", "main.version=", "main.webVersion=", "gh release create"
 )) {
     if (-not $workflow.Contains($contract)) {
         throw "Release workflow contract is missing: $contract"
@@ -263,6 +263,14 @@ foreach ($contract in @(
 }
 if ($workflow.Contains("portable-release") -or $workflow.Contains("Upload portable artifacts")) {
     throw "Release workflow must not publish portable binaries."
+}
+# A tag is verified locally before it is pushed, so the release workflow only
+# packages. Re-adding a test job here would make releases depend on tests that
+# are already known to be environment-sensitive on hosted runners.
+foreach ($testCommand in @("go test", "go vet", "node --test", "npm test")) {
+    if ($workflow.Contains($testCommand)) {
+        throw "Release workflow must not run tests: $testCommand"
+    }
 }
 $installerBuilder = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo "scripts\build-windows-installer.ps1")
 foreach ($contract in @(

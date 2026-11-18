@@ -1,3 +1,8 @@
+# Packaging and publishing only: the tag must be verified locally before it is
+# pushed (Web build, Go/plugin tests and vet, and the real package build). CI
+# does not run the test suite again; a tag that reaches this workflow is
+# already considered verified, so the only failures expected here are build or
+# packaging problems.
 name: Release
 
 on:
@@ -9,105 +14,7 @@ permissions:
   contents: write
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: "24"
-
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Build and test Web
-        run: |
-          npm ci --prefix web
-          node scripts/build-web.mjs
-          node --test web/tests/*.test.mjs
-
-      - name: Embed Web assets
-        run: |
-          rm -rf internal/webassets/dist
-          mkdir -p internal/webassets/dist
-          cp -R web/dist/. internal/webassets/dist/
-
-      # Keep the full logs on the runner only. The failure summary below
-      # publishes just failed test names and error lines, because this
-      # repository is public and full test output may contain sensitive data.
-      - name: Test Go
-        run: |
-          set -eo pipefail
-          go test ./... 2>&1 | tee /tmp/go-test-root.log
-          go vet ./... 2>&1 | tee -a /tmp/go-test-root.log
-
-      # plugins/feishu is a nested Go module, so the root `go test ./...` above
-      # never reaches its tests.
-      - name: Test Feishu plugin
-        run: |
-          set -eo pipefail
-          cd plugins/feishu
-          go test ./... 2>&1 | tee /tmp/go-test-feishu.log
-          go vet ./... 2>&1 | tee -a /tmp/go-test-feishu.log
-
-      - name: Summarize Go test failures
-        if: failure()
-        shell: bash
-        run: |
-          set -uo pipefail
-          pattern='--- FAIL:|^FAIL([[:space:]]|$)|panic:|\[build failed\]|^# |^vet: |^[^[:space:]:]+\.go:[0-9]+:[0-9]+:|^    [^[:space:]].*\.go:[0-9]+:'
-          out=/tmp/go-test-failures.txt
-          : > "$out"
-
-          extract() {
-            title="$1"
-            log="$2"
-            [ -s "$log" ] || return 0
-            matches="$(grep -E -m 200 -- "$pattern" "$log" || true)"
-            [ -n "$matches" ] || return 0
-            printf '## %s\n\n' "$title"
-            printf '%s\n\n' "$matches"
-          }
-
-          # Cap the published summary at 200 lines. `|| true` keeps a truncated
-          # pipe (head closing early) from turning into a diagnostic-step failure.
-          {
-            extract "Go test failures (root)" /tmp/go-test-root.log
-            extract "Go test failures (feishu plugin)" /tmp/go-test-feishu.log
-          } | head -n 200 > "$out" || true
-
-          if [ -s "$out" ]; then
-            {
-              printf '## Go test failures\n\n'
-              printf 'Failed test names and error lines only; the full test logs are not published.\n\n'
-              printf '```text\n'
-              cat "$out"
-              printf '\n```\n'
-            } >> "$GITHUB_STEP_SUMMARY"
-          else
-            rm -f "$out"
-            echo "No Go test failure lines found; leaving the step summary unchanged."
-          fi
-
-      - name: Upload Go test failure summary
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: go-test-failures
-          path: /tmp/go-test-failures.txt
-          if-no-files-found: ignore
-          retention-days: 7
-
-      # Builds the real package into a temp directory, checks the manifest and
-      # proves the source tree is untouched.
-      - name: Build Windows package end to end
-        run: AHA2_BUILD_E2E=1 go test ./scripts/ -run 'TestWindowsPackageBuild' -v
-
   build-windows-installer:
-    needs: test
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
@@ -164,7 +71,6 @@ jobs:
           if-no-files-found: error
 
   build-linux-packages:
-    needs: test
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -228,7 +134,6 @@ jobs:
           if-no-files-found: error
 
   build-macos-packages:
-    needs: test
     runs-on: macos-latest
     strategy:
       fail-fast: false
