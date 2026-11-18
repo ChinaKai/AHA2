@@ -44,17 +44,27 @@ export function createDownloadStore(root, profileID, sessionID, options = {}) {
     ? options.maxTotalBytes : MAX_DOWNLOAD_TOTAL_BYTES;
   const ttlMs = Number.isInteger(options.ttlMs) && options.ttlMs > 0
     ? options.ttlMs : DOWNLOAD_TTL_MS;
+  const rawDir = typeof options.rawDir === "string" && options.rawDir ? options.rawDir : "";
+  const rawPollMs = Number.isInteger(options.rawPollMs) && options.rawPollMs > 0
+    ? options.rawPollMs : 100;
   const directory = join(root, ".downloads", profileID, sessionID);
   const entries = new Map();
   const inFlight = new Set();
   let totalBytes = 0;
   let pendingBytes = 0;
+  let rejected = 0;
+  let failed = 0;
+  let rawMaxBytes = 0;
+  let rawTotalBytes = 0;
+  let rawFiles = 0;
+  let rawCancels = 0;
   let ready = false;
   let closed = false;
 
   const ensure = async () => {
     if (ready) return;
     await fs.mkdir(directory, {recursive: true, mode: 0o700});
+    if (rawDir) await fs.mkdir(rawDir, {recursive: true, mode: 0o700});
     ready = true;
   };
 
@@ -101,7 +111,10 @@ export function createDownloadStore(root, profileID, sessionID, options = {}) {
       const oldest = [...entries.values()]
         .filter(entry => entry.state !== "saving")
         .sort((left, right) => left.createdAt - right.createdAt)[0];
-      if (!oldest) return null;
+      if (!oldest) {
+        rejected += 1;
+        return null;
+      }
       entries.delete(oldest.id);
       if (oldest.state === "ready" && oldest.size > 0) {
         totalBytes = Math.max(0, totalBytes - oldest.size);
@@ -125,6 +138,50 @@ export function createDownloadStore(root, profileID, sessionID, options = {}) {
     return {entry, evicted};
   };
 
+  // createReadStream() only resolves after Chromium finished writing its raw
+  // artifact, so a stream-only limit is too late: a 30 MiB response would
+  // already sit on disk. Poll the controlled downloadsPath while a download is
+  // active and cancel every in-flight transfer as soon as one raw artifact (or
+  // the raw total) crosses the declared budget.
+  const checkRaw = async () => {
+    if (!rawDir) return;
+    let names = [];
+    try {
+      names = await fs.readdir(rawDir);
+    } catch {
+      return;
+    }
+    let maximum = 0;
+    let total = 0;
+    let files = 0;
+    for (const name of names) {
+      const stat = await fs.stat(join(rawDir, name)).catch(() => null);
+      if (!stat || !stat.isFile()) continue;
+      files += 1;
+      total += stat.size;
+      if (stat.size > maximum) maximum = stat.size;
+    }
+    rawFiles = files;
+    rawTotalBytes = total;
+    if (maximum > rawMaxBytes) rawMaxBytes = maximum;
+    if (inFlight.size === 0) return;
+    if (maximum > maxBytes || total > maxTotalBytes) {
+      rawCancels += 1;
+      for (const download of [...inFlight]) {
+        try {
+          await download.cancel?.();
+        } catch {
+          // A finished download cannot be canceled; its capture decides.
+        }
+      }
+    }
+  };
+
+  const rawTimer = rawDir
+    ? setInterval(() => { void checkRaw().catch(() => {}); }, rawPollMs)
+    : null;
+  rawTimer?.unref?.();
+
   const publish = async (download, fence) => {
     if (closed) {
       await discard(download);
@@ -142,6 +199,7 @@ export function createDownloadStore(root, profileID, sessionID, options = {}) {
     inFlight.add(download);
     let stream = null;
     let written = 0;
+    let charged = 0;
     try {
       await ensure();
       stream = await download.createReadStream();
@@ -158,6 +216,7 @@ export function createDownloadStore(root, profileID, sessionID, options = {}) {
             throw downloadFailure("download budget is exhausted", "browser_download_too_large");
           }
           pendingBytes += buffer.length;
+          charged += buffer.length;
           await handle.write(buffer);
         }
       } finally {
@@ -168,13 +227,17 @@ export function createDownloadStore(root, profileID, sessionID, options = {}) {
       totalBytes += written;
       return entry;
     } catch (error) {
+      failed += 1;
       entry.state = "failed";
       entries.delete(entry.id);
       await fs.rm(entry.path, {force: true}).catch(() => {});
       await discard(download);
       throw error;
     } finally {
-      pendingBytes = Math.max(0, pendingBytes - written);
+      // Release only the bytes this download actually reserved. A chunk that
+      // failed the per-file or cumulative check never entered the budget and
+      // must not be subtracted (that would over-release budget for peers).
+      pendingBytes = Math.max(0, pendingBytes - charged);
       inFlight.delete(download);
       delete entry.download;
       // Playwright keeps the raw browser artifact until it is deleted. Always
@@ -194,7 +257,7 @@ export function createDownloadStore(root, profileID, sessionID, options = {}) {
   }, Math.max(50, Math.min(60_000, ttlMs)));
   maintenance.unref?.();
 
-  const clearAll = async () => {
+  const clearAll = async (keepRawDirectory = true) => {
     const pending = [...entries.values()];
     entries.clear();
     totalBytes = 0;
@@ -206,7 +269,14 @@ export function createDownloadStore(root, profileID, sessionID, options = {}) {
     for (const download of [...inFlight]) await discard(download);
     inFlight.clear();
     ready = false;
+    rawFiles = 0;
+    rawTotalBytes = 0;
     await fs.rm(directory, {recursive: true, force: true}).catch(() => {});
+    // Chromium keeps writing future downloads to the same downloadsPath; keep
+    // the controlled directory present after a release-time clear.
+    if (rawDir && keepRawDirectory) {
+      await fs.mkdir(rawDir, {recursive: true, mode: 0o700}).catch(() => {});
+    }
   };
 
   return {
@@ -219,7 +289,10 @@ export function createDownloadStore(root, profileID, sessionID, options = {}) {
     // Diagnostics for tests and the opt-in real-browser regression harness.
     // Contains counts only; no file name, fence or path.
     stats() {
-      return {entries: entries.size, inFlight: inFlight.size, totalBytes, pendingBytes};
+      return {
+        entries: entries.size, inFlight: inFlight.size, totalBytes, pendingBytes,
+        rejected, failed, rawMaxBytes, rawTotalBytes, rawFiles, rawCancels,
+      };
     },
 
     async list(fence = "") {
@@ -251,14 +324,15 @@ export function createDownloadStore(root, profileID, sessionID, options = {}) {
     // Release path: drop this holder's artifacts but keep the store usable for
     // a later lease on the same browser session.
     async clear() {
-      await clearAll();
+      await clearAll(true);
     },
 
     // Session close: cancel timers and pending downloads permanently.
     async close() {
       closed = true;
       clearInterval(maintenance);
-      await clearAll();
+      if (rawTimer) clearInterval(rawTimer);
+      await clearAll(false);
     },
   };
 }

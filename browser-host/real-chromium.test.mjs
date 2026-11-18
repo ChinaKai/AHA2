@@ -50,6 +50,43 @@ function localServer() {
       request.on("close", () => clearInterval(timer));
       return;
     }
+    if (path === "/blank") {
+      response.writeHead(200, {"Content-Type": "text/html; charset=utf-8"});
+      response.end("<!doctype html><html><body></body></html>");
+      return;
+    }
+    if (path === "/huge") {
+      response.writeHead(200, {
+        "Content-Type": "application/octet-stream",
+        "Content-Disposition": 'attachment; filename="huge.bin"',
+      });
+      let sent = 0;
+      const timer = setInterval(() => {
+        if (response.destroyed || sent >= 40 * 1024 * 1024) {
+          clearInterval(timer);
+          if (!response.destroyed) response.end();
+          return;
+        }
+        response.write(Buffer.alloc(64 * 1024, 0x63));
+        sent += 64 * 1024;
+      }, 10);
+      request.on("close", () => clearInterval(timer));
+      return;
+    }
+    if (path.startsWith("/size/")) {
+      const megabytes = Number(path.slice(6));
+      if (!Number.isInteger(megabytes) || megabytes < 1 || megabytes > 20) {
+        response.writeHead(400, {"Content-Type": "text/plain"});
+        response.end("invalid size");
+        return;
+      }
+      response.writeHead(200, {
+        "Content-Type": "application/octet-stream",
+        "Content-Disposition": `attachment; filename="size-${megabytes}.bin"`,
+      });
+      response.end(Buffer.alloc(megabytes * 1024 * 1024, 0x64));
+      return;
+    }
     if (path === "/upload") {
       response.writeHead(200, {"Content-Type": "text/html; charset=utf-8"});
       response.end(`<!doctype html><html><body>
@@ -62,13 +99,6 @@ function localServer() {
     if (path === "/two") {
       response.writeHead(200, {"Content-Type": "text/html; charset=utf-8"});
       response.end("<!doctype html><html><body><input id=\"alpha\"><input id=\"beta\"></body></html>");
-      return;
-    }
-    if (path === "/slow-links") {
-      const links = Array.from({length: 25}, (_, index) =>
-        `<a id="s${index + 1}" href="/slow" download>s${index + 1}</a>`).join("");
-      response.writeHead(200, {"Content-Type": "text/html; charset=utf-8"});
-      response.end(`<!doctype html><html><body>${links}</body></html>`);
       return;
     }
     if (path === "/slow-page") {
@@ -133,6 +163,38 @@ async function openTab(host, url, fence = "") {
 
 function pageFor(host, tabID) {
   return host.host.state.get(PROFILE).tabs.get(tabID).page;
+}
+
+function downloadStats(host) {
+  return host.host.state.get(PROFILE).downloads.stats();
+}
+
+async function waitFor(predicate, timeoutMs = 5000, label = "condition") {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await predicate()) return;
+    await sleep(25);
+  }
+  throw new Error(`timed out waiting for ${label}`);
+}
+
+async function slowServer() {
+  const server = createServer((request, response) => {
+    response.writeHead(200, {
+      "Content-Type": "application/octet-stream",
+      "Content-Disposition": 'attachment; filename="slow.bin"',
+    });
+    const timer = setInterval(() => {
+      if (response.destroyed) {
+        clearInterval(timer);
+        return;
+      }
+      response.write(Buffer.alloc(64 * 1024, 0x62));
+    }, 50);
+    request.on("close", () => clearInterval(timer));
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  return server;
 }
 
 test("real chromium: disabled upload target fails cleanly and host stays alive", {
@@ -252,7 +314,8 @@ test("real chromium: download count, artifact deletion and clear", {
     const cleared = await host.call("DELETE", `/v1/profiles/${PROFILE}/downloads`);
     assert.equal(cleared.status, 200);
     const afterClear = await readdir(directory).catch(() => []);
-    assert.deepEqual(afterClear, []);
+    assert.deepEqual(afterClear.filter(name => name !== "raw"), []);
+    assert.deepEqual(await readdir(join(directory, "raw")).catch(() => []), []);
     assert.equal((await host.call("GET", `/v1/profiles/${PROFILE}/tabs`)).status, 200);
     assert.equal((await host.call("GET", "/v1/health")).status, 200);
   } finally {
@@ -260,29 +323,129 @@ test("real chromium: download count, artifact deletion and clear", {
   }
 });
 
-test("real chromium: in-flight downloads never exceed the declared count", {
+test("real chromium: raw artifact is canceled while the response is still streaming", {
   skip: !enabled, timeout: 40_000,
 }, async () => {
-  const host = await startRealHost({downloadOptions: {maxFiles: 20}});
+  const host = await startRealHost({
+    downloadOptions: {maxBytes: 10 * 1024 * 1024, maxTotalBytes: 50 * 1024 * 1024, rawPollMs: 50},
+  });
   try {
-    const tabID = await openTab(host, `${host.origin}/slow-links`);
+    const tabID = await openTab(host, `${host.origin}/blank`);
     const page = pageFor(host, tabID);
-    for (let index = 1; index <= 25; index++) {
-      await page.click(`#s${index}`);
-    }
-    await sleep(700);
-    const session = host.host.state.get(PROFILE);
-    const stats = session.downloads.stats();
-    assert.ok(stats.inFlight <= 20, `in-flight downloads exceeded 20: ${JSON.stringify(stats)}`);
-    assert.ok(stats.entries <= 20, `download entries exceeded 20: ${JSON.stringify(stats)}`);
-    const cleared = await host.call("DELETE", `/v1/profiles/${PROFILE}/downloads`);
-    assert.equal(cleared.status, 200);
-    const after = session.downloads.stats();
-    assert.equal(after.entries, 0);
-    assert.equal(after.inFlight, 0);
+    await page.evaluate(() => {
+      const anchor = document.createElement("a");
+      anchor.id = "huge";
+      anchor.href = "/huge";
+      anchor.download = "huge.bin";
+      anchor.textContent = "huge";
+      document.body.appendChild(anchor);
+    });
+    await page.click("#huge");
+    await waitFor(() => downloadStats(host).rawCancels > 0 && downloadStats(host).inFlight === 0,
+      10_000, "raw limit cancel");
+    const stats = downloadStats(host);
+    console.log("raw-cap stats:", JSON.stringify(stats));
+    assert.ok(stats.failed >= 1, JSON.stringify(stats));
+    assert.ok(stats.rawMaxBytes > 0, "raw growth was not observed");
+    assert.ok(stats.rawMaxBytes <= 14 * 1024 * 1024,
+      `raw artifact exceeded the polling allowance: ${JSON.stringify(stats)}`);
+    assert.equal(stats.entries, 0);
+    assert.equal(stats.totalBytes, 0);
+    await waitFor(() => downloadStats(host).rawFiles === 0, 3_000, "raw artifact cleanup");
     assert.equal((await host.call("GET", "/v1/health")).status, 200);
   } finally {
     await host.close();
+  }
+});
+
+test("real chromium: a rejected download does not over-release the shared budget", {
+  skip: !enabled, timeout: 40_000,
+}, async () => {
+  const host = await startRealHost({
+    downloadOptions: {maxBytes: 10 * 1024 * 1024, maxTotalBytes: 5 * 1024 * 1024, rawPollMs: 50},
+  });
+  try {
+    const tabID = await openTab(host, `${host.origin}/blank`);
+    const page = pageFor(host, tabID);
+    await page.evaluate(() => {
+      for (const [id, href] of [["ok3", "/size/3"], ["huge", "/huge"], ["ok3b", "/size/3"], ["ok1", "/size/1"]]) {
+        const anchor = document.createElement("a");
+        anchor.id = id;
+        anchor.href = href;
+        anchor.download = `${id}.bin`;
+        anchor.textContent = id;
+        document.body.appendChild(anchor);
+      }
+    });
+    await page.click("#ok3");
+    await waitFor(() => downloadStats(host).totalBytes === 3 * 1024 * 1024, 5_000, "3 MiB retained");
+
+    await page.click("#huge");
+    await waitFor(() => downloadStats(host).rawCancels > 0 && downloadStats(host).inFlight === 0,
+      10_000, "huge download failure");
+    await waitFor(() => downloadStats(host).pendingBytes === 0, 3_000, "budget release");
+
+    // 3 MiB retained + 3 MiB must still exceed the 5 MiB shared budget. If the
+    // failed huge download over-released its rejected chunk, this would pass.
+    await page.click("#ok3b");
+    await waitFor(() => downloadStats(host).failed === 2 && downloadStats(host).inFlight === 0,
+      5_000, "second over-budget rejection");
+    assert.equal(downloadStats(host).totalBytes, 3 * 1024 * 1024, JSON.stringify(downloadStats(host)));
+
+    await page.click("#ok1");
+    await waitFor(() => downloadStats(host).totalBytes === 4 * 1024 * 1024, 5_000, "1 MiB retained");
+    const listed = (await host.call("GET", `/v1/profiles/${PROFILE}/downloads`)).body.downloads;
+    const retained = listed.reduce((sum, item) => sum + item.size, 0);
+    console.log("budget stats:", JSON.stringify(downloadStats(host)), "retained:", retained);
+    assert.equal(retained, 4 * 1024 * 1024, JSON.stringify(listed));
+    assert.ok(downloadStats(host).totalBytes <= 5 * 1024 * 1024, JSON.stringify(downloadStats(host)));
+    assert.equal(downloadStats(host).pendingBytes, 0);
+    const cleared = await host.call("DELETE", `/v1/profiles/${PROFILE}/downloads`);
+    assert.equal(cleared.status, 200);
+    assert.equal((await host.call("GET", "/v1/health")).status, 200);
+  } finally {
+    await host.close();
+  }
+});
+
+test("real chromium: 25 concurrent downloads reject the five beyond the declared count", {
+  skip: !enabled, timeout: 60_000,
+}, async () => {
+  const slowServers = [];
+  for (let index = 0; index < 25; index++) slowServers.push(await slowServer());
+  const host = await startRealHost({
+    downloadOptions: {maxFiles: 20, maxBytes: 10 * 1024 * 1024, maxTotalBytes: 50 * 1024 * 1024, rawPollMs: 50},
+  });
+  try {
+    const tabID = await openTab(host, `${host.origin}/blank`);
+    const page = pageFor(host, tabID);
+    const ports = slowServers.map(server => server.address().port);
+    await page.evaluate(ports => {
+      document.body.innerHTML = ports.map((port, index) =>
+        `<a id="s${index}" href="http://127.0.0.1:${port}/slow" download>s${index}</a>`).join("");
+    }, ports);
+    for (let index = 0; index < 25; index++) await page.click(`#s${index}`);
+    await waitFor(() => downloadStats(host).rejected >= 5, 8_000, "five count rejections");
+    await sleep(300);
+    const stats = downloadStats(host);
+    console.log("count stats:", JSON.stringify(stats));
+    assert.ok(stats.inFlight <= 20, JSON.stringify(stats));
+    assert.ok(stats.entries <= 20, JSON.stringify(stats));
+    assert.ok(stats.rejected >= 5, JSON.stringify(stats));
+    assert.ok(stats.entries + stats.rejected >= 25,
+      `not every download was accounted for: ${JSON.stringify(stats)}`);
+    assert.ok(stats.rawFiles <= 20, `raw artifacts exceeded the accepted count: ${JSON.stringify(stats)}`);
+    const cleared = await host.call("DELETE", `/v1/profiles/${PROFILE}/downloads`);
+    assert.equal(cleared.status, 200);
+    await waitFor(() => downloadStats(host).entries === 0 && downloadStats(host).inFlight === 0,
+      5_000, "clear");
+    assert.equal((await host.call("GET", "/v1/health")).status, 200);
+  } finally {
+    await host.close();
+    for (const server of slowServers) {
+      server.closeAllConnections?.();
+      await new Promise(resolve => server.close(resolve));
+    }
   }
 });
 
@@ -307,7 +470,8 @@ test("real chromium: download TTL timer removes entries without a read", {
     const expired = await host.call("GET", `/v1/profiles/${PROFILE}/downloads`);
     assert.deepEqual(expired.body.downloads, []);
     const remaining = await readdir(directory).catch(() => []);
-    assert.deepEqual(remaining, []);
+    assert.deepEqual(remaining.filter(name => name !== "raw"), []);
+    assert.deepEqual(await readdir(join(directory, "raw")).catch(() => []), []);
     assert.equal((await host.call("GET", "/v1/health")).status, 200);
   } finally {
     await host.close();

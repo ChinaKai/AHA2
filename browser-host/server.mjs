@@ -640,23 +640,30 @@ export function createHostServer(options) {
           return json(response, 409, fail(409, code,
             "该 Profile 的用户数据目录已被另一个浏览器进程占用").body);
         }
+        const sessionID = `host-session-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+        // Chromium writes raw download artifacts here (allowAndName). Keeping
+        // it inside the per-session controlled directory lets the store watch
+        // real on-disk growth while a download is still in progress.
+        const rawDownloads = join(root, ".downloads", profileID, sessionID, "raw");
         try {
+          await fs.mkdir(rawDownloads, {recursive: true, mode: 0o700});
           const context = await chromium.launchPersistentContext(directory, {
             executablePath: edge,
             // Production is always visible. The override exists only for the
             // opt-in real-Chromium regression harness.
             headless,
             viewport: null,
+            downloadsPath: rawDownloads,
             args: ["--disable-features=msEdgeSidebar"],
           });
-          const sessionID = `host-session-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
           const session = {
             id: sessionID,
             profileID,
             state: "ready",
             context,
             tabs: new Map(),
-            downloads: createDownloadStore(root, profileID, sessionID, downloadOptions || {}),
+            downloads: createDownloadStore(root, profileID, sessionID,
+              {...(downloadOptions || {}), rawDir: rawDownloads}),
             lock,
             fence: "",
             gate: createSessionGate(),
@@ -687,6 +694,7 @@ export function createHostServer(options) {
           console.log(`session opened profile=${profileID}`);
           return json(response, 200, sessionPayload(session));
         } catch (error) {
+          await fs.rm(rawDownloads, {recursive: true, force: true}).catch(() => {});
           await state.locks.release(lock);
           // Raw Playwright text can contain the user-data directory or Edge
           // executable path; keep it in the host-local log only, sanitized.

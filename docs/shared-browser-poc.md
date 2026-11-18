@@ -149,7 +149,9 @@ ref，其次 viewport 坐标；text ≤4096 字节、keys ≤4、滚动每轴 �
 最多 5 个、总计 ≤20 MiB，host 用内存 payload 交给 file input 或文件选择框，不落
 临时文件。下载写入 `<profile-root>/.downloads/<profile>/<session>/`，文件名只作
 元数据、磁盘文件使用不透明 ID；单文件 ≤10 MiB、最多 20 个、累计 ≤50 MiB、
-TTL 30 分钟。限额在流式写入时执行，在途数量同步预留；超限/取消/clear 会删除
+TTL 30 分钟。host 把 Chromium `downloadsPath` 指向受控会话目录，并在下载进行中
+轮询原始 artifact 大小：单文件或累计预算超限立即 cancel/清理，不等下载结束。
+受控副本限额在流式写入时执行，在途数量同步预留；超限/取消/clear 会删除
 Playwright 原始 artifact。释放租约或关闭会话即清理，跨会话/跨 Task 的 ID 一律 404。
 
 Cookie 导入/导出只经当前 Task grant：导出必须带 `url` 或 `domain` 限定范围，最多

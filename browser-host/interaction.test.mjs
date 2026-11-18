@@ -4,6 +4,7 @@ import {mkdtemp} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {createHostServer} from "./server.mjs";
+import {createDownloadStore} from "./downloads.mjs";
 import {MAX_ACTION_TEXT_BYTES} from "./interact.mjs";
 
 const futureFence = id => `${id}@${Date.now() + 60_000}`;
@@ -290,7 +291,11 @@ test("captured downloads list, fetch raw bytes, reject traversal and clear", asy
     assert.deepEqual(after.body.downloads, []);
     const directory = join(host.root, ".downloads", "browser_profile_1");
     const {readdir} = await import("node:fs/promises");
-    assert.deepEqual(await readdir(directory), []);
+    for (const session of await readdir(directory).catch(() => [])) {
+      const entries = await readdir(join(directory, session)).catch(() => []);
+      assert.deepEqual(entries.filter(name => name !== "raw"), []);
+      assert.deepEqual(await readdir(join(directory, session, "raw")).catch(() => []), []);
+    }
   } finally {
     await host.close();
   }
@@ -436,7 +441,9 @@ test("download TTL timer removes entries and files without a read", async () => 
     const {readdir} = await import("node:fs/promises");
     const sessions = await readdir(directory).catch(() => []);
     for (const session of sessions) {
-      assert.deepEqual(await readdir(join(directory, session)).catch(() => []), []);
+      const entries = await readdir(join(directory, session)).catch(() => []);
+      assert.deepEqual(entries.filter(name => name !== "raw"), []);
+      assert.deepEqual(await readdir(join(directory, session, "raw")).catch(() => []), []);
     }
   } finally {
     await host.close();
@@ -475,4 +482,41 @@ test("clearing downloads cancels an in-flight stream and deletes its artifact", 
   } finally {
     await host.close();
   }
+});
+
+
+test("failed chunks release only the budget they reserved", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aha2-download-budget-"));
+  const {Readable} = await import("node:stream");
+  const store = createDownloadStore(root, "profile", "session", {
+    maxBytes: 10 * 1024 * 1024,
+    maxTotalBytes: 8 * 1024 * 1024,
+    ttlMs: 60_000,
+  });
+  let releaseA;
+  const gateA = new Promise(resolve => { releaseA = resolve; });
+  const makeDownload = (chunks, gate = null) => ({
+    suggestedFilename: () => "f.bin",
+    createReadStream: async () => Readable.from((async function* () {
+      for (const chunk of chunks) yield Buffer.alloc(chunk, 0x61);
+      if (gate) await gate;
+    })()),
+    cancel: async () => {},
+    delete: async () => {},
+  });
+  const captureA = store.capture(makeDownload([6 * 1024 * 1024], gateA), "f");
+  await new Promise(resolve => setTimeout(resolve, 20));
+  // A holds 6 MiB. B gets one 2 MiB chunk (pending 8) and then exceeds the
+  // budget; only its charged 2 MiB may be returned, not the rejected chunk.
+  await assert.rejects(store.capture(makeDownload([2 * 1024 * 1024, 4 * 1024 * 1024]), "f"));
+  const afterB = store.stats();
+  assert.equal(afterB.pendingBytes, 6 * 1024 * 1024, JSON.stringify(afterB));
+  // If B had over-released, C's 4 MiB would now fit (6+4>8 must reject).
+  await assert.rejects(store.capture(makeDownload([4 * 1024 * 1024]), "f"));
+  releaseA();
+  await captureA;
+  const final = store.stats();
+  assert.equal(final.totalBytes, 6 * 1024 * 1024, JSON.stringify(final));
+  assert.equal(final.pendingBytes, 0, JSON.stringify(final));
+  await store.close();
 });
