@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,7 +25,11 @@ func TestAgentCollaborationDuplicateAssignmentReturnsConflict(t *testing.T) {
 	service := app.NewService(database, nil, app.StubExecutor{})
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
 	task := createHardwareAPITask(t, database)
-	if _, err := service.UpdateTaskCollaboration(ctx, task.ID, "auto", 4); err != nil {
+	// The earlier batches leave main plus sub-001..sub-003 in place, so sub-004
+	// needs a fifth slot. With a limit of 4 the final batch would be rejected by
+	// the agent cap before the missing-model configuration was ever validated,
+	// which is exactly the failure this case must not silently accept.
+	if _, err := service.UpdateTaskCollaboration(ctx, task.ID, "auto", 5); err != nil {
 		t.Fatal(err)
 	}
 	task, err = database.Task(ctx, task.ID)
@@ -147,5 +152,24 @@ func TestAgentCollaborationDuplicateAssignmentReturnsConflict(t *testing.T) {
 	if item["agent_id"] != "sub-004" || item["code"] != app.CollaborationAssignmentDuplicate ||
 		item["reason"] != app.CollaborationAssignmentDuplicateInBatch {
 		t.Fatalf("failed-first rejected detail = %#v", item)
+	}
+
+	// The first action must fail on its missing model, not on the agent limit:
+	// otherwise this case would pass without ever exercising the model-config
+	// failure path it exists to cover. The recorded orchestration error is the
+	// evidence of which branch ran.
+	page, err := database.ConversationPageForAgent(ctx, task.ID, "main", 0, 0, 50, []string{"error"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var failures []string
+	for _, conversationItem := range page.Items {
+		if conversationItem.Kind == "agent_action_rejected" {
+			failures = append(failures, conversationItem.Summary)
+		}
+	}
+	if len(failures) != 1 || !strings.Contains(failures[0], "model-missing") ||
+		strings.Contains(failures[0], "Agent limit") {
+		t.Fatalf("first action did not fail on model config: %#v", failures)
 	}
 }
