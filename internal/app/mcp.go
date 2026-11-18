@@ -35,7 +35,7 @@ func (s *Service) normalizeTaskMCPServers(ctx context.Context, project domain.Pr
 	}
 	for _, id := range requested {
 		id = strings.TrimSpace(id)
-		if id == "mcp_channel" || id == "mcp_mail" || id == "mcp_core" || (id == "mcp_pet" && project.ID != petProjectID) {
+		if id == "mcp_channel" || id == "mcp_mail" || id == "mcp_core" || id == knowledgeMCPName || (id == "mcp_pet" && project.ID != petProjectID) {
 			continue
 		}
 		server, ok := allowed[id]
@@ -92,15 +92,16 @@ func (s *Service) MCPServers(ctx context.Context) ([]domain.MCPServer, error) {
 	channel := s.channelMCPDetail()
 	mail := s.mailMCPDetail()
 	core := s.coreMCPDetail()
+	knowledge := s.knowledgeMCPDetail()
 	insertAt := 0
 	for index, item := range items {
 		if item.Builtin {
 			insertAt = index + 1
 		}
 	}
-	combined := make([]domain.MCPServer, 0, len(items)+3)
+	combined := make([]domain.MCPServer, 0, len(items)+4)
 	combined = append(combined, items[:insertAt]...)
-	combined = append(combined, channel, mail, core)
+	combined = append(combined, channel, mail, core, knowledge)
 	combined = append(combined, items[insertAt:]...)
 	return combined, nil
 }
@@ -171,6 +172,31 @@ func (s *Service) channelMCPDetail() domain.MCPServer {
 			{Name: "channel_request_permission", Description: "为非 Owner 群成员的敏感操作创建 Owner 权限申请；批准前不要执行。"},
 		},
 		CreatedAt: now, UpdatedAt: now,
+	}
+}
+
+// knowledgeMCPDetail describes the built-in knowledge domain MCP. The endpoint
+// is injected per Turn with the Turn capability; it claims no static URL.
+func (s *Service) knowledgeMCPDetail() domain.MCPServer {
+	now := s.now().UTC()
+	descriptions := map[string]string{
+		"knowledge_list":     "列出当前 Project 与全局知识的元数据；支持查询、类型和分页，不返回正文或其他 Project。",
+		"knowledge_get":      "读取当前可读范围内一条知识的正文并标明 vault/legacy 来源；跨 Project ID 按未找到处理。",
+		"knowledge_guide":    "读取知识库静态指南；不暴露内部路径或凭据。",
+		"skill_list":         "列出当前 Task 已选 Skill 的元数据；不包含打包文件、vault key 或内部路径。",
+		"skill_get":          "只读读取当前 Task 已选 Skill 的说明；不包含打包文件、vault key 或内部路径。",
+		"knowledge_submit":   "向当前 Project 提交 create/revise 候选；Main 专用，仅 project scope，不支持发布、删除或审核。",
+		"knowledge_feedback": "为当前可读范围内的一条知识记录 helped/stale/wrong；Main 专用。",
+	}
+	tools := make([]domain.MCPTool, 0, len(knowledgeMCPReadToolNames)+len(knowledgeMCPWriteToolNames))
+	for _, name := range knowledgeMCPToolNames(true) {
+		tools = append(tools, domain.MCPTool{Name: name, Description: descriptions[name]})
+	}
+	return domain.MCPServer{
+		ID: knowledgeMCPName, Name: "知识库（内置）",
+		Description: "当前 Task 开启知识时自动注入；读取工具对所有 Agent 开放，写入工具仅限可写 Main。",
+		Transport:   "builtin", Enabled: true, Builtin: true, AutoInject: true, Health: "ok",
+		Tools: tools, CreatedAt: now, UpdatedAt: now,
 	}
 }
 
@@ -269,6 +295,9 @@ func (s *Service) MCPServerByID(ctx context.Context, id string) (domain.MCPServe
 	if strings.TrimSpace(id) == "mcp_core" {
 		return s.coreMCPDetail(), nil
 	}
+	if strings.TrimSpace(id) == knowledgeMCPName {
+		return s.knowledgeMCPDetail(), nil
+	}
 	items, err := s.store.ListMCPServers(ctx)
 	if err != nil {
 		return domain.MCPServer{}, err
@@ -282,7 +311,7 @@ func (s *Service) MCPServerByID(ctx context.Context, id string) (domain.MCPServe
 }
 
 func (s *Service) DeleteMCPServer(ctx context.Context, id string) error {
-	if strings.TrimSpace(id) == "mcp_pet" || strings.TrimSpace(id) == "mcp_channel" || strings.TrimSpace(id) == "mcp_mail" || strings.TrimSpace(id) == "mcp_core" {
+	if strings.TrimSpace(id) == "mcp_pet" || strings.TrimSpace(id) == "mcp_channel" || strings.TrimSpace(id) == "mcp_mail" || strings.TrimSpace(id) == "mcp_core" || strings.TrimSpace(id) == knowledgeMCPName {
 		return fmt.Errorf("builtin MCP cannot be deleted")
 	}
 	return s.store.DeleteMCPServer(ctx, id)

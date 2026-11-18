@@ -166,6 +166,21 @@ func TestTaskRouteAddsNarrowChannelMCP(t *testing.T) {
 				allowed[1] != wantAllowed[1] || allowed[2] != wantAllowed[2] {
 				t.Fatalf("allowed=%#v", allowed)
 			}
+
+			// A channel-routed Turn resolves other Projects' knowledge, so the
+			// knowledge domain MCP must not be injected even though the Task's
+			// own switch is on.
+			turnServers, turnAllowed := fixture.service.mcpRuntimeForTurn(ctx, task, "main", "http://127.0.0.1:8766/")
+			for _, server := range turnServers {
+				if server.Name == knowledgeMCPName {
+					t.Fatalf("routed turn gained knowledge MCP: %#v", turnServers)
+				}
+			}
+			for _, name := range turnAllowed {
+				if strings.HasPrefix(name, "mcp__"+knowledgeMCPName+"__") {
+					t.Fatalf("routed turn gained knowledge tool: %q", name)
+				}
+			}
 		})
 	}
 }
@@ -231,6 +246,83 @@ func TestCoreMCPRuntimeInjectionScopesTools(t *testing.T) {
 			for index := range want {
 				if got[index] != want[index] {
 					t.Fatalf("allowed core tools=%#v want=%#v", got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestKnowledgeMCPRuntimeInjectionScopesTools(t *testing.T) {
+	ctx, _, service, task, model := newStreamCompatFixture(t)
+	readOnly, err := service.CreateTask(ctx, CreateTaskInput{
+		ProjectID: task.ProjectID, WorkspaceID: task.WorkspaceID, Title: "knowledge review", Request: "review",
+		ModelID: model.ID, Filesystem: "read-only", Approval: "never",
+		CollaborationMode: "single", MaxAgents: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	disabled, err := service.CreateTask(ctx, CreateTaskInput{
+		ProjectID: task.ProjectID, WorkspaceID: task.WorkspaceID, Title: "no knowledge", Request: "none",
+		ModelID: model.ID, CollaborationMode: "single", MaxAgents: 1,
+		KnowledgePolicy: "disabled",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenarios := []struct {
+		name      string
+		task      domain.Task
+		agentID   string
+		apiURL    string
+		wantTools []string
+		wantMCP   bool
+	}{
+		{name: "writable main", task: task, agentID: "main", apiURL: "http://127.0.0.1:8766/", wantTools: KnowledgeMCPToolNames(true), wantMCP: true},
+		{name: "non-main", task: task, agentID: "sub", apiURL: "http://127.0.0.1:8766/", wantTools: KnowledgeMCPToolNames(false), wantMCP: true},
+		{name: "read-only main", task: readOnly, agentID: "main", apiURL: "http://127.0.0.1:8766/", wantTools: KnowledgeMCPToolNames(false), wantMCP: true},
+		{name: "knowledge disabled", task: disabled, agentID: "main", apiURL: "http://127.0.0.1:8766/"},
+		{name: "pet task", task: domain.Task{ID: petTaskID}, agentID: "main", apiURL: "http://127.0.0.1:8766/"},
+		{name: "pet project", task: domain.Task{ID: "task-pet-project", ProjectID: petProjectID}, agentID: "main", apiURL: "http://127.0.0.1:8766/"},
+		{name: "no agent API", task: task, agentID: "main", apiURL: ""},
+	}
+	for _, scenario := range scenarios {
+		t.Run(scenario.name, func(t *testing.T) {
+			servers, allowed := service.mcpRuntimeForTurn(ctx, scenario.task, scenario.agentID, scenario.apiURL)
+			var knowledge backend.MCPServer
+			for _, server := range servers {
+				if server.Name == knowledgeMCPName {
+					knowledge = server
+				}
+			}
+			if !scenario.wantMCP {
+				if knowledge.Name != "" {
+					t.Fatalf("unexpected knowledge server: %#v", knowledge)
+				}
+				return
+			}
+			if knowledge.URL != "http://127.0.0.1:8766/api/v1/agent/knowledge/mcp" ||
+				knowledge.URLFromEnv != "AHA2_AGENT_API_URL" ||
+				knowledge.URLPath != "/api/v1/agent/knowledge/mcp" ||
+				knowledge.BearerTokenEnv != "AHA2_AGENT_API_TOKEN" {
+				t.Fatalf("knowledge server=%#v", knowledge)
+			}
+			want := make([]string, 0, len(scenario.wantTools))
+			for _, name := range scenario.wantTools {
+				want = append(want, "mcp__"+knowledgeMCPName+"__"+name)
+			}
+			got := make([]string, 0, len(want))
+			for _, name := range allowed {
+				if strings.HasPrefix(name, "mcp__"+knowledgeMCPName+"__") {
+					got = append(got, name)
+				}
+			}
+			if len(got) != len(want) {
+				t.Fatalf("allowed knowledge tools=%#v want=%#v", got, want)
+			}
+			for index := range want {
+				if got[index] != want[index] {
+					t.Fatalf("allowed knowledge tools=%#v want=%#v", got, want)
 				}
 			}
 		})

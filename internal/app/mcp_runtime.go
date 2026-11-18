@@ -42,6 +42,12 @@ const (
 	// HTTP Agent API. Write tools are only advertised to a writable Main Turn.
 	coreMCPName = "aha2_core"
 	coreMCPPath = "/api/v1/agent/core/mcp"
+
+	// knowledgeMCPName is the model-facing namespace of the knowledge domain
+	// MCP. It is injected only when the current Task's knowledge switch is on
+	// and the Turn is not resolving another Project through a channel route.
+	knowledgeMCPName = "aha2_knowledge"
+	knowledgeMCPPath = "/api/v1/agent/knowledge/mcp"
 )
 
 var mailMCPToolNames = []string{
@@ -82,6 +88,57 @@ func CoreMCPToolIsWrite(name string) bool {
 		}
 	}
 	return false
+}
+
+// knowledgeMCPReadToolNames are safe for every Agent whose Task receives the
+// knowledge domain, including a non-Main collaborator or read-only reviewer.
+var knowledgeMCPReadToolNames = []string{
+	"knowledge_list", "knowledge_get", "knowledge_guide", "skill_list", "skill_get",
+}
+
+// knowledgeMCPWriteToolNames change the knowledge library and are advertised
+// to a writable Main Turn only.
+var knowledgeMCPWriteToolNames = []string{
+	"knowledge_submit", "knowledge_feedback",
+}
+
+func knowledgeMCPToolNames(write bool) []string {
+	names := append([]string{}, knowledgeMCPReadToolNames...)
+	if write {
+		names = append(names, knowledgeMCPWriteToolNames...)
+	}
+	return names
+}
+
+// KnowledgeMCPToolNames is the exact allowlist for a knowledge MCP client. It
+// is exported so the HTTP facade advertises the same subset the runtime injects.
+func KnowledgeMCPToolNames(write bool) []string {
+	return knowledgeMCPToolNames(write)
+}
+
+// KnowledgeMCPToolIsWrite reports whether a knowledge tool mutates the library.
+func KnowledgeMCPToolIsWrite(name string) bool {
+	for _, tool := range knowledgeMCPWriteToolNames {
+		if tool == name {
+			return true
+		}
+	}
+	return false
+}
+
+// knowledgeMCPInjected mirrors AgentKnowledgeMCPAllowed for the runtime path,
+// which has no AgentCallContext yet. The pet Task is excluded because its root
+// libraries are outside a Project, and channel-routed Turns are excluded
+// because ApplicableAgentKnowledge resolves their other Projects' libraries.
+func (s *Service) knowledgeMCPInjected(ctx context.Context, task domain.Task) bool {
+	if task.ID == petTaskID || task.ProjectID == petProjectID || !knowledgeEnabled(domain.Project{}, task) {
+		return false
+	}
+	routed, err := s.store.HasActiveChannelTaskRoute(ctx, task.ID)
+	if err != nil {
+		return false
+	}
+	return !routed
 }
 
 // mcpRuntimeForTask returns the MCP servers a Turn should receive and the
@@ -245,6 +302,18 @@ func (s *Service) mcpRuntimeForTurn(ctx context.Context, task domain.Task, agent
 	})
 	for _, tool := range coreMCPToolNames(write) {
 		allowed = append(allowed, "mcp__"+coreMCPName+"__"+tool)
+	}
+	if s.knowledgeMCPInjected(ctx, task) {
+		servers = append(servers, backend.MCPServer{
+			Name: knowledgeMCPName, Transport: "http",
+			URL:            strings.TrimRight(agentAPIURL, "/") + knowledgeMCPPath,
+			URLFromEnv:     "AHA2_AGENT_API_URL",
+			URLPath:        knowledgeMCPPath,
+			BearerTokenEnv: "AHA2_AGENT_API_TOKEN",
+		})
+		for _, tool := range knowledgeMCPToolNames(write) {
+			allowed = append(allowed, "mcp__"+knowledgeMCPName+"__"+tool)
+		}
 	}
 	return servers, allowed
 }

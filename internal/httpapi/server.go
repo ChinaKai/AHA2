@@ -575,6 +575,9 @@ func (s *Server) Handler() http.Handler {
 	// HTTP Agent API; write tools are additionally restricted to a writable
 	// Main Turn inside the handler.
 	mux.Handle("POST /api/v1/agent/core/mcp", s.withAgentCapability(http.HandlerFunc(s.agentCoreMCP)))
+	// Knowledge domain MCP. It shares the Turn capability and is refused when
+	// the Task's knowledge switch is off or the Turn resolves a channel route.
+	mux.Handle("POST /api/v1/agent/knowledge/mcp", s.withAgentCapability(http.HandlerFunc(s.agentKnowledgeMCP)))
 	mux.Handle("GET /api/v1/agent/mail/accounts", s.withAgentCapability(http.HandlerFunc(s.agentMailAccounts)))
 	mux.Handle("GET /api/v1/agent/mail/templates", s.withAgentCapability(http.HandlerFunc(s.agentMailTemplates)))
 	mux.Handle("GET /api/v1/agent/mail/templates/{id}", s.withAgentCapability(http.HandlerFunc(s.agentMailTemplateDetail)))
