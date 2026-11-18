@@ -658,6 +658,14 @@ func (s *Service) AgentProjectRuntimes(ctx context.Context, claims agentapi.Clai
 	if err != nil {
 		return nil, err
 	}
+	return s.agentProjectRuntimeOptions(ctx, call)
+}
+
+// agentProjectRuntimeOptions is the shared read behind the Main-only HTTP
+// Agent API and the read-only workspace domain MCP. Both surfaces project the
+// same options differently; neither can see a token, an environment value or
+// an internal address because only display identity is read here.
+func (s *Service) agentProjectRuntimeOptions(ctx context.Context, call AgentCallContext) ([]AgentRuntimeOption, error) {
 	models, err := s.store.ListModels(ctx)
 	if err != nil {
 		return nil, err

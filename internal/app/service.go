@@ -261,6 +261,10 @@ type Service struct {
 	assignmentInsertHook func()
 	agentAPI             *agentapi.Capabilities
 	agentAPIURL          string
+	// managedProcesses is the read-only process registry view used by the
+	// workspace domain MCP. Starting and stopping a process stays on the
+	// existing Agent process endpoints and is never reachable from this domain.
+	managedProcesses ManagedProcessReader
 	// knowledgeVault is the optional canary read source. Nil keeps every
 	// project on the legacy knowledge tables. knowledgeVaultRuntimeRead is a
 	// separate, default-off gate: the Web vault switch may be enabled while

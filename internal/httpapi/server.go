@@ -578,6 +578,9 @@ func (s *Server) Handler() http.Handler {
 	// Knowledge domain MCP. It shares the Turn capability and is refused when
 	// the Task's knowledge switch is off or the Turn resolves a channel route.
 	mux.Handle("POST /api/v1/agent/knowledge/mcp", s.withAgentCapability(http.HandlerFunc(s.agentKnowledgeMCP)))
+	// Workspace domain MCP. Read-only first slice: it is refused unless the Task
+	// has a bound Workspace in its own Project and the Turn is not channel-hosted.
+	mux.Handle("POST /api/v1/agent/workspace/mcp", s.withAgentCapability(http.HandlerFunc(s.agentWorkspaceMCP)))
 	mux.Handle("GET /api/v1/agent/mail/accounts", s.withAgentCapability(http.HandlerFunc(s.agentMailAccounts)))
 	mux.Handle("GET /api/v1/agent/mail/templates", s.withAgentCapability(http.HandlerFunc(s.agentMailTemplates)))
 	mux.Handle("GET /api/v1/agent/mail/templates/{id}", s.withAgentCapability(http.HandlerFunc(s.agentMailTemplateDetail)))

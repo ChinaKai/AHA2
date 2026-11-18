@@ -35,7 +35,7 @@ func (s *Service) normalizeTaskMCPServers(ctx context.Context, project domain.Pr
 	}
 	for _, id := range requested {
 		id = strings.TrimSpace(id)
-		if id == "mcp_channel" || id == "mcp_mail" || id == "mcp_core" || id == knowledgeMCPName || (id == "mcp_pet" && project.ID != petProjectID) {
+		if id == "mcp_channel" || id == "mcp_mail" || id == "mcp_core" || id == knowledgeMCPName || id == workspaceMCPName || (id == "mcp_pet" && project.ID != petProjectID) {
 			continue
 		}
 		server, ok := allowed[id]
@@ -93,15 +93,16 @@ func (s *Service) MCPServers(ctx context.Context) ([]domain.MCPServer, error) {
 	mail := s.mailMCPDetail()
 	core := s.coreMCPDetail()
 	knowledge := s.knowledgeMCPDetail()
+	workspace := s.workspaceMCPDetail()
 	insertAt := 0
 	for index, item := range items {
 		if item.Builtin {
 			insertAt = index + 1
 		}
 	}
-	combined := make([]domain.MCPServer, 0, len(items)+4)
+	combined := make([]domain.MCPServer, 0, len(items)+5)
 	combined = append(combined, items[:insertAt]...)
-	combined = append(combined, channel, mail, core, knowledge)
+	combined = append(combined, channel, mail, core, knowledge, workspace)
 	combined = append(combined, items[insertAt:]...)
 	return combined, nil
 }
@@ -195,6 +196,30 @@ func (s *Service) knowledgeMCPDetail() domain.MCPServer {
 	return domain.MCPServer{
 		ID: knowledgeMCPName, Name: "知识库（内置）",
 		Description: "当前 Task 开启知识时自动注入；读取工具对所有 Agent 开放，写入工具仅限可写 Main。",
+		Transport:   "builtin", Enabled: true, Builtin: true, AutoInject: true, Health: "ok",
+		Tools: tools, CreatedAt: now, UpdatedAt: now,
+	}
+}
+
+// workspaceMCPDetail describes the built-in workspace domain MCP. The endpoint
+// is injected per Turn and claims no static URL. It is read-only: process
+// start/stop, shell, file access and port forwarding stay on their dedicated
+// Agent APIs.
+func (s *Service) workspaceMCPDetail() domain.MCPServer {
+	now := s.now().UTC()
+	descriptions := map[string]string{
+		"workspace_list":         "读取当前 Task 绑定 Workspace 的非敏感元数据；不含根路径、SSH 凭据或内部地址。",
+		"workspace_process_list": "列出当前 Task 管理的进程状态摘要；不含命令行、环境变量、工作目录或输出。",
+		"workspace_process_get":  "按名称读取当前 Task 的一个进程状态摘要；跨 Task 名称按未找到处理。",
+		"workspace_runtime_list": "列出当前 Project 可用的运行配置字段与非密钥值；不含 token、密钥、环境变量或内网地址。",
+	}
+	tools := make([]domain.MCPTool, 0, len(workspaceMCPReadToolNames))
+	for _, name := range workspaceMCPToolNames() {
+		tools = append(tools, domain.MCPTool{Name: name, Description: descriptions[name]})
+	}
+	return domain.MCPServer{
+		ID: workspaceMCPName, Name: "工作区（内置）",
+		Description: "Task 绑定 Workspace 后自动注入；只读提供工作区元数据、进程状态与运行配置，不含写操作。",
 		Transport:   "builtin", Enabled: true, Builtin: true, AutoInject: true, Health: "ok",
 		Tools: tools, CreatedAt: now, UpdatedAt: now,
 	}
@@ -298,6 +323,9 @@ func (s *Service) MCPServerByID(ctx context.Context, id string) (domain.MCPServe
 	if strings.TrimSpace(id) == knowledgeMCPName {
 		return s.knowledgeMCPDetail(), nil
 	}
+	if strings.TrimSpace(id) == workspaceMCPName {
+		return s.workspaceMCPDetail(), nil
+	}
 	items, err := s.store.ListMCPServers(ctx)
 	if err != nil {
 		return domain.MCPServer{}, err
@@ -311,7 +339,7 @@ func (s *Service) MCPServerByID(ctx context.Context, id string) (domain.MCPServe
 }
 
 func (s *Service) DeleteMCPServer(ctx context.Context, id string) error {
-	if strings.TrimSpace(id) == "mcp_pet" || strings.TrimSpace(id) == "mcp_channel" || strings.TrimSpace(id) == "mcp_mail" || strings.TrimSpace(id) == "mcp_core" || strings.TrimSpace(id) == knowledgeMCPName {
+	if strings.TrimSpace(id) == "mcp_pet" || strings.TrimSpace(id) == "mcp_channel" || strings.TrimSpace(id) == "mcp_mail" || strings.TrimSpace(id) == "mcp_core" || strings.TrimSpace(id) == knowledgeMCPName || strings.TrimSpace(id) == workspaceMCPName {
 		return fmt.Errorf("builtin MCP cannot be deleted")
 	}
 	return s.store.DeleteMCPServer(ctx, id)

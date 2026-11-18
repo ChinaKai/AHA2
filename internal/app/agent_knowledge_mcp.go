@@ -39,19 +39,20 @@ func (s *Service) AgentKnowledgeMCPAllowed(ctx context.Context, call AgentCallCo
 	if call.Task.ID == petTaskID || call.Task.ProjectID == petProjectID || !knowledgeEnabled(call.Project, call.Task) {
 		return false
 	}
-	return !s.agentKnowledgeMCPChannelBound(ctx, call.Task.ID, call.Turn.InboxBatchID)
+	return !s.agentMCPChannelBound(ctx, call.Task.ID, call.Turn.InboxBatchID)
 }
 
-// agentKnowledgeMCPChannelBound reports whether the Task or the actual Turn is
-// tied to a channel route. Both task_route and conversation_host resolve
-// knowledge from another source, so a channel-bound Turn stays outside this
-// project-scoped domain even after the route row is no longer active. A batch
-// is channel-bound when any message carries a channel context: a batch that
+// agentMCPChannelBound is the shared channel-host determination for the
+// project-scoped domain MCPs (knowledge and workspace). Both task_route and
+// conversation_host address the Turn through an external channel host whose
+// Project is not authoritative, so a channel-bound Turn stays outside these
+// domains even after the route row is no longer active. A batch is
+// channel-bound when any message carries a channel context: a batch that
 // mixes plain and channel messages must not be classified by the aggregate
 // context alone, which returns sql.ErrNoRows as soon as one plain message
 // appears. A store error fails closed: a gate that cannot prove the Turn is
 // ordinary must not expose the domain.
-func (s *Service) agentKnowledgeMCPChannelBound(ctx context.Context, taskID, inboxBatchID string) bool {
+func (s *Service) agentMCPChannelBound(ctx context.Context, taskID, inboxBatchID string) bool {
 	if batchID := strings.TrimSpace(inboxBatchID); batchID != "" {
 		hasChannel, err := s.store.InboxBatchHasChannelContext(ctx, batchID)
 		if err != nil {

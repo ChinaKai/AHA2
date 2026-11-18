@@ -514,6 +514,7 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	appService.SetCodexAccountManager(codexAccounts)
 	agentCapabilities := agentapi.NewCapabilities()
 	managedProcesses := managedprocess.NewManager()
+	appService.SetManagedProcesses(managedProcesses)
 	defer managedProcesses.Close()
 	resolvedAgentAPIURL := resolveAgentAPIURL(options.listen, options.agentAPIURL)
 	if err := validateAgentAPIURL(resolvedAgentAPIURL); err != nil {

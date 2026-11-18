@@ -48,6 +48,13 @@ const (
 	// and the Turn is not resolving another Project through a channel route.
 	knowledgeMCPName = "aha2_knowledge"
 	knowledgeMCPPath = "/api/v1/agent/knowledge/mcp"
+
+	// workspaceMCPName is the model-facing namespace of the workspace domain
+	// MCP. It is injected only when the Task has a bound Workspace in its own
+	// Project and the Turn is not hosted by a channel. The first slice is
+	// read-only: metadata, managed process status and runtime option names.
+	workspaceMCPName = "aha2_workspace"
+	workspaceMCPPath = "/api/v1/agent/workspace/mcp"
 )
 
 var mailMCPToolNames = []string{
@@ -126,6 +133,54 @@ func KnowledgeMCPToolIsWrite(name string) bool {
 	return false
 }
 
+// workspaceMCPReadToolNames are the complete first-slice tool set. Every tool
+// is read-only and safe for any Agent whose Task receives the domain,
+// including a read-only reviewer or a non-Main collaborator.
+var workspaceMCPReadToolNames = []string{
+	"workspace_list", "workspace_process_list", "workspace_process_get", "workspace_runtime_list",
+}
+
+// WorkspaceMCPToolNames is the exact allowlist for a workspace MCP client. It
+// is exported so the HTTP facade advertises the same subset the runtime
+// injects, and so a call to an unadvertised tool is rejected before dispatch.
+func WorkspaceMCPToolNames() []string {
+	return workspaceMCPToolNames()
+}
+
+func workspaceMCPToolNames() []string {
+	return append([]string{}, workspaceMCPReadToolNames...)
+}
+
+// WorkspaceMCPToolIsRead reports whether a workspace tool is in the read-only
+// first slice. There is intentionally no write tool in this domain.
+func WorkspaceMCPToolIsRead(name string) bool {
+	for _, tool := range workspaceMCPReadToolNames {
+		if tool == name {
+			return true
+		}
+	}
+	return false
+}
+
+// workspaceMCPInjected mirrors AgentWorkspaceMCPAllowed for the runtime path,
+// which has no AgentCallContext yet. A Task needs a bound Workspace that
+// belongs to the same Project; the pet Task and channel-hosted Turns are
+// excluded by the shared rules. inboxBatchID is the Turn's actual batch.
+func (s *Service) workspaceMCPInjected(ctx context.Context, task domain.Task, inboxBatchID string) bool {
+	if task.ID == petTaskID || task.ProjectID == petProjectID {
+		return false
+	}
+	workspaceID := strings.TrimSpace(task.WorkspaceID)
+	if workspaceID == "" {
+		return false
+	}
+	item, err := s.store.Workspace(ctx, workspaceID)
+	if err != nil || item.ProjectID != task.ProjectID {
+		return false
+	}
+	return !s.agentMCPChannelBound(ctx, task.ID, inboxBatchID)
+}
+
 // knowledgeMCPInjected mirrors AgentKnowledgeMCPAllowed for the runtime path,
 // which has no AgentCallContext yet. The pet Task is excluded because its root
 // libraries are outside a Project, and channel-bound Turns (task_route or
@@ -135,7 +190,7 @@ func (s *Service) knowledgeMCPInjected(ctx context.Context, task domain.Task, in
 	if task.ID == petTaskID || task.ProjectID == petProjectID || !knowledgeEnabled(domain.Project{}, task) {
 		return false
 	}
-	return !s.agentKnowledgeMCPChannelBound(ctx, task.ID, inboxBatchID)
+	return !s.agentMCPChannelBound(ctx, task.ID, inboxBatchID)
 }
 
 // mcpRuntimeForTask returns the MCP servers a Turn should receive and the
@@ -310,6 +365,18 @@ func (s *Service) mcpRuntimeForTurn(ctx context.Context, task domain.Task, agent
 		})
 		for _, tool := range knowledgeMCPToolNames(write) {
 			allowed = append(allowed, "mcp__"+knowledgeMCPName+"__"+tool)
+		}
+	}
+	if s.workspaceMCPInjected(ctx, task, inboxBatchID) {
+		servers = append(servers, backend.MCPServer{
+			Name: workspaceMCPName, Transport: "http",
+			URL:            strings.TrimRight(agentAPIURL, "/") + workspaceMCPPath,
+			URLFromEnv:     "AHA2_AGENT_API_URL",
+			URLPath:        workspaceMCPPath,
+			BearerTokenEnv: "AHA2_AGENT_API_TOKEN",
+		})
+		for _, tool := range workspaceMCPToolNames() {
+			allowed = append(allowed, "mcp__"+workspaceMCPName+"__"+tool)
 		}
 	}
 	return servers, allowed

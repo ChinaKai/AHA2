@@ -219,6 +219,11 @@ func cloneStatus(value Status) Status {
 
 func processKey(taskID, name string) string { return taskID + "\x00" + name }
 
+// ValidName reports whether name is a legal managed process name. It is the
+// same rule Start enforces, exported so read-only surfaces cannot drift from
+// the write path or accept a name that could never have been started.
+func ValidName(name string) bool { return processNamePattern.MatchString(name) }
+
 func validateStartRequest(request StartRequest) error {
 	if !processNamePattern.MatchString(request.Name) {
 		return errors.New("name must be 1-64 letters, numbers, dot, underscore, or dash")

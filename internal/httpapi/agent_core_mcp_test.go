@@ -18,16 +18,18 @@ import (
 	"github.com/ChinaKai/AHA2/internal/agentapi"
 	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/domain"
+	"github.com/ChinaKai/AHA2/internal/managedprocess"
 	"github.com/ChinaKai/AHA2/internal/store"
 )
 
 type coreMCPHarness struct {
-	ctx      context.Context
-	dbPath   string
-	database *store.Store
-	service  *app.Service
-	caps     *agentapi.Capabilities
-	server   *httptest.Server
+	ctx       context.Context
+	dbPath    string
+	database  *store.Store
+	service   *app.Service
+	caps      *agentapi.Capabilities
+	processes *managedprocess.Manager
+	server    *httptest.Server
 }
 
 func newCoreMCPHarness(t *testing.T) *coreMCPHarness {
@@ -41,11 +43,17 @@ func newCoreMCPHarness(t *testing.T) *coreMCPHarness {
 	t.Cleanup(func() { _ = database.Close() })
 	service := app.NewService(database, nil, app.StubExecutor{})
 	capabilities := agentapi.NewCapabilities()
+	processes := managedprocess.NewManager()
+	service.SetManagedProcesses(processes)
 	server := httptest.NewServer(New(Config{
-		Store: database, App: service, AgentCapabilities: capabilities,
+		Store: database, App: service, AgentCapabilities: capabilities, ManagedProcesses: processes,
 	}).Handler())
 	t.Cleanup(server.Close)
-	return &coreMCPHarness{ctx: ctx, dbPath: path, database: database, service: service, caps: capabilities, server: server}
+	t.Cleanup(processes.Close)
+	return &coreMCPHarness{
+		ctx: ctx, dbPath: path, database: database, service: service,
+		caps: capabilities, processes: processes, server: server,
+	}
 }
 
 func (h *coreMCPHarness) issue(taskID, agentID, turnID string) string {
