@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/knowledgevault"
 )
@@ -307,8 +308,27 @@ func TestAgentKnowledgeMCPRejectsChannelBoundTurns(t *testing.T) {
 	base := createHardwareAPITask(t, h.database)
 	url := knowledgeMCPURL(h)
 
+	assertDenied := func(label, token string) {
+		t.Helper()
+		response := agentRequest(t, url, http.MethodPost, token, map[string]any{
+			"jsonrpc": "2.0", "id": 1, "method": "initialize",
+		})
+		if response.StatusCode != http.StatusForbidden {
+			t.Fatalf("%s initialize status=%d body=%s", label, response.StatusCode, readBody(t, response))
+		}
+		response.Body.Close()
+		if status, names, _ := coreMCPToolsList(t, url, token); status != http.StatusForbidden {
+			t.Fatalf("%s tools/list status=%d names=%#v", label, status, names)
+		}
+		if call := coreMCPCallTool(t, url, token, "knowledge_list", map[string]any{}); call.Status != http.StatusForbidden {
+			t.Fatalf("%s knowledge_list status=%d payload=%#v", label, call.Status, call)
+		}
+	}
+
+	// Positive control: a batch that really contains only a plain message.
 	controlTask := createCoreTaskInProject(t, h, base, "")
 	control := createCoreTurn(t, h.database, controlTask, "main", "batch-knowledge-plain")
+	seedKnowledgeMCPInbox(t, h.dbPath, controlTask, control, "plain")
 	controlToken := h.issue(controlTask.ID, "main", control.ID)
 	response := agentRequest(t, url, http.MethodPost, controlToken, map[string]any{
 		"jsonrpc": "2.0", "id": 1, "method": "initialize",
@@ -317,59 +337,98 @@ func TestAgentKnowledgeMCPRejectsChannelBoundTurns(t *testing.T) {
 		t.Fatalf("plain Turn initialize status=%d body=%s", response.StatusCode, readBody(t, response))
 	}
 	response.Body.Close()
+	if status, names, _ := coreMCPToolsList(t, url, controlToken); status != http.StatusOK || len(names) != len(app.KnowledgeMCPToolNames(true)) {
+		t.Fatalf("plain Turn tools/list status=%d names=%#v", status, names)
+	}
+	if call := coreMCPCallTool(t, url, controlToken, "knowledge_list", map[string]any{}); call.Status != http.StatusOK || call.IsError {
+		t.Fatalf("plain Turn knowledge_list payload=%#v", call)
+	}
 
+	// A batch that mixes a plain message with a channel message is
+	// channel-bound regardless of insertion order. The aggregate context
+	// lookup returns sql.ErrNoRows for both orders.
+	orders := []struct {
+		label string
+		kinds []string
+	}{
+		{label: "plain then channel", kinds: []string{"plain", "channel"}},
+		{label: "channel then plain", kinds: []string{"channel", "plain"}},
+	}
 	for name, mode := range map[string]string{
 		"conversation host": "conversation_host",
 		"task route":        "task_route",
 	} {
-		task := createCoreTaskInProject(t, h, base, "")
-		batchID := "batch-knowledge-" + strings.ReplaceAll(mode, "_", "-")
-		turn := createCoreTurn(t, h.database, task, "main", batchID)
-		seedChannelInboxBatch(t, h.dbPath, task, turn, mode)
-		token := h.issue(task.ID, "main", turn.ID)
-		response := agentRequest(t, url, http.MethodPost, token, map[string]any{
-			"jsonrpc": "2.0", "id": 2, "method": "initialize",
-		})
-		if response.StatusCode != http.StatusForbidden {
-			t.Fatalf("%s initialize status=%d body=%s", name, response.StatusCode, readBody(t, response))
-		}
-		response.Body.Close()
-		if call := coreMCPCallTool(t, url, token, "knowledge_list", map[string]any{}); call.Status != http.StatusForbidden {
-			t.Fatalf("%s knowledge_list status=%d payload=%#v", name, call.Status, call)
+		for _, order := range orders {
+			task := createCoreTaskInProject(t, h, base, "")
+			batchID := "batch-knowledge-" + strings.ReplaceAll(mode, "_", "-") + "-" +
+				strings.ReplaceAll(order.label, " ", "-")
+			turn := createCoreTurn(t, h.database, task, "main", batchID)
+			kinds := make([]string, 0, len(order.kinds))
+			for _, kind := range order.kinds {
+				if kind == "channel" {
+					kinds = append(kinds, "channel:"+mode)
+					continue
+				}
+				kinds = append(kinds, kind)
+			}
+			seedKnowledgeMCPInbox(t, h.dbPath, task, turn, kinds...)
+			assertDenied(name+" "+order.label, h.issue(task.ID, "main", turn.ID))
 		}
 	}
+
+	// Third state: a batch the store cannot classify (malformed payload) must
+	// fail closed instead of looking like a plain batch.
+	brokenTask := createCoreTaskInProject(t, h, base, "")
+	broken := createCoreTurn(t, h.database, brokenTask, "main", "batch-knowledge-malformed")
+	seedKnowledgeMCPInbox(t, h.dbPath, brokenTask, broken, "raw:not-json")
+	assertDenied("unclassifiable batch", h.issue(brokenTask.ID, "main", broken.ID))
 }
 
-func seedChannelInboxBatch(t *testing.T, dbPath string, task domain.Task, turn domain.Turn, mode string) {
+// seedKnowledgeMCPInbox inserts one agent_inbox row per kind into the Turn's
+// batch, preserving order. A kind is "plain", "channel:<route mode>", or
+// "raw:<payload>" for a deliberately malformed row.
+func seedKnowledgeMCPInbox(t *testing.T, dbPath string, task domain.Task, turn domain.Turn, kinds ...string) {
 	t.Helper()
 	raw, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer raw.Close()
-	payload, err := json.Marshal(map[string]any{
-		"channel_context": map[string]any{
-			"schema":          "aha2.channel.v1",
-			"instance_id":     "instance-mcp",
-			"provider":        "test",
-			"endpoint":        domain.ChannelEndpointGroupDigitalHuman,
-			"conversation_id": "conversation-mcp",
-			"route":           map[string]any{"mode": mode},
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := raw.ExecContext(context.Background(), `
-		INSERT INTO agent_inbox(
-			id,task_id,round_id,target_agent_id,source_agent_id,source_kind,source_turn_id,message_id,
-			content,payload_json,status,batch_id,created_at,claimed_at,processed_at
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		domain.NewID("inbox"), task.ID, turn.RoundID, "main", "channel", "channel_message",
-		"", "", "hello", string(payload), "claimed", turn.InboxBatchID,
-		time.Now().UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano), "",
-	); err != nil {
-		t.Fatal(err)
+	for _, kind := range kinds {
+		payload := `{}`
+		sourceAgent, sourceKind := "owner", "owner_message"
+		switch {
+		case strings.HasPrefix(kind, "channel:"):
+			mode := strings.TrimPrefix(kind, "channel:")
+			encoded, err := json.Marshal(map[string]any{
+				"channel_context": map[string]any{
+					"schema":          "aha2.channel.v1",
+					"instance_id":     "instance-mcp",
+					"provider":        "test",
+					"endpoint":        domain.ChannelEndpointGroupDigitalHuman,
+					"conversation_id": "conversation-mcp",
+					"route":           map[string]any{"mode": mode},
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload = string(encoded)
+			sourceAgent, sourceKind = "channel", "channel_message"
+		case strings.HasPrefix(kind, "raw:"):
+			payload = strings.TrimPrefix(kind, "raw:")
+		}
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		if _, err := raw.ExecContext(context.Background(), `
+			INSERT INTO agent_inbox(
+				id,task_id,round_id,target_agent_id,source_agent_id,source_kind,source_turn_id,message_id,
+				content,payload_json,status,batch_id,created_at,claimed_at,processed_at
+			) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			domain.NewID("inbox"), task.ID, turn.RoundID, "main", sourceAgent, sourceKind,
+			"", "", "hello", payload, "claimed", turn.InboxBatchID, now, now, "",
+		); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

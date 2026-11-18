@@ -545,6 +545,33 @@ func (s *Store) enqueueChannelMessage(
 	return round, inbox, createdRound, true, nil
 }
 
+// InboxBatchHasChannelContext reports whether any message in the batch carries
+// a channel context. It answers a different question than
+// ChannelContextForInboxBatch, which requires every message to share one
+// channel context and returns sql.ErrNoRows as soon as a plain message appears:
+// a batch that mixes a plain message with a channel message must still be
+// treated as channel-bound by the knowledge MCP gate. Malformed payloads are an
+// error so callers fail closed instead of silently classifying the batch as
+// plain.
+func (s *Store) InboxBatchHasChannelContext(ctx context.Context, batchID string) (bool, error) {
+	if batchID == "" {
+		return false, nil
+	}
+	var invalid, channel int64
+	err := s.db.QueryRowContext(ctx, `
+SELECT COALESCE(SUM(CASE WHEN json_valid(payload_json) AND json_type(payload_json)='object' THEN 0 ELSE 1 END),0),
+       COALESCE(SUM(CASE WHEN json_valid(payload_json) AND json_type(payload_json)='object'
+                          AND json_type(payload_json,'$.channel_context') IS NOT NULL THEN 1 ELSE 0 END),0)
+FROM agent_inbox WHERE batch_id=?`, batchID).Scan(&invalid, &channel)
+	if err != nil {
+		return false, err
+	}
+	if invalid > 0 {
+		return false, errors.New("inbox batch contains a malformed payload")
+	}
+	return channel > 0, nil
+}
+
 func (s *Store) ChannelContextForInboxBatch(ctx context.Context, batchID string) (map[string]any, error) {
 	if batchID == "" {
 		return nil, sql.ErrNoRows
