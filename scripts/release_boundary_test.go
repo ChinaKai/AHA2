@@ -102,24 +102,23 @@ func TestOperatorDeployScriptsRemoved(t *testing.T) {
 	}
 }
 
-// TestNoResidualOperatorDeployReferences is the repository-wide side of the
-// same boundary. Adding a deleted script name back to a doc, build script or
-// test turns this red; a "deprecated" section naming them would also fail, so
-// docs must describe the replacement instead of keeping the old usage.
-func TestNoResidualOperatorDeployReferences(t *testing.T) {
-	root := repoRoot(t)
-	self := "scripts/release_boundary_test.go"
+// scanReferenceFiles walks root and returns every text file it read, relative
+// to root, after passing its content to visit. skipRel excludes one path, which
+// the repository-wide test uses for its own source. ignoredReferenceDirs prunes
+// generated output and dependency trees.
+func scanReferenceFiles(root, skipRel string, visit func(rel string, data []byte)) ([]string, error) {
 	scanned := make([]string, 0, 512)
-	required := map[string]bool{
-		"README.md":                        false,
-		"docs/deployment.md":               false,
-		"local_build.sh":                   false,
-		"scripts/build-windows-package.sh": false,
-	}
-
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
+		}
+		// WalkDir does not follow symlinks, so a symlinked directory arrives
+		// here as a non-directory entry and reading it fails with EISDIR (the
+		// main checkout has .tools/go pointing at the Go toolchain). Links can
+		// also point outside the checkout, so skip them instead of resolving
+		// them; regular files and directories are still scanned.
+		if entry.Type()&os.ModeSymlink != 0 {
+			return nil
 		}
 		if entry.IsDir() {
 			if path == root {
@@ -135,7 +134,7 @@ func TestNoResidualOperatorDeployReferences(t *testing.T) {
 			return err
 		}
 		rel = filepath.ToSlash(rel)
-		if rel == self {
+		if rel == skipRel {
 			return nil
 		}
 		info, err := entry.Info()
@@ -153,13 +152,78 @@ func TestNoResidualOperatorDeployReferences(t *testing.T) {
 			return nil // binary
 		}
 		scanned = append(scanned, rel)
+		if visit != nil {
+			visit(rel, data)
+		}
+		return nil
+	})
+	return scanned, err
+}
+
+// TestReferenceSweepSkipsSymlinkedDirectories pins the fix for the main
+// checkout: .tools/go is a gitignored symlink to the Go toolchain, and reading
+// it as a file failed with EISDIR. The sweep must skip the link instead of
+// following it, while still finding a real reference in an ordinary file.
+func TestReferenceSweepSkipsSymlinkedDirectories(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(t.TempDir(), "toolchain")
+	if err := os.MkdirAll(filepath.Join(target, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(root, "tools-go")); err != nil {
+		t.Skipf("platform cannot create symlinked directories: %v", err)
+	}
+	docs := filepath.Join(root, "docs")
+	if err := os.MkdirAll(docs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(docs, "legacy.md"), []byte("powershell -File scripts\\deploy-windows.ps1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "notes.md"), []byte("release notes\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var found []string
+	scanned, err := scanReferenceFiles(root, "", func(rel string, data []byte) {
+		if name := referencesRemovedScript(string(data)); name != "" {
+			found = append(found, rel+" -> "+name)
+		}
+	})
+	if err != nil {
+		t.Fatalf("sweep failed on a symlinked directory: %v", err)
+	}
+	sort.Strings(scanned)
+	want := []string{"docs/legacy.md", "notes.md"}
+	if strings.Join(scanned, ",") != strings.Join(want, ",") {
+		t.Errorf("scanned %v, want %v", scanned, want)
+	}
+	if len(found) != 1 || found[0] != "docs/legacy.md -> deploy-windows" {
+		t.Errorf("reference detection = %v, want the ordinary file to be flagged", found)
+	}
+}
+
+// TestNoResidualOperatorDeployReferences is the repository-wide side of the
+// same boundary. Adding a deleted script name back to a doc, build script or
+// test turns this red; a "deprecated" section naming them would also fail, so
+// docs must describe the replacement instead of keeping the old usage.
+func TestNoResidualOperatorDeployReferences(t *testing.T) {
+	root := repoRoot(t)
+	self := "scripts/release_boundary_test.go"
+	required := map[string]bool{
+		"README.md":                        false,
+		"docs/deployment.md":               false,
+		"local_build.sh":                   false,
+		"scripts/build-windows-package.sh": false,
+	}
+
+	scanned, err := scanReferenceFiles(root, self, func(rel string, data []byte) {
 		if _, ok := required[rel]; ok {
 			required[rel] = true
 		}
 		if name := referencesRemovedScript(string(data)); name != "" {
 			t.Errorf("%s still references the removed operator script %s", rel, name)
 		}
-		return nil
 	})
 	if err != nil {
 		t.Fatalf("walk repository: %v", err)
