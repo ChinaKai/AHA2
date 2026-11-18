@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -71,8 +72,36 @@ func (s *Service) agentSnapshotWritable(ctx context.Context, task domain.Task, s
 	if err != nil {
 		return false
 	}
-	filesystem, _ := parsePermissionsJSON(snapshot.PermissionsJSON)
-	return filesystem != "read-only"
+	return strictSnapshotWritable(snapshot.PermissionsJSON)
+}
+
+// strictSnapshotWritable accepts only an explicit, well-formed permission
+// snapshot. The general runtime parser is deliberately tolerant for legacy
+// snapshots, but a tolerant result must never turn an abnormal snapshot into a
+// write grant: malformed JSON, null, wrong field types, missing fields and
+// unknown or differently-cased filesystem values all fail closed.
+func strictSnapshotWritable(permissionsJSON string) bool {
+	var payload struct {
+		Filesystem *string `json:"filesystem"`
+		Approval   *string `json:"approval"`
+	}
+	if err := json.Unmarshal([]byte(permissionsJSON), &payload); err != nil {
+		return false
+	}
+	if payload.Filesystem == nil || payload.Approval == nil {
+		return false
+	}
+	switch *payload.Approval {
+	case "never", "auto":
+	default:
+		return false
+	}
+	switch *payload.Filesystem {
+	case "workspace-write", "danger-full-access":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Service) agentWriteCallContext(ctx context.Context, claims agentapi.Claims) (AgentCallContext, error) {

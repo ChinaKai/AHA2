@@ -107,6 +107,21 @@ func (s *Service) mcpRuntimeForTask(ctx context.Context, task domain.Task, agent
 	}
 	servers := make([]backend.MCPServer, 0, len(ids)+1)
 	allowed := make([]string, 0)
+	// Namespaces that a built-in server will occupy in this Turn. A legacy
+	// user server that normalizes onto one of them must be skipped: Codex
+	// renders the namespace as a TOML key, and two tables with the same key
+	// make the backend configuration invalid.
+	builtinNamespaces := map[string]string{
+		normalizedMCPIdentifier(coreMCPName):    "core",
+		normalizedMCPIdentifier(channelMCPName): "channel",
+		normalizedMCPIdentifier(mailMCPName):    "mail",
+		normalizedMCPIdentifier("aha2-pet"):     "pet",
+		normalizedMCPIdentifier("mcp_core"):     "core",
+		normalizedMCPIdentifier("mcp_channel"):  "channel",
+		normalizedMCPIdentifier("mcp_mail"):     "mail",
+		normalizedMCPIdentifier("mcp_pet"):      "pet",
+	}
+	seenNamespaces := map[string]string{}
 	if len(ids) > 0 {
 		stored, err := s.store.ListMCPServers(ctx)
 		if err == nil {
@@ -132,8 +147,19 @@ func (s *Service) mcpRuntimeForTask(ctx context.Context, task domain.Task, agent
 					}
 					servers = append(servers, petServer)
 					allowed = append(allowed, petMCPAllowedTools(task)...)
+					seenNamespaces[normalizedMCPIdentifier("aha2-pet")] = server.ID
 					continue
 				}
+				namespace := normalizedMCPIdentifier(server.ID)
+				if builtin, reserved := builtinNamespaces[namespace]; reserved {
+					log.Printf("mcp server %s skipped: normalized namespace collides with built-in %s", server.ID, builtin)
+					continue
+				}
+				if previous, duplicate := seenNamespaces[namespace]; duplicate {
+					log.Printf("mcp server %s skipped: normalized namespace duplicates %s", server.ID, previous)
+					continue
+				}
+				seenNamespaces[namespace] = server.ID
 				server = s.refreshMCPToolsIfStale(ctx, server)
 				if server.Transport == "stdio" && server.Command != "" {
 					command, args := mcpStdioCommand(server)

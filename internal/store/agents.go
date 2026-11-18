@@ -549,6 +549,9 @@ func (s *Store) PendingAgentInbox(ctx context.Context, taskID, agentID string) (
 	return result, rows.Err()
 }
 
+// ClaimOwnerInboxForTurn claims pending owner and peer-Task messages for the
+// model-driven inbox/wait endpoint. Both kinds stay ordered by inbox sequence
+// and only rows in the current round and after the caller's cursor qualify.
 func (s *Store) ClaimOwnerInboxForTurn(
 	ctx context.Context,
 	taskID, agentID, roundID, turnID string,
@@ -566,7 +569,7 @@ func (s *Store) ClaimOwnerInboxForTurn(
 	rows, err := tx.QueryContext(ctx, `
 		SELECT `+inboxColumns+` FROM agent_inbox
 		WHERE task_id=? AND target_agent_id=? AND round_id=? AND sequence>?
-		  AND source_kind='owner_message' AND status='pending'
+		  AND source_kind IN ('owner_message','peer_task_message') AND status='pending'
 		ORDER BY sequence LIMIT ?`,
 		taskID, agentID, roundID, after, limit,
 	)
@@ -648,12 +651,12 @@ func (s *Store) RequeueClaimedInboxForTurn(ctx context.Context, turnID string) (
 	return int(affected), nil
 }
 
-// ClaimOwnerInboxForLiveInjection atomically claims pending owner/channel and
-// pet-delegated messages for a running turn without waiting. A claim is not a
-// delivery: it stays claimed_in_turn until the backend confirms the steer (Ack)
-// or fails to inject it (Nack). Unlike the model-driven Wait endpoint, this is
-// called by the DSH control plugin at tool boundaries inside the current turn.
-// Other routed source kinds stay on the Turn-boundary path.
+// ClaimOwnerInboxForLiveInjection atomically claims pending owner/channel,
+// pet-delegated and peer-Task messages for a running turn without waiting. A
+// claim is not a delivery: it stays claimed_in_turn until the backend confirms
+// the steer (Ack) or fails to inject it (Nack). Unlike the model-driven Wait
+// endpoint, this is called by the DSH control plugin at tool boundaries inside
+// the current turn. Other routed source kinds stay on the Turn-boundary path.
 func (s *Store) ClaimOwnerInboxForLiveInjection(
 	ctx context.Context,
 	taskID, agentID, roundID, turnID string,
@@ -670,7 +673,7 @@ func (s *Store) ClaimOwnerInboxForLiveInjection(
 	rows, err := tx.QueryContext(ctx, `
 		SELECT `+inboxColumns+` FROM agent_inbox
 		WHERE task_id=? AND target_agent_id=? AND round_id=?
-		  AND source_kind IN ('owner_message','pet_delegate_message') AND status='pending'
+		  AND source_kind IN ('owner_message','pet_delegate_message','peer_task_message') AND status='pending'
 		ORDER BY sequence LIMIT ?`,
 		taskID, agentID, roundID, limit,
 	)

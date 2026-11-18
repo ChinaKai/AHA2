@@ -469,6 +469,23 @@ func TestCodexRolloutWaitsForCompleteLinesAndSkipsKnownText(t *testing.T) {
 	}
 }
 
+func TestCodexMCPConfigDeduplicatesNormalizedNamespaces(t *testing.T) {
+	t.Parallel()
+	config := codexMCPConfigTOML([]MCPServer{
+		{Name: "aha2_core", Transport: "http", URL: "http://core.example/mcp"},
+		{Name: "aha2-core", Transport: "http", URL: "http://alias.example/mcp"},
+		{Name: "AHA2-CORE", Transport: "http", URL: "http://case.example/mcp"},
+	})
+	if count := strings.Count(config, "[mcp_servers.aha2_core]"); count != 1 {
+		t.Fatalf("normalized core table count=%d config:\n%s", count, config)
+	}
+	for _, collision := range []string{"http://alias.example/mcp", "http://case.example/mcp", "mcp_servers.AHA2_CORE"} {
+		if strings.Contains(config, collision) {
+			t.Fatalf("duplicate normalized MCP table leaked %q:\n%s", collision, config)
+		}
+	}
+}
+
 func TestCodexArgumentsKeepMCPOutOfArgv(t *testing.T) {
 	t.Parallel()
 	request := Request{

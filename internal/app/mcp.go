@@ -59,6 +59,32 @@ func (s *Service) MCPServers(ctx context.Context) ([]domain.MCPServer, error) {
 			items[index].Tools = petMCPToolDetails()
 		}
 	}
+	// Legacy rows could predate the reserved-namespace validation. Surface a
+	// conflict instead of silently rendering two backend tables with the same
+	// normalized key; runtime injection skips these entries as well.
+	seenMCPNamespaces := map[string]string{}
+	for index := range items {
+		namespace := normalizedMCPIdentifier(items[index].ID)
+		if namespace == "" {
+			continue
+		}
+		if reservedMCPIdentifier(items[index].ID) {
+			items[index].Health = "error"
+			items[index].LastError = "MCP ID uses the reserved aha2_* namespace after normalization; this server is not injected"
+			continue
+		}
+		if !items[index].Builtin && isBuiltinMCPIdentifier(items[index].ID) {
+			items[index].Health = "error"
+			items[index].LastError = "MCP ID conflicts with a built-in MCP namespace after normalization; this server is not injected"
+			continue
+		}
+		if previous, ok := seenMCPNamespaces[namespace]; ok && previous != items[index].ID {
+			items[index].Health = "error"
+			items[index].LastError = fmt.Sprintf("MCP ID conflicts with %s after normalization; this server is not injected", previous)
+			continue
+		}
+		seenMCPNamespaces[namespace] = items[index].ID
+	}
 	// The channel MCP is turn-scoped: its URL and token come from the current
 	// Agent capability and it is attached only to channel-routed Turns. Keep it
 	// virtual instead of persisting a server whose address would be misleading,
@@ -148,21 +174,41 @@ func (s *Service) channelMCPDetail() domain.MCPServer {
 	}
 }
 
+// normalizedMCPIdentifier mirrors the namespace normalization applied by an
+// MCP backend that has to express a server name as a TOML key: case is folded
+// and hyphen/dot separators become underscores. It is used only for collision
+// and reserved-namespace checks; stored and rendered names are never rewritten.
+func normalizedMCPIdentifier(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.ReplaceAll(value, "-", "_")
+	value = strings.ReplaceAll(value, ".", "_")
+	return value
+}
+
+func isBuiltinMCPIdentifier(value string) bool {
+	switch normalizedMCPIdentifier(value) {
+	case "mcp_pet", "mcp_channel", "mcp_mail", "mcp_core":
+		return true
+	}
+	return false
+}
+
 // reservedMCPIdentifier reports whether a server ID or display name falls in
 // the aha2_* namespace reserved for built-in, Turn-scoped MCP servers. A user
-// server must never shadow a built-in tool namespace.
+// server must never shadow a built-in tool namespace, including a hyphen, dot
+// or case variant that a backend would normalize onto the same key.
 func reservedMCPIdentifier(value string) bool {
-	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(value)), "aha2_")
+	return strings.HasPrefix(normalizedMCPIdentifier(value), "aha2_")
 }
 
 func (s *Service) SaveMCPServer(ctx context.Context, item domain.MCPServer) (domain.MCPServer, error) {
 	item.ID = strings.TrimSpace(item.ID)
-	if item.ID == "mcp_pet" || item.ID == "mcp_channel" || item.ID == "mcp_mail" || item.ID == "mcp_core" {
+	if isBuiltinMCPIdentifier(item.ID) {
 		return domain.MCPServer{}, fmt.Errorf("builtin MCP cannot be modified")
 	}
 	item.Name = strings.TrimSpace(item.Name)
 	if reservedMCPIdentifier(item.ID) || reservedMCPIdentifier(item.Name) {
-		return domain.MCPServer{}, fmt.Errorf("aha2_ MCP namespace is reserved")
+		return domain.MCPServer{}, fmt.Errorf("MCP ID or name uses the reserved aha2_* namespace after normalization")
 	}
 	item.URL = strings.TrimSpace(item.URL)
 	item.Transport = strings.TrimSpace(strings.ToLower(item.Transport))
@@ -182,11 +228,16 @@ func (s *Service) SaveMCPServer(ctx context.Context, item domain.MCPServer) (dom
 		return domain.MCPServer{}, fmt.Errorf("stdio MCP command is required")
 	}
 	existing, err := s.store.ListMCPServers(ctx)
-	if err == nil {
-		for _, server := range existing {
-			if server.Builtin && server.ID == item.ID {
-				return domain.MCPServer{}, fmt.Errorf("builtin MCP cannot be modified")
-			}
+	if err != nil {
+		return domain.MCPServer{}, fmt.Errorf("list MCP servers: %w", err)
+	}
+	normalizedID := normalizedMCPIdentifier(item.ID)
+	for _, server := range existing {
+		if server.Builtin && normalizedMCPIdentifier(server.ID) == normalizedID {
+			return domain.MCPServer{}, fmt.Errorf("builtin MCP cannot be modified")
+		}
+		if item.ID != "" && server.ID != item.ID && normalizedMCPIdentifier(server.ID) == normalizedID {
+			return domain.MCPServer{}, fmt.Errorf("MCP ID conflicts with existing server %q after normalization", server.ID)
 		}
 	}
 	if item.ID == "" {

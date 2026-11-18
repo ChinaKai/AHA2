@@ -465,17 +465,36 @@ func codexMCPDiagnosticEvent(skipped []string) Event {
 // server command/args nor its env and headers reach the process command line.
 func codexMCPConfigTOML(servers []MCPServer) string {
 	var output strings.Builder
+	seen := map[string]bool{}
 	for _, server := range servers {
 		name := codexMCPKey(server.Name)
 		if name == "" {
 			continue
 		}
-		prefix := "mcp_servers." + name
-		switch strings.ToLower(strings.TrimSpace(server.Transport)) {
+		transport := strings.ToLower(strings.TrimSpace(server.Transport))
+		switch transport {
 		case "stdio":
 			if strings.TrimSpace(server.Command) == "" {
 				continue
 			}
+		case "http":
+			if strings.TrimSpace(server.URL) == "" {
+				continue
+			}
+		default:
+			continue
+		}
+		// Codex stores each server under a TOML key. Names that differ only by
+		// case or a hyphen/underscore separator normalize to the same key, so
+		// the first registration wins instead of emitting a duplicate table.
+		namespace := strings.ToLower(name)
+		if seen[namespace] {
+			continue
+		}
+		seen[namespace] = true
+		prefix := "mcp_servers." + name
+		switch transport {
+		case "stdio":
 			output.WriteString("\n[" + prefix + "]\n")
 			output.WriteString("default_tools_approval_mode = " + tomlString("approve") + "\n")
 			output.WriteString("command = " + tomlString(server.Command) + "\n")

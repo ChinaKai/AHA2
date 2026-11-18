@@ -33,14 +33,29 @@ func (s *Server) agentCoreMCP(writer http.ResponseWriter, request *http.Request)
 		writeError(writer, http.StatusUnauthorized, "agent_capability_required")
 		return
 	}
-	request.Body = http.MaxBytesReader(writer, request.Body, agentCoreMCPMaxRequestBytes)
-	var payload mcpRequest
-	if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+	// Read the whole request before dispatch. Decoding straight from the body
+	// stops after the first JSON value, which would leave trailing whitespace
+	// or a second value beyond the 1 MiB budget unexamined.
+	body, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, agentCoreMCPMaxRequestBytes))
+	if err != nil {
 		var limit *http.MaxBytesError
 		if errors.As(err, &limit) {
 			writeError(writer, http.StatusRequestEntityTooLarge, "request_too_large")
 			return
 		}
+		writeError(writer, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	// A JSON-RPC request is one object. Reject an empty body, null, arrays and
+	// primitives before decoding; json.Unmarshal accepts exactly one value plus
+	// surrounding whitespace, so a second value or trailing garbage also fails.
+	trimmed := bytes.TrimLeft(body, " \t\r\n")
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		writeError(writer, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	var payload mcpRequest
+	if json.Unmarshal(body, &payload) != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_json")
 		return
 	}

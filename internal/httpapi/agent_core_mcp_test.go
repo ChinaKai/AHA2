@@ -1,9 +1,13 @@
 package httpapi
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -273,6 +277,95 @@ func TestAgentCoreMCPRejectsForwardedHeadersAndOversizedBody(t *testing.T) {
 	response.Body.Close()
 }
 
+func TestAgentCoreMCPRequestBoundaryAndTrailingData(t *testing.T) {
+	h := newCoreMCPHarness(t)
+	task := createHardwareAPITask(t, h.database)
+	turn := createCoreTurn(t, h.database, task, "main", "batch-core-body")
+	token := h.issue(task.ID, "main", turn.ID)
+	url := h.server.URL + "/api/v1/agent/core/mcp"
+	valid := []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`)
+
+	exact := append(append([]byte{}, valid...),
+		bytes.Repeat([]byte(" "), int(agentCoreMCPMaxRequestBytes)-len(valid))...)
+	response := agentRequestRaw(t, url, http.MethodPost, token, exact)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("exact limit status=%d body=%s", response.StatusCode, readBody(t, response))
+	}
+	response.Body.Close()
+
+	over := append(append([]byte{}, exact...), ' ')
+	response = agentRequestRaw(t, url, http.MethodPost, token, over)
+	if response.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("one byte over limit status=%d body=%s", response.StatusCode, readBody(t, response))
+	}
+	response.Body.Close()
+
+	for name, body := range map[string][]byte{
+		"second value":        []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize"}{"jsonrpc":"2.0","id":2,"method":"ping"}`),
+		"trailing garbage":    []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize"}x`),
+		"empty body":          {},
+		"whitespace only":     []byte("  \n\t"),
+		"truncated json":      []byte(`{"jsonrpc":"2.0"`),
+		"null body":           []byte(`null`),
+		"array body":          []byte(`[]`),
+		"top-level primitive": []byte(`42`),
+	} {
+		response = agentRequestRaw(t, url, http.MethodPost, token, body)
+		if response.StatusCode != http.StatusBadRequest {
+			t.Fatalf("%s status=%d body=%s", name, response.StatusCode, readBody(t, response))
+		}
+		response.Body.Close()
+	}
+
+	chunked := coreMCPChunkedRequest(t, h.server.URL, token, valid)
+	if chunked.StatusCode != http.StatusOK {
+		t.Fatalf("chunked body status=%d body=%s", chunked.StatusCode, readBody(t, chunked))
+	}
+	chunked.Body.Close()
+}
+
+func coreMCPChunkedRequest(t *testing.T, serverURL, token string, body []byte) *http.Response {
+	t.Helper()
+	host := strings.TrimPrefix(serverURL, "http://")
+	conn, err := net.Dial("tcp", host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	path := "/api/v1/agent/core/mcp"
+	if _, err := fmt.Fprintf(conn,
+		"POST %s HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\n"+
+			"Content-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+		path, host, token,
+	); err != nil {
+		t.Fatal(err)
+	}
+	half := len(body) / 2
+	for _, chunk := range [][]byte{body[:half], body[half:]} {
+		if _, err := fmt.Fprintf(conn, "%x\r\n", len(chunk)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := conn.Write(chunk); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := conn.Write([]byte("\r\n")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := conn.Write([]byte("0\r\n\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodPost, serverURL+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.ReadResponse(bufio.NewReader(conn), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response
+}
+
 func TestAgentCoreMCPReadOnlyAndNonMainWriteRefusal(t *testing.T) {
 	h := newCoreMCPHarness(t)
 	base := createHardwareAPITask(t, h.database)
@@ -316,6 +409,52 @@ func TestAgentCoreMCPReadOnlyAndNonMainWriteRefusal(t *testing.T) {
 	status, names, _ = coreMCPToolsList(t, url, baseToken)
 	if status != http.StatusOK || len(names) != len(app.CoreMCPToolNames(true)) {
 		t.Fatalf("main tools status=%d names=%#v", status, names)
+	}
+}
+
+func TestAgentCoreMCPPermissionSnapshotFailClosed(t *testing.T) {
+	h := newCoreMCPHarness(t)
+	base := createHardwareAPITask(t, h.database)
+	url := h.server.URL + "/api/v1/agent/core/mcp"
+	scenarios := []struct {
+		name        string
+		permissions string
+		writable    bool
+	}{
+		{name: "workspace write", permissions: `{"filesystem":"workspace-write","approval":"never"}`, writable: true},
+		{name: "danger full access", permissions: `{"approval":"auto","filesystem":"danger-full-access"}`, writable: true},
+		{name: "read only", permissions: `{"filesystem":"read-only","approval":"never"}`},
+		{name: "invalid json", permissions: `{"filesystem":`},
+		{name: "null document", permissions: `null`},
+		{name: "wrong type", permissions: `{"filesystem":1,"approval":"never"}`},
+		{name: "missing filesystem", permissions: `{"approval":"never"}`},
+		{name: "unknown filesystem", permissions: `{"filesystem":"readonly","approval":"never"}`},
+		{name: "case variant", permissions: `{"filesystem":"Read-Only","approval":"never"}`},
+	}
+	for _, scenario := range scenarios {
+		t.Run(scenario.name, func(t *testing.T) {
+			task := createCoreTaskInProject(t, h, base, "")
+			turn := createCoreTurn(t, h.database, task, "main", domain.NewID("batch"))
+			setCoreSnapshotPermissions(t, h.dbPath, task.RuntimeConfigSnapshotID, scenario.permissions)
+			token := h.issue(task.ID, "main", turn.ID)
+
+			wantTools := len(app.CoreMCPToolNames(false))
+			if scenario.writable {
+				wantTools = len(app.CoreMCPToolNames(true))
+			}
+			status, names, _ := coreMCPToolsList(t, url, token)
+			if status != http.StatusOK || len(names) != wantTools {
+				t.Fatalf("tools/list status=%d names=%#v want=%d", status, names, wantTools)
+			}
+			call := coreMCPCallTool(t, url, token, "progress", map[string]any{"message": "permission probe"})
+			if scenario.writable {
+				if call.Status != http.StatusOK || call.IsError {
+					t.Fatalf("writable snapshot progress status=%d payload=%#v", call.Status, call)
+				}
+			} else if call.Status != http.StatusForbidden {
+				t.Fatalf("abnormal snapshot progress status=%d payload=%#v", call.Status, call)
+			}
+		})
 	}
 }
 
@@ -411,6 +550,101 @@ func TestAgentCoreMCPTaskScopeAndPeerMessageSource(t *testing.T) {
 		"target_task_id": peer.ID, "content": "strict", "attachment_ids": []string{"a"},
 	}); !call.IsError || call.Status != http.StatusOK {
 		t.Fatalf("unknown argument status=%d payload=%#v", call.Status, call)
+	}
+}
+
+func TestAgentCoreMCPPeerMessageLiveDelivery(t *testing.T) {
+	h := newCoreMCPHarness(t)
+	base := createHardwareAPITask(t, h.database)
+	baseTurn := createCoreTurn(t, h.database, base, "main", "batch-core-peer-source")
+	token := h.issue(base.ID, "main", baseTurn.ID)
+	url := h.server.URL + "/api/v1/agent/core/mcp"
+
+	peer := createCoreTaskInProject(t, h, base, "")
+	peerTurn := createCoreTurn(t, h.database, peer, "main", "batch-core-peer-target")
+	peerToken := h.issue(peer.ID, "main", peerTurn.ID)
+
+	if sent := coreMCPCallTool(t, url, token, "task_message", map[string]any{
+		"target_task_id": peer.ID, "content": "peer-live-first",
+	}); sent.Status != http.StatusOK || sent.IsError {
+		t.Fatalf("send first peer message status=%d payload=%#v", sent.Status, sent)
+	}
+	// A Task in another Project must not receive a peer message.
+	foreign := createHardwareAPITask(t, h.database)
+	if refused := coreMCPCallTool(t, url, token, "task_message", map[string]any{
+		"target_task_id": foreign.ID, "content": "cross-project",
+	}); refused.Status != http.StatusForbidden {
+		t.Fatalf("cross-project peer message status=%d payload=%#v", refused.Status, refused)
+	}
+
+	// The live-injection path used by DSH/Claude tool boundaries must claim the
+	// peer message for the already running target Turn.
+	response := agentRequest(t, h.server.URL+"/api/v1/agent/turn/inbox/claim", http.MethodPost, peerToken, map[string]any{
+		"limit": 10,
+	})
+	var claimed struct {
+		Messages   []domain.LiveInboxMessage `json:"messages"`
+		NextCursor int64                     `json:"next_cursor"`
+	}
+	decodeResponse(t, response, &claimed)
+	if response.StatusCode != http.StatusOK || len(claimed.Messages) != 1 {
+		t.Fatalf("live claim status=%d payload=%#v", response.StatusCode, claimed)
+	}
+	live := claimed.Messages[0]
+	if live.Content != "peer-live-first" || live.SourceKind != "peer_task_message" ||
+		live.Source.Kind != "task" || live.Source.Authority != "task_peer" || live.Source.AgentID != base.ID {
+		t.Fatalf("live peer message source=%#v payload=%#v", live.Source, live)
+	}
+	if claimed.NextCursor != live.Sequence {
+		t.Fatalf("live claim cursor=%d message sequence=%d", claimed.NextCursor, live.Sequence)
+	}
+
+	if sent := coreMCPCallTool(t, url, token, "task_message", map[string]any{
+		"target_task_id": peer.ID, "content": "peer-live-second",
+	}); sent.Status != http.StatusOK || sent.IsError {
+		t.Fatalf("send second peer message status=%d payload=%#v", sent.Status, sent)
+	}
+	now := time.Now().UTC()
+	if _, _, _, err := h.database.EnqueueOwnerMessage(h.ctx, domain.Message{
+		ID: domain.NewID("message"), TaskID: peer.ID, Role: "user", Sender: "owner",
+		Content: "owner-live-control", CreatedAt: now,
+	}, "main", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// inbox/wait is the model-driven counterpart. It must see the pending peer
+	// message as well as the owner message, keep sequence order, honour the
+	// cursor from the live claim, and not re-deliver already claimed messages.
+	response = agentRequest(t, h.server.URL+"/api/v1/agent/turn/inbox/wait", http.MethodPost, peerToken, map[string]any{
+		"after_cursor": claimed.NextCursor, "timeout_seconds": 1,
+	})
+	var waited struct {
+		Messages   []domain.LiveInboxMessage `json:"messages"`
+		NextCursor int64                     `json:"next_cursor"`
+	}
+	decodeResponse(t, response, &waited)
+	if response.StatusCode != http.StatusOK || len(waited.Messages) != 2 {
+		t.Fatalf("inbox_wait status=%d payload=%#v", response.StatusCode, waited)
+	}
+	peerMessage, ownerMessage := waited.Messages[0], waited.Messages[1]
+	if peerMessage.Content != "peer-live-second" || peerMessage.Source.Kind != "task" ||
+		peerMessage.Source.Authority != "task_peer" || peerMessage.Source.AgentID != base.ID {
+		t.Fatalf("waited peer message=%#v", peerMessage)
+	}
+	if ownerMessage.Content != "owner-live-control" || ownerMessage.Source.Kind != "owner" ||
+		ownerMessage.Source.Authority != "owner" {
+		t.Fatalf("waited owner message=%#v", ownerMessage)
+	}
+	if !(peerMessage.Sequence < ownerMessage.Sequence) {
+		t.Fatalf("inbox_wait did not preserve sequence order: %#v", waited.Messages)
+	}
+
+	response = agentRequest(t, h.server.URL+"/api/v1/agent/turn/inbox/wait", http.MethodPost, peerToken, map[string]any{
+		"after_cursor": waited.NextCursor, "timeout_seconds": 1,
+	})
+	decodeResponse(t, response, &waited)
+	if response.StatusCode != http.StatusOK || len(waited.Messages) != 0 {
+		t.Fatalf("duplicate inbox_wait status=%d payload=%#v", response.StatusCode, waited)
 	}
 }
 
@@ -527,6 +761,21 @@ func TestAgentCoreMCPMemoryAndProgressMatchHTTP(t *testing.T) {
 	keys, _ := audit["argument_keys"].([]any)
 	if len(keys) != 2 || keys[0] != "decisions" || keys[1] != "facts" {
 		t.Fatalf("audit keys=%#v", audit)
+	}
+}
+
+func setCoreSnapshotPermissions(t *testing.T, path, snapshotID, permissions string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.ExecContext(context.Background(),
+		`UPDATE runtime_config_snapshots SET permissions_json=? WHERE id=?`,
+		permissions, snapshotID,
+	); err != nil {
+		t.Fatal(err)
 	}
 }
 
