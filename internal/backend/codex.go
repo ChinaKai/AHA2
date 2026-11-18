@@ -66,6 +66,14 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 				turnErr = errors.Join(turnErr, fmt.Errorf("restore Codex MCP config: %w", cleanupErr))
 			}
 		}()
+	} else if len(request.MCPServers) > 0 {
+		// Every server was filtered out, so no block is written this Turn. The
+		// reused session home may still carry a generated table from a crashed
+		// run; leaving it would start Codex against an address the diagnostic
+		// just declared unavailable.
+		if err := restoreCodexMCPConfig(ctx, request); err != nil {
+			return Result{}, fmt.Errorf("restore Codex MCP config: %w", err)
+		}
 	}
 	// Live inbox delivery is the default whenever the transport can carry it.
 	// A non-streaming runner, or a Turn with no inbox, keeps the one-shot exec

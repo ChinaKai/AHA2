@@ -2,6 +2,7 @@ package backend
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -23,8 +24,11 @@ const (
 	mcpTestSecret     = "fake-board-token-6f1c2b7d"
 	mcpProbeEnv       = "AHA2_TEST_MCP_PROBE"
 	fakeMCPBackendEnv = "AHA2_TEST_FAKE_MCP_BACKEND"
-	mcpBackendOK      = "OK"
-	mcpBackendLeak    = "LEAK"
+	// codexInspectMode makes the fake Codex backend report its config.toml
+	// verbatim instead of requiring an MCP secret in it.
+	codexInspectMode = "codex-inspect"
+	mcpBackendOK     = "OK"
+	mcpBackendLeak   = "LEAK"
 )
 
 // TestMCPEnvProbe is not a real test. It is re-executed as the MCP server child
@@ -53,6 +57,20 @@ func testExecutable(t *testing.T) string {
 // that config, and reports the outcome through the backend's normal stream
 // protocol.
 func runFakeMCPBackend(mode string, args []string) int {
+	if mode == codexInspectMode {
+		path := filepath.Join(os.Getenv("CODEX_HOME"), "config.toml")
+		content := ""
+		raw, err := os.ReadFile(path)
+		switch {
+		case err == nil:
+			content = base64.StdEncoding.EncodeToString(raw)
+		case !os.IsNotExist(err):
+			fmt.Fprintf(os.Stderr, "fake Codex backend: read config: %v\n", err)
+			return 2
+		}
+		emitFakeMCPBackendResult("codex", "CONFIG|"+content)
+		return 0
+	}
 	var (
 		configPath string
 		secret     string
@@ -298,6 +316,102 @@ func TestDSHSecretStaysOutOfArgvAndPatchIsRemoved(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("DSH profile patch still exists after the run: %v", err)
+	}
+}
+
+// TestCodexAllFilteredMCPDoesNotLoadStaleConfig drives the real adapter: every
+// MCP server is filtered out because the reverse-tunnel address is unknown, and
+// the reused CODEX_HOME still holds the generated table plus backup a crashed
+// previous run left behind. The fake backend reports the config.toml it saw, so
+// this proves Codex could not have loaded the old address while the diagnostic
+// says the MCP was not injected.
+func TestCodexAllFilteredMCPDoesNotLoadStaleConfig(t *testing.T) {
+	executable := testExecutable(t)
+	t.Setenv(fakeClaudeModeEnv, "")
+	t.Setenv(fakeMCPBackendEnv, codexInspectMode)
+	const original = "cli_auth_credentials_store = \"file\"\n"
+	stale := codexMCPConfigTOML([]MCPServer{{
+		Name: "aha2_channel", Transport: "http",
+		URL:            "http://127.0.0.1:8766/api/v1/agent/channel/mcp",
+		BearerTokenEnv: "AHA2_AGENT_API_TOKEN",
+	}})
+	if stale == "" {
+		t.Fatal("stale generated block is empty")
+	}
+	for _, scenario := range []struct {
+		name       string
+		live       string
+		backup     string
+		wantExists bool
+		wantConfig string
+	}{
+		{
+			name: "crashed run with backup", live: original + stale, backup: original,
+			wantExists: true, wantConfig: original,
+		},
+		{
+			name: "crashed run without original", live: stale,
+			wantExists: false,
+		},
+		{
+			name: "clean config control", live: original,
+			wantExists: true, wantConfig: original,
+		},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			home := t.TempDir()
+			path := filepath.Join(home, "config.toml")
+			if err := os.WriteFile(path, []byte(scenario.live), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if scenario.backup != "" {
+				if err := os.WriteFile(path+codexMCPConfigBackupSuffix, []byte(scenario.backup), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var events []Event
+			result, err := (Codex{Binary: executable}).Execute(context.Background(), Request{
+				Runner: workspace.LocalRunner{}, WorkDir: t.TempDir(),
+				Environment:    map[string]string{"CODEX_HOME": home},
+				ReverseForward: &workspace.ReverseForward{Target: "127.0.0.1:8766", EnvName: "AHA2_AGENT_API_URL"},
+				MCPServers: []MCPServer{{
+					Name: "aha2_channel", Transport: "http",
+					URL:            "http://127.0.0.1:8766/api/v1/agent/channel/mcp",
+					URLFromEnv:     "AHA2_AGENT_API_URL",
+					BearerTokenEnv: "AHA2_AGENT_API_TOKEN",
+				}},
+			}, func(event Event) { events = append(events, event) })
+			if err != nil {
+				t.Fatalf("codex run: %v", err)
+			}
+			diagnosed := false
+			for _, event := range events {
+				if event.Data["diagnostic"] == "codex_mcp_address_unresolved" {
+					diagnosed = true
+				}
+			}
+			if !diagnosed {
+				t.Fatalf("missing MCP diagnostic: %#v", events)
+			}
+			raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(result.Reply, "CONFIG|"))
+			if err != nil {
+				t.Fatalf("fake backend reply = %q: %v", result.Reply, err)
+			}
+			seen := string(raw)
+			if strings.Contains(seen, "127.0.0.1:8766") || strings.Contains(seen, codexMCPConfigBegin) {
+				t.Fatalf("Codex started with the stale generated MCP table:\n%s", seen)
+			}
+			if scenario.wantExists {
+				if seen != scenario.wantConfig {
+					t.Fatalf("config seen by Codex = %q, want %q", seen, scenario.wantConfig)
+				}
+			} else if strings.TrimSpace(seen) != "" {
+				t.Fatalf("block-only config survived: %q", seen)
+			}
+			if _, statErr := os.Stat(path + codexMCPConfigBackupSuffix); !os.IsNotExist(statErr) {
+				t.Fatalf("backup left behind: %v", statErr)
+			}
+		})
 	}
 }
 

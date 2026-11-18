@@ -181,6 +181,49 @@ func prepareCodexMCPConfig(ctx context.Context, request Request, content string)
 	}, nil
 }
 
+// restoreCodexMCPConfig removes generated MCP state a killed earlier run left
+// behind when this Turn injects no MCP server at all. A filtered-empty list is
+// the common case: the adapter says those tools are not injected, but a reused
+// Env session whose CODEX_HOME still holds the previous generated table would
+// otherwise start Codex against the stale address. A backed-up original is
+// restored first, then any remaining generated block is stripped; a config
+// without that block is left untouched.
+func restoreCodexMCPConfig(ctx context.Context, request Request) error {
+	home := strings.TrimSpace(request.Environment["CODEX_HOME"])
+	if home == "" {
+		return nil
+	}
+	local := isLocalRunner(request.Runner)
+	path := codexConfigPath(home, local)
+	backupPath := path + codexMCPConfigBackupSuffix
+	for _, temp := range []string{path + ".tmp", backupPath + ".tmp"} {
+		if err := removeExecutionFile(ctx, request, temp, local); err != nil {
+			return fmt.Errorf("remove stale Codex config temp %s: %w", temp, err)
+		}
+	}
+	if err := recoverCodexConfigBackup(ctx, request, path, backupPath, local); err != nil {
+		return err
+	}
+	current, exists, err := readExecutionFile(ctx, request, path, local)
+	if err != nil {
+		return fmt.Errorf("read Codex config: %w", err)
+	}
+	if !exists {
+		return nil
+	}
+	stripped := stripGeneratedCodexMCPConfig(current)
+	if stripped == current {
+		return nil
+	}
+	if strings.TrimSpace(stripped) == "" {
+		return removeExecutionFile(ctx, request, path, local)
+	}
+	if err := writeExecutionFileAtomic(ctx, request, path, stripped, local); err != nil {
+		return fmt.Errorf("rewrite Codex config without stale MCP block: %w", err)
+	}
+	return nil
+}
+
 // recoverCodexConfigBackup handles a backup left by a crashed run. The backup
 // is authoritative only when the live config is missing or still contains the
 // generated block; otherwise the live config was edited and must not be

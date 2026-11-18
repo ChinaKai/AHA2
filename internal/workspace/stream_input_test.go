@@ -3,12 +3,14 @@ package workspace
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"runtime"
 	"strings"
 	"testing"
@@ -50,6 +52,37 @@ func TestSSHRunnerStreamsInputAfterStart(t *testing.T) {
 		result, runErr = runner.Run(context.Background(), command, func(line string) { lines <- line })
 	}()
 
+	// The exec request carries only the constant bootstrap. The environment
+	// (including the Turn capability) must arrive on stdin as a base64 metadata
+	// line, followed by the backend's own stream.
+	received := <-commands
+	if received != streamBootstrapCommand() {
+		t.Fatalf("remote command = %q, want the constant bootstrap", received)
+	}
+	if strings.Contains(received, "a'b") || strings.Contains(received, "AHA2_AGENT_API_TOKEN") {
+		t.Fatalf("exec request leaked Turn environment: %q", received)
+	}
+	metadataLine := <-lines
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(metadataLine, "echo:"))
+	if err != nil {
+		t.Fatalf("bootstrap metadata is not base64: %q: %v", metadataLine, err)
+	}
+	wantScript, err := streamRemoteScript(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(decoded) != wantScript {
+		t.Fatalf("metadata script = %q, want %q", decoded, wantScript)
+	}
+	if strings.Contains(wantScript, "base64 -d") {
+		t.Fatalf("streaming script consumes stdin instead of forwarding it: %s", wantScript)
+	}
+	if !strings.Contains(wantScript, "exec 'claude' '-p' '--input-format' 'stream-json'") {
+		t.Fatalf("script does not exec the backend with inherited stdin: %s", wantScript)
+	}
+	if !strings.Contains(wantScript, "<&3") {
+		t.Fatalf("script does not hand fd 3 to the backend: %s", wantScript)
+	}
 	waitTestLine(t, lines, "echo:initial")
 	input <- "second\n"
 	waitTestLine(t, lines, "echo:second")
@@ -59,28 +92,48 @@ func TestSSHRunnerStreamsInputAfterStart(t *testing.T) {
 	if runErr != nil || result.ExitCode != 0 {
 		t.Fatalf("result=%#v err=%v", result, runErr)
 	}
-
-	// The script must travel as an argument, never as the session's stdin: a
-	// "sh -s" script would consume the channel the backend needs.
-	received := <-commands
-	if !strings.HasPrefix(received, "sh -c ") {
-		t.Fatalf("remote command does not run a script argument: %q", received)
+	if err := <-serverErrors; err != nil {
+		t.Fatalf("ssh server: %v", err)
 	}
-	wantScript, err := streamRemoteScript(command)
+}
+
+// TestStreamBootstrapKeepsTurnEnvironmentOutOfArgv runs the constant bootstrap
+// under a real shell. The script that exports the Turn environment is carried
+// only on stdin, so the exec argument stays free of the capability token, and
+// fd 3 still hands the backend the rest of the stream.
+func TestStreamBootstrapKeepsTurnEnvironmentOutOfArgv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs a POSIX sh")
+	}
+	command := Command{
+		Executable: "sh",
+		Args:       []string{"-c", `printf 'TOKEN=%s\n' "$AHA2_AGENT_API_TOKEN"; cat`},
+		Env:        map[string]string{"AHA2_AGENT_API_TOKEN": "secret-turn-token"},
+		Stdin:      "first\n",
+	}
+	bootstrap := streamBootstrapCommand()
+	if strings.Contains(bootstrap, "secret-turn-token") || strings.Contains(bootstrap, "AHA2_AGENT_API_TOKEN") {
+		t.Fatalf("bootstrap argument leaked the Turn environment: %q", bootstrap)
+	}
+	metadata, err := streamRemoteMetadata(command)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "sh -c " + shellQuote(wantScript); received != want {
-		t.Fatalf("remote command = %q, want %q", received, want)
+	if strings.Contains(metadata, "secret-turn-token") {
+		// The metadata is base64 on purpose; plaintext here would mean the helper
+		// stopped encoding and the token would sit in the stdin contract.
+		t.Fatalf("metadata is not encoded: %q", metadata)
 	}
-	if strings.Contains(wantScript, "base64 -d") {
-		t.Fatalf("streaming script consumes stdin instead of forwarding it: %s", wantScript)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	process := exec.CommandContext(ctx, "sh", "-c", bootstrap)
+	process.Stdin = strings.NewReader(metadata + command.Stdin + "second\n")
+	output, err := process.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bootstrap failed: %v\n%s", err, output)
 	}
-	if !strings.Contains(wantScript, "exec 'claude' '-p' '--input-format' 'stream-json'") {
-		t.Fatalf("script does not exec the backend with inherited stdin: %s", wantScript)
-	}
-	if err := <-serverErrors; err != nil {
-		t.Fatalf("ssh server: %v", err)
+	if want := "TOKEN=secret-turn-token\nfirst\nsecond\n"; string(output) != want {
+		t.Fatalf("output = %q, want %q", output, want)
 	}
 }
 
@@ -106,6 +159,10 @@ func TestSSHRunnerStreamingInputReturnsOnCancel(t *testing.T) {
 		}, func(line string) { lines <- line })
 		done <- err
 	}()
+	metadataLine := <-lines
+	if _, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(metadataLine, "echo:")); err != nil {
+		t.Fatalf("bootstrap metadata is not base64: %q: %v", metadataLine, err)
+	}
 	waitTestLine(t, lines, "echo:initial")
 	cancel()
 	select {
@@ -237,6 +294,9 @@ func TestStreamRemoteScriptLeavesStdinForBackend(t *testing.T) {
 	if !strings.Contains(streamed, "exec 'claude' '--input-format' 'stream-json'") {
 		t.Fatalf("streaming script does not exec the backend: %s", streamed)
 	}
+	if !strings.Contains(streamed, "<&3") {
+		t.Fatalf("streaming script does not use the preserved stdin: %s", streamed)
+	}
 	oneShot, err := remoteScript(command)
 	if err != nil {
 		t.Fatal(err)
@@ -265,18 +325,26 @@ func TestWSLHostCommandStreamsScriptAsArgument(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(host.Args) != 6 || host.Args[0] != "-d" || host.Args[1] != "Ubuntu" || host.Args[2] != "-e" ||
-		host.Args[3] != "bash" || host.Args[4] != "-c" {
-		t.Fatalf("host args = %#v, want wsl -d Ubuntu -e bash -c <script>", host.Args)
+		host.Args[3] != "bash" || host.Args[4] != "-c" || host.Args[5] != streamBootstrapCommand() {
+		t.Fatalf("host args = %#v, want wsl -d Ubuntu -e bash -c <bootstrap>", host.Args)
 	}
-	script := host.Args[5]
-	if strings.Contains(script, "base64 -d") {
-		t.Fatalf("streaming script consumes stdin: %s", script)
+	if strings.Contains(host.Args[5], "AHA2_AGENT_API_URL") || strings.Contains(host.Args[5], "claude") {
+		t.Fatalf("command line leaked the environment-bearing script: %q", host.Args[5])
 	}
-	if !strings.Contains(script, "exec 'claude' '--input-format' 'stream-json'") {
-		t.Fatalf("script does not exec the backend: %s", script)
+	metadata, err := streamRemoteMetadata(command)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if host.Stdin != command.Stdin || host.Input != input {
+	if host.Stdin != metadata+command.Stdin || host.Input != input {
 		t.Fatalf("stdin wiring lost: stdin=%q input=%v", host.Stdin, host.Input)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(metadata))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(decoded), "exec 'claude' '--input-format' 'stream-json'") ||
+		!strings.Contains(string(decoded), "<&3") {
+		t.Fatalf("metadata script lost the backend exec: %s", decoded)
 	}
 	if host.Timeout != command.Timeout || !host.KillTree || host.OutputLimit != command.OutputLimit {
 		t.Fatalf("limits lost: %#v", host)
@@ -338,6 +406,10 @@ func TestWSLRunnerFeedsStreamingInputToHostProcess(t *testing.T) {
 			Executable: "claude", Stdin: "initial\n", Input: input, Timeout: 60 * time.Second,
 		}, func(line string) { lines <- line })
 	}()
+	metadataLine := <-lines
+	if _, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(metadataLine, "echo:")); err != nil {
+		t.Fatalf("bootstrap metadata is not base64: %q: %v", metadataLine, err)
+	}
 	waitTestLine(t, lines, "echo:initial")
 	input <- "second\n"
 	waitTestLine(t, lines, "echo:second")

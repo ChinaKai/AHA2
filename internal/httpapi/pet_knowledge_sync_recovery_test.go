@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -124,7 +123,7 @@ func TestPetRecoverKnowledgeSyncClearsPauseWithoutClosingNotifications(t *testin
 	if status := syncer.Status(); !status.Paused || !status.Conflict || status.PauseReason != "conflict" {
 		t.Fatalf("expected conflict pause: %+v", status)
 	}
-	state := petWorkStateHTTP(t, client, server.URL)
+	state := petWorkStateHTTP(t, client, server.URL, petToken)
 	if len(state.Notifications) != 1 {
 		t.Fatalf("work state notifications=%#v", state.Notifications)
 	}
@@ -133,21 +132,30 @@ func TestPetRecoverKnowledgeSyncClearsPauseWithoutClosingNotifications(t *testin
 		t.Fatalf("notification kind=%q", state.Notifications[0].Kind)
 	}
 
-	// Only the pet Task's capability may recover install-wide sync state.
-	rejectText, rejected := petMCPToolCall(t, client, server.URL, "", "aha_recover_knowledge_sync", map[string]any{})
-	if !rejected || !strings.Contains(rejectText, "宠物 Task") {
-		t.Fatalf("unidentified recovery text=%q rejected=%v", rejectText, rejected)
-	}
-	rejectText, rejected = petMCPToolCall(t, client, server.URL, otherToken, "aha_recover_knowledge_sync", map[string]any{})
-	if !rejected || !strings.Contains(rejectText, "宠物 Task") {
-		t.Fatalf("foreign-task recovery text=%q rejected=%v", rejectText, rejected)
+	// Only the pet Task's capability may recover install-wide sync state. Both
+	// rejections happen at the HTTP layer, before any tool dispatch.
+	for _, attempt := range []struct {
+		label      string
+		token      string
+		wantStatus int
+		wantError  string
+	}{
+		{"unidentified", "", http.StatusUnauthorized, "agent_capability_required"},
+		{"foreign task", otherToken, http.StatusForbidden, app.ErrCodePetIdentityRequired},
+	} {
+		status, code := petMCPToolRejection(t, client, server.URL, attempt.token,
+			"aha_recover_knowledge_sync", map[string]any{})
+		if status != attempt.wantStatus || code != attempt.wantError {
+			t.Fatalf("%s recovery status=%d error=%q, want %d %q",
+				attempt.label, status, code, attempt.wantStatus, attempt.wantError)
+		}
 	}
 	if status := syncer.Status(); !status.Paused {
 		t.Fatalf("rejected recovery resumed sync: %+v", status)
 	}
 
 	// Recovery clears the pause but must not close the unresolved notification.
-	raw := petMCPToolTextForToken(t, client, server.URL, petToken, "aha_recover_knowledge_sync", map[string]any{})
+	raw := petMCPToolText(t, client, server.URL, petToken, "aha_recover_knowledge_sync", map[string]any{})
 	var result app.KnowledgeSyncRecoveryResult
 	if err := json.Unmarshal([]byte(raw), &result); err != nil {
 		t.Fatalf("decode recovery: %v\n%s", err, raw)
@@ -158,7 +166,7 @@ func TestPetRecoverKnowledgeSyncClearsPauseWithoutClosingNotifications(t *testin
 	if status := syncer.Status(); status.Paused || !status.Enabled {
 		t.Fatalf("recovery must clear the pause and keep auto-sync enabled: %+v", status)
 	}
-	state = petWorkStateHTTP(t, client, server.URL)
+	state = petWorkStateHTTP(t, client, server.URL, petToken)
 	if len(state.Notifications) != 1 || state.Notifications[0].ID != notificationID {
 		t.Fatalf("recovery closed an unresolved notification: %#v", state.Notifications)
 	}
@@ -169,7 +177,7 @@ func TestPetRecoverKnowledgeSyncClearsPauseWithoutClosingNotifications(t *testin
 	if status := syncer.Status(); !status.Paused || !status.Conflict || status.PauseReason != "conflict" {
 		t.Fatalf("still-diverged cycle did not pause again: %+v", status)
 	}
-	state = petWorkStateHTTP(t, client, server.URL)
+	state = petWorkStateHTTP(t, client, server.URL, petToken)
 	if len(state.Notifications) != 1 || state.Notifications[0].ID != notificationID {
 		t.Fatalf("re-pause notifications=%#v", state.Notifications)
 	}
@@ -185,7 +193,7 @@ func TestPetRecoverKnowledgeSyncClearsPauseWithoutClosingNotifications(t *testin
 	if err := os.WriteFile(filepath.Join(vaultConfig.VaultPath, "pause-window.png"), []byte("not a real png\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	raw = petMCPToolTextForToken(t, client, server.URL, petToken, "aha_recover_knowledge_sync", map[string]any{})
+	raw = petMCPToolText(t, client, server.URL, petToken, "aha_recover_knowledge_sync", map[string]any{})
 	if err := json.Unmarshal([]byte(raw), &result); err != nil {
 		t.Fatalf("decode second recovery: %v\n%s", err, raw)
 	}
@@ -202,7 +210,7 @@ func TestPetRecoverKnowledgeSyncClearsPauseWithoutClosingNotifications(t *testin
 	if status := syncer.Status(); status.Paused || status.Conflict {
 		t.Fatalf("successful sync did not clear the pause: %+v", status)
 	}
-	if state = petWorkStateHTTP(t, client, server.URL); len(state.Notifications) != 0 {
+	if state = petWorkStateHTTP(t, client, server.URL, petToken); len(state.Notifications) != 0 {
 		t.Fatalf("notifications survived a successful sync: %#v", state.Notifications)
 	}
 }

@@ -43,9 +43,9 @@ func (runner WSLRunner) Run(parent context.Context, command Command, onLine Line
 //
 // A one-shot command keeps the historical shape: the script is the stdin of
 // "bash -s" and carries any backend input inline. A streaming command cannot do
-// that, because its stdin belongs to the backend; the script moves into a
-// -c argument, so the backend inherits wsl.exe's stdin and Command.Input is fed
-// to it while it runs.
+// that, because its stdin belongs to the backend; a constant bootstrap runs as
+// the -c argument, reads the real script from a metadata line on stdin, and
+// hands the rest of the stream to the backend.
 //
 // Streaming uses -e rather than "--": everything after "--" is handed to the
 // distro's default shell for re-parsing, which loses the script's argv and
@@ -58,12 +58,16 @@ func wslHostCommand(distro string, command Command) (Command, error) {
 		KillTree:    command.KillTree,
 	}
 	if command.Input != nil {
-		script, err := streamRemoteScript(command)
+		// The script carries the Turn's environment, including its capability
+		// token, so it must not become the wsl.exe command line. Feed it as one
+		// base64 metadata line on stdin; the constant bootstrap saves stdin to
+		// fd 3, loads the script, and execs the backend on that stream.
+		metadata, err := streamRemoteMetadata(command)
 		if err != nil {
 			return Command{}, err
 		}
-		host.Args = []string{"-d", distro, "-e", "bash", "-c", script}
-		host.Stdin = command.Stdin
+		host.Args = []string{"-d", distro, "-e", "bash", "-c", streamBootstrapCommand()}
+		host.Stdin = metadata + command.Stdin
 		host.Input = command.Input
 		return host, nil
 	}

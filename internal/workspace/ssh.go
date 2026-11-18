@@ -229,20 +229,33 @@ func (runner *SSHRunner) execCommand(ctx context.Context, client *ssh.Client, co
 		return runner.execOnClient(ctx, client, windowsBootstrapCommand(), payload, command.Input, command.OutputLimit, onLine)
 	}
 	if command.Input != nil {
-		// "sh -s" would consume the session's stdin as the script, leaving the
-		// backend with nothing. Pass the script as an argument instead, so the
-		// exec'd backend inherits stdin and receives the live input.
-		script, err := streamRemoteScript(command)
+		// The script carries the Turn's environment, including its capability
+		// token. It cannot travel as a "sh -c" argument (the SSH exec request and
+		// the remote process list would expose it) and it cannot be the session's
+		// whole stdin (the backend needs that stream). Send it as one base64
+		// metadata line instead: the constant bootstrap below duplicates stdin to
+		// fd 3, decodes that line into a script, and execs the backend with fd 3.
+		metadata, err := streamRemoteMetadata(command)
 		if err != nil {
 			return Result{}, err
 		}
-		return runner.execOnClient(ctx, client, "sh -c "+shellQuote(script), command.Stdin, command.Input, command.OutputLimit, onLine)
+		return runner.execOnClient(ctx, client, streamBootstrapCommand(), metadata+command.Stdin, command.Input, command.OutputLimit, onLine)
 	}
 	script, err := remoteScript(command)
 	if err != nil {
 		return Result{}, err
 	}
 	return runner.execOnClient(ctx, client, "sh -s", script, nil, command.OutputLimit, onLine)
+}
+
+// streamBootstrapCommand is the constant remote command for a streaming run.
+// It contains no Turn data; the environment and the inner script arrive on
+// stdin as one base64 line. fd 3 keeps the session stream for the backend after
+// that line is consumed.
+func streamBootstrapCommand() string {
+	return `exec 3<&0
+IFS= read -r aha_meta || exit 1
+printf %s "$aha_meta" | base64 -d | sh -s`
 }
 
 func (runner *SSHRunner) dial(ctx context.Context) (*ssh.Client, error) {
@@ -616,9 +629,21 @@ func remoteScript(command Command) (string, error) {
 	return buildRemoteScript(command, false)
 }
 
+// streamRemoteMetadata renders the streaming bootstrap script as one base64
+// line. The caller writes it before any live input, so the remote bootstrap can
+// read exactly the metadata without touching the backend's stdin stream.
+func streamRemoteMetadata(command Command) (string, error) {
+	script, err := streamRemoteScript(command)
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString([]byte(script)) + "\n", nil
+}
+
 // streamRemoteScript builds the script for a command whose stdin is a live
 // channel. It deliberately leaves stdin unread so the exec'd backend receives
-// the caller's stream directly.
+// the caller's stream directly; the script itself runs with that stream on fd 3
+// (see streamBootstrapCommand).
 func streamRemoteScript(command Command) (string, error) {
 	return buildRemoteScript(command, true)
 }
@@ -658,6 +683,11 @@ func buildRemoteScript(command Command, streamedStdin bool) (string, error) {
 	for _, argument := range command.Args {
 		script.WriteByte(' ')
 		script.WriteString(shellQuote(argument))
+	}
+	if streamedStdin {
+		// fd 3 is the session stream saved by the bootstrap before it read the
+		// metadata line; the backend must keep receiving it while it runs.
+		script.WriteString(" <&3")
 	}
 	script.WriteByte('\n')
 	return script.String(), nil
