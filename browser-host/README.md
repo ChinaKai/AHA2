@@ -231,6 +231,7 @@ lease hold 与底层 close/navigate/open 调用窗口；真实 Edge 仍需手工
 - 下载文件保存在 `<profile-root>/.downloads/` 的会话目录，TTL 30 分钟、最多
   20 个、单个 10 MiB、累计 50 MiB。Chromium 的 `downloadsPath` 指向受控目录，
   host 在下载进行中轮询原始 artifact 大小，超限立即 cancel 并删除 artifact；
-  clear/release 等待旧 capture 退出并用 generation 隔离迟到完成，旧任务不能污染
-  新预算；释放租约或关闭会话即清理。
+  clear/release 等待旧 capture 退出并用 generation 隔离迟到完成；prune/raw 扫描
+  也校验代际与条目身份，旧任务不能删除/扣账或取消新下载；释放租约或关闭会话
+  即清理。
 - profile 删除只删 AHA 逻辑记录，host 用户数据目录会保留，需后续提供受控清理。

@@ -47,6 +47,11 @@ export function createDownloadStore(root, profileID, sessionID, options = {}) {
   const rawDir = typeof options.rawDir === "string" && options.rawDir ? options.rawDir : "";
   const rawPollMs = Number.isInteger(options.rawPollMs) && options.rawPollMs > 0
     ? options.rawPollMs : 100;
+  const clearGraceMs = Number.isInteger(options.clearGraceMs) && options.clearGraceMs > 0
+    ? options.clearGraceMs : 3000;
+  // Test-only barriers. Production never passes them.
+  const beforePruneRemove = typeof options.beforePruneRemove === "function" ? options.beforePruneRemove : null;
+  const beforeRawStat = typeof options.beforeRawStat === "function" ? options.beforeRawStat : null;
   const directory = join(root, ".downloads", profileID, sessionID);
   const entries = new Map();
   const inFlight = new Set();
@@ -74,11 +79,22 @@ export function createDownloadStore(root, profileID, sessionID, options = {}) {
     ready = true;
   };
 
+  // Accounting is released at most once per entry and only for the current
+  // generation. An old prune snapshot must not subtract a new entry's bytes
+  // after clear() reset the totals.
+  const releaseEntryBudget = entry => {
+    if (!entry.accounted) return;
+    entry.accounted = false;
+    totalBytes = Math.max(0, totalBytes - entry.size);
+  };
+
   const removeEntry = async entry => {
+    // Identity check: a stale snapshot entry is not the row currently in the
+    // map (clear()/a newer prune already removed it), so it must not delete or
+    // account anything.
+    if (entries.get(entry.id) !== entry) return;
     entries.delete(entry.id);
-    if (entry.state === "ready" && entry.size > 0) {
-      totalBytes = Math.max(0, totalBytes - entry.size);
-    }
+    if (entry.generation === generation) releaseEntryBudget(entry);
     await fs.rm(entry.path, {force: true}).catch(() => {});
   };
 
@@ -98,7 +114,9 @@ export function createDownloadStore(root, profileID, sessionID, options = {}) {
   const prune = async () => {
     const cutoff = Date.now() - ttlMs;
     for (const entry of [...entries.values()]) {
-      if (entry.createdAt >= cutoff) continue;
+      if (entry.generation !== generation || entry.createdAt >= cutoff) continue;
+      if (beforePruneRemove) await beforePruneRemove(entry);
+      if (entry.generation !== generation) continue;
       if (entry.state === "saving" && entry.download) {
         entry.state = "expired";
         await discard(entry.download);
@@ -122,9 +140,7 @@ export function createDownloadStore(root, profileID, sessionID, options = {}) {
         return null;
       }
       entries.delete(oldest.id);
-      if (oldest.state === "ready" && oldest.size > 0) {
-        totalBytes = Math.max(0, totalBytes - oldest.size);
-      }
+      if (oldest.generation === generation) releaseEntryBudget(oldest);
       evicted.push(oldest);
     }
     const id = `download-${randomBytes(12).toString("hex")}`;
@@ -137,6 +153,8 @@ export function createDownloadStore(root, profileID, sessionID, options = {}) {
       // Downloads belong to the lease fence that was installed when the page
       // activity happened. A later holder cannot list or fetch them.
       fence: String(fence || ""),
+      generation: 0,
+      accounted: false,
       state: "saving",
       download,
     };
@@ -151,17 +169,25 @@ export function createDownloadStore(root, profileID, sessionID, options = {}) {
   // the raw total) crosses the declared budget.
   const checkRaw = async () => {
     if (!rawDir) return;
+    const scanGeneration = generation;
     let names = [];
     try {
       names = await fs.readdir(rawDir);
     } catch {
       return;
     }
+    if (scanGeneration !== generation) return;
+    if (beforeRawStat) await beforeRawStat();
+    if (scanGeneration !== generation) return;
     let maximum = 0;
     let total = 0;
     let files = 0;
     for (const name of names) {
       const stat = await fs.stat(join(rawDir, name)).catch(() => null);
+      // A clear()/new capture may have replaced the directory while this scan
+      // was in flight; its observations and cancellations belong to the old
+      // generation and must not touch the new one.
+      if (scanGeneration !== generation) return;
       if (!stat || !stat.isFile()) continue;
       files += 1;
       total += stat.size;
@@ -170,7 +196,7 @@ export function createDownloadStore(root, profileID, sessionID, options = {}) {
     rawFiles = files;
     rawTotalBytes = total;
     if (maximum > rawMaxBytes) rawMaxBytes = maximum;
-    if (inFlight.size === 0) return;
+    if (inFlight.size === 0 || scanGeneration !== generation) return;
     if (maximum > maxBytes || total > maxTotalBytes) {
       rawCancels += 1;
       for (const download of [...inFlight]) {
@@ -205,6 +231,7 @@ export function createDownloadStore(root, profileID, sessionID, options = {}) {
       throw downloadFailure("too many pending downloads", "browser_download_too_many");
     }
     const {entry, evicted} = reservation;
+    entry.generation = captureGeneration;
     for (const old of evicted) {
       await fs.rm(old.path, {force: true}).catch(() => {});
     }
@@ -243,18 +270,21 @@ export function createDownloadStore(root, profileID, sessionID, options = {}) {
       } finally {
         await handle.close();
       }
-      if (captureGeneration !== generation) {
-        throw downloadFailure("download store was cleared", "browser_download_canceled");
+      if (captureGeneration !== generation || entries.get(entry.id) !== entry ||
+          entry.state !== "saving") {
+        // A newer prune/clear invalidated this row while the stream was still
+        // running. It must neither reappear in the list nor charge budget.
+        throw downloadFailure("download entry was invalidated", "browser_download_canceled");
       }
       entry.size = written;
       entry.state = "ready";
+      entry.accounted = true;
       totalBytes += written;
       return entry;
     } catch (error) {
-      failed += 1;
-      entry.state = "failed";
-      entries.delete(entry.id);
-      await fs.rm(entry.path, {force: true}).catch(() => {});
+      if (captureGeneration === generation) failed += 1;
+      if (entry.state === "saving") entry.state = "failed";
+      await removeEntry(entry);
       await discard(download);
       throw error;
     } finally {
@@ -281,25 +311,24 @@ export function createDownloadStore(root, profileID, sessionID, options = {}) {
     }
   };
 
-  const maintenance = setInterval(() => {
-    void prune().catch(() => {});
-  }, Math.max(50, Math.min(60_000, ttlMs)));
-  maintenance.unref?.();
+  const maintenance = options.disableMaintenance === true
+    ? null
+    : setInterval(() => { void prune().catch(() => {}); }, Math.max(50, Math.min(60_000, ttlMs)));
+  maintenance?.unref?.();
 
   const clearAll = async (keepRawDirectory = true) => {
     if (clearing) return clearing;
     generation += 1;
     const capturesAtClear = [...activeCaptures];
     const work = (async () => {
-      // Cancel first so streams end; then wait for the old captures to finish
-      // their per-download cleanup. The generation check above/below is the
-      // backstop if a filesystem write cannot be interrupted within the grace
-      // period: a stale capture can no longer publish or release budget.
-      for (const download of [...inFlight]) await discard(download);
-      await Promise.race([
-        Promise.allSettled(capturesAtClear),
-        sleep(3000),
-      ]);
+      // Cancel and wait under one overall deadline. A hanging cancel/delete
+      // must not block clear/close or later captures forever; the generation
+      // guard makes every late completion harmless.
+      const settle = (async () => {
+        await Promise.allSettled([...inFlight].map(download => discard(download)));
+        await Promise.allSettled(capturesAtClear);
+      })();
+      await Promise.race([settle, sleep(clearGraceMs)]);
       const pending = [...entries.values()];
       entries.clear();
       totalBytes = 0;
@@ -312,11 +341,19 @@ export function createDownloadStore(root, profileID, sessionID, options = {}) {
       rawFiles = 0;
       rawTotalBytes = 0;
       await fs.rm(directory, {recursive: true, force: true}).catch(() => {});
-      // Chromium keeps writing future downloads to the same downloadsPath;
-      // keep the controlled directory present after a release-time clear.
-      if (rawDir && keepRawDirectory) {
-        await fs.mkdir(rawDir, {recursive: true, mode: 0o700}).catch(() => {});
+      // The raw downloadsPath may be configured outside the session directory
+      // in tests; remove it explicitly so no old artifact survives a clear.
+      if (rawDir) {
+        await fs.rm(rawDir, {recursive: true, force: true}).catch(() => {});
+        // Chromium keeps writing future downloads to the same downloadsPath;
+        // keep the controlled directory present after a release-time clear.
+        if (keepRawDirectory) {
+          await fs.mkdir(rawDir, {recursive: true, mode: 0o700}).catch(() => {});
+        }
       }
+      // Captures that outlived the bounded grace stay isolated by generation;
+      // do not keep waiting on them in every later clear.
+      for (const promise of capturesAtClear) activeCaptures.delete(promise);
     })();
     clearing = work.finally(() => {
       if (clearing === wrapped) clearing = null;
@@ -386,9 +423,13 @@ export function createDownloadStore(root, profileID, sessionID, options = {}) {
     // Session close: cancel timers and pending downloads permanently.
     async close() {
       closed = true;
-      clearInterval(maintenance);
+      if (maintenance) clearInterval(maintenance);
       if (rawTimer) clearInterval(rawTimer);
       await clearAll(false);
+      // If a release-time clear was already in progress, it recreated the raw
+      // directory for future downloads. Session close must remove it again.
+      await fs.rm(directory, {recursive: true, force: true}).catch(() => {});
+      if (rawDir) await fs.rm(rawDir, {recursive: true, force: true}).catch(() => {});
     },
   };
 }

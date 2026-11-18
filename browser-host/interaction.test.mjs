@@ -547,12 +547,17 @@ test("clear waits out an old capture so it cannot publish or release into the ne
     await new Promise(resolve => setTimeout(resolve, 10));
   }
   assert.equal(store.stats().pendingBytes, 1024 * 1024);
-  const clearPromise = store.clear();
+  let clearSettled = false;
+  const clearPromise = store.clear().then(() => { clearSettled = true; });
   await new Promise(resolve => setTimeout(resolve, 50));
-  assert.equal(settled, false, "clear returned before the old capture exited");
+  // Distinguish "clear is waiting" from "clear returned while the capture is
+  // still running": both the capture and the clear promise must be unsettled.
+  assert.equal(settled, false, "old capture exited before clear");
+  assert.equal(clearSettled, false, "clear returned before the old capture exited");
   release();
   await oldCapture;
   await clearPromise;
+  assert.equal(clearSettled, true, "clear did not settle after the capture exited");
   assert.ok(canceled >= 1);
   const cleared = store.stats();
   assert.deepEqual(
@@ -621,5 +626,191 @@ test("clear during concurrent fills resets all counters and accepts a new-genera
   await store.capture(fresh, "f");
   assert.equal(store.stats().totalBytes, 4 * 1024 * 1024, JSON.stringify(store.stats()));
   assert.equal(store.stats().pendingBytes, 0);
+  await store.close();
+});
+
+
+test("a stale prune snapshot cannot delete or debit a new generation entry", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aha2-download-prune-race-"));
+  const {Readable} = await import("node:stream");
+  let releasePrune;
+  let enteredResolve;
+  const pruneGate = new Promise(resolve => { releasePrune = resolve; });
+  const entered = new Promise(resolve => { enteredResolve = resolve; });
+  let first = true;
+  const store = createDownloadStore(root, "profile", "session", {
+    maxBytes: 10 * 1024 * 1024,
+    maxTotalBytes: 50 * 1024 * 1024,
+    ttlMs: 20,
+    disableMaintenance: true,
+    beforePruneRemove: async () => {
+      if (!first) return;
+      first = false;
+      enteredResolve();
+      await pruneGate;
+    },
+  });
+  const make = (name, byte) => ({
+    suggestedFilename: () => name,
+    createReadStream: async () => Readable.from([Buffer.alloc(1024 * 1024, byte)]),
+    cancel: async () => {},
+    delete: async () => {},
+  });
+  await store.capture(make("old.bin", 0x61), "f");
+  assert.equal(store.stats().totalBytes, 1024 * 1024);
+  await new Promise(resolve => setTimeout(resolve, 40));
+  const prunePromise = store.list("f"); // expired entry pauses before removal
+  await entered;
+  await store.clear();
+  await store.capture(make("new.bin", 0x62), "f");
+  assert.equal(store.stats().totalBytes, 1024 * 1024);
+  releasePrune();
+  await prunePromise;
+  const stats = store.stats();
+  assert.equal(stats.entries, 1, JSON.stringify(stats));
+  assert.equal(stats.totalBytes, 1024 * 1024, JSON.stringify(stats));
+  const listed = await store.list("f");
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].filename, "new.bin");
+  await store.close();
+});
+
+test("TTL removal of a saving entry prevents the old capture from publishing", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aha2-download-ttl-race-"));
+  const {Readable} = await import("node:stream");
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const store = createDownloadStore(root, "profile", "session", {
+    maxBytes: 10 * 1024 * 1024,
+    maxTotalBytes: 50 * 1024 * 1024,
+    ttlMs: 50,
+  });
+  const download = {
+    suggestedFilename: () => "late.bin",
+    createReadStream: async () => Readable.from((async function* () {
+      yield Buffer.alloc(1024 * 1024, 0x61);
+      await gate;
+    })()),
+    cancel: async () => {},
+    delete: async () => {},
+  };
+  const capture = store.capture(download, "f").catch(error => error);
+  for (let attempt = 0; attempt < 100 && store.stats().pendingBytes === 0; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.equal(store.stats().pendingBytes, 1024 * 1024);
+  for (let attempt = 0; attempt < 100 && store.stats().entries !== 0; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  assert.equal(store.stats().entries, 0, "TTL did not remove the saving entry");
+  release();
+  const outcome = await capture;
+  assert.ok(outcome instanceof Error, "invalidated capture unexpectedly succeeded");
+  const stats = store.stats();
+  assert.equal(stats.entries, 0, JSON.stringify(stats));
+  assert.equal(stats.totalBytes, 0, JSON.stringify(stats));
+  assert.equal(stats.pendingBytes, 0, JSON.stringify(stats));
+  assert.deepEqual(await store.list("f"), []);
+  await store.close();
+});
+
+test("a stale raw scan cannot cancel a new-generation download", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aha2-download-raw-race-"));
+  const fsPromises = await import("node:fs/promises");
+  const rawDir = join(root, "raw");
+  await fsPromises.mkdir(rawDir, {recursive: true});
+  await fsPromises.writeFile(join(rawDir, "old-artifact"), Buffer.alloc(2 * 1024 * 1024, 0x61));
+  let releaseScan;
+  let enteredResolve;
+  const scanGate = new Promise(resolve => { releaseScan = resolve; });
+  const entered = new Promise(resolve => { enteredResolve = resolve; });
+  let first = true;
+  const store = createDownloadStore(root, "profile", "session", {
+    maxBytes: 1024 * 1024,
+    maxTotalBytes: 50 * 1024 * 1024,
+    ttlMs: 60_000,
+    rawDir,
+    rawPollMs: 10,
+    beforeRawStat: async () => {
+      if (!first) return;
+      first = false;
+      enteredResolve();
+      await scanGate;
+    },
+  });
+  await entered;
+  await store.clear();
+  const {PassThrough} = await import("node:stream");
+  let stream = null;
+  let canceled = 0;
+  const fresh = {
+    suggestedFilename: () => "fresh.bin",
+    createReadStream: async () => {
+      stream = new PassThrough();
+      return stream;
+    },
+    cancel: async () => { canceled += 1; },
+    delete: async () => {},
+  };
+  const capture = store.capture(fresh, "f");
+  for (let attempt = 0; attempt < 100 && store.stats().inFlight === 0; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.equal(store.stats().inFlight, 1);
+  releaseScan();
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(canceled, 0, "stale raw scan canceled a new download");
+  stream.write(Buffer.alloc(512 * 1024, 0x62));
+  stream.end(Buffer.alloc(512 * 1024, 0x63));
+  await capture;
+  assert.equal(store.stats().totalBytes, 1024 * 1024, JSON.stringify(store.stats()));
+  await store.close();
+});
+
+test("clear returns within its deadline when cancel hangs", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aha2-download-hang-"));
+  const {PassThrough} = await import("node:stream");
+  const store = createDownloadStore(root, "profile", "session", {
+    maxBytes: 10 * 1024 * 1024,
+    maxTotalBytes: 50 * 1024 * 1024,
+    ttlMs: 60_000,
+    clearGraceMs: 100,
+  });
+  const stream = new PassThrough();
+  const hanging = {
+    suggestedFilename: () => "hang.bin",
+    createReadStream: async () => stream,
+    cancel: () => new Promise(() => {}),
+    delete: () => new Promise(() => {}),
+  };
+  const capture = store.capture(hanging, "f").catch(() => {});
+  for (let attempt = 0; attempt < 100 && store.stats().inFlight === 0; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  const started = Date.now();
+  await store.clear();
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed >= 90, `clear returned too early: ${elapsed}ms`);
+  assert.ok(elapsed < 1000, `clear exceeded its bounded deadline: ${elapsed}ms`);
+  const stats = store.stats();
+  assert.equal(stats.entries, 0, JSON.stringify(stats));
+  assert.equal(stats.totalBytes, 0, JSON.stringify(stats));
+  assert.equal(stats.pendingBytes, 0, JSON.stringify(stats));
+
+  const fresh = {
+    suggestedFilename: () => "fresh.bin",
+    createReadStream: async () => {
+      const {Readable} = await import("node:stream");
+      return Readable.from([Buffer.alloc(1024 * 1024, 0x64)]);
+    },
+    cancel: async () => {},
+    delete: async () => {},
+  };
+  await store.capture(fresh, "f");
+  assert.equal(store.stats().totalBytes, 1024 * 1024, JSON.stringify(store.stats()));
+  stream.destroy(new Error("test complete"));
+  // cancel() never resolves, so this capture intentionally never settles; the
+  // bounded clear must still have released the store for new work.
+  void capture;
   await store.close();
 });
