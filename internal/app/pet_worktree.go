@@ -13,15 +13,32 @@ import (
 	"github.com/ChinaKai/AHA2/internal/workspace"
 )
 
+const (
+	// mergeStrategyFastForward means the target branch simply moved forward to
+	// the task branch HEAD, so target_head_after == source_head.
+	mergeStrategyFastForward = "fast_forward"
+	// mergeStrategyMergeCommit means the branches had diverged and a new merge
+	// commit was created on the target branch.
+	mergeStrategyMergeCommit = "merge_commit"
+	// mergeStrategyNone means the task branch had no commits to merge.
+	mergeStrategyNone = "none"
+)
+
 // PetFinalizeTaskWorktreeResult reports what the worktree closeout actually did.
+// The head fields let the pet quote the exact target branch HEAD and describe
+// how the task commits landed without inspecting git again.
 type PetFinalizeTaskWorktreeResult struct {
-	TaskID          string `json:"task_id"`
-	TargetBranch    string `json:"target_branch"`
-	Commits         int    `json:"commits"`
-	Merged          bool   `json:"merged"`
-	NoChanges       bool   `json:"no_changes"`
-	WorktreeRemoved bool   `json:"worktree_removed"`
-	BranchDeleted   bool   `json:"branch_deleted"`
+	TaskID           string `json:"task_id"`
+	TargetBranch     string `json:"target_branch"`
+	Commits          int    `json:"commits"`
+	Merged           bool   `json:"merged"`
+	NoChanges        bool   `json:"no_changes"`
+	MergeStrategy    string `json:"merge_strategy"`
+	SourceHead       string `json:"source_head"`
+	TargetHeadBefore string `json:"target_head_before"`
+	TargetHeadAfter  string `json:"target_head_after"`
+	WorktreeRemoved  bool   `json:"worktree_removed"`
+	BranchDeleted    bool   `json:"branch_deleted"`
 }
 
 // PetFinalizeTaskWorktree merges a completed Task's worktree back into its
@@ -96,6 +113,14 @@ func (s *Service) PetFinalizeTaskWorktree(ctx context.Context, taskID string) (P
 	if status != "" {
 		return PetFinalizeTaskWorktreeResult{}, fmt.Errorf("worktree 有未提交改动；请先在 Task 内提交或处理，未合并/清理：%s", worktreePath)
 	}
+	// The source head is the branch ref that will actually be merged, not the
+	// worktree checkout state. In a normal worktree they are identical; if a
+	// detached worktree ever diverged, the pre-delete ancestor check still
+	// refuses to remove it.
+	sourceHead, err := gitText(ctx, runner, root, "rev-parse", "--verify", taskBranch+"^{commit}")
+	if err != nil {
+		return PetFinalizeTaskWorktreeResult{}, fmt.Errorf("读取 Task 分支 HEAD 失败：%w", err)
+	}
 
 	target := strings.TrimSpace(task.TargetBranch)
 	if target == "" {
@@ -108,7 +133,8 @@ func (s *Service) PetFinalizeTaskWorktree(ctx context.Context, taskID string) (P
 	if err := validateGitRef(target); err != nil {
 		return PetFinalizeTaskWorktreeResult{}, fmt.Errorf("目标分支名不合法：%w", err)
 	}
-	if _, err := gitText(ctx, runner, root, "rev-parse", "--verify", target+"^{commit}"); err != nil {
+	targetHeadBefore, err := gitText(ctx, runner, root, "rev-parse", "--verify", target+"^{commit}")
+	if err != nil {
 		return PetFinalizeTaskWorktreeResult{}, fmt.Errorf("目标分支 %s 不存在：%w", target, err)
 	}
 	countText, err := gitText(ctx, runner, worktreePath, "rev-list", "--count", target+"..HEAD")
@@ -116,11 +142,16 @@ func (s *Service) PetFinalizeTaskWorktree(ctx context.Context, taskID string) (P
 		return PetFinalizeTaskWorktreeResult{}, fmt.Errorf("比较目标分支与 Task 分支失败：%w", err)
 	}
 	commits, _ := strconv.Atoi(strings.TrimSpace(countText))
-	result := PetFinalizeTaskWorktreeResult{TaskID: task.ID, TargetBranch: target, Commits: commits}
+	result := PetFinalizeTaskWorktreeResult{
+		TaskID: task.ID, TargetBranch: target, Commits: commits,
+		SourceHead: sourceHead, TargetHeadBefore: targetHeadBefore,
+	}
 	previousBranch := ""
 	switched := false
 	if commits == 0 {
 		result.NoChanges = true
+		result.MergeStrategy = mergeStrategyNone
+		result.TargetHeadAfter = targetHeadBefore
 		current, currentErr := gitText(ctx, runner, root, "symbolic-ref", "--short", "HEAD")
 		if currentErr != nil || strings.TrimSpace(current) == "" {
 			return result, fmt.Errorf("原 Workspace 处于 detached HEAD，无法安全清理")
@@ -165,7 +196,22 @@ func (s *Service) PetFinalizeTaskWorktree(ctx context.Context, taskID string) (P
 		ID: domain.NewID("pet_event"), At: s.now().UTC(), Actor: "pet",
 		Kind: "worktree_finalized", Detail: task.ID, Status: "completed",
 	})
+	s.auditWorktreeFinalize(ctx, result)
 	return result, nil
+}
+
+// auditWorktreeFinalize records the merge shape in audit_events. Details carry
+// only the merge strategy and commit ids; no credentials or workspace paths.
+func (s *Service) auditWorktreeFinalize(ctx context.Context, result PetFinalizeTaskWorktreeResult) {
+	ownerID, _ := s.store.PrimaryOwnerID(ctx)
+	details := map[string]any{
+		"merge_strategy":     result.MergeStrategy,
+		"source_head":        result.SourceHead,
+		"target_head_before": result.TargetHeadBefore,
+		"target_head_after":  result.TargetHeadAfter,
+		"commits":            result.Commits,
+	}
+	_ = s.store.AppendAudit(ctx, ownerID, "pet.worktree.finalize", "task", result.TaskID, details, s.now().UTC().Format(time.RFC3339Nano))
 }
 
 func (s *Service) mergeTaskWorktree(ctx context.Context, runner workspace.Runner, root, target, taskBranch, worktreePath string, result *PetFinalizeTaskWorktreeResult) (string, bool, error) {
@@ -189,6 +235,7 @@ func (s *Service) mergeTaskWorktree(ctx context.Context, runner workspace.Runner
 	}
 	if _, ffErr := gitRun(ctx, runner, root, "merge", "--ff-only", taskBranch); ffErr == nil {
 		result.Merged = true
+		result.MergeStrategy = mergeStrategyFastForward
 	} else {
 		message := fmt.Sprintf("merge %s into %s", taskBranch, target)
 		if output, err := gitRun(ctx, runner, root, "merge", "--no-ff", "-m", message, taskBranch); err != nil {
@@ -199,7 +246,13 @@ func (s *Service) mergeTaskWorktree(ctx context.Context, runner workspace.Runner
 			return "", false, fmt.Errorf("合并失败（可能有冲突），worktree 已保留：%s（%s）", worktreePath, gitErrorText(output, err))
 		}
 		result.Merged = true
+		result.MergeStrategy = mergeStrategyMergeCommit
 	}
+	targetHeadAfter, err := gitText(ctx, runner, root, "rev-parse", "--verify", target+"^{commit}")
+	if err != nil {
+		return "", false, fmt.Errorf("合并已执行，但读取目标分支 %s 的 HEAD 失败（worktree 已保留）：%w", target, err)
+	}
+	result.TargetHeadAfter = targetHeadAfter
 	return current, switched, nil
 }
 
