@@ -120,9 +120,20 @@ func openSQLiteDB(path string) (*sql.DB, error) {
 }
 
 func openSQLitePool(path string, maxConnections int) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", sqliteDSN(path))
-	if err != nil {
-		return nil, fmt.Errorf("open sqlite: %w", err)
+	dsn := sqliteDSN(path)
+	var db *sql.DB
+	if observer := sqlQueryObserver.Load(); observer != nil {
+		connector, err := sqlite.NewConnector(dsn)
+		if err != nil {
+			return nil, fmt.Errorf("open sqlite connector: %w", err)
+		}
+		db = sql.OpenDB(observedConnector{Connector: connector, observe: *observer})
+	} else {
+		var err error
+		db, err = sql.Open("sqlite", dsn)
+		if err != nil {
+			return nil, fmt.Errorf("open sqlite: %w", err)
+		}
 	}
 	if isMemoryDatabase(path) || maxConnections < 1 {
 		maxConnections = 1

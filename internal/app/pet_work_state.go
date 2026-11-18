@@ -444,6 +444,10 @@ func (s *Service) petOpenTasks(ctx context.Context, tasks []domain.Task, pending
 	for _, task := range tasks {
 		tasksByID[task.ID] = task
 	}
+	activeReviews, err := s.petActiveReviewLabels(ctx, tasks)
+	if err != nil {
+		return nil, 0, 0, err
+	}
 	ids, err := s.store.PetCreatedTaskIDs(ctx)
 	if err != nil {
 		return nil, 0, 0, err
@@ -486,10 +490,7 @@ func (s *Service) petOpenTasks(ctx context.Context, tasks []domain.Task, pending
 		}
 		activeReview := ""
 		if task.Status == domain.TaskWaitingUser {
-			activeReview, err = s.petActiveReviewLabel(ctx, task.ID, tasksByID)
-			if err != nil {
-				return nil, 0, 0, err
-			}
+			activeReview = activeReviews[task.ID]
 		}
 		item.AttentionReason = petOpenTaskAttentionReason(task.Status, domain.TurnStatus(item.LastTurnStatus), activeReview)
 		if item.AttentionReason != "" {
@@ -537,27 +538,44 @@ func petPendingApprovalTaskMap(pendingApprovals []domain.PetApproval) map[string
 	return pendingByTask
 }
 
-// petActiveReviewLabel returns the newest linked Review Task that is still in
-// flight, or "" when the source has none. The link comes from the durable
-// pet_code_reviews relation written by the review creation flow, never from
-// titles or prompts. A review that already stopped running is not progress:
-// only preparing/active reviews describe an implementation Task as under review.
-func (s *Service) petActiveReviewLabel(ctx context.Context, sourceTaskID string, tasksByID map[string]domain.Task) (string, error) {
-	reviews, err := s.store.PetCodeReviewsForSource(ctx, sourceTaskID)
+// petActiveReviewLabels returns, for each waiting source Task, the newest
+// linked Review Task that is still in flight. One store read serves every
+// source, so the query count does not grow with the number of waiting Tasks;
+// the newest preparing/active review is selected in memory. The link comes
+// from the durable pet_code_reviews relation written by the review creation
+// flow, never from titles or prompts. A review that already stopped running is
+// not progress: only preparing/active reviews describe an implementation Task
+// as under review.
+func (s *Service) petActiveReviewLabels(ctx context.Context, tasks []domain.Task) (map[string]string, error) {
+	waitingIDs := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		if task.Status == domain.TaskWaitingUser {
+			waitingIDs = append(waitingIDs, task.ID)
+		}
+	}
+	if len(waitingIDs) == 0 {
+		return nil, nil
+	}
+	linked, err := s.store.PetCodeReviewLinksBySource(ctx, waitingIDs)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	for i := len(reviews) - 1; i >= 0; i-- {
-		review, ok := tasksByID[reviews[i]]
-		if !ok || !petCodeReviewInFlight(review.Status) {
-			continue
+	labels := make(map[string]string, len(linked))
+	for sourceTaskID, reviews := range linked {
+		for i := len(reviews) - 1; i >= 0; i-- {
+			review := reviews[i]
+			if !petCodeReviewInFlight(review.Status) {
+				continue
+			}
+			label := strings.TrimSpace(review.Code)
+			if label == "" {
+				label = review.ReviewTaskID
+			}
+			labels[sourceTaskID] = label
+			break
 		}
-		if code := strings.TrimSpace(review.Code); code != "" {
-			return code, nil
-		}
-		return review.ID, nil
 	}
-	return "", nil
+	return labels, nil
 }
 
 func petCodeReviewInFlight(status domain.TaskStatus) bool {

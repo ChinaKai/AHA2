@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
+	"github.com/ChinaKai/AHA2/internal/store"
 )
 
 func TestPetWorkStateShowsInspectionAndAllOpenTasks(t *testing.T) {
@@ -220,6 +223,127 @@ func TestPetWorkStateLabelsWaitingSourceUnderReview(t *testing.T) {
 	}
 	if state.Inspection.AttentionTasks != 0 {
 		t.Fatalf("approval should clear the source attention: %#v", state.Inspection)
+	}
+}
+
+func TestPetWorkStateReviewLookupIsBatched(t *testing.T) {
+	var queryMu sync.Mutex
+	reviewQueries := 0
+	var counting atomic.Bool
+	store.SetSQLQueryObserverForTest(func(query string) {
+		if !counting.Load() || !strings.Contains(query, "pet_code_reviews") {
+			return
+		}
+		queryMu.Lock()
+		reviewQueries++
+		queryMu.Unlock()
+	})
+	t.Cleanup(func() { store.SetSQLQueryObserverForTest(nil) })
+	fixture := newPetTaskFixture(t)
+	// Connections opened by the fixture captured the observer above; don't hand
+	// it to any later Store in this test.
+	store.SetSQLQueryObserverForTest(nil)
+	if _, err := fixture.service.OwnerAssistant(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.UpdateOwnerPetSettings(fixture.ctx, PetSettingsInput{
+		Enabled: true, ChatModelID: fixture.model.ID, Actions: []string{"walk"},
+		IdleMinutes: 5, QuietStart: 22, QuietEnd: 8, HourlyLimit: 2,
+		AllowViewTasks: boolPointer(true), AllowCreateTasks: boolPointer(true),
+		AllowCreateWorkspaces: boolPointer(true), AllowMessageTasks: boolPointer(true),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	project, err := fixture.service.PetCreateProject(fixture.ctx, PetCreateProjectInput{Name: "批量评审项目"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := fixture.service.PetCreateWorkspace(fixture.ctx, PetCreateWorkspaceInput{
+		ProjectID: project.ID, Name: "批量评审 Workspace", RootPath: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	createWaiting := func(title string) domain.Task {
+		task, err := fixture.service.PetCreateTask(fixture.ctx, PetCreateTaskInput{
+			ProjectID: project.ID, WorkspaceID: workspace.ID, Title: title,
+			Request: "实现后等待独立评审", Start: boolPointer(true),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		waitForTask(t, fixture.database, task.ID, domain.TaskWaitingUser)
+		return task
+	}
+	linkReview := func(source domain.Task, status domain.TaskStatus) domain.Task {
+		review, err := fixture.service.PetCreateTask(fixture.ctx, PetCreateTaskInput{
+			ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "代码评审：" + source.Code,
+			Request: "独立评审源任务改动", Start: boolPointer(false),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := fixture.database.CreatePetCodeReviewLink(fixture.ctx, review.ID, source.ID); err != nil {
+			t.Fatal(err)
+		}
+		now := fixture.service.now().UTC()
+		if err := fixture.database.UpdateTaskStatus(fixture.ctx, review.ID, domain.TaskDraft, domain.TaskPreparing, timeString(now), ""); err != nil {
+			t.Fatal(err)
+		}
+		if err := fixture.database.UpdateTaskStatus(fixture.ctx, review.ID, domain.TaskPreparing, domain.TaskActive, timeString(now), ""); err != nil {
+			t.Fatal(err)
+		}
+		if status == domain.TaskCompleted {
+			if err := fixture.database.UpdateTaskStatus(fixture.ctx, review.ID, domain.TaskActive, domain.TaskCompleted, timeString(now), timeString(now)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return review
+	}
+	countReviewQueries := func() int {
+		queryMu.Lock()
+		reviewQueries = 0
+		queryMu.Unlock()
+		counting.Store(true)
+		_, err := fixture.service.PetWorkState(fixture.ctx)
+		counting.Store(false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		queryMu.Lock()
+		defer queryMu.Unlock()
+		return reviewQueries
+	}
+
+	// Four waiting sources: no link, in-flight review, completed review, and a
+	// pending approval. The old per-source lookup issued one query for each;
+	// the batched read must issue exactly one for the whole briefing.
+	createWaiting("无关联评审")
+	activeSource := createWaiting("在途评审")
+	linkReview(activeSource, domain.TaskActive)
+	completedSource := createWaiting("评审已结束")
+	linkReview(completedSource, domain.TaskCompleted)
+	approvalSource := createWaiting("等待审批")
+	linkReview(approvalSource, domain.TaskActive)
+	if _, err := fixture.service.CreatePetApproval(fixture.ctx, PetApprovalInput{
+		Kind: "owner_decision", Title: "实现任务需要决定", Summary: "继续还是取消", Risk: "medium",
+		Payload: `{"task_id":"` + approvalSource.ID + `"}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := countReviewQueries(); got != 1 {
+		t.Fatalf("review link queries=%d want 1 for four waiting tasks", got)
+	}
+
+	// Adding more waiting sources, including another linked one, must not add
+	// queries: the batch read is independent of the number of waiting Tasks.
+	for i := 0; i < 4; i++ {
+		createWaiting(fmt.Sprintf("额外等待任务 %d", i))
+	}
+	extraLinked := createWaiting("额外在途评审")
+	linkReview(extraLinked, domain.TaskActive)
+	if got := countReviewQueries(); got != 1 {
+		t.Fatalf("review link queries=%d want 1 after adding waiting tasks", got)
 	}
 }
 
