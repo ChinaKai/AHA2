@@ -83,8 +83,12 @@ window.__ownerClosed = [];
 window.__ownerNav = {};
 window.__ownerActive = "";
 window.__syncRequests = 0;
+window.__syncDelayOnce = 0;
 window.__frameErrorTab = "";
 window.__frameErrorStatus = 404;
+window.__frameRequests = 0;
+window.__frameUnavailable = false;
+window.__frame503 = 0;
 window.__frameClosed = [];
 window.__vis = "visible";
 const HOST_UP = {available: true, host_id: "local", version: "0.1.0", platform: "win32", edge_available: true};
@@ -130,7 +134,15 @@ window.fetch = async (input, init = {}) => {
   const method = String(init.method || "GET").toUpperCase();
   if (path === "/api/v1/tasks/task-1/browser") {
     window.__syncRequests++;
-    return json({ok: true, browser: currentState()});
+    // Capture the answer before any hold: a request started before a release
+    // must still carry the lease it was issued against.
+    const snapshot = currentState();
+    if (window.__syncDelayOnce) {
+      const delay = window.__syncDelayOnce;
+      window.__syncDelayOnce = 0;
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+    return json({ok: true, browser: snapshot});
   }
   if (path === "/api/v1/tasks/task-1/browser-sessions" && method === "POST") {
     window.__attached = true;
@@ -170,6 +182,11 @@ window.fetch = async (input, init = {}) => {
     return json({ok: true});
   }
   if (/\\/tabs\\/[a-z0-9_]+\\/frame$/.test(path)) {
+    window.__frameRequests++;
+    if (window.__frameUnavailable) {
+      window.__frame503++;
+      return json({error: {code: "browser_host_unavailable", message: "浏览器宿主不可用"}}, 503);
+    }
     if (window.__frameErrorTab && path.includes(window.__frameErrorTab)) {
       const failing = path.split("/").slice(-2)[0];
       if (window.__frameErrorStatus === 404 || window.__frameErrorStatus === 410) window.__frameClosed.push(failing);
@@ -350,6 +367,27 @@ try {
   });
   assert.ok(barHeights.bar < 60, `bookmark bar must stay one horizontal row: ${JSON.stringify(barHeights)}`);
   assert.ok(barHeights.preview > barHeights.bar, `the preview must remain the dominant surface: ${JSON.stringify(barHeights)}`);
+
+  // 380px shared panel: the Edge surfaces stay inside the column, the preview
+  // keeps its height, and nothing overflows horizontally.
+  await page.locator("#desktop-tool").evaluate(node => { node.style.width = "380px"; });
+  await page.waitForTimeout(180);
+  const narrowPanel = await page.evaluate(() => {
+    const panel = document.querySelector("#desktop-browser-control");
+    const preview = document.querySelector(".desktop-browser-preview").getBoundingClientRect();
+    const bookmarks = document.querySelector("#desktop-browser-bookmarks");
+    return {
+      scrollWidth: panel.scrollWidth, clientWidth: panel.clientWidth,
+      previewWidth: preview.width, previewHeight: preview.height,
+      bookmarkOverflow: getComputedStyle(bookmarks).overflowX,
+    };
+  });
+  assert.ok(narrowPanel.scrollWidth <= narrowPanel.clientWidth + 1,
+    `the 380px panel must not overflow horizontally: ${JSON.stringify(narrowPanel)}`);
+  assert.ok(narrowPanel.previewWidth > 100 && narrowPanel.previewHeight > 0,
+    `the 380px preview must stay usable: ${JSON.stringify(narrowPanel)}`);
+  assert.equal(narrowPanel.bookmarkOverflow, "hidden");
+  await page.locator("#desktop-tool").evaluate(node => { node.style.width = ""; });
 
   // Narrow panel: the overflow menu appears instead of a vertical wall of URLs.
   await page.locator("#desktop-tool").evaluate(node => { node.style.width = "260px"; });
@@ -577,6 +615,98 @@ try {
   await page.waitForSelector("#desktop-browser-frame:not([hidden])", {timeout: 5000});
   await waitFor(page, count => window.__frames > count, {arg: hiddenFrames, timeout: 5000});
   await page.evaluate(() => { delete document.visibilityState; window.__vis = "visible"; });
+  await page.evaluate(() => window.__panel.dispose());
+
+  // 14. A tab-sync read that started before release must not resurrect the
+  // lease it was issued against. The response is held until after the release
+  // has completed, then allowed to land while it still carries the old grant.
+  await reset(page, {__mode: "tabs", __hostAvailable: true, __hostOnlyDown: false, __staleError: false, __released: false,
+    __inUse: false, __transferred: false, __attached: true, __ownerTabs: [], __ownerClosed: [],
+    __ownerNav: {}, __ownerActive: "", __frameErrorTab: "", __frameClosed: [], __syncRequests: 0,
+    __syncDelayOnce: 0, __frames: 0, __granted: 0});
+  await page.waitForSelector("#desktop-browser-switch", {timeout: 5000});
+  await page.waitForSelector("#desktop-browser-frame:not([hidden])", {timeout: 5000});
+  await page.evaluate(() => { window.__syncDelayOnce = 2500; });
+  const syncsBeforeHold = await page.evaluate(() => window.__syncRequests);
+  await waitFor(page, count => window.__syncRequests > count, {arg: syncsBeforeHold, timeout: 4500});
+  // The held sync carries the active grant; release while it is in flight.
+  await page.evaluate(() => window.__panel.release());
+  await page.waitForSelector("#desktop-browser-attach", {timeout: 5000});
+  assert.equal(await page.evaluate(() => window.__panel.granted()), false, "release must clear the lease");
+  // Let the stale response resolve after the release finished.
+  await page.waitForTimeout(2800);
+  assert.equal(await page.evaluate(() => window.__panel.granted()), false,
+    "an in-flight state read from before the release must not restore the lease");
+  assert.equal(await page.locator("#desktop-browser-attach").count(), 1,
+    "the released panel must stay on the attach action");
+  assert.equal(await page.locator("#desktop-browser-control .desktop-browser-empty-state").count(), 1);
+  await page.evaluate(() => window.__panel.dispose());
+
+  // 15. A terminal frame answer (409/403) is never retried by the 2s error
+  // backoff or by restoring visibility: the suppression outlives hidden→visible.
+  for (const terminalStatus of [409, 403]) {
+    await reset(page, {__mode: "tabs", __hostAvailable: true, __hostOnlyDown: false, __staleError: false, __released: false,
+      __inUse: false, __transferred: false, __attached: true, __ownerTabs: [], __ownerClosed: [],
+      __ownerNav: {}, __ownerActive: "", __frameErrorTab: "browser_tab_1", __frameErrorStatus: terminalStatus,
+      __frameClosed: [], __frameRequests: 0, __frameUnavailable: false, __frame503: 0,
+      __syncRequests: 0, __syncDelayOnce: 0, __frames: 0, __granted: 0});
+    await waitFor(page, () => /画面暂不可用/.test(document.querySelector("#desktop-browser-frame-status")?.textContent || ""),
+      {timeout: 8000});
+    const requestsAfterTerminal = await page.evaluate(() => window.__frameRequests);
+    assert.ok(requestsAfterTerminal >= 1, `the ${terminalStatus} frame should have been requested`);
+    assert.equal(await page.evaluate(() => document.querySelector("#desktop-browser-frame").hidden), true);
+    assert.equal(await page.evaluate(() => document.querySelector("#desktop-browser-frame").getAttribute("src")), null);
+    // Beyond the retry backoff, a terminal answer must not be re-requested.
+    await page.waitForTimeout(2600);
+    assert.equal(await page.evaluate(() => window.__frameRequests), requestsAfterTerminal,
+      `a terminal ${terminalStatus} frame must not be retried on the timer`);
+    // Pause and resume visibility; the terminal suppression must survive.
+    await page.evaluate(() => {
+      window.__vis = "visible";
+      Object.defineProperty(document, "visibilityState", {configurable: true, get: () => window.__vis});
+      window.__vis = "hidden";
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await waitFor(page, () => document.querySelector("#desktop-browser-frame").hidden);
+    await page.evaluate(() => { window.__vis = "visible"; document.dispatchEvent(new Event("visibilitychange")); });
+    await page.waitForTimeout(1200);
+    assert.equal(await page.evaluate(() => window.__frameRequests), requestsAfterTerminal,
+      `restoring visibility must not retry a terminal ${terminalStatus} frame`);
+    await page.evaluate(() => { delete document.visibilityState; window.__vis = "visible"; });
+    await page.evaluate(() => window.__panel.dispose());
+  }
+
+  // 16. A 503 / browser_host_unavailable is not a per-tab terminal answer but
+  // it must not keep the frame loop alive: the bitmap is cleared immediately,
+  // the loop pauses, and only the health sync restarts it after recovery.
+  await reset(page, {__mode: "tabs", __hostAvailable: true, __hostOnlyDown: false, __staleError: false, __released: false,
+    __inUse: false, __transferred: false, __attached: true, __ownerTabs: [], __ownerClosed: [],
+    __ownerNav: {}, __ownerActive: "", __frameErrorTab: "", __frameClosed: [], __frameRequests: 0,
+    __frameUnavailable: false, __frame503: 0, __syncRequests: 0, __syncDelayOnce: 0, __frames: 0, __granted: 0});
+  await page.waitForSelector("#desktop-browser-frame:not([hidden])", {timeout: 5000});
+  await waitFor(page, () => window.__frames >= 2);
+  await page.evaluate(() => { window.__frameUnavailable = true; });
+  // The first 503 clears the preview; the health sync restarts one probe, which
+  // 503s again. Two failures must cost two requests, not a hot retry loop.
+  await waitFor(page, () => window.__frame503 >= 2, {timeout: 10000});
+  assert.equal(await page.evaluate(() => document.querySelector("#desktop-browser-frame").hidden), true,
+    "a 503 must hide the last bitmap immediately");
+  assert.equal(await page.evaluate(() => document.querySelector("#desktop-browser-frame").getAttribute("src")), null,
+    "a 503 must drop the last bitmap instead of keeping a stale screenshot");
+  assert.ok(await page.evaluate(() => window.__frameRequests) <= 6,
+    "a host-unavailable answer must not be retried every frame");
+  // The health read now reports the host down, so nothing polls until recovery.
+  await page.evaluate(() => { window.__hostOnlyDown = true; });
+  const requestsAfter503 = await page.evaluate(() => window.__frameRequests);
+  await page.waitForTimeout(6500);
+  assert.equal(await page.evaluate(() => window.__frameRequests), requestsAfter503,
+    "the frame loop must stay paused while the host is unavailable");
+  assert.match(await page.locator("#desktop-browser-frame-status").innerText(), /浏览器宿主不可用|画面暂不可用/);
+  // The host comes back; the tab-sync timer restarts the preview.
+  const framesBeforeRecovery = await page.evaluate(() => window.__frames);
+  await page.evaluate(() => { window.__frameUnavailable = false; window.__hostOnlyDown = false; });
+  await page.waitForSelector("#desktop-browser-frame:not([hidden])", {timeout: 8000});
+  await waitFor(page, count => window.__frames > count, {arg: framesBeforeRecovery, timeout: 5000});
   await page.evaluate(() => window.__panel.dispose());
 
   // The start page must load under the production CSP as a plain http(s) page.

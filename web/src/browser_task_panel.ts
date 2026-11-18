@@ -63,6 +63,8 @@ const httpStatusForbidden = 403;
 const httpStatusNotFound = 404;
 const httpStatusConflict = 409;
 const httpStatusGone = 410;
+const httpStatusServiceUnavailable = 503;
+const browserHostUnavailableCode = "browser_host_unavailable";
 const searchEngine = "https://www.bing.com/search";
 // AHA serves this page itself (see internal/httpapi/web.go). The host only
 // accepts http(s) URLs, so the new-tab page must never be about:blank or an
@@ -287,6 +289,13 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
   let frameDelay = BROWSER_FRAME_MIN_DELAY_MS;
   let streamGeneration = 0;
   let syncTimer = 0;
+  // State reads are asynchronous. A response that started before a release,
+  // tab switch or hiding must never be applied afterwards: it carries the old
+  // lease and would flip granted() back to true after the Owner released it.
+  // The epoch invalidates in-flight reads on those actions; the request serial
+  // makes only the newest concurrent read win.
+  let stateSyncEpoch = 0;
+  let stateSyncRequest = 0;
   // A terminal frame answer (403/404/409/410) must not be retried on the timer;
   // only a tab/lease change or an explicit reload clears this key.
   let terminalStreamKey = "";
@@ -301,6 +310,9 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     state.tabs.find(tab => tab.id === state.selectedTabID) || null;
   const selectorTarget = (): HTMLElement | null => selector && selector.isConnected ? selector : null;
   const streamKey = (): string => state.grant && state.selectedTabID ? `${state.grant.id}:${state.selectedTabID}` : "";
+  // Called whenever the lease or the visible selection changes underneath an
+  // in-flight state read; see stateSyncEpoch.
+  const invalidateStateSync = (): void => { stateSyncEpoch++; };
 
   const frameStatusText = (): string => {
     if (!state.grant) return "先选择 Profile 并获取独占控制，之后可查看并操作全部页面";
@@ -414,6 +426,7 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
       button.addEventListener("click", () => {
         const tabID = button.dataset.browserTab || "";
         if (tabID === state.selectedTabID) return;
+        invalidateStateSync();
         lastManualSelectAt = Date.now();
         state.selectedTabID = tabID;
         state.frameError = "";
@@ -623,6 +636,7 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     // fresh tab sync, so a stale screenshot is never left behind.
     if (document.visibilityState === "hidden") {
       stopStream();
+      invalidateStateSync();
       return;
     }
     const grant = state.grant;
@@ -666,6 +680,15 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
       state.frameLive = false;
       state.frameError = error instanceof Error ? error.message : String(error);
       const status = (error as {status?: number}).status;
+      const code = String((error as {code?: string}).code || "");
+      // A dead host is not a terminal answer for this tab: clearing the bitmap
+      // and stopping the loop avoids hammering a host that cannot answer. The
+      // tab-sync timer restarts the preview once /browser reports it healthy.
+      if (status === httpStatusServiceUnavailable || code === browserHostUnavailableCode) {
+        stopStream();
+        paintFrameStatus();
+        return;
+      }
       // Revoked/closed/wrong-session answers are terminal for the preview; do
       // not keep hammering the API until the owner refreshes or the tab/lease
       // changes. A closed tab is removed immediately and the next page (or the
@@ -806,9 +829,13 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     // would repaint a half-applied state. Hidden pages wait for the
     // visibility handler instead of polling behind the Owner's back.
     if (disposed || !current() || state.loading || state.binding || document.visibilityState === "hidden") return;
+    const epoch = stateSyncEpoch;
+    const request = ++stateSyncRequest;
     try {
       const result = await api.taskBrowser(taskID);
-      if (disposed) return;
+      // Drop a read that was invalidated (release/tab switch/hidden) or
+      // superseded by a newer one; applying it could resurrect a stale lease.
+      if (disposed || epoch !== stateSyncEpoch || request !== stateSyncRequest) return;
       const data = result?.browser;
       if (!data) return;
       const applied = applyBrowserState(data);
@@ -860,6 +887,8 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
 
   const load = async (): Promise<void> => {
     if (disposed) return;
+    // An explicit read supersedes any tab-sync read already in flight.
+    stateSyncRequest++;
     state.loading = true;
     state.error = "";
     paint();
@@ -896,6 +925,7 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
   // the id would leave the old URL visible.
   const selectTab = (tabID: string, url = ""): void => {
     if (!tabID) return;
+    invalidateStateSync();
     lastManualSelectAt = Date.now();
     state.selectedTabID = tabID;
     if (url) state.urlDraft = url;
@@ -976,6 +1006,8 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
 
   const releaseControl = async (): Promise<void> => {
     if (!state.grant) return;
+    // Any state read still in flight belongs to the lease being released.
+    invalidateStateSync();
     const grantID = state.grant.id;
     state.binding = true;
     state.error = "";
@@ -1038,6 +1070,7 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
       return;
     }
     const previousGrant = state.grant;
+    invalidateStateSync();
     state.binding = true;
     state.error = "";
     paint();
@@ -1123,13 +1156,16 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
       // Drop the bitmap as well as the timer: an AHA Web tab hidden behind the
       // real browser window must never come back showing a stale screenshot.
       stopStream();
+      invalidateStateSync();
       paintFrameStatus();
       return;
     }
     // Coming back must both re-read the tab strip (the Owner may have opened,
-    // switched or closed pages meanwhile) and restart the frame stream.
+    // switched or closed pages meanwhile) and restart the frame stream. A
+    // terminal 403/409 answer survives the pause: syncState() only restarts on
+    // a new selection/lease, and this fallback must not clear its suppression.
     void syncState().finally(() => {
-      if (!disposed && !state.loading && !frameTimer && !frameAbort) startStream();
+      if (!disposed && !state.loading && !frameTimer && !frameAbort && terminalStreamKey !== streamKey()) startStream();
     });
   };
 
