@@ -16,7 +16,8 @@ Project → Workspace → Task → Turn → Task Memory → Knowledge → Next T
 
 托盘会把 `aha2.exe serve` 的 stdout/stderr 写入 `<数据目录>\logs\aha2-server.log`，并记录启动命令行、PID、退出码或启动错误；文件上限 10 MB，超出后轮转为 `aha2-server.log.1`（最多保留两份）。排查启动失败或崩溃时优先查看该文件。
 
-在构建机上产出 Windows 包（两个 exe、飞书插件目录和 `release-manifest.json`）：
+在构建机上产出 Windows 包（两个 exe、飞书插件目录、`browser-host/`、固定版本 `node/` 和
+`release-manifest.json`）：
 
 ```bash
 ./local_build.sh --version 0.5.23
@@ -25,7 +26,10 @@ bash scripts/build-windows-package.sh --version 0.5.23 --output-dir dist
 ```
 
 仓库只负责构建，不停服务、不替换文件、也不回滚；安装和升级由目标机器上的本机安装器负责。
-`release-manifest.json` 记录版本、commit、构建时间、生成方式和每个产物的 SHA256。
+`release-manifest.json` 记录版本、commit、构建时间、生成方式和每个产物的 SHA256；安装器会把
+它原样安装到程序目录，部署脚本据此逐文件校验安装结果。Release 另提供
+`AHA2-Windows-Package-x64.zip`，内含官方 PackageDir 布局（`dist/` 包与
+`installer/AHA2-Setup-User-x64.exe`）。
 
 ### Debian / Ubuntu
 

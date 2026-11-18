@@ -11,6 +11,115 @@ import {fileURLToPath} from "node:url";
 // rolling back belong to the installer on the target machine.
 export const MANIFEST_SCHEMA_VERSION = 1;
 
+// The official installer places these exact paths under the install directory
+// (or, for the Feishu plugin, under the selected data directory). Anything else
+// in the manifest would describe a file the installer never writes, so package
+// validation rejects it. Keep this list in sync with installer/windows/AHA2.iss
+// and the fixed mapping used by the host deploy script.
+export const REQUIRED_PACKAGE_FILES = [
+  "aha2-windows-amd64.exe",
+  "aha2-tray-windows-amd64.exe",
+  "plugins/feishu/windows-amd64/aha2-channel-feishu.exe",
+  "plugins/feishu/windows-amd64/plugin.json",
+  "browser-host/host.mjs",
+  "browser-host/server.mjs",
+  "browser-host/tabs.mjs",
+  "browser-host/lock.mjs",
+  "browser-host/package.json",
+  "browser-host/node_modules/playwright/package.json",
+  "node/node.exe",
+  "node/LICENSE",
+];
+
+const EXACT_PACKAGE_FILES = new Set([
+  "aha2-windows-amd64.exe",
+  "aha2-tray-windows-amd64.exe",
+  "plugins/feishu/windows-amd64/aha2-channel-feishu.exe",
+  "plugins/feishu/windows-amd64/plugin.json",
+]);
+const PACKAGE_FILE_PREFIXES = ["browser-host/", "node/"];
+
+export function packagePathInScope(path) {
+  return EXACT_PACKAGE_FILES.has(path) || PACKAGE_FILE_PREFIXES.some((prefix) => path.startsWith(prefix));
+}
+
+// assertPackageManifest is the release-side gate: it re-checks a manifest that
+// buildManifest produced before the installer is built. It covers identity,
+// path safety, the required install scope and the absence of files the
+// installer would not copy.
+export function assertPackageManifest(manifest, expected = {}) {
+  if (manifest === null || typeof manifest !== "object" || Array.isArray(manifest)) {
+    throw new Error("manifest must be a JSON object");
+  }
+  if (manifest.schema_version !== MANIFEST_SCHEMA_VERSION) {
+    throw new Error(`manifest schema_version ${manifest.schema_version} != ${MANIFEST_SCHEMA_VERSION}`);
+  }
+  if (manifest.product !== "AHA2") {
+    throw new Error(`manifest product ${manifest.product} != AHA2`);
+  }
+  const version = normalizeVersion(manifest.version);
+  if (expected.version !== undefined && version !== normalizeVersion(expected.version)) {
+    throw new Error(`manifest version ${version} != ${normalizeVersion(expected.version)}`);
+  }
+  const commit = requireNonEmpty("commit", manifest.commit);
+  if (!/^[0-9a-fA-F]{12,40}$/.test(commit)) {
+    throw new Error(`manifest commit is not 12 to 40 hexadecimal characters: ${commit}`);
+  }
+  if (expected.commit !== undefined && commit !== expected.commit) {
+    throw new Error(`manifest commit ${commit} != ${expected.commit}`);
+  }
+  const builtAt = requireNonEmpty("built_at", manifest.built_at);
+  if (Number.isNaN(Date.parse(builtAt))) {
+    throw new Error(`manifest built_at is not an RFC3339 timestamp: ${builtAt}`);
+  }
+  const generator = normalizeGenerator(manifest.generator);
+  const webVersion = requireNonEmpty("generator.web_version", generator.web_version);
+  if (!webVersion.startsWith(`v${version}.`)) {
+    throw new Error(`manifest generator.web_version ${webVersion} does not describe version ${version}`);
+  }
+  if (expected.webVersion !== undefined && webVersion !== expected.webVersion) {
+    throw new Error(`manifest generator.web_version ${webVersion} != ${expected.webVersion}`);
+  }
+  if (expected.generatorScript !== undefined && generator.script !== expected.generatorScript) {
+    throw new Error(`manifest generator.script ${generator.script} != ${expected.generatorScript}`);
+  }
+  if (!Array.isArray(manifest.files) || manifest.files.length === 0) {
+    throw new Error("manifest files must list at least one package file");
+  }
+  const seen = new Set();
+  for (const entry of manifest.files) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error("manifest file entry must be an object");
+    }
+    const normalized = normalizeRelativePath(entry.path);
+    if (normalized !== entry.path) {
+      throw new Error(`manifest path is not normalized: ${entry.path}`);
+    }
+    if (seen.has(normalized)) {
+      throw new Error(`manifest file is listed twice: ${normalized}`);
+    }
+    seen.add(normalized);
+    if (normalized === "release-manifest.json") {
+      throw new Error("manifest must not list itself");
+    }
+    if (!Number.isInteger(entry.size) || entry.size < 0) {
+      throw new Error(`manifest size is invalid for ${normalized}`);
+    }
+    if (!/^[0-9a-f]{64}$/.test(entry.sha256)) {
+      throw new Error(`manifest has a malformed sha256 for ${normalized}`);
+    }
+    if (!packagePathInScope(normalized)) {
+      throw new Error(`manifest file is outside the package install scope: ${normalized}`);
+    }
+  }
+  for (const required of REQUIRED_PACKAGE_FILES) {
+    if (!seen.has(required)) {
+      throw new Error(`manifest is missing required package file: ${required}`);
+    }
+  }
+  return manifest;
+}
+
 function sha256File(path) {
   return new Promise((resolvePromise, reject) => {
     const hash = createHash("sha256");

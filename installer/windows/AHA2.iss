@@ -16,6 +16,9 @@
 #ifndef SourceNodeLicense
   #define SourceNodeLicense "..\..\dist\node\LICENSE"
 #endif
+#ifndef SourceManifest
+  #define SourceManifest "..\..\dist\release-manifest.json"
+#endif
 #ifndef OutputDir
   #define OutputDir "..\..\dist\installer"
 #endif
@@ -67,6 +70,9 @@ Source: "{#SourceTrayExe}"; DestDir: "{app}"; DestName: "aha2-tray.exe"; Flags: 
 Source: "{#SourceBrowserHost}\*"; DestDir: "{app}\browser-host"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SourceNodeExe}"; DestDir: "{app}\node"; DestName: "node.exe"; Flags: ignoreversion
 Source: "{#SourceNodeLicense}"; DestDir: "{app}\node"; DestName: "LICENSE"; Flags: ignoreversion
+; Deployment reads {app}\release-manifest.json and verifies every packaged file
+; hash against it. Install the exact package bytes; never rewrite the manifest.
+Source: "{#SourceManifest}"; DestDir: "{app}"; DestName: "release-manifest.json"; Flags: ignoreversion
 Source: "Register-AHA2UserTask.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "Prepare-AHA2DataDir.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\third_party\hysteria\LICENSE.md"; DestDir: "{app}\licenses"; DestName: "Hysteria-LICENSE.txt"; Flags: ignoreversion

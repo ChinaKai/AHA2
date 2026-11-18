@@ -8,6 +8,7 @@ param(
     [string]$InputNodeLicense = "",
 	[string]$InputFeishuPlugin = "",
 	[string]$InputFeishuManifest = "",
+    [string]$InputManifest = "",
     [string]$OutputDir = "",
     [string]$Version = "dev",
     [string]$ISCCPath = "",
@@ -46,6 +47,9 @@ if ([string]::IsNullOrWhiteSpace($InputNodeExe)) {
 if ([string]::IsNullOrWhiteSpace($InputNodeLicense)) {
     $InputNodeLicense = Join-Path $repo "dist\node\LICENSE"
 }
+if ([string]::IsNullOrWhiteSpace($InputManifest)) {
+    $InputManifest = Join-Path $repo "dist\release-manifest.json"
+}
 $defaultFeishuDir = Join-Path $repo "dist\plugins\feishu\windows-amd64"
 if ([string]::IsNullOrWhiteSpace($InputFeishuPlugin) -and [string]::IsNullOrWhiteSpace($InputFeishuManifest)) {
 	$defaultPlugin = Join-Path $defaultFeishuDir "aha2-channel-feishu.exe"
@@ -66,6 +70,7 @@ $trayInputPath = [IO.Path]::GetFullPath($InputTrayExe)
 $browserHostPath = [IO.Path]::GetFullPath($InputBrowserHost)
 $nodeInputPath = [IO.Path]::GetFullPath($InputNodeExe)
 $nodeLicensePath = [IO.Path]::GetFullPath($InputNodeLicense)
+$manifestInputPath = [IO.Path]::GetFullPath($InputManifest)
 $feishuPluginPath = if ([string]::IsNullOrWhiteSpace($InputFeishuPlugin)) { "" } else { [IO.Path]::GetFullPath($InputFeishuPlugin) }
 $feishuManifestPath = if ([string]::IsNullOrWhiteSpace($InputFeishuManifest)) { "" } else { [IO.Path]::GetFullPath($InputFeishuManifest) }
 $outputPath = [IO.Path]::GetFullPath($OutputDir)
@@ -84,6 +89,8 @@ $requiredContracts = @(
     '#define SourceTrayExe',
     'DestName: "aha2.exe"',
     'DestName: "aha2-tray.exe"',
+    'DestName: "release-manifest.json"',
+    'SourceManifest',
     'DestDir: "{app}\browser-host"',
     "recursesubdirs",
     "SourceBrowserHost",
@@ -159,8 +166,9 @@ if ($ValidateOnly) {
     $browserHostState = if (Test-Path -LiteralPath (Join-Path $browserHostPath "host.mjs") -PathType Leaf) {"found"} else {"not present"}
     $nodeState = if ((Test-Path -LiteralPath $nodeInputPath -PathType Leaf) -and (Test-Path -LiteralPath $nodeLicensePath -PathType Leaf)) {"found"} else {"not present"}
 	$feishuState = if ($feishuPluginPath -and (Test-Path -LiteralPath $feishuPluginPath -PathType Leaf) -and (Test-Path -LiteralPath $feishuManifestPath -PathType Leaf)) { "found" } else { "not bundled" }
+	$manifestState = if (Test-Path -LiteralPath $manifestInputPath -PathType Leaf) { "found" } else { "not present" }
 	$mode = if ($PerUser) { "per-user" } else { "per-machine" }
-	Write-Output "Installer definition valid ($mode); server input $serverState; tray input $trayState; browser host $browserHostState; node runtime $nodeState; Feishu plugin $feishuState."
+	Write-Output "Installer definition valid ($mode); server input $serverState; tray input $trayState; browser host $browserHostState; node runtime $nodeState; Feishu plugin $feishuState; release manifest $manifestState."
     exit 0
 }
 
@@ -181,6 +189,104 @@ if (-not (Test-Path -LiteralPath $nodeLicensePath -PathType Leaf)) {
 }
 if ($feishuPluginPath -and ((-not (Test-Path -LiteralPath $feishuPluginPath -PathType Leaf)) -or (-not (Test-Path -LiteralPath $feishuManifestPath -PathType Leaf)))) {
 	throw "Feishu plugin bundle inputs were not found."
+}
+
+# The installer writes {app}\release-manifest.json byte-for-byte. That manifest
+# is the deploy verification contract, so fail the build unless it describes
+# exactly the files the installer is about to copy: identity, path safety,
+# required scope and per-file SHA256 must all match the input tree.
+if (-not (Test-Path -LiteralPath $manifestInputPath -PathType Leaf)) {
+    throw "Release manifest not found: $manifestInputPath. Run scripts\build-windows-package.sh first."
+}
+$manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestInputPath | ConvertFrom-Json
+if ($manifest.schema_version -ne 1 -or [string]$manifest.product -ne "AHA2") {
+    throw "Release manifest is not an AHA2 schema_version 1 manifest: $manifestInputPath"
+}
+if ([string]$manifest.version -ne $normalizedVersion) {
+    throw "Release manifest version $($manifest.version) does not match installer version $normalizedVersion."
+}
+if ([string]$manifest.commit -notmatch '^[0-9a-fA-F]{12,40}$') {
+    throw "Release manifest commit is missing or malformed: $($manifest.commit)"
+}
+if ($null -eq $manifest.generator -or [string]::IsNullOrWhiteSpace([string]$manifest.generator.web_version)) {
+    throw "Release manifest generator.web_version is missing."
+}
+$manifestEntries = @($manifest.files)
+if ($manifestEntries.Count -eq 0) {
+    throw "Release manifest lists no files."
+}
+$manifestByPath = @{}
+foreach ($entry in $manifestEntries) {
+    $relative = [string]$entry.path
+    if ([string]::IsNullOrWhiteSpace($relative) -or $relative.Contains('\') -or $relative.StartsWith('/') -or $relative -match '^[A-Za-z]:' -or (($relative -split '/') -contains '..')) {
+        throw "Release manifest path is not a safe package-relative path: $relative"
+    }
+    if ($manifestByPath.ContainsKey($relative)) {
+        throw "Release manifest lists $relative twice."
+    }
+    if ([string]$entry.sha256 -notmatch '^[0-9a-f]{64}$') {
+        throw "Release manifest has a malformed SHA256 for $relative."
+    }
+    $manifestByPath[$relative] = $entry
+}
+$requiredManifestFiles = @(
+    "aha2-windows-amd64.exe",
+    "aha2-tray-windows-amd64.exe",
+    "browser-host/host.mjs",
+    "browser-host/server.mjs",
+    "browser-host/package.json",
+    "node/node.exe",
+    "node/LICENSE"
+)
+$pluginManifestFiles = @(
+    "plugins/feishu/windows-amd64/aha2-channel-feishu.exe",
+    "plugins/feishu/windows-amd64/plugin.json"
+)
+foreach ($required in $requiredManifestFiles) {
+    if (-not $manifestByPath.ContainsKey($required)) {
+        throw "Release manifest is missing required install file: $required"
+    }
+}
+$manifestHasPlugin = @($pluginManifestFiles | Where-Object { $manifestByPath.ContainsKey($_) }).Count -gt 0
+if ($manifestHasPlugin -and @($pluginManifestFiles | Where-Object { -not $manifestByPath.ContainsKey($_) }).Count -gt 0) {
+    throw "Release manifest lists only part of the Feishu plugin."
+}
+if ($manifestHasPlugin -and [string]::IsNullOrWhiteSpace($feishuPluginPath)) {
+    throw "Release manifest covers the Feishu plugin but installer inputs do not include it."
+}
+if (-not $manifestHasPlugin -and -not [string]::IsNullOrWhiteSpace($feishuPluginPath)) {
+    throw "Installer inputs include the Feishu plugin but the release manifest does not."
+}
+$allowedExactManifestFiles = @("aha2-windows-amd64.exe", "aha2-tray-windows-amd64.exe") + $pluginManifestFiles
+foreach ($relative in $manifestByPath.Keys) {
+    if ($relative.StartsWith("browser-host/") -or $relative.StartsWith("node/")) { continue }
+    if ($allowedExactManifestFiles -notcontains $relative) {
+        throw "Release manifest entry is outside the installer's install scope: $relative"
+    }
+}
+$manifestInputs = @{
+    "aha2-windows-amd64.exe" = $inputPath
+    "aha2-tray-windows-amd64.exe" = $trayInputPath
+    "node/node.exe" = $nodeInputPath
+    "node/LICENSE" = $nodeLicensePath
+}
+if ($manifestHasPlugin) {
+    $manifestInputs["plugins/feishu/windows-amd64/aha2-channel-feishu.exe"] = $feishuPluginPath
+    $manifestInputs["plugins/feishu/windows-amd64/plugin.json"] = $feishuManifestPath
+}
+foreach ($relative in $manifestByPath.Keys) {
+    if ($relative.StartsWith("browser-host/")) {
+        $inputFile = Join-Path $browserHostPath (($relative.Substring("browser-host/".Length)) -replace '/', '\')
+    } else {
+        $inputFile = $manifestInputs[$relative]
+    }
+    if ([string]::IsNullOrWhiteSpace($inputFile) -or -not (Test-Path -LiteralPath $inputFile -PathType Leaf)) {
+        throw "Release manifest lists $relative but the installer has no matching input."
+    }
+    $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $inputFile).Hash.ToLowerInvariant()
+    if ($actualHash -ne ([string]$manifestByPath[$relative].sha256)) {
+        throw "Release manifest SHA256 does not match the installer input for $relative."
+    }
 }
 
 function Get-PEWindowsSubsystem([string]$Path) {
@@ -234,6 +340,7 @@ $compilerArgs = @(
 	"/DSourceBrowserHost=$browserHostPath",
 	"/DSourceNodeExe=$nodeInputPath",
 	"/DSourceNodeLicense=$nodeLicensePath",
+	"/DSourceManifest=$manifestInputPath",
 	"/DOutputDir=$outputPath"
 )
 if ($feishuPluginPath) {
@@ -283,3 +390,4 @@ $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $setup).Hash.ToLowerInvaria
 [IO.File]::WriteAllText($hashFile, "$hash  $setupName`n", [Text.UTF8Encoding]::new($false))
 Write-Output "Installer: $setup"
 Write-Output "SHA256: $hashFile"
+Write-Output "Release manifest: $manifestInputPath"
