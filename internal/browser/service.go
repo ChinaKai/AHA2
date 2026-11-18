@@ -27,13 +27,22 @@ const (
 // authoritative for whether a real browser is running; the database state is a
 // cache plus the unique-session backstop.
 type Service struct {
-	store       *store.Store
-	host        Host
-	hostID      string
-	now         func() time.Time
-	mu          sync.Mutex
-	grantMu     sync.Mutex
-	holdForTest func() error
+	store              *store.Store
+	host               Host
+	hostID             string
+	now                func() time.Time
+	mu                 sync.Mutex
+	grantMu            sync.Mutex
+	holdMu             sync.Mutex
+	holds              map[string]*operationHold
+	holdForTest        func() error
+	releaseHoldForTest func() error
+}
+
+type operationHold struct {
+	id        string
+	expiresAt time.Time
+	refs      int
 }
 
 func NewService(st *store.Store, host Host, hostID string) *Service {
@@ -41,15 +50,27 @@ func NewService(st *store.Store, host Host, hostID string) *Service {
 	if hostID == "" {
 		hostID = DefaultHostID
 	}
-	return &Service{store: st, host: host, hostID: hostID, now: func() time.Time { return time.Now().UTC() }}
+	return &Service{
+		store: st, host: host, hostID: hostID,
+		now:   func() time.Time { return time.Now().UTC() },
+		holds: map[string]*operationHold{},
+	}
 }
 
 func (s *Service) HostID() string { return s.hostID }
 
-// fenceToken binds the lease id to its expiry so a paused in-flight host call
-// fails after the lease expires instead of relying on a string-only fence.
+// fenceToken is the stable lease identity used to install/switch host fences.
+// Temporary operation holds must not change it, otherwise two concurrent
+// requests for the same lease derive different tokens and look like a takeover.
 func (s *Service) fenceToken(grant domain.BrowserTaskGrant) string {
-	return grant.ID + "@" + strconv.FormatInt(grant.ExpiresAt.UnixMilli(), 10)
+	return grant.ID
+}
+
+// operationFence carries the stable lease identity plus the deadline this
+// particular operation was admitted with. The `|` segment is checked by the
+// host but is not part of the persistent fence identity.
+func (s *Service) operationFence(grant domain.BrowserTaskGrant, expiresAt time.Time) string {
+	return grant.ID + "|" + strconv.FormatInt(expiresAt.UnixMilli(), 10)
 }
 
 func (s *Service) Enabled() bool { return s.host != nil }
@@ -59,6 +80,10 @@ func (s *Service) SetNowForTest(now func() time.Time) { s.now = now }
 // SetHoldForTest injects a lease-hold renewal failure so tests can prove the
 // operation is rejected before the host is called. Production never sets it.
 func (s *Service) SetHoldForTest(fn func() error) { s.holdForTest = fn }
+
+// SetReleaseHoldForTest injects a hold-restore failure after the page side
+// effect. Production never sets it.
+func (s *Service) SetReleaseHoldForTest(fn func() error) { s.releaseHoldForTest = fn }
 
 type HostView struct {
 	Available bool   `json:"available"`
@@ -705,7 +730,10 @@ func (s *Service) CreateGrant(ctx context.Context, actor, taskID, profileID stri
 				return GrantView{}, sanitizeHostError(hostErr)
 			}
 			expiresAt := now.Add(ttl)
-			holderFence := holder.ID + "@" + strconv.FormatInt(expiresAt.UnixMilli(), 10)
+			// Fence identity is the lease ID; the refreshed expiry is not part
+			// of it, so a later operation hold cannot make concurrent requests
+			// look like a new holder.
+			holderFence := s.fenceToken(holder)
 			if hostSession.Fence != holderFence {
 				if fenceErr := s.host.SetFence(ctx, profile.ID, session.HostSessionID, hostSession.Fence, holderFence); fenceErr != nil {
 					return GrantView{}, s.fenceError(ctx, fenceErr)
@@ -1186,37 +1214,96 @@ func (s *Service) sessionForGrant(ctx context.Context, grant domain.BrowserTaskG
 // operationHoldBudget covers the host's maximum page-operation budget. A
 // mutation extends only the active lease's expiry while it runs, so a close or
 // navigation that started before expiry cannot be admitted and then rejected
-// halfway through its Playwright call. The expiry is restored immediately
-// afterwards; a concurrent acquire/revoke wins the CAS and makes the hold fail
-// before any page side effect.
+// halfway through its Playwright call. The extension has its own ID and is
+// restored only by that ID; owner renewal/revoke wins the conditional update.
 const operationHoldBudget = 5 * time.Minute
 
-func (s *Service) withOperationHold(ctx context.Context, grant domain.BrowserTaskGrant, fn func() error) error {
+func (s *Service) withOperationHold(ctx context.Context, grant domain.BrowserTaskGrant, fn func(expiresAt time.Time) error) (err error) {
 	now := s.now()
 	holdUntil := now.Add(operationHoldBudget)
-	if !grant.ExpiresAt.Before(holdUntil) {
-		return fn()
+	s.holdMu.Lock()
+	if held := s.holds[grant.ID]; held != nil {
+		// Service-level operations for one lease share the already-installed
+		// hold. The host fence identity stays the lease ID and both calls use
+		// the same operation deadline, so neither looks like a takeover.
+		held.refs++
+		expiresAt := held.expiresAt
+		s.holdMu.Unlock()
+		defer func() {
+			err = s.releaseOperationHold(ctx, grant.ID, held, err)
+		}()
+		return fn(expiresAt)
+	}
+	if grant.HoldID == "" && !grant.ExpiresAt.Before(holdUntil) {
+		s.holdMu.Unlock()
+		return fn(grant.ExpiresAt)
 	}
 	if s.holdForTest != nil {
-		if err := s.holdForTest(); err != nil {
-			return err
-		}
-	}
-	if err := s.store.CompareAndSwapBrowserTaskGrantExpiry(ctx, grant.ID, grant.ExpiresAt, holdUntil, now); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+		testErr := s.holdForTest()
+		s.holdMu.Unlock()
+		if testErr != nil {
+			s.holdFailureAudit(context.WithoutCancel(ctx), grant.ID, "renewal_failed")
 			return conflict("browser_lease_hold_failed", "浏览器授权正在变化，操作未开始，请重试")
 		}
-		return err
 	}
+	holdID := domain.NewID("browser_hold")
+	_, beginErr := s.store.BeginBrowserTaskGrantHold(ctx, grant.ID, grant.ExpiresAt, holdID, holdUntil, now)
+	if beginErr != nil {
+		s.holdMu.Unlock()
+		s.holdFailureAudit(context.WithoutCancel(ctx), grant.ID, "renewal_failed")
+		return conflict("browser_lease_hold_failed", "浏览器授权正在变化，操作未开始，请重试")
+	}
+	held := &operationHold{id: holdID, expiresAt: holdUntil, refs: 1}
+	s.holds[grant.ID] = held
+	s.holdMu.Unlock()
 	defer func() {
-		// Restore the Owner-visible expiry even if the request context was
-		// canceled after the page side effect. If the lease was revoked or
-		// transferred meanwhile the CAS affects no row, which is exactly what
-		// we want: the new holder's state must not be overwritten.
-		restoreCtx := context.WithoutCancel(ctx)
-		_ = s.store.CompareAndSwapBrowserTaskGrantExpiry(restoreCtx, grant.ID, holdUntil, grant.ExpiresAt, s.now())
+		err = s.releaseOperationHold(ctx, grant.ID, held, err)
 	}()
-	return fn()
+	return fn(holdUntil)
+}
+
+func (s *Service) holdFailureAudit(ctx context.Context, grantID, reason string) {
+	s.audit(ctx, "system", "browser_lease_hold.failed", "browser_task_grant", grantID, map[string]any{
+		"reason": reason,
+	})
+}
+
+func (s *Service) releaseOperationHold(ctx context.Context, grantID string, held *operationHold, operationErr error) error {
+	s.holdMu.Lock()
+	held.refs--
+	if held.refs > 0 {
+		s.holdMu.Unlock()
+		return operationErr
+	}
+	delete(s.holds, grantID)
+	s.holdMu.Unlock()
+
+	restoreCtx := context.WithoutCancel(ctx)
+	var released bool
+	var releaseErr error
+	if s.releaseHoldForTest != nil {
+		releaseErr = s.releaseHoldForTest()
+	} else {
+		released, releaseErr = s.store.ReleaseBrowserTaskGrantHold(restoreCtx, grantID, held.id, s.now())
+	}
+	if releaseErr != nil {
+		s.audit(restoreCtx, "system", "browser_lease_hold.restore_failed", "browser_task_grant", grantID, map[string]any{
+			"reason": "store_error",
+		})
+		if operationErr == nil {
+			return newError(http.StatusInternalServerError, "browser_lease_hold_release_failed",
+				"浏览器授权临时续期恢复失败；操作已完成，请刷新授权状态")
+		}
+		return operationErr
+	}
+	if !released {
+		// The owner renewed/revoked the lease or another actor replaced the
+		// hold. Their update wins; never restore an old expiry over it.
+		s.audit(restoreCtx, "system", "browser_lease_hold.superseded", "browser_task_grant", grantID, map[string]any{
+			"reason": "lease_changed",
+		})
+	}
+	return operationErr
 }
 
 func (s *Service) OpenTab(ctx context.Context, actor, grantID, targetURL string) (domain.BrowserTab, error) {
@@ -1233,8 +1320,8 @@ func (s *Service) OpenTab(ctx context.Context, actor, grantID, targetURL string)
 		return domain.BrowserTab{}, err
 	}
 	var tab domain.BrowserTab
-	err = s.withOperationHold(ctx, grant, func() error {
-		hostTab, callErr := s.host.OpenTab(ctx, grant.ProfileID, session.HostSessionID, targetURL, s.fenceToken(grant))
+	err = s.withOperationHold(ctx, grant, func(expiresAt time.Time) error {
+		hostTab, callErr := s.host.OpenTab(ctx, grant.ProfileID, session.HostSessionID, targetURL, s.operationFence(grant, expiresAt))
 		if callErr != nil {
 			return sanitizeHostError(callErr)
 		}
@@ -1248,7 +1335,7 @@ func (s *Service) OpenTab(ctx context.Context, actor, grantID, targetURL string)
 		}
 		stored, storeErr := s.store.UpsertBrowserTabForActiveGrant(ctx, candidate, s.now())
 		if storeErr != nil {
-			_ = s.host.CloseTab(ctx, grant.ProfileID, session.HostSessionID, hostTab.ID, s.fenceToken(grant))
+			_ = s.host.CloseTab(ctx, grant.ProfileID, session.HostSessionID, hostTab.ID, s.operationFence(grant, expiresAt))
 			if errors.Is(storeErr, store.ErrBrowserAccessInactive) {
 				return s.inactiveAccessError(ctx, grant.ID)
 			}
@@ -1416,8 +1503,8 @@ func (s *Service) ActivateTab(ctx context.Context, actor, grantID, tabID string)
 	if err != nil {
 		return domain.BrowserTab{}, err
 	}
-	err = s.withOperationHold(ctx, grant, func() error {
-		hostTab, callErr := s.host.Activate(ctx, grant.ProfileID, session.HostSessionID, tab.HostTabID, s.fenceToken(grant))
+	err = s.withOperationHold(ctx, grant, func(expiresAt time.Time) error {
+		hostTab, callErr := s.host.Activate(ctx, grant.ProfileID, session.HostSessionID, tab.HostTabID, s.operationFence(grant, expiresAt))
 		if callErr != nil {
 			return sanitizeHostError(callErr)
 		}
@@ -1482,8 +1569,8 @@ func (s *Service) NavigateTab(ctx context.Context, actor, grantID, tabID, target
 	if err != nil {
 		return domain.BrowserTab{}, err
 	}
-	err = s.withOperationHold(ctx, grant, func() error {
-		hostTab, callErr := s.host.Navigate(ctx, grant.ProfileID, session.HostSessionID, tab.HostTabID, targetURL, s.fenceToken(grant))
+	err = s.withOperationHold(ctx, grant, func(expiresAt time.Time) error {
+		hostTab, callErr := s.host.Navigate(ctx, grant.ProfileID, session.HostSessionID, tab.HostTabID, targetURL, s.operationFence(grant, expiresAt))
 		if callErr != nil {
 			return sanitizeHostError(callErr)
 		}
@@ -1574,8 +1661,8 @@ func (s *Service) CloseTab(ctx context.Context, actor, grantID, tabID string) er
 	// Under profile-exclusive control the Task may close any tab in the
 	// Profile, including a page the Owner opened by hand. origin is display
 	// metadata only and must not block the current holder.
-	err = s.withOperationHold(ctx, grant, func() error {
-		if hostErr := s.host.CloseTab(ctx, grant.ProfileID, session.HostSessionID, tab.HostTabID, s.fenceToken(grant)); hostErr != nil &&
+	err = s.withOperationHold(ctx, grant, func(expiresAt time.Time) error {
+		if hostErr := s.host.CloseTab(ctx, grant.ProfileID, session.HostSessionID, tab.HostTabID, s.operationFence(grant, expiresAt)); hostErr != nil &&
 			Code(hostErr) != "browser_tab_not_found" {
 			return sanitizeHostError(hostErr)
 		}

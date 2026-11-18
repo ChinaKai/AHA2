@@ -203,15 +203,21 @@ func (s *Store) UpdateBrowserSession(ctx context.Context, item domain.BrowserSes
 	return nil
 }
 
-const browserGrantColumns = `id,task_id,profile_id,session_id,capabilities_json,expires_at,revoked_at,created_at,updated_at`
+const browserGrantColumns = `id,task_id,profile_id,session_id,capabilities_json,expires_at,revoked_at,created_at,updated_at,
+	hold_id,hold_original_expires_at,hold_expires_at`
 
 func scanBrowserGrant(scanner interface{ Scan(...any) error }) (domain.BrowserTaskGrant, error) {
 	var item domain.BrowserTaskGrant
 	var capabilities, expiresAt, revokedAt, createdAt, updatedAt string
+	var holdID, holdOriginalExpiresAt, holdExpiresAt string
 	err := scanner.Scan(&item.ID, &item.TaskID, &item.ProfileID, &item.SessionID, &capabilities,
-		&expiresAt, &revokedAt, &createdAt, &updatedAt)
+		&expiresAt, &revokedAt, &createdAt, &updatedAt,
+		&holdID, &holdOriginalExpiresAt, &holdExpiresAt)
 	item.Capabilities = decodeJSON(capabilities, []string{})
 	item.ExpiresAt = parseTime(expiresAt)
+	item.HoldID = holdID
+	item.HoldOriginalExpiresAt = parseTime(holdOriginalExpiresAt)
+	item.HoldExpiresAt = parseTime(holdExpiresAt)
 	item.RevokedAt = parseTime(revokedAt)
 	item.CreatedAt = parseTime(createdAt)
 	item.UpdatedAt = parseTime(updatedAt)
@@ -521,7 +527,8 @@ func (s *Store) CreateBrowserTaskGrant(ctx context.Context, item domain.BrowserT
 // rebuild the lease.
 func (s *Store) RefreshBrowserTaskGrantLease(ctx context.Context, id string, capabilities []string, expiresAt time.Time, now time.Time) (domain.BrowserTaskGrant, error) {
 	result, err := s.db.ExecContext(ctx,
-		`UPDATE browser_task_grants SET capabilities_json=?,expires_at=?,updated_at=?
+		`UPDATE browser_task_grants SET capabilities_json=?,expires_at=?,
+			hold_id='',hold_original_expires_at='',hold_expires_at='',updated_at=?
 		 WHERE id=? AND revoked_at=''`,
 		encodeJSON(capabilities), timeString(expiresAt), timeString(now), id)
 	if err != nil {
@@ -534,22 +541,65 @@ func (s *Store) RefreshBrowserTaskGrantLease(ctx context.Context, id string, cap
 	return s.BrowserTaskGrant(ctx, id)
 }
 
-// CompareAndSwapBrowserTaskGrantExpiry changes only the active lease expiry,
-// preserving capabilities and every other field. expected is the value read
-// before the operation, so a concurrent acquire/revoke cannot be overwritten.
-func (s *Store) CompareAndSwapBrowserTaskGrantExpiry(ctx context.Context, id string, expected, expiresAt, now time.Time) error {
-	result, err := s.db.ExecContext(ctx,
-		`UPDATE browser_task_grants SET expires_at=?,updated_at=?
-		 WHERE id=? AND revoked_at='' AND expires_at=?`,
-		timeString(expiresAt), timeString(now), id, timeString(expected))
+var ErrBrowserGrantHoldActive = errors.New("browser grant hold is already active")
+
+// BeginBrowserTaskGrantHold installs a uniquely identified temporary lease
+// extension. It only updates an active row with the expected expiry and no
+// existing hold, so a concurrent owner renewal/revoke or a second hold cannot
+// be overwritten. The caller must later release exactly this holdID.
+func (s *Store) BeginBrowserTaskGrantHold(ctx context.Context, id string, expectedExpiry time.Time, holdID string, holdUntil, now time.Time) (time.Time, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return time.Time{}, err
+	}
+	defer tx.Rollback()
+	current, err := scanBrowserGrant(tx.QueryRowContext(ctx,
+		`SELECT `+browserGrantColumns+` FROM browser_task_grants WHERE id=?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, ErrBrowserAccessInactive
+	}
+	if err != nil {
+		return time.Time{}, err
+	}
+	if !current.RevokedAt.IsZero() || !current.ExpiresAt.After(now) ||
+		!current.ExpiresAt.Equal(expectedExpiry) || current.HoldID != "" ||
+		!holdUntil.After(current.ExpiresAt) {
+		return time.Time{}, ErrBrowserGrantHoldActive
+	}
+	result, err := tx.ExecContext(ctx,
+		`UPDATE browser_task_grants SET expires_at=?,hold_id=?,hold_original_expires_at=?,
+			hold_expires_at=?,updated_at=?
+		 WHERE id=? AND revoked_at='' AND expires_at=? AND hold_id=''`,
+		timeString(holdUntil), holdID, timeString(current.ExpiresAt), timeString(holdUntil),
+		timeString(now), id, timeString(current.ExpiresAt))
+	if err != nil {
+		return time.Time{}, err
 	}
 	affected, _ := result.RowsAffected()
 	if affected != 1 {
-		return sql.ErrNoRows
+		return time.Time{}, ErrBrowserGrantHoldActive
 	}
-	return nil
+	if err := tx.Commit(); err != nil {
+		return time.Time{}, err
+	}
+	return current.ExpiresAt, nil
+}
+
+// ReleaseBrowserTaskGrantHold restores only the expiry snapshot owned by
+// holdID. If the owner renewed/revoked the lease or another hold replaced it,
+// no row is touched and released=false.
+func (s *Store) ReleaseBrowserTaskGrantHold(ctx context.Context, id, holdID string, now time.Time) (bool, error) {
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE browser_task_grants
+		 SET expires_at=hold_original_expires_at,hold_id='',hold_original_expires_at='',
+		     hold_expires_at='',updated_at=?
+		 WHERE id=? AND hold_id=? AND revoked_at=''`,
+		timeString(now), id, holdID)
+	if err != nil {
+		return false, err
+	}
+	affected, _ := result.RowsAffected()
+	return affected == 1, nil
 }
 
 func (s *Store) RevokeBrowserTaskGrant(ctx context.Context, id string, revokedAt time.Time) error {

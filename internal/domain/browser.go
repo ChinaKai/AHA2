@@ -73,15 +73,18 @@ func (item BrowserSession) Active() bool {
 // BrowserTaskGrant gives one Task time-bounded use of a profile's session.
 // Every operation validates the grant, its session and the target tab.
 type BrowserTaskGrant struct {
-	ID           string    `json:"id"`
-	TaskID       string    `json:"task_id"`
-	ProfileID    string    `json:"profile_id"`
-	SessionID    string    `json:"session_id"`
-	Capabilities []string  `json:"capabilities"`
-	ExpiresAt    time.Time `json:"expires_at"`
-	RevokedAt    time.Time `json:"revoked_at,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID                    string    `json:"id"`
+	TaskID                string    `json:"task_id"`
+	ProfileID             string    `json:"profile_id"`
+	SessionID             string    `json:"session_id"`
+	Capabilities          []string  `json:"capabilities"`
+	ExpiresAt             time.Time `json:"expires_at"`
+	HoldID                string    `json:"-"`
+	HoldOriginalExpiresAt time.Time `json:"-"`
+	HoldExpiresAt         time.Time `json:"-"`
+	RevokedAt             time.Time `json:"revoked_at,omitempty"`
+	CreatedAt             time.Time `json:"created_at"`
+	UpdatedAt             time.Time `json:"updated_at"`
 }
 
 func (item BrowserTaskGrant) Status(now time.Time) string {

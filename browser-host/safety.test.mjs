@@ -377,6 +377,38 @@ test("rejects a relative .. Bookmarks symlink", async () => {
   }
 });
 
+test("stable lease identity is separate from the per-operation deadline", async () => {
+  const host = await startHost();
+  try {
+    let result = await host.call("POST", "/v1/profiles/browser_profile_1/session", {browser_kind: "edge"});
+    const sessionID = result.body.session.id;
+    await host.call("POST", "/v1/profiles/browser_profile_1/fence", {
+      session_id: sessionID, expected_fence: "", fence: "grant-stable",
+    });
+    result = await host.call("POST", "/v1/profiles/browser_profile_1/tabs", {
+      url: "https://example.com/stable", fence: `grant-stable|${Date.now() + 60_000}`,
+    });
+    assert.equal(result.status, 201);
+    const firstID = result.body.tab.id;
+    result = await host.call("POST", `/v1/profiles/browser_profile_1/tabs/${firstID}/navigate`, {
+      url: "https://example.com/next", fence: `grant-stable|${Date.now() + 60_000}`,
+    });
+    assert.equal(result.status, 200);
+    result = await host.call("POST", "/v1/profiles/browser_profile_1/tabs", {
+      url: "https://example.com/expired", fence: `grant-stable|${Date.now() - 1}`,
+    });
+    assert.equal(result.status, 409);
+    assert.equal(result.body.error.code, "browser_fence_expired");
+    result = await host.call("POST", "/v1/profiles/browser_profile_1/tabs", {
+      url: "https://example.com/stale", fence: `other-grant|${Date.now() + 60_000}`,
+    });
+    assert.equal(result.status, 409);
+    assert.equal(result.body.error.code, "browser_fence_stale");
+  } finally {
+    await host.close();
+  }
+});
+
 test("mutating calls require the current lease fence", async () => {
   const host = await startHost();
   try {

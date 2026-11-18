@@ -1300,6 +1300,165 @@ func TestHoldRenewalFailureRejectsBeforeHostSideEffect(t *testing.T) {
 	}
 }
 
+func TestConcurrentOperationsShareStableLeaseFence(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	profile := createProfile(t, f)
+	grant, err := f.service.CreateGrant(ctx, "owner", f.task.ID, profile.ID, nil, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.host.SetCurrentPages(profile.ID, []browser.HostTab{
+		{ID: "host-page-owner", URL: "https://owner.example/work", Title: "Work", Active: true},
+	})
+	tabs, err := f.service.SyncTabs(ctx, grant.ID)
+	if err != nil || len(tabs) != 1 {
+		t.Fatalf("tabs=%#v err=%v", tabs, err)
+	}
+	closeStarted := make(chan struct{}, 1)
+	closeRelease := make(chan struct{})
+	f.host.CloseTabStarted = closeStarted
+	f.host.CloseTabRelease = closeRelease
+	f.host.CloseTabGateTabID = tabs[0].HostTabID
+	closeResult := make(chan error, 1)
+	go func() {
+		closeResult <- f.service.CloseTab(ctx, "owner", grant.ID, tabs[0].ID)
+	}()
+	<-closeStarted
+	// A same-lease request joins the active hold. Both calls must use the
+	// stable lease fence even though the temporary deadline is present.
+	opened, err := f.service.OpenTab(ctx, "owner", grant.ID, "https://concurrent.example/")
+	if err != nil {
+		t.Fatalf("concurrent open under hold: %v", err)
+	}
+	if opened.URL != "https://concurrent.example/" {
+		t.Fatalf("opened=%#v", opened)
+	}
+	close(closeRelease)
+	if err := <-closeResult; err != nil {
+		t.Fatalf("close under concurrent open: %v", err)
+	}
+	if got := f.host.Fences[profile.ID]; got != grant.ID {
+		t.Fatalf("fence identity changed during hold: %q, want %q", got, grant.ID)
+	}
+	if len(f.host.FenceCalls) < 2 {
+		t.Fatalf("fence calls=%v, want close and open", f.host.FenceCalls)
+	}
+	closeFence := f.host.FenceCalls[0]
+	openFence := f.host.FenceCalls[1]
+	if closeFence != openFence {
+		t.Fatalf("concurrent operations used different tokens: %q vs %q", closeFence, openFence)
+	}
+	if !strings.HasPrefix(closeFence, grant.ID+"|") {
+		t.Fatalf("operation token %q does not carry the stable lease id", closeFence)
+	}
+}
+
+func TestHoldRestoreFailureIsBoundedAndDoesNotRoll(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	profile := createProfile(t, f)
+	grant, err := f.service.CreateGrant(ctx, "owner", f.task.ID, profile.ID, nil, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.host.SetCurrentPages(profile.ID, []browser.HostTab{
+		{ID: "host-page-owner", URL: "https://owner.example/work", Title: "Work", Active: true},
+	})
+	tabs, err := f.service.SyncTabs(ctx, grant.ID)
+	if err != nil || len(tabs) != 1 {
+		t.Fatalf("tabs=%#v err=%v", tabs, err)
+	}
+	closeStarted := make(chan struct{}, 1)
+	closeRelease := make(chan struct{})
+	f.host.CloseTabStarted = closeStarted
+	f.host.CloseTabRelease = closeRelease
+	f.host.CloseTabGateTabID = tabs[0].HostTabID
+	closeResult := make(chan error, 1)
+	go func() {
+		closeResult <- f.service.CloseTab(ctx, "owner", grant.ID, tabs[0].ID)
+	}()
+	<-closeStarted
+	original, err := f.store.BrowserTaskGrant(ctx, grant.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.service.SetReleaseHoldForTest(func() error { return errors.New("injected restore failure") })
+	close(closeRelease)
+	if err := <-closeResult; browser.Code(err) != "browser_lease_hold_release_failed" {
+		t.Fatalf("restore failure was not surfaced: %v", err)
+	}
+	held, err := f.store.BrowserTaskGrant(ctx, grant.ID)
+	if err != nil || held.HoldID == "" {
+		t.Fatalf("hold was not left for bounded recovery: %#v err=%v", held, err)
+	}
+	fixedDeadline := held.ExpiresAt
+	if !fixedDeadline.Equal(f.now.Add(5 * time.Minute)) {
+		t.Fatalf("hold deadline=%s, want %s", fixedDeadline, f.now.Add(5*time.Minute))
+	}
+
+	f.setNow(fixedDeadline.Add(-time.Minute))
+	if _, err := f.service.OpenTab(ctx, "owner", grant.ID, "https://after-failure.example/"); browser.Code(err) != "browser_lease_hold_failed" {
+		t.Fatalf("operation under unreleased hold returned %v", err)
+	}
+	after, err := f.store.BrowserTaskGrant(ctx, grant.ID)
+	if err != nil || !after.ExpiresAt.Equal(fixedDeadline) {
+		t.Fatalf("hold deadline rolled: %#v err=%v", after, err)
+	}
+
+	// Once the fixed deadline passes the lease is expired; another Task can
+	// acquire it instead of waiting for an ever-growing deadline.
+	f.setNow(original.ExpiresAt.Add(6 * time.Minute))
+	otherTask := createTask(t, f.store)
+	if _, err := f.service.CreateGrant(ctx, "owner", otherTask.ID, profile.ID, nil, time.Minute); err != nil {
+		t.Fatalf("acquire after bounded hold: %v", err)
+	}
+}
+
+func TestOwnerRenewalWinsOverOldHoldRestore(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	profile := createProfile(t, f)
+	grant, err := f.service.CreateGrant(ctx, "owner", f.task.ID, profile.ID, nil, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.host.SetCurrentPages(profile.ID, []browser.HostTab{
+		{ID: "host-page-owner", URL: "https://owner.example/work", Title: "Work", Active: true},
+	})
+	tabs, err := f.service.SyncTabs(ctx, grant.ID)
+	if err != nil || len(tabs) != 1 {
+		t.Fatalf("tabs=%#v err=%v", tabs, err)
+	}
+	closeStarted := make(chan struct{}, 1)
+	closeRelease := make(chan struct{})
+	f.host.CloseTabStarted = closeStarted
+	f.host.CloseTabRelease = closeRelease
+	f.host.CloseTabGateTabID = tabs[0].HostTabID
+	closeResult := make(chan error, 1)
+	go func() {
+		closeResult <- f.service.CloseTab(ctx, "owner", grant.ID, tabs[0].ID)
+	}()
+	<-closeStarted
+	held, err := f.store.BrowserTaskGrant(ctx, grant.ID)
+	if err != nil || held.HoldID == "" {
+		t.Fatalf("hold=%#v err=%v", held, err)
+	}
+	// Owner renewal writes the same expiry value as the temporary hold on a
+	// fixed clock. The hold ID, not the value, must decide whether restore wins.
+	if _, err := f.store.RefreshBrowserTaskGrantLease(ctx, held.ID, held.Capabilities, held.ExpiresAt, f.now); err != nil {
+		t.Fatal(err)
+	}
+	close(closeRelease)
+	if err := <-closeResult; err != nil {
+		t.Fatalf("close after owner renewal: %v", err)
+	}
+	stored, err := f.store.BrowserTaskGrant(ctx, grant.ID)
+	if err != nil || !stored.ExpiresAt.Equal(held.ExpiresAt) || stored.HoldID != "" {
+		t.Fatalf("old hold overwrote owner renewal: %#v err=%v", stored, err)
+	}
+}
+
 func TestReleaseFailsClosedWhenFenceCannotBeInstalled(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)

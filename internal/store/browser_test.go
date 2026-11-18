@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -41,6 +42,15 @@ func TestBrowserSchemaAndSingleActiveSession(t *testing.T) {
 	if err := database.db.QueryRowContext(ctx,
 		`SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=151)`).Scan(&hasV151); err != nil || !hasV151 {
 		t.Fatalf("schema v151=%v err=%v", hasV151, err)
+	}
+	var hasV152 bool
+	_ = database.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=152)`).Scan(&hasV152)
+	var holdColumns int
+	if err := database.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('browser_task_grants')
+		 WHERE name IN ('hold_id','hold_original_expires_at','hold_expires_at')`).Scan(&holdColumns); err != nil ||
+		!hasV152 || holdColumns != 3 {
+		t.Fatalf("schema v152=%v hold columns=%d err=%v", hasV152, holdColumns, err)
 	}
 	var hasOldPerTaskIndex int
 	if err := database.db.QueryRowContext(ctx,
@@ -535,5 +545,68 @@ func TestUpsertBrowserTabReassignsLeaseAndKeepsID(t *testing.T) {
 	}
 	if count, err := database.BrowserTabsForSession(ctx, session.ID); err != nil || len(count) != 1 {
 		t.Fatalf("session tabs=%#v err=%v", count, err)
+	}
+}
+
+func TestBrowserGrantHoldCASRejectsExpiredRowAndOwnerRenewal(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	task := createStoreTestTask(t, database)
+	now := time.Now().UTC()
+	profile := domain.BrowserProfile{
+		ID: domain.NewID("browser_profile"), Name: "Work", BrowserKind: domain.BrowserKindEdge,
+		HostID: "local", State: domain.BrowserProfileStateReady, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := database.UpsertBrowserProfile(ctx, profile); err != nil {
+		t.Fatal(err)
+	}
+	session := domain.BrowserSession{
+		ID: domain.NewID("browser_session"), ProfileID: profile.ID, HostID: "local",
+		State: domain.BrowserSessionStateReady, StartedAt: now, CreatedAt: now,
+	}
+	if err := database.CreateBrowserSession(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+	grant := domain.BrowserTaskGrant{
+		ID: domain.NewID("browser_grant"), TaskID: task.ID, ProfileID: profile.ID, SessionID: session.ID,
+		Capabilities: []string{domain.BrowserCapabilityOpenTab}, ExpiresAt: now.Add(time.Minute),
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := database.CreateBrowserTaskGrant(ctx, grant); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.BeginBrowserTaskGrantHold(ctx, grant.ID, grant.ExpiresAt, "hold-1", now.Add(5*time.Minute), now.Add(2*time.Minute)); !errors.Is(err, ErrBrowserGrantHoldActive) {
+		t.Fatalf("expired grant hold error=%v, want ErrBrowserGrantHoldActive", err)
+	}
+	unchanged, err := database.BrowserTaskGrant(ctx, grant.ID)
+	if err != nil || unchanged.HoldID != "" || !unchanged.ExpiresAt.Equal(grant.ExpiresAt) {
+		t.Fatalf("expired hold changed row: %#v err=%v", unchanged, err)
+	}
+
+	holdUntil := now.Add(5 * time.Minute)
+	if _, err := database.BeginBrowserTaskGrantHold(ctx, grant.ID, grant.ExpiresAt, "hold-1", holdUntil, now); err != nil {
+		t.Fatal(err)
+	}
+	held, err := database.BrowserTaskGrant(ctx, grant.ID)
+	if err != nil || held.HoldID != "hold-1" || !held.ExpiresAt.Equal(holdUntil) {
+		t.Fatalf("held grant=%#v err=%v", held, err)
+	}
+	// The Owner renews to the same numeric deadline on a fixed clock. Owner
+	// renewal clears the hold identity so the old restore must not win.
+	if _, err := database.RefreshBrowserTaskGrantLease(ctx, grant.ID, grant.Capabilities, holdUntil, now); err != nil {
+		t.Fatal(err)
+	}
+	released, err := database.ReleaseBrowserTaskGrantHold(ctx, grant.ID, "hold-1", now)
+	if err != nil || released {
+		t.Fatalf("old hold release=%v err=%v, want superseded", released, err)
+	}
+	renewed, err := database.BrowserTaskGrant(ctx, grant.ID)
+	if err != nil || !renewed.ExpiresAt.Equal(holdUntil) || renewed.HoldID != "" {
+		t.Fatalf("owner renewal was overwritten: %#v err=%v", renewed, err)
 	}
 }

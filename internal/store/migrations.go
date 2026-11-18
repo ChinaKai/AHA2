@@ -4196,6 +4196,30 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("record schema v151: %w", err)
 		}
 	}
+	var hasV152 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=152)`).Scan(&hasV152)
+	if !hasV152 ||
+		!s.tableHasColumn(ctx, "browser_task_grants", "hold_id") ||
+		!s.tableHasColumn(ctx, "browser_task_grants", "hold_original_expires_at") ||
+		!s.tableHasColumn(ctx, "browser_task_grants", "hold_expires_at") {
+		for _, column := range []struct{ name, ddl string }{
+			{"hold_id", `ALTER TABLE browser_task_grants ADD COLUMN hold_id TEXT NOT NULL DEFAULT ''`},
+			{"hold_original_expires_at", `ALTER TABLE browser_task_grants ADD COLUMN hold_original_expires_at TEXT NOT NULL DEFAULT ''`},
+			{"hold_expires_at", `ALTER TABLE browser_task_grants ADD COLUMN hold_expires_at TEXT NOT NULL DEFAULT ''`},
+		} {
+			if s.tableHasColumn(ctx, "browser_task_grants", column.name) {
+				continue
+			}
+			if _, err := s.db.ExecContext(ctx, column.ddl); err != nil &&
+				!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+				return fmt.Errorf("apply schema v152 %s: %w", column.name, err)
+			}
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(152, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return fmt.Errorf("record schema v152: %w", err)
+		}
+	}
 	return nil
 }
 

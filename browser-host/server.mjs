@@ -338,10 +338,32 @@ async function readProfileBookmarks(root, profileID, directory, beforeBookmarkOp
   return result;
 }
 
+function fenceExpiry(fence) {
+  const raw = String(fence || "");
+  const pipe = raw.indexOf("|");
+  if (pipe > 0) {
+    const explicit = Number(raw.slice(pipe + 1));
+    return Number.isFinite(explicit) ? explicit : NaN;
+  }
+  const index = raw.lastIndexOf("@");
+  if (index <= 0) return NaN;
+  const expiresAt = Number(raw.slice(index + 1));
+  return Number.isFinite(expiresAt) ? expiresAt : NaN;
+}
+
+function fenceIdentity(fence) {
+  const raw = String(fence || "");
+  const pipe = raw.indexOf("|");
+  if (pipe > 0) return raw.slice(0, pipe);
+  // Legacy persistent tokens were "<leaseID>@<expiry>"; accept them during
+  // upgrade by comparing only the lease ID. New tokens keep the deadline in
+  // the "|" segment instead.
+  const at = raw.lastIndexOf("@");
+  return at > 0 ? raw.slice(0, at) : raw;
+}
+
 function fenceExpired(fence) {
-  const index = String(fence || "").lastIndexOf("@");
-  if (index <= 0) return false;
-  const expiresAt = Number(String(fence).slice(index + 1));
+  const expiresAt = fenceExpiry(fence);
   return Number.isFinite(expiresAt) && Date.now() > expiresAt;
 }
 
@@ -353,7 +375,6 @@ function fenceExpired(fence) {
 // proceed through the session gate and are not blocked indefinitely.
 function beginOperationHold(session, failHold) {
   if (!session.fence) return {fence: "", release() {}};
-  if (fenceExpired(session.fence)) return null;
   if (typeof failHold === "function" ? failHold() : failHold) return null;
   return {fence: session.fence, release() {}};
 }
@@ -363,9 +384,12 @@ function beginOperationHold(session, failHold) {
 // ends; a fence change is still observed as stale.
 function fenceStatus(session, supplied, hold = null) {
   if (!session.fence) return "";
+  const suppliedIdentity = fenceIdentity(supplied);
+  if (suppliedIdentity !== fenceIdentity(session.fence)) return "browser_fence_stale";
   const held = Boolean(hold && hold.fence === session.fence);
-  if (fenceExpired(session.fence) && !held) return "browser_fence_expired";
-  if (String(supplied || "") !== session.fence) return "browser_fence_stale";
+  const expiresAt = fenceExpiry(supplied);
+  const expired = Number.isFinite(expiresAt) ? Date.now() > expiresAt : fenceExpired(session.fence);
+  if (expired && !held) return "browser_fence_expired";
   return "";
 }
 

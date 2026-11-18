@@ -340,7 +340,8 @@ before it starts, and any new operation after expiry fails with
 `browser_fence_expired`; do not retry either with the old grant.
 `browser_profile_in_use`, `browser_task_profile_limit`, `browser_grant_forbidden`,
 `browser_grant_revoked`, `browser_grant_expired`, `browser_fence_stale`, `browser_fence_expired`,
-`browser_fence_timeout`, `browser_lease_hold_failed` and `browser_capability_denied` are final:
+`browser_fence_timeout`, `browser_lease_hold_failed`, `browser_lease_hold_release_failed`
+and `browser_capability_denied` are final:
 stop and ask the Owner instead of retrying or looking for another route.
 
 ## Hardware

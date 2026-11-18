@@ -42,8 +42,10 @@ type FakeHost struct {
 	CloseTabCalls     int
 	FailCloseTab      error
 	OpenCalls         int
+	OpenTabCalls      int
 	CloseCalls        int
 	Fences            map[string]string
+	FenceCalls        []string
 	FrameCalls        int
 	ActivateCalls     int
 	BookmarkCalls     int
@@ -81,13 +83,38 @@ func (f *FakeHost) operationHold() (time.Time, time.Time) {
 // fenceLocked models the host operation hold: a token that was live when the
 // call started may outlive its original expiry until the hold deadline, but a
 // token already expired at call start is never resurrected.
+func splitFence(value string) (identity, expiry string) {
+	if index := strings.Index(value, "|"); index > 0 {
+		return value[:index], value[index+1:]
+	}
+	if index := strings.LastIndex(value, "@"); index > 0 {
+		return value[:index], value[index+1:]
+	}
+	return value, ""
+}
+
 func (f *FakeHost) fenceLocked(profileID, fence string, hold ...time.Time) error {
+	f.FenceCalls = append(f.FenceCalls, fence)
 	current := f.Fences[profileID]
 	if current == "" {
 		return nil
 	}
-	if index := strings.LastIndex(current, "@"); index > 0 {
-		if expiresAt, err := strconv.ParseInt(current[index+1:], 10, 64); err == nil {
+	suppliedIdentity, suppliedExpiry := splitFence(fence)
+	currentIdentity, currentExpiry := splitFence(current)
+	if suppliedIdentity != currentIdentity {
+		return &browser.Error{Code: "browser_fence_stale", Message: "lease fence changed", Status: http.StatusConflict}
+	}
+	expiryText := suppliedExpiry
+	if expiryText == "" {
+		expiryText = currentExpiry
+	}
+	if expiryText == "" {
+		if index := strings.LastIndex(current, "@"); index > 0 {
+			expiryText = current[index+1:]
+		}
+	}
+	if expiryText != "" {
+		if expiresAt, err := strconv.ParseInt(expiryText, 10, 64); err == nil {
 			expiry := time.UnixMilli(expiresAt)
 			now := f.Now()
 			held := len(hold) >= 2 && now.Before(hold[1]) && expiry.After(hold[0])
@@ -95,9 +122,6 @@ func (f *FakeHost) fenceLocked(profileID, fence string, hold ...time.Time) error
 				return &browser.Error{Code: "browser_fence_expired", Message: "lease fence expired", Status: http.StatusConflict}
 			}
 		}
-	}
-	if fence != current {
-		return &browser.Error{Code: "browser_fence_stale", Message: "lease fence changed", Status: http.StatusConflict}
 	}
 	return nil
 }
@@ -221,6 +245,7 @@ func (f *FakeHost) sessionLocked(profileID, sessionID string) (*session, error) 
 
 func (f *FakeHost) OpenTab(_ context.Context, profileID, sessionID, targetURL, fence string) (browser.HostTab, error) {
 	f.mu.Lock()
+	f.OpenTabCalls++
 	if f.FailOpenTab != nil {
 		err := f.FailOpenTab
 		f.mu.Unlock()

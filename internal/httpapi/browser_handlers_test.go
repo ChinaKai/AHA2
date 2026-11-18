@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -531,6 +532,28 @@ func TestReleaseOverHTTPFailsClosedWhenHostUnreachable(t *testing.T) {
 	}
 	if payload["grant"].(map[string]any)["status"] != "revoked" {
 		t.Fatalf("released grant=%#v", payload["grant"])
+	}
+}
+
+func TestLeaseHoldSQLFailureReturns409BeforeHostCall(t *testing.T) {
+	host := browsertest.New()
+	f := newBrowserAPIFixture(t, host)
+	_, payload := f.do(t, http.MethodPost, "/api/v1/browser/profiles", map[string]any{"name": "Work"})
+	profileID := payload["profile"].(map[string]any)["id"].(string)
+	response, payload := f.do(t, http.MethodPost, "/api/v1/tasks/"+f.task.ID+"/browser-grants", map[string]any{
+		"profile_id": profileID, "expires_in_seconds": 60,
+	})
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("lease: %d %#v", response.StatusCode, payload)
+	}
+	grantID := payload["grant"].(map[string]any)["id"].(string)
+	f.service.SetHoldForTest(func() error { return errors.New("injected SQL failure") })
+	response, payload = f.do(t, http.MethodPost, "/api/v1/browser-grants/"+grantID+"/tabs", map[string]any{"url": "https://example.com/"})
+	if response.StatusCode != http.StatusConflict || payload["error"] != "browser_lease_hold_failed" {
+		t.Fatalf("hold SQL failure: %d %#v", response.StatusCode, payload)
+	}
+	if host.OpenTabCalls != 0 {
+		t.Fatalf("host was called without a hold: %d", host.OpenTabCalls)
 	}
 }
 

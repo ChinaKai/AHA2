@@ -57,18 +57,24 @@ Profile 独占控制（profile_exclusive）：
   面板显示等待/转移入口。
 
 租约 fencing：每次获取/转移/释放都会通过 host `POST /v1/profiles/{id}/fence`
-用 CAS 安装新的 fence（旧值匹配才写入），token 形如 `<grantID>@<expiresAtMs>`；
-所有 open/activate/navigate/close 都带当前 token。host 为每个 session 维护读写门：
+用 CAS 安装新的 fence（旧值匹配才写入），持久 fence 身份就是 lease ID；所有
+open/activate/navigate/close 都带 `<leaseID>|<operationDeadlineMs>`。host 为每个 session 维护读写门：
 页面操作拿读槽并持有到副作用完成，fence 切换先立即失效旧 token，再拿写槽等待
 在途操作；超时（默认 5s）返回 409 `browser_fence_timeout` 并恢复旧 fence，不能宣称
 切换成功。mutation 开始前 host 先确认 token 在调用时仍然有效，并建立仅覆盖本次
 `page.close()`/`goto()`/`bringToFront()` 的 operation hold：已获准操作不会在
 Playwright 调用中途因原 expiry 到期而失败，也不需要事后重开页面或回滚 URL。
-service 同时用 CAS 把 DB lease expiry 临时延长到至少当前操作预算，结束后立即恢复
-原 expiry；CAS 失败或续租失败则在调用 Playwright 前返回 409
-`browser_lease_hold_failed`，页面状态不变。hold 只保护已经开始的调用；切换后的
-暂停旧调用仍返回 `browser_fence_stale`，release/transfer 通过写槽等待且不会被
-无限阻塞。读操作仍每步重新鉴权。
+host 的持久 fence 身份固定为 lease ID；每次 mutation 另带
+`<leaseID>|<operationDeadline>`，临时 deadline 不参与 fence 身份比较，因此同一
+lease 的并发请求不会互相误报 `browser_fence_stale`。
+service 用带独立 `hold_id` 的 CAS 把 DB lease expiry 临时延长到当前操作预算：
+同一 lease 的并发操作共享同一 hold；结束后只恢复该 `hold_id` 写入的 expiry。
+owner 合法续租会清空 hold 身份并获胜，旧 hold 恢复不能覆盖新 TTL。续租失败在调用
+Playwright 前返回 409 `browser_lease_hold_failed`；恢复 SQL 失败会记录审计并返回
+500 `browser_lease_hold_release_failed`，hold deadline 固定、不会滚动，过期后可被
+新的 owner 获取。hold 只保护已经开始的调用；切换后的暂停旧调用仍返回
+`browser_fence_stale`，release/transfer 通过写槽等待且不会被无限阻塞。读操作仍
+每步重新鉴权。
 
 标签页操作（Owner 与当前独占 Task 共用同一服务层；不再有 per-tab grant 归属）：
 
@@ -142,6 +148,7 @@ Agent 只有只读 snapshot/frame/bookmarks 与 open/activate/close/navigate 控
 - 控制权在操作开始前已转移/释放：`browser_fence_stale`（409）；
 - lease 过期后的新操作：`browser_fence_expired`（409）；
 - 无法建立 lease hold/续租：`browser_lease_hold_failed`（409），操作在 Playwright 调用前失败；
+- hold 恢复失败：`browser_lease_hold_release_failed`（500），操作已完成但临时期限未能恢复；deadline 固定有界；
 - fence 切换等待在途操作超时：`browser_fence_timeout`（409），旧 lease/fence 保留；
 - 跨 Profile 的 tab：`browser_tab_forbidden`（403）；
 - 授权缺少能力：`browser_capability_denied`（403）；

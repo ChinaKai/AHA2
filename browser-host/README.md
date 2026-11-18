@@ -109,7 +109,9 @@ AHA 侧业务请求客户端超时 60s，覆盖 host 的 30s 页面导航期限�
 
 ## HTTP 契约（host 侧）
 
-所有请求（含健康检查）都需要 `Authorization: Bearer <token>`。
+所有请求（含健康检查）都需要 `Authorization: Bearer <token>`。持久 fence
+身份是 lease ID；mutation 传入的 `<leaseID>|<operationDeadline>` 中只有前段参与
+身份比较，后段是本次操作的临时 deadline。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
@@ -143,6 +145,8 @@ AHA 侧业务请求客户端超时 60s，覆盖 host 的 30s 页面导航期限�
 - `browser_fence_expired`：租约已过截止时间，拒绝新操作；
 - `browser_lease_hold_failed`：无法为已开始的调用建立 lease hold 或续租失败，
   在 Playwright 调用前拒绝，页面不变；
+- `browser_lease_hold_release_failed`：服务端 hold 恢复失败（仅由 AHA 产生），
+  操作已完成但临时期限保留，deadline 固定有界；
 - `browser_fence_timeout`：fence 切换等待在途操作超时，旧 fence 保留。
 
 ## 自动化测试
