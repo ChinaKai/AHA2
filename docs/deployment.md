@@ -181,7 +181,10 @@ Release 的 Windows 作业直接调用 `scripts/build-windows-package.sh` 生成
 （包内 `dist/`），再用其中的清单和文件构建机器级与 per-user 两个安装器，最后由
 `scripts/assemble-windows-package.py` 把官方 PackageDir 布局打成
 `AHA2-Windows-Package-x64.zip`。该组包脚本只写文件条目，不写目录元数据，避免归档里
-出现无部署价值、却需要额外路径校验的目录条目；Release 与 Linux 测试执行同一脚本：
+出现无部署价值、却需要额外路径校验的目录条目；Release 与 Linux 测试执行同一脚本。
+写入前，包目录、安装器目录、两份 Setup 和 `dist/` 下每个条目都先做 `lstat` 检查：
+符号链接、Windows junction/reparse point 和其他非常规文件一律报错退出，既不跟随
+链接目标，也不静默跳过目录链接：
 
 ```text
 AHA2-Windows-Package-x64.zip
