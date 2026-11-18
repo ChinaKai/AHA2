@@ -705,6 +705,52 @@ try {
     "a normal refresh must keep the preview");
   await page.evaluate(() => window.__panel.dispose());
 
+  // 14d. A held refresh that hiding invalidates must still release the loading
+  // state it owned. The later tab sync sees unchanged data and repaints
+  // nothing, so without that cleanup the refresh/switch buttons stay disabled
+  // even after the preview comes back.
+  await reset(page, {__mode: "tabs", __hostAvailable: true, __hostOnlyDown: false, __staleError: false, __released: false,
+    __inUse: false, __transferred: false, __attached: true, __ownerTabs: [], __ownerClosed: [],
+    __ownerNav: {}, __ownerActive: "", __frameErrorTab: "", __frameClosed: [], __syncRequests: 0,
+    __syncHold: null, __syncHoldTaken: false, __syncHoldDone: false, __frames: 0, __granted: 0});
+  await page.waitForSelector("#desktop-browser-switch", {timeout: 5000});
+  await page.waitForSelector("#desktop-browser-frame:not([hidden])", {timeout: 5000});
+  await page.evaluate(() => {
+    window.__vis = "visible";
+    Object.defineProperty(document, "visibilityState", {configurable: true, get: () => window.__vis});
+  });
+  await page.evaluate(() => {
+    let release;
+    const promise = new Promise(resolve => { release = resolve; });
+    window.__syncHold = {promise, release};
+    window.__syncHoldTaken = false;
+    window.__syncHoldDone = false;
+    document.querySelector("#desktop-browser-refresh").click();
+  });
+  await waitFor(page, () => window.__syncHoldTaken, {timeout: 3000});
+  await page.evaluate(() => { window.__vis = "hidden"; document.dispatchEvent(new Event("visibilitychange")); });
+  await waitFor(page, () => document.querySelector("#desktop-browser-frame").hidden);
+  // The held refresh resolves only after hiding invalidated it.
+  await page.evaluate(() => { window.__syncHold.release(); window.__syncHold = null; });
+  await waitFor(page, () => window.__syncHoldDone, {timeout: 3000});
+  await page.waitForTimeout(150);
+  assert.equal(await page.evaluate(() => document.querySelector("#desktop-browser-refresh").disabled), false,
+    "a dropped refresh must clear the loading state it owned");
+  await page.evaluate(() => { window.__vis = "visible"; document.dispatchEvent(new Event("visibilitychange")); });
+  await page.waitForSelector("#desktop-browser-frame:not([hidden])", {timeout: 8000});
+  // One further regular sync applies unchanged data; the controls must already
+  // be usable instead of waiting for a repaint that sync will not perform.
+  const syncsAfterRestore = await page.evaluate(() => window.__syncRequests);
+  await waitFor(page, count => window.__syncRequests > count, {arg: syncsAfterRestore, timeout: 6000});
+  assert.equal(await page.evaluate(() => document.querySelector("#desktop-browser-refresh").disabled), false,
+    "the refresh button must stay usable after the stale refresh lands");
+  assert.equal(await page.evaluate(() => document.querySelector("#desktop-browser-switch").disabled), false,
+    "the switch button must stay usable after the stale refresh lands");
+  assert.equal(await page.evaluate(() => document.querySelector("#desktop-browser-frame").hidden), false,
+    "the preview must recover after hidden→visible");
+  await page.evaluate(() => { delete document.visibilityState; window.__vis = "visible"; });
+  await page.evaluate(() => window.__panel.dispose());
+
   // 15. A terminal frame answer (409/403) is never retried by the 2s error
   // backoff or by restoring visibility: the suppression outlives hidden→visible.
   for (const terminalStatus of [409, 403]) {

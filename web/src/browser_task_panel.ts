@@ -900,25 +900,42 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     state.loading = true;
     state.error = "";
     paint();
+    const stale = (): boolean =>
+      disposed || epoch !== stateSyncEpoch || request !== stateSyncRequest;
+    let dropped = false;
     try {
       const result = await api.taskBrowser(taskID);
       // The Owner may have left browser mode, released the lease or switched
       // tabs while this read was in flight; a stale answer must not be applied.
-      if (disposed || epoch !== stateSyncEpoch || request !== stateSyncRequest) return;
-      const data = result?.browser;
-      if (!data) throw new Error("浏览器状态不可用");
-      applyBrowserState(data);
+      if (stale()) {
+        dropped = true;
+      } else {
+        const data = result?.browser;
+        if (!data) throw new Error("浏览器状态不可用");
+        applyBrowserState(data);
+      }
     } catch (error) {
       // A failure from a superseded read is equally stale: it must not pin an
       // error over the state the newer read already applied.
-      if (disposed || epoch !== stateSyncEpoch || request !== stateSyncRequest) return;
-      state.error = error instanceof Error ? error.message : String(error);
+      if (stale()) {
+        dropped = true;
+      } else {
+        state.error = error instanceof Error ? error.message : String(error);
+      }
     } finally {
       // Only the newest load owns the loading flag; a superseded one must not
       // clear it while the newer read is still in flight.
       if (loadRequest === stateLoadRequest) state.loading = false;
     }
-    // Dropped answers returned above, so none of the repaint, frame restart or
+    if (dropped) {
+      // The stale answer is not applied, but the loading flag it owned may
+      // still be disabling the controls painted when the read started. Repaint
+      // the current (never the stale) state so the buttons match the cleared
+      // flag; a newer load owns the flag and will repaint for itself.
+      if (!disposed && loadRequest === stateLoadRequest) paint();
+      return;
+    }
+    // Dropped answers returned above, so none of the frame restart or
     // follow-up reads below can run for them.
     paint();
     startStream();
