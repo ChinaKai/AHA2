@@ -109,6 +109,46 @@ window.__frameDelayTab = "";
 window.__frameDelayMs = 0;
 window.__frameDelayStarted = 0;
 window.__frameDelayDone = 0;
+// A stale frame may be visible for only one paint. Hold every frame for the
+// new tab after the first one, so a late old-tab paint cannot be masked by a
+// newer frame before the test looks at the picture.
+window.__frameHoldTab = "";
+window.__frameHoldAfter = 1;
+window.__frameOK = {};
+window.__frameHeld = 0;
+window.__frameHoldWaiters = [];
+window.__frameHoldReleased = 0;
+window.__releaseFrameHolds = () => {
+  window.__frameHoldTab = "";
+  const waiters = window.__frameHoldWaiters.splice(0);
+  window.__frameHoldReleased += waiters.length;
+  waiters.forEach(resolve => resolve());
+};
+// Every decoded preview frame is recorded with the pixel it painted, so even a
+// one-frame flash of the old tab is visible after the fact.
+window.__paints = [];
+const rememberPaint = image => {
+  if (!image.complete || !image.naturalWidth) return;
+  const canvas = document.createElement("canvas");
+  canvas.width = 1;
+  canvas.height = 1;
+  const context = canvas.getContext("2d");
+  try {
+    context.drawImage(image, 0, 0, 1, 1);
+    const [red, green] = context.getImageData(0, 0, 1, 1).data;
+    window.__paints.push({color: red > 200 ? "red" : green > 200 ? "green" : "other", at: performance.now()});
+  } catch {
+    window.__paints.push({color: "error", at: performance.now()});
+  }
+};
+const watchPreviewPaint = image => {
+  if (!image || image.__paintWatched) return;
+  image.__paintWatched = true;
+  image.addEventListener("load", () => rememberPaint(image));
+};
+new MutationObserver(() => {
+  document.querySelectorAll("#desktop-browser-frame").forEach(watchPreviewPaint);
+}).observe(document.documentElement, {childList: true, subtree: true});
 window.__frameUnavailable = false;
 window.__frame503 = 0;
 window.__frameClosed = [];
@@ -234,6 +274,11 @@ window.fetch = async (input, init = {}) => {
     const tabID = path.split("/").slice(-2)[0];
     window.__lastFrameTab = tabID;
     window.__frameTabs.push(tabID);
+    window.__frameOK[tabID] = (window.__frameOK[tabID] || 0) + 1;
+    if (window.__frameHoldTab === tabID && window.__frameOK[tabID] > window.__frameHoldAfter) {
+      window.__frameHeld++;
+      await new Promise(resolve => window.__frameHoldWaiters.push(resolve));
+    }
     // Opt-in slow frame for the old tab: a switch must discard it on arrival.
     if (window.__frameDelayTab && tabID === window.__frameDelayTab && window.__frameDelayMs > 0) {
       window.__frameDelayStarted++;
@@ -422,9 +467,18 @@ try {
   assert.equal(await page.evaluate(() => window.__lastFrameTab), "browser_tab_1");
 
   // Start a slow tab-1 frame, then switch focus to tab 2 and force an immediate
-  // sync. The late tab-1 answer must be discarded, not painted over tab 2.
-  await page.evaluate(() => { window.__frameDelayTab = "browser_tab_1"; window.__frameDelayMs = 1500; });
+  // sync. Every tab-2 frame after the first is held, so a late tab-1 paint
+  // cannot be covered by a newer green frame before the test inspects it. Each
+  // decoded frame is also recorded with its pixel: a one-frame red flash fails
+  // even if a later green frame would have restored the picture.
+  await page.evaluate(() => {
+    window.__frameDelayTab = "browser_tab_1";
+    window.__frameDelayMs = 1500;
+    window.__frameHoldTab = "browser_tab_2";
+    window.__frameHoldAfter = 1;
+  });
   await waitFor(page, () => window.__frameDelayStarted > 0, {timeout: 5000});
+  const paintsBeforeSwitch = await page.evaluate(() => window.__paints.length);
   await page.evaluate(() => {
     window.__ownerFocused = "browser_tab_2";
     document.dispatchEvent(new Event("visibilitychange"));
@@ -433,11 +487,20 @@ try {
   await assertSingleCurrent("browser_tab_2");
   await waitForFrameColor(page, "green");
   assert.equal(await page.evaluate(() => window.__lastFrameTab), "browser_tab_2", "frames must come from the selected tab");
+  await waitFor(page, () => window.__frameHeld > 0, {timeout: 8000});
   await waitFor(page, () => window.__frameDelayDone > 0, {timeout: 8000});
-  await page.waitForTimeout(400);
+  // Give the browser a chance to run any paint that a stale response queued.
+  await page.waitForTimeout(250);
+  const paintsAfterSwitch = await page.evaluate(mark => window.__paints.slice(mark), paintsBeforeSwitch);
+  assert.deepEqual(paintsAfterSwitch.filter(paint => paint.color === "red"), [],
+    `the late tab-1 frame must never paint over tab 2; paints=${JSON.stringify(paintsAfterSwitch)}`);
   assert.equal(await page.evaluate(() => window.__lastFrameTab), "browser_tab_2", "the late tab-1 frame must not be requested again");
   assert.equal(await frameColor(page), "green", "the late tab-1 frame must not overwrite tab 2's picture");
-  await page.evaluate(() => { window.__frameDelayTab = ""; window.__frameDelayMs = 0; });
+  await page.evaluate(() => {
+    window.__frameDelayTab = "";
+    window.__frameDelayMs = 0;
+    window.__releaseFrameHolds();
+  });
 
   // Switching back follows the new foreground window in the same way.
   await page.evaluate(() => { window.__ownerFocused = "browser_tab_1"; document.dispatchEvent(new Event("visibilitychange")); });
