@@ -150,6 +150,37 @@ test("package manifest gate rejects identity mismatches", () => {
     "the manifest version and expected.version are both normalized before comparison");
 });
 
+test("package manifest gate cross-checks version, commit and Web version without caller input", () => {
+  // The manifest's own fields must agree with each other even when no expected
+  // values are supplied, so a forged manifest cannot validate itself.
+  assert.throws(
+    () => assertPackageManifest(validPackageManifest({generator: {
+      ...validPackageManifest().generator,
+      web_version: "v9.9.9.20261112.abcdef012345",
+    }})),
+    /must look like v1\.2\.3/,
+  );
+  assert.throws(
+    () => assertPackageManifest(validPackageManifest({generator: {
+      ...validPackageManifest().generator,
+      web_version: "v1.2.3.20261112.ffffffffffff",
+    }})),
+    /does not match manifest commit/,
+  );
+  assert.throws(
+    () => assertPackageManifest(validPackageManifest({generator: {
+      ...validPackageManifest().generator,
+      web_version: "v1.2.3.20261312.abcdef012345",
+    }})),
+    /invalid build date/,
+  );
+  assert.throws(
+    () => assertPackageManifest(validPackageManifest({commit: "0000000000000000000000000000000000000000"})),
+    /does not match manifest commit 0000000000000000000000000000000000000000/,
+    "an all-zero commit cannot be paired with a real Web version hash",
+  );
+});
+
 test("package manifest gate rejects unsafe, duplicate and out-of-scope entries", () => {
   assert.throws(() => assertPackageManifest(validPackageManifest({files: []})), /at least one package file/);
   assert.throws(

@@ -72,18 +72,21 @@ func TestInstallerBuilderValidatesPackageManifest(t *testing.T) {
 	for _, contract := range []string{
 		"Release manifest not found",
 		`"/DSourceManifest=$manifestInputPath"`,
-		"Release manifest version",
-		"Release manifest commit",
-		"generator.web_version",
-		"Release manifest path is not a safe package-relative path",
-		"Release manifest is missing required install file",
-		"outside the installer's install scope",
-		"Release manifest SHA256 does not match the installer input",
-		"Get-FileHash -Algorithm SHA256",
+		"verify-windows-package.mjs",
+		"--expected-commit",
+		"--browser-host",
+		"Expected commit is required",
+		"Node.js is required",
+		"Windows package verification failed",
 	} {
 		if !strings.Contains(builder, contract) {
 			t.Errorf("build-windows-installer.ps1 does not enforce: %s", contract)
 		}
+	}
+	// The manifest's own commit must never be the source of the expected
+	// commit; the builder derives it from the checkout or requires it.
+	if !strings.Contains(builder, "rev-parse HEAD") {
+		t.Error("build-windows-installer.ps1 must derive the expected commit from the checkout")
 	}
 	// Both installers must receive the same manifest path in the workflow; the
 	// builder itself must never regenerate or edit it.
@@ -104,8 +107,10 @@ func TestReleaseWorkflowPublishesPackageLayout(t *testing.T) {
 	if !strings.Contains(workflow, `--output-dir dist/package`) {
 		t.Error("Release workflow must build the package into dist/package")
 	}
-	if got := strings.Count(workflow, "-InputManifest"); got < 2 {
-		t.Errorf("Release workflow must pass -InputManifest to both installer builds, got %d", got)
+	for _, flag := range []string{"-InputManifest", "-ExpectedCommit"} {
+		if got := strings.Count(workflow, flag); got < 2 {
+			t.Errorf("Release workflow must pass %s to both installer builds, got %d", flag, got)
+		}
 	}
 	for _, contract := range []string{
 		"Compress-Archive",
@@ -115,8 +120,8 @@ func TestReleaseWorkflowPublishesPackageLayout(t *testing.T) {
 		"dist/release-manifest.json",
 		"release-assets/*",
 		`test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 13`,
-		"zipfile.ZipFile",
-		"hashlib.sha256",
+		"verify-windows-package-archive.py",
+		`--commit "$GITHUB_SHA"`,
 	} {
 		if !strings.Contains(workflow, contract) {
 			t.Errorf("Release workflow is missing the package layout contract: %s", contract)
@@ -134,8 +139,18 @@ func TestReleaseWorkflowPublishesPackageLayout(t *testing.T) {
 
 func TestManifestRequiredScopeMatchesInstallerMapping(t *testing.T) {
 	root := repoRoot(t)
+	scope := readRepoFile(t, root, "scripts/windows-package-scope.json")
 	manifest := readRepoFile(t, root, "scripts/release-manifest.mjs")
+	archiveVerifier := readRepoFile(t, root, "scripts/verify-windows-package-archive.py")
 
+	// One scope file is consumed by the manifest generator, the installer
+	// verifier and the Release archive checker, so the three cannot drift.
+	if !strings.Contains(manifest, "windows-package-scope.json") {
+		t.Error("release-manifest.mjs must load the shared windows-package-scope.json")
+	}
+	if !strings.Contains(archiveVerifier, "windows-package-scope.json") {
+		t.Error("verify-windows-package-archive.py must load the shared windows-package-scope.json")
+	}
 	for _, path := range []string{
 		"aha2-windows-amd64.exe",
 		"aha2-tray-windows-amd64.exe",
@@ -150,12 +165,12 @@ func TestManifestRequiredScopeMatchesInstallerMapping(t *testing.T) {
 		"node/node.exe",
 		"node/LICENSE",
 	} {
-		if !strings.Contains(manifest, `"`+path+`"`) {
-			t.Errorf("REQUIRED_PACKAGE_FILES is missing %s", path)
+		if !strings.Contains(scope, `"`+path+`"`) {
+			t.Errorf("windows-package-scope.json required files are missing %s", path)
 		}
 	}
 	for _, prefix := range []string{`"browser-host/"`, `"node/"`} {
-		if !strings.Contains(manifest, prefix) {
+		if !strings.Contains(scope, prefix) {
 			t.Errorf("package path scope is missing prefix %s", prefix)
 		}
 	}
@@ -171,6 +186,10 @@ func TestDeploymentDocsDescribePackageLayout(t *testing.T) {
 		`<PackageDir>\dist\release-manifest.json`,
 		`{app}\release-manifest.json`,
 		"-InputManifest",
+		"-ExpectedCommit",
+		"verify-windows-package.mjs",
+		"verify-windows-package-archive.py",
+		"windows-package-scope.json",
 		`{app}\browser-host`,
 		`{app}\node`,
 		`plugins\channels\feishu`,

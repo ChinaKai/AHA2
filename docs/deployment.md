@@ -156,10 +156,16 @@ Web 构建和嵌入资源都写在副本中，仓库里只写 `--output-dir`；�
 缺一项就直接失败，不会产出不完整的包。
 
 安装器构建使用同一份清单：`scripts/build-windows-installer.ps1` 读取
-`-InputManifest`（默认 `dist\release-manifest.json`），校验版本与安装器版本一致、每个
-清单路径都落在安装器实际复制的范围内，并逐文件比对安装输入的 SHA256。安装器把清单
-原样安装到 `{app}\release-manifest.json`，因此目标机部署脚本校验的清单与实际安装的字节
-完全一致。清单枚举的包内路径是固定的：
+`-InputManifest`（默认 `dist\release-manifest.json`），调用
+`scripts/verify-windows-package.mjs` 做双向校验：清单里的每一项都必须有安装输入，
+安装器会复制的每一个文件（包括递归的 `browser-host/` 和 `node/`）也必须在清单里；
+随后逐文件比对大小和 SHA256。清单身份不止检查格式：版本、commit 和
+`generator.web_version` 必须互相一致，Web 版本里的 12 位哈希必须等于 commit 前缀，
+构建日期必须是真实日期。期望 commit 来自安装器所在 git 检出（`git rev-parse HEAD`）
+或调用方传入的 `-ExpectedCommit`（Release 作业传 `$GITHUB_SHA`），绝不使用清单自身
+的 commit 自证；因此构建需要 Node.js，且清单被篡改或安装输入被增删时构建会直接失败。
+安装器把清单原样安装到 `{app}\release-manifest.json`，因此目标机部署脚本校验的清单
+与实际安装的字节完全一致。清单枚举的包内路径是固定的：
 
 - `aha2-windows-amd64.exe` → `{app}\aha2.exe`
 - `aha2-tray-windows-amd64.exe` → `{app}\aha2-tray.exe`
@@ -190,8 +196,11 @@ AHA2-Windows-Package-x64.zip
 `<PackageDir>\installer\AHA2-Setup-User-x64.exe` 和
 `<PackageDir>\dist\release-manifest.json`；单个安装器资产
 `AHA2-Setup-x64.exe`、`AHA2-Setup-User-x64.exe` 仍单独发布，Linux/macOS 资产不变。
-发布作业会检查 zip 内两份安装器与 `dist/release-manifest.json` 均存在，并逐个比对清单
-文件在 zip 内的 SHA256。
+发布作业用 `scripts/verify-windows-package-archive.py` 检查 zip：两份安装器与
+`dist/release-manifest.json` 必须存在；清单不能为空，必须包含完整的必需文件范围
+（`scripts/windows-package-scope.json`），commit 与 Web 版本必须和当前 Release 期望值
+一致；`dist/` 下的文件集合必须与清单双向一致，并逐个比对 zip 内的 SHA256。缺少
+`browser-host/` 或 `node/` 文件、清单为空、混入未列出文件或哈希不符都会让发布失败。
 
 Agent API stdio helper 不再需要单独构建或安装：它是一个只用 Node 标准库的单文件脚本，通过
 `go:embed` 打在 `aha2.exe` 里，运行时才上传到工作区 `.aha2-context/share/agent-proxy/`。因此
@@ -425,8 +434,10 @@ bash scripts/build-all.sh
   -Version 0.1.0
 ```
 
-`-InputManifest` 缺省为 `dist\release-manifest.json`。若清单缺失、版本不一致或任一清单
-文件与安装输入的 SHA256 不符，构建会直接失败，不会生成安装器。
+`-InputManifest` 缺省为 `dist\release-manifest.json`。构建会从 git 检出读取期望
+commit；源码快照没有 `.git` 时必须显式传 `-ExpectedCommit`。若清单缺失、版本/commit/
+Web 版本不一致、安装输入与清单不是一一对应、或任一文件的 SHA256 不符，构建会直接失败，
+不会生成安装器。该步骤需要 Node.js 执行 `scripts/verify-windows-package.mjs`。
 
 ## 当前边界
 

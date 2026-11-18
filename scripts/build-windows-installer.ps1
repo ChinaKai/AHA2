@@ -9,6 +9,8 @@ param(
 	[string]$InputFeishuPlugin = "",
 	[string]$InputFeishuManifest = "",
     [string]$InputManifest = "",
+    [string]$ExpectedCommit = "",
+    [string]$ExpectedWebVersion = "",
     [string]$OutputDir = "",
     [string]$Version = "dev",
     [string]$ISCCPath = "",
@@ -193,100 +195,61 @@ if ($feishuPluginPath -and ((-not (Test-Path -LiteralPath $feishuPluginPath -Pat
 
 # The installer writes {app}\release-manifest.json byte-for-byte. That manifest
 # is the deploy verification contract, so fail the build unless it describes
-# exactly the files the installer is about to copy: identity, path safety,
-# required scope and per-file SHA256 must all match the input tree.
+# exactly the files the installer is about to copy. The verifier is shared with
+# the Node tests and the Release archive check: it validates identity, path
+# safety, required scope, per-file SHA256 and the bidirectional mapping between
+# manifest entries and the files Inno Setup actually copies (the browser-host
+# tree is copied recursively, so deleting one file from that tree must fail).
 if (-not (Test-Path -LiteralPath $manifestInputPath -PathType Leaf)) {
     throw "Release manifest not found: $manifestInputPath. Run scripts\build-windows-package.sh first."
 }
-$manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestInputPath | ConvertFrom-Json
-if ($manifest.schema_version -ne 1 -or [string]$manifest.product -ne "AHA2") {
-    throw "Release manifest is not an AHA2 schema_version 1 manifest: $manifestInputPath"
-}
-if ([string]$manifest.version -ne $normalizedVersion) {
-    throw "Release manifest version $($manifest.version) does not match installer version $normalizedVersion."
-}
-if ([string]$manifest.commit -notmatch '^[0-9a-fA-F]{12,40}$') {
-    throw "Release manifest commit is missing or malformed: $($manifest.commit)"
-}
-if ($null -eq $manifest.generator -or [string]::IsNullOrWhiteSpace([string]$manifest.generator.web_version)) {
-    throw "Release manifest generator.web_version is missing."
-}
-$manifestEntries = @($manifest.files)
-if ($manifestEntries.Count -eq 0) {
-    throw "Release manifest lists no files."
-}
-$manifestByPath = @{}
-foreach ($entry in $manifestEntries) {
-    $relative = [string]$entry.path
-    if ([string]::IsNullOrWhiteSpace($relative) -or $relative.Contains('\') -or $relative.StartsWith('/') -or $relative -match '^[A-Za-z]:' -or (($relative -split '/') -contains '..')) {
-        throw "Release manifest path is not a safe package-relative path: $relative"
+# The commit is the trusted anchor for the manifest identity. Derive it from the
+# checkout when the caller does not pass one; the manifest's own commit is
+# never used to validate itself.
+if ([string]::IsNullOrWhiteSpace($ExpectedCommit)) {
+    $gitCommand = Get-Command "git.exe" -ErrorAction SilentlyContinue
+    if (-not $gitCommand) {
+        $gitCommand = Get-Command "git" -ErrorAction SilentlyContinue
     }
-    if ($manifestByPath.ContainsKey($relative)) {
-        throw "Release manifest lists $relative twice."
+    if ($gitCommand) {
+        $ExpectedCommit = (& $gitCommand.Source -C $repo rev-parse HEAD 2>$null | Out-String).Trim()
     }
-    if ([string]$entry.sha256 -notmatch '^[0-9a-f]{64}$') {
-        throw "Release manifest has a malformed SHA256 for $relative."
+    if ([string]::IsNullOrWhiteSpace($ExpectedCommit)) {
+        throw "Expected commit is required when the repository is not a git checkout; pass -ExpectedCommit."
     }
-    $manifestByPath[$relative] = $entry
 }
-$requiredManifestFiles = @(
-    "aha2-windows-amd64.exe",
-    "aha2-tray-windows-amd64.exe",
-    "browser-host/host.mjs",
-    "browser-host/server.mjs",
-    "browser-host/package.json",
-    "node/node.exe",
-    "node/LICENSE"
+$nodeCommand = Get-Command "node.exe" -ErrorAction SilentlyContinue
+if (-not $nodeCommand) {
+    $nodeCommand = Get-Command "node" -ErrorAction SilentlyContinue
+}
+if (-not $nodeCommand) {
+    throw "Node.js is required to verify the Windows package against release-manifest.json."
+}
+$verifier = Join-Path $repo "scripts\verify-windows-package.mjs"
+if (-not (Test-Path -LiteralPath $verifier -PathType Leaf)) {
+    throw "Windows package verifier is missing: $verifier"
+}
+$verifyArgs = @(
+    $verifier,
+    "--manifest", $manifestInputPath,
+    "--root", (Split-Path -Parent $manifestInputPath),
+    "--version", $normalizedVersion,
+    "--expected-commit", $ExpectedCommit,
+    "--server", $inputPath,
+    "--tray", $trayInputPath,
+    "--browser-host", $browserHostPath,
+    "--node-exe", $nodeInputPath,
+    "--node-license", $nodeLicensePath
 )
-$pluginManifestFiles = @(
-    "plugins/feishu/windows-amd64/aha2-channel-feishu.exe",
-    "plugins/feishu/windows-amd64/plugin.json"
-)
-foreach ($required in $requiredManifestFiles) {
-    if (-not $manifestByPath.ContainsKey($required)) {
-        throw "Release manifest is missing required install file: $required"
-    }
+if ($feishuPluginPath) {
+    $verifyArgs += @("--feishu-plugin", $feishuPluginPath, "--feishu-manifest", $feishuManifestPath)
 }
-$manifestHasPlugin = @($pluginManifestFiles | Where-Object { $manifestByPath.ContainsKey($_) }).Count -gt 0
-if ($manifestHasPlugin -and @($pluginManifestFiles | Where-Object { -not $manifestByPath.ContainsKey($_) }).Count -gt 0) {
-    throw "Release manifest lists only part of the Feishu plugin."
+if (-not [string]::IsNullOrWhiteSpace($ExpectedWebVersion)) {
+    $verifyArgs += @("--expected-web-version", $ExpectedWebVersion)
 }
-if ($manifestHasPlugin -and [string]::IsNullOrWhiteSpace($feishuPluginPath)) {
-    throw "Release manifest covers the Feishu plugin but installer inputs do not include it."
-}
-if (-not $manifestHasPlugin -and -not [string]::IsNullOrWhiteSpace($feishuPluginPath)) {
-    throw "Installer inputs include the Feishu plugin but the release manifest does not."
-}
-$allowedExactManifestFiles = @("aha2-windows-amd64.exe", "aha2-tray-windows-amd64.exe") + $pluginManifestFiles
-foreach ($relative in $manifestByPath.Keys) {
-    if ($relative.StartsWith("browser-host/") -or $relative.StartsWith("node/")) { continue }
-    if ($allowedExactManifestFiles -notcontains $relative) {
-        throw "Release manifest entry is outside the installer's install scope: $relative"
-    }
-}
-$manifestInputs = @{
-    "aha2-windows-amd64.exe" = $inputPath
-    "aha2-tray-windows-amd64.exe" = $trayInputPath
-    "node/node.exe" = $nodeInputPath
-    "node/LICENSE" = $nodeLicensePath
-}
-if ($manifestHasPlugin) {
-    $manifestInputs["plugins/feishu/windows-amd64/aha2-channel-feishu.exe"] = $feishuPluginPath
-    $manifestInputs["plugins/feishu/windows-amd64/plugin.json"] = $feishuManifestPath
-}
-foreach ($relative in $manifestByPath.Keys) {
-    if ($relative.StartsWith("browser-host/")) {
-        $inputFile = Join-Path $browserHostPath (($relative.Substring("browser-host/".Length)) -replace '/', '\')
-    } else {
-        $inputFile = $manifestInputs[$relative]
-    }
-    if ([string]::IsNullOrWhiteSpace($inputFile) -or -not (Test-Path -LiteralPath $inputFile -PathType Leaf)) {
-        throw "Release manifest lists $relative but the installer has no matching input."
-    }
-    $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $inputFile).Hash.ToLowerInvariant()
-    if ($actualHash -ne ([string]$manifestByPath[$relative].sha256)) {
-        throw "Release manifest SHA256 does not match the installer input for $relative."
-    }
+& $nodeCommand.Source @verifyArgs
+if ($LASTEXITCODE -ne 0) {
+    throw "Windows package verification failed for $manifestInputPath."
 }
 
 function Get-PEWindowsSubsystem([string]$Path) {

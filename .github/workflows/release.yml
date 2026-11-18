@@ -49,8 +49,8 @@ jobs:
           .\scripts\test-windows-installer.ps1 -RepoPath $PWD
           $package = Join-Path $PWD "dist\package"
           $plugin = Join-Path $package "plugins\feishu\windows-amd64"
-          .\scripts\build-windows-installer.ps1 -RepoPath $PWD -InputExe (Join-Path $package "aha2-windows-amd64.exe") -InputTrayExe (Join-Path $package "aha2-tray-windows-amd64.exe") -InputBrowserHost (Join-Path $package "browser-host") -InputNodeExe (Join-Path $package "node\node.exe") -InputNodeLicense (Join-Path $package "node\LICENSE") -InputFeishuPlugin (Join-Path $plugin "aha2-channel-feishu.exe") -InputFeishuManifest (Join-Path $plugin "plugin.json") -InputManifest (Join-Path $package "release-manifest.json") -OutputDir (Join-Path $PWD "dist\installer") -Version $env:GITHUB_REF_NAME
-          .\scripts\build-windows-installer.ps1 -RepoPath $PWD -InputExe (Join-Path $package "aha2-windows-amd64.exe") -InputTrayExe (Join-Path $package "aha2-tray-windows-amd64.exe") -InputBrowserHost (Join-Path $package "browser-host") -InputNodeExe (Join-Path $package "node\node.exe") -InputNodeLicense (Join-Path $package "node\LICENSE") -InputFeishuPlugin (Join-Path $plugin "aha2-channel-feishu.exe") -InputFeishuManifest (Join-Path $plugin "plugin.json") -InputManifest (Join-Path $package "release-manifest.json") -OutputDir (Join-Path $PWD "dist\installer") -Version $env:GITHUB_REF_NAME -PerUser
+          .\scripts\build-windows-installer.ps1 -RepoPath $PWD -InputExe (Join-Path $package "aha2-windows-amd64.exe") -InputTrayExe (Join-Path $package "aha2-tray-windows-amd64.exe") -InputBrowserHost (Join-Path $package "browser-host") -InputNodeExe (Join-Path $package "node\node.exe") -InputNodeLicense (Join-Path $package "node\LICENSE") -InputFeishuPlugin (Join-Path $plugin "aha2-channel-feishu.exe") -InputFeishuManifest (Join-Path $plugin "plugin.json") -InputManifest (Join-Path $package "release-manifest.json") -ExpectedCommit $env:GITHUB_SHA -OutputDir (Join-Path $PWD "dist\installer") -Version $env:GITHUB_REF_NAME
+          .\scripts\build-windows-installer.ps1 -RepoPath $PWD -InputExe (Join-Path $package "aha2-windows-amd64.exe") -InputTrayExe (Join-Path $package "aha2-tray-windows-amd64.exe") -InputBrowserHost (Join-Path $package "browser-host") -InputNodeExe (Join-Path $package "node\node.exe") -InputNodeLicense (Join-Path $package "node\LICENSE") -InputFeishuPlugin (Join-Path $plugin "aha2-channel-feishu.exe") -InputFeishuManifest (Join-Path $plugin "plugin.json") -InputManifest (Join-Path $package "release-manifest.json") -ExpectedCommit $env:GITHUB_SHA -OutputDir (Join-Path $PWD "dist\installer") -Version $env:GITHUB_REF_NAME -PerUser
 
       # Assemble the official PackageDir layout the deploy skill consumes:
       #   <PackageDir>\dist\release-manifest.json and package files
@@ -242,27 +242,10 @@ jobs:
           test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 13
           # The Windows archive must be the official PackageDir layout: both
           # installers under installer/ and the complete package, including
-          # release-manifest.json, under dist/. Verify every manifest entry's
-          # bytes inside the archive so a truncated or reordered zip fails here.
-          python3 - <<'PY'
-          import hashlib, json, sys, zipfile
-          with zipfile.ZipFile("dist/AHA2-Windows-Package-x64.zip") as archive:
-              names = set(archive.namelist())
-              for required in ("installer/AHA2-Setup-x64.exe", "installer/AHA2-Setup-User-x64.exe", "dist/release-manifest.json"):
-                  if required not in names:
-                      sys.exit(f"Windows package archive is missing {required}")
-              manifest = json.loads(archive.read("dist/release-manifest.json"))
-              if manifest.get("schema_version") != 1 or manifest.get("product") != "AHA2":
-                  sys.exit("Windows package manifest is not an AHA2 schema_version 1 manifest")
-              files = {entry["path"]: entry for entry in manifest["files"]}
-              for relative, entry in files.items():
-                  member = f"dist/{relative}"
-                  if member not in names:
-                      sys.exit(f"Windows package archive is missing manifest entry {member}")
-                  if hashlib.sha256(archive.read(member)).hexdigest() != entry["sha256"]:
-                      sys.exit(f"Windows package archive SHA256 mismatch for {member}")
-          print(f"Windows package archive verified ({len(files)} manifest files)")
-          PY
+          # release-manifest.json, under dist/. The verifier rejects an empty
+          # manifest, missing required scope and any dist/ file the manifest
+          # does not cover, and re-checks every hash against the archive bytes.
+          python3 scripts/verify-windows-package-archive.py "dist/AHA2-Windows-Package-x64.zip" --version "${GITHUB_REF_NAME#v}" --commit "$GITHUB_SHA"
           cd dist
           find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | sort | while IFS= read -r file; do sha256sum "$file"; done > SHA256SUMS
           test -s SHA256SUMS

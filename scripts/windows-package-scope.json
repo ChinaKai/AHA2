@@ -1,0 +1,26 @@
+{
+  "required": [
+    "aha2-windows-amd64.exe",
+    "aha2-tray-windows-amd64.exe",
+    "plugins/feishu/windows-amd64/aha2-channel-feishu.exe",
+    "plugins/feishu/windows-amd64/plugin.json",
+    "browser-host/host.mjs",
+    "browser-host/server.mjs",
+    "browser-host/tabs.mjs",
+    "browser-host/lock.mjs",
+    "browser-host/package.json",
+    "browser-host/node_modules/playwright/package.json",
+    "node/node.exe",
+    "node/LICENSE"
+  ],
+  "exact": [
+    "aha2-windows-amd64.exe",
+    "aha2-tray-windows-amd64.exe",
+    "plugins/feishu/windows-amd64/aha2-channel-feishu.exe",
+    "plugins/feishu/windows-amd64/plugin.json"
+  ],
+  "prefixes": [
+    "browser-host/",
+    "node/"
+  ]
+}

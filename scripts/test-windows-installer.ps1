@@ -255,8 +255,9 @@ foreach ($forbidden in @("delayed-auto Windows", "aha2.exe service run --listen"
 $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo ".github\workflows\release.yml")
 foreach ($contract in @(
     "runs-on: windows-latest", "build-windows-package.sh", "--output-dir", "build-windows-installer.ps1", "-InputTrayExe",
-    "-InputBrowserHost", "-InputNodeExe", "-InputNodeLicense", "-InputFeishuPlugin", "-InputFeishuManifest", "-InputManifest",
+    "-InputBrowserHost", "-InputNodeExe", "-InputNodeLicense", "-InputFeishuPlugin", "-InputFeishuManifest", "-InputManifest", "-ExpectedCommit",
 	"AHA2-Setup-x64.exe", "AHA2-Setup-User-x64.exe", "AHA2-Windows-Package-x64.zip", "Compress-Archive",
+    "verify-windows-package-archive.py",
     "build-linux-packages.sh", "build-linux-sync-packages.sh", "aha2-sync_", "build-macos-packages.sh",
     "ubuntu-24.04-arm", "SHA256SUMS", "merge-multiple: true", "pattern: package-*", "gh release create",
     "installer/AHA2-Setup-User-x64.exe", "dist/release-manifest.json"
@@ -275,7 +276,7 @@ $installerProbe = $workflow.IndexOf("build-windows-installer.ps1")
 if ($packageProbe -lt 0 -or $installerProbe -lt 0 -or $packageProbe -gt $installerProbe) {
     throw "Release workflow must build the Windows package (with release-manifest.json) before building the Windows installers."
 }
-foreach ($inputContract in @("-InputBrowserHost", "-InputNodeExe", "-InputNodeLicense", "-InputFeishuPlugin", "-InputFeishuManifest", "-InputManifest")) {
+foreach ($inputContract in @("-InputBrowserHost", "-InputNodeExe", "-InputNodeLicense", "-InputFeishuPlugin", "-InputFeishuManifest", "-InputManifest", "-ExpectedCommit")) {
     $inputCount = [regex]::Matches($workflow, [regex]::Escape($inputContract)).Count
     if ($inputCount -lt 2) {
         throw "Release workflow must pass $inputContract to both the per-machine and per-user installer builds."
@@ -303,9 +304,9 @@ $installerBuilder = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $rep
 foreach ($contract in @(
     "Get-PEWindowsSubsystem", "Windows GUI subsystem", "-H windowsgui",
     "Start-Process", "-Wait", 'Remove-Item -LiteralPath $setup,$hashFile',
-    "Release manifest not found", "/DSourceManifest=", "Release manifest version",
-    "Release manifest SHA256 does not match", "outside the installer's install scope",
-    "Release manifest covers the Feishu plugin"
+    "Release manifest not found", "/DSourceManifest=", "verify-windows-package.mjs",
+    "--expected-commit", "--browser-host", "Expected commit is required",
+    "Node.js is required", "Windows package verification failed"
 )) {
     if (-not $installerBuilder.Contains($contract)) {
         throw "Windows installer builder does not enforce the GUI tray subsystem or the release manifest contract: $contract"

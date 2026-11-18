@@ -27,8 +27,9 @@ bash scripts/build-windows-package.sh --version 0.5.23 --output-dir dist
 
 仓库只负责构建，不停服务、不替换文件、也不回滚；安装和升级由目标机器上的本机安装器负责。
 `release-manifest.json` 记录版本、commit、构建时间、生成方式和每个产物的 SHA256；安装器会把
-它原样安装到程序目录，部署脚本据此逐文件校验安装结果。Release 另提供
-`AHA2-Windows-Package-x64.zip`，内含官方 PackageDir 布局（`dist/` 包与
+它原样安装到程序目录，部署脚本据此逐文件校验安装结果。安装器构建会把清单与它将
+复制的输入做双向比对，并核对版本、commit 和 Web 版本互相一致；不一致时不生成安装器。
+Release 另提供 `AHA2-Windows-Package-x64.zip`，内含官方 PackageDir 布局（`dist/` 包与
 `installer/AHA2-Setup-User-x64.exe`）。
 
 ### Debian / Ubuntu
