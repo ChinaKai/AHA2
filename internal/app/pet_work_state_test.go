@@ -873,9 +873,24 @@ func TestPetWorkStateExposesOpenKnowledgeSyncNotifications(t *testing.T) {
 		t.Fatalf("history_limit=0 state notifications=%#v work=%#v", noHistory.Notifications, noHistory.Work)
 	}
 
+	// The ack tool is restricted to the pet Task at execution time: an
+	// unidentified call or a capability issued for another Task must be
+	// rejected before any row changes.
+	if _, err := fixture.service.PetMCPTool(ctx, "aha_ack_knowledge_sync_notification",
+		json.RawMessage(`{"ids":["`+conflictID+`"]}`)); err == nil || !strings.Contains(err.Error(), "宠物 Task") {
+		t.Fatalf("unidentified ack err=%v", err)
+	}
+	if _, err := fixture.service.PetMCPToolForTask(ctx, "task_someone_else", "aha_ack_knowledge_sync_notification",
+		json.RawMessage(`{"ids":["`+conflictID+`"]}`)); err == nil || !strings.Contains(err.Error(), "宠物 Task") {
+		t.Fatalf("foreign-task ack err=%v", err)
+	}
+	if state, err := fixture.service.PetWorkState(ctx); err != nil || len(state.Notifications) != 2 {
+		t.Fatalf("rejected ack changed notifications: %#v err=%v", state.Notifications, err)
+	}
+
 	// Acknowledging marks only the listed open rows; duplicates and unknown ids
 	// are ignored, and the paused notification stays visible.
-	ackRaw, err := fixture.service.PetMCPTool(ctx, "aha_ack_knowledge_sync_notification",
+	ackRaw, err := fixture.service.PetMCPToolForTask(ctx, petTaskID, "aha_ack_knowledge_sync_notification",
 		json.RawMessage(`{"ids":["`+conflictID+`","`+conflictID+`","pet_event_missing"]}`))
 	if err != nil {
 		t.Fatal(err)
@@ -899,7 +914,7 @@ func TestPetWorkStateExposesOpenKnowledgeSyncNotifications(t *testing.T) {
 		t.Fatalf("after ack notifications=%#v", state.Notifications)
 	}
 	// Repeated acknowledgement is a no-op rather than an error or a new row.
-	ackRaw, err = fixture.service.PetMCPTool(ctx, "aha_ack_knowledge_sync_notification",
+	ackRaw, err = fixture.service.PetMCPToolForTask(ctx, petTaskID, "aha_ack_knowledge_sync_notification",
 		json.RawMessage(`{"ids":["`+conflictID+`"]}`))
 	if err != nil {
 		t.Fatal(err)
@@ -908,7 +923,7 @@ func TestPetWorkStateExposesOpenKnowledgeSyncNotifications(t *testing.T) {
 		t.Fatalf("repeat ack=%s", ackRaw)
 	}
 	// Acknowledging the last notification empties the work-state field.
-	if _, err := fixture.service.PetMCPTool(ctx, "aha_ack_knowledge_sync_notification",
+	if _, err := fixture.service.PetMCPToolForTask(ctx, petTaskID, "aha_ack_knowledge_sync_notification",
 		json.RawMessage(`{"ids":["`+pausedID+`"]}`)); err != nil {
 		t.Fatal(err)
 	}
@@ -937,7 +952,7 @@ func TestPetWorkStateExposesOpenKnowledgeSyncNotifications(t *testing.T) {
 	if resolved, err := fixture.service.ResolveKnowledgeSyncNotifications(ctx); err != nil || resolved != 0 {
 		t.Fatalf("resolve closed=%d err=%v", resolved, err)
 	}
-	if _, err := fixture.service.PetMCPTool(ctx, "aha_ack_knowledge_sync_notification", json.RawMessage(`{"ids":[]}`)); err == nil {
+	if _, err := fixture.service.PetMCPToolForTask(ctx, petTaskID, "aha_ack_knowledge_sync_notification", json.RawMessage(`{"ids":[]}`)); err == nil {
 		t.Fatal("empty ids must be rejected")
 	}
 	// The pet's MCP allowlist must expose the ack tool, otherwise the model can
@@ -951,5 +966,67 @@ func TestPetWorkStateExposesOpenKnowledgeSyncNotifications(t *testing.T) {
 	}
 	if !allowlisted {
 		t.Fatal("ack tool missing from the pet MCP allowlist")
+	}
+}
+
+func TestPetWorkStateBudgetTrimsNotificationBytesButKeepsIdentity(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	ctx := fixture.ctx
+	now := fixture.service.now().UTC()
+	// Ten long Chinese details are far beyond the old 900-rune reasoning:
+	// runes are not bytes, so the default briefing would have been far over
+	// the 16 KB result budget before notifications participated in trimming.
+	longDetail := "本地 abcdef123456，远端 123456abcdef 已分叉；未合并、未 reset。差异文件：" +
+		strings.Repeat("知识库目录/中文文件/", 60)
+	if runes := []rune(longDetail); len(runes) > 900 {
+		longDetail = string(runes[:900])
+	}
+	ids := make([]string, 0, 10)
+	for index := 0; index < 10; index++ {
+		id := fmt.Sprintf("pet_event_budget_%02d", index)
+		ids = append(ids, id)
+		kind := "knowledge_sync_conflict"
+		if index%2 == 1 {
+			kind = "knowledge_sync_paused"
+		}
+		if err := fixture.database.AppendPetEvent(ctx, domain.PetEvent{
+			ID: id, At: now.Add(-time.Duration(index) * time.Second), Actor: "aha",
+			Kind: kind, Detail: longDetail, Status: "open",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	raw, err := fixture.service.PetMCPTool(ctx, "aha_pet_work_state", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) > petWorkStateDefaultBudgetBytes {
+		t.Fatalf("default work_state = %d bytes, want <= %d", len(raw), petWorkStateDefaultBudgetBytes)
+	}
+	var state PetWorkState
+	if err := json.Unmarshal([]byte(raw), &state); err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Notifications) != len(ids) {
+		t.Fatalf("notifications=%d, want %d", len(state.Notifications), len(ids))
+	}
+	if !state.NotificationsTruncated {
+		t.Fatal("notifications_truncated not reported")
+	}
+	seen := map[string]bool{}
+	for _, notification := range state.Notifications {
+		if notification.ID == "" || notification.Kind == "" || notification.At == "" || notification.Status != "open" {
+			t.Fatalf("notification identity/status lost: %#v", notification)
+		}
+		if len([]rune(notification.Detail)) >= len([]rune(longDetail)) {
+			t.Fatalf("notification detail not shortened: %#v", notification)
+		}
+		seen[notification.ID] = true
+	}
+	for _, id := range ids {
+		if !seen[id] {
+			t.Fatalf("notification %s dropped from the briefing", id)
+		}
 	}
 }

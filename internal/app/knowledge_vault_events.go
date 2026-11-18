@@ -19,8 +19,8 @@ var knowledgeSyncNotificationKinds = []string{
 }
 
 const (
-	// Ten rows of <=900-rune details keep the wake-up briefing inside its
-	// default 16 KB budget even when every row is a long conflict report.
+	// The work-state budget trims notification detail by serialized bytes, so
+	// this only bounds how many unresolved rows one wake-up shows.
 	knowledgeSyncNotificationLimit = 10
 	// The pet acknowledging a notification is deliberately not the same as
 	// resolving the divergence: the sync loop keeps its pause until a manual

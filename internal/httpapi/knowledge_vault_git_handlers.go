@@ -45,7 +45,9 @@ func (s *Server) updateKnowledgeVaultGitRemote(writer http.ResponseWriter, reque
 		return
 	}
 	s.resumeKnowledgeVaultAutoSync()
-	s.resolveKnowledgeVaultSyncNotifications(request.Context())
+	// Saving a remote only retries the loop; it does not touch a diverged
+	// branch. Keep open sync notifications so an unresolved conflict is not
+	// hidden from the pet until a pull/push/sync actually succeeds.
 	s.audit(request, "knowledge_vault.git_remote", "knowledge_vault_git", "origin", map[string]any{
 		"branch": result.Status.Branch, "remote": result.Status.Remote, "remote_set": result.Status.RemoteSet,
 	})
@@ -65,7 +67,9 @@ func (s *Server) initializeKnowledgeVaultGit(writer http.ResponseWriter, request
 		return
 	}
 	s.resumeKnowledgeVaultAutoSync()
-	s.resolveKnowledgeVaultSyncNotifications(request.Context())
+	// Re-running init on an existing repository leaves any divergence in
+	// place, so it cannot prove a conflict notification is stale. The next
+	// successful pull/push/sync closes it through the recovery path.
 	s.audit(request, "knowledge_vault.git_init", "knowledge_vault_git", "vault", map[string]any{
 		"branch": result.Status.Branch, "created": result.Created,
 	})

@@ -83,9 +83,13 @@ func (s *Service) mcpRuntimeForTask(ctx context.Context, task domain.Task, agent
 					if url == "" {
 						url = "http://127.0.0.1:8766/api/v1/pet/mcp"
 					}
-					servers = append(servers, backend.MCPServer{
-						Name: "aha2-pet", Transport: "http", URL: url,
-					})
+					petServer := backend.MCPServer{Name: "aha2-pet", Transport: "http", URL: url}
+					if s.agentAPI != nil && strings.TrimSpace(agentAPIURL) != "" {
+						// The endpoint uses the same Turn capability as the Agent
+						// API to prove a mutating call comes from the pet Task.
+						petServer.BearerTokenEnv = "AHA2_AGENT_API_TOKEN"
+					}
+					servers = append(servers, petServer)
 					allowed = append(allowed, petMCPAllowedTools(task)...)
 					continue
 				}

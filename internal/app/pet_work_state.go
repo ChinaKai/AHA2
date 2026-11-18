@@ -21,8 +21,13 @@ const (
 	petWorkStateMaxTurnResultChars  = 20000
 	// petWorkStateDefaultBudgetBytes is a safety net for unusually large
 	// approvals: when the default view would exceed it, the oldest history
-	// rows are dropped (never inspection/open_tasks/core/loops/agenda).
+	// rows are dropped (never inspection/open_tasks/core/loops/agenda) and
+	// notification details are shortened while their id/kind/at/status stay.
 	petWorkStateDefaultBudgetBytes = 16 * 1024
+	// knowledgeSyncNotificationMinDetailRunes is the floor used when the
+	// default budget has to shorten notification prose. Identity and status are
+	// never trimmed, so the pet can still ack or resolve the right row.
+	knowledgeSyncNotificationMinDetailRunes = 24
 	// Pet events include control/approval rows that are not part of the work
 	// list, so read a wider window than the requested item count.
 	petWorkStateEventWindowMin     = 100
@@ -152,6 +157,9 @@ type PetWorkState struct {
 	// approvals/work rows. Callers can set history_limit=50 or
 	// include_turn_results=true to expand explicitly.
 	HistoryTruncated bool `json:"history_truncated,omitempty"`
+	// NotificationsTruncated reports that the default budget shortened some
+	// notification Detail text. Every notification keeps its id/kind/at/status.
+	NotificationsTruncated bool `json:"notifications_truncated,omitempty"`
 }
 
 // PetWorkStateOptions controls the size of the wake-up briefing. The zero value
@@ -340,10 +348,11 @@ func (s *Service) PetWorkStateWithOptions(ctx context.Context, opts PetWorkState
 	return state, nil
 }
 
-// fitDefaultBudget drops the oldest approval/work rows until the marshaled
-// briefing fits the default MCP result budget. Fixed fields (inspection,
-// open_tasks, core, open_loops, agenda) are never trimmed because the pet
-// relies on them to make decisions.
+// fitDefaultBudget drops the oldest approval/work rows and shortens
+// notification detail until the marshaled briefing fits the default MCP result
+// budget. Fixed fields (inspection, open_tasks, core, open_loops, agenda) and
+// the notification identity/status are never removed because the pet relies on
+// them to make decisions and to acknowledge the right row.
 func (state *PetWorkState) fitDefaultBudget(limit int) {
 	data, err := json.Marshal(state)
 	if err != nil || len(data) <= limit {
@@ -372,10 +381,49 @@ func (state *PetWorkState) fitDefaultBudget(limit int) {
 			return
 		}
 	}
+	// Notification details are prose, not history rows: shrink them instead of
+	// dropping rows so an unresolved conflict still has its id, kind and status.
+	// Set the marker before measuring so its bytes count against the budget.
+	notificationsTrimmed := false
+	if len(data) > limit && len(state.Notifications) > 0 {
+		state.NotificationsTruncated = true
+		data, err = json.Marshal(state)
+		if err != nil {
+			return
+		}
+		for len(data) > limit && trimNotificationDetails(state) {
+			notificationsTrimmed = true
+			data, err = json.Marshal(state)
+			if err != nil {
+				return
+			}
+		}
+		// Turning the marker off only shrinks the payload, so the measured
+		// fitting result stays valid.
+		state.NotificationsTruncated = notificationsTrimmed
+	}
 	if len(state.Approvals) == fullApprovals && len(state.Work) == fullWork {
-		// Only fixed fields exceed the budget; no history row was dropped.
+		// No history row was dropped; only fixed fields or notification prose
+		// were trimmed, and the latter has its own flag.
 		state.HistoryTruncated = false
 	}
+}
+
+// trimNotificationDetails halves every detail that is still longer than the
+// floor and reports whether anything changed. ID, kind, time and status are
+// left untouched.
+func trimNotificationDetails(state *PetWorkState) bool {
+	changed := false
+	for index := range state.Notifications {
+		detail := state.Notifications[index].Detail
+		runes := []rune(detail)
+		if len(runes) <= knowledgeSyncNotificationMinDetailRunes {
+			continue
+		}
+		state.Notifications[index].Detail = truncateAssistantText(detail, len(runes)/2)
+		changed = true
+	}
+	return changed
 }
 
 func petWorkStateTurnResult(value string, chars int) string {

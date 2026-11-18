@@ -1688,10 +1688,22 @@ func ahaPetTools() []gateway.ChatTool {
 	}
 }
 
-// PetMCPTool dispatches the pet MCP surface. Pet action tools still go through
-// the validated ControlOwnerPet path; AHA read tools and approval requests are
-// handled here.
+// PetMCPTool dispatches the pet MCP surface without a caller identity. It is
+// for in-process callers and tests; the loopback HTTP endpoint must use
+// PetMCPToolForTask so identity-gated tools can verify the agent capability
+// belongs to the pet Task.
 func (s *Service) PetMCPTool(ctx context.Context, name string, args json.RawMessage) (string, error) {
+	return s.petMCPTool(ctx, "", name, args)
+}
+
+// PetMCPToolForTask dispatches one pet MCP tool on behalf of the authenticated
+// taskID. The pet MCP client sends its Turn capability as a bearer token, and
+// tools that change pet-wide state reject any caller that is not the pet Task.
+func (s *Service) PetMCPToolForTask(ctx context.Context, taskID, name string, args json.RawMessage) (string, error) {
+	return s.petMCPTool(ctx, strings.TrimSpace(taskID), name, args)
+}
+
+func (s *Service) petMCPTool(ctx context.Context, callerTaskID, name string, args json.RawMessage) (string, error) {
 	name = strings.TrimSpace(strings.ToLower(name))
 	if isAhaPetTool(name) {
 		assistant, err := s.petAssistant(ctx)
@@ -1734,6 +1746,13 @@ func (s *Service) PetMCPTool(ctx context.Context, name string, args json.RawMess
 		data, _ := json.Marshal(state)
 		return string(data), nil
 	case "aha_ack_knowledge_sync_notification":
+		// Notifications describe background sync state for the whole install,
+		// so only a call carrying the pet Task's own Turn capability may clear
+		// them. The HTTP endpoint is loopback-only but that alone does not
+		// identify the caller.
+		if callerTaskID != petTaskID {
+			return "", fmt.Errorf("只有宠物 Task 可以处理知识库自动同步通知")
+		}
 		var input struct {
 			IDs []string `json:"ids"`
 		}
