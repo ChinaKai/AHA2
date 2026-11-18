@@ -60,6 +60,12 @@ export function createDownloadStore(root, profileID, sessionID, options = {}) {
   let rawCancels = 0;
   let ready = false;
   let closed = false;
+  // Every clear() advances the generation. A capture that started in an older
+  // generation must never publish into the reset budget or release its bytes
+  // from the new generation's pending total.
+  let generation = 0;
+  let clearing = null;
+  const activeCaptures = new Set();
 
   const ensure = async () => {
     if (ready) return;
@@ -182,10 +188,16 @@ export function createDownloadStore(root, profileID, sessionID, options = {}) {
     : null;
   rawTimer?.unref?.();
 
-  const publish = async (download, fence) => {
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+  const publish = async (download, fence, captureGeneration) => {
     if (closed) {
       await discard(download);
       throw downloadFailure("download store is closed");
+    }
+    if (captureGeneration !== generation) {
+      await discard(download);
+      throw downloadFailure("download store was cleared", "browser_download_canceled");
     }
     const reservation = reserve(download, fence);
     if (!reservation) {
@@ -195,6 +207,12 @@ export function createDownloadStore(root, profileID, sessionID, options = {}) {
     const {entry, evicted} = reservation;
     for (const old of evicted) {
       await fs.rm(old.path, {force: true}).catch(() => {});
+    }
+    if (captureGeneration !== generation) {
+      entries.delete(entry.id);
+      await fs.rm(entry.path, {force: true}).catch(() => {});
+      await discard(download);
+      throw downloadFailure("download store was cleared", "browser_download_canceled");
     }
     inFlight.add(download);
     let stream = null;
@@ -207,6 +225,9 @@ export function createDownloadStore(root, profileID, sessionID, options = {}) {
       const handle = await fs.open(entry.path, "w", 0o600);
       try {
         for await (const chunk of stream) {
+          if (captureGeneration !== generation) {
+            throw downloadFailure("download store was cleared", "browser_download_canceled");
+          }
           const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
           written += buffer.length;
           if (written > maxBytes) {
@@ -221,6 +242,9 @@ export function createDownloadStore(root, profileID, sessionID, options = {}) {
         }
       } finally {
         await handle.close();
+      }
+      if (captureGeneration !== generation) {
+        throw downloadFailure("download store was cleared", "browser_download_canceled");
       }
       entry.size = written;
       entry.state = "ready";
@@ -237,7 +261,12 @@ export function createDownloadStore(root, profileID, sessionID, options = {}) {
       // Release only the bytes this download actually reserved. A chunk that
       // failed the per-file or cumulative check never entered the budget and
       // must not be subtracted (that would over-release budget for peers).
-      pendingBytes = Math.max(0, pendingBytes - charged);
+      // A capture from a cleared generation must not touch the new budget at
+      // all: clear() already reset pendingBytes after waiting for it (or timed
+      // out), and subtracting here would steal a new download's reservation.
+      if (captureGeneration === generation) {
+        pendingBytes = Math.max(0, pendingBytes - charged);
+      }
       inFlight.delete(download);
       delete entry.download;
       // Playwright keeps the raw browser artifact until it is deleted. Always
@@ -258,32 +287,59 @@ export function createDownloadStore(root, profileID, sessionID, options = {}) {
   maintenance.unref?.();
 
   const clearAll = async (keepRawDirectory = true) => {
-    const pending = [...entries.values()];
-    entries.clear();
-    totalBytes = 0;
-    pendingBytes = 0;
-    for (const entry of pending) {
-      if (entry.state === "saving" && entry.download) await discard(entry.download);
-      await fs.rm(entry.path, {force: true}).catch(() => {});
-    }
-    for (const download of [...inFlight]) await discard(download);
-    inFlight.clear();
-    ready = false;
-    rawFiles = 0;
-    rawTotalBytes = 0;
-    await fs.rm(directory, {recursive: true, force: true}).catch(() => {});
-    // Chromium keeps writing future downloads to the same downloadsPath; keep
-    // the controlled directory present after a release-time clear.
-    if (rawDir && keepRawDirectory) {
-      await fs.mkdir(rawDir, {recursive: true, mode: 0o700}).catch(() => {});
-    }
+    if (clearing) return clearing;
+    generation += 1;
+    const capturesAtClear = [...activeCaptures];
+    const work = (async () => {
+      // Cancel first so streams end; then wait for the old captures to finish
+      // their per-download cleanup. The generation check above/below is the
+      // backstop if a filesystem write cannot be interrupted within the grace
+      // period: a stale capture can no longer publish or release budget.
+      for (const download of [...inFlight]) await discard(download);
+      await Promise.race([
+        Promise.allSettled(capturesAtClear),
+        sleep(3000),
+      ]);
+      const pending = [...entries.values()];
+      entries.clear();
+      totalBytes = 0;
+      pendingBytes = 0;
+      for (const entry of pending) {
+        await fs.rm(entry.path, {force: true}).catch(() => {});
+      }
+      inFlight.clear();
+      ready = false;
+      rawFiles = 0;
+      rawTotalBytes = 0;
+      await fs.rm(directory, {recursive: true, force: true}).catch(() => {});
+      // Chromium keeps writing future downloads to the same downloadsPath;
+      // keep the controlled directory present after a release-time clear.
+      if (rawDir && keepRawDirectory) {
+        await fs.mkdir(rawDir, {recursive: true, mode: 0o700}).catch(() => {});
+      }
+    })();
+    clearing = work.finally(() => {
+      if (clearing === wrapped) clearing = null;
+    });
+    const wrapped = clearing;
+    return clearing;
   };
 
   return {
     async capture(download, fence = "") {
-      // reserve() runs synchronously inside publish() before its first await,
-      // so parallel download events cannot oversubscribe the file count.
-      return publish(download, String(fence || ""));
+      // A clear() in progress blocks new captures so its reset cannot race a
+      // fresh download. Once admitted, the capture owns the current generation
+      // until it settles.
+      if (clearing) await clearing;
+      if (closed) {
+        await discard(download);
+        throw downloadFailure("download store is closed");
+      }
+      const promise = publish(download, String(fence || ""), generation);
+      activeCaptures.add(promise);
+      const drop = () => activeCaptures.delete(promise);
+      promise.then(drop, drop);
+      return promise;
     },
 
     // Diagnostics for tests and the opt-in real-browser regression harness.

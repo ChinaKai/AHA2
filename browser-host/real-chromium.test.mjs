@@ -316,6 +316,19 @@ test("real chromium: download count, artifact deletion and clear", {
     const afterClear = await readdir(directory).catch(() => []);
     assert.deepEqual(afterClear.filter(name => name !== "raw"), []);
     assert.deepEqual(await readdir(join(directory, "raw")).catch(() => []), []);
+    await waitFor(() => {
+      const current = downloadStats(host);
+      return current.entries === 0 && current.totalBytes === 0 && current.pendingBytes === 0;
+    }, 3_000, "clear budget reset");
+
+    // A new-generation download must start from zero, not from any late
+    // publication of the capture that was canceled by clear.
+    await page.click("#d2");
+    await waitFor(() => downloadStats(host).totalBytes > 0, 5_000, "post-clear download");
+    const freshList = (await host.call("GET", `/v1/profiles/${PROFILE}/downloads`)).body.downloads;
+    assert.equal(freshList.length, 1, JSON.stringify(freshList));
+    assert.equal(downloadStats(host).totalBytes, freshList[0].size, JSON.stringify(downloadStats(host)));
+    assert.equal(downloadStats(host).pendingBytes, 0);
     assert.equal((await host.call("GET", `/v1/profiles/${PROFILE}/tabs`)).status, 200);
     assert.equal((await host.call("GET", "/v1/health")).status, 200);
   } finally {
@@ -425,20 +438,27 @@ test("real chromium: 25 concurrent downloads reject the five beyond the declared
         `<a id="s${index}" href="http://127.0.0.1:${port}/slow" download>s${index}</a>`).join("");
     }, ports);
     for (let index = 0; index < 25; index++) await page.click(`#s${index}`);
-    await waitFor(() => downloadStats(host).rejected >= 5, 8_000, "five count rejections");
-    await sleep(300);
+    await waitFor(() => {
+      const current = downloadStats(host);
+      return current.rejected === 5 && current.entries === 20 && current.inFlight === 20 &&
+        current.rawFiles === 20;
+    }, 8_000, "exactly 20 accepted and 5 rejected");
     const stats = downloadStats(host);
     console.log("count stats:", JSON.stringify(stats));
-    assert.ok(stats.inFlight <= 20, JSON.stringify(stats));
-    assert.ok(stats.entries <= 20, JSON.stringify(stats));
-    assert.ok(stats.rejected >= 5, JSON.stringify(stats));
-    assert.ok(stats.entries + stats.rejected >= 25,
-      `not every download was accounted for: ${JSON.stringify(stats)}`);
-    assert.ok(stats.rawFiles <= 20, `raw artifacts exceeded the accepted count: ${JSON.stringify(stats)}`);
+    assert.equal(stats.entries, 20, JSON.stringify(stats));
+    assert.equal(stats.inFlight, 20, JSON.stringify(stats));
+    assert.equal(stats.rejected, 5, JSON.stringify(stats));
+    assert.equal(stats.rawFiles, 20, JSON.stringify(stats));
+    assert.equal(stats.entries + stats.rejected, 25, JSON.stringify(stats));
+    const session = await host.call("GET", `/v1/profiles/${PROFILE}/session`);
+    const rawDirectory = join(host.root, ".downloads", PROFILE, session.body.session.id, "raw");
     const cleared = await host.call("DELETE", `/v1/profiles/${PROFILE}/downloads`);
     assert.equal(cleared.status, 200);
     await waitFor(() => downloadStats(host).entries === 0 && downloadStats(host).inFlight === 0,
       5_000, "clear");
+    await waitFor(async () => (await readdir(rawDirectory).catch(() => [])).length === 0,
+      5_000, "raw directory cleanup");
+    assert.deepEqual(await readdir(rawDirectory).catch(() => []), [], "raw directory is not empty");
     assert.equal((await host.call("GET", "/v1/health")).status, 200);
   } finally {
     await host.close();

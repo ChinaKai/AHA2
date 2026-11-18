@@ -520,3 +520,106 @@ test("failed chunks release only the budget they reserved", async () => {
   assert.equal(final.pendingBytes, 0, JSON.stringify(final));
   await store.close();
 });
+
+test("clear waits out an old capture so it cannot publish or release into the new budget", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aha2-download-clear-"));
+  const {Readable} = await import("node:stream");
+  const store = createDownloadStore(root, "profile", "session", {
+    maxBytes: 10 * 1024 * 1024,
+    maxTotalBytes: 50 * 1024 * 1024,
+    ttlMs: 60_000,
+  });
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  let canceled = 0;
+  let settled = false;
+  const oldDownload = {
+    suggestedFilename: () => "old.bin",
+    createReadStream: async () => Readable.from((async function* () {
+      yield Buffer.alloc(1024 * 1024, 0x61);
+      await gate;
+    })()),
+    cancel: async () => { canceled += 1; },
+    delete: async () => {},
+  };
+  const oldCapture = store.capture(oldDownload, "f").catch(() => { settled = true; });
+  for (let attempt = 0; attempt < 100 && store.stats().pendingBytes === 0; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.equal(store.stats().pendingBytes, 1024 * 1024);
+  const clearPromise = store.clear();
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(settled, false, "clear returned before the old capture exited");
+  release();
+  await oldCapture;
+  await clearPromise;
+  assert.ok(canceled >= 1);
+  const cleared = store.stats();
+  assert.deepEqual(
+    {entries: cleared.entries, totalBytes: cleared.totalBytes, pendingBytes: cleared.pendingBytes},
+    {entries: 0, totalBytes: 0, pendingBytes: 0});
+  assert.deepEqual(await store.list("f"), []);
+
+  // The stale capture's finally must not subtract its old 1 MiB from the new
+  // generation's pending budget: a fresh 1 MiB must remain exactly 1 MiB.
+  const fresh = {
+    suggestedFilename: () => "fresh.bin",
+    createReadStream: async () => Readable.from([Buffer.alloc(1024 * 1024, 0x62)]),
+    cancel: async () => {},
+    delete: async () => {},
+  };
+  await store.capture(fresh, "f");
+  const after = store.stats();
+  assert.equal(after.totalBytes, 1024 * 1024, JSON.stringify(after));
+  assert.equal(after.pendingBytes, 0, JSON.stringify(after));
+  await store.close();
+});
+
+test("clear during concurrent fills resets all counters and accepts a new-generation budget", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aha2-download-clear-stress-"));
+  const {PassThrough} = await import("node:stream");
+  const store = createDownloadStore(root, "profile", "session", {
+    maxBytes: 10 * 1024 * 1024,
+    maxTotalBytes: 50 * 1024 * 1024,
+    ttlMs: 60_000,
+  });
+  const streams = [];
+  const captures = [];
+  for (let index = 0; index < 10; index++) {
+    const stream = new PassThrough();
+    streams.push(stream);
+    const download = {
+      suggestedFilename: () => `stress-${index}.bin`,
+      createReadStream: async () => stream,
+      cancel: async () => { stream.destroy(new Error("canceled by clear")); },
+      delete: async () => {},
+    };
+    captures.push(store.capture(download, "f").catch(() => {}));
+  }
+  for (const stream of streams) {
+    for (let chunk = 0; chunk < 6; chunk++) stream.write(Buffer.alloc(1024 * 1024, 0x63));
+  }
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.ok(store.stats().totalBytes + store.stats().pendingBytes > 0);
+  await store.clear();
+  await Promise.allSettled(captures);
+  const cleared = store.stats();
+  assert.equal(cleared.entries, 0, JSON.stringify(cleared));
+  assert.equal(cleared.totalBytes, 0, JSON.stringify(cleared));
+  assert.equal(cleared.pendingBytes, 0, JSON.stringify(cleared));
+  assert.deepEqual(await store.list("f"), []);
+
+  const fresh = {
+    suggestedFilename: () => "fresh.bin",
+    createReadStream: async () => {
+      const {Readable} = await import("node:stream");
+      return Readable.from([Buffer.alloc(4 * 1024 * 1024, 0x64)]);
+    },
+    cancel: async () => {},
+    delete: async () => {},
+  };
+  await store.capture(fresh, "f");
+  assert.equal(store.stats().totalBytes, 4 * 1024 * 1024, JSON.stringify(store.stats()));
+  assert.equal(store.stats().pendingBytes, 0);
+  await store.close();
+});
