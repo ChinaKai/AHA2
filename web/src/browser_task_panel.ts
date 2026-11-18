@@ -5,7 +5,7 @@
 // second browser window.
 import {api} from "./api.js";
 import {icon} from "./icons.js";
-import type {BrowserBookmark, BrowserHostView, BrowserProfile, BrowserSession, BrowserTab, BrowserTaskGrant} from "./types.js";
+import type {BrowserBookmark, BrowserHostView, BrowserProfile, BrowserSession, BrowserTab, BrowserTaskGrant, TaskBrowserState} from "./types.js";
 
 type Notice = (type: "error" | "notice", message: string) => void;
 
@@ -55,9 +55,16 @@ interface PanelState {
 // instead of re-encoding identical JPEGs forever.
 export const BROWSER_FRAME_MIN_DELAY_MS = 300;
 export const BROWSER_FRAME_MAX_DELAY_MS = 1200;
+// The tab strip follows the real browser: new, closed and switched pages are
+// re-read on a timer while the panel is open, independent of the frame stream.
+// 3s is the middle of the 2-5s range the owner asked for.
+export const BROWSER_STATE_SYNC_MS = 3000;
 const httpStatusForbidden = 403;
 const httpStatusNotFound = 404;
 const httpStatusConflict = 409;
+const httpStatusGone = 410;
+const httpStatusServiceUnavailable = 503;
+const browserHostUnavailableCode = "browser_host_unavailable";
 const searchEngine = "https://www.bing.com/search";
 // AHA serves this page itself (see internal/httpapi/web.go). The host only
 // accepts http(s) URLs, so the new-tab page must never be about:blank or an
@@ -183,6 +190,32 @@ function faviconMark(url: string, className: string): string {
   return `<span class="${className}" aria-hidden="true">${escapeHTML(letter)}</span>`;
 }
 
+// Edge bookmarks come from a nested tree, so a folder can arrive as
+// "收藏夹/Bar". The bar itself already means "收藏夹"; strip that repeated root
+// from the visible label while keeping the raw path as the filter key.
+export function browserBookmarkFolderLabel(folder: string): string {
+  const value = String(folder || "");
+  const label = value.replace(/^(?:收藏夹|favorites?|favourites?)\s*[/／]\s*/i, "").trim();
+  return label || value;
+}
+
+// Pick the tab the preview should show. A missing selection falls back to the
+// one page the host reports as visible, then to the first page. When exactly
+// one page is active, follow the owner's real-window switch; several active
+// pages mean several browser windows, where guessing would fight the owner.
+export function browserFollowTabID(tabs: BrowserTab[], selectedID: string, followActive = true): string {
+  if (!tabs.length) return "";
+  if (!tabs.some(tab => tab.id === selectedID)) {
+    const active = tabs.filter(tab => tab.active);
+    return (active.length === 1 ? active[0] : tabs[0]).id;
+  }
+  if (followActive) {
+    const active = tabs.filter(tab => tab.active);
+    if (active.length === 1 && active[0].id !== selectedID) return active[0].id;
+  }
+  return selectedID;
+}
+
 function groupBookmarks(bookmarks: BrowserBookmark[]): Map<string, BrowserBookmark[]> {
   const groups = new Map<string, BrowserBookmark[]>();
   for (const bookmark of bookmarks) {
@@ -214,8 +247,9 @@ function bookmarkBarHTML(bookmarks: BrowserBookmark[], loading: boolean, error: 
       parts.push(...items.map(bookmarkChip));
       continue;
     }
-    parts.push(`<button type="button" class="desktop-browser-bookmark desktop-browser-bookmark-folder" data-browser-bookmark-folder="${escapeHTML(folder)}" title="${escapeHTML(folder)}">
-      ${icon("folder")}<span class="desktop-browser-bookmark-title">${escapeHTML(folder)}</span>
+    const label = browserBookmarkFolderLabel(folder);
+    parts.push(`<button type="button" class="desktop-browser-bookmark desktop-browser-bookmark-folder" data-browser-bookmark-folder="${escapeHTML(folder)}" title="${escapeHTML(label)}" aria-label="收藏夹文件夹 ${escapeHTML(label)}">
+      ${icon("folder")}<span class="desktop-browser-bookmark-title">${escapeHTML(label)}</span>
     </button>`);
   }
   return parts.join("");
@@ -227,9 +261,9 @@ function bookmarkMenuHTML(state: PanelState): string {
   const visible = all
     ? state.bookmarks
     : state.bookmarks.filter(bookmark => (bookmark.folder || "") === state.bookmarksMenuFolder);
-  const heading = all ? "全部收藏" : state.bookmarksMenuFolder;
+  const heading = all ? "全部收藏" : browserBookmarkFolderLabel(state.bookmarksMenuFolder);
   const items = visible.length
-    ? [...groupBookmarks(visible)].map(([folder, group]) => `${folder ? `<li class="desktop-browser-bookmark-menu-folder">${escapeHTML(folder)}</li>` : ""}
+    ? [...groupBookmarks(visible)].map(([folder, group]) => `${folder ? `<li class="desktop-browser-bookmark-menu-folder">${icon("folder")}<span>${escapeHTML(browserBookmarkFolderLabel(folder))}</span></li>` : ""}
       ${group.map(bookmark => `<li><button type="button" data-browser-bookmark="${escapeHTML(bookmark.url)}" title="${escapeHTML(bookmark.url)}"><span>${escapeHTML(bookmark.title || tabHost(bookmark.url))}</span><small>${escapeHTML(tabHost(bookmark.url))}</small></button></li>`).join("")}`).join("")
     : '<li class="desktop-browser-bookmark-menu-empty">收藏夹为空</li>';
   return `<div id="desktop-browser-bookmarks-menu" class="desktop-browser-bookmark-menu" role="menu" aria-label="${escapeHTML(heading)}">
@@ -254,6 +288,21 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
   let frameSignature = "";
   let frameDelay = BROWSER_FRAME_MIN_DELAY_MS;
   let streamGeneration = 0;
+  let syncTimer = 0;
+  // State reads are asynchronous. A response that started before a release,
+  // tab switch or hiding must never be applied afterwards: it carries the old
+  // lease and would flip granted() back to true after the Owner released it.
+  // The epoch invalidates in-flight reads on those actions; the request serial
+  // makes only the newest concurrent read win.
+  let stateSyncEpoch = 0;
+  let stateSyncRequest = 0;
+  // The explicit load() owns the loading flag through its own serial so a
+  // superseded read cannot clear it while a newer read is still in flight.
+  let stateLoadRequest = 0;
+  // A terminal frame answer (403/404/409/410) must not be retried on the timer;
+  // only a tab/lease change or an explicit reload clears this key.
+  let terminalStreamKey = "";
+  let lastManualSelectAt = 0;
   let bookmarkRequest = 0;
   let releaseTimer = 0;
   let releaseRequested = false;
@@ -263,25 +312,52 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
   const selectedTab = (): BrowserTab | null =>
     state.tabs.find(tab => tab.id === state.selectedTabID) || null;
   const selectorTarget = (): HTMLElement | null => selector && selector.isConnected ? selector : null;
+  const streamKey = (): string => state.grant && state.selectedTabID ? `${state.grant.id}:${state.selectedTabID}` : "";
+  // Called whenever the lease or the visible selection changes underneath an
+  // in-flight state read; see stateSyncEpoch.
+  const invalidateStateSync = (): void => { stateSyncEpoch++; };
 
   const frameStatusText = (): string => {
     if (!state.grant) return "先选择 Profile 并获取独占控制，之后可查看并操作全部页面";
     if (state.binding) return "正在处理浏览器操作…";
     if (state.host && !state.host.available) return "浏览器宿主不可用，无法获取画面";
     if (state.frameError) return `画面暂不可用：${state.frameError}`;
-    if (!state.tabs.length) return "当前浏览器还没有可用网页，正在准备开始页…";
+    if (!state.tabs.length) return "当前没有打开的页面";
     if (!selectedTab()) return "选择页面后显示画面";
     if (!state.frameLive) return "正在获取画面…";
-    return "实时画面 · 只读（不会转发点击或输入）";
+    return "实时画面 · 只读";
+  };
+
+  // The preview bottom bar owns the two previously scattered status lines:
+  // the exclusive-control state (left) and the read-only frame state (right).
+  const controlStatusText = (session: BrowserSession | null): string => {
+    if (state.error) return state.error;
+    if (!state.grant) return "尚未获取独占控制";
+    if (session?.error) return `当前 Task 独占控制中 · ${session.error}`;
+    if (session?.host_reachable === false) return "当前 Task 独占控制中 · 宿主不可达";
+    return "当前 Task 独占控制中";
   };
 
   const paintFrameStatus = (): void => {
+    const session = state.grant?.session || state.profiles.find(item => item.id === state.profileID)?.session || null;
     const status = container.querySelector<HTMLElement>("#desktop-browser-frame-status");
     if (status) status.textContent = frameStatusText();
+    const control = container.querySelector<HTMLElement>("#desktop-browser-control-status");
+    if (control) {
+      control.textContent = controlStatusText(session);
+      control.title = statusText(state, session);
+      control.dataset.tone = statusTone(state, session);
+    }
     const image = container.querySelector<HTMLImageElement>("#desktop-browser-frame");
+    const empty = container.querySelector<HTMLElement>("#desktop-browser-frame-empty");
     if (image && frameURL) {
       if (image.src !== frameURL) image.src = frameURL;
       image.hidden = false;
+    }
+    if (empty) {
+      const live = Boolean(image && frameURL);
+      empty.hidden = live;
+      if (!live) empty.textContent = state.frameError ? "画面暂不可用" : frameStatusText();
     }
   };
 
@@ -292,8 +368,6 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     shell.dataset.profile = profileName;
     shell.dataset.granted = String(Boolean(state.grant));
     container.dataset.granted = String(Boolean(state.grant));
-    const surfaceStatus = document.querySelector<HTMLElement>("#desktop-browser-surface-status");
-    if (surfaceStatus) surfaceStatus.textContent = status;
     onChange();
   };
 
@@ -355,6 +429,8 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
       button.addEventListener("click", () => {
         const tabID = button.dataset.browserTab || "";
         if (tabID === state.selectedTabID) return;
+        invalidateStateSync();
+        lastManualSelectAt = Date.now();
         state.selectedTabID = tabID;
         state.frameError = "";
         state.frameLive = false;
@@ -417,7 +493,7 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
       <p id="desktop-browser-status" class="desktop-browser-status" data-tone="${statusTone(state, session)}" role="status">${escapeHTML(statusText(state, session))}</p>`;
   };
 
-  const controlHTML = (): string => {
+  const controlHTML = (session: BrowserSession | null): string => {
     if (!state.grant) {
       // Before the first status read lands there is no basis for "create a
       // Profile" or "host down"; avoid a misleading flash in the main panel.
@@ -460,7 +536,7 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
           <button type="button" class="icon-button desktop-browser-tab-close" data-browser-tab-close="${escapeHTML(tab.id)}" title="关闭页面" aria-label="关闭页面 ${escapeHTML(tab.title || host)}">${icon("close")}</button>
         </li>`;
       }).join("")
-      : `<li class="desktop-empty desktop-browser-tabs-empty">正在打开开始页…</li>`;
+      : `<li class="desktop-empty desktop-browser-tabs-empty">当前没有打开的页面</li>`;
     const busy = state.binding;
     const menuOpen = Boolean(state.bookmarksMenu);
     return `<div class="desktop-browser-shell">
@@ -478,17 +554,41 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
         ${bookmarkMenuHTML(state)}
       </div>
       <figure class="desktop-browser-preview">
-        <img id="desktop-browser-frame" alt="内置浏览器只读画面" draggable="false" hidden>
-        <p id="desktop-browser-frame-status" class="desktop-empty" role="status">${escapeHTML(frameStatusText())}</p>
+        <div class="desktop-browser-frame-stage">
+          <img id="desktop-browser-frame" alt="内置浏览器只读画面" draggable="false" hidden>
+          <p id="desktop-browser-frame-empty" class="desktop-browser-frame-empty" role="status">${escapeHTML(frameStatusText())}</p>
+        </div>
+        <figcaption class="desktop-browser-statusbar">
+          <span id="desktop-browser-control-status" class="desktop-browser-control-status" data-tone="${statusTone(state, session)}" title="${escapeHTML(statusText(state, session))}">${escapeHTML(controlStatusText(session))}</span>
+          <span id="desktop-browser-frame-status" class="desktop-browser-frame-status" role="status" title="只读预览，不转发点击、输入或滚动">${escapeHTML(frameStatusText())}</span>
+        </figcaption>
       </figure>
     </div>`;
   };
 
+  // One overflow entry only: chips that do not fit are hidden and the "更多"
+  // menu is the single way to reach them (it lists the full folder tree). The
+  // bar itself never scrolls horizontally.
   const measureBookmarkOverflow = (): void => {
     const items = container.querySelector<HTMLElement>("#desktop-browser-bookmarks");
     const more = container.querySelector<HTMLElement>("#desktop-browser-bookmarks-more");
     if (!items || !more) return;
-    more.hidden = items.scrollWidth <= items.clientWidth + 1;
+    const chips = [...items.querySelectorAll<HTMLElement>(".desktop-browser-bookmark")];
+    if (!chips.length) {
+      more.hidden = true;
+      return;
+    }
+    more.hidden = false;
+    chips.forEach(chip => { chip.hidden = false; });
+    const right = items.getBoundingClientRect().right;
+    let overflow = false;
+    for (const chip of chips) {
+      if (chip.getBoundingClientRect().right > right + 1) {
+        chip.hidden = true;
+        overflow = true;
+      }
+    }
+    more.hidden = !overflow;
   };
 
   const paint = (): void => {
@@ -497,7 +597,7 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     const selectedProfile = state.profiles.find(item => item.id === state.profileID);
     const selectorNode = selectorTarget();
     if (selectorNode && setNodeHTML(selectorNode, selectorHTML(session))) bindSelector();
-    if (setNodeHTML(container, controlHTML())) {
+    if (setNodeHTML(container, controlHTML(session))) {
       bindControl();
       requestAnimationFrame(measureBookmarkOverflow);
     } else {
@@ -527,14 +627,27 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
 
   const schedule = (delay: number): void => {
     window.clearTimeout(frameTimer);
-    frameTimer = window.setTimeout(() => void tick(), delay);
+    // Clear the id when the timer fires: `frameTimer` then means "a frame is
+    // pending", which lets the sync timer restart a loop that the host-down
+    // early return left unscheduled.
+    frameTimer = window.setTimeout(() => { frameTimer = 0; void tick(); }, delay);
   };
 
   const tick = async (): Promise<void> => {
-    if (disposed || !current() || document.visibilityState === "hidden") return;
+    if (disposed || !current()) return;
+    // Hidden pages pause the stream; the visibility handler restarts it with a
+    // fresh tab sync, so a stale screenshot is never left behind.
+    if (document.visibilityState === "hidden") {
+      stopStream();
+      invalidateStateSync();
+      return;
+    }
     const grant = state.grant;
     const tab = selectedTab();
     if (!grant || !tab || (state.host && !state.host.available)) {
+      // A dead host means the last bitmap is no longer a live view; clear it
+      // and let the sync timer restart the loop when the host comes back.
+      if (state.host && !state.host.available) stopStream();
       paintFrameStatus();
       return;
     }
@@ -569,14 +682,38 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
       if (generation !== streamGeneration) return;
       state.frameLive = false;
       state.frameError = error instanceof Error ? error.message : String(error);
-      paintFrameStatus();
       const status = (error as {status?: number}).status;
-      // Revoked/closed/wrong-session answers are terminal for the preview; do
-      // not keep hammering the API until the owner refreshes.
-      if (status === httpStatusForbidden || status === httpStatusNotFound || status === httpStatusConflict) {
+      const code = String((error as {code?: string}).code || "");
+      // A dead host is not a terminal answer for this tab: clearing the bitmap
+      // and stopping the loop avoids hammering a host that cannot answer. The
+      // tab-sync timer restarts the preview once /browser reports it healthy.
+      if (status === httpStatusServiceUnavailable || code === browserHostUnavailableCode) {
         stopStream();
+        paintFrameStatus();
         return;
       }
+      // Revoked/closed/wrong-session answers are terminal for the preview; do
+      // not keep hammering the API until the owner refreshes or the tab/lease
+      // changes. A closed tab is removed immediately and the next page (or the
+      // explicit empty state) takes over.
+      if (status === httpStatusForbidden || status === httpStatusNotFound || status === httpStatusConflict || status === httpStatusGone) {
+        const closed = status === httpStatusNotFound || status === httpStatusGone;
+        if (closed) {
+          state.tabs = state.tabs.filter(item => item.id !== tab.id);
+          state.selectedTabID = browserFollowTabID(state.tabs, "", false);
+          state.frameError = "";
+          state.urlDraft = selectedTab()?.url || "";
+        }
+        stopStream();
+        // The terminal answer belongs to the tab that just failed, never to the
+        // next tab we switch to after a close.
+        terminalStreamKey = closed ? "" : `${grant.id}:${tab.id}`;
+        paint();
+        if (closed && selectedTab()) startStream();
+        void syncState();
+        return;
+      }
+      paintFrameStatus();
       frameDelay = 2000;
     } finally {
       if (frameAbort === controller) frameAbort = null;
@@ -588,6 +725,7 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
 
   const startStream = (): void => {
     stopStream();
+    terminalStreamKey = "";
     if (disposed || !current() || !state.grant || !selectedTab() || (state.host && !state.host.available)) {
       paintFrameStatus();
       return;
@@ -619,56 +757,186 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     }
   };
 
+  interface AppliedBrowserState {
+    changed: boolean;
+    grantChanged: boolean;
+    selectionChanged: boolean;
+    tabsChanged: boolean;
+    setChanged: boolean;
+  }
+
+  // Shared by the explicit load and the tab-sync timer so both paths agree on
+  // how grants, tabs and the preview selection are derived from one read.
+  const applyBrowserState = (data: TaskBrowserState): AppliedBrowserState => {
+    const beforeGrant = state.grant?.id || "";
+    const beforeIDs = state.tabs.map(tab => tab.id).join("\n");
+    const beforeTabs = state.tabs.map(tab => `${tab.id}|${tab.url}|${tab.title}|${tab.active ? 1 : 0}`).join("\n");
+    const beforeProfile = state.profileID;
+    const beforeHost = state.host ? `${state.host.available}|${state.host.edge_available}|${state.host.code || ""}` : "";
+
+    state.profiles = data.profiles || [];
+    state.host = data.host || null;
+    const active = (data.grants || []).find(grant => grant.status === "active") || null;
+    state.grant = active;
+    // The server syncs every visible http(s) page under the exclusive lease,
+    // including pages the Owner opened by hand.
+    state.tabs = active ? (data.tabs || []) : [];
+    if (active) state.inUseProfileID = "";
+    if (active && active.id !== beforeGrant) {
+      state.bookmarks = [];
+      state.bookmarksLoaded = false;
+      state.bookmarksError = "";
+      state.bookmarksMenu = "";
+      state.urlDraft = "";
+      state.startPageGrantID = "";
+    }
+    if (!active) {
+      state.bookmarksLoaded = false;
+      state.bookmarksMenu = "";
+    }
+    if (!state.profiles.some(item => item.id === state.profileID)) {
+      state.profileID = active?.profile_id || state.profiles[0]?.id || "";
+    }
+    if (!active) {
+      const profile = state.profiles.find(item => item.id === state.profileID);
+      if (profile?.lease_task_id) state.inUseProfileID = profile.id;
+    }
+    // A tab click in the panel is optimistic until the host confirms it; do
+    // not let a sync that started earlier pull the selection back.
+    const followActive = Date.now() - lastManualSelectAt > 2500;
+    const nextSelected = browserFollowTabID(state.tabs, state.selectedTabID, followActive);
+    const selectionChanged = nextSelected !== state.selectedTabID;
+    if (selectionChanged) {
+      state.selectedTabID = nextSelected;
+      state.frameError = "";
+      state.frameLive = false;
+      terminalStreamKey = "";
+    }
+    const selected = selectedTab();
+    if (selected && document.activeElement?.id !== "desktop-browser-url") state.urlDraft = selected.url;
+    const afterIDs = state.tabs.map(tab => tab.id).join("\n");
+    const afterTabs = state.tabs.map(tab => `${tab.id}|${tab.url}|${tab.title}|${tab.active ? 1 : 0}`).join("\n");
+    const afterHost = state.host ? `${state.host.available}|${state.host.edge_available}|${state.host.code || ""}` : "";
+    return {
+      changed: beforeGrant !== (active?.id || "") || beforeTabs !== afterTabs
+        || selectionChanged || beforeProfile !== state.profileID || beforeHost !== afterHost,
+      grantChanged: beforeGrant !== (active?.id || ""),
+      selectionChanged,
+      tabsChanged: beforeTabs !== afterTabs,
+      setChanged: beforeIDs !== afterIDs,
+    };
+  };
+
+  const syncState = async (): Promise<void> => {
+    // Opening/closing a tab already reloads through load(); a sync racing it
+    // would repaint a half-applied state. Hidden pages wait for the
+    // visibility handler instead of polling behind the Owner's back.
+    if (disposed || !current() || state.loading || state.binding || document.visibilityState === "hidden") return;
+    const epoch = stateSyncEpoch;
+    const request = ++stateSyncRequest;
+    try {
+      const result = await api.taskBrowser(taskID);
+      // Drop a read that was invalidated (release/tab switch/hidden) or
+      // superseded by a newer one; applying it could resurrect a stale lease.
+      if (disposed || epoch !== stateSyncEpoch || request !== stateSyncRequest) return;
+      const data = result?.browser;
+      if (!data) return;
+      const applied = applyBrowserState(data);
+      // A successfully read, healthy state supersedes an error from an earlier
+      // operation; leaving it pinned would keep the panel red after recovery.
+      const clearedError = Boolean(state.error);
+      if (clearedError && state.grant && !(state.host && !state.host.available)) state.error = "";
+      // Only a tab added/removed is new evidence about the lease/session. A
+      // title update is not, so it must not retry a terminal 403/409 frame.
+      if (applied.setChanged) terminalStreamKey = "";
+      // Rebuilding the surface while the Owner is typing in the address bar
+      // would drop focus and the caret; restore both after the repaint.
+      const urlInput = document.activeElement instanceof HTMLInputElement && document.activeElement.id === "desktop-browser-url"
+        ? document.activeElement : null;
+      const caretStart = urlInput?.selectionStart ?? null;
+      const caretEnd = urlInput?.selectionEnd ?? null;
+      if (applied.changed || clearedError) paint();
+      if (urlInput && (applied.changed || clearedError)) {
+        const next = container.querySelector<HTMLInputElement>("#desktop-browser-url");
+        if (next) {
+          next.focus({preventScroll: true});
+          if (caretStart !== null && caretEnd !== null) next.setSelectionRange(caretStart, caretEnd);
+        }
+      }
+      if (applied.selectionChanged || applied.grantChanged) {
+        startStream();
+      } else if (!frameTimer && !frameAbort && state.grant && selectedTab()
+        && !(state.host && !state.host.available) && terminalStreamKey !== streamKey()) {
+        startStream();
+      } else {
+        paintFrameStatus();
+      }
+    } catch {
+      // A transient read failure must not blank the current tab or preview;
+      // the next tick retries.
+    }
+    if (state.grant && !state.bookmarksLoaded && !state.bookmarksLoading) void loadBookmarks(state.grant);
+    ensureStartPage();
+  };
+
+  const scheduleSync = (delay = BROWSER_STATE_SYNC_MS): void => {
+    window.clearTimeout(syncTimer);
+    if (disposed) return;
+    syncTimer = window.setTimeout(() => {
+      syncTimer = 0;
+      void syncState().finally(() => scheduleSync());
+    }, delay);
+  };
+
   const load = async (): Promise<void> => {
     if (disposed) return;
+    // An explicit read supersedes any tab-sync read already in flight. Capture
+    // the epoch and a request serial of its own: a response that lands after a
+    // release, tab switch or hide must not repaint the old lease, restart its
+    // preview or open a start page.
+    const epoch = stateSyncEpoch;
+    const request = ++stateSyncRequest;
+    const loadRequest = ++stateLoadRequest;
     state.loading = true;
     state.error = "";
     paint();
+    const stale = (): boolean =>
+      disposed || epoch !== stateSyncEpoch || request !== stateSyncRequest;
+    let dropped = false;
     try {
       const result = await api.taskBrowser(taskID);
-      // The Owner may have left browser mode while this read was in flight;
-      // a disposed panel must not open a start page or repaint stale state.
-      if (disposed) return;
-      const data = result?.browser;
-      if (!data) throw new Error("浏览器状态不可用");
-      state.profiles = data.profiles || [];
-      state.host = data.host || null;
-      const active = (data.grants || []).find(grant => grant.status === "active") || null;
-      const previousGrant = state.grant?.id || "";
-      state.grant = active;
-      // The server syncs every visible http(s) page under the exclusive lease,
-      // including pages the Owner opened by hand.
-      state.tabs = active ? (data.tabs || []) : [];
-      if (active) state.inUseProfileID = "";
-      if (active && active.id !== previousGrant) {
-        state.bookmarks = [];
-        state.bookmarksLoaded = false;
-        state.bookmarksError = "";
-        state.bookmarksMenu = "";
-        state.urlDraft = "";
-        state.startPageGrantID = "";
+      // The Owner may have left browser mode, released the lease or switched
+      // tabs while this read was in flight; a stale answer must not be applied.
+      if (stale()) {
+        dropped = true;
+      } else {
+        const data = result?.browser;
+        if (!data) throw new Error("浏览器状态不可用");
+        applyBrowserState(data);
       }
-      if (!active) {
-        state.bookmarksLoaded = false;
-        state.bookmarksMenu = "";
-      }
-      if (!state.profiles.some(item => item.id === state.profileID)) {
-        state.profileID = active?.profile_id || state.profiles[0]?.id || "";
-      }
-      if (!active) {
-        const selected = state.profiles.find(item => item.id === state.profileID);
-        if (selected?.lease_task_id) state.inUseProfileID = selected.id;
-      }
-      if (!state.tabs.some(tab => tab.id === state.selectedTabID)) {
-        state.selectedTabID = (state.tabs.find(tab => tab.active) || state.tabs[0])?.id || "";
-      }
-      const selected = selectedTab();
-      if (selected && document.activeElement?.id !== "desktop-browser-url") state.urlDraft = selected.url;
     } catch (error) {
-      state.error = error instanceof Error ? error.message : String(error);
+      // A failure from a superseded read is equally stale: it must not pin an
+      // error over the state the newer read already applied.
+      if (stale()) {
+        dropped = true;
+      } else {
+        state.error = error instanceof Error ? error.message : String(error);
+      }
     } finally {
-      state.loading = false;
+      // Only the newest load owns the loading flag; a superseded one must not
+      // clear it while the newer read is still in flight.
+      if (loadRequest === stateLoadRequest) state.loading = false;
     }
+    if (dropped) {
+      // The stale answer is not applied, but the loading flag it owned may
+      // still be disabling the controls painted when the read started. Repaint
+      // the current (never the stale) state so the buttons match the cleared
+      // flag; a newer load owns the flag and will repaint for itself.
+      if (!disposed && loadRequest === stateLoadRequest) paint();
+      return;
+    }
+    // Dropped answers returned above, so none of the frame restart or
+    // follow-up reads below can run for them.
     paint();
     startStream();
     if (state.grant && !state.bookmarksLoaded && !state.bookmarksLoading) void loadBookmarks(state.grant);
@@ -689,6 +957,8 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
   // the id would leave the old URL visible.
   const selectTab = (tabID: string, url = ""): void => {
     if (!tabID) return;
+    invalidateStateSync();
+    lastManualSelectAt = Date.now();
     state.selectedTabID = tabID;
     if (url) state.urlDraft = url;
     state.frameError = "";
@@ -752,8 +1022,12 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
   // enumerable page yet; never close pages the Owner opened by hand.
   const ensureStartPage = (): void => {
     const grant = state.grant;
-    if (!grant || state.tabs.length || state.startPageGrantID === grant.id) return;
+    if (!grant || state.startPageGrantID === grant.id) return;
+    // The start page is only a bootstrap for a brand-new grant. Consume the
+    // marker even when pages already exist, so the Owner closing the last real
+    // page clears the panel instead of silently opening a replacement.
     state.startPageGrantID = grant.id;
+    if (state.tabs.length) return;
     void openPage(browserStartPageURL(window.location.origin), true);
   };
 
@@ -764,6 +1038,8 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
 
   const releaseControl = async (): Promise<void> => {
     if (!state.grant) return;
+    // Any state read still in flight belongs to the lease being released.
+    invalidateStateSync();
     const grantID = state.grant.id;
     state.binding = true;
     state.error = "";
@@ -826,6 +1102,7 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
       return;
     }
     const previousGrant = state.grant;
+    invalidateStateSync();
     state.binding = true;
     state.error = "";
     paint();
@@ -910,12 +1187,20 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
 
   const onVisibility = (): void => {
     if (document.visibilityState === "hidden") {
-      window.clearTimeout(frameTimer);
-      frameTimer = 0;
-      frameAbort?.abort();
-    } else {
-      startStream();
+      // Drop the bitmap as well as the timer: an AHA Web tab hidden behind the
+      // real browser window must never come back showing a stale screenshot.
+      stopStream();
+      invalidateStateSync();
+      paintFrameStatus();
+      return;
     }
+    // Coming back must both re-read the tab strip (the Owner may have opened,
+    // switched or closed pages meanwhile) and restart the frame stream. A
+    // terminal 403/409 answer survives the pause: syncState() only restarts on
+    // a new selection/lease, and this fallback must not clear its suppression.
+    void syncState().finally(() => {
+      if (!disposed && !state.loading && !frameTimer && !frameAbort && terminalStreamKey !== streamKey()) startStream();
+    });
   };
 
   // The bookmark menu is non-modal, so Escape is scoped to the panel and
@@ -944,6 +1229,7 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
 
   paint();
   void load();
+  scheduleSync();
   document.addEventListener("visibilitychange", onVisibility);
   document.addEventListener("pointerdown", onOutsidePointer, true);
   container.addEventListener("keydown", onKeydown);
@@ -955,6 +1241,8 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     dispose: () => {
       disposed = true;
       bookmarkRequest++;
+      window.clearTimeout(syncTimer);
+      syncTimer = 0;
       // An accepted stop outlives the panel: dispose must not cancel the
       // pending release timer, or switching control mode mid-open would keep
       // the exclusive lease alive with no UI to release it.

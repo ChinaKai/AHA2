@@ -388,7 +388,7 @@ export function renderDesktopHeaderControls(): string {
     <button type="button" data-desktop-popover="targets" class="icon-button" aria-label="共享目标" title="共享目标" aria-expanded="false" aria-controls="desktop-targets-popover">${icon("browser")}</button>
     <button type="button" id="desktop-focus" class="icon-button" title="恢复焦点" aria-label="恢复焦点" disabled>${icon("monitor")}</button>
     <button type="button" data-desktop-popover="operations" class="icon-button" aria-label="操作与状态" title="操作与状态" aria-expanded="false" aria-controls="desktop-operations-popover">${icon("menu")}</button>
-    <button type="button" id="desktop-stop" class="icon-button danger" title="停止共享" aria-label="停止共享" disabled>${icon("close")}</button>
+    <button type="button" id="desktop-stop" class="icon-button danger" title="停止共享" aria-label="停止共享" disabled>${icon("logout")}</button>
   </div>`;
 }
 
@@ -410,16 +410,11 @@ export function renderDesktopPanel(detail: TaskDetail, header = ""): string {
         <button type="button" id="desktop-fit" class="icon-button" title="完整适配画面" aria-label="完整适配画面">${icon("monitor")}</button>
         <input type="range" id="desktop-zoom" min="100" max="${maxDesktopZoom * 100}" step="25" value="${state.zoom * 100}" aria-label="画面放大比例，Ctrl 加滚轮以鼠标位置缩放" title="100%-${maxDesktopZoom * 100}%；Ctrl 加滚轮以鼠标位置缩放">
         <output id="desktop-zoom-value">100%</output>
-        <button type="button" id="desktop-fullscreen" class="icon-button" title="全屏" aria-label="全屏">${icon("expand")}</button>
+        <button type="button" id="desktop-fullscreen" class="icon-button" title="共享画面全屏" aria-label="共享画面全屏">${icon("expand")}</button>
       </div>
     </section>
     <div id="task-tool-panel-body" class="desktop-body">
       <p id="desktop-error" class="desktop-error desktop-alert" role="alert" hidden></p>
-      <section id="desktop-browser-surface" class="desktop-browser-surface" hidden>
-        <strong>${icon("browser")}内置浏览器</strong>
-        <p id="desktop-browser-surface-status" role="status"></p>
-        <p class="field-help">浏览器窗口运行在宿主机的可见桌面中；下方画面只读转发当前 Task 已授权标签页的截图，不写入磁盘，也不转发点击、输入或滚动。</p>
-      </section>
       <section id="desktop-browser-control" class="desktop-browser-main" hidden></section>
       <div class="desktop-observation">
         <div id="desktop-viewport" class="desktop-viewport" title="移动端：单指双击为双击，双指轻点为右键，双指平行滑动为滚轮，双指捏合为缩放"><div id="desktop-preview" class="desktop-preview" hidden>
@@ -719,8 +714,6 @@ function updateDOM(binding: Binding): void {
   if (displayTarget) displayTarget.hidden = state.browserMode;
   const browserTarget = root.querySelector<HTMLElement>("#desktop-browser-target");
   if (browserTarget) browserTarget.hidden = !state.browserMode;
-  const browserSurface = root.querySelector<HTMLElement>("#desktop-browser-surface");
-  if (browserSurface) browserSurface.hidden = !state.browserMode;
   const browserControl = root.querySelector<HTMLElement>("#desktop-browser-control");
   if (browserControl) browserControl.hidden = !state.browserMode;
   const browserGranted = state.browserMode && browserTarget?.dataset.granted === "true";
@@ -747,10 +740,15 @@ function updateDOM(binding: Binding): void {
   root.querySelector<HTMLElement>("#desktop-empty-target")!.hidden = Boolean(session) || state.browserMode;
   root.querySelector<HTMLButtonElement>("#desktop-refresh")!.disabled = Boolean(state.busy);
   // Revocation remains available even while a native operation is pending.
-  // In browser mode the same header button releases the browser lease.
-  root.querySelector<HTMLButtonElement>("#desktop-stop")!.disabled = state.browserMode
+  // In browser mode the same header button releases the browser lease, so the
+  // tooltip follows the mode instead of always saying "停止共享".
+  const stopButton = root.querySelector<HTMLButtonElement>("#desktop-stop")!;
+  const stopLabel = state.browserMode ? "释放独占控制" : "停止共享";
+  stopButton.disabled = state.browserMode
     ? !browserGranted
     : !session || state.denied || state.busy === "正在停止共享...";
+  if (stopButton.title !== stopLabel) stopButton.title = stopLabel;
+  if (stopButton.getAttribute("aria-label") !== stopLabel) stopButton.setAttribute("aria-label", stopLabel);
   if (!state.browserMode) {
     text("#desktop-title", session?.window.title || (session ? "无标题窗口" : "尚未共享窗口"));
     text("#desktop-process", session?.window.process || "");
