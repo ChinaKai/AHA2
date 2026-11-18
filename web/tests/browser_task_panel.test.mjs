@@ -65,6 +65,46 @@ test("bookmarks group under one first-level folder without losing subfolder entr
   ]);
 });
 
+test("only bookmarks sitting on the bar root count as bookmark-bar level", () => {
+  const bookmark = folder => ({title: "t", url: "https://x.example/", folder});
+  for (const folder of ["", "收藏夹栏", "收藏夹", "Favorites", "favourites", "favourites/", " 收藏夹栏 ／ "]) {
+    assert.equal(panel.isBookmarkBarLevel(bookmark(folder)), true, `"${folder}" is the bar itself`);
+  }
+  // Anything inside a first-level folder, or deeper, belongs to that folder.
+  for (const folder of ["收藏夹栏/Work", "收藏夹/Work/网易邮箱", "收藏夹栏/Docs/HUALAI", "Bar", "收藏夹栏/Work/"]) {
+    assert.equal(panel.isBookmarkBarLevel(bookmark(folder)), false, `"${folder}" is not on the bar`);
+  }
+});
+
+test("the overflow menu lists hidden first-level folders plus bar-level urls only", () => {
+  const bookmark = (folder, title) => ({title, url: `https://${title}.example/`, folder});
+  const bookmarks = [
+    bookmark("收藏夹栏", "根目录直达"),
+    bookmark("收藏夹/", "另一根"),
+    bookmark("收藏夹栏/Work", "Work 门户"),
+    bookmark("收藏夹栏/Work/网易邮箱", "网易邮箱"),
+    bookmark("收藏夹栏/Tools", "工具"),
+  ];
+  const hidden = panel.bookmarkOverflowEntries(bookmarks, ["Work"]);
+  assert.deepEqual(hidden.folders.map(([folder, group]) => [folder, group.map(item => item.title)]), [
+    ["Work", ["Work 门户", "网易邮箱"]],
+  ], "a hidden first-level folder carries its whole subtree");
+  assert.deepEqual(hidden.urls.map(item => item.title), ["根目录直达", "另一根"],
+    "folder bookmarks never leak into the bar-level url list");
+
+  // A visible folder must not be repeated in the overflow menu.
+  const withVisible = panel.bookmarkOverflowEntries(bookmarks, ["Work"]);
+  assert.equal(withVisible.folders.some(([folder]) => folder === "Tools"), false);
+
+  // No hidden folder means no folder section at all - never a fallback that
+  // turns the chevron into a second copy of the whole tree.
+  const noneHidden = panel.bookmarkOverflowEntries(bookmarks, []);
+  assert.deepEqual(noneHidden.folders, []);
+  assert.deepEqual(noneHidden.urls.map(item => item.title), ["根目录直达", "另一根"]);
+
+  assert.deepEqual(panel.bookmarkOverflowEntries([], []), {folders: [], urls: []});
+});
+
 test("tab selection follows a single real-window switch and leaves ambiguous windows alone", () => {
   const tabs = [
     {id: "a", active: false}, {id: "b", active: true},

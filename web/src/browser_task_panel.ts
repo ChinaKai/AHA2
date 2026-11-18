@@ -66,6 +66,13 @@ export const BROWSER_FRAME_MAX_DELAY_MS = 1200;
 // re-read on a timer while the panel is open, independent of the frame stream.
 // 3s is the middle of the 2-5s range the owner asked for.
 export const BROWSER_STATE_SYNC_MS = 3000;
+// A folder menu closes by itself once the pointer leaves the chip and the
+// popover. The timer is short: it only bridges the few pixels between the two
+// regions while the pointer crosses from one into the other.
+export const BOOKMARK_MENU_HOVER_CLOSE_MS = 180;
+// The chip and popover are separated by the bar's padding; pad the hover zone
+// so crossing that gap never counts as leaving.
+const BOOKMARK_MENU_HOVER_PAD = 8;
 const httpStatusForbidden = 403;
 const httpStatusNotFound = 404;
 const httpStatusConflict = 409;
@@ -224,10 +231,26 @@ function bookmarkSubfolderLabel(folder: string): string {
   return bookmarkFolderSegments(folder).slice(1).join("/");
 }
 
-// "收藏栏级别" means an unfiled bookmark or one sitting directly in a
-// first-level folder; both belong in the overflow menu's URL list.
-function isBookmarkBarLevel(bookmark: BrowserBookmark): boolean {
-  return bookmarkFolderSegments(bookmark.folder || "").length <= 1;
+// "收藏栏级别" means the bookmark sits directly on the bar: its folder is
+// empty, or only the bar root. A bookmark inside a first-level folder (or any
+// deeper subfolder) belongs to that folder's menu and must never leak into the
+// overflow menu's URL list.
+export function isBookmarkBarLevel(bookmark: BrowserBookmark): boolean {
+  return bookmarkFolderSegments(bookmark.folder || "").length === 0;
+}
+
+// Group the chevron menu's contents: only the first-level folders whose chips
+// are currently hidden by overflow, plus the bookmark-bar's own URLs. An empty
+// hidden list means the bar has no hidden folder — deliberately no "show every
+// folder" fallback, because that turned the overflow entry into a second copy
+// of the whole tree.
+export function bookmarkOverflowEntries(
+  bookmarks: BrowserBookmark[],
+  hiddenFolders: string[],
+): {folders: Array<[string, BrowserBookmark[]]>; urls: BrowserBookmark[]} {
+  const folders = [...groupBookmarks(bookmarks)]
+    .filter(([folder]) => Boolean(folder) && hiddenFolders.includes(folder));
+  return {folders, urls: bookmarks.filter(isBookmarkBarLevel)};
 }
 
 // Pick the tab the preview should show. `active` only means "visible in its
@@ -311,28 +334,23 @@ function bookmarkMenuEntry(bookmark: BrowserBookmark, index: number): string {
 function bookmarkMenuHTML(state: PanelState): string {
   if (!state.bookmarksMenu) return "";
   const all = state.bookmarksMenu === "all";
-  const heading = all ? "全部收藏" : browserBookmarkFolderLabel(state.bookmarksMenuFolder);
+  const heading = all ? "更多收藏" : browserBookmarkFolderLabel(state.bookmarksMenuFolder);
   const indexes = new Map(state.bookmarks.map((bookmark, index) => [bookmark, index]));
   let items = "";
   if (all) {
-    // The chevron is the overflow entry: list the first-level folders whose
-    // chips do not fit, plus bookmark-bar URLs, both actionable. When no chip
-    // is hidden (a very wide panel), fall back to every folder.
-    const folderGroups = [...groupBookmarks(state.bookmarks)].filter(([folder]) => folder);
-    const folders = state.bookmarkBarHiddenFolders.length
-      ? folderGroups.filter(([folder]) => state.bookmarkBarHiddenFolders.includes(folder))
-      : folderGroups;
-    const barLevel = state.bookmarks.filter(isBookmarkBarLevel);
+    // The chevron is the overflow entry: only the first-level folders whose
+    // chips do not fit, plus the bookmark-bar's own URLs. Both are actionable.
+    const {folders, urls} = bookmarkOverflowEntries(state.bookmarks, state.bookmarkBarHiddenFolders);
     const parts: string[] = [];
     if (folders.length) {
       parts.push('<li class="desktop-browser-bookmark-menu-section">更多文件夹</li>');
       parts.push(...folders.map(([folder, group]) => `<li><button type="button" class="desktop-browser-bookmark-menu-folder-entry" data-browser-bookmark-menu-folder="${escapeHTML(folder)}" title="打开文件夹 ${escapeHTML(folder)}">${icon("folder")}<span>${escapeHTML(folder)}</span><small>${group.length} 个</small></button></li>`));
     }
-    if (barLevel.length) {
+    if (urls.length) {
       parts.push('<li class="desktop-browser-bookmark-menu-section">收藏栏网址</li>');
-      parts.push(...barLevel.map(bookmark => bookmarkMenuEntry(bookmark, indexes.get(bookmark) ?? -1)));
+      parts.push(...urls.map(bookmark => bookmarkMenuEntry(bookmark, indexes.get(bookmark) ?? -1)));
     }
-    items = parts.join("") || '<li class="desktop-browser-bookmark-menu-empty">收藏夹为空</li>';
+    items = parts.join("") || '<li class="desktop-browser-bookmark-menu-empty">没有隐藏的文件夹或收藏栏网址</li>';
   } else {
     const visible = state.bookmarks.filter(bookmark => browserBookmarkFolderLabel(bookmark.folder || "") === state.bookmarksMenuFolder);
     const groups = new Map<string, BrowserBookmark[]>();
@@ -361,6 +379,11 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
 
   let disposed = false;
   let bookmarkMenuReturnFocus: BookmarkMenuReturnFocus | null = null;
+  let bookmarkHoverTimer = 0;
+  const cancelBookmarkHoverClose = (): void => {
+    window.clearTimeout(bookmarkHoverTimer);
+    bookmarkHoverTimer = 0;
+  };
   let frameTimer = 0;
   let frameAbort: AbortController | null = null;
   let frameURL = "";
@@ -655,9 +678,15 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     </div>`;
   };
 
+  // The chip a folder menu is anchored to. A chip hidden by the overflow
+  // measure cannot be an anchor (or a hover target); the chevron takes over.
+  const visibleFolderChip = (folder: string): HTMLElement | null =>
+    [...container.querySelectorAll<HTMLElement>("[data-browser-bookmark-folder]")]
+      .find(chip => chip.dataset.browserBookmarkFolder === folder && !chip.hidden) || null;
+
   // One overflow entry only: chips that do not fit are hidden and the "更多"
-  // menu is the single way to reach them (it lists the full folder tree). The
-  // bar itself never scrolls horizontally.
+  // menu is the single way to reach them (it lists the hidden folders and the
+  // bar's own URLs). The bar itself never scrolls horizontally.
   const measureBookmarkOverflow = (): void => {
     const items = container.querySelector<HTMLElement>("#desktop-browser-bookmarks");
     const more = container.querySelector<HTMLElement>("#desktop-browser-bookmarks-more");
@@ -700,10 +729,7 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     const menu = container.querySelector<HTMLElement>("#desktop-browser-bookmarks-menu");
     if (!bar || !menu) return;
     let anchor: HTMLElement | null = null;
-    if (state.bookmarksMenu === "folder") {
-      anchor = [...container.querySelectorAll<HTMLElement>("[data-browser-bookmark-folder]")]
-        .find(chip => chip.dataset.browserBookmarkFolder === state.bookmarksMenuFolder && !chip.hidden) || null;
-    }
+    if (state.bookmarksMenu === "folder") anchor = visibleFolderChip(state.bookmarksMenuFolder);
     anchor = anchor || container.querySelector<HTMLElement>("#desktop-browser-bookmarks-more");
     const barRect = bar.getBoundingClientRect();
     const style = getComputedStyle(bar);
@@ -1299,6 +1325,9 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
 
   const openBookmarksMenu = (kind: "all" | "folder", folder: string, returnFocus?: BookmarkMenuReturnFocus): void => {
     if (returnFocus) bookmarkMenuReturnFocus = returnFocus;
+    // A pending hover-close belongs to the menu that was open before this
+    // switch; it must not close the freshly opened one.
+    cancelBookmarkHoverClose();
     state.bookmarksMenu = kind;
     state.bookmarksMenuFolder = folder;
     paint();
@@ -1311,6 +1340,7 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
   };
 
   const closeBookmarksMenu = (): void => {
+    cancelBookmarkHoverClose();
     if (!state.bookmarksMenu) return;
     const returnFocus = bookmarkMenuReturnFocus;
     bookmarkMenuReturnFocus = null;
@@ -1319,15 +1349,54 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     paint();
     // A fresh paint hides the chevron until the overflow pass runs again.
     measureBookmarkOverflow();
-    const folderChips = [...container.querySelectorAll<HTMLElement>("[data-browser-bookmark-folder]")];
-    const folderChip = returnFocus?.kind === "folder"
-      ? folderChips.find(chip => chip.dataset.browserBookmarkFolder === returnFocus.folder && !chip.hidden)
-      : undefined;
-    const visibleFolder = folderChips.find(chip => !chip.hidden);
+    const folderChip = returnFocus?.kind === "folder" ? visibleFolderChip(returnFocus.folder) : null;
+    const visibleFolder = [...container.querySelectorAll<HTMLElement>("[data-browser-bookmark-folder]")]
+      .find(chip => !chip.hidden);
     const target = returnFocus?.kind === "more"
       ? container.querySelector<HTMLElement>("#desktop-browser-bookmarks-more")
       : folderChip || container.querySelector<HTMLElement>("#desktop-browser-bookmarks-more:not([hidden])") || visibleFolder;
     target?.focus({preventScroll: true});
+  };
+
+  // A folder menu stays open while the pointer is over the chip that opened it
+  // or over the popover itself. Leaving both closes it, so the Owner does not
+  // have to hunt for the close button after looking through a folder.
+  const bookmarkMenuZoneRects = (): DOMRect[] => {
+    if (state.bookmarksMenu !== "folder") return [];
+    const rects: DOMRect[] = [];
+    const menu = container.querySelector<HTMLElement>("#desktop-browser-bookmarks-menu");
+    if (menu) rects.push(menu.getBoundingClientRect());
+    const anchor = visibleFolderChip(state.bookmarksMenuFolder)
+      || container.querySelector<HTMLElement>("#desktop-browser-bookmarks-more:not([hidden])");
+    if (anchor) rects.push(anchor.getBoundingClientRect());
+    return rects;
+  };
+
+  const insideBookmarkMenuZone = (event: PointerEvent): boolean => {
+    const target = event.target instanceof Element ? event.target : null;
+    if (target?.closest("#desktop-browser-bookmarks-menu")) return true;
+    const chip = visibleFolderChip(state.bookmarksMenuFolder);
+    if (chip && target && chip.contains(target)) return true;
+    if (!chip && target?.closest("#desktop-browser-bookmarks-more")) return true;
+    return bookmarkMenuZoneRects().some(rect => event.clientX >= rect.left - BOOKMARK_MENU_HOVER_PAD
+      && event.clientX <= rect.right + BOOKMARK_MENU_HOVER_PAD
+      && event.clientY >= rect.top - BOOKMARK_MENU_HOVER_PAD
+      && event.clientY <= rect.bottom + BOOKMARK_MENU_HOVER_PAD);
+  };
+
+  const onBookmarkPointerMove = (event: PointerEvent): void => {
+    if (state.bookmarksMenu !== "folder") return;
+    if (insideBookmarkMenuZone(event)) {
+      cancelBookmarkHoverClose();
+      return;
+    }
+    // Schedule once: a pointer that keeps travelling outside must still close
+    // the menu after the grace period instead of postponing it forever.
+    if (bookmarkHoverTimer) return;
+    bookmarkHoverTimer = window.setTimeout(() => {
+      bookmarkHoverTimer = 0;
+      if (state.bookmarksMenu === "folder") closeBookmarksMenu();
+    }, BOOKMARK_MENU_HOVER_CLOSE_MS);
   };
 
   const attach = async (): Promise<void> => {
@@ -1406,6 +1475,7 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     // Close without repainting: this runs on pointerdown, and rebuilding the
     // main surface here would detach the element that is about to receive the
     // click (for example the new-tab button).
+    cancelBookmarkHoverClose();
     state.bookmarksMenu = "";
     state.bookmarksMenuFolder = "";
     bookmarkMenuReturnFocus = null;
@@ -1422,6 +1492,7 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
   scheduleSync();
   document.addEventListener("visibilitychange", onVisibility);
   document.addEventListener("pointerdown", onOutsidePointer, true);
+  document.addEventListener("pointermove", onBookmarkPointerMove, {passive: true});
   container.addEventListener("keydown", onKeydown);
   const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(relayoutBookmarks);
   observer?.observe(container);
@@ -1438,6 +1509,8 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
       // the exclusive lease alive with no UI to release it.
       document.removeEventListener("visibilitychange", onVisibility);
       document.removeEventListener("pointerdown", onOutsidePointer, true);
+      document.removeEventListener("pointermove", onBookmarkPointerMove);
+      cancelBookmarkHoverClose();
       container.removeEventListener("keydown", onKeydown);
       window.removeEventListener("resize", relayoutBookmarks);
       observer?.disconnect();
