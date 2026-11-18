@@ -494,6 +494,7 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 		},
 	})
 	knowledgeVaultManager.SetAutoCommitRequester(knowledgeVaultSyncer.NotifyWrite)
+	appService.SetKnowledgeSyncRecovery(knowledgeVaultSyncer)
 	knowledgeVaultSyncer.Start(ctx)
 	defer knowledgeVaultSyncer.Stop()
 	appService.SetBuildInfo(version, webVersion, time.Now().UTC())

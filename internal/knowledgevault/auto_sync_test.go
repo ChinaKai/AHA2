@@ -424,6 +424,9 @@ func TestSyncerDivergedRemoteEmitsConflictOnceAndKeepsLocal(t *testing.T) {
 	if len(events) != 1 {
 		t.Fatalf("same conflict pair emitted another event: %+v", events)
 	}
+	if status := syncer.Status(); !status.Paused || !status.Conflict || status.PauseReason != "conflict" {
+		t.Fatalf("unchanged divergence did not pause again after reset: %+v", status)
+	}
 	if head := headSHA(t, config.VaultPath); head != localHead {
 		t.Fatalf("repeated conflict handling moved local HEAD: %s -> %s", localHead, head)
 	}
