@@ -178,12 +178,25 @@ func TestPetRecoverKnowledgeSyncClearsPauseWithoutClosingNotifications(t *testin
 	// only then does the Recovered callback close the notification.
 	gitHelper(t, vaultConfig.VaultPath, "fetch", "origin", "main")
 	gitHelper(t, vaultConfig.VaultPath, "merge", "--no-edit", "origin/main")
+	// While paused the worktree changed: a blocked binary file adds one pending
+	// item that the pause-time snapshot never saw. Recovery must report that
+	// live value on both sides instead of regressing after.pending to the old
+	// snapshot. A blocked file does not stop the push below.
+	if err := os.WriteFile(filepath.Join(vaultConfig.VaultPath, "pause-window.png"), []byte("not a real png\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	raw = petMCPToolTextForToken(t, client, server.URL, petToken, "aha_recover_knowledge_sync", map[string]any{})
 	if err := json.Unmarshal([]byte(raw), &result); err != nil {
 		t.Fatalf("decode second recovery: %v\n%s", err, raw)
 	}
 	if !result.Recovered || result.After.Paused {
 		t.Fatalf("second recovery result=%s", raw)
+	}
+	if !result.Before.PendingKnown || result.Before.Pending != 1 {
+		t.Fatalf("before pending=%+v, want the live scan value 1", result.Before)
+	}
+	if !result.After.PendingKnown || result.After.Pending != 1 {
+		t.Fatalf("after pending=%+v, want the live scan value 1", result.After)
 	}
 	syncer.RunOnce(ctx)
 	if status := syncer.Status(); status.Paused || status.Conflict {

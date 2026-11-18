@@ -104,6 +104,16 @@ func (s *Service) RecoverKnowledgeSyncAutoSync(ctx context.Context) (KnowledgeSy
 		result.Recovered = true
 	}
 	result.After = knowledgeSyncRecoveryState(recovery.StatusLive(ctx))
+	// StatusLive only scans while paused, and ResetPause clears the pause
+	// without rescanning. A second live read therefore falls back to the
+	// pending snapshot persisted when the pause happened. The before scan is
+	// the live read for this recovery call, so carry it into the after state
+	// instead of letting pending regress to a pre-pause value. The next sync
+	// cycle refreshes it again.
+	if result.Recovered && result.Before.PendingKnown {
+		result.After.Pending = result.Before.Pending
+		result.After.PendingKnown = true
+	}
 	return result, nil
 }
 

@@ -11,11 +11,19 @@ import (
 )
 
 type fakeKnowledgeSyncRecovery struct {
-	status     knowledgevault.AutoSyncStatus
+	status knowledgevault.AutoSyncStatus
+	// live models StatusLive's paused behavior: a paused syncer performs one
+	// read-only scan and reports those values instead of the persisted
+	// snapshot. Once the pause is cleared the fake returns the snapshot again,
+	// which is the regression this test fixture must expose.
+	live       *knowledgevault.AutoSyncStatus
 	resetCalls int
 }
 
 func (f *fakeKnowledgeSyncRecovery) StatusLive(ctx context.Context) knowledgevault.AutoSyncStatus {
+	if f.status.Paused && f.live != nil {
+		return *f.live
+	}
 	return f.status
 }
 
@@ -87,6 +95,39 @@ func TestPetRecoverKnowledgeSyncClearsPauseAndReportsBeforeAfter(t *testing.T) {
 	}
 	if !strings.Contains(result.Note, "再次暂停") || !strings.Contains(result.Note, "通知") {
 		t.Fatalf("note=%q", result.Note)
+	}
+}
+
+func TestPetRecoverKnowledgeSyncKeepsLivePendingAfterReset(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	// The persisted pause-time snapshot says 0 pending, but the worktree changed
+	// while paused and the live scan (mimicking StatusLive) says 4.
+	stale := knowledgevault.AutoSyncStatus{
+		Enabled: true, Paused: true, PauseReason: "conflict", Conflict: true,
+		Pending: 0, PendingKnown: true,
+	}
+	live := knowledgevault.AutoSyncStatus{
+		Enabled: true, Paused: true, PauseReason: "conflict", Conflict: true,
+		Pending: 4, PendingKnown: true,
+	}
+	recovery := &fakeKnowledgeSyncRecovery{status: stale, live: &live}
+	fixture.service.SetKnowledgeSyncRecovery(recovery)
+
+	raw, err := fixture.service.PetMCPToolForTask(fixture.ctx, petTaskID, "aha_recover_knowledge_sync", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := decodeKnowledgeSyncRecoveryResult(t, raw)
+	if !result.Recovered || result.After.Paused {
+		t.Fatalf("recovery result=%+v", result)
+	}
+	if !result.Before.PendingKnown || result.Before.Pending != 4 {
+		t.Fatalf("before pending=%+v, want the live scan value 4", result.Before)
+	}
+	// ResetPause does not rescan, so without carrying the live read forward the
+	// after state would regress to the persisted 0.
+	if !result.After.PendingKnown || result.After.Pending != 4 {
+		t.Fatalf("after pending=%+v, want the live scan value 4", result.After)
 	}
 }
 
