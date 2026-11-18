@@ -215,6 +215,57 @@ func TestWriteKnowledgeValidationTable(t *testing.T) {
 	}
 }
 
+// The Agent write gate and the auto-commit gate share forbiddenKnowledgePatterns.
+// Chinese prose that names a keyword must stay eligible; real credential shapes
+// (prefix keys, quoted values, env assignments) must still be rejected.
+func TestForbiddenContentSecretPatterns(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{"chinese token prose", "token:从环境变量读取不要写死", false},
+		{"chinese password prose", "password:至少八位以上字符组合", false},
+		{"chinese token after cjk word", "鉴权token=设备上报的随机串", false},
+		{"full width colon", "token：从环境变量读取不要写死", false},
+		{"non secret keyword", "status: stale", false},
+		{"english prose with spaces", "token: read from env", false},
+		{"chinese prose with space after separator", "token: 从环境变量读取", false},
+		{"bare token prose", "调用前需要先获取 token，再放入请求头。", false},
+
+		{"unquoted password", "password = supersecret123", true},
+		{"quoted token", `token = "abcdefgh12345678"`, true},
+		{"single quoted password", `password: 'p@ssw0rd-Str0ng!'`, true},
+		{"base64 token", "token: dGhpcyBpcyBhIHNlY3JldA==", true},
+		{"env assignment", "TOKEN=abcdef1234567890", true},
+		{"api key assignment", "api_key: 0123456789abcdef", true},
+		{"long random ascii", "access_token=Zx9Qw3Er7Ty1Ui5Op2As4Df6", true},
+		{"openai style key", "sk-abcdefghijklmnopqrstuvwxyz012345", true},
+		{"github token", "ghp_abcdefghijklmnopqrstuvwxyz0123456789", true},
+		{"aws access key", "AKIAIOSFODNN7EXAMPLE", true},
+		{"private key header", "-----BEGIN RSA PRIVATE KEY-----", true},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := forbiddenContent(testCase.value); got != testCase.want {
+				t.Errorf("forbiddenContent(%q) = %v, want %v", testCase.value, got, testCase.want)
+			}
+			if got := containsSecretMaterial([]byte(testCase.value)); got != testCase.want {
+				t.Errorf("containsSecretMaterial(%q) = %v, want %v", testCase.value, got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestWriteKnowledgeAcceptsChineseSecretProse(t *testing.T) {
+	manager, _, ctx := newWriteTestManager(t)
+	request := writeTestCreate("中文密钥说明写入")
+	request.Body = writeTestBody + "\ntoken:从环境变量读取不要写死\npassword:至少八位以上字符组合\n鉴权token=设备上报的随机串\n"
+	if _, err := manager.WriteKnowledge(ctx, request); err != nil {
+		t.Fatalf("chinese secret prose write error = %v", err)
+	}
+}
+
 func TestWriteKnowledgeGlobalScopeRequiresPermission(t *testing.T) {
 	manager, config, ctx := newWriteTestManager(t)
 	request := writeTestCreate("全局收件箱测试")

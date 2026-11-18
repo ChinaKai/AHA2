@@ -615,3 +615,36 @@ func TestAutoCommitBlocksBareTokenAndOpenAIProjectKeys(t *testing.T) {
 		t.Fatalf("normal token prose was not eligible: %+v", scan.Eligible)
 	}
 }
+
+// A document that explains token/password handling in Chinese must not be
+// blocked as a secret, while a real credential in the same batch still is.
+func TestAutoCommitKeepsChineseSecretProseEligible(t *testing.T) {
+	ctx := context.Background()
+	config, git := newGitTestVault(t)
+	if _, err := git.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	prose := "# 配置说明\n\n" +
+		"token:从环境变量读取不要写死\n" +
+		"password:至少八位以上字符组合\n" +
+		"鉴权token=设备上报的随机串\n"
+	writeGitTestFile(t, config.VaultPath, "notes/chinese-secret-prose.md", prose)
+	writeGitTestFile(t, config.VaultPath, "notes/real-secret.md", "token = \"abcdefgh12345678\"\n")
+	scan, err := git.ScanAutoCommit(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked := map[string]string{}
+	for _, item := range scan.Blocked {
+		blocked[item.Path] = item.Reason
+	}
+	if blocked["notes/real-secret.md"] != "secret" {
+		t.Fatalf("real secret not blocked: %+v", scan.Blocked)
+	}
+	if scan.BlockedTotal != 1 {
+		t.Fatalf("blocked total = %d, want 1", scan.BlockedTotal)
+	}
+	if len(scan.Eligible) != 1 || scan.Eligible[0] != "notes/chinese-secret-prose.md" {
+		t.Fatalf("chinese prose was not eligible: %+v", scan.Eligible)
+	}
+}
