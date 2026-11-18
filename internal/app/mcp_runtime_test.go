@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -164,6 +165,73 @@ func TestTaskRouteAddsNarrowChannelMCP(t *testing.T) {
 			if len(allowed) != len(wantAllowed) || allowed[0] != wantAllowed[0] ||
 				allowed[1] != wantAllowed[1] || allowed[2] != wantAllowed[2] {
 				t.Fatalf("allowed=%#v", allowed)
+			}
+		})
+	}
+}
+
+func TestCoreMCPRuntimeInjectionScopesTools(t *testing.T) {
+	ctx, _, service, task, model := newStreamCompatFixture(t)
+	readOnly, err := service.CreateTask(ctx, CreateTaskInput{
+		ProjectID: task.ProjectID, WorkspaceID: task.WorkspaceID, Title: "review", Request: "review",
+		ModelID: model.ID, Filesystem: "read-only", Approval: "never",
+		CollaborationMode: "single", MaxAgents: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenarios := []struct {
+		name      string
+		task      domain.Task
+		agentID   string
+		apiURL    string
+		wantTools []string
+		wantCore  bool
+	}{
+		{name: "writable main", task: task, agentID: "main", apiURL: "http://127.0.0.1:8766/", wantTools: CoreMCPToolNames(true), wantCore: true},
+		{name: "non-main", task: task, agentID: "sub", apiURL: "http://127.0.0.1:8766/", wantTools: CoreMCPToolNames(false), wantCore: true},
+		{name: "read-only main", task: readOnly, agentID: "main", apiURL: "http://127.0.0.1:8766/", wantTools: CoreMCPToolNames(false), wantCore: true},
+		{name: "pet task", task: domain.Task{ID: petTaskID}, agentID: "main", apiURL: "http://127.0.0.1:8766/", wantCore: false},
+		{name: "no agent API", task: task, agentID: "main", apiURL: "", wantCore: false},
+	}
+	for _, scenario := range scenarios {
+		t.Run(scenario.name, func(t *testing.T) {
+			servers, allowed := service.mcpRuntimeForTurn(ctx, scenario.task, scenario.agentID, scenario.apiURL)
+			var core backend.MCPServer
+			for _, server := range servers {
+				if server.Name == coreMCPName {
+					core = server
+				}
+			}
+			if !scenario.wantCore {
+				if core.Name != "" {
+					t.Fatalf("unexpected core server: %#v", core)
+				}
+				return
+			}
+			if core.URL != "http://127.0.0.1:8766/api/v1/agent/core/mcp" ||
+				core.URLFromEnv != "AHA2_AGENT_API_URL" ||
+				core.URLPath != "/api/v1/agent/core/mcp" ||
+				core.BearerTokenEnv != "AHA2_AGENT_API_TOKEN" {
+				t.Fatalf("core server=%#v", core)
+			}
+			want := make([]string, 0, len(scenario.wantTools))
+			for _, name := range scenario.wantTools {
+				want = append(want, "mcp__"+coreMCPName+"__"+name)
+			}
+			got := make([]string, 0, len(want))
+			for _, name := range allowed {
+				if strings.HasPrefix(name, "mcp__"+coreMCPName+"__") {
+					got = append(got, name)
+				}
+			}
+			if len(got) != len(want) {
+				t.Fatalf("allowed core tools=%#v want=%#v", got, want)
+			}
+			for index := range want {
+				if got[index] != want[index] {
+					t.Fatalf("allowed core tools=%#v want=%#v", got, want)
+				}
 			}
 		})
 	}

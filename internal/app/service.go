@@ -993,6 +993,11 @@ func (s *Service) submitMessageWithSourceResult(ctx context.Context, taskID, age
 	} else if sourceKind == "pet_delegate_message" {
 		round, inbox, createdRound, err = s.store.EnqueuePetDelegatedMessage(ctx, message, agentID, attachmentIDs)
 		inserted = err == nil
+	} else if sourceKind == peerTaskMessageKind {
+		round, inbox, createdRound, err = s.store.EnqueuePeerTaskMessage(
+			ctx, message, agentID, strings.TrimPrefix(sender, "task:"), attachmentIDs,
+		)
+		inserted = err == nil
 	} else if local != nil {
 		round, inbox, createdRound, inserted, duplicate, enqueuedMessageID, err = s.store.EnqueueLocalOwnerMessage(ctx, message, agentID, attachmentIDs)
 	} else {
@@ -1015,8 +1020,15 @@ func (s *Service) submitMessageWithSourceResult(ctx context.Context, taskID, age
 		})
 	}
 	if inserted {
+		source := "owner"
+		switch sourceKind {
+		case "pet_delegate_message":
+			source = "pet"
+		case peerTaskMessageKind:
+			source = "peer_task"
+		}
 		s.emit(ctx, task.ID, "inbox", inbox.ID, "agent_message_queued", map[string]any{
-			"round_id": round.ID, "agent_id": agentID, "source": "owner", "inbox_sequence": inbox.Sequence,
+			"round_id": round.ID, "agent_id": agentID, "source": source, "inbox_sequence": inbox.Sequence,
 		})
 	}
 	turn, started, err := s.scheduleAgent(ctx, task.ID, agentID)
@@ -1679,7 +1691,7 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 	}
 	filesystem, approval := parsePermissionsJSON(snapshot.PermissionsJSON)
 	latestSessionUsage := cloneUsageMap(sessionUsageBaseline)
-	mcpServers, allowedTools := s.mcpRuntimeForTask(ctx, task, agentAPIURL)
+	mcpServers, allowedTools := s.mcpRuntimeForTurn(ctx, task, turn.AgentID, agentAPIURL)
 	var liveInbox backend.LiveInbox
 	if snapshot.Backend == "claude" || snapshot.Backend == "codex" {
 		// The adapter claims this inbox when the runner can stream stdin. On a

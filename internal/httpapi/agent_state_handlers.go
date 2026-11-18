@@ -1,11 +1,13 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/ChinaKai/AHA2/internal/agentapi"
 	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/knowledgevault"
@@ -19,26 +21,32 @@ func (s *Server) agentCapabilitiesInfo(writer http.ResponseWriter, request *http
 		writeAgentControlError(writer, err)
 		return
 	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "capabilities": s.agentCapabilityMap(request.Context(), claims, call)})
+}
+
+// agentCapabilityMap is shared by the HTTP capabilities endpoint and the core
+// MCP capabilities tool, so both surfaces report the same permission facts.
+func (s *Server) agentCapabilityMap(ctx context.Context, claims agentapi.Claims, call app.AgentCallContext) map[string]bool {
 	main := call.Turn.AgentID == "main"
-	knowledgePublish := s.app.AgentKnowledgePublishAllowed(request.Context(), call)
-	boundKnowledgeContribute, _ := s.store.HasContributingKnowledgeBinding(request.Context(), call.Project.ID)
+	knowledgePublish := s.app.AgentKnowledgePublishAllowed(ctx, call)
+	boundKnowledgeContribute, _ := s.store.HasContributingKnowledgeBinding(ctx, call.Project.ID)
 	channelOutreach := false
 	channelReply := false
 	channelReplyDecision := false
 	if main && s.channels != nil {
 		channelReply = true
-		_, _, channelErr := s.channels.AgentTaskChannelContacts(request.Context(), claims)
+		_, _, channelErr := s.channels.AgentTaskChannelContacts(ctx, claims)
 		channelOutreach = channelErr == nil
 	}
 	if s.store != nil {
-		channelReplyDecision, _ = s.store.HasActiveChannelTaskRoute(request.Context(), call.Task.ID)
+		channelReplyDecision, _ = s.store.HasActiveChannelTaskRoute(ctx, call.Task.ID)
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "capabilities": map[string]bool{
+	return map[string]bool{
 		"progress": true, "live_inbox_wait": true, "knowledge_read": true, "knowledge_feedback": true,
 		"memory_update": main, "knowledge_publish": knowledgePublish, "knowledge_contribute_bound": knowledgePublish && boundKnowledgeContribute, "skill_create": main, "skill_update": main,
 		// Reported separately so a caller can tell whether a global skill is
 		// possible before sending one and being refused.
-		"skill_create_global": main && s.app.AgentGlobalSkillAllowed(request.Context(), call),
+		"skill_create_global": main && s.app.AgentGlobalSkillAllowed(ctx, call),
 		// These three project-level abilities are available to Main by default;
 		// the Task-stored grants stay in the schema for compatibility only.
 		"workspace_read": main, "task_create": main, "clone_hardware": main,
@@ -47,7 +55,7 @@ func (s *Server) agentCapabilitiesInfo(writer http.ResponseWriter, request *http
 		"hardware": true, "managed_process": true,
 		"browser": s.browser != nil,
 		"desktop": main && s.desktop.Status(call.Task.ID).Supported,
-	}})
+	}
 }
 
 func (s *Server) agentProjectWorkspaces(writer http.ResponseWriter, request *http.Request) {

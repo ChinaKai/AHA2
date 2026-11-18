@@ -312,6 +312,10 @@ func liveInboxSourceLabel(message domain.LiveInboxMessage) string {
 		// The pet may relay the owner's intent, but it is never the owner
 		// identity itself; keep the authority distinct in the injection text.
 		return "pet (authority=owner_delegate)"
+	case "task":
+		// Another Task in the same Project is a peer, not the Owner. Its text is
+		// collaboration input, never a permission grant or a goal change.
+		return fmt.Sprintf("peer task %s (authority=%s)", strings.TrimSpace(source.AgentID), source.Authority)
 	default:
 		return fmt.Sprintf("%s (authority=%s)", source.Kind, source.Authority)
 	}

@@ -288,6 +288,22 @@ func (s *Store) EnqueuePetDelegatedMessage(
 	return round, inbox, createdRound, err
 }
 
+// EnqueuePeerTaskMessage keeps a Task-to-Task message distinct from the Owner
+// in the target Task conversation and inbox. The source Task ID is provenance
+// only: it is never an owner identity or a permission grant.
+func (s *Store) EnqueuePeerTaskMessage(
+	ctx context.Context,
+	message domain.Message,
+	targetAgentID, sourceTaskID string,
+	attachmentIDs []string,
+) (domain.TaskRound, domain.AgentInboxItem, bool, error) {
+	round, inbox, createdRound, _, _, _, err := s.enqueueUserMessage(
+		ctx, message, targetAgentID, strings.TrimSpace(sourceTaskID),
+		"peer_task_message", "peer_task_message", attachmentIDs,
+	)
+	return round, inbox, createdRound, err
+}
+
 func (s *Store) enqueueUserMessage(
 	ctx context.Context,
 	message domain.Message,

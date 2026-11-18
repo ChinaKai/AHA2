@@ -35,7 +35,7 @@ func (s *Service) normalizeTaskMCPServers(ctx context.Context, project domain.Pr
 	}
 	for _, id := range requested {
 		id = strings.TrimSpace(id)
-		if id == "mcp_channel" || id == "mcp_mail" || (id == "mcp_pet" && project.ID != petProjectID) {
+		if id == "mcp_channel" || id == "mcp_mail" || id == "mcp_core" || (id == "mcp_pet" && project.ID != petProjectID) {
 			continue
 		}
 		server, ok := allowed[id]
@@ -65,17 +65,45 @@ func (s *Service) MCPServers(ctx context.Context) ([]domain.MCPServer, error) {
 	// but still list it so the MCP page shows every built-in capability.
 	channel := s.channelMCPDetail()
 	mail := s.mailMCPDetail()
+	core := s.coreMCPDetail()
 	insertAt := 0
 	for index, item := range items {
 		if item.Builtin {
 			insertAt = index + 1
 		}
 	}
-	combined := make([]domain.MCPServer, 0, len(items)+2)
+	combined := make([]domain.MCPServer, 0, len(items)+3)
 	combined = append(combined, items[:insertAt]...)
-	combined = append(combined, channel, mail)
+	combined = append(combined, channel, mail, core)
 	combined = append(combined, items[insertAt:]...)
 	return combined, nil
+}
+
+// coreMCPDetail describes the built-in core Task API MCP without claiming a
+// static URL. The endpoint is injected per Turn by mcpRuntimeForTurn and uses
+// the same short-lived Turn capability as every other Agent endpoint.
+func (s *Service) coreMCPDetail() domain.MCPServer {
+	now := s.now().UTC()
+	descriptions := map[string]string{
+		"inbox_wait":      "读取并认领当前 Turn 的 live inbox 消息（只读工具）。",
+		"task_get":        "读取当前 Task 或同 Project 的另一个 Task 摘要；不跨 Project。",
+		"task_list":       "列出当前 Project 内最近的 Task 摘要。",
+		"capabilities":    "读取当前 Turn 的 Agent 能力清单。",
+		"memory_patch":    "向当前 Task 记忆追加 decisions/facts/progress 等数组；Main 专用，不能改 Task 目标。",
+		"progress":        "上报一条进度消息；Main 专用。",
+		"task_message":    "向同 Project 的另一个 Task 发送消息；Main 专用，来源标记为 peer task。",
+		"attachment_bind": "把当前 Task 已上传且未绑定的附件 ID 绑定到一条附件消息；Main 专用。",
+	}
+	tools := make([]domain.MCPTool, 0, len(coreMCPReadToolNames)+len(coreMCPWriteToolNames))
+	for _, name := range coreMCPToolNames(true) {
+		tools = append(tools, domain.MCPTool{Name: name, Description: descriptions[name]})
+	}
+	return domain.MCPServer{
+		ID: "mcp_core", Name: "核心 Agent API（内置）",
+		Description: "每个普通 Turn 自动注入；Main 获得读写工具，其他 Agent 只获得只读工具。",
+		Transport:   "builtin", Enabled: true, Builtin: true, AutoInject: true, Health: "ok",
+		Tools: tools, CreatedAt: now, UpdatedAt: now,
+	}
 }
 
 // mailMCPDetail describes the built-in mail MCP without claiming a static URL.
@@ -120,12 +148,22 @@ func (s *Service) channelMCPDetail() domain.MCPServer {
 	}
 }
 
+// reservedMCPIdentifier reports whether a server ID or display name falls in
+// the aha2_* namespace reserved for built-in, Turn-scoped MCP servers. A user
+// server must never shadow a built-in tool namespace.
+func reservedMCPIdentifier(value string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(value)), "aha2_")
+}
+
 func (s *Service) SaveMCPServer(ctx context.Context, item domain.MCPServer) (domain.MCPServer, error) {
 	item.ID = strings.TrimSpace(item.ID)
-	if item.ID == "mcp_pet" || item.ID == "mcp_channel" || item.ID == "mcp_mail" {
+	if item.ID == "mcp_pet" || item.ID == "mcp_channel" || item.ID == "mcp_mail" || item.ID == "mcp_core" {
 		return domain.MCPServer{}, fmt.Errorf("builtin MCP cannot be modified")
 	}
 	item.Name = strings.TrimSpace(item.Name)
+	if reservedMCPIdentifier(item.ID) || reservedMCPIdentifier(item.Name) {
+		return domain.MCPServer{}, fmt.Errorf("aha2_ MCP namespace is reserved")
+	}
 	item.URL = strings.TrimSpace(item.URL)
 	item.Transport = strings.TrimSpace(strings.ToLower(item.Transport))
 	if item.Transport == "" {
@@ -175,6 +213,9 @@ func (s *Service) MCPServerByID(ctx context.Context, id string) (domain.MCPServe
 	if strings.TrimSpace(id) == "mcp_mail" {
 		return s.mailMCPDetail(), nil
 	}
+	if strings.TrimSpace(id) == "mcp_core" {
+		return s.coreMCPDetail(), nil
+	}
 	items, err := s.store.ListMCPServers(ctx)
 	if err != nil {
 		return domain.MCPServer{}, err
@@ -188,7 +229,7 @@ func (s *Service) MCPServerByID(ctx context.Context, id string) (domain.MCPServe
 }
 
 func (s *Service) DeleteMCPServer(ctx context.Context, id string) error {
-	if strings.TrimSpace(id) == "mcp_pet" || strings.TrimSpace(id) == "mcp_channel" || strings.TrimSpace(id) == "mcp_mail" {
+	if strings.TrimSpace(id) == "mcp_pet" || strings.TrimSpace(id) == "mcp_channel" || strings.TrimSpace(id) == "mcp_mail" || strings.TrimSpace(id) == "mcp_core" {
 		return fmt.Errorf("builtin MCP cannot be deleted")
 	}
 	return s.store.DeleteMCPServer(ctx, id)

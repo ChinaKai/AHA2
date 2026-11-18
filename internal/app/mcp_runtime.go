@@ -36,11 +36,52 @@ const (
 	// injected when the Task has at least one enabled mail binding.
 	mailMCPName = "aha2_mail"
 	mailMCPPath = "/api/v1/agent/mail/mcp"
+
+	// coreMCPName is the model-facing namespace of the core Task API MCP. It is
+	// injected into every ordinary Turn with the same Turn capability as the
+	// HTTP Agent API. Write tools are only advertised to a writable Main Turn.
+	coreMCPName = "aha2_core"
+	coreMCPPath = "/api/v1/agent/core/mcp"
 )
 
 var mailMCPToolNames = []string{
 	"mail_list_accounts", "mail_list_templates", "mail_template_detail",
 	"mail_preview", "mail_send", "mail_get_status",
+}
+
+// coreMCPReadToolNames are safe for every Agent in the Task, including a
+// read-only review Task or a non-Main collaborator.
+var coreMCPReadToolNames = []string{
+	"inbox_wait", "task_get", "task_list", "capabilities",
+}
+
+// coreMCPWriteToolNames change Task state and are advertised to Main only.
+var coreMCPWriteToolNames = []string{
+	"memory_patch", "progress", "task_message", "attachment_bind",
+}
+
+func coreMCPToolNames(write bool) []string {
+	names := append([]string{}, coreMCPReadToolNames...)
+	if write {
+		names = append(names, coreMCPWriteToolNames...)
+	}
+	return names
+}
+
+// CoreMCPToolNames is the exact allowlist for a core MCP client. It is exported
+// so the HTTP facade advertises the same subset the runtime injects.
+func CoreMCPToolNames(write bool) []string {
+	return coreMCPToolNames(write)
+}
+
+// CoreMCPToolIsWrite reports whether a core tool mutates Task state.
+func CoreMCPToolIsWrite(name string) bool {
+	for _, tool := range coreMCPWriteToolNames {
+		if tool == name {
+			return true
+		}
+	}
+	return false
 }
 
 // mcpRuntimeForTask returns the MCP servers a Turn should receive and the
@@ -141,6 +182,34 @@ func (s *Service) mcpRuntimeForTask(ctx context.Context, task domain.Task, agent
 				allowed = append(allowed, "mcp__"+mailMCPName+"__"+tool)
 			}
 		}
+	}
+	return servers, allowed
+}
+
+// mcpRuntimeForTurn adds the core Task API MCP to the servers a Turn receives.
+// The core server is only injected when an Agent API URL exists and the Task is
+// not the pet Task. A writable Main Turn receives all tools; everyone else —
+// non-Main collaborators and read-only review Tasks — receives read tools only.
+// This keeps one Turn from being offered the entire mutating surface at once.
+func (s *Service) mcpRuntimeForTurn(ctx context.Context, task domain.Task, agentID, agentAPIURL string) ([]backend.MCPServer, []string) {
+	servers, allowed := s.mcpRuntimeForTask(ctx, task, agentAPIURL)
+	agentAPIURL = strings.TrimSpace(agentAPIURL)
+	if agentAPIURL == "" || task.ID == petTaskID {
+		return servers, allowed
+	}
+	write := false
+	if agent, err := s.store.TaskAgent(ctx, task.ID, strings.TrimSpace(agentID)); err == nil {
+		write = s.agentSnapshotWritable(ctx, task, agent.RuntimeConfigSnapshotID, agent.AgentID)
+	}
+	servers = append(servers, backend.MCPServer{
+		Name: coreMCPName, Transport: "http",
+		URL:            strings.TrimRight(agentAPIURL, "/") + coreMCPPath,
+		URLFromEnv:     "AHA2_AGENT_API_URL",
+		URLPath:        coreMCPPath,
+		BearerTokenEnv: "AHA2_AGENT_API_TOKEN",
+	})
+	for _, tool := range coreMCPToolNames(write) {
+		allowed = append(allowed, "mcp__"+coreMCPName+"__"+tool)
 	}
 	return servers, allowed
 }

@@ -571,6 +571,10 @@ func (s *Server) Handler() http.Handler {
 	// Narrow MCP for group task_route Turns. It uses the same turn capability
 	// as the Agent API and exposes only channel_reply / channel_reply_decision.
 	mux.Handle("POST /api/v1/agent/channel/mcp", s.withAgentCapability(http.HandlerFunc(s.agentChannelMCP)))
+	// Core Task API MCP. Every method uses the same Turn capability as the
+	// HTTP Agent API; write tools are additionally restricted to a writable
+	// Main Turn inside the handler.
+	mux.Handle("POST /api/v1/agent/core/mcp", s.withAgentCapability(http.HandlerFunc(s.agentCoreMCP)))
 	mux.Handle("GET /api/v1/agent/mail/accounts", s.withAgentCapability(http.HandlerFunc(s.agentMailAccounts)))
 	mux.Handle("GET /api/v1/agent/mail/templates", s.withAgentCapability(http.HandlerFunc(s.agentMailTemplates)))
 	mux.Handle("GET /api/v1/agent/mail/templates/{id}", s.withAgentCapability(http.HandlerFunc(s.agentMailTemplateDetail)))

@@ -152,6 +152,14 @@ func liveInboxMessage(item domain.AgentInboxItem) domain.LiveInboxMessage {
 			Kind: "pet", Authority: "owner_delegate", AgentID: "pet", DisplayName: "pet",
 		}
 	}
+	if item.SourceKind == "peer_task_message" {
+		// A peer Task is a collaborator, not the Owner. Keep the source Task ID
+		// visible so the receiving Agent can judge the message on its provenance.
+		result.Source = domain.LiveInboxSource{
+			Kind: "task", Authority: "task_peer", AgentID: item.SourceAgentID,
+			DisplayName: "task " + item.SourceAgentID,
+		}
+	}
 	channelContext, _ := item.Payload["channel_context"].(map[string]any)
 	if len(channelContext) == 0 {
 		return result

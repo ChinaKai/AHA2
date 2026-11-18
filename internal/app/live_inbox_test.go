@@ -47,6 +47,24 @@ func TestLiveInboxInjectionTextCarriesSourceAndAttachments(t *testing.T) {
 	}
 }
 
+func TestLiveInboxInjectionTextLabelsPeerTaskMessage(t *testing.T) {
+	t.Parallel()
+	message := liveInboxMessage(domain.AgentInboxItem{
+		ID: "inbox-peer", SourceKind: "peer_task_message", SourceAgentID: "task-source",
+		Content: "the build is ready",
+	})
+	if message.Source.Kind != "task" || message.Source.Authority != "task_peer" {
+		t.Fatalf("peer source = %#v", message.Source)
+	}
+	text := liveInboxInjectionText([]domain.LiveInboxMessage{message}, nil, nil)
+	if !strings.Contains(text, "Source: peer task task-source (authority=task_peer)") {
+		t.Fatalf("peer injection text missing authority:\n%s", text)
+	}
+	if strings.Contains(text, "authority=owner") {
+		t.Fatalf("peer message was labelled as owner:\n%s", text)
+	}
+}
+
 func TestLiveInboxInjectionTextLabelsPetDelegatedMessage(t *testing.T) {
 	t.Parallel()
 	message := liveInboxMessage(domain.AgentInboxItem{
