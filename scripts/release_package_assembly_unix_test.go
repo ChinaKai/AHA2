@@ -131,3 +131,66 @@ else:
 		}
 	}
 }
+
+// The end-to-end unreadable-directory case cannot run as root, and the direct
+// handler test above calls walk_error itself, so neither one notices when
+// add_tree stops passing onerror=walk_error to os.walk. This test replaces the
+// module's os.walk with a fake that records whether an onerror callback
+// arrived. When the wiring is present the fake invokes onerror with a
+// PermissionError, and the assembler must exit non-zero naming the path and
+// OS reason; when it is missing the fake walks silently, the assembler exits
+// 0, and the test fails. No chmod or uid is involved, so it runs as root too.
+func TestWindowsPackageAssemblyWiresWalkError(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is not on PATH")
+	}
+	packageDir := writeFixturePackage(t)
+	installerDir := writeFixtureInstallers(t)
+	const snippet = `
+import errno
+import importlib.util
+import os
+import sys
+
+spec = importlib.util.spec_from_file_location("assemble_windows_package", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+package_dir, installer_dir, output = sys.argv[2], sys.argv[3], sys.argv[4]
+walk_roots = []
+
+def fake_walk(root, followlinks=True, onerror=None):
+    walk_roots.append(os.fspath(root))
+    if onerror is None:
+        # Mirror os.walk's silent skip when the assembler forgets to wire the
+        # handler: yield nothing and let assembly finish successfully.
+        return iter(())
+    onerror(PermissionError(errno.EACCES, "Permission denied", os.fspath(root)))
+    return iter(())
+
+module.os.walk = fake_walk
+code = module.main([
+    "--package-dir", package_dir,
+    "--installer-dir", installer_dir,
+    "--output", output,
+])
+if not walk_roots:
+    raise SystemExit("assembler never called os.walk")
+print(f"os.walk roots: {walk_roots}")
+raise SystemExit(code)
+`
+	zipPath := filepath.Join(t.TempDir(), "AHA2-Windows-Package-x64.zip")
+	// -B keeps the import from leaving a __pycache__ directory in scripts/.
+	cmd := exec.Command(python, "-B", "-c", snippet, "scripts/assemble-windows-package.py", packageDir, installerDir, zipPath)
+	cmd.Dir = repoRoot(t)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("assembler exited 0 after os.walk reported a scan failure; onerror is not wired:\n%s", out)
+	}
+	for _, want := range []string{"package input directory cannot be listed: " + packageDir, "Permission denied"} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("assembler error does not contain %q:\n%s", want, out)
+		}
+	}
+}
