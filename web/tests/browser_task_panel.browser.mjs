@@ -45,13 +45,19 @@ const browserState = host => ({
   host,
 });
 const bookmarks = [
-  {title: "Mail", url: "https://mail.example/", folder: "Bar"},
-  {title: "Wiki", url: "https://wiki.example/home", folder: "收藏夹/Wiki"},
-  {title: "文档中心", url: "https://docs.example/very/long/path?token=abcdefghijklmnop&redirect=https%3A%2F%2Fexample.com", folder: ""},
-  {title: "发布面板", url: "https://release.example/deploy?environment=production&region=ap-east-1", folder: ""},
-  {title: "监控", url: "https://monitor.example/dashboard?range=last-24h&filters=service%3Dapi", folder: ""},
-  {title: "日志", url: "https://logs.example/search?query=level%3Aerror&from=now-1h", folder: ""},
+  {title: "Work 门户", url: "https://work.example/home?token=abcdefghijklmnop", folder: "收藏夹栏/Work"},
+  {title: "Tools", url: "https://tools.example/", folder: "收藏夹栏/Tools"},
+  {title: "文档中心", url: "https://docs.example/very/long/path?token=abcdefghijklmnop&redirect=https%3A%2F%2Fexample.com", folder: "收藏夹栏/Docs"},
+  {title: "HUALAI 文档", url: "https://hualai.example/docs?token=abcdefghijklmnop", folder: "收藏夹栏/Docs/HUALAI"},
+  {title: "蓝牙调试", url: "https://bluetooth.example/debug?token=abcdefghijklmnop", folder: "收藏夹栏/Docs/蓝牙"},
+  {title: "官网", url: "https://website.example/", folder: "收藏夹栏/Website"},
+  {title: "WYZE", url: "https://wyze.example/", folder: "收藏夹栏/WYZE-VEGA"},
+  {title: "其他", url: "https://others.example/", folder: "收藏夹栏/Others"},
+  {title: "监控", url: "https://monitor.example/dashboard?range=last-24h&filters=service%3Dapi", folder: "收藏夹栏/bulbcam"},
+  {title: "发布面板", url: "https://release.example/deploy?environment=production&region=ap-east-1", folder: "收藏夹栏/Work"},
   {title: "工单", url: "https://tickets.example/queue?assignee=owner&status=open", folder: ""},
+  {title: "Mail", url: "https://mail.example/", folder: ""},
+  {title: "根目录直达", url: "https://root.example/home?token=abcdefghijklmnop", folder: "收藏夹栏"},
 ];
 
 const bootstrap = `
@@ -83,6 +89,7 @@ window.__ownerClosed = [];
 window.__ownerNav = {};
 window.__ownerActive = "";
 window.__syncRequests = 0;
+window.__bookmarks = null;
 // Explicit gate for delayed-response probes: arm {promise, release} before the
 // request that must be held; the fixture awaits it and the test releases it by
 // signal instead of guessing a timeout.
@@ -168,7 +175,7 @@ window.fetch = async (input, init = {}) => {
     return json({ok: true, grant: {...GRANT, status: "revoked"}});
   }
   if (path === "/api/v1/browser-grants/browser_grant_1/bookmarks") {
-    return json({ok: true, bookmarks: BOOKMARKS});
+    return json({ok: true, bookmarks: window.__bookmarks || BOOKMARKS});
   }
   if (path === "/api/v1/browser-grants/browser_grant_1/tabs" && method === "POST") {
     const payload = JSON.parse(String(init.body || "{}"));
@@ -349,16 +356,34 @@ try {
   const tabHeights = await page.locator(".desktop-browser-tab-item").evaluateAll(items => items.map(item => item.getBoundingClientRect().height));
   assert.ok(tabHeights.every(height => height < 44), `tab rows should stay compact: ${tabHeights}`);
 
-  // 3. The bookmark bar is horizontal: folder chip + entries, no long URL.
+  // 3. The bookmark bar is horizontal: one chip per first-level folder (nested
+  // Edge folders fold into their parent), plus direct entries, no long URL.
   await page.waitForSelector("[data-browser-bookmark-folder]");
   const bookmarkBar = page.locator("#desktop-browser-bookmarks");
-  assert.equal(await page.locator("[data-browser-bookmark-folder='Bar']").count(), 1);
-  // A nested Edge folder arrives as "收藏夹/Wiki"; the repeated root is
-  // stripped from the visible label while the raw path stays the filter key.
-  assert.equal(await page.locator("[data-browser-bookmark-folder='收藏夹/Wiki'] .desktop-browser-bookmark-title").innerText(), "Wiki");
-  assert.equal(await page.locator("[data-browser-bookmark-folder='收藏夹/Wiki'] .icon").count(), 1);
+  assert.deepEqual(
+    await page.locator("[data-browser-bookmark-folder]").evaluateAll(chips => chips.map(chip => chip.dataset.browserBookmarkFolder)),
+    ["Work", "Tools", "Docs", "Website", "WYZE-VEGA", "Others", "bulbcam"],
+  );
+  assert.equal(await page.locator("[data-browser-bookmark-folder='Docs/HUALAI']").count(), 0);
+  assert.equal(await page.locator("[data-browser-bookmark-folder='Docs/蓝牙']").count(), 0);
+  // A bookmark whose folder is the bar root itself stays a direct URL chip,
+  // never a "收藏夹栏" folder chip.
+  assert.equal(await page.locator("[data-browser-bookmark-folder='收藏夹栏']").count(), 0);
+  assert.equal(await page.locator("[data-browser-bookmark-folder='Docs'] .desktop-browser-bookmark-title").innerText(), "Docs");
+  assert.equal(await page.locator("[data-browser-bookmark-folder='Docs'] .icon").count(), 1);
+  const directChipTitles = await page.locator("#desktop-browser-bookmarks [data-browser-bookmark-index]")
+    .evaluateAll(chips => chips.map(chip => chip.querySelector(".desktop-browser-bookmark-title")?.textContent || ""));
+  assert.ok(directChipTitles.includes("根目录直达"), `root-level bookmarks stay direct chips: ${JSON.stringify(directChipTitles)}`);
+  assert.ok(directChipTitles.length >= 1);
   assert.match(await bookmarkBar.innerText(), /Mail|文档中心/);
-  assert.doesNotMatch(await bookmarkBar.innerText(), /token=|redirect=|environment=|收藏夹\//);
+  assert.doesNotMatch(await bookmarkBar.innerText(), /token=|redirect=|environment=|收藏夹栏\//);
+  // Tooltips have no URL, query or token, and click payloads are indexes.
+  const barMarkup = await page.evaluate(() => document.querySelector("#desktop-browser-bookmarks").outerHTML);
+  assert.doesNotMatch(barMarkup, /[?]|https?:\/\/|token=|redirect=|environment=|assignee=/i);
+  const barAttributeLeaks = await page.locator("#desktop-browser-bookmarks [data-browser-bookmark-index], #desktop-browser-bookmarks [data-browser-bookmark-folder]")
+    .evaluateAll(nodes => nodes.flatMap(node => ["title", "aria-label"].map(name => node.getAttribute(name) || ""))
+      .filter(value => /[?]|:\/\//.test(value)));
+  assert.deepEqual(barAttributeLeaks, [], "bookmark bar title/aria-label must not contain a URL or query");
   // One overflow entry only: the bar itself never scrolls horizontally.
   assert.equal(await page.evaluate(() => getComputedStyle(document.querySelector("#desktop-browser-bookmarks")).overflowX), "hidden");
   assert.equal(await page.evaluate(() => {
@@ -394,29 +419,174 @@ try {
   assert.equal(narrowPanel.bookmarkOverflow, "hidden");
   await page.locator("#desktop-tool").evaluate(node => { node.style.width = ""; });
 
-  // Narrow panel: the overflow menu appears instead of a vertical wall of URLs.
-  await page.locator("#desktop-tool").evaluate(node => { node.style.width = "260px"; });
+  // The chevron lists the first-level folders that no longer fit plus
+  // bookmark-bar URLs, and both kinds of entry are actionable. Shrinking the
+  // panel while the menu is open must refresh that folder list.
+  await page.locator("#desktop-tool").evaluate(node => { node.style.width = "400px"; });
   await page.waitForTimeout(180);
-  assert.equal(await page.locator("#desktop-browser-bookmarks-more").isVisible(), true, "narrow bookmark bar needs an overflow menu");
+  assert.equal(await page.locator("#desktop-browser-bookmarks-more").isVisible(), true, "the narrow bookmark bar needs an overflow menu");
   await page.click("#desktop-browser-bookmarks-more");
   await page.waitForSelector("#desktop-browser-bookmarks-menu");
-  assert.match(await page.locator("#desktop-browser-bookmarks-menu").innerText(), /全部收藏/);
+  await waitFor(page, () => document.querySelector("#desktop-browser-bookmarks-more").getBoundingClientRect().width > 0);
+  const hiddenAt400 = await page.evaluate(() => [...document.querySelectorAll("[data-browser-bookmark-folder]")]
+    .filter(chip => chip.hidden).map(chip => chip.dataset.browserBookmarkFolder));
+  assert.ok(hiddenAt400.length > 0, "the 400px bar must already hide some folder chips");
+  await page.locator("#desktop-tool").evaluate(node => { node.style.width = "260px"; });
+  await waitFor(page, count => {
+    const hidden = [...document.querySelectorAll("[data-browser-bookmark-folder]")]
+      .filter(chip => chip.hidden).map(chip => chip.dataset.browserBookmarkFolder).sort();
+    const menu = [...document.querySelectorAll("#desktop-browser-bookmarks-menu [data-browser-bookmark-menu-folder]")]
+      .map(button => button.dataset.browserBookmarkMenuFolder).sort();
+    return hidden.length > count && hidden.join("\n") === menu.join("\n");
+  }, {arg: hiddenAt400.length});
+  const hiddenFolders = await page.evaluate(() => [...document.querySelectorAll("[data-browser-bookmark-folder]")]
+    .filter(chip => chip.hidden).map(chip => chip.dataset.browserBookmarkFolder));
+  assert.ok(hiddenFolders.length > hiddenAt400.length,
+    `shrinking must hide more folders: ${JSON.stringify({hiddenAt400, hiddenFolders})}`);
+  const hiddenFolder = hiddenFolders[0];
+  const moreMenu = page.locator("#desktop-browser-bookmarks-menu");
+  const moreMenuText = await moreMenu.innerText();
+  assert.match(moreMenuText, /全部收藏/);
+  assert.match(moreMenuText, /更多文件夹/);
+  assert.match(moreMenuText, /收藏栏网址/);
+  assert.ok(moreMenuText.includes(hiddenFolder), `overflow menu must list the hidden folder ${hiddenFolder}: ${moreMenuText}`);
+  assert.equal(await moreMenu.locator(`[data-browser-bookmark-menu-folder='${hiddenFolder}']`).count(), 1);
+  assert.ok(await moreMenu.locator("[data-browser-bookmark-index]").count() >= 1, "the overflow menu must list bookmark-bar URLs");
+  assert.doesNotMatch(moreMenuText, /token=|environment=|redirect=|收藏夹栏\//);
+  const moreMenuMarkup = await moreMenu.evaluate(node => node.outerHTML);
+  assert.doesNotMatch(moreMenuMarkup, /[?]|https?:\/\/|token=|environment=|redirect=|assignee=/i);
+  const moreAttributeLeaks = await page.locator("#desktop-browser-bookmarks-menu [data-browser-bookmark-index], #desktop-browser-bookmarks-menu [data-browser-bookmark-menu-folder]")
+    .evaluateAll(nodes => nodes.flatMap(node => ["title", "aria-label"].map(name => node.getAttribute(name) || ""))
+      .filter(value => /[?]|:\/\//.test(value)));
+  assert.deepEqual(moreAttributeLeaks, [], "overflow menu title/aria-label must not contain a URL or query");
+  const moreGeometry = await page.evaluate(() => {
+    const panel = document.querySelector("#desktop-browser-control").getBoundingClientRect();
+    const bar = document.querySelector("#desktop-browser-bookmarkbar").getBoundingClientRect();
+    const menu = document.querySelector("#desktop-browser-bookmarks-menu").getBoundingClientRect();
+    const more = document.querySelector("#desktop-browser-bookmarks-more").getBoundingClientRect();
+    return {
+      panelLeft: panel.left, panelRight: panel.right,
+      menuLeft: menu.left, menuRight: menu.right, menuTop: menu.top,
+      moreRight: more.right, barBottom: bar.bottom,
+    };
+  });
+  assert.ok(moreGeometry.menuLeft >= moreGeometry.panelLeft - 1 && moreGeometry.menuRight <= moreGeometry.panelRight + 1,
+    `the overflow menu must stay inside the narrow panel: ${JSON.stringify(moreGeometry)}`);
+  assert.ok(Math.abs(moreGeometry.menuRight - moreGeometry.moreRight) <= 8,
+    `the overflow menu must anchor next to the chevron: ${JSON.stringify(moreGeometry)}`);
+  assert.ok(moreGeometry.menuTop >= moreGeometry.barBottom - 0.5 && moreGeometry.menuTop <= moreGeometry.barBottom + 1.5,
+    `the overflow menu top must hug the bookmark bar bottom: ${JSON.stringify(moreGeometry)}`);
+  // A folder row in the chevron menu drills into that folder.
+  await page.click(`#desktop-browser-bookmarks-menu [data-browser-bookmark-menu-folder='${hiddenFolder}']`);
+  await page.waitForSelector("#desktop-browser-bookmarks-menu .desktop-browser-bookmark-menu-head");
+  assert.ok((await page.locator("#desktop-browser-bookmarks-menu .desktop-browser-bookmark-menu-head").innerText()).includes(hiddenFolder));
   await page.click("#desktop-browser-bookmarks-menu-close");
+  assert.equal(await page.locator("#desktop-browser-bookmarks-menu").count(), 0);
   await page.locator("#desktop-tool").evaluate(node => { node.style.width = ""; });
 
-  // Folder chip opens just that folder's bookmarks.
-  await page.click("[data-browser-bookmark-folder='Bar']");
-  await page.waitForSelector("#desktop-browser-bookmarks-menu [data-browser-bookmark]");
-  assert.match(await page.locator("#desktop-browser-bookmarks-menu").innerText(), /Mail/);
+  // Folder chip opens just that folder's bookmarks, with its subfolders
+  // grouped inside, and the popover is anchored to the chip's left edge.
+  await page.click("[data-browser-bookmark-folder='Docs']");
+  await page.waitForSelector("#desktop-browser-bookmarks-menu [data-browser-bookmark-index]");
+  const docsMenu = page.locator("#desktop-browser-bookmarks-menu");
+  const docsMenuText = await docsMenu.innerText();
+  assert.match(docsMenuText, /文档中心/);
+  assert.match(docsMenuText, /HUALAI/);
+  assert.match(docsMenuText, /蓝牙/);
+  assert.doesNotMatch(docsMenuText, /token=|redirect=|environment=|收藏夹栏\//);
+  assert.doesNotMatch(await docsMenu.evaluate(node => node.outerHTML), /[?]|https?:\/\/|token=|redirect=|environment=|assignee=/i);
+  assert.deepEqual(await page.locator("#desktop-browser-bookmarks-menu [data-browser-bookmark-index]")
+    .evaluateAll(nodes => nodes.flatMap(node => ["title", "aria-label"].map(name => node.getAttribute(name) || ""))
+      .filter(value => /[?]|:\/\//.test(value))), [], "folder menu title/aria-label must not contain a URL or query");
+  const docsGeometry = await page.evaluate(() => {
+    const chip = document.querySelector("[data-browser-bookmark-folder='Docs']").getBoundingClientRect();
+    const bar = document.querySelector("#desktop-browser-bookmarkbar").getBoundingClientRect();
+    const menu = document.querySelector("#desktop-browser-bookmarks-menu").getBoundingClientRect();
+    const panel = document.querySelector("#desktop-browser-control").getBoundingClientRect();
+    return {
+      chipLeft: chip.left, menuLeft: menu.left, menuTop: menu.top,
+      barBottom: bar.bottom, menuRight: menu.right, panelRight: panel.right,
+    };
+  });
+  assert.ok(Math.abs(docsGeometry.menuLeft - docsGeometry.chipLeft) <= 2,
+    `the menu left edge must align with the clicked Docs chip: ${JSON.stringify(docsGeometry)}`);
+  assert.ok(docsGeometry.menuTop >= docsGeometry.barBottom - 0.5 && docsGeometry.menuTop <= docsGeometry.barBottom + 1.5,
+    `the menu top must hug the bookmark bar bottom: ${JSON.stringify(docsGeometry)}`);
+  assert.ok(docsGeometry.menuRight <= docsGeometry.panelRight + 1,
+    `the menu must not overflow the panel: ${JSON.stringify(docsGeometry)}`);
   // An outside click closes the menu without a repaint; reopening the same
   // folder must render again instead of trusting the cached HTML.
   await page.click("#desktop-browser-url");
   assert.equal(await page.locator("#desktop-browser-bookmarks-menu").count(), 0);
-  await page.click("[data-browser-bookmark-folder='Bar']");
-  await page.waitForSelector("#desktop-browser-bookmarks-menu [data-browser-bookmark]");
+  await page.click("[data-browser-bookmark-folder='Docs']");
+  await page.waitForSelector("#desktop-browser-bookmarks-menu [data-browser-bookmark-index]");
   assert.equal(await page.locator("#desktop-browser-bookmarks-menu").count(), 1, "external close must not break reopening");
   await page.keyboard.press("Escape");
   assert.equal(await page.locator("#desktop-browser-bookmarks-menu").count(), 0);
+  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute("data-browser-bookmark-folder")), "Docs",
+    "Escape must restore focus to the folder chip that opened the menu");
+
+  // Low viewport: the menu scrolls inside the space it actually has instead of
+  // poking out of the panel/viewport bottom.
+  await page.setViewportSize({width: 1100, height: 240});
+  await page.waitForTimeout(150);
+  await page.click("[data-browser-bookmark-folder='Docs']");
+  await page.waitForSelector("#desktop-browser-bookmarks-menu [data-browser-bookmark-index]");
+  const lowViewport = await page.evaluate(() => {
+    const panel = document.querySelector("#desktop-browser-control").getBoundingClientRect();
+    const menu = document.querySelector("#desktop-browser-bookmarks-menu");
+    const menuRect = menu.getBoundingClientRect();
+    return {
+      panelBottom: panel.bottom, viewportBottom: window.innerHeight,
+      menuBottom: menuRect.bottom, menuTop: menuRect.top,
+      menuScrollHeight: menu.scrollHeight, menuClientHeight: menu.clientHeight,
+    };
+  });
+  const bottomBoundary = Math.min(lowViewport.panelBottom, lowViewport.viewportBottom);
+  assert.ok(lowViewport.menuBottom <= bottomBoundary + 0.5,
+    `the menu must not cross the panel/viewport bottom: ${JSON.stringify(lowViewport)}`);
+  assert.ok(lowViewport.menuScrollHeight > lowViewport.menuClientHeight,
+    `a short viewport must keep the menu internally scrollable: ${JSON.stringify(lowViewport)}`);
+  await page.keyboard.press("Escape");
+  await page.setViewportSize({width: 1100, height: 900});
+  await page.waitForTimeout(150);
+
+  // Keyboard-only overflow menu when every entry is a folder: the first
+  // focusable entry receives focus, Escape closes and returns focus to the
+  // chevron. This used to fall through to BODY and leave Escape inert.
+  const pureFolders = ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel"];
+  const pureBookmarks = pureFolders.map((name, index) => ({
+    title: `${name} 文档`, url: `https://folder-${index}.example/docs?token=abcdefghijklmnop`,
+    folder: `收藏夹栏/${name}/Nested`,
+  }));
+  await page.evaluate(() => window.__panel.dispose());
+  await page.locator("#desktop-tool").evaluate(node => { node.style.width = "260px"; });
+  await reset(page, {__bookmarks: pureBookmarks});
+  await page.waitForSelector("[data-browser-bookmark-folder='Alpha']");
+  await waitFor(page, () => document.querySelector("#desktop-browser-bookmarks-more").getBoundingClientRect().width > 0);
+  const hiddenPureFolders = await page.locator("[data-browser-bookmark-folder]")
+    .evaluateAll(chips => chips.filter(chip => chip.hidden).map(chip => chip.dataset.browserBookmarkFolder));
+  assert.ok(hiddenPureFolders.length > 0, "the pure-folder bar must hide at least one folder chip");
+  await page.focus("#desktop-browser-bookmarks-more");
+  await page.keyboard.press("Enter");
+  await page.waitForSelector("#desktop-browser-bookmarks-menu [data-browser-bookmark-menu-folder]");
+  assert.equal(await page.locator("#desktop-browser-bookmarks-menu [data-browser-bookmark-index]").count(), 0,
+    "a folder-only fixture renders no bookmark URL entries");
+  assert.deepEqual(
+    await page.locator("#desktop-browser-bookmarks-menu [data-browser-bookmark-menu-folder]")
+      .evaluateAll(buttons => buttons.map(button => button.dataset.browserBookmarkMenuFolder)),
+    hiddenPureFolders,
+  );
+  const focusedFolder = await page.evaluate(() => document.activeElement?.getAttribute("data-browser-bookmark-menu-folder") || "");
+  assert.ok(pureFolders.includes(focusedFolder), `focus must land on a folder entry, got ${JSON.stringify(focusedFolder)}`);
+  await page.keyboard.press("Escape");
+  assert.equal(await page.locator("#desktop-browser-bookmarks-menu").count(), 0);
+  assert.equal(await page.evaluate(() => document.activeElement?.id), "desktop-browser-bookmarks-more",
+    "Escape must restore focus to the chevron trigger");
+  await page.evaluate(() => window.__panel.dispose());
+  await page.locator("#desktop-tool").evaluate(node => { node.style.width = ""; });
+  await reset(page, {__bookmarks: null});
+  await page.waitForSelector("[data-browser-bookmark-folder='Docs']");
 
   // 4. Switching a tab activates it in the visible browser and keeps frames.
   await page.click("[data-browser-tab='browser_tab_2']");
@@ -427,12 +597,23 @@ try {
   await page.click("[data-browser-tab-close='browser_tab_2']");
   await waitFor(page, () => window.__deletes.length === 1);
 
+  // A bookmark-bar URL from the chevron menu opens through the same tab API.
+  await page.locator("#desktop-tool").evaluate(node => { node.style.width = "260px"; });
+  await page.waitForTimeout(180);
+  await page.click("#desktop-browser-bookmarks-more");
+  await page.waitForSelector("#desktop-browser-bookmarks-menu");
+  await page.locator("#desktop-browser-bookmarks-menu [data-browser-bookmark-index]").filter({hasText: "工单"}).click();
+  await waitFor(page, () => window.__opens.includes("https://tickets.example/queue?assignee=owner&status=open"));
+  await waitFor(page, () => document.querySelector("#desktop-browser-url").value === "https://tickets.example/queue?assignee=owner&status=open");
+  await page.locator("#desktop-tool").evaluate(node => { node.style.width = ""; });
+
   // Folder entries open through the same tab API.
-  await page.click("[data-browser-bookmark-folder='Bar']");
-  await page.waitForSelector("#desktop-browser-bookmarks-menu [data-browser-bookmark='https://mail.example/']");
-  await page.click("#desktop-browser-bookmarks-menu [data-browser-bookmark='https://mail.example/']");
-  await waitFor(page, () => window.__opens.includes("https://mail.example/"));
-  await waitFor(page, () => document.querySelector("#desktop-browser-url").value === "https://mail.example/");
+  await page.click("[data-browser-bookmark-folder='Docs']");
+  const hualaiEntry = page.locator("#desktop-browser-bookmarks-menu [data-browser-bookmark-index]").filter({hasText: "HUALAI 文档"});
+  await hualaiEntry.waitFor();
+  await hualaiEntry.click();
+  await waitFor(page, () => window.__opens.includes("https://hualai.example/docs?token=abcdefghijklmnop"));
+  await waitFor(page, () => document.querySelector("#desktop-browser-url").value === "https://hualai.example/docs?token=abcdefghijklmnop");
 
   // The + button opens AHA's local start page, never about:blank.
   await page.click("#desktop-browser-newtab");
