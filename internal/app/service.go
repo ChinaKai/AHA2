@@ -266,6 +266,10 @@ type Service struct {
 	// separate, default-off gate: the Web vault switch may be enabled while
 	// Agent turns still read the legacy DB.
 	knowledgeVault knowledgeVaultBackend
+	// knowledgeSyncRecovery is the narrow syncer slice behind the pet's
+	// recovery tool. The engine lives outside the app layer, so app only needs
+	// to read its state and clear a pause without exposing the whole syncer.
+	knowledgeSyncRecovery KnowledgeSyncRecovery
 	// runtimeRead switches reads to the vault; runtimeWrite switches writes.
 	// Both default to off and are independent: a vault-reading Turn still
 	// writes the legacy tables unless runtimeWrite is explicitly enabled.

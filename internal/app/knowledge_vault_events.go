@@ -40,6 +40,95 @@ type PetNotification struct {
 	Status string `json:"status"`
 }
 
+// KnowledgeSyncRecovery is the narrow slice of knowledgevault.Syncer the pet
+// recovery tool needs. The daemon owns the real engine and installs it on the
+// service, so the app layer never holds the whole syncer or its Git hooks.
+type KnowledgeSyncRecovery interface {
+	StatusLive(ctx context.Context) knowledgevault.AutoSyncStatus
+	ResetPause()
+}
+
+// KnowledgeSyncRecoveryState is the credential-free subset of the syncer
+// status returned by the pet recovery tool. It deliberately omits commit
+// details, remote URLs and blocked file names.
+type KnowledgeSyncRecoveryState struct {
+	Enabled      bool   `json:"enabled"`
+	Paused       bool   `json:"paused"`
+	PauseReason  string `json:"pause_reason,omitempty"`
+	Conflict     bool   `json:"conflict"`
+	Pending      int    `json:"pending"`
+	PendingKnown bool   `json:"pending_known"`
+	LastError    string `json:"last_error,omitempty"`
+}
+
+// KnowledgeSyncRecoveryResult reports the pause state before and after a
+// controlled recovery. Recovered is true only when this call actually cleared
+// a pause; a no-op keeps it false so the pet can see nothing changed.
+type KnowledgeSyncRecoveryResult struct {
+	OK        bool                       `json:"ok"`
+	Recovered bool                       `json:"recovered"`
+	Before    KnowledgeSyncRecoveryState `json:"before"`
+	After     KnowledgeSyncRecoveryState `json:"after"`
+	Note      string                     `json:"note"`
+}
+
+// SetKnowledgeSyncRecovery installs the syncer slice used by the pet recovery
+// tool. A nil value leaves the tool reporting that recovery is unavailable.
+func (s *Service) SetKnowledgeSyncRecovery(recovery KnowledgeSyncRecovery) {
+	if s == nil {
+		return
+	}
+	s.knowledgeSyncRecovery = recovery
+}
+
+// RecoverKnowledgeSyncAutoSync clears a paused auto-sync so the existing loop
+// retries. It never enables a switch the owner turned off, never runs Git
+// commands, and never closes notifications: those stay open until a real
+// pull/push/sync succeeds. If the cause is still present the next cycle pauses
+// again, which the caller can observe through the returned state.
+func (s *Service) RecoverKnowledgeSyncAutoSync(ctx context.Context) (KnowledgeSyncRecoveryResult, error) {
+	if s == nil || s.knowledgeSyncRecovery == nil {
+		return KnowledgeSyncRecoveryResult{}, fmt.Errorf("知识库自动同步不可用，无法恢复暂停状态")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	recovery := s.knowledgeSyncRecovery
+	result := KnowledgeSyncRecoveryResult{
+		OK:     true,
+		Before: knowledgeSyncRecoveryState(recovery.StatusLive(ctx)),
+		Note:   "下一次自动同步会验证；若分叉或阻塞仍在会再次暂停。本工具不会开启已关闭的自动同步，不执行 Git 操作，也不会直接关闭通知；通知只会在真正同步成功后关闭。",
+	}
+	if result.Before.Paused {
+		recovery.ResetPause()
+		result.Recovered = true
+	}
+	result.After = knowledgeSyncRecoveryState(recovery.StatusLive(ctx))
+	// StatusLive only scans while paused, and ResetPause clears the pause
+	// without rescanning. A second live read therefore falls back to the
+	// pending snapshot persisted when the pause happened. The before scan is
+	// the live read for this recovery call, so carry it into the after state
+	// instead of letting pending regress to a pre-pause value. The next sync
+	// cycle refreshes it again.
+	if result.Recovered && result.Before.PendingKnown {
+		result.After.Pending = result.Before.Pending
+		result.After.PendingKnown = true
+	}
+	return result, nil
+}
+
+func knowledgeSyncRecoveryState(status knowledgevault.AutoSyncStatus) KnowledgeSyncRecoveryState {
+	return KnowledgeSyncRecoveryState{
+		Enabled:      status.Enabled,
+		Paused:       status.Paused,
+		PauseReason:  status.PauseReason,
+		Conflict:     status.Conflict,
+		Pending:      status.Pending,
+		PendingKnown: status.PendingKnown,
+		LastError:    status.LastError,
+	}
+}
+
 // RecordKnowledgeSyncEvent persists a background knowledge-sync event for the
 // pet and nudges connected Web clients. The syncer already de-duplicates, so
 // this method always writes what it is given. Detail contains only commit

@@ -21,6 +21,7 @@ func petMCPAllowedTools(task domain.Task) []string {
 		"mcp__aha2-pet__aha_overview",
 		"mcp__aha2-pet__aha_pet_work_state",
 		"mcp__aha2-pet__aha_ack_knowledge_sync_notification",
+		"mcp__aha2-pet__aha_recover_knowledge_sync",
 		"mcp__aha2-pet__aha_task_detail",
 		"mcp__aha2-pet__aha_list_projects",
 		"mcp__aha2-pet__aha_list_remote_tasks",

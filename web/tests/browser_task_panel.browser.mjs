@@ -636,12 +636,31 @@ try {
   const hiddenFolder = hiddenFolders[0];
   const moreMenu = page.locator("#desktop-browser-bookmarks-menu");
   const moreMenuText = await moreMenu.innerText();
-  assert.match(moreMenuText, /全部收藏/);
+  assert.match(moreMenuText, /更多收藏/);
   assert.match(moreMenuText, /更多文件夹/);
   assert.match(moreMenuText, /收藏栏网址/);
   assert.ok(moreMenuText.includes(hiddenFolder), `overflow menu must list the hidden folder ${hiddenFolder}: ${moreMenuText}`);
   assert.equal(await moreMenu.locator(`[data-browser-bookmark-menu-folder='${hiddenFolder}']`).count(), 1);
-  assert.ok(await moreMenu.locator("[data-browser-bookmark-index]").count() >= 1, "the overflow menu must list bookmark-bar URLs");
+  // Only folders whose chips are hidden may appear; a visible folder must never
+  // be duplicated into the chevron menu.
+  assert.deepEqual(
+    (await moreMenu.locator("[data-browser-bookmark-menu-folder]").evaluateAll(buttons => buttons.map(button => button.dataset.browserBookmarkMenuFolder))).sort(),
+    hiddenFolders.slice().sort(),
+    `the chevron must list exactly the hidden first-level folders: ${JSON.stringify({hiddenFolders, moreMenuText})}`,
+  );
+  // 「收藏栏网址」 holds only bookmarks placed directly on the bar root - never a
+  // bookmark that lives inside a first-level folder or a deeper subfolder.
+  assert.deepEqual(
+    await moreMenu.locator("[data-browser-bookmark-index] span").evaluateAll(spans => spans.map(span => span.textContent)),
+    ["工单", "Mail", "根目录直达"],
+    `the chevron's URL section must list only bar-level bookmarks: ${moreMenuText}`,
+  );
+  // Folder-internal titles must not leak in under any real menu entry either
+  // (the `<span>` of every URL row is already pinned to the bar-level set).
+  for (const folderBookmark of ["Work 门户", "发布面板", "文档中心", "HUALAI 文档", "蓝牙调试", "官网", "其他", "监控"]) {
+    assert.equal(await moreMenu.locator(`[data-browser-bookmark-index] span:text-is("${folderBookmark}")`).count(), 0,
+      `folder bookmark "${folderBookmark}" must not leak into the chevron menu`);
+  }
   assert.doesNotMatch(moreMenuText, /token=|environment=|redirect=|收藏夹栏\//);
   const moreMenuMarkup = await moreMenu.evaluate(node => node.outerHTML);
   assert.doesNotMatch(moreMenuMarkup, /[?]|https?:\/\/|token=|environment=|redirect=|assignee=/i);
@@ -716,6 +735,38 @@ try {
   assert.equal(await page.evaluate(() => document.activeElement?.getAttribute("data-browser-bookmark-folder")), "Docs",
     "Escape must restore focus to the folder chip that opened the menu");
 
+  // Owner-requested hover behaviour: a click opens the folder menu and it stays
+  // open while the pointer moves between the chip and the popover. Leaving the
+  // union of the two areas closes it after a short grace period, so the close
+  // button is no longer the only way out.
+  const docsChip = page.locator("[data-browser-bookmark-folder='Docs']");
+  await docsChip.click();
+  await page.waitForSelector("#desktop-browser-bookmarks-menu [data-browser-bookmark-index]");
+  const chipBox = await docsChip.boundingBox();
+  const hoverMenu = page.locator("#desktop-browser-bookmarks-menu");
+  const menuBox = await hoverMenu.boundingBox();
+  const onChip = {x: chipBox.x + chipBox.width / 2, y: chipBox.y + chipBox.height / 2};
+  const onMenu = {x: menuBox.x + menuBox.width / 2, y: menuBox.y + menuBox.height / 2};
+  await page.mouse.move(onChip.x, onChip.y, {steps: 2});
+  await page.waitForTimeout(320);
+  assert.equal(await hoverMenu.count(), 1, "the menu must stay open while the pointer rests on the chip");
+  // Chip → menu: crossing the few pixels of bar padding must not close it.
+  await page.mouse.move(onMenu.x, onMenu.y, {steps: 8});
+  await page.waitForTimeout(320);
+  assert.equal(await hoverMenu.count(), 1, "moving from the chip into its menu must not close it");
+  // Menu → chip → menu: back-and-forth selection stays open.
+  await page.mouse.move(onChip.x, onChip.y, {steps: 8});
+  await page.waitForTimeout(320);
+  assert.equal(await hoverMenu.count(), 1, "moving back to the chip must not close the menu");
+  await page.mouse.move(onMenu.x, onMenu.y, {steps: 8});
+  await page.waitForTimeout(320);
+  assert.equal(await hoverMenu.count(), 1, "moving between the chip and the menu repeatedly must not close it");
+  // Leaving both areas closes it without touching the close button.
+  await page.mouse.move(onMenu.x, menuBox.y + menuBox.height + 140, {steps: 4});
+  await page.waitForTimeout(520);
+  assert.equal(await hoverMenu.count(), 0,
+    "leaving the chip and the menu must close the folder menu after the grace period");
+
   // Low viewport: the menu scrolls inside the space it actually has instead of
   // poking out of the panel/viewport bottom.
   await page.setViewportSize({width: 1100, height: 240});
@@ -773,6 +824,51 @@ try {
   assert.equal(await page.locator("#desktop-browser-bookmarks-menu").count(), 0);
   assert.equal(await page.evaluate(() => document.activeElement?.id), "desktop-browser-bookmarks-more",
     "Escape must restore focus to the chevron trigger");
+  await page.evaluate(() => window.__panel.dispose());
+  await page.locator("#desktop-tool").evaluate(node => { node.style.width = ""; });
+  await reset(page, {__bookmarks: null});
+  await page.waitForSelector("[data-browser-bookmark-folder='Docs']");
+
+  // Regression: when only direct URL chips overflow and every folder chip fits,
+  // the chevron must not fall back to listing every folder. It is then a pure
+  // 「收藏栏网址」 menu, and a bookmark inside a folder never shows up there.
+  const barOnlyBookmarks = [
+    {title: "Solo 文档", url: "https://solo.example/docs?token=abcdefghijklmnop", folder: "收藏夹栏/Solo/Nested"},
+    {title: "栏内一", url: "https://bar-one.example/", folder: "收藏夹栏"},
+    {title: "栏内二", url: "https://bar-two.example/long/path", folder: ""},
+    {title: "栏内三", url: "https://bar-three.example/long/path", folder: "收藏夹"},
+  ];
+  await page.evaluate(() => window.__panel.dispose());
+  await page.locator("#desktop-tool").evaluate(node => { node.style.width = "260px"; });
+  await reset(page, {__bookmarks: barOnlyBookmarks});
+  await page.waitForSelector("[data-browser-bookmark-folder='Solo']");
+  await waitFor(page, () => document.querySelector("#desktop-browser-bookmarks-more").getBoundingClientRect().width > 0);
+  const barOnlyOverflow = await page.evaluate(() => ({
+    soloHidden: document.querySelector("[data-browser-bookmark-folder='Solo']").hidden,
+    hiddenFolders: [...document.querySelectorAll("[data-browser-bookmark-folder]")].filter(chip => chip.hidden).length,
+    hiddenDirect: [...document.querySelectorAll("#desktop-browser-bookmarks [data-browser-bookmark-index]")].filter(chip => chip.hidden).length,
+  }));
+  assert.deepEqual([barOnlyOverflow.soloHidden, barOnlyOverflow.hiddenFolders], [false, 0],
+    `the fixture must keep its only folder chip visible: ${JSON.stringify(barOnlyOverflow)}`);
+  assert.ok(barOnlyOverflow.hiddenDirect > 0,
+    `the fixture must overflow on direct URL chips only: ${JSON.stringify(barOnlyOverflow)}`);
+  await page.click("#desktop-browser-bookmarks-more");
+  await page.waitForSelector("#desktop-browser-bookmarks-menu");
+  const barOnlyMenu = page.locator("#desktop-browser-bookmarks-menu");
+  const barOnlyText = await barOnlyMenu.innerText();
+  assert.doesNotMatch(barOnlyText, /更多文件夹/, "no hidden folder means no folder section");
+  assert.equal(await barOnlyMenu.locator("[data-browser-bookmark-menu-folder]").count(), 0,
+    "a visible folder must never be duplicated into the chevron menu");
+  assert.match(barOnlyText, /收藏栏网址/);
+  assert.deepEqual(
+    await barOnlyMenu.locator("[data-browser-bookmark-index] span").evaluateAll(spans => spans.map(span => span.textContent)),
+    ["栏内一", "栏内二", "栏内三"],
+    `the chevron must list the bar-level URLs only: ${barOnlyText}`,
+  );
+  assert.equal(barOnlyText.includes("Solo 文档"), false,
+    "a bookmark inside a first-level folder must not appear in the bar URL list");
+  assert.doesNotMatch(barOnlyText, /token=|收藏夹栏\//);
+  await page.keyboard.press("Escape");
   await page.evaluate(() => window.__panel.dispose());
   await page.locator("#desktop-tool").evaluate(node => { node.style.width = ""; });
   await reset(page, {__bookmarks: null});

@@ -782,7 +782,7 @@ func allPetMCPTools() []gateway.ChatTool {
 
 func petToolAllowed(assistant domain.OwnerAssistant, name string) bool {
 	switch name {
-	case "aha_overview", "aha_pet_work_state", "aha_pet_permissions", "aha_request_permission_change", "aha_capabilities", "pet_request_approval", "pet_list_approvals", "pet_submit_idea", "aha_ack_knowledge_sync_notification":
+	case "aha_overview", "aha_pet_work_state", "aha_pet_permissions", "aha_request_permission_change", "aha_capabilities", "pet_request_approval", "pet_list_approvals", "pet_submit_idea", "aha_ack_knowledge_sync_notification", "aha_recover_knowledge_sync":
 		return true
 	case "pet_say", "pet_play", "pet_move_to", "pet_walk_path", "pet_mood", "pet_open_task", "pet_thinking", "pet_sleep", "pet_wake",
 		"pet_update_core", "pet_write_worklog":
@@ -868,6 +868,9 @@ func ahaPetTools() []gateway.ChatTool {
 					"description": "aha_pet_work_state 返回的 notifications[].id",
 				},
 			}, "required": []string{"ids"},
+		}},
+		{Name: "aha_recover_knowledge_sync", Description: "在确认 Git 分叉或阻塞已经处理完后，清除知识库自动同步的暂停状态并唤醒下一次同步；不会开启已关闭的自动同步，不执行 Git 操作，也不会直接关闭通知（只有真正同步成功后通知才关闭）。未暂停时返回 no-op 和当前状态", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{},
 		}},
 		{Name: "aha_pet_permissions", Description: "只读查看当前宠物权限开关", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{},
@@ -1797,6 +1800,18 @@ func (s *Service) petMCPTool(ctx context.Context, callerTaskID, name string, arg
 			"ok": true, "acknowledged": acknowledged, "remaining": remaining,
 			"note": "只标记通知已处理，不会恢复自动同步，也不解决 Git 分叉；确认分叉已解决后仍需手动 pull/push/sync。",
 		})
+		return string(data), nil
+	case "aha_recover_knowledge_sync":
+		// Recovery changes install-wide background sync state, so it is gated
+		// exactly like the ack tool: only the pet Task's own Turn capability.
+		if callerTaskID != petTaskID {
+			return "", fmt.Errorf("只有宠物 Task 可以恢复知识库自动同步")
+		}
+		result, err := s.RecoverKnowledgeSyncAutoSync(ctx)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(result)
 		return string(data), nil
 	case "aha_pet_permissions":
 		permissions, err := s.PetPermissions(ctx)
