@@ -43,6 +43,9 @@ interface PanelState {
   bookmarksError: string;
   bookmarksMenu: "" | "all" | "folder";
   bookmarksMenuFolder: string;
+  // Folder labels whose bar chips are currently hidden by the overflow
+  // measure. The "更多" menu lists these folders instead of every folder.
+  bookmarkBarHiddenFolders: string[];
   inUseProfileID: string;
   urlDraft: string;
   error: string;
@@ -190,13 +193,33 @@ function faviconMark(url: string, className: string): string {
   return `<span class="${className}" aria-hidden="true">${escapeHTML(letter)}</span>`;
 }
 
-// Edge bookmarks come from a nested tree, so a folder can arrive as
-// "收藏夹/Bar". The bar itself already means "收藏夹"; strip that repeated root
-// from the visible label while keeping the raw path as the filter key.
+// Edge stores the bookmark-bar root as part of every folder path. The bar
+// itself already means that root, so drop it, tolerate the localized/English
+// spellings (case-insensitive, optional spaces and full-width slashes), and
+// group by the first remaining segment. That keeps "Docs", "Docs/HUALAI" and
+// "Docs/蓝牙" behind one "Docs" chip instead of three parallel chips.
+const bookmarkRootPattern = /^(?:收藏夹栏|收藏夹|favorites?|favourites?)\s*[/／]\s*/i;
+
+function bookmarkFolderSegments(folder: string): string[] {
+  const value = String(folder || "").trim();
+  return value.replace(bookmarkRootPattern, "").split(/[/／]/).map(segment => segment.trim()).filter(Boolean);
+}
+
+// The first segment below the Edge bookmark-bar root, or "" for an unfiled
+// bookmark. This is the only label a bar chip may show.
 export function browserBookmarkFolderLabel(folder: string): string {
-  const value = String(folder || "");
-  const label = value.replace(/^(?:收藏夹|favorites?|favourites?)\s*[/／]\s*/i, "").trim();
-  return label || value;
+  return bookmarkFolderSegments(folder)[0] || "";
+}
+
+// Everything below the first-level folder, for grouping a folder menu.
+function bookmarkSubfolderLabel(folder: string): string {
+  return bookmarkFolderSegments(folder).slice(1).join("/");
+}
+
+// "收藏栏级别" means an unfiled bookmark or one sitting directly in a
+// first-level folder; both belong in the overflow menu's URL list.
+function isBookmarkBarLevel(bookmark: BrowserBookmark): boolean {
+  return bookmarkFolderSegments(bookmark.folder || "").length <= 1;
 }
 
 // Pick the tab the preview should show. A missing selection falls back to the
@@ -216,10 +239,12 @@ export function browserFollowTabID(tabs: BrowserTab[], selectedID: string, follo
   return selectedID;
 }
 
-function groupBookmarks(bookmarks: BrowserBookmark[]): Map<string, BrowserBookmark[]> {
+export function groupBookmarks(bookmarks: BrowserBookmark[]): Map<string, BrowserBookmark[]> {
   const groups = new Map<string, BrowserBookmark[]>();
   for (const bookmark of bookmarks) {
-    const folder = bookmark.folder || "";
+    // Keying by the first-level label folds every subfolder into its parent
+    // while keeping first-appearance order and every original bookmark.
+    const folder = browserBookmarkFolderLabel(bookmark.folder || "");
     const items = groups.get(folder) || [];
     items.push(bookmark);
     groups.set(folder, items);
@@ -247,25 +272,52 @@ function bookmarkBarHTML(bookmarks: BrowserBookmark[], loading: boolean, error: 
       parts.push(...items.map(bookmarkChip));
       continue;
     }
-    const label = browserBookmarkFolderLabel(folder);
-    parts.push(`<button type="button" class="desktop-browser-bookmark desktop-browser-bookmark-folder" data-browser-bookmark-folder="${escapeHTML(folder)}" title="${escapeHTML(label)}" aria-label="收藏夹文件夹 ${escapeHTML(label)}">
-      ${icon("folder")}<span class="desktop-browser-bookmark-title">${escapeHTML(label)}</span>
+    parts.push(`<button type="button" class="desktop-browser-bookmark desktop-browser-bookmark-folder" data-browser-bookmark-folder="${escapeHTML(folder)}" title="${escapeHTML(folder)}" aria-label="收藏夹文件夹 ${escapeHTML(folder)}">
+      ${icon("folder")}<span class="desktop-browser-bookmark-title">${escapeHTML(folder)}</span>
     </button>`);
   }
   return parts.join("");
 }
 
+function bookmarkMenuEntry(bookmark: BrowserBookmark): string {
+  return `<li><button type="button" data-browser-bookmark="${escapeHTML(bookmark.url)}" title="${escapeHTML(bookmark.url)}"><span>${escapeHTML(bookmark.title || tabHost(bookmark.url))}</span><small>${escapeHTML(tabHost(bookmark.url))}</small></button></li>`;
+}
+
 function bookmarkMenuHTML(state: PanelState): string {
   if (!state.bookmarksMenu) return "";
   const all = state.bookmarksMenu === "all";
-  const visible = all
-    ? state.bookmarks
-    : state.bookmarks.filter(bookmark => (bookmark.folder || "") === state.bookmarksMenuFolder);
   const heading = all ? "全部收藏" : browserBookmarkFolderLabel(state.bookmarksMenuFolder);
-  const items = visible.length
-    ? [...groupBookmarks(visible)].map(([folder, group]) => `${folder ? `<li class="desktop-browser-bookmark-menu-folder">${icon("folder")}<span>${escapeHTML(browserBookmarkFolderLabel(folder))}</span></li>` : ""}
-      ${group.map(bookmark => `<li><button type="button" data-browser-bookmark="${escapeHTML(bookmark.url)}" title="${escapeHTML(bookmark.url)}"><span>${escapeHTML(bookmark.title || tabHost(bookmark.url))}</span><small>${escapeHTML(tabHost(bookmark.url))}</small></button></li>`).join("")}`).join("")
-    : '<li class="desktop-browser-bookmark-menu-empty">收藏夹为空</li>';
+  let items = "";
+  if (all) {
+    // The chevron is the overflow entry: list the first-level folders whose
+    // chips do not fit, plus bookmark-bar URLs, both actionable. When no chip
+    // is hidden (a very wide panel), fall back to every folder.
+    const folderGroups = [...groupBookmarks(state.bookmarks)].filter(([folder]) => folder);
+    const folders = state.bookmarkBarHiddenFolders.length
+      ? folderGroups.filter(([folder]) => state.bookmarkBarHiddenFolders.includes(folder))
+      : folderGroups;
+    const barLevel = state.bookmarks.filter(isBookmarkBarLevel);
+    const parts: string[] = [];
+    if (folders.length) {
+      parts.push('<li class="desktop-browser-bookmark-menu-section">更多文件夹</li>');
+      parts.push(...folders.map(([folder, group]) => `<li><button type="button" class="desktop-browser-bookmark-menu-folder-entry" data-browser-bookmark-menu-folder="${escapeHTML(folder)}" title="打开文件夹 ${escapeHTML(folder)}">${icon("folder")}<span>${escapeHTML(folder)}</span><small>${group.length} 个</small></button></li>`));
+    }
+    if (barLevel.length) {
+      parts.push('<li class="desktop-browser-bookmark-menu-section">收藏栏网址</li>');
+      parts.push(...barLevel.map(bookmarkMenuEntry));
+    }
+    items = parts.join("") || '<li class="desktop-browser-bookmark-menu-empty">收藏夹为空</li>';
+  } else {
+    const visible = state.bookmarks.filter(bookmark => browserBookmarkFolderLabel(bookmark.folder || "") === state.bookmarksMenuFolder);
+    const groups = new Map<string, BrowserBookmark[]>();
+    for (const bookmark of visible) {
+      const subfolder = bookmarkSubfolderLabel(bookmark.folder || "");
+      groups.set(subfolder, [...(groups.get(subfolder) || []), bookmark]);
+    }
+    items = visible.length
+      ? [...groups].map(([subfolder, group]) => `${subfolder ? `<li class="desktop-browser-bookmark-menu-folder">${icon("folder")}<span>${escapeHTML(subfolder)}</span></li>` : ""}${group.map(bookmarkMenuEntry).join("")}`).join("")
+      : '<li class="desktop-browser-bookmark-menu-empty">收藏夹为空</li>';
+  }
   return `<div id="desktop-browser-bookmarks-menu" class="desktop-browser-bookmark-menu" role="menu" aria-label="${escapeHTML(heading)}">
     <div class="desktop-browser-bookmark-menu-head"><strong>${escapeHTML(heading)}</strong><button type="button" id="desktop-browser-bookmarks-menu-close" class="icon-button" title="关闭收藏菜单" aria-label="关闭收藏菜单">${icon("close")}</button></div>
     <ul>${items}</ul>
@@ -277,7 +329,7 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
   const state: PanelState = {
     profiles: [], host: null, grant: null, tabs: [], bookmarks: [], profileID: "", selectedTabID: "",
     loading: true, binding: false, bookmarksLoading: false, bookmarksLoaded: false, bookmarksError: "",
-    bookmarksMenu: "", bookmarksMenuFolder: "", inUseProfileID: "", urlDraft: "", error: "",
+    bookmarksMenu: "", bookmarksMenuFolder: "", bookmarkBarHiddenFolders: [], inUseProfileID: "", urlDraft: "", error: "",
     frameError: "", frameLive: false, startPageGrantID: "",
   };
 
@@ -467,6 +519,11 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
         openBookmarksMenu("folder", button.dataset.browserBookmarkFolder || "");
       });
     });
+    container.querySelectorAll<HTMLElement>("[data-browser-bookmark-menu-folder]").forEach(button => {
+      button.addEventListener("click", () => {
+        openBookmarksMenu("folder", button.dataset.browserBookmarkMenuFolder || "");
+      });
+    });
   };
 
   const selectorHTML = (session: BrowserSession | null): string => {
@@ -576,6 +633,7 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     const chips = [...items.querySelectorAll<HTMLElement>(".desktop-browser-bookmark")];
     if (!chips.length) {
       more.hidden = true;
+      state.bookmarkBarHiddenFolders = [];
       return;
     }
     more.hidden = false;
@@ -589,6 +647,50 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
       }
     }
     more.hidden = !overflow;
+    // The chevron menu is built during paint, so keep the hidden-folder list
+    // current for the next paint (resize, state sync, reopen).
+    state.bookmarkBarHiddenFolders = chips
+      .filter(chip => chip.hidden && chip.dataset.browserBookmarkFolder)
+      .map(chip => chip.dataset.browserBookmarkFolder || "");
+  };
+
+  // Anchor the popover to the clicked folder chip: its left edge, immediately
+  // below the bar. A chip hidden by overflow (or the chevron itself) anchors to
+  // the "更多" toggle, and the panel/viewport edge wins when they conflict.
+  const positionBookmarkMenu = (): void => {
+    const bar = container.querySelector<HTMLElement>("#desktop-browser-bookmarkbar");
+    const menu = container.querySelector<HTMLElement>("#desktop-browser-bookmarks-menu");
+    if (!bar || !menu) return;
+    let anchor: HTMLElement | null = null;
+    if (state.bookmarksMenu === "folder") {
+      anchor = [...container.querySelectorAll<HTMLElement>("[data-browser-bookmark-folder]")]
+        .find(chip => chip.dataset.browserBookmarkFolder === state.bookmarksMenuFolder && !chip.hidden) || null;
+    }
+    anchor = anchor || container.querySelector<HTMLElement>("#desktop-browser-bookmarks-more");
+    const barRect = bar.getBoundingClientRect();
+    const style = getComputedStyle(bar);
+    const borderLeft = Number.parseFloat(style.borderLeftWidth) || 0;
+    const borderTop = Number.parseFloat(style.borderTopWidth) || 0;
+    const anchorRect = anchor?.getBoundingClientRect();
+    // Absolute children are positioned from the bar's padding box.
+    const maxLeft = Math.max(0, bar.clientWidth - menu.offsetWidth);
+    const desiredLeft = anchorRect && anchorRect.width
+      ? anchorRect.left - (barRect.left + borderLeft)
+      : maxLeft; // Chevron not measured yet: start right-aligned, then relayout.
+    menu.style.left = `${Math.round(Math.min(Math.max(0, desiredLeft), maxLeft))}px`;
+    menu.style.right = "auto";
+    // Same origin: place the outer top edge exactly at the bar's bottom edge.
+    menu.style.top = `${Math.round(barRect.height - borderTop)}px`;
+    const menuRect = menu.getBoundingClientRect();
+    const viewportBottom = window.innerHeight - 8;
+    menu.style.maxHeight = menuRect.bottom > viewportBottom
+      ? `${Math.max(96, viewportBottom - menuRect.top)}px`
+      : "";
+  };
+
+  const relayoutBookmarks = (): void => {
+    measureBookmarkOverflow();
+    positionBookmarkMenu();
   };
 
   const paint = (): void => {
@@ -599,10 +701,13 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     if (selectorNode && setNodeHTML(selectorNode, selectorHTML(session))) bindSelector();
     if (setNodeHTML(container, controlHTML(session))) {
       bindControl();
-      requestAnimationFrame(measureBookmarkOverflow);
+      // The overflow measure decides which chips (and the chevron) are
+      // visible; reposition once that layout pass has run.
+      requestAnimationFrame(relayoutBookmarks);
     } else {
       measureBookmarkOverflow();
     }
+    positionBookmarkMenu();
     paintFrameStatus();
     syncShell(session, selectedProfile?.name || "");
   };
@@ -1233,9 +1338,9 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
   document.addEventListener("visibilitychange", onVisibility);
   document.addEventListener("pointerdown", onOutsidePointer, true);
   container.addEventListener("keydown", onKeydown);
-  const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => measureBookmarkOverflow());
+  const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(relayoutBookmarks);
   observer?.observe(container);
-  window.addEventListener("resize", measureBookmarkOverflow);
+  window.addEventListener("resize", relayoutBookmarks);
 
   return {
     dispose: () => {
@@ -1249,7 +1354,7 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
       document.removeEventListener("visibilitychange", onVisibility);
       document.removeEventListener("pointerdown", onOutsidePointer, true);
       container.removeEventListener("keydown", onKeydown);
-      window.removeEventListener("resize", measureBookmarkOverflow);
+      window.removeEventListener("resize", relayoutBookmarks);
       observer?.disconnect();
       stopStream();
     },

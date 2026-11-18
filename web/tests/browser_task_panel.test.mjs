@@ -31,12 +31,32 @@ test("a changed page returns to the live frame rate immediately", () => {
   assert.equal(panel.nextBrowserFrameDelay("", "10:1:2:3:4:5:6", panel.BROWSER_FRAME_MAX_DELAY_MS), panel.BROWSER_FRAME_MIN_DELAY_MS);
 });
 
-test("bookmark folder labels drop the repeated 收藏夹 root and keep other names", () => {
+test("bookmark folder labels keep only the first level below the Edge bar root", () => {
+  assert.equal(panel.browserBookmarkFolderLabel("收藏夹栏/Docs"), "Docs");
+  assert.equal(panel.browserBookmarkFolderLabel("收藏夹栏/Docs/HUALAI"), "Docs");
+  assert.equal(panel.browserBookmarkFolderLabel("收藏夹栏/Docs/蓝牙"), "Docs");
   assert.equal(panel.browserBookmarkFolderLabel("收藏夹/Bar"), "Bar");
-  assert.equal(panel.browserBookmarkFolderLabel("收藏夹/工作/日报"), "工作/日报");
+  assert.equal(panel.browserBookmarkFolderLabel("收藏夹/工作/日报"), "工作");
   assert.equal(panel.browserBookmarkFolderLabel("Favorites/Work"), "Work");
+  assert.equal(panel.browserBookmarkFolderLabel("favourites/work"), "work");
+  assert.equal(panel.browserBookmarkFolderLabel(" 收藏夹栏 ／ Docs / HUALAI "), "Docs");
   assert.equal(panel.browserBookmarkFolderLabel("Bar"), "Bar");
   assert.equal(panel.browserBookmarkFolderLabel(""), "");
+});
+
+test("bookmarks group under one first-level folder without losing subfolder entries", () => {
+  const grouped = panel.groupBookmarks([
+    {title: "文档中心", url: "https://docs.example/", folder: "收藏夹栏/Docs"},
+    {title: "HUALAI", url: "https://hualai.example/", folder: "收藏夹栏/Docs/HUALAI"},
+    {title: "蓝牙", url: "https://bluetooth.example/", folder: "收藏夹栏/Docs/蓝牙"},
+    {title: "Bar", url: "https://bar.example/", folder: "收藏夹/Bar"},
+    {title: "未归档", url: "https://unfiled.example/", folder: ""},
+  ]);
+  assert.deepEqual([...grouped.keys()], ["Docs", "Bar", ""]);
+  assert.equal(grouped.get("Docs").length, 3);
+  assert.equal(grouped.get("Docs").filter(bookmark => bookmark.title === "文档中心").length, 1);
+  assert.equal(grouped.get("Bar").length, 1);
+  assert.equal(grouped.get("").length, 1);
 });
 
 test("tab selection follows a single real-window switch and leaves ambiguous windows alone", () => {
