@@ -16,8 +16,13 @@ import (
 var (
 	ErrAgentCallForbidden = errors.New("agent control operation is forbidden")
 	ErrAgentTurnInactive  = errors.New("agent turn is not active")
-	ErrRevisionConflict   = errors.New("resource revision conflict")
-	ErrKnowledgeReadOnly  = errors.New("knowledge entry is available through a read-only library binding")
+	// ErrAgentLimitReached reports a dispatch where no action could be queued
+	// because the Task already held MaxAgents agents. It is returned only when
+	// nothing was dispatched, so callers can distinguish a fully rejected
+	// submission from a partial one that still created a batch.
+	ErrAgentLimitReached = errors.New("agent limit reached")
+	ErrRevisionConflict  = errors.New("resource revision conflict")
+	ErrKnowledgeReadOnly = errors.New("knowledge entry is available through a read-only library binding")
 	// A global skill applies to every Project on this machine, so creating one
 	// is refused outside a Main turn that is acting for the Owner directly.
 	ErrGlobalSkillForbidden = errors.New("global skill creation is not allowed in this Turn")

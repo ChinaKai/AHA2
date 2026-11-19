@@ -92,6 +92,72 @@ func (s *Store) UpsertTaskAgent(ctx context.Context, item domain.TaskAgent) (boo
 	return count > 0, nil
 }
 
+// TaskAgentCreateResult classifies the atomic agent creation. The zero value is
+// deliberately unknown so a caller that ignores the error cannot mistake a
+// failed call for a successful insert.
+type TaskAgentCreateResult int
+
+const (
+	TaskAgentCreateUnknown TaskAgentCreateResult = iota
+	TaskAgentCreated
+	TaskAgentAlreadyExists
+	TaskAgentLimitReached
+)
+
+// CreateTaskAgentWithinLimit inserts a new Task agent only while the Task is
+// below maxAgents. The existence check, the agent count and the insert run in
+// one write transaction; the SQLite driver opens it with BEGIN IMMEDIATE, so
+// concurrent dispatchers serialize and cannot both consume the last slot.
+// maxAgents counts every agent row, including main, matching Dispatch's
+// historical limit. An existing agent does not consume another slot and is
+// reported separately so a concurrent creator can continue as the winner.
+func (s *Store) CreateTaskAgentWithinLimit(ctx context.Context, item domain.TaskAgent, maxAgents int) (TaskAgentCreateResult, error) {
+	now := item.UpdatedAt
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	if item.CreatedAt.IsZero() {
+		item.CreatedAt = now
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return TaskAgentCreateUnknown, err
+	}
+	defer tx.Rollback()
+	var exists int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM task_agents WHERE task_id=? AND agent_id=?`,
+		item.TaskID, item.AgentID,
+	).Scan(&exists); err != nil {
+		return TaskAgentCreateUnknown, err
+	}
+	if exists > 0 {
+		return TaskAgentAlreadyExists, nil
+	}
+	var count int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM task_agents WHERE task_id=?`, item.TaskID,
+	).Scan(&count); err != nil {
+		return TaskAgentCreateUnknown, err
+	}
+	if count >= maxAgents {
+		return TaskAgentLimitReached, nil
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO task_agents(
+			task_id,agent_id,role,status,title,runtime_config_snapshot_id,inherit_main,last_read_sequence,created_at,updated_at
+		) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		item.TaskID, item.AgentID, item.Role, item.Status, item.Title, item.RuntimeConfigSnapshotID,
+		boolInt(item.InheritMain), 0, timeString(item.CreatedAt), timeString(now),
+	); err != nil {
+		return TaskAgentCreateUnknown, err
+	}
+	if err := tx.Commit(); err != nil {
+		return TaskAgentCreateUnknown, err
+	}
+	return TaskAgentCreated, nil
+}
+
 func (s *Store) UpdateTaskAgentStatus(ctx context.Context, taskID, agentID, status string, updatedAt time.Time) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE task_agents SET status=?,updated_at=? WHERE task_id=? AND agent_id=?`,

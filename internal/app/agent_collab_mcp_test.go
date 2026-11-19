@@ -438,7 +438,7 @@ func TestCollabMCPSubmitAndWaitRules(t *testing.T) {
 	}
 
 	capped := newCollabMCPFixture(t, "auto", 1)
-	if _, err := capped.service.AgentCollabMCPSubmit(capped.ctx, capped.claims("main"), collabSubmitInput("capped")); !errors.Is(err, ErrAgentCollabMCPNothingQueued) {
+	if _, err := capped.service.AgentCollabMCPSubmit(capped.ctx, capped.claims("main"), collabSubmitInput("capped")); !errors.Is(err, ErrAgentLimitReached) {
 		t.Fatalf("max agents error=%v", err)
 	}
 

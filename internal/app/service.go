@@ -2611,6 +2611,7 @@ func (s *Service) spawnAgentTurns(
 	var routes []map[string]any
 	var members []domain.CollaborationMember
 	var rejections []CollaborationAssignmentRejection
+	limitReached := false
 	accepted := map[string]bool{}
 	// requested tracks explicit agent IDs in this batch. A repeated ID is an
 	// input error even when the earlier action never reached the queue (for
@@ -2649,6 +2650,9 @@ func (s *Service) spawnAgentTurns(
 			}
 			// Existing non-duplicate rejections (single mode, agent limit,
 			// permission ceiling) are already recorded as orchestration errors.
+			if errors.Is(enqueueErr, ErrAgentLimitReached) {
+				limitReached = true
+			}
 			log.Printf("collaboration assignment for task %s turn %s: %v", task.ID, parent.ID, enqueueErr)
 			continue
 		}
@@ -2676,6 +2680,12 @@ func (s *Service) spawnAgentTurns(
 	if len(routed) == 0 {
 		if len(rejections) > 0 {
 			return "", 0, &CollaborationAssignmentError{Rejected: rejections}
+		}
+		if limitReached {
+			// A fully rejected submission must not look like a successful empty
+			// batch. Partial batches keep their accepted work and stay on the
+			// success path above.
+			return "", 0, ErrAgentLimitReached
 		}
 		return "", 0, nil
 	}

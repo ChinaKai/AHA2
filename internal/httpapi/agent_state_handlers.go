@@ -696,6 +696,11 @@ func writeAgentControlError(writer http.ResponseWriter, err error) {
 			"ok": false, "error": "collaboration_requires_auto_mode",
 			"message": "单 Agent 模式没有可派发的子 Agent；请由 Owner 切换到自动协作模式",
 		})
+	case errors.Is(err, app.ErrAgentLimitReached):
+		writeJSON(writer, http.StatusConflict, map[string]any{
+			"ok": false, "error": "agent_limit_reached",
+			"message": "已达到该 Task 的 Agent 数量上限；请调整 Max Agents 或复用已有 Agent",
+		})
 	case errors.Is(err, app.ErrRevisionConflict), errors.Is(err, store.ErrKnowledgeProposalRevision), errors.Is(err, store.ErrKnowledgeProposalPending):
 		writeError(writer, http.StatusConflict, "knowledge_revision_conflict")
 	case errors.Is(err, store.ErrKnowledgeFeedbackState):

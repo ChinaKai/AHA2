@@ -1,10 +1,14 @@
 package httpapi
 
 import (
+	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -333,7 +337,7 @@ func TestAgentCollabMCPSubmitAndWait(t *testing.T) {
 			"agent_id": "sub-001", "title": "Capped", "assignment": "work",
 		}},
 		"integration_instructions": "integrate",
-	}); !call.IsError || !strings.Contains(call.Text, "collaboration_no_agents_queued") {
+	}); !call.IsError || !strings.Contains(call.Text, "collaboration_agent_limit_reached") {
 		t.Fatalf("max agents payload=%#v", call)
 	}
 
@@ -527,4 +531,208 @@ func waitForCollabMCPAudit(t *testing.T, path, tool string) string {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// collabConcurrentOutcome is one response from a concurrent submission. The
+// request helper never touches *testing.T inside a goroutine; the test asserts
+// on the collected outcomes after every request has finished.
+type collabConcurrentOutcome struct {
+	Status  int
+	IsError bool
+	Text    string
+	OK      bool
+	Error   string
+	BatchID string
+	Created int
+	Err     error
+}
+
+func postCollabJSON(url, token string, body any) collabConcurrentOutcome {
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return collabConcurrentOutcome{Err: err}
+	}
+	request, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(raw))
+	if err != nil {
+		return collabConcurrentOutcome{Err: err}
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return collabConcurrentOutcome{Err: err}
+	}
+	defer response.Body.Close()
+	var payload struct {
+		Result *struct {
+			IsError bool `json:"isError"`
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"result"`
+		OK      bool   `json:"ok"`
+		Error   string `json:"error"`
+		BatchID string `json:"batch_id"`
+		Created int    `json:"created_agents"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		return collabConcurrentOutcome{Status: response.StatusCode, Err: err}
+	}
+	outcome := collabConcurrentOutcome{
+		Status: response.StatusCode, OK: payload.OK, Error: payload.Error,
+		BatchID: payload.BatchID, Created: payload.Created,
+	}
+	if payload.Result != nil {
+		outcome.IsError = payload.Result.IsError
+		if len(payload.Result.Content) > 0 {
+			outcome.Text = payload.Result.Content[0].Text
+		}
+	}
+	return outcome
+}
+
+// TestCollabConcurrentSubmitsRespectMaxAgents reproduces the review finding:
+// eight submissions race for the single free slot of a MaxAgents=2 Task. Both
+// the MCP facade and the existing batches endpoint must stop at the server-side
+// cap, report every rejected submission instead of a silent empty batch, and
+// leave no agent row that is absent from the one winning batch.
+func TestCollabConcurrentSubmitsRespectMaxAgents(t *testing.T) {
+	const submissions = 8
+
+	run := func(t *testing.T, kind string) {
+		t.Helper()
+		h := newCoreMCPHarness(t)
+		// The winning submission starts a child Turn, which keeps writing under
+		// the Workspace after the assertions. Stop the service before this
+		// subtest returns, ahead of every TempDir cleanup, so teardown cannot
+		// race a live child.
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_ = h.service.Shutdown(ctx)
+		}()
+		task := collabMCPTask(t, h, "auto", 2)
+		turn := createCoreTurn(t, h.database, task, "main", "batch-collab-concurrent-"+kind)
+		token := h.issue(task.ID, "main", turn.ID)
+		url := collabMCPURL(h)
+		if kind == "batches" {
+			url = h.server.URL + "/api/v1/agent/collaboration/batches"
+		}
+
+		outcomes := make([]collabConcurrentOutcome, submissions)
+		start := make(chan struct{})
+		var wait sync.WaitGroup
+		for index := 0; index < submissions; index++ {
+			wait.Add(1)
+			go func(index int) {
+				defer wait.Done()
+				<-start
+				agentID := fmt.Sprintf("sub-%03d", index+1)
+				if kind == "mcp" {
+					outcomes[index] = postCollabJSON(url, token, map[string]any{
+						"jsonrpc": "2.0", "id": index + 1, "method": "tools/call",
+						"params": map[string]any{
+							"name": "collab_batch_submit",
+							"arguments": map[string]any{
+								"actions": []map[string]any{{
+									"agent_id": agentID, "title": "Concurrent worker",
+									"assignment": "concurrent work",
+								}},
+								"integration_instructions": "integrate",
+							},
+						},
+					})
+					return
+				}
+				outcomes[index] = postCollabJSON(url, token, map[string]any{
+					"actions": []map[string]any{{
+						"agent_id": agentID, "title": "Concurrent worker",
+						"assignment": "concurrent work", "required": true,
+					}},
+					"integration_instructions": "integrate",
+				})
+			}(index)
+		}
+		close(start)
+		wait.Wait()
+
+		agents, err := h.database.ListTaskAgents(h.ctx, task.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(agents) != 2 {
+			t.Fatalf("%s concurrent submissions created %d agents, want main + 1: %#v", kind, len(agents), agents)
+		}
+
+		successes, limitFailures := 0, 0
+		winnerBatch := ""
+		for index, outcome := range outcomes {
+			if outcome.Err != nil {
+				t.Fatalf("%s submission %d: %v", kind, index, outcome.Err)
+			}
+			if kind == "mcp" {
+				if outcome.Status != http.StatusOK {
+					t.Fatalf("%s submission %d status=%d", kind, index, outcome.Status)
+				}
+				if !outcome.IsError {
+					var result struct {
+						BatchID       string `json:"batch_id"`
+						CreatedAgents int    `json:"created_agents"`
+					}
+					if err := json.Unmarshal([]byte(outcome.Text), &result); err != nil {
+						t.Fatalf("%s submission %d result %q: %v", kind, index, outcome.Text, err)
+					}
+					if result.BatchID == "" || result.CreatedAgents != 1 {
+						t.Fatalf("%s submission %d result=%#v", kind, index, result)
+					}
+					successes++
+					winnerBatch = result.BatchID
+					continue
+				}
+				if !strings.Contains(outcome.Text, "collaboration_agent_limit_reached") {
+					t.Fatalf("%s submission %d was rejected without a clear limit error: %q", kind, index, outcome.Text)
+				}
+				limitFailures++
+				continue
+			}
+			switch {
+			case outcome.Status == http.StatusAccepted && outcome.OK:
+				if outcome.BatchID == "" || outcome.Created != 1 {
+					t.Fatalf("%s submission %d result=%#v", kind, index, outcome)
+				}
+				successes++
+				winnerBatch = outcome.BatchID
+			case outcome.Status == http.StatusConflict && outcome.Error == "agent_limit_reached":
+				limitFailures++
+			default:
+				t.Fatalf("%s submission %d unexpected response: %#v", kind, index, outcome)
+			}
+		}
+		if successes != 1 || limitFailures != submissions-1 {
+			t.Fatalf("%s successes=%d limitFailures=%d, want 1 and %d", kind, successes, limitFailures, submissions-1)
+		}
+		if winnerBatch == "" {
+			t.Fatalf("%s winning submission returned no batch", kind)
+		}
+
+		members, err := h.database.CollaborationMembers(h.ctx, winnerBatch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(members) != 1 {
+			t.Fatalf("%s winning batch members=%#v", kind, members)
+		}
+		var subAgent string
+		for _, agent := range agents {
+			if agent.AgentID != "main" {
+				subAgent = agent.AgentID
+			}
+		}
+		if subAgent == "" || members[0].AgentID != subAgent {
+			t.Fatalf("%s sub agent=%q members=%#v (orphan agent or missing assignment)", kind, subAgent, members)
+		}
+	}
+
+	t.Run("mcp", func(t *testing.T) { run(t, "mcp") })
+	t.Run("batches", func(t *testing.T) { run(t, "batches") })
 }

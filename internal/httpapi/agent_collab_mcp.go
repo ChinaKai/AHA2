@@ -270,6 +270,8 @@ func collabMCPErrorCode(err error) (string, string) {
 		return "agent_turn_inactive", "agent turn is not active"
 	case errors.Is(err, app.ErrAgentCollaborationRequiresAuto):
 		return "collaboration_requires_auto_mode", "collaboration requires auto mode"
+	case errors.Is(err, app.ErrAgentLimitReached):
+		return "collaboration_agent_limit_reached", "the Task reached its Max Agents limit; no sub-agent was queued"
 	case errors.Is(err, app.ErrAgentCollabMCPInvalidInput):
 		return "collaboration_input_invalid", "actions must contain 1 to 8 entries with agent_id, title and assignment, and integration_instructions is required"
 	case errors.Is(err, app.ErrAgentCollabMCPNothingQueued):

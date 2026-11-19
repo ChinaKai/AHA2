@@ -1517,11 +1517,15 @@ func (s *Service) enqueueAgentAction(
 		return agentID, false, duplicateAssignmentRejection(agentID, parent.ID)
 	}
 	if _, ok := existing[agentID]; !ok {
+		// Fast path: a Task that the (non-authoritative) list already shows as
+		// full does not need a runtime snapshot derived for an agent that cannot
+		// be created. The atomic insert below remains the authority when
+		// concurrent dispatchers race for the last slot.
 		if len(agents) >= task.MaxAgents {
 			s.recordOrchestrationError(ctx, task.ID, parent, fmt.Sprintf(
 				"Agent limit reached: %d/%d", len(agents), task.MaxAgents,
 			))
-			return "", false, nil
+			return "", false, ErrAgentLimitReached
 		}
 		mainAgent, mainErr := s.store.TaskAgent(ctx, task.ID, "main")
 		if mainErr != nil {
@@ -1558,16 +1562,29 @@ func (s *Service) enqueueAgentAction(
 			title = "Sub-agent assignment"
 		}
 		now := s.now().UTC()
-		_, err = s.store.UpsertTaskAgent(ctx, domain.TaskAgent{
+		outcome, err := s.store.CreateTaskAgentWithinLimit(ctx, domain.TaskAgent{
 			TaskID: task.ID, AgentID: agentID, Role: "sub", Status: "idle", Title: title,
 			RuntimeConfigSnapshotID: snapshotID, InheritMain: inheritMain, CreatedAt: now, UpdatedAt: now,
-		})
+		}, task.MaxAgents)
 		if err != nil {
 			return "", false, err
 		}
-		s.emit(ctx, task.ID, "agent", agentID, "task_agent_created", map[string]any{
-			"agent_id": agentID, "title": title, "inherit_main": inheritMain,
-		})
+		switch outcome {
+		case store.TaskAgentCreated:
+			s.emit(ctx, task.ID, "agent", agentID, "task_agent_created", map[string]any{
+				"agent_id": agentID, "title": title, "inherit_main": inheritMain,
+			})
+		case store.TaskAgentAlreadyExists:
+			// A concurrent dispatcher created this agent after our list read.
+			// Reuse it rather than failing or creating a duplicate slot.
+		case store.TaskAgentLimitReached:
+			s.recordOrchestrationError(ctx, task.ID, parent, fmt.Sprintf(
+				"Agent limit reached: %d/%d", len(agents), task.MaxAgents,
+			))
+			return "", false, ErrAgentLimitReached
+		default:
+			return "", false, fmt.Errorf("create task agent %s: unknown outcome %d", agentID, outcome)
+		}
 	} else if action.Backend != "" || action.ModelID != "" || action.ReasoningEffort != "" ||
 		action.Filesystem != "" || action.Approval != "" {
 		_, err := s.UpdateAgentConfig(ctx, task.ID, agentID, UpdateAgentConfigInput{
