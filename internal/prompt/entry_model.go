@@ -443,19 +443,42 @@ func anchorConditionMatches(condition string, input BuildInput, identityName, ch
 	return false
 }
 
+// entryRenderedFragment is one resident fragment exactly as Build appends it.
+// It exists so read-only structure tools can inspect and reorder the same
+// fragments the production renderer emits, without parsing the final prompt or
+// growing a second rendering path. Rendered is the text appended to the prompt
+// (including the "## <Name>" heading when the anchor has one); Content is the
+// rendered body without that heading.
+type entryRenderedFragment struct {
+	LegacyID string
+	Name     string
+	Heading  bool
+	Content  string
+	Rendered string
+}
+
 // BuildEntryModel renders the resident Prompt by resolving and ordering every
 // fragment through the entry model. Build delegates here in production;
 // BuildLegacy remains the pre-entry-model reference used by the equivalence
 // tests for one release.
 func (engine *Engine) BuildEntryModel(ctx context.Context, input BuildInput) (BuildResult, error) {
+	result, _, err := engine.buildEntryModel(ctx, input)
+	return result, err
+}
+
+// buildEntryModel returns both the production result and the ordered resident
+// fragments. Joining the fragments with a blank line is exactly how the
+// EffectivePrompt is produced, so callers can reorder them for a structural
+// preview without changing any fragment text.
+func (engine *Engine) buildEntryModel(ctx context.Context, input BuildInput) (BuildResult, []entryRenderedFragment, error) {
 	templates, err := engine.TemplatesForLanguage(ctx, input.Language)
 	if err != nil {
-		return BuildResult{}, err
+		return BuildResult{}, nil, err
 	}
 	templateByID := make(map[string]domain.PromptTemplate, len(templates))
 	for _, item := range templates {
 		if _, ok := ResolveLegacyTemplateID(item.ID); !ok {
-			return BuildResult{}, fmt.Errorf("prompt template %s has no entry anchor", item.ID)
+			return BuildResult{}, nil, fmt.Errorf("prompt template %s has no entry anchor", item.ID)
 		}
 		templateByID[item.ID] = item
 	}
@@ -468,7 +491,7 @@ func (engine *Engine) BuildEntryModel(ctx context.Context, input BuildInput) (Bu
 	if strings.TrimSpace(workDir) != "" {
 		scratchRoot, err = workspace.AgentScratchDir(input.Workspace, workDir, input.Task.ID, safeAgentID(input.Agent.AgentID))
 		if err != nil {
-			return BuildResult{}, err
+			return BuildResult{}, nil, err
 		}
 	}
 	identityName, channelName := identityAndChannel(input.ChannelContext)
@@ -480,7 +503,7 @@ func (engine *Engine) BuildEntryModel(ctx context.Context, input BuildInput) (Bu
 	// fragment when no anchor condition matches.
 	for _, id := range []string{"identity." + identityName, "channel." + channelName} {
 		if _, ok := templateByID[id]; !ok {
-			return BuildResult{}, fmt.Errorf("prompt template %s is not registered", id)
+			return BuildResult{}, nil, fmt.Errorf("prompt template %s is not registered", id)
 		}
 	}
 	data := templateData{
@@ -500,51 +523,58 @@ func (engine *Engine) BuildEntryModel(ctx context.Context, input BuildInput) (Bu
 			recoveryData.Recovery = evidence
 			recovery, renderErr := renderTemplateByID(templateByID, "context.recovery-handoff", recoveryData)
 			if renderErr != nil {
-				return BuildResult{}, renderErr
+				return BuildResult{}, nil, renderErr
 			}
 			data.RecoveryHandoff = recovery
 		}
 	}
 	contextResources, err := buildResources(input, contextRoot, templateByID, data)
 	if err != nil {
-		return BuildResult{}, err
+		return BuildResult{}, nil, err
 	}
 	sharedRoot, sharedManifest, err := buildSharedSnapshot(input, workDir, templateByID, data)
 	if err != nil {
-		return BuildResult{}, err
+		return BuildResult{}, nil, err
 	}
 	resources := append(append([]ContextResource(nil), contextResources...), sharedManifest...)
 	data.AvailableContext = availableContextEntries(resources)
 	var parts []string
+	fragments := make([]entryRenderedFragment, 0, len(phaseThreeAnchorSpecs))
 	for _, id := range entryTemplateOrder(input) {
 		anchor, ok := ResolveLegacyTemplateID(id)
 		if !ok {
-			return BuildResult{}, fmt.Errorf("resident template %s has no entry anchor", id)
+			return BuildResult{}, nil, fmt.Errorf("resident template %s has no entry anchor", id)
 		}
 		spec, _ := entryAnchorSpecByKey(anchor.EntryID, anchor.Key)
 		content, renderErr := renderTemplateByID(templateByID, id, data)
 		if renderErr != nil {
-			return BuildResult{}, renderErr
+			return BuildResult{}, nil, renderErr
 		}
 		if id == "identity."+identityName {
 			if supplement := strings.TrimSpace(input.IdentitySupplement); supplement != "" {
 				content = strings.TrimRight(content, "\n") + "\n\n" + supplement
 			}
 		}
+		rendered := content
 		if spec.Heading {
-			parts = append(parts, "## "+templateByID[id].Name+"\n"+content)
-		} else {
-			parts = append(parts, content)
+			rendered = "## " + templateByID[id].Name + "\n" + content
 		}
+		parts = append(parts, rendered)
+		fragments = append(fragments, entryRenderedFragment{
+			LegacyID: id, Name: templateByID[id].Name, Heading: spec.Heading, Content: content, Rendered: rendered,
+		})
+	}
+	if directive := languageDirective(input.Language); directive != "" {
+		parts = append(parts, directive)
+		fragments = append(fragments, entryRenderedFragment{
+			LegacyID: "language.directive", Name: "Response language", Content: directive, Rendered: directive,
+		})
 	}
 	effective := strings.Join(parts, "\n\n")
-	if directive := languageDirective(input.Language); directive != "" {
-		effective += "\n\n" + directive
-	}
 	return BuildResult{
 		EffectivePrompt: effective, ContextRoot: contextRoot, ContextManifest: contextResources,
 		SharedRoot: sharedRoot, SharedManifest: sharedManifest,
-	}, nil
+	}, fragments, nil
 }
 
 // Migration preview data. The preview is computed from the existing override
