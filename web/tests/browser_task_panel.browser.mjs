@@ -221,13 +221,8 @@ window.fetch = async (input, init = {}) => {
     window.__attached = true;
     window.__released = false;
     if (window.__inUse && !window.__transferred) {
-      return json({error: {code: "browser_profile_in_use", message: "该 Profile 正由其他 Task 独占控制；请先让原 Task 释放，或由 Owner 显式转移控制权"}}, 409);
+      return json({error: {code: "browser_profile_in_use", message: "该浏览器正由其他 Task 使用；请先在对应 Task 关闭共享"}}, 409);
     }
-    return json({ok: true, grant: GRANT, session: GRANT.session});
-  }
-  if (path === "/api/v1/browser/profiles/browser_profile_1/transfer" && method === "POST") {
-    window.__transferred = true;
-    window.__inUse = false;
     return json({ok: true, grant: GRANT, session: GRANT.session});
   }
   if (path === "/api/v1/browser-grants/browser_grant_1" && method === "DELETE") {
@@ -405,11 +400,11 @@ try {
   const selector = page.locator("#desktop-browser-target");
   assert.equal(await selector.locator("#desktop-browser-profile").count(), 1);
   assert.equal(await selector.locator("#desktop-browser-refresh").count(), 1);
-  assert.equal(await selector.locator("#desktop-browser-switch").innerText(), "切换到所选目标");
+  assert.equal(await selector.locator("#desktop-browser-release").innerText(), "关闭共享浏览器");
   for (const forbidden of ["#desktop-browser-frame", "[data-browser-tab]", "#desktop-browser-url", "#desktop-browser-bookmarks", "#desktop-browser-open-form"]) {
     assert.equal(await selector.locator(forbidden).count(), 0, `target popover must not render ${forbidden}`);
   }
-  assert.match(await selector.locator("#desktop-browser-status").innerText(), /独占控制中/);
+  assert.match(await selector.locator("#desktop-browser-status").innerText(), /浏览器共享已开启/);
 
   // The main panel owns the Edge-style surfaces.
   const main = page.locator("#desktop-browser-control");
@@ -431,7 +426,7 @@ try {
   assert.ok(fill.previewHeight > fill.panelHeight * 0.5, `preview must fill the remaining height: ${JSON.stringify(fill)}`);
   // The two status lines are one bar at the bottom of the preview.
   const barText = await page.locator(".desktop-browser-statusbar").innerText();
-  assert.match(barText, /独占控制中/);
+  assert.match(barText, /浏览器共享中/);
   assert.match(barText, /实时画面/);
 
   // Edge order: tab strip, address bar, bookmark bar, preview.
@@ -911,7 +906,7 @@ try {
   const grantedBefore = await page.evaluate(() => window.__granted);
   await page.evaluate(() => window.__panel.release());
   await waitFor(page, () => document.querySelector("#desktop-browser-attach") !== null);
-  assert.match(await page.locator("#desktop-browser-status").innerText(), /获取独占控制/);
+  assert.match(await page.locator("#desktop-browser-status").innerText(), /共享开关/);
   assert.equal(await page.evaluate(() => window.__granted), grantedBefore, "release must not fire the close-popover callback");
   assert.equal(await page.locator("#desktop-browser-control .desktop-browser-empty-state").count(), 1);
   await page.evaluate(() => window.__panel.dispose());
@@ -924,7 +919,7 @@ try {
   await page.click("#desktop-browser-attach");
   await waitFor(page, () => window.__granted === 1);
   await page.waitForSelector("#desktop-browser-tabs");
-  assert.match(await page.locator("#desktop-browser-status").innerText(), /独占控制中/);
+  assert.match(await page.locator("#desktop-browser-status").innerText(), /浏览器共享已开启/);
   assert.equal(await page.evaluate(() => window.__deletes.length), deletesBeforeAttach, "acquiring must not close Owner pages");
   // The address bar follows the page opened from it.
   await page.fill("#desktop-browser-url", "https://manual.example/page");
@@ -945,13 +940,13 @@ try {
   assert.equal(await page.evaluate(() => window.__deletes.length), deletesBeforeAttach, "the start page must not replace Owner pages");
   await page.evaluate(() => window.__panel.dispose());
 
-  // 7. Transfer then release, without inventing a second control path.
+  // 7. A profile held by another Task has no transfer control: the single
+  // switch is disabled and the status says who must close it.
   await reset(page, {__mode: "tabs", __released: false, __inUse: true, __transferred: false, __opens: [], __opened: 0, __openedTabs: [], __granted: 0});
-  await page.waitForSelector("#desktop-browser-transfer", {timeout: 5000});
-  assert.match(await page.locator("#desktop-browser-status").innerText(), /其他 Task 独占控制/);
-  await page.click("#desktop-browser-transfer");
-  await waitFor(page, () => document.querySelector("#desktop-browser-switch") !== null);
-  await waitFor(page, () => window.__granted === 1);
+  await page.waitForSelector("#desktop-browser-attach", {timeout: 5000});
+  assert.equal(await page.locator("#desktop-browser-attach").isDisabled(), true);
+  assert.equal(await page.locator("#desktop-browser-transfer").count(), 0, "transfer control must not be shown");
+  assert.match(await page.locator("#desktop-browser-status").innerText(), /其他 Task 使用/);
   await page.evaluate(() => window.__panel.dispose());
 
   // 8. Missing host: explicit status, no frame traffic, no console errors.
@@ -1096,7 +1091,7 @@ try {
     __inUse: false, __transferred: false, __attached: true, __ownerTabs: [], __ownerClosed: [],
     __ownerNav: {}, __ownerActive: "", __frameErrorTab: "", __frameClosed: [], __syncRequests: 0,
     __syncHold: null, __syncHoldTaken: false, __syncHoldDone: false, __frames: 0, __granted: 0});
-  await page.waitForSelector("#desktop-browser-switch", {timeout: 5000});
+  await page.waitForSelector("#desktop-browser-release", {timeout: 5000});
   await page.waitForSelector("#desktop-browser-frame:not([hidden])", {timeout: 5000});
   await page.evaluate(() => {
     let release;
@@ -1129,7 +1124,7 @@ try {
     __inUse: false, __transferred: false, __attached: true, __ownerTabs: [], __ownerClosed: [],
     __ownerNav: {}, __ownerActive: "", __frameErrorTab: "", __frameClosed: [], __syncRequests: 0,
     __syncHold: null, __syncHoldTaken: false, __syncHoldDone: false, __frames: 0, __granted: 0});
-  await page.waitForSelector("#desktop-browser-switch", {timeout: 5000});
+  await page.waitForSelector("#desktop-browser-release", {timeout: 5000});
   await page.waitForSelector("#desktop-browser-frame:not([hidden])", {timeout: 5000});
   // Wait until a tab sync has just run, so the next read is the refresh click;
   // arm the gate and click in the same step to make that request the held one.
@@ -1180,7 +1175,7 @@ try {
     __inUse: false, __transferred: false, __attached: true, __ownerTabs: [], __ownerClosed: [],
     __ownerNav: {}, __ownerActive: "", __frameErrorTab: "", __frameClosed: [], __syncRequests: 0,
     __syncHold: null, __syncHoldTaken: false, __syncHoldDone: false, __frames: 0, __granted: 0});
-  await page.waitForSelector("#desktop-browser-switch", {timeout: 5000});
+  await page.waitForSelector("#desktop-browser-release", {timeout: 5000});
   await page.waitForSelector("#desktop-browser-frame:not([hidden])", {timeout: 5000});
   await page.evaluate(() => {
     window.__vis = "visible";
@@ -1211,8 +1206,8 @@ try {
   await waitFor(page, count => window.__syncRequests > count, {arg: syncsAfterRestore, timeout: 6000});
   assert.equal(await page.evaluate(() => document.querySelector("#desktop-browser-refresh").disabled), false,
     "the refresh button must stay usable after the stale refresh lands");
-  assert.equal(await page.evaluate(() => document.querySelector("#desktop-browser-switch").disabled), false,
-    "the switch button must stay usable after the stale refresh lands");
+  assert.equal(await page.evaluate(() => document.querySelector("#desktop-browser-release").disabled), false,
+    "the release switch must stay usable after the stale refresh lands");
   assert.equal(await page.evaluate(() => document.querySelector("#desktop-browser-frame").hidden), false,
     "the preview must recover after hidden→visible");
   await page.evaluate(() => { delete document.visibilityState; window.__vis = "visible"; });

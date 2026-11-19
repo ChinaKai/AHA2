@@ -1777,6 +1777,8 @@ const legacyEnglish: Record<string, string> = {
   "输入文字": "Enter text",
   "发送": "Send",
   "停止共享": "Stop sharing",
+  "关闭共享浏览器": "Close browser sharing",
+  "共享浏览器": "Share browser",
   "正在停止共享...": "Stopping sharing…",
   "正在切换共享目标": "Switching shared target",
   "复制": "Copy",

@@ -158,17 +158,17 @@ try {
   assert.equal(await page.locator(".desktop-browser-preview").isVisible(), true);
   assert.equal(await page.locator("#desktop-stop").isEnabled(), true);
 
-  // The target button reopens the picker; with a lease its primary action says
-  // "切换到所选目标" and contains no preview/tab/url/bookmarks.
+  // The target button reopens the picker; with sharing on its only control is
+  // the switch in the off position and no preview/tab/url/bookmarks.
   await page.click('[data-desktop-popover="targets"]');
   assert.equal(await page.locator("#desktop-targets-popover").isVisible(), true);
-  assert.equal(await page.locator("#desktop-browser-switch").innerText(), "切换到所选目标");
+  assert.equal(await page.locator("#desktop-browser-release").innerText(), "关闭共享浏览器");
   assert.equal(await popover.locator(".desktop-browser-preview").count(), 0);
   assert.equal(await popover.locator("#desktop-browser-tabs").count(), 0);
-  await page.click("#desktop-browser-switch");
+  await page.click('[data-desktop-popover="targets"]');
   assert.equal(await page.locator("#desktop-targets-popover").isVisible(), false);
 
-  // Header stop releases the browser lease instead of stopping a desktop share.
+  // Header stop closes the browser sharing switch instead of stopping a desktop share.
   const writesBefore = await page.evaluate(() => window.__opens.length);
   await page.click("#desktop-stop");
   await waitFor(page, () => window.__granted === null);
@@ -196,7 +196,7 @@ try {
   await page.click('[data-desktop-popover="targets"]');
   await page.selectOption("#desktop-control-mode", "display");
   await waitFor(page, () => window.__granted === null, {timeout: 5000});
-  assert.ok(await page.evaluate(() => window.__grantDeletes >= 1), "the accepted stop must release the lease after dispose");
+  assert.ok(await page.evaluate(() => window.__grantDeletes >= 1), "the accepted stop must close sharing after dispose");
   assert.equal(await page.locator("#desktop-browser-control").isVisible(), false);
   await page.evaluate(() => window.unmountPanel());
   assert.deepEqual(errors, []);

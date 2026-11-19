@@ -104,6 +104,17 @@ type BrowserTaskGrant struct {
 	UpdatedAt             time.Time `json:"updated_at"`
 }
 
+// Active reports whether the grant still authorizes work: it is not revoked
+// and has not passed an explicit expiry. A zero ExpiresAt is the Owner's
+// continuous switch: the grant stays active until it is released or its
+// session closes.
+func (item BrowserTaskGrant) Active(now time.Time) bool {
+	if !item.RevokedAt.IsZero() {
+		return false
+	}
+	return item.ExpiresAt.IsZero() || now.Before(item.ExpiresAt)
+}
+
 func (item BrowserTaskGrant) Status(now time.Time) string {
 	if !item.RevokedAt.IsZero() {
 		return BrowserGrantStatusRevoked

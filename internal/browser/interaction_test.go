@@ -214,6 +214,16 @@ func TestFileUploadAndDownloadLimits(t *testing.T) {
 	if err != nil || string(file.Data) != "a,b\n1,2\n" || strings.Contains(file.Download.Filename, "/") {
 		t.Fatalf("download=%#v err=%v", file, err)
 	}
+	// Downloads have no business size cap; a file past the old 10 MiB limit
+	// must pass through intact rather than be truncated or rejected.
+	f.host.DownloadFiles["download-0123456789abcdef01234567"] = browser.HostDownloadFile{
+		Download: browser.HostDownload{Filename: "large.bin"},
+		Data:     make([]byte, 11<<20),
+	}
+	large, err := f.service.Download(ctx, "agent", grant.ID, "download-0123456789abcdef01234567")
+	if err != nil || len(large.Data) != 11<<20 {
+		t.Fatalf("large download=%d bytes err=%v", len(large.Data), err)
+	}
 	for _, id := range []string{"../../etc/passwd", "download/../../x", "", strings.Repeat("a", 65)} {
 		if _, err := f.service.Download(ctx, "agent", grant.ID, id); browser.Code(err) != "browser_download_not_found" {
 			t.Fatalf("download id %q: %v", id, err)

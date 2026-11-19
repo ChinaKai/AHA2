@@ -248,11 +248,13 @@ func (s *Store) BrowserTaskGrants(ctx context.Context, taskID string) ([]domain.
 }
 
 // BrowserTaskGrantsForProfileActive returns unrevoked, unexpired grants for a
-// profile. Profile deletion uses it to avoid orphaning a live Task permission.
+// profile. An empty expires_at means the Owner switch is on and the grant has
+// no time limit; only an explicit release or session close clears it. Profile
+// deletion uses it to avoid orphaning a live Task permission.
 func (s *Store) BrowserTaskGrantsForProfileActive(ctx context.Context, profileID string, now time.Time) ([]domain.BrowserTaskGrant, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+browserGrantColumns+` FROM browser_task_grants
-		 WHERE profile_id=? AND revoked_at='' AND expires_at>? ORDER BY created_at`, profileID, timeString(now))
+		 WHERE profile_id=? AND revoked_at='' AND (expires_at='' OR expires_at>?) ORDER BY created_at`, profileID, timeString(now))
 	if err != nil {
 		return nil, err
 	}
@@ -341,7 +343,7 @@ func (s *Store) AcquireBrowserTaskGrantExclusive(ctx context.Context, item domai
 		}
 		if existing.TaskID == item.TaskID {
 			if existing.ProfileID == item.ProfileID {
-				if existing.ExpiresAt.After(now) {
+				if existing.Active(now) {
 					copy := existing
 					existingLease = &copy
 					continue
@@ -349,14 +351,14 @@ func (s *Store) AcquireBrowserTaskGrantExclusive(ctx context.Context, item domai
 				revoked = append(revoked, existing)
 				continue
 			}
-			if existing.ExpiresAt.After(now) {
+			if existing.Active(now) {
 				rows.Close()
 				return domain.BrowserTaskGrant{}, nil, false, &BrowserTaskProfileLimitError{Grant: existing}
 			}
 			revoked = append(revoked, existing)
 			continue
 		}
-		if existing.ExpiresAt.After(now) {
+		if existing.Active(now) {
 			rows.Close()
 			return domain.BrowserTaskGrant{}, nil, false, &BrowserProfileInUseError{Grant: existing}
 		}
@@ -429,7 +431,7 @@ func (s *Store) TransferBrowserTaskGrantExclusive(ctx context.Context, oldGrantI
 	if err != nil {
 		return domain.BrowserTaskGrant{}, err
 	}
-	if !old.RevokedAt.IsZero() || !old.ExpiresAt.After(now) || old.ProfileID != item.ProfileID {
+	if !old.Active(now) || old.ProfileID != item.ProfileID {
 		return domain.BrowserTaskGrant{}, ErrBrowserAccessInactive
 	}
 	// The target Task must not already control another Profile; the Owner can
@@ -457,7 +459,7 @@ func (s *Store) TransferBrowserTaskGrantExclusive(ctx context.Context, oldGrantI
 		return domain.BrowserTaskGrant{}, err
 	}
 	for _, lease := range otherLeases {
-		if lease.ExpiresAt.After(now) {
+		if lease.Active(now) {
 			return domain.BrowserTaskGrant{}, &BrowserTaskProfileLimitError{Grant: lease}
 		}
 		if _, err := tx.ExecContext(ctx,
@@ -503,7 +505,7 @@ func (s *Store) CreateBrowserTaskGrant(ctx context.Context, item domain.BrowserT
 	// the new insert fail. Revoking expired rows here is still forward-only.
 	if _, err := s.db.ExecContext(ctx,
 		`UPDATE browser_task_grants SET revoked_at=?,updated_at=?
-		 WHERE task_id=? AND profile_id=? AND revoked_at='' AND expires_at<=?`,
+		 WHERE task_id=? AND profile_id=? AND revoked_at='' AND expires_at<>'' AND expires_at<=?`,
 		timeString(now), timeString(now), item.TaskID, item.ProfileID, timeString(now)); err != nil {
 		return err
 	}
@@ -721,7 +723,7 @@ func (s *Store) UpsertBrowserTabForActiveGrant(ctx context.Context, item domain.
 		FROM browser_task_grants g
 		JOIN browser_sessions s ON s.id=g.session_id
 		WHERE g.id=? AND g.task_id=? AND g.session_id=?
-		  AND g.revoked_at='' AND g.expires_at>?
+		  AND g.revoked_at='' AND (g.expires_at='' OR g.expires_at>?)
 		  AND s.state<>'closed'
 		  AND NOT EXISTS(
 			SELECT 1 FROM browser_sessions other
