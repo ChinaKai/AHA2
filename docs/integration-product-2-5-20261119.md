@@ -3,7 +3,7 @@
 - 日期：2026-11-19
 - 集成分支：`integration/product-2-5-20261119`
 - base：`5008f0b629e5b06983a08fe71866901b54fa884c`（main，task-659）
-- 合并后代码 HEAD：`254f45a`（含 task-664 修复；四次 merge 的代码合并点是 `03bb2f1`）
+- 合并后代码 HEAD：`7db9f64`（task-668 评审阻塞修复；此前依次为四次 merge 的 `03bb2f1`、task-664 修复 `254f45a`）
 - main 未修改，仍为 `5008f0b629e5b06983a08fe71866901b54fa884c`
 - 未 push、未合 main、未部署；未修改 DB/vault/凭据，未修改提示词正文
 
@@ -161,4 +161,62 @@ TMPDIR=/tmp go test ./internal/app \
 4. **`CodexAccountID` 回读路径**：确认历史运行时模型（无该字段）和账号删除后的宠物/渠道设置展示不会误报。
 5. task-662/663/665 的代码未变，第 4 节原有评审重点仍然有效。
 6. 未覆盖：真实 Chromium 用例、`*.browser.mjs`、端到端启动、打包与安装。
+
+## 7. 评审阻塞项修复（task-668）
+
+唯一一次 Claude native Opus 5.5 评审给出 `REQUEST_CHANGES`，三个阻塞项及修复如下。修复提交 `7db9f64`（父 `5ebaa75`），已用 `git merge --ff-only` 快进到集成分支。
+
+### 7.1 三个阻塞项
+
+| # | 阻塞项 | 问题 | `7db9f64` 的修复 |
+| --- | --- | --- | --- |
+| 1 | task-662 同名技能与项目级 vault 门禁 | 不同项目/scope 的同名技能包目录会互相覆盖；宠物项目级技能只在存在性校验时看 vault 开关，实际加载仍读得到被门禁的技能 | 技能包目录按 `skills/global/<slug>` 与 `skills/project/<projectID>/<slug>` 隔离；同 scope 重名按出现顺序确定性加后缀，不静默覆盖；存在性校验与实际加载两处都检查 `vaultReadEnabled(skill.ProjectID)`，全局技能继续用全局开关，被门禁技能从结果排除并给一次性告警 |
+| 2 | task-663 下载整包缓冲与超时 | Go 侧把宿主下载响应体整体读入内存，且 stream client 受总超时限制，大文件会占内存/超时；宿主侧 `fs.readFile` 同样整包读入 | Go 改为流式转发，新增无总超时的 stream client（保留拨号与响应头超时），context 随客户端断开取消；非 2xx 先判状态并最多读 64 KiB 错误体；成功路径才写成功头，Content-Length 仅大小已知时设置；三条路径都关闭宿主响应体。宿主 `createReadStream` 直接 pipe，断开/流错误时销毁读流 |
+| 3 | task-664 无效宠物模型阻塞设置保存 | 已删除的模型/账号会让宠物设置页无法关闭或改权限；自动选择官方账号时静默取第一个；错误暴露 `sql: no rows` | 模型选择未变化时跳过重新解析，已删除的模型/账号不再阻塞关闭宠物或改权限；实际变更仍拒绝保存并输出中文业务错误；官方账号自动选择只考虑已配置且 `ready` 的账号，0 个/多个分别报错。渠道 runtime 同样在 `runtime_default` 未变时跳过重新校验，保留 proxy/effort 等非身份字段 |
+
+附带修复：MCP lease 的零值 `expires_at` 不再输出 `0001-01-01T00:00:00Z`。
+
+### 7.2 触碰文件
+
+21 个文件，+1,140 / −113：19 个修改 + 2 个新测试文件。
+
+- 新增测试：`internal/browser/host_download_test.go`、`internal/httpapi/browser_download_stream_test.go`
+- browser-host：`downloads.mjs`、`server.mjs`、`interaction.test.mjs`
+- Go：`internal/app/{pet.go,pet_model_source_test.go,pet_task_cross_skill_test.go,service_test.go,vault_skills.go}`；`internal/browser/{host.go,interaction.go,interaction_test.go}`；`internal/channel/{service.go,runtime_source_test.go}`；`internal/httpapi/{agent_browser_mcp.go,agent_browser_mcp_test.go,browser_handlers.go,browser_interaction_handlers_test.go}`；`internal/prompt/{registry.go,registry_test.go}`
+
+### 7.3 验证结果
+
+- `254f45a` 时（task-664 修复后）：`go build`、`go test ./...` 32 包、Web build、Web 613/613、browser-host 55 pass/6 skip 全通过。
+- `7db9f64` 合入后的最终全量结果见第 7.4 节（本节随全量执行追加）。
+
+### 7.4 `7db9f64` 最终全量
+
+环境：Linux builder，go1.27.4，node v24.21.0；命令串行，每步前检查 `/tmp`（可用 1.3–1.4G，≥1G 门槛）。
+
+| # | 命令 | 退出码 | 耗时 | 结果 |
+| --- | --- | --- | --- | --- |
+| 1 | `go build ./...` | 0 | 4s | 通过 |
+| 2 | `TMPDIR=/tmp go test ./... -count=1 -timeout 1800s` | 1 | 225s | 31 个包 ok；`internal/httpapi` 被 `signal: killed`，无断言失败 |
+| 3 | `cd web && npm run build` | 0 | 1s | 通过；`app.dfa2537cd71d.js`，`build/model_source_picker.js`（14,771 字节） |
+| 4 | `cd web && npm test` | 0 | 2s | 613 tests / 613 pass / 0 fail |
+| 5 | `cd browser-host && npm test` | 0 | 7s | 61 tests / 55 pass / 6 skipped / 0 fail |
+
+`internal/httpapi` 的排查：
+
+1. 全量里是进程被 `signal: killed`（198.9s），日志只有大量 slow request（`workspaces/.../detect` 单次 64.9s），没有断言失败或 panic 输出。
+2. 单包复跑第 1 次（107s）只出现一次 `TempDir RemoveAll cleanup: directory not empty`，属后台写入与清理竞态；目标用例单独 `-count=3` 全部通过。
+3. 单包复跑第 2 次（136s）整包 `ok`。
+
+结论：不是确定性源码失败，归为资源/并发压力下的 killed + 一次清理竞态 flaky。其余 31 个包在 225s 全量里全部通过，包括 task-668 新增的 `internal/browser`、`internal/prompt`、`internal/app` 测试。
+
+Web 构建/测试期间 `web/node_modules` 仍被外部清理，临时软链到主 checkout 的依赖，结束后已移除；未写入源码或提交。
+
+### 7.5 残余风险
+
+1. **大文件下载只有单元/流式契约测试**：没有端到端下载真实大文件（数百 MB）验证内存峰值、客户端中途断开和宿主错误码解析；真实 Chromium 用例仍需 `AHA2_PLAYWRIGHT_MODULE`。
+2. **无总超时的 stream client**：这是流式下载的刻意选择（保留拨号与响应头超时），长连接的终止依赖客户端断开、宿主错误或上层 context；需要评审确认服务端没有残留的全局读写超时会把大文件截断，以及僵尸连接能被及时回收。
+3. **技能上下文目录换布局**：`skillResources` 现在写到 `skills/global/<slug>` 与 `skills/project/<projectID>/<slug>`，同 scope 重名加后缀。需要确认长期存在的 Task 上下文目录里旧的扁平 `skills/<slug>` 文件不会作为重复技能残留。
+4. **宠物项目级 vault 门禁**：`vaultSkillReadEnabled` 按每个技能的 scope/project 判定，存在性校验和实际加载两处都走同一函数；一次性的缺失告警按 project + id 集合去重，多项目混合选择时是否只出一条可操作告警需要人工确认。
+5. **宠物设置跳过重新解析**：运行时选择未变化时跳过校验，意味着后台删除模型/账号后仍可关闭宠物或改权限（产品意图），但“实际变更才拒绝”的边界需要评审确认不会让失效运行时继续跑。
+6. 首屏预算与 `data-account-id`/`CodexAccountID` 回读风险仍按第 6.3 节保留。
 
