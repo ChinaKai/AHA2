@@ -3,7 +3,7 @@
 - 日期：2026-11-19
 - 集成分支：`integration/product-2-5-20261119`
 - base：`5008f0b629e5b06983a08fe71866901b54fa884c`（main，task-659）
-- 合并后代码 HEAD：`03bb2f1e99281a6c76fe871329bcc99a71b4f9cf`（集成分支 tip 另含本报告的 docs 提交）
+- 合并后代码 HEAD：`254f45a`（含 task-664 修复；四次 merge 的代码合并点是 `03bb2f1`）
 - main 未修改，仍为 `5008f0b629e5b06983a08fe71866901b54fa884c`
 - 未 push、未合 main、未部署；未修改 DB/vault/凭据，未修改提示词正文
 
@@ -117,3 +117,48 @@ cd ../browser-host && npm test
 TMPDIR=/tmp go test ./internal/app \
   -run '^TestCreateTaskSelectsOfficialCodexModelFromAccount$' -count=1 -timeout 300s -v
 ```
+
+## 6. 最终状态（task-664 修复后）
+
+- 修复提交：`254f45a`「fix(model): 修复模型来源选择的集成测试与首屏预算（task-664）」，父 `1ad8d1a`，分支 `aha/task_d6f7b88d4216ef52b48a`
+- 合并方式：`git merge --ff-only aha/task_d6f7b88d4216ef52b48a` 快进，无冲突、无强推；代码 tip `254f45a`
+- main 仍为 `5008f0b629e5b06983a08fe71866901b54fa884c`；未 push、未合 main、未部署
+- 本报告在 `254f45a` 之上以一笔 docs commit 提交，最终分支 tip 以 `git log -1` 为准，其父为 `254f45a`
+
+### 6.1 最终全量结果
+
+环境：Linux builder，go1.27.4，node v24.21.0；`/tmp` 每步前检查，可用空间稳定在 1.4G（≥1G 门槛）。命令串行执行，无并发。
+
+| # | 命令 | 退出码 | 耗时 | 结果 |
+| --- | --- | --- | --- | --- |
+| 1 | `go build ./...` | 0 | 1s | 通过 |
+| 2 | `go test ./... -count=1 -timeout 1800s` | 0 | 131s | 32 个包全部 ok，无失败 |
+| 3 | `cd web && npm run build` | 0 | 1s | 通过；`app.dfa2537cd71d.js`，生成 `build/model_source_picker.js`（14,771 字节） |
+| 4 | `cd web && npm test` | 0 | 2s | 613 tests / 613 pass / 0 fail |
+| 5 | `cd browser-host && npm test` | 0 | 7s | 61 tests / 55 pass / 6 skipped / 0 fail |
+
+上一轮的 4 个失败面全部清掉：`internal/app` 的 `CodexAccountID` 契约、Web 缺 `model_source_picker.js`、标签语言与 `data-account-id` 断言、首屏预算。
+
+环境说明：本 worktree 的 `web/node_modules` 在验证前被外部清理，构建/测试期间临时软链到主 checkout 的 `web/node_modules`，结束后已移除；未写入任何源码或提交。
+
+### 6.2 flaky、跳过与基线对照
+
+| 项 | 本轮 | 基线/上一轮 | 判定 |
+| --- | --- | --- | --- |
+| `TestOwnerMessageIsDeliveredInsideActiveMainTurn` | 全量通过 | 上一轮并发全量超时（19.4s），单跑两次通过 | 并发 flaky，非确定性失败 |
+| `internal/httpapi` | 全量通过（131s 整体） | 上一轮并发全量失败，单跑 218s 通过 | 并发干扰，非源码失败 |
+| browser-host 6 skip | skip | 同上 | 需 `AHA2_PLAYWRIGHT_MODULE` 的真实 Chromium 用例，环境缺口 |
+| `web/tests/*.browser.mjs` | 未运行 | `npm test` 只匹配 `tests/*.test.mjs` | 浏览器用例未覆盖，环境缺口 |
+| 首屏预算 | 270,972 ≤ 271,104 | 上一轮实测 270,412，阈值 269,824 | 修复后按最终产物重测并上调到下一个 256 字节边界 |
+
+### 6.3 残余风险与评审重点
+
+给唯一一次 Claude native Opus 5.5 评审的重点，按优先级：
+
+1. **task-664 修复 diff（`254f45a`，6 文件 +116/−55）**：`moduleNames` 接线；选择器文案改走共享 i18n（中文留在懒加载模块、英文本地化在 `i18n.ts` 补 22 条）；账号属性统一 `data-account-id` 并用 `dataset.accountId` 回读、空账号不输出空属性；`build.test.mjs` 改断言真实生成的两个 select id；`CodexAccountID` 保留赋值并把既有测试契约改为 `account.ID`，新增空账号/不存在账号拒绝用例。重点看这是否改变宠物设置的回读语义。
+2. **首屏预算余量只有 132 字节**（270,972 / 271,104，JS 218,689 + CSS 52,283）；后续任何首屏静态 chunk 改动都要重新测量，不能再靠“补一行”过关。
+3. **`data-account-id` → `dataset.accountId` 的回读**：Node 单测只验证字符串输出，真实 DOM 的 dataset 大小写转换、以及既有 HTML 里残留的 `data-accountId` 需要浏览器侧确认。
+4. **`CodexAccountID` 回读路径**：确认历史运行时模型（无该字段）和账号删除后的宠物/渠道设置展示不会误报。
+5. task-662/663/665 的代码未变，第 4 节原有评审重点仍然有效。
+6. 未覆盖：真实 Chromium 用例、`*.browser.mjs`、端到端启动、打包与安装。
+
