@@ -39,6 +39,22 @@ PUT  /api/v1/prompts/templates/{id}
 POST /api/v1/prompts/templates/{id}/reset
 ```
 
+## 阶段 3 模板收敛（3a 只读层）
+
+阶段 3 把模板组织为两个顶层入口：`core`（安全、身份、角色、渠道、Agent API 与附件边界）和
+`task-context`（协作策略、知识协议、Task/Workspace、Inbox 与生成文件）。3a 只建立只读的注册
+与预览层，不切换渲染、不改写数据库：
+
+- 旧模板 ID 全部保留，并作为别名解析到 `入口#锚点`（例如 `role.main` -> `core#role-main`）。
+  旧 ID 的版本在映射表中冻结；内置模板升版时必须有意识地更新该冻结值。
+- `context.task`、`context.recent-context`、`context.recovery-handoff`、`context.turn-diagnostics`、
+  `context.hardware`、`context.mail`、`context.attachments-index` 是代码生成的动态片段：可预览，
+  在新的入口模型中不可单独编辑。`protocol.attachment-delivery` 与三个 `resource.*` 保持只读。
+- 迁移预览只读取现有 `prompt_template_overrides`：按锚点合并可迁移的 override，列出动态/只读
+  锚点冲突、未知模板的孤儿 override，以及旧路径已忽略的过期内置覆盖；不写库、不静默覆盖。
+- 有效提示词在本阶段保持不变：生产仍走旧 `Build` 路径；入口模型渲染器只用于逐字等价基线。
+  Web 的入口/迁移预览界面留到下一阶段。
+
 Main/Sub、Auto/Single 等模板的运行时选择由 Prompt Engine 按当前 Agent 和 Task 状态固定完成，不作为用户可配置的路由系统。
 
 ## Available context
