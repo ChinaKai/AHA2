@@ -236,29 +236,7 @@ func scenarioShapeFor(id string) (scenarioShape, bool) {
 // scenarios and overlong messages fail before any rendering so no partial
 // snapshot can leak into the response.
 func (engine *Engine) PreviewScenario(ctx context.Context, scenarioID, message, source, language string) (ScenarioPreview, error) {
-	spec, ok := scenarioSpecByID(strings.TrimSpace(scenarioID))
-	if !ok {
-		return ScenarioPreview{}, fmt.Errorf("%w: %s", ErrUnknownScenario, scenarioID)
-	}
-	shape, _ := scenarioShapeFor(spec.ID)
-	message = strings.TrimSpace(message)
-	if message == "" {
-		message = DefaultScenarioTestMessage
-	}
-	if len([]rune(message)) > MaxScenarioTestMessageRunes {
-		return ScenarioPreview{}, fmt.Errorf("%w: max %d runes", ErrScenarioMessageTooLong, MaxScenarioTestMessageRunes)
-	}
-	source = strings.TrimSpace(strings.ToLower(source))
-	sourceSpec := spec.DefaultMessageSource()
-	if source != "" {
-		found, ok := spec.messageSource(source)
-		if !ok {
-			return ScenarioPreview{}, fmt.Errorf("%w: %s", ErrInvalidMessageSource, source)
-		}
-		sourceSpec = found
-	}
-
-	input, effectiveSource, err := engine.scenarioBuildInput(ctx, shape, message, sourceSpec.ID, language)
+	spec, sourceSpec, effectiveSource, input, err := engine.scenarioPreviewInput(ctx, scenarioID, message, source, language)
 	if err != nil {
 		return ScenarioPreview{}, err
 	}
@@ -281,6 +259,42 @@ func (engine *Engine) PreviewScenario(ctx context.Context, scenarioID, message, 
 		MessageSourceName: sourceSpec.Name,
 		ContextFiles:      files,
 	}, nil
+}
+
+// scenarioPreviewInput validates the request and builds the synthetic Turn
+// input. Both the prompt preview and the structure preview use it, so they can
+// never disagree about which scenario/source/message they are showing.
+func (engine *Engine) scenarioPreviewInput(
+	ctx context.Context,
+	scenarioID, message, source, language string,
+) (ScenarioSpec, ScenarioMessageSource, string, BuildInput, error) {
+	spec, ok := scenarioSpecByID(strings.TrimSpace(scenarioID))
+	if !ok {
+		return ScenarioSpec{}, ScenarioMessageSource{}, "", BuildInput{}, fmt.Errorf("%w: %s", ErrUnknownScenario, scenarioID)
+	}
+	shape, _ := scenarioShapeFor(spec.ID)
+	message = strings.TrimSpace(message)
+	if message == "" {
+		message = DefaultScenarioTestMessage
+	}
+	if len([]rune(message)) > MaxScenarioTestMessageRunes {
+		return ScenarioSpec{}, ScenarioMessageSource{}, "", BuildInput{}, fmt.Errorf("%w: max %d runes", ErrScenarioMessageTooLong, MaxScenarioTestMessageRunes)
+	}
+	source = strings.TrimSpace(strings.ToLower(source))
+	sourceSpec := spec.DefaultMessageSource()
+	if source != "" {
+		found, ok := spec.messageSource(source)
+		if !ok {
+			return ScenarioSpec{}, ScenarioMessageSource{}, "", BuildInput{}, fmt.Errorf("%w: %s", ErrInvalidMessageSource, source)
+		}
+		sourceSpec = found
+	}
+
+	input, effectiveSource, err := engine.scenarioBuildInput(ctx, shape, message, sourceSpec.ID, language)
+	if err != nil {
+		return ScenarioSpec{}, ScenarioMessageSource{}, "", BuildInput{}, err
+	}
+	return spec, sourceSpec, effectiveSource, input, nil
 }
 
 func (engine *Engine) scenarioBuildInput(
