@@ -1648,6 +1648,12 @@ dialog.agent-config-dialog { width: min(760px,calc(100vw - 32px)); }
 .task-skill-option { display: grid; grid-template-columns: 18px minmax(0,1fr); align-items: start; gap: 7px; min-width: 0; margin: 0; padding: 8px; border: 1px solid #e2e8f0; border-radius: 5px; background: #fff; }
 .task-skill-option input { width: 15px; height: 15px; margin-top: 1px; }
 .task-skill-option.task-skill-unavailable { grid-template-columns: minmax(0,1fr); border-style: dashed; background: var(--color-surface-muted); }
+.task-skill-option.task-skill-disabled { opacity: .62; border-style: dashed; background: var(--color-surface-muted); }
+.task-skill-option.task-skill-disabled input { cursor: not-allowed; }
+.task-skill-search { grid-column: 1 / -1; display: flex; align-items: center; gap: 6px; }
+.task-skill-search input { flex: 1; min-width: 0; }
+.task-skill-search-empty { grid-column: 1 / -1; }
+.task-skill-project-label { grid-column: 1 / -1; padding-top: 2px; color: var(--muted); font-size: 9px; font-weight: 700; }
 .task-skill-option strong, .task-skill-option small { display: block; overflow: hidden; text-overflow: ellipsis; }
 .task-skill-option strong { font-size: 10px; }
 .task-skill-option small { margin-top: 3px; color: var(--muted); font-size: 9px; white-space: nowrap; }

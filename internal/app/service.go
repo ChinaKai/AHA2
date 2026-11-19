@@ -655,7 +655,7 @@ func (s *Service) CreateTask(ctx context.Context, input CreateTaskInput) (domain
 		}
 		input.SkillIDs = mergeSkillIDs(input.SkillIDs, autoIDs)
 	}
-	skillIDs, err := s.validateTaskSkillIDs(ctx, project.ID, input.SkillIDs)
+	skillIDs, err := s.validateTaskSkillIDs(ctx, strings.TrimSpace(input.ID), project.ID, input.SkillIDs)
 	if err != nil {
 		return domain.Task{}, err
 	}
@@ -782,7 +782,12 @@ func knowledgeEnabled(_ domain.Project, task domain.Task) bool {
 	return domain.KnowledgeEnabled(task)
 }
 
-func (s *Service) validateTaskSkillIDs(ctx context.Context, projectID string, ids []string) ([]string, error) {
+func (s *Service) validateTaskSkillIDs(ctx context.Context, taskID, projectID string, ids []string) ([]string, error) {
+	// The Pet Task is the owner's system administrator: it may select any
+	// project's skills even though project_pet itself has no vault space. Every
+	// other Task keeps the project-scoped rule, so neither a system project nor
+	// a caller-chosen id can use this as a permission bypass.
+	petTask := strings.TrimSpace(taskID) == petTaskID && strings.TrimSpace(projectID) == petProjectID
 	result := make([]string, 0, len(ids))
 	seen := map[string]bool{}
 	appendID := func(id string) {
@@ -803,7 +808,11 @@ func (s *Service) validateTaskSkillIDs(ctx context.Context, projectID string, id
 		if !knowledgevault.IsVaultSkillID(id) {
 			return nil, fmt.Errorf("skill %s is unavailable: legacy skill ids no longer resolve after the vault cutover", id)
 		}
-		if !s.vaultSkillExistsInProject(ctx, projectID, id) {
+		if petTask {
+			if !s.vaultSkillExistsForPet(ctx, id) {
+				return nil, fmt.Errorf("vault skill %s is unavailable for the pet Task", id)
+			}
+		} else if !s.vaultSkillExistsInProject(ctx, projectID, id) {
 			return nil, fmt.Errorf("vault skill %s is unavailable for this project", id)
 		}
 		appendID(id)
@@ -839,7 +848,7 @@ func (s *Service) UpdateTaskSkills(ctx context.Context, taskID string, ids []str
 	if err != nil {
 		return domain.Task{}, err
 	}
-	validated, err := s.validateTaskSkillIDs(ctx, task.ProjectID, ids)
+	validated, err := s.validateTaskSkillIDs(ctx, taskID, task.ProjectID, ids)
 	if err != nil {
 		return domain.Task{}, err
 	}
@@ -860,6 +869,12 @@ func (s *Service) activeTaskSkills(ctx context.Context, task domain.Task) []doma
 			continue
 		}
 		vaultIDs = append(vaultIDs, id)
+	}
+	if task.ID == petTaskID && task.ProjectID == petProjectID {
+		// The Pet Task is the system administrator view: its explicit selection
+		// may reference any project's vault package. The normal infrastructure
+		// path stays global-only for every other system project.
+		return s.vaultPetTaskSkills(ctx, vaultIDs)
 	}
 	return s.vaultTaskSkills(ctx, task.ProjectID, vaultIDs)
 }

@@ -13,6 +13,11 @@ export type VaultTaskSkillBundle = {
   skills: Skill[];
 };
 
+// The Pet Task's system project. The Web already uses this id to recognise the
+// pet (for example the built-in pet MCP), so the skill picker follows the same
+// identity instead of adding a second "is pet" flag to every API.
+export const PET_PROJECT_ID = "project_pet";
+
 function asTaskSkill(skill: KnowledgeVaultSkill): Skill | null {
   // Archives are read-only and never apply to a task. Mapping them to a global
   // scope used to offer an option that the server rejects at submit time.
@@ -22,12 +27,16 @@ function asTaskSkill(skill: KnowledgeVaultSkill): Skill | null {
     package_slug: skill.slug,
     scope: skill.scope,
     project_id: skill.project_id,
+    project_name: skill.project_name,
     name: skill.name,
     description: skill.description || "",
     instructions: "",
-    version: 1,
-    status: "active",
-    enabled: true,
+    version: skill.version || 1,
+    status: skill.status || "active",
+    // Keep the server's state: the Pet Task picker must show disabled entries
+    // and cannot offer them for selection.
+    enabled: skill.enabled !== false,
+    unavailable_reason: skill.unavailable_reason,
     auto_attach: skill.auto_attach && skill.auto_attach_effective,
     source: "vault",
     source_path: skill.open_path,
@@ -56,6 +65,10 @@ export async function loadVaultTaskSkills(): Promise<VaultTaskSkillBundle> {
   }
 }
 
+export function isPetTaskProject(projectID: string): boolean {
+  return projectID === PET_PROJECT_ID;
+}
+
 export function vaultTaskSkillsForProject(
   skills: Skill[],
   runtimeRead: boolean,
@@ -65,15 +78,24 @@ export function vaultTaskSkillsForProject(
   includeIDs: string[] = [],
 ): Skill[] {
   const included = new Set(includeIDs);
+  const pet = isPetTaskProject(projectID);
   const applicable = skills.filter(skill => {
     if (included.has(skill.id)) return true;
-    if (!runtimeRead || !indexReady || !projectID) return false;
+    if (!projectID) return false;
+    // The Pet Task is the owner's system administrator view: it sees global
+    // skills and every project's skills without owning a project vault space.
+    // Disabled entries stay in the list so the picker can show their state, but
+    // the picker disables them and the server rejects them on save.
+    if (pet) return skill.scope === "global" || skill.scope === "project";
+    if (!runtimeRead || !indexReady) return false;
     if (skill.scope === "project") return skill.project_id === projectID;
     return skill.scope === "global" && boundProjects.includes(projectID);
   });
   // The same slug may exist globally and in the project library. Keep one so
   // the prompt never lists two Selected Skills for the same package; the
-  // project copy wins because it is the more specific choice.
+  // project copy wins because it is the more specific choice. The pet view is
+  // grouped by project, so two projects may intentionally offer the same slug.
+  if (pet) return applicable;
   const bySlug = new Map<string, Skill>();
   for (const skill of applicable) {
     const slug = skill.package_slug || skill.id;
@@ -93,13 +115,17 @@ export function vaultTaskSkillHint(
   if (!available || !projectID) return "";
   if (!runtimeRead) return "知识库运行时读取未开启，vault 技能暂不可用。";
   if (!indexReady) return "知识库索引尚未就绪，vault 技能暂不可用。";
+  // The pet has no project binding of its own; its cross-project view is the
+  // designed state, so the normal "project is not bound" warning is wrong.
+  if (isPetTaskProject(projectID)) return "";
   if (!boundProjects.includes(projectID)) return "当前项目未绑定知识库项目库，vault 技能不会出现在这里。";
   return "";
 }
 
 // vaultTaskSkillSourceActive mirrors the server gate: a project takes its
 // auto-attach source from the vault only when the vault is enabled, runtime
-// reads are on, the index is ready and the project is bound.
+// reads are on, the index is ready and the project is bound. The Pet Task reads
+// global auto-attach preferences through the global gate, without a binding.
 export function vaultTaskSkillSourceActive(
   available: boolean,
   runtimeRead: boolean,
@@ -107,7 +133,9 @@ export function vaultTaskSkillSourceActive(
   boundProjects: string[],
   projectID: string,
 ): boolean {
-  return Boolean(projectID) && available && runtimeRead && indexReady && boundProjects.includes(projectID);
+  if (!projectID) return false;
+  if (isPetTaskProject(projectID)) return available && runtimeRead && indexReady;
+  return available && runtimeRead && indexReady && boundProjects.includes(projectID);
 }
 
 // taskAutoSkillIDs pre-selects the vault auto-attach preferences that are

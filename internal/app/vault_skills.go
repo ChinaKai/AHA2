@@ -45,6 +45,9 @@ type VaultSkillView struct {
 	// archive skills. Global skills leave it empty so the UI keeps "全局".
 	ProjectName         string   `json:"project_name,omitempty"`
 	Description         string   `json:"description,omitempty"`
+	Version             int      `json:"version"`
+	Status              string   `json:"status"`
+	Enabled             bool     `json:"enabled"`
 	FileCount           int      `json:"file_count"`
 	Files               []string `json:"files,omitempty"`
 	RelativePath        string   `json:"relative_path"`
@@ -84,12 +87,19 @@ func (s *Service) vaultSkillPreferences(ctx context.Context) map[string]domain.V
 
 // VaultSkillCatalog lists vault skills with auto-attach state. When projectID
 // is set, global skills report project_bound and the effective flag for that
-// project; project skills from other projects stay out of the result.
+// project; project skills from other projects stay out of the result. The Pet
+// Task's system project is the one exception: it is the owner's system
+// administrator view, so every project's skills stay visible and selectable
+// instead of being hidden behind a project binding it does not own.
 func (s *Service) VaultSkillCatalog(ctx context.Context, projectID string) (VaultSkillCatalog, error) {
 	if s == nil || s.knowledgeVault == nil {
 		return VaultSkillCatalog{}, knowledgevault.ErrDisabled
 	}
 	projectID = strings.TrimSpace(projectID)
+	// petCatalog is scoped by the project id the caller asks about, never by a
+	// Task's target project: a normal project (even a system one) must keep the
+	// existing single-project visibility.
+	petCatalog := projectID == petProjectID
 	preferences := s.vaultSkillPreferences(ctx)
 	projectNames := s.vaultProjectNames(ctx)
 	result := VaultSkillCatalog{RuntimeRead: s.knowledgeVaultRuntimeRead, Skills: []VaultSkillView{}}
@@ -106,18 +116,19 @@ func (s *Service) VaultSkillCatalog(ctx context.Context, projectID string) (Vaul
 			return err
 		}
 		for _, skill := range response.Skills {
-			if projectID != "" && skill.Scope == "project" && skill.ProjectID != projectID {
+			if projectID != "" && !petCatalog && skill.Scope == "project" && skill.ProjectID != projectID {
 				continue
 			}
 			preference := preferences[skill.Key]
 			bound := true
-			if projectID != "" {
+			if projectID != "" && !petCatalog {
 				bound = projectBound
 			}
 			view := VaultSkillView{
 				Key: skill.Key, ID: skill.ID, Slug: skill.Slug, Name: skill.Name,
 				Scope: skill.Scope, ProjectID: skill.ProjectID, Library: skill.Library,
-				Description: skill.Description, FileCount: skill.FileCount, Files: skill.Files,
+				Description: skill.Description, Version: skill.Version, Status: skill.Status,
+				Enabled: skill.Enabled, FileCount: skill.FileCount, Files: skill.Files,
 				RelativePath: skill.RelativePath, AbsolutePath: skill.AbsolutePath, OpenPath: skill.OpenPath,
 				Source: "vault", AutoAttach: preference.AutoAttach,
 				AutoAttachConfirmed: !preference.GlobalAttachConfirmedAt.IsZero(),
@@ -129,7 +140,14 @@ func (s *Service) VaultSkillCatalog(ctx context.Context, projectID string) (Vaul
 				view.AutoAttachEffective = preference.AutoAttach && result.RuntimeRead && result.IndexReady && bound &&
 					(skill.Scope != "global" || view.AutoAttachConfirmed)
 			}
-			view.UnavailableReason = vaultSkillUnavailableReason(result.RuntimeRead, result.IndexReady, projectID, bound, view.CanUpdate)
+			if petCatalog {
+				// The pet Task has no project vault space; a project binding must
+				// not turn every project skill into "project_not_bound". Only the
+				// shared runtime gates and the archive rule apply.
+				view.UnavailableReason = vaultSkillUnavailableReason(result.RuntimeRead, result.IndexReady, "", true, view.CanUpdate)
+			} else {
+				view.UnavailableReason = vaultSkillUnavailableReason(result.RuntimeRead, result.IndexReady, projectID, bound, view.CanUpdate)
+			}
 			result.Skills = append(result.Skills, view)
 		}
 		return nil
@@ -228,7 +246,8 @@ func (s *Service) SetVaultSkillAutoAttach(ctx context.Context, key string, autoA
 			view = VaultSkillView{
 				Key: skill.Key, ID: skill.ID, Slug: skill.Slug, Name: skill.Name,
 				Scope: skill.Scope, ProjectID: skill.ProjectID, Library: skill.Library,
-				Description: skill.Description, FileCount: skill.FileCount, Files: skill.Files,
+				Description: skill.Description, Version: skill.Version, Status: skill.Status,
+				Enabled: skill.Enabled, FileCount: skill.FileCount, Files: skill.Files,
 				RelativePath: skill.RelativePath, AbsolutePath: skill.AbsolutePath, OpenPath: skill.OpenPath,
 				Source: "vault", CanUpdate: true,
 			}
@@ -560,6 +579,102 @@ func (s *Service) warnVaultTaskSkillsOnce(projectID string, ids []string, messag
 		return
 	}
 	log.Printf("knowledge vault task skills for project %s: %s", projectID, message)
+}
+
+// vaultSkillExistsForPet validates one selected vault id for the Pet Task. The
+// pet is the owner's system administrator, so global skills and every project's
+// enabled/active skill are valid even though project_pet itself owns no vault
+// space. Archives stay read-only, and an unknown or disabled package is
+// rejected instead of being silently dropped from the selection.
+func (s *Service) vaultSkillExistsForPet(ctx context.Context, id string) bool {
+	if s == nil || s.knowledgeVault == nil || !s.vaultGlobalReadEnabled() {
+		return false
+	}
+	found := false
+	_ = s.knowledgeVault.WithReader(func(reader *knowledgevault.Reader) error {
+		response, err := reader.Skills(ctx)
+		if err != nil {
+			return err
+		}
+		for _, skill := range response.Skills {
+			if skill.Key != id {
+				continue
+			}
+			if skill.Enabled && skill.Status == "active" && (skill.Scope == "global" || skill.Scope == "project") {
+				found = true
+			}
+			break
+		}
+		return nil
+	})
+	return found
+}
+
+// vaultPetTaskSkills loads the Pet Task's explicit selection. Unlike a normal
+// infrastructure Task it may reference another project's package, because the
+// owner gave the pet the system administrator view. Only enabled/active global
+// and project packages load; unavailable selections are reported once per
+// selection instead of on every Turn.
+func (s *Service) vaultPetTaskSkills(ctx context.Context, ids []string) []domain.Skill {
+	if len(ids) == 0 {
+		return nil
+	}
+	if !s.vaultGlobalReadEnabled() {
+		s.warnVaultTaskSkillsOnce(petProjectID, ids, fmt.Sprintf("%d selected skill(s) unavailable because the vault runtime read is unavailable; task continues with the remaining skills", len(ids)))
+		return nil
+	}
+	wanted := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		wanted[id] = true
+	}
+	result := make([]domain.Skill, 0, len(ids))
+	seen := make(map[string]bool, len(ids))
+	_ = s.knowledgeVault.WithReader(func(reader *knowledgevault.Reader) error {
+		response, err := reader.Skills(ctx)
+		if err != nil {
+			return err
+		}
+		for _, skill := range response.Skills {
+			if !wanted[skill.Key] || seen[skill.Key] || !skill.Enabled || skill.Status != "active" {
+				continue
+			}
+			if skill.Scope != "global" && skill.Scope != "project" {
+				continue
+			}
+			files, err := reader.SkillFiles(skill.RelativePath)
+			if err != nil {
+				log.Printf("knowledge vault pet task skill %s package at %s is unreadable; skipped: %v", skill.Key, skill.RelativePath, err)
+				continue
+			}
+			packageFiles := make([]domain.SkillFile, 0, len(files))
+			names := make([]string, 0, len(files))
+			for _, file := range files {
+				packageFiles = append(packageFiles, domain.SkillFile{Path: file.Path, Content: file.Content})
+				names = append(names, file.Path)
+			}
+			result = append(result, domain.Skill{
+				ID: skill.Key, PackageSlug: skill.Slug, Scope: skill.Scope, ProjectID: skill.ProjectID,
+				Name: skill.Name, Description: skill.Description, Instructions: skill.Instructions,
+				Version: skill.Version, Status: skill.Status, Enabled: skill.Enabled,
+				SourcePath: filepath.Join(reader.Config().VaultPath, filepath.FromSlash(skill.RelativePath)),
+				Files:      names, PackageFiles: packageFiles,
+			})
+			seen[skill.Key] = true
+		}
+		return nil
+	})
+	missing := make([]string, 0)
+	seenMissing := map[string]bool{}
+	for _, id := range ids {
+		if !seen[id] && !seenMissing[id] {
+			seenMissing[id] = true
+			missing = append(missing, id)
+		}
+	}
+	if len(missing) > 0 {
+		s.warnVaultTaskSkillsOnce(petProjectID, missing, fmt.Sprintf("%d selected skill(s) cannot load: only enabled global or project vault skills apply (%s); task continues with the remaining skills", len(missing), strings.Join(missing, ", ")))
+	}
+	return result
 }
 
 // vaultSkillExistsInProject validates one selected vault id for task updates.

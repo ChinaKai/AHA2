@@ -1046,6 +1046,7 @@ export interface Skill {
   package_slug: string;
   scope: "global" | "project";
   project_id?: string;
+  project_name?: string;
   bound_project_id?: string;
   binding_mode?: "project" | "external";
   can_update?: boolean;
@@ -1055,6 +1056,9 @@ export interface Skill {
   version: number;
   status: string;
   enabled: boolean;
+  // The Pet Task catalog keeps the server's own reason so the picker can show
+  // why an entry is disabled instead of silently hiding it.
+  unavailable_reason?: string;
   auto_attach?: boolean;
   // The task picker merges legacy database skills and vault packages. The
   // source lets the UI label them clearly so the Owner does not think both
@@ -2421,6 +2425,9 @@ export interface KnowledgeVaultSkill {
   // leave it empty and keep the plain "全局" scope label.
   project_name?: string;
   description?: string;
+  version: number;
+  status: string;
+  enabled: boolean;
   file_count: number;
   files?: string[];
   relative_path: string;

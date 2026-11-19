@@ -276,6 +276,10 @@ func TestKnowledgeVaultAPIReadsLibrariesTreeDocumentSearchRecentInboxAndSkills(t
 	if skill["name"] != "Demo" || skill["file_count"].(float64) != 1 {
 		t.Fatalf("skill = %#v", skill)
 	}
+	// The task picker needs the package's version and state, not just its name.
+	if skill["version"].(float64) != 1 || skill["status"] != "active" || skill["enabled"] != true {
+		t.Fatalf("skill version/status/enabled = %#v", skill)
+	}
 }
 
 func TestKnowledgeVaultAPIRejectsWritesAndUnknownDocuments(t *testing.T) {
