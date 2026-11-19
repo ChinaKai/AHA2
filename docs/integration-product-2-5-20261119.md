@@ -3,7 +3,7 @@
 - 日期：2026-11-19
 - 集成分支：`integration/product-2-5-20261119`
 - base：`5008f0b629e5b06983a08fe71866901b54fa884c`（main，task-659）
-- 合并后代码 HEAD：`03bb2f1e99281a6c76fe871329bcc99a71b4f9cf`
+- 合并后代码 HEAD：`03bb2f1e99281a6c76fe871329bcc99a71b4f9cf`（集成分支 tip 另含本报告的 docs 提交）
 - main 未修改，仍为 `5008f0b629e5b06983a08fe71866901b54fa884c`
 - 未 push、未合 main、未部署；未修改 DB/vault/凭据，未修改提示词正文
 
@@ -38,7 +38,7 @@ task-662/663/664/665 在 2026-11-19 23:43 被 Owner 中断；四个 worktree 都
 | 1 | `go build ./...` | 0 | 通过，6.3s |
 | 2 | `go test ./... -count=1 -timeout 1800s` | 1 | 除 `internal/app` 外全部通过；`internal/app` 有 1 个确定性失败，256.3s |
 | 3 | `cd web && npm run build` | 0 | 通过，产出 `app.1997ce10835d.js`、`styles.2677c39119a6.css` |
-| 4 | `cd web && npm test` | 1 | 593 tests / 586 pass / 7 fail |
+| 4 | `cd web && npm test` | 1 | 593 tests / 586 pass / 7 fail（5 个测试文件因缺模块整体加载失败） |
 | 5 | `cd browser-host && npm test` | 0 | 61 tests / 55 pass / 6 skipped / 0 fail |
 
 `browser-host` 的 6 个 skip 是需要 `AHA2_PLAYWRIGHT_MODULE` 的真实 Chromium 用例；本机没有 playwright npm 模块，按测试自身逻辑跳过，属于环境缺口。
@@ -77,9 +77,25 @@ Source:"official", CodexAccountID:"account-official", ...}
 
 基线对照：base `5008f0b` 没有 `web/src/model_source_picker.ts`，`scripts/build-web.mjs` 也没有任何 `model_source_picker` 引用；上述失败断言是 task-664 在 `9fd055f` 里新增/改写的。因此这 7 项都是本次合并暴露的 task-664 分支缺陷，不是基线既有失败。
 
+### 3.3 补齐缺失模块后的补充验证：task-664 的测试与实现本身也不一致
+
+为区分“只缺构建接线”还是“还有逻辑/断言问题”，按 `build-web.mjs` 相同的转换方式在 gitignore 的 `web/build/` 里临时生成了缺失的 `model_source_picker.js`（不改任何源码），再跑 `npm test`：**612 tests / 606 pass / 6 fail**。`channel_deliveries`、`channel_knowledge_picker`、`channel_knowledge_sources` 三个文件转为通过，说明它们只是被缺模块连带拖垮；但仍有以下独立失败：
+
+| 失败项 | 实际输出 | 测试期望 | 性质 |
+| --- | --- | --- | --- |
+| `channel lifecycle renders active and retired actions with guarded purge` | `Codex official account`、`Provider model`、`data-accountId="account-b"` | `/Codex 官方账号/`、`/Provider 模型/`、`data-account-id="account-b"` | 实现是英文标签 + camelCase 属性，task-664 同时改写的测试按中文标签 + kebab-case 属性断言 |
+| `source picker keeps an unavailable saved selection instead of falling back` | `<option value="claude-opus" data-accountId="" selected disabled>` | `/value="claude-opus" selected disabled/` | 属性名不一致，且正则要求属性紧邻 |
+| `official saved account and model stay selected when the account is unavailable` | `data-accountId="account-expired"` | `/value="gpt-expired" data-account-id="account-expired" selected disabled/` | 同上 |
+| `built web contains responsive application` | `channel-runtime-source` 由 `${prefix}-source` 运行时拼接 | 在 `build/channels.js` 里找字面量 | 断言位置错误（补模块也不会出现） |
+| `production web splits route chunks and keeps the first-screen budget` | 270,412 字节 | ≤ 269,824 | 超 588 字节；且尚未计入缺失的 `model_source_picker.js` 对首屏的增量 |
+
+结论：task-664 的提交说明写明“未跑测试”，其实现、测试和构建接线三处互相不一致，不是单一补一行 `moduleNames` 就能全部转绿。最小闭环是：补 `moduleNames` → 统一标签语言与 `data-account-id` 属性命名（实现或测试二选一，按产品文案定）→ 修正 `channel-runtime-source` 断言 → 重新测量首屏预算。
+
+另：补充验证时 `web/node_modules` 已被外部清理，`vendor-only change bumps the production vendor URL but not the app hash` 因临时目录里解析不到 esbuild 而失败；该用例在上一轮（`node_modules` 存在时）通过，且本次四个提交未改动该测试或其解析路径，归为环境状态问题，不计入合并缺陷。
+
 ## 4. 残余风险与评审重点
 
-1. **task-664（优先级最高）**：补齐 `moduleNames` 里的 `model_source_picker`；修正 `build.test.mjs` 里 `channel-runtime-source` 的断言位置；重新测量首屏预算；决定 `CodexAccountID` 测试契约。这是让 Web 构建/单测和 `internal/app` 转绿的最小闭环。
+1. **task-664（优先级最高）**：补齐 `moduleNames` 里的 `model_source_picker`；统一模型来源 UI 的标签语言（实现目前是英文，新增测试按中文断言）与账号属性命名（实现输出 `data-accountId`，测试和渠道断言用 `data-account-id`）；修正 `build.test.mjs` 里 `channel-runtime-source` 的断言位置；重新测量首屏预算（当前 270,412，已超 588，补模块后还会涨）；决定 `CodexAccountID` 测试契约。补模块只能让 3 个被连带拖垮的测试文件恢复，不能清掉上述独立失败。
 2. **task-663**：代码实际移除了下载文件数、单文件大小、总量配额和 TTL，与“下载上限”这个标题的字面含义可能不一致。请确认产品意图是“取消上限”还是“调整上限”，并评估大文件/长期占盘风险。
 3. **task-662**：宠物系统项目可以跨项目选择和读取技能，属于权限面扩大。评审重点看 `validateTaskSkillIDs` 和 `VaultSkillCatalog` 的 `petCatalog` 分支是否严格只对 `project_pet` 生效，普通系统项目不能被顺带放宽。
 4. **task-665**：结构预览只重排既有片段，lint 只读；`internal/prompt` 测试已通过。请确认生产 `Build` 逐字不变这一契约仍被测试锁住。
