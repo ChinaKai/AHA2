@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -75,6 +76,14 @@ func (f *hardwareMCPFixture) call(t *testing.T, token, name string, arguments an
 
 func waitForHardwareMCPAudit(t *testing.T, path, tool string) string {
 	t.Helper()
+	return waitForHardwareMCPAuditResult(t, path, tool, "ok")
+}
+
+// waitForHardwareMCPAuditResult waits for one audit row produced by the given
+// tool and outcome. Rows are appended in the handler defer, after the response
+// has been written.
+func waitForHardwareMCPAuditResult(t *testing.T, path, tool, result string) string {
+	t.Helper()
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
@@ -84,8 +93,8 @@ func waitForHardwareMCPAudit(t *testing.T, path, tool string) string {
 	for {
 		var data string
 		err := db.QueryRowContext(context.Background(),
-			`SELECT data_json FROM audit_events WHERE action='agent.hardware_mcp.call' AND data_json LIKE ? ORDER BY sequence DESC LIMIT 1`,
-			`%"tool":"`+tool+`"%`,
+			`SELECT data_json FROM audit_events WHERE action='agent.hardware_mcp.call' AND data_json LIKE ? AND data_json LIKE ? ORDER BY sequence DESC LIMIT 1`,
+			`%"tool":"`+tool+`"%`, `%"result":"`+result+`"%`,
 		).Scan(&data)
 		if err == nil && data != "" {
 			return data
@@ -459,4 +468,193 @@ func TestAgentHardwareMCPRejectsChannelBoundTurns(t *testing.T) {
 	assertStatus("channel batch", "batch-hardware-mcp-channel", http.StatusForbidden)
 	assertStatus("plain batch", "batch-hardware-mcp-plain", http.StatusOK)
 	assertStatus("malformed batch", "batch-hardware-mcp-broken", http.StatusForbidden)
+}
+
+type hardwareMCPTerminalPayload struct {
+	HardwareID string `json:"hardware_id"`
+	Transport  string `json:"transport"`
+	Items      []struct {
+		Sequence int64  `json:"sequence"`
+		Data     string `json:"data"`
+	} `json:"items"`
+	Truncated bool  `json:"truncated"`
+	NextAfter int64 `json:"next_after"`
+}
+
+func decodeHardwareMCPTerminal(t *testing.T, call coreMCPToolCall) hardwareMCPTerminalPayload {
+	t.Helper()
+	var payload hardwareMCPTerminalPayload
+	if err := json.Unmarshal([]byte(call.Text), &payload); err != nil {
+		t.Fatal(err)
+	}
+	return payload
+}
+
+// TestAgentHardwareMCPTerminalCursorNeverRewinds reproduces the review finding:
+// an empty page at the tail used to report next_after=0 and replay the whole
+// retained log. The cursor is now a floor that only advances by returned items.
+func TestAgentHardwareMCPTerminalCursorNeverRewinds(t *testing.T) {
+	f := newHardwareMCPFixture(t)
+	if len(f.serial) != 5 {
+		t.Fatalf("serial sequences=%v", f.serial)
+	}
+	tail := f.serial[len(f.serial)-1]
+
+	// Catch-up: the window ends exactly at the newest retained event.
+	caughtUp := decodeHardwareMCPTerminal(t, f.call(t, f.token, "hardware_terminal_read", map[string]any{
+		"hardware_id": "board", "after": f.serial[2], "limit": 2,
+	}))
+	if len(caughtUp.Items) != 2 || caughtUp.Items[1].Sequence != tail ||
+		caughtUp.Truncated || caughtUp.NextAfter != tail {
+		t.Fatalf("catch-up=%#v", caughtUp)
+	}
+
+	// Empty page at the tail: nothing returned, the cursor does not move.
+	emptyCall := f.call(t, f.token, "hardware_terminal_read", map[string]any{
+		"hardware_id": "board", "after": tail,
+	})
+	empty := decodeHardwareMCPTerminal(t, emptyCall)
+	if len(empty.Items) != 0 || empty.Truncated || empty.NextAfter != tail {
+		t.Fatalf("empty tail page=%s", emptyCall.Text)
+	}
+
+	// A cursor beyond the retained maximum is still a floor, not a reset.
+	beyond := tail + 1000
+	emptyBeyond := decodeHardwareMCPTerminal(t, f.call(t, f.token, "hardware_terminal_read", map[string]any{
+		"hardware_id": "board", "after": beyond,
+	}))
+	if len(emptyBeyond.Items) != 0 || emptyBeyond.Truncated || emptyBeyond.NextAfter != beyond {
+		t.Fatalf("empty beyond page=%#v", emptyBeyond)
+	}
+
+	// New output continues from the same cursor instead of replaying history.
+	fresh, err := f.h.database.AppendHardwareIO(f.h.ctx, domain.HardwareIOEvent{
+		ID: domain.NewID("hardware_io"), TaskID: f.task.ID, HardwareID: "board",
+		Transport: domain.HardwareTransportSerial, Direction: "rx", Data: "after-cursor event",
+		Encoding: "text", Source: "terminal", CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	continuation := decodeHardwareMCPTerminal(t, f.call(t, f.token, "hardware_terminal_read", map[string]any{
+		"hardware_id": "board", "after": tail,
+	}))
+	if len(continuation.Items) != 1 || continuation.Items[0].Sequence != fresh ||
+		continuation.Items[0].Data != "after-cursor event" ||
+		continuation.Truncated || continuation.NextAfter != fresh {
+		t.Fatalf("continuation=%#v", continuation)
+	}
+
+	// An empty page after the new event still holds the tail cursor.
+	settled := decodeHardwareMCPTerminal(t, f.call(t, f.token, "hardware_terminal_read", map[string]any{
+		"hardware_id": "board", "after": fresh,
+	}))
+	if len(settled.Items) != 0 || settled.Truncated || settled.NextAfter != fresh {
+		t.Fatalf("settled=%#v", settled)
+	}
+}
+
+// TestAgentHardwareMCPTerminalReadBoundsCompleteResponse reproduces the review
+// finding: the budget used to count only the inner JSON, while content.text
+// escapes it a second time. The raw HTTP body must stay at or below 64 KiB.
+func TestAgentHardwareMCPTerminalReadBoundsCompleteResponse(t *testing.T) {
+	f := newHardwareMCPFixture(t)
+	const marker = "QUOTE-ESCAPE-MARKER-6c2"
+	// One quote-heavy event: the inner JSON doubles every quote, and the outer
+	// content.text doubles the backslashes again.
+	quoteHeavy := marker + strings.Repeat(`"`, 30<<10)
+	sequence, err := f.h.database.AppendHardwareIO(f.h.ctx, domain.HardwareIOEvent{
+		ID: domain.NewID("hardware_io"), TaskID: f.task.ID, HardwareID: "router",
+		Transport: domain.HardwareTransportNetwork, Direction: "rx", Data: quoteHeavy,
+		Encoding: "text", Source: "terminal", CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response := agentRequest(t, hardwareMCPURL(f.h), http.MethodPost, f.token, map[string]any{
+		"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+		"params": map[string]any{"name": "hardware_terminal_read", "arguments": map[string]any{
+			"hardware_id": "router", "transport": domain.HardwareTransportNetwork, "limit": 1,
+		}},
+	})
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.StatusCode, readBody(t, response))
+	}
+	raw, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) > agentHardwareMCPMaxResponseBytes {
+		t.Fatalf("raw HTTP response %d bytes exceeds the 64 KiB budget", len(raw))
+	}
+	var envelope struct {
+		Result struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if len(envelope.Result.Content) != 1 {
+		t.Fatalf("content=%#v", envelope.Result.Content)
+	}
+	payload := decodeHardwareMCPTerminal(t, coreMCPToolCall{Text: envelope.Result.Content[0].Text})
+	if len(payload.Items) != 1 || !payload.Truncated || payload.NextAfter != sequence {
+		t.Fatalf("quote-heavy read=%#v", payload)
+	}
+	if len(payload.Items[0].Data) >= len(quoteHeavy) {
+		t.Fatalf("quote-heavy event was not trimmed: %d bytes", len(payload.Items[0].Data))
+	}
+	if !strings.HasPrefix(payload.Items[0].Data, marker) {
+		t.Fatalf("trimmed event lost its head: %q", payload.Items[0].Data[:32])
+	}
+	for _, needle := range []string{marker, "QUOTE-ESCAPE-MARKER"} {
+		assertAuditActionLacks(t, f.h.dbPath, "agent.hardware_mcp.call", needle)
+	}
+}
+
+// TestAgentHardwareMCPOnlyAuditsVerifiedIdentifiers reproduces the review
+// finding: an unbound hardware_id used to be persisted before the ownership
+// check. Failures keep only the classification and argument key names.
+func TestAgentHardwareMCPOnlyAuditsVerifiedIdentifiers(t *testing.T) {
+	f := newHardwareMCPFixture(t)
+	const canary = "canary-page-text-9x4"
+	unbound := f.call(t, f.token, "hardware_terminal_read", map[string]any{"hardware_id": canary})
+	if !unbound.IsError || !strings.HasPrefix(unbound.Text, "hardware_group_not_found:") {
+		t.Fatalf("unbound=%#v", unbound)
+	}
+	if strings.Contains(unbound.Text, canary) {
+		t.Fatalf("unbound error echoed the identifier: %s", unbound.Text)
+	}
+	failure := waitForHardwareMCPAuditResult(t, f.h.dbPath, "hardware_terminal_read", "error")
+	if !strings.Contains(failure, `"argument_keys":["hardware_id"]`) {
+		t.Fatalf("failure audit lost its argument keys: %s", failure)
+	}
+	if strings.Contains(failure, `"hardware_id":"`) {
+		t.Fatalf("failure audit recorded an unverified ID: %s", failure)
+	}
+	assertAuditActionLacks(t, f.h.dbPath, "agent.hardware_mcp.call", canary)
+
+	// The schema's 64-character bound is enforced before any store lookup.
+	overlong := strings.Repeat("z", 65)
+	tooLong := f.call(t, f.token, "hardware_terminal_read", map[string]any{"hardware_id": overlong})
+	if !tooLong.IsError || !strings.HasPrefix(tooLong.Text, "invalid_arguments:") {
+		t.Fatalf("overlong=%#v", tooLong)
+	}
+	waitForHardwareMCPAuditResult(t, f.h.dbPath, "hardware_terminal_read", "invalid")
+	assertAuditActionLacks(t, f.h.dbPath, "agent.hardware_mcp.call", overlong)
+
+	// A successful read records the canonical server-side ID.
+	ok := f.call(t, f.token, "hardware_terminal_read", map[string]any{"hardware_id": "board"})
+	if ok.IsError {
+		t.Fatalf("bound read=%#v", ok)
+	}
+	audit := waitForHardwareMCPAudit(t, f.h.dbPath, "hardware_terminal_read")
+	if !strings.Contains(audit, `"hardware_id":"board"`) || !strings.Contains(audit, `"result":"ok"`) {
+		t.Fatalf("success audit lost the verified ID: %s", audit)
+	}
 }

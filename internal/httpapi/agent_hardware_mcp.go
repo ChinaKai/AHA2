@@ -133,8 +133,10 @@ func (s *Server) callAgentHardwareMCPTool(writer http.ResponseWriter, request *h
 		})
 	}
 	toolError := func(err error) {
-		log.Printf("agent hardware mcp tool %s failed: %v", input.Name, err)
 		code, message := hardwareMCPErrorCode(err)
+		// Only the fixed classification is safe to log: store and host errors
+		// can carry terminal content, device paths or credentials.
+		log.Printf("agent hardware mcp tool %s failed: %s", input.Name, code)
 		hardwareMCPError(code, message)
 	}
 	invalidToolError := func(message string) {
@@ -249,13 +251,13 @@ func (s *Server) callAgentHardwareMCPTool(writer http.ResponseWriter, request *h
 			invalidToolError("limit must be between 1 and 1000")
 			return
 		}
-		auditIDs["hardware_id"] = hardwareID
-		result, err := s.agentHardwareMCPTerminalRead(request.Context(), call, hardwareID, transport, args.After, limit)
+		result, canonicalID, err := s.agentHardwareMCPTerminalRead(request.Context(), call, payload.ID, hardwareID, transport, args.After, limit)
 		if err != nil {
 			auditResult = "error"
 			fail(err)
 			return
 		}
+		auditIDs["hardware_id"] = canonicalID
 		respondJSON(result)
 
 	default:
@@ -342,16 +344,17 @@ type agentHardwareMCPTerminal struct {
 // agentHardwareMCPTerminalRead mirrors the HTTP terminal handler: the same
 // bound-group lookup, transport default and IO page query. Unbound hardware,
 // another Task's hardware and a cross-Project hardware ID all return the same
-// hardware_group_not_found, so the tool cannot probe existence.
-func (s *Server) agentHardwareMCPTerminalRead(ctx context.Context, call app.AgentCallContext, hardwareID, transport string, after int64, limit int) (agentHardwareMCPTerminal, error) {
+// hardware_group_not_found, so the tool cannot probe existence. The second
+// return value is the canonical bound group ID for the audit row.
+func (s *Server) agentHardwareMCPTerminalRead(ctx context.Context, call app.AgentCallContext, requestID json.RawMessage, hardwareID, transport string, after int64, limit int) (agentHardwareMCPTerminal, string, error) {
 	group, err := s.store.HardwareGroup(ctx, call.Task.ID, hardwareID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return agentHardwareMCPTerminal{}, &hardwareMCPError{
+		return agentHardwareMCPTerminal{}, "", &hardwareMCPError{
 			code: "hardware_group_not_found", message: "hardware group is not bound to this Task",
 		}
 	}
 	if err != nil {
-		return agentHardwareMCPTerminal{}, err
+		return agentHardwareMCPTerminal{}, "", err
 	}
 	if transport == "" {
 		if group.Supports(domain.HardwareTransportSerial) {
@@ -361,87 +364,131 @@ func (s *Server) agentHardwareMCPTerminalRead(ctx context.Context, call app.Agen
 		}
 	}
 	if !group.Supports(transport) {
-		return agentHardwareMCPTerminal{}, &hardwareMCPError{
+		return agentHardwareMCPTerminal{}, "", &hardwareMCPError{
 			code: "hardware_transport_invalid", message: "hardware group does not configure that transport",
 		}
 	}
 	page, err := s.store.HardwareIOPage(ctx, call.Task.ID, group.ID, transport, after, limit)
 	if err != nil {
-		return agentHardwareMCPTerminal{}, &hardwareMCPError{
+		return agentHardwareMCPTerminal{}, "", &hardwareMCPError{
 			code: "hardware_io_failed", message: "terminal output could not be read",
 		}
 	}
-	return agentHardwareMCPTerminalView(group.ID, transport, page), nil
+	view := agentHardwareMCPTerminalView(group.ID, transport, after, page)
+	return fitHardwareMCPTerminalResponse(requestID, view, after), group.ID, nil
 }
 
-// agentHardwareMCPTerminalView bounds the JSON result to 64 KiB. It keeps the
-// oldest events of the page first, so next_after always advances by the events
-// the caller actually received. A single oversized event is truncated in place
-// and flagged; the caller can move past it with next_after.
-func agentHardwareMCPTerminalView(hardwareID, transport string, page domain.HardwareIOPage) agentHardwareMCPTerminal {
+// agentHardwareMCPTerminalView bounds one page. NextAfter starts at the
+// caller's cursor, so an empty page or a page that exactly catches up never
+// moves the cursor backwards; it only advances by events actually returned.
+func agentHardwareMCPTerminalView(hardwareID, transport string, after int64, page domain.HardwareIOPage) agentHardwareMCPTerminal {
+	if after < 0 {
+		after = 0
+	}
 	result := agentHardwareMCPTerminal{
 		HardwareID: hardwareID, Transport: transport,
-		Items: make([]agentHardwareMCPEvent, 0, len(page.Items)), NextAfter: 0,
+		Items: make([]agentHardwareMCPEvent, 0, len(page.Items)), NextAfter: after,
 	}
-	base, _ := json.Marshal(result)
-	remaining := agentHardwareMCPMaxResponseBytes - len(base) - 8
 	for _, item := range page.Items {
-		event := agentHardwareMCPEvent{
+		result.Items = append(result.Items, agentHardwareMCPEvent{
 			Sequence: item.Sequence, Direction: item.Direction, Data: item.Data,
 			Encoding: item.Encoding, Source: item.Source, CreatedAt: item.CreatedAt,
-		}
-		encoded, _ := json.Marshal(event)
-		if len(encoded)+1 > remaining {
-			if len(result.Items) == 0 {
-				event = fitHardwareMCPEvent(event, remaining)
-				result.Items = append(result.Items, event)
-			}
-			result.Truncated = true
-			break
-		}
-		result.Items = append(result.Items, event)
-		remaining -= len(encoded) + 1
-	}
-	if page.HasMore {
-		result.Truncated = true
-	}
-	for _, item := range result.Items {
+		})
 		if item.Sequence > result.NextAfter {
 			result.NextAfter = item.Sequence
 		}
 	}
+	result.Truncated = page.HasMore
 	return result
 }
 
-// fitHardwareMCPEvent trims Data until the encoded event fits the remaining
-// byte budget. Data can be hex or base64, so a truncated row is only useful as
-// a bounded hint; the format is preserved as-is and the caller sees the flag.
-func fitHardwareMCPEvent(item agentHardwareMCPEvent, available int) agentHardwareMCPEvent {
-	if available < 0 {
-		available = 0
+// fitHardwareMCPTerminalResponse enforces the 64 KiB cap on the complete
+// JSON-RPC response, not just the inner result: the inner JSON is embedded in
+// content.text and escaped a second time. Whole trailing events are dropped
+// first; a single oversized event is trimmed in place. Both paths set the
+// explicit truncated flag. floor is the caller's cursor, so dropping every
+// event never rewinds next_after below it.
+func fitHardwareMCPTerminalResponse(requestID json.RawMessage, result agentHardwareMCPTerminal, floor int64) agentHardwareMCPTerminal {
+	if floor < 0 {
+		floor = 0
 	}
-	for attempt := 0; attempt < 8; attempt++ {
-		encoded, _ := json.Marshal(item)
-		if len(encoded) <= available {
-			return item
+	fits := func(candidate agentHardwareMCPTerminal) bool {
+		inner, err := json.Marshal(candidate)
+		if err != nil {
+			return false
 		}
-		over := len(encoded) - available
-		keep := len(item.Data) - over - 8
-		if keep <= 0 {
-			item.Data = ""
-			return item
+		return hardwareMCPResponseSize(requestID, inner) <= agentHardwareMCPMaxResponseBytes
+	}
+	if fits(result) {
+		return result
+	}
+	result.Truncated = true
+	for len(result.Items) > 1 && !fits(result) {
+		result.Items = result.Items[:len(result.Items)-1]
+		result.NextAfter = result.Items[len(result.Items)-1].Sequence
+	}
+	if len(result.Items) == 0 || fits(result) {
+		return result
+	}
+	// One event still exceeds the cap. The outer escaping can cost up to four
+	// bytes per input byte (quote-heavy output is the worst case), so the byte
+	// overrun is not a safe prefix length. Binary-search the longest prefix of
+	// Data whose complete response fits, keeping the cursor on this event.
+	item := result.Items[0]
+	prefix := func(length int) string {
+		if length >= len(item.Data) {
+			return item.Data
 		}
-		data := item.Data[:keep]
-		for len(data) > 0 && !utf8.ValidString(data) {
+		if length < 0 {
+			length = 0
+		}
+		data := item.Data[:length]
+		// Never split a UTF-8 sequence at the truncation point.
+		for back := 0; back < utf8.UTFMax && len(data) > 0 && !utf8.ValidString(data); back++ {
 			data = data[:len(data)-1]
 		}
-		if data == item.Data {
-			item.Data = ""
-			return item
-		}
-		item.Data = data
+		return data
 	}
-	return item
+	best := ""
+	low, high := 0, len(item.Data)
+	for low <= high {
+		middle := low + (high-low)/2
+		item.Data = prefix(middle)
+		result.Items[0] = item
+		if fits(result) {
+			best = item.Data
+			low = middle + 1
+		} else {
+			high = middle - 1
+		}
+	}
+	item.Data = best
+	result.Items[0] = item
+	if !fits(result) {
+		// The fixed envelope itself is under the cap only with no event; drop
+		// the event rather than emit an oversized response, keeping the cursor
+		// at the caller's floor so the page is not replayed.
+		result.Items = nil
+		result.NextAfter = floor
+		result.Truncated = true
+	}
+	return result
+}
+
+// hardwareMCPResponseSize returns the exact byte count writeJSON emits for one
+// text content block, including the trailing newline.
+func hardwareMCPResponseSize(requestID json.RawMessage, text []byte) int {
+	payload := map[string]any{
+		"jsonrpc": "2.0", "id": requestID,
+		"result": map[string]any{
+			"content": []map[string]any{{"type": "text", "text": string(text)}},
+		},
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return agentHardwareMCPMaxResponseBytes + 1
+	}
+	return len(encoded) + 1
 }
 
 // hardwareMCPError is the stable classification used by the hardware tools.

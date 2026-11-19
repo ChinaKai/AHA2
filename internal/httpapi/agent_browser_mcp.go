@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/browser"
@@ -121,8 +122,10 @@ func (s *Server) callAgentBrowserMCPTool(writer http.ResponseWriter, request *ht
 		// Tool text is model-visible. Host diagnostics and store errors stay in
 		// the server log; the model receives only the stable classification and
 		// a public message that never carries page content.
-		log.Printf("agent browser mcp tool %s failed: %v", input.Name, err)
 		code, message := browserMCPErrorCode(err)
+		// The raw error can carry page text through a host diagnostic. Only the
+		// fixed classification and the tool name are logged.
+		log.Printf("agent browser mcp tool %s failed: %s", input.Name, code)
 		respond(map[string]any{
 			"isError": true,
 			"content": []map[string]any{{"type": "text", "text": code + ": " + message}},
@@ -208,18 +211,26 @@ func (s *Server) callAgentBrowserMCPTool(writer http.ResponseWriter, request *ht
 		var args struct {
 			GrantID string `json:"grant_id"`
 		}
-		if err := decodeCoreToolArguments(input.Arguments, &args); err != nil || strings.TrimSpace(args.GrantID) == "" {
+		if err := decodeCoreToolArguments(input.Arguments, &args); err != nil {
 			auditResult = "invalid"
 			invalidToolError("browser_tabs_list requires an opaque grant_id")
 			return
 		}
-		auditIDs["grant_id"] = args.GrantID
-		tabs, err := s.agentBrowserMCPTabs(request.Context(), call, args.GrantID)
+		args.GrantID = strings.TrimSpace(args.GrantID)
+		if !validBrowserMCPID(args.GrantID) {
+			auditResult = "invalid"
+			invalidToolError("browser_tabs_list requires an opaque grant_id")
+			return
+		}
+		tabs, verifiedGrant, err := s.agentBrowserMCPTabs(request.Context(), call, args.GrantID)
 		if err != nil {
 			auditResult = "error"
 			fail(err)
 			return
 		}
+		// Only the canonical server-side grant ID reaches the audit row. A
+		// failed or unverified identifier never does.
+		auditIDs["grant_id"] = verifiedGrant
 		respondJSON(map[string]any{"tabs": tabs, "total": len(tabs)})
 
 	case "browser_snapshot":
@@ -227,20 +238,26 @@ func (s *Server) callAgentBrowserMCPTool(writer http.ResponseWriter, request *ht
 			GrantID string `json:"grant_id"`
 			TabID   string `json:"tab_id"`
 		}
-		if err := decodeCoreToolArguments(input.Arguments, &args); err != nil ||
-			strings.TrimSpace(args.GrantID) == "" || strings.TrimSpace(args.TabID) == "" {
+		if err := decodeCoreToolArguments(input.Arguments, &args); err != nil {
 			auditResult = "invalid"
 			invalidToolError("browser_snapshot requires an opaque grant_id and tab_id")
 			return
 		}
-		auditIDs["grant_id"] = args.GrantID
-		auditIDs["tab_id"] = args.TabID
-		snapshot, err := s.agentBrowserMCPSnapshot(request.Context(), request, call, args.GrantID, args.TabID)
+		args.GrantID = strings.TrimSpace(args.GrantID)
+		args.TabID = strings.TrimSpace(args.TabID)
+		if !validBrowserMCPID(args.GrantID) || !validBrowserMCPID(args.TabID) {
+			auditResult = "invalid"
+			invalidToolError("browser_snapshot requires an opaque grant_id and tab_id")
+			return
+		}
+		snapshot, verifiedGrant, err := s.agentBrowserMCPSnapshot(request.Context(), request, call, args.GrantID, args.TabID)
 		if err != nil {
 			auditResult = "error"
 			fail(err)
 			return
 		}
+		auditIDs["grant_id"] = verifiedGrant
+		auditIDs["tab_id"] = args.TabID
 		respondJSON(snapshot)
 
 	default:
@@ -309,14 +326,24 @@ func sanitizeBrowserMCPURL(raw string) (sanitized, site string) {
 	return sanitized, site
 }
 
-func (s *Server) agentBrowserMCPTabs(ctx context.Context, call app.AgentCallContext, grantID string) ([]agentBrowserMCPTab, error) {
+// validBrowserMCPID enforces the same 128-character bound the tool schemas
+// advertise. Opaque grant and tab IDs are short server-generated tokens; a
+// longer or empty value is rejected before any store or host lookup.
+func validBrowserMCPID(value string) bool {
+	if value == "" {
+		return false
+	}
+	return utf8.RuneCountInString(value) <= 128
+}
+
+func (s *Server) agentBrowserMCPTabs(ctx context.Context, call app.AgentCallContext, grantID string) ([]agentBrowserMCPTab, string, error) {
 	service, grant, err := s.agentBrowserMCPGrant(ctx, call.Task.ID, grantID)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	tabs, err := service.Tabs(ctx, grant.ID)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	result := make([]agentBrowserMCPTab, 0, len(tabs))
 	for _, tab := range tabs {
@@ -326,7 +353,7 @@ func (s *Server) agentBrowserMCPTabs(ctx context.Context, call app.AgentCallCont
 			Active: tab.Active, Focused: tab.Focused,
 		})
 	}
-	return result, nil
+	return result, grant.ID, nil
 }
 
 // agentBrowserMCPElement is the structured element shape. Actions, input
@@ -348,21 +375,21 @@ type agentBrowserMCPSnapshot struct {
 	ElementsTruncated bool                     `json:"elements_truncated"`
 }
 
-func (s *Server) agentBrowserMCPSnapshot(ctx context.Context, request *http.Request, call app.AgentCallContext, grantID, tabID string) (agentBrowserMCPSnapshot, error) {
+func (s *Server) agentBrowserMCPSnapshot(ctx context.Context, request *http.Request, call app.AgentCallContext, grantID, tabID string) (agentBrowserMCPSnapshot, string, error) {
 	service, grant, err := s.agentBrowserMCPGrant(ctx, call.Task.ID, grantID)
 	if err != nil {
-		return agentBrowserMCPSnapshot{}, err
+		return agentBrowserMCPSnapshot{}, "", err
 	}
 	snapshot, err := service.SnapshotTab(ctx, browserActor(request), grant.ID, tabID)
 	if err != nil {
-		return agentBrowserMCPSnapshot{}, err
+		return agentBrowserMCPSnapshot{}, "", err
 	}
 	text, textTruncated := truncateBrowserMCPText(snapshot.Text)
 	elements, elementsTruncated := truncateBrowserMCPElements(snapshot.Elements)
 	return agentBrowserMCPSnapshot{
 		Text: text, TextTruncated: textTruncated,
 		Elements: elements, ElementsTruncated: elementsTruncated,
-	}, nil
+	}, grant.ID, nil
 }
 
 func truncateBrowserMCPText(raw string) (string, bool) {

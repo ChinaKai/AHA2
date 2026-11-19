@@ -1,9 +1,12 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"log"
 	"net/http"
 	"path/filepath"
 	"sort"
@@ -140,6 +143,14 @@ func seededBrowserGrant(t *testing.T, database *store.Store, task domain.Task, i
 
 func waitForBrowserMCPAudit(t *testing.T, path, tool string) string {
 	t.Helper()
+	return waitForBrowserMCPAuditResult(t, path, tool, "ok")
+}
+
+// waitForBrowserMCPAuditResult waits for one audit row produced by the given
+// tool and outcome. Audit rows are appended in the handler defer, so a client
+// that already has the HTTP response may still need to wait for the row.
+func waitForBrowserMCPAuditResult(t *testing.T, path, tool, result string) string {
+	t.Helper()
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
@@ -149,8 +160,8 @@ func waitForBrowserMCPAudit(t *testing.T, path, tool string) string {
 	for {
 		var data string
 		err := db.QueryRowContext(context.Background(),
-			`SELECT data_json FROM audit_events WHERE action='agent.browser_mcp.call' AND data_json LIKE ? ORDER BY sequence DESC LIMIT 1`,
-			`%"tool":"`+tool+`"%`,
+			`SELECT data_json FROM audit_events WHERE action='agent.browser_mcp.call' AND data_json LIKE ? AND data_json LIKE ? ORDER BY sequence DESC LIMIT 1`,
+			`%"tool":"`+tool+`"%`, `%"result":"`+result+`"%`,
 		).Scan(&data)
 		if err == nil && data != "" {
 			return data
@@ -554,5 +565,133 @@ func TestSanitizeBrowserMCPURLRejectsNonPageSchemes(t *testing.T) {
 	sanitized, site := sanitizeBrowserMCPURL("http://127.0.0.1:8080/a/b?x=1#y")
 	if sanitized != "http://127.0.0.1:8080/a/b" || site != "http://127.0.0.1:8080" {
 		t.Fatalf("sanitized=%q site=%q", sanitized, site)
+	}
+}
+
+// TestAgentBrowserMCPUnverifiedIdentifiersStayOutOfAudit reproduces the review
+// finding: a page canary supplied as an invalid grant or tab ID must not be
+// persisted by the MCP audit row. Only canonical IDs from a successful,
+// verified call may appear.
+func TestAgentBrowserMCPUnverifiedIdentifiersStayOutOfAudit(t *testing.T) {
+	f := newBrowserMCPFixture(t, "https://example.com/login", "Login")
+	tabs := f.call(t, "browser_tabs_list", map[string]any{"grant_id": f.grantID})
+	if tabs.IsError {
+		t.Fatalf("tabs=%#v", tabs)
+	}
+	var tabPayload struct {
+		Tabs []struct {
+			ID string `json:"id"`
+		} `json:"tabs"`
+	}
+	if err := json.Unmarshal([]byte(tabs.Text), &tabPayload); err != nil {
+		t.Fatal(err)
+	}
+	if len(tabPayload.Tabs) != 1 {
+		t.Fatalf("tabs=%s", tabs.Text)
+	}
+
+	const grantCanary = "CANARY-PAGE-TEXT-grant-0e4"
+	const tabCanary = "CANARY-PAGE-TEXT-tab-0e4"
+	for label, call := range map[string]coreMCPToolCall{
+		"invalid grant": f.call(t, "browser_tabs_list", map[string]any{"grant_id": grantCanary}),
+		"invalid tab": f.call(t, "browser_snapshot", map[string]any{
+			"grant_id": f.grantID, "tab_id": tabCanary,
+		}),
+		"invalid grant snapshot": f.call(t, "browser_snapshot", map[string]any{
+			"grant_id": grantCanary, "tab_id": tabPayload.Tabs[0].ID,
+		}),
+	} {
+		if !call.IsError {
+			t.Fatalf("%s=%#v", label, call)
+		}
+		if strings.Contains(call.Text, grantCanary) || strings.Contains(call.Text, tabCanary) {
+			t.Fatalf("%s echoed the canary: %s", label, call.Text)
+		}
+	}
+	dbPath := filepath.Join(f.store.DataDir(), "aha2.db")
+	// The audit row is appended in the handler defer, after the response is
+	// written; wait for the failure rows before proving they carry no canary.
+	tabsFailure := waitForBrowserMCPAuditResult(t, dbPath, "browser_tabs_list", "error")
+	snapshotFailure := waitForBrowserMCPAuditResult(t, dbPath, "browser_snapshot", "error")
+	for label, row := range map[string]string{"tabs": tabsFailure, "snapshot": snapshotFailure} {
+		if !strings.Contains(row, `"result":"error"`) || !strings.Contains(row, `"argument_keys"`) {
+			t.Fatalf("%s failure audit missing classification or keys: %s", label, row)
+		}
+		if strings.Contains(row, `"grant_id":"`) || strings.Contains(row, `"tab_id":"`) {
+			t.Fatalf("%s failure audit recorded an unverified ID: %s", label, row)
+		}
+	}
+	assertAuditActionLacks(t, dbPath, "agent.browser_mcp.call", grantCanary)
+	assertAuditActionLacks(t, dbPath, "agent.browser_mcp.call", tabCanary)
+
+	// The declared 128-character schema bound is enforced before any lookup.
+	tooLong := f.call(t, "browser_tabs_list", map[string]any{"grant_id": strings.Repeat("g", 129)})
+	if !tooLong.IsError || !strings.HasPrefix(tooLong.Text, "invalid_arguments:") {
+		t.Fatalf("overlong grant=%#v", tooLong)
+	}
+	tooLongTab := f.call(t, "browser_snapshot", map[string]any{
+		"grant_id": f.grantID, "tab_id": strings.Repeat("t", 129),
+	})
+	if !tooLongTab.IsError || !strings.HasPrefix(tooLongTab.Text, "invalid_arguments:") {
+		t.Fatalf("overlong tab=%#v", tooLongTab)
+	}
+	waitForBrowserMCPAuditResult(t, dbPath, "browser_tabs_list", "invalid")
+	waitForBrowserMCPAuditResult(t, dbPath, "browser_snapshot", "invalid")
+	assertAuditActionLacks(t, dbPath, "agent.browser_mcp.call", strings.Repeat("g", 129))
+	assertAuditActionLacks(t, dbPath, "agent.browser_mcp.call", strings.Repeat("t", 129))
+
+	// The successful snapshot keeps the canonical grant ID and verified tab ID.
+	snapshot := f.call(t, "browser_snapshot", map[string]any{
+		"grant_id": f.grantID, "tab_id": tabPayload.Tabs[0].ID,
+	})
+	if snapshot.IsError {
+		t.Fatalf("snapshot=%#v", snapshot)
+	}
+	audit := waitForBrowserMCPAudit(t, dbPath, "browser_snapshot")
+	if !strings.Contains(audit, `"grant_id":"`+f.grantID+`"`) ||
+		!strings.Contains(audit, `"tab_id":"`+tabPayload.Tabs[0].ID+`"`) {
+		t.Fatalf("audit lost the verified IDs: %s", audit)
+	}
+}
+
+// TestAgentBrowserMCPErrorLogsCarryNoPageData reproduces the review finding: an
+// unknown host failure can embed page content in the raw error. The model and
+// the log must both see only the fixed classification.
+func TestAgentBrowserMCPErrorLogsCarryNoPageData(t *testing.T) {
+	f := newBrowserMCPFixture(t, "https://example.com/login", "Login")
+	tabs := f.call(t, "browser_tabs_list", map[string]any{"grant_id": f.grantID})
+	if tabs.IsError {
+		t.Fatalf("tabs=%#v", tabs)
+	}
+	var tabPayload struct {
+		Tabs []struct {
+			ID string `json:"id"`
+		} `json:"tabs"`
+	}
+	if err := json.Unmarshal([]byte(tabs.Text), &tabPayload); err != nil {
+		t.Fatal(err)
+	}
+	if len(tabPayload.Tabs) != 1 {
+		t.Fatalf("tabs=%s", tabs.Text)
+	}
+
+	const canary = "CANARY-PAGE-TEXT-host-7d2"
+	f.host.FailSnapshot = errors.New("host exploded while reading page: " + canary)
+	var logs bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(previous)
+	snapshot := f.call(t, "browser_snapshot", map[string]any{
+		"grant_id": f.grantID, "tab_id": tabPayload.Tabs[0].ID,
+	})
+
+	if !snapshot.IsError {
+		t.Fatalf("snapshot should fail: %#v", snapshot)
+	}
+	if strings.Contains(snapshot.Text, canary) {
+		t.Fatalf("tool text leaked the canary: %s", snapshot.Text)
+	}
+	if strings.Contains(logs.String(), canary) {
+		t.Fatalf("server log leaked the canary: %s", logs.String())
 	}
 }
