@@ -213,3 +213,53 @@ func TestValidateChannelInstanceConfigSkipsUnchangedRetiredRuntime(t *testing.T)
 		t.Fatal("changed runtime accepted a missing account")
 	}
 }
+
+// A provider runtime's empty model_id is the explicit "automatic" choice, not
+// an omitted field to inherit. Switching from an explicit provider model to
+// automatic, and back, must both persist.
+func TestValidateChannelInstanceConfigProviderAutomaticRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	_, service, model, _ := newChannelRuntimeStore(t)
+	explicitRuntime := map[string]any{
+		"model_source": domain.ModelSourceProvider, "model_id": model.ID,
+		"wire_model": "", "codex_account_id": "",
+	}
+	automaticRuntime := map[string]any{
+		"model_source": domain.ModelSourceProvider, "model_id": "",
+		"wire_model": "", "codex_account_id": "",
+	}
+
+	explicitInstance := domain.ChannelInstance{
+		ID: "channel-provider-explicit", Config: map[string]any{"runtime_default": explicitRuntime},
+	}
+	automaticInput := map[string]any{"runtime_default": map[string]any{
+		"model_source": domain.ModelSourceProvider, "model_id": "", "wire_model": "", "codex_account_id": "",
+	}}
+	if sameChannelRuntimeSelection(automaticInput["runtime_default"].(map[string]any), explicitRuntime) {
+		t.Fatal("provider automatic selection was compared as unchanged")
+	}
+	if err := service.validateChannelInstanceConfig(ctx, explicitInstance, automaticInput); err != nil {
+		t.Fatal(err)
+	}
+	savedAutomatic, _ := mapField(automaticInput, "runtime_default")
+	if stringField(savedAutomatic, "model_id") != "" {
+		t.Fatalf("automatic switch kept the old model: %#v", savedAutomatic)
+	}
+
+	automaticInstance := domain.ChannelInstance{
+		ID: "channel-provider-auto", Config: map[string]any{"runtime_default": automaticRuntime},
+	}
+	explicitInput := map[string]any{"runtime_default": map[string]any{
+		"model_source": domain.ModelSourceProvider, "model_id": model.ID, "wire_model": "", "codex_account_id": "",
+	}}
+	if sameChannelRuntimeSelection(explicitInput["runtime_default"].(map[string]any), automaticRuntime) {
+		t.Fatal("provider explicit selection was compared as unchanged")
+	}
+	if err := service.validateChannelInstanceConfig(ctx, automaticInstance, explicitInput); err != nil {
+		t.Fatal(err)
+	}
+	savedExplicit, _ := mapField(explicitInput, "runtime_default")
+	if stringField(savedExplicit, "model_id") != model.ID {
+		t.Fatalf("explicit switch did not persist the model: %#v", savedExplicit)
+	}
+}

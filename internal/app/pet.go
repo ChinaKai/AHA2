@@ -713,48 +713,93 @@ func (s *Service) UpdateOwnerPetSettings(ctx context.Context, input PetSettingsI
 }
 
 // petSelectionMatchesStored reports whether the submitted pet runtime selection
-// already names the stored one. An omitted field inherits the stored value, so
-// "not provided" is never mistaken for "changed to empty". When the catalog row
-// itself is gone, the stored BrainModelID is all that remains; an identical id
-// is treated as unchanged so a deleted model cannot block unrelated saves.
+// already names the stored one. The Web picker sends an empty model_id for
+// official and claude_native sources and relies on the server to derive the
+// catalog id, so an empty id is matched by deriving the expected id from the
+// submitted source/wire/account (or from the stored model row when a field is
+// omitted). A provider selection's empty model_id means "automatic" and is a
+// real change, never an unchanged value. The legacy brain_model_id field is
+// still accepted as an exact id comparison.
 func (s *Service) petSelectionMatchesStored(ctx context.Context, assistant domain.OwnerAssistant, input PetSettingsInput) bool {
 	currentID := strings.TrimSpace(assistant.BrainModelID)
 	submittedID := strings.TrimSpace(input.PetModelID)
 	if submittedID == "" {
-		legacyID := strings.TrimSpace(input.BrainModelID)
-		return legacyID != "" && legacyID == currentID
-	}
-	if submittedID != currentID {
-		return false
-	}
-	stored, err := s.store.Model(ctx, currentID)
-	if err != nil {
-		// The model row (and possibly its account) was deleted. The id still
-		// matches, and there is no remaining catalog identity to compare.
-		return true
-	}
-	storedSource := strings.TrimSpace(stored.Source)
-	if storedSource == "" {
-		storedSource = domain.ModelSourceProvider
-	}
-	if submittedSource := strings.TrimSpace(input.PetModelSource); submittedSource != "" {
-		normalized, ok := domain.NormalizeModelSource(submittedSource)
-		if !ok || normalized != storedSource {
-			return false
+		if legacyID := strings.TrimSpace(input.BrainModelID); legacyID != "" {
+			return legacyID == currentID
 		}
 	}
-	submittedWire := strings.TrimSpace(input.PetWireModel)
-	if submittedWire == "" {
-		submittedWire = stored.WireModel
+
+	stored, storedErr := s.store.Model(ctx, currentID)
+	storedFound := storedErr == nil
+
+	source := strings.TrimSpace(input.PetModelSource)
+	if source == "" && storedFound {
+		source = strings.TrimSpace(stored.Source)
 	}
-	if submittedWire != strings.TrimSpace(stored.WireModel) {
+	if source == "" {
+		// Without a source or a stored row there is nothing to derive. An
+		// exact id match is still the same selection.
+		return submittedID != "" && submittedID == currentID
+	}
+	normalized, ok := domain.NormalizeModelSource(source)
+	if !ok {
 		return false
 	}
-	submittedAccount := strings.TrimSpace(input.PetCodexAccountID)
-	if submittedAccount == "" {
-		submittedAccount = stored.CodexAccountID
+	inherit := func(submitted, storedValue string) string {
+		if submitted != "" {
+			return submitted
+		}
+		return strings.TrimSpace(storedValue)
 	}
-	return submittedAccount == strings.TrimSpace(stored.CodexAccountID)
+	switch normalized {
+	case domain.ModelSourceProvider:
+		// Empty model_id is the explicit automatic choice. Provider ids are
+		// stored literally, so both sides must agree, not inherit.
+		if submittedID == "" || submittedID != currentID {
+			return false
+		}
+		if storedFound {
+			storedSource := strings.TrimSpace(stored.Source)
+			if normalizedStored, normalizedOK := domain.NormalizeModelSource(storedSource); normalizedOK {
+				storedSource = normalizedStored
+			}
+			if storedSource == "" {
+				storedSource = domain.ModelSourceProvider
+			}
+			if storedSource != domain.ModelSourceProvider {
+				return false
+			}
+		}
+		return true
+	case domain.ModelSourceOfficial:
+		wireModel := strings.TrimSpace(input.PetWireModel)
+		accountID := strings.TrimSpace(input.PetCodexAccountID)
+		if storedFound {
+			wireModel = inherit(wireModel, stored.WireModel)
+			accountID = inherit(accountID, stored.CodexAccountID)
+		}
+		if wireModel == "" || accountID == "" {
+			return false
+		}
+		if submittedID != "" && submittedID != currentID {
+			return false
+		}
+		return domain.OfficialCodexModelID(accountID, wireModel) == currentID
+	case domain.ModelSourceClaudeNative:
+		wireModel := strings.TrimSpace(input.PetWireModel)
+		if storedFound {
+			wireModel = inherit(wireModel, stored.WireModel)
+		}
+		if wireModel == "" {
+			return false
+		}
+		if submittedID != "" && submittedID != currentID {
+			return false
+		}
+		return domain.ClaudeNativeModelID(wireModel) == currentID
+	default:
+		return false
+	}
 }
 
 // petCodexAccountForWireModel resolves an account for an official wire model

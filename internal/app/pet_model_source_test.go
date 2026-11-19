@@ -157,7 +157,17 @@ func TestPetModelSettingsRejectsSourceModelMismatch(t *testing.T) {
 // A deleted Codex account must not block saving settings that do not change the
 // pet runtime selection. Disabling the pet and changing permissions must still
 // work, even though the stored model row still references the deleted account.
-func TestPetSettingsSaveIgnoresUnchangedDeletedAccount(t *testing.T) {
+// webPetSettings reproduces the Web payload: official and claude_native always
+// submit an empty pet_model_id and rely on the server to derive the catalog id.
+func webPetSettings(view OwnerAssistantView, enabled bool) PetSettingsInput {
+	input := petSettingsWithModel(view.PetModelSource, "", view.PetWireModel, view.PetCodexAccountID)
+	input.Enabled = enabled
+	return input
+}
+
+// A deleted Codex account must not block saving settings that do not change the
+// pet runtime selection, using the exact empty-model_id payload the Web sends.
+func TestPetSettingsSaveWebPayloadWithDeletedAccount(t *testing.T) {
 	fixture := newPetTaskFixture(t)
 	now := fixture.service.now().UTC()
 	account := domain.CodexAccount{
@@ -179,19 +189,22 @@ func TestPetSettingsSaveIgnoresUnchangedDeletedAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The view still reports the stale selection; that is exactly what the Web
-	// sends back on the next save.
 	view, err := fixture.service.OwnerAssistant(fixture.ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	input := petSettingsWithModel(view.PetModelSource, view.PetModelID, view.PetWireModel, view.PetCodexAccountID)
-	input.Enabled = false
-	input.AllowViewTasks = boolPointer(false)
-	input.AllowManageChannels = boolPointer(false)
-	saved, err = fixture.service.UpdateOwnerPetSettings(fixture.ctx, input)
+	if view.PetModelSource != domain.ModelSourceOfficial || view.PetWireModel != "gpt-deleted-later" ||
+		view.PetCodexAccountID != account.ID {
+		t.Fatalf("stale view changed shape: %#v", view)
+	}
+
+	// Save 1: disable the pet.
+	disable := webPetSettings(view, false)
+	disable.AllowViewTasks = boolPointer(false)
+	disable.AllowManageChannels = boolPointer(false)
+	saved, err = fixture.service.UpdateOwnerPetSettings(fixture.ctx, disable)
 	if err != nil {
-		t.Fatalf("an unchanged deleted account blocked unrelated settings: %v", err)
+		t.Fatalf("disable with an unchanged deleted account: %v", err)
 	}
 	if saved.Assistant.PetEnabled {
 		t.Fatal("pet stayed enabled")
@@ -201,6 +214,120 @@ func TestPetSettingsSaveIgnoresUnchangedDeletedAccount(t *testing.T) {
 	}
 	if saved.Assistant.BrainModelID != storedModel {
 		t.Fatalf("runtime changed to %q, want %q", saved.Assistant.BrainModelID, storedModel)
+	}
+
+	// Save 2: enable again and change one permission.
+	enable := webPetSettings(view, true)
+	enable.AllowManageChannels = boolPointer(true)
+	saved, err = fixture.service.UpdateOwnerPetSettings(fixture.ctx, enable)
+	if err != nil {
+		t.Fatalf("permission save with an unchanged deleted account: %v", err)
+	}
+	if !saved.Assistant.PetEnabled || !saved.Assistant.PetAllowManageChannels {
+		t.Fatalf("enable/permission change was not saved: %#v", saved.Assistant)
+	}
+	if saved.Assistant.BrainModelID != storedModel {
+		t.Fatalf("runtime changed to %q, want %q", saved.Assistant.BrainModelID, storedModel)
+	}
+}
+
+// The Web sends claude_native with an empty model_id too; an unchanged wire
+// model must be recognized without resolving the catalog row again.
+func TestPetSettingsWebPayloadClaudeNativeUnchanged(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	saved, err := fixture.service.UpdateOwnerPetSettings(fixture.ctx, petSettingsWithModel(
+		domain.ModelSourceClaudeNative, "", "claude-sonnet-4-5", "",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	storedModel := saved.Assistant.BrainModelID
+	view, err := fixture.service.OwnerAssistant(fixture.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.PetModelSource != domain.ModelSourceClaudeNative || view.PetWireModel != "claude-sonnet-4-5" {
+		t.Fatalf("claude view=%#v", view)
+	}
+	input := webPetSettings(view, true)
+	input.AllowViewTasks = boolPointer(false)
+	saved, err = fixture.service.UpdateOwnerPetSettings(fixture.ctx, input)
+	if err != nil {
+		t.Fatalf("unchanged claude native selection: %v", err)
+	}
+	if saved.Assistant.BrainModelID != storedModel || saved.Assistant.PetAllowViewTasks {
+		t.Fatalf("claude save changed the wrong state: %#v", saved.Assistant)
+	}
+}
+
+// A provider model id is literal. The picker's automatic option submits an
+// empty model_id, which is a real change, and this runtime has no automatic
+// fallback, so it must be rejected with a readable error instead of being
+// silently treated as unchanged.
+func TestPetSettingsWebProviderAutomaticIsNotSilentlyUnchanged(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	if _, err := fixture.service.UpdateOwnerPetSettings(fixture.ctx, petSettingsWithModel(
+		domain.ModelSourceProvider, fixture.model.ID, "", "",
+	)); err != nil {
+		t.Fatal(err)
+	}
+	_, err := fixture.service.UpdateOwnerPetSettings(fixture.ctx, petSettingsWithModel(
+		domain.ModelSourceProvider, "", "", "",
+	))
+	if err == nil {
+		t.Fatal("provider automatic selection was silently treated as unchanged")
+	}
+	if !strings.Contains(err.Error(), "Provider") || strings.Contains(err.Error(), "sql:") {
+		t.Fatalf("provider automatic error is not readable: %v", err)
+	}
+	assistant, storeErr := fixture.database.OwnerAssistant(fixture.ctx, ownerAssistantID)
+	if storeErr != nil {
+		t.Fatal(storeErr)
+	}
+	if assistant.BrainModelID != fixture.model.ID {
+		t.Fatalf("failed automatic switch changed the runtime to %q", assistant.BrainModelID)
+	}
+}
+
+// If the stored model row itself is gone, the Web payload is provider with the
+// old (now missing) id. That must still count as unchanged so the pet can be
+// disabled or its permissions edited.
+func TestPetSettingsSaveWhenStoredModelRowDeleted(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	now := fixture.service.now().UTC()
+	petModel := domain.Model{
+		ID: "model-pet-deleted-row", DisplayName: "Pet Deleted Row", ProviderID: fixture.provider.ID,
+		Source: domain.ModelSourceProvider, Backend: "codex", WireModel: "pet-deleted-row", WireAPI: "chat",
+		DefaultEnvGroupID: fixture.modelEnv.ID, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := fixture.database.UpsertModel(fixture.ctx, petModel); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := fixture.service.UpdateOwnerPetSettings(fixture.ctx, petSettingsWithModel(
+		domain.ModelSourceProvider, petModel.ID, "", "",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Assistant.BrainModelID != petModel.ID {
+		t.Fatalf("runtime=%q want %q", saved.Assistant.BrainModelID, petModel.ID)
+	}
+	if err := fixture.database.DeleteModel(fixture.ctx, petModel.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	input := petSettingsWithModel(domain.ModelSourceProvider, petModel.ID, "", "")
+	input.Enabled = false
+	input.AllowViewTasks = boolPointer(false)
+	saved, err = fixture.service.UpdateOwnerPetSettings(fixture.ctx, input)
+	if err != nil {
+		t.Fatalf("a deleted model row blocked disabling the pet: %v", err)
+	}
+	if saved.Assistant.PetEnabled || saved.Assistant.PetAllowViewTasks {
+		t.Fatalf("settings were not saved: %#v", saved.Assistant)
+	}
+	if saved.Assistant.BrainModelID != petModel.ID {
+		t.Fatalf("runtime changed to %q, want %q", saved.Assistant.BrainModelID, petModel.ID)
 	}
 }
 

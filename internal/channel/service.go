@@ -673,9 +673,12 @@ func mergeUnchangedChannelRuntime(incoming, stored map[string]any) map[string]an
 }
 
 // sameChannelRuntimeSelection compares the identity fields channel runtime
-// normalization validates. An empty incoming field inherits the stored value,
-// so a partial update is not mistaken for clearing the selection. Source is
-// compared after normalization so "env"/empty and "provider" agree.
+// normalization validates. Source is resolved first: an empty incoming source
+// inherits the stored source, and an empty pair is treated as provider.
+// Official and claude_native derive the model id server-side, so an empty
+// incoming model_id keeps the stored one there. A provider model id is literal:
+// empty means the explicit "automatic" choice and must be compared, never
+// inherited. Other empty identity fields keep inheriting the stored value.
 func sameChannelRuntimeSelection(incoming, stored map[string]any) bool {
 	if boolField(incoming, "inherit") != boolField(stored, "inherit") {
 		return false
@@ -683,21 +686,38 @@ func sameChannelRuntimeSelection(incoming, stored map[string]any) bool {
 	if boolField(incoming, "inherit") {
 		return true
 	}
-	for _, key := range []string{"model_source", "model_id", "wire_model", "codex_account_id"} {
+	incomingSource, incomingSourceOK := domain.NormalizeModelSource(stringField(incoming, "model_source"))
+	storedSource, storedSourceOK := domain.NormalizeModelSource(stringField(stored, "model_source"))
+	if !incomingSourceOK {
+		incomingSource = ""
+	}
+	if !storedSourceOK {
+		storedSource = ""
+	}
+	if incomingSource != "" && storedSource != "" && incomingSource != storedSource {
+		return false
+	}
+	effectiveSource := incomingSource
+	if effectiveSource == "" {
+		effectiveSource = storedSource
+	}
+	if effectiveSource == "" {
+		effectiveSource = domain.ModelSourceProvider
+	}
+
+	compare := func(key string, inherit bool) bool {
 		left := strings.TrimSpace(stringField(incoming, key))
 		right := strings.TrimSpace(stringField(stored, key))
-		if left == "" {
+		if inherit && left == "" {
 			left = right
 		}
-		if key == "model_source" {
-			if normalized, ok := domain.NormalizeModelSource(left); ok {
-				left = normalized
-			}
-			if normalized, ok := domain.NormalizeModelSource(right); ok {
-				right = normalized
-			}
-		}
-		if left != right {
+		return left == right
+	}
+	if !compare("model_id", effectiveSource != domain.ModelSourceProvider) {
+		return false
+	}
+	for _, key := range []string{"wire_model", "codex_account_id"} {
+		if !compare(key, true) {
 			return false
 		}
 	}
