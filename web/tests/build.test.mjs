@@ -310,12 +310,15 @@ test("channel lifecycle renders active and retired actions with guarded purge", 
     ],
   };
   const combinedSelect = module.channelRuntimeEditor({runtime_default: {model_id: "model-codex", codex_account_id: "account-b"}}, combinedContext, instance);
+  assert.match(combinedSelect, /id="channel-runtime-source"/);
+  assert.match(combinedSelect, /id="channel-runtime-model"/);
   assert.match(combinedSelect, /Codex 官方账号/);
   assert.match(combinedSelect, /账号 A · GPT-5/);
   assert.match(combinedSelect, /账号 B · GPT-5/);
   assert.match(combinedSelect, /Provider 模型/);
   assert.match(combinedSelect, /data-account-id="account-b" selected/);
-  assert.equal((combinedSelect.match(/ selected/g) || []).length, 1);
+  // One selected option per select: the saved source and the saved account/model.
+  assert.equal((combinedSelect.match(/ selected/g) || []).length, 2);
 
   const legacySelect = module.channelRuntimeEditor({
     runtime_default: {model_id: "", codex_account_id: ""},
@@ -1596,7 +1599,7 @@ test("built web contains responsive application", async () => {
   assert.match(api, /channel-instances\/.*\/conversations/);
   assert.match(channels, /权限更新仅做增量授权/);
   assert.doesNotMatch(channels, /name="app_secret" type="password"/);
-	for (const marker of ["渠道设置", "channel-runtime-source", "notify_task_status", "普通 Task 状态变更推送到飞书私聊助手", "knowledge_entry_id"]) assert.match(channels, new RegExp(marker));
+	for (const marker of ["渠道设置", "notify_task_status", "普通 Task 状态变更推送到飞书私聊助手", "knowledge_entry_id"]) assert.match(channels, new RegExp(marker));
 	for (const marker of ["data-channel-settings-open", "data-channel-conversations-open", "channelConversations", "channel-conversation-card", "绑定任务", "最近入站", "最近出站"] ) assert.match(channels, new RegExp(marker));
 	for (const marker of ["data-channel-policy-select-all", "data-channel-policy-clear", "knowledge_scope_mode", "data-channel-knowledge-selected", "全部项目知识与知识库"]) assert.match(channels, new RegExp(marker));
 	assert.match(channels, /私聊不限制；群聊可选全局知识 \+ 项目知识库/);
@@ -3823,8 +3826,15 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   // styles; measured 268,606, so the ceiling moves to the next boundary.
   // task-662 added the Pet Task's cross-project skill picker (search input,
   // disabled/version metadata, per-project labels); measured 269,595, so the
-  // ceiling moves to the next 256-byte boundary.
-  const FIRST_SCREEN_GZIP_BUDGET = 269824;
+  // ceiling moved to the next 256-byte boundary.
+  // The product-2-5 integration measured 270,412 on the merged branch (task-666)
+  // before the shared model-source picker module was emitted by this build.
+  // task-664's source picker keeps its Chinese copy in the lazy module but
+  // pairs it through i18n's tr(), so the 22 English strings live in the
+  // first-screen catalog; after adding model_source_picker to the module build
+  // the same mask-version, level-5 gzip measurement is 218,689 JS + 52,283 CSS
+  // = 270,972. The ceiling is the next 256-byte boundary above that.
+  const FIRST_SCREEN_GZIP_BUDGET = 271104;
   // The version query parameter is a content hash and its hex digits change
   // how the same code gzips: main already sits exactly on the budget, so a
   // hash-only change could trip it without growing the payload. Mask the

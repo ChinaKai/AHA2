@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import {readFile} from "node:fs/promises";
 import {resolve} from "node:path";
 import {pathToFileURL} from "node:url";
 
@@ -50,17 +51,19 @@ test("source picker keeps an unavailable saved selection instead of falling back
   assert.match(native.entries[0].reason, /not signed in/);
 
   const html = module.modelSourceFieldsHTML("probe", options, {source: "claude_native", wireModel: "claude-opus"});
-  assert.match(html, /value="claude_native" selected/);
-  assert.match(html, /value="claude-opus" selected disabled/);
-  assert.doesNotMatch(html, /value="model-provider" selected/);
+  assert.match(html, /value="claude_native"[^>]*\sselected/);
+  assert.match(html, /value="claude-opus"[^>]*\sselected[^>]*\sdisabled/);
+  assert.doesNotMatch(html, /value="model-provider"[^>]*\sselected/);
 });
 
 test("official saved account and model stay selected when the account is unavailable", () => {
   const html = module.modelSourceFieldsHTML("probe", module.buildModelSourceOptions(providerModels, accounts, claudeReady, {
     source: "official", wireModel: "gpt-expired", accountID: "account-expired",
   }), {source: "official", wireModel: "gpt-expired", accountID: "account-expired"});
-  assert.match(html, /value="official" selected/);
-  assert.match(html, /value="gpt-expired" data-account-id="account-expired" selected disabled/);
+  assert.match(html, /value="official"[^>]*\sselected/);
+  // Standard HTML data attribute, so dataset.accountId reads it back in the DOM.
+  assert.match(html, /value="gpt-expired"[^>]*\sdata-account-id="account-expired"[^>]*\sselected[^>]*\sdisabled/);
+  assert.doesNotMatch(html, /data-accountId/);
   assert.equal((html.match(/ selected/g) || []).length, 2);
 });
 
@@ -69,4 +72,24 @@ test("unknown source values normalize to provider", () => {
   assert.equal(module.normalizeModelSource("codex_official"), "official");
   assert.equal(module.normalizeModelSource("claude_native"), "claude_native");
   assert.equal(module.normalizeModelSource("mystery"), "provider");
+});
+
+test("picker labels come from the shared versioned i18n catalog", async () => {
+  const source = await readFile(resolve(root, "build", "model_source_picker.js"), "utf8");
+  const specifier = source.match(/from "\.\/(i18n\.js\?v=[a-f0-9]{12})"/)?.[1];
+  assert.ok(specifier, "the picker must import the versioned i18n singleton");
+  const i18n = await import(new URL(specifier, pathToFileURL(`${resolve(root, "build")}/`)).href);
+  try {
+    i18n.applyLocale("zh-CN");
+    const zh = module.buildModelSourceOptions(providerModels, accounts, claudeReady, {source: "provider", modelID: "model-provider"});
+    assert.equal(zh.find(item => item.source === "provider").label, "Provider 模型");
+    assert.equal(zh.find(item => item.source === "official").label, "Codex 官方账号");
+
+    i18n.applyLocale("en-US");
+    const en = module.buildModelSourceOptions(providerModels, accounts, claudeReady, {source: "provider", modelID: "model-provider"});
+    assert.equal(en.find(item => item.source === "provider").label, "Provider model");
+    assert.equal(en.find(item => item.source === "official").label, "Codex official account");
+  } finally {
+    i18n.applyLocale("zh-CN");
+  }
 });

@@ -65,7 +65,9 @@ func TestCreateTaskSelectsOfficialCodexModelFromAccount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if model.Source != domain.ModelSourceOfficial || model.CodexAccountID != "" || model.ContextWindow != 1050000 {
+	// The hidden runtime model carries the account so pet settings can read the
+	// actual official account back after a reload instead of only the model ID.
+	if model.Source != domain.ModelSourceOfficial || model.CodexAccountID != "account-official" || model.ContextWindow != 1050000 {
 		t.Fatalf("unexpected hidden runtime model: %#v", model)
 	}
 	agents, err := service.TaskAgents(ctx, task.ID)
@@ -114,6 +116,25 @@ func TestOfficialCodexSelectionRejectsModelOutsideAccountCatalog(t *testing.T) {
 		CodexAccountID: "account-limited", WireModel: "gpt-not-available",
 	}); err == nil {
 		t.Fatal("expected unavailable account model to be rejected")
+	}
+}
+
+func TestOfficialCodexSelectionRejectsMissingOrUnknownAccount(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	service := NewService(database, nil, nil)
+	for _, accountID := range []string{"", "account-missing"} {
+		if _, _, _, err := service.resolveRuntimeSelection(ctx, runtimeSelectionInput{
+			Backend: "codex", ModelSource: domain.ModelSourceOfficial,
+			CodexAccountID: accountID, WireModel: "gpt-5.6-sol",
+		}); err == nil {
+			t.Fatalf("account %q: expected missing account to be rejected", accountID)
+		}
 	}
 }
 

@@ -1,52 +1,33 @@
+import {tr} from "./i18n.js";
 import type {ClaudeModelOption, CodexAccount, Model, Workspace} from "./types.js";
 
-// This module is lazy-loaded on the pet/channel surfaces. Its copy lives here
-// so the first-screen i18n catalog does not grow for two secondary pages.
+// This module is lazy-loaded on the pet/channel surfaces. The Chinese copy
+// stays here so the first-screen catalog does not grow for two secondary pages;
+// tr() supplies the English pairing from i18n.ts, so there is one catalog
+// rather than a second hardcoded translation table in this module.
 const modelSourceCopy = {
-  zh: {
-    label: "模型来源", model: "模型 / 账号",
-    provider: "Provider 模型", official: "Codex 官方账号", claudeNative: "Claude native",
-    loading: "读取模型目录…", unavailable: "暂不可用", auto: "自动选择可用模型",
-    noProvider: "没有可用的 Provider 模型", noAccount: "未配置 Codex 官方账号",
-    noCredential: "尚未登录（未配置凭据）", accountStatus: "账号状态：{status}",
-    accountMissing: "所选 Codex 账号已不存在", noAccountModels: "账号暂无可用模型，请先刷新账号",
-    modelNotInCatalog: "当前配置已不在可选列表中", savedUnavailable: "当前配置不可用：{reason}",
-    noCLI: "当前 Workspace 未检测到 Claude Code CLI",
-    notLoggedIn: "尚未登录 Claude Code，请先执行 claude auth login",
-    authUnknown: "尚未完成 Claude Code 登录状态检测",
-    authUnknownWithReason: "登录状态检测失败（{reason}）", noModels: "未能获取官方模型列表",
-    modelsReady: "已检测到 {count} 个官方模型", modelsErrorWithReason: "未能获取官方模型列表（{reason}）",
-    helpProvider: "使用 Provider 的凭据与 Env Group。",
-    helpOfficial: "使用所选 Codex 官方账号的额度；账号与模型必须同时可用。",
-    helpClaudeNative: "使用当前 Workspace 的 Claude Code 登录，不读取也不保存凭据。",
-  },
-  en: {
-    label: "Model source", model: "Model / account",
-    provider: "Provider model", official: "Codex official account", claudeNative: "Claude native",
-    loading: "Loading model catalog…", unavailable: "Unavailable", auto: "Automatically pick an available model",
-    noProvider: "No Provider model is available", noAccount: "No Codex official account is configured",
-    noCredential: "Not signed in (no credentials)", accountStatus: "Account status: {status}",
-    accountMissing: "The selected Codex account no longer exists", noAccountModels: "The account has no available models; refresh it first",
-    modelNotInCatalog: "The current selection is no longer offered", savedUnavailable: "Current selection is unavailable: {reason}",
-    noCLI: "Claude Code CLI was not detected in this Workspace",
-    notLoggedIn: "Claude Code is not signed in; run claude auth login first",
-    authUnknown: "Claude Code login status has not been detected yet",
-    authUnknownWithReason: "Login status detection failed ({reason})", noModels: "Could not read the official model list",
-    modelsReady: "Detected {count} official models", modelsErrorWithReason: "Could not read the official model list ({reason})",
-    helpProvider: "Uses the Provider credentials and Env Group.",
-    helpOfficial: "Uses the selected Codex official account quota; the account and model must both be available.",
-    helpClaudeNative: "Uses the Claude Code login on this Workspace; credentials are never read or stored.",
-  },
+  label: "模型来源", model: "模型 / 账号",
+  provider: "Provider 模型", official: "Codex 官方账号", claudeNative: "Claude native",
+  unavailable: "暂不可用", auto: "自动选择可用模型",
+  noProvider: "没有可用的 Provider 模型", noAccount: "未配置 Codex 官方账号",
+  noCredential: "尚未登录（未配置凭据）", accountStatus: "账号状态：{status}",
+  accountMissing: "所选 Codex 账号已不存在", noAccountModels: "账号暂无可用模型，请先刷新账号",
+  modelNotInCatalog: "当前配置已不在可选列表中", savedUnavailable: "当前配置不可用：{reason}",
+  noCLI: "当前 Workspace 未检测到 Claude Code CLI",
+  notLoggedIn: "尚未登录 Claude Code，请先执行 claude auth login",
+  authUnknown: "尚未完成 Claude Code 登录状态检测",
+  authUnknownWithReason: "登录状态检测失败（{reason}）", noModels: "未能获取官方模型列表",
+  modelsReady: "已检测到 {count} 个官方模型", modelsErrorWithReason: "未能获取官方模型列表（{reason}）",
+  helpProvider: "使用 Provider 的凭据与 Env Group。",
+  helpOfficial: "使用所选 Codex 官方账号的额度；账号与模型必须同时可用。",
+  helpClaudeNative: "使用当前 Workspace 的 Claude Code 登录，不读取也不保存凭据。",
 } as const;
 
-type CopyKey = keyof typeof modelSourceCopy.zh;
+type CopyKey = keyof typeof modelSourceCopy;
 
 function modelSourceText(key: CopyKey, values: Record<string, string> = {}): string {
-  const lang = typeof document === "undefined" ? "" : String(document.documentElement?.lang || "");
-  const english = lang.toLowerCase().startsWith("en") ||
-    (lang === "" && typeof navigator !== "undefined" && String(navigator.language || "").toLowerCase().startsWith("en"));
-  const template = (english ? modelSourceCopy.en : modelSourceCopy.zh)[key];
-  return template.replace(/\{(\w+)\}/g, (_, name: string) => String(values[name] ?? `{${name}}`));
+  return tr(modelSourceCopy[key])
+    .replace(/\{(\w+)\}/g, (_, name: string) => String(values[name] ?? `{${name}}`));
 }
 
 // One source-first picker for channel settings and pet settings. Both surfaces
@@ -105,7 +86,10 @@ function escapeHTML(value: unknown): string {
 }
 
 function option(value: string, label: string, selected: boolean, disabled = false, dataset: Record<string, string> = {}): string {
-  const attrs = Object.entries(dataset).map(([key, item]) => ` data-${key}="${escapeHTML(item)}"`).join("");
+  const attrs = Object.entries(dataset)
+    .filter(([, item]) => item !== "")
+    .map(([key, item]) => ` data-${key}="${escapeHTML(item)}"`)
+    .join("");
   return `<option value="${escapeHTML(value)}"${attrs} ${selected ? "selected" : ""} ${disabled ? "disabled" : ""}>${escapeHTML(label)}</option>`;
 }
 
@@ -312,7 +296,7 @@ function modelOptionsHTML(source: SourceModelOption, selection: ModelSourceSelec
     entry.disabled && entry.reason ? `${entry.label} · ${entry.reason}` : entry.label,
     index === fallback,
     entry.disabled,
-    {accountId: entry.accountID},
+    {"account-id": entry.accountID},
   )).join("");
 }
 
