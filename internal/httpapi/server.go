@@ -428,6 +428,16 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/prompts/templates", s.withAuth(http.HandlerFunc(s.promptTemplates)))
 	mux.Handle("PUT /api/v1/prompts/templates/{id}", s.withAuth(http.HandlerFunc(s.updatePromptTemplate)))
 	mux.Handle("POST /api/v1/prompts/templates/{id}/reset", s.withAuth(http.HandlerFunc(s.resetPromptTemplate)))
+	// Phase 3b adds only read-only entry views. The legacy template routes
+	// above keep their existing edit/reset semantics for at least this release.
+	mux.Handle("GET /api/v1/prompts/entries", s.withAuth(http.HandlerFunc(s.promptEntryCatalog)))
+	mux.Handle("GET /api/v1/prompts/entries/{entry}/anchors/{anchor}", s.withAuth(http.HandlerFunc(s.promptEntryAnchorPreview)))
+	mux.Handle("GET /api/v1/prompts/migration-preview", s.withAuth(http.HandlerFunc(s.promptMigrationPreview)))
+	// Non-GET requests to the read-only views get an explicit 405 from the
+	// authenticated handler; the newer method-specific GET patterns win first.
+	mux.Handle("/api/v1/prompts/entries", s.withAuth(http.HandlerFunc(s.rejectPromptReadOnly)))
+	mux.Handle("/api/v1/prompts/entries/{entry}/anchors/{anchor}", s.withAuth(http.HandlerFunc(s.rejectPromptReadOnly)))
+	mux.Handle("/api/v1/prompts/migration-preview", s.withAuth(http.HandlerFunc(s.rejectPromptReadOnly)))
 	mux.Handle("GET /api/v1/hardware/serial-ports", s.withAuth(http.HandlerFunc(s.hardwareSerialPorts)))
 	mux.Handle("GET /api/v1/hardware-resources", s.withAuth(http.HandlerFunc(s.listHardwareResources)))
 	mux.Handle("POST /api/v1/hardware-resources", s.withAuth(http.HandlerFunc(s.createHardwareResource)))

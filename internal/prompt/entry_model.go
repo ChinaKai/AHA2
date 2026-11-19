@@ -45,9 +45,11 @@ type EntryAnchor struct {
 	LegacyID      string `json:"legacy_id"`
 	Name          string `json:"name"`
 	Description   string `json:"description"`
+	Layer         string `json:"layer"`
 	Kind          string `json:"kind"`
 	Required      bool   `json:"required"`
 	Editable      bool   `json:"editable"`
+	Protected     bool   `json:"protected"`
 	Dynamic       bool   `json:"dynamic"`
 	FrozenVersion int    `json:"frozen_version"`
 	Version       int    `json:"version"`
@@ -203,15 +205,18 @@ func LegacyAnchors() []EntryAnchorRef {
 }
 
 func anchorFromSpec(spec entryAnchorSpec, builtin domain.PromptTemplate, template domain.PromptTemplate) EntryAnchor {
+	editable := builtin.Editable && spec.Kind != anchorKindGenerated
 	anchor := EntryAnchor{
 		EntryID:       spec.EntryID,
 		Key:           spec.Key,
 		LegacyID:      spec.LegacyID,
 		Name:          template.Name,
 		Description:   template.Description,
+		Layer:         template.Layer,
 		Kind:          spec.Kind,
 		Required:      builtin.Required,
-		Editable:      builtin.Editable && spec.Kind != anchorKindGenerated,
+		Editable:      editable,
+		Protected:     !editable,
 		Dynamic:       spec.Kind == anchorKindGenerated,
 		FrozenVersion: spec.FrozenVersion,
 		Version:       template.Version,
@@ -266,9 +271,12 @@ type AnchorPreview struct {
 	Key           string `json:"key"`
 	LegacyID      string `json:"legacy_id"`
 	Name          string `json:"name"`
+	Description   string `json:"description"`
+	Layer         string `json:"layer"`
 	Kind          string `json:"kind"`
 	Required      bool   `json:"required"`
 	Editable      bool   `json:"editable"`
+	Protected     bool   `json:"protected"`
 	Dynamic       bool   `json:"dynamic"`
 	FrozenVersion int    `json:"frozen_version"`
 	Version       int    `json:"version"`
@@ -312,9 +320,10 @@ func (engine *Engine) PreviewEntryAnchor(ctx context.Context, entryID, key, lang
 	anchor := anchorFromSpec(spec, builtin, resolved)
 	preview := AnchorPreview{
 		EntryID: entryID, Key: key, LegacyID: spec.LegacyID, Name: anchor.Name,
-		Kind: spec.Kind, Required: anchor.Required, Editable: anchor.Editable,
-		Dynamic: anchor.Dynamic, FrozenVersion: spec.FrozenVersion,
-		Version: resolved.Version, Source: resolved.Source, Content: resolved.Content,
+		Description: anchor.Description, Layer: anchor.Layer, Kind: spec.Kind, Required: anchor.Required,
+		Editable: anchor.Editable, Protected: anchor.Protected, Dynamic: anchor.Dynamic,
+		FrozenVersion: spec.FrozenVersion, Version: resolved.Version, Source: resolved.Source,
+		Content: resolved.Content,
 	}
 	if spec.Kind == anchorKindGenerated {
 		// Code owns generated files. Resolve the builtin body regardless of any

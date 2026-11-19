@@ -39,3 +39,9 @@ func (s *Service) PromptEntryCatalog(ctx context.Context) (prompt.EntryCatalog, 
 func (s *Service) PreviewPromptTemplateMigration(ctx context.Context) (prompt.MigrationPreview, error) {
 	return s.prompts.PreviewMigration(ctx)
 }
+
+// PreviewPromptEntryAnchor renders one entry anchor with sample data for the
+// read-only Web preview. It never falls back to another anchor or template.
+func (s *Service) PreviewPromptEntryAnchor(ctx context.Context, entryID, key string) (prompt.AnchorPreview, error) {
+	return s.prompts.PreviewEntryAnchor(ctx, entryID, key, s.promptLanguage(ctx))
+}

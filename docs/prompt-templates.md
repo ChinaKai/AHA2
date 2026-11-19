@@ -39,11 +39,11 @@ PUT  /api/v1/prompts/templates/{id}
 POST /api/v1/prompts/templates/{id}/reset
 ```
 
-## 阶段 3 模板收敛（3a 只读层）
+## 阶段 3 模板收敛（3a/3b 只读层）
 
 阶段 3 把模板组织为两个顶层入口：`core`（安全、身份、角色、渠道、Agent API 与附件边界）和
-`task-context`（协作策略、知识协议、Task/Workspace、Inbox 与生成文件）。3a 只建立只读的注册
-与预览层，不切换渲染、不改写数据库：
+`task-context`（协作策略、知识协议、Task/Workspace、Inbox 与生成文件）。3a 建立只读的注册
+与预览层，3b 把它接到只读 HTTP/Web 预览，不切换渲染、不改写数据库：
 
 - 旧模板 ID 全部保留，并作为别名解析到 `入口#锚点`（例如 `role.main` -> `core#role-main`）。
   旧 ID 的版本在映射表中冻结；内置模板升版时必须有意识地更新该冻结值。
@@ -53,7 +53,21 @@ POST /api/v1/prompts/templates/{id}/reset
 - 迁移预览只读取现有 `prompt_template_overrides`：按锚点合并可迁移的 override，列出动态/只读
   锚点冲突、未知模板的孤儿 override，以及旧路径已忽略的过期内置覆盖；不写库、不静默覆盖。
 - 有效提示词在本阶段保持不变：生产仍走旧 `Build` 路径；入口模型渲染器只用于逐字等价基线。
-  Web 的入口/迁移预览界面留到下一阶段。
+
+3b 新增的读取端点：
+
+```text
+GET /api/v1/prompts/entries
+GET /api/v1/prompts/entries/{entry}/anchors/{anchor}
+GET /api/v1/prompts/migration-preview
+```
+
+入口目录固定为 `core` 与 `task-context`，锚点携带冻结版本、必需/受保护/可编辑和运行时生成标记。
+锚点预览返回源模板与示例渲染；未知或空白入口/锚点返回 4xx，不回退到默认模板。这些路径以及
+迁移预览不接受任何写方法（显式 405）。Web 的“提示词”页把入口预览、迁移预览和旧模板管理分成
+三个视图：入口视图只读，动态片段标注“运行时生成/不可单独编辑”，迁移面板只展示可迁移、冲突、
+孤儿和已忽略四组，不提供保存或一键迁移。旧 ID 列表与 `PUT /api/v1/prompts/templates/{id}`、
+`POST /api/v1/prompts/templates/{id}/reset` 的业务语义至少保留一个版本。
 
 Main/Sub、Auto/Single 等模板的运行时选择由 Prompt Engine 按当前 Agent 和 Task 状态固定完成，不作为用户可配置的路由系统。
 

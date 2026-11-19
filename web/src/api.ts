@@ -79,6 +79,9 @@ import type {
   SyncState,
   SyncConflict,
   PromptTemplate,
+  PromptAnchorPreview,
+  PromptEntry,
+  PromptMigrationPreview,
   SystemInfo,
   Task,
   TaskContextDetail,
@@ -1367,6 +1370,18 @@ class APIClient {
 
   promptTemplates(): Promise<{templates: PromptTemplate[]}> {
     return this.request("/api/v1/prompts/templates");
+  }
+
+  promptEntries(): Promise<{ok: boolean; entries: PromptEntry[]}> {
+    return this.request("/api/v1/prompts/entries");
+  }
+
+  promptEntryPreview(entryID: string, anchor: string): Promise<{ok: boolean; preview: PromptAnchorPreview}> {
+    return this.request(`/api/v1/prompts/entries/${encodeURIComponent(entryID)}/anchors/${encodeURIComponent(anchor)}`);
+  }
+
+  promptMigrationPreview(): Promise<{ok: boolean; migration: PromptMigrationPreview}> {
+    return this.request("/api/v1/prompts/migration-preview");
   }
 
   updatePromptTemplate(id: string, content: string): Promise<{ok: boolean}> {

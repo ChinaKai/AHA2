@@ -2,6 +2,9 @@ package httpapi
 
 import (
 	"net/http"
+	"strings"
+
+	"github.com/ChinaKai/AHA2/internal/prompt"
 )
 
 func (s *Server) promptTemplates(writer http.ResponseWriter, request *http.Request) {
@@ -38,4 +41,54 @@ func (s *Server) resetPromptTemplate(writer http.ResponseWriter, request *http.R
 	}
 	s.audit(request, "prompt.template.reset", "prompt_template", id, nil)
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true})
+}
+
+// promptEntryCatalog is the two-entry, read-only view of the template registry.
+// The legacy template list above stays the only list with edit affordances.
+func (s *Server) promptEntryCatalog(writer http.ResponseWriter, request *http.Request) {
+	catalog, err := s.app.PromptEntryCatalog(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "list_prompt_entries_failed")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "entries": catalog.Entries})
+}
+
+// promptEntryAnchorPreview renders one anchor. Unknown or blank identifiers are
+// rejected explicitly instead of falling back to the first entry or template.
+func (s *Server) promptEntryAnchorPreview(writer http.ResponseWriter, request *http.Request) {
+	entryID := strings.TrimSpace(request.PathValue("entry"))
+	key := strings.TrimSpace(request.PathValue("anchor"))
+	if entryID == "" || key == "" {
+		writeErrorDetail(writer, http.StatusBadRequest, "invalid_prompt_entry_anchor", "entry and anchor are required")
+		return
+	}
+	if _, ok := prompt.LookupEntryAnchor(entryID, key); !ok {
+		writeErrorDetail(writer, http.StatusNotFound, "prompt_entry_anchor_not_found", "prompt entry anchor was not found")
+		return
+	}
+	preview, err := s.app.PreviewPromptEntryAnchor(request.Context(), entryID, key)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "preview_prompt_entry_anchor_failed")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "preview": preview})
+}
+
+// promptMigrationPreview reports how existing overrides map onto entry anchors.
+// It only reads the override table; no route below this path accepts a write.
+func (s *Server) promptMigrationPreview(writer http.ResponseWriter, request *http.Request) {
+	migration, err := s.app.PreviewPromptTemplateMigration(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "preview_prompt_migration_failed")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "migration": migration})
+}
+
+// rejectPromptReadOnly makes the read-only boundary explicit instead of
+// letting a write-shaped request fall through to a generic 404.
+func (s *Server) rejectPromptReadOnly(writer http.ResponseWriter, request *http.Request) {
+	writer.Header().Set("Allow", "GET, HEAD")
+	writeErrorDetail(writer, http.StatusMethodNotAllowed, "read_only_prompt_view", "entry, anchor, and migration previews do not accept writes")
 }

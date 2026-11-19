@@ -1162,6 +1162,112 @@ export interface PromptTemplate {
   updated_at?: string;
 }
 
+// Phase 3 read-only entry view. The legacy PromptTemplate above stays the
+// editable list; these types only describe the two-entry preview.
+export interface PromptEntryAnchor {
+  entry_id: string;
+  key: string;
+  legacy_id: string;
+  name: string;
+  description: string;
+  layer: string;
+  kind: "resident" | "fragment" | "generated" | "resource" | string;
+  required: boolean;
+  editable: boolean;
+  protected: boolean;
+  dynamic: boolean;
+  frozen_version: number;
+  version: number;
+  source: string;
+  order: number;
+  heading: boolean;
+  condition?: string;
+}
+
+export interface PromptEntry {
+  id: string;
+  name: string;
+  description: string;
+  anchors: PromptEntryAnchor[];
+}
+
+export interface PromptAnchorPreview {
+  entry_id: string;
+  key: string;
+  legacy_id: string;
+  name: string;
+  description: string;
+  layer: string;
+  kind: string;
+  required: boolean;
+  editable: boolean;
+  protected: boolean;
+  dynamic: boolean;
+  frozen_version: number;
+  version: number;
+  source: string;
+  content: string;
+  rendered?: string;
+  render_error?: string;
+  legacy_override: boolean;
+  legacy_content?: string;
+  legacy_override_version?: number;
+}
+
+export interface PromptLegacyMapping {
+  legacy_id: string;
+  entry_id: string;
+  anchor_key: string;
+  kind: string;
+  dynamic: boolean;
+  editable: boolean;
+  required: boolean;
+  frozen_version: number;
+  builtin_version: number;
+}
+
+export interface PromptMergedOverride {
+  entry_id: string;
+  anchor_key: string;
+  legacy_ids: string[];
+  version: number;
+  updated_at?: string;
+  content_hash: string;
+  content: string;
+}
+
+export interface PromptOrphanOverride {
+  legacy_id: string;
+  version: number;
+  updated_at?: string;
+}
+
+export interface PromptOverrideConflict {
+  legacy_id: string;
+  entry_id: string;
+  anchor_key: string;
+  code: string;
+  message: string;
+  version: number;
+}
+
+export interface PromptIgnoredOverride {
+  legacy_id: string;
+  entry_id: string;
+  anchor_key: string;
+  code: string;
+  message: string;
+  version: number;
+}
+
+export interface PromptMigrationPreview {
+  mappings: PromptLegacyMapping[];
+  merged: PromptMergedOverride[];
+  orphans: PromptOrphanOverride[];
+  conflicts: PromptOverrideConflict[];
+  ignored: PromptIgnoredOverride[];
+}
+
 export interface ChannelPlugin {
   id: string;
   provider_key: string;
