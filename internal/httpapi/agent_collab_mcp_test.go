@@ -736,3 +736,188 @@ func TestCollabConcurrentSubmitsRespectMaxAgents(t *testing.T) {
 	t.Run("mcp", func(t *testing.T) { run(t, "mcp") })
 	t.Run("batches", func(t *testing.T) { run(t, "batches") })
 }
+
+// TestCollabConcurrentSubmitsHonorDowngradedMaxAgents reproduces the second
+// review finding: a submission that read MaxAgents=8 must not keep creating
+// agents after the Owner lowers the limit to 2 while it is in flight. A second
+// connection holds the single SQLite write lock, so every submission reads its
+// Task snapshot first and then blocks on agent creation; the downgrade commits
+// in between. Each creation afterwards has to observe the new limit inside its
+// own transaction instead of the snapshot the request started with.
+func TestCollabConcurrentSubmitsHonorDowngradedMaxAgents(t *testing.T) {
+	const (
+		submissions   = 8
+		downgradedCap = 2
+	)
+
+	run := func(t *testing.T, kind string) {
+		t.Helper()
+		h := newCoreMCPHarness(t)
+		// The winning submission starts a child Turn, which keeps writing under
+		// the Workspace after the assertions. Stop the service before this
+		// subtest returns, ahead of every TempDir cleanup.
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_ = h.service.Shutdown(ctx)
+		}()
+		task := collabMCPTask(t, h, "auto", submissions)
+		turn := createCoreTurn(t, h.database, task, "main", "batch-collab-downgrade-"+kind)
+		token := h.issue(task.ID, "main", turn.ID)
+		url := collabMCPURL(h)
+		if kind == "batches" {
+			url = h.server.URL + "/api/v1/agent/collaboration/batches"
+		}
+
+		// BEGIN IMMEDIATE takes SQLite's single write lock. Submissions can
+		// still read (WAL) but cannot create an agent until this transaction
+		// commits, so the downgrade below lands while they are in flight.
+		raw, err := sql.Open("sqlite", h.dbPath+"?_pragma=busy_timeout(5000)&_txlock=immediate")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer raw.Close()
+		raw.SetMaxOpenConns(1)
+		lock, err := raw.BeginTx(h.ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer lock.Rollback()
+
+		outcomes := make([]collabConcurrentOutcome, submissions)
+		start := make(chan struct{})
+		var wait sync.WaitGroup
+		for index := 0; index < submissions; index++ {
+			wait.Add(1)
+			go func(index int) {
+				defer wait.Done()
+				<-start
+				agentID := fmt.Sprintf("sub-%03d", index+1)
+				if kind == "mcp" {
+					outcomes[index] = postCollabJSON(url, token, map[string]any{
+						"jsonrpc": "2.0", "id": index + 1, "method": "tools/call",
+						"params": map[string]any{
+							"name": "collab_batch_submit",
+							"arguments": map[string]any{
+								"actions": []map[string]any{{
+									"agent_id": agentID, "title": "Downgrade worker",
+									"assignment": "concurrent work",
+								}},
+								"integration_instructions": "integrate",
+							},
+						},
+					})
+					return
+				}
+				outcomes[index] = postCollabJSON(url, token, map[string]any{
+					"actions": []map[string]any{{
+						"agent_id": agentID, "title": "Downgrade worker",
+						"assignment": "concurrent work", "required": true,
+					}},
+					"integration_instructions": "integrate",
+				})
+			}(index)
+		}
+		close(start)
+
+		// Let every submission finish its reads and block on agent creation,
+		// then perform the Owner downgrade and release the writers.
+		time.Sleep(500 * time.Millisecond)
+		if _, err := lock.ExecContext(h.ctx, `UPDATE tasks SET max_agents=? WHERE id=?`, downgradedCap, task.ID); err != nil {
+			t.Fatalf("%s downgrade: %v", kind, err)
+		}
+		if err := lock.Commit(); err != nil {
+			t.Fatalf("%s downgrade commit: %v", kind, err)
+		}
+		wait.Wait()
+
+		reloaded, err := h.database.Task(h.ctx, task.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if reloaded.MaxAgents != downgradedCap {
+			t.Fatalf("%s task max_agents=%d, want the downgrade to %d", kind, reloaded.MaxAgents, downgradedCap)
+		}
+		agents, err := h.database.ListTaskAgents(h.ctx, task.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		subAgents := 0
+		var subAgent string
+		for _, agent := range agents {
+			if agent.AgentID != "main" {
+				subAgents++
+				subAgent = agent.AgentID
+			}
+		}
+		if subAgents >= downgradedCap {
+			// Max Agents counts main too, so the downgraded cap leaves exactly
+			// one sub-agent slot.
+			t.Fatalf("%s created %d sub-agents after downgrading to %d: %#v", kind, subAgents, downgradedCap, agents)
+		}
+		if len(agents) != 2 {
+			t.Fatalf("%s agents=%#v, want main plus one sub-agent", kind, agents)
+		}
+
+		successes, limitFailures := 0, 0
+		winnerBatch := ""
+		for index, outcome := range outcomes {
+			if outcome.Err != nil {
+				t.Fatalf("%s submission %d: %v", kind, index, outcome.Err)
+			}
+			if kind == "mcp" {
+				if outcome.Status != http.StatusOK {
+					t.Fatalf("%s submission %d status=%d", kind, index, outcome.Status)
+				}
+				if !outcome.IsError {
+					var result struct {
+						BatchID       string `json:"batch_id"`
+						CreatedAgents int    `json:"created_agents"`
+					}
+					if err := json.Unmarshal([]byte(outcome.Text), &result); err != nil {
+						t.Fatalf("%s submission %d result %q: %v", kind, index, outcome.Text, err)
+					}
+					if result.BatchID == "" || result.CreatedAgents != 1 {
+						t.Fatalf("%s submission %d result=%#v", kind, index, result)
+					}
+					successes++
+					winnerBatch = result.BatchID
+					continue
+				}
+				if !strings.Contains(outcome.Text, "collaboration_agent_limit_reached") {
+					t.Fatalf("%s submission %d was rejected without a clear limit error: %q", kind, index, outcome.Text)
+				}
+				limitFailures++
+				continue
+			}
+			switch {
+			case outcome.Status == http.StatusAccepted && outcome.OK:
+				if outcome.BatchID == "" || outcome.Created != 1 {
+					t.Fatalf("%s submission %d result=%#v", kind, index, outcome)
+				}
+				successes++
+				winnerBatch = outcome.BatchID
+			case outcome.Status == http.StatusConflict && outcome.Error == "agent_limit_reached":
+				limitFailures++
+			default:
+				t.Fatalf("%s submission %d unexpected response: %#v", kind, index, outcome)
+			}
+		}
+		if successes != 1 || limitFailures != submissions-1 {
+			t.Fatalf("%s successes=%d limitFailures=%d, want 1 and %d", kind, successes, limitFailures, submissions-1)
+		}
+		if winnerBatch == "" {
+			t.Fatalf("%s winning submission returned no batch", kind)
+		}
+		members, err := h.database.CollaborationMembers(h.ctx, winnerBatch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(members) != 1 || members[0].AgentID != subAgent {
+			t.Fatalf("%s sub agent=%q members=%#v (orphan agent or missing assignment)", kind, subAgent, members)
+		}
+	}
+
+	t.Run("mcp", func(t *testing.T) { run(t, "mcp") })
+	t.Run("batches", func(t *testing.T) { run(t, "batches") })
+}

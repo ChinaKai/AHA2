@@ -105,13 +105,17 @@ const (
 )
 
 // CreateTaskAgentWithinLimit inserts a new Task agent only while the Task is
-// below maxAgents. The existence check, the agent count and the insert run in
-// one write transaction; the SQLite driver opens it with BEGIN IMMEDIATE, so
-// concurrent dispatchers serialize and cannot both consume the last slot.
-// maxAgents counts every agent row, including main, matching Dispatch's
-// historical limit. An existing agent does not consume another slot and is
-// reported separately so a concurrent creator can continue as the winner.
-func (s *Store) CreateTaskAgentWithinLimit(ctx context.Context, item domain.TaskAgent, maxAgents int) (TaskAgentCreateResult, error) {
+// below its current Max Agents. The limit is read from the tasks table inside
+// the same write transaction as the existence check, the agent count and the
+// insert; the SQLite driver opens that transaction with BEGIN IMMEDIATE, so a
+// concurrent downgrade either commits before this transaction starts (and this
+// insert sees the new, smaller limit) or waits until it commits. A cached limit
+// from the dispatching request can therefore never admit an agent past the
+// Owner's current setting. The limit counts every agent row, including main,
+// matching Dispatch's historical limit. An existing agent does not consume
+// another slot and is reported separately so a concurrent creator can continue
+// as the winner.
+func (s *Store) CreateTaskAgentWithinLimit(ctx context.Context, item domain.TaskAgent) (TaskAgentCreateResult, error) {
 	now := item.UpdatedAt
 	if now.IsZero() {
 		now = time.Now().UTC()
@@ -133,6 +137,12 @@ func (s *Store) CreateTaskAgentWithinLimit(ctx context.Context, item domain.Task
 	}
 	if exists > 0 {
 		return TaskAgentAlreadyExists, nil
+	}
+	var maxAgents int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT max_agents FROM tasks WHERE id=?`, item.TaskID,
+	).Scan(&maxAgents); err != nil {
+		return TaskAgentCreateUnknown, err
 	}
 	var count int
 	if err := tx.QueryRowContext(ctx,

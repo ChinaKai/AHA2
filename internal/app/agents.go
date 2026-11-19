@@ -1519,8 +1519,10 @@ func (s *Service) enqueueAgentAction(
 	if _, ok := existing[agentID]; !ok {
 		// Fast path: a Task that the (non-authoritative) list already shows as
 		// full does not need a runtime snapshot derived for an agent that cannot
-		// be created. The atomic insert below remains the authority when
-		// concurrent dispatchers race for the last slot.
+		// be created. The atomic insert below re-reads the Task's current
+		// Max Agents inside its write transaction and remains the authority when
+		// concurrent dispatchers race for the last slot or the Owner lowers the
+		// limit mid-flight.
 		if len(agents) >= task.MaxAgents {
 			s.recordOrchestrationError(ctx, task.ID, parent, fmt.Sprintf(
 				"Agent limit reached: %d/%d", len(agents), task.MaxAgents,
@@ -1565,7 +1567,7 @@ func (s *Service) enqueueAgentAction(
 		outcome, err := s.store.CreateTaskAgentWithinLimit(ctx, domain.TaskAgent{
 			TaskID: task.ID, AgentID: agentID, Role: "sub", Status: "idle", Title: title,
 			RuntimeConfigSnapshotID: snapshotID, InheritMain: inheritMain, CreatedAt: now, UpdatedAt: now,
-		}, task.MaxAgents)
+		})
 		if err != nil {
 			return "", false, err
 		}
@@ -1578,9 +1580,10 @@ func (s *Service) enqueueAgentAction(
 			// A concurrent dispatcher created this agent after our list read.
 			// Reuse it rather than failing or creating a duplicate slot.
 		case store.TaskAgentLimitReached:
-			s.recordOrchestrationError(ctx, task.ID, parent, fmt.Sprintf(
-				"Agent limit reached: %d/%d", len(agents), task.MaxAgents,
-			))
+			// The limit read inside the transaction may differ from the snapshot
+			// this dispatch started with (for example after an Owner downgrade),
+			// so the event does not quote the cached numbers.
+			s.recordOrchestrationError(ctx, task.ID, parent, "Agent limit reached: the Task is at its Max Agents limit")
 			return "", false, ErrAgentLimitReached
 		default:
 			return "", false, fmt.Errorf("create task agent %s: unknown outcome %d", agentID, outcome)
