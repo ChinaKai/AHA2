@@ -105,7 +105,7 @@ func (s *Server) promptScenarioPreview(writer http.ResponseWriter, request *http
 			writeErrorDetail(writer, http.StatusBadRequest, "prompt_preview_message_too_long",
 				"test message exceeds the preview limit; shorten it and retry")
 		case errors.Is(err, prompt.ErrInvalidMessageSource):
-			writeErrorDetail(writer, http.StatusBadRequest, "invalid_message_source", "message source must be owner or pet")
+			writeErrorDetail(writer, http.StatusBadRequest, "invalid_message_source", "message source is not valid for this preview scenario")
 		default:
 			writeError(writer, http.StatusInternalServerError, "preview_prompt_scenario_failed")
 		}

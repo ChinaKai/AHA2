@@ -3,12 +3,34 @@ import type {PromptScenarioPreview, PromptTemplate} from "./types.js";
 
 export const DEFAULT_PREVIEW_MESSAGE = "这是一条测试消息";
 
+export interface PromptScenarioSource {
+  id: string;
+  name: string;
+}
+
 export interface PromptScenarioOption {
   id: string;
   name: string;
   description: string;
-  messageSourceSwitch: boolean;
+  messageSources: PromptScenarioSource[];
 }
+
+const WEB_SOURCES: PromptScenarioSource[] = [
+  {id: "owner", name: "Owner"},
+  {id: "pet", name: "宠物"},
+];
+
+const CHANNEL_PRIVATE_SOURCES: PromptScenarioSource[] = [
+  {id: "channel-owner", name: "渠道私聊 Owner"},
+];
+
+// Group scenarios keep SourceKind=channel_message in production and switch the
+// sender actor between a member and a verified bot; the preview exposes the
+// same two shapes instead of a separate message kind.
+const CHANNEL_GROUP_SOURCES: PromptScenarioSource[] = [
+  {id: "channel-group-member", name: "渠道群聊成员"},
+  {id: "channel-group-bot", name: "群聊机器人"},
+];
 
 // The preview shapes are stable product scenarios. The server validates the
 // same IDs; keeping the list here avoids an extra round trip just to open the
@@ -18,61 +40,61 @@ export const PROMPT_SCENARIOS: PromptScenarioOption[] = [
     id: "web-task-single-main",
     name: "Web 普通 Task，单 Agent，主 Agent",
     description: "Web Owner 消息，普通 Task，单 Agent 主 Agent。",
-    messageSourceSwitch: true,
+    messageSources: WEB_SOURCES,
   },
   {
     id: "web-task-multi-main",
     name: "Web 普通 Task，多 Agent，主 Agent（自动协作）",
     description: "Web Owner 消息，多 Agent 自动协作下的主 Agent。",
-    messageSourceSwitch: true,
+    messageSources: WEB_SOURCES,
   },
   {
     id: "web-task-multi-sub",
     name: "Web 普通 Task，多 Agent，子 Agent（无协作策略段）",
     description: "多 Agent 自动协作下的子 Agent；不包含协作策略段。",
-    messageSourceSwitch: true,
+    messageSources: WEB_SOURCES,
   },
   {
     id: "web-pet-task-single-main",
     name: "Web 宠物 Task，单 Agent，主 Agent",
     description: "宠物 Task 的主 Agent，使用宠物身份模板。",
-    messageSourceSwitch: true,
+    messageSources: WEB_SOURCES,
   },
   {
     id: "channel-private-unbound-assistant-main",
     name: "渠道私聊，未绑定 Task，渠道助手，单 Agent，主 Agent",
     description: "渠道私聊未绑定 Task，渠道助手身份处理消息。",
-    messageSourceSwitch: false,
+    messageSources: CHANNEL_PRIVATE_SOURCES,
   },
   {
     id: "channel-private-task-single-task-agent",
     name: "渠道私聊，已绑定 Task，单 Agent，任务 Agent",
     description: "渠道私聊 task_route，单 Agent 任务 Agent。",
-    messageSourceSwitch: false,
+    messageSources: CHANNEL_PRIVATE_SOURCES,
   },
   {
     id: "channel-private-task-multi-main",
     name: "渠道私聊，已绑定 Task，多 Agent，主 Agent",
     description: "渠道私聊 task_route，多 Agent 自动协作主 Agent。",
-    messageSourceSwitch: false,
+    messageSources: CHANNEL_PRIVATE_SOURCES,
   },
   {
     id: "channel-group-unbound-digital-human-main",
     name: "渠道群聊，未绑定 Task，群聊电子人，单 Agent，主 Agent，群聊规则",
-    description: "渠道群聊未绑定 Task，群聊电子人身份与群聊规则。",
-    messageSourceSwitch: false,
+    description: "渠道群聊未绑定 Task，群聊电子人身份与群聊规则；消息来源可切换群聊成员或群聊机器人。",
+    messageSources: CHANNEL_GROUP_SOURCES,
   },
   {
     id: "channel-group-task-single-task-agent",
     name: "渠道群聊，已绑定 Task，单 Agent，任务 Agent，群聊规则",
-    description: "渠道群聊 task_route，单 Agent 任务 Agent 与群聊规则。",
-    messageSourceSwitch: false,
+    description: "渠道群聊 task_route，单 Agent 任务 Agent 与群聊规则；消息来源可切换群聊成员或群聊机器人。",
+    messageSources: CHANNEL_GROUP_SOURCES,
   },
   {
     id: "channel-group-task-multi-main",
     name: "渠道群聊，已绑定 Task，多 Agent，主 Agent，群聊规则",
-    description: "渠道群聊 task_route，多 Agent 自动协作主 Agent 与群聊规则。",
-    messageSourceSwitch: false,
+    description: "渠道群聊 task_route，多 Agent 自动协作主 Agent 与群聊规则；消息来源可切换群聊成员或群聊机器人。",
+    messageSources: CHANNEL_GROUP_SOURCES,
   },
 ];
 
@@ -176,6 +198,18 @@ function scenarioOption(id: string): PromptScenarioOption | undefined {
   return PROMPT_SCENARIOS.find(item => item.id === id);
 }
 
+function scenarioSources(id: string | undefined): PromptScenarioSource[] {
+  return scenarioOption(id || "")?.messageSources || [];
+}
+
+// A source only has meaning inside its scenario family: Owner/宠物 belong to Web
+// Tasks, while group scenarios use the production channel member/bot shapes.
+export function resolvePreviewSource(scenarioID: string | undefined, requested: string): string {
+  const sources = scenarioSources(scenarioID);
+  if (sources.some(item => item.id === requested)) return requested;
+  return sources[0]?.id || "owner";
+}
+
 function activeTemplate(view: PromptAdminView): PromptTemplate | undefined {
   return view.templates.find(item => item.id === view.selectedTemplateID) || view.templates[0];
 }
@@ -230,16 +264,26 @@ function previewResultBody(view: PromptAdminView): string {
   if (view.previewError) return `<p class="form-error">${escapeHTML(view.previewError)}</p>`;
   if (!view.preview) return '<div class="empty">选择场景后生成完整 Prompt Snapshot。</div>';
   const preview = view.preview;
+  const sourceLabel = preview.message_source_name || preview.message_source;
   return `<header class="prompt-scenario-result-head">
-      <div><strong>${escapeHTML(preview.scenario_name)}</strong><small>${escapeHTML(preview.scenario)} · ${escapeHTML(preview.message_source)}</small></div>
+      <div><strong>${escapeHTML(preview.scenario_name)}</strong><small>${escapeHTML(preview.scenario)} · ${escapeHTML(sourceLabel)}</small></div>
       <span><b class="prompt-scenario-badge">DEMO</b> ${preview.prompt_chars.toLocaleString()} chars</span>
     </header>
     <pre class="prompt-scenario-output" data-prompt-scenario-output>${escapeHTML(preview.prompt)}</pre>`;
 }
 
+function sourceOptions(scenario: PromptScenarioOption, selected: string): string {
+  return scenario.messageSources
+    .map(item => `<option value="${escapeHTML(item.id)}" ${item.id === selected ? "selected" : ""}>${escapeHTML(item.name)}</option>`)
+    .join("");
+}
+
 function scenarioDialog(view: PromptAdminView): string {
   const selected = scenarioOption(view.previewScenario) || PROMPT_SCENARIOS[0];
   const options = PROMPT_SCENARIOS.map(item => `<option value="${escapeHTML(item.id)}" ${item.id === selected.id ? "selected" : ""}>${escapeHTML(item.name)}</option>`).join("");
+  const sources = selected.messageSources;
+  const activeSource = resolvePreviewSource(selected.id, view.previewSource);
+  const canSwitchSource = sources.length > 1;
   const message = view.previewMessage || DEFAULT_PREVIEW_MESSAGE;
   return `<dialog class="prompt-scenario-dialog" data-prompt-scenario-dialog aria-labelledby="prompt-scenario-title">
     <header class="dialog-head">
@@ -251,10 +295,9 @@ function scenarioDialog(view: PromptAdminView): string {
         <label>场景
           <select id="prompt-scenario-select" data-prompt-scenario-select>${options}</select>
         </label>
-        <label data-prompt-scenario-source-field ${selected.messageSourceSwitch ? "" : "hidden"}>消息来源
-          <select id="prompt-scenario-source" data-prompt-scenario-source>
-            <option value="owner" ${view.previewSource !== "pet" ? "selected" : ""}>Owner</option>
-            <option value="pet" ${view.previewSource === "pet" ? "selected" : ""}>宠物</option>
+        <label data-prompt-scenario-source-field ${canSwitchSource ? "" : "hidden"}>消息来源
+          <select id="prompt-scenario-source" data-prompt-scenario-source ${canSwitchSource ? "" : "disabled"}>
+            ${sourceOptions(selected, activeSource)}
           </select>
         </label>
         <label class="prompt-scenario-message">测试消息
@@ -300,11 +343,14 @@ function syncSourceField(dialog: HTMLDialogElement): void {
   const scenario = scenarioOption(dialog.querySelector<HTMLSelectElement>("[data-prompt-scenario-select]")?.value || "");
   const field = dialog.querySelector<HTMLElement>("[data-prompt-scenario-source-field]");
   const select = dialog.querySelector<HTMLSelectElement>("[data-prompt-scenario-source]");
-  const canSwitch = scenario?.messageSourceSwitch === true;
+  const sources = scenario?.messageSources || [];
+  const canSwitch = sources.length > 1;
   if (field) field.hidden = !canSwitch;
   if (select) {
+    const activeSource = resolvePreviewSource(scenario?.id, select.value);
+    select.innerHTML = scenario ? sourceOptions(scenario, activeSource) : "";
+    select.value = activeSource;
     select.disabled = !canSwitch;
-    if (!canSwitch) select.value = "owner";
   }
 }
 
@@ -313,7 +359,7 @@ async function loadScenarioPreview(dialog: HTMLDialogElement): Promise<void> {
   const message = dialog.querySelector<HTMLTextAreaElement>("[data-prompt-scenario-message]")?.value ?? DEFAULT_PREVIEW_MESSAGE;
   const sourceSelect = dialog.querySelector<HTMLSelectElement>("[data-prompt-scenario-source]");
   const scenarioMeta = scenarioOption(scenario);
-  const source = scenarioMeta?.messageSourceSwitch ? (sourceSelect?.value || "owner") : "owner";
+  const source = resolvePreviewSource(scenarioMeta?.id, sourceSelect?.value || "");
   state.previewScenario = scenario;
   state.previewMessage = message;
   state.previewSource = source;

@@ -29,17 +29,59 @@ var (
 	// ErrScenarioMessageTooLong is returned when the test message exceeds the
 	// query budget. No partial snapshot is ever returned.
 	ErrScenarioMessageTooLong = errors.New("prompt preview message too long")
-	// ErrInvalidMessageSource rejects a source other than owner/pet instead of
-	// silently defaulting.
+	// ErrInvalidMessageSource rejects a source that the selected scenario does
+	// not declare instead of silently substituting a different sender.
 	ErrInvalidMessageSource = errors.New("invalid prompt preview message source")
 )
 
+// Scenario message sources follow the production channel model: a channel
+// message is always SourceKind=channel_message, while the sender identity is
+// carried by the actor role, owner flag, and bot flag. These IDs are stable
+// preview inputs, not new storage kinds.
+const (
+	ScenarioSourceOwner              = "owner"
+	ScenarioSourcePet                = "pet"
+	ScenarioSourceChannelOwner       = "channel-owner"
+	ScenarioSourceChannelGroupMember = "channel-group-member"
+	ScenarioSourceChannelGroupBot    = "channel-group-bot"
+)
+
+// Demo group actors keep the preview stable and make the two sender shapes
+// visibly different in the rendered header without touching production data.
+const (
+	demoGroupMemberName = "张三"
+	demoGroupBotName    = "构建机器人"
+)
+
+// ScenarioMessageSource is one selectable sender shape for a scenario.
+type ScenarioMessageSource struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
 // ScenarioSpec is the stable metadata exposed to the prompt admin page.
 type ScenarioSpec struct {
-	ID                  string `json:"id"`
-	Name                string `json:"name"`
-	Description         string `json:"description"`
-	MessageSourceSwitch bool   `json:"message_source_switch"`
+	ID             string                  `json:"id"`
+	Name           string                  `json:"name"`
+	Description    string                  `json:"description"`
+	MessageSources []ScenarioMessageSource `json:"message_sources"`
+}
+
+// DefaultMessageSource is the source used when the request omits one.
+func (spec ScenarioSpec) DefaultMessageSource() ScenarioMessageSource {
+	if len(spec.MessageSources) == 0 {
+		return ScenarioMessageSource{}
+	}
+	return spec.MessageSources[0]
+}
+
+func (spec ScenarioSpec) messageSource(id string) (ScenarioMessageSource, bool) {
+	for _, source := range spec.MessageSources {
+		if source.ID == id {
+			return source, true
+		}
+	}
+	return ScenarioMessageSource{}, false
 }
 
 // ScenarioContextFile is a small layer summary of the rendered Context files.
@@ -53,14 +95,15 @@ type ScenarioContextFile struct {
 
 // ScenarioPreview is the complete read-only demo snapshot.
 type ScenarioPreview struct {
-	Scenario      string                `json:"scenario"`
-	ScenarioName  string                `json:"scenario_name"`
-	Prompt        string                `json:"prompt"`
-	PromptChars   int                   `json:"prompt_chars"`
-	Demo          bool                  `json:"demo"`
-	TestMessage   string                `json:"test_message"`
-	MessageSource string                `json:"message_source"`
-	ContextFiles  []ScenarioContextFile `json:"context_files"`
+	Scenario          string                `json:"scenario"`
+	ScenarioName      string                `json:"scenario_name"`
+	Prompt            string                `json:"prompt"`
+	PromptChars       int                   `json:"prompt_chars"`
+	Demo              bool                  `json:"demo"`
+	TestMessage       string                `json:"test_message"`
+	MessageSource     string                `json:"message_source"`
+	MessageSourceName string                `json:"message_source_name"`
+	ContextFiles      []ScenarioContextFile `json:"context_files"`
 }
 
 const (
@@ -76,52 +119,71 @@ const (
 	ScenarioChannelGroupTaskMulti          = "channel-group-task-multi-main"
 )
 
+var webScenarioSources = []ScenarioMessageSource{
+	{ID: ScenarioSourceOwner, Name: "Owner"},
+	{ID: ScenarioSourcePet, Name: "宠物"},
+}
+
+var channelPrivateSources = []ScenarioMessageSource{
+	{ID: ScenarioSourceChannelOwner, Name: "渠道私聊 Owner"},
+}
+
+var channelGroupSources = []ScenarioMessageSource{
+	{ID: ScenarioSourceChannelGroupMember, Name: "渠道群聊成员"},
+	{ID: ScenarioSourceChannelGroupBot, Name: "群聊机器人"},
+}
+
 var scenarioSpecs = []ScenarioSpec{
 	{
 		ID: ScenarioWebTaskSingleMain, Name: "Web 普通 Task，单 Agent，主 Agent",
-		Description: "Web Owner 消息，普通 Task，单 Agent 主 Agent。", MessageSourceSwitch: true,
+		Description: "Web Owner 消息，普通 Task，单 Agent 主 Agent。", MessageSources: webScenarioSources,
 	},
 	{
 		ID: ScenarioWebTaskMultiMain, Name: "Web 普通 Task，多 Agent，主 Agent（自动协作）",
-		Description: "Web Owner 消息，多 Agent 自动协作下的主 Agent。", MessageSourceSwitch: true,
+		Description: "Web Owner 消息，多 Agent 自动协作下的主 Agent。", MessageSources: webScenarioSources,
 	},
 	{
 		ID: ScenarioWebTaskMultiSub, Name: "Web 普通 Task，多 Agent，子 Agent（无协作策略段）",
-		Description: "多 Agent 自动协作下的子 Agent；不包含协作策略段。", MessageSourceSwitch: true,
+		Description: "多 Agent 自动协作下的子 Agent；不包含协作策略段。", MessageSources: webScenarioSources,
 	},
 	{
 		ID: ScenarioWebPetTaskSingleMain, Name: "Web 宠物 Task，单 Agent，主 Agent",
-		Description: "宠物 Task 的主 Agent，使用宠物身份模板。", MessageSourceSwitch: true,
+		Description: "宠物 Task 的主 Agent，使用宠物身份模板。", MessageSources: webScenarioSources,
 	},
 	{
 		ID: ScenarioChannelPrivateUnboundAssistant, Name: "渠道私聊，未绑定 Task，渠道助手，单 Agent，主 Agent",
-		Description: "渠道私聊未绑定 Task，渠道助手身份处理消息。",
+		Description: "渠道私聊未绑定 Task，渠道助手身份处理消息。", MessageSources: channelPrivateSources,
 	},
 	{
 		ID: ScenarioChannelPrivateTaskSingle, Name: "渠道私聊，已绑定 Task，单 Agent，任务 Agent",
-		Description: "渠道私聊 task_route，单 Agent 任务 Agent。",
+		Description: "渠道私聊 task_route，单 Agent 任务 Agent。", MessageSources: channelPrivateSources,
 	},
 	{
 		ID: ScenarioChannelPrivateTaskMulti, Name: "渠道私聊，已绑定 Task，多 Agent，主 Agent",
-		Description: "渠道私聊 task_route，多 Agent 自动协作主 Agent。",
+		Description: "渠道私聊 task_route，多 Agent 自动协作主 Agent。", MessageSources: channelPrivateSources,
 	},
 	{
 		ID: ScenarioChannelGroupUnboundDigital, Name: "渠道群聊，未绑定 Task，群聊电子人，单 Agent，主 Agent，群聊规则",
-		Description: "渠道群聊未绑定 Task，群聊电子人身份与群聊规则。",
+		Description: "渠道群聊未绑定 Task，群聊电子人身份与群聊规则；消息来源可切换群聊成员或群聊机器人。", MessageSources: channelGroupSources,
 	},
 	{
 		ID: ScenarioChannelGroupTaskSingle, Name: "渠道群聊，已绑定 Task，单 Agent，任务 Agent，群聊规则",
-		Description: "渠道群聊 task_route，单 Agent 任务 Agent 与群聊规则。",
+		Description: "渠道群聊 task_route，单 Agent 任务 Agent 与群聊规则；消息来源可切换群聊成员或群聊机器人。", MessageSources: channelGroupSources,
 	},
 	{
 		ID: ScenarioChannelGroupTaskMulti, Name: "渠道群聊，已绑定 Task，多 Agent，主 Agent，群聊规则",
-		Description: "渠道群聊 task_route，多 Agent 自动协作主 Agent 与群聊规则。",
+		Description: "渠道群聊 task_route，多 Agent 自动协作主 Agent 与群聊规则；消息来源可切换群聊成员或群聊机器人。", MessageSources: channelGroupSources,
 	},
 }
 
 // ScenarioCatalog returns a copy so callers cannot mutate the stable list.
 func ScenarioCatalog() []ScenarioSpec {
-	return append([]ScenarioSpec(nil), scenarioSpecs...)
+	catalog := make([]ScenarioSpec, len(scenarioSpecs))
+	for index, spec := range scenarioSpecs {
+		spec.MessageSources = append([]ScenarioMessageSource(nil), spec.MessageSources...)
+		catalog[index] = spec
+	}
+	return catalog
 }
 
 func scenarioSpecByID(id string) (ScenarioSpec, bool) {
@@ -187,14 +249,16 @@ func (engine *Engine) PreviewScenario(ctx context.Context, scenarioID, message, 
 		return ScenarioPreview{}, fmt.Errorf("%w: max %d runes", ErrScenarioMessageTooLong, MaxScenarioTestMessageRunes)
 	}
 	source = strings.TrimSpace(strings.ToLower(source))
-	if source == "" {
-		source = "owner"
-	}
-	if source != "owner" && source != "pet" {
-		return ScenarioPreview{}, fmt.Errorf("%w: %s", ErrInvalidMessageSource, source)
+	sourceSpec := spec.DefaultMessageSource()
+	if source != "" {
+		found, ok := spec.messageSource(source)
+		if !ok {
+			return ScenarioPreview{}, fmt.Errorf("%w: %s", ErrInvalidMessageSource, source)
+		}
+		sourceSpec = found
 	}
 
-	input, effectiveSource, err := engine.scenarioBuildInput(ctx, shape, message, source, language)
+	input, effectiveSource, err := engine.scenarioBuildInput(ctx, shape, message, sourceSpec.ID, language)
 	if err != nil {
 		return ScenarioPreview{}, err
 	}
@@ -207,14 +271,15 @@ func (engine *Engine) PreviewScenario(ctx context.Context, scenarioID, message, 
 		files = append(files, ScenarioContextFile{ID: item.ID, Path: item.Path, Chars: item.Chars})
 	}
 	return ScenarioPreview{
-		Scenario:      spec.ID,
-		ScenarioName:  spec.Name,
-		Prompt:        result.EffectivePrompt,
-		PromptChars:   len([]rune(result.EffectivePrompt)),
-		Demo:          true,
-		TestMessage:   message,
-		MessageSource: effectiveSource,
-		ContextFiles:  files,
+		Scenario:          spec.ID,
+		ScenarioName:      spec.Name,
+		Prompt:            result.EffectivePrompt,
+		PromptChars:       len([]rune(result.EffectivePrompt)),
+		Demo:              true,
+		TestMessage:       message,
+		MessageSource:     effectiveSource,
+		MessageSourceName: sourceSpec.Name,
+		ContextFiles:      files,
 	}, nil
 }
 
@@ -279,7 +344,7 @@ func (engine *Engine) scenarioBuildInput(
 		ModelID: "gpt-5-codex", WireModel: "gpt-5-codex", EnvGroupRevision: 1,
 	}
 
-	channelContext := demoChannelContext(shape, task.ID)
+	channelContext := demoChannelContext(shape, task.ID, source)
 	// Mirror the production knowledge selection in runTurn: a channel turn that
 	// is not a task_route always gets knowledge, otherwise the Task policy
 	// decides. The demo Task policy is enabled, so every preview scene includes
@@ -303,18 +368,29 @@ func (engine *Engine) scenarioBuildInput(
 		item.ChannelSenderIsOwner = true
 		item.ChannelReceiptID = "channel_inbox_demo_private"
 		item.ChannelConversation = "与 Owner 的私聊"
-		effectiveSource = "channel"
+		effectiveSource = ScenarioSourceChannelOwner
 	case shape.channel == "group":
+		// Production keeps the source kind as channel_message for every group
+		// actor. The sender identity is carried by the actor role and bot flag,
+		// which the real Inbox renderer turns into the sender header and which
+		// channel-context.json exposes as provenance.
+		bot := source == ScenarioSourceChannelGroupBot
+		displayName := demoGroupMemberName
+		receiptID := "channel_inbox_demo_group"
+		if bot {
+			displayName = demoGroupBotName
+			receiptID = "channel_inbox_demo_group_bot"
+		}
 		item.SourceKind = "channel_message"
-		item.SourceAgentID = "张三"
-		item.ChannelSender = "张三"
+		item.SourceAgentID = displayName
+		item.ChannelSender = displayName
 		item.ChannelSenderRole = "participant"
 		item.ChannelSenderIsOwner = false
-		item.ChannelReceiptID = "channel_inbox_demo_group"
+		item.ChannelSenderIsBot = bot
+		item.ChannelReceiptID = receiptID
 		item.ChannelConversation = "AHA2 技术群"
 		item.MentionedParticipants = "AHA"
-		effectiveSource = "channel"
-	case source == "pet":
+	case source == ScenarioSourcePet:
 		item.SourceKind = "pet_delegate_message"
 		item.SourceAgentID = "pet"
 	}
@@ -362,7 +438,7 @@ func (engine *Engine) scenarioBuildInput(
 	return input, effectiveSource, nil
 }
 
-func demoChannelContext(shape scenarioShape, taskID string) map[string]any {
+func demoChannelContext(shape scenarioShape, taskID, source string) map[string]any {
 	if shape.channel == "" {
 		return nil
 	}
@@ -385,14 +461,26 @@ func demoChannelContext(shape scenarioShape, taskID string) map[string]any {
 			route["mode"] = "conversation_host"
 		}
 	} else {
+		bot := source == ScenarioSourceChannelGroupBot
+		displayName := demoGroupMemberName
+		receiptID := "channel_inbox_demo_group"
+		if bot {
+			displayName = demoGroupBotName
+			receiptID = "channel_inbox_demo_group_bot"
+		}
 		context["endpoint"] = domain.ChannelEndpointGroupDigitalHuman
 		context["conversation_id"] = "conversation-group-demo"
 		context["chat_display_name"] = "AHA2 技术群"
-		context["inbound_receipt_id"] = "channel_inbox_demo_group"
+		context["inbound_receipt_id"] = receiptID
 		context["actor"] = map[string]any{
-			"display_name": "张三", "role": "participant", "is_owner": false, "is_bot": false,
+			"display_name": displayName, "role": "participant", "is_owner": false, "is_bot": bot,
 		}
 		context["mentions"] = []any{map[string]any{"display_name": "AHA"}}
+		if bot {
+			// Mirror the production group digital-human provenance for a
+			// verified bot sender so the preview shows the bot-to-bot path.
+			context["bot_dialogue"] = map[string]any{"active": true, "turn": 1}
+		}
 		if shape.channelBound {
 			route["mode"] = "task_route"
 		} else {

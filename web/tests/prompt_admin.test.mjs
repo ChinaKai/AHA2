@@ -30,6 +30,7 @@ function preview(overrides = {}) {
     demo: true,
     test_message: "这是一条测试消息",
     message_source: "owner",
+    message_source_name: "Owner",
     context_files: [{id: "task", path: "/demo/task.md", chars: 120}],
     ...overrides,
   };
@@ -122,15 +123,78 @@ test("preview dialog lists all ten stable scenarios and the default message", ()
   assert.match(html, /预览只使用已保存模板，不合并未保存草稿/);
 });
 
+function sourceFieldTag(html) {
+  return html.match(/<label[^>]*data-prompt-scenario-source-field[^>]*>/)?.[0] || "";
+}
+
+function sourceSelect(html) {
+  return html.match(/<select[^>]*data-prompt-scenario-source[^>]*>[\s\S]*?<\/select>/)?.[0] || "";
+}
+
+test("web scenarios offer Owner and pet as visible, selectable sources", () => {
+  const html = promptAdmin.renderPromptAdmin(view({previewSource: "pet"}));
+  assert.doesNotMatch(sourceFieldTag(html), /\bhidden\b/);
+  const select = sourceSelect(html);
+  assert.doesNotMatch(select, /\bdisabled\b/);
+  assert.match(select, /value="owner"[^>]*>Owner</);
+  assert.match(select, /value="pet"[^>]*selected[^>]*>宠物</);
+});
+
+test("group scenarios offer channel group member and group bot sources", () => {
+  const html = promptAdmin.renderPromptAdmin(view({
+    previewScenario: "channel-group-task-single-task-agent",
+    previewSource: "channel-group-bot",
+  }));
+  assert.doesNotMatch(sourceFieldTag(html), /\bhidden\b/);
+  const select = sourceSelect(html);
+  assert.doesNotMatch(select, /\bdisabled\b/);
+  assert.match(select, /value="channel-group-member"[^>]*>渠道群聊成员</);
+  assert.match(select, /value="channel-group-bot"[^>]*selected[^>]*>群聊机器人</);
+  // Switching back to the same scenario keeps the requested source, while a
+  // source from another scenario family falls back to the group member.
+  assert.equal(promptAdmin.resolvePreviewSource("channel-group-task-single-task-agent", "channel-group-bot"), "channel-group-bot");
+  assert.equal(promptAdmin.resolvePreviewSource("channel-group-task-single-task-agent", "owner"), "channel-group-member");
+  assert.equal(promptAdmin.resolvePreviewSource("web-task-single-main", "pet"), "pet");
+  assert.equal(promptAdmin.resolvePreviewSource("web-task-single-main", "channel-group-bot"), "owner");
+});
+
+test("private channel scenarios keep a fixed Owner source and hide the switch", () => {
+  const html = promptAdmin.renderPromptAdmin(view({
+    previewScenario: "channel-private-task-single-task-agent",
+    previewSource: "owner",
+  }));
+  assert.match(sourceFieldTag(html), /\bhidden\b/);
+  const select = sourceSelect(html);
+  assert.match(select, /\bdisabled\b/);
+  assert.match(select, /value="channel-owner"[^>]*selected[^>]*>渠道私聊 Owner</);
+});
+
 test("scenario result renders the complete snapshot and char count", () => {
   const html = promptAdmin.renderPromptAdmin(view({preview: preview()}));
   assert.match(html, /data-prompt-scenario-output/);
   assert.match(html, /Web 普通 Task，单 Agent，主 Agent/);
+  assert.match(html, /web-task-single-main · Owner/);
   assert.match(html, /2,048 chars/);
   assert.match(html, /DEMO/);
   assert.match(html, /&lt;full demo snapshot&gt;/);
   assert.match(html, /这是一条测试消息/);
   assert.doesNotMatch(html, /<full demo snapshot>/);
+});
+
+test("group bot preview shows the bot source name and rendered sender header", () => {
+  const html = promptAdmin.renderPromptAdmin(view({
+    previewScenario: "channel-group-task-single-task-agent",
+    previewSource: "channel-group-bot",
+    preview: preview({
+      scenario: "channel-group-task-single-task-agent",
+      scenario_name: "渠道群聊，已绑定 Task，单 Agent，任务 Agent，群聊规则",
+      message_source: "channel-group-bot",
+      message_source_name: "群聊机器人",
+      prompt: "## Current Inbox Batch\n渠道发送者：构建机器人（角色=participant，Bot，非 Owner）\n请检查构建结果",
+    }),
+  }));
+  assert.match(html, /channel-group-task-single-task-agent · 群聊机器人/);
+  assert.match(html, /渠道发送者：构建机器人（角色=participant，Bot，非 Owner）/);
 });
 
 test("preview errors replace the snapshot instead of showing partial text", () => {

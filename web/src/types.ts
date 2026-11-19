@@ -1178,6 +1178,7 @@ export interface PromptScenarioPreview {
   demo: boolean;
   test_message: string;
   message_source: string;
+  message_source_name?: string;
   context_files: PromptScenarioContextFile[];
 }
 
