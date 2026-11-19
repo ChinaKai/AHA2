@@ -528,20 +528,36 @@ func (s *Server) agentBrowserGrantTarget(writer http.ResponseWriter, request *ht
 		writeBrowserFailure(writer, err)
 		return nil, browser.GrantView{}, false
 	}
-	if grant.TaskID != claims.TaskID {
-		writeErrorDetail(writer, http.StatusForbidden, "browser_grant_forbidden",
-			"该浏览器授权不属于当前 Task")
-		return nil, browser.GrantView{}, false
-	}
-	switch grant.Status {
-	case domain.BrowserGrantStatusRevoked:
-		writeErrorDetail(writer, http.StatusForbidden, "browser_grant_revoked", "浏览器授权已撤销")
-		return nil, browser.GrantView{}, false
-	case domain.BrowserGrantStatusExpired:
-		writeErrorDetail(writer, http.StatusForbidden, "browser_grant_expired", "浏览器授权已过期")
+	if accessErr := agentBrowserGrantAccessError(grant, claims.TaskID); accessErr != nil {
+		writeBrowserFailure(writer, accessErr)
 		return nil, browser.GrantView{}, false
 	}
 	return service, grant, true
+}
+
+// agentBrowserGrantAccessError is the shared authorization check for every
+// grant-addressed Agent surface (HTTP and MCP): a grant from another Task is
+// forbidden, and a revoked or expired grant fails closed without a retry path.
+func agentBrowserGrantAccessError(grant browser.GrantView, taskID string) *browser.Error {
+	if grant.TaskID != taskID {
+		return &browser.Error{
+			Code: "browser_grant_forbidden", Message: "该浏览器授权不属于当前 Task",
+			Status: http.StatusForbidden,
+		}
+	}
+	switch grant.Status {
+	case domain.BrowserGrantStatusRevoked:
+		return &browser.Error{
+			Code: "browser_grant_revoked", Message: "浏览器授权已撤销",
+			Status: http.StatusForbidden,
+		}
+	case domain.BrowserGrantStatusExpired:
+		return &browser.Error{
+			Code: "browser_grant_expired", Message: "浏览器授权已过期",
+			Status: http.StatusForbidden,
+		}
+	}
+	return nil
 }
 
 func (s *Server) agentBrowserTabs(writer http.ResponseWriter, request *http.Request) {

@@ -60,6 +60,9 @@ type FakeHost struct {
 	Now               func() time.Time
 
 	SnapshotElements []browser.HostElement
+	// SnapshotText overrides the fixed "page text" body when non-empty. Tests
+	// use it to exercise bounded-response truncation without a real host.
+	SnapshotText     string
 	FailSnapshot     error
 	ActionCalls      []browser.HostAction
 	FailAction       error
@@ -426,8 +429,12 @@ func (f *FakeHost) Snapshot(_ context.Context, profileID, sessionID, tabID strin
 	if !ok {
 		return browser.HostSnapshot{}, &browser.Error{Code: "browser_tab_not_found", Message: "no tab", Status: http.StatusNotFound}
 	}
+	text := f.SnapshotText
+	if text == "" {
+		text = "page text"
+	}
 	return browser.HostSnapshot{
-		URL: tab.URL, Title: tab.Title, Text: "page text",
+		URL: tab.URL, Title: tab.Title, Text: text,
 		Elements: append([]browser.HostElement(nil), f.SnapshotElements...),
 	}, nil
 }

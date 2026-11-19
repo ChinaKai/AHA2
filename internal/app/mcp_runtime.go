@@ -61,6 +61,21 @@ const (
 	// mode, and never into a channel-hosted Turn. Both tools are Main-only.
 	collabMCPName = "aha2_collab"
 	collabMCPPath = "/api/v1/agent/collab/mcp"
+
+	// browserMCPName is the model-facing namespace of the shared-browser
+	// domain MCP. It is injected only when the Task currently holds an active
+	// browser grant (and is not the pet Task or a channel-hosted Turn). The
+	// first slice is read-only: lease state, tab list and one structured page
+	// snapshot.
+	browserMCPName = "aha2_browser"
+	browserMCPPath = "/api/v1/agent/browser/mcp"
+
+	// hardwareMCPName is the model-facing namespace of the Task hardware
+	// domain MCP. Its trigger is independent from the browser domain: the Task
+	// needs at least one bound hardware group. The first slice is read-only:
+	// bound resource metadata and bounded terminal output.
+	hardwareMCPName = "aha2_hardware"
+	hardwareMCPPath = "/api/v1/agent/hardware/mcp"
 )
 
 var mailMCPToolNames = []string{
@@ -168,6 +183,53 @@ func WorkspaceMCPToolIsRead(name string) bool {
 	return false
 }
 
+// browserMCPToolNames is the complete shared-browser first slice. Every tool is
+// read-only; navigation, tab lifecycle, actions, file upload, cookies, frames,
+// downloads and grant management stay on the existing Agent browser API.
+var browserMCPToolNames = []string{
+	"browser_status", "browser_tabs_list", "browser_snapshot",
+}
+
+// BrowserMCPToolNames is the exact allowlist for a browser MCP client. It is
+// exported so the HTTP facade advertises the same subset the runtime injects.
+func BrowserMCPToolNames() []string {
+	return append([]string{}, browserMCPToolNames...)
+}
+
+// BrowserMCPToolIsRead reports whether a browser tool is in the read-only
+// first slice. There is intentionally no write tool in this domain.
+func BrowserMCPToolIsRead(name string) bool {
+	for _, tool := range browserMCPToolNames {
+		if tool == name {
+			return true
+		}
+	}
+	return false
+}
+
+// hardwareMCPToolNames is the complete Task hardware first slice. It never
+// includes connect/disconnect/send/login/ADB exec/config or firmware tools.
+var hardwareMCPToolNames = []string{
+	"hardware_list", "hardware_terminal_read",
+}
+
+// HardwareMCPToolNames is the exact allowlist for a hardware MCP client. It is
+// exported so the HTTP facade advertises the same subset the runtime injects.
+func HardwareMCPToolNames() []string {
+	return append([]string{}, hardwareMCPToolNames...)
+}
+
+// HardwareMCPToolIsRead reports whether a hardware tool is in the read-only
+// first slice. There is intentionally no write tool in this domain.
+func HardwareMCPToolIsRead(name string) bool {
+	for _, tool := range hardwareMCPToolNames {
+		if tool == name {
+			return true
+		}
+	}
+	return false
+}
+
 // collabMCPToolNames is the complete collaboration surface. Both tools are
 // Main-only, so the domain is advertised as a unit rather than split into a
 // read/write subset like the core and knowledge domains.
@@ -209,6 +271,51 @@ func (s *Service) workspaceMCPInjected(ctx context.Context, task domain.Task, in
 		return false
 	}
 	return !s.agentMCPChannelBound(ctx, task.ID, inboxBatchID)
+}
+
+// browserMCPInjected reports whether the shared-browser domain belongs to this
+// Turn. Its trigger is the presence of an active browser grant for the Task:
+// without a lease the tools could only report "no grant", so the domain is not
+// advertised at all. The pet Task and channel-hosted Turns are excluded by the
+// shared rules. A grant whose session is already closed does not count, which
+// mirrors the Agent-facing HTTP view.
+func (s *Service) browserMCPInjected(ctx context.Context, task domain.Task, inboxBatchID string) bool {
+	if task.ID == petTaskID || task.ProjectID == petProjectID {
+		return false
+	}
+	if s.agentMCPChannelBound(ctx, task.ID, inboxBatchID) {
+		return false
+	}
+	grants, err := s.store.BrowserTaskGrants(ctx, task.ID)
+	if err != nil {
+		return false
+	}
+	now := s.now().UTC()
+	for _, grant := range grants {
+		if grant.Status(now) != domain.BrowserGrantStatusActive {
+			continue
+		}
+		session, sessionErr := s.store.BrowserSession(ctx, grant.SessionID)
+		if sessionErr == nil && session.State != domain.BrowserSessionStateClosed {
+			return true
+		}
+	}
+	return false
+}
+
+// hardwareMCPInjected reports whether the Task hardware domain belongs to this
+// Turn. It is intentionally independent from the browser trigger: a Task with
+// bound hardware groups receives this domain even when it holds no browser
+// lease, and vice versa.
+func (s *Service) hardwareMCPInjected(ctx context.Context, task domain.Task, inboxBatchID string) bool {
+	if task.ID == petTaskID || task.ProjectID == petProjectID {
+		return false
+	}
+	if s.agentMCPChannelBound(ctx, task.ID, inboxBatchID) {
+		return false
+	}
+	groups, err := s.store.HardwareGroups(ctx, task.ID)
+	return err == nil && len(groups) > 0
 }
 
 // knowledgeMCPInjected mirrors AgentKnowledgeMCPAllowed for the runtime path,
@@ -407,6 +514,30 @@ func (s *Service) mcpRuntimeForTurn(ctx context.Context, task domain.Task, agent
 		})
 		for _, tool := range workspaceMCPToolNames() {
 			allowed = append(allowed, "mcp__"+workspaceMCPName+"__"+tool)
+		}
+	}
+	if s.browserMCPInjected(ctx, task, inboxBatchID) {
+		servers = append(servers, backend.MCPServer{
+			Name: browserMCPName, Transport: "http",
+			URL:            strings.TrimRight(agentAPIURL, "/") + browserMCPPath,
+			URLFromEnv:     "AHA2_AGENT_API_URL",
+			URLPath:        browserMCPPath,
+			BearerTokenEnv: "AHA2_AGENT_API_TOKEN",
+		})
+		for _, tool := range browserMCPToolNames {
+			allowed = append(allowed, "mcp__"+browserMCPName+"__"+tool)
+		}
+	}
+	if s.hardwareMCPInjected(ctx, task, inboxBatchID) {
+		servers = append(servers, backend.MCPServer{
+			Name: hardwareMCPName, Transport: "http",
+			URL:            strings.TrimRight(agentAPIURL, "/") + hardwareMCPPath,
+			URLFromEnv:     "AHA2_AGENT_API_URL",
+			URLPath:        hardwareMCPPath,
+			BearerTokenEnv: "AHA2_AGENT_API_TOKEN",
+		})
+		for _, tool := range hardwareMCPToolNames {
+			allowed = append(allowed, "mcp__"+hardwareMCPName+"__"+tool)
 		}
 	}
 	if s.collabMCPInjected(ctx, task, agentID, inboxBatchID) {

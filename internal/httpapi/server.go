@@ -582,6 +582,12 @@ func (s *Server) Handler() http.Handler {
 	// has a bound Workspace in its own Project and the Turn is not channel-hosted.
 	mux.Handle("POST /api/v1/agent/workspace/mcp", s.withAgentCapability(http.HandlerFunc(s.agentWorkspaceMCP)))
 	mux.Handle("POST /api/v1/agent/collab/mcp", s.withAgentCapability(http.HandlerFunc(s.agentCollabMCP)))
+	// Shared-browser domain MCP. Read-only first slice; refused unless the Task
+	// currently holds an active browser grant and the Turn is not channel-hosted.
+	mux.Handle("POST /api/v1/agent/browser/mcp", s.withAgentCapability(http.HandlerFunc(s.agentBrowserMCP)))
+	// Task hardware domain MCP. Read-only first slice with an independent
+	// injection trigger: the Task must have at least one bound hardware group.
+	mux.Handle("POST /api/v1/agent/hardware/mcp", s.withAgentCapability(http.HandlerFunc(s.agentHardwareMCP)))
 	mux.Handle("GET /api/v1/agent/mail/accounts", s.withAgentCapability(http.HandlerFunc(s.agentMailAccounts)))
 	mux.Handle("GET /api/v1/agent/mail/templates", s.withAgentCapability(http.HandlerFunc(s.agentMailTemplates)))
 	mux.Handle("GET /api/v1/agent/mail/templates/{id}", s.withAgentCapability(http.HandlerFunc(s.agentMailTemplateDetail)))
