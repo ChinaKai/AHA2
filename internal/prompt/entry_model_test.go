@@ -441,44 +441,96 @@ func equivalenceScenarios(t *testing.T) []struct {
 	}
 }
 
-func TestEntryModelRendersTheSamePromptAsLegacyBuild(t *testing.T) {
+func TestProductionBuildRendersTheSamePromptAsLegacyBuild(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	engine := NewEngine(&fixturePromptRepository{})
 	for _, scenario := range equivalenceScenarios(t) {
 		scenario := scenario
 		t.Run(scenario.name, func(t *testing.T) {
-			legacy, err := engine.Build(ctx, scenario.input)
+			legacy, err := engine.BuildLegacy(ctx, scenario.input)
 			if err != nil {
 				t.Fatal(err)
 			}
-			entry, err := engine.BuildEntryModel(ctx, scenario.input)
+			production, err := engine.Build(ctx, scenario.input)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if legacy.EffectivePrompt != entry.EffectivePrompt {
-				t.Fatalf("effective prompt differs\nlegacy:\n%s\nentry:\n%s", legacy.EffectivePrompt, entry.EffectivePrompt)
+			if legacy.EffectivePrompt != production.EffectivePrompt {
+				t.Fatalf("effective prompt differs\nlegacy:\n%s\nproduction:\n%s", legacy.EffectivePrompt, production.EffectivePrompt)
 			}
-			if legacy.ContextRoot != entry.ContextRoot || legacy.SharedRoot != entry.SharedRoot {
-				t.Fatalf("context roots differ: legacy=%q/%q entry=%q/%q", legacy.ContextRoot, legacy.SharedRoot, entry.ContextRoot, entry.SharedRoot)
+			if legacy.ContextRoot != production.ContextRoot || legacy.SharedRoot != production.SharedRoot {
+				t.Fatalf("context roots differ: legacy=%q/%q production=%q/%q", legacy.ContextRoot, legacy.SharedRoot, production.ContextRoot, production.SharedRoot)
 			}
-			if !reflect.DeepEqual(legacy.ContextManifest, entry.ContextManifest) {
-				t.Fatalf("context manifest differs\nlegacy=%#v\nentry=%#v", legacy.ContextManifest, entry.ContextManifest)
+			if !reflect.DeepEqual(legacy.ContextManifest, production.ContextManifest) {
+				t.Fatalf("context manifest differs\nlegacy=%#v\nproduction=%#v", legacy.ContextManifest, production.ContextManifest)
 			}
-			if !reflect.DeepEqual(legacy.SharedManifest, entry.SharedManifest) {
+			if !reflect.DeepEqual(legacy.SharedManifest, production.SharedManifest) {
 				t.Fatalf("shared manifest differs")
 			}
 			for _, expected := range scenario.expect {
-				if !strings.Contains(legacy.EffectivePrompt, expected) {
-					t.Fatalf("prompt missing %q: %s", expected, legacy.EffectivePrompt)
+				if !strings.Contains(production.EffectivePrompt, expected) {
+					t.Fatalf("prompt missing %q: %s", expected, production.EffectivePrompt)
 				}
 			}
 			for _, absent := range scenario.absent {
-				if strings.Contains(legacy.EffectivePrompt, absent) {
+				if strings.Contains(production.EffectivePrompt, absent) {
 					t.Fatalf("prompt unexpectedly contains %q", absent)
 				}
 			}
 		})
+	}
+}
+
+func TestProductionBuildResolvesLegacyIDOverridesByAnchorWithoutWrites(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	input := equivalenceScenarios(t)[0].input
+	now := time.Date(2026, 11, 19, 15, 0, 0, 0, time.UTC)
+	repository := &fixturePromptRepository{overrides: map[string]domain.PromptTemplate{
+		"role.main": {
+			ID: "role.main", Content: "CUSTOM MAIN {{.AgentID}}", Version: 7, UpdatedAt: now,
+		},
+		"protocol.attachment-delivery": {
+			ID: "protocol.attachment-delivery", Content: "READ-ONLY OVERRIDE MUST NOT RENDER", Version: 1, UpdatedAt: now,
+		},
+	}}
+	engine := NewEngine(repository)
+	before, err := repository.PromptTemplateOverrides(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ref, ok := ResolveLegacyTemplateID("role.main")
+	if !ok || ref.EntryID != EntryCore || ref.Key != "role-main" {
+		t.Fatalf("legacy override ID did not resolve to core#role-main: %#v ok=%t", ref, ok)
+	}
+	production, err := engine.Build(ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := engine.BuildLegacy(ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if production.EffectivePrompt != legacy.EffectivePrompt {
+		t.Fatalf("override merge changed the production output\nlegacy:\n%s\nproduction:\n%s", legacy.EffectivePrompt, production.EffectivePrompt)
+	}
+	if !strings.Contains(production.EffectivePrompt, "CUSTOM MAIN main") {
+		t.Fatalf("editable legacy-ID override was not merged through its anchor: %s", production.EffectivePrompt)
+	}
+	if strings.Contains(production.EffectivePrompt, "READ-ONLY OVERRIDE MUST NOT RENDER") {
+		t.Fatal("read-only legacy ID accepted an owner override in the production path")
+	}
+	if repository.upserts != 0 || repository.deletes != 0 {
+		t.Fatalf("render path wrote overrides: upserts=%d deletes=%d", repository.upserts, repository.deletes)
+	}
+	after, err := repository.PromptTemplateOverrides(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("render path mutated override data:\nbefore=%#v\nafter=%#v", before, after)
 	}
 }
 
@@ -487,7 +539,7 @@ func TestRequiredContentStillRendersThroughTheEntryMap(t *testing.T) {
 	ctx := context.Background()
 	engine := NewEngine(&fixturePromptRepository{})
 	input := equivalenceScenarios(t)[0].input
-	result, err := engine.BuildEntryModel(ctx, input)
+	result, err := engine.Build(ctx, input)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -511,7 +563,7 @@ func TestRequiredContentStillRendersThroughTheEntryMap(t *testing.T) {
 	}
 	subInput := input
 	subInput.Agent = domain.TaskAgent{AgentID: "sub-001", Role: "sub"}
-	subResult, err := engine.BuildEntryModel(ctx, subInput)
+	subResult, err := engine.Build(ctx, subInput)
 	if err != nil {
 		t.Fatal(err)
 	}

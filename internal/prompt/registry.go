@@ -576,7 +576,18 @@ func languageDirective(language string) string {
 	}
 }
 
+// Build is the production prompt renderer. Resident fragments are selected and
+// ordered through the core/task-context entry model, with every legacy template
+// ID resolved through its frozen anchor alias. The rendered bytes are identical
+// to BuildLegacy for the supported Turn shapes.
 func (engine *Engine) Build(ctx context.Context, input BuildInput) (BuildResult, error) {
+	return engine.BuildEntryModel(ctx, input)
+}
+
+// BuildLegacy is the pre-entry-model renderer. It is retained for one release
+// as a testable equivalence baseline and rollback reference; new callers must
+// use Build.
+func (engine *Engine) BuildLegacy(ctx context.Context, input BuildInput) (BuildResult, error) {
 	templates, err := engine.TemplatesForLanguage(ctx, input.Language)
 	if err != nil {
 		return BuildResult{}, err

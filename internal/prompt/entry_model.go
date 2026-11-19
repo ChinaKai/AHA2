@@ -14,10 +14,9 @@ import (
 
 // Phase 3 template convergence starts from two top-level entries, core and
 // task-context, while the legacy template IDs stay valid as aliases. This file
-// is the read/registration layer only: it describes the frozen alias map,
-// previews anchors and legacy overrides, and can rebuild the resident prompt
-// from anchors. The legacy Build path remains authoritative for this phase so
-// the effective prompt does not change.
+// owns the frozen alias map, anchor and migration previews, and the entry-model
+// renderer used by the production Build path. BuildLegacy is retained for one
+// release as the byte-equivalence baseline.
 const (
 	EntryCore        = "core"
 	EntryTaskContext = "task-context"
@@ -444,11 +443,10 @@ func anchorConditionMatches(condition string, input BuildInput, identityName, ch
 	return false
 }
 
-// BuildEntryModel renders the same resident Prompt as Build, but resolves and
-// orders every resident fragment through the entry model. The legacy Build path
-// remains the production path for phase 3a; this function exists so the
-// equivalence baseline can prove the entry map is complete and text-preserving
-// before phase 3b switches the renderer.
+// BuildEntryModel renders the resident Prompt by resolving and ordering every
+// fragment through the entry model. Build delegates here in production;
+// BuildLegacy remains the pre-entry-model reference used by the equivalence
+// tests for one release.
 func (engine *Engine) BuildEntryModel(ctx context.Context, input BuildInput) (BuildResult, error) {
 	templates, err := engine.TemplatesForLanguage(ctx, input.Language)
 	if err != nil {
@@ -476,6 +474,14 @@ func (engine *Engine) BuildEntryModel(ctx context.Context, input BuildInput) (Bu
 	identityName, channelName := identityAndChannel(input.ChannelContext)
 	if strings.TrimSpace(input.Identity) != "" {
 		identityName = strings.TrimSpace(input.Identity)
+	}
+	// The legacy renderer failed when an identity/channel template was not
+	// registered. Keep that boundary explicit instead of silently dropping the
+	// fragment when no anchor condition matches.
+	for _, id := range []string{"identity." + identityName, "channel." + channelName} {
+		if _, ok := templateByID[id]; !ok {
+			return BuildResult{}, fmt.Errorf("prompt template %s is not registered", id)
+		}
 	}
 	data := templateData{
 		AgentID: input.Agent.AgentID, AgentRole: input.Agent.Role, Identity: identityName,

@@ -39,11 +39,11 @@ PUT  /api/v1/prompts/templates/{id}
 POST /api/v1/prompts/templates/{id}/reset
 ```
 
-## 阶段 3 模板收敛（3a/3b 只读层）
+## 阶段 3 模板收敛（3a/3b 只读层，3c 生产切换）
 
 阶段 3 把模板组织为两个顶层入口：`core`（安全、身份、角色、渠道、Agent API 与附件边界）和
 `task-context`（协作策略、知识协议、Task/Workspace、Inbox 与生成文件）。3a 建立只读的注册
-与预览层，3b 把它接到只读 HTTP/Web 预览，不切换渲染、不改写数据库：
+与预览层，3b 把它接到只读 HTTP/Web 预览；3c 把生产渲染切换到入口模型，但输出逐字不变：
 
 - 旧模板 ID 全部保留，并作为别名解析到 `入口#锚点`（例如 `role.main` -> `core#role-main`）。
   旧 ID 的版本在映射表中冻结；内置模板升版时必须有意识地更新该冻结值。
@@ -52,7 +52,10 @@ POST /api/v1/prompts/templates/{id}/reset
   在新的入口模型中不可单独编辑。`protocol.attachment-delivery` 与三个 `resource.*` 保持只读。
 - 迁移预览只读取现有 `prompt_template_overrides`：按锚点合并可迁移的 override，列出动态/只读
   锚点冲突、未知模板的孤儿 override，以及旧路径已忽略的过期内置覆盖；不写库、不静默覆盖。
-- 有效提示词在本阶段保持不变：生产仍走旧 `Build` 路径；入口模型渲染器只用于逐字等价基线。
+- 3c 起生产 `Build` 通过入口模型选择、排序并解析 resident 片段，所有旧 ID 继续经冻结别名
+  解析到锚点；可编辑旧 ID 的 owner override 仍按旧 ID 合并，不重写数据、不自动迁移。旧渲染器
+  保留为 `BuildLegacy` 一个版本，只用于逐字等价基线和回退参考。渲染路径只读 override，不写库；
+  11 个支持场景的 `EffectivePrompt`、`ContextManifest`、`SharedManifest` 和根路径与旧路径逐字相同。
 
 3b 新增的读取端点：
 
