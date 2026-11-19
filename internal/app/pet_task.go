@@ -117,7 +117,21 @@ func (s *Service) syncPetTaskRuntime(ctx context.Context, modelID string) error 
 	if err != nil {
 		return err
 	}
-	needsModel := modelID != "" && snapshot.ModelID != modelID
+	runtimeModel, modelFound := s.storeModelForPetRuntime(ctx, modelID)
+	needsModel := false
+	if modelID != "" {
+		if modelFound {
+			currentSource := domain.RuntimeModelSource(snapshot.EnvGroupID, snapshot.CodexAccountID)
+			modelSource := runtimeModel.Source
+			if modelSource == "" {
+				modelSource = domain.ModelSourceProvider
+			}
+			needsModel = snapshot.ModelID != runtimeModel.ID || currentSource != modelSource ||
+				(modelSource == domain.ModelSourceOfficial && snapshot.CodexAccountID != runtimeModel.CodexAccountID)
+		} else {
+			needsModel = snapshot.ModelID != modelID
+		}
+	}
 	filesystem, approval := parsePermissionsJSON(snapshot.PermissionsJSON)
 	needsRuntime := filesystem != petTaskFilesystem || approval != "never" || snapshot.ReasoningEffort != petTaskReasoningEffort
 	if !needsModel && !needsRuntime {
@@ -127,10 +141,31 @@ func (s *Service) syncPetTaskRuntime(ctx context.Context, modelID string) error 
 		Filesystem: petTaskFilesystem, Approval: "never", ReasoningEffort: petTaskReasoningEffort,
 	}
 	if needsModel {
-		input.ModelID = modelID
+		if modelFound {
+			input.ModelSource = runtimeModel.Source
+			if input.ModelSource == "" {
+				input.ModelSource = domain.ModelSourceProvider
+			}
+			input.ModelID = runtimeModel.ID
+			input.WireModel = runtimeModel.WireModel
+			input.CodexAccountID = runtimeModel.CodexAccountID
+		} else {
+			input.ModelID = modelID
+		}
 	}
 	_, err = s.UpdateAgentConfig(ctx, petTaskID, "main", input)
 	return err
+}
+
+// storeModelForPetRuntime reads the catalog row the Pet Task should run on.
+// The booleans distinguish "model deleted" from "lookup failed" for callers
+// that still need to pass a legacy model ID through.
+func (s *Service) storeModelForPetRuntime(ctx context.Context, modelID string) (domain.Model, bool) {
+	model, err := s.store.Model(ctx, strings.TrimSpace(modelID))
+	if err != nil {
+		return domain.Model{}, false
+	}
+	return model, true
 }
 
 // ensureOwnerPetTask creates the visible system Pet Task and its dedicated
@@ -166,7 +201,11 @@ func (s *Service) ensureOwnerPetTask(ctx context.Context, assistant *domain.Owne
 	// with the assistant setting; the settings save path reports failures,
 	// while this page-load path is best effort so a stale Task cannot block
 	// the assistant view.
-	_ = s.syncPetTaskRuntime(ctx, assistant.ModelID)
+	petModelID := strings.TrimSpace(assistant.BrainModelID)
+	if petModelID == "" {
+		petModelID = assistant.ModelID
+	}
+	_ = s.syncPetTaskRuntime(ctx, petModelID)
 
 	recordPetTask := func(taskID string) {
 		if taskID == "" || assistant.PetTaskID == taskID {
@@ -217,9 +256,20 @@ func (s *Service) ensureOwnerPetTask(ctx context.Context, assistant *domain.Owne
 			return "", err
 		}
 	}
+	petRuntime, petRuntimeFound := s.storeModelForPetRuntime(ctx, petModelID)
+	modelSource := petRuntime.Source
+	if modelSource == "" {
+		modelSource = domain.ModelSourceProvider
+	}
+	wireModel := petRuntime.WireModel
+	codexAccountID := petRuntime.CodexAccountID
+	if !petRuntimeFound {
+		modelSource, wireModel, codexAccountID = "", "", ""
+	}
 	task, err := s.CreateTask(ctx, CreateTaskInput{
 		ID: petTaskID, ProjectID: petProjectID, WorkspaceID: petWorkspaceID,
-		Title: "宠物", Request: petTaskIntro, CurrentGoal: petTaskMissionGoal, ModelID: assistant.ModelID,
+		Title: "宠物", Request: petTaskIntro, CurrentGoal: petTaskMissionGoal,
+		ModelSource: modelSource, ModelID: petModelID, WireModel: wireModel, CodexAccountID: codexAccountID,
 		ReasoningEffort: petTaskReasoningEffort,
 		Isolation:       "inplace", Filesystem: petTaskFilesystem, Approval: "never",
 		CollaborationMode: "single", MaxAgents: 1, StartMode: "manual",

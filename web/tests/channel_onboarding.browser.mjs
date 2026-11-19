@@ -167,7 +167,8 @@ try {
   await page.locator("#channel-onboarding-setup [data-setup-close]").first().click();
   await page.click('[data-channel-settings-open="channel-1"]');
   await page.waitForSelector("#channel-settings-dialog[open]");
-  assert.equal(await page.locator("#channel-settings-dialog select[name=\"channel_runtime\"]").count(), 1);
+  assert.equal(await page.locator("#channel-settings-dialog select[name=\"model_source\"]").count(), 1);
+  assert.equal(await page.locator("#channel-settings-dialog select[name=\"model_id\"]").count(), 1);
   assert.equal(await page.locator("#channel-settings-dialog input[name=\"runtime_bot_display_name_override\"]").count(), 0);
   assert.match(await page.locator("#channel-settings-dialog").innerText(), /Knowledge 访问范围/);
   await page.click("#channel-settings-dialog [data-save]");

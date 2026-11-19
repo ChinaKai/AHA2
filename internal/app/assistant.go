@@ -38,10 +38,18 @@ type OwnerAssistantView struct {
 	Models         []AssistantModelOption    `json:"models"`
 	ModelName      string                    `json:"model_name,omitempty"`
 	BrainModelName string                    `json:"brain_model_name,omitempty"`
-	Tools          []PetToolInfo             `json:"tools"`
-	PetLastBrainAt time.Time                 `json:"pet_last_brain_at,omitempty"`
-	PetNextBrainAt time.Time                 `json:"pet_next_brain_at,omitempty"`
-	PetBrainRuns   int                       `json:"pet_brain_runs"`
+	// Pet runtime readback. Models above are the Provider-only chat choices;
+	// these fields describe the source/model/account the Pet Task actually runs.
+	PetModelID        string        `json:"pet_model_id,omitempty"`
+	PetModelSource    string        `json:"pet_model_source,omitempty"`
+	PetWireModel      string        `json:"pet_wire_model,omitempty"`
+	PetCodexAccountID string        `json:"pet_codex_account_id,omitempty"`
+	PetModelName      string        `json:"pet_model_name,omitempty"`
+	PetWorkspaceID    string        `json:"pet_workspace_id,omitempty"`
+	Tools             []PetToolInfo `json:"tools"`
+	PetLastBrainAt    time.Time     `json:"pet_last_brain_at,omitempty"`
+	PetNextBrainAt    time.Time     `json:"pet_next_brain_at,omitempty"`
+	PetBrainRuns      int           `json:"pet_brain_runs"`
 }
 
 type AssistantToolEvent struct {
@@ -101,10 +109,29 @@ func (s *Service) OwnerAssistant(ctx context.Context) (OwnerAssistantView, error
 		if model.ID == assistant.ModelID {
 			view.ModelName = model.DisplayName
 		}
-		if model.ID == assistant.BrainModelID {
-			view.BrainModelName = model.DisplayName
+	}
+	petModelID := strings.TrimSpace(assistant.BrainModelID)
+	if petModelID == "" {
+		petModelID = assistant.ModelID
+	}
+	view.PetModelID = petModelID
+	view.PetWorkspaceID = petWorkspaceID
+	if petModelID != "" {
+		if model, modelErr := s.store.Model(ctx, petModelID); modelErr == nil {
+			source := strings.TrimSpace(model.Source)
+			if source == "" {
+				source = domain.ModelSourceProvider
+			}
+			view.PetModelSource = source
+			view.PetWireModel = model.WireModel
+			view.PetCodexAccountID = model.CodexAccountID
+			view.PetModelName = model.DisplayName
 		}
 	}
+	if view.PetModelSource == "" {
+		view.PetModelSource = domain.ModelSourceProvider
+	}
+	view.BrainModelName = view.PetModelName
 	if view.BrainModelName == "" {
 		view.BrainModelName = "跟随聊天模型"
 	}

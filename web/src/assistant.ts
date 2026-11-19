@@ -2,7 +2,8 @@ import {api} from "./api.js";
 import {icon} from "./icons.js";
 import {computeSpeechBubblePlacement} from "./pet_bubble.js";
 import {createPetNavigationClaimer} from "./pet_navigation.js";
-import type {AssistantHint, AssistantMessage, AssistantToolEvent, OwnerAssistantView, PetBrainAction, PetLayout, PetResetResult, PetState, PetStatePatch} from "./types.js";
+import type {ModelSourceSelection} from "./model_source_picker.js";
+import type {AssistantHint, AssistantMessage, AssistantToolEvent, CodexAccount, Model, OwnerAssistantView, PetBrainAction, PetLayout, PetResetResult, PetState, PetStatePatch, Workspace} from "./types.js";
 
 const PET_SIZE = 64;
 const PET_RESET_CONFIRM = "重置宠物";
@@ -66,6 +67,15 @@ let panel: HTMLElement;
 let modelSelect: HTMLSelectElement;
 let modelLabel: HTMLElement;
 let view: OwnerAssistantView | null = null;
+let petModelContext: {models: Model[]; accounts: CodexAccount[]; workspace?: Workspace} | null = null;
+let petModelContextLoading: Promise<void> | null = null;
+let petModelPicker: typeof import("./model_source_picker.js") | null = null;
+
+async function loadPetModelPicker(): Promise<typeof import("./model_source_picker.js")> {
+  if (petModelPicker) return petModelPicker;
+  petModelPicker = await import("./model_source_picker.js");
+  return petModelPicker;
+}
 let hints: AssistantHint[] = [];
 let activeHint: AssistantHint | null = null;
 let sending = false;
@@ -117,6 +127,7 @@ let settingsQuietEnabled: HTMLInputElement;
 let settingsQuietEnd: HTMLInputElement;
 let settingsCharacters: HTMLElement;
 let settingsChatModel: HTMLSelectElement;
+let settingsPetModelHost: HTMLElement;
 let settingsBrainStatus: HTMLElement;
 let settingsError: HTMLElement;
 let settingsAllowViewTasks: HTMLInputElement;
@@ -231,7 +242,9 @@ export function mountAssistant(): void {
             <p class="assistant-settings-note">权限变更立即生效，不重置会话；无权限的工具调用会被服务端拒绝。删除 Task/项目/Workspace 会先创建审批，主人批准后才执行。</p>
           </section>
           <section><h3>模型</h3>
-            <label class="assistant-settings-field">宠物模型（聊天 + 自主行为）<select id="pet-chat-model"></select></label>
+            <label class="assistant-settings-field">助手聊天模型（Provider）<select id="pet-chat-model"></select></label>
+            <div id="pet-model-source"></div>
+            <p class="assistant-settings-note">聊天面板使用 Provider 模型；自主行为在宠物 Task 中运行，可选择 Provider、Claude native 或 Codex 官方账号。不可用来源不会回退。</p>
           </section>
           <section class="assistant-settings-danger"><h3>恢复出厂设置</h3>
             <p class="assistant-settings-note">只清理本机宠物 Workspace、Task、工作记录/身份设定、审批与活动记录、聊天记录，并停用本机宠物。宠物项目、同步镜像和其他设备的宠物不受影响；模型、形象和权限设置会保留。</p>
@@ -290,6 +303,7 @@ export function mountAssistant(): void {
   settingsQuietEnd = layer.querySelector<HTMLInputElement>("#pet-quiet-end")!;
   settingsCharacters = layer.querySelector<HTMLElement>("#pet-character-options")!;
   settingsChatModel = layer.querySelector<HTMLSelectElement>("#pet-chat-model")!;
+  settingsPetModelHost = layer.querySelector<HTMLElement>("#pet-model-source")!;
   settingsBrainStatus = layer.querySelector<HTMLElement>("#pet-brain-status")!;
   settingsError = layer.querySelector<HTMLElement>("#pet-settings-error")!;
   settingsAllowViewTasks = layer.querySelector<HTMLInputElement>("#pet-allow-view-tasks")!;
@@ -678,6 +692,59 @@ function restoreLocalPetPosition(): boolean {
   }
 }
 
+function petModelSelection(): ModelSourceSelection {
+  return {
+    source: view?.pet_model_source || "",
+    modelID: view?.pet_model_id || "",
+    wireModel: view?.pet_wire_model || "",
+    accountID: view?.pet_codex_account_id || "",
+  };
+}
+
+async function loadPetModelContext(force = false): Promise<void> {
+  if (petModelContext && !force) return;
+  if (petModelContextLoading && !force) return petModelContextLoading;
+  petModelContextLoading = (async () => {
+    const [picker, models, accounts, workspaces] = await Promise.all([loadPetModelPicker(), api.models(), api.codexAccounts(), api.workspaces()]);
+    const workspaceID = String(view?.pet_workspace_id || "");
+    petModelPicker = picker;
+    const allWorkspaces = workspaces.workspaces || [];
+    const petWorkspace = allWorkspaces.find(item => item.id === workspaceID);
+    // The Pet Task workspace is created lazily on first enable and may not have
+    // a Claude probe yet. It runs on this local host, so any local Workspace
+    // that already probed Claude Code describes the same login state.
+    const probedWorkspace = allWorkspaces.find(item => {
+      const probe = (item.capabilities || {}).claude as {status?: string} | undefined;
+      return probe?.status === "ready";
+    });
+    petModelContext = {
+      models: models.models || [],
+      accounts: accounts.accounts || [],
+      workspace: petWorkspace || probedWorkspace,
+    };
+  })();
+  try {
+    await petModelContextLoading;
+  } finally {
+    petModelContextLoading = null;
+  }
+}
+
+function renderPetModelPicker(): void {
+  if (!settingsPetModelHost) return;
+  if (!petModelContext || !petModelPicker) {
+    settingsPetModelHost.innerHTML = `<small class="field-help">读取中…</small>`;
+    return;
+  }
+  const selection = petModelSelection();
+  const options = petModelPicker.buildModelSourceOptions(
+    petModelContext.models, petModelContext.accounts,
+    petModelPicker.claudeCatalogFromWorkspace(petModelContext.workspace), selection,
+  );
+  settingsPetModelHost.innerHTML = petModelPicker.modelSourceFieldsHTML("pet-model", options, selection);
+  petModelPicker.bindModelSourceFields("pet-model", options);
+}
+
 function renderPetSettings(): void {
   if (!view) return;
   settingsEnabled.checked = Boolean(view.assistant.pet_enabled);
@@ -686,6 +753,7 @@ function renderPetSettings(): void {
     <strong>${escapeHTML(character.nickname)}</strong>
   </button>`).join("");
   settingsChatModel.innerHTML = view.models.map(model => `<option value="${escapeHTML(model.id)}" ${model.id === view!.assistant.model_id ? "selected" : ""}>${escapeHTML([model.provider_name, model.display_name].filter(Boolean).join(" / ") || model.id)}</option>`).join("");
+  renderPetModelPicker();
   settingsIdleMinutes.value = String(view.assistant.pet_idle_minutes || 5);
   settingsHourlyLimit.value = String(view.assistant.pet_hourly_limit ?? 6);
   settingsQuietEnabled.checked = view.assistant.pet_quiet_enabled !== false;
@@ -720,6 +788,7 @@ export async function showPetSettings(): Promise<void> {
   if (!view) return;
   characterMenu.hidden = true;
   motionMenu.hidden = true;
+  try { await loadPetModelContext(true); } catch (error) { console.error("load pet model catalog failed", error); }
   try { renderPetSettings(); } catch (error) { console.error("pet settings render failed", error); }
   let attempts = 0;
   const mountInline = () => {
@@ -771,11 +840,15 @@ async function savePetSettings(): Promise<void> {
   const character = settingsCharacters.querySelector<HTMLElement>(".active")?.dataset.petCharacter || view.assistant.character;
   const actions = ["walk", "jump", "happy", "angry"];
   const enabled = settingsEnabled.checked;
+  const picker = await loadPetModelPicker();
+  const petRuntime = picker.readModelSourceSelection("pet-model");
   settingsError.hidden = true;
   try {
     const result = await api.updatePetSettings({
       enabled, character, chat_model_id: settingsChatModel.value,
-      brain_model_id: settingsChatModel.value, actions,
+      pet_model_source: petRuntime.model_source, pet_model_id: petRuntime.model_id,
+      pet_wire_model: petRuntime.wire_model, pet_codex_account_id: petRuntime.codex_account_id,
+      actions,
       idle_minutes: Number(settingsIdleMinutes.value) || 5,
       hourly_limit: Number(settingsHourlyLimit.value) || 0,
       quiet_enabled: settingsQuietEnabled.checked,
@@ -790,7 +863,13 @@ async function savePetSettings(): Promise<void> {
       allow_manage_channels: settingsAllowManageChannels.checked,
       allow_manage_system: settingsAllowManageSystem.checked,
     });
-    view = {...view, assistant: result.assistant, models: result.models || view.models, model_name: result.model_name ?? view.model_name, brain_model_name: result.brain_model_name ?? view.brain_model_name};
+    view = {
+      ...view, assistant: result.assistant, models: result.models || view.models,
+      model_name: result.model_name ?? view.model_name, brain_model_name: result.brain_model_name ?? view.brain_model_name,
+      pet_model_id: result.pet_model_id ?? view.pet_model_id, pet_model_source: result.pet_model_source ?? view.pet_model_source,
+      pet_wire_model: result.pet_wire_model ?? view.pet_wire_model, pet_codex_account_id: result.pet_codex_account_id ?? view.pet_codex_account_id,
+      pet_model_name: result.pet_model_name ?? view.pet_model_name, pet_workspace_id: result.pet_workspace_id ?? view.pet_workspace_id,
+    };
     rememberCharacter(view.assistant.character);
     renderCharacter();
     markCharacterReady();

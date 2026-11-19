@@ -1,6 +1,8 @@
 package domain
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -8,11 +10,28 @@ import (
 const (
 	OfficialCodexProviderID  = "official-codex"
 	OfficialClaudeProviderID = "official-claude"
+	OfficialCodexEnvGroupID  = "env_codex_official"
 	ClaudeNativeEnvGroupID   = "env_claude_native"
 	ModelSourceProvider      = "provider"
 	ModelSourceOfficial      = "official"
 	ModelSourceClaudeNative  = "claude_native"
 )
+
+// OfficialCodexModelID is the stable catalog identity for one account/model
+// pair. The account is part of the identity because two Codex accounts may offer
+// the same wire model with different health, quota and credentials.
+func OfficialCodexModelID(accountID, wireModel string) string {
+	digest := sha256.Sum256([]byte(strings.TrimSpace(accountID) + "\x00" + strings.TrimSpace(wireModel)))
+	return fmt.Sprintf("model_codex_official_%x", digest[:8])
+}
+
+// ClaudeNativeModelID is the stable catalog identity for one Claude native
+// wire model. Native models have no account association: the login belongs to
+// the Workspace host.
+func ClaudeNativeModelID(wireModel string) string {
+	digest := sha256.Sum256([]byte(strings.TrimSpace(wireModel)))
+	return fmt.Sprintf("model_claude_native_%x", digest[:8])
+}
 
 // NormalizeModelSource maps request-facing aliases to the canonical runtime
 // source. An empty value stays empty so callers can tell "not asked" from an
