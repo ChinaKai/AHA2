@@ -45,3 +45,10 @@ func (s *Service) PreviewPromptTemplateMigration(ctx context.Context) (prompt.Mi
 func (s *Service) PreviewPromptEntryAnchor(ctx context.Context, entryID, key string) (prompt.AnchorPreview, error) {
 	return s.prompts.PreviewEntryAnchor(ctx, entryID, key, s.promptLanguage(ctx))
 }
+
+// PreviewPromptScenario renders a complete demo Prompt Snapshot through the
+// production builder. It is read-only: no Turn/Task, channel message, or model
+// call is created, and no draft content is accepted from the page.
+func (s *Service) PreviewPromptScenario(ctx context.Context, scenarioID, message, source string) (prompt.ScenarioPreview, error) {
+	return s.prompts.PreviewScenario(ctx, scenarioID, message, source, s.promptLanguage(ctx))
+}

@@ -82,6 +82,7 @@ import type {
   PromptAnchorPreview,
   PromptEntry,
   PromptMigrationPreview,
+  PromptScenarioPreview,
   SystemInfo,
   Task,
   TaskContextDetail,
@@ -1382,6 +1383,13 @@ class APIClient {
 
   promptMigrationPreview(): Promise<{ok: boolean; migration: PromptMigrationPreview}> {
     return this.request("/api/v1/prompts/migration-preview");
+  }
+
+  // The scenario preview is a read-only GET. The editor never sends its draft:
+  // the server always renders the currently saved template content.
+  promptScenarioPreview(scenario: string, message: string, source: string): Promise<{ok: boolean; preview: PromptScenarioPreview}> {
+    const query = new URLSearchParams({scenario, message, source});
+    return this.request(`/api/v1/prompts/scenario-preview?${query.toString()}`);
   }
 
   updatePromptTemplate(id: string, content: string): Promise<{ok: boolean}> {

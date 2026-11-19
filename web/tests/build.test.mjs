@@ -1245,8 +1245,8 @@ test("built web contains responsive application", async () => {
   assert.match(promptAdmin, /内置只读模板/);
   assert.doesNotMatch(promptAdmin, /协议由代码管理/);
   assert.match(promptAdmin, /data-ui-key="prompt-template-content:\$\{escapeHTML\(selected\.id\)\}"/);
-  assert.match(promptAdmin, /state\.drafts\[state\.selectedTemplateID\]/);
-  assert.match(promptAdmin, /delete state\.drafts\[state\.selectedTemplateID\]/);
+  assert.match(promptAdmin, /data-prompt-edit/);
+  assert.match(promptAdmin, /editContent/);
   assert.match(css, /\.prompt-page \{[^}]*height: calc\(100vh - 52px\);[^}]*overflow: hidden;/);
   assert.match(css, /\.prompt-template-list \{[^}]*overflow-y: auto;/);
   assert.match(css, /\.prompt-editor textarea \{[^}]*height: 100%;[^}]*overflow: auto;/);
@@ -3819,7 +3819,9 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   // (Edge-style tab strip, address bar, horizontal bookmark bar with overflow
   // menu, local start page) and reworked its stylesheet rules; measured
   // 268,110, ceiling is the next 256-byte boundary.
-  const FIRST_SCREEN_GZIP_BUDGET = 268288;
+  // task-657 added the prompt page edit-mode and scenario-preview dialog
+  // styles; measured 268,606, so the ceiling moves to the next boundary.
+  const FIRST_SCREEN_GZIP_BUDGET = 268800;
   // The version query parameter is a content hash and its hex digits change
   // how the same code gzips: main already sits exactly on the budget, so a
   // hash-only change could trip it without growing the payload. Mask the

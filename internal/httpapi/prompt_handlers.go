@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 
@@ -86,9 +87,36 @@ func (s *Server) promptMigrationPreview(writer http.ResponseWriter, request *htt
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "migration": migration})
 }
 
+// promptScenarioPreview renders a complete demo Prompt Snapshot through the
+// real builder. The route only accepts GET and never receives draft content.
+func (s *Server) promptScenarioPreview(writer http.ResponseWriter, request *http.Request) {
+	query := request.URL.Query()
+	scenarioID := strings.TrimSpace(query.Get("scenario"))
+	if scenarioID == "" {
+		writeErrorDetail(writer, http.StatusBadRequest, "invalid_prompt_scenario", "scenario is required")
+		return
+	}
+	preview, err := s.app.PreviewPromptScenario(request.Context(), scenarioID, query.Get("message"), query.Get("source"))
+	if err != nil {
+		switch {
+		case errors.Is(err, prompt.ErrUnknownScenario):
+			writeErrorDetail(writer, http.StatusNotFound, "prompt_scenario_not_found", "prompt preview scenario was not found")
+		case errors.Is(err, prompt.ErrScenarioMessageTooLong):
+			writeErrorDetail(writer, http.StatusBadRequest, "prompt_preview_message_too_long",
+				"test message exceeds the preview limit; shorten it and retry")
+		case errors.Is(err, prompt.ErrInvalidMessageSource):
+			writeErrorDetail(writer, http.StatusBadRequest, "invalid_message_source", "message source must be owner or pet")
+		default:
+			writeError(writer, http.StatusInternalServerError, "preview_prompt_scenario_failed")
+		}
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "preview": preview})
+}
+
 // rejectPromptReadOnly makes the read-only boundary explicit instead of
 // letting a write-shaped request fall through to a generic 404.
 func (s *Server) rejectPromptReadOnly(writer http.ResponseWriter, request *http.Request) {
 	writer.Header().Set("Allow", "GET, HEAD")
-	writeErrorDetail(writer, http.StatusMethodNotAllowed, "read_only_prompt_view", "entry, anchor, and migration previews do not accept writes")
+	writeErrorDetail(writer, http.StatusMethodNotAllowed, "read_only_prompt_view", "entry, anchor, migration, and scenario previews do not accept writes")
 }

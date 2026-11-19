@@ -1162,6 +1162,25 @@ export interface PromptTemplate {
   updated_at?: string;
 }
 
+// Scenario preview renders a complete demo Prompt Snapshot through the real
+// builder. It is read-only and never accepts an editor draft.
+export interface PromptScenarioContextFile {
+  id: string;
+  path: string;
+  chars: number;
+}
+
+export interface PromptScenarioPreview {
+  scenario: string;
+  scenario_name: string;
+  prompt: string;
+  prompt_chars: number;
+  demo: boolean;
+  test_message: string;
+  message_source: string;
+  context_files: PromptScenarioContextFile[];
+}
+
 // Phase 3 read-only entry view. The legacy PromptTemplate above stays the
 // editable list; these types only describe the two-entry preview.
 export interface PromptEntryAnchor {
