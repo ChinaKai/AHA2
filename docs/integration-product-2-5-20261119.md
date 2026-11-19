@@ -3,7 +3,7 @@
 - 日期：2026-11-19
 - 集成分支：`integration/product-2-5-20261119`
 - base：`5008f0b629e5b06983a08fe71866901b54fa884c`（main，task-659）
-- 合并后代码 HEAD：`7db9f64`（task-668 评审阻塞修复；此前依次为四次 merge 的 `03bb2f1`、task-664 修复 `254f45a`）
+- 合并后代码 HEAD：`e1c7307`（task-668 第二轮复审修复；此前为 `7db9f64`、task-664 修复 `254f45a`、四次 merge 的 `03bb2f1`）
 - main 未修改，仍为 `5008f0b629e5b06983a08fe71866901b54fa884c`
 - 未 push、未合 main、未部署；未修改 DB/vault/凭据，未修改提示词正文
 
@@ -219,4 +219,46 @@ Web 构建/测试期间 `web/node_modules` 仍被外部清理，临时软链到�
 4. **宠物项目级 vault 门禁**：`vaultSkillReadEnabled` 按每个技能的 scope/project 判定，存在性校验和实际加载两处都走同一函数；一次性的缺失告警按 project + id 集合去重，多项目混合选择时是否只出一条可操作告警需要人工确认。
 5. **宠物设置跳过重新解析**：运行时选择未变化时跳过校验，意味着后台删除模型/账号后仍可关闭宠物或改权限（产品意图），但“实际变更才拒绝”的边界需要评审确认不会让失效运行时继续跑。
 6. 首屏预算与 `data-account-id`/`CodexAccountID` 回读风险仍按第 6.3 节保留。
+
+## 8. 第二轮复审修复（task-668 复审）
+
+第二轮复审又发现两项阻塞：Web 表单发来的空 `pet_model_id` 被误判为“已变化”，以及渠道 provider 的空 `model_id` 被当成可继承值，导致“自动选择”无法正确落盘。修复提交 `e1c7307`（父 `1f7d6c1`），`git merge --ff-only` 快进到集成分支，无冲突。
+
+### 8.1 两项修复
+
+| # | 问题 | 修复 |
+| --- | --- | --- |
+| 1 | 宠物设置：Web 对 official / claude_native 来源不发 `pet_model_id`，由服务端推导 catalog id；旧逻辑把空 id 当作 id 不同，直接判为“已变化”，已删模型/账号时阻塞保存 | `petSelectionMatchesStored` 在 `pet_model_id` 为空时按 source/wire/account 推导预期模型 ID 再与 `assistant.BrainModelID` 比较；wire/account 缺省时从存储模型行继承；模型行已删除时仍用推导 ID 判断。provider 的空 `model_id` 是显式“自动选择”，必须走重新解析，不能算未变化 |
+| 2 | 渠道 runtime：provider 的空 `model_id` 原被当作“继承存储值”，导致显式自动选择无法与已存模型双向切换 | `sameChannelRuntimeSelection` 先归一化存储行 source；provider 的空 `model_id` 直接与存储值比较（空 == 自动），只有 official/claude_native 的空 `model_id` 才继承；provider 显式模型与自动选择双向切换都能正确落盘 |
+
+测试同步改用真实 Web payload（`pet_model_id` 为空字符串），覆盖：已删账号下关闭/启用并改权限、claude_native 未变、provider 自动选择被正常拒绝、模型行删除后仍可保存，以及渠道 provider 自动/显式双向切换。
+
+### 8.2 触碰文件
+
+4 个文件，+295 / −53：
+
+- `internal/app/pet.go`
+- `internal/app/pet_model_source_test.go`
+- `internal/channel/service.go`
+- `internal/channel/runtime_source_test.go`
+
+### 8.3 验证结果
+
+本轮按 Owner 要求把 Go 全量改为 `-p 1` 串行包，避免上次并发导致的 `internal/httpapi` 被 killed。
+
+环境：Linux builder，go1.27.4，node v24.21.0；命令串行，每步前检查 `/tmp`（可用 1.3G，≥1G 门槛）。
+
+| # | 命令 | 退出码 | 耗时 | 结果 |
+| --- | --- | --- | --- | --- |
+| 1 | `go build ./...` | 0 | 4s | 通过 |
+| 2 | `TMPDIR=/tmp go test ./... -p 1 -count=1 -timeout 1800s` | 0 | 478s | 32 个包全部 ok，无失败、无 killed |
+| 3 | `cd web && npm run build` | 0 | 1s | 通过；`app.dfa2537cd71d.js`，`build/model_source_picker.js`（14,771 字节） |
+| 4 | `cd web && npm test` | 0 | 2s | 613 tests / 613 pass / 0 fail |
+| 5 | `cd browser-host && npm test` | 0 | 8s | 61 tests / 55 pass / 6 skipped / 0 fail |
+
+`-p 1` 的效果：上一轮并发全量 225s 内 `internal/httpapi` 被 `signal: killed`；本轮串行 478s 整包通过，没有再出现 killed 或 TempDir 清理竞态。browser-host 的 6 个 skip 仍是需要 `AHA2_PLAYWRIGHT_MODULE` 的真实 Chromium 用例，属于环境缺口。
+
+Web 构建/测试期间 `web/node_modules` 仍被外部清理，临时软链到主 checkout 的依赖，结束后已移除；未写入源码或提交。
+
+残余风险：第 7.5 节的大文件下载端到端、无总超时 stream client、技能上下文目录布局、宠物门禁告警、跳过重新解析边界仍然有效；本轮两个修复把“空 id 判定”补上后，宠物与渠道这两条保存路径不再有已知的确定性失败，但真实浏览器表单的 payload 仍只有单测覆盖。
 
