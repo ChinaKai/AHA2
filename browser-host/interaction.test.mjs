@@ -373,162 +373,104 @@ test("file chooser upload succeeds and a failed click leaves the host alive", as
   }
 });
 
-test("download store caps in-flight files and rejects beyond the declared count", async () => {
-  const host = await startHost({downloadOptions: {maxFiles: 2}});
+test("downloads beyond the old 10 MiB, 20-file and 50 MiB limits all succeed", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aha2-download-unlimited-"));
   const {Readable} = await import("node:stream");
-  try {
-    await openSession(host);
-    const gates = [];
-    const deleted = [];
-    const makeDownload = index => {
-      let release;
-      const gate = new Promise(resolve => { release = resolve; });
-      return {
-        release,
-        suggestedFilename: () => `f${index}.txt`,
-        createReadStream: async () => {
-          await gate;
-          return Readable.from([Buffer.from(`body-${index}`)]);
-        },
-        cancel: async () => {},
-        delete: async () => { deleted.push(index); },
-      };
-    };
-    const downloads = [1, 2, 3].map(makeDownload);
-    for (const download of downloads) host.listeners.download(download);
-    // Reservation is synchronous, so the third event must be rejected while
-    // the first two are still saving.
-    await new Promise(resolve => setTimeout(resolve, 20));
-    downloads[0].release();
-    downloads[1].release();
-    let listed = [];
-    for (let attempt = 0; attempt < 50; attempt++) {
-      listed = (await host.call("GET", "/v1/profiles/browser_profile_1/downloads")).body.downloads;
-      if (listed.length === 2) break;
-      await new Promise(resolve => setTimeout(resolve, 10));
-    }
-    assert.equal(listed.length, 2, "in-flight count must stay within maxFiles");
-    assert.ok(deleted.includes(3), "rejected download artifact must be deleted");
-    assert.equal((await host.call("DELETE", "/v1/profiles/browser_profile_1/downloads")).status, 200);
-  } finally {
-    await host.close();
-  }
-});
-
-test("download TTL timer removes entries and files without a read", async () => {
-  const host = await startHost({downloadOptions: {ttlMs: 100}});
-  const {Readable} = await import("node:stream");
-  try {
-    await openSession(host);
-    const download = {
-      suggestedFilename: () => "ttl.txt",
-      createReadStream: async () => Readable.from([Buffer.from("ttl-body")]),
-      cancel: async () => {},
-      delete: async () => {},
-    };
-    host.listeners.download(download);
-    let listed = [];
-    for (let attempt = 0; attempt < 50; attempt++) {
-      listed = (await host.call("GET", "/v1/profiles/browser_profile_1/downloads")).body.downloads;
-      if (listed.length === 1) break;
-      await new Promise(resolve => setTimeout(resolve, 10));
-    }
-    assert.equal(listed.length, 1);
-    await new Promise(resolve => setTimeout(resolve, 400));
-    const after = await host.call("GET", "/v1/profiles/browser_profile_1/downloads");
-    assert.deepEqual(after.body.downloads, []);
-    const directory = join(host.root, ".downloads", "browser_profile_1");
-    const {readdir} = await import("node:fs/promises");
-    const sessions = await readdir(directory).catch(() => []);
-    for (const session of sessions) {
-      const entries = await readdir(join(directory, session)).catch(() => []);
-      assert.deepEqual(entries.filter(name => name !== "raw"), []);
-      assert.deepEqual(await readdir(join(directory, session, "raw")).catch(() => []), []);
-    }
-  } finally {
-    await host.close();
-  }
-});
-
-test("clearing downloads cancels an in-flight stream and deletes its artifact", async () => {
-  const host = await startHost({downloadOptions: {maxFiles: 5}});
-  const {PassThrough} = await import("node:stream");
-  try {
-    await openSession(host);
-    let stream = null;
-    let canceled = 0;
-    let deleted = 0;
-    const download = {
-      suggestedFilename: () => "slow.bin",
-      createReadStream: async () => {
-        stream = new PassThrough();
-        return stream;
-      },
-      cancel: async () => {
-        canceled++;
-        stream?.destroy(new Error("canceled by clear"));
-      },
-      delete: async () => { deleted++; },
-    };
-    host.listeners.download(download);
-    for (let attempt = 0; attempt < 50 && !stream; attempt++) {
-      await new Promise(resolve => setTimeout(resolve, 10));
-    }
-    assert.ok(stream, "stream did not start");
-    const cleared = await host.call("DELETE", "/v1/profiles/browser_profile_1/downloads");
-    assert.equal(cleared.status, 200);
-    assert.ok(canceled >= 1 && deleted >= 1);
-    assert.equal((await host.call("GET", "/v1/profiles/browser_profile_1/tabs")).status, 200);
-  } finally {
-    await host.close();
-  }
-});
-
-
-test("failed chunks release only the budget they reserved", async () => {
-  const root = await mkdtemp(join(tmpdir(), "aha2-download-budget-"));
-  const {Readable} = await import("node:stream");
-  const store = createDownloadStore(root, "profile", "session", {
-    maxBytes: 10 * 1024 * 1024,
-    maxTotalBytes: 8 * 1024 * 1024,
-    ttlMs: 60_000,
-  });
-  let releaseA;
-  const gateA = new Promise(resolve => { releaseA = resolve; });
-  const makeDownload = (chunks, gate = null) => ({
-    suggestedFilename: () => "f.bin",
+  const store = createDownloadStore(root, "profile", "session", {clearGraceMs: 200});
+  const chunk = Buffer.alloc(1024 * 1024, 0x61);
+  const make = size => ({
+    suggestedFilename: () => "large.bin",
     createReadStream: async () => Readable.from((async function* () {
-      for (const chunk of chunks) yield Buffer.alloc(chunk, 0x61);
-      if (gate) await gate;
+      for (let sent = 0; sent < size; sent += chunk.length) {
+        yield chunk.subarray(0, Math.min(chunk.length, size - sent));
+      }
     })()),
     cancel: async () => {},
     delete: async () => {},
   });
-  const captureA = store.capture(makeDownload([6 * 1024 * 1024], gateA), "f");
-  await new Promise(resolve => setTimeout(resolve, 20));
-  // A holds 6 MiB. B gets one 2 MiB chunk (pending 8) and then exceeds the
-  // budget; only its charged 2 MiB may be returned, not the rejected chunk.
-  await assert.rejects(store.capture(makeDownload([2 * 1024 * 1024, 4 * 1024 * 1024]), "f"));
-  const afterB = store.stats();
-  assert.equal(afterB.pendingBytes, 6 * 1024 * 1024, JSON.stringify(afterB));
-  // If B had over-released, C's 4 MiB would now fit (6+4>8 must reject).
-  await assert.rejects(store.capture(makeDownload([4 * 1024 * 1024]), "f"));
-  releaseA();
-  await captureA;
-  const final = store.stats();
-  assert.equal(final.totalBytes, 6 * 1024 * 1024, JSON.stringify(final));
-  assert.equal(final.pendingBytes, 0, JSON.stringify(final));
-  await store.close();
+  try {
+    // 21 files at 3 MiB each = 63 MiB; the first is 12 MiB, beyond the old
+    // 10 MiB per-file cap. Together they exceed the old 20-file and 50 MiB
+    // cumulative caps.
+    const captured = [];
+    for (let index = 0; index < 21; index++) {
+      const size = (index === 0 ? 12 : 3) * 1024 * 1024;
+      captured.push(await store.capture(make(size), "f"));
+    }
+    const listed = await store.list("f");
+    assert.equal(listed.length, 21, "all downloads must be retained");
+    const total = listed.reduce((sum, item) => sum + item.size, 0);
+    assert.ok(total > 50 * 1024 * 1024, `total ${total} did not exceed the old 50 MiB cap`);
+    const largest = listed.find(item => item.size > 10 * 1024 * 1024);
+    assert.ok(largest, "the >10 MiB download was not retained");
+    const fetched = await store.read(largest.id, "f");
+    assert.equal(fetched.data.length, 12 * 1024 * 1024, "the >10 MiB body was truncated");
+    assert.equal((await store.stats()).entries, 21);
+
+    // The release clear is the only cleanup path; there is no age-based timer.
+    await store.clear();
+    assert.deepEqual(await store.list("f"), []);
+    assert.equal((await store.stats()).entries, 0);
+  } finally {
+    await store.close();
+  }
 });
 
-test("clear waits out an old capture so it cannot publish or release into the new budget", async () => {
+test("download entries do not expire on a timer; only clear removes them", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aha2-download-no-ttl-"));
+  const {Readable} = await import("node:stream");
+  const store = createDownloadStore(root, "profile", "session", {clearGraceMs: 100});
+  const download = {
+    suggestedFilename: () => "retained.bin",
+    createReadStream: async () => Readable.from([Buffer.from("retained-body")]),
+    cancel: async () => {},
+    delete: async () => {},
+  };
+  try {
+    const entry = await store.capture(download, "f");
+    await new Promise(resolve => setTimeout(resolve, 300));
+    const listed = await store.list("f");
+    assert.equal(listed.length, 1, "an old download must stay listed");
+    assert.equal(listed[0].id, entry.id);
+    assert.equal((await store.read(entry.id, "f")).data.toString(), "retained-body");
+    await store.clear();
+    assert.deepEqual(await store.list("f"), []);
+  } finally {
+    await store.close();
+  }
+});
+
+test("a stream failure surfaces and leaves no artifact or listed entry", async () => {
+  const root = await mkdtemp(join(tmpdir(), "aha2-download-write-fail-"));
+  const {Readable} = await import("node:stream");
+  const {readdir} = await import("node:fs/promises");
+  const store = createDownloadStore(root, "profile", "session", {clearGraceMs: 100});
+  let deleted = 0;
+  const download = {
+    suggestedFilename: () => "broken.bin",
+    createReadStream: async () => Readable.from((async function* () {
+      yield Buffer.alloc(1024 * 1024, 0x61);
+      throw new Error("disk full");
+    })()),
+    cancel: async () => {},
+    delete: async () => { deleted += 1; },
+  };
+  try {
+    await assert.rejects(store.capture(download, "f"), /disk full/);
+    assert.deepEqual(await store.list("f"), [], "a failed write must not be listed as success");
+    assert.equal((await store.stats()).entries, 0);
+    assert.ok(deleted >= 1, "the raw artifact was not deleted");
+    const directory = join(root, ".downloads", "profile", "session");
+    assert.deepEqual(await readdir(directory).catch(() => []), []);
+  } finally {
+    await store.close();
+  }
+});
+
+test("clear waits out an old capture so it cannot publish into the new generation", async () => {
   const root = await mkdtemp(join(tmpdir(), "aha2-download-clear-"));
   const {Readable} = await import("node:stream");
-  const store = createDownloadStore(root, "profile", "session", {
-    maxBytes: 10 * 1024 * 1024,
-    maxTotalBytes: 50 * 1024 * 1024,
-    ttlMs: 60_000,
-  });
+  const store = createDownloadStore(root, "profile", "session", {clearGraceMs: 200});
   let release;
   const gate = new Promise(resolve => { release = resolve; });
   let canceled = 0;
@@ -542,31 +484,24 @@ test("clear waits out an old capture so it cannot publish or release into the ne
     cancel: async () => { canceled += 1; },
     delete: async () => {},
   };
-  const oldCapture = store.capture(oldDownload, "f").catch(() => { settled = true; });
-  for (let attempt = 0; attempt < 100 && store.stats().pendingBytes === 0; attempt++) {
+  const oldCapture = store.capture(oldDownload, "f").catch(error => { settled = error; });
+  for (let attempt = 0; attempt < 100 && store.stats().inFlight === 0; attempt++) {
     await new Promise(resolve => setTimeout(resolve, 10));
   }
-  assert.equal(store.stats().pendingBytes, 1024 * 1024);
-  let clearSettled = false;
-  const clearPromise = store.clear().then(() => { clearSettled = true; });
-  await new Promise(resolve => setTimeout(resolve, 50));
-  // Distinguish "clear is waiting" from "clear returned while the capture is
-  // still running": both the capture and the clear promise must be unsettled.
-  assert.equal(settled, false, "old capture exited before clear");
-  assert.equal(clearSettled, false, "clear returned before the old capture exited");
+  assert.equal(store.stats().inFlight, 1);
+  // Give the capture time to consume its first chunk, then clear while it is
+  // still parked. The generation guard must reject it, not publish it.
+  await new Promise(resolve => setTimeout(resolve, 100));
+  const clearPromise = store.clear();
   release();
   await oldCapture;
   await clearPromise;
-  assert.equal(clearSettled, true, "clear did not settle after the capture exited");
+  assert.ok(settled instanceof Error, "old capture published into the new generation");
   assert.ok(canceled >= 1);
   const cleared = store.stats();
-  assert.deepEqual(
-    {entries: cleared.entries, totalBytes: cleared.totalBytes, pendingBytes: cleared.pendingBytes},
-    {entries: 0, totalBytes: 0, pendingBytes: 0});
+  assert.deepEqual({entries: cleared.entries, totalBytes: cleared.totalBytes}, {entries: 0, totalBytes: 0});
   assert.deepEqual(await store.list("f"), []);
 
-  // The stale capture's finally must not subtract its old 1 MiB from the new
-  // generation's pending budget: a fresh 1 MiB must remain exactly 1 MiB.
   const fresh = {
     suggestedFilename: () => "fresh.bin",
     createReadStream: async () => Readable.from([Buffer.alloc(1024 * 1024, 0x62)]),
@@ -576,18 +511,13 @@ test("clear waits out an old capture so it cannot publish or release into the ne
   await store.capture(fresh, "f");
   const after = store.stats();
   assert.equal(after.totalBytes, 1024 * 1024, JSON.stringify(after));
-  assert.equal(after.pendingBytes, 0, JSON.stringify(after));
   await store.close();
 });
 
-test("clear during concurrent fills resets all counters and accepts a new-generation budget", async () => {
+test("clear during concurrent fills resets entries and accepts fresh downloads", async () => {
   const root = await mkdtemp(join(tmpdir(), "aha2-download-clear-stress-"));
   const {PassThrough} = await import("node:stream");
-  const store = createDownloadStore(root, "profile", "session", {
-    maxBytes: 10 * 1024 * 1024,
-    maxTotalBytes: 50 * 1024 * 1024,
-    ttlMs: 60_000,
-  });
+  const store = createDownloadStore(root, "profile", "session", {clearGraceMs: 200});
   const streams = [];
   const captures = [];
   for (let index = 0; index < 10; index++) {
@@ -605,13 +535,11 @@ test("clear during concurrent fills resets all counters and accepts a new-genera
     for (let chunk = 0; chunk < 6; chunk++) stream.write(Buffer.alloc(1024 * 1024, 0x63));
   }
   await new Promise(resolve => setTimeout(resolve, 50));
-  assert.ok(store.stats().totalBytes + store.stats().pendingBytes > 0);
   await store.clear();
   await Promise.allSettled(captures);
   const cleared = store.stats();
   assert.equal(cleared.entries, 0, JSON.stringify(cleared));
   assert.equal(cleared.totalBytes, 0, JSON.stringify(cleared));
-  assert.equal(cleared.pendingBytes, 0, JSON.stringify(cleared));
   assert.deepEqual(await store.list("f"), []);
 
   const fresh = {
@@ -625,92 +553,6 @@ test("clear during concurrent fills resets all counters and accepts a new-genera
   };
   await store.capture(fresh, "f");
   assert.equal(store.stats().totalBytes, 4 * 1024 * 1024, JSON.stringify(store.stats()));
-  assert.equal(store.stats().pendingBytes, 0);
-  await store.close();
-});
-
-
-test("a stale prune snapshot cannot delete or debit a new generation entry", async () => {
-  const root = await mkdtemp(join(tmpdir(), "aha2-download-prune-race-"));
-  const {Readable} = await import("node:stream");
-  let releasePrune;
-  let enteredResolve;
-  const pruneGate = new Promise(resolve => { releasePrune = resolve; });
-  const entered = new Promise(resolve => { enteredResolve = resolve; });
-  let first = true;
-  const store = createDownloadStore(root, "profile", "session", {
-    maxBytes: 10 * 1024 * 1024,
-    maxTotalBytes: 50 * 1024 * 1024,
-    ttlMs: 20,
-    disableMaintenance: true,
-    beforePruneRemove: async () => {
-      if (!first) return;
-      first = false;
-      enteredResolve();
-      await pruneGate;
-    },
-  });
-  const make = (name, byte) => ({
-    suggestedFilename: () => name,
-    createReadStream: async () => Readable.from([Buffer.alloc(1024 * 1024, byte)]),
-    cancel: async () => {},
-    delete: async () => {},
-  });
-  await store.capture(make("old.bin", 0x61), "f");
-  assert.equal(store.stats().totalBytes, 1024 * 1024);
-  await new Promise(resolve => setTimeout(resolve, 40));
-  const prunePromise = store.list("f"); // expired entry pauses before removal
-  await entered;
-  await store.clear();
-  await store.capture(make("new.bin", 0x62), "f");
-  assert.equal(store.stats().totalBytes, 1024 * 1024);
-  releasePrune();
-  await prunePromise;
-  const stats = store.stats();
-  assert.equal(stats.entries, 1, JSON.stringify(stats));
-  assert.equal(stats.totalBytes, 1024 * 1024, JSON.stringify(stats));
-  const listed = await store.list("f");
-  assert.equal(listed.length, 1);
-  assert.equal(listed[0].filename, "new.bin");
-  await store.close();
-});
-
-test("TTL removal of a saving entry prevents the old capture from publishing", async () => {
-  const root = await mkdtemp(join(tmpdir(), "aha2-download-ttl-race-"));
-  const {Readable} = await import("node:stream");
-  let release;
-  const gate = new Promise(resolve => { release = resolve; });
-  const store = createDownloadStore(root, "profile", "session", {
-    maxBytes: 10 * 1024 * 1024,
-    maxTotalBytes: 50 * 1024 * 1024,
-    ttlMs: 50,
-  });
-  const download = {
-    suggestedFilename: () => "late.bin",
-    createReadStream: async () => Readable.from((async function* () {
-      yield Buffer.alloc(1024 * 1024, 0x61);
-      await gate;
-    })()),
-    cancel: async () => {},
-    delete: async () => {},
-  };
-  const capture = store.capture(download, "f").catch(error => error);
-  for (let attempt = 0; attempt < 100 && store.stats().pendingBytes === 0; attempt++) {
-    await new Promise(resolve => setTimeout(resolve, 10));
-  }
-  assert.equal(store.stats().pendingBytes, 1024 * 1024);
-  for (let attempt = 0; attempt < 100 && store.stats().entries !== 0; attempt++) {
-    await new Promise(resolve => setTimeout(resolve, 20));
-  }
-  assert.equal(store.stats().entries, 0, "TTL did not remove the saving entry");
-  release();
-  const outcome = await capture;
-  assert.ok(outcome instanceof Error, "invalidated capture unexpectedly succeeded");
-  const stats = store.stats();
-  assert.equal(stats.entries, 0, JSON.stringify(stats));
-  assert.equal(stats.totalBytes, 0, JSON.stringify(stats));
-  assert.equal(stats.pendingBytes, 0, JSON.stringify(stats));
-  assert.deepEqual(await store.list("f"), []);
   await store.close();
 });
 
@@ -733,12 +575,7 @@ test("a late fs.open after clear leaves no empty orphan artifact", async () => {
     cancel: async () => {},
     delete: async () => {},
   };
-  const store = createDownloadStore(root, "profile", "session", {
-    maxBytes: 10 * 1024 * 1024,
-    maxTotalBytes: 50 * 1024 * 1024,
-    ttlMs: 60_000,
-    clearGraceMs: 50,
-  });
+  const store = createDownloadStore(root, "profile", "session", {clearGraceMs: 50});
   const oldCapture = store.capture(oldDownload, "f").catch(error => error);
   await requested;
   assert.equal(store.stats().inFlight, 1, JSON.stringify(store.stats()));
@@ -767,7 +604,6 @@ test("a late fs.open after clear leaves no empty orphan artifact", async () => {
   assert.equal(stats.entries, 1, JSON.stringify(stats));
   assert.equal(stats.inFlight, 0, JSON.stringify(stats));
   assert.equal(stats.totalBytes, 1024 * 1024, JSON.stringify(stats));
-  assert.equal(stats.pendingBytes, 0, JSON.stringify(stats));
   const listed = await store.list("f");
   assert.equal(listed.length, 1, JSON.stringify(listed));
   assert.equal(listed[0].id, fresh.id);
@@ -775,68 +611,10 @@ test("a late fs.open after clear leaves no empty orphan artifact", async () => {
   await store.close();
 });
 
-test("a stale raw scan cannot cancel a new-generation download", async () => {
-  const root = await mkdtemp(join(tmpdir(), "aha2-download-raw-race-"));
-  const fsPromises = await import("node:fs/promises");
-  const rawDir = join(root, "raw");
-  await fsPromises.mkdir(rawDir, {recursive: true});
-  await fsPromises.writeFile(join(rawDir, "old-artifact"), Buffer.alloc(2 * 1024 * 1024, 0x61));
-  let releaseScan;
-  let enteredResolve;
-  const scanGate = new Promise(resolve => { releaseScan = resolve; });
-  const entered = new Promise(resolve => { enteredResolve = resolve; });
-  let first = true;
-  const store = createDownloadStore(root, "profile", "session", {
-    maxBytes: 1024 * 1024,
-    maxTotalBytes: 50 * 1024 * 1024,
-    ttlMs: 60_000,
-    rawDir,
-    rawPollMs: 10,
-    beforeRawStat: async () => {
-      if (!first) return;
-      first = false;
-      enteredResolve();
-      await scanGate;
-    },
-  });
-  await entered;
-  await store.clear();
-  const {PassThrough} = await import("node:stream");
-  let stream = null;
-  let canceled = 0;
-  const fresh = {
-    suggestedFilename: () => "fresh.bin",
-    createReadStream: async () => {
-      stream = new PassThrough();
-      return stream;
-    },
-    cancel: async () => { canceled += 1; },
-    delete: async () => {},
-  };
-  const capture = store.capture(fresh, "f");
-  for (let attempt = 0; attempt < 100 && store.stats().inFlight === 0; attempt++) {
-    await new Promise(resolve => setTimeout(resolve, 10));
-  }
-  assert.equal(store.stats().inFlight, 1);
-  releaseScan();
-  await new Promise(resolve => setTimeout(resolve, 60));
-  assert.equal(canceled, 0, "stale raw scan canceled a new download");
-  stream.write(Buffer.alloc(512 * 1024, 0x62));
-  stream.end(Buffer.alloc(512 * 1024, 0x63));
-  await capture;
-  assert.equal(store.stats().totalBytes, 1024 * 1024, JSON.stringify(store.stats()));
-  await store.close();
-});
-
 test("clear returns within its deadline when cancel hangs", async () => {
   const root = await mkdtemp(join(tmpdir(), "aha2-download-hang-"));
   const {PassThrough} = await import("node:stream");
-  const store = createDownloadStore(root, "profile", "session", {
-    maxBytes: 10 * 1024 * 1024,
-    maxTotalBytes: 50 * 1024 * 1024,
-    ttlMs: 60_000,
-    clearGraceMs: 100,
-  });
+  const store = createDownloadStore(root, "profile", "session", {clearGraceMs: 100});
   const stream = new PassThrough();
   const hanging = {
     suggestedFilename: () => "hang.bin",
@@ -856,7 +634,6 @@ test("clear returns within its deadline when cancel hangs", async () => {
   const stats = store.stats();
   assert.equal(stats.entries, 0, JSON.stringify(stats));
   assert.equal(stats.totalBytes, 0, JSON.stringify(stats));
-  assert.equal(stats.pendingBytes, 0, JSON.stringify(stats));
 
   const fresh = {
     suggestedFilename: () => "fresh.bin",

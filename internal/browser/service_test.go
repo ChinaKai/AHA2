@@ -281,6 +281,76 @@ func TestGrantExpiryAndRevocationFailClosed(t *testing.T) {
 	requireCode(t, err, "browser_grant_revoked")
 }
 
+func TestOwnerSwitchGrantDoesNotExpireUntilClosed(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	profile := createProfile(t, f)
+	// ttl == 0 is the Owner switch: continuous authorization, no expiry.
+	grant, err := f.service.CreateGrant(ctx, "owner", f.task.ID, profile.ID,
+		[]string{domain.BrowserCapabilityOpenTab, domain.BrowserCapabilityNavigate, domain.BrowserCapabilitySnapshot}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !grant.ExpiresAt.IsZero() {
+		t.Fatalf("owner switch grant carries an expiry: %v", grant.ExpiresAt)
+	}
+	if grant.Status != domain.BrowserGrantStatusActive {
+		t.Fatalf("grant status=%q", grant.Status)
+	}
+	tab, err := f.service.OpenTab(ctx, "owner", grant.ID, "https://example.com/login")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Far beyond the old 30-minute default and the 24-hour maximum.
+	f.setNow(f.now.Add(72 * time.Hour))
+	if _, err := f.service.NavigateTab(ctx, "owner", grant.ID, tab.ID, "https://example.com/home"); err != nil {
+		t.Fatalf("continuous grant rejected after time passed: %v", err)
+	}
+	if _, err := f.service.SnapshotTab(ctx, "owner", grant.ID, tab.ID); err != nil {
+		t.Fatalf("snapshot after time passed: %v", err)
+	}
+	views, err := f.service.Grants(ctx, f.task.ID)
+	if err != nil || len(views) != 1 || views[0].Status != domain.BrowserGrantStatusActive {
+		t.Fatalf("continuous grant view=%#v err=%v", views, err)
+	}
+
+	// Closing the Owner switch invalidates the authorization immediately.
+	if _, err := f.service.RevokeGrant(ctx, "owner", grant.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.service.OpenTab(ctx, "owner", grant.ID, "https://example.com/after"); browser.Code(err) != "browser_grant_revoked" {
+		t.Fatalf("operation after closing the switch: %v", err)
+	}
+}
+
+func TestStaleOwnerSwitchGrantIsReleasedWhenHostSessionDisappears(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	profile := createProfile(t, f)
+	grant, err := f.service.CreateGrant(ctx, "owner", f.task.ID, profile.ID, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a host restart/crash: the stored session is still "active" in
+	// the database but the host no longer knows it. Reconciliation must close
+	// the session and revoke the no-expiry grant instead of holding the
+	// Profile forever.
+	if err := f.host.Close(ctx, profile.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.service.RefreshSession(ctx, profile.ID); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := f.store.BrowserTaskGrant(ctx, grant.ID)
+	if err != nil || stored.RevokedAt.IsZero() {
+		t.Fatalf("stale grant was not revoked: %#v err=%v", stored, err)
+	}
+	otherTask := createTask(t, f.store)
+	if _, err := f.service.CreateGrant(ctx, "owner", otherTask.ID, profile.ID, nil, 0); err != nil {
+		t.Fatalf("another task could not take over after the host session was lost: %v", err)
+	}
+}
+
 func TestCapabilityAndURLValidation(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)

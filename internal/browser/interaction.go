@@ -3,7 +3,6 @@ package browser
 import (
 	"context"
 	"encoding/base64"
-	"net/http"
 	"net/url"
 	"sort"
 	"strconv"
@@ -29,7 +28,6 @@ const (
 	MaxUploadFileBytes  = 10 << 20
 	MaxUploadTotalBytes = 20 << 20
 	MaxFilenameBytes    = 255
-	MaxDownloadBytes    = 10 << 20
 	MaxCookies          = 300
 	MaxCookieNameBytes  = 256
 	MaxCookieValueBytes = 4096
@@ -344,7 +342,7 @@ func (s *Service) Downloads(ctx context.Context, actor, grantID string) ([]HostD
 func (s *Service) Download(ctx context.Context, actor, grantID, downloadID string) (HostDownloadFile, error) {
 	downloadID = strings.TrimSpace(downloadID)
 	if !validDownloadID(downloadID) {
-		return HostDownloadFile{}, badRequest("browser_download_not_found", "下载文件不存在或已过期")
+		return HostDownloadFile{}, badRequest("browser_download_not_found", "下载文件不存在或已清理")
 	}
 	grant, _, err := s.authorize(ctx, grantID, domain.BrowserCapabilityFiles, "")
 	if err != nil {
@@ -357,9 +355,6 @@ func (s *Service) Download(ctx context.Context, actor, grantID, downloadID strin
 	file, err := s.host.Download(ctx, grant.ProfileID, session.HostSessionID, downloadID)
 	if err != nil {
 		return HostDownloadFile{}, sanitizeHostError(err)
-	}
-	if len(file.Data) > MaxDownloadBytes {
-		return HostDownloadFile{}, newError(http.StatusBadGateway, "browser_download_failed", "下载文件超过大小上限")
 	}
 	if _, _, err := s.authorize(ctx, grantID, domain.BrowserCapabilityFiles, ""); err != nil {
 		return HostDownloadFile{}, err

@@ -270,7 +270,9 @@ func (s *Server) createTaskBrowserGrant(writer http.ResponseWriter, request *htt
 		writeErrorDetail(writer, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
-	ttl := browser.DefaultGrantTTL
+	// The Owner switch grants continuous control. expires_in_seconds is still
+	// accepted from older callers, but omitting it means no expiry.
+	ttl := time.Duration(0)
 	if payload.ExpiresInSecs < 0 {
 		writeErrorDetail(writer, http.StatusBadRequest, "browser_grant_invalid", "授权有效期不能为负数")
 		return
@@ -407,7 +409,9 @@ func (s *Server) transferBrowserProfile(writer http.ResponseWriter, request *htt
 		writeErrorDetail(writer, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
-	ttl := browser.DefaultGrantTTL
+	// The Owner switch grants continuous control. expires_in_seconds is still
+	// accepted from older callers, but omitting it means no expiry.
+	ttl := time.Duration(0)
 	if payload.ExpiresInSecs < 0 {
 		writeErrorDetail(writer, http.StatusBadRequest, "browser_grant_invalid", "授权有效期不能为负数")
 		return

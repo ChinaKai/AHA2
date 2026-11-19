@@ -661,9 +661,9 @@ export function createHostServer(options) {
             "该 Profile 的用户数据目录已被另一个浏览器进程占用").body);
         }
         const sessionID = `host-session-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-        // Chromium writes raw download artifacts here (allowAndName). Keeping
-        // it inside the per-session controlled directory lets the store watch
-        // real on-disk growth while a download is still in progress.
+        // Chromium writes raw download artifacts here (allowAndName). The
+        // store copies each artifact into the controlled directory and removes
+        // the raw copy; it never enforces a size or count quota.
         const rawDownloads = join(root, ".downloads", profileID, sessionID, "raw");
         try {
           await fs.mkdir(rawDownloads, {recursive: true, mode: 0o700});

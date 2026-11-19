@@ -168,12 +168,12 @@ function statusText(state: PanelState, session: BrowserSession | null): string {
   if (state.grant) {
     const reachable = session?.host_reachable === false ? " · 宿主不可达" : "";
     const error = session?.error ? `：${session.error}` : "";
-    return `当前 Task 独占控制中 · 会话 ${stateLabel(session?.state || "ready")}${reachable}${error}`;
+    return `浏览器共享已开启 · 会话 ${stateLabel(session?.state || "ready")}${reachable}${error}`;
   }
   if (state.inUseProfileID && state.inUseProfileID === state.profileID) {
-    return "该 Profile 正由其他 Task 独占控制；请等它释放，或由 Owner 在本面板转移控制权。";
+    return "该浏览器正由其他 Task 使用；请在对应 Task 关闭共享后再开启。";
   }
-  return "选择 Profile 后点「获取独占控制」；获取成功后 Agent 可操作这个浏览器的全部页面。";
+  return "选择 Profile 后打开共享开关；开启后当前 Task 可操作这个浏览器的全部页面。";
 }
 
 function statusTone(state: PanelState, session: BrowserSession | null): "ok" | "warning" | "error" | "muted" {
@@ -420,7 +420,7 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
   const invalidateStateSync = (): void => { stateSyncEpoch++; };
 
   const frameStatusText = (): string => {
-    if (!state.grant) return "先选择 Profile 并获取独占控制，之后可查看并操作全部页面";
+    if (!state.grant) return "先选择 Profile 并打开共享开关，之后可查看并操作全部页面";
     if (state.binding) return "正在处理浏览器操作…";
     if (state.host && !state.host.available) return "浏览器宿主不可用，无法获取画面";
     if (state.frameError) return `画面暂不可用：${state.frameError}`;
@@ -434,10 +434,10 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
   // the exclusive-control state (left) and the read-only frame state (right).
   const controlStatusText = (session: BrowserSession | null): string => {
     if (state.error) return state.error;
-    if (!state.grant) return "尚未获取独占控制";
-    if (session?.error) return `当前 Task 独占控制中 · ${session.error}`;
-    if (session?.host_reachable === false) return "当前 Task 独占控制中 · 宿主不可达";
-    return "当前 Task 独占控制中";
+    if (!state.grant) return "尚未开启浏览器共享";
+    if (session?.error) return `浏览器共享中 · ${session.error}`;
+    if (session?.host_reachable === false) return "浏览器共享中 · 宿主不可达";
+    return "浏览器共享中";
   };
 
   const paintFrameStatus = (): void => {
@@ -493,11 +493,8 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     node.querySelector("#desktop-browser-attach")?.addEventListener("click", () => {
       if (!state.loading) void attach();
     });
-    node.querySelector("#desktop-browser-switch")?.addEventListener("click", () => {
-      if (!state.loading) void switchTarget();
-    });
-    node.querySelector("#desktop-browser-transfer")?.addEventListener("click", () => {
-      if (!state.binding) void transferControl();
+    node.querySelector("#desktop-browser-release")?.addEventListener("click", () => {
+      if (!state.binding) void releaseControl();
     });
   };
 
@@ -585,20 +582,17 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     const busy = state.loading || state.binding;
     const noProfiles = !state.profiles.length;
     const hostDown = Boolean(state.host && !state.host.available);
-    const canTransfer = !state.grant && Boolean(state.inUseProfileID) && state.inUseProfileID === state.profileID;
-    let primary = "";
-    if (state.grant) {
-      primary = `<button type="button" id="desktop-browser-switch" class="primary desktop-browser-control" ${busy ? "disabled" : ""}>切换到所选目标</button>`;
-    } else if (canTransfer) {
-      primary = `<button type="button" id="desktop-browser-transfer" class="primary desktop-browser-control" ${busy ? "disabled" : ""}>转移控制权</button>`;
-    } else {
-      primary = `<button type="button" id="desktop-browser-attach" class="primary desktop-browser-control" ${busy || noProfiles || hostDown ? "disabled" : ""}>${icon("link")}<span>获取独占控制</span></button>`;
-    }
+    const heldByOther = !state.grant && Boolean(state.inUseProfileID) && state.inUseProfileID === state.profileID;
+    // One Owner-facing switch. On creates the continuous grant; off releases
+    // it. There is no expiry, renewal or transfer control to show.
+    const primary = state.grant
+      ? `<button type="button" id="desktop-browser-release" class="primary desktop-browser-control" ${busy ? "disabled" : ""}>关闭共享浏览器</button>`
+      : `<button type="button" id="desktop-browser-attach" class="primary desktop-browser-control" ${busy || noProfiles || hostDown || heldByOther ? "disabled" : ""}>${icon("link")}<span>共享浏览器</span></button>`;
     // This popover is only a target picker. No preview, tab strip, address bar
     // or bookmark bar may be rendered here.
     return `
       <div class="desktop-browser-toolbar" role="group" aria-label="内置浏览器控制">
-        <label class="desktop-window-label desktop-browser-profile-label"><span>Profile</span><select id="desktop-browser-profile" aria-label="浏览器 Profile">${profileOptions(state.profiles, state.profileID)}</select></label>
+        <label class="desktop-window-label desktop-browser-profile-label"><span>Profile</span><select id="desktop-browser-profile" aria-label="浏览器 Profile" ${state.grant ? "disabled" : ""}>${profileOptions(state.profiles, state.profileID)}</select></label>
         <button type="button" id="desktop-browser-refresh" class="icon-button" title="刷新浏览器状态" aria-label="刷新浏览器状态" ${busy ? "disabled" : ""}>${icon("refresh")}</button>
         ${primary}
       </div>
@@ -614,11 +608,11 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
       }
       const noProfiles = !state.profiles.length;
       const hostDown = Boolean(state.host && !state.host.available);
-      const title = noProfiles ? "创建一个浏览器 Profile" : hostDown ? "重新连接浏览器宿主" : "还没有获取浏览器控制";
+      const title = noProfiles ? "创建一个浏览器 Profile" : hostDown ? "重新连接浏览器宿主" : "还没有开启浏览器共享";
       const hint = noProfiles
-        ? "创建后即可选择 Profile、获取独占控制并查看实时画面。"
+        ? "创建后即可选择 Profile、开启共享并查看实时画面。"
         : hostDown ? "确认 AHA2 的浏览器宿主进程正在运行，然后重新检测。"
-          : "在「共享目标」里选择 Profile 并获取独占控制，之后这里会显示标签页、地址栏、收藏夹和实时画面。";
+          : "在「共享目标」里选择 Profile 并打开共享开关，之后这里会显示标签页、地址栏、收藏夹和实时画面。";
       const action = noProfiles
         ? `<a class="desktop-browser-cta" href="#resources?tab=browser">前往资源页创建 Profile</a>`
         : hostDown
@@ -1250,68 +1244,7 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
       state.bookmarksMenu = "";
       state.startPageGrantID = "";
       await load();
-      notify("notice", "已释放独占控制；浏览器页面保持打开，其他 Task 可以接手");
-    } catch (error) {
-      const details = errorDetails(error);
-      state.error = details.message;
-      notify("error", details.message);
-    } finally {
-      state.binding = false;
-    }
-    paint();
-    startStream();
-  };
-
-  const transferControl = async (): Promise<void> => {
-    if (!state.inUseProfileID) return;
-    state.binding = true;
-    state.error = "";
-    paint();
-    try {
-      await api.transferBrowserProfile(state.inUseProfileID, taskID);
-      state.inUseProfileID = "";
-      await load();
-      notify("notice", "Owner 已把该 Profile 的独占控制转移给当前 Task");
-      onGranted?.();
-    } catch (error) {
-      const details = errorDetails(error);
-      state.error = details.message;
-      notify("error", details.message);
-    } finally {
-      state.binding = false;
-    }
-    paint();
-    startStream();
-  };
-
-  // Same profile: just go back to the main controls. A different profile has to
-  // release the old lease first because the API allows one browser profile per
-  // Task; this is a UI sequence over the existing grant endpoints.
-  const switchTarget = async (): Promise<void> => {
-    if (!state.grant) return;
-    if (state.profileID === state.grant.profile_id) {
-      onGranted?.();
-      return;
-    }
-    if (!state.profileID) {
-      state.error = "请先选择浏览器 Profile";
-      paint();
-      return;
-    }
-    const previousGrant = state.grant;
-    invalidateStateSync();
-    state.binding = true;
-    state.error = "";
-    paint();
-    try {
-      await api.releaseTaskBrowserGrant(previousGrant.id);
-      if (state.grant?.id === previousGrant.id) state.grant = null;
-      state.tabs = [];
-      state.bookmarks = [];
-      state.bookmarksLoaded = false;
-      state.bookmarksMenu = "";
-      state.startPageGrantID = "";
-      await attach();
+      notify("notice", "已关闭浏览器共享；页面保持打开，其他 Task 可以接手");
     } catch (error) {
       const details = errorDetails(error);
       state.error = details.message;
@@ -1414,7 +1347,6 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
         // New grants carry the Owner-approved full interaction scope. Existing
         // grants keep their stored capability array until the Owner re-grants.
         capabilities: ["open_tab", "navigate", "snapshot", "interact", "files", "cookies"],
-        expires_in_seconds: 1800,
       });
       state.inUseProfileID = "";
       state.grant = result.grant;
@@ -1422,17 +1354,17 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
       state.startPageGrantID = "";
       await load();
       notify("notice", result.session
-        ? `已获取独占控制（会话 ${stateLabel(result.session.state)}）`
-        : "已获取该 Profile 的独占控制");
+        ? `已开启浏览器共享（会话 ${stateLabel(result.session.state)}）`
+        : "已开启该 Profile 的浏览器共享");
       onGranted?.();
     } catch (error) {
       const details = errorDetails(error);
       state.error = details.message;
       if (details.code === "browser_profile_in_use") {
         state.inUseProfileID = state.profileID;
-        notify("notice", "该 Profile 正由其他 Task 独占控制；等它释放，或由 Owner 在这里转移控制权。");
+        notify("notice", "该浏览器正由其他 Task 使用；请先在对应 Task 关闭共享。");
       } else if (details.code === "browser_task_profile_limit") {
-        notify("notice", "当前 Task 已独占另一个 Profile；请先释放它，再获取新的 Profile。");
+        notify("notice", "当前 Task 正在共享另一个浏览器 Profile；请先关闭该共享。");
       } else {
         notify("error", details.message);
       }

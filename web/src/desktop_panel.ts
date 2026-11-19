@@ -740,10 +740,10 @@ function updateDOM(binding: Binding): void {
   root.querySelector<HTMLElement>("#desktop-empty-target")!.hidden = Boolean(session) || state.browserMode;
   root.querySelector<HTMLButtonElement>("#desktop-refresh")!.disabled = Boolean(state.busy);
   // Revocation remains available even while a native operation is pending.
-  // In browser mode the same header button releases the browser lease, so the
-  // tooltip follows the mode instead of always saying "停止共享".
+  // In browser mode the same header button closes the browser sharing switch,
+  // so the tooltip follows the mode instead of always saying "停止共享".
   const stopButton = root.querySelector<HTMLButtonElement>("#desktop-stop")!;
-  const stopLabel = state.browserMode ? "释放独占控制" : "停止共享";
+  const stopLabel = state.browserMode ? "关闭共享浏览器" : "停止共享";
   stopButton.disabled = state.browserMode
     ? !browserGranted
     : !session || state.denied || state.busy === "正在停止共享...";
@@ -2341,7 +2341,7 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
   listen(binding, root.querySelector("#desktop-share"), "click", () => shareTarget(binding));
   listen(binding, root.querySelector("#desktop-new-desktop"), "click", () => shareTarget(binding, true));
   listen(binding, root.querySelector("#desktop-stop"), "click", () => {
-    // In browser mode the header stop releases the exclusive browser lease,
+    // In browser mode the header stop closes the browser sharing switch,
     // mirroring the shared-desktop stop button.
     if (state.browserMode && binding.browserHandle?.release()) {
       setPopover(binding, "");

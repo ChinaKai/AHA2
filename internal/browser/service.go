@@ -671,10 +671,13 @@ func (s *Service) CreateGrant(ctx context.Context, actor, taskID, profileID stri
 	if err != nil {
 		return GrantView{}, err
 	}
-	if ttl <= 0 {
-		ttl = DefaultGrantTTL
+	// The Owner switch grants continuous control: ttl == 0 means no expiry.
+	// An explicit positive ttl is still honored for older API callers, but the
+	// Owner UI never sends one.
+	if ttl < 0 {
+		return GrantView{}, badRequest("browser_grant_invalid", "授权有效期不能为负数")
 	}
-	if ttl < MinGrantTTL || ttl > MaxGrantTTL {
+	if ttl > 0 && (ttl < MinGrantTTL || ttl > MaxGrantTTL) {
 		return GrantView{}, badRequest("browser_grant_invalid",
 			"授权有效期必须在 1 分钟到 24 小时之间")
 	}
@@ -732,7 +735,10 @@ func (s *Service) CreateGrant(ctx context.Context, actor, taskID, profileID stri
 			if hostErr != nil {
 				return GrantView{}, sanitizeHostError(hostErr)
 			}
-			expiresAt := now.Add(ttl)
+			expiresAt := time.Time{}
+			if ttl > 0 {
+				expiresAt = now.Add(ttl)
+			}
 			// Fence identity is the lease ID; the refreshed expiry is not part
 			// of it, so a later operation hold cannot make concurrent requests
 			// look like a new holder.
@@ -746,32 +752,36 @@ func (s *Service) CreateGrant(ctx context.Context, actor, taskID, profileID stri
 			if refreshErr != nil {
 				_ = s.host.SetFence(ctx, profile.ID, session.HostSessionID, holderFence, hostSession.Fence)
 				if errors.Is(refreshErr, sql.ErrNoRows) {
-					return GrantView{}, conflict("browser_profile_in_use", "独占控制已变化，请刷新后重试")
+					return GrantView{}, conflict("browser_profile_in_use", "共享状态已变化，请刷新后重试")
 				}
 				return GrantView{}, refreshErr
 			}
 			return s.grantView(ctx, refreshed), nil
 		}
 		return GrantView{}, conflict("browser_profile_in_use",
-			"该 Profile 正由其他 Task 独占控制；请先让原 Task 释放，或由 Owner 显式转移控制权")
+			"该浏览器正由其他 Task 使用；请先在对应 Task 关闭共享")
 	}
 	taskGrants, err := s.store.BrowserTaskGrants(ctx, taskID)
 	if err != nil {
 		return GrantView{}, err
 	}
 	for _, existing := range taskGrants {
-		if existing.RevokedAt.IsZero() && existing.ExpiresAt.After(now) && existing.ProfileID != profile.ID {
+		if existing.Active(now) && existing.ProfileID != profile.ID {
 			return GrantView{}, conflict("browser_task_profile_limit",
-				"当前 Task 已独占另一个 Profile；请先释放该 Profile，再获取新的 Profile")
+				"当前 Task 正在共享另一个浏览器 Profile；请先关闭该共享，再共享新的 Profile")
 		}
 	}
 	hostSession, err := s.host.Session(ctx, profile.ID)
 	if err != nil {
 		return GrantView{}, sanitizeHostError(err)
 	}
+	grantExpiry := time.Time{}
+	if ttl > 0 {
+		grantExpiry = now.Add(ttl)
+	}
 	grant := domain.BrowserTaskGrant{
 		ID: domain.NewID("browser_grant"), TaskID: taskID, ProfileID: profile.ID,
-		SessionID: session.ID, Capabilities: caps, ExpiresAt: now.Add(ttl),
+		SessionID: session.ID, Capabilities: caps, ExpiresAt: grantExpiry,
 		CreatedAt: now, UpdatedAt: now,
 	}
 	if err := s.host.SetFence(ctx, profile.ID, session.HostSessionID, hostSession.Fence, s.fenceToken(grant)); err != nil {
@@ -811,7 +821,7 @@ func (s *Service) fenceError(ctx context.Context, err error) error {
 	case "browser_fence_stale":
 		return conflict("browser_profile_in_use", "浏览器控制权已变化，请刷新后重试")
 	case "browser_fence_expired":
-		return conflict("browser_fence_expired", "浏览器独占控制已过期，请重新获取")
+		return conflict("browser_fence_expired", "浏览器共享授权已失效，请重新打开共享")
 	case "browser_fence_timeout":
 		return conflict("browser_fence_timeout", "无法隔离在途浏览器操作，旧控制仍保留，请稍后重试")
 	case "browser_operation_busy":
@@ -824,12 +834,12 @@ func (s *Service) acquireError(ctx context.Context, err error) error {
 	var inUse *store.BrowserProfileInUseError
 	if errors.As(err, &inUse) {
 		return conflict("browser_profile_in_use",
-			"该 Profile 正由其他 Task 独占控制；请先让原 Task 释放，或由 Owner 显式转移控制权")
+			"该浏览器正由其他 Task 使用；请先在对应 Task 关闭共享")
 	}
 	var limit *store.BrowserTaskProfileLimitError
 	if errors.As(err, &limit) {
 		return conflict("browser_task_profile_limit",
-			"当前 Task 已独占另一个 Profile；请先释放该 Profile，再获取新的 Profile")
+			"当前 Task 正在共享另一个浏览器 Profile；请先关闭该共享，再共享新的 Profile")
 	}
 	if isUniqueConstraintError(err) {
 		return conflict("browser_profile_in_use", "浏览器控制权已变化，请刷新后重试")
@@ -857,10 +867,10 @@ func (s *Service) TransferProfileControl(ctx context.Context, actor, profileID, 
 	if err != nil {
 		return GrantView{}, err
 	}
-	if ttl <= 0 {
-		ttl = DefaultGrantTTL
+	if ttl < 0 {
+		return GrantView{}, badRequest("browser_grant_invalid", "授权有效期不能为负数")
 	}
-	if ttl < MinGrantTTL || ttl > MaxGrantTTL {
+	if ttl > 0 && (ttl < MinGrantTTL || ttl > MaxGrantTTL) {
 		return GrantView{}, badRequest("browser_grant_invalid", "授权有效期必须在 1 分钟到 24 小时之间")
 	}
 	profile, err := s.store.BrowserProfile(ctx, profileID)
@@ -895,9 +905,13 @@ func (s *Service) TransferProfileControl(ctx context.Context, actor, profileID, 
 	if len(active) > 0 && active[0].TaskID == targetTaskID {
 		return s.grantView(ctx, active[0]), nil
 	}
+	transferExpiry := time.Time{}
+	if ttl > 0 {
+		transferExpiry = now.Add(ttl)
+	}
 	newGrant := domain.BrowserTaskGrant{
 		ID: domain.NewID("browser_grant"), TaskID: targetTaskID, ProfileID: profile.ID,
-		SessionID: session.ID, Capabilities: caps, ExpiresAt: now.Add(ttl),
+		SessionID: session.ID, Capabilities: caps, ExpiresAt: transferExpiry,
 		CreatedAt: now, UpdatedAt: now,
 	}
 	hostSession, err := s.host.Session(ctx, profile.ID)
@@ -935,7 +949,7 @@ func (s *Service) TransferProfileControl(ctx context.Context, actor, profileID, 
 	if err != nil {
 		_ = s.host.SetFence(ctx, profile.ID, session.HostSessionID, newFence, hostSession.Fence)
 		if errors.Is(err, store.ErrBrowserAccessInactive) {
-			return GrantView{}, conflict("browser_profile_in_use", "独占控制已变化，请刷新后重试")
+			return GrantView{}, conflict("browser_profile_in_use", "共享状态已变化，请刷新后重试")
 		}
 		return GrantView{}, s.acquireError(ctx, err)
 	}
@@ -1168,7 +1182,7 @@ func (s *Service) authorize(ctx context.Context, grantID, capability, tabID stri
 	holdsLease := len(holders) == 1 && holders[0].ID == grant.ID
 	if !holdsLease {
 		return domain.BrowserTaskGrant{}, nil, conflict("browser_profile_in_use",
-			"该 Profile 已由其他 Task 独占控制")
+			"该浏览器正由其他 Task 使用")
 	}
 	if s.host == nil {
 		return domain.BrowserTaskGrant{}, nil, newError(http.StatusServiceUnavailable,
@@ -1237,6 +1251,11 @@ const operationHoldBudget = 5 * time.Minute
 func (s *Service) withOperationHold(ctx context.Context, grant domain.BrowserTaskGrant, fn func(expiresAt time.Time) error) (err error) {
 	now := s.now()
 	holdUntil := now.Add(operationHoldBudget)
+	// A grant with no expiry (the Owner switch) needs no persisted hold: the
+	// operation fence only needs a bounded deadline for the in-flight call.
+	if grant.ExpiresAt.IsZero() {
+		return fn(holdUntil)
+	}
 	s.holdMu.Lock()
 	if held := s.holds[grant.ID]; held != nil {
 		// The in-memory entry is only a cache of one persisted hold
@@ -1258,7 +1277,7 @@ func (s *Service) withOperationHold(ctx context.Context, grant domain.BrowserTas
 		if readErr != nil {
 			s.holdMu.Unlock()
 			s.holdFailureAudit(context.WithoutCancel(ctx), grant.ID, "hold_read_failed")
-			return conflict("browser_lease_hold_failed", "浏览器授权正在变化，操作未开始，请重试")
+			return conflict("browser_lease_hold_failed", "浏览器共享状态正在变化，操作未开始，请重试")
 		}
 		// Detach only this generation. Older holders keep their own pointer
 		// and release it by hold_id; they must not delete a newer cache entry.
@@ -1280,7 +1299,7 @@ func (s *Service) withOperationHold(ctx context.Context, grant domain.BrowserTas
 		s.holdMu.Unlock()
 		if testErr != nil {
 			s.holdFailureAudit(context.WithoutCancel(ctx), grant.ID, "renewal_failed")
-			return conflict("browser_lease_hold_failed", "浏览器授权正在变化，操作未开始，请重试")
+			return conflict("browser_lease_hold_failed", "浏览器共享状态正在变化，操作未开始，请重试")
 		}
 	}
 	holdID := domain.NewID("browser_hold")
@@ -1288,7 +1307,7 @@ func (s *Service) withOperationHold(ctx context.Context, grant domain.BrowserTas
 	if beginErr != nil {
 		s.holdMu.Unlock()
 		s.holdFailureAudit(context.WithoutCancel(ctx), grant.ID, "renewal_failed")
-		return conflict("browser_lease_hold_failed", "浏览器授权正在变化，操作未开始，请重试")
+		return conflict("browser_lease_hold_failed", "浏览器共享状态正在变化，操作未开始，请重试")
 	}
 	held := &operationHold{id: holdID, expiresAt: holdUntil, refs: 1}
 	s.holds[grant.ID] = held
