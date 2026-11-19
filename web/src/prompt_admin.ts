@@ -109,6 +109,7 @@ const state: PromptAdminView = {
 };
 
 let previewRequestID = 0;
+let switchIntent = 0;
 
 // Explicit edit-session state. A save response may only finish the session it
 // started; a template switch, cancel, or further typing advances the generation
@@ -359,13 +360,18 @@ interface PromptSaveResult {
   current: boolean;
 }
 
-async function saveCurrent(notify: (kind: "notice" | "error", message: string) => void): Promise<PromptSaveResult> {
+async function saveCurrent(
+  notify: (kind: "notice" | "error", message: string) => void,
+  guard?: () => boolean,
+): Promise<PromptSaveResult> {
   const token = beginPromptSave(state);
   const content = document.querySelector<HTMLTextAreaElement>("[data-prompt-template-content]")?.value ?? state.editContent;
   try {
     await api.updatePromptTemplate(token.templateID, content);
     await loadPromptCatalog();
-    const current = finishPromptSave(state, token);
+    // A switch intent may have been cancelled while the PUT was in flight. The
+    // save may still have persisted, but it must not end the current editor.
+    const current = (guard?.() ?? true) && finishPromptSave(state, token);
     notify("notice", "提示词模板已保存");
     return {ok: true, current};
   } catch (error) {
@@ -384,6 +390,7 @@ export function bindPromptAdmin(
     if (state.editing) {
       // Never drop edits silently: offer save / discard / cancel.
       blurEditor();
+      switchIntent += 1;
       state.switchTargetID = id;
       render();
       return;
@@ -429,24 +436,32 @@ export function bindPromptAdmin(
 
   document.querySelector("#reset-prompt-template")?.addEventListener("click", async () => {
     if (!window.confirm("恢复该模板的内置内容？")) return;
+    const token = beginPromptSave(state);
     try {
-      await api.resetPromptTemplate(state.selectedTemplateID);
-      blurEditor();
-      markEditorPristine();
-      cancelPromptEdit(state);
+      await api.resetPromptTemplate(token.templateID);
       await loadPromptCatalog();
+      const current = finishPromptSave(state, token);
       notify("notice", "已恢复内置模板");
+      if (current) {
+        blurEditor();
+        markEditorPristine();
+        render();
+      } else if (!state.editing) {
+        render();
+      }
     } catch (error) {
       notify("error", error instanceof Error ? error.message : String(error));
+      if (!state.editing) render();
     }
-    render();
   });
 
   document.querySelector("[data-prompt-switch-save]")?.addEventListener("click", async () => {
     const target = state.switchTargetID;
     if (!target) return;
-    const result = await saveCurrent(notify);
+    const intent = switchIntent;
+    const result = await saveCurrent(notify, () => switchIntent === intent && state.switchTargetID === target);
     if (!result.ok || !result.current) return;
+    switchIntent += 1;
     blurEditor();
     state.switchTargetID = "";
     document.querySelector<HTMLDialogElement>("[data-prompt-switch-dialog]")?.close();
@@ -457,6 +472,7 @@ export function bindPromptAdmin(
     const target = state.switchTargetID;
     if (!target) return;
     blurEditor();
+    switchIntent += 1;
     state.switchTargetID = "";
     document.querySelector<HTMLDialogElement>("[data-prompt-switch-dialog]")?.close();
     cancelPromptEdit(state);
@@ -465,6 +481,7 @@ export function bindPromptAdmin(
   });
   document.querySelector("[data-prompt-switch-cancel]")?.addEventListener("click", () => {
     blurEditor();
+    switchIntent += 1;
     state.switchTargetID = "";
     document.querySelector<HTMLDialogElement>("[data-prompt-switch-dialog]")?.close();
     render();
@@ -479,6 +496,7 @@ export function bindPromptAdmin(
       // Esc/backdrop close without choosing: treat it as cancel switch.
       if (!state.switchTargetID) return;
       blurEditor();
+      switchIntent += 1;
       state.switchTargetID = "";
       render();
     });
