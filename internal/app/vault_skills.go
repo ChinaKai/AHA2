@@ -581,88 +581,133 @@ func (s *Service) warnVaultTaskSkillsOnce(projectID string, ids []string, messag
 	log.Printf("knowledge vault task skills for project %s: %s", projectID, message)
 }
 
-// vaultSkillExistsForPet validates one selected vault id for the Pet Task. The
-// pet is the owner's system administrator, so global skills and every project's
-// enabled/active skill are valid even though project_pet itself owns no vault
-// space. Archives stay read-only, and an unknown or disabled package is
-// rejected instead of being silently dropped from the selection.
-func (s *Service) vaultSkillExistsForPet(ctx context.Context, id string) bool {
-	if s == nil || s.knowledgeVault == nil || !s.vaultGlobalReadEnabled() {
+// vaultSkillReadEnabled reports whether one vault package may be read right
+// now. Global packages use the global read gate; project packages must also
+// pass their own project's read gate, so disabling project reads cannot be
+// bypassed through the pet Task's administrator view.
+func (s *Service) vaultSkillReadEnabled(skill knowledgevault.SkillPackage) bool {
+	switch strings.TrimSpace(skill.Scope) {
+	case "global":
+		return s.vaultGlobalReadEnabled()
+	case "project":
+		return s.vaultReadEnabled(skill.ProjectID)
+	default:
 		return false
 	}
-	found := false
+}
+
+// vaultSkillExistsForPet validates one selected vault id for the Pet Task. The
+// pet is the owner's system administrator, so global skills and project skills
+// from any project are selectable. Each package still has to pass its own read
+// gate: a project whose vault read is disabled stays unavailable. Archives stay
+// read-only, and an unknown or disabled package is rejected instead of being
+// silently dropped from the selection.
+func (s *Service) vaultSkillExistsForPet(ctx context.Context, id string) bool {
+	if s == nil || s.knowledgeVault == nil {
+		return false
+	}
+	var skills []knowledgevault.SkillPackage
 	_ = s.knowledgeVault.WithReader(func(reader *knowledgevault.Reader) error {
 		response, err := reader.Skills(ctx)
 		if err != nil {
 			return err
 		}
-		for _, skill := range response.Skills {
-			if skill.Key != id {
-				continue
-			}
-			if skill.Enabled && skill.Status == "active" && (skill.Scope == "global" || skill.Scope == "project") {
-				found = true
-			}
-			break
-		}
+		skills = response.Skills
 		return nil
 	})
-	return found
+	for _, skill := range skills {
+		if skill.Key != id {
+			continue
+		}
+		if !skill.Enabled || skill.Status != "active" {
+			return false
+		}
+		if skill.Scope != "global" && skill.Scope != "project" {
+			return false
+		}
+		// The gate lookup opens the reader itself, so it must run outside the
+		// WithReader callback above.
+		return s.vaultSkillReadEnabled(skill)
+	}
+	return false
 }
 
 // vaultPetTaskSkills loads the Pet Task's explicit selection. Unlike a normal
 // infrastructure Task it may reference another project's package, because the
 // owner gave the pet the system administrator view. Only enabled/active global
-// and project packages load; unavailable selections are reported once per
-// selection instead of on every Turn.
+// and project packages that pass their own read gate load; unavailable
+// selections are reported once per selection instead of on every Turn.
 func (s *Service) vaultPetTaskSkills(ctx context.Context, ids []string) []domain.Skill {
 	if len(ids) == 0 {
 		return nil
 	}
-	if !s.vaultGlobalReadEnabled() {
-		s.warnVaultTaskSkillsOnce(petProjectID, ids, fmt.Sprintf("%d selected skill(s) unavailable because the vault runtime read is unavailable; task continues with the remaining skills", len(ids)))
+	if s == nil || s.knowledgeVault == nil {
+		s.warnVaultTaskSkillsOnce(petProjectID, ids, fmt.Sprintf("%d selected skill(s) unavailable because the knowledge vault is not configured; task continues with the remaining skills", len(ids)))
 		return nil
 	}
 	wanted := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		wanted[id] = true
 	}
-	result := make([]domain.Skill, 0, len(ids))
-	seen := make(map[string]bool, len(ids))
+	available := make([]knowledgevault.SkillPackage, 0, len(ids))
+	seenCatalog := make(map[string]bool, len(ids))
 	_ = s.knowledgeVault.WithReader(func(reader *knowledgevault.Reader) error {
 		response, err := reader.Skills(ctx)
 		if err != nil {
 			return err
 		}
 		for _, skill := range response.Skills {
-			if !wanted[skill.Key] || seen[skill.Key] || !skill.Enabled || skill.Status != "active" {
+			if !wanted[skill.Key] || seenCatalog[skill.Key] || !skill.Enabled || skill.Status != "active" {
 				continue
 			}
 			if skill.Scope != "global" && skill.Scope != "project" {
 				continue
 			}
-			files, err := reader.SkillFiles(skill.RelativePath)
-			if err != nil {
-				log.Printf("knowledge vault pet task skill %s package at %s is unreadable; skipped: %v", skill.Key, skill.RelativePath, err)
-				continue
-			}
-			packageFiles := make([]domain.SkillFile, 0, len(files))
-			names := make([]string, 0, len(files))
-			for _, file := range files {
-				packageFiles = append(packageFiles, domain.SkillFile{Path: file.Path, Content: file.Content})
-				names = append(names, file.Path)
-			}
-			result = append(result, domain.Skill{
-				ID: skill.Key, PackageSlug: skill.Slug, Scope: skill.Scope, ProjectID: skill.ProjectID,
-				Name: skill.Name, Description: skill.Description, Instructions: skill.Instructions,
-				Version: skill.Version, Status: skill.Status, Enabled: skill.Enabled,
-				SourcePath: filepath.Join(reader.Config().VaultPath, filepath.FromSlash(skill.RelativePath)),
-				Files:      names, PackageFiles: packageFiles,
-			})
-			seen[skill.Key] = true
+			available = append(available, skill)
+			seenCatalog[skill.Key] = true
 		}
 		return nil
 	})
+	// Read gates are resolved outside WithReader: vaultReadEnabled opens the
+	// reader itself, and a project whose reads are turned off must not be
+	// reachable through the pet's cross-project selection.
+	eligible := make([]knowledgevault.SkillPackage, 0, len(available))
+	readGated := make([]string, 0)
+	for _, skill := range available {
+		if !s.vaultSkillReadEnabled(skill) {
+			readGated = append(readGated, skill.Key)
+			continue
+		}
+		eligible = append(eligible, skill)
+	}
+	result := make([]domain.Skill, 0, len(eligible))
+	seen := make(map[string]bool, len(eligible))
+	if len(eligible) > 0 {
+		_ = s.knowledgeVault.WithReader(func(reader *knowledgevault.Reader) error {
+			for _, skill := range eligible {
+				files, err := reader.SkillFiles(skill.RelativePath)
+				if err != nil {
+					log.Printf("knowledge vault pet task skill %s package at %s is unreadable; skipped: %v", skill.Key, skill.RelativePath, err)
+					continue
+				}
+				packageFiles := make([]domain.SkillFile, 0, len(files))
+				names := make([]string, 0, len(files))
+				for _, file := range files {
+					packageFiles = append(packageFiles, domain.SkillFile{Path: file.Path, Content: file.Content})
+					names = append(names, file.Path)
+				}
+				result = append(result, domain.Skill{
+					ID: skill.Key, PackageSlug: skill.Slug, Scope: skill.Scope, ProjectID: skill.ProjectID,
+					Name: skill.Name, Description: skill.Description, Instructions: skill.Instructions,
+					Version: skill.Version, Status: skill.Status, Enabled: skill.Enabled,
+					SourcePath: filepath.Join(reader.Config().VaultPath, filepath.FromSlash(skill.RelativePath)),
+					Files:      names, PackageFiles: packageFiles,
+				})
+				seen[skill.Key] = true
+			}
+			return nil
+		})
+	}
 	missing := make([]string, 0)
 	seenMissing := map[string]bool{}
 	for _, id := range ids {
@@ -672,7 +717,12 @@ func (s *Service) vaultPetTaskSkills(ctx context.Context, ids []string) []domain
 		}
 	}
 	if len(missing) > 0 {
-		s.warnVaultTaskSkillsOnce(petProjectID, missing, fmt.Sprintf("%d selected skill(s) cannot load: only enabled global or project vault skills apply (%s); task continues with the remaining skills", len(missing), strings.Join(missing, ", ")))
+		message := fmt.Sprintf("%d selected skill(s) cannot load: only enabled global or project vault skills apply (%s); task continues with the remaining skills", len(missing), strings.Join(missing, ", "))
+		if len(readGated) > 0 {
+			sort.Strings(readGated)
+			message = fmt.Sprintf("%d selected skill(s) cannot load because the project vault read is disabled or not bound (%s); task continues with the remaining skills", len(readGated), strings.Join(readGated, ", "))
+		}
+		s.warnVaultTaskSkillsOnce(petProjectID, missing, message)
 	}
 	return result
 }

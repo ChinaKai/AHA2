@@ -433,6 +433,13 @@ test("download entries do not expire on a timer; only clear removes them", async
     assert.equal(listed.length, 1, "an old download must stay listed");
     assert.equal(listed[0].id, entry.id);
     assert.equal((await store.read(entry.id, "f")).data.toString(), "retained-body");
+    // The HTTP path opens a stream instead of buffering the whole file.
+    const opened = await store.open(entry.id, "f");
+    assert.equal(opened.size, Buffer.byteLength("retained-body"));
+    const chunks = [];
+    for await (const chunk of opened.stream) chunks.push(chunk);
+    assert.equal(Buffer.concat(chunks).toString(), "retained-body");
+    assert.equal(await store.open(entry.id, "wrong-fence"), null);
     await store.clear();
     assert.deepEqual(await store.list("f"), []);
   } finally {

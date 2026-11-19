@@ -357,17 +357,23 @@ func (s *Service) Download(ctx context.Context, actor, grantID, downloadID strin
 		return HostDownloadFile{}, sanitizeHostError(err)
 	}
 	if _, _, err := s.authorize(ctx, grantID, domain.BrowserCapabilityFiles, ""); err != nil {
+		// The host stream is already open; the caller never sees this file, so
+		// close it here instead of leaking the response body.
+		if file.Body != nil {
+			_ = file.Body.Close()
+		}
 		return HostDownloadFile{}, err
 	}
 	filename := safeDownloadFilename(file.Download.Filename)
 	// The HTTP layer uses this value for Content-Disposition; sanitize it here
 	// so a host-side suggested name can never inject a path or header break.
 	file.Download.Filename = filename
-	file.Download.Size = int64(len(file.Data))
+	// Size stays whatever the host reported (Content-Length) or -1 when
+	// unknown; the body is never read here just to measure it.
 	s.touchSession(ctx, session)
 	s.audit(ctx, actor, "browser_download.fetch", "browser_task_grant", grant.ID, map[string]any{
 		"task_id": grant.TaskID, "download_id": downloadID, "filename": filename,
-		"size": len(file.Data), "result": "ok",
+		"size": file.Download.Size, "result": "ok",
 	})
 	return file, nil
 }

@@ -272,11 +272,11 @@ func (s *Server) callAgentBrowserMCPTool(writer http.ResponseWriter, request *ht
 // agentBrowserMCPLease is the non-sensitive lease shape. Profile, session,
 // host, URL and page fields are deliberately absent.
 type agentBrowserMCPLease struct {
-	GrantID      string    `json:"grant_id"`
-	Status       string    `json:"status"`
-	Capabilities []string  `json:"capabilities"`
-	TabCount     int       `json:"tab_count"`
-	ExpiresAt    time.Time `json:"expires_at"`
+	GrantID      string     `json:"grant_id"`
+	Status       string     `json:"status"`
+	Capabilities []string   `json:"capabilities"`
+	TabCount     int        `json:"tab_count"`
+	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
 }
 
 func (s *Server) agentBrowserMCPStatus(ctx context.Context, call app.AgentCallContext) (map[string]any, error) {
@@ -289,10 +289,15 @@ func (s *Server) agentBrowserMCPStatus(ctx context.Context, call app.AgentCallCo
 	}
 	leases := make([]agentBrowserMCPLease, 0, len(state.Grants))
 	for _, grant := range state.Grants {
-		leases = append(leases, agentBrowserMCPLease{
+		lease := agentBrowserMCPLease{
 			GrantID: grant.ID, Status: grant.Status, Capabilities: grant.Capabilities,
-			TabCount: len(grant.Tabs), ExpiresAt: grant.ExpiresAt,
-		})
+			TabCount: len(grant.Tabs),
+		}
+		if !grant.ExpiresAt.IsZero() {
+			expiresAt := grant.ExpiresAt
+			lease.ExpiresAt = &expiresAt
+		}
+		leases = append(leases, lease)
 	}
 	return map[string]any{"leases": leases, "total": len(leases)}, nil
 }

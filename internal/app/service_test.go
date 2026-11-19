@@ -975,15 +975,19 @@ func TestTaskMultiTurnFlow(t *testing.T) {
 	if sharedRoot == "" {
 		t.Fatalf("shared Context snapshot was not materialized: %#v", contextEntries)
 	}
-	selectedSkillEntry := filepath.Join(sharedRoot, "skills", "selected", "SKILL.md")
+	selectedSkillEntry := filepath.Join(sharedRoot, "skills", "global", "selected", "SKILL.md")
 	if data, err := os.ReadFile(selectedSkillEntry); err != nil || !strings.Contains(string(data), "Use selected skill.") {
 		t.Fatalf("selected skill entry was not materialized: %q %v", data, err)
 	}
-	if data, err := os.ReadFile(filepath.Join(sharedRoot, "skills", "selected", "scripts", "check.sh")); err != nil || !strings.Contains(string(data), "selected") {
+	if data, err := os.ReadFile(filepath.Join(sharedRoot, "skills", "global", "selected", "scripts", "check.sh")); err != nil || !strings.Contains(string(data), "selected") {
 		t.Fatalf("selected skill script was not materialized: %q %v", data, err)
 	}
-	if _, err := os.Stat(filepath.Join(sharedRoot, "skills", "other", "SKILL.md")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("unselected skill was materialized: %v", err)
+	if _, err := os.Stat(filepath.Join(sharedRoot, "skills", "global", "other", "SKILL.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unselected skill was materialized as a global package: %v", err)
+	}
+	projectOther, _ := filepath.Glob(filepath.Join(sharedRoot, "skills", "project", "*", "other", "SKILL.md"))
+	if len(projectOther) != 0 {
+		t.Fatalf("unselected skill was materialized as a project package: %#v", projectOther)
 	}
 	if _, err := os.Stat(filepath.Join(sharedRoot, "agent-api.md")); err != nil {
 		t.Fatalf("Agent API guide was not shared: %v", err)

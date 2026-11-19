@@ -214,10 +214,10 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 		}
 		// Native Windows manifest paths use "\"; the skill layout is asserted
 		// in "/" form, so compare on the slash form of the path.
-		if resource.ID == "skill-skill-1" && resource.EntryPoint && strings.Contains(filepath.ToSlash(resource.Path), "skills/review/SKILL.md") {
+		if resource.ID == "skill-skill-1" && resource.EntryPoint && strings.Contains(filepath.ToSlash(resource.Path), "skills/global/review/SKILL.md") {
 			skillDetailFound = true
 		}
-		if strings.Contains(filepath.ToSlash(resource.Path), "skills/review/scripts/check.sh") && !resource.EntryPoint && strings.Contains(resource.Content, "reviewed") {
+		if strings.Contains(filepath.ToSlash(resource.Path), "skills/global/review/scripts/check.sh") && !resource.EntryPoint && strings.Contains(resource.Content, "reviewed") {
 			skillScriptFound = true
 		}
 		if resource.ID == "manifest" {
@@ -1084,5 +1084,71 @@ func TestKnowledgeGuideIsMaterializedAheadOfScopeResources(t *testing.T) {
 	}
 	if resources[0].Content != input.KnowledgeGuide || !resources[0].EntryPoint {
 		t.Fatalf("guide content was not preserved: %#v", resources[0])
+	}
+}
+
+// A global and a project package may share the same slug. Both must survive in
+// separate scope-first directories, and a duplicate inside one scope gets a
+// deterministic suffix instead of overwriting the earlier package.
+func TestBuildKeepsSameSlugSkillsIsolatedByScope(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	engine := NewEngine(database)
+	skillFile := func(body string) []domain.SkillFile {
+		return []domain.SkillFile{{Path: "SKILL.md", Content: "---\nname: demo\ndescription: demo\n---\n\n" + body}}
+	}
+	result, err := engine.Build(ctx, BuildInput{
+		Project:   domain.Project{Name: "Project"},
+		Workspace: domain.Workspace{Name: "Workspace", RootPath: "/repo", Transport: "native"},
+		Task: domain.Task{
+			ID: "task-skill-scope", Code: "task-skill-scope", Title: "Skills",
+			TaskWorkspacePath: "/repo", CollaborationMode: "single", MaxAgents: 1,
+		},
+		Agent:    domain.TaskAgent{AgentID: "main", Role: "main"},
+		Snapshot: domain.RuntimeConfigSnapshot{Backend: "codex"},
+		Skills: []domain.Skill{
+			{ID: "skill-global-demo", PackageSlug: "demo", Scope: "global", Name: "Global Demo", Version: 1, Enabled: true, PackageFiles: skillFile("GLOBAL BODY")},
+			{ID: "skill-project-demo", PackageSlug: "demo", Scope: "project", ProjectID: "project-1", Name: "Project Demo", Version: 1, Enabled: true, PackageFiles: skillFile("PROJECT BODY")},
+			{ID: "skill-project-demo-dup", PackageSlug: "demo", Scope: "project", ProjectID: "project-1", Name: "Project Demo Two", Version: 1, Enabled: true, PackageFiles: skillFile("SECOND PROJECT BODY")},
+		},
+		UserMessage: "skills",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]ContextResource{}
+	for _, item := range append(append([]ContextResource(nil), result.ContextManifest...), result.SharedManifest...) {
+		byID[item.ID] = item
+	}
+	for id, want := range map[string]struct{ path, body string }{
+		"skill-skill-global-demo":      {"skills/global/demo/SKILL.md", "GLOBAL BODY"},
+		"skill-skill-project-demo":     {"skills/project/project-1/demo/SKILL.md", "PROJECT BODY"},
+		"skill-skill-project-demo-dup": {"skills/project/project-1/demo-2/SKILL.md", "SECOND PROJECT BODY"},
+	} {
+		item, ok := byID[id]
+		if !ok {
+			t.Fatalf("missing skill resource %s: %#v", id, result.ContextManifest)
+		}
+		if !strings.Contains(filepath.ToSlash(item.Path), want.path) {
+			t.Fatalf("%s path=%q, want suffix %q", id, item.Path, want.path)
+		}
+		if !strings.Contains(item.Content, want.body) {
+			t.Fatalf("%s content=%q, want %q", id, item.Content, want.body)
+		}
+	}
+	manifestPaths := map[string]bool{}
+	for _, id := range []string{"skill-skill-global-demo-manifest", "skill-skill-project-demo-manifest", "skill-skill-project-demo-dup-manifest"} {
+		item, ok := byID[id]
+		if !ok {
+			t.Fatalf("missing manifest resource %s", id)
+		}
+		manifestPaths[item.Path] = true
+	}
+	if len(manifestPaths) != 3 {
+		t.Fatalf("skill manifests share a path: %#v", manifestPaths)
 	}
 }

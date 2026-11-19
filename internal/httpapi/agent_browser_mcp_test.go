@@ -695,3 +695,23 @@ func TestAgentBrowserMCPErrorLogsCarryNoPageData(t *testing.T) {
 		t.Fatalf("server log leaked the canary: %s", logs.String())
 	}
 }
+
+// A lease with no expiry must not render the Go zero time as
+// 0001-01-01T00:00:00Z. A real expiry keeps its JSON shape.
+func TestAgentBrowserMCPLeaseOmitsZeroExpiry(t *testing.T) {
+	zero, err := json.Marshal(agentBrowserMCPLease{GrantID: "grant-zero", Status: "active"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(zero), "expires_at") {
+		t.Fatalf("zero lease rendered expires_at: %s", zero)
+	}
+	expires := time.Date(2026, 11, 20, 8, 30, 0, 0, time.UTC)
+	withExpiry, err := json.Marshal(agentBrowserMCPLease{GrantID: "grant-real", ExpiresAt: &expires})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(withExpiry), `"expires_at":"2026-11-20T08:30:00Z"`) {
+		t.Fatalf("real expiry missing: %s", withExpiry)
+	}
+}

@@ -882,6 +882,11 @@ func (s *Server) agentBrowserDownload(writer http.ResponseWriter, request *http.
 		writeBrowserFailure(writer, err)
 		return
 	}
+	if file.Body != nil {
+		// The handler owns the host stream on every path, including a client
+		// disconnect that cancels the copy.
+		defer file.Body.Close()
+	}
 	filename := file.Download.Filename
 	disposition := mime.FormatMediaType("attachment", map[string]string{"filename": filename})
 	if disposition == "" {
@@ -891,9 +896,21 @@ func (s *Server) agentBrowserDownload(writer http.ResponseWriter, request *http.
 	writer.Header().Set("Content-Disposition", disposition)
 	writer.Header().Set("Cache-Control", "no-store")
 	writer.Header().Set("X-Content-Type-Options", "nosniff")
-	writer.Header().Set("Content-Length", strconv.Itoa(len(file.Data)))
+	// A known size lets the client show progress and detect a truncated
+	// transfer. An unknown size is streamed chunked rather than buffered.
+	if file.Download.Size >= 0 {
+		writer.Header().Set("Content-Length", strconv.FormatInt(file.Download.Size, 10))
+	}
 	writer.WriteHeader(http.StatusOK)
-	_, _ = writer.Write(file.Data)
+	if file.Body == nil {
+		return
+	}
+	if _, copyErr := io.Copy(writer, file.Body); copyErr != nil {
+		// The status line and headers are already committed, so a JSON error
+		// would corrupt the file. Abort the connection instead: net/http
+		// suppresses this sentinel and the client sees a truncated transfer.
+		panic(http.ErrAbortHandler)
+	}
 }
 
 func (s *Server) agentBrowserCookies(writer http.ResponseWriter, request *http.Request) {

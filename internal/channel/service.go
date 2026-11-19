@@ -633,14 +633,75 @@ func (s *Service) validateChannelInstanceConfig(ctx context.Context, instance do
 	// normalized map is written back so the stored row always says which source
 	// and account are actually in effect.
 	if runtimeConfig, present := mapField(config, "runtime_default"); present {
-		normalized, err := s.normalizeChannelRuntimeConfig(ctx, runtimeConfig)
-		if err != nil {
-			return err
+		existing, existingPresent := mapField(instance.Config, "runtime_default")
+		if existingPresent && sameChannelRuntimeSelection(runtimeConfig, existing) {
+			// The selection is unchanged. Re-normalizing would reject an
+			// instance whose stored account/model was deleted later and block
+			// unrelated settings saves. Keep the stored canonical identity but
+			// still persist non-identity changes from this request.
+			config["runtime_default"] = mergeUnchangedChannelRuntime(runtimeConfig, existing)
+		} else {
+			normalized, err := s.normalizeChannelRuntimeConfig(ctx, runtimeConfig)
+			if err != nil {
+				return err
+			}
+			config["runtime_default"] = normalized
 		}
-		config["runtime_default"] = normalized
 	}
-	_ = instance
 	return nil
+}
+
+// mergeUnchangedChannelRuntime keeps the stored canonical source/model/account
+// values while preserving other request fields such as proxy or reasoning
+// effort. Inherit mode stays exactly as stored.
+func mergeUnchangedChannelRuntime(incoming, stored map[string]any) map[string]any {
+	if boolField(stored, "inherit") {
+		return stored
+	}
+	merged := make(map[string]any, len(incoming)+4)
+	for key, value := range incoming {
+		merged[key] = value
+	}
+	for _, key := range []string{"model_source", "model_id", "wire_model", "codex_account_id"} {
+		if value, ok := stored[key]; ok {
+			merged[key] = value
+		} else {
+			delete(merged, key)
+		}
+	}
+	return merged
+}
+
+// sameChannelRuntimeSelection compares the identity fields channel runtime
+// normalization validates. An empty incoming field inherits the stored value,
+// so a partial update is not mistaken for clearing the selection. Source is
+// compared after normalization so "env"/empty and "provider" agree.
+func sameChannelRuntimeSelection(incoming, stored map[string]any) bool {
+	if boolField(incoming, "inherit") != boolField(stored, "inherit") {
+		return false
+	}
+	if boolField(incoming, "inherit") {
+		return true
+	}
+	for _, key := range []string{"model_source", "model_id", "wire_model", "codex_account_id"} {
+		left := strings.TrimSpace(stringField(incoming, key))
+		right := strings.TrimSpace(stringField(stored, key))
+		if left == "" {
+			left = right
+		}
+		if key == "model_source" {
+			if normalized, ok := domain.NormalizeModelSource(left); ok {
+				left = normalized
+			}
+			if normalized, ok := domain.NormalizeModelSource(right); ok {
+				right = normalized
+			}
+		}
+		if left != right {
+			return false
+		}
+	}
+	return true
 }
 
 // normalizeChannelRuntimeConfig validates one saved channel runtime selection

@@ -13,7 +13,7 @@
 // session close(); there is no age-based expiry.
 
 import {randomBytes} from "node:crypto";
-import {promises as fs} from "node:fs";
+import {createReadStream, promises as fs} from "node:fs";
 import {join} from "node:path";
 
 export function safeDownloadName(raw) {
@@ -288,6 +288,21 @@ export function createDownloadStore(root, profileID, sessionID, options = {}) {
         return null;
       }
       return {entry, data: await fs.readFile(entry.path)};
+    },
+
+    // HTTP serving path: return a live file stream instead of reading the
+    // whole download into memory. The caller owns the stream and must destroy
+    // it when the response closes or fails.
+    async open(id, fence = "") {
+      if (!/^download-[a-f0-9]{24}$/.test(String(id || ""))) return null;
+      const entry = entries.get(id);
+      if (!entry || entry.state !== "ready" || entry.fence !== String(fence || "")) return null;
+      const stat = await fs.stat(entry.path).catch(() => null);
+      if (!stat || !stat.isFile()) {
+        if (stat) await removeEntry(entry);
+        return null;
+      }
+      return {entry, size: stat.size, stream: createReadStream(entry.path)};
     },
 
     // Release path: drop this holder's artifacts but keep the store usable for

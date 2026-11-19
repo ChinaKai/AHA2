@@ -797,7 +797,7 @@ export function createHostServer(options) {
       if (parts.length === 5 && request.method === "GET") {
         let item = null;
         try {
-          item = await session.downloads.read(parts[4], session.fence);
+          item = await session.downloads.open(parts[4], session.fence);
         } catch {
           item = null;
         }
@@ -806,12 +806,22 @@ export function createHostServer(options) {
         }
         response.writeHead(200, {
           "Content-Type": "application/octet-stream",
-          "Content-Length": item.data.length,
+          "Content-Length": item.size,
           "Cache-Control": "no-store",
           "X-Content-Type-Options": "nosniff",
           "X-AHA2-Download-Filename": encodeURIComponent(item.entry.name),
         });
-        response.end(item.data);
+        // Never materialize the file in the host process. Destroy the read
+        // stream when the client goes away or the response fails so a large
+        // download cannot keep a file descriptor open.
+        const stream = item.stream;
+        response.on("close", () => {
+          if (!stream.destroyed) stream.destroy();
+        });
+        stream.on("error", () => {
+          if (!response.writableEnded) response.destroy();
+        });
+        stream.pipe(response);
         return;
       }
     }

@@ -1,8 +1,10 @@
 package browser_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -206,24 +208,31 @@ func TestFileUploadAndDownloadLimits(t *testing.T) {
 	}
 	f.host.DownloadFiles = map[string]browser.HostDownloadFile{
 		"download-0123456789abcdef01234567": {
-			Download: browser.HostDownload{Filename: "../../report.csv"},
-			Data:     []byte("a,b\n1,2\n"),
+			Download: browser.HostDownload{Filename: "../../report.csv", Size: int64(len("a,b\n1,2\n"))},
+			Body:     io.NopCloser(bytes.NewReader([]byte("a,b\n1,2\n"))),
 		},
 	}
 	file, err := f.service.Download(ctx, "agent", grant.ID, "download-0123456789abcdef01234567")
-	if err != nil || string(file.Data) != "a,b\n1,2\n" || strings.Contains(file.Download.Filename, "/") {
+	if err != nil || strings.Contains(file.Download.Filename, "/") {
 		t.Fatalf("download=%#v err=%v", file, err)
 	}
+	body, readErr := io.ReadAll(file.Body)
+	_ = file.Body.Close()
+	if readErr != nil || string(body) != "a,b\n1,2\n" {
+		t.Fatalf("download body=%q err=%v", body, readErr)
+	}
 	// Downloads have no business size cap; a file past the old 10 MiB limit
-	// must pass through intact rather than be truncated or rejected.
+	// must stream through intact rather than be truncated or rejected. The
+	// service must not read the body to measure it.
 	f.host.DownloadFiles["download-0123456789abcdef01234567"] = browser.HostDownloadFile{
-		Download: browser.HostDownload{Filename: "large.bin"},
-		Data:     make([]byte, 11<<20),
+		Download: browser.HostDownload{Filename: "large.bin", Size: 11 << 20},
+		Body:     io.NopCloser(bytes.NewReader(make([]byte, 11<<20))),
 	}
 	large, err := f.service.Download(ctx, "agent", grant.ID, "download-0123456789abcdef01234567")
-	if err != nil || len(large.Data) != 11<<20 {
-		t.Fatalf("large download=%d bytes err=%v", len(large.Data), err)
+	if err != nil || large.Download.Size != 11<<20 {
+		t.Fatalf("large download size=%d err=%v", large.Download.Size, err)
 	}
+	_ = large.Body.Close()
 	for _, id := range []string{"../../etc/passwd", "download/../../x", "", strings.Repeat("a", 65)} {
 		if _, err := f.service.Download(ctx, "agent", grant.ID, id); browser.Code(err) != "browser_download_not_found" {
 			t.Fatalf("download id %q: %v", id, err)

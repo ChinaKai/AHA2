@@ -154,3 +154,62 @@ func TestResolveChannelRuntimeHonorsExplicitSourceWithoutFallback(t *testing.T) 
 	}
 	_ = model
 }
+
+// Saving unrelated channel settings must not re-validate an unchanged runtime
+// selection. Otherwise a later-deleted account or model blocks every save,
+// including turning the channel off.
+func TestValidateChannelInstanceConfigSkipsUnchangedRetiredRuntime(t *testing.T) {
+	ctx := context.Background()
+	database, service, model, account := newChannelRuntimeStore(t)
+	storedRuntime := map[string]any{
+		"model_source": domain.ModelSourceOfficial, "wire_model": "gpt-channel-official",
+		"model_id":         domain.OfficialCodexModelID(account.ID, "gpt-channel-official"),
+		"codex_account_id": account.ID,
+	}
+	instance := domain.ChannelInstance{
+		ID: "channel-unchanged-runtime", Config: map[string]any{"runtime_default": storedRuntime},
+	}
+
+	// Retire the account after it was saved.
+	account.Status = "expired"
+	account.UpdatedAt = time.Now().UTC()
+	if err := database.UpsertCodexAccount(ctx, account); err != nil {
+		t.Fatal(err)
+	}
+
+	unchanged := map[string]any{
+		"runtime_default": map[string]any{
+			"model_source": domain.ModelSourceOfficial, "wire_model": "gpt-channel-official",
+			"model_id":         domain.OfficialCodexModelID(account.ID, "gpt-channel-official"),
+			"codex_account_id": account.ID, "proxy_enabled": true,
+		},
+		"name": "renamed",
+	}
+	if err := service.validateChannelInstanceConfig(ctx, instance, unchanged); err != nil {
+		t.Fatalf("unchanged retired runtime blocked an unrelated save: %v", err)
+	}
+	if got, ok := mapField(unchanged, "runtime_default"); !ok || got == nil {
+		t.Fatalf("unchanged runtime was dropped: %#v", unchanged)
+	}
+	if !sameChannelRuntimeSelection(unchanged["runtime_default"].(map[string]any), storedRuntime) {
+		t.Fatalf("stored runtime was not recognized as unchanged: %#v", unchanged["runtime_default"])
+	}
+	if !boolField(unchanged["runtime_default"].(map[string]any), "proxy_enabled") {
+		t.Fatalf("non-identity runtime change was lost: %#v", unchanged["runtime_default"])
+	}
+
+	// An actual change still resolves and must fail on the retired account.
+	changed := map[string]any{"runtime_default": map[string]any{
+		"model_source": domain.ModelSourceProvider, "model_id": model.ID,
+	}}
+	if err := service.validateChannelInstanceConfig(ctx, instance, changed); err != nil {
+		t.Fatalf("provider change should still be valid: %v", err)
+	}
+	changedOfficial := map[string]any{"runtime_default": map[string]any{
+		"model_source": domain.ModelSourceOfficial, "wire_model": "gpt-channel-official",
+		"codex_account_id": "account-missing",
+	}}
+	if err := service.validateChannelInstanceConfig(ctx, instance, changedOfficial); err == nil {
+		t.Fatal("changed runtime accepted a missing account")
+	}
+}

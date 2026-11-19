@@ -2,7 +2,9 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -582,18 +584,29 @@ func (s *Service) UpdateOwnerPetSettings(ctx context.Context, input PetSettingsI
 		strings.TrimSpace(input.PetWireModel) != "" ||
 		strings.TrimSpace(input.PetCodexAccountID) != ""
 	if petSelectionProvided {
-		model, resolveErr := s.resolvePetRuntimeSelection(ctx,
-			input.PetModelSource, input.PetModelID, input.PetWireModel, input.PetCodexAccountID)
-		if resolveErr != nil {
-			return OwnerAssistantView{}, fmt.Errorf("宠物模型不可用：%w", resolveErr)
+		if s.petSelectionMatchesStored(ctx, assistant, input) {
+			// The submitted runtime is already in effect. Re-resolving it would
+			// turn a deleted account or model into a hard failure that blocks
+			// unrelated settings such as disabling the pet or changing
+			// permissions, so keep the stored selection as-is.
+		} else {
+			model, resolveErr := s.resolvePetRuntimeSelection(ctx,
+				input.PetModelSource, input.PetModelID, input.PetWireModel, input.PetCodexAccountID)
+			if resolveErr != nil {
+				return OwnerAssistantView{}, fmt.Errorf("宠物模型不可用：%w", resolveErr)
+			}
+			assistant.BrainModelID = model.ID
 		}
-		assistant.BrainModelID = model.ID
 	} else if brainModelID := strings.TrimSpace(input.BrainModelID); brainModelID != "" {
-		model, resolveErr := s.resolvePetRuntimeSelection(ctx, "", brainModelID, "", "")
-		if resolveErr != nil {
-			return OwnerAssistantView{}, fmt.Errorf("宠物模型不可用：%w", resolveErr)
+		if brainModelID == strings.TrimSpace(assistant.BrainModelID) {
+			// Legacy field naming the current runtime; nothing to re-resolve.
+		} else {
+			model, resolveErr := s.resolvePetRuntimeSelection(ctx, "", brainModelID, "", "")
+			if resolveErr != nil {
+				return OwnerAssistantView{}, fmt.Errorf("宠物模型不可用：%w", resolveErr)
+			}
+			assistant.BrainModelID = model.ID
 		}
-		assistant.BrainModelID = model.ID
 	} else if chatModelID := strings.TrimSpace(input.ChatModelID); chatModelID != "" {
 		// Compatibility with the old single-model setting: chat and autonomy
 		// shared one Provider model.
@@ -685,13 +698,102 @@ func (s *Service) UpdateOwnerPetSettings(ctx context.Context, input PetSettingsI
 	if err := s.store.UpdateOwnerPetIdentity(ctx, assistant.ID, assistant.PetIdentity, assistant.PetPrinciples, assistant.UpdatedAt); err != nil {
 		return OwnerAssistantView{}, err
 	}
-	if err := s.syncPetTaskRuntime(ctx, assistant.BrainModelID); err != nil {
-		return OwnerAssistantView{}, fmt.Errorf("宠物 Task 模型同步失败：%w", err)
+	if assistant.PetEnabled {
+		// A disabled pet has no runnable Task. Skipping the sync on disable
+		// means a stale or deleted runtime can never block turning the pet off
+		// or changing its permissions.
+		if err := s.syncPetTaskRuntime(ctx, assistant.BrainModelID); err != nil {
+			return OwnerAssistantView{}, fmt.Errorf("宠物 Task 模型同步失败：%w", err)
+		}
 	}
 	if state, stateErr := s.OwnerPetState(ctx); stateErr == nil {
 		s.publishPetState(state)
 	}
 	return s.OwnerAssistant(ctx)
+}
+
+// petSelectionMatchesStored reports whether the submitted pet runtime selection
+// already names the stored one. An omitted field inherits the stored value, so
+// "not provided" is never mistaken for "changed to empty". When the catalog row
+// itself is gone, the stored BrainModelID is all that remains; an identical id
+// is treated as unchanged so a deleted model cannot block unrelated saves.
+func (s *Service) petSelectionMatchesStored(ctx context.Context, assistant domain.OwnerAssistant, input PetSettingsInput) bool {
+	currentID := strings.TrimSpace(assistant.BrainModelID)
+	submittedID := strings.TrimSpace(input.PetModelID)
+	if submittedID == "" {
+		legacyID := strings.TrimSpace(input.BrainModelID)
+		return legacyID != "" && legacyID == currentID
+	}
+	if submittedID != currentID {
+		return false
+	}
+	stored, err := s.store.Model(ctx, currentID)
+	if err != nil {
+		// The model row (and possibly its account) was deleted. The id still
+		// matches, and there is no remaining catalog identity to compare.
+		return true
+	}
+	storedSource := strings.TrimSpace(stored.Source)
+	if storedSource == "" {
+		storedSource = domain.ModelSourceProvider
+	}
+	if submittedSource := strings.TrimSpace(input.PetModelSource); submittedSource != "" {
+		normalized, ok := domain.NormalizeModelSource(submittedSource)
+		if !ok || normalized != storedSource {
+			return false
+		}
+	}
+	submittedWire := strings.TrimSpace(input.PetWireModel)
+	if submittedWire == "" {
+		submittedWire = stored.WireModel
+	}
+	if submittedWire != strings.TrimSpace(stored.WireModel) {
+		return false
+	}
+	submittedAccount := strings.TrimSpace(input.PetCodexAccountID)
+	if submittedAccount == "" {
+		submittedAccount = stored.CodexAccountID
+	}
+	return submittedAccount == strings.TrimSpace(stored.CodexAccountID)
+}
+
+// petCodexAccountForWireModel resolves an account for an official wire model
+// with the same rules as the channel runtime: only configured, ready accounts
+// count, one candidate is auto-selected, and an ambiguous match must be made
+// explicit instead of silently taking the first row.
+func (s *Service) petCodexAccountForWireModel(ctx context.Context, wireModel string) (string, error) {
+	accounts, err := s.store.ListCodexAccounts(ctx)
+	if err != nil {
+		return "", err
+	}
+	candidates := make([]domain.CodexAccount, 0, len(accounts))
+	for _, account := range accounts {
+		if !account.CredentialConfigured || account.Status != "ready" {
+			continue
+		}
+		if codexAccountOffersWireModel(account, wireModel) {
+			candidates = append(candidates, account)
+		}
+	}
+	switch len(candidates) {
+	case 0:
+		return "", fmt.Errorf("没有可用的 Codex 官方账号提供模型 %q", wireModel)
+	case 1:
+		return candidates[0].ID, nil
+	default:
+		return "", fmt.Errorf("多个 Codex 官方账号提供模型 %q，请明确选择账号", wireModel)
+	}
+}
+
+// codexAccountOffersWireModel reports whether one Codex account lists a wire
+// model in its probed catalog.
+func codexAccountOffersWireModel(account domain.CodexAccount, wireModel string) bool {
+	for _, option := range account.AvailableModels {
+		if option.WireModel == wireModel {
+			return true
+		}
+	}
+	return false
 }
 
 // resolvePetRuntimeSelection turns the pet settings selection into a catalog
@@ -731,19 +833,42 @@ func (s *Service) resolvePetRuntimeSelection(ctx context.Context, source, modelI
 	if normalized == "" {
 		normalized = domain.ModelSourceProvider
 	}
+	if normalized == domain.ModelSourceProvider && modelID == "" {
+		return domain.Model{}, fmt.Errorf("请选择 Provider 宠物运行时模型")
+	}
+	if normalized == domain.ModelSourceOfficial && wireModel == "" {
+		return domain.Model{}, fmt.Errorf("请选择 Codex 官方宠物运行时模型")
+	}
 	if normalized == domain.ModelSourceOfficial && accountID == "" && wireModel != "" {
-		resolved, err := s.codexAccountForWireModel(ctx, wireModel)
+		resolved, err := s.petCodexAccountForWireModel(ctx, wireModel)
 		if err != nil {
 			return domain.Model{}, err
 		}
 		accountID = resolved
+	}
+	if normalized == domain.ModelSourceOfficial {
+		// Validate the official account here so every failure reaches the
+		// settings page as business Chinese instead of a storage error.
+		account, err := s.store.CodexAccount(ctx, accountID)
+		if err != nil {
+			return domain.Model{}, fmt.Errorf("所选 Codex 官方账号已删除，请重新选择账号")
+		}
+		if !account.CredentialConfigured {
+			return domain.Model{}, fmt.Errorf("所选 Codex 官方账号尚未配置凭据，请重新选择账号")
+		}
+		if status := strings.TrimSpace(account.Status); status != "" && status != "ready" {
+			return domain.Model{}, fmt.Errorf("所选 Codex 官方账号当前不可用（%s），请重新选择账号", status)
+		}
+		if !codexAccountOffersWireModel(account, wireModel) {
+			return domain.Model{}, fmt.Errorf("所选模型不在该 Codex 官方账号的可用模型列表中")
+		}
 	}
 	model, _, accountID, err := s.resolveRuntimeSelection(ctx, runtimeSelectionInput{
 		WorkspaceID: petWorkspaceID, ModelSource: normalized, ModelID: modelID,
 		WireModel: wireModel, CodexAccountID: accountID,
 	})
 	if err != nil {
-		return domain.Model{}, err
+		return domain.Model{}, petRuntimeSelectionError(normalized, err)
 	}
 	if model.Source == "" {
 		model.Source = normalized
@@ -752,6 +877,19 @@ func (s *Service) resolvePetRuntimeSelection(ctx context.Context, source, modelI
 		model.CodexAccountID = accountID
 	}
 	return model, nil
+}
+
+// petRuntimeSelectionError replaces storage-level not-found errors with the
+// business wording the settings page can show. sql: no rows must never reach
+// the owner.
+func petRuntimeSelectionError(source string, err error) error {
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if source == domain.ModelSourceOfficial {
+		return fmt.Errorf("所选 Codex 官方账号已删除，请重新选择账号")
+	}
+	return fmt.Errorf("所选模型已删除，请重新选择模型")
 }
 
 func (s *Service) OwnerPetActivity(ctx context.Context, limit int) ([]domain.PetEvent, error) {

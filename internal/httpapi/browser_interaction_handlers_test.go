@@ -97,8 +97,8 @@ func TestAgentBrowserPageActionsOverHTTP(t *testing.T) {
 	}
 	host.DownloadFiles = map[string]browser.HostDownloadFile{
 		"download-0123456789abcdef01234567": {
-			Download: browser.HostDownload{Filename: "report.csv"},
-			Data:     []byte("a,b\n1,2\n"),
+			Download: browser.HostDownload{Filename: "report.csv", Size: int64(len("a,b\n1,2\n"))},
+			Body:     io.NopCloser(bytes.NewReader([]byte("a,b\n1,2\n"))),
 		},
 	}
 	downloadRequest, err := http.NewRequest(http.MethodGet,

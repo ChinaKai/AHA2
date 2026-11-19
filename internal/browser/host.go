@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -36,6 +38,8 @@ type Host interface {
 	// The bytes stay in memory; no caller-supplied or host path is accepted.
 	Upload(ctx context.Context, profileID, sessionID, tabID string, upload HostUpload, fence string) (HostUploadResult, error)
 	Downloads(ctx context.Context, profileID, sessionID string) ([]HostDownload, error)
+	// Download opens one captured file as a stream. The returned Body is owned
+	// by the caller and must always be closed; AHA never buffers the whole file.
 	Download(ctx context.Context, profileID, sessionID, downloadID string) (HostDownloadFile, error)
 	ClearDownloads(ctx context.Context, profileID, sessionID string) error
 	Cookies(ctx context.Context, profileID, sessionID, targetURL, domain string) ([]HostCookie, bool, error)
@@ -152,9 +156,13 @@ type HostDownload struct {
 	CreatedAt string `json:"created_at,omitempty"`
 }
 
+// HostDownloadFile is one captured download opened for streaming. Body is the
+// live response stream: the caller that receives this value owns it and must
+// close it on every path. Size is the host-reported length, or -1 when the
+// host did not send a Content-Length.
 type HostDownloadFile struct {
 	Download HostDownload
-	Data     []byte
+	Body     io.ReadCloser
 }
 
 // HostCookie is a browser cookie. Value is sensitive: it may be returned to the
@@ -196,6 +204,11 @@ type HTTPHost struct {
 	baseURL string
 	token   string
 	client  *http.Client
+	// streamClient has no whole-request timeout. A captured download can be
+	// arbitrarily large and slow, so the 60s RPC budget would truncate it. Dial
+	// and response-header deadlines still apply, and the request context
+	// cancels the stream as soon as the HTTP client goes away.
+	streamClient *http.Client
 }
 
 // DefaultHostTimeout is deliberately longer than every host-side operation:
@@ -203,20 +216,37 @@ type HTTPHost struct {
 // fires first would report failure while the host still commits the navigation.
 const DefaultHostTimeout = 60 * time.Second
 
+// hostStreamDialTimeout bounds only connection setup for streamed downloads.
+// The body itself is intentionally unbounded in time.
+const hostStreamDialTimeout = 10 * time.Second
+
 func NewHTTPHost(baseURL, token string) *HTTPHost {
 	return NewHTTPHostWithTimeout(baseURL, token, DefaultHostTimeout)
 }
 
 // NewHTTPHostWithTimeout is used by tests to exercise slow-host behavior without
-// waiting a full minute.
+// waiting a full minute. The timeout applies to RPC calls (and to the response
+// headers of a download), never to the download body.
 func NewHTTPHostWithTimeout(baseURL, token string, timeout time.Duration) *HTTPHost {
 	if timeout <= 0 {
 		timeout = DefaultHostTimeout
 	}
+	dialer := &net.Dialer{Timeout: hostStreamDialTimeout, KeepAlive: 30 * time.Second}
+	streamTransport := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           dialer.DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          4,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: time.Second,
+		ResponseHeaderTimeout: timeout,
+	}
 	return &HTTPHost{
-		baseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
-		token:   strings.TrimSpace(token),
-		client:  &http.Client{Timeout: timeout},
+		baseURL:      strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		token:        strings.TrimSpace(token),
+		client:       &http.Client{Timeout: timeout},
+		streamClient: &http.Client{Transport: streamTransport},
 	}
 }
 
@@ -598,8 +628,13 @@ func (h *HTTPHost) Downloads(ctx context.Context, profileID, sessionID string) (
 	return result.Downloads, err
 }
 
-// Download fetches one captured download as raw bytes. The host-local file path
-// never crosses this boundary; only the bounded file body does.
+// maxHostErrorBodyBytes bounds how much of a non-2xx host response is read to
+// recover the machine error code. Error bodies are diagnostics, never files.
+const maxHostErrorBodyBytes = 64 << 10
+
+// Download opens one captured download as a stream. The host-local file path
+// never crosses this boundary. On success the returned Body is a live stream
+// owned by the caller; on any error the host response body is closed here.
 func (h *HTTPHost) Download(ctx context.Context, profileID, sessionID, downloadID string) (HostDownloadFile, error) {
 	path := profilePath(profileID) + "/downloads/" + url.PathEscape(downloadID) + "?session_id=" + url.QueryEscape(sessionID)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, h.baseURL+path, nil)
@@ -610,7 +645,11 @@ func (h *HTTPHost) Download(ctx context.Context, profileID, sessionID, downloadI
 	if h.token != "" {
 		request.Header.Set("Authorization", "Bearer "+h.token)
 	}
-	response, err := h.client.Do(request)
+	client := h.streamClient
+	if client == nil {
+		client = h.client
+	}
+	response, err := client.Do(request)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || isTimeout(err) {
 			return HostDownloadFile{}, &Error{Code: "browser_host_timeout", Status: http.StatusGatewayTimeout,
@@ -619,12 +658,11 @@ func (h *HTTPHost) Download(ctx context.Context, profileID, sessionID, downloadI
 		return HostDownloadFile{}, &Error{Code: "browser_host_unavailable", Status: http.StatusServiceUnavailable,
 			Message: hostErrorMessage("browser_host_unavailable")}
 	}
-	defer response.Body.Close()
-	payload, err := io.ReadAll(response.Body)
-	if err != nil {
-		return HostDownloadFile{}, newError(http.StatusBadGateway, "browser_host_bad_response", "读取浏览器宿主响应失败")
-	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		defer response.Body.Close()
+		// Only the small diagnostic body is read; the status is decided before
+		// any success header can be written.
+		payload, _ := io.ReadAll(io.LimitReader(response.Body, maxHostErrorBodyBytes))
 		code := "browser_download_failed"
 		var failure hostErrorBody
 		if json.Unmarshal(payload, &failure) == nil && strings.TrimSpace(failure.Error.Code) != "" {
@@ -643,10 +681,15 @@ func (h *HTTPHost) Download(ctx context.Context, profileID, sessionID, downloadI
 			filename = decoded
 		}
 	}
-	size := int64(len(payload))
+	size := int64(-1)
+	if raw := strings.TrimSpace(response.Header.Get("Content-Length")); raw != "" {
+		if parsed, parseErr := strconv.ParseInt(raw, 10, 64); parseErr == nil && parsed >= 0 {
+			size = parsed
+		}
+	}
 	return HostDownloadFile{
 		Download: HostDownload{ID: downloadID, Filename: filename, Size: size},
-		Data:     payload,
+		Body:     response.Body,
 	}, nil
 }
 

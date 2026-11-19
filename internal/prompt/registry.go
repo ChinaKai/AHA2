@@ -1700,15 +1700,78 @@ func knowledgeRelativePath(from, to string) string {
 	return filepath.ToSlash(value)
 }
 
+// skillPackageDirectory resolves the per-skill context directory. The layout
+// is scope-first: skills/global/<slug>/ and
+// skills/project/<projectID>/<slug>/. A same-scope duplicate slug receives a
+// numeric suffix in encounter order instead of silently overwriting the earlier
+// package. usedDirectories is shared across the whole skill list.
+func skillPackageDirectory(input BuildInput, skillsRoot string, skill domain.Skill, usedDirectories map[string]bool) string {
+	slug := contextPathSegment(skill.PackageSlug)
+	if slug == "" {
+		slug = contextPathSegment(skill.ID)
+	}
+	if slug == "" {
+		slug = "skill"
+	}
+	segments := []string{}
+	switch scope := strings.ToLower(strings.TrimSpace(skill.Scope)); scope {
+	case "project":
+		project := contextPathSegment(skill.ProjectID)
+		if project == "" {
+			project = "_unbound"
+		}
+		segments = append(segments, "project", project, slug)
+	case "", "global":
+		segments = append(segments, "global", slug)
+	default:
+		segments = append(segments, scope, slug)
+	}
+	base := segments[len(segments)-1]
+	for suffix := 2; ; suffix++ {
+		key := strings.Join(segments, "/")
+		if !usedDirectories[key] {
+			usedDirectories[key] = true
+			return joinContextPath(input, append([]string{skillsRoot}, segments...)...)
+		}
+		segments[len(segments)-1] = fmt.Sprintf("%s-%d", base, suffix)
+	}
+}
+
+// contextPathSegment makes one prompt path component safe. Scope, project and
+// slug values come from vault metadata, so path separators, control characters
+// and dot-only names must never escape the intended directory.
+func contextPathSegment(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	var builder strings.Builder
+	for _, char := range raw {
+		switch {
+		case char == '/' || char == '\\':
+			builder.WriteRune('-')
+		case char < 0x20 || char == 0x7f:
+			builder.WriteRune('-')
+		default:
+			builder.WriteRune(char)
+		}
+	}
+	value := strings.Trim(builder.String(), ". ")
+	if value == "" || value == "_" {
+		return ""
+	}
+	return value
+}
+
 func skillResources(input BuildInput, root string) []ContextResource {
 	directory := joinContextPath(input, root, "skills")
 	resources := []ContextResource{}
+	// Skill packages are namespaced by scope and project so a global package
+	// and a project package that share a slug never overwrite each other.
+	// Duplicates inside the same scope still get a deterministic suffix.
+	usedDirectories := map[string]bool{}
 	for _, skill := range input.Skills {
-		slug := skill.PackageSlug
-		if slug == "" {
-			slug = skill.ID
-		}
-		packageDirectory := joinContextPath(input, directory, slug)
+		packageDirectory := skillPackageDirectory(input, directory, skill, usedDirectories)
 		files := skill.PackageFiles
 		if len(files) == 0 {
 			files = []domain.SkillFile{{Path: "SKILL.md", Content: fmt.Sprintf("---\nname: %s\ndescription: %s\n---\n\n%s\n", skill.Name, skill.Description, skill.Instructions)}}

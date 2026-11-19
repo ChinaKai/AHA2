@@ -195,3 +195,37 @@ func findVaultSkill(catalog VaultSkillCatalog, key string) *VaultSkillView {
 	}
 	return nil
 }
+
+// The pet's cross-project view must not bypass a project's vault read gate. A
+// project skill whose project read is disabled is neither selectable nor
+// loaded, while global skills keep working.
+func TestPetProjectSkillRequiresProjectVaultRead(t *testing.T) {
+	fixture := newPetCrossSkillFixture(t)
+	task := fixture.createTask(t, petTaskID, petProjectID, fixture.workspace.ID, []string{fixture.globalKey})
+
+	// Keep the pet project's own read enabled but remove BU2_CAM1 from the
+	// support rollback allowlist.
+	t.Setenv(knowledgeVaultReadProjectsEnv, petProjectID)
+
+	if fixture.service.vaultSkillExistsForPet(fixture.ctx, fixture.bu2SkillKey) {
+		t.Fatal("pet still accepted a skill from a project whose vault read is disabled")
+	}
+	if !fixture.service.vaultSkillExistsForPet(fixture.ctx, fixture.globalKey) {
+		t.Fatal("global skill disappeared when only a project read was disabled")
+	}
+	if _, err := fixture.service.UpdateTaskSkills(fixture.ctx, task.ID, []string{fixture.bu2SkillKey}); err == nil || !strings.Contains(err.Error(), fixture.bu2SkillKey) {
+		t.Fatalf("pet selected a read-disabled project skill: %v", err)
+	}
+	stored, err := fixture.database.Task(fixture.ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.SkillIDs) != 1 || stored.SkillIDs[0] != fixture.globalKey {
+		t.Fatalf("rejected update changed the selection: %#v", stored.SkillIDs)
+	}
+
+	loaded := fixture.service.vaultPetTaskSkills(fixture.ctx, []string{fixture.bu2SkillKey, fixture.globalKey})
+	if len(loaded) != 1 || loaded[0].ID != fixture.globalKey {
+		t.Fatalf("loaded pet skills=%#v, want only the global skill", loaded)
+	}
+}
