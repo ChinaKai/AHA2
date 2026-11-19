@@ -1436,7 +1436,7 @@ class APIClient {
     return this.request(`/api/v1/pet/activity?limit=${limit}`);
   }
 
-  updatePetSettings(payload: {enabled: boolean; character: string; chat_model_id: string; brain_model_id: string; actions: string[]; identity?: string; principles?: string; idle_minutes: number; quiet_start: number; quiet_end: number; hourly_limit: number; allow_view_tasks?: boolean; allow_create_tasks?: boolean; allow_create_workspaces?: boolean; allow_message_tasks?: boolean; allow_manage_models?: boolean; allow_manage_knowledge?: boolean; allow_manage_channels?: boolean; allow_manage_system?: boolean}): Promise<{ok: boolean; assistant: OwnerAssistant; models: AssistantModelOption[]; model_name?: string; brain_model_name?: string}> {
+  updatePetSettings(payload: {enabled: boolean; character: string; chat_model_id: string; brain_model_id?: string; pet_model_source?: string; pet_model_id?: string; pet_wire_model?: string; pet_codex_account_id?: string; actions: string[]; identity?: string; principles?: string; idle_minutes: number; quiet_start: number; quiet_end: number; hourly_limit: number; allow_view_tasks?: boolean; allow_create_tasks?: boolean; allow_create_workspaces?: boolean; allow_message_tasks?: boolean; allow_manage_models?: boolean; allow_manage_knowledge?: boolean; allow_manage_channels?: boolean; allow_manage_system?: boolean}): Promise<{ok: boolean; assistant: OwnerAssistant; models: AssistantModelOption[]; model_name?: string; brain_model_name?: string; pet_model_id?: string; pet_model_source?: string; pet_wire_model?: string; pet_codex_account_id?: string; pet_model_name?: string; pet_workspace_id?: string}> {
     return this.request("/api/v1/pet/settings", {method: "PUT", body: JSON.stringify(payload)});
   }
 

@@ -1497,8 +1497,6 @@ function claudeOfficialCatalog(workspace?: Workspace): ClaudeOfficialCatalog {
     return {availability: "not_logged_in", models: [], message: "暂不可用：当前 Workspace 尚未登录 Claude Code，请先执行 claude auth login。"};
   }
   if (probe.auth_status !== "logged_in") {
-    // The probe keeps the reason it could not read a status. Showing it is the
-    // difference between the operator knowing what failed and guessing.
     const reason = typeof probe.auth_error === "string" ? probe.auth_error.trim() : "";
     return {
       availability: "unknown",

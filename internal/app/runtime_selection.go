@@ -2,15 +2,12 @@ package app
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"strings"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
 	workspacepkg "github.com/ChinaKai/AHA2/internal/workspace"
 )
-
-const officialCodexEnvGroupID = "env_codex_official"
 
 type runtimeSelectionInput struct {
 	WorkspaceID    string
@@ -94,7 +91,6 @@ func (s *Service) resolveClaudeNativeSelection(
 	if err := s.store.UpsertEnvGroup(ctx, envGroup); err != nil {
 		return domain.Model{}, domain.EnvGroup{}, "", fmt.Errorf("Claude native env group: %w", err)
 	}
-	digest := sha256.Sum256([]byte(wireModel))
 	capabilities := map[string]any{}
 	if option.ResolvedModel != "" {
 		capabilities["resolved_model"] = option.ResolvedModel
@@ -118,7 +114,7 @@ func (s *Service) resolveClaudeNativeSelection(
 	// a window for display through ClaudeContextWindow instead, which keeps a
 	// guess out of the run.
 	model := domain.Model{
-		ID: fmt.Sprintf("model_claude_native_%x", digest[:8]), DisplayName: displayName,
+		ID: domain.ClaudeNativeModelID(wireModel), DisplayName: displayName,
 		ProviderID: domain.OfficialClaudeProviderID, Source: domain.ModelSourceClaudeNative,
 		Backend: "claude", WireModel: wireModel, WireAPI: "anthropic_messages",
 		Capabilities:      capabilities,
@@ -308,6 +304,9 @@ func (s *Service) resolveOfficialCodexSelection(
 	if !account.CredentialConfigured {
 		return domain.Model{}, domain.EnvGroup{}, "", fmt.Errorf("Codex account credentials are not configured")
 	}
+	if status := strings.TrimSpace(account.Status); status != "" && status != "ready" {
+		return domain.Model{}, domain.EnvGroup{}, "", fmt.Errorf("Codex account %q is unavailable: %s", account.Label, status)
+	}
 	wireModel := strings.TrimSpace(input.WireModel)
 	var option domain.CodexModelOption
 	for _, candidate := range account.AvailableModels {
@@ -321,7 +320,7 @@ func (s *Service) resolveOfficialCodexSelection(
 	}
 	now := s.now().UTC()
 	envGroup := domain.EnvGroup{
-		ID: officialCodexEnvGroupID, Name: "Official Codex Runtime",
+		ID: domain.OfficialCodexEnvGroupID, Name: "Official Codex Runtime",
 		ProviderID: domain.OfficialCodexProviderID, Backend: "codex", Revision: 1,
 		Environment: map[string]string{}, SecretRefs: map[string]string{}, CreatedAt: now, UpdatedAt: now,
 	}
@@ -332,11 +331,11 @@ func (s *Service) resolveOfficialCodexSelection(
 	if contextWindow == 0 {
 		contextWindow = option.ContextWindow
 	}
-	digest := sha256.Sum256([]byte(option.WireModel))
 	model := domain.Model{
-		ID: fmt.Sprintf("model_codex_official_%x", digest[:8]), DisplayName: option.DisplayName,
+		ID: domain.OfficialCodexModelID(account.ID, option.WireModel), DisplayName: option.DisplayName,
 		ProviderID: domain.OfficialCodexProviderID, Source: domain.ModelSourceOfficial,
-		Backend: "codex", WireModel: option.WireModel, WireAPI: "responses",
+		CodexAccountID: account.ID,
+		Backend:        "codex", WireModel: option.WireModel, WireAPI: "responses",
 		ContextWindow: contextWindow, DefaultEffort: option.DefaultEffort,
 		Capabilities:      map[string]any{"reasoning_efforts": option.ReasoningEfforts},
 		DefaultEnvGroupID: envGroup.ID, CreatedAt: now, UpdatedAt: now,

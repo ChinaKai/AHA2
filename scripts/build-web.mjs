@@ -96,8 +96,8 @@ async function buildModules() {
     "knowledge_vault.js": ["api", "icons", "i18n", "markdown", "skill_groups"],
     "knowledge_vault_settings.js": ["api", "i18n"],
     "task_vault_skills.js": ["api"],
-    "channels.js": ["api", "icons"],
-    "assistant.js": ["api", "pet_bubble", "pet_navigation"],
+    "channels.js": ["api", "icons", "i18n", "model_source_picker"],
+    "assistant.js": ["api", "pet_bubble", "pet_navigation", "model_source_picker"],
   };
   for (const [file, dependencies] of Object.entries(importers)) {
     const path = resolve(modulesOutput, file);

@@ -15,6 +15,9 @@ func (s *Server) ownerAssistant(writer http.ResponseWriter, request *http.Reques
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"ok": true, "assistant": view.Assistant, "messages": view.Messages,
 		"models": view.Models, "model_name": view.ModelName, "brain_model_name": view.BrainModelName,
+		"pet_model_id": view.PetModelID, "pet_model_source": view.PetModelSource,
+		"pet_wire_model": view.PetWireModel, "pet_codex_account_id": view.PetCodexAccountID,
+		"pet_model_name": view.PetModelName, "pet_workspace_id": view.PetWorkspaceID,
 		"tools": view.Tools,
 	})
 }

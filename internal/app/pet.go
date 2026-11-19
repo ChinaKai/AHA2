@@ -515,18 +515,25 @@ func parsePetBrain(text string) PetBrainResult {
 }
 
 type PetSettingsInput struct {
-	Enabled      bool     `json:"enabled"`
-	Character    string   `json:"character"`
-	ChatModelID  string   `json:"chat_model_id"`
-	BrainModelID string   `json:"brain_model_id"`
-	Actions      []string `json:"actions"`
-	Identity     string   `json:"identity"`
-	Principles   string   `json:"principles"`
-	IdleMinutes  int      `json:"idle_minutes"`
-	QuietEnabled *bool    `json:"quiet_enabled"`
-	QuietStart   int      `json:"quiet_start"`
-	QuietEnd     int      `json:"quiet_end"`
-	HourlyLimit  int      `json:"hourly_limit"`
+	Enabled     bool   `json:"enabled"`
+	Character   string `json:"character"`
+	ChatModelID string `json:"chat_model_id"`
+	// BrainModelID is the legacy pet runtime field. New callers select a
+	// source-first runtime with the four PetModel* fields; the catalog model ID
+	// is then derived server-side and stored in BrainModelID.
+	BrainModelID      string   `json:"brain_model_id"`
+	PetModelSource    string   `json:"pet_model_source"`
+	PetModelID        string   `json:"pet_model_id"`
+	PetWireModel      string   `json:"pet_wire_model"`
+	PetCodexAccountID string   `json:"pet_codex_account_id"`
+	Actions           []string `json:"actions"`
+	Identity          string   `json:"identity"`
+	Principles        string   `json:"principles"`
+	IdleMinutes       int      `json:"idle_minutes"`
+	QuietEnabled      *bool    `json:"quiet_enabled"`
+	QuietStart        int      `json:"quiet_start"`
+	QuietEnd          int      `json:"quiet_end"`
+	HourlyLimit       int      `json:"hourly_limit"`
 
 	AllowViewTasks        *bool `json:"allow_view_tasks"`
 	AllowCreateTasks      *bool `json:"allow_create_tasks"`
@@ -563,13 +570,38 @@ func (s *Service) UpdateOwnerPetSettings(ctx context.Context, input PetSettingsI
 	}
 	if chatModelID := strings.TrimSpace(input.ChatModelID); chatModelID != "" {
 		if !validModel(chatModelID) {
-			return OwnerAssistantView{}, fmt.Errorf("宠物模型不可用")
+			return OwnerAssistantView{}, fmt.Errorf("聊天模型不可用，请选择 Provider 模型")
 		}
 		assistant.ModelID = chatModelID
 	}
-	// Chat and autonomous behavior share one model. The old brain_model_id
-	// field is kept in the stored row for compatibility but mirrors model_id.
-	assistant.BrainModelID = assistant.ModelID
+	// The pet runtime may use any supported source. It is stored in the legacy
+	// brain_model_id column so old rows and readers keep working, while the chat
+	// panel keeps its Provider-only model_id.
+	petSelectionProvided := strings.TrimSpace(input.PetModelSource) != "" ||
+		strings.TrimSpace(input.PetModelID) != "" ||
+		strings.TrimSpace(input.PetWireModel) != "" ||
+		strings.TrimSpace(input.PetCodexAccountID) != ""
+	if petSelectionProvided {
+		model, resolveErr := s.resolvePetRuntimeSelection(ctx,
+			input.PetModelSource, input.PetModelID, input.PetWireModel, input.PetCodexAccountID)
+		if resolveErr != nil {
+			return OwnerAssistantView{}, fmt.Errorf("宠物模型不可用：%w", resolveErr)
+		}
+		assistant.BrainModelID = model.ID
+	} else if brainModelID := strings.TrimSpace(input.BrainModelID); brainModelID != "" {
+		model, resolveErr := s.resolvePetRuntimeSelection(ctx, "", brainModelID, "", "")
+		if resolveErr != nil {
+			return OwnerAssistantView{}, fmt.Errorf("宠物模型不可用：%w", resolveErr)
+		}
+		assistant.BrainModelID = model.ID
+	} else if chatModelID := strings.TrimSpace(input.ChatModelID); chatModelID != "" {
+		// Compatibility with the old single-model setting: chat and autonomy
+		// shared one Provider model.
+		assistant.BrainModelID = assistant.ModelID
+	}
+	if strings.TrimSpace(assistant.BrainModelID) == "" {
+		assistant.BrainModelID = assistant.ModelID
+	}
 	allowed := map[string]bool{"walk": true, "jump": true, "happy": true, "angry": true}
 	actions := []string{}
 	seen := map[string]bool{}
@@ -653,13 +685,73 @@ func (s *Service) UpdateOwnerPetSettings(ctx context.Context, input PetSettingsI
 	if err := s.store.UpdateOwnerPetIdentity(ctx, assistant.ID, assistant.PetIdentity, assistant.PetPrinciples, assistant.UpdatedAt); err != nil {
 		return OwnerAssistantView{}, err
 	}
-	if err := s.syncPetTaskRuntime(ctx, assistant.ModelID); err != nil {
+	if err := s.syncPetTaskRuntime(ctx, assistant.BrainModelID); err != nil {
 		return OwnerAssistantView{}, fmt.Errorf("宠物 Task 模型同步失败：%w", err)
 	}
 	if state, stateErr := s.OwnerPetState(ctx); stateErr == nil {
 		s.publishPetState(state)
 	}
 	return s.OwnerAssistant(ctx)
+}
+
+// resolvePetRuntimeSelection turns the pet settings selection into a catalog
+// model. An empty source is inferred from model_id; an official selection
+// without an explicit account is resolved only when exactly one configured
+// account offers that wire model.
+func (s *Service) resolvePetRuntimeSelection(ctx context.Context, source, modelID, wireModel, accountID string) (domain.Model, error) {
+	normalized, ok := domain.NormalizeModelSource(source)
+	if !ok {
+		return domain.Model{}, fmt.Errorf("model_source 必须是 provider、official 或 claude_native")
+	}
+	modelID = strings.TrimSpace(modelID)
+	wireModel = strings.TrimSpace(wireModel)
+	accountID = strings.TrimSpace(accountID)
+	if modelID != "" {
+		model, err := s.store.Model(ctx, modelID)
+		if err != nil {
+			return domain.Model{}, fmt.Errorf("所选模型不存在或已删除")
+		}
+		modelSource := strings.TrimSpace(model.Source)
+		if modelSource == "" {
+			modelSource = domain.ModelSourceProvider
+		}
+		if normalized != "" && normalized != modelSource {
+			return domain.Model{}, fmt.Errorf("模型 %q 属于模型源 %s，不能通过 model_source=%s 选择", modelID, modelSource, normalized)
+		}
+		if normalized == "" {
+			normalized = modelSource
+		}
+		if wireModel == "" {
+			wireModel = model.WireModel
+		}
+		if accountID == "" {
+			accountID = model.CodexAccountID
+		}
+	}
+	if normalized == "" {
+		normalized = domain.ModelSourceProvider
+	}
+	if normalized == domain.ModelSourceOfficial && accountID == "" && wireModel != "" {
+		resolved, err := s.codexAccountForWireModel(ctx, wireModel)
+		if err != nil {
+			return domain.Model{}, err
+		}
+		accountID = resolved
+	}
+	model, _, accountID, err := s.resolveRuntimeSelection(ctx, runtimeSelectionInput{
+		WorkspaceID: petWorkspaceID, ModelSource: normalized, ModelID: modelID,
+		WireModel: wireModel, CodexAccountID: accountID,
+	})
+	if err != nil {
+		return domain.Model{}, err
+	}
+	if model.Source == "" {
+		model.Source = normalized
+	}
+	if accountID != "" && model.CodexAccountID == "" {
+		model.CodexAccountID = accountID
+	}
+	return model, nil
 }
 
 func (s *Service) OwnerPetActivity(ctx context.Context, limit int) ([]domain.PetEvent, error) {

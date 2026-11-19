@@ -629,15 +629,177 @@ func (s *Service) validateChannelInstanceConfig(ctx context.Context, instance do
 		}
 	}
 	// Channel runtime is configured once per instance. Retired endpoint
-	// overrides are ignored instead of blocking an otherwise valid save.
-	if runtimeConfig, present := mapField(config, "runtime_default"); present && !boolField(runtimeConfig, "inherit") && stringField(runtimeConfig, "model_id") != "" {
-		model, err := s.store.Model(ctx, stringField(runtimeConfig, "model_id"))
-		if err != nil || !s.channelRuntimeModelAvailable(ctx, model, stringField(runtimeConfig, "codex_account_id"), model.WireModel) {
-			return fmt.Errorf("invalid channel runtime configuration")
+	// overrides are ignored instead of blocking an otherwise valid save. The
+	// normalized map is written back so the stored row always says which source
+	// and account are actually in effect.
+	if runtimeConfig, present := mapField(config, "runtime_default"); present {
+		normalized, err := s.normalizeChannelRuntimeConfig(ctx, runtimeConfig)
+		if err != nil {
+			return err
 		}
+		config["runtime_default"] = normalized
 	}
 	_ = instance
 	return nil
+}
+
+// normalizeChannelRuntimeConfig validates one saved channel runtime selection
+// and returns its canonical form. An empty selection keeps the legacy
+// "automatic" behavior. Explicit sources never fall back: an unknown model,
+// an unavailable account or a source/model mismatch is an error.
+func (s *Service) normalizeChannelRuntimeConfig(ctx context.Context, config map[string]any) (map[string]any, error) {
+	if boolField(config, "inherit") {
+		return map[string]any{"inherit": true}, nil
+	}
+	requestedSource, ok := domain.NormalizeModelSource(stringField(config, "model_source"))
+	if !ok {
+		return nil, fmt.Errorf("model_source 必须是 provider、official 或 claude_native")
+	}
+	modelID := strings.TrimSpace(stringField(config, "model_id"))
+	wireModel := strings.TrimSpace(stringField(config, "wire_model"))
+	accountID := strings.TrimSpace(stringField(config, "codex_account_id"))
+	if modelID == "" && wireModel == "" && accountID == "" &&
+		(requestedSource == "" || requestedSource == domain.ModelSourceProvider) {
+		return map[string]any{"model_id": "", "codex_account_id": ""}, nil
+	}
+
+	var selected domain.Model
+	modelFound := false
+	if modelID != "" {
+		model, err := s.store.Model(ctx, modelID)
+		if err != nil {
+			return nil, fmt.Errorf("所选模型不存在或已删除")
+		}
+		if strings.TrimSpace(model.Source) == "" {
+			model.Source = domain.ModelSourceProvider
+		}
+		selected, modelFound = model, true
+		if requestedSource != "" && selected.Source != requestedSource {
+			return nil, fmt.Errorf("模型 %q 属于模型源 %s，不能通过 model_source=%s 选择", modelID, selected.Source, requestedSource)
+		}
+		if requestedSource == "" {
+			requestedSource = selected.Source
+		}
+	}
+	if requestedSource == "" {
+		requestedSource = domain.ModelSourceProvider
+	}
+
+	switch requestedSource {
+	case domain.ModelSourceProvider:
+		if !modelFound {
+			return nil, fmt.Errorf("provider 模型源必须提供 model_id")
+		}
+		if selected.Source != domain.ModelSourceProvider {
+			return nil, fmt.Errorf("模型 %q 不是 Provider 模型", modelID)
+		}
+		if wireModel != "" && selected.WireModel != "" && wireModel != selected.WireModel {
+			return nil, fmt.Errorf("wire_model=%s 与模型 %q 的 wire_model=%s 不一致", wireModel, modelID, selected.WireModel)
+		}
+		if accountID != "" {
+			return nil, fmt.Errorf("Provider 模型不能绑定 Codex 官方账号")
+		}
+		return map[string]any{
+			"model_source": domain.ModelSourceProvider, "model_id": selected.ID,
+			"wire_model": "", "codex_account_id": "",
+		}, nil
+
+	case domain.ModelSourceOfficial:
+		if modelFound && selected.Source != domain.ModelSourceOfficial {
+			return nil, fmt.Errorf("模型 %q 不是 Codex 官方模型", modelID)
+		}
+		if wireModel == "" && modelFound {
+			wireModel = selected.WireModel
+		}
+		if wireModel == "" {
+			return nil, fmt.Errorf("official 模型源必须提供 wire_model")
+		}
+		if modelFound && selected.WireModel != "" && wireModel != selected.WireModel {
+			return nil, fmt.Errorf("wire_model=%s 与模型 %q 的 wire_model=%s 不一致", wireModel, modelID, selected.WireModel)
+		}
+		if accountID == "" && modelFound {
+			accountID = selected.CodexAccountID
+		}
+		if accountID == "" {
+			resolved, err := s.channelCodexAccountForWireModel(ctx, wireModel)
+			if err != nil {
+				return nil, err
+			}
+			accountID = resolved
+		}
+		account, err := s.store.CodexAccount(ctx, accountID)
+		if err != nil {
+			return nil, fmt.Errorf("Codex 官方账号不存在")
+		}
+		if !account.CredentialConfigured {
+			return nil, fmt.Errorf("Codex 官方账号 %q 尚未配置凭据", account.Label)
+		}
+		if account.Status != "ready" {
+			return nil, fmt.Errorf("Codex 官方账号 %q 当前不可用（%s）", account.Label, account.Status)
+		}
+		if !codexAccountOffersModel(account, wireModel) {
+			return nil, fmt.Errorf("所选模型 %q 不在 Codex 官方账号 %q 的可用模型列表中", wireModel, account.Label)
+		}
+		return map[string]any{
+			"model_source": domain.ModelSourceOfficial, "model_id": domain.OfficialCodexModelID(account.ID, wireModel),
+			"wire_model": wireModel, "codex_account_id": account.ID,
+		}, nil
+
+	case domain.ModelSourceClaudeNative:
+		if modelFound && selected.Source != domain.ModelSourceClaudeNative {
+			return nil, fmt.Errorf("模型 %q 不是 Claude native 模型", modelID)
+		}
+		if wireModel == "" && modelFound {
+			wireModel = selected.WireModel
+		}
+		if wireModel == "" {
+			return nil, fmt.Errorf("claude_native 模型源必须提供 wire_model")
+		}
+		if modelFound && selected.WireModel != "" && !strings.EqualFold(selected.WireModel, wireModel) {
+			return nil, fmt.Errorf("wire_model=%s 与模型 %q 的 wire_model=%s 不一致", wireModel, modelID, selected.WireModel)
+		}
+		if accountID != "" {
+			return nil, fmt.Errorf("Claude native 模型不能绑定 Codex 官方账号")
+		}
+		return map[string]any{
+			"model_source": domain.ModelSourceClaudeNative, "model_id": domain.ClaudeNativeModelID(wireModel),
+			"wire_model": wireModel, "codex_account_id": "",
+		}, nil
+	}
+	return nil, fmt.Errorf("model_source 必须是 provider、official 或 claude_native")
+}
+
+func (s *Service) channelCodexAccountForWireModel(ctx context.Context, wireModel string) (string, error) {
+	accounts, err := s.store.ListCodexAccounts(ctx)
+	if err != nil {
+		return "", err
+	}
+	candidates := []domain.CodexAccount{}
+	for _, account := range accounts {
+		if !account.CredentialConfigured || account.Status != "ready" {
+			continue
+		}
+		if codexAccountOffersModel(account, wireModel) {
+			candidates = append(candidates, account)
+		}
+	}
+	switch len(candidates) {
+	case 0:
+		return "", fmt.Errorf("没有可用的 Codex 官方账号提供模型 %q", wireModel)
+	case 1:
+		return candidates[0].ID, nil
+	default:
+		return "", fmt.Errorf("多个 Codex 官方账号提供模型 %q，请明确选择账号", wireModel)
+	}
+}
+
+func codexAccountOffersModel(account domain.CodexAccount, wireModel string) bool {
+	for _, option := range account.AvailableModels {
+		if option.WireModel == wireModel {
+			return true
+		}
+	}
+	return false
 }
 
 func sameStringSet(left, right []string) bool {
@@ -2675,7 +2837,7 @@ func (s *Service) executeCreateTaskAction(ctx context.Context, action domain.Cha
 	if errors.Is(err, sql.ErrNoRows) {
 		task, err = s.application.CreateTask(ctx, app.CreateTaskInput{
 			ID: taskID, ProjectID: workspace.ProjectID, WorkspaceID: workspace.ID, Title: stringField(intent, "title"), Request: stringField(intent, "request"),
-			Isolation: "inplace", Backend: runtimeChoice.Model.Backend, ModelSource: runtimeChoice.Model.Source, ModelID: runtimeChoice.Model.ID, WireModel: runtimeChoice.WireModel,
+			Isolation: "inplace", Backend: runtimeChoice.Model.Backend, ModelSource: runtimeChoice.ModelSource, ModelID: runtimeChoice.Model.ID, WireModel: runtimeChoice.WireModel,
 			CodexAccountID: runtimeChoice.CodexAccountID, ProxyEnabled: runtimeChoice.ProxyEnabled, ReasoningEffort: runtimeChoice.ReasoningEffort, Filesystem: "workspace-write", Approval: "never",
 			CollaborationMode: "single", MaxAgents: 1, KnowledgePolicy: "inherit",
 		})
@@ -2768,7 +2930,7 @@ func (s *Service) ensureConversation(ctx context.Context, instance domain.Channe
 		ProjectID: instance.HostProjectID, WorkspaceID: instance.HostWorkspaceID,
 		Title:   s.channelConversationTitle(ctx, instance, endpoint.Kind, envelope),
 		Request: "System-managed external channel conversation host.", Isolation: "inplace",
-		Backend: runtimeChoice.Model.Backend, ModelSource: runtimeChoice.Model.Source, ModelID: runtimeChoice.Model.ID, WireModel: runtimeChoice.WireModel,
+		Backend: runtimeChoice.Model.Backend, ModelSource: runtimeChoice.ModelSource, ModelID: runtimeChoice.Model.ID, WireModel: runtimeChoice.WireModel,
 		CodexAccountID: runtimeChoice.CodexAccountID, ProxyEnabled: runtimeChoice.ProxyEnabled,
 		ReasoningEffort: effort, Filesystem: filesystem, Approval: "never",
 		CollaborationMode: "single", MaxAgents: 1, KnowledgePolicy: "enabled", AllowSystemProject: true,
@@ -2836,6 +2998,7 @@ func (s *Service) updateChannelConversationIdentity(ctx context.Context, convers
 
 type channelRuntimeChoice struct {
 	Model           domain.Model
+	ModelSource     string
 	WireModel       string
 	CodexAccountID  string
 	ReasoningEffort string
@@ -2844,27 +3007,110 @@ type channelRuntimeChoice struct {
 
 func (s *Service) resolveChannelRuntime(ctx context.Context, instance domain.ChannelInstance) (channelRuntimeChoice, error) {
 	runtimeConfig, _ := mapField(instance.Config, "runtime_default")
-	configuredModelID := stringField(runtimeConfig, "model_id")
-	configuredAccountID := stringField(runtimeConfig, "codex_account_id")
+	if runtimeConfig == nil {
+		runtimeConfig = map[string]any{}
+	}
+	configured := false
+	for _, key := range []string{"model_source", "model_id", "wire_model", "codex_account_id"} {
+		if strings.TrimSpace(stringField(runtimeConfig, key)) != "" {
+			configured = true
+			break
+		}
+	}
+	// An explicit selection is resolved as written. If it is invalid the caller
+	// gets an error instead of silently running on a Provider model or another
+	// account.
+	if configured {
+		normalized, err := s.normalizeChannelRuntimeConfig(ctx, runtimeConfig)
+		if err != nil {
+			return channelRuntimeChoice{}, fmt.Errorf("channel runtime: %w", err)
+		}
+		source := stringField(normalized, "model_source")
+		modelID := stringField(normalized, "model_id")
+		wireModel := stringField(normalized, "wire_model")
+		accountID := stringField(normalized, "codex_account_id")
+		effort := firstNonEmpty(stringField(runtimeConfig, "reasoning_effort"), "")
+		if model, modelErr := s.store.Model(ctx, modelID); modelErr == nil {
+			if effort == "" {
+				effort = model.DefaultEffort
+			}
+			return channelRuntimeChoice{
+				Model: model, ModelSource: source, WireModel: firstNonEmpty(wireModel, model.WireModel),
+				CodexAccountID: accountID, ReasoningEffort: effort,
+				ProxyEnabled: boolField(runtimeConfig, "proxy_enabled"),
+			}, nil
+		}
+		switch source {
+		case domain.ModelSourceProvider:
+			return channelRuntimeChoice{}, fmt.Errorf("channel runtime: provider 模型 %q 不存在或已删除", modelID)
+		case domain.ModelSourceOfficial:
+			account, err := s.store.CodexAccount(ctx, accountID)
+			if err != nil {
+				return channelRuntimeChoice{}, fmt.Errorf("channel runtime: Codex 官方账号不存在")
+			}
+			var option domain.CodexModelOption
+			for _, candidate := range account.AvailableModels {
+				if candidate.WireModel == wireModel {
+					option = candidate
+					break
+				}
+			}
+			if option.WireModel == "" {
+				return channelRuntimeChoice{}, fmt.Errorf("channel runtime: 所选模型不在该 Codex 账号的可用模型列表中")
+			}
+			if effort == "" {
+				effort = option.DefaultEffort
+			}
+			contextWindow := option.MaxContextWindow
+			if contextWindow == 0 {
+				contextWindow = option.ContextWindow
+			}
+			model := domain.Model{
+				ID: domain.OfficialCodexModelID(account.ID, wireModel), DisplayName: option.DisplayName,
+				ProviderID: domain.OfficialCodexProviderID, Source: domain.ModelSourceOfficial,
+				CodexAccountID: account.ID, Backend: "codex", WireModel: wireModel, WireAPI: "responses",
+				ContextWindow: contextWindow, DefaultEffort: option.DefaultEffort,
+				Capabilities: map[string]any{"reasoning_efforts": option.ReasoningEfforts},
+			}
+			if model.DisplayName == "" {
+				model.DisplayName = wireModel
+			}
+			return channelRuntimeChoice{
+				Model: model, ModelSource: domain.ModelSourceOfficial, WireModel: wireModel,
+				CodexAccountID: account.ID, ReasoningEffort: effort,
+				ProxyEnabled: boolFieldDefault(runtimeConfig, "proxy_enabled", account.ProxyEnabled),
+			}, nil
+		case domain.ModelSourceClaudeNative:
+			model := domain.Model{
+				ID: domain.ClaudeNativeModelID(wireModel), DisplayName: wireModel,
+				ProviderID: domain.OfficialClaudeProviderID, Source: domain.ModelSourceClaudeNative,
+				Backend: "claude", WireModel: wireModel, WireAPI: "anthropic_messages",
+			}
+			return channelRuntimeChoice{
+				Model: model, ModelSource: domain.ModelSourceClaudeNative, WireModel: wireModel,
+				ReasoningEffort: effort, ProxyEnabled: boolField(runtimeConfig, "proxy_enabled"),
+			}, nil
+		}
+		return channelRuntimeChoice{}, fmt.Errorf("channel runtime: model_source 必须是 provider、official 或 claude_native")
+	}
+
 	tasks, _ := s.store.ListTasks(ctx, "")
 	for _, task := range tasks {
 		if task.ReadOnly || task.ProjectID == instance.HostProjectID || s.store.IsManagedChannelTask(ctx, task.ID) {
 			continue
 		}
 		snapshot, snapshotErr := s.store.RuntimeSnapshot(ctx, task.RuntimeConfigSnapshotID)
-		if snapshotErr != nil || (configuredModelID != "" && snapshot.ModelID != configuredModelID) {
+		if snapshotErr != nil {
 			continue
 		}
 		model, modelErr := s.store.Model(ctx, snapshot.ModelID)
 		accountID := snapshot.CodexAccountID
-		if configuredAccountID != "" {
-			accountID = configuredAccountID
-		}
 		if modelErr != nil || !s.channelRuntimeModelAvailable(ctx, model, accountID, snapshot.WireModel) {
 			continue
 		}
 		return channelRuntimeChoice{
-			Model: model, WireModel: snapshot.WireModel, CodexAccountID: accountID,
+			Model: model, ModelSource: domain.RuntimeModelSource(snapshot.EnvGroupID, accountID),
+			WireModel: snapshot.WireModel, CodexAccountID: accountID,
 			ReasoningEffort: firstNonEmpty(stringField(runtimeConfig, "reasoning_effort"), snapshot.ReasoningEffort), ProxyEnabled: boolFieldDefault(runtimeConfig, "proxy_enabled", snapshot.ProxyEnabled),
 		}, nil
 	}
@@ -2875,25 +3121,29 @@ func (s *Service) resolveChannelRuntime(ctx context.Context, instance domain.Cha
 	}
 	accounts, _ := s.store.ListCodexAccounts(ctx)
 	for _, model := range models {
-		if configuredModelID != "" && model.ID != configuredModelID {
+		if model.Source != "" && model.Source != domain.ModelSourceProvider && model.Source != domain.ModelSourceOfficial {
 			continue
 		}
 		if model.Source == domain.ModelSourceOfficial {
 			for _, account := range accounts {
-				if configuredAccountID != "" && account.ID != configuredAccountID {
-					continue
-				}
 				if !account.CredentialConfigured || account.Status != "ready" {
 					continue
 				}
 				if s.channelRuntimeModelAvailable(ctx, model, account.ID, model.WireModel) {
-					return channelRuntimeChoice{Model: model, WireModel: model.WireModel, CodexAccountID: account.ID, ReasoningEffort: firstNonEmpty(stringField(runtimeConfig, "reasoning_effort"), model.DefaultEffort), ProxyEnabled: boolFieldDefault(runtimeConfig, "proxy_enabled", account.ProxyEnabled)}, nil
+					return channelRuntimeChoice{
+						Model: model, ModelSource: domain.ModelSourceOfficial, WireModel: model.WireModel,
+						CodexAccountID: account.ID, ReasoningEffort: firstNonEmpty(stringField(runtimeConfig, "reasoning_effort"), model.DefaultEffort),
+						ProxyEnabled: boolFieldDefault(runtimeConfig, "proxy_enabled", account.ProxyEnabled),
+					}, nil
 				}
 			}
 			continue
 		}
 		if s.channelRuntimeModelAvailable(ctx, model, "", model.WireModel) {
-			return channelRuntimeChoice{Model: model, WireModel: model.WireModel, ReasoningEffort: firstNonEmpty(stringField(runtimeConfig, "reasoning_effort"), model.DefaultEffort), ProxyEnabled: boolField(runtimeConfig, "proxy_enabled")}, nil
+			return channelRuntimeChoice{
+				Model: model, ModelSource: domain.ModelSourceProvider, WireModel: model.WireModel,
+				ReasoningEffort: firstNonEmpty(stringField(runtimeConfig, "reasoning_effort"), model.DefaultEffort), ProxyEnabled: boolField(runtimeConfig, "proxy_enabled"),
+			}, nil
 		}
 	}
 	return channelRuntimeChoice{}, fmt.Errorf("channel runtime model is unavailable")
@@ -3002,6 +3252,9 @@ func firstNonEmpty(values ...string) string {
 }
 
 func (s *Service) channelRuntimeModelAvailable(ctx context.Context, model domain.Model, accountID, wireModel string) bool {
+	if model.Source == domain.ModelSourceClaudeNative {
+		return strings.TrimSpace(wireModel) != "" && strings.EqualFold(model.WireModel, wireModel)
+	}
 	if model.Source == domain.ModelSourceOfficial {
 		if accountID == "" {
 			return false

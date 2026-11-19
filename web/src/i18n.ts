@@ -1849,6 +1849,8 @@ const legacyEnglish: Record<string, string> = {
   "启用安静时段": "Enable quiet hours",
   "关闭后任何时间都可能自主互动": "When off, autonomous interaction can happen at any time",
   "宠物模型（聊天 + 自主行为）": "Pet model (chat + autonomy)",
+  "助手聊天模型（Provider）": "Assistant chat model (Provider)",
+  "聊天面板使用 Provider 模型；自主行为在宠物 Task 中运行，可选择 Provider、Claude native 或 Codex 官方账号。不可用来源不会回退。": "The chat panel uses a Provider model; autonomy runs in the Pet Task and can use a Provider, Claude native, or Codex official account. Unavailable sources never fall back.",
   "立即触发一次自主行为": "Trigger autonomy now",
   "已请求一次自主行为，等待 Task 执行…": "Autonomy requested; waiting for the Task",
   "只清理本机宠物 Workspace、Task、工作记录/身份设定、审批与活动记录、聊天记录，并停用本机宠物。宠物项目、同步镜像和其他设备的宠物不受影响；模型、形象和权限设置会保留。": "Only clear this device's pet Workspace, pet Task, worklog/identity, approvals and activity, and chat history, then disable this device's pet. Pet projects, sync mirrors, and pets on other devices are unaffected; models, appearance, and permissions are kept.",

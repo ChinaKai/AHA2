@@ -1655,6 +1655,12 @@ export interface OwnerAssistantView {
   models: AssistantModelOption[];
   model_name?: string;
   brain_model_name?: string;
+  pet_model_id?: string;
+  pet_model_source?: string;
+  pet_wire_model?: string;
+  pet_codex_account_id?: string;
+  pet_model_name?: string;
+  pet_workspace_id?: string;
   tools?: PetToolInfo[];
   pet_last_brain_at?: string;
   pet_next_brain_at?: string;

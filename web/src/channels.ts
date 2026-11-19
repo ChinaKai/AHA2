@@ -1,6 +1,8 @@
 import {api} from "./api.js";
 import {icon} from "./icons.js";
 import {t} from "./i18n.js";
+import {bindModelSourceFields, buildModelSourceOptions, claudeCatalogFromWorkspace, modelSourceFieldsHTML, readModelSourceSelection} from "./model_source_picker.js";
+import type {ModelSourceSelection} from "./model_source_picker.js";
 import type {ChannelConversationSummary, ChannelDelivery, ChannelInstance, ChannelOnboardingOptions, ChannelOnboardingSession, ChannelPlugin, CodexAccount, Knowledge, KnowledgeLibrary, KnowledgeVaultLibrary, Model, Project, Workspace} from "./types.js";
 
 interface ChannelUIContext {
@@ -115,51 +117,33 @@ export async function exportRetiredChannelInstance(instanceID: string): Promise<
 	window.setTimeout(() => URL.revokeObjectURL(blobURL), 0);
 }
 
-function runtimeModelLabel(model: Model): string {
-  return escapeHTML([model.provider_name, model.display_name].filter(Boolean).join(" / ") || model.id);
-}
-
-function codexAccountSupportsModel(account: CodexAccount, model: Model): boolean {
-  const available = account.available_models || [];
-  return available.length === 0 || available.some(item => item.wire_model === model.wire_model);
-}
-
-export function channelRuntimeOptions(config: Record<string, unknown>, context: ChannelUIContext): string {
+export function channelRuntimeSelection(config: Record<string, unknown>, context: ChannelUIContext): ModelSourceSelection {
   const runtime = objectValue(config.runtime_default);
   const modelID = String(runtime.model_id || "");
-  const accountID = String(runtime.codex_account_id || "");
-  const options = [`<option value="" data-model-id="" data-codex-account-id="" ${modelID ? "" : "selected"}>自动选择可用模型</option>`];
-  let selected = !modelID;
-  const accounts = context.accounts.filter(item => item.status === "ready" && item.credential_configured);
-  for (const model of context.models) {
-    const label = runtimeModelLabel(model);
-    if (model.source === "official") {
-      const compatible = accounts.filter(account => codexAccountSupportsModel(account, model));
-      if (!compatible.length) {
-        options.push(`<option value="${escapeHTML(model.id)}" disabled>${label} · 无就绪 Codex 账号</option>`);
-        continue;
-      }
-      for (const account of compatible) {
-        const isSelected = model.id === modelID && account.id === accountID;
-        if (isSelected) selected = true;
-        options.push(`<option value="${escapeHTML(model.id)}" data-model-id="${escapeHTML(model.id)}" data-codex-account-id="${escapeHTML(account.id)}" ${isSelected ? "selected" : ""}>${label} · ${escapeHTML(account.label)}</option>`);
-      }
-      continue;
-    }
-    const isSelected = model.id === modelID;
-    if (isSelected) selected = true;
-    options.push(`<option value="${escapeHTML(model.id)}" data-model-id="${escapeHTML(model.id)}" data-codex-account-id="" ${isSelected ? "selected" : ""}>${label}</option>`);
-  }
-  if (modelID && !selected) {
-    const model = context.models.find(item => item.id === modelID);
-    const label = model ? runtimeModelLabel(model) : escapeHTML(modelID);
-    options.push(`<option value="${escapeHTML(modelID)}" data-model-id="${escapeHTML(modelID)}" data-codex-account-id="${escapeHTML(accountID)}" selected>${label} · 当前配置不可用</option>`);
-  }
-  return options.join("");
+  const model = context.models.find(item => item.id === modelID);
+  const accountID = String(runtime.codex_account_id || model?.codex_account_id || "");
+  // Old saves stored only model_id + account. The catalog response hides
+  // managed models, so an account is the remaining signal that the saved row
+  // was an official selection. Never infer Provider in that case.
+  const source = String(runtime.model_source || model?.source || (accountID ? "official" : ""));
+  return {
+    source,
+    modelID,
+    wireModel: String(runtime.wire_model || model?.wire_model || ""),
+    accountID,
+  };
 }
 
-function channelRuntimeEditor(config: Record<string, unknown>, context: ChannelUIContext): string {
-  return `<fieldset class="channel-runtime-editor"><legend>运行模型</legend><label>模型与执行账号<select name="channel_runtime">${channelRuntimeOptions(config, context)}</select></label><small>私聊和群聊共用。官方 Codex 模型会同时指定账号。</small></fieldset>`;
+export function channelRuntimeOptionsFor(config: Record<string, unknown>, context: ChannelUIContext, instance?: ChannelInstance) {
+  const selection = channelRuntimeSelection(config, context);
+  const workspace = (context.workspaces || []).find(item => item.id === (instance?.host_workspace_id || ""));
+  const options = buildModelSourceOptions(context.models, context.accounts, claudeCatalogFromWorkspace(workspace), selection, {allowAuto: true});
+  return {selection, options};
+}
+
+export function channelRuntimeEditor(config: Record<string, unknown>, context: ChannelUIContext, instance?: ChannelInstance): string {
+  const {selection, options} = channelRuntimeOptionsFor(config, context, instance);
+  return `<fieldset class="channel-runtime-editor"><legend>运行模型</legend>${modelSourceFieldsHTML("channel-runtime", options, selection)}<small>私聊和群聊共用。官方来源会同时确定账号和模型；不可用的账号或模型不可选。</small></fieldset>`;
 }
 
 export interface ChannelKnowledgeSource {
@@ -307,13 +291,15 @@ function openChannelSettings(instance: ChannelInstance, context: ChannelUIContex
   dialog.className = "channel-settings-dialog";
   dialog.innerHTML = `<div class="dialog-head"><div><h2>渠道设置</h2><p>${escapeHTML(instance.name)}</p></div><button type="button" class="icon-button" data-close aria-label="${t("common.closeDialog")}">${icon("close")}</button></div>
     <div class="dialog-body">
-      ${channelRuntimeEditor(config, context)}
+      ${channelRuntimeEditor(config, context, instance)}
       <fieldset><legend>消息通知</legend><label class="channel-check"><input type="checkbox" name="notify_task_status" ${config.notify_task_status === true ? "checked" : ""}>普通 Task 状态变更推送到飞书私聊助手</label><small>仅推送等待处理、完成、失败或中断等状态；不会推送普通消息、过程输出或渠道宿主 Task。</small></fieldset>
       <section class="channel-settings-knowledge"><div class="panel-head"><strong>Knowledge 访问范围</strong><span>私聊不限制；群聊可选全局知识 + 项目知识库</span></div><div data-channel-settings-knowledge><small>加载中…</small></div></section>
     </div>
     <div class="dialog-actions"><button type="button" data-close>取消</button><button type="button" class="primary" data-save>保存设置</button></div>`;
   document.body.append(dialog);
   dialog.showModal();
+  const runtimePicker = channelRuntimeOptionsFor(config, context, instance);
+  bindModelSourceFields("channel-runtime", runtimePicker.options);
   const close = () => { dialog.close(); dialog.remove(); };
   dialog.querySelectorAll("[data-close]").forEach(button => button.addEventListener("click", close));
   dialog.addEventListener("cancel", event => { event.preventDefault(); close(); });
@@ -355,12 +341,9 @@ function openChannelSettings(instance: ChannelInstance, context: ChannelUIContex
   }
   saveButton?.addEventListener("click", () => {
     void (async () => {
-      const runtimeOption = dialog.querySelector<HTMLSelectElement>('select[name="channel_runtime"]')?.selectedOptions[0];
+      const runtimeSelection = readModelSourceSelection("channel-runtime");
       const configUpdate = {
-        runtime_default: {
-          model_id: runtimeOption?.dataset.modelId || "",
-          codex_account_id: runtimeOption?.dataset.codexAccountId || "",
-        },
+        runtime_default: runtimeSelection,
         runtime_assistant_dm: {inherit: true},
         runtime_group_digital_human: {inherit: true},
         notify_task_status: Boolean(dialog.querySelector<HTMLInputElement>('input[name="notify_task_status"]')?.checked),

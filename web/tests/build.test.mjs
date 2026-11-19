@@ -309,21 +309,21 @@ test("channel lifecycle renders active and retired actions with guarded purge", 
       {id: "account-b", label: "账号 B", status: "ready", credential_configured: true, available_models: [{wire_model: "gpt-5", display_name: "GPT-5"}]},
     ],
   };
-  const combinedSelect = module.channelRuntimeOptions({runtime_default: {model_id: "model-codex", codex_account_id: "account-b"}}, combinedContext);
-  assert.match(combinedSelect, /自动选择可用模型/);
-  assert.match(combinedSelect, /Codex \/ GPT-5/);
-  assert.match(combinedSelect, /Provider \/ Claude/);
-  assert.match(combinedSelect, /账号 A/);
-  assert.match(combinedSelect, /data-codex-account-id="account-b" selected/);
+  const combinedSelect = module.channelRuntimeEditor({runtime_default: {model_id: "model-codex", codex_account_id: "account-b"}}, combinedContext, instance);
+  assert.match(combinedSelect, /Codex 官方账号/);
+  assert.match(combinedSelect, /账号 A · GPT-5/);
+  assert.match(combinedSelect, /账号 B · GPT-5/);
+  assert.match(combinedSelect, /Provider 模型/);
+  assert.match(combinedSelect, /data-account-id="account-b" selected/);
   assert.equal((combinedSelect.match(/ selected/g) || []).length, 1);
 
-  const legacySelect = module.channelRuntimeOptions({
+  const legacySelect = module.channelRuntimeEditor({
     runtime_default: {model_id: "", codex_account_id: ""},
     runtime_assistant_dm: {inherit: true, model_id: "model_stale", codex_account_id: "acct_stale"},
     runtime_group_digital_human: {model_id: "model_stale"},
-  }, context);
+  }, context, instance);
   assert.doesNotMatch(legacySelect, /model_stale|assistant_model_id|group_model_id/);
-  assert.match(legacySelect, /自动选择可用模型/);
+  assert.match(legacySelect, /Provider 模型/);
 
   const retired = module.renderChannels([], [{...instance, status: "retired"}], context);
   for (const marker of ["已归档", "data-channel-view", "data-channel-export", "data-channel-purge", "永久删除"]) assert.match(retired, new RegExp(marker));
@@ -1596,7 +1596,7 @@ test("built web contains responsive application", async () => {
   assert.match(api, /channel-instances\/.*\/conversations/);
   assert.match(channels, /权限更新仅做增量授权/);
   assert.doesNotMatch(channels, /name="app_secret" type="password"/);
-	for (const marker of ["渠道设置", "channel_runtime", "notify_task_status", "普通 Task 状态变更推送到飞书私聊助手", "knowledge_entry_id"]) assert.match(channels, new RegExp(marker));
+	for (const marker of ["渠道设置", "channel-runtime-source", "notify_task_status", "普通 Task 状态变更推送到飞书私聊助手", "knowledge_entry_id"]) assert.match(channels, new RegExp(marker));
 	for (const marker of ["data-channel-settings-open", "data-channel-conversations-open", "channelConversations", "channel-conversation-card", "绑定任务", "最近入站", "最近出站"] ) assert.match(channels, new RegExp(marker));
 	for (const marker of ["data-channel-policy-select-all", "data-channel-policy-clear", "knowledge_scope_mode", "data-channel-knowledge-selected", "全部项目知识与知识库"]) assert.match(channels, new RegExp(marker));
 	assert.match(channels, /私聊不限制；群聊可选全局知识 \+ 项目知识库/);
