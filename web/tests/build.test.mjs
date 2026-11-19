@@ -3821,7 +3821,10 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   // 268,110, ceiling is the next 256-byte boundary.
   // task-657 added the prompt page edit-mode and scenario-preview dialog
   // styles; measured 268,606, so the ceiling moves to the next boundary.
-  const FIRST_SCREEN_GZIP_BUDGET = 268800;
+  // task-662 added the Pet Task's cross-project skill picker (search input,
+  // disabled/version metadata, per-project labels); measured 269,595, so the
+  // ceiling moves to the next 256-byte boundary.
+  const FIRST_SCREEN_GZIP_BUDGET = 269824;
   // The version query parameter is a content hash and its hex digits change
   // how the same code gzips: main already sits exactly on the budget, so a
   // hash-only change could trip it without growing the payload. Mask the

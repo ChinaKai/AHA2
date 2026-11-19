@@ -586,10 +586,93 @@ export function validateAgentConfigInput(input: AgentConfigValidationInput): str
   return errors;
 }
 
-export function renderTaskSkills(skills: Skill[], projectID: string, selected: string[]): string {
+// The Pet Task's system project. Keeping the literal here avoids pulling the
+// lazy vault-skill module into the first-screen bundle.
+const PET_TASK_PROJECT_ID = "project_pet";
+
+function taskSkillUnavailableText(skill: Skill, pet: boolean): string {
+  if (!pet) return "";
+  if (skill.enabled === false) return t("knowledge.skill.task.disabled");
+  if (skill.status && skill.status !== "active") return t("knowledge.skill.task.status", {status: skill.status});
+  switch (skill.unavailable_reason) {
+    case "runtime_read_off":
+      return t("knowledge.skill.task.runtimeOff");
+    case "index_not_ready":
+      return t("knowledge.skill.task.indexNotReady");
+    case "project_not_bound":
+      return t("knowledge.skill.task.projectNotBound");
+    case "archive_read_only":
+      return t("knowledge.skill.task.archiveReadOnly");
+  }
+  return "";
+}
+
+// taskSkillSearchText is the lower-cased haystack the Pet Task picker filters
+// on. It includes the owning project so searching "BU2" finds its skills.
+export function taskSkillSearchText(skill: Skill): string {
+  return [
+    skill.name,
+    skill.description,
+    skill.project_name,
+    skill.project_id,
+    skill.scope === "global" ? "全局 global" : `项目 project ${skill.project_name || skill.project_id || ""}`,
+    `v${skill.version || 1}`,
+    skill.id,
+  ].join(" ").toLowerCase();
+}
+
+export function taskSkillMatchesSearch(skill: Skill, query: string): boolean {
+  const tokens = String(query || "").trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (!tokens.length) return true;
+  const text = taskSkillSearchText(skill);
+  return tokens.every(token => text.includes(token));
+}
+
+// filterTaskSkillOptions hides non-matching entries and empty groups in place.
+// The picker keeps its checkbox state, so a search never changes the selection.
+export function filterTaskSkillOptions(root: ParentNode, query: string): number {
+  const tokens = String(query || "").trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const options = [...root.querySelectorAll<HTMLElement>("[data-skill-search]")];
+  let visible = 0;
+  for (const option of options) {
+    const text = option.dataset.skillSearch || "";
+    const match = tokens.every(token => text.includes(token));
+    option.style.display = match ? "" : "none";
+    if (match) visible += 1;
+  }
+  root.querySelectorAll<HTMLElement>("[data-task-skill-project]").forEach(group => {
+    const any = [...group.querySelectorAll<HTMLElement>("[data-skill-search]")].some(option => option.style.display !== "none");
+    group.style.display = any ? "" : "none";
+  });
+  root.querySelectorAll<HTMLElement>("[data-task-skill-group]").forEach(section => {
+    const any = [...section.querySelectorAll<HTMLElement>("[data-skill-search]")].some(option => option.style.display !== "none");
+    section.style.display = any ? "" : "none";
+  });
+  const empty = root.querySelector<HTMLElement>("[data-task-skill-empty]");
+  if (empty) empty.hidden = tokens.length === 0 || visible > 0;
+  return visible;
+}
+
+export function renderTaskSkills(
+  skills: Skill[],
+  projectID: string,
+  selected: string[],
+  options: {query?: string} = {},
+): string {
+  const pet = projectID === PET_TASK_PROJECT_ID;
+  const query = String(options.query || "");
   const visible = skills
-    .filter(item => item.enabled && item.status === "active" && item.scope !== "archive" && item.can_update !== false &&
-      (item.scope === "global" || item.project_id === projectID || item.bound_project_id === projectID))
+    .filter(item => {
+      if (item.scope !== "global" && item.scope !== "project") return false;
+      if (item.can_update === false) return false;
+      // The Pet Task sees every project's entries, including disabled ones, so
+      // it can explain why an entry cannot be selected. Normal Tasks keep the
+      // existing project-scoped visibility (the catalog mapping used to force
+      // every entry to enabled, so filtering here would narrow the old list).
+      if (pet) return true;
+      return item.scope === "global" || item.project_id === projectID || item.bound_project_id === projectID;
+    })
+    .filter(item => taskSkillMatchesSearch(item, query))
     .sort((left, right) => {
       if (left.scope !== right.scope) return left.scope === "global" ? -1 : 1;
       return left.name.localeCompare(right.name) || left.id.localeCompare(right.id);
@@ -597,8 +680,12 @@ export function renderTaskSkills(skills: Skill[], projectID: string, selected: s
   const renderOption = (item: Skill): string => {
     const auto = item.auto_attach ? ' <span class="capability-badge">自动</span>' : "";
     const source = "vault 技能";
-    const scope = item.scope === "global" ? "全局" : `项目 · ${item.bound_project_id || item.project_id || ""}`;
-    return `<label class="task-skill-option"><input type="checkbox" name="skill_ids" value="${escapeHTML(item.id)}" ${selected.includes(item.id) ? "checked" : ""}><span><strong>${escapeHTML(item.name)}${auto}</strong><small>${escapeHTML(source)} · ${escapeHTML(scope)} · ${escapeHTML(item.description || "无描述")}</small></span></label>`;
+    const projectName = item.project_name || item.bound_project_id || item.project_id || "";
+    const scope = item.scope === "global" ? "全局" : `项目 · ${projectName}`;
+    const unavailable = taskSkillUnavailableText(item, pet);
+    const disabled = pet && Boolean(unavailable);
+    const meta = [source, scope, `v${item.version || 1}`, unavailable].filter(Boolean).join(" · ");
+    return `<label class="task-skill-option${disabled ? " task-skill-disabled" : ""}" data-skill-search="${escapeHTML(taskSkillSearchText(item))}"><input type="checkbox" name="skill_ids" value="${escapeHTML(item.id)}" ${selected.includes(item.id) ? "checked" : ""}${disabled ? " disabled" : ""}><span><strong>${escapeHTML(item.name)}${auto}</strong><small>${escapeHTML(meta)} · ${escapeHTML(item.description || "无描述")}</small></span></label>`;
   };
   // The picker reuses the skill page grouping: global first, then project
   // skills grouped by their owning project so the same package name under two
@@ -616,8 +703,9 @@ export function renderTaskSkills(skills: Skill[], projectID: string, selected: s
       byProject.set(key, [...(byProject.get(key) || []), item]);
     }
     const groups = [...byProject.entries()]
-      .sort((left, right) => left[0].localeCompare(right[0]))
-      .map(([key, items]) => `<div class="task-skill-project" data-task-skill-project="${escapeHTML(key)}">${items.map(renderOption).join("")}</div>`);
+      .map(([key, items]) => ({key, items, label: items[0]?.project_name || key}))
+      .sort((left, right) => left.label.localeCompare(right.label) || left.key.localeCompare(right.key))
+      .map(({key, items, label}) => `<div class="task-skill-project" data-task-skill-project="${escapeHTML(key)}">${pet ? `<div class="task-skill-project-label" data-task-skill-project-label="${escapeHTML(key)}">${escapeHTML(label)}</div>` : ""}${items.map(renderOption).join("")}</div>`);
     sections.push(`<section class="task-skill-group" data-task-skill-group="project"><header><strong>${escapeHTML(t("knowledge.skill.group.projects"))}</strong><span>${projectSkills.length}</span></header>${groups.join("")}</section>`);
   }
   // A historical Task can still store a legacy skill id. After the vault-only
@@ -628,7 +716,10 @@ export function renderTaskSkills(skills: Skill[], projectID: string, selected: s
   if (unavailable.length) {
     sections.push(`<section class="task-skill-group" data-task-skill-group="unavailable"><header><strong>${escapeHTML(t("knowledge.skill.group.unavailable"))}</strong><span>${unavailable.length}</span></header>${unavailable.map(id => `<div class="task-skill-option task-skill-unavailable"><span><strong>${escapeHTML(id)}</strong><small>${escapeHTML(t("knowledge.skill.unavailableHint"))}</small></span></div>`).join("")}</section>`);
   }
-  return sections.join("") || `<div class="field-help">当前 Project 没有可用 Skill。</div>`;
+  const search = pet
+    ? `<label class="task-skill-search">${icon("search")}<input type="search" data-task-skill-search autocomplete="off" placeholder="${escapeHTML(t("knowledge.skill.task.search"))}"></label><div class="field-help task-skill-search-empty" data-task-skill-empty hidden>${escapeHTML(t("knowledge.skill.task.searchEmpty"))}</div>`
+    : "";
+  return search + (sections.join("") || `<div class="field-help">当前 Project 没有可用 Skill。</div>`);
 }
 
 export type MCPOptionsResult = {body: string; total: number};

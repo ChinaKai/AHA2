@@ -35,6 +35,7 @@ import type {InteractiveRegionState, ModelHealthView} from "./ui_helpers.js";
 import {
   compactNumber,
   contextPercent,
+  filterTaskSkillOptions,
   formatDuration,
   isActiveTurn,
   latestAgentTurns,
@@ -1752,6 +1753,11 @@ function availableTaskSkills(projectID: string, includeIDs: string[] = []): Skil
   // load, the same vault catalog returned by GET /api/v1/skills is the
   // fallback. The legacy skills table is never merged here.
   if (vaultTaskSkillsModule) return availableVaultTaskSkills(projectID, includeIDs);
+  if (projectID === "project_pet") {
+    // The Pet Task is the system administrator view: every global and project
+    // package stays visible even though project_pet owns no vault space.
+    return state.skills.filter(item => item.can_update !== false && (item.scope === "global" || item.scope === "project"));
+  }
   return state.skills.filter(item => item.enabled && item.status === "active" && item.scope !== "archive" && item.can_update !== false &&
     (item.scope === "global" || item.project_id === projectID || item.bound_project_id === projectID));
 }
@@ -1769,6 +1775,16 @@ function taskSkillOptions(projectID: string, selected: string[] = [], includeAut
   const hint = taskSkillSourceHint(projectID);
   return renderTaskSkills(items, projectID, [...new Set([...selected, ...defaults])])
     + (hint ? `<div class="field-help task-skill-source-hint">${escapeHTML(hint)}</div>` : "");
+}
+
+function bindTaskSkillSearch(root: HTMLElement | null): void {
+  if (!root) return;
+  // Property assignment keeps repeated render passes from stacking listeners.
+  root.oninput = event => {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement) || !target.matches("[data-task-skill-search]")) return;
+    filterTaskSkillOptions(target.closest(".task-skill-options") || root, target.value);
+  };
 }
 
 function syncTaskSkills(): void {
@@ -7868,6 +7884,10 @@ function bindCommon(): void {
     });
   });
   document.querySelector("#task-project")?.addEventListener("change", syncTaskWorkspaces);
+  // Both Agent dialogs render the skill picker. The search input filters the
+  // already-rendered options in place so a search never drops checkbox state.
+  bindTaskSkillSearch(document.querySelector<HTMLElement>("#task-dialog"));
+  bindTaskSkillSearch(document.querySelector<HTMLElement>("#agent-config-dialog"));
   // The collapsed summaries report what is selected inside them, so they must
   // follow every checkbox change, not just the initial render.
   document.querySelector<HTMLElement>("#task-dialog")?.addEventListener("change", event => {
