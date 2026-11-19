@@ -42,6 +42,7 @@ function view(overrides = {}) {
     selectedTemplateID: "role.main",
     editing: false,
     editContent: "",
+    generation: 0,
     switchTargetID: "",
     previewScenario: "web-task-single-main",
     previewMessage: "这是一条测试消息",
@@ -150,4 +151,41 @@ test("test message edits stay separate from the template draft", () => {
   // The dialog stays disabled during editing; changing its message is not a
   // template draft and cannot enable preview.
   assert.match(html, /id="preview-prompt-scenario"[^>]*disabled/);
+});
+
+test("a delayed save response cannot end another template's edit", () => {
+  const editor = promptAdmin.createPromptEditorState();
+  promptAdmin.beginPromptEdit(editor, "role.main", "A draft");
+  const token = promptAdmin.beginPromptSave(editor);
+
+  // Pause A's response, cancel, switch to B, and start typing there.
+  promptAdmin.cancelPromptEdit(editor);
+  editor.selectedTemplateID = "protocol.attachment-delivery";
+  promptAdmin.beginPromptEdit(editor, "protocol.attachment-delivery", "B draft");
+  promptAdmin.updatePromptDraft(editor, "B draft v2");
+
+  // A's late response must not close B's editor or clear B's draft.
+  assert.equal(promptAdmin.finishPromptSave(editor, token), false);
+  assert.equal(editor.editing, true);
+  assert.equal(editor.selectedTemplateID, "protocol.attachment-delivery");
+  assert.equal(editor.editContent, "B draft v2");
+});
+
+test("typing during an in-flight save keeps the newer draft editable", () => {
+  const editor = promptAdmin.createPromptEditorState();
+  promptAdmin.beginPromptEdit(editor, "role.main", "A draft");
+  const token = promptAdmin.beginPromptSave(editor);
+  promptAdmin.updatePromptDraft(editor, "A draft v2");
+  assert.equal(promptAdmin.finishPromptSave(editor, token), false);
+  assert.equal(editor.editing, true);
+  assert.equal(editor.editContent, "A draft v2");
+});
+
+test("a save only finishes its own unchanged session", () => {
+  const editor = promptAdmin.createPromptEditorState();
+  promptAdmin.beginPromptEdit(editor, "role.main", "A draft");
+  const token = promptAdmin.beginPromptSave(editor);
+  assert.equal(promptAdmin.finishPromptSave(editor, token), true);
+  assert.equal(editor.editing, false);
+  assert.equal(editor.editContent, "");
 });

@@ -779,15 +779,7 @@ func normalizeKnowledgePolicy(value string) string {
 }
 
 func knowledgeEnabled(_ domain.Project, task domain.Task) bool {
-	switch strings.TrimSpace(task.KnowledgePolicy) {
-	case "disabled":
-		return false
-	case "enabled", "inherit", "":
-		return true
-	default:
-		// A legacy or hand-written value must not silently disable knowledge.
-		return true
-	}
+	return domain.KnowledgeEnabled(task)
 }
 
 func (s *Service) validateTaskSkillIDs(ctx context.Context, projectID string, ids []string) ([]string, error) {

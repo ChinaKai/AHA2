@@ -82,6 +82,7 @@ export interface PromptAdminView {
   selectedTemplateID: string;
   editing: boolean;
   editContent: string;
+  generation: number;
   switchTargetID: string;
   previewScenario: string;
   previewMessage: string;
@@ -97,6 +98,7 @@ const state: PromptAdminView = {
   selectedTemplateID: "",
   editing: false,
   editContent: "",
+  generation: 0,
   switchTargetID: "",
   previewScenario: PROMPT_SCENARIOS[0].id,
   previewMessage: DEFAULT_PREVIEW_MESSAGE,
@@ -107,6 +109,57 @@ const state: PromptAdminView = {
 };
 
 let previewRequestID = 0;
+
+// Explicit edit-session state. A save response may only finish the session it
+// started; a template switch, cancel, or further typing advances the generation
+// so a late response can never close another template's editor.
+export interface PromptEditorState {
+  editing: boolean;
+  selectedTemplateID: string;
+  editContent: string;
+  generation: number;
+}
+
+export interface PromptSaveToken {
+  generation: number;
+  templateID: string;
+}
+
+export function createPromptEditorState(): PromptEditorState {
+  return {editing: false, selectedTemplateID: "", editContent: "", generation: 0};
+}
+
+export function beginPromptEdit(target: PromptEditorState, templateID: string, content: string): void {
+  target.generation += 1;
+  target.editing = true;
+  target.selectedTemplateID = templateID;
+  target.editContent = content;
+}
+
+export function updatePromptDraft(target: PromptEditorState, content: string): void {
+  target.editContent = content;
+  target.generation += 1;
+}
+
+export function cancelPromptEdit(target: PromptEditorState): void {
+  target.generation += 1;
+  target.editing = false;
+  target.editContent = "";
+}
+
+export function beginPromptSave(target: PromptEditorState): PromptSaveToken {
+  return {generation: target.generation, templateID: target.selectedTemplateID};
+}
+
+export function finishPromptSave(target: PromptEditorState, token: PromptSaveToken): boolean {
+  if (!target.editing || target.generation !== token.generation || target.selectedTemplateID !== token.templateID) {
+    return false;
+  }
+  target.generation += 1;
+  target.editing = false;
+  target.editContent = "";
+  return true;
+}
 
 function escapeHTML(value: unknown): string {
   return String(value ?? "")
@@ -298,18 +351,26 @@ function markEditorPristine(): void {
   if (textarea) textarea.value = textarea.defaultValue;
 }
 
-async function saveCurrent(notify: (kind: "notice" | "error", message: string) => void): Promise<boolean> {
+interface PromptSaveResult {
+  ok: boolean;
+  // current is false when the user cancelled, switched templates, or typed
+  // further while this save was in flight. The response must not touch that
+  // newer editor session.
+  current: boolean;
+}
+
+async function saveCurrent(notify: (kind: "notice" | "error", message: string) => void): Promise<PromptSaveResult> {
+  const token = beginPromptSave(state);
   const content = document.querySelector<HTMLTextAreaElement>("[data-prompt-template-content]")?.value ?? state.editContent;
   try {
-    await api.updatePromptTemplate(state.selectedTemplateID, content);
-    state.editing = false;
-    state.editContent = "";
+    await api.updatePromptTemplate(token.templateID, content);
     await loadPromptCatalog();
+    const current = finishPromptSave(state, token);
     notify("notice", "提示词模板已保存");
-    return true;
+    return {ok: true, current};
   } catch (error) {
     notify("error", error instanceof Error ? error.message : String(error));
-    return false;
+    return {ok: false, current: false};
   }
 }
 
@@ -336,29 +397,33 @@ export function bindPromptAdmin(
     const selected = activeTemplate(state);
     if (!selected?.editable) return;
     blurEditor();
-    state.editing = true;
-    state.editContent = selected.content;
+    beginPromptEdit(state, selected.id, selected.content);
     render();
   });
 
   document.querySelector<HTMLTextAreaElement>("[data-prompt-template-content]")?.addEventListener("input", event => {
     if (!state.editing) return;
-    state.editContent = (event.currentTarget as HTMLTextAreaElement).value;
+    updatePromptDraft(state, (event.currentTarget as HTMLTextAreaElement).value);
     const count = document.querySelector<HTMLElement>("[data-prompt-char-count]");
     if (count) count.textContent = `${charCount(state.editContent)} chars`;
   });
 
   document.querySelector("#save-prompt-template")?.addEventListener("click", async () => {
-    const saved = await saveCurrent(notify);
-    if (saved) blurEditor();
-    render();
+    const result = await saveCurrent(notify);
+    if (result.current) {
+      blurEditor();
+      render();
+    } else if (!state.editing) {
+      // A late response for an already-cancelled edit may still refresh the
+      // saved content, but it must never disturb a newer edit session.
+      render();
+    }
   });
 
   document.querySelector("#cancel-prompt-template")?.addEventListener("click", () => {
     blurEditor();
     markEditorPristine();
-    state.editing = false;
-    state.editContent = "";
+    cancelPromptEdit(state);
     render();
   });
 
@@ -368,8 +433,7 @@ export function bindPromptAdmin(
       await api.resetPromptTemplate(state.selectedTemplateID);
       blurEditor();
       markEditorPristine();
-      state.editing = false;
-      state.editContent = "";
+      cancelPromptEdit(state);
       await loadPromptCatalog();
       notify("notice", "已恢复内置模板");
     } catch (error) {
@@ -381,7 +445,8 @@ export function bindPromptAdmin(
   document.querySelector("[data-prompt-switch-save]")?.addEventListener("click", async () => {
     const target = state.switchTargetID;
     if (!target) return;
-    if (!await saveCurrent(notify)) return;
+    const result = await saveCurrent(notify);
+    if (!result.ok || !result.current) return;
     blurEditor();
     state.switchTargetID = "";
     document.querySelector<HTMLDialogElement>("[data-prompt-switch-dialog]")?.close();
@@ -394,9 +459,8 @@ export function bindPromptAdmin(
     blurEditor();
     state.switchTargetID = "";
     document.querySelector<HTMLDialogElement>("[data-prompt-switch-dialog]")?.close();
+    cancelPromptEdit(state);
     state.selectedTemplateID = target;
-    state.editing = false;
-    state.editContent = "";
     render();
   });
   document.querySelector("[data-prompt-switch-cancel]")?.addEventListener("click", () => {

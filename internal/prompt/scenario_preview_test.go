@@ -142,13 +142,52 @@ func TestScenarioPreviewSelectsTheExpectedIdentityAndPolicy(t *testing.T) {
 	if !strings.Contains(groupUnbound, "## Group request intent") {
 		t.Fatal("unbound group lost the group rules")
 	}
-	if strings.Contains(groupUnbound, "/group-permissions.md") {
+	if strings.Contains(groupUnbound, "Owner permission rules for group task routes") {
 		t.Fatal("unbound group must not materialize task-route group permissions")
 	}
 
 	groupTask := render(ScenarioChannelGroupTaskSingle)
-	if !strings.Contains(groupTask, "/group-permissions.md") {
+	if !strings.Contains(groupTask, "Owner permission rules for group task routes") {
 		t.Fatal("task-routed group lost the group permissions resource")
+	}
+}
+
+// The production renderer selects protocol.knowledge whenever knowledge is
+// enabled. This assertion builds the expected static section from the
+// registered production template, independently of scenarioBuildInput, so a
+// demo input that silently drops KnowledgeEnabled cannot hide the regression.
+func TestScenarioPreviewIncludesProductionKnowledgeProtocol(t *testing.T) {
+	t.Parallel()
+	engine := NewEngine(&fixturePromptRepository{})
+	ctx := context.Background()
+	templates, err := engine.TemplatesForLanguage(ctx, domain.LanguageEnglish)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var knowledge domain.PromptTemplate
+	for _, item := range templates {
+		if item.ID == "protocol.knowledge" {
+			knowledge = item
+			break
+		}
+	}
+	if knowledge.ID == "" {
+		t.Fatal("protocol.knowledge is not registered")
+	}
+	rendered, err := renderTemplate(knowledge.ID, knowledge.Content, sampleTemplateData())
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := "## " + knowledge.Name + "\n" + rendered
+
+	for _, spec := range ScenarioCatalog() {
+		preview, err := engine.PreviewScenario(ctx, spec.ID, "", "", domain.LanguageEnglish)
+		if err != nil {
+			t.Fatalf("preview %s: %v", spec.ID, err)
+		}
+		if !strings.Contains(preview.Prompt, expected) {
+			t.Fatalf("scenario %s is missing the production Knowledge Protocol section", spec.ID)
+		}
 	}
 }
 

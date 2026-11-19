@@ -280,6 +280,14 @@ func (engine *Engine) scenarioBuildInput(
 	}
 
 	channelContext := demoChannelContext(shape, task.ID)
+	// Mirror the production knowledge selection in runTurn: a channel turn that
+	// is not a task_route always gets knowledge, otherwise the Task policy
+	// decides. The demo Task policy is enabled, so every preview scene includes
+	// the production Knowledge Protocol section.
+	knowledgeEnabled := domain.KnowledgeEnabled(task)
+	if len(channelContext) > 0 && channelRouteMode(channelContext) != "task_route" {
+		knowledgeEnabled = true
+	}
 
 	item := InboxTemplateItem{
 		Sequence: 1, SourceKind: "owner_message", SourceAgentID: "owner",
@@ -348,6 +356,7 @@ func (engine *Engine) scenarioBuildInput(
 		IncludeRecentContext: true, UserMessage: userMessage,
 		ChannelContext: channelContext, Identity: identity,
 		IdentitySupplement: identitySupplement,
+		KnowledgeEnabled:   knowledgeEnabled,
 		AgentAPIURL:        "http://127.0.0.1:8766", Language: language,
 	}
 	return input, effectiveSource, nil
