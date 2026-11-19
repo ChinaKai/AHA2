@@ -522,7 +522,19 @@ func (s *Service) SubmitAgentCollaboration(ctx context.Context, claims agentapi.
 	if channelContext, channelErr := s.store.ChannelContextForInboxBatch(ctx, call.Turn.InboxBatchID); channelErr == nil && channelRouteMode(channelContext) != "task_route" {
 		return "", 0, ErrAgentCallForbidden
 	}
-	return s.spawnAgentTurns(ctx, call.Task, call.Turn, actions, strings.TrimSpace(mainFollowup))
+	singleMode := call.Task.CollaborationMode != "auto"
+	batchID, created, err := s.spawnAgentTurns(ctx, call.Task, call.Turn, actions, strings.TrimSpace(mainFollowup))
+	if err != nil {
+		return batchID, created, err
+	}
+	if singleMode {
+		// A single-agent Task has no dispatchable sub-agent surface. The enqueue
+		// path has already recorded the visible per-action rejection; returning a
+		// distinct error keeps the HTTP endpoint and the collab MCP facade from
+		// reporting a successful empty batch on top of it.
+		return "", 0, ErrAgentCollaborationRequiresAuto
+	}
+	return batchID, created, nil
 }
 
 func (s *Service) SelectedAgentSkills(ctx context.Context, claims agentapi.Claims) ([]domain.Skill, AgentCallContext, error) {

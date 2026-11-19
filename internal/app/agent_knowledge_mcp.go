@@ -43,7 +43,7 @@ func (s *Service) AgentKnowledgeMCPAllowed(ctx context.Context, call AgentCallCo
 }
 
 // agentMCPChannelBound is the shared channel-host determination for the
-// project-scoped domain MCPs (knowledge and workspace). Both task_route and
+// project-scoped domain MCPs (knowledge, workspace and collab). Both task_route and
 // conversation_host address the Turn through an external channel host whose
 // Project is not authoritative, so a channel-bound Turn stays outside these
 // domains even after the route row is no longer active. A batch is

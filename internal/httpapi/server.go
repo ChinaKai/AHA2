@@ -581,6 +581,7 @@ func (s *Server) Handler() http.Handler {
 	// Workspace domain MCP. Read-only first slice: it is refused unless the Task
 	// has a bound Workspace in its own Project and the Turn is not channel-hosted.
 	mux.Handle("POST /api/v1/agent/workspace/mcp", s.withAgentCapability(http.HandlerFunc(s.agentWorkspaceMCP)))
+	mux.Handle("POST /api/v1/agent/collab/mcp", s.withAgentCapability(http.HandlerFunc(s.agentCollabMCP)))
 	mux.Handle("GET /api/v1/agent/mail/accounts", s.withAgentCapability(http.HandlerFunc(s.agentMailAccounts)))
 	mux.Handle("GET /api/v1/agent/mail/templates", s.withAgentCapability(http.HandlerFunc(s.agentMailTemplates)))
 	mux.Handle("GET /api/v1/agent/mail/templates/{id}", s.withAgentCapability(http.HandlerFunc(s.agentMailTemplateDetail)))

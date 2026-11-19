@@ -55,6 +55,12 @@ const (
 	// read-only: metadata, managed process status and runtime option names.
 	workspaceMCPName = "aha2_workspace"
 	workspaceMCPPath = "/api/v1/agent/workspace/mcp"
+
+	// collabMCPName is the model-facing namespace of the collaboration domain
+	// MCP. It is injected only into a Main Turn of a Task in auto collaboration
+	// mode, and never into a channel-hosted Turn. Both tools are Main-only.
+	collabMCPName = "aha2_collab"
+	collabMCPPath = "/api/v1/agent/collab/mcp"
 )
 
 var mailMCPToolNames = []string{
@@ -155,6 +161,30 @@ func workspaceMCPToolNames() []string {
 // first slice. There is intentionally no write tool in this domain.
 func WorkspaceMCPToolIsRead(name string) bool {
 	for _, tool := range workspaceMCPReadToolNames {
+		if tool == name {
+			return true
+		}
+	}
+	return false
+}
+
+// collabMCPToolNames is the complete collaboration surface. Both tools are
+// Main-only, so the domain is advertised as a unit rather than split into a
+// read/write subset like the core and knowledge domains.
+var collabMCPToolNames = []string{
+	"collab_batch_submit", "collab_batch_wait",
+}
+
+// CollabMCPToolNames is the exact allowlist for a collab MCP client. It is
+// exported so the HTTP facade advertises the same subset the runtime injects.
+func CollabMCPToolNames() []string {
+	return append([]string{}, collabMCPToolNames...)
+}
+
+// CollabMCPToolIsKnown reports whether name is a tool this domain implements.
+// An unknown tool is rejected before any business logic or audit row.
+func CollabMCPToolIsKnown(name string) bool {
+	for _, tool := range collabMCPToolNames {
 		if tool == name {
 			return true
 		}
@@ -377,6 +407,18 @@ func (s *Service) mcpRuntimeForTurn(ctx context.Context, task domain.Task, agent
 		})
 		for _, tool := range workspaceMCPToolNames() {
 			allowed = append(allowed, "mcp__"+workspaceMCPName+"__"+tool)
+		}
+	}
+	if s.collabMCPInjected(ctx, task, agentID, inboxBatchID) {
+		servers = append(servers, backend.MCPServer{
+			Name: collabMCPName, Transport: "http",
+			URL:            strings.TrimRight(agentAPIURL, "/") + collabMCPPath,
+			URLFromEnv:     "AHA2_AGENT_API_URL",
+			URLPath:        collabMCPPath,
+			BearerTokenEnv: "AHA2_AGENT_API_TOKEN",
+		})
+		for _, tool := range collabMCPToolNames {
+			allowed = append(allowed, "mcp__"+collabMCPName+"__"+tool)
 		}
 	}
 	return servers, allowed

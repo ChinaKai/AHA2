@@ -35,7 +35,7 @@ func (s *Service) normalizeTaskMCPServers(ctx context.Context, project domain.Pr
 	}
 	for _, id := range requested {
 		id = strings.TrimSpace(id)
-		if id == "mcp_channel" || id == "mcp_mail" || id == "mcp_core" || id == knowledgeMCPName || id == workspaceMCPName || (id == "mcp_pet" && project.ID != petProjectID) {
+		if id == "mcp_channel" || id == "mcp_mail" || id == "mcp_core" || id == knowledgeMCPName || id == workspaceMCPName || id == collabMCPName || (id == "mcp_pet" && project.ID != petProjectID) {
 			continue
 		}
 		server, ok := allowed[id]
@@ -94,15 +94,16 @@ func (s *Service) MCPServers(ctx context.Context) ([]domain.MCPServer, error) {
 	core := s.coreMCPDetail()
 	knowledge := s.knowledgeMCPDetail()
 	workspace := s.workspaceMCPDetail()
+	collab := s.collabMCPDetail()
 	insertAt := 0
 	for index, item := range items {
 		if item.Builtin {
 			insertAt = index + 1
 		}
 	}
-	combined := make([]domain.MCPServer, 0, len(items)+5)
+	combined := make([]domain.MCPServer, 0, len(items)+6)
 	combined = append(combined, items[:insertAt]...)
-	combined = append(combined, channel, mail, core, knowledge, workspace)
+	combined = append(combined, channel, mail, core, knowledge, workspace, collab)
 	combined = append(combined, items[insertAt:]...)
 	return combined, nil
 }
@@ -225,6 +226,28 @@ func (s *Service) workspaceMCPDetail() domain.MCPServer {
 	}
 }
 
+// collabMCPDetail describes the built-in collaboration domain MCP. The endpoint
+// is injected per Turn for a Main agent in auto collaboration mode; it claims
+// no static URL and offers no agent-lifecycle operation beyond the existing
+// batch submit and wait endpoints.
+func (s *Service) collabMCPDetail() domain.MCPServer {
+	now := s.now().UTC()
+	descriptions := map[string]string{
+		"collab_batch_submit": "向当前 Task 的子 Agent 提交一个协作批次；仅自动协作模式的 Main 可用，沿用现有数量上限与去重校验。",
+		"collab_batch_wait":   "轮询当前 Task 本轮的一个协作批次；仅 Main 可用，游标单调，超时返回未完成而不是错误。",
+	}
+	tools := make([]domain.MCPTool, 0, len(collabMCPToolNames))
+	for _, name := range collabMCPToolNames {
+		tools = append(tools, domain.MCPTool{Name: name, Description: descriptions[name]})
+	}
+	return domain.MCPServer{
+		ID: collabMCPName, Name: "协作（内置）",
+		Description: "Task 为自动协作模式且当前由 Main 执行时注入；提供批次提交与等待，只读 Agent 与单 Agent 模式均不注入。",
+		Transport:   "builtin", Enabled: true, Builtin: true, AutoInject: true, Health: "ok",
+		Tools: tools, CreatedAt: now, UpdatedAt: now,
+	}
+}
+
 // normalizedMCPIdentifier mirrors the namespace normalization applied by an
 // MCP backend that has to express a server name as a TOML key: case is folded
 // and hyphen/dot separators become underscores. It is used only for collision
@@ -326,6 +349,9 @@ func (s *Service) MCPServerByID(ctx context.Context, id string) (domain.MCPServe
 	if strings.TrimSpace(id) == workspaceMCPName {
 		return s.workspaceMCPDetail(), nil
 	}
+	if strings.TrimSpace(id) == collabMCPName {
+		return s.collabMCPDetail(), nil
+	}
 	items, err := s.store.ListMCPServers(ctx)
 	if err != nil {
 		return domain.MCPServer{}, err
@@ -339,7 +365,7 @@ func (s *Service) MCPServerByID(ctx context.Context, id string) (domain.MCPServe
 }
 
 func (s *Service) DeleteMCPServer(ctx context.Context, id string) error {
-	if strings.TrimSpace(id) == "mcp_pet" || strings.TrimSpace(id) == "mcp_channel" || strings.TrimSpace(id) == "mcp_mail" || strings.TrimSpace(id) == "mcp_core" || strings.TrimSpace(id) == knowledgeMCPName || strings.TrimSpace(id) == workspaceMCPName {
+	if strings.TrimSpace(id) == "mcp_pet" || strings.TrimSpace(id) == "mcp_channel" || strings.TrimSpace(id) == "mcp_mail" || strings.TrimSpace(id) == "mcp_core" || strings.TrimSpace(id) == knowledgeMCPName || strings.TrimSpace(id) == workspaceMCPName || strings.TrimSpace(id) == collabMCPName {
 		return fmt.Errorf("builtin MCP cannot be deleted")
 	}
 	return s.store.DeleteMCPServer(ctx, id)
