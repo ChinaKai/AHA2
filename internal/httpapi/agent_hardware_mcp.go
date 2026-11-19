@@ -22,6 +22,12 @@ import (
 // only travels in the response; the request carries identifiers and cursors.
 const agentHardwareMCPMaxRequestBytes int64 = 1 << 20
 
+// agentHardwareMCPMaxRequestIDBytes bounds the JSON-RPC id that is copied
+// verbatim into every response. A request body up to 1 MiB can otherwise carry
+// an id large enough that the fixed response envelope alone exceeds the 64 KiB
+// response budget, no matter how the terminal result is trimmed.
+const agentHardwareMCPMaxRequestIDBytes = 256
+
 // The terminal read returns a bounded page so one call cannot fill a context
 // window. Truncation is explicit and the caller can continue from next_after.
 const (
@@ -77,6 +83,15 @@ func (s *Server) agentHardwareMCP(writer http.ResponseWriter, request *http.Requ
 	}
 	if !s.app.AgentHardwareMCPAllowed(request.Context(), call) {
 		writeError(writer, http.StatusForbidden, "agent_operation_forbidden")
+		return
+	}
+	// The id is echoed into every JSON-RPC response. Reject an oversized one
+	// before any tool work with a bounded error that does not echo it.
+	if len(payload.ID) > agentHardwareMCPMaxRequestIDBytes {
+		writeJSON(writer, http.StatusOK, map[string]any{
+			"jsonrpc": "2.0", "id": nil,
+			"error": map[string]any{"code": -32600, "message": "request id too large"},
+		})
 		return
 	}
 	respond := func(result any) {
@@ -375,7 +390,11 @@ func (s *Server) agentHardwareMCPTerminalRead(ctx context.Context, call app.Agen
 		}
 	}
 	view := agentHardwareMCPTerminalView(group.ID, transport, after, page)
-	return fitHardwareMCPTerminalResponse(requestID, view, after), group.ID, nil
+	view, err = fitHardwareMCPTerminalResponse(requestID, view, after)
+	if err != nil {
+		return agentHardwareMCPTerminal{}, "", err
+	}
+	return view, group.ID, nil
 }
 
 // agentHardwareMCPTerminalView bounds one page. NextAfter starts at the
@@ -407,8 +426,10 @@ func agentHardwareMCPTerminalView(hardwareID, transport string, after int64, pag
 // content.text and escaped a second time. Whole trailing events are dropped
 // first; a single oversized event is trimmed in place. Both paths set the
 // explicit truncated flag. floor is the caller's cursor, so dropping every
-// event never rewinds next_after below it.
-func fitHardwareMCPTerminalResponse(requestID json.RawMessage, result agentHardwareMCPTerminal, floor int64) agentHardwareMCPTerminal {
+// event never rewinds next_after below it. A candidate that does not fit is
+// never returned as success: if even the fixed envelope is over budget
+// (for example with an oversized request ID), the read fails closed.
+func fitHardwareMCPTerminalResponse(requestID json.RawMessage, result agentHardwareMCPTerminal, floor int64) (agentHardwareMCPTerminal, error) {
 	if floor < 0 {
 		floor = 0
 	}
@@ -420,15 +441,20 @@ func fitHardwareMCPTerminalResponse(requestID json.RawMessage, result agentHardw
 		return hardwareMCPResponseSize(requestID, inner) <= agentHardwareMCPMaxResponseBytes
 	}
 	if fits(result) {
-		return result
+		return result, nil
 	}
 	result.Truncated = true
 	for len(result.Items) > 1 && !fits(result) {
 		result.Items = result.Items[:len(result.Items)-1]
 		result.NextAfter = result.Items[len(result.Items)-1].Sequence
 	}
-	if len(result.Items) == 0 || fits(result) {
-		return result
+	// An empty page that still does not fit means the envelope itself exceeds
+	// the budget; reject it instead of emitting an oversized success.
+	if len(result.Items) == 0 {
+		return agentHardwareMCPTerminal{}, errHardwareMCPResponseTooLarge
+	}
+	if fits(result) {
+		return result, nil
 	}
 	// One event still exceeds the cap. The outer escaping can cost up to four
 	// bytes per input byte (quote-heavy output is the worst case), so the byte
@@ -464,15 +490,17 @@ func fitHardwareMCPTerminalResponse(requestID json.RawMessage, result agentHardw
 	}
 	item.Data = best
 	result.Items[0] = item
-	if !fits(result) {
-		// The fixed envelope itself is under the cap only with no event; drop
-		// the event rather than emit an oversized response, keeping the cursor
-		// at the caller's floor so the page is not replayed.
-		result.Items = nil
-		result.NextAfter = floor
-		result.Truncated = true
+	if fits(result) {
+		return result, nil
 	}
-	return result
+	// Drop the event and retry the fixed envelope, keeping the cursor at the
+	// caller's floor so the page is not replayed. Reject when even that fails.
+	result.Items = nil
+	result.NextAfter = floor
+	if fits(result) {
+		return result, nil
+	}
+	return agentHardwareMCPTerminal{}, errHardwareMCPResponseTooLarge
 }
 
 // hardwareMCPResponseSize returns the exact byte count writeJSON emits for one
@@ -491,6 +519,11 @@ func hardwareMCPResponseSize(requestID json.RawMessage, text []byte) int {
 	return len(encoded) + 1
 }
 
+// errHardwareMCPResponseTooLarge means the fixed JSON-RPC envelope alone
+// exceeds the response budget. The read fails closed rather than emitting a
+// result that violates the cap.
+var errHardwareMCPResponseTooLarge = errors.New("hardware mcp response exceeds the size budget")
+
 // hardwareMCPError is the stable classification used by the hardware tools.
 type hardwareMCPError struct {
 	code    string
@@ -502,6 +535,9 @@ func (e *hardwareMCPError) Error() string {
 }
 
 func hardwareMCPErrorCode(err error) (string, string) {
+	if errors.Is(err, errHardwareMCPResponseTooLarge) {
+		return "hardware_response_too_large", "response exceeds the size budget"
+	}
 	var typed *hardwareMCPError
 	if errors.As(err, &typed) {
 		return typed.code, typed.message

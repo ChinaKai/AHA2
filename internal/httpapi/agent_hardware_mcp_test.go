@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"sort"
@@ -656,5 +657,89 @@ func TestAgentHardwareMCPOnlyAuditsVerifiedIdentifiers(t *testing.T) {
 	audit := waitForHardwareMCPAudit(t, f.h.dbPath, "hardware_terminal_read")
 	if !strings.Contains(audit, `"hardware_id":"board"`) || !strings.Contains(audit, `"result":"ok"`) {
 		t.Fatalf("success audit lost the verified ID: %s", audit)
+	}
+}
+
+// TestAgentHardwareMCPBoundsOversizedRequestID reproduces the review finding:
+// a 1 MiB request body can carry a request id large enough that the fixed
+// JSON-RPC envelope alone exceeds the 64 KiB response budget. The endpoint now
+// rejects it before any tool work with a bounded error that does not echo the
+// id. The assertions read raw HTTP bytes, not the decoded helper.
+func TestAgentHardwareMCPBoundsOversizedRequestID(t *testing.T) {
+	f := newHardwareMCPFixture(t)
+	hugeID := strings.Repeat("i", 71680)
+	tooLongRun := strings.Repeat("i", 64)
+	for label, after := range map[string]int64{
+		"non-empty page": 0,
+		"empty page":     f.serial[len(f.serial)-1],
+	} {
+		body, err := json.Marshal(map[string]any{
+			"jsonrpc": "2.0", "id": hugeID, "method": "tools/call",
+			"params": map[string]any{"name": "hardware_terminal_read", "arguments": map[string]any{
+				"hardware_id": "board", "after": after,
+			}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(body) >= 1<<20 {
+			t.Fatalf("%s request body %d bytes must stay under 1 MiB", label, len(body))
+		}
+		response := agentRequestRaw(t, hardwareMCPURL(f.h), http.MethodPost, f.token, body)
+		raw, err := io.ReadAll(response.Body)
+		response.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("%s: request=%d bytes response=%d bytes", label, len(body), len(raw))
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("%s status=%d body=%s", label, response.StatusCode, raw)
+		}
+		if len(raw) > agentHardwareMCPMaxResponseBytes {
+			t.Fatalf("%s raw HTTP response %d bytes exceeds the 64 KiB budget", label, len(raw))
+		}
+		if strings.Contains(string(raw), tooLongRun) {
+			t.Fatalf("%s response echoed the oversized id: %s", label, raw)
+		}
+		var envelope struct {
+			ID    json.RawMessage `json:"id"`
+			Error struct {
+				Code int `json:"code"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(raw, &envelope); err != nil {
+			t.Fatal(err)
+		}
+		if string(envelope.ID) != "null" || envelope.Error.Code != -32600 {
+			t.Fatalf("%s envelope=%s", label, raw)
+		}
+	}
+}
+
+// TestFitHardwareMCPTerminalResponseRejectsOversizedEnvelope proves that the
+// empty-page early return and the drop-every-event fallback never emit a
+// candidate whose complete response is over budget.
+func TestFitHardwareMCPTerminalResponseRejectsOversizedEnvelope(t *testing.T) {
+	huge := json.RawMessage(`"` + strings.Repeat("i", 70<<10) + `"`)
+	empty := agentHardwareMCPTerminal{
+		HardwareID: "board", Transport: domain.HardwareTransportSerial,
+		Items: []agentHardwareMCPEvent{}, NextAfter: 5,
+	}
+	if _, err := fitHardwareMCPTerminalResponse(huge, empty, 5); !errors.Is(err, errHardwareMCPResponseTooLarge) {
+		t.Fatalf("empty page err=%v", err)
+	}
+	withItem := agentHardwareMCPTerminal{
+		HardwareID: "board", Transport: domain.HardwareTransportSerial,
+		Items: []agentHardwareMCPEvent{{
+			Sequence: 6, Direction: "rx", Data: "tick", Encoding: "text", CreatedAt: time.Now().UTC(),
+		}},
+		NextAfter: 6,
+	}
+	if _, err := fitHardwareMCPTerminalResponse(huge, withItem, 5); !errors.Is(err, errHardwareMCPResponseTooLarge) {
+		t.Fatalf("non-empty page err=%v", err)
+	}
+	// The same page with an ordinary id still fits.
+	if _, err := fitHardwareMCPTerminalResponse(json.RawMessage(`9`), withItem, 5); err != nil {
+		t.Fatalf("normal id err=%v", err)
 	}
 }
