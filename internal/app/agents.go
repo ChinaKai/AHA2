@@ -287,8 +287,16 @@ func (s *Service) UpdateTaskCollaboration(ctx context.Context, taskID, mode stri
 	if maxAgents < count {
 		return domain.Task{}, fmt.Errorf("max_agents cannot be lower than the current agent count")
 	}
+	if hook := s.taskCollaborationCheckHook; hook != nil {
+		hook()
+	}
 	now := s.now().UTC()
 	if err := s.store.UpdateTaskCollaboration(ctx, taskID, mode, maxAgents, timeString(now)); err != nil {
+		// The store re-counts inside its write transaction; a creation that
+		// committed after the check above keeps the same explicit rejection.
+		if errors.Is(err, store.ErrTaskAgentLimitBelowCount) {
+			return domain.Task{}, fmt.Errorf("max_agents cannot be lower than the current agent count")
+		}
 		return domain.Task{}, err
 	}
 	task.CollaborationMode = mode
@@ -1564,6 +1572,9 @@ func (s *Service) enqueueAgentAction(
 			title = "Sub-agent assignment"
 		}
 		now := s.now().UTC()
+		if hook := s.taskAgentCreateHook.Load(); hook != nil {
+			(*hook)()
+		}
 		outcome, err := s.store.CreateTaskAgentWithinLimit(ctx, domain.TaskAgent{
 			TaskID: task.ID, AgentID: agentID, Role: "sub", Status: "idle", Title: title,
 			RuntimeConfigSnapshotID: snapshotID, InheritMain: inheritMain, CreatedAt: now, UpdatedAt: now,

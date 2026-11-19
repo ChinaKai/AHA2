@@ -595,12 +595,41 @@ func (s *Store) UpdateTaskTitle(ctx context.Context, id, title, updatedAt string
 	return err
 }
 
+// UpdateTaskCollaboration writes the collaboration mode and Max Agents in one
+// write transaction that re-counts the Task's agents as part of the update.
+// The caller's own count read can go stale: an agent creation may commit
+// between that check and this call. The conditional UPDATE therefore refuses a
+// limit below the live agent count (ErrTaskAgentLimitBelowCount) instead of
+// writing a limit the Task is already over; existing agents are never revoked.
 func (s *Store) UpdateTaskCollaboration(ctx context.Context, id, mode string, maxAgents int, updatedAt string) error {
-	_, err := s.db.ExecContext(ctx, `
-		UPDATE tasks SET collaboration_mode=?,max_agents=?,updated_at=? WHERE id=?`,
-		mode, maxAgents, updatedAt, id,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `
+		UPDATE tasks SET collaboration_mode=?,max_agents=?,updated_at=?
+		WHERE id=? AND ? >= (SELECT COUNT(*) FROM task_agents WHERE task_id=?)`,
+		mode, maxAgents, updatedAt, id, maxAgents, id,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed == 0 {
+		var exists int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE id=?`, id).Scan(&exists); err != nil {
+			return err
+		}
+		if exists == 0 {
+			return sql.ErrNoRows
+		}
+		return ErrTaskAgentLimitBelowCount
+	}
+	return tx.Commit()
 }
 
 func (s *Store) UpdateTaskKnowledgePolicy(ctx context.Context, id, policy, updatedAt string) error {

@@ -259,8 +259,18 @@ type Service struct {
 	// and prove the unique index conflict is still reported instead of
 	// silently dropping the second assignment. Production leaves it nil.
 	assignmentInsertHook func()
-	agentAPI             *agentapi.Capabilities
-	agentAPIURL          string
+	// taskAgentCreateHook is a test seam: it runs after a dispatch resolved a
+	// new agent id and before the atomic create transaction. Tests use it to
+	// hold every dispatch in that window and observe when the cached Task
+	// snapshot meets the authoritative write. Production leaves it nil.
+	taskAgentCreateHook atomic.Pointer[func()]
+	// taskCollaborationCheckHook is a test seam: it runs after
+	// UpdateTaskCollaboration validated the requested Max Agents against a read
+	// of the agent count and before the store re-counts inside its write
+	// transaction. Production leaves it nil.
+	taskCollaborationCheckHook func()
+	agentAPI                   *agentapi.Capabilities
+	agentAPIURL                string
 	// managedProcesses is the read-only process registry view used by the
 	// workspace domain MCP. Starting and stopping a process stays on the
 	// existing Agent process endpoints and is never reachable from this domain.
@@ -378,6 +388,16 @@ func (s *Service) SetPetHardwareDisconnector(disconnector PetHardwareDisconnecto
 // leaves it nil so executePetApproval runs.
 func (s *Service) SetPetApprovalExecutionHook(hook func(context.Context, domain.PetApproval) error) {
 	s.petApprovalExecutionHook = hook
+}
+
+// SetTaskAgentCreateHook installs the test seam that runs before the atomic
+// Task agent creation transaction. Production never sets it.
+func (s *Service) SetTaskAgentCreateHook(hook func()) {
+	if hook == nil {
+		s.taskAgentCreateHook.Store(nil)
+		return
+	}
+	s.taskAgentCreateHook.Store(&hook)
 }
 
 type sharedContextState struct {

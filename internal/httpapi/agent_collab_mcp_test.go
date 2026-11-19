@@ -739,11 +739,11 @@ func TestCollabConcurrentSubmitsRespectMaxAgents(t *testing.T) {
 
 // TestCollabConcurrentSubmitsHonorDowngradedMaxAgents reproduces the second
 // review finding: a submission that read MaxAgents=8 must not keep creating
-// agents after the Owner lowers the limit to 2 while it is in flight. A second
-// connection holds the single SQLite write lock, so every submission reads its
-// Task snapshot first and then blocks on agent creation; the downgrade commits
-// in between. Each creation afterwards has to observe the new limit inside its
-// own transaction instead of the snapshot the request started with.
+// agents after the Owner lowers the limit to 2 while it is in flight. The
+// create seam is an observable phase barrier: every submission reads its
+// MaxAgents=8 Task snapshot, parks before the atomic create transaction, and
+// only wakes after the downgrade committed. Each creation then has to observe
+// the new limit inside its own transaction instead of the request snapshot.
 func TestCollabConcurrentSubmitsHonorDowngradedMaxAgents(t *testing.T) {
 	const (
 		submissions   = 8
@@ -769,20 +769,22 @@ func TestCollabConcurrentSubmitsHonorDowngradedMaxAgents(t *testing.T) {
 			url = h.server.URL + "/api/v1/agent/collaboration/batches"
 		}
 
-		// BEGIN IMMEDIATE takes SQLite's single write lock. Submissions can
-		// still read (WAL) but cannot create an agent until this transaction
-		// commits, so the downgrade below lands while they are in flight.
-		raw, err := sql.Open("sqlite", h.dbPath+"?_pragma=busy_timeout(5000)&_txlock=immediate")
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer raw.Close()
-		raw.SetMaxOpenConns(1)
-		lock, err := raw.BeginTx(h.ctx, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer lock.Rollback()
+		// Observable phase barrier: the seam runs after the submission read its
+		// Task snapshot and resolved the new agent, immediately before the
+		// atomic create transaction. It holds the dispatch there until the test
+		// has performed the downgrade. Nothing is held while parked: the seam
+		// runs before the create transaction acquires a connection.
+		createWindow := make(chan struct{}, submissions)
+		release := make(chan struct{})
+		h.service.SetTaskAgentCreateHook(func() {
+			// Non-blocking: a later dispatch after the barrier must not stall.
+			select {
+			case createWindow <- struct{}{}:
+			default:
+			}
+			<-release
+		})
+		defer h.service.SetTaskAgentCreateHook(nil)
 
 		outcomes := make([]collabConcurrentOutcome, submissions)
 		start := make(chan struct{})
@@ -820,15 +822,19 @@ func TestCollabConcurrentSubmitsHonorDowngradedMaxAgents(t *testing.T) {
 		}
 		close(start)
 
-		// Let every submission finish its reads and block on agent creation,
-		// then perform the Owner downgrade and release the writers.
-		time.Sleep(500 * time.Millisecond)
-		if _, err := lock.ExecContext(h.ctx, `UPDATE tasks SET max_agents=? WHERE id=?`, downgradedCap, task.ID); err != nil {
+		// Wait until every submission has read its MaxAgents=8 snapshot and is
+		// parked in the create window, then perform the real Owner downgrade.
+		for index := 0; index < submissions; index++ {
+			select {
+			case <-createWindow:
+			case <-time.After(10 * time.Second):
+				t.Fatalf("%s %d of %d submissions reached the agent create window", kind, index, submissions)
+			}
+		}
+		if _, err := h.service.UpdateTaskCollaboration(h.ctx, task.ID, "auto", downgradedCap); err != nil {
 			t.Fatalf("%s downgrade: %v", kind, err)
 		}
-		if err := lock.Commit(); err != nil {
-			t.Fatalf("%s downgrade commit: %v", kind, err)
-		}
+		close(release)
 		wait.Wait()
 
 		reloaded, err := h.database.Task(h.ctx, task.ID)
