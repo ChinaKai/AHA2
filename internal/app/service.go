@@ -1620,6 +1620,17 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 	// The scratch path is per Agent and per Turn, so it wins over any static
 	// env-group value with the same name.
 	environment["AHA2_SCRATCH_DIR"] = scratchDir
+	// The go command keeps its build work under the system temp directory, and
+	// a killed build leaves that tree behind. On a host whose /tmp is a tmpfs
+	// those leftovers are charged to memory until someone deletes them. Scratch
+	// is on the workspace disk and is cleaned with the Task, so point the build
+	// work there unless the env group chose a location itself.
+	//
+	// TMPDIR is deliberately left alone: a scratch path is long enough that a
+	// Unix socket created under it would exceed the 108-byte sun_path limit.
+	if strings.TrimSpace(environment["GOTMPDIR"]) == "" {
+		environment["GOTMPDIR"] = scratchDir
+	}
 	capabilityToken := ""
 	agentAPIForward := (*workspacepkg.ReverseForward)(nil)
 	if s.agentAPI != nil && agentAPIURL != "" {

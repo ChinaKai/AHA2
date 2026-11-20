@@ -623,11 +623,15 @@ func TestFilterClaudeEnvironment(t *testing.T) {
 		"ANTHROPIC_BASE_URL": "https://api.example.com",
 		"ANTHROPIC_API_KEY":  "sk-123",
 		"AHA2_SCRATCH_DIR":   "/repo/.aha2-context/task-1/scratch/main",
+		"GOTMPDIR":           "/repo/.aha2-context/task-1/scratch/main",
 		"OPENAI_API_KEY":     "should-drop",
 	}
 	filtered := filterClaudeEnvironment(values)
 	if filtered["ANTHROPIC_BASE_URL"] != "https://api.example.com" || filtered["ANTHROPIC_API_KEY"] != "sk-123" {
 		t.Fatalf("claude env not filtered correctly: %#v", filtered)
+	}
+	if filtered["GOTMPDIR"] != "/repo/.aha2-context/task-1/scratch/main" {
+		t.Fatalf("GOTMPDIR was filtered from the backend env: %#v", filtered)
 	}
 	if filtered["AHA2_SCRATCH_DIR"] != "/repo/.aha2-context/task-1/scratch/main" {
 		t.Fatalf("scratch path was filtered from claude env: %#v", filtered)

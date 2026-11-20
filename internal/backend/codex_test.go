@@ -336,10 +336,14 @@ func TestFilterEnvironmentDropsUnknownSecrets(t *testing.T) {
 	filtered := filterEnvironment(map[string]string{
 		"OPENAI_API_KEY":   "ok",
 		"AHA2_SCRATCH_DIR": "/repo/.aha2-context/task-1/scratch/main",
+		"GOTMPDIR":         "/repo/.aha2-context/task-1/scratch/main",
 		"UNRELATED_SECRET": "drop",
 	})
 	if filtered["OPENAI_API_KEY"] != "ok" {
 		t.Fatal("allowed key dropped")
+	}
+	if filtered["GOTMPDIR"] != "/repo/.aha2-context/task-1/scratch/main" {
+		t.Fatalf("GOTMPDIR was filtered from the backend env: %#v", filtered)
 	}
 	if filtered["AHA2_SCRATCH_DIR"] != "/repo/.aha2-context/task-1/scratch/main" {
 		t.Fatalf("scratch path was filtered from codex env: %#v", filtered)
