@@ -668,10 +668,13 @@ func (k StreamKey) less(other StreamKey) bool {
 	return k.Transport < other.Transport
 }
 
-// loadStream reads a stream directory: it removes temp files, drops an
-// active file whose compressed copy already exists, truncates a torn last
-// line, and reopens the active segment for appending (or closes it when it
-// belongs to an earlier day).
+// loadStream reads a stream directory: it removes temp files, keeps one gz
+// per first sequence (the one reaching furthest), resolves a gz and an
+// active file with the same first by their last sequence (the gz wins when
+// it holds every record, otherwise the active file wins and the outdated gz
+// is removed), truncates a torn last line, and reopens the newest active
+// segment of today for appending. Older actives are compressed; a file that
+// cannot be compressed or reopened stays readable as a plain segment.
 func (s *Store) loadStream(key StreamKey) (*stream, error) {
 	dir, err := s.streamDir(key)
 	if err != nil {
