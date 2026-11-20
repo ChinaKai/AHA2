@@ -391,7 +391,7 @@ func TestAgentCoreMCPReadOnlyAndNonMainWriteRefusal(t *testing.T) {
 	if call := coreMCPCallTool(t, url, subToken, "progress", map[string]any{"message": "nope"}); call.Status != http.StatusForbidden {
 		t.Fatalf("sub progress status=%d payload=%#v", call.Status, call)
 	}
-	if call := coreMCPCallTool(t, url, subToken, "memory_patch", map[string]any{"facts": []string{"nope"}}); call.Status != http.StatusForbidden {
+	if call := coreMCPCallTool(t, url, subToken, "memory_update", map[string]any{"status": "nope"}); call.Status != http.StatusForbidden {
 		t.Fatalf("sub memory status=%d payload=%#v", call.Status, call)
 	}
 	if call := coreMCPCallTool(t, url, subToken, "task_get", map[string]any{}); call.Status != http.StatusOK || call.IsError {
@@ -703,13 +703,14 @@ func TestAgentCoreMCPMemoryAndProgressMatchHTTP(t *testing.T) {
 	token := h.issue(task.ID, "main", turn.ID)
 	url := h.server.URL + "/api/v1/agent/core/mcp"
 
-	if call := coreMCPCallTool(t, url, token, "memory_patch", map[string]any{
-		"decisions": []string{"mcp-decision"}, "facts": []string{"do-not-log-this-value"},
+	if call := coreMCPCallTool(t, url, token, "memory_update", map[string]any{
+		"add_constraints": []string{"mcp-constraint"}, "status": "do-not-log-this-value",
+		"current_goal": "mcp goal", "goal_reason": "the tool can change the goal",
 	}); call.Status != http.StatusOK || call.IsError {
 		t.Fatalf("mcp memory status=%d payload=%#v", call.Status, call)
 	}
 	response := agentRequest(t, h.server.URL+"/api/v1/agent/turn/memory", http.MethodPatch, token, map[string]any{
-		"append": map[string]any{"facts": []string{"http-fact"}},
+		"next_steps": []string{"http-step"},
 	})
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("http memory status=%d body=%s", response.StatusCode, readBody(t, response))
@@ -719,7 +720,9 @@ func TestAgentCoreMCPMemoryAndProgressMatchHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !containsString(memory.Decisions, "mcp-decision") || !containsString(memory.Facts, "http-fact") {
+	if len(memory.Constraints) != 1 || memory.Constraints[0].Text != "mcp-constraint" ||
+		!containsString(memory.NextSteps, "http-step") || memory.Status != "do-not-log-this-value" ||
+		memory.CurrentGoal != "mcp goal" {
 		t.Fatalf("memory=%#v", memory)
 	}
 
@@ -752,7 +755,7 @@ func TestAgentCoreMCPMemoryAndProgressMatchHTTP(t *testing.T) {
 
 	// The audit row records the tool and keys only. The memory value itself must
 	// never appear in audit data.
-	auditJSON := waitForCoreAudit(t, h.dbPath, "memory_patch")
+	auditJSON := waitForCoreAudit(t, h.dbPath, "memory_update")
 	if strings.Contains(auditJSON, "do-not-log-this-value") || strings.Contains(auditJSON, token) {
 		t.Fatalf("audit leaked a value or token: %s", auditJSON)
 	}
@@ -760,14 +763,15 @@ func TestAgentCoreMCPMemoryAndProgressMatchHTTP(t *testing.T) {
 	if err := json.Unmarshal([]byte(auditJSON), &audit); err != nil {
 		t.Fatal(err)
 	}
-	if audit["tool"] != "memory_patch" || audit["turn_id"] != turn.ID || audit["result"] != "ok" {
+	if audit["tool"] != "memory_update" || audit["turn_id"] != turn.ID || audit["result"] != "ok" {
 		t.Fatalf("audit fields=%#v", audit)
 	}
 	if _, ok := audit["duration_ms"]; !ok {
 		t.Fatalf("audit missing duration: %#v", audit)
 	}
 	keys, _ := audit["argument_keys"].([]any)
-	if len(keys) != 2 || keys[0] != "decisions" || keys[1] != "facts" {
+	if len(keys) != 4 || keys[0] != "add_constraints" || keys[1] != "current_goal" ||
+		keys[2] != "goal_reason" || keys[3] != "status" {
 		t.Fatalf("audit keys=%#v", audit)
 	}
 }

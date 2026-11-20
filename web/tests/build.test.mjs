@@ -1440,7 +1440,7 @@ test("built web contains responsive application", async () => {
   assert.match(css, /#hardware-clear-output, #hardware-copy-output/);
   assert.match(hardwarePanel, /const sendForm = root\.querySelector/);
   assert.doesNotMatch(script, /data-task-tab=|mobile-agent-strip|conversation-filters/);
-  assert.match(taskTools, /renderTaskMemory\(detail\.memory\)/);
+  assert.match(taskTools, /renderTaskMemory\(detail\.memory, detail\.turns \|\| \[\]\)/);
   assert.doesNotMatch(script, /data-realtime-state class=/);
   assert.match(script, /task-head-subline/);
   assert.match(taskTools, /iconName: "hardware"/);
@@ -1935,7 +1935,7 @@ test("task agent config selects skills explicitly", async () => {
   assert.match(html, /name="skill_ids" value="skill-1" checked/);
 });
 
-test("task memory renders a bounded chronological goal timeline", async () => {
+test("task memory renders the state card and a bounded newest-first goal timeline", async () => {
   const root = resolve(import.meta.dirname, "..");
   const {renderTaskMemory} = await import(pathToFileURL(resolve(root, "build", "task_agents.js")));
   const goal_history = Array.from({length: 21}, (_, index) => ({
@@ -1948,13 +1948,45 @@ test("task memory renders a bounded chronological goal timeline", async () => {
     reason: `reason-${index + 1}`,
     created_at: `2026-10-23T12:${String(index).padStart(2, "0")}:00Z`,
   }));
-  const html = renderTaskMemory({task_id: "task-1", current_goal: "goal-21", goal_history});
-  assert.match(html, /最近 20\/20 次 · 按时间顺序/);
+  const turns = [
+    {id: "turn-1", agent_id: "main", sequence: 1, finished_at: "2026-10-23T12:00:00Z"},
+    {id: "turn-2", agent_id: "main", sequence: 2, finished_at: "2026-10-23T13:00:00Z"},
+    {id: "turn-sub", agent_id: "sub-001", sequence: 3, finished_at: "2026-10-23T13:30:00Z"},
+    {id: "turn-3", agent_id: "main", sequence: 4},
+  ];
+  const memory = {
+    task_id: "task-1", current_goal: "goal-21", goal_history,
+    status: "fix written <b>", status_turn_id: "turn-2", status_updated_at: "2026-10-23T13:00:00Z",
+    next_steps: ["run integration tests"], open_questions: ["fix the log leak too?"],
+    constraints: [{text: "keep the public API", created_at: "2026-10-22T09:00:00Z"}],
+  };
+  const html = renderTaskMemory(memory, turns);
+  // The five sections, with the Agent's text escaped.
+  for (const heading of ["目标", "现在到哪了", "下一步", "已定的约束", "等你决定"]) {
+    assert.match(html, new RegExp(`<strong>${heading}</strong>`));
+  }
+  assert.match(html, /fix written &lt;b&gt;/);
+  assert.match(html, /run integration tests/);
+  assert.match(html, /keep the public API/);
+  assert.match(html, /fix the log leak too\?/);
+  // Written by the latest finished Main Turn: fresh, and it says which Turn.
+  assert.match(html, /Turn #2/);
+  assert.doesNotMatch(html, /memory-stale/);
+  // A later Main Turn that finished without writing the card makes it stale.
+  const stale = renderTaskMemory({...memory, status_turn_id: "turn-1"}, turns);
+  assert.match(stale, /memory-stale/);
+  // Never written at all, with history behind it, is also flagged; a Task with
+  // no finished Turn is not.
+  assert.match(renderTaskMemory({task_id: "task-1", current_goal: "g"}, turns), /Agent 还没有写过这张卡/);
+  assert.doesNotMatch(renderTaskMemory({task_id: "task-1", current_goal: "g"}, []), /memory-stale/);
+  // The timeline keeps the last 20 changes, newest first, with the earlier goal folded away.
+  assert.match(html, /最近 20\/20 次 · 新的在上/);
   assert.doesNotMatch(html, /reason-1</);
   assert.match(html, /reason-2</);
-  assert.match(html, /reason-21</);
-  assert.match(html, /goal-20<\/span><b>→<\/b><strong>goal-21<\/strong>/);
-  assert.doesNotMatch(html, /memory-block/);
+  assert.ok(html.indexOf("reason-21<") < html.indexOf("reason-2<"), "newest change is not first");
+  assert.match(html, /<strong>goal-21<\/strong><\/div><details class="memory-goal-before"><summary>调整前的目标<\/summary><p>goal-20<\/p>/);
+  // The zero time the server sends for "never updated" is not shown as a date.
+  assert.doesNotMatch(renderTaskMemory({task_id: "task-1", current_goal: "g", status_updated_at: "0001-01-01T00:00:00Z"}, []), /0001|01\/01/);
 });
 
 // The Agent config dialog is the only place an existing Task's runtime can be
@@ -3834,7 +3866,10 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   // first-screen catalog; after adding model_source_picker to the module build
   // the same mask-version, level-5 gzip measurement is 218,689 JS + 52,283 CSS
   // = 270,972. The ceiling is the next 256-byte boundary above that.
-  const FIRST_SCREEN_GZIP_BUDGET = 271104;
+  // The Task Memory tool became the five-section state card (status, next
+  // steps, constraints, open questions, folded goal timeline) with its rules
+  // and copy; measured 271,827, so the ceiling moves to the next boundary.
+  const FIRST_SCREEN_GZIP_BUDGET = 271872;
   // The version query parameter is a content hash and its hex digits change
   // how the same code gzips: main already sits exactly on the budget, so a
   // hash-only change could trip it without growing the payload. Mask the

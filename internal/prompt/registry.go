@@ -77,6 +77,10 @@ type BuildInput struct {
 	// the editable template body.
 	IdentitySupplement string
 	Language           string
+	// Memory is the Task state card the previous Turns left behind. It is
+	// printed after the Task section so the Agent starts from where the work
+	// stands instead of reconstructing it from the conversation.
+	Memory domain.TaskMemory
 }
 
 // MaxInlineAttachmentBytes is the per-Turn Context inline cap. It is
@@ -291,6 +295,48 @@ type templateData struct {
 	DefaultGuideTemplates []mailContextGuideTemplate
 	AttachmentEntries     []attachmentIndexEntry
 	InboxItems            []InboxTemplateItem
+	// The Task state card, as rendered by the task-workspace section.
+	MemoryCard          bool
+	MemoryStale         bool
+	MemoryStatus        string
+	MemoryNextSteps     []string
+	MemoryConstraints   []string
+	MemoryOpenQuestions []string
+}
+
+// applyMemoryCard copies the Task state card into the template data. Only a
+// Task Agent keeps one: the pet has its core files and a channel host Task
+// answers one conversation at a time.
+//
+// The card is stale when an earlier Main Turn finished without writing it. A
+// stale card is still shown, with a warning, because an outdated note the
+// Agent knows to verify beats no note at all.
+func applyMemoryCard(data *templateData, input BuildInput) {
+	if data.Identity != identityTaskAgent {
+		return
+	}
+	memory := input.Memory
+	data.MemoryStatus = strings.TrimSpace(memory.Status)
+	data.MemoryNextSteps = memory.NextSteps
+	data.MemoryOpenQuestions = memory.OpenQuestions
+	for _, note := range memory.Constraints {
+		if text := strings.TrimSpace(note.Text); text != "" {
+			data.MemoryConstraints = append(data.MemoryConstraints, text)
+		}
+	}
+	lastMainTurnID, lastSequence := "", -1
+	for _, turn := range input.Turns {
+		if turn.ID == input.CurrentTurnID || turn.AgentID != "main" || turn.FinishedAt.IsZero() {
+			continue
+		}
+		if turn.Sequence > lastSequence {
+			lastMainTurnID, lastSequence = turn.ID, turn.Sequence
+		}
+	}
+	data.MemoryStale = lastMainTurnID != "" && memory.StatusTurnID != lastMainTurnID
+	hasContent := data.MemoryStatus != "" || len(data.MemoryNextSteps) > 0 ||
+		len(data.MemoryConstraints) > 0 || len(data.MemoryOpenQuestions) > 0
+	data.MemoryCard = hasContent || data.MemoryStale
 }
 
 func NewEngine(repository Repository) *Engine {
@@ -299,7 +345,7 @@ func NewEngine(repository Repository) *Engine {
 
 var builtinTemplates = []domain.PromptTemplate{
 	{ID: "core.default", Name: "AHA Core", Layer: "core", Description: "所有 Agent 共用的安全、Workspace 与 AHA 编排边界", Editable: true, Required: true, Version: 3},
-	{ID: "role.main", Name: "Main Agent", Layer: "role", Description: "Main 的规划、整合和最终交付职责", Editable: true, Required: true, Version: 4},
+	{ID: "role.main", Name: "Main Agent", Layer: "role", Description: "Main 的规划、整合和最终交付职责", Editable: true, Required: true, Version: 5},
 	{ID: "role.sub", Name: "Sub Agent", Layer: "role", Description: "Sub 的聚焦执行和隔离职责", Editable: true, Required: true, Version: 2},
 	{ID: "identity.task-agent", Name: "Task Agent Identity", Layer: "identity", Description: "代码与项目任务场景身份", Editable: true, Required: false, Version: 2},
 	{ID: "identity.channel-assistant", Name: "Channel Assistant Identity", Layer: "identity", Description: "Owner 私聊渠道助手身份", Editable: true, Required: false, Version: 2},
@@ -310,7 +356,7 @@ var builtinTemplates = []domain.PromptTemplate{
 	{ID: "policy.auto", Name: "Auto Collaboration", Layer: "policy", Description: "AHA 自动协作策略", Editable: true, Required: false, Version: 2},
 	{ID: "policy.single", Name: "Single Agent", Layer: "policy", Description: "单 Agent 策略", Editable: true, Required: false, Version: 2},
 	{ID: "protocol.knowledge", Name: "Knowledge Protocol", Layer: "protocol", Description: "按 index 渐进读取知识并形成反馈与修订闭环", Editable: true, Required: false, Version: 3},
-	{ID: "protocol.agent-api", Name: "Agent Control API Protocol", Layer: "protocol", Description: "Agent API 的权限、进度与输出边界", Editable: true, Required: true, Version: 4},
+	{ID: "protocol.agent-api", Name: "Agent Control API Protocol", Layer: "protocol", Description: "Agent API 的权限、进度与输出边界", Editable: true, Required: true, Version: 5},
 	{ID: "protocol.attachment-delivery", Name: "Attachment Delivery Protocol", Layer: "protocol", Description: "所有 Task 必须遵守的附件上传、绑定与回执边界", Editable: false, Required: true, Version: 2},
 	{ID: "context.task", Name: "Task Context File", Layer: "context", Description: "内容模板", Editable: true, Required: true, Version: 1},
 	{ID: "context.recent-context", Name: "Recent Context File", Layer: "context", Description: "recent-context.md 的内容模板", Editable: true, Required: false, Version: 2},
@@ -320,7 +366,7 @@ var builtinTemplates = []domain.PromptTemplate{
 	{ID: "context.mail", Name: "Mail Context File", Layer: "context", Description: "mail.md 的非敏感邮件上下文模板；不含凭据、正文或收件人历史", Editable: true, Required: false, Version: 1},
 	{ID: "context.attachments-index", Name: "Attachments Index File", Layer: "context", Description: "attachments/index.md 的内容模板", Editable: true, Required: false, Version: 2},
 	{ID: "section.compact-handoff", Name: "Compact Handoff Section", Layer: "section", Description: "Backend Session 压缩后的 Prompt 段落", Editable: true, Required: false, Version: 1},
-	{ID: "section.task-workspace", Name: "Task And Workspace Section", Layer: "section", Description: "Task 与 Workspace 摘要段落", Editable: true, Required: true, Version: 2},
+	{ID: "section.task-workspace", Name: "Task And Workspace Section", Layer: "section", Description: "Task 与 Workspace 摘要、任务状态卡", Editable: true, Required: true, Version: 3},
 	{ID: "section.available-context", Name: "Available Context Section", Layer: "section", Description: "可用上下文入口列表段落", Editable: true, Required: true, Version: 3},
 	{ID: "section.current-inbox", Name: "Current Inbox Section", Layer: "section", Description: "当前 Inbox Batch 段落", Editable: true, Required: true, Version: 1},
 	{ID: "section.inbox-batch-content", Name: "Inbox Batch Content", Layer: "section", Description: "Inbox 消息、渠道来源、引用上下文和附件引用的内容模板", Editable: true, Required: true, Version: 3},
@@ -360,6 +406,11 @@ var supersededBuiltinOverrideHashes = map[string]map[string]bool{
 	"section.task-workspace": {
 		// Adds the runtime scratch path and read-only Context boundary.
 		"99ed10ce10700b61f8d8e2800382c2a8343d8959007cb5237d4f2ae31022c197": true,
+		// Before the Task state card was appended to the section.
+		"1c093fd69d35a0b4ed2827849f75a8728d984370ce52d75e1def1e3dc1b09e86": true,
+		"fab692626aef4dc2f0366bee0ee56c5c37206c6e9202740d39fb540dbc188391": true,
+		"5b12e24479ea081a83cd3959e281f4174f529c22690d7ce1679dc4546d90b78a": true,
+		"15a896edb0860c04e4fd1be9ff14749aef3fb33ce644e4eb88d19601a06979c7": true,
 	},
 	"role.sub": {
 		"388229947d72bbd80f97bd93a316e88bf8425b13a0d1845b66089c54d20a0d5f": true,
@@ -749,6 +800,7 @@ func (engine *Engine) BuildLegacy(ctx context.Context, input BuildInput) (BuildR
 		TaskBranch: input.Task.TaskBranch, InboxBatch: strings.TrimSpace(input.UserMessage),
 		CompactHandoff: strings.TrimSpace(input.Handoff), AgentAPIURL: strings.TrimRight(input.AgentAPIURL, "/"),
 	}
+	applyMemoryCard(&data, input)
 	if input.IncludeRecoveryHandoff {
 		if evidence := recoveryHandoffEvidenceFor(input); evidence != nil {
 			recoveryData := data

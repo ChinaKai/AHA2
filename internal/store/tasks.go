@@ -1175,17 +1175,16 @@ func (s *Store) ListBackendSessionsForTasks(ctx context.Context, taskIDs []strin
 
 func (s *Store) TaskMemory(ctx context.Context, taskID string) (domain.TaskMemory, error) {
 	var item domain.TaskMemory
-	var decisions, facts, excluded, progress, verification, nextActions, extra, updatedAt string
+	var nextSteps, constraints, openQuestions, extra, statusUpdatedAt, updatedAt string
 	err := s.db.QueryRowContext(ctx, `
-		SELECT task_id,current_goal,decisions_json,facts_json,excluded_json,progress_json,verification_json,next_actions_json,extra_json,updated_at
+		SELECT task_id,current_goal,status,status_turn_id,status_updated_at,next_steps_json,constraints_json,open_questions_json,extra_json,updated_at
 		FROM task_memory WHERE task_id=?`, taskID).
-		Scan(&item.TaskID, &item.CurrentGoal, &decisions, &facts, &excluded, &progress, &verification, &nextActions, &extra, &updatedAt)
-	item.Decisions = decodeJSON(decisions, []string{})
-	item.Facts = decodeJSON(facts, []string{})
-	item.Excluded = decodeJSON(excluded, []string{})
-	item.Progress = decodeJSON(progress, []string{})
-	item.Verification = decodeJSON(verification, []string{})
-	item.NextActions = decodeJSON(nextActions, []string{})
+		Scan(&item.TaskID, &item.CurrentGoal, &item.Status, &item.StatusTurnID, &statusUpdatedAt,
+			&nextSteps, &constraints, &openQuestions, &extra, &updatedAt)
+	item.StatusUpdatedAt = parseTime(statusUpdatedAt)
+	item.NextSteps = decodeJSON(nextSteps, []string{})
+	item.Constraints = decodeJSON(constraints, []domain.TaskMemoryNote{})
+	item.OpenQuestions = decodeJSON(openQuestions, []string{})
 	item.Extra = decodeJSON(extra, map[string]any{})
 	item.UpdatedAt = parseTime(updatedAt)
 	if err != nil {
@@ -1292,17 +1291,41 @@ func insertTaskGoalEventTx(ctx context.Context, tx *sql.Tx, event domain.TaskGoa
 	return err
 }
 
+// memoryTimeString keeps "never updated" as an empty column instead of the
+// year-1 timestamp a zero time would format to.
+func memoryTimeString(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return timeString(value)
+}
+
+func emptyIfNil(values []string) []string {
+	if values == nil {
+		return []string{}
+	}
+	return values
+}
+
+func notesOrEmpty(values []domain.TaskMemoryNote) []domain.TaskMemoryNote {
+	if values == nil {
+		return []domain.TaskMemoryNote{}
+	}
+	return values
+}
+
 func (s *Store) UpsertTaskMemory(ctx context.Context, item domain.TaskMemory) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO task_memory(task_id,current_goal,decisions_json,facts_json,excluded_json,progress_json,verification_json,next_actions_json,extra_json,updated_at)
+		INSERT INTO task_memory(task_id,current_goal,status,status_turn_id,status_updated_at,next_steps_json,constraints_json,open_questions_json,extra_json,updated_at)
 		VALUES(?,?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(task_id) DO UPDATE SET current_goal=excluded.current_goal,decisions_json=excluded.decisions_json,
-			facts_json=excluded.facts_json,excluded_json=excluded.excluded_json,progress_json=excluded.progress_json,
-			verification_json=excluded.verification_json,next_actions_json=excluded.next_actions_json,
+		ON CONFLICT(task_id) DO UPDATE SET current_goal=excluded.current_goal,status=excluded.status,
+			status_turn_id=excluded.status_turn_id,status_updated_at=excluded.status_updated_at,
+			next_steps_json=excluded.next_steps_json,constraints_json=excluded.constraints_json,
+			open_questions_json=excluded.open_questions_json,
 			extra_json=excluded.extra_json,updated_at=excluded.updated_at`,
-		item.TaskID, item.CurrentGoal, encodeJSON(item.Decisions), encodeJSON(item.Facts), encodeJSON(item.Excluded),
-		encodeJSON(item.Progress), encodeJSON(item.Verification), encodeJSON(item.NextActions), encodeJSON(item.Extra),
-		timeString(item.UpdatedAt),
+		item.TaskID, item.CurrentGoal, item.Status, item.StatusTurnID, memoryTimeString(item.StatusUpdatedAt),
+		encodeJSON(emptyIfNil(item.NextSteps)), encodeJSON(notesOrEmpty(item.Constraints)), encodeJSON(emptyIfNil(item.OpenQuestions)),
+		encodeJSON(item.Extra), timeString(item.UpdatedAt),
 	)
 	return err
 }

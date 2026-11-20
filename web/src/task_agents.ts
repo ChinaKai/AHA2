@@ -295,23 +295,72 @@ export function renderTaskContextSummary(detail: TaskDetail): string {
   ).join("<br>") || "-";
 }
 
-export function renderTaskMemory(memory?: TaskMemory): string {
+function memoryTime(value?: string): string {
+  // The server sends a zero time for "never"; treat anything before 2000 as unset.
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime()) || date.getFullYear() < 2000) return "";
+  return date.toLocaleString([], {month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit"});
+}
+
+function memoryList(items: string[], ordered: boolean): string {
+  if (!items.length) return `<p class="memory-empty">暂无</p>`;
+  const tag = ordered ? "ol" : "ul";
+  return `<${tag} class="memory-list">${items.map(item => `<li>${escapeHTML(item)}</li>`).join("")}</${tag}>`;
+}
+
+// renderTaskMemory draws the Task state card. turns lets it say which Turn wrote
+// the card and flag one that a later Main Turn finished without updating: the
+// card is only useful if a reader can tell whether it is current.
+export function renderTaskMemory(memory?: TaskMemory, turns: Turn[] = []): string {
   const labels: Record<string, string> = {
     set: "设定", revise: "调整", pause: "暂停", resume: "恢复", complete: "完成", reopen: "重新打开",
   };
   const history = [...(memory?.goal_history || [])].slice(-20);
-  const timeline = history.map((event, index) => {
-    const date = event.created_at ? new Date(event.created_at).toLocaleString([], {
-      month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
-    }) : "";
+  const latestGoal = history[history.length - 1];
+  const goalMeta = latestGoal
+    ? `<small class="memory-meta">${escapeHTML([memoryTime(latestGoal.created_at), labels[latestGoal.change_type] || latestGoal.change_type].filter(Boolean).join(" · "))}${latestGoal.reason ? ` · ${escapeHTML(latestGoal.reason)}` : ""}</small>`
+    : "";
+
+  const statusTurn = turns.find(turn => turn.id === memory?.status_turn_id);
+  const lastMain = turns
+    .filter(turn => turn.agent_id === "main" && Boolean(turn.finished_at))
+    .sort((left, right) => right.sequence - left.sequence)[0];
+  const stale = Boolean(lastMain) && lastMain.id !== (memory?.status_turn_id || "");
+  const updated = [statusTurn ? `Turn #${statusTurn.sequence}` : "", memoryTime(memory?.status_updated_at)].filter(Boolean).join(" · ");
+  const staleNote = stale
+    ? `<p class="memory-stale">${memory?.status_turn_id ? "最近一轮结束时没有更新这张卡，内容可能已经过时。" : "Agent 还没有写过这张卡。"}</p>`
+    : "";
+
+  const constraints = memory?.constraints || [];
+  const constraintList = constraints.length
+    ? `<ul class="memory-list">${constraints.map(note => {
+        const when = memoryTime(note.created_at);
+        return `<li>${escapeHTML(note.text)}${when ? `<time>${escapeHTML(when)}</time>` : ""}</li>`;
+      }).join("")}</ul>`
+    : `<p class="memory-empty">暂无</p>`;
+
+  // Newest first: the change the reader is looking for is almost always the last one.
+  const timeline = [...history].reverse().map(event => {
+    const date = memoryTime(event.created_at);
+    const before = event.goal_before && event.goal_before !== event.goal_after
+      ? `<details class="memory-goal-before"><summary>调整前的目标</summary><p>${escapeHTML(event.goal_before)}</p></details>`
+      : "";
     return `<li class="memory-goal-event">
-      <div class="memory-goal-event-head"><span>${String(index + 1).padStart(2, "0")} · ${escapeHTML(labels[event.change_type] || event.change_type)}</span>${date ? `<time>${escapeHTML(date)}</time>` : ""}</div>
+      <div class="memory-goal-event-head"><span>${escapeHTML(labels[event.change_type] || event.change_type)}</span>${date ? `<time>${escapeHTML(date)}</time>` : ""}</div>
       <p class="memory-goal-reason">${escapeHTML(event.reason || "-")}</p>
-      <div class="memory-goal-transition">${event.goal_before ? `<span>${escapeHTML(event.goal_before)}</span><b>→</b>` : ""}<strong>${escapeHTML(event.goal_after || "-")}</strong></div>
+      <div class="memory-goal-transition"><strong>${escapeHTML(event.goal_after || "-")}</strong></div>${before}
     </li>`;
   }).join("");
-  return `<div class="memory-goal"><small>Current Goal</small><p>${escapeHTML(memory?.current_goal || "-")}</p></div>
-    <section class="memory-goal-timeline"><header><strong>目标变更</strong><small>最近 ${history.length}/20 次 · 按时间顺序</small></header>${timeline ? `<ol>${timeline}</ol>` : `<p class="memory-empty">尚无目标变更记录</p>`}</section>`;
+
+  return `<div class="memory-card">
+    <section class="memory-goal"><header><strong>目标</strong></header><p>${escapeHTML(memory?.current_goal || "-")}</p>${goalMeta}</section>
+    <section class="memory-section"><header><strong>现在到哪了</strong>${updated ? `<small>${escapeHTML(updated)}</small>` : ""}</header>${staleNote}${memory?.status ? `<p class="memory-status">${escapeHTML(memory.status)}</p>` : `<p class="memory-empty">暂无</p>`}</section>
+    <section class="memory-section"><header><strong>下一步</strong></header>${memoryList(memory?.next_steps || [], true)}</section>
+    <section class="memory-section"><header><strong>已定的约束</strong></header>${constraintList}</section>
+    <section class="memory-section"><header><strong>等你决定</strong></header>${memoryList(memory?.open_questions || [], false)}</section>
+  </div>
+  <details class="memory-goal-timeline"><summary><strong>目标变更</strong><small>最近 ${history.length}/20 次 · 新的在上</small></summary>${timeline ? `<ol>${timeline}</ol>` : `<p class="memory-empty">尚无目标变更记录</p>`}</details>`;
 }
 
 function renderOrchestrationCard(item: ConversationItem, detail: TaskDetail): string {

@@ -322,7 +322,7 @@ func (s *Service) SetAgentChannelReplyDecision(ctx context.Context, claims agent
 	)
 }
 
-func (s *Service) UpdateAgentMemory(ctx context.Context, claims agentapi.Claims, patch MemoryPatch) (domain.TaskMemory, error) {
+func (s *Service) UpdateAgentMemory(ctx context.Context, claims agentapi.Claims, update MemoryUpdate) (domain.TaskMemory, error) {
 	call, err := s.AgentCallContext(ctx, claims, true)
 	if err != nil {
 		return domain.TaskMemory{}, err
@@ -331,50 +331,7 @@ func (s *Service) UpdateAgentMemory(ctx context.Context, claims agentapi.Claims,
 	if err != nil {
 		return domain.TaskMemory{}, err
 	}
-	if err := s.applyMemoryPatch(ctx, call.Task, call.Turn, memory, patch); err != nil {
-		return domain.TaskMemory{}, err
-	}
-	return s.store.TaskMemory(ctx, call.Task.ID)
-}
-
-func (s *Service) ReplaceAgentMemory(ctx context.Context, claims agentapi.Claims, replacement MemoryPatch) (domain.TaskMemory, error) {
-	call, err := s.AgentCallContext(ctx, claims, true)
-	if err != nil {
-		return domain.TaskMemory{}, err
-	}
-	memory, err := s.store.TaskMemory(ctx, call.Task.ID)
-	if err != nil {
-		return domain.TaskMemory{}, err
-	}
-	memory.TaskID = call.Task.ID
-	memory.CurrentGoal = call.Task.CurrentGoal
-	if replacement.CurrentGoal != nil {
-		goal := strings.TrimSpace(*replacement.CurrentGoal)
-		if goal == "" || len([]rune(goal)) > 2000 {
-			return domain.TaskMemory{}, fmt.Errorf("current goal is invalid")
-		}
-		changeType := strings.TrimSpace(replacement.GoalChangeType)
-		if changeType == "" {
-			changeType = "revise"
-		}
-		if err := s.store.UpdateTaskGoalWithEvent(ctx, domain.TaskGoalChange{
-			TaskID: call.Task.ID, RoundID: call.Turn.RoundID, TurnID: call.Turn.ID,
-			SourceMessageID: call.Turn.InputMessageID, GoalAfter: goal,
-			ChangeType: changeType, Reason: strings.TrimSpace(replacement.GoalReason),
-			CreatedAt: s.now().UTC(),
-		}); err != nil {
-			return domain.TaskMemory{}, err
-		}
-		memory.CurrentGoal = goal
-	}
-	memory.Decisions = appendUnique(nil, replacement.Decisions...)
-	memory.Facts = appendUnique(nil, replacement.Facts...)
-	memory.Excluded = appendUnique(nil, replacement.Excluded...)
-	memory.Progress = appendUnique(nil, replacement.Progress...)
-	memory.Verification = appendUnique(nil, replacement.Verification...)
-	memory.NextActions = appendUnique(nil, replacement.NextActions...)
-	memory.UpdatedAt = s.now().UTC()
-	if err := s.store.UpsertTaskMemory(ctx, memory); err != nil {
+	if err := s.applyMemoryUpdate(ctx, call.Task, call.Turn, memory, update); err != nil {
 		return domain.TaskMemory{}, err
 	}
 	return s.store.TaskMemory(ctx, call.Task.ID)

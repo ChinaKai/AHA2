@@ -1053,23 +1053,35 @@ body.task-tool-resizing { cursor: col-resize; user-select: none; }
 .hardware-send .terminal-toggle { min-height: 38px; padding: 0 9px; }
 .hardware-send button { min-height: 38px; }
 .hardware-inline-error { min-height: 18px; padding: 2px 8px 5px; background: #f8fafc; color: var(--red); font-size: 9px; }
-.memory-goal { margin-bottom: 16px; padding: 10px; border: 1px solid var(--line); background: #fff; }
-.memory-goal small { color: var(--muted); font-size: 9px; font-weight: 800; text-transform: uppercase; }
-.memory-goal p { max-height: 120px; margin: 6px 0 0; overflow: auto; font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+.memory-card { display: grid; gap: 0; border: 1px solid var(--line); background: #fff; }
+.memory-card > section { padding: 10px; border-top: 1px solid var(--line); }
+.memory-card > section:first-child { border-top: 0; }
+.memory-card header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 6px; }
+.memory-card header strong { font-size: 11px; }
+.memory-card header small, .memory-meta, .memory-empty { color: var(--muted); font-size: 9px; }
+.memory-goal p, .memory-status { margin: 0; font-size: 10px; line-height: 1.55; overflow-wrap: anywhere; white-space: pre-wrap; }
+.memory-goal p { max-height: 120px; overflow: auto; }
+.memory-meta { display: block; margin-top: 6px; overflow-wrap: anywhere; }
+.memory-empty { margin: 0; }
+.memory-stale { margin: 0 0 6px; padding: 5px 7px; border-left: 2px solid #c98a00; background: #fff8e6; color: #7a5300; font-size: 9px; line-height: 1.45; }
+.memory-list { margin: 0; padding-left: 16px; font-size: 10px; line-height: 1.55; }
+.memory-list li { overflow-wrap: anywhere; }
+.memory-list li time { margin-left: 8px; color: var(--muted); font-size: 9px; white-space: nowrap; }
 .memory-goal-timeline { margin-top: 14px; }
-.memory-goal-timeline > header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
-.memory-goal-timeline > header strong { font-size: 11px; }
-.memory-goal-timeline > header small, .memory-empty { color: var(--muted); font-size: 9px; }
+.memory-goal-timeline > summary { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--line); cursor: pointer; }
+.memory-goal-timeline > summary strong { font-size: 11px; }
+.memory-goal-timeline > summary small { color: var(--muted); font-size: 9px; }
 .memory-goal-timeline ol { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; }
 .memory-goal-event { position: relative; margin-left: 7px; padding: 12px 0 12px 18px; border-left: 1px solid var(--line); }
 .memory-goal-event::before { position: absolute; top: 17px; left: -4px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); content: ""; }
 .memory-goal-event:last-child { padding-bottom: 2px; }
 .memory-goal-event-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 9px; font-weight: 800; }
 .memory-goal-reason { margin: 6px 0; font-size: 10px; line-height: 1.55; overflow-wrap: anywhere; }
-.memory-goal-transition { display: flex; align-items: flex-start; gap: 7px; color: var(--muted); font-size: 9px; line-height: 1.45; }
-.memory-goal-transition span, .memory-goal-transition strong { min-width: 0; overflow-wrap: anywhere; }
-.memory-goal-transition strong { color: var(--text); font-weight: 600; }
-.memory-goal-transition b { flex: none; color: var(--accent); }
+.memory-goal-transition { font-size: 9px; line-height: 1.45; }
+.memory-goal-transition strong { color: var(--text); font-weight: 600; overflow-wrap: anywhere; }
+.memory-goal-before { margin-top: 4px; color: var(--muted); font-size: 9px; }
+.memory-goal-before summary { cursor: pointer; }
+.memory-goal-before p { margin: 4px 0 0; line-height: 1.45; overflow-wrap: anywhere; }
 .task-head .realtime-state { padding: 3px 6px; border-radius: 4px; font-size: 9px; white-space: nowrap; }
 dl { margin: 0 0 20px; }
 dt { margin-top: 9px; color: var(--muted); font-size: 9px; }

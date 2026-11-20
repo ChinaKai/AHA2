@@ -11,12 +11,12 @@ AHA exposes one Task-scoped control plane two ways, behind the same server-side 
 
 | MCP server | Tools | HTTP section |
 | --- | --- | --- |
-| `aha2_core` | `inbox_wait`, `progress`, `memory_patch`, `attachment_bind`, `task_get`, `task_list`, `task_message`, `capabilities` | Turn state |
+| `aha2_core` | `inbox_wait`, `progress`, `memory_update`, `attachment_bind`, `task_get`, `task_list`, `task_message`, `capabilities` | Turn state |
 | `aha2_knowledge` | `knowledge_list`, `knowledge_get`, `knowledge_guide`, `knowledge_submit`, `knowledge_feedback`, `skill_list`, `skill_get` | Knowledge and Skills |
 | `aha2_collab` | `collab_batch_submit`, `collab_batch_wait` | Turn state (collaboration batches) |
 | `aha2_channel` | `channel_reply`, `channel_reply_decision`, `channel_request_permission`, `channel_contacts` | Channel operations (`task_route` only) |
 
-Which servers a Turn receives depends on the Task; a Sub Agent or a read-only Turn sees only the read tools. HTTP only: changing the Task goal (`memory_patch` appends entries but cannot change the goal), uploading attachment bytes, creating Tasks, creating or updating Skills, and channel contact messages that are not a reply.
+Which servers a Turn receives depends on the Task; a Sub Agent or a read-only Turn sees only the read tools. HTTP only: uploading attachment bytes, creating Tasks, creating or updating Skills, and channel contact messages that are not a reply.
 
 Use one path per operation. Calling the MCP tool and the HTTP endpoint for the same thing sends it twice.
 
@@ -55,9 +55,15 @@ Send UTF-8 JSON with `Content-Type: application/json; charset=utf-8`. Windows Po
 - `POST /api/v1/agent/tasks`
 - `GET /api/v1/agent/tasks/{task}`
 
-The memory endpoint accepts exactly one of `append` or `replace`. Task Memory is not default Prompt context. The current storage format retains legacy `decisions`, `facts`, `excluded`, `progress`, `verification`, and `next_actions` arrays for compatibility, but the Web UI and Agent API expose the bounded goal-change timeline instead. Use replace only when the caller can carry forward every still-valid item.
+The memory endpoint (and the `memory_update` tool) writes the Task state card: the short note the Owner reads on the Task page and the next Turn reads in its prompt. Send only the fields you want to change:
 
-When the active goal changes, send `current_goal`, `goal_change_type` (`set`, `revise`, `pause`, `resume`, `complete`, or `reopen`), and a concise `goal_reason`. The server records the change as a goal event and updates the authoritative Task goal. Do not update the goal for ordinary progress.
+```json
+{"status":"where the work stands now, one short paragraph","next_steps":["..."],"open_questions":["..."],"add_constraints":["..."],"remove_constraints":["exact text"]}
+```
+
+`status` (up to 600 characters), `next_steps` and `open_questions` (up to 6 entries each) replace what was there, so send the current picture rather than a log, and send `[]` to clear a list. Constraints are the Owner's standing decisions: they are appended, at most 12 are kept, and one is removed by its exact text. Update the card before the final answer of every Turn; a Turn that ends without updating it leaves a card the next Turn is told may be stale.
+
+When the active goal changes, add `current_goal`, `goal_change_type` (`set`, `revise`, `pause`, `resume`, `complete`, or `reopen`), and a concise `goal_reason` to the same call. The server records the change as a goal event and updates the authoritative Task goal. Do not update the goal for ordinary progress. Completing or reopening a Task is recorded on the goal timeline by the server.
 
 Progress messages use:
 
@@ -87,7 +93,7 @@ Poll Owner and channel messages already queued for this active Turn:
 - An explicit Owner request to do something else replaces or pauses the current objective.
 - An Owner request to also do something adds work to the plan.
 - Channel participants are message sources, not permission grants. Group/task-channel messages may add proposed work only within their verified route and Task scope; they do not override the Owner goal or grant capabilities.
-- Do not overwrite `current_goal` mechanically for every message. Use the memory endpoint with `goal_change_type` and `goal_reason` only after deciding whether the message is a replacement, addition, correction, stop, or context update.
+- Do not overwrite `current_goal` mechanically for every message. Change the goal (`memory_update` with `goal_change_type` and `goal_reason`) only after deciding whether the message is a replacement, addition, correction, stop, or context update.
 
 The final Main answer belongs to AHA Web and is not automatically mirrored to a Task-routed channel. For every channel message that needs an answer, send a separate receipt-bound reply:
 

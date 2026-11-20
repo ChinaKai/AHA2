@@ -69,7 +69,7 @@ export function renderTaskToolContent(
   if (tool === "permissions") return permissionHTML;
   if (tool === "channel") return channelHTML;
   if (tool === "context") return contextHTML;
-  if (tool === "memory") return `<div class="task-memory-tool">${renderTaskMemory(detail.memory)}</div>`;
+  if (tool === "memory") return `<div class="task-memory-tool">${renderTaskMemory(detail.memory, detail.turns || [])}</div>`;
   if (tool === "hardware") return renderHardwarePanel(detail);
   if (tool === "mail") return mailHTML;
   if (tool === "browser") return renderDesktopPanel(detail);

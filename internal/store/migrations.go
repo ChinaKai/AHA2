@@ -4234,6 +4234,42 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("record schema v153: %w", err)
 		}
 	}
+	// v154 turns Task Memory into the state card: a status paragraph, next
+	// steps, standing constraints and open questions. The earlier array columns
+	// (decisions, facts, ...) were written by Agents but shown to nobody and
+	// never fed back into a prompt; they stay in the table, unread, so an older
+	// binary can still open the database.
+	memoryColumns := []struct{ name, ddl string }{
+		{"status", `ALTER TABLE task_memory ADD COLUMN status TEXT NOT NULL DEFAULT ''`},
+		{"status_turn_id", `ALTER TABLE task_memory ADD COLUMN status_turn_id TEXT NOT NULL DEFAULT ''`},
+		{"status_updated_at", `ALTER TABLE task_memory ADD COLUMN status_updated_at TEXT NOT NULL DEFAULT ''`},
+		{"next_steps_json", `ALTER TABLE task_memory ADD COLUMN next_steps_json TEXT NOT NULL DEFAULT '[]'`},
+		{"constraints_json", `ALTER TABLE task_memory ADD COLUMN constraints_json TEXT NOT NULL DEFAULT '[]'`},
+		{"open_questions_json", `ALTER TABLE task_memory ADD COLUMN open_questions_json TEXT NOT NULL DEFAULT '[]'`},
+	}
+	var hasV154 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=154)`).Scan(&hasV154)
+	memoryColumnsReady := hasV154
+	for _, column := range memoryColumns {
+		if !s.tableHasColumn(ctx, "task_memory", column.name) {
+			memoryColumnsReady = false
+		}
+	}
+	if !memoryColumnsReady {
+		for _, column := range memoryColumns {
+			if s.tableHasColumn(ctx, "task_memory", column.name) {
+				continue
+			}
+			if _, err := s.db.ExecContext(ctx, column.ddl); err != nil &&
+				!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+				return fmt.Errorf("apply schema v154 %s: %w", column.name, err)
+			}
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(154, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return fmt.Errorf("record schema v154: %w", err)
+		}
+	}
 	return nil
 }
 

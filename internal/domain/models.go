@@ -659,19 +659,46 @@ type BackendSession struct {
 	LastUsedAt       time.Time `json:"last_used_at"`
 }
 
+// TaskMemory is the Task's state card: the small amount of state that has to
+// survive across Turns and session compaction. The Owner reads it on the Task
+// page and the next Turn reads it in its prompt, so one text serves both.
+//
+// Status, NextSteps and OpenQuestions describe "now" and are replaced as a
+// whole each time the Agent updates them; an append-only log would go stale.
+// Constraints are the Owner's standing decisions and are appended, because they
+// are exactly what a compacted session forgets.
 type TaskMemory struct {
-	TaskID       string           `json:"task_id"`
-	CurrentGoal  string           `json:"current_goal"`
-	Decisions    []string         `json:"decisions,omitempty"`
-	Facts        []string         `json:"facts,omitempty"`
-	Excluded     []string         `json:"excluded,omitempty"`
-	Progress     []string         `json:"progress,omitempty"`
-	Verification []string         `json:"verification,omitempty"`
-	NextActions  []string         `json:"next_actions,omitempty"`
-	GoalHistory  []TaskGoalChange `json:"goal_history,omitempty"`
-	Extra        map[string]any   `json:"extra,omitempty"`
-	UpdatedAt    time.Time        `json:"updated_at"`
+	TaskID      string `json:"task_id"`
+	CurrentGoal string `json:"current_goal"`
+	// Status is one short paragraph: where the work stands right now.
+	Status string `json:"status,omitempty"`
+	// StatusTurnID and StatusUpdatedAt record which Turn last wrote the "now"
+	// fields, so a reader can tell a fresh card from one a later Turn skipped.
+	StatusTurnID    string           `json:"status_turn_id,omitempty"`
+	StatusUpdatedAt time.Time        `json:"status_updated_at"`
+	NextSteps       []string         `json:"next_steps,omitempty"`
+	Constraints     []TaskMemoryNote `json:"constraints,omitempty"`
+	OpenQuestions   []string         `json:"open_questions,omitempty"`
+	GoalHistory     []TaskGoalChange `json:"goal_history,omitempty"`
+	Extra           map[string]any   `json:"extra,omitempty"`
+	UpdatedAt       time.Time        `json:"updated_at"`
 }
+
+// TaskMemoryNote is one standing constraint with the Turn that recorded it.
+type TaskMemoryNote struct {
+	Text      string    `json:"text"`
+	TurnID    string    `json:"turn_id,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// Limits keep the state card small enough to print in every Turn's prompt.
+const (
+	TaskMemoryStatusMaxRunes  = 600
+	TaskMemoryItemMaxRunes    = 240
+	TaskMemoryMaxNextSteps    = 6
+	TaskMemoryMaxConstraints  = 12
+	TaskMemoryMaxOpenQuestion = 6
+)
 
 type TaskGoalChange struct {
 	Sequence        int64     `json:"sequence"`

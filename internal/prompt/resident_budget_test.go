@@ -32,7 +32,7 @@ var residentPromptBudget = map[string]int{
 	// programs and logs into the repository root and user directories.
 	"core-default":                 1800,
 	"identity-task-agent":          600,
-	"role-main":                    2200,
+	"role-main":                    2400,
 	"channel-web":                  250,
 	"protocol-agent-api":           1500,
 	"protocol-attachment-delivery": 600,

@@ -80,8 +80,8 @@ func seedTaskDetailPerfFixture(tb testing.TB) *taskDetailPerfFixture {
 	}
 	task = created
 	if err := database.UpsertTaskMemory(ctx, domain.TaskMemory{
-		TaskID: task.ID, CurrentGoal: "perf goal", Decisions: []string{"decide"},
-		Facts: []string{"fact"}, Progress: []string{"progress"}, UpdatedAt: now,
+		TaskID: task.ID, CurrentGoal: "perf goal", Status: "progress",
+		NextSteps: []string{"next"}, Constraints: []domain.TaskMemoryNote{{Text: "decide", CreatedAt: now}}, UpdatedAt: now,
 	}); err != nil {
 		tb.Fatal(err)
 	}

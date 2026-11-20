@@ -262,36 +262,25 @@ func (s *Server) callAgentCoreMCPTool(writer http.ResponseWriter, request *http.
 		}
 		respondJSON(map[string]any{"capabilities": s.agentCapabilityMap(request.Context(), claims, call)})
 
-	case "memory_patch":
-		var args struct {
-			Decisions    []string `json:"decisions"`
-			Facts        []string `json:"facts"`
-			Excluded     []string `json:"excluded"`
-			Progress     []string `json:"progress"`
-			Verification []string `json:"verification"`
-			NextActions  []string `json:"next_actions"`
-		}
+	case "memory_update":
+		var args app.MemoryUpdate
 		if err := decodeCoreToolArguments(input.Arguments, &args); err != nil {
 			auditResult = "invalid"
-			toolError("invalid memory_patch arguments")
+			toolError("invalid memory_update arguments")
 			return
 		}
-		patch := app.MemoryPatch{
-			Decisions: args.Decisions, Facts: args.Facts, Excluded: args.Excluded,
-			Progress: args.Progress, Verification: args.Verification, NextActions: args.NextActions,
-		}
-		if !validMemoryPatch(patch) {
+		if args.Empty() {
 			auditResult = "invalid"
-			toolError("memory_patch needs 1-100 non-empty entries; goal changes are not accepted by this tool")
+			toolError("memory_update needs at least one field")
 			return
 		}
-		memory, err := s.app.UpdateAgentMemory(request.Context(), claims, patch)
+		memory, err := s.app.UpdateAgentMemory(request.Context(), claims, args)
 		if err != nil {
 			auditResult = "error"
 			fail(err)
 			return
 		}
-		respondJSON(map[string]any{"ok": true, "mode": "append", "memory": compactTaskMemory(memory)})
+		respondJSON(map[string]any{"ok": true, "memory": compactTaskMemory(memory)})
 
 	case "progress":
 		var args struct {
@@ -485,18 +474,35 @@ func coreMCPTools() []mcpTool {
 			},
 		},
 		{
-			Name: "memory_patch",
-			Description: "Append entries to this Task's Turn memory arrays. Main Agent only. " +
-				"Goal changes and Task status are not available here.",
+			Name: "memory_update",
+			Description: "Update this Task's state card: the short note the Owner reads on the Task page and the " +
+				"next Turn reads in its prompt. Main Agent only. Call it before the final answer of every Turn; " +
+				"status, next_steps and open_questions replace what was there, so send the current picture, not a log. " +
+				"A goal change goes in the same call.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"decisions":    stringArray("Decisions to append."),
-					"facts":        stringArray("Facts to append."),
-					"excluded":     stringArray("Rejected options to append."),
-					"progress":     stringArray("Progress entries to append."),
-					"verification": stringArray("Verification evidence to append."),
-					"next_actions": stringArray("Next actions to append."),
+					"status": map[string]any{
+						"type": "string", "maxLength": 600,
+						"description": "Where the work stands right now, in one short paragraph (up to 600 characters). Replaces the previous status.",
+					},
+					"next_steps":     stringArray("What comes next, up to 6 short entries. Replaces the previous list; send [] when nothing is left."),
+					"open_questions": stringArray("Decisions waiting on the Owner, up to 6 entries. Replaces the previous list; send [] once they are answered."),
+					"add_constraints": stringArray("Standing decisions or limits the Owner stated that later Turns must keep (for example \"do not change the public API\"). " +
+						"Appended; at most 12 are kept."),
+					"remove_constraints": stringArray("Exact text of constraints that no longer apply."),
+					"current_goal": map[string]any{
+						"type": "string", "maxLength": 2000,
+						"description": "The new Task goal, only when the goal really changed. Requires goal_reason.",
+					},
+					"goal_change_type": map[string]any{
+						"type": "string", "enum": []string{"set", "revise", "pause", "resume", "complete", "reopen"},
+						"description": "Kind of goal change; defaults to revise.",
+					},
+					"goal_reason": map[string]any{
+						"type": "string", "maxLength": 500,
+						"description": "Why the goal changed. Required with current_goal.",
+					},
 				},
 				"required": []string{}, "additionalProperties": false,
 			},

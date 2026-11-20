@@ -771,17 +771,26 @@ export interface ConversationPage {
   latest_sequence?: number;
 }
 
+// The Task state card: what the Owner reads here and the next Turn reads in its
+// prompt. status, next_steps and open_questions describe "now" and are replaced
+// as a whole; constraints are the Owner's standing decisions.
 export interface TaskMemory {
   task_id: string;
   current_goal: string;
+  status?: string;
+  status_turn_id?: string;
+  status_updated_at?: string;
+  next_steps?: string[];
+  constraints?: TaskMemoryNote[];
+  open_questions?: string[];
   goal_history?: TaskGoalChange[];
-  decisions?: string[];
-  facts?: string[];
-  excluded?: string[];
-  progress?: string[];
-  verification?: string[];
-  next_actions?: string[];
   updated_at?: string;
+}
+
+export interface TaskMemoryNote {
+  text: string;
+  turn_id?: string;
+  created_at?: string;
 }
 
 export interface TaskGoalChange {

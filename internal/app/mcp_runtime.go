@@ -91,7 +91,7 @@ var coreMCPReadToolNames = []string{
 
 // coreMCPWriteToolNames change Task state and are advertised to Main only.
 var coreMCPWriteToolNames = []string{
-	"memory_patch", "progress", "task_message", "attachment_bind",
+	"memory_update", "progress", "task_message", "attachment_bind",
 }
 
 func coreMCPToolNames(write bool) []string {

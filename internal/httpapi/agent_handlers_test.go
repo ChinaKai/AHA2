@@ -430,19 +430,38 @@ func TestAgentStateKnowledgeAndSkillAPIs(t *testing.T) {
 		t.Fatalf("alternate snapshot=%#v err=%v", alternateSnapshot, err)
 	}
 
-	response = agentRequest(t, server.URL+"/api/v1/agent/turn/memory", http.MethodPatch, token, map[string]any{"append": map[string]any{
-		"current_goal": "Unreasoned objective",
-	}})
-	if response.StatusCode != http.StatusBadRequest {
-		t.Fatalf("memory goal without reason status=%d", response.StatusCode)
+	memoryURL := server.URL + "/api/v1/agent/turn/memory"
+	// Rejected updates must leave both the goal and the card untouched.
+	for name, body := range map[string]map[string]any{
+		"goal without reason": {"current_goal": "Unreasoned objective"},
+		"empty update":        {},
+		"status too long":     {"status": strings.Repeat("长", domain.TaskMemoryStatusMaxRunes+1)},
+		"too many next steps": {"next_steps": []string{"1", "2", "3", "4", "5", "6", "7"}},
+		"goal plus bad status": {
+			"current_goal": "Must not be recorded", "goal_reason": "rejected with the status",
+			"status": strings.Repeat("长", domain.TaskMemoryStatusMaxRunes+1),
+		},
+	} {
+		response = agentRequest(t, memoryURL, http.MethodPatch, token, body)
+		if response.StatusCode != http.StatusBadRequest {
+			t.Fatalf("memory %s status=%d body=%s", name, response.StatusCode, readBody(t, response))
+		}
+		response.Body.Close()
 	}
-	response.Body.Close()
-	response = agentRequest(t, server.URL+"/api/v1/agent/turn/memory", http.MethodPatch, token, map[string]any{"append": map[string]any{
+	if untouched, _ := database.TaskMemory(ctx, task.ID); untouched.Status != "" || untouched.CurrentGoal == "Must not be recorded" {
+		t.Fatalf("rejected memory update left a trace: %#v", untouched)
+	}
+
+	response = agentRequest(t, memoryURL, http.MethodPatch, token, map[string]any{
 		"current_goal": "Refined active objective", "goal_change_type": "revise",
-		"goal_reason": "The requested objective changed", "facts": []string{"API fact"},
-	}})
+		"goal_reason":     "The requested objective changed",
+		"status":          "Root cause found; fix written, integration tests pending.",
+		"next_steps":      []string{"Run integration tests", "Run integration tests", "  "},
+		"open_questions":  []string{"Also fix the log leak?"},
+		"add_constraints": []string{"Do not change the public API", "Use option B"},
+	})
 	if response.StatusCode != http.StatusOK {
-		t.Fatalf("memory status=%d", response.StatusCode)
+		t.Fatalf("memory status=%d body=%s", response.StatusCode, readBody(t, response))
 	}
 	var memoryResponse struct {
 		Memory domain.TaskMemory `json:"memory"`
@@ -451,12 +470,16 @@ func TestAgentStateKnowledgeAndSkillAPIs(t *testing.T) {
 		t.Fatal(err)
 	}
 	response.Body.Close()
-	if len(memoryResponse.Memory.Facts) != 0 || len(memoryResponse.Memory.GoalHistory) == 0 {
-		t.Fatalf("memory response was not compact: %#v", memoryResponse.Memory)
+	if memoryResponse.Memory.Status == "" || len(memoryResponse.Memory.GoalHistory) == 0 || memoryResponse.Memory.Extra != nil {
+		t.Fatalf("memory response is not the state card: %#v", memoryResponse.Memory)
 	}
 	memory, _ := database.TaskMemory(ctx, task.ID)
 	updatedGoalTask, _ := database.Task(ctx, task.ID)
-	if len(memory.Facts) != 1 || memory.Facts[0] != "API fact" || memory.CurrentGoal != "Refined active objective" || updatedGoalTask.CurrentGoal != memory.CurrentGoal {
+	if memory.CurrentGoal != "Refined active objective" || updatedGoalTask.CurrentGoal != memory.CurrentGoal ||
+		len(memory.NextSteps) != 1 || memory.NextSteps[0] != "Run integration tests" ||
+		len(memory.OpenQuestions) != 1 || len(memory.Constraints) != 2 ||
+		memory.Constraints[0].Text != "Do not change the public API" || memory.Constraints[0].TurnID == "" ||
+		memory.StatusTurnID == "" || memory.StatusUpdatedAt.IsZero() {
 		t.Fatalf("memory=%#v", memory)
 	}
 	lastGoalChange := memory.GoalHistory[len(memory.GoalHistory)-1]
@@ -464,16 +487,20 @@ func TestAgentStateKnowledgeAndSkillAPIs(t *testing.T) {
 		lastGoalChange.Reason != "The requested objective changed" || lastGoalChange.TurnID == "" {
 		t.Fatalf("goal change=%#v", lastGoalChange)
 	}
-	response = agentRequest(t, server.URL+"/api/v1/agent/turn/memory", http.MethodPatch, token, map[string]any{"replace": map[string]any{
-		"decisions": []string{"Keep the current decision"}, "facts": []string{"Compacted fact", "Compacted fact"},
-		"excluded": []string{}, "progress": []string{"Current progress"}, "verification": []string{}, "next_actions": []string{"Only remaining action"},
-	}})
+	// The "now" fields are replaced, an empty list clears, and a constraint is
+	// removed by its exact text while the others stay.
+	response = agentRequest(t, memoryURL, http.MethodPatch, token, map[string]any{
+		"status": "Integration tests pass.", "next_steps": []string{}, "open_questions": []string{},
+		"add_constraints": []string{"Use option B"}, "remove_constraints": []string{"Do not change the public API"},
+	})
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("memory replacement status=%d body=%s", response.StatusCode, readBody(t, response))
 	}
 	response.Body.Close()
 	memory, _ = database.TaskMemory(ctx, task.ID)
-	if len(memory.Facts) != 1 || memory.Facts[0] != "Compacted fact" || len(memory.Decisions) != 1 || len(memory.NextActions) != 1 {
+	if memory.Status != "Integration tests pass." || len(memory.NextSteps) != 0 || len(memory.OpenQuestions) != 0 ||
+		len(memory.Constraints) != 1 || memory.Constraints[0].Text != "Use option B" ||
+		memory.CurrentGoal != "Refined active objective" {
 		t.Fatalf("replaced memory=%#v", memory)
 	}
 

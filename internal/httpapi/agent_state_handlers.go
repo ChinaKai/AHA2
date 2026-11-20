@@ -110,34 +110,21 @@ func (s *Server) agentTaskStatus(writer http.ResponseWriter, request *http.Reque
 
 func (s *Server) updateAgentMemory(writer http.ResponseWriter, request *http.Request) {
 	claims, _ := agentClaimsFromContext(request.Context())
-	var payload struct {
-		Append  app.MemoryPatch  `json:"append"`
-		Replace *app.MemoryPatch `json:"replace"`
-	}
+	var payload app.MemoryUpdate
 	if err := decodeJSON(request, &payload); err != nil {
 		writeErrorDetail(writer, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
-	appendValid := validMemoryPatch(payload.Append)
-	replaceValid := payload.Replace != nil && validMemoryPatch(*payload.Replace)
-	if appendValid == replaceValid {
-		writeError(writer, http.StatusBadRequest, "memory_patch_invalid")
+	if payload.Empty() {
+		writeError(writer, http.StatusBadRequest, "memory_update_empty")
 		return
 	}
-	mode := "append"
-	var memory domain.TaskMemory
-	var err error
-	if replaceValid {
-		mode = "replace"
-		memory, err = s.app.ReplaceAgentMemory(request.Context(), claims, *payload.Replace)
-	} else {
-		memory, err = s.app.UpdateAgentMemory(request.Context(), claims, payload.Append)
-	}
+	memory, err := s.app.UpdateAgentMemory(request.Context(), claims, payload)
 	if err != nil {
 		writeAgentControlError(writer, err)
 		return
 	}
-	s.audit(request, "agent.memory.update", "task", claims.TaskID, map[string]any{"mode": mode})
+	s.audit(request, "agent.memory.update", "task", claims.TaskID, map[string]any{"goal_changed": payload.CurrentGoal != nil})
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "memory": compactTaskMemory(memory)})
 }
 
@@ -708,37 +695,4 @@ func writeAgentControlError(writer http.ResponseWriter, err error) {
 	default:
 		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "agent_operation_failed", "message": err.Error()})
 	}
-}
-
-func validMemoryPatch(patch app.MemoryPatch) bool {
-	groups := [][]string{patch.Decisions, patch.Facts, patch.Excluded, patch.Progress, patch.Verification, patch.NextActions}
-	count := 0
-	for _, group := range groups {
-		count += len(group)
-		for _, value := range group {
-			if strings.TrimSpace(value) == "" || len([]rune(value)) > 4000 {
-				return false
-			}
-		}
-	}
-	if patch.CurrentGoal != nil {
-		goal := strings.TrimSpace(*patch.CurrentGoal)
-		reason := strings.TrimSpace(patch.GoalReason)
-		changeType := strings.TrimSpace(patch.GoalChangeType)
-		if changeType == "" {
-			changeType = "revise"
-		}
-		if goal == "" || len([]rune(goal)) > 2000 || reason == "" || len([]rune(reason)) > 500 {
-			return false
-		}
-		switch changeType {
-		case "set", "revise", "pause", "resume", "complete", "reopen":
-		default:
-			return false
-		}
-		count++
-	} else if strings.TrimSpace(patch.GoalReason) != "" || strings.TrimSpace(patch.GoalChangeType) != "" {
-		return false
-	}
-	return count > 0 && count <= 100
 }

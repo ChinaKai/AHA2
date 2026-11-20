@@ -120,7 +120,7 @@ func (s *Service) coreMCPDetail() domain.MCPServer {
 		"task_get":        "读取当前 Task 或同 Project 的另一个 Task 摘要；不跨 Project。",
 		"task_list":       "列出当前 Project 内最近的 Task 摘要。",
 		"capabilities":    "读取当前 Turn 的 Agent 能力清单。",
-		"memory_patch":    "向当前 Task 记忆追加 decisions/facts/progress 等数组；Main 专用，不能改 Task 目标。",
+		"memory_update":   "更新当前 Task 的状态卡（现在到哪了、下一步、约束、待决定事项），可同时变更目标；Main 专用。",
 		"progress":        "上报一条进度消息；Main 专用。",
 		"task_message":    "向同 Project 的另一个 Task 发送消息；Main 专用，来源标记为 peer task。",
 		"attachment_bind": "把当前 Task 已上传且未绑定的附件 ID 绑定到一条附件消息；Main 专用。",
