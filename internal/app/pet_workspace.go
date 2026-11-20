@@ -155,7 +155,7 @@ func (s *Service) PetCoreDocuments(ctx context.Context) ([]PetWorkspaceDocument,
 		return []PetWorkspaceDocument{}, nil
 	}
 	items := []PetWorkspaceDocument{}
-	for _, relative := range []string{petCoreIdentityPath, petCorePrinciplesPath, petCoreLoopsPath, petCoreAgendaPath} {
+	for _, relative := range []string{petCoreIdentityPath, petCorePrinciplesPath, petCoreLoopsPath, petCoreAgendaPath, petCoreChangesPath} {
 		data, err := os.ReadFile(filepath.Join(root, relative))
 		if err != nil {
 			if os.IsNotExist(err) {

@@ -171,3 +171,10 @@ func buildDiffOps(before, after []string) []diffOp {
 	}
 	return ops
 }
+
+// UnifiedDiff renders a unified diff of two texts and reports how many lines
+// were added and removed. It is the same diff the structure preview shows,
+// exported for callers that need to show a reader what changed in a document.
+func UnifiedDiff(beforeName, afterName, before, after string) (string, int, int) {
+	return unifiedDiff(beforeName, afterName, before, after)
+}

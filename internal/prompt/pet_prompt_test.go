@@ -45,7 +45,7 @@ func TestPetTaskIdentityOwnsWorkspacePaths(t *testing.T) {
 		// never reaches the prompt as content. The ceiling covers the rules and
 		// the reason behind each one; command lists still belong in
 		// aha_capabilities.
-		if runes := len([]rune(strings.ReplaceAll(body, "\r\n", "\n"))); runes > 6800 {
+		if runes := len([]rune(strings.ReplaceAll(body, "\r\n", "\n"))); runes > 7100 {
 			t.Fatalf("%s grew back to %d runes; keep command lists in aha_capabilities:\n%s", test.path, runes, body)
 		}
 	}

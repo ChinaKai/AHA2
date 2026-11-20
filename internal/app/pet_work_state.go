@@ -141,18 +141,22 @@ type PetWorkState struct {
 	// handle. They are kept separate from Work because Work treats Detail as a
 	// target id; a conflict detail is prose plus file names.
 	Notifications []PetNotification `json:"notifications"`
-	Work          []PetWorkItem     `json:"work"`
-	OpenTasks     []PetOpenTask     `json:"open_tasks"`
-	Inspection    PetInspection     `json:"inspection"`
-	Core          PetCoreDigest     `json:"core"`
-	OpenLoops     string            `json:"open_loops,omitempty"`
-	OpenLoopsPath string            `json:"open_loops_path,omitempty"`
-	OpenLoopsNote string            `json:"open_loops_note,omitempty"`
-	Agenda        string            `json:"agenda,omitempty"`
-	AgendaPath    string            `json:"agenda_path,omitempty"`
-	AgendaNote    string            `json:"agenda_note,omitempty"`
-	LabPath       string            `json:"lab_path,omitempty"`
-	Note          string            `json:"note,omitempty"`
+	// Corrections are decisions the Owner rejected, with the Owner's reason,
+	// that the pet has not yet turned into a principle.
+	Corrections     []PetCorrection `json:"corrections,omitempty"`
+	CorrectionsNote string          `json:"corrections_note,omitempty"`
+	Work            []PetWorkItem   `json:"work"`
+	OpenTasks       []PetOpenTask   `json:"open_tasks"`
+	Inspection      PetInspection   `json:"inspection"`
+	Core            PetCoreDigest   `json:"core"`
+	OpenLoops       string          `json:"open_loops,omitempty"`
+	OpenLoopsPath   string          `json:"open_loops_path,omitempty"`
+	OpenLoopsNote   string          `json:"open_loops_note,omitempty"`
+	Agenda          string          `json:"agenda,omitempty"`
+	AgendaPath      string          `json:"agenda_path,omitempty"`
+	AgendaNote      string          `json:"agenda_note,omitempty"`
+	LabPath         string          `json:"lab_path,omitempty"`
+	Note            string          `json:"note,omitempty"`
 	// HistoryTruncated reports that the default 16 KB budget dropped older
 	// approvals/work rows. Callers can set history_limit=50 or
 	// include_turn_results=true to expand explicitly.
@@ -249,6 +253,10 @@ func (s *Service) PetWorkStateWithOptions(ctx context.Context, opts PetWorkState
 	// pet can still work from approvals/tasks, and the next wake retries.
 	if notifications, notificationErr := s.KnowledgeSyncNotifications(ctx); notificationErr == nil {
 		state.Notifications = notifications
+	}
+	if corrections := s.petOpenCorrections(ctx); len(corrections) > 0 {
+		state.Corrections = corrections
+		state.CorrectionsNote = "owner 否决了这些决定并写了原因。逐条想清楚你误判了 owner 的什么，把判断（不是规程）写进 core/principles.md；更新 principles 后这些条目自动关闭，7 天后也会自动消失。"
 	}
 	if opts.HistoryLimit > 0 {
 		eventWindow := opts.HistoryLimit * petWorkStateEventWindowPerItem

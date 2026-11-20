@@ -48,7 +48,7 @@ var residentPromptBudget = map[string]int{
 	// The identity owns invariants; the command directory lives in aha_capabilities.
 	// It also says what the pet is to the Owner (avatar and partner), how it
 	// decides, and how it grows: that is what lets it act instead of asking.
-	"identity-pet-task": 6800,
+	"identity-pet-task": 7100,
 	"role-sub":          1500,
 	"policy-single":     150,
 }

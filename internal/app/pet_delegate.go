@@ -310,6 +310,11 @@ func (s *Service) resolvePetApproval(ctx context.Context, id, decision, note str
 	item.Status = status
 	item.Resolution = strings.TrimSpace(note)
 	item.DecisionReason = strings.TrimSpace(note)
+	if status == petApprovalRejected {
+		// A rejection always carries the Owner's reason. Keep it in front of
+		// the pet until it has turned the reason into a principle.
+		s.recordPetCorrection(ctx, item, note)
+	}
 	item.ResolvedAt = now
 	s.finishPetApprovalResolution(ctx, item)
 	return item, nil
