@@ -43,7 +43,7 @@ func (s *Store) After(key StreamKey, after int64, limit int) ([]Record, int64, e
 		if seg.last <= after {
 			continue
 		}
-		more, err := readClosed(&s.corruptLines, key, seg.path, after, visit)
+		more, err := readClosed(&s.corruptLines, key, seg, after, visit)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -114,9 +114,9 @@ func (s *Store) Latest(key StreamKey, limit int) ([]Record, int64, error) {
 		}
 	}
 	for index := len(item.closed) - 1; index >= 0 && total < limit; index-- {
-		path := item.closed[index].path
+		seg := item.closed[index]
 		if err := collect(func(visit func(Record) bool) error {
-			_, err := readClosed(&s.corruptLines, key, path, 0, visit)
+			_, err := readClosed(&s.corruptLines, key, seg, 0, visit)
 			return err
 		}); err != nil {
 			return nil, 0, err
@@ -144,7 +144,7 @@ func (s *Store) ReadStream(key StreamKey, visit func(Record) bool) error {
 	item.mu.RLock()
 	defer item.mu.RUnlock()
 	for _, seg := range item.closed {
-		more, err := readClosed(&s.corruptLines, key, seg.path, 0, visit)
+		more, err := readClosed(&s.corruptLines, key, seg, 0, visit)
 		if err != nil || !more {
 			return err
 		}
@@ -156,15 +156,20 @@ func (s *Store) ReadStream(key StreamKey, visit func(Record) bool) error {
 	return nil
 }
 
-func readClosed(corrupt *atomic.Int64, key StreamKey, path string, skipThrough int64, visit func(Record) bool) (bool, error) {
-	file, err := os.Open(path)
+func readClosed(corrupt *atomic.Int64, key StreamKey, seg segment, skipThrough int64, visit func(Record) bool) (bool, error) {
+	file, err := os.Open(seg.path)
 	if err != nil {
 		return false, fmt.Errorf("open hardware io segment: %w", err)
 	}
 	defer file.Close()
+	if seg.plain {
+		// An uncompressed closed segment (its compression failed). Only
+		// the bytes that were committed when it was registered are read.
+		return scanLines(corrupt, key, io.NewSectionReader(file, 0, seg.bytes), skipThrough, visit)
+	}
 	reader, err := gzip.NewReader(bufio.NewReaderSize(file, 64<<10))
 	if err != nil {
-		return false, fmt.Errorf("read hardware io segment %s: %w", path, err)
+		return false, fmt.Errorf("read hardware io segment %s: %w", seg.path, err)
 	}
 	defer reader.Close()
 	return scanLines(corrupt, key, reader, skipThrough, visit)

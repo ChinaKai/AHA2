@@ -31,6 +31,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -155,6 +156,8 @@ type Options struct {
 	MaxBytes int64
 	// Now overrides the clock for tests.
 	Now func() time.Time
+	// Logger receives rate-limited failure reports; nil uses slog.Default.
+	Logger *slog.Logger
 }
 
 // Store is safe for concurrent use. Only one Store may own a Root at a time;
@@ -182,6 +185,12 @@ type Store struct {
 	seqMu    sync.Mutex
 	next     int64 // last sequence handed out
 	reserved int64 // largest sequence covered by sequence.json
+
+	// failures records write-path problems (see reportFailure) so they are
+	// visible in Stats and the log instead of being swallowed.
+	failures failureLog
+	// faults injects errors in tests; every hook is nil in production.
+	faults faultHooks
 }
 
 type segment struct {
@@ -190,6 +199,10 @@ type segment struct {
 	rows        int64
 	bytes       int64
 	path        string
+	// plain marks a closed segment that is still an uncompressed JSONL file
+	// because compressing it failed; readers scan it directly and
+	// maintenance retries the compression.
+	plain bool
 }
 
 type activeSegment struct {
@@ -229,6 +242,15 @@ type stream struct {
 	active  *activeSegment
 	lastSeq int64
 	removed bool
+	// rotateFailures and retryAt back off a failing rotation: the active
+	// segment keeps taking appends and the rotation is retried later
+	// instead of on every append.
+	rotateFailures int
+	retryAt        time.Time
+	// stale lists files whose data is already held by a closed segment but
+	// that could not be removed yet (for example a Windows sharing
+	// violation). Maintenance retries the removal.
+	stale []string
 }
 
 // Open returns a Store. Nothing touches the disk until first use.
@@ -238,6 +260,9 @@ func Open(options Options) *Store {
 	}
 	if options.Now == nil {
 		options.Now = time.Now
+	}
+	if options.Logger == nil {
+		options.Logger = slog.Default()
 	}
 	return &Store{options: options, streams: make(map[StreamKey]*stream), capSignal: make(chan struct{}, 1)}
 }
@@ -396,8 +421,15 @@ func (s *Store) appendLocked(item *stream, record Record) (int64, error) {
 	}
 	created := parseRecordTime(createdAt, now)
 	day := created.Format("2006-01-02")
-	if item.active != nil && (item.active.size >= s.options.MaxSegmentBytes || item.active.firstDay != day) {
-		if err := s.rotateLocked(item); err != nil {
+	if item.active != nil && (item.active.size >= s.options.MaxSegmentBytes || item.active.firstDay != day) && !now.Before(item.retryAt) {
+		// A failed rotation leaves the active segment intact; this record
+		// is still appended to it and the rotation is retried after a
+		// back-off (rotateLocked reports the failure).
+		_ = s.rotateLocked(item)
+	}
+	if item.active != nil && item.active.file == nil {
+		if err := s.reopenActive(item.active); err != nil {
+			s.reportFailure("reopen", err)
 			return 0, err
 		}
 	}
@@ -418,7 +450,9 @@ func (s *Store) appendLocked(item *stream, record Record) (int64, error) {
 		path := filepath.Join(item.dir, fmt.Sprintf("%s%020d%s", segmentPrefix, sequence, activeSuffix))
 		file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		if err != nil {
-			return 0, fmt.Errorf("open hardware io segment: %w", err)
+			err = fmt.Errorf("open hardware io segment: %w", err)
+			s.reportFailure("append", err)
+			return 0, err
 		}
 		item.active = &activeSegment{file: file, path: path, first: sequence, firstDay: day}
 	}
@@ -435,7 +469,9 @@ func (s *Store) appendLocked(item *stream, record Record) (int64, error) {
 				}
 			}
 		}
-		return 0, fmt.Errorf("write hardware io segment: %w", err)
+		err = fmt.Errorf("write hardware io segment: %w", err)
+		s.reportFailure("append", err)
+		return 0, err
 	}
 	active.addMark(sequence)
 	active.size += int64(len(line))
@@ -460,70 +496,12 @@ func parseRecordTime(value string, fallback time.Time) time.Time {
 	return parsed.UTC()
 }
 
-// rotateLocked compresses the active segment into a closed segment.
-func (s *Store) rotateLocked(item *stream) error {
-	active := item.active
-	if active == nil {
-		return nil
-	}
-	if active.rows == 0 {
-		_ = active.file.Close()
-		_ = os.Remove(active.path)
-		s.totalBytes.Add(-active.size)
-		item.active = nil
-		return nil
-	}
-	if err := active.file.Sync(); err != nil {
-		return fmt.Errorf("sync hardware io segment: %w", err)
-	}
-	if err := active.file.Close(); err != nil {
-		return fmt.Errorf("close hardware io segment: %w", err)
-	}
-	item.active = nil
-	closed, err := compressSegment(item.dir, active.path, active.first, active.last, active.lastUnix, active.rows)
-	if err != nil {
-		// Keep appending to a fresh handle so the stream is not stuck; the
-		// next rotation or load retries the compression.
-		file, openErr := os.OpenFile(active.path, os.O_WRONLY|os.O_APPEND, 0o600)
-		if openErr == nil {
-			item.active = active
-			active.file = file
-		}
-		return err
-	}
-	item.closed = append(item.closed, closed)
-	s.totalBytes.Add(closed.bytes - active.size)
-	return nil
-}
-
 func closedSegmentName(first, last, lastUnix, rows int64) string {
 	return fmt.Sprintf("%s%020d-%020d-%d-%d%s", segmentPrefix, first, last, lastUnix, rows, closedSuffix)
 }
 
-// compressSegment gzips source into a closed segment and removes source.
-func compressSegment(dir, source string, first, last, lastUnix, rows int64) (segment, error) {
-	input, err := os.Open(source)
-	if err != nil {
-		return segment{}, fmt.Errorf("open hardware io segment: %w", err)
-	}
-	defer input.Close()
-	final := filepath.Join(dir, closedSegmentName(first, last, lastUnix, rows))
-	size, err := writeGzipAtomic(final, func(writer io.Writer) error {
-		_, copyErr := io.Copy(writer, input)
-		return copyErr
-	})
-	if err != nil {
-		return segment{}, err
-	}
-	_ = input.Close()
-	if err := os.Remove(source); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return segment{}, fmt.Errorf("remove compressed hardware io segment: %w", err)
-	}
-	return segment{first: first, last: last, lastUnix: lastUnix, rows: rows, bytes: size, path: final}, nil
-}
-
 // writeGzipAtomic writes a gzip file via a temp file, fsync and rename.
-func writeGzipAtomic(final string, fill func(io.Writer) error) (int64, error) {
+func writeGzipAtomic(final string, fill func(io.Writer) error, renameFault func() error) (int64, error) {
 	temp := final + tempSuffix
 	output, err := os.OpenFile(temp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
@@ -564,9 +542,13 @@ func writeGzipAtomic(final string, fill func(io.Writer) error) (int64, error) {
 		_ = os.Remove(temp)
 		return 0, err
 	}
-	if err := os.Rename(temp, final); err != nil {
+	renameErr := runFault(renameFault)
+	if renameErr == nil {
+		renameErr = os.Rename(temp, final)
+	}
+	if renameErr != nil {
 		_ = os.Remove(temp)
-		return 0, fmt.Errorf("install hardware io segment: %w", err)
+		return 0, fmt.Errorf("install hardware io segment: %w", renameErr)
 	}
 	return info.Size(), nil
 }
@@ -701,7 +683,15 @@ func (s *Store) loadStream(key StreamKey) (*stream, error) {
 		return nil, fmt.Errorf("read hardware io stream: %w", err)
 	}
 	var actives []string
-	closedFirsts := make(map[int64]bool)
+	// One closed segment per first sequence. Two gz files with the same
+	// first can only come from an interrupted re-compression; the one that
+	// reaches further holds a superset of the other.
+	closedByFirst := make(map[int64]segment)
+	discard := func(path string) {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			item.stale = append(item.stale, path)
+		}
+	}
 	for _, entry := range entries {
 		name := entry.Name()
 		switch {
@@ -720,44 +710,72 @@ func (s *Store) loadStream(key StreamKey) (*stream, error) {
 			}
 			seg.bytes = info.Size()
 			seg.path = filepath.Join(dir, name)
-			item.closed = append(item.closed, seg)
-			closedFirsts[seg.first] = true
+			if existing, found := closedByFirst[seg.first]; found {
+				keep, drop := existing, seg
+				if seg.last > existing.last || (seg.last == existing.last && seg.rows > existing.rows) {
+					keep, drop = seg, existing
+				}
+				closedByFirst[seg.first] = keep
+				discard(drop.path)
+				continue
+			}
+			closedByFirst[seg.first] = seg
 		}
 	}
 	sort.Strings(actives)
+	today := s.options.Now().UTC().Format("2006-01-02")
 	for index, name := range actives {
 		first, ok := parseActiveName(name)
 		path := filepath.Join(dir, name)
 		if !ok {
 			continue
 		}
-		if closedFirsts[first] {
-			_ = os.Remove(path)
-			continue
-		}
 		active, err := scanActive(key, path, first)
 		if err != nil {
-			return nil, err
+			// Unreadable: leave the file for inspection and keep the rest
+			// of the stream usable.
+			s.reportFailure("load", err)
+			continue
+		}
+		if existing, found := closedByFirst[first]; found {
+			if existing.last >= active.last {
+				// The compressed copy already holds every record (a crash
+				// or a failed removal after the gz was installed).
+				discard(path)
+				continue
+			}
+			// The active file went on past the gz (an older build kept
+			// appending after a failed rotation): the active file wins.
+			delete(closedByFirst, first)
+			discard(existing.path)
 		}
 		if active.rows == 0 {
-			_ = os.Remove(path)
+			discard(path)
 			continue
 		}
-		today := s.options.Now().UTC().Format("2006-01-02")
 		if index < len(actives)-1 || active.firstDay != today {
-			seg, err := compressSegment(dir, path, active.first, active.last, active.lastUnix, active.rows)
+			seg, err := s.compressFile(dir, path, active.size, active.first, active.last, active.lastUnix, active.rows)
 			if err != nil {
-				return nil, err
+				s.reportFailure("compress", err)
+				closedByFirst[first] = plainSegment(active)
+				continue
 			}
-			item.closed = append(item.closed, seg)
+			closedByFirst[first] = seg
+			if err := s.removeFile(path); err != nil {
+				s.reportFailure("remove", err)
+				item.stale = append(item.stale, path)
+			}
 			continue
 		}
-		file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
-		if err != nil {
-			return nil, fmt.Errorf("reopen hardware io segment: %w", err)
+		if err := s.reopenActive(active); err != nil {
+			s.reportFailure("reopen", err)
+			closedByFirst[first] = plainSegment(active)
+			continue
 		}
-		active.file = file
 		item.active = active
+	}
+	for _, seg := range closedByFirst {
+		item.closed = append(item.closed, seg)
 	}
 	sort.Slice(item.closed, func(i, j int) bool { return item.closed[i].first < item.closed[j].first })
 	for _, seg := range item.closed {

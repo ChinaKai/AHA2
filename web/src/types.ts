@@ -111,6 +111,14 @@ export interface HardwareIOFileStats {
   bytes: number;
   max_bytes: number;
   last_sequence: number;
+  corrupt_lines?: number;
+  // Write-path failures of the file store (rotation, compression, removal,
+  // append) and segments/files still waiting for a retry.
+  failures?: number;
+  last_error?: string;
+  last_error_at?: string;
+  plain_segments?: number;
+  stale_files?: number;
   oldest_at?: string;
   newest_at?: string;
 }
@@ -548,6 +556,7 @@ export interface CodexLogin {
   error?: string;
   login_status?: string;
   login_error?: string;
+  record_error?: string;
   started_at: string;
   updated_at: string;
 }

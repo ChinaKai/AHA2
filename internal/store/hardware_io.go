@@ -279,6 +279,11 @@ func (s *Store) HardwareIOFileStats() (domain.HardwareIOFileStats, error) {
 	result.Bytes = stats.Bytes
 	result.LastSequence = stats.LastSequence
 	result.CorruptLines = stats.CorruptLines
+	result.Failures = stats.Failures.Total
+	result.LastError = stats.Failures.LastError
+	result.LastErrorAt = stats.Failures.LastAt
+	result.PlainSegments = stats.PlainSegments
+	result.StaleFiles = stats.StaleFiles
 	result.OldestAt = stats.OldestAt
 	result.NewestAt = stats.NewestAt
 	return result, nil

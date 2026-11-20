@@ -124,16 +124,19 @@ type HardwareIOPage struct {
 }
 
 type HardwareTerminalStatus struct {
-	TaskID      string    `json:"task_id"`
-	HardwareID  string    `json:"hardware_id"`
-	Transport   string    `json:"transport"`
-	Endpoint    string    `json:"endpoint"`
-	Status      string    `json:"status"`
-	Connected   bool      `json:"connected"`
-	ReadOnly    bool      `json:"read_only"`
-	Error       string    `json:"error,omitempty"`
-	LoginStatus string    `json:"login_status,omitempty"`
-	LoginError  string    `json:"login_error,omitempty"`
+	TaskID      string `json:"task_id"`
+	HardwareID  string `json:"hardware_id"`
+	Transport   string `json:"transport"`
+	Endpoint    string `json:"endpoint"`
+	Status      string `json:"status"`
+	Connected   bool   `json:"connected"`
+	ReadOnly    bool   `json:"read_only"`
+	Error       string `json:"error,omitempty"`
+	LoginStatus string `json:"login_status,omitempty"`
+	LoginError  string `json:"login_error,omitempty"`
+	// RecordError is set while terminal output cannot be stored (the live
+	// stream still works); it clears once an event is stored again.
+	RecordError string    `json:"record_error,omitempty"`
 	StartedAt   time.Time `json:"started_at,omitempty"`
 	UpdatedAt   time.Time `json:"updated_at,omitempty"`
 }

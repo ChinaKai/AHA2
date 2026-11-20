@@ -24,6 +24,7 @@ type Policy struct {
 // PruneResult reports one maintenance pass.
 type PruneResult struct {
 	RotatedSegments   int   `json:"rotated_segments"`
+	RecompressedPlain int   `json:"recompressed_plain"`
 	RetentionSegments int   `json:"retention_segments"`
 	RetentionBytes    int64 `json:"retention_bytes"`
 	CapacitySegments  int   `json:"capacity_segments"`
@@ -36,16 +37,21 @@ type PruneResult struct {
 
 // Stats summarizes the store for the data management page.
 type Stats struct {
-	Root           string     `json:"root"`
-	Streams        int        `json:"streams"`
-	Segments       int        `json:"segments"`
-	ActiveSegments int        `json:"active_segments"`
-	Records        int64      `json:"records"`
-	Bytes          int64      `json:"bytes"`
-	LastSequence   int64      `json:"last_sequence"`
-	CorruptLines   int64      `json:"corrupt_lines"`
-	OldestAt       *time.Time `json:"oldest_at,omitempty"`
-	NewestAt       *time.Time `json:"newest_at,omitempty"`
+	Root           string `json:"root"`
+	Streams        int    `json:"streams"`
+	Segments       int    `json:"segments"`
+	ActiveSegments int    `json:"active_segments"`
+	Records        int64  `json:"records"`
+	Bytes          int64  `json:"bytes"`
+	LastSequence   int64  `json:"last_sequence"`
+	CorruptLines   int64  `json:"corrupt_lines"`
+	// PlainSegments are closed segments still waiting for compression and
+	// StaleFiles are files waiting for removal, both after earlier failures.
+	PlainSegments int          `json:"plain_segments"`
+	StaleFiles    int          `json:"stale_files"`
+	Failures      FailureStats `json:"failures"`
+	OldestAt      *time.Time   `json:"oldest_at,omitempty"`
+	NewestAt      *time.Time   `json:"newest_at,omitempty"`
 }
 
 func (s *Store) snapshotStreams() ([]*stream, error) {
@@ -80,8 +86,12 @@ func (s *Store) Stats() (Stats, error) {
 			continue
 		}
 		counted := false
+		result.StaleFiles += len(item.stale)
 		for _, seg := range item.closed {
 			counted = true
+			if seg.plain {
+				result.PlainSegments++
+			}
 			result.Segments++
 			result.Records += seg.rows
 			result.Bytes += seg.bytes
@@ -108,6 +118,7 @@ func (s *Store) Stats() (Stats, error) {
 	}
 	result.LastSequence, _ = s.LastSequence()
 	result.CorruptLines = s.corruptLines.Load()
+	result.Failures = s.failureStats()
 	if oldest > 0 {
 		value := time.Unix(oldest, 0).UTC()
 		result.OldestAt = &value
@@ -160,11 +171,14 @@ func (s *Store) Prune(policy Policy) (PruneResult, error) {
 
 	for _, item := range items {
 		item.mu.Lock()
-		if !item.removed && item.active != nil && item.active.firstDay != today {
-			if err := s.rotateLocked(item); err != nil {
-				errs = append(errs, err)
-			} else {
-				result.RotatedSegments++
+		if !item.removed {
+			result.RecompressedPlain += s.retryPendingLocked(item)
+			if item.active != nil && item.active.firstDay != today && !now.Before(item.retryAt) {
+				if err := s.rotateLocked(item); err != nil {
+					errs = append(errs, err)
+				} else {
+					result.RotatedSegments++
+				}
 			}
 		}
 		item.mu.Unlock()

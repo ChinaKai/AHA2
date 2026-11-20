@@ -188,16 +188,24 @@ const (
 
 // HardwareIOFileStats describes the terminal IO files.
 type HardwareIOFileStats struct {
-	Directory    string     `json:"directory"`
-	Streams      int        `json:"streams"`
-	Segments     int        `json:"segments"`
-	Records      int64      `json:"records"`
-	Bytes        int64      `json:"bytes"`
-	MaxBytes     int64      `json:"max_bytes"`
-	LastSequence int64      `json:"last_sequence"`
-	CorruptLines int64      `json:"corrupt_lines"`
-	OldestAt     *time.Time `json:"oldest_at,omitempty"`
-	NewestAt     *time.Time `json:"newest_at,omitempty"`
+	Directory    string `json:"directory"`
+	Streams      int    `json:"streams"`
+	Segments     int    `json:"segments"`
+	Records      int64  `json:"records"`
+	Bytes        int64  `json:"bytes"`
+	MaxBytes     int64  `json:"max_bytes"`
+	LastSequence int64  `json:"last_sequence"`
+	CorruptLines int64  `json:"corrupt_lines"`
+	// Failures counts write-path problems of the file store (rotation,
+	// compression, removal, append); LastError is the most recent one.
+	// PlainSegments wait for a retried compression, StaleFiles for removal.
+	Failures      int64      `json:"failures"`
+	LastError     string     `json:"last_error,omitempty"`
+	LastErrorAt   *time.Time `json:"last_error_at,omitempty"`
+	PlainSegments int        `json:"plain_segments"`
+	StaleFiles    int        `json:"stale_files"`
+	OldestAt      *time.Time `json:"oldest_at,omitempty"`
+	NewestAt      *time.Time `json:"newest_at,omitempty"`
 }
 
 type DatabaseStats struct {
