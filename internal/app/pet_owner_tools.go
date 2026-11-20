@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"path"
 	"path/filepath"
@@ -73,11 +74,17 @@ func (s *Service) PetProjectCatalog(ctx context.Context) ([]PetProjectBrief, err
 }
 
 type PetCreateTaskInput struct {
-	ProjectID       string `json:"project_id"`
-	WorkspaceID     string `json:"workspace_id"`
-	Title           string `json:"title"`
-	Request         string `json:"request"`
-	ModelID         string `json:"model_id"`
+	ProjectID   string `json:"project_id"`
+	WorkspaceID string `json:"workspace_id"`
+	Title       string `json:"title"`
+	Request     string `json:"request"`
+	ModelID     string `json:"model_id"`
+	// ModelSource/WireModel/CodexAccountID are optional. Leaving ModelSource
+	// empty lets the catalog entry decide, so a managed model id (official or
+	// claude_native) is not silently treated as a provider model.
+	ModelSource     string `json:"model_source"`
+	WireModel       string `json:"wire_model"`
+	CodexAccountID  string `json:"codex_account_id"`
 	ReasoningEffort string `json:"reasoning_effort"`
 	Filesystem      string `json:"filesystem"`
 	Approval        string `json:"approval"`
@@ -170,9 +177,17 @@ func (s *Service) PetCreateTask(ctx context.Context, input PetCreateTaskInput) (
 	if workspace.ReadOnly {
 		return domain.Task{}, fmt.Errorf("该 Workspace 只读，不能创建任务")
 	}
+	selection, err := s.petCreateTaskModelSelection(
+		ctx, input.ModelSource, modelID, input.WireModel, input.CodexAccountID,
+	)
+	if err != nil {
+		return domain.Task{}, err
+	}
 	task, err := s.CreateTask(ctx, CreateTaskInput{
 		ProjectID: projectID, WorkspaceID: workspaceID, Title: title, Request: request,
-		ModelID: modelID, ReasoningEffort: reasoningEffort, Filesystem: filesystem, Approval: approval,
+		Backend: selection.Backend, ModelSource: selection.ModelSource, ModelID: selection.ModelID,
+		WireModel: selection.WireModel, CodexAccountID: selection.CodexAccountID,
+		ReasoningEffort: reasoningEffort, Filesystem: filesystem, Approval: approval,
 		Isolation: isolation, CollaborationMode: "single", MaxAgents: 1, KnowledgePolicy: "enabled",
 		StartMode: "manual", SkillIDs: input.SkillIDs,
 	})
@@ -196,6 +211,62 @@ func (s *Service) PetCreateTask(ctx context.Context, input PetCreateTaskInput) (
 	}
 	s.recordPetWork(ctx, "task_created", task.ID, string(task.Status))
 	return task, nil
+}
+
+// petCreateTaskModelSelection resolves the optional model-source fields of a
+// pet-created Task. deriveModelSelection infers the source from the catalog when
+// the caller leaves it empty, which is what lets a managed model id (official or
+// claude_native) reach its runtime source instead of the provider branch. Its
+// official fallback, however, takes the most recently used account without
+// checking readiness or ambiguity; the pet path must only auto-select when the
+// catalog entry names an account or exactly one ready account offers the wire
+// model, mirroring the review creator.
+func (s *Service) petCreateTaskModelSelection(
+	ctx context.Context, requestedSource, modelID, wireModel, accountID string,
+) (runtimeSelectionInput, error) {
+	accountID = strings.TrimSpace(accountID)
+	wireModel = strings.TrimSpace(wireModel)
+	if modelID = strings.TrimSpace(modelID); modelID != "" {
+		if model, err := s.store.Model(ctx, modelID); err == nil {
+			catalogSource := strings.TrimSpace(model.Source)
+			if catalogSource == "" {
+				catalogSource = domain.ModelSourceProvider
+			}
+			normalizedSource, ok := domain.NormalizeModelSource(requestedSource)
+			if !ok {
+				normalizedSource = ""
+			}
+			effectiveSource := normalizedSource
+			if effectiveSource == "" {
+				effectiveSource = catalogSource
+			}
+			// Only the official source needs an account. A non-empty requested
+			// source that conflicts with the catalog is left to
+			// deriveModelSelection so it fails with the mismatch error instead of
+			// silently resolving an account for the wrong source.
+			if effectiveSource == domain.ModelSourceOfficial && catalogSource == domain.ModelSourceOfficial {
+				if accountID == "" {
+					accountID = strings.TrimSpace(model.CodexAccountID)
+				}
+				wire := wireModel
+				if wire == "" {
+					wire = strings.TrimSpace(model.WireModel)
+				}
+				if accountID == "" && wire != "" {
+					resolved, resolveErr := s.petCodexAccountForWireModel(ctx, wire)
+					if resolveErr != nil {
+						return runtimeSelectionInput{}, codedErrorf(
+							ErrCodeCodexAccountUnavailable, http.StatusConflict, "%s", resolveErr.Error(),
+						)
+					}
+					accountID = resolved
+				}
+			}
+		}
+	}
+	return s.deriveModelSelection(
+		ctx, requestedSource, modelID, "", wireModel, accountID, domain.RuntimeConfigSnapshot{},
+	)
 }
 
 func (s *Service) PetStartTask(ctx context.Context, taskID string) (domain.Task, error) {
