@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
@@ -71,12 +72,33 @@ func (s *Service) PetRequestCodeReview(ctx context.Context, input PetRequestCode
 	if err != nil {
 		return PetCodeReviewResult{}, fmt.Errorf("评审模型不存在")
 	}
+	reviewSource := strings.TrimSpace(reviewModel.Source)
+	if reviewSource == "" {
+		reviewSource = domain.ModelSourceProvider
+	}
+	reviewAccountID := strings.TrimSpace(reviewModel.CodexAccountID)
+	// An official catalog entry without an account must not fall through to
+	// deriveModelSelection's lax resolver: that one picks the most recently used
+	// configured account regardless of readiness and never reports ambiguity.
+	// As a pet tool, this path only auto-selects when exactly one ready account
+	// offers the wire model; with zero or several candidates the owner must name
+	// the account.
+	if reviewSource == domain.ModelSourceOfficial && reviewAccountID == "" &&
+		strings.TrimSpace(reviewModel.WireModel) != "" {
+		resolved, resolveErr := s.petCodexAccountForWireModel(ctx, reviewModel.WireModel)
+		if resolveErr != nil {
+			return PetCodeReviewResult{}, codedErrorf(
+				ErrCodeCodexAccountUnavailable, http.StatusConflict, "%s", resolveErr.Error(),
+			)
+		}
+		reviewAccountID = resolved
+	}
 	// Resolve the review model through the same catalog inference as an agent
 	// config edit. The catalog entry carries the runtime source (provider,
 	// official or claude_native) plus wire_model/backend/account, so a managed
 	// review model must not fall back to the provider source in CreateTask.
 	selection, err := s.deriveModelSelection(
-		ctx, "", reviewModel.ID, "", "", reviewModel.CodexAccountID, domain.RuntimeConfigSnapshot{},
+		ctx, "", reviewModel.ID, "", "", reviewAccountID, domain.RuntimeConfigSnapshot{},
 	)
 	if err != nil {
 		return PetCodeReviewResult{}, err
@@ -116,6 +138,21 @@ func (s *Service) PetRequestCodeReview(ctx context.Context, input PetRequestCode
 		return PetCodeReviewResult{}, fmt.Errorf("无法读取源 Task 模型，不能创建独立评审")
 	}
 	if sourceModelID == reviewModel.ID {
+		return PetCodeReviewResult{}, fmt.Errorf("评审模型必须与源 Task 模型不同，避免同模型自审")
+	}
+	// A catalog id is not necessarily the id the runtime snapshot carries:
+	// official models are keyed by account + wire model, and claude_native ids
+	// are derived from the lowercased wire model. Compare the resolved identity
+	// too, so a non-canonical catalog row cannot bypass the different-model
+	// rule.
+	resolvedReviewModel, _, _, err := s.resolveRuntimeSelection(ctx, runtimeSelectionInput{
+		WorkspaceID: source.WorkspaceID, Backend: selection.Backend, ModelSource: selection.ModelSource,
+		ModelID: selection.ModelID, WireModel: selection.WireModel, CodexAccountID: selection.CodexAccountID,
+	})
+	if err != nil {
+		return PetCodeReviewResult{}, err
+	}
+	if sourceModelID == resolvedReviewModel.ID {
 		return PetCodeReviewResult{}, fmt.Errorf("评审模型必须与源 Task 模型不同，避免同模型自审")
 	}
 	skillIDs, warning, err := s.petCodeReviewSkillIDs(ctx, project.ID, input.SkillIDs)

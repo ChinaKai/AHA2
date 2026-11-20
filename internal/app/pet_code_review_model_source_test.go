@@ -1,6 +1,7 @@
 package app
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
@@ -132,6 +133,8 @@ func TestPetRequestCodeReviewProviderSourceDoesNotRegress(t *testing.T) {
 
 // A managed catalog entry without a wire model cannot be resolved and must fail
 // with the stable wire-model error instead of silently degrading to provider.
+// The normal catalog only produces claude_native rows with a wire model, so
+// this row simulates corrupt or hand-edited data.
 func TestPetRequestCodeReviewRejectsNativeModelWithoutWireModel(t *testing.T) {
 	fixture, project, workspace := petReviewFixture(t)
 	now := fixture.service.now().UTC()
@@ -155,7 +158,9 @@ func TestPetRequestCodeReviewRejectsNativeModelWithoutWireModel(t *testing.T) {
 }
 
 // An official catalog entry whose wire model no configured account offers must
-// return the Codex-account error rather than falling back to provider.
+// return the Codex-account error rather than falling back to provider. The
+// normal catalog derives official rows from a live account and carries its id,
+// so this row simulates a stale entry left behind after the account was removed.
 func TestPetRequestCodeReviewRejectsOfficialModelWithoutAccount(t *testing.T) {
 	fixture, project, workspace := petReviewFixture(t)
 	now := fixture.service.now().UTC()
@@ -176,5 +181,52 @@ func TestPetRequestCodeReviewRejectsOfficialModelWithoutAccount(t *testing.T) {
 	coded, ok := AsCodedError(err)
 	if !ok || coded.Code != ErrCodeCodexAccountUnavailable {
 		t.Fatalf("error = %v, want code %s", err, ErrCodeCodexAccountUnavailable)
+	}
+}
+
+// Two ready accounts offering the same wire model is ambiguous: the pet tool
+// must report it instead of silently binding the review to one of them. The
+// lax agents.go resolver used to pick the most recently used account without
+// checking readiness or uniqueness.
+func TestPetRequestCodeReviewRejectsAmbiguousOfficialAccount(t *testing.T) {
+	fixture, project, workspace := petReviewFixture(t)
+	now := fixture.service.now().UTC()
+	for _, account := range []domain.CodexAccount{
+		{
+			ID: "account-review-ready-a", Label: "Ready A", Status: "ready", CredentialConfigured: true,
+			AvailableModels: []domain.CodexModelOption{{WireModel: "gpt-review-shared", DisplayName: "Shared"}},
+			CreatedAt:       now, UpdatedAt: now,
+		},
+		{
+			ID: "account-review-ready-b", Label: "Ready B", Status: "ready", CredentialConfigured: true,
+			AvailableModels: []domain.CodexModelOption{{WireModel: "gpt-review-shared", DisplayName: "Shared"}},
+			CreatedAt:       now, UpdatedAt: now,
+		},
+	} {
+		if err := fixture.database.UpsertCodexAccount(fixture.ctx, account); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// No account association on the catalog row forces the auto-resolution path.
+	officialModel := domain.Model{
+		ID: "model-review-official-ambiguous", DisplayName: "Shared",
+		ProviderID: domain.OfficialCodexProviderID, Source: domain.ModelSourceOfficial,
+		Backend: "codex", WireModel: "gpt-review-shared", WireAPI: "responses",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := fixture.database.UpsertModel(fixture.ctx, officialModel); err != nil {
+		t.Fatal(err)
+	}
+	source := reviewSourceTask(t, fixture, project.ID, workspace.ID)
+
+	_, err := fixture.service.PetRequestCodeReview(fixture.ctx, PetRequestCodeReviewInput{
+		TaskID: source.ID, ReviewModelID: officialModel.ID,
+	})
+	coded, ok := AsCodedError(err)
+	if !ok || coded.Code != ErrCodeCodexAccountUnavailable {
+		t.Fatalf("ambiguous account error = %v, want code %s", err, ErrCodeCodexAccountUnavailable)
+	}
+	if !strings.Contains(err.Error(), "多个") {
+		t.Fatalf("ambiguous account error is not explicit: %v", err)
 	}
 }
