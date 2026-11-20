@@ -547,22 +547,28 @@ func (s *Service) recordAgentConfigUpdate(
 	})
 }
 
-func (s *Service) deriveRuntimeSnapshot(
+// deriveModelSelection normalizes a requested model choice against the model
+// catalog and fills in the runtime-selection fields. When the caller does not
+// name a source, the catalog entry decides, so a managed model (official or
+// claude_native) chosen by id is never silently treated as a provider model.
+// base carries the previous snapshot for edits that do not restate a value;
+// Task creation paths pass the zero snapshot. It is shared by agent-config
+// edits and the pet code-review creator so both resolve sources the same way.
+func (s *Service) deriveModelSelection(
 	ctx context.Context,
-	task domain.Task,
+	requestedSource, modelID, backend, wireModel, accountID string,
 	base domain.RuntimeConfigSnapshot,
-	input UpdateAgentConfigInput,
-) (domain.RuntimeConfigSnapshot, error) {
-	requestedSource, ok := domain.NormalizeModelSource(input.ModelSource)
+) (runtimeSelectionInput, error) {
+	requestedSource, ok := domain.NormalizeModelSource(requestedSource)
 	if !ok {
-		return domain.RuntimeConfigSnapshot{}, codedErrorf(
+		return runtimeSelectionInput{}, codedErrorf(
 			ErrCodeModelSourceInvalid, http.StatusBadRequest,
 			"model_source 必须是 provider、official 或 claude_native（也接受 env、codex_official）",
 		)
 	}
 	baseSource := domain.RuntimeModelSource(base.EnvGroupID, base.CodexAccountID)
 
-	modelID := strings.TrimSpace(input.ModelID)
+	modelID = strings.TrimSpace(modelID)
 	var selectedModel domain.Model
 	modelFound := false
 	loadModel := func() error {
@@ -578,7 +584,7 @@ func (s *Service) deriveRuntimeSnapshot(
 	}
 	if modelID != "" {
 		if err := loadModel(); err != nil {
-			return domain.RuntimeConfigSnapshot{}, err
+			return runtimeSelectionInput{}, err
 		}
 	}
 
@@ -596,33 +602,33 @@ func (s *Service) deriveRuntimeSnapshot(
 		}
 	}
 	if requestedSource != "" && modelFound && selectedModel.Source != requestedSource {
-		return domain.RuntimeConfigSnapshot{}, codedErrorf(
+		return runtimeSelectionInput{}, codedErrorf(
 			ErrCodeModelSourceMismatch, http.StatusBadRequest,
 			"模型 %q 属于模型源 %s，不能通过 model_source=%s 选择", modelID, selectedModel.Source, requestedSource,
 		)
 	}
 
-	backend := strings.TrimSpace(input.Backend)
-	wireModel := strings.TrimSpace(input.WireModel)
-	accountID := strings.TrimSpace(input.CodexAccountID)
+	backend = strings.TrimSpace(backend)
+	wireModel = strings.TrimSpace(wireModel)
+	accountID = strings.TrimSpace(accountID)
 
 	switch modelSource {
 	case domain.ModelSourceProvider:
 		if modelID == "" {
 			if baseSource != domain.ModelSourceProvider || base.ModelID == "" {
-				return domain.RuntimeConfigSnapshot{}, codedErrorf(
+				return runtimeSelectionInput{}, codedErrorf(
 					ErrCodeModelRequired, http.StatusBadRequest,
 					"选择 provider 模型源时必须提供 model_id",
 				)
 			}
 			modelID = base.ModelID
 			if err := loadModel(); err != nil {
-				return domain.RuntimeConfigSnapshot{}, err
+				return runtimeSelectionInput{}, err
 			}
 		}
 		if modelBackend := strings.TrimSpace(selectedModel.Backend); modelBackend != "" {
 			if backend != "" && backend != modelBackend {
-				return domain.RuntimeConfigSnapshot{}, codedErrorf(
+				return runtimeSelectionInput{}, codedErrorf(
 					ErrCodeModelSelectionInvalid, http.StatusBadRequest,
 					"backend=%s 与模型 %q 的 backend=%s 不一致", backend, modelID, modelBackend,
 				)
@@ -633,13 +639,13 @@ func (s *Service) deriveRuntimeSnapshot(
 			backend = base.Backend
 		}
 		if wireModel != "" && selectedModel.WireModel != "" && wireModel != selectedModel.WireModel {
-			return domain.RuntimeConfigSnapshot{}, codedErrorf(
+			return runtimeSelectionInput{}, codedErrorf(
 				ErrCodeModelSelectionInvalid, http.StatusBadRequest,
 				"wire_model=%s 与模型 %q 的 wire_model=%s 不一致", wireModel, modelID, selectedModel.WireModel,
 			)
 		}
 		if modelID == "" {
-			return domain.RuntimeConfigSnapshot{}, codedErrorf(
+			return runtimeSelectionInput{}, codedErrorf(
 				ErrCodeModelRequired, http.StatusBadRequest, "选择 provider 模型源时必须提供 model_id",
 			)
 		}
@@ -648,7 +654,7 @@ func (s *Service) deriveRuntimeSnapshot(
 			backend = "claude"
 		}
 		if backend != "claude" {
-			return domain.RuntimeConfigSnapshot{}, codedErrorf(
+			return runtimeSelectionInput{}, codedErrorf(
 				ErrCodeModelSelectionInvalid, http.StatusBadRequest,
 				"claude_native 模型源只能使用 claude backend，不能使用 %s", backend,
 			)
@@ -660,13 +666,13 @@ func (s *Service) deriveRuntimeSnapshot(
 			wireModel = base.WireModel
 		}
 		if wireModel == "" {
-			return domain.RuntimeConfigSnapshot{}, codedErrorf(
+			return runtimeSelectionInput{}, codedErrorf(
 				ErrCodeWireModelRequired, http.StatusBadRequest,
 				"选择 claude_native 时必须提供 wire_model（或 claude_native 目录模型的 model_id）",
 			)
 		}
 		if modelFound && selectedModel.WireModel != "" && !strings.EqualFold(selectedModel.WireModel, wireModel) {
-			return domain.RuntimeConfigSnapshot{}, codedErrorf(
+			return runtimeSelectionInput{}, codedErrorf(
 				ErrCodeModelSelectionInvalid, http.StatusBadRequest,
 				"wire_model=%s 与模型 %q 的 wire_model=%s 不一致", wireModel, modelID, selectedModel.WireModel,
 			)
@@ -678,7 +684,7 @@ func (s *Service) deriveRuntimeSnapshot(
 			backend = "codex"
 		}
 		if backend != "codex" {
-			return domain.RuntimeConfigSnapshot{}, codedErrorf(
+			return runtimeSelectionInput{}, codedErrorf(
 				ErrCodeModelSelectionInvalid, http.StatusBadRequest,
 				"official 模型源只能使用 codex backend，不能使用 %s", backend,
 			)
@@ -690,13 +696,13 @@ func (s *Service) deriveRuntimeSnapshot(
 			wireModel = base.WireModel
 		}
 		if wireModel == "" {
-			return domain.RuntimeConfigSnapshot{}, codedErrorf(
+			return runtimeSelectionInput{}, codedErrorf(
 				ErrCodeWireModelRequired, http.StatusBadRequest,
 				"选择 official 时必须提供 wire_model（或 official 目录模型的 model_id）",
 			)
 		}
 		if modelFound && selectedModel.WireModel != "" && wireModel != selectedModel.WireModel {
-			return domain.RuntimeConfigSnapshot{}, codedErrorf(
+			return runtimeSelectionInput{}, codedErrorf(
 				ErrCodeModelSelectionInvalid, http.StatusBadRequest,
 				"wire_model=%s 与模型 %q 的 wire_model=%s 不一致", wireModel, modelID, selectedModel.WireModel,
 			)
@@ -707,15 +713,31 @@ func (s *Service) deriveRuntimeSnapshot(
 		if accountID == "" {
 			resolved, err := s.codexAccountForWireModel(ctx, wireModel)
 			if err != nil {
-				return domain.RuntimeConfigSnapshot{}, err
+				return runtimeSelectionInput{}, err
 			}
 			accountID = resolved
 		}
 	}
-	model, envGroup, accountID, err := s.resolveRuntimeSelection(ctx, runtimeSelectionInput{
-		WorkspaceID: task.WorkspaceID, Backend: backend, ModelSource: modelSource, ModelID: modelID,
+	return runtimeSelectionInput{
+		Backend: backend, ModelSource: modelSource, ModelID: modelID,
 		WireModel: wireModel, CodexAccountID: accountID,
-	})
+	}, nil
+}
+
+func (s *Service) deriveRuntimeSnapshot(
+	ctx context.Context,
+	task domain.Task,
+	base domain.RuntimeConfigSnapshot,
+	input UpdateAgentConfigInput,
+) (domain.RuntimeConfigSnapshot, error) {
+	selection, err := s.deriveModelSelection(
+		ctx, input.ModelSource, input.ModelID, input.Backend, input.WireModel, input.CodexAccountID, base,
+	)
+	if err != nil {
+		return domain.RuntimeConfigSnapshot{}, err
+	}
+	selection.WorkspaceID = task.WorkspaceID
+	model, envGroup, accountID, err := s.resolveRuntimeSelection(ctx, selection)
 	if err != nil {
 		return domain.RuntimeConfigSnapshot{}, wrapModelSelectionError(err)
 	}
@@ -762,7 +784,7 @@ func (s *Service) deriveRuntimeSnapshot(
 		return domain.RuntimeConfigSnapshot{}, err
 	}
 	return domain.RuntimeConfigSnapshot{
-		ID: domain.NewID("runtime"), WorkspaceID: task.WorkspaceID, Backend: backend,
+		ID: domain.NewID("runtime"), WorkspaceID: task.WorkspaceID, Backend: selection.Backend,
 		ModelID: model.ID, WireModel: model.WireModel, EnvGroupID: envGroup.ID,
 		EnvGroupRevision: envGroup.Revision, CodexAccountID: accountID, ReasoningEffort: effort,
 		StreamIdleTimeoutMS: streamIdleTimeoutMS, StreamMaxRetries: streamMaxRetries,

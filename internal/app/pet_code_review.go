@@ -71,6 +71,16 @@ func (s *Service) PetRequestCodeReview(ctx context.Context, input PetRequestCode
 	if err != nil {
 		return PetCodeReviewResult{}, fmt.Errorf("评审模型不存在")
 	}
+	// Resolve the review model through the same catalog inference as an agent
+	// config edit. The catalog entry carries the runtime source (provider,
+	// official or claude_native) plus wire_model/backend/account, so a managed
+	// review model must not fall back to the provider source in CreateTask.
+	selection, err := s.deriveModelSelection(
+		ctx, "", reviewModel.ID, "", "", reviewModel.CodexAccountID, domain.RuntimeConfigSnapshot{},
+	)
+	if err != nil {
+		return PetCodeReviewResult{}, err
+	}
 	workspace, err := s.store.Workspace(ctx, source.WorkspaceID)
 	if err != nil {
 		return PetCodeReviewResult{}, fmt.Errorf("Task 的 Workspace 不存在")
@@ -116,7 +126,9 @@ func (s *Service) PetRequestCodeReview(ctx context.Context, input PetRequestCode
 	title := truncateAssistantText("代码评审："+source.Code+" "+source.Title, 120)
 	review, err := s.CreateTask(ctx, CreateTaskInput{
 		ProjectID: source.ProjectID, WorkspaceID: source.WorkspaceID, Title: title, Request: request,
-		ModelID: reviewModel.ID, ReasoningEffort: reasoningEffort, Filesystem: filesystem, Approval: "never",
+		Backend: selection.Backend, ModelSource: selection.ModelSource, ModelID: selection.ModelID,
+		WireModel: selection.WireModel, CodexAccountID: selection.CodexAccountID,
+		ReasoningEffort: reasoningEffort, Filesystem: filesystem, Approval: "never",
 		CollaborationMode: "single", MaxAgents: 1, KnowledgePolicy: "enabled",
 		Isolation: "inplace", StartMode: "manual", SkillIDs: skillIDs,
 	})
