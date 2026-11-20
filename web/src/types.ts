@@ -101,6 +101,20 @@ export interface DatabaseCategory {
   tables: DatabaseTableStat[];
 }
 
+// Terminal IO files under <data-dir>/hardware-io (task-711). New hardware
+// terminal output is stored here instead of SQLite.
+export interface HardwareIOFileStats {
+  directory: string;
+  streams: number;
+  segments: number;
+  records: number;
+  bytes: number;
+  max_bytes: number;
+  last_sequence: number;
+  oldest_at?: string;
+  newest_at?: string;
+}
+
 export interface DatabaseStats {
   file_bytes: number;
   wal_bytes: number;
@@ -114,6 +128,7 @@ export interface DatabaseStats {
   categories: DatabaseCategory[];
   cached: boolean;
   hardware_io: {min_sequence: number; max_sequence: number; estimated_rows: number; oldest_at?: string; newest_at?: string};
+  hardware_io_files?: HardwareIOFileStats;
   retention: HardwareIORetentionSettings;
   conversation_retention: ConversationRetentionSettings;
   collected_at: string;

@@ -25,7 +25,8 @@ password -> Secret Store
 access = read_only | read_write
 ```
 
-硬件组和终端 I/O 元数据保存在 SQLite。密码仅以
+硬件组保存在 SQLite；终端 I/O 自 task-711 起保存在数据目录的 `hardware-io/`
+append-only 分段文件里，不再写入 SQLite（见 `docs/hardware-io-file-storage.md`）。密码仅以
 `hardware/<task-id>/<hardware-id>/credential` 引用保存到 `secrets.json`，
 不会进入 Hardware API、Audit、日志、Prompt 或 `hardware.md`。
 

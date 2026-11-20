@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ChinaKai/AHA2/internal/hardwareio"
 	sqlite "modernc.org/sqlite"
 )
 
@@ -64,6 +65,13 @@ type Store struct {
 
 	databaseStats databaseStatsCache
 
+	// hardwareIO holds terminal IO in append-only files under
+	// <data-dir>/hardware-io. The primary Store owns it; OpenSecondary shares
+	// the same instance so there is only ever one sequence allocator.
+	hardwareIO     *hardwareio.Store
+	ownsHardwareIO bool
+	hardwareIOTemp string
+
 	// purgeProgress is the in-memory snapshot served while a manual B/C
 	// cleanup is still running. It is never persisted; a restart clears it.
 	purgeProgress purgeProgressTracker
@@ -109,6 +117,10 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	}
 	result := &Store{db: db, dataDir: filepath.Dir(path), path: path}
 	if err := result.migrate(ctx); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := result.openHardwareIO(); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -169,7 +181,7 @@ func (s *Store) OpenSecondary(ctx context.Context) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	secondary := &Store{db: db, dataDir: s.dataDir, path: s.path}
+	secondary := &Store{db: db, dataDir: s.dataDir, path: s.path, hardwareIO: s.hardwareIO}
 	var journal string
 	var foreignKeys, busyTimeout int
 	if err := db.QueryRowContext(ctx, `PRAGMA journal_mode`).Scan(&journal); err != nil {
@@ -209,7 +221,8 @@ func (s *Store) Close() error {
 	if s == nil || s.db == nil {
 		return nil
 	}
-	return s.db.Close()
+	hardwareErr := s.closeHardwareIO()
+	return errors.Join(s.db.Close(), hardwareErr)
 }
 
 // PoolStats reports connection pool counters for this Store. It is used by the

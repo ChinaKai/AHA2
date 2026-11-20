@@ -8,6 +8,7 @@ import type {
   DatabaseSafety,
   DatabaseStats,
   DatabaseTableStat,
+  HardwareIOFileStats,
   HardwareIOPurgePlan,
   HardwareIOPurgeResult,
   HardwareIORetentionSettings,
@@ -261,6 +262,19 @@ function dialogShell(id: string, title: string, body: string): string {
   </dialog>`;
 }
 
+// hardwareFilesSummary describes where new terminal output lives. The
+// SQLite range below it only covers rows from before the switch, which the
+// service clears at startup.
+function hardwareFilesSummary(files: HardwareIOFileStats | undefined, days: number): string {
+  if (!files) return "";
+  const usage = t("data.db.hardwareFiles", {
+    size: formatBytes(files.bytes), max: formatBytes(files.max_bytes), records: formatLocaleNumber(files.records),
+    oldest: escapeHTML(formatTime(files.oldest_at)), newest: escapeHTML(formatTime(files.newest_at)),
+  });
+  return `<p class="data-cleanup-note" data-db-hardware-files>${usage}</p>
+    <p class="field-help data-cleanup-note" data-db-hardware-files-policy>${t("data.db.hardwareFilesPolicy", {days})}</p>`;
+}
+
 function hardwareDialogBody(state: DataRetentionViewState, category: DatabaseCategory): string {
   const retention: HardwareIORetentionSettings = state.database?.retention ?? {retention_days: 30, max_delete_rows: PURGE_DEFAULT_MAX_ROWS};
   const range = state.database?.hardware_io;
@@ -271,6 +285,7 @@ function hardwareDialogBody(state: DataRetentionViewState, category: DatabaseCat
   const busy = Boolean(state.busy);
   const canPurge = purgeEnabled(state, days, rows);
   return `<p class="data-cleanup-note">${categoryNote(category, safetyKey(category.safety))}</p>
+    ${hardwareFilesSummary(state.database?.hardware_io_files, days)}
     <p class="data-cleanup-note" data-db-range>${range?.max_sequence
       ? t("data.db.range", {oldest: escapeHTML(formatTime(range.oldest_at)), newest: escapeHTML(formatTime(range.newest_at)), rows: formatLocaleNumber(range.estimated_rows)})
       : t("data.db.rangeEmpty")}</p>
