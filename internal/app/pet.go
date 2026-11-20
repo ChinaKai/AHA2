@@ -1174,7 +1174,7 @@ func petToolAllowed(assistant domain.OwnerAssistant, name string) bool {
 		return assistant.PetAllowMessageTasks
 	case "aha_create_provider", "aha_update_provider", "aha_delete_provider", "aha_detect_models",
 		"aha_create_model", "aha_update_model", "aha_delete_model", "aha_delete_models",
-		"aha_create_env_group", "aha_update_env_group", "aha_delete_env_group":
+		"aha_create_env_group", "aha_update_env_group", "aha_delete_env_group", "aha_restore_previous_credential":
 		return assistant.PetAllowManageModels
 	default:
 		return false
@@ -1501,7 +1501,7 @@ func ahaPetTools() []gateway.ChatTool {
 				"environment": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}},
 			}, "required": []string{"name", "provider_id", "backend"},
 		}},
-		{Name: "aha_update_env_group", Description: "修改 Env Group；environment 会整体替换", Parameters: map[string]any{
+		{Name: "aha_update_env_group", Description: "修改 Env Group；environment 会整体替换，被替换的旧值保留一代，可用 aha_restore_previous_credential 恢复", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"env_group_id": map[string]any{"type": "string"},
 				"name":         map[string]any{"type": "string"},
@@ -1510,6 +1510,12 @@ func ahaPetTools() []gateway.ChatTool {
 				"environment":  map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}},
 				"reason":       map[string]any{"type": "string", "description": "修改 environment 等环境变量时必填；至少 8 个字符"},
 			}, "required": []string{"env_group_id"},
+		}},
+		{Name: "aha_restore_previous_credential", Description: "撤销上一次覆盖：把 Provider 的 API Key 或 Env Group 的 environment 恢复成被覆盖前的值（只保留一代；恢复本身也可再撤销）。不返回任何凭据值", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"target": map[string]any{"type": "string", "enum": []string{"provider", "env_group"}},
+				"id":     map[string]any{"type": "string", "description": "Provider ID 或 Env Group ID"},
+			}, "required": []string{"target", "id"},
 		}},
 		{Name: "aha_delete_env_group", Description: "提交删除 Env Group 审批；主人批准后才删除", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
@@ -2699,6 +2705,20 @@ func (s *Service) petMCPTool(ctx context.Context, callerTaskID, name string, arg
 			return "", err
 		}
 		data, _ := json.Marshal(group)
+		return string(data), nil
+	case "aha_restore_previous_credential":
+		var input struct {
+			Target string `json:"target"`
+			ID     string `json:"id"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid restore previous credential request")
+		}
+		result, err := s.PetRestorePreviousCredential(ctx, input.Target, input.ID)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(result)
 		return string(data), nil
 	case "aha_update_env_group":
 		var input PetEnvGroupInput

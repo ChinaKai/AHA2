@@ -110,6 +110,14 @@ func (s *Service) PetUpdateProvider(ctx context.Context, input PetProviderInput)
 	if apiKey := strings.TrimSpace(input.APIKey); apiKey != "" {
 		ref := "provider/" + existing.ID + "/credential"
 		if s.secrets != nil {
+			// Replacing a key discards the old one. Keep the last value so the
+			// change can be undone: an overwrite the pet makes on its own has to
+			// be reversible, or it belongs behind an approval.
+			if previous, ok := s.secrets.Get(ref); ok && previous != "" && previous != apiKey {
+				if err := s.secrets.PutMany(map[string]string{petPreviousSecretRef(ref): previous}); err != nil {
+					return PetProviderBrief{}, err
+				}
+			}
 			if err := s.secrets.PutMany(map[string]string{ref: apiKey}); err != nil {
 				return PetProviderBrief{}, err
 			}
@@ -536,6 +544,14 @@ func (s *Service) PetUpdateEnvGroup(ctx context.Context, input PetEnvGroupInput)
 				environment[key] = value
 			}
 		}
+		// The environment is replaced as a whole, so keep what it was.
+		if s.secrets != nil && len(existing.Environment) > 0 {
+			if previous, err := json.Marshal(existing.Environment); err == nil {
+				if err := s.secrets.PutMany(map[string]string{petPreviousSecretRef("env/" + existing.ID + "/environment"): string(previous)}); err != nil {
+					return PetEnvGroupBrief{}, err
+				}
+			}
+		}
 		existing.Environment = environment
 	}
 	existing.Revision++
@@ -544,6 +560,80 @@ func (s *Service) PetUpdateEnvGroup(ctx context.Context, input PetEnvGroupInput)
 		return PetEnvGroupBrief{}, err
 	}
 	return petEnvGroupBrief(existing), nil
+}
+
+// petPreviousSecretRef names where the value a pet overwrite replaced is kept.
+// One generation is kept: enough to undo the last change, without turning the
+// secret store into a history of old credentials.
+func petPreviousSecretRef(ref string) string { return ref + ".previous" }
+
+// PetRestorePreviousCredential undoes the pet's last overwrite of a Provider
+// API key or an Env Group environment. The value that was current becomes the
+// kept one, so a restore can itself be undone.
+func (s *Service) PetRestorePreviousCredential(ctx context.Context, target, id string) (map[string]any, error) {
+	if _, err := s.petManageModels(ctx); err != nil {
+		return nil, err
+	}
+	if s.secrets == nil {
+		return nil, fmt.Errorf("Secret Store 不可用")
+	}
+	id = strings.TrimSpace(id)
+	switch strings.TrimSpace(target) {
+	case "provider":
+		provider, err := s.store.Provider(ctx, id)
+		if err != nil {
+			return nil, fmt.Errorf("Provider 不存在")
+		}
+		ref := "provider/" + provider.ID + "/credential"
+		previous, ok := s.secrets.Get(petPreviousSecretRef(ref))
+		if !ok || previous == "" {
+			return nil, fmt.Errorf("没有可恢复的旧 API Key")
+		}
+		current, _ := s.secrets.Get(ref)
+		if err := s.secrets.PutMany(map[string]string{ref: previous, petPreviousSecretRef(ref): current}); err != nil {
+			return nil, err
+		}
+		provider.CredentialRef, provider.CredentialConfigured, provider.UpdatedAt = ref, true, s.now().UTC()
+		if err := s.store.UpsertProvider(ctx, provider); err != nil {
+			return nil, err
+		}
+		s.recordPetWork(ctx, "credential_restored", provider.ID, "provider")
+		return map[string]any{"ok": true, "target": "provider", "id": provider.ID}, nil
+	case "env_group":
+		group, err := s.store.EnvGroup(ctx, id)
+		if err != nil {
+			return nil, fmt.Errorf("Env Group 不存在")
+		}
+		ref := petPreviousSecretRef("env/" + group.ID + "/environment")
+		raw, ok := s.secrets.Get(ref)
+		if !ok || raw == "" {
+			return nil, fmt.Errorf("没有可恢复的旧 environment")
+		}
+		previous := map[string]string{}
+		if err := json.Unmarshal([]byte(raw), &previous); err != nil {
+			return nil, fmt.Errorf("旧 environment 无法解析")
+		}
+		current, _ := json.Marshal(group.Environment)
+		if err := s.secrets.PutMany(map[string]string{ref: string(current)}); err != nil {
+			return nil, err
+		}
+		group.Environment = previous
+		group.Revision++
+		group.UpdatedAt = s.now().UTC()
+		if err := s.store.UpsertEnvGroup(ctx, group); err != nil {
+			return nil, err
+		}
+		keys := make([]string, 0, len(previous))
+		for key := range previous {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		s.recordPetWork(ctx, "credential_restored", group.ID, "env_group")
+		// Names only: the values are credentials.
+		return map[string]any{"ok": true, "target": "env_group", "id": group.ID, "environment_keys": keys}, nil
+	default:
+		return nil, fmt.Errorf("target 必须是 provider 或 env_group")
+	}
 }
 
 func (s *Service) PetRequestDeleteEnvGroup(ctx context.Context, envGroupID string, reason ...string) (domain.PetApproval, error) {

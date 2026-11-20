@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -77,6 +78,41 @@ func TestPetProviderModelEnvGroupAdmin(t *testing.T) {
 		EnvGroupID: group.ID, Environment: map[string]string{"TOKEN": "rotated"}, Reason: "轮换环境变量凭据",
 	}); err != nil {
 		t.Fatalf("environment update with reason failed: %v", err)
+	}
+	// Both overwrites kept the value they replaced, so the pet can undo them.
+	credentialRef := "provider/" + provider.ID + "/credential"
+	if current, _ := fixture.service.secrets.Get(credentialRef); current != "new-secret" {
+		t.Fatalf("provider key=%q, want the rotated key", current)
+	}
+	restored, err := fixture.service.PetRestorePreviousCredential(fixture.ctx, "provider", provider.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(fmt.Sprint(restored), "secret") {
+		t.Fatalf("the restore result leaked a credential: %#v", restored)
+	}
+	if current, _ := fixture.service.secrets.Get(credentialRef); current != "secret-value" {
+		t.Fatalf("restored provider key=%q, want the original", current)
+	}
+	// A restore can be undone as well.
+	if _, err := fixture.service.PetRestorePreviousCredential(fixture.ctx, "provider", provider.ID); err != nil {
+		t.Fatal(err)
+	}
+	if current, _ := fixture.service.secrets.Get(credentialRef); current != "new-secret" {
+		t.Fatalf("second restore key=%q, want the rotated key back", current)
+	}
+	groupRestored, err := fixture.service.PetRestorePreviousCredential(fixture.ctx, "env_group", group.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(fmt.Sprint(groupRestored), "secret-value") {
+		t.Fatalf("the env group restore result leaked a value: %#v", groupRestored)
+	}
+	if reloaded, _ := fixture.database.EnvGroup(fixture.ctx, group.ID); reloaded.Environment["TOKEN"] != "secret-value" {
+		t.Fatalf("restored environment=%#v", reloaded.Environment)
+	}
+	if _, err := fixture.service.PetRestorePreviousCredential(fixture.ctx, "model", model.ID); err == nil {
+		t.Fatal("an unknown restore target was accepted")
 	}
 	name := "宠物模型改名"
 	updated, err := fixture.service.PetUpdateModel(fixture.ctx, PetModelInput{

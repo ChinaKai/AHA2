@@ -63,6 +63,7 @@ func petMCPAllowedTools(task domain.Task) []string {
 		"mcp__aha2-pet__aha_create_env_group",
 		"mcp__aha2-pet__aha_update_env_group",
 		"mcp__aha2-pet__aha_delete_env_group",
+		"mcp__aha2-pet__aha_restore_previous_credential",
 		"mcp__aha2-pet__aha_create_task",
 		"mcp__aha2-pet__aha_start_task",
 		"mcp__aha2-pet__aha_takeover_remote_task",
