@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"bytes"
 	"database/sql"
 	"errors"
 	"io"
@@ -86,15 +85,48 @@ func (s *Server) createTaskAttachment(writer http.ResponseWriter, request *http.
 }
 
 func (s *Server) taskAttachmentContent(writer http.ResponseWriter, request *http.Request) {
-	item, err := s.store.Attachment(request.Context(), request.PathValue("id"), request.PathValue("attachment"))
-	if err != nil {
+	taskID := request.PathValue("id")
+	attachmentID := request.PathValue("attachment")
+	claims, agentRequest := agentClaimsFromContext(request.Context())
+	// A Task capability may only read its own Task's attachments. Returning
+	// 404 for a foreign Task keeps the endpoint from confirming that another
+	// Task's attachment exists.
+	if agentRequest && claims.TaskID != taskID {
+		s.audit(request, "agent.attachment.download", "attachment", attachmentID, map[string]any{
+			"task_id": taskID, "capability_task_id": claims.TaskID, "result": "denied_cross_task",
+		})
 		writeError(writer, http.StatusNotFound, "attachment_not_found")
 		return
 	}
-	content, err := s.store.AttachmentContent(item)
+	// Attachment lookup is scoped to taskID, so a missing attachment and an
+	// attachment owned by another Task are both a 404.
+	item, err := s.store.Attachment(request.Context(), taskID, attachmentID)
 	if err != nil {
+		if agentRequest {
+			s.audit(request, "agent.attachment.download", "attachment", attachmentID, map[string]any{
+				"task_id": taskID, "result": "not_found",
+			})
+		}
+		writeError(writer, http.StatusNotFound, "attachment_not_found")
+		return
+	}
+	// Stream from the blob instead of loading it into memory; the content is
+	// not subject to the 4MiB inline limit.
+	file, err := s.store.OpenAttachmentContent(item)
+	if err != nil {
+		if agentRequest {
+			s.audit(request, "agent.attachment.download", "attachment", attachmentID, map[string]any{
+				"task_id": taskID, "result": "content_not_found",
+			})
+		}
 		writeError(writer, http.StatusNotFound, "attachment_content_not_found")
 		return
+	}
+	defer file.Close()
+	if agentRequest {
+		s.audit(request, "agent.attachment.download", "attachment", item.ID, map[string]any{
+			"task_id": item.TaskID, "result": "ok",
+		})
 	}
 	disposition := "attachment"
 	switch item.MediaType {
@@ -104,7 +136,7 @@ func (s *Server) taskAttachmentContent(writer http.ResponseWriter, request *http
 	writer.Header().Set("Content-Type", item.MediaType)
 	writer.Header().Set("Content-Disposition", mime.FormatMediaType(disposition, map[string]string{"filename": item.Name}))
 	writer.Header().Set("Cache-Control", "private, no-store")
-	http.ServeContent(writer, request, item.Name, item.CreatedAt, bytes.NewReader(content))
+	http.ServeContent(writer, request, item.Name, item.CreatedAt, file)
 }
 
 func (s *Server) deleteTaskAttachment(writer http.ResponseWriter, request *http.Request) {

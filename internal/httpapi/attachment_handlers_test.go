@@ -3,6 +3,8 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"mime/multipart"
@@ -13,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ChinaKai/AHA2/internal/agentapi"
 	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/auth"
 	"github.com/ChinaKai/AHA2/internal/domain"
@@ -161,5 +164,170 @@ func TestTaskAttachmentUploadDownloadAndDelete(t *testing.T) {
 	response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("delete failed: %d", response.StatusCode)
+	}
+}
+
+func TestTaskAttachmentDownloadByAgentCapabilityIsScopedToTask(t *testing.T) {
+	t.Parallel()
+	ctx, now := context.Background(), time.Now().UTC()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	project := domain.Project{ID: "project-agent-attachment", Name: "Attachments", ProjectType: "folder", CreatedAt: now, UpdatedAt: now}
+	workspace := domain.Workspace{
+		ID: "workspace-agent-attachment", ProjectID: project.ID, Name: "Local", Locality: "local",
+		Transport: "native", RootPath: t.TempDir(), SSHPort: 22, Health: "ready", CreatedAt: now, UpdatedAt: now,
+	}
+	if err := database.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CreateWorkspace(ctx, workspace); err != nil {
+		t.Fatal(err)
+	}
+	environment := domain.EnvGroup{ID: "env-agent-attachment", Name: "Env", ProviderID: "stub", Backend: "stub", Revision: 1, Environment: map[string]string{}, SecretRefs: map[string]string{}, CreatedAt: now, UpdatedAt: now}
+	model := domain.Model{ID: "model-agent-attachment", DisplayName: "Model", ProviderID: "stub", Backend: "stub", WireModel: "stub", DefaultEnvGroupID: environment.ID, CreatedAt: now, UpdatedAt: now}
+	if err := database.UpsertEnvGroup(ctx, environment); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpsertModel(ctx, model); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := domain.RuntimeConfigSnapshot{
+		ID: "runtime-agent-attachment", WorkspaceID: workspace.ID, Backend: "stub", ModelID: model.ID,
+		WireModel: "stub", EnvGroupID: environment.ID, EnvGroupRevision: 1, PermissionsJSON: "{}", CreatedAt: now,
+	}
+	if err := database.CreateRuntimeSnapshot(ctx, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	taskA := domain.Task{
+		ID: "task-agent-attachment-a", ProjectID: project.ID, WorkspaceID: workspace.ID,
+		Title: "A", Status: domain.TaskActive, RuntimeConfigSnapshotID: snapshot.ID, CreatedAt: now, UpdatedAt: now,
+	}
+	taskB := domain.Task{
+		ID: "task-agent-attachment-b", ProjectID: project.ID, WorkspaceID: workspace.ID,
+		Title: "B", Status: domain.TaskActive, RuntimeConfigSnapshotID: snapshot.ID, CreatedAt: now, UpdatedAt: now,
+	}
+	for _, task := range []domain.Task{taskA, taskB} {
+		if err := database.CreateTask(ctx, task); err != nil {
+			t.Fatal(err)
+		}
+	}
+	contentA := []byte("attachment body for task A")
+	attachmentA, err := database.CreateAttachment(ctx, taskA.ID, "report.txt", "text/plain", contentA, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachmentB, err := database.CreateAttachment(ctx, taskB.ID, "secret.txt", "text/plain", []byte("other task only"), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Larger than the 4MiB inline threshold, so a regression to the inline path
+	// would either truncate the body or fail outright.
+	largeContent := make([]byte, (5<<20)+37)
+	for index := range largeContent {
+		largeContent[index] = byte(index % 251)
+	}
+	largeAttachment, err := database.CreateAttachment(ctx, taskA.ID, "p0-log.zip", "application/zip", largeContent, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	capabilities := agentapi.NewCapabilities()
+	tokenA, err := capabilities.Issue(taskA.ID, "main", "turn-a", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenB, err := capabilities.Issue(taskB.ID, "main", "turn-b", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authService := auth.NewService(database, "setup-test", time.Hour)
+	server := httptest.NewServer(New(Config{Store: database, Auth: authService, AgentCapabilities: capabilities}).Handler())
+	defer server.Close()
+	attachmentURL := func(taskID, attachmentID string) string {
+		return server.URL + "/api/v1/tasks/" + taskID + "/attachments/" + attachmentID
+	}
+	readBody := func(response *http.Response) []byte {
+		t.Helper()
+		defer response.Body.Close()
+		body, err := io.ReadAll(response.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+
+	// Same Task: 200, bytes and the stored sha256 match.
+	response := agentRequest(t, attachmentURL(taskA.ID, attachmentA.ID), http.MethodGet, tokenA, nil)
+	body := readBody(response)
+	digest := sha256.Sum256(body)
+	if response.StatusCode != http.StatusOK || !bytes.Equal(body, contentA) {
+		t.Fatalf("same-task download: status=%d body=%q", response.StatusCode, body)
+	}
+	if hex.EncodeToString(digest[:]) != attachmentA.SHA256 {
+		t.Fatalf("same-task sha256 = %s, want %s", hex.EncodeToString(digest[:]), attachmentA.SHA256)
+	}
+
+	// Another Task's capability cannot download this attachment.
+	response = agentRequest(t, attachmentURL(taskA.ID, attachmentA.ID), http.MethodGet, tokenB, nil)
+	response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("cross-task capability download status = %d, want 404", response.StatusCode)
+	}
+
+	// A capability pointed at its own Task still cannot read another Task's attachment.
+	response = agentRequest(t, attachmentURL(taskB.ID, attachmentB.ID), http.MethodGet, tokenA, nil)
+	response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("foreign attachment download status = %d, want 404", response.StatusCode)
+	}
+
+	// Missing attachment ids are 404, not 401 or 500.
+	response = agentRequest(t, attachmentURL(taskA.ID, "attachment_missing"), http.MethodGet, tokenA, nil)
+	response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing attachment status = %d, want 404", response.StatusCode)
+	}
+
+	// Too-large files stream in full.
+	response = agentRequest(t, attachmentURL(taskA.ID, largeAttachment.ID), http.MethodGet, tokenA, nil)
+	largeBody := readBody(response)
+	largeDigest := sha256.Sum256(largeBody)
+	if response.StatusCode != http.StatusOK || len(largeBody) != len(largeContent) || !bytes.Equal(largeBody, largeContent) {
+		t.Fatalf("large download: status=%d size=%d want=%d", response.StatusCode, len(largeBody), len(largeContent))
+	}
+	if hex.EncodeToString(largeDigest[:]) != largeAttachment.SHA256 {
+		t.Fatalf("large download sha256 = %s, want %s", hex.EncodeToString(largeDigest[:]), largeAttachment.SHA256)
+	}
+
+	// No credential and an invalid capability both stay 401.
+	response, err = http.Get(attachmentURL(taskA.ID, attachmentA.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("anonymous download status = %d, want 401", response.StatusCode)
+	}
+	response = agentRequest(t, attachmentURL(taskA.ID, attachmentA.ID), http.MethodGet, "invalid", nil)
+	response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("invalid capability download status = %d, want 401", response.StatusCode)
+	}
+
+	// Owner session downloads keep working, including for attachments the
+	// agent capability path also serves.
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	registerOwner(t, client, server.URL)
+	response, err = client.Get(attachmentURL(taskA.ID, attachmentA.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerBody := readBody(response)
+	if response.StatusCode != http.StatusOK || !bytes.Equal(ownerBody, contentA) {
+		t.Fatalf("owner download: status=%d body=%q", response.StatusCode, ownerBody)
 	}
 }
