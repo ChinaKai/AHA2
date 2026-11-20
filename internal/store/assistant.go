@@ -27,11 +27,13 @@ func (s *Store) OwnerAssistant(ctx context.Context, id string) (domain.OwnerAssi
 		SELECT id,name,model_id,COALESCE(NULLIF(character,''),'gugugaga'),
 			pet_enabled,pet_brain_model_id,pet_actions,pet_identity,pet_principles,
 			pet_idle_minutes,pet_quiet_enabled,pet_quiet_start,pet_quiet_end,pet_hourly_limit,pet_task_id,
+			pet_free_daily_turns,pet_free_day,pet_free_used,
 			pet_allow_view_tasks,pet_allow_create_tasks,pet_allow_create_workspaces,pet_allow_message_tasks,pet_allow_manage_models,pet_allow_manage_knowledge,pet_allow_manage_channels,pet_allow_manage_system,
 			created_at,updated_at
 		FROM owner_assistants WHERE id=?`, id).
 		Scan(&item.ID, &item.Name, &item.ModelID, &item.Character, &enabled, &item.BrainModelID, &actions, &item.PetIdentity, &item.PetPrinciples,
 			&item.PetIdleMinutes, &quietEnabled, &item.PetQuietStart, &item.PetQuietEnd, &item.PetHourlyLimit, &item.PetTaskID,
+			&item.PetFreeDailyTurns, &item.PetFreeDay, &item.PetFreeUsed,
 			&allowViewTasks, &allowCreateTasks, &allowCreateWorkspaces, &allowMessageTasks, &allowManageModels, &allowManageKnowledge, &allowManageChannels, &allowManageSystem,
 			&created, &updated)
 	item.PetEnabled = enabled != 0
@@ -305,6 +307,41 @@ func (s *Store) UpdateOwnerPetBudget(ctx context.Context, id string, idleMinutes
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE owner_assistants SET pet_idle_minutes=?,pet_quiet_enabled=?,pet_quiet_start=?,pet_quiet_end=?,pet_hourly_limit=?,updated_at=? WHERE id=?`,
 		idleMinutes, boolInt(quietEnabled), quietStart, quietEnd, hourlyLimit, timeString(updatedAt), id)
+	return err
+}
+
+// UpdateOwnerPetFreeDailyTurns sets how many Turns a day the pet may spend on
+// its own interests.
+func (s *Store) UpdateOwnerPetFreeDailyTurns(ctx context.Context, id string, dailyTurns int, updatedAt time.Time) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE owner_assistants SET pet_free_daily_turns=?,updated_at=? WHERE id=?`,
+		dailyTurns, timeString(updatedAt), id)
+	return err
+}
+
+// ClaimPetFreeTurn takes one free-time Turn for the given local day when the
+// daily allowance still has room, and reports whether it did. The check and
+// the increment are one statement, so the scheduler and a browser-triggered
+// wake cannot both take the last one. A new day resets the count.
+func (s *Store) ClaimPetFreeTurn(ctx context.Context, id, day string) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE owner_assistants
+		SET pet_free_used=CASE WHEN pet_free_day=? THEN pet_free_used+1 ELSE 1 END, pet_free_day=?
+		WHERE id=? AND pet_free_daily_turns>0
+		  AND (pet_free_day<>? OR pet_free_used<pet_free_daily_turns)`,
+		day, day, id, day)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	return affected == 1, err
+}
+
+// ReleasePetFreeTurn gives back a claimed free-time Turn whose wake was never
+// submitted, so a failed submission does not eat the day's allowance.
+func (s *Store) ReleasePetFreeTurn(ctx context.Context, id, day string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE owner_assistants SET pet_free_used=pet_free_used-1
+		WHERE id=? AND pet_free_day=? AND pet_free_used>0`, id, day)
 	return err
 }
 

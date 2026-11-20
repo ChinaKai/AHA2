@@ -4270,6 +4270,37 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("record schema v154: %w", err)
 		}
 	}
+	// v155 gives the pet a daily free-time allowance, counted in Turns. Without
+	// it every background wake is a work wake, so the pet's own interests never
+	// get a Turn however idle the system is.
+	freeColumns := []struct{ name, ddl string }{
+		{"pet_free_daily_turns", `ALTER TABLE owner_assistants ADD COLUMN pet_free_daily_turns INTEGER NOT NULL DEFAULT 3`},
+		{"pet_free_day", `ALTER TABLE owner_assistants ADD COLUMN pet_free_day TEXT NOT NULL DEFAULT ''`},
+		{"pet_free_used", `ALTER TABLE owner_assistants ADD COLUMN pet_free_used INTEGER NOT NULL DEFAULT 0`},
+	}
+	var hasV155 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=155)`).Scan(&hasV155)
+	freeColumnsReady := hasV155
+	for _, column := range freeColumns {
+		if !s.tableHasColumn(ctx, "owner_assistants", column.name) {
+			freeColumnsReady = false
+		}
+	}
+	if !freeColumnsReady {
+		for _, column := range freeColumns {
+			if s.tableHasColumn(ctx, "owner_assistants", column.name) {
+				continue
+			}
+			if _, err := s.db.ExecContext(ctx, column.ddl); err != nil &&
+				!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+				return fmt.Errorf("apply schema v155 %s: %w", column.name, err)
+			}
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(155, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return fmt.Errorf("record schema v155: %w", err)
+		}
+	}
 	return nil
 }
 

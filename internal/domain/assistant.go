@@ -19,7 +19,13 @@ type OwnerAssistant struct {
 	PetQuietStart   int      `json:"pet_quiet_start"`
 	PetQuietEnd     int      `json:"pet_quiet_end"`
 	PetHourlyLimit  int      `json:"pet_hourly_limit"`
-	PetTaskID       string   `json:"pet_task_id"`
+	// PetFreeDailyTurns is how many background Turns a day the pet may spend on
+	// its own interests instead of work; 0 turns free time off. PetFreeDay and
+	// PetFreeUsed count what it has used on the current local day.
+	PetFreeDailyTurns int    `json:"pet_free_daily_turns"`
+	PetFreeDay        string `json:"pet_free_day,omitempty"`
+	PetFreeUsed       int    `json:"pet_free_used"`
+	PetTaskID         string `json:"pet_task_id"`
 
 	// Owner-delegation permissions. The pet reads AHA2 through its own tools;
 	// these switches decide how much of the owner's view it may use. Mutating

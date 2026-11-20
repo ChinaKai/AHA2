@@ -17,6 +17,16 @@ const PET_POSITION_KEY = "aha2.pet.position.v1";
 const PET_QUIET_START = 23;
 const PET_QUIET_END = 8;
 const PET_HOURLY_LIMIT = 6;
+
+// The pet's free-time allowance is counted per local day on the server; the
+// stored day tells whether the count is today's or a stale one.
+export function petFreeUsedLabel(assistant: {pet_free_daily_turns?: number; pet_free_day?: string; pet_free_used?: number}, today = new Date()): string {
+  const limit = assistant.pet_free_daily_turns ?? 0;
+  if (limit <= 0) return "";
+  const day = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+  const used = assistant.pet_free_day === day ? (assistant.pet_free_used ?? 0) : 0;
+  return `今天已用 ${used}/${limit} 次`;
+}
 const PET_BRAIN_RUNS_KEY = "aha2.pet.brain.runs.v1";
 const PET_BRAIN_LAST_KEY = "aha2.pet.brain.last.v1";
 
@@ -122,6 +132,8 @@ let thinkingEl: HTMLElement;
 let panelThinkingEl: HTMLElement;
 let settingsIdleMinutes: HTMLInputElement;
 let settingsHourlyLimit: HTMLInputElement;
+let settingsFreeDailyTurns: HTMLInputElement;
+let settingsFreeUsed: HTMLElement;
 let settingsQuietStart: HTMLInputElement;
 let settingsQuietEnabled: HTMLInputElement;
 let settingsQuietEnd: HTMLInputElement;
@@ -223,6 +235,7 @@ export function mountAssistant(): void {
             <div class="pet-budget-grid">
               <label class="assistant-settings-field">空闲触发（分钟，最低 5 分钟复盘）<input id="pet-idle-minutes" type="number" min="1" max="120"></label>
               <label class="assistant-settings-field">每小时上限（次，0=不限）<input id="pet-hourly-limit" type="number" min="0" max="60"></label>
+              <label class="assistant-settings-field">每日自由活动（次，0=关闭）<input id="pet-free-daily-turns" type="number" min="0" max="48"><small id="pet-free-used"></small></label>
               <label class="assistant-settings-switch"><input type="checkbox" id="pet-quiet-enabled"><span><b>启用安静时段</b><small>关闭后任何时间都可能自主互动</small></span></label>
               <label class="assistant-settings-field">免打扰开始（点）<input id="pet-quiet-start" type="number" min="0" max="23"></label>
               <label class="assistant-settings-field">免打扰结束（点）<input id="pet-quiet-end" type="number" min="0" max="23"></label>
@@ -298,6 +311,8 @@ export function mountAssistant(): void {
   panelThinkingEl = layer.querySelector<HTMLElement>("#assistant-panel-thinking")!;
   settingsIdleMinutes = layer.querySelector<HTMLInputElement>("#pet-idle-minutes")!;
   settingsHourlyLimit = layer.querySelector<HTMLInputElement>("#pet-hourly-limit")!;
+  settingsFreeDailyTurns = layer.querySelector<HTMLInputElement>("#pet-free-daily-turns")!;
+  settingsFreeUsed = layer.querySelector<HTMLElement>("#pet-free-used")!;
   settingsQuietEnabled = layer.querySelector<HTMLInputElement>("#pet-quiet-enabled")!;
   settingsQuietStart = layer.querySelector<HTMLInputElement>("#pet-quiet-start")!;
   settingsQuietEnd = layer.querySelector<HTMLInputElement>("#pet-quiet-end")!;
@@ -756,6 +771,8 @@ function renderPetSettings(): void {
   renderPetModelPicker();
   settingsIdleMinutes.value = String(view.assistant.pet_idle_minutes || 5);
   settingsHourlyLimit.value = String(view.assistant.pet_hourly_limit ?? 6);
+  settingsFreeDailyTurns.value = String(view.assistant.pet_free_daily_turns ?? 3);
+  settingsFreeUsed.textContent = petFreeUsedLabel(view.assistant);
   settingsQuietEnabled.checked = view.assistant.pet_quiet_enabled !== false;
   settingsQuietStart.disabled = !settingsQuietEnabled.checked;
   settingsQuietEnd.disabled = !settingsQuietEnabled.checked;
@@ -851,6 +868,7 @@ async function savePetSettings(): Promise<void> {
       actions,
       idle_minutes: Number(settingsIdleMinutes.value) || 5,
       hourly_limit: Number(settingsHourlyLimit.value) || 0,
+      free_daily_turns: Math.max(0, Number(settingsFreeDailyTurns.value) || 0),
       quiet_enabled: settingsQuietEnabled.checked,
       quiet_start: Number(settingsQuietStart.value),
       quiet_end: Number(settingsQuietEnd.value),

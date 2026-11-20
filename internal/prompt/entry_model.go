@@ -92,11 +92,11 @@ type entryAnchorSpec struct {
 // Agent reads. Resident templates carry their own "## " section headings: the
 // template Name is an admin label, not prompt text.
 var phaseThreeAnchorSpecs = []entryAnchorSpec{
-	{EntryID: EntryCore, Key: "main", LegacyID: "core.default", Kind: anchorKindResident, FrozenVersion: 3, Order: 2, Condition: "always"},
+	{EntryID: EntryCore, Key: "main", LegacyID: "core.default", Kind: anchorKindResident, FrozenVersion: 4, Order: 2, Condition: "always"},
 	{EntryID: EntryCore, Key: "identity-task", LegacyID: "identity.task-agent", Kind: anchorKindResident, FrozenVersion: 2, Order: 0, Condition: "identity:task-agent"},
 	{EntryID: EntryCore, Key: "identity-channel-assistant", LegacyID: "identity.channel-assistant", Kind: anchorKindResident, FrozenVersion: 2, Order: 0, Condition: "identity:channel-assistant"},
 	{EntryID: EntryCore, Key: "identity-channel-digital-human", LegacyID: "identity.channel-digital-human", Kind: anchorKindResident, FrozenVersion: 3, Order: 0, Condition: "identity:channel-digital-human"},
-	{EntryID: EntryCore, Key: "identity-pet", LegacyID: "identity.pet-task", Kind: anchorKindResident, FrozenVersion: 13, Order: 0, Condition: "identity:pet-task"},
+	{EntryID: EntryCore, Key: "identity-pet", LegacyID: "identity.pet-task", Kind: anchorKindResident, FrozenVersion: 14, Order: 0, Condition: "identity:pet-task"},
 	{EntryID: EntryCore, Key: "role-main", LegacyID: "role.main", Kind: anchorKindResident, FrozenVersion: 5, Order: 1, Condition: "role:main"},
 	{EntryID: EntryCore, Key: "role-sub", LegacyID: "role.sub", Kind: anchorKindResident, FrozenVersion: 2, Order: 1, Condition: "role:sub"},
 	{EntryID: EntryCore, Key: "channel-web", LegacyID: "channel.web", Kind: anchorKindResident, FrozenVersion: 2, Order: 4, Condition: "channel:web"},
@@ -113,7 +113,7 @@ var phaseThreeAnchorSpecs = []entryAnchorSpec{
 	{EntryID: EntryCore, Key: "agent-api", LegacyID: "protocol.agent-api", Kind: anchorKindResident, FrozenVersion: 5, Order: 6, Condition: "always"},
 	{EntryID: EntryCore, Key: "attachment", LegacyID: "protocol.attachment-delivery", Kind: anchorKindResident, FrozenVersion: 2, Order: 7, Condition: "always"},
 
-	{EntryID: EntryTaskContext, Key: "inbox-batch", LegacyID: "section.inbox-batch-content", Kind: anchorKindFragment, FrozenVersion: 3, Order: 20, Heading: true},
+	{EntryID: EntryTaskContext, Key: "inbox-batch", LegacyID: "section.inbox-batch-content", Kind: anchorKindFragment, FrozenVersion: 4, Order: 20, Heading: true},
 
 	// Generated files: Go code produces them from live Turn data. They stay
 	// previewable but are not independently editable in the entry model.

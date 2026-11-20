@@ -30,7 +30,7 @@ import (
 var residentPromptBudget = map[string]int{
 	// The scratch-path rule is a boundary rule: without it Agents write test
 	// programs and logs into the repository root and user directories.
-	"core-default":                 1800,
+	"core-default":                 1900,
 	"identity-task-agent":          600,
 	"role-main":                    2400,
 	"channel-web":                  250,
@@ -46,7 +46,9 @@ var residentPromptBudget = map[string]int{
 	"identity-channel-digital-human": 1300,
 	"identity-channel-assistant":     1050,
 	// The identity owns invariants; the command directory lives in aha_capabilities.
-	"identity-pet-task": 4500,
+	// It also says what the pet is to the Owner (avatar and partner), how it
+	// decides, and how it grows: that is what lets it act instead of asking.
+	"identity-pet-task": 6800,
 	"role-sub":          1500,
 	"policy-single":     150,
 }

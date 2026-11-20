@@ -344,13 +344,13 @@ func NewEngine(repository Repository) *Engine {
 }
 
 var builtinTemplates = []domain.PromptTemplate{
-	{ID: "core.default", Name: "AHA Core", Layer: "core", Description: "所有 Agent 共用的安全、Workspace 与 AHA 编排边界", Editable: true, Required: true, Version: 3},
+	{ID: "core.default", Name: "AHA Core", Layer: "core", Description: "所有 Agent 共用的安全、Workspace 与 AHA 编排边界", Editable: true, Required: true, Version: 4},
 	{ID: "role.main", Name: "Main Agent", Layer: "role", Description: "Main 的规划、整合和最终交付职责", Editable: true, Required: true, Version: 5},
 	{ID: "role.sub", Name: "Sub Agent", Layer: "role", Description: "Sub 的聚焦执行和隔离职责", Editable: true, Required: true, Version: 2},
 	{ID: "identity.task-agent", Name: "Task Agent Identity", Layer: "identity", Description: "代码与项目任务场景身份", Editable: true, Required: false, Version: 2},
 	{ID: "identity.channel-assistant", Name: "Channel Assistant Identity", Layer: "identity", Description: "Owner 私聊渠道助手身份", Editable: true, Required: false, Version: 2},
 	{ID: "identity.channel-digital-human", Name: "Channel Digital Human Identity", Layer: "identity", Description: "受限群聊电子人身份", Editable: true, Required: false, Version: 3},
-	{ID: "identity.pet-task", Name: "Pet Task Identity", Layer: "identity", Description: "宠物 Task 的电子分身定位、owner-delegate 权限和 core/worklog 路径", Editable: true, Required: false, Version: 13},
+	{ID: "identity.pet-task", Name: "Pet Task Identity", Layer: "identity", Description: "宠物 Task 的电子分身定位、owner-delegate 权限和 core/worklog 路径", Editable: true, Required: false, Version: 14},
 	{ID: "channel.web", Name: "AHA Web Channel", Layer: "channel", Description: "Web 渠道消息行为", Editable: true, Required: false, Version: 2},
 	{ID: "channel.external-channel", Name: "External Channel", Layer: "channel", Description: "外部渠道消息行为", Editable: true, Required: false, Version: 5},
 	{ID: "policy.auto", Name: "Auto Collaboration", Layer: "policy", Description: "AHA 自动协作策略", Editable: true, Required: false, Version: 2},
@@ -369,7 +369,7 @@ var builtinTemplates = []domain.PromptTemplate{
 	{ID: "section.task-workspace", Name: "Task And Workspace Section", Layer: "section", Description: "Task 与 Workspace 摘要、任务状态卡", Editable: true, Required: true, Version: 3},
 	{ID: "section.available-context", Name: "Available Context Section", Layer: "section", Description: "可用上下文入口列表段落", Editable: true, Required: true, Version: 3},
 	{ID: "section.current-inbox", Name: "Current Inbox Section", Layer: "section", Description: "当前 Inbox Batch 段落", Editable: true, Required: true, Version: 1},
-	{ID: "section.inbox-batch-content", Name: "Inbox Batch Content", Layer: "section", Description: "Inbox 消息、渠道来源、引用上下文和附件引用的内容模板", Editable: true, Required: true, Version: 3},
+	{ID: "section.inbox-batch-content", Name: "Inbox Batch Content", Layer: "section", Description: "Inbox 消息、渠道来源、引用上下文和附件引用的内容模板", Editable: true, Required: true, Version: 4},
 	{ID: "resource.agent-api", Name: "Agent API Reference File", Layer: "resource", Description: "Agent API 的 HTTP 参考；内置 MCP 工具不覆盖时查阅", Editable: false, Required: true, Version: 12},
 	{ID: "resource.attachment-protocol", Name: "Attachment Protocol File", Layer: "resource", Description: "只读参考模板；附件上传、绑定与回执规程", Editable: false, Required: true, Version: 1},
 	{ID: "resource.group-permissions", Name: "Group Permission Rules File", Layer: "resource", Description: "只读参考模板；群聊 task_route 的 Owner 权限申请规则", Editable: false, Required: false, Version: 1},
@@ -389,6 +389,12 @@ var supersededBuiltinOverrideHashes = map[string]map[string]bool{
 		"ad632fee762a12d164530e5050bd6b510814757676f587d0a018bfcf65959d63": true,
 		"2176f21f52c5d378135e275c761b91219b217a412e0c9b9c060a5f3c4450c295": true,
 		"db43418abcd968ee87f2c0b99654fab1be5a3e4ebf1eaab3e3d84e04c7a97c2a": true,
+		// The v0.5.547 builtins, before the pet was described as the Owner's avatar
+		// and partner and its messages were given Owner authority.
+		"96bb736bd1b5147150e65dd5e8ce8152ffc4b1c3ff13c0dea9369534baa60aff": true,
+		"b761495ae018cbca2a875655fce189d2d92e062fa742e4ec8c47d635b09ea542": true,
+		"a0bb0f79c613c3cebe465d927f1f213ac00662b63270b2442ffef065c6a00cea": true,
+		"2a18b808af82a9c02a189ce6bfbaacd823adcefe09874fbf0718323dbf2d775e": true,
 	},
 	"role.main": {
 		"497fffe9552e6978f283985916e9563ec59b8a3a080f2759ef5da56731a489a0": true,
@@ -432,6 +438,12 @@ var supersededBuiltinOverrideHashes = map[string]map[string]bool{
 		"53f6c871f7453c5081c672191fdc3141efb96c0da0ecb05fa896f5af603e106d": true,
 		"f5ee6f97c3c3f8228ce032dd649ffd25c89ed630c11dde5e50f9dc47fdd20e62": true,
 		"4d698e38a239a8622b8f3cff9df68c59b9744539750b0efe5b54a8a1d1fc0511": true,
+		// The v0.5.547 builtins, before the pet was described as the Owner's avatar
+		// and partner and its messages were given Owner authority.
+		"9539139dd3190d2796c1b991c74b2c70775b83427aae2ad3167eb724f569ccb5": true,
+		"9e365c330affd8df091345b7c892342f3b283dbe0c8db5506308093799bca4e3": true,
+		"697e2989009283765ad2a37cb2a8d6977d0f6e0a29205488f395fd3eb62c7c32": true,
+		"25c0403f4de2ba3b94517cb96c254ed24d10496ac9f77593f8d9e00fd41ad547": true,
 	},
 	"identity.pet-task": {
 		"a5f90c9f238a5b97a04049c4cda2cc210aacb1a06174c845af8bc707704178bf": true,
@@ -466,6 +478,12 @@ var supersededBuiltinOverrideHashes = map[string]map[string]bool{
 		"cbf624e6696c98e1c9a643586f58ba486f85b51ea1c829b83b5f8e03685b1905": true,
 		"4b39c8dd13eea1e81242565ec7a8cf5243395d344ee1c5e107b641c23ff16208": true,
 		"4f500e3acb936c2e56854d51f95e81bbda0551f03580f3261ea1cef5e597dc7f": true,
+		// The v0.5.547 builtins, before the pet was described as the Owner's avatar
+		// and partner and its messages were given Owner authority.
+		"cbdabd75853dfca5cdbd11730a4313e94d814ae4391b8f4b6a7410eef7b0a8a2": true,
+		"41877414dfa11c8d0a5945f7d9d01f13e9d4c7b6cb1623f54f77aeb7c3ae3f67": true,
+		"20e40b8e28d7708a3c08e603a87728172ea8fbbe0c4e6d2413a30ae627aaee0b": true,
+		"121b709cf85a67e3ddbaab3b2d4df9ff80ec95b266fd8dbf94437e46a48f6729": true,
 	},
 	"section.available-context": {
 		// The previous builtins repeated the pet core/diary paths that Pet Task

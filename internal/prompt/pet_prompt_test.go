@@ -12,8 +12,8 @@ func TestPetTaskIdentityOwnsWorkspacePaths(t *testing.T) {
 		path string
 		want []string
 	}{
-		{"templates/identity-pet-task.md", []string{"electronic avatar", "project orchestrator", "Do not change project code", "pet-lab", "Unclosed"}},
-		{"templates/zh-CN/identity-pet-task.md", []string{"电子分身", "项目调度者", "不直接修改项目源码", "pet-lab", "未闭环"}},
+		{"templates/identity-pet-task.md", []string{"electronic avatar and partner", "How to decide", "Do not change project code", "pet-lab", "Unclosed"}},
+		{"templates/zh-CN/identity-pet-task.md", []string{"分身和搭档", "怎么做决定", "不直接修改项目源码", "pet-lab", "未闭环"}},
 	}
 	common := []string{
 		"core/identity.md", "core/principles.md", "core/loops.md", "core/agenda.md", "pet-lab/",
@@ -45,7 +45,7 @@ func TestPetTaskIdentityOwnsWorkspacePaths(t *testing.T) {
 		// never reaches the prompt as content. The ceiling covers the rules and
 		// the reason behind each one; command lists still belong in
 		// aha_capabilities.
-		if runes := len([]rune(strings.ReplaceAll(body, "\r\n", "\n"))); runes > 4500 {
+		if runes := len([]rune(strings.ReplaceAll(body, "\r\n", "\n"))); runes > 6800 {
 			t.Fatalf("%s grew back to %d runes; keep command lists in aha_capabilities:\n%s", test.path, runes, body)
 		}
 	}
@@ -68,16 +68,17 @@ func TestAvailableContextDoesNotDuplicatePetPaths(t *testing.T) {
 // copy of the previous builtin, and must never discard a real customization.
 // testdata/superseded holds the builtins as they were before the rewrite.
 func TestPreviousBuiltinsAreSupersededWithoutOverwritingCustom(t *testing.T) {
-	for _, language := range []string{"en", "zh-CN"} {
-		entries, err := os.ReadDir(filepath.Join("testdata", "superseded", language))
+	// Each directory is one generation of builtins that has since been rewritten.
+	for _, snapshot := range []string{"superseded/en", "superseded/zh-CN", "superseded-2/en", "superseded-2/zh-CN"} {
+		entries, err := os.ReadDir(filepath.Join("testdata", filepath.FromSlash(snapshot)))
 		if err != nil {
 			t.Fatal(err)
 		}
 		if len(entries) == 0 {
-			t.Fatalf("no previous builtins recorded for %s", language)
+			t.Fatalf("no previous builtins recorded for %s", snapshot)
 		}
 		for _, entry := range entries {
-			path := filepath.Join("testdata", "superseded", language, entry.Name())
+			path := filepath.Join("testdata", filepath.FromSlash(snapshot), entry.Name())
 			data, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatal(err)

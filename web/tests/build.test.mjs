@@ -3869,7 +3869,9 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   // The Task Memory tool became the five-section state card (status, next
   // steps, constraints, open questions, folded goal timeline) with its rules
   // and copy; measured 271,827, so the ceiling moves to the next boundary.
-  const FIRST_SCREEN_GZIP_BUDGET = 271872;
+  // The pet settings gained the daily free-time allowance (field, usage label
+  // and their English copy); measured 272,123, next boundary.
+  const FIRST_SCREEN_GZIP_BUDGET = 272128;
   // The version query parameter is a content hash and its hex digits change
   // how the same code gzips: main already sits exactly on the budget, so a
   // hash-only change could trip it without growing the payload. Mask the

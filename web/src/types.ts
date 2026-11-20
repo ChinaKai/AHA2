@@ -1504,6 +1504,9 @@ export interface OwnerAssistant {
   pet_quiet_start: number;
   pet_quiet_end: number;
   pet_hourly_limit: number;
+  pet_free_daily_turns?: number;
+  pet_free_day?: string;
+  pet_free_used?: number;
   pet_task_id?: string;
   pet_allow_view_tasks: boolean;
   pet_allow_create_tasks: boolean;

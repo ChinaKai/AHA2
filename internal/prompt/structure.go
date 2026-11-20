@@ -46,7 +46,7 @@ var promptBlockSpecs = []PromptBlockSpec{
 	{
 		ID: BlockIdentity, Order: 0, NameZH: "身份", NameEN: "Identity",
 		PurposeZH: "我是谁：平台身份、Agent 角色和一个 Turn 怎么进行。",
-		MaxRunes:  7000, Required: true,
+		MaxRunes:  9500, Required: true,
 	},
 	{
 		ID: BlockPrinciples, Order: 1, NameZH: "做事准则", NameEN: "Principles",

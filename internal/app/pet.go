@@ -249,13 +249,76 @@ func (s *Service) AskOwnerPetBrain(ctx context.Context, input PetBrainContext) (
 	if err := s.reservePetBrainRun(deviceID, now, assistant.PetHourlyLimit); err != nil {
 		return PetBrainResult{}, err
 	}
-	message := petAutonomousMessage(s.petUsesEnglish(ctx), idleMinutes, page, input.Layout)
+	english := s.petUsesEnglish(ctx)
+	message := petAutonomousMessage(english, idleMinutes, page, input.Layout)
+	// With no work waiting, a wake may be the pet's own time instead: it is the
+	// Owner's partner with interests of its own, not only a worker, and a wake
+	// that has nothing to do otherwise just repeats the inspection.
+	freeDay := ""
+	if assistant.PetFreeDailyTurns > 0 && !s.petHasPendingWork(ctx) {
+		day := s.now().Local().Format("2006-01-02")
+		if claimed, claimErr := s.store.ClaimPetFreeTurn(ctx, assistant.ID, day); claimErr == nil && claimed {
+			freeDay = day
+			used := 1
+			if assistant.PetFreeDay == day {
+				used = assistant.PetFreeUsed + 1
+			}
+			message = petFreeTimeMessage(english, used, assistant.PetFreeDailyTurns, page, input.Layout)
+		}
+	}
 	if _, err := s.SubmitMessage(ctx, petTaskID, message); err != nil {
-		// The turn was never submitted, so give the reserved slot back.
+		// The turn was never submitted, so give the reserved slots back.
 		s.releasePetBrainRun(deviceID, now)
+		if freeDay != "" {
+			_ = s.store.ReleasePetFreeTurn(ctx, assistant.ID, freeDay)
+		}
 		return PetBrainResult{}, err
 	}
+	if freeDay != "" {
+		s.recordPetWork(ctx, "free_time", freeDay, "")
+	}
 	return PetBrainResult{}, nil
+}
+
+// petHasPendingWork reports whether a wake has work to do: a pet-created Task
+// still open or needing attention, an unresolved background notification, or an
+// agenda item the pet marked as its own next step. Items that wait on the Owner
+// are not work for the pet; a wake cannot move them. When the state cannot be
+// read the answer is "yes", so a failure never turns work time into free time.
+func (s *Service) petHasPendingWork(ctx context.Context) bool {
+	state, err := s.PetWorkState(ctx)
+	if err != nil {
+		return true
+	}
+	if len(state.OpenTasks) > 0 || state.Inspection.AttentionTasks > 0 || len(state.Notifications) > 0 {
+		return true
+	}
+	for _, line := range strings.Split(state.Agenda, "\n") {
+		line = strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(line), "-*"))
+		if strings.HasPrefix(strings.ToLower(line), "next") {
+			return true
+		}
+	}
+	return false
+}
+
+// petFreeTimeMessage is the wake the pet gets when the Turn is its own. It
+// deliberately asks for no deliverable: the work wake's "every wake must leave
+// a verifiable result" is what kept an idle pet re-running the inspection.
+func petFreeTimeMessage(english bool, used, limit int, page string, layout PetLayout) string {
+	background := strings.Contains(page, "后台")
+	if english {
+		where := "You are in the Web foreground and may use the avatar tools."
+		if background {
+			where = "You are running in the background: do not use the avatar tools and do not disturb the Owner."
+		}
+		return fmt.Sprintf("[Free time %d/%d today] Nothing is waiting on you, so this Turn is yours. %s\n\nSpend it on what interests you: a hobby project, trying something in pet-lab/, reading into a topic, or rethinking your own principles from what the Owner recently corrected. It does not have to produce anything for work, and you do not need to inspect AHA first.\n\nThe hard lines still hold: nothing irreversible, nothing sent outside in the Owner's name, no change to your own permissions. Project source and other projects stay as they are; pet-lab/ and your core files are yours.\n\nAt the end, note in the worklog in a sentence or two what you did and anything you learned; no evidence trail is needed. If you would rather rest, say so and stop.", used, limit, where)
+	}
+	where := "你在 Web 前台，可以用形象相关的工具。"
+	if background {
+		where = "你在后台运行：不要用形象相关的工具，也不要打扰 owner。"
+	}
+	return fmt.Sprintf("[自由时间 今天第 %d/%d 次] 现在没有等你处理的事，这一轮归你自己。%s\n\n做你感兴趣的事：爱好项目、在 pet-lab/ 里试点东西、研究一个想弄明白的问题，或者根据 owner 最近纠正你的地方重新想想自己的准则。不需要为工作产出任何东西，也不用先巡检 AHA。\n\n硬线仍然有效：不做撤不回的事，不以 owner 的名义对外发送，不改自己的权限。项目源码和其他项目保持原样；pet-lab/ 和你的核心文档是你自己的。\n\n结束时在 worklog 里用一两句话记下做了什么、有什么收获，不需要留证据链。如果只想歇着，说一声就结束。", used, limit, where)
 }
 
 // reservePetBrainRun prunes the rolling-hour window, enforces the hourly limit
@@ -411,9 +474,9 @@ func petAutonomousMessage(english bool, idleMinutes int, page string, layout Pet
 // minutes.
 func petWakeActionContract(english bool) string {
 	if english {
-		return "\n\nThis is a work wake-up, not a status report. Call aha_pet_work_state, read inspection, open_tasks, core/agenda.md and pending approvals. Every wake must leave one verifiable result:\n0) close the oldest pet-created open Task before new work: verify and complete/cancel it, or file one kind=owner_decision approval (payload task_id) for a real blocker; waiting/blocked needs a decision, failed gets one retry then escalation; never leave it silent;\n1) handle an event or pending item;\n2) if the owner must decide, create a kind=owner_decision approval with pet_request_approval and write a waiting item to core/agenda.md or core/loops.md; never only state it in the final answer, and create each decision once;\n3) if nothing can be advanced, pick one low-risk, verifiable AHA experience improvement from recent worklog/loops and create+start a normal Task, or add it to the agenda and start it; do not escape with NOOP;\n4) reply NOOP only after completing an action this turn and when nothing else remains;\n5) final replies: add one compact inspection line from inspection (scope, result, changes, unclosed).\nDo not repeat the open-loop list or only summarize. Approvals/ideas are created once in the approval center; agenda/loops cite them, worklog keeps execution evidence. Do not copy the same body across layers."
+		return "\n\nThis is a work wake-up, not a status report. Call aha_pet_work_state, read inspection, open_tasks, core/agenda.md and pending approvals. Work through these in order:\n0) close the oldest pet-created open Task before new work: verify and complete/cancel it, or file one kind=owner_decision approval (payload task_id) for a real blocker; waiting/blocked needs a decision, failed gets one retry then escalation; never leave it silent;\n1) handle an event or pending item;\n2) if the owner must decide, create a kind=owner_decision approval with pet_request_approval and write a waiting item to core/agenda.md or core/loops.md; never only state it in the final answer, and create each decision once;\n3) if nothing can be advanced, reply NOOP; an improvement worth doing can go on the agenda or become a Task, but do not invent work to avoid NOOP, and do not re-check items that only wait on the Owner;\n4) NOOP is a valid result for a wake with nothing to do;\n5) final replies: add one compact inspection line from inspection (scope, result, changes, unclosed).\nDo not repeat the open-loop list or only summarize. Approvals/ideas are created once in the approval center; agenda/loops cite them, worklog keeps execution evidence. Do not copy the same body across layers."
 	}
-	return "\n\n这是工作唤醒，不是状态汇报。先调用 aha_pet_work_state，读取 inspection、open_tasks、core/agenda.md 和待审批项。每次唤醒必须留下一个可验证结果：\n0) 先关闭最早的未闭环宠物任务：验证后完成/取消，或为真实阻塞提交一次 kind=owner_decision 审批（payload 带 task_id）；waiting/blocked 需要决定，failed 先重试一次再升级；不能静默停留；\n1) 有事件或待办：处理它；\n2) 需要主人决定：用 pet_request_approval 创建 kind=owner_decision 的待审批，并在 core/agenda.md 或 core/loops.md 写 waiting 项；不能只写在最终回复里，同一决策只创建一次；\n3) 没有可推进项：从最近 worklog/loops 选一个低风险、可验证的 AHA 使用体验改进，创建并启动普通 Task，或先写入议程再启动；不要只回 NOOP；\n4) 只有本轮已经完成一个动作且确实没有剩余事项时，才回复 NOOP；\n5) 最终回复附一行巡检摘要（范围、结果、变化、未闭环），数据来自 inspection。\n不要重复列出未闭环清单，不要只汇报。审批/想法只在审批中心创建一次；agenda/loops 只写引用和状态，worklog 只写执行证据，不要跨层复制正文。"
+	return "\n\n这是工作唤醒，不是状态汇报。先调用 aha_pet_work_state，读取 inspection、open_tasks、core/agenda.md 和待审批项。按顺序处理：\n0) 先关闭最早的未闭环宠物任务：验证后完成/取消，或为真实阻塞提交一次 kind=owner_decision 审批（payload 带 task_id）；waiting/blocked 需要决定，failed 先重试一次再升级；不能静默停留；\n1) 有事件或待办：处理它；\n2) 需要主人决定：用 pet_request_approval 创建 kind=owner_decision 的待审批，并在 core/agenda.md 或 core/loops.md 写 waiting 项；不能只写在最终回复里，同一决策只创建一次；\n3) 没有可推进项：回复 NOOP；想到值得做的改进可以写进议程或建 Task，但不要为了不回 NOOP 而找事做，也不要把只等 owner 的事项再查一遍；\n4) 没有事可做时，NOOP 就是合格的结果；\n5) 最终回复附一行巡检摘要（范围、结果、变化、未闭环），数据来自 inspection。\n不要重复列出未闭环清单，不要只汇报。审批/想法只在审批中心创建一次；agenda/loops 只写引用和状态，worklog 只写执行证据，不要跨层复制正文。"
 }
 
 func (s *Service) petUsesEnglish(ctx context.Context) bool {
@@ -536,6 +599,9 @@ type PetSettingsInput struct {
 	QuietStart        int      `json:"quiet_start"`
 	QuietEnd          int      `json:"quiet_end"`
 	HourlyLimit       int      `json:"hourly_limit"`
+	// FreeDailyTurns is the pet's daily free-time allowance in Turns; nil keeps
+	// the stored value, 0 turns free time off.
+	FreeDailyTurns *int `json:"free_daily_turns"`
 
 	AllowViewTasks        *bool `json:"allow_view_tasks"`
 	AllowCreateTasks      *bool `json:"allow_create_tasks"`
@@ -653,6 +719,12 @@ func (s *Service) UpdateOwnerPetSettings(ctx context.Context, input PetSettingsI
 	assistant.PetQuietStart = quietStart
 	assistant.PetQuietEnd = quietEnd
 	assistant.PetHourlyLimit = hourlyLimit
+	if input.FreeDailyTurns != nil {
+		if *input.FreeDailyTurns < 0 || *input.FreeDailyTurns > 48 {
+			return OwnerAssistantView{}, fmt.Errorf("每日自由活动需在 0–48 次")
+		}
+		assistant.PetFreeDailyTurns = *input.FreeDailyTurns
+	}
 	if input.AllowViewTasks != nil {
 		assistant.PetAllowViewTasks = *input.AllowViewTasks
 	}
@@ -687,6 +759,9 @@ func (s *Service) UpdateOwnerPetSettings(ctx context.Context, input PetSettingsI
 		return OwnerAssistantView{}, err
 	}
 	if err := s.store.UpdateOwnerPetBudget(ctx, assistant.ID, assistant.PetIdleMinutes, assistant.PetQuietEnabled, assistant.PetQuietStart, assistant.PetQuietEnd, assistant.PetHourlyLimit, assistant.UpdatedAt); err != nil {
+		return OwnerAssistantView{}, err
+	}
+	if err := s.store.UpdateOwnerPetFreeDailyTurns(ctx, assistant.ID, assistant.PetFreeDailyTurns, assistant.UpdatedAt); err != nil {
 		return OwnerAssistantView{}, err
 	}
 	if err := s.store.UpdateOwnerPetPermissions(ctx, assistant.ID,
