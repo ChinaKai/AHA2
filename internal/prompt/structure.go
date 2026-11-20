@@ -25,7 +25,9 @@ const (
 )
 
 // PromptBlockSpec is the executable form of the four-block recommendation:
-// name, order, and the per-block rune ceiling. The ceilings are deliberately
+// name, order, and the per-block rune ceiling. Order is the production order:
+// the three fixed blocks first, the per-Turn context last, so the Current Inbox
+// Batch is the final thing the Agent reads. The ceilings are deliberately
 // above the current worst-case English render so the lint fails on a material
 // addition instead of on wording noise, matching the existing resident budget
 // guardrail.
@@ -43,26 +45,26 @@ type PromptBlockSpec struct {
 var promptBlockSpecs = []PromptBlockSpec{
 	{
 		ID: BlockIdentity, Order: 0, NameZH: "身份", NameEN: "Identity",
-		PurposeZH: "我是谁：平台身份、Agent 角色、渠道身份和协作形态。",
-		MaxRunes:  6500, Required: true,
+		PurposeZH: "我是谁：平台身份、Agent 角色和一个 Turn 怎么进行。",
+		MaxRunes:  7000, Required: true,
 	},
 	{
 		ID: BlockPrinciples, Order: 1, NameZH: "做事准则", NameEN: "Principles",
-		PurposeZH: "按什么准则工作：平台与核心边界、协作策略、知识与证据纪律。",
-		MaxRunes:  3200, Required: true,
+		PurposeZH: "按什么准则工作：指令来源与核心边界、协作策略、渠道规则、知识与证据纪律。",
+		MaxRunes:  11500, Required: true,
 		RequiredFragments: []string{"core.default"},
 	},
 	{
-		ID: BlockContext, Order: 2, NameZH: "上下文", NameEN: "Context",
+		ID: BlockControl, Order: 2, NameZH: "控制协议", NameEN: "Control protocol",
+		PurposeZH: "如何操作系统与交付：内置 MCP 与 Agent Control API、附件投递和回复语言。",
+		MaxRunes:  2800, Required: true,
+		RequiredFragments: []string{"protocol.agent-api", "protocol.attachment-delivery"},
+	},
+	{
+		ID: BlockContext, Order: 3, NameZH: "上下文", NameEN: "Context",
 		PurposeZH: "这一轮的事实：Task 与工作区、可用上下文入口、Inbox 消息和生成文件。",
 		MaxRunes:  6000, Required: true,
 		RequiredFragments: []string{"section.task-workspace", "section.available-context", "section.current-inbox"},
-	},
-	{
-		ID: BlockControl, Order: 3, NameZH: "控制协议", NameEN: "Control protocol",
-		PurposeZH: "如何操作系统与交付：Agent Control API、附件投递和回复语言。",
-		MaxRunes:  2200, Required: true,
-		RequiredFragments: []string{"protocol.agent-api", "protocol.attachment-delivery"},
 	},
 }
 
@@ -169,13 +171,13 @@ var promptFragmentPlans = map[string]fragmentPlan{
 	"identity.pet-task":              {Block: BlockIdentity, Order: 0, Stable: true, Mixed: true, Resident: true, Note: "身份 + 调度准则 + 授权控制；末尾还内联了优先级声明"},
 	"role.main":                      {Block: BlockIdentity, Order: 1, Stable: true, Mixed: true, Resident: true, Note: "角色 + 工作循环准则"},
 	"role.sub":                       {Block: BlockIdentity, Order: 1, Stable: true, Mixed: true, Resident: true, Note: "角色 + 工作准则"},
-	"channel.web":                    {Block: BlockIdentity, Order: 2, Stable: true, Resident: true},
-	"channel.external-channel":       {Block: BlockIdentity, Order: 2, Stable: true, Mixed: true, Resident: true, Note: "渠道身份 + 群聊意图准则 + 权限/回执控制"},
+	"channel.web":                    {Block: BlockPrinciples, Order: 2, Stable: true, Resident: true},
+	"channel.external-channel":       {Block: BlockPrinciples, Order: 2, Stable: true, Mixed: true, Resident: true, Note: "渠道来源 + 群聊意图准则 + 权限/回执控制"},
 
 	"core.default":       {Block: BlockPrinciples, Order: 0, Stable: true, Resident: true},
 	"policy.single":      {Block: BlockPrinciples, Order: 1, Stable: true, Resident: true},
 	"policy.auto":        {Block: BlockPrinciples, Order: 1, Stable: true, Resident: true},
-	"protocol.knowledge": {Block: BlockPrinciples, Order: 2, Stable: true, Mixed: true, Resident: true, Note: "知识准则 + closeout/反馈控制"},
+	"protocol.knowledge": {Block: BlockPrinciples, Order: 3, Stable: true, Mixed: true, Resident: true, Note: "知识准则 + closeout/反馈控制"},
 
 	"section.compact-handoff":   {Block: BlockContext, Order: 0, Stable: false, Mixed: true, Resident: true, Note: "固定说明 + Task 字段"},
 	"section.task-workspace":    {Block: BlockContext, Order: 1, Stable: false, Mixed: true, Resident: true, Note: "固定标签 + 运行时路径/目标"},

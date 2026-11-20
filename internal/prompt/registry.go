@@ -252,10 +252,15 @@ type InboxTemplateItem struct {
 }
 
 type templateData struct {
-	AgentID               string
-	AgentRole             string
-	Identity              string
-	Channel               string
+	AgentID   string
+	AgentRole string
+	Identity  string
+	Channel   string
+	// ChannelGroup and ChannelTaskRoute select the external-channel rules that
+	// apply to this Turn: a private chat never needs the group rules, and only a
+	// task_route conversation has receipts to resolve.
+	ChannelGroup          bool
+	ChannelTaskRoute      bool
 	Backend               string
 	Collaboration         string
 	MaxAgents             int
@@ -293,20 +298,20 @@ func NewEngine(repository Repository) *Engine {
 }
 
 var builtinTemplates = []domain.PromptTemplate{
-	{ID: "core.default", Name: "AHA Core", Layer: "core", Description: "所有 Agent 共用的安全、Workspace 与 AHA 编排边界", Editable: true, Required: true, Version: 2},
-	{ID: "role.main", Name: "Main Agent", Layer: "role", Description: "Main 的规划、整合和最终交付职责", Editable: true, Required: true, Version: 3},
-	{ID: "role.sub", Name: "Sub Agent", Layer: "role", Description: "Sub 的聚焦执行和隔离职责", Editable: true, Required: true, Version: 1},
-	{ID: "identity.task-agent", Name: "Task Agent Identity", Layer: "identity", Description: "代码与项目任务场景身份", Editable: true, Required: false, Version: 1},
-	{ID: "identity.channel-assistant", Name: "Channel Assistant Identity", Layer: "identity", Description: "Owner 私聊渠道助手身份", Editable: true, Required: false, Version: 1},
-	{ID: "identity.channel-digital-human", Name: "Channel Digital Human Identity", Layer: "identity", Description: "受限群聊电子人身份", Editable: true, Required: false, Version: 2},
-	{ID: "identity.pet-task", Name: "Pet Task Identity", Layer: "identity", Description: "宠物 Task 的电子分身定位、owner-delegate 权限和 core/worklog 路径", Editable: true, Required: false, Version: 12},
-	{ID: "channel.web", Name: "AHA Web Channel", Layer: "channel", Description: "Web 渠道消息行为", Editable: true, Required: false, Version: 1},
-	{ID: "channel.external-channel", Name: "External Channel", Layer: "channel", Description: "外部渠道消息行为", Editable: true, Required: false, Version: 4},
-	{ID: "policy.auto", Name: "Auto Collaboration", Layer: "policy", Description: "AHA 自动协作策略", Editable: true, Required: false, Version: 1},
-	{ID: "policy.single", Name: "Single Agent", Layer: "policy", Description: "单 Agent 策略", Editable: true, Required: false, Version: 1},
-	{ID: "protocol.knowledge", Name: "Knowledge Protocol", Layer: "protocol", Description: "按 index 渐进读取知识并形成反馈与修订闭环", Editable: true, Required: false, Version: 2},
-	{ID: "protocol.agent-api", Name: "Agent Control API Protocol", Layer: "protocol", Description: "Agent API 的权限、进度与输出边界", Editable: true, Required: true, Version: 3},
-	{ID: "protocol.attachment-delivery", Name: "Attachment Delivery Protocol", Layer: "protocol", Description: "所有 Task 必须遵守的附件上传、绑定与回执边界", Editable: false, Required: true, Version: 1},
+	{ID: "core.default", Name: "AHA Core", Layer: "core", Description: "所有 Agent 共用的安全、Workspace 与 AHA 编排边界", Editable: true, Required: true, Version: 3},
+	{ID: "role.main", Name: "Main Agent", Layer: "role", Description: "Main 的规划、整合和最终交付职责", Editable: true, Required: true, Version: 4},
+	{ID: "role.sub", Name: "Sub Agent", Layer: "role", Description: "Sub 的聚焦执行和隔离职责", Editable: true, Required: true, Version: 2},
+	{ID: "identity.task-agent", Name: "Task Agent Identity", Layer: "identity", Description: "代码与项目任务场景身份", Editable: true, Required: false, Version: 2},
+	{ID: "identity.channel-assistant", Name: "Channel Assistant Identity", Layer: "identity", Description: "Owner 私聊渠道助手身份", Editable: true, Required: false, Version: 2},
+	{ID: "identity.channel-digital-human", Name: "Channel Digital Human Identity", Layer: "identity", Description: "受限群聊电子人身份", Editable: true, Required: false, Version: 3},
+	{ID: "identity.pet-task", Name: "Pet Task Identity", Layer: "identity", Description: "宠物 Task 的电子分身定位、owner-delegate 权限和 core/worklog 路径", Editable: true, Required: false, Version: 13},
+	{ID: "channel.web", Name: "AHA Web Channel", Layer: "channel", Description: "Web 渠道消息行为", Editable: true, Required: false, Version: 2},
+	{ID: "channel.external-channel", Name: "External Channel", Layer: "channel", Description: "外部渠道消息行为", Editable: true, Required: false, Version: 5},
+	{ID: "policy.auto", Name: "Auto Collaboration", Layer: "policy", Description: "AHA 自动协作策略", Editable: true, Required: false, Version: 2},
+	{ID: "policy.single", Name: "Single Agent", Layer: "policy", Description: "单 Agent 策略", Editable: true, Required: false, Version: 2},
+	{ID: "protocol.knowledge", Name: "Knowledge Protocol", Layer: "protocol", Description: "按 index 渐进读取知识并形成反馈与修订闭环", Editable: true, Required: false, Version: 3},
+	{ID: "protocol.agent-api", Name: "Agent Control API Protocol", Layer: "protocol", Description: "Agent API 的权限、进度与输出边界", Editable: true, Required: true, Version: 4},
+	{ID: "protocol.attachment-delivery", Name: "Attachment Delivery Protocol", Layer: "protocol", Description: "所有 Task 必须遵守的附件上传、绑定与回执边界", Editable: false, Required: true, Version: 2},
 	{ID: "context.task", Name: "Task Context File", Layer: "context", Description: "内容模板", Editable: true, Required: true, Version: 1},
 	{ID: "context.recent-context", Name: "Recent Context File", Layer: "context", Description: "recent-context.md 的内容模板", Editable: true, Required: false, Version: 2},
 	{ID: "context.recovery-handoff", Name: "Recovery Handoff Inline", Layer: "context", Description: "Current Inbox Batch 开头的中断续接证据模板", Editable: true, Required: false, Version: 2},
@@ -316,10 +321,10 @@ var builtinTemplates = []domain.PromptTemplate{
 	{ID: "context.attachments-index", Name: "Attachments Index File", Layer: "context", Description: "attachments/index.md 的内容模板", Editable: true, Required: false, Version: 2},
 	{ID: "section.compact-handoff", Name: "Compact Handoff Section", Layer: "section", Description: "Backend Session 压缩后的 Prompt 段落", Editable: true, Required: false, Version: 1},
 	{ID: "section.task-workspace", Name: "Task And Workspace Section", Layer: "section", Description: "Task 与 Workspace 摘要段落", Editable: true, Required: true, Version: 2},
-	{ID: "section.available-context", Name: "Available Context Section", Layer: "section", Description: "可用上下文入口列表段落", Editable: true, Required: true, Version: 2},
+	{ID: "section.available-context", Name: "Available Context Section", Layer: "section", Description: "可用上下文入口列表段落", Editable: true, Required: true, Version: 3},
 	{ID: "section.current-inbox", Name: "Current Inbox Section", Layer: "section", Description: "当前 Inbox Batch 段落", Editable: true, Required: true, Version: 1},
-	{ID: "section.inbox-batch-content", Name: "Inbox Batch Content", Layer: "section", Description: "Inbox 消息、渠道来源、引用上下文和附件引用的内容模板", Editable: true, Required: true, Version: 2},
-	{ID: "resource.agent-api", Name: "Agent API Reference File", Layer: "resource", Description: "只读参考模板", Editable: false, Required: true, Version: 11},
+	{ID: "section.inbox-batch-content", Name: "Inbox Batch Content", Layer: "section", Description: "Inbox 消息、渠道来源、引用上下文和附件引用的内容模板", Editable: true, Required: true, Version: 3},
+	{ID: "resource.agent-api", Name: "Agent API Reference File", Layer: "resource", Description: "Agent API 的 HTTP 参考；内置 MCP 工具不覆盖时查阅", Editable: false, Required: true, Version: 12},
 	{ID: "resource.attachment-protocol", Name: "Attachment Protocol File", Layer: "resource", Description: "只读参考模板；附件上传、绑定与回执规程", Editable: false, Required: true, Version: 1},
 	{ID: "resource.group-permissions", Name: "Group Permission Rules File", Layer: "resource", Description: "只读参考模板；群聊 task_route 的 Owner 权限申请规则", Editable: false, Required: false, Version: 1},
 }
@@ -331,12 +336,26 @@ var supersededBuiltinOverrideHashes = map[string]map[string]bool{
 		// v1 before the scratch boundary rule; an unmodified override must not
 		// hide the rule from existing installations.
 		"7053edc7d33e461aba5a061c6e6b76099d3e5f345342e3c3eeca5ec857608c69": true,
+		// The builtins before the prompt rewrite that explains the system, gives
+		// each rule its reason, and moves the per-Turn sections last (en, zh-CN;
+		// LF and CRLF).
+		"239daf74b4ee73802bfe0b9d207a91847c3e2dac27eef4b070d2935110fa52d4": true,
+		"ad632fee762a12d164530e5050bd6b510814757676f587d0a018bfcf65959d63": true,
+		"2176f21f52c5d378135e275c761b91219b217a412e0c9b9c060a5f3c4450c295": true,
+		"db43418abcd968ee87f2c0b99654fab1be5a3e4ebf1eaab3e3d84e04c7a97c2a": true,
 	},
 	"role.main": {
 		"497fffe9552e6978f283985916e9563ec59b8a3a080f2759ef5da56731a489a0": true,
 		"d4cc743eaf8270e21634508f17e47ee240924c3bb57426a7c8a126b7af64cd3d": true,
 		// Adds the pre-final scratch cleanup reminder.
 		"1ee35434ece95016d4b804a7e9a0d7268cc79eef31fd2dad4e89825f40136cc9": true,
+		// The builtins before the prompt rewrite that explains the system, gives
+		// each rule its reason, and moves the per-Turn sections last (en, zh-CN;
+		// LF and CRLF).
+		"db9d4e3399c32fc39a56ac2d38e8eee929369b3d45ef18a3964ac5f352585b72": true,
+		"6fb5ceb8b2e48174d57c1c15622e7d6f3a35238e0fbdd6bd000e9b76bc0ad1c5": true,
+		"a6d313bcd3fa54aedc22722d66283c4ef872be3507dbf6fb3a3eb5cb84c658d2": true,
+		"8c3628c820ea226ca653db61c22c0fe96731a2e744ea4cde3e9cf574efc16b1c": true,
 	},
 	"section.task-workspace": {
 		// Adds the runtime scratch path and read-only Context boundary.
@@ -345,9 +364,23 @@ var supersededBuiltinOverrideHashes = map[string]map[string]bool{
 	"role.sub": {
 		"388229947d72bbd80f97bd93a316e88bf8425b13a0d1845b66089c54d20a0d5f": true,
 		"05cfc5eb0815fde5b4ce67beea783dc3621faf239dd2817fa06d3652421af14c": true,
+		// The builtins before the prompt rewrite that explains the system, gives
+		// each rule its reason, and moves the per-Turn sections last (en, zh-CN;
+		// LF and CRLF).
+		"89a0dcef50449695846fc99d23655cdd2f4882df57a4d456dfa15b305d7ded74": true,
+		"1a0c5d48adca814cd4c542e0d8b94d06177e75932dc3099a6bf3b4a8ac58d231": true,
+		"56cc6950890a9ebf329b849b660ec7e19cfd9962d8195e9d948bcb4627c5b7f1": true,
+		"582e336503f8d647fd9024909a2b8496ec35f8ef16198d6638f31878d17c57ff": true,
 	},
 	"section.inbox-batch-content": {
 		"5fa0f46660226c7ccc0d18c91ae55a813230b3651194dee277e3fe180df2356d": true,
+		// The builtins before the prompt rewrite that explains the system, gives
+		// each rule its reason, and moves the per-Turn sections last (en, zh-CN;
+		// LF and CRLF).
+		"c92eb1124de0b5360485f211e69412d0bba005317ee0efb867fdefae77fc0f67": true,
+		"53f6c871f7453c5081c672191fdc3141efb96c0da0ecb05fa896f5af603e106d": true,
+		"f5ee6f97c3c3f8228ce032dd649ffd25c89ed630c11dde5e50f9dc47fdd20e62": true,
+		"4d698e38a239a8622b8f3cff9df68c59b9744539750b0efe5b54a8a1d1fc0511": true,
 	},
 	"identity.pet-task": {
 		"a5f90c9f238a5b97a04049c4cda2cc210aacb1a06174c845af8bc707704178bf": true,
@@ -375,12 +408,101 @@ var supersededBuiltinOverrideHashes = map[string]map[string]bool{
 		"38fe86fac2740ac0a552419b1267ebe0c79b9bfb5347ec0f999881991f475b7d": true,
 		"61446d0c1c1e8d07504050bedaedd6499489151e2b36fc36e4722bf95eaa8903": true,
 		"c4d14681b31e310759633872da0d01d74d6f69fd1c0b3aa8a2758c55440f0bf5": true,
+		// The builtins before the prompt rewrite that explains the system, gives
+		// each rule its reason, and moves the per-Turn sections last (en, zh-CN;
+		// LF and CRLF).
+		"232bd43e8daa63a760596e22c83a02745b2d49874fe41f082c6be383d83a735d": true,
+		"cbf624e6696c98e1c9a643586f58ba486f85b51ea1c829b83b5f8e03685b1905": true,
+		"4b39c8dd13eea1e81242565ec7a8cf5243395d344ee1c5e107b641c23ff16208": true,
+		"4f500e3acb936c2e56854d51f95e81bbda0551f03580f3261ea1cef5e597dc7f": true,
 	},
 	"section.available-context": {
 		// The previous builtins repeated the pet core/diary paths that Pet Task
 		// Identity already owns; discard an unmodified override of either version.
 		"88f7ddab63240d7dffe30efab3dd57f9fee0360f5cce5387c114ca3366ff0039": true,
 		"49803c2773aad1968094484789be9b8c253084b50fede4bda767ad9476e7c190": true,
+		// The builtins before the prompt rewrite that explains the system, gives
+		// each rule its reason, and moves the per-Turn sections last (en, zh-CN;
+		// LF and CRLF).
+		"4ff967ce4ab046ef2d17c0ab74d66a5afce4a28f61a371b35cf77c458ae67695": true,
+		"7d87028ef781235e459d57454a7ef218452f023ce2e20b0f58547eb090b56000": true,
+		"3d42e28e20c34701f86889fae3aab9ff80e8b139d8aeb8c92dd021d5cc22ac18": true,
+		"642ea6fb568b5270ce68df58b46e0532e47e087f24a532871144eeac41d91250": true,
+	},
+	"channel.external-channel": {
+		// The builtins before the prompt rewrite that explains the system, gives
+		// each rule its reason, and moves the per-Turn sections last (en, zh-CN;
+		// LF and CRLF).
+		"fc938dee8ed157bf137b51c72177975a598848f992a44e62b22d9eca5a427c00": true,
+		"416fc168fc9c65fed118fdefca86e208fd4e9ac583d9ce3b12f6c661a864b0b7": true,
+		"486be4ac6197132dab802a5af52a7dd1e43111e94e227cb6b43c761bc9545d59": true,
+		"1cc946d3096f8bd9adf13e059ceb67ef4a6da5ce4eaceec50e0daec16e20a99a": true,
+	},
+	"channel.web": {
+		// The builtins before the prompt rewrite that explains the system, gives
+		// each rule its reason, and moves the per-Turn sections last (en, zh-CN;
+		// LF and CRLF).
+		"72059a9850540039d80064002aae6cf9afef1e418d182f139c3e588b73c5d4fa": true,
+		"7194e9594a00447d14ef32712b1c62a8f71e21bc68933a52da27d252930bffd5": true,
+	},
+	"identity.channel-assistant": {
+		// The builtins before the prompt rewrite that explains the system, gives
+		// each rule its reason, and moves the per-Turn sections last (en, zh-CN;
+		// LF and CRLF).
+		"4c378288f608547624ea462dca479494f9a87ad4b614c477786bce8a4b3be631": true,
+		"191ae1b194de3eb8abea10bc860472029a007718fd923e92e8bfdba8e69ce493": true,
+		"b4c11bd14aed2392822f71be5084a34d6f3937168ad28c70459f9abe603a862e": true,
+		"0d7c05a9f4788c79531cefeda920013fc5d0a8af8a071758f1c7723b58c4e772": true,
+	},
+	"identity.channel-digital-human": {
+		// The builtins before the prompt rewrite that explains the system, gives
+		// each rule its reason, and moves the per-Turn sections last (en, zh-CN;
+		// LF and CRLF).
+		"4b827d8a44da93ed5858b2ac31e65215b45f0b32799378be1e037a07d0981922": true,
+		"872f7a601ae26c1cafa51ebf85e7635bcb50d635b36f1234a0502d020ac429b2": true,
+		"864c1817154dbf2497bd68c27ee06ec4967c923a274869951dddb1bbbd1d3609": true,
+		"c3b7a8eb44d22993cb42af32eafb0e8d1825dbd24c3ce013bccfa98df87dbf81": true,
+	},
+	"identity.task-agent": {
+		// The builtins before the prompt rewrite that explains the system, gives
+		// each rule its reason, and moves the per-Turn sections last (en, zh-CN;
+		// LF and CRLF).
+		"3d04207b3bcbe9276e8f7e5f45f2a13258c81f05365642d6f2e097d526c7ff5f": true,
+		"8889d88b2b8c2e59375fd529a234a0b87af780f90e680e72206bc3c0d4514e81": true,
+		"0f959d94e1813015fd34ccfbc30e659de785740e9734344d6d24a6654341be62": true,
+		"bdbc00660e7c4ec48e22e583f2b4368095ac343e6e1ec87c71c3fd61ff1dc7c4": true,
+	},
+	"policy.auto": {
+		// The builtins before the prompt rewrite that explains the system, gives
+		// each rule its reason, and moves the per-Turn sections last (en, zh-CN;
+		// LF and CRLF).
+		"fd604e60b2a0a19682dadc5f9ba313bb98fd82118b709468ebd33554fca0986d": true,
+		"284d290c0710bffde3b6b57f27f422fe6f9db7c5bf3644945010238a6285f870": true,
+	},
+	"policy.single": {
+		// The builtins before the prompt rewrite that explains the system, gives
+		// each rule its reason, and moves the per-Turn sections last (en, zh-CN;
+		// LF and CRLF).
+		"0bfa457d1d53ae0b6a7efc0851e48666c6f254565cbc56448d40662bd2837ba0": true,
+		"2bc547c1cfa5ee1a380a9bc1a0b6234ab6af47e633fa89df101b856c82711645": true,
+	},
+	"protocol.agent-api": {
+		// The builtins before the prompt rewrite that explains the system, gives
+		// each rule its reason, and moves the per-Turn sections last (en, zh-CN;
+		// LF and CRLF).
+		"b3de146ab2fc11923d5f5284719a6ae3b451a1d77e1594f6118cc66248475fb7": true,
+		"3a38f23dcdb9971a6af193107ac59178f43673a5b29695aaf70a67e2e6f87cdd": true,
+		"65652e6c35ce26adced6dfe609d83e2c72efd86e66f0595a936c57d064ad49ab": true,
+		"f8eff1c49bd5f44a1867fb60d918dbcbdab46180bf1ee3894ed0bce255671772": true,
+	},
+	"protocol.knowledge": {
+		// The builtins before the prompt rewrite that explains the system, gives
+		// each rule its reason, and moves the per-Turn sections last (en, zh-CN;
+		// LF and CRLF).
+		"62e0a87d5b01af8bd4c106b03c2090c343acc633932651f32d18f357350a2c0b": true,
+		"e34552f1265d803f2ad90295d5d3f3ad8c524ab6cee66ca71ee39bc50f62795b": true,
+		"4bcb7b04e154963e4f7b3076f94122a2bbfae2ba2d37107d6922da737b30cb26": true,
+		"fbc17b4c27576a674dd88ecbe3cc6846af2ff9b8dd06e563112169804073c4f8": true,
 	},
 }
 
@@ -457,7 +579,7 @@ var englishTemplateDescriptions = map[string]string{
 	"section.available-context":      "Available-context entry list section",
 	"section.current-inbox":          "Current Inbox Batch section",
 	"section.inbox-batch-content":    "Template for Inbox messages, channel sources, quoted context, and attachment references",
-	"resource.agent-api":             "Read-only reference template",
+	"resource.agent-api":             "HTTP reference for the Agent API; the fallback when built-in MCP tools do not cover an operation",
 	"resource.attachment-protocol":   "Read-only reference template; attachment upload, binding, and receipt protocol",
 	"resource.group-permissions":     "Read-only reference template; Owner permission rules for group task routes",
 }
@@ -570,7 +692,7 @@ func languageDirective(language string) string {
 	case domain.LanguageEnglish:
 		return "## Response language\nUse English for your user-facing answer, progress messages, and summaries unless the Owner explicitly asks for another language. When replying in an external channel, match the language used by that channel's participants."
 	case domain.LanguageSimplified:
-		return "## 回复语言\n除非主人本轮明确要求其他语言，否则使用简体中文回复主人、进度消息和总结。回复外部渠道时跟随该渠道参与者使用的语言。"
+		return "## 回复语言\n回复 owner、写进度消息和总结默认用简体中文，除非 owner 本轮明确要求其他语言；给外部渠道发消息时，跟随对方使用的语言。"
 	default:
 		return "## Response language\nReply in the language of the Owner's latest message. If the message language is ambiguous, use Simplified Chinese. In an external channel, match the participants' language."
 	}
@@ -616,7 +738,9 @@ func (engine *Engine) BuildLegacy(ctx context.Context, input BuildInput) (BuildR
 	channelTemplate := "channel." + channelName
 	data := templateData{
 		AgentID: input.Agent.AgentID, AgentRole: input.Agent.Role, Identity: identityName,
-		Channel: channelName, Backend: input.Snapshot.Backend, Collaboration: input.Task.CollaborationMode,
+		Channel: channelName, ChannelGroup: channelIsGroup(input.ChannelContext),
+		ChannelTaskRoute: channelRouteMode(input.ChannelContext) == "task_route",
+		Backend:          input.Snapshot.Backend, Collaboration: input.Task.CollaborationMode,
 		MaxAgents: input.Task.MaxAgents, TaskID: input.Task.ID, TaskCode: input.Task.Code,
 		TaskTitle: input.Task.Title, ContextRoot: contextRoot, ScratchRoot: scratchRoot, TaskWorkspace: workDir,
 		Workspace: input.Workspace.Name, WorkspaceTransport: input.Workspace.Transport,
@@ -658,8 +782,19 @@ func (engine *Engine) BuildLegacy(ctx context.Context, input BuildInput) (BuildR
 				content = strings.TrimRight(content, "\n") + "\n\n" + supplement
 			}
 		}
-		item := templateByID[id]
-		parts = append(parts, "## "+item.Name+"\n"+content)
+		parts = append(parts, content)
+	}
+	// Fixed rules come first and the per-Turn payload last, so the Agent reads
+	// the request right after the rules that govern it.
+	for _, id := range residentProtocolTemplateIDs {
+		content, renderErr := renderTemplateByID(templateByID, id, data)
+		if renderErr != nil {
+			return BuildResult{}, renderErr
+		}
+		parts = append(parts, content)
+	}
+	if directive := languageDirective(input.Language); directive != "" {
+		parts = append(parts, directive)
 	}
 	if data.CompactHandoff != "" {
 		content, renderErr := renderTemplateByID(templateByID, "section.compact-handoff", data)
@@ -668,25 +803,14 @@ func (engine *Engine) BuildLegacy(ctx context.Context, input BuildInput) (BuildR
 		}
 		parts = append(parts, content)
 	}
-	for _, id := range []string{"section.task-workspace", "section.available-context", "section.current-inbox"} {
+	for _, id := range residentSectionTemplateIDs {
 		content, renderErr := renderTemplateByID(templateByID, id, data)
 		if renderErr != nil {
 			return BuildResult{}, renderErr
 		}
 		parts = append(parts, content)
 	}
-	for _, id := range []string{"protocol.agent-api", "protocol.attachment-delivery"} {
-		content, renderErr := renderTemplateByID(templateByID, id, data)
-		if renderErr != nil {
-			return BuildResult{}, renderErr
-		}
-		item := templateByID[id]
-		parts = append(parts, "## "+item.Name+"\n"+content)
-	}
 	effective := strings.Join(parts, "\n\n")
-	if directive := languageDirective(input.Language); directive != "" {
-		effective += "\n\n" + directive
-	}
 	return BuildResult{
 		EffectivePrompt: effective, ContextRoot: contextRoot, ContextManifest: contextResources,
 		SharedRoot: sharedRoot, SharedManifest: sharedManifest,
@@ -707,13 +831,13 @@ func renderTemplateByID(templates map[string]domain.PromptTemplate, id string, d
 // without a budget entry should fail the test rather than quietly ship
 // unguarded, which is how the largest layer in the system went unnoticed.
 func residentTemplateIDs(agentRole, collaborationMode string, knowledgeEnabled bool, identityTemplate, channelTemplate string) []string {
-	ids := []string{"core.default", identityTemplate}
+	ids := []string{identityTemplate}
 	if agentRole == "sub" {
 		ids = append(ids, "role.sub")
 	} else {
 		ids = append(ids, "role.main")
 	}
-	ids = append(ids, channelTemplate)
+	ids = append(ids, "core.default")
 	if agentRole == "main" {
 		if collaborationMode == "single" {
 			ids = append(ids, "policy.single")
@@ -721,6 +845,7 @@ func residentTemplateIDs(agentRole, collaborationMode string, knowledgeEnabled b
 			ids = append(ids, "policy.auto")
 		}
 	}
+	ids = append(ids, channelTemplate)
 	if knowledgeEnabled {
 		ids = append(ids, "protocol.knowledge")
 	}
@@ -757,6 +882,13 @@ func identityAndChannel(channelContext map[string]any) (string, string) {
 		return identityChannelDigitalHuman, channelExternal
 	}
 	return identityChannelAssistant, channelExternal
+}
+
+// channelIsGroup reports whether the Turn came through the group endpoint. A
+// task_route can be bound to either a group or a private chat, so the route
+// mode alone does not say which rules apply.
+func channelIsGroup(channelContext map[string]any) bool {
+	return contextString(channelContext, "endpoint") == domain.ChannelEndpointGroupDigitalHuman
 }
 
 func channelRouteMode(channelContext map[string]any) string {

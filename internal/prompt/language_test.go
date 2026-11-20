@@ -36,7 +36,7 @@ func TestBuildAppendsOwnerLanguageDirective(t *testing.T) {
 		want     string
 	}{
 		{language: domain.LanguageEnglish, want: "Use English for your user-facing answer"},
-		{language: domain.LanguageSimplified, want: "使用简体中文回复主人"},
+		{language: domain.LanguageSimplified, want: "默认用简体中文"},
 		{language: domain.LanguageAuto, want: "Owner's latest message"},
 	}
 	for _, test := range tests {
@@ -49,10 +49,10 @@ func TestBuildAppendsOwnerLanguageDirective(t *testing.T) {
 		if !strings.Contains(result.EffectivePrompt, test.want) {
 			t.Fatalf("language %q prompt missing %q", test.language, test.want)
 		}
-		if test.language == domain.LanguageSimplified && !strings.Contains(result.EffectivePrompt, "你负责整合、验证") {
+		if test.language == domain.LanguageSimplified && !strings.Contains(result.EffectivePrompt, "你是本 Task 的 Main") {
 			t.Fatalf("zh-CN prompt did not use translated resident templates")
 		}
-		if test.language == domain.LanguageEnglish && !strings.Contains(result.EffectivePrompt, "You own integration") {
+		if test.language == domain.LanguageEnglish && !strings.Contains(result.EffectivePrompt, "You are this Task's Main") {
 			t.Fatalf("en-US prompt did not use English resident templates")
 		}
 		if test.language == domain.LanguageEnglish && regexp.MustCompile(`\p{Han}`).MatchString(result.EffectivePrompt) {
@@ -164,7 +164,7 @@ func TestTemplatesForLanguageLocalizesCatalog(t *testing.T) {
 		if item.Name != "AHA 核心边界" {
 			t.Fatalf("zh-CN core name = %q", item.Name)
 		}
-		if !strings.Contains(item.Content, "以选定的 Task Workspace") {
+		if !strings.Contains(item.Content, "这份提示词是 AHA 给你的工作约定") {
 			t.Fatalf("zh-CN core content was not translated: %q", item.Content)
 		}
 	}

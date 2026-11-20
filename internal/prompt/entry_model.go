@@ -85,32 +85,35 @@ type entryAnchorSpec struct {
 	Condition     string
 }
 
-// The order below is the resident Prompt order across both entries. Entries are
-// organizational: core#agent-api and core#attachment render after the
-// task-context sections, exactly as the legacy Build path renders them.
+// Order is the resident Prompt order across both entries; entries themselves are
+// organizational. Fixed rules render first (identity, role, channel, core
+// boundaries, policy, channel, knowledge, Agent API, attachments) and the
+// per-Turn sections last, so the Current Inbox Batch is the final thing the
+// Agent reads. Resident templates carry their own "## " section headings: the
+// template Name is an admin label, not prompt text.
 var phaseThreeAnchorSpecs = []entryAnchorSpec{
-	{EntryID: EntryCore, Key: "main", LegacyID: "core.default", Kind: anchorKindResident, FrozenVersion: 2, Order: 0, Heading: true, Condition: "always"},
-	{EntryID: EntryCore, Key: "identity-task", LegacyID: "identity.task-agent", Kind: anchorKindResident, FrozenVersion: 1, Order: 1, Heading: true, Condition: "identity:task-agent"},
-	{EntryID: EntryCore, Key: "identity-channel-assistant", LegacyID: "identity.channel-assistant", Kind: anchorKindResident, FrozenVersion: 1, Order: 1, Heading: true, Condition: "identity:channel-assistant"},
-	{EntryID: EntryCore, Key: "identity-channel-digital-human", LegacyID: "identity.channel-digital-human", Kind: anchorKindResident, FrozenVersion: 2, Order: 1, Heading: true, Condition: "identity:channel-digital-human"},
-	{EntryID: EntryCore, Key: "identity-pet", LegacyID: "identity.pet-task", Kind: anchorKindResident, FrozenVersion: 12, Order: 1, Heading: true, Condition: "identity:pet-task"},
-	{EntryID: EntryCore, Key: "role-main", LegacyID: "role.main", Kind: anchorKindResident, FrozenVersion: 3, Order: 2, Heading: true, Condition: "role:main"},
-	{EntryID: EntryCore, Key: "role-sub", LegacyID: "role.sub", Kind: anchorKindResident, FrozenVersion: 1, Order: 2, Heading: true, Condition: "role:sub"},
-	{EntryID: EntryCore, Key: "channel-web", LegacyID: "channel.web", Kind: anchorKindResident, FrozenVersion: 1, Order: 3, Heading: true, Condition: "channel:web"},
-	{EntryID: EntryCore, Key: "channel-external", LegacyID: "channel.external-channel", Kind: anchorKindResident, FrozenVersion: 4, Order: 3, Heading: true, Condition: "channel:external-channel"},
+	{EntryID: EntryCore, Key: "main", LegacyID: "core.default", Kind: anchorKindResident, FrozenVersion: 3, Order: 2, Condition: "always"},
+	{EntryID: EntryCore, Key: "identity-task", LegacyID: "identity.task-agent", Kind: anchorKindResident, FrozenVersion: 2, Order: 0, Condition: "identity:task-agent"},
+	{EntryID: EntryCore, Key: "identity-channel-assistant", LegacyID: "identity.channel-assistant", Kind: anchorKindResident, FrozenVersion: 2, Order: 0, Condition: "identity:channel-assistant"},
+	{EntryID: EntryCore, Key: "identity-channel-digital-human", LegacyID: "identity.channel-digital-human", Kind: anchorKindResident, FrozenVersion: 3, Order: 0, Condition: "identity:channel-digital-human"},
+	{EntryID: EntryCore, Key: "identity-pet", LegacyID: "identity.pet-task", Kind: anchorKindResident, FrozenVersion: 13, Order: 0, Condition: "identity:pet-task"},
+	{EntryID: EntryCore, Key: "role-main", LegacyID: "role.main", Kind: anchorKindResident, FrozenVersion: 4, Order: 1, Condition: "role:main"},
+	{EntryID: EntryCore, Key: "role-sub", LegacyID: "role.sub", Kind: anchorKindResident, FrozenVersion: 2, Order: 1, Condition: "role:sub"},
+	{EntryID: EntryCore, Key: "channel-web", LegacyID: "channel.web", Kind: anchorKindResident, FrozenVersion: 2, Order: 4, Condition: "channel:web"},
+	{EntryID: EntryCore, Key: "channel-external", LegacyID: "channel.external-channel", Kind: anchorKindResident, FrozenVersion: 5, Order: 4, Condition: "channel:external-channel"},
 
-	{EntryID: EntryTaskContext, Key: "policy-auto", LegacyID: "policy.auto", Kind: anchorKindResident, FrozenVersion: 1, Order: 4, Heading: true, Condition: "policy:auto"},
-	{EntryID: EntryTaskContext, Key: "policy-single", LegacyID: "policy.single", Kind: anchorKindResident, FrozenVersion: 1, Order: 4, Heading: true, Condition: "policy:single"},
-	{EntryID: EntryTaskContext, Key: "knowledge", LegacyID: "protocol.knowledge", Kind: anchorKindResident, FrozenVersion: 2, Order: 5, Heading: true, Condition: "knowledge"},
-	{EntryID: EntryTaskContext, Key: "compact-handoff", LegacyID: "section.compact-handoff", Kind: anchorKindResident, FrozenVersion: 1, Order: 6, Condition: "compact-handoff"},
-	{EntryID: EntryTaskContext, Key: "task-workspace", LegacyID: "section.task-workspace", Kind: anchorKindResident, FrozenVersion: 2, Order: 7, Condition: "always"},
-	{EntryID: EntryTaskContext, Key: "available-context", LegacyID: "section.available-context", Kind: anchorKindResident, FrozenVersion: 2, Order: 8, Condition: "always"},
-	{EntryID: EntryTaskContext, Key: "current-inbox", LegacyID: "section.current-inbox", Kind: anchorKindResident, FrozenVersion: 1, Order: 9, Condition: "always"},
+	{EntryID: EntryTaskContext, Key: "policy-auto", LegacyID: "policy.auto", Kind: anchorKindResident, FrozenVersion: 2, Order: 3, Condition: "policy:auto"},
+	{EntryID: EntryTaskContext, Key: "policy-single", LegacyID: "policy.single", Kind: anchorKindResident, FrozenVersion: 2, Order: 3, Condition: "policy:single"},
+	{EntryID: EntryTaskContext, Key: "knowledge", LegacyID: "protocol.knowledge", Kind: anchorKindResident, FrozenVersion: 3, Order: 5, Condition: "knowledge"},
+	{EntryID: EntryTaskContext, Key: "compact-handoff", LegacyID: "section.compact-handoff", Kind: anchorKindResident, FrozenVersion: 1, Order: 8, Condition: "compact-handoff"},
+	{EntryID: EntryTaskContext, Key: "task-workspace", LegacyID: "section.task-workspace", Kind: anchorKindResident, FrozenVersion: 2, Order: 9, Condition: "always"},
+	{EntryID: EntryTaskContext, Key: "available-context", LegacyID: "section.available-context", Kind: anchorKindResident, FrozenVersion: 3, Order: 10, Condition: "always"},
+	{EntryID: EntryTaskContext, Key: "current-inbox", LegacyID: "section.current-inbox", Kind: anchorKindResident, FrozenVersion: 1, Order: 11, Condition: "always"},
 
-	{EntryID: EntryCore, Key: "agent-api", LegacyID: "protocol.agent-api", Kind: anchorKindResident, FrozenVersion: 3, Order: 10, Heading: true, Condition: "always"},
-	{EntryID: EntryCore, Key: "attachment", LegacyID: "protocol.attachment-delivery", Kind: anchorKindResident, FrozenVersion: 1, Order: 11, Heading: true, Condition: "always"},
+	{EntryID: EntryCore, Key: "agent-api", LegacyID: "protocol.agent-api", Kind: anchorKindResident, FrozenVersion: 4, Order: 6, Condition: "always"},
+	{EntryID: EntryCore, Key: "attachment", LegacyID: "protocol.attachment-delivery", Kind: anchorKindResident, FrozenVersion: 2, Order: 7, Condition: "always"},
 
-	{EntryID: EntryTaskContext, Key: "inbox-batch", LegacyID: "section.inbox-batch-content", Kind: anchorKindFragment, FrozenVersion: 2, Order: 20, Heading: true},
+	{EntryID: EntryTaskContext, Key: "inbox-batch", LegacyID: "section.inbox-batch-content", Kind: anchorKindFragment, FrozenVersion: 3, Order: 20, Heading: true},
 
 	// Generated files: Go code produces them from live Turn data. They stay
 	// previewable but are not independently editable in the entry model.
@@ -124,7 +127,7 @@ var phaseThreeAnchorSpecs = []entryAnchorSpec{
 
 	// Shared read-only references. They are grouped under core because they are
 	// global boundaries, not task context.
-	{EntryID: EntryCore, Key: "resource-agent-api", LegacyID: "resource.agent-api", Kind: anchorKindResource, FrozenVersion: 11, Order: 200},
+	{EntryID: EntryCore, Key: "resource-agent-api", LegacyID: "resource.agent-api", Kind: anchorKindResource, FrozenVersion: 12, Order: 200},
 	{EntryID: EntryCore, Key: "resource-attachment-protocol", LegacyID: "resource.attachment-protocol", Kind: anchorKindResource, FrozenVersion: 1, Order: 201},
 	{EntryID: EntryCore, Key: "resource-group-permissions", LegacyID: "resource.group-permissions", Kind: anchorKindResource, FrozenVersion: 1, Order: 202},
 }
@@ -508,7 +511,9 @@ func (engine *Engine) buildEntryModel(ctx context.Context, input BuildInput) (Bu
 	}
 	data := templateData{
 		AgentID: input.Agent.AgentID, AgentRole: input.Agent.Role, Identity: identityName,
-		Channel: channelName, Backend: input.Snapshot.Backend, Collaboration: input.Task.CollaborationMode,
+		Channel: channelName, ChannelGroup: channelIsGroup(input.ChannelContext),
+		ChannelTaskRoute: channelRouteMode(input.ChannelContext) == "task_route",
+		Backend:          input.Snapshot.Backend, Collaboration: input.Task.CollaborationMode,
 		MaxAgents: input.Task.MaxAgents, TaskID: input.Task.ID, TaskCode: input.Task.Code,
 		TaskTitle: input.Task.Title, ContextRoot: contextRoot, ScratchRoot: scratchRoot, TaskWorkspace: workDir,
 		Workspace: input.Workspace.Name, WorkspaceTransport: input.Workspace.Transport,
@@ -540,6 +545,16 @@ func (engine *Engine) buildEntryModel(ctx context.Context, input BuildInput) (Bu
 	data.AvailableContext = availableContextEntries(resources)
 	var parts []string
 	fragments := make([]entryRenderedFragment, 0, len(phaseThreeAnchorSpecs))
+	directiveAdded := false
+	appendDirective := func() {
+		directiveAdded = true
+		if directive := languageDirective(input.Language); directive != "" {
+			parts = append(parts, directive)
+			fragments = append(fragments, entryRenderedFragment{
+				LegacyID: "language.directive", Name: "Response language", Content: directive, Rendered: directive,
+			})
+		}
+	}
 	for _, id := range entryTemplateOrder(input) {
 		anchor, ok := ResolveLegacyTemplateID(id)
 		if !ok {
@@ -555,6 +570,11 @@ func (engine *Engine) buildEntryModel(ctx context.Context, input BuildInput) (Bu
 				content = strings.TrimRight(content, "\n") + "\n\n" + supplement
 			}
 		}
+		// The response-language directive closes the fixed rules, ahead of the
+		// per-Turn sections.
+		if !directiveAdded && strings.HasPrefix(id, "section.") {
+			appendDirective()
+		}
 		rendered := content
 		if spec.Heading {
 			rendered = "## " + templateByID[id].Name + "\n" + content
@@ -564,11 +584,8 @@ func (engine *Engine) buildEntryModel(ctx context.Context, input BuildInput) (Bu
 			LegacyID: id, Name: templateByID[id].Name, Heading: spec.Heading, Content: content, Rendered: rendered,
 		})
 	}
-	if directive := languageDirective(input.Language); directive != "" {
-		parts = append(parts, directive)
-		fragments = append(fragments, entryRenderedFragment{
-			LegacyID: "language.directive", Name: "Response language", Content: directive, Rendered: directive,
-		})
+	if !directiveAdded {
+		appendDirective()
 	}
 	effective := strings.Join(parts, "\n\n")
 	return BuildResult{

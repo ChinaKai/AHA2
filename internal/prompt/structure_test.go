@@ -27,18 +27,18 @@ func compliantStructureFragments() []StructureFragment {
 			Content: "## Single Agent\nThis Task uses single-agent mode."},
 		{ID: "protocol.knowledge", Name: "Knowledge Protocol", Block: BlockPrinciples, Order: 2, Stable: true, Mixed: true, Resident: true,
 			Content: "## Knowledge Protocol\nRead knowledge progressively by index."},
-		{ID: "section.task-workspace", Name: "Task And Workspace Section", Block: BlockContext, Order: 1, Stable: false, Mixed: true, Resident: true,
-			Content: "## Task and workspace\n- Project: demo"},
-		{ID: "section.available-context", Name: "Available Context Section", Block: BlockContext, Order: 2, Stable: false, Mixed: true, Resident: true,
-			Content: "## Available context\n- `task.md` (content template)"},
-		{ID: "section.current-inbox", Name: "Current Inbox Section", Block: BlockContext, Order: 3, Stable: false, Mixed: true, Resident: true,
-			Content: "## Current Inbox Batch\nProcess the routed message."},
 		{ID: "protocol.agent-api", Name: "Agent Control API Protocol", Block: BlockControl, Order: 0, Stable: true, Mixed: true, Resident: true,
 			Content: "## Agent Control API Protocol\nUse the Task-scoped Agent Control API."},
 		{ID: "protocol.attachment-delivery", Name: "Attachment Delivery Protocol", Block: BlockControl, Order: 1, Stable: true, Resident: true,
 			Content: "## Attachment Delivery Protocol\nOnly a confirmed upload and binding is a delivery."},
 		{ID: "language.directive", Name: "Response language", Block: BlockControl, Order: 2, Stable: true, Resident: true,
 			Content: "## Response language\nUse Simplified Chinese."},
+		{ID: "section.task-workspace", Name: "Task And Workspace Section", Block: BlockContext, Order: 1, Stable: false, Mixed: true, Resident: true,
+			Content: "## Task and workspace\n- Project: demo"},
+		{ID: "section.available-context", Name: "Available Context Section", Block: BlockContext, Order: 2, Stable: false, Mixed: true, Resident: true,
+			Content: "## Available context\n- `task.md` (content template)"},
+		{ID: "section.current-inbox", Name: "Current Inbox Section", Block: BlockContext, Order: 3, Stable: false, Mixed: true, Resident: true,
+			Content: "## Current Inbox Batch\nProcess the routed message."},
 	}
 }
 
@@ -232,7 +232,7 @@ func TestLintStructureRejectsEachInvariantWithAClearError(t *testing.T) {
 			name: "explicit truncation marker",
 			build: func() []StructureFragment {
 				result := clone()
-				result[6] = withContent(result[6], "## Task and workspace\n- detail [truncated]")
+				result[9] = withContent(result[9], "## Task and workspace\n- detail [truncated]")
 				return result
 			},
 			code: IssueTruncationMarker,
@@ -242,7 +242,7 @@ func TestLintStructureRejectsEachInvariantWithAClearError(t *testing.T) {
 			name: "chinese truncation marker",
 			build: func() []StructureFragment {
 				result := clone()
-				result[6] = withContent(result[6], "## Task and workspace\n- [纯文本正文过长，已按上下文预算截断]")
+				result[9] = withContent(result[9], "## Task and workspace\n- [纯文本正文过长，已按上下文预算截断]")
 				return result
 			},
 			code: IssueTruncationMarker,
@@ -252,7 +252,7 @@ func TestLintStructureRejectsEachInvariantWithAClearError(t *testing.T) {
 			name: "silently truncated task goal",
 			build: func() []StructureFragment {
 				result := clone()
-				result[6] = withContent(result[6], "## Task and workspace\n- 当前目标：定位并修复登录超时的根因...")
+				result[9] = withContent(result[9], "## Task and workspace\n- 当前目标：定位并修复登录超时的根因...")
 				return result
 			},
 			code: IssueTruncationMarker,
@@ -262,7 +262,7 @@ func TestLintStructureRejectsEachInvariantWithAClearError(t *testing.T) {
 			name: "overlong block",
 			build: func() []StructureFragment {
 				result := clone()
-				result[6] = withContent(result[6], "## Task and workspace\n"+strings.Repeat("长", 7000))
+				result[9] = withContent(result[9], "## Task and workspace\n"+strings.Repeat("长", 7000))
 				return result
 			},
 			code: IssueBlockTooLong,
@@ -276,7 +276,7 @@ func TestLintStructureRejectsEachInvariantWithAClearError(t *testing.T) {
 				return append(append([]StructureFragment{}, result[3:6]...), append(result[:3], result[6:]...)...)
 			},
 			code: IssueBlockOrder,
-			want: "want identity -> principles -> context -> control",
+			want: "want identity -> principles -> control -> context",
 		},
 		{
 			name: "fragment order inside a block",
@@ -346,7 +346,7 @@ func TestLintStructureRejectsEachInvariantWithAClearError(t *testing.T) {
 func TestTruncationMarkerDoesNotMatchMentionedWord(t *testing.T) {
 	t.Parallel()
 	result := cloneFragments(compliantStructureFragments())
-	result[6].Content = "## Task and workspace\n- 标记截断或规则不清时读取全文。\n- The digest may be marked truncated or unclear."
+	result[9].Content = "## Task and workspace\n- 标记截断或规则不清时读取全文。\n- The digest may be marked truncated or unclear."
 	if codes := issueCodes(LintStructure("mention", result)); codes[IssueTruncationMarker] {
 		t.Fatal("a sentence mentioning truncation was treated as a marker")
 	}
@@ -388,32 +388,25 @@ func TestScenarioStructurePreviewCoversTenScenariosAndOnlyMovesText(t *testing.T
 					t.Fatalf("%s after prompt_chars disagrees with its prompt", preview.Scenario)
 				}
 
-				// Before is the production order: principles (core) leads today.
-				if len(preview.Before.BlockOrder) == 0 || preview.Before.BlockOrder[0] != BlockPrinciples {
-					t.Fatalf("%s before block order=%v, want principles first", preview.Scenario, preview.Before.BlockOrder)
+				// Production already renders the recommended order (fixed rules
+				// first, the per-Turn context last), so the proposed layout is the
+				// production layout and there is nothing left to move.
+				want := []PromptBlockID{BlockIdentity, BlockPrinciples, BlockControl, BlockContext}
+				if !equalBlockOrder(preview.Before.BlockOrder, want) {
+					t.Fatalf("%s production block order=%v, want %v", preview.Scenario, preview.Before.BlockOrder, want)
 				}
-				wantAfter := []PromptBlockID{BlockIdentity, BlockPrinciples, BlockContext, BlockControl}
-				if !equalBlockOrder(preview.After.BlockOrder, wantAfter) {
-					t.Fatalf("%s after block order=%v, want %v", preview.Scenario, preview.After.BlockOrder, wantAfter)
+				if !equalBlockOrder(preview.After.BlockOrder, want) {
+					t.Fatalf("%s after block order=%v, want %v", preview.Scenario, preview.After.BlockOrder, want)
 				}
-
-				// The before layout must report the known order debt; the proposed
-				// layout must be clean.
-				if !issueCodes(LintReport{Issues: preview.Before.Issues})[IssueBlockOrder] {
-					t.Fatalf("%s before layout did not report the block_order finding", preview.Scenario)
+				if err := (LintReport{Label: preview.Scenario, Issues: preview.Before.Issues}).Err(); err != nil {
+					t.Fatalf("%s production layout failed lint: %v", preview.Scenario, err)
 				}
 				if err := (LintReport{Label: preview.Scenario, Issues: preview.After.Issues}).Err(); err != nil {
 					t.Fatalf("%s after layout failed lint: %v", preview.Scenario, err)
 				}
-
-				// The preview must be structure-only: the same lines, reordered.
-				// Compare the sorted multiset so a moved block still matches, but a
-				// changed word does not.
-				if preview.Diff == "" {
-					t.Fatalf("%s produced no diff", preview.Scenario)
-				}
-				if preview.AddedLines == 0 || preview.RemovedLines == 0 {
-					t.Fatalf("%s diff added=%d removed=%d, want a visible move", preview.Scenario, preview.AddedLines, preview.RemovedLines)
+				if preview.Before.Prompt != preview.After.Prompt || preview.AddedLines != 0 || preview.RemovedLines != 0 {
+					t.Fatalf("%s proposed layout still differs from production: added=%d removed=%d",
+						preview.Scenario, preview.AddedLines, preview.RemovedLines)
 				}
 				if !sameLineMultiset(preview.Before.Prompt, preview.After.Prompt) {
 					t.Fatalf("%s preview changed prompt text instead of only reordering it", preview.Scenario)

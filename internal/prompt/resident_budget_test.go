@@ -21,26 +21,33 @@ import (
 // Coverage is the point: an unlisted layer is an unguarded one, and the
 // largest layer in the system was unlisted until it was added here. Adding a
 // template should mean adding it to this map in the same change.
+// The ceilings were re-baselined when the resident prompt was rewritten to
+// explain the system the Agent works in and to give each rule its reason: an
+// Agent that knows why the live inbox must be polled, or that a task_route
+// final answer never reaches the channel, follows the rule in cases the terse
+// wording did not cover. That text is deliberate; the ceilings still sit just
+// above it so the next addition has to argue with a number.
 var residentPromptBudget = map[string]int{
 	// The scratch-path rule is a boundary rule: without it Agents write test
 	// programs and logs into the repository root and user directories.
-	"core-default":                 1100,
-	"identity-task-agent":          220,
-	"role-main":                    950,
+	"core-default":                 1800,
+	"identity-task-agent":          600,
+	"role-main":                    2200,
 	"channel-web":                  250,
-	"protocol-agent-api":           850,
-	"protocol-attachment-delivery": 500,
+	"protocol-agent-api":           1500,
+	"protocol-attachment-delivery": 600,
 	// Selected by scenario rather than always, but each is the largest block in
 	// its scenario, so an edit here costs more per Turn than one in the always-on
-	// layers above.
-	"channel-external-channel":       3700,
-	"protocol-knowledge":             1300,
-	"policy-auto":                    450,
-	"identity-channel-digital-human": 1250,
-	"identity-channel-assistant":     850,
+	// layers above. The external-channel ceiling is the sum of every branch; a
+	// private chat renders well under half of it and no Turn renders all of it.
+	"channel-external-channel":       6800,
+	"protocol-knowledge":             1800,
+	"policy-auto":                    850,
+	"identity-channel-digital-human": 1300,
+	"identity-channel-assistant":     1050,
 	// The identity owns invariants; the command directory lives in aha_capabilities.
-	"identity-pet-task": 1600,
-	"role-sub":          700,
+	"identity-pet-task": 4500,
+	"role-sub":          1500,
 	"policy-single":     150,
 }
 

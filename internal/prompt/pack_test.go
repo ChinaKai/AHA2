@@ -36,7 +36,7 @@ func TestProtocolTemplatesAreFocusedAndFileBacked(t *testing.T) {
 			t.Fatalf("Agent Control API Protocol does not contain %q", expected)
 		}
 	}
-	if len([]rune(knowledge)) > 1800 || len([]rune(agentAPI)) > 1400 {
+	if len([]rune(knowledge)) > 1900 || len([]rune(agentAPI)) > 1600 {
 		t.Fatalf("protocol templates regressed to verbose copies: knowledge=%d agent_api=%d", len([]rune(knowledge)), len([]rune(agentAPI)))
 	}
 }

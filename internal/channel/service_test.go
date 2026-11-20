@@ -1154,7 +1154,7 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 		t.Fatalf("dm turns=%#v err=%v", dmTurns, err)
 	}
 	prompt := dmTurns[len(dmTurns)-1].PromptSnapshot
-	if !strings.Contains(prompt, "Channel Assistant Identity") || !strings.Contains(prompt, "channel-context.json") {
+	if !strings.Contains(prompt, "private AHA channel assistant") || !strings.Contains(prompt, "channel-context.json") {
 		t.Fatalf("channel prompt route missing: %s", prompt)
 	}
 	if strings.Contains(prompt, "owner-open") || strings.Contains(prompt, "chat-owner") {

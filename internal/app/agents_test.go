@@ -300,7 +300,7 @@ func TestInboxInstructionRendersPerMessageChannelActor(t *testing.T) {
 		"channel_message from 张三", "Channel sender: 张三 (role=participant, NOT Owner)", "Channel receipt: channel_inbox_a", "Mentioned participants: 李四",
 		"channel_message from 王五", "Channel sender: 王五 (role=participant, NOT Owner)", "Channel receipt: channel_inbox_b", "我补充日志",
 		"channel_message from Owner", "Channel sender: Owner (role=owner)", "Channel receipt: channel_inbox_owner",
-		"Group participants are not the Owner", "Each channel message is its own conversation boundary",
+		"Group participants are not the Owner", "Source headers are rendered by the server",
 		"Message time: " + prompt.FormatPromptTime(created),
 	} {
 		if !strings.Contains(instruction, expected) {
@@ -403,7 +403,7 @@ func TestInboxInstructionUsesConfiguredLanguage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"处理以下由 AHA 路由给你的消息", "消息时间：", "来源元数据是权威的"} {
+	for _, expected := range []string{"以下是 AHA 路由给你的消息", "消息时间：", "来源头由服务端渲染"} {
 		if !strings.Contains(stored.Instruction, expected) {
 			t.Fatalf("instruction missing %q: %s", expected, stored.Instruction)
 		}

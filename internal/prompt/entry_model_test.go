@@ -334,7 +334,7 @@ func equivalenceScenarios(t *testing.T) []struct {
 				item.KnowledgeEnabled = true
 				return item
 			}(),
-			expect: []string{"## AHA Core", "## Task Agent Identity", "## Main Agent", "## AHA Web Channel", "## Auto Collaboration", "## Knowledge Protocol", "## Task and workspace", "## Agent Control API Protocol", "## Attachment Delivery Protocol"},
+			expect: []string{"## Where instructions come from", "You are an AHA2 Task Agent", "You are this Task's Main", "AHA Web: the Owner reads", "AHA auto collaboration", "## Knowledge base", "## Task and workspace", "## Working with AHA", "Attachments: they require"},
 		},
 		{
 			name: "code task zh-CN",
@@ -343,7 +343,7 @@ func equivalenceScenarios(t *testing.T) []struct {
 				item.Language = domain.LanguageSimplified
 				return item
 			}(),
-			expect: []string{"## AHA 核心边界", "## 主 Agent", "## 自动协作"},
+			expect: []string{"## 指令从哪里来", "你是本 Task 的 Main", "AHA 自动协作"},
 		},
 		{
 			name: "code task single knowledge off",
@@ -352,8 +352,8 @@ func equivalenceScenarios(t *testing.T) []struct {
 				item.Task.CollaborationMode = "single"
 				return item
 			}(),
-			expect: []string{"## Single Agent", "## Task and workspace"},
-			absent: []string{"## Auto Collaboration", "## Knowledge Protocol"},
+			expect: []string{"single-agent mode", "## Task and workspace"},
+			absent: []string{"AHA auto collaboration", "## Knowledge base"},
 		},
 		{
 			name: "pet task identity",
@@ -364,7 +364,7 @@ func equivalenceScenarios(t *testing.T) []struct {
 				item.Task.CollaborationMode = "single"
 				return item
 			}(),
-			expect: []string{"## Pet Task Identity", "PET DIGEST"},
+			expect: []string{"You are AHA2's pet", "PET DIGEST"},
 		},
 		{
 			name: "channel assistant",
@@ -373,8 +373,8 @@ func equivalenceScenarios(t *testing.T) []struct {
 				item.ChannelContext = map[string]any{"endpoint": domain.ChannelEndpointAssistantDM}
 				return item
 			}(),
-			expect: []string{"## Channel Assistant Identity", "## External Channel"},
-			absent: []string{"## AHA Web Channel"},
+			expect: []string{"private AHA channel assistant", "## External channel"},
+			absent: []string{"AHA Web: the Owner reads"},
 		},
 		{
 			name: "group digital human",
@@ -383,7 +383,7 @@ func equivalenceScenarios(t *testing.T) []struct {
 				item.ChannelContext = map[string]any{"endpoint": domain.ChannelEndpointGroupDigitalHuman}
 				return item
 			}(),
-			expect: []string{"## Channel Digital Human Identity", "## External Channel"},
+			expect: []string{"public group digital human", "## External channel"},
 		},
 		{
 			name: "group task route keeps task identity",
@@ -395,8 +395,8 @@ func equivalenceScenarios(t *testing.T) []struct {
 				}
 				return item
 			}(),
-			expect: []string{"## Task Agent Identity", "## External Channel"},
-			absent: []string{"## Channel Digital Human Identity"},
+			expect: []string{"You are an AHA2 Task Agent", "## External channel"},
+			absent: []string{"public group digital human"},
 		},
 		{
 			name: "sub agent",
@@ -405,8 +405,8 @@ func equivalenceScenarios(t *testing.T) []struct {
 				item.Agent = domain.TaskAgent{AgentID: "sub-001", Role: "sub"}
 				return item
 			}(),
-			expect: []string{"## Sub Agent"},
-			absent: []string{"## Main Agent", "## Auto Collaboration", "## Single Agent"},
+			expect: []string{"a Sub Agent of this Task"},
+			absent: []string{"You are this Task's Main", "AHA auto collaboration", "single-agent mode"},
 		},
 		{
 			name: "compact handoff",
@@ -427,7 +427,7 @@ func equivalenceScenarios(t *testing.T) []struct {
 				}}
 				return item
 			}(),
-			expect: []string{"## AHA Core"},
+			expect: []string{"## Where instructions come from"},
 		},
 		{
 			name: "mail context",
@@ -436,7 +436,7 @@ func equivalenceScenarios(t *testing.T) []struct {
 				item.MailAccounts = []domain.MailAccount{{ID: "mail-1", Address: "agent@example.com", DisplayName: "Agent", Status: domain.MailAccountOK}}
 				return item
 			}(),
-			expect: []string{"## AHA Core"},
+			expect: []string{"## Where instructions come from"},
 		},
 	}
 }
@@ -544,8 +544,8 @@ func TestRequiredContentStillRendersThroughTheEntryMap(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, marker := range []string{
-		"Use the selected Task workspace as the default/primary workspace",
-		"## Main Agent", "## Agent Control API Protocol", "## Attachment Delivery Protocol",
+		"This prompt is AHA's working agreement with you",
+		"You are this Task's Main", "## Working with AHA", "Attachments: they require",
 		"## Task and workspace", "## Available context", "## Current Inbox Batch",
 	} {
 		if !strings.Contains(result.EffectivePrompt, marker) {
@@ -567,7 +567,7 @@ func TestRequiredContentStillRendersThroughTheEntryMap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(subResult.EffectivePrompt, "## Sub Agent") {
+	if !strings.Contains(subResult.EffectivePrompt, "a Sub Agent of this Task") {
 		t.Fatal("required Sub Agent role content missing")
 	}
 	templates, err := engine.TemplatesForLanguage(ctx, "")

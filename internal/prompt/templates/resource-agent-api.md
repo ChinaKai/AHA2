@@ -1,6 +1,28 @@
 # Agent API
 
-The AHA2 control plane exposes a Task-scoped API.
+This file is the HTTP reference for the AHA2 control plane. It is the fallback path, not the first choice.
+
+## MCP first, HTTP as the fallback
+
+AHA exposes one Task-scoped control plane two ways, behind the same server-side permission checks:
+
+- **Built-in MCP tools.** Servers named `aha2_*` appear in your tool list when this Turn has them. Prefer them: arguments are schema-checked and the Turn token is attached for you.
+- **The HTTP endpoints below.** Use them when no matching tool is in your tool list, or for an operation the tools do not cover.
+
+| MCP server | Tools | HTTP section |
+| --- | --- | --- |
+| `aha2_core` | `inbox_wait`, `progress`, `memory_patch`, `attachment_bind`, `task_get`, `task_list`, `task_message`, `capabilities` | Turn state |
+| `aha2_knowledge` | `knowledge_list`, `knowledge_get`, `knowledge_guide`, `knowledge_submit`, `knowledge_feedback`, `skill_list`, `skill_get` | Knowledge and Skills |
+| `aha2_collab` | `collab_batch_submit`, `collab_batch_wait` | Turn state (collaboration batches) |
+| `aha2_channel` | `channel_reply`, `channel_reply_decision`, `channel_request_permission` | Channel operations (`task_route` only) |
+
+Which servers a Turn receives depends on the Task; a Sub Agent or a read-only Turn sees only the read tools. HTTP only: changing the Task goal (`memory_patch` appends entries but cannot change the goal), uploading attachment bytes, creating Tasks, creating or updating Skills, and channel contact messages with mentions.
+
+Use one path per operation. Calling the MCP tool and the HTTP endpoint for the same thing sends it twice.
+
+## HTTP access
+
+The API is Task-scoped.
 
 Read its base URL from the `AHA2_AGENT_API_URL` environment variable, and use that variable in your commands instead of writing an address out:
 
@@ -116,6 +138,8 @@ For an ordinary Task with an active group primary channel, Main may read selecte
 - `POST /api/v1/agent/channel/handoffs`
 
 Action previews use `{"operation":"takeover|exit|create_task|status_change|handoff_decision","target_id":"optional","intent":{...}}`. Contact messages use `{"request_id":"stable-retry-key","purpose":"blocker","message":"...","mention_identity_link_ids":[],"attachment_ids":["attachment_..."]}`; leave the mention list empty for a plain group post and fill it (up to 5 verified contacts) only when those people need to act. Attachment IDs must come from this Turn's Task attachment upload API; text and native image/file deliveries are ordered and share the same idempotent request.
+
+**Mentions.** Typing `@name` in message text is plain text: it notifies nobody. A receipt-bound reply in a group already quotes the original message and @-mentions its sender, so do not repeat `@name` in the text. To notify anyone else, send a contact message with their `mention_identity_link_ids` (IDs from `GET /api/v1/agent/channel/contacts`); AHA puts the mention in front of the message, so leave `@name` out of the text there too.
 
 For a task-routed channel message, an explicit receipt-bound
 `POST /api/v1/agent/channel/replies` is the `continue` signal. Call

@@ -107,7 +107,7 @@ func TestScenarioPreviewSelectsTheExpectedIdentityAndPolicy(t *testing.T) {
 	if !strings.Contains(single, "single-agent mode") {
 		t.Fatal("web single main prompt lost the single-agent policy")
 	}
-	if !strings.Contains(single, "Channel: AHA Web") {
+	if !strings.Contains(single, "AHA Web: the Owner reads") {
 		t.Fatal("web single main prompt lost the Web channel template")
 	}
 
@@ -136,15 +136,15 @@ func TestScenarioPreviewSelectsTheExpectedIdentityAndPolicy(t *testing.T) {
 	if !strings.Contains(privateAssistant, "private AHA channel assistant") {
 		t.Fatal("unbound private channel lost the assistant identity")
 	}
-	if strings.Contains(privateAssistant, "Identity: AHA Task Agent.") {
+	if strings.Contains(privateAssistant, "You are an AHA2 Task Agent.") {
 		t.Fatal("unbound private channel must not use the task agent identity")
 	}
 
 	privateTask := render(ScenarioChannelPrivateTaskSingle)
-	if !strings.Contains(privateTask, "Identity: AHA Task Agent.") {
+	if !strings.Contains(privateTask, "You are an AHA2 Task Agent.") {
 		t.Fatal("task_route private channel lost the task agent identity")
 	}
-	if !strings.Contains(privateTask, "You are communicating through an external channel") {
+	if !strings.Contains(privateTask, "This Turn's messages come from an external private chat") {
 		t.Fatal("task_route private channel lost the external channel template")
 	}
 
@@ -187,13 +187,17 @@ func TestScenarioPreviewIncludesProductionKnowledgeProtocol(t *testing.T) {
 	if knowledge.ID == "" {
 		t.Fatal("protocol.knowledge is not registered")
 	}
-	rendered, err := renderTemplate(knowledge.ID, knowledge.Content, sampleTemplateData())
-	if err != nil {
-		t.Fatal(err)
-	}
-	expected := "## " + knowledge.Name + "\n" + rendered
-
 	for _, spec := range ScenarioCatalog() {
+		// The closeout rule differs by role: publishing knowledge belongs to Main.
+		data := sampleTemplateData()
+		if strings.HasSuffix(spec.ID, "-sub") {
+			data.AgentRole = "sub"
+		}
+		rendered, err := renderTemplate(knowledge.ID, knowledge.Content, data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		expected := rendered
 		preview, err := engine.PreviewScenario(ctx, spec.ID, "", "", domain.LanguageEnglish)
 		if err != nil {
 			t.Fatalf("preview %s: %v", spec.ID, err)
@@ -272,7 +276,7 @@ func TestScenarioPreviewGroupMemberAndBotSources(t *testing.T) {
 			if !strings.Contains(bot.Prompt, "Channel sender: 构建机器人 (role=participant, bot, NOT Owner)") {
 				t.Fatalf("bot preview %s lost the bot sender header", id)
 			}
-			if !strings.Contains(member.Prompt, "## Main Agent") || !strings.Contains(bot.Prompt, "## Main Agent") {
+			if !strings.Contains(member.Prompt, "You are this Task's Main") || !strings.Contains(bot.Prompt, "You are this Task's Main") {
 				t.Fatalf("group preview %s lost the role section", id)
 			}
 			if !strings.Contains(member.Prompt, "## Group request intent") || !strings.Contains(bot.Prompt, "## Group request intent") {

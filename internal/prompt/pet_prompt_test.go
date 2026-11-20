@@ -1,6 +1,8 @@
 package prompt
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -40,8 +42,10 @@ func TestPetTaskIdentityOwnsWorkspacePaths(t *testing.T) {
 			}
 		}
 		// Measure the logical text: a CRLF checkout adds one \r per line that
-		// never reaches the prompt as content.
-		if runes := len([]rune(strings.ReplaceAll(body, "\r\n", "\n"))); runes > 1600 {
+		// never reaches the prompt as content. The ceiling covers the rules and
+		// the reason behind each one; command lists still belong in
+		// aha_capabilities.
+		if runes := len([]rune(strings.ReplaceAll(body, "\r\n", "\n"))); runes > 4500 {
 			t.Fatalf("%s grew back to %d runes; keep command lists in aha_capabilities:\n%s", test.path, runes, body)
 		}
 	}
@@ -60,37 +64,36 @@ func TestAvailableContextDoesNotDuplicatePetPaths(t *testing.T) {
 	}
 }
 
-func TestPetIdentityMigratesPreviousBuiltinWithoutOverwritingCustom(t *testing.T) {
-	cases := []struct {
-		path         string
-		replacements [][2]string
-	}{
-		{path: "templates/identity-pet-task.md", replacements: [][2]string{
-			{"- Use `pet_open_task` (id or code); background calls queue until Web connects.", "- Use `pet_open_task`."},
-			{"- `pet_update_core`: core/identity.md, core/principles.md, core/loops.md, core/agenda.md; `pet_write_worklog`: worklog/YYYY-MM-DD.md. Approvals/ideas stay in the approval center; agenda/loops cite IDs; worklog = evidence. pet-lab/ writable; other paths read-only.", "- `pet_update_core`: core/identity.md, core/principles.md, core/loops.md, core/agenda.md; `pet_write_diary`: diary/YYYY-MM-DD.md; `pet_write_worklog`: worklog/YYYY-MM-DD.md. Approvals/ideas stay in the approval center; agenda/loops cite IDs; worklog = evidence, diary = personal. pet-lab/ writable; other paths read-only."},
-		}},
-		{path: "templates/zh-CN/identity-pet-task.md", replacements: [][2]string{
-			{"- 需要打开 Task 时用 `pet_open_task`（ID 或编号）；后台调用会排队，前端连接后只执行一次。", "- 需要打开 Task 时用 `pet_open_task`。"},
-			{"- 核心文档 `core/identity.md`、`core/principles.md`、`core/loops.md`、`core/agenda.md` 用 `pet_update_core` 写入；`loops.md` 只保留未闭环事项，`agenda.md` 只保留可自主推进项，完成后删除并留痕 worklog；巡检发现写 `worklog/YYYY-MM-DD.md`，用 `pet_write_worklog`。", "- 核心文档 `core/identity.md`、`core/principles.md`、`core/loops.md`、`core/agenda.md` 用 `pet_update_core` 写入；`loops.md` 只保留未闭环事项，`agenda.md` 只保留可自主推进项，完成后删除并留痕 worklog；日记写 `diary/YYYY-MM-DD.md`，巡检发现写 `worklog/YYYY-MM-DD.md`，分别用 `pet_write_diary`、`pet_write_worklog`。"},
-			{"- 审批/想法只在审批中心创建一次；agenda/loops 只写引用和状态，worklog 只写证据。", "- 审批/想法只在审批中心创建一次；agenda/loops 只写引用和状态，worklog 只写证据，diary 只写叙事。"},
-			{"- 宠物工作区可写：`pet-lab/` 可直接读写运行；核心文档和 worklog 仍用上述工具；其他项目只读诊断。", "- 宠物工作区可写：`pet-lab/` 可直接读写运行；核心文档和 diary/worklog 仍用上述工具；其他项目只读诊断。"},
-		}},
-	}
-	for _, tc := range cases {
-		data, err := templateFiles.ReadFile(tc.path)
+// A builtin rewrite must not be hidden by an override that is merely a saved
+// copy of the previous builtin, and must never discard a real customization.
+// testdata/superseded holds the builtins as they were before the rewrite.
+func TestPreviousBuiltinsAreSupersededWithoutOverwritingCustom(t *testing.T) {
+	for _, language := range []string{"en", "zh-CN"} {
+		entries, err := os.ReadDir(filepath.Join("testdata", "superseded", language))
 		if err != nil {
 			t.Fatal(err)
 		}
-		body := strings.ReplaceAll(string(data), "\r\n", "\n")
-		for _, pair := range tc.replacements {
-			body = strings.ReplaceAll(body, pair[0], pair[1])
+		if len(entries) == 0 {
+			t.Fatalf("no previous builtins recorded for %s", language)
 		}
-		for _, legacy := range []string{body, strings.ReplaceAll(body, "\n", "\r\n")} {
-			if !isSupersededBuiltinOverride("identity.pet-task", legacy) {
-				t.Fatalf("previous builtin was not migrated: %s", tc.path)
+		for _, entry := range entries {
+			path := filepath.Join("testdata", "superseded", language, entry.Name())
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
 			}
-			if isSupersededBuiltinOverride("identity.pet-task", legacy+"\nOwner custom instruction") {
-				t.Fatalf("custom override would be overwritten: %s", tc.path)
+			id := strings.Replace(strings.TrimSuffix(entry.Name(), ".md"), "-", ".", 1)
+			if _, ok := builtinTemplate(id); !ok {
+				t.Fatalf("%s does not name a builtin template (%s)", path, id)
+			}
+			body := strings.ReplaceAll(string(data), "\r\n", "\n")
+			for _, legacy := range []string{body, strings.ReplaceAll(body, "\n", "\r\n")} {
+				if !isSupersededBuiltinOverride(id, legacy) {
+					t.Fatalf("previous builtin was not migrated: %s", path)
+				}
+				if isSupersededBuiltinOverride(id, legacy+"\nOwner custom instruction") {
+					t.Fatalf("custom override would be overwritten: %s", path)
+				}
 			}
 		}
 	}

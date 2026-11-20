@@ -909,7 +909,7 @@ func TestTaskMultiTurnFlow(t *testing.T) {
 		}
 	}
 	prompts, providerInputs := service.executor.(*stubExecutor).requestHistory()
-	if len(prompts) < 2 || !strings.Contains(prompts[0], "## AHA Core") ||
+	if len(prompts) < 2 || !strings.Contains(prompts[0], "## Where instructions come from") ||
 		!strings.Contains(prompts[0], ".aha2-context") || !strings.Contains(prompts[0], "agent-api.md") {
 		t.Fatalf("routed prompt was not used: %#v", prompts)
 	}
@@ -939,6 +939,9 @@ func TestTaskMultiTurnFlow(t *testing.T) {
 	scratchDir := filepath.Join(workspace.RootPath, ".aha2-context", task.ID, "scratch", "main")
 	if environments[0]["AHA2_SCRATCH_DIR"] != scratchDir {
 		t.Fatalf("scratch path was not injected: %#v", environments[0])
+	}
+	if environments[0]["GOTMPDIR"] != scratchDir {
+		t.Fatalf("go build temp was not pointed at scratch: %#v", environments[0])
 	}
 	if info, err := os.Stat(scratchDir); err != nil || !info.IsDir() {
 		t.Fatalf("scratch directory was not created: %v %v", info, err)

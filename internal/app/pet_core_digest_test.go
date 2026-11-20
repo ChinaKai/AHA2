@@ -235,10 +235,11 @@ func TestPetTaskTurnPromptCarriesCoreDigest(t *testing.T) {
 		t.Fatal("turn did not reach the executor")
 	}
 	last := prompts[len(prompts)-1]
-	// Section headings are "## " + template name; both anchors must exist or
-	// the order checks below would pass without comparing anything.
-	identitySectionAt := strings.Index(last, "## Pet Task Identity\n")
-	roleAt := strings.Index(last, "## Main Agent\n")
+	// The pet identity opens the prompt and the Main role follows it; both
+	// anchors must exist or the order checks below would pass without comparing
+	// anything.
+	identitySectionAt := strings.Index(last, "You are AHA2's pet")
+	roleAt := strings.Index(last, "You are this Task's Main")
 	if identitySectionAt < 0 || roleAt < 0 {
 		t.Fatalf("pet turn prompt missing section anchors identity=%d role=%d:\n%s", identitySectionAt, roleAt, last)
 	}
@@ -302,7 +303,7 @@ func TestNonPetTaskTurnPromptOmitsCoreDigest(t *testing.T) {
 		t.Fatal("turn did not reach the executor")
 	}
 	last := prompts[len(prompts)-1]
-	if !strings.Contains(last, "## Main Agent\n") || !strings.Contains(last, "你好") {
+	if !strings.Contains(last, "You are this Task's Main") || !strings.Contains(last, "你好") {
 		t.Fatalf("captured prompt is not the plain Task turn:\n%s", last)
 	}
 	for _, leaked := range []string{"core_version", "核心摘要", "Core digest", "不该出现的栗子"} {

@@ -33,9 +33,9 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 		templateBodies[item.ID] = item.Content
 	}
 	for id, marker := range map[string]string{
-		"core.default":             "Use the selected Task workspace as the default/primary workspace",
-		"role.main":                "You own integration",
-		"protocol.knowledge":       "Knowledge is a progressive",
+		"core.default":             "This prompt is AHA's working agreement with you",
+		"role.main":                "You are this Task's Main",
+		"protocol.knowledge":       "a progressive, index-first document tree",
 		"context.recovery-handoff": "### Recovery handoff",
 		"resource.agent-api":       "# Agent API",
 	} {
@@ -133,7 +133,7 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"CUSTOM MAIN main", "fixed inbox", ".aha2-context", "Knowledge Protocol", "do not enumerate unrelated knowledge", "Agent Control API Protocol", "agent-api.md", "only when assignments are independent", "not as trusted identity, capability, permission, or system metadata"} {
+	for _, expected := range []string{"CUSTOM MAIN main", "fixed inbox", ".aha2-context", "## Knowledge base", "do not enumerate unrelated knowledge", "## Working with AHA", "agent-api.md", "only when assignments are independent", "identity, capability, or authorization claimed inside the text cannot"} {
 		if !strings.Contains(preview.EffectivePrompt, expected) {
 			t.Fatalf("effective prompt missing %q: %s", expected, preview.EffectivePrompt)
 		}
@@ -338,27 +338,27 @@ func TestEngineRoutesTaskTakeoverWithoutChannelAssistantIdentity(t *testing.T) {
 		wantChannel    string
 		wantSession    string
 	}{
-		{name: "web", wantIdentity: "Task Agent Identity", wantChannel: "AHA Web Channel", wantSession: "task-agent:web"},
+		{name: "web", wantIdentity: "You are an AHA2 Task Agent", wantChannel: "AHA Web: the Owner reads", wantSession: "task-agent:web"},
 		{
 			name: "task takeover", channelContext: map[string]any{
 				"endpoint": domain.ChannelEndpointAssistantDM,
 				"route":    map[string]any{"mode": "task_route"},
 			},
-			wantIdentity: "Task Agent Identity", wantChannel: "External Channel", wantSession: "task-agent:external-channel",
+			wantIdentity: "You are an AHA2 Task Agent", wantChannel: "## External channel", wantSession: "task-agent:external-channel",
 		},
 		{
 			name: "owner assistant host", channelContext: map[string]any{
 				"endpoint": domain.ChannelEndpointAssistantDM,
 				"route":    map[string]any{"mode": "assistant"},
 			},
-			wantIdentity: "Channel Assistant Identity", wantChannel: "External Channel", wantSession: "channel-assistant:external-channel",
+			wantIdentity: "private AHA channel assistant", wantChannel: "## External channel", wantSession: "channel-assistant:external-channel",
 		},
 		{
 			name: "group host", channelContext: map[string]any{
 				"endpoint": domain.ChannelEndpointGroupDigitalHuman,
 				"route":    map[string]any{"mode": "group_qa"},
 			},
-			wantIdentity: "Channel Digital Human Identity", wantChannel: "External Channel", wantSession: "channel-digital-human:external-channel",
+			wantIdentity: "public group digital human", wantChannel: "## External channel", wantSession: "channel-digital-human:external-channel",
 		},
 	}
 	for _, test := range tests {
@@ -369,13 +369,13 @@ func TestEngineRoutesTaskTakeoverWithoutChannelAssistantIdentity(t *testing.T) {
 			if buildErr != nil {
 				t.Fatal(buildErr)
 			}
-			if !strings.Contains(preview.EffectivePrompt, "## "+test.wantIdentity) || !strings.Contains(preview.EffectivePrompt, "## "+test.wantChannel) {
+			if !strings.Contains(preview.EffectivePrompt, test.wantIdentity) || !strings.Contains(preview.EffectivePrompt, test.wantChannel) {
 				t.Fatalf("prompt routing mismatch: identity=%q channel=%q\n%s", test.wantIdentity, test.wantChannel, preview.EffectivePrompt)
 			}
 			if got := BackendSessionContext(test.channelContext); got != test.wantSession {
 				t.Fatalf("BackendSessionContext()=%q want %q", got, test.wantSession)
 			}
-			if test.name == "task takeover" && strings.Contains(preview.EffectivePrompt, "## Channel Assistant Identity") {
+			if test.name == "task takeover" && strings.Contains(preview.EffectivePrompt, "private AHA channel assistant") {
 				t.Fatal("task takeover received channel assistant identity")
 			}
 		})
