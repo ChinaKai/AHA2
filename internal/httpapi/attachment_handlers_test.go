@@ -277,8 +277,10 @@ func TestTaskAttachmentDownloadByAgentCapabilityIsScopedToTask(t *testing.T) {
 		t.Fatalf("cross-task capability download status = %d, want 404", response.StatusCode)
 	}
 
-	// A capability pointed at its own Task still cannot read another Task's attachment.
-	response = agentRequest(t, attachmentURL(taskB.ID, attachmentB.ID), http.MethodGet, tokenA, nil)
+	// A capability pointed at its own Task still cannot read another Task's
+	// attachment: the path Task matches the capability, so only the SQL
+	// attachment lookup (id AND task_id) can reject it.
+	response = agentRequest(t, attachmentURL(taskA.ID, attachmentB.ID), http.MethodGet, tokenA, nil)
 	response.Body.Close()
 	if response.StatusCode != http.StatusNotFound {
 		t.Fatalf("foreign attachment download status = %d, want 404", response.StatusCode)
@@ -322,6 +324,23 @@ func TestTaskAttachmentDownloadByAgentCapabilityIsScopedToTask(t *testing.T) {
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{Jar: jar}
 	registerOwner(t, client, server.URL)
+
+	// A valid capability takes precedence over the Owner cookie, so attaching
+	// one does not let it read another Task's attachment.
+	request, err := http.NewRequest(http.MethodGet, attachmentURL(taskB.ID, attachmentB.ID), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+tokenA)
+	response, err = client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("owner cookie plus cross-task capability status = %d, want 404", response.StatusCode)
+	}
+
 	response, err = client.Get(attachmentURL(taskA.ID, attachmentA.ID))
 	if err != nil {
 		t.Fatal(err)
@@ -329,5 +348,13 @@ func TestTaskAttachmentDownloadByAgentCapabilityIsScopedToTask(t *testing.T) {
 	ownerBody := readBody(response)
 	if response.StatusCode != http.StatusOK || !bytes.Equal(ownerBody, contentA) {
 		t.Fatalf("owner download: status=%d body=%q", response.StatusCode, ownerBody)
+	}
+
+	// A revoked capability is rejected even though it has not expired yet.
+	capabilities.Revoke(tokenA)
+	response = agentRequest(t, attachmentURL(taskA.ID, attachmentA.ID), http.MethodGet, tokenA, nil)
+	response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("revoked capability download status = %d, want 401", response.StatusCode)
 	}
 }
