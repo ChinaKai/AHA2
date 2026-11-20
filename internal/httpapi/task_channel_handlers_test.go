@@ -481,6 +481,26 @@ func TestTaskChannelRouteAPI(t *testing.T) {
 	}
 	response.Body.Close()
 
+	// A reply may @ people besides the sender, but only this Task's selected
+	// contacts and at most four of them; both are refused before any delivery
+	// is queued, so the receipt in these probes never has to exist.
+	for name, probe := range map[string]struct {
+		mentions []string
+		want     string
+	}{
+		"unknown contact":   {[]string{"channel-route-unknown"}, "channel contact is not available"},
+		"too many mentions": {[]string{"a", "b", "c", "d", "e"}, "mention at most 4 people"},
+	} {
+		response = agentRequest(t, server.URL+"/api/v1/agent/channel/replies", http.MethodPost, token, map[string]any{
+			"request_id": "reply-mention-probe", "inbound_receipt_id": "channel_inbox_missing", "message": "不应发送",
+			"mention_identity_link_ids": probe.mentions,
+		})
+		body := readBody(t, response)
+		if response.StatusCode != http.StatusBadRequest || !strings.Contains(body, probe.want) {
+			t.Fatalf("reply mention probe %q status=%d body=%s", name, response.StatusCode, body)
+		}
+	}
+
 	refreshCommand, err := channelService.RefreshOwnerTaskChannelMembers(ctx, owner.ID, task.ID)
 	if err != nil {
 		t.Fatal(err)

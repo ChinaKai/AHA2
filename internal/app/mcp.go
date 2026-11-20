@@ -168,12 +168,13 @@ func (s *Service) channelMCPDetail() domain.MCPServer {
 	now := s.now().UTC()
 	return domain.MCPServer{
 		ID: "mcp_channel", Name: "渠道（内置）",
-		Description: "群聊路由的 Turn 自动注入；提供渠道回复、结束回复和 Owner 权限申请工具。",
+		Description: "群聊路由的 Turn 自动注入；提供渠道回复（可 @ 联系人）、结束回复、Owner 权限申请和联系人查询工具。",
 		Transport:   "builtin", Enabled: true, Builtin: true, AutoInject: true, Health: "ok",
 		Tools: []domain.MCPTool{
-			{Name: "channel_reply", Description: "回复触发本 Turn 的渠道消息；立即送达，只在最终答复时调用一次。"},
+			{Name: "channel_reply", Description: "回复触发本 Turn 的渠道消息；立即送达，只在最终答复时调用一次。群聊里自动 @ 发送者，可另外 @ 联系人。"},
 			{Name: "channel_reply_decision", Description: "本 Turn 无需回复时结束；理由只显示在 AHA Web 状态卡，不发到群里。"},
 			{Name: "channel_request_permission", Description: "为非 Owner 群成员的敏感操作创建 Owner 权限申请；批准前不要执行。"},
+			{Name: "channel_contacts", Description: "列出本 Task 群里可以 @ 的联系人及其 ID，供 channel_reply 的 mention_identity_link_ids 使用。"},
 		},
 		CreatedAt: now, UpdatedAt: now,
 	}

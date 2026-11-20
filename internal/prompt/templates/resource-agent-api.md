@@ -14,9 +14,9 @@ AHA exposes one Task-scoped control plane two ways, behind the same server-side 
 | `aha2_core` | `inbox_wait`, `progress`, `memory_patch`, `attachment_bind`, `task_get`, `task_list`, `task_message`, `capabilities` | Turn state |
 | `aha2_knowledge` | `knowledge_list`, `knowledge_get`, `knowledge_guide`, `knowledge_submit`, `knowledge_feedback`, `skill_list`, `skill_get` | Knowledge and Skills |
 | `aha2_collab` | `collab_batch_submit`, `collab_batch_wait` | Turn state (collaboration batches) |
-| `aha2_channel` | `channel_reply`, `channel_reply_decision`, `channel_request_permission` | Channel operations (`task_route` only) |
+| `aha2_channel` | `channel_reply`, `channel_reply_decision`, `channel_request_permission`, `channel_contacts` | Channel operations (`task_route` only) |
 
-Which servers a Turn receives depends on the Task; a Sub Agent or a read-only Turn sees only the read tools. HTTP only: changing the Task goal (`memory_patch` appends entries but cannot change the goal), uploading attachment bytes, creating Tasks, creating or updating Skills, and channel contact messages with mentions.
+Which servers a Turn receives depends on the Task; a Sub Agent or a read-only Turn sees only the read tools. HTTP only: changing the Task goal (`memory_patch` appends entries but cannot change the goal), uploading attachment bytes, creating Tasks, creating or updating Skills, and channel contact messages that are not a reply.
 
 Use one path per operation. Calling the MCP tool and the HTTP endpoint for the same thing sends it twice.
 
@@ -92,7 +92,7 @@ Poll Owner and channel messages already queued for this active Turn:
 The final Main answer belongs to AHA Web and is not automatically mirrored to a Task-routed channel. For every channel message that needs an answer, send a separate receipt-bound reply:
 
 ```json
-{"request_id":"stable-reply-token","inbound_receipt_id":"channel_inbox_...","message":"channel-specific reply","attachment_ids":[]}
+{"request_id":"stable-reply-token","inbound_receipt_id":"channel_inbox_...","message":"channel-specific reply","attachment_ids":[],"mention_identity_link_ids":[]}
 ```
 
 Use the `inbound_receipt_id` from the live inbox message or its channel context. A channel reply may only answer that source conversation and actor. Do not include Web-only artifacts, private diagnostics, installation packages, or unrelated Task output unless the Owner explicitly asks to send them to that channel. Multiple channel messages require independently addressable replies; one Web final answer must not be reused as their combined response.
@@ -139,7 +139,7 @@ For an ordinary Task with an active group primary channel, Main may read selecte
 
 Action previews use `{"operation":"takeover|exit|create_task|status_change|handoff_decision","target_id":"optional","intent":{...}}`. Contact messages use `{"request_id":"stable-retry-key","purpose":"blocker","message":"...","mention_identity_link_ids":[],"attachment_ids":["attachment_..."]}`; leave the mention list empty for a plain group post and fill it (up to 5 verified contacts) only when those people need to act. Attachment IDs must come from this Turn's Task attachment upload API; text and native image/file deliveries are ordered and share the same idempotent request.
 
-**Mentions.** Typing `@name` in message text is plain text: it notifies nobody. A receipt-bound reply in a group already quotes the original message and @-mentions its sender, so do not repeat `@name` in the text. To notify anyone else, send a contact message with their `mention_identity_link_ids` (IDs from `GET /api/v1/agent/channel/contacts`); AHA puts the mention in front of the message, so leave `@name` out of the text there too.
+**Mentions.** Typing `@name` in message text is plain text: it notifies nobody. A receipt-bound reply in a group already quotes the original message and @-mentions its sender, so do not repeat `@name` in the text. To notify anyone else in a reply, add `mention_identity_link_ids` to the reply (up to 4 IDs from `GET /api/v1/agent/channel/contacts` or the `channel_contacts` tool; only contacts the Owner selected for this Task are accepted). A contact message takes the same field. AHA puts the mentions in front of the message, so leave `@name` out of the text there too.
 
 For a task-routed channel message, an explicit receipt-bound
 `POST /api/v1/agent/channel/replies` is the `continue` signal. Call

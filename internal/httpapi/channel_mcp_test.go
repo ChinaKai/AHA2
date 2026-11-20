@@ -65,12 +65,13 @@ func TestAgentChannelMCPRequiresCapabilityAndExposesOnlyTwoTools(t *testing.T) {
 		} `json:"result"`
 	}
 	decodeResponse(t, response, &listed)
-	if response.StatusCode != http.StatusOK || len(listed.Result.Tools) != 3 {
+	if response.StatusCode != http.StatusOK || len(listed.Result.Tools) != 4 {
 		t.Fatalf("tools status=%d payload=%#v", response.StatusCode, listed)
 	}
 	if listed.Result.Tools[0].Name != "channel_reply" ||
 		listed.Result.Tools[1].Name != "channel_request_permission" ||
-		listed.Result.Tools[2].Name != "channel_reply_decision" {
+		listed.Result.Tools[2].Name != "channel_reply_decision" ||
+		listed.Result.Tools[3].Name != "channel_contacts" {
 		t.Fatalf("narrow MCP exposed unexpected tools: %#v", listed.Result.Tools)
 	}
 

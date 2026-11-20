@@ -86,7 +86,8 @@ func channelMCPTools() []mcpTool {
 			Description: "Reply to the channel message that triggered this Turn. " +
 				"The message is delivered immediately: call this once at the end with the final answer, " +
 				"not for progress, planning, or tool-failure narration. " +
-				"The current message's receipt is resolved automatically.",
+				"The current message's receipt is resolved automatically. In a group the reply quotes the " +
+				"original message and @-mentions its sender for you; typing @name in the text mentions nobody.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -102,6 +103,13 @@ func channelMCPTools() []mcpTool {
 						"type":        "array",
 						"items":       map[string]any{"type": "string"},
 						"description": "Optional attachment IDs uploaded during this Turn.",
+					},
+					"mention_identity_link_ids": map[string]any{
+						"type":     "array",
+						"items":    map[string]any{"type": "string"},
+						"maxItems": 4,
+						"description": "Group only: identity_link_id values from channel_contacts for people to @ " +
+							"besides the sender. Use it only when that person must act. Do not also type @name in the message.",
 					},
 				},
 				"required":             []string{"message"},
@@ -159,6 +167,15 @@ func channelMCPTools() []mcpTool {
 				"additionalProperties": false,
 			},
 		},
+		{
+			Name: "channel_contacts",
+			Description: "List the people in this Task's group who can be @-mentioned, with the " +
+				"identity_link_id to pass in channel_reply mention_identity_link_ids. Group task routes only.",
+			InputSchema: map[string]any{
+				"type": "object", "properties": map[string]any{},
+				"required": []string{}, "additionalProperties": false,
+			},
+		},
 	}
 }
 
@@ -195,9 +212,10 @@ func (s *Server) callChannelMCPTool(writer http.ResponseWriter, request *http.Re
 	switch call.Name {
 	case "channel_reply":
 		var input struct {
-			Message          string   `json:"message"`
-			InboundReceiptID string   `json:"inbound_receipt_id"`
-			AttachmentIDs    []string `json:"attachment_ids"`
+			Message                string   `json:"message"`
+			InboundReceiptID       string   `json:"inbound_receipt_id"`
+			AttachmentIDs          []string `json:"attachment_ids"`
+			MentionIdentityLinkIDs []string `json:"mention_identity_link_ids"`
 		}
 		if err := json.Unmarshal(call.Arguments, &input); err != nil {
 			toolError("invalid channel_reply arguments")
@@ -213,6 +231,8 @@ func (s *Server) callChannelMCPTool(writer http.ResponseWriter, request *http.Re
 			InboundReceiptID: receiptID,
 			Message:          input.Message,
 			AttachmentIDs:    input.AttachmentIDs,
+
+			MentionIdentityLinkIDs: input.MentionIdentityLinkIDs,
 		})
 		if err != nil {
 			toolError(err.Error())
@@ -220,6 +240,23 @@ func (s *Server) callChannelMCPTool(writer http.ResponseWriter, request *http.Re
 		}
 		respond(map[string]any{
 			"content": []map[string]any{{"type": "text", "text": "Reply queued for the channel."}},
+		})
+	case "channel_contacts":
+		_, contacts, err := s.channels.AgentTaskChannelContacts(request.Context(), claims)
+		if err != nil {
+			toolError("this Turn has no group channel with mentionable contacts")
+			return
+		}
+		items := make([]map[string]any, 0, len(contacts))
+		for _, contact := range contacts {
+			items = append(items, map[string]any{
+				"identity_link_id": contact.IdentityLinkID, "display_name": contact.DisplayName,
+				"role": contact.Role, "collaboration_role": contact.CollaborationRole, "is_bot": contact.IsBot,
+			})
+		}
+		text, _ := json.Marshal(map[string]any{"contacts": items})
+		respond(map[string]any{
+			"content": []map[string]any{{"type": "text", "text": string(text)}},
 		})
 	case "channel_request_permission":
 		var input struct {

@@ -891,6 +891,21 @@ func (s *Store) EnqueueAgentChannelReply(
 	attachmentIDs []string,
 	at time.Time,
 ) (domain.ChannelDelivery, string, bool, error) {
+	return s.EnqueueAgentChannelReplyWithMentions(ctx, taskID, turnID, requestID, inboundReceiptID, message, nil, attachmentIDs, at)
+}
+
+// EnqueueAgentChannelReplyWithMentions is EnqueueAgentChannelReply plus extra
+// people to @ in a group reply. The message's sender is always mentioned first;
+// extraMentionIDs are identity link IDs the caller has already checked against
+// the Task's channel contacts. Typing "@name" in the text notifies nobody, so
+// this is the only way a reply can summon someone other than the sender. Extra
+// mentions are ignored outside a group, where there is nobody else to mention.
+func (s *Store) EnqueueAgentChannelReplyWithMentions(
+	ctx context.Context,
+	taskID, turnID, requestID, inboundReceiptID, message string,
+	extraMentionIDs, attachmentIDs []string,
+	at time.Time,
+) (domain.ChannelDelivery, string, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return domain.ChannelDelivery{}, "", false, err
@@ -1037,8 +1052,22 @@ func (s *Store) EnqueueAgentChannelReply(
 		"kind": "agent_reply", "task_id": taskID, "text": message,
 		"reply_to_receipt_id": replyToReceiptID,
 	}
-	if endpointKind == domain.ChannelEndpointGroupDigitalHuman && recipientID != "" {
-		payload["mention_identity_link_ids"] = []string{recipientID}
+	if endpointKind == domain.ChannelEndpointGroupDigitalHuman {
+		// Delivery resolves at most five mentions, so keep the sender's slot and
+		// fill the rest in the caller's order.
+		mentionIDs := make([]string, 0, 5)
+		seenMention := map[string]bool{}
+		for _, identityID := range append([]string{recipientID}, extraMentionIDs...) {
+			identityID = strings.TrimSpace(identityID)
+			if identityID == "" || seenMention[identityID] || len(mentionIDs) >= 5 {
+				continue
+			}
+			seenMention[identityID] = true
+			mentionIDs = append(mentionIDs, identityID)
+		}
+		if len(mentionIDs) > 0 {
+			payload["mention_identity_link_ids"] = mentionIDs
+		}
 	}
 	attachments, err := bindAttachmentsTx(ctx, tx, taskID, conversationItemID, attachmentIDs)
 	if err != nil {

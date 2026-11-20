@@ -449,6 +449,7 @@ func (s *Service) mcpRuntimeForTask(ctx context.Context, task domain.Task, agent
 				"mcp__"+channelMCPName+"__channel_reply",
 				"mcp__"+channelMCPName+"__channel_reply_decision",
 				"mcp__"+channelMCPName+"__channel_request_permission",
+				"mcp__"+channelMCPName+"__channel_contacts",
 			)
 		}
 		if accounts, _, _ := s.MailTaskResources(ctx, task); len(accounts) > 0 {

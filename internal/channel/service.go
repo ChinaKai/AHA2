@@ -80,6 +80,9 @@ type AgentChannelReplyInput struct {
 	InboundReceiptID string   `json:"inbound_receipt_id"`
 	Message          string   `json:"message"`
 	AttachmentIDs    []string `json:"attachment_ids,omitempty"`
+	// MentionIdentityLinkIDs are extra people to @ in a group reply, besides
+	// the message's sender, who is always mentioned.
+	MentionIdentityLinkIDs []string `json:"mention_identity_link_ids,omitempty"`
 }
 
 type KnowledgeGrantInput struct {
@@ -2254,8 +2257,12 @@ func (s *Service) SendAgentChannelReply(ctx context.Context, claims agentapi.Cla
 	if message == "" || len([]rune(message)) > 4000 {
 		return domain.ChannelDelivery{}, fmt.Errorf("message must contain 1 to 4000 characters")
 	}
-	delivery, conversationItemID, created, err := s.store.EnqueueAgentChannelReply(
-		ctx, claims.TaskID, claims.TurnID, requestID, receiptID, message, input.AttachmentIDs, s.now().UTC(),
+	mentionIDs, err := s.replyMentionIDs(ctx, claims.TaskID, input.MentionIdentityLinkIDs)
+	if err != nil {
+		return domain.ChannelDelivery{}, err
+	}
+	delivery, conversationItemID, created, err := s.store.EnqueueAgentChannelReplyWithMentions(
+		ctx, claims.TaskID, claims.TurnID, requestID, receiptID, message, mentionIDs, input.AttachmentIDs, s.now().UTC(),
 	)
 	if err != nil {
 		reason := ""
@@ -2277,6 +2284,44 @@ func (s *Service) SendAgentChannelReply(ctx context.Context, claims agentapi.Cla
 		ctx, claims.TaskID, claims.TurnID, receiptID, "replied", "", "",
 	)
 	return delivery, nil
+}
+
+// maxReplyExtraMentions leaves one of the five mention slots a delivery
+// resolves for the sender of the message being answered.
+const maxReplyExtraMentions = 4
+
+// replyMentionIDs validates the extra people a reply wants to @. They must be
+// contacts the Owner selected for this Task's group, the same rule a blocker
+// outreach message follows, so a reply cannot summon someone outreach could not.
+func (s *Service) replyMentionIDs(ctx context.Context, taskID string, requested []string) ([]string, error) {
+	if len(requested) == 0 {
+		return nil, nil
+	}
+	if len(requested) > maxReplyExtraMentions {
+		return nil, fmt.Errorf("mention at most %d people besides the sender", maxReplyExtraMentions)
+	}
+	_, contacts, err := s.taskChannelContacts(ctx, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("mentions are only available when replying in the Task's group channel")
+	}
+	available := map[string]bool{}
+	for _, contact := range contacts {
+		available[contact.IdentityLinkID] = true
+	}
+	identityIDs := make([]string, 0, len(requested))
+	seen := map[string]bool{}
+	for _, identityID := range requested {
+		identityID = strings.TrimSpace(identityID)
+		if identityID == "" || !available[identityID] {
+			return nil, fmt.Errorf("channel contact is not available in the primary channel")
+		}
+		if seen[identityID] {
+			continue
+		}
+		seen[identityID] = true
+		identityIDs = append(identityIDs, identityID)
+	}
+	return identityIDs, nil
 }
 
 func (s *Service) PreviewAgentAction(ctx context.Context, claims agentapi.Claims, input ActionPreviewInput) (domain.ChannelPendingAction, error) {

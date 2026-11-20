@@ -26,7 +26,7 @@
 ## 群里怎么 @ 人
 - 你对一条群消息的回复，AHA 会自动引用原消息并真正 @ 它的发送者。所以正文里不要再写“@张三”，直接说事。
 - 在正文里手打“@名字”只是普通字符，不会提醒任何人；想让某人收到提醒，不能靠打字。{{if .ChannelTaskRoute}}
-- 要 @ 发送者以外的人，用渠道联系人消息：先取联系人列表拿到对方的 ID，再在 `mention_identity_link_ids` 里带上（见 `agent-api.md` 的 Channel operations）。被 @ 的人由 AHA 加在消息前面，正文里同样不要再写一遍“@名字”。
+- 要 @ 发送者以外的人：先用 `channel_contacts` 查到对方的 `identity_link_id`，再放进 `channel_reply` 的 `mention_identity_link_ids`（最多 4 人，只能是 owner 为这个 Task 选定的联系人）。被 @ 的人由 AHA 加在消息前面，正文里同样不要再写一遍“@名字”。
 - 只有确实需要某个人行动时才 @；只是往群里发一条消息或附件，就不带任何 @。{{end}}
 {{if .ChannelTaskRoute}}
 ## 围绕 Task 的群聊

@@ -276,6 +276,21 @@ func TestAgentChannelReplyIsReceiptBoundAndIdempotent(t *testing.T) {
 		t.Fatalf("owner reply target=%#v err=%v", ownerTarget, err)
 	}
 
+	// A reply can also summon someone other than the sender. The sender keeps
+	// the first mention slot, a repeated ID is not mentioned twice, and typing
+	// "@name" in the text is not needed for either of them.
+	mentionDelivery, _, mentionCreated, err := database.EnqueueAgentChannelReplyWithMentions(
+		ctx, task.ID, turn.ID, "owner-reply-with-mention", ownerReceiptID, "请看一下",
+		[]string{actor.ID, ownerIdentity.ID, actor.ID}, nil, now.Add(2*time.Second),
+	)
+	if err != nil || !mentionCreated || mentionDelivery.ID == "" {
+		t.Fatalf("mention reply delivery=%#v created=%v err=%v", mentionDelivery, mentionCreated, err)
+	}
+	mentionTarget, err := database.ChannelDeliveryTarget(ctx, conversation.ID, mentionDelivery.SourceEventSequence)
+	if err != nil || mentionTarget["mention_user_ids"] != `["provider-user-owner","provider-user-reply"]` {
+		t.Fatalf("mention reply target=%#v err=%v", mentionTarget, err)
+	}
+
 	botReceiptID := domain.NewID("channel_inbox")
 	botNormalized, _ := json.Marshal(map[string]any{
 		"external_message_id": "provider-message-bot",
@@ -582,8 +597,9 @@ func TestAgentChannelReplyIsReceiptBoundAndIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	deliveries, err := database.ChannelDeliveries(ctx, instance.ID, 20)
-	if err != nil || len(deliveries) != 5 ||
+	if err != nil || len(deliveries) != 6 ||
 		!slices.ContainsFunc(deliveries, func(item domain.ChannelDelivery) bool { return item.ID == delivery.ID }) ||
+		!slices.ContainsFunc(deliveries, func(item domain.ChannelDelivery) bool { return item.ID == mentionDelivery.ID }) ||
 		!slices.ContainsFunc(deliveries, func(item domain.ChannelDelivery) bool { return item.ID == ownerDelivery.ID }) ||
 		!slices.ContainsFunc(deliveries, func(item domain.ChannelDelivery) bool { return item.ID == botDelivery.ID }) ||
 		!slices.ContainsFunc(deliveries, func(item domain.ChannelDelivery) bool { return item.ID == approvalDelivery.ID }) ||

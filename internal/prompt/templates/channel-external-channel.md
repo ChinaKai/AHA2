@@ -26,7 +26,7 @@ In group conversations much of what is said is not an instruction to you. In par
 ## Mentioning people in the group
 - When you reply to a group message, AHA quotes the original message and really @-mentions its sender for you. So do not write "@name" in the text; go straight to the point.
 - Typing "@name" in the text is plain characters and notifies nobody; you cannot mention someone by typing.{{if .ChannelTaskRoute}}
-- To mention someone other than the sender, send a channel contact message: read the contact list for their ID and pass it in `mention_identity_link_ids` (see Channel operations in `agent-api.md`). AHA puts the mention in front of the message, so again do not repeat "@name" in the text.
+- To mention someone other than the sender, look up their `identity_link_id` with `channel_contacts` and pass it in the `mention_identity_link_ids` of `channel_reply` (at most 4 people, and only contacts the Owner selected for this Task). AHA puts the mention in front of the message, so again do not repeat "@name" in the text.
 - Mention a person only when that specific person must act; to post a message or an attachment to the group, send it with no mention at all.{{end}}
 {{if .ChannelTaskRoute}}
 ## Task-linked group
