@@ -418,27 +418,17 @@ func (m *Manager) skillFilesForUpdateLocked(existing SkillPackage, name, descrip
 		// caller put in SKILL.md with the next one. Other files are kept as-is.
 		return normalizeSkillEntry(files, document.Name, document.Description, document.Instructions, version, enabled, status)
 	}
-	files, err := m.reader.SkillFiles(existing.RelativePath)
-	if err != nil {
-		files = nil
-	}
-	merged := make([]SkillPackageFile, 0, len(files)+1)
-	for _, file := range files {
-		if file.Path == "SKILL.md" {
-			continue
-		}
-		merged = append(merged, SkillPackageFile{Path: file.Path, Content: file.Content})
-	}
+	// A field-only update rewrites SKILL.md and nothing else, so only SKILL.md
+	// is validated. Checking the files already on disk against the rules for
+	// incoming files rejected the whole update whenever a package carried
+	// something those rules refuse as input (a dot-file such as .gitkeep or
+	// .claude/notes.md, or more assets than a request may send), even though
+	// those files were never going to be written.
 	content, err := renderSkillDocument(name, description, instructions, version, enabled, status)
 	if err != nil {
 		return nil, err
 	}
-	merged = append(merged, SkillPackageFile{Path: "SKILL.md", Content: string(content)})
-	validated, err := validateSkillPackageFiles(merged)
-	if err != nil {
-		return nil, err
-	}
-	return validated, nil
+	return validateSkillPackageFiles([]SkillPackageFile{{Path: "SKILL.md", Content: string(content)}})
 }
 
 // normalizeSkillEntry rebuilds SKILL.md from parsed fields so the server-owned

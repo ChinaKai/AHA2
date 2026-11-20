@@ -115,6 +115,29 @@ func TestVaultSkillCreateUpdatePreservesAssetsAndDeleteMovesToTrash(t *testing.T
 	if raw, err := os.ReadFile(binaryAsset); err != nil || len(raw) != 5 {
 		t.Fatalf("binary asset was changed by a field-only update: %v %#v", err, raw)
 	}
+	// The same holds for files the write contract would not accept as input:
+	// a package that was imported or edited by hand can carry dot-files, and a
+	// field-only update must not refuse to touch SKILL.md because of them.
+	packageDir := filepath.Join(config.VaultPath, "global", "skills", "review-demo")
+	dotFile := filepath.Join(packageDir, ".claude", "notes.md")
+	if err := os.MkdirAll(filepath.Dir(dotFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{dotFile, filepath.Join(packageDir, ".gitkeep")} {
+		if err := os.WriteFile(path, []byte("kept by hand\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dotSafe, err := manager.UpdateSkillPackage(ctx, SkillWriteRequest{Key: created.Key, Instructions: "Dot-file-safe review."})
+	if err != nil {
+		t.Fatalf("a field-only update was refused because of existing dot-files: %v", err)
+	}
+	if dotSafe.Version != 4 {
+		t.Fatalf("dot-file-safe update version = %d, want 4", dotSafe.Version)
+	}
+	if raw, err := os.ReadFile(dotFile); err != nil || string(raw) != "kept by hand\n" {
+		t.Fatalf("dot-file was changed by a field-only update: %v %q", err, raw)
+	}
 
 	if _, err := manager.DeleteSkillPackage(ctx, created.Key); err != nil {
 		t.Fatal(err)
