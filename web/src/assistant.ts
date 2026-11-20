@@ -1,6 +1,7 @@
 import {api} from "./api.js";
 import {icon} from "./icons.js";
 import {computeSpeechBubblePlacement} from "./pet_bubble.js";
+import {isPetNoCharacter, PET_NO_CHARACTER, shouldRenderPetAvatar} from "./pet_character.js";
 import {createPetNavigationClaimer} from "./pet_navigation.js";
 import type {ModelSourceSelection} from "./model_source_picker.js";
 import type {AssistantHint, AssistantMessage, AssistantToolEvent, CodexAccount, Model, OwnerAssistantView, PetBrainAction, PetLayout, PetResetResult, PetState, PetStatePatch, Workspace} from "./types.js";
@@ -43,7 +44,7 @@ interface AssistantCharacter {
   name: string;
   nickname: string;
   description: string;
-  kind: "svg" | "image" | "video";
+  kind: "svg" | "image" | "video" | "none";
   svg?: string;
   src?: string;
   headSrc?: string;
@@ -53,6 +54,7 @@ interface AssistantCharacter {
 const ASSISTANT_CHARACTERS: AssistantCharacter[] = [
   {id: "gugugaga", name: "咕咕嘎嘎", nickname: "咕咕嘎嘎", description: "3D 原版企鹅娘", kind: "image", src: "/assets/assistant/gugu-3d.png", headSrc: "/assets/assistant/gugu-head.png"},
   {id: "deepseek_fish", name: "DeepSeek 大肥鱼", nickname: "大肥鱼", description: "原版鲸鱼娘", kind: "image", src: "/assets/assistant/fish-3d.png", headSrc: "/assets/assistant/fish-head.png"},
+  {id: PET_NO_CHARACTER, name: "无形象", nickname: "小A", description: "隐藏桌面小人，宠物功能照常", kind: "none"},
 ];
 
 let mounted = false;
@@ -418,7 +420,7 @@ function scheduleRoam(delay?: number): void {
   window.clearTimeout(roamTimer);
   const wait = delay ?? (ROAM_MIN_MS + Math.random() * (ROAM_MAX_MS - ROAM_MIN_MS));
   roamTimer = window.setTimeout(() => {
-    if (visible && !document.hidden && !panelOpen && !activeHint && !sending && !dragging && !petFrozen && Date.now() >= roamPausedUntil) {
+    if (visible && !document.hidden && !panelOpen && !activeHint && !sending && !dragging && !petFrozen && Date.now() >= roamPausedUntil && !isPetNoCharacter(currentCharacter().id)) {
       if (Date.now() - lastInteraction >= 1500 && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
         positionAt(safePoint());
       }
@@ -648,6 +650,11 @@ async function refreshHints(): Promise<void> {
 
 function showHint(hint: AssistantHint): void {
   if (!HINTS_ENABLED) return;
+  if (!shouldRenderPetAvatar({
+    character: currentCharacter().id,
+    petEnabled: view?.assistant.pet_enabled !== false,
+    assistantVisible: visible,
+  })) return;
   activeHint = hint;
   bubbleTitle.textContent = hint.title;
   bubbleBody.textContent = hint.body;
@@ -765,7 +772,7 @@ function renderPetSettings(): void {
   settingsEnabled.checked = Boolean(view.assistant.pet_enabled);
   settingsCharacters.innerHTML = ASSISTANT_CHARACTERS.map(character => `<button type="button" class="pet-character-option ${character.id === view!.assistant.character ? "active" : ""}" data-pet-character="${escapeHTML(character.id)}">
     <span class="assistant-character-preview">${characterMarkup(character)}</span>
-    <strong>${escapeHTML(character.nickname)}</strong>
+    <strong>${escapeHTML(isPetNoCharacter(character.id) ? character.name : character.nickname)}</strong>
   </button>`).join("");
   settingsChatModel.innerHTML = view.models.map(model => `<option value="${escapeHTML(model.id)}" ${model.id === view!.assistant.model_id ? "selected" : ""}>${escapeHTML([model.provider_name, model.display_name].filter(Boolean).join(" / ") || model.id)}</option>`).join("");
   renderPetModelPicker();
@@ -845,9 +852,11 @@ function applyPetEnabled(enabled: boolean): void {
     panelOpen = false;
     return;
   }
-  pet.hidden = false;
   visible = true;
   layer.hidden = false;
+  // "无形象" keeps the pet enabled; the shared visibility check leaves the
+  // avatar hidden while still allowing the panel and backend features to run.
+  applyPetAvatarVisibility();
   scheduleRoam(1200);
 }
 
@@ -1175,6 +1184,13 @@ function clearBubbleTail(): void {
 
 function showPetSpeech(text: string, options: {holdMs?: number; fade?: boolean} = {}): void {
   if (!bubble || panelOpen || !text) return;
+  // A disabled pet or "无形象" must not paint a speech bubble without an
+  // avatar. The backend still emits the same events; they simply stay visual.
+  if (!shouldRenderPetAvatar({
+    character: currentCharacter().id,
+    petEnabled: view?.assistant.pet_enabled !== false,
+    assistantVisible: visible,
+  })) return;
   clearSpeechTimers();
   setPetFrozen(true);
   activeHint = null;
@@ -1467,6 +1483,9 @@ function playMotion(name: string, options: {duration?: number; once?: boolean} =
 }
 
 function characterMarkup(character: AssistantCharacter): string {
+  if (character.kind === "none") {
+    return `<span class="pet-none-mark" aria-hidden="true">${icon("eye")}</span>`;
+  }
   if (character.kind === "image" && character.src) {
     return `<img class="pet-img" src="${escapeHTML(character.src)}" alt="" draggable="false">`;
   }
@@ -1486,28 +1505,73 @@ function petMarkup(character: AssistantCharacter): string {
   return characterMarkup(character);
 }
 
+function assistantDisplayName(): string {
+  return String(view?.assistant.name || "").trim() || "小A";
+}
+
+// applyPetAvatarVisibility is the only place that decides whether the floating
+// avatar is in the DOM viewport. "无形象" hides it (and its bubble, thinking
+// mark and character menu) without touching the pet's timers, SSE handling,
+// navigation claims or backend calls.
+function applyPetAvatarVisibility(): void {
+  if (!pet) return;
+  const show = shouldRenderPetAvatar({
+    character: currentCharacter().id,
+    petEnabled: view?.assistant.pet_enabled !== false,
+    assistantVisible: visible,
+  });
+  pet.hidden = !show;
+  if (show) return;
+  stopPetMove();
+  clearTrailGhosts();
+  if (bubble) {
+    bubble.hidden = true;
+    bubble.classList.remove("speech", "fade-out", "typing");
+    clearBubbleTail();
+  }
+  clearSpeechTimers();
+  if (panelOpen) {
+    panelOpen = false;
+    panel.hidden = true;
+    pet.setAttribute("aria-expanded", "false");
+    pet.classList.remove("panel-open");
+  }
+}
+
 function renderCharacter(): void {
   if (!petArt || !pet) return;
   const character = currentCharacter();
+  const noAvatar = isPetNoCharacter(character.id);
   pet.dataset.character = character.id;
   pet.classList.toggle("has-video", character.kind === "video");
+  pet.classList.toggle("no-character", noAvatar);
   if (motionAnimation) {
     motionAnimation.cancel();
     motionAnimation = null;
   }
   facing = 1;
   currentMotionName = "idle";
-  petArt.innerHTML = `<span class="pet-motion">${petMarkup(character)}</span>`;
-  miniAvatar.innerHTML = characterMarkup(character);
-  characterMini.innerHTML = characterMarkup(character);
+  if (noAvatar) {
+    // Keep the pet button itself empty so no image, shadow or thinking mark is
+    // left to paint even for one frame while the avatar is hidden.
+    petArt.innerHTML = "";
+    miniAvatar.innerHTML = "";
+    characterMini.innerHTML = "";
+  } else {
+    petArt.innerHTML = `<span class="pet-motion">${petMarkup(character)}</span>`;
+    miniAvatar.innerHTML = characterMarkup(character);
+    characterMini.innerHTML = characterMarkup(character);
+    playMotion("idle");
+  }
   petMoving = false;
-  playMotion("idle");
-  if (assistantName) assistantName.textContent = character.nickname;
-  panel.setAttribute("aria-label", `${character.nickname} 助手`);
-  layer.querySelector<HTMLButtonElement>("#assistant-close")?.setAttribute("aria-label", `收起${character.nickname}`);
-  pet.setAttribute("aria-label", `打开${character.nickname}助手`);
+  const displayName = noAvatar ? assistantDisplayName() : character.nickname;
+  if (assistantName) assistantName.textContent = displayName;
+  panel.setAttribute("aria-label", `${displayName} 助手`);
+  layer.querySelector<HTMLButtonElement>("#assistant-close")?.setAttribute("aria-label", `收起${displayName}`);
+  pet.setAttribute("aria-label", `打开${displayName}助手`);
   characterButton.title = "宠物设置";
   characterButton.setAttribute("aria-label", "打开宠物设置");
+  applyPetAvatarVisibility();
 }
 
 function renderCharacterMenu(): void {

@@ -218,6 +218,109 @@ func TestOwnerPetSettingsAPI(t *testing.T) {
 	}
 }
 
+func TestOwnerPetNoCharacterSettingsAPI(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	secretStore, err := secrets.Open(filepath.Join(t.TempDir(), "secrets.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	authService := auth.NewService(database, "setup-test", time.Hour)
+	appService := app.NewService(database, secretStore, app.StubExecutor{})
+	server := httptest.NewServer(New(Config{Store: database, Auth: authService, App: appService}).Handler())
+	defer server.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	csrf := registerOwner(t, client, server.URL)
+
+	response := requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/pet/settings", map[string]any{
+		"enabled": true, "character": "none", "actions": []string{"walk", "jump"},
+		"idle_minutes": 5, "quiet_start": 23, "quiet_end": 8, "hourly_limit": 6,
+	}, csrf)
+	var saved struct {
+		Assistant struct {
+			Character  string `json:"character"`
+			PetEnabled bool   `json:"pet_enabled"`
+		} `json:"assistant"`
+	}
+	decodeResponse(t, response, &saved)
+	if response.StatusCode != http.StatusOK || saved.Assistant.Character != "none" || !saved.Assistant.PetEnabled {
+		t.Fatalf("save no-character settings=%d %#v", response.StatusCode, saved)
+	}
+
+	// A fresh read must come from the persisted column, not in-memory state.
+	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/assistant", nil, "")
+	var assistant struct {
+		Assistant struct {
+			Character  string `json:"character"`
+			PetEnabled bool   `json:"pet_enabled"`
+		} `json:"assistant"`
+		Tools []struct {
+			Name string `json:"name"`
+		} `json:"tools"`
+	}
+	decodeResponse(t, response, &assistant)
+	if response.StatusCode != http.StatusOK || assistant.Assistant.Character != "none" || !assistant.Assistant.PetEnabled || len(assistant.Tools) == 0 {
+		t.Fatalf("assistant after no-character=%d %#v", response.StatusCode, assistant)
+	}
+
+	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/pet", nil, "")
+	var pet struct {
+		State struct {
+			Character string `json:"character"`
+			Version   int64  `json:"version"`
+		} `json:"state"`
+	}
+	decodeResponse(t, response, &pet)
+	if response.StatusCode != http.StatusOK || pet.State.Character != "none" {
+		t.Fatalf("pet state after no-character=%d %#v", response.StatusCode, pet)
+	}
+	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/pet", map[string]any{
+		"action": "jump", "version": pet.State.Version,
+	}, csrf)
+	var updated struct {
+		State struct {
+			Action string `json:"action"`
+		} `json:"state"`
+	}
+	decodeResponse(t, response, &updated)
+	if response.StatusCode != http.StatusOK || updated.State.Action != "jump" {
+		t.Fatalf("pet state update in no-character mode=%d %#v", response.StatusCode, updated)
+	}
+
+	// The assistant endpoint accepts the same persisted value, so the legacy
+	// quick-switch path keeps working; the avatar must render again after the
+	// value is restored.
+	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/assistant", map[string]any{"character": "deepseek_fish"}, csrf)
+	var restored struct {
+		Assistant struct {
+			Character string `json:"character"`
+		} `json:"assistant"`
+	}
+	decodeResponse(t, response, &restored)
+	if response.StatusCode != http.StatusOK || restored.Assistant.Character != "deepseek_fish" {
+		t.Fatalf("restore character=%d %#v", response.StatusCode, restored)
+	}
+	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/pet", nil, "")
+	decodeResponse(t, response, &pet)
+	if response.StatusCode != http.StatusOK || pet.State.Character != "deepseek_fish" {
+		t.Fatalf("pet state after restore=%d %#v", response.StatusCode, pet)
+	}
+
+	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/pet/settings", map[string]any{
+		"enabled": true, "character": "not-a-character", "actions": []string{"walk"},
+	}, csrf)
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid character settings=%d", response.StatusCode)
+	}
+	response.Body.Close()
+}
+
 func TestOwnerPetControlAPI(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

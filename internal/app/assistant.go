@@ -736,9 +736,13 @@ func emptyAs(value, fallback string) string {
 	return value
 }
 
+// assistantCharacterNone is the persisted "no appearance" choice. It only
+// hides the Web avatar; every pet capability keeps running under this value.
+const assistantCharacterNone = "none"
+
 func assistantCharacterAllowed(value string) bool {
 	switch value {
-	case "gugugaga", "deepseek_fish":
+	case "gugugaga", "deepseek_fish", assistantCharacterNone:
 		return true
 	default:
 		return false

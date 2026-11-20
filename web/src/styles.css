@@ -2483,6 +2483,11 @@ dialog.agent-config-dialog { width: min(760px,calc(100vw - 32px)); }
 .assistant-character-option.active { border-color: #7eb2e8; background: #e8f3ff; }
 .assistant-character-preview { display: grid; flex: 0 0 auto; width: 42px; height: 42px; place-items: center; border-radius: 10px; background: #fff; }
 .assistant-character-preview .pet-svg { width: 38px; height: 38px; overflow: visible; }
+/* "无形象" is a real character choice in the picker; it only hides the
+   floating avatar, so its preview stays a neutral eye icon. */
+.pet-none-mark { display: grid; width: 100%; height: 100%; place-items: center; color: #7b93ae; }
+.pet-none-mark .icon { width: 22px; height: 22px; }
+.assistant-pet.no-character { display: none; }
 .assistant-character-copy { display: grid; gap: 1px; min-width: 0; }
 .assistant-character-copy strong { font-size: 12px; }
 .assistant-character-copy small { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }

@@ -2687,6 +2687,8 @@ const legacyEnglish: Record<string, string> = {
   "小A 助手": "AHA assistant",
   "咕咕嘎嘎": "Gugugaga",
   "3D 原版企鹅娘": "3D classic penguin girl",
+  "无形象": "No appearance",
+  "隐藏桌面小人，宠物功能照常": "Hide the desktop pet; pet features keep running",
   "DeepSeek 大肥鱼": "DeepSeek Big Fish",
   "大肥鱼": "Big Fish",
   "原版鲸鱼娘": "Classic whale girl",

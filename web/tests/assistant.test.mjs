@@ -53,3 +53,16 @@ test("pet uses the cached character before the first API response", async () => 
   assert.match(assistant, /character-loading/);
   assert.match(styles, /\.assistant-pet\.character-loading \{ visibility: hidden; \}/);
 });
+
+test("built assistant ships the no-character choice without a pet kill switch", async () => {
+  const assistant = await readFile(resolve(root, "build", "assistant.js"), "utf8");
+  const character = await readFile(resolve(root, "build", "pet_character.js"), "utf8");
+  assert.match(assistant, /\.\/pet_character\.js\?v=[a-f0-9]{12}/);
+  assert.match(character, /PET_NO_CHARACTER = "none"/);
+  assert.match(assistant, /无形象/);
+  assert.match(assistant, /function applyPetAvatarVisibility/);
+  // The avatar is hidden by the shared visibility decision, not by flipping
+  // pet_enabled, so timers, SSE and navigation claims keep running.
+  assert.match(assistant, /shouldRenderPetAvatar\(\{/);
+  assert.doesNotMatch(assistant, /pet_enabled\s*=\s*false/);
+});

@@ -3873,7 +3873,10 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   // and their English copy); measured 272,123, next boundary.
   // Unifying the pet settings note on "owner" changed how the copy gzips;
   // measured 272,133, next boundary.
-  const FIRST_SCREEN_GZIP_BUDGET = 272384;
+  // The no-character pet appearance adds the choice copy, the shared
+  // visibility decision and the hidden-avatar guards; measured 272,558, next
+  // 256-byte boundary.
+  const FIRST_SCREEN_GZIP_BUDGET = 272640;
   // The version query parameter is a content hash and its hex digits change
   // how the same code gzips: main already sits exactly on the budget, so a
   // hash-only change could trip it without growing the payload. Mask the
