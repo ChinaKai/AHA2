@@ -48,6 +48,25 @@ func (s *Server) withAgentCapability(next http.Handler) http.Handler {
 	})
 }
 
+// withOwnerOrAgentAuth accepts either an Owner session cookie or a Task-scoped
+// Agent capability. It only authenticates: the handler must still verify that
+// the capability's Task matches the Task in the request path.
+func (s *Server) withOwnerOrAgentAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		scheme, token, ok := strings.Cut(strings.TrimSpace(request.Header.Get("Authorization")), " ")
+		if ok && strings.EqualFold(scheme, "Bearer") && s.agentCapabilities != nil {
+			if claims, err := s.agentCapabilities.Authenticate(strings.TrimSpace(token)); err == nil {
+				ctx := context.WithValue(request.Context(), agentClaimsContextKey{}, claims)
+				next.ServeHTTP(writer, request.WithContext(ctx))
+				return
+			}
+		}
+		// No usable capability: fall back to the Owner session. A request with
+		// neither credential, or with only an invalid one, gets 401 from withAuth.
+		s.withAuth(next).ServeHTTP(writer, request)
+	})
+}
+
 func (s *Server) withAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		cookie, err := request.Cookie(sessionCookieName)
