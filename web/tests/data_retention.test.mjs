@@ -322,6 +322,43 @@ test("B dialog keeps each checkbox attached to its label row", () => {
   assert.match(b, /<label><input id="data-conversation-update" type="checkbox"[^>]*> 同时清理 agent update<\/label>/);
 });
 
+test("C dialog shows where new terminal output is stored and how it is bounded", () => {
+  i18n.applyLocale("zh-CN");
+  const files = {
+    directory: "/data/hardware-io", streams: 2, segments: 5, records: 12_345, bytes: 3_500_000,
+    max_bytes: 2_147_483_648, last_sequence: 12_400_000,
+    oldest_at: "2026-11-01T00:00:00Z", newest_at: "2026-11-20T00:00:00Z",
+  };
+  const c = dialog(panel.renderDatabasePanel(viewState({database: stats({hardware_io_files: files})})), "C");
+  const usage = c.match(/<p class="data-cleanup-note" data-db-hardware-files>[\s\S]*?<\/p>/)?.[0] || "";
+  assert.match(usage, /hardware-io 文件夹（不进数据库）/);
+  assert.match(usage, /12,345|12345/);
+  assert.match(usage, /2\.0 GiB|2 GiB|2\.0 GB|2 GB/);
+  const policy = c.match(/data-db-hardware-files-policy>[\s\S]*?<\/p>/)?.[0] || "";
+  assert.match(policy, /（30 天）/);
+  assert.match(policy, /先删最旧文件/);
+  assert.match(policy, /不拒绝新输出/);
+  assert.ok(c.indexOf("data-db-hardware-files") < c.indexOf("data-db-range"), "file usage comes before the legacy SQLite range");
+  // The legacy preview/confirm flow is still there for rows left in SQLite.
+  assert.match(c, /data-hardware-io-preview/);
+
+  const empty = dialog(panel.renderDatabasePanel(viewState({database: stats({hardware_io_files: {...files, records: 0, segments: 0, streams: 0, bytes: 0}})})), "C");
+  assert.match(empty, /0 条/);
+  const older = dialog(panel.renderDatabasePanel(viewState()), "C");
+  assert.doesNotMatch(older, /data-db-hardware-files/, "an older server without file stats renders as before");
+
+  i18n.applyLocale("en-US");
+  try {
+    const en = dialog(panel.renderDatabasePanel(viewState({database: stats({hardware_io_files: files})})), "C");
+    assert.match(en, /hardware-io files, not the database/);
+    assert.match(en, /after 30 days/);
+    assert.match(en, /new output is never refused/);
+    assert.doesNotMatch(en, /[一-鿿]/);
+  } finally {
+    i18n.applyLocale("zh-CN");
+  }
+});
+
 test("database panel strings are translated in English", () => {
   i18n.applyLocale("en-US");
   try {

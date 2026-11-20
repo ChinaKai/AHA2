@@ -101,6 +101,28 @@ export interface DatabaseCategory {
   tables: DatabaseTableStat[];
 }
 
+// Terminal IO files under <data-dir>/hardware-io (task-711). New hardware
+// terminal output is stored here instead of SQLite.
+export interface HardwareIOFileStats {
+  directory: string;
+  streams: number;
+  segments: number;
+  records: number;
+  bytes: number;
+  max_bytes: number;
+  last_sequence: number;
+  corrupt_lines?: number;
+  // Write-path failures of the file store (rotation, compression, removal,
+  // append) and segments/files still waiting for a retry.
+  failures?: number;
+  last_error?: string;
+  last_error_at?: string;
+  plain_segments?: number;
+  stale_files?: number;
+  oldest_at?: string;
+  newest_at?: string;
+}
+
 export interface DatabaseStats {
   file_bytes: number;
   wal_bytes: number;
@@ -114,6 +136,7 @@ export interface DatabaseStats {
   categories: DatabaseCategory[];
   cached: boolean;
   hardware_io: {min_sequence: number; max_sequence: number; estimated_rows: number; oldest_at?: string; newest_at?: string};
+  hardware_io_files?: HardwareIOFileStats;
   retention: HardwareIORetentionSettings;
   conversation_retention: ConversationRetentionSettings;
   collected_at: string;
@@ -533,6 +556,7 @@ export interface CodexLogin {
   error?: string;
   login_status?: string;
   login_error?: string;
+  record_error?: string;
   started_at: string;
   updated_at: string;
 }

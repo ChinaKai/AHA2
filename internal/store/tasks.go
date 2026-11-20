@@ -672,7 +672,17 @@ func (s *Store) deleteTask(ctx context.Context, id string, tombstone bool) error
 		return err
 	}
 	s.removeOrphanedAttachmentBlobs(ctx, hashes)
+	s.removeTaskHardwareIOFiles(id)
 	return nil
+}
+
+// removeTaskHardwareIOFiles deletes a deleted Task's terminal IO files. The
+// rows used to cascade with the Task; a failure here is left to the periodic
+// maintenance, which removes streams of Tasks that no longer exist.
+func (s *Store) removeTaskHardwareIOFiles(taskIDs ...string) {
+	for _, taskID := range taskIDs {
+		_ = s.RemoveTaskHardwareIO(taskID)
+	}
 }
 
 // deleteTaskTx removes one Task and its restricting dependents inside the

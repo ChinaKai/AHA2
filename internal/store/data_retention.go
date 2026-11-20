@@ -522,6 +522,7 @@ func (s *Store) DatabaseStats(ctx context.Context, refresh bool) (domain.Databas
 		stats.Retention = retention
 		stats.Conversation = conversation
 		stats.Cached = true
+		stats.HardwareIOFiles = s.hardwareIOFileStatsOrNil()
 		return stats, nil
 	}
 	stats, err := s.collectDatabaseStats(ctx)
@@ -529,7 +530,25 @@ func (s *Store) DatabaseStats(ctx context.Context, refresh bool) (domain.Databas
 		return domain.DatabaseStats{}, err
 	}
 	cache.stats = &stats
+	stats.HardwareIOFiles = s.hardwareIOFileStatsOrNil()
 	return stats, nil
+}
+
+// hardwareIOFileStatsOrNil reads the in-memory file index on every call so
+// the page always shows the current files; a failure only hides the line.
+func (s *Store) hardwareIOFileStatsOrNil() *domain.HardwareIOFileStats {
+	stats, err := s.HardwareIOFileStats()
+	if err != nil {
+		return nil
+	}
+	return &stats
+}
+
+// invalidateDatabaseStats drops cached table estimates after a bulk change.
+func (s *Store) invalidateDatabaseStats() {
+	s.databaseStats.mu.Lock()
+	s.databaseStats.stats = nil
+	s.databaseStats.mu.Unlock()
 }
 
 // collectDatabaseStats reports database file and table usage using only

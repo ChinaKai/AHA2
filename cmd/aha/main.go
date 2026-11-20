@@ -342,6 +342,16 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 		return err
 	}
 	defer database.Close()
+	// task-711: hardware terminal IO now lives in <data-dir>/hardware-io.
+	// SQLite-era rows are dropped once at startup (Owner decision); a failure
+	// is logged and does not block startup because nothing reads the table.
+	if cleared, clearErr := database.ClearLegacyHardwareIO(ctx); clearErr != nil {
+		logger.Error("clear legacy hardware_io rows failed", "error", clearErr)
+	} else if !cleared.AlreadyEmpty {
+		logger.Info("cleared legacy hardware_io rows; run `aha2 db compact` with the service stopped to shrink aha2.db",
+			"rows", cleared.Rows, "freed_pages", cleared.FreedPages, "sequence_floor", cleared.FloorSeq, "duration_ms", cleared.DurationMS)
+	}
+	go runHardwareIOMaintenance(ctx, database, logger)
 	// Single-switch startup precedence: a Web toggle persisted with configured=1
 	// is authoritative. Otherwise the backend decides fresh install vs upgrade:
 	// a fresh install defaults to the vault, while an upgrade with legacy
@@ -841,4 +851,47 @@ func printEffectiveListen(args []string) error {
 	}
 	fmt.Println(address)
 	return nil
+}
+
+// runHardwareIOMaintenance applies retention, the disk cap and Task deletion
+// to the terminal IO files: once shortly after startup, then hourly, and
+// early (at most once a minute) when writes push the files over the cap.
+func runHardwareIOMaintenance(ctx context.Context, database *store.Store, logger *slog.Logger) {
+	timer := time.NewTimer(time.Minute)
+	defer timer.Stop()
+	overCap := database.HardwareIOCapacitySignal()
+	var lastRun time.Time
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		case <-overCap:
+			if wait := time.Minute - time.Since(lastRun); wait > 0 {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(wait):
+				}
+			}
+		}
+		lastRun = time.Now()
+		result, err := database.RunHardwareIOMaintenance(ctx)
+		if err != nil {
+			logger.Warn("hardware io maintenance failed", "error", err)
+		}
+		if result.RetentionSegments+result.CapacitySegments+result.OrphanTasks > 0 || result.OverLimit {
+			logger.Info("hardware io maintenance",
+				"retention_segments", result.RetentionSegments, "retention_bytes", result.RetentionBytes,
+				"capacity_segments", result.CapacitySegments, "capacity_bytes", result.CapacityBytes,
+				"orphan_tasks", result.OrphanTasks, "total_bytes", result.TotalBytes, "over_limit", result.OverLimit)
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(time.Hour)
+	}
 }

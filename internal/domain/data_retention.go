@@ -177,22 +177,55 @@ type HardwareIORange struct {
 	NewestAt      *time.Time `json:"newest_at,omitempty"`
 }
 
+// Terminal IO files (task-711). New hardware terminal output is stored under
+// <data-dir>/hardware-io instead of SQLite. Retention reuses
+// HardwareIORetentionSettings.RetentionDays and is applied automatically;
+// MaxBytes caps the directory by deleting the oldest closed segments first.
+const (
+	HardwareIOFileMaxBytesDefault int64 = 2 << 30
+	HardwareIOFileMaxBytesMin     int64 = 64 << 20
+)
+
+// HardwareIOFileStats describes the terminal IO files.
+type HardwareIOFileStats struct {
+	Directory    string `json:"directory"`
+	Streams      int    `json:"streams"`
+	Segments     int    `json:"segments"`
+	Records      int64  `json:"records"`
+	Bytes        int64  `json:"bytes"`
+	MaxBytes     int64  `json:"max_bytes"`
+	LastSequence int64  `json:"last_sequence"`
+	CorruptLines int64  `json:"corrupt_lines"`
+	// Failures counts write-path problems of the file store (rotation,
+	// compression, removal, append); LastError is the most recent one.
+	// PlainSegments wait for a retried compression, StaleFiles for removal.
+	Failures      int64      `json:"failures"`
+	LastError     string     `json:"last_error,omitempty"`
+	LastErrorAt   *time.Time `json:"last_error_at,omitempty"`
+	PlainSegments int        `json:"plain_segments"`
+	StaleFiles    int        `json:"stale_files"`
+	OldestAt      *time.Time `json:"oldest_at,omitempty"`
+	NewestAt      *time.Time `json:"newest_at,omitempty"`
+}
+
 type DatabaseStats struct {
-	FileBytes     int64                         `json:"file_bytes"`
-	WALBytes      int64                         `json:"wal_bytes"`
-	SHMBytes      int64                         `json:"shm_bytes"`
-	PageSize      int64                         `json:"page_size"`
-	PageCount     int64                         `json:"page_count"`
-	FreelistCount int64                         `json:"freelist_count"`
-	UsedBytes     int64                         `json:"used_bytes"`
-	FreeBytes     int64                         `json:"free_bytes"`
-	TableCount    int                           `json:"table_count"`
-	Categories    []DatabaseCategory            `json:"categories"`
-	HardwareIO    HardwareIORange               `json:"hardware_io"`
-	Retention     HardwareIORetentionSettings   `json:"retention"`
-	Conversation  ConversationRetentionSettings `json:"conversation_retention"`
-	CollectedAt   time.Time                     `json:"collected_at"`
-	DurationMS    int64                         `json:"duration_ms"`
+	FileBytes     int64              `json:"file_bytes"`
+	WALBytes      int64              `json:"wal_bytes"`
+	SHMBytes      int64              `json:"shm_bytes"`
+	PageSize      int64              `json:"page_size"`
+	PageCount     int64              `json:"page_count"`
+	FreelistCount int64              `json:"freelist_count"`
+	UsedBytes     int64              `json:"used_bytes"`
+	FreeBytes     int64              `json:"free_bytes"`
+	TableCount    int                `json:"table_count"`
+	Categories    []DatabaseCategory `json:"categories"`
+	HardwareIO    HardwareIORange    `json:"hardware_io"`
+	// HardwareIOFiles is read fresh on every call, also for cached stats.
+	HardwareIOFiles *HardwareIOFileStats          `json:"hardware_io_files,omitempty"`
+	Retention       HardwareIORetentionSettings   `json:"retention"`
+	Conversation    ConversationRetentionSettings `json:"conversation_retention"`
+	CollectedAt     time.Time                     `json:"collected_at"`
+	DurationMS      int64                         `json:"duration_ms"`
 	// Cached is true when the table estimates come from an earlier collection;
 	// Retention is always read fresh.
 	Cached bool `json:"cached"`

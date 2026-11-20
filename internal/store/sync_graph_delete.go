@@ -157,6 +157,7 @@ func (s *Store) DeleteWorkspaceWithSyncTombstone(ctx context.Context, id string)
 		return err
 	}
 	s.removeOrphanedAttachmentBlobs(ctx, attachmentHashes)
+	s.removeTaskHardwareIOFiles(taskIDs...)
 	return nil
 }
 
@@ -354,6 +355,9 @@ func (s *Store) DeleteProjectWithSyncTombstone(ctx context.Context, id string) e
 		return err
 	}
 	s.removeOrphanedAttachmentBlobs(ctx, attachmentHashes)
+	for _, task := range tasks {
+		s.removeTaskHardwareIOFiles(task.id)
+	}
 	return nil
 }
 

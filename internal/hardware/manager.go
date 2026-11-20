@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -96,11 +98,23 @@ type terminalSession struct {
 	loginOptions    LoginOptions
 	loginAttempts   int
 	loginGeneration int
+	// recordError is the latest storage failure, cleared on the next
+	// successfully stored event.
+	recordError string
 }
 
 type Manager struct {
 	recorder Recorder
 	now      func() time.Time
+	logger   *slog.Logger
+
+	// recordFailures counts terminal events that could not be stored.
+	// The live output is still delivered; the failure is logged (rate
+	// limited) and shown on the session status as record_error.
+	recordFailures   atomic.Int64
+	recordLogMu      sync.Mutex
+	recordLoggedAt   time.Time
+	recordSuppressed int64
 
 	openSerial  func(string, int) (io.ReadWriteCloser, error)
 	dialNetwork func(context.Context, string, string) (net.Conn, error)
@@ -117,6 +131,7 @@ func NewManager(recorder Recorder) *Manager {
 	return &Manager{
 		recorder:   recorder,
 		now:        time.Now,
+		logger:     slog.Default(),
 		openSerial: openSerial,
 		dialNetwork: func(ctx context.Context, network, address string) (net.Conn, error) {
 			return dialer.DialContext(ctx, network, address)
@@ -517,6 +532,7 @@ func (session *terminalSession) statusForLocked(taskID, hardwareID string, readO
 		Endpoint: session.endpoint, Status: session.status, Connected: !session.closing && session.status == "running",
 		ReadOnly: readOnly, Error: session.lastError, StartedAt: session.startedAt, UpdatedAt: session.updatedAt,
 		LoginStatus: session.loginStatus, LoginError: session.loginError,
+		RecordError: session.recordError,
 	}
 }
 
@@ -744,11 +760,13 @@ func (session *terminalSession) record(direction, data, source string, raw []byt
 			}
 			continue
 		}
-		sequence, _ = session.manager.recorder.AppendHardwareIO(context.Background(), domain.HardwareIOEvent{
+		var recordErr error
+		sequence, recordErr = session.manager.recorder.AppendHardwareIO(context.Background(), domain.HardwareIOEvent{
 			ID: domain.NewID("hardware_io"), TaskID: target.taskID, HardwareID: target.hardwareID,
 			Transport: session.transport, Direction: direction, Data: data, Encoding: "text",
 			Source: source, CreatedAt: now,
 		})
+		session.noteRecordResult(target, direction, recordErr)
 		if direction == "rx" && len(raw) > 0 {
 			session.broadcastOutput(target, sequence, raw)
 		}
@@ -938,4 +956,41 @@ func (decoder *streamDecoder) Decode(chunk []byte) (string, []byte) {
 	}
 	consumed := len(combined) - len(decoder.pending)
 	return output.String(), append([]byte(nil), combined[:consumed]...)
+}
+
+// RecordFailures reports how many terminal events could not be stored.
+func (manager *Manager) RecordFailures() int64 {
+	return manager.recordFailures.Load()
+}
+
+// noteRecordResult makes a storage failure visible: it counts it, logs it at
+// most once a minute and keeps the latest message on the session status
+// until a later event is stored again. The live output is still delivered.
+func (session *terminalSession) noteRecordResult(target attachment, direction string, err error) {
+	manager := session.manager
+	session.mu.Lock()
+	if err == nil {
+		session.recordError = ""
+		session.mu.Unlock()
+		return
+	}
+	session.recordError = "terminal output could not be saved: " + err.Error()
+	session.mu.Unlock()
+	manager.recordFailures.Add(1)
+	now := manager.now()
+	manager.recordLogMu.Lock()
+	emit := now.Sub(manager.recordLoggedAt) >= time.Minute
+	suppressed := manager.recordSuppressed
+	if emit {
+		manager.recordLoggedAt = now
+		manager.recordSuppressed = 0
+	} else {
+		manager.recordSuppressed++
+	}
+	manager.recordLogMu.Unlock()
+	if emit && manager.logger != nil {
+		manager.logger.Warn("hardware terminal output could not be stored",
+			"task_id", target.taskID, "hardware_id", target.hardwareID, "transport", session.transport,
+			"direction", direction, "error", err, "suppressed_since_last_log", suppressed)
+	}
 }
