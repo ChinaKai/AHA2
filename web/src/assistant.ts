@@ -243,7 +243,7 @@ export function mountAssistant(): void {
           </section>
           <section><h3>模型</h3>
             <label class="assistant-settings-field">助手聊天模型（Provider）<select id="pet-chat-model"></select></label>
-            <div id="pet-model-source"></div>
+            <div id="pet-model-source-host"></div>
             <p class="assistant-settings-note">聊天面板使用 Provider 模型；自主行为在宠物 Task 中运行，可选择 Provider、Claude native 或 Codex 官方账号。不可用来源不会回退。</p>
           </section>
           <section class="assistant-settings-danger"><h3>恢复出厂设置</h3>
@@ -303,7 +303,7 @@ export function mountAssistant(): void {
   settingsQuietEnd = layer.querySelector<HTMLInputElement>("#pet-quiet-end")!;
   settingsCharacters = layer.querySelector<HTMLElement>("#pet-character-options")!;
   settingsChatModel = layer.querySelector<HTMLSelectElement>("#pet-chat-model")!;
-  settingsPetModelHost = layer.querySelector<HTMLElement>("#pet-model-source")!;
+  settingsPetModelHost = layer.querySelector<HTMLElement>("#pet-model-source-host")!;
   settingsBrainStatus = layer.querySelector<HTMLElement>("#pet-brain-status")!;
   settingsError = layer.querySelector<HTMLElement>("#pet-settings-error")!;
   settingsAllowViewTasks = layer.querySelector<HTMLInputElement>("#pet-allow-view-tasks")!;
