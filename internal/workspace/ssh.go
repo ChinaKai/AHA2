@@ -228,6 +228,10 @@ func (runner *SSHRunner) execCommand(ctx context.Context, client *ssh.Client, co
 		}
 		return runner.execOnClient(ctx, client, windowsBootstrapCommand(), payload, command.Input, command.OutputLimit, onLine)
 	}
+	// Tag the remote tree so an interrupt or timeout can end it; closing the
+	// connection alone leaves the remote processes running.
+	command, mark := markCommand(command)
+	onCancel := func() { runner.killMarked(client, mark) }
 	if command.Input != nil {
 		// The script carries the Turn's environment, including its capability
 		// token. It cannot travel as a "sh -c" argument (the SSH exec request and
@@ -239,13 +243,38 @@ func (runner *SSHRunner) execCommand(ctx context.Context, client *ssh.Client, co
 		if err != nil {
 			return Result{}, err
 		}
-		return runner.execOnClient(ctx, client, streamBootstrapCommand(), metadata+command.Stdin, command.Input, command.OutputLimit, onLine)
+		return runner.execOnClientWithCancel(ctx, client, streamBootstrapCommand(), metadata+command.Stdin, command.Input, command.OutputLimit, onLine, onCancel)
 	}
 	script, err := remoteScript(command)
 	if err != nil {
 		return Result{}, err
 	}
-	return runner.execOnClient(ctx, client, "sh -s", script, nil, command.OutputLimit, onLine)
+	return runner.execOnClientWithCancel(ctx, client, "sh -s", script, nil, command.OutputLimit, onLine, onCancel)
+}
+
+// killMarked ends the remote processes of one marked run over a second session
+// on the same connection, which is still open when the run is cancelled. It is
+// bounded and best effort.
+func (runner *SSHRunner) killMarked(client *ssh.Client, mark string) {
+	if mark == "" || client == nil {
+		return
+	}
+	session, err := client.NewSession()
+	if err != nil {
+		return
+	}
+	defer session.Close()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = session.Run("sh -c " + shellQuote(killMarkedScript) + " aha-kill " + shellQuote(mark))
+	}()
+	timer := time.NewTimer(remoteKillTimeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+	}
 }
 
 // streamBootstrapCommand is the constant remote command for a streaming run.
@@ -352,6 +381,12 @@ func (runner *SSHRunner) runScriptWithStdin(ctx context.Context, script string, 
 // it out lets a caller reuse the same connection for a reverse forward, whose
 // lifetime must match the command's.
 func (runner *SSHRunner) execOnClient(ctx context.Context, client *ssh.Client, remoteCommand, stdin string, input <-chan string, outputLimit int, onLine LineHandler) (Result, error) {
+	return runner.execOnClientWithCancel(ctx, client, remoteCommand, stdin, input, outputLimit, onLine, nil)
+}
+
+// execOnClientWithCancel is execOnClient with a hook that runs when the context
+// ends while the command is still running, before the connection is closed.
+func (runner *SSHRunner) execOnClientWithCancel(ctx context.Context, client *ssh.Client, remoteCommand, stdin string, input <-chan string, outputLimit int, onLine LineHandler, onCancel func()) (Result, error) {
 	start := time.Now()
 	session, err := client.NewSession()
 	if err != nil {
@@ -394,6 +429,9 @@ func (runner *SSHRunner) execOnClient(ctx context.Context, client *ssh.Client, r
 	select {
 	case runErr = <-done:
 	case <-ctx.Done():
+		if onCancel != nil {
+			onCancel()
+		}
 		_ = client.Close()
 		runErr = <-done
 	}

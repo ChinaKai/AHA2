@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -32,11 +33,19 @@ func (runner WSLRunner) Run(parent context.Context, command Command, onLine Line
 	if distro == "" {
 		return Result{}, fmt.Errorf("wsl distro is required")
 	}
+	// Killing wsl.exe ends the Windows-side client, not the processes inside
+	// the distro, so tag the run and end the tagged processes when the context
+	// is cancelled.
+	command, mark := markCommand(command)
 	host, err := wslHostCommand(distro, command)
 	if err != nil {
 		return Result{}, err
 	}
-	return wslProcessRunner(parent, host, wslHostEnvironment(), onLine)
+	result, err := wslProcessRunner(parent, host, wslHostEnvironment(), onLine)
+	if mark != "" && (parent.Err() != nil || errors.Is(err, context.DeadlineExceeded)) {
+		KillMarkedProcesses(WSLRunner{Distro: distro}, mark)
+	}
+	return result, err
 }
 
 // wslHostCommand builds the wsl.exe invocation for a workspace command.
