@@ -1215,20 +1215,34 @@ func ahaPetTools() []gateway.ChatTool {
 				"limit":      map[string]any{"type": "integer", "minimum": 1, "maximum": 50},
 			},
 		}},
-		{Name: "aha_skill_detail", Description: "只读查看 Skill 说明和文件名", Parameters: map[string]any{
-			"type": "object", "properties": map[string]any{"skill_id": map[string]any{"type": "string"}}, "required": []string{"skill_id"},
-		}},
-		{Name: "aha_create_skill", Description: "创建项目级 Skill", Parameters: map[string]any{
+		{Name: "aha_skill_detail", Description: "只读查看 Skill 说明和文件名；include_files=true 时同时返回包内文本文件的内容", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
-				"project_id":   map[string]any{"type": "string"},
+				"skill_id":      map[string]any{"type": "string"},
+				"include_files": map[string]any{"type": "boolean", "description": "要修改包内文件前先读取它们"},
+			}, "required": []string{"skill_id"},
+		}},
+		{Name: "aha_create_skill", Description: "创建 Skill：默认项目级（需 project_id）；scope=global 创建对所有项目生效的全局 Skill", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"scope":        map[string]any{"type": "string", "enum": []string{"project", "global"}},
+				"project_id":   map[string]any{"type": "string", "description": "项目级 Skill 必填"},
 				"name":         map[string]any{"type": "string"},
 				"description":  map[string]any{"type": "string"},
 				"instructions": map[string]any{"type": "string"},
 				"status":       map[string]any{"type": "string", "enum": []string{"active", "draft", "disabled"}},
 				"enabled":      map[string]any{"type": "boolean"},
-			}, "required": []string{"project_id", "name", "instructions"},
+				"files": map[string]any{
+					"type":        "array",
+					"description": "完整的包文件列表（必须包含 SKILL.md）；传了就整体替换包内文本文件，不传则只改 SKILL.md 的字段、其余文件保持不变",
+					"items": map[string]any{
+						"type": "object", "properties": map[string]any{
+							"path":    map[string]any{"type": "string"},
+							"content": map[string]any{"type": "string"},
+						}, "required": []string{"path", "content"},
+					},
+				},
+			}, "required": []string{"name", "instructions"},
 		}},
-		{Name: "aha_update_skill", Description: "修改项目级 Skill；未提供的字段保持不变", Parameters: map[string]any{
+		{Name: "aha_update_skill", Description: "修改项目级或全局 Skill；未提供的字段保持不变。归档（archive）Skill 只读", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"skill_id":     map[string]any{"type": "string"},
 				"name":         map[string]any{"type": "string"},
@@ -1236,9 +1250,19 @@ func ahaPetTools() []gateway.ChatTool {
 				"instructions": map[string]any{"type": "string"},
 				"status":       map[string]any{"type": "string", "enum": []string{"active", "draft", "disabled"}},
 				"enabled":      map[string]any{"type": "boolean"},
+				"files": map[string]any{
+					"type":        "array",
+					"description": "完整的包文件列表（必须包含 SKILL.md）；传了就整体替换包内文本文件，不传则只改 SKILL.md 的字段、其余文件保持不变",
+					"items": map[string]any{
+						"type": "object", "properties": map[string]any{
+							"path":    map[string]any{"type": "string"},
+							"content": map[string]any{"type": "string"},
+						}, "required": []string{"path", "content"},
+					},
+				},
 			}, "required": []string{"skill_id"},
 		}},
-		{Name: "aha_delete_skill", Description: "提交删除 Skill 审批；主人批准后才删除", Parameters: map[string]any{
+		{Name: "aha_delete_skill", Description: "提交删除项目级或全局 Skill 的审批；主人批准后才删除", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"skill_id": map[string]any{"type": "string"},
 				"reason":   map[string]any{"type": "string", "description": "为什么需要删除；必填"},
@@ -2283,12 +2307,13 @@ func (s *Service) petMCPTool(ctx context.Context, callerTaskID, name string, arg
 		return string(data), nil
 	case "aha_skill_detail":
 		var input struct {
-			SkillID string `json:"skill_id"`
+			SkillID      string `json:"skill_id"`
+			IncludeFiles bool   `json:"include_files"`
 		}
 		if err := json.Unmarshal(args, &input); err != nil {
 			return "", fmt.Errorf("invalid skill detail request")
 		}
-		detail, err := s.PetSkillDetail(ctx, input.SkillID)
+		detail, err := s.PetSkillDetailWithFiles(ctx, input.SkillID, input.IncludeFiles)
 		if err != nil {
 			return "", err
 		}

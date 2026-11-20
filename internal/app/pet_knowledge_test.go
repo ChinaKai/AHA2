@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"github.com/ChinaKai/AHA2/internal/knowledgevault"
 	"strings"
 	"testing"
 	"time"
@@ -103,6 +104,72 @@ func TestPetKnowledgeSkillAndPromptManagement(t *testing.T) {
 	if err != nil || updated.Version != 2 || updated.Name != "发布检查 v2" {
 		t.Fatalf("updated skill=%#v err=%v", updated, err)
 	}
+	// The pet reads a package's files before changing them, and an update that
+	// sends files replaces the package.
+	withFiles, err := fixture.service.PetUpdateSkill(fixture.ctx, PetSkillInput{
+		SkillID: skill.ID, Files: []knowledgevault.SkillPackageFile{
+			{Path: "SKILL.md", Content: "---\nname: 发布检查 v2\ndescription: 发布前检查\n---\n部署前运行测试并核对哈希。\n"},
+			{Path: "scripts/check.sh", Content: "#!/bin/sh\necho check\n"},
+		},
+	})
+	if err != nil || withFiles.Version != 3 {
+		t.Fatalf("package update=%#v err=%v", withFiles, err)
+	}
+	read, err := fixture.service.PetSkillDetailWithFiles(fixture.ctx, skill.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var script string
+	for _, file := range read.FileContents {
+		if file.Path == "scripts/check.sh" {
+			script = file.Content
+		}
+	}
+	if !strings.Contains(script, "echo check") || len(read.FilesOmitted) != 0 {
+		t.Fatalf("package files were not readable: %#v", read)
+	}
+	if plain, _ := fixture.service.PetSkillDetail(fixture.ctx, skill.ID); len(plain.FileContents) != 0 {
+		t.Fatal("file contents were returned without being asked for")
+	}
+	// A field-only update afterwards keeps the script.
+	if _, err := fixture.service.PetUpdateSkill(fixture.ctx, PetSkillInput{SkillID: skill.ID, Description: "只改描述"}); err != nil {
+		t.Fatal(err)
+	}
+	if kept, _ := fixture.service.PetSkillDetailWithFiles(fixture.ctx, skill.ID, true); len(kept.FileContents) != 2 || kept.Description != "只改描述" {
+		t.Fatalf("a field-only update dropped package files: %#v", kept)
+	}
+
+	// The pet manages the whole Skill library, not only project Skills.
+	global, err := fixture.service.PetCreateSkill(fixture.ctx, PetSkillInput{
+		Scope: "global", Name: "通用评审", Instructions: "先读 diff 再下结论。",
+	})
+	if err != nil || global.Scope != "global" || global.ProjectID != "" {
+		t.Fatalf("global skill=%#v err=%v", global, err)
+	}
+	globalUpdated, err := fixture.service.PetUpdateSkill(fixture.ctx, PetSkillInput{SkillID: global.ID, Instructions: "先读 diff，再跑测试。"})
+	if err != nil || globalUpdated.Version != 2 || !strings.Contains(globalUpdated.Instructions, "再跑测试") {
+		t.Fatalf("global skill update=%#v err=%v", globalUpdated, err)
+	}
+	if _, err := fixture.service.PetCreateSkill(fixture.ctx, PetSkillInput{Name: "缺项目", Instructions: "x"}); err == nil {
+		t.Fatal("a project Skill was created without a project")
+	}
+	if _, err := fixture.service.PetCreateSkill(fixture.ctx, PetSkillInput{Scope: "archive", Name: "归档", Instructions: "x"}); err == nil {
+		t.Fatal("an archive Skill was created")
+	}
+	globalApproval, err := fixture.service.PetDeleteSkill(fixture.ctx, global.ID, "全局技能删除也要走审批")
+	if err != nil || globalApproval.Kind != "delete_skill" || !strings.Contains(globalApproval.Summary, "全局") {
+		t.Fatalf("global delete approval=%#v err=%v", globalApproval, err)
+	}
+	if _, err := fixture.service.PetSkillDetail(fixture.ctx, global.ID); err != nil {
+		t.Fatal("the global Skill was deleted before the Owner approved it")
+	}
+	if _, err := fixture.service.ResolvePetApproval(fixture.ctx, globalApproval.ID, "approve", "确认"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.PetSkillDetail(fixture.ctx, global.ID); err == nil {
+		t.Fatal("an approved global Skill deletion did not delete it")
+	}
+
 	approval, err := fixture.service.PetDeleteSkill(fixture.ctx, skill.ID, "测试删除技能需要原因")
 	if err != nil || approval.Kind != "delete_skill" || approval.Status != petApprovalPending {
 		t.Fatalf("delete skill approval=%#v err=%v", approval, err)

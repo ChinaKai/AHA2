@@ -602,7 +602,9 @@ func (s *Service) executePetApproval(ctx context.Context, item domain.PetApprova
 	case "delete_skill":
 		// Move the package into the vault trash. The legacy skills table is not
 		// touched; a historical legacy id resolves through the read-only alias.
-		if err := s.DeleteVaultSkill(ctx, payload.SkillID, false); err != nil {
+		// The Owner approved this exact deletion, so a global package is
+		// allowed here; the approval, not the scope, is the safeguard.
+		if err := s.DeleteVaultSkill(ctx, payload.SkillID, true); err != nil {
 			return err
 		}
 		s.recordPetWork(ctx, "skill_deleted", payload.SkillID, "approved")
