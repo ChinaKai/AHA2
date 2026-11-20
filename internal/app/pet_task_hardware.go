@@ -30,7 +30,7 @@ func (s *Service) PetHardwareResources(ctx context.Context) ([]PetHardwareResour
 		return nil, err
 	}
 	if !assistant.PetAllowViewTasks {
-		return nil, fmt.Errorf("主人未开启查看 AHA 信息权限")
+		return nil, fmt.Errorf("owner 未开启查看 AHA 信息权限")
 	}
 	items, err := s.store.HardwareResources(ctx)
 	if err != nil {
@@ -77,7 +77,7 @@ func (s *Service) PetRequestDeleteHardwareResource(ctx context.Context, resource
 		return domain.PetApproval{}, err
 	}
 	if !assistant.PetAllowManageSystem {
-		return domain.PetApproval{}, fmt.Errorf("主人未开启管理系统设置权限")
+		return domain.PetApproval{}, fmt.Errorf("owner 未开启管理系统设置权限")
 	}
 	resource, err := s.store.HardwareResource(ctx, strings.TrimSpace(resourceID))
 	if err != nil {

@@ -30,7 +30,7 @@ func (s *Service) PetRemoteTaskMirrors(ctx context.Context, projectID string) ([
 		return nil, err
 	}
 	if !assistant.PetAllowViewTasks {
-		return nil, fmt.Errorf("主人未开启查看其他任务信息权限")
+		return nil, fmt.Errorf("owner 未开启查看其他任务信息权限")
 	}
 	mirrors, err := s.store.RemoteTaskMirrors(ctx, strings.TrimSpace(projectID))
 	if err != nil {
@@ -63,7 +63,7 @@ func (s *Service) PetRetireRemoteTaskMirror(ctx context.Context, taskID string) 
 		return PetRemoteMirrorResult{}, err
 	}
 	if !assistant.PetAllowCreateTasks {
-		return PetRemoteMirrorResult{}, fmt.Errorf("主人未开启主动管理任务权限")
+		return PetRemoteMirrorResult{}, fmt.Errorf("owner 未开启主动管理任务权限")
 	}
 	mirror, err := s.store.RetireRemoteTaskMirror(ctx, taskID)
 	if err != nil {
@@ -95,7 +95,7 @@ func (s *Service) PetRetireRemoteWorkspaceMirror(ctx context.Context, workspaceI
 		return PetRemoteMirrorResult{}, err
 	}
 	if !assistant.PetAllowCreateWorkspaces {
-		return PetRemoteMirrorResult{}, fmt.Errorf("主人未开启主动管理项目/Workspace 权限")
+		return PetRemoteMirrorResult{}, fmt.Errorf("owner 未开启主动管理项目/Workspace 权限")
 	}
 	workspace, synchronized, err := s.store.RetireRemoteWorkspaceMirror(ctx, workspaceID)
 	if err != nil {

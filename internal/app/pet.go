@@ -448,7 +448,7 @@ func petActionsFromToolCalls(calls []gateway.ChatToolCall, limit int) []PetBrain
 }
 
 func petAutonomousMessage(english bool, idleMinutes int, page string, layout PetLayout) string {
-	runtimeState := "Web 前台（你可以使用 pet MCP 控制形象和主人互动）"
+	runtimeState := "Web 前台（你可以使用 pet MCP 控制形象和 owner 互动）"
 	if strings.Contains(page, "后台") {
 		runtimeState = "后台运行（不要调用 pet MCP 控制形象；专注推进自主议程）"
 	}
@@ -476,7 +476,7 @@ func petWakeActionContract(english bool) string {
 	if english {
 		return "\n\nThis is a work wake-up, not a status report. Call aha_pet_work_state, read inspection, open_tasks, core/agenda.md and pending approvals. Work through these in order:\n0) close the oldest pet-created open Task before new work: verify and complete/cancel it, or file one kind=owner_decision approval (payload task_id) for a real blocker; waiting/blocked needs a decision, failed gets one retry then escalation; never leave it silent;\n1) handle an event or pending item;\n2) if the owner must decide, create a kind=owner_decision approval with pet_request_approval and write a waiting item to core/agenda.md or core/loops.md; never only state it in the final answer, and create each decision once;\n3) if nothing can be advanced, reply NOOP; an improvement worth doing can go on the agenda or become a Task, but do not invent work to avoid NOOP, and do not re-check items that only wait on the Owner;\n4) NOOP is a valid result for a wake with nothing to do;\n5) final replies: add one compact inspection line from inspection (scope, result, changes, unclosed).\nDo not repeat the open-loop list or only summarize. Approvals/ideas are created once in the approval center; agenda/loops cite them, worklog keeps execution evidence. Do not copy the same body across layers."
 	}
-	return "\n\n这是工作唤醒，不是状态汇报。先调用 aha_pet_work_state，读取 inspection、open_tasks、core/agenda.md 和待审批项。按顺序处理：\n0) 先关闭最早的未闭环宠物任务：验证后完成/取消，或为真实阻塞提交一次 kind=owner_decision 审批（payload 带 task_id）；waiting/blocked 需要决定，failed 先重试一次再升级；不能静默停留；\n1) 有事件或待办：处理它；\n2) 需要主人决定：用 pet_request_approval 创建 kind=owner_decision 的待审批，并在 core/agenda.md 或 core/loops.md 写 waiting 项；不能只写在最终回复里，同一决策只创建一次；\n3) 没有可推进项：回复 NOOP；想到值得做的改进可以写进议程或建 Task，但不要为了不回 NOOP 而找事做，也不要把只等 owner 的事项再查一遍；\n4) 没有事可做时，NOOP 就是合格的结果；\n5) 最终回复附一行巡检摘要（范围、结果、变化、未闭环），数据来自 inspection。\n不要重复列出未闭环清单，不要只汇报。审批/想法只在审批中心创建一次；agenda/loops 只写引用和状态，worklog 只写执行证据，不要跨层复制正文。"
+	return "\n\n这是工作唤醒，不是状态汇报。先调用 aha_pet_work_state，读取 inspection、open_tasks、core/agenda.md 和待审批项。按顺序处理：\n0) 先关闭最早的未闭环宠物任务：验证后完成/取消，或为真实阻塞提交一次 kind=owner_decision 审批（payload 带 task_id）；waiting/blocked 需要决定，failed 先重试一次再升级；不能静默停留；\n1) 有事件或待办：处理它；\n2) 需要 owner 决定：用 pet_request_approval 创建 kind=owner_decision 的待审批，并在 core/agenda.md 或 core/loops.md 写 waiting 项；不能只写在最终回复里，同一决策只创建一次；\n3) 没有可推进项：回复 NOOP；想到值得做的改进可以写进议程或建 Task，但不要为了不回 NOOP 而找事做，也不要把只等 owner 的事项再查一遍；\n4) 没有事可做时，NOOP 就是合格的结果；\n5) 最终回复附一行巡检摘要（范围、结果、变化、未闭环），数据来自 inspection。\n不要重复列出未闭环清单，不要只汇报。审批/想法只在审批中心创建一次；agenda/loops 只写引用和状态，worklog 只写执行证据，不要跨层复制正文。"
 }
 
 func (s *Service) petUsesEnglish(ctx context.Context) bool {
@@ -1228,7 +1228,7 @@ func ahaPetTools() []gateway.ChatTool {
 		{Name: "aha_capabilities", Description: "按当前权限返回可用工具目录；需要知道有哪些命令时调用，不要凭记忆猜", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{},
 		}},
-		{Name: "aha_request_permission_change", Description: "提交权限变更审批；主人批准后才生效，宠物不能自行改权限", Parameters: map[string]any{
+		{Name: "aha_request_permission_change", Description: "提交权限变更审批；owner 批准后才生效，宠物不能自行改权限", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"permission": map[string]any{"type": "string", "enum": []string{
 					"view_tasks", "create_tasks", "create_workspaces", "message_tasks",
@@ -1337,13 +1337,13 @@ func ahaPetTools() []gateway.ChatTool {
 				},
 			}, "required": []string{"skill_id"},
 		}},
-		{Name: "aha_delete_skill", Description: "提交删除项目级或全局 Skill 的审批；主人批准后才删除", Parameters: map[string]any{
+		{Name: "aha_delete_skill", Description: "提交删除项目级或全局 Skill 的审批；owner 批准后才删除", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"skill_id": map[string]any{"type": "string"},
 				"reason":   map[string]any{"type": "string", "description": "为什么需要删除；必填"},
 			}, "required": []string{"skill_id", "reason"},
 		}},
-		{Name: "aha_delete_knowledge", Description: "提交删除知识条目审批（支持 project/global）；主人批准后才删除，空 AHA1 目录会自动清理", Parameters: map[string]any{
+		{Name: "aha_delete_knowledge", Description: "提交删除知识条目审批（支持 project/global）；owner 批准后才删除，空 AHA1 目录会自动清理", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"knowledge_id": map[string]any{"type": "string"},
 				"reason":       map[string]any{"type": "string", "description": "为什么需要删除；必填"},
@@ -1355,7 +1355,7 @@ func ahaPetTools() []gateway.ChatTool {
 		{Name: "aha_prompt_template_detail", Description: "查看 Prompt 模板内容；受保护的身份/安全/协议模板只读", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{"template_id": map[string]any{"type": "string"}}, "required": []string{"template_id"},
 		}},
-		{Name: "aha_update_prompt_template", Description: "提交 Prompt 模板修改审批；主人批准后才写入，身份/安全/协议模板不允许修改", Parameters: map[string]any{
+		{Name: "aha_update_prompt_template", Description: "提交 Prompt 模板修改审批；owner 批准后才写入，身份/安全/协议模板不允许修改", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"template_id": map[string]any{"type": "string"},
 				"content":     map[string]any{"type": "string"},
@@ -1374,7 +1374,7 @@ func ahaPetTools() []gateway.ChatTool {
 		{Name: "aha_channel_contacts", Description: "只读查看渠道目的地的联系人", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{"conversation_id": map[string]any{"type": "string"}}, "required": []string{"conversation_id"},
 		}},
-		{Name: "aha_send_channel_message", Description: "提交对外渠道发送审批；主人批准后才发送到已绑定的群聊渠道", Parameters: map[string]any{
+		{Name: "aha_send_channel_message", Description: "提交对外渠道发送审批；owner 批准后才发送到已绑定的群聊渠道", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"task_id":                   map[string]any{"type": "string"},
 				"message":                   map[string]any{"type": "string"},
@@ -1383,7 +1383,7 @@ func ahaPetTools() []gateway.ChatTool {
 				"attachment_ids":            map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 			}, "required": []string{"task_id", "message", "reason"},
 		}},
-		{Name: "aha_set_channel_enabled", Description: "提交启用/停用渠道审批；主人批准后才执行", Parameters: map[string]any{
+		{Name: "aha_set_channel_enabled", Description: "提交启用/停用渠道审批；owner 批准后才执行", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"instance_id": map[string]any{"type": "string"},
 				"enabled":     map[string]any{"type": "boolean"},
@@ -1410,7 +1410,7 @@ func ahaPetTools() []gateway.ChatTool {
 		{Name: "aha_system_settings", Description: "只读查看系统安全设置和代理设置（代理凭据会脱敏）", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{},
 		}},
-		{Name: "aha_update_security_settings", Description: "提交安全设置修改审批；主人批准后立即应用 access_scope 和 Origin 校验", Parameters: map[string]any{
+		{Name: "aha_update_security_settings", Description: "提交安全设置修改审批；owner 批准后立即应用 access_scope 和 Origin 校验", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"validate_origin": map[string]any{"type": "boolean"},
 				"access_scope":    map[string]any{"type": "string", "enum": []string{"local", "lan"}},
@@ -1440,7 +1440,7 @@ func ahaPetTools() []gateway.ChatTool {
 				"reason":             map[string]any{"type": "string", "description": "修改 api_key 等凭据时必填；至少 8 个字符"},
 			}, "required": []string{"provider_id", "name", "base_url"},
 		}},
-		{Name: "aha_delete_provider", Description: "提交删除 Provider 审批；主人批准后才删除，且不能有模型引用", Parameters: map[string]any{
+		{Name: "aha_delete_provider", Description: "提交删除 Provider 审批；owner 批准后才删除，且不能有模型引用", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"provider_id": map[string]any{"type": "string"},
 				"reason":      map[string]any{"type": "string", "description": "为什么删除；至少 8 个字符"},
@@ -1478,13 +1478,13 @@ func ahaPetTools() []gateway.ChatTool {
 				"default_env_group_id":     map[string]any{"type": "string"},
 			}, "required": []string{"model_id"},
 		}},
-		{Name: "aha_delete_model", Description: "提交删除模型审批；主人批准后才删除", Parameters: map[string]any{
+		{Name: "aha_delete_model", Description: "提交删除模型审批；owner 批准后才删除", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"model_id": map[string]any{"type": "string"},
 				"reason":   map[string]any{"type": "string", "description": "为什么删除；至少 8 个字符"},
 			}, "required": []string{"model_id", "reason"},
 		}},
-		{Name: "aha_delete_models", Description: "提交批量删除模型审批：只生成一张审批，主人批准后在同一个事务里删除全部；任一模型已不存在时整批不删除", Parameters: map[string]any{
+		{Name: "aha_delete_models", Description: "提交批量删除模型审批：只生成一张审批，owner 批准后在同一个事务里删除全部；任一模型已不存在时整批不删除", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"model_ids": map[string]any{
 					"type": "array", "items": map[string]any{"type": "string"}, "minItems": 1, "maxItems": 100,
@@ -1517,7 +1517,7 @@ func ahaPetTools() []gateway.ChatTool {
 				"id":     map[string]any{"type": "string", "description": "Provider ID 或 Env Group ID"},
 			}, "required": []string{"target", "id"},
 		}},
-		{Name: "aha_delete_env_group", Description: "提交删除 Env Group 审批；主人批准后才删除", Parameters: map[string]any{
+		{Name: "aha_delete_env_group", Description: "提交删除 Env Group 审批；owner 批准后才删除", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"env_group_id": map[string]any{"type": "string"},
 				"reason":       map[string]any{"type": "string", "description": "为什么删除；至少 8 个字符"},
@@ -1634,7 +1634,7 @@ func ahaPetTools() []gateway.ChatTool {
 				"knowledge_policy":    map[string]any{"type": "string", "enum": []string{"enabled", "disabled"}},
 			}, "required": []string{"project_id"},
 		}},
-		{Name: "aha_delete_project", Description: "提交删除项目审批；主人批准后才会删除项目及其本地任务和 Workspace", Parameters: map[string]any{
+		{Name: "aha_delete_project", Description: "提交删除项目审批；owner 批准后才会删除项目及其本地任务和 Workspace", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"project_id": map[string]any{"type": "string"},
 				"reason":     map[string]any{"type": "string", "description": "为什么删除；至少 8 个字符"},
@@ -1655,7 +1655,7 @@ func ahaPetTools() []gateway.ChatTool {
 				"clear_ssh_password": map[string]any{"type": "boolean"},
 			}, "required": []string{"workspace_id"},
 		}},
-		{Name: "aha_delete_workspace", Description: "提交删除 Workspace 审批；主人批准后才会删除 Workspace 及其本地任务", Parameters: map[string]any{
+		{Name: "aha_delete_workspace", Description: "提交删除 Workspace 审批；owner 批准后才会删除 Workspace 及其本地任务", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"workspace_id": map[string]any{"type": "string"},
 				"reason":       map[string]any{"type": "string", "description": "为什么删除；至少 8 个字符"},
@@ -1703,7 +1703,7 @@ func ahaPetTools() []gateway.ChatTool {
 		{Name: "aha_hardware_resources", Description: "只读列出可绑定硬件资源（不返回凭据）", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{},
 		}},
-		{Name: "aha_delete_hardware_resource", Description: "提交删除硬件资源审批；主人批准后才删除", Parameters: map[string]any{
+		{Name: "aha_delete_hardware_resource", Description: "提交删除硬件资源审批；owner 批准后才删除", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"resource_id": map[string]any{"type": "string"},
 				"reason":      map[string]any{"type": "string", "description": "为什么删除；至少 8 个字符"},
@@ -1871,7 +1871,7 @@ func ahaPetTools() []gateway.ChatTool {
 				"enabled":             map[string]any{"type": "boolean"},
 			}, "required": []string{"binding_id"},
 		}},
-		{Name: "aha_delete_mail_resource", Description: "提交删除邮件账号/模板/绑定的审批；主人批准后才执行。模板按现有规则归档，历史版本保留", Parameters: map[string]any{
+		{Name: "aha_delete_mail_resource", Description: "提交删除邮件账号/模板/绑定的审批；owner 批准后才执行。模板按现有规则归档，历史版本保留", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"kind":        map[string]any{"type": "string", "enum": []string{"account", "template", "binding"}},
 				"resource_id": map[string]any{"type": "string"},
@@ -1931,7 +1931,7 @@ func ahaPetTools() []gateway.ChatTool {
 				"skill_ids":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "可选；创建时生效。为空时自动附加项目或全局可用的 tiered-code-review Skill；找不到时 Review Task 照常创建并在 warnings 中说明"},
 			}, "required": []string{"task_id", "review_model_id"},
 		}},
-		{Name: "aha_delete_task", Description: "提交删除 Task 审批；主人批准后才会删除", Parameters: map[string]any{
+		{Name: "aha_delete_task", Description: "提交删除 Task 审批；owner 批准后才会删除", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"task_id": map[string]any{"type": "string"},
 				"reason":  map[string]any{"type": "string", "description": "为什么删除；至少 8 个字符"},
@@ -2017,13 +2017,13 @@ func ahaPetTools() []gateway.ChatTool {
 				"command":     map[string]any{"type": "string", "description": "stdio 可执行文件；不能是 shell、cmd/.bat/.ps1 或脚本宿主"},
 				"args":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 				"url":         map[string]any{"type": "string", "description": "http(s) URL；不能内嵌凭据或查询参数"},
-				"env_keys":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "只填键名；值由主人在 Web 或 Secret Store 填写"},
-				"header_keys": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "只填键名；值由主人在 Web 或 Secret Store 填写"},
+				"env_keys":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "只填键名；值由 owner 在 Web 或 Secret Store 填写"},
+				"header_keys": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "只填键名；值由 owner 在 Web 或 Secret Store 填写"},
 				"enabled":     map[string]any{"type": "boolean"},
 				"reason":      map[string]any{"type": "string", "description": "为什么需要新增；至少 8 个字符"},
 			}, "required": []string{"name", "transport", "reason"},
 		}},
-		{Name: "aha_request_mcp_server_update", Description: "提交修改外部 MCP 的 Owner 审批；只创建审批，不改配置。secret 值不进入审批，由主人或 Secret Store 保留。内置 MCP 拒绝修改。", Parameters: map[string]any{
+		{Name: "aha_request_mcp_server_update", Description: "提交修改外部 MCP 的 Owner 审批；只创建审批，不改配置。secret 值不进入审批，由 owner 或 Secret Store 保留。内置 MCP 拒绝修改。", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"server_id":   map[string]any{"type": "string"},
 				"name":        map[string]any{"type": "string"},
@@ -2050,7 +2050,7 @@ func ahaPetTools() []gateway.ChatTool {
 		{Name: "pet_unwatch_task", Description: "取消关注一个 Task 的状态变化", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{"task_id": map[string]any{"type": "string"}}, "required": []string{"task_id"},
 		}},
-		{Name: "pet_submit_idea", Description: "提交一个想法审批；主人同意后再实现，不自动执行或授权", Parameters: map[string]any{
+		{Name: "pet_submit_idea", Description: "提交一个想法审批；owner 同意后再实现，不自动执行或授权", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"title":              map[string]any{"type": "string"},
 				"summary":            map[string]any{"type": "string"},
@@ -2061,7 +2061,7 @@ func ahaPetTools() []gateway.ChatTool {
 				"permissions_needed": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 			}, "required": []string{"title", "summary", "reason"},
 		}},
-		{Name: "pet_request_approval", Description: "向主人申请一次需要授权的操作；只创建审批，不执行操作；任务相关审批在 payload 中带 task_id", Parameters: map[string]any{
+		{Name: "pet_request_approval", Description: "向 owner 申请一次需要授权的操作；只创建审批，不执行操作；任务相关审批在 payload 中带 task_id", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"kind":    map[string]any{"type": "string", "description": "操作类型，例如 external_channel_send、delete_task、owner_decision"},
 				"title":   map[string]any{"type": "string"},
@@ -2121,7 +2121,7 @@ func (s *Service) petMCPTool(ctx context.Context, callerTaskID, name string, arg
 			return "", err
 		}
 		if !petToolAllowed(assistant, name) {
-			return "", codedErrorf(ErrCodePetPermissionDenied, http.StatusForbidden, "主人未开启该工具权限")
+			return "", codedErrorf(ErrCodePetPermissionDenied, http.StatusForbidden, "owner 未开启该工具权限")
 		}
 	}
 	switch name {

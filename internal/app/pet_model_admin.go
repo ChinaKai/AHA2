@@ -21,7 +21,7 @@ func (s *Service) petManageModels(ctx context.Context) (domain.OwnerAssistant, e
 		return domain.OwnerAssistant{}, err
 	}
 	if !assistant.PetAllowManageModels {
-		return domain.OwnerAssistant{}, fmt.Errorf("主人未开启管理模型/Provider 权限")
+		return domain.OwnerAssistant{}, fmt.Errorf("owner 未开启管理模型/Provider 权限")
 	}
 	return assistant, nil
 }

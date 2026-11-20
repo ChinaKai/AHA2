@@ -61,7 +61,7 @@ func (s *Service) petKnowledgeReadable(ctx context.Context) (domain.OwnerAssista
 		return domain.OwnerAssistant{}, err
 	}
 	if !assistant.PetAllowViewTasks && !assistant.PetAllowManageKnowledge {
-		return domain.OwnerAssistant{}, fmt.Errorf("主人未开启查看知识信息权限")
+		return domain.OwnerAssistant{}, fmt.Errorf("owner 未开启查看知识信息权限")
 	}
 	return assistant, nil
 }
@@ -76,7 +76,7 @@ func (s *Service) petSkillListReadable(ctx context.Context) (domain.OwnerAssista
 		return domain.OwnerAssistant{}, err
 	}
 	if !assistant.PetAllowViewTasks && !assistant.PetAllowManageKnowledge && !assistant.PetAllowCreateTasks {
-		return domain.OwnerAssistant{}, fmt.Errorf("主人未开启查看 Skill 信息权限")
+		return domain.OwnerAssistant{}, fmt.Errorf("owner 未开启查看 Skill 信息权限")
 	}
 	return assistant, nil
 }
@@ -87,7 +87,7 @@ func (s *Service) petKnowledgeWritable(ctx context.Context) (domain.OwnerAssista
 		return domain.OwnerAssistant{}, err
 	}
 	if !assistant.PetAllowManageKnowledge {
-		return domain.OwnerAssistant{}, fmt.Errorf("主人未开启管理知识/Skill/Prompt 权限")
+		return domain.OwnerAssistant{}, fmt.Errorf("owner 未开启管理知识/Skill/Prompt 权限")
 	}
 	return assistant, nil
 }

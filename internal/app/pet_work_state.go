@@ -606,7 +606,7 @@ func petOpenTaskAttentionReason(status domain.TaskStatus, lastTurnStatus domain.
 		if lastTurnStatus == domain.TurnSucceeded {
 			return "waiting_user：等待下一步指令"
 		}
-		return "waiting_user：等待主人决定或补充信息"
+		return "waiting_user：等待 owner 决定或补充信息"
 	case domain.TaskBlocked:
 		return "blocked：需要解除阻塞条件"
 	case domain.TaskFailed:

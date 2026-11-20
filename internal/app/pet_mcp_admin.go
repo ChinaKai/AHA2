@@ -635,7 +635,7 @@ func petMCPServerCreateSummary(config petMCPServerApprovalPayload) string {
 		}
 	}
 	return truncateAssistantText(fmt.Sprintf(
-		"宠物申请新增 %s MCP「%s」（%s）。%s。批准前请确认来源可信：外部 MCP 会以 AHA 服务账号权限运行，stdio 等价于执行任意命令。env/header 只记录键名 %s，secret 值需由主人在批准后于 Web 填写或提前放入 Secret Store（mcp/<server_id>/env/<KEY>）。",
+		"宠物申请新增 %s MCP「%s」（%s）。%s。批准前请确认来源可信：外部 MCP 会以 AHA 服务账号权限运行，stdio 等价于执行任意命令。env/header 只记录键名 %s，secret 值需由 owner 在批准后于 Web 填写或提前放入 Secret Store（mcp/<server_id>/env/<KEY>）。",
 		config.Transport, truncateAssistantText(config.Name, 80), config.ServerID, detail,
 		petMCPKeySummary(config.EnvKeys, config.HeaderKeys),
 	), 1900)
@@ -681,7 +681,7 @@ func petMCPServerUpdateSummary(existing domain.MCPServer, config petMCPServerApp
 		truncateAssistantText(config.Name, 80), config.ServerID, strings.Join(parts, "；"))
 	if petMCPEndpointChanged(existing, config.Transport, config.Command, config.Args, config.URL) {
 		if count := petMCPExistingSecretCount(existing); count > 0 {
-			summary += fmt.Sprintf(" 注意：端点已变更，现有 %d 个 env/header secret 不会自动沿用旧配置值；Secret Store 中已有的值仍会使用，其余需主人重新填写。", count)
+			summary += fmt.Sprintf(" 注意：端点已变更，现有 %d 个 env/header secret 不会自动沿用旧配置值；Secret Store 中已有的值仍会使用，其余需 owner 重新填写。", count)
 		} else {
 			summary += " 注意：端点已变更。"
 		}

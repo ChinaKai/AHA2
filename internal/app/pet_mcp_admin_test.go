@@ -157,7 +157,7 @@ func TestPetMCPAdminRequiresManageSystem(t *testing.T) {
 	enablePetHardwareTestSettings(t, fixture, false)
 	for _, name := range petMCPAdminToolNames {
 		_, err := fixture.service.PetMCPTool(fixture.ctx, name, json.RawMessage(`{}`))
-		if err == nil || !strings.Contains(err.Error(), "主人未开启") {
+		if err == nil || !strings.Contains(err.Error(), "owner 未开启") {
 			t.Fatalf("%s without manage_system err=%v", name, err)
 		}
 	}

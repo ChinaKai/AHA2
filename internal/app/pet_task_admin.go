@@ -21,7 +21,7 @@ func (s *Service) petManageableTask(ctx context.Context, taskID string) (domain.
 	}
 	if !assistant.PetAllowCreateTasks {
 		return domain.Task{}, domain.OwnerAssistant{}, codedErrorf(
-			ErrCodePetPermissionDenied, http.StatusForbidden, "主人未开启主动创建/管理任务权限",
+			ErrCodePetPermissionDenied, http.StatusForbidden, "owner 未开启主动创建/管理任务权限",
 		)
 	}
 	taskID = strings.TrimSpace(taskID)
@@ -185,7 +185,7 @@ func (s *Service) PetUpdateTask(ctx context.Context, input PetUpdateTaskInput) (
 		}
 		if err := s.store.UpdateTaskGoalWithEvent(ctx, domain.TaskGoalChange{
 			TaskID: task.ID, GoalAfter: goal, ChangeType: "revise",
-			Reason: "宠物代主人修改目标", CreatedAt: s.now().UTC(),
+			Reason: "宠物代 owner 修改目标", CreatedAt: s.now().UTC(),
 		}); err != nil {
 			return task, err
 		}
@@ -233,7 +233,7 @@ func (s *Service) PetDeleteTask(ctx context.Context, taskID string, reason ...st
 	}
 	return s.CreatePetApproval(ctx, PetApprovalInput{
 		Kind: "delete_task", Title: "删除 Task「" + task.Title + "」",
-		Summary: "宠物请求删除这个 Task，需要主人确认。",
+		Summary: "宠物请求删除这个 Task，需要 owner 确认。",
 		Reason:  reasonText, Risk: "high", Payload: mustJSON(map[string]string{"task_id": task.ID}),
 	})
 }
@@ -352,7 +352,7 @@ func (s *Service) petViewableTask(ctx context.Context, taskID string) (domain.Ta
 		return domain.Task{}, err
 	}
 	if !assistant.PetAllowViewTasks {
-		return domain.Task{}, fmt.Errorf("主人未开启查看其他任务信息权限")
+		return domain.Task{}, fmt.Errorf("owner 未开启查看其他任务信息权限")
 	}
 	taskID = strings.TrimSpace(taskID)
 	if taskID == "" {

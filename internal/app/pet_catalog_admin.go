@@ -22,7 +22,7 @@ func (s *Service) petManageableProject(ctx context.Context, projectID string) (d
 		return domain.Project{}, domain.OwnerAssistant{}, err
 	}
 	if !assistant.PetAllowCreateWorkspaces {
-		return domain.Project{}, domain.OwnerAssistant{}, fmt.Errorf("主人未开启主动管理项目/Workspace 权限")
+		return domain.Project{}, domain.OwnerAssistant{}, fmt.Errorf("owner 未开启主动管理项目/Workspace 权限")
 	}
 	projectID = strings.TrimSpace(projectID)
 	if projectID == "" {
@@ -107,7 +107,7 @@ func (s *Service) PetDeleteProject(ctx context.Context, projectID string, reason
 	}
 	return s.CreatePetApproval(ctx, PetApprovalInput{
 		Kind: "delete_project", Title: "删除项目「" + project.Name + "」",
-		Summary: "宠物请求删除项目及其本地 Task/Workspace，需要主人确认。",
+		Summary: "宠物请求删除项目及其本地 Task/Workspace，需要 owner 确认。",
 		Reason:  reasonText, Risk: "high", Payload: mustJSON(map[string]string{"project_id": project.ID}),
 	})
 }
@@ -202,7 +202,7 @@ func (s *Service) petManageableWorkspace(ctx context.Context, workspaceID string
 		return domain.Workspace{}, domain.OwnerAssistant{}, err
 	}
 	if !assistant.PetAllowCreateWorkspaces {
-		return domain.Workspace{}, domain.OwnerAssistant{}, fmt.Errorf("主人未开启主动管理项目/Workspace 权限")
+		return domain.Workspace{}, domain.OwnerAssistant{}, fmt.Errorf("owner 未开启主动管理项目/Workspace 权限")
 	}
 	workspaceID = strings.TrimSpace(workspaceID)
 	if workspaceID == "" {
@@ -349,7 +349,7 @@ func (s *Service) PetDeleteWorkspace(ctx context.Context, workspaceID string, re
 	}
 	return s.CreatePetApproval(ctx, PetApprovalInput{
 		Kind: "delete_workspace", Title: "删除 Workspace「" + workspace.Name + "」",
-		Summary: "宠物请求删除 Workspace 及其本地 Task，需要主人确认。",
+		Summary: "宠物请求删除 Workspace 及其本地 Task，需要 owner 确认。",
 		Reason:  reasonText, Risk: "high", Payload: mustJSON(map[string]string{"workspace_id": workspace.ID}),
 	})
 }

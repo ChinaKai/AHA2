@@ -38,7 +38,7 @@ func (s *Service) PetProjectCatalog(ctx context.Context) ([]PetProjectBrief, err
 		return nil, err
 	}
 	if !assistant.PetAllowViewTasks && !assistant.PetAllowCreateTasks && !assistant.PetAllowCreateWorkspaces {
-		return nil, fmt.Errorf("主人未开启查看项目/任务信息权限")
+		return nil, fmt.Errorf("owner 未开启查看项目/任务信息权限")
 	}
 	projects, err := s.store.ListProjects(ctx)
 	if err != nil {
@@ -105,7 +105,7 @@ func (s *Service) PetCreateTask(ctx context.Context, input PetCreateTaskInput) (
 		return domain.Task{}, err
 	}
 	if !assistant.PetAllowCreateTasks {
-		return domain.Task{}, fmt.Errorf("主人未开启主动创建任务权限")
+		return domain.Task{}, fmt.Errorf("owner 未开启主动创建任务权限")
 	}
 	projectID := strings.TrimSpace(input.ProjectID)
 	workspaceID := strings.TrimSpace(input.WorkspaceID)
@@ -204,7 +204,7 @@ func (s *Service) PetStartTask(ctx context.Context, taskID string) (domain.Task,
 		return domain.Task{}, err
 	}
 	if !assistant.PetAllowCreateTasks {
-		return domain.Task{}, fmt.Errorf("主人未开启主动创建任务权限")
+		return domain.Task{}, fmt.Errorf("owner 未开启主动创建任务权限")
 	}
 	taskID = strings.TrimSpace(taskID)
 	if taskID == "" {
@@ -254,7 +254,7 @@ func (s *Service) PetCreateProject(ctx context.Context, input PetCreateProjectIn
 		return domain.Project{}, err
 	}
 	if !assistant.PetAllowCreateWorkspaces {
-		return domain.Project{}, fmt.Errorf("主人未开启主动创建项目/Workspace 权限")
+		return domain.Project{}, fmt.Errorf("owner 未开启主动创建项目/Workspace 权限")
 	}
 	name := strings.TrimSpace(input.Name)
 	if name == "" || len([]rune(name)) > 120 {
@@ -309,7 +309,7 @@ func (s *Service) PetCreateWorkspace(ctx context.Context, input PetCreateWorkspa
 		return domain.Workspace{}, err
 	}
 	if !assistant.PetAllowCreateWorkspaces {
-		return domain.Workspace{}, fmt.Errorf("主人未开启主动创建项目/Workspace 权限")
+		return domain.Workspace{}, fmt.Errorf("owner 未开启主动创建项目/Workspace 权限")
 	}
 	projectID := strings.TrimSpace(input.ProjectID)
 	name := strings.TrimSpace(input.Name)
@@ -400,7 +400,7 @@ func (s *Service) PetSendTaskMessage(ctx context.Context, input PetSendTaskMessa
 		return domain.Turn{}, err
 	}
 	if !assistant.PetAllowMessageTasks {
-		return domain.Turn{}, fmt.Errorf("主人未开启给其他任务发消息权限")
+		return domain.Turn{}, fmt.Errorf("owner 未开启给其他任务发消息权限")
 	}
 	taskID := strings.TrimSpace(input.TaskID)
 	content := strings.TrimSpace(input.Content)
@@ -422,7 +422,7 @@ func (s *Service) PetSendTaskMessage(ctx context.Context, input PetSendTaskMessa
 	}
 	if task.Status == domain.TaskDraft {
 		if !assistant.PetAllowCreateTasks {
-			return domain.Turn{}, fmt.Errorf("目标 Task 还是草稿；主人未开启启动任务权限")
+			return domain.Turn{}, fmt.Errorf("目标 Task 还是草稿；owner 未开启启动任务权限")
 		}
 		if _, err := s.StartTask(ctx, task.ID); err != nil {
 			return domain.Turn{}, fmt.Errorf("启动目标 Task 失败：%w", err)

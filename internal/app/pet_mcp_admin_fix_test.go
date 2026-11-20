@@ -207,7 +207,7 @@ func TestPetMCPAdminExecutionRechecksManageSystem(t *testing.T) {
 
 	enablePetHardwareTestSettings(t, fixture, false)
 	_, err := fixture.service.ResolvePetApproval(fixture.ctx, approval.ID, "approve", "")
-	if err == nil || !strings.Contains(err.Error(), "主人未开启") {
+	if err == nil || !strings.Contains(err.Error(), "owner 未开启") {
 		t.Fatalf("approval executed without manage_system: %v", err)
 	}
 	if _, err := fixture.service.MCPServerByID(fixture.ctx, "mcp_revoked"); err == nil {

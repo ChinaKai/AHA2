@@ -491,7 +491,7 @@ func (s *Service) finishPetApprovalResolution(ctx context.Context, item domain.P
 		case petApprovalCancelled:
 			decisionText = "取消"
 		}
-		message = fmt.Sprintf("[审批结果] 主人%s了审批「%s」（%s）。", decisionText, item.Title, item.ID)
+		message = fmt.Sprintf("[审批结果] owner%s了审批「%s」（%s）。", decisionText, item.Title, item.ID)
 		if item.Resolution != "" {
 			message += " 备注：" + item.Resolution
 		}
@@ -773,7 +773,7 @@ func (s *Service) PetAHAOverview(ctx context.Context) (PetAHAOverview, error) {
 		overview.DegradedChannels = append(overview.DegradedChannels, channel.Name+"（"+channel.Status+"）")
 	}
 	if !assistant.PetAllowViewTasks {
-		overview.Note = "主人未开启查看其他任务信息权限；这里只返回汇总数量。"
+		overview.Note = "owner 未开启查看其他任务信息权限；这里只返回汇总数量。"
 		return overview, nil
 	}
 	sort.SliceStable(attention, func(i, j int) bool { return attention[i].UpdatedAt.After(attention[j].UpdatedAt) })
@@ -833,7 +833,7 @@ func (s *Service) PetTaskDetail(ctx context.Context, taskID string) (PetTaskDeta
 		return PetTaskDetail{}, err
 	}
 	if !assistant.PetAllowViewTasks {
-		return PetTaskDetail{}, fmt.Errorf("主人未开启查看其他任务信息权限")
+		return PetTaskDetail{}, fmt.Errorf("owner 未开启查看其他任务信息权限")
 	}
 	taskID = strings.TrimSpace(taskID)
 	if taskID == "" {

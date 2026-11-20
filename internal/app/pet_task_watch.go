@@ -193,7 +193,7 @@ func (s *Service) PetWatchTask(ctx context.Context, taskID string) (domain.PetTa
 		return domain.PetTaskWatch{}, fmt.Errorf("不能关注宠物自己的 Task")
 	}
 	if watch, watchErr := s.store.PetTaskWatch(ctx, task.ID); watchErr == nil && watch.Ignored {
-		return domain.PetTaskWatch{}, fmt.Errorf("该任务已被主人忽略，不能重新关注")
+		return domain.PetTaskWatch{}, fmt.Errorf("该任务已被 owner 忽略，不能重新关注")
 	}
 	now := s.now().UTC()
 	if err := s.store.UpsertPetTaskWatch(ctx, task.ID, "manual", now); err != nil {
@@ -206,7 +206,7 @@ func (s *Service) PetWatchTask(ctx context.Context, taskID string) (domain.PetTa
 	// An ignore may have landed between the pre-check and the upsert. The
 	// conditional upsert preserves it, so report the same error as before.
 	if watch.Ignored {
-		return domain.PetTaskWatch{}, fmt.Errorf("该任务已被主人忽略，不能重新关注")
+		return domain.PetTaskWatch{}, fmt.Errorf("该任务已被 owner 忽略，不能重新关注")
 	}
 	return watch, nil
 }
@@ -217,7 +217,7 @@ func (s *Service) PetUnwatchTask(ctx context.Context, taskID string) error {
 		return err
 	}
 	if watch, watchErr := s.store.PetTaskWatch(ctx, task.ID); watchErr == nil && watch.Ignored {
-		return fmt.Errorf("该任务已被主人忽略，请由主人在宠物工作台取消关注")
+		return fmt.Errorf("该任务已被 owner 忽略，请由 owner 在宠物工作台取消关注")
 	}
 	return s.store.DeletePetTaskWatch(ctx, task.ID)
 }

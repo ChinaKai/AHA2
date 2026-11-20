@@ -46,7 +46,7 @@ func (s *Service) PetRequestCodeReview(ctx context.Context, input PetRequestCode
 		return PetCodeReviewResult{}, err
 	}
 	if !assistant.PetAllowCreateTasks {
-		return PetCodeReviewResult{}, fmt.Errorf("主人未开启主动创建任务权限")
+		return PetCodeReviewResult{}, fmt.Errorf("owner 未开启主动创建任务权限")
 	}
 	sourceID := strings.TrimSpace(input.TaskID)
 	if sourceID == "" || sourceID == petTaskID {
@@ -205,7 +205,7 @@ func petCodeReviewRequest(source domain.Task, focus, sourceAgent string) string 
 		b.WriteString("源 Task 原地执行，直接检查当前 Workspace 的改动。\n")
 	}
 	if strings.TrimSpace(focus) != "" {
-		fmt.Fprintf(&b, "主人额外关注：%s\n", strings.TrimSpace(focus))
+		fmt.Fprintf(&b, "owner 额外关注：%s\n", strings.TrimSpace(focus))
 	}
 	b.WriteString("\n请检查源 Task 的完整改动（git diff、变更文件、测试和构建证据），重点看：正确性、回归风险、测试覆盖、安全与数据风险。\n")
 	b.WriteString("最终结果第一行必须是以下二选一：\n")

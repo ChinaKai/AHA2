@@ -70,7 +70,7 @@ func (s *Service) petChannelReadable(ctx context.Context) (domain.OwnerAssistant
 		return domain.OwnerAssistant{}, err
 	}
 	if !assistant.PetAllowViewTasks && !assistant.PetAllowManageChannels {
-		return domain.OwnerAssistant{}, fmt.Errorf("主人未开启查看渠道信息权限")
+		return domain.OwnerAssistant{}, fmt.Errorf("owner 未开启查看渠道信息权限")
 	}
 	return assistant, nil
 }
@@ -81,7 +81,7 @@ func (s *Service) petChannelWritable(ctx context.Context) (domain.OwnerAssistant
 		return domain.OwnerAssistant{}, err
 	}
 	if !assistant.PetAllowManageChannels {
-		return domain.OwnerAssistant{}, fmt.Errorf("主人未开启管理渠道权限")
+		return domain.OwnerAssistant{}, fmt.Errorf("owner 未开启管理渠道权限")
 	}
 	return assistant, nil
 }

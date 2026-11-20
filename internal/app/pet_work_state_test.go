@@ -349,7 +349,7 @@ func TestPetWorkStateReviewLookupIsBatched(t *testing.T) {
 
 func TestPetOpenTaskAttentionReasonSeparatesWaitingKinds(t *testing.T) {
 	const (
-		awaitingDecision = "waiting_user：等待主人决定或补充信息"
+		awaitingDecision = "waiting_user：等待 owner 决定或补充信息"
 		awaitingNext     = "waiting_user：等待下一步指令"
 		underReview      = "waiting_user：评审中 task-777"
 	)

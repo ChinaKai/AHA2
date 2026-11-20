@@ -346,7 +346,7 @@ func TestPetHardwareResourcesRequireManageSystem(t *testing.T) {
 
 	args := json.RawMessage(`{"description":"x","mode":"serial","serial":{"device":"/dev/ttyS0","baudrate":9600}}`)
 	if _, err := fixture.service.PetMCPTool(fixture.ctx, "aha_create_hardware_resource", args); err == nil ||
-		!strings.Contains(err.Error(), "主人未开启") {
+		!strings.Contains(err.Error(), "owner 未开启") {
 		t.Fatalf("create without manage_system err=%v", err)
 	}
 	var input PetHardwareResourceInput

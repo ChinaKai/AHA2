@@ -34,7 +34,7 @@ func (s *Service) PetTakeoverRemoteWorkspace(ctx context.Context, input PetTakeo
 		return domain.Workspace{}, err
 	}
 	if !assistant.PetAllowCreateWorkspaces {
-		return domain.Workspace{}, fmt.Errorf("主人未开启主动管理项目/Workspace 权限")
+		return domain.Workspace{}, fmt.Errorf("owner 未开启主动管理项目/Workspace 权限")
 	}
 	source, err := s.store.Workspace(ctx, strings.TrimSpace(input.WorkspaceID))
 	if err != nil {
@@ -141,7 +141,7 @@ func (s *Service) PetTakeoverRemoteTask(ctx context.Context, input PetTakeoverTa
 		return domain.Task{}, nil, err
 	}
 	if !assistant.PetAllowCreateTasks {
-		return domain.Task{}, nil, fmt.Errorf("主人未开启主动创建/管理任务权限")
+		return domain.Task{}, nil, fmt.Errorf("owner 未开启主动创建/管理任务权限")
 	}
 	taskID := strings.TrimSpace(input.TaskID)
 	if taskID == "" {

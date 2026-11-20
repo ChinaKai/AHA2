@@ -68,7 +68,7 @@ func (s *Service) PetSubmitIdea(ctx context.Context, input PetIdeaInput) (domain
 		}
 	}
 	if pending >= 5 {
-		return domain.PetApproval{}, fmt.Errorf("待审批的想法已经有 5 个，请先等主人处理")
+		return domain.PetApproval{}, fmt.Errorf("待审批的想法已经有 5 个，请先等 owner 处理")
 	}
 	summaryText := summary
 	if plan != "" {

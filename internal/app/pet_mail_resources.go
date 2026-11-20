@@ -1075,7 +1075,7 @@ func (s *Service) PetRequestDeleteMailResource(ctx context.Context, kind, resour
 		return domain.PetApproval{}, err
 	}
 	if !assistant.PetAllowManageSystem {
-		return domain.PetApproval{}, fmt.Errorf("主人未开启管理系统设置权限")
+		return domain.PetApproval{}, fmt.Errorf("owner 未开启管理系统设置权限")
 	}
 	kind = strings.ToLower(strings.TrimSpace(kind))
 	resourceID = strings.TrimSpace(resourceID)

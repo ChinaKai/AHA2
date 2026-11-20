@@ -118,7 +118,7 @@ func (s *Service) petManageSystemAssistant(ctx context.Context) (domain.OwnerAss
 		return domain.OwnerAssistant{}, err
 	}
 	if !assistant.PetAllowManageSystem {
-		return domain.OwnerAssistant{}, fmt.Errorf("主人未开启管理系统设置权限")
+		return domain.OwnerAssistant{}, fmt.Errorf("owner 未开启管理系统设置权限")
 	}
 	return assistant, nil
 }

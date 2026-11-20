@@ -252,7 +252,7 @@ export function mountAssistant(): void {
             <label class="assistant-settings-switch"><input type="checkbox" id="pet-allow-manage-knowledge"><span><b>管理知识/Skill/Prompt</b><small>提交知识候选、维护 Skill、读取 Prompt；Prompt 修改和删除需要审批</small></span></label>
             <label class="assistant-settings-switch"><input type="checkbox" id="pet-allow-manage-channels"><span><b>管理渠道</b><small>查看渠道实例、目的地和联系人；对外发送需要审批</small></span></label>
             <label class="assistant-settings-switch"><input type="checkbox" id="pet-allow-manage-system"><span><b>管理系统设置</b><small>查看安全/代理设置；安全设置修改需要审批</small></span></label>
-            <p class="assistant-settings-note">权限变更立即生效，不重置会话；无权限的工具调用会被服务端拒绝。删除 Task/项目/Workspace 会先创建审批，主人批准后才执行。</p>
+            <p class="assistant-settings-note">权限变更立即生效，不重置会话；无权限的工具调用会被服务端拒绝。删除 Task/项目/Workspace 会先创建审批，owner 批准后才执行。</p>
           </section>
           <section><h3>模型</h3>
             <label class="assistant-settings-field">助手聊天模型（Provider）<select id="pet-chat-model"></select></label>

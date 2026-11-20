@@ -57,7 +57,7 @@ func (s *Service) PetModelCatalog(ctx context.Context) (PetModelCatalog, error) 
 		return PetModelCatalog{}, err
 	}
 	if !assistant.PetAllowViewTasks {
-		return PetModelCatalog{}, fmt.Errorf("主人未开启查看 AHA 信息权限")
+		return PetModelCatalog{}, fmt.Errorf("owner 未开启查看 AHA 信息权限")
 	}
 	models, err := s.store.ListModels(ctx)
 	if err != nil {
