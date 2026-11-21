@@ -302,47 +302,82 @@ func (s *Service) providerAPIKey(provider domain.Provider) string {
 }
 
 // claudeNativeAvailability reads the Workspace probe the picker already uses.
-// With no probe there is no evidence either way, so it stays available and the
-// CLI reports a real authentication error instead of the settings page
-// inventing one.
+// With no probe on the execution host there is no evidence either way, so it
+// stays available and the CLI reports a real authentication error instead of
+// the settings page inventing one.
 func (s *Service) claudeNativeAvailability(ctx context.Context) (bool, string) {
 	workspaces, err := s.store.ListWorkspaces(ctx, "")
 	if err != nil {
 		return true, ""
 	}
-	ordered := make([]domain.Workspace, 0, len(workspaces))
-	for _, workspace := range workspaces {
-		if workspace.ID == petWorkspaceID {
-			ordered = append(ordered, workspace)
-		}
-	}
+	// The Pet Workspace is where chat actually runs. If it has its own probe,
+	// that probe is authoritative even if it belongs to a remote host.
 	for _, workspace := range workspaces {
 		if workspace.ID != petWorkspaceID {
-			ordered = append(ordered, workspace)
+			continue
+		}
+		if ok, available, reason := claudeProbeAvailability(workspace); ok {
+			return available, reason
 		}
 	}
-	for _, workspace := range ordered {
-		probe, ok := workspace.Capabilities["claude"].(map[string]any)
+	// Only local native Workspaces share the default Claude login with the
+	// local Pet Workspace. A remote Workspace's not_logged_in must never block
+	// a working local account, and list order must not decide it either.
+	loggedIn, notLoggedIn := false, false
+	for _, workspace := range workspaces {
+		if workspace.ID == petWorkspaceID || !claudeNativeHostWorkspace(workspace) {
+			continue
+		}
+		ok, available, _ := claudeProbeAvailability(workspace)
 		if !ok {
 			continue
 		}
-		status, _ := probe["status"].(string)
-		if status != "ready" {
-			continue
-		}
-		switch authStatus, _ := probe["auth_status"].(string); authStatus {
-		case "not_logged_in":
-			return false, "尚未登录 Claude Code，请先执行 claude auth login"
-		case "logged_in":
-			return true, ""
-		default:
-			// "unknown" is not evidence of a failure. Keeping it available lets
-			// the CLI report the real authentication result instead of the
-			// settings page blocking a login it could not verify.
-			return true, ""
+		if available {
+			loggedIn = true
+		} else {
+			notLoggedIn = true
 		}
 	}
+	if loggedIn {
+		return true, ""
+	}
+	if notLoggedIn {
+		return false, "尚未登录 Claude Code，请先执行 claude auth login"
+	}
 	return true, ""
+}
+
+// claudeNativeHostWorkspace reports whether a Workspace describes the login of
+// the machine that runs the local pet chat: a local native Workspace. WSL and
+// SSH Workspaces have their own logged-in account and are not evidence about
+// this host.
+func claudeNativeHostWorkspace(workspace domain.Workspace) bool {
+	if workspace.Locality != "" && workspace.Locality != "local" {
+		return false
+	}
+	return workspace.Transport == "native"
+}
+
+// claudeProbeAvailability reads one Workspace's Claude probe. ok=false means
+// the Workspace has no successful probe and contributes no evidence.
+func claudeProbeAvailability(workspace domain.Workspace) (ok, available bool, reason string) {
+	probe, found := workspace.Capabilities["claude"].(map[string]any)
+	if !found {
+		return false, true, ""
+	}
+	if status, _ := probe["status"].(string); status != "ready" {
+		return false, true, ""
+	}
+	switch authStatus, _ := probe["auth_status"].(string); authStatus {
+	case "not_logged_in":
+		return true, false, "尚未登录 Claude Code，请先执行 claude auth login"
+	case "logged_in":
+		return true, true, ""
+	default:
+		// "unknown" is not evidence of a failure. Keeping it available lets the
+		// CLI report the real authentication result.
+		return true, true, ""
+	}
 }
 
 func (s *Service) UpdateOwnerAssistant(ctx context.Context, modelID, name, character string) (OwnerAssistantView, error) {

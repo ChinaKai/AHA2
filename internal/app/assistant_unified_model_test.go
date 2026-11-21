@@ -3,11 +3,13 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ChinaKai/AHA2/internal/codexaccount"
 	"github.com/ChinaKai/AHA2/internal/domain"
@@ -51,11 +53,15 @@ type refreshingCodexAuthExecutor struct {
 	mu             sync.Mutex
 	seenTokens     []string
 	refreshedToken string
+	failErr        error
+	// blockUntilCancel makes Execute wait for its context after refreshing, so
+	// a canceled chat still exercises the credential write-back path.
+	blockUntilCancel bool
+	refreshed        chan struct{}
+	refreshedOnce    sync.Once
 }
 
-func (executor *refreshingCodexAuthExecutor) Execute(_ context.Context, request ExecutionRequest, _ func(ExecutionEvent)) (ExecutionResult, error) {
-	executor.mu.Lock()
-	defer executor.mu.Unlock()
+func (executor *refreshingCodexAuthExecutor) Execute(ctx context.Context, request ExecutionRequest, _ func(ExecutionEvent)) (ExecutionResult, error) {
 	home := strings.TrimSpace(request.Environment["CODEX_HOME"])
 	path := filepath.Join(home, "auth.json")
 	data, err := os.ReadFile(path)
@@ -68,7 +74,6 @@ func (executor *refreshingCodexAuthExecutor) Execute(_ context.Context, request 
 	}
 	tokens, _ := raw["tokens"].(map[string]any)
 	token, _ := tokens["access_token"].(string)
-	executor.seenTokens = append(executor.seenTokens, token)
 	tokens["access_token"] = executor.refreshedToken
 	tokens["refresh_token"] = "refreshed-refresh-token"
 	updated, err := json.Marshal(raw)
@@ -78,6 +83,19 @@ func (executor *refreshingCodexAuthExecutor) Execute(_ context.Context, request 
 	if err := os.WriteFile(path, updated, 0o600); err != nil {
 		return ExecutionResult{}, err
 	}
+	executor.mu.Lock()
+	executor.seenTokens = append(executor.seenTokens, token)
+	executor.mu.Unlock()
+	if executor.refreshed != nil {
+		executor.refreshedOnce.Do(func() { close(executor.refreshed) })
+	}
+	if executor.blockUntilCancel {
+		<-ctx.Done()
+		return ExecutionResult{}, ctx.Err()
+	}
+	if executor.failErr != nil {
+		return ExecutionResult{}, executor.failErr
+	}
 	return ExecutionResult{Reply: "官方账号回答"}, nil
 }
 
@@ -85,6 +103,40 @@ func (executor *refreshingCodexAuthExecutor) tokens() []string {
 	executor.mu.Lock()
 	defer executor.mu.Unlock()
 	return append([]string(nil), executor.seenTokens...)
+}
+
+// newCodexChatFixture wires a ready official account, the real codexaccount
+// manager over a temp secret store, and an official unified model selection
+// with the pet disabled so only chat reaches the executor.
+func newCodexChatFixture(t *testing.T, executor Executor) (*petTaskFixture, *secrets.FileStore, string) {
+	t.Helper()
+	fixture := newPetTaskFixtureWithExecutor(t, executor)
+	secretStore, err := secrets.Open(filepath.Join(t.TempDir(), "codex-secrets.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentialRef := "codex/account/refresh"
+	const initialAuth = `{"tokens":{"access_token":"initial-access-token","refresh_token":"initial-refresh-token"}}`
+	if err := secretStore.PutMany(map[string]string{credentialRef: initialAuth}); err != nil {
+		t.Fatal(err)
+	}
+	fixture.service.SetCodexAccountManager(codexaccount.New(fixture.ctx, fixture.database, secretStore, "", "codex"))
+	now := fixture.service.now().UTC()
+	account := domain.CodexAccount{
+		ID: "account-refresh", Label: "Refresh Account", Status: "ready", CredentialConfigured: true,
+		CredentialRef:   credentialRef,
+		AvailableModels: []domain.CodexModelOption{{WireModel: "gpt-refresh", DisplayName: "GPT Refresh"}},
+		CreatedAt:       now, UpdatedAt: now,
+	}
+	if err := fixture.database.UpsertCodexAccount(fixture.ctx, account); err != nil {
+		t.Fatal(err)
+	}
+	disabled := petSettingsWithModel(domain.ModelSourceOfficial, "", "gpt-refresh", account.ID)
+	disabled.Enabled = false
+	if _, err := fixture.service.UpdateOwnerPetSettings(fixture.ctx, disabled); err != nil {
+		t.Fatal(err)
+	}
+	return fixture, secretStore, credentialRef
 }
 
 func secondProviderModel(t *testing.T, fixture *petTaskFixture) domain.Model {
@@ -426,35 +478,7 @@ func TestAssistantChatDeletedUnifiedModelDoesNotFallBack(t *testing.T) {
 // its profile from that refreshed value instead of the original one.
 func TestAssistantChatPersistsRefreshedCodexCredential(t *testing.T) {
 	executor := &refreshingCodexAuthExecutor{refreshedToken: "refreshed-access-token"}
-	fixture := newPetTaskFixtureWithExecutor(t, executor)
-	secretStore, err := secrets.Open(filepath.Join(t.TempDir(), "codex-secrets.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	credentialRef := "codex/account/refresh"
-	const initialAuth = `{"tokens":{"access_token":"initial-access-token","refresh_token":"initial-refresh-token"}}`
-	if err := secretStore.PutMany(map[string]string{credentialRef: initialAuth}); err != nil {
-		t.Fatal(err)
-	}
-	fixture.service.SetCodexAccountManager(codexaccount.New(fixture.ctx, fixture.database, secretStore, "", "codex"))
-	now := fixture.service.now().UTC()
-	account := domain.CodexAccount{
-		ID: "account-refresh", Label: "Refresh Account", Status: "ready", CredentialConfigured: true,
-		CredentialRef:   credentialRef,
-		AvailableModels: []domain.CodexModelOption{{WireModel: "gpt-refresh", DisplayName: "GPT Refresh"}},
-		CreatedAt:       now, UpdatedAt: now,
-	}
-	if err := fixture.database.UpsertCodexAccount(fixture.ctx, account); err != nil {
-		t.Fatal(err)
-	}
-	// The fixture uses one executor for both chat and the Pet Task. Disable the
-	// pet so only the two chat calls below reach it; the credential refresh is
-	// still exercised through the chat path.
-	disabled := petSettingsWithModel(domain.ModelSourceOfficial, "", "gpt-refresh", account.ID)
-	disabled.Enabled = false
-	if _, err := fixture.service.UpdateOwnerPetSettings(fixture.ctx, disabled); err != nil {
-		t.Fatal(err)
-	}
+	fixture, secretStore, credentialRef := newCodexChatFixture(t, executor)
 
 	if _, err := fixture.service.AskOwnerAssistant(fixture.ctx, "第一次"); err != nil {
 		t.Fatal(err)
@@ -476,6 +500,59 @@ func TestAssistantChatPersistsRefreshedCodexCredential(t *testing.T) {
 	}
 	if tokens[1] != "refreshed-access-token" {
 		t.Fatalf("second chat token=%q, want the refreshed token", tokens[1])
+	}
+}
+
+// A failed chat still refreshed the token before the backend error. The
+// refreshed credential must be written back, exactly like the success path.
+func TestAssistantChatPersistsRefreshedCodexCredentialOnFailure(t *testing.T) {
+	executor := &refreshingCodexAuthExecutor{
+		refreshedToken: "refreshed-after-error",
+		failErr:        errors.New("provider rejected the turn"),
+	}
+	fixture, secretStore, credentialRef := newCodexChatFixture(t, executor)
+	reply, err := fixture.service.AskOwnerAssistant(fixture.ctx, "会失败")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(reply.Reply.Content, "我暂时没连上模型") {
+		t.Fatalf("failed chat reply=%q", reply.Reply.Content)
+	}
+	stored, ok := secretStore.Get(credentialRef)
+	if !ok || !strings.Contains(stored, "refreshed-after-error") {
+		t.Fatalf("refreshed credential after a failed chat was not written back: %q", stored)
+	}
+}
+
+// Canceling/timing out a chat must still write the refreshed credential back;
+// the normal Turn path syncs on every exit, and chat has to match.
+func TestAssistantChatPersistsRefreshedCodexCredentialOnCancel(t *testing.T) {
+	executor := &refreshingCodexAuthExecutor{
+		refreshedToken:   "refreshed-after-cancel",
+		blockUntilCancel: true,
+		refreshed:        make(chan struct{}),
+	}
+	fixture, secretStore, credentialRef := newCodexChatFixture(t, executor)
+	ctx, cancel := context.WithCancel(fixture.ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = fixture.service.AskOwnerAssistant(ctx, "会被取消")
+	}()
+	select {
+	case <-executor.refreshed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("chat backend was never reached")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("canceled chat did not return")
+	}
+	stored, ok := secretStore.Get(credentialRef)
+	if !ok || !strings.Contains(stored, "refreshed-after-cancel") {
+		t.Fatalf("refreshed credential after cancellation was not written back: %q", stored)
 	}
 }
 
@@ -660,6 +737,165 @@ func TestProviderAvailabilityMatchesChatRuntime(t *testing.T) {
 		ModelID: fixture.model.ID, BrainModelID: fixture.model.ID,
 	}); err != nil {
 		t.Fatalf("chat runtime rejected a no-credential provider: %v", err)
+	}
+}
+
+// A stale profile object must not roll the model columns back. The old store
+// method wrote model_id from the caller's snapshot; this test would fail then.
+func TestStaleProfileUpdateCannotRevertModel(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	second := secondProviderModel(t, fixture)
+	if _, err := fixture.service.UpdateOwnerPetSettings(fixture.ctx, petSettingsWithModel(
+		domain.ModelSourceProvider, fixture.model.ID, "", "",
+	)); err != nil {
+		t.Fatal(err)
+	}
+	stale := storedAssistant(t, fixture)
+	if err := fixture.database.UpdateOwnerPetSettings(fixture.ctx, stale.ID, true, second.ID, []string{"walk"}, fixture.service.now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	// The stale snapshot still names the old model; only its profile fields are
+	// meant to be written.
+	stale.Character = "deepseek_fish"
+	stale.UpdatedAt = fixture.service.now().UTC()
+	if err := fixture.database.UpdateOwnerAssistant(fixture.ctx, stale); err != nil {
+		t.Fatal(err)
+	}
+	stored := storedAssistant(t, fixture)
+	if stored.BrainModelID != second.ID || stored.ModelID != second.ID {
+		t.Fatalf("stale profile update reverted the model: brain=%q chat=%q", stored.BrainModelID, stored.ModelID)
+	}
+	if stored.Character != "deepseek_fish" {
+		t.Fatalf("profile update was not saved: character=%q", stored.Character)
+	}
+}
+
+func createProbeWorkspace(t *testing.T, fixture *petTaskFixture, id, locality, transport, authStatus string) {
+	t.Helper()
+	const projectID = "project-probe-workspaces"
+	if _, err := fixture.database.Project(fixture.ctx, projectID); err != nil {
+		now := fixture.service.now().UTC()
+		project := domain.Project{
+			ID: projectID, Name: "Probe Workspaces", ProjectType: "folder",
+			KnowledgePolicy: "none", CreatedAt: now, UpdatedAt: now,
+		}
+		if err := fixture.database.CreateProject(fixture.ctx, project); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := fixture.service.now().UTC()
+	workspace := domain.Workspace{
+		ID: id, ProjectID: projectID, Name: id, Locality: locality, Transport: transport,
+		RootPath: t.TempDir(), Health: "ready",
+		Capabilities: map[string]any{"claude": map[string]any{"status": "ready", "auth_status": authStatus}},
+		CreatedAt:    now, UpdatedAt: now,
+	}
+	if err := fixture.database.CreateWorkspace(fixture.ctx, workspace); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func setPetWorkspaceProbe(t *testing.T, fixture *petTaskFixture, authStatus string) {
+	t.Helper()
+	workspace, err := fixture.service.ensurePetWorkspace(fixture.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace.Capabilities = map[string]any{"claude": map[string]any{"status": "ready", "auth_status": authStatus}}
+	if err := fixture.database.UpdateWorkspaceDetection(fixture.ctx, workspace); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// M4: only the actual execution host's probe may gate local Claude chat. A
+// remote SSH/WSL Workspace's not_logged_in must never block a working local
+// account, regardless of list order.
+func TestClaudeNativeAvailabilityIgnoresRemoteProbe(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(*testing.T, *petTaskFixture)
+		want  bool
+	}{
+		{
+			name: "remote not_logged_in before a working local probe",
+			setup: func(t *testing.T, fixture *petTaskFixture) {
+				createProbeWorkspace(t, fixture, "workspace-remote", "remote", "ssh", "not_logged_in")
+				createProbeWorkspace(t, fixture, "workspace-local", "local", "native", "logged_in")
+			},
+			want: true,
+		},
+		{
+			name: "working local probe before a remote negative",
+			setup: func(t *testing.T, fixture *petTaskFixture) {
+				createProbeWorkspace(t, fixture, "workspace-local", "local", "native", "logged_in")
+				createProbeWorkspace(t, fixture, "workspace-remote", "remote", "ssh", "not_logged_in")
+			},
+			want: true,
+		},
+		{
+			name: "only a remote negative probe",
+			setup: func(t *testing.T, fixture *petTaskFixture) {
+				createProbeWorkspace(t, fixture, "workspace-remote", "remote", "ssh", "not_logged_in")
+			},
+			want: true,
+		},
+		{
+			name: "local negative with a remote positive",
+			setup: func(t *testing.T, fixture *petTaskFixture) {
+				createProbeWorkspace(t, fixture, "workspace-remote", "remote", "ssh", "logged_in")
+				createProbeWorkspace(t, fixture, "workspace-local", "local", "native", "not_logged_in")
+			},
+			want: false,
+		},
+		{
+			name: "WSL is a different login",
+			setup: func(t *testing.T, fixture *petTaskFixture) {
+				createProbeWorkspace(t, fixture, "workspace-wsl", "local", "wsl", "not_logged_in")
+			},
+			want: true,
+		},
+		{
+			name: "unprobed pet workspace falls back to the local native probe",
+			setup: func(t *testing.T, fixture *petTaskFixture) {
+				if _, err := fixture.service.ensurePetWorkspace(fixture.ctx); err != nil {
+					t.Fatal(err)
+				}
+				createProbeWorkspace(t, fixture, "workspace-remote", "remote", "ssh", "not_logged_in")
+				createProbeWorkspace(t, fixture, "workspace-local", "local", "native", "logged_in")
+			},
+			want: true,
+		},
+		{
+			name: "pet workspace probe is authoritative for its execution host",
+			setup: func(t *testing.T, fixture *petTaskFixture) {
+				setPetWorkspaceProbe(t, fixture, "not_logged_in")
+				createProbeWorkspace(t, fixture, "workspace-local", "local", "native", "logged_in")
+			},
+			want: false,
+		},
+		{
+			name: "unprobed pet workspace ignores remote-only negatives",
+			setup: func(t *testing.T, fixture *petTaskFixture) {
+				if _, err := fixture.service.ensurePetWorkspace(fixture.ctx); err != nil {
+					t.Fatal(err)
+				}
+				createProbeWorkspace(t, fixture, "workspace-remote", "remote", "ssh", "not_logged_in")
+			},
+			want: true,
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := newPetTaskFixture(t)
+			testCase.setup(t, fixture)
+			available, reason := fixture.service.claudeNativeAvailability(fixture.ctx)
+			if available != testCase.want {
+				t.Fatalf("available=%t reason=%q, want %t", available, reason, testCase.want)
+			}
+			if !testCase.want && !strings.Contains(reason, "尚未登录") {
+				t.Fatalf("unavailable reason=%q", reason)
+			}
+		})
 	}
 }
 
