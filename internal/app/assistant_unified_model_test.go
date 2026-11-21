@@ -883,6 +883,43 @@ func TestClaudeNativeAvailabilityIgnoresRemoteProbe(t *testing.T) {
 			},
 			want: true,
 		},
+		{
+			name: "local unknown before an explicit local negative",
+			setup: func(t *testing.T, fixture *petTaskFixture) {
+				if _, err := fixture.service.ensurePetWorkspace(fixture.ctx); err != nil {
+					t.Fatal(err)
+				}
+				createProbeWorkspace(t, fixture, "workspace-unknown", "local", "native", "unknown")
+				createProbeWorkspace(t, fixture, "workspace-negative", "local", "native", "not_logged_in")
+			},
+			want: false,
+		},
+		{
+			name: "local negative before a local unknown",
+			setup: func(t *testing.T, fixture *petTaskFixture) {
+				if _, err := fixture.service.ensurePetWorkspace(fixture.ctx); err != nil {
+					t.Fatal(err)
+				}
+				createProbeWorkspace(t, fixture, "workspace-negative", "local", "native", "not_logged_in")
+				createProbeWorkspace(t, fixture, "workspace-unknown", "local", "native", "unknown")
+			},
+			want: false,
+		},
+		{
+			name: "pet workspace unknown stays available",
+			setup: func(t *testing.T, fixture *petTaskFixture) {
+				setPetWorkspaceProbe(t, fixture, "unknown")
+				createProbeWorkspace(t, fixture, "workspace-negative", "local", "native", "not_logged_in")
+			},
+			want: true,
+		},
+		{
+			name: "only local unknown probes still allow the CLI",
+			setup: func(t *testing.T, fixture *petTaskFixture) {
+				createProbeWorkspace(t, fixture, "workspace-unknown", "local", "native", "unknown")
+			},
+			want: true,
+		},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {

@@ -311,30 +311,37 @@ func (s *Service) claudeNativeAvailability(ctx context.Context) (bool, string) {
 		return true, ""
 	}
 	// The Pet Workspace is where chat actually runs. If it has its own probe,
-	// that probe is authoritative even if it belongs to a remote host.
+	// that probe is authoritative even if it belongs to a remote host. An
+	// unknown result there stays "try the CLI", as it did before.
 	for _, workspace := range workspaces {
 		if workspace.ID != petWorkspaceID {
 			continue
 		}
-		if ok, available, reason := claudeProbeAvailability(workspace); ok {
-			return available, reason
+		if ok, state, reason := claudeProbeAuthState(workspace); ok {
+			if state == claudeAuthNotLoggedIn {
+				return false, reason
+			}
+			return true, ""
 		}
 	}
 	// Only local native Workspaces share the default Claude login with the
 	// local Pet Workspace. A remote Workspace's not_logged_in must never block
 	// a working local account, and list order must not decide it either.
+	// Only an explicit logged_in is positive evidence: "unknown" means "try the
+	// CLI", so it must not cancel an explicit not_logged_in.
 	loggedIn, notLoggedIn := false, false
 	for _, workspace := range workspaces {
 		if workspace.ID == petWorkspaceID || !claudeNativeHostWorkspace(workspace) {
 			continue
 		}
-		ok, available, _ := claudeProbeAvailability(workspace)
+		ok, state, _ := claudeProbeAuthState(workspace)
 		if !ok {
 			continue
 		}
-		if available {
+		switch state {
+		case claudeAuthLoggedIn:
 			loggedIn = true
-		} else {
+		case claudeAuthNotLoggedIn:
 			notLoggedIn = true
 		}
 	}
@@ -358,25 +365,31 @@ func claudeNativeHostWorkspace(workspace domain.Workspace) bool {
 	return workspace.Transport == "native"
 }
 
-// claudeProbeAvailability reads one Workspace's Claude probe. ok=false means
-// the Workspace has no successful probe and contributes no evidence.
-func claudeProbeAvailability(workspace domain.Workspace) (ok, available bool, reason string) {
+const (
+	claudeAuthLoggedIn    = "logged_in"
+	claudeAuthNotLoggedIn = "not_logged_in"
+	claudeAuthUnknown     = "unknown"
+)
+
+// claudeProbeAuthState reads one Workspace's Claude probe. ok=false means the
+// Workspace has no usable probe and contributes no evidence. The three states
+// are deliberately distinct: "unknown" may try the CLI, but it is not proof
+// that this host is logged in.
+func claudeProbeAuthState(workspace domain.Workspace) (ok bool, state, reason string) {
 	probe, found := workspace.Capabilities["claude"].(map[string]any)
 	if !found {
-		return false, true, ""
+		return false, "", ""
 	}
 	if status, _ := probe["status"].(string); status != "ready" {
-		return false, true, ""
+		return false, "", ""
 	}
 	switch authStatus, _ := probe["auth_status"].(string); authStatus {
-	case "not_logged_in":
-		return true, false, "尚未登录 Claude Code，请先执行 claude auth login"
-	case "logged_in":
-		return true, true, ""
+	case claudeAuthNotLoggedIn:
+		return true, claudeAuthNotLoggedIn, "尚未登录 Claude Code，请先执行 claude auth login"
+	case claudeAuthLoggedIn:
+		return true, claudeAuthLoggedIn, ""
 	default:
-		// "unknown" is not evidence of a failure. Keeping it available lets the
-		// CLI report the real authentication result.
-		return true, true, ""
+		return true, claudeAuthUnknown, ""
 	}
 }
 
