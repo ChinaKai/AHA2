@@ -65,7 +65,7 @@ func (s *Service) AgentWriteAllowed(ctx context.Context, call AgentCallContext) 
 }
 
 func (s *Service) agentSnapshotWritable(ctx context.Context, task domain.Task, snapshotID, agentID string) bool {
-	if agentID != "main" || task.ReadOnly {
+	if agentID != "main" || task.ReadOnly || task.Status.Terminal() {
 		return false
 	}
 	snapshot, err := s.store.RuntimeSnapshot(ctx, snapshotID)
@@ -143,7 +143,7 @@ func (s *Service) AgentCoreTaskGet(ctx context.Context, claims agentapi.Claims, 
 		taskID = call.Task.ID
 	}
 	item, err := s.store.Task(ctx, taskID)
-	if err != nil || item.ProjectID != call.Project.ID {
+	if err != nil || item.ProjectID != call.Project.ID || (call.Task.ID == petTaskID && item.ID != call.Task.ID) {
 		return AgentCoreTaskView{}, ErrAgentCallForbidden
 	}
 	turns, err := s.store.ListTurns(ctx, item.ID)
@@ -178,6 +178,9 @@ func (s *Service) AgentCoreTaskList(ctx context.Context, claims agentapi.Claims,
 	}
 	result := make([]AgentCoreTaskView, 0, min(len(items), limit))
 	for _, item := range items {
+		if call.Task.ID == petTaskID && item.ID != call.Task.ID {
+			continue
+		}
 		if len(result) == limit {
 			break
 		}

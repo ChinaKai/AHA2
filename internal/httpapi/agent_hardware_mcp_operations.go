@@ -28,7 +28,7 @@ func (s *Server) hardwareMCPOperations() []agentMCPOperation {
 		"args":         map[string]any{"type": "array", "items": mcpString(), "minItems": 1, "maxItems": 64},
 		"stdin_base64": map[string]any{"type": "string", "maxLength": 65536}, "timeout_seconds": mcpInteger(1, 120),
 	}, "args")
-	adb.ResultFields = []string{"ok", "exit_code", "stdout_base64", "stderr_base64", "duration_ms"}
+	adb.ResultFields = []string{"ok", "exit_code", "stdout_base64", "stderr_base64", "duration_ms", "stdout_truncated", "stderr_truncated", "stdout_bytes", "stderr_bytes"}
 	return []agentMCPOperation{connect, disconnect, send, login, adb}
 }
 

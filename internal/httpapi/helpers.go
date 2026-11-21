@@ -44,7 +44,11 @@ func (s *Server) withAgentCapability(next http.Handler) http.Handler {
 			return
 		}
 		ctx := context.WithValue(request.Context(), agentClaimsContextKey{}, claims)
-		next.ServeHTTP(writer, request.WithContext(ctx))
+		request = request.WithContext(ctx)
+		if !s.authorizeAgentDomainRoute(writer, request, claims) {
+			return
+		}
+		next.ServeHTTP(writer, request)
 	})
 }
 

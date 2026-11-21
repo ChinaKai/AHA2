@@ -137,13 +137,23 @@ func (s *Service) PetUpdateTaskHardware(ctx context.Context, input PetUpdateTask
 		return PetTaskHardwareView{}, err
 	}
 	byResource := map[string]string{}
+	usedIDs := map[string]bool{}
 	for _, item := range existing {
 		byResource[item.ResourceID] = item.ID
+		usedIDs[item.ID] = true
 	}
 	bindings := make([]domain.TaskHardwareBinding, 0, len(input.ResourceIDs))
 	for _, raw := range input.ResourceIDs {
 		resourceID := strings.TrimSpace(raw)
-		bindings = append(bindings, domain.TaskHardwareBinding{TaskID: task.ID, ID: byResource[resourceID], ResourceID: resourceID})
+		id := byResource[resourceID]
+		if id == "" {
+			id = resourceID
+			for usedIDs[id] {
+				id = domain.NewID("hardware_binding")
+			}
+			usedIDs[id] = true
+		}
+		bindings = append(bindings, domain.TaskHardwareBinding{TaskID: task.ID, ID: id, ResourceID: resourceID})
 	}
 	if err := s.ReplaceTaskHardwareResourceBindings(ctx, task.ID, bindings); err != nil {
 		return PetTaskHardwareView{}, err

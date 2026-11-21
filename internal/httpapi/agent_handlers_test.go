@@ -72,10 +72,11 @@ func TestAgentAPIUsesTurnCapabilityAndTaskScope(t *testing.T) {
 	processes := managedprocess.NewManager()
 	defer processes.Close()
 	server := httptest.NewServer(New(Config{
-		Store: database, AgentCapabilities: capabilities, ManagedProcesses: processes,
+		Store: database, App: app.NewService(database, nil, app.StubExecutor{}), AgentCapabilities: capabilities, ManagedProcesses: processes,
 	}).Handler())
 	defer server.Close()
-	token, err := capabilities.Issue(task.ID, "main", "turn-1", time.Hour)
+	turn := createCoreTurn(t, database, task, "main", domain.NewID("inbox_batch"))
+	token, err := capabilities.Issue(task.ID, "main", turn.ID, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +129,7 @@ func TestAgentADBExecUsesTaskDeviceAndReturnsBinary(t *testing.T) {
 	}
 	capabilities := agentapi.NewCapabilities()
 	server := httptest.NewServer(New(Config{
-		Store: database, AgentCapabilities: capabilities,
+		Store: database, App: app.NewService(database, nil, app.StubExecutor{}), AgentCapabilities: capabilities,
 		ExecuteADB: func(_ context.Context, endpoint string, args []string, input []byte, timeout time.Duration) (hardware.ADBExecResult, error) {
 			if endpoint != "192.0.2.90:5555" {
 				t.Fatalf("unexpected ADB endpoint %q", endpoint)
@@ -144,7 +145,8 @@ func TestAgentADBExecUsesTaskDeviceAndReturnsBinary(t *testing.T) {
 		},
 	}).Handler())
 	defer server.Close()
-	token, err := capabilities.Issue(task.ID, "main", "turn-adb-exec", time.Hour)
+	turn := createCoreTurn(t, database, task, "main", domain.NewID("inbox_batch"))
+	token, err := capabilities.Issue(task.ID, "main", turn.ID, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}

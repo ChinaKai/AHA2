@@ -485,9 +485,6 @@ func (s *Service) SubmitAgentKnowledgeMCPFeedback(ctx context.Context, claims ag
 		if _, err := s.petKnowledgeWritable(ctx); err != nil {
 			return AgentKnowledgeMCPFeedbackResult{}, ErrAgentCallForbidden
 		}
-		if _, err := s.PetKnowledgeDetail(ctx, entryID); err != nil {
-			return AgentKnowledgeMCPFeedbackResult{}, ErrKnowledgeMCPEntryNotFound
-		}
 		if kind != "helped" && kind != "stale" && kind != "wrong" {
 			return AgentKnowledgeMCPFeedbackResult{}, ErrAgentCallForbidden
 		}

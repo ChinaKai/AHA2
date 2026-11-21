@@ -178,11 +178,30 @@ func (s *Server) agentADBExec(writer http.ResponseWriter, request *http.Request)
 		"input_bytes": len(input), "stdout_bytes": len(result.Stdout),
 		"stderr_bytes": len(result.Stderr), "exit_code": result.ExitCode,
 	})
+	stdout, stderr := result.Stdout, result.Stderr
+	stdoutTruncated, stderrTruncated := false, false
+	if operation, _ := request.Context().Value(agentOperationContextKey{}).(string); operation == "hardware_adb_exec" {
+		// The command has already run. Preserve exit/status and an explicit
+		// bounded result instead of turning a successful side effect into a
+		// response-size failure that could provoke an unsafe command retry.
+		const budget = 24 << 10
+		if len(stdout) > budget {
+			stdout = stdout[:budget]
+			stdoutTruncated = true
+		}
+		remaining := budget - len(stdout)
+		if len(stderr) > remaining {
+			stderr = stderr[:remaining]
+			stderrTruncated = true
+		}
+	}
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"ok": true, "endpoint": result.Endpoint, "exit_code": result.ExitCode,
-		"stdout_base64": base64.StdEncoding.EncodeToString(result.Stdout),
-		"stderr_base64": base64.StdEncoding.EncodeToString(result.Stderr),
-		"duration_ms":   result.Duration.Milliseconds(),
+		"stdout_base64":    base64.StdEncoding.EncodeToString(stdout),
+		"stderr_base64":    base64.StdEncoding.EncodeToString(stderr),
+		"stdout_truncated": stdoutTruncated, "stderr_truncated": stderrTruncated,
+		"stdout_bytes": len(result.Stdout), "stderr_bytes": len(result.Stderr),
+		"duration_ms": result.Duration.Milliseconds(),
 	})
 }
 

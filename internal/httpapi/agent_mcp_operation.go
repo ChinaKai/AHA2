@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -23,6 +24,29 @@ type agentMCPOperation struct {
 	Write        bool
 	ResultFields []string
 	Binary       bool
+}
+
+type agentOperationContextKey struct{}
+type agentOperationError struct {
+	Status int
+	Code   string
+}
+
+func (e *agentOperationError) Error() string { return e.Code }
+
+// Codes are copied only from this fixed vocabulary, never from an upstream
+// message, response header or arbitrary provider error.
+func safeAgentOperationCode(body []byte) string {
+	var failure struct {
+		Error string `json:"error"`
+	}
+	_ = json.Unmarshal(body, &failure)
+	switch failure.Error {
+	case "hardware_read_only", "hardware_runtime_unavailable", "hardware_group_not_found", "hardware_transport_invalid", "hardware_connect_failed", "hardware_send_failed", "hardware_login_failed", "ssh_host_key_unknown", "adb_exec_unavailable", "adb_command_not_allowed", "adb_args_invalid", "adb_stdin_invalid", "adb_timeout_invalid", "adb_exec_failed", "managed_process_not_found", "managed_process_already_running", "managed_process_start_failed", "browser_capability_denied", "browser_grant_forbidden", "browser_grant_revoked", "browser_grant_expired", "browser_tab_not_found", "agent_operation_forbidden", "agent_turn_inactive", "task_read_only":
+		return failure.Error
+	default:
+		return "operation_failed"
+	}
 }
 
 func mcpObject(properties map[string]any, required ...string) map[string]any {
@@ -193,7 +217,7 @@ func runAgentMCPOperation(request *http.Request, op agentMCPOperation, raw json.
 	if decoder.Decode(new(any)) != io.EOF {
 		return nil, errors.New("invalid tool arguments")
 	}
-	child := request.Clone(request.Context())
+	child := request.Clone(context.WithValue(request.Context(), agentOperationContextKey{}, op.Tool.Name))
 	child.Method = op.Method
 	child.Header = make(http.Header)
 	child.URL = &url.URL{Path: request.URL.Path}
@@ -233,7 +257,7 @@ func runAgentMCPOperation(request *http.Request, op agentMCPOperation, raw json.
 	// Raw runtime errors can contain endpoints or credentials. Only a fixed
 	// classification leaves this boundary, and no body is logged here.
 	if response.status >= 400 {
-		return nil, errors.New("operation failed; check resource permissions and state")
+		return nil, &agentOperationError{Status: response.status, Code: safeAgentOperationCode(response.body.Bytes())}
 	}
 	if response.overflow {
 		return nil, errors.New("operation response exceeds limit")

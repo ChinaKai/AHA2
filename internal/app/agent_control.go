@@ -323,7 +323,7 @@ func (s *Service) SetAgentChannelReplyDecision(ctx context.Context, claims agent
 }
 
 func (s *Service) UpdateAgentMemory(ctx context.Context, claims agentapi.Claims, update MemoryUpdate) (domain.TaskMemory, error) {
-	call, err := s.AgentCallContext(ctx, claims, true)
+	call, err := s.agentWriteCallContext(ctx, claims)
 	if err != nil {
 		return domain.TaskMemory{}, err
 	}
@@ -761,7 +761,7 @@ func (s *Service) AgentProjectTask(ctx context.Context, claims agentapi.Claims, 
 		return domain.Task{}, nil, err
 	}
 	item, err := s.store.Task(ctx, strings.TrimSpace(taskID))
-	if err != nil || item.ProjectID != call.Project.ID {
+	if err != nil || item.ProjectID != call.Project.ID || (call.Task.ID == petTaskID && item.ID != call.Task.ID) {
 		return domain.Task{}, nil, ErrAgentCallForbidden
 	}
 	turns, err := s.store.ListTurns(ctx, item.ID)

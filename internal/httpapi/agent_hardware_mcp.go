@@ -76,7 +76,7 @@ func (s *Server) agentHardwareMCP(writer http.ResponseWriter, request *http.Requ
 		writeError(writer, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	call, err := s.app.AgentCallContext(request.Context(), claims, false)
+	call, err := s.app.AgentDomainCallContext(request.Context(), claims, "hardware", false)
 	if err != nil {
 		writeAgentControlError(writer, err)
 		return
@@ -148,6 +148,11 @@ func (s *Server) callAgentHardwareMCPTool(writer http.ResponseWriter, request *h
 		})
 	}
 	toolError := func(err error) {
+		var operation *agentOperationError
+		if errors.As(err, &operation) && operation.Status == http.StatusForbidden {
+			writeError(writer, http.StatusForbidden, operation.Code)
+			return
+		}
 		code, message := hardwareMCPErrorCode(err)
 		// Only the fixed classification is safe to log: store and host errors
 		// can carry terminal content, device paths or credentials.
@@ -556,6 +561,10 @@ func (e *hardwareMCPError) Error() string {
 }
 
 func hardwareMCPErrorCode(err error) (string, string) {
+	var operation *agentOperationError
+	if errors.As(err, &operation) {
+		return operation.Code, operation.Code
+	}
 	if errors.Is(err, errHardwareMCPResponseTooLarge) {
 		return "hardware_response_too_large", "response exceeds the size budget"
 	}

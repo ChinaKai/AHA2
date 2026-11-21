@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -292,7 +293,17 @@ func TestBrowserAPINeverReturnsHostDiagnosticPaths(t *testing.T) {
 
 func (f *browserAPIFixture) agentToken(t *testing.T, taskID string) string {
 	t.Helper()
-	token, err := f.agents.Issue(taskID, "main", "turn-1", time.Hour)
+	turn, err := f.store.ActiveTurnForAgent(context.Background(), taskID, "main")
+	if errors.Is(err, sql.ErrNoRows) {
+		task, readErr := f.store.Task(context.Background(), taskID)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		turn = createCoreTurn(t, f.store, task, "main", domain.NewID("inbox_batch"))
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	token, err := f.agents.Issue(taskID, "main", turn.ID, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}

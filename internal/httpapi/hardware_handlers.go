@@ -320,6 +320,19 @@ func (s *Server) taskHardware(writer http.ResponseWriter, request *http.Request)
 		return
 	}
 	resources, _ := s.store.HardwareResources(request.Context())
+	if _, agent := agentClaimsFromContext(request.Context()); agent {
+		bound := map[string]bool{}
+		for _, group := range groups {
+			bound[group.ResourceID] = true
+		}
+		filtered := make([]domain.HardwareResource, 0, len(groups))
+		for _, resource := range resources {
+			if bound[resource.ID] {
+				filtered = append(filtered, resource)
+			}
+		}
+		resources = filtered
+	}
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "groups": groups, "resources": resources})
 }
 
@@ -392,7 +405,12 @@ func (s *Server) updateTaskHardwareBindings(writer http.ResponseWriter, request 
 		})
 	}
 	if err := s.app.ReplaceTaskHardwareResourceBindings(request.Context(), taskID, bindings); err != nil {
-		writeError(writer, http.StatusBadRequest, "update_hardware_bindings_failed")
+		var invalid *app.HardwareBindingError
+		if errors.As(err, &invalid) {
+			writeError(writer, http.StatusBadRequest, invalid.Code)
+		} else {
+			writeError(writer, http.StatusBadRequest, "update_hardware_bindings_failed")
+		}
 		return
 	}
 
@@ -724,7 +742,19 @@ func (s *Server) hardwareTarget(
 		})
 		return domain.Task{}, domain.HardwareGroup{}, "", false, false
 	}
-	readOnly := task.Status.Terminal() || task.ReadOnly || !group.Writable()
+	// Owner Web retains its resource/terminal-state policy. Agent-only Task and
+	// snapshot restrictions belong to the shared Agent authorization boundary.
+	readOnly := task.Status.Terminal() || !group.Writable()
+	if claims, agent := agentClaimsFromContext(request.Context()); agent {
+		if _, err := s.app.AgentDomainCallContext(request.Context(), claims, "hardware", request.Method != http.MethodGet); err != nil {
+			writeAgentControlError(writer, err)
+			return domain.Task{}, domain.HardwareGroup{}, "", true, false
+		}
+		if request.Method != http.MethodGet && !group.Writable() {
+			writeError(writer, http.StatusForbidden, "hardware_read_only")
+			return domain.Task{}, domain.HardwareGroup{}, "", true, false
+		}
+	}
 	return task, group, transport, readOnly, true
 }
 

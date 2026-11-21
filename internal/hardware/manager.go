@@ -478,9 +478,24 @@ func (manager *Manager) Disconnect(taskID, hardwareID, transport string) {
 }
 
 func (manager *Manager) DisconnectTask(taskID string) {
+	manager.DisconnectTaskExcept(taskID, nil)
+}
+
+// DisconnectTaskExcept preserves unchanged bindings while also removing live
+// attachments whose binding row has already disappeared. Callers pass only IDs
+// whose resource identity is unchanged after a successful binding update.
+func (manager *Manager) DisconnectTaskExcept(taskID string, keepIDs []string) {
+	keep := map[string]bool{}
+	for _, id := range keepIDs {
+		keep[id] = true
+	}
 	manager.mu.Lock()
 	for key, session := range manager.attachments {
 		if strings.HasPrefix(key, taskID+"\x00") {
+			parts := strings.Split(key, "\x00")
+			if len(parts) == 3 && keep[parts[1]] {
+				continue
+			}
 			manager.detachLocked(key, session)
 		}
 	}

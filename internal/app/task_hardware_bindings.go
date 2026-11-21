@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
@@ -11,12 +10,16 @@ import (
 
 const MaxTaskHardwareResources = 16
 
+type HardwareBindingError struct{ Code string }
+
+func (e *HardwareBindingError) Error() string { return e.Code }
+
 // ReplaceTaskHardwareResourceBindings is shared by Web and pet management.
 // Caller-specific owner/Task permissions are checked before entering here.
 // Validation completes before any live connection is closed or row is changed.
 func (s *Service) ReplaceTaskHardwareResourceBindings(ctx context.Context, taskID string, bindings []domain.TaskHardwareBinding) error {
 	if len(bindings) > MaxTaskHardwareResources {
-		return fmt.Errorf("每个任务最多启用 %d 个硬件资源", MaxTaskHardwareResources)
+		return &HardwareBindingError{Code: "hardware_binding_limit"}
 	}
 	if _, err := s.store.Task(ctx, taskID); err != nil {
 		return err
@@ -39,11 +42,14 @@ func (s *Service) ReplaceTaskHardwareResourceBindings(ctx context.Context, taskI
 		if item.ID == "" {
 			item.ID = hardwareconfig.NormalizeID(item.ResourceID)
 		}
-		if item.ID == "" || item.ResourceID == "" || ids[item.ID] || resources[item.ResourceID] {
-			return fmt.Errorf("硬件绑定为空或重复")
+		if item.ID == "" || item.ResourceID == "" {
+			return &HardwareBindingError{Code: "hardware_binding_empty"}
+		}
+		if ids[item.ID] || resources[item.ResourceID] {
+			return &HardwareBindingError{Code: "hardware_binding_duplicate"}
 		}
 		if _, err := s.store.HardwareResource(ctx, item.ResourceID); err != nil {
-			return fmt.Errorf("硬件资源不存在")
+			return &HardwareBindingError{Code: "hardware_resource_not_found"}
 		}
 		ids[item.ID], resources[item.ResourceID] = true, true
 		item.CreatedAt, item.UpdatedAt = now, now
@@ -55,8 +61,30 @@ func (s *Service) ReplaceTaskHardwareResourceBindings(ctx context.Context, taskI
 	if err != nil {
 		return err
 	}
-	if s.petHardware != nil {
+	keepIDs := []string{}
+	keep := map[string]bool{}
+	unchanged := len(existing) == len(bindings)
+	for index, item := range bindings {
+		if previous, ok := byID[item.ID]; ok && previous.ResourceID == item.ResourceID {
+			keepIDs = append(keepIDs, item.ID)
+			keep[item.ID] = true
+		}
+		if index >= len(existing) || existing[index].ID != item.ID || existing[index].ResourceID != item.ResourceID {
+			unchanged = false
+		}
+	}
+	if !unchanged {
+		if err := s.store.ReplaceTaskHardwareBindings(ctx, taskID, bindings); err != nil {
+			return err
+		}
+	}
+	if runtime, ok := s.petHardware.(interface{ DisconnectTaskExcept(string, []string) }); ok {
+		runtime.DisconnectTaskExcept(taskID, keepIDs)
+	} else if s.petHardware != nil {
 		for _, group := range groups {
+			if keep[group.ID] {
+				continue
+			}
 			for _, transport := range []string{domain.HardwareTransportSerial, domain.HardwareTransportNetwork} {
 				if group.Supports(transport) {
 					s.petHardware.Disconnect(taskID, group.ID, transport)
@@ -64,5 +92,5 @@ func (s *Service) ReplaceTaskHardwareResourceBindings(ctx context.Context, taskI
 			}
 		}
 	}
-	return s.store.ReplaceTaskHardwareBindings(ctx, taskID, bindings)
+	return nil
 }

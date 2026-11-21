@@ -53,7 +53,7 @@ func (s *Server) agentCapabilityMap(ctx context.Context, claims agentapi.Claims,
 		"desktop_mcp_write":   s.app.AgentDesktopMCPWriteAllowed(ctx, call),
 		"browser_mcp_write":   s.app.AgentBrowserMCPWriteAllowed(ctx, call),
 		"progress":            true, "live_inbox_wait": true, "knowledge_read": true, "knowledge_feedback": true,
-		"memory_update": main, "knowledge_publish": knowledgePublish, "knowledge_contribute_bound": knowledgePublish && boundKnowledgeContribute, "skill_create": main, "skill_update": main,
+		"memory_update": s.app.AgentWriteAllowed(ctx, call), "knowledge_publish": knowledgePublish, "knowledge_contribute_bound": knowledgePublish && boundKnowledgeContribute, "skill_create": main, "skill_update": main,
 		// Reported separately so a caller can tell whether a global skill is
 		// possible before sending one and being refused.
 		"skill_create_global": main && s.app.AgentGlobalSkillAllowed(ctx, call),

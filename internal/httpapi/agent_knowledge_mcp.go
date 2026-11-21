@@ -113,8 +113,8 @@ func (s *Server) callAgentKnowledgeMCPTool(writer http.ResponseWriter, request *
 		// Tool text is model-visible. Internal errors can carry host paths
 		// (guide/entry reads); operators get the detail in the server log and
 		// the model gets only the stable classification.
-		log.Printf("agent knowledge mcp tool %s failed: %v", input.Name, err)
 		code, message := knowledgeMCPErrorCode(err)
+		log.Printf("agent knowledge mcp tool %s failed: %s", input.Name, code)
 		respond(map[string]any{
 			"isError": true,
 			"content": []map[string]any{{"type": "text", "text": code + ": " + message}},

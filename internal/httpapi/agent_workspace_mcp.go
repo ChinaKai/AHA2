@@ -55,7 +55,7 @@ func (s *Server) agentWorkspaceMCP(writer http.ResponseWriter, request *http.Req
 		writeError(writer, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	call, err := s.app.AgentCallContext(request.Context(), claims, false)
+	call, err := s.app.AgentDomainCallContext(request.Context(), claims, "workspace", false)
 	if err != nil {
 		writeAgentControlError(writer, err)
 		return

@@ -100,11 +100,14 @@ func TestPetHardwareBindingReplacementPreservesIdentityAndRejectsWithoutMutation
 			t.Fatal("unchanged resource lost binding identity")
 		}
 	}
-	if len(recorder.calls) != 16 {
-		t.Fatalf("old connections were not closed: %v", recorder.calls)
+	if len(recorder.calls) != 0 {
+		t.Fatalf("unchanged connections were closed: %v", recorder.calls)
 	}
 	if _, err := f.service.PetUpdateTaskHardware(f.ctx, PetUpdateTaskHardwareInput{TaskID: task.ID, ResourceIDs: []string{resources[16]}}); err != nil {
 		t.Fatal(err)
+	}
+	if len(recorder.calls) != 16 {
+		t.Fatalf("removed connections not closed: %v", recorder.calls)
 	}
 	if _, err := f.database.HardwareGroup(f.ctx, task.ID, resources[0]); err == nil {
 		t.Fatal("removed resource still resolves")

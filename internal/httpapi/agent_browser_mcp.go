@@ -64,7 +64,7 @@ func (s *Server) agentBrowserMCP(writer http.ResponseWriter, request *http.Reque
 		writeError(writer, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	call, err := s.app.AgentCallContext(request.Context(), claims, false)
+	call, err := s.app.AgentDomainCallContext(request.Context(), claims, "browser", false)
 	if err != nil {
 		writeAgentControlError(writer, err)
 		return
@@ -459,6 +459,10 @@ func (s *Server) agentBrowserMCPGrant(ctx context.Context, taskID, grantID strin
 // The message is browser.PublicMessage, which already hides host diagnostics;
 // page text, element names, titles and URLs never enter an error.
 func browserMCPErrorCode(err error) (string, string) {
+	var operation *agentOperationError
+	if errors.As(err, &operation) {
+		return operation.Code, operation.Code
+	}
 	var typed *browser.Error
 	if errors.As(err, &typed) {
 		code := strings.TrimSpace(typed.Code)

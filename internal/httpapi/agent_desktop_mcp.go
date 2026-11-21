@@ -57,7 +57,7 @@ func (s *Server) agentDesktopMCP(writer http.ResponseWriter, request *http.Reque
 		writeError(writer, http.StatusUnauthorized, "agent_capability_required")
 		return
 	}
-	call, err := s.app.AgentCallContext(request.Context(), claims, false)
+	call, err := s.app.AgentDomainCallContext(request.Context(), claims, "desktop", false)
 	if err != nil {
 		writeAgentControlError(writer, err)
 		return
