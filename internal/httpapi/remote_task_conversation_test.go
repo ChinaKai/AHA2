@@ -89,6 +89,82 @@ func TestRemoteTaskConversationIsPagedAndDefaultsToReadableCategories(t *testing
 	}
 }
 
+// Read-only mirrors keep the synced item payload as-is, so Thinking must be
+// split from Agent Update by the payload kind there too, and a request without
+// categories keeps returning reasoning rows like it did before the split.
+func TestRemoteTaskConversationSplitsThinkingFromUpdate(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Now().UTC().Truncate(time.Second)
+	project := domain.Project{ID: "project-remote-thinking", Name: "Remote", CreatedAt: now, UpdatedAt: now}
+	if err := database.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	task := domain.Task{ID: "source-task-thinking", ProjectID: project.ID, Title: "Remote thinking", Status: domain.TaskWaitingUser, CreatedAt: now, UpdatedAt: now}
+	putRemoteTaskObject(t, database, store.RemoteTaskObject{OwnerDeviceID: "remote-thinking-owner", ObjectType: "task", ObjectID: task.ID, TaskID: task.ID, ProjectID: project.ID, Payload: mustJSON(t, task), CreatedAt: now, UpdatedAt: now})
+	rows := []struct{ id, category, kind string }{
+		{"r1-chat", "chat", "agent_message"},
+		{"r2-update", "update", "agent_progress"},
+		{"r3-thinking", "update", domain.ConversationKindReasoning},
+		{"r4-tool", "tool", "agent_command_finished"},
+		{"r5-thinking", "update", domain.ConversationKindReasoning},
+		{"r6-error", "error", "agent_error"},
+		{"r7-update", "update", "agent_message_update"},
+	}
+	for index, row := range rows {
+		item := domain.ConversationItem{
+			ID: row.id, TaskID: task.ID, AgentID: "main", StreamAgentID: "main",
+			Category: row.category, Kind: row.kind, Summary: row.id, CreatedAt: now.Add(time.Duration(index) * time.Second),
+		}
+		putRemoteTaskObject(t, database, store.RemoteTaskObject{
+			OwnerDeviceID: "remote-thinking-owner", ObjectType: "conversation", ObjectID: item.ID, TaskID: task.ID,
+			ProjectID: project.ID, Payload: mustJSON(t, item), CreatedAt: item.CreatedAt, UpdatedAt: item.CreatedAt,
+		})
+	}
+	mirrors, err := database.RemoteTaskMirrors(ctx, "")
+	if err != nil || len(mirrors) != 1 {
+		t.Fatalf("mirrors=%d err=%v", len(mirrors), err)
+	}
+	publicID := mirrors[0].Task.ID
+	authService := auth.NewService(database, "setup-test", time.Hour)
+	server := httptest.NewServer(New(Config{Store: database, Auth: authService, App: app.NewService(database, nil, app.StubExecutor{})}).Handler())
+	defer server.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	_ = registerOwner(t, client, server.URL)
+	ids := func(page domain.ConversationPage) string {
+		result := []string{}
+		for _, item := range page.Items {
+			result = append(result, item.ID)
+		}
+		return fmt.Sprint(result)
+	}
+	cases := map[string]string{
+		"limit=20&categories=chat,error,update":          "[r1-chat r2-update r6-error r7-update]",
+		"limit=20&categories=thinking":                   "[r3-thinking r5-thinking]",
+		"limit=20&categories=update,thinking":            "[r2-update r3-thinking r5-thinking r7-update]",
+		"limit=20&categories=chat,error,update,thinking": "[r1-chat r2-update r3-thinking r5-thinking r6-error r7-update]",
+		"limit=20": "[r1-chat r2-update r3-thinking r5-thinking r6-error r7-update]",
+	}
+	for query, want := range cases {
+		if got := ids(getRemoteConversationPage(t, client, server.URL, publicID, query)); got != want {
+			t.Fatalf("%s: got %s want %s", query, got, want)
+		}
+	}
+	first := getRemoteConversationPage(t, client, server.URL, publicID, "limit=1&categories=thinking")
+	if ids(first) != "[r5-thinking]" || !first.HasMore {
+		t.Fatalf("first thinking page: %#v", first)
+	}
+	older := getRemoteConversationPage(t, client, server.URL, publicID, fmt.Sprintf("limit=1&categories=thinking&before=%d", first.NextBefore))
+	if ids(older) != "[r3-thinking]" || older.HasMore {
+		t.Fatalf("older thinking page: %#v", older)
+	}
+}
+
 func TestRemoteTaskDetailDoesNotMaterializeConversation(t *testing.T) {
 	ctx := context.Background()
 	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))

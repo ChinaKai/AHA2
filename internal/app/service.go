@@ -2995,8 +2995,8 @@ func (s *Service) recordExecutionEvent(ctx context.Context, turn domain.Turn, ev
 		category = "update"
 		summary = firstText(event.Data, "message", "phase", "status")
 	case "agent_reasoning":
-		category = "update"
-		kind = "agent_reasoning_update"
+		category = domain.ConversationCategoryUpdate
+		kind = domain.ConversationKindReasoning
 		summary = firstText(event.Data, "text")
 		durableUpdate = true
 	case "agent_message":

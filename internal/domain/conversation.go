@@ -49,6 +49,18 @@ type ConversationItem struct {
 	CreatedAt     time.Time      `json:"created_at"`
 }
 
+// Thinking is a query-only conversation filter. Model reasoning is stored as
+// category "update" with kind ConversationKindReasoning (every Backend projects
+// its thinking/reasoning blocks through the agent_reasoning execution event),
+// so history written before the filter existed is split by kind instead of
+// being rewritten. Filtering by "update" excludes these rows; "thinking"
+// selects only them.
+const (
+	ConversationCategoryUpdate   = "update"
+	ConversationCategoryThinking = "thinking"
+	ConversationKindReasoning    = "agent_reasoning_update"
+)
+
 type ConversationPage struct {
 	Items      []ConversationItem `json:"items"`
 	HasMore    bool               `json:"has_more"`

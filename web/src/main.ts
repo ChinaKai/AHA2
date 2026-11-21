@@ -708,7 +708,7 @@ const state: State = {
   taskConversationBefore: 0,
   taskConversationLatest: 0,
   taskEventCursor: 0,
-  taskCategories: {chat: true, update: false, tool: false, error: true},
+  taskCategories: {chat: true, update: true, thinking: false, tool: false, error: true},
   taskContext: null,
   taskRealtimeState: "connecting",
   taskDraft: "",
@@ -8737,7 +8737,7 @@ async function loadOlderConversation(): Promise<void> {
       // The patch anchored on the first visible row before the prepend and
       // restored it after; prepended rows above it never move the viewport.
     }
-    const count = document.querySelector<HTMLElement>("#conversation-filter-count");
+    const count = document.querySelector<HTMLElement>("#conversation-filter-loaded");
     if (count) count.textContent = `${state.taskConversation.length} 条已加载`;
   } finally {
     loadingOlderConversation = false;

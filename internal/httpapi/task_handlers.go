@@ -650,13 +650,15 @@ func (s *Server) conversationForAgent(writer http.ResponseWriter, request *http.
 	for _, value := range strings.Split(categoryQuery, ",") {
 		value = strings.TrimSpace(value)
 		switch value {
-		case "chat", "update", "tool", "error", "mail":
+		case "chat", "update", "thinking", "tool", "error", "mail":
 			categories = append(categories, value)
 		}
 	}
 	if _, err := s.store.Task(request.Context(), taskID); err != nil {
 		if strings.TrimSpace(categoryQuery) == "" {
-			categories = []string{"chat", "update", "error", "mail"}
+			// "update" no longer includes reasoning rows; keep the historical
+			// no-filter default by naming thinking explicitly.
+			categories = []string{"chat", "update", "thinking", "error", "mail"}
 		}
 		page, pageErr := s.store.RemoteConversationPageForAgent(
 			request.Context(),

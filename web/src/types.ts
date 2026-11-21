@@ -721,7 +721,10 @@ export interface TaskActivity {
   agent_id: string;
 }
 
-export type ConversationCategory = "chat" | "update" | "tool" | "error";
+// "thinking" is a filter-only category: reasoning rows are stored and returned
+// as category "update" with kind "agent_reasoning_update", and the server splits
+// them out of "update" when the filter asks for it.
+export type ConversationCategory = "chat" | "update" | "thinking" | "tool" | "error";
 
 export interface Attachment {
   id: string;

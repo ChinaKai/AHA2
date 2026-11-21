@@ -543,6 +543,60 @@ func (s *Store) ConversationPage(
 	return s.ConversationPageForAgent(ctx, taskID, "main", before, after, limit, categories)
 }
 
+// conversationCategoryClause turns the conversation filter categories into one
+// SQL predicate. Plain categories match the stored category column. "update"
+// and "thinking" share the stored "update" category and are split by the
+// reasoning kind: "update" alone excludes reasoning rows, "thinking" alone
+// selects only them, and both together select every update row. The filter
+// is applied in SQL, so LIMIT, has_more, next_before and the incremental
+// latest_sequence all describe exactly the rows the caller asked for.
+// An empty or fully unknown list returns no predicate (all categories).
+func conversationCategoryClause(categories []string, categoryColumn, kindColumn string) (string, []any) {
+	plain := make([]string, 0, len(categories))
+	seen := map[string]bool{}
+	update, thinking := false, false
+	for _, category := range categories {
+		category = strings.TrimSpace(category)
+		if category == "" || seen[category] {
+			continue
+		}
+		seen[category] = true
+		switch category {
+		case domain.ConversationCategoryUpdate:
+			update = true
+		case domain.ConversationCategoryThinking:
+			thinking = true
+		default:
+			plain = append(plain, category)
+		}
+	}
+	if update && thinking {
+		plain = append(plain, domain.ConversationCategoryUpdate)
+	}
+	terms := make([]string, 0, 2)
+	args := make([]any, 0, len(plain)+2)
+	if len(plain) > 0 {
+		placeholders := make([]string, 0, len(plain))
+		for _, category := range plain {
+			placeholders = append(placeholders, "?")
+			args = append(args, category)
+		}
+		terms = append(terms, categoryColumn+" IN ("+strings.Join(placeholders, ",")+")")
+	}
+	if update != thinking {
+		operator := "<>"
+		if thinking {
+			operator = "="
+		}
+		terms = append(terms, "("+categoryColumn+"=? AND "+kindColumn+operator+"?)")
+		args = append(args, domain.ConversationCategoryUpdate, domain.ConversationKindReasoning)
+	}
+	if len(terms) == 0 {
+		return "", nil
+	}
+	return "(" + strings.Join(terms, " OR ") + ")", args
+}
+
 func (s *Store) ConversationPageForAgent(
 	ctx context.Context,
 	taskID string,
@@ -565,13 +619,9 @@ func (s *Store) ConversationPageForAgent(
 		where = append(where, "item.sequence>?")
 		args = append(args, after)
 	}
-	if len(categories) > 0 {
-		placeholders := make([]string, 0, len(categories))
-		for _, category := range categories {
-			placeholders = append(placeholders, "?")
-			args = append(args, category)
-		}
-		where = append(where, "item.category IN ("+strings.Join(placeholders, ",")+")")
+	if clause, clauseArgs := conversationCategoryClause(categories, "item.category", "item.kind"); clause != "" {
+		where = append(where, clause)
+		args = append(args, clauseArgs...)
 	}
 	order := "DESC"
 	if after > 0 {

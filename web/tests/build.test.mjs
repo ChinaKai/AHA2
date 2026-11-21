@@ -1519,15 +1519,19 @@ test("built web contains responsive application", async () => {
   assert.match(taskComposer, /composer-target-wrap/);
   assert.match(taskComposer, /conversation-filter-popover/);
   assert.match(taskComposer, /data-conversation-category/);
-  // The message filter keeps exactly four categories; mail is not one of them.
-  assert.match(taskComposer, /chat: "对话",\s*update: "Agent Update",\s*tool: "工具调用",\s*error: "错误",?\s*\}/);
+  // The message filter has exactly five categories (task-724 split Thinking out
+  // of Agent Update); mail is still not one of them. The count denominator is
+  // derived from the label table so it cannot drift from the buttons.
+  assert.match(taskComposer, /chat: "对话",\s*update: "Agent Update",\s*thinking: "Thinking",\s*tool: "工具调用",\s*error: "错误",?\s*\}/);
   assert.doesNotMatch(taskComposer, /mail: "邮件"/);
-  assert.match(taskComposer, /enabled}\/4/);
-  assert.doesNotMatch(taskComposer, /enabled}\/5/);
+  assert.match(taskComposer, /const total = Object\.keys\(labels\)\.length;/);
+  assert.match(taskComposer, /enabled}\/\$\{total}/);
+  assert.doesNotMatch(taskComposer, /enabled}\/[0-9]/);
   assert.doesNotMatch(conversation, /mailConversationCardHtml|mail-message-card|data-message-category="mail"/);
   assert.doesNotMatch(script, /taskCategories:\s*\{[\s\S]{0,200}mail/);
   assert.doesNotMatch(script, /\["chat", "update", "error", "mail"\]/);
-  assert.match(script, /taskCategories:\s*\{\s*chat:\s*true,\s*update:\s*false,\s*tool:\s*false,\s*error:\s*true\s*\}/);
+  // Default filter (task-724): chat + error + Agent Update; Thinking and tool off.
+  assert.match(script, /taskCategories:\s*\{\s*chat:\s*true,\s*update:\s*true,\s*thinking:\s*false,\s*tool:\s*false,\s*error:\s*true\s*\}/);
   assert.match(script, /消息已排队/);
   assert.match(promptAdmin, /prompt-template-layout/);
   assert.match(script, /renderCodexAccounts/);
