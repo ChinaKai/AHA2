@@ -7,29 +7,66 @@ import (
 	"github.com/ChinaKai/AHA2/internal/agentapi"
 )
 
-// authorizeAgentDomainRoute runs after token authentication. Its finite path
-// families are the existing Agent APIs, never owner Web routes. MCP dispatch
-// determines read/write from the named tool and uses the same app boundary.
+type agentRouteMode uint8
+
+const (
+	agentRouteBusiness agentRouteMode = iota + 1
+	agentRouteResource
+	agentRouteMCP
+)
+
+type agentRouteAccess uint8
+
+const (
+	agentRouteRead agentRouteAccess = iota + 1
+	agentRouteWrite
+	agentRouteBookkeeping
+	agentRouteTools
+)
+
+type agentTokenRoutePolicy struct {
+	Domain string
+	Access agentRouteAccess
+	Mode   agentRouteMode
+}
+
+// authorizeAgentDomainRoute uses the pattern chosen by the server's ServeMux.
+// An opaque resource name (including an encoded slash) cannot select a policy.
+// Business-scoped endpoints retain their existing per-operation authorization;
+// shared resources always pass the common domain gate. Unknown routes fail shut.
 func (s *Server) authorizeAgentDomainRoute(writer http.ResponseWriter, request *http.Request, claims agentapi.Claims) bool {
-	path := request.URL.Path
-	if strings.HasSuffix(path, "/mcp") {
-		return true
+	policy, known := agentTokenRoutePolicies[request.Pattern]
+	if !known {
+		writeError(writer, http.StatusForbidden, "agent_route_policy_missing")
+		return false
 	}
-	domainName := ""
-	for prefix, name := range map[string]string{"/api/v1/agent/hardware": "hardware", "/api/v1/agent/browser": "browser", "/api/v1/agent/processes": "workspace", "/api/v1/agent/project/workspaces": "workspace", "/api/v1/agent/project/runtimes": "workspace", "/api/v1/agent/desktop": "desktop"} {
-		if path == prefix || strings.HasPrefix(path, prefix+"/") {
-			domainName = name
-			break
+	if policy.Mode == agentRouteMCP {
+		method, path, valid := strings.Cut(request.Pattern, " ")
+		if !valid || method != http.MethodPost || request.Method != http.MethodPost || request.URL.EscapedPath() != path {
+			writeError(writer, http.StatusForbidden, "agent_route_policy_mismatch")
+			return false
 		}
+		return true // The exact registered MCP handler checks the named tool.
 	}
-	if domainName == "" {
+	if policy.Mode == agentRouteBusiness && policy.Domain != "attachment" {
 		return true
+	}
+	if policy.Mode != agentRouteResource && !(policy.Mode == agentRouteBusiness && policy.Domain == "attachment") {
+		writeError(writer, http.StatusForbidden, "agent_route_policy_invalid")
+		return false
 	}
 	if s.app == nil {
 		writeError(writer, http.StatusServiceUnavailable, "agent_api_unavailable")
 		return false
 	}
-	_, err := s.app.AgentDomainCallContext(request.Context(), claims, domainName, request.Method != http.MethodGet)
+	var err error
+	if policy.Domain == "attachment" {
+		// This dual-auth resource keeps ordinary collaborators' own-Task reads,
+		// but an expired Turn cannot retain data access through a live token.
+		_, err = s.app.AgentCallContext(request.Context(), claims, false)
+	} else {
+		_, err = s.app.AgentDomainCallContext(request.Context(), claims, policy.Domain, policy.Access == agentRouteWrite)
+	}
 	if err != nil {
 		writeAgentControlError(writer, err)
 		return false

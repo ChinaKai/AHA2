@@ -61,7 +61,11 @@ func (s *Server) withOwnerOrAgentAuth(next http.Handler) http.Handler {
 		if ok && strings.EqualFold(scheme, "Bearer") && s.agentCapabilities != nil {
 			if claims, err := s.agentCapabilities.Authenticate(strings.TrimSpace(token)); err == nil {
 				ctx := context.WithValue(request.Context(), agentClaimsContextKey{}, claims)
-				next.ServeHTTP(writer, request.WithContext(ctx))
+				request = request.WithContext(ctx)
+				if !s.authorizeAgentDomainRoute(writer, request, claims) {
+					return
+				}
+				next.ServeHTTP(writer, request)
 				return
 			}
 		}

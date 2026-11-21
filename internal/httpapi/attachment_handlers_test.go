@@ -235,16 +235,18 @@ func TestTaskAttachmentDownloadByAgentCapabilityIsScopedToTask(t *testing.T) {
 	}
 
 	capabilities := agentapi.NewCapabilities()
-	tokenA, err := capabilities.Issue(taskA.ID, "main", "turn-a", time.Hour)
+	turnA := createCoreTurn(t, database, taskA, "main", domain.NewID("inbox_batch"))
+	tokenA, err := capabilities.Issue(taskA.ID, "main", turnA.ID, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
-	tokenB, err := capabilities.Issue(taskB.ID, "main", "turn-b", time.Hour)
+	turnB := createCoreTurn(t, database, taskB, "main", domain.NewID("inbox_batch"))
+	tokenB, err := capabilities.Issue(taskB.ID, "main", turnB.ID, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
 	authService := auth.NewService(database, "setup-test", time.Hour)
-	server := httptest.NewServer(New(Config{Store: database, Auth: authService, AgentCapabilities: capabilities}).Handler())
+	server := httptest.NewServer(New(Config{Store: database, Auth: authService, App: app.NewService(database, nil, app.StubExecutor{}), AgentCapabilities: capabilities}).Handler())
 	defer server.Close()
 	attachmentURL := func(taskID, attachmentID string) string {
 		return server.URL + "/api/v1/tasks/" + taskID + "/attachments/" + attachmentID
