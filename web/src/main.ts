@@ -3879,9 +3879,9 @@ async function openTask(taskID: string): Promise<void> {
     state.taskConversationLatest = page?.conversation.latest_sequence || 0;
     state.taskEventCursor = detail.event_cursor || 0;
     state.taskContext = null;
-    state.taskTool = state.taskToolPinned === "channel" && !taskChannelRouteEditable(detail) && taskPermissionPendingCount(detail) === 0
-      ? ""
-      : state.taskToolPinned;
+    // The channel page is always a valid destination: channel-hosted and
+    // read-only Tasks render approvals only, so a pinned channel stays open.
+    state.taskTool = state.taskToolPinned;
     state.taskDetailLoading = false;
     rememberCommandPaletteTask(taskID);
     requestConversationBottom();
@@ -4096,6 +4096,9 @@ function taskRuntimeSignature(detail: TaskDetail | null): string {
     ] : null,
     hardware: detail.hardware,
     memory: detail.memory,
+    // A new or resolved permission request must redraw the channel badge even
+    // when no Task/Turn field changed.
+    permissions: (detail.permission_requests || []).map(item => [item.id, item.status]),
   });
 }
 
@@ -6848,7 +6851,7 @@ function taskMailPendingCount(): number {
 
 function taskDetailView(detail: TaskDetail): string {
   const loadingDetail = state.taskDetailLoading;
-  const {archivedReadOnly, remoteReadOnly, completed, readOnly} = taskComposerFlags(detail);
+  const {archivedReadOnly, remoteReadOnly, completed} = taskComposerFlags(detail);
   const draft = detail.task.status === "draft";
   const activeTurn = (detail.turns || []).find(item => item.agent_id === state.selectedTaskAgent && isActiveTurn(item.status));
   const selectedAgent = detail.agents.find(item => item.agent_id === state.selectedTaskAgent);
@@ -6867,10 +6870,10 @@ function taskDetailView(detail: TaskDetail): string {
     ${messageComposerOpenTag(detail, {runtimeError})}${messageComposerHtml(detail, {activeTurn: Boolean(activeTurn), runtimeError})}</${messageComposerElement(detail)}>
   </section>`;
   const toolLayout = state.taskTool ? ` task-tool-open task-tool-${state.taskToolMode}` : "";
-  // The channel tool owns pending approvals now. Keep it reachable for
-  // channel-hosted or read-only Tasks that still have something to decide,
-  // even though those Tasks cannot bind a route here.
-  const channelVisible = (!readOnly && !detail.task.channel_instance_id) || taskPermissionPendingCount(detail) > 0;
+  // The channel entry is also the approval history entry for channel-hosted
+  // and read-only Tasks. Keep it in the toolbar even at zero pending; those
+  // Tasks render only the approval section, never the route form.
+  const channelVisible = true;
   return shell(`<section class="task-screen">
     <header class="task-head"><button id="back-tasks">←</button><div class="task-title-block"><h1><span class="task-code">${escapeHTML(detail.task.code || "")}</span><span class="task-title-text">${escapeHTML(detail.task.title)}</span></h1><div class="task-head-subline"><span class="task-head-meta" title="${escapeHTML(taskMeta)}">${escapeHTML(taskMeta)}</span><span id="task-detail-status" class="status ${statusClass(detail.task.status)}">${statusLabel(detail.task.status)}</span><span class="task-branch">${escapeHTML(detail.task.task_branch || "")}</span><span id="task-review-slot">${renderTaskReviewDecision(detail.task, tr)}</span></div></div><div class="actions task-tool-actions">${renderTaskToolButtons(state.taskTool, {includeChannel: channelVisible, channelConnected: Boolean(state.taskChannelDestination), channelLabel: taskChannelButtonLabel(state.taskChannelDestination), pendingPermissions: taskPermissionPendingCount(detail), pendingMail: taskMailPendingCount()})}</div></header>
     <div class="task-grid${toolLayout}" style="--task-tool-width:${state.taskToolWidth}%">

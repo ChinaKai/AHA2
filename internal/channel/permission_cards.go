@@ -98,7 +98,11 @@ func (s *Service) resolveTaskPermissionCardAction(
 	task, taskErr := s.store.Task(ctx, resolved.TaskID)
 	if taskErr != nil || !app.TaskAcceptsApprovalResultWake(task.Status) {
 		// A terminal Task cannot run the continuation. Keep the same result as
-		// history only and do not disturb the state machine.
+		// history only and do not disturb the state machine. The receipt must
+		// still finish processing; no continuation message consumes it here.
+		if err := s.store.FinishChannelInbox(ctx, receipt.ID, receipt.LeaseID, "processed", action.ConversationID, "", "permission_approved", s.now().UTC()); err != nil {
+			return err
+		}
 		if notifyErr := s.application.NotifyTaskApprovalResult(ctx, app.TaskApprovalResultInput{
 			TaskID: resolved.TaskID, Kind: app.TaskApprovalKindChannelPermission,
 			Subject: resolved.Action, ReferenceID: resolved.ID, Decision: "approved",

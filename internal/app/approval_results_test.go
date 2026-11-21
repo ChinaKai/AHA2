@@ -121,18 +121,18 @@ func TestExpiredPermissionRequestNotifiesTaskOnce(t *testing.T) {
 	if _, err := fixture.service.TaskPermissionRequests(fixture.ctx, task.ID, 50); err != nil {
 		t.Fatal(err)
 	}
-	if !conversationHasKindText(t, fixture, task.ID, "user_message", "owner 已过期") {
+	if !conversationHasKindText(t, fixture, task.ID, "user_message", "申请已过期（owner 未处理）") {
 		t.Fatal("expired permission request did not notify the task")
 	}
 	if !conversationHasKindText(t, fixture, task.ID, "user_message", request.ID) {
 		t.Fatal("expiry result did not include the request id")
 	}
 	// Reading the list again must not produce a second expiry message.
-	before := countConversationText(t, fixture, task.ID, "owner 已过期")
+	before := countConversationText(t, fixture, task.ID, "申请已过期（owner 未处理）")
 	if _, err := fixture.service.TaskPermissionRequests(fixture.ctx, task.ID, 50); err != nil {
 		t.Fatal(err)
 	}
-	if after := countConversationText(t, fixture, task.ID, "owner 已过期"); after != before || after != 1 {
+	if after := countConversationText(t, fixture, task.ID, "申请已过期（owner 未处理）"); after != before || after != 1 {
 		t.Fatalf("expiry notification count = %d -> %d, want 1", before, after)
 	}
 }
@@ -172,10 +172,40 @@ func TestNotifyTaskApprovalResultRecordsTerminalTaskWithoutWaking(t *testing.T) 
 	if stored.Status != domain.TaskCompleted {
 		t.Fatalf("task status = %s, want completed", stored.Status)
 	}
-	if !conversationHasKindText(t, fixture, task.ID, "agent_message", "owner 已过期") {
+	if !conversationHasKindText(t, fixture, task.ID, "agent_message", "申请已过期（owner 未处理）") {
 		t.Fatal("terminal task did not keep the result as history")
 	}
-	if conversationHasKindText(t, fixture, task.ID, "user_message", "owner 已过期") {
+	if conversationHasKindText(t, fixture, task.ID, "user_message", "申请已过期（owner 未处理）") {
 		t.Fatal("terminal task received a waking message instead of a history record")
+	}
+}
+
+// A new request must see the old expired one as expired and notify it exactly
+// once; the old list-read side effect used to consume it silently.
+func TestCreateAfterExpiryStillNotifiesOnce(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	task := createApprovalResultTask(t, fixture)
+	base := fixture.service.now().UTC()
+	if _, err := fixture.service.CreateTaskPermissionRequest(fixture.ctx, TaskPermissionRequestInput{
+		TaskID: task.ID, Action: "push main", Reason: "联调", Risk: "medium", ExpiresInSeconds: 60,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fixture.service.now = func() time.Time { return base.Add(16 * time.Minute) }
+	t.Cleanup(func() { fixture.service.now = time.Now })
+	created, err := fixture.service.CreateTaskPermissionRequest(fixture.ctx, TaskPermissionRequestInput{
+		TaskID: task.ID, Action: "run tests", Reason: "再试一次", Risk: "low",
+	})
+	if err != nil {
+		t.Fatalf("create after expiry: %v", err)
+	}
+	if created.Status != "pending" {
+		t.Fatalf("new request status = %s", created.Status)
+	}
+	if count := countConversationText(t, fixture, task.ID, "申请已过期（owner 未处理）"); count != 1 {
+		t.Fatalf("expiry notification count = %d, want 1", count)
+	}
+	if !conversationHasKindText(t, fixture, task.ID, "user_message", "渠道权限申请「push main」") {
+		t.Fatal("expiry result does not name the expired request")
 	}
 }

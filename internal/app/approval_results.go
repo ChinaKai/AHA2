@@ -63,9 +63,16 @@ func TaskApprovalResultContent(input TaskApprovalResultInput) string {
 	case "cancelled", "canceled", "cancel":
 		decision = "取消"
 	}
-	decider := strings.TrimSpace(input.Decider)
-	if decider == "" {
-		decider = "owner"
+	decisionText := "owner 已" + decision
+	decidedBy := ""
+	if decision == "过期" {
+		decisionText = "申请已过期（owner 未处理）"
+	} else {
+		decider := strings.TrimSpace(input.Decider)
+		if decider == "" {
+			decider = "owner"
+		}
+		decidedBy = "处理人：" + decider + "。"
 	}
 	at := input.At
 	if at.IsZero() {
@@ -73,8 +80,8 @@ func TaskApprovalResultContent(input TaskApprovalResultInput) string {
 	}
 	reason := strings.TrimSpace(input.Reason)
 	message := fmt.Sprintf(
-		"[审批结果] %s「%s」（%s）：owner 已%s。处理人：%s。时间：%s。",
-		kind, subject, strings.TrimSpace(input.ReferenceID), decision, decider,
+		"[审批结果] %s「%s」（%s）：%s。%s时间：%s。",
+		kind, subject, strings.TrimSpace(input.ReferenceID), decisionText, decidedBy,
 		at.Local().Format("2006-01-02 15:04:05"),
 	)
 	if reason != "" {

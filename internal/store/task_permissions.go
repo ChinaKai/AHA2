@@ -48,25 +48,12 @@ func (s *Store) TaskPermissionRequest(ctx context.Context, id string) (domain.Ta
 		`SELECT `+taskPermissionRequestColumns+` FROM task_permission_requests WHERE id=?`, id))
 }
 
+// ListTaskPermissionRequests is a pure read. Expiry is settled explicitly by
+// ExpireTaskPermissionRequests so a read or an unrelated write can never turn a
+// request into expired without the caller also sending its result message.
 func (s *Store) ListTaskPermissionRequests(ctx context.Context, taskID string, limit int) ([]domain.TaskPermissionRequest, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 50
-	}
-	now := time.Now().UTC()
-	// Expiring is a write, and the detail page reads this list on every load.
-	// Probe first so the common page (nothing expired) does not take the write
-	// lock just to update zero rows.
-	var hasExpired bool
-	if err := s.db.QueryRowContext(ctx, `
-		SELECT EXISTS(
-			SELECT 1 FROM task_permission_requests
-			WHERE task_id=? AND status='pending' AND expires_at<=?
-		)`, taskID, timeString(now),
-	).Scan(&hasExpired); err != nil || hasExpired {
-		_, _ = s.db.ExecContext(ctx, `
-			UPDATE task_permission_requests SET status='expired',updated_at=?
-			WHERE task_id=? AND status='pending' AND expires_at<=?`,
-			timeString(now), taskID, timeString(now))
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT `+taskPermissionRequestColumns+` FROM task_permission_requests

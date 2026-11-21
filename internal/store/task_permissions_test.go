@@ -51,7 +51,8 @@ func TestTaskPermissionRequestResolvesOnce(t *testing.T) {
 // Listing expires stale pending rows as a side effect. The read path now
 // probes before writing, so this pins that the expiry still happens when there
 // is something to expire.
-func TestListTaskPermissionRequestsExpiresStalePending(t *testing.T) {
+// Listing is a pure read now; expiry is one explicit, notifying operation.
+func TestListTaskPermissionRequestsDoesNotExpireImplicitly(t *testing.T) {
 	ctx := context.Background()
 	database, err := Open(ctx, t.TempDir()+"/aha2.db")
 	if err != nil {
@@ -69,8 +70,16 @@ func TestListTaskPermissionRequestsExpiresStalePending(t *testing.T) {
 		t.Fatal(err)
 	}
 	listed, err := database.ListTaskPermissionRequests(ctx, task.ID, 10)
+	if err != nil || len(listed) != 1 || listed[0].Status != "pending" {
+		t.Fatalf("list must not write expiry: %#v err=%v", listed, err)
+	}
+	expired, err := database.ExpireTaskPermissionRequests(ctx, task.ID, now)
+	if err != nil || len(expired) != 1 || expired[0].ID != request.ID {
+		t.Fatalf("explicit expiry = %#v err=%v", expired, err)
+	}
+	listed, err = database.ListTaskPermissionRequests(ctx, task.ID, 10)
 	if err != nil || len(listed) != 1 || listed[0].Status != "expired" {
-		t.Fatalf("listed=%#v err=%v", listed, err)
+		t.Fatalf("expired list=%#v err=%v", listed, err)
 	}
 }
 

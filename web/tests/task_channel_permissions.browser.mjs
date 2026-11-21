@@ -24,6 +24,7 @@ const now = new Date().toISOString();
 const bootstrap = `
 const LANG = new URL(location.href).searchParams.get("lang") || "zh-CN";
 const task = {id: "t-ui", code: "task-736", title: "Channel UI", status: "waiting_user", project_id: "project-1", workspace_id: "workspace-1", channel_instance_id: "", collaboration_mode: "auto", max_agents: 3};
+const hostedTask = {id: "t-hosted", code: "task-737", title: "Channel hosted", status: "waiting_user", project_id: "project-1", workspace_id: "workspace-1", channel_instance_id: "instance-hosted", collaboration_mode: "auto", max_agents: 3};
 const members = [
   {identity_link_id: "alice", display_name: "Alice Chen", is_bot: false, source: "provider"},
   {identity_link_id: "bob", display_name: "Bob Bot", is_bot: true, source: "observed"},
@@ -33,9 +34,14 @@ const members = [
 const contacts = [{identity_link_id: "alice", display_name: "Alice Chen", role: "participant", collaboration_role: "APP", is_bot: false, last_seen_at: ${JSON.stringify(now)}}];
 const pending = {id: "perm-pending", task_id: "t-ui", action: "在群聊里公布构建产物下载地址", scope: "release artifacts", reason: "测试同学要看包", status: "pending", applicant_name: "Alice Chen", applicant_is_bot: false, risk: "medium", created_at: ${JSON.stringify(now)}, expires_at: ${JSON.stringify(new Date(Date.now() + 600000).toISOString())}};
 const approved = {id: "perm-approved", task_id: "t-ui", action: "重跑 CI", scope: "workflow", reason: "偶发失败", status: "approved", applicant_name: "Bob Bot", applicant_is_bot: true, decider_name: "owner", decision_reason: "同意重跑", created_at: ${JSON.stringify(now)}, decided_at: ${JSON.stringify(now)}, expires_at: ${JSON.stringify(new Date(Date.now() + 600000).toISOString())}};
-const detail = () => ({
-  task, turns: [], agents: [{task_id: "t-ui", agent_id: "main", role: "main", status: "idle", title: "Main", runtime_config_valid: true, unread_count: 0}],
-  latest_round: null, hardware: [], memory: {}, permission_requests: [pending, approved],
+const hostedApproved = {id: "perm-hosted-approved", task_id: "t-hosted", action: "重跑历史 CI", scope: "workflow", reason: "偶发失败", status: "approved", applicant_name: "Bob Bot", applicant_is_bot: true, decider_name: "owner", decision_reason: "同意重跑", created_at: ${JSON.stringify(now)}, decided_at: ${JSON.stringify(now)}, expires_at: ${JSON.stringify(new Date(Date.now() + 600000).toISOString())}};
+const hostedPending = {id: "perm-hosted-pending", task_id: "t-hosted", action: "发布新的构建产物", scope: "release artifacts", reason: "有新的包", status: "pending", applicant_name: "Alice Chen", applicant_is_bot: false, risk: "medium", created_at: ${JSON.stringify(now)}, expires_at: ${JSON.stringify(new Date(Date.now() + 600000).toISOString())}};
+let hostedRequests = [hostedApproved];
+const detailFor = id => ({
+  task: id === "t-hosted" ? hostedTask : task, turns: [],
+  agents: [{task_id: id, agent_id: "main", role: "main", status: "idle", title: "Main", runtime_config_valid: true, unread_count: 0}],
+  latest_round: null, hardware: [], memory: {},
+  permission_requests: id === "t-hosted" ? hostedRequests : [pending, approved],
 });
 const json = (value, status = 200) => new Response(JSON.stringify(value), {status, headers: {"Content-Type": "application/json"}});
 window.fetch = async (input, init = {}) => {
@@ -45,23 +51,36 @@ window.fetch = async (input, init = {}) => {
   if (path === "/api/v1/auth/status") return json({authenticated: true, csrf_token: "csrf", owner: {id: "owner-1", username: "kaikai"}});
   if (path === "/api/v1/settings/general") return json({ok: true, general: {language: LANG}});
   if (path === "/api/v1/assistant") return json({assistant: {character: "gugugaga", name: "AHA", nickname: "AHA", enabled: true}, messages: [], models: [], tools: []});
-  if (path === "/api/v1/tasks" && method === "GET") return json({tasks: [task], has_more: false, counts: {status: {waiting_user: 1}, project: {"project-1": 1}, device: {local: 1}}});
+  if (path === "/api/v1/tasks" && method === "GET") return json({tasks: [task, hostedTask], has_more: false, counts: {status: {waiting_user: 2}, project: {"project-1": 2}, device: {local: 2}}});
   if (path === "/api/v1/projects") return json({projects: [{id: "project-1", name: "Project One", project_type: "folder", channel_retired: false, knowledge_policy: "enabled"}], has_more: false});
   if (path === "/api/v1/workspaces") return json({workspaces: [{id: "workspace-1", project_id: "project-1", name: "WS One", root_path: "/tmp/ws", transport: "native", health: "ready", read_only: false, capabilities: {}}]});
   if (path === "/api/v1/models" || path === "/api/v1/providers" || path === "/api/v1/env-groups") return json({models: [], providers: [], env_groups: []});
   if (path === "/api/v1/codex/accounts") return json({accounts: []});
-  if (path === "/api/v1/tasks/t-ui" && method === "GET") return json(detail());
+  if ((path === "/api/v1/tasks/t-ui" || path === "/api/v1/tasks/t-hosted") && method === "GET") return json(detailFor(path.split("/")[4]));
   if (path === "/api/v1/tasks/t-ui/channel-routes" && method === "GET") return json({
     destinations: [{conversation_id: "conversation-1", instance_id: "instance-1", instance_name: "Feishu", provider_key: "feishu", endpoint_kind: "group_digital_human", display_name: "联调群", status: "active", updated_at: ${JSON.stringify(now)}}],
     route: {id: "route-1", instance_id: "instance-1", conversation_id: "conversation-1", target_task_id: "t-ui", state: "active", revision: 1},
     contacts, members,
   });
-  if (path === "/api/v1/tasks/t-ui/agents/main/conversation") return json({conversation: {items: [], has_more: false, next_before: 0, latest_sequence: 0}});
+  if (path === "/api/v1/tasks/t-hosted/channel-routes" && method === "GET") return json({destinations: [], route: null, contacts: [], members: []});
+  if (path.startsWith("/api/v1/tasks/") && path.endsWith("/agents/main/conversation")) return json({conversation: {items: [], has_more: false, next_before: 0, latest_sequence: 0}});
   if (path === "/api/v1/tasks/t-ui/channel-contacts" && method === "POST") return json({ok: true});
   if (path.startsWith("/api/v1/")) return json({});
   return json({});
 };
-window.EventSource = class { constructor() {} close() {} addEventListener() {} };
+window.__sources = [];
+window.__sequence = 0;
+window.EventSource = class {
+  constructor() { this.listeners = {}; window.__sources.push(this); }
+  close() {}
+  addEventListener(name, fn) { (this.listeners[name] ||= []).push(fn); }
+};
+window.__addHostedPending = () => { hostedRequests = [...hostedRequests, hostedPending]; };
+window.__emitTaskUpdate = () => {
+  const sequence = ++window.__sequence;
+  window.__sources.forEach(source => (source.listeners.update || []).forEach(fn =>
+    fn({data: JSON.stringify({sequence, type: "task_permission_requested"})})));
+};
 sessionStorage.setItem("aha2.navigation", JSON.stringify({view: "tasks"}));
 `;
 
@@ -91,7 +110,7 @@ try {
   browser = await chromium.launch({...launchOptions, headless: true});
   const page = await browser.newPage({viewport: {width: 1280, height: 900}});
   const errors = [];
-  page.on("pageerror", error => errors.push(error.message));
+  page.on("pageerror", error => { errors.push(error.message); console.error("pageerror:", error.message); });
   await page.goto(url, {waitUntil: "networkidle"});
   await page.waitForSelector('.task-card[data-task="t-ui"]', {timeout: 15000});
   await page.click('.task-card[data-task="t-ui"]');
@@ -163,6 +182,34 @@ try {
   assert.equal(order.approvalsFirst, true, "pending approvals should come first on a narrow screen");
   assert.equal(order.overflow, false, "the channel page overflows on a phone");
   await page.screenshot({path: resolve(output, "task-channel-merged-390.png")});
+
+  // Channel-hosted Tasks keep the channel entry at zero pending and can open
+  // their approval history; an SSE-created request must update the badge.
+  const hosted = await browser.newPage({viewport: {width: 1280, height: 900}});
+  const hostedErrors = [];
+  hosted.on("pageerror", error => hostedErrors.push(error.message));
+  await hosted.goto(url, {waitUntil: "networkidle"});
+  await hosted.waitForSelector('.task-card[data-task="t-hosted"]', {timeout: 15000});
+  await hosted.click('.task-card[data-task="t-hosted"]');
+  await hosted.waitForSelector('[data-task-tool="channel"]', {timeout: 15000});
+  assert.equal(await hosted.locator('[data-task-tool="channel"]').count(), 1, "channel-hosted task lost its channel entry");
+  assert.equal(await hosted.locator('[data-task-tool="channel"] .task-tool-badge').count(), 0, "zero pending should show no badge");
+  await hosted.locator('[data-task-tool="channel"]').click();
+  await hosted.waitForSelector("#task-tool-panel-body #task-channel-permissions", {timeout: 8000});
+  assert.equal(await hosted.locator("#task-channel-route-form").count(), 0, "channel-hosted task should not render the route form");
+  assert.match(await hosted.locator("#task-channel-permissions").innerText(), /当前没有待审批的权限申请/);
+  await hosted.click("#toggle-task-permission-history");
+  await hosted.waitForFunction(() => document.querySelector("#task-channel-permissions")?.innerText.includes("重跑历史 CI"), null, {timeout: 5000});
+  assert.match(await hosted.locator("#task-channel-permissions").innerText(), /已批准/);
+  assert.match(await hosted.locator("#task-channel-permissions").innerText(), /Bob Bot/);
+  await hosted.click("#toggle-task-permission-history");
+  await hosted.waitForFunction(() => document.querySelector("#task-channel-permissions")?.innerText.includes("当前没有待审批的权限申请"));
+  await hosted.evaluate(() => { window.__addHostedPending(); window.__emitTaskUpdate(); });
+  await hosted.waitForFunction(() => document.querySelector('[data-task-tool="channel"] .task-tool-badge')?.textContent === "1", null, {timeout: 8000});
+  assert.equal(await hosted.locator('[data-task-tool="channel"]').evaluate(node => node.classList.contains("has-pending")), true);
+  await hosted.waitForFunction(() => document.querySelector("#task-channel-permissions")?.innerText.includes("发布新的构建产物"), null, {timeout: 8000});
+  await hosted.screenshot({path: resolve(output, "task-channel-hosted-sse.png")});
+  assert.deepEqual(hostedErrors, [], "the channel-hosted task threw");
 
   // English UI must not fall back to Chinese for the new copy.
   const english = await browser.newPage({viewport: {width: 1280, height: 900}});

@@ -208,6 +208,10 @@ func TestTaskPermissionCardDecisionsNotifyTerminalTask(t *testing.T) {
 		if err := f.service.resolveTaskPermissionCardAction(f.ctx, receipt, f.instance, f.identity, claimed, item.input); err != nil {
 			t.Fatal(err)
 		}
+		finished, err := f.database.ChannelInboxReceipt(f.ctx, f.instance.ID, receipt.ID)
+		if err != nil || finished.State != "processed" {
+			t.Fatalf("%s receipt state = %#v err=%v", item.decision, finished.State, err)
+		}
 		if count := f.resultCount(t, "渠道权限申请「push main」"); count != expectedResults {
 			t.Fatalf("%s result messages = %d, want %d", item.decision, count, expectedResults)
 		}
