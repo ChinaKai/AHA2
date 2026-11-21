@@ -2352,14 +2352,17 @@ test("knowledge review queue folds legacy candidates into the same one-at-a-time
 test("message send clears draft state before awaiting the request", async () => {
   const root = resolve(import.meta.dirname, "..");
   const script = await readFile(resolve(root, "build", "app.js"), "utf8");
-  const clearAt = script.indexOf('state.taskDrafts[agentID] = ""');
+  const clearAt = script.indexOf("clearTaskDraft(state.taskDraftStore, taskID, agentID)");
   const sendAt = script.indexOf("await api.agentMessage(taskID, agentID");
   const acceptedAt = script.indexOf("accepted = true", sendAt);
   const refreshAt = script.indexOf("await refreshTaskRuntime(taskID)", sendAt);
   assert.ok(clearAt >= 0 && sendAt > clearAt);
   assert.ok(acceptedAt > sendAt && refreshAt > acceptedAt);
   assert.match(script, /messageSubmitPending = true/);
-  assert.match(script, /state\.taskAttachmentDrafts\[agentID\] = \[\]/);
+  // The clear is scoped to the Task that sent the message, not to whatever
+  // Task happens to be open when a request settles.
+  assert.match(script, /state\.taskDraftStore = clearTaskDraft\(state\.taskDraftStore, taskID, agentID\)/);
+  assert.match(script, /writeTaskDraft\(state\.taskDraftStore, taskID, agentID, \{\s*text: content,\s*attachments\s*\}\)/);
   assert.match(script, /if \(!accepted && state\.selectedTask/);
   assert.match(script, /消息已发送，但刷新失败/);
   assert.match(script, /finally\s*\{\s*messageSubmitPending = false/);
@@ -3893,7 +3896,10 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   // the shared bundle gained the per-form labels, endpoints and fields (+480
   // JS, +41 CSS over main's 272,829); measured 273,350, next 256-byte boundary.
   // ADB 三模式新增 UI，实测 273,350，owner 侧分身上限 +512 字节（272,896 → 273,408）。
-  const FIRST_SCREEN_GZIP_BUDGET = 273408;
+  // task-730 的任务详情三栏布局把图标侧栏、任务带（范围文案、卡片、收起
+  // rail）和按任务隔离的草稿存储放进首屏包；同一掩码版本、level-5 实测
+  // 275,929 JS+CSS，ceil 到下一个 256 字节边界。
+  const FIRST_SCREEN_GZIP_BUDGET = 275968;
   // The version query parameter is a content hash and its hex digits change
   // how the same code gzips: main already sits exactly on the budget, so a
   // hash-only change could trip it without growing the payload. Mask the

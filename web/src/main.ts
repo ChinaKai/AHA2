@@ -26,8 +26,9 @@ import type {DataRetentionViewState} from "./data_retention.js";
 import {bindRuntimeFields, proxyEnabledFrom, proxyOptionsHTML, runtimeFieldsHTML, setClaudeOfficialCatalog, setClaudeOfficialLoading, setRuntimeBackends, syncRuntimeFields} from "./runtime_picker.js";
 import type {ClaudeOfficialCatalog} from "./runtime_picker.js";
 import {renderComposerAgentOptions, renderComposerTools, TASK_ATTACHMENT_MAX_COUNT, taskAttachmentLimitHint, taskAttachmentValidationError} from "./task_composer.js";
-import {DEFAULT_TASK_STATUS_FILTERS, LOCAL_TASK_DEVICE_FILTER, TASK_STATUS_GROUP_LABELS, hiddenTaskStatusGroups, hiddenTaskStatusText, taskDeviceFilterOptions, taskMatchesFilters, taskStatusGroupCounts} from "./task_filters.js";
+import {DEFAULT_TASK_SCOPE_LABEL, DEFAULT_TASK_STATUS_FILTERS, LOCAL_TASK_DEVICE_FILTER, TASK_STATUS_GROUP_LABELS, hiddenTaskStatusGroups, hiddenTaskStatusText, isDefaultTaskFilterSelection, taskDeviceFilterOptions, taskInDefaultTaskScope, taskMatchesFilters, taskStatusGroupCounts} from "./task_filters.js";
 import type {TaskStatusGroup} from "./task_filters.js";
+import {clearTaskDraft, loadTaskDraftStore, readTaskDraft, saveTaskDraftStore, taskDraftKey, writeTaskDraft} from "./task_drafts.js";
 import {TASK_TOOL_DEFAULT_WIDTH, normalizePinnedTaskTool, normalizeTaskToolMode, normalizeTaskToolWidth, renderTaskToolButtons, renderTaskToolContent, renderTaskToolPanel} from "./task_tools.js";
 import type {TaskTool, TaskToolMode} from "./task_tools.js";
 import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, createLatestRequest, createListRefreshScheduler, createResourceLoader, copyText, createStatusAnnouncer, eventRefreshesTaskList, taskStatusNeedsAnnouncement, exactSlashCommand, executeAgentSessionAction, installDialogEntryFocus, loadNavigationSnapshot, matchingSlashCommands, paginateItems, paginationHTML, planKeyedNodes, stableTextSignature, protoBadges, readPerfPanelPreference, renderModelHealthCell, renderProtocolProbeStatus, renderWorkspaceDetection, replaceInteractiveRegion, restoreInteractiveRegion, saveNavigationSnapshot, staleViewHashTarget, textMatchesQuery, writePerfPanelPreference} from "./ui_helpers.js";
@@ -223,8 +224,10 @@ interface State extends ModelHealthState {
   taskContext: TaskContextDetail | null;
   taskRealtimeState: "connecting" | "live" | "fallback";
   taskDraft: string;
-  taskDrafts: Record<string, string>;
-  taskAttachmentDrafts: Record<string, Attachment[]>;
+  // Keyed by taskDraftKey(task.id, agent_id); see task_drafts.ts.
+  taskDraftStore: Record<string, {text: string; attachments: Attachment[]}>;
+  taskBandCollapsed: boolean;
+  taskBandNarrowOpen: boolean;
   taskChannelDestination: ChannelDestination | null | undefined;
   taskChannelState: TaskChannelState | null;
   taskChannelLoading: boolean;
@@ -617,6 +620,50 @@ function loadTaskToolLayout(): {mode: TaskToolMode; width: number; pinnedTool: T
 const savedTaskToolLayout = loadTaskToolLayout();
 const savedSidebarSettings = loadSidebarSettings();
 
+const taskBandCollapsedKey = "aha2.task-band-collapsed";
+// The band is wider than the icon rail and the detail pane needs the space
+// first. Below this width the band automatically becomes the rail; widening
+// the window restores whatever preference the owner last saved.
+const TASK_BAND_AUTO_COLLAPSE_QUERY = "(max-width: 1100px)";
+function taskBandNarrow(): boolean {
+  return window.matchMedia(TASK_BAND_AUTO_COLLAPSE_QUERY).matches;
+}
+function loadTaskBandCollapsed(): boolean {
+  try {
+    return localStorage.getItem(taskBandCollapsedKey) === "collapsed";
+  } catch {
+    return false;
+  }
+}
+function persistTaskBandCollapsed(collapsed: boolean): void {
+  try {
+    localStorage.setItem(taskBandCollapsedKey, collapsed ? "collapsed" : "expanded");
+  } catch {
+    // Preference persistence is best-effort in restricted WebViews.
+  }
+}
+function taskBandExpanded(): boolean {
+  return taskBandNarrow() ? state.taskBandNarrowOpen : !state.taskBandCollapsed;
+}
+
+const savedTaskDraftStore = loadTaskDraftStore();
+let taskDraftSaveTimer = 0;
+function persistTaskDrafts(): void {
+  if (taskDraftSaveTimer) {
+    window.clearTimeout(taskDraftSaveTimer);
+    taskDraftSaveTimer = 0;
+  }
+  saveTaskDraftStore(state.taskDraftStore);
+}
+function scheduleTaskDraftsPersist(): void {
+  if (taskDraftSaveTimer) window.clearTimeout(taskDraftSaveTimer);
+  taskDraftSaveTimer = window.setTimeout(() => {
+    taskDraftSaveTimer = 0;
+    saveTaskDraftStore(state.taskDraftStore);
+  }, 200);
+}
+
+
 const state: State = {
   auth: null,
   view: "projects",
@@ -712,8 +759,9 @@ const state: State = {
   taskContext: null,
   taskRealtimeState: "connecting",
   taskDraft: "",
-  taskDrafts: {},
-  taskAttachmentDrafts: {},
+  taskDraftStore: savedTaskDraftStore,
+  taskBandCollapsed: loadTaskBandCollapsed(),
+  taskBandNarrowOpen: false,
   taskChannelDestination: undefined,
   taskChannelState: null,
   taskChannelLoading: false,
@@ -3311,7 +3359,6 @@ function persistNavigationState(): void {
     view: state.view, projectID: state.selectedProject?.id, taskID: state.selectedTask?.task.id,
     project: state.selectedProject || undefined, task: state.selectedTask?.task,
     agentID: state.selectedTaskAgent,
-    draft: state.taskDraft, drafts: state.taskDrafts,
   });
 }
 async function restoreNavigationState(saved = loadNavigationSnapshot()): Promise<void> {
@@ -3331,8 +3378,6 @@ async function restoreNavigationState(saved = loadNavigationSnapshot()): Promise
   if (saved.agentID && saved.agentID !== "main" && state.selectedTask?.agents.some(agent => agent.agent_id === saved.agentID)) {
     await selectTaskAgent(saved.agentID);
   }
-  state.taskDrafts = saved.drafts || {};
-  state.taskDraft = saved.draft || state.taskDrafts[state.selectedTaskAgent] || "";
 }
 function syncVisualViewportHeight(): void {
   const viewport = window.visualViewport;
@@ -3769,9 +3814,9 @@ function showTaskLoading(task: Task): void {
   state.taskMailLoading = true;
   state.taskMailError = "";
   state.taskTool = "";
-  state.taskDraft = "";
-  state.taskDrafts = {};
-  state.taskAttachmentDrafts = {};
+  // Drafts live in taskDraftStore keyed by Task + agent. Switching Tasks only
+  // changes which entry the composer reads; it never clears the store.
+  state.taskDraft = readTaskDraft(state.taskDraftStore, task.id, "main").text;
   state.taskChannelDestination = undefined;
   state.taskChannelState = null;
   state.taskChannelLoading = false;
@@ -3809,6 +3854,7 @@ async function openTask(taskID: string): Promise<void> {
     state.selectedTaskAgent = detail.agents.some(agent => agent.agent_id === "main")
       ? "main"
       : (detail.agents[0]?.agent_id || "main");
+    state.taskDraft = readTaskDraft(state.taskDraftStore, detail.task.id, state.selectedTaskAgent).text;
     state.taskConversation = page?.conversation.items || [];
     state.taskConversationHasMore = page?.conversation.has_more || false;
     state.taskConversationBefore = page?.conversation.next_before || 0;
@@ -3893,9 +3939,14 @@ async function loadTaskChannelDestination(taskID: string, version: number): Prom
 
 async function selectTaskAgent(agentID: string): Promise<void> {
   if (!state.selectedTask || !state.selectedTask.agents.some(agent => agent.agent_id === agentID) || agentID === state.selectedTaskAgent) return;
-  state.taskDrafts[state.selectedTaskAgent] = state.taskDraft;
+  const taskID = state.selectedTask.task.id;
+  state.taskDraftStore = writeTaskDraft(state.taskDraftStore, taskID, state.selectedTaskAgent, {
+    text: state.taskDraft,
+    attachments: currentAttachmentDrafts(),
+  });
   state.selectedTaskAgent = agentID;
-  state.taskDraft = state.taskDrafts[agentID] || "";
+  state.taskDraft = readTaskDraft(state.taskDraftStore, taskID, agentID).text;
+  persistTaskDrafts();
   const page = await api.agentConversation(state.selectedTask.task.id, agentID, {
     limit: initialConversationPageSize,
     categories: selectedConversationCategories(),
@@ -4193,7 +4244,7 @@ function navButton(view: View, glyph: string, label: Parameters<typeof t>[0]): s
   return `<button data-view="${view}" class="${state.view === view ? "active" : ""}${pending > 0 ? " has-pending" : ""}" title="${escapeHTML(description)}" aria-label="${escapeHTML(description)}">${icon(glyph)}<span>${t(label)}</span>${petPendingApprovalBadge(pending)}</button>`;
 }
 
-function shell(content: string): string {
+function shell(content: string, options: {taskShell?: boolean; taskBand?: string} = {}): string {
   const nav = [
     ["projects", "projects", "nav.projects"],
     ["tasks", "tasks", "nav.tasks"],
@@ -4204,7 +4255,14 @@ function shell(content: string): string {
     ["pet-workbench", "bot", "nav.pet"],
   ] as const;
   const mobileNav = [...nav, ["advanced", "settings", "nav.advanced"] as const];
-  return `<div class="app-shell">
+  // The Task detail shell fixes the sidebar to its icon rail and inserts the
+  // task band between nav and workspace. Every other page keeps the existing
+  // resizable sidebar.
+  const taskShell = options.taskShell === true;
+  const bandExpanded = taskShell && taskBandExpanded();
+  const bandOverlay = taskShell && taskBandNarrow() && state.taskBandNarrowOpen;
+  const shellClass = `app-shell${taskShell ? " task-shell" : ""}${taskShell && !bandExpanded ? " task-band-collapsed" : ""}${bandOverlay ? " task-band-overlay" : ""}`;
+  return `<div class="${shellClass}">
     <aside class="sidebar">
       <div class="brand-lockup"><span class="brand-mark"><img src="/assets/aha-logo.svg" alt=""></span><div><strong>AHA</strong><small>${t("brand.tagline")}</small></div></div>
       <button type="button" class="command-palette-trigger" data-command-palette-open aria-label="${t("palette.ariaLabel")}（${commandPaletteShortcutLabel()}）" title="${t("palette.placeholder")}">${icon("search")}<span>${t("palette.search")}</span><kbd>${commandPaletteShortcutLabel()}</kbd></button>
@@ -4217,7 +4275,8 @@ function shell(content: string): string {
       <div class="system-meta"><span>AHA2 ${escapeHTML(state.system.web_version || state.system.version || "dev")}</span><span id="system-uptime">${systemUptimeText()}</span></div>
       <div class="owner-block"><button id="owner-avatar" class="avatar" type="button" title="Owner">O</button><div><strong>${escapeHTML(state.auth?.username || "Owner")}</strong><small>${t("owner.signedIn")}</small></div><div class="owner-actions"><button id="advanced-settings" class="icon-button" type="button" data-view="advanced" title="${t("owner.advanced")}" aria-label="${t("owner.advanced")}">${icon("settings")}</button><button id="logout" class="icon-button" title="${t("owner.logout")}">${icon("logout")}</button></div></div>
     </aside>
-    <div id="sidebar-resizer" class="sidebar-resizer" role="separator" aria-label="调整侧栏宽度" aria-orientation="vertical" aria-valuemin="${SIDEBAR_MIN_WIDTH}" aria-valuemax="${SIDEBAR_MAX_WIDTH}" aria-valuenow="${state.sidebarWidth}" tabindex="0" title="拖动调整侧栏宽度，双击恢复默认"></div>
+    ${taskShell ? "" : `<div id="sidebar-resizer" class="sidebar-resizer" role="separator" aria-label="调整侧栏宽度" aria-orientation="vertical" aria-valuemin="${SIDEBAR_MIN_WIDTH}" aria-valuemax="${SIDEBAR_MAX_WIDTH}" aria-valuenow="${state.sidebarWidth}" tabindex="0" title="拖动调整侧栏宽度，双击恢复默认"></div>`}
+    ${taskShell ? (options.taskBand || "") : ""}
     <header class="mobile-header"><div class="brand-lockup"><span class="brand-mark"><img src="/assets/aha-logo.svg" alt=""></span><strong>AHA</strong></div><button id="mobile-context" class="icon-button">${icon("menu")}</button></header>
     <main class="workspace">${resourceStatusHTML()}${banner()}${content}</main>
     <button type="button" class="command-palette-fab" data-command-palette-open aria-label="${t("palette.ariaLabel")}（${commandPaletteShortcutLabel()}）" title="${t("palette.placeholder")}">${icon("search")}</button>
@@ -5366,6 +5425,90 @@ function filteredTasks(): Task[] {
   ));
 }
 
+// The band is the default work queue: local device, every project, unfinished
+// or failed, and never the terminal completed/cancelled Tasks. It reuses the
+// shared predicate instead of reading the list's manual filter state.
+function taskBandTasks(): Task[] {
+  return state.tasks.filter(taskInDefaultTaskScope);
+}
+
+function taskBandCardHTML(task: Task): string {
+  const project = state.projects.find(item => item.id === task.project_id);
+  const workspace = state.workspaces.find(item => item.id === task.workspace_id);
+  const active = state.selectedTask?.task.id === task.id;
+  const label = [task.code, task.title, statusLabel(task.status)].filter(Boolean).join(" ");
+  return `<button type="button" class="task-band-card${active ? " active" : ""}" data-task-band-open="${escapeHTML(task.id)}" ${active ? 'aria-current="true"' : ""} aria-label="${escapeHTML(label)}">
+    <span class="task-band-card-top"><span class="status ${statusClass(task.status)}">${escapeHTML(statusLabel(task.status))}</span><span class="task-code">${escapeHTML(task.code || "")}</span></span>
+    <strong class="task-band-card-title">${escapeHTML(task.title)}</strong>
+    <span class="task-band-card-meta"><span title="所属项目">${icon("projects")}${escapeHTML(project?.name || task.project_id)}</span><span title="所属 Workspace">${icon("monitor")}${escapeHTML(workspace?.name || task.workspace_id)}</span></span>
+  </button>`;
+}
+
+function taskBandHTML(): string {
+  const tasks = taskBandTasks();
+  const expanded = taskBandExpanded();
+  const narrow = taskBandNarrow();
+  const body = tasks.length
+    ? `<div class="task-band-list">${tasks.map(taskBandCardHTML).join("")}</div>`
+    : `<div class="task-band-empty">${icon("tasks")}<strong>没有需要处理的任务</strong><small>未完成与异常的本机任务会出现在这里。</small></div>`;
+  const band = `<aside class="task-band${expanded ? "" : " collapsed"}${narrow && expanded ? " narrow-expanded" : ""}" data-task-band aria-label="任务带">
+        <header class="task-band-head"><div><strong>任务</strong><small>${DEFAULT_TASK_SCOPE_LABEL}</small></div><span class="task-band-count" title="符合条件的任务数">${tasks.length}</span><button type="button" class="icon-button" data-task-band-toggle aria-label="收起任务带" title="收起任务带">${icon("chevron-left")}</button></header>
+        <div class="task-band-body">${body}</div>
+        <button type="button" class="task-band-rail" data-task-band-toggle aria-label="展开任务带" title="展开任务带">${icon("chevron-right")}<span>任务</span>${tasks.length ? `<small>${tasks.length}</small>` : ""}</button>
+      </aside>`;
+  return `${narrow && expanded ? '<button type="button" class="task-band-backdrop" data-task-band-close aria-label="收起任务带"></button>' : ""}${band}`;
+}
+
+function bindTaskBand(): void {
+  const focusBandToggle = () => {
+    const toggles = [...document.querySelectorAll<HTMLElement>("[data-task-band-toggle]")];
+    (toggles.find(toggle => toggle.offsetParent !== null) || toggles[0])?.focus();
+  };
+  document.querySelectorAll<HTMLElement>("[data-task-band-toggle]").forEach(button => {
+    button.addEventListener("click", () => {
+      if (taskBandNarrow()) {
+        // Narrow windows never let the band take width from the detail; the
+        // expanded band floats over it and the saved preference stays intact.
+        state.taskBandNarrowOpen = !state.taskBandNarrowOpen;
+      } else {
+        state.taskBandCollapsed = !state.taskBandCollapsed;
+        persistTaskBandCollapsed(state.taskBandCollapsed);
+      }
+      render();
+      focusBandToggle();
+    });
+  });
+  document.querySelectorAll<HTMLElement>("[data-task-band-close]").forEach(button => {
+    button.addEventListener("click", () => {
+      state.taskBandNarrowOpen = false;
+      render();
+      focusBandToggle();
+    });
+  });
+  document.querySelectorAll<HTMLElement>("[data-task-band-open]").forEach(button => {
+    button.addEventListener("click", () => {
+      const taskID = button.dataset.taskBandOpen || "";
+      if (!taskID || openingTaskID) return;
+      if (taskID === state.selectedTask?.task.id) {
+        if (taskBandNarrow()) {
+          state.taskBandNarrowOpen = false;
+          render();
+        }
+        return;
+      }
+      // In a narrow window the band is an overlay; picking a Task should reveal
+      // the detail it was covering.
+      state.taskBandNarrowOpen = false;
+      taskCardFocusReturnID = taskID;
+      void openTask(taskID).catch(error => {
+        taskCardFocusReturnID = "";
+        setMessage("error", error instanceof Error ? error.message : String(error));
+        render();
+      });
+    });
+  });
+}
+
 function tasksPageHTML(): string {
   // Counts describe the whole set, so they come from the server aggregate
   // rather than the loaded page; a page-derived count is wrong as soon as the
@@ -5381,7 +5524,12 @@ function tasksPageHTML(): string {
   const deviceOptions = taskDeviceFilterOptions(counts?.device || {});
   const filtered = filteredTasks();
   const rows = filtered.map(item => taskCardHtml(item)).join("");
-  const hiddenText = counts ? hiddenTaskStatusText(hiddenTaskStatusGroups(groupedStatus, state.taskStatusFilters)) : "";
+  const hiddenText = counts ? hiddenTaskStatusText(
+    hiddenTaskStatusGroups(groupedStatus, state.taskStatusFilters),
+    isDefaultTaskFilterSelection(state.taskProjectFilters, state.taskStatusFilters, state.taskDeviceFilters)
+      ? (counts.status?.cancelled || 0)
+      : 0,
+  ) : "";
   const totalTasks = counts ? Object.values(counts.status || {}).reduce((sum, value) => sum + value, 0) : 0;
   const countTitle = `符合筛选 ${filtered.length} 个 / 已加载 ${state.tasks.length} 个${counts ? ` / 全部 ${totalTasks} 个` : ""}；“加载更多”只增加已加载数量，筛选保持不变`;
   const noMatchHint = taskLoadMoreNoMatch
@@ -5771,7 +5919,8 @@ async function reloadTaskChannelState(renderAfter = true): Promise<void> {
 }
 
 function currentAttachmentDrafts(): Attachment[] {
-  return state.taskAttachmentDrafts[state.selectedTaskAgent] || [];
+  if (!state.selectedTask) return [];
+  return readTaskDraft(state.taskDraftStore, state.selectedTask.task.id, state.selectedTaskAgent).attachments;
 }
 
 function attachmentURL(item: Pick<Attachment, "task_id" | "id">): string {
@@ -5844,13 +5993,16 @@ async function uploadMessageAttachments(files: File[]): Promise<void> {
     setMessage("error", validationError);
     return;
   }
-  state.taskAttachmentDrafts[agentID] = drafts;
+  state.taskDraftStore = writeTaskDraft(state.taskDraftStore, taskID, agentID, {text: state.taskDraft, attachments: drafts});
+  persistTaskDrafts();
   messageAttachmentUploadPending = true;
   refreshMessageAttachmentDOM();
   try {
     for (const file of files) {
       const result = await api.uploadAttachment(taskID, file);
       drafts.push(result.attachment);
+      state.taskDraftStore = writeTaskDraft(state.taskDraftStore, taskID, agentID, {text: state.taskDraft, attachments: drafts});
+      persistTaskDrafts();
       refreshMessageAttachmentDOM();
     }
     setMessage("notice", `已添加 ${files.length} 个附件`);
@@ -5869,7 +6021,13 @@ function bindRemoveAttachmentButtons(): void {
     button.disabled = true;
     try {
       await api.deleteAttachment(state.selectedTask.task.id, id);
-      state.taskAttachmentDrafts[state.selectedTaskAgent] = currentAttachmentDrafts().filter(item => item.id !== id);
+      state.taskDraftStore = writeTaskDraft(
+        state.taskDraftStore,
+        state.selectedTask.task.id,
+        state.selectedTaskAgent,
+        {text: state.taskDraft, attachments: currentAttachmentDrafts().filter(item => item.id !== id)},
+      );
+      persistTaskDrafts();
       refreshMessageAttachmentDOM();
     } catch (error) {
       button.disabled = false;
@@ -5905,7 +6063,13 @@ function applyTaskSlashCommand(value: string): void {
   if (!textarea) return;
   textarea.value = value;
   state.taskDraft = value;
-  state.taskDrafts[state.selectedTaskAgent] = value;
+  if (state.selectedTask) {
+    state.taskDraftStore = writeTaskDraft(state.taskDraftStore, state.selectedTask.task.id, state.selectedTaskAgent, {
+      text: value,
+      attachments: currentAttachmentDrafts(),
+    });
+    scheduleTaskDraftsPersist();
+  }
   const menu = document.querySelector<HTMLElement>("#slash-command-menu");
   if (menu) menu.hidden = true;
   syncTaskComposerState(textarea);
@@ -6561,7 +6725,7 @@ function taskDetailView(detail: TaskDetail): string {
       ${renderTaskToolPanel(state.taskTool, detail, state.selectedTaskAgent, taskCtxHtml(), state.taskToolMode, taskChannelPanelHTML(), state.taskToolPinned === state.taskTool, taskPermissionPanelHtml(detail), taskMailPanelHTML(detail))}
     </div>
     ${renderAgentConfigDialog(detail, state.selectedTaskAgent, state.models, state.codexAccounts, availableTaskSkills(detail.task.project_id, detail.task.skill_ids || []), state.mcpServers)}${taskTakeoverDialog(detail)}<div id="task-screen-dialogs">${completed ? reopenTaskDialog(detail) : ""}</div>
-  </section>`);
+  </section>`, {taskShell: true, taskBand: taskBandHTML()});
 }
 
 type RegionUIState = InteractiveRegionState;
@@ -7405,6 +7569,7 @@ function bindTaskListControls(root: ParentNode = document): void {
 function bindCommon(): void {
   bindSidebarControls();
   bindTaskListControls();
+  bindTaskBand();
   if (state.view === "models") bindCodexAccounts({
     accounts: state.codexAccounts,
     onChanged: async () => { await loadAll(); render(); },
@@ -8216,9 +8381,11 @@ function bindMessageComposer(): void {
     if (!content && attachments.length === 0) return;
     messageSubmitPending = true;
     if (taskID === "task_pet") notifyPetTaskThinking();
-    state.taskDrafts[agentID] = "";
-    if (state.selectedTaskAgent === agentID) state.taskDraft = "";
-    state.taskAttachmentDrafts[agentID] = [];
+    // Clearing is scoped to this Task (and agent); every other Task keeps its
+    // own draft untouched.
+    state.taskDraftStore = clearTaskDraft(state.taskDraftStore, taskID, agentID);
+    if (state.selectedTask.task.id === taskID && state.selectedTaskAgent === agentID) state.taskDraft = "";
+    persistTaskDrafts();
     const clearTextarea = document.querySelector<HTMLTextAreaElement>("#message-form textarea");
     if (clearTextarea) {
       clearTextarea.value = "";
@@ -8245,9 +8412,9 @@ function bindMessageComposer(): void {
       if (menu) menu.hidden = true;
     } catch (error) {
       if (!accepted && state.selectedTask?.task.id === taskID && state.selectedTaskAgent === agentID) {
-        state.taskDrafts[agentID] = content;
-        state.taskAttachmentDrafts[agentID] = attachments;
+        state.taskDraftStore = writeTaskDraft(state.taskDraftStore, taskID, agentID, {text: content, attachments});
         state.taskDraft = content;
+        persistTaskDrafts();
         const currentTextarea = document.querySelector<HTMLTextAreaElement>("#message-form textarea");
         if (currentTextarea) currentTextarea.value = content;
         refreshMessageAttachmentDOM();
@@ -8263,7 +8430,13 @@ function bindMessageComposer(): void {
   document.querySelector<HTMLTextAreaElement>("#message-form textarea")?.addEventListener("input", event => {
     const textarea = event.target as HTMLTextAreaElement;
     state.taskDraft = textarea.value;
-    state.taskDrafts[state.selectedTaskAgent] = textarea.value;
+    if (state.selectedTask) {
+      state.taskDraftStore = writeTaskDraft(state.taskDraftStore, state.selectedTask.task.id, state.selectedTaskAgent, {
+        text: textarea.value,
+        attachments: currentAttachmentDrafts(),
+      });
+      scheduleTaskDraftsPersist();
+    }
     persistNavigationState();
     slashCommandSelection = 0;
     textarea.style.height = "auto";
@@ -9083,6 +9256,14 @@ window.addEventListener("hashchange", () => {
 });
 syncVisualViewportHeight();
 window.addEventListener("resize", syncVisualViewportHeight);
+// Crossing the auto-collapse breakpoint re-renders the band so the detail can
+// reclaim the width immediately. The saved preference is deliberately left
+// alone: widening the window restores whatever the owner chose.
+window.matchMedia(TASK_BAND_AUTO_COLLAPSE_QUERY).addEventListener?.("change", () => {
+  state.taskBandNarrowOpen = false;
+  if (state.selectedTask) render();
+});
+window.addEventListener("pagehide", persistTaskDrafts);
 window.visualViewport?.addEventListener("resize", () => {
   syncVisualViewportHeight();
   restoreComposerConversationBottom();
