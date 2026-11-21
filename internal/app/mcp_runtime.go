@@ -537,10 +537,11 @@ func (s *Service) mcpRuntimeForTurn(ctx context.Context, task domain.Task, agent
 	if agentAPIURL == "" {
 		return servers, allowed
 	}
-	write := false
-	if agent, err := s.store.TaskAgent(ctx, task.ID, strings.TrimSpace(agentID)); err == nil {
-		write = s.agentSnapshotWritable(ctx, task, agent.RuntimeConfigSnapshotID, agent.AgentID)
-	}
+	agentID = strings.TrimSpace(agentID)
+	agent, agentErr := s.store.TaskAgent(ctx, task.ID, agentID)
+	write := agentErr == nil && s.agentSnapshotWritable(ctx, task, agent.RuntimeConfigSnapshotID, agentID)
+	ioWrite := agentErr == nil && s.hardwareMCPSnapshotWritable(ctx, task, agent.RuntimeConfigSnapshotID, agentID)
+
 	servers = append(servers, backend.MCPServer{
 		Name: coreMCPName, Transport: "http",
 		URL:            strings.TrimRight(agentAPIURL, "/") + coreMCPPath,
@@ -548,10 +549,7 @@ func (s *Service) mcpRuntimeForTurn(ctx context.Context, task domain.Task, agent
 		URLPath:        coreMCPPath,
 		BearerTokenEnv: "AHA2_AGENT_API_TOKEN",
 	})
-	coreNames := coreMCPToolNames(false)
-	if agent, err := s.store.TaskAgent(ctx, task.ID, strings.TrimSpace(agentID)); err == nil {
-		coreNames = s.coreMCPNamesForSnapshot(ctx, task, agent.RuntimeConfigSnapshotID, agent.AgentID)
-	}
+	coreNames := coreMCPNamesForTask(task, write)
 	for _, tool := range coreNames {
 		allowed = append(allowed, "mcp__"+coreMCPName+"__"+tool)
 	}
@@ -575,11 +573,9 @@ func (s *Service) mcpRuntimeForTurn(ctx context.Context, task domain.Task, agent
 			URLPath:        workspaceMCPPath,
 			BearerTokenEnv: "AHA2_AGENT_API_TOKEN",
 		})
-		workspaceWrite := false
-		if agent, err := s.store.TaskAgent(ctx, task.ID, agentID); err == nil {
-			bound, bindErr := s.store.Workspace(ctx, task.WorkspaceID)
-			workspaceWrite = bindErr == nil && !bound.ReadOnly && s.hardwareMCPSnapshotWritable(ctx, task, agent.RuntimeConfigSnapshotID, agentID)
-		}
+		bound, bindErr := s.store.Workspace(ctx, task.WorkspaceID)
+		workspaceWrite := bindErr == nil && !bound.ReadOnly && ioWrite
+
 		for _, tool := range WorkspaceMCPToolNamesFor(workspaceWrite) {
 			allowed = append(allowed, "mcp__"+workspaceMCPName+"__"+tool)
 		}
@@ -592,11 +588,8 @@ func (s *Service) mcpRuntimeForTurn(ctx context.Context, task domain.Task, agent
 			URLPath:        browserMCPPath,
 			BearerTokenEnv: "AHA2_AGENT_API_TOKEN",
 		})
-		browserWrite := false
-		if agent, err := s.store.TaskAgent(ctx, task.ID, agentID); err == nil {
-			browserWrite = s.hardwareMCPSnapshotWritable(ctx, task, agent.RuntimeConfigSnapshotID, agentID)
-		}
-		for _, tool := range BrowserMCPToolNamesFor(browserWrite) {
+
+		for _, tool := range BrowserMCPToolNamesFor(ioWrite) {
 			allowed = append(allowed, "mcp__"+browserMCPName+"__"+tool)
 		}
 	}
@@ -608,21 +601,15 @@ func (s *Service) mcpRuntimeForTurn(ctx context.Context, task domain.Task, agent
 			URLPath:        hardwareMCPPath,
 			BearerTokenEnv: "AHA2_AGENT_API_TOKEN",
 		})
-		hardwareWrite := false
-		if agent, err := s.store.TaskAgent(ctx, task.ID, strings.TrimSpace(agentID)); err == nil {
-			hardwareWrite = s.hardwareMCPSnapshotWritable(ctx, task, agent.RuntimeConfigSnapshotID, agentID)
-		}
-		for _, tool := range HardwareMCPToolNamesFor(hardwareWrite) {
+
+		for _, tool := range HardwareMCPToolNamesFor(ioWrite) {
 			allowed = append(allowed, "mcp__"+hardwareMCPName+"__"+tool)
 		}
 	}
 	if s.desktopMCPInjected(ctx, task, agentID, inboxBatchID) {
 		servers = append(servers, backend.MCPServer{Name: desktopMCPName, Transport: "http", URL: strings.TrimRight(agentAPIURL, "/") + desktopMCPPath, URLFromEnv: "AHA2_AGENT_API_URL", URLPath: desktopMCPPath, BearerTokenEnv: "AHA2_AGENT_API_TOKEN"})
-		desktopWrite := false
-		if agent, err := s.store.TaskAgent(ctx, task.ID, agentID); err == nil {
-			desktopWrite = s.hardwareMCPSnapshotWritable(ctx, task, agent.RuntimeConfigSnapshotID, agentID)
-		}
-		for _, tool := range DesktopMCPToolNames(desktopWrite) {
+
+		for _, tool := range DesktopMCPToolNames(ioWrite) {
 			allowed = append(allowed, "mcp__"+desktopMCPName+"__"+tool)
 		}
 	}

@@ -10,11 +10,11 @@ import (
 // has a permission-checked cross-project messaging tool; task_message retains
 // its ordinary project-scoped contract and is never widened for the pet.
 func (s *Service) AgentCoreMCPToolNames(ctx context.Context, call AgentCallContext) []string {
-	return s.coreMCPNamesForSnapshot(ctx, call.Task, call.Turn.RuntimeConfigSnapshotID, call.Turn.AgentID)
+	return coreMCPNamesForTask(call.Task, s.AgentWriteAllowed(ctx, call))
 }
 
-func (s *Service) coreMCPNamesForSnapshot(ctx context.Context, task domain.Task, snapshotID, agentID string) []string {
-	names := coreMCPToolNames(s.agentSnapshotWritable(ctx, task, snapshotID, agentID))
+func coreMCPNamesForTask(task domain.Task, write bool) []string {
+	names := coreMCPToolNames(write)
 	if task.ID != petTaskID {
 		return names
 	}

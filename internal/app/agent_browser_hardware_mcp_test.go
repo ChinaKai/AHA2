@@ -135,9 +135,18 @@ func TestBrowserAndHardwareMCPAreIndependentBuiltins(t *testing.T) {
 			t.Fatalf("%s was assignable: %#v err=%v", id, normalized, err)
 		}
 	}
-	if len(BrowserMCPToolNames()) != 3 || len(HardwareMCPToolNames()) != 2 {
-		t.Fatalf("browser=%v hardware=%v", BrowserMCPToolNames(), HardwareMCPToolNames())
+	// Pin the published surface independently from the catalog implementation.
+	// Read subsets must stay separate so adding write tools never advertises
+	// device I/O to read-only or non-Main callers.
+	wantHardware := []string{"hardware_list", "hardware_terminal_read", "hardware_connect", "hardware_disconnect", "hardware_send", "hardware_login", "hardware_adb_exec"}
+	wantBrowser := []string{"browser_status", "browser_tabs_list", "browser_snapshot", "browser_frame", "browser_downloads_list", "browser_download_get", "browser_bookmarks_list", "browser_cookie_metadata", "browser_tab_open", "browser_tab_bind_current", "browser_tab_activate", "browser_tab_close", "browser_navigate", "browser_action", "browser_upload", "browser_release"}
+	if strings.Join(HardwareMCPToolNames(), ",") != strings.Join(wantHardware, ",") || strings.Join(BrowserMCPToolNames(), ",") != strings.Join(wantBrowser, ",") {
+		t.Fatalf("published tools changed: browser=%v hardware=%v", BrowserMCPToolNames(), HardwareMCPToolNames())
 	}
+	if len(HardwareMCPToolNamesFor(false)) != 2 || len(BrowserMCPToolNamesFor(false)) != 8 {
+		t.Fatal("write tools escaped the read subset")
+	}
+
 }
 
 // TestBrowserHardwareMCPInjectionUsesIndependentTriggers proves the two
