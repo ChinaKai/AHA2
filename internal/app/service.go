@@ -495,9 +495,15 @@ type CreateTaskInput struct {
 }
 
 func NewService(database *store.Store, secretStore *secrets.FileStore, executor Executor) *Service {
+	// Keep a missing secret store as a nil interface. Assigning the typed nil
+	// pointer would make s.secrets != nil true and panic on Get.
+	var secretResolver SecretResolver
+	if secretStore != nil {
+		secretResolver = secretStore
+	}
 	return &Service{
 		store:                database,
-		secrets:              secretStore,
+		secrets:              secretResolver,
 		executor:             executor,
 		hub:                  NewEventHub(),
 		now:                  time.Now,

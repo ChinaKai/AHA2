@@ -766,11 +766,6 @@ func (s *Service) UpdateOwnerPetSettings(ctx context.Context, input PetSettingsI
 	if err := s.store.UpdateOwnerPetSettings(ctx, assistant.ID, assistant.PetEnabled, assistant.BrainModelID, assistant.PetActions, assistant.UpdatedAt); err != nil {
 		return OwnerAssistantView{}, err
 	}
-	// Keep the derived chat mirror in the same committed value even if an older
-	// writer raced this save; a reader must never see two different models.
-	if err := s.store.UpdateOwnerAssistantModel(ctx, assistant.ID, assistant.BrainModelID, assistant.UpdatedAt); err != nil {
-		return OwnerAssistantView{}, err
-	}
 	if err := s.store.UpdateOwnerPetBudget(ctx, assistant.ID, assistant.PetIdleMinutes, assistant.PetQuietEnabled, assistant.PetQuietStart, assistant.PetQuietEnd, assistant.PetHourlyLimit, assistant.UpdatedAt); err != nil {
 		return OwnerAssistantView{}, err
 	}
