@@ -10,8 +10,9 @@
 //     filter popover stays open, and the page does not scroll.
 //   - The in-row title editor keeps its focus and typed value across a refresh;
 //     Escape restores the rendered title.
-//   - An open Task detail pauses list refreshes, keeps composer focus, and runs
-//     exactly one catch-up refresh after closing.
+//   - An open Task detail still refreshes the list data behind the task band,
+//     but leaves the mounted list and composer alone; closing shows the
+//     already-fresh rows.
 //   - No page errors and no horizontal overflow.
 import assert from "node:assert/strict";
 import {createServer} from "node:http";
@@ -210,8 +211,9 @@ try {
   await page.waitForFunction(() => !document.querySelector("input.task-title-input"), null, {timeout: 5000});
   assert.equal(await page.locator('.task-card[data-task="task-000"] [data-task-title]').innerText(), "任务 1：列表实时刷新验证", "Escape did not restore the rendered title");
 
-  // An open detail pauses the list refresh and keeps the composer untouched;
-  // closing runs one catch-up.
+  // An open detail still refreshes the list data for the task band, but does
+  // not replace the mounted list or touch the composer. The refreshed rows are
+  // visible as soon as the detail closes.
   await page.locator('.task-card[data-task="task-001"]').click();
   await page.waitForSelector(".task-screen", {timeout: 15000});
   await page.waitForSelector("#message-form textarea", {timeout: 10000});
@@ -226,14 +228,16 @@ try {
   await emit(page, "task_status", {task_id: "task-002", status: "completed"});
   await emit(page, "task_status", {task_id: "task-003", status: "completed"});
   await page.waitForTimeout(1500);
-  assert.equal(await refreshCount(page), detailRefresh, "the list refreshed while a Task detail was open");
+  assert.equal(await refreshCount(page), detailRefresh + 1, "the task band did not receive one coalesced list refresh while the detail was open");
+  assert.equal(await page.locator('.task-band-card[data-task-band-open="task-002"]').count(), 0, "the band kept a completed task while the detail was open");
+  assert.equal(await page.locator('.task-band-card[data-task-band-open="task-003"]').count(), 0, "the band kept a completed task while the detail was open");
   assert.deepEqual(await textarea.evaluate(node => ({focused: document.activeElement === node, value: node.value})), {focused: true, value: "详情输入不应被抢走"}, "the global SSE update disturbed the composer");
   assert.equal(await page.locator(".task-screen").count(), 1, "the detail was replaced by a list render");
   await page.click("#back-tasks");
   await page.waitForSelector(".task-card", {timeout: 15000});
-  await waitForRefresh(page, detailRefresh);
   await page.waitForFunction(() => !document.querySelector('.task-card[data-task="task-002"]'), null, {timeout: 10000});
-  assert.equal(await page.locator('.task-card[data-task="task-002"]').count(), 0, "the catch-up refresh did not apply the held status changes");
+  assert.equal(await page.locator('.task-card[data-task="task-002"]').count(), 0, "the refreshed status change was not visible after closing the detail");
+  assert.equal(await page.locator('.task-card[data-task="task-003"]').count(), 0, "the refreshed status change was not visible after closing the detail");
 
   assert.deepEqual(errors, [], "the page reported errors");
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
