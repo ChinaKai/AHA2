@@ -856,8 +856,11 @@ func (s *Store) EnqueueTaskChannelOutreach(ctx context.Context, taskID, turnID, 
 			deliveryID = partID
 		}
 	}
+	// An Agent outreach comes from a live Turn of this Task. An owner-approved
+	// pet send has no Agent Turn behind it (its turn ID only keys the request),
+	// so its card carries no round instead of failing the approved send.
 	var roundID string
-	if err := tx.QueryRowContext(ctx, `SELECT round_id FROM turns WHERE id=? AND task_id=?`, turnID, taskID).Scan(&roundID); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT round_id FROM turns WHERE id=? AND task_id=?`, turnID, taskID).Scan(&roundID); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return domain.ChannelDelivery{}, "", false, err
 	}
 	card := normalizeConversationItem(domain.ConversationItem{
