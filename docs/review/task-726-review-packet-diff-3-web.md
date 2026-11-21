@@ -1,6 +1,6 @@
 # task-726 review packet diff-3-web：Web 生产代码与 build.test 断言/预算
 
-`git diff 43624a4 3890244 -- web/src/hardware_resources.ts web/src/hardware_panel.ts web/src/main.ts web/src/types.ts web/src/api.ts web/src/i18n.ts web/src/styles.css web/tests/build.test.mjs` 原样输出。
+`git diff 43624a4 336d47b -- web/src/hardware_resources.ts web/src/hardware_panel.ts web/src/main.ts web/src/types.ts web/src/api.ts web/src/i18n.ts web/src/styles.css web/tests/build.test.mjs` 原样输出。
 
 ~~~~diff
 diff --git a/web/src/api.ts b/web/src/api.ts
@@ -449,7 +449,7 @@ index dbb46f0..e6b85a1 100644
    binding_count: number;
    created_at: string;
 diff --git a/web/tests/build.test.mjs b/web/tests/build.test.mjs
-index 7109ce0..6ac2311 100644
+index 7109ce0..1ead8bb 100644
 --- a/web/tests/build.test.mjs
 +++ b/web/tests/build.test.mjs
 @@ -1799,7 +1799,11 @@ test("built web contains responsive application", async () => {
@@ -465,7 +465,7 @@ index 7109ce0..6ac2311 100644
    assert.match(hardwareResources, /protocol === "adb"\) return 5555/);
    assert.match(hardwarePanel, /\.\/hardware_terminal\.js\?v=[a-f0-9]{12}/);
    assert.match(agents, /\.\/icons\.js\?v=[a-f0-9]{12}/);
-@@ -3884,7 +3888,11 @@ test("production web splits route chunks and keeps the first-screen budget", asy
+@@ -3884,7 +3888,12 @@ test("production web splits route chunks and keeps the first-screen budget", asy
    // data-retention copy (Chinese and English) plus its render function to the
    // shared first-screen bundle; the packaging run measured 272,805 (272,808 in
    // this worktree), so the ceiling moves to the next 256-byte boundary.
@@ -474,6 +474,7 @@ index 7109ce0..6ac2311 100644
 +  // the Task hardware panel, the takeover form and the short en-US labels in
 +  // the shared bundle gained the per-form labels, endpoints and fields (+480
 +  // JS, +41 CSS over main's 272,829); measured 273,350, next 256-byte boundary.
++  // ADB 三模式新增 UI，实测 273,350，owner 侧分身上限 +512 字节（272,896 → 273,408）。
 +  const FIRST_SCREEN_GZIP_BUDGET = 273408;
    // The version query parameter is a content hash and its hex digits change
    // how the same code gzips: main already sits exactly on the budget, so a

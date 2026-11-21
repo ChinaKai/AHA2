@@ -1,6 +1,6 @@
 # task-726 review packet diff-1-go-core：Go 生产代码：domain / hardwareconfig / hardware / store
 
-`git diff 43624a4 3890244 -- internal/domain/hardware.go internal/hardwareconfig/config.go internal/hardware/adb.go internal/hardware/adb_usb.go internal/hardware/manager.go internal/store/hardware.go internal/store/migrations.go` 原样输出。
+`git diff 43624a4 336d47b -- internal/domain/hardware.go internal/hardwareconfig/config.go internal/hardware/adb.go internal/hardware/adb_usb.go internal/hardware/manager.go internal/store/hardware.go internal/store/migrations.go` 原样输出。
 
 ~~~~diff
 diff --git a/internal/domain/hardware.go b/internal/domain/hardware.go

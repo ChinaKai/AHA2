@@ -1,6 +1,6 @@
 # task-726 review packet diff-2-go-api：Go 生产代码：httpapi / app（宠物、接管）/ prompt
 
-`git diff 43624a4 3890244 -- internal/httpapi/agent_handlers.go internal/httpapi/hardware_handlers.go internal/httpapi/server.go internal/httpapi/takeover_handlers.go internal/app/pet.go internal/app/pet_hardware_resources.go internal/app/pet_takeover.go internal/prompt/registry.go internal/prompt/templates/context-hardware.md internal/prompt/templates/zh-CN/context-hardware.md` 原样输出。
+`git diff 43624a4 336d47b -- internal/httpapi/agent_handlers.go internal/httpapi/hardware_handlers.go internal/httpapi/server.go internal/httpapi/takeover_handlers.go internal/app/pet.go internal/app/pet_hardware_resources.go internal/app/pet_takeover.go internal/prompt/registry.go internal/prompt/templates/context-hardware.md internal/prompt/templates/zh-CN/context-hardware.md` 原样输出。
 
 ~~~~diff
 diff --git a/internal/app/pet.go b/internal/app/pet.go
