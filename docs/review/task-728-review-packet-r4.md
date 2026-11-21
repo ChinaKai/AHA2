@@ -1,5 +1,7 @@
 # task-728 review packet r4：M4 unknown 与明确已登录分离
 
+- 后续修订：本包是 r4（源码 `0455c0f`）；合入 main 的冲突解决见 `task-728-review-packet-r5.md`（merge `53ce62d`）。
+
 - 上一版：实现 `ee276b2`，材料 `7848fef`（r3，复审结论 REQUEST_CHANGES：只剩 M4）
 - 本版：实现 `0455c0f`，分支 `aha/task_07933ff5b7797feffa4c`，worktree `.aha2-worktrees/task_07933ff5b7797feffa4c`
 - 没有 push、没有 merge、没有 complete
