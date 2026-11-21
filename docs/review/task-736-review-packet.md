@@ -1,10 +1,24 @@
 # task-736 review packet：渠道页合并权限申请 + 任务带字体收敛 + 审批结果通知
 
-- **实现提交**：`5724d9c`（本文件与截图随后单独提交）。
+- **实现提交**：`5724d9c`（首轮），`681bc59`（task-740 L2 评审修订）。
+- **评审包提交**：本文档与截图随后单独提交。
 - **base**：`ce2ceef`（当前 main）。
 - **分支 / worktree**：`aha/task_75ddc0ed40d96b2c3d5f` / `/srv/build/users/kaikai/kk-workspace/.aha2-worktrees/task_75ddc0ed40d96b2c3d5f`。
 - **边界**：未合并、未 push、未部署、未运行安装器、未修改 AHA 数据。
 - **改动范围**：`web/src`、`web/tests`、`internal/app`、`internal/store`、`internal/httpapi`、`internal/channel`、`docs/review`。没有 schema 迁移，没有新增依赖。
+
+## L2 评审修订（681bc59）
+
+| 评审项 | 修法 | 测试 |
+|---|---|---|
+| 1. 渠道托管/只读 Task 0 pending 时入口消失 | 渠道按钮改成始终渲染；`channel_instance_id` 非空或只读时渠道页只渲染审批区，不渲染绑定表单；pinned channel 不再被自动收起。`taskRuntimeSignature` 加入 `permission_requests`，SSE 新建待审批也会触发实时区域刷新，角标不再因为无变更而漏更新。 | `task_channel_permissions.browser.mjs` 新增 `t-hosted`（`channel_instance_id=instance-hosted`、初始 0 pending）：渠道按钮存在且无角标、无绑定表单、能打开已批准历史；随后模拟 SSE 新增 pending，断言角标变成 1 且待审批项出现。 |
+| 2. 过期通知会漏 | `ListTaskPermissionRequests` 改成纯读，不再偷偷写 `expired`。过期只由 `ExpireTaskPermissionRequests` 条件更新；`TaskPermissionRequests` 和 `CreateTaskPermissionRequest` 都先调用同一个 `settleExpiredTaskPermissionRequests`，所以“过期后直接重新发起申请”也会恰好通知一次。 | 新增 `TestCreateAfterExpiryStillNotifiesOnce`：过期后直接 Create，断言新申请可创建、旧申请结果消息恰好 1 条。store 测试改为“list 不写过期、显式 Expire 才写”。 |
+| 3. 终态 Task 批准后 receipt 停在 processing | 卡片批准命中终态分支时，先 `FinishChannelInbox(processed, permission_approved)`，再写历史记录。 | 卡片测试对批准和拒绝都断言 receipt 最终为 `processed`。 |
+| 4. 过期文案 | 改成 `申请已过期（owner 未处理）`，不再写“owner 已过期”，也不列处理人。 | app 过期测试和 Create-after-expiry 测试按新文案断言。 |
+| 保持项：failed 仍按终态 | 不改。`TaskAcceptsApprovalResultWake` 只放行 active / waiting_user；completed、failed、cancelled、blocked、draft、preparing 都只记历史。 | 现有终态测试覆盖 completed；代码路径对所有非 active/waiting 状态一致。 |
+| N4 续跑失败兜底 | 本次不改。批准续跑失败仍只回 `continuation_error` 并记日志，没有自动补一条历史记录；如果强行补发，可能在“续跑其实已提交但响应失败”时造成双消息，风险更高。列为残余风险。 | — |
+| N5 邮件取消竞态 | 本次不改。`cancelMailMessage` 先读旧状态决定是否通知；如果读到 draft 后、真正取消前被并发提交为 pending_approval，这一条取消通知会被跳过。要彻底修需要 store 返回“是否从已提交状态取消”，超出本次最小范围。列为残余风险。 | — |
+
 
 ## 0. owner 原话
 
@@ -76,7 +90,7 @@
 - 顶部工具条：搜索框、全选、清空、`已选 N / 共 M`。搜索只切换 chip 的 `hidden`，不重渲染表单；全选/清空只作用于未隐藏且非 disabled 的成员。
 - 可@联调人：38px 单行，姓名 + 行内身份输入（保留 datalist、`maxlength=40`）+ 删除按钮；删除即取消对应成员勾选并重建列表。
 - 审批区：`#task-channel-permissions` 全宽放在渠道页底部。默认只列 pending；“查看历史”切到已处理；每行一行摘要（申请人 + Bot 标记 + 动作 + 状态徽标），详情列范围、原因、风险、申请时间、处理人、处理说明；批准/拒绝按钮都是 `type="button"`。
-- 无渠道绑定时审批区照常渲染；channel-hosted / 只读 Task 只渲染审批区，不显示无法使用的绑定表单。
+- 渠道按钮始终存在；无渠道绑定时审批区照常渲染；channel-hosted / 只读 Task 只渲染审批区，不显示无法使用的绑定表单，0 条待审批时仍可查看历史。
 - 窄屏顺序：`.task-channel-permissions.has-pending { order: 2 }`，即“审批 → 群成员 → 可@联调人”；没有 pending 时审批区回到最底部。
 - 决定/切换历史只重渲染审批区（`refreshTaskPermissionSection`），不会丢掉成员表单里尚未保存的身份输入。
 
@@ -90,7 +104,7 @@
 
 新增 `internal/app/approval_results.go`：
 
-- `TaskApprovalResultContent` 统一生成 `[审批结果] <类型>「<动作/主题>」（<id>）：owner 已<批准/拒绝/过期/取消>。处理人：…。时间：…。原因：…`，可选 `Instruction` 拼接“请继续执行已授权动作”。
+- `TaskApprovalResultContent` 统一生成 `[审批结果] <类型>「<动作/主题>」（<id>）：owner 已<批准/拒绝/取消>。处理人：…。时间：…。原因：…`，过期则写成 `申请已过期（owner 未处理）`；可选 `Instruction` 拼接“请继续执行已授权动作”。
 - `NotifyTaskApprovalResult`：
   - active / waiting_user：`SubmitMessage`，正常开一个 Turn；
   - completed / failed / cancelled / blocked / draft / preparing：只 `AddConversationItem`（`agent_message`，payload `approval_result=true`），不改 Task 状态、不唤醒。
@@ -111,7 +125,7 @@
 
 - 权限：store 条件更新 `pending && expires_at>now`；第二次 resolve 拿不到变更，Web 回 409，卡片报“已经处理过”，不会发第二条。
 - 邮件批准：store 对重复 approve 返回 nil `events`；handler 只在 `len(events)>0` 时通知。
-- 过期：新增 `ExpireTaskPermissionRequests`，逐行 `WHERE status='pending' AND expires_at<=?` 条件更新，只返回本次真正改掉的行；`TaskPermissionRequests` 对返回值逐条通知，第二次读不会再发。
+- 过期：新增 `ExpireTaskPermissionRequests`，逐行 `WHERE status='pending' AND expires_at<=?` 条件更新，只返回本次真正改掉的行；`TaskPermissionRequests` 和 `CreateTaskPermissionRequest` 都走 `settleExpiredTaskPermissionRequests` 逐条通知，第二次读或紧接着的新申请不会再发。`ListTaskPermissionRequests` 已改成纯读。
 - 已处理/过期后重复点击不会产生新的 Turn 或消息。
 
 **公开 API**：形状不变；仅在通知失败时给原响应加可选 `notification_error`（权限 resolve / 邮件 approve）。不新增接口、不改 schema。
@@ -145,6 +159,7 @@
 - `task-channel-merged-390.png`：390 下两列成员，待审批区在成员区上方。
 - `task-permissions-panel.png`：渠道页内的待审批详情与批准/拒绝按钮。
 - `task-permissions-history.png`：切到历史后的已批准记录。
+- `task-channel-hosted-sse.png`：渠道托管 Task 在 0 pending 时打开历史，随后模拟 SSE 新 pending，渠道角标变为 1。
 
 ## 5. 实际命令与退出码
 
@@ -154,14 +169,14 @@
 |---|---|
 | `go build ./...` | 0 |
 | `go vet ./internal/app ./internal/channel ./internal/httpapi ./internal/store` | 0 |
-| `go test ./internal/app -run 'TestTaskApprovalResult\|TestNotifyTaskApproval\|TestExpiredPermission' -count=1` | 0 |
+| `go test ./internal/app -run 'TestTaskApprovalResult\|TestNotifyTaskApproval\|TestExpiredPermission\|TestCreateAfterExpiry' -count=1` | 0 |
 | `go test ./internal/channel -run 'TestSendTaskPermissionRequestCard\|TestTaskPermissionCardDecisions' -count=1` | 0 |
 | `go test ./internal/store -run 'TestResolveTaskPermissionRequestIsAtomic\|TestExpireTaskPermission\|TestListTaskPermission\|TestTaskPermissionRequestResolvesOnce' -count=1` | 0 |
 | `go test ./internal/httpapi -run 'TestWebPermission\|TestResolveTaskPermissionFromWebKeepsChannelReplyRoute\|TestMailApprovalDecisions\|TestMailApprovalOnTerminal\|TestMailApprovalIsOwnerOnlyAndRejectsChangedDigest' -count=1` | 0 |
 | `node scripts/build-web.mjs` | 0 |
 | `node --test tests/*.test.mjs` | 0（632 pass / 0 fail） |
 | `node web/tests/task_permissions.browser.mjs` | 0 |
-| `node web/tests/task_channel_permissions.browser.mjs` | 0 |
+| `node web/tests/task_channel_permissions.browser.mjs`（含 hosted Task、SSE 角标、英文） | 0 |
 | `node web/tests/task_band_typography.browser.mjs` | 0 |
 | `node web/tests/task_detail_band.browser.mjs` | 0 |
 
@@ -180,9 +195,11 @@
 
 ## 7. 缺口与残余风险
 
-1. **过期只在读列表时结算**：权限申请过期依赖 `TaskPermissionRequests` 被调用（任务详情/详情接口），没有独立定时器。一个长期没人打开的任务，过期通知会推迟到下一次读取；不会漏，但可能晚。
+1. **过期结算时机**：权限申请过期由“读详情/列表”或“同 Task 新建申请”触发 `settleExpiredTaskPermissionRequests`，没有独立定时器。一个长期既没人打开、也没有新申请的任务，过期通知会推迟到下一次结算；不会漏，但可能晚。列表读取本身已不再写过期。
 2. **邮件没有过期终态**：`pending_approval` 不会自动过期，所以没有“邮件过期”通知。邮件投递失败/`dead_letter` 是投递结果、不是 owner 审批决定，本次也没有加通知；如果 owner 希望知道投递失败，需要另开需求。
 3. **通知不是事务内提交**：审批状态先原子落库，再写结果消息。如果进程恰好在两者之间崩溃，结果消息会丢（状态不会回退）。当前用日志记录通知失败；没有重试队列。
 4. **结果文案是中文**：后端消息直接进会话，和宠物审批的默认中文一致；不在 `i18n.ts` 的 UI 文案范围内，英文界面里这条会话消息仍是中文。
 5. **历史视图上限**：已处理记录最多显示 50 条，pending 最多 20 条；超出部分没有分页，和原权限面板的 12 条上限相比已放宽但仍有界。
 6. **`task_panels.browser.mjs` 基线失败**：见 §5，已在 base 复现，不是本次回归，但没有修它。
+7. **N4 续跑失败兜底**：批准时如果续跑消息提交失败，只返回 `continuation_error` 并记日志，不再自动补一条历史记录。没有自动补发的原因是：响应失败不等于提交一定没成功，补发可能造成双消息；需要更明确的提交幂等信号后再做。
+8. **N5 邮件取消竞态**：`cancelMailMessage` 先读旧状态、再调用 store 取消。如果读到 draft 后、取消前被并发提交为 pending_approval，这一次取消会成功但通知被跳过。彻底修需要 store 返回“是否从已提交状态取消”，本次没有扩大接口范围。
