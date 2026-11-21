@@ -263,6 +263,12 @@ func New(config Config) *Server {
 }
 
 func (s *Server) Handler() http.Handler {
+	return s.securityHeaders(s.requestLog(s.slowRequestLog(s.enforceAccessScope(s.repairTextEncoding(s.routeMux())))))
+}
+
+// routeMux registers every route of the main listener. It is separate from
+// Handler so the coverage inventory can be checked against the real mux.
+func (s *Server) routeMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.health)
 	if s.localOwnerIngest {
@@ -692,7 +698,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /api/v1/skills/{id}", s.withAuth(http.HandlerFunc(s.rejectRemovedSkillWrite)))
 
 	mux.HandleFunc("/", s.serveWeb)
-	return s.securityHeaders(s.requestLog(s.slowRequestLog(s.enforceAccessScope(s.repairTextEncoding(mux)))))
+	return mux
 }
 
 func (s *Server) securityHeaders(next http.Handler) http.Handler {

@@ -20,7 +20,7 @@ const (
 )
 
 var ledgerFields = []string{"operation", "server", "source", "handler", "boundary", "fingerprint", "mcp", "permission", "protected_flow", "tests", "status"}
-var webFields = []string{"source", "line", "method_hint", "expression"}
+var webFields = []string{"source", "method_hint", "expression", "occurrences"}
 var toolFields = []string{"tool", "pet_access", "permission", "tests", "status"}
 
 // Final statuses close a row. Everything else keeps the gate open.
@@ -240,6 +240,10 @@ func ValidateRow(root string, catalog Catalog, route Registration, row Row) erro
 type Report struct {
 	Operations, Final, Open, WebSites, Tools, ToolsFinal int
 	Stale, Removed                                       []string
+	// Every .Handle/.HandleFunc call in scanned Go source is either one of
+	// RegisteringCalls or listed in NonRouteCalls with its reason.
+	HandleCalls, RegisteringCalls int
+	NonRouteCalls                 []string
 }
 
 // Check regenerates every inventory, compares it with the checked-in files
@@ -247,10 +251,11 @@ type Report struct {
 // complete it also requires every operation and tool row to be closed.
 func Check(root string, catalog Catalog, update, complete bool) (Report, error) {
 	var report Report
-	routes, err := ScanRoutes(root)
+	routes, stats, err := ScanRoutes(root)
 	if err != nil {
 		return report, err
 	}
+	report.HandleCalls, report.RegisteringCalls, report.NonRouteCalls = stats.Calls, stats.Registering, stats.NonRoute
 	previous, _, err := readTSV(filepath.Join(root, LedgerPath))
 	if err != nil {
 		return report, err
@@ -268,13 +273,13 @@ func Check(root string, catalog Catalog, update, complete bool) (Report, error) 
 	if len(unmatched) > 0 {
 		var lines []string
 		for _, site := range unmatched {
-			lines = append(lines, fmt.Sprintf("%s:%d %s %s", site.Source, site.Line, site.MethodHint, site.Expression))
+			lines = append(lines, fmt.Sprintf("%s %s %s", site.Source, site.MethodHint, site.Expression))
 		}
 		return report, fmt.Errorf("Web calls with no registered route (a registration escaped the scan):\n%s", strings.Join(lines, "\n"))
 	}
 	webRows := make([]Row, 0, len(sites))
 	for _, site := range sites {
-		webRows = append(webRows, Row{"source": site.Source, "line": fmt.Sprint(site.Line), "method_hint": site.MethodHint, "expression": site.Expression})
+		webRows = append(webRows, Row{"source": site.Source, "method_hint": site.MethodHint, "expression": site.Expression, "occurrences": fmt.Sprint(site.Occurrences)})
 	}
 	toolsPrevious, _, err := readTSV(filepath.Join(root, ToolsPath))
 	if err != nil {

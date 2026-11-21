@@ -1,6 +1,7 @@
 package petcoverage
 
 import (
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,9 +90,13 @@ func (s *Server) tables(mux *http.ServeMux) {
 }
 `,
 	})
-	routes, err := ScanRoutes(root)
+	routes, stats, err := ScanRoutes(root)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// 7 routes from 6 Handle calls (each table call counts once); every call is accounted.
+	if stats.Calls != 6 || stats.Registering != 6 || len(stats.NonRoute) != 0 {
+		t.Fatalf("stats = %+v", stats)
 	}
 	got := map[string]Registration{}
 	for _, route := range routes {
@@ -123,17 +128,22 @@ func (s *Server) tables(mux *http.ServeMux) {
 func TestScanFailsClosedOnRegistrationsItCannotAccountFor(t *testing.T) {
 	cases := map[string][2]string{
 		"unclassified function": {`func (s *Server) Other() { mux := http.NewServeMux(); mux.Handle("GET /x", http.HandlerFunc(s.list)) }`, "not classified"},
-		"default serve mux":     {`func (s *Server) Routes() { http.Handle("GET /x", http.HandlerFunc(s.list)) }`, "unrecognized receiver"},
+		"default serve mux":     {`func (s *Server) Routes() { http.Handle("GET /x", http.HandlerFunc(s.list)) }`, "DefaultServeMux"},
 		"unknown receiver":      {`func (s *Server) Routes(r interface{ Handle(string, http.Handler) }) { r.Handle("/x", http.HandlerFunc(s.list)) }`, "unrecognized receiver"},
 		"dynamic pattern":       {`func (s *Server) Routes(pattern string) { mux := http.NewServeMux(); mux.Handle(pattern, http.HandlerFunc(s.list)) }`, "unresolvable route pattern"},
 		"duplicate":             {`func (s *Server) Routes() { mux := http.NewServeMux(); mux.Handle("GET /x", http.HandlerFunc(s.list)); mux.Handle("GET /x", http.HandlerFunc(s.status)) }`, "duplicate route"},
 		"unknown handler":       {`func (s *Server) Routes() { mux := http.NewServeMux(); mux.Handle("GET /x", http.HandlerFunc(s.missing)) }`, "no unique declaration"},
+		"multi-line call":       {"func (s *Server) Routes(r interface{ Handle(string, http.Handler) }) {\n\tr.Handle(\n\t\t\"/x\",\n\t\thttp.HandlerFunc(s.list),\n\t)\n}", "unrecognized receiver"},
+		"non-route lookalike":   {`func (s *Server) Routes(r interface{ Handle(int, int) }) { r.Handle(1, 2) }`, "unrecognized receiver"},
+		"helper on field":       {`type holder struct{ mux *http.ServeMux }; func (s *Server) Routes(h holder) { h.mux.Handle("GET /x", http.HandlerFunc(s.list)) }`, "unrecognized receiver"},
+		"package-level literal": {`var register = func(mux *http.ServeMux, s *Server) { mux.Handle("GET /x", http.HandlerFunc(s.list)) }`, "outside a function body"},
+		"unknown wrapper":       {`func (s *Server) wrap(next http.Handler) http.Handler { return next }; func (s *Server) Routes() { mux := http.NewServeMux(); mux.Handle("GET /x", s.wrap(http.HandlerFunc(s.list))) }`, "no reviewed boundary"},
 	}
 	for name, item := range cases {
 		t.Run(name, func(t *testing.T) {
 			classify(t, map[string]string{"internal/api (*Server).Routes": "httpapi"})
 			root := writeTree(t, map[string]string{"internal/api/server.go": serverPreamble + item[0] + "\n"})
-			if _, err := ScanRoutes(root); err == nil || !strings.Contains(err.Error(), item[1]) {
+			if _, _, err := ScanRoutes(root); err == nil || !strings.Contains(err.Error(), item[1]) {
 				t.Fatalf("scan error = %v, want %q", err, item[1])
 			}
 		})
@@ -225,42 +235,114 @@ func TestEvidenceRulesRejectVagueOrMisappliedClosure(t *testing.T) {
 	}
 }
 
+func TestScanCountsNonRouteHandleCalls(t *testing.T) {
+	classify(t, map[string]string{"internal/api (*Server).Routes": "httpapi"})
+	root := writeTree(t, map[string]string{"internal/api/server.go": serverPreamble + `
+type conv int
+
+func Handle(value int) conv { return conv(value) }
+
+// mux.Handle("GET /commented", s.list) is not a call.
+var note = "mux.Handle(\"GET /string\", s.list)"
+
+func (s *Server) Routes() {
+	mux := http.NewServeMux()
+	_ = api.Handle(1)
+	mux.Handle("GET /x", http.HandlerFunc(s.list))
+}
+
+var api = struct{ Handle func(int) conv }{Handle}
+`})
+	routes, stats, err := ScanRoutes(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(routes) != 1 || stats.Calls != 2 || stats.Registering != 1 || len(stats.NonRoute) != 1 || !strings.Contains(stats.NonRoute[0], "1 arguments") {
+		t.Fatalf("routes=%d stats=%+v", len(routes), stats)
+	}
+}
+
 func TestWebSitesMustMatchARegisteredRoute(t *testing.T) {
 	routes := []Registration{
 		{Operation: "GET /api/v1/projects", Server: "httpapi"},
 		{Operation: "PATCH /api/v1/tasks/{id}", Server: "httpapi"},
 		{Operation: "GET /api/v1/knowledge-vault/git/status", Server: "httpapi"},
+		{Operation: "GET /api/v1/tasks/{id}/hardware/{hardware}/terminal/ws", Server: "httpapi"},
 		{Operation: "GET /api/v1/other", Server: "centersync"},
 	}
 	sites := []WebSite{
-		{Source: "a.ts", Line: 1, MethodHint: "GET/see-source", Expression: "/api/v1/projects${query.size ? `?${query}` : \"\"}"},
-		{Source: "a.ts", Line: 2, MethodHint: "PATCH", Expression: "/api/v1/tasks/${encodeURIComponent(id)}"},
-		{Source: "a.ts", Line: 3, MethodHint: "GET/see-source", Expression: "/api/v1/knowledge-vault/git/${action}"},
-		{Source: "a.ts", Line: 4, MethodHint: "DELETE", Expression: "/api/v1/tasks/${id}"},
-		{Source: "a.ts", Line: 5, MethodHint: "GET/see-source", Expression: "/api/v1/unregistered"},
-		{Source: "a.ts", Line: 6, MethodHint: "GET/see-source", Expression: "/api/v1/other"},
+		{Source: "a.ts", MethodHint: "GET/see-source", Expression: "/api/v1/projects${query.size ? `?${query}` : \"\"}"},
+		{Source: "a.ts", MethodHint: "PATCH", Expression: "/api/v1/tasks/${encodeURIComponent(id)}"},
+		{Source: "a.ts", MethodHint: "GET/see-source", Expression: "/api/v1/knowledge-vault/git/${action}"},
+		{Source: "a.ts", MethodHint: "GET/see-source", Expression: "${protocol}//${location.host}/api/v1/tasks/${id}/hardware/${hw}/terminal/ws?${query}"},
+		{Source: "b.ts", MethodHint: "DELETE", Expression: "/api/v1/tasks/${id}"},
+		{Source: "b.ts", MethodHint: "GET/see-source", Expression: "/api/v1/unregistered"},
+		{Source: "b.ts", MethodHint: "GET/see-source", Expression: "/api/v1/other"},
 	}
 	unmatched, err := UnmatchedWebSites(sites, routes)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var lines []int
-	for _, site := range unmatched {
-		lines = append(lines, site.Line)
+	if len(unmatched) != 3 {
+		t.Fatalf("unmatched = %+v, want the three b.ts sites", unmatched)
 	}
-	if len(lines) != 3 || lines[0] != 4 || lines[1] != 5 || lines[2] != 6 {
-		t.Fatalf("unmatched lines = %v, want [4 5 6]", lines)
+	for _, site := range unmatched {
+		if site.Source != "b.ts" {
+			t.Fatalf("matched site reported: %+v", site)
+		}
 	}
 }
 
-func TestScanWebKeepsNestedTemplatesAndMethodHints(t *testing.T) {
-	root := writeTree(t, map[string]string{"web/src/api.ts": "return this.request(`/api/v1/tasks/${encodeURIComponent(id)}`, {method: \"PATCH\", body: \"{}\"});\nfetch(\"/api/v1/system\");\nreturn this.request(`/api/v1/projects${query.size ? `?${query}` : \"\"}`);\n"})
+func TestScanWebLexesCommentsRegexpsTemplatesAndDynamicBases(t *testing.T) {
+	root := writeTree(t, map[string]string{"web/src/api.ts": strings.Join([]string{
+		"return this.request(`/api/v1/tasks/${encodeURIComponent(id)}`, {method: \"PATCH\", body: \"{}\"});",
+		"fetch(\"/api/v1/system\");",
+		"fetch(\"/api/v1/system\");",
+		"return this.request(`/api/v1/projects${query.size ? `?${query}` : \"\"}`);",
+		"// fetch(\"/api/v1/commented-out\");",
+		"/* fetch('/api/v1/block-comment'); */",
+		"const pattern = /[\"']\\/api\\//g; const ratio = total / 2;",
+		"const url = `${protocol}//${location.host}/api/v1/tasks/${id}/hardware/${hw}/terminal/ws?${query}`;",
+		"const external = \"https://openrouter.ai/api/v1\";",
+		"const nested = `${flag ? \"/api/v1/nested-a\" : '/api/v1/nested-b'}`;",
+		"const link = \"http://example.test/x\"; fetch('/api/v1/after-url');",
+		"state.innerHTML = `<img src=\"/api/v1/embedded/${encodeURIComponent(id)}/qr\" alt=\"x\">${flag ? \"/api/v1/inside-expr\" : \"\"}`;",
+		"link.download = `${name.replace(/[\\\\/:*?\"<>|]+/g, \"-\")}-archive.json`;",
+	}, "\n") + "\n"})
 	sites, err := ScanWeb(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sites) != 3 || sites[0].MethodHint != "PATCH" || sites[1].Line != 2 || sites[2].Expression != "/api/v1/projects${query.size ? `?${query}` : \"\"}" {
+	got := map[string]WebSite{}
+	for _, site := range sites {
+		got[site.Expression] = site
+	}
+	for _, expression := range []string{"/api/v1/commented-out", "/api/v1/block-comment", "https://openrouter.ai/api/v1"} {
+		if _, ok := got[expression]; ok {
+			t.Fatalf("%s should not be a call site", expression)
+		}
+	}
+	want := map[string]string{
+		"/api/v1/tasks/${encodeURIComponent(id)}": "PATCH",
+		"/api/v1/system": "GET/see-source",
+		"/api/v1/projects${query.size ? `?${query}` : \"\"}":                                   "GET/see-source",
+		"${protocol}//${location.host}/api/v1/tasks/${id}/hardware/${hw}/terminal/ws?${query}": "GET/see-source",
+		"/api/v1/nested-a":  "GET/see-source",
+		"/api/v1/nested-b":  "GET/see-source",
+		"/api/v1/after-url": "GET/see-source",
+		"/api/v1/embedded/${encodeURIComponent(id)}/qr": "GET/see-source",
+		"/api/v1/inside-expr":                           "GET/see-source",
+	}
+	if len(got) != len(want) {
 		t.Fatalf("sites = %+v", sites)
+	}
+	for expression, hint := range want {
+		if got[expression].MethodHint != hint {
+			t.Fatalf("%s = %+v", expression, got[expression])
+		}
+	}
+	if got["/api/v1/system"].Occurrences != 2 {
+		t.Fatal("identical calls in one file were not folded")
 	}
 }
 
@@ -293,5 +375,28 @@ func TestCheckDetectsDriftAndCompleteRequiresClosure(t *testing.T) {
 	}
 	if _, err := Check(root, catalog, false, false); err == nil {
 		t.Fatal("handler change did not invalidate the ledger")
+	}
+}
+
+func TestVerifyMuxRejectsScannedRoutesTheLiveMuxDoesNotServe(t *testing.T) {
+	mux := http.NewServeMux()
+	ok := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	mux.Handle("GET /api/v1/tasks/{id}", ok)
+	mux.Handle("GET /api/v1/files/{path...}", ok)
+	mux.Handle("/api/v1/prompts", ok)
+	mux.Handle("GET /api/v1/prompts", ok)
+	routes := []Registration{
+		{Operation: "GET /api/v1/tasks/{id}", Server: "httpapi"},
+		{Operation: "GET /api/v1/files/{path...}", Server: "httpapi"},
+		{Operation: "ANY /api/v1/prompts", Server: "httpapi"},
+		{Operation: "GET /api/v1/prompts", Server: "httpapi"},
+		{Operation: "GET /elsewhere", Server: "centersync"},
+	}
+	if checked, err := VerifyMux(mux, routes, "httpapi"); err != nil || checked != 4 {
+		t.Fatalf("checked=%d err=%v", checked, err)
+	}
+	routes = append(routes, Registration{Operation: "POST /api/v1/tasks/{id}", Server: "httpapi"}, Registration{Operation: "GET /api/v1/missing", Server: "httpapi"})
+	if _, err := VerifyMux(mux, routes, "httpapi"); err == nil || !strings.Contains(err.Error(), "POST /api/v1/tasks/{id}") || !strings.Contains(err.Error(), "GET /api/v1/missing") {
+		t.Fatalf("live mismatch not reported: %v", err)
 	}
 }

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
+	"github.com/ChinaKai/AHA2/internal/petcoverage"
 )
 
 func testStore(t *testing.T) *Store {
@@ -425,5 +426,22 @@ func TestConflictResponseEncodesEmptyRemotePayload(t *testing.T) {
 	}
 	if len(response.Conflicts) != 1 || string(response.Conflicts[0].RemotePayload) != "null" {
 		t.Fatalf("conflicts=%#v", response.Conflicts)
+	}
+}
+
+// The pet MCP coverage scan inventories the aha-sync listener statically;
+// every scanned operation must be served by the real mux under that pattern.
+func TestCoverageScanMatchesLiveCenterMux(t *testing.T) {
+	routes, _, err := petcoverage.ScanRoutes(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux, ok := testStore(t).Handler().(*http.ServeMux)
+	if !ok {
+		t.Fatal("center handler is not a ServeMux")
+	}
+	checked, err := petcoverage.VerifyMux(mux, routes, "centersync")
+	if err != nil || checked != 6 {
+		t.Fatalf("checked=%d err=%v", checked, err)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -18,27 +19,44 @@ import (
 )
 
 func main() {
-	update := flag.Bool("update", false, "rewrite the inventories; reviewed columns are kept, changed rows become stale")
-	complete := flag.Bool("complete", false, "fail unless every operation and tool row has a closing status with valid evidence")
-	flag.Parse()
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+func run(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("aha-pet-coverage", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	update := flags.Bool("update", false, "rewrite the inventories; reviewed columns are kept, changed rows become stale")
+	complete := flags.Bool("complete", false, "fail unless every operation and tool row has a closing status with valid evidence")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if flags.NArg() > 0 {
+		fmt.Fprintln(stderr, "unexpected arguments:", flags.Args())
+		return 2
+	}
 	root, err := moduleRoot()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(2)
+		fmt.Fprintln(stderr, err)
+		return 2
 	}
 	report, err := petcoverage.Check(root, petcoverage.NewCatalog(httpapi.MCPToolCatalog()), *update, *complete)
 	for _, key := range report.Stale {
-		fmt.Println("stale (re-verify):", key)
+		fmt.Fprintln(stdout, "stale (re-verify):", key)
 	}
 	for _, key := range report.Removed {
-		fmt.Println("removed:", key)
+		fmt.Fprintln(stdout, "removed:", key)
 	}
-	fmt.Printf("HTTP operations: %d (closed %d, open %d); Web literal call sites: %d; ordinary-Task MCP tools: %d (closed %d)\n",
+	for _, call := range report.NonRouteCalls {
+		fmt.Fprintln(stdout, "non-route Handle call:", call)
+	}
+	fmt.Fprintf(stdout, "Handle/HandleFunc calls: %d (route registrations %d, non-route %d)\n", report.HandleCalls, report.RegisteringCalls, len(report.NonRouteCalls))
+	fmt.Fprintf(stdout, "HTTP operations: %d (closed %d, open %d); Web API call sites: %d; ordinary-Task MCP tools: %d (closed %d)\n",
 		report.Operations, report.Final, report.Open, report.WebSites, report.Tools, report.ToolsFinal)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		fmt.Fprintln(stderr, err)
+		return 1
 	}
+	return 0
 }
 
 func moduleRoot() (string, error) {

@@ -13,6 +13,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/printer"
+	"go/scanner"
 	"go/token"
 	"io/fs"
 	"os"
@@ -37,13 +38,22 @@ type Registration struct {
 // registeringFunctions classifies every function that registers routes. A
 // new registering function fails the scan until a reviewer classifies it.
 var registeringFunctions = map[string]string{
-	"internal/httpapi (*Server).Handler":               "httpapi",
+	"internal/httpapi (*Server).routeMux":              "httpapi",
 	"internal/httpapi (*Server).registerBrowserRoutes": "httpapi",
 	"internal/httpapi (*Server).registerDesktopRoutes": "httpapi",
 	"internal/httpapi (*Server).MailDownloadHandler":   "mail-download",
 	"internal/centersync (*Store).Handler":             "centersync",
 }
 
+// nonRouteHandleCalls lists two-argument Handle/HandleFunc calls that are
+// reviewed as not registering an HTTP route, keyed by
+// "<package dir> <function> <receiver>". Every other such call on a value that
+// is not a ServeMux fails the scan.
+var nonRouteHandleCalls = map[string]string{}
+
+// boundaries maps every accepted wrapper to its authentication boundary. A
+// wrapper missing here fails the scan instead of silently becoming
+// transport_auth.
 var boundaries = map[string]string{
 	"withAgentCapability":   "agent_turn",
 	"withOwnerOrAgentAuth":  "owner_or_agent",
@@ -60,6 +70,7 @@ type goPackage struct {
 	dir       string
 	fset      *token.FileSet
 	files     map[string]*ast.File
+	sources   map[string][]byte
 	constants map[string]ast.Expr
 	methods   map[string]*ast.FuncDecl // handler name -> method declaration
 }
@@ -87,14 +98,19 @@ func loadPackages(root string) (map[string]*goPackage, error) {
 			dir = filepath.ToSlash(dir)
 			pkg := packages[dir]
 			if pkg == nil {
-				pkg = &goPackage{dir: dir, fset: token.NewFileSet(), files: map[string]*ast.File{}, constants: map[string]ast.Expr{}, methods: map[string]*ast.FuncDecl{}}
+				pkg = &goPackage{dir: dir, fset: token.NewFileSet(), files: map[string]*ast.File{}, sources: map[string][]byte{}, constants: map[string]ast.Expr{}, methods: map[string]*ast.FuncDecl{}}
 				packages[dir] = pkg
 			}
-			file, err := parser.ParseFile(pkg.fset, path, nil, parser.SkipObjectResolution)
+			content, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			file, err := parser.ParseFile(pkg.fset, path, content, parser.SkipObjectResolution)
 			if err != nil {
 				return err
 			}
 			pkg.files[dir+"/"+entry.Name()] = file
+			pkg.sources[dir+"/"+entry.Name()] = content
 			return nil
 		})
 		if err != nil && !os.IsNotExist(err) {
@@ -143,11 +159,21 @@ func functionKey(declaration *ast.FuncDecl) string {
 	return "(" + receiver.String() + ")." + declaration.Name.Name
 }
 
+// ScanStats reconciles every Handle/HandleFunc call in the scanned source:
+// Calls counts the token sequences `.Handle(` / `.HandleFunc(`, and each one
+// is either a route registration or a reviewed non-route call.
+type ScanStats struct {
+	Calls       int
+	Registering int
+	NonRoute    []string
+}
+
 // ScanRoutes returns every route registration under root, sorted by operation.
-func ScanRoutes(root string) ([]Registration, error) {
+func ScanRoutes(root string) ([]Registration, ScanStats, error) {
+	var stats ScanStats
 	packages, err := loadPackages(root)
 	if err != nil {
-		return nil, err
+		return nil, stats, err
 	}
 	var result []Registration
 	seen := map[string]string{}
@@ -164,23 +190,50 @@ func ScanRoutes(root string) ([]Registration, error) {
 		}
 		sort.Strings(names)
 		for _, source := range names {
+			tokens := handleTokens(pkg.sources[source])
+			calls := 0
+			ast.Inspect(pkg.files[source], func(node ast.Node) bool {
+				if call, ok := node.(*ast.CallExpr); ok && isHandleCall(call) {
+					calls++
+				}
+				return true
+			})
+			if tokens != calls {
+				return nil, stats, fmt.Errorf("%s: %d .Handle/.HandleFunc tokens but %d parsed calls; review the scanner", source, tokens, calls)
+			}
+			stats.Calls += calls
+			accounted := 0
 			for _, declaration := range pkg.files[source].Decls {
 				function, ok := declaration.(*ast.FuncDecl)
 				if !ok || function.Body == nil {
+					outside := 0
+					ast.Inspect(declaration, func(node ast.Node) bool {
+						if call, ok := node.(*ast.CallExpr); ok && isHandleCall(call) {
+							outside++
+						}
+						return true
+					})
+					if outside > 0 {
+						return nil, stats, fmt.Errorf("%s: Handle/HandleFunc call outside a function body", source)
+					}
 					continue
 				}
-				found, err := scanFunction(pkg, source, function)
+				found, handled, err := scanFunction(pkg, source, function, &stats)
 				if err != nil {
-					return nil, err
+					return nil, stats, err
 				}
+				accounted += handled
 				for _, item := range found {
 					key := item.Server + " " + item.Operation
 					if previous, exists := seen[key]; exists {
-						return nil, fmt.Errorf("duplicate route %s (%s and %s)", key, previous, item.Source)
+						return nil, stats, fmt.Errorf("duplicate route %s (%s and %s)", key, previous, item.Source)
 					}
 					seen[key] = item.Source
 					result = append(result, item)
 				}
+			}
+			if accounted != calls {
+				return nil, stats, fmt.Errorf("%s: %d Handle/HandleFunc calls but %d accounted for", source, calls, accounted)
 			}
 		}
 	}
@@ -190,7 +243,38 @@ func ScanRoutes(root string) ([]Registration, error) {
 		}
 		return result[i].Server < result[j].Server
 	})
-	return result, nil
+	sort.Strings(stats.NonRoute)
+	return result, stats, nil
+}
+
+func isHandleCall(call *ast.CallExpr) bool {
+	selector, ok := call.Fun.(*ast.SelectorExpr)
+	return ok && (selector.Sel.Name == "Handle" || selector.Sel.Name == "HandleFunc")
+}
+
+// handleTokens counts `.` Handle|HandleFunc `(` in the token stream, so a call
+// the AST walk cannot see (or a scanner bug) shows up as a mismatch. Comments
+// and string contents are not tokens and do not count.
+func handleTokens(source []byte) int {
+	var lexer scanner.Scanner
+	fileSet := token.NewFileSet()
+	lexer.Init(fileSet.AddFile("", fileSet.Base(), len(source)), source, nil, 0)
+	count := 0
+	var previous [2]token.Token
+	var name string
+	for {
+		_, tok, literal := lexer.Scan()
+		if tok == token.EOF {
+			return count
+		}
+		if tok == token.LPAREN && previous[1] == token.IDENT && previous[0] == token.PERIOD && (name == "Handle" || name == "HandleFunc") {
+			count++
+		}
+		if tok == token.IDENT {
+			name = literal
+		}
+		previous[0], previous[1] = previous[1], tok
+	}
 }
 
 type scope struct {
@@ -202,7 +286,7 @@ type scope struct {
 	enclosing []ast.Node
 }
 
-func scanFunction(pkg *goPackage, source string, function *ast.FuncDecl) ([]Registration, error) {
+func scanFunction(pkg *goPackage, source string, function *ast.FuncDecl, stats *ScanStats) ([]Registration, int, error) {
 	current := &scope{pkg: pkg, function: function, locals: map[string]ast.Expr{}, muxes: map[string]bool{}}
 	if function.Type.Params != nil {
 		for _, field := range function.Type.Params.List {
@@ -239,6 +323,7 @@ func scanFunction(pkg *goPackage, source string, function *ast.FuncDecl) ([]Regi
 	var result []Registration
 	var failure error
 	var stack []ast.Node
+	handled := 0
 	ast.Inspect(function.Body, func(node ast.Node) bool {
 		if node == nil {
 			stack = stack[:len(stack)-1]
@@ -253,21 +338,34 @@ func scanFunction(pkg *goPackage, source string, function *ast.FuncDecl) ([]Regi
 			return true
 		}
 		current.enclosing = stack
-		method, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || (method.Sel.Name != "Handle" && method.Sel.Name != "HandleFunc") || len(call.Args) != 2 {
+		if !isHandleCall(call) {
+			return true
+		}
+		handled++
+		method := call.Fun.(*ast.SelectorExpr)
+		var printedReceiver bytes.Buffer
+		printer.Fprint(&printedReceiver, token.NewFileSet(), method.X)
+		where := fmt.Sprintf("%s %s %s.%s", source, functionKey(function), printedReceiver.String(), method.Sel.Name)
+		if len(call.Args) != 2 {
+			// ServeMux.Handle/HandleFunc always take two arguments; anything else
+			// (for example the windows.Handle conversion) is not a route.
+			stats.NonRoute = append(stats.NonRoute, fmt.Sprintf("%s: %d arguments, not ServeMux.%s", where, len(call.Args), method.Sel.Name))
 			return true
 		}
 		receiver, _ := method.X.(*ast.Ident)
 		if receiver == nil || !current.muxes[receiver.Name] {
-			// A 2-argument Handle on something else is only acceptable when the
-			// first argument cannot be a route pattern (e.g. slog handlers).
-			if pattern, ok := current.eval(call.Args[0]); ok && looksLikePattern(pattern) {
-				failure = fmt.Errorf("%s: route registered on an unrecognized receiver in %s", source, functionKey(function))
-			} else if _, isSelector := call.Args[0].(*ast.SelectorExpr); isSelector && receiver != nil && receiver.Name == "http" {
-				failure = fmt.Errorf("%s: route registered on http.DefaultServeMux in %s", source, functionKey(function))
+			if reason, ok := nonRouteHandleCalls[pkg.dir+" "+functionKey(function)+" "+printedReceiver.String()]; ok {
+				stats.NonRoute = append(stats.NonRoute, where+": "+reason)
+				return true
 			}
-			return true
+			if receiver != nil && receiver.Name == "http" {
+				failure = fmt.Errorf("%s: route registered on http.DefaultServeMux", where)
+			} else {
+				failure = fmt.Errorf("%s: route registered on an unrecognized receiver (not a local http.NewServeMux() or *http.ServeMux parameter)", where)
+			}
+			return false
 		}
+		stats.Registering++
 		server, classified := registeringFunctions[pkg.dir+" "+functionKey(function)]
 		if !classified {
 			failure = fmt.Errorf("%s: %s registers routes but is not classified in registeringFunctions", source, functionKey(function))
@@ -281,7 +379,7 @@ func scanFunction(pkg *goPackage, source string, function *ast.FuncDecl) ([]Regi
 		result = append(result, items...)
 		return true
 	})
-	return result, failure
+	return result, handled, failure
 }
 
 func (current *scope) registrations(source, server string, call *ast.CallExpr) ([]Registration, error) {
@@ -412,10 +510,12 @@ func (current *scope) registration(source, server, pattern string, handler ast.E
 	item.Wrappers = strings.Join(wrappers, ">")
 	item.Boundary = "transport_auth"
 	for _, wrapper := range wrappers {
-		if boundary, ok := boundaries[wrapper]; ok {
-			item.Boundary = boundary
-			break
+		if _, ok := boundaries[wrapper]; !ok {
+			return item, fmt.Errorf("%s: wrapper %s on %s has no reviewed boundary", source, wrapper, item.Operation)
 		}
+	}
+	if len(wrappers) > 0 {
+		item.Boundary = boundaries[wrappers[0]] // the outermost wrapper authenticates first
 	}
 	var printed bytes.Buffer
 	if err := printer.Fprint(&printed, current.pkg.fset, body); err != nil {
@@ -451,14 +551,6 @@ func (current *scope) eval(expr ast.Expr) (string, bool) {
 		return current.eval(value.X)
 	}
 	return "", false
-}
-
-func looksLikePattern(value string) bool {
-	if strings.HasPrefix(value, "/") {
-		return true
-	}
-	method, route, found := strings.Cut(value, " ")
-	return found && strings.HasPrefix(strings.TrimSpace(route), "/") && strings.ToUpper(method) == method
 }
 
 func isServeMuxType(expr ast.Expr) bool {

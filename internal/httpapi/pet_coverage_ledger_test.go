@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/ChinaKai/AHA2/internal/knowledgevault"
 	"github.com/ChinaKai/AHA2/internal/petcoverage"
 )
 
@@ -50,5 +51,36 @@ func TestHealthProbeCarriesNoBusinessData(t *testing.T) {
 	var body map[string]any
 	if recorder.Code != http.StatusOK || json.Unmarshal(recorder.Body.Bytes(), &body) != nil || len(body) != 2 || body["ok"] != true || body["service"] != "aha2" {
 		t.Fatalf("health probe changed: %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+// The static scan must agree with the muxes the server really builds: every
+// scanned httpapi and mail-download operation is routed to exactly its
+// pattern. Conditional groups are switched on so all of them are registered.
+func TestPetCoverageScanMatchesLiveMuxes(t *testing.T) {
+	routes, stats, err := petcoverage.ScanRoutes(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Calls != stats.Registering+len(stats.NonRoute) {
+		t.Fatalf("unreconciled Handle calls: %+v", stats)
+	}
+	server := New(Config{})
+	server.localOwnerIngest = true
+	server.knowledgeVault = &knowledgevault.Manager{}
+	main, err := petcoverage.VerifyMux(server.routeMux(), routes, "httpapi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	download, ok := server.MailDownloadHandler().(*http.ServeMux)
+	if !ok {
+		t.Fatal("mail download handler is not a ServeMux")
+	}
+	mail, err := petcoverage.VerifyMux(download, routes, "mail-download")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if main < 400 || mail != 2 {
+		t.Fatalf("verified %d main and %d mail-download operations", main, mail)
 	}
 }

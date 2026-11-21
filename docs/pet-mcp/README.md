@@ -8,8 +8,10 @@
 
 三份账本都由 `internal/petcoverage` 生成和校验，它用 Go 自己的语法解析器读源码，不靠文本正则：
 
-- `coverage.tsv`：`internal/` 与 `cmd/` 下所有 `ServeMux` 注册（任意变量名、常量、拼接、局部前缀、字面量路由表都会展开），按监听分 `httpapi`、`mail-download`、`centersync`。每行带源文件、handler、认证边界（由外层包装推出）和 handler 指纹（包装链加 handler 源码的哈希）。注册在未登记的函数里、注册到 DefaultServeMux 或无法识别的接收者上、路由串无法求值、handler 找不到唯一声明，扫描都会直接失败。
-- `web-call-sites.tsv`：`web/src` 里所有以 `/api/` 开头的字符串/模板字面量。每个调用点必须能对上一条已注册的 httpapi 路由（方法明确时方法也要一致），对不上就说明有注册逃过了扫描，校验失败。
+- `coverage.tsv`：`internal/` 与 `cmd/` 下所有 `ServeMux` 注册（任意变量名、常量、拼接、局部前缀、字面量路由表都会展开），按监听分 `httpapi`、`mail-download`、`centersync`。每行带源文件、handler、认证边界（由外层包装推出）和 handler 指纹（包装链加 handler 源码的哈希）。
+  - 对账：源码里每个 `.Handle(` / `.HandleFunc(` 词法记号都要对上一处解析出的调用，并且要么是路由注册，要么列为非路由调用并写明原因（目前只有 `instancelock` 里两处单参数的 `windows.Handle` 类型转换）。函数体外的调用、注册到 DefaultServeMux 或非 `http.NewServeMux()`/`*http.ServeMux` 参数的接收者、未登记的注册函数、无法求值的路由串、找不到唯一声明的 handler、没有登记边界的包装函数，扫描都会直接失败。
+  - 运行期对照：`TestPetCoverageScanMatchesLiveMuxes`（httpapi 与 mail-download）和 `TestCoverageScanMatchesLiveCenterMux`（aha-sync）用真实 mux 的 `Handler(r)` 逐条确认，扫描出的每个操作都被路由到完全相同的模式。主监听的注册放在 `routeMux()` 里，就是为了这一步能拿到真实 mux。
+- `web-call-sites.tsv`：`web/src` 里所有点名 AHA2 API 的字面量：以 `/api/` 开头的字符串/模板、经同源动态基址（只由 `${...}`、`/`、`:` 组成，例如 `${protocol}//${location.host}`）到达 `/api/` 的模板，以及字面量文本里带引号的 `/api/` 路径（例如 `src="/api/..."`）。扫描是真正的 TS 词法：注释、正则字面量（含模板表达式里的正则）跳过，`${...}` 里的嵌套字面量单独计入且不重复。清单不带行号，同一文件里相同的调用合并为 occurrences，挪动代码不会改账本。每个调用点必须能对上一条已注册的 httpapi 路由（方法明确时方法也要一致），对不上就说明有注册逃过了扫描。
 - `task-mcp-tools.tsv`：普通 Task 可用的全部内置 MCP 工具（`httpapi.MCPToolCatalog()`，宠物自己的 server 除外），逐个记录宠物 Turn 如何拿到同样能力。
 
 ```sh
@@ -19,7 +21,7 @@ go run ./cmd/aha-pet-coverage -complete  # 最终门禁：所有行都关闭且�
 go test ./internal/petcoverage ./internal/httpapi -run 'PetCoverage|MCPToolCatalog|HealthProbe'
 ```
 
-`go test ./internal/httpapi` 里的 `TestPetCoverageLedgersMatchRegistrationsAndEvidence` 做的就是第一条命令：新增、删除或改动路由而不更新账本，测试失败。
+`go test ./internal/httpapi` 里的 `TestPetCoverageLedgersMatchRegistrationsAndEvidence` 做的就是第一条命令：新增、删除或改动路由而不更新账本，测试失败。`go test ./cmd/aha-pet-coverage` 在真实仓库上验证命令本身：检查通过、`-complete` 失败、错误参数退出 2（`-update` 只在合成源码树上测，不在测试里改真实检出）。
 
 状态分两类。开放：`pending`、`implemented`、`implemented_unverified`、`stale`。`stale` 表示该行之前审过，但 handler、源文件、边界或指纹已经变了，旧结论不再成立，必须重新核对后才能改回关闭状态；从 v1 账本迁移时，所有没有指纹的已审行都按这个规则退回了 stale。关闭：`direct`、`equivalent`、`protected_handoff`、`transport_na`、`web_prohibited_na`。关闭行的 mcp、permission、protected_flow、tests 四列都不能为空或 pending，并且：
 
