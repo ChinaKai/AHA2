@@ -129,6 +129,7 @@ type Server struct {
 	executeADBTCP            func(context.Context, string, []string, []byte, time.Duration) (hardware.ADBExecResult, error)
 	listADBUSBDevices        func(context.Context) (hardware.ADBUSBDeviceList, error)
 	adbForwards              *adbForwardRegistry
+	adbForwardMu             sync.Mutex // serializes forward add/remove from authorization through the registry update
 	version                  string
 	webVersion               string
 	startedAt                time.Time

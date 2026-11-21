@@ -290,6 +290,14 @@ func (s *Server) agentADBExec(writer http.ResponseWriter, request *http.Request)
 			writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "adb_forward_remove_all_not_allowed", "message": "forward --remove-all 会清除同一 ADB server 上所有设备的转发，禁止使用"})
 			return
 		}
+		// Serialize forward mutations from authorization through the registry
+		// update: a concurrent add can rebind (and invalidate) the same local
+		// name, so a remove that passed the ownership check must not execute
+		// after such an add interleaves.
+		if action == adbForwardAdd || action == adbForwardRemove {
+			s.adbForwardMu.Lock()
+			defer s.adbForwardMu.Unlock()
+		}
 		if action == adbForwardRemove && !s.adbForwards.allows(forwardScope, local) {
 			writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "adb_forward_remove_not_allowed", "message": "只能删除本 Task 通过该硬件资源创建的转发端口"})
 			return
@@ -365,7 +373,9 @@ func (s *Server) agentADBExec(writer http.ResponseWriter, request *http.Request)
 	}
 	// A forward only enters or leaves the registry when adb reported success:
 	// a failed add created nothing to remove, and a failed remove leaves the
-	// record in place (fail closed). tcp:0 is stored under the port adb picked,
+	// record in place (fail closed). A successful add also invalidates the same
+	// local name under every other binding, because adb may have rebound that
+	// listener to this transport. tcp:0 is stored under the port adb picked,
 	// because the literal tcp:0 cannot be removed later.
 	if result.ExitCode == 0 {
 		switch forwardAction {

@@ -42,16 +42,25 @@ func registeredADBForwardLocal(local string, result hardware.ADBExecResult) stri
 }
 
 // adbForwardRegistry records the forward local names this AHA process created
-// through the Agent ADB executor, scoped to one Task hardware binding. adb
-// forward --remove compares only the local name and not the device transport,
-// so without this record one Task could delete another device's forward just
-// by knowing (or reading from --list) the port name.
+// through the Agent ADB executor, and which Task hardware binding currently
+// owns each name. adb keeps one host-wide listener table keyed only by the
+// local name: forward --remove compares that name and not the device
+// transport, and a successful plain add rebinds an existing same-name
+// listener to the caller's transport. Without this record one Task could
+// delete another device's forward just by knowing (or reading from --list)
+// the port name; with a per-scope record only, a rebind-permitting add would
+// also leave the previous owner's name removable against the new listener.
+//
+// A successful add therefore takes ownership of its local name away from every
+// other binding. That invalidation happens on the add path itself, not from
+// the later --remove exit code, so a rebind can never leave an older record
+// authorized. A successful remove drops the name from its own scope.
 //
 // The registry is deliberately in-process. After a restart previously created
 // forwards are no longer removable through the Agent API until they are
-// created again; that is stricter, not permissive. A forward removed outside
-// this path (owner on the host, adb server restart) can leave a stale entry
-// for a reused port; see the review packet for that residual risk.
+// created again; that is stricter, not permissive. A forward added or removed
+// outside this path (owner on the host, adb server restart) can leave a stale
+// entry for a reused port; see the review packet for that residual risk.
 type adbForwardRegistry struct {
 	mu      sync.Mutex
 	byScope map[string]map[string]struct{}
@@ -67,6 +76,19 @@ func (registry *adbForwardRegistry) add(scope, local string) {
 	}
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
+	// An add that reaches the registry succeeded, and adb may have rebound an
+	// existing listener for this local name to the current transport whatever
+	// form was used (--no-rebind succeeds only when nothing was bound). The
+	// previous owner's record no longer describes a listener it can remove.
+	for otherScope, locals := range registry.byScope {
+		if otherScope == scope {
+			continue
+		}
+		delete(locals, local)
+		if len(locals) == 0 {
+			delete(registry.byScope, otherScope)
+		}
+	}
 	locals := registry.byScope[scope]
 	if locals == nil {
 		locals = map[string]struct{}{}
