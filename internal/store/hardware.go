@@ -12,7 +12,7 @@ import (
 
 const hardwareResourceColumns = `id,description,mode,serial_device,serial_baudrate,
 	network_host,network_port,network_protocol,ssh_auth,username,credential_ref,
-	password_configured,adb_paired_at,access,created_at,updated_at`
+	password_configured,adb_paired_at,access,created_at,updated_at,adb_connection,adb_serial`
 
 func scanHardwareResource(scanner interface{ Scan(...any) error }) (domain.HardwareResource, error) {
 	var item domain.HardwareResource
@@ -22,7 +22,9 @@ func scanHardwareResource(scanner interface{ Scan(...any) error }) (domain.Hardw
 		&item.ID, &item.Description, &item.Mode, &item.Serial.Device, &item.Serial.Baudrate,
 		&item.Network.Host, &item.Network.Port, &item.Network.Protocol, &item.Network.SSHAuth,
 		&item.Username, &item.CredentialRef, &passwordConfigured, &item.ADBPairedAt, &item.Access, &createdAt, &updatedAt,
+		&item.Network.ADBConnection, &item.Network.ADBSerial,
 	)
+	item.Network = item.Network.NormalizedADB()
 	item.PasswordConfigured = passwordConfigured != 0
 	item.CreatedAt = parseTime(createdAt)
 	item.UpdatedAt = parseTime(updatedAt)
@@ -34,7 +36,7 @@ func (s *Store) HardwareResources(ctx context.Context) ([]domain.HardwareResourc
 		SELECT r.id,r.description,r.mode,r.serial_device,r.serial_baudrate,
 		       r.network_host,r.network_port,r.network_protocol,r.ssh_auth,r.username,
 		       r.credential_ref,r.password_configured,r.adb_paired_at,r.access,r.created_at,r.updated_at,
-		       COUNT(b.task_id)
+		       r.adb_connection,r.adb_serial,COUNT(b.task_id)
 		FROM hardware_resources r
 		LEFT JOIN task_hardware_bindings b ON b.resource_id=r.id
 		GROUP BY r.id
@@ -52,10 +54,11 @@ func (s *Store) HardwareResources(ctx context.Context) ([]domain.HardwareResourc
 			&item.ID, &item.Description, &item.Mode, &item.Serial.Device, &item.Serial.Baudrate,
 			&item.Network.Host, &item.Network.Port, &item.Network.Protocol, &item.Network.SSHAuth,
 			&item.Username, &item.CredentialRef, &passwordConfigured, &item.ADBPairedAt, &item.Access,
-			&createdAt, &updatedAt, &item.BindingCount,
+			&createdAt, &updatedAt, &item.Network.ADBConnection, &item.Network.ADBSerial, &item.BindingCount,
 		); err != nil {
 			return nil, err
 		}
+		item.Network = item.Network.NormalizedADB()
 		item.PasswordConfigured = passwordConfigured != 0
 		item.CreatedAt = parseTime(createdAt)
 		item.UpdatedAt = parseTime(updatedAt)
@@ -100,12 +103,13 @@ func (s *Store) UpsertHardwareResource(ctx context.Context, item domain.Hardware
 	if item.UpdatedAt.IsZero() {
 		item.UpdatedAt = now
 	}
+	network := item.Network.NormalizedADB()
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO hardware_resources(
 			id,description,mode,serial_device,serial_baudrate,network_host,network_port,
 			network_protocol,ssh_auth,username,credential_ref,password_configured,adb_paired_at,access,
-			created_at,updated_at
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+			created_at,updated_at,adb_connection,adb_serial
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 			description=excluded.description,mode=excluded.mode,
 			serial_device=excluded.serial_device,serial_baudrate=excluded.serial_baudrate,
@@ -113,11 +117,11 @@ func (s *Store) UpsertHardwareResource(ctx context.Context, item domain.Hardware
 			network_protocol=excluded.network_protocol,ssh_auth=excluded.ssh_auth,
 			username=excluded.username,credential_ref=excluded.credential_ref,
 			password_configured=excluded.password_configured,adb_paired_at=excluded.adb_paired_at,access=excluded.access,
-			updated_at=excluded.updated_at`,
+			updated_at=excluded.updated_at,adb_connection=excluded.adb_connection,adb_serial=excluded.adb_serial`,
 		item.ID, item.Description, item.Mode, item.Serial.Device, item.Serial.Baudrate,
 		item.Network.Host, item.Network.Port, item.Network.Protocol, item.Network.SSHAuth,
 		item.Username, item.CredentialRef, boolInt(item.PasswordConfigured), item.ADBPairedAt, item.Access,
-		timeString(item.CreatedAt), timeString(item.UpdatedAt),
+		timeString(item.CreatedAt), timeString(item.UpdatedAt), network.ADBConnection, network.ADBSerial,
 	)
 	return err
 }
@@ -232,7 +236,8 @@ func (s *Store) HardwareGroups(ctx context.Context, taskID string) ([]domain.Har
 		SELECT b.task_id,b.id,b.resource_id,b.position,r.description,r.mode,
 		       r.serial_device,r.serial_baudrate,r.network_host,r.network_port,
 		       r.network_protocol,r.ssh_auth,r.username,r.credential_ref,
-		       r.password_configured,r.access,b.created_at,b.updated_at
+		       r.password_configured,r.access,b.created_at,b.updated_at,
+		       r.adb_connection,r.adb_serial
 		FROM task_hardware_bindings b
 		JOIN hardware_resources r ON r.id=b.resource_id
 		WHERE b.task_id=?
@@ -251,9 +256,11 @@ func (s *Store) HardwareGroups(ctx context.Context, taskID string) ([]domain.Har
 			&item.Mode, &item.Serial.Device, &item.Serial.Baudrate, &item.Network.Host,
 			&item.Network.Port, &item.Network.Protocol, &item.Network.SSHAuth, &item.Username,
 			&item.CredentialRef, &passwordConfigured, &item.Access, &createdAt, &updatedAt,
+			&item.Network.ADBConnection, &item.Network.ADBSerial,
 		); err != nil {
 			return nil, err
 		}
+		item.Network = item.Network.NormalizedADB()
 		item.PasswordConfigured = passwordConfigured != 0
 		item.CreatedAt = parseTime(createdAt)
 		item.UpdatedAt = parseTime(updatedAt)
@@ -297,13 +304,14 @@ func (s *Store) ReplaceHardwareGroups(ctx context.Context, taskID string, groups
 			INSERT INTO hardware_resources(
 				id,description,mode,serial_device,serial_baudrate,network_host,network_port,
 				network_protocol,ssh_auth,username,credential_ref,password_configured,adb_paired_at,access,
-				created_at,updated_at
-			) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				created_at,updated_at,adb_connection,adb_serial
+			) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			resource.ID, resource.Description, resource.Mode, resource.Serial.Device,
 			resource.Serial.Baudrate, resource.Network.Host, resource.Network.Port,
 			resource.Network.Protocol, resource.Network.SSHAuth, resource.Username,
 			resource.CredentialRef, boolInt(resource.PasswordConfigured), resource.ADBPairedAt, resource.Access,
 			timeString(resource.CreatedAt), timeString(resource.UpdatedAt),
+			resource.Network.NormalizedADB().ADBConnection, resource.Network.NormalizedADB().ADBSerial,
 		)
 		if err != nil {
 			return fmt.Errorf("insert hardware resource %s: %w", resource.ID, err)
@@ -323,7 +331,8 @@ func (s *Store) ReplaceHardwareGroups(ctx context.Context, taskID string, groups
 						Access: group.Access, CreatedAt: group.CreatedAt, UpdatedAt: group.UpdatedAt,
 					})
 				}
-				if group.Network.Host != "" {
+				// USB direct ADB has a serial instead of a host.
+				if group.Network.Host != "" || group.Network.ADBUSB() && group.Network.ADBSerial != "" {
 					resources = append(resources, domain.HardwareResource{
 						ID: domain.NewID("hardware_resource"), Description: group.Description + " · 网络",
 						Mode: domain.HardwareModeNetwork, Network: group.Network, Username: group.Username,

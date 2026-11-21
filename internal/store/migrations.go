@@ -4301,6 +4301,26 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("record schema v155: %w", err)
 		}
 	}
+	// v156 splits ADB into wireless debugging and USB direct. Additive only:
+	// existing rows keep adb_connection='' which reads as wireless, so a phone
+	// that is already paired keeps its host, port and pairing state.
+	adbColumns := []struct{ name, ddl string }{
+		{"adb_connection", `ALTER TABLE hardware_resources ADD COLUMN adb_connection TEXT NOT NULL DEFAULT ''`},
+		{"adb_serial", `ALTER TABLE hardware_resources ADD COLUMN adb_serial TEXT NOT NULL DEFAULT ''`},
+	}
+	for _, column := range adbColumns {
+		if s.tableHasColumn(ctx, "hardware_resources", column.name) {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, column.ddl); err != nil &&
+			!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("apply schema v156 %s: %w", column.name, err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(156, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v156: %w", err)
+	}
 	return nil
 }
 

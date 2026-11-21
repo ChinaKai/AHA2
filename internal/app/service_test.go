@@ -1339,6 +1339,37 @@ func TestMultiAgentRoundCreatesIntegrationTurn(t *testing.T) {
 		if finals != 1 || progress != 1 || commentary != 2 || reasoning != 1 || backendStreams != 0 {
 			t.Fatalf("turn %s conversation was not finalized exactly once: finals=%d progress=%d commentary=%d reasoning=%d streams=%d items=%#v", turn.ID, finals, progress, commentary, reasoning, backendStreams, stream.Items)
 		}
+		// The live agent_reasoning projection must land in the Thinking filter
+		// and stay out of the Agent Update filter, while progress and
+		// commentary updates stay in Update.
+		thinkingPage, err := database.ConversationPageForAgent(ctx, task.ID, turn.AgentID, 0, 0, 100, []string{"thinking"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		updatePage, err := database.ConversationPageForAgent(ctx, task.ID, turn.AgentID, 0, 0, 100, []string{"update"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		thinkingRows, updateRows := 0, 0
+		for _, item := range thinkingPage.Items {
+			if item.Kind != domain.ConversationKindReasoning {
+				t.Fatalf("thinking filter returned a non-reasoning row: %#v", item)
+			}
+			if item.TurnID == turn.ID {
+				thinkingRows++
+			}
+		}
+		for _, item := range updatePage.Items {
+			if item.Kind == domain.ConversationKindReasoning {
+				t.Fatalf("update filter returned a reasoning row: %#v", item)
+			}
+			if item.TurnID == turn.ID && (item.Kind == "agent_progress" || item.Kind == "agent_message_update") {
+				updateRows++
+			}
+		}
+		if thinkingRows != 1 || updateRows != progress+commentary {
+			t.Fatalf("turn %s thinking/update split: thinking=%d update=%d want 1/%d", turn.ID, thinkingRows, updateRows, progress+commentary)
+		}
 	}
 	agents, err := database.ListTaskAgents(ctx, task.ID)
 	if err != nil {

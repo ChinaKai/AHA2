@@ -7,8 +7,9 @@
 - 访问方式：{{.Access}}
 - 模式：{{.Mode}}
 {{if .HasSerial}}- 串口：{{.SerialDevice}} @ {{.SerialBaudrate}}
-{{end}}{{if .HasNetwork}}- 网络：{{.NetworkHost}}:{{.NetworkPort}}（{{.NetworkProtocol}}）
-{{end}}{{if .SSHAuthentication}}- SSH 认证：{{.SSHAuthentication}}
+{{end}}{{if .HasNetwork}}{{if .ADBUSB}}- 网络：ADB USB 直连，设备序列号 {{.ADBSerial}}
+{{else}}- 网络：{{.NetworkHost}}:{{.NetworkPort}}（{{.NetworkProtocol}}{{if eq .ADBConnection "tcp"}}，网络直连免配对{{else if eq .ADBConnection "wireless"}}，Android 无线调试{{end}}）
+{{end}}{{end}}{{if .SSHAuthentication}}- SSH 认证：{{.SSHAuthentication}}
 {{end}}{{if .Username}}- 用户名：{{.Username}}
 {{end}}- 已配置密码：{{.PasswordConfigured}}
 {{end}}

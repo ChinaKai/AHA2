@@ -102,10 +102,15 @@ func NormalizeGroup(
 	if raw.Network.Port > 65535 {
 		return domain.HardwareGroup{}, fmt.Errorf("硬件组 %s 的网络端口无效", id)
 	}
+	network, err := normalizeADBTarget(id, mode, raw.Network)
+	if err != nil {
+		return domain.HardwareGroup{}, err
+	}
+	raw.Network = network
 	if mode == domain.HardwareModeSerial && raw.Serial.Device == "" {
 		return domain.HardwareGroup{}, fmt.Errorf("硬件组 %s 缺少串口设备", id)
 	}
-	if mode == domain.HardwareModeNetwork && raw.Network.Host == "" {
+	if mode == domain.HardwareModeNetwork && !raw.Network.ADBUSB() && raw.Network.Host == "" {
 		return domain.HardwareGroup{}, fmt.Errorf("硬件组 %s 缺少网络地址", id)
 	}
 	if (mode == domain.HardwareModeNetwork || mode == domain.HardwareModeBoth) &&
@@ -113,7 +118,7 @@ func NormalizeGroup(
 		strings.TrimSpace(raw.Username) == "" {
 		return domain.HardwareGroup{}, fmt.Errorf("硬件组 %s 的 SSH 用户名不能为空", id)
 	}
-	if mode == domain.HardwareModeBoth && raw.Serial.Device == "" && raw.Network.Host == "" {
+	if mode == domain.HardwareModeBoth && raw.Serial.Device == "" && raw.Network.Host == "" && raw.Network.ADBSerial == "" {
 		return domain.HardwareGroup{}, fmt.Errorf("硬件组 %s 至少需要一种连接", id)
 	}
 	createdAt := existing.CreatedAt
@@ -130,4 +135,52 @@ func NormalizeGroup(
 		CredentialRef: existing.CredentialRef, PasswordConfigured: existing.PasswordConfigured,
 		Access: access, CreatedAt: createdAt, UpdatedAt: now,
 	}, nil
+}
+
+// normalizeADBTarget settles the ADB connection form and keeps only the target
+// fields that form uses. USB direct targets a device serial on the AHA host and
+// never carries a host or port, so it cannot fall back to adb connect or mDNS.
+// Wireless and TCP keep host + port and never carry a serial; only wireless
+// pairs. Non-ADB protocols carry neither ADB field.
+func normalizeADBTarget(id, mode string, network domain.HardwareNetworkConfig) (domain.HardwareNetworkConfig, error) {
+	connection := strings.TrimSpace(network.ADBConnection)
+	serial := strings.TrimSpace(network.ADBSerial)
+	if network.Protocol != domain.HardwareProtocolADB {
+		network.ADBConnection, network.ADBSerial = "", ""
+		return network, nil
+	}
+	switch connection {
+	case "", domain.HardwareADBConnectionWireless:
+		network.ADBConnection = domain.HardwareADBConnectionWireless
+		network.ADBSerial = ""
+		return network, nil
+	case domain.HardwareADBConnectionTCP:
+		// Classic network ADB keeps the explicit host:port (port defaults to
+		// 5555 above) and never carries a serial.
+		network.ADBConnection = domain.HardwareADBConnectionTCP
+		network.ADBSerial = ""
+		return network, nil
+	case domain.HardwareADBConnectionUSB:
+	default:
+		return network, fmt.Errorf("硬件组 %s 的 ADB 连接方式无效", id)
+	}
+	network.ADBConnection = domain.HardwareADBConnectionUSB
+	network.Host, network.Port = "", 0
+	network.ADBSerial = serial
+	if serial != "" && !domain.ValidADBUSBSerial(serial) {
+		return network, fmt.Errorf("硬件组 %s 的 USB 设备序列号无效：只能选择 AHA 宿主机检测到的 USB 设备，不能填写 IP:端口、mDNS 名称或模拟器", id)
+	}
+	if serial == "" && (mode == domain.HardwareModeNetwork || mode == domain.HardwareModeBoth) {
+		return network, fmt.Errorf("硬件组 %s 缺少 USB 设备序列号，请先选择 AHA 宿主机上的 USB 设备", id)
+	}
+	return network, nil
+}
+
+// ADBPairingStillValid reports whether a recorded wireless pairing survives an
+// edit. Pairing belongs to one wireless host: any switch to USB direct, to
+// network direct (tcp), to another protocol or mode, or to another host
+// invalidates it.
+func ADBPairingStillValid(beforeMode string, before domain.HardwareNetworkConfig, afterMode string, after domain.HardwareNetworkConfig) bool {
+	return beforeMode == domain.HardwareModeNetwork && afterMode == domain.HardwareModeNetwork &&
+		before.ADBWireless() && after.ADBWireless() && before.Host == after.Host
 }

@@ -157,8 +157,8 @@ func (s *Server) takeoverTask(writer http.ResponseWriter, request *http.Request)
 	}
 	for _, remote := range source.Hardware {
 		raw, ok := rawByID[remote.ID]
-		if !ok || remote.Serial.Device != "" && strings.TrimSpace(raw.Serial.Device) == "" || remote.Network.Host != "" && strings.TrimSpace(raw.Network.Host) == "" {
-			writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "local_hardware_fields_required", "message": fmt.Sprintf("硬件组 %s 必须重新提供本机串口和网络端点", remote.ID)})
+		if !ok || remote.Serial.Device != "" && strings.TrimSpace(raw.Serial.Device) == "" || remote.Network.Host != "" && strings.TrimSpace(raw.Network.Host) == "" || remote.Network.ADBUSB() && strings.TrimSpace(raw.Network.ADBSerial) == "" && strings.TrimSpace(raw.Network.ADBConnection) != domain.HardwareADBConnectionWireless {
+			writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "local_hardware_fields_required", "message": fmt.Sprintf("硬件组 %s 必须重新提供本机串口、网络端点或 USB 设备序列号", remote.ID)})
 			return
 		}
 		if remote.PasswordConfigured && raw.Password == "" {
@@ -239,6 +239,11 @@ func (s *Server) takeoverTask(writer http.ResponseWriter, request *http.Request)
 		}
 		if raw.Network.SSHAuth == "" {
 			raw.Network.SSHAuth = remote.Network.SSHAuth
+		}
+		// An omitted ADB connection form follows the remote resource, so a USB
+		// device is not silently reinterpreted as wireless (or the reverse).
+		if raw.Network.ADBConnection == "" && raw.Network.Protocol == domain.HardwareProtocolADB && remote.Network.Protocol == domain.HardwareProtocolADB {
+			raw.Network.ADBConnection = remote.Network.NormalizedADB().ADBConnection
 		}
 		if raw.Username == "" {
 			raw.Username = remote.Username

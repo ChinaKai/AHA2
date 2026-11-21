@@ -68,8 +68,9 @@ export function renderComposerTools(
 ): string {
   const options = renderComposerAgentOptions(detail, selectedAgentID);
   const labels: Record<ConversationCategory, string> = {
-    chat: "对话", update: "Agent Update", tool: "工具调用", error: "错误",
+    chat: "对话", update: "Agent Update", thinking: "Thinking", tool: "工具调用", error: "错误",
   };
+  const total = Object.keys(labels).length;
   const enabled = Object.values(categories).filter(Boolean).length;
   const filters = (Object.keys(labels) as ConversationCategory[]).map(category =>
     `<button type="button" data-conversation-category="${category}" class="${categories[category] ? "active" : ""}"><span>${categories[category] ? "✓" : ""}</span>${labels[category]}</button>`
@@ -79,7 +80,7 @@ export function renderComposerTools(
     <button type="button" data-agent-config="${escapeHTML(selectedAgentID)}" class="icon-button composer-agent-config" title="编辑 ${escapeHTML(selectedAgentID)} 配置">${icon("edit")}</button>
   </div>
   <details class="conversation-filter-popover">
-    <summary class="conversation-filter-trigger" title="筛选消息">${icon("filter")}<small>${enabled}/4</small></summary>
+    <summary class="conversation-filter-trigger" title="筛选消息">${icon("filter")}<small>${enabled}/${total}</small></summary>
     <div class="conversation-filter-menu"><header><strong>消息筛选</strong><small id="conversation-filter-loaded">${loadedCount} 条已加载</small></header>${filters}</div>
   </details>`;
 }

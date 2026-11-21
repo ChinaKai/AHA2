@@ -128,6 +128,12 @@ type Manager struct {
 	dialNetwork func(context.Context, string, string) (net.Conn, error)
 	openSSH     func(context.Context, string, string, string, string) (io.ReadWriteCloser, error)
 	openADB     func(context.Context, string) (io.ReadWriteCloser, error)
+	// openADBUSB opens a shell on a USB-attached device by serial. It is kept
+	// separate from openADB so a USB target never goes through adb connect.
+	openADBUSB func(context.Context, string) (io.ReadWriteCloser, error)
+	// openADBTCP opens a shell on a classic network ADB host:port without
+	// pairing or mDNS port discovery.
+	openADBTCP func(context.Context, string) (io.ReadWriteCloser, error)
 
 	mu          sync.Mutex
 	sessions    map[string]*terminalSession
@@ -146,6 +152,8 @@ func NewManager(recorder Recorder) *Manager {
 		},
 		openSSH:     openSSHTerminal,
 		openADB:     openADBTerminal,
+		openADBUSB:  openADBUSBTerminal,
+		openADBTCP:  openADBTCPTerminal,
 		sessions:    map[string]*terminalSession{},
 		attachments: map[string]*terminalSession{},
 	}
@@ -214,6 +222,10 @@ func (manager *Manager) Connect(ctx context.Context, request ConnectRequest) (do
 		connection, err = manager.openSerial(request.Group.Serial.Device, baudrate)
 	} else if protocol == domain.HardwareProtocolSSH {
 		connection, err = manager.openSSH(ctx, endpoint, request.Group.Username, request.Password, sshAuth)
+	} else if protocol == domain.HardwareProtocolADB && request.Group.Network.ADBUSB() {
+		connection, err = manager.openADBUSB(ctx, request.Group.Network.ADBSerial)
+	} else if protocol == domain.HardwareProtocolADB && request.Group.Network.ADBTCP() {
+		connection, err = manager.openADBTCP(ctx, endpoint)
 	} else if protocol == domain.HardwareProtocolADB {
 		connection, err = manager.openADB(ctx, endpoint)
 	} else {
@@ -820,6 +832,17 @@ func sessionTarget(group domain.HardwareGroup, transport string) (key, endpoint,
 			protocol != domain.HardwareProtocolSSH &&
 			protocol != domain.HardwareProtocolADB {
 			err = fmt.Errorf("unsupported network protocol %q", protocol)
+			return
+		}
+		if group.Network.ADBUSB() {
+			// USB direct is addressed by serial only; host and port are unused.
+			serial := strings.TrimSpace(group.Network.ADBSerial)
+			if !domain.ValidADBUSBSerial(serial) {
+				err = fmt.Errorf("ADB USB device serial is required")
+				return
+			}
+			endpoint = USBDisplayEndpoint(serial)
+			key = "network:adb-usb:" + serial
 			return
 		}
 		port := group.Network.Port

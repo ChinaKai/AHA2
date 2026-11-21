@@ -64,6 +64,7 @@ web/src/api.ts	POST	/api/v1/hardware-resources	1
 web/src/api.ts	DELETE	/api/v1/hardware-resources/${encodeURIComponent(id)}	1
 web/src/api.ts	PUT	/api/v1/hardware-resources/${encodeURIComponent(id)}	1
 web/src/api.ts	POST	/api/v1/hardware-resources/${encodeURIComponent(id)}/adb/pair	1
+web/src/api.ts	POST	/api/v1/hardware/adb/usb-devices	1
 web/src/api.ts	GET/see-source	/api/v1/hardware/serial-ports	1
 web/src/api.ts	POST	/api/v1/knowledge	1
 web/src/api.ts	GET/see-source	/api/v1/knowledge-vault/doc/${encodeURIComponent(id)}	1

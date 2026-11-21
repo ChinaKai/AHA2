@@ -35,9 +35,10 @@ const TASK = {
 
 const CONVERSATION = [
   {sequence: 1, id: "ci-chat", task_id: TASK.id, agent_id: "main", category: "chat", kind: "agent_message", summary: "chat row", payload: {}, created_at: "2026-11-13T00:00:00Z"},
-  {sequence: 2, id: "ci-update", task_id: TASK.id, agent_id: "main", category: "update", kind: "agent_reasoning_update", summary: "update row", payload: {}, created_at: "2026-11-13T00:00:01Z"},
+  {sequence: 2, id: "ci-update", task_id: TASK.id, agent_id: "main", category: "update", kind: "agent_progress", summary: "update row", payload: {}, created_at: "2026-11-13T00:00:01Z"},
   {sequence: 3, id: "ci-tool", task_id: TASK.id, agent_id: "main", category: "tool", kind: "agent_command_finished", summary: "tool row", payload: {command: "ls"}, created_at: "2026-11-13T00:00:02Z"},
   {sequence: 4, id: "ci-error", task_id: TASK.id, agent_id: "main", category: "error", kind: "agent_error", summary: "error row", payload: {}, created_at: "2026-11-13T00:00:03Z"},
+  {sequence: 5, id: "ci-thinking", task_id: TASK.id, agent_id: "main", category: "update", kind: "agent_reasoning_update", summary: "thinking row", payload: {}, created_at: "2026-11-13T00:00:04Z"},
 ];
 
 const bootstrap = `
@@ -100,7 +101,8 @@ window.fetch = async (input, init = {}) => {
   if (path.includes("/conversation")) {
     const categories = (url.searchParams.get("categories") || "").split(",").filter(Boolean);
     window.__lastCategories.push(categories);
-    const items = CONVERSATION.filter(item => !categories.length || categories.includes(item.category));
+    const bucket = item => item.category === "update" && item.kind === "agent_reasoning_update" ? "thinking" : item.category;
+    const items = CONVERSATION.filter(item => !categories.length || categories.includes(bucket(item)));
     return json({conversation: {items, has_more: false, next_before: 0, latest_sequence: CONVERSATION.length}});
   }
   if (path.includes("/context")) return json({context: {}});
@@ -293,28 +295,29 @@ try {
   assert.ok(overflow.page <= 1, `the page overflows horizontally by ${overflow.page}px on mobile`);
   assert.ok(overflow.card <= 1, `the round card overflows horizontally by ${overflow.card}px on mobile`);
 
-  // Default message filter: chat + error, count 2/4, manual tool toggle adds rows.
+  // Default message filter (task-724): chat + error + Agent Update, count 3/5;
+  // manual tool and Thinking toggles add their rows.
   await page.setViewportSize({width: 1280, height: 800});
   const trigger = await page.textContent(".conversation-filter-trigger");
-  assert.match(trigger || "", /2\/4/);
+  assert.match(trigger || "", /3\/5/);
   const initialCategories = await page.evaluate(() => window.__lastCategories.at(-1) || []);
-  assert.deepEqual(initialCategories.sort(), ["chat", "error"]);
+  assert.deepEqual(initialCategories.sort(), ["chat", "error", "update"]);
   const initialIDs = await page.evaluate(() => [...document.querySelectorAll("#conversation-list [data-message-id]")].map(node => node.dataset.messageId));
-  assert.deepEqual(initialIDs.sort(), ["ci-chat", "ci-error"]);
+  assert.deepEqual(initialIDs.sort(), ["ci-chat", "ci-error", "ci-update"]);
 
   await page.evaluate(() => { const popover = document.querySelector(".conversation-filter-popover"); if (popover) popover.open = true; });
   await page.click('[data-conversation-category="tool"]');
   await page.waitForFunction(() => document.querySelector('[data-message-id="ci-tool"]'), null, {timeout: 10000});
   const toolCategories = await page.evaluate(() => window.__lastCategories.at(-1) || []);
-  assert.deepEqual(toolCategories.sort(), ["chat", "error", "tool"]);
-  assert.match(await page.textContent(".conversation-filter-trigger") || "", /3\/4/);
+  assert.deepEqual(toolCategories.sort(), ["chat", "error", "tool", "update"]);
+  assert.match(await page.textContent(".conversation-filter-trigger") || "", /4\/5/);
 
   await page.evaluate(() => { const popover = document.querySelector(".conversation-filter-popover"); if (popover) popover.open = true; });
-  await page.click('[data-conversation-category="update"]');
-  await page.waitForFunction(() => document.querySelector('[data-message-id="ci-update"]'), null, {timeout: 10000});
-  const updateCategories = await page.evaluate(() => window.__lastCategories.at(-1) || []);
-  assert.deepEqual(updateCategories.sort(), ["chat", "error", "tool", "update"]);
-  assert.match(await page.textContent(".conversation-filter-trigger") || "", /4\/4/);
+  await page.click('[data-conversation-category="thinking"]');
+  await page.waitForFunction(() => document.querySelector('[data-message-id="ci-thinking"]'), null, {timeout: 10000});
+  const thinkingCategories = await page.evaluate(() => window.__lastCategories.at(-1) || []);
+  assert.deepEqual(thinkingCategories.sort(), ["chat", "error", "thinking", "tool", "update"]);
+  assert.match(await page.textContent(".conversation-filter-trigger") || "", /5\/5/);
   // Filtering messages must not disturb the Round card outside the list.
   assert.match(await page.textContent("#agent-turn-slot .agent-turn-card details > summary") || "", /失败/);
 

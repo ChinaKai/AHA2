@@ -63,6 +63,9 @@ type Config struct {
 	TrustSSHHostKey     func(context.Context, string, string) (hardware.SSHHostKeyInfo, error)
 	PairADB             func(context.Context, string, string) (string, error)
 	ExecuteADB          func(context.Context, string, []string, []byte, time.Duration) (hardware.ADBExecResult, error)
+	ExecuteADBUSB       func(context.Context, string, []string, []byte, time.Duration) (hardware.ADBExecResult, error)
+	ExecuteADBTCP       func(context.Context, string, []string, []byte, time.Duration) (hardware.ADBExecResult, error)
+	ListADBUSBDevices   func(context.Context) (hardware.ADBUSBDeviceList, error)
 	Version             string
 	WebVersion          string
 	// ListenAddress is what this process was launched with, reported so the UI can
@@ -122,6 +125,9 @@ type Server struct {
 	pairADB                  func(context.Context, string, string) (string, error)
 	backupPreviewTimeout     time.Duration
 	executeADB               func(context.Context, string, []string, []byte, time.Duration) (hardware.ADBExecResult, error)
+	executeADBUSB            func(context.Context, string, []string, []byte, time.Duration) (hardware.ADBExecResult, error)
+	executeADBTCP            func(context.Context, string, []string, []byte, time.Duration) (hardware.ADBExecResult, error)
+	listADBUSBDevices        func(context.Context) (hardware.ADBUSBDeviceList, error)
 	version                  string
 	webVersion               string
 	startedAt                time.Time
@@ -172,6 +178,18 @@ func New(config Config) *Server {
 	executeADB := config.ExecuteADB
 	if executeADB == nil {
 		executeADB = hardware.ExecuteADB
+	}
+	executeADBUSB := config.ExecuteADBUSB
+	if executeADBUSB == nil {
+		executeADBUSB = hardware.ExecuteADBUSB
+	}
+	executeADBTCP := config.ExecuteADBTCP
+	if executeADBTCP == nil {
+		executeADBTCP = hardware.ExecuteADBTCP
+	}
+	listADBUSBDevices := config.ListADBUSBDevices
+	if listADBUSBDevices == nil {
+		listADBUSBDevices = hardware.ListADBUSBDevices
 	}
 	mailTester := config.MailTester
 	if mailTester == nil {
@@ -234,6 +252,9 @@ func New(config Config) *Server {
 		trustSSHHostKey:          trustSSHHostKey,
 		pairADB:                  pairADB,
 		executeADB:               executeADB,
+		executeADBUSB:            executeADBUSB,
+		executeADBTCP:            executeADBTCP,
+		listADBUSBDevices:        listADBUSBDevices,
 		version:                  config.Version,
 		webVersion:               config.WebVersion,
 		startedAt:                startedAt,
@@ -460,6 +481,9 @@ func (s *Server) routeMux() *http.ServeMux {
 	mux.Handle("PUT /api/v1/hardware-resources/{id}", s.withAuth(http.HandlerFunc(s.updateHardwareResource)))
 	mux.Handle("DELETE /api/v1/hardware-resources/{id}", s.withAuth(http.HandlerFunc(s.deleteHardwareResource)))
 	mux.Handle(hardwareADBPairRoute, s.withAuth(http.HandlerFunc(s.pairHardwareADB)))
+	// Owner-only: lists USB ADB devices on the AHA host for resource config.
+	// POST so the adb server start it may cause needs CSRF + same origin.
+	mux.Handle("POST /api/v1/hardware/adb/usb-devices", s.withAuth(http.HandlerFunc(s.hardwareADBUSBDevices)))
 	s.registerBrowserRoutes(mux)
 
 	// Mail resources phase one task B: Owner-only account/template/binding

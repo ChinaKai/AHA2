@@ -1574,10 +1574,12 @@ func ahaPetTools() []gateway.ChatTool {
 							"baudrate": map[string]any{"type": "integer"},
 						}},
 						"network": map[string]any{"type": "object", "properties": map[string]any{
-							"host":     map[string]any{"type": "string"},
-							"port":     map[string]any{"type": "integer"},
-							"protocol": map[string]any{"type": "string", "enum": []string{"telnet", "raw", "ssh", "adb"}},
-							"ssh_auth": map[string]any{"type": "string", "enum": []string{"auto", "password", "key"}},
+							"host":           map[string]any{"type": "string"},
+							"port":           map[string]any{"type": "integer"},
+							"protocol":       map[string]any{"type": "string", "enum": []string{"telnet", "raw", "ssh", "adb"}},
+							"ssh_auth":       map[string]any{"type": "string", "enum": []string{"auto", "password", "key"}},
+							"adb_connection": map[string]any{"type": "string", "enum": []string{"wireless", "tcp", "usb"}},
+							"adb_serial":     map[string]any{"type": "string"},
 						}},
 						"username":                map[string]any{"type": "string"},
 						"password":                map[string]any{"type": "string"},
@@ -1730,7 +1732,7 @@ func ahaPetTools() []gateway.ChatTool {
 					},
 				},
 				"network": map[string]any{
-					"type": "object", "description": "mode=network 时 host 必填；port 不传时按协议使用默认端口",
+					"type": "object", "description": "mode=network 时 host 必填（ADB USB 直连除外，改为 adb_serial 必填）；port 不传时按协议使用默认端口",
 					"properties": map[string]any{
 						"host": map[string]any{"type": "string"},
 						"port": map[string]any{"type": "integer", "minimum": 1, "maximum": 65535},
@@ -1741,6 +1743,10 @@ func ahaPetTools() []gateway.ChatTool {
 						"ssh_auth": map[string]any{"type": "string", "enum": []string{
 							domain.HardwareSSHAuthAuto, domain.HardwareSSHAuthPassword, domain.HardwareSSHAuthKey,
 						}},
+						"adb_connection": map[string]any{"type": "string", "enum": []string{
+							domain.HardwareADBConnectionWireless, domain.HardwareADBConnectionTCP, domain.HardwareADBConnectionUSB,
+						}, "description": "仅 protocol=adb：wireless=Android 无线调试（host+调试连接端口，配对码由 Owner 在 Web 资源页配对）；tcp=网络直连（显式 host+port，默认 5555，不配对、不做 mDNS 端口发现，设备需已开启网络 ADB）；usb=USB 直连（只用 adb_serial，不用 host/port/配对码）。不传时旧资源按 wireless"},
+						"adb_serial": map[string]any{"type": "string", "description": "仅 adb_connection=usb：AHA 宿主机上 USB 设备的序列号（Owner 在 Web 资源页从检测到的设备中选择）；不接受 IP:端口、mDNS 名或模拟器"},
 					},
 				},
 				"username": map[string]any{"type": "string", "description": "SSH 用户名；ADB 资源会忽略"},
@@ -1764,7 +1770,7 @@ func ahaPetTools() []gateway.ChatTool {
 					},
 				},
 				"network": map[string]any{
-					"type": "object", "description": "未提供字段保持原值；mode=network 时 host 必填",
+					"type": "object", "description": "未提供字段保持原值；mode=network 时 host 必填（ADB USB 直连除外，改为 adb_serial 必填）",
 					"properties": map[string]any{
 						"host": map[string]any{"type": "string"},
 						"port": map[string]any{"type": "integer", "minimum": 1, "maximum": 65535},
@@ -1775,6 +1781,10 @@ func ahaPetTools() []gateway.ChatTool {
 						"ssh_auth": map[string]any{"type": "string", "enum": []string{
 							domain.HardwareSSHAuthAuto, domain.HardwareSSHAuthPassword, domain.HardwareSSHAuthKey,
 						}},
+						"adb_connection": map[string]any{"type": "string", "enum": []string{
+							domain.HardwareADBConnectionWireless, domain.HardwareADBConnectionTCP, domain.HardwareADBConnectionUSB,
+						}, "description": "仅 protocol=adb：wireless=Android 无线调试（host+调试连接端口，配对码由 Owner 在 Web 资源页配对）；tcp=网络直连（显式 host+port，默认 5555，不配对、不做 mDNS 端口发现，设备需已开启网络 ADB）；usb=USB 直连（只用 adb_serial，不用 host/port/配对码）。不传时旧资源按 wireless"},
+						"adb_serial": map[string]any{"type": "string", "description": "仅 adb_connection=usb：AHA 宿主机上 USB 设备的序列号（Owner 在 Web 资源页从检测到的设备中选择）；不接受 IP:端口、mDNS 名或模拟器"},
 					},
 				},
 				"username": map[string]any{"type": "string", "description": "SSH 用户名；ADB 资源会忽略"},

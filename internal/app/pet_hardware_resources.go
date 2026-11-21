@@ -40,6 +40,9 @@ type PetHardwareNetworkInput struct {
 	Port     *int    `json:"port"`
 	Protocol *string `json:"protocol"`
 	SSHAuth  *string `json:"ssh_auth"`
+	// ADBConnection is wireless or usb; ADBSerial is the USB device serial.
+	ADBConnection *string `json:"adb_connection"`
+	ADBSerial     *string `json:"adb_serial"`
 }
 
 type PetHardwareResourceInput struct {
@@ -55,6 +58,9 @@ type PetHardwareResourceInput struct {
 
 var petHardwareCredentialFields = map[string]bool{
 	"password": true, "credential_ref": true, "clear_secret": true, "clear_password": true,
+	// ADB wireless pairing codes are Owner-only, entered in the Web resource
+	// page; reject instead of silently dropping so the pet never assumes it paired.
+	"pairing_code": true,
 }
 
 var errPetHardwareCredentialOwnerOnly = fmt.Errorf(
@@ -157,6 +163,12 @@ func (input PetHardwareResourceInput) applyTo(base hardwareconfig.GroupPayload) 
 		if input.Network.SSHAuth != nil {
 			base.Network.SSHAuth = *input.Network.SSHAuth
 		}
+		if input.Network.ADBConnection != nil {
+			base.Network.ADBConnection = *input.Network.ADBConnection
+		}
+		if input.Network.ADBSerial != nil {
+			base.Network.ADBSerial = *input.Network.ADBSerial
+		}
 	}
 	return base
 }
@@ -175,7 +187,12 @@ func validatePetHardwareResourceInput(payload hardwareconfig.GroupPayload, input
 		}
 	}
 	if mode == domain.HardwareModeNetwork {
-		if strings.TrimSpace(payload.Network.Host) == "" {
+		adbUSB := strings.TrimSpace(payload.Network.Protocol) == domain.HardwareProtocolADB &&
+			strings.TrimSpace(payload.Network.ADBConnection) == domain.HardwareADBConnectionUSB
+		if adbUSB && strings.TrimSpace(payload.Network.ADBSerial) == "" {
+			return fmt.Errorf("hardware_resource_invalid: ADB USB 直连资源必须提供 network.adb_serial（AHA 宿主机上的 USB 设备序列号），不需要 host、port 或配对码")
+		}
+		if !adbUSB && strings.TrimSpace(payload.Network.Host) == "" {
 			return fmt.Errorf("hardware_resource_invalid: 网络硬件资源必须提供 network.host")
 		}
 		if input.Network != nil && input.Network.Port != nil &&
@@ -242,6 +259,12 @@ func petHardwareResourceChangedFields(before, after domain.HardwareResource) []s
 	if before.Network.SSHAuth != after.Network.SSHAuth {
 		changed = append(changed, "network.ssh_auth")
 	}
+	if before.Network.ADBConnection != after.Network.ADBConnection {
+		changed = append(changed, "network.adb_connection")
+	}
+	if before.Network.ADBSerial != after.Network.ADBSerial {
+		changed = append(changed, "network.adb_serial")
+	}
 	if before.Username != after.Username {
 		changed = append(changed, "username")
 	}
@@ -292,6 +315,8 @@ func petHardwareResourceTargetChanged(before, after domain.HardwareResource) boo
 		before.Network.Host != after.Network.Host ||
 		before.Network.Port != after.Network.Port ||
 		before.Network.Protocol != after.Network.Protocol ||
+		before.Network.ADBConnection != after.Network.ADBConnection ||
+		before.Network.ADBSerial != after.Network.ADBSerial ||
 		before.Username != after.Username
 }
 
@@ -358,13 +383,12 @@ func (s *Service) PetUpdateHardwareResource(ctx context.Context, input PetHardwa
 		return PetHardwareResourceView{}, fmt.Errorf("hardware_resource_invalid: %w", err)
 	}
 	resource := petHardwareResourceFromGroup(group)
-	// ADB pairing only remains valid while the same ADB host stays configured.
-	if group.Mode != domain.HardwareModeNetwork ||
-		group.Network.Protocol != domain.HardwareProtocolADB ||
-		existing.Network.Host != group.Network.Host {
-		resource.ADBPairedAt = ""
-	} else {
+	// ADB pairing only remains valid while the same wireless host stays
+	// configured; switching to USB direct or another host drops it.
+	if hardwareconfig.ADBPairingStillValid(existing.Mode, existing.Network, group.Mode, group.Network) {
 		resource.ADBPairedAt = existing.ADBPairedAt
+	} else {
+		resource.ADBPairedAt = ""
 	}
 	// The pet must not be able to point an Owner-configured credential at a new
 	// endpoint (for example its own host), where auto-login would send the

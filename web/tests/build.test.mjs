@@ -1519,15 +1519,19 @@ test("built web contains responsive application", async () => {
   assert.match(taskComposer, /composer-target-wrap/);
   assert.match(taskComposer, /conversation-filter-popover/);
   assert.match(taskComposer, /data-conversation-category/);
-  // The message filter keeps exactly four categories; mail is not one of them.
-  assert.match(taskComposer, /chat: "对话",\s*update: "Agent Update",\s*tool: "工具调用",\s*error: "错误",?\s*\}/);
+  // The message filter has exactly five categories (task-724 split Thinking out
+  // of Agent Update); mail is still not one of them. The count denominator is
+  // derived from the label table so it cannot drift from the buttons.
+  assert.match(taskComposer, /chat: "对话",\s*update: "Agent Update",\s*thinking: "Thinking",\s*tool: "工具调用",\s*error: "错误",?\s*\}/);
   assert.doesNotMatch(taskComposer, /mail: "邮件"/);
-  assert.match(taskComposer, /enabled}\/4/);
-  assert.doesNotMatch(taskComposer, /enabled}\/5/);
+  assert.match(taskComposer, /const total = Object\.keys\(labels\)\.length;/);
+  assert.match(taskComposer, /enabled}\/\$\{total}/);
+  assert.doesNotMatch(taskComposer, /enabled}\/[0-9]/);
   assert.doesNotMatch(conversation, /mailConversationCardHtml|mail-message-card|data-message-category="mail"/);
   assert.doesNotMatch(script, /taskCategories:\s*\{[\s\S]{0,200}mail/);
   assert.doesNotMatch(script, /\["chat", "update", "error", "mail"\]/);
-  assert.match(script, /taskCategories:\s*\{\s*chat:\s*true,\s*update:\s*false,\s*tool:\s*false,\s*error:\s*true\s*\}/);
+  // Default filter (task-724): chat + error + Agent Update; Thinking and tool off.
+  assert.match(script, /taskCategories:\s*\{\s*chat:\s*true,\s*update:\s*true,\s*thinking:\s*false,\s*tool:\s*false,\s*error:\s*true\s*\}/);
   assert.match(script, /消息已排队/);
   assert.match(promptAdmin, /prompt-template-layout/);
   assert.match(script, /renderCodexAccounts/);
@@ -1795,7 +1799,11 @@ test("built web contains responsive application", async () => {
   assert.match(mailTask, /mailCanCancel/);
   assert.match(hardwarePanel, /\.\/api\.js\?v=[a-f0-9]{12}/);
   assert.match(hardwareResources, /\.\/api\.js\?v=[a-f0-9]{12}/);
-  assert.match(hardwareResources, /["']adb["'],\s*["']ADB["']/);
+  // ADB is split into three connection forms chosen in the same protocol select.
+  assert.match(hardwareResources, /["']adb["'],\s*["']ADB（无线调试 \/ 配对码）["']/);
+  assert.match(hardwareResources, /["']adb_tcp["'],\s*["']ADB（网络直连 \/ IP:端口，免配对）["']/);
+  assert.match(hardwareResources, /["']adb_usb["'],\s*["']ADB（USB 直连）["']/);
+  assert.match(hardwareResources, /\/api\/v1\/hardware\/adb\/usb-devices|adbUSBDevices/);
   assert.match(hardwareResources, /protocol === "adb"\) return 5555/);
   assert.match(hardwarePanel, /\.\/hardware_terminal\.js\?v=[a-f0-9]{12}/);
   assert.match(agents, /\.\/icons\.js\?v=[a-f0-9]{12}/);
@@ -3880,7 +3888,12 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   // data-retention copy (Chinese and English) plus its render function to the
   // shared first-screen bundle; the packaging run measured 272,805 (272,808 in
   // this worktree), so the ceiling moves to the next 256-byte boundary.
-  const FIRST_SCREEN_GZIP_BUDGET = 272896;
+  // task-726 split ADB into USB direct / wireless debugging / network direct:
+  // the Task hardware panel, the takeover form and the short en-US labels in
+  // the shared bundle gained the per-form labels, endpoints and fields (+480
+  // JS, +41 CSS over main's 272,829); measured 273,350, next 256-byte boundary.
+  // ADB 三模式新增 UI，实测 273,350，owner 侧分身上限 +512 字节（272,896 → 273,408）。
+  const FIRST_SCREEN_GZIP_BUDGET = 273408;
   // The version query parameter is a content hash and its hex digits change
   // how the same code gzips: main already sits exactly on the budget, so a
   // hash-only change could trip it without growing the payload. Mask the

@@ -181,13 +181,9 @@ func (s *Store) RemoteConversationPageForAgent(
 		outerWhere = append(outerWhere, "sequence>?")
 		outerArgs = append(outerArgs, after)
 	}
-	if len(categories) > 0 {
-		placeholders := make([]string, 0, len(categories))
-		for _, category := range categories {
-			placeholders = append(placeholders, "?")
-			outerArgs = append(outerArgs, category)
-		}
-		outerWhere = append(outerWhere, "category IN ("+strings.Join(placeholders, ",")+")")
+	if clause, clauseArgs := conversationCategoryClause(categories, "category", "kind"); clause != "" {
+		outerWhere = append(outerWhere, clause)
+		outerArgs = append(outerArgs, clauseArgs...)
 	}
 	order := "DESC"
 	if after > 0 {
@@ -199,7 +195,8 @@ func (s *Store) RemoteConversationPageForAgent(
 		WITH ordered AS (
 			SELECT ROW_NUMBER() OVER (ORDER BY COALESCE(json_extract(payload_json,'$.created_at'),created_at),object_id) AS sequence,
 			       payload_json,
-			       COALESCE(json_extract(payload_json,'$.category'),'') AS category
+			       COALESCE(json_extract(payload_json,'$.category'),'') AS category,
+			       COALESCE(json_extract(payload_json,'$.kind'),'') AS kind
 			FROM sync_remote_task_objects
 			WHERE `+strings.Join(baseWhere, " AND ")+`
 		)
@@ -241,6 +238,20 @@ func (s *Store) RemoteConversationPageForAgent(
 	if len(items) > 0 {
 		page.NextBefore = items[0].Sequence
 	}
+	if after > 0 {
+		// An incremental read advances only through the rows it returned, like
+		// the local store: a filtered page cut by LIMIT must leave the rest of
+		// its range reachable by the next after-request.
+		page.Latest = after
+		for _, item := range items {
+			if item.Sequence > page.Latest {
+				page.Latest = item.Sequence
+			}
+		}
+		return page, nil
+	}
+	// Only the newest page's Latest seeds incremental reads, and that page
+	// already holds the newest matching rows, so the mirror length is safe.
 	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sync_remote_task_objects WHERE `+strings.Join(baseWhere, " AND "), baseArgs...).Scan(&page.Latest)
 	return page, nil
 }

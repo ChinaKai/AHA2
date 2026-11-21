@@ -4,8 +4,13 @@
 // showed 2/4 (chat+error), so update rows appeared without their checkbox and a
 // later tool toggle silently dropped update. This fixture records every
 // conversation request and asserts that the control's selected categories and
-// the requested categories stay identical, including after toggling update and
-// tool one at a time.
+// the requested categories stay identical, including after toggling update,
+// thinking and tool one at a time.
+//
+// task-724: five categories, default chat+error+update (3/5). Reasoning rows are
+// stored as category "update" + kind "agent_reasoning_update"; the fixture
+// filters them the way the server does, so Agent Update never shows them and
+// Thinking shows only them.
 import assert from "node:assert/strict";
 import {createServer} from "node:http";
 import {readFile} from "node:fs/promises";
@@ -34,9 +39,10 @@ const TASK = {
 
 const CONVERSATION = [
   {sequence: 1, id: "ci-chat", task_id: TASK.id, agent_id: "main", category: "chat", kind: "agent_message", summary: "chat row", payload: {}, created_at: "2026-11-13T00:00:00Z"},
-  {sequence: 2, id: "ci-update", task_id: TASK.id, agent_id: "main", category: "update", kind: "agent_reasoning_update", summary: "update row", payload: {}, created_at: "2026-11-13T00:00:01Z"},
-  {sequence: 3, id: "ci-tool", task_id: TASK.id, agent_id: "main", category: "tool", kind: "agent_command_finished", summary: "tool row", payload: {command: "ls"}, created_at: "2026-11-13T00:00:02Z"},
-  {sequence: 4, id: "ci-error", task_id: TASK.id, agent_id: "main", category: "error", kind: "agent_error", summary: "error row", payload: {}, created_at: "2026-11-13T00:00:03Z"},
+  {sequence: 2, id: "ci-update", task_id: TASK.id, agent_id: "main", category: "update", kind: "agent_progress", summary: "update row", payload: {}, created_at: "2026-11-13T00:00:01Z"},
+  {sequence: 3, id: "ci-thinking", task_id: TASK.id, agent_id: "main", category: "update", kind: "agent_reasoning_update", summary: "thinking row", payload: {}, created_at: "2026-11-13T00:00:02Z"},
+  {sequence: 4, id: "ci-tool", task_id: TASK.id, agent_id: "main", category: "tool", kind: "agent_command_finished", summary: "tool row", payload: {command: "ls"}, created_at: "2026-11-13T00:00:03Z"},
+  {sequence: 5, id: "ci-error", task_id: TASK.id, agent_id: "main", category: "error", kind: "agent_error", summary: "error row", payload: {}, created_at: "2026-11-13T00:00:04Z"},
 ];
 
 const bootstrap = `
@@ -65,7 +71,8 @@ window.fetch = async (input, init = {}) => {
   if (path.includes("/conversation")) {
     const categories = (url.searchParams.get("categories") || "").split(",").filter(Boolean);
     window.__requests.push({categories});
-    const items = CONVERSATION.filter(item => !categories.length || categories.includes(item.category));
+    const bucket = item => item.category === "update" && item.kind === "agent_reasoning_update" ? "thinking" : item.category;
+    const items = CONVERSATION.filter(item => !categories.length || categories.includes(bucket(item)));
     return json({conversation: {items, has_more: false, next_before: 0, latest_sequence: CONVERSATION.length}});
   }
   if (path.includes("/context")) return json({context: {}});
@@ -125,7 +132,7 @@ async function filterState(page) {
 function assertConsistent(state, expected) {
   assert.deepEqual(state.requested, expected, `requested categories: ${JSON.stringify(state.requested)}`);
   assert.deepEqual(state.selected, expected, `control categories: ${JSON.stringify(state.selected)}`);
-  assert.equal(state.count, `${expected.length}/4`, `control count: ${state.count}`);
+  assert.equal(state.count, `${expected.length}/5`, `control count: ${state.count}`);
 }
 
 async function toggle(page, category, expectedRequests, expected) {
@@ -156,37 +163,50 @@ try {
 
   await page.goto(url, {waitUntil: "domcontentloaded"});
   await page.waitForSelector(".conversation-filter-trigger", {timeout: 20000});
-  await page.waitForFunction(() => window.__requests.length > 0 && document.querySelectorAll("#conversation-list [data-message-id]").length === 2, null, {timeout: 20000});
+  await page.waitForFunction(() => window.__requests.length > 0 && document.querySelectorAll("#conversation-list [data-message-id]").length === 3, null, {timeout: 20000});
 
-  // Read-only default is the same chat+error filter the control displays. No
-  // update row may slip in from a hardcoded read-only request.
+  // Read-only default is the same chat+error+update filter the control
+  // displays. No thinking or tool row may slip in.
   const initial = await filterState(page);
-  assertConsistent(initial, ["chat", "error"]);
-  assert.deepEqual(initial.visible, ["ci-chat", "ci-error"], `initial rows: ${JSON.stringify(initial.visible)}`);
+  assertConsistent(initial, ["chat", "error", "update"]);
+  assert.deepEqual(initial.visible, ["ci-chat", "ci-error", "ci-update"], `initial rows: ${JSON.stringify(initial.visible)}`);
 
-  await toggle(page, "update", initial.requests, ["chat", "error", "update"]);
-  const withUpdate = await filterState(page);
-  assertConsistent(withUpdate, ["chat", "error", "update"]);
-  assert.deepEqual(withUpdate.visible, ["ci-chat", "ci-error", "ci-update"], `update rows: ${JSON.stringify(withUpdate.visible)}`);
-  assert.ok(!withUpdate.requested.includes("tool"), "toggling update must not add tool");
+  await toggle(page, "thinking", initial.requests, ["chat", "error", "thinking", "update"]);
+  const withThinking = await filterState(page);
+  assertConsistent(withThinking, ["chat", "error", "thinking", "update"]);
+  assert.deepEqual(withThinking.visible, ["ci-chat", "ci-error", "ci-thinking", "ci-update"], `thinking rows: ${JSON.stringify(withThinking.visible)}`);
+  assert.ok(!withThinking.requested.includes("tool"), "toggling thinking must not add tool");
 
-  await toggle(page, "tool", withUpdate.requests, ["chat", "error", "tool", "update"]);
+  await toggle(page, "tool", withThinking.requests, ["chat", "error", "thinking", "tool", "update"]);
   const withTool = await filterState(page);
-  assertConsistent(withTool, ["chat", "error", "tool", "update"]);
-  assert.deepEqual(withTool.visible, ["ci-chat", "ci-error", "ci-tool", "ci-update"], `all rows: ${JSON.stringify(withTool.visible)}`);
+  assertConsistent(withTool, ["chat", "error", "thinking", "tool", "update"]);
+  assert.deepEqual(withTool.visible, ["ci-chat", "ci-error", "ci-thinking", "ci-tool", "ci-update"], `all rows: ${JSON.stringify(withTool.visible)}`);
   assert.ok(withTool.requested.includes("update"), "toggling tool must not drop update");
 
-  // Switching categories off only removes that category too.
-  await toggle(page, "update", withTool.requests, ["chat", "error", "tool"]);
+  // Switching categories off only removes that category too: Agent Update off
+  // keeps Thinking, and Thinking off keeps tool rows.
+  await toggle(page, "update", withTool.requests, ["chat", "error", "thinking", "tool"]);
   const updateOff = await filterState(page);
-  assertConsistent(updateOff, ["chat", "error", "tool"]);
+  assertConsistent(updateOff, ["chat", "error", "thinking", "tool"]);
   assert.ok(!updateOff.visible.includes("ci-update"), "update row stayed visible after update was unchecked");
+  assert.ok(updateOff.visible.includes("ci-thinking"), "thinking row disappeared with the update toggle");
   assert.ok(updateOff.visible.includes("ci-tool"), "tool row disappeared with the update toggle");
 
-  await toggle(page, "tool", updateOff.requests, ["chat", "error"]);
+  await toggle(page, "thinking", updateOff.requests, ["chat", "error", "tool"]);
+  const thinkingOff = await filterState(page);
+  assertConsistent(thinkingOff, ["chat", "error", "tool"]);
+  assert.deepEqual(thinkingOff.visible, ["ci-chat", "ci-error", "ci-tool"], `thinking off rows: ${JSON.stringify(thinkingOff.visible)}`);
+
+  await toggle(page, "tool", thinkingOff.requests, ["chat", "error"]);
   const toolOff = await filterState(page);
   assertConsistent(toolOff, ["chat", "error"]);
-  assert.deepEqual(toolOff.visible, ["ci-chat", "ci-error"], `final rows: ${JSON.stringify(toolOff.visible)}`);
+  assert.deepEqual(toolOff.visible, ["ci-chat", "ci-error"], `tool off rows: ${JSON.stringify(toolOff.visible)}`);
+
+  // Agent Update back on alone still excludes Thinking.
+  await toggle(page, "update", toolOff.requests, ["chat", "error", "update"]);
+  const updateOn = await filterState(page);
+  assertConsistent(updateOn, ["chat", "error", "update"]);
+  assert.deepEqual(updateOn.visible, ["ci-chat", "ci-error", "ci-update"], `final rows: ${JSON.stringify(updateOn.visible)}`);
   assert.deepEqual(errors, []);
   console.log("task_readonly_filter: ok");
 } finally {

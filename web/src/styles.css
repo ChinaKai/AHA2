@@ -1511,6 +1511,9 @@ dialog.agent-config-dialog { width: min(760px,calc(100vw - 32px)); }
 .detect-status { margin-top: 10px; color: var(--muted); font-size: 11px; }
 .two { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }
 .hardware-resource-dialog [hidden] { display: none !important; }
+.hardware-adb-usb-row { display: flex; gap: 8px; align-items: flex-end; }
+.hardware-adb-usb-row label { flex: 1; min-width: 0; }
+.hardware-adb-usb-row button { flex: 0 0 auto; display: inline-flex; gap: 6px; align-items: center; }
 .runtime-picker[hidden] { display: none !important; }
 .mobile-only { display: none; }
 
@@ -3232,6 +3235,9 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
   /* The composer establishes its own stacking context, so the attachment tray
      cannot rise above the FAB. Hide the FAB while drafts are attached. */
   body:has(.composer-attachment-tray) .task-search-fab { display: none; }
+  /* Same stacking limit for the open message-filter menu: its rows reach the
+     FAB's corner, so the FAB steps aside until the menu closes. */
+  body:has(.conversation-filter-popover[open]) .task-search-fab { display: none; }
 }
 
 /* MCP page: the four-column line needs the full 1041px desktop width. Between
