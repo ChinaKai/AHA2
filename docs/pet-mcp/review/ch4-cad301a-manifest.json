@@ -1,0 +1,12 @@
+{
+  "source_commit": "cad301adea7385958fe73161519a0039c628b280",
+  "source_tree": "2fc3d5f085401af78a1afb53f9ff3890e850e94b",
+  "base_commit": "ed8a05cd2381766f394a77c90eece658b6b418ac",
+  "files": [
+    {
+      "path": "docs/pet-mcp/review/ch4-cad301a-channel-turn.md",
+      "bytes": 31069,
+      "sha256": "c5f6bb2bf9e3a65a07e85434862d2e95bd0835de2ebac3b8248afbc3c65b3056"
+    }
+  ]
+}
