@@ -209,7 +209,7 @@ func TestParseADBCommandSkipsGlobalOptionsAndWaitPrefixes(t *testing.T) {
 		{"attached_numeric_serial", []string{"-s123ABC", "shell"}, adbCommand{name: "shell", serial: "123ABC"}, true},
 		{"attached_nonnumeric_serial", []string{"-sSERIAL", "shell"}, adbCommand{}, false},
 		{"attached_socket_is_unknown", []string{"-Ltcp:5037", "shell"}, adbCommand{}, false},
-		{"multiple_flags_waits", []string{"-d", "-a", "--exit-on-write-error", "-s", "SERIAL", "wait-for-device", "wait-for-usb-device", "install", "-r", "app.apk"}, adbCommand{name: "install", serial: "SERIAL", unsafeGlobalFlags: true}, true},
+		{"multiple_flags_waits", []string{"-d", "-a", "--exit-on-write-error", "-s", "SERIAL", "wait-for-device", "wait-for-usb-device", "install", "-r", "app.apk"}, adbCommand{name: "install", serial: "SERIAL", unsafeGlobalFlags: true, arguments: []string{"-r", "app.apk"}}, true},
 		{"last_serial_wins", []string{"-s", "OTHER", "-s", "SERIAL", "shell"}, adbCommand{name: "shell", serial: "SERIAL"}, true},
 		{"only_wait", []string{"wait-for-device"}, adbCommand{name: "wait-for-device"}, true},
 		{"options_only", []string{"-H", "host", "-P", "5037"}, adbCommand{unsafeGlobalFlags: true}, false},
@@ -219,7 +219,7 @@ func TestParseADBCommandSkipsGlobalOptionsAndWaitPrefixes(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, parsed := parseADBCommand(tc.args)
-			if got != tc.want || parsed != tc.parsed {
+			if !reflect.DeepEqual(got, tc.want) || parsed != tc.parsed {
 				t.Fatalf("parseADBCommand(%q)=(%#v, %v), want (%#v, %v)", tc.args, got, parsed, tc.want, tc.parsed)
 			}
 		})
@@ -276,6 +276,8 @@ func TestAgentADBExecParsesCommandBeforeApplyingPolicy(t *testing.T) {
 			{"shell_arguments_are_not_commands", []string{"shell", "echo", "tcpip", "-s"}, true},
 			{"shell_raw_argument_is_not_command", []string{"shell", "echo", "raw", "host:devices"}, true},
 			{"forward_list_remains_available", []string{"forward", "--list"}, true},
+			{"forward_add_remains_available", []string{"forward", "tcp:22001", "tcp:8080"}, true},
+			{"forward_add_no_rebind_remains_available", []string{"forward", "--no-rebind", "tcp:22002", "tcp:8080"}, true},
 			{"reverse_list_remains_available", []string{"reverse", "--list"}, true},
 			{"wait_only", []string{"wait-for-device"}, true},
 			{"wait_shell", []string{"wait-for-device", "shell"}, true},

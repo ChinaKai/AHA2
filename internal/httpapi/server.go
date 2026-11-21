@@ -128,6 +128,7 @@ type Server struct {
 	executeADBUSB            func(context.Context, string, []string, []byte, time.Duration) (hardware.ADBExecResult, error)
 	executeADBTCP            func(context.Context, string, []string, []byte, time.Duration) (hardware.ADBExecResult, error)
 	listADBUSBDevices        func(context.Context) (hardware.ADBUSBDeviceList, error)
+	adbForwards              *adbForwardRegistry
 	version                  string
 	webVersion               string
 	startedAt                time.Time
@@ -255,6 +256,7 @@ func New(config Config) *Server {
 		executeADBUSB:            executeADBUSB,
 		executeADBTCP:            executeADBTCP,
 		listADBUSBDevices:        listADBUSBDevices,
+		adbForwards:              newADBForwardRegistry(),
 		version:                  config.Version,
 		webVersion:               config.WebVersion,
 		startedAt:                startedAt,
