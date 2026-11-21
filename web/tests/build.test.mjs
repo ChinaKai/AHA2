@@ -1180,11 +1180,12 @@ test("task detail can bind one primary private or group channel", async () => {
   const api = await readFile(resolve(root, "build", "api.js"), "utf8");
   const conversation = await readFile(resolve(root, "build", "conversation_ui.js"), "utf8");
   const styles = await readFile(resolve(root, "build", "styles.css"), "utf8");
-  for (const marker of ["task-channel-route-form", "disconnect-task-channel", "task-channel-contacts-form", "群聊成员", "可 @ 联调人", "保存联调人"]) {
+  for (const marker of ["task-channel-route-form", "disconnect-task-channel", "task-channel-contacts-form", "群聊成员", "勾选加入联调 · Agent 只会看到这里的人", "同步群成员", "保存联调人", "task-channel-member-role", "task-channel-sync"]) {
     assert.match(script, new RegExp(marker));
   }
   assert.match(script, /同时 @ 当前渠道机器人和目标机器人/);
   assert.doesNotMatch(script, /task-channel-route-dialog/);
+  assert.doesNotMatch(script, /可 @ 联调人/);
   assert.match(script, /renderTaskToolPanel\([\s\S]*?taskChannelPanelHTML\(\)/);
   assert.match(api, /\/tasks\/\$\{encodeURIComponent\(id\)\}\/channel-routes/);
   assert.match(api, /channel-members:refresh/);
@@ -1192,7 +1193,8 @@ test("task detail can bind one primary private or group channel", async () => {
   assert.match(conversation, /actor\.display_name/);
   assert.match(conversation, /chat_display_name/);
   assert.match(styles, /\.task-channel-people/);
-  assert.match(styles, /\.task-channel-contact-list/);
+  assert.match(styles, /\.task-channel-member-role/);
+  assert.match(styles, /\.task-channel-sync/);
 });
 
 test("task channel entry keeps a stable tool slot and exposes connected state", async () => {
@@ -3433,7 +3435,8 @@ test("task channel page is a compact member picker with pending approvals", asyn
     'id="task-channel-clear"',
     'id="task-channel-member-count"',
     "已选 ${result.contacts.length} / 共 ${result.members.length}",
-    'data-remove-task-contact',
+    'class="task-channel-member-role"',
+    'name="role_${escapeHTML(member.identity_link_id)}"',
     'id="toggle-task-permission-history"',
     'data-task-permission-history="${history}"',
     "只看待审批",
@@ -3441,19 +3444,27 @@ test("task channel page is a compact member picker with pending approvals", asyn
   ]) {
     assert.ok(main.includes(marker), `main.ts missing ${marker}`);
   }
+  // The separate contact list is gone; identities render inside the member row.
+  assert.doesNotMatch(main, /可 @ 联调人/);
+  assert.doesNotMatch(main, /task-channel-contact-list/);
+  assert.doesNotMatch(main, /data-remove-task-contact/);
   assert.match(main, /applyTaskChannelMemberFilter\(\)/);
   assert.match(main, /\.task-channel-member:not\(\[hidden\]\) input\[name="contact_id"\]/);
-  assert.match(main, /checkbox\.checked = false;[\s\S]*?dispatchEvent\(new Event\("change"/);
-  // Desktop is a three-column chip grid; narrow screens fall to two.
-  assert.match(styles, /\.task-channel-member-list \{[^}]*grid-template-columns: repeat\(3,minmax\(0,1fr\)\)/);
-  assert.match(styles, /\.task-channel-member \{[^}]*height: 36px/);
-  assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.task-channel-member-list \{ grid-template-columns: repeat\(2,minmax\(0,1fr\)\)/);
-  assert.match(styles, /\.task-channel-contact \{[^}]*min-height: 38px/);
-  assert.match(styles, /\.task-channel-permissions\.has-pending \{ order: 2; \}/);
+  assert.match(main, /role\.disabled = !input\.checked/);
+  assert.match(main, /role\.value = ""/);
+  // Two-column cards carry the identity control; narrow screens use one.
+  assert.match(styles, /\.task-channel-member-list \{[^}]*grid-template-columns: repeat\(2,minmax\(0,1fr\)\)/);
+  assert.match(styles, /\.task-channel-member:has\(input\[name="contact_id"\]:checked\) \.task-channel-member-role \{ display: block; \}/);
+  assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.task-channel-member-list \{ grid-template-columns: minmax\(0,1fr\)/);
+  assert.doesNotMatch(styles, /\.task-channel-permissions\.has-pending \{ order:/);
   // New visible copy has both directions in the dictionary.
   assert.match(i18n, /"查看历史": "View history"/);
   assert.match(i18n, /"只看待审批": "View pending only"/);
   assert.match(i18n, /"按姓名搜索": "Search by name"/);
+  assert.match(i18n, /"群聊成员": "Group members"/);
+  assert.match(i18n, /"勾选加入联调 · Agent 只会看到这里的人": "Select to join integration/);
+  assert.match(i18n, /"同步群成员": "Sync group members"/);
+  assert.match(i18n, /"APP \/ 云端 \/ 固件": "APP \/ Cloud \/ Firmware"/);
   assert.ok(i18n.includes("已选 (\\d+) \\/ 共 (\\d+)"), "selected/total count pattern is missing");
 });
 

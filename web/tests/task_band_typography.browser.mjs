@@ -25,9 +25,16 @@ const task = {
   status: "active", project_id: "project-1", workspace_id: "workspace-1",
   project_name: "一个名字很长很长的项目用于验证省略号", workspace_name: "一个名字很长时间很长的 Workspace 用于验证省略号", created_at: now,
 };
+// A short title exposes the bug where the grid track was centered inside the
+// card instead of starting at the left padding.
+const shortTask = {
+  id: "t-band-short", code: "task-737", title: "短标题",
+  status: "active", project_id: "project-1", workspace_id: "workspace-1", created_at: now,
+};
 const bootstrap = `
 const json = (value, status = 200) => new Response(JSON.stringify(value), {status, headers: {"Content-Type": "application/json"}});
 const task = ${JSON.stringify(task)};
+const shortTask = ${JSON.stringify(shortTask)};
 window.fetch = async (input, init = {}) => {
   const url = new URL(typeof input === "string" ? input : input.url, location.origin);
   const path = url.pathname;
@@ -36,7 +43,7 @@ window.fetch = async (input, init = {}) => {
   if (path === "/api/v1/settings/general") return json({ok: true, general: {language: "zh-CN"}});
   if (path === "/api/v1/system") return json({system: {web_version: "v0.0.0.test", version: "v0.0.0.test", started_at: new Date().toISOString()}});
   if (path === "/api/v1/assistant") return json({assistant: {character: "gugugaga", name: "AHA", nickname: "AHA", enabled: false}, messages: [], models: [], tools: []});
-  if (path === "/api/v1/tasks" && method === "GET") return json({tasks: [task], has_more: false, counts: {status: {active: 1}, project: {"project-1": 1}, device: {local: 1}}});
+  if (path === "/api/v1/tasks" && method === "GET") return json({tasks: [task, shortTask], has_more: false, counts: {status: {active: 2}, project: {"project-1": 2}, device: {local: 2}}});
   if (path === "/api/v1/projects") return json({projects: [{id: "project-1", name: "一个名字很长很长的项目用于验证省略号", project_type: "folder", channel_retired: false}]});
   if (path === "/api/v1/workspaces") return json({workspaces: [{id: "workspace-1", project_id: "project-1", name: "一个名字很长时间很长的 Workspace 用于验证省略号", root_path: "/tmp/ws", transport: "native", health: "ready"}]});
   if (path === "/api/v1/skills" || path === "/api/v1/models" || path === "/api/v1/providers" || path === "/api/v1/env-groups") return json({skills: [], models: [], providers: [], env_groups: []});
@@ -96,6 +103,24 @@ const bandMetrics = page => page.evaluate(() => {
   };
 });
 
+// Every content row must start at the card's left padding, and the right-side
+// task code must stay at the right padding for both short and long titles.
+const cardAlignment = (page, id) => page.locator(`.task-band-card[data-task-band-open="${id}"]`).evaluate(card => {
+  const style = getComputedStyle(card);
+  const rect = selector => card.querySelector(selector).getBoundingClientRect();
+  const cardRect = card.getBoundingClientRect();
+  const contentLeft = Math.round(cardRect.left + parseFloat(style.borderLeftWidth) + parseFloat(style.paddingLeft));
+  const contentRight = Math.round(cardRect.right - parseFloat(style.borderRightWidth) - parseFloat(style.paddingRight));
+  return {
+    justify: style.justifyContent,
+    contentLeft,
+    contentRight,
+    rowLefts: [".task-band-card-top", ".task-band-card-title", ".task-band-card-meta"].map(selector => Math.round(rect(selector).left)),
+    statusLeft: Math.round(rect(".status").left),
+    codeRight: Math.round(rect(".task-code").right),
+  };
+});
+
 let browser;
 try {
   browser = await chromium.launch({...launchOptions, headless: true});
@@ -121,6 +146,13 @@ try {
   assert.equal(normal.titleClamp, "2");
   assert.ok(normal.cardOverflow <= 1, `card overflows at 1280 (${normal.cardOverflow}px)`);
   assert.equal(normal.docOverflow <= 0, true);
+  for (const id of ["t-band", "t-band-short"]) {
+    const align = await cardAlignment(page, id);
+    assert.equal(align.justify, "start", `${id} grid track is not left aligned (${align.justify})`);
+    assert.deepEqual(align.rowLefts, [align.contentLeft, align.contentLeft, align.contentLeft], `${id} content rows start at ${align.rowLefts}, expected ${align.contentLeft}`);
+    assert.equal(align.statusLeft, align.contentLeft, `${id} status row starts at ${align.statusLeft}, expected ${align.contentLeft}`);
+    assert.equal(align.codeRight, align.contentRight, `${id} task code moved away from the right padding (${align.codeRight} vs ${align.contentRight})`);
+  }
   await page.screenshot({path: resolve(output, "task-band-1280.png")});
 
   // 1000px: the band collapses to the rail; opening it overlays at 272px.

@@ -32,7 +32,7 @@ const members = [
   {identity_link_id: "carol", display_name: "Carol Wu", is_bot: false, source: "observed"},
   {identity_link_id: "self", display_name: "AHA Bot", is_bot: true, source: "provider", is_self: true},
 ];
-const contacts = [{identity_link_id: "alice", display_name: "Alice Chen", role: "participant", collaboration_role: "APP", is_bot: false, last_seen_at: ${JSON.stringify(now)}}];
+let contacts = [{identity_link_id: "alice", display_name: "Alice Chen", role: "participant", collaboration_role: "APP", is_bot: false, last_seen_at: ${JSON.stringify(now)}}];
 const pending = {id: "perm-pending", task_id: "t-ui", action: "在群聊里公布构建产物下载地址", scope: "release artifacts", reason: "测试同学要看包", status: "pending", applicant_name: "Alice Chen", applicant_is_bot: false, risk: "medium", created_at: ${JSON.stringify(now)}, expires_at: ${JSON.stringify(new Date(Date.now() + 600000).toISOString())}};
 const approved = {id: "perm-approved", task_id: "t-ui", action: "重跑 CI", scope: "workflow", reason: "偶发失败", status: "approved", applicant_name: "Bob Bot", applicant_is_bot: true, decider_name: "owner", decision_reason: "同意重跑", created_at: ${JSON.stringify(now)}, decided_at: ${JSON.stringify(now)}, expires_at: ${JSON.stringify(new Date(Date.now() + 600000).toISOString())}};
 const hostedApproved = {id: "perm-hosted-approved", task_id: "t-hosted", action: "重跑历史 CI", scope: "workflow", reason: "偶发失败", status: "approved", applicant_name: "Bob Bot", applicant_is_bot: true, decider_name: "owner", decision_reason: "同意重跑", created_at: ${JSON.stringify(now)}, decided_at: ${JSON.stringify(now)}, expires_at: ${JSON.stringify(new Date(Date.now() + 600000).toISOString())}};
@@ -46,6 +46,7 @@ const detailFor = id => ({
 });
 const json = (value, status = 200) => new Response(JSON.stringify(value), {status, headers: {"Content-Type": "application/json"}});
 window.__channelRouteCalls = 0;
+window.__contactPayloads = [];
 window.fetch = async (input, init = {}) => {
   const url = new URL(typeof input === "string" ? input : input.url, location.origin);
   const path = url.pathname;
@@ -70,7 +71,15 @@ window.fetch = async (input, init = {}) => {
     return json({ok: false, error: "task_not_eligible", message: "task is not eligible for a primary channel"}, 400);
   }
   if (path.startsWith("/api/v1/tasks/") && path.endsWith("/agents/main/conversation")) return json({conversation: {items: [], has_more: false, next_before: 0, latest_sequence: 0}});
-  if (path === "/api/v1/tasks/t-ui/channel-contacts" && method === "POST") return json({ok: true});
+  if (path === "/api/v1/tasks/t-ui/channel-contacts" && method === "PUT") {
+    const payload = JSON.parse(init.body || "{}");
+    window.__contactPayloads.push(payload);
+    contacts = (payload.contacts || []).map(contact => {
+      const member = members.find(item => item.identity_link_id === contact.identity_link_id) || {};
+      return {...contact, display_name: member.display_name || contact.identity_link_id, is_bot: Boolean(member.is_bot), source: member.source || "provider", last_seen_at: new Date().toISOString()};
+    });
+    return json({contacts});
+  }
   if (path.startsWith("/api/v1/")) return json({});
   return json({});
 };
@@ -130,11 +139,20 @@ try {
   await page.waitForSelector("#task-channel-contacts-form", {timeout: 8000});
 
   const columns = await page.locator(".task-channel-member-list").evaluate(node => getComputedStyle(node).gridTemplateColumns.split(" ").length);
-  assert.equal(columns, 3, `desktop member grid has ${columns} columns`);
-  const heights = await page.locator(".task-channel-member").evaluateAll(nodes => nodes.map(node => Math.round(node.getBoundingClientRect().height)));
-  assert.deepEqual(heights, [36, 36, 36, 36], `member chip heights: ${heights}`);
+  assert.equal(columns, 2, `desktop member grid has ${columns} columns`);
   assert.equal(await page.locator("#task-channel-member-count").innerText(), "已选 1 / 共 4");
   assert.equal(await page.locator('#task-channel-contacts-form input[value="self"]').isDisabled(), true);
+
+  // The identity control lives inside the checked member's row and is absent
+  // from unchecked rows. The separate "可 @ 联调人" block is gone.
+  assert.equal(await page.locator('.task-channel-member[data-member-name="Alice Chen"] .task-channel-member-role').isVisible(), true);
+  assert.equal(await page.locator('.task-channel-member[data-member-name="Bob Bot"] .task-channel-member-role').isVisible(), false);
+  assert.equal(await page.locator('input[name="role_alice"]').inputValue(), "APP");
+  assert.equal(await page.locator('input[name="role_bob"]').isDisabled(), true);
+  assert.equal(await page.locator("text=可 @ 联调人").count(), 0);
+  assert.equal(await page.locator(".task-channel-contact-list").count(), 0);
+  assert.equal(await page.locator('.task-channel-members-section header small').innerText(), "勾选加入联调 · Agent 只会看到这里的人");
+  assert.equal((await page.locator("body").innerText()).match(/Agent 只会看到这里的人/g)?.length, 1);
 
   // Search only hides rows; it never clears the existing selection.
   await page.fill("#task-channel-member-search", "bo");
@@ -142,22 +160,43 @@ try {
   assert.deepEqual(visibleNames, ["Bob Bot", "AHA Bot"]);
   assert.equal(await page.locator("#task-channel-member-count").innerText(), "已选 1 / 共 4");
 
-  // Select all / clear act on the filtered rows only.
+  // Select all / clear act on the filtered rows only. Checking a member shows
+  // their identity control immediately; clearing hides it and drops the value.
   await page.click("#task-channel-select-all");
   assert.equal(await page.locator("#task-channel-member-count").innerText(), "已选 2 / 共 4");
-  assert.equal(await page.locator(".task-channel-contact").count(), 2);
+  assert.equal(await page.locator('.task-channel-member[data-member-name="Bob Bot"] .task-channel-member-role').isVisible(), true);
+  assert.equal(await page.locator('input[name="role_bob"]').isDisabled(), false);
+  await page.fill('input[name="role_bob"]', "自定义身份");
   await page.click("#task-channel-clear");
   assert.equal(await page.locator("#task-channel-member-count").innerText(), "已选 1 / 共 4");
-  assert.equal(await page.locator(".task-channel-contact").count(), 1);
+  assert.equal(await page.locator('.task-channel-member[data-member-name="Bob Bot"] .task-channel-member-role').isVisible(), false);
+  assert.equal(await page.locator('input[name="role_bob"]').inputValue(), "", "unchecking a member must drop their identity");
+  assert.equal(await page.locator('input[name="role_bob"]').isDisabled(), true);
 
   await page.fill("#task-channel-member-search", "");
   await page.waitForFunction(() => document.querySelectorAll(".task-channel-member:not([hidden])").length === 4);
-  // Removing a contact row is the same as unticking its member chip.
-  await page.click('[data-remove-task-contact="alice"]');
-  await page.waitForFunction(() => document.querySelectorAll(".task-channel-contact").length === 0);
-  assert.equal(await page.locator('#task-channel-contacts-form input[value="alice"]').isChecked(), false);
-  assert.equal(await page.locator("#task-channel-member-count").innerText(), "已选 0 / 共 4");
-  assert.equal(await page.locator('.task-channel-contact-remove').count(), 0);
+
+  // Re-checking starts empty, then a custom identity can be saved. Only checked
+  // members are submitted.
+  await page.locator('input[name="contact_id"][value="bob"]').check();
+  assert.equal(await page.locator('input[name="role_bob"]').inputValue(), "");
+  await page.fill('input[name="role_bob"]', "field-ops");
+  assert.equal(await page.locator('input[name="role_alice"]').inputValue(), "APP");
+  const loadCallsBeforeSave = await page.evaluate(() => window.__channelRouteCalls);
+  await page.click('#task-channel-contacts-form button[type="submit"]');
+  await page.waitForFunction(() => window.__contactPayloads.length === 1, null, {timeout: 8000});
+  const payload = await page.evaluate(() => window.__contactPayloads[0]);
+  assert.deepEqual(payload.contacts, [
+    {identity_link_id: "alice", collaboration_role: "APP"},
+    {identity_link_id: "bob", collaboration_role: "field-ops"},
+  ]);
+  // The fixture echoes the saved contacts, so a post-save reload must re-render
+  // the custom identity on the checked member.
+  await page.waitForFunction(baseline => window.__channelRouteCalls > baseline, loadCallsBeforeSave, {timeout: 8000});
+  assert.equal(await page.locator('input[name="role_bob"]').inputValue(), "field-ops");
+  assert.equal(await page.locator('input[name="contact_id"][value="bob"]').isChecked(), true);
+  assert.equal(await page.locator("#task-channel-member-count").innerText(), "已选 2 / 共 4");
+  assert.equal(await page.locator(".banner.error").count(), 0, "saving contacts surfaced an error");
 
   // The approval section is part of the channel page and starts with pending
   // work only; its buttons are type=button so they cannot submit the form.
@@ -173,24 +212,34 @@ try {
   assert.match(await page.locator("#task-tool-panel-body .task-permission-item").innerText(), /Bob Bot/);
   await page.click("#toggle-task-permission-history");
   await page.waitForFunction(() => document.querySelector("#task-tool-panel-body .task-permission-item")?.innerText.includes("待审批"));
-  await page.screenshot({path: resolve(output, "task-channel-merged.png")});
 
-  // Narrow: two member columns, and a pending approval section moves above the
-  // member list.
-  await page.setViewportSize({width: 390, height: 844});
-  await page.waitForTimeout(150);
-  const narrowColumns = await page.locator(".task-channel-member-list").evaluate(node => getComputedStyle(node).gridTemplateColumns.split(" ").length);
-  assert.equal(narrowColumns, 2, `narrow member grid has ${narrowColumns} columns`);
-  const order = await page.evaluate(() => {
-    const approvals = document.querySelector("#task-channel-permissions");
+  // Members, approvals, sync: both DOM order and rendered order.
+  const order = () => page.evaluate(() => {
     const members = document.querySelector(".task-channel-members-section");
+    const approvals = document.querySelector("#task-channel-permissions");
+    const sync = document.querySelector(".task-channel-sync");
+    const top = node => node?.getBoundingClientRect().top ?? NaN;
+    const follows = (first, second) => Boolean(first && second && (first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING));
     return {
-      approvalsFirst: Boolean(approvals && members) && approvals.getBoundingClientRect().top < members.getBoundingClientRect().top,
+      dom: follows(members, approvals) && follows(approvals, sync),
+      visual: top(members) < top(approvals) && top(approvals) < top(sync),
       overflow: document.documentElement.scrollWidth > window.innerWidth,
     };
   });
-  assert.equal(order.approvalsFirst, true, "pending approvals should come first on a narrow screen");
-  assert.equal(order.overflow, false, "the channel page overflows on a phone");
+  const desktopOrder = await order();
+  assert.equal(desktopOrder.dom, true, "DOM order must be members, approvals, sync");
+  assert.equal(desktopOrder.visual, true, "rendered order must be members, approvals, sync");
+  await page.screenshot({path: resolve(output, "task-channel-merged.png")});
+
+  // Narrow: one member column; the three blocks keep the same order.
+  await page.setViewportSize({width: 390, height: 844});
+  await page.waitForTimeout(150);
+  const narrowColumns = await page.locator(".task-channel-member-list").evaluate(node => getComputedStyle(node).gridTemplateColumns.split(" ").length);
+  assert.equal(narrowColumns, 1, `narrow member grid has ${narrowColumns} columns`);
+  const narrowOrder = await order();
+  assert.equal(narrowOrder.dom, true, "narrow DOM order must be members, approvals, sync");
+  assert.equal(narrowOrder.visual, true, "narrow rendered order must be members, approvals, sync");
+  assert.equal(narrowOrder.overflow, false, "the channel page overflows on a phone");
   await page.screenshot({path: resolve(output, "task-channel-merged-390.png")});
 
   // Channel-hosted Tasks keep the channel entry at zero pending and can open
@@ -272,8 +321,10 @@ try {
   await english.waitForSelector("#task-channel-contacts-form", {timeout: 8000});
   assert.equal(await english.locator("#task-channel-member-search").getAttribute("placeholder"), "Search by name");
   assert.equal(await english.locator("#task-channel-member-count").innerText(), "Selected 1 / 4 total");
+  assert.equal((await english.locator(".task-channel-members-section header small").innerText()).trim(), "Select to join integration · The Agent only sees the people here");
+  assert.equal(await english.locator('input[name="role_alice"]').getAttribute("placeholder"), "APP / Cloud / Firmware");
+  assert.equal((await english.locator(".task-channel-sync button").innerText()).trim(), "Sync group members");
   assert.equal((await english.locator("#toggle-task-permission-history").innerText()).trim(), "View history");
-  assert.equal(await english.locator(".task-channel-contact-remove").getAttribute("title"), "Remove contact");
   assert.match(await english.locator("#task-channel-permissions").innerText(), /Pending review/);
   assert.deepEqual(englishErrors, [], "the English channel page threw");
   assert.deepEqual(errors, [], "the channel page threw while being driven");

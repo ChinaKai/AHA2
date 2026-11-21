@@ -5978,22 +5978,27 @@ function taskChannelPanelHTML(): string {
   const memberRows = result.members.map(member => {
     const contact = selected.get(member.identity_link_id);
     const hidden = !taskChannelMemberMatches(member, query);
-    return `<label class="task-channel-member ${member.is_bot ? "bot" : ""} ${member.is_self ? "self" : ""}" data-member-name="${escapeHTML(member.display_name)}" ${hidden ? "hidden" : ""}>
-      <input type="checkbox" name="contact_id" value="${escapeHTML(member.identity_link_id)}" data-member-name="${escapeHTML(member.display_name)}" data-member-bot="${member.is_bot}" data-member-role="${escapeHTML(contact?.collaboration_role || "")}" ${member.is_self ? "disabled" : ""} ${contact ? "checked" : ""}>
-      <span class="task-channel-member-text"><strong>${escapeHTML(member.display_name)}</strong><small class="task-channel-member-tag">${taskChannelMemberSourceLabel(member)}</small></span>
-    </label>`;
+    return `<div class="task-channel-member ${member.is_bot ? "bot" : ""} ${member.is_self ? "self" : ""}" data-member-name="${escapeHTML(member.display_name)}" ${hidden ? "hidden" : ""}>
+      <label class="task-channel-member-pick">
+        <input type="checkbox" name="contact_id" value="${escapeHTML(member.identity_link_id)}" data-member-name="${escapeHTML(member.display_name)}" data-member-bot="${member.is_bot}" ${member.is_self ? "disabled" : ""} ${contact ? "checked" : ""}>
+        <span class="task-channel-member-text"><strong>${escapeHTML(member.display_name)}</strong><small class="task-channel-member-tag">${taskChannelMemberSourceLabel(member)}</small></span>
+      </label>
+      <label class="task-channel-member-role">
+        <span class="visually-hidden">身份</span>
+        <input name="role_${escapeHTML(member.identity_link_id)}" list="task-channel-role-options" maxlength="40" value="${escapeHTML(contact?.collaboration_role || "")}" placeholder="APP / 云端 / 固件" aria-label="身份" ${contact ? "" : "disabled"}>
+      </label>
+    </div>`;
   }).join("");
-  const selectedRows = result.contacts.map(contact => taskChannelSelectedContactHTML(contact.identity_link_id, contact.display_name, contact.is_bot, contact.collaboration_role || "")).join("");
   const memberEmpty = result.members.length
     ? `<div class="task-channel-member-empty empty-state" ${query ? "" : "hidden"}>没有匹配的成员</div>`
     : '<div class="empty-state">暂无成员，点击“同步群成员”读取。</div>';
   return `<div class="task-channel-tool">
     ${switcher}
-    <div class="task-channel-group-head"><div><strong>${escapeHTML(currentDestination.display_name || "未命名群聊")}</strong><small>${escapeHTML(currentDestination.instance_name)} · ${result.members.length} 名已登记成员</small></div><button type="button" id="refresh-task-channel-members">${icon("refresh")}同步群成员</button></div>
+    <div class="task-channel-group-head"><div><strong>${escapeHTML(currentDestination.display_name || "未命名群聊")}</strong><small>${escapeHTML(currentDestination.instance_name)} · ${result.members.length} 名已登记成员</small></div></div>
     <form id="task-channel-contacts-form">
       <div class="task-channel-people">
         <section class="task-channel-members-section">
-          <header><strong>群聊成员</strong><small>勾选加入联调</small></header>
+          <header><strong>群聊成员</strong><small>勾选加入联调 · Agent 只会看到这里的人</small></header>
           <div class="task-channel-member-tools">
             <label class="task-channel-member-search"><span class="visually-hidden">按姓名搜索成员</span><input id="task-channel-member-search" type="search" placeholder="按姓名搜索" value="${escapeHTML(state.taskChannelMemberQuery)}" autocomplete="off"></label>
             <button type="button" id="task-channel-select-all" class="task-channel-member-action">全选</button>
@@ -6002,23 +6007,12 @@ function taskChannelPanelHTML(): string {
           </div>
           <div class="task-channel-member-list" data-task-channel-member-list>${memberRows}${memberEmpty}</div>
         </section>
-        <section class="task-channel-contacts-section">
-          <header><strong>可 @ 联调人</strong><small>Agent 只会看到这里的人</small></header>
-          <div class="task-channel-contact-list" data-task-channel-selected>${selectedRows || '<div class="empty-state">尚未选择联调人</div>'}</div>
-        </section>
       </div>
-      <datalist id="task-channel-role-options"><option value="APP"><option value="云端"><option value="固件"><option value="测试"><option value="产品"></datalist>
+      <datalist id="task-channel-role-options"><option value="APP"><option value="云端"><option value="固件"></datalist>
       <footer><small>群成员来自渠道同步；观察其他机器人时，请在同一条群消息里同时 @ 当前渠道机器人和目标机器人。</small><button type="submit" class="primary">${icon("save")}保存联调人</button></footer>
     </form>
     ${approvals}
-  </div>`;
-}
-
-function taskChannelSelectedContactHTML(identityID: string, name: string, isBot: boolean, role: string): string {
-  return `<div class="task-channel-contact" data-contact-id="${escapeHTML(identityID)}">
-    <span class="task-channel-contact-person">${icon(isBot ? "bot" : "user")}<strong>${escapeHTML(name)}</strong></span>
-    <label class="task-channel-contact-role"><span class="visually-hidden">身份</span><input name="role_${escapeHTML(identityID)}" list="task-channel-role-options" maxlength="40" value="${escapeHTML(role)}" placeholder="APP / 云端 / 固件" aria-label="身份"></label>
-    <button type="button" class="icon-button task-channel-contact-remove" data-remove-task-contact="${escapeHTML(identityID)}" title="移除联调人" aria-label="移除联调人">${icon("close")}</button>
+    <div class="task-channel-sync"><button type="button" id="refresh-task-channel-members">${icon("refresh")}同步群成员</button></div>
   </div>`;
 }
 
@@ -8856,36 +8850,17 @@ function applyTaskChannelMemberFilter(): void {
 
 function syncTaskChannelContactSelection(): void {
   const form = document.querySelector<HTMLFormElement>("#task-channel-contacts-form");
-  const selected = form?.querySelector<HTMLElement>("[data-task-channel-selected]");
-  if (!form || !selected) return;
-  // Preserve whatever the owner typed before rebuilding the rows.
-  selected.querySelectorAll<HTMLInputElement>('input[name^="role_"]').forEach(input => {
-    const identityID = input.name.slice("role_".length);
-    const checkbox = Array.from(form.querySelectorAll<HTMLInputElement>('input[name="contact_id"]')).find(item => item.value === identityID);
-    if (checkbox) checkbox.dataset.memberRole = input.value;
+  if (!form) return;
+  // Unchecking a member removes their identity. The role control lives in the
+  // same row and stays hidden until the member is selected again; clearing and
+  // disabling it keeps a re-check from restoring a stale identity and keeps the
+  // value out of FormData for members that are not selected.
+  form.querySelectorAll<HTMLInputElement>('input[name="contact_id"]').forEach(input => {
+    const role = form.querySelector<HTMLInputElement>(`input[name="role_${CSS.escape(input.value)}"]`);
+    if (!role) return;
+    role.disabled = !input.checked;
+    if (!input.checked) role.value = "";
   });
-  const rows = Array.from(form.querySelectorAll<HTMLInputElement>('input[name="contact_id"]:checked')).map(input =>
-    taskChannelSelectedContactHTML(
-      input.value,
-      input.dataset.memberName || "群成员",
-      input.dataset.memberBot === "true",
-      input.dataset.memberRole || "",
-    ),
-  ).join("");
-  selected.innerHTML = rows || '<div class="empty-state">尚未选择联调人</div>';
-  selected.querySelectorAll<HTMLInputElement>('input[name^="role_"]').forEach(input => input.addEventListener("input", () => {
-    const identityID = input.name.slice("role_".length);
-    const checkbox = Array.from(form.querySelectorAll<HTMLInputElement>('input[name="contact_id"]')).find(item => item.value === identityID);
-    if (checkbox) checkbox.dataset.memberRole = input.value;
-  }));
-  selected.querySelectorAll<HTMLButtonElement>("[data-remove-task-contact]").forEach(button => button.addEventListener("click", () => {
-    const identityID = button.dataset.removeTaskContact || "";
-    const checkbox = Array.from(form.querySelectorAll<HTMLInputElement>('input[name="contact_id"]')).find(item => item.value === identityID);
-    if (!checkbox || !checkbox.checked) return;
-    // Removing a contact row is the same action as unticking its member chip.
-    checkbox.checked = false;
-    checkbox.dispatchEvent(new Event("change", {bubbles: true}));
-  }));
   syncTaskChannelMemberCounts();
 }
 
