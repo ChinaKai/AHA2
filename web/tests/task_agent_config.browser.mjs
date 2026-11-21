@@ -25,7 +25,7 @@ const TASK = {
   collaboration_mode: "single",
   max_agents: 2,
   knowledge_policy: "disabled",
-  skill_ids: ["skill-b"],
+  skill_ids: ["vault-skill:project:project-1:beta"],
   mcp_server_ids: [],
   agent_capabilities: {workspace_read: false, task_create: false, clone_hardware: false},
   total_tokens: 0,
@@ -57,9 +57,15 @@ const AGENT = {
   created_at: "",
   updated_at: "",
 };
+// The Agent config picker reads vault packages only. The legacy rows stay in
+// the stub so the test can prove they are not merged back into the picker.
 const SKILLS = [
   {id: "skill-a", name: "Alpha skill", scope: "global", description: "first", enabled: true, status: "active"},
   {id: "skill-b", name: "Beta skill", scope: "project", project_id: "project-1", description: "second", enabled: true, status: "active"},
+];
+const VAULT_SKILLS = [
+  {key: "vault-skill:global:alpha", id: "vs-alpha", slug: "alpha", name: "Alpha skill", scope: "global", library: "全局", description: "first", file_count: 1, files: ["SKILL.md"], relative_path: "skills/alpha", absolute_path: "/vault/skills/alpha", open_path: "/vault/skills/alpha", source: "vault", auto_attach: false, auto_attach_effective: false, auto_attach_confirmed: false, can_update: true, project_bound: true},
+  {key: "vault-skill:project:project-1:beta", id: "vs-beta", slug: "beta", name: "Beta skill", scope: "project", project_id: "project-1", library: "Project One", description: "second", file_count: 1, files: ["SKILL.md"], relative_path: "projects/project-1/skills/beta", absolute_path: "/vault/projects/project-1/skills/beta", open_path: "/vault/projects/project-1/skills/beta", source: "vault", auto_attach: false, auto_attach_effective: false, auto_attach_confirmed: false, can_update: true, project_bound: true},
 ];
 const MCP = {
   id: "mcp-1",
@@ -85,6 +91,7 @@ const json = (value, status = 200) => new Response(JSON.stringify(value), {statu
 const TASK = ${JSON.stringify(TASK)};
 const AGENT = ${JSON.stringify(AGENT)};
 const SKILLS = ${JSON.stringify(SKILLS)};
+const VAULT_SKILLS = ${JSON.stringify(VAULT_SKILLS)};
 const MCP = ${JSON.stringify(MCP)};
 const detail = () => ({
   task: {...TASK},
@@ -105,6 +112,7 @@ window.fetch = async (input, init = {}) => {
   if (path === "/api/v1/projects") return json({projects: [{id: "project-1", name: "Project One", project_type: "folder", channel_retired: false, knowledge_policy: "enabled"}], has_more: false});
   if (path === "/api/v1/workspaces") return json({workspaces: [{id: "workspace-1", project_id: "project-1", name: "WS One", root_path: "/tmp/ws", transport: "native", health: "ready", read_only: false, capabilities: {codex: {status: "ready"}}}]});
   if (path === "/api/v1/skills") return json({skills: SKILLS});
+  if (path === "/api/v1/knowledge-vault/skills") return json({ok: true, enabled: true, index_ready: true, runtime_read: true, bound_project_ids: ["project-1"], skills: VAULT_SKILLS});
   if (path === "/api/v1/mcp-servers") return json({servers: [MCP]});
   if (path === "/api/v1/models") return json({models: [{id: "model-1", display_name: "Stub model", provider_id: "provider-1", source: "provider", backend: "codex", wire_model: "stub", default_env_group_id: "env-1", created_at: new Date().toISOString(), updated_at: new Date().toISOString()}]});
   if (path === "/api/v1/providers") return json({providers: [{id: "provider-1", name: "Provider", auth_style: "none"}]});
@@ -211,8 +219,10 @@ try {
   await page.fill('#agent-config-form input[name="max_agents"]', "3");
   await page.selectOption('#agent-config-form select[name="knowledge_policy"]', "enabled");
   await page.locator("#agent-config-skills-fold summary").click();
-  await page.locator('#agent-config-skills-fold input[value="skill-a"]').setChecked(true);
-  await page.locator('#agent-config-skills-fold input[value="skill-b"]').setChecked(false);
+  const offeredSkills = await page.locator('#agent-config-skills-fold input[name="skill_ids"]').evaluateAll(nodes => nodes.map(node => node.value));
+  assert.deepEqual(offeredSkills.sort(), ["vault-skill:global:alpha", "vault-skill:project:project-1:beta"], `agent config picker is not vault-only: ${offeredSkills}`);
+  await page.locator('#agent-config-skills-fold input[value="vault-skill:global:alpha"]').setChecked(true);
+  await page.locator('#agent-config-skills-fold input[value="vault-skill:project:project-1:beta"]').setChecked(false);
   await page.locator("#agent-config-mcp-fold summary").click();
   await page.locator('#agent-config-mcp-fold input[value="mcp-1"]').setChecked(true);
   await page.locator("#agent-config-fast-fold summary").click();
@@ -223,7 +233,7 @@ try {
   const saved = await patches();
   assert.deepEqual(saved.map(call => call.path), ["/api/v1/tasks/t-active", "/api/v1/tasks/t-active/agents/main"]);
   assert.deepEqual(saved.map(call => call.method), ["PATCH", "PATCH"]);
-  assert.deepEqual(saved[0].body.skill_ids.sort(), ["skill-a"], "task Skills were not saved");
+  assert.deepEqual(saved[0].body.skill_ids.sort(), ["vault-skill:global:alpha"], "task Skills were not saved");
   assert.deepEqual(saved[0].body.mcp_server_ids, ["mcp-1"], "task MCP tools were not saved");
   assert.equal(saved[0].body.collaboration_mode, "auto", "collaboration mode was not saved");
   assert.equal(saved[0].body.max_agents, 3, "max agents was not saved");

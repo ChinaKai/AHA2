@@ -44,6 +44,8 @@ window.__created = null;
 const json = (value, status = 200) => new Response(JSON.stringify(value), {status, headers: {"Content-Type": "application/json"}});
 const TASKS = ${JSON.stringify(TASKS)};
 const COUNTS = ${JSON.stringify(COUNTS)};
+// The task picker reads vault packages only. This legacy catalog stays in the
+// stub so the test can prove those rows are not merged into the picker.
 const SKILLS = [
   {id: "skill-a", name: "Alpha skill", scope: "global", description: "first", enabled: true, status: "active"},
   {id: "skill-b", name: "Beta skill", scope: "project", project_id: "project-1", description: "second", enabled: true, status: "active"},
@@ -65,6 +67,8 @@ window.fetch = async (input, init = {}) => {
   if (path === "/api/v1/workspaces") return json({workspaces: [{id: "workspace-1", project_id: "project-1", name: "WS One", root_path: "/tmp/ws", transport: "native", health: "ready", read_only: false, capabilities: {codex: {status: "ready"}}}]});
   if (path === "/api/v1/skills") return json({skills: SKILLS});
   if (path === "/api/v1/knowledge-vault/skills") return json({ok: true, enabled: true, index_ready: true, runtime_read: true, bound_project_ids: ["project-1"], skills: [
+    {key: "vault-skill:global:alpha", id: "vs-alpha", slug: "alpha", name: "Alpha skill", scope: "global", library: "全局", description: "first", file_count: 1, files: ["SKILL.md"], relative_path: "skills/alpha", absolute_path: "/vault/skills/alpha", open_path: "/vault/skills/alpha", source: "vault", auto_attach: false, auto_attach_effective: false, auto_attach_confirmed: false, can_update: true, project_bound: true},
+    {key: "vault-skill:project:project-1:beta", id: "vs-beta", slug: "beta", name: "Beta skill", scope: "project", project_id: "project-1", library: "Project One", description: "second", file_count: 1, files: ["SKILL.md"], relative_path: "projects/project-1/skills/beta", absolute_path: "/vault/projects/project-1/skills/beta", open_path: "/vault/projects/project-1/skills/beta", source: "vault", auto_attach: false, auto_attach_effective: false, auto_attach_confirmed: false, can_update: true, project_bound: true},
     {key: "vault-skill:project:project-1:vault-review", id: "vs-1", slug: "vault-review", name: "Vault review", scope: "project", project_id: "project-1", library: "Project One", description: "from the vault", file_count: 2, files: ["SKILL.md"], relative_path: "projects/project-1/skills/vault-review", absolute_path: "/vault/projects/project-1/skills/vault-review", open_path: "/vault/projects/project-1/skills/vault-review", source: "vault", auto_attach: true, auto_attach_effective: true, auto_attach_confirmed: false, can_update: true, project_bound: true},
     {key: "vault-skill:archive:project-1:old-review", id: "vs-old", slug: "old-review", name: "Archived vault review", scope: "archive", project_id: "project-1", library: "Project One", description: "read only", file_count: 1, files: ["SKILL.md"], relative_path: "archive/project-1/skills/old-review", absolute_path: "/vault/archive/project-1/skills/old-review", open_path: "/vault/archive/project-1/skills/old-review", source: "vault", auto_attach: true, auto_attach_effective: false, auto_attach_confirmed: false, can_update: false, project_bound: true, unavailable_reason: "archive_read_only"},
   ]});
@@ -210,11 +214,14 @@ try {
   // they must never become a selectable option the server would reject.
   assert.equal(await page.locator('#task-skills-fold input[value="vault-skill:archive:project-1:old-review"]').count(), 0, "an archive vault skill leaked into the task selector");
   assert.doesNotMatch(await page.locator("#task-skills-fold").innerText(), /Archived vault review/);
-  await page.locator('#task-skills-fold input[value="skill-a"]').setChecked(true);
-  await page.locator('#task-skills-fold input[value="skill-b"]').setChecked(true);
+  await page.locator('#task-skills-fold input[value="vault-skill:global:alpha"]').setChecked(true);
+  await page.locator('#task-skills-fold input[value="vault-skill:project:project-1:beta"]').setChecked(true);
   assert.match(await page.locator("#task-skills-fold [data-fold-count]").innerText(), /已选 3/);
   const offered = await page.locator('#task-skills-fold input[name="skill_ids"]').evaluateAll(nodes => nodes.map(node => node.value));
-  assert.deepEqual(offered.sort(), ["skill-a", "skill-b", "vault-skill:project:project-1:vault-review"], `unexpected skill offer: ${offered}`);
+  assert.deepEqual(offered.sort(), ["vault-skill:global:alpha", "vault-skill:project:project-1:beta", "vault-skill:project:project-1:vault-review"], `unexpected skill offer: ${offered}`);
+  // The picker is vault-only: on the same fixture the legacy /api/v1/skills
+  // rows must never be merged in, even though they are global/project scoped.
+  assert.ok(!offered.includes("skill-a") && !offered.includes("skill-b"), `legacy skills leaked into the vault-only picker: ${offered}`);
   // Manual removal is allowed and must survive the submit.
   await vaultSkill.setChecked(false);
   assert.match(await page.locator("#task-skills-fold [data-fold-count]").innerText(), /已选 2/);
@@ -230,8 +237,8 @@ try {
   await page.click('[data-dialog="task"]');
   await page.waitForSelector("#task-dialog[open]", {timeout: 5000});
   await page.locator("#task-skills-fold summary").click();
-  await page.locator('#task-skills-fold input[value="skill-a"]').setChecked(true);
-  await page.locator('#task-skills-fold input[value="skill-b"]').setChecked(true);
+  await page.locator('#task-skills-fold input[value="vault-skill:global:alpha"]').setChecked(true);
+  await page.locator('#task-skills-fold input[value="vault-skill:project:project-1:beta"]').setChecked(true);
   // The inherited vault skill is removed by hand here so the submitted list
   // proves a manual removal survives, not just that the default was offered.
   await page.locator('#task-skills-fold input[value="vault-skill:project:project-1:vault-review"]').setChecked(false);
@@ -256,7 +263,7 @@ try {
   assert.equal(created.proxy_enabled, true, "proxy select was not submitted");
   assert.equal(created.fast_mode, true, "the fast switch was not submitted as a boolean");
   assert.equal("agent_capabilities" in created, false, "the create payload still carries capability grants");
-  assert.deepEqual(created.skill_ids.sort(), ["skill-a", "skill-b"], "selected skills were not submitted");
+  assert.deepEqual(created.skill_ids.sort(), ["vault-skill:global:alpha", "vault-skill:project:project-1:beta"], "selected skills were not submitted");
   assert.deepEqual(errors, [], "the task panel threw while being driven");
 
   // 5. A memo can seed the create panel. The button only shows on a row that
