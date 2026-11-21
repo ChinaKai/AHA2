@@ -1,428 +1,434 @@
-operation	source	handler	boundary	mcp	permission	protected_flow	tests	status
-ANY /	server.go	serveWeb	transport_auth	not a business operation	existing transport boundary	health probe or static Web delivery; no MCP business action	existing HTTP server tests	transport_na
-ANY /api/v1/prompts/entries	server.go	rejectPromptReadOnly	owner_session	pending	pending	pending	pending	pending
-ANY /api/v1/prompts/entries/{entry}/anchors/{anchor}	server.go	rejectPromptReadOnly	owner_session	pending	pending	pending	pending	pending
-ANY /api/v1/prompts/migration-preview	server.go	rejectPromptReadOnly	owner_session	pending	pending	pending	pending	pending
-ANY /api/v1/prompts/scenario-preview	server.go	rejectPromptReadOnly	owner_session	pending	pending	pending	pending	pending
-DELETE /api/v1/agent/browser/grants/{grant}	server.go	agentBrowserRelease	agent_turn	pending	pending	pending	pending	pending
-DELETE /api/v1/agent/browser/grants/{grant}/tabs/{tab}	server.go	agentBrowserCloseTab	agent_turn	pending	pending	pending	pending	pending
-DELETE /api/v1/browser-grants/{id}	browser_handlers.go	revokeBrowserGrant	owner_session	pending	pending	pending	pending	pending
-DELETE /api/v1/browser-grants/{id}/tabs/{tab}	browser_handlers.go	closeBrowserTab	owner_session	pending	pending	pending	pending	pending
-DELETE /api/v1/browser/profiles/{id}	browser_handlers.go	deleteBrowserProfile	owner_session	pending	pending	pending	pending	pending
-DELETE /api/v1/browser/profiles/{id}/session	browser_handlers.go	closeBrowserProfileSession	owner_session	pending	pending	pending	pending	pending
-DELETE /api/v1/codex-accounts/login/{id}	server.go	cancelCodexAccountLogin	owner_session	pending	pending	pending	pending	pending
-DELETE /api/v1/codex-accounts/{id}	server.go	deleteCodexAccount	owner_session	pending	pending	pending	pending	pending
-DELETE /api/v1/hardware-resources/{id}	server.go	deleteHardwareResource	owner_session	pending	pending	pending	pending	pending
-DELETE /api/v1/knowledge/libraries/{id}	server.go	deleteKnowledgeLibrary	owner_session	pending	pending	pending	pending	pending
-DELETE /api/v1/knowledge/{id}	server.go	deleteKnowledge	owner_session	pending	pending	pending	pending	pending
-DELETE /api/v1/mail-accounts/{id}	server.go	deleteMailAccount	owner_session	pending	pending	pending	pending	pending
-DELETE /api/v1/mail-bindings/{id}	server.go	deleteMailBinding	owner_session	pending	pending	pending	pending	pending
-DELETE /api/v1/mail-templates/{id}	server.go	deleteMailTemplate	owner_session	pending	pending	pending	pending	pending
-DELETE /api/v1/mcp-servers/{id}	server.go	deleteMCPServer	owner_session	pending	pending	pending	pending	pending
-DELETE /api/v1/models/{id}	server.go	deleteModel	owner_session	pending	pending	pending	pending	pending
-DELETE /api/v1/pet/watches/{task}	server.go	deletePetWatch	owner_session	pending	pending	pending	pending	pending
-DELETE /api/v1/projects/{id}	server.go	deleteProject	owner_session	pending	pending	pending	pending	pending
-DELETE /api/v1/projects/{id}/knowledge	server.go	deleteProjectKnowledge	owner_session	pending	pending	pending	pending	pending
-DELETE /api/v1/projects/{id}/product-lines/{line}	server.go	deleteProductLine	owner_session	pending	pending	pending	pending	pending
-DELETE /api/v1/providers/{id}	server.go	deleteProvider	owner_session	pending	pending	pending	pending	pending
-DELETE /api/v1/settings/proxy/profiles/{id}	server.go	deleteProxyProfile	owner_session	pending	pending	pending	pending	pending
-DELETE /api/v1/skills/{id}	server.go	rejectRemovedSkillWrite	owner_session	Web also rejects this removed legacy mutation	owner session still cannot execute	use the vault Skill management operations instead	existing Skill removal tests; exact reference pending	web_prohibited_na
-DELETE /api/v1/tasks/{id}	server.go	deleteTask	owner_session	pending	pending	pending	pending	pending
-DELETE /api/v1/tasks/{id}/attachments/{attachment}	server.go	deleteTaskAttachment	owner_session	pending	pending	pending	pending	pending
-DELETE /api/v1/tasks/{id}/channel-routes/{route}	server.go	unbindTaskChannelRoute	owner_session	pending	pending	pending	pending	pending
-DELETE /api/v1/tasks/{id}/remote-mirror	server.go	retireRemoteTaskMirror	owner_session	pending	pending	pending	pending	pending
-DELETE /api/v1/workspaces/{id}	server.go	deleteWorkspace	owner_session	pending	pending	pending	pending	pending
-DELETE /api/v1/workspaces/{id}/remote-mirror	server.go	retireRemoteWorkspaceMirror	owner_session	pending	pending	pending	pending	pending
-GET /api/channel-runtime/v1/deliveries/{id}/attachment	server.go	channelRuntimeMediaContent	transport_auth	pending	pending	pending	pending	pending
-GET /api/v1/agent/browser	server.go	agentBrowserState	agent_turn	pending	pending	pending	pending	pending
-GET /api/v1/agent/browser/grants/{grant}/bookmarks	server.go	agentBrowserBookmarks	agent_turn	pending	pending	pending	pending	pending
-GET /api/v1/agent/browser/grants/{grant}/cookies	server.go	agentBrowserCookies	agent_turn	pending	pending	pending	pending	pending
-GET /api/v1/agent/browser/grants/{grant}/downloads	server.go	agentBrowserDownloads	agent_turn	pending	pending	pending	pending	pending
-GET /api/v1/agent/browser/grants/{grant}/downloads/{download}	server.go	agentBrowserDownload	agent_turn	pending	pending	pending	pending	pending
-GET /api/v1/agent/browser/grants/{grant}/tabs	server.go	agentBrowserTabs	agent_turn	pending	pending	pending	pending	pending
-GET /api/v1/agent/browser/grants/{grant}/tabs/{tab}/frame	server.go	agentBrowserFrame	agent_turn	pending	pending	pending	pending	pending
-GET /api/v1/agent/browser/grants/{grant}/tabs/{tab}/snapshot	server.go	agentBrowserSnapshot	agent_turn	pending	pending	pending	pending	pending
-GET /api/v1/agent/capabilities	server.go	agentCapabilitiesInfo	agent_turn	aha2_core.capabilities	Turn capability; live Task/Agent/Turn	none	internal/httpapi/agent_pet_domains_test.go:TestPetCoreMCPCallsUseRealTurnAndKeepManagementBoundary	implemented
-GET /api/v1/agent/channel/catalog	server.go	agentChannelCatalog	agent_turn	pending	pending	pending	pending	pending
-GET /api/v1/agent/channel/contacts	server.go	agentTaskChannelContacts	agent_turn	pending	pending	pending	pending	pending
-GET /api/v1/agent/channel/context	server.go	agentChannelContext	agent_turn	pending	pending	pending	pending	pending
-GET /api/v1/agent/desktop	desktop_handlers.go	desktopStatus	agent_turn	pending	pending	pending	pending	pending
-GET /api/v1/agent/desktop/observation	desktop_handlers.go	desktopObserve	agent_turn	pending	pending	pending	pending	pending
-GET /api/v1/agent/hardware	server.go	agentHardware	agent_turn	aha2_hardware.hardware_list	bound Task resources; channel gate; pet live view permission	no credential values or internal device endpoints returned	internal/httpapi/agent_hardware_mcp_test.go:TestAgentHardwareMCPListOnlyExposesBoundNonSensitiveFields	implemented
-GET /api/v1/agent/hardware/{hardware}/terminal	server.go	agentHardwareTerminal	agent_turn	aha2_hardware.hardware_terminal_read	bound Task resource; channel gate; pet live view permission	bounded output; no automatic connection	internal/httpapi/agent_hardware_mcp_test.go:TestAgentHardwareMCPTerminalReadPagingAndCaps	implemented
-GET /api/v1/agent/knowledge	server.go	agentKnowledge	agent_turn	pending	pending	pending	pending	pending
-GET /api/v1/agent/knowledge/guide	server.go	agentKnowledgeGuide	agent_turn	pending	pending	pending	pending	pending
-GET /api/v1/agent/knowledge/{knowledge}	server.go	agentKnowledgeEntry	agent_turn	pending	pending	pending	pending	pending
-GET /api/v1/agent/mail/accounts	server.go	agentMailAccounts	agent_turn	pending	pending	pending	pending	pending
-GET /api/v1/agent/mail/messages/{id}	server.go	agentMailMessageStatus	agent_turn	pending	pending	pending	pending	pending
-GET /api/v1/agent/mail/templates	server.go	agentMailTemplates	agent_turn	pending	pending	pending	pending	pending
-GET /api/v1/agent/mail/templates/{id}	server.go	agentMailTemplateDetail	agent_turn	pending	pending	pending	pending	pending
-GET /api/v1/agent/processes	server.go	agentProcesses	agent_turn	pending	pending	pending	pending	pending
-GET /api/v1/agent/processes/{name}	server.go	agentProcessStatus	agent_turn	pending	pending	pending	pending	pending
-GET /api/v1/agent/project/runtimes	server.go	agentProjectRuntimes	agent_turn	pending	pending	pending	pending	pending
-GET /api/v1/agent/project/workspaces	server.go	agentProjectWorkspaces	agent_turn	pending	pending	pending	pending	pending
-GET /api/v1/agent/skills	server.go	agentSkills	agent_turn	pending	pending	pending	pending	pending
-GET /api/v1/agent/skills/{skill}	server.go	agentSkill	agent_turn	pending	pending	pending	pending	pending
-GET /api/v1/agent/tasks/{task}	server.go	agentTaskStatus	agent_turn	pending	pending	pending	pending	pending
-GET /api/v1/assistant	server.go	ownerAssistant	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/assistant/hints	server.go	ownerAssistantHints	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/auth/status	server.go	authStatus	transport_auth	pending	pending	pending	pending	pending
-GET /api/v1/browser-grants/{id}	browser_handlers.go	browserGrantDetail	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/browser-grants/{id}/bookmarks	browser_handlers.go	browserGrantBookmarks	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/browser-grants/{id}/tabs	browser_handlers.go	listBrowserGrantTabs	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/browser-grants/{id}/tabs/{tab}/frame	browser_handlers.go	browserTabFrame	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/browser-grants/{id}/tabs/{tab}/snapshot	browser_handlers.go	snapshotBrowserTab	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/browser/host	browser_handlers.go	browserHostHealth	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/browser/profiles	browser_handlers.go	listBrowserProfiles	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/browser/profiles/{id}	browser_handlers.go	browserProfileDetail	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/browser/profiles/{id}/session	browser_handlers.go	browserProfileSession	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/channel-deliveries/{id}/attempts	server.go	channelDeliveryAttempts	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/channel-instances	server.go	channelInstances	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/channel-instances/{id}	server.go	channelInstance	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/channel-instances/{id}/conversations	server.go	channelConversationSummaries	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/channel-instances/{id}/deliveries	server.go	channelDeliveries	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/channel-instances/{id}/handoffs	server.go	channelHandoffs	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/channel-instances/{id}/knowledge-bindings	server.go	channelKnowledgeBindings	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/channel-instances/{id}/knowledge-policy	server.go	channelKnowledgePolicy	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/channel-instances/{id}/onboarding-options	server.go	channelOnboardingOptions	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/channel-instances/{id}/purge-preview	server.go	channelPurgePreview	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/channel-onboarding-sessions/{id}	server.go	channelOnboarding	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/channel-onboarding-sessions/{id}/qr	server.go	channelOnboardingQR	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/channel-providers	server.go	channelProviders	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/codex-accounts	server.go	listCodexAccounts	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/codex-accounts/login/{id}	server.go	codexAccountLoginStatus	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/env-groups	server.go	listEnvGroups	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/events	server.go	allEvents	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/hardware-resources	server.go	listHardwareResources	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/hardware/serial-ports	server.go	hardwareSerialPorts	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/knowledge	server.go	listKnowledge	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/knowledge-vault/doc/{id}	server.go	knowledgeVaultDocument	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/knowledge-vault/doc/{id}/diff	server.go	knowledgeVaultDocumentDiff	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/knowledge-vault/file	server.go	knowledgeVaultFile	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/knowledge-vault/file/download	server.go	knowledgeVaultFileDownload	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/knowledge-vault/files	server.go	knowledgeVaultFiles	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/knowledge-vault/git/status	server.go	knowledgeVaultGitStatus	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/knowledge-vault/inbox	server.go	knowledgeVaultInbox	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/knowledge-vault/libraries	server.go	knowledgeVaultLibraries	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/knowledge-vault/open-info	server.go	knowledgeVaultOpenInfo	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/knowledge-vault/recent	server.go	knowledgeVaultRecent	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/knowledge-vault/search	server.go	knowledgeVaultSearch	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/knowledge-vault/skills	server.go	knowledgeVaultSkills	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/knowledge-vault/tree	server.go	knowledgeVaultTree	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/knowledge/indexes	server.go	knowledgeIndexes	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/knowledge/libraries	server.go	listKnowledgeLibraries	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/knowledge/proposals	server.go	listKnowledgeProposals	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/knowledge/{id}	server.go	knowledgeDetail	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/mail-accounts	server.go	listMailAccounts	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/mail-accounts/{id}	server.go	mailAccountDetail	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/mail-bindings	server.go	listMailBindings	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/mail-messages	server.go	listMailMessages	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/mail-messages/{id}	server.go	mailMessageDetail	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/mail-messages/{id}/attempts	server.go	mailMessageAttempts	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/mail-messages/{id}/download-links	server.go	mailMessageDownloadLinks	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/mail-templates	server.go	listMailTemplates	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/mail-templates/{id}	server.go	mailTemplateDetail	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/mail-templates/{id}/versions	server.go	mailTemplateVersions	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/mcp-servers	server.go	listMCPServers	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/mcp-servers/{id}	server.go	mcpServerDetail	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/models	server.go	listModels	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/pet	server.go	ownerPetState	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/pet/activity	server.go	ownerPetActivity	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/pet/approvals/pending-count	server.go	petPendingApprovalCount	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/pet/events	server.go	ownerPetEvents	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/pet/prompts	server.go	ownerPetPrompts	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/pet/workbench	server.go	petWorkbench	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/projects	server.go	listProjects	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/projects/{id}/product-lines	server.go	listProductLines	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/prompts/entries	server.go	promptEntryCatalog	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/prompts/entries/{entry}/anchors/{anchor}	server.go	promptEntryAnchorPreview	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/prompts/migration-preview	server.go	promptMigrationPreview	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/prompts/scenario-preview	server.go	promptScenarioPreview	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/prompts/templates	server.go	promptTemplates	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/providers	server.go	listProviders	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/providers/{id}/model-detection-jobs/{job}/events	server.go	modelDetectionJobEvents	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/settings/agent-api	server.go	agentAPISettings	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/settings/backend	server.go	backendSettings	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/settings/general	server.go	generalSettings	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/settings/knowledge-review	server.go	knowledgeReviewSettings	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/settings/knowledge-vault	server.go	knowledgeVaultSettings	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/settings/network	server.go	networkSettings	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/settings/proxy	server.go	proxySettings	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/settings/security	server.go	securitySettings	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/settings/sync	server.go	syncSettings	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/settings/sync/conflicts	server.go	syncConflicts	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/settings/sync/preview	server.go	syncPreview	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/settings/sync/status	server.go	syncStatus	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/skills	server.go	listSkills	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/system	server.go	systemInfo	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/system/data	server.go	dataInventory	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/system/data/backups	server.go	previewBackupCleanup	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/system/data/conversation/purge/progress	server.go	conversationPurgeProgress	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/system/data/database	server.go	databaseStats	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/system/data/database/offline-compaction	server.go	offlineCompactionInfo	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/system/data/hardware-io/purge/progress	server.go	hardwareIOPurgeProgress	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/task-clone-sources	server.go	listTaskCloneSources	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/tasks	server.go	listTasks	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/tasks/{id}	server.go	taskDetail	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/tasks/{id}/agents	server.go	taskAgents	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/tasks/{id}/agents/{agent}/context	server.go	agentContext	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/tasks/{id}/agents/{agent}/conversation	server.go	agentConversation	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/tasks/{id}/attachments/{attachment}	server.go	taskAttachmentContent	transport_auth	pending	pending	pending	pending	pending
-GET /api/v1/tasks/{id}/browser	browser_handlers.go	taskBrowser	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/tasks/{id}/browser-grants	browser_handlers.go	listTaskBrowserGrants	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/tasks/{id}/browser-sessions	browser_handlers.go	listTaskBrowserGrants	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/tasks/{id}/channel-routes	server.go	taskChannelRoutes	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/tasks/{id}/context	server.go	taskContext	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/tasks/{id}/conversation	server.go	taskConversation	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/tasks/{id}/desktop	desktop_handlers.go	desktopStatus	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/tasks/{id}/desktop/observation	desktop_handlers.go	desktopObserve	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/tasks/{id}/desktop/stream	desktop_handlers.go	desktopStream	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/tasks/{id}/desktop/targets	desktop_handlers.go	desktopTargets	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/tasks/{id}/desktop/windows	desktop_handlers.go	desktopWindows	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/tasks/{id}/events	server.go	taskEvents	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/tasks/{id}/hardware	server.go	taskHardware	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/tasks/{id}/hardware/{hardware}/host-key	server.go	hardwareSSHHostKey	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/tasks/{id}/hardware/{hardware}/terminal	server.go	hardwareTerminal	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/tasks/{id}/hardware/{hardware}/terminal/ws	server.go	hardwareTerminalWebSocket	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/tasks/{id}/mail	server.go	taskMailOptions	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/workspaces	server.go	listWorkspaces	owner_session	pending	pending	pending	pending	pending
-GET /api/v1/workspaces/{id}/host-key	server.go	workspaceSSHHostKey	owner_session	pending	pending	pending	pending	pending
-GET /d/{token}	mail_download_handlers.go	mailDownloadConfirmPage	transport_auth	pending	pending	pending	pending	pending
-GET /healthz	server.go	health	transport_auth	not a business operation	existing transport boundary	health probe or static Web delivery; no MCP business action	existing HTTP server tests	transport_na
-PATCH /api/v1/agent/turn/memory	server.go	updateAgentMemory	agent_turn	aha2_core.memory_update	Main; writable snapshot; current Task/Turn	none	internal/httpapi/agent_pet_domains_test.go:TestPetCoreMCPCallsUseRealTurnAndKeepManagementBoundary	implemented
-PATCH /api/v1/browser/profiles/{id}	browser_handlers.go	renameBrowserProfile	owner_session	pending	pending	pending	pending	pending
-PATCH /api/v1/channel-instances/{id}	server.go	updateChannelInstance	owner_session	pending	pending	pending	pending	pending
-PATCH /api/v1/channel-plugins/{id}	server.go	updateChannelPlugin	owner_session	pending	pending	pending	pending	pending
-PATCH /api/v1/pet/watches/{task}	server.go	updatePetWatch	owner_session	pending	pending	pending	pending	pending
-PATCH /api/v1/settings/proxy/profiles/{id}	server.go	patchProxyProfile	owner_session	pending	pending	pending	pending	pending
-PATCH /api/v1/tasks/{id}	server.go	updateTaskTitle	owner_session	pending	pending	pending	pending	pending
-PATCH /api/v1/tasks/{id}/agents/{agent}	server.go	updateAgentConfig	owner_session	pending	pending	pending	pending	pending
-PATCH /api/v1/tasks/{id}/collaboration	server.go	updateTaskCollaboration	owner_session	pending	pending	pending	pending	pending
-POST /api/channel-runtime/v1/commands/{id}/attachment	server.go	channelRuntimeUploadMedia	transport_auth	pending	pending	pending	pending	pending
-POST /api/channel-runtime/v1/commands/{id}/complete	server.go	channelRuntimeCommandComplete	transport_auth	pending	pending	pending	pending	pending
-POST /api/channel-runtime/v1/commands/{id}/progress	server.go	channelRuntimeCommandProgress	transport_auth	pending	pending	pending	pending	pending
-POST /api/channel-runtime/v1/deliveries/{id}/ack	server.go	channelRuntimeDeliveryAck	transport_auth	pending	pending	pending	pending	pending
-POST /api/channel-runtime/v1/deliveries/{id}/media	server.go	channelRuntimeMediaUploaded	transport_auth	pending	pending	pending	pending	pending
-POST /api/channel-runtime/v1/deliveries/{id}/nack	server.go	channelRuntimeDeliveryNack	transport_auth	pending	pending	pending	pending	pending
-POST /api/channel-runtime/v1/handshake	server.go	channelRuntimeHandshake	transport_auth	pending	pending	pending	pending	pending
-POST /api/channel-runtime/v1/instances/{instance_id}/commands:claim	server.go	channelRuntimeClaimCommands	transport_auth	pending	pending	pending	pending	pending
-POST /api/channel-runtime/v1/instances/{instance_id}/deliveries:claim	server.go	channelRuntimeClaimDeliveries	transport_auth	pending	pending	pending	pending	pending
-POST /api/channel-runtime/v1/instances/{instance_id}/inbound-events	server.go	channelRuntimeInbound	transport_auth	pending	pending	pending	pending	pending
-POST /api/v1/agent/browser/grants/{grant}/cookies	server.go	agentBrowserImportCookies	agent_turn	pending	pending	pending	pending	pending
-POST /api/v1/agent/browser/grants/{grant}/tabs	server.go	agentBrowserOpenTab	agent_turn	pending	pending	pending	pending	pending
-POST /api/v1/agent/browser/grants/{grant}/tabs/current	server.go	agentBrowserBindCurrent	agent_turn	pending	pending	pending	pending	pending
-POST /api/v1/agent/browser/grants/{grant}/tabs/{tab}/actions	server.go	agentBrowserAction	agent_turn	pending	pending	pending	pending	pending
-POST /api/v1/agent/browser/grants/{grant}/tabs/{tab}/activate	server.go	agentBrowserActivate	agent_turn	pending	pending	pending	pending	pending
-POST /api/v1/agent/browser/grants/{grant}/tabs/{tab}/files	server.go	agentBrowserUpload	agent_turn	pending	pending	pending	pending	pending
-POST /api/v1/agent/browser/grants/{grant}/tabs/{tab}/navigate	server.go	agentBrowserNavigate	agent_turn	pending	pending	pending	pending	pending
-POST /api/v1/agent/browser/mcp	server.go	agentBrowserMCP	agent_turn	MCP protocol transport; operation tools tracked separately	agent_turn	existing authentication middleware retained	protocol suites in internal/httpapi/*mcp_test.go	transport_na
-POST /api/v1/agent/channel/actions/preview	server.go	previewAgentChannelAction	agent_turn	pending	pending	pending	pending	pending
-POST /api/v1/agent/channel/handoffs	server.go	createAgentChannelHandoff	agent_turn	pending	pending	pending	pending	pending
-POST /api/v1/agent/channel/mcp	server.go	agentChannelMCP	agent_turn	MCP protocol transport; operation tools tracked separately	agent_turn	existing authentication middleware retained	protocol suites in internal/httpapi/*mcp_test.go	transport_na
-POST /api/v1/agent/channel/messages	server.go	sendAgentTaskChannelMessage	agent_turn	pending	pending	pending	pending	pending
-POST /api/v1/agent/channel/replies	server.go	sendAgentChannelReply	agent_turn	pending	pending	pending	pending	pending
-POST /api/v1/agent/channel/reply-decision	server.go	setAgentChannelReplyDecision	agent_turn	pending	pending	pending	pending	pending
-POST /api/v1/agent/collab/mcp	server.go	agentCollabMCP	agent_turn	MCP protocol transport; operation tools tracked separately	agent_turn	existing authentication middleware retained	protocol suites in internal/httpapi/*mcp_test.go	transport_na
-POST /api/v1/agent/collaboration/batches	server.go	submitAgentCollaboration	agent_turn	pending	pending	pending	pending	pending
-POST /api/v1/agent/collaboration/batches/{batch}/wait	server.go	waitAgentCollaboration	agent_turn	pending	pending	pending	pending	pending
-POST /api/v1/agent/core/mcp	server.go	agentCoreMCP	agent_turn	MCP protocol transport; operation tools tracked separately	agent_turn	existing authentication middleware retained	protocol suites in internal/httpapi/*mcp_test.go	transport_na
-POST /api/v1/agent/desktop/actions	desktop_handlers.go	desktopAct	agent_turn	pending	pending	pending	pending	pending
-POST /api/v1/agent/desktop/control	desktop_handlers.go	desktopControl	agent_turn	pending	pending	pending	pending	pending
-POST /api/v1/agent/desktop/mcp	server.go	agentDesktopMCP	agent_turn	MCP protocol transport; desktop operations tracked separately	agent_turn	Turn capability and desktop domain gate	internal/httpapi/agent_desktop_mcp_test.go:TestDesktopMCPUsesExistingShareAndSingleUseObservation	transport_na
-POST /api/v1/agent/desktop/stop	server.go	agentDesktopStop	agent_turn	aha2_desktop.desktop_stop	live Turn; current Task; channel exclusion; write tools Main+writable snapshot; pet live permission	existing service grant/resource/observation checks retained; no target selection or credentials accepted	internal/httpapi/agent_desktop_mcp_test.go:TestDesktopMCPUsesExistingShareAndSingleUseObservation	direct
-POST /api/v1/agent/hardware/mcp	server.go	agentHardwareMCP	agent_turn	MCP protocol transport; operation tools tracked separately	agent_turn	existing authentication middleware retained	protocol suites in internal/httpapi/*mcp_test.go	transport_na
-POST /api/v1/agent/hardware/{hardware}/adb/exec	server.go	agentADBExec	agent_turn	aha2_hardware.hardware_adb_exec	Main+writable snapshot; bound writable resource; pet live create_tasks permission	no host ADB commands; owner pairing remains protected	internal/httpapi/agent_pet_domains_test.go:TestPetHardwareMCPExecUsesBoundResourceAndLivePermissions	implemented
-POST /api/v1/agent/hardware/{hardware}/connect	server.go	agentConnectHardware	agent_turn	aha2_hardware.hardware_connect	Main+writable snapshot; bound resource; pet live create_tasks permission	stored credentials only; unknown host key requires owner flow	internal/httpapi/agent_pet_domains_test.go:TestAgentMCPOperationRejectsInvalidBeforeHandlerAndSanitizesResults	implemented_unverified
-POST /api/v1/agent/hardware/{hardware}/disconnect	server.go	agentDisconnectHardware	agent_turn	aha2_hardware.hardware_disconnect	Main+writable snapshot; bound resource; pet live create_tasks permission	none	pending	implemented_unverified
-POST /api/v1/agent/hardware/{hardware}/login	server.go	agentLoginHardware	agent_turn	aha2_hardware.hardware_login	Main+writable snapshot; bound writable resource; pet live create_tasks permission	stored credentials only; password not accepted or returned	pending	implemented_unverified
-POST /api/v1/agent/hardware/{hardware}/send	server.go	agentSendHardware	agent_turn	aha2_hardware.hardware_send	Main+writable snapshot; bound writable resource; pet live create_tasks permission	no credentials schema; terminal output separate	pending	implemented_unverified
-POST /api/v1/agent/knowledge/candidates	server.go	submitAgentKnowledge	agent_turn	pending	pending	pending	pending	pending
-POST /api/v1/agent/knowledge/entries	server.go	submitAgentKnowledgeEntry	agent_turn	pending	pending	pending	pending	pending
-POST /api/v1/agent/knowledge/feedback	server.go	submitAgentKnowledgeFeedbackEntry	agent_turn	pending	pending	pending	pending	pending
-POST /api/v1/agent/knowledge/mcp	server.go	agentKnowledgeMCP	agent_turn	MCP protocol transport; operation tools tracked separately	agent_turn	existing authentication middleware retained	protocol suites in internal/httpapi/*mcp_test.go	transport_na
-POST /api/v1/agent/knowledge/{knowledge}/feedback	server.go	submitAgentKnowledgeFeedback	agent_turn	pending	pending	pending	pending	pending
-POST /api/v1/agent/mail/mcp	server.go	agentMailMCP	agent_turn	MCP protocol transport; operation tools tracked separately	agent_turn	existing authentication middleware retained	protocol suites in internal/httpapi/*mcp_test.go	transport_na
-POST /api/v1/agent/mail/messages	server.go	agentMailSend	agent_turn	pending	pending	pending	pending	pending
-POST /api/v1/agent/mail/preview	server.go	agentMailPreview	agent_turn	pending	pending	pending	pending	pending
-POST /api/v1/agent/processes	server.go	startAgentProcess	agent_turn	pending	pending	pending	pending	pending
-POST /api/v1/agent/processes/{name}/stop	server.go	stopAgentProcess	agent_turn	pending	pending	pending	pending	pending
-POST /api/v1/agent/skills	server.go	createAgentSkill	agent_turn	pending	pending	pending	pending	pending
-POST /api/v1/agent/tasks	server.go	createAgentTask	agent_turn	pending	pending	pending	pending	pending
-POST /api/v1/agent/turn/attachments	server.go	uploadAgentAttachment	agent_turn	pending	pending	pending	pending	pending
-POST /api/v1/agent/turn/inbox/ack	server.go	ackAgentInbox	agent_turn	pending	pending	pending	pending	pending
-POST /api/v1/agent/turn/inbox/claim	server.go	claimAgentInbox	agent_turn	pending	pending	pending	pending	pending
-POST /api/v1/agent/turn/inbox/wait	server.go	waitAgentInbox	agent_turn	aha2_core.inbox_wait	Turn capability; current Task/Agent; live Turn	none	internal/httpapi/agent_core_mcp_test.go:TestAgentCoreMCP	implemented
-POST /api/v1/agent/turn/messages	server.go	addAgentProgressMessage	agent_turn	aha2_core.progress; aha2_core.attachment_bind	MCP Main+writable; HTTP existing Agent scope	attachment bytes use existing upload API; IDs remain Task scoped	internal/httpapi/agent_pet_domains_test.go:TestPetCoreMCPCallsUseRealTurnAndKeepManagementBoundary	implemented
-POST /api/v1/agent/workspace/mcp	server.go	agentWorkspaceMCP	agent_turn	MCP protocol transport; operation tools tracked separately	agent_turn	existing authentication middleware retained	protocol suites in internal/httpapi/*mcp_test.go	transport_na
-POST /api/v1/assistant/hints/dismiss	server.go	dismissOwnerAssistantHint	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/assistant/messages	server.go	askOwnerAssistant	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/auth/login	server.go	authLogin	transport_auth	pending	pending	pending	pending	pending
-POST /api/v1/auth/logout	server.go	authLogout	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/auth/password	server.go	authChangePassword	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/auth/recover	server.go	authRecover	transport_auth	pending	pending	pending	pending	pending
-POST /api/v1/auth/register	server.go	authRegister	transport_auth	pending	pending	pending	pending	pending
-POST /api/v1/browser-grants/{id}/tabs	browser_handlers.go	openBrowserTab	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/browser-grants/{id}/tabs/current	browser_handlers.go	adoptBrowserCurrentTab	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/browser-grants/{id}/tabs/{tab}/activate	browser_handlers.go	activateBrowserTab	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/browser-grants/{id}/tabs/{tab}/navigate	browser_handlers.go	navigateBrowserTab	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/browser-sessions/{id}/close	browser_handlers.go	closeBrowserSession	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/browser/profiles	browser_handlers.go	createBrowserProfile	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/browser/profiles/{id}/login-window	browser_handlers.go	openBrowserLoginWindow	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/browser/profiles/{id}/transfer	browser_handlers.go	transferBrowserProfile	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/channel-deliveries/{id}/replay	server.go	replayChannelDelivery	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/channel-deliveries/{id}/skip	server.go	skipChannelDelivery	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/channel-instances	server.go	createChannelInstance	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/channel-instances/{id}/archive	server.go	archiveChannelInstance	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/channel-instances/{id}/onboarding-sessions	server.go	startChannelOnboarding	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/channel-instances/{id}/purge	server.go	purgeChannelInstance	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/channel-instances/{id}/reset-binding	server.go	resetChannelBinding	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/channel-instances/{id}/runtime-menus/reset	server.go	resetChannelRuntimeMenus	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/channel-onboarding-sessions/{id}/cancel	server.go	cancelChannelOnboarding	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/codex-accounts/import	server.go	importCodexAccount	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/codex-accounts/import-local	server.go	importLocalCodexAccount	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/codex-accounts/login	server.go	startCodexAccountLogin	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/codex-accounts/login/{id}/callback	server.go	submitCodexAccountCallback	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/codex-accounts/{id}/refresh	server.go	refreshCodexAccount	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/env-groups	server.go	createEnvGroup	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/hardware-resources	server.go	createHardwareResource	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/hardware-resources/{id}/adb/pair	server.go	pairHardwareADB	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/knowledge	server.go	createKnowledge	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/knowledge-vault/git/commit	server.go	commitKnowledgeVaultGit	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/knowledge-vault/git/init	server.go	initializeKnowledgeVaultGit	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/knowledge-vault/git/pull	server.go	pullKnowledgeVaultGit	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/knowledge-vault/git/push	server.go	pushKnowledgeVaultGit	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/knowledge-vault/git/sync	server.go	syncKnowledgeVaultGit	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/knowledge-vault/reveal	server.go	revealKnowledgeVaultPath	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/knowledge/libraries/{id}/bind	server.go	bindKnowledgeLibrary	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/knowledge/libraries/{id}/unbind	server.go	unbindKnowledgeLibrary	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/knowledge/proposals/batch	server.go	batchKnowledgeProposalReviews	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/knowledge/proposals/{id}/approve	server.go	approveKnowledgeProposal	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/knowledge/proposals/{id}/reject	server.go	rejectKnowledgeProposal	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/knowledge/{id}/feedback	server.go	feedbackKnowledge	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/knowledge/{id}/verify	server.go	verifyKnowledge	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/local/owner-messages	server.go	localOwnerMessageIngest	transport_auth	pending	pending	pending	pending	pending
-POST /api/v1/mail-accounts	server.go	createMailAccount	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/mail-accounts/{id}/test	server.go	testMailAccount	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/mail-bindings	server.go	createMailBinding	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/mail-messages	server.go	createMailMessage	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/mail-messages/{id}/approve	server.go	approveMailMessage	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/mail-messages/{id}/cancel	server.go	cancelMailMessage	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/mail-messages/{id}/download-links/{attachment_id}/revoke	server.go	revokeMailMessageDownloadLink	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/mail-messages/{id}/reject	server.go	rejectMailMessage	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/mail-messages/{id}/retry	server.go	retryMailMessage	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/mail-messages/{id}/submit	server.go	submitMailMessage	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/mail-templates	server.go	createMailTemplate	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/mail-templates/preview	server.go	previewMailTemplateContent	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/mail-templates/{id}/preview	server.go	previewMailTemplate	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/mcp-servers	server.go	saveMCPServer	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/mcp-servers/test	server.go	testMCPServer	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/models	server.go	createModel	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/models/batch-delete	server.go	requestBatchDeleteModels	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/models/{id}/health-check	server.go	checkModelHealth	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/pet/approvals/{id}/resolve	server.go	resolvePetApproval	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/pet/brain	server.go	ownerPetBrain	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/pet/control	server.go	controlOwnerPet	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/pet/mcp	server.go	petMCP	agent_turn	MCP protocol transport; operation tools tracked separately	agent_turn	existing authentication middleware retained	protocol suites in internal/httpapi/*mcp_test.go	transport_na
-POST /api/v1/pet/navigation/claim	server.go	claimOwnerPetNavigation	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/pet/reset	server.go	resetOwnerPet	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/pet/watches/{task}	server.go	followPetWatch	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/projects	server.go	createProject	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/projects/{id}/knowledge-space	server.go	retryProjectKnowledgeSpace	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/projects/{id}/knowledge/detach	server.go	detachProjectKnowledge	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/projects/{id}/product-lines	server.go	createProductLine	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/prompts/templates/{id}/reset	server.go	resetPromptTemplate	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/providers	server.go	createProvider	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/providers/add-models	server.go	addModelsHandler	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/providers/detect-models	server.go	detectModelsHandler	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/providers/{id}/model-detection-jobs	server.go	createModelDetectionJob	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/providers/{id}/model-detection-jobs/{job}/cancel	server.go	cancelModelDetectionJob	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/providers/{id}/model-probes	server.go	probeProviderModel	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/rounds/{id}/interrupt	server.go	interruptRound	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/settings/knowledge-vault/cutover-legacy	server.go	cutoverLegacyKnowledge	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/settings/knowledge-vault/import	server.go	importKnowledgeVault	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/settings/knowledge-vault/init	server.go	initializeKnowledgeVault	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/settings/knowledge-vault/migrate	server.go	migrateKnowledgeVault	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/settings/knowledge-vault/rebuild	server.go	rebuildKnowledgeVaultIndex	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/settings/proxy/profiles/{id}/activate	server.go	activateProxyProfile	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/settings/proxy/profiles/{id}/nodes/{node_id}/test	server.go	testProxyNode	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/settings/proxy/profiles/{id}/refresh	server.go	refreshProxyProfile	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/settings/proxy/subscription	server.go	importProxySubscription	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/settings/proxy/subscription/refresh	server.go	refreshProxySubscription	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/settings/proxy/test	server.go	testProxySettings	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/settings/sync/conflicts/{id}/resolve	server.go	resolveSyncConflict	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/settings/sync/run	server.go	runSync	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/skills	server.go	rejectRemovedSkillWrite	owner_session	Web also rejects this removed legacy mutation	owner session still cannot execute	use the vault Skill management operations instead	existing Skill removal tests; exact reference pending	web_prohibited_na
-POST /api/v1/system/data/cleanup	server.go	cleanupData	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/system/data/conversation/preview	server.go	previewConversationPurge	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/system/data/conversation/purge	server.go	purgeConversation	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/system/data/hardware-io/preview	server.go	previewHardwareIOPurge	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/system/data/hardware-io/purge	server.go	purgeHardwareIO	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/tasks	server.go	createTask	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/tasks/{id}/agents/{agent}/messages	server.go	submitAgentMessage	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/tasks/{id}/agents/{agent}/session/compact	server.go	compactAgentSession	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/tasks/{id}/agents/{agent}/session/reset	server.go	resetAgentSession	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/tasks/{id}/attachments	server.go	uploadTaskAttachment	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/tasks/{id}/browser-grants	browser_handlers.go	createTaskBrowserGrant	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/tasks/{id}/browser-sessions	browser_handlers.go	createTaskBrowserGrant	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/tasks/{id}/channel-members:refresh	server.go	refreshTaskChannelMembers	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/tasks/{id}/channel-routes	server.go	bindTaskChannelRoute	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/tasks/{id}/complete	server.go	completeTask	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/tasks/{id}/desktop/actions	desktop_handlers.go	desktopAct	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/tasks/{id}/desktop/control	desktop_handlers.go	desktopControl	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/tasks/{id}/desktop/session	desktop_handlers.go	desktopOpen	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/tasks/{id}/desktop/stop	desktop_handlers.go	desktopStop	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/tasks/{id}/desktop/switch	desktop_handlers.go	desktopSwitch	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/tasks/{id}/hardware/{hardware}/connect	server.go	connectHardware	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/tasks/{id}/hardware/{hardware}/disconnect	server.go	disconnectHardware	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/tasks/{id}/hardware/{hardware}/host-key/trust	server.go	trustHardwareSSHHostKey	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/tasks/{id}/hardware/{hardware}/send	server.go	sendHardware	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/tasks/{id}/messages	server.go	submitMessage	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/tasks/{id}/permission-requests/{request}/resolve	server.go	resolveTaskPermissionRequest	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/tasks/{id}/reopen	server.go	reopenTask	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/tasks/{id}/start	server.go	startTask	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/tasks/{id}/takeover	server.go	takeoverTask	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/turns/{id}/interrupt	server.go	interruptTurn	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/workspaces	server.go	createWorkspace	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/workspaces/{id}/detect	server.go	detectWorkspaceHandler	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/workspaces/{id}/host-key/trust	server.go	trustWorkspaceSSHHostKey	owner_session	pending	pending	pending	pending	pending
-POST /api/v1/workspaces/{id}/takeover	server.go	takeoverWorkspace	owner_session	pending	pending	pending	pending	pending
-POST /d/{token}/confirm	mail_download_handlers.go	mailDownloadConfirm	transport_auth	pending	pending	pending	pending	pending
-PUT /api/channel-runtime/v1/instances/{instance_id}/health	server.go	channelRuntimeHealth	transport_auth	pending	pending	pending	pending	pending
-PUT /api/v1/agent/skills/{skill}	server.go	updateAgentSkill	agent_turn	pending	pending	pending	pending	pending
-PUT /api/v1/assistant	server.go	updateOwnerAssistant	owner_session	pending	pending	pending	pending	pending
-PUT /api/v1/channel-instances/{id}/credentials	server.go	updateChannelCredentials	owner_session	pending	pending	pending	pending	pending
-PUT /api/v1/channel-instances/{id}/knowledge-bindings	server.go	updateChannelKnowledgeBindings	owner_session	pending	pending	pending	pending	pending
-PUT /api/v1/channel-instances/{id}/knowledge-bindings/group	server.go	updateChannelGroupKnowledgeBindings	owner_session	pending	pending	pending	pending	pending
-PUT /api/v1/channel-instances/{id}/knowledge-policy	server.go	updateChannelKnowledgePolicy	owner_session	pending	pending	pending	pending	pending
-PUT /api/v1/hardware-resources/{id}	server.go	updateHardwareResource	owner_session	pending	pending	pending	pending	pending
-PUT /api/v1/knowledge-vault/git/remote	server.go	updateKnowledgeVaultGitRemote	owner_session	pending	pending	pending	pending	pending
-PUT /api/v1/knowledge-vault/skills/auto-attach	server.go	updateKnowledgeVaultSkillAutoAttach	owner_session	pending	pending	pending	pending	pending
-PUT /api/v1/knowledge/{id}	server.go	updateKnowledge	owner_session	pending	pending	pending	pending	pending
-PUT /api/v1/mail-accounts/{id}	server.go	updateMailAccount	owner_session	pending	pending	pending	pending	pending
-PUT /api/v1/mail-bindings/{id}	server.go	updateMailBinding	owner_session	pending	pending	pending	pending	pending
-PUT /api/v1/mail-templates/{id}	server.go	updateMailTemplate	owner_session	pending	pending	pending	pending	pending
-PUT /api/v1/models/{id}	server.go	updateModel	owner_session	pending	pending	pending	pending	pending
-PUT /api/v1/pet	server.go	updateOwnerPetState	owner_session	pending	pending	pending	pending	pending
-PUT /api/v1/pet/settings	server.go	updateOwnerPetSettings	owner_session	pending	pending	pending	pending	pending
-PUT /api/v1/pet/workbench/core/{name}	server.go	savePetWorkbenchDocument	owner_session	pending	pending	pending	pending	pending
-PUT /api/v1/pet/workbench/worklog/{name}	server.go	savePetWorkbenchDocument	owner_session	pending	pending	pending	pending	pending
-PUT /api/v1/projects/{id}	server.go	updateProject	owner_session	pending	pending	pending	pending	pending
-PUT /api/v1/prompts/templates/{id}	server.go	updatePromptTemplate	owner_session	pending	pending	pending	pending	pending
-PUT /api/v1/providers/{id}	server.go	updateProvider	owner_session	pending	pending	pending	pending	pending
-PUT /api/v1/settings/agent-api	server.go	updateAgentAPISettings	owner_session	pending	pending	pending	pending	pending
-PUT /api/v1/settings/backend	server.go	updateBackendSettings	owner_session	pending	pending	pending	pending	pending
-PUT /api/v1/settings/general	server.go	updateGeneralSettings	owner_session	pending	pending	pending	pending	pending
-PUT /api/v1/settings/knowledge-review	server.go	updateKnowledgeReviewSettings	owner_session	pending	pending	pending	pending	pending
-PUT /api/v1/settings/knowledge-vault	server.go	updateKnowledgeVaultSettings	owner_session	pending	pending	pending	pending	pending
-PUT /api/v1/settings/network	server.go	updateNetworkSettings	owner_session	pending	pending	pending	pending	pending
-PUT /api/v1/settings/proxy	server.go	updateProxySettings	owner_session	pending	pending	pending	pending	pending
-PUT /api/v1/settings/security	server.go	updateSecuritySettings	owner_session	pending	pending	pending	pending	pending
-PUT /api/v1/settings/sync	server.go	updateSyncSettings	owner_session	pending	pending	pending	pending	pending
-PUT /api/v1/skills/{id}	server.go	rejectRemovedSkillWrite	owner_session	Web also rejects this removed legacy mutation	owner session still cannot execute	use the vault Skill management operations instead	existing Skill removal tests; exact reference pending	web_prohibited_na
-PUT /api/v1/system/data/conversation/retention	server.go	updateConversationRetention	owner_session	pending	pending	pending	pending	pending
-PUT /api/v1/system/data/hardware-io/retention	server.go	updateHardwareIORetention	owner_session	pending	pending	pending	pending	pending
-PUT /api/v1/tasks/{id}/channel-contacts	server.go	updateTaskChannelContacts	owner_session	pending	pending	pending	pending	pending
-PUT /api/v1/tasks/{id}/hardware	server.go	updateTaskHardware	owner_session	pending	pending	pending	pending	pending
-PUT /api/v1/tasks/{id}/hardware-bindings	server.go	updateTaskHardwareBindings	owner_session	aha2-pet.aha_update_task_hardware	owner session OR pet create_tasks; manageable Task	binding identities retained; max 16; validate before disconnect	internal/app/agent_pet_domains_test.go:TestPetHardwareBindingReplacementPreservesIdentityAndRejectsWithoutMutation	implemented
-PUT /api/v1/tasks/{id}/mcp-servers	server.go	setTaskMCPServers	owner_session	pending	pending	pending	pending	pending
-PUT /api/v1/workspaces/{id}	server.go	updateWorkspace	owner_session	pending	pending	pending	pending	pending
+operation	server	source	handler	boundary	fingerprint	mcp	permission	protected_flow	tests	status
+ANY /	httpapi	internal/httpapi/server.go	serveWeb	transport_auth	7d932ea4626c	none	none (public static assets)	static Web assets and SPA fallback; no business action or data	internal/httpapi/web_test.go:TestServeWebUnknownRouteStillFallsBackToSPA; internal/httpapi/web_test.go:TestServeWebServesBrowserNewTabAsHTTPPage	transport_na
+ANY /api/v1/prompts/entries	httpapi	internal/httpapi/server.go	rejectPromptReadOnly	owner_session	4f923e677b97	pending	pending	pending	pending	pending
+ANY /api/v1/prompts/entries/{entry}/anchors/{anchor}	httpapi	internal/httpapi/server.go	rejectPromptReadOnly	owner_session	4f923e677b97	pending	pending	pending	pending	pending
+ANY /api/v1/prompts/migration-preview	httpapi	internal/httpapi/server.go	rejectPromptReadOnly	owner_session	4f923e677b97	pending	pending	pending	pending	pending
+ANY /api/v1/prompts/scenario-preview	httpapi	internal/httpapi/server.go	rejectPromptReadOnly	owner_session	4f923e677b97	pending	pending	pending	pending	pending
+DELETE /api/v1/agent/browser/grants/{grant}	httpapi	internal/httpapi/server.go	agentBrowserRelease	agent_turn	af8026fc11d0	aha2_browser.browser_release	live Turn; current Task; channel exclusion; write tools Main+writable snapshot; pet live permission	existing service grant/resource/observation checks retained; no target selection or credentials accepted	internal/httpapi/agent_browser_workspace_operations_test.go:TestBrowserMCPOperationsUseExistingGrantAndKeepSecretValuesOut	stale
+DELETE /api/v1/agent/browser/grants/{grant}/tabs/{tab}	httpapi	internal/httpapi/server.go	agentBrowserCloseTab	agent_turn	172f07a6d8f8	aha2_browser.browser_tab_close	live Turn; current Task; channel exclusion; write tools Main+writable snapshot; pet live permission	existing service grant/resource/observation checks retained; no target selection or credentials accepted	internal/httpapi/agent_browser_workspace_operations_test.go:TestBrowserMCPOperationsUseExistingGrantAndKeepSecretValuesOut	stale
+DELETE /api/v1/browser-grants/{id}	httpapi	internal/httpapi/browser_handlers.go	revokeBrowserGrant	owner_session	0696dced67c4	pending	pending	pending	pending	pending
+DELETE /api/v1/browser-grants/{id}/tabs/{tab}	httpapi	internal/httpapi/browser_handlers.go	closeBrowserTab	owner_session	09abb88456d8	pending	pending	pending	pending	pending
+DELETE /api/v1/browser/profiles/{id}	httpapi	internal/httpapi/browser_handlers.go	deleteBrowserProfile	owner_session	09b33681a770	pending	pending	pending	pending	pending
+DELETE /api/v1/browser/profiles/{id}/session	httpapi	internal/httpapi/browser_handlers.go	closeBrowserProfileSession	owner_session	02d5b6629071	pending	pending	pending	pending	pending
+DELETE /api/v1/codex-accounts/login/{id}	httpapi	internal/httpapi/server.go	cancelCodexAccountLogin	owner_session	62dea9b1a3b0	pending	pending	pending	pending	pending
+DELETE /api/v1/codex-accounts/{id}	httpapi	internal/httpapi/server.go	deleteCodexAccount	owner_session	cc2dc032b51a	pending	pending	pending	pending	pending
+DELETE /api/v1/hardware-resources/{id}	httpapi	internal/httpapi/server.go	deleteHardwareResource	owner_session	59194ee3baf1	pending	pending	pending	pending	pending
+DELETE /api/v1/knowledge/libraries/{id}	httpapi	internal/httpapi/server.go	deleteKnowledgeLibrary	owner_session	8912939bd196	pending	pending	pending	pending	pending
+DELETE /api/v1/knowledge/{id}	httpapi	internal/httpapi/server.go	deleteKnowledge	owner_session	35973089d80c	pending	pending	pending	pending	pending
+DELETE /api/v1/mail-accounts/{id}	httpapi	internal/httpapi/server.go	deleteMailAccount	owner_session	163331da39d5	pending	pending	pending	pending	pending
+DELETE /api/v1/mail-bindings/{id}	httpapi	internal/httpapi/server.go	deleteMailBinding	owner_session	1bf15057ce89	pending	pending	pending	pending	pending
+DELETE /api/v1/mail-templates/{id}	httpapi	internal/httpapi/server.go	deleteMailTemplate	owner_session	66fd3effb470	pending	pending	pending	pending	pending
+DELETE /api/v1/mcp-servers/{id}	httpapi	internal/httpapi/server.go	deleteMCPServer	owner_session	b07e16c3bf5a	pending	pending	pending	pending	pending
+DELETE /api/v1/models/{id}	httpapi	internal/httpapi/server.go	deleteModel	owner_session	b81c98694980	pending	pending	pending	pending	pending
+DELETE /api/v1/pet/watches/{task}	httpapi	internal/httpapi/server.go	deletePetWatch	owner_session	554550ebf732	pending	pending	pending	pending	pending
+DELETE /api/v1/projects/{id}	httpapi	internal/httpapi/server.go	deleteProject	owner_session	0304b04b9ecd	pending	pending	pending	pending	pending
+DELETE /api/v1/projects/{id}/knowledge	httpapi	internal/httpapi/server.go	deleteProjectKnowledge	owner_session	364ed2fdad08	pending	pending	pending	pending	pending
+DELETE /api/v1/projects/{id}/product-lines/{line}	httpapi	internal/httpapi/server.go	deleteProductLine	owner_session	d061eccab702	pending	pending	pending	pending	pending
+DELETE /api/v1/providers/{id}	httpapi	internal/httpapi/server.go	deleteProvider	owner_session	d68aca6a2ee9	pending	pending	pending	pending	pending
+DELETE /api/v1/settings/proxy/profiles/{id}	httpapi	internal/httpapi/server.go	deleteProxyProfile	owner_session	fca09fb08ebc	pending	pending	pending	pending	pending
+DELETE /api/v1/skills/{id}	httpapi	internal/httpapi/server.go	rejectRemovedSkillWrite	owner_session	dcac79ed64a4	none	owner session; still rejected	removed legacy Skill write; Web and API both answer 405, Skill changes use the vault Skill operations	internal/httpapi/skill_write_removed_test.go:TestRemovedSkillWriteRoutesReturnMethodNotAllowed	web_prohibited_na
+DELETE /api/v1/tasks/{id}	httpapi	internal/httpapi/server.go	deleteTask	owner_session	456f6d5732b0	pending	pending	pending	pending	pending
+DELETE /api/v1/tasks/{id}/attachments/{attachment}	httpapi	internal/httpapi/server.go	deleteTaskAttachment	owner_session	a6d58d42bb5e	pending	pending	pending	pending	pending
+DELETE /api/v1/tasks/{id}/channel-routes/{route}	httpapi	internal/httpapi/server.go	unbindTaskChannelRoute	owner_session	20a8c89ccc81	pending	pending	pending	pending	pending
+DELETE /api/v1/tasks/{id}/remote-mirror	httpapi	internal/httpapi/server.go	retireRemoteTaskMirror	owner_session	c0b1e2e3260c	pending	pending	pending	pending	pending
+DELETE /api/v1/workspaces/{id}	httpapi	internal/httpapi/server.go	deleteWorkspace	owner_session	8d6ed13ab007	pending	pending	pending	pending	pending
+DELETE /api/v1/workspaces/{id}/remote-mirror	httpapi	internal/httpapi/server.go	retireRemoteWorkspaceMirror	owner_session	e5020201a205	pending	pending	pending	pending	pending
+GET /api/channel-runtime/v1/deliveries/{id}/attachment	httpapi	internal/httpapi/server.go	withChannelCapability	transport_auth	e1d101d20c1a	pending	pending	pending	pending	pending
+GET /api/v1/agent/browser	httpapi	internal/httpapi/server.go	agentBrowserState	agent_turn	fa5fbb802383	pending	pending	pending	pending	pending
+GET /api/v1/agent/browser/grants/{grant}/bookmarks	httpapi	internal/httpapi/server.go	agentBrowserBookmarks	agent_turn	ecfef9413442	aha2_browser.browser_bookmarks_list	live Turn; current Task; channel exclusion; write tools Main+writable snapshot; pet live permission	existing service grant/resource/observation checks retained; no target selection or credentials accepted	pending	stale
+GET /api/v1/agent/browser/grants/{grant}/cookies	httpapi	internal/httpapi/server.go	agentBrowserCookies	agent_turn	bf221ea39bfd	pending	pending	pending	pending	pending
+GET /api/v1/agent/browser/grants/{grant}/downloads	httpapi	internal/httpapi/server.go	agentBrowserDownloads	agent_turn	8e89d68acbfe	aha2_browser.browser_downloads_list	live Turn; current Task; channel exclusion; write tools Main+writable snapshot; pet live permission	existing service grant/resource/observation checks retained; no target selection or credentials accepted	pending	stale
+GET /api/v1/agent/browser/grants/{grant}/downloads/{download}	httpapi	internal/httpapi/server.go	agentBrowserDownload	agent_turn	fa265103af3a	aha2_browser.browser_download_get; existing authenticated byte transport for large downloads	live Turn; current Task; channel exclusion; write tools Main+writable snapshot; pet live permission	existing service grant/resource/observation checks retained; no target selection or credentials accepted	pending	stale
+GET /api/v1/agent/browser/grants/{grant}/tabs	httpapi	internal/httpapi/server.go	agentBrowserTabs	agent_turn	5638f2fd7ee6	pending	pending	pending	pending	pending
+GET /api/v1/agent/browser/grants/{grant}/tabs/{tab}/frame	httpapi	internal/httpapi/server.go	agentBrowserFrame	agent_turn	e032ab7f9192	aha2_browser.browser_frame	live Turn; current Task; channel exclusion; write tools Main+writable snapshot; pet live permission	existing service grant/resource/observation checks retained; no target selection or credentials accepted	internal/httpapi/agent_browser_workspace_operations_test.go:TestBrowserMCPOperationsUseExistingGrantAndKeepSecretValuesOut	stale
+GET /api/v1/agent/browser/grants/{grant}/tabs/{tab}/snapshot	httpapi	internal/httpapi/server.go	agentBrowserSnapshot	agent_turn	0e007e440538	pending	pending	pending	pending	pending
+GET /api/v1/agent/capabilities	httpapi	internal/httpapi/server.go	agentCapabilitiesInfo	agent_turn	2ce1a4cbeeb0	aha2_core.capabilities	Turn capability; live Task/Agent/Turn	none	internal/httpapi/agent_pet_domains_test.go:TestPetCoreMCPCallsUseRealTurnAndKeepManagementBoundary	stale
+GET /api/v1/agent/channel/catalog	httpapi	internal/httpapi/server.go	agentChannelCatalog	agent_turn	4704b71efeee	pending	pending	pending	pending	pending
+GET /api/v1/agent/channel/contacts	httpapi	internal/httpapi/server.go	agentTaskChannelContacts	agent_turn	d2de2ae87302	pending	pending	pending	pending	pending
+GET /api/v1/agent/channel/context	httpapi	internal/httpapi/server.go	agentChannelContext	agent_turn	77cddcd8fbcc	pending	pending	pending	pending	pending
+GET /api/v1/agent/desktop	httpapi	internal/httpapi/desktop_handlers.go	desktopStatus	agent_turn	c1b31ca1e14b	aha2_desktop.desktop_status	live Turn; current Task; channel exclusion; write tools Main+writable snapshot; pet live permission	existing service grant/resource/observation checks retained; no target selection or credentials accepted	internal/httpapi/agent_desktop_mcp_test.go:TestDesktopMCPUsesExistingShareAndSingleUseObservation	stale
+GET /api/v1/agent/desktop/observation	httpapi	internal/httpapi/desktop_handlers.go	desktopObserve	agent_turn	32c0e7e62ac2	aha2_desktop.desktop_observe	live Turn; current Task; channel exclusion; write tools Main+writable snapshot; pet live permission	existing service grant/resource/observation checks retained; no target selection or credentials accepted	internal/httpapi/agent_desktop_mcp_test.go:TestDesktopMCPUsesExistingShareAndSingleUseObservation	stale
+GET /api/v1/agent/hardware	httpapi	internal/httpapi/server.go	agentHardware	agent_turn	696d555070a0	aha2_hardware.hardware_list	bound Task resources; channel gate; pet live view permission	no credential values or internal device endpoints returned	internal/httpapi/agent_hardware_mcp_test.go:TestAgentHardwareMCPListOnlyExposesBoundNonSensitiveFields	stale
+GET /api/v1/agent/hardware/{hardware}/terminal	httpapi	internal/httpapi/server.go	agentHardwareTerminal	agent_turn	884f11781bef	aha2_hardware.hardware_terminal_read	bound Task resource; channel gate; pet live view permission	bounded output; no automatic connection	internal/httpapi/agent_hardware_mcp_test.go:TestAgentHardwareMCPTerminalReadPagingAndCaps	stale
+GET /api/v1/agent/knowledge	httpapi	internal/httpapi/server.go	agentKnowledge	agent_turn	032fc5960306	pending	pending	pending	pending	pending
+GET /api/v1/agent/knowledge/guide	httpapi	internal/httpapi/server.go	agentKnowledgeGuide	agent_turn	df4e74710e7d	pending	pending	pending	pending	pending
+GET /api/v1/agent/knowledge/{knowledge}	httpapi	internal/httpapi/server.go	agentKnowledgeEntry	agent_turn	3ad977880f56	pending	pending	pending	pending	pending
+GET /api/v1/agent/mail/accounts	httpapi	internal/httpapi/server.go	agentMailAccounts	agent_turn	cabc192bba79	pending	pending	pending	pending	pending
+GET /api/v1/agent/mail/messages/{id}	httpapi	internal/httpapi/server.go	agentMailMessageStatus	agent_turn	bb2bb0fff2e0	pending	pending	pending	pending	pending
+GET /api/v1/agent/mail/templates	httpapi	internal/httpapi/server.go	agentMailTemplates	agent_turn	cdc0974ac9bc	pending	pending	pending	pending	pending
+GET /api/v1/agent/mail/templates/{id}	httpapi	internal/httpapi/server.go	agentMailTemplateDetail	agent_turn	19119c5a66b6	pending	pending	pending	pending	pending
+GET /api/v1/agent/processes	httpapi	internal/httpapi/server.go	agentProcesses	agent_turn	c2a0fe7fa717	pending	pending	pending	pending	pending
+GET /api/v1/agent/processes/{name}	httpapi	internal/httpapi/server.go	agentProcessStatus	agent_turn	4917b281b335	pending	pending	pending	pending	pending
+GET /api/v1/agent/project/runtimes	httpapi	internal/httpapi/server.go	agentProjectRuntimes	agent_turn	8e4579b4cde7	pending	pending	pending	pending	pending
+GET /api/v1/agent/project/workspaces	httpapi	internal/httpapi/server.go	agentProjectWorkspaces	agent_turn	14da067d859a	pending	pending	pending	pending	pending
+GET /api/v1/agent/skills	httpapi	internal/httpapi/server.go	agentSkills	agent_turn	6296994b4ff6	pending	pending	pending	pending	pending
+GET /api/v1/agent/skills/{skill}	httpapi	internal/httpapi/server.go	agentSkill	agent_turn	ffa8dc6a44e5	pending	pending	pending	pending	pending
+GET /api/v1/agent/tasks/{task}	httpapi	internal/httpapi/server.go	agentTaskStatus	agent_turn	ee234efaebf9	pending	pending	pending	pending	pending
+GET /api/v1/assistant	httpapi	internal/httpapi/server.go	ownerAssistant	owner_session	609d2b2d389f	pending	pending	pending	pending	pending
+GET /api/v1/assistant/hints	httpapi	internal/httpapi/server.go	ownerAssistantHints	owner_session	a6ab25dcb059	pending	pending	pending	pending	pending
+GET /api/v1/auth/status	httpapi	internal/httpapi/server.go	authStatus	transport_auth	d34e4b7b5fa0	pending	pending	pending	pending	pending
+GET /api/v1/browser-grants/{id}	httpapi	internal/httpapi/browser_handlers.go	browserGrantDetail	owner_session	14c17363cc84	pending	pending	pending	pending	pending
+GET /api/v1/browser-grants/{id}/bookmarks	httpapi	internal/httpapi/browser_handlers.go	browserGrantBookmarks	owner_session	ad0bcfb6b311	pending	pending	pending	pending	pending
+GET /api/v1/browser-grants/{id}/tabs	httpapi	internal/httpapi/browser_handlers.go	listBrowserGrantTabs	owner_session	3f3fe6c71b9a	pending	pending	pending	pending	pending
+GET /api/v1/browser-grants/{id}/tabs/{tab}/frame	httpapi	internal/httpapi/browser_handlers.go	browserTabFrame	owner_session	0d8e1f255cc1	pending	pending	pending	pending	pending
+GET /api/v1/browser-grants/{id}/tabs/{tab}/snapshot	httpapi	internal/httpapi/browser_handlers.go	snapshotBrowserTab	owner_session	83d161e1935c	pending	pending	pending	pending	pending
+GET /api/v1/browser/host	httpapi	internal/httpapi/browser_handlers.go	browserHostHealth	owner_session	0d3eae43b463	pending	pending	pending	pending	pending
+GET /api/v1/browser/profiles	httpapi	internal/httpapi/browser_handlers.go	listBrowserProfiles	owner_session	97f732a50d5e	pending	pending	pending	pending	pending
+GET /api/v1/browser/profiles/{id}	httpapi	internal/httpapi/browser_handlers.go	browserProfileDetail	owner_session	3e07ec5a501a	pending	pending	pending	pending	pending
+GET /api/v1/browser/profiles/{id}/session	httpapi	internal/httpapi/browser_handlers.go	browserProfileSession	owner_session	a3180a45cff8	pending	pending	pending	pending	pending
+GET /api/v1/channel-deliveries/{id}/attempts	httpapi	internal/httpapi/server.go	channelDeliveryAttempts	owner_session	d8f68db6b683	pending	pending	pending	pending	pending
+GET /api/v1/channel-instances	httpapi	internal/httpapi/server.go	channelInstances	owner_session	e9f17bc45e0e	pending	pending	pending	pending	pending
+GET /api/v1/channel-instances/{id}	httpapi	internal/httpapi/server.go	channelInstance	owner_session	bea19e276126	pending	pending	pending	pending	pending
+GET /api/v1/channel-instances/{id}/conversations	httpapi	internal/httpapi/server.go	channelConversationSummaries	owner_session	c94d543fd018	pending	pending	pending	pending	pending
+GET /api/v1/channel-instances/{id}/deliveries	httpapi	internal/httpapi/server.go	channelDeliveries	owner_session	1138aef9aee7	pending	pending	pending	pending	pending
+GET /api/v1/channel-instances/{id}/handoffs	httpapi	internal/httpapi/server.go	channelHandoffs	owner_session	07231a3a5e0d	pending	pending	pending	pending	pending
+GET /api/v1/channel-instances/{id}/knowledge-bindings	httpapi	internal/httpapi/server.go	channelKnowledgeBindings	owner_session	d13282ccb8d7	pending	pending	pending	pending	pending
+GET /api/v1/channel-instances/{id}/knowledge-policy	httpapi	internal/httpapi/server.go	channelKnowledgePolicy	owner_session	5e3031711393	pending	pending	pending	pending	pending
+GET /api/v1/channel-instances/{id}/onboarding-options	httpapi	internal/httpapi/server.go	channelOnboardingOptions	owner_session	077afb338f7a	pending	pending	pending	pending	pending
+GET /api/v1/channel-instances/{id}/purge-preview	httpapi	internal/httpapi/server.go	channelPurgePreview	owner_session	d22ef0d038be	pending	pending	pending	pending	pending
+GET /api/v1/channel-onboarding-sessions/{id}	httpapi	internal/httpapi/server.go	channelOnboarding	owner_session	71c9a92e956f	pending	pending	pending	pending	pending
+GET /api/v1/channel-onboarding-sessions/{id}/qr	httpapi	internal/httpapi/server.go	channelOnboardingQR	owner_session	ee7feb75646d	pending	pending	pending	pending	pending
+GET /api/v1/channel-providers	httpapi	internal/httpapi/server.go	channelProviders	owner_session	2893a68d5419	pending	pending	pending	pending	pending
+GET /api/v1/codex-accounts	httpapi	internal/httpapi/server.go	listCodexAccounts	owner_session	52bbe428f6b0	pending	pending	pending	pending	pending
+GET /api/v1/codex-accounts/login/{id}	httpapi	internal/httpapi/server.go	codexAccountLoginStatus	owner_session	276647c94174	pending	pending	pending	pending	pending
+GET /api/v1/env-groups	httpapi	internal/httpapi/server.go	listEnvGroups	owner_session	b32d791fd4f1	pending	pending	pending	pending	pending
+GET /api/v1/events	httpapi	internal/httpapi/server.go	allEvents	owner_session	a573a7b9116b	pending	pending	pending	pending	pending
+GET /api/v1/hardware-resources	httpapi	internal/httpapi/server.go	listHardwareResources	owner_session	d4374eeba374	pending	pending	pending	pending	pending
+GET /api/v1/hardware/serial-ports	httpapi	internal/httpapi/server.go	hardwareSerialPorts	owner_session	786f3169d90f	pending	pending	pending	pending	pending
+GET /api/v1/knowledge	httpapi	internal/httpapi/server.go	listKnowledge	owner_session	5b602d063536	pending	pending	pending	pending	pending
+GET /api/v1/knowledge-vault/doc/{id}	httpapi	internal/httpapi/server.go	knowledgeVaultDocument	owner_session	fac4f8fba4d8	pending	pending	pending	pending	pending
+GET /api/v1/knowledge-vault/doc/{id}/diff	httpapi	internal/httpapi/server.go	knowledgeVaultDocumentDiff	owner_session	651e4e544c5e	pending	pending	pending	pending	pending
+GET /api/v1/knowledge-vault/file	httpapi	internal/httpapi/server.go	knowledgeVaultFile	owner_session	85e31c12584a	pending	pending	pending	pending	pending
+GET /api/v1/knowledge-vault/file/download	httpapi	internal/httpapi/server.go	knowledgeVaultFileDownload	owner_session	c206477c2836	pending	pending	pending	pending	pending
+GET /api/v1/knowledge-vault/files	httpapi	internal/httpapi/server.go	knowledgeVaultFiles	owner_session	253a988c3944	pending	pending	pending	pending	pending
+GET /api/v1/knowledge-vault/git/status	httpapi	internal/httpapi/server.go	knowledgeVaultGitStatus	owner_session	be7fe63739f2	pending	pending	pending	pending	pending
+GET /api/v1/knowledge-vault/inbox	httpapi	internal/httpapi/server.go	knowledgeVaultInbox	owner_session	cea23db05f59	pending	pending	pending	pending	pending
+GET /api/v1/knowledge-vault/libraries	httpapi	internal/httpapi/server.go	knowledgeVaultLibraries	owner_session	5ba2d9aa3fa2	pending	pending	pending	pending	pending
+GET /api/v1/knowledge-vault/open-info	httpapi	internal/httpapi/server.go	knowledgeVaultOpenInfo	owner_session	0ec916caeb0a	pending	pending	pending	pending	pending
+GET /api/v1/knowledge-vault/recent	httpapi	internal/httpapi/server.go	knowledgeVaultRecent	owner_session	dd191184de31	pending	pending	pending	pending	pending
+GET /api/v1/knowledge-vault/search	httpapi	internal/httpapi/server.go	knowledgeVaultSearch	owner_session	1bca1f44b5c9	pending	pending	pending	pending	pending
+GET /api/v1/knowledge-vault/skills	httpapi	internal/httpapi/server.go	knowledgeVaultSkills	owner_session	c1bd3971e751	pending	pending	pending	pending	pending
+GET /api/v1/knowledge-vault/tree	httpapi	internal/httpapi/server.go	knowledgeVaultTree	owner_session	deba842fbef5	pending	pending	pending	pending	pending
+GET /api/v1/knowledge/indexes	httpapi	internal/httpapi/server.go	knowledgeIndexes	owner_session	fd1785808b04	pending	pending	pending	pending	pending
+GET /api/v1/knowledge/libraries	httpapi	internal/httpapi/server.go	listKnowledgeLibraries	owner_session	f9999c133192	pending	pending	pending	pending	pending
+GET /api/v1/knowledge/proposals	httpapi	internal/httpapi/server.go	listKnowledgeProposals	owner_session	088317f80f4a	pending	pending	pending	pending	pending
+GET /api/v1/knowledge/{id}	httpapi	internal/httpapi/server.go	knowledgeDetail	owner_session	59dcdd951155	pending	pending	pending	pending	pending
+GET /api/v1/mail-accounts	httpapi	internal/httpapi/server.go	listMailAccounts	owner_session	e659d82512c1	pending	pending	pending	pending	pending
+GET /api/v1/mail-accounts/{id}	httpapi	internal/httpapi/server.go	mailAccountDetail	owner_session	cb54b265bdb7	pending	pending	pending	pending	pending
+GET /api/v1/mail-bindings	httpapi	internal/httpapi/server.go	listMailBindings	owner_session	06f6b22669b8	pending	pending	pending	pending	pending
+GET /api/v1/mail-messages	httpapi	internal/httpapi/server.go	listMailMessages	owner_session	4875090ce73e	pending	pending	pending	pending	pending
+GET /api/v1/mail-messages/{id}	httpapi	internal/httpapi/server.go	mailMessageDetail	owner_session	c85555d59ef6	pending	pending	pending	pending	pending
+GET /api/v1/mail-messages/{id}/attempts	httpapi	internal/httpapi/server.go	mailMessageAttempts	owner_session	ca64b884b107	pending	pending	pending	pending	pending
+GET /api/v1/mail-messages/{id}/download-links	httpapi	internal/httpapi/server.go	mailMessageDownloadLinks	owner_session	2e0bf04bd967	pending	pending	pending	pending	pending
+GET /api/v1/mail-templates	httpapi	internal/httpapi/server.go	listMailTemplates	owner_session	1fa059f2c8cb	pending	pending	pending	pending	pending
+GET /api/v1/mail-templates/{id}	httpapi	internal/httpapi/server.go	mailTemplateDetail	owner_session	c69929dcbd1f	pending	pending	pending	pending	pending
+GET /api/v1/mail-templates/{id}/versions	httpapi	internal/httpapi/server.go	mailTemplateVersions	owner_session	cbdbd19f9005	pending	pending	pending	pending	pending
+GET /api/v1/mcp-servers	httpapi	internal/httpapi/server.go	listMCPServers	owner_session	c87d4c8f48a7	pending	pending	pending	pending	pending
+GET /api/v1/mcp-servers/{id}	httpapi	internal/httpapi/server.go	mcpServerDetail	owner_session	14226fd5f960	pending	pending	pending	pending	pending
+GET /api/v1/models	httpapi	internal/httpapi/server.go	listModels	owner_session	118123b3b794	pending	pending	pending	pending	pending
+GET /api/v1/pet	httpapi	internal/httpapi/server.go	ownerPetState	owner_session	bc250407762d	pending	pending	pending	pending	pending
+GET /api/v1/pet/activity	httpapi	internal/httpapi/server.go	ownerPetActivity	owner_session	42b35bf2b1d9	pending	pending	pending	pending	pending
+GET /api/v1/pet/approvals/pending-count	httpapi	internal/httpapi/server.go	petPendingApprovalCount	owner_session	ce65cf2ada42	pending	pending	pending	pending	pending
+GET /api/v1/pet/events	httpapi	internal/httpapi/server.go	ownerPetEvents	owner_session	c4cd0221be32	pending	pending	pending	pending	pending
+GET /api/v1/pet/prompts	httpapi	internal/httpapi/server.go	ownerPetPrompts	owner_session	032305154e76	pending	pending	pending	pending	pending
+GET /api/v1/pet/workbench	httpapi	internal/httpapi/server.go	petWorkbench	owner_session	7f136c3d9038	pending	pending	pending	pending	pending
+GET /api/v1/projects	httpapi	internal/httpapi/server.go	listProjects	owner_session	f5aa8ac5b85a	pending	pending	pending	pending	pending
+GET /api/v1/projects/{id}/product-lines	httpapi	internal/httpapi/server.go	listProductLines	owner_session	82ec949cd92f	pending	pending	pending	pending	pending
+GET /api/v1/prompts/entries	httpapi	internal/httpapi/server.go	promptEntryCatalog	owner_session	36f5ac49df7f	pending	pending	pending	pending	pending
+GET /api/v1/prompts/entries/{entry}/anchors/{anchor}	httpapi	internal/httpapi/server.go	promptEntryAnchorPreview	owner_session	53142e1d168b	pending	pending	pending	pending	pending
+GET /api/v1/prompts/migration-preview	httpapi	internal/httpapi/server.go	promptMigrationPreview	owner_session	10919e37dfc5	pending	pending	pending	pending	pending
+GET /api/v1/prompts/scenario-preview	httpapi	internal/httpapi/server.go	promptScenarioPreview	owner_session	270beb975f40	pending	pending	pending	pending	pending
+GET /api/v1/prompts/templates	httpapi	internal/httpapi/server.go	promptTemplates	owner_session	376de212c965	pending	pending	pending	pending	pending
+GET /api/v1/providers	httpapi	internal/httpapi/server.go	listProviders	owner_session	89ed6c3e760a	pending	pending	pending	pending	pending
+GET /api/v1/providers/{id}/model-detection-jobs/{job}/events	httpapi	internal/httpapi/server.go	modelDetectionJobEvents	owner_session	540019b5147f	pending	pending	pending	pending	pending
+GET /api/v1/settings/agent-api	httpapi	internal/httpapi/server.go	agentAPISettings	owner_session	5e7970a91901	pending	pending	pending	pending	pending
+GET /api/v1/settings/backend	httpapi	internal/httpapi/server.go	backendSettings	owner_session	1f6cae6ff0c2	pending	pending	pending	pending	pending
+GET /api/v1/settings/general	httpapi	internal/httpapi/server.go	generalSettings	owner_session	0ce71def9858	pending	pending	pending	pending	pending
+GET /api/v1/settings/knowledge-review	httpapi	internal/httpapi/server.go	knowledgeReviewSettings	owner_session	95b3f1ba9029	pending	pending	pending	pending	pending
+GET /api/v1/settings/knowledge-vault	httpapi	internal/httpapi/server.go	knowledgeVaultSettings	owner_session	a570e6a8cbda	pending	pending	pending	pending	pending
+GET /api/v1/settings/network	httpapi	internal/httpapi/server.go	networkSettings	owner_session	ba1d495af2ac	pending	pending	pending	pending	pending
+GET /api/v1/settings/proxy	httpapi	internal/httpapi/server.go	proxySettings	owner_session	1761832c9ded	pending	pending	pending	pending	pending
+GET /api/v1/settings/security	httpapi	internal/httpapi/server.go	securitySettings	owner_session	cf046cde901e	pending	pending	pending	pending	pending
+GET /api/v1/settings/sync	httpapi	internal/httpapi/server.go	syncSettings	owner_session	c0656d05778c	pending	pending	pending	pending	pending
+GET /api/v1/settings/sync/conflicts	httpapi	internal/httpapi/server.go	syncConflicts	owner_session	f9e9134f50d5	pending	pending	pending	pending	pending
+GET /api/v1/settings/sync/preview	httpapi	internal/httpapi/server.go	syncPreview	owner_session	4e4df0a0d5dd	pending	pending	pending	pending	pending
+GET /api/v1/settings/sync/status	httpapi	internal/httpapi/server.go	syncStatus	owner_session	623a77b167ac	pending	pending	pending	pending	pending
+GET /api/v1/skills	httpapi	internal/httpapi/server.go	listSkills	owner_session	070e840ca8b0	pending	pending	pending	pending	pending
+GET /api/v1/system	httpapi	internal/httpapi/server.go	systemInfo	owner_session	4c232fddebc8	pending	pending	pending	pending	pending
+GET /api/v1/system/data	httpapi	internal/httpapi/server.go	dataInventory	owner_session	06f6a01494ca	pending	pending	pending	pending	pending
+GET /api/v1/system/data/backups	httpapi	internal/httpapi/server.go	previewBackupCleanup	owner_session	8a0323018db5	pending	pending	pending	pending	pending
+GET /api/v1/system/data/conversation/purge/progress	httpapi	internal/httpapi/server.go	conversationPurgeProgress	owner_session	51d76a672dca	pending	pending	pending	pending	pending
+GET /api/v1/system/data/database	httpapi	internal/httpapi/server.go	databaseStats	owner_session	950dd466fb0a	pending	pending	pending	pending	pending
+GET /api/v1/system/data/database/offline-compaction	httpapi	internal/httpapi/server.go	offlineCompactionInfo	owner_session	4fbd74158e7d	pending	pending	pending	pending	pending
+GET /api/v1/system/data/hardware-io/purge/progress	httpapi	internal/httpapi/server.go	hardwareIOPurgeProgress	owner_session	d13a099226cd	pending	pending	pending	pending	pending
+GET /api/v1/task-clone-sources	httpapi	internal/httpapi/server.go	listTaskCloneSources	owner_session	6247ec76afc0	pending	pending	pending	pending	pending
+GET /api/v1/tasks	httpapi	internal/httpapi/server.go	listTasks	owner_session	557a48ab4674	pending	pending	pending	pending	pending
+GET /api/v1/tasks/{id}	httpapi	internal/httpapi/server.go	taskDetail	owner_session	78c1c28b1374	pending	pending	pending	pending	pending
+GET /api/v1/tasks/{id}/agents	httpapi	internal/httpapi/server.go	taskAgents	owner_session	d1dd24d221e9	pending	pending	pending	pending	pending
+GET /api/v1/tasks/{id}/agents/{agent}/context	httpapi	internal/httpapi/server.go	agentContext	owner_session	afb9ece30d6f	pending	pending	pending	pending	pending
+GET /api/v1/tasks/{id}/agents/{agent}/conversation	httpapi	internal/httpapi/server.go	agentConversation	owner_session	e3de6644605a	pending	pending	pending	pending	pending
+GET /api/v1/tasks/{id}/attachments/{attachment}	httpapi	internal/httpapi/server.go	taskAttachmentContent	owner_or_agent	4fa8e10776f1	pending	pending	pending	pending	pending
+GET /api/v1/tasks/{id}/browser	httpapi	internal/httpapi/browser_handlers.go	taskBrowser	owner_session	5ceb9341933f	pending	pending	pending	pending	pending
+GET /api/v1/tasks/{id}/browser-grants	httpapi	internal/httpapi/browser_handlers.go	listTaskBrowserGrants	owner_session	1e396bdb5abb	pending	pending	pending	pending	pending
+GET /api/v1/tasks/{id}/browser-sessions	httpapi	internal/httpapi/browser_handlers.go	listTaskBrowserGrants	owner_session	1e396bdb5abb	pending	pending	pending	pending	pending
+GET /api/v1/tasks/{id}/channel-routes	httpapi	internal/httpapi/server.go	taskChannelRoutes	owner_session	de0fe2d511cd	pending	pending	pending	pending	pending
+GET /api/v1/tasks/{id}/context	httpapi	internal/httpapi/server.go	taskContext	owner_session	d0b45e1288e5	pending	pending	pending	pending	pending
+GET /api/v1/tasks/{id}/conversation	httpapi	internal/httpapi/server.go	taskConversation	owner_session	db1ca4d3a260	pending	pending	pending	pending	pending
+GET /api/v1/tasks/{id}/desktop	httpapi	internal/httpapi/desktop_handlers.go	desktopStatus	owner_session	b085f71f2c3c	pending	pending	pending	pending	pending
+GET /api/v1/tasks/{id}/desktop/observation	httpapi	internal/httpapi/desktop_handlers.go	desktopObserve	owner_session	8a8ca2327a87	pending	pending	pending	pending	pending
+GET /api/v1/tasks/{id}/desktop/stream	httpapi	internal/httpapi/desktop_handlers.go	desktopStream	owner_session	f41bdc367355	pending	pending	pending	pending	pending
+GET /api/v1/tasks/{id}/desktop/targets	httpapi	internal/httpapi/desktop_handlers.go	desktopTargets	owner_session	8fdbcf19bf00	pending	pending	pending	pending	pending
+GET /api/v1/tasks/{id}/desktop/windows	httpapi	internal/httpapi/desktop_handlers.go	desktopWindows	owner_session	1c7152f14802	pending	pending	pending	pending	pending
+GET /api/v1/tasks/{id}/events	httpapi	internal/httpapi/server.go	taskEvents	owner_session	88909018d331	pending	pending	pending	pending	pending
+GET /api/v1/tasks/{id}/hardware	httpapi	internal/httpapi/server.go	taskHardware	owner_session	62fd549da794	pending	pending	pending	pending	pending
+GET /api/v1/tasks/{id}/hardware/{hardware}/host-key	httpapi	internal/httpapi/server.go	hardwareSSHHostKey	owner_session	cec50c483734	pending	pending	pending	pending	pending
+GET /api/v1/tasks/{id}/hardware/{hardware}/terminal	httpapi	internal/httpapi/server.go	hardwareTerminal	owner_session	70a7c37ca04d	pending	pending	pending	pending	pending
+GET /api/v1/tasks/{id}/hardware/{hardware}/terminal/ws	httpapi	internal/httpapi/server.go	hardwareTerminalWebSocket	owner_session	27a829ca6fb5	pending	pending	pending	pending	pending
+GET /api/v1/tasks/{id}/mail	httpapi	internal/httpapi/server.go	taskMailOptions	owner_session	c1f83106d259	pending	pending	pending	pending	pending
+GET /api/v1/workspaces	httpapi	internal/httpapi/server.go	listWorkspaces	owner_session	8558d36ccf03	pending	pending	pending	pending	pending
+GET /api/v1/workspaces/{id}/host-key	httpapi	internal/httpapi/server.go	workspaceSSHHostKey	owner_session	69273cf1fa22	pending	pending	pending	pending	pending
+GET /d/{token}	mail-download	internal/httpapi/mail_download_handlers.go	mailDownloadConfirmPage	transport_auth	5beb7fa9f2c9	pending	pending	pending	pending	pending
+GET /healthz	centersync	internal/centersync/service.go	inline	transport_auth	ce06a910b2e6	none	device token (or one-time bootstrap code) of the separate aha-sync center service	device-to-center sync protocol served by cmd/aha-sync, not the owner Web listener; owner sync management is the httpapi settings/sync rows	internal/centersync/service_test.go:TestHealthAndAuthentication	transport_na
+GET /healthz	httpapi	internal/httpapi/server.go	health	transport_auth	56d4cce0d9f0	none	none (liveness probe)	returns only ok/service; no business data	internal/httpapi/pet_coverage_ledger_test.go:TestHealthProbeCarriesNoBusinessData	transport_na
+GET /v1/sync/pull	centersync	internal/centersync/service.go	inline	device_token	b70e1e6f4bff	none	device token (or one-time bootstrap code) of the separate aha-sync center service	device-to-center sync protocol served by cmd/aha-sync, not the owner Web listener; owner sync management is the httpapi settings/sync rows	internal/centersync/service_test.go:TestPushIsIdempotentAndPullIsIncremental	transport_na
+PATCH /api/v1/agent/turn/memory	httpapi	internal/httpapi/server.go	updateAgentMemory	agent_turn	bbedd9b72033	aha2_core.memory_update	Main; writable snapshot; current Task/Turn	none	internal/httpapi/agent_pet_domains_test.go:TestPetCoreMCPCallsUseRealTurnAndKeepManagementBoundary	stale
+PATCH /api/v1/browser/profiles/{id}	httpapi	internal/httpapi/browser_handlers.go	renameBrowserProfile	owner_session	81aad22e2da0	pending	pending	pending	pending	pending
+PATCH /api/v1/channel-instances/{id}	httpapi	internal/httpapi/server.go	updateChannelInstance	owner_session	aff6e852482c	pending	pending	pending	pending	pending
+PATCH /api/v1/channel-plugins/{id}	httpapi	internal/httpapi/server.go	updateChannelPlugin	owner_session	f321a722a04b	pending	pending	pending	pending	pending
+PATCH /api/v1/pet/watches/{task}	httpapi	internal/httpapi/server.go	updatePetWatch	owner_session	eed899230af5	pending	pending	pending	pending	pending
+PATCH /api/v1/settings/proxy/profiles/{id}	httpapi	internal/httpapi/server.go	patchProxyProfile	owner_session	94edf5483c6f	pending	pending	pending	pending	pending
+PATCH /api/v1/tasks/{id}	httpapi	internal/httpapi/server.go	updateTaskTitle	owner_session	6f65ebe59602	pending	pending	pending	pending	pending
+PATCH /api/v1/tasks/{id}/agents/{agent}	httpapi	internal/httpapi/server.go	updateAgentConfig	owner_session	becd09e3e680	pending	pending	pending	pending	pending
+PATCH /api/v1/tasks/{id}/collaboration	httpapi	internal/httpapi/server.go	updateTaskCollaboration	owner_session	fcb61ead4e18	pending	pending	pending	pending	pending
+PATCH /v1/devices/self	centersync	internal/centersync/service.go	inline	device_token	f6a1dc16ce2d	none	device token (or one-time bootstrap code) of the separate aha-sync center service	device-to-center sync protocol served by cmd/aha-sync, not the owner Web listener; owner sync management is the httpapi settings/sync rows	internal/centersync/service_test.go:TestDeviceRenameKeepsCenterGeneratedID	transport_na
+POST /api/channel-runtime/v1/commands/{id}/attachment	httpapi	internal/httpapi/server.go	withChannelCapability	transport_auth	e1d101d20c1a	pending	pending	pending	pending	pending
+POST /api/channel-runtime/v1/commands/{id}/complete	httpapi	internal/httpapi/server.go	withChannelCapability	transport_auth	e1d101d20c1a	pending	pending	pending	pending	pending
+POST /api/channel-runtime/v1/commands/{id}/progress	httpapi	internal/httpapi/server.go	withChannelCapability	transport_auth	e1d101d20c1a	pending	pending	pending	pending	pending
+POST /api/channel-runtime/v1/deliveries/{id}/ack	httpapi	internal/httpapi/server.go	withChannelCapability	transport_auth	e1d101d20c1a	pending	pending	pending	pending	pending
+POST /api/channel-runtime/v1/deliveries/{id}/media	httpapi	internal/httpapi/server.go	withChannelCapability	transport_auth	e1d101d20c1a	pending	pending	pending	pending	pending
+POST /api/channel-runtime/v1/deliveries/{id}/nack	httpapi	internal/httpapi/server.go	withChannelCapability	transport_auth	e1d101d20c1a	pending	pending	pending	pending	pending
+POST /api/channel-runtime/v1/handshake	httpapi	internal/httpapi/server.go	withChannelCapability	transport_auth	e1d101d20c1a	pending	pending	pending	pending	pending
+POST /api/channel-runtime/v1/instances/{instance_id}/commands:claim	httpapi	internal/httpapi/server.go	withChannelCapability	transport_auth	e1d101d20c1a	pending	pending	pending	pending	pending
+POST /api/channel-runtime/v1/instances/{instance_id}/deliveries:claim	httpapi	internal/httpapi/server.go	withChannelCapability	transport_auth	e1d101d20c1a	pending	pending	pending	pending	pending
+POST /api/channel-runtime/v1/instances/{instance_id}/inbound-events	httpapi	internal/httpapi/server.go	withChannelCapability	transport_auth	e1d101d20c1a	pending	pending	pending	pending	pending
+POST /api/v1/agent/browser/grants/{grant}/cookies	httpapi	internal/httpapi/server.go	agentBrowserImportCookies	agent_turn	0af73298bb82	pending	pending	pending	pending	pending
+POST /api/v1/agent/browser/grants/{grant}/tabs	httpapi	internal/httpapi/server.go	agentBrowserOpenTab	agent_turn	d9c036413870	aha2_browser.browser_tab_open	live Turn; current Task; channel exclusion; write tools Main+writable snapshot; pet live permission	existing service grant/resource/observation checks retained; no target selection or credentials accepted	internal/httpapi/agent_browser_workspace_operations_test.go:TestBrowserMCPOperationsUseExistingGrantAndKeepSecretValuesOut	stale
+POST /api/v1/agent/browser/grants/{grant}/tabs/current	httpapi	internal/httpapi/server.go	agentBrowserBindCurrent	agent_turn	df70de5f291b	aha2_browser.browser_tab_bind_current	live Turn; current Task; channel exclusion; write tools Main+writable snapshot; pet live permission	existing service grant/resource/observation checks retained; no target selection or credentials accepted	pending	stale
+POST /api/v1/agent/browser/grants/{grant}/tabs/{tab}/actions	httpapi	internal/httpapi/server.go	agentBrowserAction	agent_turn	7d8326918c1b	aha2_browser.browser_action	live Turn; current Task; channel exclusion; write tools Main+writable snapshot; pet live permission	existing service grant/resource/observation checks retained; no target selection or credentials accepted	internal/httpapi/agent_browser_workspace_operations_test.go:TestBrowserMCPOperationsUseExistingGrantAndKeepSecretValuesOut	stale
+POST /api/v1/agent/browser/grants/{grant}/tabs/{tab}/activate	httpapi	internal/httpapi/server.go	agentBrowserActivate	agent_turn	4a150454db54	aha2_browser.browser_tab_activate	live Turn; current Task; channel exclusion; write tools Main+writable snapshot; pet live permission	existing service grant/resource/observation checks retained; no target selection or credentials accepted	pending	stale
+POST /api/v1/agent/browser/grants/{grant}/tabs/{tab}/files	httpapi	internal/httpapi/server.go	agentBrowserUpload	agent_turn	b41029b80721	aha2_browser.browser_upload; existing Agent byte transport for large files	live Turn; current Task; channel exclusion; write tools Main+writable snapshot; pet live permission	existing service grant/resource/observation checks retained; no target selection or credentials accepted	internal/httpapi/agent_browser_workspace_operations_test.go:TestBrowserMCPOperationsUseExistingGrantAndKeepSecretValuesOut	stale
+POST /api/v1/agent/browser/grants/{grant}/tabs/{tab}/navigate	httpapi	internal/httpapi/server.go	agentBrowserNavigate	agent_turn	1d051e7a57a1	aha2_browser.browser_navigate	live Turn; current Task; channel exclusion; write tools Main+writable snapshot; pet live permission	existing service grant/resource/observation checks retained; no target selection or credentials accepted	internal/httpapi/agent_browser_workspace_operations_test.go:TestBrowserMCPOperationsUseExistingGrantAndKeepSecretValuesOut	stale
+POST /api/v1/agent/browser/mcp	httpapi	internal/httpapi/server.go	agentBrowserMCP	agent_turn	1814239c8f90	none	Agent token; Turn capability and per-domain gate in the handler	MCP JSON-RPC transport only; every tool it serves is a row of task-mcp-tools.tsv or the pet tool catalog	internal/httpapi/agent_browser_mcp_test.go:TestAgentBrowserMCPRequiresCapabilityAndDomainGate	transport_na
+POST /api/v1/agent/channel/actions/preview	httpapi	internal/httpapi/server.go	previewAgentChannelAction	agent_turn	3dcfcf023ec8	pending	pending	pending	pending	pending
+POST /api/v1/agent/channel/handoffs	httpapi	internal/httpapi/server.go	createAgentChannelHandoff	agent_turn	116bb3f5d0a4	pending	pending	pending	pending	pending
+POST /api/v1/agent/channel/mcp	httpapi	internal/httpapi/server.go	agentChannelMCP	agent_turn	f32ac6643d9a	none	Agent token; Turn capability and per-domain gate in the handler	MCP JSON-RPC transport only; every tool it serves is a row of task-mcp-tools.tsv or the pet tool catalog	internal/httpapi/channel_mcp_test.go:TestAgentChannelMCPRequiresCapabilityAndExposesOnlyTwoTools	transport_na
+POST /api/v1/agent/channel/messages	httpapi	internal/httpapi/server.go	sendAgentTaskChannelMessage	agent_turn	0965550fa660	pending	pending	pending	pending	pending
+POST /api/v1/agent/channel/replies	httpapi	internal/httpapi/server.go	sendAgentChannelReply	agent_turn	e7ad2ecf0db8	pending	pending	pending	pending	pending
+POST /api/v1/agent/channel/reply-decision	httpapi	internal/httpapi/server.go	setAgentChannelReplyDecision	agent_turn	b35b9a8f6851	pending	pending	pending	pending	pending
+POST /api/v1/agent/collab/mcp	httpapi	internal/httpapi/server.go	agentCollabMCP	agent_turn	17f60bcdd138	none	Agent token; Turn capability and per-domain gate in the handler	MCP JSON-RPC transport only; every tool it serves is a row of task-mcp-tools.tsv or the pet tool catalog	internal/httpapi/agent_collab_mcp_test.go:TestAgentCollabMCPRequiresCapabilityAndDomainGate	transport_na
+POST /api/v1/agent/collaboration/batches	httpapi	internal/httpapi/server.go	submitAgentCollaboration	agent_turn	9240d85d1049	pending	pending	pending	pending	pending
+POST /api/v1/agent/collaboration/batches/{batch}/wait	httpapi	internal/httpapi/server.go	waitAgentCollaboration	agent_turn	e5f04eb20e24	pending	pending	pending	pending	pending
+POST /api/v1/agent/core/mcp	httpapi	internal/httpapi/server.go	agentCoreMCP	agent_turn	dc162322101a	none	Agent token; Turn capability and per-domain gate in the handler	MCP JSON-RPC transport only; every tool it serves is a row of task-mcp-tools.tsv or the pet tool catalog	internal/httpapi/agent_core_mcp_test.go:TestAgentCoreMCPRequiresCapabilityAndRunningTurn	transport_na
+POST /api/v1/agent/desktop/actions	httpapi	internal/httpapi/desktop_handlers.go	desktopAct	agent_turn	38bd57ff92cf	aha2_desktop.desktop_action	live Turn; current Task; channel exclusion; write tools Main+writable snapshot; pet live permission	existing service grant/resource/observation checks retained; no target selection or credentials accepted	internal/httpapi/agent_desktop_mcp_test.go:TestDesktopMCPUsesExistingShareAndSingleUseObservation	stale
+POST /api/v1/agent/desktop/control	httpapi	internal/httpapi/desktop_handlers.go	desktopControl	agent_turn	f8339577bb60	aha2_desktop.desktop_control	live Turn; current Task; channel exclusion; write tools Main+writable snapshot; pet live permission	existing service grant/resource/observation checks retained; no target selection or credentials accepted	internal/httpapi/agent_desktop_mcp_test.go:TestDesktopMCPUsesExistingShareAndSingleUseObservation	stale
+POST /api/v1/agent/desktop/mcp	httpapi	internal/httpapi/server.go	agentDesktopMCP	agent_turn	a4f4faf31814	none	Agent token; Turn capability and per-domain gate in the handler	MCP JSON-RPC transport only; every tool it serves is a row of task-mcp-tools.tsv or the pet tool catalog	internal/httpapi/agent_desktop_mcp_test.go:TestDesktopMCPUsesExistingShareAndSingleUseObservation	transport_na
+POST /api/v1/agent/desktop/stop	httpapi	internal/httpapi/server.go	agentDesktopStop	agent_turn	4ffd4613931d	aha2_desktop.desktop_stop	live Turn; current Task; channel exclusion; write tools Main+writable snapshot; pet live permission	existing service grant/resource/observation checks retained; no target selection or credentials accepted	internal/httpapi/agent_desktop_mcp_test.go:TestDesktopMCPUsesExistingShareAndSingleUseObservation	stale
+POST /api/v1/agent/hardware/mcp	httpapi	internal/httpapi/server.go	agentHardwareMCP	agent_turn	838c600634cd	none	Agent token; Turn capability and per-domain gate in the handler	MCP JSON-RPC transport only; every tool it serves is a row of task-mcp-tools.tsv or the pet tool catalog	internal/httpapi/agent_hardware_mcp_test.go:TestAgentHardwareMCPRequiresCapabilityAndDomainGate	transport_na
+POST /api/v1/agent/hardware/{hardware}/adb/exec	httpapi	internal/httpapi/server.go	agentADBExec	agent_turn	21fe24c5da74	aha2_hardware.hardware_adb_exec	Main+writable snapshot; bound writable resource; pet live create_tasks permission	no host ADB commands; owner pairing remains protected	internal/httpapi/agent_pet_domains_test.go:TestPetHardwareMCPExecUsesBoundResourceAndLivePermissions	stale
+POST /api/v1/agent/hardware/{hardware}/connect	httpapi	internal/httpapi/server.go	agentConnectHardware	agent_turn	816e180e45e6	aha2_hardware.hardware_connect	Main+writable snapshot; bound resource; pet live create_tasks permission	stored credentials only; unknown host key requires owner flow	internal/httpapi/agent_pet_domains_test.go:TestAgentMCPOperationRejectsInvalidBeforeHandlerAndSanitizesResults	stale
+POST /api/v1/agent/hardware/{hardware}/disconnect	httpapi	internal/httpapi/server.go	agentDisconnectHardware	agent_turn	a5ce4adfadfa	aha2_hardware.hardware_disconnect	Main+writable snapshot; bound resource; pet live create_tasks permission	none	pending	stale
+POST /api/v1/agent/hardware/{hardware}/login	httpapi	internal/httpapi/server.go	agentLoginHardware	agent_turn	67479df095a6	aha2_hardware.hardware_login	Main+writable snapshot; bound writable resource; pet live create_tasks permission	stored credentials only; password not accepted or returned	pending	stale
+POST /api/v1/agent/hardware/{hardware}/send	httpapi	internal/httpapi/server.go	agentSendHardware	agent_turn	c1d6cf8ec92c	aha2_hardware.hardware_send	Main+writable snapshot; bound writable resource; pet live create_tasks permission	no credentials schema; terminal output separate	pending	stale
+POST /api/v1/agent/knowledge/candidates	httpapi	internal/httpapi/server.go	submitAgentKnowledge	agent_turn	a84be4fd9657	pending	pending	pending	pending	pending
+POST /api/v1/agent/knowledge/entries	httpapi	internal/httpapi/server.go	submitAgentKnowledgeEntry	agent_turn	c22adf5e62f4	pending	pending	pending	pending	pending
+POST /api/v1/agent/knowledge/feedback	httpapi	internal/httpapi/server.go	submitAgentKnowledgeFeedbackEntry	agent_turn	506f41ec88ff	pending	pending	pending	pending	pending
+POST /api/v1/agent/knowledge/mcp	httpapi	internal/httpapi/server.go	agentKnowledgeMCP	agent_turn	f01fad870adc	none	Agent token; Turn capability and per-domain gate in the handler	MCP JSON-RPC transport only; every tool it serves is a row of task-mcp-tools.tsv or the pet tool catalog	internal/httpapi/agent_knowledge_mcp_test.go:TestAgentKnowledgeMCPRequiresCapabilityAndDomainGate	transport_na
+POST /api/v1/agent/knowledge/{knowledge}/feedback	httpapi	internal/httpapi/server.go	submitAgentKnowledgeFeedback	agent_turn	d80170bc7eb6	pending	pending	pending	pending	pending
+POST /api/v1/agent/mail/mcp	httpapi	internal/httpapi/server.go	agentMailMCP	agent_turn	7160868f3790	none	Agent token; Turn capability and per-domain gate in the handler	MCP JSON-RPC transport only; every tool it serves is a row of task-mcp-tools.tsv or the pet tool catalog	internal/httpapi/mail_agent_handlers_test.go:TestAgentMailMCPTools	transport_na
+POST /api/v1/agent/mail/messages	httpapi	internal/httpapi/server.go	agentMailSend	agent_turn	b2c57a516062	pending	pending	pending	pending	pending
+POST /api/v1/agent/mail/preview	httpapi	internal/httpapi/server.go	agentMailPreview	agent_turn	d97d9831fd97	pending	pending	pending	pending	pending
+POST /api/v1/agent/processes	httpapi	internal/httpapi/server.go	startAgentProcess	agent_turn	8b1518be0ef7	aha2_workspace.workspace_process_start	live Turn; current Task; channel exclusion; write tools Main+writable snapshot; pet live permission	existing service grant/resource/observation checks retained; no target selection or credentials accepted	internal/httpapi/agent_browser_workspace_operations_test.go:TestWorkspaceMCPStartsAndStopsOnlyCurrentTaskProcess	stale
+POST /api/v1/agent/processes/{name}/stop	httpapi	internal/httpapi/server.go	stopAgentProcess	agent_turn	378cc595b920	aha2_workspace.workspace_process_stop	live Turn; current Task; channel exclusion; write tools Main+writable snapshot; pet live permission	existing service grant/resource/observation checks retained; no target selection or credentials accepted	internal/httpapi/agent_browser_workspace_operations_test.go:TestWorkspaceMCPStartsAndStopsOnlyCurrentTaskProcess	stale
+POST /api/v1/agent/skills	httpapi	internal/httpapi/server.go	createAgentSkill	agent_turn	96c03107f208	pending	pending	pending	pending	pending
+POST /api/v1/agent/tasks	httpapi	internal/httpapi/server.go	createAgentTask	agent_turn	85e402adcb14	pending	pending	pending	pending	pending
+POST /api/v1/agent/turn/attachments	httpapi	internal/httpapi/server.go	uploadAgentAttachment	agent_turn	525ff84121fa	pending	pending	pending	pending	pending
+POST /api/v1/agent/turn/inbox/ack	httpapi	internal/httpapi/server.go	ackAgentInbox	agent_turn	4b9c601ff774	pending	pending	pending	pending	pending
+POST /api/v1/agent/turn/inbox/claim	httpapi	internal/httpapi/server.go	claimAgentInbox	agent_turn	a125d11ddf8e	pending	pending	pending	pending	pending
+POST /api/v1/agent/turn/inbox/wait	httpapi	internal/httpapi/server.go	waitAgentInbox	agent_turn	99728c71f02d	aha2_core.inbox_wait	Turn capability; current Task/Agent; live Turn	none	internal/httpapi/live_inbox_test.go:TestAgentLiveInboxClaimAckHTTP; internal/httpapi/agent_core_pet_scope_test.go:TestPetCoreKeepsOwnTurnAccessWithoutReadingOtherInternalTasks	stale
+POST /api/v1/agent/turn/messages	httpapi	internal/httpapi/server.go	addAgentProgressMessage	agent_turn	56c815ea76c0	aha2_core.progress; aha2_core.attachment_bind	MCP Main+writable; HTTP existing Agent scope	attachment bytes use existing upload API; IDs remain Task scoped	internal/httpapi/agent_pet_domains_test.go:TestPetCoreMCPCallsUseRealTurnAndKeepManagementBoundary	stale
+POST /api/v1/agent/workspace/mcp	httpapi	internal/httpapi/server.go	agentWorkspaceMCP	agent_turn	63345b5ddb67	none	Agent token; Turn capability and per-domain gate in the handler	MCP JSON-RPC transport only; every tool it serves is a row of task-mcp-tools.tsv or the pet tool catalog	internal/httpapi/agent_workspace_mcp_test.go:TestAgentWorkspaceMCPRequiresCapabilityAndDomainGate	transport_na
+POST /api/v1/assistant/hints/dismiss	httpapi	internal/httpapi/server.go	dismissOwnerAssistantHint	owner_session	839f72196e0d	pending	pending	pending	pending	pending
+POST /api/v1/assistant/messages	httpapi	internal/httpapi/server.go	askOwnerAssistant	owner_session	ac79df8165f8	pending	pending	pending	pending	pending
+POST /api/v1/auth/login	httpapi	internal/httpapi/server.go	authLogin	transport_auth	3e087d36b5d9	pending	pending	pending	pending	pending
+POST /api/v1/auth/logout	httpapi	internal/httpapi/server.go	authLogout	owner_session	088258af9855	pending	pending	pending	pending	pending
+POST /api/v1/auth/password	httpapi	internal/httpapi/server.go	authChangePassword	owner_session	3b7e5ecc798a	pending	pending	pending	pending	pending
+POST /api/v1/auth/recover	httpapi	internal/httpapi/server.go	authRecover	transport_auth	f732eab3881c	pending	pending	pending	pending	pending
+POST /api/v1/auth/register	httpapi	internal/httpapi/server.go	authRegister	transport_auth	fa9bbba74fcd	pending	pending	pending	pending	pending
+POST /api/v1/browser-grants/{id}/tabs	httpapi	internal/httpapi/browser_handlers.go	openBrowserTab	owner_session	0539288f2859	pending	pending	pending	pending	pending
+POST /api/v1/browser-grants/{id}/tabs/current	httpapi	internal/httpapi/browser_handlers.go	adoptBrowserCurrentTab	owner_session	6e0dfa3db343	pending	pending	pending	pending	pending
+POST /api/v1/browser-grants/{id}/tabs/{tab}/activate	httpapi	internal/httpapi/browser_handlers.go	activateBrowserTab	owner_session	bc3f3958ba5b	pending	pending	pending	pending	pending
+POST /api/v1/browser-grants/{id}/tabs/{tab}/navigate	httpapi	internal/httpapi/browser_handlers.go	navigateBrowserTab	owner_session	61cc15bf36a5	pending	pending	pending	pending	pending
+POST /api/v1/browser-sessions/{id}/close	httpapi	internal/httpapi/browser_handlers.go	closeBrowserSession	owner_session	3fd72afb2af6	pending	pending	pending	pending	pending
+POST /api/v1/browser/profiles	httpapi	internal/httpapi/browser_handlers.go	createBrowserProfile	owner_session	4381003a6d44	pending	pending	pending	pending	pending
+POST /api/v1/browser/profiles/{id}/login-window	httpapi	internal/httpapi/browser_handlers.go	openBrowserLoginWindow	owner_session	da770b23fe25	pending	pending	pending	pending	pending
+POST /api/v1/browser/profiles/{id}/transfer	httpapi	internal/httpapi/browser_handlers.go	transferBrowserProfile	owner_session	a1316b606fc8	pending	pending	pending	pending	pending
+POST /api/v1/channel-deliveries/{id}/replay	httpapi	internal/httpapi/server.go	replayChannelDelivery	owner_session	69e26e3ab8db	pending	pending	pending	pending	pending
+POST /api/v1/channel-deliveries/{id}/skip	httpapi	internal/httpapi/server.go	skipChannelDelivery	owner_session	f9b5eaa4f339	pending	pending	pending	pending	pending
+POST /api/v1/channel-instances	httpapi	internal/httpapi/server.go	createChannelInstance	owner_session	8b8cc544d838	pending	pending	pending	pending	pending
+POST /api/v1/channel-instances/{id}/archive	httpapi	internal/httpapi/server.go	archiveChannelInstance	owner_session	7a8f9944468a	pending	pending	pending	pending	pending
+POST /api/v1/channel-instances/{id}/onboarding-sessions	httpapi	internal/httpapi/server.go	startChannelOnboarding	owner_session	dff2d9c14fef	pending	pending	pending	pending	pending
+POST /api/v1/channel-instances/{id}/purge	httpapi	internal/httpapi/server.go	purgeChannelInstance	owner_session	70269baee975	pending	pending	pending	pending	pending
+POST /api/v1/channel-instances/{id}/reset-binding	httpapi	internal/httpapi/server.go	resetChannelBinding	owner_session	bf4dd8702cb7	pending	pending	pending	pending	pending
+POST /api/v1/channel-instances/{id}/runtime-menus/reset	httpapi	internal/httpapi/server.go	resetChannelRuntimeMenus	owner_session	95dc5b5d9574	pending	pending	pending	pending	pending
+POST /api/v1/channel-onboarding-sessions/{id}/cancel	httpapi	internal/httpapi/server.go	cancelChannelOnboarding	owner_session	199b2245813e	pending	pending	pending	pending	pending
+POST /api/v1/codex-accounts/import	httpapi	internal/httpapi/server.go	importCodexAccount	owner_session	9881a819c50e	pending	pending	pending	pending	pending
+POST /api/v1/codex-accounts/import-local	httpapi	internal/httpapi/server.go	importLocalCodexAccount	owner_session	3d16478adccb	pending	pending	pending	pending	pending
+POST /api/v1/codex-accounts/login	httpapi	internal/httpapi/server.go	startCodexAccountLogin	owner_session	599554815827	pending	pending	pending	pending	pending
+POST /api/v1/codex-accounts/login/{id}/callback	httpapi	internal/httpapi/server.go	submitCodexAccountCallback	owner_session	d2f455f9feed	pending	pending	pending	pending	pending
+POST /api/v1/codex-accounts/{id}/refresh	httpapi	internal/httpapi/server.go	refreshCodexAccount	owner_session	a8ad26d92e26	pending	pending	pending	pending	pending
+POST /api/v1/env-groups	httpapi	internal/httpapi/server.go	createEnvGroup	owner_session	92b346e7ddc3	pending	pending	pending	pending	pending
+POST /api/v1/hardware-resources	httpapi	internal/httpapi/server.go	createHardwareResource	owner_session	d94240d46486	pending	pending	pending	pending	pending
+POST /api/v1/hardware-resources/{id}/adb/pair	httpapi	internal/httpapi/server.go	pairHardwareADB	owner_session	f95f0884da49	pending	pending	pending	pending	pending
+POST /api/v1/knowledge	httpapi	internal/httpapi/server.go	createKnowledge	owner_session	9d6216c89d27	pending	pending	pending	pending	pending
+POST /api/v1/knowledge-vault/git/commit	httpapi	internal/httpapi/server.go	commitKnowledgeVaultGit	owner_session	112b72762265	pending	pending	pending	pending	pending
+POST /api/v1/knowledge-vault/git/init	httpapi	internal/httpapi/server.go	initializeKnowledgeVaultGit	owner_session	b1162f2a700c	pending	pending	pending	pending	pending
+POST /api/v1/knowledge-vault/git/pull	httpapi	internal/httpapi/server.go	pullKnowledgeVaultGit	owner_session	9ea2ad4b2523	pending	pending	pending	pending	pending
+POST /api/v1/knowledge-vault/git/push	httpapi	internal/httpapi/server.go	pushKnowledgeVaultGit	owner_session	9cd8083c2548	pending	pending	pending	pending	pending
+POST /api/v1/knowledge-vault/git/sync	httpapi	internal/httpapi/server.go	syncKnowledgeVaultGit	owner_session	525d406c31b1	pending	pending	pending	pending	pending
+POST /api/v1/knowledge-vault/reveal	httpapi	internal/httpapi/server.go	revealKnowledgeVaultPath	owner_session	09e6bddfb70d	pending	pending	pending	pending	pending
+POST /api/v1/knowledge/libraries/{id}/bind	httpapi	internal/httpapi/server.go	bindKnowledgeLibrary	owner_session	bb5067fa481a	pending	pending	pending	pending	pending
+POST /api/v1/knowledge/libraries/{id}/unbind	httpapi	internal/httpapi/server.go	unbindKnowledgeLibrary	owner_session	5b002ba74e05	pending	pending	pending	pending	pending
+POST /api/v1/knowledge/proposals/batch	httpapi	internal/httpapi/server.go	batchKnowledgeProposalReviews	owner_session	9481b251279f	pending	pending	pending	pending	pending
+POST /api/v1/knowledge/proposals/{id}/approve	httpapi	internal/httpapi/server.go	approveKnowledgeProposal	owner_session	7cffd3853e5b	pending	pending	pending	pending	pending
+POST /api/v1/knowledge/proposals/{id}/reject	httpapi	internal/httpapi/server.go	rejectKnowledgeProposal	owner_session	efc610257798	pending	pending	pending	pending	pending
+POST /api/v1/knowledge/{id}/feedback	httpapi	internal/httpapi/server.go	feedbackKnowledge	owner_session	2d8e902aafb4	pending	pending	pending	pending	pending
+POST /api/v1/knowledge/{id}/verify	httpapi	internal/httpapi/server.go	verifyKnowledge	owner_session	94a982d46104	pending	pending	pending	pending	pending
+POST /api/v1/local/owner-messages	httpapi	internal/httpapi/server.go	localOwnerMessageIngest	transport_auth	4bfae1d314d3	pending	pending	pending	pending	pending
+POST /api/v1/mail-accounts	httpapi	internal/httpapi/server.go	createMailAccount	owner_session	344e85848d64	pending	pending	pending	pending	pending
+POST /api/v1/mail-accounts/{id}/test	httpapi	internal/httpapi/server.go	testMailAccount	owner_session	031b05ce10dc	pending	pending	pending	pending	pending
+POST /api/v1/mail-bindings	httpapi	internal/httpapi/server.go	createMailBinding	owner_session	735ba6fd920b	pending	pending	pending	pending	pending
+POST /api/v1/mail-messages	httpapi	internal/httpapi/server.go	createMailMessage	owner_session	cb89af741a19	pending	pending	pending	pending	pending
+POST /api/v1/mail-messages/{id}/approve	httpapi	internal/httpapi/server.go	approveMailMessage	owner_session	99962623cca9	pending	pending	pending	pending	pending
+POST /api/v1/mail-messages/{id}/cancel	httpapi	internal/httpapi/server.go	cancelMailMessage	owner_session	3d2afc8c7356	pending	pending	pending	pending	pending
+POST /api/v1/mail-messages/{id}/download-links/{attachment_id}/revoke	httpapi	internal/httpapi/server.go	revokeMailMessageDownloadLink	owner_session	7b1a4dcf7ba6	pending	pending	pending	pending	pending
+POST /api/v1/mail-messages/{id}/reject	httpapi	internal/httpapi/server.go	rejectMailMessage	owner_session	ba892be66520	pending	pending	pending	pending	pending
+POST /api/v1/mail-messages/{id}/retry	httpapi	internal/httpapi/server.go	retryMailMessage	owner_session	dc4471937b6d	pending	pending	pending	pending	pending
+POST /api/v1/mail-messages/{id}/submit	httpapi	internal/httpapi/server.go	submitMailMessage	owner_session	00c80ad86e52	pending	pending	pending	pending	pending
+POST /api/v1/mail-templates	httpapi	internal/httpapi/server.go	createMailTemplate	owner_session	9a2a1a1e6ab9	pending	pending	pending	pending	pending
+POST /api/v1/mail-templates/preview	httpapi	internal/httpapi/server.go	previewMailTemplateContent	owner_session	21fc01742467	pending	pending	pending	pending	pending
+POST /api/v1/mail-templates/{id}/preview	httpapi	internal/httpapi/server.go	previewMailTemplate	owner_session	6b4822b4d9a1	pending	pending	pending	pending	pending
+POST /api/v1/mcp-servers	httpapi	internal/httpapi/server.go	saveMCPServer	owner_session	79bfd40cc0c7	pending	pending	pending	pending	pending
+POST /api/v1/mcp-servers/test	httpapi	internal/httpapi/server.go	testMCPServer	owner_session	7ca22ec37ca1	pending	pending	pending	pending	pending
+POST /api/v1/models	httpapi	internal/httpapi/server.go	createModel	owner_session	947996a50178	pending	pending	pending	pending	pending
+POST /api/v1/models/batch-delete	httpapi	internal/httpapi/server.go	requestBatchDeleteModels	owner_session	a091796667dd	pending	pending	pending	pending	pending
+POST /api/v1/models/{id}/health-check	httpapi	internal/httpapi/server.go	checkModelHealth	owner_session	ae5d3d683c41	pending	pending	pending	pending	pending
+POST /api/v1/pet/approvals/{id}/resolve	httpapi	internal/httpapi/server.go	resolvePetApproval	owner_session	1e4ac700fbd0	pending	pending	pending	pending	pending
+POST /api/v1/pet/brain	httpapi	internal/httpapi/server.go	ownerPetBrain	owner_session	b0d51ee4b382	pending	pending	pending	pending	pending
+POST /api/v1/pet/control	httpapi	internal/httpapi/server.go	controlOwnerPet	owner_session	32081fbb0f6c	pending	pending	pending	pending	pending
+POST /api/v1/pet/mcp	httpapi	internal/httpapi/server.go	petMCP	agent_turn	d09a354d80ef	none	Agent token; Turn capability and per-domain gate in the handler	MCP JSON-RPC transport only; every tool it serves is a row of task-mcp-tools.tsv or the pet tool catalog	internal/httpapi/pet_mcp_test.go:TestPetMCPPingReturnsResult; internal/httpapi/pet_mcp_test.go:TestPetMCPNotificationsAreAcceptedWithoutJSON	transport_na
+POST /api/v1/pet/navigation/claim	httpapi	internal/httpapi/server.go	claimOwnerPetNavigation	owner_session	2f50714bcd1d	pending	pending	pending	pending	pending
+POST /api/v1/pet/reset	httpapi	internal/httpapi/server.go	resetOwnerPet	owner_session	bfe15426814e	pending	pending	pending	pending	pending
+POST /api/v1/pet/watches/{task}	httpapi	internal/httpapi/server.go	followPetWatch	owner_session	b2cb41e429c9	pending	pending	pending	pending	pending
+POST /api/v1/projects	httpapi	internal/httpapi/server.go	createProject	owner_session	1360d2bda019	pending	pending	pending	pending	pending
+POST /api/v1/projects/{id}/knowledge-space	httpapi	internal/httpapi/server.go	retryProjectKnowledgeSpace	owner_session	2a302c4d632e	pending	pending	pending	pending	pending
+POST /api/v1/projects/{id}/knowledge/detach	httpapi	internal/httpapi/server.go	detachProjectKnowledge	owner_session	ff15d686ebc7	pending	pending	pending	pending	pending
+POST /api/v1/projects/{id}/product-lines	httpapi	internal/httpapi/server.go	createProductLine	owner_session	80b65f816214	pending	pending	pending	pending	pending
+POST /api/v1/prompts/templates/{id}/reset	httpapi	internal/httpapi/server.go	resetPromptTemplate	owner_session	a31c867eac98	pending	pending	pending	pending	pending
+POST /api/v1/providers	httpapi	internal/httpapi/server.go	createProvider	owner_session	e98041244423	pending	pending	pending	pending	pending
+POST /api/v1/providers/add-models	httpapi	internal/httpapi/server.go	addModelsHandler	owner_session	0700d2d6c4ca	pending	pending	pending	pending	pending
+POST /api/v1/providers/detect-models	httpapi	internal/httpapi/server.go	detectModelsHandler	owner_session	8e1851792ea6	pending	pending	pending	pending	pending
+POST /api/v1/providers/{id}/model-detection-jobs	httpapi	internal/httpapi/server.go	createModelDetectionJob	owner_session	290f8e118aa2	pending	pending	pending	pending	pending
+POST /api/v1/providers/{id}/model-detection-jobs/{job}/cancel	httpapi	internal/httpapi/server.go	cancelModelDetectionJob	owner_session	8f5ed0647a6a	pending	pending	pending	pending	pending
+POST /api/v1/providers/{id}/model-probes	httpapi	internal/httpapi/server.go	probeProviderModel	owner_session	0e399db99d3a	pending	pending	pending	pending	pending
+POST /api/v1/rounds/{id}/interrupt	httpapi	internal/httpapi/server.go	interruptRound	owner_session	87c9e4bb66a2	pending	pending	pending	pending	pending
+POST /api/v1/settings/knowledge-vault/cutover-legacy	httpapi	internal/httpapi/server.go	cutoverLegacyKnowledge	owner_session	55a66b7fa895	pending	pending	pending	pending	pending
+POST /api/v1/settings/knowledge-vault/import	httpapi	internal/httpapi/server.go	importKnowledgeVault	owner_session	8776e4de798c	pending	pending	pending	pending	pending
+POST /api/v1/settings/knowledge-vault/init	httpapi	internal/httpapi/server.go	initializeKnowledgeVault	owner_session	0adbb7c20acf	pending	pending	pending	pending	pending
+POST /api/v1/settings/knowledge-vault/migrate	httpapi	internal/httpapi/server.go	migrateKnowledgeVault	owner_session	3bb53826575b	pending	pending	pending	pending	pending
+POST /api/v1/settings/knowledge-vault/rebuild	httpapi	internal/httpapi/server.go	rebuildKnowledgeVaultIndex	owner_session	fcbd7e72940a	pending	pending	pending	pending	pending
+POST /api/v1/settings/proxy/profiles/{id}/activate	httpapi	internal/httpapi/server.go	activateProxyProfile	owner_session	186cf158349f	pending	pending	pending	pending	pending
+POST /api/v1/settings/proxy/profiles/{id}/nodes/{node_id}/test	httpapi	internal/httpapi/server.go	testProxyNode	owner_session	ed78ce040177	pending	pending	pending	pending	pending
+POST /api/v1/settings/proxy/profiles/{id}/refresh	httpapi	internal/httpapi/server.go	refreshProxyProfile	owner_session	1714c86760fb	pending	pending	pending	pending	pending
+POST /api/v1/settings/proxy/subscription	httpapi	internal/httpapi/server.go	importProxySubscription	owner_session	2ea510c924ba	pending	pending	pending	pending	pending
+POST /api/v1/settings/proxy/subscription/refresh	httpapi	internal/httpapi/server.go	refreshProxySubscription	owner_session	49b94d727712	pending	pending	pending	pending	pending
+POST /api/v1/settings/proxy/test	httpapi	internal/httpapi/server.go	testProxySettings	owner_session	d32d6aa55791	pending	pending	pending	pending	pending
+POST /api/v1/settings/sync/conflicts/{id}/resolve	httpapi	internal/httpapi/server.go	resolveSyncConflict	owner_session	85c42e46b586	pending	pending	pending	pending	pending
+POST /api/v1/settings/sync/run	httpapi	internal/httpapi/server.go	runSync	owner_session	dacf211e2dc2	pending	pending	pending	pending	pending
+POST /api/v1/skills	httpapi	internal/httpapi/server.go	rejectRemovedSkillWrite	owner_session	dcac79ed64a4	none	owner session; still rejected	removed legacy Skill write; Web and API both answer 405, Skill changes use the vault Skill operations	internal/httpapi/skill_write_removed_test.go:TestRemovedSkillWriteRoutesReturnMethodNotAllowed	web_prohibited_na
+POST /api/v1/system/data/cleanup	httpapi	internal/httpapi/server.go	cleanupData	owner_session	0d0ed9739223	pending	pending	pending	pending	pending
+POST /api/v1/system/data/conversation/preview	httpapi	internal/httpapi/server.go	previewConversationPurge	owner_session	cfdbbf745fb4	pending	pending	pending	pending	pending
+POST /api/v1/system/data/conversation/purge	httpapi	internal/httpapi/server.go	purgeConversation	owner_session	dbf3fe605db2	pending	pending	pending	pending	pending
+POST /api/v1/system/data/hardware-io/preview	httpapi	internal/httpapi/server.go	previewHardwareIOPurge	owner_session	2a9d2ede7bb6	pending	pending	pending	pending	pending
+POST /api/v1/system/data/hardware-io/purge	httpapi	internal/httpapi/server.go	purgeHardwareIO	owner_session	bc5734f4f33c	pending	pending	pending	pending	pending
+POST /api/v1/tasks	httpapi	internal/httpapi/server.go	createTask	owner_session	c7220cdae4fb	pending	pending	pending	pending	pending
+POST /api/v1/tasks/{id}/agents/{agent}/messages	httpapi	internal/httpapi/server.go	submitAgentMessage	owner_session	cd6ba66b0450	pending	pending	pending	pending	pending
+POST /api/v1/tasks/{id}/agents/{agent}/session/compact	httpapi	internal/httpapi/server.go	compactAgentSession	owner_session	284b1696ed5f	pending	pending	pending	pending	pending
+POST /api/v1/tasks/{id}/agents/{agent}/session/reset	httpapi	internal/httpapi/server.go	resetAgentSession	owner_session	9840a848c4db	pending	pending	pending	pending	pending
+POST /api/v1/tasks/{id}/attachments	httpapi	internal/httpapi/server.go	uploadTaskAttachment	owner_session	7a29a33628dc	pending	pending	pending	pending	pending
+POST /api/v1/tasks/{id}/browser-grants	httpapi	internal/httpapi/browser_handlers.go	createTaskBrowserGrant	owner_session	5bdea7eecb23	pending	pending	pending	pending	pending
+POST /api/v1/tasks/{id}/browser-sessions	httpapi	internal/httpapi/browser_handlers.go	createTaskBrowserGrant	owner_session	5bdea7eecb23	pending	pending	pending	pending	pending
+POST /api/v1/tasks/{id}/channel-members:refresh	httpapi	internal/httpapi/server.go	refreshTaskChannelMembers	owner_session	b47888309ed7	pending	pending	pending	pending	pending
+POST /api/v1/tasks/{id}/channel-routes	httpapi	internal/httpapi/server.go	bindTaskChannelRoute	owner_session	aca5583b2ec9	pending	pending	pending	pending	pending
+POST /api/v1/tasks/{id}/complete	httpapi	internal/httpapi/server.go	completeTask	owner_session	22e9b85b3154	pending	pending	pending	pending	pending
+POST /api/v1/tasks/{id}/desktop/actions	httpapi	internal/httpapi/desktop_handlers.go	desktopAct	owner_session	bacd21106e56	pending	pending	pending	pending	pending
+POST /api/v1/tasks/{id}/desktop/control	httpapi	internal/httpapi/desktop_handlers.go	desktopControl	owner_session	16cf0a5688e2	pending	pending	pending	pending	pending
+POST /api/v1/tasks/{id}/desktop/session	httpapi	internal/httpapi/desktop_handlers.go	desktopOpen	owner_session	c04910849321	pending	pending	pending	pending	pending
+POST /api/v1/tasks/{id}/desktop/stop	httpapi	internal/httpapi/desktop_handlers.go	desktopStop	owner_session	644f9ddfbc86	pending	pending	pending	pending	pending
+POST /api/v1/tasks/{id}/desktop/switch	httpapi	internal/httpapi/desktop_handlers.go	desktopSwitch	owner_session	16af0832eade	pending	pending	pending	pending	pending
+POST /api/v1/tasks/{id}/hardware/{hardware}/connect	httpapi	internal/httpapi/server.go	connectHardware	owner_session	1937ef47db30	pending	pending	pending	pending	pending
+POST /api/v1/tasks/{id}/hardware/{hardware}/disconnect	httpapi	internal/httpapi/server.go	disconnectHardware	owner_session	5071dece6e69	pending	pending	pending	pending	pending
+POST /api/v1/tasks/{id}/hardware/{hardware}/host-key/trust	httpapi	internal/httpapi/server.go	trustHardwareSSHHostKey	owner_session	12150066124c	pending	pending	pending	pending	pending
+POST /api/v1/tasks/{id}/hardware/{hardware}/send	httpapi	internal/httpapi/server.go	sendHardware	owner_session	c5c9ad250267	pending	pending	pending	pending	pending
+POST /api/v1/tasks/{id}/messages	httpapi	internal/httpapi/server.go	submitMessage	owner_session	e791743bfe3d	pending	pending	pending	pending	pending
+POST /api/v1/tasks/{id}/permission-requests/{request}/resolve	httpapi	internal/httpapi/server.go	resolveTaskPermissionRequest	owner_session	a0dc72ae59fa	pending	pending	pending	pending	pending
+POST /api/v1/tasks/{id}/reopen	httpapi	internal/httpapi/server.go	reopenTask	owner_session	e050d883d2db	pending	pending	pending	pending	pending
+POST /api/v1/tasks/{id}/start	httpapi	internal/httpapi/server.go	startTask	owner_session	b2ed532bef1b	pending	pending	pending	pending	pending
+POST /api/v1/tasks/{id}/takeover	httpapi	internal/httpapi/server.go	takeoverTask	owner_session	73b59e9dcf33	pending	pending	pending	pending	pending
+POST /api/v1/turns/{id}/interrupt	httpapi	internal/httpapi/server.go	interruptTurn	owner_session	0656fd537f69	pending	pending	pending	pending	pending
+POST /api/v1/workspaces	httpapi	internal/httpapi/server.go	createWorkspace	owner_session	a29fb1abf774	pending	pending	pending	pending	pending
+POST /api/v1/workspaces/{id}/detect	httpapi	internal/httpapi/server.go	detectWorkspaceHandler	owner_session	21db547839a1	pending	pending	pending	pending	pending
+POST /api/v1/workspaces/{id}/host-key/trust	httpapi	internal/httpapi/server.go	trustWorkspaceSSHHostKey	owner_session	1ee1c713751c	pending	pending	pending	pending	pending
+POST /api/v1/workspaces/{id}/takeover	httpapi	internal/httpapi/server.go	takeoverWorkspace	owner_session	718e25866c31	pending	pending	pending	pending	pending
+POST /d/{token}/confirm	mail-download	internal/httpapi/mail_download_handlers.go	mailDownloadConfirm	transport_auth	af12369097fc	pending	pending	pending	pending	pending
+POST /v1/devices/bootstrap-code	centersync	internal/centersync/service.go	inline	transport_auth	a7acb0125559	none	device token (or one-time bootstrap code) of the separate aha-sync center service	device-to-center sync protocol served by cmd/aha-sync, not the owner Web listener; owner sync management is the httpapi settings/sync rows	internal/centersync/service_test.go:TestOneTimeDeviceRegistrationStoresOnlyHashes	transport_na
+POST /v1/devices/register	centersync	internal/centersync/service.go	inline	transport_auth	aecd86e5f144	none	device token (or one-time bootstrap code) of the separate aha-sync center service	device-to-center sync protocol served by cmd/aha-sync, not the owner Web listener; owner sync management is the httpapi settings/sync rows	internal/centersync/service_test.go:TestOneTimeDeviceRegistrationStoresOnlyHashes	transport_na
+POST /v1/sync/push	centersync	internal/centersync/service.go	inline	device_token	adedb59a7172	none	device token (or one-time bootstrap code) of the separate aha-sync center service	device-to-center sync protocol served by cmd/aha-sync, not the owner Web listener; owner sync management is the httpapi settings/sync rows	internal/centersync/service_test.go:TestPushIsIdempotentAndPullIsIncremental	transport_na
+PUT /api/channel-runtime/v1/instances/{instance_id}/health	httpapi	internal/httpapi/server.go	withChannelCapability	transport_auth	e1d101d20c1a	pending	pending	pending	pending	pending
+PUT /api/v1/agent/skills/{skill}	httpapi	internal/httpapi/server.go	updateAgentSkill	agent_turn	1f176536a696	pending	pending	pending	pending	pending
+PUT /api/v1/assistant	httpapi	internal/httpapi/server.go	updateOwnerAssistant	owner_session	4beaf3de40e2	pending	pending	pending	pending	pending
+PUT /api/v1/channel-instances/{id}/credentials	httpapi	internal/httpapi/server.go	updateChannelCredentials	owner_session	9b511787a6e4	pending	pending	pending	pending	pending
+PUT /api/v1/channel-instances/{id}/knowledge-bindings	httpapi	internal/httpapi/server.go	updateChannelKnowledgeBindings	owner_session	52620610bbcb	pending	pending	pending	pending	pending
+PUT /api/v1/channel-instances/{id}/knowledge-bindings/group	httpapi	internal/httpapi/server.go	updateChannelGroupKnowledgeBindings	owner_session	fe06d7c1e99a	pending	pending	pending	pending	pending
+PUT /api/v1/channel-instances/{id}/knowledge-policy	httpapi	internal/httpapi/server.go	updateChannelKnowledgePolicy	owner_session	6045e67930b5	pending	pending	pending	pending	pending
+PUT /api/v1/hardware-resources/{id}	httpapi	internal/httpapi/server.go	updateHardwareResource	owner_session	93c1c55602ac	pending	pending	pending	pending	pending
+PUT /api/v1/knowledge-vault/git/remote	httpapi	internal/httpapi/server.go	updateKnowledgeVaultGitRemote	owner_session	473a078ede09	pending	pending	pending	pending	pending
+PUT /api/v1/knowledge-vault/skills/auto-attach	httpapi	internal/httpapi/server.go	updateKnowledgeVaultSkillAutoAttach	owner_session	3b9ce812d2fd	pending	pending	pending	pending	pending
+PUT /api/v1/knowledge/{id}	httpapi	internal/httpapi/server.go	updateKnowledge	owner_session	8865d3a87c55	pending	pending	pending	pending	pending
+PUT /api/v1/mail-accounts/{id}	httpapi	internal/httpapi/server.go	updateMailAccount	owner_session	5c93471fb35d	pending	pending	pending	pending	pending
+PUT /api/v1/mail-bindings/{id}	httpapi	internal/httpapi/server.go	updateMailBinding	owner_session	74e409c2c193	pending	pending	pending	pending	pending
+PUT /api/v1/mail-templates/{id}	httpapi	internal/httpapi/server.go	updateMailTemplate	owner_session	5e85cf8bf373	pending	pending	pending	pending	pending
+PUT /api/v1/models/{id}	httpapi	internal/httpapi/server.go	updateModel	owner_session	e4b7982d0104	pending	pending	pending	pending	pending
+PUT /api/v1/pet	httpapi	internal/httpapi/server.go	updateOwnerPetState	owner_session	4b060b5c36a0	pending	pending	pending	pending	pending
+PUT /api/v1/pet/settings	httpapi	internal/httpapi/server.go	updateOwnerPetSettings	owner_session	343bcdc6fd40	pending	pending	pending	pending	pending
+PUT /api/v1/pet/workbench/core/{name}	httpapi	internal/httpapi/server.go	savePetWorkbenchDocument	owner_session	ed3521c76473	pending	pending	pending	pending	pending
+PUT /api/v1/pet/workbench/worklog/{name}	httpapi	internal/httpapi/server.go	savePetWorkbenchDocument	owner_session	ed3521c76473	pending	pending	pending	pending	pending
+PUT /api/v1/projects/{id}	httpapi	internal/httpapi/server.go	updateProject	owner_session	9aaf7df6a785	pending	pending	pending	pending	pending
+PUT /api/v1/prompts/templates/{id}	httpapi	internal/httpapi/server.go	updatePromptTemplate	owner_session	a80176a397ab	pending	pending	pending	pending	pending
+PUT /api/v1/providers/{id}	httpapi	internal/httpapi/server.go	updateProvider	owner_session	d7b3dfab1a30	pending	pending	pending	pending	pending
+PUT /api/v1/settings/agent-api	httpapi	internal/httpapi/server.go	updateAgentAPISettings	owner_session	a6e8ee69ef81	pending	pending	pending	pending	pending
+PUT /api/v1/settings/backend	httpapi	internal/httpapi/server.go	updateBackendSettings	owner_session	0d155c2ba596	pending	pending	pending	pending	pending
+PUT /api/v1/settings/general	httpapi	internal/httpapi/server.go	updateGeneralSettings	owner_session	aed2dc888fb6	pending	pending	pending	pending	pending
+PUT /api/v1/settings/knowledge-review	httpapi	internal/httpapi/server.go	updateKnowledgeReviewSettings	owner_session	c7d60f8703e8	pending	pending	pending	pending	pending
+PUT /api/v1/settings/knowledge-vault	httpapi	internal/httpapi/server.go	updateKnowledgeVaultSettings	owner_session	8783b82db42f	pending	pending	pending	pending	pending
+PUT /api/v1/settings/network	httpapi	internal/httpapi/server.go	updateNetworkSettings	owner_session	d575ef84d936	pending	pending	pending	pending	pending
+PUT /api/v1/settings/proxy	httpapi	internal/httpapi/server.go	updateProxySettings	owner_session	2c97572ba154	pending	pending	pending	pending	pending
+PUT /api/v1/settings/security	httpapi	internal/httpapi/server.go	updateSecuritySettings	owner_session	7bc27c922afc	pending	pending	pending	pending	pending
+PUT /api/v1/settings/sync	httpapi	internal/httpapi/server.go	updateSyncSettings	owner_session	5704627732c4	pending	pending	pending	pending	pending
+PUT /api/v1/skills/{id}	httpapi	internal/httpapi/server.go	rejectRemovedSkillWrite	owner_session	dcac79ed64a4	none	owner session; still rejected	removed legacy Skill write; Web and API both answer 405, Skill changes use the vault Skill operations	internal/httpapi/skill_write_removed_test.go:TestRemovedSkillWriteRoutesReturnMethodNotAllowed	web_prohibited_na
+PUT /api/v1/system/data/conversation/retention	httpapi	internal/httpapi/server.go	updateConversationRetention	owner_session	231342e9b91b	pending	pending	pending	pending	pending
+PUT /api/v1/system/data/hardware-io/retention	httpapi	internal/httpapi/server.go	updateHardwareIORetention	owner_session	ae094502b6fb	pending	pending	pending	pending	pending
+PUT /api/v1/tasks/{id}/channel-contacts	httpapi	internal/httpapi/server.go	updateTaskChannelContacts	owner_session	df3fe83975eb	pending	pending	pending	pending	pending
+PUT /api/v1/tasks/{id}/hardware	httpapi	internal/httpapi/server.go	updateTaskHardware	owner_session	74f0c63a207c	pending	pending	pending	pending	pending
+PUT /api/v1/tasks/{id}/hardware-bindings	httpapi	internal/httpapi/server.go	updateTaskHardwareBindings	owner_session	fcfdd2f5f49a	aha2-pet.aha_update_task_hardware	owner session OR pet create_tasks; manageable Task	binding identities retained; max 16; validate before disconnect	internal/app/agent_pet_domains_test.go:TestPetHardwareBindingReplacementPreservesIdentityAndRejectsWithoutMutation	stale
+PUT /api/v1/tasks/{id}/mcp-servers	httpapi	internal/httpapi/server.go	setTaskMCPServers	owner_session	95075e92f87b	pending	pending	pending	pending	pending
+PUT /api/v1/workspaces/{id}	httpapi	internal/httpapi/server.go	updateWorkspace	owner_session	26ec449c1dc1	pending	pending	pending	pending	pending

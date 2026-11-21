@@ -4,16 +4,31 @@
 
 基线 `a3ed6cb566680ff079d660685126a2b77a76bad8`，分支 `aha/task_e3d0848747ddc2018605`，工作目录为本 Task 独立 worktree。所有提交保留在此分支，不合并 main、不推送、不部署、不操作生产资源。
 
-`coverage.tsv` 逐行记录实际注册的 HTTP 操作、源文件、handler、现有或新增 MCP、权限、安全交接与测试。source 列相对 `internal/httpapi/`。它目前是路由级账本，后续还需展开同一入口的业务子操作，并完成全部映射与效果验证。`web-call-sites.tsv` 保存前端字面 API 调用点与方法提示；方法提示不能代替完整 TypeScript 调用链审查。
+## 账本与门禁
+
+三份账本都由 `internal/petcoverage` 生成和校验，它用 Go 自己的语法解析器读源码，不靠文本正则：
+
+- `coverage.tsv`：`internal/` 与 `cmd/` 下所有 `ServeMux` 注册（任意变量名、常量、拼接、局部前缀、字面量路由表都会展开），按监听分 `httpapi`、`mail-download`、`centersync`。每行带源文件、handler、认证边界（由外层包装推出）和 handler 指纹（包装链加 handler 源码的哈希）。注册在未登记的函数里、注册到 DefaultServeMux 或无法识别的接收者上、路由串无法求值、handler 找不到唯一声明，扫描都会直接失败。
+- `web-call-sites.tsv`：`web/src` 里所有以 `/api/` 开头的字符串/模板字面量。每个调用点必须能对上一条已注册的 httpapi 路由（方法明确时方法也要一致），对不上就说明有注册逃过了扫描，校验失败。
+- `task-mcp-tools.tsv`：普通 Task 可用的全部内置 MCP 工具（`httpapi.MCPToolCatalog()`，宠物自己的 server 除外），逐个记录宠物 Turn 如何拿到同样能力。
 
 ```sh
-python3 scripts/pet-mcp-coverage.py            # 检查注册与账本一致
-python3 scripts/pet-mcp-coverage.py --update   # 更新后逐项审查差异
-python3 scripts/pet-mcp-coverage.py --complete # 最终覆盖门禁，当前必须失败
-python3 scripts/test_pet_mcp_coverage.py
+go run ./cmd/aha-pet-coverage            # 账本与注册/调用点/工具目录一致，且每行证据真实
+go run ./cmd/aha-pet-coverage -update    # 重写账本；人工列保留，handler 变了的已审行退回 stale
+go run ./cmd/aha-pet-coverage -complete  # 最终门禁：所有行都关闭且证据有效，当前必须失败
+go test ./internal/petcoverage ./internal/httpapi -run 'PetCoverage|MCPToolCatalog|HealthProbe'
 ```
 
-未完成项使用 pending 或 implemented/implemented_unverified。后两个状态只说明已有代码，仍不能通过最终门禁。transport_na 只用于协议、静态资源等传输入口；web_prohibited_na 必须能证明 Web 自身也禁止该操作。受保护功能需要真实申请、状态与 owner 安全输入/授权交接，不能标成 owner_only 后略过。
+`go test ./internal/httpapi` 里的 `TestPetCoverageLedgersMatchRegistrationsAndEvidence` 做的就是第一条命令：新增、删除或改动路由而不更新账本，测试失败。
+
+状态分两类。开放：`pending`、`implemented`、`implemented_unverified`、`stale`。`stale` 表示该行之前审过，但 handler、源文件、边界或指纹已经变了，旧结论不再成立，必须重新核对后才能改回关闭状态；从 v1 账本迁移时，所有没有指纹的已审行都按这个规则退回了 stale。关闭：`direct`、`equivalent`、`protected_handoff`、`transport_na`、`web_prohibited_na`。关闭行的 mcp、permission、protected_flow、tests 四列都不能为空或 pending，并且：
+
+- tests 只接受 `路径_test.go:TestName`（多个用 `; ` 分隔），文件必须存在且声明了该顶层测试。"existing ... tests"、通配路径这类说法会被拒绝；开放行里写了非 pending 的 tests 也同样核对。
+- direct/equivalent/protected_handoff 的 mcp 至少点名一个 `server.tool`，且每个都在内置工具目录里。
+- transport_na 的 mcp 必须是 none，且只用于 MCP 协议端点、无认证传输、设备令牌或渠道运行时路由；owner 会话下的业务操作不能标 N/A。
+- web_prohibited_na 的 mcp 必须是 none，且 handler 必须是"只回写客户端错误"的拒绝函数（扫描器逐个调用核对）。
+
+受保护功能需要真实申请、状态与 owner 安全输入/授权交接，不能标成 owner_only 后略过；账本也不接受 owner_only 这个状态。
 
 首批实现中，宠物 core 不再提前退出注入；知识只补指南和反馈，其他知识与 Skill 操作复用宠物已有入口；Workspace、浏览器与硬件按当前绑定、授权和实时查看权限注入。硬件写入另外要求 Main、可写 snapshot、可写资源以及宠物实时 Task 管理权限。普通 Task、只读 Task 和渠道 Turn 的原作用域继续生效。`capabilities` 新增各 MCP 域和硬件写入的实际门禁标志，原 HTTP 能力标志仍表示该 HTTP 面是否存在。
 
