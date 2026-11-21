@@ -133,3 +133,80 @@ func TestReplaceHardwareGroupsKeepsUSBNetworkSideOfBothMode(t *testing.T) {
 		t.Fatalf("USB side of a both-mode group was lost: %#v", groups)
 	}
 }
+
+// A database at v155 (no ADB connection columns, no v156 row) holding a
+// paired wireless phone is migrated in place: the columns appear, v156 is
+// recorded once, and the phone keeps host, port and pairing as wireless.
+func TestMigrationV156UpgradesV155DatabaseWithLegacyADBRow(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "aha2.db")
+	database, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	database.Close()
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Roll the schema back to its v155 shape.
+	for _, statement := range []string{
+		`ALTER TABLE hardware_resources DROP COLUMN adb_serial`,
+		`ALTER TABLE hardware_resources DROP COLUMN adb_connection`,
+		`DELETE FROM schema_migrations WHERE version=156`,
+	} {
+		if _, err := raw.ExecContext(ctx, statement); err != nil {
+			t.Fatalf("%s: %v", statement, err)
+		}
+	}
+	columnExists := func(name string) bool {
+		var exists bool
+		if err := raw.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pragma_table_info('hardware_resources') WHERE name=?)`, name).Scan(&exists); err != nil {
+			t.Fatal(err)
+		}
+		return exists
+	}
+	if columnExists("adb_connection") || columnExists("adb_serial") {
+		t.Fatal("rollback to the v155 shape failed")
+	}
+	// Insert with the v155 column list, as a pre-upgrade server would.
+	if _, err := raw.ExecContext(ctx, `
+		INSERT INTO hardware_resources(id,description,mode,serial_device,serial_baudrate,network_host,network_port,
+			network_protocol,ssh_auth,username,credential_ref,password_configured,adb_paired_at,access,created_at,updated_at)
+		VALUES('phone','Phone','network','',115200,'192.0.2.5',41235,'adb','auto','','',0,'2026-11-01T00:00:00Z','read_write',
+			'2026-11-01T00:00:00Z','2026-11-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	raw.Close()
+
+	database, err = Open(ctx, path)
+	if err != nil {
+		t.Fatalf("migrate v155 database: %v", err)
+	}
+	defer database.Close()
+	phone, err := database.HardwareResource(ctx, "phone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !phone.Network.ADBWireless() || phone.Network.ADBConnection != "wireless" || phone.Network.ADBSerial != "" ||
+		phone.Network.Host != "192.0.2.5" || phone.Network.Port != 41235 || phone.ADBPairedAt != "2026-11-01T00:00:00Z" {
+		t.Fatalf("legacy phone changed meaning after migration: %#v", phone)
+	}
+	raw, err = sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if !columnExists("adb_connection") || !columnExists("adb_serial") {
+		t.Fatal("v156 did not add the ADB columns")
+	}
+	var stored string
+	var recorded int
+	if err := raw.QueryRowContext(ctx, `SELECT adb_connection FROM hardware_resources WHERE id='phone'`).Scan(&stored); err != nil || stored != "" {
+		t.Fatalf("migration rewrote the legacy row: %q err=%v", stored, err)
+	}
+	if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version=156`).Scan(&recorded); err != nil || recorded != 1 {
+		t.Fatalf("v156 recorded=%d err=%v", recorded, err)
+	}
+}

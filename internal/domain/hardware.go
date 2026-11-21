@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"net"
 	"regexp"
 	"strings"
 	"time"
@@ -111,12 +112,19 @@ var adbUSBSerialPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$
 // Network transports (host:port), mDNS service names and emulators are
 // rejected so a USB resource can never be pointed at a network device, and
 // adb -s device qualifiers (model:, usb:, product:) cannot be smuggled in.
+// adb -s also resolves a bare host (192.0.2.4, localhost, tv.lan) to a
+// connected host:5555 transport, so IP literals, dotted host names and
+// localhost are rejected too. A dot never appears in a real USB serial we
+// accept; the runtime get-serialno check is the second line of defence.
 func ValidADBUSBSerial(serial string) bool {
 	if !adbUSBSerialPattern.MatchString(serial) {
 		return false
 	}
 	lower := strings.ToLower(serial)
 	if strings.HasPrefix(lower, "emulator-") || strings.Contains(lower, "._adb") || strings.HasSuffix(lower, "._tcp") {
+		return false
+	}
+	if strings.Contains(serial, ".") || lower == "localhost" || net.ParseIP(serial) != nil {
 		return false
 	}
 	return true

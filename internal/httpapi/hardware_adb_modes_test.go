@@ -126,6 +126,9 @@ func TestAgentADBExecRoutesEachConnectionFormToTheBoundTarget(t *testing.T) {
 		{"board", []string{"-s", "SERIAL-B", "shell", "id"}, http.StatusBadRequest},
 		{"tv", []string{"pair", "192.0.2.11:37000"}, http.StatusBadRequest},
 		{"tv", []string{"kill-server"}, http.StatusBadRequest},
+		{"board", []string{"tcpip", "5555"}, http.StatusBadRequest},
+		{"legacy", []string{"TCPIP", "5555"}, http.StatusBadRequest},
+		{"tv", []string{"tcpip", "5601"}, http.StatusBadRequest},
 	} {
 		if status := exec(testCase.id, testCase.args...); status != testCase.status {
 			t.Fatalf("%s %v status=%d want %d", testCase.id, testCase.args, status, testCase.status)

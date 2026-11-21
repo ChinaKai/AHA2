@@ -1,6 +1,7 @@
 package hardware
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -208,7 +209,7 @@ func ensureADBUSBDevice(ctx context.Context, executable, serial string) error {
 		state, detail := adbUSBDeviceState(ctx, executable, serial)
 		switch state {
 		case "device":
-			return nil
+			return verifyADBUSBSerial(ctx, executable, serial)
 		case "missing":
 			return fmt.Errorf("未在 AHA 宿主机上找到 USB 设备 %s：请确认数据线已连接、设备已开启 USB 调试，并在硬件资源页刷新设备列表", serial)
 		case "ambiguous":
@@ -234,22 +235,67 @@ func ensureADBUSBDevice(ctx context.Context, executable, serial string) error {
 	}
 }
 
+// verifyADBUSBSerial asks the device that adb -s resolved to for its serial
+// and requires an exact match, so -s can never land on another transport
+// (for example a bare host adb expands to host:5555).
+func verifyADBUSBSerial(ctx context.Context, executable, serial string) error {
+	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	stdout, stderr, err := runADBQuery(checkCtx, executable, "-s", serial, "get-serialno")
+	reported := adbResultLine(stdout)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("读取 USB 设备 %s 的序列号失败：%s", serial, adbFailure(sanitizeADBText(adbResultLine(stderr), 512), err))
+	}
+	if reported != serial {
+		return fmt.Errorf("USB 设备序列号不一致：配置为 %s，adb 实际连到 %s；已拒绝执行，请在硬件资源页重新选择设备", serial, sanitizeADBText(reported, 128))
+	}
+	return nil
+}
+
+// runADBQuery runs a short adb query and keeps stdout and stderr apart: a
+// cold adb server prints "* daemon not running; starting now ..." banners on
+// stderr that must never be read as a device answer.
+func runADBQuery(ctx context.Context, executable string, arguments ...string) (string, string, error) {
+	command := exec.CommandContext(ctx, executable, arguments...)
+	configureADBCommand(command)
+	var stdout, stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	err := command.Run()
+	return stdout.String(), stderr.String(), err
+}
+
+// adbResultLine returns the last non-empty line that is not an adb daemon
+// banner (lines starting with "*").
+func adbResultLine(output string) string {
+	lines := strings.Split(output, "\n")
+	for index := len(lines) - 1; index >= 0; index-- {
+		line := strings.TrimSpace(lines[index])
+		if line != "" && !strings.HasPrefix(line, "*") {
+			return line
+		}
+	}
+	return ""
+}
+
 // adbUSBDeviceState maps `adb -s <serial> get-state` to device, unauthorized,
 // offline, no_permissions, missing, ambiguous, error or another raw state.
 func adbUSBDeviceState(ctx context.Context, executable, serial string) (string, string) {
 	stateCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	command := exec.CommandContext(stateCtx, executable, "-s", serial, "get-state")
-	configureADBCommand(command)
-	output, err := command.CombinedOutput()
-	message := strings.ToLower(strings.TrimSpace(string(output)))
+	stdout, stderr, err := runADBQuery(stateCtx, executable, "-s", serial, "get-state")
 	if err == nil {
-		state := sanitizeADBText(message, 32)
+		// Only stdout carries the state; stderr may hold daemon banners.
+		state := sanitizeADBText(strings.ToLower(adbResultLine(stdout)), 32)
 		if state == "" {
 			return "error", "adb 未返回设备状态"
 		}
 		return state, ""
 	}
+	message := strings.ToLower(strings.TrimSpace(stdout + "\n" + stderr))
 	switch {
 	case strings.Contains(message, "more than one"):
 		return "ambiguous", ""
@@ -265,5 +311,9 @@ func adbUSBDeviceState(ctx context.Context, executable, serial string) (string, 
 	if ctx.Err() != nil {
 		return "error", ctx.Err().Error()
 	}
-	return "error", adbFailure(sanitizeADBText(string(output), 512), err)
+	detail := adbResultLine(stderr)
+	if detail == "" {
+		detail = adbResultLine(stdout)
+	}
+	return "error", adbFailure(sanitizeADBText(detail, 512), err)
 }

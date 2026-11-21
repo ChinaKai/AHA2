@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/cookiejar"
@@ -21,7 +22,8 @@ import (
 // resource so USB / network direct / wireless never swap meaning.
 func TestTaskTakeoverKeepsADBConnectionForms(t *testing.T) {
 	ctx := context.Background()
-	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	databasePath := filepath.Join(t.TempDir(), "aha2.db")
+	database, err := store.Open(ctx, databasePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,16 +82,41 @@ func TestTaskTakeoverKeepsADBConnectionForms(t *testing.T) {
 			},
 		}, csrf)
 	}
+	countRows := func() [4]int {
+		t.Helper()
+		db, err := sql.Open("sqlite", databasePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		var counts [4]int
+		for index, table := range []string{"tasks", "hardware_resources", "task_hardware_bindings", "runtime_config_snapshots"} {
+			if err := db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&counts[index]); err != nil {
+				t.Fatalf("count %s: %v", table, err)
+			}
+		}
+		return counts
+	}
+	before := countRows()
 	response := takeover(map[string]any{"protocol": "adb"})
 	var failed map[string]any
 	decodeResponse(t, response, &failed)
 	if response.StatusCode != http.StatusBadRequest || failed["error"] != "local_hardware_fields_required" || !strings.Contains(failed["message"].(string), "USB 设备序列号") {
 		t.Fatalf("takeover without a local USB serial status=%d payload=%#v", response.StatusCode, failed)
 	}
-	response = takeover(map[string]any{"protocol": "adb", "adb_serial": "192.0.2.4:5555"})
-	response.Body.Close()
-	if response.StatusCode != http.StatusBadRequest {
-		t.Fatalf("takeover with a network-style USB serial status=%d", response.StatusCode)
+	if after := countRows(); after != before {
+		t.Fatalf("guard rejection left rows behind: before=%v after=%v", before, after)
+	}
+	// Validation runs after the Task is created; the failure must clean it up.
+	for _, serial := range []string{"192.0.2.4:5555", "192.0.2.4", "tv.lan"} {
+		response = takeover(map[string]any{"protocol": "adb", "adb_serial": serial})
+		decodeResponse(t, response, &failed)
+		if response.StatusCode != http.StatusBadRequest || failed["error"] != "local_hardware_invalid" {
+			t.Fatalf("takeover with USB serial %q status=%d payload=%#v", serial, response.StatusCode, failed)
+		}
+		if after := countRows(); after != before {
+			t.Fatalf("validation rejection (%q) left a half-created Task behind: before=%v after=%v", serial, before, after)
+		}
 	}
 	response = takeover(map[string]any{"protocol": "adb", "adb_serial": "LOCAL-SER"})
 	var created struct {

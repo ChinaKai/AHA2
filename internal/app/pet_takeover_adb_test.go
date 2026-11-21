@@ -1,6 +1,7 @@
 package app
 
 import (
+	"database/sql"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -70,10 +71,27 @@ func TestPetTakeoverKeepsADBConnectionForms(t *testing.T) {
 			{ID: "phone", Network: domain.HardwareNetworkConfig{Host: "10.0.0.20"}},
 		}
 	}
+	before := takeoverRowCounts(t, fixture.databasePath)
+	// Layer 1 (pet_takeover): a remote USB group without a local serial is
+	// refused before any Task is created. The message is the takeover guard's,
+	// not NormalizeGroup's "缺少 USB 设备序列号".
 	if _, _, err := fixture.service.PetTakeoverRemoteTask(fixture.ctx, PetTakeoverTaskInput{
 		TaskID: mirrors[0].ID, WorkspaceID: localWorkspace.ID, ModelID: fixture.model.ID, Groups: groups(""),
-	}); err == nil || !strings.Contains(err.Error(), "USB 设备序列号") {
-		t.Fatalf("takeover without a local USB serial: %v", err)
+	}); err == nil || !strings.Contains(err.Error(), "必须重新提供本机串口、网络端点或 USB 设备序列号") {
+		t.Fatalf("takeover without a local USB serial must be refused by the takeover guard: %v", err)
+	}
+	if after := takeoverRowCounts(t, fixture.databasePath); after != before {
+		t.Fatalf("guard rejection left rows behind: before=%v after=%v", before, after)
+	}
+	// Layer 2 (NormalizeGroup, after CreateTask): an invalid serial is refused
+	// and the half-created Task is cleaned up.
+	if _, _, err := fixture.service.PetTakeoverRemoteTask(fixture.ctx, PetTakeoverTaskInput{
+		TaskID: mirrors[0].ID, WorkspaceID: localWorkspace.ID, ModelID: fixture.model.ID, Groups: groups("192.0.2.4"),
+	}); err == nil || !strings.Contains(err.Error(), "USB 设备序列号无效") {
+		t.Fatalf("takeover with an IP-literal USB serial must be refused by validation: %v", err)
+	}
+	if after := takeoverRowCounts(t, fixture.databasePath); after != before {
+		t.Fatalf("validation rejection left a half-created Task behind: before=%v after=%v", before, after)
 	}
 	_, taken, err := fixture.service.PetTakeoverRemoteTask(fixture.ctx, PetTakeoverTaskInput{
 		TaskID: mirrors[0].ID, WorkspaceID: localWorkspace.ID, ModelID: fixture.model.ID, Groups: groups("LOCAL-SER"),
@@ -94,4 +112,22 @@ func TestPetTakeoverKeepsADBConnectionForms(t *testing.T) {
 	if phone := byID["phone"].Network; !phone.ADBWireless() || phone.ADBConnection != "wireless" || phone.Port != 41235 {
 		t.Fatalf("taken wireless=%#v", phone)
 	}
+}
+
+// takeoverRowCounts snapshots the rows a takeover may create, so a rejected
+// takeover can be shown to leave nothing behind.
+func takeoverRowCounts(t *testing.T, databasePath string) [4]int {
+	t.Helper()
+	db, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var counts [4]int
+	for index, table := range []string{"tasks", "hardware_resources", "task_hardware_bindings", "runtime_config_snapshots"} {
+		if err := db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&counts[index]); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+	}
+	return counts
 }

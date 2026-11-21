@@ -48,7 +48,7 @@ func TestNormalizeGroupADBConnectionForms(t *testing.T) {
 	if _, err := normalizeNetwork(t, domain.HardwareNetworkConfig{Protocol: "adb", ADBConnection: "usb"}); err == nil || !strings.Contains(err.Error(), "USB 设备序列号") {
 		t.Fatalf("usb without serial: %v", err)
 	}
-	for _, serial := range []string{"192.0.2.4:5555", "adb-R58M._adb-tls-connect._tcp", "emulator-5554", "-s", "model:Pixel", "usb:1-1", "a b", "x;rm -rf", strings.Repeat("a", 129)} {
+	for _, serial := range []string{"192.0.2.4:5555", "adb-R58M._adb-tls-connect._tcp", "emulator-5554", "-s", "model:Pixel", "usb:1-1", "a b", "x;rm -rf", strings.Repeat("a", 129), "192.0.2.4", "localhost", "LocalHost", "tv.lan", "10.0.0.1"} {
 		if _, err := normalizeNetwork(t, domain.HardwareNetworkConfig{Protocol: "adb", ADBConnection: "usb", ADBSerial: serial}); err == nil {
 			t.Fatalf("invalid USB serial %q was accepted", serial)
 		}

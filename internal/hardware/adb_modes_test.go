@@ -128,7 +128,8 @@ fi`)
 
 func TestExecuteADBUSBTargetsSerialWithoutNetworkCommands(t *testing.T) {
 	// Not parallel: the authorization wait is a package variable other tests shrink.
-	executable, logPath := fakeADB(t, `if [ "$1" = "-s" ] && [ "$2" = "R58M12345A" ] && [ "$3" = "get-state" ]; then
+	executable, logPath := fakeADB(t, `if [ "$1" = "-s" ] && [ "$3" = "get-serialno" ]; then echo "$2"; exit 0; fi
+if [ "$1" = "-s" ] && [ "$2" = "R58M12345A" ] && [ "$3" = "get-state" ]; then
   echo device
   exit 0
 fi
@@ -187,7 +188,8 @@ func TestExecuteADBUSBWaitsForOwnerAuthorization(t *testing.T) {
 	shrinkADBAuthorizeWait(t, 2*time.Second)
 	directory := t.TempDir()
 	marker := filepath.Join(directory, "count")
-	executable, logPath := fakeADB(t, `if [ "$3" = "get-state" ]; then
+	executable, logPath := fakeADB(t, `if [ "$1" = "-s" ] && [ "$3" = "get-serialno" ]; then echo "$2"; exit 0; fi
+if [ "$3" = "get-state" ]; then
   count=$(cat "`+marker+`" 2>/dev/null || echo 0)
   count=$((count+1))
   echo $count > "`+marker+`"
@@ -205,7 +207,7 @@ if [ "$3" = "shell" ]; then echo ok; exit 0; fi`)
 func TestExecuteADBUSBRejectsNonUSBSerialsBeforeRunningADB(t *testing.T) {
 	executable, logPath := fakeADB(t, ``)
 	t.Setenv(adbExecutableEnvironment, executable)
-	for _, serial := range []string{"", "192.0.2.4:5555", "adb-x._adb-tls-connect._tcp", "emulator-5554", "-s", "model:Pixel", "a b", "usb:1-1", "x;rm"} {
+	for _, serial := range []string{"", "192.0.2.4:5555", "adb-x._adb-tls-connect._tcp", "emulator-5554", "-s", "model:Pixel", "a b", "usb:1-1", "x;rm", "192.0.2.4", "localhost", "tv.lan"} {
 		if _, err := ExecuteADBUSB(context.Background(), serial, []string{"shell", "id"}, nil, time.Second); err == nil {
 			t.Fatalf("serial %q was accepted", serial)
 		}
@@ -220,7 +222,8 @@ func TestExecuteADBUSBRejectsNonUSBSerialsBeforeRunningADB(t *testing.T) {
 
 func TestOpenADBUSBTerminalStartsShellOnSerial(t *testing.T) {
 	// Not parallel: the authorization wait is a package variable other tests shrink.
-	executable, logPath := fakeADB(t, `if [ "$3" = "get-state" ]; then echo device; exit 0; fi
+	executable, logPath := fakeADB(t, `if [ "$1" = "-s" ] && [ "$3" = "get-serialno" ]; then echo "$2"; exit 0; fi
+if [ "$3" = "get-state" ]; then echo device; exit 0; fi
 if [ "$1" = "-s" ] && [ "$2" = "SER1" ] && [ "$3" = "shell" ] && [ "$4" = "-t" ] && [ "$5" = "-t" ]; then
   echo "usb shell"
   IFS= read -r line
@@ -348,5 +351,52 @@ func TestManagerRoutesEachADBConnectionFormToItsOpener(t *testing.T) {
 	case extra := <-calls:
 		t.Fatalf("invalid USB group reached an opener: %#v", extra)
 	default:
+	}
+}
+
+// A cold adb server prints daemon banners on stderr before answering. The USB
+// path must read the state and serial from stdout only, so the first command
+// after a host reboot or a killed server still works.
+func TestADBUSBIgnoresDaemonBannerOnColdStart(t *testing.T) {
+	// Not parallel: the authorization wait is a package variable other tests shrink.
+	banner := `echo "* daemon not running; starting now at tcp:5037" >&2; echo "* daemon started successfully" >&2;`
+	executable, logPath := fakeADB(t, `if [ "$1" = "-s" ] && [ "$2" = "SER1" ] && [ "$3" = "get-state" ]; then `+banner+` echo device; exit 0; fi
+if [ "$1" = "-s" ] && [ "$2" = "SER1" ] && [ "$3" = "get-serialno" ]; then `+banner+` echo SER1; exit 0; fi
+if [ "$1" = "-s" ] && [ "$2" = "SER1" ] && [ "$3" = "shell" ] && [ "$4" = "id" ]; then echo "uid=2000(shell)"; exit 0; fi
+if [ "$1" = "-s" ] && [ "$2" = "SER1" ] && [ "$3" = "shell" ] && [ "$4" = "-t" ]; then echo "usb shell"; IFS= read -r line; exit 0; fi`)
+	result, err := executeADBUSBWithExecutable(context.Background(), executable, "SER1", []string{"shell", "id"}, nil, 5*time.Second)
+	if err != nil || string(result.Stdout) != "uid=2000(shell)\n" {
+		t.Fatalf("exec after a daemon banner: result=%#v err=%v", result, err)
+	}
+	terminal, err := openADBUSBTerminalWithExecutable(context.Background(), executable, "SER1")
+	if err != nil {
+		t.Fatalf("terminal after a daemon banner: %v", err)
+	}
+	defer terminal.Close()
+	buffer := make([]byte, 64)
+	count, _ := terminal.Read(buffer)
+	if !strings.Contains(string(buffer[:count]), "usb shell") {
+		t.Fatalf("terminal output %q", buffer[:count])
+	}
+	assertNoHostADBCommands(t, adbCalls(t, logPath), "connect", "pair", "mdns", "kill-server")
+}
+
+// adb -s with a bare host can resolve to a connected host:5555 transport.
+// get-serialno must confirm the device is the configured USB serial before
+// any command runs; a mismatch is refused for exec and terminal alike.
+func TestADBUSBRefusesWhenResolvedSerialDiffers(t *testing.T) {
+	executable, logPath := fakeADB(t, `if [ "$3" = "get-state" ]; then echo device; exit 0; fi
+if [ "$3" = "get-serialno" ]; then echo "192.0.2.4:5555"; exit 0; fi
+if [ "$3" = "shell" ]; then echo "must not run"; exit 0; fi`)
+	if _, err := executeADBUSBWithExecutable(context.Background(), executable, "SER1", []string{"shell", "id"}, nil, 2*time.Second); err == nil || !strings.Contains(err.Error(), "序列号不一致") {
+		t.Fatalf("exec on a mismatched serial: %v", err)
+	}
+	if _, err := openADBUSBTerminalWithExecutable(context.Background(), executable, "SER1"); err == nil || !strings.Contains(err.Error(), "序列号不一致") {
+		t.Fatalf("terminal on a mismatched serial: %v", err)
+	}
+	for _, call := range adbCalls(t, logPath) {
+		if strings.Contains(call, " shell") {
+			t.Fatalf("a command ran on a mismatched device: %q", adbCalls(t, logPath))
+		}
 	}
 }

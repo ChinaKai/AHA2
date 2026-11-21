@@ -92,6 +92,9 @@ var blockedADBHostCommands = map[string]bool{
 	"connect": true, "disconnect": true, "pair": true,
 	"kill-server": true, "start-server": true, "devices": true,
 	"mdns": true, "host-features": true,
+	// tcpip restarts adbd in TCP mode, silently turning a USB or wireless
+	// resource into a network device outside the resource's connection form.
+	"tcpip": true,
 }
 
 func (s *Server) agentADBExec(writer http.ResponseWriter, request *http.Request) {
