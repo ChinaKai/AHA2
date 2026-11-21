@@ -1,6 +1,7 @@
 // Optional browser verification for the Task permission request entry.
 // Reproduces the failure mode where a tall conversation collapsed the request
-// block to zero height, and checks the toolbar badge, panel and decision flow.
+// block to zero height, and checks that the channel page now owns both the
+// badge and the approval section.
 import assert from "node:assert/strict";
 import {createServer} from "node:http";
 import {readFile, mkdir} from "node:fs/promises";
@@ -9,9 +10,15 @@ import {pathToFileURL} from "node:url";
 
 const root = resolve(import.meta.dirname, "../..");
 const tools = resolve(root, ".tools/web-validation");
-const {chromium} = await import(pathToFileURL(resolve(tools, "node_modules/playwright/index.mjs")));
-const {default: binary} = await import(pathToFileURL(resolve(tools, "node_modules/@sparticuz/chromium/build/index.js")));
-const output = resolve(tools, "screenshots");
+const playwrightModule = process.env.AHA_PLAYWRIGHT_MODULE || resolve(tools, "node_modules/playwright/index.mjs");
+const {chromium} = await import(pathToFileURL(playwrightModule));
+const launchOptions = process.env.AHA_BROWSER_EXECUTABLE
+  ? {executablePath: process.env.AHA_BROWSER_EXECUTABLE, args: ["--no-sandbox"]}
+  : await (async () => {
+      const {default: binary} = await import(pathToFileURL(resolve(tools, "node_modules/@sparticuz/chromium/build/index.js")));
+      return {executablePath: await binary.executablePath(), args: binary.args};
+    })();
+const output = process.env.AHA_BROWSER_SCREENSHOT_DIR || resolve(tools, "screenshots");
 await mkdir(output, {recursive: true});
 const csp = (await readFile(resolve(root, "internal/httpapi/server.go"), "utf8")).match(/Set\("Content-Security-Policy", "([^"]+)"\)/)[1];
 
@@ -86,22 +93,27 @@ await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
 const url = `http://127.0.0.1:${server.address().port}`;
 let browser;
 try {
-  browser = await chromium.launch({executablePath: await binary.executablePath(), args: binary.args, headless: true});
+  browser = await chromium.launch({...launchOptions, headless: true});
   const page = await browser.newPage({viewport: {width: 1280, height: 900}});
   const errors = [];
   page.on("pageerror", error => errors.push(error.message));
   await page.goto(url, {waitUntil: "networkidle"});
   await page.waitForSelector('.task-card[data-task="t-perm"]', {timeout: 15000});
   await page.click('.task-card[data-task="t-perm"]');
-  await page.waitForSelector('[data-task-tool="permissions"]', {timeout: 15000});
+  await page.waitForSelector('[data-task-tool="channel"]', {timeout: 15000});
   assert.equal(await page.locator("#task-permission-slot").count(), 0, "the inline permission block should be gone");
+  assert.equal(await page.locator('[data-task-tool="permissions"]').count(), 0, "the permissions tool should be gone");
 
-  const button = page.locator('[data-task-tool="permissions"]');
-  assert.equal(await button.count(), 1, "permission entry missing from the Task toolbar");
-  assert.equal(await button.locator(".task-tool-badge").innerText(), "1", "pending badge did not render");
+  const button = page.locator('[data-task-tool="channel"]');
+  assert.equal(await button.count(), 1, "channel entry missing from the Task toolbar");
+  assert.equal(await button.locator(".task-tool-badge").innerText(), "1", "pending badge did not move to the channel entry");
+  assert.equal(await button.evaluate(node => node.classList.contains("has-pending")), true);
 
   await button.click();
   await page.waitForSelector("#task-tool-panel-body .task-permission-item", {timeout: 5000});
+  // The approval section renders even when the Task has no channel binding.
+  assert.equal(await page.locator("#task-tool-panel-body #task-channel-permissions").count(), 1);
+  assert.equal(await page.locator("#task-permission-slot").count(), 0);
   // A long request action must not widen the grid item past the split panel:
   // the row text ellipsizes instead of clipping the card on the right.
   const overflow = await page.evaluate(() => {
@@ -138,7 +150,15 @@ try {
   await page.locator('#task-tool-panel-body [data-task-permission-decision="approve"]').click();
   await page.waitForFunction(() => window.__resolved !== null, null, {timeout: 8000});
   assert.equal((await page.evaluate(() => window.__resolved)).decision, "approve");
-  await page.waitForFunction(() => document.querySelector("#task-tool-panel-body")?.innerText.includes("已批准"), null, {timeout: 8000});
+  // The default view lists pending work only, so the decided request leaves the
+  // list and the channel badge disappears.
+  await page.waitForFunction(() => document.querySelector("#task-tool-panel-body .task-permission-item") === null, null, {timeout: 8000});
+  await page.waitForFunction(() => document.querySelector('[data-task-tool="channel"] .task-tool-badge') === null, null, {timeout: 8000});
+  assert.match(await page.locator("#task-channel-permissions").innerText(), /当前没有待审批的权限申请/);
+  await page.click("#toggle-task-permission-history");
+  await page.waitForSelector("#task-tool-panel-body .task-permission-item", {timeout: 5000});
+  assert.match(await page.locator("#task-tool-panel-body .task-permission-item").first().innerText(), /已批准/);
+  await page.screenshot({path: resolve(output, "task-permissions-history.png")});
   assert.deepEqual(errors, [], "the permission entry threw while being driven");
   console.log("task permission entry verified in the built Web bundle");
 } finally {

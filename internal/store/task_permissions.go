@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
@@ -47,25 +48,12 @@ func (s *Store) TaskPermissionRequest(ctx context.Context, id string) (domain.Ta
 		`SELECT `+taskPermissionRequestColumns+` FROM task_permission_requests WHERE id=?`, id))
 }
 
+// ListTaskPermissionRequests is a pure read. Expiry is settled explicitly by
+// ExpireTaskPermissionRequests so a read or an unrelated write can never turn a
+// request into expired without the caller also sending its result message.
 func (s *Store) ListTaskPermissionRequests(ctx context.Context, taskID string, limit int) ([]domain.TaskPermissionRequest, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 50
-	}
-	now := time.Now().UTC()
-	// Expiring is a write, and the detail page reads this list on every load.
-	// Probe first so the common page (nothing expired) does not take the write
-	// lock just to update zero rows.
-	var hasExpired bool
-	if err := s.db.QueryRowContext(ctx, `
-		SELECT EXISTS(
-			SELECT 1 FROM task_permission_requests
-			WHERE task_id=? AND status='pending' AND expires_at<=?
-		)`, taskID, timeString(now),
-	).Scan(&hasExpired); err != nil || hasExpired {
-		_, _ = s.db.ExecContext(ctx, `
-			UPDATE task_permission_requests SET status='expired',updated_at=?
-			WHERE task_id=? AND status='pending' AND expires_at<=?`,
-			timeString(now), taskID, timeString(now))
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT `+taskPermissionRequestColumns+` FROM task_permission_requests
@@ -92,6 +80,60 @@ func (s *Store) SetTaskPermissionRequestChannelAction(ctx context.Context, id, a
 		UPDATE task_permission_requests SET channel_action_id=?,updated_at=? WHERE id=?`,
 		actionID, timeString(at), id)
 	return err
+}
+
+// ExpireTaskPermissionRequests moves due pending requests to expired and
+// returns only the rows this call actually changed. The conditional update
+// keeps concurrent readers from reporting the same expiry twice, so the caller
+// can use the result to send exactly one approval-result message per request.
+func (s *Store) ExpireTaskPermissionRequests(ctx context.Context, taskID string, at time.Time) ([]domain.TaskPermissionRequest, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT `+taskPermissionRequestColumns+` FROM task_permission_requests
+		WHERE task_id=? AND status='pending' AND expires_at<=?`,
+		taskID, timeString(at))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var due []domain.TaskPermissionRequest
+	for rows.Next() {
+		item, scanErr := scanTaskPermissionRequest(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		due = append(due, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	expired := make([]domain.TaskPermissionRequest, 0, len(due))
+	for _, item := range due {
+		result, err := s.db.ExecContext(ctx, `
+			UPDATE task_permission_requests SET status='expired',updated_at=?
+			WHERE id=? AND status='pending' AND expires_at<=?`,
+			timeString(at), item.ID, timeString(at))
+		if err != nil {
+			return nil, err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return nil, err
+		}
+		if affected != 1 {
+			continue
+		}
+		item.Status = "expired"
+		item.UpdatedAt = at
+		expired = append(expired, item)
+	}
+	return expired, nil
 }
 
 // ResolveTaskPermissionRequest consumes one pending request. It returns false

@@ -1057,7 +1057,7 @@ test("mail phase two keeps navigation stable, one mail entry, and table tools", 
   assert.doesNotMatch(script, /id="task-send-mail"/);
   assert.doesNotMatch(script, /bindMailCardActions\(list/);
   // The mail tool is the single entry and owns the pending badge.
-  assert.match(taskTools, /tool\.id === "mail" \? Math\.max\(0, Number\(options\.pendingMail\) \|\| 0\)/);
+  assert.match(taskTools, /tool\.id === "channel" \|\| tool\.id === "mail"[\s\S]*?Number\(tool\.id === "channel" \? options\.pendingPermissions : options\.pendingMail\)/);
   assert.match(script, /pendingMail: taskMailPendingCount\(\)/);
   assert.match(script, /function syncTaskMailIndicator\(\)/);
   assert.match(script, /syncTaskMailIndicator\(\);/);
@@ -3393,13 +3393,16 @@ test("pet workbench actions cover unfollowed, followed, ignored, and restored ro
   assert.match(main, /\[data-pet-watch-ignore\]"\)\.forEach[\s\S]*?const ignored = button\.dataset\.petWatchIgnore === "true"[\s\S]*?api\.setPetTaskWatchIgnored\(taskID, ignored\)[\s\S]*?await load\(\)/);
 });
 
-test("task detail renders owner permission request decisions", async () => {
+test("task detail renders owner permission request decisions inside the channel page", async () => {
   const root = resolve(import.meta.dirname, "..");
   const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
   const tools = await readFile(resolve(root, "src", "task_tools.ts"), "utf8");
   const api = await readFile(resolve(root, "src", "api.ts"), "utf8");
   const types = await readFile(resolve(root, "src", "types.ts"), "utf8");
-  assert.match(main, /taskPermissionPanelHtml\(detail\)/);
+  // The channel page owns approvals now, and the toolbar has no permissions
+  // entry; the pending count moved onto the channel button.
+  assert.match(main, /taskPermissionSectionHtml\(detail\)/);
+  assert.match(main, /<section id="task-channel-permissions"/);
   assert.match(main, /<details class="task-permission-item/);
   assert.match(main, /task-permission-detail/);
   assert.match(main, /data-task-permission-decision="approve"/);
@@ -3409,11 +3412,49 @@ test("task detail renders owner permission request decisions", async () => {
   // The inline block above the conversation was replaced by the toolbar panel.
   assert.doesNotMatch(main, /<div id="task-permission-slot">/);
   assert.doesNotMatch(main, /class="conversation-top"/);
-  assert.match(tools, /\{id: "permissions", label: "权限申请", iconName: "shield"\}/);
+  assert.doesNotMatch(tools, /\{id: "permissions", label: "权限申请", iconName: "shield"\}/);
+  assert.doesNotMatch(tools, /data-task-tool="permissions"/);
+  assert.match(tools, /tool\.id === "channel" \|\| tool\.id === "mail"/);
   assert.match(tools, /task-tool-badge/);
+  assert.match(tools, /value === "permissions"\) return "channel"/);
   assert.match(api, /resolveTaskPermissionRequest/);
   assert.match(types, /interface TaskPermissionRequest/);
   assert.match(types, /permission_requests\?: TaskPermissionRequest\[\]/);
+});
+
+test("task channel page is a compact member picker with pending approvals", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
+  const styles = await readFile(resolve(root, "src", "styles.css"), "utf8");
+  const i18n = await readFile(resolve(root, "src", "i18n.ts"), "utf8");
+  for (const marker of [
+    'id="task-channel-member-search"',
+    'id="task-channel-select-all"',
+    'id="task-channel-clear"',
+    'id="task-channel-member-count"',
+    "已选 ${result.contacts.length} / 共 ${result.members.length}",
+    'data-remove-task-contact',
+    'id="toggle-task-permission-history"',
+    'data-task-permission-history="${history}"',
+    "只看待审批",
+    "查看历史",
+  ]) {
+    assert.ok(main.includes(marker), `main.ts missing ${marker}`);
+  }
+  assert.match(main, /applyTaskChannelMemberFilter\(\)/);
+  assert.match(main, /\.task-channel-member:not\(\[hidden\]\) input\[name="contact_id"\]/);
+  assert.match(main, /checkbox\.checked = false;[\s\S]*?dispatchEvent\(new Event\("change"/);
+  // Desktop is a three-column chip grid; narrow screens fall to two.
+  assert.match(styles, /\.task-channel-member-list \{[^}]*grid-template-columns: repeat\(3,minmax\(0,1fr\)\)/);
+  assert.match(styles, /\.task-channel-member \{[^}]*height: 36px/);
+  assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.task-channel-member-list \{ grid-template-columns: repeat\(2,minmax\(0,1fr\)\)/);
+  assert.match(styles, /\.task-channel-contact \{[^}]*min-height: 38px/);
+  assert.match(styles, /\.task-channel-permissions\.has-pending \{ order: 2; \}/);
+  // New visible copy has both directions in the dictionary.
+  assert.match(i18n, /"查看历史": "View history"/);
+  assert.match(i18n, /"只看待审批": "View pending only"/);
+  assert.match(i18n, /"按姓名搜索": "Search by name"/);
+  assert.ok(i18n.includes("已选 (\\d+) \\/ 共 (\\d+)"), "selected/total count pattern is missing");
 });
 
 test("completed tasks freeze the composer behind a confirmed reopen", async () => {
@@ -3917,7 +3958,9 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   // 发送的草稿回写，以及浮层 Esc；实测 276,244，ceil 到下一个边界。
   // 合入 task-728 后同一掩码、level-5 实测 276,402 JS+CSS，ceil 到下一个
   // 256 字节边界。
-  const FIRST_SCREEN_GZIP_BUDGET = 276480;
+  // task-736 把权限申请并入渠道页、加紧凑成员筛选并收敛任务带字号，
+  // 同一掩码、level-5 实测 278,188 JS+CSS，ceil 到下一个 256 字节边界。
+  const FIRST_SCREEN_GZIP_BUDGET = 278272;
   // The version query parameter is a content hash and its hex digits change
   // how the same code gzips: main already sits exactly on the budget, so a
   // hash-only change could trip it without growing the payload. Mask the

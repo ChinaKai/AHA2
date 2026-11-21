@@ -2809,6 +2809,28 @@ const legacyEnglish: Record<string, string> = {
   "kv.status.draft": "Draft",
   "kv.status.unverified": "Unverified",
   "kv.status.conflict": "Conflict",
+  // Task channel page: merged permission requests and the compact member list.
+  "按姓名搜索成员": "Search members by name",
+  "按姓名搜索": "Search by name",
+  "没有匹配的成员": "No matching members",
+  "移除联调人": "Remove contact",
+  "身份": "Role",
+  "查看历史": "View history",
+  "只看待审批": "View pending only",
+  "没有待审批": "Nothing pending",
+  "当前没有待审批的权限申请。": "No pending permission requests.",
+  "没有已处理的权限申请。": "No processed permission requests.",
+  "范围": "Scope",
+  "原因": "Reason",
+  "申请时间": "Requested",
+  "处理人": "Decided by",
+  "处理说明": "Decision note",
+  "群成员": "Group member",
+  "未填写动作": "No action",
+  "已过期": "Expired",
+  "高": "High",
+  "中": "Medium",
+  "低": "Low",
 };
 
 let locale: Locale = "zh-CN";
@@ -2998,6 +3020,16 @@ function translatePatternText(text: string): string | null {
   if (match) return "Change security settings";
   match = /^权限申请（(\d+) 条待审批）$/.exec(text);
   if (match) return `Permission requests (${match[1]} pending)`;
+  match = /^(\d+) 条待审批$/.exec(text);
+  if (match) return `${match[1]} pending`;
+  // Channel entry badge/title: the base label can be dynamic, so translate the
+  // static part when known and always translate the pending suffix.
+  match = /^(.+?)（(\d+) 条待审批）$/.exec(text);
+  if (match) return `${legacyEnglish[match[1].trim()] ?? match[1]} (${match[2]} pending)`;
+  match = /^已选 (\d+) \/ 共 (\d+)$/.exec(text);
+  if (match) return `Selected ${match[1]} / ${match[2]} total`;
+  match = /^(.+) · (\d+) 名已登记成员$/.exec(text);
+  if (match) return `${match[1]} · ${match[2]} registered members`;
   match = /^邮件（(\d+) 条待审批）$/.exec(text);
   if (match) return `Mail (${match[1]} pending)`;
   match = /^每条消息最多 (\d+) 个，单文件 ≤(\d+)MiB$/.exec(text);

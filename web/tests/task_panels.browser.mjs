@@ -10,9 +10,15 @@ import {pathToFileURL} from "node:url";
 
 const root = resolve(import.meta.dirname, "../..");
 const tools = resolve(root, ".tools/web-validation");
-const {chromium} = await import(pathToFileURL(resolve(tools, "node_modules/playwright/index.mjs")));
-const {default: binary} = await import(pathToFileURL(resolve(tools, "node_modules/@sparticuz/chromium/build/index.js")));
-const output = resolve(tools, "screenshots");
+const playwrightModule = process.env.AHA_PLAYWRIGHT_MODULE || resolve(tools, "node_modules/playwright/index.mjs");
+const {chromium} = await import(pathToFileURL(playwrightModule));
+const launchOptions = process.env.AHA_BROWSER_EXECUTABLE
+  ? {executablePath: process.env.AHA_BROWSER_EXECUTABLE, args: ["--no-sandbox"]}
+  : await (async () => {
+      const {default: binary} = await import(pathToFileURL(resolve(tools, "node_modules/@sparticuz/chromium/build/index.js")));
+      return {executablePath: await binary.executablePath(), args: binary.args};
+    })();
+const output = process.env.AHA_BROWSER_SCREENSHOT_DIR || resolve(tools, "screenshots");
 await mkdir(output, {recursive: true});
 const csp = (await readFile(resolve(root, "internal/httpapi/server.go"), "utf8")).match(/Set\("Content-Security-Policy", "([^"]+)"\)/)[1];
 
@@ -127,7 +133,7 @@ const toggleFilter = (page, filter, value, checked) => page.evaluate(([filter, v
   input.dispatchEvent(new Event("change", {bubbles: true}));
 }, [filter, value, checked]);
 try {
-  browser = await chromium.launch({executablePath: await binary.executablePath(), args: binary.args, headless: true});
+  browser = await chromium.launch({...launchOptions, headless: true});
   const page = await browser.newPage({viewport: {width: 1440, height: 1400}});
   const errors = [];
   page.on("pageerror", error => errors.push(error.message));
