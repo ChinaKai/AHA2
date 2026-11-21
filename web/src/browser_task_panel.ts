@@ -145,7 +145,12 @@ export function browserTextByteLength(text: string): number {
 }
 
 // browserViewportPoint returns the page coordinate under a client point, or
-// null when the point is outside the displayed image (the letterbox bars).
+// null when the point cannot be mapped safely: outside the displayed image
+// (the letterbox bars), or the frame has no valid CSS viewport. A missing
+// viewport is fail-closed: image pixels are not a substitute because a device
+// scale factor would silently shift the click inside the viewport.
+export const BROWSER_VIEWPORT_WAITING_NOTICE = "画面尺寸未知，坐标输入已暂停；请等待下一帧画面";
+
 export function browserViewportPoint(
   clientX: number,
   clientY: number,
@@ -156,6 +161,7 @@ export function browserViewportPoint(
   viewportHeight: number,
 ): BrowserPoint | null {
   if (!rect || !(rect.width > 0) || !(rect.height > 0) || !(imageWidth > 0) || !(imageHeight > 0)) return null;
+  if (!(viewportWidth > 0) || !(viewportHeight > 0)) return null;
   const scale = Math.min(rect.width / imageWidth, rect.height / imageHeight);
   if (!Number.isFinite(scale) || scale <= 0) return null;
   const contentWidth = imageWidth * scale;
@@ -163,13 +169,11 @@ export function browserViewportPoint(
   const left = rect.left + (rect.width - contentWidth) / 2;
   const top = rect.top + (rect.height - contentHeight) / 2;
   if (clientX < left || clientX > left + contentWidth || clientY < top || clientY > top + contentHeight) return null;
-  const width = viewportWidth > 0 ? viewportWidth : imageWidth;
-  const height = viewportHeight > 0 ? viewportHeight : imageHeight;
-  const x = Math.floor(((clientX - left) / contentWidth) * width);
-  const y = Math.floor(((clientY - top) / contentHeight) * height);
+  const x = Math.floor(((clientX - left) / contentWidth) * viewportWidth);
+  const y = Math.floor(((clientY - top) / contentHeight) * viewportHeight);
   return {
-    x: Math.max(0, Math.min(width - 1, x)),
-    y: Math.max(0, Math.min(height - 1, y)),
+    x: Math.max(0, Math.min(viewportWidth - 1, x)),
+    y: Math.max(0, Math.min(viewportHeight - 1, y)),
   };
 }
 
@@ -614,6 +618,9 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     startedAt: number;
     moved: boolean;
     scrolling: boolean;
+    // Set once a contextmenu event has already claimed this gesture, so
+    // pointerup cannot turn the same right-button press into a second click.
+    contextQueued: boolean;
   }
   let controlGesture: ControlGesture | null = null;
   const controlPointers = new Map<number, {x: number; y: number}>();
@@ -623,13 +630,19 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
   const controlCapable = (): boolean => Boolean(state.grant?.capabilities?.includes("interact"));
   const controlReady = (): boolean => state.controlMode && Boolean(state.grant) && Boolean(selectedTab())
     && !(state.host && !state.host.available);
+  // Coordinate actions need both the frame and the CSS viewport it belongs to.
+  // Without that pair a click cannot be mapped safely (DPR is unknowable), so
+  // the panel refuses the action instead of guessing from image pixels.
+  const frameViewportReady = (): boolean => state.frameViewportWidth > 0 && state.frameViewportHeight > 0;
+  const missingViewportNotice = (): void => controlNotice(BROWSER_VIEWPORT_WAITING_NOTICE);
 
   const controlHintText = (): string => {
     if (!state.grant) return "";
-    if (state.controlNotice) return state.controlNotice;
     if (!controlCapable()) return "当前授权不含页面操作能力；重新开启共享后可控制页面";
     if (state.host && !state.host.available) return "浏览器宿主不可用，输入已停用";
     if (!selectedTab()) return "当前没有可控制的页面";
+    if (state.controlMode && !frameViewportReady()) return BROWSER_VIEWPORT_WAITING_NOTICE;
+    if (state.controlNotice) return state.controlNotice;
     if (state.controlMode) return "控制中 · 点击画面操作页面；Shift+Esc 退出";
     return "只读浏览 · 打开控制后可点击、输入和滚动";
   };
@@ -993,6 +1006,8 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
       empty.hidden = live;
       if (!live) empty.textContent = state.frameError ? "画面暂不可用" : frameStatusText();
     }
+    // Every frame may change whether coordinate mapping is possible.
+    paintControlBar();
   };
 
   const syncShell = (session: BrowserSession | null, profileName: string): void => {
@@ -1040,7 +1055,10 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     const sink = container.querySelector<HTMLTextAreaElement>("#desktop-browser-input");
     if (!stage || !image || !sink) return;
 
-    let contextClickAt = 0;
+    // Timestamp only for the "contextmenu arrived after pointerup" platform
+    // order; the per-gesture contextQueued flag is what makes a held right
+    // click produce exactly one context_click.
+    let contextHandledAt = 0;
     const pointAt = (clientX: number, clientY: number): BrowserPoint | null =>
       browserViewportPoint(clientX, clientY, image.getBoundingClientRect(),
         image.naturalWidth, image.naturalHeight, state.frameViewportWidth, state.frameViewportHeight);
@@ -1092,6 +1110,7 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
         lastX: event.clientX, lastY: event.clientY,
         pointerId: event.pointerId, pointerType: event.pointerType,
         button: event.button, startedAt: Date.now(), moved: false, scrolling: false,
+        contextQueued: false,
       };
       try { stage.setPointerCapture(event.pointerId); } catch { /* synthetic pointer */ }
     });
@@ -1134,6 +1153,12 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
       controlGesture = null;
       try { stage.releasePointerCapture(event.pointerId); } catch { /* not captured */ }
       if (!controlReady()) return;
+      // Without the frame's CSS viewport, a click/drag cannot be mapped safely;
+      // refuse it and tell the Owner to wait for the next frame.
+      if (!frameViewportReady()) {
+        missingViewportNotice();
+        return;
+      }
       const startPoint = pointAt(gesture.startX, gesture.startY);
       const endPoint = pointAt(event.clientX, event.clientY);
       if (gesture.pointerType === "touch") {
@@ -1152,14 +1177,20 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
         return;
       }
       if (gesture.button === 2) {
-        // On some platforms contextmenu fires before pointerup; only one of
-        // the two paths may turn this gesture into a context_click.
-        if (!gesture.moved && startPoint && Date.now() - contextClickAt > 80) {
-          contextClickAt = Date.now();
+        // contextmenu may fire before pointerup (Linux/macOS) or after
+        // (Windows). contextQueued covers the first order regardless of how
+        // long the button was held; contextHandledAt covers the second.
+        if (!gesture.contextQueued && !gesture.moved && startPoint) {
+          contextHandledAt = Date.now();
           queueControlClick(startPoint, "context_click", "mouse");
+        } else {
+          contextHandledAt = Date.now();
         }
         return;
       }
+      // A contextmenu already consumed this gesture (macOS ctrl+left-click);
+      // do not also send the normal click.
+      if (gesture.contextQueued) return;
       if (!startPoint || !endPoint) return;
       if (gesture.moved) {
         if (Math.hypot(endPoint.x - startPoint.x, endPoint.y - startPoint.y) > 4) {
@@ -1180,15 +1211,32 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     });
     stage.addEventListener("contextmenu", event => {
       event.preventDefault();
-      // macOS/ctrl-click has no right-button gesture; pointerup for it is a
-      // normal left click, so the contextmenu event is the only signal. The
-      // guard avoids a second context_click after a real right-button gesture.
-      if (!controlReady() || Date.now() - contextClickAt < 80) return;
-      const point = pointAt(event.clientX, event.clientY);
-      if (point) {
-        contextClickAt = Date.now();
-        queueControlClick(point, "context_click", "mouse");
+      if (!controlReady()) return;
+      if (!frameViewportReady()) {
+        missingViewportNotice();
+        return;
       }
+      const gesture = controlGesture;
+      if (gesture) {
+        // Linux/macOS can fire contextmenu while the button is still down.
+        // Claim the gesture once; pointerup then only records the timestamp.
+        const rightButton = gesture.button === 2;
+        const macControlClick = gesture.button === 0 && event.ctrlKey;
+        if ((!rightButton && !macControlClick) || gesture.contextQueued || gesture.moved) return;
+        const point = pointAt(event.clientX, event.clientY);
+        if (!point) return;
+        gesture.contextQueued = true;
+        contextHandledAt = Date.now();
+        queueControlClick(point, "context_click", "mouse");
+        return;
+      }
+      // Windows can fire it after pointerup. The pointerup path already set
+      // contextHandledAt for a right-button gesture; do not queue a second one.
+      if (Date.now() - contextHandledAt < 250) return;
+      const point = pointAt(event.clientX, event.clientY);
+      if (!point) return;
+      contextHandledAt = Date.now();
+      queueControlClick(point, "context_click", "mouse");
     });
     stage.addEventListener("dragstart", event => event.preventDefault());
     stage.addEventListener("wheel", event => {
@@ -1196,6 +1244,10 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
       // Ctrl/Cmd+wheel is the Owner zooming the panel, not page input.
       if (event.ctrlKey || event.metaKey) return;
       event.preventDefault();
+      if (!frameViewportReady()) {
+        missingViewportNotice();
+        return;
+      }
       const point = pointAt(event.clientX, event.clientY);
       if (!point || (!event.deltaX && !event.deltaY)) return;
       const scale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? stage.clientHeight : 1;
@@ -1658,10 +1710,14 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
       frameSignature = nextSignature;
       state.frameLive = true;
       state.frameError = "";
-      // The viewport belongs to this exact image. A frame without headers
-      // falls back to the image's natural size.
+      // The viewport belongs to this exact image. A frame without headers is
+      // not mappable: coordinate input stays paused until a valid pair arrives.
       state.frameViewportWidth = frame.viewportWidth;
       state.frameViewportHeight = frame.viewportHeight;
+      if (frame.viewportWidth > 0 && frame.viewportHeight > 0
+        && state.controlNotice === BROWSER_VIEWPORT_WAITING_NOTICE) {
+        state.controlNotice = "";
+      }
       const nextURL = URL.createObjectURL(new Blob([buffer], {type: frame.blob.type || "image/jpeg"}));
       const previousURL = frameURL;
       frameURL = nextURL;

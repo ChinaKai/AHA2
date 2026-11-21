@@ -11,7 +11,7 @@ const futureFence = id => `${id}@${Date.now() + 60_000}`;
 
 async function startHost({elements = [], cookieList = [], downloadBody = "download-body", downloadOptions = null} = {}) {
   const root = await mkdtemp(join(tmpdir(), "aha2-browser-interaction-"));
-  const calls = {actions: [], uploads: [], addedCookies: [], cookieURLs: null, chooserFiles: null};
+  const calls = {actions: [], uploads: [], addedCookies: [], cookieURLs: null, chooserFiles: null, screenshotOptions: null};
   const listeners = {};
   let currentURL = "https://example.com/login";
   const fixtureElements = elements.length
@@ -58,7 +58,10 @@ async function startHost({elements = [], cookieList = [], downloadBody = "downlo
     on: (event, fn) => { listeners[event] = fn; },
     once: (event, fn) => { listeners[event] = fn; },
     removeListener: event => { delete listeners[event]; },
-    screenshot: async () => Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+    screenshot: async options => {
+      calls.screenshotOptions = options || null;
+      return Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+    },
     evaluate: async (fn, arg) => {
       if (typeof arg === "number") return "page text";
       if (arg && typeof arg === "object" && typeof arg.max === "number") {
@@ -266,6 +269,9 @@ test("frame carries the CSS viewport that belongs to the image", async () => {
     assert.equal(first.headers.get("x-aha2-viewport-width"), "1280");
     assert.equal(first.headers.get("x-aha2-viewport-height"), "800");
     assert.equal(first.headers.get("x-aha2-frame-cached"), "0");
+    // CSS-scale screenshots keep image pixels equal to CSS pixels on a DPR≠1
+    // display; the viewport headers still drive the Web mapping.
+    assert.equal(host.calls.screenshotOptions?.scale, "css");
     // A throttled cached frame must describe the same viewport as its image.
     const cached = await host.raw(`/v1/profiles/browser_profile_1/tabs/${tabID}/frame`);
     assert.equal(cached.status, 200);

@@ -990,21 +990,26 @@ export function createHostServer(options) {
               // both sizes as a ratio, so DPI never has to be guessed.
               const viewportProbe = (async () => {
                 try {
-                  const size = await tab.page.evaluate(() => ({
+                  // A wedged page must not hold the whole frame request; the
+                  // same short budget as the other page metadata probes.
+                  const size = await settleWithin(tab.page.evaluate(() => ({
                     width: window.innerWidth, height: window.innerHeight,
-                  }));
+                  })), PAGE_METADATA_TIMEOUT_MS, null);
                   if (size && Number.isInteger(size.width) && Number.isInteger(size.height) &&
                       size.width > 0 && size.height > 0) {
                     return {width: size.width, height: size.height};
                   }
                 } catch {
-                  // A wedged page still yields its bitmap; mapping falls back
-                  // to the image's own pixel size in the Web UI.
+                  // No valid viewport: the Web UI fails closed for coordinate
+                  // input instead of guessing from image pixels.
                 }
                 return {width: 0, height: 0};
               })();
               const [buffer, viewport] = await Promise.all([
-                tab.page.screenshot({type: "jpeg", quality: FRAME_QUALITY, timeout: 5000}),
+                // "css" makes the image pixels match the CSS viewport even on
+                // a device-scale-factor display; the Web UI still requires the
+                // explicit viewport headers to map input.
+                tab.page.screenshot({type: "jpeg", quality: FRAME_QUALITY, timeout: 5000, scale: "css"}),
                 viewportProbe,
               ]);
               if (!Buffer.isBuffer(buffer) || buffer.length === 0) {

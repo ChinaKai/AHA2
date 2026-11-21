@@ -214,12 +214,17 @@ profile 路径、CDP 或密码管理器。
 
 坐标换算：
 
-- frame 是页面 viewport 的截图，像图像素可能含设备缩放因子；host 在同一次
-  截图时读取 `window.innerWidth/innerHeight` 并通过响应头返回 CSS viewport。
+- frame 是页面 viewport 的截图；host 用 `scale:"css"` 截图，并在同一次截图时
+  读取 `window.innerWidth/innerHeight`，通过响应头返回 CSS viewport。读取有
+  1.5s 上限，卡死的页面不会把整个 frame 请求拖住。
 - 面板里的 `<img>` 使用 `object-fit: contain`，会留白。每次事件都用图片的
   `getBoundingClientRect()`、`naturalWidth/naturalHeight` 和 frame 的 CSS
   viewport 计算内容区，再把 client 坐标按比例映射到页面坐标，
   因此窗口缩放、CSS 缩放、devicePixelRatio、移动端都不需要单独猜。
+- **没有有效 viewport 就失败关闭**：响应头缺失、为 0 或越界时，面板不接受
+  click/drag/scroll/hover（键盘 text/key 仍可用），并提示“画面尺寸未知，
+  坐标输入已暂停；请等待下一帧画面”。不用截图图片像素兜底，避免 DPR≠1 时
+  静默点偏。下一帧带回有效 viewport 后自动恢复。
 - 点在留白区或图片之外时不会发送动作；窗口刚变化、画面还没更新时，host 的
   viewport 校验会返回 `browser_action_invalid`，面板提示刷新后重试，不会静默
   把点击落到错误位置。

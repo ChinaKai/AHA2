@@ -155,6 +155,9 @@ window.__frame503 = 0;
 window.__actions = [];
 window.__notices = [];
 window.__actionError = null;
+// When set, frame responses omit the CSS viewport headers. Coordinate input
+// must then fail closed instead of falling back to image pixels.
+window.__omitFrameViewport = false;
 window.__frameClosed = [];
 window.__vis = "visible";
 const HOST_UP = {available: true, host_id: "local", version: "0.1.0", platform: "win32", edge_available: true};
@@ -297,12 +300,13 @@ window.fetch = async (input, init = {}) => {
     window.__frames++;
     const png = tabID === "browser_tab_2" ? FRAME_PNG.green : FRAME_PNG.red;
     const body = Uint8Array.from(atob(png), char => char.charCodeAt(0));
-    const viewport = window.__frameViewport || {width: 1280, height: 800};
-    return new Response(body, {status: 200, headers: {
-      "Content-Type": "image/png",
-      "X-AHA2-Viewport-Width": String(viewport.width),
-      "X-AHA2-Viewport-Height": String(viewport.height),
-    }});
+    const headers = {"Content-Type": "image/png"};
+    if (!window.__omitFrameViewport) {
+      const viewport = window.__frameViewport || {width: 1280, height: 800};
+      headers["X-AHA2-Viewport-Width"] = String(viewport.width);
+      headers["X-AHA2-Viewport-Height"] = String(viewport.height);
+    }
+    return new Response(body, {status: 200, headers});
   }
   if (path.startsWith("/api/v1/")) return json({ok: true});
   return json({});
@@ -1306,7 +1310,7 @@ try {
     __released: false, __inUse: false, __transferred: false, __attached: true, __ownerTabs: [],
     __ownerClosed: [], __ownerNav: {}, __ownerActive: "", __frameErrorTab: "", __frameClosed: [],
     __frameRequests: 0, __frameUnavailable: false, __frame503: 0, __actions: [], __notices: [],
-    __actionError: null, __frameViewport: null, __frames: 0});
+    __actionError: null, __frameViewport: null, __omitFrameViewport: false, __frames: 0});
   await page.waitForSelector("#desktop-browser-frame:not([hidden])", {timeout: 5000});
   const toggle = page.locator("#desktop-browser-control-toggle");
   assert.equal(await toggle.count(), 1);
@@ -1367,6 +1371,28 @@ try {
   assert.equal(actions.filter(action => action.kind === "context_click").length, 1,
     "a right click must produce exactly one context_click");
 
+  // Holding the right button longer than any short dedupe window must still
+  // produce exactly one context_click (Linux/macOS contextmenu ordering).
+  const contextBeforeHold = actions.filter(action => action.kind === "context_click").length;
+  await page.mouse.move(center.x, center.y);
+  await page.mouse.down({button: "right"});
+  // Force the Linux/macOS order deterministically: contextmenu arrives while
+  // the button is still down, then the button is held past the old 80ms guard
+  // before pointerup. A timestamp-only dedupe would send a second click here.
+  await page.evaluate(point => {
+    document.querySelector("#desktop-browser-stage").dispatchEvent(new MouseEvent("contextmenu", {
+      bubbles: true, cancelable: true, clientX: point.x, clientY: point.y, button: 2,
+    }));
+  }, center);
+  await page.waitForTimeout(150);
+  await page.mouse.up({button: "right"});
+  await waitFor(page, count => window.__actions.filter(action => action.kind === "context_click").length > count,
+    {arg: contextBeforeHold});
+  await page.waitForTimeout(300);
+  actions = await page.evaluate(() => window.__actions);
+  assert.equal(actions.filter(action => action.kind === "context_click").length, contextBeforeHold + 1,
+    "a held right click must not send a second context_click");
+
   // Keyboard: printable input becomes text, shortcuts become key combinations.
   const beforeKeys = actions.length;
   await page.locator("#desktop-browser-keyboard").click();
@@ -1389,6 +1415,35 @@ try {
   await waitFor(page, count => window.__actions.slice(count).some(action => action.kind === "scroll"), {arg: beforeWheel});
   const scrollAction = await page.evaluate(start => window.__actions.slice(start).find(action => action.kind === "scroll"), beforeWheel);
   assert.ok(scrollAction.delta_y > 0);
+
+  // A frame without the CSS viewport must not send coordinate input: image
+  // pixels are not a safe fallback when a device scale factor is unknown.
+  await page.waitForTimeout(300); // let the scroll settle
+  const coordinateKinds = ["click", "double_click", "context_click", "scroll", "drag", "hover"];
+  const coordinateCount = () => page.evaluate(kinds =>
+    window.__actions.filter(action => kinds.includes(action.kind)).length, coordinateKinds);
+  const coordinatesBeforeMissing = await coordinateCount();
+  const framesBeforeMissing = await page.evaluate(() => window.__frameRequests);
+  await page.evaluate(() => { window.__omitFrameViewport = true; });
+  await waitFor(page, count => window.__frameRequests > count, {arg: framesBeforeMissing});
+  await waitFor(page, () => /画面尺寸未知/.test(document.querySelector("#desktop-browser-control-hint")?.textContent || ""),
+    {timeout: 4000});
+  await page.mouse.click(center.x, center.y);
+  await page.mouse.wheel(0, 200);
+  await page.waitForTimeout(500);
+  assert.equal(await coordinateCount(), coordinatesBeforeMissing,
+    "no click/drag/scroll/hover without a frame viewport");
+  assert.match(await page.locator("#desktop-browser-control-hint").innerText(), /画面尺寸未知/);
+
+  // Restoring a valid frame resumes coordinate input.
+  const clicksBeforeRestore = await page.evaluate(() => window.__actions.filter(action => action.kind === "click").length);
+  const framesBeforeRestore = await page.evaluate(() => window.__frameRequests);
+  await page.evaluate(() => { window.__omitFrameViewport = false; });
+  await waitFor(page, count => window.__frameRequests > count, {arg: framesBeforeRestore});
+  await waitFor(page, () => !/画面尺寸未知/.test(document.querySelector("#desktop-browser-control-hint")?.textContent || ""));
+  await page.mouse.click(center.x, center.y);
+  await waitFor(page, count => window.__actions.filter(action => action.kind === "click").length > count,
+    {arg: clicksBeforeRestore});
 
   // A revoked lease must exit control mode immediately, keep the queue empty,
   // and surface a readable notice instead of silently dropping input.

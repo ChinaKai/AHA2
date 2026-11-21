@@ -181,8 +181,11 @@ test("a device scale factor cancels out because only the image/viewport ratio is
   const rect = {left: 0, top: 0, width: 640, height: 400};
   assert.deepEqual(panel.browserViewportPoint(320, 200, rect, 2560, 1600, 1280, 800), {x: 640, y: 400});
   assert.deepEqual(panel.browserViewportPoint(160, 100, rect, 2560, 1600, 1280, 800), {x: 320, y: 200});
-  // Missing viewport metadata falls back to the image's own pixel size.
-  assert.deepEqual(panel.browserViewportPoint(160, 100, rect, 1280, 800, 0, 0), {x: 320, y: 200});
+  // Missing or partial viewport metadata is fail-closed: image pixels are not
+  // a safe substitute because a device scale factor would shift the click.
+  assert.equal(panel.browserViewportPoint(160, 100, rect, 1280, 800, 0, 0), null);
+  assert.equal(panel.browserViewportPoint(160, 100, rect, 1280, 800, 1280, 0), null);
+  assert.equal(panel.browserViewportPoint(160, 100, rect, 1280, 800, 0, 800), null);
   assert.equal(panel.browserViewportPoint(0, 0, {left: 0, top: 0, width: 0, height: 0}, 1280, 800, 1280, 800), null);
 });
 
