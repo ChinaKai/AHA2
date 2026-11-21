@@ -751,22 +751,15 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     focusControlInput(false);
   };
 
-  const mergeQueuedText = (text: string): boolean => {
-    const last = controlQueue[controlQueue.length - 1];
-    if (!last || last.kind !== "text") return false;
-    const merged = `${last.text || ""}${text}`;
-    if (browserTextByteLength(merged) > BROWSER_CONTROL_MAX_TEXT_BYTES) return false;
-    last.text = merged;
-    return true;
-  };
-
-  const enqueueControl = (action: BrowserPageAction, mergeText = false): boolean => {
+  // enqueueControl is the single entry point for explicit input. A pending
+  // single click is still waiting out the 300ms double-click discriminator; it
+  // must be flushed first or the later text/key/scroll/drag executes before the
+  // click it was meant for. flushPendingClick clears its timer, so the click
+  // cannot be sent twice. The click paths themselves enqueue with flushClick
+  // false only after they cleared the pending click.
+  const enqueueControl = (action: BrowserPageAction, flushClick = true): boolean => {
     if (!controlReady()) return false;
-    if (mergeText && mergeQueuedText(action.text || "")) {
-      state.controlNotice = "";
-      void pumpControl();
-      return true;
-    }
+    if (flushClick) flushPendingClick();
     if (controlQueue.length >= BROWSER_CONTROL_MAX_QUEUE) {
       controlNotice("操作太频繁，请稍后再试");
       return false;
@@ -848,7 +841,7 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
       controlNotice("输入内容过长");
       return;
     }
-    for (const action of browserTextActions(value)) enqueueControl(action, !paste);
+    for (const action of browserTextActions(value)) enqueueControl(action);
   };
 
   const flushPendingClick = (): void => {
@@ -856,7 +849,8 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     controlClickTimer = 0;
     const pending = controlPendingClick;
     controlPendingClick = null;
-    if (pending) enqueueControl({kind: "click", x: pending.x, y: pending.y});
+    // The click is being flushed by this call; do not re-enter the flush.
+    if (pending) enqueueControl({kind: "click", x: pending.x, y: pending.y}, false);
   };
 
   const queueControlClick = (point: BrowserPoint, kind: "click" | "context_click", pointerType: string): void => {
@@ -876,8 +870,8 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
       const first = controlPendingClick;
       controlPendingClick = null;
       // The first click was still waiting; send only the double-click so the
-      // page does not see three clicks.
-      enqueueControl({kind: "double_click", x: first.x, y: first.y});
+      // page does not see three clicks. The pending click was cleared above.
+      enqueueControl({kind: "double_click", x: first.x, y: first.y}, false);
       return;
     }
     flushPendingClick();
@@ -887,7 +881,7 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
       controlClickTimer = 0;
       const pending = controlPendingClick;
       controlPendingClick = null;
-      if (pending) enqueueControl({kind: "click", x: pending.x, y: pending.y});
+      if (pending) enqueueControl({kind: "click", x: pending.x, y: pending.y}, false);
     }, delay);
   };
 

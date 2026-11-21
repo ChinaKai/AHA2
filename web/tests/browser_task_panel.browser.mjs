@@ -1408,6 +1408,68 @@ try {
   assert.ok(keyboardActions.some(action => action.kind === "key"
     && JSON.stringify(action.keys) === JSON.stringify(["Enter"])));
 
+  // M1: input typed inside the 300ms single-click window must not overtake the
+  // click. Real Playwright pointer events, no synthetic dispatch. The old code
+  // queued text/key immediately and the click fired 300ms later, producing
+  // text:a, text:b, key:Enter, click.
+  await page.waitForTimeout(250); // let the previous keyboard actions settle
+  await page.evaluate(() => { window.__actions = []; });
+  box = await stageBox();
+  center = centerOf(box);
+  await page.mouse.click(center.x, center.y);
+  await page.waitForTimeout(50);
+  await page.keyboard.type("ab");
+  await page.keyboard.press("Enter");
+  await waitFor(page, () => window.__actions.some(action =>
+    action.kind === "key" && JSON.stringify(action.keys) === JSON.stringify(["Enter"])));
+  await page.waitForTimeout(400); // the old 300ms click timer would fire here
+  const ordered = await page.evaluate(() => window.__actions.filter(action => action.kind !== "hover"));
+  const sequence = ordered.map(action => action.kind === "text" ? `text:${action.text}`
+    : action.kind === "key" ? `key:${action.keys.join("+")}` : action.kind);
+  assert.deepEqual(sequence.slice(0, 4), ["click", "text:a", "text:b", "key:Enter"],
+    `input must follow the click, got ${sequence.join(" -> ")}`);
+  assert.equal(ordered.filter(action => action.kind === "click").length, 1,
+    "the flushed click must not be sent again by the 300ms timer");
+
+  // A double click still sends exactly one double_click and no plain click,
+  // even though explicit input now flushes a pending click first.
+  await page.evaluate(() => { window.__actions = []; });
+  await page.mouse.dblclick(center.x, center.y);
+  await waitFor(page, () => window.__actions.some(action => action.kind === "double_click"));
+  await page.waitForTimeout(400);
+  const doubled = await page.evaluate(() => window.__actions.filter(action => action.kind !== "hover"));
+  assert.equal(doubled.filter(action => action.kind === "double_click").length, 1,
+    "a double click must produce exactly one double_click");
+  assert.equal(doubled.filter(action => action.kind === "click").length, 0,
+    "a double click must not also send a plain click");
+
+  // Scroll and drag created inside the same click window also follow the click.
+  const orderedKinds = actionsList => actionsList.filter(action => action.kind !== "hover").map(action => action.kind);
+  await page.evaluate(() => { window.__actions = []; });
+  await page.mouse.click(center.x, center.y);
+  await page.waitForTimeout(50);
+  await page.mouse.move(center.x, center.y);
+  await page.mouse.wheel(0, 200);
+  await waitFor(page, () => window.__actions.some(action => action.kind === "scroll"));
+  await page.waitForTimeout(400);
+  const scrollOrder = await page.evaluate(() => window.__actions);
+  assert.deepEqual(orderedKinds(scrollOrder).slice(0, 2), ["click", "scroll"],
+    `scroll must follow the pending click, got ${orderedKinds(scrollOrder).join(" -> ")}`);
+
+  await page.evaluate(() => { window.__actions = []; });
+  await page.mouse.move(center.x, center.y);
+  await page.mouse.click(center.x, center.y);
+  await page.waitForTimeout(50);
+  await page.mouse.move(center.x, center.y);
+  await page.mouse.down();
+  await page.mouse.move(center.x + 60, center.y + 20, {steps: 4});
+  await page.mouse.up();
+  await waitFor(page, () => window.__actions.some(action => action.kind === "drag"));
+  await page.waitForTimeout(400);
+  const dragOrder = await page.evaluate(() => window.__actions);
+  assert.deepEqual(orderedKinds(dragOrder).slice(0, 2), ["click", "drag"],
+    `drag must follow the pending click, got ${orderedKinds(dragOrder).join(" -> ")}`);
+
   // Wheel scrolling is coalesced into a scroll action with a page viewport point.
   const beforeWheel = await page.evaluate(() => window.__actions.length);
   await page.mouse.move(center.x, center.y);
