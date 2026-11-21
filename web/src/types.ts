@@ -844,6 +844,20 @@ export interface HardwareNetworkConfig {
   port: number;
   protocol: "telnet" | "raw" | "ssh" | "adb";
   ssh_auth: "auto" | "password" | "key";
+  /** ADB only: wireless debugging (host + connection port, pairing code), tcp network direct (host:port, no pairing) or USB direct (serial). Missing means wireless. */
+  adb_connection?: "wireless" | "tcp" | "usb";
+  /** ADB USB direct only: device serial on the AHA host. */
+  adb_serial?: string;
+}
+
+export interface ADBUSBDevice {
+  serial: string;
+  state: string;
+  model?: string;
+  product?: string;
+  device?: string;
+  usb?: string;
+  selectable: boolean;
 }
 
 export interface HardwareGroup {
@@ -871,6 +885,7 @@ export interface HardwareResource {
   network: HardwareNetworkConfig;
   username?: string;
   password_configured: boolean;
+  adb_paired_at?: string;
   access: "read_only" | "read_write";
   binding_count: number;
   created_at: string;

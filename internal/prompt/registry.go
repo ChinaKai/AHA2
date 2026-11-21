@@ -221,6 +221,9 @@ type hardwareContextGroup struct {
 	NetworkHost        string
 	NetworkPort        int
 	NetworkProtocol    string
+	ADBUSB             bool
+	ADBSerial          string
+	ADBConnection      string
 	SSHAuthentication  string
 	Username           string
 	PasswordConfigured bool
@@ -2198,6 +2201,12 @@ func hardwareContextGroups(groups []domain.HardwareGroup) []hardwareContextGroup
 			HasSerial: group.Supports(domain.HardwareTransportSerial), SerialDevice: group.Serial.Device, SerialBaudrate: group.Serial.Baudrate,
 			HasNetwork: group.Supports(domain.HardwareTransportNetwork), NetworkHost: group.Network.Host, NetworkPort: group.Network.Port,
 			NetworkProtocol: string(group.Network.Protocol), Username: group.Username, PasswordConfigured: group.PasswordConfigured,
+		}
+		if item.HasNetwork && group.Network.Protocol == domain.HardwareProtocolADB {
+			item.ADBConnection = group.Network.NormalizedADB().ADBConnection
+		}
+		if item.HasNetwork && group.Network.ADBUSB() {
+			item.ADBUSB, item.ADBSerial = true, group.Network.ADBSerial
 		}
 		if item.HasNetwork && group.Network.Protocol == domain.HardwareProtocolSSH {
 			item.SSHAuthentication = normalizeHardwareSSHAuth(group.Network.SSHAuth)

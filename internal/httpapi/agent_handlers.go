@@ -103,7 +103,7 @@ func (s *Server) agentADBExec(writer http.ResponseWriter, request *http.Request)
 		return
 	}
 	if transport != domain.HardwareTransportNetwork || group.Network.Protocol != domain.HardwareProtocolADB {
-		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "adb_exec_unavailable", "message": "当前硬件资源不是 ADB 网络设备"})
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "adb_exec_unavailable", "message": "当前硬件资源不是 ADB 设备"})
 		return
 	}
 	if readOnly {
@@ -160,8 +160,20 @@ func (s *Server) agentADBExec(writer http.ResponseWriter, request *http.Request)
 		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "adb_timeout_invalid", "message": "ADB 超时时间必须在 1 到 120 秒之间"})
 		return
 	}
-	endpoint := net.JoinHostPort(group.Network.Host, strconv.Itoa(group.Network.Port))
-	result, err := s.executeADB(request.Context(), endpoint, payload.Args, input, time.Duration(timeoutSeconds)*time.Second)
+	// The target comes only from this Task's bound resource: USB direct runs
+	// on that serial without connect/mDNS, network direct connects exactly
+	// its host:port without mDNS, wireless debugging keeps its mDNS path.
+	var result hardware.ADBExecResult
+	var err error
+	timeout := time.Duration(timeoutSeconds) * time.Second
+	switch {
+	case group.Network.ADBUSB():
+		result, err = s.executeADBUSB(request.Context(), group.Network.ADBSerial, payload.Args, input, timeout)
+	case group.Network.ADBTCP():
+		result, err = s.executeADBTCP(request.Context(), net.JoinHostPort(group.Network.Host, strconv.Itoa(group.Network.Port)), payload.Args, input, timeout)
+	default:
+		result, err = s.executeADB(request.Context(), net.JoinHostPort(group.Network.Host, strconv.Itoa(group.Network.Port)), payload.Args, input, timeout)
+	}
 	if err != nil {
 		code := http.StatusConflict
 		if errors.Is(err, hardware.ErrADBOutputTooLarge) {

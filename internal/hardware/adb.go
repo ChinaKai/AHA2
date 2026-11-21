@@ -69,7 +69,43 @@ func executeADBWithExecutable(ctx context.Context, executable, endpoint string, 
 	if err != nil {
 		return ADBExecResult{}, err
 	}
-	commandArgs := append([]string{"-s", resolvedEndpoint}, arguments...)
+	return runADBDeviceCommand(commandCtx, executable, resolvedEndpoint, arguments, input, timeout, startedAt)
+}
+
+// ExecuteADBTCP runs one device command on a classic network ADB target
+// (explicit host:port, no pairing, no mDNS discovery).
+func ExecuteADBTCP(ctx context.Context, endpoint string, arguments []string, input []byte, timeout time.Duration) (ADBExecResult, error) {
+	if len(arguments) == 0 {
+		return ADBExecResult{}, fmt.Errorf("ADB command arguments are required")
+	}
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	if timeout > maxADBExecTimeout {
+		timeout = maxADBExecTimeout
+	}
+	executable, err := resolveADBExecutable()
+	if err != nil {
+		return ADBExecResult{}, err
+	}
+	return executeADBTCPWithExecutable(ctx, executable, endpoint, arguments, input, timeout)
+}
+
+func executeADBTCPWithExecutable(ctx context.Context, executable, endpoint string, arguments []string, input []byte, timeout time.Duration) (ADBExecResult, error) {
+	commandCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	startedAt := time.Now()
+	target, err := connectADBDirect(commandCtx, executable, endpoint)
+	if err != nil {
+		return ADBExecResult{}, err
+	}
+	return runADBDeviceCommand(commandCtx, executable, target, arguments, input, timeout, startedAt)
+}
+
+// runADBDeviceCommand runs one device command pinned with -s to an already
+// verified target: a wireless host:port after connect, or a USB serial.
+func runADBDeviceCommand(commandCtx context.Context, executable, target string, arguments []string, input []byte, timeout time.Duration, startedAt time.Time) (ADBExecResult, error) {
+	commandArgs := append([]string{"-s", target}, arguments...)
 	command := exec.CommandContext(commandCtx, executable, commandArgs...)
 	command.Stdin = bytes.NewReader(input)
 	stdout := &limitedADBWriter{limit: MaxADBExecOutputBytes}
@@ -77,9 +113,9 @@ func executeADBWithExecutable(ctx context.Context, executable, endpoint string, 
 	command.Stdout = stdout
 	command.Stderr = stderr
 	configureADBCommand(command)
-	err = command.Run()
+	err := command.Run()
 	result := ADBExecResult{
-		Endpoint: resolvedEndpoint,
+		Endpoint: target,
 		ExitCode: 0,
 		Stdout:   stdout.Bytes(),
 		Stderr:   stderr.Bytes(),
@@ -186,8 +222,31 @@ func openADBTerminal(ctx context.Context, endpoint string) (io.ReadWriteCloser, 
 	if err != nil {
 		return nil, err
 	}
+	return startADBShell(executable, resolvedEndpoint, resolvedEndpoint)
+}
 
-	command := exec.Command(executable, "-s", resolvedEndpoint, "shell", "-t", "-t")
+func openADBTCPTerminal(ctx context.Context, endpoint string) (io.ReadWriteCloser, error) {
+	executable, err := resolveADBExecutable()
+	if err != nil {
+		return nil, err
+	}
+	return openADBTCPTerminalWithExecutable(ctx, executable, endpoint)
+}
+
+func openADBTCPTerminalWithExecutable(ctx context.Context, executable, endpoint string) (io.ReadWriteCloser, error) {
+	connectCtx, cancel := context.WithTimeout(ctx, adbAuthorizeWait+15*time.Second)
+	defer cancel()
+	target, err := connectADBDirect(connectCtx, executable, endpoint)
+	if err != nil {
+		return nil, err
+	}
+	return startADBShell(executable, target, target)
+}
+
+// startADBShell opens an interactive shell pinned with -s to a verified target.
+// display is what the terminal reports as its endpoint.
+func startADBShell(executable, target, display string) (io.ReadWriteCloser, error) {
+	command := exec.Command(executable, "-s", target, "shell", "-t", "-t")
 	configureADBCommand(command)
 	stdin, err := command.StdinPipe()
 	if err != nil {
@@ -208,7 +267,7 @@ func openADBTerminal(ctx context.Context, endpoint string) (io.ReadWriteCloser, 
 		output:   terminalOutput,
 		writer:   writer,
 		done:     make(chan struct{}),
-		endpoint: resolvedEndpoint,
+		endpoint: display,
 	}
 	go func() {
 		waitErr := command.Wait()
@@ -222,11 +281,27 @@ func openADBTerminal(ctx context.Context, endpoint string) (io.ReadWriteCloser, 
 	return terminal, nil
 }
 
+// connectADB is the Android wireless-debugging path: mDNS may correct the
+// connection port, and an unauthorized device gets one adb server restart.
 func connectADB(ctx context.Context, executable, endpoint string) (string, error) {
 	resolvedEndpoint, err := resolveADBMdnsEndpoint(ctx, executable, endpoint)
 	if err != nil {
 		return "", err
 	}
+	return connectADBEndpoint(ctx, executable, resolvedEndpoint, true)
+}
+
+// connectADBDirect is classic network ADB: the configured host:port is used
+// exactly as is. No mDNS lookup can swap it for another port or device, no
+// pairing is attempted, and the shared adb server is never restarted.
+func connectADBDirect(ctx context.Context, executable, endpoint string) (string, error) {
+	if _, _, err := net.SplitHostPort(endpoint); err != nil {
+		return "", fmt.Errorf("ADB 网络直连地址无效：%s", endpoint)
+	}
+	return connectADBEndpoint(ctx, executable, endpoint, false)
+}
+
+func connectADBEndpoint(ctx context.Context, executable, resolvedEndpoint string, restartOnUnauthorized bool) (string, error) {
 	if err := dialADB(ctx, executable, resolvedEndpoint); err != nil {
 		return "", err
 	}
@@ -234,7 +309,7 @@ func connectADB(ctx context.Context, executable, endpoint string) (string, error
 	if err != nil {
 		return "", err
 	}
-	if state == "unauthorized" {
+	if state == "unauthorized" && restartOnUnauthorized {
 		// Android re-prompts only for a fresh server session: once a key was
 		// denied (or the stored key changed) the dialog stays away until the
 		// daemon restarts. A TV that "never shows the prompt" is almost always
@@ -255,6 +330,9 @@ func connectADB(ctx context.Context, executable, endpoint string) (string, error
 	case "offline":
 		return "", fmt.Errorf("设备处于离线状态（%s）：请在设备上重新确认授权，或关闭再打开该设备的网络调试后重试。", resolvedEndpoint)
 	case "unauthorized":
+		if !restartOnUnauthorized {
+			return "", fmt.Errorf("设备未授权（%s）：请在设备上确认「允许 USB 调试」弹窗（建议勾选一律允许）后重试；若始终不弹窗，请在设备开发者选项里「撤销 USB 调试授权」后重新开启网络 ADB。", resolvedEndpoint)
+		}
 		return "", fmt.Errorf("设备未授权（%s）：请在电视/手机上确认「允许 USB 调试」弹窗（建议勾选一律允许）。已自动重启 ADB 服务重试仍未授权；若电视始终不弹窗，请在电视开发者选项里「撤销 USB 调试授权」，或在电视上关闭再打开 ADB 调试后重试。", resolvedEndpoint)
 	default:
 		return "", fmt.Errorf("ADB 设备状态异常（%s）：%s", resolvedEndpoint, state)

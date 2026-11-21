@@ -97,6 +97,7 @@ import type {
   HardwareIOPurgeResult,
   HardwareIORetentionSettings,
   HardwareResource,
+  ADBUSBDevice,
   HardwareTerminalStatus,
   BrowserBookmark,
   BrowserProfile,
@@ -1053,6 +1054,10 @@ class APIClient {
     return this.request(`/api/v1/browser/profiles/${encodeURIComponent(profileID)}/transfer`, {
       method: "POST", body: JSON.stringify({task_id: taskID}),
     });
+  }
+
+  adbUSBDevices(): Promise<{devices: ADBUSBDevice[]; other_count: number}> {
+    return this.request("/api/v1/hardware/adb/usb-devices", {method: "POST", body: "{}"});
   }
 
   pairHardwareADB(id: string, pairingPort: number, pairingCode: string): Promise<{message: string; output: string; resource: HardwareResource}> {

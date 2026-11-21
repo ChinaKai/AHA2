@@ -158,7 +158,19 @@ function supports(group: HardwareDraft | undefined, transport: Transport): boole
   if (transport === "serial") {
     return (group.mode === "serial" || group.mode === "both") && Boolean(group.serial.device);
   }
-  return (group.mode === "network" || group.mode === "both") && Boolean(group.network.host);
+  if (!(group.mode === "network" || group.mode === "both")) return false;
+  return adbUSB(group.network) ? Boolean(group.network.adb_serial) : Boolean(group.network.host);
+}
+
+// ADB USB direct is addressed by device serial only; a row without
+// adb_connection predates the split and is wireless debugging.
+function adbUSB(network: HardwareResource["network"]): boolean {
+  return network.protocol === "adb" && network.adb_connection === "usb";
+}
+
+function networkEndpointText(network: HardwareResource["network"]): string {
+  if (adbUSB(network)) return network.adb_serial ? `USB ${network.adb_serial}` : "";
+  return network.host ? `${network.host}:${network.port}` : "";
 }
 
 // Whenever the group list or the selection changes without the user picking a
@@ -260,6 +272,10 @@ function bytesToBase64(data: Uint8Array): string {
 }
 
 function networkProtocolLabel(resource: HardwareResource): string {
+  if (resource.network.protocol === "adb") {
+    if (adbUSB(resource.network)) return "ADB（USB 直连）";
+    return resource.network.adb_connection === "tcp" ? "ADB（网络直连）" : "ADB（无线调试）";
+  }
   return {telnet: "Telnet", raw: "Raw TCP", ssh: "SSH", adb: "ADB"}[resource.network.protocol] || resource.network.protocol;
 }
 
@@ -273,14 +289,18 @@ function resourceNetworkPort(resource: HardwareResource): number {
 function resourceLabel(resource: HardwareResource): string {
   const endpoints: string[] = [];
   if (resource.serial.device) endpoints.push(resource.serial.device);
-  if (resource.network.host) endpoints.push(`${networkProtocolLabel(resource)} ${resource.network.host}:${resourceNetworkPort(resource)}`);
+  if (adbUSB(resource.network)) {
+    if (resource.network.adb_serial) endpoints.push(`${networkProtocolLabel(resource)} ${resource.network.adb_serial}`);
+  } else if (resource.network.host) endpoints.push(`${networkProtocolLabel(resource)} ${resource.network.host}:${resourceNetworkPort(resource)}`);
   return `${resource.description || resource.id} · ${endpoints.join(" / ") || "未配置端点"}`;
 }
 
 function resourcePicker(state: PanelState): string {
   return state.resources.map(resource => {
     const binding = state.groups.find(group => (group.resource_id || group.id) === resource.id);
-    const resourceState = resource.network.protocol === "adb"
+    const resourceState = adbUSB(resource.network) || resource.network.adb_connection === "tcp"
+      ? ""
+      : resource.network.protocol === "adb"
       ? (resource.adb_paired_at ? " · 已配对" : " · 未配对")
       : (resource.password_configured ? " · 凭据已配置" : "");
     return `<article class="hardware-resource-choice ${binding ? "enabled" : ""} ${binding?.id === state.selectedID ? "selected" : ""}">
@@ -324,7 +344,7 @@ export function renderHardwarePanel(detail: TaskDetail): string {
       <header class="hardware-console-toolbar">
         <span class="hardware-transport-label">${serialSelected ? "串口" : "网络"}</span>
         <span id="hardware-status" class="hardware-status ${statusClass(stream.status)}">${statusText(stream.status)}</span>
-        <span id="hardware-endpoint">${escapeHTML(stream.status?.endpoint || (serialSelected ? group?.serial.device : group ? `${group.network.host}:${group.network.port}` : "") || "-")}</span>
+        <span id="hardware-endpoint">${escapeHTML(stream.status?.endpoint || (serialSelected ? group?.serial.device : group ? networkEndpointText(group.network) : "") || "-")}</span>
         <div class="hardware-console-actions">
           <button type="button" id="hardware-connect" ${canConnect && !connected ? "" : "disabled"}>连接</button>
           <button type="button" id="hardware-disconnect" ${connected ? "" : "disabled"}>断开</button>

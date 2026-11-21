@@ -1511,6 +1511,9 @@ dialog.agent-config-dialog { width: min(760px,calc(100vw - 32px)); }
 .detect-status { margin-top: 10px; color: var(--muted); font-size: 11px; }
 .two { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }
 .hardware-resource-dialog [hidden] { display: none !important; }
+.hardware-adb-usb-row { display: flex; gap: 8px; align-items: flex-end; }
+.hardware-adb-usb-row label { flex: 1; min-width: 0; }
+.hardware-adb-usb-row button { flex: 0 0 auto; display: inline-flex; gap: 6px; align-items: center; }
 .runtime-picker[hidden] { display: none !important; }
 .mobile-only { display: none; }
 

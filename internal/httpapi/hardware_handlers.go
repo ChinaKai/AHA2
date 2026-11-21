@@ -52,7 +52,7 @@ func resourceFromPayload(
 		return domain.HardwareResource{}, fmt.Errorf("硬件资源必须选择串口或网络中的一种连接方式")
 	}
 	pairedAt := existing.ADBPairedAt
-	if group.Mode != domain.HardwareModeNetwork || group.Network.Protocol != domain.HardwareProtocolADB || existing.Network.Host != group.Network.Host {
+	if !hardwareconfig.ADBPairingStillValid(existing.Mode, existing.Network, group.Mode, group.Network) {
 		pairedAt = ""
 	}
 	return domain.HardwareResource{
@@ -132,7 +132,7 @@ func (s *Server) createHardwareResource(writer http.ResponseWriter, request *htt
 		return
 	}
 	s.audit(request, "hardware_resource.create", "hardware_resource", resource.ID, map[string]any{
-		"mode": resource.Mode, "access": resource.Access,
+		"mode": resource.Mode, "access": resource.Access, "adb_connection": resource.Network.ADBConnection,
 	})
 	writeJSON(writer, http.StatusCreated, map[string]any{"ok": true, "resource": resource})
 }
@@ -195,6 +195,7 @@ func (s *Server) updateHardwareResource(writer http.ResponseWriter, request *htt
 	}
 	s.audit(request, "hardware_resource.update", "hardware_resource", resource.ID, map[string]any{
 		"mode": resource.Mode, "access": resource.Access, "bindings": existing.BindingCount,
+		"adb_connection": resource.Network.ADBConnection,
 	})
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "resource": resource})
 }
@@ -231,6 +232,14 @@ func (s *Server) pairHardwareADB(writer http.ResponseWriter, request *http.Reque
 	}
 	if resource.Mode != domain.HardwareModeNetwork || resource.Network.Protocol != domain.HardwareProtocolADB {
 		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "adb_pair_unavailable", "message": "当前硬件资源不是 ADB 网络设备"})
+		return
+	}
+	if resource.Network.ADBUSB() {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "adb_pair_unavailable", "message": "USB 直连资源不需要配对码，请在设备上允许 USB 调试"})
+		return
+	}
+	if resource.Network.ADBTCP() {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "adb_pair_unavailable", "message": "网络直连资源不需要配对码，直接连接 IP:端口；首次连接时请在设备上允许调试"})
 		return
 	}
 	var payload struct {
@@ -276,6 +285,38 @@ func (s *Server) pairHardwareADB(writer http.ResponseWriter, request *http.Reque
 	}
 	s.audit(request, "hardware_resource.adb_pair", "hardware_resource", resource.ID, map[string]any{"connection_endpoint": net.JoinHostPort(resource.Network.Host, fmt.Sprint(resource.Network.Port))})
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "message": "Android 设备配对成功", "output": output, "resource": resource})
+}
+
+// hardwareADBUSBDevices lists USB-attached ADB devices on the AHA host so the
+// Owner can pick an explicit serial. Owner session only; it never connects,
+// pairs or changes any resource.
+func (s *Server) hardwareADBUSBDevices(writer http.ResponseWriter, request *http.Request) {
+	ctx, cancel := context.WithTimeout(request.Context(), 20*time.Second)
+	defer cancel()
+	list, err := s.listADBUSBDevices(ctx)
+	if err != nil {
+		writeJSON(writer, http.StatusConflict, map[string]any{
+			"ok": false, "error": "adb_usb_devices_failed", "message": adbUSBListFailureMessage(err),
+		})
+		return
+	}
+	if list.Devices == nil {
+		list.Devices = []hardware.ADBUSBDevice{}
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "devices": list.Devices, "other_count": list.OtherCount})
+}
+
+func adbUSBListFailureMessage(err error) string {
+	detail := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(detail, "adb executable not found"),
+		strings.Contains(detail, "configured adb executable is unavailable"):
+		return "找不到 ADB。请安装 Android Platform-Tools，或在 AHA2 运行账户中把 AHA2_ADB_PATH 设置为 adb.exe 的完整路径，然后重启 AHA2 User。"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "读取 USB 设备列表超时，请稍后重试。"
+	default:
+		return "读取 USB 设备列表失败，请确认 AHA 宿主机上的 ADB 可以正常运行后重试。"
+	}
 }
 
 func adbPairingFailureMessage(err error) string {
