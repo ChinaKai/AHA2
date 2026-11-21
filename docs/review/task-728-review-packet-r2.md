@@ -1,5 +1,7 @@
 # task-728 review packet r2：M1/M3 修复 + M2 按 owner 指示改为完全访问
 
+- 后续修订：本包是 r2（源码 `2a8f1e5`）；M4 与测试补强见 `task-728-review-packet-r3.md`（源码 `ee276b2`）。
+
 - 上一版：实现 `b285d54`，材料 `1e88bce`（r1，评审结论 REQUEST_CHANGES：M1/M2/M3 + S）
 - 本版：实现 `2a8f1e5`，分支 `aha/task_07933ff5b7797feffa4c`，worktree `.aha2-worktrees/task_07933ff5b7797feffa4c`
 - 没有 push、没有 merge、没有 complete/finalize；没有另开评审 Task
