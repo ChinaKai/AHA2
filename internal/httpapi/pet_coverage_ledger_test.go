@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ChinaKai/AHA2/internal/knowledgevault"
@@ -82,5 +83,30 @@ func TestPetCoverageScanMatchesLiveMuxes(t *testing.T) {
 	}
 	if main < 400 || mail != 2 {
 		t.Fatalf("verified %d main and %d mail-download operations", main, mail)
+	}
+}
+
+// r2 M1 on the real repository: the channel-runtime routes sit behind the
+// two-argument withChannelCapability(scope, next); each must resolve to its
+// own handler and fingerprint under the channel_runtime boundary.
+func TestChannelRuntimeRoutesResolvePastTheirTwoArgumentWrapper(t *testing.T) {
+	routes, _, err := petcoverage.ScanRoutes(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handlers, fingerprints := map[string]bool{}, map[string]bool{}
+	count := 0
+	for _, route := range routes {
+		if route.Server != "httpapi" || !strings.Contains(route.Operation, " /api/channel-runtime/") {
+			continue
+		}
+		count++
+		if route.Handler == "withChannelCapability" || route.Boundary != "channel_runtime" || !strings.HasPrefix(route.Wrappers, "withChannelCapability(") {
+			t.Fatalf("%s resolved to %+v", route.Operation, route)
+		}
+		handlers[route.Handler], fingerprints[route.Fingerprint] = true, true
+	}
+	if count != 12 || len(handlers) != 12 || len(fingerprints) != 12 {
+		t.Fatalf("channel-runtime routes=%d distinct handlers=%d fingerprints=%d", count, len(handlers), len(fingerprints))
 	}
 }

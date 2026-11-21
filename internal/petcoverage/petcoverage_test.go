@@ -400,3 +400,190 @@ func TestVerifyMuxRejectsScannedRoutesTheLiveMuxDoesNotServe(t *testing.T) {
 		t.Fatalf("live mismatch not reported: %v", err)
 	}
 }
+
+func withBoundary(t *testing.T, name, boundary string) {
+	t.Helper()
+	saved := boundaries
+	boundaries = map[string]string{}
+	for key, value := range saved {
+		boundaries[key] = value
+	}
+	boundaries[name] = boundary
+	t.Cleanup(func() { boundaries = saved })
+}
+
+const scopedPreamble = `
+func (s *Server) withScope(scope string, next http.Handler) http.Handler { return next }
+func (s *Server) factory(section string) http.HandlerFunc { return func(http.ResponseWriter, *http.Request) {} }
+`
+
+// r2 M1: a registered wrapper is a wrapper whatever its arity; the real
+// handler, the wrapper's constant arguments and a factory's arguments all
+// reach the fingerprint, and a wrapper is never recorded as the handler.
+func TestMultiArgumentWrappersResolveToTheRealHandler(t *testing.T) {
+	classify(t, map[string]string{"internal/api (*Server).Routes": "httpapi"})
+	withBoundary(t, "withScope", "scoped")
+	root := writeTree(t, map[string]string{"internal/api/server.go": serverPreamble + scopedPreamble + `
+func (s *Server) Routes() {
+	mux := http.NewServeMux()
+	mux.Handle("POST /a", s.withScope("scope.a", http.HandlerFunc(s.list)))
+	mux.Handle("POST /b", s.withScope("scope.b", http.HandlerFunc(s.status)))
+	mux.Handle("POST /c", s.withScope("scope.a", http.HandlerFunc(s.status)))
+	mux.Handle("PUT /core", s.withAuth(s.factory("core")))
+	mux.Handle("PUT /worklog", s.withAuth(s.factory("worklog")))
+}
+`})
+	routes, _, err := ScanRoutes(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]Registration{}
+	fingerprints := map[string]string{}
+	for _, route := range routes {
+		got[route.Operation] = route
+		if previous, duplicate := fingerprints[route.Fingerprint]; duplicate {
+			t.Fatalf("%s and %s share fingerprint %s", previous, route.Operation, route.Fingerprint)
+		}
+		fingerprints[route.Fingerprint] = route.Operation
+	}
+	for operation, handler := range map[string]string{"POST /a": "list", "POST /b": "status", "POST /c": "status", "PUT /core": "factory", "PUT /worklog": "factory"} {
+		if got[operation].Handler != handler {
+			t.Fatalf("%s handler = %q, want %q", operation, got[operation].Handler, handler)
+		}
+	}
+	if got["POST /a"].Boundary != "scoped" || got["POST /a"].Wrappers != `withScope("scope.a")` || got["PUT /core"].Boundary != "owner_session" {
+		t.Fatalf("wrapper metadata: %+v %+v", got["POST /a"], got["PUT /core"])
+	}
+	for name, body := range map[string]string{
+		"unregistered multi-arg wrapper": `func (s *Server) withOther(scope string, next http.Handler) http.Handler { return next }; func (s *Server) Routes() { mux := http.NewServeMux(); mux.Handle("POST /x", s.withOther("x", http.HandlerFunc(s.list))) }`,
+		"non-constant wrapper argument":  `func (s *Server) Routes(scope string) { mux := http.NewServeMux(); mux.Handle("POST /x", s.withScope(scope, http.HandlerFunc(s.list))) }`,
+		"wrapper used as handler":        `func (s *Server) Routes() { mux := http.NewServeMux(); mux.Handle("POST /x", http.HandlerFunc(s.withScope)) }`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := writeTree(t, map[string]string{"internal/api/server.go": serverPreamble + scopedPreamble + body + "\n"})
+			if _, _, err := ScanRoutes(root); err == nil {
+				t.Fatal("scan accepted it")
+			}
+		})
+	}
+}
+
+// r2 M2: aliases and method expressions cannot register a route unseen.
+func TestHandleAliasesAndMethodExpressionsFailTheScan(t *testing.T) {
+	for name, item := range map[string][2]string{
+		"method value alias":     {`func (s *Server) Routes() { mux := http.NewServeMux(); add := mux.Handle; add("POST /api/v1/alias", http.HandlerFunc(s.list)) }`, "used as a value"},
+		"HandleFunc alias":       {`func (s *Server) Routes() { mux := http.NewServeMux(); register := mux.HandleFunc; register("POST /api/v1/alias", s.list) }`, "used as a value"},
+		"method expression":      {`func (s *Server) Routes() { mux := http.NewServeMux(); (*http.ServeMux).Handle(mux, "POST /api/v1/expr", http.HandlerFunc(s.list)) }`, "method-expression"},
+		"default mux value":      {`var register = http.Handle`, "used as a value"},
+		"route in a 3-arg call":  {`func (s *Server) Routes(r interface{ Handle(string, http.Handler, int) }) { r.Handle("POST /api/v1/three", http.HandlerFunc(s.list), 1) }`, "carries route pattern"},
+		"qualified type is fine": {`type holder struct{ h http.Handler }`, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			classify(t, map[string]string{"internal/api (*Server).Routes": "httpapi"})
+			root := writeTree(t, map[string]string{"internal/api/server.go": serverPreamble + item[0] + "\n"})
+			_, _, err := ScanRoutes(root)
+			if item[1] == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), item[1]) {
+				t.Fatalf("scan error = %v, want %q", err, item[1])
+			}
+		})
+	}
+}
+
+func TestVerifyMuxFindsPatternsTheScanMissed(t *testing.T) {
+	mux := http.NewServeMux()
+	ok := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	mux.Handle("GET /api/v1/known", ok)
+	mux.Handle("POST /api/v1/alias", ok)
+	mux.Handle("/static/", ok)
+	routes := []Registration{{Operation: "GET /api/v1/known", Server: "httpapi"}, {Operation: "ANY /static/", Server: "httpapi"}}
+	_, err := VerifyMux(mux, routes, "httpapi")
+	if err == nil || !strings.Contains(err.Error(), `"POST /api/v1/alias", which the scan did not find`) {
+		t.Fatalf("reverse check missed the extra pattern: %v", err)
+	}
+	live, err := LivePatterns(mux)
+	if err != nil || strings.Join(live, ",") != "/static/,GET /api/v1/known,POST /api/v1/alias" {
+		t.Fatalf("live patterns = %v err=%v", live, err)
+	}
+}
+
+// r2 M3 for multi-argument wrappers: a reviewed row goes stale and the
+// complete gate fails when the handler, the wrapper's argument or the
+// wrapper's own code changes.
+func TestReviewedRowUnderMultiArgumentWrapperGoesStaleOnAnyChange(t *testing.T) {
+	withBoundary(t, "withScope", "scoped")
+	for name, change := range map[string][2]string{
+		"handler body":     {"func (s *Server) status(w http.ResponseWriter, r *http.Request) { s.list(w, r) }", "func (s *Server) status(w http.ResponseWriter, r *http.Request) { s.list(w, r); s.list(w, r) }"},
+		"wrapper argument": {`s.withScope("scope.b", http.HandlerFunc(s.status))`, `s.withScope("scope.z", http.HandlerFunc(s.status))`},
+		"wrapper body":     {"func (s *Server) withScope(scope string, next http.Handler) http.Handler { return next }", "func (s *Server) withScope(scope string, next http.Handler) http.Handler { _ = scope; return next }"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			classify(t, map[string]string{"internal/api (*Server).Routes": "httpapi"})
+			root := writeTree(t, map[string]string{
+				"internal/api/server.go":   serverPreamble + scopedPreamble + "func (s *Server) Routes() { mux := http.NewServeMux(); mux.Handle(\"POST /api/v1/b\", s.withScope(\"scope.b\", http.HandlerFunc(s.status))) }\n",
+				"internal/api/api_test.go": "package api\n\nimport \"testing\"\n\nfunc TestReal(t *testing.T) {}\n",
+				"web/src/api.ts":           "fetch(\"/api/v1/b\", {method: \"POST\"});\n",
+				"docs/pet-mcp/.keep":       "",
+			})
+			catalog := NewCatalog(map[string][]string{"aha2_pet": {"aha_overview"}})
+			if _, err := Check(root, catalog, true, false); err != nil {
+				t.Fatal(err)
+			}
+			ledger := filepath.Join(root, LedgerPath)
+			data, _ := os.ReadFile(ledger)
+			closed := strings.Replace(string(data), "pending\tpending\tpending\tpending\tpending", "aha2_pet.aha_overview\tscoped\tnone\tinternal/api/api_test.go:TestReal\tdirect", 1)
+			if closed == string(data) {
+				t.Fatal("fixture row not found")
+			}
+			if err := os.WriteFile(ledger, []byte(closed), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if report, err := Check(root, catalog, false, true); err != nil || report.Final != 1 {
+				t.Fatalf("closed fixture row did not pass: %+v %v", report, err)
+			}
+			source := filepath.Join(root, "internal/api/server.go")
+			code, _ := os.ReadFile(source)
+			edited := strings.Replace(string(code), change[0], change[1], 1)
+			if edited == string(code) {
+				t.Fatal("change not applied")
+			}
+			if err := os.WriteFile(source, []byte(edited), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Check(root, catalog, false, false); err == nil || !strings.Contains(err.Error(), "differs from the scan") {
+				t.Fatalf("change was not detected: %v", err)
+			}
+			report, err := Check(root, catalog, true, false)
+			if err != nil || len(report.Stale) != 1 || report.Final != 0 {
+				t.Fatalf("update did not mark the row stale: %+v %v", report, err)
+			}
+			if _, err := Check(root, catalog, false, true); err == nil || !strings.Contains(err.Error(), "incomplete") {
+				t.Fatalf("complete gate passed after the change: %v", err)
+			}
+		})
+	}
+}
+
+func TestV1FingerprintMigrationKeepsOnlyUnchangedVerdicts(t *testing.T) {
+	route := Registration{Operation: "GET /a", Server: "httpapi", Source: "internal/api/a.go", Handler: "a", Boundary: "owner_session", Fingerprint: "v2:aaaaaaaaaaaa", LegacyFingerprint: "111111111111"}
+	row := func(fingerprint string) []Row {
+		return []Row{{"operation": "GET /a", "server": "httpapi", "source": "internal/api/a.go", "handler": "a", "boundary": "owner_session", "fingerprint": fingerprint, "mcp": "m", "permission": "p", "protected_flow": "f", "tests": "t", "status": "direct"}}
+	}
+	for fingerprint, want := range map[string]string{
+		"111111111111":    "direct", // v1 hash of unchanged code: verdict kept
+		"222222222222":    "stale",  // v1 hash of different code
+		"v2:aaaaaaaaaaaa": "direct",
+		"v2:bbbbbbbbbbbb": "stale",
+		"v2:111111111111": "stale", // a v2 value never takes the migration path
+	} {
+		rows, _, _ := MergeLedger(row(fingerprint), []Registration{route})
+		if rows[0]["status"] != want || rows[0]["fingerprint"] != route.Fingerprint {
+			t.Fatalf("stored %s: status=%s fingerprint=%s, want %s", fingerprint, rows[0]["status"], rows[0]["fingerprint"], want)
+		}
+	}
+}

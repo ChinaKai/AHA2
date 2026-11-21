@@ -31,8 +31,12 @@ type Registration struct {
 	Handler     string // handler method, factory, or "inline"
 	Wrappers    string // authentication/authorization wrappers, outermost first
 	Boundary    string // authentication boundary derived from Wrappers
-	Fingerprint string // hash of wrappers and the handler's source
-	RejectOnly  bool   // the handler only writes a client error
+	Fingerprint string // "v2:" + hash of wrappers (with arguments and source) and handler source
+	// LegacyFingerprint is the pre-v2 hash (wrapper names and handler source)
+	// of the current code. MergeLedger uses it once to keep a verdict whose
+	// stored v1 fingerprint proves the code has not changed since review.
+	LegacyFingerprint string
+	RejectOnly        bool // the handler only writes a client error
 }
 
 // registeringFunctions classifies every function that registers routes. A
@@ -61,6 +65,9 @@ var boundaries = map[string]string{
 	"withChannelCapability": "channel_runtime",
 	"auth":                  "device_token",
 }
+
+// fingerprintVersion prefixes every fingerprint of the current scheme.
+const fingerprintVersion = "v2:"
 
 // scanned Go roots; everything else (web, tooling output, vendored copies)
 // cannot register a route served by AHA2 binaries.
@@ -202,6 +209,9 @@ func ScanRoutes(root string) ([]Registration, ScanStats, error) {
 				return nil, stats, fmt.Errorf("%s: %d .Handle/.HandleFunc tokens but %d parsed calls; review the scanner", source, tokens, calls)
 			}
 			stats.Calls += calls
+			if err := refuseHandleValues(source, pkg.files[source]); err != nil {
+				return nil, stats, err
+			}
 			accounted := 0
 			for _, declaration := range pkg.files[source].Decls {
 				function, ok := declaration.(*ast.FuncDecl)
@@ -245,6 +255,53 @@ func ScanRoutes(root string) ([]Registration, ScanStats, error) {
 	})
 	sort.Strings(stats.NonRoute)
 	return result, stats, nil
+}
+
+// refuseHandleValues fails on any .Handle/.HandleFunc that is not called
+// directly, such as a method value `add := mux.Handle`, because a later call
+// through the alias registers a route the scan cannot see. A qualified name
+// from another imported package (the windows.Handle type) is not a mux method.
+func refuseHandleValues(source string, file *ast.File) error {
+	packages := map[string]bool{}
+	for _, spec := range file.Imports {
+		path, _ := strconv.Unquote(spec.Path.Value)
+		name := path[strings.LastIndex(path, "/")+1:]
+		if spec.Name != nil {
+			name = spec.Name.Name
+		}
+		if path != "net/http" {
+			packages[name] = true
+		}
+	}
+	var failure error
+	var stack []ast.Node
+	ast.Inspect(file, func(node ast.Node) bool {
+		if node == nil {
+			stack = stack[:len(stack)-1]
+			return true
+		}
+		if failure != nil {
+			return false
+		}
+		parent := ast.Node(nil)
+		if len(stack) > 0 {
+			parent = stack[len(stack)-1]
+		}
+		stack = append(stack, node)
+		selector, ok := node.(*ast.SelectorExpr)
+		if !ok || (selector.Sel.Name != "Handle" && selector.Sel.Name != "HandleFunc") {
+			return true
+		}
+		if call, isCall := parent.(*ast.CallExpr); isCall && call.Fun == selector {
+			return true
+		}
+		if base, isIdent := selector.X.(*ast.Ident); isIdent && packages[base.Name] {
+			return true
+		}
+		failure = fmt.Errorf("%s: .%s used as a value; register routes by calling the mux directly", source, selector.Sel.Name)
+		return false
+	})
+	return failure
 }
 
 func isHandleCall(call *ast.CallExpr) bool {
@@ -346,9 +403,20 @@ func scanFunction(pkg *goPackage, source string, function *ast.FuncDecl, stats *
 		var printedReceiver bytes.Buffer
 		printer.Fprint(&printedReceiver, token.NewFileSet(), method.X)
 		where := fmt.Sprintf("%s %s %s.%s", source, functionKey(function), printedReceiver.String(), method.Sel.Name)
+		if isServeMuxMethodExpression(method.X) {
+			failure = fmt.Errorf("%s: method-expression registration is not supported; call Handle on the mux", where)
+			return false
+		}
 		if len(call.Args) != 2 {
 			// ServeMux.Handle/HandleFunc always take two arguments; anything else
-			// (for example the windows.Handle conversion) is not a route.
+			// (for example the windows.Handle conversion) is not a route, unless
+			// an argument spells a route pattern.
+			for _, argument := range call.Args {
+				if pattern, ok := current.eval(argument); ok && looksLikePattern(pattern) {
+					failure = fmt.Errorf("%s: %d-argument call carries route pattern %q", where, len(call.Args), pattern)
+					return false
+				}
+			}
 			stats.NonRoute = append(stats.NonRoute, fmt.Sprintf("%s: %d arguments, not ServeMux.%s", where, len(call.Args), method.Sel.Name))
 			return true
 		}
@@ -463,8 +531,10 @@ func (current *scope) registration(source, server, pattern string, handler ast.E
 		method, route = "ANY", pattern
 	}
 	item := Registration{Operation: method + " " + strings.TrimSpace(route), Server: server, Source: source}
-	var wrappers []string
+	var wrappers []string     // wrapper names, outermost first
+	var wrapperCalls []string // wrapper names with their non-handler arguments
 	var body ast.Node
+	var handlerCall ast.Node // a factory call, so its literal arguments count
 	expr := handler
 	for depth := 0; ; depth++ {
 		if depth > 16 {
@@ -482,17 +552,41 @@ func (current *scope) registration(source, server, pattern string, handler ast.E
 				continue
 			}
 			selector, ok := value.Fun.(*ast.SelectorExpr)
-			if !ok {
+			if !ok || len(value.Args) == 0 {
 				return item, fmt.Errorf("%s: unsupported handler expression for %s", source, item.Operation)
 			}
-			if len(value.Args) == 1 && !isBasicLiteral(value.Args[0]) {
-				wrappers = append(wrappers, selector.Sel.Name)
-				expr = value.Args[0]
+			name := selector.Sel.Name
+			// The handler argument of a wrapper is its last argument; every
+			// other argument must be a resolvable constant. A call whose
+			// arguments include a handler is a wrapper and must be reviewed.
+			last := value.Args[len(value.Args)-1]
+			_, registered := boundaries[name]
+			if registered || isHandlerLike(last, substitute) {
+				if !registered {
+					return item, fmt.Errorf("%s: wrapper %s on %s has no reviewed boundary", source, name, item.Operation)
+				}
+				var parameters []string
+				for _, argument := range value.Args[:len(value.Args)-1] {
+					literal, ok := current.eval(argument)
+					if !ok {
+						return item, fmt.Errorf("%s: wrapper %s on %s has a non-constant argument", source, name, item.Operation)
+					}
+					parameters = append(parameters, strconv.Quote(literal))
+				}
+				wrappers = append(wrappers, name)
+				wrapperCalls = append(wrapperCalls, name+"("+strings.Join(parameters, ",")+")")
+				expr = last
 				continue
 			}
+			for _, argument := range value.Args {
+				if _, ok := current.eval(argument); !ok {
+					return item, fmt.Errorf("%s: handler factory %s on %s has a non-constant argument", source, name, item.Operation)
+				}
+			}
 			// Handler factory such as s.savePetWorkbenchDocument("core").
-			item.Handler = selector.Sel.Name
-			body = current.pkg.methods[selector.Sel.Name]
+			item.Handler = name
+			handlerCall = value
+			body = current.pkg.methods[name]
 		case *ast.SelectorExpr:
 			item.Handler = value.Sel.Name
 			body = current.pkg.methods[value.Sel.Name]
@@ -504,25 +598,47 @@ func (current *scope) registration(source, server, pattern string, handler ast.E
 		}
 		break
 	}
+	if _, isWrapper := boundaries[item.Handler]; isWrapper {
+		return item, fmt.Errorf("%s: %s resolved to the wrapper %s instead of its handler", source, item.Operation, item.Handler)
+	}
 	if body == nil || body == (*ast.FuncDecl)(nil) {
 		return item, fmt.Errorf("%s: handler %s for %s has no unique declaration in %s", source, item.Handler, item.Operation, current.pkg.dir)
 	}
-	item.Wrappers = strings.Join(wrappers, ">")
+	item.Wrappers = strings.Join(wrapperCalls, ">")
 	item.Boundary = "transport_auth"
-	for _, wrapper := range wrappers {
-		if _, ok := boundaries[wrapper]; !ok {
-			return item, fmt.Errorf("%s: wrapper %s on %s has no reviewed boundary", source, wrapper, item.Operation)
-		}
-	}
 	if len(wrappers) > 0 {
 		item.Boundary = boundaries[wrappers[0]] // the outermost wrapper authenticates first
 	}
-	var printed bytes.Buffer
-	if err := printer.Fprint(&printed, current.pkg.fset, body); err != nil {
+	// The fingerprint covers everything a reviewed verdict depends on: the
+	// wrapper chain with its arguments, each wrapper's own source, a factory's
+	// arguments and the handler's source.
+	var fingerprint bytes.Buffer
+	fingerprint.WriteString(item.Wrappers + "\n")
+	for _, name := range wrappers {
+		declaration := current.pkg.methods[name]
+		if declaration == nil {
+			return item, fmt.Errorf("%s: wrapper %s on %s has no unique declaration in %s", source, name, item.Operation, current.pkg.dir)
+		}
+		if err := printer.Fprint(&fingerprint, current.pkg.fset, declaration); err != nil {
+			return item, err
+		}
+		fingerprint.WriteString("\n")
+	}
+	if handlerCall != nil {
+		if err := printer.Fprint(&fingerprint, current.pkg.fset, handlerCall); err != nil {
+			return item, err
+		}
+		fingerprint.WriteString("\n")
+	}
+	var handlerSource bytes.Buffer
+	if err := printer.Fprint(&handlerSource, current.pkg.fset, body); err != nil {
 		return item, err
 	}
-	sum := sha256.Sum256([]byte(item.Wrappers + "\n" + printed.String()))
-	item.Fingerprint = hex.EncodeToString(sum[:6])
+	fingerprint.Write(handlerSource.Bytes())
+	sum := sha256.Sum256(fingerprint.Bytes())
+	item.Fingerprint = fingerprintVersion + hex.EncodeToString(sum[:6])
+	legacy := sha256.Sum256([]byte(strings.Join(wrappers, ">") + "\n" + handlerSource.String()))
+	item.LegacyFingerprint = hex.EncodeToString(legacy[:6])
 	item.RejectOnly = rejectOnly(body)
 	return item, nil
 }
@@ -551,6 +667,54 @@ func (current *scope) eval(expr ast.Expr) (string, bool) {
 		return current.eval(value.X)
 	}
 	return "", false
+}
+
+// isHandlerLike reports an expression that can only be an http.Handler or
+// handler function: a method value, a function literal, http.HandlerFunc(...)
+// or a call that itself wraps one.
+func isHandlerLike(expr ast.Expr, substitute func(ast.Expr) ast.Expr) bool {
+	if substitute != nil {
+		if replaced := substitute(expr); replaced != nil {
+			expr = replaced
+		}
+	}
+	switch value := expr.(type) {
+	case *ast.SelectorExpr, *ast.FuncLit:
+		return true
+	case *ast.CallExpr:
+		if isSelector(value.Fun, "http", "HandlerFunc") {
+			return true
+		}
+		for _, argument := range value.Args {
+			if isHandlerLike(argument, substitute) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func looksLikePattern(value string) bool {
+	if strings.HasPrefix(value, "/") {
+		return true
+	}
+	method, route, found := strings.Cut(value, " ")
+	return found && strings.HasPrefix(strings.TrimSpace(route), "/") && method != "" && strings.ToUpper(method) == method
+}
+
+// isServeMuxMethodExpression matches (*http.ServeMux).Handle style calls.
+func isServeMuxMethodExpression(expr ast.Expr) bool {
+	for {
+		paren, ok := expr.(*ast.ParenExpr)
+		if !ok {
+			break
+		}
+		expr = paren.X
+	}
+	if star, ok := expr.(*ast.StarExpr); ok {
+		expr = star.X
+	}
+	return isSelector(expr, "http", "ServeMux")
 }
 
 func isServeMuxType(expr ast.Expr) bool {

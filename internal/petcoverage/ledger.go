@@ -127,7 +127,10 @@ func MergeLedger(previous []Row, routes []Registration) (rows []Row, stale, remo
 			if !strings.Contains(oldSource, "/") && oldSource != "" {
 				oldSource = "internal/httpapi/" + oldSource // v1 paths were package-relative
 			}
-			if oldSource != route.Source || old["handler"] != route.Handler || old["boundary"] != route.Boundary || old["fingerprint"] != route.Fingerprint {
+			// A v1 fingerprint equal to the v1 hash of the current code proves
+			// nothing changed since review; only the hash scheme moved on.
+			migrated := !strings.HasPrefix(old["fingerprint"], fingerprintVersion) && old["fingerprint"] == route.LegacyFingerprint
+			if oldSource != route.Source || old["handler"] != route.Handler || old["boundary"] != route.Boundary || (old["fingerprint"] != route.Fingerprint && !migrated) {
 				row["status"] = "stale"
 				stale = append(stale, key)
 			}
