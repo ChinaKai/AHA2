@@ -97,9 +97,78 @@ var blockedADBHostCommands = map[string]bool{
 	"connect": true, "disconnect": true, "pair": true,
 	"kill-server": true, "start-server": true, "devices": true,
 	"mdns": true, "host-features": true,
+	"track-devices": true, "server-status": true, "reconnect": true,
+	// raw forwards arbitrary ADB services, including host services that bypass
+	// the selected device and services such as tcpip otherwise blocked by name.
+	"raw": true,
+	// These are also parsed as server-mode modifiers before device commands.
+	"server": true, "nodaemon": true, "fork-server": true,
 	// tcpip restarts adbd in TCP mode, silently turning a USB or wireless
 	// resource into a network device outside the resource's connection form.
 	"tcpip": true,
+}
+
+type adbCommand struct {
+	name              string
+	serial            string
+	unsafeGlobalFlags bool
+}
+
+// parseADBCommand only parses the global prefix. Once a device command is
+// found, its arguments belong to that command (including options and names
+// such as "tcpip" passed to shell). Unknown or incomplete prefixes fail closed.
+func parseADBCommand(args []string) (adbCommand, bool) {
+	var command adbCommand
+	i := 0
+	for i < len(args) && strings.HasPrefix(args[i], "-") {
+		option, value := args[i], ""
+		switch option {
+		case "-s", "-t", "-H", "-P", "-L":
+			i++
+			if i == len(args) {
+				return adbCommand{}, false
+			}
+			value = args[i]
+		case "-a", "-d", "-e", "--exit-on-write-error":
+		default:
+			// adb accepts attached -H/-P values, and attached -s/-t values
+			// only when their first character is a digit. -L needs a token.
+			if len(option) <= 2 {
+				return adbCommand{}, false
+			}
+			prefix := option[:2]
+			if prefix != "-H" && prefix != "-P" &&
+				!((prefix == "-s" || prefix == "-t") && option[2] >= '0' && option[2] <= '9') {
+				return adbCommand{}, false
+			}
+			option, value = prefix, option[2:]
+		}
+		switch option {
+		case "-s", "-t", "-H", "-P", "-L":
+			if value == "" || strings.HasPrefix(value, "-") {
+				return adbCommand{}, false
+			}
+		}
+		if option == "-s" {
+			command.serial = value // Like adb, the last -s wins.
+		} else if option != "--exit-on-write-error" {
+			// Recognizing an option must not grant access to another device,
+			// transport ID, or ADB server. Keep the existing resource boundary.
+			command.unsafeGlobalFlags = true
+		}
+		i++
+	}
+	for i < len(args) && strings.HasPrefix(args[i], "wait-for-") {
+		if args[i] == "wait-for-" {
+			return adbCommand{}, false
+		}
+		command.name = args[i]
+		i++
+	}
+	if i < len(args) {
+		command.name = args[i]
+	}
+	return command, command.name != "" && !strings.HasPrefix(command.name, "-")
 }
 
 func (s *Server) agentADBExec(writer http.ResponseWriter, request *http.Request) {
@@ -131,7 +200,15 @@ func (s *Server) agentADBExec(writer http.ResponseWriter, request *http.Request)
 		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "adb_args_invalid", "message": "ADB 参数数量必须在 1 到 64 之间"})
 		return
 	}
-	if strings.HasPrefix(payload.Args[0], "-") || blockedADBHostCommands[strings.ToLower(payload.Args[0])] {
+	command, parsed := parseADBCommand(payload.Args)
+	target := net.JoinHostPort(group.Network.Host, strconv.Itoa(group.Network.Port))
+	if group.Network.ADBUSB() {
+		target = group.Network.ADBSerial
+	}
+	// Wireless debugging resolves its serial via mDNS at execution time, so a
+	// caller-supplied serial cannot be verified against that resource here.
+	if !parsed || blockedADBHostCommands[strings.ToLower(command.name)] || command.unsafeGlobalFlags ||
+		(command.serial != "" && (group.Network.ADBWireless() || command.serial != target)) {
 		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "adb_command_not_allowed", "message": "这里只允许面向当前设备的 ADB 子命令"})
 		return
 	}

@@ -10,8 +10,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -187,6 +190,220 @@ func TestAgentADBExecUsesTaskDeviceAndReturnsBinary(t *testing.T) {
 		t.Fatalf("read-only ADB exec status=%d", response.StatusCode)
 	}
 	response.Body.Close()
+}
+
+func TestParseADBCommandSkipsGlobalOptionsAndWaitPrefixes(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		args   []string
+		want   adbCommand
+		parsed bool
+	}{
+		{"serial", []string{"-s", "SERIAL", "shell"}, adbCommand{name: "shell", serial: "SERIAL"}, true},
+		{"serial_value_is_not_command", []string{"-s", "tcpip", "shell"}, adbCommand{name: "shell", serial: "tcpip"}, true},
+		{"host_port", []string{"-H", "host", "-P", "5037", "host-features"}, adbCommand{name: "host-features", unsafeGlobalFlags: true}, true},
+		{"socket", []string{"-L", "tcp:localhost:5037", "shell"}, adbCommand{name: "shell", unsafeGlobalFlags: true}, true},
+		{"transport", []string{"-t", "1", "wait-for-device", "tcpip"}, adbCommand{name: "tcpip", unsafeGlobalFlags: true}, true},
+		{"attached_host_port", []string{"-Hhost", "-P5037", "wait-for-device", "host-features"}, adbCommand{name: "host-features", unsafeGlobalFlags: true}, true},
+		{"attached_transport", []string{"-t1", "shell"}, adbCommand{name: "shell", unsafeGlobalFlags: true}, true},
+		{"attached_numeric_serial", []string{"-s123ABC", "shell"}, adbCommand{name: "shell", serial: "123ABC"}, true},
+		{"attached_nonnumeric_serial", []string{"-sSERIAL", "shell"}, adbCommand{}, false},
+		{"attached_socket_is_unknown", []string{"-Ltcp:5037", "shell"}, adbCommand{}, false},
+		{"multiple_flags_waits", []string{"-d", "-a", "--exit-on-write-error", "-s", "SERIAL", "wait-for-device", "wait-for-usb-device", "install", "-r", "app.apk"}, adbCommand{name: "install", serial: "SERIAL", unsafeGlobalFlags: true}, true},
+		{"last_serial_wins", []string{"-s", "OTHER", "-s", "SERIAL", "shell"}, adbCommand{name: "shell", serial: "SERIAL"}, true},
+		{"only_wait", []string{"wait-for-device"}, adbCommand{name: "wait-for-device"}, true},
+		{"options_only", []string{"-H", "host", "-P", "5037"}, adbCommand{unsafeGlobalFlags: true}, false},
+		{"missing_value", []string{"-s"}, adbCommand{}, false},
+		{"unknown", []string{"--unknown", "tcpip"}, adbCommand{}, false},
+		{"empty", nil, adbCommand{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, parsed := parseADBCommand(tc.args)
+			if got != tc.want || parsed != tc.parsed {
+				t.Fatalf("parseADBCommand(%q)=(%#v, %v), want (%#v, %v)", tc.args, got, parsed, tc.want, tc.parsed)
+			}
+		})
+	}
+}
+
+func TestAgentADBExecParsesCommandBeforeApplyingPolicy(t *testing.T) {
+	h := newCoreMCPHarness(t)
+	task := createHardwareAPITask(t, h.database)
+	now := time.Now().UTC()
+	groups := []domain.HardwareGroup{
+		{ID: "usb", Network: domain.HardwareNetworkConfig{ADBConnection: "usb", ADBSerial: "123SERIAL"}},
+		{ID: "tcp", Network: domain.HardwareNetworkConfig{ADBConnection: "tcp", Host: "192.0.2.10", Port: 5555}},
+		{ID: "wireless", Network: domain.HardwareNetworkConfig{Host: "192.0.2.11", Port: 41234}},
+	}
+	for i := range groups {
+		groups[i].Mode, groups[i].Access = domain.HardwareModeNetwork, domain.HardwareAccessReadWrite
+		groups[i].Network.Protocol = domain.HardwareProtocolADB
+		groups[i].CreatedAt, groups[i].UpdatedAt = now, now
+	}
+	if err := h.database.ReplaceHardwareGroups(h.ctx, task.ID, groups); err != nil {
+		t.Fatal(err)
+	}
+	var executions atomic.Int32
+	forwarded := make(chan []string, 1)
+	executor := func(_ context.Context, _ string, args []string, _ []byte, _ time.Duration) (hardware.ADBExecResult, error) {
+		executions.Add(1)
+		forwarded <- append([]string(nil), args...)
+		return hardware.ADBExecResult{Stdout: []byte("fixture")}, nil
+	}
+	server := httptest.NewServer(New(Config{
+		Store: h.database, App: h.service, AgentCapabilities: h.caps,
+		ExecuteADB: executor, ExecuteADBTCP: executor, ExecuteADBUSB: executor,
+	}).Handler())
+	defer server.Close()
+	turn := createCoreTurn(t, h.database, task, "main", "batch-adb-command-policy")
+	token := h.issue(task.ID, "main", turn.ID)
+
+	for _, group := range groups {
+		target := group.Network.ADBSerial
+		if group.ID == "tcp" {
+			target = "192.0.2.10:5555"
+		} else if group.ID == "wireless" {
+			target = "192.0.2.11:41234"
+		}
+		for _, tc := range []struct {
+			name    string
+			args    []string
+			allowed bool
+		}{
+			{"shell", []string{"shell", "id"}, true},
+			{"logcat", []string{"logcat", "-d"}, true},
+			{"install", []string{"install", "-r", "app.apk"}, true},
+			{"shell_arguments_are_not_commands", []string{"shell", "echo", "tcpip", "-s"}, true},
+			{"shell_raw_argument_is_not_command", []string{"shell", "echo", "raw", "host:devices"}, true},
+			{"forward_list_remains_available", []string{"forward", "--list"}, true},
+			{"reverse_list_remains_available", []string{"reverse", "--list"}, true},
+			{"wait_only", []string{"wait-for-device"}, true},
+			{"wait_shell", []string{"wait-for-device", "shell"}, true},
+			{"multiple_waits_shell", []string{"wait-for-device", "wait-for-usb-device", "shell"}, true},
+			{"multiple_waits_only", []string{"wait-for-device", "wait-for-disconnect"}, true},
+			{"exit_on_write_error", []string{"--exit-on-write-error", "shell"}, true},
+			{"serial_shell", []string{"-s", "123SERIAL", "shell"}, group.ID == "usb"},
+			{"attached_serial_shell", []string{"-s123SERIAL", "shell"}, group.ID == "usb"},
+			{"serial_wait_shell", []string{"-s", "123SERIAL", "wait-for-device", "shell"}, group.ID == "usb"},
+			{"tcp_serial_shell", []string{"-s", "192.0.2.10:5555", "shell"}, group.ID == "tcp"},
+			{"wireless_serial_cannot_be_verified", []string{"-s", "192.0.2.11:41234", "shell"}, false},
+			// N-a: direct blocked commands must stay blocked.
+			{"direct_tcpip", []string{"tcpip", "5555"}, false},
+			{"direct_uppercase_tcpip", []string{"TCPIP", "5555"}, false},
+			{"direct_raw_tcpip", []string{"raw", "tcpip:5555"}, false},
+			{"direct_raw_host_devices", []string{"raw", "host:devices"}, false},
+			{"direct_uppercase_raw", []string{"RAW", "host:devices"}, false},
+			{"direct_track_devices", []string{"track-devices"}, false},
+			{"direct_server_status", []string{"server-status"}, false},
+			{"direct_reconnect", []string{"reconnect", "offline"}, false},
+			{"direct_host_features", []string{"host-features"}, false},
+			{"direct_devices", []string{"devices"}, false},
+			{"direct_connect", []string{"connect", "192.0.2.99:5555"}, false},
+			{"direct_disconnect", []string{"disconnect"}, false},
+			{"direct_pair", []string{"pair", "192.0.2.99:37000"}, false},
+			{"direct_start_server", []string{"start-server"}, false},
+			{"direct_kill_server", []string{"kill-server"}, false},
+			{"direct_mdns", []string{"mdns", "services"}, false},
+			// N-b: prefixes must not conceal a blocked command.
+			{"wait_tcpip", []string{"wait-for-device", "tcpip", "5555"}, false},
+			{"wait_raw_host_kill", []string{"wait-for-device", "raw", "host:kill"}, false},
+			{"serial_raw_tcpip", []string{"-s", target, "raw", "tcpip:5555"}, false},
+			{"host_port_raw_host_devices", []string{"-H", "127.0.0.1", "-P", "5037", "raw", "host:devices"}, false},
+			{"serial_tcpip", []string{"-s", "123SERIAL", "tcpip", "5555"}, false},
+			{"host_port_host_features", []string{"-H", "127.0.0.1", "-P", "5037", "host-features"}, false},
+			{"wait_host_features", []string{"wait-for-device", "host-features"}, false},
+			{"multiple_waits_tcpip", []string{"wait-for-device", "wait-for-any-device", "tcpip", "5555"}, false},
+			{"serial_multiple_waits_host_features", []string{"-s", "123SERIAL", "wait-for-device", "wait-for-local-device", "host-features"}, false},
+			{"serial_wait_uppercase_tcpip", []string{"-s", "123SERIAL", "wait-for-device", "TCPIP", "5555"}, false},
+			{"socket_wait_tcpip", []string{"-L", "tcp:localhost:5037", "wait-for-device", "tcpip", "5555"}, false},
+			{"transport_wait_tcpip", []string{"-t", "1", "wait-for-device", "tcpip", "5555"}, false},
+			{"server_mode", []string{"server", "nodaemon"}, false},
+			{"nodaemon_prefix", []string{"nodaemon", "tcpip", "5555"}, false},
+			{"fork_server_prefix", []string{"fork-server", "tcpip", "5555"}, false},
+			{"empty", []string{}, false},
+			{"null", nil, false},
+			{"empty_command", []string{""}, false},
+			{"serial_only", []string{"-s", "123SERIAL"}, false},
+			{"unknown_option", []string{"--unknown", "shell"}, false},
+			{"missing_serial", []string{"-s"}, false},
+			{"missing_host", []string{"-H"}, false},
+			{"missing_port", []string{"-P"}, false},
+			{"missing_socket", []string{"-L"}, false},
+			{"missing_transport", []string{"-t"}, false},
+			{"empty_option_value", []string{"-s", "", "shell"}, false},
+			{"option_instead_of_value", []string{"-s", "-H", "shell"}, false},
+			{"option_after_wait", []string{"wait-for-device", "-s", "123SERIAL", "shell"}, false},
+			{"empty_wait_suffix", []string{"wait-for-"}, false},
+			{"host_override_shell", []string{"-H", "127.0.0.1", "shell"}, false},
+			{"port_override_shell", []string{"-P", "5037", "shell"}, false},
+			{"socket_override_shell", []string{"-L", "tcp:localhost:5037", "shell"}, false},
+			{"transport_override_shell", []string{"-t", "1", "shell"}, false},
+			{"other_serial_shell", []string{"-s", "OTHER", "shell"}, false},
+			{"usb_selector_shell", []string{"-d", "shell"}, false},
+			{"emulator_selector_shell", []string{"-e", "shell"}, false},
+			{"listen_all_shell", []string{"-a", "shell"}, false},
+			{"server_only_option", []string{"--one-device", "123SERIAL", "shell"}, false},
+		} {
+			t.Run(group.ID+"/"+tc.name, func(t *testing.T) {
+				for _, mcp := range []bool{false, true} {
+					// The MCP schema rejects empty arrays/nulls and empty strings
+					// before the handler. Exercise those parser boundaries via HTTP.
+					if mcp && (len(tc.args) == 0 || slices.Contains(tc.args, "")) {
+						continue
+					}
+					before := executions.Load()
+					wantError, wantMessage := "adb_command_not_allowed", "这里只允许面向当前设备的 ADB 子命令"
+					if len(tc.args) == 0 {
+						wantError, wantMessage = "adb_args_invalid", "ADB 参数数量必须在 1 到 64 之间"
+					}
+					var status int
+					var payload struct {
+						OK      bool   `json:"ok"`
+						Error   string `json:"error"`
+						Message string `json:"message"`
+					}
+					if mcp {
+						result := coreMCPCallTool(t, server.URL+"/api/v1/agent/hardware/mcp", token, "hardware_adb_exec", map[string]any{"hardware_id": group.ID, "args": tc.args})
+						status = result.Status
+						if !tc.allowed {
+							select {
+							case <-forwarded:
+							default:
+							}
+							if status != http.StatusOK || !result.IsError || result.Text != "adb_command_not_allowed: adb_command_not_allowed" || executions.Load() != before {
+								t.Fatalf("MCP status=%d isError=%v text=%q executions=%d", status, result.IsError, result.Text, executions.Load()-before)
+							}
+							continue
+						}
+						if err := json.Unmarshal([]byte(result.Text), &payload); err != nil {
+							t.Fatal(err)
+						}
+					} else {
+						response := agentRequest(t, server.URL+"/api/v1/agent/hardware/"+group.ID+"/adb/exec", http.MethodPost, token, map[string]any{"args": tc.args})
+						status = response.StatusCode
+						decodeResponse(t, response, &payload)
+					}
+					var got []string
+					select {
+					case got = <-forwarded:
+					default:
+					}
+					if tc.allowed {
+						if status != http.StatusOK || !payload.OK || executions.Load() != before+1 {
+							t.Fatalf("mcp=%v status=%d ok=%v executions=%d", mcp, status, payload.OK, executions.Load()-before)
+						}
+						if !reflect.DeepEqual(got, tc.args) {
+							t.Fatalf("forwarded args=%q want=%q", got, tc.args)
+						}
+					} else if status != http.StatusBadRequest || payload.OK || payload.Error != wantError || executions.Load() != before {
+						t.Fatalf("mcp=%v status=%d error=%q executions=%d", mcp, status, payload.Error, executions.Load()-before)
+					} else if payload.Message != wantMessage {
+						t.Fatalf("mcp=%v unexpected public message %q", mcp, payload.Message)
+					}
+				}
+			})
+		}
+	}
 }
 
 func TestAgentStateKnowledgeAndSkillAPIs(t *testing.T) {
