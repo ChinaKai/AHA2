@@ -1,6 +1,7 @@
 package hardware
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/hex"
@@ -38,6 +39,7 @@ type ConnectRequest struct {
 }
 
 type LoginOptions struct {
+	Cancel          bool     `json:"cancel,omitempty"`
 	UsernamePrompts []string `json:"username_prompts"`
 	PasswordPrompts []string `json:"password_prompts"`
 	SuccessPrompts  []string `json:"success_prompts"`
@@ -67,19 +69,21 @@ type liveSubscriber struct {
 }
 
 type terminalSession struct {
-	manager   *Manager
-	targetKey string
-	endpoint  string
-	transport string
-	protocol  string
-	sshAuth   string
-	username  string
-	password  string
-	baudrate  int
-	conn      io.ReadWriteCloser
-	codec     *telnetCodec
-	decoder   streamDecoder
-	startedAt time.Time
+	manager        *Manager
+	targetKey      string
+	endpoint       string
+	transport      string
+	protocol       string
+	sshAuth        string
+	username       string
+	password       string
+	baudrate       int
+	conn           io.ReadWriteCloser
+	codec          *telnetCodec
+	decoder        streamDecoder
+	promptDecoder  streamDecoder
+	outputRedactor *secretStream
+	startedAt      time.Time
 
 	mu              sync.RWMutex
 	writeMu         sync.Mutex
@@ -98,6 +102,10 @@ type terminalSession struct {
 	loginOptions    LoginOptions
 	loginAttempts   int
 	loginGeneration int
+	loginArmed      bool
+	loginImplicit   bool
+	loginOwner      string
+	loginDone       chan struct{}
 	// recordError is the latest storage failure, cleared on the next
 	// successfully stored event.
 	recordError string
@@ -213,7 +221,7 @@ func (manager *Manager) Connect(ctx context.Context, request ConnectRequest) (do
 	}
 	if err != nil {
 		manager.mu.Unlock()
-		return domain.HardwareTerminalStatus{}, fmt.Errorf("connect %s: %w", endpoint, err)
+		return domain.HardwareTerminalStatus{}, fmt.Errorf("connect %s: %w", endpoint, redactHardwareError(err, request.Password))
 	}
 	if resolved, ok := connection.(interface{ ResolvedEndpoint() string }); ok {
 		if value := strings.TrimSpace(resolved.ResolvedEndpoint()); value != "" {
@@ -231,15 +239,19 @@ func (manager *Manager) Connect(ctx context.Context, request ConnectRequest) (do
 		subscribers: map[string]liveSubscriber{},
 	}
 	session.loginOptions = normalizeLoginOptions(LoginOptions{})
+	session.outputRedactor = newSecretStream(session.password)
 	if protocol == domain.HardwareProtocolSSH || protocol == domain.HardwareProtocolADB {
 		session.loginStatus = "authenticated"
 	} else if session.username != "" || session.password != "" {
-		session.loginStatus = "waiting"
-		session.loginAttempts = 1
-		session.loginGeneration = 1
+		if request.ReadOnly {
+			session.loginStatus = "read_only"
+		} else {
+			session.armLoginLocked(session.loginOptions, attachmentKey, 1, true)
+		}
 	} else {
 		session.loginStatus = "not_configured"
 	}
+
 	if protocol == domain.HardwareProtocolTelnet {
 		session.codec = newTelnetCodec(100, 28)
 	}
@@ -252,60 +264,14 @@ func (manager *Manager) Connect(ctx context.Context, request ConnectRequest) (do
 		_ = session.writeRaw(session.codec.InitialNegotiation())
 	}
 	session.mu.RLock()
-	loginWaiting := session.loginStatus == "waiting"
+	loginWaiting, generation, seconds, done := session.loginArmed, session.loginGeneration, session.loginOptions.TimeoutSeconds, session.loginDone
 	session.mu.RUnlock()
 	go session.readLoop()
 	if loginWaiting {
-		go session.loginTimeout(session.loginGeneration, session.loginOptions.TimeoutSeconds)
+		go session.loginTimeout(generation, seconds, done)
 	}
-	return session.statusFor(request.TaskID, request.HardwareID, request.ReadOnly), nil
-}
 
-func (manager *Manager) Login(taskID, hardwareID, transport string, options LoginOptions) (domain.HardwareTerminalStatus, error) {
-	key := attachmentKey(taskID, hardwareID, transport)
-	manager.mu.Lock()
-	session := manager.attachments[key]
-	manager.mu.Unlock()
-	if session == nil {
-		return domain.HardwareTerminalStatus{}, ErrNotConnected
-	}
-	session.mu.Lock()
-	if session.protocol == domain.HardwareProtocolSSH {
-		status := session.statusForLocked(taskID, hardwareID, false)
-		session.mu.Unlock()
-		return status, nil
-	}
-	attachment, ok := session.attachments[key]
-	if !ok || session.closing {
-		session.mu.Unlock()
-		return domain.HardwareTerminalStatus{}, ErrNotConnected
-	}
-	if attachment.readOnly {
-		session.mu.Unlock()
-		return domain.HardwareTerminalStatus{}, ErrReadOnly
-	}
-	if session.username == "" && session.password == "" {
-		session.mu.Unlock()
-		return domain.HardwareTerminalStatus{}, fmt.Errorf("hardware login credentials are not configured")
-	}
-	session.loginOptions = normalizeLoginOptions(options)
-	session.usernameSent = false
-	session.passwordSent = false
-	session.loginBuffer = ""
-	session.loginStatus = "waiting"
-	session.loginError = ""
-	session.loginAttempts = 1
-	session.loginGeneration++
-	generation := session.loginGeneration
-	wakeup := session.loginOptions.Wakeup
-	ending := loginLineEnding(session.loginOptions.LineEnding)
-	timeout := session.loginOptions.TimeoutSeconds
-	session.mu.Unlock()
-	if wakeup {
-		session.automaticSend(ending, "<wakeup>")
-	}
-	go session.loginTimeout(generation, timeout)
-	return session.statusFor(taskID, hardwareID, attachment.readOnly), nil
+	return session.statusFor(request.TaskID, request.HardwareID, request.ReadOnly), nil
 }
 
 func (manager *Manager) Status(taskID, hardwareID, transport string, readOnly bool) domain.HardwareTerminalStatus {
@@ -332,8 +298,9 @@ func (manager *Manager) Send(taskID, hardwareID, transport, data, encoding, sour
 	}
 	session.mu.RLock()
 	item, ok := session.attachments[key]
+	connected := !session.closing && session.status == "running"
 	session.mu.RUnlock()
-	if !ok {
+	if !ok || !connected {
 		return ErrNotConnected
 	}
 	if item.readOnly {
@@ -348,21 +315,21 @@ func (manager *Manager) Send(taskID, hardwareID, transport, data, encoding, sour
 		payload = []byte(data)
 	case "hex":
 		if transport != domain.HardwareTransportSerial {
-			return fmt.Errorf("hex input is supported for serial only")
+			return fmt.Errorf("%w: hex is supported for serial only", ErrHardwareEncodingInvalid)
 		}
 		var err error
 		payload, err = decodeHex(data)
 		if err != nil {
-			return err
+			return fmt.Errorf("%w: hex data is invalid", ErrHardwareEncodingInvalid)
 		}
 	case "base64":
 		var err error
 		payload, err = base64.StdEncoding.DecodeString(data)
 		if err != nil {
-			return fmt.Errorf("invalid base64 input: %w", err)
+			return fmt.Errorf("%w: base64 data is invalid", ErrHardwareEncodingInvalid)
 		}
 	default:
-		return fmt.Errorf("unsupported encoding %q", encoding)
+		return fmt.Errorf("%w: unsupported encoding", ErrHardwareEncodingInvalid)
 	}
 	if len(payload) == 0 {
 		return fmt.Errorf("hardware input is empty")
@@ -520,6 +487,9 @@ func (manager *Manager) Close() error {
 func (manager *Manager) detachLocked(key string, session *terminalSession) {
 	delete(manager.attachments, key)
 	session.mu.Lock()
+	if session.loginOwner == key && session.loginArmed {
+		session.stopLoginLocked("cancelled", "")
+	}
 	delete(session.attachments, key)
 	remaining := len(session.attachments)
 	session.mu.Unlock()
@@ -545,13 +515,20 @@ func (session *terminalSession) statusForLocked(taskID, hardwareID string, readO
 	return domain.HardwareTerminalStatus{
 		TaskID: taskID, HardwareID: hardwareID, Transport: session.transport,
 		Endpoint: session.endpoint, Status: session.status, Connected: !session.closing && session.status == "running",
-		ReadOnly: readOnly, Error: session.lastError, StartedAt: session.startedAt, UpdatedAt: session.updatedAt,
-		LoginStatus: session.loginStatus, LoginError: session.loginError,
-		RecordError: session.recordError,
+		ReadOnly: readOnly, Error: redactSecretText(session.lastError, session.password), StartedAt: session.startedAt, UpdatedAt: session.updatedAt,
+		LoginStatus: session.loginStatus, LoginError: redactSecretText(session.loginError, session.password),
+		RecordError: redactSecretText(session.recordError, session.password),
 	}
 }
 
 func (session *terminalSession) readLoop() {
+	defer func() {
+		if pending := session.outputRedactor.Finish(); len(pending) > 0 {
+			if text, raw := session.decoder.Decode(pending); len(raw) > 0 {
+				session.record("rx", text, "runtime", raw, nil)
+			}
+		}
+	}()
 	buffer := make([]byte, 4096)
 	for {
 		count, err := session.conn.Read(buffer)
@@ -564,9 +541,9 @@ func (session *terminalSession) readLoop() {
 					_ = session.writeRaw(reply)
 				}
 			}
-			if text, terminalData := session.decoder.Decode(payload); len(terminalData) > 0 {
+			session.maybeAutoLogin(payload)
+			if text, terminalData := session.decoder.Decode(session.outputRedactor.Feed(payload)); len(terminalData) > 0 {
 				session.record("rx", text, "runtime", terminalData, nil)
-				session.maybeAutoLogin(text)
 			}
 		}
 		if err != nil {
@@ -576,65 +553,6 @@ func (session *terminalSession) readLoop() {
 			session.fail(err)
 			break
 		}
-	}
-}
-
-func (session *terminalSession) maybeAutoLogin(text string) {
-	session.mu.Lock()
-	session.loginBuffer = appendLoginBuffer(session.loginBuffer, text)
-	lower := strings.ToLower(session.loginBuffer)
-	options := session.loginOptions
-	username := session.username
-	password := session.password
-	if matchesLoginPrompt(lower, options.FailurePrompts) {
-		session.loginStatus = "failed"
-		session.loginError = "hardware reported a login failure"
-		session.mu.Unlock()
-		return
-	}
-	if matchesLoginPrompt(lower, options.SuccessPrompts) {
-		session.loginStatus = "authenticated"
-		session.loginError = ""
-		session.mu.Unlock()
-		return
-	}
-	sendUsername := username != "" && !session.usernameSent && matchesLoginPrompt(lower, options.UsernamePrompts)
-	sendPassword := password != "" && !session.passwordSent && matchesLoginPrompt(lower, options.PasswordPrompts)
-	if password != "" && session.passwordSent && matchesLoginPrompt(lower, options.PasswordPrompts) && session.loginAttempts < options.Retries {
-		session.passwordSent = false
-		session.loginAttempts++
-		sendPassword = true
-	}
-	if sendUsername {
-		session.usernameSent = true
-		session.loginStatus = "username_sent"
-	}
-	if sendPassword {
-		session.passwordSent = true
-		session.loginStatus = "credentials_sent"
-	}
-	if sendUsername || sendPassword {
-		session.loginBuffer = ""
-	}
-	ending := loginLineEnding(options.LineEnding)
-	session.mu.Unlock()
-	if sendUsername {
-		session.automaticSend(username+ending, username+displayLineEnding(options.LineEnding))
-	}
-	if sendPassword {
-		session.automaticSend(password+ending, "<password>"+displayLineEnding(options.LineEnding))
-	}
-}
-
-func (session *terminalSession) loginTimeout(generation, seconds int) {
-	timer := time.NewTimer(time.Duration(seconds) * time.Second)
-	defer timer.Stop()
-	<-timer.C
-	session.mu.Lock()
-	defer session.mu.Unlock()
-	if generation == session.loginGeneration && session.loginStatus != "authenticated" && session.loginStatus != "failed" {
-		session.loginStatus = "timeout"
-		session.loginError = "hardware login timed out"
 	}
 }
 
@@ -669,6 +587,15 @@ func normalizeLoginOptions(options LoginOptions) LoginOptions {
 }
 
 func matchesLoginPrompt(lower string, prompts []string) bool {
+	for _, prompt := range prompts {
+		if value := strings.ToLower(strings.TrimSpace(prompt)); value != "" && strings.HasSuffix(strings.TrimSpace(lower), value) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsLoginPrompt(lower string, prompts []string) bool {
 	for _, prompt := range prompts {
 		if value := strings.ToLower(strings.TrimSpace(prompt)); value != "" && strings.Contains(lower, value) {
 			return true
@@ -707,16 +634,6 @@ func displayLineEnding(value string) string {
 	}
 }
 
-func (session *terminalSession) automaticSend(value, display string) {
-	payload := []byte(value)
-	if session.codec != nil {
-		payload = session.codec.Encode(payload)
-	}
-	if session.writeRaw(payload) == nil {
-		session.record("tx", display, "auto-login", nil, nil)
-	}
-}
-
 func (session *terminalSession) sendPayload(payload []byte, display, source string) error {
 	wire := payload
 	if session.codec != nil {
@@ -732,16 +649,20 @@ func (session *terminalSession) sendPayload(payload []byte, display, source stri
 func (session *terminalSession) writeRaw(payload []byte) error {
 	session.writeMu.Lock()
 	defer session.writeMu.Unlock()
+	return session.writeRawLocked(payload)
+}
+
+func (session *terminalSession) writeRawLocked(payload []byte) error {
 	for len(payload) > 0 {
 		count, err := session.conn.Write(payload)
 		if err != nil {
 			session.fail(err)
-			return err
+			return redactHardwareError(err, session.password)
 		}
 		if count <= 0 {
 			err = io.ErrShortWrite
 			session.fail(err)
-			return err
+			return redactHardwareError(err, session.password)
 		}
 		payload = payload[count:]
 	}
@@ -749,6 +670,10 @@ func (session *terminalSession) writeRaw(payload []byte) error {
 }
 
 func (session *terminalSession) record(direction, data, source string, raw []byte, only *attachment) {
+	data = redactSecretText(data, session.password)
+	if len(raw) > 0 && session.password != "" {
+		raw = bytes.ReplaceAll(raw, []byte(session.password), []byte(secretMaskFor(session.password)))
+	}
 	if direction == "rx" {
 		if data == "" && len(raw) == 0 {
 			return
@@ -798,10 +723,11 @@ func (session *terminalSession) fail(err error) {
 		return
 	}
 	session.status = "error"
-	session.lastError = err.Error()
+	session.lastError = redactSecretText(err.Error(), session.password)
+	session.stopLoginLocked("failed", "hardware connection failed")
 	session.updatedAt = session.manager.now().UTC()
 	session.mu.Unlock()
-	session.record("system", "hardware terminal error: "+err.Error(), "runtime", nil, nil)
+	session.record("system", "hardware terminal error: "+redactSecretText(err.Error(), session.password), "runtime", nil, nil)
 	session.broadcastStatus()
 	_ = session.conn.Close()
 }
@@ -812,6 +738,7 @@ func (session *terminalSession) close(reason string) {
 		session.mu.Unlock()
 		return
 	}
+	session.stopLoginLocked("cancelled", "")
 	session.closing = true
 	session.status = "disconnected"
 	session.updatedAt = session.manager.now().UTC()
@@ -989,6 +916,7 @@ func (session *terminalSession) noteRecordResult(target attachment, direction st
 		session.mu.Unlock()
 		return
 	}
+	err = redactHardwareError(err, session.password)
 	session.recordError = "terminal output could not be saved: " + err.Error()
 	session.mu.Unlock()
 	manager.recordFailures.Add(1)

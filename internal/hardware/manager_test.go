@@ -42,7 +42,7 @@ func TestBase64FallbackInput(t *testing.T) {
 	manager := NewManager(nil)
 	key := attachmentKey("task-1", "board", "serial")
 	session := &terminalSession{
-		manager: manager, conn: device, transport: "serial",
+		manager: manager, conn: device, transport: "serial", status: "running",
 		attachments: map[string]attachment{
 			key: {taskID: "task-1", hardwareID: "board"},
 		},

@@ -51,7 +51,7 @@ func (s *Server) hardwareTerminalWebSocket(writer http.ResponseWriter, request *
 	if afterSequence < 0 {
 		afterSequence = 0
 	}
-	page, err := s.store.HardwareIOPage(request.Context(), task.ID, group.ID, transport, afterSequence, 1000)
+	page, err := s.hardwareHistoryPage(request.Context(), group, transport, afterSequence, 1000)
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, "hardware_io_failed")
 		return

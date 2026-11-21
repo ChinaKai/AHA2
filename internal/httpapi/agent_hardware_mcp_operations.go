@@ -20,11 +20,12 @@ func (s *Server) hardwareMCPOperations() []agentMCPOperation {
 	connect := operation("hardware_connect", "Connect a device already bound to this Task using stored credentials. Requires Main and writable resource access. Unknown SSH host keys require owner confirmation in Web. Read connection state with hardware_list.", s.agentConnectHardware, nil)
 	disconnect := operation("hardware_disconnect", "Disconnect one bound device transport. Does not change bindings or credentials.", s.agentDisconnectHardware, nil)
 	send := operation("hardware_send", "Send data to a bound writable connected device. No credentials are accepted; use hardware_login for stored-credential login. Read output with hardware_terminal_read.", s.agentSendHardware, map[string]any{"data": map[string]any{"type": "string", "minLength": 1, "maxLength": 65536}, "encoding": mcpEnum("text", "base64")}, "data")
-	login := operation("hardware_login", "Start stored-credential login on a bound writable device. Credential values are never accepted or returned. Read connection state and terminal output separately.", s.agentLoginHardware, map[string]any{
+	login := operation("hardware_login", "Start stored-credential login on a bound writable device. Credential values are never accepted or returned. Authenticated or pending explicit attempts are idempotent. Failure/timeout/cancel disarms; retries is the explicit-attempt budget for this connection (default 1, maximum 3). Read connection state and sanitized terminal output separately.", s.agentLoginHardware, map[string]any{
+		"cancel": map[string]any{"type": "boolean", "description": "Disarm a pending login without disconnecting; an authenticated session stays authenticated."},
 		"wakeup": map[string]any{"type": "boolean"}, "line_ending": mcpEnum("lf", "crlf", "cr"),
-		"timeout_seconds": mcpInteger(1, 120), "retries": mcpInteger(0, 5),
+		"timeout_seconds": mcpInteger(3, 300), "retries": mcpInteger(1, 3),
 	})
-	adb := operation("hardware_adb_exec", "Run a device-scoped ADB command against a bound writable ADB resource. Host commands, pairing, host-key trust and credentials are excluded. Uses the same command validation, timeout and cancellation as the Agent API.", s.agentADBExec, map[string]any{
+	adb := operation("hardware_adb_exec", "Run a device-scoped ADB command against a bound writable ADB resource. Host commands, pairing, host-key trust and credentials are excluded. Uses the same command validation, timeout and cancellation as the Agent API. adb_output_limit_may_have_executed and adb_timeout_may_have_executed mean the command may already have run: check device state before any retry.", s.agentADBExec, map[string]any{
 		"args":         map[string]any{"type": "array", "items": mcpString(), "minItems": 1, "maxItems": 64},
 		"stdin_base64": map[string]any{"type": "string", "maxLength": 65536}, "timeout_seconds": mcpInteger(1, 120),
 	}, "args")

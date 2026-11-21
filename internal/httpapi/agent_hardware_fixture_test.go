@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"github.com/ChinaKai/AHA2/internal/auth"
 	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/hardware"
@@ -42,7 +44,12 @@ func newHardwareAuthorizationFixture(t *testing.T, pet bool) *hardwareAuthorizat
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
-	f := &hardwareAuthorizationFixture{h: h, task: task, listener: listener, accepted: make(chan net.Conn, 8), secret: "LOGIN-FIXTURE-SECRET-NOT-IN-MODEL"}
+	f := &hardwareAuthorizationFixture{h: h, task: task, listener: listener, accepted: make(chan net.Conn, 8), secret: ""}
+	var secretBytes [24]byte
+	if _, err := rand.Read(secretBytes[:]); err != nil {
+		t.Fatal("fixture secret generation failed")
+	}
+	f.secret = hex.EncodeToString(secretBytes[:])
 	go func() {
 		for {
 			conn, err := listener.Accept()

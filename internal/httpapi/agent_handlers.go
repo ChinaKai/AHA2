@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -75,13 +76,17 @@ func (s *Server) agentLoginHardware(writer http.ResponseWriter, request *http.Re
 		writeError(writer, http.StatusBadRequest, "invalid_json")
 		return
 	}
+	if request.Context().Err() != nil {
+		writeError(writer, http.StatusConflict, "operation_cancelled")
+		return
+	}
 	status, err := s.hardware.Login(task.ID, group.ID, transport, options)
 	if err != nil {
 		code := http.StatusConflict
 		if errors.Is(err, hardware.ErrReadOnly) {
 			code = http.StatusForbidden
 		}
-		writeJSON(writer, code, map[string]any{"ok": false, "error": "hardware_login_failed", "message": err.Error()})
+		writeJSON(writer, code, map[string]any{"ok": false, "error": hardwarePublicErrorCode(err, "hardware_login_failed"), "message": err.Error()})
 		return
 	}
 	s.audit(request, "task.hardware.login", "task", task.ID, map[string]any{"hardware_id": group.ID, "transport": transport})
@@ -161,16 +166,26 @@ func (s *Server) agentADBExec(writer http.ResponseWriter, request *http.Request)
 		return
 	}
 	endpoint := net.JoinHostPort(group.Network.Host, strconv.Itoa(group.Network.Port))
-	result, err := s.executeADB(request.Context(), endpoint, payload.Args, input, time.Duration(timeoutSeconds)*time.Second)
+	timeout := time.Duration(timeoutSeconds) * time.Second
+	startedAt := time.Now()
+	result, err := s.executeADB(request.Context(), endpoint, payload.Args, input, timeout)
 	if err != nil {
 		code := http.StatusConflict
-		if errors.Is(err, hardware.ErrADBOutputTooLarge) {
+		errorCode := hardwarePublicErrorCode(err, "adb_exec_failed")
+		// Output overflow and the command deadline both end a command that may
+		// already have changed the device; a caller must not retry blindly. A
+		// connection that hangs until the deadline is also reported this way:
+		// it cannot be told apart from a started command here.
+		mayHaveExecuted := errors.Is(err, hardware.ErrADBOutputTooLarge)
+		if mayHaveExecuted {
 			code = http.StatusRequestEntityTooLarge
+		} else if time.Since(startedAt) >= timeout || errors.Is(request.Context().Err(), context.DeadlineExceeded) {
+			mayHaveExecuted, errorCode = true, "adb_timeout_may_have_executed"
 		}
 		s.audit(request, "task.hardware.adb_exec_failed", "task", task.ID, map[string]any{
-			"hardware_id": group.ID, "argument_count": len(payload.Args), "input_bytes": len(input),
+			"hardware_id": group.ID, "argument_count": len(payload.Args), "input_bytes": len(input), "may_have_executed": mayHaveExecuted,
 		})
-		writeJSON(writer, code, map[string]any{"ok": false, "error": "adb_exec_failed", "message": err.Error()})
+		writeJSON(writer, code, map[string]any{"ok": false, "error": errorCode, "may_have_executed": mayHaveExecuted, "message": err.Error()})
 		return
 	}
 	s.audit(request, "task.hardware.adb_exec", "task", task.ID, map[string]any{
@@ -185,8 +200,14 @@ func (s *Server) agentADBExec(writer http.ResponseWriter, request *http.Request)
 		// bounded result instead of turning a successful side effect into a
 		// response-size failure that could provoke an unsafe command retry.
 		const budget = 24 << 10
-		if len(stdout) > budget {
-			stdout = stdout[:budget]
+		// Keep diagnostic stderr even when stdout fills its entire allowance.
+		reservedStderr := len(stderr)
+		if reservedStderr > 6<<10 {
+			reservedStderr = 6 << 10
+		}
+		stdoutBudget := budget - reservedStderr
+		if len(stdout) > stdoutBudget {
+			stdout = stdout[:stdoutBudget]
 			stdoutTruncated = true
 		}
 		remaining := budget - len(stdout)

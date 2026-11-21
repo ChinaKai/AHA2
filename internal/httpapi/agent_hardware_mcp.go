@@ -409,7 +409,7 @@ func (s *Server) agentHardwareMCPTerminalRead(ctx context.Context, call app.Agen
 			code: "hardware_transport_invalid", message: "hardware group does not configure that transport",
 		}
 	}
-	page, err := s.store.HardwareIOPage(ctx, call.Task.ID, group.ID, transport, after, limit)
+	page, err := s.hardwareHistoryPage(ctx, group, transport, after, limit)
 	if err != nil {
 		return agentHardwareMCPTerminal{}, "", &hardwareMCPError{
 			code: "hardware_io_failed", message: "terminal output could not be read",

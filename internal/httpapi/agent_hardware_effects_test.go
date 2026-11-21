@@ -4,10 +4,13 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/ChinaKai/AHA2/internal/hardware"
+	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -89,7 +92,48 @@ func TestADBMCPLargeOutputIsBoundedAfterExactlyOneExecution(t *testing.T) {
 		t.Fatalf("large result: status=%d isError=%v size=%d executions=%d", result.Status, result.IsError, len(result.Text), f.executions.Load())
 	}
 	var payload map[string]any
-	if json.Unmarshal([]byte(result.Text), &payload) != nil || payload["stdout_truncated"] != true || payload["stderr_truncated"] != true || payload["exit_code"] != float64(7) {
+	if json.Unmarshal([]byte(result.Text), &payload) != nil || payload["stdout_truncated"] != true || payload["stderr_truncated"] != false || payload["stderr_base64"] != "dGFpbA==" || payload["exit_code"] != float64(7) {
 		t.Fatal("truncation or command status was lost")
+	}
+}
+
+// A command that reaches its deadline may already have changed the device.
+// Both the Agent HTTP body and the MCP error code must say so, and a failure
+// before the deadline keeps the ordinary code, so callers can tell them apart.
+func TestADBDeadlineReportsPossibleExecutionOnHTTPAndMCP(t *testing.T) {
+	f := newHardwareAuthorizationFixture(t, false)
+	var hang atomic.Bool
+	server := httptest.NewServer(New(Config{Store: f.h.database, App: f.h.service, AgentCapabilities: f.h.caps, ExecuteADB: func(ctx context.Context, _ string, _ []string, _ []byte, timeout time.Duration) (hardware.ADBExecResult, error) {
+		f.executions.Add(1)
+		if !hang.Load() {
+			return hardware.ADBExecResult{}, errors.New("fixture connection refused")
+		}
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+		case <-timer.C:
+		}
+		return hardware.ADBExecResult{}, errors.New("fixture command timed out")
+	}}).Handler())
+	defer server.Close()
+	args := map[string]any{"hardware_id": "device", "args": []string{"shell", "fixture"}, "timeout_seconds": 1}
+	result := coreMCPCallTool(t, server.URL+"/api/v1/agent/hardware/mcp", f.token, "hardware_adb_exec", args)
+	if !result.IsError || !strings.Contains(result.Text, "adb_exec_failed") || strings.Contains(result.Text, "may_have_executed") {
+		t.Fatal("early failure was reported as a possibly executed command")
+	}
+	hang.Store(true)
+	result = coreMCPCallTool(t, server.URL+"/api/v1/agent/hardware/mcp", f.token, "hardware_adb_exec", args)
+	if !result.IsError || !strings.Contains(result.Text, "adb_timeout_may_have_executed") {
+		t.Fatal("deadline was not reported as possibly executed over MCP")
+	}
+	response := agentRequest(t, server.URL+"/api/v1/agent/hardware/device/adb/exec", http.MethodPost, f.token, map[string]any{"args": []string{"shell", "fixture"}, "timeout_seconds": 1})
+	defer response.Body.Close()
+	var body map[string]any
+	if json.NewDecoder(response.Body).Decode(&body) != nil || body["error"] != "adb_timeout_may_have_executed" || body["may_have_executed"] != true {
+		t.Fatal("deadline was not reported as possibly executed over Agent HTTP")
+	}
+	if f.executions.Load() != 3 {
+		t.Fatal("deadline classification retried or skipped a command")
 	}
 }

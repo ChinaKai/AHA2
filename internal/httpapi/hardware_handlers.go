@@ -551,8 +551,8 @@ func (s *Server) hardwareTerminal(writer http.ResponseWriter, request *http.Requ
 	if !ok {
 		return
 	}
-	page, err := s.store.HardwareIOPage(
-		request.Context(), task.ID, group.ID, transport,
+	page, err := s.hardwareHistoryPage(
+		request.Context(), group, transport,
 		queryInt(request, "after", 0), int(queryInt(request, "limit", 500)),
 	)
 	if err != nil {
@@ -701,7 +701,7 @@ func (s *Server) sendHardware(writer http.ResponseWriter, request *http.Request)
 			status = http.StatusForbidden
 		}
 		writeJSON(writer, status, map[string]any{
-			"ok": false, "error": "hardware_send_failed", "message": err.Error(),
+			"ok": false, "error": hardwarePublicErrorCode(err, "hardware_send_failed"), "message": err.Error(),
 		})
 		return
 	}
