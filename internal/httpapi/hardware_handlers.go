@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/hardware"
 	"github.com/ChinaKai/AHA2/internal/hardwareconfig"
@@ -347,7 +348,7 @@ func (s *Server) updateTaskHardwareBindings(writer http.ResponseWriter, request 
 		writeError(writer, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	if len(payload.Bindings) > 16 {
+	if len(payload.Bindings) > app.MaxTaskHardwareResources {
 		writeJSON(writer, http.StatusBadRequest, map[string]any{
 			"ok": false, "error": "hardware_bindings_invalid", "message": "每个任务最多启用 16 个硬件资源",
 		})
@@ -390,13 +391,11 @@ func (s *Server) updateTaskHardwareBindings(writer http.ResponseWriter, request 
 			CreatedAt: createdAt, UpdatedAt: now,
 		})
 	}
-	if s.hardware != nil {
-		s.hardware.DisconnectTask(taskID)
-	}
-	if err := s.store.ReplaceTaskHardwareBindings(request.Context(), taskID, bindings); err != nil {
-		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "update_hardware_bindings_failed", "message": err.Error()})
+	if err := s.app.ReplaceTaskHardwareResourceBindings(request.Context(), taskID, bindings); err != nil {
+		writeError(writer, http.StatusBadRequest, "update_hardware_bindings_failed")
 		return
 	}
+
 	groups, _ := s.store.HardwareGroups(request.Context(), taskID)
 	resources, _ := s.store.HardwareResources(request.Context())
 	s.audit(request, "task.hardware.bindings.update", "task", taskID, map[string]any{
@@ -570,7 +569,7 @@ func (s *Server) connectHardware(writer http.ResponseWriter, request *http.Reque
 	})
 	if err != nil {
 		s.audit(request, "task.hardware.connect_failed", "task", task.ID, map[string]any{
-			"hardware_id": group.ID, "transport": transport, "error": err.Error(),
+			"hardware_id": group.ID, "transport": transport, "error": "hardware_connect_failed",
 		})
 		code := "hardware_connect_failed"
 		if hardware.IsUnknownSSHHostKey(err) {
@@ -725,7 +724,7 @@ func (s *Server) hardwareTarget(
 		})
 		return domain.Task{}, domain.HardwareGroup{}, "", false, false
 	}
-	readOnly := task.Status.Terminal() || !group.Writable()
+	readOnly := task.Status.Terminal() || task.ReadOnly || !group.Writable()
 	return task, group, transport, readOnly, true
 }
 

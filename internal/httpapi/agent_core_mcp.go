@@ -89,7 +89,7 @@ func (s *Server) agentCoreMCP(writer http.ResponseWriter, request *http.Request)
 	case "ping":
 		respond(map[string]any{})
 	case "tools/list":
-		respond(map[string]any{"tools": agentCoreMCPTools(s.app.AgentWriteAllowed(request.Context(), call))})
+		respond(map[string]any{"tools": agentCoreMCPToolsNamed(s.app.AgentCoreMCPToolNames(request.Context(), call))})
 	case "tools/call":
 		s.callAgentCoreMCPTool(writer, request, claims, call, payload)
 	default:
@@ -191,7 +191,7 @@ func (s *Server) callAgentCoreMCPTool(writer http.ResponseWriter, request *http.
 			writeError(writer, http.StatusForbidden, "agent_operation_forbidden")
 			return
 		}
-		if !s.app.AgentWriteAllowed(request.Context(), call) {
+		if !coreMCPNameIncluded(s.app.AgentCoreMCPToolNames(request.Context(), call), input.Name) {
 			auditResult = "denied"
 			writeError(writer, http.StatusForbidden, app.ErrCodeTaskReadOnly)
 			return
@@ -397,13 +397,26 @@ func coreMCPArgumentKeys(raw json.RawMessage) []string {
 	return keys
 }
 
+func coreMCPNameIncluded(names []string, name string) bool {
+	for _, item := range names {
+		if item == name {
+			return true
+		}
+	}
+	return false
+}
+
 func agentCoreMCPTools(write bool) []mcpTool {
+	return agentCoreMCPToolsNamed(app.CoreMCPToolNames(write))
+}
+
+func agentCoreMCPToolsNamed(names []string) []mcpTool {
 	all := map[string]mcpTool{}
 	for _, tool := range coreMCPTools() {
 		all[tool.Name] = tool
 	}
 	result := make([]mcpTool, 0, len(all))
-	for _, name := range app.CoreMCPToolNames(write) {
+	for _, name := range names {
 		if tool, ok := all[name]; ok {
 			result = append(result, tool)
 		}

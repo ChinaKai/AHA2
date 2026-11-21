@@ -207,7 +207,7 @@ func TestCoreMCPRuntimeInjectionScopesTools(t *testing.T) {
 		{name: "writable main", task: task, agentID: "main", apiURL: "http://127.0.0.1:8766/", wantTools: CoreMCPToolNames(true), wantCore: true},
 		{name: "non-main", task: task, agentID: "sub", apiURL: "http://127.0.0.1:8766/", wantTools: CoreMCPToolNames(false), wantCore: true},
 		{name: "read-only main", task: readOnly, agentID: "main", apiURL: "http://127.0.0.1:8766/", wantTools: CoreMCPToolNames(false), wantCore: true},
-		{name: "pet task", task: domain.Task{ID: petTaskID}, agentID: "main", apiURL: "http://127.0.0.1:8766/", wantCore: false},
+		{name: "pet without snapshot gets read core", task: domain.Task{ID: petTaskID}, agentID: "main", apiURL: "http://127.0.0.1:8766/", wantTools: CoreMCPToolNames(false), wantCore: true},
 		{name: "no agent API", task: task, agentID: "main", apiURL: "", wantCore: false},
 	}
 	for _, scenario := range scenarios {

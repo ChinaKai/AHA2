@@ -43,21 +43,11 @@ func (s *Service) SetManagedProcesses(reader ManagedProcessReader) {
 
 // AgentWorkspaceMCPAllowed is the single gate for the workspace domain MCP. The
 // runtime injects the server only when this returns true, and every tool call
-// re-checks it server-side. The pet Task, a Task without a bound Workspace and
-// any channel-hosted Turn are outside this project-scoped domain.
+// re-checks it server-side. A Task without a matching bound Workspace and any
+// channel-hosted Turn remain outside the domain; pet access needs view permission.
 func (s *Service) AgentWorkspaceMCPAllowed(ctx context.Context, call AgentCallContext) bool {
-	if call.Task.ID == petTaskID || call.Task.ProjectID == petProjectID {
-		return false
-	}
-	workspaceID := strings.TrimSpace(call.Task.WorkspaceID)
-	if workspaceID == "" {
-		return false
-	}
-	item, err := s.store.Workspace(ctx, workspaceID)
-	if err != nil || item.ProjectID != call.Project.ID {
-		return false
-	}
-	return !s.agentMCPChannelBound(ctx, call.Task.ID, call.Turn.InboxBatchID)
+
+	return s.workspaceMCPInjected(ctx, call.Task, call.Turn.InboxBatchID)
 }
 
 func (s *Service) agentWorkspaceMCPReadContext(ctx context.Context, claims agentapi.Claims) (AgentCallContext, error) {

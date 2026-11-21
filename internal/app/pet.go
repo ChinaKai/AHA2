@@ -1786,7 +1786,7 @@ func ahaPetTools() []gateway.ChatTool {
 		{Name: "aha_update_task_hardware", Description: "整体替换 Task 的硬件资源绑定", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"task_id":      map[string]any{"type": "string"},
-				"resource_ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"resource_ids": map[string]any{"type": "array", "maxItems": MaxTaskHardwareResources, "uniqueItems": true, "items": map[string]any{"type": "string"}},
 			}, "required": []string{"task_id"},
 		}},
 		{Name: "aha_mail_resources", Description: "只读列出邮箱账号、模板和绑定；账号只返回非敏感字段与 password_configured，绝不返回 password、授权码或 credential_ref。可选 task_id 同时返回该 Task 的有效绑定", Parameters: map[string]any{

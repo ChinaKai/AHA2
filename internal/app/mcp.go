@@ -276,21 +276,26 @@ func (s *Service) browserMCPDetail() domain.MCPServer {
 
 // hardwareMCPDetail describes the built-in Task hardware domain MCP. Its
 // injection trigger (a bound hardware group) is independent from the browser
-// domain. It is read-only: connect, disconnect, send, login, ADB exec and
-// configuration stay on the existing Agent hardware API.
+// domain. Device I/O reuses the existing Agent hardware API and is only
+// advertised to authorized writable Main Turns. Configuration is owner-managed.
 func (s *Service) hardwareMCPDetail() domain.MCPServer {
 	now := s.now().UTC()
 	descriptions := map[string]string{
+		"hardware_connect":       "连接当前 Task 已绑定的设备；保留资源权限与 host key 检查，不接收或返回凭据。",
+		"hardware_disconnect":    "断开已绑定设备连接。",
+		"hardware_send":          "向已绑定、可读写的连接发送数据。",
+		"hardware_login":         "用服务端已保存的凭据登录设备；不接收密码。",
+		"hardware_adb_exec":      "执行设备范围的 ADB 命令；不允许 host 管理或配对。",
 		"hardware_list":          "列出当前 Task 绑定的硬件资源 ID、模式、权限、连接方式与健康状态；不含密码、凭据引用、串口设备或网络配置。",
 		"hardware_terminal_read": "按硬件 ID、连接方式与游标读取终端输出，单次响应上限 64 KiB；只读，不含连接、发送、登录或配置操作。",
 	}
-	tools := make([]domain.MCPTool, 0, len(hardwareMCPToolNames))
-	for _, name := range hardwareMCPToolNames {
+	tools := make([]domain.MCPTool, 0, len(HardwareMCPToolNames()))
+	for _, name := range HardwareMCPToolNames() {
 		tools = append(tools, domain.MCPTool{Name: name, Description: descriptions[name]})
 	}
 	return domain.MCPServer{
 		ID: hardwareMCPName, Name: "Task 硬件（内置）",
-		Description: "Task 绑定硬件资源后自动注入；只读提供资源元数据与有界终端输出，不含任何连接、发送、登录、ADB 执行或配置能力。",
+		Description: "Task 绑定硬件资源后自动注入；提供元数据与有界终端读取，Main 在当前权限允许时可连接、断开、发送、登录和执行 ADB；凭据与信任仍由 owner 管理。",
 		Transport:   "builtin", Enabled: true, Builtin: true, AutoInject: true, Health: "ok",
 		Tools: tools, CreatedAt: now, UpdatedAt: now,
 	}

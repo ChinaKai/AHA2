@@ -183,6 +183,10 @@ type KnowledgeFeedbackWriteResult struct {
 // entry is refused when its scope reads the vault; the legacy tables are only
 // written for a project that still reads them.
 func (s *Service) FeedbackWebKnowledge(ctx context.Context, id, kind string) (KnowledgeFeedbackWriteResult, error) {
+	return s.feedbackKnowledge(ctx, id, kind, "web")
+}
+
+func (s *Service) feedbackKnowledge(ctx context.Context, id, kind, writer string) (KnowledgeFeedbackWriteResult, error) {
 	target, err := s.resolveKnowledgeFeedbackTarget(ctx, id)
 	if err != nil {
 		return KnowledgeFeedbackWriteResult{}, err
@@ -190,7 +194,7 @@ func (s *Service) FeedbackWebKnowledge(ctx context.Context, id, kind string) (Kn
 	if target.Vault {
 		result, err := s.knowledgeVault.KnowledgeFeedback(ctx, knowledgevault.FeedbackRequest{
 			Scope: target.Scope, ProjectID: target.ProjectID, AllowGlobal: true,
-			EntryID: target.VaultEntry.ID, Kind: kind, Writer: "web",
+			EntryID: target.VaultEntry.ID, Kind: kind, Writer: writer,
 		})
 		if err != nil {
 			return KnowledgeFeedbackWriteResult{}, err

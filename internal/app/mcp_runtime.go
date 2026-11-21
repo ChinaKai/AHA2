@@ -64,7 +64,7 @@ const (
 
 	// browserMCPName is the model-facing namespace of the shared-browser
 	// domain MCP. It is injected only when the Task currently holds an active
-	// browser grant (and is not the pet Task or a channel-hosted Turn). The
+	// browser grant and the Turn is not channel-hosted. The
 	// first slice is read-only: lease state, tab list and one structured page
 	// snapshot.
 	browserMCPName = "aha2_browser"
@@ -72,8 +72,8 @@ const (
 
 	// hardwareMCPName is the model-facing namespace of the Task hardware
 	// domain MCP. Its trigger is independent from the browser domain: the Task
-	// needs at least one bound hardware group. The first slice is read-only:
-	// bound resource metadata and bounded terminal output.
+	// needs at least one bound hardware group. Read tools expose metadata and
+	// bounded terminal output; Main writes require a writable snapshot.
 	hardwareMCPName = "aha2_hardware"
 	hardwareMCPPath = "/api/v1/agent/hardware/mcp"
 )
@@ -207,8 +207,8 @@ func BrowserMCPToolIsRead(name string) bool {
 	return false
 }
 
-// hardwareMCPToolNames is the complete Task hardware first slice. It never
-// includes connect/disconnect/send/login/ADB exec/config or firmware tools.
+// hardwareMCPToolNames is the Task hardware read subset. Device I/O is
+// advertised separately to authorized writable Main Turns.
 var hardwareMCPToolNames = []string{
 	"hardware_list", "hardware_terminal_read",
 }
@@ -216,11 +216,29 @@ var hardwareMCPToolNames = []string{
 // HardwareMCPToolNames is the exact allowlist for a hardware MCP client. It is
 // exported so the HTTP facade advertises the same subset the runtime injects.
 func HardwareMCPToolNames() []string {
-	return append([]string{}, hardwareMCPToolNames...)
+	return HardwareMCPToolNamesFor(true)
 }
 
-// HardwareMCPToolIsRead reports whether a hardware tool is in the read-only
-// first slice. There is intentionally no write tool in this domain.
+var hardwareMCPWriteToolNames = []string{"hardware_connect", "hardware_disconnect", "hardware_send", "hardware_login", "hardware_adb_exec"}
+
+func HardwareMCPToolNamesFor(write bool) []string {
+	names := append([]string{}, hardwareMCPToolNames...)
+	if write {
+		names = append(names, hardwareMCPWriteToolNames...)
+	}
+	return names
+}
+
+func HardwareMCPToolIsKnown(name string) bool {
+	for _, item := range HardwareMCPToolNamesFor(true) {
+		if item == name {
+			return true
+		}
+	}
+	return false
+}
+
+// HardwareMCPToolIsRead distinguishes metadata/terminal reads from device I/O.
 func HardwareMCPToolIsRead(name string) bool {
 	for _, tool := range hardwareMCPToolNames {
 		if tool == name {
@@ -256,10 +274,10 @@ func CollabMCPToolIsKnown(name string) bool {
 
 // workspaceMCPInjected mirrors AgentWorkspaceMCPAllowed for the runtime path,
 // which has no AgentCallContext yet. A Task needs a bound Workspace that
-// belongs to the same Project; the pet Task and channel-hosted Turns are
-// excluded by the shared rules. inboxBatchID is the Turn's actual batch.
+// belongs to the same Project. Pet access requires its live view permission;
+// channel-hosted Turns remain excluded. inboxBatchID is the Turn's actual batch.
 func (s *Service) workspaceMCPInjected(ctx context.Context, task domain.Task, inboxBatchID string) bool {
-	if task.ID == petTaskID || task.ProjectID == petProjectID {
+	if !s.petDomainReadable(ctx, task) {
 		return false
 	}
 	workspaceID := strings.TrimSpace(task.WorkspaceID)
@@ -276,11 +294,11 @@ func (s *Service) workspaceMCPInjected(ctx context.Context, task domain.Task, in
 // browserMCPInjected reports whether the shared-browser domain belongs to this
 // Turn. Its trigger is the presence of an active browser grant for the Task:
 // without a lease the tools could only report "no grant", so the domain is not
-// advertised at all. The pet Task and channel-hosted Turns are excluded by the
-// shared rules. A grant whose session is already closed does not count, which
+// advertised at all. Pet access requires its live view permission; channel-hosted
+// Turns remain excluded. A grant whose session is already closed does not count, which
 // mirrors the Agent-facing HTTP view.
 func (s *Service) browserMCPInjected(ctx context.Context, task domain.Task, inboxBatchID string) bool {
-	if task.ID == petTaskID || task.ProjectID == petProjectID {
+	if !s.petDomainReadable(ctx, task) {
 		return false
 	}
 	if s.agentMCPChannelBound(ctx, task.ID, inboxBatchID) {
@@ -308,7 +326,7 @@ func (s *Service) browserMCPInjected(ctx context.Context, task domain.Task, inbo
 // bound hardware groups receives this domain even when it holds no browser
 // lease, and vice versa.
 func (s *Service) hardwareMCPInjected(ctx context.Context, task domain.Task, inboxBatchID string) bool {
-	if task.ID == petTaskID || task.ProjectID == petProjectID {
+	if !s.petDomainReadable(ctx, task) {
 		return false
 	}
 	if s.agentMCPChannelBound(ctx, task.ID, inboxBatchID) {
@@ -319,11 +337,14 @@ func (s *Service) hardwareMCPInjected(ctx context.Context, task domain.Task, inb
 }
 
 // knowledgeMCPInjected mirrors AgentKnowledgeMCPAllowed for the runtime path,
-// which has no AgentCallContext yet. The pet Task is excluded because its root
-// libraries are outside a Project, and channel-bound Turns (task_route or
-// conversation_host) are excluded because their knowledge resolves from
-// another source. inboxBatchID is the Turn's actual batch, not just the Task.
+// which has no AgentCallContext yet. The pet receives only the missing guide
+// and feedback tools; its existing management tools own the library scope.
+// Channel-bound Turns remain excluded because they resolve another source. inboxBatchID is the Turn's actual batch, not just the Task.
 func (s *Service) knowledgeMCPInjected(ctx context.Context, task domain.Task, inboxBatchID string) bool {
+	if task.ID == petTaskID {
+		_, err := s.petKnowledgeReadable(ctx)
+		return task.ProjectID == petProjectID && err == nil && !s.agentMCPChannelBound(ctx, task.ID, inboxBatchID)
+	}
 	if task.ID == petTaskID || task.ProjectID == petProjectID || !knowledgeEnabled(domain.Project{}, task) {
 		return false
 	}
@@ -469,14 +490,14 @@ func (s *Service) mcpRuntimeForTask(ctx context.Context, task domain.Task, agent
 }
 
 // mcpRuntimeForTurn adds the core Task API MCP to the servers a Turn receives.
-// The core server is only injected when an Agent API URL exists and the Task is
-// not the pet Task. A writable Main Turn receives all tools; everyone else —
-// non-Main collaborators and read-only review Tasks — receives read tools only.
+// The core server is injected when an Agent API URL exists. A writable Main
+// receives state tools; pet cross-project messages use its management gate. Other
+// non-Main collaborators and read-only review Tasks receive read tools only.
 // This keeps one Turn from being offered the entire mutating surface at once.
 func (s *Service) mcpRuntimeForTurn(ctx context.Context, task domain.Task, agentID, agentAPIURL, inboxBatchID string) ([]backend.MCPServer, []string) {
 	servers, allowed := s.mcpRuntimeForTask(ctx, task, agentAPIURL)
 	agentAPIURL = strings.TrimSpace(agentAPIURL)
-	if agentAPIURL == "" || task.ID == petTaskID {
+	if agentAPIURL == "" {
 		return servers, allowed
 	}
 	write := false
@@ -490,7 +511,11 @@ func (s *Service) mcpRuntimeForTurn(ctx context.Context, task domain.Task, agent
 		URLPath:        coreMCPPath,
 		BearerTokenEnv: "AHA2_AGENT_API_TOKEN",
 	})
-	for _, tool := range coreMCPToolNames(write) {
+	coreNames := coreMCPToolNames(false)
+	if agent, err := s.store.TaskAgent(ctx, task.ID, strings.TrimSpace(agentID)); err == nil {
+		coreNames = s.coreMCPNamesForSnapshot(ctx, task, agent.RuntimeConfigSnapshotID, agent.AgentID)
+	}
+	for _, tool := range coreNames {
 		allowed = append(allowed, "mcp__"+coreMCPName+"__"+tool)
 	}
 	if s.knowledgeMCPInjected(ctx, task, inboxBatchID) {
@@ -501,7 +526,7 @@ func (s *Service) mcpRuntimeForTurn(ctx context.Context, task domain.Task, agent
 			URLPath:        knowledgeMCPPath,
 			BearerTokenEnv: "AHA2_AGENT_API_TOKEN",
 		})
-		for _, tool := range knowledgeMCPToolNames(write) {
+		for _, tool := range s.knowledgeMCPNamesForTask(ctx, task, write) {
 			allowed = append(allowed, "mcp__"+knowledgeMCPName+"__"+tool)
 		}
 	}
@@ -537,7 +562,11 @@ func (s *Service) mcpRuntimeForTurn(ctx context.Context, task domain.Task, agent
 			URLPath:        hardwareMCPPath,
 			BearerTokenEnv: "AHA2_AGENT_API_TOKEN",
 		})
-		for _, tool := range hardwareMCPToolNames {
+		hardwareWrite := false
+		if agent, err := s.store.TaskAgent(ctx, task.ID, strings.TrimSpace(agentID)); err == nil {
+			hardwareWrite = s.hardwareMCPSnapshotWritable(ctx, task, agent.RuntimeConfigSnapshotID, agentID)
+		}
+		for _, tool := range HardwareMCPToolNamesFor(hardwareWrite) {
 			allowed = append(allowed, "mcp__"+hardwareMCPName+"__"+tool)
 		}
 	}

@@ -87,8 +87,7 @@ func (s *Server) agentKnowledgeMCP(writer http.ResponseWriter, request *http.Req
 	case "ping":
 		respond(map[string]any{})
 	case "tools/list":
-		write := s.app.AgentWriteAllowed(request.Context(), call)
-		respond(map[string]any{"tools": agentKnowledgeMCPTools(write)})
+		respond(map[string]any{"tools": agentKnowledgeMCPToolsNamed(s.app.AgentKnowledgeMCPToolNames(request.Context(), call))})
 	case "tools/call":
 		s.callAgentKnowledgeMCPTool(writer, request, claims, call, payload)
 	default:
@@ -190,6 +189,12 @@ func (s *Server) callAgentKnowledgeMCPTool(writer http.ResponseWriter, request *
 			"argument_keys": coreMCPArgumentKeys(input.Arguments),
 		})
 	}()
+	if app.IsPetTaskID(call.Task.ID) && !coreMCPNameIncluded(s.app.AgentKnowledgeMCPToolNames(request.Context(), call), input.Name) {
+		auditResult = "denied"
+		writeError(writer, http.StatusForbidden, "agent_operation_forbidden")
+		return
+	}
+
 	if app.KnowledgeMCPToolIsWrite(input.Name) {
 		if call.Turn.AgentID != "main" {
 			auditResult = "denied"
@@ -376,12 +381,16 @@ func knowledgeMCPErrorCode(err error) (string, string) {
 }
 
 func agentKnowledgeMCPTools(write bool) []mcpTool {
+	return agentKnowledgeMCPToolsNamed(app.KnowledgeMCPToolNames(write))
+}
+
+func agentKnowledgeMCPToolsNamed(names []string) []mcpTool {
 	all := map[string]mcpTool{}
 	for _, tool := range knowledgeMCPTools() {
 		all[tool.Name] = tool
 	}
 	result := make([]mcpTool, 0, len(all))
-	for _, name := range app.KnowledgeMCPToolNames(write) {
+	for _, name := range names {
 		if tool, ok := all[name]; ok {
 			result = append(result, tool)
 		}

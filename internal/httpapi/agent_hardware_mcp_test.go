@@ -193,7 +193,7 @@ func TestAgentHardwareMCPToolsListSchemas(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("tools/list status=%d", status)
 	}
-	want := []string{"hardware_list", "hardware_terminal_read"}
+	want := []string{"hardware_adb_exec", "hardware_connect", "hardware_disconnect", "hardware_list", "hardware_login", "hardware_send", "hardware_terminal_read"}
 	sort.Strings(names)
 	if len(names) != len(want) {
 		t.Fatalf("tools=%v", names)
@@ -216,7 +216,7 @@ func TestAgentHardwareMCPToolsListSchemas(t *testing.T) {
 	if maximum, _ := properties["limit"].(map[string]any)["maximum"].(float64); maximum != 1000 {
 		t.Fatalf("terminal limit=%#v", properties["limit"])
 	}
-	for _, forbidden := range []string{"hardware_connect", "hardware_send", "hardware_login", "hardware_adb_exec", "hardware_port_forward"} {
+	for _, forbidden := range []string{"hardware_port_forward", "hardware_trust_host_key", "hardware_pair", "hardware_configure"} {
 		if _, ok := schemas[forbidden]; ok {
 			t.Fatalf("%s must not be exposed", forbidden)
 		}

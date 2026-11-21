@@ -32,14 +32,11 @@ var ErrKnowledgeMCPGuideUnavailable = errors.New("knowledge guide is unavailable
 
 // AgentKnowledgeMCPAllowed is the single gate for the knowledge domain MCP.
 // The runtime injects the server only when this returns true, and every tool
-// call re-checks it server-side. A Task with knowledge switched off, the pet
-// Task (whose root libraries are outside a Project), and any channel-bound
-// Turn (which resolves other Projects' knowledge) do not receive this domain.
+// call re-checks it server-side. Ordinary Tasks with knowledge switched off
+// and channel-bound Turns stay excluded. The pet receives only guide/feedback,
+// using its existing knowledge-management permissions and library resolution.
 func (s *Service) AgentKnowledgeMCPAllowed(ctx context.Context, call AgentCallContext) bool {
-	if call.Task.ID == petTaskID || call.Task.ProjectID == petProjectID || !knowledgeEnabled(call.Project, call.Task) {
-		return false
-	}
-	return !s.agentMCPChannelBound(ctx, call.Task.ID, call.Turn.InboxBatchID)
+	return s.knowledgeMCPInjected(ctx, call.Task, call.Turn.InboxBatchID)
 }
 
 // agentMCPChannelBound is the shared channel-host determination for the
@@ -481,6 +478,25 @@ type AgentKnowledgeMCPFeedback struct {
 }
 
 func (s *Service) SubmitAgentKnowledgeMCPFeedback(ctx context.Context, claims agentapi.Claims, entryID, kind string) (AgentKnowledgeMCPFeedbackResult, error) {
+	if call, err := s.AgentCallContext(ctx, claims, true); err == nil && call.Task.ID == petTaskID {
+		if !s.AgentKnowledgeMCPAllowed(ctx, call) || !s.AgentWriteAllowed(ctx, call) {
+			return AgentKnowledgeMCPFeedbackResult{}, ErrAgentCallForbidden
+		}
+		if _, err := s.petKnowledgeWritable(ctx); err != nil {
+			return AgentKnowledgeMCPFeedbackResult{}, ErrAgentCallForbidden
+		}
+		if _, err := s.PetKnowledgeDetail(ctx, entryID); err != nil {
+			return AgentKnowledgeMCPFeedbackResult{}, ErrKnowledgeMCPEntryNotFound
+		}
+		if kind != "helped" && kind != "stale" && kind != "wrong" {
+			return AgentKnowledgeMCPFeedbackResult{}, ErrAgentCallForbidden
+		}
+		result, err := s.feedbackKnowledge(ctx, entryID, kind, "pet")
+		if err != nil {
+			return AgentKnowledgeMCPFeedbackResult{}, err
+		}
+		return AgentKnowledgeMCPFeedbackResult{Source: result.Source, Feedback: &AgentKnowledgeMCPFeedback{Kind: kind, ID: result.Entry.ID, Scope: result.Entry.Scope, Status: string(result.Entry.Status), Revision: result.Entry.Revision}}, nil
+	}
 	call, err := s.agentKnowledgeMCPWriteContext(ctx, claims)
 	if err != nil {
 		return AgentKnowledgeMCPFeedbackResult{}, err

@@ -117,7 +117,7 @@ func (s *Server) agentHardwareMCP(writer http.ResponseWriter, request *http.Requ
 	case "ping":
 		respond(map[string]any{})
 	case "tools/list":
-		respond(map[string]any{"tools": agentHardwareMCPTools()})
+		respond(map[string]any{"tools": s.hardwareMCPToolsFor(s.app.AgentHardwareMCPWriteAllowed(request.Context(), call))})
 	case "tools/call":
 		s.callAgentHardwareMCPTool(writer, request, call, payload)
 	default:
@@ -192,7 +192,7 @@ func (s *Server) callAgentHardwareMCPTool(writer http.ResponseWriter, request *h
 	if len(input.Arguments) == 0 {
 		input.Arguments = json.RawMessage(`{}`)
 	}
-	if !app.HardwareMCPToolIsRead(input.Name) {
+	if !app.HardwareMCPToolIsKnown(input.Name) {
 		writeJSON(writer, http.StatusOK, map[string]any{
 			"jsonrpc": "2.0", "id": payload.ID,
 			"error": map[string]any{"code": -32602, "message": "unknown tool"},
@@ -212,6 +212,27 @@ func (s *Server) callAgentHardwareMCPTool(writer http.ResponseWriter, request *h
 		}
 		s.audit(request, "agent.hardware_mcp.call", "task", call.Task.ID, data)
 	}()
+
+	if !app.HardwareMCPToolIsRead(input.Name) {
+		if !s.app.AgentHardwareMCPWriteAllowed(request.Context(), call) {
+			auditResult = "denied"
+			writeError(writer, http.StatusForbidden, "agent_operation_forbidden")
+			return
+		}
+		for _, operation := range s.hardwareMCPOperations() {
+			if operation.Tool.Name != input.Name {
+				continue
+			}
+			result, err := runAgentMCPOperation(request, operation, input.Arguments)
+			if err != nil {
+				auditResult = "error"
+				toolError(err)
+				return
+			}
+			respondJSON(result)
+			return
+		}
+	}
 
 	switch input.Name {
 	case "hardware_list":
@@ -315,7 +336,7 @@ func (s *Server) agentHardwareMCPList(ctx context.Context, call app.AgentCallCon
 	readOnlyTask := call.Task.Status.Terminal()
 	items := make([]agentHardwareMCPItem, 0, len(groups))
 	for _, group := range groups {
-		readOnly := readOnlyTask || !group.Writable()
+		readOnly := readOnlyTask || call.Task.ReadOnly || !group.Writable()
 		transports := make([]agentHardwareMCPTransport, 0, 2)
 		for _, transport := range []string{domain.HardwareTransportSerial, domain.HardwareTransportNetwork} {
 			if !group.Supports(transport) {

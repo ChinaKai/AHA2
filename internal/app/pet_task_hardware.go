@@ -132,27 +132,23 @@ func (s *Service) PetUpdateTaskHardware(ctx context.Context, input PetUpdateTask
 	if err != nil {
 		return PetTaskHardwareView{}, err
 	}
-	bindings := make([]domain.TaskHardwareBinding, 0, len(input.ResourceIDs))
-	seen := map[string]bool{}
-	for _, raw := range input.ResourceIDs {
-		resourceID := strings.TrimSpace(raw)
-		if resourceID == "" || seen[resourceID] {
-			continue
-		}
-		seen[resourceID] = true
-		if _, err := s.store.HardwareResource(ctx, resourceID); err != nil {
-			return PetTaskHardwareView{}, fmt.Errorf("硬件资源 %s 不存在", resourceID)
-		}
-		bindings = append(bindings, domain.TaskHardwareBinding{
-			TaskID: task.ID, ID: domain.NewID("hardware_binding"), ResourceID: resourceID,
-		})
-	}
-	if len(bindings) > 8 {
-		return PetTaskHardwareView{}, fmt.Errorf("一个 Task 最多绑定 8 个硬件资源")
-	}
-	if err := s.store.ReplaceTaskHardwareBindings(ctx, task.ID, bindings); err != nil {
+	existing, err := s.store.TaskHardwareBindings(ctx, task.ID)
+	if err != nil {
 		return PetTaskHardwareView{}, err
 	}
+	byResource := map[string]string{}
+	for _, item := range existing {
+		byResource[item.ResourceID] = item.ID
+	}
+	bindings := make([]domain.TaskHardwareBinding, 0, len(input.ResourceIDs))
+	for _, raw := range input.ResourceIDs {
+		resourceID := strings.TrimSpace(raw)
+		bindings = append(bindings, domain.TaskHardwareBinding{TaskID: task.ID, ID: byResource[resourceID], ResourceID: resourceID})
+	}
+	if err := s.ReplaceTaskHardwareResourceBindings(ctx, task.ID, bindings); err != nil {
+		return PetTaskHardwareView{}, err
+	}
+
 	_ = s.store.AppendPetEvent(ctx, domain.PetEvent{
 		ID: domain.NewID("pet_event"), At: s.now().UTC(), Actor: "pet", Kind: "task_hardware_updated",
 		Detail: task.ID, Status: "ok",
