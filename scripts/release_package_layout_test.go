@@ -148,12 +148,21 @@ func TestReleaseWorkflowPublishesPackageLayout(t *testing.T) {
 		t.Error("assemble-windows-package.py still requires the retired machine-level installer")
 	}
 	// The archive carries the same installer that is also released on its own;
-	// the standalone asset must not disappear.
-	if strings.Count(workflow, "AHA2-Setup-User-x64.exe") < 2 {
-		t.Error("Release workflow must assemble and still publish AHA2-Setup-User-x64.exe")
+	// both the staging copy and the publish manifest must name it explicitly.
+	// A bare count is not enough on its own, so pin the two lines as well.
+	for _, line := range []string{
+		`Copy-Item -Path "dist\installer\AHA2-Setup-User-x64.exe" -Destination "release-assets" -Force`,
+		`AHA2-Setup-User-x64.exe \`,
+	} {
+		if !strings.Contains(workflow, line) {
+			t.Errorf("Release workflow is missing the standalone user installer line: %s", line)
+		}
+	}
+	if got := strings.Count(workflow, "AHA2-Setup-User-x64.exe"); got < 3 {
+		t.Errorf("Release workflow must name the user installer in the archive comment, the staging copy and the publish manifest, got %d", got)
 	}
 	if !strings.Contains(workflow, `-OutputDir (Join-Path $PWD "dist\installer")`) {
-		t.Error("Release workflow must write the Windows installers to dist\\installer")
+		t.Error("Release workflow must write the Windows installer to dist\\installer")
 	}
 }
 

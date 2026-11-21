@@ -711,6 +711,18 @@ func TestWindowsPackageArchiveVerifierExecutable(t *testing.T) {
 		}
 	})
 
+	t.Run("rejects the retired machine-level installer", func(t *testing.T) {
+		zipPath := filepath.Join(t.TempDir(), "AHA2-Windows-Package-x64.zip")
+		writeArchiveFixture(t, zipPath, nil, nil, archiveEntry{name: "installer/AHA2-Setup-x64.exe", data: []byte("machine-setup")})
+		out, err := runArchiveVerifier(t, zipPath)
+		if err == nil {
+			t.Fatalf("archive verifier accepted the retired machine-level installer:\n%s", out)
+		}
+		if !strings.Contains(out, "unexpected installer entry: installer/AHA2-Setup-x64.exe") {
+			t.Errorf("unexpected archive verifier error: %s", out)
+		}
+	})
+
 	t.Run("rejects an empty manifest", func(t *testing.T) {
 		zipPath := filepath.Join(t.TempDir(), "AHA2-Windows-Package-x64.zip")
 		writeArchiveFixture(t, zipPath, nil, func(manifest map[string]any) {
