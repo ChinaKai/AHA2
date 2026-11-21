@@ -3876,7 +3876,11 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   // The no-character pet appearance adds the choice copy, the shared
   // visibility decision and the hidden-avatar guards; measured 272,558, next
   // 256-byte boundary.
-  const FIRST_SCREEN_GZIP_BUDGET = 272640;
+  // task-711 moved the terminal IO log to append-only files and added the
+  // data-retention copy (Chinese and English) plus its render function to the
+  // shared first-screen bundle; the packaging run measured 272,805 (272,808 in
+  // this worktree), so the ceiling moves to the next 256-byte boundary.
+  const FIRST_SCREEN_GZIP_BUDGET = 272896;
   // The version query parameter is a content hash and its hex digits change
   // how the same code gzips: main already sits exactly on the budget, so a
   // hash-only change could trip it without growing the payload. Mask the
