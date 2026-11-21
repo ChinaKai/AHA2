@@ -1,0 +1,22 @@
+{
+  "source_commit": "aee3f33e926e1f6345810a5de0f8d1dda77e3b51",
+  "source_tree": "c54bd022f66e9c5900a046d4397284a306e778bf",
+  "fixed_blobs_verified": 2126,
+  "files": [
+    {
+      "path": "docs/pet-mcp/review/m2a-aee3f33-routing-v1.md",
+      "bytes": 56178,
+      "sha256": "30c16537cf043d54e286b8c4f6bcfe54fcdacaaca67230c12ef47e205dffbce2"
+    },
+    {
+      "path": "docs/pet-mcp/review/m2a-aee3f33-chain-v1.md",
+      "bytes": 54630,
+      "sha256": "fffd9a043c3445a889e9506896acb4e54715639b501a6224dfd2a4ba6a724694"
+    },
+    {
+      "path": "docs/pet-mcp/review/m2a-aee3f33-validation-v1.md",
+      "bytes": 3508,
+      "sha256": "1868e73800d2f54360333c50dce38d83b5261d0dcdacdc06d55f849bc440c8d2"
+    }
+  ]
+}
