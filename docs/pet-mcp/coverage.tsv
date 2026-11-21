@@ -64,7 +64,7 @@ GET /api/v1/agent/project/workspaces	httpapi	internal/httpapi/server.go	agentPro
 GET /api/v1/agent/skills	httpapi	internal/httpapi/server.go	agentSkills	agent_turn	v2:05d4cfa16434	pending	pending	pending	pending	pending
 GET /api/v1/agent/skills/{skill}	httpapi	internal/httpapi/server.go	agentSkill	agent_turn	v2:2b0a76972c08	pending	pending	pending	pending	pending
 GET /api/v1/agent/tasks/{task}	httpapi	internal/httpapi/server.go	agentTaskStatus	agent_turn	v2:2e4e1e0dbacf	pending	pending	pending	pending	pending
-GET /api/v1/assistant	httpapi	internal/httpapi/server.go	ownerAssistant	owner_session	v2:b0c2649b3eda	pending	pending	pending	pending	pending
+GET /api/v1/assistant	httpapi	internal/httpapi/server.go	ownerAssistant	owner_session	v2:8f5b95ff3bbc	pending	pending	pending	pending	pending
 GET /api/v1/assistant/hints	httpapi	internal/httpapi/server.go	ownerAssistantHints	owner_session	v2:f5dd09faa143	pending	pending	pending	pending	pending
 GET /api/v1/auth/status	httpapi	internal/httpapi/server.go	authStatus	transport_auth	v2:d34e4b7b5fa0	pending	pending	pending	pending	pending
 GET /api/v1/browser-grants/{id}	httpapi	internal/httpapi/browser_handlers.go	browserGrantDetail	owner_session	v2:de02694de4be	pending	pending	pending	pending	pending
@@ -410,7 +410,7 @@ PUT /api/v1/mail-bindings/{id}	httpapi	internal/httpapi/server.go	updateMailBind
 PUT /api/v1/mail-templates/{id}	httpapi	internal/httpapi/server.go	updateMailTemplate	owner_session	v2:d8b4a8bb86c1	pending	pending	pending	pending	pending
 PUT /api/v1/models/{id}	httpapi	internal/httpapi/server.go	updateModel	owner_session	v2:37f311ab23ec	pending	pending	pending	pending	pending
 PUT /api/v1/pet	httpapi	internal/httpapi/server.go	updateOwnerPetState	owner_session	v2:49244d5dc375	pending	pending	pending	pending	pending
-PUT /api/v1/pet/settings	httpapi	internal/httpapi/server.go	updateOwnerPetSettings	owner_session	v2:99d94f467280	pending	pending	pending	pending	pending
+PUT /api/v1/pet/settings	httpapi	internal/httpapi/server.go	updateOwnerPetSettings	owner_session	v2:72f085941b9c	pending	pending	pending	pending	pending
 PUT /api/v1/pet/workbench/core/{name}	httpapi	internal/httpapi/server.go	savePetWorkbenchDocument	owner_session	v2:d75934dbafd3	pending	pending	pending	pending	pending
 PUT /api/v1/pet/workbench/worklog/{name}	httpapi	internal/httpapi/server.go	savePetWorkbenchDocument	owner_session	v2:dbf75aff144d	pending	pending	pending	pending	pending
 PUT /api/v1/projects/{id}	httpapi	internal/httpapi/server.go	updateProject	owner_session	v2:9eeb879df120	pending	pending	pending	pending	pending
