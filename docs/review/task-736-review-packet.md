@@ -1,6 +1,6 @@
 # task-736 review packet：渠道页合并权限申请 + 任务带字体收敛 + 审批结果通知
 
-- **实现提交**：`5724d9c`（首轮），`681bc59`（task-740 L2 评审修订）。
+- **实现提交**：`5724d9c`（首轮），`681bc59`（task-740 L2 评审修订），`6e27038`（L2 复审回归 M3）。
 - **评审包提交**：本文档与截图随后单独提交。
 - **base**：`ce2ceef`（当前 main）。
 - **分支 / worktree**：`aha/task_75ddc0ed40d96b2c3d5f` / `/srv/build/users/kaikai/kk-workspace/.aha2-worktrees/task_75ddc0ed40d96b2c3d5f`。
@@ -19,6 +19,20 @@
 | N4 续跑失败兜底 | 本次不改。批准续跑失败仍只回 `continuation_error` 并记日志，没有自动补一条历史记录；如果强行补发，可能在“续跑其实已提交但响应失败”时造成双消息，风险更高。列为残余风险。 | — |
 | N5 邮件取消竞态 | 本次不改。`cancelMailMessage` 先读旧状态决定是否通知；如果读到 draft 后、真正取消前被并发提交为 pending_approval，这一条取消通知会被跳过。要彻底修需要 store 返回“是否从已提交状态取消”，超出本次最小范围。列为残余风险。 | — |
 
+
+## L2 复审回归 M3（本轮）
+
+复审指出：上一轮把 `state.taskTool = state.taskToolPinned` 无条件保留后，`openTask` 只要看到 `taskTool==="channel"` 就会调 `reloadTaskChannelState()`，没有判断 Task 是否能绑定渠道。真实服务端对渠道托管/只读 Task 返回 400 `task is not eligible for a primary channel`，结果 pinned 渠道页每次打开 hosted Task 都弹错误。
+
+修法：
+
+- `reloadTaskChannelState` 开头统一拦截：`!taskChannelRouteEditable(state.selectedTask)` 直接返回，不设置 loading、不发请求。任何调用点都被覆盖。
+- `openTask` 的 pinned reload 条件也显式加上 `taskChannelRouteEditable(detail)`，和点击渠道按钮的路径一致。
+- 测试 fixture 把 `t-hosted` / `t-readonly` 的 `channel-routes` 改成真实服务端的 400，并统计 `window.__channelRouteCalls`。pinned 打开 hosted 和只读 Task 都断言：调用次数为 0、没有 `.banner.error`、没有绑定表单、审批区和“查看历史”仍在。
+- 补了 `t-readonly`（`read_only: true`）用例。它不在本机默认任务列表里，所以测试通过 navigation snapshot 深链打开，不为了测试改默认筛选。
+- 变异验证：临时去掉两处 `taskChannelRouteEditable` 判断后，`task_channel_permissions.browser.mjs` 立即失败，报 `pinned hosted Task requested channel-routes`；恢复后通过。这说明测试确实能抓住这条回归。
+
+截图：`task-channel-hosted-pinned.png`、`task-channel-readonly-pinned.png`。
 
 ## 0. owner 原话
 
@@ -160,6 +174,8 @@
 - `task-permissions-panel.png`：渠道页内的待审批详情与批准/拒绝按钮。
 - `task-permissions-history.png`：切到历史后的已批准记录。
 - `task-channel-hosted-sse.png`：渠道托管 Task 在 0 pending 时打开历史，随后模拟 SSE 新 pending，渠道角标变为 1。
+- `task-channel-hosted-pinned.png`：pinned 渠道页打开渠道托管 Task，不发 channel-routes、不报错。
+- `task-channel-readonly-pinned.png`：pinned 渠道页打开只读 Task，同样不发请求、不报错。
 
 ## 5. 实际命令与退出码
 
@@ -179,6 +195,8 @@
 | `node web/tests/task_channel_permissions.browser.mjs`（含 hosted Task、SSE 角标、英文） | 0 |
 | `node web/tests/task_band_typography.browser.mjs` | 0 |
 | `node web/tests/task_detail_band.browser.mjs` | 0 |
+
+M3 变异验证：临时去掉 `reloadTaskChannelState` 和 `openTask` 两处 `taskChannelRouteEditable` 判断后，`task_channel_permissions.browser.mjs` 退出码 1，报 `pinned hosted Task requested channel-routes`；恢复后重新构建并跑回 0。
 
 浏览器环境：`.tools/web-validation` 里 Playwright 1.65.1，配 `~/.cache/ms-playwright/chromium_headless_shell-1255`，用 `AHA_PLAYWRIGHT_MODULE` / `AHA_BROWSER_EXECUTABLE` 指定。
 
