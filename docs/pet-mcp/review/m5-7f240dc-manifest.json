@@ -1,0 +1,22 @@
+{
+  "source_commit": "7f240dcd2a12a479b3954dc842961790a5a5b2de",
+  "source_tree": "309b9d42b5db5ec8734f27edd1c96b722f46b993",
+  "base_commit": "9bed44dc1bb53be6ab869416cd9a2acdaa886194",
+  "files": [
+    {
+      "path": "docs/pet-mcp/review/m5-7f240dc-hardware.md",
+      "bytes": 63222,
+      "sha256": "06b774f90e055052e133d324d02466dd95709294ec4949c8033ede56cad7e7f7"
+    },
+    {
+      "path": "docs/pet-mcp/review/m5-7f240dc-surfaces.md",
+      "bytes": 60030,
+      "sha256": "55780f7feca8c1c4d5946a04040920526bb3b1e2f05722e879e34441383885a3"
+    },
+    {
+      "path": "docs/pet-mcp/review/m5-7f240dc-validation.md",
+      "bytes": 7361,
+      "sha256": "4b47d36126f412900375238c732beb188c6504004e426daa96a5090f20bbe83d"
+    }
+  ]
+}
