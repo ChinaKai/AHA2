@@ -1,5 +1,7 @@
 # task-728 review packet r3：M4 修复 + M1/M3 判别性测试补强
 
+- 后续修订：本包是 r3（源码 `ee276b2`）；unknown 聚合修复见 `task-728-review-packet-r4.md`（源码 `0455c0f`）。
+
 - 上一版：实现 `2a8f1e5`，材料 `5c7a110`（r2，复审结论 REQUEST_CHANGES：M4 + S1/S3）
 - 本版：实现 `ee276b2`，分支 `aha/task_07933ff5b7797feffa4c`，worktree `.aha2-worktrees/task_07933ff5b7797feffa4c`
 - 没有 push、没有 merge、没有 complete/finalize
