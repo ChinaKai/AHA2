@@ -1,0 +1,17 @@
+{
+  "source_commit": "552661bc9766a06b18793dd5892ac4618af426b8",
+  "source_tree": "b31e8a3d32165efbed465bf5186c8bf79ad97881",
+  "base_commit": "b630146f65cce0ef8400a37ef84f04eccece1d33",
+  "files": [
+    {
+      "path": "docs/pet-mcp/review/p1b1-552661b-main.md",
+      "bytes": 34546,
+      "sha256": "967c6a0df778bd31ba1b12854eda0944dc76ec73c4eda3ed2329353ab4e9563e"
+    },
+    {
+      "path": "docs/pet-mcp/review/p1b1-552661b-diff.md",
+      "bytes": 30011,
+      "sha256": "311a8f8216ae82e6b2eeaf65290ae69aae467f1c9418199eb62b97bdb0b48269"
+    }
+  ]
+}
