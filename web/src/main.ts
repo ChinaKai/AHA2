@@ -1221,15 +1221,20 @@ const listRefreshScheduler = createListRefreshScheduler({
   now: () => Date.now(),
   schedule: (callback, delay) => window.setTimeout(callback, delay),
   cancel: handle => window.clearTimeout(handle),
-  // While a Task detail is open (or opening), the per-Task SSE keeps the detail
-  // current; a list refresh would only contend with it and reset the list behind
-  // the user. It stays pending until the list is visible again.
-  canRefresh: () => Boolean(state.auth?.authenticated) && !document.hidden && !state.selectedTask && !openingTaskID,
+  // A Task detail still needs the list data: the task band reads state.tasks.
+  // The refresh therefore runs while a detail is open too, but it only patches
+  // the band (performListRefresh) instead of replacing the list behind it.
+  canRefresh: () => Boolean(state.auth?.authenticated) && !document.hidden && !openingTaskID,
   isInFlight: () => listRefreshInFlight,
   refresh: performListRefresh,
 });
 let authRecoveryOpen = false;
 let messageSubmitPending = false;
+// Changing agent on the same Task keeps the page UI scope, so the generic
+// interactive-region restore would otherwise put the previous agent's typed
+// text back into the textarea. The switch marks this and render re-applies the
+// stored draft after the restore.
+let composerDraftSyncPending = false;
 let navigationRestoring = true;
 let taskOpenVersion = 0;
 let taskChannelLoadVersion = 0;
@@ -2481,6 +2486,13 @@ document.addEventListener("keydown", event => {
 // behavior, so only an otherwise plain detail layer is closed here.
 document.addEventListener("keydown", event => {
   if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || event.key !== "Escape") return;
+  // The narrow-window band is an overlay above the detail; Escape closes that
+  // layer first instead of leaving the whole Task.
+  if (state.taskBandNarrowOpen) {
+    event.preventDefault();
+    closeTaskBandOverlay();
+    return;
+  }
   if (!state.selectedTask || state.taskTool || document.querySelector("dialog[open]")) return;
   if (event.target instanceof Element && event.target.closest("input, textarea, select, [contenteditable='true']")) return;
   event.preventDefault();
@@ -3870,6 +3882,9 @@ async function openTask(taskID: string): Promise<void> {
     if (detail.task.read_only || detail.task.status === "draft") closeEvents();
     else openEvents(taskID, state.taskEventCursor);
     render();
+    // The band rides on state.tasks; switching Tasks must not leave it showing
+    // the snapshot from before the switch.
+    refreshListData();
     void loadTaskMail(taskID);
     void loadTaskChannelDestination(taskID, version);
     if (state.taskTool === "channel") {
@@ -3947,6 +3962,7 @@ async function selectTaskAgent(agentID: string): Promise<void> {
   state.selectedTaskAgent = agentID;
   state.taskDraft = readTaskDraft(state.taskDraftStore, taskID, agentID).text;
   persistTaskDrafts();
+  composerDraftSyncPending = true;
   const page = await api.agentConversation(state.selectedTask.task.id, agentID, {
     limit: initialConversationPageSize,
     categories: selectedConversationCategories(),
@@ -4094,6 +4110,7 @@ async function refreshTaskRuntime(taskID: string): Promise<boolean> {
   if (state.selectedTask?.task.id !== taskID) return false;
   const previousStatus = state.selectedTask.task.status;
   const previousSignature = taskRuntimeSignature(state.selectedTask);
+  const previousBandSignature = taskBandSignature(state.selectedTask.task);
   const previousContext = state.taskContext ? JSON.stringify(state.taskContext) : "";
   const previousMail = state.taskMailOptions ? JSON.stringify(state.taskMailOptions) : "";
   const refreshMail = mailRefreshRequested
@@ -4108,6 +4125,13 @@ async function refreshTaskRuntime(taskID: string): Promise<boolean> {
   ]);
   detail.agents ||= [];
   state.selectedTask = detail;
+  // The band reads state.tasks, so a status/title change seen through the
+  // per-Task stream has to reach that copy too. Without this the band keeps
+  // showing a finished Task until the list page is visited again.
+  if (taskBandSignature(detail.task) !== previousBandSignature) {
+    syncTaskListTask(detail.task);
+    patchTaskBand();
+  }
   if (taskStatusNeedsAnnouncement(previousStatus, detail.task.status)) {
     announceStatus(tr(statusLabel(detail.task.status)), detail.task.code || detail.task.title);
   }
@@ -5432,6 +5456,39 @@ function taskBandTasks(): Task[] {
   return state.tasks.filter(taskInDefaultTaskScope);
 }
 
+// Only the fields the band renders; token counters and timestamps change
+// constantly and must not redraw the band on every runtime refresh.
+function taskBandSignature(task: Task): string {
+  return stableTextSignature([task.id, task.code || "", task.title, task.status, task.project_id, task.workspace_id]);
+}
+
+function syncTaskListTask(task: Task): void {
+  const index = state.tasks.findIndex(item => item.id === task.id);
+  if (index >= 0) state.tasks[index] = task;
+}
+
+// Replace the band in place while the detail stays mounted. The band's own
+// cards are the only focus targets inside it, so focus is restored by task id
+// across the replacement. Returns false when no band is mounted.
+function patchTaskBand(): boolean {
+  const band = document.querySelector<HTMLElement>(".task-band");
+  if (!band) return false;
+  const template = document.createElement("template");
+  template.innerHTML = taskBandHTML();
+  const next = template.content.querySelector<HTMLElement>(".task-band");
+  if (!next) return false;
+  const focused = document.activeElement instanceof Element
+    ? document.activeElement.closest<HTMLElement>("[data-task-band-open]")?.dataset.taskBandOpen || ""
+    : "";
+  band.className = next.className;
+  band.innerHTML = next.innerHTML;
+  if (focused) {
+    band.querySelector<HTMLElement>(`[data-task-band-open="${CSS.escape(focused)}"]`)?.focus({preventScroll: true});
+  }
+  bindTaskBand();
+  return true;
+}
+
 function taskBandCardHTML(task: Task): string {
   const project = state.projects.find(item => item.id === task.project_id);
   const workspace = state.workspaces.find(item => item.id === task.workspace_id);
@@ -5459,6 +5516,13 @@ function taskBandHTML(): string {
   return `${narrow && expanded ? '<button type="button" class="task-band-backdrop" data-task-band-close aria-label="收起任务带"></button>' : ""}${band}`;
 }
 
+function closeTaskBandOverlay(): void {
+  if (!state.taskBandNarrowOpen) return;
+  state.taskBandNarrowOpen = false;
+  render();
+  document.querySelector<HTMLElement>(".task-band-rail[data-task-band-toggle]")?.focus({preventScroll: true});
+}
+
 function bindTaskBand(): void {
   const focusBandToggle = () => {
     const toggles = [...document.querySelectorAll<HTMLElement>("[data-task-band-toggle]")];
@@ -5479,11 +5543,7 @@ function bindTaskBand(): void {
     });
   });
   document.querySelectorAll<HTMLElement>("[data-task-band-close]").forEach(button => {
-    button.addEventListener("click", () => {
-      state.taskBandNarrowOpen = false;
-      render();
-      focusBandToggle();
-    });
+    button.addEventListener("click", () => closeTaskBandOverlay());
   });
   document.querySelectorAll<HTMLElement>("[data-task-band-open]").forEach(button => {
     button.addEventListener("click", () => {
@@ -5987,48 +6047,60 @@ async function uploadMessageAttachments(files: File[]): Promise<void> {
   if (!files.length || !state.selectedTask || messageAttachmentUploadPending) return;
   const taskID = state.selectedTask.task.id;
   const agentID = state.selectedTaskAgent;
+  const sameComposer = () => state.selectedTask?.task.id === taskID && state.selectedTaskAgent === agentID;
   const drafts = currentAttachmentDrafts();
   const validationError = taskAttachmentValidationError(drafts.length, files);
   if (validationError) {
     setMessage("error", validationError);
     return;
   }
-  state.taskDraftStore = writeTaskDraft(state.taskDraftStore, taskID, agentID, {text: state.taskDraft, attachments: drafts});
+  const initial = readTaskDraft(state.taskDraftStore, taskID, agentID);
+  state.taskDraftStore = writeTaskDraft(state.taskDraftStore, taskID, agentID, {text: initial.text, attachments: drafts});
   persistTaskDrafts();
   messageAttachmentUploadPending = true;
   refreshMessageAttachmentDOM();
   try {
     for (const file of files) {
       const result = await api.uploadAttachment(taskID, file);
-      drafts.push(result.attachment);
-      state.taskDraftStore = writeTaskDraft(state.taskDraftStore, taskID, agentID, {text: state.taskDraft, attachments: drafts});
+      // Re-read the target key after the await: the owner may have switched
+      // Task or agent meanwhile, or removed another attachment. Appending to
+      // the live entry keeps this upload in its own draft instead of writing
+      // whatever the composer happens to show now.
+      const current = readTaskDraft(state.taskDraftStore, taskID, agentID);
+      state.taskDraftStore = writeTaskDraft(state.taskDraftStore, taskID, agentID, {
+        text: current.text,
+        attachments: [...current.attachments, result.attachment],
+      });
       persistTaskDrafts();
-      refreshMessageAttachmentDOM();
+      if (sameComposer()) refreshMessageAttachmentDOM();
     }
-    setMessage("notice", `已添加 ${files.length} 个附件`);
+    if (sameComposer()) setMessage("notice", `已添加 ${files.length} 个附件`);
   } catch (error) {
     setMessage("error", error instanceof Error ? error.message : String(error));
   } finally {
     messageAttachmentUploadPending = false;
-    if (state.selectedTask?.task.id === taskID && state.selectedTaskAgent === agentID) refreshMessageAttachmentDOM();
+    if (sameComposer()) refreshMessageAttachmentDOM();
   }
 }
 
 function bindRemoveAttachmentButtons(): void {
   document.querySelectorAll<HTMLButtonElement>("[data-remove-attachment]").forEach(button => button.addEventListener("click", async () => {
     if (!state.selectedTask) return;
+    const taskID = state.selectedTask.task.id;
+    const agentID = state.selectedTaskAgent;
     const id = button.dataset.removeAttachment || "";
     button.disabled = true;
     try {
-      await api.deleteAttachment(state.selectedTask.task.id, id);
-      state.taskDraftStore = writeTaskDraft(
-        state.taskDraftStore,
-        state.selectedTask.task.id,
-        state.selectedTaskAgent,
-        {text: state.taskDraft, attachments: currentAttachmentDrafts().filter(item => item.id !== id)},
-      );
+      await api.deleteAttachment(taskID, id);
+      // The removal belongs to the Task/agent that owns the button, even if
+      // the owner switched away while the request was in flight.
+      const current = readTaskDraft(state.taskDraftStore, taskID, agentID);
+      state.taskDraftStore = writeTaskDraft(state.taskDraftStore, taskID, agentID, {
+        text: current.text,
+        attachments: current.attachments.filter(item => item.id !== id),
+      });
       persistTaskDrafts();
-      refreshMessageAttachmentDOM();
+      if (state.selectedTask?.task.id === taskID && state.selectedTaskAgent === agentID) refreshMessageAttachmentDOM();
     } catch (error) {
       button.disabled = false;
       setMessage("error", error instanceof Error ? error.message : String(error));
@@ -7258,6 +7330,14 @@ function render(): void {
   if (preservedConversation) document.querySelector("#conversation-list")?.replaceWith(preservedConversation);
   if (state.view === "pet-settings") void showPetSettings();
   restoreRegionUI(app, previousAppUI, false);
+  if (composerDraftSyncPending) {
+    composerDraftSyncPending = false;
+    const draftTextarea = document.querySelector<HTMLTextAreaElement>("#message-form textarea");
+    if (draftTextarea && draftTextarea.value !== state.taskDraft) {
+      draftTextarea.value = state.taskDraft;
+      syncTaskComposerState(draftTextarea);
+    }
+  }
   if (state.selectedTask) {
     restoreRegionUI(document.querySelector<HTMLElement>("#agent-turn-slot"), previousTurnUI);
     restoreRegionUI(document.querySelector<HTMLElement>("#task-tool-panel-body"), previousToolUI);
@@ -8403,21 +8483,28 @@ function bindMessageComposer(): void {
       if (!handled) {
         const submission = await api.agentMessage(taskID, agentID, content, attachments.map(item => item.id));
         accepted = true;
-        if (!submission.started) setMessage("notice", `${agentID} 正在执行，消息已排队；输入 /interrupt 可中断当前 Round`);
-        await refreshTaskRuntime(taskID);
-        requestConversationBottom();
-        updateTaskLiveRegions();
+        if (state.selectedTask?.task.id === taskID && state.selectedTaskAgent === agentID) {
+          if (!submission.started) setMessage("notice", `${agentID} 正在执行，消息已排队；输入 /interrupt 可中断当前 Round`);
+          await refreshTaskRuntime(taskID);
+          requestConversationBottom();
+          updateTaskLiveRegions();
+        }
       }
       const menu = document.querySelector<HTMLElement>("#slash-command-menu");
       if (menu) menu.hidden = true;
     } catch (error) {
-      if (!accepted && state.selectedTask?.task.id === taskID && state.selectedTaskAgent === agentID) {
+      if (!accepted) {
+        // The request failed, so the Task that owned this composer gets its
+        // draft back even if the owner already switched to another Task. Only
+        // the visible composer is repopulated when it is still the same one.
         state.taskDraftStore = writeTaskDraft(state.taskDraftStore, taskID, agentID, {text: content, attachments});
-        state.taskDraft = content;
         persistTaskDrafts();
-        const currentTextarea = document.querySelector<HTMLTextAreaElement>("#message-form textarea");
-        if (currentTextarea) currentTextarea.value = content;
-        refreshMessageAttachmentDOM();
+        if (state.selectedTask?.task.id === taskID && state.selectedTaskAgent === agentID) {
+          state.taskDraft = content;
+          const currentTextarea = document.querySelector<HTMLTextAreaElement>("#message-form textarea");
+          if (currentTextarea) currentTextarea.value = content;
+          refreshMessageAttachmentDOM();
+        }
       }
       persistNavigationState();
       const message = error instanceof Error ? error.message : String(error);
@@ -9130,7 +9217,12 @@ async function performListRefresh(): Promise<void> {
     listPages.tasks = {cursor: tasks.next_cursor || "", hasMore: Boolean(tasks.has_more), loadingMore: false};
     rebuildOpenCommandPaletteIndex();
     const listPageVisible = state.view === "projects" || state.view === "tasks" || Boolean(state.selectedProject);
-    if (!state.selectedTask && !openingTaskID && listPageVisible) {
+    if (state.selectedTask || openingTaskID) {
+      // The list itself stays parked behind the detail; only the band follows
+      // the new state.tasks snapshot. A detail that has not rendered yet has
+      // no band to patch, and its first render will use the fresh state.
+      patchTaskBand();
+    } else if (listPageVisible) {
       // An in-row title editor is a live text control the row patch cannot
       // carry over: replacing its row drops the typed value and focus. Hold the
       // patch until the editor closes; finish() re-renders the list with the

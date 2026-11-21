@@ -1076,17 +1076,22 @@ test("mail phase two keeps navigation stable, one mail entry, and table tools", 
   assert.match(styles, /\.task-mail-compose-dialog \.dialog-actions \{[^}]*position: sticky;[^}]*bottom: 0;/);
 });
 
-test("SSE list refresh is debounced and deferred while a task detail is open", async () => {
+test("SSE list refresh runs behind a task detail but only patches the band", async () => {
   const root = resolve(import.meta.dirname, "..");
   const script = await readFile(resolve(root, "build", "app.js"), "utf8");
   assert.match(script, /debounceMs: 350/);
   assert.match(script, /maxWaitMs: 1000/);
-  assert.match(script, /canRefresh: \(\)=>Boolean\(state\.auth\?\.authenticated\) && !document\.hidden && !state\.selectedTask && !openingTaskID/);
+  // A detail no longer pauses the data refresh: the band reads state.tasks.
+  assert.match(script, /canRefresh: \(\)=>Boolean\(state\.auth\?\.authenticated\) && !document\.hidden && !openingTaskID/);
   assert.match(script, /isInFlight: \(\)=>listRefreshInFlight/);
   assert.match(script, /function refreshListData\(\)/);
   assert.match(script, /listRefreshScheduler\.request\(\)/);
   assert.match(script, /addEventListener\("visibilitychange"/);
-  assert.match(script, /!state\.selectedTask && !openingTaskID && listPageVisible/);
+  // With a detail open the list stays parked and only the band is replaced.
+  assert.match(script, /if \(state\.selectedTask \|\| openingTaskID\) \{[\s\S]{0,500}patchTaskBand\(\)/);
+  assert.match(script, /else if \(listPageVisible\)/);
+  // The per-Task runtime refresh feeds the same band copy.
+  assert.match(script, /syncTaskListTask\(detail\.task\)/);
   assert.match(script, /listRefreshRequests\+\+/);
   assert.match(script, /taskOpenLastMs/);
 });
@@ -2362,8 +2367,11 @@ test("message send clears draft state before awaiting the request", async () => 
   // The clear is scoped to the Task that sent the message, not to whatever
   // Task happens to be open when a request settles.
   assert.match(script, /state\.taskDraftStore = clearTaskDraft\(state\.taskDraftStore, taskID, agentID\)/);
-  assert.match(script, /writeTaskDraft\(state\.taskDraftStore, taskID, agentID, \{\s*text: content,\s*attachments\s*\}\)/);
-  assert.match(script, /if \(!accepted && state\.selectedTask/);
+  // A failed send restores the Task that owned the request even after the
+  // owner has already switched away; only the visible composer is conditional.
+  assert.match(script, /if \(!accepted\) \{/);
+  assert.match(script, /state\.taskDraftStore = writeTaskDraft\(state\.taskDraftStore, taskID, agentID, \{\s*text: content,\s*attachments\s*\}\)/);
+  assert.match(script, /if \(state\.selectedTask\?\.task\.id === taskID && state\.selectedTaskAgent === agentID\) \{/);
   assert.match(script, /消息已发送，但刷新失败/);
   assert.match(script, /finally\s*\{\s*messageSubmitPending = false/);
 });
@@ -3025,7 +3033,10 @@ test("task list protects clicks from live refresh and reports open failures", as
   // guard that silently drops a pending refresh.
   assert.doesNotMatch(source, /if \(listRefreshInFlight\) return;/);
   assert.match(source, /async function performListRefresh\(\): Promise<void> \{\s*listRefreshInFlight = true;/);
-  assert.match(source, /!state\.selectedTask && !openingTaskID && listPageVisible/);
+  // The detail branch patches only the band; the list patch stays behind the
+  // visible-list guard.
+  assert.match(source, /if \(state\.selectedTask \|\| openingTaskID\) \{[\s\S]{0,500}patchTaskBand\(\)/);
+  assert.match(source, /else if \(listPageVisible\)/);
 });
 
 test("task list filters combine multi-select project, status, and device choices", async () => {
@@ -3899,7 +3910,9 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   // task-730 的任务详情三栏布局把图标侧栏、任务带（范围文案、卡片、收起
   // rail）和按任务隔离的草稿存储放进首屏包；同一掩码版本、level-5 实测
   // 275,929 JS+CSS，ceil 到下一个 256 字节边界。
-  const FIRST_SCREEN_GZIP_BUDGET = 275968;
+  // r2 修复任务带实时更新（patchTaskBand / syncTaskListTask）、上传与失败
+  // 发送的草稿回写，以及浮层 Esc；实测 276,244，ceil 到下一个边界。
+  const FIRST_SCREEN_GZIP_BUDGET = 276480;
   // The version query parameter is a content hash and its hex digits change
   // how the same code gzips: main already sits exactly on the budget, so a
   // hash-only change could trip it without growing the payload. Mask the
