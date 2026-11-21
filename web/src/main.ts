@@ -3893,7 +3893,7 @@ async function openTask(taskID: string): Promise<void> {
     refreshListData();
     void loadTaskMail(taskID);
     void loadTaskChannelDestination(taskID, version);
-    if (state.taskTool === "channel") {
+    if (state.taskTool === "channel" && taskChannelRouteEditable(detail)) {
       void reloadTaskChannelState().catch(error => {
         if (version === taskOpenVersion) setMessage("error", error instanceof Error ? error.message : String(error));
       });
@@ -6023,7 +6023,10 @@ function taskChannelSelectedContactHTML(identityID: string, name: string, isBot:
 }
 
 async function reloadTaskChannelState(renderAfter = true): Promise<void> {
-  if (!state.selectedTask) return;
+  // Channel-hosted and read-only Tasks cannot have a primary route; asking the
+  // server would return 400 and surface a false error just because the channel
+  // page is pinned. The page still renders approvals.
+  if (!state.selectedTask || !taskChannelRouteEditable(state.selectedTask)) return;
   const taskID = state.selectedTask.task.id;
   const loadVersion = ++taskChannelLoadVersion;
   state.taskChannelLoading = true;

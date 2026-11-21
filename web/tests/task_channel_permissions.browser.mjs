@@ -25,6 +25,7 @@ const bootstrap = `
 const LANG = new URL(location.href).searchParams.get("lang") || "zh-CN";
 const task = {id: "t-ui", code: "task-736", title: "Channel UI", status: "waiting_user", project_id: "project-1", workspace_id: "workspace-1", channel_instance_id: "", collaboration_mode: "auto", max_agents: 3};
 const hostedTask = {id: "t-hosted", code: "task-737", title: "Channel hosted", status: "waiting_user", project_id: "project-1", workspace_id: "workspace-1", channel_instance_id: "instance-hosted", collaboration_mode: "auto", max_agents: 3};
+const readonlyTask = {id: "t-readonly", code: "task-738", title: "Read only channel", status: "waiting_user", project_id: "project-1", workspace_id: "workspace-1", read_only: true, collaboration_mode: "auto", max_agents: 3};
 const members = [
   {identity_link_id: "alice", display_name: "Alice Chen", is_bot: false, source: "provider"},
   {identity_link_id: "bob", display_name: "Bob Bot", is_bot: true, source: "observed"},
@@ -38,31 +39,36 @@ const hostedApproved = {id: "perm-hosted-approved", task_id: "t-hosted", action:
 const hostedPending = {id: "perm-hosted-pending", task_id: "t-hosted", action: "发布新的构建产物", scope: "release artifacts", reason: "有新的包", status: "pending", applicant_name: "Alice Chen", applicant_is_bot: false, risk: "medium", created_at: ${JSON.stringify(now)}, expires_at: ${JSON.stringify(new Date(Date.now() + 600000).toISOString())}};
 let hostedRequests = [hostedApproved];
 const detailFor = id => ({
-  task: id === "t-hosted" ? hostedTask : task, turns: [],
+  task: id === "t-hosted" ? hostedTask : id === "t-readonly" ? readonlyTask : task, turns: [],
   agents: [{task_id: id, agent_id: "main", role: "main", status: "idle", title: "Main", runtime_config_valid: true, unread_count: 0}],
   latest_round: null, hardware: [], memory: {},
-  permission_requests: id === "t-hosted" ? hostedRequests : [pending, approved],
+  permission_requests: id === "t-hosted" ? hostedRequests : id === "t-readonly" ? [] : [pending, approved],
 });
 const json = (value, status = 200) => new Response(JSON.stringify(value), {status, headers: {"Content-Type": "application/json"}});
+window.__channelRouteCalls = 0;
 window.fetch = async (input, init = {}) => {
   const url = new URL(typeof input === "string" ? input : input.url, location.origin);
   const path = url.pathname;
   const method = (init.method || "GET").toUpperCase();
+  if (path.endsWith("/channel-routes")) window.__channelRouteCalls += 1;
   if (path === "/api/v1/auth/status") return json({authenticated: true, csrf_token: "csrf", owner: {id: "owner-1", username: "kaikai"}});
   if (path === "/api/v1/settings/general") return json({ok: true, general: {language: LANG}});
   if (path === "/api/v1/assistant") return json({assistant: {character: "gugugaga", name: "AHA", nickname: "AHA", enabled: true}, messages: [], models: [], tools: []});
-  if (path === "/api/v1/tasks" && method === "GET") return json({tasks: [task, hostedTask], has_more: false, counts: {status: {waiting_user: 2}, project: {"project-1": 2}, device: {local: 2}}});
+  if (path === "/api/v1/tasks" && method === "GET") return json({tasks: [task, hostedTask, readonlyTask], has_more: false, counts: {status: {waiting_user: 3}, project: {"project-1": 3}, device: {local: 3}}});
   if (path === "/api/v1/projects") return json({projects: [{id: "project-1", name: "Project One", project_type: "folder", channel_retired: false, knowledge_policy: "enabled"}], has_more: false});
   if (path === "/api/v1/workspaces") return json({workspaces: [{id: "workspace-1", project_id: "project-1", name: "WS One", root_path: "/tmp/ws", transport: "native", health: "ready", read_only: false, capabilities: {}}]});
   if (path === "/api/v1/models" || path === "/api/v1/providers" || path === "/api/v1/env-groups") return json({models: [], providers: [], env_groups: []});
   if (path === "/api/v1/codex/accounts") return json({accounts: []});
-  if ((path === "/api/v1/tasks/t-ui" || path === "/api/v1/tasks/t-hosted") && method === "GET") return json(detailFor(path.split("/")[4]));
+  if (["t-ui", "t-hosted", "t-readonly"].includes(path.split("/")[4]) && path.split("/").length === 5 && method === "GET") return json(detailFor(path.split("/")[4]));
   if (path === "/api/v1/tasks/t-ui/channel-routes" && method === "GET") return json({
     destinations: [{conversation_id: "conversation-1", instance_id: "instance-1", instance_name: "Feishu", provider_key: "feishu", endpoint_kind: "group_digital_human", display_name: "联调群", status: "active", updated_at: ${JSON.stringify(now)}}],
     route: {id: "route-1", instance_id: "instance-1", conversation_id: "conversation-1", target_task_id: "t-ui", state: "active", revision: 1},
     contacts, members,
   });
-  if (path === "/api/v1/tasks/t-hosted/channel-routes" && method === "GET") return json({destinations: [], route: null, contacts: [], members: []});
+  // The real server rejects routes for hosted and read-only Tasks with 400.
+  if ((path === "/api/v1/tasks/t-hosted/channel-routes" || path === "/api/v1/tasks/t-readonly/channel-routes") && method === "GET") {
+    return json({ok: false, error: "task_not_eligible", message: "task is not eligible for a primary channel"}, 400);
+  }
   if (path.startsWith("/api/v1/tasks/") && path.endsWith("/agents/main/conversation")) return json({conversation: {items: [], has_more: false, next_before: 0, latest_sequence: 0}});
   if (path === "/api/v1/tasks/t-ui/channel-contacts" && method === "POST") return json({ok: true});
   if (path.startsWith("/api/v1/")) return json({});
@@ -81,8 +87,12 @@ window.__emitTaskUpdate = () => {
   window.__sources.forEach(source => (source.listeners.update || []).forEach(fn =>
     fn({data: JSON.stringify({sequence, type: "task_permission_requested"})})));
 };
-sessionStorage.setItem("aha2.navigation", JSON.stringify({view: "tasks"}));
+if (!sessionStorage.getItem("aha2.navigation")) sessionStorage.setItem("aha2.navigation", JSON.stringify({view: "tasks"}));
 `;
+
+// Test-side copy for the deep-link snapshot; the fixture defines the same task
+// for the stubbed API.
+const readOnlySummary = {id: "t-readonly", code: "task-738", title: "Read only channel", status: "waiting_user", project_id: "project-1", workspace_id: "workspace-1", read_only: true, collaboration_mode: "auto", max_agents: 3};
 
 const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="/styles.css"></head><body><main id="app"></main><script type="module" src="/fixture.js"></script><script type="module" src="/app.js"></script></body></html>`;
 const server = createServer(async (request, response) => {
@@ -210,6 +220,44 @@ try {
   await hosted.waitForFunction(() => document.querySelector("#task-channel-permissions")?.innerText.includes("发布新的构建产物"), null, {timeout: 8000});
   await hosted.screenshot({path: resolve(output, "task-channel-hosted-sse.png")});
   assert.deepEqual(hostedErrors, [], "the channel-hosted task threw");
+
+  // A pinned channel must not call channel-routes for Tasks that cannot bind
+  // one. The mock returns the same 400 as the real server, so any request
+  // would surface as an error banner.
+  const openPinnedUnbindable = async (taskID, directTask = null) => {
+    const pinned = await browser.newPage({viewport: {width: 1280, height: 900}});
+    await pinned.addInitScript(({direct}) => {
+      localStorage.setItem("aha2.task-tool-layout", JSON.stringify({pinnedTool: "channel"}));
+      // Read-only Tasks are outside the default local-device list, so deep-link
+      // one through the navigation snapshot instead of changing the filters.
+      if (direct) sessionStorage.setItem("aha2.navigation", JSON.stringify({view: "tasks", taskID: direct.id, task: direct}));
+    }, {direct: directTask});
+    await pinned.goto(url, {waitUntil: "networkidle"});
+    if (directTask) {
+      await pinned.waitForFunction(id => document.querySelector(".task-head .task-code")?.textContent?.includes(id), directTask.code, {timeout: 15000});
+    } else {
+      await pinned.waitForSelector(`.task-card[data-task="${taskID}"]`, {timeout: 15000});
+      await pinned.click(`.task-card[data-task="${taskID}"]`);
+    }
+    await pinned.waitForSelector("#task-tool-panel-body #task-channel-permissions", {timeout: 15000});
+    await pinned.waitForTimeout(300);
+    return pinned;
+  };
+  const pinnedHosted = await openPinnedUnbindable("t-hosted");
+  assert.equal(await pinnedHosted.evaluate(() => window.__channelRouteCalls), 0, "pinned hosted Task requested channel-routes");
+  assert.equal(await pinnedHosted.locator(".banner.error").count(), 0, "pinned hosted Task surfaced a route error");
+  assert.equal(await pinnedHosted.locator("#task-channel-route-form").count(), 0);
+  assert.match(await pinnedHosted.locator("#task-channel-permissions").innerText(), /当前没有待审批的权限申请/);
+  assert.match(await pinnedHosted.locator("#task-channel-permissions").innerText(), /查看历史/);
+  await pinnedHosted.screenshot({path: resolve(output, "task-channel-hosted-pinned.png")});
+
+  const pinnedReadOnly = await openPinnedUnbindable("t-readonly", readOnlySummary);
+  assert.equal(await pinnedReadOnly.evaluate(() => window.__channelRouteCalls), 0, "pinned read-only Task requested channel-routes");
+  assert.equal(await pinnedReadOnly.locator(".banner.error").count(), 0, "pinned read-only Task surfaced a route error");
+  assert.equal(await pinnedReadOnly.locator("#task-channel-route-form").count(), 0);
+  assert.match(await pinnedReadOnly.locator("#task-channel-permissions").innerText(), /当前没有待审批的权限申请/);
+  assert.match(await pinnedReadOnly.locator("#task-channel-permissions").innerText(), /查看历史/);
+  await pinnedReadOnly.screenshot({path: resolve(output, "task-channel-readonly-pinned.png")});
 
   // English UI must not fall back to Chinese for the new copy.
   const english = await browser.newPage({viewport: {width: 1280, height: 900}});
