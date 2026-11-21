@@ -52,10 +52,42 @@ func (s *Store) OwnerAssistant(ctx context.Context, id string) (domain.OwnerAssi
 }
 
 func (s *Store) UpdateOwnerAssistant(ctx context.Context, item domain.OwnerAssistant) error {
+	// Profile-only update. The model columns are written by
+	// UpdateOwnerAssistantModel or UpdateOwnerPetSettings so a stale profile
+	// read can never overwrite a model another request just saved.
 	_, err := s.db.ExecContext(ctx, `
-		UPDATE owner_assistants SET name=?,model_id=?,character=?,updated_at=? WHERE id=?`,
-		item.Name, item.ModelID, item.Character, timeString(item.UpdatedAt), item.ID)
+		UPDATE owner_assistants SET name=?,character=?,updated_at=? WHERE id=?`,
+		item.Name, item.Character, timeString(item.UpdatedAt), item.ID)
 	return err
+}
+
+// UpdateOwnerAssistantModel writes the unified model in one statement. The pet
+// runtime column remains the source of truth and model_id is the derived
+// compatibility mirror, so a reader can never observe them disagreeing.
+func (s *Store) UpdateOwnerAssistantModel(ctx context.Context, id, modelID string, updatedAt time.Time) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE owner_assistants SET model_id=?,pet_brain_model_id=?,updated_at=? WHERE id=?`,
+		modelID, modelID, timeString(updatedAt), id)
+	return err
+}
+
+// NormalizeOwnerAssistantModel applies a read-time repair only when the row is
+// still exactly what the caller read. A concurrent save that moved either
+// column makes the condition fail, so normalization can never overwrite a
+// model the Owner just chose. The boolean reports whether the row was updated.
+func (s *Store) NormalizeOwnerAssistantModel(ctx context.Context, id, modelID, expectModelID, expectBrainModelID string, updatedAt time.Time) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE owner_assistants SET model_id=?,pet_brain_model_id=?,updated_at=?
+		WHERE id=? AND model_id=? AND pet_brain_model_id=?`,
+		modelID, modelID, timeString(updatedAt), id, expectModelID, expectBrainModelID)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
 }
 
 func splitPetActions(value string) []string {
@@ -77,9 +109,12 @@ func (s *Store) UpdateOwnerPetSettings(ctx context.Context, id string, enabled b
 	if strings.TrimSpace(value) == "" {
 		value = ""
 	}
+	// The save writes both model columns in the same statement. Splitting them
+	// into separate updates used to expose a transient (new chat model, old pet
+	// model) row that a concurrent read could normalize back over the new choice.
 	_, err := s.db.ExecContext(ctx, `
-		UPDATE owner_assistants SET pet_enabled=?,pet_brain_model_id=?,pet_actions=?,updated_at=? WHERE id=?`,
-		petBoolInt(enabled), brainModelID, value, timeString(updatedAt), id)
+		UPDATE owner_assistants SET model_id=?,pet_brain_model_id=?,pet_enabled=?,pet_actions=?,updated_at=? WHERE id=?`,
+		brainModelID, brainModelID, petBoolInt(enabled), value, timeString(updatedAt), id)
 	return err
 }
 
