@@ -1,0 +1,37 @@
+{
+  "source_commit": "6d785b35e5455d06ad2e12ac6fd5d2827a9f724a",
+  "source_tree": "8b6209025d6dd874a931facd69fe18d8f9c23c7f",
+  "base_commit": "322c15458441191210a1967b3d3731bd065dc5d5",
+  "files": [
+    {
+      "path": "docs/pet-mcp/review/p1c-6d785b3-scanner.md",
+      "bytes": 45264,
+      "sha256": "377e9334c5253c4f5bb55c5e58163f8e838f916c30770d88053f9915aaebee8e"
+    },
+    {
+      "path": "docs/pet-mcp/review/p1c-6d785b3-rules.md",
+      "bytes": 51373,
+      "sha256": "582df1ddb4c1d054860e0e30e61157b84a848622e1f60014328067370a79d394"
+    },
+    {
+      "path": "docs/pet-mcp/review/p1c-6d785b3-ledger-1.md",
+      "bytes": 43365,
+      "sha256": "998002ad288f519f4008d03740e925263fb45610119cfed46dbfcde7441f308a"
+    },
+    {
+      "path": "docs/pet-mcp/review/p1c-6d785b3-ledger-2.md",
+      "bytes": 46367,
+      "sha256": "f037f868754eaee58b2dc50a6eda49759f890a6f9a2805671289dbcb51c0f6e7"
+    },
+    {
+      "path": "docs/pet-mcp/review/p1c-6d785b3-ledger-diff.md",
+      "bytes": 24276,
+      "sha256": "62f3789109caa3fed3e2ffd29668b9786c2f7bb8d61de1bc56b75089e7d5dfcf"
+    },
+    {
+      "path": "docs/pet-mcp/review/p1c-6d785b3-validation.md",
+      "bytes": 4107,
+      "sha256": "bf899f38b71047c75251fade2ed02b693456ca7d320dbb61ddf3abf1e1a79368"
+    }
+  ]
+}
