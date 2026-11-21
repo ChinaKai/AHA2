@@ -238,6 +238,20 @@ func (s *Store) RemoteConversationPageForAgent(
 	if len(items) > 0 {
 		page.NextBefore = items[0].Sequence
 	}
+	if after > 0 {
+		// An incremental read advances only through the rows it returned, like
+		// the local store: a filtered page cut by LIMIT must leave the rest of
+		// its range reachable by the next after-request.
+		page.Latest = after
+		for _, item := range items {
+			if item.Sequence > page.Latest {
+				page.Latest = item.Sequence
+			}
+		}
+		return page, nil
+	}
+	// Only the newest page's Latest seeds incremental reads, and that page
+	// already holds the newest matching rows, so the mirror length is safe.
 	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sync_remote_task_objects WHERE `+strings.Join(baseWhere, " AND "), baseArgs...).Scan(&page.Latest)
 	return page, nil
 }

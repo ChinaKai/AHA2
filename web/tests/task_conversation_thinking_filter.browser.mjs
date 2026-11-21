@@ -8,6 +8,12 @@
 // default 3/5 without Thinking, Thinking alone/combined, "load older" paging
 // with no gaps or duplicates, and SSE-driven incremental refresh appending only
 // the selected categories.
+//
+// Mobile (task-724 review M1): the open filter menu reaches the floating
+// search button's corner on phones. Every filter button's right edge must hit
+// the button itself and a click there must toggle the filter, never open the
+// command palette. en-US: the "N loaded" count updated after load-older goes
+// through the existing i18n pattern.
 import assert from "node:assert/strict";
 import {createServer} from "node:http";
 import {readFile} from "node:fs/promises";
@@ -83,7 +89,7 @@ window.fetch = async (input, init = {}) => {
   const path = url.pathname;
   const method = (init.method || "GET").toUpperCase();
   if (path === "/api/v1/auth/status") return json({authenticated: true, csrf_token: "csrf", owner: {id: "owner-1", username: "owner"}});
-  if (path === "/api/v1/settings/general") return json({ok: true, general: {language: "zh-CN"}});
+  if (path === "/api/v1/settings/general") return json({ok: true, general: {language: window.__ahaLanguage || "zh-CN"}});
   if (path === "/api/v1/assistant") return json({assistant: {character: "gugugaga", name: "AHA", nickname: "AHA", enabled: false}, messages: [], models: [], tools: []});
   if (path === "/api/v1/projects") return json({projects: [{id: "project-1", name: "Project", project_type: "folder", channel_retired: false}], has_more: false});
   if (path === "/api/v1/workspaces") return json({workspaces: [{id: "workspace-1", project_id: "project-1", name: "W", root_path: "/tmp", transport: "native", health: "ready"}]});
@@ -285,6 +291,79 @@ try {
   const updateLive = await snapshot(page);
   assert.ok(!updateLive.mounted.includes("r160-thinking"), "a live Thinking row leaked into the Agent Update filter");
   assert.deepEqual(updateLive.buckets, ["update"]);
+
+  assert.deepEqual(errors, []);
+
+  // Phones: the FAB steps aside while the menu is open; every button's right
+  // edge is hit-testable and a right-edge click only toggles that filter.
+  for (const viewport of [{width: 360, height: 740}, {width: 390, height: 844}, {width: 414, height: 896}]) {
+    const phone = await browser.newPage({viewport});
+    phone.on("pageerror", error => errors.push(`${viewport.width}: ${error.message}`));
+    await phone.goto(url, {waitUntil: "domcontentloaded"});
+    await phone.waitForFunction(() => window.__requests.length > 0 && document.querySelector(".conversation-filter-trigger"), null, {timeout: 20000});
+    const fabVisible = () => phone.evaluate(() => {
+      const fab = document.querySelector(".task-search-fab");
+      return Boolean(fab) && getComputedStyle(fab).display !== "none";
+    });
+    assert.ok(await fabVisible(), `${viewport.width}: the search FAB must stay available while the menu is closed`);
+    let selected = ["chat", "error", "update"];
+    for (const category of ["chat", "update", "thinking", "tool", "error"]) {
+      // The menu may stay open across the re-render after a toggle; open it
+      // with a real tap only when it is closed.
+      if (!(await phone.evaluate(() => Boolean(document.querySelector(".conversation-filter-popover")?.open)))) {
+        await phone.click(".conversation-filter-trigger");
+      }
+      await phone.waitForSelector(`[data-conversation-category="${category}"]`, {state: "visible", timeout: 5000});
+      assert.ok(!(await fabVisible()), `${viewport.width}: the search FAB still shows over the open menu`);
+      const hits = await phone.evaluate(() => [...document.querySelectorAll("[data-conversation-category]")].map(button => {
+        const rect = button.getBoundingClientRect();
+        // Sample the whole straight part of the right edge, 1px inside it;
+        // the rounded corners are outside the button's hit area by design.
+        const radius = parseFloat(getComputedStyle(button).borderTopRightRadius) || 0;
+        const ys = [];
+        for (let y = rect.top + radius + 1; y <= rect.bottom - radius - 1; y += 2) ys.push(y);
+        const covered = ys.filter(y => {
+          const hit = document.elementFromPoint(rect.right - 1, y);
+          return !(hit && (hit === button || button.contains(hit)));
+        }).map(y => {
+          const hit = document.elementFromPoint(rect.right - 1, y);
+          return `${Math.round(y)}:${hit ? hit.className || hit.tagName : "none"}`;
+        });
+        return {category: button.dataset.conversationCategory, samples: ys.length, covered, inside: rect.right <= innerWidth && rect.left >= 0};
+      }));
+      for (const hit of hits) {
+        assert.ok(hit.inside, `${viewport.width}: ${hit.category} button leaves the viewport`);
+        assert.ok(hit.samples >= 8, `${viewport.width}: ${hit.category} right edge too short to sample (${hit.samples})`);
+        assert.deepEqual(hit.covered, [], `${viewport.width}: ${hit.category} right edge is covered`);
+      }
+      const box = await phone.locator(`[data-conversation-category="${category}"]`).boundingBox();
+      const before = await phone.evaluate(() => window.__requests.length);
+      await phone.mouse.click(box.x + box.width - 2, box.y + box.height / 2);
+      selected = selected.includes(category) ? selected.filter(item => item !== category) : [...selected, category].sort();
+      await phone.waitForFunction(({count, expected}) => {
+        const request = window.__requests.at(-1);
+        return window.__requests.length > count && request && [...request.categories].sort().join(",") === expected.join(",");
+      }, {count: before, expected: selected}, {timeout: 10000});
+      assert.equal(await phone.evaluate(() => Boolean(document.querySelector("#command-palette[open]"))), false, `${viewport.width}: clicking ${category} opened the search palette`);
+      await phone.waitForFunction(expected => [...document.querySelectorAll("[data-conversation-category].active")]
+        .map(node => node.dataset.conversationCategory).sort().join(",") === expected.join(","), selected, {timeout: 10000});
+    }
+    await phone.evaluate(() => { const popover = document.querySelector(".conversation-filter-popover"); if (popover) popover.open = false; });
+    assert.ok(await fabVisible(), `${viewport.width}: the search FAB must come back after the menu closes`);
+    await phone.close();
+  }
+
+  // en-US: the loaded count rewritten after "load older" is translated.
+  const english = await browser.newPage({viewport: {width: 1280, height: 800}});
+  await english.addInitScript(() => { window.__ahaLanguage = "en-US"; });
+  english.on("pageerror", error => errors.push(`en-US: ${error.message}`));
+  await english.goto(url, {waitUntil: "domcontentloaded"});
+  await english.waitForSelector("#load-older-conversation", {timeout: 20000});
+  await english.evaluate(() => { const popover = document.querySelector(".conversation-filter-popover"); if (popover) popover.open = true; });
+  assert.equal((await english.textContent("#conversation-filter-loaded"))?.trim(), "20 loaded");
+  await english.click("#load-older-conversation");
+  await english.waitForFunction(() => document.querySelector("#conversation-filter-loaded")?.textContent?.trim() === "70 loaded", null, {timeout: 10000});
+  await english.close();
 
   assert.deepEqual(errors, []);
   console.log("task_conversation_thinking_filter: ok");

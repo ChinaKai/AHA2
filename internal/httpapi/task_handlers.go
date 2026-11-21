@@ -643,19 +643,47 @@ func (s *Server) agentConversation(writer http.ResponseWriter, request *http.Req
 	s.conversationForAgent(writer, request, request.PathValue("agent"))
 }
 
-func (s *Server) conversationForAgent(writer http.ResponseWriter, request *http.Request, agentID string) {
-	taskID := request.PathValue("id")
+// conversationCategoriesQuery normalizes the conversation "categories" query
+// value. Names are trimmed and lower-cased; duplicates collapse. A missing or
+// blank value (including bare commas) returns no categories, which means the
+// endpoint default: every category for a local Task, the readable set for a
+// read-only mirror. Unknown names next to at least one known name are ignored,
+// so a newer client's extra name narrows nothing it did not ask for. A value
+// naming only unknown categories is rejected (ok=false) instead of widening to
+// every category, tool rows included.
+func conversationCategoriesQuery(raw string) ([]string, bool) {
 	categories := []string{}
-	categoryQuery := request.URL.Query().Get("categories")
-	for _, value := range strings.Split(categoryQuery, ",") {
-		value = strings.TrimSpace(value)
+	seen := map[string]bool{}
+	named := false
+	for _, value := range strings.Split(raw, ",") {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value == "" {
+			continue
+		}
+		named = true
 		switch value {
 		case "chat", "update", "thinking", "tool", "error", "mail":
-			categories = append(categories, value)
+			if !seen[value] {
+				seen[value] = true
+				categories = append(categories, value)
+			}
 		}
 	}
+	if named && len(categories) == 0 {
+		return nil, false
+	}
+	return categories, true
+}
+
+func (s *Server) conversationForAgent(writer http.ResponseWriter, request *http.Request, agentID string) {
+	taskID := request.PathValue("id")
+	categories, ok := conversationCategoriesQuery(request.URL.Query().Get("categories"))
+	if !ok {
+		writeError(writer, http.StatusBadRequest, "invalid_categories")
+		return
+	}
 	if _, err := s.store.Task(request.Context(), taskID); err != nil {
-		if strings.TrimSpace(categoryQuery) == "" {
+		if len(categories) == 0 {
 			// "update" no longer includes reasoning rows; keep the historical
 			// no-filter default by naming thinking explicitly.
 			categories = []string{"chat", "update", "thinking", "error", "mail"}

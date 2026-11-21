@@ -3232,6 +3232,9 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
   /* The composer establishes its own stacking context, so the attachment tray
      cannot rise above the FAB. Hide the FAB while drafts are attached. */
   body:has(.composer-attachment-tray) .task-search-fab { display: none; }
+  /* Same stacking limit for the open message-filter menu: its rows reach the
+     FAB's corner, so the FAB steps aside until the menu closes. */
+  body:has(.conversation-filter-popover[open]) .task-search-fab { display: none; }
 }
 
 /* MCP page: the four-column line needs the full 1041px desktop width. Between

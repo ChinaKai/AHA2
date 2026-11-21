@@ -550,7 +550,9 @@ func (s *Store) ConversationPage(
 // selects only them, and both together select every update row. The filter
 // is applied in SQL, so LIMIT, has_more, next_before and the incremental
 // latest_sequence all describe exactly the rows the caller asked for.
-// An empty or fully unknown list returns no predicate (all categories).
+// An empty list returns no predicate (all categories). Any other name is
+// matched literally against the stored category, so an unknown name matches
+// no row; the HTTP layer validates and normalizes names before calling.
 func conversationCategoryClause(categories []string, categoryColumn, kindColumn string) (string, []any) {
 	plain := make([]string, 0, len(categories))
 	seen := map[string]bool{}
