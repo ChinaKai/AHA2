@@ -1,0 +1,211 @@
+{
+  "base": "9d01cb63cca51bff23c40dad2c61d55497f2cd3a",
+  "fixed_commit": "9bca3785b3ef1d071faed06041aeb2e6de0139a7",
+  "changed_files": [
+    "internal/app/agent_browser_hardware_mcp_test.go",
+    "internal/app/agent_control.go",
+    "internal/app/agent_core.go",
+    "internal/app/agent_domain_authorization.go",
+    "internal/app/agent_hardware_metadata_test.go",
+    "internal/app/agent_knowledge_mcp.go",
+    "internal/app/agent_pet_channel_scope_test.go",
+    "internal/app/agent_pet_domains.go",
+    "internal/app/agent_pet_domains_test.go",
+    "internal/app/mcp_runtime.go",
+    "internal/app/pet_hardware_binding_alias_test.go",
+    "internal/app/pet_task_hardware.go",
+    "internal/app/task_hardware_bindings.go",
+    "internal/hardware/manager.go",
+    "internal/httpapi/agent_browser_mcp.go",
+    "internal/httpapi/agent_core_pet_scope_test.go",
+    "internal/httpapi/agent_desktop_mcp.go",
+    "internal/httpapi/agent_domain_authorization.go",
+    "internal/httpapi/agent_handlers.go",
+    "internal/httpapi/agent_handlers_test.go",
+    "internal/httpapi/agent_hardware_bindings_test.go",
+    "internal/httpapi/agent_hardware_effects_test.go",
+    "internal/httpapi/agent_hardware_fixture_test.go",
+    "internal/httpapi/agent_hardware_gate_test.go",
+    "internal/httpapi/agent_hardware_mcp.go",
+    "internal/httpapi/agent_hardware_mcp_operations.go",
+    "internal/httpapi/agent_knowledge_mcp.go",
+    "internal/httpapi/agent_mcp_operation.go",
+    "internal/httpapi/agent_pet_channel_authorization_test.go",
+    "internal/httpapi/agent_state_handlers.go",
+    "internal/httpapi/agent_workspace_mcp.go",
+    "internal/httpapi/browser_handlers_test.go",
+    "internal/httpapi/hardware_handlers.go",
+    "internal/httpapi/helpers.go"
+  ],
+  "packets": [
+    {
+      "packet": "docs/pet-mcp/review/recheck-9bca378-r1-catalog-agent-lookup.md",
+      "bytes": 30668,
+      "sha256": "0c20aa0f9c793e2a3d53fda49132397282a5946f35e15240446b4a528de79edd",
+      "diff_files": [
+        "internal/app/agent_browser_hardware_mcp_test.go",
+        "internal/app/mcp_runtime.go",
+        "internal/app/agent_pet_domains.go"
+      ]
+    },
+    {
+      "packet": "docs/pet-mcp/review/recheck-9bca378-r2-live-agent-authority.md",
+      "bytes": 45011,
+      "sha256": "f76eef80228d3481a96501775b19b9988a74bd94cdabf82d0d0b3132519bb814",
+      "diff_files": [
+        "internal/app/agent_domain_authorization.go",
+        "internal/app/agent_hardware_metadata_test.go",
+        "internal/httpapi/agent_domain_authorization.go",
+        "internal/httpapi/helpers.go",
+        "internal/httpapi/agent_browser_mcp.go",
+        "internal/httpapi/agent_desktop_mcp.go",
+        "internal/httpapi/agent_hardware_mcp.go",
+        "internal/httpapi/agent_workspace_mcp.go",
+        "internal/httpapi/agent_handlers_test.go",
+        "internal/httpapi/browser_handlers_test.go",
+        "internal/httpapi/agent_mcp_operation.go"
+      ]
+    },
+    {
+      "packet": "docs/pet-mcp/review/recheck-9bca378-r3a-resource-owner-boundary.md",
+      "bytes": 57045,
+      "sha256": "f0695c59577d91a9c7636aa0f15d3e02345a71c795098d0e18ab6a40734a5ced",
+      "diff_files": [
+        "internal/httpapi/hardware_handlers.go",
+        "internal/httpapi/agent_hardware_gate_test.go"
+      ]
+    },
+    {
+      "packet": "docs/pet-mcp/review/recheck-9bca378-r3b-device-effects-bounded-results.md",
+      "bytes": 62316,
+      "sha256": "f3f9f907f57e40dc53aecd77dc7209f41726aed2e058f21685542189b7ee08d1",
+      "diff_files": [
+        "internal/httpapi/agent_handlers.go",
+        "internal/httpapi/agent_hardware_mcp_operations.go",
+        "internal/httpapi/agent_hardware_effects_test.go",
+        "internal/httpapi/agent_hardware_fixture_test.go"
+      ]
+    },
+    {
+      "packet": "docs/pet-mcp/review/recheck-9bca378-r4-binding-lifecycle.md",
+      "bytes": 26770,
+      "sha256": "19ca4cde4b24df8bc72b8d7755617952976cfd4a2f2257a325134e10f28c6209",
+      "diff_files": [
+        "internal/app/agent_pet_domains_test.go",
+        "internal/app/pet_hardware_binding_alias_test.go",
+        "internal/app/pet_task_hardware.go",
+        "internal/app/task_hardware_bindings.go",
+        "internal/hardware/manager.go",
+        "internal/httpapi/agent_hardware_bindings_test.go"
+      ]
+    },
+    {
+      "packet": "docs/pet-mcp/review/recheck-9bca378-r5-own-turn-core-scope.md",
+      "bytes": 27253,
+      "sha256": "2256331b2eb5972c7d3c1e76f3c8758348925681e88a0e494ab65ec6d6232a62",
+      "diff_files": [
+        "internal/app/agent_control.go",
+        "internal/app/agent_core.go",
+        "internal/httpapi/agent_core_pet_scope_test.go",
+        "internal/httpapi/agent_state_handlers.go"
+      ]
+    },
+    {
+      "packet": "docs/pet-mcp/review/recheck-9bca378-r6-channel-knowledge-source.md",
+      "bytes": 31649,
+      "sha256": "7d0b3a9317f2bcf20f5d6fc5f4416c0aab2a8a8aa16d2e90373f8e80f2e06a78",
+      "diff_files": [
+        "internal/app/agent_knowledge_mcp.go",
+        "internal/app/agent_pet_channel_scope_test.go",
+        "internal/httpapi/agent_knowledge_mcp.go",
+        "internal/httpapi/agent_pet_channel_authorization_test.go"
+      ]
+    }
+  ],
+  "all_changed_files_covered_once": true,
+  "validation": {
+    "path": "docs/pet-mcp/review/recheck-9bca378-validation.md",
+    "bytes": 15772,
+    "sha256": "a773180ca6668f04f885243407214855a32790811e3fc78fed47f1af5ecbd7da",
+    "r2_plus_validation_bytes": 60783
+  },
+  "frozen_r2": {
+    "path": "docs/pet-mcp/review/recheck-9bca378-r2-live-agent-authority.md",
+    "bytes": 45011,
+    "sha256": "f76eef80228d3481a96501775b19b9988a74bd94cdabf82d0d0b3132519bb814",
+    "frozen": true,
+    "authority": "pet task-723 static review at 14:31"
+  },
+  "all_task_base": "a3ed6cb566680ff079d660685126a2b77a76bad8",
+  "all_task_changed_files": [
+    "docs/pet-mcp/README.md",
+    "docs/pet-mcp/coverage.tsv",
+    "docs/pet-mcp/review/p1a-runtime-hardware.md",
+    "docs/pet-mcp/review/p1b-http-inventory.md",
+    "docs/pet-mcp/review/p1c-scanner-web.md",
+    "docs/pet-mcp/web-call-sites.tsv",
+    "internal/app/agent_browser_hardware_mcp_test.go",
+    "internal/app/agent_browser_mcp.go",
+    "internal/app/agent_control.go",
+    "internal/app/agent_core.go",
+    "internal/app/agent_desktop_mcp.go",
+    "internal/app/agent_domain_authorization.go",
+    "internal/app/agent_hardware_mcp.go",
+    "internal/app/agent_hardware_metadata_test.go",
+    "internal/app/agent_knowledge_mcp.go",
+    "internal/app/agent_pet_channel_scope_test.go",
+    "internal/app/agent_pet_domains.go",
+    "internal/app/agent_pet_domains_test.go",
+    "internal/app/agent_workspace_mcp.go",
+    "internal/app/agent_workspace_mcp_test.go",
+    "internal/app/knowledge_routes.go",
+    "internal/app/mcp.go",
+    "internal/app/mcp_runtime.go",
+    "internal/app/mcp_runtime_test.go",
+    "internal/app/pet.go",
+    "internal/app/pet_hardware_binding_alias_test.go",
+    "internal/app/pet_task_hardware.go",
+    "internal/app/service.go",
+    "internal/app/task_hardware_bindings.go",
+    "internal/hardware/manager.go",
+    "internal/httpapi/agent_browser_mcp.go",
+    "internal/httpapi/agent_browser_mcp_operations.go",
+    "internal/httpapi/agent_browser_mcp_test.go",
+    "internal/httpapi/agent_browser_workspace_operations_test.go",
+    "internal/httpapi/agent_core_mcp.go",
+    "internal/httpapi/agent_core_pet_scope_test.go",
+    "internal/httpapi/agent_desktop_mcp.go",
+    "internal/httpapi/agent_desktop_mcp_test.go",
+    "internal/httpapi/agent_domain_authorization.go",
+    "internal/httpapi/agent_handlers.go",
+    "internal/httpapi/agent_handlers_test.go",
+    "internal/httpapi/agent_hardware_bindings_test.go",
+    "internal/httpapi/agent_hardware_effects_test.go",
+    "internal/httpapi/agent_hardware_fixture_test.go",
+    "internal/httpapi/agent_hardware_gate_test.go",
+    "internal/httpapi/agent_hardware_mcp.go",
+    "internal/httpapi/agent_hardware_mcp_operations.go",
+    "internal/httpapi/agent_hardware_mcp_test.go",
+    "internal/httpapi/agent_knowledge_mcp.go",
+    "internal/httpapi/agent_mcp_operation.go",
+    "internal/httpapi/agent_pet_channel_authorization_test.go",
+    "internal/httpapi/agent_pet_domains_test.go",
+    "internal/httpapi/agent_state_handlers.go",
+    "internal/httpapi/agent_workspace_mcp.go",
+    "internal/httpapi/agent_workspace_mcp_operations.go",
+    "internal/httpapi/agent_workspace_mcp_test.go",
+    "internal/httpapi/browser_handlers_test.go",
+    "internal/httpapi/hardware_handlers.go",
+    "internal/httpapi/helpers.go",
+    "internal/httpapi/server.go",
+    "scripts/pet-mcp-coverage.py",
+    "scripts/test_pet_mcp_coverage.py"
+  ],
+  "source_integrity": {
+    "commit": "9bca3785b3ef1d071faed06041aeb2e6de0139a7",
+    "tree": "5d2a491a18fe4df4c9c348c0e491aba87a8537ba",
+    "tracked_blobs_checked": 2113,
+    "mismatched_paths": [],
+    "checked_at_utc": "2026-11-21T06:36:02.672550+00:00"
+  }
+}
