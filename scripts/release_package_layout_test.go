@@ -108,8 +108,8 @@ func TestReleaseWorkflowPublishesPackageLayout(t *testing.T) {
 		t.Error("Release workflow must build the package into dist/package")
 	}
 	for _, flag := range []string{"-InputManifest", "-ExpectedCommit"} {
-		if got := strings.Count(workflow, flag); got < 2 {
-			t.Errorf("Release workflow must pass %s to both installer builds, got %d", flag, got)
+		if got := strings.Count(workflow, flag); got < 1 {
+			t.Errorf("Release workflow must pass %s to the installer build, got %d", flag, got)
 		}
 	}
 	for _, contract := range []string{
@@ -118,7 +118,7 @@ func TestReleaseWorkflowPublishesPackageLayout(t *testing.T) {
 		"--installer-dir",
 		"AHA2-Windows-Package-x64.zip",
 		"release-assets/*",
-		`test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 13`,
+		`test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 12`,
 		"verify-windows-package-archive.py",
 		`--commit "$GITHUB_SHA"`,
 	} {
@@ -126,11 +126,15 @@ func TestReleaseWorkflowPublishesPackageLayout(t *testing.T) {
 			t.Errorf("Release workflow is missing the package layout contract: %s", contract)
 		}
 	}
-	// The layout itself lives in the shared assembler: it must place the two
-	// installers under installer/ and the whole package under dist/.
+	// The machine-level installer was retired; the workflow must neither build
+	// it nor publish it.
+	if strings.Contains(workflow, "AHA2-Setup-x64.exe") {
+		t.Error("Release workflow still references the retired machine-level installer")
+	}
+	// The layout itself lives in the shared assembler: it must place the
+	// per-user installer under installer/ and the whole package under dist/.
 	assembler := readRepoFile(t, root, "scripts/assemble-windows-package.py")
 	for _, contract := range []string{
-		`"AHA2-Setup-x64.exe"`,
 		`"AHA2-Setup-User-x64.exe"`,
 		`"release-manifest.json"`,
 		`add_tree(archive, package_dir, "dist")`,
@@ -140,10 +144,13 @@ func TestReleaseWorkflowPublishesPackageLayout(t *testing.T) {
 			t.Errorf("assemble-windows-package.py is missing the package layout contract: %s", contract)
 		}
 	}
-	// The archive carries the same installers that are also released on their
-	// own; the standalone assets must not disappear.
-	if strings.Count(workflow, "AHA2-Setup-User-x64.exe") < 3 {
-		t.Error("Release workflow must assemble, verify and still publish AHA2-Setup-User-x64.exe")
+	if strings.Contains(assembler, `"AHA2-Setup-x64.exe"`) {
+		t.Error("assemble-windows-package.py still requires the retired machine-level installer")
+	}
+	// The archive carries the same installer that is also released on its own;
+	// the standalone asset must not disappear.
+	if strings.Count(workflow, "AHA2-Setup-User-x64.exe") < 2 {
+		t.Error("Release workflow must assemble and still publish AHA2-Setup-User-x64.exe")
 	}
 	if !strings.Contains(workflow, `-OutputDir (Join-Path $PWD "dist\installer")`) {
 		t.Error("Release workflow must write the Windows installers to dist\\installer")

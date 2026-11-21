@@ -12,7 +12,18 @@ Project → Workspace → Task → Turn → Task Memory → Knowledge → Next T
 
 ### Windows
 
-运行 `AHA2-Setup-x64.exe`。安装包同时安装 `aha2.exe` 控制面与 GUI 子系统的 `aha2-tray.exe`。安装向导可选择程序目录、数据目录、监听 IP、端口、远程 Agent API 地址和局域网防火墙规则；唯一的 `AHA2 User` 登录计划任务会以原登录用户的最低权限直接启动托盘程序，由托盘管理控制面进程，从而继承该用户的 Git、Codex、Claude、WSL 与 SSH 环境。旧版 LocalSystem 服务会保持禁用并尽力删除。
+运行 `AHA2-Setup-User-x64.exe`。这是唯一的 Windows 安装器，用户级安装，不会请求 UAC：
+程序装到当前用户的 `%LOCALAPPDATA%\Programs\AHA2`，数据目录默认 `%LOCALAPPDATA%\AHA2`，
+默认只监听 `127.0.0.1:8766`。安装包同时安装 `aha2.exe` 控制面与 GUI 子系统的 `aha2-tray.exe`。
+安装向导可选择数据目录、监听 IP 和端口，但不再创建防火墙规则——需要局域网访问时请按自己的网络策略放行。
+唯一的 `AHA2 User` 登录计划任务会以原登录用户的最低权限直接启动托盘程序，由托盘管理控制面进程，
+从而继承该用户的 Git、Codex、Claude、WSL 与 SSH 环境。安装器不创建 Windows 服务，也不处理旧版
+LocalSystem 服务。
+
+旧版本曾提供机器级安装包 `AHA2-Setup-x64.exe`（安装到 `Program Files\AHA2`、需要 UAC、
+可能创建防火墙规则和服务）。它已不再构建或发布；如果机器上装过，请在确认用户级实例健康后手动
+用管理员权限卸载旧安装、删除残留的 `Program Files\AHA2`、`AHA2` 服务和防火墙规则，避免两个实例
+争用端口或登录任务。
 
 托盘会把 `aha2.exe serve` 的 stdout/stderr 写入 `<数据目录>\logs\aha2-server.log`，并记录启动命令行、PID、退出码或启动错误；文件上限 10 MB，超出后轮转为 `aha2-server.log.1`（最多保留两份）。排查启动失败或崩溃时优先查看该文件。
 
@@ -30,7 +41,7 @@ bash scripts/build-windows-package.sh --version 0.5.23 --output-dir dist
 它原样安装到程序目录，部署脚本据此逐文件校验安装结果。安装器构建会把清单与它将
 复制的输入做双向比对，并核对版本、commit 和 Web 版本互相一致；不一致时不生成安装器。
 Release 另提供 `AHA2-Windows-Package-x64.zip`，内含官方 PackageDir 布局（`dist/` 包与
-`installer/AHA2-Setup-User-x64.exe`）。
+`installer/AHA2-Setup-User-x64.exe`）。Windows 只有这一个安装器名。
 
 ### Debian / Ubuntu
 
@@ -56,7 +67,7 @@ Linux 安装后由 systemd 自动启动。监听地址和数据目录可在 `/et
 
 默认打开 `http://127.0.0.1:8766`，使用安装时选择的数据目录中的 `setup-token` 创建 Owner；后续忘记密码时也使用该文件完成本机恢复。这里指的是**数据目录，不是程序安装目录**；如果替换或恢复了该文件，需要重启 AHA2 才会加载新值：
 
-- Windows：安装时选择的数据目录，默认为 `C:\ProgramData\AHA2\setup-token`
+- Windows：安装时选择的数据目录，默认为 `%LOCALAPPDATA%\AHA2\setup-token`
 - Linux：`sudo cat /var/lib/aha2/setup-token`
 - macOS：`sudo cat "/Library/Application Support/AHA2/setup-token"`
 

@@ -2,7 +2,6 @@
 """Verify the deployable Windows package archive published by the Release job.
 
 The archive must be the official PackageDir layout:
-  installer/AHA2-Setup-x64.exe
   installer/AHA2-Setup-User-x64.exe
   dist/<package files>
   dist/release-manifest.json
@@ -29,7 +28,6 @@ REQUIRED_PACKAGE_FILES = SCOPE["required"]
 EXACT_PACKAGE_FILES = set(SCOPE["exact"])
 PACKAGE_FILE_PREFIXES = tuple(SCOPE["prefixes"])
 ALLOWED_INSTALLER_FILES = {
-    "installer/AHA2-Setup-x64.exe",
     "installer/AHA2-Setup-User-x64.exe",
 }
 REQUIRED_ARCHIVE_FILES = ALLOWED_INSTALLER_FILES | {"dist/release-manifest.json"}

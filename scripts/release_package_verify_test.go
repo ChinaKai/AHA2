@@ -60,7 +60,7 @@ func writeFixturePackage(t *testing.T) string {
 func writeFixtureInstallers(t *testing.T) string {
 	t.Helper()
 	installerDir := t.TempDir()
-	for _, name := range []string{"AHA2-Setup-x64.exe", "AHA2-Setup-User-x64.exe"} {
+	for _, name := range []string{"AHA2-Setup-User-x64.exe"} {
 		if err := os.WriteFile(filepath.Join(installerDir, name), []byte("installer-"+name), 0o644); err != nil {
 			t.Fatalf("write %s: %v", name, err)
 		}
@@ -494,7 +494,6 @@ func writeArchiveFixture(t *testing.T, zipPath string, mutateDist func(map[strin
 	}
 	entries := []archiveEntry{
 		{name: "dist/release-manifest.json", data: append(encoded, '\n')},
-		{name: "installer/AHA2-Setup-x64.exe", data: []byte("machine-setup")},
 		{name: "installer/AHA2-Setup-User-x64.exe", data: []byte("user-setup")},
 	}
 	for path, data := range files {
@@ -582,7 +581,6 @@ func TestWindowsPackageWorkflowAssemblyRoundTrip(t *testing.T) {
 		names = append(names, file.Name)
 	}
 	for _, required := range []string{
-		"installer/AHA2-Setup-x64.exe",
 		"installer/AHA2-Setup-User-x64.exe",
 		"dist/release-manifest.json",
 		"dist/browser-host/tabs.mjs",
@@ -628,18 +626,6 @@ func TestWindowsPackageAssemblyRejectsSymlinkedInputs(t *testing.T) {
 			t.Errorf("assembler error does not name the rejected input; want %q in:\n%s", want, out)
 		}
 	}
-
-	t.Run("rejects a symlinked machine setup", func(t *testing.T) {
-		packageDir := writeFixturePackage(t)
-		installerDir := writeFixtureInstallers(t)
-		setup := filepath.Join(installerDir, "AHA2-Setup-x64.exe")
-		target := filepath.Join(installerDir, "AHA2-Setup-x64.real.exe")
-		if err := os.Rename(setup, target); err != nil {
-			t.Fatal(err)
-		}
-		replaceWithSymlink(t, target, setup)
-		assemblerRejects(t, packageDir, installerDir, "installer is a symlink: "+setup)
-	})
 
 	t.Run("rejects a symlinked user setup", func(t *testing.T) {
 		packageDir := writeFixturePackage(t)

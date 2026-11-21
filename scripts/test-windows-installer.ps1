@@ -71,25 +71,31 @@ $env:TMP = $tempRoot
 $missingServer = Join-Path ([IO.Path]::GetTempPath()) ("aha2-server-validation-" + [Guid]::NewGuid().ToString("N") + ".exe")
 $missingTray = Join-Path ([IO.Path]::GetTempPath()) ("aha2-tray-validation-" + [Guid]::NewGuid().ToString("N") + ".exe")
 & (Join-Path $repo "scripts\build-windows-installer.ps1") -RepoPath $repo -InputExe $missingServer -InputTrayExe $missingTray -ValidateOnly
-& (Join-Path $repo "scripts\build-windows-installer.ps1") -RepoPath $repo -InputExe $missingServer -InputTrayExe $missingTray -PerUser -ValidateOnly
 
 $installerPath = Join-Path $repo "installer\windows\AHA2.iss"
 $installer = Get-Content -Raw -Encoding UTF8 -LiteralPath $installerPath
 foreach ($contract in @(
-	"PrivilegesRequired=admin", "PrivilegesRequired=lowest", "PerUserInstall", "AHA2-Setup-User-x64", "{localappdata}\Programs\AHA2", "DisableDirPage=no", "ArchitecturesAllowed=x64compatible", "CurUninstallStepChanged", "DeinitializeSetup",
+	"PrivilegesRequired=lowest", "AHA2-Setup-User-x64", "{localappdata}\Programs\AHA2", "DisableDirPage=no", "ArchitecturesAllowed=x64compatible", "CurUninstallStepChanged", "DeinitializeSetup",
     '[Icons]', '[Run]', '[Files]', '[InstallDelete]', 'Type: files; Name: "{app}\Run-AHA2User.vbs"', 'CreateInputDirPage', 'CreateInputOptionPage', 'CreateInputQueryPage',
-    'RegisterPreviousData', 'remoteip=localsubnet profile=private', '{code:LocalManagementURL}', '{commonappdata}\AHA2',
+    'RegisterPreviousData', '{code:LocalManagementURL}',
     'DestName: "aha2.exe"', 'DestName: "aha2-tray.exe"', 'DestName: "release-manifest.json"', 'SourceManifest',
     'TrayParameters', '--server', '--listen', '--data-dir',
 	'DestName: "Xray-core-MPL-2.0.txt"', 'DestName: "Xray-core-SOURCE.txt"',
     'runasoriginaluser', 'StopInstalledUserProcesses', "Get-Process -Name ''aha2-tray'',''aha2''",
-    'DisableAndStopLegacyAHA2Service(True)', 'RemoveLegacyAHA2Service()', 'Register-AHA2UserTask.ps1',
-    'Prepare-AHA2DataDir.ps1', 'ConfigureAHA2UserTask', 'AHA2UserTaskName', 'RemoveAHA2UserTask',
+    'Register-AHA2UserTask.ps1', 'ConfigureAHA2UserTask', 'AHA2UserTaskName', 'RemoveAHA2UserTask',
     'ExecAsOriginalUser', 'InstallStarted',
     'WaitForAHA2Health', 'LocalHealthURL', "ExpandConstant('{app}\aha2-tray.exe')"
 )) {
     if (-not $installer.Contains($contract)) {
         throw "Installer safety contract is missing: $contract"
+    }
+}
+# The Windows installer is per-user only: no elevation, no Program Files, no
+# ProgramData, no machine-level service or firewall handling, and no data
+# directory ACL helper.
+foreach ($forbidden in @('PrivilegesRequired=admin', 'PerUserInstall', '{autopf}', '{commonappdata}', 'netsh.exe', 'sc.exe', 'Source: "Prepare-AHA2DataDir.ps1"', 'FirewallPage', 'LegacyAHA2Service')) {
+    if ($installer.Contains($forbidden)) {
+        throw "Installer still contains a machine-level contract: $forbidden"
     }
 }
 # Agent API must not be an installer input. Leaving it unset is what lets the
@@ -107,30 +113,18 @@ foreach ($forbidden in @('Source: "Run-AHA2User.vbs"', "UserLauncherParameters",
         throw "Installer still contains the forbidden legacy runtime contract: $forbidden"
     }
 }
-if ($installer.Contains("RequireSC('create") -or $installer.Contains("RunSC('create")) {
-    throw "Installer must never create a Windows service."
-}
-if ($installer.Contains("RunSC(" + "'start ") -or -not $installer.Contains('start= disabled') -or -not $installer.Contains('remains stopped and disabled')) {
-    throw "Legacy LocalSystem service must remain stopped and disabled."
-}
-if (-not $installer.Contains("procedure RemoveLegacyAHA2Service();") -or -not $installer.Contains("DisableAndStopLegacyAHA2Service(True);")) {
-    throw "Legacy service deletion must require the service to be disabled first."
-}
-
 $installStep = $installer.IndexOf("if CurStep = ssInstall then")
-$disableService = $installer.IndexOf("DisableAndStopLegacyAHA2Service(True);", $installStep)
 $stopProcesses = $installer.IndexOf("StopInstalledUserProcesses();", $installStep)
 $stopTask = $installer.IndexOf("StopAHA2UserTask();", $stopProcesses)
-if ($installStep -lt 0 -or $disableService -le $installStep -or $stopProcesses -le $disableService -or $stopTask -le $stopProcesses) {
-    throw "Upgrade must disable the legacy service, kill the complete runtime tree, and then end the unique task before file replacement."
+if ($installStep -lt 0 -or $stopProcesses -le $installStep -or $stopTask -le $stopProcesses) {
+    throw "Upgrade must kill the complete runtime tree and then end the unique task before file replacement."
 }
 $postInstall = $installer.IndexOf("else if CurStep = ssPostInstall then")
 $startTask = $installer.IndexOf("if not RunScheduledTask('/Run /TN", $postInstall)
 $health = $installer.IndexOf("WaitForAHA2Health();", $startTask)
-$removeService = $installer.IndexOf("RemoveLegacyAHA2Service();", $health)
-$commit = $installer.IndexOf("InstallCommitted := True;", $removeService)
-if ($postInstall -lt 0 -or $startTask -le $postInstall -or $health -le $startTask -or $removeService -le $health -or $commit -le $removeService) {
-    throw "Installer transition must start the tray task, verify health, delete the legacy service best-effort, and then commit."
+$commit = $installer.IndexOf("InstallCommitted := True;", $health)
+if ($postInstall -lt 0 -or $startTask -le $postInstall -or $health -le $startTask -or $commit -le $health) {
+    throw "Installer transition must start the tray task, verify health, and then commit."
 }
 $uninstall = $installer.IndexOf("if CurUninstallStep = usUninstall then")
 $uninstallProcesses = $installer.IndexOf("StopInstalledUserProcesses();", $uninstall)
@@ -158,12 +152,6 @@ foreach ($forbidden in @("wscript.exe", ".vbs", "powershell.exe", "service run",
     }
 }
 
-$dataDirScript = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo "installer\windows\Prepare-AHA2DataDir.ps1")
-foreach ($contract in @("Get-ScheduledTask", "Principal.UserId", "SetAccessRuleProtection", "SecurityIdentifier]'S-1-5-18'", "SecurityIdentifier]'S-1-5-32-544'", "Set-Acl", "FileSystemRights]::Modify", "New-Item -ItemType Directory")) {
-    if (-not $dataDirScript.Contains($contract)) {
-        throw "Windows user data directory contract is missing: $contract"
-    }
-}
 $taskScript = Get-Content -Raw -Encoding UTF8 -LiteralPath $taskScriptPath
 if ($taskScript.IndexOf("if (Test-ExistingAHA2UserTask)") -gt $taskScript.LastIndexOf("Register-ScheduledTask -TaskName")) {
     throw "Windows user task does not reuse an exact existing task before attempting registration."
@@ -176,7 +164,6 @@ try {
 } finally {
     Remove-Item -LiteralPath $validationServer,$validationTray -Force -ErrorAction SilentlyContinue
 }
-& (Join-Path $repo "installer\windows\Prepare-AHA2DataDir.ps1") -DataDir (Join-Path ([IO.Path]::GetTempPath()) "AHA2 User Data") -ValidateOnly
 
 $unsafeListenRejected = $false
 try {
@@ -196,20 +183,16 @@ try {
 if (-not $insecureAgentURLRejected) {
     throw "Windows tray task accepted a non-loopback HTTP Agent API URL."
 }
-$uncDataRejected = $false
-try {
-    & (Join-Path $repo "installer\windows\Prepare-AHA2DataDir.ps1") -DataDir "\\server\share\AHA2" -ValidateOnly
-} catch {
-    $uncDataRejected = $true
-}
-if (-not $uncDataRejected) {
-    throw "Windows data directory helper accepted a UNC path."
-}
 
 $deployment = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo "docs\deployment.md")
-foreach ($contract in @("AHA2 User", "aha2-tray.exe", "--server", "aha2.exe", '`LocalSystem`', "Program Files", "ProgramData\AHA2", "Agent API", "--agent-api-url")) {
+foreach ($contract in @("AHA2 User", "aha2-tray.exe", "--server", "aha2.exe", "LOCALAPPDATA", "Agent API", "--agent-api-url")) {
     if (-not $deployment.Contains($contract)) {
         throw "Windows deployment documentation is missing: $contract"
+    }
+}
+foreach ($forbidden in @("AHA2-Setup-x64.exe", "ProgramData\AHA2")) {
+    if ($deployment.Contains($forbidden)) {
+        throw "Windows deployment documentation still describes the retired machine-level install: $forbidden"
     }
 }
 foreach ($contract in @("taskkill.exe", "/T", "backend CLI")) {
@@ -237,8 +220,8 @@ $skipStart = $installer.IndexOf("function ShouldSkipPage")
 $skipEnd = $installer.IndexOf("function NextButtonClick", $skipStart)
 $skipSection = $installer.Substring($skipStart, $skipEnd - $skipStart)
 if ($listenProbe -lt 0 -or $listenArgument -le $listenProbe -or $listenModeRestore -lt 0 -or $listenPortRestore -le $listenModeRestore -or
-    $skipSection.Contains("PageID = ListenModePage.ID") -or -not $skipSection.Contains("PageID = FirewallPage.ID")) {
-  throw "The per-user wizard must show listen mode, restore the existing --listen value, and keep only the firewall page unavailable."
+    $skipSection.Contains("PageID = ListenModePage.ID") -or $skipSection.Contains("FirewallPage") -or -not $skipSection.Contains("PageID = LANPage.ID")) {
+  throw "The per-user wizard must show listen mode, restore the existing --listen value, and only skip the LAN address page outside LAN mode."
 }
 $preserveTask = $installer.IndexOf("Existing AHA2 user task will be preserved for per-user upgrade.")
 $enableTask = $installer.IndexOf("/Change /Enable /TN", $preserveTask)
@@ -256,7 +239,7 @@ $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo ".gith
 foreach ($contract in @(
     "runs-on: windows-latest", "build-windows-package.sh", "--output-dir", "build-windows-installer.ps1", "-InputTrayExe",
     "-InputBrowserHost", "-InputNodeExe", "-InputNodeLicense", "-InputFeishuPlugin", "-InputFeishuManifest", "-InputManifest", "-ExpectedCommit",
-	"AHA2-Setup-x64.exe", "AHA2-Setup-User-x64.exe", "AHA2-Windows-Package-x64.zip", "assemble-windows-package.py",
+	"AHA2-Setup-User-x64.exe", "AHA2-Windows-Package-x64.zip", "assemble-windows-package.py",
     "verify-windows-package-archive.py",
     "build-linux-packages.sh", "build-linux-sync-packages.sh", "aha2-sync_", "build-macos-packages.sh",
     "ubuntu-24.04-arm", "SHA256SUMS", "merge-multiple: true", "pattern: package-*", "gh release create"
@@ -265,33 +248,41 @@ foreach ($contract in @(
         throw "Release workflow contract is missing: $contract"
     }
 }
+foreach ($forbidden in @("AHA2-Setup-x64.exe", "-PerUser")) {
+    if ($workflow.Contains($forbidden)) {
+        throw "Release workflow still references the retired machine-level installer build: $forbidden"
+    }
+}
 if ($workflow.Contains("portable-release") -or $workflow.Contains("Upload portable artifacts")) {
     throw "Release workflow must not publish portable binaries."
 }
 # The Windows job must build the same official package the deploy skill
-# consumes (including release-manifest.json) before compiling the installers.
+# consumes (including release-manifest.json) before compiling the installer.
 $packageProbe = $workflow.IndexOf("build-windows-package.sh")
 $installerProbe = $workflow.IndexOf("build-windows-installer.ps1")
 if ($packageProbe -lt 0 -or $installerProbe -lt 0 -or $packageProbe -gt $installerProbe) {
-    throw "Release workflow must build the Windows package (with release-manifest.json) before building the Windows installers."
+    throw "Release workflow must build the Windows package (with release-manifest.json) before building the Windows installer."
 }
 foreach ($inputContract in @("-InputBrowserHost", "-InputNodeExe", "-InputNodeLicense", "-InputFeishuPlugin", "-InputFeishuManifest", "-InputManifest", "-ExpectedCommit")) {
     $inputCount = [regex]::Matches($workflow, [regex]::Escape($inputContract)).Count
-    if ($inputCount -lt 2) {
-        throw "Release workflow must pass $inputContract to both the per-machine and per-user installer builds."
+    if ($inputCount -lt 1) {
+        throw "Release workflow must pass $inputContract to the per-user installer build."
     }
 }
-# The archive is the deployable PackageDir layout: both installers under
+# The archive is the deployable PackageDir layout: the per-user installer under
 # installer/ and the exact package manifest under dist/. The layout lives in
 # the shared Python assembler so the Linux round-trip test exercises it too.
 $assembler = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo "scripts\assemble-windows-package.py")
-foreach ($archiveContract in @("AHA2-Windows-Package-x64.zip", "AHA2-Setup-x64.exe", "AHA2-Setup-User-x64.exe", "release-manifest.json", 'add_tree(archive, package_dir, "dist")', 'f"installer/{name}"')) {
+foreach ($archiveContract in @("AHA2-Windows-Package-x64.zip", "AHA2-Setup-User-x64.exe", "release-manifest.json", 'add_tree(archive, package_dir, "dist")', 'f"installer/{name}"')) {
     $source = if ($archiveContract -eq "AHA2-Windows-Package-x64.zip") { $workflow } else { $assembler }
     if (-not $source.Contains($archiveContract)) {
         throw "Windows package assembly does not produce the deployable layout: $archiveContract"
     }
 }
-if ($workflow -notmatch 'test "\$\(find dist -maxdepth 1 -type f \| wc -l\)" -eq 13') {
+if ($assembler.Contains("AHA2-Setup-x64.exe")) {
+    throw "Windows package assembly still requires the retired machine-level installer."
+}
+if ($workflow -notmatch 'test "\$\(find dist -maxdepth 1 -type f \| wc -l\)" -eq 12') {
     throw "Release workflow must expect the new Windows package archive in its release-asset count."
 }
 # A tag is verified locally before it is pushed, so the release workflow only

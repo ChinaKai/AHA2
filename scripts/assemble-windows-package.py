@@ -3,7 +3,6 @@
 
 The archive contains file entries only:
   dist/<package files>
-  installer/AHA2-Setup-x64.exe
   installer/AHA2-Setup-User-x64.exe
 
 No directory entries are written. Compress-Archive records directory metadata,
@@ -32,7 +31,7 @@ import sys
 import zipfile
 from pathlib import Path
 
-REQUIRED_INSTALLERS = ("AHA2-Setup-x64.exe", "AHA2-Setup-User-x64.exe")
+REQUIRED_INSTALLERS = ("AHA2-Setup-User-x64.exe",)
 
 # Windows exposes junctions and other reparse points through
 # st_file_attributes/st_reparse_tag; on POSIX and for Windows symbolic links

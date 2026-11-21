@@ -39,7 +39,7 @@ jobs:
       # One packaging path for local builds and Release: the package script
       # builds Web, server, tray and the Feishu plugin, stages the pinned Node
       # runtime and browser host, and writes release-manifest.json. The
-      # installers below consume that exact tree, so the manifest describes the
+      # installer below consumes that exact tree, so the manifest describes the
       # bytes that end up installed.
       - name: Build Windows package
         shell: bash
@@ -54,15 +54,14 @@ jobs:
           $package = Join-Path $PWD "dist\package"
           $plugin = Join-Path $package "plugins\feishu\windows-amd64"
           .\scripts\build-windows-installer.ps1 -RepoPath $PWD -InputExe (Join-Path $package "aha2-windows-amd64.exe") -InputTrayExe (Join-Path $package "aha2-tray-windows-amd64.exe") -InputBrowserHost (Join-Path $package "browser-host") -InputNodeExe (Join-Path $package "node\node.exe") -InputNodeLicense (Join-Path $package "node\LICENSE") -InputFeishuPlugin (Join-Path $plugin "aha2-channel-feishu.exe") -InputFeishuManifest (Join-Path $plugin "plugin.json") -InputManifest (Join-Path $package "release-manifest.json") -ExpectedCommit $env:GITHUB_SHA -OutputDir (Join-Path $PWD "dist\installer") -Version $env:GITHUB_REF_NAME
-          .\scripts\build-windows-installer.ps1 -RepoPath $PWD -InputExe (Join-Path $package "aha2-windows-amd64.exe") -InputTrayExe (Join-Path $package "aha2-tray-windows-amd64.exe") -InputBrowserHost (Join-Path $package "browser-host") -InputNodeExe (Join-Path $package "node\node.exe") -InputNodeLicense (Join-Path $package "node\LICENSE") -InputFeishuPlugin (Join-Path $plugin "aha2-channel-feishu.exe") -InputFeishuManifest (Join-Path $plugin "plugin.json") -InputManifest (Join-Path $package "release-manifest.json") -ExpectedCommit $env:GITHUB_SHA -OutputDir (Join-Path $PWD "dist\installer") -Version $env:GITHUB_REF_NAME -PerUser
 
       # Assemble the official PackageDir layout the deploy skill consumes:
       #   <PackageDir>\dist\release-manifest.json and package files
       #   <PackageDir>\installer\AHA2-Setup-User-x64.exe
-      # A GitHub Release holds one archive plus the standalone installers, so
-      # ship the layout as a zip and keep both exe assets unchanged. The shared
-      # assembler writes file entries only; directory metadata is rejected by
-      # the archive verifier in the publish job.
+      # A GitHub Release holds one archive plus the standalone per-platform
+      # assets, so ship the layout as a zip and keep the installer exe asset
+      # unchanged. The shared assembler writes file entries only; directory
+      # metadata is rejected by the archive verifier in the publish job.
       - name: Assemble deployable Windows package
         shell: pwsh
         run: |
@@ -74,7 +73,6 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force "release-assets" | Out-Null
-          Copy-Item -Path "dist\installer\AHA2-Setup-x64.exe" -Destination "release-assets" -Force
           Copy-Item -Path "dist\installer\AHA2-Setup-User-x64.exe" -Destination "release-assets" -Force
           Copy-Item -Path "dist\AHA2-Windows-Package-x64.zip" -Destination "release-assets" -Force
 
@@ -222,7 +220,6 @@ jobs:
             exit 1
           fi
           for package in \
-            AHA2-Setup-x64.exe \
             AHA2-Setup-User-x64.exe \
             "aha2_${version}_amd64.deb" "aha2_${version}_arm64.deb" \
             "aha2-${version}-1.x86_64.rpm" "aha2-${version}-1.aarch64.rpm" \
@@ -232,12 +229,13 @@ jobs:
             AHA2-Windows-Package-x64.zip; do
             test -f "dist/${package}" || { echo "Missing release package: ${package}" >&2; exit 1; }
           done
-          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 13
-          # The Windows archive must be the official PackageDir layout: both
-          # installers under installer/ and the complete package, including
-          # release-manifest.json, under dist/. The verifier rejects an empty
-          # manifest, missing required scope and any dist/ file the manifest
-          # does not cover, and re-checks every hash against the archive bytes.
+          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 12
+          # The Windows archive must be the official PackageDir layout: the
+          # per-user installer under installer/ and the complete package,
+          # including release-manifest.json, under dist/. The verifier rejects
+          # an empty manifest, missing required scope and any dist/ file the
+          # manifest does not cover, and re-checks every hash against the
+          # archive bytes.
           python3 scripts/verify-windows-package-archive.py "dist/AHA2-Windows-Package-x64.zip" --version "${GITHUB_REF_NAME#v}" --commit "$GITHUB_SHA"
           cd dist
           find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | sort | while IFS= read -r file; do sha256sum "$file"; done > SHA256SUMS

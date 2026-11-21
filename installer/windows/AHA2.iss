@@ -23,40 +23,25 @@
   #define OutputDir "..\..\dist\installer"
 #endif
 #define AppName "AHA2"
-#define ServiceName "AHA2"
 #define ListenAddress "127.0.0.1:8766"
-#define FirewallRuleName "AHA2 Local Control Plane"
 
 [Setup]
-#ifdef PerUserInstall
+; The Windows package ships a single per-user installer. It never requests
+; elevation: the program goes under the current user's LocalAppData and the
+; login task runs with that same user's limited token.
 AppId={{D23028A1-597D-4D7B-BB12-E29A58AC53A8}
-#else
-AppId={{6F51A727-6446-4A71-83C8-6A6E8FB61192}
-#endif
 AppName={#AppName}
 AppVersion={#MyAppVersion}
 AppPublisher=AHA2
-#ifdef PerUserInstall
 DefaultDirName={localappdata}\Programs\AHA2
-#else
-DefaultDirName={autopf}\AHA2
-#endif
 DefaultGroupName=AHA2
 DisableProgramGroupPage=yes
 DisableDirPage=no
-#ifdef PerUserInstall
 PrivilegesRequired=lowest
-#else
-PrivilegesRequired=admin
-#endif
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir={#OutputDir}
-#ifdef PerUserInstall
 OutputBaseFilename=AHA2-Setup-User-x64
-#else
-OutputBaseFilename=AHA2-Setup-x64
-#endif
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
@@ -74,7 +59,6 @@ Source: "{#SourceNodeLicense}"; DestDir: "{app}\node"; DestName: "LICENSE"; Flag
 ; hash against it. Install the exact package bytes; never rewrite the manifest.
 Source: "{#SourceManifest}"; DestDir: "{app}"; DestName: "release-manifest.json"; Flags: ignoreversion
 Source: "Register-AHA2UserTask.ps1"; DestDir: "{app}"; Flags: ignoreversion
-Source: "Prepare-AHA2DataDir.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\third_party\hysteria\LICENSE.md"; DestDir: "{app}\licenses"; DestName: "Hysteria-LICENSE.txt"; Flags: ignoreversion
 Source: "..\..\third_party\yaml-v3\LICENSE"; DestDir: "{app}\licenses"; DestName: "yaml-v3-LICENSE.txt"; Flags: ignoreversion
 Source: "..\..\third_party\yaml-v3\NOTICE"; DestDir: "{app}\licenses"; DestName: "yaml-v3-NOTICE.txt"; Flags: ignoreversion
@@ -87,6 +71,9 @@ Source: "{#SourceFeishuManifest}"; DestDir: "{code:SelectedDataDir}\plugins\chan
 
 [InstallDelete]
 Type: files; Name: "{app}\Run-AHA2User.vbs"
+; The machine-level data-directory ACL helper is no longer installed. Remove a
+; copy an older install left behind so it cannot be mistaken for a live script.
+Type: files; Name: "{app}\Prepare-AHA2DataDir.ps1"
 ; The packaged browser host is upgraded as a whole directory. Remove the old
 ; tree first so a dependency dropped by a newer Playwright version does not
 ; linger and shadow the new one.
@@ -121,8 +108,6 @@ Filename: "{code:LocalManagementURL}"; Description: "打开 AHA2 管理页面"; 
 
 [Code]
 const
-  AHA2ServiceName = '{#ServiceName}';
-  AHA2FirewallRuleName = '{#FirewallRuleName}';
   AHA2UserTaskName = 'AHA2 User';
 
 var
@@ -130,7 +115,6 @@ var
   ListenModePage: TInputOptionWizardPage;
   PortPage: TInputQueryWizardPage;
   LANPage: TInputQueryWizardPage;
-  FirewallPage: TInputOptionWizardPage;
   UserTaskWasPresent: Boolean;
   UserProcessWasRunning: Boolean;
   InstallCommitted: Boolean;
@@ -196,13 +180,6 @@ begin
     ExpandConstant('{app}\aha2-tray.exe') + '" -ServerExecutable "' +
     ExpandConstant('{app}\aha2.exe') + '" -Listen "' + SelectedListenAddress() +
     '" -DataDir "' + SelectedDataDir('') + '"';
-end;
-
-function PrepareDataDirParameters(Param: String): String;
-begin
-  Result := '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' +
-    ExpandConstant('{app}\Prepare-AHA2DataDir.ps1') + '" -DataDir "' +
-    SelectedDataDir('') + '" -TaskName "' + AHA2UserTaskName + '"';
 end;
 
 function QuotedArgumentValue(const Arguments, Name: String): String;
@@ -273,11 +250,6 @@ begin
   Result := ListenModePage.SelectedValueIndex = 1;
 end;
 
-function FirewallSelected(): Boolean;
-begin
-  Result := IsLANMode() and FirewallPage.Values[0];
-end;
-
 function IsIPv4Address(const Value: String): Boolean;
 var
   Index, Parts, PartValue, Digits: Integer;
@@ -324,7 +296,6 @@ begin
     '数据库、配置、密钥和日志将保存在此目录。升级和卸载不会自动删除该目录。',
     False, SetupMessage(msgNewFolderName));
   DataDirPage.Add('');
-#ifdef PerUserInstall
   ExplicitDataDir := Trim(ExpandConstant('{param:DATADIR|}'));
   TaskDataDir := ExistingUserTaskDataDir();
   PreviousDataDir := GetPreviousData('DataDir', ExpandConstant('{localappdata}\AHA2'));
@@ -334,9 +305,6 @@ begin
     DataDirPage.Values[0] := TaskDataDir
   else
     DataDirPage.Values[0] := PreviousDataDir;
-#else
-  DataDirPage.Values[0] := GetPreviousData('DataDir', ExpandConstant('{commonappdata}\AHA2'));
-#endif
 
   TaskListenAddress := ExistingUserTaskListenAddress();
   ListenSeparator := Pos(':', TaskListenAddress);
@@ -382,11 +350,9 @@ begin
   else
     LANPage.Values[0] := GetPreviousData('ListenHost', '0.0.0.0');
 
-  FirewallPage := CreateInputOptionPage(LANPage.ID,
-    'Windows 防火墙', '是否允许本地子网访问？',
-    '安装器只会为 Private profile 和本地子网创建 TCP 入站规则。', False, False);
-  FirewallPage.Add('创建 AHA2 Windows 防火墙规则');
-  FirewallPage.Values[0] := GetPreviousData('Firewall', '0') = '1';
+  { No firewall page. A per-user install runs without elevation and cannot
+    create Windows firewall rules; LAN mode is left to the owner's own network
+    policy. }
 
   { No Agent API page. Left unset, the server derives its Agent API base URL from
     the listen address (127.0.0.1 for a wildcard bind), and that loopback address
@@ -398,12 +364,7 @@ end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
-#ifdef PerUserInstall
-  Result := (PageID = FirewallPage.ID) or
-    ((not IsLANMode()) and (PageID = LANPage.ID));
-#else
-  Result := (not IsLANMode()) and ((PageID = LANPage.ID) or (PageID = FirewallPage.ID));
-#endif
+  Result := (not IsLANMode()) and (PageID = LANPage.ID);
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
@@ -446,28 +407,11 @@ begin
     SetPreviousData(PreviousDataKey, 'ListenMode', 'local');
   SetPreviousData(PreviousDataKey, 'Port', SelectedPort());
   SetPreviousData(PreviousDataKey, 'ListenHost', Trim(LANPage.Values[0]));
-  if FirewallSelected() then
-    SetPreviousData(PreviousDataKey, 'Firewall', '1')
-  else
-    SetPreviousData(PreviousDataKey, 'Firewall', '0');
   { Agent API is not a wizard input, so nothing to carry over between runs.
     A stale AgentAPIURL left in the registry from an older version would still be
     read by the page initialisation that no longer exists, so make sure it is
     cleared rather than inherited. }
   SetPreviousData(PreviousDataKey, 'AgentAPIURL', '');
-end;
-
-function RunSC(const Arguments: String): Boolean;
-var
-  ResultCode: Integer;
-begin
-  Result := Exec(ExpandConstant('{sys}\sc.exe'), Arguments, '', SW_HIDE,
-    ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
-end;
-
-function ServiceExists(): Boolean;
-begin
-  Result := RunSC('query "' + AHA2ServiceName + '"');
 end;
 
 function RunScheduledTask(const Arguments: String): Boolean;
@@ -498,17 +442,6 @@ begin
   begin
     StopAHA2UserTask();
     RunScheduledTask('/Delete /F /TN "' + AHA2UserTaskName + '"');
-  end;
-end;
-
-procedure StopAHA2Service();
-var
-  ResultCode: Integer;
-begin
-  if ServiceExists() then
-  begin
-    Exec(ExpandConstant('{sys}\net.exe'), 'stop "' + AHA2ServiceName + '" /y',
-      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   end;
 end;
 
@@ -581,7 +514,6 @@ begin
     already-correct ACL-protected task. }
   if CompareText(ExpandConstant('{param:SKIPUSERTASK|0}'), '1') = 0 then
     Exit;
-#ifdef PerUserInstall
   { A manual per-user upgrade must preserve an existing login task. Its action
     is the authoritative runtime configuration and may be owner-startable but
     ACL-protected against Register-ScheduledTask -Force. The caller performs
@@ -593,7 +525,6 @@ begin
       RaiseException('无法重新启用已有 AHA2 登录任务。');
     Exit;
   end;
-#endif
   if not ExecAsOriginalUser(
     ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
     RegisterUserTaskParameters(''), ExpandConstant('{app}'), SW_HIDE,
@@ -603,58 +534,6 @@ begin
       RemoveAHA2UserTask();
     RaiseException('无法为原始登录用户注册 AHA2 登录任务。');
   end;
-#ifndef PerUserInstall
-  if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
-    PrepareDataDirParameters(''), ExpandConstant('{app}'), SW_HIDE,
-    ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
-  begin
-    if not UserTaskWasPresent then
-      RemoveAHA2UserTask();
-    RaiseException('无法为原始登录用户准备 AHA2 数据目录权限。');
-  end;
-#endif
-end;
-
-procedure ConfigureFirewall();
-var
-  ResultCode: Integer;
-begin
-#ifdef PerUserInstall
-  Exit;
-#else
-  Exec(ExpandConstant('{sys}\netsh.exe'),
-    'advfirewall firewall delete rule name="' + AHA2FirewallRuleName + '"',
-    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  if FirewallSelected() then
-    if not Exec(ExpandConstant('{sys}\netsh.exe'),
-      'advfirewall firewall add rule name="' + AHA2FirewallRuleName +
-      '" dir=in action=allow protocol=TCP localport=' + SelectedPort() +
-      ' remoteip=localsubnet profile=private', '', SW_HIDE,
-      ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
-      RaiseException('无法创建 AHA2 Windows 防火墙规则。');
-#endif
-end;
-
-procedure DisableAndStopLegacyAHA2Service(Required: Boolean);
-begin
-  if ServiceExists() then
-  begin
-    if Required and (not RunSC('config "' + AHA2ServiceName + '" start= disabled')) then
-      RaiseException('无法禁用旧版 AHA2 LocalSystem 服务；为避免下次启动抢占端口，安装已中止。');
-    if not Required then
-      RunSC('config "' + AHA2ServiceName + '" start= disabled');
-    StopAHA2Service();
-  end;
-end;
-
-procedure RemoveLegacyAHA2Service();
-begin
-  if ServiceExists() then
-  begin
-    DisableAndStopLegacyAHA2Service(True);
-    if not RunSC('delete "' + AHA2ServiceName + '"') then
-      Log('Legacy AHA2 service could not be deleted immediately; it remains stopped and disabled.');
-  end;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -663,22 +542,15 @@ begin
   begin
     InstallStarted := True;
     UserTaskWasPresent := UserTaskExists();
-#ifndef PerUserInstall
-    DisableAndStopLegacyAHA2Service(True);
-#endif
     UserProcessWasRunning := StopInstalledUserProcesses();
     StopAHA2UserTask();
   end
   else if CurStep = ssPostInstall then
   begin
-    ConfigureFirewall();
     ConfigureAHA2UserTask();
     if not RunScheduledTask('/Run /TN "' + AHA2UserTaskName + '"') then
       RaiseException('无法启动 AHA2 登录任务。');
     WaitForAHA2Health();
-#ifndef PerUserInstall
-    RemoveLegacyAHA2Service();
-#endif
     InstallCommitted := True;
   end;
 end;
@@ -708,18 +580,10 @@ begin
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
-var
-  ResultCode: Integer;
 begin
   if CurUninstallStep = usUninstall then
   begin
     StopInstalledUserProcesses();
     RemoveAHA2UserTask();
-#ifndef PerUserInstall
-    RemoveLegacyAHA2Service();
-    Exec(ExpandConstant('{sys}\netsh.exe'),
-      'advfirewall firewall delete rule name="' + AHA2FirewallRuleName + '"',
-      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-#endif
   end;
 end;

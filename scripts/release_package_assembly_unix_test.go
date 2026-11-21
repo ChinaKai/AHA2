@@ -44,7 +44,7 @@ func TestWindowsPackageAssemblyRejectsNonRegularInputs(t *testing.T) {
 	t.Run("rejects a FIFO installer", func(t *testing.T) {
 		packageDir := writeFixturePackage(t)
 		installerDir := writeFixtureInstallers(t)
-		setup := filepath.Join(installerDir, "AHA2-Setup-x64.exe")
+		setup := filepath.Join(installerDir, "AHA2-Setup-User-x64.exe")
 		if err := os.Remove(setup); err != nil {
 			t.Fatal(err)
 		}

@@ -22,40 +22,35 @@ http://<Windows 主机 IP>:8766
 
 公网部署必须在 AHA2 前增加 HTTPS 反向代理，不应直接公开明文 HTTP。
 
-## Windows 机器级安装（登录用户运行模式）
+## Windows 用户级安装
 
-GitHub Release 提供机器级安装包 `AHA2-Setup-x64.exe`。安装包需要管理员权限，
-程序默认安装到 `Program Files\AHA2`。
-应由最终运行 AHA2 的 Windows 登录用户直接双击安装包，让安装器自行请求 UAC；不要从已提权
-终端启动，也不要使用另一个管理员账号“运行方式”启动，否则 Windows 无法可靠保留原始用户令牌。
-安装向导允许选择数据目录，默认值为：
+Windows 只提供一个安装器：`AHA2-Setup-User-x64.exe`。它是用户级安装，安装和升级都不请求
+UAC，程序安装到当前用户的 `%LOCALAPPDATA%\Programs\AHA2`，默认数据目录为：
 
 ```text
-C:\ProgramData\AHA2
+%LOCALAPPDATA%\AHA2
 ```
 
-数据目录必须位于本机磁盘；SQLite 数据目录不支持映射盘或 UNC 网络共享。安装器从登录计划任务
-读取原始登录用户身份，只向该用户授予所选目录的递归修改权限。管理员提权仅用于写入
-`Program Files`、设置该目录权限、配置防火墙和清理遗留服务，AHA2 进程本身不以管理员或
-`LocalSystem` 身份运行。
+数据目录必须位于本机磁盘；SQLite 数据目录不支持映射盘或 UNC 网络共享。安装器不需要管理员权限，
+程序目录、数据目录和登录任务都属于当前登录用户，AHA2 进程始终以该用户的最低权限运行。
 
 安装向导还允许选择 HTTP 端口和访问范围：
 
-- 仅本机：监听 `127.0.0.1`，默认且不创建防火墙规则。
-- 局域网：可监听 `0.0.0.0` 或指定网卡 IPv4；可显式选择创建 Windows 防火墙规则。
+- 仅本机：监听 `127.0.0.1`，默认。
+- 局域网：可监听 `0.0.0.0` 或指定网卡 IPv4。
 
-安装器创建的防火墙规则只适用于 Private profile、TCP 目标端口和本地子网。安装包在
-`Program Files\AHA2` 同时安装 `aha2.exe` 和 GUI 子系统的 `aha2-tray.exe`。安装程序通过原始
-登录用户进程注册唯一的 `AHA2 User` Windows 登录计划任务；任务使用交互式、最低权限的用户
+用户级安装不创建 Windows 防火墙规则，也不创建 Windows 服务；需要局域网访问时请按自己的网络
+策略放行端口。安装包在程序目录同时安装 `aha2.exe` 和 GUI 子系统的 `aha2-tray.exe`。安装程序通过
+原始登录用户进程注册唯一的 `AHA2 User` Windows 登录计划任务；任务使用交互式、最低权限的用户
 令牌，在安装完成后以及该用户每次登录时直接启动：
 
 ```text
-aha2-tray.exe --server "<Program Files>\AHA2\aha2.exe" --listen "<IP>:<端口>" --data-dir "<数据目录>"
+aha2-tray.exe --server "<LOCALAPPDATA>\Programs\AHA2\aha2.exe" --listen "<IP>:<端口>" --data-dir "<数据目录>"
 ```
 
 `aha2-tray.exe` 自身使用 Windows GUI 子系统，不创建控制台窗口；它负责启动、监控和停止
 `aha2.exe serve`。计划任务 action 直接指向 tray，不长期依赖 PowerShell、Windows Script Host
-或 VBS launcher。PowerShell 仅在安装期间用于注册任务和设置数据目录 ACL。
+或 VBS launcher。PowerShell 仅在安装期间用于注册任务。
 
 tray 会把 `aha2.exe serve` 的 stdout/stderr 持久化到 `<数据目录>\logs\aha2-server.log`，
 并在其中记录每次启动的命令行、PID、退出码或启动错误；单个文件上限 10 MB，超出后把当前文件
@@ -77,36 +72,34 @@ Workspace 默认通过既有 SSH 连接建立反向隧道，不需要在安装�
 手动覆盖，普通 Workspace 会显示自动选择结果。特殊 NAT、跳板机、HTTPS 反向代理环境仍可
 用该隐藏覆盖排除故障。
 
-此登录用户模式是 Windows 安装器的短期正式默认方案。安装器会停止、禁用并尝试删除旧版本
-遗留的 `AHA2` LocalSystem 服务；若 Windows 暂时不能删除服务，保留 Stopped/Disabled 状态也
-不会在重启后抢占端口。
-
-升级安装会记住上次的数据目录、访问范围、IP、端口和防火墙选项，也允许重新选择这些值及安装
-路径。升级先禁用并结束唯一计划任务，停止所有已安装版本的 `aha2-tray.exe` 与 `aha2.exe`，再以
-`Register-ScheduledTask -Force` 覆盖同名任务的程序路径和完整参数，因此不会保留第二个任务或并行
-实例。遗留 `AHA2` LocalSystem 服务在任何迁移结果下都保持 Stopped/Disabled；新 tray 健康后安装器
-尽力删除服务，暂时删除失败也不会恢复其启动能力。若安装在切换完成前失败，安装器只尝试恢复升级
-前的用户任务/tray。卸载会先删除登录任务，再停止 tray/server、删除开始菜单快捷方式、遗留服务及安装器创建的防火墙
-规则，但保留所选数据目录，避免误删数据库、Secret Store 和 Setup Token；确认不再需要时应由
-管理员另行备份并删除。
+升级安装会记住上次的数据目录、访问范围、IP 和端口，也允许重新选择这些值及安装路径。升级先
+禁用并结束唯一计划任务，停止所有已安装版本的 `aha2-tray.exe` 与 `aha2.exe`，再以
+`Register-ScheduledTask -Force` 覆盖同名任务的程序路径和完整参数，因此不会保留第二个任务或
+并行实例。若安装在切换完成前失败，安装器只尝试恢复升级前的用户任务/tray。卸载会先删除登录
+任务，再停止 tray/server 并删除开始菜单快捷方式，但保留所选数据目录，避免误删数据库、
+Secret Store 和 Setup Token；确认不再需要时应由当前用户另行备份并删除。
 
 登录用户模式不使用 Windows Service Control Manager。GUI tray 保持 AHA2 控制面进程不可见，
-计划任务在 tray 异常退出后以 1 分钟间隔最多
-重试 3 次；仍未恢复时，可从开始菜单选择“启动 AHA2”，或在该用户下次登录时自动启动。用户
-注销后 AHA2 会随该登录会话结束，不提供未登录状态下的后台服务。
+计划任务在 tray 异常退出后以 1 分钟间隔最多重试 3 次；仍未恢复时，可从开始菜单选择
+“启动 AHA2”，或在该用户下次登录时自动启动。用户注销后 AHA2 会随该登录会话结束，不提供
+未登录状态下的后台服务。
 
 完成页可以选择打开 `http://127.0.0.1:8766`。Release 中的统一 `SHA256SUMS`
 可用于校验下载完整性。
 
-## Windows per-user 安装与构建出包
+### 从旧版机器级安装迁移
 
-频繁本地开发使用 `AHA2-Setup-User-x64.exe`。它以最低权限安装到当前用户的
-`LOCALAPPDATA\Programs\AHA2`，默认数据目录为 `LOCALAPPDATA\AHA2`，只监听 loopback，
-继续使用唯一的 `AHA2 User` 登录任务，不创建服务或防火墙规则。安装和后续升级均不请求 UAC。
+旧版本曾同时发布一个机器级安装器：需要 UAC、装到 `Program Files`、默认数据目录在
+`ProgramData`、可创建防火墙规则并清理旧服务。该机器级安装器已从构建、Release 资产和部署
+zip 中移除，仓库也不再提供对应的服务和防火墙处理。如果机器上装过：
 
-从已有机器级安装迁移时，可在首次 per-user 安装中显式复用用户已有写权限的数据目录；安装器会
-把唯一登录任务切换到用户级二进制。旧机器级文件不会被无权限删除，可在确认新实例健康后单独执行
-一次管理员卸载。
+- 先用当前用户级安装器装好并确认新实例健康；
+- 再用管理员权限从“应用和功能”卸载旧机器级安装；
+- 手工删除残留的旧程序目录、旧的 `AHA2` Windows 服务（若存在）和旧的防火墙规则；
+- 数据目录如仍指向旧的 `ProgramData` 位置，可在用户级向导里显式选择该目录（当前用户需有
+  写权限），或迁移到新的默认目录。
+
+不要同时保留两个实例争用同一端口和唯一登录任务。
 
 ### 职责边界
 
@@ -178,11 +171,11 @@ Web 构建和嵌入资源都写在副本中，仓库里只写 `--output-dir`；�
 ### Release 的可部署 Windows 包布局
 
 Release 的 Windows 作业直接调用 `scripts/build-windows-package.sh` 生成 `dist/package`
-（包内 `dist/`），再用其中的清单和文件构建机器级与 per-user 两个安装器，最后由
+（包内 `dist/`），再用其中的清单和文件构建用户级安装器，最后由
 `scripts/assemble-windows-package.py` 把官方 PackageDir 布局打成
 `AHA2-Windows-Package-x64.zip`。该组包脚本只写文件条目，不写目录元数据，避免归档里
 出现无部署价值、却需要额外路径校验的目录条目；Release 与 Linux 测试执行同一脚本。
-写入前，包目录、安装器目录、两份 Setup 和 `dist/` 下每个条目都先做 `lstat` 检查：
+写入前，包目录、安装器目录、Setup 和 `dist/` 下每个条目都先做 `lstat` 检查：
 符号链接、Windows junction/reparse point 和其他非常规文件一律报错退出，既不跟随
 链接目标，也不静默跳过目录链接。目录遍历同样不吞错：`os.walk` 扫到无法读取的
 子目录（权限不足、`scandir` 失败等）会带着路径和系统原因报错，组包以非 0 退出，
@@ -198,15 +191,14 @@ AHA2-Windows-Package-x64.zip
     node/
     release-manifest.json
   installer/
-    AHA2-Setup-x64.exe
     AHA2-Setup-User-x64.exe
 ```
 
 部署侧以解压后的目录作为 `PackageDir`，需要
 `<PackageDir>\installer\AHA2-Setup-User-x64.exe` 和
-`<PackageDir>\dist\release-manifest.json`；单个安装器资产
-`AHA2-Setup-x64.exe`、`AHA2-Setup-User-x64.exe` 仍单独发布，Linux/macOS 资产不变。
-发布作业用 `scripts/verify-windows-package-archive.py` 检查 zip：两份安装器与
+`<PackageDir>\dist\release-manifest.json`；用户级安装器
+`AHA2-Setup-User-x64.exe` 也作为单个资产单独发布，Linux/macOS 资产不变。
+发布作业用 `scripts/verify-windows-package-archive.py` 检查 zip：用户级安装器与
 `dist/release-manifest.json` 必须存在；清单不能为空，必须包含完整的必需文件范围
 （`scripts/windows-package-scope.json`），commit 与 Web 版本必须和当前 Release 期望值
 一致；`dist/` 下的文件集合必须与清单双向一致，并逐个比对 zip 内的 SHA256。缺少
@@ -304,10 +296,10 @@ Debian/Ubuntu 提供 amd64、arm64 `.deb`，Fedora/RHEL 提供 x86_64、aarch64 
 
 ## 首次 Owner 初始化
 
-首次启动会在所选数据目录生成 `setup-token`，用于首次创建 Owner，并在忘记密码时验证本机所有权。它是数据文件，不是程序安装目录中的文件。Windows 机器级安装默认位于：
+首次启动会在所选数据目录生成 `setup-token`，用于首次创建 Owner，并在忘记密码时验证本机所有权。它是数据文件，不是程序安装目录中的文件。Windows 用户级安装默认位于：
 
 ```text
-C:\ProgramData\AHA2\setup-token
+%LOCALAPPDATA%\AHA2\setup-token
 ```
 
 打开登录页，选择初始化 Owner，输入：
@@ -316,21 +308,17 @@ C:\ProgramData\AHA2\setup-token
 - Owner 用户名
 - 至少 10 位密码
 
-Owner 创建后公开注册自动关闭；Setup Token 只保留用于登录页的本机密码恢复。该文件等同于恢复凭据，应继续限制为管理员和 AHA2 运行用户可读。
+Owner 创建后公开注册自动关闭；Setup Token 只保留用于登录页的本机密码恢复。该文件等同于恢复凭据，应继续限制为当前 Windows 用户可读。
 
 如果安装时自定义了数据目录，应以 `AHA2 User` 计划任务参数中的实际 `--data-dir` 为准。密码恢复失败时，不要使用程序安装目录中遗留的同名文件；文件被替换或恢复后，还需重启 AHA2 才会重新加载其内容。
 
 ## 数据目录
 
 ```text
-C:\ProgramData\AHA2
+%LOCALAPPDATA%\AHA2
 ```
 
-默认目录的写权限应只授予：
-
-- 当前 Windows 用户
-- `NT AUTHORITY\SYSTEM`
-- 本机 Administrators
+默认目录属于当前 Windows 用户，写权限只需要授予该用户；不需要管理员权限，也不需要额外的 ACL 设置。
 
 包含：
 
@@ -389,7 +377,6 @@ Release 只包含标准安装包，不发布裸二进制。`aha2-sync` 是单独
 服务器上的同步中心，不需要安装到每台客户端：
 
 ```text
-AHA2-Setup-x64.exe
 AHA2-Setup-User-x64.exe
 AHA2-Windows-Package-x64.zip
 aha2_<version>_amd64.deb
@@ -409,9 +396,9 @@ SHA256SUMS
 
 构建机交付给本机安装器的是 Windows 包，由 `scripts/build-windows-package.sh` 生成，包含
 `aha2-windows-amd64.exe`、`aha2-tray-windows-amd64.exe`、飞书插件目录、`browser-host/`、
-`node/` 和 `release-manifest.json`。Release 把它们和两个安装器一起打成
+`node/` 和 `release-manifest.json`。Release 把它们和用户级安装器一起打成
 `AHA2-Windows-Package-x64.zip`，形成部署脚本直接消费的 PackageDir 布局。包的构建和清单
-格式见“Windows per-user 安装与构建出包”。
+格式见“Windows 用户级安装”。
 
 本地仅校验安装器定义、不生成二进制：
 

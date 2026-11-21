@@ -14,7 +14,6 @@ param(
     [string]$OutputDir = "",
     [string]$Version = "dev",
     [string]$ISCCPath = "",
-	[switch]$PerUser,
     [switch]$ValidateOnly
 )
 
@@ -25,11 +24,10 @@ $global:LASTEXITCODE = 0
 $repo = [IO.Path]::GetFullPath($RepoPath)
 $iss = Join-Path $repo "installer\windows\AHA2.iss"
 $userTaskScript = Join-Path $repo "installer\windows\Register-AHA2UserTask.ps1"
-$dataDirScript = Join-Path $repo "installer\windows\Prepare-AHA2DataDir.ps1"
 if (-not (Test-Path -LiteralPath (Join-Path $repo "go.mod") -PathType Leaf)) {
     throw "RepoPath is not an AHA2 repository: $repo"
 }
-foreach ($requiredFile in @($iss, $userTaskScript, $dataDirScript)) {
+foreach ($requiredFile in @($iss, $userTaskScript)) {
     if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
         throw "Windows installer source is missing: $requiredFile"
     }
@@ -85,9 +83,14 @@ if ([string]::IsNullOrWhiteSpace($normalizedVersion)) {
 }
 
 $source = Get-Content -Raw -Encoding UTF8 -LiteralPath $iss
+# The Windows installer is per-user only. These contracts pin the parts that
+# make that true (no elevation, LocalAppData install, user login task) and the
+# parts the release verifier depends on (manifest, browser host, Node runtime).
 $requiredContracts = @(
-    '#define ServiceName "AHA2"',
     '#define ListenAddress "127.0.0.1:8766"',
+    'PrivilegesRequired=lowest',
+    'DefaultDirName={localappdata}\Programs\AHA2',
+    'OutputBaseFilename=AHA2-Setup-User-x64',
     '#define SourceTrayExe',
     'DestName: "aha2.exe"',
     'DestName: "aha2-tray.exe"',
@@ -109,18 +112,13 @@ $requiredContracts = @(
     "CreateInputOptionPage",
     "SelectedListenAddress",
     "RegisterPreviousData",
-    "remoteip=localsubnet profile=private",
     "{code:LocalManagementURL}",
     "IconFilename: ""{app}\aha2-tray.exe""",
-    "{commonappdata}\AHA2",
     "runasoriginaluser",
     "TrayParameters",
     "StopInstalledUserProcesses",
     "Get-Process -Name ''aha2-tray'',''aha2''",
-    "DisableAndStopLegacyAHA2Service(True)",
-    "RemoveLegacyAHA2Service()",
     "Register-AHA2UserTask.ps1",
-    "Prepare-AHA2DataDir.ps1",
     "[InstallDelete]",
     'Type: files; Name: "{app}\Run-AHA2User.vbs"',
     "ConfigureAHA2UserTask",
@@ -151,12 +149,6 @@ foreach ($forbidden in @("wscript.exe", ".vbs", "powershell.exe", "service run",
         throw "Windows login task still contains a forbidden long-running host contract: $forbidden"
     }
 }
-$dataDirSource = Get-Content -Raw -Encoding UTF8 -LiteralPath $dataDirScript
-foreach ($contract in @("Get-ScheduledTask", "Principal.UserId", "SetAccessRuleProtection", "SecurityIdentifier]'S-1-5-18'", "SecurityIdentifier]'S-1-5-32-544'", "Set-Acl", "FileSystemRights]::Modify", "New-Item -ItemType Directory")) {
-    if (-not $dataDirSource.Contains($contract)) {
-        throw "Windows user data directory contract is missing: $contract"
-    }
-}
 foreach ($forbidden in @("service run --listen", "actions= restart/", "ConfigureAndStartAHA2Service", 'Source: "Run-AHA2User.vbs"', "wscript.exe")) {
     if ($source.Contains($forbidden)) {
         throw "Installer still contains a forbidden legacy runtime contract: $forbidden"
@@ -169,8 +161,7 @@ if ($ValidateOnly) {
     $nodeState = if ((Test-Path -LiteralPath $nodeInputPath -PathType Leaf) -and (Test-Path -LiteralPath $nodeLicensePath -PathType Leaf)) {"found"} else {"not present"}
 	$feishuState = if ($feishuPluginPath -and (Test-Path -LiteralPath $feishuPluginPath -PathType Leaf) -and (Test-Path -LiteralPath $feishuManifestPath -PathType Leaf)) { "found" } else { "not bundled" }
 	$manifestState = if (Test-Path -LiteralPath $manifestInputPath -PathType Leaf) { "found" } else { "not present" }
-	$mode = if ($PerUser) { "per-user" } else { "per-machine" }
-	Write-Output "Installer definition valid ($mode); server input $serverState; tray input $trayState; browser host $browserHostState; node runtime $nodeState; Feishu plugin $feishuState; release manifest $manifestState."
+	Write-Output "Installer definition valid (per-user); server input $serverState; tray input $trayState; browser host $browserHostState; node runtime $nodeState; Feishu plugin $feishuState; release manifest $manifestState."
     exit 0
 }
 
@@ -310,10 +301,7 @@ if ($feishuPluginPath) {
 	$compilerArgs += "/DSourceFeishuPlugin=$feishuPluginPath"
 	$compilerArgs += "/DSourceFeishuManifest=$feishuManifestPath"
 }
-if ($PerUser) {
-	$compilerArgs += "/DPerUserInstall=1"
-}
-$setupName = if ($PerUser) { "AHA2-Setup-User-x64.exe" } else { "AHA2-Setup-x64.exe" }
+$setupName = "AHA2-Setup-User-x64.exe"
 $setup = Join-Path $outputPath $setupName
 $hashFile = "$setup.sha256"
 Remove-Item -LiteralPath $setup,$hashFile -Force -ErrorAction SilentlyContinue
