@@ -580,8 +580,12 @@ func parsePetBrain(text string) PetBrainResult {
 }
 
 type PetSettingsInput struct {
-	Enabled     bool   `json:"enabled"`
-	Character   string `json:"character"`
+	Enabled   bool   `json:"enabled"`
+	Character string `json:"character"`
+	// ChatModelID is the legacy single-model field. It is only consulted when
+	// no source-first pet selection is present, and it then selects the one
+	// unified Provider model. A value that disagrees with the pet selection is
+	// ignored: the chat model can no longer move independently.
 	ChatModelID string `json:"chat_model_id"`
 	// BrainModelID is the legacy pet runtime field. New callers select a
 	// source-first runtime with the four PetModel* fields; the catalog model ID
@@ -636,15 +640,10 @@ func (s *Service) UpdateOwnerPetSettings(ctx context.Context, input PetSettingsI
 		}
 		return false
 	}
-	if chatModelID := strings.TrimSpace(input.ChatModelID); chatModelID != "" {
-		if !validModel(chatModelID) {
-			return OwnerAssistantView{}, fmt.Errorf("聊天模型不可用，请选择 Provider 模型")
-		}
-		assistant.ModelID = chatModelID
-	}
-	// The pet runtime may use any supported source. It is stored in the legacy
-	// brain_model_id column so old rows and readers keep working, while the chat
-	// panel keeps its Provider-only model_id.
+	// One model fact: the source-first pet selection below is the only write
+	// path. The legacy chat_model_id/brain_model_id inputs are accepted for old
+	// clients but map onto the same unified field instead of creating a second
+	// chat model. pet_brain_model_id is authoritative; model_id is its mirror.
 	petSelectionProvided := strings.TrimSpace(input.PetModelSource) != "" ||
 		strings.TrimSpace(input.PetModelID) != "" ||
 		strings.TrimSpace(input.PetWireModel) != "" ||
@@ -674,13 +673,22 @@ func (s *Service) UpdateOwnerPetSettings(ctx context.Context, input PetSettingsI
 			assistant.BrainModelID = model.ID
 		}
 	} else if chatModelID := strings.TrimSpace(input.ChatModelID); chatModelID != "" {
-		// Compatibility with the old single-model setting: chat and autonomy
-		// shared one Provider model.
-		assistant.BrainModelID = assistant.ModelID
+		// Compatibility with the old single-model setting: an old client that
+		// only sent chat_model_id selects that Provider model for chat and
+		// autonomy together.
+		if !validModel(chatModelID) {
+			return OwnerAssistantView{}, fmt.Errorf("聊天模型不可用，请选择 Provider 模型")
+		}
+		model, resolveErr := s.resolvePetRuntimeSelection(ctx, domain.ModelSourceProvider, chatModelID, "", "")
+		if resolveErr != nil {
+			return OwnerAssistantView{}, fmt.Errorf("宠物模型不可用：%w", resolveErr)
+		}
+		assistant.BrainModelID = model.ID
 	}
 	if strings.TrimSpace(assistant.BrainModelID) == "" {
-		assistant.BrainModelID = assistant.ModelID
+		assistant.BrainModelID = strings.TrimSpace(assistant.ModelID)
 	}
+	assistant.ModelID = strings.TrimSpace(assistant.BrainModelID)
 	allowed := map[string]bool{"walk": true, "jump": true, "happy": true, "angry": true}
 	actions := []string{}
 	seen := map[string]bool{}
@@ -756,6 +764,11 @@ func (s *Service) UpdateOwnerPetSettings(ctx context.Context, input PetSettingsI
 		return OwnerAssistantView{}, err
 	}
 	if err := s.store.UpdateOwnerPetSettings(ctx, assistant.ID, assistant.PetEnabled, assistant.BrainModelID, assistant.PetActions, assistant.UpdatedAt); err != nil {
+		return OwnerAssistantView{}, err
+	}
+	// Keep the derived chat mirror in the same committed value even if an older
+	// writer raced this save; a reader must never see two different models.
+	if err := s.store.UpdateOwnerAssistantModel(ctx, assistant.ID, assistant.BrainModelID, assistant.UpdatedAt); err != nil {
 		return OwnerAssistantView{}, err
 	}
 	if err := s.store.UpdateOwnerPetBudget(ctx, assistant.ID, assistant.PetIdleMinutes, assistant.PetQuietEnabled, assistant.PetQuietStart, assistant.PetQuietEnd, assistant.PetHourlyLimit, assistant.UpdatedAt); err != nil {

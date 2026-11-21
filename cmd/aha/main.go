@@ -509,6 +509,7 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	defer knowledgeVaultSyncer.Stop()
 	appService.SetBuildInfo(version, webVersion, time.Now().UTC())
 	appService.MigratePetTaskGoal(ctx)
+	appService.MigrateOwnerAssistantUnifiedModel(ctx)
 	appService.StartPetTaskNotifications()
 	appService.SetProxyRuntime(proxyRuntime)
 	appService.SetRunContext(ctx)

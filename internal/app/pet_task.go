@@ -168,6 +168,40 @@ func (s *Service) storeModelForPetRuntime(ctx context.Context, modelID string) (
 	return model, true
 }
 
+// ensurePetWorkspace creates the system pet project and its local writable
+// workspace on first use. Chat with a Claude native or Codex official model runs
+// in this workspace through the backend CLI, so it must be available even when
+// the pet Task itself has not been created or the pet is disabled.
+func (s *Service) ensurePetWorkspace(ctx context.Context) (domain.Workspace, error) {
+	if workspace, err := s.store.Workspace(ctx, petWorkspaceID); err == nil {
+		return workspace, nil
+	}
+	now := s.now().UTC()
+	project, projectErr := s.store.Project(ctx, petProjectID)
+	if projectErr != nil {
+		project = domain.Project{
+			ID: petProjectID, Name: "宠物", Description: "系统管理的宠物 Task 项目",
+			ProjectType: "system", KnowledgePolicy: "none", CreatedAt: now, UpdatedAt: now,
+		}
+		if err := s.store.CreateProject(ctx, project); err != nil {
+			return domain.Workspace{}, err
+		}
+	}
+	root := filepath.Join(s.store.DataDir(), "pet-workspace")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return domain.Workspace{}, err
+	}
+	workspace := domain.Workspace{
+		ID: petWorkspaceID, ProjectID: project.ID, Name: "pet-workspace",
+		Locality: "local", Transport: "native", RootPath: root, Health: "ready",
+		AgentAPIMode: "embedded", CreatedAt: now, UpdatedAt: now,
+	}
+	if err := s.store.CreateWorkspace(ctx, workspace); err != nil {
+		return domain.Workspace{}, err
+	}
+	return workspace, nil
+}
+
 // ensureOwnerPetTask creates the visible system Pet Task and its dedicated
 // writable workspace on first use. The pet is a normal Task so it can use the
 // normal backend conversation, while pet tools come from the MCP endpoint.
@@ -231,30 +265,8 @@ func (s *Service) ensureOwnerPetTask(ctx context.Context, assistant *domain.Owne
 		s.ensurePetTaskStarted(ctx, existing)
 		return petTaskID, nil
 	}
-	now := s.now().UTC()
-	project, projectErr := s.store.Project(ctx, petProjectID)
-	if projectErr != nil {
-		project = domain.Project{
-			ID: petProjectID, Name: "宠物", Description: "系统管理的宠物 Task 项目",
-			ProjectType: "system", KnowledgePolicy: "none", CreatedAt: now, UpdatedAt: now,
-		}
-		if err := s.store.CreateProject(ctx, project); err != nil {
-			return "", err
-		}
-	}
-	if _, err := s.store.Workspace(ctx, petWorkspaceID); err != nil {
-		root := filepath.Join(s.store.DataDir(), "pet-workspace")
-		if err := os.MkdirAll(root, 0o700); err != nil {
-			return "", err
-		}
-		workspace := domain.Workspace{
-			ID: petWorkspaceID, ProjectID: project.ID, Name: "pet-workspace",
-			Locality: "local", Transport: "native", RootPath: root, Health: "ready",
-			AgentAPIMode: "embedded", CreatedAt: now, UpdatedAt: now,
-		}
-		if err := s.store.CreateWorkspace(ctx, workspace); err != nil {
-			return "", err
-		}
+	if _, err := s.ensurePetWorkspace(ctx); err != nil {
+		return "", err
 	}
 	petRuntime, petRuntimeFound := s.storeModelForPetRuntime(ctx, petModelID)
 	modelSource := petRuntime.Source
@@ -345,6 +357,24 @@ func (s *Service) migratePetTaskGoal(ctx context.Context, task domain.Task) doma
 		task.CurrentGoal = petTaskMissionGoal
 	}
 	return task
+}
+
+// MigrateOwnerAssistantUnifiedModel applies the single-model migration once at
+// server start. pet_brain_model_id becomes authoritative and model_id a derived
+// mirror, so a legacy row where the chat model and pet model diverged stops
+// presenting two different models.
+func (s *Service) MigrateOwnerAssistantUnifiedModel(ctx context.Context) {
+	if s == nil || s.store == nil {
+		return
+	}
+	assistant, err := s.store.EnsureOwnerAssistant(ctx, s.now().UTC())
+	if err != nil {
+		log.Printf("migrate owner assistant unified model: %v", err)
+		return
+	}
+	if err := s.normalizeAssistantUnifiedModel(ctx, &assistant); err != nil {
+		log.Printf("migrate owner assistant unified model: %v", err)
+	}
 }
 
 // MigratePetTaskGoal applies the Pet Task goal migration once at server start

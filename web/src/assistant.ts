@@ -76,7 +76,6 @@ let trailLayer: HTMLElement;
 let bubbleTitle: HTMLElement;
 let bubbleBody: HTMLElement;
 let panel: HTMLElement;
-let modelSelect: HTMLSelectElement;
 let modelLabel: HTMLElement;
 let view: OwnerAssistantView | null = null;
 let petModelContext: {models: Model[]; accounts: CodexAccount[]; workspace?: Workspace} | null = null;
@@ -140,7 +139,7 @@ let settingsQuietStart: HTMLInputElement;
 let settingsQuietEnabled: HTMLInputElement;
 let settingsQuietEnd: HTMLInputElement;
 let settingsCharacters: HTMLElement;
-let settingsChatModel: HTMLSelectElement;
+let settingsChatModel: HTMLInputElement;
 let settingsPetModelHost: HTMLElement;
 let settingsBrainStatus: HTMLElement;
 let settingsError: HTMLElement;
@@ -194,7 +193,6 @@ export function mountAssistant(): void {
             <span id="assistant-character-mini" class="assistant-character-mini" aria-hidden="true"></span>
             <span class="assistant-character-badge" aria-hidden="true">✦</span>
           </button>
-          <select id="assistant-model" aria-label="助手模型"></select>
           <button id="assistant-close" class="icon-button" type="button" aria-label="收起小A">×</button>
         </div>
       </header>
@@ -257,9 +255,9 @@ export function mountAssistant(): void {
             <p class="assistant-settings-note">权限变更立即生效，不重置会话；无权限的工具调用会被服务端拒绝。删除 Task/项目/Workspace 会先创建审批，owner 批准后才执行。</p>
           </section>
           <section><h3>模型</h3>
-            <label class="assistant-settings-field">助手聊天模型（Provider）<select id="pet-chat-model"></select></label>
+            <label class="assistant-settings-field">助手聊天模型<input id="pet-chat-model" type="text" readonly aria-describedby="pet-chat-model-help"></label>
             <div id="pet-model-source-host"></div>
-            <p class="assistant-settings-note">聊天面板使用 Provider 模型；自主行为在宠物 Task 中运行，可选择 Provider、Claude native 或 Codex 官方账号。不可用来源不会回退。</p>
+            <p class="assistant-settings-note" id="pet-chat-model-help">聊天和自主行为使用同一个模型；下面的「模型来源 / 模型账号」是唯一修改入口。不可用来源不会回退。</p>
           </section>
           <section class="assistant-settings-danger"><h3>恢复出厂设置</h3>
             <p class="assistant-settings-note">只清理本机宠物 Workspace、Task、工作记录/身份设定、审批与活动记录、聊天记录，并停用本机宠物。宠物项目、同步镜像和其他设备的宠物不受影响；模型、形象和权限设置会保留。</p>
@@ -319,7 +317,7 @@ export function mountAssistant(): void {
   settingsQuietStart = layer.querySelector<HTMLInputElement>("#pet-quiet-start")!;
   settingsQuietEnd = layer.querySelector<HTMLInputElement>("#pet-quiet-end")!;
   settingsCharacters = layer.querySelector<HTMLElement>("#pet-character-options")!;
-  settingsChatModel = layer.querySelector<HTMLSelectElement>("#pet-chat-model")!;
+  settingsChatModel = layer.querySelector<HTMLInputElement>("#pet-chat-model")!;
   settingsPetModelHost = layer.querySelector<HTMLElement>("#pet-model-source-host")!;
   settingsBrainStatus = layer.querySelector<HTMLElement>("#pet-brain-status")!;
   settingsError = layer.querySelector<HTMLElement>("#pet-settings-error")!;
@@ -347,7 +345,6 @@ export function mountAssistant(): void {
   bubbleBody = layer.querySelector<HTMLElement>("#assistant-bubble-body")!;
   panel = layer.querySelector<HTMLElement>("#assistant-panel")!;
   panel.style.zIndex = "4";
-  modelSelect = layer.querySelector<HTMLSelectElement>("#assistant-model")!;
   modelLabel = layer.querySelector<HTMLElement>("#assistant-model-name")!;
   cachedCharacter = readCachedCharacter();
   characterReady = Boolean(cachedCharacter);
@@ -507,16 +504,6 @@ function bindEvents(): void {
       setPanelOpen(true);
     }
   });
-  modelSelect.addEventListener("change", () => {
-    const modelID = modelSelect.value;
-    if (!modelID || !view) return;
-    void api.updateOwnerAssistant({model_id: modelID}).then(result => {
-      if (view) {
-        view = {...view, assistant: result.assistant, models: result.models, model_name: result.model_name};
-        renderModel();
-      }
-    }).catch(error => appendLocalError(error instanceof Error ? error.message : String(error)));
-  });
   characterButton.addEventListener("click", event => {
     event.stopPropagation();
     void openPetSettings();
@@ -609,7 +596,13 @@ function bindEvents(): void {
 async function refreshAssistant(): Promise<void> {
   try {
     const result = await api.ownerAssistant();
-    view = {assistant: result.assistant, messages: result.messages || [], models: result.models || [], model_name: result.model_name, brain_model_name: result.brain_model_name, tools: result.tools || []};
+    view = {assistant: result.assistant, messages: result.messages || [], models: result.models || [], model_name: result.model_name, brain_model_name: result.brain_model_name, tools: result.tools || [],
+      pet_model_id: result.pet_model_id, pet_model_source: result.pet_model_source,
+      pet_wire_model: result.pet_wire_model, pet_codex_account_id: result.pet_codex_account_id,
+      pet_model_name: result.pet_model_name, pet_account_name: result.pet_account_name,
+      pet_model_label: result.pet_model_label, pet_model_available: result.pet_model_available,
+      pet_model_unavailable_reason: result.pet_model_unavailable_reason,
+      pet_workspace_id: result.pet_workspace_id};
     rememberCharacter(view.assistant.character);
     renderCharacter();
     renderCharacterMenu();
@@ -774,7 +767,14 @@ function renderPetSettings(): void {
     <span class="assistant-character-preview">${characterMarkup(character)}</span>
     <strong>${escapeHTML(isPetNoCharacter(character.id) ? character.name : character.nickname)}</strong>
   </button>`).join("");
-  settingsChatModel.innerHTML = view.models.map(model => `<option value="${escapeHTML(model.id)}" ${model.id === view!.assistant.model_id ? "selected" : ""}>${escapeHTML([model.provider_name, model.display_name].filter(Boolean).join(" / ") || model.id)}</option>`).join("");
+  // Read-only mirror of the unified model. It is rendered from the same
+  // pet_model_* fields that seed the source picker below, so the two cannot
+  // show different values.
+  settingsChatModel.value = String(view.pet_model_label || "未配置模型");
+  settingsChatModel.title = view.pet_model_available === false
+    ? `当前配置不可用：${view.pet_model_unavailable_reason || "请重新选择"}`
+    : "聊天和自主行为使用同一个模型；请用下面的「模型来源 / 模型账号」修改";
+  settingsChatModel.classList.toggle("is-unavailable", view.pet_model_available === false);
   renderPetModelPicker();
   settingsIdleMinutes.value = String(view.assistant.pet_idle_minutes || 5);
   settingsHourlyLimit.value = String(view.assistant.pet_hourly_limit ?? 6);
@@ -871,7 +871,7 @@ async function savePetSettings(): Promise<void> {
   settingsError.hidden = true;
   try {
     const result = await api.updatePetSettings({
-      enabled, character, chat_model_id: settingsChatModel.value,
+      enabled, character,
       pet_model_source: petRuntime.model_source, pet_model_id: petRuntime.model_id,
       pet_wire_model: petRuntime.wire_model, pet_codex_account_id: petRuntime.codex_account_id,
       actions,
@@ -895,7 +895,11 @@ async function savePetSettings(): Promise<void> {
       model_name: result.model_name ?? view.model_name, brain_model_name: result.brain_model_name ?? view.brain_model_name,
       pet_model_id: result.pet_model_id ?? view.pet_model_id, pet_model_source: result.pet_model_source ?? view.pet_model_source,
       pet_wire_model: result.pet_wire_model ?? view.pet_wire_model, pet_codex_account_id: result.pet_codex_account_id ?? view.pet_codex_account_id,
-      pet_model_name: result.pet_model_name ?? view.pet_model_name, pet_workspace_id: result.pet_workspace_id ?? view.pet_workspace_id,
+      pet_model_name: result.pet_model_name ?? view.pet_model_name, pet_account_name: result.pet_account_name ?? view.pet_account_name,
+      pet_model_label: result.pet_model_label ?? view.pet_model_label,
+      pet_model_available: result.pet_model_available ?? view.pet_model_available,
+      pet_model_unavailable_reason: result.pet_model_unavailable_reason ?? view.pet_model_unavailable_reason,
+      pet_workspace_id: result.pet_workspace_id ?? view.pet_workspace_id,
     };
     rememberCharacter(view.assistant.character);
     renderCharacter();
@@ -1304,13 +1308,14 @@ function schedulePetSync(patch: PetStatePatch): void {
 
 function renderModel(): void {
   if (!view) return;
-  modelLabel.textContent = view.model_name ? "模型 · " + view.model_name : "未配置模型";
-  const options = view.models.map(model => {
-    const label = [model.provider_name, model.display_name].filter(Boolean).join(" / ");
-    return `<option value="${escapeHTML(model.id)}" ${model.id === view!.assistant.model_id ? "selected" : ""}>${escapeHTML(label || model.id)}</option>`;
-  }).join("");
-  modelSelect.innerHTML = options || `<option value="">未配置模型</option>`;
-  modelSelect.disabled = view.models.length <= 1;
+  // One model for chat and autonomy: the panel shows the unified selection and
+  // offers no independent chooser. The source picker in pet settings is the
+  // only place that writes it.
+  const label = String(view.pet_model_label || view.model_name || "").trim();
+  modelLabel.textContent = label || "未配置模型";
+  modelLabel.title = view.pet_model_available === false
+    ? `当前配置不可用：${view.pet_model_unavailable_reason || "请重新选择"}`
+    : label;
 }
 
 function nickname(): string {

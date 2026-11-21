@@ -58,6 +58,16 @@ func (s *Store) UpdateOwnerAssistant(ctx context.Context, item domain.OwnerAssis
 	return err
 }
 
+// UpdateOwnerAssistantModel writes the unified model in one statement. The pet
+// runtime column remains the source of truth and model_id is the derived
+// compatibility mirror, so a reader can never observe them disagreeing.
+func (s *Store) UpdateOwnerAssistantModel(ctx context.Context, id, modelID string, updatedAt time.Time) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE owner_assistants SET model_id=?,pet_brain_model_id=?,updated_at=? WHERE id=?`,
+		modelID, modelID, timeString(updatedAt), id)
+	return err
+}
+
 func splitPetActions(value string) []string {
 	result := []string{}
 	for _, item := range strings.Split(value, ",") {

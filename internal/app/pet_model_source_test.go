@@ -47,11 +47,11 @@ func TestPetModelSettingsSelectOfficialAccountAndReadBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantModelID := domain.OfficialCodexModelID(account.ID, "gpt-pet-official")
-	if view.Assistant.BrainModelID != wantModelID {
-		t.Fatalf("pet runtime model=%q, want %q", view.Assistant.BrainModelID, wantModelID)
+	if view.Assistant.BrainModelID != wantModelID || view.Assistant.ModelID != wantModelID {
+		t.Fatalf("unified model=(brain=%q chat=%q), want %q", view.Assistant.BrainModelID, view.Assistant.ModelID, wantModelID)
 	}
-	if view.Assistant.ModelID != fixture.model.ID {
-		t.Fatalf("chat model changed to %q; it must stay on the Provider chat model", view.Assistant.ModelID)
+	if view.Assistant.ModelID != wantModelID {
+		t.Fatalf("chat model=%q; it must mirror the unified pet model %q", view.Assistant.ModelID, wantModelID)
 	}
 	if view.PetModelSource != domain.ModelSourceOfficial || view.PetWireModel != "gpt-pet-official" ||
 		view.PetCodexAccountID != account.ID || view.PetModelName != "GPT Pet Official" {
@@ -76,8 +76,8 @@ func TestPetModelSettingsSelectClaudeNative(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantModelID := domain.ClaudeNativeModelID("claude-sonnet-4-5")
-	if view.Assistant.BrainModelID != wantModelID {
-		t.Fatalf("pet runtime model=%q, want %q", view.Assistant.BrainModelID, wantModelID)
+	if view.Assistant.BrainModelID != wantModelID || view.Assistant.ModelID != wantModelID {
+		t.Fatalf("unified model=(brain=%q chat=%q), want %q", view.Assistant.BrainModelID, view.Assistant.ModelID, wantModelID)
 	}
 	if view.PetModelSource != domain.ModelSourceClaudeNative || view.PetWireModel != "claude-sonnet-4-5" || view.PetCodexAccountID != "" {
 		t.Fatalf("pet model readback=%#v", view)
@@ -100,7 +100,7 @@ func TestPetModelSettingsProviderDoesNotRegress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if view.Assistant.BrainModelID != fixture.model.ID || view.PetModelSource != domain.ModelSourceProvider ||
+	if view.Assistant.BrainModelID != fixture.model.ID || view.Assistant.ModelID != fixture.model.ID || view.PetModelSource != domain.ModelSourceProvider ||
 		view.PetWireModel != fixture.model.WireModel {
 		t.Fatalf("provider pet selection=%#v", view)
 	}

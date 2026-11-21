@@ -54,6 +54,20 @@ test("pet uses the cached character before the first API response", async () => 
   assert.match(styles, /\.assistant-pet\.character-loading \{ visibility: hidden; \}/);
 });
 
+test("chat model is a read-only mirror of the unified pet model", async () => {
+  const assistant = await readFile(resolve(root, "build", "assistant.js"), "utf8");
+  // The chat field is a readonly input, not a chooser, and the old panel-level
+  // model switch is gone: the source picker is the only edit entry.
+  assert.match(assistant, /id="pet-chat-model" type="text" readonly/);
+  assert.doesNotMatch(assistant, /id="pet-chat-model"><\/select>/);
+  assert.doesNotMatch(assistant, /id="assistant-model"/);
+  // Saving must not send the legacy independent chat field at all.
+  assert.doesNotMatch(assistant, /chat_model_id/);
+  // The read-only box and the picker are both fed by the server's one label.
+  assert.match(assistant, /settingsChatModel\.value = String\(view\.pet_model_label/);
+  assert.match(assistant, /modelLabel\.textContent = label/);
+});
+
 test("built assistant ships the no-character choice without a pet kill switch", async () => {
   const assistant = await readFile(resolve(root, "build", "assistant.js"), "utf8");
   const character = await readFile(resolve(root, "build", "pet_character.js"), "utf8");

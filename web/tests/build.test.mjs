@@ -3893,7 +3893,10 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   // the shared bundle gained the per-form labels, endpoints and fields (+480
   // JS, +41 CSS over main's 272,829); measured 273,350, next 256-byte boundary.
   // ADB 三模式新增 UI，实测 273,350，owner 侧分身上限 +512 字节（272,896 → 273,408）。
-  const FIRST_SCREEN_GZIP_BUDGET = 273408;
+  // task-728 unified pet model: the readonly chat field, its shared Chinese/English
+  // copy and the unavailable-state style add 136 bytes over 273,408; measured
+  // 273,544, next 256-byte boundary.
+  const FIRST_SCREEN_GZIP_BUDGET = 273664;
   // The version query parameter is a content hash and its hex digits change
   // how the same code gzips: main already sits exactly on the budget, so a
   // hash-only change could trip it without growing the payload. Mask the

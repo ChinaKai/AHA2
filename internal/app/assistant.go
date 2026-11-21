@@ -11,6 +11,7 @@ import (
 
 	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/gateway"
+	"github.com/ChinaKai/AHA2/internal/proxyconfig"
 )
 
 const (
@@ -18,6 +19,10 @@ const (
 	assistantHistoryLimit = 12
 	assistantTaskLimit    = 40
 	assistantAskTimeout   = 60 * time.Second
+	// assistantBackendTimeout bounds a CLI-backed chat. Starting a backend and
+	// producing one answer is slower than a direct HTTP completion, but a chat
+	// must not inherit the full multi-minute Turn budget.
+	assistantBackendTimeout = 3 * time.Minute
 )
 
 type AssistantModelOption struct {
@@ -33,23 +38,30 @@ type PetToolInfo struct {
 }
 
 type OwnerAssistantView struct {
-	Assistant      domain.OwnerAssistant     `json:"assistant"`
-	Messages       []domain.AssistantMessage `json:"messages"`
-	Models         []AssistantModelOption    `json:"models"`
-	ModelName      string                    `json:"model_name,omitempty"`
-	BrainModelName string                    `json:"brain_model_name,omitempty"`
-	// Pet runtime readback. Models above are the Provider-only chat choices;
-	// these fields describe the source/model/account the Pet Task actually runs.
-	PetModelID        string        `json:"pet_model_id,omitempty"`
-	PetModelSource    string        `json:"pet_model_source,omitempty"`
-	PetWireModel      string        `json:"pet_wire_model,omitempty"`
-	PetCodexAccountID string        `json:"pet_codex_account_id,omitempty"`
-	PetModelName      string        `json:"pet_model_name,omitempty"`
-	PetWorkspaceID    string        `json:"pet_workspace_id,omitempty"`
-	Tools             []PetToolInfo `json:"tools"`
-	PetLastBrainAt    time.Time     `json:"pet_last_brain_at,omitempty"`
-	PetNextBrainAt    time.Time     `json:"pet_next_brain_at,omitempty"`
-	PetBrainRuns      int           `json:"pet_brain_runs"`
+	Assistant domain.OwnerAssistant     `json:"assistant"`
+	Messages  []domain.AssistantMessage `json:"messages"`
+	// Models is the Provider catalog shown by older clients. It is no longer a
+	// chat chooser: the unified pet model drives chat and autonomy alike.
+	Models         []AssistantModelOption `json:"models"`
+	ModelName      string                 `json:"model_name,omitempty"`
+	BrainModelName string                 `json:"brain_model_name,omitempty"`
+	// Unified pet model readback. The same source/model/account runs the Web
+	// assistant chat and the Pet Task; the settings page renders the read-only
+	// chat field and the source picker from these fields only.
+	PetModelID                string        `json:"pet_model_id,omitempty"`
+	PetModelSource            string        `json:"pet_model_source,omitempty"`
+	PetWireModel              string        `json:"pet_wire_model,omitempty"`
+	PetCodexAccountID         string        `json:"pet_codex_account_id,omitempty"`
+	PetModelName              string        `json:"pet_model_name,omitempty"`
+	PetAccountName            string        `json:"pet_account_name,omitempty"`
+	PetModelLabel             string        `json:"pet_model_label,omitempty"`
+	PetModelAvailable         bool          `json:"pet_model_available"`
+	PetModelUnavailableReason string        `json:"pet_model_unavailable_reason,omitempty"`
+	PetWorkspaceID            string        `json:"pet_workspace_id,omitempty"`
+	Tools                     []PetToolInfo `json:"tools"`
+	PetLastBrainAt            time.Time     `json:"pet_last_brain_at,omitempty"`
+	PetNextBrainAt            time.Time     `json:"pet_next_brain_at,omitempty"`
+	PetBrainRuns              int           `json:"pet_brain_runs"`
 }
 
 type AssistantToolEvent struct {
@@ -67,7 +79,8 @@ type OwnerAssistantReply struct {
 }
 
 // OwnerAssistant returns the device-local assistant, its recent conversation,
-// and the provider models it may use. It creates the singleton on first use.
+// and the Provider catalog. There is one model fact: the unified pet model in
+// pet_brain_model_id. model_id is a derived compatibility mirror.
 func (s *Service) OwnerAssistant(ctx context.Context) (OwnerAssistantView, error) {
 	assistant, err := s.store.EnsureOwnerAssistant(ctx, s.now().UTC())
 	if err != nil {
@@ -80,61 +93,19 @@ func (s *Service) OwnerAssistant(ctx context.Context) (OwnerAssistantView, error
 			return OwnerAssistantView{}, err
 		}
 	}
+	if err := s.normalizeAssistantUnifiedModel(ctx, &assistant); err != nil {
+		return OwnerAssistantView{}, err
+	}
 	models, err := s.assistantModelOptions(ctx)
 	if err != nil {
 		return OwnerAssistantView{}, err
-	}
-	if len(models) > 0 {
-		selected := false
-		for _, model := range models {
-			if model.ID == assistant.ModelID {
-				selected = true
-				break
-			}
-		}
-		if !selected {
-			assistant.ModelID = models[0].ID
-			assistant.UpdatedAt = s.now().UTC()
-			if err := s.store.UpdateOwnerAssistant(ctx, assistant); err != nil {
-				return OwnerAssistantView{}, err
-			}
-		}
 	}
 	messages, err := s.store.AssistantMessages(ctx, assistant.ID, 50)
 	if err != nil {
 		return OwnerAssistantView{}, err
 	}
 	view := OwnerAssistantView{Assistant: assistant, Messages: messages, Models: models}
-	for _, model := range models {
-		if model.ID == assistant.ModelID {
-			view.ModelName = model.DisplayName
-		}
-	}
-	petModelID := strings.TrimSpace(assistant.BrainModelID)
-	if petModelID == "" {
-		petModelID = assistant.ModelID
-	}
-	view.PetModelID = petModelID
-	view.PetWorkspaceID = petWorkspaceID
-	if petModelID != "" {
-		if model, modelErr := s.store.Model(ctx, petModelID); modelErr == nil {
-			source := strings.TrimSpace(model.Source)
-			if source == "" {
-				source = domain.ModelSourceProvider
-			}
-			view.PetModelSource = source
-			view.PetWireModel = model.WireModel
-			view.PetCodexAccountID = model.CodexAccountID
-			view.PetModelName = model.DisplayName
-		}
-	}
-	if view.PetModelSource == "" {
-		view.PetModelSource = domain.ModelSourceProvider
-	}
-	view.BrainModelName = view.PetModelName
-	if view.BrainModelName == "" {
-		view.BrainModelName = "跟随聊天模型"
-	}
+	s.fillAssistantModelReadback(ctx, &view)
 	// A disabled pet has no runnable Task. This also keeps a just-reset pet
 	// from recreating its project while the owner reviews the disabled settings.
 	if assistant.PetEnabled {
@@ -147,9 +118,158 @@ func (s *Service) OwnerAssistant(ctx context.Context) (OwnerAssistantView, error
 	return view, nil
 }
 
+// unifiedAssistantModelID returns the one model ID that drives both the Web
+// assistant chat and the Pet Task. pet_brain_model_id is authoritative; the
+// legacy chat column is only a fallback for rows written before unification.
+func unifiedAssistantModelID(assistant domain.OwnerAssistant) string {
+	if id := strings.TrimSpace(assistant.BrainModelID); id != "" {
+		return id
+	}
+	return strings.TrimSpace(assistant.ModelID)
+}
+
+// normalizeAssistantUnifiedModel makes the stored row self-consistent. It
+// never picks a different model: an unavailable stored model stays stored so
+// chat and settings report a real error instead of silently switching.
+func (s *Service) normalizeAssistantUnifiedModel(ctx context.Context, assistant *domain.OwnerAssistant) error {
+	if assistant == nil {
+		return nil
+	}
+	unified := unifiedAssistantModelID(*assistant)
+	changed := unified != strings.TrimSpace(assistant.BrainModelID) || unified != strings.TrimSpace(assistant.ModelID)
+	if unified == "" {
+		// First use only: seed the unified field from the chat-capable Provider
+		// catalog. This is setup, not a fallback after a failed selection.
+		models, err := s.assistantModelOptions(ctx)
+		if err != nil {
+			return err
+		}
+		if len(models) > 0 {
+			unified = models[0].ID
+			changed = true
+		}
+	}
+	assistant.BrainModelID = unified
+	assistant.ModelID = unified
+	if !changed {
+		return nil
+	}
+	assistant.UpdatedAt = s.now().UTC()
+	return s.store.UpdateOwnerAssistantModel(ctx, assistant.ID, unified, assistant.UpdatedAt)
+}
+
+// fillAssistantModelReadback describes the unified model exactly once, so the
+// read-only chat field and the source picker can never disagree.
+func (s *Service) fillAssistantModelReadback(ctx context.Context, view *OwnerAssistantView) {
+	view.PetWorkspaceID = petWorkspaceID
+	modelID := unifiedAssistantModelID(view.Assistant)
+	view.PetModelID = modelID
+	if modelID == "" {
+		view.PetModelSource = domain.ModelSourceProvider
+		view.PetModelLabel = "未配置模型"
+		view.BrainModelName = "未配置模型"
+		view.PetModelAvailable = false
+		view.PetModelUnavailableReason = "还没有选择宠物模型"
+		return
+	}
+	model, err := s.store.Model(ctx, modelID)
+	if err != nil {
+		view.PetModelLabel = modelID + "（当前配置不可用）"
+		view.BrainModelName = modelID
+		view.PetModelAvailable = false
+		view.PetModelUnavailableReason = "所选模型已删除，请在模型来源里重新选择"
+		return
+	}
+	source := strings.TrimSpace(model.Source)
+	if source == "" {
+		source = domain.ModelSourceProvider
+	}
+	view.PetModelSource = source
+	view.PetWireModel = model.WireModel
+	view.PetCodexAccountID = model.CodexAccountID
+	view.PetModelName = model.DisplayName
+	view.ModelName = model.DisplayName
+	view.BrainModelName = model.DisplayName
+	if accountID := strings.TrimSpace(model.CodexAccountID); accountID != "" {
+		if account, accountErr := s.store.CodexAccount(ctx, accountID); accountErr == nil {
+			view.PetAccountName = strings.TrimSpace(account.Label)
+			if view.PetAccountName == "" {
+				view.PetAccountName = account.Email
+			}
+		}
+	}
+	view.PetModelLabel = assistantModelLabel(source, model, view.PetAccountName)
+	view.PetModelAvailable, view.PetModelUnavailableReason = s.assistantModelAvailability(ctx, model, source)
+}
+
+// assistantModelLabel is the readable source + model/account description shown
+// by the read-only chat field.
+func assistantModelLabel(source string, model domain.Model, accountName string) string {
+	name := strings.TrimSpace(model.DisplayName)
+	if name == "" {
+		name = strings.TrimSpace(model.WireModel)
+	}
+	switch source {
+	case domain.ModelSourceOfficial:
+		account := strings.TrimSpace(accountName)
+		if account == "" {
+			account = strings.TrimSpace(model.CodexAccountID)
+		}
+		return "Codex 官方账号 · " + emptyAs(account, "未知账号") + " / " + emptyAs(name, model.ID)
+	case domain.ModelSourceClaudeNative:
+		return "Claude native · " + emptyAs(name, model.WireModel)
+	default:
+		provider := strings.TrimSpace(model.ProviderName)
+		return "Provider 模型 · " + emptyAs(provider, "未知 Provider") + " / " + emptyAs(name, model.ID)
+	}
+}
+
+// assistantModelAvailability is a cheap readback check. It never mutates the
+// selection; callers show the reason and the runtime fails explicitly.
+func (s *Service) assistantModelAvailability(ctx context.Context, model domain.Model, source string) (bool, string) {
+	if strings.TrimSpace(model.ProviderID) == "" {
+		return false, "模型缺少 Provider 配置"
+	}
+	switch source {
+	case domain.ModelSourceOfficial:
+		account, err := s.store.CodexAccount(ctx, model.CodexAccountID)
+		if err != nil {
+			return false, "所选 Codex 官方账号已删除，请重新选择账号"
+		}
+		if !account.CredentialConfigured {
+			return false, "所选 Codex 官方账号尚未配置凭据"
+		}
+		if status := strings.TrimSpace(account.Status); status != "" && status != "ready" {
+			return false, "所选 Codex 官方账号当前不可用（" + status + "）"
+		}
+		for _, option := range account.AvailableModels {
+			if option.WireModel == model.WireModel {
+				return true, ""
+			}
+		}
+		return false, "所选模型不在该 Codex 官方账号的可用模型列表中"
+	case domain.ModelSourceClaudeNative:
+		// Login state belongs to the Workspace probe; the settings picker shows
+		// that detail. The runtime reports a real authentication error.
+		return true, ""
+	default:
+		provider, err := s.store.Provider(ctx, model.ProviderID)
+		if err != nil {
+			return false, "模型 Provider 已删除"
+		}
+		if !provider.CredentialConfigured {
+			return false, "Provider 凭据不可用，请在模型页重新填写"
+		}
+		return true, ""
+	}
+}
+
 func (s *Service) UpdateOwnerAssistant(ctx context.Context, modelID, name, character string) (OwnerAssistantView, error) {
 	assistant, err := s.store.EnsureOwnerAssistant(ctx, s.now().UTC())
 	if err != nil {
+		return OwnerAssistantView{}, err
+	}
+	if err := s.normalizeAssistantUnifiedModel(ctx, &assistant); err != nil {
 		return OwnerAssistantView{}, err
 	}
 	if name = strings.TrimSpace(name); name != "" {
@@ -164,25 +284,17 @@ func (s *Service) UpdateOwnerAssistant(ctx context.Context, modelID, name, chara
 		}
 		assistant.Character = character
 	}
-	if modelID = strings.TrimSpace(modelID); modelID != "" {
-		models, modelErr := s.assistantModelOptions(ctx)
-		if modelErr != nil {
-			return OwnerAssistantView{}, modelErr
-		}
-		found := false
-		for _, model := range models {
-			if model.ID == modelID {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return OwnerAssistantView{}, fmt.Errorf("所选模型不可用于助手，请选择 Provider 模型")
-		}
-		assistant.ModelID = modelID
+	if modelID = strings.TrimSpace(modelID); modelID != "" && modelID != unifiedAssistantModelID(assistant) {
+		// The chat model is no longer independently settable. Keeping the old
+		// model_id field accepted-but-inert would let two clients disagree about
+		// which model runs; the source picker is the only write path.
+		return OwnerAssistantView{}, fmt.Errorf("聊天模型跟随宠物模型，请在宠物设置的「模型来源 / 模型账号」中修改")
 	}
 	assistant.UpdatedAt = s.now().UTC()
 	if err := s.store.UpdateOwnerAssistant(ctx, assistant); err != nil {
+		return OwnerAssistantView{}, err
+	}
+	if err := s.store.UpdateOwnerAssistantModel(ctx, assistant.ID, unifiedAssistantModelID(assistant), assistant.UpdatedAt); err != nil {
 		return OwnerAssistantView{}, err
 	}
 	if state, stateErr := s.OwnerPetState(ctx); stateErr == nil {
@@ -212,7 +324,10 @@ func (s *Service) AskOwnerAssistantWithLayout(ctx context.Context, content strin
 	if err != nil {
 		return OwnerAssistantReply{}, err
 	}
-	model, provider, apiKey, err := s.assistantRuntime(ctx, &assistant)
+	if err := s.normalizeAssistantUnifiedModel(ctx, &assistant); err != nil {
+		return OwnerAssistantReply{}, err
+	}
+	model, provider, apiKey, source, err := s.assistantRuntime(ctx, &assistant)
 	if err != nil {
 		return OwnerAssistantReply{}, err
 	}
@@ -247,31 +362,40 @@ func (s *Service) AskOwnerAssistantWithLayout(ctx context.Context, content strin
 	if promptErr != nil {
 		return OwnerAssistantReply{}, promptErr
 	}
-	chatOptions := gateway.ChatOptions{
-		BaseURL: provider.BaseURL, AnthropicBaseURL: provider.AnthropicBaseURL,
-		APIKey: apiKey, AuthStyle: provider.AuthStyle, WireAPI: model.WireAPI,
-		Model: wireModel, System: assistantSystemPromptText, Messages: messages,
-		MaxTokens: 3000, Timeout: assistantAskTimeout,
-	}
+	var toolResult gateway.ChatToolResponse
 	fallbackUsed := false
-	chatOptions.ForceTool = wantsPetAction(content)
-	toolResult, callErr := gateway.ChatWithTools(ctx, chatOptions, assistantPetTools())
-	if callErr != nil {
-		firstErr := callErr
-		// Retry with tools but without a forced choice; some Anthropic-compatible
-		// gateways reject tool_choice=any but accept normal tool use.
-		autoOptions := chatOptions
-		autoOptions.ForceTool = false
-		if retried, retryErr := gateway.ChatWithTools(ctx, autoOptions, assistantPetTools()); retryErr == nil {
-			toolResult = retried
-			callErr = nil
-			fallbackUsed = true
-		} else if fallback, fallbackErr := gateway.Chat(ctx, autoOptions); fallbackErr == nil {
-			toolResult = gateway.ChatToolResponse{Text: fallback}
-			callErr = nil
-			fallbackUsed = true
-		} else {
-			callErr = fmt.Errorf("%v; fallback: %v", firstErr, fallbackErr)
+	var callErr error
+	if source == domain.ModelSourceOfficial || source == domain.ModelSourceClaudeNative {
+		// The selected source has no Provider HTTP endpoint. Run the same
+		// backend the Pet Task runs, with the same catalog model and account,
+		// so chat and autonomy cannot diverge.
+		toolResult.Text, callErr = s.askAssistantBackend(ctx, model, source, assistantSystemPromptText, history, content)
+	} else {
+		chatOptions := gateway.ChatOptions{
+			BaseURL: provider.BaseURL, AnthropicBaseURL: provider.AnthropicBaseURL,
+			APIKey: apiKey, AuthStyle: provider.AuthStyle, WireAPI: model.WireAPI,
+			Model: wireModel, System: assistantSystemPromptText, Messages: messages,
+			MaxTokens: 3000, Timeout: assistantAskTimeout,
+		}
+		chatOptions.ForceTool = wantsPetAction(content)
+		toolResult, callErr = gateway.ChatWithTools(ctx, chatOptions, assistantPetTools())
+		if callErr != nil {
+			firstErr := callErr
+			// Retry with tools but without a forced choice; some Anthropic-compatible
+			// gateways reject tool_choice=any but accept normal tool use.
+			autoOptions := chatOptions
+			autoOptions.ForceTool = false
+			if retried, retryErr := gateway.ChatWithTools(ctx, autoOptions, assistantPetTools()); retryErr == nil {
+				toolResult = retried
+				callErr = nil
+				fallbackUsed = true
+			} else if fallback, fallbackErr := gateway.Chat(ctx, autoOptions); fallbackErr == nil {
+				toolResult = gateway.ChatToolResponse{Text: fallback}
+				callErr = nil
+				fallbackUsed = true
+			} else {
+				callErr = fmt.Errorf("%v; fallback: %v", firstErr, fallbackErr)
+			}
 		}
 	}
 	if len(toolResult.ToolCalls) == 0 {
@@ -282,7 +406,7 @@ func (s *Service) AskOwnerAssistantWithLayout(ctx context.Context, content strin
 	}
 	replyText := toolResult.Text
 	if callErr != nil {
-		replyText = "我暂时没连上模型：" + truncateAssistantText(callErr.Error(), 240) + "\n\n你可以在助手面板右上角换一个模型，或到模型页检查 Provider。"
+		replyText = "我暂时没连上模型：" + truncateAssistantText(callErr.Error(), 240) + "\n\n请在宠物设置的「模型来源 / 模型账号」检查当前模型；不可用来源不会自动切换。"
 	}
 	toolEvents := make([]AssistantToolEvent, 0, len(toolResult.ToolCalls)+1)
 	replyActions := make([]PetBrainAction, 0, 3)
@@ -514,62 +638,193 @@ func (s *Service) assistantModelOptions(ctx context.Context) ([]AssistantModelOp
 	return options, nil
 }
 
-func (s *Service) assistantRuntime(ctx context.Context, assistant *domain.OwnerAssistant) (domain.Model, domain.Provider, string, error) {
-	return s.assistantRuntimeByID(ctx, assistant, assistant.ModelID)
-}
-
-func (s *Service) assistantRuntimeByID(ctx context.Context, assistant *domain.OwnerAssistant, requestedModelID string) (domain.Model, domain.Provider, string, error) {
-	options, err := s.assistantModelOptions(ctx)
-	if err != nil {
-		return domain.Model{}, domain.Provider{}, "", err
-	}
-	if len(options) == 0 {
-		return domain.Model{}, domain.Provider{}, "", fmt.Errorf("还没有可用于助手的 Provider 模型，请先在模型页配置 chat 或 anthropic 模型")
-	}
-	modelID := strings.TrimSpace(requestedModelID)
+// assistantRuntime resolves the one unified model. It returns the model, the
+// Provider runtime values for the direct HTTP chat path, and the canonical
+// source. It never substitutes a different model: an unavailable selection is
+// an error the owner must see and fix.
+func (s *Service) assistantRuntime(ctx context.Context, assistant *domain.OwnerAssistant) (domain.Model, domain.Provider, string, string, error) {
+	modelID := unifiedAssistantModelID(*assistant)
 	if modelID == "" {
-		modelID = assistant.ModelID
-	}
-	eligible := false
-	for _, option := range options {
-		if option.ID == modelID {
-			eligible = true
-			break
-		}
-	}
-	if !eligible {
-		modelID = assistant.ModelID
-		for _, option := range options {
-			if option.ID == modelID {
-				eligible = true
-				break
-			}
-		}
-		if !eligible {
-			modelID = options[0].ID
-			assistant.ModelID = modelID
-			assistant.UpdatedAt = s.now().UTC()
-			if err := s.store.UpdateOwnerAssistant(ctx, *assistant); err != nil {
-				return domain.Model{}, domain.Provider{}, "", err
-			}
-		}
+		return domain.Model{}, domain.Provider{}, "", "", fmt.Errorf("还没有配置宠物模型，请在宠物设置的「模型来源 / 模型账号」中选择")
 	}
 	model, err := s.store.Model(ctx, modelID)
 	if err != nil {
-		return domain.Model{}, domain.Provider{}, "", err
+		return domain.Model{}, domain.Provider{}, "", "", fmt.Errorf("宠物模型已删除或不存在，请在宠物设置的「模型来源 / 模型账号」中重新选择")
 	}
-	provider, err := s.store.Provider(ctx, model.ProviderID)
+	source := strings.TrimSpace(model.Source)
+	if source == "" {
+		source = domain.ModelSourceProvider
+	}
+	switch source {
+	case domain.ModelSourceOfficial, domain.ModelSourceClaudeNative:
+		if model.Backend != "codex" && model.Backend != "claude" {
+			return domain.Model{}, domain.Provider{}, "", "", fmt.Errorf("宠物模型的 Backend %q 不支持聊天", model.Backend)
+		}
+		return model, domain.Provider{}, "", source, nil
+	case domain.ModelSourceProvider:
+		if strings.TrimSpace(model.ProviderID) == "" {
+			return domain.Model{}, domain.Provider{}, "", "", fmt.Errorf("宠物模型缺少 Provider 配置，请重新选择")
+		}
+		wire := strings.TrimSpace(model.WireAPI)
+		if wire == "" {
+			wire = "chat"
+		}
+		if !gateway.SupportsChat(wire) {
+			return domain.Model{}, domain.Provider{}, "", "", fmt.Errorf("宠物模型协议 %q 不支持聊天", model.WireAPI)
+		}
+		provider, err := s.store.Provider(ctx, model.ProviderID)
+		if err != nil {
+			return domain.Model{}, domain.Provider{}, "", "", fmt.Errorf("宠物模型的 Provider 不存在：%w", err)
+		}
+		apiKey := ""
+		if provider.CredentialRef != "" && s.secrets != nil {
+			apiKey, _ = s.secrets.Get(provider.CredentialRef)
+		}
+		if apiKey == "" && provider.CredentialConfigured {
+			return domain.Model{}, domain.Provider{}, "", "", fmt.Errorf("Provider 凭据不可用，请在模型页重新填写")
+		}
+		return model, provider, apiKey, source, nil
+	default:
+		return domain.Model{}, domain.Provider{}, "", "", fmt.Errorf("宠物模型来源 %q 不支持聊天", source)
+	}
+}
+
+// askAssistantThroughBackend runs the selected Claude native or Codex official
+// model through the same backend adapter the Pet Task executes, so both paths
+// resolve the identical catalog row, account and credentials.
+func (s *Service) askAssistantBackend(ctx context.Context, model domain.Model, source, systemPrompt string, history []domain.AssistantMessage, content string) (string, error) {
+	if s.executor == nil {
+		return "", fmt.Errorf("聊天后端不可用")
+	}
+	assistantWorkspace, envGroup, environment, err := s.assistantBackendEnvironment(ctx, model, source)
 	if err != nil {
-		return domain.Model{}, domain.Provider{}, "", fmt.Errorf("Provider 不存在：%w", err)
+		return "", err
 	}
-	apiKey := ""
-	if provider.CredentialRef != "" && s.secrets != nil {
-		apiKey, _ = s.secrets.Get(provider.CredentialRef)
+	prompt := assistantBackendPrompt(systemPrompt, history, content)
+	snapshot := domain.RuntimeConfigSnapshot{
+		WorkspaceID:      assistantWorkspace.ID,
+		Backend:          model.Backend,
+		ModelID:          model.ID,
+		WireModel:        model.WireModel,
+		EnvGroupID:       envGroup.ID,
+		EnvGroupRevision: envGroup.Revision,
+		CodexAccountID:   model.CodexAccountID,
+		ReasoningEffort:  model.DefaultEffort,
 	}
-	if apiKey == "" && provider.CredentialConfigured {
-		return domain.Model{}, domain.Provider{}, "", fmt.Errorf("Provider 凭据不可用，请在模型页重新填写")
+	timeout := assistantBackendTimeout
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	result, err := s.executor.Execute(runCtx, ExecutionRequest{
+		Task:             domain.Task{TaskWorkspacePath: assistantWorkspace.RootPath},
+		Workspace:        assistantWorkspace,
+		Snapshot:         snapshot,
+		Model:            model,
+		EnvGroup:         envGroup,
+		Environment:      environment,
+		Prompt:           prompt,
+		BackendSessionID: "assistant_chat",
+		Filesystem:       "read-only",
+		Approval:         "never",
+	}, func(ExecutionEvent) {})
+	if err != nil {
+		return "", err
 	}
-	return model, provider, apiKey, nil
+	reply := strings.TrimSpace(result.Reply)
+	if reply == "" {
+		return "", fmt.Errorf("模型没有返回内容")
+	}
+	return reply, nil
+}
+
+// assistantBackendEnvironment builds the runtime environment for the one-shot
+// backend chat. It mirrors the Turn path: env group values and secret refs,
+// proxy settings, and the Codex official profile directory.
+func (s *Service) assistantBackendEnvironment(ctx context.Context, model domain.Model, source string) (domain.Workspace, domain.EnvGroup, map[string]string, error) {
+	assistantWorkspace, err := s.ensurePetWorkspace(ctx)
+	if err != nil {
+		return domain.Workspace{}, domain.EnvGroup{}, nil, fmt.Errorf("准备宠物 Workspace 失败：%w", err)
+	}
+	envGroup, err := s.store.EnvGroup(ctx, model.DefaultEnvGroupID)
+	if err != nil {
+		return domain.Workspace{}, domain.EnvGroup{}, nil, fmt.Errorf("宠物模型的 Env Group 不可用：%w", err)
+	}
+	environment := make(map[string]string, len(envGroup.Environment)+len(envGroup.SecretRefs))
+	for key, value := range envGroup.Environment {
+		environment[key] = value
+	}
+	if s.secrets != nil {
+		for name, secretRef := range envGroup.SecretRefs {
+			if value, ok := s.secrets.Get(secretRef); ok {
+				environment[name] = value
+			}
+		}
+	}
+	// Mirror the Pet Task's proxy decision: the same turn path applies store
+	// proxy settings only when the snapshot asked for them, so chat must not
+	// silently route through a proxy the autonomy path does not use.
+	if s.petTaskProxyEnabled(ctx) {
+		if s.proxyRuntime != nil {
+			if settingsErr := s.proxyRuntime.ApplyEnvironment(ctx, environment); settingsErr != nil {
+				return domain.Workspace{}, domain.EnvGroup{}, nil, fmt.Errorf("应用代理设置失败：%w", settingsErr)
+			}
+		} else if settings, settingsErr := s.store.ProxySettings(ctx); settingsErr == nil {
+			if normalized, normalizeErr := proxyconfig.Normalize(settings); normalizeErr == nil {
+				proxyconfig.ApplyEnvironment(environment, normalized)
+			}
+		}
+	}
+	if source == domain.ModelSourceOfficial {
+		if s.codex == nil {
+			return domain.Workspace{}, domain.EnvGroup{}, nil, fmt.Errorf("Codex 官方账号运行时不可用")
+		}
+		unlock := s.codex.LockAccount(model.CodexAccountID)
+		profileDir, profileErr := s.codex.PrepareProfile(ctx, model.CodexAccountID, assistantWorkspace, assistantWorkspace.RootPath, "assistant_chat")
+		unlock()
+		if profileErr != nil {
+			return domain.Workspace{}, domain.EnvGroup{}, nil, fmt.Errorf("准备 Codex 官方账号失败：%w", profileErr)
+		}
+		environment["CODEX_HOME"] = profileDir
+	}
+	return assistantWorkspace, envGroup, environment, nil
+}
+
+// petTaskProxyEnabled reports the Pet Task runtime's proxy switch. Without a
+// pet Task there is no autonomy runtime to match, so chat keeps the direct
+// environment.
+func (s *Service) petTaskProxyEnabled(ctx context.Context) bool {
+	agent, err := s.store.TaskAgent(ctx, petTaskID, "main")
+	if err != nil {
+		return false
+	}
+	snapshot, err := s.store.RuntimeSnapshot(ctx, agent.RuntimeConfigSnapshotID)
+	if err != nil {
+		return false
+	}
+	return snapshot.ProxyEnabled
+}
+
+// assistantBackendPrompt renders the single prompt string a CLI backend takes.
+// The text tool-call block is the only way a CLI chat can move the pet, because
+// these backends have no function-calling parameter in this path.
+func assistantBackendPrompt(systemPrompt string, history []domain.AssistantMessage, content string) string {
+	var builder strings.Builder
+	builder.WriteString("本轮是 Web 里的助手聊天：直接回答主人下面的问题，不要巡检 AHA、不要调用工具、不要创建 Task。\n\n")
+	builder.WriteString(strings.TrimSpace(systemPrompt))
+	builder.WriteString("\n\n## 当前对话\n")
+	for _, item := range history {
+		role := "主人"
+		if item.Role == domain.AssistantRoleAssistant {
+			role = "你"
+		}
+		builder.WriteString(role + "：" + truncateAssistantText(item.Content, 800) + "\n")
+	}
+	builder.WriteString("主人：" + content + "\n\n请直接回复主人。")
+	builder.WriteString("\n\n需要做动作时，在回复末尾按下面的格式输出（可多条）。动作是可选的，不要为了动作编造理由：\n")
+	for _, tool := range assistantPetTools() {
+		parameters, _ := json.Marshal(tool.Parameters)
+		fmt.Fprintf(&builder, "- <tool_call>%s %s</tool_call_end>\n", tool.Name, parameters)
+	}
+	return builder.String()
 }
 
 func (s *Service) assistantSnapshot(ctx context.Context) (string, error) {

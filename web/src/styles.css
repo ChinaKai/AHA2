@@ -2650,6 +2650,8 @@ dialog.agent-config-dialog { width: min(760px,calc(100vw - 32px)); }
 .pet-action-option { display: flex; align-items: center; gap: 5px; padding: 7px 10px; border: 1px solid #dbe8f7; border-radius: 9px; background: #f8fbff; font-size: 12px; }
 .assistant-settings-field { display: grid; gap: 4px; margin-top: 7px; color: #5c7187; font-size: 11px; }
 .assistant-settings-field select { min-height: 32px; padding: 0 8px; border: 1px solid #d7e2f0; border-radius: 8px; background: #fff; color: #17324d; }
+.assistant-settings-field input[readonly] { min-height: 32px; padding: 0 8px; border: 1px solid #d7e2f0; border-radius: 8px; background: #f6f9fd; color: #52677d; }
+.assistant-settings-field input[readonly].is-unavailable { border-color: #e7b4b4; background: #fff7f7; color: #a33a3a; }
 .assistant-settings-error { margin: 0; color: #b42318; font-size: 11px; }
 .assistant-settings-foot { display: flex; justify-content: flex-end; gap: 7px; padding: 10px 14px; border-top: 1px solid #e7eef7; background: #fbfdff; }
 .assistant-settings-foot button { min-height: 32px; padding: 0 14px; border: 1px solid #d7e2f0; border-radius: 8px; background: #fff; color: #25517d; font-size: 12px; }

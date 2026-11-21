@@ -1714,6 +1714,11 @@ export interface OwnerAssistantView {
   pet_wire_model?: string;
   pet_codex_account_id?: string;
   pet_model_name?: string;
+  pet_account_name?: string;
+  /** Readable "source · model/account" description for the read-only chat field. */
+  pet_model_label?: string;
+  pet_model_available?: boolean;
+  pet_model_unavailable_reason?: string;
   pet_workspace_id?: string;
   tools?: PetToolInfo[];
   pet_last_brain_at?: string;

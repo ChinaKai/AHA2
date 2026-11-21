@@ -17,8 +17,11 @@ func (s *Server) ownerAssistant(writer http.ResponseWriter, request *http.Reques
 		"models": view.Models, "model_name": view.ModelName, "brain_model_name": view.BrainModelName,
 		"pet_model_id": view.PetModelID, "pet_model_source": view.PetModelSource,
 		"pet_wire_model": view.PetWireModel, "pet_codex_account_id": view.PetCodexAccountID,
-		"pet_model_name": view.PetModelName, "pet_workspace_id": view.PetWorkspaceID,
-		"tools": view.Tools,
+		"pet_model_name": view.PetModelName, "pet_account_name": view.PetAccountName,
+		"pet_model_label": view.PetModelLabel, "pet_model_available": view.PetModelAvailable,
+		"pet_model_unavailable_reason": view.PetModelUnavailableReason,
+		"pet_workspace_id":             view.PetWorkspaceID,
+		"tools":                        view.Tools,
 	})
 }
 
