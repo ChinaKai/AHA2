@@ -5,7 +5,9 @@
 - 分支：`aha/task_5c2b60c8a9061790a345`
 - 工作区：`/srv/build/users/kaikai/kk-workspace/.aha2-worktrees/task_5c2b60c8a9061790a345`
 - 状态：未合并、未 push、未部署、未运行安装器；未登录真实账号，未读写任何凭据。
-- 实现提交：`52913ac`（评审包本身随后单独提交）
+- 实现提交：`52913ac`
+- r2 修复提交（task-741 L2 复审）：`e3f1336`
+- 评审包提交：`b404743`（r1）；r2 更新随后单独提交
 
 ## 1. 只读核对结论（第一步）
 
@@ -46,6 +48,8 @@
   Web 每次指针事件用 `getBoundingClientRect()`、`naturalWidth/naturalHeight` 和
   该 frame 的 CSS viewport 计算内容区，再做比例映射。DPR 在比例里抵消，留白被
   显式排除；移动端使用同一套 CSS client 坐标，不需要单独处理 `devicePixelRatio`。
+  host 截图同时使用 `scale:"css"`，viewport 探测有 1.5s 上限；头缺失或无效时
+  面板拒绝 click/drag/scroll/hover，不用图片像素兜底。
 - tab 切换/lease 变化时清空 frame viewport 和待发输入；窗口缩放后的旧 frame 可能
   短暂用旧 viewport，host 的 `checkViewport` 会以 `browser_action_invalid` 拒绝越界
   坐标，面板提示刷新，不会静默错点。
@@ -151,17 +155,25 @@
   抢焦点；Agent 仍使用 `type`。
 - 右键用真实 `button:"right"`，页面自定义菜单可工作；Chromium 也可能弹出原生
   Edge 菜单，这是已知限制而不是 bug。
+- 一次右键手势只产生一个 `context_click`：`contextmenu` 事件在 Linux/macOS 可能
+  先于 `pointerup` 到达，在 Windows 可能后到。手势上带 `contextQueued` 标记，
+  `contextmenu` 认领后 `pointerup` 不再补发；只后到的情况用 `contextHandledAt`
+  挡住。按住 150ms 再松开的 Playwright 用例专门覆盖旧 80ms 时间窗的缺陷。
 - 拖拽为左键 `move → down → move{8 steps} → up`，起点/终点都做 viewport 校验。
 
 ### 3.3 坐标映射
 
+- host 截图加 `scale:"css"`，让图片像素在 DPR≠1 时也等于 CSS 像素；viewport
+  读取有 1.5s 上限，卡死页面不会拖住整个 frame 请求。
 - 纯函数 `browserViewportPoint`：
   1. `scale = min(rect.w/img.w, rect.h/img.h)`，内容区居中；
   2. 事件点落在内容区外返回 `null`（留白/图片外不发动作）；
   3. `x = floor((clientX-left)/contentW * viewportW)`，clamp 到 `[0, W-1]`；
-  4. viewport 缺失时回退到图片像素尺寸。
+  4. **viewport 缺失/为 0/不完整一律返回 `null`**，不回退图片像素；面板对
+     click/drag/scroll/hover 失败关闭，并提示等待下一帧。
 - 单测覆盖：1280×800 图显示在 640×480 舞台（上下留白 40px）、2560×1600 图 +
-  1280×800 CSS viewport 的 DPR 场景、边缘 clamp、0 尺寸/缺失元数据。
+  1280×800 CSS viewport 的 DPR 场景、边缘 clamp、0/单边缺失 viewport 全部
+  返回 `null`。
 - 每次事件实时读取 rect 和 natural size，窗口缩放不需要重建 handler。
 
 ### 3.4 串行、并发、错误
@@ -210,7 +222,7 @@
 | --- | --- |
 | `node --test browser-host/*.test.mjs` | 57 pass，6 skipped（平台/真实 Chromium 相关），0 fail |
 | `cd web && npm test` | 632 pass，0 fail |
-| `node web/tests/browser_task_panel.browser.mjs`（`AHA_PLAYWRIGHT_MODULE` 指向已装 Playwright） | pass；覆盖只读不发输入、控制开关、中心点击映射、letterbox 忽略、双击、右键、键盘、滚轮、403 退出、撤销退出 |
+| `node web/tests/browser_task_panel.browser.mjs`（`AHA_PLAYWRIGHT_MODULE` 指向已装 Playwright） | pass；覆盖只读不发输入、控制开关、中心点击映射、letterbox 忽略、双击、单击右键、**按住 150ms 的右键只发一次**、键盘、滚轮、**缺 viewport 头不发坐标输入并在恢复后继续**、403 退出、撤销退出 |
 | `go build ./...` | OK |
 | `go test ./internal/browser -run 'TestOwnerActionsUseOwnerSet|TestPageActionValidation|TestPageActionsRequireInteract|TestSnapshotPasses'` | PASS（约 49s） |
 | `go test ./internal/httpapi -run 'TestBrowserTabFrameReturnsAuthorizedImageAndStopsAfterRevoke\|TestAgentBrowserPageActionsOverHTTP\|TestOwnerBrowserPageActionsOverHTTP\|TestOwnerBrowserActionsRequireInteractOverHTTP' -count=1 -v` | 4/4 PASS（23.4s；Owner actor 断言为 `owner_...`） |
@@ -221,9 +233,14 @@
 - Go：Owner/Agent 动作集边界、Owner text/drag 参数校验、审计来源/grant/tab 且不
   泄露 text、snapshot-only grant 拒绝、释放后 403、frame viewport 头。
 - host：右键、text 不点击、drag 序列、非法参数、单字符按键（`Control+/`）、
-  frame viewport 头（含缓存帧）。
-- Web：留白/DPR/缺失 viewport 的坐标换算、键盘映射（含 Meta/Ctrl+Alt+Del 拒绝、
-  IME）、UTF-8 切分/换行、滚动上限；浏览器回归覆盖完整控制路径。
+  frame viewport 头（含缓存帧）、截图使用 `scale:"css"`。
+- Web：留白/DPR/缺失 viewport 的坐标换算（缺失时返回 `null`）、键盘映射（含
+  Meta/Ctrl+Alt+Del 拒绝、IME）、UTF-8 切分/换行、滚动上限；浏览器回归覆盖完整
+  控制路径、按住 150ms 的右键去重，以及缺 viewport 头时 click/scroll 都不发、
+  恢复有效帧后重新可用。
+- 变异验证：把构建产物里的右键判断临时改回旧的 80ms 时间窗，浏览器回归在
+  “按住 150ms”用例上得到 `3 !== 2`（多出一次 `context_click`），确认该用例确实
+  能抓住旧缺陷；随后重新构建恢复，用例通过。
 
 全包结果：`internal/browser` 完整包退出码 0（约 9 分钟，XFS；stdout 未保留，只有
 退出码），新增的三个 Owner 用例包含在内。`internal/httpapi` 未跑完整包（XFS 上
@@ -250,8 +267,11 @@
 - 帧有 300–1200ms 间隔，点击作用于最近一帧的内容；页面在两次帧之间变化时可能
   点到旧位置（host viewport 校验只能拦越界，不拦“旧内容”）。
 - 窗口缩放后到下一帧前，旧 viewport 可能短暂不匹配；越界返回
-  `browser_action_invalid`，不静默。
-- 右键可能弹原生菜单；Ctrl/Cmd+滚轮是面板缩放而不是页面缩放；无双指缩放。
+  `browser_action_invalid`，不静默。帧没有有效 viewport 头时坐标输入直接暂停，
+  不会用图片像素猜。
+- 一次右键手势只发一次 `context_click`（已按手势去重）；右键仍可能弹原生菜单，
+  这是页面/浏览器行为，不属于重复发送。
+- Ctrl/Cmd+滚轮是面板缩放而不是页面缩放；无双指缩放。
 - hover 是 best-effort，可能跳过中间位置；不保证 hover 与点击严格同帧。
 - 队列上限 64 个显式动作，超出提示“操作太频繁”，不静默丢弃。
 - 未改动上传/下载/Cookie 导入导出、Agent API、profile lease、frame 轮询频率。
@@ -265,3 +285,61 @@
   不在提交里。
 - 需要后续 Owner 决策：是否接受“无自动重试 + 明确错误提示”的取舍；是否在真实
   Edge 验收后再考虑 action_id 幂等/重放缓存。
+
+## 7. 复审修复（r2，task-741 L2）
+
+复审结论是 REQUEST_CHANGES，两个必须项均已复现并修复；修复提交见本节末尾。
+
+### 7.1 按住右键 >80ms 会发两次 context_click
+
+- 根因：旧实现只在 `contextmenu` 与 `pointerup` 之间用 `Date.now()-contextClickAt`
+  的 80ms 时间窗去重。Linux/macOS 的 `contextmenu` 可能在按钮按下时就到，Owner
+  按住超过 80ms 再松开，`pointerup` 会认为时间窗已过而补发第二次。
+- 修复：`ControlGesture` 增加 `contextQueued`。`contextmenu` 一旦认领当前手势就
+  置位并立即发一次；`pointerup` 看到该标记只更新时间戳、不再补发。若平台把
+  `contextmenu` 放在 `pointerup` 之后，`pointerup` 先发一次并设置
+  `contextHandledAt`，后到的 `contextmenu` 在 250ms 内跳过。每只右键手势只产生
+  一个 `context_click`，与按住时长无关。
+- 测试：浏览器回归新增“按住 150ms 再松开”用例，并在按住期间显式派发一个
+  `contextmenu`，确定性地模拟 Linux/macOS 顺序。变异验证把判断改回旧的 80ms
+  时间窗后，该用例得到 `3 !== 2`；修复后通过。
+
+### 7.2 缺 viewport 头时回退图片像素
+
+- 根因：旧 `browserViewportPoint` 在 `viewportWidth/Height` 缺失时退回
+  `naturalWidth/naturalHeight`。DPR≠1 时截图像素不等于 CSS 像素，点击仍可能落在
+  视口内，因此 host 的越界校验也拦不住，属于静默点偏。
+- 修复（两层）：
+  1. host 截图改用 `scale:"css"`，让图片像素等于 CSS 像素；viewport 探测加
+     1.5s 上限，卡死页面不会拖住 frame。
+  2. Web 端失败关闭：`browserViewportPoint` 对缺失/为 0/单边缺失的 viewport
+     一律返回 `null`；`pointerup`、`wheel`、`contextmenu` 在坐标输入前检查
+     `frameViewportReady()`，不满足时不发 click/drag/scroll/hover，并提示
+     “画面尺寸未知，坐标输入已暂停；请等待下一帧画面”。下一帧带回有效 viewport
+     后自动恢复。
+- 测试：单测断言 `0/0`、`1280/0`、`0/800` 全部返回 `null`；浏览器回归新增
+  “缺 viewport 头”用例，设置 fixture 省略响应头，断言一次 click 和一次 wheel
+  都不产生坐标动作、提示可见；恢复有效帧后点击重新可用。
+
+### 7.3 未改动的边界
+
+- 授权、lease/fence、跨 Task 边界、审计脱敏（text/keys 不入审计）和“不自动
+  重试”保持不变。
+- Agent 动作集没有扩大；`context_click/text/drag` 仍只走 Owner 路由。
+- 非阻塞项：evaluate 超时已顺带加 1.5s 上限；Agent 按键能力与文档不一致、
+  `browser_action_invalid` 提示偏泛、非中心点/非 1:1 坐标 fixture、新路由缺
+  CSRF 缺失用例、hover 与点击顺序，均未在本轮扩大范围，继续如实披露。
+
+### 7.4 r2 验证
+
+| 命令 | 结果 |
+| --- | --- |
+| `node --test browser-host/*.test.mjs` | 57 pass，6 skipped，0 fail |
+| `cd web && npm test` | 632 pass，0 fail |
+| `node web/tests/browser_task_panel.browser.mjs` | pass（含按住 150ms 右键、缺 viewport 头两个新用例） |
+| `go build ./...` | OK |
+| `go test ./internal/browser -run 'TestOwnerActionsUseOwnerSet\|TestPageActionValidation' -count=1` | PASS（17.4s） |
+| `go test ./internal/httpapi -run 'TestOwnerBrowserPageActionsOverHTTP\|TestOwnerBrowserActionsRequireInteractOverHTTP\|TestBrowserTabFrameReturnsAuthorizedImageAndStopsAfterRevoke' -count=1` | PASS（17.5s） |
+
+修复提交：`e3f1336`（Fix owner browser control review findings）；本评审包的 r2
+更新在随后单独的提交里。
