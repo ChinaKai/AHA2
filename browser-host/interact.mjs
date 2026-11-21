@@ -25,7 +25,10 @@ const KEY_ALIASES = new Map([
   ["TAB", "Tab"], ["SPACE", "Space"], ["BACKSPACE", "Backspace"], ["DELETE", "Delete"],
   ["UP", "ArrowUp"], ["DOWN", "ArrowDown"], ["LEFT", "ArrowLeft"], ["RIGHT", "ArrowRight"],
   ["HOME", "Home"], ["END", "End"], ["PAGEUP", "PageUp"], ["PAGEDOWN", "PageDown"],
+  ["INSERT", "Insert"], ["CONTEXTMENU", "ContextMenu"],
 ]);
+
+const DRAG_STEPS = 8;
 
 function invalid(message = "invalid action", code = "browser_action_invalid") {
   return Object.assign(new Error(message), {code});
@@ -134,13 +137,21 @@ function normalizeKeyToken(token) {
   const upper = raw.toUpperCase();
   if (KEY_ALIASES.has(upper)) return KEY_ALIASES.get(upper);
   if (/^[A-Za-z0-9]$/.test(raw)) return raw;
+  // A single printable ASCII character is a valid Playwright key name. Owner
+  // keyboard input needs combinations such as Control+/; element refs never
+  // reach this path, so no selector or script can be smuggled in here.
+  if (/^[!-~]$/.test(raw)) return raw;
   if (/^F([1-9]|1[0-2])$/.test(upper)) return upper;
   throw invalid("invalid key name");
 }
 
+// The host accepts a closed action set. The first six kinds are the Agent set;
+// context_click, text and drag are Owner-only additions (AHA enforces the
+// boundary before the host call; the host still validates every field).
 export function normalizeAction(input) {
   const kind = String(input && input.kind || "").trim();
-  if (!["click", "double_click", "hover", "type", "key", "scroll"].includes(kind)) {
+  if (!["click", "double_click", "hover", "type", "key", "scroll",
+    "context_click", "text", "drag"].includes(kind)) {
     throw invalid("unsupported action");
   }
   const hasRef = typeof input.ref === "string" && input.ref.trim() !== "";
@@ -154,9 +165,44 @@ export function normalizeAction(input) {
   if (hasCoords && (input.x < 0 || input.y < 0 || input.x > MAX_COORDINATE || input.y > MAX_COORDINATE)) {
     throw invalid("coordinates are out of range");
   }
-  const action = {kind, ref, x: hasCoords ? input.x : null, y: hasCoords ? input.y : null, text: "", keys: [], deltaX: 0, deltaY: 0};
-  if (kind === "click" || kind === "double_click" || kind === "hover") {
+  const hasToX = Number.isInteger(input.to_x);
+  const hasToY = Number.isInteger(input.to_y);
+  if (hasToX !== hasToY) throw invalid("to_x and to_y must be supplied together");
+  if (hasToX && (input.to_x < 0 || input.to_y < 0 ||
+    input.to_x > MAX_COORDINATE || input.to_y > MAX_COORDINATE)) {
+    throw invalid("drag destination is out of range");
+  }
+  // Only drag accepts a destination; every other kind rejects it so a
+  // malformed call cannot silently ignore part of its payload.
+  if (kind !== "drag" && (hasToX || hasToY)) throw invalid("drag destination is not accepted");
+  const action = {
+    kind, ref, x: hasCoords ? input.x : null, y: hasCoords ? input.y : null,
+    toX: hasToX ? input.to_x : null, toY: hasToY ? input.to_y : null,
+    text: "", keys: [], deltaX: 0, deltaY: 0,
+  };
+  const hasExtraPayload = () => String(input.text || "") !== "" ||
+    (Array.isArray(input.keys) && input.keys.length > 0) ||
+    (Number.isInteger(input.delta_x) && input.delta_x !== 0) ||
+    (Number.isInteger(input.delta_y) && input.delta_y !== 0);
+  if (kind === "click" || kind === "double_click" || kind === "hover" || kind === "context_click") {
     if (!hasRef && !hasCoords) throw invalid("element ref or coordinates are required");
+    if (hasExtraPayload()) throw invalid("this action does not accept input content");
+  } else if (kind === "text") {
+    if (hasRef || hasCoords) throw invalid("text action does not accept a target");
+    const text = String(input.text || "");
+    if (!text) throw invalid("text is required");
+    if (Buffer.byteLength(text, "utf8") > MAX_ACTION_TEXT_BYTES) throw invalid("text is too long");
+    if (/[\u0000\r\n\u007f]/.test(text)) throw invalid("text contains control characters");
+    if ((Array.isArray(input.keys) && input.keys.length > 0) ||
+        (Number.isInteger(input.delta_x) && input.delta_x !== 0) ||
+        (Number.isInteger(input.delta_y) && input.delta_y !== 0)) {
+      throw invalid("text action does not accept keys or scroll parameters");
+    }
+    action.text = text;
+  } else if (kind === "drag") {
+    if (hasRef) throw invalid("drag does not accept an element ref");
+    if (!hasCoords || !hasToX) throw invalid("drag requires start and end coordinates");
+    if (hasExtraPayload()) throw invalid("drag does not accept input content");
   } else if (kind === "type") {
     if (!hasRef && !hasCoords) throw invalid("element ref or coordinates are required");
     const text = String(input.text || "");
@@ -231,9 +277,20 @@ export async function performAction(page, tab, action) {
       if (target) await target.hover({timeout: 5000});
       else await page.mouse.move(action.x, action.y);
       break;
+    case "context_click":
+      // A real right click, like the Owner pressing the right mouse button.
+      // Pages may show their own menu; Chromium may also show its native one.
+      if (target) await target.click({timeout: 5000, button: "right"});
+      else await page.mouse.click(action.x, action.y, {button: "right"});
+      break;
     case "type":
       if (target) await target.click({timeout: 5000});
       else await page.mouse.click(action.x, action.y);
+      await page.keyboard.type(action.text);
+      break;
+    case "text":
+      // Type into the page's current focus. The Owner clicks the target first
+      // (a click action), so continuous typing does not re-click or move focus.
       await page.keyboard.type(action.text);
       break;
     case "key":
@@ -243,10 +300,24 @@ export async function performAction(page, tab, action) {
       if (action.x !== null) await page.mouse.move(action.x, action.y);
       await page.mouse.wheel(action.deltaX, action.deltaY);
       break;
+    case "drag":
+      await checkViewport(page, action.toX, action.toY);
+      await page.mouse.move(action.x, action.y);
+      await page.mouse.down();
+      try {
+        await page.mouse.move(action.toX, action.toY, {steps: DRAG_STEPS});
+      } finally {
+        await page.mouse.up();
+      }
+      break;
     default:
       throw invalid("unsupported action");
   }
-  return {kind: action.kind, ref: action.ref || undefined, x: action.x === null ? undefined : action.x, y: action.y === null ? undefined : action.y};
+  return {
+    kind: action.kind, ref: action.ref || undefined,
+    x: action.x === null ? undefined : action.x, y: action.y === null ? undefined : action.y,
+    to_x: action.toX === null ? undefined : action.toX, to_y: action.toY === null ? undefined : action.toY,
+  };
 }
 
 function decodeUploadFile(file) {

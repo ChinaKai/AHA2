@@ -100,6 +100,8 @@ import type {
   ADBUSBDevice,
   HardwareTerminalStatus,
   BrowserBookmark,
+  BrowserFrame,
+  BrowserPageAction,
   BrowserProfile,
   BrowserSession,
   BrowserTab,
@@ -1001,8 +1003,10 @@ class APIClient {
   }
 
   // Read-only preview frame. The endpoint returns image/jpeg and is never
-  // cached; callers own the object URL and must revoke it when they stop.
-  async browserTabFrame(grantID: string, tabID: string, signal?: AbortSignal): Promise<Blob> {
+  // cached; callers own the object URL and must revoke it when they stop. The
+  // viewport headers describe the CSS page size that belongs to this image, so
+  // the panel never has to guess a device scale factor when mapping a click.
+  async browserTabFrame(grantID: string, tabID: string, signal?: AbortSignal): Promise<BrowserFrame> {
     const response = await fetch(
       `/api/v1/browser-grants/${encodeURIComponent(grantID)}/tabs/${encodeURIComponent(tabID)}/frame`,
       {method: "GET", credentials: "same-origin", cache: "no-store", signal},
@@ -1015,7 +1019,24 @@ class APIClient {
       error.status = response.status;
       throw error;
     }
-    return response.blob();
+    const dimension = (name: string): number => {
+      const value = Number.parseInt(response.headers.get(name) || "", 10);
+      return Number.isSafeInteger(value) && value > 0 && value <= 100000 ? value : 0;
+    };
+    return {
+      blob: await response.blob(),
+      viewportWidth: dimension("X-AHA2-Viewport-Width"),
+      viewportHeight: dimension("X-AHA2-Viewport-Height"),
+    };
+  }
+
+  // Owner Web input. This is the session-authenticated counterpart of the
+  // Agent /actions route: same grant/lease/fence/input slot, owner actor and
+  // audit source, plus right-click, typing-at-focus and drag.
+  ownerBrowserAction(grantID: string, tabID: string, action: BrowserPageAction): Promise<{ok: boolean; action?: Record<string, unknown>}> {
+    return this.request(`/api/v1/browser-grants/${encodeURIComponent(grantID)}/tabs/${encodeURIComponent(tabID)}/actions`, {
+      method: "POST", body: JSON.stringify(action),
+    });
   }
 
   createTaskBrowserGrant(taskID: string, payload: {profile_id: string; capabilities?: string[]; expires_in_seconds?: number}): Promise<{grant: BrowserTaskGrant; session: BrowserSession | null}> {

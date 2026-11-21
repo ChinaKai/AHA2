@@ -47,17 +47,21 @@ type FakeHost struct {
 	Fences            map[string]string
 	FenceCalls        []string
 	FrameCalls        int
-	ActivateCalls     int
-	BookmarkCalls     int
-	FailActivate      error
-	FailBookmarks     error
-	FailSetFence      error
-	FailSession       error
-	OperationHold     time.Duration
-	BookmarkList      []browser.HostBookmark
-	Sessions          map[string]*session
-	nextID            int
-	Now               func() time.Time
+	// FrameWidth/FrameHeight are the CSS viewport dimensions reported with a
+	// fake frame. Defaults keep the old 1280x800 fixture size.
+	FrameWidth    int
+	FrameHeight   int
+	ActivateCalls int
+	BookmarkCalls int
+	FailActivate  error
+	FailBookmarks error
+	FailSetFence  error
+	FailSession   error
+	OperationHold time.Duration
+	BookmarkList  []browser.HostBookmark
+	Sessions      map[string]*session
+	nextID        int
+	Now           func() time.Time
 
 	SnapshotElements []browser.HostElement
 	// SnapshotText overrides the fixed "page text" body when non-empty. Tests
@@ -457,7 +461,8 @@ func (f *FakeHost) Action(_ context.Context, profileID, sessionID, tabID string,
 	if err := f.fenceLocked(profileID, fence, holdStart, holdUntil); err != nil {
 		return browser.HostActionResult{}, err
 	}
-	return browser.HostActionResult{Kind: action.Kind, Ref: action.Ref, X: action.X, Y: action.Y}, nil
+	return browser.HostActionResult{Kind: action.Kind, Ref: action.Ref, X: action.X, Y: action.Y,
+		ToX: action.ToX, ToY: action.ToY}, nil
 }
 
 func (f *FakeHost) Upload(_ context.Context, profileID, sessionID, tabID string, upload browser.HostUpload, fence string) (browser.HostUploadResult, error) {
@@ -566,7 +571,15 @@ func (f *FakeHost) Frame(_ context.Context, profileID, sessionID, tabID string) 
 		return browser.HostFrame{}, &browser.Error{Code: "browser_tab_not_found", Message: "no tab", Status: http.StatusNotFound}
 	}
 	f.FrameCalls++
-	return browser.HostFrame{ContentType: "image/jpeg", Data: []byte{0xff, 0xd8, 0xff, 0xd9}}, nil
+	width, height := f.FrameWidth, f.FrameHeight
+	if width <= 0 {
+		width = 1280
+	}
+	if height <= 0 {
+		height = 800
+	}
+	return browser.HostFrame{ContentType: "image/jpeg", Data: []byte{0xff, 0xd8, 0xff, 0xd9},
+		Width: width, Height: height}, nil
 }
 
 func (f *FakeHost) CloseTab(_ context.Context, profileID, sessionID, tabID, fence string) error {

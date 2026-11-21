@@ -5,7 +5,7 @@
 // second browser window.
 import {api} from "./api.js";
 import {icon} from "./icons.js";
-import type {BrowserBookmark, BrowserHostView, BrowserProfile, BrowserSession, BrowserTab, BrowserTaskGrant, TaskBrowserState} from "./types.js";
+import type {BrowserBookmark, BrowserHostView, BrowserPageAction, BrowserProfile, BrowserSession, BrowserTab, BrowserTaskGrant, TaskBrowserState} from "./types.js";
 
 type Notice = (type: "error" | "notice", message: string) => void;
 
@@ -52,6 +52,14 @@ interface PanelState {
   frameError: string;
   frameLive: boolean;
   startPageGrantID: string;
+  // Owner page control. Read-only is the default: input is only forwarded after
+  // the explicit toggle, and the mode is dropped on lease/tab/host changes.
+  controlMode: boolean;
+  controlNotice: string;
+  // CSS viewport captured with the currently displayed frame; 0 means unknown
+  // and the mapper falls back to the image's own pixel size.
+  frameViewportWidth: number;
+  frameViewportHeight: number;
 }
 
 // Where Escape/close should put focus back. The menu and bar are rebuilt on
@@ -103,6 +111,167 @@ export function nextBrowserFrameDelay(previous: string, current: string, delay: 
   if (!previous) return BROWSER_FRAME_MIN_DELAY_MS;
   if (previous === current) return Math.min(BROWSER_FRAME_MAX_DELAY_MS, Math.round(bounded * 1.7));
   return BROWSER_FRAME_MIN_DELAY_MS;
+}
+
+// --- Owner control: viewport mapping, keyboard and text shaping ------------
+//
+// The preview is an <img> with object-fit: contain, so the page image is
+// centered inside the stage and may be letterboxed. A click is mapped through
+// the image's own natural pixel size and the CSS viewport captured with that
+// frame: both are ratios, so a device scale factor never has to be known.
+
+export const BROWSER_CONTROL_CLICK_DELAY_MS = 300;
+export const BROWSER_CONTROL_MAX_TEXT_BYTES = 4096;
+export const BROWSER_CONTROL_MAX_PASTE_BYTES = 16 * 1024;
+export const BROWSER_CONTROL_MAX_QUEUE = 64;
+export const BROWSER_CONTROL_MAX_SCROLL = 4000;
+
+export interface BrowserDisplayRect {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+export interface BrowserPoint {
+  x: number;
+  y: number;
+}
+
+const browserUTF8 = new TextEncoder();
+
+export function browserTextByteLength(text: string): number {
+  return browserUTF8.encode(String(text || "")).length;
+}
+
+// browserViewportPoint returns the page coordinate under a client point, or
+// null when the point is outside the displayed image (the letterbox bars).
+export function browserViewportPoint(
+  clientX: number,
+  clientY: number,
+  rect: BrowserDisplayRect,
+  imageWidth: number,
+  imageHeight: number,
+  viewportWidth: number,
+  viewportHeight: number,
+): BrowserPoint | null {
+  if (!rect || !(rect.width > 0) || !(rect.height > 0) || !(imageWidth > 0) || !(imageHeight > 0)) return null;
+  const scale = Math.min(rect.width / imageWidth, rect.height / imageHeight);
+  if (!Number.isFinite(scale) || scale <= 0) return null;
+  const contentWidth = imageWidth * scale;
+  const contentHeight = imageHeight * scale;
+  const left = rect.left + (rect.width - contentWidth) / 2;
+  const top = rect.top + (rect.height - contentHeight) / 2;
+  if (clientX < left || clientX > left + contentWidth || clientY < top || clientY > top + contentHeight) return null;
+  const width = viewportWidth > 0 ? viewportWidth : imageWidth;
+  const height = viewportHeight > 0 ? viewportHeight : imageHeight;
+  const x = Math.floor(((clientX - left) / contentWidth) * width);
+  const y = Math.floor(((clientY - top) / contentHeight) * height);
+  return {
+    x: Math.max(0, Math.min(width - 1, x)),
+    y: Math.max(0, Math.min(height - 1, y)),
+  };
+}
+
+export type BrowserKeyCommand = {kind: "key"; keys: string[]} | {kind: "text"; text: string};
+
+export interface BrowserKeyEventLike {
+  key?: string;
+  ctrlKey?: boolean;
+  altKey?: boolean;
+  shiftKey?: boolean;
+  metaKey?: boolean;
+  isComposing?: boolean;
+}
+
+// browserKeyCommand turns a Web keyboard event into the host's closed key/text
+// vocabulary. Printable input becomes text (so IME and layout-produced
+// characters survive); navigation keys and real combinations become keys.
+// Meta/Win is deliberately never forwarded: on the host it is an OS-level
+// modifier (Win+L locks the machine), not a page shortcut.
+export function browserKeyCommand(event: BrowserKeyEventLike | null | undefined): BrowserKeyCommand | null {
+  if (!event || event.isComposing) return null;
+  const key = String(event.key || "");
+  if (!key) return null;
+  const ignored = new Set([
+    "Control", "Shift", "Alt", "Meta", "AltGraph", "CapsLock", "NumLock", "ScrollLock",
+    "OS", "Dead", "Unidentified", "Process", "Compose", "Super",
+  ]);
+  if (ignored.has(key)) return null;
+  const ctrl = Boolean(event.ctrlKey);
+  const alt = Boolean(event.altKey);
+  const shift = Boolean(event.shiftKey);
+  const meta = Boolean(event.metaKey);
+  if (meta) return null;
+  const names: Record<string, string> = {
+    Enter: "Enter", Escape: "Escape", Tab: "Tab", Backspace: "Backspace", Delete: "Delete",
+    Insert: "Insert", ArrowLeft: "ArrowLeft", ArrowRight: "ArrowRight",
+    ArrowUp: "ArrowUp", ArrowDown: "ArrowDown", Home: "Home", End: "End",
+    PageUp: "PageUp", PageDown: "PageDown", " ": "Space", ContextMenu: "ContextMenu",
+  };
+  const functionKey = /^F([1-9]|1[0-2])$/.test(key) ? key : "";
+  const singleCharacter = [...key].length === 1;
+  const printable = singleCharacter && key !== " " && /^[!-~]$/.test(key);
+  if (ctrl || alt) {
+    if (ctrl && alt && key === "Delete") return null; // OS secure attention
+    let base = names[key] || functionKey;
+    if (!base && printable) base = key;
+    if (!base && singleCharacter && /^[a-z0-9]$/i.test(key)) base = key;
+    if (!base) return null;
+    // A letter combination is case-insensitive; Shift is its own modifier.
+    if (/^[A-Z]$/.test(base)) base = base.toLowerCase();
+    const keys = [
+      ...(ctrl ? ["Control"] : []), ...(alt ? ["Alt"] : []),
+      ...(shift ? ["Shift"] : []), base,
+    ];
+    if (keys.length > 4) return null;
+    return {kind: "key", keys};
+  }
+  if (key === " " || printable || (singleCharacter && key !== "\u007f" && !names[key])) {
+    // Shift already shaped event.key into the final character (e.g. "A", "?").
+    return {kind: "text", text: key};
+  }
+  const special = names[key] || functionKey;
+  if (!special) return null;
+  return {kind: "key", keys: shift ? ["Shift", special] : [special]};
+}
+
+// splitBrowserText cuts text on UTF-8 byte boundaries, never splitting a
+// code point, so one action stays inside the host's 4096-byte text budget.
+export function splitBrowserText(text: string, maxBytes = BROWSER_CONTROL_MAX_TEXT_BYTES): string[] {
+  const chunks: string[] = [];
+  let current = "";
+  let size = 0;
+  for (const character of String(text || "")) {
+    const bytes = browserUTF8.encode(character).length;
+    if (current && size + bytes > maxBytes) {
+      chunks.push(current);
+      current = "";
+      size = 0;
+    }
+    current += character;
+    size += bytes;
+  }
+  if (current) chunks.push(current);
+  return chunks;
+}
+
+// browserTextActions turns free text into ordered host actions. A newline is a
+// real Enter press; everything else is chunked text typed at the page's focus.
+export function browserTextActions(text: string, maxBytes = BROWSER_CONTROL_MAX_TEXT_BYTES): BrowserPageAction[] {
+  const value = String(text || "").replace(/\r\n?/g, "\n");
+  if (!value) return [];
+  const actions: BrowserPageAction[] = [];
+  value.split("\n").forEach((line, index) => {
+    if (index > 0) actions.push({kind: "key", keys: ["Enter"]});
+    for (const chunk of splitBrowserText(line, maxBytes)) actions.push({kind: "text", text: chunk});
+  });
+  return actions;
+}
+
+export function browserScrollStep(value: number, max = BROWSER_CONTROL_MAX_SCROLL): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(-max, Math.min(max, Math.trunc(value)));
 }
 
 export function browserStartPageURL(origin: string): string {
@@ -375,6 +544,7 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     loading: true, binding: false, bookmarksLoading: false, bookmarksLoaded: false, bookmarksError: "",
     bookmarksMenu: "", bookmarksMenuFolder: "", bookmarkBarHiddenFolders: [], inUseProfileID: "", urlDraft: "", error: "",
     frameError: "", frameLive: false, startPageGrantID: "",
+    controlMode: false, controlNotice: "", frameViewportWidth: 0, frameViewportHeight: 0,
   };
 
   let disposed = false;
@@ -410,6 +580,368 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
   let releaseRequested = false;
   const painted = new WeakMap<HTMLElement, string>();
 
+  // --- Owner control state -------------------------------------------------
+  // The queue is explicit user intent (click/key/text/scroll). It is sent one
+  // action at a time so the host input slot never has to interleave gestures.
+  // A generation bump (tab/mode/lease change) discards pending input and makes
+  // an in-flight reply harmless. Hover is a separate best-effort hint and never
+  // blocks or reorders explicit input.
+  let controlGeneration = 0;
+  const controlQueue: BrowserPageAction[] = [];
+  let controlInFlight: {generation: number} | null = null;
+  let controlPendingClick: {x: number; y: number; at: number} | null = null;
+  let controlClickTimer = 0;
+  let controlWheel: {x: number; y: number; dx: number; dy: number} | null = null;
+  let controlWheelTimer = 0;
+  let controlHover: {x: number; y: number} | null = null;
+  let controlHoverTimer = 0;
+  let controlComposing = false;
+  let controlCompositionDone = {text: "", at: 0};
+  let controlFocusWanted = false;
+  // Relative position of the last pointer inside the stage, used to keep the
+  // hidden input sink (and therefore the IME candidate window) near the click
+  // even after a repaint.
+  let controlLastPointer = {rx: 0.5, ry: 0.5};
+  let controlNotifyAt = 0;
+  interface ControlGesture {
+    startX: number;
+    startY: number;
+    lastX: number;
+    lastY: number;
+    pointerId: number;
+    pointerType: string;
+    button: number;
+    startedAt: number;
+    moved: boolean;
+    scrolling: boolean;
+  }
+  let controlGesture: ControlGesture | null = null;
+  const controlPointers = new Map<number, {x: number; y: number}>();
+
+  const coarsePointer = (): boolean =>
+    typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches;
+  const controlCapable = (): boolean => Boolean(state.grant?.capabilities?.includes("interact"));
+  const controlReady = (): boolean => state.controlMode && Boolean(state.grant) && Boolean(selectedTab())
+    && !(state.host && !state.host.available);
+
+  const controlHintText = (): string => {
+    if (!state.grant) return "";
+    if (state.controlNotice) return state.controlNotice;
+    if (!controlCapable()) return "当前授权不含页面操作能力；重新开启共享后可控制页面";
+    if (state.host && !state.host.available) return "浏览器宿主不可用，输入已停用";
+    if (!selectedTab()) return "当前没有可控制的页面";
+    if (state.controlMode) return "控制中 · 点击画面操作页面；Shift+Esc 退出";
+    return "只读浏览 · 打开控制后可点击、输入和滚动";
+  };
+
+  const paintControlBar = (): void => {
+    const hint = container.querySelector<HTMLElement>("#desktop-browser-control-hint");
+    if (hint) {
+      hint.textContent = controlHintText();
+      hint.title = controlHintText();
+    }
+    const toggle = container.querySelector<HTMLButtonElement>("#desktop-browser-control-toggle");
+    if (toggle) {
+      toggle.setAttribute("aria-pressed", String(state.controlMode));
+      toggle.textContent = state.controlMode ? "退出控制" : "控制页面";
+    }
+    const preview = container.querySelector<HTMLElement>(".desktop-browser-preview");
+    if (preview) preview.dataset.control = state.controlMode ? "on" : "off";
+    const keyboard = container.querySelector<HTMLButtonElement>("#desktop-browser-keyboard");
+    if (keyboard) keyboard.hidden = !state.controlMode;
+  };
+
+  const controlNotice = (message: string, tone: "error" | "notice" = "error"): void => {
+    state.controlNotice = message;
+    paintControlBar();
+    if (Date.now() - controlNotifyAt > 1200) {
+      controlNotifyAt = Date.now();
+      notify(tone, message);
+    }
+  };
+
+  const resetControlInput = (): void => {
+    // Invalidate every in-flight and pending action. The request itself is not
+    // aborted (the host may already be executing it), but its result can no
+    // longer touch the new tab/mode.
+    controlGeneration++;
+    controlQueue.length = 0;
+    controlInFlight = null;
+    window.clearTimeout(controlClickTimer);
+    controlClickTimer = 0;
+    controlPendingClick = null;
+    window.clearTimeout(controlWheelTimer);
+    controlWheelTimer = 0;
+    controlWheel = null;
+    window.clearTimeout(controlHoverTimer);
+    controlHoverTimer = 0;
+    controlHover = null;
+    controlGesture = null;
+    controlPointers.clear();
+    controlComposing = false;
+    controlCompositionDone = {text: "", at: 0};
+  };
+
+  const exitControlMode = (reason = ""): void => {
+    if (!state.controlMode) return;
+    state.controlMode = false;
+    state.controlNotice = reason;
+    resetControlInput();
+    controlFocusWanted = false;
+    if (reason) notify("notice", reason);
+  };
+
+  const placeControlSink = (sink: HTMLTextAreaElement): void => {
+    const rect = sink.parentElement?.getBoundingClientRect();
+    if (!rect || rect.width <= 0 || rect.height <= 0) return;
+    const left = Math.max(0, Math.min(rect.width - 2, controlLastPointer.rx * rect.width - 1));
+    const top = Math.max(0, Math.min(rect.height - 4, controlLastPointer.ry * rect.height - 2));
+    sink.style.left = `${Math.round(left)}px`;
+    sink.style.top = `${Math.round(top)}px`;
+  };
+
+  const focusControlInput = (force = false): void => {
+    if (!state.controlMode) return;
+    // A coarse pointer opens the virtual keyboard only from the explicit
+    // keyboard button; otherwise every tap would cover the page.
+    if (!force && coarsePointer()) return;
+    const sink = container.querySelector<HTMLTextAreaElement>("#desktop-browser-input");
+    if (!sink) return;
+    placeControlSink(sink);
+    controlFocusWanted = true;
+    sink.focus({preventScroll: true});
+  };
+
+  const toggleControlMode = (): void => {
+    if (state.controlMode) {
+      exitControlMode();
+      paint();
+      return;
+    }
+    if (!state.grant) return;
+    if (!controlCapable()) {
+      controlNotice("当前授权不含页面操作能力；请重新开启共享后再控制页面");
+      return;
+    }
+    if (state.host && !state.host.available) {
+      controlNotice("浏览器宿主不可用，暂时无法控制页面");
+      return;
+    }
+    if (!selectedTab()) {
+      controlNotice("请先选择一个页面，再打开控制");
+      return;
+    }
+    state.controlMode = true;
+    state.controlNotice = "";
+    resetControlInput();
+    paint();
+    focusControlInput(false);
+  };
+
+  const mergeQueuedText = (text: string): boolean => {
+    const last = controlQueue[controlQueue.length - 1];
+    if (!last || last.kind !== "text") return false;
+    const merged = `${last.text || ""}${text}`;
+    if (browserTextByteLength(merged) > BROWSER_CONTROL_MAX_TEXT_BYTES) return false;
+    last.text = merged;
+    return true;
+  };
+
+  const enqueueControl = (action: BrowserPageAction, mergeText = false): boolean => {
+    if (!controlReady()) return false;
+    if (mergeText && mergeQueuedText(action.text || "")) {
+      state.controlNotice = "";
+      void pumpControl();
+      return true;
+    }
+    if (controlQueue.length >= BROWSER_CONTROL_MAX_QUEUE) {
+      controlNotice("操作太频繁，请稍后再试");
+      return false;
+    }
+    state.controlNotice = "";
+    controlQueue.push(action);
+    paintControlBar();
+    void pumpControl();
+    return true;
+  };
+
+  const handleControlFailure = (error: unknown): void => {
+    const details = errorDetails(error);
+    const status = (error as {status?: number}).status;
+    const terminal = status === 403 || status === 410
+      || ["browser_grant_revoked", "browser_grant_expired", "browser_profile_in_use",
+        "browser_session_changed", "browser_session_closed", "browser_tab_forbidden",
+        "browser_tab_not_found", "browser_fence_stale", "browser_fence_expired",
+        "browser_host_unavailable", "browser_host_timeout", "browser_lease_hold_failed"].includes(details.code);
+    if (terminal) {
+      const reason = details.code === "browser_host_unavailable" || details.code === "browser_host_timeout"
+        ? "浏览器宿主不可用，已退出控制模式"
+        : status === 403
+          ? "浏览器授权已失效，已退出控制模式"
+          : "浏览器状态已变化，已退出控制模式";
+      exitControlMode(reason);
+      paint();
+      void syncState();
+      return;
+    }
+    if (details.code === "browser_operation_busy") {
+      controlNotice("页面正忙，操作未发送，请稍后重试");
+      return;
+    }
+    if (details.code === "browser_action_invalid") {
+      // Most often the Edge window was resized and the click now falls outside
+      // the live viewport; the next frame carries the new size.
+      controlNotice("页面尺寸已变化，操作未发送；请刷新画面后重试");
+      return;
+    }
+    controlNotice(details.message || "页面操作失败");
+  };
+
+  const pumpControl = async (): Promise<void> => {
+    if (controlInFlight || !controlReady() || !controlQueue.length) return;
+    const grant = state.grant;
+    const tab = selectedTab();
+    if (!grant || !tab) return;
+    const action = controlQueue.shift();
+    if (!action) return;
+    const ticket = {generation: controlGeneration};
+    controlInFlight = ticket;
+    try {
+      await api.ownerBrowserAction(grant.id, tab.id, action);
+      if (ticket.generation === controlGeneration) {
+        // The host invalidated its cached frame; fetch the result at the live
+        // rate instead of waiting out an unchanged-page backoff.
+        frameDelay = BROWSER_FRAME_MIN_DELAY_MS;
+        if (!disposed && current() && state.grant && selectedTab() && !frameAbort
+          && terminalStreamKey !== streamKey()) schedule(0);
+      }
+    } catch (error) {
+      if (ticket.generation === controlGeneration) handleControlFailure(error);
+    } finally {
+      if (controlInFlight === ticket) controlInFlight = null;
+      if (ticket.generation === controlGeneration && controlQueue.length) void pumpControl();
+    }
+  };
+
+  const sendControlText = (text: string, paste = false): void => {
+    const value = String(text || "");
+    if (!value || !controlReady()) return;
+    const bytes = browserTextByteLength(value);
+    if (paste && bytes > BROWSER_CONTROL_MAX_PASTE_BYTES) {
+      controlNotice("粘贴内容过长，一次最多 16 KB");
+      return;
+    }
+    if (!paste && bytes > BROWSER_CONTROL_MAX_TEXT_BYTES * 4) {
+      controlNotice("输入内容过长");
+      return;
+    }
+    for (const action of browserTextActions(value)) enqueueControl(action, !paste);
+  };
+
+  const flushPendingClick = (): void => {
+    window.clearTimeout(controlClickTimer);
+    controlClickTimer = 0;
+    const pending = controlPendingClick;
+    controlPendingClick = null;
+    if (pending) enqueueControl({kind: "click", x: pending.x, y: pending.y});
+  };
+
+  const queueControlClick = (point: BrowserPoint, kind: "click" | "context_click", pointerType: string): void => {
+    if (!controlReady()) return;
+    flushControlWheel();
+    if (kind === "context_click") {
+      flushPendingClick();
+      enqueueControl({kind: "context_click", x: point.x, y: point.y});
+      return;
+    }
+    const now = Date.now();
+    const doubleClickWindow = pointerType === "touch" ? BROWSER_CONTROL_CLICK_DELAY_MS + 60 : BROWSER_CONTROL_CLICK_DELAY_MS;
+    if (controlPendingClick && now - controlPendingClick.at <= doubleClickWindow &&
+        Math.hypot(point.x - controlPendingClick.x, point.y - controlPendingClick.y) <= 12) {
+      window.clearTimeout(controlClickTimer);
+      controlClickTimer = 0;
+      const first = controlPendingClick;
+      controlPendingClick = null;
+      // The first click was still waiting; send only the double-click so the
+      // page does not see three clicks.
+      enqueueControl({kind: "double_click", x: first.x, y: first.y});
+      return;
+    }
+    flushPendingClick();
+    controlPendingClick = {x: point.x, y: point.y, at: now};
+    const delay = pointerType === "touch" ? BROWSER_CONTROL_CLICK_DELAY_MS + 40 : BROWSER_CONTROL_CLICK_DELAY_MS;
+    controlClickTimer = window.setTimeout(() => {
+      controlClickTimer = 0;
+      const pending = controlPendingClick;
+      controlPendingClick = null;
+      if (pending) enqueueControl({kind: "click", x: pending.x, y: pending.y});
+    }, delay);
+  };
+
+  const flushControlWheel = (): void => {
+    window.clearTimeout(controlWheelTimer);
+    controlWheelTimer = 0;
+    const wheel = controlWheel;
+    if (!wheel) return;
+    const stepX = browserScrollStep(wheel.dx);
+    const stepY = browserScrollStep(wheel.dy);
+    if (stepX === 0 && stepY === 0) {
+      controlWheel = null;
+      return;
+    }
+    wheel.dx -= stepX;
+    wheel.dy -= stepY;
+    if (!enqueueControl({kind: "scroll", x: wheel.x, y: wheel.y, delta_x: stepX, delta_y: stepY})) {
+      controlWheel = null;
+      return;
+    }
+    if (Math.abs(wheel.dx) >= 1 || Math.abs(wheel.dy) >= 1) {
+      controlWheelTimer = window.setTimeout(() => {
+        controlWheelTimer = 0;
+        flushControlWheel();
+      }, 30);
+    } else {
+      controlWheel = null;
+    }
+  };
+
+  const queueControlScroll = (point: BrowserPoint, dx: number, dy: number): void => {
+    if (!controlReady()) return;
+    controlWheel ||= {x: point.x, y: point.y, dx: 0, dy: 0};
+    controlWheel.x = point.x;
+    controlWheel.y = point.y;
+    controlWheel.dx += dx;
+    controlWheel.dy += dy;
+    if (!controlWheelTimer) {
+      controlWheelTimer = window.setTimeout(() => {
+        controlWheelTimer = 0;
+        flushControlWheel();
+      }, 40);
+    }
+  };
+
+  // Hover is a best-effort pointer hint: one position at a time, skipped while
+  // an explicit action is pending or in flight. Dropping an intermediate hover
+  // never loses a click, key or text.
+  const queueControlHover = (point: BrowserPoint): void => {
+    controlHover = {x: point.x, y: point.y};
+    if (controlHoverTimer) return;
+    controlHoverTimer = window.setTimeout(() => {
+      controlHoverTimer = 0;
+      const hover = controlHover;
+      controlHover = null;
+      if (!hover || !controlReady() || controlInFlight || controlQueue.length
+        || controlPendingClick || controlGesture) {
+        if (hover) queueControlHover(hover);
+        return;
+      }
+      const grant = state.grant;
+      const tab = selectedTab();
+      if (!grant || !tab) return;
+      void api.ownerBrowserAction(grant.id, tab.id, {kind: "hover", x: hover.x, y: hover.y}).catch(() => {});
+    }, 120);
+  };
+
   const current = (): boolean => container.isConnected && Boolean(container.closest("#desktop-tool"));
   const selectedTab = (): BrowserTab | null =>
     state.tabs.find(tab => tab.id === state.selectedTabID) || null;
@@ -427,7 +959,7 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     if (!state.tabs.length) return "当前没有打开的页面";
     if (!selectedTab()) return "选择页面后显示画面";
     if (!state.frameLive) return "正在获取画面…";
-    return "实时画面 · 只读";
+    return state.controlMode ? "实时画面 · 控制中" : "实时画面 · 只读";
   };
 
   // The preview bottom bar owns the two previously scattered status lines:
@@ -498,6 +1030,237 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     });
   };
 
+  // bindControlSurface attaches the pointer/keyboard handlers that only exist
+  // while the Owner enabled control mode. In read-only mode the stage has no
+  // handlers at all, so a stray click can never reach the page.
+  const bindControlSurface = (): void => {
+    if (!state.controlMode) return;
+    const stage = container.querySelector<HTMLElement>("#desktop-browser-stage");
+    const image = container.querySelector<HTMLImageElement>("#desktop-browser-frame");
+    const sink = container.querySelector<HTMLTextAreaElement>("#desktop-browser-input");
+    if (!stage || !image || !sink) return;
+
+    let contextClickAt = 0;
+    const pointAt = (clientX: number, clientY: number): BrowserPoint | null =>
+      browserViewportPoint(clientX, clientY, image.getBoundingClientRect(),
+        image.naturalWidth, image.naturalHeight, state.frameViewportWidth, state.frameViewportHeight);
+
+    const rememberPointer = (clientX: number, clientY: number): void => {
+      const rect = image.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+      controlLastPointer = {
+        rx: Math.max(0, Math.min(1, (clientX - rect.left) / rect.width)),
+        ry: Math.max(0, Math.min(1, (clientY - rect.top) / rect.height)),
+      };
+    };
+
+    const focusSinkAt = (clientX: number, clientY: number): void => {
+      if (coarsePointer()) return;
+      rememberPointer(clientX, clientY);
+      placeControlSink(sink);
+      controlFocusWanted = true;
+      sink.focus({preventScroll: true});
+    };
+
+    // Touch drag scrolls by the equivalent page pixels. Moving the finger up
+    // (decreasing clientY) must scroll the page down (positive deltaY).
+    const controlScale = (): {x: number; y: number} => {
+      const rect = image.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0 || image.naturalWidth <= 0 || image.naturalHeight <= 0) {
+        return {x: 1, y: 1};
+      }
+      const scale = Math.min(rect.width / image.naturalWidth, rect.height / image.naturalHeight);
+      const width = state.frameViewportWidth || image.naturalWidth;
+      const height = state.frameViewportHeight || image.naturalHeight;
+      return {x: width / (image.naturalWidth * scale), y: height / (image.naturalHeight * scale)};
+    };
+
+    stage.addEventListener("pointerdown", event => {
+      if (!controlReady()) return;
+      if (event.pointerType === "mouse" && event.button !== 0 && event.button !== 2) return;
+      event.preventDefault();
+      focusSinkAt(event.clientX, event.clientY);
+      controlPointers.set(event.pointerId, {x: event.clientX, y: event.clientY});
+      if (controlPointers.size > 1) {
+        // No pinch support: a second finger cancels the in-flight gesture
+        // instead of turning it into an accidental drag or click.
+        controlGesture = null;
+        return;
+      }
+      controlGesture = {
+        startX: event.clientX, startY: event.clientY,
+        lastX: event.clientX, lastY: event.clientY,
+        pointerId: event.pointerId, pointerType: event.pointerType,
+        button: event.button, startedAt: Date.now(), moved: false, scrolling: false,
+      };
+      try { stage.setPointerCapture(event.pointerId); } catch { /* synthetic pointer */ }
+    });
+
+    stage.addEventListener("pointermove", event => {
+      if (!controlReady()) return;
+      if (controlPointers.has(event.pointerId)) {
+        controlPointers.set(event.pointerId, {x: event.clientX, y: event.clientY});
+      }
+      const gesture = controlGesture;
+      if (!gesture || gesture.pointerId !== event.pointerId) {
+        if (event.pointerType !== "touch" && controlPointers.size === 0) {
+          const point = pointAt(event.clientX, event.clientY);
+          if (point) queueControlHover(point);
+        }
+        return;
+      }
+      const distance = Math.hypot(event.clientX - gesture.startX, event.clientY - gesture.startY);
+      // A hand click wobbles a few pixels; only a deliberate move becomes a drag.
+      if (distance > 8) gesture.moved = true;
+      if (gesture.pointerType === "touch") {
+        if (!gesture.scrolling && distance > 10) gesture.scrolling = true;
+        if (gesture.scrolling) {
+          event.preventDefault();
+          const point = pointAt(gesture.lastX, gesture.lastY) || pointAt(event.clientX, event.clientY);
+          const scale = controlScale();
+          const dx = (gesture.lastX - event.clientX) * scale.x;
+          const dy = (gesture.lastY - event.clientY) * scale.y;
+          if (point && (dx || dy)) queueControlScroll(point, dx, dy);
+        }
+      }
+      gesture.lastX = event.clientX;
+      gesture.lastY = event.clientY;
+    }, {passive: false});
+
+    stage.addEventListener("pointerup", event => {
+      controlPointers.delete(event.pointerId);
+      const gesture = controlGesture;
+      if (!gesture || gesture.pointerId !== event.pointerId) return;
+      controlGesture = null;
+      try { stage.releasePointerCapture(event.pointerId); } catch { /* not captured */ }
+      if (!controlReady()) return;
+      const startPoint = pointAt(gesture.startX, gesture.startY);
+      const endPoint = pointAt(event.clientX, event.clientY);
+      if (gesture.pointerType === "touch") {
+        if (gesture.scrolling) {
+          flushControlWheel();
+          return;
+        }
+        const distance = Math.hypot(event.clientX - gesture.startX, event.clientY - gesture.startY);
+        if (!startPoint || distance > 12) return;
+        if (Date.now() - gesture.startedAt >= 500) {
+          // Long press is the touch equivalent of the right mouse button.
+          queueControlClick(startPoint, "context_click", "touch");
+          return;
+        }
+        queueControlClick(startPoint, "click", "touch");
+        return;
+      }
+      if (gesture.button === 2) {
+        // On some platforms contextmenu fires before pointerup; only one of
+        // the two paths may turn this gesture into a context_click.
+        if (!gesture.moved && startPoint && Date.now() - contextClickAt > 80) {
+          contextClickAt = Date.now();
+          queueControlClick(startPoint, "context_click", "mouse");
+        }
+        return;
+      }
+      if (!startPoint || !endPoint) return;
+      if (gesture.moved) {
+        if (Math.hypot(endPoint.x - startPoint.x, endPoint.y - startPoint.y) > 4) {
+          enqueueControl({
+            kind: "drag", x: startPoint.x, y: startPoint.y,
+            to_x: endPoint.x, to_y: endPoint.y,
+          });
+        }
+        return;
+      }
+      queueControlClick(startPoint, "click", "mouse");
+    });
+
+    stage.addEventListener("pointercancel", () => {
+      controlGesture = null;
+      controlPointers.clear();
+      flushControlWheel();
+    });
+    stage.addEventListener("contextmenu", event => {
+      event.preventDefault();
+      // macOS/ctrl-click has no right-button gesture; pointerup for it is a
+      // normal left click, so the contextmenu event is the only signal. The
+      // guard avoids a second context_click after a real right-button gesture.
+      if (!controlReady() || Date.now() - contextClickAt < 80) return;
+      const point = pointAt(event.clientX, event.clientY);
+      if (point) {
+        contextClickAt = Date.now();
+        queueControlClick(point, "context_click", "mouse");
+      }
+    });
+    stage.addEventListener("dragstart", event => event.preventDefault());
+    stage.addEventListener("wheel", event => {
+      if (!controlReady()) return;
+      // Ctrl/Cmd+wheel is the Owner zooming the panel, not page input.
+      if (event.ctrlKey || event.metaKey) return;
+      event.preventDefault();
+      const point = pointAt(event.clientX, event.clientY);
+      if (!point || (!event.deltaX && !event.deltaY)) return;
+      const scale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? stage.clientHeight : 1;
+      queueControlScroll(point, event.deltaX * scale, event.deltaY * scale);
+    }, {passive: false});
+
+    sink.addEventListener("keydown", event => {
+      if (!controlReady()) return;
+      if (event.key === "Escape" && event.shiftKey) {
+        event.preventDefault();
+        event.stopPropagation();
+        exitControlMode("已退出控制模式");
+        paint();
+        return;
+      }
+      const command = browserKeyCommand(event);
+      if (!command) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (command.kind === "text") sendControlText(command.text);
+      else enqueueControl({kind: "key", keys: command.keys});
+    });
+    sink.addEventListener("input", event => {
+      if (!controlReady()) return;
+      if (controlComposing) return;
+      const input = event as InputEvent;
+      const data = String(input.data || "");
+      const inputType = String(input.inputType || "");
+      // The sink is a transport, never a local editor.
+      sink.value = "";
+      if (data) {
+        if (controlCompositionDone.text === data && Date.now() - controlCompositionDone.at < 150) return;
+        sendControlText(data);
+        return;
+      }
+      if (inputType === "deleteContentBackward") enqueueControl({kind: "key", keys: ["Backspace"]});
+      else if (inputType === "deleteContentForward") enqueueControl({kind: "key", keys: ["Delete"]});
+      else if (inputType === "insertLineBreak" || inputType === "insertParagraph") {
+        enqueueControl({kind: "key", keys: ["Enter"]});
+      }
+    });
+    sink.addEventListener("compositionstart", () => {
+      controlComposing = true;
+    });
+    sink.addEventListener("compositionend", event => {
+      controlComposing = false;
+      const text = String(event.data || sink.value || "");
+      sink.value = "";
+      controlCompositionDone = {text, at: Date.now()};
+      if (text) sendControlText(text);
+    });
+    sink.addEventListener("paste", event => {
+      if (!controlReady()) return;
+      event.preventDefault();
+      const text = event.clipboardData?.getData("text/plain") || "";
+      sendControlText(text, true);
+    });
+    sink.addEventListener("focus", () => {
+      controlFocusWanted = true;
+    });
+    sink.addEventListener("blur", () => {
+      if (document.activeElement !== sink) controlFocusWanted = false;
+    });
+  };
+
   const bindControl = (): void => {
     container.querySelector("#desktop-browser-retry")?.addEventListener("click", () => {
       if (!state.loading) void reload();
@@ -530,6 +1293,11 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
         if (tabID === state.selectedTabID) return;
         invalidateStateSync();
         lastManualSelectAt = Date.now();
+        // Input aimed at the previous page must never land on the new tab.
+        resetControlInput();
+        state.controlNotice = "";
+        state.frameViewportWidth = 0;
+        state.frameViewportHeight = 0;
         state.selectedTabID = tabID;
         state.frameError = "";
         state.frameLive = false;
@@ -576,6 +1344,21 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
         openBookmarksMenu("folder", folder, {kind: "folder", folder});
       });
     });
+    container.querySelector("#desktop-browser-control-toggle")?.addEventListener("click", () => {
+      toggleControlMode();
+    });
+    container.querySelector("#desktop-browser-keyboard")?.addEventListener("click", () => {
+      // On touch this button is the only way to open the soft keyboard; the
+      // same button closes it again so the page is not permanently covered.
+      const sink = container.querySelector<HTMLTextAreaElement>("#desktop-browser-input");
+      if (sink && document.activeElement === sink) {
+        controlFocusWanted = false;
+        sink.blur();
+        return;
+      }
+      focusControlInput(true);
+    });
+    bindControlSurface();
   };
 
   const selectorHTML = (session: BrowserSession | null): string => {
@@ -659,14 +1442,20 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
         <button type="button" id="desktop-browser-bookmarks-more" class="icon-button desktop-browser-bookmarks-more" title="更多收藏" aria-label="更多收藏" aria-expanded="${menuOpen}" hidden>${icon("chevron-down")}</button>
         ${bookmarkMenuHTML(state)}
       </div>
-      <figure class="desktop-browser-preview">
-        <div class="desktop-browser-frame-stage">
-          <img id="desktop-browser-frame" alt="内置浏览器只读画面" draggable="false" hidden>
+      <div class="desktop-browser-controlbar" role="group" aria-label="页面控制">
+        <button type="button" id="desktop-browser-control-toggle" class="desktop-browser-control-toggle" aria-pressed="${state.controlMode}" title="${state.controlMode ? "退出控制模式，回到只读浏览" : "打开控制模式后可点击、输入和滚动页面"}" ${controlCapable() && !(state.host && !state.host.available) && state.tabs.length ? "" : "disabled"}>${state.controlMode ? "退出控制" : "控制页面"}</button>
+        <span id="desktop-browser-control-hint" class="desktop-browser-control-hint" role="status" aria-live="polite" title="${escapeHTML(controlHintText())}">${escapeHTML(controlHintText())}</span>
+        <button type="button" id="desktop-browser-keyboard" class="desktop-browser-keyboard" title="打开输入键盘" ${state.controlMode ? "" : "hidden"}>键盘输入</button>
+      </div>
+      <figure class="desktop-browser-preview" data-control="${state.controlMode ? "on" : "off"}">
+        <div id="desktop-browser-stage" class="desktop-browser-frame-stage">
+          <img id="desktop-browser-frame" alt="${state.controlMode ? "内置浏览器画面，控制模式" : "内置浏览器只读画面"}" draggable="false" hidden>
           <p id="desktop-browser-frame-empty" class="desktop-browser-frame-empty" role="status">${escapeHTML(frameStatusText())}</p>
+          ${state.controlMode ? '<textarea id="desktop-browser-input" class="desktop-browser-input" aria-label="页面键盘输入，按键将发送到当前页面" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"></textarea>' : ""}
         </div>
         <figcaption class="desktop-browser-statusbar">
           <span id="desktop-browser-control-status" class="desktop-browser-control-status" data-tone="${statusTone(state, session)}" title="${escapeHTML(statusText(state, session))}">${escapeHTML(controlStatusText(session))}</span>
-          <span id="desktop-browser-frame-status" class="desktop-browser-frame-status" role="status" title="只读预览，不转发点击、输入或滚动">${escapeHTML(frameStatusText())}</span>
+          <span id="desktop-browser-frame-status" class="desktop-browser-frame-status" role="status" title="${state.controlMode ? "实时画面，控制模式开启" : "只读预览，不转发点击、输入或滚动"}">${escapeHTML(frameStatusText())}</span>
         </figcaption>
       </figure>
     </div>`;
@@ -764,6 +1553,16 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     if (selectorNode && setNodeHTML(selectorNode, selectorHTML(session))) bindSelector();
     if (setNodeHTML(container, controlHTML(session))) {
       bindControl();
+      // A repaint while the Owner is typing must not steal focus from the
+      // address bar or drop the page input sink. Only restore the sink when it
+      // owned focus before the rebuild; never focus it proactively.
+      if (state.controlMode && controlFocusWanted) {
+        const sink = container.querySelector<HTMLTextAreaElement>("#desktop-browser-input");
+        if (sink) {
+          placeControlSink(sink);
+          sink.focus({preventScroll: true});
+        }
+      }
       // The overflow measure decides which chips (and the chevron) are
       // visible; reposition once that layout pass has run.
       requestAnimationFrame(relayoutBookmarks);
@@ -831,6 +1630,8 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     if (document.visibilityState === "hidden") {
       stopStream();
       invalidateStateSync();
+      resetControlInput();
+      controlFocusWanted = false;
       return;
     }
     const grant = state.grant;
@@ -846,18 +1647,22 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     frameAbort = controller;
     const generation = streamGeneration;
     try {
-      const blob = await api.browserTabFrame(grant.id, tab.id, controller.signal);
+      const frame = await api.browserTabFrame(grant.id, tab.id, controller.signal);
       // The owner may have switched tabs or closed the panel while this frame
       // was in flight; a stale tab screenshot must never reach the new view.
       if (disposed || generation !== streamGeneration) return;
-      const buffer = new Uint8Array(await blob.arrayBuffer());
+      const buffer = new Uint8Array(await frame.blob.arrayBuffer());
       if (disposed || generation !== streamGeneration) return;
       const nextSignature = browserFrameSignature(buffer);
       frameDelay = nextBrowserFrameDelay(frameSignature, nextSignature, frameDelay);
       frameSignature = nextSignature;
       state.frameLive = true;
       state.frameError = "";
-      const nextURL = URL.createObjectURL(new Blob([buffer], {type: blob.type || "image/jpeg"}));
+      // The viewport belongs to this exact image. A frame without headers
+      // falls back to the image's natural size.
+      state.frameViewportWidth = frame.viewportWidth;
+      state.frameViewportHeight = frame.viewportHeight;
+      const nextURL = URL.createObjectURL(new Blob([buffer], {type: frame.blob.type || "image/jpeg"}));
       const previousURL = frameURL;
       frameURL = nextURL;
       const image = container.querySelector<HTMLImageElement>("#desktop-browser-frame");
@@ -964,6 +1769,7 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     const beforeTabs = state.tabs.map(tab => `${tab.id}|${tab.url}|${tab.title}|${tab.active ? 1 : 0}|${tab.focused ? 1 : 0}`).join("\n");
     const beforeProfile = state.profileID;
     const beforeHost = state.host ? `${state.host.available}|${state.host.edge_available}|${state.host.code || ""}` : "";
+    const beforeControl = state.controlMode;
 
     state.profiles = data.profiles || [];
     state.host = data.host || null;
@@ -998,10 +1804,28 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     const nextSelected = browserFollowTabID(state.tabs, state.selectedTabID, followActive);
     const selectionChanged = nextSelected !== state.selectedTabID;
     if (selectionChanged) {
+      // Input aimed at the previous page must never land on the new tab.
+      resetControlInput();
+      state.controlNotice = "";
+      state.frameViewportWidth = 0;
+      state.frameViewportHeight = 0;
       state.selectedTabID = nextSelected;
       state.frameError = "";
       state.frameLive = false;
       terminalStreamKey = "";
+    }
+    if (active && active.id !== beforeGrant) {
+      resetControlInput();
+      state.controlNotice = "";
+      state.frameViewportWidth = 0;
+      state.frameViewportHeight = 0;
+    }
+    // A revoked/expired/transferred lease or a dead host drops the mode back
+    // to read-only immediately; pending input is cleared, never replayed.
+    if (state.controlMode) {
+      if (!active) exitControlMode("浏览器共享已结束，已退出控制模式");
+      else if (active.id !== beforeGrant) exitControlMode("浏览器共享已更换，已退出控制模式");
+      else if (state.host && !state.host.available) exitControlMode("浏览器宿主不可用，已退出控制模式");
     }
     const selected = selectedTab();
     if (selected && document.activeElement?.id !== "desktop-browser-url") state.urlDraft = selected.url;
@@ -1010,7 +1834,8 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     const afterHost = state.host ? `${state.host.available}|${state.host.edge_available}|${state.host.code || ""}` : "";
     return {
       changed: beforeGrant !== (active?.id || "") || beforeTabs !== afterTabs
-        || selectionChanged || beforeProfile !== state.profileID || beforeHost !== afterHost,
+        || selectionChanged || beforeProfile !== state.profileID || beforeHost !== afterHost
+        || beforeControl !== state.controlMode,
       grantChanged: beforeGrant !== (active?.id || ""),
       selectionChanged,
       tabsChanged: beforeTabs !== afterTabs,
@@ -1231,6 +2056,7 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     if (!state.grant) return;
     // Any state read still in flight belongs to the lease being released.
     invalidateStateSync();
+    exitControlMode();
     const grantID = state.grant.id;
     state.binding = true;
     state.error = "";
@@ -1381,6 +2207,9 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
       // real browser window must never come back showing a stale screenshot.
       stopStream();
       invalidateStateSync();
+      // Pending input belongs to a view the Owner can no longer see.
+      resetControlInput();
+      controlFocusWanted = false;
       paintFrameStatus();
       return;
     }
@@ -1434,6 +2263,8 @@ export function mountBrowserTaskPanel(options: BrowserTaskPanelOptions): Browser
     dispose: () => {
       disposed = true;
       bookmarkRequest++;
+      state.controlMode = false;
+      resetControlInput();
       window.clearTimeout(syncTimer);
       syncTimer = 0;
       // An accepted stop outlives the panel: dispose must not cancel the

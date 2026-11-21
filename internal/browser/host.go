@@ -114,6 +114,8 @@ type HostAction struct {
 	Ref    string   `json:"ref,omitempty"`
 	X      *int     `json:"x,omitempty"`
 	Y      *int     `json:"y,omitempty"`
+	ToX    *int     `json:"to_x,omitempty"`
+	ToY    *int     `json:"to_y,omitempty"`
 	Text   string   `json:"text,omitempty"`
 	Keys   []string `json:"keys,omitempty"`
 	DeltaX int      `json:"delta_x,omitempty"`
@@ -127,6 +129,8 @@ type HostActionResult struct {
 	Ref  string `json:"ref,omitempty"`
 	X    *int   `json:"x,omitempty"`
 	Y    *int   `json:"y,omitempty"`
+	ToX  *int   `json:"to_x,omitempty"`
+	ToY  *int   `json:"to_y,omitempty"`
 }
 
 type HostUploadFile struct {
@@ -187,10 +191,15 @@ type HostBookmark struct {
 }
 
 // HostFrame is a single read-only preview image of an authorized tab. It is
-// transient: AHA never writes it to disk or into an audit row.
+// transient: AHA never writes it to disk or into an audit row. Width/Height are
+// the CSS viewport size captured with the image (0 when the host could not
+// report it); the Web panel uses the image/viewport ratio so a device scale
+// factor or letterboxing never has to be guessed.
 type HostFrame struct {
 	ContentType string
 	Data        []byte
+	Width       int
+	Height      int
 }
 
 const (
@@ -582,6 +591,8 @@ type hostActionWire struct {
 	Ref       string   `json:"ref,omitempty"`
 	X         *int     `json:"x,omitempty"`
 	Y         *int     `json:"y,omitempty"`
+	ToX       *int     `json:"to_x,omitempty"`
+	ToY       *int     `json:"to_y,omitempty"`
 	Text      string   `json:"text,omitempty"`
 	Keys      []string `json:"keys,omitempty"`
 	DeltaX    int      `json:"delta_x,omitempty"`
@@ -594,7 +605,8 @@ func (h *HTTPHost) Action(ctx context.Context, profileID, sessionID, tabID strin
 	}
 	body := hostActionWire{
 		SessionID: sessionID, Fence: fence, Kind: action.Kind, Ref: action.Ref,
-		X: action.X, Y: action.Y, Text: action.Text, Keys: action.Keys,
+		X: action.X, Y: action.Y, ToX: action.ToX, ToY: action.ToY,
+		Text: action.Text, Keys: action.Keys,
 		DeltaX: action.DeltaX, DeltaY: action.DeltaY,
 	}
 	err := h.call(ctx, http.MethodPost,
@@ -791,7 +803,22 @@ func (h *HTTPHost) Frame(ctx context.Context, profileID, sessionID, tabID string
 	if len(payload) == 0 || len(payload) > maxHostFrameBytes {
 		return HostFrame{}, newError(http.StatusBadGateway, "browser_frame_failed", "浏览器宿主返回的画面大小无效")
 	}
-	return HostFrame{ContentType: contentType, Data: payload}, nil
+	// Viewport metadata is optional. A missing or malformed value is not a
+	// frame failure: the Web panel falls back to the image's own pixel size.
+	width, _ := positiveFrameDimension(response.Header.Get("X-AHA2-Viewport-Width"))
+	height, _ := positiveFrameDimension(response.Header.Get("X-AHA2-Viewport-Height"))
+	return HostFrame{ContentType: contentType, Data: payload, Width: width, Height: height}, nil
+}
+
+// positiveFrameDimension parses a viewport dimension header. Values are used
+// only for proportional coordinate mapping, so anything outside the action
+// coordinate budget is dropped instead of being trusted as an unbounded int.
+func positiveFrameDimension(raw string) (int, bool) {
+	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || value <= 0 || value > MaxCoordinate {
+		return 0, false
+	}
+	return value, true
 }
 
 func isHostUnavailable(err error) bool {

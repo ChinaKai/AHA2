@@ -41,6 +41,10 @@ func (s *Server) registerBrowserRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /api/v1/browser-grants/{id}/tabs/{tab}/navigate", s.withAuth(http.HandlerFunc(s.navigateBrowserTab)))
 	mux.Handle("GET /api/v1/browser-grants/{id}/tabs/{tab}/snapshot", s.withAuth(http.HandlerFunc(s.snapshotBrowserTab)))
 	mux.Handle("GET /api/v1/browser-grants/{id}/tabs/{tab}/frame", s.withAuth(http.HandlerFunc(s.browserTabFrame)))
+	// Owner Web input: clicks, typing, keys, scrolling, right-click and drag.
+	// It shares the Agent action endpoint's grant/lease/fence/input-slot path
+	// and adds an explicit owner actor/source in the audit trail.
+	mux.Handle("POST /api/v1/browser-grants/{id}/tabs/{tab}/actions", s.withAuth(http.HandlerFunc(s.ownerBrowserAction)))
 	mux.Handle("GET /api/v1/browser-grants/{id}/bookmarks", s.withAuth(http.HandlerFunc(s.browserGrantBookmarks)))
 	mux.Handle("POST /api/v1/browser/profiles/{id}/transfer", s.withAuth(http.HandlerFunc(s.transferBrowserProfile)))
 }
@@ -480,6 +484,48 @@ func (s *Server) browserTabFrame(writer http.ResponseWriter, request *http.Reque
 	writeBrowserFrame(writer, frame)
 }
 
+// browserActionPayload is shared by the Owner Web route and the Agent route so
+// both validate exactly the same wire shape. Which action kinds are accepted is
+// decided by the service (Agent vs Owner), not by the decoder.
+type browserActionPayload struct {
+	Kind   string   `json:"kind"`
+	Ref    string   `json:"ref"`
+	X      *int     `json:"x"`
+	Y      *int     `json:"y"`
+	ToX    *int     `json:"to_x"`
+	ToY    *int     `json:"to_y"`
+	Text   string   `json:"text"`
+	Keys   []string `json:"keys"`
+	DeltaX int      `json:"delta_x"`
+	DeltaY int      `json:"delta_y"`
+}
+
+func (p browserActionPayload) action() browser.HostAction {
+	return browser.HostAction{
+		Kind: p.Kind, Ref: p.Ref, X: p.X, Y: p.Y, ToX: p.ToX, ToY: p.ToY,
+		Text: p.Text, Keys: p.Keys, DeltaX: p.DeltaX, DeltaY: p.DeltaY,
+	}
+}
+
+func (s *Server) ownerBrowserAction(writer http.ResponseWriter, request *http.Request) {
+	service := s.browserServiceOrError(writer)
+	if service == nil {
+		return
+	}
+	var payload browserActionPayload
+	if err := decodeJSON(request, &payload); err != nil {
+		writeErrorDetail(writer, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	result, err := service.ActOwner(request.Context(), browserActor(request),
+		request.PathValue("id"), request.PathValue("tab"), payload.action())
+	if err != nil {
+		writeBrowserFailure(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "action": result})
+}
+
 func (s *Server) closeBrowserTab(writer http.ResponseWriter, request *http.Request) {
 	service := s.browserServiceOrError(writer)
 	if service == nil {
@@ -717,25 +763,13 @@ func (s *Server) agentBrowserAction(writer http.ResponseWriter, request *http.Re
 	if !ok {
 		return
 	}
-	var payload struct {
-		Kind   string   `json:"kind"`
-		Ref    string   `json:"ref"`
-		X      *int     `json:"x"`
-		Y      *int     `json:"y"`
-		Text   string   `json:"text"`
-		Keys   []string `json:"keys"`
-		DeltaX int      `json:"delta_x"`
-		DeltaY int      `json:"delta_y"`
-	}
+	var payload browserActionPayload
 	if err := decodeJSON(request, &payload); err != nil {
 		writeErrorDetail(writer, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
 	result, err := service.Act(request.Context(), browserActor(request), grant.ID, request.PathValue("tab"),
-		browser.HostAction{
-			Kind: payload.Kind, Ref: payload.Ref, X: payload.X, Y: payload.Y,
-			Text: payload.Text, Keys: payload.Keys, DeltaX: payload.DeltaX, DeltaY: payload.DeltaY,
-		})
+		payload.action())
 	if err != nil {
 		writeBrowserFailure(writer, err)
 		return
@@ -961,6 +995,13 @@ func (s *Server) agentBrowserImportCookies(writer http.ResponseWriter, request *
 
 func writeBrowserFrame(writer http.ResponseWriter, frame browser.HostFrame) {
 	writer.Header().Set("Content-Type", frame.ContentType)
+	// The CSS viewport that belongs to this image. The Web panel multiplies the
+	// click position by viewport/image size, so DPI scaling and object-fit
+	// letterboxing never change what the owner is aiming at.
+	if frame.Width > 0 && frame.Height > 0 {
+		writer.Header().Set("X-AHA2-Viewport-Width", strconv.Itoa(frame.Width))
+		writer.Header().Set("X-AHA2-Viewport-Height", strconv.Itoa(frame.Height))
+	}
 	writer.Header().Set("Cache-Control", "no-store")
 	writer.Header().Set("Content-Length", strconv.Itoa(len(frame.Data)))
 	writer.WriteHeader(http.StatusOK)

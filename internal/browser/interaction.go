@@ -35,20 +35,43 @@ const (
 	MaxCookieDomain     = 253
 )
 
-var actionKinds = map[string]bool{
+// agentActionKinds is the closed Agent action set. Owner input additionally
+// allows context_click, text and drag: a Web session can press the right
+// mouse button, type into the page's current focus and drag a selection, which
+// the Agent API deliberately does not expose.
+var agentActionKinds = map[string]bool{
 	"click": true, "double_click": true, "hover": true,
 	"type": true, "key": true, "scroll": true,
 }
 
-// Act runs one page interaction under the Task grant, its capability and the
-// exclusive lease. Text and key payloads are passed to the host but never
+var ownerActionKinds = map[string]bool{
+	"click": true, "double_click": true, "hover": true,
+	"type": true, "key": true, "scroll": true,
+	"context_click": true, "text": true, "drag": true,
+}
+
+// Act runs one Agent page interaction under the Task grant, its capability and
+// the exclusive lease. Text and key payloads are passed to the host but never
 // written to the audit trail or returned in the response.
 func (s *Service) Act(ctx context.Context, actor, grantID, tabID string, action HostAction) (HostActionResult, error) {
+	return s.act(ctx, "agent", actor, grantID, tabID, action, false)
+}
+
+// ActOwner runs one Owner Web page interaction. It uses the same grant,
+// capability (interact), lease, fence and host input slot as an Agent action;
+// only the actor/source recorded in the audit trail and the extended action set
+// differ. The Owner route is session-authenticated, never Agent-token
+// authenticated.
+func (s *Service) ActOwner(ctx context.Context, actor, grantID, tabID string, action HostAction) (HostActionResult, error) {
+	return s.act(ctx, "owner", actor, grantID, tabID, action, true)
+}
+
+func (s *Service) act(ctx context.Context, source, actor, grantID, tabID string, action HostAction, allowOwner bool) (HostActionResult, error) {
 	grant, tab, err := s.authorize(ctx, grantID, domain.BrowserCapabilityInteract, tabID)
 	if err != nil {
 		return HostActionResult{}, err
 	}
-	action, err = normalizeAction(action)
+	action, err = normalizeAction(action, allowOwner)
 	if err != nil {
 		return HostActionResult{}, err
 	}
@@ -69,8 +92,12 @@ func (s *Service) Act(ctx context.Context, actor, grantID, tabID string, action 
 		result = hostResult
 		return nil
 	})
+	// The audit trail names who acted (owner session vs agent:<agent>@<turn>),
+	// which grant/tab, the action kind/target and the result. Text and key
+	// names are payloads and must never enter the row.
 	auditData := map[string]any{
-		"task_id": tab.TaskID, "tab_id": tab.ID, "kind": action.Kind,
+		"task_id": tab.TaskID, "grant_id": grant.ID, "tab_id": tab.ID,
+		"kind": action.Kind, "source": source,
 	}
 	if target := actionTarget(action); target != "" {
 		auditData["target"] = target
@@ -84,10 +111,14 @@ func (s *Service) Act(ctx context.Context, actor, grantID, tabID string, action 
 	return result, nil
 }
 
-func normalizeAction(action HostAction) (HostAction, error) {
+func normalizeAction(action HostAction, allowOwner bool) (HostAction, error) {
 	action.Kind = strings.TrimSpace(action.Kind)
 	action.Ref = strings.TrimSpace(action.Ref)
-	if !actionKinds[action.Kind] {
+	kinds := agentActionKinds
+	if allowOwner {
+		kinds = ownerActionKinds
+	}
+	if !kinds[action.Kind] {
 		return HostAction{}, badRequest("browser_action_invalid", "不支持的页面操作")
 	}
 	hasRef := action.Ref != ""
@@ -108,12 +139,26 @@ func normalizeAction(action HostAction) (HostAction, error) {
 			return HostAction{}, badRequest("browser_action_invalid", "坐标超出允许范围")
 		}
 	}
+	hasToX := action.ToX != nil
+	hasToY := action.ToY != nil
+	if hasToX != hasToY {
+		return HostAction{}, badRequest("browser_action_invalid", "拖动终点 to_x/to_y 必须同时提供")
+	}
+	if hasToX {
+		if *action.ToX < 0 || *action.ToX > MaxCoordinate || *action.ToY < 0 || *action.ToY > MaxCoordinate {
+			return HostAction{}, badRequest("browser_action_invalid", "拖动终点超出允许范围")
+		}
+	}
+	if action.Kind != "drag" && (hasToX || hasToY) {
+		return HostAction{}, badRequest("browser_action_invalid", "只有拖动操作接受终点坐标")
+	}
+	hasPayload := action.Text != "" || len(action.Keys) > 0 || action.DeltaX != 0 || action.DeltaY != 0
 	switch action.Kind {
-	case "click", "double_click", "hover":
+	case "click", "double_click", "hover", "context_click":
 		if !hasRef && !hasCoords {
 			return HostAction{}, badRequest("browser_action_invalid", "请提供元素 ref 或坐标")
 		}
-		if action.Text != "" || len(action.Keys) > 0 || action.DeltaX != 0 || action.DeltaY != 0 {
+		if hasPayload {
 			return HostAction{}, badRequest("browser_action_invalid", "该操作不接受输入内容")
 		}
 	case "type":
@@ -128,6 +173,31 @@ func normalizeAction(action HostAction) (HostAction, error) {
 		}
 		if len(action.Keys) > 0 || action.DeltaX != 0 || action.DeltaY != 0 {
 			return HostAction{}, badRequest("browser_action_invalid", "该操作不接受按键或滚动参数")
+		}
+	case "text":
+		// Owner typing targets the page's current focus. The Owner clicks the
+		// input first, so continuous typing must not re-click or move focus.
+		if hasRef || hasCoords {
+			return HostAction{}, badRequest("browser_action_invalid", "文本输入不接受元素或坐标")
+		}
+		if action.Text == "" {
+			return HostAction{}, badRequest("browser_action_invalid", "请输入要键入的文本")
+		}
+		if len(action.Text) > MaxActionTextBytes || !utf8.ValidString(action.Text) || hasControlChars(action.Text, false) {
+			return HostAction{}, badRequest("browser_action_invalid", "输入文本过长或包含无效字符")
+		}
+		if len(action.Keys) > 0 || action.DeltaX != 0 || action.DeltaY != 0 {
+			return HostAction{}, badRequest("browser_action_invalid", "文本输入不接受按键或滚动参数")
+		}
+	case "drag":
+		if hasRef {
+			return HostAction{}, badRequest("browser_action_invalid", "拖动不接受元素 ref")
+		}
+		if !hasCoords || !hasToX {
+			return HostAction{}, badRequest("browser_action_invalid", "拖动需要起点和终点坐标")
+		}
+		if hasPayload {
+			return HostAction{}, badRequest("browser_action_invalid", "拖动不接受输入内容")
 		}
 	case "key":
 		if hasRef || hasCoords || action.Text != "" || action.DeltaX != 0 || action.DeltaY != 0 {
@@ -194,7 +264,11 @@ func actionTarget(action HostAction) string {
 		return action.Ref
 	}
 	if action.X != nil && action.Y != nil {
-		return "viewport:" + strconv.Itoa(*action.X) + "," + strconv.Itoa(*action.Y)
+		target := "viewport:" + strconv.Itoa(*action.X) + "," + strconv.Itoa(*action.Y)
+		if action.Kind == "drag" && action.ToX != nil && action.ToY != nil {
+			target += "->" + strconv.Itoa(*action.ToX) + "," + strconv.Itoa(*action.ToY)
+		}
+		return target
 	}
 	return ""
 }

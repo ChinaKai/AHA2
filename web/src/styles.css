@@ -1059,6 +1059,26 @@ body.task-tool-resizing { cursor: col-resize; user-select: none; }
 .desktop-browser-frame-stage img[hidden] { display: none; }
 .desktop-browser-frame-empty { position: absolute; inset: 0; display: grid; place-items: center; margin: 0; padding: 12px; color: #cbd5e1; font-size: 12px; line-height: 1.5; text-align: center; }
 .desktop-browser-frame-empty[hidden] { display: none; }
+/* Owner control is an explicit mode: read-only is the default, and the mode
+   never changes by accident (tab/lease/host changes drop it back to read-only). */
+.desktop-browser-controlbar { display: flex; flex: 0 0 auto; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.desktop-browser-control-toggle { flex: 0 0 auto; min-height: 28px; padding: 3px 10px; border: 1px solid var(--line-strong); border-radius: 6px; background: #fff; color: var(--color-text); font-size: 12px; font-weight: 650; }
+.desktop-browser-control-toggle:hover:not(:disabled) { background: var(--color-surface-muted); }
+.desktop-browser-control-toggle[aria-pressed="true"] { border-color: #b9d2e8; background: var(--color-info-soft); box-shadow: inset 0 0 0 1px #b9d2e8; color: var(--color-info-ink); }
+.desktop-browser-control-toggle:disabled { cursor: not-allowed; opacity: .55; }
+.desktop-browser-control-hint { flex: 1 1 160px; min-width: 0; overflow: hidden; color: var(--muted); font-size: 11px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+.desktop-browser-keyboard { flex: 0 0 auto; min-height: 26px; padding: 2px 8px; border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--color-text); font-size: 11px; }
+.desktop-browser-keyboard[hidden] { display: none; }
+/* A stage in control mode is a remote application surface: the highlight tells
+   the Owner input is live, and touch scrolling is handled by the panel so the
+   browser does not pan the preview instead. */
+.desktop-browser-preview[data-control="on"] .desktop-browser-frame-stage { border-color: #7aa7cc; box-shadow: 0 0 0 1px #7aa7cc; cursor: crosshair; touch-action: none; }
+.desktop-browser-preview[data-control="on"] .desktop-browser-frame-stage img { cursor: crosshair; }
+/* The keyboard surface is invisible; the stage carries its focus ring. */
+.desktop-browser-preview[data-control="on"] .desktop-browser-frame-stage:focus-within { outline: 2px solid var(--color-info); outline-offset: 1px; }
+/* A transparent text sink: it owns the keyboard/IME/paste stream without
+   covering the image (pointer-events: none keeps clicks on the page picture). */
+.desktop-browser-input { position: absolute; z-index: 2; width: 2px; height: 1.4em; margin: 0; padding: 0; border: 0; background: transparent; color: transparent; caret-color: transparent; font-size: 16px; line-height: 1.4; opacity: 0; outline: none; overflow: hidden; pointer-events: none; resize: none; }
 .desktop-browser-statusbar { display: flex; flex: 0 0 auto; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 2px 12px; min-width: 0; padding: 5px 7px; border: 1px solid var(--line); border-radius: 6px; background: #fff; font-size: 11px; line-height: 1.4; }
 .desktop-browser-control-status { min-width: 0; overflow: hidden; color: var(--color-text); font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .desktop-browser-control-status[data-tone="warning"] { color: var(--color-warning-ink); }

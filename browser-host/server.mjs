@@ -526,13 +526,23 @@ function tabPayload(tab) {
   return {tab: {id: tab.id, url: tab.url, title: tab.title}};
 }
 
-function sendFrame(response, buffer, cached) {
-  response.writeHead(200, {
+// The frame is a screenshot of the page viewport, but its pixel size can differ
+// from the CSS viewport (device scale factor, browser window resizing). AHA and
+// the Web UI need the CSS viewport size that belongs to this exact image to map
+// a click on the displayed, letterboxed picture back to page coordinates.
+function sendFrame(response, buffer, cached, viewport) {
+  const headers = {
     "Content-Type": "image/jpeg",
     "Cache-Control": "no-store",
     "Content-Length": buffer.length,
     "X-AHA2-Frame-Cached": cached ? "1" : "0",
-  });
+  };
+  if (viewport && Number.isInteger(viewport.width) && Number.isInteger(viewport.height) &&
+      viewport.width > 0 && viewport.height > 0) {
+    headers["X-AHA2-Viewport-Width"] = String(viewport.width);
+    headers["X-AHA2-Viewport-Height"] = String(viewport.height);
+  }
+  response.writeHead(200, headers);
   response.end(buffer);
 }
 
@@ -970,30 +980,49 @@ export function createHostServer(options) {
         // fast client cannot turn into an unbounded screenshot loop.
         const now = Date.now();
         if (tab.frame && now - tab.frame.at < FRAME_MIN_INTERVAL_MS) {
-          return sendFrame(response, tab.frame.buffer, true);
+          return sendFrame(response, tab.frame.buffer, true, tab.frame.viewport);
         }
         try {
           if (!tab.framePending) {
             const capture = (async () => {
-              const buffer = await tab.page.screenshot({
-                type: "jpeg", quality: FRAME_QUALITY, timeout: 5000,
-              });
+              // Read the CSS viewport together with the screenshot. The image
+              // pixel size may include a device scale factor; the Web UI uses
+              // both sizes as a ratio, so DPI never has to be guessed.
+              const viewportProbe = (async () => {
+                try {
+                  const size = await tab.page.evaluate(() => ({
+                    width: window.innerWidth, height: window.innerHeight,
+                  }));
+                  if (size && Number.isInteger(size.width) && Number.isInteger(size.height) &&
+                      size.width > 0 && size.height > 0) {
+                    return {width: size.width, height: size.height};
+                  }
+                } catch {
+                  // A wedged page still yields its bitmap; mapping falls back
+                  // to the image's own pixel size in the Web UI.
+                }
+                return {width: 0, height: 0};
+              })();
+              const [buffer, viewport] = await Promise.all([
+                tab.page.screenshot({type: "jpeg", quality: FRAME_QUALITY, timeout: 5000}),
+                viewportProbe,
+              ]);
               if (!Buffer.isBuffer(buffer) || buffer.length === 0) {
                 throw new Error("browser screenshot returned no data");
               }
               if (buffer.length > MAX_FRAME_BYTES) {
                 throw new Error("browser screenshot exceeded the frame size limit");
               }
-              return buffer;
+              return {buffer, viewport};
             })();
             tab.framePending = capture;
             capture.finally(() => {
               if (tab.framePending === capture) tab.framePending = null;
             }).catch(() => {});
           }
-          const buffer = await tab.framePending;
-          tab.frame = {at: Date.now(), buffer};
-          return sendFrame(response, buffer, false);
+          const {buffer, viewport} = await tab.framePending;
+          tab.frame = {at: Date.now(), buffer, viewport};
+          return sendFrame(response, buffer, false, viewport);
         } catch (error) {
           console.error(`tab frame failed profile=${profileID} diagnostic=${diagnostics(error, root, "")}`);
           return json(response, 502, fail(502, "browser_frame_failed", "读取页面画面失败").body);

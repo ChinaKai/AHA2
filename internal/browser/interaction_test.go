@@ -127,6 +127,96 @@ func TestPageActionValidationAndStaleRefsFailClosed(t *testing.T) {
 	}
 }
 
+func TestOwnerActionsUseOwnerSetAndKeepPayloadsOutOfAudit(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	grant, tab := grantWithCaps(t, f, []string{
+		domain.BrowserCapabilitySnapshot, domain.BrowserCapabilityInteract,
+	})
+
+	// The Agent set is closed: Owner-only kinds must not become Agent powers.
+	for name, action := range map[string]browser.HostAction{
+		"context click": {Kind: "context_click", X: intPtr(10), Y: intPtr(20)},
+		"text":          {Kind: "text", Text: "owner-only-2FA-654321"},
+		"drag":          {Kind: "drag", X: intPtr(1), Y: intPtr(2), ToX: intPtr(3), ToY: intPtr(4)},
+	} {
+		if _, err := f.service.Act(ctx, "agent:a@turn", grant.ID, tab.ID, action); browser.Code(err) != "browser_action_invalid" {
+			t.Fatalf("agent %s: expected browser_action_invalid, got %v", name, err)
+		}
+	}
+	if len(f.host.ActionCalls) != 0 {
+		t.Fatalf("owner-only actions reached the host through the agent path: %#v", f.host.ActionCalls)
+	}
+
+	if _, err := f.service.ActOwner(ctx, "owner", grant.ID, tab.ID, browser.HostAction{
+		Kind: "text", Text: "owner-only-2FA-654321",
+	}); err != nil {
+		t.Fatalf("owner text: %v", err)
+	}
+	if len(f.host.ActionCalls) != 1 || f.host.ActionCalls[0].Kind != "text" {
+		t.Fatalf("owner text host calls=%#v", f.host.ActionCalls)
+	}
+	if _, err := f.service.ActOwner(ctx, "owner", grant.ID, tab.ID, browser.HostAction{
+		Kind: "context_click", X: intPtr(40), Y: intPtr(50),
+	}); err != nil {
+		t.Fatalf("owner right click: %v", err)
+	}
+	result, err := f.service.ActOwner(ctx, "owner", grant.ID, tab.ID, browser.HostAction{
+		Kind: "drag", X: intPtr(1), Y: intPtr(2), ToX: intPtr(30), ToY: intPtr(40),
+	})
+	if err != nil {
+		t.Fatalf("owner drag: %v", err)
+	}
+	if result.Kind != "drag" || result.ToX == nil || *result.ToX != 30 {
+		t.Fatalf("owner drag result=%#v", result)
+	}
+
+	events, err := f.store.BrowserAuditEvents(ctx, "browser_tab.action", 10)
+	if err != nil || len(events) != 3 {
+		t.Fatalf("owner action audit=%#v err=%v", events, err)
+	}
+	for _, event := range events {
+		if event.OwnerID != "owner" {
+			t.Fatalf("owner action actor=%q", event.OwnerID)
+		}
+		encoded, _ := json.Marshal(event.Data)
+		text := string(encoded)
+		if !strings.Contains(text, `"source":"owner"`) ||
+			!strings.Contains(text, `"grant_id":"`+grant.ID+`"`) ||
+			!strings.Contains(text, `"tab_id":"`+tab.ID+`"`) {
+			t.Fatalf("owner action audit lost provenance: %s", text)
+		}
+		if strings.Contains(text, "owner-only-2FA-654321") {
+			t.Fatalf("owner action audit leaked typed text: %s", text)
+		}
+	}
+
+	// Owner input still needs the interact capability; it never rides on the
+	// snapshot capability that the preview uses. A Task can hold only one
+	// Profile lease, so this uses its own fixture.
+	f2 := newFixture(t)
+	snapshotOnly, snapshotTab := grantWithCaps(t, f2, []string{domain.BrowserCapabilitySnapshot})
+	if _, err := f2.service.ActOwner(ctx, "owner", snapshotOnly.ID, snapshotTab.ID, browser.HostAction{
+		Kind: "click", X: intPtr(1), Y: intPtr(1),
+	}); browser.Code(err) != "browser_capability_denied" {
+		t.Fatalf("snapshot-only owner action: %v", err)
+	}
+
+	// Validation is shared with the Agent path.
+	for name, action := range map[string]browser.HostAction{
+		"text with coords":  {Kind: "text", Text: "x", X: intPtr(1), Y: intPtr(2)},
+		"text without text": {Kind: "text"},
+		"drag without end":  {Kind: "drag", X: intPtr(1), Y: intPtr(2)},
+		"drag end out of range": {Kind: "drag", X: intPtr(1), Y: intPtr(2),
+			ToX: intPtr(browser.MaxCoordinate + 1), ToY: intPtr(2)},
+		"click with end": {Kind: "click", X: intPtr(1), Y: intPtr(2), ToX: intPtr(3), ToY: intPtr(4)},
+	} {
+		if _, err := f.service.ActOwner(ctx, "owner", grant.ID, tab.ID, action); browser.Code(err) != "browser_action_invalid" {
+			t.Fatalf("%s: expected browser_action_invalid, got %v", name, err)
+		}
+	}
+}
+
 func TestOldGrantDoesNotSilentlyAcquireNewCapabilities(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)

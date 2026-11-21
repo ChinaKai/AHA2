@@ -2,7 +2,9 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -217,5 +219,114 @@ func TestAgentBrowserActionFailsClosedAfterRelease(t *testing.T) {
 	}
 	if len(host.ActionCalls) != 0 {
 		t.Fatalf("released action reached the host: %#v", host.ActionCalls)
+	}
+}
+
+// ownerGrantFixture creates the session-authenticated grant the Web panel uses.
+// The owner route shares the service layer with the Agent route; only the actor,
+// source and accepted action kinds differ.
+func ownerGrantFixture(t *testing.T, f *browserAPIFixture, capabilities []string) (grantID, tabID string) {
+	t.Helper()
+	_, payload := f.do(t, http.MethodPost, "/api/v1/browser/profiles", map[string]any{"name": "Owner Web"})
+	profileID := payload["profile"].(map[string]any)["id"].(string)
+	response, payload := f.do(t, http.MethodPost, "/api/v1/tasks/"+f.task.ID+"/browser-grants", map[string]any{
+		"profile_id": profileID, "capabilities": capabilities,
+	})
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("create owner grant: %d %#v", response.StatusCode, payload)
+	}
+	grantID = payload["grant"].(map[string]any)["id"].(string)
+	f.host.SetCurrentPages(profileID, []browser.HostTab{
+		{ID: "host-tab-owner", URL: "https://example.com/login", Title: "Login", Active: true},
+	})
+	response, payload = f.do(t, http.MethodPost, "/api/v1/browser-grants/"+grantID+"/tabs/current", nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("bind owner tab: %d %#v", response.StatusCode, payload)
+	}
+	return grantID, payload["tab"].(map[string]any)["id"].(string)
+}
+
+func TestOwnerBrowserPageActionsOverHTTP(t *testing.T) {
+	ctx := context.Background()
+	host := browsertest.New()
+	f := newBrowserAPIFixture(t, host)
+	grantID, tabID := ownerGrantFixture(t, f, []string{"open_tab", "navigate", "snapshot", "interact"})
+	path := "/api/v1/browser-grants/" + grantID + "/tabs/" + tabID + "/actions"
+
+	response, payload := f.do(t, http.MethodPost, path, map[string]any{"kind": "click", "x": 100, "y": 60})
+	if response.StatusCode != http.StatusOK || payload["action"].(map[string]any)["kind"] != "click" {
+		t.Fatalf("owner click: %d %#v", response.StatusCode, payload)
+	}
+	if len(host.ActionCalls) != 1 || host.ActionCalls[0].X == nil || *host.ActionCalls[0].X != 100 {
+		t.Fatalf("owner click host calls=%#v", host.ActionCalls)
+	}
+
+	for name, body := range map[string]map[string]any{
+		"text":          {"kind": "text", "text": "owner-typed-2FA-987654"},
+		"context click": {"kind": "context_click", "x": 10, "y": 20},
+		"drag":          {"kind": "drag", "x": 1, "y": 2, "to_x": 30, "to_y": 40},
+	} {
+		response, payload = f.do(t, http.MethodPost, path, body)
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("owner %s: %d %#v", name, response.StatusCode, payload)
+		}
+	}
+
+	// Agent capability cannot use the Owner-only kinds; the boundary lives in
+	// the service, not in the Web client.
+	token := f.agentToken(t, f.task.ID)
+	response, payload = f.agentDo(t, http.MethodPost,
+		"/api/v1/agent/browser/grants/"+grantID+"/tabs/"+tabID+"/actions", token,
+		map[string]any{"kind": "text", "text": "agent-should-not-type"})
+	if response.StatusCode != http.StatusBadRequest || payload["error"] != "browser_action_invalid" {
+		t.Fatalf("agent owner-only kind: %d %#v", response.StatusCode, payload)
+	}
+
+	// The audit trail names the owner and the grant/tab, never the typed text.
+	events, err := f.store.BrowserAuditEvents(ctx, "browser_tab.action", 10)
+	if err != nil || len(events) != 4 {
+		t.Fatalf("owner action audit=%#v err=%v", events, err)
+	}
+	for _, event := range events {
+		encoded, _ := json.Marshal(event.Data)
+		text := string(encoded)
+		// A Web session actor is the owner account id (owner_...), never an
+		// agent:<agent>@<turn> identity.
+		if !strings.HasPrefix(event.OwnerID, "owner") {
+			t.Fatalf("owner action actor=%q", event.OwnerID)
+		}
+		if !strings.Contains(text, `"source":"owner"`) || !strings.Contains(text, `"grant_id":"`+grantID+`"`) {
+			t.Fatalf("owner action audit lost provenance: %s", text)
+		}
+		if strings.Contains(text, "owner-typed-2FA-987654") {
+			t.Fatalf("owner action audit leaked typed text: %s", text)
+		}
+	}
+
+	// The same route fails closed once the grant is released.
+	if response, payload := f.do(t, http.MethodDelete, "/api/v1/browser-grants/"+grantID, nil); response.StatusCode != http.StatusOK {
+		t.Fatalf("release owner grant: %d %#v", response.StatusCode, payload)
+	}
+	response, payload = f.do(t, http.MethodPost, path, map[string]any{"kind": "click", "x": 1, "y": 1})
+	if response.StatusCode != http.StatusForbidden || payload["error"] != "browser_grant_revoked" {
+		t.Fatalf("owner action after release: %d %#v", response.StatusCode, payload)
+	}
+	if len(host.ActionCalls) != 4 {
+		t.Fatalf("released owner action reached the host: %#v", host.ActionCalls)
+	}
+}
+
+func TestOwnerBrowserActionsRequireInteractOverHTTP(t *testing.T) {
+	host := browsertest.New()
+	f := newBrowserAPIFixture(t, host)
+	grantID, tabID := ownerGrantFixture(t, f, []string{"open_tab", "navigate", "snapshot"})
+	response, payload := f.do(t, http.MethodPost,
+		"/api/v1/browser-grants/"+grantID+"/tabs/"+tabID+"/actions",
+		map[string]any{"kind": "click", "x": 1, "y": 1})
+	if response.StatusCode != http.StatusForbidden || payload["error"] != "browser_capability_denied" {
+		t.Fatalf("owner action without interact: %d %#v", response.StatusCode, payload)
+	}
+	if len(host.ActionCalls) != 0 {
+		t.Fatalf("capability-denied action reached the host: %#v", host.ActionCalls)
 	}
 }

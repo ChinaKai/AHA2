@@ -88,7 +88,12 @@ Playwright 前返回 409 `browser_lease_hold_failed`；恢复 SQL 失败会记�
 - `POST /api/v1/browser-grants/{id}/tabs/{tab}/navigate`
 - `GET /api/v1/browser-grants/{id}/tabs/{tab}/snapshot`
 - `GET /api/v1/browser-grants/{id}/tabs/{tab}/frame`：只读 JPEG 预览（2–5 fps，
-  页面不变时自动降帧）。帧不落盘、不写审计正文，关闭面板即停止拉取。
+  页面不变时自动降帧）。帧不落盘、不写审计正文，关闭面板即停止拉取。响应头
+  `X-AHA2-Viewport-Width/Height` 给出与这张图同一时刻的 CSS 页面 viewport。
+- `POST /api/v1/browser-grants/{id}/tabs/{tab}/actions`：Owner Web 页面输入。
+  与会话/CSRF 登录态绑定，复用同一 grant、`interact` 能力、profile 独占 lease、
+  fence、host `inputSlot` 串行和审计通道；动作集比 Agent 多
+  `context_click`（右键）、`text`（在当前焦点连续输入，不重新点击）和 `drag`。
 - `DELETE /api/v1/browser-grants/{id}/tabs/{tab}`：关闭任意 tab（包括 Owner 手动
   打开的页面），origin 仅作展示标签。
 - `GET /api/v1/browser-grants/{id}/bookmarks`：读取该 Profile 的 Edge 收藏夹，
@@ -173,6 +178,73 @@ profile 路径、CDP 或密码管理器。
 `AHA2_NODE_SIGNATURE_POLICY=require` 改为失败）。内置运行时缺失/损坏时资源页
 返回 `browser_host_node_missing` 并失败关闭，不会退回公开端口或 CDP。
 
+### 2.1 Owner Web 页面控制（task-737）
+
+面板默认仍是**只读浏览**：画面、标签页、地址栏和收藏栏与以前一致，指针事件不会
+发到页面。Owner 显式点「控制页面」后才进入控制模式；再次点击或按 Shift+Esc 退出。
+
+授权与执行链：
+
+- Web 路由 `POST /api/v1/browser-grants/{id}/tabs/{tab}/actions` 使用 Session +
+  CSRF 认证，不接受 Agent Bearer capability。服务层调用 `ActOwner`：
+  - 先按 `interact` 能力、grant 状态、session 状态、profile 独占 lease 和
+    tab 归属逐项鉴权；与 Agent 的 `Act` 完全同一条 `authorize` 路径；
+  - 通过 `withOperationHold` 临时续期 lease，再调用 host
+    `POST /v1/profiles/{profile}/tabs/{tab}/actions`，带
+    `<leaseID>|<operationDeadline>` fence；
+  - host 端仍在 session gate 的读槽 + `inputSlot` 中串行执行；等待期间 fence
+    变化会重新检查并返回明确错误码。Owner 与 Agent 共用同一个 `inputSlot`，
+    两个来源的输入不会交错成半个手势；
+  - 审计行 actor 是 Owner 会话 id，`data.source="owner"`，并记录
+    `task_id/grant_id/tab_id/kind/target/result`；`text` 与 `keys` 永不入审计。
+    Agent 动作的 `source="agent"`，仍只允许原来的动作集（不含
+    `context_click/text/drag`）。
+
+动作集：
+
+| 动作 | 语义 |
+| --- | --- |
+| `click` / `double_click` | 左键单击 / 双击（viewport 坐标向页面内部换算） |
+| `context_click` | 右键；页面自定义菜单可用，Chromium 也可能弹出自己的原生菜单 |
+| `hover` | 指针移动，尽力而为；有明确操作排队时自动跳过 |
+| `scroll` | 以指针位置为锚点的滚轮滚动，单次每轴 ≤4000 像素 |
+| `text` | 在页面当前焦点键入文本（Owner 先点击输入框，后续键入不重复点击） |
+| `key` | 组合键/特殊键（`Control+c`、`ArrowLeft`、`Enter`、F1–F12 等） |
+| `drag` | 左键从起点拖到终点 |
+
+坐标换算：
+
+- frame 是页面 viewport 的截图，像图像素可能含设备缩放因子；host 在同一次
+  截图时读取 `window.innerWidth/innerHeight` 并通过响应头返回 CSS viewport。
+- 面板里的 `<img>` 使用 `object-fit: contain`，会留白。每次事件都用图片的
+  `getBoundingClientRect()`、`naturalWidth/naturalHeight` 和 frame 的 CSS
+  viewport 计算内容区，再把 client 坐标按比例映射到页面坐标，
+  因此窗口缩放、CSS 缩放、devicePixelRatio、移动端都不需要单独猜。
+- 点在留白区或图片之外时不会发送动作；窗口刚变化、画面还没更新时，host 的
+  viewport 校验会返回 `browser_action_invalid`，面板提示刷新后重试，不会静默
+  把点击落到错误位置。
+
+输入生命周期与错误：
+
+- 切换标签页、切换模式、lease 变化、host 不可用或页面进入后台时，清空待发
+  输入、未决的单击判别和滚动累积；已在途的请求结果按 generation 丢弃。
+- 同一时刻只发送一个动作；点击经过 300ms 判别以区分单击和双击，双击只发一次。
+- 不做自动重试：HTTP 超时后动作可能已经执行，重放会造成重复输入。可证明未执行
+  的 `browser_operation_busy` 会提示稍后重试；授权撤销/过期/转移、会话换代、
+  tab 关闭、host 不可用直接退出控制模式并提示。
+- 键盘输入通过一个透明 textarea 承接：支持中文 IME（composition）、粘贴和
+  虚拟键盘的 input 事件；text 按 UTF-8 字节切成 ≤4096 字节的动作，换行转为
+  Enter；一次粘贴 ≤16 KB，超出给出可读错误。Meta/Win 组合键和
+  Ctrl+Alt+Delete 不转发（前者是宿主 OS 级快捷键，后者无法也不应模拟）。
+- Tab、Escape 等页面需要的按键会转发，因此控制模式下键盘焦点留在页面输入
+  通道；Shift+Esc 或「退出控制」按钮退出。地址栏获得焦点时按键只进地址栏，
+  不会被页面抢走。
+
+已知限制（需要实机验收）：右键可能打开 Edge 原生菜单；Ctrl/Cmd+滚轮是缩放
+AHA 面板而不是页面；触屏不支持双指缩放，单指拖动滚动、长按为右键；hover 是
+尽力而为；画面有帧间隔，点击作用于截图时刻附近的位置；新开的弹窗要等下一次
+标签同步才会出现在面板里。
+
 ## 3. 失败关闭
 - host 未配置/不可达：`browser_host_unavailable`（HTTP 503）；释放时同样失败并保留 lease；
 - Edge 缺失：`browser_edge_unavailable`（503），不自动换浏览器；
@@ -222,7 +294,9 @@ host 返回的原始 Playwright 诊断只留在 host 本地日志（替换 profi
 标签页 open/activate/close/navigate/snapshot、页面动作、文件上传、下载列表/取回、
 Cookie 导入/导出、收藏夹读取、lease 获取/释放/转移。审计记录 profile/session、
 task、动作、tab id、URL、目标 ref/坐标、文件数量/大小/文件名和结果；Agent actor
-形如 `agent:<agent>@<turn>`，因此能追溯到 turn。审计不写页面正文、输入 text、
+形如 `agent:<agent>@<turn>`，因此能追溯到 turn。Owner Web 页面动作的 actor 是
+Owner 会话 id，`source="owner"`，并额外记录 grant id，因此同一 `browser_tab.action`
+事件能区分 Owner 与 Agent、定位到具体 grant/tab。审计不写页面正文、输入 text、
 按键名、cookie 值、文件内容、storage 或 profile 路径。
 
 ## 6. 威胁边界与未覆盖风险

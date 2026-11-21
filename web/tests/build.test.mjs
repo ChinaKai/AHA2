@@ -3917,7 +3917,11 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   // 发送的草稿回写，以及浮层 Esc；实测 276,244，ceil 到下一个边界。
   // 合入 task-728 后同一掩码、level-5 实测 276,402 JS+CSS，ceil 到下一个
   // 256 字节边界。
-  const FIRST_SCREEN_GZIP_BUDGET = 276480;
+  // task-737 owner browser control adds the read-only/control bar, its toggle
+  // and hint, the control-mode stage highlight and the transparent IME sink to
+  // the global stylesheet; same mask version, level-5 measured 276,738 JS+CSS,
+  // ceil to the next 256-byte boundary.
+  const FIRST_SCREEN_GZIP_BUDGET = 276992;
   // The version query parameter is a content hash and its hex digits change
   // how the same code gzips: main already sits exactly on the budget, so a
   // hash-only change could trip it without growing the payload. Mask the

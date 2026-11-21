@@ -949,6 +949,34 @@ export interface BrowserBookmark {
   folder?: string;
 }
 
+// One preview image plus the CSS page viewport it was captured from. The panel
+// maps a displayed click by the image/viewport ratio, so a device scale factor
+// and object-fit letterboxing cancel out.
+export interface BrowserFrame {
+  blob: Blob;
+  viewportWidth: number;
+  viewportHeight: number;
+}
+
+// Owner Web page input. The browser-host accepts this closed set; the Agent
+// action set is narrower (no context_click/text/drag).
+export type BrowserPageActionKind =
+  "click" | "double_click" | "context_click" | "hover" |
+  "type" | "text" | "key" | "scroll" | "drag";
+
+export interface BrowserPageAction {
+  kind: BrowserPageActionKind;
+  ref?: string;
+  x?: number;
+  y?: number;
+  to_x?: number;
+  to_y?: number;
+  text?: string;
+  keys?: string[];
+  delta_x?: number;
+  delta_y?: number;
+}
+
 export interface BrowserTaskGrant {
   id: string;
   task_id: string;

@@ -31,8 +31,8 @@ async function startHost({elements = [], cookieList = [], downloadBody = "downlo
       waitFor: async () => { if (!entry) throw new Error("not attached"); },
       count: async () => (entry ? 1 : 0),
       evaluate: async () => Boolean(entry && entry.fileInput),
-      click: async () => {
-        calls.actions.push({kind: "click", ref});
+      click: async options => {
+        calls.actions.push({kind: "click", ref, button: options?.button || "left"});
         if (entry && entry.clickError) throw entry.clickError;
         if (entry && entry.opensChooser && typeof listeners.filechooser === "function") {
           listeners.filechooser(chooser);
@@ -72,9 +72,11 @@ async function startHost({elements = [], cookieList = [], downloadBody = "downlo
     },
     locator: locatorFor,
     mouse: {
-      click: async (x, y) => { calls.actions.push({kind: "mouse-click", x, y}); },
+      click: async (x, y, options = {}) => { calls.actions.push({kind: "mouse-click", x, y, button: options.button || "left"}); },
       dblclick: async (x, y) => { calls.actions.push({kind: "mouse-double-click", x, y}); },
       move: async (x, y) => { calls.actions.push({kind: "mouse-move", x, y}); },
+      down: async () => { calls.actions.push({kind: "mouse-down"}); },
+      up: async () => { calls.actions.push({kind: "mouse-up"}); },
       wheel: async (deltaX, deltaY) => { calls.actions.push({kind: "wheel", deltaX, deltaY}); },
     },
     keyboard: {
@@ -202,6 +204,74 @@ test("page actions run through the fence and reject stale refs", async () => {
       {fence: "stale@1", kind: "type", ref: "e2-1", text: "must-not-leak"});
     assert.equal(result.status, 409);
     assert.doesNotMatch(JSON.stringify(result.body), /must-not-leak/);
+  } finally {
+    await host.close();
+  }
+});
+
+test("owner action kinds type at the current focus, right-click and drag", async () => {
+  const host = await startHost();
+  try {
+    const fence = futureFence("grant-owner");
+    const tabID = await openSession(host, fence);
+    const url = `/v1/profiles/browser_profile_1/tabs/${tabID}/actions`;
+
+    // text never clicks a target: the Owner's preceding click owns the focus.
+    const beforeText = host.calls.actions.length;
+    let result = await host.call("POST", url, {fence, kind: "text", text: "你好, owner"});
+    assert.equal(result.status, 200);
+    assert.equal(result.body.action.kind, "text");
+    assert.equal(host.calls.actions.length, beforeText + 1);
+    assert.equal(host.calls.actions[beforeText].kind, "type");
+    assert.equal(host.calls.actions[beforeText].text, "你好, owner");
+
+    result = await host.call("POST", url, {fence, kind: "context_click", x: 120, y: 80});
+    assert.equal(result.status, 200);
+    assert.ok(host.calls.actions.some(call => call.kind === "mouse-click" && call.button === "right"
+      && call.x === 120 && call.y === 80));
+
+    result = await host.call("POST", url, {fence, kind: "drag", x: 10, y: 20, to_x: 210, to_y: 120});
+    assert.equal(result.status, 200);
+    assert.equal(result.body.action.to_x, 210);
+    const dragKinds = host.calls.actions.map(call => call.kind);
+    const down = dragKinds.lastIndexOf("mouse-down");
+    assert.ok(down > 0 && dragKinds[down + 1] === "mouse-move" && dragKinds.includes("mouse-up"),
+      `drag sequence=${dragKinds.join(",")}`);
+
+    // Malformed owner actions fail before any page side effect.
+    result = await host.call("POST", url, {fence, kind: "text", text: "x", x: 1, y: 2});
+    assert.equal(result.status, 400);
+    result = await host.call("POST", url, {fence, kind: "context_click"});
+    assert.equal(result.status, 400);
+    result = await host.call("POST", url, {fence, kind: "drag", x: 1, y: 2});
+    assert.equal(result.status, 400);
+    result = await host.call("POST", url, {fence, kind: "drag", x: 1, y: 2, to_x: -1, to_y: 5});
+    assert.equal(result.status, 400);
+    result = await host.call("POST", url, {fence, kind: "click", x: 1, y: 2, to_x: 3, to_y: 4});
+    assert.equal(result.status, 400);
+    result = await host.call("POST", url, {fence, kind: "key", keys: ["Control", "/"]});
+    assert.equal(result.status, 200);
+    assert.ok(host.calls.actions.some(call => call.kind === "press" && call.keys === "Control+/"));
+  } finally {
+    await host.close();
+  }
+});
+
+test("frame carries the CSS viewport that belongs to the image", async () => {
+  const host = await startHost();
+  try {
+    const tabID = await openSession(host);
+    const first = await host.raw(`/v1/profiles/browser_profile_1/tabs/${tabID}/frame`);
+    assert.equal(first.status, 200);
+    assert.equal(first.headers.get("x-aha2-viewport-width"), "1280");
+    assert.equal(first.headers.get("x-aha2-viewport-height"), "800");
+    assert.equal(first.headers.get("x-aha2-frame-cached"), "0");
+    // A throttled cached frame must describe the same viewport as its image.
+    const cached = await host.raw(`/v1/profiles/browser_profile_1/tabs/${tabID}/frame`);
+    assert.equal(cached.status, 200);
+    assert.equal(cached.headers.get("x-aha2-frame-cached"), "1");
+    assert.equal(cached.headers.get("x-aha2-viewport-width"), "1280");
+    assert.equal(cached.headers.get("x-aha2-viewport-height"), "800");
   } finally {
     await host.close();
   }

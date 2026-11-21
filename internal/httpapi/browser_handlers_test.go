@@ -167,6 +167,12 @@ func TestBrowserTabFrameReturnsAuthorizedImageAndStopsAfterRevoke(t *testing.T) 
 	if frameResponse.Header.Get("Content-Type") != "image/jpeg" || frameResponse.Header.Get("Cache-Control") != "no-store" {
 		t.Fatalf("frame headers: %#v", frameResponse.Header)
 	}
+	// The Web panel maps clicks with this CSS viewport, never by guessing from
+	// the JPEG's pixel size (which can include a device scale factor).
+	if frameResponse.Header.Get("X-AHA2-Viewport-Width") != "1280" ||
+		frameResponse.Header.Get("X-AHA2-Viewport-Height") != "800" {
+		t.Fatalf("frame viewport headers: %#v", frameResponse.Header)
+	}
 	if len(body) != 4 || body[0] != 0xff {
 		t.Fatalf("frame body=%v", body)
 	}

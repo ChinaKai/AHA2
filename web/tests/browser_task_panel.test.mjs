@@ -162,3 +162,69 @@ test("several focused pages still fall back to the single active page", () => {
   // Several focused with no active page cannot pick a window either.
   assert.equal(panel.browserFollowTabID([{id: "a", focused: true}, {id: "b", focused: true}], "b"), "b");
 });
+
+test("clicks map through the letterboxed image and the frame's CSS viewport", () => {
+  // A 1280x800 page shown in a 640x480 stage: scale .5, content 640x400,
+  // letterboxed 40px at the top and bottom.
+  const rect = {left: 100, top: 200, width: 640, height: 480};
+  const center = panel.browserViewportPoint(420, 440, rect, 1280, 800, 1280, 800);
+  assert.deepEqual(center, {x: 640, y: 400});
+  // The letterbox bars are not part of the page.
+  assert.equal(panel.browserViewportPoint(420, 210, rect, 1280, 800, 1280, 800), null);
+  assert.equal(panel.browserViewportPoint(90, 440, rect, 1280, 800, 1280, 800), null);
+  // The far content corner clamps to the last page pixel, never one past it.
+  assert.deepEqual(panel.browserViewportPoint(740, 640, rect, 1280, 800, 1280, 800), {x: 1279, y: 799});
+});
+
+test("a device scale factor cancels out because only the image/viewport ratio is used", () => {
+  // A 2560x1600 screenshot of a 1280x800 CSS viewport displayed at 640x400.
+  const rect = {left: 0, top: 0, width: 640, height: 400};
+  assert.deepEqual(panel.browserViewportPoint(320, 200, rect, 2560, 1600, 1280, 800), {x: 640, y: 400});
+  assert.deepEqual(panel.browserViewportPoint(160, 100, rect, 2560, 1600, 1280, 800), {x: 320, y: 200});
+  // Missing viewport metadata falls back to the image's own pixel size.
+  assert.deepEqual(panel.browserViewportPoint(160, 100, rect, 1280, 800, 0, 0), {x: 320, y: 200});
+  assert.equal(panel.browserViewportPoint(0, 0, {left: 0, top: 0, width: 0, height: 0}, 1280, 800, 1280, 800), null);
+});
+
+test("keyboard mapping keeps printable input as text and forwards real shortcuts", () => {
+  assert.deepEqual(panel.browserKeyCommand({key: "a"}), {kind: "text", text: "a"});
+  assert.deepEqual(panel.browserKeyCommand({key: "你"}), {kind: "text", text: "你"});
+  assert.deepEqual(panel.browserKeyCommand({key: "A", shiftKey: true}), {kind: "text", text: "A"});
+  assert.deepEqual(panel.browserKeyCommand({key: " "}), {kind: "text", text: " "});
+  assert.deepEqual(panel.browserKeyCommand({key: "Enter"}), {kind: "key", keys: ["Enter"]});
+  assert.deepEqual(panel.browserKeyCommand({key: "Tab", shiftKey: true}), {kind: "key", keys: ["Shift", "Tab"]});
+  assert.deepEqual(panel.browserKeyCommand({key: "ArrowLeft", altKey: true}), {kind: "key", keys: ["Alt", "ArrowLeft"]});
+  assert.deepEqual(panel.browserKeyCommand({key: "l", ctrlKey: true, shiftKey: true}),
+    {kind: "key", keys: ["Control", "Shift", "l"]});
+  assert.deepEqual(panel.browserKeyCommand({key: "/", ctrlKey: true}), {kind: "key", keys: ["Control", "/"]});
+  assert.deepEqual(panel.browserKeyCommand({key: "F5"}), {kind: "key", keys: ["F5"]});
+  // IME composing events never leak as raw key presses.
+  assert.equal(panel.browserKeyCommand({key: "Enter", isComposing: true}), null);
+  assert.equal(panel.browserKeyCommand({key: "Process"}), null);
+  // Win/Meta and the OS secure attention sequence are never forwarded.
+  assert.equal(panel.browserKeyCommand({key: "l", metaKey: true}), null);
+  assert.equal(panel.browserKeyCommand({key: "Delete", ctrlKey: true, altKey: true}), null);
+  assert.equal(panel.browserKeyCommand({key: "Control"}), null);
+});
+
+test("text is chunked on UTF-8 boundaries and newlines become Enter presses", () => {
+  assert.equal(panel.browserTextByteLength("你好"), 6);
+  assert.deepEqual(panel.browserTextActions("你好\nworld"),
+    [{kind: "text", text: "你好"}, {kind: "key", keys: ["Enter"]}, {kind: "text", text: "world"}]);
+  assert.deepEqual(panel.browserTextActions("a\n"),
+    [{kind: "text", text: "a"}, {kind: "key", keys: ["Enter"]}]);
+  assert.deepEqual(panel.browserTextActions(""), []);
+  const chunks = panel.splitBrowserText("你".repeat(3000), 4096);
+  assert.equal(chunks.length, 3);
+  for (const chunk of chunks) assert.ok(panel.browserTextByteLength(chunk) <= 4096);
+  assert.equal(chunks.join(""), "你".repeat(3000));
+  assert.deepEqual(panel.browserTextActions("x", 4096), [{kind: "text", text: "x"}]);
+});
+
+test("scroll steps stay inside the host's per-action budget without dropping distance", () => {
+  assert.equal(panel.browserScrollStep(120), 120);
+  assert.equal(panel.browserScrollStep(9000), 4000);
+  assert.equal(panel.browserScrollStep(-9000), -4000);
+  assert.equal(panel.browserScrollStep(Number.NaN), 0);
+  assert.equal(panel.browserScrollStep(12.9), 12);
+});

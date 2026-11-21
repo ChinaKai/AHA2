@@ -20,7 +20,7 @@ const csp = (await readFile(resolve(root, "internal/httpapi/server.go"), "utf8")
 const now = "2026-11-17T09:00:00Z";
 const grant = {
   id: "browser_grant_1", task_id: "task-1", profile_id: "browser_profile_1",
-  session_id: "browser_session_1", capabilities: ["open_tab", "navigate", "snapshot"],
+  session_id: "browser_session_1", capabilities: ["open_tab", "navigate", "snapshot", "interact"],
   expires_at: "2026-11-18T09:00:00Z", created_at: now, updated_at: now, status: "active",
   session: {
     id: "browser_session_1", profile_id: "browser_profile_1", host_id: "local",
@@ -151,6 +151,10 @@ new MutationObserver(() => {
 }).observe(document.documentElement, {childList: true, subtree: true});
 window.__frameUnavailable = false;
 window.__frame503 = 0;
+// Owner control fixtures: every forwarded page action and every toast.
+window.__actions = [];
+window.__notices = [];
+window.__actionError = null;
 window.__frameClosed = [];
 window.__vis = "visible";
 const HOST_UP = {available: true, host_id: "local", version: "0.1.0", platform: "win32", edge_available: true};
@@ -249,6 +253,16 @@ window.fetch = async (input, init = {}) => {
     window.__deletes.push(path);
     return json({ok: true});
   }
+  if (/\\/api\\/v1\\/browser-grants\\/browser_grant_1\\/tabs\\/[a-z0-9_]+\\/actions$/.test(path) && method === "POST") {
+    const payload = JSON.parse(String(init.body || "{}"));
+    window.__actions.push(payload);
+    if (window.__actionError) {
+      const failure = window.__actionError;
+      window.__actionError = null;
+      return json({error: {code: failure.code, message: failure.message}}, failure.status);
+    }
+    return json({ok: true, action: payload});
+  }
   if (/\\/tabs\\/[a-z0-9_]+\\/frame$/.test(path)) {
     window.__frameRequests++;
     if (window.__frameUnavailable) {
@@ -283,7 +297,12 @@ window.fetch = async (input, init = {}) => {
     window.__frames++;
     const png = tabID === "browser_tab_2" ? FRAME_PNG.green : FRAME_PNG.red;
     const body = Uint8Array.from(atob(png), char => char.charCodeAt(0));
-    return new Response(body, {status: 200, headers: {"Content-Type": "image/png"}});
+    const viewport = window.__frameViewport || {width: 1280, height: 800};
+    return new Response(body, {status: 200, headers: {
+      "Content-Type": "image/png",
+      "X-AHA2-Viewport-Width": String(viewport.width),
+      "X-AHA2-Viewport-Height": String(viewport.height),
+    }});
   }
   if (path.startsWith("/api/v1/")) return json({ok: true});
   return json({});
@@ -374,7 +393,7 @@ const mount = async page => {
       container: document.querySelector("#desktop-browser-control"),
       selector: document.querySelector("#desktop-browser-target"),
       taskID: "task-1",
-      notify: () => {},
+      notify: (type, message) => { window.__notices.push({type, message}); },
       onChange: () => {},
       onOpenTargets: () => { window.__openTargets++; },
       onGranted: () => { window.__granted++; },
@@ -1278,6 +1297,113 @@ try {
   await page.evaluate(() => { window.__frameUnavailable = false; window.__hostOnlyDown = false; });
   await page.waitForSelector("#desktop-browser-frame:not([hidden])", {timeout: 8000});
   await waitFor(page, count => window.__frames > count, {arg: framesBeforeRecovery, timeout: 5000});
+  await page.evaluate(() => window.__panel.dispose());
+
+  // 17. Owner control: read-only by default, explicit mode, mapped clicks,
+  // double/right click, keyboard, scroll, and a lease error that drops back to
+  // read-only with a visible notice.
+  await reset(page, {__mode: "tabs", __hostAvailable: true, __hostOnlyDown: false, __staleError: false,
+    __released: false, __inUse: false, __transferred: false, __attached: true, __ownerTabs: [],
+    __ownerClosed: [], __ownerNav: {}, __ownerActive: "", __frameErrorTab: "", __frameClosed: [],
+    __frameRequests: 0, __frameUnavailable: false, __frame503: 0, __actions: [], __notices: [],
+    __actionError: null, __frameViewport: null, __frames: 0});
+  await page.waitForSelector("#desktop-browser-frame:not([hidden])", {timeout: 5000});
+  const toggle = page.locator("#desktop-browser-control-toggle");
+  assert.equal(await toggle.count(), 1);
+  assert.equal(await toggle.getAttribute("aria-pressed"), "false");
+  assert.match(await page.locator("#desktop-browser-control-hint").innerText(), /只读浏览/);
+  const stageBox = async () => page.evaluate(() => {
+    const image = document.querySelector("#desktop-browser-frame");
+    const rect = image.getBoundingClientRect();
+    return {left: rect.left, top: rect.top, width: rect.width, height: rect.height,
+      naturalWidth: image.naturalWidth, naturalHeight: image.naturalHeight};
+  });
+  const centerOf = box => ({x: box.left + box.width / 2, y: box.top + box.height / 2});
+
+  // Read-only: a click on the picture sends nothing.
+  let box = await stageBox();
+  let center = centerOf(box);
+  await page.mouse.click(center.x, center.y);
+  await page.waitForTimeout(450);
+  assert.equal(await page.evaluate(() => window.__actions.length), 0,
+    "read-only preview must never forward a click");
+
+  await toggle.click();
+  assert.equal(await toggle.getAttribute("aria-pressed"), "true");
+  assert.match(await page.locator("#desktop-browser-control-hint").innerText(), /控制中/);
+
+  // The 1x1 fixture image is letterboxed as a centered square. Its center maps
+  // to the middle of the advertised 1280x800 CSS viewport.
+  box = await stageBox();
+  center = centerOf(box);
+  await page.mouse.click(center.x, center.y);
+  await waitFor(page, () => window.__actions.some(action => action.kind === "click"));
+  let actions = await page.evaluate(() => window.__actions);
+  const clickAction = actions.find(action => action.kind === "click");
+  assert.ok(Math.abs(clickAction.x - 640) <= 1, `x=${clickAction.x}`);
+  assert.ok(Math.abs(clickAction.y - 400) <= 1, `y=${clickAction.y}`);
+
+  // A click in the letterbox bar is outside the page and must be ignored.
+  const beforeLetterbox = await page.evaluate(() => window.__actions.length);
+  const beforeClicks = actions.filter(action => action.kind === "click").length;
+  await page.mouse.click(box.left + 2, box.top + 2);
+  await page.waitForTimeout(450);
+  assert.equal(await page.evaluate(() => window.__actions.filter(action => action.kind === "click").length), beforeClicks,
+    "letterbox clicks must not reach the page");
+
+  await page.mouse.dblclick(center.x, center.y);
+  await waitFor(page, () => window.__actions.some(action => action.kind === "double_click"));
+  await page.waitForTimeout(450);
+  actions = await page.evaluate(() => window.__actions);
+  assert.equal(actions.filter(action => action.kind === "click").length, 1,
+    "the first click of a double click must not be sent separately");
+  assert.equal(actions.filter(action => action.kind === "double_click").length, 1);
+
+  const beforeRight = actions.length;
+  await page.mouse.click(center.x, center.y, {button: "right"});
+  await waitFor(page, count => window.__actions.length > count, {arg: beforeRight});
+  await page.waitForTimeout(200);
+  actions = await page.evaluate(() => window.__actions);
+  assert.equal(actions.filter(action => action.kind === "context_click").length, 1,
+    "a right click must produce exactly one context_click");
+
+  // Keyboard: printable input becomes text, shortcuts become key combinations.
+  const beforeKeys = actions.length;
+  await page.locator("#desktop-browser-keyboard").click();
+  await page.keyboard.type("ab");
+  await page.keyboard.press("Control+c");
+  await page.keyboard.press("Enter");
+  await waitFor(page, count => window.__actions.length >= count + 3, {arg: beforeKeys});
+  const keyboardActions = await page.evaluate(start => window.__actions.slice(start), beforeKeys);
+  const typed = keyboardActions.filter(action => action.kind === "text").map(action => action.text || "").join("");
+  assert.equal(typed, "ab", "typed characters must be sent as text");
+  assert.ok(keyboardActions.some(action => action.kind === "key"
+    && JSON.stringify(action.keys) === JSON.stringify(["Control", "c"])));
+  assert.ok(keyboardActions.some(action => action.kind === "key"
+    && JSON.stringify(action.keys) === JSON.stringify(["Enter"])));
+
+  // Wheel scrolling is coalesced into a scroll action with a page viewport point.
+  const beforeWheel = await page.evaluate(() => window.__actions.length);
+  await page.mouse.move(center.x, center.y);
+  await page.mouse.wheel(0, 240);
+  await waitFor(page, count => window.__actions.slice(count).some(action => action.kind === "scroll"), {arg: beforeWheel});
+  const scrollAction = await page.evaluate(start => window.__actions.slice(start).find(action => action.kind === "scroll"), beforeWheel);
+  assert.ok(scrollAction.delta_y > 0);
+
+  // A revoked lease must exit control mode immediately, keep the queue empty,
+  // and surface a readable notice instead of silently dropping input.
+  await page.evaluate(() => { window.__actionError = {status: 403, code: "browser_grant_revoked", message: "浏览器授权已撤销"}; });
+  await page.mouse.click(center.x, center.y);
+  await waitFor(page, () => window.__notices.some(item => /授权已失效/.test(item.message)), {timeout: 3000});
+  assert.equal(await toggle.getAttribute("aria-pressed"), "false");
+  assert.match(await page.locator("#desktop-browser-control-hint").innerText(), /授权已失效/);
+
+  // Losing the grant also drops the mode without any pointer input.
+  await toggle.click();
+  assert.equal(await toggle.getAttribute("aria-pressed"), "true");
+  await page.evaluate(() => { window.__released = true; });
+  await waitFor(page, () => document.querySelector("#desktop-browser-stage") === null, {timeout: 6000});
+  assert.equal(await page.locator("#desktop-browser-control-toggle").count(), 0);
   await page.evaluate(() => window.__panel.dispose());
 
   // The start page must load under the production CSP as a plain http(s) page.
