@@ -19,12 +19,12 @@ import (
 // endpoint.
 const agentWorkspaceMCPMaxRequestBytes int64 = 1 << 20
 
-// agentWorkspaceMCP is the HTTP MCP facade for the read-only workspace domain.
+// agentWorkspaceMCP is the HTTP MCP facade for scoped Workspace operations.
 // Every method — including initialize and tools/list — is mounted behind
 // withAgentCapability and revalidates AgentCallContext plus the domain gate, so
 // a caller that knows the URL still cannot use tool visibility as an
-// authorization shortcut. The domain is never injected for the pet Task, a
-// Task without a bound Workspace, or a channel-hosted Turn.
+// authorization shortcut. A matching bound Workspace and non-channel Turn are
+// required; pet access rechecks live permissions.
 func (s *Server) agentWorkspaceMCP(writer http.ResponseWriter, request *http.Request) {
 	if agentCoreMCPForwarded(request) {
 		writeError(writer, http.StatusForbidden, "agent_workspace_mcp_forwarded")
@@ -87,7 +87,7 @@ func (s *Server) agentWorkspaceMCP(writer http.ResponseWriter, request *http.Req
 	case "ping":
 		respond(map[string]any{})
 	case "tools/list":
-		respond(map[string]any{"tools": agentWorkspaceMCPTools()})
+		respond(map[string]any{"tools": s.workspaceMCPToolsFor(s.app.AgentWorkspaceMCPWriteAllowed(request.Context(), call))})
 	case "tools/call":
 		s.callAgentWorkspaceMCPTool(writer, request, claims, call, payload)
 	default:
@@ -158,7 +158,7 @@ func (s *Server) callAgentWorkspaceMCPTool(writer http.ResponseWriter, request *
 	if len(input.Arguments) == 0 {
 		input.Arguments = json.RawMessage(`{}`)
 	}
-	if !app.WorkspaceMCPToolIsRead(input.Name) {
+	if !app.WorkspaceMCPToolIsKnown(input.Name) {
 		writeJSON(writer, http.StatusOK, map[string]any{
 			"jsonrpc": "2.0", "id": payload.ID,
 			"error": map[string]any{"code": -32602, "message": "unknown tool"},
@@ -175,6 +175,25 @@ func (s *Server) callAgentWorkspaceMCPTool(writer http.ResponseWriter, request *
 			"argument_keys": coreMCPArgumentKeys(input.Arguments),
 		})
 	}()
+
+	for _, operation := range s.workspaceMCPOperations() {
+		if operation.Tool.Name != input.Name {
+			continue
+		}
+		if !s.app.AgentWorkspaceMCPWriteAllowed(request.Context(), call) {
+			auditResult = "denied"
+			writeError(writer, http.StatusForbidden, "agent_operation_forbidden")
+			return
+		}
+		result, err := runAgentMCPOperation(request, operation, input.Arguments)
+		if err != nil {
+			auditResult = "error"
+			toolError(err)
+			return
+		}
+		respondJSON(result)
+		return
+	}
 
 	switch input.Name {
 	case "workspace_list":

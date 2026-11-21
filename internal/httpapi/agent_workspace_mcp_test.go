@@ -276,7 +276,7 @@ func TestAgentWorkspaceMCPRequiresCapabilityAndDomainGate(t *testing.T) {
 	}
 	readOnlyTurn := createCoreTurn(t, h.database, readOnly, "sub", "batch-workspace-read-only")
 	readOnlyToken := h.issue(readOnly.ID, "sub", readOnlyTurn.ID)
-	if status, names, _ := coreMCPToolsList(t, url, readOnlyToken); status != http.StatusOK || len(names) != len(want) {
+	if status, names, _ := coreMCPToolsList(t, url, readOnlyToken); status != http.StatusOK || len(names) != len(app.WorkspaceMCPToolNamesFor(false)) {
 		t.Fatalf("read-only tools/list status=%d names=%#v", status, names)
 	}
 	if call := coreMCPCallTool(t, url, readOnlyToken, "workspace_list", map[string]any{}); call.Status != http.StatusOK || call.IsError {

@@ -28,12 +28,12 @@ const (
 	agentBrowserMCPMaxElements  = 200
 )
 
-// agentBrowserMCP is the HTTP MCP facade for the read-only shared-browser
+// agentBrowserMCP is the HTTP MCP facade for the scoped shared-browser
 // domain. Every method — including initialize and tools/list — is mounted
 // behind withAgentCapability and revalidates AgentCallContext plus the domain
 // gate, so tool visibility is never authorization. The domain exists only while
-// the Task holds an active browser grant, and never for the pet Task or a
-// channel-hosted Turn.
+// the Task holds an active browser grant and the Turn is not channel-hosted.
+// Pet access additionally requires live view permission.
 func (s *Server) agentBrowserMCP(writer http.ResponseWriter, request *http.Request) {
 	if agentCoreMCPForwarded(request) {
 		writeError(writer, http.StatusForbidden, "agent_browser_mcp_forwarded")
@@ -96,7 +96,7 @@ func (s *Server) agentBrowserMCP(writer http.ResponseWriter, request *http.Reque
 	case "ping":
 		respond(map[string]any{})
 	case "tools/list":
-		respond(map[string]any{"tools": agentBrowserMCPTools()})
+		respond(map[string]any{"tools": s.browserMCPToolsFor(s.app.AgentBrowserMCPWriteAllowed(request.Context(), call))})
 	case "tools/call":
 		s.callAgentBrowserMCPTool(writer, request, call, payload)
 	default:
@@ -169,7 +169,7 @@ func (s *Server) callAgentBrowserMCPTool(writer http.ResponseWriter, request *ht
 	if len(input.Arguments) == 0 {
 		input.Arguments = json.RawMessage(`{}`)
 	}
-	if !app.BrowserMCPToolIsRead(input.Name) {
+	if !app.BrowserMCPToolIsKnown(input.Name) {
 		writeJSON(writer, http.StatusOK, map[string]any{
 			"jsonrpc": "2.0", "id": payload.ID,
 			"error": map[string]any{"code": -32602, "message": "unknown tool"},
@@ -191,6 +191,25 @@ func (s *Server) callAgentBrowserMCPTool(writer http.ResponseWriter, request *ht
 		}
 		s.audit(request, "agent.browser_mcp.call", "task", call.Task.ID, data)
 	}()
+
+	for _, operation := range s.browserMCPOperations() {
+		if operation.Tool.Name != input.Name {
+			continue
+		}
+		if operation.Write && !s.app.AgentBrowserMCPWriteAllowed(request.Context(), call) {
+			auditResult = "denied"
+			writeError(writer, http.StatusForbidden, "agent_operation_forbidden")
+			return
+		}
+		result, err := runAgentMCPOperation(request, operation, input.Arguments)
+		if err != nil {
+			auditResult = "error"
+			toolError(err)
+			return
+		}
+		respondJSON(browserMCPSafeResult(input.Name, result))
+		return
+	}
 
 	switch input.Name {
 	case "browser_status":

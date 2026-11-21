@@ -22,10 +22,11 @@ func TestPetDomainRuntimeUsesCurrentBindingsPermissionsAndMode(t *testing.T) {
 		}
 	}
 	set(true, true)
+	f.service.SetDesktopMCPAvailability(func(string) bool { return true })
 	seedHardwareMCPGroup(t, f.ctx, f.database, task)
 	seedBrowserMCPGrant(t, f.ctx, f.database, task, "pet-grant", "active")
 	servers, allowed := f.service.mcpRuntimeForTurn(f.ctx, task, "main", "http://127.0.0.1:8766", "")
-	for _, name := range []string{coreMCPName, knowledgeMCPName, workspaceMCPName, browserMCPName, hardwareMCPName} {
+	for _, name := range []string{coreMCPName, knowledgeMCPName, workspaceMCPName, browserMCPName, hardwareMCPName, desktopMCPName} {
 		if !hasMCPServer(servers, name) {
 			t.Fatalf("missing %s", name)
 		}

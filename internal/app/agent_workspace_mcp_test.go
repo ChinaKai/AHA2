@@ -117,13 +117,14 @@ func TestWorkspaceMCPRuntimeInjectionScopesTools(t *testing.T) {
 	crossProject.WorkspaceID = otherWorkspace.ID
 
 	scenarios := []struct {
-		name    string
-		task    domain.Task
-		agentID string
-		apiURL  string
-		wantMCP bool
+		name      string
+		task      domain.Task
+		agentID   string
+		apiURL    string
+		wantMCP   bool
+		wantWrite bool
 	}{
-		{name: "writable main", task: task, agentID: "main", apiURL: "http://127.0.0.1:8766/", wantMCP: true},
+		{name: "writable main", task: task, agentID: "main", apiURL: "http://127.0.0.1:8766/", wantMCP: true, wantWrite: true},
 		{name: "non-main", task: task, agentID: "sub", apiURL: "http://127.0.0.1:8766/", wantMCP: true},
 		{name: "read-only main", task: readOnly, agentID: "main", apiURL: "http://127.0.0.1:8766/", wantMCP: true},
 		{name: "unbound workspace", task: unbound, agentID: "main", apiURL: "http://127.0.0.1:8766/"},
@@ -159,7 +160,7 @@ func TestWorkspaceMCPRuntimeInjectionScopesTools(t *testing.T) {
 				t.Fatalf("workspace server=%#v", workspaceServer)
 			}
 			want := make([]string, 0, len(WorkspaceMCPToolNames()))
-			for _, name := range WorkspaceMCPToolNames() {
+			for _, name := range WorkspaceMCPToolNamesFor(scenario.wantWrite) {
 				want = append(want, "mcp__"+workspaceMCPName+"__"+name)
 			}
 			got := make([]string, 0, len(want))

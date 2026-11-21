@@ -11,3 +11,7 @@ import "context"
 func (s *Service) AgentBrowserMCPAllowed(ctx context.Context, call AgentCallContext) bool {
 	return s.browserMCPInjected(ctx, call.Task, call.Turn.InboxBatchID)
 }
+
+func (s *Service) AgentBrowserMCPWriteAllowed(ctx context.Context, call AgentCallContext) bool {
+	return s.AgentBrowserMCPAllowed(ctx, call) && s.hardwareMCPSnapshotWritable(ctx, call.Task, call.Turn.RuntimeConfigSnapshotID, call.Turn.AgentID)
+}

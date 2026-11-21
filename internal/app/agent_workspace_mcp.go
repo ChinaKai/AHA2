@@ -50,6 +50,14 @@ func (s *Service) AgentWorkspaceMCPAllowed(ctx context.Context, call AgentCallCo
 	return s.workspaceMCPInjected(ctx, call.Task, call.Turn.InboxBatchID)
 }
 
+func (s *Service) AgentWorkspaceMCPWriteAllowed(ctx context.Context, call AgentCallContext) bool {
+	if !s.AgentWorkspaceMCPAllowed(ctx, call) || !s.hardwareMCPSnapshotWritable(ctx, call.Task, call.Turn.RuntimeConfigSnapshotID, call.Turn.AgentID) {
+		return false
+	}
+	workspace, err := s.store.Workspace(ctx, call.Task.WorkspaceID)
+	return err == nil && !workspace.ReadOnly
+}
+
 func (s *Service) agentWorkspaceMCPReadContext(ctx context.Context, claims agentapi.Claims) (AgentCallContext, error) {
 	call, err := s.AgentCallContext(ctx, claims, false)
 	if err != nil {

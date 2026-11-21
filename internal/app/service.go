@@ -257,6 +257,7 @@ type Service struct {
 	proxyRuntime         ProxyRuntime
 	petChannels          PetChannelSender
 	petSecurity          PetSecurityApplier
+	desktopMCPAvailable  func(string) bool
 	petHardware          PetHardwareDisconnector
 	// Heavy approvals run outside the HTTP request. The hook and timeout are
 	// test seams: production leaves the hook nil and uses the default budget.

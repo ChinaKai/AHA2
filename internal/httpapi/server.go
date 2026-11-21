@@ -248,6 +248,9 @@ func New(config Config) *Server {
 	if server.app != nil && server.hardware != nil {
 		server.app.SetPetHardwareDisconnector(server.hardware)
 	}
+	if server.app != nil {
+		server.app.SetDesktopMCPAvailability(func(taskID string) bool { return server.desktop != nil && server.desktop.Status(taskID).Supported })
+	}
 	if server.webVersion == "" {
 		server.webVersion = server.version
 	}
@@ -605,6 +608,8 @@ func (s *Server) Handler() http.Handler {
 	// Task hardware domain MCP. Read and guarded device I/O with an independent
 	// injection trigger: the Task must have at least one bound hardware group.
 	mux.Handle("POST /api/v1/agent/hardware/mcp", s.withAgentCapability(http.HandlerFunc(s.agentHardwareMCP)))
+	mux.Handle("POST /api/v1/agent/desktop/mcp", s.withAgentCapability(http.HandlerFunc(s.agentDesktopMCP)))
+	mux.Handle("POST /api/v1/agent/desktop/stop", s.withAgentCapability(http.HandlerFunc(s.agentDesktopStop)))
 	mux.Handle("GET /api/v1/agent/mail/accounts", s.withAgentCapability(http.HandlerFunc(s.agentMailAccounts)))
 	mux.Handle("GET /api/v1/agent/mail/templates", s.withAgentCapability(http.HandlerFunc(s.agentMailTemplates)))
 	mux.Handle("GET /api/v1/agent/mail/templates/{id}", s.withAgentCapability(http.HandlerFunc(s.agentMailTemplateDetail)))

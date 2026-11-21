@@ -43,12 +43,16 @@ func (s *Server) agentCapabilityMap(ctx context.Context, claims agentapi.Claims,
 	}
 	return map[string]bool{
 		"core_mcp": true, "core_mcp_write": s.app.AgentWriteAllowed(ctx, call),
-		"knowledge_mcp":      s.app.AgentKnowledgeMCPAllowed(ctx, call),
-		"workspace_mcp":      s.app.AgentWorkspaceMCPAllowed(ctx, call),
-		"browser_mcp":        s.app.AgentBrowserMCPAllowed(ctx, call),
-		"hardware_mcp":       s.app.AgentHardwareMCPAllowed(ctx, call),
-		"hardware_mcp_write": s.app.AgentHardwareMCPWriteAllowed(ctx, call),
-		"progress":           true, "live_inbox_wait": true, "knowledge_read": true, "knowledge_feedback": true,
+		"knowledge_mcp":       s.app.AgentKnowledgeMCPAllowed(ctx, call),
+		"workspace_mcp":       s.app.AgentWorkspaceMCPAllowed(ctx, call),
+		"browser_mcp":         s.app.AgentBrowserMCPAllowed(ctx, call),
+		"hardware_mcp":        s.app.AgentHardwareMCPAllowed(ctx, call),
+		"hardware_mcp_write":  s.app.AgentHardwareMCPWriteAllowed(ctx, call),
+		"workspace_mcp_write": s.app.AgentWorkspaceMCPWriteAllowed(ctx, call),
+		"desktop_mcp":         s.app.AgentDesktopMCPAllowed(ctx, call),
+		"desktop_mcp_write":   s.app.AgentDesktopMCPWriteAllowed(ctx, call),
+		"browser_mcp_write":   s.app.AgentBrowserMCPWriteAllowed(ctx, call),
+		"progress":            true, "live_inbox_wait": true, "knowledge_read": true, "knowledge_feedback": true,
 		"memory_update": main, "knowledge_publish": knowledgePublish, "knowledge_contribute_bound": knowledgePublish && boundKnowledgeContribute, "skill_create": main, "skill_update": main,
 		// Reported separately so a caller can tell whether a global skill is
 		// possible before sending one and being refused.

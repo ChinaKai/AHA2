@@ -290,7 +290,7 @@ func TestAgentBrowserMCPToolsListSchemas(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("tools/list status=%d", status)
 	}
-	want := []string{"browser_snapshot", "browser_status", "browser_tabs_list"}
+	want := []string{"browser_action", "browser_bookmarks_list", "browser_cookie_metadata", "browser_download_get", "browser_downloads_list", "browser_frame", "browser_navigate", "browser_release", "browser_snapshot", "browser_status", "browser_tab_activate", "browser_tab_bind_current", "browser_tab_close", "browser_tab_open", "browser_tabs_list", "browser_upload"}
 	sort.Strings(names)
 	if len(names) != len(want) {
 		t.Fatalf("tools=%v", names)
@@ -306,7 +306,7 @@ func TestAgentBrowserMCPToolsListSchemas(t *testing.T) {
 			t.Fatalf("%s schema=%#v", name, schema)
 		}
 	}
-	for _, forbidden := range []string{"browser_click", "browser_type", "browser_navigate", "browser_open_tab", "browser_cookie", "browser_grant_release"} {
+	for _, forbidden := range []string{"browser_click", "browser_type", "browser_open_tab", "browser_cookie", "browser_grant_release", "browser_import_cookie_values"} {
 		if _, ok := schemas[forbidden]; ok {
 			t.Fatalf("%s must not be exposed", forbidden)
 		}

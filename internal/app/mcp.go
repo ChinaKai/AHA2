@@ -35,7 +35,7 @@ func (s *Service) normalizeTaskMCPServers(ctx context.Context, project domain.Pr
 	}
 	for _, id := range requested {
 		id = strings.TrimSpace(id)
-		if id == "mcp_channel" || id == "mcp_mail" || id == "mcp_core" || id == knowledgeMCPName || id == workspaceMCPName || id == collabMCPName || id == browserMCPName || id == hardwareMCPName || (id == "mcp_pet" && project.ID != petProjectID) {
+		if id == "mcp_channel" || id == "mcp_mail" || id == "mcp_core" || id == knowledgeMCPName || id == workspaceMCPName || id == collabMCPName || id == browserMCPName || id == hardwareMCPName || id == desktopMCPName || (id == "mcp_pet" && project.ID != petProjectID) {
 			continue
 		}
 		server, ok := allowed[id]
@@ -97,15 +97,16 @@ func (s *Service) MCPServers(ctx context.Context) ([]domain.MCPServer, error) {
 	collab := s.collabMCPDetail()
 	browser := s.browserMCPDetail()
 	hardware := s.hardwareMCPDetail()
+	desktop := s.desktopMCPDetail()
 	insertAt := 0
 	for index, item := range items {
 		if item.Builtin {
 			insertAt = index + 1
 		}
 	}
-	combined := make([]domain.MCPServer, 0, len(items)+8)
+	combined := make([]domain.MCPServer, 0, len(items)+9)
 	combined = append(combined, items[:insertAt]...)
-	combined = append(combined, channel, mail, core, knowledge, workspace, collab, browser, hardware)
+	combined = append(combined, channel, mail, core, knowledge, workspace, collab, browser, hardware, desktop)
 	combined = append(combined, items[insertAt:]...)
 	return combined, nil
 }
@@ -206,24 +207,25 @@ func (s *Service) knowledgeMCPDetail() domain.MCPServer {
 }
 
 // workspaceMCPDetail describes the built-in workspace domain MCP. The endpoint
-// is injected per Turn and claims no static URL. It is read-only: process
-// start/stop, shell, file access and port forwarding stay on their dedicated
-// Agent APIs.
+// is injected per Turn and claims no static URL. Process writes require a
+// writable Main snapshot; shell/file/forwarding remain dedicated Agent APIs.
 func (s *Service) workspaceMCPDetail() domain.MCPServer {
 	now := s.now().UTC()
 	descriptions := map[string]string{
-		"workspace_list":         "读取当前 Task 绑定 Workspace 的非敏感元数据；不含根路径、SSH 凭据或内部地址。",
-		"workspace_process_list": "列出当前 Task 管理的进程状态摘要；不含命令行、环境变量、工作目录或输出。",
-		"workspace_process_get":  "按名称读取当前 Task 的一个进程状态摘要；跨 Task 名称按未找到处理。",
-		"workspace_runtime_list": "列出当前 Project 可用的运行配置字段与非密钥值；不含 token、密钥、环境变量或内网地址。",
+		"workspace_process_start": "在当前Task的可写Workspace里启动托管进程；Main和实时权限检查。",
+		"workspace_process_stop":  "停止当前Task的托管进程；不允许寻址其他Task进程。",
+		"workspace_list":          "读取当前 Task 绑定 Workspace 的非敏感元数据；不含根路径、SSH 凭据或内部地址。",
+		"workspace_process_list":  "列出当前 Task 管理的进程状态摘要；不含命令行、环境变量、工作目录或输出。",
+		"workspace_process_get":   "按名称读取当前 Task 的一个进程状态摘要；跨 Task 名称按未找到处理。",
+		"workspace_runtime_list":  "列出当前 Project 可用的运行配置字段与非密钥值；不含 token、密钥、环境变量或内网地址。",
 	}
-	tools := make([]domain.MCPTool, 0, len(workspaceMCPReadToolNames))
-	for _, name := range workspaceMCPToolNames() {
+	tools := make([]domain.MCPTool, 0, len(WorkspaceMCPToolNames()))
+	for _, name := range WorkspaceMCPToolNames() {
 		tools = append(tools, domain.MCPTool{Name: name, Description: descriptions[name]})
 	}
 	return domain.MCPServer{
 		ID: workspaceMCPName, Name: "工作区（内置）",
-		Description: "Task 绑定 Workspace 后自动注入；只读提供工作区元数据、进程状态与运行配置，不含写操作。",
+		Description: "Task 绑定 Workspace 后自动注入；提供元数据、进程状态和运行配置，可写 Main 可在当前 Task 范围内启停托管进程。",
 		Transport:   "builtin", Enabled: true, Builtin: true, AutoInject: true, Health: "ok",
 		Tools: tools, CreatedAt: now, UpdatedAt: now,
 	}
@@ -253,8 +255,8 @@ func (s *Service) collabMCPDetail() domain.MCPServer {
 
 // browserMCPDetail describes the built-in shared-browser domain MCP. The
 // endpoint is injected per Turn only while the Task holds an active browser
-// grant; it claims no static URL and exposes no page interaction, tab lifecycle,
-// cookie, frame or grant management operation.
+// grant; actions and tab lifecycle retain service capabilities, Main/write
+// boundaries and per-call grant checks. Cookie values stay on secure owner flows.
 func (s *Service) browserMCPDetail() domain.MCPServer {
 	now := s.now().UTC()
 	descriptions := map[string]string{
@@ -262,13 +264,17 @@ func (s *Service) browserMCPDetail() domain.MCPServer {
 		"browser_tabs_list": "列出当前授权下的标签页 ID、标题、站点与去掉 query/fragment 的网址；不含页面内容。",
 		"browser_snapshot":  "读取当前标签页的可读文本与最多 200 个元素（ref/role/name/bounds）；不含输入值、HTML、Cookie 或可执行动作。",
 	}
-	tools := make([]domain.MCPTool, 0, len(browserMCPToolNames))
-	for _, name := range browserMCPToolNames {
-		tools = append(tools, domain.MCPTool{Name: name, Description: descriptions[name]})
+	tools := make([]domain.MCPTool, 0, len(BrowserMCPToolNames()))
+	for _, name := range BrowserMCPToolNames() {
+		description := descriptions[name]
+		if description == "" {
+			description = "在当前 Task 已有授权和能力范围内执行 " + name + "；每次调用重查授权，敏感 Cookie 值不返回模型。"
+		}
+		tools = append(tools, domain.MCPTool{Name: name, Description: description})
 	}
 	return domain.MCPServer{
 		ID: browserMCPName, Name: "共享浏览器（内置）",
-		Description: "Task 持有活跃浏览器授权时自动注入；只读提供租约、标签页与页面快照，不含点击、导航、上传、Cookie、帧或授权管理。",
+		Description: "Task 持有现有浏览器授权时自动注入；提供状态、页面、帧、下载、书签和 Cookie 元数据，Main 在当前权限允许时可管理标签、导航、动作、上传和释放授权。凭据和授权目标仍由 owner 管理。",
 		Transport:   "builtin", Enabled: true, Builtin: true, AutoInject: true, Health: "ok",
 		Tools: tools, CreatedAt: now, UpdatedAt: now,
 	}
@@ -408,6 +414,9 @@ func (s *Service) MCPServerByID(ctx context.Context, id string) (domain.MCPServe
 	if strings.TrimSpace(id) == browserMCPName {
 		return s.browserMCPDetail(), nil
 	}
+	if strings.TrimSpace(id) == desktopMCPName {
+		return s.desktopMCPDetail(), nil
+	}
 	if strings.TrimSpace(id) == hardwareMCPName {
 		return s.hardwareMCPDetail(), nil
 	}
@@ -424,7 +433,7 @@ func (s *Service) MCPServerByID(ctx context.Context, id string) (domain.MCPServe
 }
 
 func (s *Service) DeleteMCPServer(ctx context.Context, id string) error {
-	if strings.TrimSpace(id) == "mcp_pet" || strings.TrimSpace(id) == "mcp_channel" || strings.TrimSpace(id) == "mcp_mail" || strings.TrimSpace(id) == "mcp_core" || strings.TrimSpace(id) == knowledgeMCPName || strings.TrimSpace(id) == workspaceMCPName || strings.TrimSpace(id) == collabMCPName || strings.TrimSpace(id) == browserMCPName || strings.TrimSpace(id) == hardwareMCPName {
+	if strings.TrimSpace(id) == "mcp_pet" || strings.TrimSpace(id) == "mcp_channel" || strings.TrimSpace(id) == "mcp_mail" || strings.TrimSpace(id) == "mcp_core" || strings.TrimSpace(id) == knowledgeMCPName || strings.TrimSpace(id) == workspaceMCPName || strings.TrimSpace(id) == collabMCPName || strings.TrimSpace(id) == browserMCPName || strings.TrimSpace(id) == hardwareMCPName || strings.TrimSpace(id) == desktopMCPName {
 		return fmt.Errorf("builtin MCP cannot be deleted")
 	}
 	return s.store.DeleteMCPServer(ctx, id)

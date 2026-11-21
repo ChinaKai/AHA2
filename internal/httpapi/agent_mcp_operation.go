@@ -60,11 +60,17 @@ func validateMCPOperation(value any, schema map[string]any) error {
 		for key, child := range object {
 			spec, ok := properties[key].(map[string]any)
 			if !ok {
-				return fail
+				spec, ok = schema["additionalProperties"].(map[string]any)
+				if !ok {
+					return fail
+				}
 			}
 			if err := validateMCPOperation(child, spec); err != nil {
 				return fail
 			}
+		}
+		if max, ok := schema["maxProperties"].(int); ok && len(object) > max {
+			return fail
 		}
 		for _, key := range schema["required"].([]string) {
 			if _, ok := object[key]; !ok {
@@ -169,12 +175,15 @@ func (r *mcpOperationResponse) Write(p []byte) (int, error) {
 	}
 	if r.body.Len()+len(p) > 2<<20 {
 		r.overflow = true
-		return len(p), nil
+		return 0, io.ErrShortBuffer
 	}
 	return r.body.Write(p)
 }
 
-func runAgentMCPOperation(request *http.Request, op agentMCPOperation, raw json.RawMessage) (map[string]any, error) {
+func runAgentMCPOperation(request *http.Request, op agentMCPOperation, raw json.RawMessage) (result map[string]any, err error) {
+	if request.Context().Err() != nil {
+		return nil, errors.New("operation cancelled")
+	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
 	var arguments map[string]any
@@ -210,6 +219,16 @@ func runAgentMCPOperation(request *http.Request, op agentMCPOperation, raw json.
 	child.Body = io.NopCloser(bytes.NewReader(body))
 	child.ContentLength = int64(len(body))
 	response := &mcpOperationResponse{header: make(http.Header)}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if recovered == http.ErrAbortHandler {
+				result = nil
+				err = errors.New("operation stream interrupted")
+				return
+			}
+			panic(recovered)
+		}
+	}()
 	op.Handler(response, child)
 	// Raw runtime errors can contain endpoints or credentials. Only a fixed
 	// classification leaves this boundary, and no body is logged here.
@@ -222,7 +241,6 @@ func runAgentMCPOperation(request *http.Request, op agentMCPOperation, raw json.
 	if op.Binary {
 		return map[string]any{"media_type": response.header.Get("Content-Type"), "content_base64": base64.StdEncoding.EncodeToString(response.body.Bytes())}, nil
 	}
-	var result map[string]any
 	if json.Unmarshal(response.body.Bytes(), &result) != nil {
 		return nil, errors.New("operation result unavailable")
 	}

@@ -165,11 +165,29 @@ var workspaceMCPReadToolNames = []string{
 // is exported so the HTTP facade advertises the same subset the runtime
 // injects, and so a call to an unadvertised tool is rejected before dispatch.
 func WorkspaceMCPToolNames() []string {
-	return workspaceMCPToolNames()
+	return WorkspaceMCPToolNamesFor(true)
 }
 
 func workspaceMCPToolNames() []string {
 	return append([]string{}, workspaceMCPReadToolNames...)
+}
+
+var workspaceMCPWriteNames = []string{"workspace_process_start", "workspace_process_stop"}
+
+func WorkspaceMCPToolNamesFor(write bool) []string {
+	names := workspaceMCPToolNames()
+	if write {
+		names = append(names, workspaceMCPWriteNames...)
+	}
+	return names
+}
+func WorkspaceMCPToolIsKnown(name string) bool {
+	for _, item := range WorkspaceMCPToolNamesFor(true) {
+		if item == name {
+			return true
+		}
+	}
+	return false
 }
 
 // WorkspaceMCPToolIsRead reports whether a workspace tool is in the read-only
@@ -193,13 +211,32 @@ var browserMCPToolNames = []string{
 // BrowserMCPToolNames is the exact allowlist for a browser MCP client. It is
 // exported so the HTTP facade advertises the same subset the runtime injects.
 func BrowserMCPToolNames() []string {
-	return append([]string{}, browserMCPToolNames...)
+	return BrowserMCPToolNamesFor(true)
+}
+
+var browserMCPExtraReadNames = []string{"browser_frame", "browser_downloads_list", "browser_download_get", "browser_bookmarks_list", "browser_cookie_metadata"}
+var browserMCPWriteNames = []string{"browser_tab_open", "browser_tab_bind_current", "browser_tab_activate", "browser_tab_close", "browser_navigate", "browser_action", "browser_upload", "browser_release"}
+
+func BrowserMCPToolNamesFor(write bool) []string {
+	names := append(append([]string{}, browserMCPToolNames...), browserMCPExtraReadNames...)
+	if write {
+		names = append(names, browserMCPWriteNames...)
+	}
+	return names
+}
+func BrowserMCPToolIsKnown(name string) bool {
+	for _, item := range BrowserMCPToolNamesFor(true) {
+		if item == name {
+			return true
+		}
+	}
+	return false
 }
 
 // BrowserMCPToolIsRead reports whether a browser tool is in the read-only
 // first slice. There is intentionally no write tool in this domain.
 func BrowserMCPToolIsRead(name string) bool {
-	for _, tool := range browserMCPToolNames {
+	for _, tool := range BrowserMCPToolNamesFor(false) {
 		if tool == name {
 			return true
 		}
@@ -538,7 +575,12 @@ func (s *Service) mcpRuntimeForTurn(ctx context.Context, task domain.Task, agent
 			URLPath:        workspaceMCPPath,
 			BearerTokenEnv: "AHA2_AGENT_API_TOKEN",
 		})
-		for _, tool := range workspaceMCPToolNames() {
+		workspaceWrite := false
+		if agent, err := s.store.TaskAgent(ctx, task.ID, agentID); err == nil {
+			bound, bindErr := s.store.Workspace(ctx, task.WorkspaceID)
+			workspaceWrite = bindErr == nil && !bound.ReadOnly && s.hardwareMCPSnapshotWritable(ctx, task, agent.RuntimeConfigSnapshotID, agentID)
+		}
+		for _, tool := range WorkspaceMCPToolNamesFor(workspaceWrite) {
 			allowed = append(allowed, "mcp__"+workspaceMCPName+"__"+tool)
 		}
 	}
@@ -550,7 +592,11 @@ func (s *Service) mcpRuntimeForTurn(ctx context.Context, task domain.Task, agent
 			URLPath:        browserMCPPath,
 			BearerTokenEnv: "AHA2_AGENT_API_TOKEN",
 		})
-		for _, tool := range browserMCPToolNames {
+		browserWrite := false
+		if agent, err := s.store.TaskAgent(ctx, task.ID, agentID); err == nil {
+			browserWrite = s.hardwareMCPSnapshotWritable(ctx, task, agent.RuntimeConfigSnapshotID, agentID)
+		}
+		for _, tool := range BrowserMCPToolNamesFor(browserWrite) {
 			allowed = append(allowed, "mcp__"+browserMCPName+"__"+tool)
 		}
 	}
@@ -570,6 +616,17 @@ func (s *Service) mcpRuntimeForTurn(ctx context.Context, task domain.Task, agent
 			allowed = append(allowed, "mcp__"+hardwareMCPName+"__"+tool)
 		}
 	}
+	if s.desktopMCPInjected(ctx, task, agentID, inboxBatchID) {
+		servers = append(servers, backend.MCPServer{Name: desktopMCPName, Transport: "http", URL: strings.TrimRight(agentAPIURL, "/") + desktopMCPPath, URLFromEnv: "AHA2_AGENT_API_URL", URLPath: desktopMCPPath, BearerTokenEnv: "AHA2_AGENT_API_TOKEN"})
+		desktopWrite := false
+		if agent, err := s.store.TaskAgent(ctx, task.ID, agentID); err == nil {
+			desktopWrite = s.hardwareMCPSnapshotWritable(ctx, task, agent.RuntimeConfigSnapshotID, agentID)
+		}
+		for _, tool := range DesktopMCPToolNames(desktopWrite) {
+			allowed = append(allowed, "mcp__"+desktopMCPName+"__"+tool)
+		}
+	}
+
 	if s.collabMCPInjected(ctx, task, agentID, inboxBatchID) {
 		servers = append(servers, backend.MCPServer{
 			Name: collabMCPName, Transport: "http",
