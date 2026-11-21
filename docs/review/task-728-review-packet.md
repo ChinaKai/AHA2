@@ -1,5 +1,7 @@
 # task-728 review packet：宠物模型设置统一（聊天 + 自主行为一个模型）
 
+- 后续修订：本包是 r1（源码 `b285d54`）；评审意见的修复见 `task-728-review-packet-r2.md`（源码 `2a8f1e5`）。
+
 - 基线：main `12b9be1`
 - 实现提交：`b285d54`（分支 `aha/task_07933ff5b7797feffa4c`，worktree `.aha2-worktrees/task_07933ff5b7797feffa4c`）
 - 材料：本文件 + 2 个 diff 分卷；没有 push、没有合并、没有部署、没有改生产数据
