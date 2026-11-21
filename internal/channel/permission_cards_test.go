@@ -3,6 +3,7 @@ package channel
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,13 +13,26 @@ import (
 	"github.com/ChinaKai/AHA2/internal/store"
 )
 
-func TestSendTaskPermissionRequestCardCreatesOwnerAction(t *testing.T) {
+type permissionCardFixture struct {
+	ctx          context.Context
+	database     *store.Store
+	appService   *app.Service
+	service      *Service
+	instance     domain.ChannelInstance
+	conversation domain.ChannelConversation
+	task         domain.Task
+	identity     domain.ChannelIdentityLink
+	now          time.Time
+}
+
+func newPermissionCardFixture(t *testing.T) *permissionCardFixture {
+	t.Helper()
 	ctx := context.Background()
 	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer database.Close()
+	t.Cleanup(func() { database.Close() })
 	secretStore, err := secrets.Open(filepath.Join(t.TempDir(), "secrets.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -59,10 +73,11 @@ func TestSendTaskPermissionRequestCardCreatesOwnerAction(t *testing.T) {
 	if err := database.CreateChannelInstance(ctx, instance, []domain.ChannelEndpoint{endpoint}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.BindChannelOwnerIdentity(ctx, domain.ChannelIdentityLink{
+	identity, err := database.BindChannelOwnerIdentity(ctx, domain.ChannelIdentityLink{
 		ID: "owner-identity", InstanceID: instance.ID, OwnerID: "owner-card",
 		ExternalUserID: "owner-open", Role: "owner", Status: "active", LinkedAt: now,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 	envGroup := domain.EnvGroup{ID: "env-card", Name: "Card", ProviderID: "provider-card", Backend: "stub", Revision: 1, Environment: map[string]string{}, SecretRefs: map[string]string{}, CreatedAt: now, UpdatedAt: now}
@@ -93,19 +108,122 @@ func TestSendTaskPermissionRequestCardCreatesOwnerAction(t *testing.T) {
 	if err := database.CreateChannelConversation(ctx, conversation, session); err != nil {
 		t.Fatal(err)
 	}
-	service := New(Config{Store: database, App: app.NewService(database, secretStore, app.StubExecutor{}), Secrets: secretStore, DataDir: t.TempDir()})
-	request := domain.TaskPermissionRequest{
-		ID: "task_permission_card", TaskID: "task-card", ApplicantName: "张三",
-		Action: "push main", Scope: "origin/main", Reason: "联调", Risk: "high",
-		Status: "pending", CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
+	appService := app.NewService(database, secretStore, app.StubExecutor{})
+	return &permissionCardFixture{
+		ctx: ctx, database: database, appService: appService,
+		service:  New(Config{Store: database, App: appService, Secrets: secretStore, DataDir: t.TempDir()}),
+		instance: instance, conversation: conversation, task: task, identity: identity, now: now,
 	}
-	actionID, err := service.SendTaskPermissionRequestCard(ctx, instance.ID, "conversation-card", request)
+}
+
+func (f *permissionCardFixture) processingReceipt(t *testing.T, id string) domain.ChannelInboxReceipt {
+	t.Helper()
+	receipt, _, err := f.database.ReceiveChannelInbox(f.ctx, domain.ChannelInboxReceipt{
+		ID: id, InstanceID: f.instance.ID, ExternalEventID: "event-" + id,
+		EventType: "message", PayloadDigest: "digest-" + id,
+		NormalizedPayload: map[string]any{"mentioned_bot": false},
+		State:             "processing", LeaseID: "lease-" + id,
+		ConversationID: f.conversation.ID, OccurredAt: f.now, ReceivedAt: f.now,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	action, err := database.ChannelPendingAction(ctx, actionID)
+	return receipt
+}
+
+func (f *permissionCardFixture) resultCount(t *testing.T, text string) int {
+	t.Helper()
+	page, err := f.database.ConversationPage(f.ctx, f.task.ID, 0, 0, 200, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, item := range page.Items {
+		if item.Kind == "agent_message" && strings.Contains(item.Summary, text) {
+			count += 1
+		}
+	}
+	return count
+}
+
+func TestSendTaskPermissionRequestCardCreatesOwnerAction(t *testing.T) {
+	f := newPermissionCardFixture(t)
+	request := domain.TaskPermissionRequest{
+		ID: "task_permission_card", TaskID: f.task.ID, ApplicantName: "张三",
+		Action: "push main", Scope: "origin/main", Reason: "联调", Risk: "high",
+		Status: "pending", CreatedAt: f.now, UpdatedAt: f.now, ExpiresAt: f.now.Add(10 * time.Minute),
+	}
+	actionID, err := f.service.SendTaskPermissionRequestCard(f.ctx, f.instance.ID, f.conversation.ID, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	action, err := f.database.ChannelPendingAction(f.ctx, actionID)
 	if err != nil || action.Operation != "task_permission" || action.ActorIdentityLinkID != "owner-identity" ||
 		action.TargetID != request.ID {
 		t.Fatalf("action=%#v err=%v", action, err)
+	}
+}
+
+// Channel card decisions write the same result message the Web path writes.
+// The fixture Task is terminal so the test can assert the history-only record
+// without depending on a running Agent.
+func TestTaskPermissionCardDecisionsNotifyTerminalTask(t *testing.T) {
+	f := newPermissionCardFixture(t)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if err := f.database.UpdateTaskStatus(f.ctx, f.task.ID, domain.TaskActive, domain.TaskCompleted, now, now); err != nil {
+		t.Fatal(err)
+	}
+	for index, item := range []struct {
+		decision string
+		input    string
+		want     string
+	}{
+		{decision: "approved", input: "confirm", want: "owner 已批准"},
+		{decision: "rejected", input: "cancel", want: "owner 已拒绝"},
+	} {
+		expectedResults := index + 1
+		request, err := f.appService.CreateTaskPermissionRequest(f.ctx, app.TaskPermissionRequestInput{
+			TaskID: f.task.ID, ChannelInstanceID: f.instance.ID, ChannelConversationID: f.conversation.ID,
+			ApplicantIdentityLinkID: "member-1", ApplicantName: "张三",
+			Action: "push main", Reason: "联调", Risk: "medium",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		actionID, err := f.service.SendTaskPermissionRequestCard(f.ctx, f.instance.ID, f.conversation.ID, request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		action, err := f.database.ChannelPendingAction(f.ctx, actionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The real card path claims the action before resolving it.
+		claimed, ok, err := f.database.BeginChannelPendingAction(
+			f.ctx, action.ID, f.instance.ID, f.conversation.ID, f.identity.ID, "", f.now)
+		if err != nil || !ok {
+			t.Fatalf("claim action: %#v ok=%v err=%v", claimed, ok, err)
+		}
+		receipt := f.processingReceipt(t, "receipt-"+item.decision)
+		if err := f.service.resolveTaskPermissionCardAction(f.ctx, receipt, f.instance, f.identity, claimed, item.input); err != nil {
+			t.Fatal(err)
+		}
+		finished, err := f.database.ChannelInboxReceipt(f.ctx, f.instance.ID, receipt.ID)
+		if err != nil || finished.State != "processed" {
+			t.Fatalf("%s receipt state = %#v err=%v", item.decision, finished.State, err)
+		}
+		if count := f.resultCount(t, "渠道权限申请「push main」"); count != expectedResults {
+			t.Fatalf("%s result messages = %d, want %d", item.decision, count, expectedResults)
+		}
+		if count := f.resultCount(t, item.want); count != 1 {
+			t.Fatalf("%s decision messages = %d, want 1", item.decision, count)
+		}
+		// A repeated card click cannot resolve an already-decided request.
+		if err := f.service.resolveTaskPermissionCardAction(f.ctx, receipt, f.instance, f.identity, claimed, item.input); err == nil {
+			t.Fatalf("%s repeated decision was accepted", item.decision)
+		}
+		if count := f.resultCount(t, "渠道权限申请「push main」"); count != expectedResults {
+			t.Fatalf("repeated %s decision produced %d results, want %d", item.decision, count, expectedResults)
+		}
 	}
 }

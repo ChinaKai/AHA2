@@ -112,6 +112,63 @@ type adbCommand struct {
 	name              string
 	serial            string
 	unsafeGlobalFlags bool
+	// arguments are the tokens after the command name. They are only used by
+	// commands with device-scoped subcommands (forward today); a wait-only
+	// prefix such as "wait-for-device" leaves them empty.
+	arguments []string
+}
+
+type adbForwardAction int
+
+const (
+	adbForwardInvalid adbForwardAction = iota
+	adbForwardAdd
+	adbForwardList
+	adbForwardRemove
+	adbForwardRemoveAll
+)
+
+// classifyADBForward recognizes only the device-scoped forward shapes. Any
+// other argv fails closed: a future or vendor subcommand (or the usage text's
+// unknown-option path) must never become a way to reach the host-wide
+// listener table. adb compares the subcommand literally, but the check is
+// case-insensitive so an uppercase spelling cannot slip past the policy.
+func classifyADBForward(arguments []string) (adbForwardAction, string, bool) {
+	if len(arguments) == 0 {
+		return adbForwardInvalid, "", false
+	}
+	switch strings.ToLower(arguments[0]) {
+	case "--remove-all":
+		// Trailing tokens are ignored by adb's usage path; still refuse the
+		// host-wide operation rather than letting it fall through as an add.
+		return adbForwardRemoveAll, "", true
+	case "--remove":
+		if len(arguments) != 2 || !validADBForwardSpec(arguments[1]) {
+			return adbForwardInvalid, "", false
+		}
+		return adbForwardRemove, arguments[1], true
+	case "--list":
+		if len(arguments) != 1 {
+			return adbForwardInvalid, "", false
+		}
+		return adbForwardList, "", true
+	case "--no-rebind":
+		if len(arguments) != 3 || !validADBForwardSpec(arguments[1]) || !validADBForwardSpec(arguments[2]) {
+			return adbForwardInvalid, "", false
+		}
+		return adbForwardAdd, arguments[1], true
+	}
+	if !validADBForwardSpec(arguments[0]) || len(arguments) != 2 || !validADBForwardSpec(arguments[1]) {
+		return adbForwardInvalid, "", false
+	}
+	return adbForwardAdd, arguments[0], true
+}
+
+// validADBForwardSpec rejects empty and option-looking tokens. Every real
+// forward endpoint is a non-empty spec such as tcp:8080, localabstract:name
+// or jdwp:1234, never an option.
+func validADBForwardSpec(value string) bool {
+	return value != "" && !strings.HasPrefix(value, "-")
 }
 
 // parseADBCommand only parses the global prefix. Once a device command is
@@ -167,6 +224,9 @@ func parseADBCommand(args []string) (adbCommand, bool) {
 	}
 	if i < len(args) {
 		command.name = args[i]
+		if i+1 < len(args) {
+			command.arguments = args[i+1:]
+		}
 	}
 	return command, command.name != "" && !strings.HasPrefix(command.name, "-")
 }
@@ -211,6 +271,30 @@ func (s *Server) agentADBExec(writer http.ResponseWriter, request *http.Request)
 		(command.serial != "" && (group.Network.ADBWireless() || command.serial != target)) {
 		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "adb_command_not_allowed", "message": "这里只允许面向当前设备的 ADB 子命令"})
 		return
+	}
+	// adb forward --remove-all and --remove act on the host-wide listener table,
+	// not on the selected device: --remove-all deletes every device's forwards
+	// on this adb server, and --remove matches only the local name. Keep the
+	// read-only and add forms, but refuse the host-wide delete and only allow
+	// removing a local name this binding previously created through this path.
+	forwardAction := adbForwardInvalid
+	forwardLocal := ""
+	forwardScope := adbForwardScope(task.ID, group.ID, target)
+	if strings.EqualFold(command.name, "forward") {
+		action, local, recognized := classifyADBForward(command.arguments)
+		if !recognized {
+			writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "adb_command_not_allowed", "message": "这里只允许面向当前设备的 ADB 子命令"})
+			return
+		}
+		if action == adbForwardRemoveAll {
+			writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "adb_forward_remove_all_not_allowed", "message": "forward --remove-all 会清除同一 ADB server 上所有设备的转发，禁止使用"})
+			return
+		}
+		if action == adbForwardRemove && !s.adbForwards.allows(forwardScope, local) {
+			writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "adb_forward_remove_not_allowed", "message": "只能删除本 Task 通过该硬件资源创建的转发端口"})
+			return
+		}
+		forwardAction, forwardLocal = action, local
 	}
 	argumentBytes := 0
 	for _, argument := range payload.Args {
@@ -278,6 +362,18 @@ func (s *Server) agentADBExec(writer http.ResponseWriter, request *http.Request)
 		})
 		writeJSON(writer, code, map[string]any{"ok": false, "error": errorCode, "may_have_executed": mayHaveExecuted, "message": err.Error()})
 		return
+	}
+	// A forward only enters or leaves the registry when adb reported success:
+	// a failed add created nothing to remove, and a failed remove leaves the
+	// record in place (fail closed). tcp:0 is stored under the port adb picked,
+	// because the literal tcp:0 cannot be removed later.
+	if result.ExitCode == 0 {
+		switch forwardAction {
+		case adbForwardAdd:
+			s.adbForwards.add(forwardScope, registeredADBForwardLocal(forwardLocal, result))
+		case adbForwardRemove:
+			s.adbForwards.remove(forwardScope, forwardLocal)
+		}
 	}
 	s.audit(request, "task.hardware.adb_exec", "task", task.ID, map[string]any{
 		"hardware_id": group.ID, "argument_count": len(payload.Args),

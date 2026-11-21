@@ -4,7 +4,7 @@ import {renderDesktopHeaderControls, renderDesktopPanel} from "./desktop_panel.j
 import {renderTaskMemory} from "./task_agents.js";
 import type {TaskDetail} from "./types.js";
 
-export type TaskTool = "permissions" | "channel" | "context" | "hardware" | "mail" | "browser" | "memory";
+export type TaskTool = "channel" | "context" | "hardware" | "mail" | "browser" | "memory";
 export type TaskToolMode = "split" | "fullscreen";
 
 export const TASK_TOOL_DEFAULT_WIDTH = 42;
@@ -20,11 +20,13 @@ export function normalizeTaskToolWidth(value: unknown): number {
 }
 
 export function normalizePinnedTaskTool(value: unknown): TaskTool | "" {
+  // Permission requests used to live in their own tool; old saved layouts map
+  // to the channel page that now owns them instead of leaving a blank panel.
+  if (value === "permissions") return "channel";
   return tools.some(tool => tool.id === value) ? value as TaskTool : "";
 }
 
 const tools: Array<{id: TaskTool; label: string; iconName: string}> = [
-  {id: "permissions", label: "权限申请", iconName: "shield"},
   {id: "channel", label: "渠道", iconName: "bot"},
   {id: "context", label: "Context", iconName: "context"},
   {id: "hardware", label: "硬件调试", iconName: "hardware"},
@@ -46,11 +48,14 @@ export function renderTaskToolButtons(
   return tools.filter(tool => tool.id !== "channel" || options.includeChannel !== false).map(tool => {
     const connected = tool.id === "channel" && options.channelConnected;
     const label = tool.id === "channel" && options.channelLabel ? options.channelLabel : tool.label;
-    const pending = tool.id === "permissions"
-      ? Math.max(0, Number(options.pendingPermissions) || 0)
-      : tool.id === "mail" ? Math.max(0, Number(options.pendingMail) || 0) : 0;
+    // Permission requests belong to the channel page, so its badge carries the
+    // same pending count the removed permissions tool used to show.
+    const pending = tool.id === "channel" || tool.id === "mail"
+      ? Math.max(0, Number(tool.id === "channel" ? options.pendingPermissions : options.pendingMail) || 0)
+      : 0;
+    const labelWithPending = pending > 0 ? `${label}（${pending > 99 ? "99+" : pending} 条待审批）` : label;
     const badge = pending > 0 ? `<span class="task-tool-badge">${pending > 99 ? "99+" : pending}</span>` : "";
-    return `<button type="button" data-task-tool="${tool.id}" class="icon-button task-tool-button ${active === tool.id ? "active" : ""} ${connected ? "connected" : ""} ${pending > 0 ? "has-pending" : ""}" title="${escapeHTML(label)}${pending > 0 ? `（${pending} 条待审批）` : ""}" aria-label="${escapeHTML(label)}">${icon(tool.iconName)}${badge}</button>`;
+    return `<button type="button" data-task-tool="${tool.id}" class="icon-button task-tool-button ${active === tool.id ? "active" : ""} ${connected ? "connected" : ""} ${pending > 0 ? "has-pending" : ""}" title="${escapeHTML(labelWithPending)}" aria-label="${escapeHTML(label)}">${icon(tool.iconName)}${badge}</button>`;
   }).join("");
 }
 
@@ -63,10 +68,11 @@ export function renderTaskToolContent(
   detail: TaskDetail,
   contextHTML: string,
   channelHTML = "",
-  permissionHTML = "",
   mailHTML = "",
 ): string {
-  if (tool === "permissions") return permissionHTML;
+  // A saved or linked "permissions" entry resolves to the channel page; the
+  // approval section is part of channelHTML now, so there is never a blank page.
+  if ((tool as string) === "permissions") tool = "channel";
   if (tool === "channel") return channelHTML;
   if (tool === "context") return contextHTML;
   if (tool === "memory") return `<div class="task-memory-tool">${renderTaskMemory(detail.memory, detail.turns || [])}</div>`;
@@ -84,7 +90,6 @@ export function renderTaskToolPanel(
   mode: TaskToolMode,
   channelHTML = "",
   pinned = false,
-  permissionHTML = "",
   mailHTML = "",
 ): string {
   const switchLabel = mode === "split" ? "全屏" : "小窗";
@@ -102,6 +107,6 @@ export function renderTaskToolPanel(
   return `<aside class="task-tool-panel ${tool ? "open" : ""} ${mode}">
     <div id="task-tool-resizer" class="task-tool-resizer" role="separator" aria-label="调整工具面板宽度" aria-orientation="vertical" aria-valuemin="30" aria-valuemax="70" tabindex="0" title="拖动调整宽度，双击恢复默认"></div>
     <header class="task-tool-panel-head"><div class="task-tool-panel-title"><div class="task-tool-panel-title-row"><h3>${escapeHTML(taskToolTitle(tool))}</h3>${hardwareSwitcher}</div><small>${escapeHTML(agentID)}</small></div><div class="task-tool-panel-actions">${pinButton}<button type="button" id="toggle-task-tool-mode" class="task-tool-mode-toggle" title="切换为${switchLabel}" aria-label="切换为${switchLabel}">${icon(switchIcon)}<span>${switchLabel}</span></button><button type="button" id="close-task-tool" class="icon-button" title="关闭">${icon("close")}</button></div></header>
-    <div id="task-tool-panel-body">${renderTaskToolContent(tool, detail, contextHTML, channelHTML, permissionHTML, mailHTML)}</div>
+    <div id="task-tool-panel-body">${renderTaskToolContent(tool, detail, contextHTML, channelHTML, mailHTML)}</div>
   </aside>`;
 }

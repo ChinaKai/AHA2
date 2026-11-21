@@ -597,18 +597,42 @@ func (s *Server) resolveTaskPermissionRequest(writer http.ResponseWriter, reques
 	}
 	result := map[string]any{"ok": true, "request": resolved}
 	if resolved.Status == "approved" {
-		content := permissionApprovalContinuationContent(resolved)
-		var submitErr error
-		if taskPermissionHasChannelRoute(resolved) {
-			// The approval happened in AHA Web, but the request came from the
-			// group. Keep its route so the follow-up Turn can answer the group
-			// and notify the applicant instead of stopping at AHA Web.
-			_, submitErr = s.app.SubmitTaskPermissionApprovalContinuation(request.Context(), resolved, content)
+		task, taskErr := s.store.Task(request.Context(), resolved.TaskID)
+		canWake := taskErr == nil && app.TaskAcceptsApprovalResultWake(task.Status)
+		hasRoute := taskPermissionHasChannelRoute(resolved)
+		if hasRoute && canWake {
+			// The approval Turn is already the result message. Enrich it with
+			// the owner, time and reason instead of submitting a second message
+			// that would wake the Task twice.
+			content := permissionApprovalContinuationContent(resolved, decider, input.Reason, time.Now().UTC())
+			if _, submitErr := s.app.SubmitTaskPermissionApprovalContinuation(request.Context(), resolved, content); submitErr != nil {
+				result["continuation_error"] = submitErr.Error()
+			}
 		} else {
-			_, submitErr = s.app.SubmitMessage(request.Context(), resolved.TaskID, content)
+			// No channel continuation exists (or the Task is terminal), so the
+			// result message itself carries the continue instruction. The
+			// helper records history instead of waking a terminal Task.
+			instruction := "请继续执行已授权动作，不要扩大范围，完成后汇报结果。"
+			if hasRoute {
+				instruction = fmt.Sprintf("申请人：%s。请继续执行已授权的动作：%s。不要扩大范围，完成后向渠道汇报结果。", resolved.ApplicantName, resolved.Action)
+			}
+			if notifyErr := s.app.NotifyTaskApprovalResult(request.Context(), app.TaskApprovalResultInput{
+				TaskID: resolved.TaskID, Kind: app.TaskApprovalKindChannelPermission,
+				Subject: resolved.Action, ReferenceID: resolved.ID, Decision: "approved",
+				Decider: decider, Reason: input.Reason, Instruction: instruction, At: time.Now().UTC(),
+			}); notifyErr != nil {
+				result["notification_error"] = notifyErr.Error()
+			}
 		}
-		if submitErr != nil {
-			result["continuation_error"] = submitErr.Error()
+	} else if resolved.Status == "rejected" {
+		// A rejection has no continuation to carry the result, so deliver one
+		// explicit result message. Terminal Tasks only record it.
+		if notifyErr := s.app.NotifyTaskApprovalResult(request.Context(), app.TaskApprovalResultInput{
+			TaskID: resolved.TaskID, Kind: app.TaskApprovalKindChannelPermission,
+			Subject: resolved.Action, ReferenceID: resolved.ID, Decision: "rejected",
+			Decider: decider, Reason: input.Reason, At: time.Now().UTC(),
+		}); notifyErr != nil {
+			result["notification_error"] = notifyErr.Error()
 		}
 	}
 	s.audit(request, "task.permission.resolve", "task", taskID, map[string]any{"request_id": resolved.ID, "decision": resolved.Status})
@@ -622,17 +646,19 @@ func taskPermissionHasChannelRoute(request domain.TaskPermissionRequest) bool {
 		strings.TrimSpace(request.ApplicantIdentityLinkID) != ""
 }
 
-func permissionApprovalContinuationContent(request domain.TaskPermissionRequest) string {
+func permissionApprovalContinuationContent(request domain.TaskPermissionRequest, decider, reason string, at time.Time) string {
+	result := app.TaskApprovalResultContent(app.TaskApprovalResultInput{
+		TaskID: request.TaskID, Kind: app.TaskApprovalKindChannelPermission,
+		Subject: request.Action, ReferenceID: request.ID, Decision: "approved",
+		Decider: decider, Reason: reason, At: at,
+	})
 	if taskPermissionHasChannelRoute(request) {
 		return fmt.Sprintf(
-			"Owner 已批准权限申请 %s（申请人：%s）。请继续执行已授权的动作：%s。不要扩大范围，完成后向渠道汇报结果。",
-			request.ID, request.ApplicantName, request.Action,
+			"%s 申请人：%s。请继续执行已授权的动作：%s。不要扩大范围，完成后向渠道汇报结果。",
+			result, request.ApplicantName, request.Action,
 		)
 	}
-	return fmt.Sprintf(
-		"Owner 已批准权限申请 %s（%s）。请继续执行已授权动作，不要扩大范围，完成后汇报结果。",
-		request.ID, request.Action,
-	)
+	return fmt.Sprintf("%s 请继续执行已授权动作，不要扩大范围，完成后汇报结果。", result)
 }
 
 func (s *Server) taskConversation(writer http.ResponseWriter, request *http.Request) {

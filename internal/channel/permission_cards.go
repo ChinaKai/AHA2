@@ -3,8 +3,10 @@ package channel
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 
+	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
@@ -66,16 +68,51 @@ func (s *Service) resolveTaskPermissionCardAction(
 			map[string]any{"request_id": resolved.ID, "decision": "rejected"}, s.now().UTC()); err != nil {
 			return err
 		}
-		return s.store.FinishChannelInbox(ctx, receipt.ID, receipt.LeaseID, "processed", action.ConversationID, "", "permission_rejected", s.now().UTC())
+		if err := s.store.FinishChannelInbox(ctx, receipt.ID, receipt.LeaseID, "processed", action.ConversationID, "", "permission_rejected", s.now().UTC()); err != nil {
+			return err
+		}
+		// Rejection has no continuation Turn, so send the result message itself.
+		// The resolved row is already terminal, so a repeated card click cannot
+		// reach this branch again.
+		if notifyErr := s.application.NotifyTaskApprovalResult(ctx, app.TaskApprovalResultInput{
+			TaskID: resolved.TaskID, Kind: app.TaskApprovalKindChannelPermission,
+			Subject: resolved.Action, ReferenceID: resolved.ID, Decision: "rejected",
+			Decider: identity.DisplayName, Reason: "在群聊中拒绝", At: s.now().UTC(),
+		}); notifyErr != nil {
+			log.Printf("notify rejected task permission %s: %v", resolved.ID, notifyErr)
+		}
+		return nil
 	}
 	if err := s.store.FinishChannelPendingAction(ctx, action.ID, resolved.ID, "succeeded",
 		map[string]any{"request_id": resolved.ID, "decision": "approved"}, s.now().UTC()); err != nil {
 		return err
 	}
-	content := fmt.Sprintf(
-		"Owner 已批准权限申请 %s（申请人：%s）。请继续执行已授权的动作：%s。不要扩大范围，完成后向渠道汇报结果。",
-		resolved.ID, resolved.ApplicantName, resolved.Action,
-	)
+	// Approval already continues the Task. Fold the approval result into that
+	// continuation message instead of submitting a second, equivalent wake-up.
+	content := app.TaskApprovalResultContent(app.TaskApprovalResultInput{
+		TaskID: resolved.TaskID, Kind: app.TaskApprovalKindChannelPermission,
+		Subject: resolved.Action, ReferenceID: resolved.ID, Decision: "approved",
+		Decider: identity.DisplayName, At: s.now().UTC(),
+	}) + fmt.Sprintf(" 申请人：%s。请继续执行已授权的动作：%s。不要扩大范围，完成后向渠道汇报结果。",
+		resolved.ApplicantName, resolved.Action)
+	task, taskErr := s.store.Task(ctx, resolved.TaskID)
+	if taskErr != nil || !app.TaskAcceptsApprovalResultWake(task.Status) {
+		// A terminal Task cannot run the continuation. Keep the same result as
+		// history only and do not disturb the state machine. The receipt must
+		// still finish processing; no continuation message consumes it here.
+		if err := s.store.FinishChannelInbox(ctx, receipt.ID, receipt.LeaseID, "processed", action.ConversationID, "", "permission_approved", s.now().UTC()); err != nil {
+			return err
+		}
+		if notifyErr := s.application.NotifyTaskApprovalResult(ctx, app.TaskApprovalResultInput{
+			TaskID: resolved.TaskID, Kind: app.TaskApprovalKindChannelPermission,
+			Subject: resolved.Action, ReferenceID: resolved.ID, Decision: "approved",
+			Decider: identity.DisplayName, Instruction: fmt.Sprintf("申请人：%s。请继续执行已授权的动作：%s。", resolved.ApplicantName, resolved.Action),
+			At: s.now().UTC(),
+		}); notifyErr != nil {
+			log.Printf("record approved task permission %s: %v", resolved.ID, notifyErr)
+		}
+		return nil
+	}
 	provenance := map[string]any{
 		"schema": "aha.channel-context/v1", "instance_id": instance.ID, "provider": instance.ProviderKey,
 		"endpoint": domain.ChannelEndpointGroupDigitalHuman, "conversation_id": action.ConversationID,

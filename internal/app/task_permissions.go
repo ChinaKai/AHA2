@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -47,6 +48,10 @@ func (s *Service) CreateTaskPermissionRequest(ctx context.Context, input TaskPer
 	if _, err := s.store.Task(ctx, input.TaskID); err != nil {
 		return domain.TaskPermissionRequest{}, fmt.Errorf("Task 不存在")
 	}
+	// Settle old expired rows before checking for a pending duplicate. This is
+	// the only expiry writer besides the read path, so a new request can never
+	// silently consume an expired one without its result message.
+	s.settleExpiredTaskPermissionRequests(ctx, input.TaskID)
 	if existing, listErr := s.store.ListTaskPermissionRequests(ctx, input.TaskID, 100); listErr == nil {
 		now := s.now().UTC()
 		for _, item := range existing {
@@ -76,7 +81,29 @@ func (s *Service) CreateTaskPermissionRequest(ctx context.Context, input TaskPer
 }
 
 func (s *Service) TaskPermissionRequests(ctx context.Context, taskID string, limit int) ([]domain.TaskPermissionRequest, error) {
-	return s.store.ListTaskPermissionRequests(ctx, strings.TrimSpace(taskID), limit)
+	taskID = strings.TrimSpace(taskID)
+	s.settleExpiredTaskPermissionRequests(ctx, taskID)
+	return s.store.ListTaskPermissionRequests(ctx, taskID, limit)
+}
+
+// settleExpiredTaskPermissionRequests is the single expiry writer. The store
+// returns only rows this call changed, so concurrent readers and a following
+// Create still produce exactly one result message per expired request.
+func (s *Service) settleExpiredTaskPermissionRequests(ctx context.Context, taskID string) {
+	expired, err := s.store.ExpireTaskPermissionRequests(ctx, taskID, s.now().UTC())
+	if err != nil {
+		log.Printf("expire task permission requests for %s: %v", taskID, err)
+		return
+	}
+	for _, item := range expired {
+		if notifyErr := s.NotifyTaskApprovalResult(ctx, TaskApprovalResultInput{
+			TaskID: item.TaskID, Kind: TaskApprovalKindChannelPermission,
+			Subject: item.Action, ReferenceID: item.ID, Decision: "expired",
+			Decider: "owner", At: item.UpdatedAt,
+		}); notifyErr != nil {
+			log.Printf("notify expired permission request %s: %v", item.ID, notifyErr)
+		}
+	}
 }
 
 // ResolveTaskPermissionRequest consumes a pending request. The caller must
