@@ -7,7 +7,8 @@
 - 状态：未合并、未 push、未部署、未运行安装器；未登录真实账号，未读写任何凭据。
 - 实现提交：`52913ac`
 - r2 修复提交（task-741 L2 复审）：`e3f1336`
-- 评审包提交：`b404743`（r1）；r2 更新随后单独提交
+- r3 M1 修复提交（task-741 第二次复审）：`a03ddea`
+- 评审包提交：`b404743`（r1）、`02304be`（r2）；r3 更新随后单独提交
 
 ## 1. 只读核对结论（第一步）
 
@@ -180,6 +181,9 @@
 
 - 客户端同一时刻只发一个动作；点击经 300ms 判别，双击只发一个 `double_click`，
   不产生 click+click+double_click。
+- 除 hover 外的任何显式动作（text/key/scroll/drag/右键）入队前先 flush 未决
+  单击；flush 清掉 300ms 计时器，click 不会晚到或补发。双击路径先清掉未决
+  单击再入队，仍只发一个 `double_click`。
 - 显式动作（click/key/text/scroll/drag）进有序队列，不丢弃；hover 单独
   best-effort、最多一个待发位置，有显式动作排队/在途时跳过。
 - host `inputSlot` 是最终串行点；Agent/Owner 并发都排它。
@@ -222,7 +226,7 @@
 | --- | --- |
 | `node --test browser-host/*.test.mjs` | 57 pass，6 skipped（平台/真实 Chromium 相关），0 fail |
 | `cd web && npm test` | 632 pass，0 fail |
-| `node web/tests/browser_task_panel.browser.mjs`（`AHA_PLAYWRIGHT_MODULE` 指向已装 Playwright） | pass；覆盖只读不发输入、控制开关、中心点击映射、letterbox 忽略、双击、单击右键、**按住 150ms 的右键只发一次**、键盘、滚轮、**缺 viewport 头不发坐标输入并在恢复后继续**、403 退出、撤销退出 |
+| `node web/tests/browser_task_panel.browser.mjs`（`AHA_PLAYWRIGHT_MODULE` 指向已装 Playwright） | pass；覆盖只读不发输入、控制开关、中心点击映射、letterbox 忽略、双击、单击右键、**按住 150ms 的右键只发一次**、键盘、滚轮、**缺 viewport 头不发坐标输入并在恢复后继续**、**单击窗口内 text/key/scroll/drag 的入队顺序**、403 退出、撤销退出 |
 | `go build ./...` | OK |
 | `go test ./internal/browser -run 'TestOwnerActionsUseOwnerSet|TestPageActionValidation|TestPageActionsRequireInteract|TestSnapshotPasses'` | PASS（约 49s） |
 | `go test ./internal/httpapi -run 'TestBrowserTabFrameReturnsAuthorizedImageAndStopsAfterRevoke\|TestAgentBrowserPageActionsOverHTTP\|TestOwnerBrowserPageActionsOverHTTP\|TestOwnerBrowserActionsRequireInteractOverHTTP' -count=1 -v` | 4/4 PASS（23.4s；Owner actor 断言为 `owner_...`） |
@@ -343,3 +347,64 @@
 
 修复提交：`e3f1336`（Fix owner browser control review findings）；本评审包的 r2
 更新在随后单独的提交里。
+
+## 8. 复审修复（r3，task-741 第二次复审）
+
+复审对 `b404743..02304be` 的结论是 REQUEST_CHANGES：r2 的两项已确认修好，但发现
+从 `52913ac` 起存在的 M1——单击后 300ms 判别窗口内的输入会排到 click 前面。
+
+### 8.1 M1 根因
+
+单击 `pointerup` 只把点击放进 `controlPendingClick`，300ms 后才真正
+`enqueueControl(click)`。这段窗口里 text/key/scroll/drag 直接入队，于是事件顺序
+变成 `text:a, text:b, key:Enter, click`。对 `text` 的主要用法（先点输入框再连续
+输入）来说，文字和 Enter 会打进上一个焦点元素，甚至提交错误表单。
+
+### 8.2 修复
+
+- `enqueueControl` 现在是所有显式动作的唯一入口。它在入队前调用
+  `flushPendingClick()`（除 click 自身的内部路径显式传 `flushClick=false`）。
+  于是 text/key/scroll/drag/右键都会先把未决单击入队，click 始终排在后面输入
+  之前。
+- `flushPendingClick` 会清掉 300ms 计时器并把 `controlPendingClick` 置空，因此
+  计时器不会稍后再补发一次 click。
+- 双击路径在入队 `double_click` 前已经清掉未决单击，并以
+  `flushClick=false` 入队，所以不会变成“两次单击 + 双击”。
+- 不再合并连续键入的 text 动作，保证回归里能观察到 `text:a, text:b` 的原始
+  顺序；代价是快速输入会按字符逐个入队，队列上限 64，超出仍给可读提示。
+- hover 保持旁路，不调用 `enqueueControl`、不 flush：host 的 hover 只执行
+  `mouse.move`，不带按下/抬起或 click；而且 `queueControlHover` 在
+  `controlPendingClick` 或手势进行中会跳过/推迟，不会与未决单击竞争。它没有
+  点击语义，也不会改变 text/key 的入队顺序。
+
+### 8.3 回归用例
+
+浏览器回归新增（真实 Playwright 指针事件）：
+
+1. 单击画面，50ms 后输入 `ab` 并按 Enter；过滤 hover 后断言顺序是
+   `click → text:a → text:b → key:Enter`，并等待 400ms 确认没有第二次 click。
+2. 同一窗口内的滚轮：断言顺序是 `click → scroll`。
+3. 同一窗口内的拖拽：断言顺序是 `click → drag`。
+4. 双击：断言只有一个 `double_click`，没有普通 click。
+
+变异验证：把构建产物里的 `flushClick` 条件临时去掉后，用例 1 得到
+`actual: ["text:a", "text:b", "key:Enter", "click"]`，正是复审报告的顺序；
+恢复后通过。这确认用例确实覆盖 M1，而不是偶然通过。
+
+### 8.4 r3 验证
+
+| 命令 | 结果 |
+| --- | --- |
+| `node --test browser-host/*.test.mjs` | 63 个测试，57 pass、6 skipped、0 fail，exit 0 |
+| `cd web && npm test` | 632 pass，0 fail，exit 0 |
+| `node web/tests/browser_task_panel.browser.mjs` | pass，exit 0（含 8.3 的四个顺序用例） |
+| `go build ./...` | exit 0 |
+| `go test ./internal/browser -run 'TestOwnerActionsUseOwnerSet\|TestPageActionValidation' -count=1` | exit 0 |
+| `go test ./internal/httpapi -run 'TestOwnerBrowserPageActionsOverHTTP\|TestOwnerBrowserActionsRequireInteractOverHTTP\|TestBrowserTabFrameReturnsAuthorizedImageAndStopsAfterRevoke' -count=1` | exit 0 |
+
+边界未变：授权、lease/fence、审计、不自动重试、Agent 动作集都没改；没有合并、
+push、部署或自行 complete。非阻塞项（CSRF 缺失用例、`browser_action_invalid`
+提示细化、非中心 fixture、hover/点击顺序、Agent 按键文档）继续如实披露。
+
+M1 修复提交：`a03ddea`（Flush a pending click before later owner input）；本评审包
+的 r3 更新在随后单独的提交里。
