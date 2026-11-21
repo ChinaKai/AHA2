@@ -1,0 +1,32 @@
+{
+  "source_commit": "0da575e5d7703b40a207d0cce0b1d629efd78e50",
+  "source_tree": "b4d6c2105e0e22c9dffdc5ba92b5f10693a73a0b",
+  "base_commit": "6acfdb617caef3eb15b11ca8a474c2266e952a93",
+  "files": [
+    {
+      "path": "docs/pet-mcp/review/p1c4-0da575e-code.md",
+      "bytes": 41938,
+      "sha256": "07923c02e3121c94122ceaedfbde13bca43ce8a108338bf8917ef3c528b7d99b"
+    },
+    {
+      "path": "docs/pet-mcp/review/p1c4-0da575e-ledger-1.md",
+      "bytes": 50842,
+      "sha256": "4d2d95bb4d43a06690b197f5b0bd027a08cffc5085df6318a3563b3ee10b4e91"
+    },
+    {
+      "path": "docs/pet-mcp/review/p1c4-0da575e-ledger-2.md",
+      "bytes": 54507,
+      "sha256": "bf45266525e0cf3791abb0e714659acaa9331ec512f171526cd002804516091d"
+    },
+    {
+      "path": "docs/pet-mcp/review/p1c4-0da575e-ledger-diff.md",
+      "bytes": 8612,
+      "sha256": "123b4038ab33c20c1b28c1ec94150fe735ecbacc04fca21063774b473a40a2b9"
+    },
+    {
+      "path": "docs/pet-mcp/review/p1c4-0da575e-validation.md",
+      "bytes": 4662,
+      "sha256": "c1b8c061e95fbc2df4349edae5b30fd9721a3da455219d1e656e724e2577f3bc"
+    }
+  ]
+}
