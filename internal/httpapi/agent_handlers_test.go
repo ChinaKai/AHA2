@@ -259,6 +259,12 @@ func TestAgentADBExecParsesCommandBeforeApplyingPolicy(t *testing.T) {
 	token := h.issue(task.ID, "main", turn.ID)
 
 	for _, group := range groups {
+		target := group.Network.ADBSerial
+		if group.ID == "tcp" {
+			target = "192.0.2.10:5555"
+		} else if group.ID == "wireless" {
+			target = "192.0.2.11:41234"
+		}
 		for _, tc := range []struct {
 			name    string
 			args    []string
@@ -268,6 +274,9 @@ func TestAgentADBExecParsesCommandBeforeApplyingPolicy(t *testing.T) {
 			{"logcat", []string{"logcat", "-d"}, true},
 			{"install", []string{"install", "-r", "app.apk"}, true},
 			{"shell_arguments_are_not_commands", []string{"shell", "echo", "tcpip", "-s"}, true},
+			{"shell_raw_argument_is_not_command", []string{"shell", "echo", "raw", "host:devices"}, true},
+			{"forward_list_remains_available", []string{"forward", "--list"}, true},
+			{"reverse_list_remains_available", []string{"reverse", "--list"}, true},
 			{"wait_only", []string{"wait-for-device"}, true},
 			{"wait_shell", []string{"wait-for-device", "shell"}, true},
 			{"multiple_waits_shell", []string{"wait-for-device", "wait-for-usb-device", "shell"}, true},
@@ -280,6 +289,13 @@ func TestAgentADBExecParsesCommandBeforeApplyingPolicy(t *testing.T) {
 			{"wireless_serial_cannot_be_verified", []string{"-s", "192.0.2.11:41234", "shell"}, false},
 			// N-a: direct blocked commands must stay blocked.
 			{"direct_tcpip", []string{"tcpip", "5555"}, false},
+			{"direct_uppercase_tcpip", []string{"TCPIP", "5555"}, false},
+			{"direct_raw_tcpip", []string{"raw", "tcpip:5555"}, false},
+			{"direct_raw_host_devices", []string{"raw", "host:devices"}, false},
+			{"direct_uppercase_raw", []string{"RAW", "host:devices"}, false},
+			{"direct_track_devices", []string{"track-devices"}, false},
+			{"direct_server_status", []string{"server-status"}, false},
+			{"direct_reconnect", []string{"reconnect", "offline"}, false},
 			{"direct_host_features", []string{"host-features"}, false},
 			{"direct_devices", []string{"devices"}, false},
 			{"direct_connect", []string{"connect", "192.0.2.99:5555"}, false},
@@ -290,6 +306,9 @@ func TestAgentADBExecParsesCommandBeforeApplyingPolicy(t *testing.T) {
 			{"direct_mdns", []string{"mdns", "services"}, false},
 			// N-b: prefixes must not conceal a blocked command.
 			{"wait_tcpip", []string{"wait-for-device", "tcpip", "5555"}, false},
+			{"wait_raw_host_kill", []string{"wait-for-device", "raw", "host:kill"}, false},
+			{"serial_raw_tcpip", []string{"-s", target, "raw", "tcpip:5555"}, false},
+			{"host_port_raw_host_devices", []string{"-H", "127.0.0.1", "-P", "5037", "raw", "host:devices"}, false},
 			{"serial_tcpip", []string{"-s", "123SERIAL", "tcpip", "5555"}, false},
 			{"host_port_host_features", []string{"-H", "127.0.0.1", "-P", "5037", "host-features"}, false},
 			{"wait_host_features", []string{"wait-for-device", "host-features"}, false},
@@ -333,6 +352,10 @@ func TestAgentADBExecParsesCommandBeforeApplyingPolicy(t *testing.T) {
 						continue
 					}
 					before := executions.Load()
+					wantError, wantMessage := "adb_command_not_allowed", "这里只允许面向当前设备的 ADB 子命令"
+					if len(tc.args) == 0 {
+						wantError, wantMessage = "adb_args_invalid", "ADB 参数数量必须在 1 到 64 之间"
+					}
 					var status int
 					var payload struct {
 						OK      bool   `json:"ok"`
@@ -372,9 +395,9 @@ func TestAgentADBExecParsesCommandBeforeApplyingPolicy(t *testing.T) {
 						if !reflect.DeepEqual(got, tc.args) {
 							t.Fatalf("forwarded args=%q want=%q", got, tc.args)
 						}
-					} else if status != http.StatusBadRequest || payload.OK || payload.Error != "adb_command_not_allowed" || executions.Load() != before {
+					} else if status != http.StatusBadRequest || payload.OK || payload.Error != wantError || executions.Load() != before {
 						t.Fatalf("mcp=%v status=%d error=%q executions=%d", mcp, status, payload.Error, executions.Load()-before)
-					} else if payload.Message != "这里只允许面向当前设备的 ADB 子命令" {
+					} else if payload.Message != wantMessage {
 						t.Fatalf("mcp=%v unexpected public message %q", mcp, payload.Message)
 					}
 				}

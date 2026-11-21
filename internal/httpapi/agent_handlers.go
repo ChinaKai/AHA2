@@ -97,6 +97,10 @@ var blockedADBHostCommands = map[string]bool{
 	"connect": true, "disconnect": true, "pair": true,
 	"kill-server": true, "start-server": true, "devices": true,
 	"mdns": true, "host-features": true,
+	"track-devices": true, "server-status": true, "reconnect": true,
+	// raw forwards arbitrary ADB services, including host services that bypass
+	// the selected device and services such as tcpip otherwise blocked by name.
+	"raw": true,
 	// These are also parsed as server-mode modifiers before device commands.
 	"server": true, "nodaemon": true, "fork-server": true,
 	// tcpip restarts adbd in TCP mode, silently turning a USB or wireless
@@ -192,7 +196,7 @@ func (s *Server) agentADBExec(writer http.ResponseWriter, request *http.Request)
 		writeError(writer, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	if len(payload.Args) > 64 {
+	if len(payload.Args) == 0 || len(payload.Args) > 64 {
 		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "adb_args_invalid", "message": "ADB 参数数量必须在 1 到 64 之间"})
 		return
 	}
