@@ -8,12 +8,14 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"log"
 	"net/http"
 	"net/url"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/domain"
 	mailpkg "github.com/ChinaKai/AHA2/internal/mail"
 	"github.com/ChinaKai/AHA2/internal/store"
@@ -603,7 +605,20 @@ func (s *Server) approveMailMessage(writer http.ResponseWriter, request *http.Re
 		return
 	}
 	s.publishMailEvents(events)
-	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "message": updated, "delivery": delivery})
+	result := map[string]any{"ok": true, "message": updated, "delivery": delivery}
+	// A repeated approval is idempotent and emits no transition, so only the
+	// call that actually moved pending_approval -> queued sends the result.
+	if len(events) > 0 {
+		if notifyErr := s.app.NotifyTaskApprovalResult(ctx, app.TaskApprovalResultInput{
+			TaskID: updated.TaskID, Kind: app.TaskApprovalKindMail, Subject: updated.Subject,
+			ReferenceID: updated.ID, Decision: "approved", Decider: mailOwnerID(request),
+			Reason: payload.Note, At: nowUTC(),
+		}); notifyErr != nil {
+			log.Printf("notify approved mail %s: %v", updated.ID, notifyErr)
+			result["notification_error"] = notifyErr.Error()
+		}
+	}
+	writeJSON(writer, http.StatusOK, result)
 }
 
 func (s *Server) rejectMailMessage(writer http.ResponseWriter, request *http.Request) {
@@ -628,17 +643,42 @@ func (s *Server) rejectMailMessage(writer http.ResponseWriter, request *http.Req
 		return
 	}
 	s.publishMailEvents(events)
+	// Rejection is terminal and has no mail delivery, so the result message is
+	// the only way the initiating Task learns the decision.
+	if notifyErr := s.app.NotifyTaskApprovalResult(request.Context(), app.TaskApprovalResultInput{
+		TaskID: message.TaskID, Kind: app.TaskApprovalKindMail, Subject: message.Subject,
+		ReferenceID: message.ID, Decision: "rejected", Decider: mailOwnerID(request),
+		Reason: reason, At: nowUTC(),
+	}); notifyErr != nil {
+		log.Printf("notify rejected mail %s: %v", message.ID, notifyErr)
+	}
 	s.audit(request, "mail.message.reject", "mail_message", message.ID, map[string]any{"reason": reason})
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (s *Server) cancelMailMessage(writer http.ResponseWriter, request *http.Request) {
+	previous, err := s.store.MailMessage(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeMailStoreFailure(writer, err, "读取邮件消息失败")
+		return
+	}
 	message, events, err := s.store.CancelMailMessage(request.Context(), request.PathValue("id"), mailOwnerID(request), nowUTC())
 	if err != nil {
 		writeMailStoreFailure(writer, err, "取消邮件失败")
 		return
 	}
 	s.publishMailEvents(events)
+	// Cancelling a submitted message is an owner decision about an approval
+	// result. A draft has never entered approval, so it stays silent.
+	if previous.Status != domain.MailMessageDraft {
+		if notifyErr := s.app.NotifyTaskApprovalResult(request.Context(), app.TaskApprovalResultInput{
+			TaskID: message.TaskID, Kind: app.TaskApprovalKindMail, Subject: message.Subject,
+			ReferenceID: message.ID, Decision: "cancelled", Decider: mailOwnerID(request),
+			At: nowUTC(),
+		}); notifyErr != nil {
+			log.Printf("notify cancelled mail %s: %v", message.ID, notifyErr)
+		}
+	}
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "message": message})
 }
 

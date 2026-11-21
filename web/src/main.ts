@@ -231,6 +231,8 @@ interface State extends ModelHealthState {
   taskChannelDestination: ChannelDestination | null | undefined;
   taskChannelState: TaskChannelState | null;
   taskChannelLoading: boolean;
+  taskChannelMemberQuery: string;
+  taskPermissionHistory: boolean;
   selectedTaskAgent: string;
   selectedProject: Project | null;
   dialogProjectID: string;
@@ -765,6 +767,8 @@ const state: State = {
   taskChannelDestination: undefined,
   taskChannelState: null,
   taskChannelLoading: false,
+  taskChannelMemberQuery: "",
+  taskPermissionHistory: false,
   selectedTaskAgent: "main",
   selectedProject: null,
   dialogProjectID: "",
@@ -3832,6 +3836,8 @@ function showTaskLoading(task: Task): void {
   state.taskChannelDestination = undefined;
   state.taskChannelState = null;
   state.taskChannelLoading = false;
+  state.taskChannelMemberQuery = "";
+  state.taskPermissionHistory = false;
   taskChannelLoadVersion++;
   state.taskDetailLoading = true;
   loadingOlderConversation = false;
@@ -3873,7 +3879,7 @@ async function openTask(taskID: string): Promise<void> {
     state.taskConversationLatest = page?.conversation.latest_sequence || 0;
     state.taskEventCursor = detail.event_cursor || 0;
     state.taskContext = null;
-    state.taskTool = state.taskToolPinned === "channel" && (detail.task.read_only || detail.task.channel_instance_id)
+    state.taskTool = state.taskToolPinned === "channel" && !taskChannelRouteEditable(detail) && taskPermissionPendingCount(detail) === 0
       ? ""
       : state.taskToolPinned;
     state.taskDetailLoading = false;
@@ -3925,13 +3931,22 @@ function taskChannelButtonLabel(destination: ChannelDestination | null | undefin
   return `主渠道已连接 · ${kind} · ${destination.instance_name} · ${name}`;
 }
 
+// Pending permission requests ride on the channel toolbar entry; the base
+// channel label stays readable and the count is appended in the same format the
+// removed permissions tool used.
+function taskChannelToolLabel(pending = state.selectedTask ? taskPermissionPendingCount(state.selectedTask) : 0): string {
+  const label = taskChannelButtonLabel(state.taskChannelDestination);
+  if (pending <= 0) return label;
+  return `${label}（${pending > 99 ? "99+" : pending} 条待审批）`;
+}
+
 function updateTaskChannelButton(): void {
   const button = document.querySelector<HTMLButtonElement>('[data-task-tool="channel"]');
   if (!button) return;
   const connected = Boolean(state.taskChannelDestination);
   const label = taskChannelButtonLabel(state.taskChannelDestination);
   button.classList.toggle("connected", connected);
-  button.title = label;
+  button.title = taskChannelToolLabel();
   button.setAttribute("aria-label", label);
 }
 
@@ -5901,14 +5916,38 @@ function taskTakeoverDialog(detail: TaskDetail): string {
   return `<dialog id="task-takeover-dialog" class="wide"><form id="task-takeover-form"><div class="dialog-head"><h2>接管只读 Task</h2><button type="button" data-close class="icon-button" aria-label="${t("common.closeDialog")}">${icon("close")}</button></div><p class="field-help">接管会创建新的本机 Task。请重新选择本机 Workspace，并确认所有设备专属路径和端点。</p><label>标题<input name="title" required value="${escapeHTML(detail.task.title)} (本机)"></label><label>需求<textarea name="request" required>${escapeHTML(detail.task.original_request || detail.task.current_goal || detail.task.title)}</textarea></label><label>本机 Workspace<select name="workspace_id" id="takeover-task-workspace" required>${workspaces.map(item => `<option value="${item.id}">${escapeHTML(item.name)} · ${escapeHTML(item.root_path)}</option>`).join("") || '<option value="">请先为此项目创建本机 Workspace</option>'}</select></label>${runtimeFieldsHTML("takeover-task", state.models, state.codexAccounts)}<div class="two"><label>推理强度<select name="reasoning_effort" id="takeover-task-effort"></select></label><label>文件访问<select name="filesystem"><option value="workspace-write">工作区可写</option><option value="read-only">只读</option><option value="danger-full-access">完全访问</option></select></label></div><div class="two"><label>协作模式<select name="collaboration_mode"><option value="auto" ${detail.task.collaboration_mode === "auto" ? "selected" : ""}>Auto</option><option value="single" ${detail.task.collaboration_mode === "single" ? "selected" : ""}>Single</option></select></label><label>最大 Agent 数<input name="max_agents" type="number" min="1" value="${Number(detail.task.max_agents || 3)}"></label></div><label>审批<select name="approval"><option value="never">无需确认</option><option value="auto">自动批准</option></select></label>${groups ? `<section><h3>本机硬件重绑定</h3>${groups}</section>` : ""}<div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" type="submit" ${workspaces.length ? "" : "disabled"}>创建本机 Task</button></div></form></dialog>`;
 }
 
+// Binding a route needs a local, editable Task; channel-hosted and read-only
+// mirrors still render the approval section, just without the route switcher.
+function taskChannelRouteEditable(detail: TaskDetail | null | undefined): boolean {
+  return Boolean(detail && !detail.task.read_only && !detail.task.channel_instance_id);
+}
+
+function taskChannelMemberSourceLabel(member: ChannelGroupMember): string {
+  if (member.is_self) return "当前渠道机器人";
+  if (member.is_bot) return "渠道已观察机器人";
+  return member.source === "provider" ? "群成员" : "已观察成员";
+}
+
+function taskChannelMemberMatches(member: ChannelGroupMember, query: string): boolean {
+  if (!query) return true;
+  return member.display_name.toLocaleLowerCase().includes(query);
+}
+
 function taskChannelPanelHTML(): string {
+  const detail = state.selectedTask;
+  const approvals = detail ? taskPermissionSectionHtml(detail) : "";
+  // Channel-hosted and read-only mirrors cannot bind a route; the approval
+  // section still renders on its own.
+  if (!taskChannelRouteEditable(detail)) {
+    return `<div class="task-channel-tool">${approvals}</div>`;
+  }
   if (state.taskChannelLoading) {
-    return `<div class="ctx-loading">${icon("spinner", true)}正在读取可用渠道...</div>`;
+    return `<div class="task-channel-tool"><div class="ctx-loading">${icon("spinner", true)}正在读取可用渠道...</div>${approvals}</div>`;
   }
   const result = state.taskChannelState;
-  const taskID = state.selectedTask?.task.id || "";
+  const taskID = detail?.task.id || "";
   if (!result) {
-    return `<div class="task-channel-empty"><strong>渠道信息尚未加载</strong><button type="button" id="reload-task-channel">${icon("refresh")}重新加载</button></div>`;
+    return `<div class="task-channel-tool"><div class="task-channel-empty"><strong>渠道信息尚未加载</strong><button type="button" id="reload-task-channel">${icon("refresh")}重新加载</button></div>${approvals}</div>`;
   }
   const current = result.route;
   const currentDestination = current ? result.destinations.find(item => item.conversation_id === current.conversation_id) : undefined;
@@ -5926,36 +5965,58 @@ function taskChannelPanelHTML(): string {
     ${current ? `<button type="button" id="disconnect-task-channel" class="icon-button danger-quiet" title="解除主渠道" aria-label="解除主渠道">${icon("close")}</button>` : ""}
   </form>`;
   if (!current || !currentDestination) {
-    return `<div class="task-channel-tool">${switcher}<div class="task-channel-empty"><strong>未连接主渠道</strong><p>先在上方选择已登记的私聊或群聊。每个 Task 只能连接一个主渠道。</p></div></div>`;
+    return `<div class="task-channel-tool">${switcher}<div class="task-channel-empty"><strong>未连接主渠道</strong><p>先在上方选择已登记的私聊或群聊。每个 Task 只能连接一个主渠道。</p></div>${approvals}</div>`;
   }
   if (currentDestination.endpoint_kind !== "group_digital_human") {
-    return `<div class="task-channel-tool">${switcher}<section class="task-channel-private"><span class="channel-route-icon">${icon("bot")}</span><div><strong>${escapeHTML(currentDestination.display_name || "Owner 私聊")}</strong><small>${escapeHTML(currentDestination.instance_name)} · 私聊主渠道</small></div></section></div>`;
+    return `<div class="task-channel-tool">${switcher}<section class="task-channel-private"><span class="channel-route-icon">${icon("bot")}</span><div><strong>${escapeHTML(currentDestination.display_name || "Owner 私聊")}</strong><small>${escapeHTML(currentDestination.instance_name)} · 私聊主渠道</small></div></section>${approvals}</div>`;
   }
   const selected = new Map(result.contacts.map(contact => [contact.identity_link_id, contact]));
+  const query = state.taskChannelMemberQuery.trim().toLocaleLowerCase();
   const memberRows = result.members.map(member => {
     const contact = selected.get(member.identity_link_id);
-    return `<label class="task-channel-member ${member.is_bot ? "bot" : ""}">
+    const hidden = !taskChannelMemberMatches(member, query);
+    return `<label class="task-channel-member ${member.is_bot ? "bot" : ""} ${member.is_self ? "self" : ""}" data-member-name="${escapeHTML(member.display_name)}" ${hidden ? "hidden" : ""}>
       <input type="checkbox" name="contact_id" value="${escapeHTML(member.identity_link_id)}" data-member-name="${escapeHTML(member.display_name)}" data-member-bot="${member.is_bot}" data-member-role="${escapeHTML(contact?.collaboration_role || "")}" ${member.is_self ? "disabled" : ""} ${contact ? "checked" : ""}>
-      <span>${icon(member.is_bot ? "bot" : "user")}<span><strong>${escapeHTML(member.display_name)}</strong><small>${member.is_self ? "当前渠道机器人" : member.is_bot ? "渠道已观察机器人" : member.source === "provider" ? "群成员" : "已观察成员"}</small></span></span>
+      <span class="task-channel-member-text"><strong>${escapeHTML(member.display_name)}</strong><small class="task-channel-member-tag">${taskChannelMemberSourceLabel(member)}</small></span>
     </label>`;
   }).join("");
   const selectedRows = result.contacts.map(contact => taskChannelSelectedContactHTML(contact.identity_link_id, contact.display_name, contact.is_bot, contact.collaboration_role || "")).join("");
+  const memberEmpty = result.members.length
+    ? `<div class="task-channel-member-empty empty-state" ${query ? "" : "hidden"}>没有匹配的成员</div>`
+    : '<div class="empty-state">暂无成员，点击“同步群成员”读取。</div>';
   return `<div class="task-channel-tool">
     ${switcher}
     <div class="task-channel-group-head"><div><strong>${escapeHTML(currentDestination.display_name || "未命名群聊")}</strong><small>${escapeHTML(currentDestination.instance_name)} · ${result.members.length} 名已登记成员</small></div><button type="button" id="refresh-task-channel-members">${icon("refresh")}同步群成员</button></div>
     <form id="task-channel-contacts-form">
       <div class="task-channel-people">
-        <section><header><strong>群聊成员</strong><small>勾选加入联调</small></header><div class="task-channel-member-list">${memberRows || '<div class="empty-state">暂无成员，点击“同步群成员”读取。</div>'}</div></section>
-        <section><header><strong>可 @ 联调人</strong><small>Agent 只会看到这里的人</small></header><div class="task-channel-contact-list" data-task-channel-selected>${selectedRows || '<div class="empty-state">尚未选择联调人</div>'}</div></section>
+        <section class="task-channel-members-section">
+          <header><strong>群聊成员</strong><small>勾选加入联调</small></header>
+          <div class="task-channel-member-tools">
+            <label class="task-channel-member-search"><span class="visually-hidden">按姓名搜索成员</span><input id="task-channel-member-search" type="search" placeholder="按姓名搜索" value="${escapeHTML(state.taskChannelMemberQuery)}" autocomplete="off"></label>
+            <button type="button" id="task-channel-select-all" class="task-channel-member-action">全选</button>
+            <button type="button" id="task-channel-clear" class="task-channel-member-action">清空</button>
+            <small id="task-channel-member-count" class="task-channel-member-count" aria-live="polite">已选 ${result.contacts.length} / 共 ${result.members.length}</small>
+          </div>
+          <div class="task-channel-member-list" data-task-channel-member-list>${memberRows}${memberEmpty}</div>
+        </section>
+        <section class="task-channel-contacts-section">
+          <header><strong>可 @ 联调人</strong><small>Agent 只会看到这里的人</small></header>
+          <div class="task-channel-contact-list" data-task-channel-selected>${selectedRows || '<div class="empty-state">尚未选择联调人</div>'}</div>
+        </section>
       </div>
       <datalist id="task-channel-role-options"><option value="APP"><option value="云端"><option value="固件"><option value="测试"><option value="产品"></datalist>
       <footer><small>群成员来自渠道同步；观察其他机器人时，请在同一条群消息里同时 @ 当前渠道机器人和目标机器人。</small><button type="submit" class="primary">${icon("save")}保存联调人</button></footer>
     </form>
+    ${approvals}
   </div>`;
 }
 
 function taskChannelSelectedContactHTML(identityID: string, name: string, isBot: boolean, role: string): string {
-  return `<div class="task-channel-contact" data-contact-id="${escapeHTML(identityID)}"><span>${icon(isBot ? "bot" : "user")}<strong>${escapeHTML(name)}</strong></span><label>身份<input name="role_${escapeHTML(identityID)}" list="task-channel-role-options" maxlength="40" value="${escapeHTML(role)}" placeholder="APP / 云端 / 固件"></label></div>`;
+  return `<div class="task-channel-contact" data-contact-id="${escapeHTML(identityID)}">
+    <span class="task-channel-contact-person">${icon(isBot ? "bot" : "user")}<strong>${escapeHTML(name)}</strong></span>
+    <label class="task-channel-contact-role"><span class="visually-hidden">身份</span><input name="role_${escapeHTML(identityID)}" list="task-channel-role-options" maxlength="40" value="${escapeHTML(role)}" placeholder="APP / 云端 / 固件" aria-label="身份"></label>
+    <button type="button" class="icon-button task-channel-contact-remove" data-remove-task-contact="${escapeHTML(identityID)}" title="移除联调人" aria-label="移除联调人">${icon("close")}</button>
+  </div>`;
 }
 
 async function reloadTaskChannelState(renderAfter = true): Promise<void> {
@@ -6649,14 +6710,22 @@ function taskPermissionRiskLabel(risk?: string): string {
   return risk || "";
 }
 
+function taskPermissionStatusLabel(status: string): string {
+  if (status === "approved") return "已批准";
+  if (status === "rejected") return "已拒绝";
+  if (status === "expired") return "已过期";
+  return "待审批";
+}
+
 // Requests are collapsed rows so a long history does not take over the panel.
 // Expanding one shows the full request and, when it is still pending, the
-// Owner decision buttons.
+// Owner decision buttons. Every row is a one-line summary: applicant, action,
+// status. The action ellipsizes instead of widening the panel.
 function taskPermissionCardsHtml(items: TaskPermissionRequest[]): string {
-  return visibleTaskPermissionRequests(items).slice(0, 12).map(item => {
+  return items.map(item => {
     const pending = item.status === "pending";
-    const status = item.status === "approved" ? "已批准" : item.status === "rejected" ? "已拒绝" : item.status === "expired" ? "已过期" : "待审批";
-    const statusClass = item.status === "approved" ? "approved" : item.status === "rejected" ? "rejected" : item.status === "expired" ? "expired" : "pending";
+    const status = taskPermissionStatusLabel(item.status);
+    const statusClass = pending ? "pending" : item.status;
     const applicant = item.applicant_name || "群成员";
     const action = item.action || "未填写动作";
     const risk = taskPermissionRiskLabel(item.risk);
@@ -6665,47 +6734,56 @@ function taskPermissionCardsHtml(items: TaskPermissionRequest[]): string {
       : "";
     return `<details class="task-permission-item ${pending ? "pending" : ""}" data-task-permission-request="${escapeHTML(item.id)}">
       <summary>
-        <span class="task-permission-summary"><strong>${escapeHTML(applicant)}${item.applicant_is_bot ? "（Bot）" : ""}</strong><span class="task-permission-summary-action">${escapeHTML(action)}</span></span>
+        <span class="task-permission-summary"><strong>${escapeHTML(applicant)}</strong>${item.applicant_is_bot ? '<span class="task-permission-bot">Bot</span>' : ""}<span class="task-permission-summary-action">${escapeHTML(action)}</span></span>
         <span class="task-permission-status ${statusClass}">${escapeHTML(status)}</span>
       </summary>
       <div class="task-permission-detail">
-        <p><strong>动作</strong><span>${escapeHTML(action)}</span></p>
-        ${item.scope ? `<p><strong>范围</strong><span>${escapeHTML(item.scope)}</span></p>` : ""}
-        ${item.reason ? `<p><strong>原因</strong><span>${escapeHTML(item.reason)}</span></p>` : ""}
+        <p><strong>范围</strong><span>${escapeHTML(item.scope || "—")}</span></p>
+        <p><strong>原因</strong><span>${escapeHTML(item.reason || "—")}</span></p>
         ${risk ? `<p><strong>风险</strong><span>${escapeHTML(risk)}</span></p>` : ""}
-        ${item.decision_reason ? `<p><strong>审批说明</strong><span>${escapeHTML(item.decision_reason)}</span></p>` : ""}
-        <p><strong>申请时间</strong><span>${escapeHTML(formatDateTime(item.created_at))}${item.decider_name ? ` · ${escapeHTML(item.decider_name)}` : ""}</span></p>
+        <p><strong>申请时间</strong><span>${escapeHTML(formatDateTime(item.created_at))}</span></p>
+        <p><strong>处理人</strong><span>${escapeHTML(item.decider_name || "—")}</span></p>
+        <p><strong>处理说明</strong><span>${escapeHTML(item.decision_reason || "—")}</span></p>
         ${actions}
       </div>
     </details>`;
   }).join("");
 }
 
-// The toolbar panel stays reachable even when there are no requests, so the
-// entry point never disappears from the Task toolbar.
-function taskPermissionPanelHtml(detail: TaskDetail): string {
-  const cards = taskPermissionCardsHtml(detail.permission_requests || []);
-  return `<section class="task-permission-requests panel-permissions"><div class="task-permission-head"><strong>权限申请</strong><small>点击申请查看详情；批准只对这一次动作有效。</small></div>${cards || `<div class="task-permission-empty">当前没有权限申请记录。</div>`}</section>`;
+// The channel page owns permission requests. It defaults to pending work; the
+// history toggle narrows the same list to processed records. It renders even
+// when the Task has no channel binding, so approvals never become unreachable.
+function taskPermissionSectionHtml(detail: TaskDetail): string {
+  const requests = visibleTaskPermissionRequests(detail.permission_requests || []);
+  const pending = requests.filter(item => item.status === "pending");
+  const history = state.taskPermissionHistory;
+  const items = history
+    ? requests.filter(item => item.status !== "pending").slice(0, 50)
+    : pending.slice(0, 20);
+  const empty = history ? "没有已处理的权限申请。" : "当前没有待审批的权限申请。";
+  const summary = pending.length ? `${pending.length} 条待审批` : "没有待审批";
+  const toggle = `<button type="button" id="toggle-task-permission-history" class="task-permission-history-toggle ${history ? "active" : ""}" aria-pressed="${history}">${history ? "只看待审批" : "查看历史"}</button>`;
+  return `<section id="task-channel-permissions" class="task-permission-requests task-channel-permissions ${pending.length ? "has-pending" : ""}" data-task-permission-history="${history}">
+    <div class="task-permission-head"><div class="task-permission-head-title"><strong>权限申请</strong><small>${summary}</small></div>${toggle}</div>
+    ${items.length ? taskPermissionCardsHtml(items) : `<div class="task-permission-empty">${empty}</div>`}
+  </section>`;
 }
 
-// SSE refreshes only patch the conversation. Keep the toolbar badge in sync so
-// a request created while the Task is open is visible without reloading.
+// SSE refreshes only patch the conversation. Keep the channel toolbar badge in
+// sync so a request created while the Task is open is visible without reloading.
 function syncTaskPermissionIndicators(detail: TaskDetail): void {
-  const button = document.querySelector<HTMLButtonElement>('[data-task-tool="permissions"]');
+  const button = document.querySelector<HTMLButtonElement>('[data-task-tool="channel"]');
   if (!button) return;
   const pending = taskPermissionPendingCount(detail);
   const badge = button.querySelector<HTMLElement>(".task-tool-badge");
+  const label = taskChannelToolLabel(pending);
+  button.classList.toggle("has-pending", pending > 0);
+  button.title = label;
+  button.setAttribute("aria-label", taskChannelButtonLabel(state.taskChannelDestination));
   if (pending > 0) {
-    const label = `权限申请（${pending} 条待审批）`;
-    button.classList.add("has-pending");
-    button.title = label;
-    button.setAttribute("aria-label", label);
     if (badge) badge.textContent = pending > 99 ? "99+" : String(pending);
     else button.insertAdjacentHTML("beforeend", `<span class="task-tool-badge">${pending > 99 ? "99+" : pending}</span>`);
   } else {
-    button.classList.remove("has-pending");
-    button.title = "权限申请";
-    button.setAttribute("aria-label", "权限申请");
     badge?.remove();
   }
 }
@@ -6789,12 +6867,15 @@ function taskDetailView(detail: TaskDetail): string {
     ${messageComposerOpenTag(detail, {runtimeError})}${messageComposerHtml(detail, {activeTurn: Boolean(activeTurn), runtimeError})}</${messageComposerElement(detail)}>
   </section>`;
   const toolLayout = state.taskTool ? ` task-tool-open task-tool-${state.taskToolMode}` : "";
-  const channelVisible = !readOnly && !detail.task.channel_instance_id;
+  // The channel tool owns pending approvals now. Keep it reachable for
+  // channel-hosted or read-only Tasks that still have something to decide,
+  // even though those Tasks cannot bind a route here.
+  const channelVisible = (!readOnly && !detail.task.channel_instance_id) || taskPermissionPendingCount(detail) > 0;
   return shell(`<section class="task-screen">
     <header class="task-head"><button id="back-tasks">←</button><div class="task-title-block"><h1><span class="task-code">${escapeHTML(detail.task.code || "")}</span><span class="task-title-text">${escapeHTML(detail.task.title)}</span></h1><div class="task-head-subline"><span class="task-head-meta" title="${escapeHTML(taskMeta)}">${escapeHTML(taskMeta)}</span><span id="task-detail-status" class="status ${statusClass(detail.task.status)}">${statusLabel(detail.task.status)}</span><span class="task-branch">${escapeHTML(detail.task.task_branch || "")}</span><span id="task-review-slot">${renderTaskReviewDecision(detail.task, tr)}</span></div></div><div class="actions task-tool-actions">${renderTaskToolButtons(state.taskTool, {includeChannel: channelVisible, channelConnected: Boolean(state.taskChannelDestination), channelLabel: taskChannelButtonLabel(state.taskChannelDestination), pendingPermissions: taskPermissionPendingCount(detail), pendingMail: taskMailPendingCount()})}</div></header>
     <div class="task-grid${toolLayout}" style="--task-tool-width:${state.taskToolWidth}%">
       ${chat}
-      ${renderTaskToolPanel(state.taskTool, detail, state.selectedTaskAgent, taskCtxHtml(), state.taskToolMode, taskChannelPanelHTML(), state.taskToolPinned === state.taskTool, taskPermissionPanelHtml(detail), taskMailPanelHTML(detail))}
+      ${renderTaskToolPanel(state.taskTool, detail, state.selectedTaskAgent, taskCtxHtml(), state.taskToolMode, taskChannelPanelHTML(), state.taskToolPinned === state.taskTool, taskMailPanelHTML(detail))}
     </div>
     ${renderAgentConfigDialog(detail, state.selectedTaskAgent, state.models, state.codexAccounts, availableTaskSkills(detail.task.project_id, detail.task.skill_ids || []), state.mcpServers)}${taskTakeoverDialog(detail)}<div id="task-screen-dialogs">${completed ? reopenTaskDialog(detail) : ""}</div>
   </section>`, {taskShell: true, taskBand: taskBandHTML()});
@@ -7139,10 +7220,9 @@ function updateTaskLiveRegions(): void {
   } else if (toolBody && state.taskTool === "browser") {
     refreshDesktopPanel(detail, setMessage);
   } else if (toolBody && state.taskTool) {
-    replaceRegionHTML(toolBody, renderTaskToolContent(state.taskTool, detail, taskCtxHtml(), taskChannelPanelHTML(), taskPermissionPanelHtml(detail), taskMailPanelHTML(detail)));
+    replaceRegionHTML(toolBody, renderTaskToolContent(state.taskTool, detail, taskCtxHtml(), taskChannelPanelHTML(), taskMailPanelHTML(detail)));
     bindSessionActions();
     if (state.taskTool === "channel") bindTaskChannelPanel();
-    if (state.taskTool === "permissions") bindTaskPermissionActions(toolBody);
     if (state.taskTool === "mail") bindTaskMailPanel(detail, state.taskMailOptions, taskMailActions());
   }
   const count = document.querySelector<HTMLElement>("#conversation-filter-loaded");
@@ -8607,7 +8687,9 @@ function bindMessageComposer(): void {
   }));
   bindConversationLiveControls();
   document.querySelectorAll<HTMLElement>("[data-task-tool]").forEach(button => button.addEventListener("click", async () => {
-    const tool = button.dataset.taskTool as TaskTool;
+    // Old layouts could still carry a permissions entry; it resolves to the
+    // channel page that now hosts the approval section.
+    const tool = (button.dataset.taskTool === "permissions" ? "channel" : button.dataset.taskTool) as TaskTool;
     if (state.taskTool === "hardware") stopHardwarePanel();
     if (state.taskTool === "browser") stopDesktopPanel();
     if (state.taskTool === tool) {
@@ -8624,7 +8706,8 @@ function bindMessageComposer(): void {
       state.taskToolPinned = tool;
       persistTaskToolLayout();
     }
-    if (tool === "permissions") {
+    if (tool === "channel") {
+      // The channel page shows approvals, so refresh them with the route data.
       if (state.selectedTask) {
         try {
           const detail = await api.task(state.selectedTask.task.id);
@@ -8635,14 +8718,14 @@ function bindMessageComposer(): void {
           setMessage("error", error instanceof Error ? error.message : String(error));
         }
       }
-      render();
-      return;
-    }
-    if (tool === "channel") {
-      try {
-        await reloadTaskChannelState();
-      } catch (error) {
-        setMessage("error", error instanceof Error ? error.message : String(error));
+      if (state.selectedTask && taskChannelRouteEditable(state.selectedTask)) {
+        try {
+          await reloadTaskChannelState();
+        } catch (error) {
+          setMessage("error", error instanceof Error ? error.message : String(error));
+        }
+      } else {
+        render();
       }
       return;
     }
@@ -8691,7 +8774,6 @@ function bindMessageComposer(): void {
 
 function bindTaskToolsAndPanels(): void {
   bindTaskToolLayout();
-  bindTaskPermissionActions();
   if (state.taskTool === "mail" && state.selectedTask) bindTaskMailPanel(state.selectedTask, state.taskMailOptions, taskMailActions());
   if (state.taskTool === "hardware" && state.selectedTask) bindHardwarePanel(state.selectedTask, setMessage);
   if (state.taskTool === "browser" && state.selectedTask) bindDesktopPanel(state.selectedTask, setMessage);
@@ -8729,19 +8811,48 @@ function bindSessionActions(): void {
       await refreshTaskRuntime(state.selectedTask!.task.id);
       const content = document.querySelector<HTMLElement>("#task-tool-panel-body");
       if (content) {
-        content.innerHTML = renderTaskToolContent(state.taskTool, state.selectedTask!, taskCtxHtml(), taskChannelPanelHTML(), taskPermissionPanelHtml(state.selectedTask!), taskMailPanelHTML(state.selectedTask!));
+        content.innerHTML = renderTaskToolContent(state.taskTool, state.selectedTask!, taskCtxHtml(), taskChannelPanelHTML(), taskMailPanelHTML(state.selectedTask!));
         bindSessionActions();
-        if (state.taskTool === "permissions") bindTaskPermissionActions(content);
+        if (state.taskTool === "channel") bindTaskChannelPanel();
         if (state.taskTool === "mail") bindTaskMailPanel(state.selectedTask!, state.taskMailOptions, taskMailActions());
       }
     });
   }));
 }
 
+function syncTaskChannelMemberCounts(): void {
+  const form = document.querySelector<HTMLFormElement>("#task-channel-contacts-form");
+  const count = form?.querySelector<HTMLElement>("#task-channel-member-count");
+  if (!form || !count) return;
+  // The count stays a whole-list number: filtering only hides rows and never
+  // clears a selected member. Select all/clear act on the filtered rows only.
+  const total = form.querySelectorAll<HTMLInputElement>('input[name="contact_id"]').length;
+  const checked = form.querySelectorAll<HTMLInputElement>('input[name="contact_id"]:checked').length;
+  count.textContent = `已选 ${checked} / 共 ${total}`;
+}
+
+// Filtering is purely visual so typing in the search box never re-renders the
+// form and never drops an edited role or an in-flight checkbox choice.
+function applyTaskChannelMemberFilter(): void {
+  const form = document.querySelector<HTMLFormElement>("#task-channel-contacts-form");
+  if (!form) return;
+  const query = state.taskChannelMemberQuery.trim().toLocaleLowerCase();
+  let visible = 0;
+  form.querySelectorAll<HTMLElement>(".task-channel-member").forEach(chip => {
+    const name = (chip.dataset.memberName || "").toLocaleLowerCase();
+    const hidden = Boolean(query) && !name.includes(query);
+    chip.hidden = hidden;
+    if (!hidden) visible += 1;
+  });
+  const empty = form.querySelector<HTMLElement>(".task-channel-member-empty");
+  if (empty) empty.hidden = !query || visible > 0;
+}
+
 function syncTaskChannelContactSelection(): void {
   const form = document.querySelector<HTMLFormElement>("#task-channel-contacts-form");
   const selected = form?.querySelector<HTMLElement>("[data-task-channel-selected]");
   if (!form || !selected) return;
+  // Preserve whatever the owner typed before rebuilding the rows.
   selected.querySelectorAll<HTMLInputElement>('input[name^="role_"]').forEach(input => {
     const identityID = input.name.slice("role_".length);
     const checkbox = Array.from(form.querySelectorAll<HTMLInputElement>('input[name="contact_id"]')).find(item => item.value === identityID);
@@ -8761,6 +8872,42 @@ function syncTaskChannelContactSelection(): void {
     const checkbox = Array.from(form.querySelectorAll<HTMLInputElement>('input[name="contact_id"]')).find(item => item.value === identityID);
     if (checkbox) checkbox.dataset.memberRole = input.value;
   }));
+  selected.querySelectorAll<HTMLButtonElement>("[data-remove-task-contact]").forEach(button => button.addEventListener("click", () => {
+    const identityID = button.dataset.removeTaskContact || "";
+    const checkbox = Array.from(form.querySelectorAll<HTMLInputElement>('input[name="contact_id"]')).find(item => item.value === identityID);
+    if (!checkbox || !checkbox.checked) return;
+    // Removing a contact row is the same action as unticking its member chip.
+    checkbox.checked = false;
+    checkbox.dispatchEvent(new Event("change", {bubbles: true}));
+  }));
+  syncTaskChannelMemberCounts();
+}
+
+// Re-renders only the approval section. Deciding a request or switching to
+// history must not redraw the member form and discard unsaved role edits.
+function refreshTaskPermissionSection(): void {
+  const detail = state.selectedTask;
+  const current = document.querySelector<HTMLElement>("#task-channel-permissions");
+  if (!detail || !current) return;
+  const template = document.createElement("template");
+  template.innerHTML = taskPermissionSectionHtml(detail);
+  const next = template.content.firstElementChild;
+  if (!next) return;
+  current.replaceWith(next);
+  bindTaskPermissionSection(next);
+  syncTaskPermissionIndicators(detail);
+}
+
+function bindTaskPermissionHistoryToggle(): void {
+  document.querySelector<HTMLButtonElement>("#toggle-task-permission-history")?.addEventListener("click", () => {
+    state.taskPermissionHistory = !state.taskPermissionHistory;
+    refreshTaskPermissionSection();
+  });
+}
+
+function bindTaskPermissionSection(root: ParentNode = document): void {
+  bindTaskPermissionActions(root);
+  bindTaskPermissionHistoryToggle();
 }
 
 function bindTaskPermissionActions(root: ParentNode = document): void {
@@ -8782,7 +8929,7 @@ function bindTaskPermissionActions(root: ParentNode = document): void {
           if (index >= 0) requests[index] = result.request;
           else requests.unshift(result.request);
           state.selectedTask.permission_requests = requests;
-          render();
+          refreshTaskPermissionSection();
         }
       } catch (error) {
         button.disabled = false;
@@ -8837,6 +8984,27 @@ function bindTaskChannelPanel(): void {
   document.querySelectorAll<HTMLInputElement>('#task-channel-contacts-form input[name="contact_id"]').forEach(input =>
     input.addEventListener("change", syncTaskChannelContactSelection),
   );
+  document.querySelector<HTMLInputElement>("#task-channel-member-search")?.addEventListener("input", event => {
+    state.taskChannelMemberQuery = (event.currentTarget as HTMLInputElement).value;
+    applyTaskChannelMemberFilter();
+  });
+  document.querySelector<HTMLButtonElement>("#task-channel-select-all")?.addEventListener("click", () => {
+    const form = document.querySelector<HTMLFormElement>("#task-channel-contacts-form");
+    if (!form) return;
+    // Only the rows currently visible under the search filter are affected.
+    form.querySelectorAll<HTMLInputElement>('.task-channel-member:not([hidden]) input[name="contact_id"]:not(:disabled)').forEach(input => {
+      input.checked = true;
+    });
+    syncTaskChannelContactSelection();
+  });
+  document.querySelector<HTMLButtonElement>("#task-channel-clear")?.addEventListener("click", () => {
+    const form = document.querySelector<HTMLFormElement>("#task-channel-contacts-form");
+    if (!form) return;
+    form.querySelectorAll<HTMLInputElement>('.task-channel-member:not([hidden]) input[name="contact_id"]:not(:disabled)').forEach(input => {
+      input.checked = false;
+    });
+    syncTaskChannelContactSelection();
+  });
   document.querySelector<HTMLFormElement>("#task-channel-contacts-form")?.addEventListener("submit", event => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -8862,6 +9030,7 @@ function bindTaskChannelPanel(): void {
       form.querySelector("footer")?.before(feedback);
     });
   });
+  bindTaskPermissionSection();
 }
 
 function bindForm(selector: string, action: (form: FormData) => Promise<void>, pendingLabel = "提交中", refreshAfter = true): void {

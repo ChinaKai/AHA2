@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -76,7 +77,22 @@ func (s *Service) CreateTaskPermissionRequest(ctx context.Context, input TaskPer
 }
 
 func (s *Service) TaskPermissionRequests(ctx context.Context, taskID string, limit int) ([]domain.TaskPermissionRequest, error) {
-	return s.store.ListTaskPermissionRequests(ctx, strings.TrimSpace(taskID), limit)
+	taskID = strings.TrimSpace(taskID)
+	// Expiry is a real terminal decision, not a silent list refresh. The store
+	// returns only rows that this call changed, so the result message is sent
+	// exactly once even when several readers see the same expired request.
+	if expired, err := s.store.ExpireTaskPermissionRequests(ctx, taskID, s.now().UTC()); err == nil {
+		for _, item := range expired {
+			if notifyErr := s.NotifyTaskApprovalResult(ctx, TaskApprovalResultInput{
+				TaskID: item.TaskID, Kind: TaskApprovalKindChannelPermission,
+				Subject: item.Action, ReferenceID: item.ID, Decision: "expired",
+				Decider: "owner", At: item.UpdatedAt,
+			}); notifyErr != nil {
+				log.Printf("notify expired permission request %s: %v", item.ID, notifyErr)
+			}
+		}
+	}
+	return s.store.ListTaskPermissionRequests(ctx, taskID, limit)
 }
 
 // ResolveTaskPermissionRequest consumes a pending request. The caller must

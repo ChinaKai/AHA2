@@ -100,7 +100,9 @@ func newMailAPIFixtureWith(t *testing.T, mutate func(*Config)) *mailAPIFixture {
 
 func (f *mailAPIFixture) rawDB() *sql.DB {
 	f.t.Helper()
-	raw, err := sql.Open("sqlite", f.dbPath)
+	// Approval results can start a Turn in the background; the raw connection
+	// must wait for the single SQLite writer instead of failing with BUSY.
+	raw, err := sql.Open("sqlite", f.dbPath+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		f.t.Fatal(err)
 	}
