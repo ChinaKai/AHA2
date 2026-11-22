@@ -1,0 +1,132 @@
+Task 753 validation results
+Source head: 0d70ee4e93b6983772e9c3b5091cea5cc1048ceb
+Commands and scope are recorded in review-packet.md. Initial red baseline failures and the corrected test-entry failure are retained here without truncation.
+
+===== baseline.log; exit=1 =====
+--- FAIL: TestBrowserHardwareMCPInjectionUsesIndependentTriggers (8.29s)
+    agent_browser_hardware_mcp_test.go:260: conversation_host batch browser server=false want=true servers=[]backend.MCPServer{backend.MCPServer{Name:"aha2_core", Transport:"http", URL:"http://127.0.0.1:8766/api/v1/agent/core/mcp", URLFromEnv:"AHA2_AGENT_API_URL", URLPath:"/api/v1/agent/core/mcp", Command:"", Args:[]string(nil), Env:map[string]string(nil), Headers:map[string]string(nil), BearerTokenEnv:"AHA2_AGENT_API_TOKEN"}}
+--- FAIL: TestTaskRouteAddsNarrowChannelMCP (9.23s)
+    --- FAIL: TestTaskRouteAddsNarrowChannelMCP/group (3.52s)
+        mcp_runtime_test.go:152: active route revoked aha2_hardware
+    --- FAIL: TestTaskRouteAddsNarrowChannelMCP/private (5.71s)
+        mcp_runtime_test.go:152: active route revoked aha2_hardware
+FAIL
+FAIL	github.com/ChinaKai/AHA2/internal/app	17.523s
+--- FAIL: TestHardwareChannelGrantHTTPAndMCP (62.13s)
+    --- FAIL: TestHardwareChannelGrantHTTPAndMCP/active_route (6.94s)
+        agent_control_channel_test.go:88: hardware capabilities=map[browser:false browser_mcp:false browser_mcp_write:false channel_outreach:false channel_reply:false channel_reply_decision:true clone_hardware:true collaboration:false core_mcp:true core_mcp_write:true desktop:false desktop_mcp:false desktop_mcp_write:false hardware:true hardware_mcp:false hardware_mcp_write:false knowledge_contribute_bound:false knowledge_feedback:true knowledge_mcp:false knowledge_publish:true knowledge_read:true live_inbox_wait:true managed_process:true memory_update:true progress:true skill_create:true skill_create_global:true skill_update:true task_create:true workspace_mcp:false workspace_mcp_write:false workspace_read:true] status=200
+    --- FAIL: TestHardwareChannelGrantHTTPAndMCP/channel_batch (3.73s)
+        agent_control_channel_test.go:88: hardware capabilities=map[browser:false browser_mcp:false browser_mcp_write:false channel_outreach:false channel_reply:false channel_reply_decision:false clone_hardware:true collaboration:false core_mcp:true core_mcp_write:true desktop:false desktop_mcp:false desktop_mcp_write:false hardware:true hardware_mcp:false hardware_mcp_write:false knowledge_contribute_bound:false knowledge_feedback:true knowledge_mcp:false knowledge_publish:true knowledge_read:true live_inbox_wait:true managed_process:true memory_update:true progress:true skill_create:true skill_create_global:true skill_update:true task_create:true workspace_mcp:false workspace_mcp_write:false workspace_read:true] status=200
+    --- FAIL: TestHardwareChannelGrantHTTPAndMCP/plain_with_route (6.54s)
+        agent_control_channel_test.go:88: hardware capabilities=map[browser:false browser_mcp:false browser_mcp_write:false channel_outreach:false channel_reply:false channel_reply_decision:true clone_hardware:true collaboration:false core_mcp:true core_mcp_write:true desktop:false desktop_mcp:false desktop_mcp_write:false hardware:true hardware_mcp:false hardware_mcp_write:false knowledge_contribute_bound:false knowledge_feedback:true knowledge_mcp:false knowledge_publish:true knowledge_read:true live_inbox_wait:true managed_process:true memory_update:true progress:true skill_create:true skill_create_global:true skill_update:true task_create:true workspace_mcp:false workspace_mcp_write:false workspace_read:true] status=200
+    --- FAIL: TestHardwareChannelGrantHTTPAndMCP/mixed_batch (44.92s)
+        agent_control_channel_test.go:88: hardware capabilities=map[browser:false browser_mcp:false browser_mcp_write:false channel_outreach:false channel_reply:false channel_reply_decision:false clone_hardware:true collaboration:false core_mcp:true core_mcp_write:true desktop:false desktop_mcp:false desktop_mcp_write:false hardware:true hardware_mcp:false hardware_mcp_write:false knowledge_contribute_bound:false knowledge_feedback:true knowledge_mcp:false knowledge_publish:true knowledge_read:true live_inbox_wait:true managed_process:true memory_update:true progress:true skill_create:true skill_create_global:true skill_update:true task_create:true workspace_mcp:false workspace_mcp_write:false workspace_read:true] status=200
+--- FAIL: TestBrowserChannelGrantHTTPAndMCP (87.13s)
+    --- FAIL: TestBrowserChannelGrantHTTPAndMCP/active_route (45.81s)
+        agent_control_channel_test.go:143: browser capabilities=map[browser:true browser_mcp:false browser_mcp_write:false channel_outreach:false channel_reply:false channel_reply_decision:true clone_hardware:true collaboration:false core_mcp:true core_mcp_write:true desktop:false desktop_mcp:false desktop_mcp_write:false hardware:true hardware_mcp:false hardware_mcp_write:false knowledge_contribute_bound:false knowledge_feedback:true knowledge_mcp:false knowledge_publish:true knowledge_read:true live_inbox_wait:true managed_process:true memory_update:true progress:true skill_create:true skill_create_global:true skill_update:true task_create:true workspace_mcp:false workspace_mcp_write:false workspace_read:true] status=200
+    --- FAIL: TestBrowserChannelGrantHTTPAndMCP/channel_batch (24.21s)
+        agent_control_channel_test.go:143: browser capabilities=map[browser:true browser_mcp:false browser_mcp_write:false channel_outreach:false channel_reply:false channel_reply_decision:false clone_hardware:true collaboration:false core_mcp:true core_mcp_write:true desktop:false desktop_mcp:false desktop_mcp_write:false hardware:true hardware_mcp:false hardware_mcp_write:false knowledge_contribute_bound:false knowledge_feedback:true knowledge_mcp:false knowledge_publish:true knowledge_read:true live_inbox_wait:true managed_process:true memory_update:true progress:true skill_create:true skill_create_global:true skill_update:true task_create:true workspace_mcp:false workspace_mcp_write:false workspace_read:true] status=200
+    --- FAIL: TestBrowserChannelGrantHTTPAndMCP/plain_with_route (8.76s)
+        agent_control_channel_test.go:143: browser capabilities=map[browser:true browser_mcp:false browser_mcp_write:false channel_outreach:false channel_reply:false channel_reply_decision:true clone_hardware:true collaboration:false core_mcp:true core_mcp_write:true desktop:false desktop_mcp:false desktop_mcp_write:false hardware:true hardware_mcp:false hardware_mcp_write:false knowledge_contribute_bound:false knowledge_feedback:true knowledge_mcp:false knowledge_publish:true knowledge_read:true live_inbox_wait:true managed_process:true memory_update:true progress:true skill_create:true skill_create_global:true skill_update:true task_create:true workspace_mcp:false workspace_mcp_write:false workspace_read:true] status=200
+    --- FAIL: TestBrowserChannelGrantHTTPAndMCP/mixed_batch (8.35s)
+        agent_control_channel_test.go:143: browser capabilities=map[browser:true browser_mcp:false browser_mcp_write:false channel_outreach:false channel_reply:false channel_reply_decision:false clone_hardware:true collaboration:false core_mcp:true core_mcp_write:true desktop:false desktop_mcp:false desktop_mcp_write:false hardware:true hardware_mcp:false hardware_mcp_write:false knowledge_contribute_bound:false knowledge_feedback:true knowledge_mcp:false knowledge_publish:true knowledge_read:true live_inbox_wait:true managed_process:true memory_update:true progress:true skill_create:true skill_create_global:true skill_update:true task_create:true workspace_mcp:false workspace_mcp_write:false workspace_read:true] status=200
+--- FAIL: TestDesktopMCPUsesExistingShareAndSingleUseObservation (27.50s)
+    --- FAIL: TestDesktopMCPUsesExistingShareAndSingleUseObservation/active_route (8.58s)
+        agent_desktop_mcp_test.go:29: desktop capabilities=map[browser:false browser_mcp:false browser_mcp_write:false channel_outreach:false channel_reply:false channel_reply_decision:true clone_hardware:true collaboration:false core_mcp:true core_mcp_write:true desktop:true desktop_mcp:false desktop_mcp_write:false hardware:true hardware_mcp:false hardware_mcp_write:false knowledge_contribute_bound:false knowledge_feedback:true knowledge_mcp:false knowledge_publish:true knowledge_read:true live_inbox_wait:true managed_process:true memory_update:true progress:true skill_create:true skill_create_global:true skill_update:true task_create:true workspace_mcp:false workspace_mcp_write:false workspace_read:true] status=200
+    --- FAIL: TestDesktopMCPUsesExistingShareAndSingleUseObservation/channel_batch (8.29s)
+        agent_desktop_mcp_test.go:29: desktop capabilities=map[browser:false browser_mcp:false browser_mcp_write:false channel_outreach:false channel_reply:false channel_reply_decision:false clone_hardware:true collaboration:false core_mcp:true core_mcp_write:true desktop:true desktop_mcp:false desktop_mcp_write:false hardware:true hardware_mcp:false hardware_mcp_write:false knowledge_contribute_bound:false knowledge_feedback:true knowledge_mcp:false knowledge_publish:true knowledge_read:true live_inbox_wait:true managed_process:true memory_update:true progress:true skill_create:true skill_create_global:true skill_update:true task_create:true workspace_mcp:false workspace_mcp_write:false workspace_read:true] status=200
+    --- FAIL: TestDesktopMCPUsesExistingShareAndSingleUseObservation/plain_with_route (5.28s)
+        agent_desktop_mcp_test.go:29: desktop capabilities=map[browser:false browser_mcp:false browser_mcp_write:false channel_outreach:false channel_reply:false channel_reply_decision:true clone_hardware:true collaboration:false core_mcp:true core_mcp_write:true desktop:true desktop_mcp:false desktop_mcp_write:false hardware:true hardware_mcp:false hardware_mcp_write:false knowledge_contribute_bound:false knowledge_feedback:true knowledge_mcp:false knowledge_publish:true knowledge_read:true live_inbox_wait:true managed_process:true memory_update:true progress:true skill_create:true skill_create_global:true skill_update:true task_create:true workspace_mcp:false workspace_mcp_write:false workspace_read:true] status=200
+    --- FAIL: TestDesktopMCPUsesExistingShareAndSingleUseObservation/mixed_batch (5.35s)
+        agent_desktop_mcp_test.go:29: desktop capabilities=map[browser:false browser_mcp:false browser_mcp_write:false channel_outreach:false channel_reply:false channel_reply_decision:false clone_hardware:true collaboration:false core_mcp:true core_mcp_write:true desktop:true desktop_mcp:false desktop_mcp_write:false hardware:true hardware_mcp:false hardware_mcp_write:false knowledge_contribute_bound:false knowledge_feedback:true knowledge_mcp:false knowledge_publish:true knowledge_read:true live_inbox_wait:true managed_process:true memory_update:true progress:true skill_create:true skill_create_global:true skill_update:true task_create:true workspace_mcp:false workspace_mcp_write:false workspace_read:true] status=200
+FAIL
+FAIL	github.com/ChinaKai/AHA2/internal/httpapi	176.780s
+FAIL
+
+===== baseline-final.log; exit=1 =====
+--- FAIL: TestBrowserHardwareMCPInjectionUsesIndependentTriggers (10.36s)
+    agent_browser_hardware_mcp_test.go:267: conversation_host batch desktop server=false want=true
+--- FAIL: TestTaskRouteAddsNarrowChannelMCP (21.29s)
+    --- FAIL: TestTaskRouteAddsNarrowChannelMCP/group (10.76s)
+        mcp_runtime_test.go:182: active route changed read-only aha2_hardware tools
+    --- FAIL: TestTaskRouteAddsNarrowChannelMCP/private (10.53s)
+        mcp_runtime_test.go:182: active route changed read-only aha2_hardware tools
+FAIL
+FAIL	github.com/ChinaKai/AHA2/internal/app	31.652s
+FAIL
+
+===== fixed-first.log; exit=1 =====
+=== RUN   TestBrowserHardwareMCPInjectionUsesIndependentTriggers
+--- PASS: TestBrowserHardwareMCPInjectionUsesIndependentTriggers (7.96s)
+=== RUN   TestPetChannelBatchKeepsResourceGrantsAfterRealInboxClaim
+--- PASS: TestPetChannelBatchKeepsResourceGrantsAfterRealInboxClaim (7.91s)
+=== RUN   TestTaskRouteAddsNarrowChannelMCP
+=== RUN   TestTaskRouteAddsNarrowChannelMCP/group
+    mcp_runtime_test.go:152: active route revoked aha2_hardware
+=== RUN   TestTaskRouteAddsNarrowChannelMCP/private
+    mcp_runtime_test.go:152: active route revoked aha2_hardware
+--- FAIL: TestTaskRouteAddsNarrowChannelMCP (17.58s)
+    --- FAIL: TestTaskRouteAddsNarrowChannelMCP/group (8.64s)
+    --- FAIL: TestTaskRouteAddsNarrowChannelMCP/private (8.94s)
+FAIL
+FAIL	github.com/ChinaKai/AHA2/internal/app	33.463s
+=== RUN   TestHardwareChannelGrantHTTPAndMCP
+=== RUN   TestHardwareChannelGrantHTTPAndMCP/active_route
+=== RUN   TestHardwareChannelGrantHTTPAndMCP/channel_batch
+=== RUN   TestHardwareChannelGrantHTTPAndMCP/plain_with_route
+=== RUN   TestHardwareChannelGrantHTTPAndMCP/mixed_batch
+--- PASS: TestHardwareChannelGrantHTTPAndMCP (34.74s)
+    --- PASS: TestHardwareChannelGrantHTTPAndMCP/active_route (9.08s)
+    --- PASS: TestHardwareChannelGrantHTTPAndMCP/channel_batch (8.12s)
+    --- PASS: TestHardwareChannelGrantHTTPAndMCP/plain_with_route (8.78s)
+    --- PASS: TestHardwareChannelGrantHTTPAndMCP/mixed_batch (8.77s)
+=== RUN   TestBrowserChannelGrantHTTPAndMCP
+=== RUN   TestBrowserChannelGrantHTTPAndMCP/active_route
+=== RUN   TestBrowserChannelGrantHTTPAndMCP/channel_batch
+=== RUN   TestBrowserChannelGrantHTTPAndMCP/plain_with_route
+=== RUN   TestBrowserChannelGrantHTTPAndMCP/mixed_batch
+--- PASS: TestBrowserChannelGrantHTTPAndMCP (101.07s)
+    --- PASS: TestBrowserChannelGrantHTTPAndMCP/active_route (5.75s)
+    --- PASS: TestBrowserChannelGrantHTTPAndMCP/channel_batch (6.31s)
+    --- PASS: TestBrowserChannelGrantHTTPAndMCP/plain_with_route (46.03s)
+    --- PASS: TestBrowserChannelGrantHTTPAndMCP/mixed_batch (42.98s)
+=== RUN   TestBrowserChannelGrantStillRequiresWritableMainAndOwnedCapabilities
+2026/11/21 22:45:10 agent browser mcp tool browser_tab_open failed: browser_grant_forbidden
+2026/11/21 22:45:10 agent browser mcp tool browser_tab_open failed: browser_grant_expired
+2026/11/21 22:45:10 agent browser mcp tool browser_tab_open failed: browser_grant_revoked
+2026/11/21 22:45:10 agent browser mcp tool browser_action failed: browser_capability_denied
+=== RUN   TestBrowserChannelGrantStillRequiresWritableMainAndOwnedCapabilities/read_only_snapshot
+=== RUN   TestBrowserChannelGrantStillRequiresWritableMainAndOwnedCapabilities/non_main
+--- PASS: TestBrowserChannelGrantStillRequiresWritableMainAndOwnedCapabilities (29.68s)
+    --- PASS: TestBrowserChannelGrantStillRequiresWritableMainAndOwnedCapabilities/read_only_snapshot (0.40s)
+    --- PASS: TestBrowserChannelGrantStillRequiresWritableMainAndOwnedCapabilities/non_main (0.47s)
+=== RUN   TestDesktopMCPUsesExistingShareAndSingleUseObservation
+=== RUN   TestDesktopMCPUsesExistingShareAndSingleUseObservation/active_route
+=== RUN   TestDesktopMCPUsesExistingShareAndSingleUseObservation/channel_batch
+=== RUN   TestDesktopMCPUsesExistingShareAndSingleUseObservation/plain_with_route
+=== RUN   TestDesktopMCPUsesExistingShareAndSingleUseObservation/mixed_batch
+--- PASS: TestDesktopMCPUsesExistingShareAndSingleUseObservation (57.85s)
+    --- PASS: TestDesktopMCPUsesExistingShareAndSingleUseObservation/active_route (40.26s)
+    --- PASS: TestDesktopMCPUsesExistingShareAndSingleUseObservation/channel_batch (5.72s)
+    --- PASS: TestDesktopMCPUsesExistingShareAndSingleUseObservation/plain_with_route (4.64s)
+    --- PASS: TestDesktopMCPUsesExistingShareAndSingleUseObservation/mixed_batch (7.21s)
+=== RUN   TestDesktopChannelNonMainCannotControl
+--- PASS: TestDesktopChannelNonMainCannotControl (6.35s)
+=== RUN   TestPetChannelTurnKeepsResourceGrantsAndUnrelatedDomainRestrictions
+--- PASS: TestPetChannelTurnKeepsResourceGrantsAndUnrelatedDomainRestrictions (7.41s)
+PASS
+ok  	github.com/ChinaKai/AHA2/internal/httpapi	237.126s
+FAIL
+
+===== app-final.log; exit=0 =====
+ok  	github.com/ChinaKai/AHA2/internal/app	112.668s
+
+===== http-final.log; exit=0 =====
+ok  	github.com/ChinaKai/AHA2/internal/httpapi	408.912s
+
+===== hardware-final.log; exit=0 =====
+ok  	github.com/ChinaKai/AHA2/internal/httpapi	37.131s
+
+===== vet.log; exit=0 =====
+
+===== vet-final.log; exit=0 =====
