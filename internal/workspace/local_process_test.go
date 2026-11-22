@@ -398,8 +398,8 @@ func TestRunProcessOversizedLineReturnsUnderTimeout(t *testing.T) {
 		command.Timeout = 2 * time.Second
 	}, nil)
 	elapsed := time.Since(start)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("error = %v, want context.DeadlineExceeded", err)
+	if !isProcessOutputError(err) {
+		t.Fatalf("error = %v, want explicit output scan failure", err)
 	}
 	if elapsed > 15*time.Second {
 		t.Fatalf("Run took %s for an oversized line with a 2s timeout", elapsed)

@@ -186,6 +186,11 @@ var processInputFeeder = feedInput
 // still blocked writing here, the capture is reported as truncated.
 const processOutputSpoolLimit = 4 * 1024 * 1024
 
+// errProcessOutputScan distinguishes a framing/read failure from cancellation.
+var errProcessOutputScan = errors.New("workspace: process output scan failed")
+
+func isProcessOutputError(err error) bool { return errors.Is(err, errProcessOutputScan) }
+
 // errProcessOutputTruncated reports that a process pipe was closed while the
 // consumer was backpressured, so output still in that pipe was lost. Callers
 // must not mistake this for a successful run with complete output.
@@ -200,8 +205,10 @@ func runProcess(parent context.Context, command Command, env []string, onLine Li
 		ctx, cancel = context.WithTimeout(parent, command.Timeout)
 	}
 	defer cancel()
+	processContext, stopOutput := context.WithCancel(ctx)
+	defer stopOutput()
 	start := time.Now()
-	process := exec.CommandContext(ctx, command.Executable, command.Args...)
+	process := exec.CommandContext(processContext, command.Executable, command.Args...)
 	if command.KillTree {
 		configureProcessTree(process)
 	}
@@ -273,8 +280,13 @@ func runProcess(parent context.Context, command Command, env []string, onLine Li
 	stdout, stderr := newOutputBuffer(command.OutputLimit), newOutputBuffer(command.OutputLimit)
 	var wait sync.WaitGroup
 	wait.Add(2)
-	go scanOutput(stdoutSpool, stdout, onLine, &wait)
-	go scanOutput(stderrSpool, stderr, nil, &wait)
+	outputErrors := make(chan error, 2)
+	failOutput := func(err error) {
+		outputErrors <- err
+		stopOutput()
+	}
+	go scanOutput(stdoutSpool, stdout, onLine, &wait, command.StdoutLineLimit, failOutput)
+	go scanOutput(stderrSpool, stderr, nil, &wait, 0, failOutput)
 	exited := make(chan struct{})
 	feederDone := make(chan struct{})
 	if stdinPipe != nil {
@@ -308,6 +320,11 @@ func runProcess(parent context.Context, command Command, env []string, onLine Li
 	}
 	if ctx.Err() != nil {
 		return result, ctx.Err()
+	}
+	select {
+	case err := <-outputErrors:
+		return result, err
+	default:
 	}
 	if truncated {
 		return result, errProcessOutputTruncated
@@ -367,10 +384,17 @@ func awaitInputFeeder(stdin io.Closer, done <-chan struct{}) {
 	}
 }
 
-func scanOutput(reader io.Reader, destination io.Writer, handler LineHandler, wait *sync.WaitGroup) {
+// scanOutput bounds per-line allocation separately from the retained output tail.
+// On failure it cancels the producer before draining, so a persistent RPC server
+// cannot leave its caller waiting for a response that will never be delivered.
+func scanOutput(reader io.Reader, destination io.Writer, handler LineHandler, wait *sync.WaitGroup, lineLimit int, fail func(error)) {
 	defer wait.Done()
 	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	if lineLimit <= 0 {
+		lineLimit = 4 * 1024 * 1024
+	}
+	initialSize := min(64*1024, lineLimit)
+	scanner.Buffer(make([]byte, initialSize), lineLimit)
 	for scanner.Scan() {
 		line := scanner.Text()
 		_, _ = io.WriteString(destination, line+"\n")
@@ -378,10 +402,17 @@ func scanOutput(reader io.Reader, destination io.Writer, handler LineHandler, wa
 			handler(line)
 		}
 	}
-	// A line longer than the scanner's maximum stops the scan loop, but the
-	// pipe drainer may still be delivering data. Keep consuming so a
-	// backpressured drainer (and the command behind it) can finish instead of
-	// blocking forever.
+	if err := scanner.Err(); err != nil && fail != nil {
+		if errors.Is(err, bufio.ErrTooLong) {
+			// Never include the rejected frame: it can contain session history
+			// and credentials. Only the configured limit is safe to report.
+			fail(fmt.Errorf("%w: line exceeds %d byte scan limit", errProcessOutputScan, lineLimit))
+		} else {
+			fail(fmt.Errorf("%w: %w", errProcessOutputScan, err))
+		}
+	}
+	// Keep draining after cancellation to release backpressured pipe writers.
+	// Do not deliver later frames after a framing failure.
 	_, _ = io.Copy(io.Discard, reader)
 }
 

@@ -226,7 +226,7 @@ func (runner *SSHRunner) execCommand(ctx context.Context, client *ssh.Client, co
 		if err != nil {
 			return Result{}, err
 		}
-		return runner.execOnClient(ctx, client, windowsBootstrapCommand(), payload, command.Input, command.OutputLimit, onLine)
+		return runner.execOnClient(ctx, client, windowsBootstrapCommand(), payload, command.Input, command.OutputLimit, onLine, command.StdoutLineLimit)
 	}
 	// Tag the remote tree so an interrupt or timeout can end it; closing the
 	// connection alone leaves the remote processes running.
@@ -243,13 +243,13 @@ func (runner *SSHRunner) execCommand(ctx context.Context, client *ssh.Client, co
 		if err != nil {
 			return Result{}, err
 		}
-		return runner.execOnClientWithCancel(ctx, client, streamBootstrapCommand(), metadata+command.Stdin, command.Input, command.OutputLimit, onLine, onCancel)
+		return runner.execOnClientWithCancel(ctx, client, streamBootstrapCommand(), metadata+command.Stdin, command.Input, command.OutputLimit, onLine, onCancel, command.StdoutLineLimit)
 	}
 	script, err := remoteScript(command)
 	if err != nil {
 		return Result{}, err
 	}
-	return runner.execOnClientWithCancel(ctx, client, "sh -s", script, nil, command.OutputLimit, onLine, onCancel)
+	return runner.execOnClientWithCancel(ctx, client, "sh -s", script, nil, command.OutputLimit, onLine, onCancel, command.StdoutLineLimit)
 }
 
 // killMarked ends the remote processes of one marked run over a second session
@@ -311,7 +311,7 @@ func (runner *SSHRunner) runRaw(parent context.Context, remoteCommand, stdin str
 		return Result{}, err
 	}
 	defer client.Close()
-	return runner.execOnClient(ctx, client, remoteCommand, stdin, nil, outputLimit, onLine)
+	return runner.execOnClient(ctx, client, remoteCommand, stdin, nil, outputLimit, onLine, 0)
 }
 
 // runScriptWithStdin runs script through `sh -c` with arguments, feeding the
@@ -380,13 +380,15 @@ func (runner *SSHRunner) runScriptWithStdin(ctx context.Context, script string, 
 // execOnClient runs one command over an already-established connection. Splitting
 // it out lets a caller reuse the same connection for a reverse forward, whose
 // lifetime must match the command's.
-func (runner *SSHRunner) execOnClient(ctx context.Context, client *ssh.Client, remoteCommand, stdin string, input <-chan string, outputLimit int, onLine LineHandler) (Result, error) {
-	return runner.execOnClientWithCancel(ctx, client, remoteCommand, stdin, input, outputLimit, onLine, nil)
+func (runner *SSHRunner) execOnClient(ctx context.Context, client *ssh.Client, remoteCommand, stdin string, input <-chan string, outputLimit int, onLine LineHandler, stdoutLineLimit int) (Result, error) {
+	return runner.execOnClientWithCancel(ctx, client, remoteCommand, stdin, input, outputLimit, onLine, nil, stdoutLineLimit)
 }
 
 // execOnClientWithCancel is execOnClient with a hook that runs when the context
 // ends while the command is still running, before the connection is closed.
-func (runner *SSHRunner) execOnClientWithCancel(ctx context.Context, client *ssh.Client, remoteCommand, stdin string, input <-chan string, outputLimit int, onLine LineHandler, onCancel func()) (Result, error) {
+func (runner *SSHRunner) execOnClientWithCancel(ctx context.Context, client *ssh.Client, remoteCommand, stdin string, input <-chan string, outputLimit int, onLine LineHandler, onCancel func(), stdoutLineLimit int) (Result, error) {
+	readContext, stopOutput := context.WithCancel(ctx)
+	defer stopOutput()
 	start := time.Now()
 	session, err := client.NewSession()
 	if err != nil {
@@ -414,8 +416,13 @@ func (runner *SSHRunner) execOnClientWithCancel(ctx context.Context, client *ssh
 	stdout, stderr := newOutputBuffer(outputLimit), newOutputBuffer(outputLimit)
 	var wait sync.WaitGroup
 	wait.Add(2)
-	go scanOutput(stdoutPipe, stdout, onLine, &wait)
-	go scanOutput(stderrPipe, stderr, nil, &wait)
+	outputErrors := make(chan error, 2)
+	failOutput := func(err error) {
+		outputErrors <- err
+		stopOutput()
+	}
+	go scanOutput(stdoutPipe, stdout, onLine, &wait, stdoutLineLimit, failOutput)
+	go scanOutput(stderrPipe, stderr, nil, &wait, 0, failOutput)
 	done := make(chan error, 1)
 	go func() { done <- session.Run(remoteCommand) }()
 	exited := make(chan struct{})
@@ -428,7 +435,7 @@ func (runner *SSHRunner) execOnClientWithCancel(ctx context.Context, client *ssh
 	var runErr error
 	select {
 	case runErr = <-done:
-	case <-ctx.Done():
+	case <-readContext.Done():
 		if onCancel != nil {
 			onCancel()
 		}
@@ -445,6 +452,11 @@ func (runner *SSHRunner) execOnClientWithCancel(ctx context.Context, client *ssh
 	result := Result{Stdout: stdout.String(), Stderr: stderr.String(), Duration: time.Since(start)}
 	if ctx.Err() != nil {
 		return result, ctx.Err()
+	}
+	select {
+	case err := <-outputErrors:
+		return result, err
+	default:
 	}
 	if runErr == nil {
 		return result, nil

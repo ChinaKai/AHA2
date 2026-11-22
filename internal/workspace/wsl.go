@@ -42,7 +42,7 @@ func (runner WSLRunner) Run(parent context.Context, command Command, onLine Line
 		return Result{}, err
 	}
 	result, err := wslProcessRunner(parent, host, wslHostEnvironment(), onLine)
-	if mark != "" && (parent.Err() != nil || errors.Is(err, context.DeadlineExceeded)) {
+	if mark != "" && (parent.Err() != nil || errors.Is(err, context.DeadlineExceeded) || isProcessOutputError(err)) {
 		KillMarkedProcesses(WSLRunner{Distro: distro}, mark)
 	}
 	return result, err
@@ -61,10 +61,11 @@ func (runner WSLRunner) Run(parent context.Context, command Command, onLine Line
 // exported environment (measured: $#=0, env empty). -e execs the argv directly.
 func wslHostCommand(distro string, command Command) (Command, error) {
 	host := Command{
-		Executable:  findWSLExecutable(),
-		Timeout:     command.Timeout,
-		OutputLimit: command.OutputLimit,
-		KillTree:    command.KillTree,
+		Executable:      findWSLExecutable(),
+		Timeout:         command.Timeout,
+		OutputLimit:     command.OutputLimit,
+		StdoutLineLimit: command.StdoutLineLimit,
+		KillTree:        command.KillTree,
 	}
 	if command.Input != nil {
 		// The script carries the Turn's environment, including its capability

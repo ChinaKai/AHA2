@@ -19,6 +19,10 @@ type Command struct {
 	Timeout time.Duration
 	// OutputLimit keeps only the latest bytes from stdout and stderr. Zero means unlimited.
 	OutputLimit int
+	// StdoutLineLimit bounds a stdout line including its delimiter. Values <= 0
+	// use 4 MiB. Stderr always uses 4 MiB. Exceeding either limit fails the run
+	// and cancels the process; no partial line is delivered to the handler.
+	StdoutLineLimit int
 	// KillTree terminates the local process tree when the command context is cancelled.
 	KillTree bool
 	// ReverseForward, when set, asks the runner to expose an AHA-side address

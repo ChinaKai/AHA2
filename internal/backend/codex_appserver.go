@@ -220,6 +220,8 @@ func (session *codexAppServerSession) run() error {
 	if session.request.ProviderSessionID != "" {
 		threadMethod = "thread/resume"
 		threadParams["threadId"] = session.request.ProviderSessionID
+		// AHA needs only metadata; Codex restores model context from its session.
+		threadParams["excludeTurns"] = true
 	}
 	response, err := session.requestWithTimeout(threadMethod, threadParams, codexLiveHandshakeTimeout)
 	if err != nil {
@@ -702,6 +704,8 @@ func (adapter Codex) executeLiveInbox(
 			Executable: binary, Args: codexAppServerArguments(request, catalogPath),
 			Dir: request.WorkDir, Env: environment, Input: input,
 			Timeout: timeout, KillTree: true, ReverseForward: request.ReverseForward,
+			// Large JSONL frames need a separate bound from retained diagnostics.
+			StdoutLineLimit: 16 * 1024 * 1024, OutputLimit: 64 * 1024,
 		}, func(line string) {
 			select {
 			case activity <- "app_server":
@@ -784,8 +788,9 @@ func (adapter Codex) executeLiveInbox(
 	// result is the only place the exit code and stderr survive. Attach them to
 	// the adapter error instead of discarding the only diagnostic evidence. A
 	// runner failure stays authoritative: the stream closed because the runner
-	// failed, not because the process exited on its own.
-	if errors.Is(sessionErr, errCodexAppServerExited) && runFailure != nil {
+	// failed, not because the process exited on its own. This also applies during
+	// initialize/resume, before the turn loop can report an unexpected exit.
+	if runFailure != nil {
 		return Result{Reply: session.reply, ExitCode: runResult.ExitCode, ProviderSessionID: session.threadID}, runFailure, started
 	}
 	if errors.Is(sessionErr, errCodexAppServerExited) {
@@ -799,9 +804,6 @@ func (adapter Codex) executeLiveInbox(
 			return Result{Reply: session.reply, ExitCode: runResult.ExitCode, ProviderSessionID: session.threadID}, fmt.Errorf("%v: %s", sessionErr, session.providerError), started
 		}
 		return Result{Reply: session.reply, ExitCode: runResult.ExitCode, ProviderSessionID: session.threadID}, sessionErr, started
-	}
-	if runFailure != nil {
-		return Result{Reply: session.reply, ExitCode: runResult.ExitCode, ProviderSessionID: session.threadID}, runFailure, started
 	}
 	if strings.TrimSpace(session.reply) == "" {
 		return Result{ExitCode: runResult.ExitCode, ProviderSessionID: session.threadID}, fmt.Errorf("codex returned no agent message"), started

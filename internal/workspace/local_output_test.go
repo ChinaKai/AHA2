@@ -332,7 +332,7 @@ func TestScanOutputAppliesOutputLimit(t *testing.T) {
 	var received []string
 	var wait sync.WaitGroup
 	wait.Add(1)
-	scanOutput(strings.NewReader(input), buffer, func(line string) { received = append(received, line) }, &wait)
+	scanOutput(strings.NewReader(input), buffer, func(line string) { received = append(received, line) }, &wait, 0, nil)
 	wait.Wait()
 
 	if got, want := buffer.String(), input[len(input)-limit:]; got != want {
