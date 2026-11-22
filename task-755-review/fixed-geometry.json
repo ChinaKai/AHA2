@@ -1,0 +1,6006 @@
+{
+  "results": [
+    {
+      "label": "zh-CN-0-1024x600",
+      "height": 600,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 600,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 70,
+          "right": 214,
+          "bottom": 104,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 116,
+          "right": 214,
+          "bottom": 152,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 155,
+          "right": 214,
+          "bottom": 191,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 194,
+          "right": 214,
+          "bottom": 230,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 233,
+          "right": 214,
+          "bottom": 269,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 272,
+          "right": 214,
+          "bottom": 308,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 311,
+          "right": 214,
+          "bottom": 347,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 350,
+          "right": 214,
+          "bottom": 386,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 554.5,
+          "right": 46,
+          "bottom": 586.5,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 555.5,
+          "right": 182,
+          "bottom": 585.5,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 555.5,
+          "right": 214,
+          "bottom": 585.5,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "zh-CN-0-1024x650",
+      "height": 650,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 650,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 70,
+          "right": 214,
+          "bottom": 104,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 116,
+          "right": 214,
+          "bottom": 152,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 155,
+          "right": 214,
+          "bottom": 191,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 194,
+          "right": 214,
+          "bottom": 230,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 233,
+          "right": 214,
+          "bottom": 269,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 272,
+          "right": 214,
+          "bottom": 308,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 311,
+          "right": 214,
+          "bottom": 347,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 350,
+          "right": 214,
+          "bottom": 386,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 604.5,
+          "right": 46,
+          "bottom": 636.5,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 605.5,
+          "right": 182,
+          "bottom": 635.5,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 605.5,
+          "right": 214,
+          "bottom": 635.5,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "zh-CN-0-1024x720",
+      "height": 720,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 720,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 70,
+          "right": 214,
+          "bottom": 104,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 116,
+          "right": 214,
+          "bottom": 152,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 155,
+          "right": 214,
+          "bottom": 191,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 194,
+          "right": 214,
+          "bottom": 230,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 233,
+          "right": 214,
+          "bottom": 269,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 272,
+          "right": 214,
+          "bottom": 308,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 311,
+          "right": 214,
+          "bottom": 347,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 350,
+          "right": 214,
+          "bottom": 386,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 674.5,
+          "right": 46,
+          "bottom": 706.5,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 675.5,
+          "right": 182,
+          "bottom": 705.5,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 675.5,
+          "right": 214,
+          "bottom": 705.5,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "zh-CN-0-1024x768",
+      "height": 768,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 768,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 70,
+          "right": 214,
+          "bottom": 104,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 116,
+          "right": 214,
+          "bottom": 152,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 155,
+          "right": 214,
+          "bottom": 191,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 194,
+          "right": 214,
+          "bottom": 230,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 233,
+          "right": 214,
+          "bottom": 269,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 272,
+          "right": 214,
+          "bottom": 308,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 311,
+          "right": 214,
+          "bottom": 347,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 350,
+          "right": 214,
+          "bottom": 386,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 722.5,
+          "right": 46,
+          "bottom": 754.5,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 723.5,
+          "right": 182,
+          "bottom": 753.5,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 723.5,
+          "right": 214,
+          "bottom": 753.5,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "zh-CN-0-1024x799",
+      "height": 799,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 799,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 70,
+          "right": 214,
+          "bottom": 104,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 116,
+          "right": 214,
+          "bottom": 152,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 155,
+          "right": 214,
+          "bottom": 191,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 194,
+          "right": 214,
+          "bottom": 230,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 233,
+          "right": 214,
+          "bottom": 269,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 272,
+          "right": 214,
+          "bottom": 308,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 311,
+          "right": 214,
+          "bottom": 347,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 350,
+          "right": 214,
+          "bottom": 386,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 753.5,
+          "right": 46,
+          "bottom": 785.5,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 754.5,
+          "right": 182,
+          "bottom": 784.5,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 754.5,
+          "right": 214,
+          "bottom": 784.5,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "zh-CN-0-1024x800",
+      "height": 800,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 800,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 82,
+          "right": 214,
+          "bottom": 116,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 146,
+          "right": 214,
+          "bottom": 182,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 187,
+          "right": 214,
+          "bottom": 223,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 228,
+          "right": 214,
+          "bottom": 264,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 269,
+          "right": 214,
+          "bottom": 305,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 310,
+          "right": 214,
+          "bottom": 346,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 351,
+          "right": 214,
+          "bottom": 387,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 392,
+          "right": 214,
+          "bottom": 428,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 750.5,
+          "right": 46,
+          "bottom": 782.5,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 751.5,
+          "right": 182,
+          "bottom": 781.5,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 751.5,
+          "right": 214,
+          "bottom": 781.5,
+          "height": 30
+        }
+      ],
+      "memoVisible": true,
+      "memoHeight": 198,
+      "listOverflow": 0
+    },
+    {
+      "label": "zh-CN-0-1024x900",
+      "height": 900,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 900,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 82,
+          "right": 214,
+          "bottom": 116,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 146,
+          "right": 214,
+          "bottom": 182,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 187,
+          "right": 214,
+          "bottom": 223,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 228,
+          "right": 214,
+          "bottom": 264,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 269,
+          "right": 214,
+          "bottom": 305,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 310,
+          "right": 214,
+          "bottom": 346,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 351,
+          "right": 214,
+          "bottom": 387,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 392,
+          "right": 214,
+          "bottom": 428,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 850.5,
+          "right": 46,
+          "bottom": 882.5,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 851.5,
+          "right": 182,
+          "bottom": 881.5,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 851.5,
+          "right": 214,
+          "bottom": 881.5,
+          "height": 30
+        }
+      ],
+      "memoVisible": true,
+      "memoHeight": 298,
+      "listOverflow": 0
+    },
+    {
+      "label": "zh-CN-0-1280x600",
+      "height": 600,
+      "width": 1280,
+      "overflow": 0,
+      "sidebarBottom": 600,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 70,
+          "right": 214,
+          "bottom": 104,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 116,
+          "right": 214,
+          "bottom": 152,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 155,
+          "right": 214,
+          "bottom": 191,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 194,
+          "right": 214,
+          "bottom": 230,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 233,
+          "right": 214,
+          "bottom": 269,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 272,
+          "right": 214,
+          "bottom": 308,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 311,
+          "right": 214,
+          "bottom": 347,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 350,
+          "right": 214,
+          "bottom": 386,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 554.5,
+          "right": 46,
+          "bottom": 586.5,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 555.5,
+          "right": 182,
+          "bottom": 585.5,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 555.5,
+          "right": 214,
+          "bottom": 585.5,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "zh-CN-0-1440x900",
+      "height": 900,
+      "width": 1440,
+      "overflow": 0,
+      "sidebarBottom": 900,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 82,
+          "right": 214,
+          "bottom": 116,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 146,
+          "right": 214,
+          "bottom": 182,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 187,
+          "right": 214,
+          "bottom": 223,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 228,
+          "right": 214,
+          "bottom": 264,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 269,
+          "right": 214,
+          "bottom": 305,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 310,
+          "right": 214,
+          "bottom": 346,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 351,
+          "right": 214,
+          "bottom": 387,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 392,
+          "right": 214,
+          "bottom": 428,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 850.5,
+          "right": 46,
+          "bottom": 882.5,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 851.5,
+          "right": 182,
+          "bottom": 881.5,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 851.5,
+          "right": 214,
+          "bottom": 881.5,
+          "height": 30
+        }
+      ],
+      "memoVisible": true,
+      "memoHeight": 298,
+      "listOverflow": 0
+    },
+    {
+      "label": "zh-CN-0-819x600",
+      "height": 600,
+      "width": 819,
+      "overflow": 0,
+      "sidebarBottom": 600,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 70,
+          "right": 214,
+          "bottom": 104,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 116,
+          "right": 214,
+          "bottom": 152,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 155,
+          "right": 214,
+          "bottom": 191,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 194,
+          "right": 214,
+          "bottom": 230,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 233,
+          "right": 214,
+          "bottom": 269,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 272,
+          "right": 214,
+          "bottom": 308,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 311,
+          "right": 214,
+          "bottom": 347,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 350,
+          "right": 214,
+          "bottom": 386,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 554.5,
+          "right": 46,
+          "bottom": 586.5,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 555.5,
+          "right": 182,
+          "bottom": 585.5,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 555.5,
+          "right": 214,
+          "bottom": 585.5,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "zh-CN-1-1024x600",
+      "height": 600,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 600,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 70,
+          "right": 214,
+          "bottom": 104,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 116,
+          "right": 214,
+          "bottom": 152,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 155,
+          "right": 214,
+          "bottom": 191,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 194,
+          "right": 214,
+          "bottom": 230,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 233,
+          "right": 214,
+          "bottom": 269,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 272,
+          "right": 214,
+          "bottom": 308,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 311,
+          "right": 214,
+          "bottom": 347,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 350,
+          "right": 214,
+          "bottom": 386,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 554.5,
+          "right": 46,
+          "bottom": 586.5,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 555.5,
+          "right": 182,
+          "bottom": 585.5,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 555.5,
+          "right": 214,
+          "bottom": 585.5,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "zh-CN-1-1024x650",
+      "height": 650,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 650,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 70,
+          "right": 214,
+          "bottom": 104,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 116,
+          "right": 214,
+          "bottom": 152,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 155,
+          "right": 214,
+          "bottom": 191,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 194,
+          "right": 214,
+          "bottom": 230,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 233,
+          "right": 214,
+          "bottom": 269,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 272,
+          "right": 214,
+          "bottom": 308,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 311,
+          "right": 214,
+          "bottom": 347,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 350,
+          "right": 214,
+          "bottom": 386,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 604.5,
+          "right": 46,
+          "bottom": 636.5,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 605.5,
+          "right": 182,
+          "bottom": 635.5,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 605.5,
+          "right": 214,
+          "bottom": 635.5,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "zh-CN-1-1024x720",
+      "height": 720,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 720,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 70,
+          "right": 214,
+          "bottom": 104,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 116,
+          "right": 214,
+          "bottom": 152,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 155,
+          "right": 214,
+          "bottom": 191,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 194,
+          "right": 214,
+          "bottom": 230,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 233,
+          "right": 214,
+          "bottom": 269,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 272,
+          "right": 214,
+          "bottom": 308,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 311,
+          "right": 214,
+          "bottom": 347,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 350,
+          "right": 214,
+          "bottom": 386,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 674.5,
+          "right": 46,
+          "bottom": 706.5,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 675.5,
+          "right": 182,
+          "bottom": 705.5,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 675.5,
+          "right": 214,
+          "bottom": 705.5,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "zh-CN-1-1024x768",
+      "height": 768,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 768,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 70,
+          "right": 214,
+          "bottom": 104,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 116,
+          "right": 214,
+          "bottom": 152,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 155,
+          "right": 214,
+          "bottom": 191,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 194,
+          "right": 214,
+          "bottom": 230,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 233,
+          "right": 214,
+          "bottom": 269,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 272,
+          "right": 214,
+          "bottom": 308,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 311,
+          "right": 214,
+          "bottom": 347,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 350,
+          "right": 214,
+          "bottom": 386,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 722.5,
+          "right": 46,
+          "bottom": 754.5,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 723.5,
+          "right": 182,
+          "bottom": 753.5,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 723.5,
+          "right": 214,
+          "bottom": 753.5,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "zh-CN-1-1024x799",
+      "height": 799,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 799,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 70,
+          "right": 214,
+          "bottom": 104,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 116,
+          "right": 214,
+          "bottom": 152,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 155,
+          "right": 214,
+          "bottom": 191,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 194,
+          "right": 214,
+          "bottom": 230,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 233,
+          "right": 214,
+          "bottom": 269,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 272,
+          "right": 214,
+          "bottom": 308,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 311,
+          "right": 214,
+          "bottom": 347,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 350,
+          "right": 214,
+          "bottom": 386,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 753.5,
+          "right": 46,
+          "bottom": 785.5,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 754.5,
+          "right": 182,
+          "bottom": 784.5,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 754.5,
+          "right": 214,
+          "bottom": 784.5,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "zh-CN-1-1024x800",
+      "height": 800,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 800,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 82,
+          "right": 214,
+          "bottom": 116,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 146,
+          "right": 214,
+          "bottom": 182,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 187,
+          "right": 214,
+          "bottom": 223,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 228,
+          "right": 214,
+          "bottom": 264,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 269,
+          "right": 214,
+          "bottom": 305,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 310,
+          "right": 214,
+          "bottom": 346,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 351,
+          "right": 214,
+          "bottom": 387,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 392,
+          "right": 214,
+          "bottom": 428,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 750.5,
+          "right": 46,
+          "bottom": 782.5,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 751.5,
+          "right": 182,
+          "bottom": 781.5,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 751.5,
+          "right": 214,
+          "bottom": 781.5,
+          "height": 30
+        }
+      ],
+      "memoVisible": true,
+      "memoHeight": 198,
+      "listOverflow": 0
+    },
+    {
+      "label": "zh-CN-1-1024x900",
+      "height": 900,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 900,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 82,
+          "right": 214,
+          "bottom": 116,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 146,
+          "right": 214,
+          "bottom": 182,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 187,
+          "right": 214,
+          "bottom": 223,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 228,
+          "right": 214,
+          "bottom": 264,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 269,
+          "right": 214,
+          "bottom": 305,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 310,
+          "right": 214,
+          "bottom": 346,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 351,
+          "right": 214,
+          "bottom": 387,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 392,
+          "right": 214,
+          "bottom": 428,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 850.5,
+          "right": 46,
+          "bottom": 882.5,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 851.5,
+          "right": 182,
+          "bottom": 881.5,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 851.5,
+          "right": 214,
+          "bottom": 881.5,
+          "height": 30
+        }
+      ],
+      "memoVisible": true,
+      "memoHeight": 298,
+      "listOverflow": 0
+    },
+    {
+      "label": "zh-CN-1-1280x600",
+      "height": 600,
+      "width": 1280,
+      "overflow": 0,
+      "sidebarBottom": 600,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 70,
+          "right": 214,
+          "bottom": 104,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 116,
+          "right": 214,
+          "bottom": 152,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 155,
+          "right": 214,
+          "bottom": 191,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 194,
+          "right": 214,
+          "bottom": 230,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 233,
+          "right": 214,
+          "bottom": 269,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 272,
+          "right": 214,
+          "bottom": 308,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 311,
+          "right": 214,
+          "bottom": 347,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 350,
+          "right": 214,
+          "bottom": 386,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 554.5,
+          "right": 46,
+          "bottom": 586.5,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 555.5,
+          "right": 182,
+          "bottom": 585.5,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 555.5,
+          "right": 214,
+          "bottom": 585.5,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "zh-CN-1-1440x900",
+      "height": 900,
+      "width": 1440,
+      "overflow": 0,
+      "sidebarBottom": 900,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 82,
+          "right": 214,
+          "bottom": 116,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 146,
+          "right": 214,
+          "bottom": 182,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 187,
+          "right": 214,
+          "bottom": 223,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 228,
+          "right": 214,
+          "bottom": 264,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 269,
+          "right": 214,
+          "bottom": 305,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 310,
+          "right": 214,
+          "bottom": 346,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 351,
+          "right": 214,
+          "bottom": 387,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 392,
+          "right": 214,
+          "bottom": 428,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 850.5,
+          "right": 46,
+          "bottom": 882.5,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 851.5,
+          "right": 182,
+          "bottom": 881.5,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 851.5,
+          "right": 214,
+          "bottom": 881.5,
+          "height": 30
+        }
+      ],
+      "memoVisible": true,
+      "memoHeight": 298,
+      "listOverflow": 0
+    },
+    {
+      "label": "zh-CN-1-819x600",
+      "height": 600,
+      "width": 819,
+      "overflow": 0,
+      "sidebarBottom": 600,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 70,
+          "right": 214,
+          "bottom": 104,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 116,
+          "right": 214,
+          "bottom": 152,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 155,
+          "right": 214,
+          "bottom": 191,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 194,
+          "right": 214,
+          "bottom": 230,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 233,
+          "right": 214,
+          "bottom": 269,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 272,
+          "right": 214,
+          "bottom": 308,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 311,
+          "right": 214,
+          "bottom": 347,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 350,
+          "right": 214,
+          "bottom": 386,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 554.5,
+          "right": 46,
+          "bottom": 586.5,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 555.5,
+          "right": 182,
+          "bottom": 585.5,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 555.5,
+          "right": 214,
+          "bottom": 585.5,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "zh-CN-24-1024x600",
+      "height": 600,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 600,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 70,
+          "right": 214,
+          "bottom": 104,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 116,
+          "right": 214,
+          "bottom": 152,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 155,
+          "right": 214,
+          "bottom": 191,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 194,
+          "right": 214,
+          "bottom": 230,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 233,
+          "right": 214,
+          "bottom": 269,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 272,
+          "right": 214,
+          "bottom": 308,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 311,
+          "right": 214,
+          "bottom": 347,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 350,
+          "right": 214,
+          "bottom": 386,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 554.5,
+          "right": 46,
+          "bottom": 586.5,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 555.5,
+          "right": 182,
+          "bottom": 585.5,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 555.5,
+          "right": 214,
+          "bottom": 585.5,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "zh-CN-24-1024x650",
+      "height": 650,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 650,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 70,
+          "right": 214,
+          "bottom": 104,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 116,
+          "right": 214,
+          "bottom": 152,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 155,
+          "right": 214,
+          "bottom": 191,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 194,
+          "right": 214,
+          "bottom": 230,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 233,
+          "right": 214,
+          "bottom": 269,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 272,
+          "right": 214,
+          "bottom": 308,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 311,
+          "right": 214,
+          "bottom": 347,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 350,
+          "right": 214,
+          "bottom": 386,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 604.5,
+          "right": 46,
+          "bottom": 636.5,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 605.5,
+          "right": 182,
+          "bottom": 635.5,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 605.5,
+          "right": 214,
+          "bottom": 635.5,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "zh-CN-24-1024x720",
+      "height": 720,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 720,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 70,
+          "right": 214,
+          "bottom": 104,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 116,
+          "right": 214,
+          "bottom": 152,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 155,
+          "right": 214,
+          "bottom": 191,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 194,
+          "right": 214,
+          "bottom": 230,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 233,
+          "right": 214,
+          "bottom": 269,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 272,
+          "right": 214,
+          "bottom": 308,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 311,
+          "right": 214,
+          "bottom": 347,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 350,
+          "right": 214,
+          "bottom": 386,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 674.5,
+          "right": 46,
+          "bottom": 706.5,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 675.5,
+          "right": 182,
+          "bottom": 705.5,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 675.5,
+          "right": 214,
+          "bottom": 705.5,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "zh-CN-24-1024x768",
+      "height": 768,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 768,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 70,
+          "right": 214,
+          "bottom": 104,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 116,
+          "right": 214,
+          "bottom": 152,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 155,
+          "right": 214,
+          "bottom": 191,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 194,
+          "right": 214,
+          "bottom": 230,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 233,
+          "right": 214,
+          "bottom": 269,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 272,
+          "right": 214,
+          "bottom": 308,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 311,
+          "right": 214,
+          "bottom": 347,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 350,
+          "right": 214,
+          "bottom": 386,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 722.5,
+          "right": 46,
+          "bottom": 754.5,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 723.5,
+          "right": 182,
+          "bottom": 753.5,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 723.5,
+          "right": 214,
+          "bottom": 753.5,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "zh-CN-24-1024x799",
+      "height": 799,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 799,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 70,
+          "right": 214,
+          "bottom": 104,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 116,
+          "right": 214,
+          "bottom": 152,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 155,
+          "right": 214,
+          "bottom": 191,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 194,
+          "right": 214,
+          "bottom": 230,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 233,
+          "right": 214,
+          "bottom": 269,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 272,
+          "right": 214,
+          "bottom": 308,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 311,
+          "right": 214,
+          "bottom": 347,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 350,
+          "right": 214,
+          "bottom": 386,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 753.5,
+          "right": 46,
+          "bottom": 785.5,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 754.5,
+          "right": 182,
+          "bottom": 784.5,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 754.5,
+          "right": 214,
+          "bottom": 784.5,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "zh-CN-24-1024x800",
+      "height": 800,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 800,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 82,
+          "right": 214,
+          "bottom": 116,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 146,
+          "right": 214,
+          "bottom": 182,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 187,
+          "right": 214,
+          "bottom": 223,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 228,
+          "right": 214,
+          "bottom": 264,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 269,
+          "right": 214,
+          "bottom": 305,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 310,
+          "right": 214,
+          "bottom": 346,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 351,
+          "right": 214,
+          "bottom": 387,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 392,
+          "right": 214,
+          "bottom": 428,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 750.5,
+          "right": 46,
+          "bottom": 782.5,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 751.5,
+          "right": 182,
+          "bottom": 781.5,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 751.5,
+          "right": 214,
+          "bottom": 781.5,
+          "height": 30
+        }
+      ],
+      "memoVisible": true,
+      "memoHeight": 198,
+      "listOverflow": 1161
+    },
+    {
+      "label": "zh-CN-24-1024x900",
+      "height": 900,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 900,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 82,
+          "right": 214,
+          "bottom": 116,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 146,
+          "right": 214,
+          "bottom": 182,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 187,
+          "right": 214,
+          "bottom": 223,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 228,
+          "right": 214,
+          "bottom": 264,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 269,
+          "right": 214,
+          "bottom": 305,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 310,
+          "right": 214,
+          "bottom": 346,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 351,
+          "right": 214,
+          "bottom": 387,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 392,
+          "right": 214,
+          "bottom": 428,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 850.5,
+          "right": 46,
+          "bottom": 882.5,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 851.5,
+          "right": 182,
+          "bottom": 881.5,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 851.5,
+          "right": 214,
+          "bottom": 881.5,
+          "height": 30
+        }
+      ],
+      "memoVisible": true,
+      "memoHeight": 298,
+      "listOverflow": 1061
+    },
+    {
+      "label": "zh-CN-24-1280x600",
+      "height": 600,
+      "width": 1280,
+      "overflow": 0,
+      "sidebarBottom": 600,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 70,
+          "right": 214,
+          "bottom": 104,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 116,
+          "right": 214,
+          "bottom": 152,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 155,
+          "right": 214,
+          "bottom": 191,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 194,
+          "right": 214,
+          "bottom": 230,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 233,
+          "right": 214,
+          "bottom": 269,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 272,
+          "right": 214,
+          "bottom": 308,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 311,
+          "right": 214,
+          "bottom": 347,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 350,
+          "right": 214,
+          "bottom": 386,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 554.5,
+          "right": 46,
+          "bottom": 586.5,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 555.5,
+          "right": 182,
+          "bottom": 585.5,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 555.5,
+          "right": 214,
+          "bottom": 585.5,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "zh-CN-24-1440x900",
+      "height": 900,
+      "width": 1440,
+      "overflow": 0,
+      "sidebarBottom": 900,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 82,
+          "right": 214,
+          "bottom": 116,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 146,
+          "right": 214,
+          "bottom": 182,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 187,
+          "right": 214,
+          "bottom": 223,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 228,
+          "right": 214,
+          "bottom": 264,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 269,
+          "right": 214,
+          "bottom": 305,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 310,
+          "right": 214,
+          "bottom": 346,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 351,
+          "right": 214,
+          "bottom": 387,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 392,
+          "right": 214,
+          "bottom": 428,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 850.5,
+          "right": 46,
+          "bottom": 882.5,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 851.5,
+          "right": 182,
+          "bottom": 881.5,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 851.5,
+          "right": 214,
+          "bottom": 881.5,
+          "height": 30
+        }
+      ],
+      "memoVisible": true,
+      "memoHeight": 298,
+      "listOverflow": 1061
+    },
+    {
+      "label": "zh-CN-24-819x600",
+      "height": 600,
+      "width": 819,
+      "overflow": 0,
+      "sidebarBottom": 600,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 70,
+          "right": 214,
+          "bottom": 104,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 116,
+          "right": 214,
+          "bottom": 152,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 155,
+          "right": 214,
+          "bottom": 191,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 194,
+          "right": 214,
+          "bottom": 230,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 233,
+          "right": 214,
+          "bottom": 269,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 272,
+          "right": 214,
+          "bottom": 308,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 311,
+          "right": 214,
+          "bottom": 347,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 350,
+          "right": 214,
+          "bottom": 386,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 554.5,
+          "right": 46,
+          "bottom": 586.5,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 555.5,
+          "right": 182,
+          "bottom": 585.5,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 555.5,
+          "right": 214,
+          "bottom": 585.5,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "en-US-0-1024x600",
+      "height": 600,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 600,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 67,
+          "right": 214,
+          "bottom": 101,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 113,
+          "right": 214,
+          "bottom": 149,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 152,
+          "right": 214,
+          "bottom": 188,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 191,
+          "right": 214,
+          "bottom": 227,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 230,
+          "right": 214,
+          "bottom": 266,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 269,
+          "right": 214,
+          "bottom": 305,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 308,
+          "right": 214,
+          "bottom": 344,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 347,
+          "right": 214,
+          "bottom": 383,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 556,
+          "right": 46,
+          "bottom": 588,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 557,
+          "right": 182,
+          "bottom": 587,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 557,
+          "right": 214,
+          "bottom": 587,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "en-US-0-1024x650",
+      "height": 650,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 650,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 67,
+          "right": 214,
+          "bottom": 101,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 113,
+          "right": 214,
+          "bottom": 149,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 152,
+          "right": 214,
+          "bottom": 188,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 191,
+          "right": 214,
+          "bottom": 227,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 230,
+          "right": 214,
+          "bottom": 266,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 269,
+          "right": 214,
+          "bottom": 305,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 308,
+          "right": 214,
+          "bottom": 344,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 347,
+          "right": 214,
+          "bottom": 383,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 606,
+          "right": 46,
+          "bottom": 638,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 607,
+          "right": 182,
+          "bottom": 637,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 607,
+          "right": 214,
+          "bottom": 637,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "en-US-0-1024x720",
+      "height": 720,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 720,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 67,
+          "right": 214,
+          "bottom": 101,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 113,
+          "right": 214,
+          "bottom": 149,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 152,
+          "right": 214,
+          "bottom": 188,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 191,
+          "right": 214,
+          "bottom": 227,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 230,
+          "right": 214,
+          "bottom": 266,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 269,
+          "right": 214,
+          "bottom": 305,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 308,
+          "right": 214,
+          "bottom": 344,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 347,
+          "right": 214,
+          "bottom": 383,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 676,
+          "right": 46,
+          "bottom": 708,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 677,
+          "right": 182,
+          "bottom": 707,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 677,
+          "right": 214,
+          "bottom": 707,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "en-US-0-1024x768",
+      "height": 768,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 768,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 67,
+          "right": 214,
+          "bottom": 101,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 113,
+          "right": 214,
+          "bottom": 149,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 152,
+          "right": 214,
+          "bottom": 188,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 191,
+          "right": 214,
+          "bottom": 227,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 230,
+          "right": 214,
+          "bottom": 266,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 269,
+          "right": 214,
+          "bottom": 305,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 308,
+          "right": 214,
+          "bottom": 344,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 347,
+          "right": 214,
+          "bottom": 383,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 724,
+          "right": 46,
+          "bottom": 756,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 725,
+          "right": 182,
+          "bottom": 755,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 725,
+          "right": 214,
+          "bottom": 755,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "en-US-0-1024x799",
+      "height": 799,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 799,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 67,
+          "right": 214,
+          "bottom": 101,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 113,
+          "right": 214,
+          "bottom": 149,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 152,
+          "right": 214,
+          "bottom": 188,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 191,
+          "right": 214,
+          "bottom": 227,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 230,
+          "right": 214,
+          "bottom": 266,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 269,
+          "right": 214,
+          "bottom": 305,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 308,
+          "right": 214,
+          "bottom": 344,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 347,
+          "right": 214,
+          "bottom": 383,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 755,
+          "right": 46,
+          "bottom": 787,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 756,
+          "right": 182,
+          "bottom": 786,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 756,
+          "right": 214,
+          "bottom": 786,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "en-US-0-1024x800",
+      "height": 800,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 800,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 79,
+          "right": 214,
+          "bottom": 113,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 143,
+          "right": 214,
+          "bottom": 179,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 184,
+          "right": 214,
+          "bottom": 220,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 225,
+          "right": 214,
+          "bottom": 261,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 266,
+          "right": 214,
+          "bottom": 302,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 307,
+          "right": 214,
+          "bottom": 343,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 348,
+          "right": 214,
+          "bottom": 384,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 389,
+          "right": 214,
+          "bottom": 425,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 752,
+          "right": 46,
+          "bottom": 784,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 753,
+          "right": 182,
+          "bottom": 783,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 753,
+          "right": 214,
+          "bottom": 783,
+          "height": 30
+        }
+      ],
+      "memoVisible": true,
+      "memoHeight": 207,
+      "listOverflow": 0
+    },
+    {
+      "label": "en-US-0-1024x900",
+      "height": 900,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 900,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 79,
+          "right": 214,
+          "bottom": 113,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 143,
+          "right": 214,
+          "bottom": 179,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 184,
+          "right": 214,
+          "bottom": 220,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 225,
+          "right": 214,
+          "bottom": 261,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 266,
+          "right": 214,
+          "bottom": 302,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 307,
+          "right": 214,
+          "bottom": 343,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 348,
+          "right": 214,
+          "bottom": 384,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 389,
+          "right": 214,
+          "bottom": 425,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 852,
+          "right": 46,
+          "bottom": 884,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 853,
+          "right": 182,
+          "bottom": 883,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 853,
+          "right": 214,
+          "bottom": 883,
+          "height": 30
+        }
+      ],
+      "memoVisible": true,
+      "memoHeight": 307,
+      "listOverflow": 0
+    },
+    {
+      "label": "en-US-0-1280x600",
+      "height": 600,
+      "width": 1280,
+      "overflow": 0,
+      "sidebarBottom": 600,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 67,
+          "right": 214,
+          "bottom": 101,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 113,
+          "right": 214,
+          "bottom": 149,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 152,
+          "right": 214,
+          "bottom": 188,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 191,
+          "right": 214,
+          "bottom": 227,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 230,
+          "right": 214,
+          "bottom": 266,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 269,
+          "right": 214,
+          "bottom": 305,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 308,
+          "right": 214,
+          "bottom": 344,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 347,
+          "right": 214,
+          "bottom": 383,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 556,
+          "right": 46,
+          "bottom": 588,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 557,
+          "right": 182,
+          "bottom": 587,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 557,
+          "right": 214,
+          "bottom": 587,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "en-US-0-1440x900",
+      "height": 900,
+      "width": 1440,
+      "overflow": 0,
+      "sidebarBottom": 900,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 79,
+          "right": 214,
+          "bottom": 113,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 143,
+          "right": 214,
+          "bottom": 179,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 184,
+          "right": 214,
+          "bottom": 220,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 225,
+          "right": 214,
+          "bottom": 261,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 266,
+          "right": 214,
+          "bottom": 302,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 307,
+          "right": 214,
+          "bottom": 343,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 348,
+          "right": 214,
+          "bottom": 384,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 389,
+          "right": 214,
+          "bottom": 425,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 852,
+          "right": 46,
+          "bottom": 884,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 853,
+          "right": 182,
+          "bottom": 883,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 853,
+          "right": 214,
+          "bottom": 883,
+          "height": 30
+        }
+      ],
+      "memoVisible": true,
+      "memoHeight": 307,
+      "listOverflow": 0
+    },
+    {
+      "label": "en-US-0-819x600",
+      "height": 600,
+      "width": 819,
+      "overflow": 0,
+      "sidebarBottom": 600,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 67,
+          "right": 214,
+          "bottom": 101,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 113,
+          "right": 214,
+          "bottom": 149,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 152,
+          "right": 214,
+          "bottom": 188,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 191,
+          "right": 214,
+          "bottom": 227,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 230,
+          "right": 214,
+          "bottom": 266,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 269,
+          "right": 214,
+          "bottom": 305,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 308,
+          "right": 214,
+          "bottom": 344,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 347,
+          "right": 214,
+          "bottom": 383,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 556,
+          "right": 46,
+          "bottom": 588,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 557,
+          "right": 182,
+          "bottom": 587,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 557,
+          "right": 214,
+          "bottom": 587,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "en-US-1-1024x600",
+      "height": 600,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 600,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 67,
+          "right": 214,
+          "bottom": 101,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 113,
+          "right": 214,
+          "bottom": 149,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 152,
+          "right": 214,
+          "bottom": 188,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 191,
+          "right": 214,
+          "bottom": 227,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 230,
+          "right": 214,
+          "bottom": 266,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 269,
+          "right": 214,
+          "bottom": 305,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 308,
+          "right": 214,
+          "bottom": 344,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 347,
+          "right": 214,
+          "bottom": 383,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 556,
+          "right": 46,
+          "bottom": 588,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 557,
+          "right": 182,
+          "bottom": 587,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 557,
+          "right": 214,
+          "bottom": 587,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "en-US-1-1024x650",
+      "height": 650,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 650,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 67,
+          "right": 214,
+          "bottom": 101,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 113,
+          "right": 214,
+          "bottom": 149,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 152,
+          "right": 214,
+          "bottom": 188,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 191,
+          "right": 214,
+          "bottom": 227,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 230,
+          "right": 214,
+          "bottom": 266,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 269,
+          "right": 214,
+          "bottom": 305,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 308,
+          "right": 214,
+          "bottom": 344,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 347,
+          "right": 214,
+          "bottom": 383,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 606,
+          "right": 46,
+          "bottom": 638,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 607,
+          "right": 182,
+          "bottom": 637,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 607,
+          "right": 214,
+          "bottom": 637,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "en-US-1-1024x720",
+      "height": 720,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 720,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 67,
+          "right": 214,
+          "bottom": 101,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 113,
+          "right": 214,
+          "bottom": 149,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 152,
+          "right": 214,
+          "bottom": 188,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 191,
+          "right": 214,
+          "bottom": 227,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 230,
+          "right": 214,
+          "bottom": 266,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 269,
+          "right": 214,
+          "bottom": 305,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 308,
+          "right": 214,
+          "bottom": 344,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 347,
+          "right": 214,
+          "bottom": 383,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 676,
+          "right": 46,
+          "bottom": 708,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 677,
+          "right": 182,
+          "bottom": 707,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 677,
+          "right": 214,
+          "bottom": 707,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "en-US-1-1024x768",
+      "height": 768,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 768,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 67,
+          "right": 214,
+          "bottom": 101,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 113,
+          "right": 214,
+          "bottom": 149,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 152,
+          "right": 214,
+          "bottom": 188,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 191,
+          "right": 214,
+          "bottom": 227,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 230,
+          "right": 214,
+          "bottom": 266,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 269,
+          "right": 214,
+          "bottom": 305,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 308,
+          "right": 214,
+          "bottom": 344,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 347,
+          "right": 214,
+          "bottom": 383,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 724,
+          "right": 46,
+          "bottom": 756,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 725,
+          "right": 182,
+          "bottom": 755,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 725,
+          "right": 214,
+          "bottom": 755,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "en-US-1-1024x799",
+      "height": 799,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 799,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 67,
+          "right": 214,
+          "bottom": 101,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 113,
+          "right": 214,
+          "bottom": 149,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 152,
+          "right": 214,
+          "bottom": 188,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 191,
+          "right": 214,
+          "bottom": 227,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 230,
+          "right": 214,
+          "bottom": 266,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 269,
+          "right": 214,
+          "bottom": 305,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 308,
+          "right": 214,
+          "bottom": 344,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 347,
+          "right": 214,
+          "bottom": 383,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 755,
+          "right": 46,
+          "bottom": 787,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 756,
+          "right": 182,
+          "bottom": 786,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 756,
+          "right": 214,
+          "bottom": 786,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "en-US-1-1024x800",
+      "height": 800,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 800,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 79,
+          "right": 214,
+          "bottom": 113,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 143,
+          "right": 214,
+          "bottom": 179,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 184,
+          "right": 214,
+          "bottom": 220,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 225,
+          "right": 214,
+          "bottom": 261,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 266,
+          "right": 214,
+          "bottom": 302,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 307,
+          "right": 214,
+          "bottom": 343,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 348,
+          "right": 214,
+          "bottom": 384,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 389,
+          "right": 214,
+          "bottom": 425,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 752,
+          "right": 46,
+          "bottom": 784,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 753,
+          "right": 182,
+          "bottom": 783,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 753,
+          "right": 214,
+          "bottom": 783,
+          "height": 30
+        }
+      ],
+      "memoVisible": true,
+      "memoHeight": 207,
+      "listOverflow": 0
+    },
+    {
+      "label": "en-US-1-1024x900",
+      "height": 900,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 900,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 79,
+          "right": 214,
+          "bottom": 113,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 143,
+          "right": 214,
+          "bottom": 179,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 184,
+          "right": 214,
+          "bottom": 220,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 225,
+          "right": 214,
+          "bottom": 261,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 266,
+          "right": 214,
+          "bottom": 302,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 307,
+          "right": 214,
+          "bottom": 343,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 348,
+          "right": 214,
+          "bottom": 384,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 389,
+          "right": 214,
+          "bottom": 425,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 852,
+          "right": 46,
+          "bottom": 884,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 853,
+          "right": 182,
+          "bottom": 883,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 853,
+          "right": 214,
+          "bottom": 883,
+          "height": 30
+        }
+      ],
+      "memoVisible": true,
+      "memoHeight": 307,
+      "listOverflow": 0
+    },
+    {
+      "label": "en-US-1-1280x600",
+      "height": 600,
+      "width": 1280,
+      "overflow": 0,
+      "sidebarBottom": 600,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 67,
+          "right": 214,
+          "bottom": 101,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 113,
+          "right": 214,
+          "bottom": 149,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 152,
+          "right": 214,
+          "bottom": 188,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 191,
+          "right": 214,
+          "bottom": 227,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 230,
+          "right": 214,
+          "bottom": 266,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 269,
+          "right": 214,
+          "bottom": 305,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 308,
+          "right": 214,
+          "bottom": 344,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 347,
+          "right": 214,
+          "bottom": 383,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 556,
+          "right": 46,
+          "bottom": 588,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 557,
+          "right": 182,
+          "bottom": 587,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 557,
+          "right": 214,
+          "bottom": 587,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "en-US-1-1440x900",
+      "height": 900,
+      "width": 1440,
+      "overflow": 0,
+      "sidebarBottom": 900,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 79,
+          "right": 214,
+          "bottom": 113,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 143,
+          "right": 214,
+          "bottom": 179,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 184,
+          "right": 214,
+          "bottom": 220,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 225,
+          "right": 214,
+          "bottom": 261,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 266,
+          "right": 214,
+          "bottom": 302,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 307,
+          "right": 214,
+          "bottom": 343,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 348,
+          "right": 214,
+          "bottom": 384,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 389,
+          "right": 214,
+          "bottom": 425,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 852,
+          "right": 46,
+          "bottom": 884,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 853,
+          "right": 182,
+          "bottom": 883,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 853,
+          "right": 214,
+          "bottom": 883,
+          "height": 30
+        }
+      ],
+      "memoVisible": true,
+      "memoHeight": 307,
+      "listOverflow": 0
+    },
+    {
+      "label": "en-US-1-819x600",
+      "height": 600,
+      "width": 819,
+      "overflow": 0,
+      "sidebarBottom": 600,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 67,
+          "right": 214,
+          "bottom": 101,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 113,
+          "right": 214,
+          "bottom": 149,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 152,
+          "right": 214,
+          "bottom": 188,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 191,
+          "right": 214,
+          "bottom": 227,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 230,
+          "right": 214,
+          "bottom": 266,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 269,
+          "right": 214,
+          "bottom": 305,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 308,
+          "right": 214,
+          "bottom": 344,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 347,
+          "right": 214,
+          "bottom": 383,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 556,
+          "right": 46,
+          "bottom": 588,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 557,
+          "right": 182,
+          "bottom": 587,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 557,
+          "right": 214,
+          "bottom": 587,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "en-US-24-1024x600",
+      "height": 600,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 600,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 67,
+          "right": 214,
+          "bottom": 101,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 113,
+          "right": 214,
+          "bottom": 149,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 152,
+          "right": 214,
+          "bottom": 188,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 191,
+          "right": 214,
+          "bottom": 227,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 230,
+          "right": 214,
+          "bottom": 266,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 269,
+          "right": 214,
+          "bottom": 305,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 308,
+          "right": 214,
+          "bottom": 344,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 347,
+          "right": 214,
+          "bottom": 383,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 556,
+          "right": 46,
+          "bottom": 588,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 557,
+          "right": 182,
+          "bottom": 587,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 557,
+          "right": 214,
+          "bottom": 587,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "en-US-24-1024x650",
+      "height": 650,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 650,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 67,
+          "right": 214,
+          "bottom": 101,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 113,
+          "right": 214,
+          "bottom": 149,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 152,
+          "right": 214,
+          "bottom": 188,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 191,
+          "right": 214,
+          "bottom": 227,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 230,
+          "right": 214,
+          "bottom": 266,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 269,
+          "right": 214,
+          "bottom": 305,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 308,
+          "right": 214,
+          "bottom": 344,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 347,
+          "right": 214,
+          "bottom": 383,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 606,
+          "right": 46,
+          "bottom": 638,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 607,
+          "right": 182,
+          "bottom": 637,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 607,
+          "right": 214,
+          "bottom": 637,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "en-US-24-1024x720",
+      "height": 720,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 720,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 67,
+          "right": 214,
+          "bottom": 101,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 113,
+          "right": 214,
+          "bottom": 149,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 152,
+          "right": 214,
+          "bottom": 188,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 191,
+          "right": 214,
+          "bottom": 227,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 230,
+          "right": 214,
+          "bottom": 266,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 269,
+          "right": 214,
+          "bottom": 305,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 308,
+          "right": 214,
+          "bottom": 344,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 347,
+          "right": 214,
+          "bottom": 383,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 676,
+          "right": 46,
+          "bottom": 708,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 677,
+          "right": 182,
+          "bottom": 707,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 677,
+          "right": 214,
+          "bottom": 707,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "en-US-24-1024x768",
+      "height": 768,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 768,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 67,
+          "right": 214,
+          "bottom": 101,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 113,
+          "right": 214,
+          "bottom": 149,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 152,
+          "right": 214,
+          "bottom": 188,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 191,
+          "right": 214,
+          "bottom": 227,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 230,
+          "right": 214,
+          "bottom": 266,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 269,
+          "right": 214,
+          "bottom": 305,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 308,
+          "right": 214,
+          "bottom": 344,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 347,
+          "right": 214,
+          "bottom": 383,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 724,
+          "right": 46,
+          "bottom": 756,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 725,
+          "right": 182,
+          "bottom": 755,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 725,
+          "right": 214,
+          "bottom": 755,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "en-US-24-1024x799",
+      "height": 799,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 799,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 67,
+          "right": 214,
+          "bottom": 101,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 113,
+          "right": 214,
+          "bottom": 149,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 152,
+          "right": 214,
+          "bottom": 188,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 191,
+          "right": 214,
+          "bottom": 227,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 230,
+          "right": 214,
+          "bottom": 266,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 269,
+          "right": 214,
+          "bottom": 305,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 308,
+          "right": 214,
+          "bottom": 344,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 347,
+          "right": 214,
+          "bottom": 383,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 755,
+          "right": 46,
+          "bottom": 787,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 756,
+          "right": 182,
+          "bottom": 786,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 756,
+          "right": 214,
+          "bottom": 786,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "en-US-24-1024x800",
+      "height": 800,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 800,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 79,
+          "right": 214,
+          "bottom": 113,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 143,
+          "right": 214,
+          "bottom": 179,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 184,
+          "right": 214,
+          "bottom": 220,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 225,
+          "right": 214,
+          "bottom": 261,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 266,
+          "right": 214,
+          "bottom": 302,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 307,
+          "right": 214,
+          "bottom": 343,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 348,
+          "right": 214,
+          "bottom": 384,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 389,
+          "right": 214,
+          "bottom": 425,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 752,
+          "right": 46,
+          "bottom": 784,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 753,
+          "right": 182,
+          "bottom": 783,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 753,
+          "right": 214,
+          "bottom": 783,
+          "height": 30
+        }
+      ],
+      "memoVisible": true,
+      "memoHeight": 207,
+      "listOverflow": 1150
+    },
+    {
+      "label": "en-US-24-1024x900",
+      "height": 900,
+      "width": 1024,
+      "overflow": 0,
+      "sidebarBottom": 900,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 79,
+          "right": 214,
+          "bottom": 113,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 143,
+          "right": 214,
+          "bottom": 179,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 184,
+          "right": 214,
+          "bottom": 220,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 225,
+          "right": 214,
+          "bottom": 261,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 266,
+          "right": 214,
+          "bottom": 302,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 307,
+          "right": 214,
+          "bottom": 343,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 348,
+          "right": 214,
+          "bottom": 384,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 389,
+          "right": 214,
+          "bottom": 425,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 852,
+          "right": 46,
+          "bottom": 884,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 853,
+          "right": 182,
+          "bottom": 883,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 853,
+          "right": 214,
+          "bottom": 883,
+          "height": 30
+        }
+      ],
+      "memoVisible": true,
+      "memoHeight": 307,
+      "listOverflow": 1050
+    },
+    {
+      "label": "en-US-24-1280x600",
+      "height": 600,
+      "width": 1280,
+      "overflow": 0,
+      "sidebarBottom": 600,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 67,
+          "right": 214,
+          "bottom": 101,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 113,
+          "right": 214,
+          "bottom": 149,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 152,
+          "right": 214,
+          "bottom": 188,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 191,
+          "right": 214,
+          "bottom": 227,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 230,
+          "right": 214,
+          "bottom": 266,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 269,
+          "right": 214,
+          "bottom": 305,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 308,
+          "right": 214,
+          "bottom": 344,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 347,
+          "right": 214,
+          "bottom": 383,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 556,
+          "right": 46,
+          "bottom": 588,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 557,
+          "right": 182,
+          "bottom": 587,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 557,
+          "right": 214,
+          "bottom": 587,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    },
+    {
+      "label": "en-US-24-1440x900",
+      "height": 900,
+      "width": 1440,
+      "overflow": 0,
+      "sidebarBottom": 900,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 79,
+          "right": 214,
+          "bottom": 113,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 143,
+          "right": 214,
+          "bottom": 179,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 184,
+          "right": 214,
+          "bottom": 220,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 225,
+          "right": 214,
+          "bottom": 261,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 266,
+          "right": 214,
+          "bottom": 302,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 307,
+          "right": 214,
+          "bottom": 343,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 348,
+          "right": 214,
+          "bottom": 384,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 389,
+          "right": 214,
+          "bottom": 425,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 852,
+          "right": 46,
+          "bottom": 884,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 853,
+          "right": 182,
+          "bottom": 883,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 853,
+          "right": 214,
+          "bottom": 883,
+          "height": 30
+        }
+      ],
+      "memoVisible": true,
+      "memoHeight": 307,
+      "listOverflow": 1050
+    },
+    {
+      "label": "en-US-24-819x600",
+      "height": 600,
+      "width": 819,
+      "overflow": 0,
+      "sidebarBottom": 600,
+      "boxes": [
+        {
+          "selector": ".command-palette-trigger",
+          "x": 14,
+          "y": 67,
+          "right": 214,
+          "bottom": 101,
+          "height": 34
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"projects\"]",
+          "x": 14,
+          "y": 113,
+          "right": 214,
+          "bottom": 149,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"tasks\"]",
+          "x": 14,
+          "y": 152,
+          "right": 214,
+          "bottom": 188,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"channels\"]",
+          "x": 14,
+          "y": 191,
+          "right": 214,
+          "bottom": 227,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"knowledge\"]",
+          "x": 14,
+          "y": 230,
+          "right": 214,
+          "bottom": 266,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"models\"]",
+          "x": 14,
+          "y": 269,
+          "right": 214,
+          "bottom": 305,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"resources\"]",
+          "x": 14,
+          "y": 308,
+          "right": 214,
+          "bottom": 344,
+          "height": 36
+        },
+        {
+          "selector": ".sidebar nav [data-view=\"pet-workbench\"]",
+          "x": 14,
+          "y": 347,
+          "right": 214,
+          "bottom": 383,
+          "height": 36
+        },
+        {
+          "selector": "#owner-avatar",
+          "x": 14,
+          "y": 556,
+          "right": 46,
+          "bottom": 588,
+          "height": 32
+        },
+        {
+          "selector": "#advanced-settings",
+          "x": 152,
+          "y": 557,
+          "right": 182,
+          "bottom": 587,
+          "height": 30
+        },
+        {
+          "selector": "#logout",
+          "x": 184,
+          "y": 557,
+          "right": 214,
+          "bottom": 587,
+          "height": 30
+        }
+      ],
+      "memoVisible": false,
+      "memoHeight": 0,
+      "listOverflow": 0
+    }
+  ],
+  "failures": [],
+  "errors": []
+}

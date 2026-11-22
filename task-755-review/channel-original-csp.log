@@ -1,0 +1,12 @@
+node:internal/modules/run_main:107
+    triggerUncaughtException(
+    ^
+
+page.waitForFunction: EvalError: Evaluating a string as JavaScript violates the following Content Security Policy directive because 'unsafe-eval' is not an allowed source of script: script-src 'self'".
+
+    at eval (<anonymous>)
+    at predicate (eval at evaluate (:234:30), <anonymous>:11:37)
+    at next (eval at evaluate (:234:30), <anonymous>:32:31)
+    at /srv/build/users/kaikai/kk-workspace/.aha2-worktrees/task_ac7b5b2e98bc5a2eed8a/.aha2-context/task_ac7b5b2e98bc5a2eed8a/scratch/main/fixed/web/tests/task_channel_permissions.browser.mjs:200:14
+
+Node.js v24.21.0

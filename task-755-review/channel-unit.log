@@ -1,0 +1,13 @@
+✔ channel tools share the channel glyph and keep connection state (0.864511ms)
+✔ the permissions tool is removed and old links resolve to the channel page (0.163455ms)
+✔ the channel toolbar entry carries the pending permission badge (0.205603ms)
+✔ the channel badge caps at 99+ (0.141594ms)
+✔ new channel and approval copy has English translations (0.221914ms)
+ℹ tests 5
+ℹ suites 0
+ℹ pass 5
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 65.596639

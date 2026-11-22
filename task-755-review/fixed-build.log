@@ -1,0 +1,4 @@
+(node:2490181) ExperimentalWarning: stripTypeScriptTypes is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+Built /srv/build/users/kaikai/kk-workspace/.aha2-worktrees/task_ac7b5b2e98bc5a2eed8a/.aha2-context/task_ac7b5b2e98bc5a2eed8a/scratch/main/fixed/web/build and /srv/build/users/kaikai/kk-workspace/.aha2-worktrees/task_ac7b5b2e98bc5a2eed8a/.aha2-context/task_ac7b5b2e98bc5a2eed8a/scratch/main/fixed/web/dist
+Production assets: app.b9a68fb77e12.js styles.9280454792c1.css 22 route chunks vendor v=34987d1ee774
