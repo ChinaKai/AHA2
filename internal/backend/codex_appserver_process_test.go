@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"strings"
@@ -29,6 +30,9 @@ func TestCodexAppServerProcessHelper(t *testing.T) {
 		if json.Unmarshal(scanner.Bytes(), &message) != nil {
 			os.Exit(90)
 		}
+		if mode == "handshake-failure" {
+			os.Exit(0)
+		}
 		result := map[string]any{}
 		switch message.Method {
 		case "initialize":
@@ -52,6 +56,14 @@ func TestCodexAppServerProcessHelper(t *testing.T) {
 			time.Sleep(30 * time.Second)
 		}
 		if message.Method == "turn/start" {
+			if strings.HasPrefix(mode, "provider-failed") {
+				_, _ = io.WriteString(os.Stdout, `{"method":"turn/completed","params":{"threadId":"synthetic-thread","turn":{"id":"synthetic-turn","status":"failed","error":{"message":"synthetic-provider-quota-exhausted","codexErrorInfo":"usageLimitExceeded"}}}}`+"\n")
+				if mode == "provider-failed-scan" {
+					_, _ = io.WriteString(os.Stdout, strings.Repeat("x", 17*1024*1024))
+					time.Sleep(30 * time.Second)
+				}
+				continue
+			}
 			_, _ = io.WriteString(os.Stdout, `{"method":"item/completed","params":{"threadId":"synthetic-thread","turnId":"synthetic-turn","item":{"type":"agentMessage","id":"reply","text":"synthetic-result","phase":"final_answer"}}}`+"\n")
 			_, _ = io.WriteString(os.Stdout, `{"method":"turn/completed","params":{"threadId":"synthetic-thread","turn":{"id":"synthetic-turn","status":"completed"}}}`+"\n")
 		}
@@ -60,8 +72,9 @@ func TestCodexAppServerProcessHelper(t *testing.T) {
 }
 
 type appServerProcessTestRunner struct {
-	mode    string
-	command workspace.Command
+	mode          string
+	command       workspace.Command
+	afterRunError error
 }
 
 func (*appServerProcessTestRunner) StreamsInput() bool { return true }
@@ -71,7 +84,11 @@ func (runner *appServerProcessTestRunner) Run(ctx context.Context, command works
 	// limits, context and line handler still cross LocalRunner and scanOutput.
 	command.Args = []string{"-test.run=^TestCodexAppServerProcessHelper$"}
 	command.Env = map[string]string{"AHA2_APP_SERVER_PROCESS_TEST": runner.mode}
-	return (workspace.LocalRunner{}).Run(ctx, command, handler)
+	result, err := (workspace.LocalRunner{}).Run(ctx, command, handler)
+	if err != nil {
+		return result, err
+	}
+	return result, runner.afterRunError
 }
 
 func TestCodexAppServerRealProcessLargeResumeAndLimitFailure(t *testing.T) {
@@ -102,6 +119,49 @@ func TestCodexAppServerRealProcessLargeResumeAndLimitFailure(t *testing.T) {
 			}
 			if runner.command.StdoutLineLimit != 16*1024*1024 || runner.command.OutputLimit != 64*1024 {
 				t.Fatal("adapter did not configure bounded protocol output")
+			}
+		})
+	}
+}
+
+// Provider failure comes from real JSON-RPC process output; only the independent
+// cleanup failure is injected after LocalRunner has finished successfully.
+func TestCodexAppServerRealProcessErrorPrecedence(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupError := errors.New("synthetic-runner-cleanup-failure")
+	for _, tc := range []struct {
+		mode                                string
+		wantProvider, wantScan, wantStarted bool
+	}{
+		{mode: "provider-failed", wantProvider: true, wantStarted: true},
+		{mode: "provider-failed-scan", wantScan: true, wantStarted: true},
+		{mode: "large", wantStarted: true},
+		{mode: "handshake-failure"},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			runner := &appServerProcessTestRunner{mode: tc.mode, afterRunError: cleanupError}
+			request := Request{Runner: runner, WorkDir: t.TempDir(), Prompt: "synthetic", ProviderSessionID: "synthetic-thread"}
+			begin := time.Now()
+			_, err, started := (Codex{}).executeLiveInbox(context.Background(), request, nil, executable, 8*time.Second)
+			if started != tc.wantStarted || err == nil {
+				t.Fatalf("started=%v err=%v", started, err)
+			}
+			if tc.wantProvider {
+				if !strings.Contains(err.Error(), "synthetic-provider-quota-exhausted") || strings.Contains(err.Error(), cleanupError.Error()) {
+					t.Fatalf("provider failure was replaced by cleanup error: %v", err)
+				}
+			} else if tc.wantScan {
+				if !strings.Contains(err.Error(), "line exceeds 16777216 byte scan limit") || strings.Contains(err.Error(), "exited") || strings.Contains(err.Error(), "timed out") {
+					t.Fatalf("scan failure was lost: %v", err)
+				}
+			} else if !errors.Is(err, cleanupError) {
+				t.Fatalf("runner failure was lost: %v", err)
+			}
+			if time.Since(begin) > 6*time.Second {
+				t.Fatalf("error settlement took too long: %s", time.Since(begin))
 			}
 		})
 	}

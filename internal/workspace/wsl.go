@@ -42,7 +42,7 @@ func (runner WSLRunner) Run(parent context.Context, command Command, onLine Line
 		return Result{}, err
 	}
 	result, err := wslProcessRunner(parent, host, wslHostEnvironment(), onLine)
-	if mark != "" && (parent.Err() != nil || errors.Is(err, context.DeadlineExceeded) || isProcessOutputError(err)) {
+	if mark != "" && (parent.Err() != nil || errors.Is(err, context.DeadlineExceeded) || IsProcessOutputError(err)) {
 		KillMarkedProcesses(WSLRunner{Distro: distro}, mark)
 	}
 	return result, err

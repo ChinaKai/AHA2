@@ -189,7 +189,9 @@ const processOutputSpoolLimit = 4 * 1024 * 1024
 // errProcessOutputScan distinguishes a framing/read failure from cancellation.
 var errProcessOutputScan = errors.New("workspace: process output scan failed")
 
-func isProcessOutputError(err error) bool { return errors.Is(err, errProcessOutputScan) }
+// IsProcessOutputError reports an actual output framing/read failure, including
+// wrapped errors. Callers can distinguish it from ordinary teardown failures.
+func IsProcessOutputError(err error) bool { return errors.Is(err, errProcessOutputScan) }
 
 // errProcessOutputTruncated reports that a process pipe was closed while the
 // consumer was backpressured, so output still in that pipe was lost. Callers

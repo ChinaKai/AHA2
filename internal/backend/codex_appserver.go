@@ -786,11 +786,11 @@ func (adapter Codex) executeLiveInbox(
 
 	// An unexpected process exit has no turn/completed response, so the runner
 	// result is the only place the exit code and stderr survive. Attach them to
-	// the adapter error instead of discarding the only diagnostic evidence. A
-	// runner failure stays authoritative: the stream closed because the runner
-	// failed, not because the process exited on its own. This also applies during
-	// initialize/resume, before the turn loop can report an unexpected exit.
-	if runFailure != nil {
+	// the adapter error instead of discarding the only diagnostic evidence.
+	// Before a turn starts, or when framing fails or the process disappears,
+	// prefer the runner's concrete cause over a generic stream/exit error.
+	// Once started, an ordinary cleanup failure must not hide a provider error.
+	if runFailure != nil && (!started || workspace.IsProcessOutputError(runFailure) || errors.Is(sessionErr, errCodexAppServerExited)) {
 		return Result{Reply: session.reply, ExitCode: runResult.ExitCode, ProviderSessionID: session.threadID}, runFailure, started
 	}
 	if errors.Is(sessionErr, errCodexAppServerExited) {
@@ -804,6 +804,9 @@ func (adapter Codex) executeLiveInbox(
 			return Result{Reply: session.reply, ExitCode: runResult.ExitCode, ProviderSessionID: session.threadID}, fmt.Errorf("%v: %s", sessionErr, session.providerError), started
 		}
 		return Result{Reply: session.reply, ExitCode: runResult.ExitCode, ProviderSessionID: session.threadID}, sessionErr, started
+	}
+	if runFailure != nil {
+		return Result{Reply: session.reply, ExitCode: runResult.ExitCode, ProviderSessionID: session.threadID}, runFailure, started
 	}
 	if strings.TrimSpace(session.reply) == "" {
 		return Result{ExitCode: runResult.ExitCode, ProviderSessionID: session.threadID}, fmt.Errorf("codex returned no agent message"), started
