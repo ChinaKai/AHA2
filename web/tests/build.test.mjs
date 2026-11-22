@@ -1596,7 +1596,8 @@ test("built web contains responsive application", async () => {
   assert.doesNotMatch(script, /\["prompts",\s*"bot",\s*"提示词"\]/);
   assert.doesNotMatch(script, /\["sync",\s*"sync",/);
   assert.match(css, /\.bottom-nav \{[^}]*grid-template-columns:\s*repeat\(8,1fr\)/);
-  assert.match(script, /"channels",\s*"bot",\s*"nav\.channels"/);
+  assert.match(script, /"channels",\s*"channel",\s*"nav\.channels"/);
+  assert.match(script, /"pet-workbench",\s*"bot",\s*"nav\.pet"/);
 	assert.match(script, /renderChannels\(state\.channelProviders, state\.channelInstances,/);
   assert.match(api, /api\/v1\/channel-providers/);
   assert.match(script, /channels\.js\?v=[a-f0-9]{12}/);
@@ -3976,7 +3977,11 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   // the same global stylesheet. After merging task-736 + task-737, the same
   // mask version and level-5 measurement is 278,511 JS+CSS; ceil to the next
   // 256-byte boundary.
-  const FIRST_SCREEN_GZIP_BUDGET = 278528;
+  // task-755 keeps short-screen navigation/account controls reachable and uses
+  // a distinct channel glyph. From 6a5099d to 406feb3, the same masked-query,
+  // level-5 build adds 69 JS + 145 CSS bytes: 224,510 + 54,070 = 278,580
+  // (Windows release run: 278,583). Ceil to the next 256-byte boundary.
+  const FIRST_SCREEN_GZIP_BUDGET = 278784;
   // The version query parameter is a content hash and its hex digits change
   // how the same code gzips: main already sits exactly on the budget, so a
   // hash-only change could trip it without growing the payload. Mask the
