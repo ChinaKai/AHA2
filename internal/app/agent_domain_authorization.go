@@ -20,7 +20,9 @@ func (s *Service) AgentDomainCallContext(ctx context.Context, claims agentapi.Cl
 	// reads can safely report an empty or unsupported state; grant-addressed
 	// handlers still enforce the actual binding, grant status and capability.
 	// Never replace their resource authorization with tools/list visibility.
-	readAllowed := s.petDomainReadable(ctx, call.Task) && !s.agentMCPChannelBound(ctx, call.Task.ID, call.Turn.InboxBatchID)
+	// Owner resource grants are independent of channel input and routes.
+	// Workspace keeps its separate channel policy in AgentWorkspaceMCPAllowed.
+	readAllowed := s.petDomainReadable(ctx, call.Task)
 	writeAllowed := false
 	if write {
 		writeAllowed = readAllowed && s.hardwareMCPSnapshotWritable(ctx, call.Task, call.Turn.RuntimeConfigSnapshotID, call.Turn.AgentID)

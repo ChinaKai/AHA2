@@ -331,14 +331,11 @@ func (s *Service) workspaceMCPInjected(ctx context.Context, task domain.Task, in
 // browserMCPInjected reports whether the shared-browser domain belongs to this
 // Turn. Its trigger is the presence of an active browser grant for the Task:
 // without a lease the tools could only report "no grant", so the domain is not
-// advertised at all. Pet access requires its live view permission; channel-hosted
-// Turns remain excluded. A grant whose session is already closed does not count, which
-// mirrors the Agent-facing HTTP view.
+// advertised at all. Pet access requires its live view permission. Channel
+// input and routes do not revoke owner resource grants. A grant whose session
+// is already closed does not count, mirroring the Agent-facing HTTP view.
 func (s *Service) browserMCPInjected(ctx context.Context, task domain.Task, inboxBatchID string) bool {
 	if !s.petDomainReadable(ctx, task) {
-		return false
-	}
-	if s.agentMCPChannelBound(ctx, task.ID, inboxBatchID) {
 		return false
 	}
 	grants, err := s.store.BrowserTaskGrants(ctx, task.ID)
@@ -361,12 +358,9 @@ func (s *Service) browserMCPInjected(ctx context.Context, task domain.Task, inbo
 // hardwareMCPInjected reports whether the Task hardware domain belongs to this
 // Turn. It is intentionally independent from the browser trigger: a Task with
 // bound hardware groups receives this domain even when it holds no browser
-// lease, and vice versa.
+// lease, and vice versa. Channel input and routes do not revoke bindings.
 func (s *Service) hardwareMCPInjected(ctx context.Context, task domain.Task, inboxBatchID string) bool {
 	if !s.petDomainReadable(ctx, task) {
-		return false
-	}
-	if s.agentMCPChannelBound(ctx, task.ID, inboxBatchID) {
 		return false
 	}
 	groups, err := s.store.HardwareGroups(ctx, task.ID)

@@ -23,8 +23,10 @@ func (s *Service) SetDesktopMCPAvailability(available func(string) bool) {
 	s.desktopMCPAvailable = available
 }
 
+// Channel input does not change the existing owner share. The desktop
+// handlers still require the Task session, target, controller and observation.
 func (s *Service) desktopMCPInjected(ctx context.Context, task domain.Task, agentID, batchID string) bool {
-	return agentID == "main" && s.petDomainReadable(ctx, task) && !s.agentMCPChannelBound(ctx, task.ID, batchID) && s.desktopMCPAvailable != nil && s.desktopMCPAvailable(task.ID)
+	return agentID == "main" && s.petDomainReadable(ctx, task) && s.desktopMCPAvailable != nil && s.desktopMCPAvailable(task.ID)
 }
 
 func (s *Service) AgentDesktopMCPAllowed(ctx context.Context, call AgentCallContext) bool {

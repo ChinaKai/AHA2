@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func TestPetChannelBatchExcludesEverySharedDomainAfterRealInboxClaim(t *testing.T) {
+func TestPetChannelBatchKeepsResourceGrantsAfterRealInboxClaim(t *testing.T) {
 	f := newPetTaskFixture(t)
 	task := f.createPetDraft(t, "channel scope fixture")
 	assistant, err := f.database.EnsureOwnerAssistant(f.ctx, f.createdAt)
@@ -50,9 +50,14 @@ func TestPetChannelBatchExcludesEverySharedDomainAfterRealInboxClaim(t *testing.
 		t.Fatal("Inbox batch identity was lost")
 	}
 	servers, _ := f.service.mcpRuntimeForTurn(f.ctx, task, "main", "http://127.0.0.1:8766", stored.InboxBatchID)
-	for _, name := range []string{knowledgeMCPName, workspaceMCPName, browserMCPName, hardwareMCPName, desktopMCPName, collabMCPName} {
+	for _, name := range []string{knowledgeMCPName, workspaceMCPName, collabMCPName} {
 		if hasMCPServer(servers, name) {
 			t.Fatalf("pet channel Turn received %s", name)
+		}
+	}
+	for _, name := range []string{browserMCPName, hardwareMCPName, desktopMCPName} {
+		if !hasMCPServer(servers, name) {
+			t.Fatalf("pet channel Turn lost %s", name)
 		}
 	}
 	claims := agentapi.Claims{TaskID: task.ID, AgentID: "main", TurnID: turn.ID}
@@ -65,8 +70,9 @@ func TestPetChannelBatchExcludesEverySharedDomainAfterRealInboxClaim(t *testing.
 	}
 	for _, domainName := range []string{"workspace", "browser", "hardware", "desktop"} {
 		for _, write := range []bool{false, true} {
-			if _, err := f.service.AgentDomainCallContext(f.ctx, claims, domainName, write); err == nil {
-				t.Fatalf("pet channel Turn can call %s write=%v", domainName, write)
+			_, err := f.service.AgentDomainCallContext(f.ctx, claims, domainName, write)
+			if (err == nil) != (domainName != "workspace") {
+				t.Fatalf("pet channel %s write=%v err=%v", domainName, write, err)
 			}
 		}
 	}

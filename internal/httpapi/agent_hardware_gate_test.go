@@ -57,6 +57,10 @@ func TestAgentHardwareSharedAuthorizationRejectsWritesBeforeEffects(t *testing.T
 						t.Fatal(err)
 					}
 				}
+				if err := f.h.database.ReplaceTaskHardwareBindings(f.h.ctx, f.task.ID, []domain.TaskHardwareBinding{{TaskID: f.task.ID, ID: "board", ResourceID: f.board.ID}, {TaskID: f.task.ID, ID: "device", ResourceID: f.adb.ID}}); err != nil {
+					t.Fatal(err)
+				}
+				seedKnowledgeMCPInbox(t, f.h.dbPath, f.task, f.turn, "channel:task_route")
 				f.token = f.h.issue(f.task.ID, "main", f.turn.ID)
 				if pet {
 					assistant, _ := f.h.database.EnsureOwnerAssistant(f.h.ctx, time.Now())
@@ -65,7 +69,7 @@ func TestAgentHardwareSharedAuthorizationRejectsWritesBeforeEffects(t *testing.T
 					}
 				}
 			}
-			for _, scenario := range []string{"non_main", "read_only_snapshot", "read_only_resource", "channel_turn", "terminal_task", "revoked_pet"} {
+			for _, scenario := range []string{"non_main", "read_only_snapshot", "read_only_resource", "revoked_binding", "terminal_task", "revoked_pet"} {
 				if scenario == "revoked_pet" && !pet {
 					continue
 				}
@@ -93,12 +97,18 @@ func TestAgentHardwareSharedAuthorizationRejectsWritesBeforeEffects(t *testing.T
 						}
 						assistant, _ := f.h.database.EnsureOwnerAssistant(f.h.ctx, time.Now())
 						err = f.h.database.UpdateOwnerPetPermissions(f.h.ctx, assistant.ID, false, false, false, false, false, false, false, false, time.Now())
-					case "channel_turn":
-						payload := `{"channel_context":{"schema":"aha2.channel.v1","instance_id":"fixture","endpoint":"group_digital_human","conversation_id":"fixture","route":{"mode":"task_route"}}}`
-						_, err = raw.Exec(`INSERT INTO agent_inbox(id,task_id,round_id,target_agent_id,source_agent_id,source_kind,source_turn_id,message_id,content,payload_json,status,batch_id,created_at,claimed_at,processed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, domain.NewID("inbox"), f.task.ID, f.turn.RoundID, "main", "channel", "channel_message", "", "", "fixture", payload, "claimed", f.turn.InboxBatchID, time.Now().Format(time.RFC3339Nano), "", "")
+					case "revoked_binding":
+						err = f.h.database.ReplaceTaskHardwareBindings(f.h.ctx, f.task.ID, nil)
 					}
 					if err != nil {
 						t.Fatal(err)
+					}
+					if scenario == "read_only_snapshot" || scenario == "non_main" {
+						assertControlCapabilities(t, f.server.URL, f.token, "hardware", true, false)
+						status, names, _ := coreMCPToolsList(t, f.server.URL+"/api/v1/agent/hardware/mcp", f.token)
+						if status != 200 || len(names) != 2 {
+							t.Fatalf("read-only tools=%d %v", status, names)
+						}
 					}
 					beforeAccepts, beforeExec := f.accepts.Load(), f.executions.Load()
 					for _, op := range []struct {
@@ -129,7 +139,7 @@ func TestAgentHardwareSharedAuthorizationRejectsWritesBeforeEffects(t *testing.T
 					if f.accepts.Load() != beforeAccepts || f.executions.Load() != beforeExec || !f.manager.Status(f.task.ID, "board", "network", false).Connected {
 						t.Fatal("denied operation changed transport state")
 					}
-					if scenario == "channel_turn" || scenario == "revoked_pet" {
+					if scenario == "revoked_pet" {
 						if status := f.raw(t, http.MethodGet, "", nil); status != 403 {
 							t.Fatalf("HTTP read after revocation status=%d", status)
 						}

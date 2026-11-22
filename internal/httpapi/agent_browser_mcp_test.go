@@ -521,14 +521,14 @@ func TestAgentBrowserMCPAuthorizationFailuresAreFinal(t *testing.T) {
 		t.Fatalf("error leaked the owning task: %s", foreign.Text)
 	}
 
-	// A channel-hosted Turn loses the domain even while the lease is active.
+	// A channel-hosted Turn retains its active owner grant.
 	retireCoreTurn(t, f.store, f.turn)
 	channelTurn, channelToken := browserMCPToken(t, f.browserAPIFixture, f.task, "batch-browser-mcp-channel")
 	seedKnowledgeMCPInbox(t, filepath.Join(f.store.DataDir(), "aha2.db"), f.task, channelTurn, "channel:task_route")
 	response := agentRequest(t, browserMCPURL(f.browserAPIFixture), http.MethodPost, channelToken, map[string]any{
 		"jsonrpc": "2.0", "id": 1, "method": "initialize",
 	})
-	if response.StatusCode != http.StatusForbidden {
+	if response.StatusCode != http.StatusOK {
 		t.Fatalf("channel turn status=%d body=%s", response.StatusCode, readBody(t, response))
 	}
 	response.Body.Close()
@@ -550,7 +550,7 @@ func TestAgentBrowserMCPAuthorizationFailuresAreFinal(t *testing.T) {
 	response = agentRequest(t, browserMCPURL(f.browserAPIFixture), http.MethodPost, brokenToken, map[string]any{
 		"jsonrpc": "2.0", "id": 1, "method": "initialize",
 	})
-	if response.StatusCode != http.StatusForbidden {
+	if response.StatusCode != http.StatusOK {
 		t.Fatalf("malformed batch status=%d body=%s", response.StatusCode, readBody(t, response))
 	}
 	response.Body.Close()

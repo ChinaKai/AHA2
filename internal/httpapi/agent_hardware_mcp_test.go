@@ -439,7 +439,7 @@ func TestAgentHardwareMCPTerminalReadEnforcesResponseBudget(t *testing.T) {
 	}
 }
 
-func TestAgentHardwareMCPRejectsChannelBoundTurns(t *testing.T) {
+func TestAgentHardwareMCPChannelInputKeepsBinding(t *testing.T) {
 	f := newHardwareMCPFixture(t)
 	url := hardwareMCPURL(f.h)
 	retireCoreTurn(t, f.h.database, f.turn)
@@ -466,9 +466,9 @@ func TestAgentHardwareMCPRejectsChannelBoundTurns(t *testing.T) {
 		response.Body.Close()
 		retireCoreTurn(t, f.h.database, turn)
 	}
-	assertStatus("channel batch", "batch-hardware-mcp-channel", http.StatusForbidden)
+	assertStatus("channel batch", "batch-hardware-mcp-channel", http.StatusOK)
 	assertStatus("plain batch", "batch-hardware-mcp-plain", http.StatusOK)
-	assertStatus("malformed batch", "batch-hardware-mcp-broken", http.StatusForbidden)
+	assertStatus("malformed batch", "batch-hardware-mcp-broken", http.StatusOK)
 }
 
 type hardwareMCPTerminalPayload struct {

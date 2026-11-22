@@ -141,6 +141,11 @@ func TestTaskRouteAddsNarrowChannelMCP(t *testing.T) {
 				t.Fatal(err)
 			}
 
+			// A Web/plain Turn with an active route keeps owner resource grants.
+			seedHardwareMCPGroup(t, ctx, fixture.database, task)
+			seedBrowserMCPGrant(t, ctx, fixture.database, task, "routed-grant", "active")
+			fixture.service.SetDesktopMCPAvailability(func(string) bool { return true })
+
 			servers, allowed := fixture.service.mcpRuntimeForTask(ctx, task, "http://127.0.0.1:8766/")
 			found := backend.MCPServer{}
 			for _, server := range servers {
@@ -172,6 +177,11 @@ func TestTaskRouteAddsNarrowChannelMCP(t *testing.T) {
 			// knowledge domain MCP must not be injected even though the Task's
 			// own switch is on.
 			turnServers, turnAllowed := fixture.service.mcpRuntimeForTurn(ctx, task, "main", "http://127.0.0.1:8766/", "")
+			for name, want := range map[string]int{hardwareMCPName: 2, browserMCPName: 8, desktopMCPName: 2} {
+				if !hasMCPServer(turnServers, name) || len(mcpDomainTools(turnAllowed, name)) != want {
+					t.Fatalf("active route changed read-only %s tools", name)
+				}
+			}
 			for _, server := range turnServers {
 				if server.Name == knowledgeMCPName {
 					t.Fatalf("routed turn gained knowledge MCP: %#v", turnServers)

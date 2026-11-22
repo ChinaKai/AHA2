@@ -6,8 +6,8 @@ import "context"
 // domain MCP. The runtime injects the server only when browserMCPInjected
 // returns true, and every MCP method re-checks this gate, so knowing the URL or
 // reading tools/list is never an authorization shortcut. The domain is absent
-// for a Task without an active browser grant, a channel-hosted Turn, or a pet
-// whose live view permission has been revoked.
+// for a Task without an active browser grant or a pet whose live view
+// permission has been revoked. Channel input does not change a resource grant.
 func (s *Service) AgentBrowserMCPAllowed(ctx context.Context, call AgentCallContext) bool {
 	return s.browserMCPInjected(ctx, call.Task, call.Turn.InboxBatchID)
 }

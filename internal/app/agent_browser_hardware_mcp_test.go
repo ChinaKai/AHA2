@@ -151,15 +151,21 @@ func TestBrowserAndHardwareMCPAreIndependentBuiltins(t *testing.T) {
 
 // TestBrowserHardwareMCPInjectionUsesIndependentTriggers proves the two
 // domains are not merged into one condition: a hardware binding alone injects
-// only hardware, a browser lease alone injects only browser, and a channel
-// hosted batch removes both.
+// only hardware, a browser lease alone injects only browser, and channel input
+// does not revoke either binding.
 func TestBrowserHardwareMCPInjectionUsesIndependentTriggers(t *testing.T) {
 	ctx, database, service, task, model := newStreamCompatFixture(t)
 	const apiURL = "http://127.0.0.1:8766"
+	sharedTaskID := task.ID
+	desktopAvailable := false
+	service.SetDesktopMCPAvailability(func(id string) bool { return desktopAvailable && id == task.ID })
 
 	check := func(label string, task domain.Task, batchID string, wantBrowser, wantHardware bool) {
 		t.Helper()
 		servers, allowed := service.mcpRuntimeForTurn(ctx, task, "main", apiURL, batchID)
+		if got, want := hasMCPServer(servers, desktopMCPName), desktopAvailable && task.ID == sharedTaskID; got != want {
+			t.Fatalf("%s desktop server=%v want=%v", label, got, want)
+		}
 		if got := hasMCPServer(servers, browserMCPName); got != wantBrowser {
 			t.Fatalf("%s browser server=%v want=%v servers=%#v", label, got, wantBrowser, servers)
 		}
@@ -188,6 +194,7 @@ func TestBrowserHardwareMCPInjectionUsesIndependentTriggers(t *testing.T) {
 	check("hardware only", task, "", false, true)
 
 	seedBrowserMCPGrant(t, ctx, database, task, "grant-both", "active")
+	desktopAvailable = true
 	check("both triggers", task, "", true, true)
 
 	browserOnly, err := service.CreateTask(ctx, CreateTaskInput{
@@ -212,8 +219,7 @@ func TestBrowserHardwareMCPInjectionUsesIndependentTriggers(t *testing.T) {
 		check(state+" grant", inactive, "", false, false)
 	}
 
-	// A channel-hosted batch removes both domains even though the Task holds
-	// both triggers.
+	// Resource grants remain valid for pure channel and mixed batches.
 	raw, err := sql.Open("sqlite", filepath.Join(database.DataDir(), "aha2.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -257,13 +263,15 @@ func TestBrowserHardwareMCPInjectionUsesIndependentTriggers(t *testing.T) {
 	}
 	for _, mode := range []string{"conversation_host", "task_route"} {
 		batchID := "batch-browser-hardware-" + strings.ReplaceAll(mode, "_", "-")
-		insertInbox(batchID, "plain", "channel:"+mode)
-		check(mode+" batch", task, batchID, false, false)
+		insertInbox(batchID, "channel:"+mode)
+		check(mode+" batch", task, batchID, true, true)
+		insertInbox(batchID+"-mixed", "plain", "channel:"+mode)
+		check(mode+" mixed batch", task, batchID+"-mixed", true, true)
 	}
 	insertInbox("batch-browser-hardware-plain", "plain")
 	check("plain batch", task, "batch-browser-hardware-plain", true, true)
 	insertInbox("batch-browser-hardware-malformed", "raw:not-json")
-	check("malformed batch", task, "batch-browser-hardware-malformed", false, false)
+	check("malformed batch", task, "batch-browser-hardware-malformed", true, true)
 
 	check("pet task", domain.Task{ID: petTaskID}, "", false, false)
 	check("pet project", domain.Task{ID: "task-pet-project", ProjectID: petProjectID}, "", false, false)

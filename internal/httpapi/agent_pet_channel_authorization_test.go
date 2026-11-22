@@ -13,7 +13,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
-func TestPetChannelTurnRejectsDomainDiscoveryAndDirectHTTPCalls(t *testing.T) {
+func TestPetChannelTurnKeepsResourceGrantsAndUnrelatedDomainRestrictions(t *testing.T) {
 	f := newHardwareAuthorizationFixture(t, true)
 	seededBrowserGrant(t, f.h.database, f.task, "pet-channel-http", "active")
 	manager := desktop.New(&desktopFixture{})
@@ -39,11 +39,15 @@ func TestPetChannelTurnRejectsDomainDiscoveryAndDirectHTTPCalls(t *testing.T) {
 	for name, tool := range tools {
 		url := server.URL + "/api/v1/agent/" + name + "/mcp"
 		status, _, _ := coreMCPToolsList(t, url, f.token)
-		if status != 403 {
+		want := http.StatusOK
+		if name == "knowledge" || name == "workspace" {
+			want = http.StatusForbidden
+		}
+		if status != want {
 			t.Fatalf("channel pet discovers %s: %d", name, status)
 		}
 		result := coreMCPCallTool(t, url, f.token, tool, map[string]any{})
-		if result.Status != 403 {
+		if result.Status != want {
 			t.Fatalf("channel pet calls %s: %d", name, result.Status)
 		}
 	}
@@ -51,7 +55,11 @@ func TestPetChannelTurnRejectsDomainDiscoveryAndDirectHTTPCalls(t *testing.T) {
 		response := agentRequest(t, server.URL+"/api/v1/agent"+path, http.MethodGet, f.token, nil)
 		status := response.StatusCode
 		response.Body.Close()
-		if status != 403 {
+		want := http.StatusOK
+		if path == "/processes" {
+			want = http.StatusForbidden
+		}
+		if status != want {
 			t.Fatalf("channel pet direct %s status=%d", path, status)
 		}
 	}
