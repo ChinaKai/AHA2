@@ -27,7 +27,7 @@ export function normalizePinnedTaskTool(value: unknown): TaskTool | "" {
 }
 
 const tools: Array<{id: TaskTool; label: string; iconName: string}> = [
-  {id: "channel", label: "渠道", iconName: "bot"},
+  {id: "channel", label: "渠道", iconName: "channel"},
   {id: "context", label: "Context", iconName: "context"},
   {id: "hardware", label: "硬件调试", iconName: "hardware"},
   {id: "mail", label: "邮件", iconName: "mail"},

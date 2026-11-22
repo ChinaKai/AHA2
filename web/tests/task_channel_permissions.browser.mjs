@@ -23,6 +23,7 @@ const csp = (await readFile(resolve(root, "internal/httpapi/server.go"), "utf8")
 const now = new Date().toISOString();
 const bootstrap = `
 const LANG = new URL(location.href).searchParams.get("lang") || "zh-CN";
+const PRIVATE = new URL(location.href).searchParams.has("private");
 const task = {id: "t-ui", code: "task-736", title: "Channel UI", status: "waiting_user", project_id: "project-1", workspace_id: "workspace-1", channel_instance_id: "", collaboration_mode: "auto", max_agents: 3};
 const hostedTask = {id: "t-hosted", code: "task-737", title: "Channel hosted", status: "waiting_user", project_id: "project-1", workspace_id: "workspace-1", channel_instance_id: "instance-hosted", collaboration_mode: "auto", max_agents: 3};
 const readonlyTask = {id: "t-readonly", code: "task-738", title: "Read only channel", status: "waiting_user", project_id: "project-1", workspace_id: "workspace-1", read_only: true, collaboration_mode: "auto", max_agents: 3};
@@ -62,7 +63,7 @@ window.fetch = async (input, init = {}) => {
   if (path === "/api/v1/codex/accounts") return json({accounts: []});
   if (["t-ui", "t-hosted", "t-readonly"].includes(path.split("/")[4]) && path.split("/").length === 5 && method === "GET") return json(detailFor(path.split("/")[4]));
   if (path === "/api/v1/tasks/t-ui/channel-routes" && method === "GET") return json({
-    destinations: [{conversation_id: "conversation-1", instance_id: "instance-1", instance_name: "Feishu", provider_key: "feishu", endpoint_kind: "group_digital_human", display_name: "联调群", status: "active", updated_at: ${JSON.stringify(now)}}],
+    destinations: [{conversation_id: "conversation-1", instance_id: "instance-1", instance_name: "Feishu", provider_key: "feishu", endpoint_kind: PRIVATE ? "assistant_dm" : "group_digital_human", display_name: "联调群", status: "active", updated_at: ${JSON.stringify(now)}}],
     route: {id: "route-1", instance_id: "instance-1", conversation_id: "conversation-1", target_task_id: "t-ui", state: "active", revision: 1},
     contacts, members,
   });
@@ -115,8 +116,8 @@ const server = createServer(async (request, response) => {
       response.setHeader("Content-Type", "text/javascript");
       response.end(bootstrap);
     } else {
-      if (!/^\/[a-z0-9_]+\.(?:js|css)$/.test(name)) { response.writeHead(404).end(); return; }
-      response.setHeader("Content-Type", name.endsWith(".css") ? "text/css" : "text/javascript");
+      if (!/^\/(?:[a-z0-9_]+\.(?:js|css)|assets\/[a-zA-Z0-9_/-]+\.(?:svg|png))$/.test(name)) { response.writeHead(404).end(); return; }
+      response.setHeader("Content-Type", name.endsWith(".css") ? "text/css" : name.endsWith(".svg") ? "image/svg+xml" : name.endsWith(".png") ? "image/png" : "text/javascript");
       response.end(await readFile(resolve(root, "web/build", name.slice(1))));
     }
   } catch { response.writeHead(404).end(); }
@@ -134,9 +135,13 @@ try {
   await page.waitForSelector('.task-card[data-task="t-ui"]', {timeout: 15000});
   await page.click('.task-card[data-task="t-ui"]');
   await page.waitForSelector('[data-task-tool="channel"]', {timeout: 15000});
+  const globalChannel = await page.locator('.sidebar [data-view="channels"] svg').innerHTML();
+  assert.notEqual(globalChannel, await page.locator('.sidebar [data-view="pet-workbench"] svg').innerHTML());
+  assert.equal(globalChannel, await page.locator('[data-task-tool="channel"] svg').innerHTML());
   assert.equal(await page.locator('[data-task-tool="permissions"]').count(), 0, "the permissions tool is still in the toolbar");
   await page.locator('[data-task-tool="channel"]').click();
   await page.waitForSelector("#task-channel-contacts-form", {timeout: 8000});
+  assert.equal(await page.locator('[data-task-tool="channel"]').evaluate(node => node.classList.contains("connected")), true);
 
   const columns = await page.locator(".task-channel-member-list").evaluate(node => getComputedStyle(node).gridTemplateColumns.split(" ").length);
   assert.equal(columns, 2, `desktop member grid has ${columns} columns`);
@@ -327,6 +332,14 @@ try {
   assert.equal((await english.locator("#toggle-task-permission-history").innerText()).trim(), "View history");
   assert.match(await english.locator("#task-channel-permissions").innerText(), /Pending review/);
   assert.deepEqual(englishErrors, [], "the English channel page threw");
+  const privatePage = await browser.newPage({viewport: {width: 1024, height: 900}});
+  privatePage.on("pageerror", error => errors.push(error.message));
+  await privatePage.goto(`${url}/?private=1`, {waitUntil: "networkidle"});
+  await privatePage.locator('.task-card[data-task="t-ui"]').click();
+  await privatePage.locator('[data-task-tool="channel"]').click();
+  await privatePage.waitForSelector(".task-channel-private .channel-route-icon svg");
+  assert.equal(globalChannel, await privatePage.locator(".channel-route-icon svg").innerHTML());
+  await privatePage.screenshot({path: resolve(output, "task-channel-private-1024.png")});
   assert.deepEqual(errors, [], "the channel page threw while being driven");
   console.log("merged channel page verified in the built Web bundle");
 } finally {

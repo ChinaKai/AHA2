@@ -4290,7 +4290,7 @@ function shell(content: string, options: {taskShell?: boolean; taskBand?: string
   const nav = [
     ["projects", "projects", "nav.projects"],
     ["tasks", "tasks", "nav.tasks"],
-    ["channels", "bot", "nav.channels"],
+    ["channels", "channel", "nav.channels"],
     ["knowledge", "knowledge", "nav.knowledge"],
     ["models", "model", "nav.models"],
     ["resources", "hardware", "nav.resources"],
@@ -5971,7 +5971,7 @@ function taskChannelPanelHTML(): string {
     return `<div class="task-channel-tool">${switcher}<div class="task-channel-empty"><strong>未连接主渠道</strong><p>先在上方选择已登记的私聊或群聊。每个 Task 只能连接一个主渠道。</p></div>${approvals}</div>`;
   }
   if (currentDestination.endpoint_kind !== "group_digital_human") {
-    return `<div class="task-channel-tool">${switcher}<section class="task-channel-private"><span class="channel-route-icon">${icon("bot")}</span><div><strong>${escapeHTML(currentDestination.display_name || "Owner 私聊")}</strong><small>${escapeHTML(currentDestination.instance_name)} · 私聊主渠道</small></div></section>${approvals}</div>`;
+    return `<div class="task-channel-tool">${switcher}<section class="task-channel-private"><span class="channel-route-icon">${icon("channel")}</span><div><strong>${escapeHTML(currentDestination.display_name || "Owner 私聊")}</strong><small>${escapeHTML(currentDestination.instance_name)} · 私聊主渠道</small></div></section>${approvals}</div>`;
   }
   const selected = new Map(result.contacts.map(contact => [contact.identity_link_id, contact]));
   const query = state.taskChannelMemberQuery.trim().toLocaleLowerCase();

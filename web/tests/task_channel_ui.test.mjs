@@ -7,12 +7,20 @@ import {pathToFileURL} from "node:url";
 const root = resolve(import.meta.dirname, "..");
 const tools = await import(pathToFileURL(resolve(root, "build", "task_tools.js")));
 const i18n = await import(pathToFileURL(resolve(root, "build", "i18n.js")));
+const {icon} = await import(pathToFileURL(resolve(root, "build", "icons.js")));
 const detail = {
   task: {id: "t-1", code: "task-1", title: "T", status: "active", project_id: "p", workspace_id: "w"},
   turns: [],
   agents: [],
   memory: {},
 };
+
+test("channel tools share the channel glyph and keep connection state", () => {
+  const channel = tools.renderTaskToolButtons("channel", {channelConnected: true}).match(/<button[^>]*data-task-tool="channel"[^>]*>.*?<\/button>/)?.[0] || "";
+  assert.ok(channel.includes(icon("channel")));
+  assert.ok(!channel.includes(icon("bot")));
+  assert.match(channel, /connected/);
+});
 
 test("the permissions tool is removed and old links resolve to the channel page", () => {
   assert.equal(tools.normalizePinnedTaskTool("permissions"), "channel");
