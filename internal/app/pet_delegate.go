@@ -496,7 +496,7 @@ func (s *Service) finishPetApprovalResolution(ctx context.Context, item domain.P
 			message += " 备注：" + item.Resolution
 		}
 	}
-	if _, err := s.SubmitMessage(ctx, petTaskID, message); err != nil {
+	if err := s.submitPetWake(ctx, message); err != nil && !errors.Is(err, errPetDisabled) {
 		log.Printf("notify pet task about approval %s: %v", item.ID, err)
 	}
 }

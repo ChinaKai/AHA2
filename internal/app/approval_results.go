@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -112,7 +113,10 @@ func (s *Service) NotifyTaskApprovalResult(ctx context.Context, input TaskApprov
 	if !taskAcceptsResultWake(task.Status) {
 		return s.recordTaskApprovalResult(ctx, taskID, content, input.At)
 	}
-	if _, err := s.SubmitMessage(ctx, taskID, content); err != nil {
+	if err := s.submitTaskApprovalWake(ctx, taskID, content); err != nil {
+		if errors.Is(err, errPetDisabled) {
+			return s.recordTaskApprovalResult(ctx, taskID, content, input.At)
+		}
 		// A concurrent Complete/Cancel/Block can land between the read and the
 		// write. Re-read once and keep the result as history instead of failing
 		// or forcing the Task out of its terminal state.
@@ -122,6 +126,14 @@ func (s *Service) NotifyTaskApprovalResult(ctx context.Context, input TaskApprov
 		return err
 	}
 	return nil
+}
+
+func (s *Service) submitTaskApprovalWake(ctx context.Context, taskID, content string) error {
+	if taskID == petTaskID {
+		return s.submitPetWake(ctx, content)
+	}
+	_, err := s.SubmitMessage(ctx, taskID, content)
+	return err
 }
 
 // taskAcceptsResultWake lists the states where a result message may start a

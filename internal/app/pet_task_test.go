@@ -30,6 +30,11 @@ func newPetTaskFixture(t *testing.T) *petTaskFixture {
 
 func newPetTaskFixtureWithExecutor(t *testing.T, executor Executor) *petTaskFixture {
 	t.Helper()
+	return newPetTaskFixtureWithEnabled(t, executor, true)
+}
+
+func newPetTaskFixtureWithEnabled(t *testing.T, executor Executor, enabled bool) *petTaskFixture {
+	t.Helper()
 	ctx := context.Background()
 	databasePath := filepath.Join(t.TempDir(), "aha2.db")
 	database, err := store.Open(ctx, databasePath)
@@ -57,6 +62,7 @@ func newPetTaskFixtureWithExecutor(t *testing.T, executor Executor) *petTaskFixt
 		DefaultEnvGroupID: envGroup.ID, CreatedAt: now, UpdatedAt: now,
 	}
 	for _, operation := range []func() error{
+		func() error { return secretStore.PutMany(map[string]string{provider.CredentialRef: "test-key"}) },
 		func() error { return database.UpsertProvider(ctx, provider) },
 		func() error { return database.UpsertEnvGroup(ctx, envGroup) },
 		func() error { return database.UpsertModel(ctx, model) },
@@ -75,6 +81,15 @@ func newPetTaskFixtureWithExecutor(t *testing.T, executor Executor) *petTaskFixt
 		_ = fixture.service.Shutdown(context.Background())
 		_ = database.Close()
 	})
+	if enabled {
+		assistant, err := database.EnsureOwnerAssistant(ctx, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := database.UpdateOwnerPetSettings(ctx, assistant.ID, true, "", assistant.PetActions, now); err != nil {
+			t.Fatal(err)
+		}
+	}
 	return fixture
 }
 

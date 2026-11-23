@@ -3981,7 +3981,9 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   // a distinct channel glyph. From 6a5099d to 406feb3, the same masked-query,
   // level-5 build adds 69 JS + 145 CSS bytes: 224,510 + 54,070 = 278,580
   // (Windows release run: 278,583). Ceil to the next 256-byte boundary.
-  const FIRST_SCREEN_GZIP_BUDGET = 278784;
+  // task-766 loads the checklist and its copy in a route chunk. Its entry
+  // points, login focus fix, and shared styles measure 279,997 bytes total.
+  const FIRST_SCREEN_GZIP_BUDGET = 280064;
   // The version query parameter is a content hash and its hex digits change
   // how the same code gzips: main already sits exactly on the budget, so a
   // hash-only change could trip it without growing the payload. Mask the

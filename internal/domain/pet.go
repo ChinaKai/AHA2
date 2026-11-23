@@ -2,6 +2,8 @@ package domain
 
 import "time"
 
+const PetWakeSourceKind = "pet_wake"
+
 // PetState is the owner-scoped, server-authoritative state of the web pet.
 // Position is stored as a normalized viewport coordinate plus a semantic zone
 // so desktop and mobile clients can render the same pet without sharing pixels.

@@ -83,11 +83,8 @@ func TestOwnerAssistantViewAndHints(t *testing.T) {
 	if view.Assistant.ID != ownerAssistantID || view.Assistant.ModelID != model.ID || view.Assistant.Character != "gugugaga" {
 		t.Fatalf("assistant=%#v", view.Assistant)
 	}
-	if view.Assistant.PetTaskID == "" {
-		t.Fatal("pet task was not created")
-	}
-	if _, err := database.Task(ctx, view.Assistant.PetTaskID); err != nil {
-		t.Fatalf("pet task missing: %v", err)
+	if view.Assistant.PetEnabled || view.Assistant.PetTaskID != "" {
+		t.Fatal("a fresh assistant should stay disabled even with a model configured")
 	}
 	updated, err := service.UpdateOwnerAssistant(ctx, "", "", "deepseek_fish")
 	if err != nil || updated.Assistant.Character != "deepseek_fish" {

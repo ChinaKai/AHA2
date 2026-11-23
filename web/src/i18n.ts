@@ -2,6 +2,12 @@ export type Locale = "zh-CN" | "en-US";
 export type LanguagePreference = "auto" | Locale;
 
 const zhCN: Record<string, string> = {
+  "onboarding.open": "打开首装引导",
+  "onboarding.openDetail": "检查模型、创建工作区和只读任务",
+  "onboarding.return": "返回首装引导",
+  "onboarding.loadFailed": "引导状态暂时无法读取，请检查与 AHA2 服务的连接后重试。",
+  "pet.settings.enable": "启用宠物",
+  "pet.settings.enableDetails": "启用后，宠物拥有全权限，会在后台自主运行并消耗 token。关闭后停止新的自主活动。",
   "brand.tagline": "个人 AI 工作流",
   "nav.projects": "项目",
   "nav.tasks": "任务",
@@ -827,6 +833,12 @@ const zhCN: Record<string, string> = {
 };
 
 const enUS: Record<string, string> = {
+  "onboarding.open": "Open setup checklist",
+  "onboarding.openDetail": "Check a model, create a workspace and try a read-only task",
+  "onboarding.return": "Return to setup",
+  "onboarding.loadFailed": "Setup status is unavailable. Check your connection to the AHA2 server and try again.",
+  "pet.settings.enable": "Enable pet",
+  "pet.settings.enableDetails": "When enabled, your pet has full access, runs autonomously in the background, and uses tokens. Turning it off stops new autonomous activity.",
   "brand.tagline": "Personal AI workflow",
   "nav.projects": "Projects",
   "nav.tasks": "Tasks",

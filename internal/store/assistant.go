@@ -9,9 +9,11 @@ import (
 )
 
 func (s *Store) EnsureOwnerAssistant(ctx context.Context, now time.Time) (domain.OwnerAssistant, error) {
+	// Preserve stored preferences. A fresh assistant opts in only through
+	// Settings, with a fallback for a legacy Task whose assistant row is gone.
 	_, err := s.db.ExecContext(ctx, `
-		INSERT OR IGNORE INTO owner_assistants(id,name,model_id,character,created_at,updated_at)
-		VALUES('assistant_default','小A','','gugugaga',?,?)`, timeString(now), timeString(now))
+		INSERT OR IGNORE INTO owner_assistants(id,name,model_id,character,pet_enabled,created_at,updated_at)
+		VALUES('assistant_default','小A','','gugugaga',EXISTS(SELECT 1 FROM tasks WHERE id='task_pet'),?,?)`, timeString(now), timeString(now))
 	if err != nil {
 		return domain.OwnerAssistant{}, err
 	}
@@ -112,10 +114,28 @@ func (s *Store) UpdateOwnerPetSettings(ctx context.Context, id string, enabled b
 	// The save writes both model columns in the same statement. Splitting them
 	// into separate updates used to expose a transient (new chat model, old pet
 	// model) row that a concurrent read could normalize back over the new choice.
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `
 		UPDATE owner_assistants SET model_id=?,pet_brain_model_id=?,pet_enabled=?,pet_actions=?,updated_at=? WHERE id=?`,
 		brainModelID, brainModelID, petBoolInt(enabled), value, timeString(updatedAt), id)
-	return err
+	if err != nil {
+		return err
+	}
+	if !enabled {
+		// Keep the conversation and running Turn. Pending system wakes must
+		// not become follow-up Turns after the owner switches the pet off.
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE agent_inbox SET status='cancelled',processed_at=?
+			WHERE task_id='task_pet' AND source_kind=? AND status='pending'`,
+			timeString(updatedAt), domain.PetWakeSourceKind); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func petBoolInt(value bool) int {

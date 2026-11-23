@@ -4337,6 +4337,9 @@ func (s *Store) migrate(ctx context.Context) error {
 		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(158, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v158: %w", err)
 	}
+	if err := s.migrateOnboarding(ctx); err != nil {
+		return fmt.Errorf("apply schema v159 onboarding: %w", err)
+	}
 	return nil
 }
 

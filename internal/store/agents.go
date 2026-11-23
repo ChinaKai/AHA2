@@ -335,6 +335,13 @@ func (s *Store) EnqueueOwnerMessage(
 	return round, inbox, createdRound, err
 }
 
+// EnqueuePetWake identifies server-generated messages so disabling the pet
+// can cancel queued wakes while leaving owner messages and history intact.
+func (s *Store) EnqueuePetWake(ctx context.Context, message domain.Message, targetAgentID string) (domain.TaskRound, domain.AgentInboxItem, bool, error) {
+	round, inbox, createdRound, _, _, _, err := s.enqueueUserMessage(ctx, message, targetAgentID, "aha", domain.PetWakeSourceKind, domain.PetWakeSourceKind, nil)
+	return round, inbox, createdRound, err
+}
+
 // EnqueueLocalOwnerMessage writes an owner-role message with provenance from
 // the local ingest bridge. A non-empty message.ClientRequestID makes the write
 // idempotent: retries return the message written by the first call instead of

@@ -455,6 +455,17 @@ export interface Model {
   capabilities?: Record<string, unknown>;
 }
 
+export interface OnboardingView {
+  onboarding_dismissed_at: string | null;
+  show_automatically: boolean;
+  backend_cli: Record<string, boolean>;
+  models: {id: string; name: string; backend: string; updated_at: string}[];
+  workspaces: Workspace[];
+  task_id?: string;
+  task_workspace_id?: string;
+  task_error?: string;
+}
+
 /** Account usability of a configured model, measured by one real call. */
 export type ModelHealthStatus = "ok" | "rate_limited" | "unauthorized" | "quota_exhausted" | "model_not_found" | "rejected" | "unavailable" | "inconclusive";
 

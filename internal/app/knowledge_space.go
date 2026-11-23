@@ -57,17 +57,21 @@ func (s *Service) KnowledgeVaultAvailable() bool {
 // cannot be provisioned. The project state records whether the space is
 // ready, and startup reconciliation or an explicit retry can provision it.
 func (s *Service) CreateProject(ctx context.Context, project domain.Project) (domain.Project, error) {
+	return s.createProject(ctx, project, s.store.CreateProject)
+}
+
+func (s *Service) createProject(ctx context.Context, project domain.Project, persist func(context.Context, domain.Project) error) (domain.Project, error) {
 	// Infrastructure projects (channel hosts and the pet's system project) do
 	// not own a vault space in model A. Their knowledge comes from
 	// knowledge_bindings or global knowledge, so creating the row must not
 	// provision a space that the owner would only have to clean up again.
 	if domain.IsSystemManagedProject(project) {
-		return project, s.store.CreateProject(ctx, project)
+		return project, persist(ctx, project)
 	}
 	if !s.projectKnowledgeSpaceEnabled() {
 		// Tests and support tools that construct the service without a vault
 		// keep the pre-model-A behavior. Production always wires a manager.
-		return project, s.store.CreateProject(ctx, project)
+		return project, persist(ctx, project)
 	}
 	// A deleted project's knowledge lives on under its old project ID in
 	// archive_names/archives. Reusing that ID would silently merge two
@@ -89,7 +93,7 @@ func (s *Service) CreateProject(ctx context.Context, project domain.Project) (do
 			project.KnowledgeState = domain.KnowledgeStateInitializing
 		}
 	}
-	if err := s.store.CreateProject(ctx, project); err != nil {
+	if err := persist(ctx, project); err != nil {
 		return domain.Project{}, err
 	}
 	if project.KnowledgeState != domain.KnowledgeStateInitializing {

@@ -356,6 +356,7 @@ type Service struct {
 	petAutonomyLast     time.Time
 	petAutonomyNext     time.Time
 	petBrainRuns        map[string][]time.Time
+	onboardingMu        sync.Mutex
 	sharedContextMu     sync.Mutex
 	sharedContexts      map[string]*sharedContextState
 	latestShared        map[string]string
@@ -1039,6 +1040,9 @@ func (s *Service) submitMessageWithSourceResult(ctx context.Context, taskID, age
 	} else if sourceKind == "pet_delegate_message" {
 		round, inbox, createdRound, err = s.store.EnqueuePetDelegatedMessage(ctx, message, agentID, attachmentIDs)
 		inserted = err == nil
+	} else if sourceKind == domain.PetWakeSourceKind {
+		round, inbox, createdRound, err = s.store.EnqueuePetWake(ctx, message, agentID)
+		inserted = err == nil
 	} else if sourceKind == peerTaskMessageKind {
 		round, inbox, createdRound, err = s.store.EnqueuePeerTaskMessage(
 			ctx, message, agentID, strings.TrimPrefix(sender, "task:"), attachmentIDs,
@@ -1070,6 +1074,8 @@ func (s *Service) submitMessageWithSourceResult(ctx context.Context, taskID, age
 		switch sourceKind {
 		case "pet_delegate_message":
 			source = "pet"
+		case domain.PetWakeSourceKind:
+			source = "aha"
 		case peerTaskMessageKind:
 			source = "peer_task"
 		}

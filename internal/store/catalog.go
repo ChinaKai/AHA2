@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"sort"
 	"strconv"
 	"strings"
@@ -14,26 +15,59 @@ import (
 
 func (s *Store) CreateProject(ctx context.Context, project domain.Project) error {
 	project.UpdatedAt = s.sharedTimeVersion(ctx, "project", project.ID, project.UpdatedAt)
-	_, err := s.db.ExecContext(
+	if err := insertProject(ctx, s.db, project); err != nil {
+		return err
+	}
+	return s.createProjectKnowledgeRoots(ctx, project)
+}
+
+// CreateProjectWithWorkspace commits the first workspace and its project
+// together so a retry cannot leave a second, empty project behind.
+func (s *Store) CreateProjectWithWorkspace(ctx context.Context, project domain.Project, workspace domain.Workspace) error {
+	project.UpdatedAt = s.sharedTimeVersion(ctx, "project", project.ID, project.UpdatedAt)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := insertProject(ctx, tx, project); err != nil {
+		return err
+	}
+	if err := insertWorkspace(ctx, tx, workspace); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if err := s.createProjectKnowledgeRoots(ctx, project); err != nil {
+		log.Printf("initialize legacy knowledge for project %s: %v", project.ID, err)
+	}
+	return nil
+}
+
+func insertProject(ctx context.Context, exec snapshotExecer, project domain.Project) error {
+	_, err := exec.ExecContext(
 		ctx,
 		`INSERT INTO projects(id,name,description,project_type,repository_identity,default_workspace_id,default_branch,knowledge_policy,knowledge_revision,knowledge_state,created_at,updated_at)
 		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
 		project.ID, project.Name, project.Description, project.ProjectType, project.RepositoryIdentity, project.DefaultWorkspaceID,
 		project.DefaultBranch, project.KnowledgePolicy, project.KnowledgeRevision, knowledgeStateOrDefault(project.KnowledgeState), timeString(project.CreatedAt), timeString(project.UpdatedAt),
 	)
-	if err != nil {
-		return err
-	}
+	return err
+}
+
+func (s *Store) createProjectKnowledgeRoots(ctx context.Context, project domain.Project) error {
 	if s.legacyKnowledgeRootsEnabled(project.ID) {
-		_, err = s.EnsureKnowledgeRoot(ctx, "project", project.ID)
+		_, err := s.EnsureKnowledgeRoot(ctx, "project", project.ID)
 		if err != nil {
 			return err
 		}
 	}
 	if project.ProjectType == "knowledge" {
-		_, err = s.EnsureKnowledgeLibraryForProject(ctx, project)
+		_, err := s.EnsureKnowledgeLibraryForProject(ctx, project)
+		return err
 	}
-	return err
+	return nil
 }
 
 func (s *Store) ListProjects(ctx context.Context) ([]domain.Project, error) {
@@ -113,7 +147,11 @@ func (s *Store) UpdateProject(ctx context.Context, item domain.Project) error {
 }
 
 func (s *Store) CreateWorkspace(ctx context.Context, item domain.Workspace) error {
-	_, err := s.db.ExecContext(ctx, `
+	return insertWorkspace(ctx, s.db, item)
+}
+
+func insertWorkspace(ctx context.Context, exec snapshotExecer, item domain.Workspace) error {
+	_, err := exec.ExecContext(ctx, `
 		INSERT INTO workspaces(
 			id,project_id,name,locality,transport,root_path,ssh_host,ssh_user,ssh_port,ssh_auth,
 			ssh_credential_ref,ssh_password_configured,distro,platform,health,

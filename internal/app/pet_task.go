@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
@@ -9,6 +11,8 @@ import (
 
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
+
+var errPetDisabled = errors.New("宠物已停用")
 
 // petWorkspaceGuides are the files earlier versions wrote into the Pet
 // Workspace. The core instructions now live in the Task prompt only; these
@@ -218,66 +222,66 @@ func (s *Service) ensureOwnerPetTask(ctx context.Context, assistant *domain.Owne
 	// recreate the project immediately after the reset.
 	s.petTaskMu.Lock()
 	defer s.petTaskMu.Unlock()
-	if current, err := s.store.OwnerAssistant(ctx, assistant.ID); err == nil {
-		*assistant = current
-		if !assistant.PetEnabled {
-			return "", nil
-		}
+	current, err := s.store.OwnerAssistant(ctx, assistant.ID)
+	if err != nil {
+		return "", err
 	}
-	s.removeGeneratedPetWorkspaceGuides()
-	// Seed the pet's stable home before the Task starts. This runs on every
-	// assistant page load, but only fills missing files; the pet owns them after
-	// the first start and its edits are never overwritten.
-	if err := s.ensurePetWorkspaceFiles(ctx, assistant); err != nil {
-		log.Printf("prepare pet workspace: %v", err)
+	*assistant = current
+	if !assistant.PetEnabled {
+		return "", nil
 	}
-	// The pet has one model. Keep the existing Task's Agent runtime in step
-	// with the assistant setting; the settings save path reports failures,
-	// while this page-load path is best effort so a stale Task cannot block
-	// the assistant view.
-	petModelID := strings.TrimSpace(assistant.BrainModelID)
-	if petModelID == "" {
-		petModelID = assistant.ModelID
+	if err := s.normalizeAssistantUnifiedModel(ctx, assistant); err != nil {
+		return "", err
 	}
-	_ = s.syncPetTaskRuntime(ctx, petModelID)
-
+	petModelID := unifiedAssistantModelID(*assistant)
+	petRuntime, found := s.storeModelForPetRuntime(ctx, petModelID)
 	recordPetTask := func(taskID string) {
-		if taskID == "" || assistant.PetTaskID == taskID {
+		if assistant.PetTaskID == taskID {
 			return
 		}
 		assistant.PetTaskID = taskID
 		assistant.UpdatedAt = s.now().UTC()
 		_ = s.store.UpdateOwnerPetTask(ctx, assistant.ID, taskID, assistant.UpdatedAt)
 	}
-	if assistant.PetTaskID != "" {
-		if existing, err := s.store.Task(ctx, assistant.PetTaskID); err == nil {
+	if found {
+		s.removeGeneratedPetWorkspaceGuides()
+		// Only seed missing files; existing files belong to the pet.
+		if err := s.ensurePetWorkspaceFiles(ctx, assistant); err != nil {
+			log.Printf("prepare pet workspace: %v", err)
+		}
+		_ = s.syncPetTaskRuntime(ctx, petModelID)
+	}
+	for _, id := range []string{assistant.PetTaskID, petTaskID} {
+		if id == "" {
+			continue
+		}
+		existing, err := s.store.Task(ctx, id)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		if found {
 			existing = s.reopenPetTaskIfNeeded(ctx, existing)
 			existing = s.migratePetTaskGoal(ctx, existing)
 			s.ensurePetTaskStarted(ctx, existing)
-			recordPetTask(existing.ID)
-			return existing.ID, nil
 		}
+		recordPetTask(existing.ID)
+		return existing.ID, nil
 	}
-	if existing, err := s.store.Task(ctx, petTaskID); err == nil {
-		existing = s.reopenPetTaskIfNeeded(ctx, existing)
-		existing = s.migratePetTaskGoal(ctx, existing)
-		recordPetTask(petTaskID)
-		s.ensurePetTaskStarted(ctx, existing)
-		return petTaskID, nil
+	if !found {
+		return "", nil
 	}
 	if _, err := s.ensurePetWorkspace(ctx); err != nil {
 		return "", err
 	}
-	petRuntime, petRuntimeFound := s.storeModelForPetRuntime(ctx, petModelID)
 	modelSource := petRuntime.Source
 	if modelSource == "" {
 		modelSource = domain.ModelSourceProvider
 	}
 	wireModel := petRuntime.WireModel
 	codexAccountID := petRuntime.CodexAccountID
-	if !petRuntimeFound {
-		modelSource, wireModel, codexAccountID = "", "", ""
-	}
 	task, err := s.CreateTask(ctx, CreateTaskInput{
 		ID: petTaskID, ProjectID: petProjectID, WorkspaceID: petWorkspaceID,
 		Title: "宠物", Request: petTaskIntro, CurrentGoal: petTaskMissionGoal,
@@ -334,9 +338,30 @@ func (s *Service) ensurePetTaskStarted(ctx context.Context, task domain.Task) {
 	if turns > 0 {
 		return
 	}
-	if _, err := s.SubmitMessage(ctx, started.ID, petTaskIntro); err != nil {
+	if err := s.enqueuePetWake(ctx, started.ID, petTaskIntro); err != nil {
 		s.resetPetTaskDraft(ctx, started.ID)
 	}
+}
+
+// submitPetWake serializes notifications and autonomous submissions with
+// disabling the pet. Settings use the same lock as lazy Task startup.
+func (s *Service) submitPetWake(ctx context.Context, message string) error {
+	s.petTaskMu.Lock()
+	defer s.petTaskMu.Unlock()
+	assistant, err := s.petAssistant(ctx)
+	if err != nil {
+		return err
+	}
+	if !assistant.PetEnabled {
+		return errPetDisabled
+	}
+	return s.enqueuePetWake(ctx, petTaskID, message)
+}
+
+// enqueuePetWake requires petTaskMu and an enabled assistant.
+func (s *Service) enqueuePetWake(ctx context.Context, taskID, message string) error {
+	_, err := s.submitMessageWithSource(ctx, taskID, "main", message, nil, "", "", "", nil, "aha", domain.PetWakeSourceKind, false)
+	return err
 }
 
 // migratePetTaskGoal replaces the legacy self-introduction goal with the stable

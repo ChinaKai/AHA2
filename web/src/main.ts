@@ -2,6 +2,7 @@ import {api, setAPIRequestObserver} from "./api.js";
 import type {APIRequestSample} from "./api.js";
 import {COMMAND_PALETTE_COMPOSITION_GUARD_MS, COMMAND_PALETTE_DEBOUNCE_MS, buildCommandSections, createDebouncer, flattenCommandSections, isPaletteShortcut, paletteKeyAction, readRecentTaskIDs, rememberRecentTaskID, runPaletteSelection} from "./command_palette.js";
 import type {CommandItem, CommandSection, CommandSectionID} from "./command_palette.js";
+import type {OnboardingChecklist} from "./onboarding.js";
 import {handlePetStreamEvent, mountAssistant, showPetSettings, notifyPetTaskIdle, notifyPetTaskReply, notifyPetTaskThinking, resumePetNavigation, setAssistantVisible} from "./assistant.js";
 import {MODEL_WIRE_OPTIONS, backendSelectOptionsHTML, backendsPanelHTML, modelWireEditOptionsHTML, persistedWireValue, resolveBackendOptions} from "./backends.js";
 import {bindPetDocEditorButtons, createPetWorkbenchLoader, createPetWorkbenchPageKeeper, mapPetWorkbenchTab, PET_APPROVAL_MAX_LIMIT, petApprovalMatches, petApprovalPage, renderPetApprovalLoadMore, renderPetOverview, renderPetRecords, renderPetWorkbenchLoadError, swapPetWorkbenchPage} from "./pet_workbench.js";
@@ -790,6 +791,34 @@ const state: State = {
 
 applyLocale("auto");
 const app = document.querySelector<HTMLDivElement>("#app");
+let onboarding: OnboardingChecklist | null = null;
+let loadingOnboarding: Promise<OnboardingChecklist> | null = null;
+
+function loadOnboarding(): Promise<OnboardingChecklist> {
+  if (onboarding) return Promise.resolve(onboarding);
+  return loadingOnboarding ??= import("./onboarding.js").then(({OnboardingChecklist}) => {
+    onboarding = new OnboardingChecklist({
+      openModels: () => switchView("models"),
+      openTask: id => { void openTask(id); },
+      updateCatalog: async () => {
+        await loadCoreData(true);
+        render();
+      },
+    });
+    onboarding.mount(app?.querySelector<HTMLElement>("[data-onboarding-host]") ?? null);
+    return onboarding;
+  }).finally(() => { loadingOnboarding = null; });
+}
+
+async function refreshOnboarding(): Promise<void> {
+  if (!state.auth?.authenticated || (state.view !== "tasks" && state.view !== "projects")) return;
+  try {
+    const guide = await loadOnboarding();
+    if (state.auth?.authenticated) await guide.refresh();
+  } catch {
+    // A failed setup chunk must leave the project and task pages usable.
+  }
+}
 // render() replaces #app wholesale, so the live region that speaks for the page
 // lives beside it and survives. Only explicit events write here; an ordinary
 // render, a poll, or an unchanged list patch never does.
@@ -2079,6 +2108,7 @@ function switchView(nextView: View): void {
   state.dialogProjectID = "";
   closeEvents();
   render();
+  void refreshOnboarding();
   void ensureViewData(state.view, nextView === "proxy").then(() => {
     // Entering the workbench already rendered its page and started exactly one
     // load; a second full render here used to rebind and abort that request.
@@ -2157,6 +2187,7 @@ function commandPaletteActions(): CommandItem[] {
   return [
     {id: "action:new-task", kind: "action", label: t("palette.newTask"), detail: t("palette.newTaskDetail"), keywords: ["new", "create", "task", "新建", "任务"], target: "new-task"},
     {id: "action:open-models", kind: "action", label: t("palette.openModels"), detail: t("nav.models"), keywords: ["model", "models", "模型"], target: "models"},
+    {id: "action:open-onboarding", kind: "action", label: t("onboarding.open"), detail: t("onboarding.openDetail"), keywords: ["onboarding", "setup", "guide", "getting started", "首装", "引导"], target: "onboarding"},
     {id: "action:open-approvals", kind: "action", label: t("palette.openApprovals"), detail: t("petWorkbench.approvals"), keywords: ["approval", "approvals", "审批"], target: "approvals"},
     {id: "action:open-pet-workbench", kind: "action", label: t("palette.openPetWorkbench"), detail: t("petWorkbench.title"), keywords: ["pet", "workbench", "宠物", "工作台"], target: "pet-workbench"},
   ];
@@ -2433,6 +2464,8 @@ async function runCommandPaletteAction(action: string): Promise<void> {
     await openTaskCreateDialogFromPalette();
   } else if (action === "models") {
     switchView("models");
+  } else if (action === "onboarding") {
+    await openOnboardingChecklist();
   } else if (action === "approvals") {
     petWorkbenchTab = "approvals";
     switchView("pet-workbench");
@@ -2474,8 +2507,17 @@ async function executeCommandPaletteItem(item: CommandItem): Promise<void> {
   } finally {
     // The navigation replaced the shell, so the element that opened the
     // palette may be detached; put focus on the freshly rendered trigger.
-    focusCommandPaletteTrigger();
+    if (item.target === "onboarding") onboarding?.focus();
+    else focusCommandPaletteTrigger();
   }
+}
+
+async function openOnboardingChecklist(): Promise<void> {
+  const guide = await loadOnboarding();
+  if (!state.auth?.authenticated) return;
+  guide.open();
+  switchView("tasks");
+  guide.focus();
 }
 
 document.addEventListener("keydown", event => {
@@ -2929,6 +2971,7 @@ async function purgeArchivedChannelProject(project: Project): Promise<boolean> {
 }
 
 async function loadCoreData(force = false): Promise<void> {
+  void refreshOnboarding();
   await Promise.all([
     loadResource("projects", force, async () => {
       const result = await api.projects({limit: initialListPageSize});
@@ -4373,6 +4416,7 @@ function projectsView(): string {
   }).join("");
   return shell(`<section class="page">
     ${pageHead("项目", "管理逻辑 Project，点开项目配置其 Workspace。", `<button data-dialog="project">${icon("plus")}新建项目</button>`)}
+    <div data-onboarding-host></div>
     <div class="metrics"><div><small>项目</small><strong>${state.projects.length}</strong></div><div><small>Workspace</small><strong>${state.workspaces.length}</strong></div><div><small>活动任务</small><strong>${state.tasks.filter(item => item.status === "active").length}</strong></div><div><small>知识</small><strong>${state.knowledge.length}</strong></div></div>
     <div class="panel"><div class="panel-head"><strong>所有项目</strong><button id="refresh">${icon("refresh")}刷新</button></div>${rows || `<div class="empty">创建第一个项目，随后点开配置 Workspace。</div>`}${loadMoreHTML("projects")}</div>
     ${projectDialog()}
@@ -4603,7 +4647,7 @@ function modelsView(): string {
   </article>`).join("");
   const codexPage = paginateItems(state.codexAccounts, state.codexAccountPage, CODEX_ACCOUNT_PAGE_SIZE);
   return shell(`<section class="page models-page">
-    ${pageHead("模型", "Models 管理 Provider / Env 模型与 Agent Backend；Codex 与 Claude Code 官方账号在创建或编辑 Task 时选择。")}
+    ${pageHead("模型", "Models 管理 Provider / Env 模型与 Agent Backend；Codex 与 Claude Code 官方账号在创建或编辑 Task 时选择。", onboarding?.showModelReturn ? `<button type="button" data-onboarding-return>${t("onboarding.return")}</button>` : "")}
     ${backendsPanelHTML()}
     <div class="provider-layout">
       <div class="provider-sidebar">
@@ -5615,6 +5659,7 @@ function tasksPageHTML(): string {
     : "";
   return `<section class="page">
     ${pageHead("任务", "Task 是长期目标，每条用户输入创建一个独立 Turn。", `<button data-dialog="task">${icon("plus")}创建任务</button>`)}
+    <div data-onboarding-host></div>
     <div class="task-filters">
       ${taskFilterPopover("project", "项目", "全部项目", projectOptions)}
       ${taskFilterPopover("status", "状态", "全部状态", statusOptions)}
@@ -7390,6 +7435,7 @@ function render(): void {
     if (!swapPetWorkbenchPage(app, preservedWorkbenchPage)) petWorkbenchPageKeeper.release();
   }
   translateUI(app);
+  onboarding?.mount(app.querySelector<HTMLElement>("[data-onboarding-host]"));
   if (preservedDesktop) document.querySelector("#desktop-tool")?.replaceWith(preservedDesktop);
   app.dataset.uiScope = nextUIScope;
   const renderedConversation = document.querySelector<HTMLElement>("#conversation-list");
@@ -7513,11 +7559,13 @@ function bindAuth(): void {
         button.innerHTML = original;
       }
     }
+    if (element.contains(document.activeElement)) (document.activeElement as HTMLElement).blur();
     render();
   });
   document.querySelector<HTMLFormElement>("#auth-form")?.addEventListener("submit", async event => {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
+    const element = event.currentTarget;
+    const form = new FormData(element);
     const payload = Object.fromEntries(form.entries()) as Record<string, string>;
     try {
       const response = state.auth?.registration_open ? await api.register(payload) : await api.login(payload);
@@ -7530,6 +7578,9 @@ function bindAuth(): void {
     } catch (error) {
       state.error = error instanceof Error ? error.message : String(error);
     }
+    // Keyboard submit leaves focus in the password field. The normal
+    // whole-view render guard would keep the login form on screen.
+    if (element.contains(document.activeElement)) (document.activeElement as HTMLElement).blur();
     render();
   });
 }
@@ -7802,6 +7853,12 @@ function bindCommon(): void {
     switchView(button.dataset.view as View);
   }));
   document.querySelectorAll<HTMLElement>("[data-command-palette-open]").forEach(button => button.addEventListener("click", () => openCommandPalette()));
+  document.querySelector("[data-onboarding-return]")?.addEventListener("click", () => {
+    void openOnboardingChecklist().catch(() => {
+      setMessage("error", t("onboarding.loadFailed"));
+      render();
+    });
+  });
   document.querySelector<HTMLElement>("#retry-view-data")?.addEventListener("click", () => {
     void ensureViewData(state.view, true).then(() => render());
   });
@@ -7813,6 +7870,7 @@ function bindCommon(): void {
     void runWithFeedback(button, "退出中", async () => {
       await api.logout();
       state.auth = {...state.auth!, authenticated: false};
+      onboarding?.reset();
       state.selectedTask = null;
       clearTaskCardFocusReturn();
       state.selectedProject = null;
@@ -9394,6 +9452,7 @@ async function performListRefresh(): Promise<void> {
 // A hidden page pauses refresh traffic; on return, one coalesced catch-up runs.
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) return;
+  void refreshOnboarding();
   resumePetNavigation();
   if (listRefreshScheduler.pending()) listRefreshScheduler.request();
   if (!secondaryPrefetchDone) prefetchSecondaryData();

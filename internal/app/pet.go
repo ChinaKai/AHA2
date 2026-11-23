@@ -213,7 +213,7 @@ func (s *Service) AskOwnerPetBrain(ctx context.Context, input PetBrainContext) (
 		return PetBrainResult{}, err
 	}
 	if !assistant.PetEnabled {
-		return PetBrainResult{}, fmt.Errorf("宠物已停用")
+		return PetBrainResult{}, errPetDisabled
 	}
 	if petQuietNow(assistant, time.Now()) {
 		return PetBrainResult{}, fmt.Errorf("现在处于宠物安静时段")
@@ -226,10 +226,17 @@ func (s *Service) AskOwnerPetBrain(ctx context.Context, input PetBrainContext) (
 	if page == "" {
 		page = "未知页面"
 	}
-	if _, err := s.ensureOwnerPetTask(ctx, &assistant); err != nil {
+	taskID, err := s.ensureOwnerPetTask(ctx, &assistant)
+	if err != nil {
 		return PetBrainResult{}, fmt.Errorf("确保宠物 Task 可用失败：%w", err)
 	}
-	task, err := s.store.Task(ctx, petTaskID)
+	if !assistant.PetEnabled {
+		return PetBrainResult{}, errPetDisabled
+	}
+	if taskID == "" {
+		return PetBrainResult{}, fmt.Errorf("宠物没有可用的模型")
+	}
+	task, err := s.store.Task(ctx, taskID)
 	if err != nil {
 		return PetBrainResult{}, fmt.Errorf("宠物 Task 不存在")
 	}
@@ -266,7 +273,7 @@ func (s *Service) AskOwnerPetBrain(ctx context.Context, input PetBrainContext) (
 			message = petFreeTimeMessage(english, used, assistant.PetFreeDailyTurns, page, input.Layout)
 		}
 	}
-	if _, err := s.SubmitMessage(ctx, petTaskID, message); err != nil {
+	if err := s.submitPetWake(ctx, message); err != nil {
 		// The turn was never submitted, so give the reserved slots back.
 		s.releasePetBrainRun(deviceID, now)
 		if freeDay != "" {
@@ -763,8 +770,16 @@ func (s *Service) UpdateOwnerPetSettings(ctx context.Context, input PetSettingsI
 	if err := s.store.UpdateOwnerAssistant(ctx, assistant); err != nil {
 		return OwnerAssistantView{}, err
 	}
-	if err := s.store.UpdateOwnerPetSettings(ctx, assistant.ID, assistant.PetEnabled, assistant.BrainModelID, assistant.PetActions, assistant.UpdatedAt); err != nil {
-		return OwnerAssistantView{}, err
+	// The creation and notification paths take petTaskMu before scheduling.
+	// Holding scheduleMu here also makes pending-wake cancellation atomic with
+	// claiming the next Turn after a running one settles.
+	s.petTaskMu.Lock()
+	s.scheduleMu.Lock()
+	settingsErr := s.store.UpdateOwnerPetSettings(ctx, assistant.ID, assistant.PetEnabled, assistant.BrainModelID, assistant.PetActions, assistant.UpdatedAt)
+	s.scheduleMu.Unlock()
+	s.petTaskMu.Unlock()
+	if settingsErr != nil {
+		return OwnerAssistantView{}, settingsErr
 	}
 	if err := s.store.UpdateOwnerPetBudget(ctx, assistant.ID, assistant.PetIdleMinutes, assistant.PetQuietEnabled, assistant.PetQuietStart, assistant.PetQuietEnd, assistant.PetHourlyLimit, assistant.UpdatedAt); err != nil {
 		return OwnerAssistantView{}, err

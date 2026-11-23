@@ -115,8 +115,10 @@ func (s *Service) deliverPetTaskStatusMessage(taskID, message string, removeWatc
 	if closing {
 		return
 	}
-	if _, err := s.SubmitMessage(context.Background(), petTaskID, message); err != nil {
-		log.Printf("notify pet task about watched task status: %v", err)
+	if err := s.submitPetWake(context.Background(), message); err != nil {
+		if !errors.Is(err, errPetDisabled) {
+			log.Printf("notify pet task about watched task status: %v", err)
+		}
 		return
 	}
 	if removeWatch {

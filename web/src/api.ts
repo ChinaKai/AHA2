@@ -54,6 +54,7 @@ import type {
   KnowledgeVaultTree,
   Model,
   ModelHealth,
+  OnboardingView,
   OwnerAssistant,
   OwnerAssistantView,
   AssistantHint,
@@ -673,6 +674,24 @@ class APIClient {
 
   checkModelHealth(id: string): Promise<{health: ModelHealth}> {
     return this.request(`/api/v1/models/${encodeURIComponent(id)}/health-check`, {method: "POST"});
+  }
+
+  onboarding(): Promise<OnboardingView> {
+    return this.request("/api/v1/onboarding");
+  }
+
+  dismissOnboarding(): Promise<{ok: boolean}> {
+    return this.request("/api/v1/onboarding/dismiss", {method: "PUT"});
+  }
+
+  createOnboardingWorkspace(name: string, rootPath?: string): Promise<{workspace: Workspace}> {
+    return this.request("/api/v1/onboarding/workspace", {
+      method: "POST", body: JSON.stringify({name, root_path: rootPath}),
+    });
+  }
+
+  createOnboardingTask(payload: {workspace_id: string; model_id: string; title: string; request: string}): Promise<{task: Task}> {
+    return this.request("/api/v1/onboarding/task", {method: "POST", body: JSON.stringify(payload)});
   }
 
   codexAccounts(): Promise<{accounts: CodexAccount[]}> {

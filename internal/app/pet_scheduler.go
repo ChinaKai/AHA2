@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"strings"
 	"time"
@@ -102,7 +103,7 @@ func IsPetBrainSkip(err error) bool { return petAutonomySkip(err) }
 // petAutonomySkip distinguishes the normal reasons a scheduled thought does
 // nothing from a real failure. Only the latter is written to pet activity.
 func petAutonomySkip(err error) bool {
-	if err == nil {
+	if err == nil || errors.Is(err, errPetDisabled) {
 		return true
 	}
 	message := err.Error()

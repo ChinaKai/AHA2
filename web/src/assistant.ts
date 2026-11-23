@@ -1,4 +1,5 @@
 import {api} from "./api.js";
+import {t} from "./i18n.js";
 import {icon} from "./icons.js";
 import {computeSpeechBubblePlacement} from "./pet_bubble.js";
 import {isPetNoCharacter, PET_NO_CHARACTER, shouldRenderPetAvatar} from "./pet_character.js";
@@ -230,7 +231,7 @@ export function mountAssistant(): void {
           <button id="assistant-settings-close" class="icon-button" type="button" aria-label="关闭宠物设置">×</button>
         </header>
         <div class="assistant-settings-body">
-          <label class="assistant-settings-switch"><input type="checkbox" id="pet-enabled"><span><b>启用宠物</b><small>关闭后隐藏宠物、停止自主思考和主动气泡</small></span></label>
+          <label class="assistant-settings-switch"><input type="checkbox" id="pet-enabled" aria-describedby="pet-enabled-details"><span><b id="pet-enabled-label"></b><small id="pet-enabled-details"></small></span></label>
           <section><h3>自主行为</h3>
             <div class="pet-budget-grid">
               <label class="assistant-settings-field">空闲触发（分钟，最低 5 分钟复盘）<input id="pet-idle-minutes" type="number" min="1" max="120"></label>
@@ -763,6 +764,8 @@ function renderPetModelPicker(): void {
 function renderPetSettings(): void {
   if (!view) return;
   settingsEnabled.checked = Boolean(view.assistant.pet_enabled);
+  settingsPanel.querySelector("#pet-enabled-label")!.textContent = t("pet.settings.enable");
+  settingsPanel.querySelector("#pet-enabled-details")!.textContent = t("pet.settings.enableDetails");
   settingsCharacters.innerHTML = ASSISTANT_CHARACTERS.map(character => `<button type="button" class="pet-character-option ${character.id === view!.assistant.character ? "active" : ""}" data-pet-character="${escapeHTML(character.id)}">
     <span class="assistant-character-preview">${characterMarkup(character)}</span>
     <strong>${escapeHTML(isPetNoCharacter(character.id) ? character.name : character.nickname)}</strong>

@@ -24,7 +24,7 @@ try {
   throw new Error("esbuild is not installed; run `npm ci` in web/ before building");
 }
 
-const moduleNames = ["api", "i18n", "icons", "types", "lazy_page", "pet_bubble", "pet_character", "pet_navigation", "pet_approvals", "pet_workbench", "runtime_picker", "task_agents", "task_composer", "task_drafts", "task_filters", "hardware_terminal", "hardware_panel", "hardware_resources", "browser_resources", "browser_task_panel", "mail_cards", "mail_editor", "mail_resources", "mail_task", "resources", "desktop_panel", "task_tools", "mcp_page", "markdown", "conversation_ui", "ui_helpers", "model_health", "model_selection", "prompt_admin", "proxy_settings", "data_retention", "sync_settings", "codex_accounts", "skill_groups", "knowledge_workspace", "knowledge_vault", "knowledge_vault_settings", "task_vault_skills", "model_source_picker", "channels", "assistant", "backends", "command_palette", "main"];
+const moduleNames = ["api", "i18n", "icons", "types", "lazy_page", "pet_bubble", "pet_character", "pet_navigation", "pet_approvals", "pet_workbench", "runtime_picker", "task_agents", "task_composer", "task_drafts", "task_filters", "hardware_terminal", "hardware_panel", "hardware_resources", "browser_resources", "browser_task_panel", "mail_cards", "mail_editor", "mail_resources", "mail_task", "resources", "desktop_panel", "task_tools", "mcp_page", "markdown", "conversation_ui", "ui_helpers", "model_health", "model_selection", "prompt_admin", "proxy_settings", "data_retention", "sync_settings", "codex_accounts", "skill_groups", "knowledge_workspace", "knowledge_vault", "knowledge_vault_settings", "task_vault_skills", "model_source_picker", "channels", "assistant", "backends", "onboarding", "command_palette", "main"];
 
 async function writeAssets(target) {
   await mkdir(resolve(target, "vendor"), {recursive: true});
@@ -70,8 +70,9 @@ async function buildModules() {
   // that hold shared state. Missing a rewrite here duplicates a singleton at
   // runtime, so the list stays explicit per file.
   const importers = {
-    "app.js": ["api", "i18n", "icons", "lazy_page", "pet_approvals", "pet_workbench", "runtime_picker", "task_agents", "task_composer", "task_drafts", "task_filters", "hardware_panel", "desktop_panel", "hardware_terminal", "task_tools", "markdown", "conversation_ui", "assistant", "backends", "ui_helpers", "model_health", "model_selection", "prompt_admin", "proxy_settings", "data_retention", "sync_settings", "codex_accounts", "hardware_resources", "browser_resources", "knowledge_workspace", "knowledge_vault", "knowledge_vault_settings", "task_vault_skills", "channels", "resources", "mail_task", "mail_cards", "mail_resources", "command_palette", "mcp_page"],
+    "app.js": ["api", "i18n", "icons", "lazy_page", "pet_approvals", "pet_workbench", "runtime_picker", "task_agents", "task_composer", "task_drafts", "task_filters", "hardware_panel", "desktop_panel", "hardware_terminal", "task_tools", "markdown", "conversation_ui", "assistant", "backends", "ui_helpers", "model_health", "model_selection", "prompt_admin", "proxy_settings", "data_retention", "sync_settings", "codex_accounts", "hardware_resources", "browser_resources", "knowledge_workspace", "knowledge_vault", "knowledge_vault_settings", "task_vault_skills", "channels", "resources", "mail_task", "mail_cards", "mail_resources", "command_palette", "onboarding", "mcp_page"],
     "model_selection.js": ["ui_helpers"],
+    "onboarding.js": ["api", "i18n", "model_health"],
     "runtime_picker.js": ["backends"],
     "task_agents.js": ["i18n", "icons", "runtime_picker", "ui_helpers"],
     "conversation_ui.js": ["icons", "mail_cards", "markdown", "task_agents", "ui_helpers"],
@@ -98,7 +99,7 @@ async function buildModules() {
     "task_vault_skills.js": ["api"],
     "model_source_picker.js": ["i18n"],
     "channels.js": ["api", "icons", "i18n", "model_source_picker"],
-    "assistant.js": ["api", "pet_bubble", "pet_character", "pet_navigation", "model_source_picker"],
+    "assistant.js": ["api", "i18n", "pet_bubble", "pet_character", "pet_navigation", "model_source_picker"],
   };
   for (const [file, dependencies] of Object.entries(importers)) {
     const path = resolve(modulesOutput, file);
