@@ -665,13 +665,18 @@ func (s *Service) CreateTask(ctx context.Context, input CreateTaskInput) (domain
 		return domain.Task{}, err
 	}
 	if input.ApplyAutoSkills == nil || *input.ApplyAutoSkills {
-		autoIDs, autoErr := s.autoAttachSkillIDs(ctx, project.ID)
-		if autoErr != nil {
-			return domain.Task{}, autoErr
-		}
-		input.SkillIDs = mergeSkillIDs(input.SkillIDs, autoIDs)
+		input.SkillIDs = mergeSkillIDs(input.SkillIDs, s.vaultAutoAttachSkillKeys(ctx, project.ID))
 	}
-	skillIDs, err := s.validateTaskSkillIDs(ctx, strings.TrimSpace(input.ID), project.ID, input.SkillIDs)
+	allowUnavailableVault := false
+	if len(input.SkillIDs) > 0 {
+		scope := "project"
+		if domain.IsSystemManagedProject(project) {
+			scope = "global"
+		}
+		read := s.knowledgeReadDecision(scope, project.ID)
+		allowUnavailableVault = project.KnowledgeState == domain.KnowledgeStateError || !read.Vault || read.Err != nil
+	}
+	skillIDs, err := s.validateTaskSkillIDs(ctx, strings.TrimSpace(input.ID), project.ID, input.SkillIDs, allowUnavailableVault)
 	if err != nil {
 		return domain.Task{}, err
 	}
@@ -798,7 +803,7 @@ func knowledgeEnabled(_ domain.Project, task domain.Task) bool {
 	return domain.KnowledgeEnabled(task)
 }
 
-func (s *Service) validateTaskSkillIDs(ctx context.Context, taskID, projectID string, ids []string) ([]string, error) {
+func (s *Service) validateTaskSkillIDs(ctx context.Context, taskID, projectID string, ids []string, allowUnavailableVault bool) ([]string, error) {
 	// The Pet Task is the owner's system administrator: it may select any
 	// project's skills even though project_pet itself has no vault space. Every
 	// other Task keeps the project-scoped rule, so neither a system project nor
@@ -806,41 +811,36 @@ func (s *Service) validateTaskSkillIDs(ctx context.Context, taskID, projectID st
 	petTask := strings.TrimSpace(taskID) == petTaskID && strings.TrimSpace(projectID) == petProjectID
 	result := make([]string, 0, len(ids))
 	seen := map[string]bool{}
-	appendID := func(id string) {
-		if id == "" || seen[id] {
-			return
-		}
-		seen[id] = true
-		result = append(result, id)
-	}
 	for _, id := range ids {
 		id = strings.TrimSpace(id)
 		if id == "" || seen[id] {
 			continue
 		}
+		seen[id] = true
 		// Skills are vault-only after the cutover. A legacy skills-table id is
 		// never resolved or rewritten: it is reported as unavailable so the
 		// caller reselects a vault package instead of resurrecting old content.
 		if !knowledgevault.IsVaultSkillID(id) {
 			return nil, fmt.Errorf("skill %s is unavailable: legacy skill ids no longer resolve after the vault cutover", id)
 		}
+		var unavailable error
 		if petTask {
 			if !s.vaultSkillExistsForPet(ctx, id) {
-				return nil, fmt.Errorf("vault skill %s is unavailable for the pet Task", id)
+				unavailable = fmt.Errorf("vault skill %s is unavailable for the pet Task", id)
 			}
 		} else if !s.vaultSkillExistsInProject(ctx, projectID, id) {
-			return nil, fmt.Errorf("vault skill %s is unavailable for this project", id)
+			unavailable = fmt.Errorf("vault skill %s is unavailable for this project", id)
 		}
-		appendID(id)
+		if unavailable != nil {
+			if !allowUnavailableVault {
+				return nil, unavailable
+			}
+			log.Printf("project %s: %v; task continues without this skill because the vault or project knowledge space is unavailable", projectID, unavailable)
+			continue
+		}
+		result = append(result, id)
 	}
 	return result, nil
-}
-
-func (s *Service) autoAttachSkillIDs(ctx context.Context, projectID string) ([]string, error) {
-	// Skills are vault-only after the cutover. The legacy AutoAttach column is
-	// never read here: a task either receives the vault preference or nothing.
-	selection := s.vaultAutoAttachSelection(ctx, projectID)
-	return selection.keys, nil
 }
 
 func mergeSkillIDs(existing, extra []string) []string {
@@ -864,7 +864,7 @@ func (s *Service) UpdateTaskSkills(ctx context.Context, taskID string, ids []str
 	if err != nil {
 		return domain.Task{}, err
 	}
-	validated, err := s.validateTaskSkillIDs(ctx, taskID, task.ProjectID, ids)
+	validated, err := s.validateTaskSkillIDs(ctx, taskID, task.ProjectID, ids, false)
 	if err != nil {
 		return domain.Task{}, err
 	}

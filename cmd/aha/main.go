@@ -394,6 +394,14 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	}
 	knowledgeVaultManager.SetSource(vaultSource)
 	knowledgeVaultManager.SetRuntimeWrite(options.knowledgeVaultRuntimeWrite)
+	// A previously configured vault can be temporarily missing. Keep its
+	// readiness diagnosable without creating a new vault in its place.
+	if vaultEnabled && !vaultSettings.Configured && !legacyInventory.HasLegacy() && !vaultSettings.VaultPopulated() && !legacyCutoverApplied {
+		if err := initializeFreshKnowledgeVault(ctx, knowledgeVaultManager); err != nil {
+			logger.Warn("knowledge vault startup initialization failed; continuing startup",
+				"vault", knowledgeVaultConfig.VaultPath, "index", knowledgeVaultConfig.IndexPath, "error", err)
+		}
+	}
 	if err := knowledgeVaultManager.SetEnabled(ctx, vaultEnabled); err != nil {
 		// A broken index must not keep the whole control plane from starting.
 		// The index is derived, so quarantine and rebuild it from the files
@@ -729,6 +737,37 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 		}
 		return err
 	}
+}
+
+func initializeFreshKnowledgeVault(ctx context.Context, manager *knowledgevault.Manager) error {
+	config := manager.Config()
+	if knowledgevault.VaultInitialized(config.VaultPath) {
+		// A startup interrupted after creating the skeleton can still be
+		// missing the derived index. Rebuild it before accepting requests.
+		if _, err := os.Stat(config.IndexPath); errors.Is(err, os.ErrNotExist) {
+			_, err := manager.Rebuild(ctx)
+			return err
+		}
+		return nil
+	}
+	// A failed bootstrap can leave empty directories before the manifest is
+	// written. Retry those, and leave manifest-less vaults with files alone.
+	if err := filepath.WalkDir(config.VaultPath, func(path string, entry os.DirEntry, err error) error {
+		if path == config.VaultPath && errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() {
+			return fmt.Errorf("vault has no manifest and contains %s; automatic initialization requires an empty vault", path)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	_, err := manager.Initialize(ctx, false)
+	return err
 }
 
 func resolveAgentAPIURL(listen, configured string) string {

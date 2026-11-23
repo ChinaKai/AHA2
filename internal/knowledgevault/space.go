@@ -256,7 +256,7 @@ func SpaceRootPath(cfg Config, projectID string) (string, bool) {
 }
 
 // CheckProjectSpacePrerequisites verifies the vault and index locations can
-// accept a new space before a project row is created. The probe writes a
+// accept a new space before provisioning begins. The probe writes a
 // temporary file and removes it; it never mutates knowledge content.
 func CheckProjectSpacePrerequisites(cfg Config) error {
 	cfg, err := cfg.Normalized()

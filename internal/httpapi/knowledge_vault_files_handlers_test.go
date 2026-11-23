@@ -36,7 +36,7 @@ func TestKnowledgeVaultFilesHandlersReadRealTree(t *testing.T) {
 	for _, entry := range payload.Entries {
 		names[entry.Name] = true
 	}
-	for _, expected := range []string{"global", "projects", "skills", "knowledge-base-guide.md"} {
+	for _, expected := range []string{"global", "projects", "knowledge-base-guide.md"} {
 		if !names[expected] {
 			t.Fatalf("root listing missing %q: %#v", expected, payload.Entries)
 		}

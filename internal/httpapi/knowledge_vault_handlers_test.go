@@ -90,7 +90,7 @@ project_id: project-1
 	if err := os.MkdirAll(filepath.Join(config.VaultPath, ".obsidian"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	write("skills/demo/SKILL.md", "---\nname: Demo\ndescription: A demo skill\n---\n\n# Demo\n")
+	write("global/skills/demo/SKILL.md", "---\nname: Demo\ndescription: A demo skill\n---\n\n# Demo\n")
 	index, err := knowledgevault.OpenIndex(ctx, config.IndexPath)
 	if err != nil {
 		t.Fatal(err)
@@ -273,7 +273,7 @@ func TestKnowledgeVaultAPIReadsLibrariesTreeDocumentSearchRecentInboxAndSkills(t
 		t.Fatalf("skills status=%d payload=%#v", response.StatusCode, skills)
 	}
 	skill := skills["skills"].([]any)[0].(map[string]any)
-	if skill["name"] != "Demo" || skill["file_count"].(float64) != 1 {
+	if skill["name"] != "Demo" || skill["relative_path"] != "global/skills/demo" || skill["file_count"].(float64) != 1 {
 		t.Fatalf("skill = %#v", skill)
 	}
 	// The task picker needs the package's version and state, not just its name.

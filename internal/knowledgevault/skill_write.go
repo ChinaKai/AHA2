@@ -132,9 +132,8 @@ func (m *Manager) CreateSkillPackage(ctx context.Context, request SkillWriteRequ
 		return SkillWriteResult{}, statErr
 	}
 	if request.Scope == SkillScopeGlobal {
-		// The flat skills/ area is the retired global library. Creating a second
-		// package with the same slug would make the task picker show two skills
-		// with the same name, so reject it instead of shadowing one.
+		// Reserve slugs from the retired global library so an owner can move
+		// a retained package into the canonical location without a collision.
 		flat := filepath.Join(m.config.VaultPath, "skills", slug)
 		if info, flatErr := os.Lstat(flat); flatErr == nil && info.IsDir() {
 			return SkillWriteResult{}, skillWriteError(skillWriteErrorDuplicate, "skill %q already exists in the flat skills library", slug)

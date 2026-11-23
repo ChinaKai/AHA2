@@ -440,8 +440,8 @@ func TestVaultSkillAutoAttachDegradesForUnboundProject(t *testing.T) {
 	if keys := fixture.service.vaultAutoAttachSkillKeys(ctx, fixture.project.ID); len(keys) != 1 || keys[0] != "vault-skill:global:demo" {
 		t.Fatalf("bound project vault auto-attach = %#v", keys)
 	}
-	// Explicit selection in an unbound project fails clearly instead of
-	// silently dropping the skill.
+	// An unbound project can create a Task while the selection is unavailable.
+	logs := captureLog(t)
 	otherProject := domain.Project{ID: "project_unbound", Name: "Unbound", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
 	if err := fixture.database.CreateProject(ctx, otherProject); err != nil {
 		t.Fatal(err)
@@ -453,13 +453,25 @@ func TestVaultSkillAutoAttachDegradesForUnboundProject(t *testing.T) {
 	if err := fixture.database.CreateWorkspace(ctx, otherWorkspace); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.service.CreateTask(ctx, CreateTaskInput{
+	task, err := fixture.service.CreateTask(ctx, CreateTaskInput{
 		ProjectID: otherProject.ID, WorkspaceID: otherWorkspace.ID, Title: "unbound",
 		Request: "unbound", SkillIDs: []string{"vault-skill:global:demo"}, ApplyAutoSkills: boolPointer(false),
 		ModelID: "model-vault-skills",
-	}); err == nil || !strings.Contains(err.Error(), "vault-skill:global:demo") {
-		t.Fatalf("unbound project explicit vault skill err = %v", err)
+	})
+	if err != nil || task.Status != domain.TaskActive || len(task.SkillIDs) != 0 {
+		t.Fatalf("unbound task = %#v, err = %v", task, err)
 	}
+	if !strings.Contains(logs.String(), "vault-skill:global:demo") {
+		t.Fatal("missing skill degradation warning")
+	}
+	if _, err := fixture.service.UpdateTaskSkills(ctx, task.ID, []string{"vault-skill:global:demo"}); err == nil {
+		t.Fatal("task skill update accepted an unavailable skill")
+	}
+	turn, err := fixture.service.SubmitMessage(ctx, task.ID, task.OriginalRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForTurn(t, fixture.database, turn.ID, domain.TurnSucceeded)
 }
 
 func TestVaultSkillAutoAttachRequiresIndexReady(t *testing.T) {

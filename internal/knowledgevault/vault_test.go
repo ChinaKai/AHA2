@@ -49,11 +49,14 @@ func TestBootstrapCreatesStructureAndManifest(t *testing.T) {
 	for _, relative := range []string{
 		".aha-vault.json", "README.md", "global/index.md",
 		"global/general", "global/agent-lessons", "global/skills", "global/inbox",
-		"projects", "skills", ".trash",
+		"projects", ".trash",
 	} {
 		if _, err := os.Stat(filepath.Join(config.VaultPath, filepath.FromSlash(relative))); err != nil {
 			t.Errorf("missing %s: %v", relative, err)
 		}
+	}
+	if _, err := os.Lstat(filepath.Join(config.VaultPath, "skills")); !os.IsNotExist(err) {
+		t.Fatalf("root skills directory exists or could not be checked: %v", err)
 	}
 	manifest, err := ReadManifest(config.VaultPath)
 	if err != nil {

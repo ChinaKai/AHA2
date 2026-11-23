@@ -485,8 +485,8 @@ func TestReaderIndexIsReadOnly(t *testing.T) {
 }
 
 func TestReaderSkillsAreListedFromVaultFolders(t *testing.T) {
-	config, _, _ := readerFixture(t)
-	directory := filepath.Join(config.VaultPath, "skills", "demo-skill")
+	config, _, ctx := readerFixture(t)
+	directory := filepath.Join(config.VaultPath, "global", "skills", "demo-skill")
 	if err := os.MkdirAll(directory, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -495,6 +495,21 @@ func TestReaderSkillsAreListedFromVaultFolders(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(directory, "extra.md"), []byte("extra"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, relative := range []string{"skills/retired-skill", ".trash/skills/global/deleted-skill"} {
+		writeVaultTestFile(t, config.VaultPath, relative+"/SKILL.md", content)
+		writeVaultTestFile(t, config.VaultPath, relative+"/note.md", "---\nscope: global\ntitle: Hidden Note\n---\n\nHidden body.\n")
+	}
+	index, err := OpenIndex(ctx, config.IndexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := index.Rebuild(ctx, config.VaultPath); err != nil {
+		_ = index.Close()
+		t.Fatal(err)
+	}
+	if err := index.Close(); err != nil {
 		t.Fatal(err)
 	}
 	reader, err := OpenReader(context.Background(), config)
@@ -506,26 +521,31 @@ func TestReaderSkillsAreListedFromVaultFolders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(skills.Skills) == 0 {
-		t.Fatal("skill package was not listed")
+	if len(skills.Skills) != 1 {
+		t.Fatalf("skills = %+v, want only the canonical package", skills.Skills)
 	}
-	var found bool
-	for _, skill := range skills.Skills {
-		if skill.Slug == "demo-skill" {
-			found = true
-			if skill.Name != "Demo Skill" || skill.Description != "Read-only demo" || skill.FileCount != 2 {
-				t.Fatalf("skill = %+v", skill)
-			}
-			if skill.Key != "vault-skill:global:flat:demo-skill" {
-				t.Fatalf("flat skill key = %q, want a scope+slug key", skill.Key)
-			}
-			if !strings.HasSuffix(skill.OpenPath, filepath.Join("skills", "demo-skill", "SKILL.md")) {
-				t.Fatalf("open path = %q", skill.OpenPath)
-			}
+	skill := skills.Skills[0]
+	if skill.Key != "vault-skill:global:demo-skill" || skill.Name != "Demo Skill" || skill.Description != "Read-only demo" || skill.FileCount != 2 ||
+		skill.OpenPath != filepath.Join(directory, "SKILL.md") {
+		t.Fatalf("skill = %+v", skill)
+	}
+	manifest := reader.Manifest()
+	if len(manifest.Skills) != 1 || manifest.Skills["demo-skill"].Scope != "global" {
+		t.Fatalf("manifest skills = %+v", manifest.Skills)
+	}
+	for _, relative := range []string{"skills/retired-skill", ".trash/skills/global/deleted-skill"} {
+		if _, err := reader.SkillFiles(relative); !errors.Is(err, ErrSkillPackageNotFound) {
+			t.Fatalf("read ignored skill %s: %v", relative, err)
 		}
 	}
-	if !found {
-		t.Fatalf("demo-skill not found: %+v", skills.Skills)
+	entries, err := reader.Entries(ctx, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Path, ".trash/") || strings.HasPrefix(entry.Path, "skills/") {
+			t.Fatalf("ignored file in the index: %s", entry.Path)
+		}
 	}
 }
 

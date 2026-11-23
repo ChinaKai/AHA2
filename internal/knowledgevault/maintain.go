@@ -193,7 +193,6 @@ func deriveSkills(vaultPath string, projects, archives map[string]string) (map[s
 			addDirectory(path.Join(relative, child.Name()), child.Name(), SkillLocation{Scope: scope, ProjectID: projectID})
 		}
 	}
-	scanSkillRoot("skills", "global", "")
 	scanSkillRoot("global/skills", "global", "")
 	for projectID, slug := range projects {
 		scanSkillRoot(path.Join("projects", slug, "skills"), "project", projectID)

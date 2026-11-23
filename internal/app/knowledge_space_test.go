@@ -122,12 +122,8 @@ func TestCreateProjectFailureLeavesRetryableErrorState(t *testing.T) {
 		ID: "project-retry", Name: "Retry", ProjectType: "folder",
 		KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now,
 	})
-	if err == nil {
-		t.Fatal("expected the provisioning failure to be reported")
-	}
-	var spaceErr *KnowledgeSpaceError
-	if !errors.As(err, &spaceErr) || spaceErr.Code != "knowledge_space_init_failed" {
-		t.Fatalf("error = %#v", err)
+	if err != nil {
+		t.Fatal(err)
 	}
 	if project.KnowledgeState != domain.KnowledgeStateError {
 		t.Fatalf("returned state = %q", project.KnowledgeState)
@@ -158,7 +154,7 @@ func TestCreateProjectFailureLeavesRetryableErrorState(t *testing.T) {
 	}
 }
 
-func TestCreateProjectRejectsVaultPrerequisiteBeforeInsert(t *testing.T) {
+func TestCreateProjectLeavesMissingVaultSpaceUninitialized(t *testing.T) {
 	ctx := context.Background()
 	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
 	if err != nil {
@@ -170,19 +166,23 @@ func TestCreateProjectRejectsVaultPrerequisiteBeforeInsert(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer manager.Close()
+	if err := manager.SetEnabled(ctx, true); err != nil {
+		t.Fatal(err)
+	}
 	service := NewService(database, nil, nil)
 	service.SetKnowledgeVault(manager, true)
 	now := time.Now().UTC()
-	_, err = service.CreateProject(ctx, domain.Project{
-		ID: "project-blocked", Name: "Blocked", ProjectType: "folder",
+	project, err := service.CreateProject(ctx, domain.Project{
+		ID: "project-uninitialized", Name: "Uninitialized", ProjectType: "folder",
 		KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now,
 	})
-	var spaceErr *KnowledgeSpaceError
-	if !errors.As(err, &spaceErr) || !IsKnowledgeSpaceNotReadyError(err) {
-		t.Fatalf("error = %#v", err)
+	if err != nil || project.KnowledgeState != domain.KnowledgeStateUninitialized {
+		t.Fatalf("project = %#v, err = %v", project, err)
 	}
-	if _, lookupErr := database.Project(ctx, "project-blocked"); lookupErr == nil {
-		t.Fatal("prerequisite failure still inserted the project row")
+	stored, err := database.Project(ctx, project.ID)
+	if err != nil || stored.KnowledgeState != domain.KnowledgeStateUninitialized {
+		t.Fatalf("stored project = %#v, err = %v", stored, err)
 	}
 }
 

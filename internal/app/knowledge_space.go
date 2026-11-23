@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,12 +53,9 @@ func (s *Service) KnowledgeVaultAvailable() bool {
 	return s != nil && s.knowledgeVault != nil && s.knowledgeVault.Enabled()
 }
 
-// CreateProject creates a project row and initializes its knowledge space in
-// the same operation. Model A has no separate space entity: the project row
-// itself is the space, and a project is only usable once its manifest mapping,
-// root index and index entry are ready. A failure after the row insert leaves
-// the project in error so the owner can retry; it never falls back to the
-// legacy knowledge tables.
+// CreateProject creates the project row even when its optional vault space
+// cannot be provisioned. The project state records whether the space is
+// ready, and startup reconciliation or an explicit retry can provision it.
 func (s *Service) CreateProject(ctx context.Context, project domain.Project) (domain.Project, error) {
 	// Infrastructure projects (channel hosts and the pet's system project) do
 	// not own a vault space in model A. Their knowledge comes from
@@ -80,23 +78,31 @@ func (s *Service) CreateProject(ctx context.Context, project domain.Project) (do
 			"project_id_archived",
 			fmt.Sprintf("项目 ID 已被归档知识空间 %q 使用，不能复用；请新建项目或使用其他 ID", archivedSlug), nil)
 	}
-	if !s.knowledgeVault.Enabled() {
-		return domain.Project{}, knowledgeSpaceError(
-			"knowledge_vault_disabled",
-			"文件知识库尚未启用，无法创建项目；请先在高级设置中启用或初始化文件知识库", knowledgevault.ErrDisabled)
+	project.KnowledgeState = domain.KnowledgeStateUninitialized
+	if s.knowledgeVault.Enabled() {
+		if err := s.knowledgeVault.CheckProjectSpacePrerequisites(); err != nil {
+			if !errors.Is(err, knowledgevault.ErrVaultNotInitialized) {
+				project.KnowledgeState = domain.KnowledgeStateError
+			}
+			log.Printf("project %s knowledge space unavailable (%s): %v", project.ID, project.KnowledgeState, err)
+		} else {
+			project.KnowledgeState = domain.KnowledgeStateInitializing
+		}
 	}
-	if err := s.knowledgeVault.CheckProjectSpacePrerequisites(); err != nil {
-		return domain.Project{}, knowledgeSpaceError(
-			"knowledge_space_not_ready",
-			"文件知识库不可用，项目未创建："+err.Error(), err)
-	}
-	project.KnowledgeState = domain.KnowledgeStateInitializing
 	if err := s.store.CreateProject(ctx, project); err != nil {
 		return domain.Project{}, err
 	}
+	if project.KnowledgeState != domain.KnowledgeStateInitializing {
+		return project, nil
+	}
 	if err := s.provisionProjectKnowledgeSpace(ctx, project); err != nil {
 		project.KnowledgeState = domain.KnowledgeStateError
-		return project, err
+		var spaceErr *KnowledgeSpaceError
+		if errors.As(err, &spaceErr) && spaceErr.Code == "project_id_archived" {
+			return project, err
+		}
+		log.Printf("project %s knowledge space unavailable (%s): %v", project.ID, project.KnowledgeState, err)
+		return project, nil
 	}
 	project.KnowledgeState = domain.KnowledgeStateReady
 	return project, nil
@@ -115,7 +121,9 @@ func (s *Service) archivedProjectSpace(projectID string) (string, bool) {
 
 func (s *Service) provisionProjectKnowledgeSpace(ctx context.Context, project domain.Project) error {
 	if _, err := s.knowledgeVault.ProvisionProjectSpace(ctx, project.ID, project.Name); err != nil {
-		_ = s.store.SetProjectKnowledgeState(ctx, project.ID, domain.KnowledgeStateError)
+		if stateErr := s.store.SetProjectKnowledgeState(context.WithoutCancel(ctx), project.ID, domain.KnowledgeStateError); stateErr != nil {
+			log.Printf("project %s failed to save knowledge space error state: %v", project.ID, stateErr)
+		}
 		if errors.Is(err, knowledgevault.ErrProjectIDArchived) {
 			return knowledgeSpaceError(
 				"project_id_archived",
@@ -125,7 +133,7 @@ func (s *Service) provisionProjectKnowledgeSpace(ctx context.Context, project do
 			"knowledge_space_init_failed",
 			"项目已创建，但知识空间初始化失败，可重试："+err.Error(), err)
 	}
-	if err := s.store.SetProjectKnowledgeState(ctx, project.ID, domain.KnowledgeStateReady); err != nil {
+	if err := s.store.SetProjectKnowledgeState(context.WithoutCancel(ctx), project.ID, domain.KnowledgeStateReady); err != nil {
 		return knowledgeSpaceError("knowledge_space_state_failed", "知识空间已创建，但保存状态失败："+err.Error(), err)
 	}
 	return nil

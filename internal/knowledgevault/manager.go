@@ -293,9 +293,8 @@ func (m *Manager) Status(ctx context.Context) Status {
 	return status
 }
 
-// CheckProjectSpacePrerequisites is the preflight a project creation uses
-// before it inserts a row. It refuses a vault that is not initialized or not
-// writable instead of leaving a half-created project behind.
+// CheckProjectSpacePrerequisites checks whether a project's space can be
+// provisioned now, independently of whether the project row can be created.
 func (m *Manager) CheckProjectSpacePrerequisites() error {
 	return CheckProjectSpacePrerequisites(m.config)
 }

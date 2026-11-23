@@ -295,7 +295,7 @@ func Bootstrap(cfg Config, options InitOptions) (InitReport, error) {
 
 	directories := []string{
 		"", "global", "global/general", "global/agent-lessons", "global/skills", "global/inbox",
-		"projects", "skills", ".trash", stateDirectory,
+		"projects", ".trash", stateDirectory,
 	}
 	for _, relative := range directories {
 		path := filepath.Join(cfg.VaultPath, filepath.FromSlash(relative))
@@ -331,7 +331,7 @@ func Bootstrap(cfg Config, options InitOptions) (InitReport, error) {
 	if err := writeVaultFileIfChanged(cfg.VaultPath, gitignorePath, []byte(gitignore), 0o644); err != nil {
 		return report, err
 	}
-	for _, relative := range []string{"global/general", "global/agent-lessons", "global/skills", "global/inbox", "projects", "skills", ".trash"} {
+	for _, relative := range []string{"global/general", "global/agent-lessons", "global/skills", "global/inbox", "projects", ".trash"} {
 		keep := filepath.Join(cfg.VaultPath, filepath.FromSlash(relative), ".gitkeep")
 		if err := writeVaultFileIfChanged(cfg.VaultPath, keep, []byte{}, 0o644); err != nil {
 			return report, err
@@ -387,7 +387,7 @@ func vaultReadme(manifest Manifest) string {
 - ` + "`projects/<slug>/index.md`" + `：项目知识入口；主题组是子目录，根下叶子文档在 ` + "`inbox/`" + `。
 - ` + "`archive/<slug>/`" + `：AHA1 归档知识库，单独标记，不并入主库。
 - ` + "`orphans/`" + `：导出时找不到所属项目或 scope 的孤儿条目隔离区；正文保留，报告逐条列出。
-- ` + "`skills/<slug>/`" + `：技能包的扁平预留位置；Phase 1 不迁移技能。
+- ` + "`global/skills/<slug>/`" + ` 和 ` + "`projects/<slug>/skills/<slug>/`" + `：全局和项目技能包。
 - ` + "`.trash/`" + `：删除暂存，不作为有效知识。
 - ` + "`.aha-vault.json`" + `：vault 身份、项目 ID 与稳定目录 slug 的映射。
 
