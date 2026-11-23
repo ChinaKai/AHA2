@@ -14,6 +14,7 @@ web/src/api.ts	DELETE	/api/v1/browser-grants/${encodeURIComponent(grantID)}	1
 web/src/api.ts	GET/see-source	/api/v1/browser-grants/${encodeURIComponent(grantID)}/bookmarks	1
 web/src/api.ts	POST	/api/v1/browser-grants/${encodeURIComponent(grantID)}/tabs	1
 web/src/api.ts	DELETE	/api/v1/browser-grants/${encodeURIComponent(grantID)}/tabs/${encodeURIComponent(tabID)}	1
+web/src/api.ts	POST	/api/v1/browser-grants/${encodeURIComponent(grantID)}/tabs/${encodeURIComponent(tabID)}/actions	1
 web/src/api.ts	POST	/api/v1/browser-grants/${encodeURIComponent(grantID)}/tabs/${encodeURIComponent(tabID)}/activate	1
 web/src/api.ts	GET	/api/v1/browser-grants/${encodeURIComponent(grantID)}/tabs/${encodeURIComponent(tabID)}/frame	1
 web/src/api.ts	GET/see-source	/api/v1/browser/host	1
