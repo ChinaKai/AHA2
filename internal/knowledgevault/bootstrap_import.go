@@ -11,8 +11,9 @@ import (
 	"strings"
 )
 
-// BootstrapFingerprint includes every file and directory, even those the
-// knowledge index skips. Any edit or addition closes the replacement path.
+// BootstrapFingerprint includes the vault files and directory structure,
+// including content the index skips. Local runtime state under .aha does not
+// affect whether the scaffold is still unused.
 func BootstrapFingerprint(vaultPath string) (string, error) {
 	const maxEntries, maxFileSize = 64, 128 << 10
 	hash := sha256.New()
@@ -31,6 +32,11 @@ func BootstrapFingerprint(vaultPath string) (string, error) {
 		}
 		if entry.IsDir() {
 			fmt.Fprintf(hash, "dir %q\n", filepath.ToSlash(relative))
+			// Keep the directory entry in the hash so existing fingerprints of
+			// the scaffold, recorded before auto-sync starts, still match.
+			if relative == stateDirectory {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		file, err := os.Open(path)
