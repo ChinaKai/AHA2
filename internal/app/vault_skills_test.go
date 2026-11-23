@@ -458,7 +458,7 @@ func TestVaultSkillAutoAttachDegradesForUnboundProject(t *testing.T) {
 		Request: "unbound", SkillIDs: []string{"vault-skill:global:demo"}, ApplyAutoSkills: boolPointer(false),
 		ModelID: "model-vault-skills",
 	})
-	if err != nil || task.Status != domain.TaskActive || len(task.SkillIDs) != 0 {
+	if err != nil || task.Status != domain.TaskActive || !hasTaskSkill(task, "vault-skill:global:demo") {
 		t.Fatalf("unbound task = %#v, err = %v", task, err)
 	}
 	if !strings.Contains(logs.String(), "vault-skill:global:demo") {
@@ -472,6 +472,16 @@ func TestVaultSkillAutoAttachDegradesForUnboundProject(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForTurn(t, fixture.database, turn.ID, domain.TurnSucceeded)
+	if _, err := fixture.service.RetryProjectKnowledgeSpace(ctx, otherProject.ID); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := fixture.database.Task(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if skills := fixture.service.activeTaskSkills(ctx, stored); len(skills) != 1 || skills[0].ID != "vault-skill:global:demo" {
+		t.Fatalf("recovered Task skills = %+v", skills)
+	}
 }
 
 func TestVaultSkillAutoAttachRequiresIndexReady(t *testing.T) {

@@ -15,10 +15,115 @@ import (
 
 	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/auth"
+	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/knowledgevault"
 	"github.com/ChinaKai/AHA2/internal/secrets"
 	"github.com/ChinaKai/AHA2/internal/store"
 )
+
+func TestKnowledgeVaultImportOverAutomaticBootstrap(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	database, err := store.Open(ctx, filepath.Join(dataDir, "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	config := knowledgevault.DefaultConfig(dataDir)
+	manager, err := knowledgevault.NewManager(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	if _, err := manager.Initialize(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	fingerprint, err := knowledgevault.BootstrapFingerprint(config.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.RecordKnowledgeVaultObserved(ctx, "", fingerprint); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(New(Config{Store: database, Auth: auth.NewService(database, "setup-test", time.Hour),
+		App: app.NewService(database, nil, app.StubExecutor{}), KnowledgeVault: manager}).Handler())
+	defer server.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	csrf := registerOwner(t, client, server.URL)
+	endpoint := server.URL + "/api/v1/settings/knowledge-vault"
+	canImport := func() bool {
+		var result struct{ Settings knowledgeVaultSettingsView }
+		decodeResponse(t, requestJSON(t, client, http.MethodGet, endpoint, nil, ""), &result)
+		return result.Settings.CanImportOverBootstrap
+	}
+	if !canImport() {
+		t.Fatal("pristine automatic vault did not offer import")
+	}
+	importFrom := func(path string, wantStatus int) (knowledgevault.ExistingVaultImportReport, string) {
+		t.Helper()
+		response := requestJSON(t, client, http.MethodPost, endpoint+"/import", map[string]string{"kind": "local", "path": path}, csrf)
+		var result struct {
+			Import knowledgevault.ExistingVaultImportReport
+			Error  string
+		}
+		decodeResponse(t, response, &result)
+		if response.StatusCode != wantStatus {
+			t.Fatalf("import status = %d, want %d (code: %q)", response.StatusCode, wantStatus, result.Error)
+		}
+		return result.Import, result.Error
+	}
+	if _, code := importFrom(t.TempDir(), http.StatusBadRequest); code != "knowledge_vault_manifest_missing" || !canImport() {
+		t.Fatalf("failed verification changed the bootstrap, error code %q", code)
+	}
+	source := knowledgevault.DefaultConfig(t.TempDir())
+	if _, err := knowledgevault.Bootstrap(source, knowledgevault.InitOptions{VaultName: "Existing vault"}); err != nil {
+		t.Fatal(err)
+	}
+	retainedFile := filepath.Join(config.VaultPath, ".trash", "owner-note.md")
+	if err := os.WriteFile(retainedFile, []byte("owner file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if canImport() {
+		t.Fatal("modified scaffold still offered import")
+	}
+	if _, code := importFrom(source.VaultPath, http.StatusConflict); code != "knowledge_vault_target_not_empty" {
+		t.Fatalf("modified scaffold import code: %q", code)
+	}
+	if data, err := os.ReadFile(retainedFile); err != nil || string(data) != "owner file" {
+		t.Fatalf("owner file changed: %q %v", data, err)
+	}
+	if err := os.Remove(retainedFile); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	project := domain.Project{ID: "project-setup", Name: "Setup", ProjectType: "folder", CreatedAt: now, UpdatedAt: now}
+	if err := database.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	if canImport() {
+		t.Fatal("a vault with a project still offered import")
+	}
+	if _, code := importFrom(source.VaultPath, http.StatusConflict); code != "knowledge_vault_target_not_empty" {
+		t.Fatalf("vault with a project import code: %q", code)
+	}
+	if err := database.DeleteProject(ctx, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	report, _ := importFrom(source.VaultPath, http.StatusOK)
+	if report.BackupPath == "" || report.VaultPath != config.VaultPath || report.VerifiedAt.IsZero() {
+		t.Fatalf("import report = %+v", report)
+	}
+	if backup, err := knowledgevault.BootstrapFingerprint(report.BackupPath); err != nil || backup != fingerprint {
+		t.Fatalf("backup fingerprint = %q, err = %v", backup, err)
+	}
+	if settings, err := database.KnowledgeVaultSettings(ctx); err != nil || !settings.Configured || settings.ImportVerifiedAt.IsZero() || settings.LastBackupPath != report.BackupPath {
+		t.Fatalf("import settings = %+v, err = %v", settings, err)
+	}
+	if status := manager.Status(ctx); !status.IndexReady || status.VaultName != "Existing vault" || canImport() {
+		t.Fatalf("imported vault status = %+v", status)
+	}
+}
 
 // knowledgeVaultManagerFixture builds a real Phase 1 vault on disk, rebuilds
 // its index, and returns the same enabled runtime manager the server uses.
@@ -90,7 +195,7 @@ project_id: project-1
 	if err := os.MkdirAll(filepath.Join(config.VaultPath, ".obsidian"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	write("global/skills/demo/SKILL.md", "---\nname: Demo\ndescription: A demo skill\n---\n\n# Demo\n")
+	write("skills/demo/SKILL.md", "---\nname: Demo\ndescription: A demo skill\n---\n\n# Demo\n")
 	index, err := knowledgevault.OpenIndex(ctx, config.IndexPath)
 	if err != nil {
 		t.Fatal(err)
@@ -273,7 +378,7 @@ func TestKnowledgeVaultAPIReadsLibrariesTreeDocumentSearchRecentInboxAndSkills(t
 		t.Fatalf("skills status=%d payload=%#v", response.StatusCode, skills)
 	}
 	skill := skills["skills"].([]any)[0].(map[string]any)
-	if skill["name"] != "Demo" || skill["relative_path"] != "global/skills/demo" || skill["file_count"].(float64) != 1 {
+	if skill["name"] != "Demo" || skill["key"] != "vault-skill:global:flat:demo" || skill["file_count"].(float64) != 1 {
 		t.Fatalf("skill = %#v", skill)
 	}
 	// The task picker needs the package's version and state, not just its name.

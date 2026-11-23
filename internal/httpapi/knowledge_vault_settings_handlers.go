@@ -24,15 +24,23 @@ import (
 
 type knowledgeVaultSettingsView struct {
 	knowledgevault.Status
-	Readiness           knowledgevault.Readiness        `json:"readiness"`
-	Legacy              domain.LegacyKnowledgeInventory `json:"legacy"`
-	Configured          bool                            `json:"configured"`
-	AutoSync            knowledgevault.AutoSyncStatus   `json:"auto_sync"`
-	ImportSource        string                          `json:"import_source,omitempty"`
-	MigrationVerifiedAt time.Time                       `json:"migration_verified_at,omitempty"`
-	ImportVerifiedAt    time.Time                       `json:"import_verified_at,omitempty"`
-	LastBackupPath      string                          `json:"last_backup_path,omitempty"`
-	SettingsUpdatedAt   time.Time                       `json:"settings_updated_at,omitempty"`
+	Readiness              knowledgevault.Readiness        `json:"readiness"`
+	Legacy                 domain.LegacyKnowledgeInventory `json:"legacy"`
+	Configured             bool                            `json:"configured"`
+	AutoSync               knowledgevault.AutoSyncStatus   `json:"auto_sync"`
+	ImportSource           string                          `json:"import_source,omitempty"`
+	MigrationVerifiedAt    time.Time                       `json:"migration_verified_at,omitempty"`
+	ImportVerifiedAt       time.Time                       `json:"import_verified_at,omitempty"`
+	LastBackupPath         string                          `json:"last_backup_path,omitempty"`
+	SettingsUpdatedAt      time.Time                       `json:"settings_updated_at,omitempty"`
+	CanImportOverBootstrap bool                            `json:"can_import_over_bootstrap,omitempty"`
+}
+
+func (s *Server) vaultBootstrapImportFingerprint(settings domain.KnowledgeVaultSettings, projects []string) string {
+	if settings.Configured || settings.VaultPopulated() || len(projects) != 0 || !s.knowledgeVault.CanReplaceBootstrap(settings.BootstrapFingerprint) {
+		return ""
+	}
+	return settings.BootstrapFingerprint
 }
 
 func (s *Server) knowledgeVaultView(ctx context.Context) (knowledgeVaultSettingsView, knowledgevault.Readiness, error) {
@@ -94,10 +102,11 @@ func (s *Server) knowledgeVaultView(ctx context.Context) (knowledgeVaultSettings
 	view := knowledgeVaultSettingsView{
 		Status: status, Readiness: readiness, Legacy: inventory,
 		Configured: settings.Configured, AutoSync: autoSync, ImportSource: settings.ImportSource,
-		MigrationVerifiedAt: settings.MigrationVerifiedAt,
-		ImportVerifiedAt:    settings.ImportVerifiedAt,
-		LastBackupPath:      settings.LastBackupPath,
-		SettingsUpdatedAt:   settings.UpdatedAt,
+		MigrationVerifiedAt:    settings.MigrationVerifiedAt,
+		ImportVerifiedAt:       settings.ImportVerifiedAt,
+		LastBackupPath:         settings.LastBackupPath,
+		CanImportOverBootstrap: s.vaultBootstrapImportFingerprint(settings, known) != "",
+		SettingsUpdatedAt:      settings.UpdatedAt,
 	}
 	return view, readiness, nil
 }
@@ -359,7 +368,8 @@ func (s *Server) migrateKnowledgeVault(writer http.ResponseWriter, request *http
 
 // importKnowledgeVault is the existing-vault path: copy a local directory or
 // clone a Git remote, rebuild the index, verify manifest/project bindings and
-// only then turn the vault on. A non-empty target is rejected, never merged.
+// only then turn the vault on. An unused automatic scaffold can be replaced
+// with a backup of the old directory.
 func (s *Server) importKnowledgeVault(writer http.ResponseWriter, request *http.Request) {
 	if s.knowledgeVault == nil {
 		writeKnowledgeVaultDisabled(writer)
@@ -395,16 +405,34 @@ func (s *Server) importKnowledgeVault(writer http.ResponseWriter, request *http.
 		known = append(known, project.ID)
 	}
 	previousEnabled, previousSource := s.knowledgeVault.Enabled(), s.knowledgeVault.Source()
-	report, err := knowledgevault.ImportExistingVault(request.Context(), s.knowledgeVault.Config(), knowledgevault.ExistingVaultImportOptions{
+	settings, err := s.store.KnowledgeVaultSettings(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "knowledge_vault_settings_failed")
+		return
+	}
+	options := knowledgevault.ExistingVaultImportOptions{
 		Kind: kind, Path: payload.Path, Remote: payload.Remote, Branch: payload.Branch,
 		KnownProjects: known,
-	})
+	}
+	fingerprint := s.vaultBootstrapImportFingerprint(settings, known)
+	var report knowledgevault.ExistingVaultImportReport
+	if fingerprint != "" {
+		report, err = s.knowledgeVault.ImportOverBootstrap(request.Context(), fingerprint, options, func(report knowledgevault.ExistingVaultImportReport) error {
+			committed, err := s.store.RecordKnowledgeVaultBootstrapImport(context.WithoutCancel(request.Context()), fingerprint, knowledgevault.ImportSourceExisting, report.VerifiedAt, report.BackupPath)
+			if err == nil && !committed {
+				return knowledgevault.ErrTargetNotEmpty
+			}
+			return err
+		})
+	} else {
+		report, err = knowledgevault.ImportExistingVault(request.Context(), s.knowledgeVault.Config(), options)
+	}
 	var validation *knowledgevault.GitValidationError
 	switch {
-	case errors.Is(err, knowledgevault.ErrTargetNotEmpty):
+	case errors.Is(err, knowledgevault.ErrTargetNotEmpty) && report.BackupPath == "":
 		writeJSON(writer, http.StatusConflict, map[string]any{
 			"ok": false, "error": "knowledge_vault_target_not_empty",
-			"message": "目标知识库目录已有文件；请先移走旧目录，导入不会自动合并。",
+			"message": "导入需要空目录或尚未使用的自动骨架。当前知识库已有文件、修改或项目。",
 		})
 		return
 	case errors.Is(err, knowledgevault.ErrImportSourceMissing):
@@ -423,13 +451,15 @@ func (s *Server) importKnowledgeVault(writer http.ResponseWriter, request *http.
 		})
 		return
 	}
-	if err := s.finishKnowledgeVaultPopulation(request.Context(), report.VerifiedAt, "", knowledgevault.ImportSourceExisting, false); err != nil {
-		s.rollbackKnowledgeVaultSwitch(previousEnabled, previousSource)
-		writeJSON(writer, http.StatusInternalServerError, map[string]any{
-			"ok": false, "error": "knowledge_vault_enable_failed", "message": err.Error(),
-			"report": report,
-		})
-		return
+	if fingerprint == "" {
+		if err := s.finishKnowledgeVaultPopulation(request.Context(), report.VerifiedAt, "", knowledgevault.ImportSourceExisting, false); err != nil {
+			s.rollbackKnowledgeVaultSwitch(previousEnabled, previousSource)
+			writeJSON(writer, http.StatusInternalServerError, map[string]any{
+				"ok": false, "error": "knowledge_vault_enable_failed", "message": err.Error(),
+				"report": report,
+			})
+			return
+		}
 	}
 	s.audit(request, "knowledge_vault.import", "knowledge_vault", report.VaultPath, map[string]any{
 		"kind": report.Kind, "entries": report.IndexedEntries, "files": report.ImportedFiles,

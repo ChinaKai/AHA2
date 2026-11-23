@@ -345,7 +345,7 @@ POST /api/v1/providers/{id}/model-detection-jobs/{job}/cancel	httpapi	internal/h
 POST /api/v1/providers/{id}/model-probes	httpapi	internal/httpapi/server.go	probeProviderModel	owner_session	v2:985f1c590231	pending	pending	pending	pending	pending
 POST /api/v1/rounds/{id}/interrupt	httpapi	internal/httpapi/server.go	interruptRound	owner_session	v2:f8917244ed0c	pending	pending	pending	pending	pending
 POST /api/v1/settings/knowledge-vault/cutover-legacy	httpapi	internal/httpapi/server.go	cutoverLegacyKnowledge	owner_session	v2:7d8d310200ce	pending	pending	pending	pending	pending
-POST /api/v1/settings/knowledge-vault/import	httpapi	internal/httpapi/server.go	importKnowledgeVault	owner_session	v2:c496de87a5a4	pending	pending	pending	pending	pending
+POST /api/v1/settings/knowledge-vault/import	httpapi	internal/httpapi/server.go	importKnowledgeVault	owner_session	v2:c57b51f453e6	pending	pending	pending	pending	pending
 POST /api/v1/settings/knowledge-vault/init	httpapi	internal/httpapi/server.go	initializeKnowledgeVault	owner_session	v2:ef2a0218b7f3	pending	pending	pending	pending	pending
 POST /api/v1/settings/knowledge-vault/migrate	httpapi	internal/httpapi/server.go	migrateKnowledgeVault	owner_session	v2:f480124b9317	pending	pending	pending	pending	pending
 POST /api/v1/settings/knowledge-vault/rebuild	httpapi	internal/httpapi/server.go	rebuildKnowledgeVaultIndex	owner_session	v2:47c4ff1103de	pending	pending	pending	pending	pending

@@ -30,6 +30,7 @@ type ExistingVaultImportReport struct {
 	Remote          string    `json:"remote,omitempty"`
 	Branch          string    `json:"branch,omitempty"`
 	VaultPath       string    `json:"vault_path"`
+	BackupPath      string    `json:"backup_path,omitempty"`
 	ImportedFiles   int       `json:"imported_files"`
 	ProjectCount    int       `json:"project_count"`
 	UnboundProjects []string  `json:"unbound_projects,omitempty"`

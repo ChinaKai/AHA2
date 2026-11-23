@@ -25,6 +25,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/browser"
 	"github.com/ChinaKai/AHA2/internal/channel"
 	"github.com/ChinaKai/AHA2/internal/codexaccount"
+	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/execution"
 	"github.com/ChinaKai/AHA2/internal/hardware"
 	"github.com/ChinaKai/AHA2/internal/httpapi"
@@ -397,7 +398,7 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	// A previously configured vault can be temporarily missing. Keep its
 	// readiness diagnosable without creating a new vault in its place.
 	if vaultEnabled && !vaultSettings.Configured && !legacyInventory.HasLegacy() && !vaultSettings.VaultPopulated() && !legacyCutoverApplied {
-		if err := initializeFreshKnowledgeVault(ctx, knowledgeVaultManager); err != nil {
+		if err := initializeFreshKnowledgeVault(ctx, knowledgeVaultManager, database, vaultSettings.BootstrapFingerprint); err != nil {
 			logger.Warn("knowledge vault startup initialization failed; continuing startup",
 				"vault", knowledgeVaultConfig.VaultPath, "index", knowledgeVaultConfig.IndexPath, "error", err)
 		}
@@ -739,9 +740,30 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	}
 }
 
-func initializeFreshKnowledgeVault(ctx context.Context, manager *knowledgevault.Manager) error {
+func initializeFreshKnowledgeVault(ctx context.Context, manager *knowledgevault.Manager, database *store.Store, fingerprint string) error {
+	const pending = "pending:"
 	config := manager.Config()
+	recordSnapshot := func(previous, prefix string) error {
+		actual, err := knowledgevault.BootstrapFingerprint(config.VaultPath)
+		if err == nil {
+			actual = prefix + actual
+		}
+		return errors.Join(err, database.RecordKnowledgeVaultObserved(ctx, previous, actual))
+	}
 	if knowledgevault.VaultInitialized(config.VaultPath) {
+		if previous, ok := strings.CutPrefix(fingerprint, pending); ok && manager.CanReplaceBootstrap(previous) {
+			_, err := manager.Rebuild(ctx)
+			prefix := ""
+			if err != nil {
+				prefix = pending
+			}
+			return errors.Join(err, recordSnapshot(fingerprint, prefix))
+		}
+		if fingerprint == "" {
+			if err := database.RecordKnowledgeVaultObserved(ctx, "", ""); err != nil {
+				return fmt.Errorf("record existing vault: %w", err)
+			}
+		}
 		// A startup interrupted after creating the skeleton can still be
 		// missing the derived index. Rebuild it before accepting requests.
 		if _, err := os.Stat(config.IndexPath); errors.Is(err, os.ErrNotExist) {
@@ -749,6 +771,25 @@ func initializeFreshKnowledgeVault(ctx context.Context, manager *knowledgevault.
 			return err
 		}
 		return nil
+	}
+	if fingerprint != "" {
+		return fmt.Errorf("previously initialized vault is missing its manifest; restore the existing vault")
+	}
+	ready, err := database.ProjectsWithKnowledgeState(ctx, domain.KnowledgeStateReady)
+	if err != nil {
+		return fmt.Errorf("check prior project knowledge spaces: %w", err)
+	}
+	for _, project := range ready {
+		if !domain.IsSystemManagedProject(project) {
+			return errors.Join(fmt.Errorf("project %s has an existing knowledge space but the vault manifest is missing", project.ID),
+				database.RecordKnowledgeVaultObserved(ctx, "", ""))
+		}
+	}
+	if info, err := os.Lstat(config.IndexPath); err == nil && !info.IsDir() {
+		return errors.Join(errors.New("knowledge index already exists but the vault manifest is missing; restore the existing vault"),
+			database.RecordKnowledgeVaultObserved(ctx, "", ""))
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect knowledge index before initialization: %w", err)
 	}
 	// A failed bootstrap can leave empty directories before the manifest is
 	// written. Retry those, and leave manifest-less vaults with files alone.
@@ -766,8 +807,13 @@ func initializeFreshKnowledgeVault(ctx context.Context, manager *knowledgevault.
 	}); err != nil {
 		return err
 	}
-	_, err := manager.Initialize(ctx, false)
-	return err
+	if _, err := manager.Initialize(ctx, false); err != nil {
+		if knowledgevault.VaultInitialized(config.VaultPath) {
+			return errors.Join(err, recordSnapshot("", pending))
+		}
+		return err
+	}
+	return recordSnapshot("", "")
 }
 
 func resolveAgentAPIURL(listen, configured string) string {

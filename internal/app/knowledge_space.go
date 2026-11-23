@@ -185,6 +185,13 @@ func (s *Service) RetryProjectKnowledgeSpace(ctx context.Context, projectID stri
 				fmt.Sprintf("项目标记为 ready，但本地 live 知识空间不在 manifest 中，且项目 ID 已被归档空间 %s 占用，无法自动恢复；请删除这个项目行或改用新的项目 ID。归档内容仍可在知识库中浏览。", archivedPath),
 				knowledgevault.ErrProjectIDArchived)
 		}
+		root, bound := knowledgevault.SpaceRootPath(s.knowledgeVault.Config(), project.ID)
+		if !bound {
+			return project, knowledgeSpaceError("knowledge_space_not_ready", "找不到此前绑定的知识空间，请先恢复原知识库及项目绑定。", nil)
+		}
+		if _, err := os.Stat(filepath.Join(s.knowledgeVault.Config().VaultPath, filepath.FromSlash(root))); err != nil {
+			return project, knowledgeSpaceError("knowledge_space_not_ready", "此前绑定的知识空间缺少根索引，请先恢复原知识库。", err)
+		}
 		return project, nil
 	}
 	if err := s.store.SetProjectKnowledgeState(ctx, project.ID, domain.KnowledgeStateInitializing); err != nil {
@@ -227,6 +234,13 @@ func (s *Service) ReconcileKnowledgeSpaces(ctx context.Context) (KnowledgeSpaceR
 		return report, nil
 	}
 	report.Enabled = true
+	config := s.knowledgeVault.Config()
+	// A missing or unreadable manifest is a recovery problem for the whole
+	// vault. Preserve stored project states until the original files return.
+	manifest, err := knowledgevault.ReadManifest(config.VaultPath)
+	if err != nil {
+		return report, fmt.Errorf("reconcile knowledge spaces: read vault manifest: %w", err)
+	}
 	// A crash between the rename into .trash and the final deletion leaves an
 	// empty infrastructure space there. Sweep confirmed scaffolding only; any
 	// unknown or non-empty entry is kept and reported.
@@ -245,17 +259,8 @@ func (s *Service) ReconcileKnowledgeSpaces(ctx context.Context) (KnowledgeSpaceR
 	for _, project := range projects {
 		byID[project.ID] = project
 	}
-	manifestProjects := map[string]string{}
-	manifestArchives := map[string]string{}
-	config := s.knowledgeVault.Config()
-	// Reconcile from the manifest currently on disk. The live Reader may have
-	// been opened before an archive/provision step, and a stale snapshot would
-	// make reconciliation act on mappings that no longer exist (or miss ones
-	// that do).
-	if manifest, manifestErr := knowledgevault.ReadManifest(config.VaultPath); manifestErr == nil {
-		manifestProjects = manifest.Projects
-		manifestArchives = manifest.Archives
-	}
+	manifestProjects := manifest.Projects
+	manifestArchives := manifest.Archives
 	indexedRoots := map[string]bool{}
 	indexedArchives := map[string]bool{}
 	projectEntries := map[string]bool{}
@@ -450,6 +455,10 @@ func (s *Service) ReconcileKnowledgeSpaces(ctx context.Context) (KnowledgeSpaceR
 					report.Warnings = append(report.Warnings, fmt.Sprintf(
 						"%s 状态为 ready，但 live 知识空间不在 manifest 中且项目 ID 已被归档空间 %s 占用（project_id_archived）；请删除这个项目行或改用新的项目 ID",
 						project.ID, archivedPath))
+				} else {
+					warning := fmt.Sprintf("项目 %s 在 manifest 中缺少此前绑定的知识空间，请恢复原有绑定", project.ID)
+					report.Warnings = append(report.Warnings, warning)
+					log.Print(warning)
 				}
 				continue
 			}

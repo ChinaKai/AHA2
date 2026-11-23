@@ -166,6 +166,7 @@ const localText: Record<string, [zhCN: string, enUS: string]> = {
   "kvs.import.branch": ["分支（可选）", "Branch (optional)"],
   "kvs.import.branchPlaceholder": ["留空使用远端默认分支", "Leave blank for the remote default branch"],
   "kvs.import.help": ["目标知识库目录必须为空；导入不会合并已有文件，也不会读取 Git 密码（仅支持 SSH 密钥）。", "The target vault directory must be empty; imports never merge existing files and never read Git passwords (SSH keys only)."],
+  "kvs.import.bootstrapHelp": ["导入会替换当前空骨架，并保留原目录的备份。Git 导入使用 SSH 密钥。", "Import replaces the empty scaffold and keeps a backup of the original directory. Git imports use SSH keys."],
   "kvs.footer": ["文件是知识正本；请用 VSCode 或 Obsidian 编辑，索引会随写入、文件变化和启动对账自动维护。", "Files are the source of truth; edit them in VS Code or Obsidian. The index is maintained automatically on writes, file changes, and startup reconciliation."],
 };
 
@@ -701,7 +702,7 @@ function switchHTML(settings: KnowledgeVaultSettings, busy: string, blocked: boo
 }
 
 function importHTML(settings: KnowledgeVaultSettings, busy: string): string {
-  if (settings.vault_initialized) return "";
+  if (settings.vault_initialized && !settings.can_import_over_bootstrap) return "";
   return `<details class="knowledge-vault-import"${state.importOpen ? " open" : ""}><summary>${kt("kvs.import.title")}</summary>
     <div class="knowledge-vault-import-body">
       <fieldset class="knowledge-vault-import-modes">
@@ -715,7 +716,7 @@ function importHTML(settings: KnowledgeVaultSettings, busy: string): string {
         <label class="knowledge-vault-import-field" data-import-kind="git"${state.importKind === "git" ? "" : " hidden"}><span>${kt("kvs.import.branch")}</span><input id="knowledge-vault-import-branch" type="text" autocomplete="off" placeholder="${kt("kvs.import.branchPlaceholder")}" value="${escapeHTML(state.importDraft.branch)}"></label>
       </div>
       <div class="knowledge-vault-import-actions"><button type="button" id="knowledge-vault-import" ${busy ? "disabled" : ""}>${busy === "import" ? kt("kvs.action.importing") : kt("kvs.action.import")}</button></div>
-      <p class="field-help knowledge-vault-import-help">${kt("kvs.import.help")}</p>
+      <p class="field-help knowledge-vault-import-help">${kt(settings.can_import_over_bootstrap ? "kvs.import.bootstrapHelp" : "kvs.import.help")}</p>
     </div>
   </details>`;
 }

@@ -521,8 +521,8 @@ func TestReaderSkillsAreListedFromVaultFolders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(skills.Skills) != 1 {
-		t.Fatalf("skills = %+v, want only the canonical package", skills.Skills)
+	if len(skills.Skills) != 2 {
+		t.Fatalf("skills = %+v, want the canonical and legacy flat packages", skills.Skills)
 	}
 	skill := skills.Skills[0]
 	if skill.Key != "vault-skill:global:demo-skill" || skill.Name != "Demo Skill" || skill.Description != "Read-only demo" || skill.FileCount != 2 ||
@@ -530,13 +530,17 @@ func TestReaderSkillsAreListedFromVaultFolders(t *testing.T) {
 		t.Fatalf("skill = %+v", skill)
 	}
 	manifest := reader.Manifest()
-	if len(manifest.Skills) != 1 || manifest.Skills["demo-skill"].Scope != "global" {
+	if len(manifest.Skills) != 2 || manifest.Skills["demo-skill"].Scope != "global" || manifest.Skills["retired-skill"].Scope != "global" {
 		t.Fatalf("manifest skills = %+v", manifest.Skills)
 	}
-	for _, relative := range []string{"skills/retired-skill", ".trash/skills/global/deleted-skill"} {
-		if _, err := reader.SkillFiles(relative); !errors.Is(err, ErrSkillPackageNotFound) {
-			t.Fatalf("read ignored skill %s: %v", relative, err)
-		}
+	if flat := skills.Skills[1]; flat.Key != "vault-skill:global:flat:retired-skill" || flat.RelativePath != "skills/retired-skill" {
+		t.Fatalf("legacy flat skill = %+v", flat)
+	}
+	if files, err := reader.SkillFiles("skills/retired-skill"); err != nil || len(files) != 2 {
+		t.Fatalf("read legacy flat skill: %v (%d files)", err, len(files))
+	}
+	if _, err := reader.SkillFiles(".trash/skills/global/deleted-skill"); !errors.Is(err, ErrSkillPackageNotFound) {
+		t.Fatalf("read trashed skill: %v", err)
 	}
 	entries, err := reader.Entries(ctx, "", "")
 	if err != nil {

@@ -835,8 +835,7 @@ func (s *Service) validateTaskSkillIDs(ctx context.Context, taskID, projectID st
 			if !allowUnavailableVault {
 				return nil, unavailable
 			}
-			log.Printf("project %s: %v; task continues without this skill because the vault or project knowledge space is unavailable", projectID, unavailable)
-			continue
+			log.Printf("project %s: %v; keeping the selection for future Turns", projectID, unavailable)
 		}
 		result = append(result, id)
 	}

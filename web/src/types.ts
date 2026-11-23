@@ -2169,6 +2169,7 @@ export interface KnowledgeVaultSettings {
   source: "database" | "startup";
   vault_ready: boolean;
   vault_initialized: boolean;
+  can_import_over_bootstrap?: boolean;
   vault_writable?: boolean;
   index_ready: boolean;
   index_writable?: boolean;

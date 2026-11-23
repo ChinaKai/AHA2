@@ -143,7 +143,7 @@ func (r *Reader) SkillFiles(relative string) ([]SkillPackageFile, error) {
 		return nil, ErrSkillPackageNotFound
 	}
 	root, _, _ := strings.Cut(relative, "/")
-	if strings.EqualFold(root, "skills") || strings.EqualFold(root, ".trash") {
+	if strings.EqualFold(root, ".trash") {
 		return nil, ErrSkillPackageNotFound
 	}
 	directory := filepath.Join(r.config.VaultPath, filepath.FromSlash(relative))
@@ -980,7 +980,10 @@ func (r *Reader) Skills(ctx context.Context) (SkillsResponse, error) {
 		project  string
 		library  string
 	}
-	locations := []location{{relative: "global/skills", scope: "global", library: "全局技能"}}
+	locations := []location{
+		{relative: "skills", scope: "global", library: "全局技能"},
+		{relative: "global/skills", scope: "global", library: "全局技能"},
+	}
 	for id, slug := range r.manifest.Projects {
 		relative := path.Join("projects", slug, "skills")
 		locations = append(locations, location{relative: relative, scope: "project", project: id, library: r.projectName(id)})

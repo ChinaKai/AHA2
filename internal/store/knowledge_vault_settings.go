@@ -16,9 +16,9 @@ func (s *Store) KnowledgeVaultSettings(ctx context.Context) (domain.KnowledgeVau
 	var item domain.KnowledgeVaultSettings
 	var enabled, configured, autoSync int
 	var updatedAt, importSource, migrationVerifiedAt, importVerifiedAt, backupPath string
-	err := s.db.QueryRowContext(ctx, `SELECT enabled,configured,auto_sync,import_source,migration_verified_at,import_verified_at,last_backup_path,updated_at
+	err := s.db.QueryRowContext(ctx, `SELECT enabled,configured,auto_sync,import_source,migration_verified_at,import_verified_at,last_backup_path,updated_at,bootstrap_fingerprint
 		FROM knowledge_vault_settings WHERE id=1`).
-		Scan(&enabled, &configured, &autoSync, &importSource, &migrationVerifiedAt, &importVerifiedAt, &backupPath, &updatedAt)
+		Scan(&enabled, &configured, &autoSync, &importSource, &migrationVerifiedAt, &importVerifiedAt, &backupPath, &updatedAt, &item.BootstrapFingerprint)
 	item.Enabled = enabled != 0
 	item.Configured = configured != 0
 	item.AutoSync = autoSync != 0
@@ -28,6 +28,31 @@ func (s *Store) KnowledgeVaultSettings(ctx context.Context) (domain.KnowledgeVau
 	item.LastBackupPath = backupPath
 	item.UpdatedAt = parseTime(updatedAt)
 	return item, err
+}
+
+// RecordKnowledgeVaultObserved records the first appearance or completion of
+// a bootstrap independently of the owner switch.
+func (s *Store) RecordKnowledgeVaultObserved(ctx context.Context, previous, fingerprint string) error {
+	if fingerprint == "" {
+		fingerprint = "observed"
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE knowledge_vault_settings SET bootstrap_fingerprint=? WHERE id=1 AND bootstrap_fingerprint=?`, fingerprint, previous)
+	return err
+}
+
+// RecordKnowledgeVaultBootstrapImport commits an import only while the
+// settings and projects still allow replacing the recorded scaffold.
+func (s *Store) RecordKnowledgeVaultBootstrapImport(ctx context.Context, fingerprint, source string, verifiedAt time.Time, backupPath string) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `UPDATE knowledge_vault_settings
+		SET import_verified_at=?,import_source=?,last_backup_path=?,enabled=1,configured=1,updated_at=?
+		WHERE id=1 AND configured=0 AND migration_verified_at='' AND import_verified_at='' AND bootstrap_fingerprint=?
+		AND NOT EXISTS (SELECT 1 FROM projects WHERE project_type NOT IN ('channel','system'))`,
+		timeString(verifiedAt), source, backupPath, timeString(time.Now().UTC()), fingerprint)
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	return rows == 1, err
 }
 
 // UpdateKnowledgeVaultSettings replaces the full owner decision, including the

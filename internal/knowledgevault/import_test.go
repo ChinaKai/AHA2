@@ -126,6 +126,62 @@ func TestImportExistingVaultFromGitRemote(t *testing.T) {
 	if _, err := ReadManifest(destination.VaultPath); err != nil {
 		t.Fatalf("cloned vault manifest: %v", err)
 	}
+	ctx := context.Background()
+	destination = DefaultConfig(t.TempDir())
+	destination.AllowLocalRemote = true
+	manager, err := NewManager(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	if _, err := manager.Initialize(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	fingerprint, err := BootstrapFingerprint(destination.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err = manager.ImportOverBootstrap(ctx, fingerprint, ExistingVaultImportOptions{
+		Kind: "git", Remote: source.VaultPath, Branch: "main",
+	}, func(ExistingVaultImportReport) error { return nil })
+	if err != nil || report.BackupPath == "" || report.ProjectCount == 0 {
+		t.Fatalf("git import over bootstrap = %+v, err = %v", report, err)
+	}
+	if status := manager.Status(ctx); !status.IndexReady || status.ProjectBindings["project-demo"] == "" {
+		t.Fatalf("git import did not retain the source binding: %+v", status)
+	}
+}
+
+func TestImportOverBootstrapRestoresVaultIfVerificationCannotBeRecorded(t *testing.T) {
+	ctx := context.Background()
+	source := DefaultConfig(t.TempDir())
+	if _, err := Bootstrap(source, InitOptions{VaultName: "Source"}); err != nil {
+		t.Fatal(err)
+	}
+	destination := DefaultConfig(t.TempDir())
+	manager, err := NewManager(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	if _, err := manager.Initialize(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	original := manager.Status(ctx)
+	fingerprint, err := BootstrapFingerprint(destination.VaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordErr := errors.New("test metadata write failed")
+	report, err := manager.ImportOverBootstrap(ctx, fingerprint, ExistingVaultImportOptions{
+		Kind: "local", Path: source.VaultPath,
+	}, func(ExistingVaultImportReport) error { return recordErr })
+	if !errors.Is(err, recordErr) || report.BackupPath != "" || !manager.CanReplaceBootstrap(fingerprint) {
+		t.Fatalf("failed import did not restore the original files: %+v err = %v", report, err)
+	}
+	if restored := manager.Status(ctx); !restored.Enabled || !restored.IndexReady || restored.VaultName != original.VaultName || restored.Source != original.Source {
+		t.Fatalf("failed import did not restore the reader: %+v", restored)
+	}
 }
 
 func TestImportExistingVaultNeverLeaksGitCredentials(t *testing.T) {

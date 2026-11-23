@@ -152,14 +152,15 @@ type GeneralSettings struct {
 // was populated. They are written only after a migration/import has been
 // verified; the old knowledge tables are never deleted.
 type KnowledgeVaultSettings struct {
-	Enabled             bool      `json:"enabled"`
-	Configured          bool      `json:"configured"`
-	AutoSync            bool      `json:"auto_sync"`
-	ImportSource        string    `json:"import_source,omitempty"`
-	MigrationVerifiedAt time.Time `json:"migration_verified_at,omitempty"`
-	ImportVerifiedAt    time.Time `json:"import_verified_at,omitempty"`
-	LastBackupPath      string    `json:"last_backup_path,omitempty"`
-	UpdatedAt           time.Time `json:"updated_at,omitempty"`
+	Enabled              bool      `json:"enabled"`
+	Configured           bool      `json:"configured"`
+	AutoSync             bool      `json:"auto_sync"`
+	ImportSource         string    `json:"import_source,omitempty"`
+	MigrationVerifiedAt  time.Time `json:"migration_verified_at,omitempty"`
+	ImportVerifiedAt     time.Time `json:"import_verified_at,omitempty"`
+	LastBackupPath       string    `json:"last_backup_path,omitempty"`
+	UpdatedAt            time.Time `json:"updated_at,omitempty"`
+	BootstrapFingerprint string    `json:"-"`
 }
 
 // VaultPopulated reports whether a legacy migration or an existing-vault

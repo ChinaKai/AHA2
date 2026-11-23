@@ -4327,6 +4327,16 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := s.migrateProxyDefaultOff(ctx); err != nil {
 		return err
 	}
+	if !s.tableHasColumn(ctx, "knowledge_vault_settings", "bootstrap_fingerprint") {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE knowledge_vault_settings ADD COLUMN bootstrap_fingerprint TEXT NOT NULL DEFAULT ''`); err != nil &&
+			!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("apply schema v158 knowledge vault bootstrap: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(158, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v158: %w", err)
+	}
 	return nil
 }
 

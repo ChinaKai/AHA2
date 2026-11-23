@@ -147,6 +147,25 @@ function stub(name, replacement) {
   return () => { api[name] = original; };
 }
 
+test("an unused automatic scaffold keeps the existing vault import actions", async () => {
+  panel.__resetKnowledgeVaultSettingsForTest();
+  let settings = {...ready, configured: false, source: "startup", can_import_over_bootstrap: true};
+  const restore = stub("knowledgeVaultSettings", async () => ({ok: true, settings}));
+  try {
+    const ctx = context();
+    await panel.refreshKnowledgeVaultSettingsPanel(ctx);
+    const scaffold = panel.renderKnowledgeVaultSettingsPanel(ctx);
+    assert.match(scaffold, /id="knowledge-vault-import-path"/);
+    assert.match(scaffold, /id="knowledge-vault-import-remote"/);
+    assert.match(scaffold, /替换当前空骨架，并保留原目录的备份/);
+    settings = {...settings, can_import_over_bootstrap: false};
+    await panel.refreshKnowledgeVaultSettingsPanel(ctx);
+    assert.doesNotMatch(panel.renderKnowledgeVaultSettingsPanel(ctx), /id="knowledge-vault-import"/);
+  } finally {
+    restore();
+  }
+});
+
 test("settings panel shows vault, index and source for an enabled vault", async () => {
   panel.__resetKnowledgeVaultSettingsForTest();
   const restore = stub("knowledgeVaultSettings", async () => ({ok: true, settings: ready}));
