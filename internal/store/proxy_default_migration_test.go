@@ -353,6 +353,203 @@ func TestProxyDefaultOffMigrationPreservesRowWithoutSeedMarker(t *testing.T) {
 	assertProxyDefaultOffVersion(t, ctx, database)
 }
 
+// TestProxyDefaultOffMigrationPreservesSaveAfterCandidateRead pins the
+// read-then-rewrite race: after the migration has read a row that still looks
+// like the v18 seed, an explicit save (including one that stores exactly the
+// old default addresses) must survive both the conditional rewrite and the
+// version bookkeeping.
+func TestProxyDefaultOffMigrationPreservesSaveAfterCandidateRead(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	cases := []struct {
+		name  string
+		saved domain.ProxySettings
+	}{
+		{
+			name: "same legacy addresses",
+			saved: domain.ProxySettings{
+				Mode: "external", HTTPProxy: legacyProxyAddress, HTTPSProxy: legacyProxyAddress,
+				NoProxy: legacyProxyNoProxy, ManagedRefreshIntervalMins: 1440,
+			},
+		},
+		{
+			name: "custom external",
+			saved: domain.ProxySettings{
+				Mode: "external", HTTPProxy: "http://198.51.100.9:8080", HTTPSProxy: "https://proxy.example:8443",
+				NoProxy: "localhost,.corp.example", ManagedRefreshIntervalMins: 1440,
+			},
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			database, _ := prepareProxySeedRow(t, ctx)
+			defer database.Close()
+			candidate, isSeed, err := database.proxyDefaultOffCandidate(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !isSeed {
+				t.Fatal("prepared row was not classified as the v18 seed")
+			}
+			saved, err := database.UpdateProxySettings(ctx, testCase.saved)
+			if err != nil {
+				t.Fatal(err)
+			}
+			changed, err := database.applyProxyDefaultOffCandidate(ctx, candidate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if changed {
+				t.Fatal("conditional rewrite overwrote a save made after the candidate read")
+			}
+			assertProxySavedValue(t, ctx, database, saved)
+			// Bookkeeping must still finish, and must not revisit the row.
+			if err := database.migrateProxyDefaultOff(ctx); err != nil {
+				t.Fatal(err)
+			}
+			assertProxySavedValue(t, ctx, database, saved)
+			assertProxyDefaultOffVersion(t, ctx, database)
+		})
+	}
+}
+
+func TestProxyDefaultOffConditionalRewriteSurvivesRetry(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, _ := prepareProxySeedRow(t, ctx)
+	defer database.Close()
+	candidate, isSeed, err := database.proxyDefaultOffCandidate(ctx)
+	if err != nil || !isSeed {
+		t.Fatalf("prepared row was not classified as the v18 seed: %v", err)
+	}
+	changed, err := database.applyProxyDefaultOffCandidate(ctx, candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("conditional rewrite did not update the unchanged seed row")
+	}
+	settings, err := database.ProxySettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.Mode != "off" {
+		t.Fatalf("conditional rewrite left mode %q, want off", settings.Mode)
+	}
+	if !settings.UpdatedAt.Equal(mustParseProxyTestTime(t, testLegacyProxyTime)) {
+		t.Fatalf("conditional rewrite changed updated_at: %v", settings.UpdatedAt)
+	}
+	// Simulate a failure between the rewrite and the version insert: the
+	// retry sees mode=off, skips the rewrite and records the version.
+	if err := database.migrateProxyDefaultOff(ctx); err != nil {
+		t.Fatal(err)
+	}
+	settings, err = database.ProxySettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.Mode != "off" {
+		t.Fatalf("retry changed mode to %q, want off", settings.Mode)
+	}
+	assertProxyDefaultOffVersion(t, ctx, database)
+}
+
+// TestProxyDefaultOffMigrationTreatsSameMillisecondSeedAsSeed documents the
+// historical boundary: v18 writes both timestamps with millisecond precision,
+// so a real seed commonly has updated_at == applied_at. That row is the seed
+// and is turned off.
+func TestProxyDefaultOffMigrationTreatsSameMillisecondSeedAsSeed(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, _ := prepareProxySeedRow(t, ctx)
+	defer database.Close()
+	if err := database.migrateProxyDefaultOff(ctx); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := database.ProxySettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.Mode != "off" {
+		t.Fatalf("same-millisecond seed row mode = %q, want off", settings.Mode)
+	}
+	assertProxyDefaultOffVersion(t, ctx, database)
+}
+
+// TestProxyDefaultOffMigrationPreservesGoTimestampBeforeAppliedAt covers a
+// settings write whose nanosecond timestamp happens to parse before v18's
+// applied_at (for example after a clock rollback). Its format is not the v18
+// seed shape, so it is preserved even though the time comparison alone would
+// classify it as a seed.
+func TestProxyDefaultOffMigrationPreservesGoTimestampBeforeAppliedAt(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, _ := prepareProxySeedRow(t, ctx)
+	defer database.Close()
+	execProxyTestSQL(t, database,
+		`UPDATE schema_migrations SET applied_at='2025-01-02T03:04:05.679Z' WHERE version=18`)
+	execProxyTestSQL(t, database,
+		`UPDATE proxy_settings SET updated_at='2025-01-02T03:04:05.678123456Z' WHERE id=1`)
+	if err := database.migrateProxyDefaultOff(ctx); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := database.ProxySettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.Mode != "external" {
+		t.Fatalf("nanosecond settings write was rewritten to %q", settings.Mode)
+	}
+	assertProxyDefaultOffVersion(t, ctx, database)
+}
+
+func prepareProxySeedRow(t *testing.T, ctx context.Context) (*Store, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "aha2.db")
+	database, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx, `
+		UPDATE proxy_settings
+		SET mode='external', http_proxy=?, https_proxy=?, no_proxy=?,
+		    managed_profile_id='', managed_node_id='', managed_refresh_interval_minutes=1440,
+		    managed_subscription_at='', updated_at=?
+		WHERE id=1`,
+		legacyProxyAddress, legacyProxyAddress, legacyProxyNoProxy, testLegacyProxyTime,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx,
+		`UPDATE schema_migrations SET applied_at=? WHERE version=18`, testLegacyProxyTime); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx,
+		`DELETE FROM schema_migrations WHERE version=?`, proxyDefaultOffVersion); err != nil {
+		t.Fatal(err)
+	}
+	return database, path
+}
+
+func assertProxySavedValue(t *testing.T, ctx context.Context, database *Store, want domain.ProxySettings) {
+	t.Helper()
+	stored, err := database.ProxySettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Mode != want.Mode ||
+		stored.HTTPProxy != want.HTTPProxy ||
+		stored.HTTPSProxy != want.HTTPSProxy ||
+		stored.NoProxy != want.NoProxy ||
+		stored.ManagedProfileID != want.ManagedProfileID ||
+		stored.ManagedNodeID != want.ManagedNodeID ||
+		stored.ManagedRefreshIntervalMins != want.ManagedRefreshIntervalMins ||
+		!stored.ManagedSubscriptionAt.Equal(want.ManagedSubscriptionAt) ||
+		!stored.UpdatedAt.Equal(want.UpdatedAt) {
+		t.Fatalf("saved proxy value changed:\n got %#v\nwant %#v", stored, want)
+	}
+}
+
 func prepareProxyUpgradeRow(
 	t *testing.T, ctx context.Context, settings domain.ProxySettings, updatedAt string,
 ) (*Store, string) {

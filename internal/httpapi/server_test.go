@@ -128,7 +128,10 @@ func TestProxySettingsAPI(t *testing.T) {
 	}, csrf)
 	decodeResponse(t, response, &payload)
 	proxy = payload["proxy"].(map[string]any)
-	if response.StatusCode != http.StatusOK || proxy["mode"] != "off" || proxy["https_proxy"] != "http://192.168.1.2:7897" {
+	if response.StatusCode != http.StatusOK || proxy["mode"] != "off" ||
+		proxy["http_proxy"] != "http://192.168.1.2:7897" ||
+		proxy["https_proxy"] != "http://192.168.1.2:7897" ||
+		proxy["no_proxy"] != "localhost,127.0.0.1" {
 		t.Fatalf("omitted-mode proxy update failed: status=%d payload=%v", response.StatusCode, payload)
 	}
 	// An explicit external or managed choice still takes effect unchanged.

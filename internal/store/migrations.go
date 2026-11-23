@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -4339,18 +4340,45 @@ const (
 	legacyProxyNoProxy = "localhost,127.0.0.1,::1"
 )
 
+// proxySeedTimestampPattern is the exact milliseconds shape written by
+// schema v18's SQLite strftime('%Y-%m-%dT%H:%M:%fZ','now'). Go settings writes
+// use time.RFC3339Nano, which normally keeps more than three fractional
+// digits. The shape alone is not a complete proof (Go trims trailing zeros),
+// but it lets a same-instant Go write be preserved instead of being mistaken
+// for the seed.
+const proxySeedTimestampPattern = `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$`
+
+var proxySeedTimestamp = regexp.MustCompile(proxySeedTimestampPattern)
+
+// proxySeedCandidate captures every column of the row that was classified as
+// the schema v18 seed. The conditional update re-checks all of them, so a
+// concurrent settings save makes the update match zero rows instead of
+// overwriting the newer choice.
+type proxySeedCandidate struct {
+	mode                       string
+	httpProxy                  string
+	httpsProxy                 string
+	noProxy                    string
+	managedProfileID           string
+	managedNodeID              string
+	managedRefreshIntervalMins int
+	managedSubscriptionAt      string
+	updatedAt                  string
+}
+
 // migrateProxyDefaultOff turns the historical external preset into an opt-in
 // setting. Schema v18 inserted proxy_settings and recorded its applied_at in
-// the same migration run; every later write, including a save of values equal
-// to the old default, goes through UpdateProxySettings and always advances
-// updated_at. A row whose updated_at is at or before v18's applied_at is
-// therefore still the untouched seed, not an owner choice.
+// the same migration run. Every later write, including a save of values equal
+// to the old default, goes through UpdateProxySettings and advances updated_at,
+// normally with nanosecond precision. A row that still has the v18 seed shape
+// and is not after v18's applied_at therefore looks like the untouched seed.
 //
-// The migration is conservative by design: a missing migration marker, an
-// unreadable timestamp, a later timestamp, or values that differ from the seed
-// all mean "cannot prove it was never configured", so the row is preserved.
-// Because the version row is written even when the row is preserved, reopening
-// the database never re-evaluates (and never overwrites) a later user choice.
+// The migration is conservative by design. A missing migration marker, an
+// unreadable timestamp, a Go-format timestamp, a later timestamp, or values
+// that differ from the seed all mean "cannot prove it was never configured",
+// so the row is preserved. Because the version row is written even when the
+// row is preserved, reopening the database never re-evaluates (and never
+// overwrites) a later user choice.
 func (s *Store) migrateProxyDefaultOff(ctx context.Context) error {
 	var recorded int
 	if err := s.db.QueryRowContext(ctx,
@@ -4360,37 +4388,16 @@ func (s *Store) migrateProxyDefaultOff(ctx context.Context) error {
 	if recorded > 0 {
 		return nil
 	}
-	var mode, httpProxy, httpsProxy, noProxy string
-	var managedProfileID, managedNodeID, managedSubscriptionAt, updatedAt string
-	var refreshMinutes int
-	err := s.db.QueryRowContext(ctx, `
-		SELECT mode,http_proxy,https_proxy,no_proxy,managed_profile_id,managed_node_id,
-		       managed_refresh_interval_minutes,managed_subscription_at,updated_at
-		FROM proxy_settings WHERE id=1`).Scan(
-		&mode, &httpProxy, &httpsProxy, &noProxy, &managedProfileID, &managedNodeID,
-		&refreshMinutes, &managedSubscriptionAt, &updatedAt,
-	)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("read proxy settings for default migration: %w", err)
+	candidate, isSeed, err := s.proxyDefaultOffCandidate(ctx)
+	if err != nil {
+		return err
 	}
-	if err == nil {
-		var appliedAt string
-		appliedErr := s.db.QueryRowContext(ctx,
-			`SELECT applied_at FROM schema_migrations WHERE version=18`).Scan(&appliedAt)
-		if appliedErr != nil && !errors.Is(appliedErr, sql.ErrNoRows) {
-			return fmt.Errorf("read proxy seed migration time: %w", appliedErr)
-		}
-		if appliedErr == nil && proxyRowIsMigrationSeed(
-			mode, httpProxy, httpsProxy, noProxy, managedProfileID, managedNodeID,
-			managedSubscriptionAt, updatedAt, appliedAt, refreshMinutes,
-		) {
-			// updated_at is intentionally left untouched: it records when the
-			// row was created, not this migration. A rerun therefore reaches
-			// the same conclusion and remains idempotent.
-			if _, err := s.db.ExecContext(ctx,
-				`UPDATE proxy_settings SET mode='off' WHERE id=1 AND mode='external'`); err != nil {
-				return fmt.Errorf("default proxy to off: %w", err)
-			}
+	if isSeed {
+		// A zero-row conditional update means the row changed after the read;
+		// the newer row (normally an explicit save) wins. The version is still
+		// recorded below so a later open does not try again.
+		if _, err := s.applyProxyDefaultOffCandidate(ctx, candidate); err != nil {
+			return err
 		}
 	}
 	if _, err := s.db.ExecContext(ctx,
@@ -4402,18 +4409,83 @@ func (s *Store) migrateProxyDefaultOff(ctx context.Context) error {
 	return nil
 }
 
-func proxyRowIsMigrationSeed(
-	mode, httpProxy, httpsProxy, noProxy, managedProfileID, managedNodeID,
-	managedSubscriptionAt, updatedAt, appliedAt string, refreshMinutes int,
-) bool {
-	if mode != "external" ||
-		httpProxy != legacyProxyAddress || httpsProxy != legacyProxyAddress ||
-		noProxy != legacyProxyNoProxy ||
-		managedProfileID != "" || managedNodeID != "" || managedSubscriptionAt != "" ||
-		refreshMinutes != 1440 {
+// proxyDefaultOffCandidate reads the proxy row and decides whether it still
+// provably holds the schema v18 seed. The read is intentionally separate from
+// the rewrite: the rewrite is conditioned on the values returned here, which
+// is what makes a concurrent explicit save safe.
+func (s *Store) proxyDefaultOffCandidate(ctx context.Context) (proxySeedCandidate, bool, error) {
+	var candidate proxySeedCandidate
+	err := s.db.QueryRowContext(ctx, `
+		SELECT mode,http_proxy,https_proxy,no_proxy,managed_profile_id,managed_node_id,
+		       managed_refresh_interval_minutes,managed_subscription_at,updated_at
+		FROM proxy_settings WHERE id=1`).Scan(
+		&candidate.mode, &candidate.httpProxy, &candidate.httpsProxy, &candidate.noProxy,
+		&candidate.managedProfileID, &candidate.managedNodeID,
+		&candidate.managedRefreshIntervalMins, &candidate.managedSubscriptionAt, &candidate.updatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return candidate, false, nil
+	}
+	if err != nil {
+		return candidate, false, fmt.Errorf("read proxy settings for default migration: %w", err)
+	}
+	var appliedAt string
+	err = s.db.QueryRowContext(ctx,
+		`SELECT applied_at FROM schema_migrations WHERE version=18`).Scan(&appliedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return candidate, false, nil
+	}
+	if err != nil {
+		return candidate, false, fmt.Errorf("read proxy seed migration time: %w", err)
+	}
+	if !proxyRowIsMigrationSeed(candidate, appliedAt) {
+		return candidate, false, nil
+	}
+	return candidate, true, nil
+}
+
+// applyProxyDefaultOffCandidate flips the row to off only when it still equals
+// the candidate that was classified as the seed. Including updated_at in the
+// predicate is what makes an explicit save win the race: even a save that
+// stores the same legacy addresses changes the timestamp, so the update matches
+// zero rows. updated_at itself is not rewritten, so a retry after a failed
+// version insert still sees the same seed state and stays idempotent.
+func (s *Store) applyProxyDefaultOffCandidate(ctx context.Context, candidate proxySeedCandidate) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE proxy_settings SET mode='off'
+		WHERE id=1 AND mode=? AND http_proxy=? AND https_proxy=? AND no_proxy=?
+		  AND managed_profile_id=? AND managed_node_id=?
+		  AND managed_refresh_interval_minutes=? AND managed_subscription_at=?
+		  AND updated_at=?`,
+		candidate.mode, candidate.httpProxy, candidate.httpsProxy, candidate.noProxy,
+		candidate.managedProfileID, candidate.managedNodeID, candidate.managedRefreshIntervalMins,
+		candidate.managedSubscriptionAt, candidate.updatedAt,
+	)
+	if err != nil {
+		return false, fmt.Errorf("default proxy to off: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("count default proxy rewrite: %w", err)
+	}
+	return affected > 0, nil
+}
+
+func proxyRowIsMigrationSeed(candidate proxySeedCandidate, appliedAt string) bool {
+	if candidate.mode != "external" ||
+		candidate.httpProxy != legacyProxyAddress || candidate.httpsProxy != legacyProxyAddress ||
+		candidate.noProxy != legacyProxyNoProxy ||
+		candidate.managedProfileID != "" || candidate.managedNodeID != "" ||
+		candidate.managedSubscriptionAt != "" || candidate.managedRefreshIntervalMins != 1440 {
 		return false
 	}
-	updated, err := time.Parse(time.RFC3339Nano, updatedAt)
+	if !proxySeedTimestamp.MatchString(candidate.updatedAt) {
+		// Go settings writes use RFC3339Nano. A non-seed shape therefore came
+		// from UpdateProxySettings, even if a clock rollback makes its parsed
+		// time earlier than applied_at. Preserve it.
+		return false
+	}
+	updated, err := time.Parse(time.RFC3339Nano, candidate.updatedAt)
 	if err != nil {
 		return false
 	}
@@ -4421,15 +4493,13 @@ func proxyRowIsMigrationSeed(
 	if err != nil {
 		return false
 	}
-	// v18 writes the seed row before it records applied_at, so a seed has
-	// updated_at <= applied_at. A save through UpdateProxySettings always
-	// moves updated_at forward, even when it stores the same old addresses.
+	// v18 writes the seed row before it records applied_at. For a real seed
+	// the two SQLite strftime values are usually equal and never more than a
+	// few milliseconds apart. A row that is later than applied_at has a
+	// settings write; a row far before it has had its provenance rewritten.
 	if updated.After(applied) {
 		return false
 	}
-	// A seed is written by the migration immediately before applied_at. A
-	// larger gap means the timestamps were rewritten by something we cannot
-	// reason about, so keep the row.
 	return applied.Sub(updated) <= time.Minute
 }
 
