@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -4321,7 +4323,114 @@ func (s *Store) migrate(ctx context.Context) error {
 		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(156, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v156: %w", err)
 	}
+	if err := s.migrateProxyDefaultOff(ctx); err != nil {
+		return err
+	}
 	return nil
+}
+
+// proxyDefaultOffVersion is the append-only migration that makes direct
+// connection the effective default. It deliberately only rewrites a row that
+// provably still holds the schema v18 seed.
+const proxyDefaultOffVersion = 157
+
+const (
+	legacyProxyAddress = "http://127.0.0.1:7897"
+	legacyProxyNoProxy = "localhost,127.0.0.1,::1"
+)
+
+// migrateProxyDefaultOff turns the historical external preset into an opt-in
+// setting. Schema v18 inserted proxy_settings and recorded its applied_at in
+// the same migration run; every later write, including a save of values equal
+// to the old default, goes through UpdateProxySettings and always advances
+// updated_at. A row whose updated_at is at or before v18's applied_at is
+// therefore still the untouched seed, not an owner choice.
+//
+// The migration is conservative by design: a missing migration marker, an
+// unreadable timestamp, a later timestamp, or values that differ from the seed
+// all mean "cannot prove it was never configured", so the row is preserved.
+// Because the version row is written even when the row is preserved, reopening
+// the database never re-evaluates (and never overwrites) a later user choice.
+func (s *Store) migrateProxyDefaultOff(ctx context.Context) error {
+	var recorded int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM schema_migrations WHERE version=?`, proxyDefaultOffVersion).Scan(&recorded); err != nil {
+		return fmt.Errorf("read proxy default migration state: %w", err)
+	}
+	if recorded > 0 {
+		return nil
+	}
+	var mode, httpProxy, httpsProxy, noProxy string
+	var managedProfileID, managedNodeID, managedSubscriptionAt, updatedAt string
+	var refreshMinutes int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT mode,http_proxy,https_proxy,no_proxy,managed_profile_id,managed_node_id,
+		       managed_refresh_interval_minutes,managed_subscription_at,updated_at
+		FROM proxy_settings WHERE id=1`).Scan(
+		&mode, &httpProxy, &httpsProxy, &noProxy, &managedProfileID, &managedNodeID,
+		&refreshMinutes, &managedSubscriptionAt, &updatedAt,
+	)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("read proxy settings for default migration: %w", err)
+	}
+	if err == nil {
+		var appliedAt string
+		appliedErr := s.db.QueryRowContext(ctx,
+			`SELECT applied_at FROM schema_migrations WHERE version=18`).Scan(&appliedAt)
+		if appliedErr != nil && !errors.Is(appliedErr, sql.ErrNoRows) {
+			return fmt.Errorf("read proxy seed migration time: %w", appliedErr)
+		}
+		if appliedErr == nil && proxyRowIsMigrationSeed(
+			mode, httpProxy, httpsProxy, noProxy, managedProfileID, managedNodeID,
+			managedSubscriptionAt, updatedAt, appliedAt, refreshMinutes,
+		) {
+			// updated_at is intentionally left untouched: it records when the
+			// row was created, not this migration. A rerun therefore reaches
+			// the same conclusion and remains idempotent.
+			if _, err := s.db.ExecContext(ctx,
+				`UPDATE proxy_settings SET mode='off' WHERE id=1 AND mode='external'`); err != nil {
+				return fmt.Errorf("default proxy to off: %w", err)
+			}
+		}
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+		proxyDefaultOffVersion,
+	); err != nil {
+		return fmt.Errorf("record schema v%d: %w", proxyDefaultOffVersion, err)
+	}
+	return nil
+}
+
+func proxyRowIsMigrationSeed(
+	mode, httpProxy, httpsProxy, noProxy, managedProfileID, managedNodeID,
+	managedSubscriptionAt, updatedAt, appliedAt string, refreshMinutes int,
+) bool {
+	if mode != "external" ||
+		httpProxy != legacyProxyAddress || httpsProxy != legacyProxyAddress ||
+		noProxy != legacyProxyNoProxy ||
+		managedProfileID != "" || managedNodeID != "" || managedSubscriptionAt != "" ||
+		refreshMinutes != 1440 {
+		return false
+	}
+	updated, err := time.Parse(time.RFC3339Nano, updatedAt)
+	if err != nil {
+		return false
+	}
+	applied, err := time.Parse(time.RFC3339Nano, appliedAt)
+	if err != nil {
+		return false
+	}
+	// v18 writes the seed row before it records applied_at, so a seed has
+	// updated_at <= applied_at. A save through UpdateProxySettings always
+	// moves updated_at forward, even when it stores the same old addresses.
+	if updated.After(applied) {
+		return false
+	}
+	// A seed is written by the migration immediately before applied_at. A
+	// larger gap means the timestamps were rewritten by something we cannot
+	// reason about, so keep the row.
+	return applied.Sub(updated) <= time.Minute
 }
 
 // migrateKnowledgeModelA adds the project knowledge-space state and the

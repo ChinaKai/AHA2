@@ -116,16 +116,40 @@ func TestProxySettingsAPI(t *testing.T) {
 	response := requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/settings/proxy", nil, "")
 	var payload map[string]any
 	decodeResponse(t, response, &payload)
-	if response.StatusCode != http.StatusOK || payload["proxy"].(map[string]any)["http_proxy"] != "http://127.0.0.1:7897" {
+	proxy := payload["proxy"].(map[string]any)
+	if response.StatusCode != http.StatusOK || proxy["mode"] != "off" || proxy["http_proxy"] != "http://127.0.0.1:7897" {
 		t.Fatalf("unexpected default proxy: status=%d payload=%v", response.StatusCode, payload)
 	}
+	// Older callers omitted mode. They must keep working, with the new safe
+	// default of a direct connection.
 	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/settings/proxy", map[string]any{
 		"http_proxy": "http://192.168.1.2:7897", "https_proxy": "http://192.168.1.2:7897",
 		"no_proxy": "localhost,127.0.0.1",
 	}, csrf)
 	decodeResponse(t, response, &payload)
-	if response.StatusCode != http.StatusOK || payload["proxy"].(map[string]any)["https_proxy"] != "http://192.168.1.2:7897" {
-		t.Fatalf("proxy update failed: status=%d payload=%v", response.StatusCode, payload)
+	proxy = payload["proxy"].(map[string]any)
+	if response.StatusCode != http.StatusOK || proxy["mode"] != "off" || proxy["https_proxy"] != "http://192.168.1.2:7897" {
+		t.Fatalf("omitted-mode proxy update failed: status=%d payload=%v", response.StatusCode, payload)
+	}
+	// An explicit external or managed choice still takes effect unchanged.
+	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/settings/proxy", map[string]any{
+		"mode": "external", "http_proxy": "http://198.51.100.5:3128",
+		"https_proxy": "http://198.51.100.5:3128", "no_proxy": "localhost",
+	}, csrf)
+	decodeResponse(t, response, &payload)
+	proxy = payload["proxy"].(map[string]any)
+	if response.StatusCode != http.StatusOK || proxy["mode"] != "external" ||
+		proxy["http_proxy"] != "http://198.51.100.5:3128" {
+		t.Fatalf("explicit external proxy update failed: status=%d payload=%v", response.StatusCode, payload)
+	}
+	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/settings/proxy", map[string]any{
+		"mode": "managed_hysteria2", "managed_refresh_interval_minutes": 120,
+	}, csrf)
+	decodeResponse(t, response, &payload)
+	proxy = payload["proxy"].(map[string]any)
+	if response.StatusCode != http.StatusOK || proxy["mode"] != "managed_hysteria2" ||
+		proxy["managed_refresh_interval_minutes"] != float64(120) {
+		t.Fatalf("explicit managed proxy update failed: status=%d payload=%v", response.StatusCode, payload)
 	}
 }
 
@@ -196,7 +220,7 @@ func TestManagedProxySubscriptionAPIKeepsSecretsOutOfResponses(t *testing.T) {
 	}
 	profileID := profiles[0].(map[string]any)["id"].(string)
 	proxy := payload["proxy"].(map[string]any)
-	if proxy["mode"] != "external" || proxy["managed_profile_id"] != nil {
+	if proxy["mode"] != "off" || proxy["managed_profile_id"] != nil {
 		t.Fatalf("new profile unexpectedly became active: %#v", proxy)
 	}
 	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/settings/proxy/profiles/"+profileID+"/activate", map[string]any{}, csrf)

@@ -675,7 +675,7 @@ const state: State = {
   notice: "",
   renderPending: false,
   system: {os: "windows", arch: "", wsl_available: false, wsl_distros: [], version: "dev", web_version: "", started_at: ""},
-  proxySettings: {mode: "external", http_proxy: "http://127.0.0.1:7897", https_proxy: "http://127.0.0.1:7897", no_proxy: "localhost,127.0.0.1,::1", managed_refresh_interval_minutes: 1440},
+  proxySettings: {mode: "off", http_proxy: "http://127.0.0.1:7897", https_proxy: "http://127.0.0.1:7897", no_proxy: "localhost,127.0.0.1,::1", managed_refresh_interval_minutes: 1440},
   managedProxy: {configured: false, profiles: [], url_configured: false, nodes: [], unsupported_count: 0, unsupported_types: [], status: "idle"},
   securitySettings: {validate_origin: true, access_scope: "lan", startup_override: false},
   networkSettings: {listen_address: "", startup_listen_address: "", restart_required: false},

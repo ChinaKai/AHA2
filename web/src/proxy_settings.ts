@@ -26,7 +26,7 @@ function formatUpdatedAt(value?: string): string {
 }
 
 function formSettings(base: ProxySettings): ProxySettings {
-  const mode = document.querySelector<HTMLSelectElement>("#proxy-mode")?.value || "external";
+  const mode = document.querySelector<HTMLSelectElement>("#proxy-mode")?.value || "off";
   return {
     ...base,
     mode: mode as ProxySettings["mode"],
@@ -100,7 +100,7 @@ export function renderProxySettings(settings: ProxySettings, managed: ManagedPro
       <section class="panel proxy-settings-panel"><div class="empty">正在读取当前代理设置…</div></section>
     </section>`;
   }
-  const mode = settings.mode || "external";
+  const mode = settings.mode || "off";
   const profiles = managed.profiles || [];
   const activeProfile = profiles.find(profile => profile.active);
   const activeNode = activeProfile?.nodes.find(node => node.id === activeProfile.active_node_id);

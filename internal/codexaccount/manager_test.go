@@ -50,7 +50,7 @@ func (f *fakeAccountStore) ProxySettings(context.Context) (domain.ProxySettings,
 		return f.proxy, nil
 	}
 	return domain.ProxySettings{
-		HTTPProxy: "http://127.0.0.1:7897", HTTPSProxy: "http://127.0.0.1:7897",
+		Mode: "external", HTTPProxy: "http://127.0.0.1:7897", HTTPSProxy: "http://127.0.0.1:7897",
 		NoProxy: "localhost,127.0.0.1,::1",
 	}, nil
 }
@@ -94,7 +94,7 @@ func TestOAuthTokenExchangeUsesConfiguredProxy(t *testing.T) {
 	defer proxyServer.Close()
 	store := &fakeAccountStore{
 		items: map[string]domain.CodexAccount{},
-		proxy: domain.ProxySettings{HTTPProxy: proxyServer.URL, HTTPSProxy: proxyServer.URL},
+		proxy: domain.ProxySettings{Mode: "external", HTTPProxy: proxyServer.URL, HTTPSProxy: proxyServer.URL},
 	}
 	manager := New(context.Background(), store, &fakeSecretStore{items: map[string]string{}}, "", "")
 	manager.tokenURL = "http://auth.openai.invalid/oauth/token"

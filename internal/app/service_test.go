@@ -872,6 +872,14 @@ func TestTaskMultiTurnFlow(t *testing.T) {
 	service.SetKnowledgeVaultRuntimeWrite(true)
 	capabilities := agentapi.NewCapabilities()
 	service.SetAgentAPI(capabilities, "https://aha.example.test")
+	// This test covers environment injection, so it opts into the external
+	// proxy explicitly; the default is now off.
+	if _, err := database.UpdateProxySettings(ctx, domain.ProxySettings{
+		Mode: "external", HTTPProxy: "http://127.0.0.1:7897", HTTPSProxy: "http://127.0.0.1:7897",
+		NoProxy: "localhost,127.0.0.1,::1", ManagedRefreshIntervalMins: 1440, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	task, err := service.CreateTask(ctx, CreateTaskInput{
 		ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "test", Request: "run test",
 		ModelID: model.ID, ProxyEnabled: true, SkillIDs: []string{selectedSkillID},

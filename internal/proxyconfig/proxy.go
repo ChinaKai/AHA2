@@ -14,7 +14,10 @@ import (
 func Normalize(input domain.ProxySettings) (domain.ProxySettings, error) {
 	input.Mode = strings.TrimSpace(input.Mode)
 	if input.Mode == "" {
-		input.Mode = "external"
+		// The historical default was "external" with a local 127.0.0.1:7897
+		// preset. An omitted mode now means the owner never asked for a proxy,
+		// so the safe default is a direct connection.
+		input.Mode = "off"
 	}
 	if input.Mode != "off" && input.Mode != "external" && input.Mode != "managed_hysteria2" {
 		return domain.ProxySettings{}, fmt.Errorf("unsupported proxy mode")
@@ -44,7 +47,10 @@ func Normalize(input domain.ProxySettings) (domain.ProxySettings, error) {
 }
 
 func ApplyEnvironment(environment map[string]string, settings domain.ProxySettings) {
-	if settings.Mode == "off" {
+	// Only an explicit external proxy may inject HTTP_PROXY/HTTPS_PROXY. Off,
+	// an omitted mode, and managed mode (which reaches this point through a
+	// loopback bridge with Mode "external") must never leak a stored address.
+	if settings.Mode != "external" {
 		settings.HTTPProxy = ""
 		settings.HTTPSProxy = ""
 	}
@@ -75,6 +81,12 @@ func Client(base *http.Client, settings domain.ProxySettings) (*http.Client, err
 
 func proxyFunc(settings domain.ProxySettings) func(*http.Request) (*url.URL, error) {
 	return func(request *http.Request) (*url.URL, error) {
+		// Off means direct even if a historical address is still stored. This
+		// keeps callers that build a client straight from the stored row (for
+		// example the Codex account path) from using the old 127.0.0.1 preset.
+		if settings.Mode != "external" {
+			return nil, nil
+		}
 		if bypassProxy(request.URL.Hostname(), request.URL.Port(), settings.NoProxy) {
 			return nil, nil
 		}
