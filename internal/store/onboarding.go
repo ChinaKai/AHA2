@@ -26,8 +26,15 @@ func (s *Store) migrateOnboarding(ctx context.Context) error {
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=159)`).Scan(&applied); err != nil || applied {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `ALTER TABLE general_settings ADD COLUMN onboarding_dismissed_at TEXT`); err != nil {
+	var hasDismissedAt bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pragma_table_info('general_settings')
+		WHERE name='onboarding_dismissed_at')`).Scan(&hasDismissedAt); err != nil {
 		return err
+	}
+	if !hasDismissedAt {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE general_settings ADD COLUMN onboarding_dismissed_at TEXT`); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO general_settings(id,language,updated_at)
 		VALUES(1,'auto',strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
@@ -37,7 +44,8 @@ func (s *Store) migrateOnboarding(ctx context.Context) error {
 	// version's onboarding must leave the rest of the checklist visible.
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE general_settings SET onboarding_dismissed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
-		WHERE id=1 AND (EXISTS(SELECT 1 FROM projects WHERE project_type NOT IN ('system','channel'))
+		WHERE id=1 AND onboarding_dismissed_at IS NULL
+		AND (EXISTS(SELECT 1 FROM projects WHERE project_type NOT IN ('system','channel'))
 			OR EXISTS(SELECT 1 FROM models WHERE deleted_at='')
 			OR `+onboardingTaskExists+` OR `+onboardingMirrorExists+`)`); err != nil {
 		return err

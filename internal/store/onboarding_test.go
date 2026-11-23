@@ -2,11 +2,57 @@ package store
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
+
+func TestOnboardingMigrationRecoversExistingColumnWithoutVersion(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "aha2.db")
+	db, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	dismissedAt := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
+	if err := db.DismissOnboarding(ctx, dismissedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateProject(ctx, domain.Project{
+		ID: "existing_project", Name: "Existing", ProjectType: "folder",
+		CreatedAt: dismissedAt, UpdatedAt: dismissedAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version=159`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	for attempt := 0; attempt < 2; attempt++ {
+		func() {
+			reopened, err := Open(ctx, path)
+			if err != nil {
+				t.Fatalf("open %d: %v", attempt, err)
+			}
+			defer reopened.Close()
+			var recorded int
+			if err := reopened.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version=159`).Scan(&recorded); err != nil || recorded != 1 {
+				t.Fatalf("open %d: v159 recorded=%d, err=%v", attempt, recorded, err)
+			}
+			at, automatic, err := reopened.OnboardingVisibility(ctx)
+			if err != nil || automatic || at == nil || !at.Equal(dismissedAt) {
+				t.Fatalf("open %d: dismissal=%v automatic=%v err=%v", attempt, at, automatic, err)
+			}
+		}()
+	}
+}
 
 func TestOnboardingVisibilityUpgradeAndDismissal(t *testing.T) {
 	ctx := context.Background()

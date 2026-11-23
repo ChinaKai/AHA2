@@ -4340,7 +4340,34 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := s.migrateOnboarding(ctx); err != nil {
 		return fmt.Errorf("apply schema v159 onboarding: %w", err)
 	}
+	if err := s.migrateLegacyPetOptIn(ctx); err != nil {
+		return fmt.Errorf("apply schema v160 pet opt-in: %w", err)
+	}
 	return nil
+}
+
+// migrateLegacyPetOptIn runs even when v159 is already recorded. Older
+// versions initialized pet_enabled to 1 before a Pet Task existed.
+func (s *Store) migrateLegacyPetOptIn(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var applied bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=160)`).Scan(&applied); err != nil || applied {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE owner_assistants SET pet_enabled=0
+		WHERE pet_enabled=1 AND NOT EXISTS(SELECT 1 FROM tasks WHERE id='task_pet')`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version, applied_at)
+		VALUES(160,strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // proxyDefaultOffVersion is the append-only migration that makes direct
