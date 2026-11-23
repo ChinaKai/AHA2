@@ -12,6 +12,24 @@ import (
 	"github.com/ChinaKai/AHA2/internal/store"
 )
 
+func TestAttachmentMaterializeServeLimit(t *testing.T) {
+	for _, test := range []struct {
+		args []string
+		want int64
+	}{
+		{nil, 64 << 20},
+		{[]string{"--attachment-materialize-max-mib=1"}, 1 << 20},
+		{[]string{"--attachment-materialize-max-mib=200"}, 200 << 20},
+		{[]string{"--attachment-materialize-max-mib=0"}, 0},
+		{[]string{"--attachment-materialize-max-mib=201"}, 0},
+	} {
+		options, err := parseServeOptions("test", test.args)
+		if test.want == 0 && err == nil || test.want != 0 && (err != nil || options.attachmentMaxBytes != test.want) {
+			t.Fatalf("args=%v: size=%d err=%v want=%d", test.args, options.attachmentMaxBytes, err, test.want)
+		}
+	}
+}
+
 func unsetEnv(t *testing.T, key string) {
 	t.Helper()
 	previous, existed := os.LookupEnv(key)

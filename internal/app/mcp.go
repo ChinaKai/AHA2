@@ -117,14 +117,15 @@ func (s *Service) MCPServers(ctx context.Context) ([]domain.MCPServer, error) {
 func (s *Service) coreMCPDetail() domain.MCPServer {
 	now := s.now().UTC()
 	descriptions := map[string]string{
-		"inbox_wait":      "读取并认领当前 Turn 的 live inbox 消息（只读工具）。",
-		"task_get":        "读取当前 Task 或同 Project 的另一个 Task 摘要；不跨 Project。",
-		"task_list":       "列出当前 Project 内最近的 Task 摘要。",
-		"capabilities":    "读取当前 Turn 的 Agent 能力清单。",
-		"memory_update":   "更新当前 Task 的状态卡（现在到哪了、下一步、约束、待决定事项），可同时变更目标；Main 专用。",
-		"progress":        "上报一条进度消息；Main 专用。",
-		"task_message":    "向同 Project 的另一个 Task 发送消息；Main 专用，来源标记为 peer task。",
-		"attachment_bind": "把当前 Task 已上传且未绑定的附件 ID 绑定到一条附件消息；Main 专用。",
+		"inbox_wait":             "读取并认领当前 Turn 的 live inbox 消息（只读工具）。",
+		"task_get":               "读取当前 Task 或同 Project 的另一个 Task 摘要；不跨 Project。",
+		"task_list":              "列出当前 Project 内最近的 Task 摘要。",
+		"capabilities":           "读取当前 Turn 的 Agent 能力清单。",
+		"memory_update":          "更新当前 Task 的状态卡（现在到哪了、下一步、约束、待决定事项），可同时变更目标；Main 专用。",
+		"progress":               "上报一条进度消息；Main 专用。",
+		"task_message":           "向同 Project 的另一个 Task 发送消息；Main 专用，来源标记为 peer task。",
+		"attachment_bind":        "把当前 Task 已上传且未绑定的附件 ID 绑定到一条附件消息；Main 专用。",
+		"attachment_materialize": "把本 Task 附件流式保存到当前 Agent 的 scratch，只返回路径、字节数、SHA-256 和媒体类型。",
 	}
 	tools := make([]domain.MCPTool, 0, len(coreMCPReadToolNames)+len(coreMCPWriteToolNames))
 	for _, name := range coreMCPToolNames(true) {

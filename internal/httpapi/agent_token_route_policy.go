@@ -80,6 +80,7 @@ var agentTokenRoutePolicies = map[string]agentTokenRoutePolicy{
 	"POST /api/v1/agent/skills":                                     {Domain: "skill", Access: agentRouteWrite, Mode: agentRouteBusiness},
 	"POST /api/v1/agent/tasks":                                      {Domain: "task", Access: agentRouteWrite, Mode: agentRouteBusiness},
 	"POST /api/v1/agent/turn/attachments":                           {Domain: "turn", Access: agentRouteBookkeeping, Mode: agentRouteBusiness},
+	"POST /api/v1/agent/turn/attachments/materialize":               {Domain: "turn", Access: agentRouteRead, Mode: agentRouteBusiness},
 	"POST /api/v1/agent/turn/inbox/ack":                             {Domain: "turn", Access: agentRouteBookkeeping, Mode: agentRouteBusiness},
 	"POST /api/v1/agent/turn/inbox/claim":                           {Domain: "turn", Access: agentRouteBookkeeping, Mode: agentRouteBusiness},
 	"POST /api/v1/agent/turn/inbox/wait":                            {Domain: "turn", Access: agentRouteBookkeeping, Mode: agentRouteBusiness},

@@ -139,6 +139,7 @@ type serveOptions struct {
 	secureCookie          bool
 	allowCrossOrigin      bool
 	agentAPIURL           string
+	attachmentMaxBytes    int64
 	mailTaskBaseURL       string
 	mailDownloadBaseURL   string
 	mailDownloadListen    string
@@ -185,6 +186,7 @@ func parseServeOptions(name string, args []string) (serveOptions, error) {
 	secureCookie := flags.Bool("secure-cookie", envBool("AHA2_SECURE_COOKIE"), "mark session cookie Secure")
 	allowCrossOrigin := flags.Bool("allow-cross-origin", envBool("AHA2_ALLOW_CROSS_ORIGIN"), "disable Origin host validation for reverse proxies and embedded WebViews")
 	agentAPIURL := flags.String("agent-api-url", os.Getenv("AHA2_AGENT_API_URL"), "Agent-reachable AHA2 base URL (https or loopback; optional)")
+	attachmentMaxMiB := flags.Int64("attachment-materialize-max-mib", workspace.DefaultScratchAttachmentBytes>>20, "maximum size in MiB for one Task attachment copied to Agent scratch (1-200)")
 	// Removed switch. Kept as a parse-only no-op so service definitions written
 	// by an older installer still start; it cannot re-enable plaintext HTTP.
 	flags.Bool("allow-insecure-agent-api", false, "deprecated no-op: non-loopback http Agent API addresses are not supported")
@@ -212,6 +214,9 @@ func parseServeOptions(name string, args []string) (serveOptions, error) {
 	if flags.NArg() != 0 {
 		return serveOptions{}, fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
 	}
+	if *attachmentMaxMiB < 1 || *attachmentMaxMiB > workspace.MaxScratchAttachmentBytes>>20 {
+		return serveOptions{}, fmt.Errorf("attachment-materialize-max-mib must be between 1 and %d", workspace.MaxScratchAttachmentBytes>>20)
+	}
 	deprecatedLiveInput := deprecatedLiveInputSettings(flags)
 	deprecatedAgentAPIInsecure := deprecatedAgentAPIInsecureSettings(flags)
 	knowledgeVaultEnabledSet := false
@@ -226,6 +231,7 @@ func parseServeOptions(name string, args []string) (serveOptions, error) {
 	return serveOptions{
 		listen: *listen, dataDir: *dataDir, setupToken: *setupToken, setupTokenFile: *setupTokenFile,
 		secureCookie: *secureCookie, allowCrossOrigin: *allowCrossOrigin, agentAPIURL: *agentAPIURL,
+		attachmentMaxBytes:  *attachmentMaxMiB << 20,
 		mailTaskBaseURL:     *mailTaskBaseURL,
 		mailDownloadBaseURL: *mailDownloadBaseURL, mailDownloadListen: *mailDownloadListen,
 		logLevel: *logLevel, codexBinary: *codexBinary,
@@ -618,23 +624,24 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	apiServer := httpapi.New(httpapi.Config{
 		Store: database, SyncStore: syncDatabase, Auth: authService, App: appService, Web: webassets.FS(),
 		Logger: logger, SecureCookie: options.secureCookie, AllowCrossOrigin: options.allowCrossOrigin,
-		DetectWorkspace:     workspace.Detect,
-		Secrets:             secretStore,
-		Hardware:            hardwareManager,
-		Browser:             browserService,
-		CodexAccounts:       codexAccounts,
-		AgentCapabilities:   agentCapabilities,
-		ManagedProcesses:    managedProcesses,
-		OutboundProxy:       proxyRuntime,
-		Channels:            channelService,
-		MailTaskBaseURL:     options.mailTaskBaseURL,
-		MailDownloadBaseURL: options.mailDownloadBaseURL,
-		Version:             version,
-		WebVersion:          webVersion,
-		ListenAddress:       options.listen,
-		LocalOwnerIngest:    options.localOwnerIngest,
-		KnowledgeVault:      knowledgeVaultManager,
-		KnowledgeVaultSync:  knowledgeVaultSyncer,
+		DetectWorkspace:        workspace.Detect,
+		Secrets:                secretStore,
+		Hardware:               hardwareManager,
+		Browser:                browserService,
+		CodexAccounts:          codexAccounts,
+		AgentCapabilities:      agentCapabilities,
+		ScratchAttachmentLimit: options.attachmentMaxBytes,
+		ManagedProcesses:       managedProcesses,
+		OutboundProxy:          proxyRuntime,
+		Channels:               channelService,
+		MailTaskBaseURL:        options.mailTaskBaseURL,
+		MailDownloadBaseURL:    options.mailDownloadBaseURL,
+		Version:                version,
+		WebVersion:             webVersion,
+		ListenAddress:          options.listen,
+		LocalOwnerIngest:       options.localOwnerIngest,
+		KnowledgeVault:         knowledgeVaultManager,
+		KnowledgeVaultSync:     knowledgeVaultSyncer,
 	})
 	if options.allowCrossOrigin {
 		logger.Warn("Origin host validation disabled")

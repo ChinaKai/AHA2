@@ -25,6 +25,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/managedprocess"
 	"github.com/ChinaKai/AHA2/internal/outboundproxy"
 	"github.com/ChinaKai/AHA2/internal/store"
+	"github.com/ChinaKai/AHA2/internal/workspace"
 )
 
 const sessionCookieName = "aha2_session"
@@ -48,10 +49,13 @@ type Config struct {
 	Desktop           *desktop.Manager
 	CodexAccounts     *codexaccount.Manager
 	AgentCapabilities *agentapi.Capabilities
-	ManagedProcesses  *managedprocess.Manager
-	OutboundProxy     *outboundproxy.Controller
-	Channels          *channel.Service
-	MailTester        mailpkg.Tester
+
+	ScratchAttachmentLimit int64
+
+	ManagedProcesses *managedprocess.Manager
+	OutboundProxy    *outboundproxy.Controller
+	Channels         *channel.Service
+	MailTester       mailpkg.Tester
 	// MailTaskBaseURL is the external https base used for task.url template
 	// variables. Relative or non-https values are treated as unconfigured.
 	MailTaskBaseURL string
@@ -109,6 +113,7 @@ type Server struct {
 	desktop                  *desktop.Manager
 	codexAccounts            *codexaccount.Manager
 	agentCapabilities        *agentapi.Capabilities
+	attachmentLimit          int64
 	managedProcesses         *managedprocess.Manager
 	outboundProxy            *outboundproxy.Controller
 	channels                 *channel.Service
@@ -227,6 +232,10 @@ func New(config Config) *Server {
 	if syncStore == nil {
 		syncStore = config.Store
 	}
+	attachmentLimit := config.ScratchAttachmentLimit
+	if attachmentLimit <= 0 || attachmentLimit > workspace.MaxScratchAttachmentBytes {
+		attachmentLimit = workspace.DefaultScratchAttachmentBytes
+	}
 	server := &Server{
 		store: config.Store, syncStore: syncStore, auth: config.Auth, app: config.App, web: config.Web,
 		logger: logger, secureCookie: config.SecureCookie, validateOrigin: validateOrigin,
@@ -240,6 +249,7 @@ func New(config Config) *Server {
 		desktop:                  config.Desktop,
 		codexAccounts:            config.CodexAccounts,
 		agentCapabilities:        config.AgentCapabilities,
+		attachmentLimit:          attachmentLimit,
 		managedProcesses:         config.ManagedProcesses,
 		outboundProxy:            config.OutboundProxy,
 		channels:                 config.Channels,
@@ -599,6 +609,7 @@ func (s *Server) routeMux() *http.ServeMux {
 	mux.Handle("POST /api/v1/agent/turn/inbox/ack", s.withAgentCapability(http.HandlerFunc(s.ackAgentInbox)))
 	mux.Handle("POST /api/v1/agent/channel/reply-decision", s.withAgentCapability(http.HandlerFunc(s.setAgentChannelReplyDecision)))
 	mux.Handle("POST /api/v1/agent/turn/attachments", s.withAgentCapability(http.HandlerFunc(s.uploadAgentAttachment)))
+	mux.Handle("POST /api/v1/agent/turn/attachments/materialize", s.withAgentCapability(http.HandlerFunc(s.materializeAgentAttachment)))
 	mux.Handle("GET /api/v1/agent/knowledge", s.withAgentCapability(http.HandlerFunc(s.agentKnowledge)))
 	mux.Handle("GET /api/v1/agent/knowledge/guide", s.withAgentCapability(http.HandlerFunc(s.agentKnowledgeGuide)))
 	mux.Handle("GET /api/v1/agent/knowledge/{knowledge}", s.withAgentCapability(http.HandlerFunc(s.agentKnowledgeEntry)))

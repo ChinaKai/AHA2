@@ -57,7 +57,7 @@ func TestAttachmentResourcesKeepLargeAttachmentsMetadataOnly(t *testing.T) {
 		!strings.Contains(index.Content, "old.bin") || !strings.Contains(index.Content, "note.txt") {
 		t.Fatalf("index does not list every attachment: %#v", index)
 	}
-	for _, expected := range []string{bigHash, "metadata only", "/api/v1/tasks/task-1/attachments/attachment-big", "attachment-big/metadata.md"} {
+	for _, expected := range []string{bigHash, "metadata only", "aha2_core.attachment_materialize", "/api/v1/tasks/task-1/attachments/attachment-big", "attachment-big/metadata.md"} {
 		if !strings.Contains(index.Content, expected) {
 			t.Fatalf("index missing %q:\n%s", expected, index.Content)
 		}
@@ -82,7 +82,7 @@ func TestAttachmentResourcesKeepLargeAttachmentsMetadataOnly(t *testing.T) {
 	if !strings.HasSuffix(metadata.Path, "metadata.md") || !strings.HasSuffix(budgetMetadata.Path, "metadata.md") {
 		t.Fatalf("metadata paths = %q, %q", metadata.Path, budgetMetadata.Path)
 	}
-	for _, expected := range []string{bigHash, "not inlined", "4 MiB", "/api/v1/tasks/task-1/attachments/attachment-big"} {
+	for _, expected := range []string{bigHash, "not inlined", "4 MiB", "aha2_core.attachment_materialize", "/api/v1/tasks/task-1/attachments/attachment-big"} {
 		if !strings.Contains(metadata.Content, expected) {
 			t.Fatalf("metadata file missing %q:\n%s", expected, metadata.Content)
 		}

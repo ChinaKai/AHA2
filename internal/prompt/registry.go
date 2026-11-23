@@ -367,13 +367,13 @@ var builtinTemplates = []domain.PromptTemplate{
 	{ID: "context.turn-diagnostics", Name: "Turn Diagnostics File", Layer: "context", Description: "diagnostics/turns.md 的内容模板", Editable: true, Required: false, Version: 1},
 	{ID: "context.hardware", Name: "Hardware Context File", Layer: "context", Description: "hardware.md 的非敏感硬件上下文模板", Editable: true, Required: false, Version: 1},
 	{ID: "context.mail", Name: "Mail Context File", Layer: "context", Description: "mail.md 的非敏感邮件上下文模板；不含凭据、正文或收件人历史", Editable: true, Required: false, Version: 1},
-	{ID: "context.attachments-index", Name: "Attachments Index File", Layer: "context", Description: "attachments/index.md 的内容模板", Editable: true, Required: false, Version: 2},
+	{ID: "context.attachments-index", Name: "Attachments Index File", Layer: "context", Description: "attachments/index.md 的内容模板", Editable: true, Required: false, Version: 3},
 	{ID: "section.compact-handoff", Name: "Compact Handoff Section", Layer: "section", Description: "Backend Session 压缩后的 Prompt 段落", Editable: true, Required: false, Version: 1},
 	{ID: "section.task-workspace", Name: "Task And Workspace Section", Layer: "section", Description: "Task 与 Workspace 摘要、任务状态卡", Editable: true, Required: true, Version: 3},
 	{ID: "section.available-context", Name: "Available Context Section", Layer: "section", Description: "可用上下文入口列表段落", Editable: true, Required: true, Version: 3},
 	{ID: "section.current-inbox", Name: "Current Inbox Section", Layer: "section", Description: "当前 Inbox Batch 段落", Editable: true, Required: true, Version: 1},
 	{ID: "section.inbox-batch-content", Name: "Inbox Batch Content", Layer: "section", Description: "Inbox 消息、渠道来源、引用上下文和附件引用的内容模板", Editable: true, Required: true, Version: 4},
-	{ID: "resource.agent-api", Name: "Agent API Reference File", Layer: "resource", Description: "Agent API 的 HTTP 参考；内置 MCP 工具不覆盖时查阅", Editable: false, Required: true, Version: 12},
+	{ID: "resource.agent-api", Name: "Agent API Reference File", Layer: "resource", Description: "Agent API 的 HTTP 参考；内置 MCP 工具不覆盖时查阅", Editable: false, Required: true, Version: 13},
 	{ID: "resource.attachment-protocol", Name: "Attachment Protocol File", Layer: "resource", Description: "只读参考模板；附件上传、绑定与回执规程", Editable: false, Required: true, Version: 1},
 	{ID: "resource.group-permissions", Name: "Group Permission Rules File", Layer: "resource", Description: "只读参考模板；群聊 task_route 的 Owner 权限申请规则", Editable: false, Required: false, Version: 1},
 }
@@ -1275,7 +1275,8 @@ func attachmentMetadata(item domain.Attachment, taskID string, budgetExhausted b
 	return fmt.Sprintf(
 		"# %s\n\n- id: %s\n- media_type: %s\n- size: %d bytes\n- sha256: %s\n"+
 			"- content: not inlined; %s\n"+
-			"- download: GET /api/v1/tasks/%s/attachments/%s (an Owner session is required)\n",
+			"- read into scratch: `aha2_core.attachment_materialize` with this attachment ID; see the Agent API reference for HTTP fallback.\n"+
+			"- raw download: GET /api/v1/tasks/%s/attachments/%s\n",
 		item.Name, item.ID, item.MediaType, item.Size, item.SHA256, reason, taskID, item.ID)
 }
 

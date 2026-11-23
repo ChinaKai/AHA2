@@ -86,7 +86,7 @@ var mailMCPToolNames = []string{
 // coreMCPReadToolNames are safe for every Agent in the Task, including a
 // read-only review Task or a non-Main collaborator.
 var coreMCPReadToolNames = []string{
-	"inbox_wait", "task_get", "task_list", "capabilities",
+	"inbox_wait", "task_get", "task_list", "capabilities", "attachment_materialize",
 }
 
 // coreMCPWriteToolNames change Task state and are advertised to Main only.

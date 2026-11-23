@@ -123,11 +123,11 @@ var phaseThreeAnchorSpecs = []entryAnchorSpec{
 	{EntryID: EntryTaskContext, Key: "turn-diagnostics", LegacyID: "context.turn-diagnostics", Kind: anchorKindGenerated, FrozenVersion: 1, Order: 103},
 	{EntryID: EntryTaskContext, Key: "hardware", LegacyID: "context.hardware", Kind: anchorKindGenerated, FrozenVersion: 1, Order: 104},
 	{EntryID: EntryTaskContext, Key: "mail", LegacyID: "context.mail", Kind: anchorKindGenerated, FrozenVersion: 1, Order: 105},
-	{EntryID: EntryTaskContext, Key: "attachments-index", LegacyID: "context.attachments-index", Kind: anchorKindGenerated, FrozenVersion: 2, Order: 106},
+	{EntryID: EntryTaskContext, Key: "attachments-index", LegacyID: "context.attachments-index", Kind: anchorKindGenerated, FrozenVersion: 3, Order: 106},
 
 	// Shared read-only references. They are grouped under core because they are
 	// global boundaries, not task context.
-	{EntryID: EntryCore, Key: "resource-agent-api", LegacyID: "resource.agent-api", Kind: anchorKindResource, FrozenVersion: 12, Order: 200},
+	{EntryID: EntryCore, Key: "resource-agent-api", LegacyID: "resource.agent-api", Kind: anchorKindResource, FrozenVersion: 13, Order: 200},
 	{EntryID: EntryCore, Key: "resource-attachment-protocol", LegacyID: "resource.attachment-protocol", Kind: anchorKindResource, FrozenVersion: 1, Order: 201},
 	{EntryID: EntryCore, Key: "resource-group-permissions", LegacyID: "resource.group-permissions", Kind: anchorKindResource, FrozenVersion: 1, Order: 202},
 }

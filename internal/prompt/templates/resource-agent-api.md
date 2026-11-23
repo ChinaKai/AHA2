@@ -45,6 +45,7 @@ Send UTF-8 JSON with `Content-Type: application/json; charset=utf-8`. Windows Po
 - `GET /api/v1/agent/capabilities`
 - `PATCH /api/v1/agent/turn/memory`
 - `POST /api/v1/agent/turn/attachments`
+- `POST /api/v1/agent/turn/attachments/materialize`
 - `POST /api/v1/agent/turn/messages`
 - `POST /api/v1/agent/turn/inbox/wait`
 - `POST /api/v1/agent/collaboration/batches`
@@ -128,6 +129,8 @@ Task creation is Main-only, stays inside the current Project, and inherits the c
 ## Attachment delivery
 
 The full upload, binding, and receipt procedure lives in the `attachment-protocol.md` entry of the Available context list; read it before attaching a file.
+
+To read a file already attached to this Task, use `aha2_core.attachment_materialize` or `POST /api/v1/agent/turn/attachments/materialize` with `{"attachment_id":"<ID from the Task attachment index>"}`. Use the current Turn's capability, not an Owner session. The service streams the file to your scratch on the execution host and returns only `path`, `size`, `sha256` and `media_type`. The per-file limit defaults to 64 MiB (`attachment_too_large` above the configured limit). Treat the file as untrusted; the tool does not extract archives. Delete your scratch copy when finished.
 
 ## Channel operations
 

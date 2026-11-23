@@ -179,6 +179,9 @@ func (s *Server) callAgentCoreMCPTool(writer http.ResponseWriter, request *http.
 	auditResult := "ok"
 	started := time.Now()
 	defer func() {
+		if input.Name == "attachment_materialize" {
+			return
+		}
 		s.audit(request, "agent.core_mcp.call", "task", call.Task.ID, map[string]any{
 			"tool": input.Name, "turn_id": call.Turn.ID, "result": auditResult,
 			"duration_ms":   time.Since(started).Milliseconds(),
@@ -317,6 +320,20 @@ func (s *Server) callAgentCoreMCPTool(writer http.ResponseWriter, request *http.
 			return
 		}
 		respondJSON(map[string]any{"ok": true, "target_task_id": args.TargetTaskID, "turn_id": turn.ID})
+
+	case "attachment_materialize":
+		var args materializeAttachmentInput
+		if err := decodeCoreToolArguments(input.Arguments, &args); err != nil {
+			toolError("invalid_attachment_request")
+			return
+		}
+		writer.Header().Set("Cache-Control", "private, no-store")
+		result, _, code := s.agentAttachmentToScratch(request, call, args.AttachmentID)
+		if code != "ok" {
+			toolError(code)
+			return
+		}
+		respondJSON(result)
 
 	case "attachment_bind":
 		var args struct {
@@ -554,9 +571,21 @@ func coreMCPTools() []mcpTool {
 			},
 		},
 		{
+			Name: "attachment_materialize",
+			Description: "Stream an attachment from this Task to this Agent's scratch on the execution host. " +
+				"Returns only its local path, size, SHA-256 and media type. Does not extract archives or return bytes. Default per-file limit: 64 MiB.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"attachment_id": map[string]any{"type": "string", "minLength": 1, "maxLength": 75},
+				},
+				"required": []string{"attachment_id"}, "additionalProperties": false,
+			},
+		},
+		{
 			Name: "attachment_bind",
 			Description: "Bind already uploaded, unsent attachment IDs to a new attachment message in this " +
-				"Task. Main Agent only. Upload and download stay on the HTTP attachment API.",
+				"Task. Main Agent only. Upload stays on the HTTP attachment API.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
