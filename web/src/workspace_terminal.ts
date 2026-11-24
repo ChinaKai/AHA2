@@ -48,7 +48,10 @@ const copy = {
     connecting: "正在连接…",
     disconnected: "连接已断开",
     componentFailed: "终端组件无法加载。",
-    startFailed: "无法启动终端，请重试。",
+    startFailed: "工作区主机启动终端失败，请查看服务端日志。",
+    checkFailed: "暂时无法确认终端访问权限，请重试。",
+    accessRevoked: "终端访问权限已撤销，请检查登录状态和局域网终端设置。",
+    requestFailed: "创建终端的请求失败，请重试。",
     closeFailed: "无法关闭终端，请重试。",
     limit: "当前工作区最多开 6 个终端。",
   },
@@ -75,7 +78,10 @@ const copy = {
     connecting: "Connecting…",
     disconnected: "Disconnected",
     componentFailed: "Unable to load terminal component.",
-    startFailed: "Unable to start the terminal. Try again.",
+    startFailed: "The workspace host could not start the terminal. Check the server logs.",
+    checkFailed: "Terminal access could not be verified. Try again.",
+    accessRevoked: "Terminal access was revoked. Check your login and LAN terminal settings.",
+    requestFailed: "Could not create the terminal. Try again.",
     closeFailed: "Unable to close the terminal. Try again.",
     limit: "This workspace can have up to 6 terminals.",
   },
@@ -90,6 +96,18 @@ const nameOf = (session: SessionInfo) => label("session", {number: session.numbe
 
 function errorCode(reason: unknown): string | undefined {
   return (reason as {code?: string})?.code;
+}
+
+function terminalError(code: string | undefined, fallback: "unavailable" | "requestFailed" | "closeFailed"): string {
+  switch (code) {
+    case "workspace_terminal_unsupported": return label("unsupported");
+    case "workspace_terminal_unavailable": return label("unavailable");
+    case "workspace_terminal_start_failed": return label("startFailed");
+    case "workspace_terminal_check_failed": return label("checkFailed");
+    case "workspace_terminal_access_revoked": return label("accessRevoked");
+    case "workspace_terminal_limit": return label("limit");
+    default: return label(fallback);
+  }
 }
 
 function makeTerminalView(endpoint: string, session: SessionInfo, cwd: string, ssh: boolean, socketClosed: () => void): TerminalView {
@@ -207,17 +225,16 @@ function makeTerminalView(endpoint: string, session: SessionInfo, cwd: string, s
   };
 }
 
-function mountDrawer(host: HTMLElement, endpoint: string, layoutKey: string): {refresh(): Promise<void>; shortcut(): void; dispose(): void} {
+function mountDrawer(host: HTMLElement, endpoint: string, layoutKey: string): {refresh(): Promise<void>; shortcut(event: KeyboardEvent): void; dispose(): void} {
   const element = document.createElement("section");
   element.className = "wv-terminal";
   element.setAttribute("aria-label", label("title"));
   element.innerHTML = `
     <div class="wv-term-resizer" title="${label("resize")}"></div>
     <div class="wv-term-bar">
-      <button type="button" class="wv-term-toggle">${icon("chevron-down")}</button>
+      <button type="button" class="wv-term-toggle" aria-keyshortcuts="Control+&#96;">${icon("chevron-down")}</button>
       <span class="wv-term-brand"><span aria-hidden="true">&gt;_</span>${label("title")}</span>
       <a class="wv-term-lock" href="/#other" target="_blank" rel="noopener" hidden>${label("locked")}</a>
-      <span class="wv-term-feedback" role="status"></span>
       <div class="wv-term-tabs" role="tablist" aria-label="${label("sessions")}"></div>
       <div class="wv-term-actions">
         <button type="button" data-wvt-new aria-label="${label("new")}" title="${label("new")}">＋</button>
@@ -225,6 +242,7 @@ function mountDrawer(host: HTMLElement, endpoint: string, layoutKey: string): {r
         <button type="button" data-wvt-max>⤢</button>
       </div>
     </div>
+    <div class="wv-term-feedback" role="status" hidden></div>
     <div class="wv-term-body">
       <div class="wv-term-pane" data-pane="0"></div>
       <div class="wv-term-pane" data-pane="1" hidden></div>
@@ -243,8 +261,12 @@ function mountDrawer(host: HTMLElement, endpoint: string, layoutKey: string): {r
   const maxButton = actions.querySelector<HTMLButtonElement>("[data-wvt-max]")!;
   const resizer = element.querySelector<HTMLElement>(".wv-term-resizer")!;
   const body = element.querySelector<HTMLElement>(".wv-term-body")!;
+  body.id = "wv-term-body-" + encodeURIComponent(layoutKey);
+  toggleButton.setAttribute("aria-controls", body.id);
   const panels = [...body.querySelectorAll<HTMLElement>(".wv-term-pane")];
   const parking = element.querySelector<HTMLElement>(".wv-term-parking")!;
+  const editor = element.closest<HTMLElement>(".wv-editor");
+  const editorTabs = editor?.querySelector(".wv-tabs");
   const empty = panels.map(panel => {
     const note = document.createElement("div");
     note.className = "wv-term-empty";
@@ -257,7 +279,7 @@ function mountDrawer(host: HTMLElement, endpoint: string, layoutKey: string): {r
   let sessions: SessionInfo[] = [];
   let cwd = "";
   let ssh = false;
-  let expanded = true;
+  let expanded = false;
   let split = false;
   let focused: Pane = 0;
   let maximized = false;
@@ -270,10 +292,21 @@ function mountDrawer(host: HTMLElement, endpoint: string, layoutKey: string): {r
   let autoStarted = false;
   let error = "";
   let height = 0;
+  // Closing the last shell suppresses auto-creation even if the drawer is open.
   let explicitlyClosed = false;
   try {
     height = Number(localStorage.getItem("aha2.workspaceTerminal.height")) || 0;
-    explicitlyClosed = sessionStorage.getItem(layoutKey) === "closed";
+  } catch {}
+  try {
+    const saved = sessionStorage.getItem(layoutKey);
+    if (saved === "opened" || saved === "closed") {
+      expanded = saved === "opened";
+      explicitlyClosed = saved === "closed";
+    } else if (saved) {
+      const layout = JSON.parse(saved);
+      expanded = layout.expanded === true;
+      explicitlyClosed = layout.explicitlyClosed === true;
+    }
   } catch {
     // Storage may be disabled in a private browser.
   }
@@ -284,10 +317,8 @@ function mountDrawer(host: HTMLElement, endpoint: string, layoutKey: string): {r
   }
 
   function updateHeight(): void {
-    const viewer = element.closest(".workspace-viewer");
-    const reserve = (viewer?.querySelector(".wv-header")?.clientHeight || 0) +
-      (viewer?.querySelector(".wv-notice")?.clientHeight || 0) + 18;
-    const max = Math.max(120, Math.min(innerHeight - 90, innerHeight - reserve));
+    const reserve = Math.max(18, editorTabs?.clientHeight || 0);
+    const max = Math.max(37, (editor?.clientHeight || innerHeight) - reserve);
     const normal = height || Math.round(innerHeight * 0.42);
     element.style.setProperty("--drawer-height", (maximized ? max : Math.min(max, Math.max(160, normal))) + "px");
   }
@@ -319,6 +350,7 @@ function mountDrawer(host: HTMLElement, endpoint: string, layoutKey: string): {r
       }
       const close = document.createElement("button");
       close.type = "button";
+      close.disabled = busy || refreshing;
       close.dataset.close = session.id;
       close.textContent = "×";
       close.title = label("close", {name: nameOf(session)});
@@ -347,7 +379,8 @@ function mountDrawer(host: HTMLElement, endpoint: string, layoutKey: string): {r
     toggleButton.disabled = !ready && !locked;
     toggleButton.setAttribute("aria-expanded", String(open));
     buttonLabel(toggleButton, locked ? "settings" : open ? "collapse" : "expand");
-    newButton.disabled = busy || sessions.length >= 6;
+    if (!locked) toggleButton.title += " (Ctrl+`)";
+    newButton.disabled = busy || refreshing || sessions.length >= 6;
     splitButton.setAttribute("aria-pressed", String(split));
     buttonLabel(splitButton, split ? "unsplit" : "split");
     maxButton.setAttribute("aria-pressed", String(maximized));
@@ -379,9 +412,19 @@ function mountDrawer(host: HTMLElement, endpoint: string, layoutKey: string): {r
     }
   }
 
-  function rememberClosed(value: boolean): void {
-    explicitlyClosed = value;
-    try { sessionStorage.setItem(layoutKey, value ? "closed" : "opened"); } catch {}
+  function saveLayout(): void {
+    try { sessionStorage.setItem(layoutKey, JSON.stringify({expanded, explicitlyClosed})); } catch {}
+  }
+
+  function setExpanded(value: boolean): void {
+    expanded = value;
+    saveLayout();
+  }
+
+  async function autoStart(): Promise<void> {
+    if (!ready || locked || busy || refreshing || !expanded || host.hidden || sessions.length || autoStarted || explicitlyClosed) return;
+    autoStarted = true;
+    await create(true);
   }
 
   function pruneViews(): void {
@@ -400,7 +443,7 @@ function mountDrawer(host: HTMLElement, endpoint: string, layoutKey: string): {r
       return;
     }
     refreshing = true;
-    let initial = false;
+    for (const button of element.querySelectorAll<HTMLButtonElement>("[data-wvt-new], [data-close]")) button.disabled = true;
     try {
       const data = await api.request<TerminalState>(endpoint);
       if (disposed) return;
@@ -412,7 +455,6 @@ function mountDrawer(host: HTMLElement, endpoint: string, layoutKey: string): {r
       sessions = data.sessions || [];
       cwd = data.cwd || "";
       ssh = Boolean(data.ssh);
-      initial = ready && !sessions.length && !autoStarted && !explicitlyClosed;
     } catch (reason) {
       const code = errorCode(reason);
       if (!ready || code) {
@@ -420,17 +462,14 @@ function mountDrawer(host: HTMLElement, endpoint: string, layoutKey: string): {r
         sessions = [];
         locked = code === "workspace_terminal_lan_locked";
       }
-      error = locked ? "" : label(code === "workspace_terminal_unsupported" ? "unsupported" : "unavailable");
+      error = locked ? "" : terminalError(code, "unavailable");
     } finally {
       refreshing = false;
       selectAvailable();
       pruneViews();
       render();
     }
-    if (initial && !host.hidden && !disposed) {
-      autoStarted = true;
-      await create(true);
-    }
+    await autoStart();
     if (refreshPending) {
       refreshPending = false;
       void refresh();
@@ -438,7 +477,8 @@ function mountDrawer(host: HTMLElement, endpoint: string, layoutKey: string): {r
   }
 
   async function create(initial = false): Promise<void> {
-    if (!ready || locked || busy) return;
+    if (!ready || locked || busy || refreshing || disposed) return;
+    if (!initial) setExpanded(true);
     busy = true;
     error = "";
     render();
@@ -447,16 +487,19 @@ function mountDrawer(host: HTMLElement, endpoint: string, layoutKey: string): {r
         method: "POST", body: JSON.stringify({cols: 80, rows: 24, initial}),
       });
       if (disposed) return;
-      rememberClosed(false);
+      explicitlyClosed = false;
+      saveLayout();
       sessions.push(info);
       selection[focused] = info.id;
-      expanded = true;
       selectAvailable();
     } catch (reason) {
       const code = errorCode(reason);
       if (code === "workspace_terminal_already_exists") window.setTimeout(() => { void refresh(); }, 500);
-      else if (code === "workspace_terminal_lan_locked") refreshPending = true;
-      else error = label(code === "workspace_terminal_limit" ? "limit" : "startFailed");
+      else if (code === "workspace_terminal_lan_locked") {
+        locked = true;
+        ready = false;
+        refreshPending = true;
+      } else error = terminalError(code, "requestFailed");
     } finally {
       busy = false;
       render();
@@ -469,15 +512,17 @@ function mountDrawer(host: HTMLElement, endpoint: string, layoutKey: string): {r
   }
 
   async function close(id: string): Promise<void> {
-    if (busy || locked) return;
+    if (busy || refreshing || locked) return;
     busy = true;
     const url = new URL(endpoint, location.href);
     url.pathname += "/" + encodeURIComponent(id);
     try {
       await api.request(url.pathname + url.search, {method: "DELETE"});
     } catch (reason) {
-      if (errorCode(reason) !== "workspace_terminal_not_found") {
-        error = label("closeFailed");
+      const code = errorCode(reason);
+      if (code !== "workspace_terminal_not_found") {
+        locked = code === "workspace_terminal_lan_locked";
+        error = locked ? "" : terminalError(code, "closeFailed");
         busy = false;
         render();
         void refresh();
@@ -485,7 +530,10 @@ function mountDrawer(host: HTMLElement, endpoint: string, layoutKey: string): {r
       }
     }
     sessions = sessions.filter(item => item.id !== id);
-    if (sessions.length === 0) rememberClosed(true);
+    if (sessions.length === 0) {
+      explicitlyClosed = true;
+      saveLayout();
+    }
     selectAvailable();
     pruneViews();
     busy = false;
@@ -502,11 +550,18 @@ function mountDrawer(host: HTMLElement, endpoint: string, layoutKey: string): {r
   }
 
   function toggle(): void {
-    if (locked) lockLink.click();
-    else if (ready) {
-      expanded = !expanded;
-      render();
-      if (expanded) focusTerminal();
+    if (locked) {
+      lockLink.click();
+      return;
+    }
+    if (!ready) return;
+    setExpanded(!expanded);
+    render();
+    if (expanded) {
+      focusTerminal();
+      void autoStart();
+    } else {
+      toggleButton.focus({preventScroll: true});
     }
   }
 
@@ -522,15 +577,17 @@ function mountDrawer(host: HTMLElement, endpoint: string, layoutKey: string): {r
       focused = 0;
       selectAvailable();
     }
-    expanded = true;
+    setExpanded(true);
     render();
     focusTerminal();
+    void autoStart();
   });
   maxButton.addEventListener("click", () => {
-    expanded = true;
+    setExpanded(true);
     maximized = !maximized;
     render();
     focusTerminal();
+    void autoStart();
   });
   tabs.addEventListener("click", event => {
     const button = (event.target as Element).closest<HTMLButtonElement>("button");
@@ -539,7 +596,7 @@ function mountDrawer(host: HTMLElement, endpoint: string, layoutKey: string): {r
     if (!id) return;
     if (split && selection[other(focused)] === id) focused = other(focused);
     else selection[focused] = id;
-    expanded = true;
+    setExpanded(true);
     render();
     focusTerminal();
   });
@@ -584,14 +641,19 @@ function mountDrawer(host: HTMLElement, endpoint: string, layoutKey: string): {r
     render();
   });
   const layout = new ResizeObserver(updateHeight);
-  const header = element.closest(".workspace-viewer")?.querySelector(".wv-header");
-  if (header) layout.observe(header);
+  if (editor) layout.observe(editor);
+  if (editorTabs) layout.observe(editorTabs);
   window.addEventListener("resize", updateHeight);
 
   render();
   return {
     refresh,
-    shortcut: toggle,
+    shortcut(event: KeyboardEvent) {
+      if (locked || !ready) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (!event.repeat) toggle();
+    },
     dispose() {
       disposed = true;
       for (const view of views.values()) view.dispose();
@@ -608,10 +670,11 @@ export function workspaceTerminals(slot: HTMLElement, task: string): {show(works
   let current = "";
   const refresh = () => { void active?.refresh(); };
   function shortcut(event: KeyboardEvent): void {
-    if (!active || !event.ctrlKey || event.altKey || event.metaKey || event.shiftKey || event.code !== "Backquote") return;
-    event.preventDefault();
-    event.stopPropagation();
-    active.shortcut();
+    if (!active || event.defaultPrevented || !event.ctrlKey || event.altKey || event.metaKey || event.code !== "Backquote") return;
+    const target = event.target;
+    if (target instanceof HTMLElement && (target.isContentEditable || target.closest("input, textarea, select")) &&
+        !target.matches(".wv-term-screen textarea.xterm-helper-textarea")) return;
+    active.shortcut(event);
   }
   function dispose(event: PageTransitionEvent): void {
     if (event.persisted) return;
@@ -619,11 +682,12 @@ export function workspaceTerminals(slot: HTMLElement, task: string): {show(works
     window.removeEventListener("focus", refresh);
     window.removeEventListener("pageshow", refresh);
     window.removeEventListener("pagehide", dispose);
+    window.removeEventListener("keydown", shortcut, true);
   }
   window.addEventListener("focus", refresh);
   window.addEventListener("pageshow", refresh);
   window.addEventListener("pagehide", dispose);
-  slot.closest(".workspace-viewer")?.addEventListener("keydown", shortcut as EventListener, true);
+  window.addEventListener("keydown", shortcut, true);
   return {
     show(workspace) {
       if (!task) return;

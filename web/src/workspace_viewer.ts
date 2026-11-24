@@ -105,6 +105,11 @@ const copy: Record<string, Record<string, string>> = {
   "zh-CN": {
     title: "工作区查看器",
     navigation: "工作区导航",
+    fileSidebar: "工作区文件栏",
+    collapseSidebar: "收起文件栏",
+    expandSidebar: "展开文件栏",
+    resizeSidebar: "调整文件栏宽度",
+    resetSidebar: "恢复文件栏默认宽度",
     preview: "内容预览",
     baseline: "基线",
     branch: "分支",
@@ -177,6 +182,11 @@ const copy: Record<string, Record<string, string>> = {
   "en-US": {
     title: "Workspace viewer",
     navigation: "Workspace navigation",
+    fileSidebar: "Workspace file sidebar",
+    collapseSidebar: "Collapse file sidebar",
+    expandSidebar: "Expand file sidebar",
+    resizeSidebar: "Resize file sidebar",
+    resetSidebar: "Reset file sidebar width",
     preview: "Content preview",
     baseline: "Base",
     branch: "Branch",
@@ -312,21 +322,127 @@ function diffHTML(text: string): string {
   return groups.join("");
 }
 
+function bindFileSidebar(layout: HTMLElement): void {
+  const key = "aha2.workspace-viewer.sidebar-layout";
+  const minWidth = 220;
+  const side = layout.querySelector<HTMLElement>(".wv-side")!;
+  const content = layout.querySelector<HTMLElement>("#wv-side-content")!;
+  const toggle = layout.querySelector<HTMLButtonElement>(".wv-side-toggle")!;
+  const reset = layout.querySelector<HTMLButtonElement>(".wv-side-reset")!;
+  const resizer = layout.querySelector<HTMLElement>(".wv-side-resizer")!;
+  let width = 0;
+  let collapsed = false;
+  try {
+    const saved = JSON.parse(localStorage.getItem(key) || "{}");
+    if (Number.isFinite(saved.width) && saved.width > 0) width = saved.width;
+    collapsed = saved.collapsed === true;
+  } catch {}
+
+  function save(): void {
+    try { localStorage.setItem(key, JSON.stringify({width, collapsed})); } catch {}
+  }
+
+  function maxWidth(): number {
+    return Math.max(minWidth, Math.min(640, Math.floor(layout.clientWidth * 0.55)));
+  }
+
+  function clampWidth(value: number): number {
+    return Math.max(minWidth, Math.min(maxWidth(), Math.round(value)));
+  }
+
+  function applyWidth(): void {
+    if (width) layout.style.setProperty("--wv-side-width", clampWidth(width) + "px");
+    else layout.style.removeProperty("--wv-side-width");
+    resizer.setAttribute("aria-valuemin", String(minWidth));
+    resizer.setAttribute("aria-valuemax", String(maxWidth()));
+    resizer.setAttribute("aria-valuenow", String(clampWidth(side.getBoundingClientRect().width)));
+  }
+
+  function render(): void {
+    layout.classList.toggle("side-collapsed", collapsed);
+    content.hidden = collapsed;
+    resizer.hidden = collapsed;
+    reset.hidden = collapsed;
+    toggle.setAttribute("aria-expanded", String(!collapsed));
+    toggle.title = label(collapsed ? "expandSidebar" : "collapseSidebar");
+    toggle.setAttribute("aria-label", toggle.title);
+    toggle.innerHTML = icon(collapsed ? "chevron-right" : "chevron-left");
+    applyWidth();
+  }
+
+  function resetWidth(): void {
+    width = 0;
+    applyWidth();
+    save();
+  }
+
+  toggle.addEventListener("click", () => {
+    collapsed = !collapsed;
+    render();
+    save();
+  });
+  reset.addEventListener("click", resetWidth);
+  resizer.addEventListener("dblclick", resetWidth);
+  resizer.addEventListener("keydown", event => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      resetWidth();
+      return;
+    }
+    const step = event.key === "ArrowRight" ? 8 : event.key === "ArrowLeft" ? -8 : 0;
+    if (event.key !== "Home" && event.key !== "End" && !step) return;
+    event.preventDefault();
+    const current = side.getBoundingClientRect().width;
+    width = clampWidth(event.key === "Home" ? minWidth : event.key === "End" ? maxWidth() : current + step);
+    applyWidth();
+    save();
+  });
+  let drag: {id: number; x: number; width: number} | undefined;
+  resizer.addEventListener("pointerdown", event => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    resizer.focus({preventScroll: true});
+    drag = {id: event.pointerId, x: event.clientX, width: side.getBoundingClientRect().width};
+    resizer.setPointerCapture(event.pointerId);
+  });
+  resizer.addEventListener("pointermove", event => {
+    if (drag?.id !== event.pointerId) return;
+    width = clampWidth(drag.width + event.clientX - drag.x);
+    applyWidth();
+  });
+  resizer.addEventListener("lostpointercapture", () => {
+    drag = undefined;
+    save();
+  });
+  new ResizeObserver(applyWidth).observe(layout);
+  render();
+}
+
 export function mountWorkspaceViewer(host: HTMLElement, task: string, copyText: (value: string) => Promise<void>): void {
   host.innerHTML = `<section class="workspace-viewer" data-i18n-ignore>
     <header class="wv-header"></header>
     <div class="wv-notice" role="status" hidden></div>
     <span class="visually-hidden" role="status" data-wv-copy-status></span>
     <div class="wv-layout">
-      <aside class="wv-side"><nav class="wv-modes" aria-label="${label("navigation")}"></nav><div class="wv-navigator"></div></aside>
+      <aside class="wv-side" aria-label="${label("fileSidebar")}">
+        <div class="wv-side-actions">
+          <button class="wv-side-toggle" type="button" aria-controls="wv-side-content"></button>
+          <button class="wv-side-reset" type="button" aria-label="${label("resetSidebar")}" title="${label("resetSidebar")}">${icon("refresh")}</button>
+        </div>
+        <div id="wv-side-content" class="wv-side-content">
+          <nav class="wv-modes" aria-label="${label("navigation")}"></nav><div class="wv-navigator"></div>
+        </div>
+        <div class="wv-side-resizer" role="separator" aria-label="${label("resizeSidebar")}" aria-orientation="vertical" aria-controls="wv-side-content" tabindex="0" title="${label("resetSidebar")}"></div>
+      </aside>
       <section class="wv-editor" aria-label="${label("preview")}">
         <div class="wv-tabs"></div>
         <div class="wv-content"></div>
+        <div class="wv-drawers"></div>
       </section>
     </div>
-    <div class="wv-drawers"></div>
   </section>`;
   const root = host.querySelector<HTMLElement>(".workspace-viewer")!;
+  bindFileSidebar(root.querySelector<HTMLElement>(".wv-layout")!);
   const header = root.querySelector<HTMLElement>(".wv-header")!;
   const notice = root.querySelector<HTMLElement>(".wv-notice")!;
   const copyStatus = root.querySelector<HTMLElement>("[data-wv-copy-status]")!;

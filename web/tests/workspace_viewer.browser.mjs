@@ -78,6 +78,7 @@ try {
     let remoteBranchError = "";
     const terminalRequests = [];
     const terminalMessages = [];
+    const terminalFaults = new Map();
     const sessions = new Map();
     const sockets = new Map();
     let allowTerminalLAN = false;
@@ -121,6 +122,11 @@ try {
         const method = route.request().method();
         const list = sessions.get(workspace) || [];
         terminalRequests.push({method, workspace, path});
+        const fault = terminalFaults.get(method);
+        if (fault) {
+          if (fault.error === "workspace_terminal_lan_locked") allowTerminalLAN = false;
+          return answer({error: fault.error}, fault.status);
+        }
         if (method === "GET") return answer({sessions: list,
           cwd: workspace ? "/srv/workspace" : "/resolved/worktree", ssh: Boolean(workspace)});
         if (method === "POST") {
@@ -209,7 +215,8 @@ try {
         : {text: child && file === childPath ? "Child source" : file === "README.md" ? "<script>literal only</script>\n" + "long".repeat(300) : "Working notes"});
     });
     return {ctx, queries, terminalRequests, terminalMessages, forgetChild: () => { childDiscovered = false; }, restoreChild: () => { childDiscovered = true; },
-      failRemoteBranch: error => { remoteBranchError = error; }};
+      failRemoteBranch: error => { remoteBranchError = error; }, allowTerminal: () => { allowTerminalLAN = true; },
+      failTerminal: (method, error, status) => terminalFaults.set(method, {error, status}), clearTerminalFault: method => terminalFaults.delete(method)};
   }
 
   const desktop = await context(1280, "en-US");
@@ -673,6 +680,64 @@ try {
     await page.getByRole("button", {name: labels.refresh, exact: true}).click();
     const left = drawer.locator('[data-pane="0"]');
     const right = drawer.locator('[data-pane="1"]');
+    const terminalToggle = drawer.locator(".wv-term-toggle");
+    await drawer.getByRole("button", {name: labels.expand}).waitFor();
+    assert.equal(await terminalToggle.getAttribute("aria-expanded"), "false");
+    assert.equal(terminal.terminalRequests.filter(({method}) => method === "POST").length, 0);
+    const assertAligned = async () => {
+      const editor = await page.locator(".wv-editor").boundingBox();
+      const rect = await drawer.boundingBox();
+      assert.equal(rect.x, editor.x);
+      assert.equal(rect.width, editor.width);
+    };
+    await assertAligned();
+    if (width === 1280) {
+      const side = page.locator(".wv-side");
+      const sideToggle = page.locator(".wv-side-toggle");
+      const splitter = page.getByRole("separator", {name: "Resize file sidebar"});
+      const originalWidth = (await side.boundingBox()).width;
+      const splitRect = await splitter.boundingBox();
+      await page.mouse.move(splitRect.x + splitRect.width / 2, splitRect.y + 100);
+      await page.mouse.down();
+      await page.mouse.move(splitRect.x + splitRect.width / 2 + 74, splitRect.y + 100, {steps: 4});
+      await page.mouse.up();
+      const resized = (await side.boundingBox()).width;
+      assert.ok(resized >= originalWidth + 70);
+      assert.equal(Number(await splitter.getAttribute("aria-valuenow")), resized);
+      await assertAligned();
+      await sideToggle.focus();
+      await page.keyboard.press("Enter");
+      assert.equal(await sideToggle.getAttribute("aria-expanded"), "false");
+      await page.locator("#wv-side-content").waitFor({state: "hidden"});
+      await assertAligned();
+      await page.reload();
+      await page.locator(".wv-side-toggle[aria-expanded=false]").waitFor();
+      await sideToggle.click();
+      assert.equal((await side.boundingBox()).width, resized);
+      await splitter.focus();
+      await page.keyboard.press("ArrowLeft");
+      assert.equal((await side.boundingBox()).width, resized - 8);
+      await splitter.dblclick();
+      assert.equal((await side.boundingBox()).width, originalWidth);
+      await splitter.press("ArrowRight");
+      await page.getByRole("button", {name: "Reset file sidebar width"}).click();
+      assert.equal((await side.boundingBox()).width, originalWidth);
+    }
+    await drawer.getByRole("button", {name: labels.expand}).waitFor();
+    for (const tag of ["input", "textarea", "div"]) {
+      const allowed = await page.evaluate(tag => {
+        const input = document.createElement(tag);
+        if (tag === "div") input.contentEditable = "true";
+        document.querySelector(".workspace-viewer").append(input);
+        const allowed = input.dispatchEvent(new KeyboardEvent("keydown", {code: "Backquote", ctrlKey: true, bubbles: true, cancelable: true}));
+        input.remove();
+        return allowed;
+      }, tag);
+      assert.equal(allowed, true, `shortcut should leave ${tag} alone`);
+    }
+    assert.equal(await terminalToggle.getAttribute("aria-expanded"), "false");
+    assert.equal(terminal.terminalRequests.filter(({method}) => method === "POST").length, 0);
+    await page.keyboard.press("Control+Backquote");
     await left.getByText(/PTY fixture for pty-1/).waitFor();
     assert.equal(await left.locator(".wv-term-cwd").textContent(), "/resolved/worktree");
     await drawer.getByRole("button", {name: labels.new}).click();
@@ -694,16 +759,19 @@ try {
     const drag = await resizer.boundingBox();
     await page.mouse.move(drag.x + drag.width / 2, drag.y + 4);
     await page.mouse.down();
-    await page.mouse.move(drag.x + drag.width / 2, drag.y - 66, {steps: 4});
+    await page.mouse.move(drag.x + drag.width / 2, drag.y + 74, {steps: 4});
     await page.mouse.up();
-    assert.ok((await drawer.boundingBox()).height > initialHeight + 50);
+    assert.ok((await drawer.boundingBox()).height < initialHeight - 50);
     await resizer.dblclick();
     assert.equal((await drawer.boundingBox()).height, initialHeight);
     await drawer.getByRole("button", {name: labels.maximize}).click();
-    assert.ok((await drawer.boundingBox()).height > initialHeight * 1.5);
+    const maxHeight = await page.locator(".wv-editor").evaluate(editor =>
+      editor.clientHeight - Math.max(18, editor.querySelector(".wv-tabs").clientHeight));
+    assert.equal((await drawer.boundingBox()).height, maxHeight);
     await drawer.getByRole("button", {name: labels.restore}).click();
     assert.equal((await drawer.boundingBox()).height, initialHeight);
 
+    await left.getByRole("textbox", {name: labels.input}).focus();
     await page.keyboard.press("Control+Backquote");
     await left.waitFor({state: "hidden"});
     assert.equal(Math.round((await drawer.boundingBox()).height), 37);
@@ -713,6 +781,9 @@ try {
 
     const switcher = page.getByRole("combobox", {name: labels.switcher});
     await switcher.selectOption("ssh-workspace");
+    await drawer.getByRole("button", {name: labels.expand}).waitFor();
+    assert.equal(terminal.terminalRequests.filter(({method}) => method === "POST").length, 2);
+    await drawer.getByRole("button", {name: labels.expand}).click();
     await drawer.getByRole("tab", {name: labels.ssh}).waitFor();
     assert.equal(await drawer.getByRole("tab").count(), 1);
     await left.getByText(/PTY fixture for pty-3/).waitFor();
@@ -726,17 +797,59 @@ try {
     await drawer.getByRole("button", {name: labels.close}).click();
     await drawer.getByRole("tab", {name: labels.second, exact: true}).waitFor({state: "hidden"});
     assert.ok(terminal.terminalRequests.some(({method, path}) => method === "DELETE" && path.endsWith("/pty-2")));
+    await terminalToggle.click();
     await page.reload();
     await drawer.getByRole("tab", {name: labels.first, exact: true}).waitFor();
+    assert.equal(await terminalToggle.getAttribute("aria-expanded"), "false");
+    await page.keyboard.press("Control+Backquote");
     await left.getByText(/PTY fixture for pty-1/).waitFor();
     assert.equal(terminal.terminalRequests.filter(({method}) => method === "POST").length, 3);
 
+    await drawer.locator("[data-close]").click();
+    await drawer.getByRole("tab").waitFor({state: "hidden"});
+    await page.reload();
+    await drawer.locator(".wv-term-toggle[aria-expanded=true]").waitFor();
+    assert.equal(terminal.terminalRequests.filter(({method}) => method === "POST").length, 3);
+
     await toggle.uncheck();
+    const revoke = settings.waitForResponse(response =>
+      response.request().method() === "PUT" && response.url().endsWith("/settings/security/workspace-terminal"));
     await settings.getByRole("button", {name: labels.save}).click();
+    assert.ok((await revoke).ok());
+    await page.getByRole("button", {name: labels.refresh, exact: true}).click();
     await lock.waitFor();
     await terminal.ctx.close();
     console.log(`Workspace terminal and LAN settings verified at ${width}px (${locale})`);
   }
+
+  const failures = await context(1024, "en-US", true);
+  failures.allowTerminal();
+  failures.failTerminal("POST", "workspace_terminal_check_failed", 503);
+  const errorsPage = await failures.ctx.newPage();
+  await errorsPage.goto(origin + "/workspace-viewer?task=" + task.id);
+  await errorsPage.getByRole("button", {name: "Expand terminal", exact: true}).click();
+  const feedback = errorsPage.locator(".wv-term-feedback");
+  await errorsPage.getByText("Terminal access could not be verified. Try again.", {exact: true}).waitFor();
+  await errorsPage.getByRole("button", {name: "Refresh", exact: true}).click();
+  await feedback.waitFor({state: "hidden"});
+  assert.equal(failures.terminalRequests.filter(({method}) => method === "POST").length, 1);
+  const newTerminal = errorsPage.getByRole("button", {name: "New terminal on this workspace host"});
+  for (const [code, status, message] of [
+    ["unsupported", 422, "This workspace does not support terminals."],
+    ["unavailable", 404, "Terminal unavailable for this workspace."],
+    ["limit", 409, "This workspace can have up to 6 terminals."],
+    ["start_failed", 503, "The workspace host could not start the terminal. Check the server logs."],
+    ["access_revoked", 403, "Terminal access was revoked. Check your login and LAN terminal settings."],
+  ]) {
+    failures.failTerminal("POST", "workspace_terminal_" + code, status);
+    await newTerminal.click();
+    await errorsPage.getByText(message, {exact: true}).waitFor();
+  }
+  failures.failTerminal("POST", "workspace_terminal_lan_locked", 403);
+  await newTerminal.click();
+  await errorsPage.getByRole("link", {name: /LAN terminal locked/}).waitFor();
+  await feedback.waitFor({state: "hidden"});
+  await failures.ctx.close();
   assert.deepEqual(errors, []);
   console.log("Workspace viewer verified at 1280px, 1024px and 390px in real Chromium");
 } finally {
