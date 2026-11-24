@@ -46,8 +46,9 @@ const copy = {
     settingsAllowLAN: "允许通过局域网访问终端",
     settingsAllowLANHelp: "默认关闭。在运行 AHA2 的电脑上通过 localhost 开启。Owner 可以从局域网关闭。",
     settingsExternalOrigin: "终端外部访问地址",
-    settingsExternalOriginHelp: "通过反向代理访问时，填写浏览器使用的协议、域名和端口。留空则沿用直连校验。",
+    settingsExternalOriginHelp: "填写浏览器通过反向代理访问 AHA2 时使用的协议、域名和端口，例如 https://aha.example.com。首次保存需在本机或直连地址下进行；留空则沿用直连校验。",
     settingsInvalidExternalOrigin: "请输入有效的 HTTP 或 HTTPS 地址，地址只应包含协议、主机和可选端口。",
+    settingsRequiresDirectOrigin: "终端设置只能在本机或通过直连地址修改：请在运行 AHA2 的电脑上打开 http://localhost:8766，或使用局域网直连地址后再保存。",
     settingsEnableRequiresLoopback: "请在运行 AHA2 的电脑上通过 localhost 开启。",
     settingsSaved: "工作区终端设置已保存。",
     settingsSave: "保存终端设置",
@@ -90,8 +91,9 @@ const copy = {
     settingsAllowLAN: "Allow workspace terminals over LAN",
     settingsAllowLANHelp: "Off by default. Enable via localhost on the computer running AHA2. The owner can disable it over the LAN.",
     settingsExternalOrigin: "External terminal address",
-    settingsExternalOriginHelp: "If you use a reverse proxy, enter the scheme, host, and port used by your browser. Leave blank to use direct-connection checks.",
+    settingsExternalOriginHelp: "The scheme, host and port the browser uses to reach AHA2 through the reverse proxy, e.g. https://aha.example.com. The first save must be made on the AHA2 computer or via a direct address; leave empty to keep direct checks.",
     settingsInvalidExternalOrigin: "Enter a valid HTTP or HTTPS address with a scheme, host, and optional port.",
+    settingsRequiresDirectOrigin: "Terminal settings can only be changed on the AHA2 computer or via a direct address. Open http://localhost:8766 on that computer, or use the LAN direct address, then save.",
     settingsEnableRequiresLoopback: "To enable LAN terminals, open this page via localhost on the computer running AHA2.",
     settingsSaved: "Workspace terminal setting saved.",
     settingsSave: "Save terminal setting",
@@ -151,6 +153,7 @@ export async function saveWorkspaceTerminalSettings(form: FormData, settings: Se
     return (await api.updateWorkspaceTerminalSettings(payload)).security;
   } catch (error) {
     switch (errorCode(error)) {
+      case "origin_rejected": throw new Error(label("settingsRequiresDirectOrigin"));
       case "workspace_terminal_lan_enable_requires_loopback": throw new Error(label("settingsEnableRequiresLoopback"));
       case "workspace_terminal_invalid_external_origin": throw new Error(label("settingsInvalidExternalOrigin"));
       default: throw error;
