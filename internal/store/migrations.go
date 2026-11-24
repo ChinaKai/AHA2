@@ -4353,6 +4353,31 @@ func (s *Store) migrate(ctx context.Context) error {
 		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(161, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v161: %w", err)
 	}
+	var hasV162 bool
+	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=162)`).Scan(&hasV162); err != nil {
+		return fmt.Errorf("read schema v162 state: %w", err)
+	}
+	if !hasV162 {
+		// Earlier builds superseded all pending cards in a conversation when a
+		// new card was created. Restore only the card linked to a still-pending
+		// permission request.
+		if _, err := s.db.ExecContext(ctx, `
+			UPDATE channel_pending_actions SET status='pending'
+			WHERE operation='task_permission' AND status='superseded'
+			  AND EXISTS (
+				SELECT 1 FROM task_permission_requests r
+				WHERE r.id=channel_pending_actions.target_id AND r.status='pending'
+				  AND r.channel_instance_id=channel_pending_actions.instance_id
+				  AND r.channel_conversation_id=channel_pending_actions.conversation_id
+				  AND r.channel_action_id=channel_pending_actions.id
+			  )`); err != nil {
+			return fmt.Errorf("apply schema v162 permission cards: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(162, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return fmt.Errorf("record schema v162: %w", err)
+		}
+	}
 	return nil
 }
 

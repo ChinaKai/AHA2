@@ -35,7 +35,10 @@ func (s *Store) CreateChannelPendingAction(ctx context.Context, item domain.Chan
 		return domain.ChannelPendingAction{}, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `UPDATE channel_pending_actions SET status='superseded',updated_at=? WHERE conversation_id=? AND status='pending'`, timeString(item.CreatedAt), item.ConversationID); err != nil {
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE channel_pending_actions SET status='superseded',updated_at=?
+		WHERE conversation_id=? AND status='pending' AND operation<>'task_permission'`,
+		timeString(item.CreatedAt), item.ConversationID); err != nil {
 		return domain.ChannelPendingAction{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO channel_pending_actions(id,instance_id,conversation_id,actor_identity_link_id,operation,target_type,target_id,intent_json,preview_json,precondition_json,precondition_hash,status,provider_message_id,expires_at,consumed_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
@@ -44,7 +47,10 @@ func (s *Store) CreateChannelPendingAction(ctx context.Context, item domain.Chan
 		item.ProviderMessageID, timeString(item.ExpiresAt), timeString(item.ConsumedAt), timeString(item.CreatedAt), timeString(item.UpdatedAt)); err != nil {
 		return domain.ChannelPendingAction{}, err
 	}
-	payload := map[string]any{"kind": "confirmation", "action_id": item.ID, "operation": item.Operation, "preview": item.Preview, "expires_at": timeString(item.ExpiresAt)}
+	payload := map[string]any{"kind": "confirmation", "action_id": item.ID, "operation": item.Operation, "preview": item.Preview}
+	if item.Operation != "task_permission" {
+		payload["expires_at"] = timeString(item.ExpiresAt)
+	}
 	if err := enqueueChannelActionDeliveryTx(ctx, tx, item.InstanceID, item.ConversationID, item.ID+":preview", "action_preview", payload, item.CreatedAt); err != nil {
 		return domain.ChannelPendingAction{}, err
 	}
@@ -119,7 +125,16 @@ func (s *Store) SkipEphemeralMenuCards(ctx context.Context, at time.Time) error 
 }
 
 func (s *Store) BeginChannelPendingAction(ctx context.Context, id, instanceID, conversationID, actorIdentityID, providerMessageID string, at time.Time) (domain.ChannelPendingAction, bool, error) {
-	result, err := s.db.ExecContext(ctx, `UPDATE channel_pending_actions SET status='executing',consumed_at=?,updated_at=? WHERE id=? AND instance_id=? AND conversation_id=? AND actor_identity_link_id=? AND provider_message_id=? AND status='pending' AND expires_at>?`,
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE channel_pending_actions SET status='executing',consumed_at=?,updated_at=?
+		WHERE id=? AND instance_id=? AND conversation_id=? AND actor_identity_link_id=? AND provider_message_id=? AND status='pending'
+		  AND CASE WHEN operation='task_permission' THEN EXISTS (
+			SELECT 1 FROM task_permission_requests r
+			WHERE r.id=channel_pending_actions.target_id AND r.status='pending'
+			  AND r.channel_instance_id=channel_pending_actions.instance_id
+			  AND r.channel_conversation_id=channel_pending_actions.conversation_id
+			  AND (r.channel_action_id='' OR r.channel_action_id=channel_pending_actions.id)
+		  ) ELSE expires_at>? END`,
 		timeString(at), timeString(at), id, instanceID, conversationID, actorIdentityID, providerMessageID, timeString(at))
 	if err != nil {
 		return domain.ChannelPendingAction{}, false, err

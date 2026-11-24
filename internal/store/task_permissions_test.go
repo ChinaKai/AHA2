@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"errors"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -24,7 +26,7 @@ func TestTaskPermissionRequestResolvesOnce(t *testing.T) {
 		ChannelInstanceID: "instance-1", ChannelConversationID: "conversation-1",
 		ApplicantIdentityLinkID: "member-1", ApplicantName: "张三", ApplicantIsBot: true,
 		Action: "push main", Scope: "origin/main", Reason: "联调需要", Risk: "high",
-		Status: "pending", CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
+		Status: "pending", CreatedAt: now, UpdatedAt: now,
 	}
 	if err := database.CreateTaskPermissionRequest(ctx, request); err != nil {
 		t.Fatal(err)
@@ -48,44 +50,82 @@ func TestTaskPermissionRequestResolvesOnce(t *testing.T) {
 	}
 }
 
-// Listing expires stale pending rows as a side effect. The read path now
-// probes before writing, so this pins that the expiry still happens when there
-// is something to expire.
-// Listing is a pure read now; expiry is one explicit, notifying operation.
-func TestListTaskPermissionRequestsDoesNotExpireImplicitly(t *testing.T) {
+func TestLegacyTaskPermissionRequestAndCardSurviveUpgrade(t *testing.T) {
 	ctx := context.Background()
-	database, err := Open(ctx, t.TempDir()+"/aha2.db")
+	path := filepath.Join(t.TempDir(), "aha2.db")
+	database, err := Open(ctx, path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer database.Close()
+	t.Cleanup(func() { database.Close() })
 	task := createStoreTestTask(t, database)
+	channel := createChannelHistoryFixture(t, database, task.ID, task.ID)
 	now := time.Now().UTC()
-	request := domain.TaskPermissionRequest{
-		ID: "task_permission_stale", TaskID: task.ID, Action: "push", Scope: "origin/main",
-		Reason: "stale", Risk: "low", Status: "pending", CreatedAt: now.Add(-time.Hour),
-		UpdatedAt: now.Add(-time.Hour), ExpiresAt: now.Add(-time.Minute),
-	}
-	if err := database.CreateTaskPermissionRequest(ctx, request); err != nil {
+	past := now.Add(-time.Hour)
+	identity, err := database.BindChannelOwnerIdentity(ctx, domain.ChannelIdentityLink{
+		ID: "owner-identity", InstanceID: channel.instance.ID, OwnerID: channel.instance.OwnerID,
+		ExternalUserID: "owner-open", Role: "owner", Status: "active", LinkedAt: past,
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
-	listed, err := database.ListTaskPermissionRequests(ctx, task.ID, 10)
-	if err != nil || len(listed) != 1 || listed[0].Status != "pending" {
-		t.Fatalf("list must not write expiry: %#v err=%v", listed, err)
+	for _, status := range []string{"pending", "expired"} {
+		requestID, cardID := "permission-"+status, "card-"+status
+		if _, err := database.db.ExecContext(ctx, `
+			INSERT INTO task_permission_requests(id,task_id,channel_instance_id,channel_conversation_id,channel_action_id,action,status,created_at,updated_at,expires_at)
+			VALUES(?,?,?,?,?,'push',?,?,?,?)`,
+			requestID, task.ID, channel.instance.ID, channel.conversation.ID, cardID, status,
+			timeString(past), timeString(past), timeString(past)); err != nil {
+			t.Fatal(err)
+		}
+		for _, id := range []string{cardID, cardID + "-unlinked"} {
+			if _, err := database.CreateChannelPendingAction(ctx, domain.ChannelPendingAction{
+				ID: id, InstanceID: channel.instance.ID, ConversationID: channel.conversation.ID,
+				ActorIdentityLinkID: identity.ID, Operation: "task_permission", TargetType: "task_permission",
+				TargetID: requestID, Status: "superseded", ProviderMessageID: id + "-message",
+				CreatedAt: past, UpdatedAt: past, ExpiresAt: past,
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
-	expired, err := database.ExpireTaskPermissionRequests(ctx, task.ID, now)
-	if err != nil || len(expired) != 1 || expired[0].ID != request.ID {
-		t.Fatalf("explicit expiry = %#v err=%v", expired, err)
+	if _, err := database.db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version=162`); err != nil {
+		t.Fatal(err)
 	}
-	listed, err = database.ListTaskPermissionRequests(ctx, task.ID, 10)
-	if err != nil || len(listed) != 1 || listed[0].Status != "expired" {
-		t.Fatalf("expired list=%#v err=%v", listed, err)
+	reopened := reopenAfterMigration(t, database, path)
+	defer reopened.Close()
+
+	listed, err := reopened.ListTaskPermissionRequests(ctx, task.ID, 10)
+	if err != nil || len(listed) != 2 || listed[0].Status != "pending" || listed[1].Status != "expired" {
+		t.Fatalf("legacy requests = %#v, err = %v", listed, err)
+	}
+	if err := reopened.CreateTaskPermissionRequest(ctx, domain.TaskPermissionRequest{
+		ID: "duplicate", TaskID: task.ID, Action: "push", Status: "pending", CreatedAt: now, UpdatedAt: now,
+	}); !errors.Is(err, ErrTaskPermissionPending) {
+		t.Fatalf("duplicate of legacy pending request: %v", err)
+	}
+	for _, id := range []string{"card-expired", "card-pending-unlinked"} {
+		card, err := reopened.ChannelPendingAction(ctx, id)
+		if err != nil || card.Status != "superseded" {
+			t.Fatalf("unavailable legacy card = %#v, err = %v", card, err)
+		}
+	}
+	card, claimed, err := reopened.BeginChannelPendingAction(ctx,
+		"card-pending", channel.instance.ID, channel.conversation.ID, identity.ID, "card-pending-message", now)
+	if err != nil || !claimed || card.Status != "executing" || !card.ExpiresAt.Equal(past) {
+		t.Fatalf("claim legacy card = %#v, claimed = %v, err = %v", card, claimed, err)
+	}
+	resolved, changed, err := reopened.ResolveTaskPermissionRequest(ctx, "permission-pending", "approved", identity.ID, "Owner", "", now)
+	if err != nil || !changed || resolved.Status != "approved" || !resolved.ExpiresAt.Equal(past) {
+		t.Fatalf("resolve legacy request = %#v, changed = %v, err = %v", resolved, changed, err)
+	}
+	history, changed, err := reopened.ResolveTaskPermissionRequest(ctx, "permission-expired", "approved", identity.ID, "Owner", "", now)
+	if err != nil || changed || history.Status != "expired" {
+		t.Fatalf("resolve expired history = %#v, changed = %v, err = %v", history, changed, err)
 	}
 }
 
-// ExpireTaskPermissionRequests returns only the rows it actually changed, so
-// concurrent readers cannot each notify the Task about the same expiry.
-func TestExpireTaskPermissionRequestsIsOneShot(t *testing.T) {
+func TestCreateTaskPermissionRequestRejectsConcurrentDuplicate(t *testing.T) {
 	ctx := context.Background()
 	database, err := Open(ctx, t.TempDir()+"/aha2.db")
 	if err != nil {
@@ -94,25 +134,23 @@ func TestExpireTaskPermissionRequestsIsOneShot(t *testing.T) {
 	defer database.Close()
 	task := createStoreTestTask(t, database)
 	now := time.Now().UTC()
-	for _, item := range []domain.TaskPermissionRequest{
-		{ID: "task_permission_due", TaskID: task.ID, Action: "push", Status: "pending", CreatedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-time.Hour), ExpiresAt: now.Add(-time.Minute)},
-		{ID: "task_permission_future", TaskID: task.ID, Action: "later", Status: "pending", CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(time.Hour)},
-	} {
-		if err := database.CreateTaskPermissionRequest(ctx, item); err != nil {
-			t.Fatal(err)
-		}
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, id := range []string{"request-one", "request-two"} {
+		go func() {
+			<-start
+			results <- database.CreateTaskPermissionRequest(ctx, domain.TaskPermissionRequest{
+				ID: id, TaskID: task.ID, Action: "push", Status: "pending", CreatedAt: now, UpdatedAt: now,
+			})
+		}()
 	}
-	expired, err := database.ExpireTaskPermissionRequests(ctx, task.ID, now)
-	if err != nil || len(expired) != 1 || expired[0].ID != "task_permission_due" || expired[0].Status != "expired" {
-		t.Fatalf("first expiry = %#v err=%v", expired, err)
+	close(start)
+	first, second := <-results, <-results
+	if first != nil {
+		first, second = second, first
 	}
-	again, err := database.ExpireTaskPermissionRequests(ctx, task.ID, now)
-	if err != nil || len(again) != 0 {
-		t.Fatalf("second expiry = %#v err=%v", again, err)
-	}
-	future, err := database.TaskPermissionRequest(ctx, "task_permission_future")
-	if err != nil || future.Status != "pending" {
-		t.Fatalf("future request = %#v err=%v", future, err)
+	if first != nil || !errors.Is(second, ErrTaskPermissionPending) {
+		t.Fatalf("concurrent inserts: first = %v, second = %v", first, second)
 	}
 }
 
@@ -128,7 +166,7 @@ func TestResolveTaskPermissionRequestIsAtomic(t *testing.T) {
 	now := time.Now().UTC()
 	request := domain.TaskPermissionRequest{
 		ID: "task_permission_race", TaskID: task.ID, Action: "push", Status: "pending",
-		CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
+		CreatedAt: now, UpdatedAt: now,
 	}
 	if err := database.CreateTaskPermissionRequest(ctx, request); err != nil {
 		t.Fatal(err)

@@ -1296,11 +1296,6 @@ func renderDelivery(payload map[string]any) (string, string) {
 		content := renderConfirmationPreview(preview)
 		if operation == "task_permission" {
 			content += "\n\n**状态：** 待审批"
-			if expiresAt := stringValue(payload, "expires_at"); expiresAt != "" {
-				if parsed, err := time.Parse(time.RFC3339, expiresAt); err == nil {
-					content += "\n\n**有效期至：** " + parsed.Local().Format("2006-01-02 15:04")
-				}
-			}
 		}
 		elements := []any{}
 		if strings.TrimSpace(content) != "" {

@@ -26,5 +26,6 @@ type TaskPermissionRequest struct {
 	CreatedAt               time.Time `json:"created_at"`
 	UpdatedAt               time.Time `json:"updated_at"`
 	DecidedAt               time.Time `json:"decided_at,omitempty"`
-	ExpiresAt               time.Time `json:"expires_at"`
+	// ExpiresAt is retained for JSON compatibility with older clients.
+	ExpiresAt time.Time `json:"expires_at"`
 }
