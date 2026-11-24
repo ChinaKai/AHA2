@@ -143,11 +143,12 @@ def isolated_git_environment(env):
 
 def run_git(req, git_dir):
     env = git_environment()
+    timeout = min(12, req.get("timeout_ms", 12000) / 1000)
     line_endings = line_ending_args(env, git_dir) if req.get("read_line_endings") else []
     try:
         data, status, truncated = run_git_command(
             ["git", *line_endings, "--git-dir=" + git_dir, "-c", "core.hooksPath=" + os.devnull, *req["args"]],
-            isolated_git_environment(env), req["limit"], timeout=12,
+            isolated_git_environment(env), req["limit"], timeout=timeout,
         )
         return {"data": encode(data), "exit": status, "truncated": truncated}
     except OSError:
@@ -385,6 +386,7 @@ def read(req):
         os.close(root)
 
 
-frame = encode(json.dumps(read(json.load(sys.stdin)), ensure_ascii=False).encode("utf-8"))
-for offset in range(0, len(frame), 16384):
-    print(frame[offset:offset + 16384])
+if __name__ == "__main__":
+    frame = encode(json.dumps(read(json.load(sys.stdin)), ensure_ascii=False).encode("utf-8"))
+    for offset in range(0, len(frame), 16384):
+        print(frame[offset:offset + 16384])

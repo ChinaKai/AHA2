@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"strings"
+	"time"
 
 	"github.com/ChinaKai/AHA2/internal/workspace"
 )
@@ -29,6 +30,7 @@ type viewerRemoteRequest struct {
 	Path            string   `json:"path,omitempty"`
 	Args            []string `json:"args,omitempty"`
 	Limit           int      `json:"limit,omitempty"`
+	TimeoutMS       int64    `json:"timeout_ms,omitempty"`
 	ReadLineEndings bool     `json:"read_line_endings,omitempty"`
 }
 
@@ -125,6 +127,10 @@ func (source remoteViewerFS) file(ctx context.Context, rel string) (viewerConten
 }
 
 func (source remoteViewerFS) git(ctx context.Context, limit int, readLineEndings bool, args ...string) (viewerGitOutput, error) {
-	result, err := source.request(ctx, viewerRemoteRequest{Op: "git", Args: args, Limit: limit, ReadLineEndings: readLineEndings})
+	req := viewerRemoteRequest{Op: "git", Args: args, Limit: limit, ReadLineEndings: readLineEndings}
+	if deadline, ok := ctx.Deadline(); ok {
+		req.TimeoutMS = max(1, time.Until(deadline).Milliseconds())
+	}
+	result, err := source.request(ctx, req)
 	return viewerGitOutput{data: result.Data, exit: result.Exit, truncated: result.Truncated}, err
 }

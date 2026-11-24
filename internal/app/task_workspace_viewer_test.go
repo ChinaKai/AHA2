@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -236,6 +237,121 @@ func testViewerGitSources(t *testing.T, test func(*testing.T, string, viewerFS))
 		}
 		dir := t.TempDir()
 		test(t, dir, remoteViewerFS{root: dir, runner: viewerSSHFixture(t)})
+	})
+}
+
+func TestWorkspaceViewerBranchSelection(t *testing.T) {
+	testViewerGitSources(t, func(t *testing.T, dir string, source viewerFS) {
+		runViewerFixtureGit(t, dir, "init", "-b", "main")
+		commit := func(text, subject string) string {
+			writeViewerFixture(t, dir, "readme.txt", text+"\n")
+			runViewerFixtureGit(t, dir, "add", "readme.txt")
+			runViewerFixtureGit(t, dir, "commit", "-m", subject)
+			return runViewerFixtureGit(t, dir, "rev-parse", "HEAD")
+		}
+		base := commit("base", "base")
+		runViewerFixtureGit(t, dir, "switch", "-c", "origin/topic")
+		local := commit("local change", "local subject")
+		runViewerFixtureGit(t, dir, "switch", "-c", "remote-fixture", base)
+		subject := strings.Repeat("long commit title ", 80) + "end"
+		remote := commit("remote change", subject)
+		runViewerFixtureGit(t, dir, "update-ref", "refs/remotes/origin/topic", remote)
+		runViewerFixtureGit(t, dir, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/topic")
+		runViewerFixtureGit(t, dir, "branch", "team/topic", local)
+		runViewerFixtureGit(t, dir, "tag", "refs/heads/team", remote)
+		runViewerFixtureGit(t, dir, "switch", "main")
+		runViewerFixtureGit(t, dir, "branch", "-D", "remote-fixture")
+		writeViewerFixture(t, dir, "readme.txt", "uncommitted\n")
+		index := filepath.Join(dir, ".git", "index")
+		before, err := os.ReadFile(index)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		task := domain.Task{BaseCommit: base, TargetBranch: "main"}
+		view := func(req WorkspaceViewerRequest) (any, error) {
+			t.Helper()
+			return readWorkspaceView(t.Context(), source, task, "fixture", "fixture", req)
+		}
+		state := func(ref string, summary bool) viewerState {
+			t.Helper()
+			result, err := view(WorkspaceViewerRequest{View: "state", Branch: ref, Summary: summary})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return result.(viewerState)
+		}
+		current := state("", false)
+		if current.Head != base || current.Branch != "main" || current.CheckedOutBranch != "main" || len(current.Uncommitted) != 1 {
+			t.Fatalf("default state: %+v", current)
+		}
+		const localRef = "refs/heads/origin/topic"
+		const remoteRef = "refs/remotes/origin/topic"
+		for _, ref := range []string{localRef, remoteRef} {
+			if !slices.Contains(current.BranchOptions, viewerBranch{Ref: ref, Name: "origin/topic"}) {
+				t.Fatalf("branch %s missing: %+v", ref, current.BranchOptions)
+			}
+		}
+		if slices.Contains(current.BranchOptions, viewerBranch{Ref: "refs/remotes/origin/HEAD", Name: "origin/HEAD"}) {
+			t.Fatal("symbolic remote HEAD was offered as a branch")
+		}
+		for _, option := range []struct{ ref, head, change string }{
+			{localRef, local, "local change"}, {remoteRef, remote, "remote change"},
+		} {
+			selected := state(option.ref, false)
+			if selected.Head != option.head || selected.CheckedOutBranch != "main" || len(selected.Uncommitted) != 0 ||
+				selected.MergeBase != base || selected.Ahead != 1 || len(selected.BaseChanges) != 1 || len(selected.Commits) != 1 ||
+				selected.Commits[0].ID != option.head {
+				t.Fatalf("%s: %+v", option.ref, selected)
+			}
+			for _, scope := range []string{"base", "commit"} {
+				result, err := view(WorkspaceViewerRequest{View: "diff", Scope: scope, Path: "readme.txt", Branch: option.ref, Commit: option.head})
+				if err != nil || !strings.Contains(result.(viewerContent).Text, "+"+option.change) {
+					t.Fatalf("%s diff at %s: %+v, %v", scope, option.ref, result, err)
+				}
+			}
+		}
+		latest := state(remoteRef, false).Commits[0]
+		if latest.Short != remote[:7] || latest.Subject != subject || latest.Author != "Test" || latest.Date <= 0 {
+			t.Fatalf("commit metadata: %+v", latest)
+		}
+		for _, ref := range []string{"HEAD", "--all", remoteRef + "^", "refs/tags/refs/heads/team", "refs/heads/team",
+			"refs/heads/team/*", "refs/heads/x\x00y", "refs/heads/x@{1}", "refs/heads/team/../topic", "refs/remotes/origin/HEAD"} {
+			if _, err := view(WorkspaceViewerRequest{View: "state", Branch: ref}); !errors.Is(err, ErrViewerBranch) {
+				t.Errorf("%q: expected branch error, got %v", ref, err)
+			}
+		}
+		for _, req := range []WorkspaceViewerRequest{
+			{View: "diff", Scope: "commit", Path: "readme.txt", Branch: remoteRef, Commit: local},
+			{View: "state", Branch: remoteRef, Base: "origin/HEAD"},
+		} {
+			if _, err := view(req); !errors.Is(err, ErrViewerRevision) {
+				t.Errorf("%+v: expected revision error, got %v", req, err)
+			}
+		}
+		if _, err := view(WorkspaceViewerRequest{View: "diff", Scope: "uncommitted", Path: "readme.txt", Branch: remoteRef}); !errors.Is(err, ErrViewerBranch) {
+			t.Fatalf("uncommitted diff on selected branch: %v", err)
+		}
+		version := state(remoteRef, true).Version
+		runViewerFixtureGit(t, dir, "update-ref", remoteRef, local)
+		if state(remoteRef, true).Version == version {
+			t.Fatal("polling did not detect the remote-tracking ref move")
+		}
+		runViewerFixtureGit(t, dir, "update-ref", "-d", remoteRef)
+		for _, req := range []WorkspaceViewerRequest{
+			{View: "state", Branch: remoteRef}, {View: "state", Branch: remoteRef, Summary: true},
+			{View: "diff", Scope: "base", Path: ".env", Branch: remoteRef},
+		} {
+			if _, err := view(req); !errors.Is(err, ErrViewerBranch) {
+				t.Errorf("deleted branch: %+v: %v", req, err)
+			}
+		}
+		after, err := os.ReadFile(index)
+		text, contentErr := os.ReadFile(filepath.Join(dir, "readme.txt"))
+		if err != nil || contentErr != nil || !bytes.Equal(before, after) || string(text) != "uncommitted\n" ||
+			runViewerFixtureGit(t, dir, "symbolic-ref", "HEAD") != "refs/heads/main" {
+			t.Fatal("branch viewing changed the index, working copy or HEAD")
+		}
 	})
 }
 

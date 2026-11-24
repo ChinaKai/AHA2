@@ -34,14 +34,15 @@ var (
 	ErrViewerGit         = errors.New("workspace_viewer_git_failed")
 	ErrViewerNotGit      = errors.New("workspace_viewer_not_git")
 	ErrViewerRevision    = errors.New("workspace_viewer_invalid_revision")
+	ErrViewerBranch      = errors.New("workspace_viewer_invalid_branch")
 	ErrViewerRepository  = errors.New("workspace_viewer_invalid_repository")
 	ErrViewerRepoScan    = errors.New("workspace_viewer_repository_discovery_incomplete")
 	ErrViewerRepoMissing = errors.New("workspace_viewer_repository_unavailable")
 )
 
 type WorkspaceViewerRequest struct {
-	View, Path, Scope, Base, Commit, Repo   string
-	Summary, Availability, IgnoreWhitespace bool
+	View, Path, Scope, Base, Commit, Repo, Branch string
+	Summary, Availability, IgnoreWhitespace       bool
 }
 
 type viewerEntry struct {
@@ -146,6 +147,15 @@ func (s *Service) ReadTaskWorkspace(ctx context.Context, taskID string, req Work
 }
 
 func readWorkspaceView(ctx context.Context, source viewerFS, task domain.Task, name, repositoryName string, req WorkspaceViewerRequest) (any, error) {
+	if req.Branch != "" {
+		if !validViewerBranchRef(req.Branch) || (req.View != "state" && req.View != "diff") ||
+			req.Availability || req.Scope == "uncommitted" {
+			return nil, ErrViewerBranch
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, viewerBranchTimeout)
+		defer cancel()
+	}
 	switch req.View {
 	case "state":
 		if req.Availability && req.Repo == "" {

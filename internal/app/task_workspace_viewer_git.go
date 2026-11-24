@@ -206,6 +206,7 @@ type viewerCommit struct {
 	ID        string         `json:"id"`
 	Short     string         `json:"short"`
 	Subject   string         `json:"subject"`
+	Author    string         `json:"author"`
 	Date      int64          `json:"date"`
 	Files     []viewerChange `json:"files"`
 	Truncated bool           `json:"truncated"`
@@ -222,6 +223,8 @@ type viewerState struct {
 	IsGit                 bool           `json:"isGit"`
 	Version               string         `json:"version,omitempty"`
 	Branch                string         `json:"branch,omitempty"`
+	CheckedOutBranch      string         `json:"checkedOutBranch,omitempty"`
+	BranchOptions         []viewerBranch `json:"branchOptions"`
 	Head                  string         `json:"head,omitempty"`
 	Base                  string         `json:"base,omitempty"`
 	MergeBase             string         `json:"mergeBase,omitempty"`
@@ -238,44 +241,81 @@ func readViewerState(ctx context.Context, source viewerFS, task domain.Task, nam
 	state := viewerState{Name: name, TaskTitle: task.Title, TaskCode: task.Code, Branches: []string{}, Uncommitted: []viewerChange{}, BaseChanges: []viewerChange{}, Commits: []viewerCommit{}}
 	var err error
 	state.IsGit, err = source.gitMarker(ctx)
+	if err == nil && !state.IsGit && req.Branch != "" {
+		return state, ErrViewerNotGit
+	}
 	if !state.IsGit || err != nil {
 		return state, err
 	}
 	git := viewerGit{source: source}
-	if err := git.disableFilters(ctx); err != nil {
-		return state, err
-	}
-	status, err := git.checked(ctx, viewerDiffLimit, "status", "--porcelain=v2", "-z", "--branch", "--untracked-files=all", "--no-renames", "--ignore-submodules=all")
-	if err != nil {
-		return state, err
-	}
-	staged, err := git.stagedRaw(ctx, viewerHistorySize, "--")
-	if err != nil {
-		return state, err
-	}
-	refs, rawRefs, err := git.branches(ctx)
-	if err != nil {
-		return state, err
-	}
 	hash := sha256.New()
-	hash.Write(status.data)
-	hash.Write(staged.data)
-	hash.Write(rawRefs)
+	baselineBranch := ""
+	if req.Branch == "" {
+		if err := git.disableFilters(ctx); err != nil {
+			return state, err
+		}
+		status, err := git.checked(ctx, viewerDiffLimit, "status", "--porcelain=v2", "-z", "--branch", "--untracked-files=all", "--no-renames", "--ignore-submodules=all")
+		if err != nil {
+			return state, err
+		}
+		staged, err := git.stagedRaw(ctx, viewerHistorySize, "--")
+		if err != nil {
+			return state, err
+		}
+		hash.Write(status.data)
+		hash.Write(staged.data)
+		if !req.Summary {
+			state.Truncated = status.truncated || staged.truncated
+			state.readStatus(status.records())
+			state.CheckedOutBranch = state.Branch
+			baselineBranch = state.Branch
+			if err := state.readUncommittedGitlinks(ctx, git, staged, repos.checkedOutHeads(req.Repo)); err != nil {
+				return state, err
+			}
+		}
+	} else {
+		state.Head, err = git.selectedBranch(ctx, req.Branch)
+		if err != nil {
+			return state, err
+		}
+		state.CheckedOutBranch, err = git.checkedOutBranch(ctx)
+		if err != nil {
+			return state, err
+		}
+		state.Branch = viewerBranchName(req.Branch)
+		if name, local := strings.CutPrefix(req.Branch, viewerLocalRefs); local {
+			baselineBranch = name
+		}
+		hash.Write([]byte(state.Head + "\x00" + state.CheckedOutBranch))
+	}
+	branchCtx, cancelBranches := context.WithTimeout(ctx, viewerBranchTimeout)
+	defer cancelBranches()
+	refs, local, err := git.branches(branchCtx)
+	if err != nil {
+		return state, err
+	}
+	remoteOptions, remote, err := git.remoteBranches(branchCtx)
+	if err != nil {
+		return state, err
+	}
+	hash.Write(local.data)
+	hash.Write(remote.data)
 	state.Version = fmt.Sprintf("%x", hash.Sum(nil))
 	if req.Summary {
 		return viewerState{IsGit: true, Version: state.Version}, nil
 	}
-	state.Truncated = status.truncated || staged.truncated
-	state.readStatus(status.records())
-	if err := state.readUncommittedGitlinks(ctx, git, staged, repos.checkedOutHeads(req.Repo)); err != nil {
-		return state, err
-	}
-	for name := range strings.SplitSeq(string(rawRefs), "\n") {
-		if branch, _, ok := strings.Cut(name, "\x00"); ok {
-			state.Branches = append(state.Branches, branch)
+	state.Truncated = state.Truncated || local.truncated || remote.truncated
+	state.BranchOptions = []viewerBranch{}
+	for line := range strings.SplitSeq(string(local.data), "\n") {
+		if ref, _, ok := strings.Cut(line, "\x00"); ok {
+			state.Branches = append(state.Branches, viewerBranchName(ref))
+		}
+		if ref, _, ok := readViewerBranchRecord(line); ok {
+			state.BranchOptions = append(state.BranchOptions, viewerBranch{Ref: ref, Name: viewerBranchName(ref)})
 		}
 	}
-	base, baseline, fallback, err := git.comparisonBase(ctx, task, refs, state.Branch, state.Head, req)
+	state.BranchOptions = append(state.BranchOptions, remoteOptions...)
+	base, baseline, fallback, err := git.comparisonBase(ctx, task, refs, baselineBranch, state.Head, req)
 	if err != nil {
 		return state, err
 	}
@@ -309,7 +349,7 @@ func readViewerState(ctx context.Context, source viewerFS, task domain.Task, nam
 
 	log, err := git.checked(ctx, viewerHistorySize, "log", "--no-show-signature", "--max-count="+strconv.Itoa(viewerCommitLimit+1),
 		"--raw", "--numstat", "-z", "--no-abbrev", "--no-renames", "--no-ext-diff", "--no-textconv", "--ignore-submodules=none", "--submodule=short",
-		"--diff-merges=first-parent", "--format=tformat:%x1e%H%x00%h%x00%ct%x00%s", history, "--")
+		"--diff-merges=first-parent", "--format=tformat:%x1e%H%x00%ct%x00%an%x00%s", history, "--")
 	if err != nil {
 		return state, err
 	}
@@ -374,12 +414,10 @@ func (state *viewerState) readLog(records []string) {
 				state.Truncated = true
 				return
 			}
-			date, _ := strconv.ParseInt(records[i+2], 10, 64)
-			subject := records[i+3]
-			if len(subject) > 1000 {
-				subject = subject[:1000]
-			}
-			state.Commits = append(state.Commits, viewerCommit{ID: hash, Short: records[i+1], Date: date, Subject: subject, Files: []viewerChange{}})
+			date, _ := strconv.ParseInt(records[i+1], 10, 64)
+			state.Commits = append(state.Commits, viewerCommit{
+				ID: hash, Short: hash[:7], Date: date, Author: records[i+2], Subject: records[i+3], Files: []viewerChange{},
+			})
 			item = &state.Commits[len(state.Commits)-1]
 			gitlinks = map[string]*viewerGitlink{}
 			i += 3
@@ -447,19 +485,21 @@ func viewerStat(record string, gitlinks map[string]*viewerGitlink) (viewerChange
 	return change, true
 }
 
-func (git viewerGit) branches(ctx context.Context) (map[string]string, []byte, error) {
+func (git viewerGit) branches(ctx context.Context) (map[string]string, viewerGitOutput, error) {
 	out, err := git.checked(ctx, 512<<10, "for-each-ref", "--sort=refname", "--count=500",
-		"--format=%(refname:strip=2)%00%(objectname)", "refs/heads")
+		viewerRefFormat, viewerLocalRefs)
 	if err != nil {
-		return nil, nil, err
+		return nil, out, err
 	}
 	refs := map[string]string{}
 	for line := range strings.SplitSeq(string(out.data), "\n") {
-		if name, id, ok := strings.Cut(line, "\x00"); ok && validViewerSHA(id) {
-			refs[name] = id
+		ref, rest, ok := strings.Cut(line, "\x00")
+		id, _, separated := strings.Cut(rest, "\x00")
+		if ok && separated && validViewerSHA(id) {
+			refs[viewerBranchName(ref)] = id
 		}
 	}
-	return refs, out.data, nil
+	return refs, out, nil
 }
 
 func (git viewerGit) baseline(ctx context.Context, task domain.Task, refs map[string]string, branch, requested string) (string, string, error) {
@@ -560,13 +600,24 @@ func readViewerDiff(ctx context.Context, source viewerFS, task domain.Task, req 
 	if !isGit {
 		return viewerContent{}, ErrViewerNotGit
 	}
-	if viewerSensitivePath(req.Path) {
-		return viewerContent{Placeholder: "masked"}, nil
-	}
 	git := viewerGit{source: source}
-	head, err := git.head(ctx)
+	var head string
+	if req.Branch == "" {
+		if viewerSensitivePath(req.Path) {
+			return viewerContent{Placeholder: "masked"}, nil
+		}
+		head, err = git.head(ctx)
+	} else {
+		if req.Scope == "uncommitted" {
+			return viewerContent{}, ErrViewerBranch
+		}
+		head, err = git.selectedBranch(ctx, req.Branch)
+	}
 	if err != nil {
 		return viewerContent{}, err
+	}
+	if viewerSensitivePath(req.Path) {
+		return viewerContent{Placeholder: "masked"}, nil
 	}
 
 	args := []string{"--no-ext-diff", "--no-textconv", "--no-renames", "--submodule=short", "--no-color", "--unified=3",
@@ -636,7 +687,11 @@ func readViewerDiff(ctx context.Context, source viewerFS, task domain.Task, req 
 			return viewerContent{}, err
 		}
 		branch := ""
-		if req.Base == "" || req.Repo != "" {
+		if req.Branch != "" {
+			if name, local := strings.CutPrefix(req.Branch, viewerLocalRefs); local {
+				branch = name
+			}
+		} else if req.Base == "" || req.Repo != "" {
 			out, err := git.run(ctx, 4096, "symbolic-ref", "--quiet", "--short", "HEAD")
 			if err != nil {
 				return viewerContent{}, err

@@ -7322,7 +7322,7 @@ function render(): void {
   if (workspaceViewerTask !== null && state.auth?.authenticated && !state.loading) {
     const module = workspaceViewerPage.loaded();
     if (module) {
-      if (!app.querySelector(".workspace-viewer")) module.mountWorkspaceViewer(app, workspaceViewerTask);
+      if (!app.querySelector(".workspace-viewer")) module.mountWorkspaceViewer(app, workspaceViewerTask, copyText);
     } else {
       app.innerHTML = lazyPageState(workspaceViewerPage);
       app.querySelector("[data-chunk-retry]")?.addEventListener("click", () => { void workspaceViewerPage.retry(); });

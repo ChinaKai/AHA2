@@ -37,6 +37,13 @@ const head = "a".repeat(40);
 const older = "b".repeat(40);
 const longBranch = "task/" + "long-branch-".repeat(17) + "end";
 const longBase = "release/" + "long-baseline-".repeat(16) + "end";
+const localRef = "refs/heads/release";
+const remoteRef = "refs/remotes/origin/release";
+const localHead = "d".repeat(40);
+const remoteHead = "e".repeat(40);
+const author = "A & B";
+const date = Date.UTC(2026, 0, 15, 12) / 1000;
+const longSubject = "Earlier commit " + "long-unbroken-title".repeat(80);
 const childRepository = "modules/application";
 const childPath = "README.md";
 const longPath = "nested/" + "long-file-name-".repeat(24) + ".md";
@@ -65,6 +72,7 @@ try {
     });
     const queries = [];
     let childDiscovered = true;
+    let remoteBranchError = "";
     await ctx.route("**/api/v1/**", async route => {
       const url = new URL(route.request().url());
       const path = url.pathname;
@@ -86,6 +94,11 @@ try {
       const repo = url.searchParams.get("repo");
       const child = repo === childRepository;
       const unavailable = repo === "modules/missing";
+      const branch = url.searchParams.get("branch");
+      const remote = branch === remoteRef;
+      const branchHead = remote ? remoteHead : localHead;
+      const branchName = remote ? "origin/release" : "release";
+      const version = branch ? "v1-" + branch : "v1";
       if (view === "state" && url.searchParams.has("availability")) return answer({available: true});
       if (view === "state" && repo === "modules/pending") {
         return answer({error: "workspace_viewer_repository_discovery_incomplete"}, 503);
@@ -93,19 +106,27 @@ try {
       if ((child && !childDiscovered) || (view === "state" && repo && !repositories.some(item => item.id === repo))) {
         return answer({error: "workspace_viewer_invalid_repository"}, 400);
       }
-      if (view === "state" && url.searchParams.has("summary")) return answer({isGit, version: "v1"});
+      if (remote && remoteBranchError) {
+        return answer({error: remoteBranchError}, remoteBranchError === "workspace_viewer_invalid_branch" ? 400 : 503);
+      }
+      if (view === "state" && url.searchParams.has("summary")) return answer({isGit, version});
       if (view === "state") return answer({
         isGit: isGit && !unavailable, name: isGit ? "Viewer fixture" : "Plain folder", taskTitle: task.title, taskCode: task.code,
         repositories: isGit ? repositories.filter(item => childDiscovered || item.id !== childRepository) : undefined,
         repositoryUnavailable: unavailable, repositoriesTruncated: isGit && !child, repositoryDeadlineReached: isGit && !child,
-        version: "v1", branch: child ? "feature" : longBranch, head,
+        version, branch: branch ? branchName : child ? "feature" : longBranch, head: branch ? branchHead : head,
+        checkedOutBranch: child ? "feature" : longBranch,
+        branchOptions: child ? [{ref: "refs/heads/feature", name: "feature"}] : [
+          {ref: "refs/heads/" + longBranch, name: longBranch}, {ref: localRef, name: "release"}, {ref: remoteRef, name: "origin/release"},
+        ],
         base: child ? "HEAD" : url.searchParams.get("base") || longBase, mergeBase: child ? "" : older,
         baseAtHead: child, baseFallback: child && url.searchParams.has("base"),
         ahead: child ? 0 : 1, behind: 0, branches: child ? ["feature"] : ["main", "release", longBase, longBranch], baseChanges: changes,
-        uncommitted: [{...changes[0], path: child ? childPath : changes[0].path, status: ".M"}],
-        commits: unavailable ? [] : child ? [{id: head, short: "aaaaaaa", subject: "Child commit", files: [{...changes[0], path: childPath}]}]
-          : [{id: head, short: "aaaaaaa", subject: "Latest commit", files: changes},
-          {id: older, short: "bbbbbbb", subject: "Earlier commit", files: [{path: longPath, added: 1, deleted: 0}]},
+        uncommitted: branch ? [] : [{...changes[0], path: child ? childPath : changes[0].path, status: ".M"}],
+        commits: unavailable ? [] : branch ? [{id: branchHead, short: branchHead.slice(0, 7), subject: branchName + " commit", author, date, files: changes}]
+          : child ? [{id: head, short: "aaaaaaa", subject: "Child commit", files: [{...changes[0], path: childPath}]}]
+          : [{id: head, short: "aaaaaaa", subject: "Latest commit", author, date, files: changes},
+          {id: older, short: "bbbbbbb", subject: longSubject, author, date, files: [{path: longPath, added: 1, deleted: 0}]},
           {id: gitlinkCommit, short: "ccccccc", subject: "Update application pointer", files: [gitlink]}, ...history],
       });
       if (view === "tree") {
@@ -118,13 +139,15 @@ try {
         if (url.searchParams.get("path") === childRepository) {
           return answer({text: "@@ -1 +1 @@\n-Subproject commit " + older + "\n+Subproject commit " + head + "\n"});
         }
+        if (branch) return answer({text: patch.replace("+new", "+" + branchName + " change")});
         return answer({text: url.searchParams.has("ignore_whitespace") ? "" : child ? patch.replace("+new", "+child change") : patch});
       }
       const file = url.searchParams.get("path");
       return answer(file === ".env" ? {text: "", placeholder: "masked"}
         : {text: child && file === childPath ? "Child source" : file === "README.md" ? "<script>literal only</script>\n" + "long".repeat(300) : "Working notes"});
     });
-    return {ctx, queries, forgetChild: () => { childDiscovered = false; }, restoreChild: () => { childDiscovered = true; }};
+    return {ctx, queries, forgetChild: () => { childDiscovered = false; }, restoreChild: () => { childDiscovered = true; },
+      failRemoteBranch: error => { remoteBranchError = error; }};
   }
 
   const desktop = await context(1280, "en-US");
@@ -160,19 +183,24 @@ try {
       const center = ({y, height}) => y + height / 2;
       const label = meta.querySelector("label > span");
       const baseSelect = meta.querySelector("[data-wv-base]");
-      const branch = meta.querySelector(".wv-branch span");
+      const branch = meta.querySelector("[data-wv-branch]");
       return {
         sameRow: boxes.every(box => Math.abs(center(box) - center(boxes[0])) < 1),
         noOverlap: boxes.every((box, i) => box.right <= innerWidth && (i === 0 || box.left >= boxes[i - 1].right)) &&
           label.getBoundingClientRect().right <= baseSelect.getBoundingClientRect().left,
         noWrap: getComputedStyle(label).whiteSpace === "nowrap",
         baseEllipsis: getComputedStyle(baseSelect).textOverflow === "ellipsis",
-        branchClipped: branch.scrollWidth > branch.clientWidth,
+        branchEllipsis: getComputedStyle(branch).textOverflow === "ellipsis",
       };
     });
-    assert.deepEqual(layout, {sameRow: true, noOverlap: true, noWrap: true, baseEllipsis: true, branchClipped: true}, `viewer header at ${width}px`);
-    assert.equal(await page.locator(".wv-branch").getAttribute("title"), longBranch);
+    assert.deepEqual(layout, {sameRow: true, noOverlap: true, noWrap: true, baseEllipsis: true, branchEllipsis: true}, `viewer header at ${width}px`);
+    assert.equal(await page.locator("[data-wv-branch]").getAttribute("title"), longBranch);
   }
+  const branchSelect = viewer.getByRole("combobox", {name: "Branch"});
+  assert.equal(await branchSelect.inputValue(), "");
+  assert.equal(await branchSelect.locator("option:checked").textContent(), longBranch);
+  assert.equal(await branchSelect.locator('optgroup[label="Local branches"]').locator(`option[value="${localRef}"]`).count(), 1);
+  assert.equal(await branchSelect.locator('optgroup[label="Remote branches"]').locator(`option[value="${remoteRef}"]`).textContent(), "origin/release");
   const repositorySelect = viewer.getByRole("combobox", {name: "Repository"});
   assert.equal(await repositorySelect.locator('option[value=""]').textContent(), "AHA2");
   await viewer.getByText(/The submodule list may be incomplete/).waitFor();
@@ -197,9 +225,60 @@ try {
   assert.equal(await commitRows.count(), 0);
   await commitGroup.click();
   assert.equal(await viewer.getByRole("button", {name: /Latest commit/}).getAttribute("aria-expanded"), "true");
+  const latestRow = viewer.locator(`[data-wv-toggle-commit="${head}"]`);
+  await latestRow.hover();
+  assert.equal(await latestRow.locator("code").textContent(), "aaaaaaa");
+  const commitInfo = await latestRow.getAttribute("title");
+  assert.match(commitInfo, new RegExp(`Latest commit\\nFull hash ${head}\\nAuthor A & B\\nCommitted .*2026`));
+  assert.equal(await latestRow.getAttribute("aria-label"), commitInfo);
+  const copy = viewer.locator(`[data-wv-copy-commit="${head}"]`);
+  await copy.focus();
+  await viewer.keyboard.press("Shift+Tab");
+  assert.equal(await latestRow.evaluate(row => row.matches(":focus-visible")), true);
+  assert.equal(await commitRows.first().locator(".wv-commit-info").innerText(), commitInfo);
+  const longRow = viewer.locator(`[data-wv-toggle-commit="${older}"]`);
+  assert.ok((await longRow.getAttribute("title")).startsWith(longSubject));
+  assert.equal(await longRow.locator(".wv-row-name > span:last-child").evaluate(el => el.scrollWidth > el.clientWidth), true);
+  await desktop.ctx.grantPermissions(["clipboard-read", "clipboard-write"], {origin});
+  await copy.click();
+  assert.equal(await viewer.evaluate(() => navigator.clipboard.readText()), head);
   await viewer.locator('[data-wv-scope="commit"][data-wv-commit="' + head + '"]').click();
   await viewer.locator(".wv-hunk").first().waitFor();
   assert.equal(await viewer.locator(".wv-hunk").count(), 2);
+  async function checkToolbar(page, width, names, constrained = false) {
+    await page.setViewportSize({width, height: 800});
+    const toolbar = page.locator(".wv-toolbar");
+    await page.locator(".wv-hunk").first().waitFor();
+    if (constrained) await toolbar.evaluate(el => el.style.maxWidth = "280px");
+    const layout = await toolbar.evaluate(el => {
+      const boxes = [...el.children].map(control => control.getBoundingClientRect());
+      const center = ({top, height}) => top + height / 2;
+      return {
+        sameRow: boxes.length === 4 && boxes.every(box => Math.abs(center(box) - center(boxes[0])) < 1),
+        noOverlap: boxes.every((box, index) => !index || boxes[index - 1].right <= box.left),
+        scrollable: getComputedStyle(el).overflowX === "auto" && el.scrollWidth > el.clientWidth,
+        pageFits: document.documentElement.scrollWidth <= innerWidth,
+      };
+    });
+    assert.ok(layout.sameRow && layout.noOverlap && layout.pageFits, JSON.stringify({width, layout}));
+    if (constrained) assert.equal(layout.scrollable, true);
+    const controls = toolbar.locator("[aria-label]");
+    assert.deepEqual(await controls.evaluateAll(nodes => nodes.map(node => node.getAttribute("aria-label"))), names);
+    assert.deepEqual(await controls.evaluateAll(nodes => nodes.map(node => node.title)), names);
+    await controls.nth(2).focus();
+    await page.keyboard.press("Tab");
+    const focus = await controls.nth(3).evaluate(button => ({
+      active: document.activeElement?.getAttribute("aria-label"),
+      visible: button.matches(":focus-visible"),
+      outline: getComputedStyle(button).outlineStyle,
+      fullyVisible: button.getBoundingClientRect().right <= button.closest(".wv-toolbar").getBoundingClientRect().right + 1,
+    }));
+    assert.deepEqual(focus, {active: names[3], visible: true, outline: "solid", fullyVisible: true}, `toolbar focus at ${width}px`);
+    if (constrained) await toolbar.evaluate(el => el.style.removeProperty("max-width"));
+  }
+  const enToolbar = ["Ignore whitespace", "Wrap lines", "Previous hunk", "Next hunk"];
+  for (const width of [1280, 1024, 390]) await checkToolbar(viewer, width, enToolbar);
+  await checkToolbar(viewer, 390, enToolbar, true);
   async function checkContentHead(page, width, expectClipped) {
     await page.setViewportSize({width, height: 800});
     const layout = await page.locator(".wv-content-head").evaluate(head => {
@@ -369,6 +448,52 @@ try {
   await viewer.goto(origin + "/workspace-viewer?" + new URLSearchParams({task: task.id, repo: "modules/pending"}));
   await viewer.getByText(/The selected repository could not be verified/).waitFor();
   assert.equal(new URL(viewer.url()).searchParams.get("repo"), "modules/pending");
+
+  await viewer.goto(origin + "/workspace-viewer?task=" + task.id);
+  await branchSelect.selectOption(localRef);
+  await viewer.waitForURL(url => url.searchParams.get("branch") === localRef);
+  await commitGroup.click();
+  await viewer.locator(`[data-wv-toggle-commit="${localHead}"]`).waitFor();
+  await viewer.locator('[data-wv-action="baseChanges"]').click();
+  await viewer.locator('[data-wv-scope="base"]').click();
+  await viewer.getByText("+release change", {exact: true}).waitFor();
+  await viewer.getByRole("combobox", {name: "Branch"}).selectOption(remoteRef);
+  await viewer.locator(`[data-wv-toggle-commit="${remoteHead}"]`).waitFor();
+  assert.equal(await viewer.locator(`[data-wv-toggle-commit="${localHead}"]`).count(), 0);
+  assert.equal(await viewer.locator('[data-wv-action="uncommitted"]').count(), 0);
+  assert.equal(await viewer.locator(".wv-tab").count(), 0);
+  await viewer.locator(`[data-wv-scope="commit"][data-wv-commit="${remoteHead}"]`).click();
+  const remoteDiff = viewer.getByText("+origin/release change", {exact: true});
+  await remoteDiff.waitFor();
+  await viewer.reload();
+  await remoteDiff.waitFor();
+  assert.equal(await branchSelect.inputValue(), remoteRef);
+  assert.equal(new URL(viewer.url()).searchParams.get("commit"), remoteHead);
+  assert.ok(desktop.queries.some(({view, query}) => view === "diff" && query.get("branch") === localRef && query.get("scope") === "base"));
+  assert.ok(desktop.queries.some(({view, query}) => view === "diff" && query.get("branch") === remoteRef && query.get("commit") === remoteHead));
+
+  const refresh = viewer.locator('[data-wv-action="refresh"]');
+  desktop.failRemoteBranch("workspace_viewer_git_failed");
+  await refresh.click();
+  await viewer.locator(".wv-notice").getByText("Unable to read Git information for this workspace.").waitFor();
+  assert.equal(await remoteDiff.count(), 0);
+  assert.equal(await branchSelect.inputValue(), remoteRef);
+  desktop.failRemoteBranch("");
+  await refresh.click();
+  await remoteDiff.waitFor();
+  desktop.failRemoteBranch("workspace_viewer_invalid_branch");
+  await viewer.waitForResponse(response => response.status() === 400 && new URL(response.url()).searchParams.get("summary") === "1");
+  const missingBranch = viewer.locator(".wv-notice").getByText("The selected branch is missing or unavailable.");
+  await missingBranch.waitFor();
+  assert.equal(await remoteDiff.count(), 0);
+  assert.equal(await branchSelect.inputValue(), remoteRef);
+  await viewer.reload();
+  await missingBranch.waitFor();
+  assert.equal(new URL(viewer.url()).searchParams.get("branch"), remoteRef);
+  await branchSelect.selectOption("");
+  await viewer.locator('[data-wv-action="uncommitted"]').waitFor();
+  assert.equal(new URL(viewer.url()).searchParams.has("branch"), false);
+  assert.ok(desktop.queries.every(({method}) => method === "GET"));
   await desktop.ctx.close();
 
   const mobile = await context(390, "zh-CN");
@@ -391,6 +516,16 @@ try {
   await narrow.getByLabel("基线", {exact: true}).waitFor();
   await narrow.getByText(/读取子模块登记超时/).waitFor();
   await checkHeader(narrow, 1024);
+  await checkHeader(narrow, 390);
+  const narrowBranch = narrow.getByRole("combobox", {name: "分支"});
+  assert.equal(await narrowBranch.locator("option:checked").textContent(), longBranch);
+  await narrowBranch.selectOption(remoteRef);
+  await narrow.locator('[data-wv-action="commits"]').click();
+  await narrow.locator(`[data-wv-scope="commit"][data-wv-commit="${remoteHead}"]`).click();
+  await checkToolbar(narrow, 390, ["忽略空白", "自动换行", "上一处差异", "下一处差异"]);
+  const narrowCommit = narrow.locator(`[data-wv-toggle-commit="${remoteHead}"]`);
+  assert.equal(await narrowCommit.locator("code").textContent(), "eeeeeee");
+  assert.match(await narrowCommit.getAttribute("title"), new RegExp(`完整哈希 ${remoteHead}\\n作者 A & B\\n提交时间 .*2026`));
   await narrow.goto(origin + "/workspace-viewer?task=missing");
   await narrow.getByText("该任务的工作区或工作树不可用。").waitFor();
   await mobile.ctx.close();

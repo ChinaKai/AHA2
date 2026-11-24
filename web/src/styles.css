@@ -3822,13 +3822,14 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
 .wv-meta { flex: 0 1 75%; justify-content: flex-end; font-size: var(--font-size-12); white-space: nowrap; }
 .wv-meta label { display: flex; flex: 0 1 30%; min-width: 0; margin: 0; gap: var(--space-1); align-items: center; font-weight: 650; }
 .wv-meta label > span, .wv-meta .wv-branch > svg { flex: none; }
-.wv-meta select, .wv-branch span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wv-meta select { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wv-meta select { padding-inline-start: var(--space-2); }
 .wv-meta [data-wv-repo] { flex: 0 1 24%; }
 .wv-meta [data-wv-base] { flex: 1 1 auto; max-width: 100%; }
 .wv-meta button { flex: none; padding: 0 var(--space-2); }
-.wv-branch, .wv-badge { display: inline-flex; align-items: center; gap: var(--space-1); background: var(--surface-soft); border-radius: var(--radius-control); padding: var(--space-1) var(--space-2); font-size: var(--font-size-12); white-space: nowrap; }
-.wv-branch { flex: 0 1 24%; min-width: 0; font-family: var(--font-mono); }
+.wv-badge { display: inline-flex; align-items: center; gap: var(--space-1); background: var(--surface-soft); border-radius: var(--radius-control); padding: var(--space-1) var(--space-2); font-size: var(--font-size-12); white-space: nowrap; }
+.wv-branch { display: flex; align-items: center; gap: var(--space-1); flex: 1 1 24%; min-width: 0; }
+.wv-branch select { width: 100%; font-family: var(--font-mono); }
 .wv-counts { flex: none; font-family: var(--font-mono); color: var(--muted); }
 .wv-notice { padding: var(--space-2) var(--space-5); color: var(--color-warning-ink); background: var(--color-warning-soft); }
 .wv-layout { min-height: 0; grid-row: 3; display: grid; grid-template-columns: minmax(250px, min(32%, 350px)) minmax(0, 1fr); }
@@ -3851,7 +3852,12 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
 .wv-row-name > span:last-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .wv-row-name .icon { flex: 0 0 15px; width: 15px; height: 15px; }
 .wv-row > small, .wv-row > code, .wv-stat { color: var(--muted); white-space: nowrap; }
-.wv-commit-title { font-weight: 650; }
+.wv-commit-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
+.wv-commit-title { min-width: 0; font-weight: 650; }
+.wv-copy-commit { min-height: 26px; padding: 0 var(--space-1); margin-inline-end: var(--space-1); }
+.wv-copy-commit .icon { width: 14px; height: 14px; }
+.wv-commit-info { display: none; grid-column: 1 / -1; padding: var(--space-2); color: var(--muted); background: var(--surface-soft); font-size: var(--font-size-12); white-space: pre-wrap; overflow-wrap: anywhere; }
+.wv-commit-heading:has(.wv-commit-title:focus-visible) .wv-commit-info { display: block; }
 .wv-stat { font-family: var(--font-mono); font-size: var(--font-size-11); }
 .wv-row:has(.wv-gitlink-stat) { flex-wrap: wrap; gap: 0; }
 .wv-gitlink-stat { flex-basis: 100%; padding-inline-start: calc(15px + var(--space-1)); }
@@ -3872,10 +3878,12 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
 .wv-content-head, .wv-toolbar { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--line); }
 .wv-content-head strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: var(--font-size-13); }
 .wv-content-head .wv-badge { flex-shrink: 0; }
-.wv-toolbar { flex-wrap: wrap; background: var(--color-surface-raised); color: var(--muted); font-size: var(--font-size-12); }
-.wv-toolbar label { display: inline-flex; gap: var(--space-1); align-items: center; }
+.wv-toolbar { flex: none; flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden; white-space: nowrap; background: var(--color-surface-raised); color: var(--muted); font-size: var(--font-size-12); }
+.wv-toolbar > * { flex: none; }
+.wv-toolbar label { display: inline-flex; gap: var(--space-1); align-items: center; margin: 0; }
 .wv-toolbar input { width: auto; margin: 0; }
 .wv-toolbar button { min-height: 26px; padding: 0 var(--space-1); font-size: inherit; }
+.wv-toolbar :is(input, button):focus-visible { outline: 2px solid var(--focus-ring-color); outline-offset: -2px; }
 .wv-code { flex: 1; margin: 0; overflow: auto; padding: var(--space-2) var(--space-3); font-family: var(--font-mono); font-size: var(--font-size-13); line-height: 1.55; tab-size: 4; }
 .wv-code code { display: block; width: max-content; min-width: 100%; font: inherit; }
 .wv-code.wv-wrap { white-space: pre-wrap; overflow-wrap: anywhere; }

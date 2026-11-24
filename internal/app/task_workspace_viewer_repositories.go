@@ -50,6 +50,9 @@ func readViewerRepositoryState(ctx context.Context, source viewerFS, task domain
 ) (viewerState, error) {
 	var state viewerState
 	if req.Repo != "" && !selected.Readable {
+		if req.Branch != "" {
+			return state, ErrViewerRepoMissing
+		}
 		state = viewerState{Name: name, TaskTitle: task.Title, TaskCode: task.Code, RepositoryUnavailable: true}
 	} else {
 		var err error
