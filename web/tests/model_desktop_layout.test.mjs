@@ -11,13 +11,15 @@ import {resolve} from "node:path";
 const root = resolve(import.meta.dirname, "..");
 
 function mediaBlocks(css, query) {
-  const marker = `@media (${query})`;
+  // Match the entire condition so a compound query with the same opening
+  // clause does not stand in for this breakpoint.
+  const marker = `@media (${query}) {`;
   const blocks = [];
   let from = 0;
   for (;;) {
     const start = css.indexOf(marker, from);
     if (start < 0) return blocks;
-    const open = css.indexOf("{", start);
+    const open = start + marker.length - 1;
     let depth = 0;
     for (let index = open; index < css.length; index += 1) {
       if (css[index] === "{") depth += 1;

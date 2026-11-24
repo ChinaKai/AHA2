@@ -272,6 +272,8 @@ function lazyPageState<T>(page: LazyPage<T>): string {
     : chunkLoadingHTML(t("chunk.loading"));
 }
 
+const workspaceViewerPage = createLazyPage("workspace-viewer", () => import("./workspace_viewer.js"), {onChange: () => render()});
+
 type KnowledgePageModule = typeof import("./knowledge_workspace.js");
 const knowledgePage = createLazyPage<KnowledgePageModule>("knowledge", () => import("./knowledge_workspace.js"), {onChange: () => render()});
 
@@ -791,6 +793,10 @@ const state: State = {
 
 applyLocale("auto");
 const app = document.querySelector<HTMLDivElement>("#app");
+const workspaceViewerTask = window.location.pathname === "/workspace-viewer"
+  ? new URLSearchParams(window.location.search).get("task") || ""
+  : null;
+let workspaceEntryProbe: {task: string; time: number; result: Promise<string>} | undefined;
 let onboarding: OnboardingChecklist | null = null;
 let loadingOnboarding: Promise<OnboardingChecklist> | null = null;
 
@@ -2568,6 +2574,7 @@ async function bootstrap(): Promise<void> {
         state.generalSettings = general.general;
         applyLocale(general.general.language);
       }
+      if (workspaceViewerTask !== null) return;
       state.loading = false;
       state.hydrating = true;
       render();
@@ -6891,6 +6898,35 @@ function taskMailPendingCount(): number {
   return (state.taskMailOptions?.messages || []).filter(card => card.message.status === "pending_approval").length;
 }
 
+function workspaceEntryHTML(task: Task, configured: boolean): string {
+  const label = t("workspaceViewer.open");
+  const reason = t(configured ? "common.loading" : "workspaceViewer.unavailable");
+  return `<a class="workspace-viewer-entry" data-workspace-entry="${configured ? escapeHTML(task.id) : ""}" aria-disabled="true" aria-label="${label}" title="${reason}" target="_blank" rel="noopener">${icon("folder")}<span>${label}</span></a>`;
+}
+
+function bindWorkspaceEntry(): void {
+  const link = document.querySelector<HTMLAnchorElement>("[data-workspace-entry]");
+  const task = link?.dataset.workspaceEntry;
+  if (!link || !task) return;
+  if (workspaceEntryProbe?.task !== task || Date.now() - workspaceEntryProbe.time > 10_000) {
+    const result = api.request(`/api/v1/tasks/${encodeURIComponent(task)}/workspace/state?availability=1`)
+      .then(() => "", (error: {code?: string}) => error.code === "workspace_viewer_transport_unsupported"
+        ? "workspaceViewer.transport" : "workspaceViewer.unavailable");
+    workspaceEntryProbe = {task, time: Date.now(), result};
+  }
+  void workspaceEntryProbe.result.then(error => {
+    if (!link.isConnected) return;
+    if (error) {
+      link.title = t(error);
+      link.setAttribute("aria-label", `${t("workspaceViewer.open")} — ${link.title}`);
+      return;
+    }
+    link.href = `/workspace-viewer?${new URLSearchParams({task})}`;
+    link.title = t("workspaceViewer.open");
+    link.removeAttribute("aria-disabled");
+  });
+}
+
 function taskDetailView(detail: TaskDetail): string {
   const loadingDetail = state.taskDetailLoading;
   const {archivedReadOnly, remoteReadOnly, completed} = taskComposerFlags(detail);
@@ -6917,7 +6953,7 @@ function taskDetailView(detail: TaskDetail): string {
   // Tasks render only the approval section, never the route form.
   const channelVisible = true;
   return shell(`<section class="task-screen">
-    <header class="task-head"><button id="back-tasks">←</button><div class="task-title-block"><h1><span class="task-code">${escapeHTML(detail.task.code || "")}</span><span class="task-title-text">${escapeHTML(detail.task.title)}</span></h1><div class="task-head-subline"><span class="task-head-meta" title="${escapeHTML(taskMeta)}">${escapeHTML(taskMeta)}</span><span id="task-detail-status" class="status ${statusClass(detail.task.status)}">${statusLabel(detail.task.status)}</span><span class="task-branch">${escapeHTML(detail.task.task_branch || "")}</span><span id="task-review-slot">${renderTaskReviewDecision(detail.task, tr)}</span></div></div><div class="actions task-tool-actions">${renderTaskToolButtons(state.taskTool, {includeChannel: channelVisible, channelConnected: Boolean(state.taskChannelDestination), channelLabel: taskChannelButtonLabel(state.taskChannelDestination), pendingPermissions: taskPermissionPendingCount(detail), pendingMail: taskMailPendingCount()})}</div></header>
+    <header class="task-head"><button id="back-tasks">←</button><div class="task-title-block"><h1><span class="task-code">${escapeHTML(detail.task.code || "")}</span><span class="task-title-text">${escapeHTML(detail.task.title)}</span></h1><div class="task-head-subline"><span class="task-head-meta" title="${escapeHTML(taskMeta)}">${escapeHTML(taskMeta)}</span><span id="task-detail-status" class="status ${statusClass(detail.task.status)}">${statusLabel(detail.task.status)}</span><span class="task-branch">${escapeHTML(detail.task.task_branch || "")}</span><span id="task-review-slot">${renderTaskReviewDecision(detail.task, tr)}</span></div></div><div class="actions task-tool-actions">${workspaceEntryHTML(detail.task, Boolean(!remoteReadOnly && !archivedReadOnly && (detail.task.task_workspace_path || (detail.task.isolation !== "worktree" && workspace?.root_path))))}${renderTaskToolButtons(state.taskTool, {includeChannel: channelVisible, channelConnected: Boolean(state.taskChannelDestination), channelLabel: taskChannelButtonLabel(state.taskChannelDestination), pendingPermissions: taskPermissionPendingCount(detail), pendingMail: taskMailPendingCount()})}</div></header>
     <div class="task-grid${toolLayout}" style="--task-tool-width:${state.taskToolWidth}%">
       ${chat}
       ${renderTaskToolPanel(state.taskTool, detail, state.selectedTaskAgent, taskCtxHtml(), state.taskToolMode, taskChannelPanelHTML(), state.taskToolPinned === state.taskTool, taskMailPanelHTML(detail))}
@@ -7283,6 +7319,17 @@ function updateTaskLiveRegions(): void {
 
 function render(): void {
   if (!app) return;
+  if (workspaceViewerTask !== null && state.auth?.authenticated && !state.loading) {
+    const module = workspaceViewerPage.loaded();
+    if (module) {
+      if (!app.querySelector(".workspace-viewer")) module.mountWorkspaceViewer(app, workspaceViewerTask);
+    } else {
+      app.innerHTML = lazyPageState(workspaceViewerPage);
+      app.querySelector("[data-chunk-retry]")?.addEventListener("click", () => { void workspaceViewerPage.retry(); });
+      void workspaceViewerPage.load();
+    }
+    return;
+  }
   flushDeferredListRefresh();
   // Keep the mounted workbench page across same-view renders: the body identity
   // survives, so bindPetWorkbenchPage reuses its loader instead of aborting the
@@ -7511,6 +7558,16 @@ function render(): void {
   scrollConversationToBottom = false;
 }
 
+async function loadAfterWebLogin(): Promise<void> {
+  if (workspaceViewerTask !== null) {
+    const settings = await api.generalSettings().catch(() => null);
+    if (settings?.general) applyLocale(settings.general.language);
+    return;
+  }
+  await loadAll();
+  openGlobalEvents();
+}
+
 function bindAuth(): void {
   document.querySelector("#forgot-password")?.addEventListener("click", () => {
     authRecoveryOpen = true;
@@ -7549,8 +7606,7 @@ function bindAuth(): void {
       api.setCSRF(response.csrf_token);
       authRecoveryOpen = false;
       state.error = "";
-      await loadAll();
-      openGlobalEvents();
+      await loadAfterWebLogin();
     } catch (error) {
       state.error = authErrorMessage(error, "密码重置失败");
     } finally {
@@ -7573,8 +7629,7 @@ function bindAuth(): void {
       api.setCSRF(response.csrf_token);
       state.error = "";
       authRecoveryOpen = false;
-      await loadAll();
-      openGlobalEvents();
+      await loadAfterWebLogin();
     } catch (error) {
       state.error = error instanceof Error ? error.message : String(error);
     }
@@ -8428,6 +8483,7 @@ function bindCommon(): void {
     setMessage("notice", `${agentID} 配置已更新，下一个 Turn 生效`);
   });
   document.querySelector("#back-tasks")?.addEventListener("click", () => closeTaskDetail());
+  bindWorkspaceEntry();
   document.querySelector<HTMLFormElement>("#task-takeover-form")?.addEventListener("submit", event => {
     event.preventDefault();
     if (!state.selectedTask?.task.read_only) return;
