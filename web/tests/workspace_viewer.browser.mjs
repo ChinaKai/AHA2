@@ -80,6 +80,9 @@ try {
       const child = repo === childRepository;
       const unavailable = repo === "modules/missing";
       if (view === "state" && url.searchParams.has("availability")) return answer({available: true});
+      if (view === "state" && repo && !repositories.some(item => item.id === repo)) {
+        return answer({error: "workspace_viewer_invalid_repository"}, 400);
+      }
       if (view === "state" && url.searchParams.has("summary")) return answer({isGit, version: "v1"});
       if (view === "state") return answer({
         isGit: isGit && !unavailable, name: isGit ? "Viewer fixture" : "Plain folder", taskTitle: task.title, taskCode: task.code,
@@ -233,6 +236,24 @@ try {
   await viewer.getByRole("button", {name: /Latest commit/}).waitFor();
   assert.equal(new URL(viewer.url()).searchParams.has("repo"), false);
   assert.equal(await viewer.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+
+  const beforeInvalidLink = desktop.queries.length;
+  const staleLink = new URLSearchParams({task: task.id, repo: "modules/deleted", base: "child-base",
+    file: childPath, scope: "commit", commit: head});
+  await viewer.goto(origin + "/workspace-viewer?" + staleLink);
+  const recovered = viewer.getByText("The selected repository is unavailable. Showing the workspace root.");
+  await recovered.waitFor();
+  assert.equal(await viewer.getByRole("combobox", {name: "Repository"}).inputValue(), "");
+  await viewer.getByRole("button", {name: /Latest commit/}).waitFor();
+  const recoveredURL = new URL(viewer.url());
+  assert.ok(["repo", "file", "scope", "commit"].every(key => !recoveredURL.searchParams.has(key)));
+  assert.equal(await viewer.locator(".wv-tab").count(), 0);
+  const recoveryQueries = desktop.queries.slice(beforeInvalidLink);
+  assert.equal(recoveryQueries.filter(({query}) => query.get("repo") === "modules/deleted").length, 1);
+  assert.ok(recoveryQueries.some(({view, query}) => view === "state" && !query.has("repo") && !query.has("base")));
+  assert.ok(!recoveryQueries.some(({view}) => view === "file" || view === "diff"));
+  await viewer.locator('[data-wv-action="refresh"]').click();
+  await recovered.waitFor({state: "hidden"});
   await desktop.ctx.close();
 
   const mobile = await context(390, "zh-CN");

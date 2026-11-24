@@ -108,15 +108,18 @@ func (source nativeViewerFS) checkRepositoryMarker(ctx context.Context, repo *na
 	if err != nil || target != canonical {
 		return true, false
 	}
-	// An absorbed submodule points into its parent's Git modules directory.
-	// The workspace root may itself be a linked worktree with shared metadata.
+	// An absorbed submodule can live under either the shared Git directory
+	// or the linked worktree's own Git directory.
 	probe, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	git := viewerGit{source: source}
-	common, err := git.checked(probe, 4096, "rev-parse", "--path-format=absolute", "--git-common-dir")
-	if err == nil && !common.truncated {
-		commonDir := strings.TrimSuffix(string(common.data), "\n")
-		if filepath.IsAbs(commonDir) && viewerModuleTarget(filepath.Join(commonDir, "modules"), target) {
+	for _, flag := range []string{"--git-common-dir", "--git-dir"} {
+		out, err := git.checked(probe, 4096, "rev-parse", "--path-format=absolute", flag)
+		if err != nil || out.truncated {
+			continue
+		}
+		dir := strings.TrimSuffix(string(out.data), "\n")
+		if filepath.IsAbs(dir) && viewerModuleTarget(filepath.Join(dir, "modules"), target) {
 			repo.gitDir = target
 			return true, true
 		}

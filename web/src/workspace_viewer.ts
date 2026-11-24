@@ -92,6 +92,7 @@ const copy: Record<string, Record<string, string>> = {
     repositoryUnavailableLabel: "{name}（不可用）",
     repositoryUnavailable: "这个仓库尚未初始化，或无法读取 Git 数据。",
     invalidRepository: "找不到所选仓库，或该仓库已不在工作区仓库列表中。",
+    repositoryRecovered: "所选仓库已不可用，已切回工作区根仓库。",
     repositoriesTruncated: "已达到仓库发现上限，列表可能不完整。",
     baselineFallback: "仓库中没有基线 {requested}，当前使用 {actual}。",
     detached: "分离 HEAD · {head}",
@@ -144,6 +145,7 @@ const copy: Record<string, Record<string, string>> = {
     repositoryUnavailableLabel: "{name} (unavailable)",
     repositoryUnavailable: "This repository has not been initialized or its Git data could not be read.",
     invalidRepository: "The selected repository is missing or is no longer in the workspace repository list.",
+    repositoryRecovered: "The selected repository is unavailable. Showing the workspace root.",
     repositoriesTruncated: "Repository discovery reached its limit. The list may be incomplete.",
     baselineFallback: "Base {requested} is unavailable in this repository. Using {actual}.",
     detached: "Detached HEAD · {head}",
@@ -577,7 +579,31 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string): void {
     return promise;
   }
 
-  async function refresh(poll = false): Promise<void> {
+  function switchRepository(nextRepo: string, recoveryNotice = ""): void {
+    repositoryBases.set(repo, base);
+    repo = nextRepo;
+    base = repositoryBases.get(repo) ?? (repo ? repositoryBases.get("") || "" : "");
+    initialFile = null;
+    state = undefined;
+    treeSession.abort();
+    treeSession = new AbortController();
+    treeRequests.clear();
+    treeErrors.clear();
+    tree.clear();
+    expandedFolders.clear();
+    expandedFolders.add("");
+    expandedCommits.clear();
+    groupOpen = true;
+    baseOpen = false;
+    tabs.length = 0;
+    select(undefined);
+    renderHeader();
+    renderNavigation();
+    showNotice(t("common.loading"));
+    void refresh(false, recoveryNotice);
+  }
+
+  async function refresh(poll = false, recoveryNotice = ""): Promise<void> {
     if (!task) return;
     if (poll && (document.hidden || statusRequest)) return;
     statusRequest?.abort();
@@ -634,7 +660,7 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string): void {
         showNotice(label("repositoryUnavailable"));
         return;
       }
-      showNotice(state?.repositoriesTruncated ? label("repositoriesTruncated") : "");
+      showNotice([recoveryNotice, state?.repositoriesTruncated ? label("repositoriesTruncated") : ""].filter(Boolean).join(" "));
       if (mode === "files") {
         const activePath = selected?.path || "";
         const selectedFolder = activePath.slice(0, Math.max(0, activePath.lastIndexOf("/")));
@@ -643,7 +669,12 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string): void {
       }
       if (selected && !contentRequest) void readTab(selected, true);
     } catch (reason) {
-      if (!controller.signal.aborted) showNotice(errorText(reason));
+      if (controller.signal.aborted) return;
+      if (repo && (reason as {code?: string})?.code === "workspace_viewer_invalid_repository") {
+        switchRepository("", label("repositoryRecovered"));
+      } else {
+        showNotice(errorText(reason));
+      }
     } finally {
       if (statusRequest === controller) statusRequest = undefined;
     }
@@ -710,27 +741,7 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string): void {
   header.addEventListener("change", event => {
     const input = event.target as HTMLSelectElement;
     if (input.hasAttribute("data-wv-repo")) {
-      repositoryBases.set(repo, base);
-      repo = input.value;
-      base = repositoryBases.get(repo) ?? (repo ? repositoryBases.get("") || "" : "");
-      initialFile = null;
-      state = undefined;
-      treeSession.abort();
-      treeSession = new AbortController();
-      treeRequests.clear();
-      treeErrors.clear();
-      tree.clear();
-      expandedFolders.clear();
-      expandedFolders.add("");
-      expandedCommits.clear();
-      groupOpen = true;
-      baseOpen = false;
-      tabs.length = 0;
-      select(undefined);
-      renderHeader();
-      renderNavigation();
-      showNotice(t("common.loading"));
-      void refresh();
+      switchRepository(input.value);
       return;
     }
     if (!input.hasAttribute("data-wv-base")) return;

@@ -205,6 +205,73 @@ func TestWorkspaceViewerRepositories(t *testing.T) {
 	})
 }
 
+func TestWorkspaceViewerLinkedWorktreeSubmodule(t *testing.T) {
+	testViewerGitSources(t, func(t *testing.T, worktree string, source viewerFS) {
+		isolateViewerGitConfig(t)
+		const child = "libs/sub"
+		submodule := t.TempDir()
+		runViewerFixtureGit(t, submodule, "init", "-b", "main")
+		writeViewerFixture(t, submodule, "source.txt", "original\n")
+		runViewerFixtureGit(t, submodule, "add", "source.txt")
+		runViewerFixtureGit(t, submodule, "commit", "-m", "Submodule source")
+		head := runViewerFixtureGit(t, submodule, "rev-parse", "HEAD")
+
+		main := t.TempDir()
+		runViewerFixtureGit(t, main, "init", "-b", "main")
+		runViewerFixtureGit(t, main, "-c", "protocol.file.allow=always", "submodule", "add", submodule, child)
+		runViewerFixtureGit(t, main, "commit", "-m", "Add submodule")
+		runViewerFixtureGit(t, main, "worktree", "add", "--detach", worktree, "HEAD")
+		runViewerFixtureGit(t, worktree, "-c", "protocol.file.allow=always", "submodule", "update", "--init")
+		childDir := filepath.Join(worktree, filepath.FromSlash(child))
+		actualGitDir := runViewerFixtureGit(t, childDir, "rev-parse", "--absolute-git-dir")
+		worktreeGitDir := runViewerFixtureGit(t, worktree, "rev-parse", "--absolute-git-dir")
+		common := runViewerFixtureGit(t, worktree, "rev-parse", "--path-format=absolute", "--git-common-dir")
+		if !viewerModuleTarget(filepath.Join(worktreeGitDir, "modules"), actualGitDir) ||
+			viewerModuleTarget(filepath.Join(common, "modules"), actualGitDir) {
+			t.Fatalf("expected worktree-local submodule metadata: gitdir=%q, worktree gitdir=%q, common=%q", actualGitDir, worktreeGitDir, common)
+		}
+		writeViewerFixture(t, childDir, "source.txt", "modified in worktree\n")
+
+		read := func(req WorkspaceViewerRequest) any {
+			t.Helper()
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+			defer cancel()
+			value, err := readWorkspaceView(ctx, source, domain.Task{}, "Linked worktree", req)
+			if err != nil {
+				t.Fatalf("%+v: %v", req, err)
+			}
+			return value
+		}
+		state := read(WorkspaceViewerRequest{View: "state"}).(viewerState)
+		index := slices.IndexFunc(state.Items, func(repo viewerRepository) bool { return repo.ID == child })
+		if index < 0 {
+			t.Fatalf("submodule stayed out of the repository list: %+v", state.Items)
+		}
+		if repo := state.Items[index]; !repo.Initialized || !repo.Readable || !repo.Detached || repo.Head != head {
+			t.Fatalf("linked worktree submodule: %+v (Git directory %s)", repo, actualGitDir)
+		}
+		t.Logf("%s initialized=true readable=true with metadata under the worktree Git directory", child)
+		file := read(WorkspaceViewerRequest{View: "file", Repo: child, Path: "source.txt"}).(viewerContent)
+		if file.Text != "modified in worktree\n" {
+			t.Fatalf("submodule file: %+v", file)
+		}
+		diff := read(WorkspaceViewerRequest{View: "diff", Repo: child, Path: "source.txt", Scope: "uncommitted"}).(viewerContent)
+		if !strings.Contains(diff.Text, "-original\n+modified in worktree\n") {
+			t.Fatalf("submodule diff: %+v", diff)
+		}
+		t.Log("read the submodule file and its uncommitted diff")
+
+		const ref = "refs/custom/topic"
+		runViewerFixtureGit(t, childDir, "update-ref", ref, head)
+		runViewerFixtureGit(t, childDir, "symbolic-ref", "HEAD", ref)
+		state = read(WorkspaceViewerRequest{View: "state"}).(viewerState)
+		index = slices.IndexFunc(state.Items, func(repo viewerRepository) bool { return repo.ID == child })
+		if index < 0 || state.Items[index].Branch != ref || state.Items[index].Detached {
+			t.Fatalf("symbolic HEAD outside refs/heads: %+v", state.Items)
+		}
+	})
+}
+
 func TestWorkspaceViewerRepositoryLimit(t *testing.T) {
 	testViewerGitSources(t, func(t *testing.T, dir string, source viewerFS) {
 		runViewerFixtureGit(t, dir, "init", "-b", "main")

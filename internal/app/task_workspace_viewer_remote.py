@@ -200,17 +200,21 @@ def repository_git(git_dir, limit, *args):
     )
 
 
-def common_module_dir():
-    data, code, cut = repository_git(".git", 4096, "rev-parse", "--path-format=absolute", "--git-common-dir")
-    common = os.fsdecode(data).rstrip("\n")
-    return os.path.join(common, "modules") if not cut and code == 0 and os.path.isabs(common) else ""
+def workspace_module_dirs():
+    dirs = []
+    for flag in ("--git-common-dir", "--git-dir"):
+        data, code, cut = repository_git(".git", 4096, "rev-parse", "--path-format=absolute", flag)
+        git_dir = os.fsdecode(data.rstrip(b"\n"))
+        if not cut and code == 0 and os.path.isabs(git_dir):
+            dirs.append(os.path.join(git_dir, "modules"))
+    return dirs
 
 
-def submodule_git_dir(root, scoped, relative, root_path, modules):
+def submodule_git_dir(root, scoped, relative, root_path, module_dirs):
     if not relative or stat.S_ISDIR(os.stat(".git", dir_fd=scoped, follow_symlinks=False).st_mode):
         return ".git"
-    # Gitfiles can point to the workspace's module metadata, including the
-    # shared Git directory of a linked worktree.
+    # Gitfiles can point into the shared Git directory or the linked
+    # worktree's own Git directory.
     handle = open_path(scoped, ".git", os.O_RDONLY | os.O_NONBLOCK)
     with os.fdopen(handle, "rb") as file:
         if not stat.S_ISREG(os.fstat(file.fileno()).st_mode):
@@ -224,7 +228,7 @@ def submodule_git_dir(root, scoped, relative, root_path, modules):
     target = os.path.normpath(os.path.join(root_path, relative, raw))
     if os.path.realpath(target) != target or not os.path.isdir(target):
         return None
-    if modules and target.startswith(modules.rstrip("/") + "/"):
+    if any(target.startswith(modules + "/") for modules in module_dirs):
         return target
     parent = relative.rpartition("/")[0]
     while parent:
@@ -289,7 +293,7 @@ def repositories(root):
     if not git_marker(root):
         return {}
     root_path = os.getcwd()
-    modules = common_module_dir()
+    module_dirs = workspace_module_dirs()
     items, scan = [], [REPO_SCAN_LIMIT]
     deadline = time.monotonic() + 5
     truncated = False
@@ -310,7 +314,7 @@ def repositories(root):
             item["initialized"] = git_marker(handle)
             if not item["initialized"]:
                 return
-            git_dir = submodule_git_dir(root, handle, relative, root_path, modules)
+            git_dir = submodule_git_dir(root, handle, relative, root_path, module_dirs)
             if git_dir is None:
                 return
             head, code, cut = repository_git(git_dir, 1024, "rev-parse", "--verify", "--quiet", "HEAD")
@@ -320,8 +324,12 @@ def repositories(root):
             branch, code, cut = repository_git(git_dir, 4096, "symbolic-ref", "--quiet", "HEAD")
             if cut or code not in (0, 1):
                 return
+            if branch.endswith(b"\n"):
+                branch = branch[:-1]
+            if branch.startswith(b"refs/heads/"):
+                branch = branch[len(b"refs/heads/"):]
             item.update(readable=True, head=head.decode("ascii"), detached=code == 1 and bool(head),
-                        branch=branch.decode("utf-8", errors="replace").rstrip("\n")[len("refs/heads/"):] if code == 0 else "")
+                        branch=branch.decode("utf-8", errors="replace"))
             children, cut = repository_children(handle, git_dir, scan, deadline)
             truncated = truncated or cut
             for child in children:
@@ -366,7 +374,7 @@ def read(req):
                 if not git_marker(scoped):
                     return {"error": "repo"}
                 if not stat.S_ISDIR(os.stat(".git", dir_fd=scoped, follow_symlinks=False).st_mode):
-                    git_dir = submodule_git_dir(root, scoped, relative, os.getcwd(), common_module_dir())
+                    git_dir = submodule_git_dir(root, scoped, relative, os.getcwd(), workspace_module_dirs())
                     if git_dir is None:
                         return {"error": "repo"}
                 os.fchdir(scoped)
