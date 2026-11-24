@@ -550,6 +550,7 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string, copyText: 
       return item.readable ? name : label("repositoryUnavailableLabel", {name});
     };
     const currentRepository = repositories.find(item => item.id === repo);
+    const comparison = state ? html(label("comparison", {ahead: state.ahead, behind: state.behind})) : "";
     header.innerHTML = `<div class="wv-heading">
         <span class="wv-heading-icon">${icon("folder")}</span>
         <div><h1>${html(state?.name || repositories[0]?.name || label("title"))}</h1>
@@ -570,7 +571,7 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string, copyText: 
             <option value="">${html(automatic)}</option>
             ${[...choices].map(value => `<option value="${html(value)}" ${value === visibleBase ? "selected" : ""}>${html(value === baseline ? shortBase : value)}</option>`).join("")}
           </select></label>
-          ${baseline && !state.baseAtHead && !state.noCommonAncestor ? `<span class="wv-counts" title="${html(label("comparison", {ahead: state.ahead, behind: state.behind}))}">↑${state.ahead} ↓${state.behind}</span>` : ""}`
+          ${baseline && !state.baseAtHead && !state.noCommonAncestor ? `<span class="wv-counts" role="img" aria-label="${comparison}" title="${comparison}">↑${state.ahead} ↓${state.behind}</span>` : ""}`
         : state && !state.repositoryUnavailable ? `<span class="wv-badge">${label("nonGit")}</span>` : ""}
         <button type="button" data-wv-action="refresh" title="${t("common.refresh")}" aria-label="${t("common.refresh")}">${icon("refresh")}</button>
         ${workspaces.length > 1 ? `<select data-wv-workspace aria-label="${terminalLabel("workspace")}">

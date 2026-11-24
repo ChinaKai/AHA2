@@ -3825,6 +3825,7 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
 .wv-meta select { padding-inline-start: var(--space-2); }
 .wv-meta [data-wv-repo] { flex: 0 1 24%; }
 .wv-meta [data-wv-base] { flex: 1 1 auto; max-width: 100%; }
+.wv-meta [data-wv-workspace] { flex: 0 1 22%; }
 .wv-meta button { flex: none; padding: 0 var(--space-2); }
 .wv-badge { display: inline-flex; align-items: center; gap: var(--space-1); background: var(--surface-soft); border-radius: var(--radius-control); padding: var(--space-1) var(--space-2); font-size: var(--font-size-12); white-space: nowrap; }
 .wv-branch { display: flex; align-items: center; gap: var(--space-1); flex: 1 1 24%; min-width: 0; }
@@ -3906,16 +3907,24 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
 .wv-empty { display: grid; height: 100%; min-height: 130px; padding: var(--space-4); justify-items: center; align-content: center; text-align: center; color: var(--muted); }
 .wv-empty .icon { width: 28px; height: 28px; }
 
-@media (max-width: 720px) {
+@media (width < 1024px) {
   .wv-header { grid-template-columns: minmax(0, 1fr); padding: var(--space-2) var(--space-3); }
-  .wv-meta { justify-content: flex-start; }
+  .wv-heading h1, .wv-heading p { white-space: normal; overflow-wrap: anywhere; }
+  .wv-meta { flex-wrap: wrap; justify-content: flex-start; }
+  .wv-meta [data-wv-repo] { flex: 1 1 5.5rem; }
+  .wv-meta .wv-branch { flex: 2 1 10.5rem; }
+  .wv-meta label { flex: 2 1 11rem; }
+  .wv-meta [data-wv-workspace] { flex: 1 1 12rem; }
+  .wv-meta button { min-width: 36px; }
   .wv-branch-notices { grid-column: 1; }
+}
+
+@media (max-width: 720px) {
   .wv-layout, .wv-layout.side-collapsed { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
   .wv-side { max-height: 35dvh; border-right: 0; border-bottom: 1px solid var(--line); }
   .wv-layout .wv-side-resizer, .wv-layout .wv-side-reset { display: none; }
 }
 
-.wv-meta [data-wv-workspace] { flex: 0 1 22%; }
 .wv-drawers { flex: none; min-width: 0; }
 
 /* workspace-terminal:start */
@@ -3974,7 +3983,6 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
 .wv-term-empty { display: grid; flex: 1 1 auto; place-items: center; padding: 12px; text-align: center; color: #9ba5b0; font-size: 12px; }
 
 @media (max-width: 720px) {
-  .wv-meta [data-wv-workspace] { flex: 0 1 26%; }
   .wv-term-bar { gap: 3px; padding-inline: 4px; }
   .wv-term-pane-head { gap: 4px; padding-inline: 5px; }
   .wv-term-screen { margin-inline: 3px; }

@@ -33,6 +33,11 @@ await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
 const origin = `http://127.0.0.1:${server.address().port}`;
 const task = {id: "viewer-task", code: "task-42", title: "Review the changes", status: "active", isolation: "worktree",
   project_id: "p", workspace_id: "w", task_workspace_path: "/resolved/worktree"};
+const headerTask = {
+  code: "task-276",
+  title: "远程工作区查看器在手机窄屏上的布局调整与分支、基线和工作区切换的可用性验证",
+  workspace: "hl_project-bu2_bulbcam",
+};
 const head = "a".repeat(40);
 const older = "b".repeat(40);
 const longBranch = "task/" + "long-branch-".repeat(17) + "end";
@@ -67,8 +72,12 @@ let browser;
 const errors = [];
 try {
   browser = await chromium.launch({...launch, headless: true});
-  async function context(width, language, terminalFixture = false) {
-    const ctx = await browser.newContext({viewport: {width, height: 800}});
+  async function context(width, language, terminalFixture = false, headerFixture = false) {
+    const ctx = await browser.newContext({
+      viewport: {width, height: 800},
+      isMobile: headerFixture && width <= 430,
+      hasTouch: headerFixture && width <= 768,
+    });
     ctx.on("page", page => page.on("pageerror", error => errors.push(error.message)));
     await ctx.addInitScript(() => {
       window.EventSource = class { addEventListener() {} close() {} };
@@ -119,8 +128,8 @@ try {
         return answer({security: {access_scope: "lan", validate_origin: true, workspace_terminal_lan: allowTerminalLAN,
           workspace_terminal_external_origin: externalTerminalOrigin}});
       }
-      if (path.endsWith("/workspace-targets")) return answer({workspaces: terminalFixture
-        ? [{id: "", name: "Local checkout"}, {id: "ssh-workspace", name: "Builder"}] : []});
+      if (path.endsWith("/workspace-targets")) return answer({workspaces: terminalFixture || headerFixture
+        ? [{id: "", name: "Local checkout"}, {id: "ssh-workspace", name: headerFixture ? headerTask.workspace : "Builder"}] : []});
       if (path.includes("/workspace-terminal")) {
         if (!terminalFixture || !allowTerminalLAN) return answer({locked: true});
         const workspace = url.searchParams.get("workspace") || "";
@@ -181,7 +190,8 @@ try {
       }
       if (view === "state" && url.searchParams.has("summary")) return answer({isGit, version});
       if (view === "state") return answer({
-        isGit: isGit && !unavailable, name: isGit ? "Viewer fixture" : "Plain folder", taskTitle: task.title, taskCode: task.code,
+        isGit: isGit && !unavailable, name: isGit ? (headerFixture ? headerTask.workspace : "Viewer fixture") : "Plain folder",
+        taskTitle: headerFixture ? headerTask.title : task.title, taskCode: headerFixture ? headerTask.code : task.code,
         repositories: isGit ? repositories.filter(item => childDiscovered || item.id !== childRepository) : undefined,
         repositoryUnavailable: unavailable, repositoriesTruncated: isGit && !child, repositoryDeadlineReached: isGit && !child,
         version, branch: branch ? branchName : child ? "feature" : longBranch, head: branch ? branchHead : head,
@@ -223,6 +233,80 @@ try {
       failRemoteBranch: error => { remoteBranchError = error; }, allowTerminal: () => { allowTerminalLAN = true; },
       failTerminal: (method, error, status) => terminalFaults.set(method, {error, status}), clearTerminalFault: method => terminalFaults.delete(method)};
   }
+
+  const screenshotDir = process.env.AHA_BROWSER_SCREENSHOT_DIR;
+  const headerFailures = [];
+  for (const [width, locale] of [[360, "zh-CN"], [390, "zh-CN"], [430, "zh-CN"], [768, "zh-CN"],
+    [1024, "zh-CN"], [1280, "zh-CN"], [390, "en-US"]]) {
+    const {ctx} = await context(width, locale, false, true);
+    const page = await ctx.newPage();
+    await page.goto(origin + `/workspace-viewer?task=${task.id}&workspace=ssh-workspace&base=${encodeURIComponent(longBase)}`);
+    const header = page.locator(".wv-header");
+    await header.getByRole("heading", {name: headerTask.workspace, exact: true}).waitFor();
+    const names = locale === "zh-CN"
+      ? ["仓库", "分支", "基线", "切换工作区", "刷新"]
+      : ["Repository", "Branch", "Base", "Switch workspace", "Refresh"];
+    const controls = names.slice(0, 4).map(name => header.getByRole("combobox", {name, exact: true}));
+    controls.push(header.getByRole("button", {name: names[4], exact: true}));
+    for (const control of controls) await control.waitFor();
+    const counts = header.getByText("↑1 ↓0", {exact: true});
+    await counts.waitFor();
+    assert.equal(await header.locator(".wv-heading p").textContent(), `${headerTask.code} · ${headerTask.title}`);
+    assert.equal(await header.locator("[data-wv-workspace]").inputValue(), "ssh-workspace");
+    await page.evaluate(() => document.fonts.ready);
+    if (screenshotDir && locale === "zh-CN") await page.screenshot({path: resolve(screenshotDir, `workspace-viewer-${width}.png`)});
+    if (width < 1024) {
+      const issues = await header.evaluate(el => {
+        const issues = [];
+        const {documentElement: documentRoot} = document;
+        if (documentRoot.scrollWidth > documentRoot.clientWidth || el.scrollWidth > el.clientWidth) {
+          issues.push("page or header overflows horizontally");
+        }
+        for (const title of el.querySelectorAll(".wv-heading :is(h1, p)")) {
+          if (title.scrollWidth > title.clientWidth || title.scrollHeight > title.clientHeight) {
+            issues.push(`${title.tagName} is clipped`);
+          }
+        }
+        const bounds = el.getBoundingClientRect();
+        const controls = [...el.querySelectorAll(".wv-meta :is(select, button, label > span, .wv-counts)")].map(node => ({
+          name: node.getAttribute("aria-label") || node.textContent,
+          box: node.getBoundingClientRect(),
+          interactive: node.matches("select, button"),
+        }));
+        for (const [i, {name, box, interactive}] of controls.entries()) {
+          if (box.width <= 0 || box.height <= 0 || box.left < bounds.left || box.right > bounds.right ||
+              box.top < bounds.top || box.bottom > bounds.bottom) issues.push(`${name} is outside the header`);
+          if (interactive && (box.width < 32 || box.height < 32)) issues.push(`${name} is smaller than 32px`);
+          for (const other of controls.slice(i + 1)) {
+            if (box.left < other.box.right && box.right > other.box.left &&
+                box.top < other.box.bottom && box.bottom > other.box.top) issues.push(`${name} overlaps ${other.name}`);
+          }
+        }
+        const canvas = document.createElement("canvas").getContext("2d");
+        for (const select of el.querySelectorAll(".wv-meta select")) {
+          const style = getComputedStyle(select);
+          const inset = ["paddingLeft", "paddingRight", "borderLeftWidth", "borderRightWidth"]
+            .reduce((sum, key) => sum + parseFloat(style[key]), 0);
+          const value = select.selectedOptions[0].text;
+          const minText = select.matches("[data-wv-workspace]") ? value : value.slice(0, 14);
+          canvas.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+          const available = select.getBoundingClientRect().width - inset;
+          if (available < canvas.measureText(minText).width) {
+            issues.push(`${select.getAttribute("aria-label")} has only ${Math.round(available)}px for its value`);
+          }
+        }
+        return issues;
+      });
+      if (issues.length) headerFailures.push({width, locale, issues});
+      if (!issues.length) {
+        const comparison = locale === "zh-CN" ? "领先 1 个提交，落后 0 个提交" : "1 commits ahead, 0 behind";
+        assert.equal(await header.getByRole("img", {name: comparison, exact: true}).textContent(), "↑1 ↓0");
+        for (const control of controls) await control.tap({trial: true});
+      }
+    }
+    await ctx.close();
+  }
+  assert.deepEqual(headerFailures, [], "workspace viewer responsive header");
 
   const desktop = await context(1280, "en-US");
   const page = await desktop.ctx.newPage();
@@ -617,7 +701,7 @@ try {
   await narrow.getByLabel("基线", {exact: true}).waitFor();
   await narrow.getByText(/读取子模块登记超时/).waitFor();
   await checkHeader(narrow, 1024);
-  await checkHeader(narrow, 390);
+  await narrow.setViewportSize({width: 390, height: 800});
   const narrowBranch = narrow.getByRole("combobox", {name: "分支"});
   const narrowNotices = narrow.locator("header .wv-branch-notices");
   await narrowNotices.getByText("本地分支列表已截断。", {exact: true}).waitFor();
@@ -888,7 +972,7 @@ try {
   await feedback.waitFor({state: "hidden"});
   await failures.ctx.close();
   assert.deepEqual(errors, []);
-  console.log("Workspace viewer verified at 1280px, 1024px and 390px in real Chromium");
+  console.log("Workspace viewer verified at 360px, 390px, 430px, 768px, 1024px and 1280px in real Chromium");
 } finally {
   await browser?.close();
   await new Promise(resolve => server.close(resolve));
