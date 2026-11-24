@@ -366,9 +366,9 @@ class APIClient {
     return this.request("/api/v1/settings/security", {method: "PUT", body: JSON.stringify(payload)});
   }
 
-  updateWorkspaceTerminalLAN(enabled: boolean): Promise<{security: SecuritySettings}> {
+  updateWorkspaceTerminalSettings(payload: {workspace_terminal_lan?: boolean; workspace_terminal_external_origin?: string}): Promise<{security: SecuritySettings}> {
     return this.request("/api/v1/settings/security/workspace-terminal", {
-      method: "PUT", body: JSON.stringify({workspace_terminal_lan: enabled}),
+      method: "PUT", body: JSON.stringify(payload),
     });
   }
 

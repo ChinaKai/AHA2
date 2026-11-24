@@ -65,12 +65,58 @@ func TestSecuritySettingsV161UpgradesV160Database(t *testing.T) {
 		t.Fatalf("migrated security settings = %+v, %v", settings, err)
 	}
 	for _, enabled := range []bool{true, false} {
-		if _, err := upgraded.UpdateWorkspaceTerminalLAN(ctx, enabled); err != nil {
+		if _, err := upgraded.UpdateWorkspaceTerminalSettings(ctx, &enabled, nil); err != nil {
 			t.Fatal(err)
 		}
 		settings, err := upgraded.SecuritySettings(ctx)
 		if err != nil || settings.WorkspaceTerminalLAN != enabled || settings.ValidateOrigin || settings.AccessScope != domain.AccessScopeLocal {
 			t.Fatalf("persisted LAN setting after writing %t = %+v, %v", enabled, settings, err)
 		}
+	}
+}
+
+func TestSecuritySettingsV163UpgradesV162Database(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "aha2.db")
+	legacy, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = legacy.db.ExecContext(ctx, `
+		ALTER TABLE security_settings DROP COLUMN workspace_terminal_external_origin;
+		DELETE FROM schema_migrations WHERE version=163;
+		UPDATE security_settings SET access_scope='lan', validate_origin=0, workspace_terminal_lan=1 WHERE id=1;
+	`)
+	legacy.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	upgraded, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upgraded.Close()
+	if count := migrationVersionCount(t, upgraded, 163); count != 1 {
+		t.Fatalf("v163 migration rows = %d, want 1", count)
+	}
+	settings, err := upgraded.SecuritySettings(ctx)
+	if err != nil || settings.WorkspaceTerminalExternalOrigin != "" || !settings.WorkspaceTerminalLAN ||
+		settings.ValidateOrigin || settings.AccessScope != domain.AccessScopeLAN {
+		t.Fatalf("migrated security settings = %+v, %v", settings, err)
+	}
+	origin := "https://proxy.example"
+	settings, err = upgraded.UpdateWorkspaceTerminalSettings(ctx, nil, &origin)
+	if err != nil || settings.WorkspaceTerminalExternalOrigin != origin || !settings.WorkspaceTerminalLAN {
+		t.Fatalf("origin-only update = %+v, %v", settings, err)
+	}
+	disabled := false
+	settings, err = upgraded.UpdateWorkspaceTerminalSettings(ctx, &disabled, nil)
+	if err != nil || settings.WorkspaceTerminalExternalOrigin != origin || settings.WorkspaceTerminalLAN {
+		t.Fatalf("LAN-only update = %+v, %v", settings, err)
+	}
+	settings, err = upgraded.UpdateSecuritySettings(ctx, domain.SecuritySettings{ValidateOrigin: true, AccessScope: domain.AccessScopeLocal})
+	if err != nil || settings.WorkspaceTerminalExternalOrigin != origin || settings.WorkspaceTerminalLAN {
+		t.Fatalf("general security update = %+v, %v", settings, err)
 	}
 }

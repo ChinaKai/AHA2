@@ -8,6 +8,7 @@ export interface AuthStatus {
 }
 export interface SecuritySettings {
   workspace_terminal_lan?: boolean;
+  workspace_terminal_external_origin?: string;
   validate_origin: boolean;
   // "local" answers only this machine; "lan" also answers private network
   // addresses. The server binds every interface, so this is what narrows it.

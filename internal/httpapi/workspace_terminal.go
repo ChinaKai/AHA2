@@ -11,7 +11,10 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,34 +26,45 @@ import (
 
 func (s *Server) registerWorkspaceTerminalRoutes(mux *http.ServeMux) {
 	const base = "/api/v1/tasks/{id}/workspace-terminal"
-	mux.Handle("GET "+base, s.withWorkspaceTerminalOwner(s.workspaceTerminalState))
-	mux.Handle("POST "+base, s.withWorkspaceTerminalOwner(s.workspaceTerminalCreate))
-	mux.Handle("DELETE "+base+"/{terminal}", s.withWorkspaceTerminalOwner(s.workspaceTerminalDelete))
-	mux.Handle("GET "+base+"/{terminal}/ws", s.withWorkspaceTerminalOwner(s.workspaceTerminalSocket))
-	mux.Handle("PUT /api/v1/settings/security/workspace-terminal", s.withWorkspaceTerminalOwner(s.updateWorkspaceTerminalLAN))
+	mux.Handle("GET "+base, s.withWorkspaceTerminalOwner(s.workspaceTerminalState, false))
+	mux.Handle("POST "+base, s.withWorkspaceTerminalOwner(s.workspaceTerminalCreate, false))
+	mux.Handle("DELETE "+base+"/{terminal}", s.withWorkspaceTerminalOwner(s.workspaceTerminalDelete, false))
+	mux.Handle("GET "+base+"/{terminal}/ws", s.withWorkspaceTerminalOwner(s.workspaceTerminalSocket, true))
+	mux.Handle("PUT /api/v1/settings/security/workspace-terminal", s.withAuth(http.HandlerFunc(s.updateWorkspaceTerminalSettings)))
 }
 
 func (s *Server) CloseWorkspaceTerminals() {
 	s.workspaceTerminals.Close()
 }
 
-func (s *Server) withWorkspaceTerminalOwner(handler http.HandlerFunc) http.Handler {
-	return s.withAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func (s *Server) withWorkspaceTerminalOwner(handler http.HandlerFunc, requireOrigin bool) http.Handler {
+	return s.withOwnerSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A configured terminal origin can also satisfy the origin check for
+		// unsafe methods when the proxy rewrites Host.
+		checkBeforeCSRF := unsafeMethod(r.Method) && !s.sameOrigin(r)
+		if checkBeforeCSRF && !s.checkWorkspaceTerminalOrigin(w, r, requireOrigin) {
+			return
+		}
+		if !requireCSRF(w, r) {
+			return
+		}
 		if r.Header.Get("Authorization") != "" {
 			writeError(w, http.StatusForbidden, "workspace_terminal_owner_required")
 			return
 		}
-		if site := r.Header.Get("Sec-Fetch-Site"); (site != "" && site != "same-origin" && site != "none") ||
-			(r.Header.Get("Origin") != "" && !workspaceTerminalOrigin(r)) {
-			writeError(w, http.StatusForbidden, "origin_rejected")
+		if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
+			s.rejectWorkspaceTerminalOrigin(w, r, "fetch_site")
+			return
+		}
+		if !checkBeforeCSRF && !s.checkWorkspaceTerminalOrigin(w, r, requireOrigin) {
 			return
 		}
 		handler(w, r)
 	}))
 }
 
-func workspaceTerminalOrigin(r *http.Request) bool {
-	if len(r.Header.Values("Origin")) != 1 || !desktopStreamOrigin(r) {
+func workspaceTerminalDirectOrigin(r *http.Request) bool {
+	if !desktopStreamOrigin(r) {
 		return false
 	}
 	origin, _ := url.Parse(r.Header.Get("Origin"))
@@ -60,6 +74,89 @@ func workspaceTerminalOrigin(r *http.Request) bool {
 		scheme = "https"
 	}
 	return !origin.ForceQuery && origin.Scheme == scheme
+}
+
+func (s *Server) checkWorkspaceTerminalOrigin(w http.ResponseWriter, r *http.Request, required bool) bool {
+	values := r.Header.Values("Origin")
+	origin := r.Header.Get("Origin")
+	switch {
+	case len(values) > 1 || strings.Contains(origin, ","):
+		return s.rejectWorkspaceTerminalOrigin(w, r, "multiple_origins")
+	case origin == "":
+		if required {
+			return s.rejectWorkspaceTerminalOrigin(w, r, "missing_origin")
+		}
+		return true
+	case workspaceTerminalDirectOrigin(r):
+		return true
+	}
+	normalized, ok := normalizeWorkspaceTerminalOrigin(origin)
+	if !ok {
+		return s.rejectWorkspaceTerminalOrigin(w, r, "invalid_origin")
+	}
+	settings, err := s.store.SecuritySettings(r.Context())
+	if err != nil {
+		return s.rejectWorkspaceTerminalOrigin(w, r, "external_origin_unavailable")
+	}
+	if normalized != settings.WorkspaceTerminalExternalOrigin {
+		return s.rejectWorkspaceTerminalOrigin(w, r, "origin_mismatch")
+	}
+	return true
+}
+
+var terminalOriginHostname = regexp.MustCompile(`^[a-z0-9_.-]+$`)
+
+func normalizeWorkspaceTerminalOrigin(value string) (string, bool) {
+	u, err := url.Parse(value)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") ||
+		u.User != nil || (u.Path != "" && u.Path != "/") || u.RawPath != "" ||
+		u.ForceQuery || u.RawQuery != "" || strings.Contains(value, "#") {
+		return "", false
+	}
+	host := strings.ToLower(u.Hostname())
+	if strings.HasPrefix(u.Host, "[") {
+		ip, err := netip.ParseAddr(host)
+		if err != nil || !ip.Is6() || ip.Zone() != "" {
+			return "", false
+		}
+		host = "[" + ip.String() + "]"
+	} else if !terminalOriginHostname.MatchString(host) {
+		return "", false
+	}
+	if strings.HasSuffix(u.Host, ":") {
+		return "", false
+	}
+	if port := u.Port(); port != "" {
+		number, err := strconv.ParseUint(port, 10, 16)
+		if err != nil {
+			return "", false
+		}
+		if !(u.Scheme == "http" && number == 80 || u.Scheme == "https" && number == 443) {
+			host += ":" + strconv.FormatUint(number, 10)
+		}
+	}
+	return u.Scheme + "://" + host, true
+}
+
+func (s *Server) rejectWorkspaceTerminalOrigin(w http.ResponseWriter, r *http.Request, reason string) bool {
+	// Only log origin components so malformed headers cannot inject
+	// user information, paths, or query parameters containing credentials.
+	origin := r.Header.Get("Origin")
+	if origin != "" {
+		if normalized, ok := normalizeWorkspaceTerminalOrigin(origin); ok {
+			origin = normalized
+		} else {
+			origin = "<invalid>"
+		}
+	}
+	host := "<invalid>"
+	if _, ok := normalizeWorkspaceTerminalOrigin("http://" + r.Host); ok && !strings.Contains(r.Host, "/") {
+		host = r.Host
+	}
+	s.logger.Warn("workspace terminal request rejected", "stage", "origin_rejected",
+		"peer", r.RemoteAddr, "origin", origin, "host", host, "reason", reason)
+	writeError(w, http.StatusForbidden, "origin_rejected")
+	return false
 }
 
 func loopbackTerminalRequest(r *http.Request) bool {
@@ -142,30 +239,50 @@ func (s *Server) workspaceTerminalAccess(w http.ResponseWriter, r *http.Request)
 	return true
 }
 
-func (s *Server) updateWorkspaceTerminalLAN(w http.ResponseWriter, r *http.Request) {
+func (s *Server) updateWorkspaceTerminalSettings(w http.ResponseWriter, r *http.Request) {
 	var payload struct {
-		Enabled *bool `json:"workspace_terminal_lan"`
+		Enabled        *bool   `json:"workspace_terminal_lan"`
+		ExternalOrigin *string `json:"workspace_terminal_external_origin"`
 	}
-	if decodeJSON(r, &payload) != nil || payload.Enabled == nil {
+	if decodeJSON(r, &payload) != nil || payload.Enabled == nil && payload.ExternalOrigin == nil {
 		writeError(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
 	// Enabling a remote shell requires the same direct loopback origin that
 	// can use the terminal while LAN access is locked.
-	if *payload.Enabled && !loopbackTerminalRequest(r) {
+	if payload.Enabled != nil && *payload.Enabled && !loopbackTerminalRequest(r) {
 		writeError(w, http.StatusForbidden, "workspace_terminal_lan_enable_requires_loopback")
 		return
 	}
-	settings, err := s.store.UpdateWorkspaceTerminalLAN(r.Context(), *payload.Enabled)
+	if payload.ExternalOrigin != nil {
+		value := strings.TrimSpace(*payload.ExternalOrigin)
+		if value != "" {
+			normalized, ok := normalizeWorkspaceTerminalOrigin(value)
+			if !ok {
+				writeError(w, http.StatusBadRequest, "workspace_terminal_invalid_external_origin")
+				return
+			}
+			value = normalized
+		}
+		payload.ExternalOrigin = &value
+	}
+	settings, err := s.store.UpdateWorkspaceTerminalSettings(r.Context(), payload.Enabled, payload.ExternalOrigin)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "update_security_settings_failed")
 		return
 	}
 	settings.ValidateOrigin = s.originValidationEnabled()
 	settings.StartupOverride = s.originStartupOverride
-	s.audit(r, "security.workspace_terminal_lan.update", "settings", "security", map[string]any{
-		"workspace_terminal_lan": settings.WorkspaceTerminalLAN,
-	})
+	if payload.Enabled != nil {
+		s.audit(r, "security.workspace_terminal_lan.update", "settings", "security", map[string]any{
+			"workspace_terminal_lan": settings.WorkspaceTerminalLAN,
+		})
+	}
+	if payload.ExternalOrigin != nil {
+		s.audit(r, "security.workspace_terminal_external_origin.update", "settings", "security", map[string]any{
+			"workspace_terminal_external_origin": settings.WorkspaceTerminalExternalOrigin,
+		})
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"security": settings})
 }
 
@@ -334,10 +451,6 @@ func (s *Server) workspaceTerminalRecheck(ctx context.Context, r *http.Request, 
 }
 
 func (s *Server) workspaceTerminalSocket(w http.ResponseWriter, r *http.Request) {
-	if !workspaceTerminalOrigin(r) {
-		writeError(w, http.StatusForbidden, "origin_rejected")
-		return
-	}
 	if !s.workspaceTerminalAccess(w, r) {
 		return
 	}
@@ -354,7 +467,11 @@ func (s *Server) workspaceTerminalSocket(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	defer s.workspaceTerminals.Detach(link)
-	connection, err := websocket.Accept(w, r, &websocket.AcceptOptions{CompressionMode: websocket.CompressionDisabled})
+	// The route already requires a single direct or configured Origin.
+	connection, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+		InsecureSkipVerify: true,
+		CompressionMode:    websocket.CompressionDisabled,
+	})
 	if err != nil {
 		// Accept errors can quote raw handshake headers, including the key.
 		logger.Warn("workspace terminal request failed", "stage", "upgrade", "error", "WebSocket handshake rejected")

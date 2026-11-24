@@ -3,6 +3,8 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -24,6 +26,86 @@ import (
 	"github.com/ChinaKai/AHA2/internal/workspaceterminal"
 	"github.com/coder/websocket"
 )
+
+func TestWorkspaceTerminalOrigin(t *testing.T) {
+	fixture := newTaskDetailFixture(t, false)
+	externalOrigin := "https://proxy.example"
+	if _, err := fixture.database.UpdateWorkspaceTerminalSettings(t.Context(), nil, &externalOrigin); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	api := &Server{store: fixture.database, logger: slog.New(slog.NewTextHandler(&logs, nil))}
+	for _, test := range []struct {
+		name, host, method, proto string
+		origins                   []string
+		tls, loopback, required   bool
+		wantRejection             string
+	}{
+		{name: "direct http", host: "internal.example:8766", origins: []string{"http://internal.example:8766"}},
+		{name: "direct TLS", host: "internal.example", tls: true, origins: []string{"https://internal.example"}},
+		{name: "loopback forwarded TLS", host: "localhost", loopback: true, proto: "HTTPS", origins: []string{"https://localhost"}},
+		{name: "remote forwarded TLS", host: "internal.example", proto: "https", origins: []string{"https://internal.example"}, wantRejection: "origin_mismatch"},
+		{name: "external", host: "internal.example", origins: []string{"https://proxy.example"}},
+		{name: "normalized external", host: "internal.example", origins: []string{"HTTPS://PROXY.Example:443/"}},
+		{name: "external host mismatch", host: "internal.example", origins: []string{"https://proxy.example.evil"}, wantRejection: "origin_mismatch"},
+		{name: "external scheme mismatch", host: "internal.example", origins: []string{"http://proxy.example"}, wantRejection: "origin_mismatch"},
+		{name: "external port mismatch", host: "internal.example", origins: []string{"https://proxy.example:8443"}, wantRejection: "origin_mismatch"},
+		{name: "path and query", host: "internal.example", origins: []string{"https://proxy.example/secret?token=secret"}, wantRejection: "invalid_origin"},
+		{name: "empty query", host: "internal.example", origins: []string{"https://proxy.example?"}, wantRejection: "invalid_origin"},
+		{name: "encoded slash", host: "internal.example", origins: []string{"https://proxy.example/%2F"}, wantRejection: "invalid_origin"},
+		{name: "userinfo", host: "internal.example", origins: []string{"https://user:secret@proxy.example"}, wantRejection: "invalid_origin"},
+		{name: "missing optional", host: "internal.example"},
+		{name: "missing websocket", host: "internal.example", method: http.MethodGet, required: true, wantRejection: "missing_origin"},
+		{name: "multiple websocket origins", host: "internal.example", method: http.MethodGet, required: true, origins: []string{"https://proxy.example", "https://proxy.example"}, wantRejection: "multiple_origins"},
+		{name: "multiple delete origins with empty first", host: "internal.example", method: http.MethodDelete, origins: []string{"", "https://proxy.example"}, wantRejection: "multiple_origins"},
+		{name: "combined origins", host: "internal.example", origins: []string{"https://proxy.example, https://proxy.example"}, wantRejection: "multiple_origins"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			logs.Reset()
+			req := httptest.NewRequest(test.method, "http://"+test.host, nil)
+			if test.tls {
+				req.TLS = &tls.ConnectionState{}
+			}
+			if test.loopback {
+				req.RemoteAddr = "127.0.0.1:12345"
+			}
+			req.Header.Set("X-Forwarded-Proto", test.proto)
+			req.Header["Origin"] = test.origins
+			req.Header.Set("Cookie", "session=secret")
+			req.Header.Set("X-CSRF-Token", "secret")
+			res := httptest.NewRecorder()
+			if got := api.checkWorkspaceTerminalOrigin(res, req, test.required); got != (test.wantRejection == "") {
+				t.Fatalf("allowed = %v, response = %s", got, res.Body)
+			}
+			if test.wantRejection == "" {
+				return
+			}
+			if res.Code != http.StatusForbidden || !strings.Contains(res.Body.String(), "origin_rejected") {
+				t.Fatalf("rejected response = %d %s", res.Code, res.Body)
+			}
+			for _, field := range []string{"level=WARN", "stage=origin_rejected", "peer=" + req.RemoteAddr,
+				"origin=", "host=" + test.host, "reason=" + test.wantRejection} {
+				if !strings.Contains(logs.String(), field) {
+					t.Fatalf("missing origin diagnostic %q", field)
+				}
+			}
+			if strings.Contains(logs.String(), "secret") {
+				t.Fatal("origin diagnostic logged a credential")
+			}
+		})
+	}
+	nonDefaultPort := "https://proxy.example:8443"
+	if _, err := fixture.database.UpdateWorkspaceTerminalSettings(t.Context(), nil, &nonDefaultPort); err != nil {
+		t.Fatal(err)
+	}
+	for _, origin := range []string{"https://PROXY.EXAMPLE:8443/", "https://proxy.example"} {
+		req := httptest.NewRequest(http.MethodDelete, "http://internal.example/terminal", nil)
+		req.Header.Set("Origin", origin)
+		if allowed := api.checkWorkspaceTerminalOrigin(httptest.NewRecorder(), req, false); allowed != strings.Contains(origin, ":8443") {
+			t.Fatalf("allowed = %v for %s with configured port 8443", allowed, origin)
+		}
+	}
+}
 
 func TestWorkspaceTerminalAccessRecheckDistinguishesQueryFailure(t *testing.T) {
 	fixture := newTaskDetailFixture(t, false)
@@ -105,11 +187,16 @@ func TestWorkspaceTerminalOwnerLANWebSocketLifecycle(t *testing.T) {
 	}
 	var logs bytes.Buffer
 	api := New(Config{Store: fixture.database, Auth: authServiceForTest(fixture.database), App: fixture.app,
-		AgentCapabilities: capabilities, AllowCrossOrigin: true, Logger: slog.New(slog.NewTextHandler(&logs, nil))})
+		AgentCapabilities: capabilities, Logger: slog.New(slog.NewTextHandler(&logs, nil))})
 	handler := api.Handler()
+	const externalHost = "proxy.example"
+	const externalOrigin = "https://" + externalHost
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Test-LAN") == "yes" {
 			r.RemoteAddr = "192.0.2.10:12345"
+		}
+		if r.Header.Get("X-Test-Preserve-Host") == "yes" {
+			r.Host = externalHost
 		}
 		handler.ServeHTTP(w, r)
 	}))
@@ -121,7 +208,7 @@ func TestWorkspaceTerminalOwnerLANWebSocketLifecycle(t *testing.T) {
 		CSRF string `json:"csrf_token"`
 	}
 	decodeResponse(t, status, &authStatus)
-	check := func(method, path, body string, headers http.Header, client *http.Client, code int, contains string) {
+	check := func(method, path, body string, headers http.Header, client *http.Client, code int, contains string) string {
 		t.Helper()
 		req, err := http.NewRequestWithContext(t.Context(), method, server.URL+path, strings.NewReader(body))
 		if err != nil {
@@ -131,7 +218,7 @@ func TestWorkspaceTerminalOwnerLANWebSocketLifecycle(t *testing.T) {
 		if req.Header == nil {
 			req.Header = make(http.Header)
 		}
-		if client == fixture.client {
+		if client == fixture.client && len(req.Header.Values("X-CSRF-Token")) == 0 {
 			req.Header.Set("X-CSRF-Token", authStatus.CSRF)
 		}
 		resp, err := client.Do(req)
@@ -143,6 +230,7 @@ func TestWorkspaceTerminalOwnerLANWebSocketLifecycle(t *testing.T) {
 		if err != nil || resp.StatusCode != code || !strings.Contains(string(data), contains) {
 			t.Fatalf("%s %s: %d %q, %v", method, path, resp.StatusCode, data, err)
 		}
+		return string(data)
 	}
 	const size = `{"cols":80,"rows":24}`
 	setting := "/api/v1/settings/security/workspace-terminal"
@@ -172,6 +260,27 @@ func TestWorkspaceTerminalOwnerLANWebSocketLifecycle(t *testing.T) {
 	check(http.MethodPut, "/api/v1/settings/security", `{"validate_origin":true,"access_scope":"local"}`, nil, fixture.client, 200, `"workspace_terminal_lan":true`)
 	check(http.MethodPost, base, size, lan, fixture.client, 403, "access_scope_local_only")
 	check(http.MethodPut, "/api/v1/settings/security", `{"validate_origin":true,"access_scope":"lan"}`, nil, fixture.client, 200, `"workspace_terminal_lan":true`)
+
+	t.Run("save external origin behind proxy", func(t *testing.T) {
+		const body = `{"workspace_terminal_external_origin":"HTTPS://PROXY.Example:443/"}`
+		proxy := http.Header{"Origin": {externalOrigin}, "X-Test-Lan": {"yes"}, "X-Test-Preserve-Host": {"yes"}}
+		check(http.MethodPut, setting, body, proxy, http.DefaultClient, 401, "authentication_required")
+		noCSRF := proxy.Clone()
+		noCSRF.Set("X-CSRF-Token", "")
+		check(http.MethodPut, setting, body, noCSRF, fixture.client, 403, "csrf_rejected")
+		check(http.MethodPut, setting, enableLAN, proxy, fixture.client, 403, loopbackRequired)
+		check(http.MethodPut, setting, `{"workspace_terminal_external_origin":"https://proxy.example/path"}`, proxy, fixture.client, 400, "workspace_terminal_invalid_external_origin")
+		check(http.MethodGet, "/api/v1/settings/security", "", nil, fixture.client, 200, `"workspace_terminal_external_origin":""`)
+
+		// Settings still follow the general Origin policy, which the reported
+		// deployment has disabled. Simulate a rewritten Host for that case.
+		proxy.Del("X-Test-Preserve-Host")
+		check(http.MethodPut, setting, body, proxy, fixture.client, 403, "origin_rejected")
+		api.setOriginValidation(false)
+		check(http.MethodPut, setting, body, proxy, fixture.client, 200, `"workspace_terminal_external_origin":"https://proxy.example"`)
+		api.setOriginValidation(true)
+		check(http.MethodGet, "/api/v1/settings/security", "", nil, fixture.client, 200, `"workspace_terminal_lan":true`)
+	})
 
 	remote := domain.Workspace{ID: "other-workspace", ProjectID: fixture.task.ProjectID, Name: "Another target",
 		Transport: "native", Locality: "local", RootPath: t.TempDir(), CreatedAt: time.Now(), UpdatedAt: time.Now()}
@@ -231,6 +340,41 @@ func TestWorkspaceTerminalOwnerLANWebSocketLifecycle(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = conn.CloseNow() })
 		return conn
+	}
+	for _, name := range []string{"Host preserved", "Host rewritten"} {
+		t.Run(name, func(t *testing.T) {
+			proxy := lan.Clone()
+			proxy.Set("Origin", externalOrigin)
+			if name == "Host preserved" {
+				proxy.Set("X-Test-Preserve-Host", "yes")
+			}
+			noCSRF := proxy.Clone()
+			noCSRF.Set("X-CSRF-Token", "")
+			check(http.MethodPost, base, size, noCSRF, fixture.client, 403, "csrf_rejected")
+			body := check(http.MethodPost, base, size, proxy, fixture.client, 201, `"id":`)
+			var proxiedSession workspaceterminal.Info
+			if err := json.Unmarshal([]byte(body), &proxiedSession); err != nil || proxiedSession.ID == "" {
+				t.Fatalf("could not decode created terminal: %v", err)
+			}
+			proxiedItem := base + "/" + proxiedSession.ID
+			directSocketURL := socketURL
+			socketURL = "ws" + strings.TrimPrefix(server.URL, "http") + proxiedItem + "/ws"
+			defer func() { socketURL = directSocketURL }()
+			dial("https://wrong.example", proxy, "", 403)
+			crossSite := proxy.Clone()
+			crossSite.Set("Sec-Fetch-Site", "cross-site")
+			dial(externalOrigin, crossSite, "", 403)
+			dial(externalOrigin, proxy, "", 101)
+			check(http.MethodDelete, proxiedItem, "", noCSRF, fixture.client, 403, "csrf_rejected")
+			check(http.MethodDelete, proxiedItem, "", proxy, fixture.client, 200, `"ok":true`)
+		})
+	}
+	check(http.MethodPut, setting, `{"workspace_terminal_external_origin":""}`, nil, fixture.client, 200, `"workspace_terminal_external_origin":""`)
+	for _, preserve := range []string{"yes", "no"} {
+		proxy := http.Header{"Origin": {externalOrigin}, "X-Test-Lan": {"yes"}, "X-Test-Preserve-Host": {preserve}}
+		check(http.MethodPost, base, size, proxy, fixture.client, 403, "origin_rejected")
+		check(http.MethodDelete, item, "", proxy, fixture.client, 403, "origin_rejected")
+		dial(externalOrigin, proxy, "", 403)
 	}
 	dial("", nil, "", 403)
 	dial("http://wrong.example", nil, "", 403)

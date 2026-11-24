@@ -8,12 +8,12 @@ import (
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
-const securitySettingsColumns = `validate_origin,access_scope,workspace_terminal_lan,updated_at`
+const securitySettingsColumns = `validate_origin,access_scope,workspace_terminal_lan,workspace_terminal_external_origin,updated_at`
 
 func scanSecuritySettings(row *sql.Row) (domain.SecuritySettings, error) {
 	var item domain.SecuritySettings
 	var updatedAt string
-	err := row.Scan(&item.ValidateOrigin, &item.AccessScope, &item.WorkspaceTerminalLAN, &updatedAt)
+	err := row.Scan(&item.ValidateOrigin, &item.AccessScope, &item.WorkspaceTerminalLAN, &item.WorkspaceTerminalExternalOrigin, &updatedAt)
 	item.AccessScope = domain.NormalizeAccessScope(item.AccessScope)
 	item.UpdatedAt = parseTime(updatedAt)
 	return item, err
@@ -33,8 +33,10 @@ func (s *Store) UpdateSecuritySettings(ctx context.Context, item domain.Security
 		RETURNING `+securitySettingsColumns, boolInt(item.ValidateOrigin), domain.NormalizeAccessScope(item.AccessScope), timeString(item.UpdatedAt)))
 }
 
-func (s *Store) UpdateWorkspaceTerminalLAN(ctx context.Context, enabled bool) (domain.SecuritySettings, error) {
+func (s *Store) UpdateWorkspaceTerminalSettings(ctx context.Context, enabled *bool, externalOrigin *string) (domain.SecuritySettings, error) {
 	return scanSecuritySettings(s.db.QueryRowContext(ctx,
-		`UPDATE security_settings SET workspace_terminal_lan=?, updated_at=? WHERE id=1 RETURNING `+securitySettingsColumns,
-		boolInt(enabled), timeString(time.Now().UTC())))
+		`UPDATE security_settings SET workspace_terminal_lan=COALESCE(?,workspace_terminal_lan),
+			workspace_terminal_external_origin=COALESCE(?,workspace_terminal_external_origin),
+			updated_at=? WHERE id=1 RETURNING `+securitySettingsColumns,
+		enabled, externalOrigin, timeString(time.Now().UTC())))
 }

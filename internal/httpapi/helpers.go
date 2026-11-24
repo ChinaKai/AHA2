@@ -76,6 +76,18 @@ func (s *Server) withOwnerOrAgentAuth(next http.Handler) http.Handler {
 }
 
 func (s *Server) withAuth(next http.Handler) http.Handler {
+	return s.withOwnerSession(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if unsafeMethod(request.Method) && !s.sameOrigin(request) {
+			writeError(writer, http.StatusForbidden, "origin_rejected")
+			return
+		}
+		if requireCSRF(writer, request) {
+			next.ServeHTTP(writer, request)
+		}
+	}))
+}
+
+func (s *Server) withOwnerSession(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		cookie, err := request.Cookie(sessionCookieName)
 		if err != nil {
@@ -88,18 +100,20 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 			writeError(writer, http.StatusUnauthorized, "authentication_required")
 			return
 		}
-		if unsafeMethod(request.Method) {
-			if !s.sameOrigin(request) {
-				writeError(writer, http.StatusForbidden, "origin_rejected")
-				return
-			}
-			if request.Header.Get("X-CSRF-Token") != session.CSRFToken {
-				writeError(writer, http.StatusForbidden, "csrf_rejected")
-				return
-			}
-		}
 		next.ServeHTTP(writer, request.WithContext(context.WithValue(request.Context(), sessionContextKey{}, session)))
 	})
+}
+
+func requireCSRF(w http.ResponseWriter, r *http.Request) bool {
+	if !unsafeMethod(r.Method) {
+		return true
+	}
+	session, ok := sessionFromContext(r.Context())
+	if !ok || r.Header.Get("X-CSRF-Token") != session.CSRFToken {
+		writeError(w, http.StatusForbidden, "csrf_rejected")
+		return false
+	}
+	return true
 }
 
 func unsafeMethod(method string) bool {

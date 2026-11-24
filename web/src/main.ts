@@ -273,6 +273,7 @@ function lazyPageState<T>(page: LazyPage<T>): string {
 }
 
 const workspaceViewerPage = createLazyPage("workspace-viewer", () => import("./workspace_viewer.js"), {onChange: () => render()});
+const workspaceTerminalPage = createLazyPage("workspace-terminal-settings", () => import("./workspace_terminal.js"), {onChange: () => render()});
 
 type KnowledgePageModule = typeof import("./knowledge_workspace.js");
 const knowledgePage = createLazyPage<KnowledgePageModule>("knowledge", () => import("./knowledge_workspace.js"), {onChange: () => render()});
@@ -5331,6 +5332,12 @@ function bindOfflineCompactionDialogBodyActions(dialog: HTMLDialogElement, view:
   });
 }
 
+function renderWorkspaceTerminalSettings(): string {
+  const module = workspaceTerminalPage.loaded();
+  if (!module) { void workspaceTerminalPage.load(); return lazyPageState(workspaceTerminalPage); }
+  return module.renderWorkspaceTerminalSettings(state.securitySettings, escapeHTML);
+}
+
 function otherSettingsView(): string {
   const origin = state.securitySettings;
   const backendSettings = state.backendSettings;
@@ -5376,13 +5383,7 @@ function otherSettingsView(): string {
         <div class="dialog-actions"><button class="primary" type="submit">保存访问范围</button></div>
       </form>
     </section>
-    <section class="panel spaced account-security-panel">
-      <div class="panel-head"><strong>${t("workspaceTerminal.title")}</strong></div>
-      <form id="workspace-terminal-settings-form">
-        <label class="security-setting-toggle"><input name="workspace_terminal_lan" type="checkbox" ${origin.workspace_terminal_lan ? "checked" : ""}><span><strong>${t("workspaceTerminal.allowLAN")}</strong><small>${t("workspaceTerminal.allowLANHelp")}</small></span></label>
-        <div class="dialog-actions"><button class="primary" type="submit">${t("workspaceTerminal.save")}</button></div>
-      </form>
-    </section>
+    ${renderWorkspaceTerminalSettings()}
     <section class="panel spaced account-security-panel agent-api-override-panel">
       <div class="panel-head"><strong>Agent API 高级覆盖</strong><span>仅用于排障</span></div>
       <form id="agent-api-override-form">
@@ -8580,16 +8581,13 @@ function bindCommon(): void {
     state.securitySettings = response.security;
     setMessage("notice", accessScope === "local" ? "访问范围已改为仅本机" : "访问范围已改为本机与局域网");
   }, "保存中");
-  bindForm("#workspace-terminal-settings-form", async form => {
-    const response = await api.updateWorkspaceTerminalLAN(form.get("workspace_terminal_lan") === "on").catch(error => {
-      if (error.code === "workspace_terminal_lan_enable_requires_loopback") {
-        throw new Error(t("workspaceTerminal.enableRequiresLoopback"));
-      }
-      throw error;
-    });
-    state.securitySettings = response.security;
-    setMessage("notice", t("workspaceTerminal.saved"));
-  }, t("workspaceTerminal.saving"), false);
+  const workspaceTerminal = workspaceTerminalPage.loaded();
+  if (workspaceTerminal) {
+    bindForm("#workspace-terminal-settings-form", async form => {
+      state.securitySettings = await workspaceTerminal.saveWorkspaceTerminalSettings(form, state.securitySettings);
+      setMessage("notice", workspaceTerminal.terminalLabel("settingsSaved"));
+    }, workspaceTerminal.terminalLabel("settingsSaving"), false);
+  }
   bindForm("#agent-api-override-form", async form => {
     const url = String(form.get("url") || "").trim();
     const response = await api.updateAgentAPISettings({url});

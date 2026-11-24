@@ -4378,6 +4378,16 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("record schema v162: %w", err)
 		}
 	}
+	if !s.tableHasColumn(ctx, "security_settings", "workspace_terminal_external_origin") {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE security_settings ADD COLUMN workspace_terminal_external_origin TEXT NOT NULL DEFAULT ''`); err != nil &&
+			!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("apply schema v163 workspace terminal external origin: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(163, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v163: %w", err)
+	}
 	return nil
 }
 

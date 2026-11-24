@@ -2,6 +2,7 @@ import {api} from "./api.js";
 import {currentLocale} from "./i18n.js";
 import {loadStylesheet, loadTerminalAssets} from "./terminal_assets.js";
 import {icon} from "./icons.js";
+import type {SecuritySettings} from "./types.js";
 
 interface SessionInfo {
   id: string;
@@ -41,6 +42,16 @@ const copy = {
     resize: "拖动调整高度，双击恢复默认高度",
     locked: "局域网终端已锁定 · 请在本机设置开启",
     settings: "打开终端设置",
+    settingsTitle: "工作区终端",
+    settingsAllowLAN: "允许通过局域网访问终端",
+    settingsAllowLANHelp: "默认关闭。在运行 AHA2 的电脑上通过 localhost 开启。Owner 可以从局域网关闭。",
+    settingsExternalOrigin: "终端外部访问地址",
+    settingsExternalOriginHelp: "通过反向代理访问时，填写浏览器使用的协议、域名和端口。留空则沿用直连校验。",
+    settingsInvalidExternalOrigin: "请输入有效的 HTTP 或 HTTPS 地址，地址只应包含协议、主机和可选端口。",
+    settingsEnableRequiresLoopback: "请在运行 AHA2 的电脑上通过 localhost 开启。",
+    settingsSaved: "工作区终端设置已保存。",
+    settingsSave: "保存终端设置",
+    settingsSaving: "正在保存…",
     empty: "用 ＋ 新建终端，或选择已有标签。",
     unavailable: "当前工作区的终端不可用。",
     unsupported: "当前工作区不支持终端。",
@@ -51,6 +62,10 @@ const copy = {
     startFailed: "工作区主机启动终端失败，请查看服务端日志。",
     checkFailed: "暂时无法确认终端访问权限，请重试。",
     accessRevoked: "终端访问权限已撤销，请检查登录状态和局域网终端设置。",
+    originRejected: "终端请求来源校验未通过，请检查终端外部访问地址和反向代理设置。",
+    invalidSize: "终端尺寸超出允许范围，请调整窗口大小后重试。",
+    invalidTarget: "终端请求指定的工作区无效，请重新选择工作区。",
+    taskNotFound: "找不到该任务，请返回任务列表确认。",
     requestFailed: "创建终端的请求失败，请重试。",
     closeFailed: "无法关闭终端，请重试。",
     limit: "当前工作区最多开 6 个终端。",
@@ -71,6 +86,16 @@ const copy = {
     resize: "Drag to resize, double-click to reset the height",
     locked: "LAN terminal locked · Enable in settings on the host",
     settings: "Open terminal settings",
+    settingsTitle: "Workspace terminal",
+    settingsAllowLAN: "Allow workspace terminals over LAN",
+    settingsAllowLANHelp: "Off by default. Enable via localhost on the computer running AHA2. The owner can disable it over the LAN.",
+    settingsExternalOrigin: "External terminal address",
+    settingsExternalOriginHelp: "If you use a reverse proxy, enter the scheme, host, and port used by your browser. Leave blank to use direct-connection checks.",
+    settingsInvalidExternalOrigin: "Enter a valid HTTP or HTTPS address with a scheme, host, and optional port.",
+    settingsEnableRequiresLoopback: "To enable LAN terminals, open this page via localhost on the computer running AHA2.",
+    settingsSaved: "Workspace terminal setting saved.",
+    settingsSave: "Save terminal setting",
+    settingsSaving: "Saving…",
     empty: "Open a terminal with + or select an existing tab.",
     unavailable: "Terminal unavailable for this workspace.",
     unsupported: "This workspace does not support terminals.",
@@ -81,6 +106,10 @@ const copy = {
     startFailed: "The workspace host could not start the terminal. Check the server logs.",
     checkFailed: "Terminal access could not be verified. Try again.",
     accessRevoked: "Terminal access was revoked. Check your login and LAN terminal settings.",
+    originRejected: "Terminal origin check failed. Check the external terminal address and reverse proxy settings.",
+    invalidSize: "Terminal dimensions are out of range. Resize the window and try again.",
+    invalidTarget: "The terminal request specifies an invalid workspace. Select the workspace again.",
+    taskNotFound: "Task not found. Check the task list.",
     requestFailed: "Could not create the terminal. Try again.",
     closeFailed: "Unable to close the terminal. Try again.",
     limit: "This workspace can have up to 6 terminals.",
@@ -98,8 +127,43 @@ function errorCode(reason: unknown): string | undefined {
   return (reason as {code?: string})?.code;
 }
 
+export function renderWorkspaceTerminalSettings(settings: SecuritySettings, escapeHTML: (value: string) => string): string {
+  return `<section class="panel spaced account-security-panel">
+    <div class="panel-head"><strong>${label("settingsTitle")}</strong></div>
+    <form id="workspace-terminal-settings-form">
+      <label class="security-setting-toggle"><input name="workspace_terminal_lan" type="checkbox" ${settings.workspace_terminal_lan ? "checked" : ""}><span><strong>${label("settingsAllowLAN")}</strong><small>${label("settingsAllowLANHelp")}</small></span></label>
+      <label>${label("settingsExternalOrigin")}<input name="workspace_terminal_external_origin" type="url" value="${escapeHTML(settings.workspace_terminal_external_origin || "")}" placeholder="https://aha.example.com" aria-describedby="workspace-terminal-external-origin-help"></label>
+      <div class="field-help" id="workspace-terminal-external-origin-help">${label("settingsExternalOriginHelp")}</div>
+      <div class="dialog-actions"><button class="primary" type="submit">${label("settingsSave")}</button></div>
+    </form>
+  </section>`;
+}
+
+export async function saveWorkspaceTerminalSettings(form: FormData, settings: SecuritySettings): Promise<SecuritySettings> {
+  const lan = form.get("workspace_terminal_lan") === "on";
+  const origin = String(form.get("workspace_terminal_external_origin") || "").trim();
+  const payload = {
+    workspace_terminal_lan: lan !== Boolean(settings.workspace_terminal_lan) ? lan : undefined,
+    workspace_terminal_external_origin: origin !== (settings.workspace_terminal_external_origin || "") ? origin : undefined,
+  };
+  if (payload.workspace_terminal_lan === undefined && payload.workspace_terminal_external_origin === undefined) return settings;
+  try {
+    return (await api.updateWorkspaceTerminalSettings(payload)).security;
+  } catch (error) {
+    switch (errorCode(error)) {
+      case "workspace_terminal_lan_enable_requires_loopback": throw new Error(label("settingsEnableRequiresLoopback"));
+      case "workspace_terminal_invalid_external_origin": throw new Error(label("settingsInvalidExternalOrigin"));
+      default: throw error;
+    }
+  }
+}
+
 function terminalError(code: string | undefined, fallback: "unavailable" | "requestFailed" | "closeFailed"): string {
   switch (code) {
+    case "origin_rejected": return label("originRejected");
+    case "workspace_terminal_invalid_size": return label("invalidSize");
+    case "workspace_terminal_invalid_target": return label("invalidTarget");
+    case "task_not_found": return label("taskNotFound");
     case "workspace_terminal_unsupported": return label("unsupported");
     case "workspace_terminal_unavailable": return label("unavailable");
     case "workspace_terminal_start_failed": return label("startFailed");

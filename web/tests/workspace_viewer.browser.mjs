@@ -82,6 +82,7 @@ try {
     const sessions = new Map();
     const sockets = new Map();
     let allowTerminalLAN = false;
+    let externalTerminalOrigin = "";
     let nextTerminal = 1;
     if (terminalFixture) await ctx.routeWebSocket(/\/workspace-terminal\/[^/]+\/ws/, ws => {
       const url = new URL(ws.url());
@@ -104,15 +105,17 @@ try {
       const answer = (json, status = 200) => route.fulfill({json, status});
       if (path === "/api/v1/auth/status") return answer({authenticated: true, csrf_token: "fixture", username: "Owner"});
       if (path === "/api/v1/settings/general") return answer({general: {language}});
-      if (terminalFixture && path === "/api/v1/settings/security") {
-        return answer({security: {access_scope: "lan", validate_origin: true, workspace_terminal_lan: allowTerminalLAN}});
-      }
-      if (terminalFixture && path === "/api/v1/settings/security/workspace-terminal") {
-        allowTerminalLAN = route.request().postDataJSON().workspace_terminal_lan;
-        if (!allowTerminalLAN) for (const list of sockets.values()) {
-          for (const ws of list) void ws.close({code: 1008});
+      if (terminalFixture && (path === "/api/v1/settings/security" || path === "/api/v1/settings/security/workspace-terminal")) {
+        if (path.endsWith("/workspace-terminal")) {
+          const payload = route.request().postDataJSON();
+          allowTerminalLAN = payload.workspace_terminal_lan ?? allowTerminalLAN;
+          externalTerminalOrigin = payload.workspace_terminal_external_origin ?? externalTerminalOrigin;
+          if (!allowTerminalLAN) for (const list of sockets.values()) {
+            for (const ws of list) void ws.close({code: 1008});
+          }
         }
-        return answer({security: {access_scope: "lan", validate_origin: true, workspace_terminal_lan: allowTerminalLAN}});
+        return answer({security: {access_scope: "lan", validate_origin: true, workspace_terminal_lan: allowTerminalLAN,
+          workspace_terminal_external_origin: externalTerminalOrigin}});
       }
       if (path.endsWith("/workspace-targets")) return answer({workspaces: terminalFixture
         ? [{id: "", name: "Local checkout"}, {id: "ssh-workspace", name: "Builder"}] : []});
@@ -639,6 +642,7 @@ try {
   const terminalLocales = {
     "en-US": {
       title: "Workspace terminal", lock: /LAN terminal locked/, allow: /Allow workspace terminals over LAN/,
+      externalOrigin: "External terminal address",
       save: "Save terminal setting", saved: "Workspace terminal setting saved.", refresh: "Refresh",
       new: "New terminal on this workspace host", split: "Split terminal side by side", input: "Terminal input",
       maximize: "Maximize terminal", restore: "Restore terminal height", expand: "Expand terminal",
@@ -646,6 +650,7 @@ try {
     },
     "zh-CN": {
       title: "工作区终端", lock: /局域网终端已锁定/, allow: /允许通过局域网访问终端/,
+      externalOrigin: "终端外部访问地址",
       save: "保存终端设置", saved: "工作区终端设置已保存。", refresh: "刷新",
       new: "在当前工作区主机新建终端", split: "分屏（左右两栏）", input: "终端输入",
       maximize: "最大化终端", restore: "恢复终端高度", expand: "展开终端",
@@ -676,6 +681,20 @@ try {
     await settings.getByText(labels.saved).waitFor();
     await settings.reload();
     await settings.locator('[name="workspace_terminal_lan"]:checked').waitFor();
+    const externalOrigin = settings.getByRole("textbox", {name: labels.externalOrigin});
+    assert.equal(await externalOrigin.inputValue(), "");
+    await externalOrigin.fill("https://proxy.example");
+    const addressSave = settings.waitForRequest(request =>
+      request.method() === "PUT" && request.url().endsWith("/settings/security/workspace-terminal"));
+    await settings.getByRole("button", {name: labels.save}).click();
+    const saveRequest = await addressSave;
+    assert.deepEqual(saveRequest.postDataJSON(), {workspace_terminal_external_origin: "https://proxy.example"});
+    assert.equal(await saveRequest.headerValue("x-csrf-token"), "fixture");
+    await settings.getByText(labels.saved).waitFor();
+    await settings.reload();
+    await externalOrigin.waitFor();
+    assert.equal(await externalOrigin.inputValue(), "https://proxy.example");
+    assert.equal(await toggle.isChecked(), true);
     await page.bringToFront();
     await page.getByRole("button", {name: labels.refresh, exact: true}).click();
     const left = drawer.locator('[data-pane="0"]');
@@ -835,13 +854,17 @@ try {
   assert.equal(failures.terminalRequests.filter(({method}) => method === "POST").length, 1);
   const newTerminal = errorsPage.getByRole("button", {name: "New terminal on this workspace host"});
   for (const [code, status, message] of [
-    ["unsupported", 422, "This workspace does not support terminals."],
-    ["unavailable", 404, "Terminal unavailable for this workspace."],
-    ["limit", 409, "This workspace can have up to 6 terminals."],
-    ["start_failed", 503, "The workspace host could not start the terminal. Check the server logs."],
-    ["access_revoked", 403, "Terminal access was revoked. Check your login and LAN terminal settings."],
+    ["workspace_terminal_unsupported", 422, "This workspace does not support terminals."],
+    ["workspace_terminal_unavailable", 404, "Terminal unavailable for this workspace."],
+    ["workspace_terminal_limit", 409, "This workspace can have up to 6 terminals."],
+    ["workspace_terminal_start_failed", 503, "The workspace host could not start the terminal. Check the server logs."],
+    ["workspace_terminal_access_revoked", 403, "Terminal access was revoked. Check your login and LAN terminal settings."],
+    ["origin_rejected", 403, "Terminal origin check failed. Check the external terminal address and reverse proxy settings."],
+    ["workspace_terminal_invalid_size", 400, "Terminal dimensions are out of range. Resize the window and try again."],
+    ["workspace_terminal_invalid_target", 400, "The terminal request specifies an invalid workspace. Select the workspace again."],
+    ["task_not_found", 404, "Task not found. Check the task list."],
   ]) {
-    failures.failTerminal("POST", "workspace_terminal_" + code, status);
+    failures.failTerminal("POST", code, status);
     await newTerminal.click();
     await errorsPage.getByText(message, {exact: true}).waitFor();
   }

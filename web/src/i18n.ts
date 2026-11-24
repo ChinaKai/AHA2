@@ -3,13 +3,6 @@ export type LanguagePreference = "auto" | Locale;
 
 const zhCN: Record<string, string> = {
   "workspaceViewer.open": "打开工作区",
-  "workspaceTerminal.title": "工作区终端",
-  "workspaceTerminal.allowLAN": "允许通过局域网访问终端",
-  "workspaceTerminal.allowLANHelp": "默认关闭。在运行 AHA2 的电脑上通过 localhost 开启。Owner 可以从局域网关闭。",
-  "workspaceTerminal.enableRequiresLoopback": "请在运行 AHA2 的电脑上通过 localhost 开启。",
-  "workspaceTerminal.saved": "工作区终端设置已保存。",
-  "workspaceTerminal.save": "保存终端设置",
-  "workspaceTerminal.saving": "正在保存…",
   "workspaceViewer.unavailable": "该任务的工作区或工作树不可用。",
   "workspaceViewer.transport": "无法通过当前连接读取工作区。SSH 和 WSL 需要支持 Python 3 的 Unix 环境。",
   "onboarding.open": "打开首装引导",
@@ -844,13 +837,6 @@ const zhCN: Record<string, string> = {
 
 const enUS: Record<string, string> = {
   "workspaceViewer.open": "Open Workspace",
-  "workspaceTerminal.title": "Workspace terminal",
-  "workspaceTerminal.allowLAN": "Allow workspace terminals over LAN",
-  "workspaceTerminal.allowLANHelp": "Off by default. Enable via localhost on the computer running AHA2. The owner can disable it over the LAN.",
-  "workspaceTerminal.enableRequiresLoopback": "To enable LAN terminals, open this page via localhost on the computer running AHA2.",
-  "workspaceTerminal.saved": "Workspace terminal setting saved.",
-  "workspaceTerminal.save": "Save terminal setting",
-  "workspaceTerminal.saving": "Saving…",
   "workspaceViewer.unavailable": "This task’s workspace or worktree is unavailable.",
   "workspaceViewer.transport": "Unable to read the workspace over this connection. SSH and WSL require a Unix environment with Python 3.",
   "onboarding.open": "Open setup checklist",
