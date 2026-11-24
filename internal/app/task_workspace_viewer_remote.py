@@ -12,10 +12,8 @@ import threading
 import time
 
 DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-REPO_LIMIT = 64
-REPO_DEPTH = 2
-REPO_SCAN_LIMIT = 512
-REPO_PATH_DEPTH = 12
+REPO_TIMEOUT = 5
+REPO_METADATA_LIMIT = 8 << 20
 GITLINK_LIMIT = 8 << 20
 
 
@@ -192,18 +190,21 @@ def git_marker(root):
     return True
 
 
-def repository_git(git_dir, limit, *args):
+def repository_git(git_dir, limit, *args, deadline=None):
+    timeout = 2 if deadline is None else min(2, deadline - time.monotonic())
+    if timeout <= 0:
+        return b"", -1, False
     return run_git_command(
         ["git", "--no-pager", "--git-dir=" + git_dir, "--work-tree=.", "-c", "core.fsmonitor=false",
          "-c", "core.hooksPath=" + os.devnull, *args],
-        isolated_git_environment(git_environment()), limit, timeout=2,
+        isolated_git_environment(git_environment()), limit, timeout=timeout,
     )
 
 
-def workspace_module_dirs():
+def workspace_module_dirs(deadline=None):
     dirs = []
     for flag in ("--git-common-dir", "--git-dir"):
-        data, code, cut = repository_git(".git", 4096, "rev-parse", "--path-format=absolute", flag)
+        data, code, cut = repository_git(".git", 4096, "rev-parse", "--path-format=absolute", flag, deadline=deadline)
         git_dir = os.fsdecode(data.rstrip(b"\n"))
         if not cut and code == 0 and os.path.isabs(git_dir):
             dirs.append(os.path.join(git_dir, "modules"))
@@ -243,10 +244,10 @@ def submodule_git_dir(root, scoped, relative, root_path, module_dirs):
     return None
 
 
-def repository_children(root, git_dir, scan, deadline):
+def repository_children(root, git_dir, deadline):
     children = set()
     try:
-        index, code, truncated = repository_git(git_dir, GITLINK_LIMIT, "ls-files", "--stage", "-z", "--")
+        index, code, truncated = repository_git(git_dir, GITLINK_LIMIT, "ls-files", "--stage", "-z", "--", deadline=deadline)
         truncated = truncated or code != 0
         for record in index.split(b"\x00")[:-1]:
             header, _, relative = record.partition(b"\t")
@@ -257,97 +258,109 @@ def repository_children(root, git_dir, scan, deadline):
         truncated = True
 
     queue = deque([""])
-    while queue and scan[0] and time.monotonic() < deadline:
-        scan[0] -= 1
+    while queue and time.monotonic() < deadline:
         relative = queue.popleft()
         try:
-            listing = list_tree(root, relative)["tree"]
+            handle = open_path(root, relative, DIRECTORY)
+            try:
+                with os.scandir(handle) as entries:
+                    for entry in entries:
+                        if time.monotonic() >= deadline:
+                            truncated = True
+                            break
+                        name = relative + "/" + entry.name if relative else entry.name
+                        if name in children or not valid_repository_path(name) or not entry.is_dir(follow_symlinks=False):
+                            continue
+                        try:
+                            child = open_path(handle, entry.name, DIRECTORY)
+                            try:
+                                if git_marker(child):
+                                    children.add(name)
+                                else:
+                                    queue.append(name)
+                            finally:
+                                os.close(child)
+                        except FileNotFoundError:
+                            continue
+                        except OSError:
+                            continue
+            finally:
+                os.close(handle)
         except OSError:
             truncated = True
-            continue
-        truncated = truncated or listing["truncated"]
-        for entry in listing["entries"]:
-            name = entry["path"]
-            if entry["kind"] != "directory" or name in children or not valid_repository_path(name):
-                continue
-            try:
-                child = open_path(root, name, DIRECTORY)
-                try:
-                    if git_marker(child):
-                        children.add(name)
-                        continue
-                finally:
-                    os.close(child)
-            except FileNotFoundError:
-                continue
-            except OSError:
-                continue
-            if name.count("/") + 1 == REPO_PATH_DEPTH or len(queue) >= scan[0]:
-                truncated = True
-            else:
-                queue.append(name)
     return sorted(children), truncated or bool(queue)
+
+
+def repository_details(root, relative, root_path, module_dirs, deadline):
+    item = {
+        "id": relative, "path": relative, "name": os.path.basename(relative or root_path),
+        "initialized": False, "readable": False, "head": "", "branch": "", "detached": False,
+    }
+    try:
+        handle = open_path(root, relative, DIRECTORY)
+    except OSError:
+        return item, [], False
+    try:
+        os.fchdir(handle)
+        item["initialized"] = git_marker(handle)
+        if not item["initialized"]:
+            return item, [], False
+        git_dir = submodule_git_dir(root, handle, relative, root_path, module_dirs)
+        if git_dir is None:
+            return item, [], False
+        head, code, cut = repository_git(git_dir, 1024, "rev-parse", "--verify", "--quiet", "HEAD", deadline=deadline)
+        head = head.strip()
+        if cut or (code != 1 and (code != 0 or not re.fullmatch(b"(?:[0-9a-f]{40}|[0-9a-f]{64})", head))):
+            return item, [], False
+        branch, code, cut = repository_git(git_dir, 4096, "symbolic-ref", "--quiet", "HEAD", deadline=deadline)
+        if cut or code not in (0, 1):
+            return item, [], False
+        if branch.endswith(b"\n"):
+            branch = branch[:-1]
+        if branch.startswith(b"refs/heads/"):
+            branch = branch[len(b"refs/heads/"):]
+        item.update(readable=True, head=head.decode("ascii"), detached=code == 1 and bool(head),
+                    branch=branch.decode("utf-8", errors="replace"))
+        children, cut = repository_children(handle, git_dir, deadline)
+        return item, children, cut
+    except OSError:
+        return item, [], True
+    finally:
+        os.close(handle)
 
 
 def repositories(root):
     if not git_marker(root):
         return {}
     root_path = os.getcwd()
-    module_dirs = workspace_module_dirs()
-    items, scan = [], [REPO_SCAN_LIMIT]
-    deadline = time.monotonic() + 5
-    truncated = False
-
-    def visit(relative, depth):
-        nonlocal truncated
-        item = {
-            "id": relative, "path": relative, "name": relative.rsplit("/", 1)[-1],
-            "initialized": False, "readable": False,
-        }
+    deadline = time.monotonic() + REPO_TIMEOUT
+    module_dirs = workspace_module_dirs(deadline)
+    items, pending, seen = [], [""], set()
+    size = 0
+    truncated = size_reached = False
+    while pending and time.monotonic() < deadline:
+        relative = pending.pop()
+        if relative in seen:
+            continue
+        seen.add(relative)
+        item, children, cut = repository_details(root, relative, root_path, module_dirs, deadline)
+        size += len(json.dumps(item, ensure_ascii=False).encode("utf-8")) + 2
+        if size > REPO_METADATA_LIMIT:
+            size_reached = True
+            break
         items.append(item)
-        try:
-            handle = open_path(root, relative, DIRECTORY)
-        except OSError:
-            return
-        try:
-            os.fchdir(handle)
-            item["initialized"] = git_marker(handle)
-            if not item["initialized"]:
-                return
-            git_dir = submodule_git_dir(root, handle, relative, root_path, module_dirs)
-            if git_dir is None:
-                return
-            head, code, cut = repository_git(git_dir, 1024, "rev-parse", "--verify", "--quiet", "HEAD")
-            head = head.strip()
-            if cut or (code != 1 and (code != 0 or not re.fullmatch(b"(?:[0-9a-f]{40}|[0-9a-f]{64})", head))):
-                return
-            branch, code, cut = repository_git(git_dir, 4096, "symbolic-ref", "--quiet", "HEAD")
-            if cut or code not in (0, 1):
-                return
-            if branch.endswith(b"\n"):
-                branch = branch[:-1]
-            if branch.startswith(b"refs/heads/"):
-                branch = branch[len(b"refs/heads/"):]
-            item.update(readable=True, head=head.decode("ascii"), detached=code == 1 and bool(head),
-                        branch=branch.decode("utf-8", errors="replace"))
-            children, cut = repository_children(handle, git_dir, scan, deadline)
-            truncated = truncated or cut
-            for child in children:
-                if depth == REPO_DEPTH or len(items) == REPO_LIMIT or time.monotonic() >= deadline:
-                    truncated = True
-                    break
-                full_path = relative + "/" + child if relative else child
-                if valid_repository_path(full_path):
-                    visit(full_path, depth + 1)
-        except OSError:
-            return
-        finally:
-            os.close(handle)
-
-    visit("", 0)
-    if not items[0]["readable"]:
+        truncated = truncated or cut
+        for child in reversed(children):
+            full_path = relative + "/" + child if relative else child
+            if valid_repository_path(full_path):
+                pending.append(full_path)
+    if not items or not items[0]["readable"]:
         return {"error": "git"}
-    return {"repositories": items, "repositoriesTruncated": truncated}
+    deadline_reached = time.monotonic() >= deadline
+    return {
+        "repositories": items, "repositoriesTruncated": truncated or deadline_reached or size_reached,
+        "repositoryDeadlineReached": deadline_reached, "repositorySizeReached": size_reached,
+    }
 
 
 def read(req):

@@ -19,6 +19,7 @@ func TestWorkspaceViewerRepositories(t *testing.T) {
 	testViewerGitSources(t, func(t *testing.T, dir string, source viewerFS) {
 		const child = "modules/application"
 		const nested = child + "/sdk"
+		const deep = nested + "/tools"
 		makeRepo := func(rel, branch, text string) {
 			folder := filepath.Join(dir, filepath.FromSlash(rel))
 			if err := os.MkdirAll(folder, 0700); err != nil {
@@ -32,7 +33,7 @@ func TestWorkspaceViewerRepositories(t *testing.T) {
 		makeRepo("", "main", "parent data")
 		makeRepo(child, "feature", "child data")
 		makeRepo(nested, "trunk", "nested data")
-		makeRepo(nested+"/too-deep", "main", "too deep")
+		makeRepo(deep, "main", "deep repository")
 		childDir := filepath.Join(dir, filepath.FromSlash(child))
 		nestedDir := filepath.Join(dir, filepath.FromSlash(nested))
 		runViewerFixtureGit(t, nestedDir, "checkout", "--detach")
@@ -81,7 +82,7 @@ func TestWorkspaceViewerRepositories(t *testing.T) {
 		view := func(req WorkspaceViewerRequest) (any, error) {
 			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 			defer cancel()
-			return readWorkspaceView(ctx, source, task, "Workspace", req)
+			return readWorkspaceView(ctx, source, task, "Workspace", "parent-repository", req)
 		}
 		read := func(req WorkspaceViewerRequest) any {
 			t.Helper()
@@ -92,7 +93,7 @@ func TestWorkspaceViewerRepositories(t *testing.T) {
 			return value
 		}
 		state := read(WorkspaceViewerRequest{View: "state"}).(viewerState)
-		wantIDs := []string{"", "external", child, nested, "modules/missing"}
+		wantIDs := []string{"", "external", child, nested, deep, "modules/missing"}
 		if linkAllowed {
 			wantIDs = slices.Insert(wantIDs, 2, "linked")
 		}
@@ -101,7 +102,7 @@ func TestWorkspaceViewerRepositories(t *testing.T) {
 			ids = append(ids, item.ID)
 			switch item.ID {
 			case "":
-				if item.Name != "Workspace" || !item.Readable || item.Branch != "main" {
+				if item.Name != "parent-repository" || !item.Readable || item.Branch != "main" {
 					t.Fatalf("root repository: %+v", item)
 				}
 			case child:
@@ -122,7 +123,7 @@ func TestWorkspaceViewerRepositories(t *testing.T) {
 				}
 			}
 		}
-		if !slices.Equal(ids, wantIDs) || !state.viewerRepositories.Truncated {
+		if !slices.Equal(ids, wantIDs) || state.viewerRepositories.Truncated {
 			t.Fatalf("repository list: %+v", state.viewerRepositories)
 		}
 		if got := read(WorkspaceViewerRequest{View: "state", Summary: true}).(viewerState); got.Version != state.Version {
@@ -145,7 +146,7 @@ func TestWorkspaceViewerRepositories(t *testing.T) {
 			slices.ContainsFunc(list.Entries, func(e viewerEntry) bool { return e.Path == ".git" || strings.HasPrefix(e.Path, child) }) {
 			t.Fatalf("child tree: %+v", list)
 		}
-		for repo, want := range map[string]string{"": "parent data\n", child: "working change in child\n", nested: "nested data\n"} {
+		for repo, want := range map[string]string{"": "parent data\n", child: "working change in child\n", nested: "nested data\n", deep: "deep repository\n"} {
 			if file := read(WorkspaceViewerRequest{View: "file", Repo: repo, Path: "shared.txt"}).(viewerContent); file.Text != want {
 				t.Fatalf("file in %q: %+v", repo, file)
 			}
@@ -184,7 +185,6 @@ func TestWorkspaceViewerRepositories(t *testing.T) {
 		}{
 			{WorkspaceViewerRequest{View: "state", Repo: "../outside"}, ErrViewerRepository},
 			{WorkspaceViewerRequest{View: "tree", Repo: "ordinary"}, ErrViewerRepository},
-			{WorkspaceViewerRequest{View: "tree", Repo: nested + "/too-deep"}, ErrViewerRepository},
 			{WorkspaceViewerRequest{View: "file", Repo: "modules/missing", Path: "shared.txt"}, ErrViewerRepoMissing},
 			{WorkspaceViewerRequest{View: "diff", Repo: "external", Path: "shared.txt", Scope: "commit", Commit: childHead}, ErrViewerRepoMissing},
 			{WorkspaceViewerRequest{View: "file", Repo: child, Path: "../shared.txt"}, ErrViewerPath},
@@ -236,7 +236,7 @@ func TestWorkspaceViewerLinkedWorktreeSubmodule(t *testing.T) {
 			t.Helper()
 			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 			defer cancel()
-			value, err := readWorkspaceView(ctx, source, domain.Task{}, "Linked worktree", req)
+			value, err := readWorkspaceView(ctx, source, domain.Task{}, "Linked worktree", "original-repository", req)
 			if err != nil {
 				t.Fatalf("%+v: %v", req, err)
 			}
@@ -272,7 +272,7 @@ func TestWorkspaceViewerLinkedWorktreeSubmodule(t *testing.T) {
 	})
 }
 
-func TestWorkspaceViewerRepositoryLimit(t *testing.T) {
+func TestWorkspaceViewerDiscoversMoreThan64Repositories(t *testing.T) {
 	testViewerGitSources(t, func(t *testing.T, dir string, source viewerFS) {
 		runViewerFixtureGit(t, dir, "init", "-b", "main")
 		writeViewerFixture(t, dir, "root.txt", "root\n")
@@ -280,7 +280,8 @@ func TestWorkspaceViewerRepositoryLimit(t *testing.T) {
 		runViewerFixtureGit(t, dir, "commit", "-m", "root")
 		head := runViewerFixtureGit(t, dir, "rev-parse", "HEAD")
 		var links strings.Builder
-		for i := 0; i < viewerRepoLimit; i++ {
+		const linksCount = 70
+		for i := 0; i < linksCount; i++ {
 			fmt.Fprintf(&links, "160000 %s\tmodule-%02d\n", head, i)
 		}
 		cmd := exec.CommandContext(t.Context(), "git", "update-index", "--index-info")
@@ -290,9 +291,127 @@ func TestWorkspaceViewerRepositoryLimit(t *testing.T) {
 			t.Fatalf("Git link fixture: %v: %s", err, output)
 		}
 		repos, err := source.repositories(t.Context())
-		if err != nil || len(repos.Items) != viewerRepoLimit || !repos.Truncated ||
-			repos.Items[0].ID != "" || repos.Items[viewerRepoLimit-1].ID != "module-62" {
-			t.Fatalf("bounded discovery: %+v, %v", repos, err)
+		if err != nil || len(repos.Items) != linksCount+1 || repos.Truncated ||
+			repos.Items[0].ID != "" || repos.Items[0].Name != filepath.Base(dir) || repos.Items[linksCount].ID != "module-69" {
+			t.Fatalf("complete repository discovery: %+v, %v", repos, err)
+		}
+	})
+}
+
+func TestWorkspaceViewerGitlinkChanges(t *testing.T) {
+	testViewerGitSources(t, func(t *testing.T, dir string, source viewerFS) {
+		isolateViewerGitConfig(t)
+		const child = "libs/child [module]"
+		upstream := t.TempDir()
+		runViewerFixtureGit(t, upstream, "init", "-b", "main")
+		writeViewerFixture(t, upstream, "code.txt", "one\n")
+		runViewerFixtureGit(t, upstream, "add", "code.txt")
+		runViewerFixtureGit(t, upstream, "commit", "-m", "First child version")
+		old := runViewerFixtureGit(t, upstream, "rev-parse", "HEAD")
+		runViewerFixtureGit(t, dir, "init", "-b", "main")
+		runViewerFixtureGit(t, dir, "-c", "protocol.file.allow=always", "submodule", "add", upstream, child)
+		runViewerFixtureGit(t, dir, "config", "submodule."+child+".ignore", "all")
+		runViewerFixtureGit(t, dir, "config", "diff.submodule", "log")
+		runViewerFixtureGit(t, dir, "commit", "-m", "Add child")
+		parentBase := runViewerFixtureGit(t, dir, "rev-parse", "HEAD")
+		childDir := filepath.Join(dir, filepath.FromSlash(child))
+		writeViewerFixture(t, childDir, "code.txt", "two\n")
+		runViewerFixtureGit(t, childDir, "add", "code.txt")
+		runViewerFixtureGit(t, childDir, "commit", "-m", "Second child version")
+		newHead := runViewerFixtureGit(t, childDir, "rev-parse", "HEAD")
+		runViewerFixtureGit(t, dir, "add", "--force", "--", child)
+		runViewerFixtureGit(t, dir, "commit", "-m", "Update only the child pointer")
+		commit := runViewerFixtureGit(t, dir, "rev-parse", "HEAD")
+
+		read := func(req WorkspaceViewerRequest) any {
+			t.Helper()
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+			defer cancel()
+			value, err := readWorkspaceView(ctx, source, domain.Task{BaseCommit: parentBase}, "Workspace", "parent-repository", req)
+			if err != nil {
+				t.Fatalf("%+v: %v", req, err)
+			}
+			return value
+		}
+		assertLink := func(changes []viewerChange, want viewerGitlink) {
+			t.Helper()
+			if len(changes) != 1 || changes[0].Path != child || changes[0].Gitlink == nil || *changes[0].Gitlink != want {
+				t.Fatalf("gitlink changes: %+v, want %+v under %s", changes, want, child)
+			}
+		}
+		assertPreview := func(scope, prior, next string) {
+			t.Helper()
+			diff := read(WorkspaceViewerRequest{View: "diff", Path: child, Scope: scope, Commit: commit}).(viewerContent)
+			if !strings.Contains(diff.Text, "-Subproject commit "+prior) || !strings.Contains(diff.Text, "+Subproject commit "+next) ||
+				strings.Contains(diff.Text, "code.txt") || strings.Contains(diff.Text, "Second child version") {
+				t.Fatalf("%s pointer preview: %q", scope, diff.Text)
+			}
+		}
+		state := read(WorkspaceViewerRequest{View: "state"}).(viewerState)
+		if len(state.Commits) != 1 {
+			t.Fatalf("pointer-only commit: %+v", state.Commits)
+		}
+		for _, changes := range [][]viewerChange{state.Commits[0].Files, state.BaseChanges} {
+			assertLink(changes, viewerGitlink{Old: old, New: newHead})
+		}
+		assertPreview("commit", old, newHead)
+		assertPreview("base", old, newHead)
+		t.Log("pointer-only commit and baseline both list the changed gitlink and show its full IDs")
+
+		writeViewerFixture(t, childDir, "code.txt", "dirty child worktree\n")
+		writeViewerFixture(t, childDir, "untracked.txt", "untracked child data\n")
+		dirty := read(WorkspaceViewerRequest{View: "state"}).(viewerState)
+		if len(dirty.Uncommitted) != 0 || dirty.Version != state.Version {
+			t.Fatalf("child worktree dirt leaked into parent state: %+v", dirty.Uncommitted)
+		}
+		runViewerFixtureGit(t, childDir, "checkout", "--force", "--detach", old)
+		state = read(WorkspaceViewerRequest{View: "state"}).(viewerState)
+		assertLink(state.Uncommitted, viewerGitlink{Old: newHead, New: old})
+		assertPreview("uncommitted", newHead, old)
+		summary := read(WorkspaceViewerRequest{View: "state", Summary: true}).(viewerState)
+		if summary.Version == dirty.Version || summary.Version != state.Version {
+			t.Fatalf("summary did not track the checked-out pointer")
+		}
+		runViewerFixtureGit(t, dir, "add", "--force", "--", child)
+		state = read(WorkspaceViewerRequest{View: "state"}).(viewerState)
+		assertLink(state.Uncommitted, viewerGitlink{Old: newHead, New: old})
+		assertPreview("uncommitted", newHead, old)
+		runViewerFixtureGit(t, childDir, "checkout", "--detach", newHead)
+		state = read(WorkspaceViewerRequest{View: "state"}).(viewerState)
+		assertLink(state.Uncommitted, viewerGitlink{Old: newHead, Index: old, New: newHead})
+		assertPreview("uncommitted", newHead, old)
+		assertPreview("uncommitted", old, newHead)
+		t.Log("worktree-only, staged, and divergent index/worktree pointers show without child file changes")
+	})
+}
+
+func TestWorkspaceViewerDiscoversRepositoriesAfterWideAndDeepPaths(t *testing.T) {
+	testViewerGitSources(t, func(t *testing.T, dir string, source viewerFS) {
+		runViewerFixtureGit(t, dir, "init", "-b", "main")
+		for i := range 520 {
+			if err := os.Mkdir(filepath.Join(dir, fmt.Sprintf("folder-%03d", i)), 0700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		deep := "folder-519/" + strings.Repeat("layer/", 13) + "repository"
+		folder := filepath.Join(dir, filepath.FromSlash(deep))
+		if err := os.MkdirAll(folder, 0700); err != nil {
+			t.Fatal(err)
+		}
+		runViewerFixtureGit(t, folder, "init", "-b", "main")
+		writeViewerFixture(t, folder, "deep.txt", "deep data")
+		value, err := readWorkspaceView(t.Context(), source, domain.Task{}, "Workspace", "parent-repository", WorkspaceViewerRequest{View: "state"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		state := value.(viewerState)
+		if len(state.Items) != 2 || state.viewerRepositories.Truncated || state.Items[1].ID != deep || !state.Items[1].Readable {
+			t.Fatalf("wide and deep scan: %+v", state.viewerRepositories)
+		}
+		got, err := readWorkspaceView(t.Context(), source, domain.Task{}, "Workspace", "parent-repository",
+			WorkspaceViewerRequest{View: "file", Repo: deep, Path: "deep.txt"})
+		if err != nil || got.(viewerContent).Text != "deep data" {
+			t.Fatalf("read discovered repository: %+v, %v", got, err)
 		}
 	})
 }

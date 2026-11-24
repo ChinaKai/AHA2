@@ -6,23 +6,23 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
-// Keep the limits and repository discovery rules in sync with the POSIX worker.
+// Keep the discovery budgets and rules in sync with the POSIX worker.
 const (
-	viewerRepoLimit     = 64
-	viewerRepoDepth     = 2 // Repository boundaries below the workspace root.
-	viewerRepoScanLimit = 512
-	viewerRepoPathDepth = 12
-	viewerGitlinkLimit  = 8 << 20
+	viewerRepoTimeout       = 5 * time.Second
+	viewerRepoMetadataLimit = 8 << 20
+	viewerGitlinkLimit      = 8 << 20
 )
 
 type viewerRepository struct {
@@ -37,15 +37,17 @@ type viewerRepository struct {
 }
 
 type viewerRepositories struct {
-	Items     []viewerRepository `json:"repositories,omitempty"`
-	Truncated bool               `json:"repositoriesTruncated,omitempty"`
+	Items           []viewerRepository `json:"repositories,omitempty"`
+	Truncated       bool               `json:"repositoriesTruncated,omitempty"`
+	DeadlineReached bool               `json:"repositoryDeadlineReached,omitempty"`
+	SizeReached     bool               `json:"repositorySizeReached,omitempty"`
 }
 
 func validViewerRepositoryPath(rel string) bool {
 	return validViewerPath(rel, false) && !viewerSensitivePath(rel)
 }
 
-func readViewerRepositoryState(ctx context.Context, source viewerFS, task domain.Task, name string,
+func readViewerRepositoryState(ctx context.Context, source viewerFS, task domain.Task, name, repositoryName string,
 	req WorkspaceViewerRequest, repos viewerRepositories, selected viewerRepository,
 ) (viewerState, error) {
 	var state viewerState
@@ -53,14 +55,16 @@ func readViewerRepositoryState(ctx context.Context, source viewerFS, task domain
 		state = viewerState{Name: name, TaskTitle: task.Title, TaskCode: task.Code, RepositoryUnavailable: true}
 	} else {
 		var err error
-		state, err = readViewerState(ctx, source, task, name, req)
+		state, err = readViewerState(ctx, source, task, name, req, repos)
 		if err != nil {
 			return state, err
 		}
 	}
 	state.viewerRepositories = repos
 	if len(repos.Items) > 0 {
-		state.Items[0].Name = name
+		if repositoryName != "" && repositoryName != "." && repositoryName != string(filepath.Separator) {
+			state.Items[0].Name = repositoryName
+		}
 		// Polling also detects repository additions, removals and initialization.
 		metadata, err := json.Marshal(repos)
 		if err != nil {
@@ -79,14 +83,14 @@ func (source nativeViewerFS) openRepository(ctx context.Context, rel string) (vi
 	if err != nil {
 		return nil, nil, err
 	}
-	if _, readable := source.checkRepositoryMarker(ctx, &repo, rel); !readable {
+	if _, readable := source.checkRepositoryMarker(ctx, &repo, rel, func() []string { return source.moduleDirs(ctx) }); !readable {
 		repo.root.Close()
 		return nil, nil, ErrViewerRepoMissing
 	}
 	return repo, func() { repo.root.Close() }, nil
 }
 
-func (source nativeViewerFS) checkRepositoryMarker(ctx context.Context, repo *nativeViewerFS, rel string) (initialized, readable bool) {
+func (source nativeViewerFS) checkRepositoryMarker(ctx context.Context, repo *nativeViewerFS, rel string, moduleDirs func() []string) (initialized, readable bool) {
 	info, err := repo.root.Lstat(".git")
 	if err != nil || !(info.IsDir() || info.Mode().IsRegular()) {
 		return false, false
@@ -108,18 +112,8 @@ func (source nativeViewerFS) checkRepositoryMarker(ctx context.Context, repo *na
 	if err != nil || target != canonical {
 		return true, false
 	}
-	// An absorbed submodule can live under either the shared Git directory
-	// or the linked worktree's own Git directory.
-	probe, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	git := viewerGit{source: source}
-	for _, flag := range []string{"--git-common-dir", "--git-dir"} {
-		out, err := git.checked(probe, 4096, "rev-parse", "--path-format=absolute", flag)
-		if err != nil || out.truncated {
-			continue
-		}
-		dir := strings.TrimSuffix(string(out.data), "\n")
-		if filepath.IsAbs(dir) && viewerModuleTarget(filepath.Join(dir, "modules"), target) {
+	for _, modules := range moduleDirs() {
+		if viewerModuleTarget(modules, target) {
 			repo.gitDir = target
 			return true, true
 		}
@@ -133,6 +127,24 @@ func (source nativeViewerFS) checkRepositoryMarker(ctx context.Context, repo *na
 		}
 	}
 	return true, false
+}
+
+// An absorbed submodule can live under either the shared Git directory
+// or the linked worktree's own Git directory.
+func (source nativeViewerFS) moduleDirs(ctx context.Context) []string {
+	probe, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	git := viewerGit{source: source}
+	var dirs []string
+	for _, flag := range []string{"--git-common-dir", "--git-dir"} {
+		out, err := git.checked(probe, 4096, "rev-parse", "--path-format=absolute", flag)
+		if err == nil && !out.truncated {
+			if dir := strings.TrimSuffix(string(out.data), "\n"); filepath.IsAbs(dir) {
+				dirs = append(dirs, filepath.Join(dir, "modules"))
+			}
+		}
+	}
+	return dirs
 }
 
 func viewerModuleTarget(modules, target string) bool {
@@ -165,63 +177,83 @@ func (source nativeViewerFS) repositories(ctx context.Context) (viewerRepositori
 	if !marker || err != nil {
 		return viewerRepositories{}, err
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	result := viewerRepositories{}
-	scanBudget := viewerRepoScanLimit
-	var visit func(nativeViewerFS, string, int)
-	visit = func(repo nativeViewerFS, rel string, depth int) {
-		metadata := viewerRepository{ID: rel, Path: rel}
+	scan, cancel := context.WithTimeout(ctx, viewerRepoTimeout)
+	defer cancel()
+	var result viewerRepositories
+	moduleDirs := sync.OnceValue(func() []string { return source.moduleDirs(scan) })
+	size := 0
+	pending := []string{""}
+	seen := map[string]bool{}
+	for len(pending) > 0 && scan.Err() == nil {
+		rel := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		if seen[rel] {
+			continue
+		}
+		seen[rel] = true
+		repo := source
 		if rel != "" {
-			metadata.Name = path.Base(rel)
+			repo, _ = source.repositoryDir(rel)
 		}
-		markerOK := false
-		if repo.root != nil {
-			metadata.Initialized, markerOK = source.checkRepositoryMarker(ctx, &repo, rel)
+		item, children, truncated := source.repositoryDetails(scan, repo, rel, moduleDirs)
+		if rel != "" && repo.root != nil {
+			repo.root.Close()
 		}
-		if markerOK {
-			git := viewerGit{source: repo}
-			probe, cancel := context.WithTimeout(ctx, 2*time.Second)
-			head, headErr := git.head(probe)
-			branch, branchErr := git.run(probe, 4096, "symbolic-ref", "--quiet", "HEAD")
-			cancel()
-			metadata.Readable = headErr == nil && branchErr == nil && !branch.truncated && (branch.exit == 0 || branch.exit == 1)
-			if metadata.Readable {
-				metadata.Head = head
-				metadata.Branch = strings.TrimPrefix(strings.TrimSuffix(string(branch.data), "\n"), "refs/heads/")
-				metadata.Detached = branch.exit == 1 && head != ""
-			}
+		encoded, err := json.Marshal(item)
+		if err != nil {
+			return viewerRepositories{}, err
 		}
-		result.Items = append(result.Items, metadata)
-		if !metadata.Readable {
-			return
+		size += len(encoded) + 1
+		if size > viewerRepoMetadataLimit {
+			result.SizeReached = true
+			break
 		}
-
-		children, truncated := repo.repositoryChildren(ctx, &scanBudget, deadline)
+		result.Items = append(result.Items, item)
 		result.Truncated = result.Truncated || truncated
-		for _, child := range children {
-			if depth == viewerRepoDepth || len(result.Items) == viewerRepoLimit || time.Now().After(deadline) {
-				result.Truncated = true
-				break
-			}
-			fullPath := path.Join(rel, child)
-			if !validViewerRepositoryPath(fullPath) {
-				continue
-			}
-			childRepo, err := source.repositoryDir(fullPath)
-			visit(childRepo, fullPath, depth+1)
-			if err == nil {
-				childRepo.root.Close()
+		for _, child := range slices.Backward(children) {
+			if fullPath := path.Join(rel, child); validViewerRepositoryPath(fullPath) {
+				pending = append(pending, fullPath)
 			}
 		}
 	}
-	visit(source, "", 0)
-	if ctx.Err() != nil || !result.Items[0].Readable {
+	result.DeadlineReached = scan.Err() != nil
+	result.Truncated = result.Truncated || result.DeadlineReached || result.SizeReached
+	if ctx.Err() != nil || len(result.Items) == 0 || !result.Items[0].Readable {
 		return viewerRepositories{}, ErrViewerGit
 	}
 	return result, nil
 }
 
-func (source nativeViewerFS) repositoryChildren(ctx context.Context, scanBudget *int, deadline time.Time) ([]string, bool) {
+func (source nativeViewerFS) repositoryDetails(ctx context.Context, repo nativeViewerFS, rel string, moduleDirs func() []string) (viewerRepository, []string, bool) {
+	item := viewerRepository{ID: rel, Path: rel, Name: path.Base(rel)}
+	if rel == "" {
+		item.Name = filepath.Base(source.dir)
+	}
+	if repo.root == nil {
+		return item, nil, false
+	}
+	var markerOK bool
+	item.Initialized, markerOK = source.checkRepositoryMarker(ctx, &repo, rel, moduleDirs)
+	if !markerOK {
+		return item, nil, false
+	}
+	git := viewerGit{source: repo}
+	probe, cancel := context.WithTimeout(ctx, 2*time.Second)
+	head, headErr := git.head(probe)
+	branch, branchErr := git.run(probe, 4096, "symbolic-ref", "--quiet", "HEAD")
+	cancel()
+	item.Readable = headErr == nil && branchErr == nil && !branch.truncated && (branch.exit == 0 || branch.exit == 1)
+	if !item.Readable {
+		return item, nil, false
+	}
+	item.Head = head
+	item.Branch = strings.TrimPrefix(strings.TrimSuffix(string(branch.data), "\n"), "refs/heads/")
+	item.Detached = branch.exit == 1 && head != ""
+	children, truncated := repo.repositoryChildren(ctx)
+	return item, children, truncated
+}
+
+func (source nativeViewerFS) repositoryChildren(ctx context.Context) ([]string, bool) {
 	children := map[string]bool{}
 	git := viewerGit{source: source}
 	probe, cancel := context.WithTimeout(ctx, 2*time.Second)
@@ -234,46 +266,55 @@ func (source nativeViewerFS) repositoryChildren(ctx context.Context, scanBudget 
 		}
 	}
 
-	// A repository can also be checked out inside a workspace without being
-	// registered as a submodule. Stop walking when we reach another Git marker.
+	// A repository can be checked out inside a workspace without being
+	// registered as a submodule. Its contents are scanned in its own turn.
 	queue := []string{""}
-	for len(queue) > 0 {
-		if ctx.Err() != nil || *scanBudget == 0 || time.Now().After(deadline) {
-			truncated = true
-			break
-		}
-		*scanBudget = *scanBudget - 1
+	for len(queue) > 0 && ctx.Err() == nil {
 		rel := queue[0]
 		queue = queue[1:]
-		listing, err := source.tree(ctx, rel)
-		if err != nil {
-			truncated = true
-			continue
-		}
-		truncated = truncated || listing.Truncated
-		for _, entry := range listing.Entries {
-			if entry.Kind != "directory" || !validViewerRepositoryPath(entry.Path) || children[entry.Path] {
-				continue
+		err := source.scanRepositoryDirectories(ctx, rel, func(child string) {
+			if children[child] {
+				return
 			}
-			info, err := source.info(path.Join(entry.Path, ".git"))
+			info, err := source.info(path.Join(child, ".git"))
 			switch {
 			case err == nil:
 				if info.IsDir() || info.Mode().IsRegular() {
-					children[entry.Path] = true
+					children[child] = true
 				}
 			case errors.Is(err, ErrViewerMissing):
-				if strings.Count(entry.Path, "/")+1 == viewerRepoPathDepth || len(queue) >= *scanBudget {
-					truncated = true
-				} else {
-					queue = append(queue, entry.Path)
-				}
+				queue = append(queue, child)
 			}
-		}
+		})
+		truncated = truncated || err != nil
 	}
 	paths := make([]string, 0, len(children))
 	for child := range children {
 		paths = append(paths, child)
 	}
 	slices.Sort(paths)
-	return paths, truncated
+	return paths, truncated || len(queue) > 0
+}
+
+func (source nativeViewerFS) scanRepositoryDirectories(ctx context.Context, rel string, visit func(string)) error {
+	handle, err := source.openDirectory(rel)
+	if err != nil {
+		return err
+	}
+	defer handle.Close()
+	for ctx.Err() == nil {
+		entries, err := handle.ReadDir(512)
+		for _, entry := range entries {
+			if child := path.Join(rel, entry.Name()); entry.IsDir() && validViewerRepositoryPath(child) {
+				visit(child)
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
 }

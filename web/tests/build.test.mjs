@@ -3993,7 +3993,7 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   // tracks the code rather than hash luck.
   const firstScreenGzip = text => gzipSync(Buffer.from(text.replace(/\?v=[a-f0-9]{12}/g, "?v=3f9a1c7e5b2d")), {level: 5}).length;
   const gzipped = [...seen.values()].reduce((total, text) => total + firstScreenGzip(text), 0);
-  const repositoryNotice = "Repository discovery reached its limit.";
+  const repositoryNotice = "Repository discovery timed out.";
   const viewerChunk = jsNames.find(name => name.startsWith("workspace_viewer."));
   assert.ok((await readFile(resolve(dist, viewerChunk), "utf8")).includes(repositoryNotice));
   assert.ok([...seen.values()].every(text => !text.includes(repositoryNotice)), "viewer copy stays in the lazy chunk");

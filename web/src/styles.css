@@ -3853,6 +3853,8 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
 .wv-row > small, .wv-row > code, .wv-stat { color: var(--muted); white-space: nowrap; }
 .wv-commit-title { font-weight: 650; }
 .wv-stat { font-family: var(--font-mono); font-size: var(--font-size-11); }
+.wv-row:has(.wv-gitlink-stat) { flex-wrap: wrap; gap: 0; }
+.wv-gitlink-stat { flex-basis: 100%; padding-inline-start: calc(15px + var(--space-1)); }
 .wv-plus { color: var(--color-success-ink); }
 .wv-minus { color: var(--color-danger-ink); }
 .wv-hint, .wv-truncated { margin: 0; padding: var(--space-2) var(--space-3); color: var(--muted); font-size: var(--font-size-12); }
@@ -3868,7 +3870,8 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
 .wv-tab button:hover, .wv-close-all:hover { background: var(--color-accent-soft); }
 .wv-content { flex: 1; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 .wv-content-head, .wv-toolbar { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--line); }
-.wv-content-head strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: var(--font-size-13); }
+.wv-content-head strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: var(--font-size-13); }
+.wv-content-head .wv-badge { flex-shrink: 0; }
 .wv-toolbar { flex-wrap: wrap; background: var(--color-surface-raised); color: var(--muted); font-size: var(--font-size-12); }
 .wv-toolbar label { display: inline-flex; gap: var(--space-1); align-items: center; }
 .wv-toolbar input { width: auto; margin: 0; }

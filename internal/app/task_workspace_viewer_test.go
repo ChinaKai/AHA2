@@ -76,7 +76,7 @@ func TestWorkspaceViewerFiles(t *testing.T) {
 	for name, source := range sources {
 		t.Run(name, func(t *testing.T) {
 			read := func(view, path string) (any, error) {
-				return readWorkspaceView(t.Context(), source, domain.Task{}, "fixture", WorkspaceViewerRequest{View: view, Path: path, Scope: "uncommitted"})
+				return readWorkspaceView(t.Context(), source, domain.Task{}, "fixture", "fixture", WorkspaceViewerRequest{View: view, Path: path, Scope: "uncommitted"})
 			}
 			result, err := read("state", "")
 			if err != nil || result.(viewerState).IsGit {
@@ -155,7 +155,7 @@ func TestWorkspaceViewerGit(t *testing.T) {
 	defer root.Close()
 	source := nativeViewerFS{root: root, dir: worktree}
 	task := domain.Task{Title: "viewer", BaseCommit: base, TargetBranch: "main"}
-	state, err := readViewerState(t.Context(), source, task, "test", WorkspaceViewerRequest{})
+	state, err := readViewerState(t.Context(), source, task, "test", WorkspaceViewerRequest{}, viewerRepositories{})
 	if err != nil || !state.IsGit || state.Head != head || state.Branch != "task" || state.Base != base ||
 		state.Ahead != 1 || state.Behind != 0 || state.MergeBase != base || len(state.Branches) != 2 ||
 		len(state.Commits) != 1 || len(state.Uncommitted) != 3 || len(state.BaseChanges) != 2 {
@@ -169,26 +169,26 @@ func TestWorkspaceViewerGit(t *testing.T) {
 	}
 	for _, scope := range []string{"commit", "base"} {
 		req := WorkspaceViewerRequest{View: "diff", Path: "readme.txt", Scope: scope, Commit: head}
-		result, err := readWorkspaceView(t.Context(), source, task, "", req)
+		result, err := readWorkspaceView(t.Context(), source, task, "", "", req)
 		if err != nil || !strings.Contains(result.(viewerContent).Text, "+two") {
 			t.Fatalf("%s diff: %+v %v", scope, result, err)
 		}
 		req.Path = ".env"
-		result, err = readWorkspaceView(t.Context(), source, task, "", req)
+		result, err = readWorkspaceView(t.Context(), source, task, "", "", req)
 		if err != nil || result != (viewerContent{Placeholder: "masked"}) {
 			t.Fatalf("%s diff mask: %+v %v", scope, result, err)
 		}
 	}
 	whitespace := WorkspaceViewerRequest{Path: "readme.txt", Scope: "uncommitted", IgnoreWhitespace: true}
-	if result, err := readViewerDiff(t.Context(), source, task, whitespace); err != nil || result.Text != "" {
+	if result, err := readViewerDiff(t.Context(), source, task, whitespace, viewerRepositories{}); err != nil || result.Text != "" {
 		t.Fatalf("whitespace diff: %+v %v", result, err)
 	}
 	whitespace.IgnoreWhitespace = false
-	if result, err := readViewerDiff(t.Context(), source, task, whitespace); err != nil || !strings.Contains(result.Text, "+one ") {
+	if result, err := readViewerDiff(t.Context(), source, task, whitespace, viewerRepositories{}); err != nil || !strings.Contains(result.Text, "+one ") {
 		t.Fatalf("working tree diff: %+v %v", result, err)
 	}
 	for _, path := range []string{"untracked.txt", "big.txt"} {
-		result, err := readViewerDiff(t.Context(), source, task, WorkspaceViewerRequest{Path: path, Scope: "uncommitted"})
+		result, err := readViewerDiff(t.Context(), source, task, WorkspaceViewerRequest{Path: path, Scope: "uncommitted"}, viewerRepositories{})
 		if err != nil || !result.Truncated || result.Text == "" || len(result.Text) > viewerDiffLimit {
 			t.Fatalf("%s: length=%d truncated=%v err=%v", path, len(result.Text), result.Truncated, err)
 		}
@@ -200,11 +200,11 @@ func TestWorkspaceViewerGit(t *testing.T) {
 		{Path: "readme.txt", Scope: "commit", Commit: "HEAD~1"},
 		{Path: "readme.txt", Scope: "base", Base: "--no-index"},
 	} {
-		if _, err := readViewerDiff(t.Context(), source, task, req); !errors.Is(err, ErrViewerRevision) {
+		if _, err := readViewerDiff(t.Context(), source, task, req, viewerRepositories{}); !errors.Is(err, ErrViewerRevision) {
 			t.Errorf("invalid revision: %v", err)
 		}
 	}
-	if _, err := readViewerState(t.Context(), native, domain.Task{}, "main", WorkspaceViewerRequest{Summary: true}); err != nil {
+	if _, err := readViewerState(t.Context(), native, domain.Task{}, "main", WorkspaceViewerRequest{Summary: true}, viewerRepositories{}); err != nil {
 		t.Fatal(err)
 	}
 	indexAfter, err := os.Stat(indexPath)
@@ -285,7 +285,7 @@ func TestWorkspaceViewerDiffLeavesIndexUntouched(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		got, err := readViewerDiff(t.Context(), source, domain.Task{}, WorkspaceViewerRequest{Path: name, Scope: "uncommitted"})
+		got, err := readViewerDiff(t.Context(), source, domain.Task{}, WorkspaceViewerRequest{Path: name, Scope: "uncommitted"}, viewerRepositories{})
 		if err != nil || got != (viewerContent{}) {
 			t.Fatalf("expected no content change: %+v %v", got, err)
 		}
@@ -340,7 +340,7 @@ func TestWorkspaceViewerDiffKeepsConfiguredLineEndings(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "callback.sh"), []byte("#!/bin/sh\nprintf 'ran\\n' > callback-ran\n"), 0700); err != nil {
 			t.Fatal(err)
 		}
-		got, err := readViewerDiff(t.Context(), source, domain.Task{}, WorkspaceViewerRequest{Path: name, Scope: "uncommitted"})
+		got, err := readViewerDiff(t.Context(), source, domain.Task{}, WorkspaceViewerRequest{Path: name, Scope: "uncommitted"}, viewerRepositories{})
 		if err != nil || !strings.Contains(got.Text, "\n-third\n+changed\n") || strings.Count(got.Text, "\n+") != 2 || strings.Count(got.Text, "\n-") != 2 || strings.Contains(got.Text, "\r") {
 			t.Errorf("expected a one-line diff: %+v %v", got, err)
 		}
@@ -402,7 +402,7 @@ func TestWorkspaceViewerGitConfigProbeFallback(t *testing.T) {
 				}
 				ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 				defer cancel()
-				got, err := readViewerDiff(ctx, source, domain.Task{}, WorkspaceViewerRequest{Path: name, Scope: "uncommitted"})
+				got, err := readViewerDiff(ctx, source, domain.Task{}, WorkspaceViewerRequest{Path: name, Scope: "uncommitted"}, viewerRepositories{})
 				if err != nil || !strings.Contains(got.Text, "\n-old\n+new\n") || ctx.Err() != nil {
 					t.Fatalf("bad user config must not stop the protected diff: %+v %v", got, err)
 				}
@@ -426,10 +426,10 @@ func TestWorkspaceViewerDisablesGitCallbacks(t *testing.T) {
 	for _, key := range []string{"core.fsmonitor", "filter.sideeffect.clean", "filter.sideeffect.process", "diff.sideeffect.command", "diff.sideeffect.textconv"} {
 		runViewerFixtureGit(t, dir, "config", key, "echo run > callback-ran")
 	}
-	if _, err := readViewerState(t.Context(), source, domain.Task{}, "test", WorkspaceViewerRequest{}); err != nil {
+	if _, err := readViewerState(t.Context(), source, domain.Task{}, "test", WorkspaceViewerRequest{}, viewerRepositories{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readViewerDiff(t.Context(), source, domain.Task{}, WorkspaceViewerRequest{Path: "hello.txt", Scope: "uncommitted"}); err != nil {
+	if _, err := readViewerDiff(t.Context(), source, domain.Task{}, WorkspaceViewerRequest{Path: "hello.txt", Scope: "uncommitted"}, viewerRepositories{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "callback-ran")); !errors.Is(err, os.ErrNotExist) {
@@ -476,11 +476,11 @@ func TestWorkspaceViewerOverSSH(t *testing.T) {
 	runViewerFixtureGit(t, dir, "commit", "-m", "base")
 	writeViewerFixture(t, dir, "README.md", "working line\n")
 	source := remoteViewerFS{root: dir, runner: viewerSSHFixture(t)}
-	state, err := readViewerState(t.Context(), source, domain.Task{}, "remote", WorkspaceViewerRequest{})
+	state, err := readViewerState(t.Context(), source, domain.Task{}, "remote", WorkspaceViewerRequest{}, viewerRepositories{})
 	if err != nil || !state.IsGit || len(state.Uncommitted) != 1 || len(state.Commits) != 1 {
 		t.Fatalf("SSH state: %+v, %v", state, err)
 	}
-	value, err := readViewerDiff(t.Context(), source, domain.Task{}, WorkspaceViewerRequest{Path: "README.md", Scope: "uncommitted"})
+	value, err := readViewerDiff(t.Context(), source, domain.Task{}, WorkspaceViewerRequest{Path: "README.md", Scope: "uncommitted"}, viewerRepositories{})
 	if err != nil || !strings.Contains(value.Text, "+working line") {
 		t.Fatalf("SSH diff: %+v, %v", value, err)
 	}

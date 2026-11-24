@@ -35,6 +35,7 @@ var (
 	ErrViewerNotGit      = errors.New("workspace_viewer_not_git")
 	ErrViewerRevision    = errors.New("workspace_viewer_invalid_revision")
 	ErrViewerRepository  = errors.New("workspace_viewer_invalid_repository")
+	ErrViewerRepoScan    = errors.New("workspace_viewer_repository_discovery_incomplete")
 	ErrViewerRepoMissing = errors.New("workspace_viewer_repository_unavailable")
 )
 
@@ -139,10 +140,12 @@ func (s *Service) ReadTaskWorkspace(ctx context.Context, taskID string, req Work
 		defer dir.Close()
 		source = nativeViewerFS{root: dir, dir: canonical}
 	}
-	return readWorkspaceView(ctx, source, task, item.Name, req)
+	// The task checkout can be named after its worktree. Use the original
+	// repository directory for the root selector even when the workspace has an alias.
+	return readWorkspaceView(ctx, source, task, item.Name, filepath.Base(item.RootPath), req)
 }
 
-func readWorkspaceView(ctx context.Context, source viewerFS, task domain.Task, name string, req WorkspaceViewerRequest) (any, error) {
+func readWorkspaceView(ctx context.Context, source viewerFS, task domain.Task, name, repositoryName string, req WorkspaceViewerRequest) (any, error) {
 	switch req.View {
 	case "state":
 		if req.Availability && req.Repo == "" {
@@ -171,6 +174,9 @@ func readWorkspaceView(ctx context.Context, source viewerFS, task domain.Task, n
 	if req.Repo != "" {
 		index := slices.IndexFunc(repos.Items, func(repo viewerRepository) bool { return repo.ID == req.Repo })
 		if index < 0 {
+			if repos.Truncated {
+				return nil, ErrViewerRepoScan
+			}
 			return nil, ErrViewerRepository
 		}
 		selected = repos.Items[index]
@@ -189,7 +195,7 @@ func readWorkspaceView(ctx context.Context, source viewerFS, task domain.Task, n
 		if req.Availability {
 			return map[string]bool{"available": true}, source.available(ctx)
 		}
-		return readViewerRepositoryState(ctx, source, task, name, req, repos, selected)
+		return readViewerRepositoryState(ctx, source, task, name, repositoryName, req, repos, selected)
 	}
 
 	if req.View == "tree" {
@@ -227,7 +233,7 @@ func readWorkspaceView(ctx context.Context, source viewerFS, task domain.Task, n
 		}
 		return source.file(ctx, req.Path)
 	}
-	return readViewerDiff(ctx, source, task, req)
+	return readViewerDiff(ctx, source, task, req, repos)
 }
 
 func validViewerPath(value string, allowRoot bool) bool {
@@ -310,13 +316,13 @@ func (source nativeViewerFS) info(rel string) (os.FileInfo, error) {
 	return info, nil
 }
 
-func (source nativeViewerFS) tree(_ context.Context, rel string) (viewerTree, error) {
+func (source nativeViewerFS) openDirectory(rel string) (*os.File, error) {
 	info, err := source.info(rel)
 	if err != nil {
-		return viewerTree{}, err
+		return nil, err
 	}
 	if !info.IsDir() {
-		return viewerTree{}, ErrViewerPath
+		return nil, ErrViewerPath
 	}
 	name := rel
 	if name == "" {
@@ -324,16 +330,24 @@ func (source nativeViewerFS) tree(_ context.Context, rel string) (viewerTree, er
 	}
 	dir, err := source.root.OpenRoot(filepath.FromSlash(name))
 	if err != nil {
-		return viewerTree{}, ErrViewerPath
+		return nil, ErrViewerPath
 	}
 	defer dir.Close()
 	actual, err := dir.Stat(".")
 	if err != nil || !os.SameFile(info, actual) {
-		return viewerTree{}, ErrViewerPath
+		return nil, ErrViewerPath
 	}
 	handle, err := dir.Open(".")
 	if err != nil {
-		return viewerTree{}, ErrViewerPath
+		return nil, ErrViewerPath
+	}
+	return handle, nil
+}
+
+func (source nativeViewerFS) tree(_ context.Context, rel string) (viewerTree, error) {
+	handle, err := source.openDirectory(rel)
+	if err != nil {
+		return viewerTree{}, err
 	}
 	defer handle.Close()
 	children, err := handle.ReadDir(viewerListLimit + 1)

@@ -5,6 +5,8 @@ import {icon} from "./icons.js";
 type Scope = "file" | "uncommitted" | "base" | "commit";
 type Mode = "files" | "changes";
 
+const commitPageSize = 20;
+
 interface Change {
   path: string;
   status?: string;
@@ -12,6 +14,7 @@ interface Change {
   deleted: number;
   binary?: boolean;
   masked?: boolean;
+  gitlink?: {old?: string; new?: string; index?: string};
 }
 
 interface Commit {
@@ -44,6 +47,8 @@ interface ViewerState {
   truncated: boolean;
   repositories?: Repository[];
   repositoriesTruncated?: boolean;
+  repositoryDeadlineReached?: boolean;
+  repositorySizeReached?: boolean;
   repositoryUnavailable?: boolean;
 }
 
@@ -74,6 +79,8 @@ interface Content {
 }
 
 interface Tab {
+  repo: string;
+  base: string;
   path: string;
   scope: Scope;
   commit: string;
@@ -88,12 +95,16 @@ const copy: Record<string, Record<string, string>> = {
     preview: "内容预览",
     baseline: "基线",
     repository: "仓库",
-    rootRepository: "工作区根仓库",
     repositoryUnavailableLabel: "{name}（不可用）",
     repositoryUnavailable: "这个仓库尚未初始化，或无法读取 Git 数据。",
     invalidRepository: "找不到所选仓库，或该仓库已不在工作区仓库列表中。",
     repositoryRecovered: "所选仓库已不可用，已切回工作区根仓库。",
-    repositoriesTruncated: "已达到仓库发现上限，列表可能不完整。",
+    repositoriesTruncated: "仓库列表可能不完整。",
+    repositoryDeadlineReached: "仓库扫描超时。",
+    repositorySizeReached: "仓库列表达到数据大小上限。",
+    repositoryScanIncomplete: "仓库扫描未完成，暂时无法确认所选仓库。",
+    gitlinkChange: "子模块更新 {old} → {new}",
+    gitlinkMissing: "无",
     baselineFallback: "仓库中没有基线 {requested}，当前使用 {actual}。",
     detached: "分离 HEAD · {head}",
     automatic: "自动",
@@ -108,6 +119,7 @@ const copy: Record<string, Record<string, string>> = {
     baseChanges: "与基线的差异",
     noChanges: "没有文件变更",
     noCommits: "暂无提交",
+    loadMoreCommits: "加载更多",
     noSubject: "无提交说明",
     tabs: "已打开的文件",
     closeTab: "关闭 {file}",
@@ -141,12 +153,16 @@ const copy: Record<string, Record<string, string>> = {
     preview: "Content preview",
     baseline: "Base",
     repository: "Repository",
-    rootRepository: "Workspace root",
     repositoryUnavailableLabel: "{name} (unavailable)",
     repositoryUnavailable: "This repository has not been initialized or its Git data could not be read.",
     invalidRepository: "The selected repository is missing or is no longer in the workspace repository list.",
     repositoryRecovered: "The selected repository is unavailable. Showing the workspace root.",
-    repositoriesTruncated: "Repository discovery reached its limit. The list may be incomplete.",
+    repositoriesTruncated: "The repository list may be incomplete.",
+    repositoryDeadlineReached: "Repository discovery timed out.",
+    repositorySizeReached: "The repository list reached its size limit.",
+    repositoryScanIncomplete: "Repository discovery is incomplete. The selected repository could not be verified.",
+    gitlinkChange: "Submodule update {old} → {new}",
+    gitlinkMissing: "None",
     baselineFallback: "Base {requested} is unavailable in this repository. Using {actual}.",
     detached: "Detached HEAD · {head}",
     automatic: "Automatic",
@@ -161,6 +177,7 @@ const copy: Record<string, Record<string, string>> = {
     baseChanges: "Diff against base",
     noChanges: "No changed files",
     noCommits: "No commits",
+    loadMoreCommits: "Load more",
     noSubject: "No commit message",
     tabs: "Open files",
     closeTab: "Close {file}",
@@ -200,6 +217,7 @@ const errorLabels: Record<string, string> = {
   workspace_viewer_invalid_revision: "invalidRevision",
   workspace_viewer_invalid_repository: "invalidRepository",
   workspace_viewer_repository_unavailable: "repositoryUnavailable",
+  workspace_viewer_repository_discovery_incomplete: "repositoryScanIncomplete",
   workspace_viewer_not_git: "nonGit",
 };
 
@@ -274,6 +292,9 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string): void {
   const url = new URL(window.location.href);
   let initialFile = url.searchParams.get("file");
   const initialScope = url.searchParams.get("scope");
+  const initialFileRepo = url.searchParams.get("fileRepo");
+  const initialFileBase = url.searchParams.get("fileBase");
+  let loaded = false;
   let mode: Mode = url.searchParams.get("tab") === "files" ? "files" : "changes";
   let base = url.searchParams.get("base") || "";
   let repo = url.searchParams.get("repo") || "";
@@ -294,11 +315,13 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string): void {
   const treeErrors = new Map<string, string>();
   const treeRequests = new Map<string, Promise<void>>();
   let groupOpen = true;
+  let commitsOpen = false;
+  let visibleCommitCount = commitPageSize;
   let baseOpen = false;
 
-  function read<T>(view: string, params: Record<string, string>, signal?: AbortSignal): Promise<T> {
+  function read<T>(view: string, params: Record<string, string>, signal: AbortSignal, repository = repo): Promise<T> {
     const query = new URLSearchParams(params);
-    if (repo) query.set("repo", repo);
+    if (repository) query.set("repo", repository);
     return api.request<T>(`/api/v1/tasks/${encodeURIComponent(task)}/workspace/${view}?${query}`, {signal});
   }
 
@@ -317,6 +340,10 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string): void {
       next.searchParams.set("file", selected.path);
       next.searchParams.set("scope", selected.scope);
       if (selected.commit) next.searchParams.set("commit", selected.commit);
+      if (selected.repo !== repo) {
+        next.searchParams.set("fileRepo", selected.repo);
+        if (selected.scope === "base" && selected.base) next.searchParams.set("fileBase", selected.base);
+      }
     }
     history.replaceState(null, "", next);
   }
@@ -334,7 +361,7 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string): void {
     const baseTitle = state?.baseFallback ? label("baselineFallback", {requested: base, actual: baseline || label("noCommits")})
       : visibleBase || (baseline ? label("automaticBase", {base: baseline}) : automatic);
     const repositoryLabel = (item: Repository) => {
-      const name = item.path || label("rootRepository");
+      const name = item.path || item.name || state?.name || label("title");
       return item.readable ? name : label("repositoryUnavailableLabel", {name});
     };
     const currentRepository = repositories.find(item => item.id === repo);
@@ -359,19 +386,31 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string): void {
     if (focusAttr) header.querySelector<HTMLElement>(`[${focusAttr}]`)?.focus({preventScroll: true});
   }
 
+  function changeStat(change: Change): string {
+    if (change.masked) return label("maskedLabel");
+    if (change.gitlink) {
+      const {old, index, new: next} = change.gitlink;
+      const short = (id?: string) => id?.slice(0, 8) || label("gitlinkMissing");
+      const transition = index ? `${short(index)} → ${short(next)}` : short(next);
+      return html(label("gitlinkChange", {old: short(old), new: transition}));
+    }
+    if (change.status) return html(change.status.replaceAll(".", "·"));
+    if (change.binary) return label("binaryLabel");
+    return `<span class="wv-plus">+${change.added}</span> <span class="wv-minus">−${change.deleted}</span>`;
+  }
+
   function changeList(changes: Change[], scope: Scope, commit = ""): string {
     if (!changes.length) return `<p class="wv-hint">${label("noChanges")}</p>`;
     return `<ul class="wv-list">${changes.map(change => `
       <li><button type="button" class="wv-row" data-wv-path="${encodeURIComponent(change.path)}" data-wv-scope="${scope}" data-wv-commit="${commit}" title="${html(change.path)}">
         <span class="wv-row-name">${icon(change.masked ? "shield" : "file")}<span>${html(change.path)}</span></span>
-        <span class="wv-stat">${change.status ? html(change.status.replaceAll(".", "·")) : change.masked ? label("maskedLabel") : change.binary ? label("binaryLabel")
-          : `<span class="wv-plus">+${change.added}</span> <span class="wv-minus">−${change.deleted}</span>`}</span>
+        <span class="wv-stat${change.gitlink ? " wv-gitlink-stat" : ""}">${changeStat(change)}</span>
       </button></li>`).join("")}</ul>`;
   }
 
   function renderChanges(): string {
     const commits = state!.commits;
-    const history = commits.map(commit => {
+    const history = commitsOpen ? commits.slice(0, visibleCommitCount).map(commit => {
       const opened = expandedCommits.has(commit.id);
       return `<section class="wv-commit">
         <button type="button" class="wv-row wv-commit-title" data-wv-toggle-commit="${commit.id}" aria-expanded="${opened}">
@@ -380,7 +419,7 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string): void {
         </button>
         ${opened ? `<div class="wv-commit-files">${changeList(commit.files, "commit", commit.id)}${commit.truncated ? `<p class="wv-hint">${label("truncatedList")}</p>` : ""}</div>` : ""}
       </section>`;
-    }).join("");
+    }).join("") : "";
     return `<section class="wv-group">
       <button type="button" class="wv-group-title" data-wv-action="uncommitted" aria-expanded="${groupOpen}">
         <span aria-hidden="true">${groupOpen ? "▾" : "▸"}</span> ${label("uncommitted")} <span class="wv-count">${state!.uncommitted.length}</span>
@@ -388,8 +427,11 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string): void {
       ${groupOpen ? changeList(state!.uncommitted, "uncommitted") : ""}
     </section>
     <section class="wv-group">
-      <h2 class="wv-group-title">${state!.base && !state!.baseAtHead ? label("relativeCommits") : label("commits")} <span class="wv-count">${commits.length}</span></h2>
-      ${history || `<p class="wv-hint">${label("noCommits")}</p>`}
+      <button type="button" class="wv-group-title" data-wv-action="commits" aria-expanded="${commitsOpen}">
+        <span aria-hidden="true">${commitsOpen ? "▾" : "▸"}</span> ${state!.base && !state!.baseAtHead ? label("relativeCommits") : label("commits")} <span class="wv-count">${commits.length}</span>
+      </button>
+      ${commitsOpen ? history || `<p class="wv-hint">${label("noCommits")}</p>` : ""}
+      ${commitsOpen && visibleCommitCount < commits.length ? `<button type="button" class="wv-row" data-wv-action="loadMoreCommits">${label("loadMoreCommits")}</button>` : ""}
     </section>
     ${state!.mergeBase ? `<section class="wv-group">
       <button type="button" class="wv-group-title" data-wv-action="baseChanges" aria-expanded="${baseOpen}">
@@ -441,11 +483,17 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string): void {
   function renderTabs(): void {
     const scroll = tabBar.querySelector(".wv-tab-list")?.scrollLeft || 0;
     tabBar.hidden = tabs.length === 0;
-    tabBar.innerHTML = `<div class="wv-tab-list" aria-label="${label("tabs")}">${tabs.map((tab, index) => `
-      <div class="wv-tab" data-wv-tab="${index}">
-        <button type="button" data-wv-select="${index}" aria-pressed="${tab === selected}" title="${html(tab.path)}">${icon("file")}<span>${html(fileName(tab.path))}</span></button>
-        <button type="button" data-wv-close="${index}" title="${html(label("closeTab", {file: fileName(tab.path)}))}" aria-label="${html(label("closeTab", {file: fileName(tab.path)}))}">${icon("close")}</button>
-      </div>`).join("")}</div>
+    tabBar.innerHTML = `<div class="wv-tab-list" aria-label="${label("tabs")}">${tabs.map((tab, index) => {
+      const name = fileName(tab.path);
+      const repository = tab.repo || repositories[0]?.name || state?.name;
+      const duplicate = tabs.some(other => other.repo !== tab.repo && fileName(other.path) === name);
+      const caption = duplicate && repository ? `${name} · ${repository}` : name;
+      const closeLabel = html(label("closeTab", {file: caption}));
+      return `<div class="wv-tab" data-wv-tab="${index}">
+        <button type="button" data-wv-select="${index}" aria-pressed="${tab === selected}" title="${html(repository ? `${repository} · ${tab.path}` : tab.path)}">${icon("file")}<span>${html(caption)}</span></button>
+        <button type="button" data-wv-close="${index}" title="${closeLabel}" aria-label="${closeLabel}">${icon("close")}</button>
+      </div>`;
+    }).join("")}</div>
       <button type="button" class="wv-close-all" data-wv-action="closeAll">${label("closeAll")}</button>`;
     const list = tabBar.querySelector<HTMLElement>(".wv-tab-list")!;
     list.scrollLeft = scroll;
@@ -471,11 +519,10 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string): void {
     const diff = tab.scope !== "file";
     const placeholder = info?.placeholder;
     let body = "";
-    if (tab.error) body = `<p class="wv-hint" role="alert">${html(tab.error)}</p>`;
-    else if (!info) body = `<p class="wv-hint" role="status">${t("common.loading")}</p>`;
+    if (!info && !tab.error) body = `<p class="wv-hint" role="status">${t("common.loading")}</p>`;
     else if (placeholder) body = `<p class="wv-hint">${label(placeholder === "too_large" ? "tooLarge" : placeholder)}</p>`;
-    else if (!info.text) body = `<p class="wv-hint">${label(diff ? "noDiff" : "emptyFile")}</p>`;
-    else body = `<pre class="wv-code ${wrap ? "wv-wrap" : ""}" tabindex="0"><code>${diff ? diffHTML(info.text) : html(info.text)}</code></pre>`;
+    else if (info && !info.text) body = `<p class="wv-hint">${label(diff ? "noDiff" : "emptyFile")}</p>`;
+    else if (info) body = `<pre class="wv-code ${wrap ? "wv-wrap" : ""}" tabindex="0"><code>${diff ? diffHTML(info.text) : html(info.text)}</code></pre>`;
     const source = tab.scope === "file" ? "" : tab.scope === "uncommitted" ? label("uncommitted")
       : tab.scope === "base" ? label("baseChanges") : tab.commit.slice(0, 8);
     content.innerHTML = `<div class="wv-content-head"><strong title="${html(tab.path)}">${html(tab.path)}</strong>
@@ -487,6 +534,7 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string): void {
       ${diff ? `<button type="button" data-wv-action="previous" ${info && /^@@/m.test(info.text) ? "" : "disabled"} title="${label("previous")}">↑ <span>${label("previous")}</span></button>
       <button type="button" data-wv-action="next" ${info && /^@@/m.test(info.text) ? "" : "disabled"} title="${label("next")}">↓ <span>${label("next")}</span></button>` : ""}
     </div>
+    ${tab.error ? `<p class="wv-hint" role="alert">${html(tab.error)}</p>` : ""}
     ${info?.truncated ? `<p class="wv-truncated" role="status">${label("truncatedDiff")}</p>` : ""}
     ${body}`;
     const scroll = content.querySelector(".wv-code");
@@ -504,11 +552,11 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string): void {
     if (tab.scope !== "file") {
       params.scope = tab.scope;
       if (tab.scope === "commit") params.commit = tab.commit;
-      if (tab.scope === "base" && (base || (!repo && state?.base))) params.base = base || state!.base!;
+      if (tab.scope === "base" && tab.base) params.base = tab.base;
       if (ignoreWhitespace) params.ignore_whitespace = "1";
     }
     try {
-      const value = await read<Content>(tab.scope === "file" ? "file" : "diff", params, controller.signal);
+      const value = await read<Content>(tab.scope === "file" ? "file" : "diff", params, controller.signal, tab.repo);
       if (controller.signal.aborted || selected !== tab) return;
       const old = tab.content;
       const changed = tab.error || !old || old.text !== value.text || old.placeholder !== value.placeholder || old.truncated !== value.truncated;
@@ -536,13 +584,14 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string): void {
     if (tab) void readTab(tab);
   }
 
-  function open(path: string, scope: Scope, commit = ""): void {
-    let tab = tabs.find(item => item.path === path);
+  function open(path: string, scope: Scope, commit = "", repository = repo, comparison = base || (!repo ? state?.base || "" : "")): void {
+    const tabBase = scope === "base" ? comparison : "";
+    let tab = tabs.find(item => item.repo === repository && item.path === path);
     if (!tab) {
-      tab = {path, scope, commit};
+      tab = {repo: repository, base: tabBase, path, scope, commit};
       tabs.push(tab);
-    } else if (tab.scope !== scope || tab.commit !== commit) {
-      Object.assign(tab, {scope, commit, content: undefined, error: undefined});
+    } else if (tab.scope !== scope || tab.commit !== commit || tab.base !== tabBase) {
+      Object.assign(tab, {scope, commit, base: tabBase, content: undefined, error: undefined});
     }
     select(tab);
   }
@@ -594,9 +643,10 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string): void {
     expandedFolders.add("");
     expandedCommits.clear();
     groupOpen = true;
+    commitsOpen = false;
+    visibleCommitCount = commitPageSize;
     baseOpen = false;
-    tabs.length = 0;
-    select(undefined);
+    saveLocation();
     renderHeader();
     renderNavigation();
     showNotice(t("common.loading"));
@@ -620,7 +670,8 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string): void {
         const params = base ? {base} : {};
         const next = await read<ViewerState>("state", params, controller.signal);
         if (controller.signal.aborted) return;
-        const first = !state;
+        const first = !loaded;
+        loaded = true;
         const latest = next.commits?.[0]?.id;
         if (latest && latest !== state?.commits?.[0]?.id) expandedCommits.add(latest);
         const lostGit = state?.isGit && !next.isGit && !next.repositoryUnavailable;
@@ -633,44 +684,49 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string): void {
         }
         if (lostGit) {
           for (const tab of tabs) {
-            if (tab.scope !== "file") Object.assign(tab, {scope: "file", commit: "", content: undefined, error: undefined});
+            if (tab.repo === repo && tab.scope !== "file") Object.assign(tab, {scope: "file", commit: "", base: "", content: undefined, error: undefined});
           }
           select(selected);
         }
         renderHeader();
         renderNavigation();
-        if (first && initialFile && !next.repositoryUnavailable) {
-          const scope = next.isGit && (initialScope === "uncommitted" || initialScope === "commit" || initialScope === "base")
+        if (first && initialFile && (!next.repositoryUnavailable || (initialFileRepo !== null && initialFileRepo !== repo))) {
+          const fileRepo = initialFileRepo ?? repo;
+          const fileIsGit = fileRepo === repo ? next.isGit : repositories.some(item => item.id === fileRepo);
+          const scope = fileIsGit && (initialScope === "uncommitted" || initialScope === "commit" || initialScope === "base")
             ? initialScope : "file";
-          if (mode === "files") {
+          if (mode === "files" && fileRepo === repo) {
             for (let parent = initialFile.lastIndexOf("/"); parent > 0; parent = initialFile.lastIndexOf("/", parent - 1)) {
               expandedFolders.add(initialFile.slice(0, parent));
             }
           }
-          open(initialFile, scope, url.searchParams.get("commit") || "");
+          open(initialFile, scope, url.searchParams.get("commit") || "", fileRepo,
+            fileRepo === repo ? undefined : initialFileBase || "");
         }
         initialFile = null;
-        if (next.repositoryUnavailable) {
-          tabs.length = 0;
-          select(undefined);
-        } else if (!selected) renderContent();
+        renderTabs();
+        if (!selected) renderContent();
         saveLocation();
       }
-      if (state?.repositoryUnavailable) {
-        showNotice(label("repositoryUnavailable"));
-        return;
+      const notices = [recoveryNotice];
+      if (state?.repositoriesTruncated) {
+        notices.push(label("repositoriesTruncated"));
+        if (state.repositoryDeadlineReached) notices.push(label("repositoryDeadlineReached"));
+        if (state.repositorySizeReached) notices.push(label("repositorySizeReached"));
       }
-      showNotice([recoveryNotice, state?.repositoriesTruncated ? label("repositoriesTruncated") : ""].filter(Boolean).join(" "));
+      if (state?.repositoryUnavailable) notices.push(label("repositoryUnavailable"));
+      showNotice(notices.filter(Boolean).join(" "));
+      if (state?.repositoryUnavailable) return;
       if (mode === "files") {
-        const activePath = selected?.path || "";
+        const activePath = selected?.repo === repo ? selected.path : "";
         const selectedFolder = activePath.slice(0, Math.max(0, activePath.lastIndexOf("/")));
         const folders = poll ? [...new Set(["", selectedFolder])].filter(path => expandedFolders.has(path)) : [...expandedFolders];
         void Promise.all(folders.map(readTree));
       }
-      if (selected && !contentRequest) void readTab(selected, true);
+      if (selected?.repo === repo && !contentRequest) void readTab(selected, true);
     } catch (reason) {
       if (controller.signal.aborted) return;
-      if (repo && (reason as {code?: string})?.code === "workspace_viewer_invalid_repository") {
+      if (!loaded && repo && (reason as {code?: string})?.code === "workspace_viewer_invalid_repository") {
         switchRepository("", label("repositoryRecovered"));
       } else {
         showNotice(errorText(reason));
@@ -700,6 +756,10 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string): void {
       if (!expandedCommits.delete(wvToggleCommit)) expandedCommits.add(wvToggleCommit);
     } else if (wvAction === "uncommitted") {
       groupOpen = !groupOpen;
+    } else if (wvAction === "commits") {
+      commitsOpen = !commitsOpen;
+    } else if (wvAction === "loadMoreCommits") {
+      visibleCommitCount += commitPageSize;
     } else if (wvAction === "baseChanges") {
       baseOpen = !baseOpen;
     }
@@ -746,11 +806,17 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string): void {
     }
     if (!input.hasAttribute("data-wv-base")) return;
     base = input.value;
-    if (selected?.scope === "base") {
-      contentRequest?.abort();
-      contentRequest = undefined;
-      delete selected.content;
-      renderContent();
+    visibleCommitCount = commitPageSize;
+    for (const tab of tabs) {
+      if (tab.repo !== repo || tab.scope !== "base") continue;
+      tab.base = base;
+      delete tab.content;
+      delete tab.error;
+      if (tab === selected) {
+        contentRequest?.abort();
+        contentRequest = undefined;
+        renderContent();
+      }
     }
     void refresh();
   });

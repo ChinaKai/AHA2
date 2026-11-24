@@ -89,7 +89,7 @@ func (source remoteViewerFS) request(ctx context.Context, req viewerRemoteReques
 }
 
 func (source remoteViewerFS) repositories(ctx context.Context) (viewerRepositories, error) {
-	result, err := source.request(ctx, viewerRemoteRequest{Op: "repositories"})
+	result, err := source.request(ctx, viewerRemoteRequest{Op: "repositories", Limit: viewerRepoMetadataLimit})
 	return result.viewerRepositories, err
 }
 

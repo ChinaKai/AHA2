@@ -35,7 +35,7 @@ func (s *Server) taskWorkspaceView(writer http.ResponseWriter, request *http.Req
 		writeError(writer, http.StatusNotFound, err.Error())
 	case errors.Is(err, app.ErrViewerPath), errors.Is(err, app.ErrViewerRevision), errors.Is(err, app.ErrViewerNotGit), errors.Is(err, app.ErrViewerRepository):
 		writeError(writer, http.StatusBadRequest, err.Error())
-	case errors.Is(err, app.ErrViewerTransport), errors.Is(err, app.ErrViewerGit):
+	case errors.Is(err, app.ErrViewerTransport), errors.Is(err, app.ErrViewerGit), errors.Is(err, app.ErrViewerRepoScan):
 		writeError(writer, http.StatusServiceUnavailable, err.Error())
 	default:
 		writeError(writer, http.StatusInternalServerError, "workspace_viewer_failed")
