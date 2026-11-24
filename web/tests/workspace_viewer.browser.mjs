@@ -629,11 +629,28 @@ try {
   await narrow.goto(origin + "/workspace-viewer?task=missing");
   await narrow.getByText("该任务的工作区或工作树不可用。").waitFor();
   await mobile.ctx.close();
-  for (const width of [1280, 1024, 390]) {
-    const terminal = await context(width, "en-US", true);
+  const terminalLocales = {
+    "en-US": {
+      title: "Workspace terminal", lock: /LAN terminal locked/, allow: /Allow workspace terminals over LAN/,
+      save: "Save terminal setting", saved: "Workspace terminal setting saved.", refresh: "Refresh",
+      new: "New terminal on this workspace host", split: "Split terminal side by side", input: "Terminal input",
+      maximize: "Maximize terminal", restore: "Restore terminal height", expand: "Expand terminal",
+      switcher: "Switch workspace", ssh: /Terminal 1 SSH/, close: "Close Terminal 2", first: "Terminal 1", second: "Terminal 2",
+    },
+    "zh-CN": {
+      title: "工作区终端", lock: /局域网终端已锁定/, allow: /允许通过局域网访问终端/,
+      save: "保存终端设置", saved: "工作区终端设置已保存。", refresh: "刷新",
+      new: "在当前工作区主机新建终端", split: "分屏（左右两栏）", input: "终端输入",
+      maximize: "最大化终端", restore: "恢复终端高度", expand: "展开终端",
+      switcher: "切换工作区", ssh: /终端 1 SSH/, close: "关闭 终端 2", first: "终端 1", second: "终端 2",
+    },
+  };
+  for (const [width, locale] of [[1280, "en-US"], [1024, "en-US"], [390, "en-US"], [1024, "zh-CN"]]) {
+    const labels = terminalLocales[locale];
+    const terminal = await context(width, locale, true);
     const page = await terminal.ctx.newPage();
     await page.goto(origin + "/workspace-viewer?task=" + task.id);
-    const lock = page.getByRole("link", {name: /LAN terminal locked/});
+    const lock = page.getByRole("link", {name: labels.lock});
     await lock.waitFor();
     const drawer = page.locator(".wv-terminal:visible");
     assert.equal(Math.round((await drawer.boundingBox()).height), 37);
@@ -643,29 +660,31 @@ try {
     await lock.click();
     const settings = await openingSettings;
     await settings.waitForURL("**/#other");
-    const toggle = settings.getByRole("checkbox", {name: /Allow workspace terminals over LAN/});
+    const title = settings.locator("section:has(> #workspace-terminal-settings-form) > .panel-head");
+    await title.getByText(labels.title, {exact: true}).waitFor();
+    const toggle = settings.getByRole("checkbox", {name: labels.allow});
     assert.equal(await toggle.isChecked(), false);
     await toggle.check();
-    await settings.getByRole("button", {name: "Save terminal setting"}).click();
-    await settings.getByText("Workspace terminal setting saved.").waitFor();
+    await settings.getByRole("button", {name: labels.save}).click();
+    await settings.getByText(labels.saved).waitFor();
     await settings.reload();
     await settings.locator('[name="workspace_terminal_lan"]:checked').waitFor();
     await page.bringToFront();
-    await page.getByRole("button", {name: "Refresh", exact: true}).click();
+    await page.getByRole("button", {name: labels.refresh, exact: true}).click();
     const left = drawer.locator('[data-pane="0"]');
     const right = drawer.locator('[data-pane="1"]');
     await left.getByText(/PTY fixture for pty-1/).waitFor();
     assert.equal(await left.locator(".wv-term-cwd").textContent(), "/resolved/worktree");
-    await drawer.getByRole("button", {name: "New terminal on this workspace host"}).click();
+    await drawer.getByRole("button", {name: labels.new}).click();
     await left.getByText(/PTY fixture for pty-2/).waitFor();
     assert.equal(await drawer.getByRole("tab").count(), 2);
-    await drawer.getByRole("button", {name: "Split terminal side by side"}).click();
+    await drawer.getByRole("button", {name: labels.split}).click();
     await right.getByText(/PTY fixture for pty-1/).waitFor();
     assert.equal(await drawer.locator(".wv-term-tab.in-other").count(), 1);
     const [leftRect, rightRect] = await Promise.all([left.boundingBox(), right.boundingBox()]);
     assert.ok(Math.abs(leftRect.width - rightRect.width) <= 2 && leftRect.x + leftRect.width <= rightRect.x + 1);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
-    await left.getByRole("textbox", {name: "Terminal input"}).focus();
+    await left.getByRole("textbox", {name: labels.input}).focus();
     await page.keyboard.press("X");
     await left.getByText("echo=X", {exact: true}).waitFor();
     assert.ok(terminal.terminalMessages.some(({data}) => typeof data === "string" && JSON.parse(data).cols > 1));
@@ -680,21 +699,21 @@ try {
     assert.ok((await drawer.boundingBox()).height > initialHeight + 50);
     await resizer.dblclick();
     assert.equal((await drawer.boundingBox()).height, initialHeight);
-    await drawer.getByRole("button", {name: "Maximize terminal"}).click();
+    await drawer.getByRole("button", {name: labels.maximize}).click();
     assert.ok((await drawer.boundingBox()).height > initialHeight * 1.5);
-    await drawer.getByRole("button", {name: "Restore terminal height"}).click();
+    await drawer.getByRole("button", {name: labels.restore}).click();
     assert.equal((await drawer.boundingBox()).height, initialHeight);
 
     await page.keyboard.press("Control+Backquote");
     await left.waitFor({state: "hidden"});
     assert.equal(Math.round((await drawer.boundingBox()).height), 37);
     assert.equal(await drawer.getByRole("tab").count(), 2);
-    await drawer.getByRole("button", {name: "Expand terminal"}).click();
+    await drawer.getByRole("button", {name: labels.expand}).click();
     await left.getByText("echo=X", {exact: true}).waitFor();
 
-    const switcher = page.getByRole("combobox", {name: "Switch workspace"});
+    const switcher = page.getByRole("combobox", {name: labels.switcher});
     await switcher.selectOption("ssh-workspace");
-    await drawer.getByRole("tab", {name: /Terminal 1 SSH/}).waitFor();
+    await drawer.getByRole("tab", {name: labels.ssh}).waitFor();
     assert.equal(await drawer.getByRole("tab").count(), 1);
     await left.getByText(/PTY fixture for pty-3/).waitFor();
     assert.equal(await left.locator(".wv-term-cwd").textContent(), "/srv/workspace");
@@ -704,19 +723,19 @@ try {
     await left.getByText("echo=X", {exact: true}).waitFor();
     assert.equal(terminal.terminalRequests.filter(({method}) => method === "POST").length, 3);
 
-    await drawer.getByRole("button", {name: "Close Terminal 2"}).click();
-    await drawer.getByRole("tab", {name: "Terminal 2", exact: true}).waitFor({state: "hidden"});
+    await drawer.getByRole("button", {name: labels.close}).click();
+    await drawer.getByRole("tab", {name: labels.second, exact: true}).waitFor({state: "hidden"});
     assert.ok(terminal.terminalRequests.some(({method, path}) => method === "DELETE" && path.endsWith("/pty-2")));
     await page.reload();
-    await drawer.getByRole("tab", {name: "Terminal 1", exact: true}).waitFor();
+    await drawer.getByRole("tab", {name: labels.first, exact: true}).waitFor();
     await left.getByText(/PTY fixture for pty-1/).waitFor();
     assert.equal(terminal.terminalRequests.filter(({method}) => method === "POST").length, 3);
 
     await toggle.uncheck();
-    await settings.getByRole("button", {name: "Save terminal setting"}).click();
+    await settings.getByRole("button", {name: labels.save}).click();
     await lock.waitFor();
     await terminal.ctx.close();
-    console.log(`Workspace terminal and LAN settings verified at ${width}px`);
+    console.log(`Workspace terminal and LAN settings verified at ${width}px (${locale})`);
   }
   assert.deepEqual(errors, []);
   console.log("Workspace viewer verified at 1280px, 1024px and 390px in real Chromium");

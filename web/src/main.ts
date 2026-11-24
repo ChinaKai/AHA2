@@ -8581,7 +8581,12 @@ function bindCommon(): void {
     setMessage("notice", accessScope === "local" ? "访问范围已改为仅本机" : "访问范围已改为本机与局域网");
   }, "保存中");
   bindForm("#workspace-terminal-settings-form", async form => {
-    const response = await api.updateWorkspaceTerminalLAN(form.get("workspace_terminal_lan") === "on");
+    const response = await api.updateWorkspaceTerminalLAN(form.get("workspace_terminal_lan") === "on").catch(error => {
+      if (error.code === "workspace_terminal_lan_enable_requires_loopback") {
+        throw new Error(t("workspaceTerminal.enableRequiresLoopback"));
+      }
+      throw error;
+    });
     state.securitySettings = response.security;
     setMessage("notice", t("workspaceTerminal.saved"));
   }, t("workspaceTerminal.saving"), false);

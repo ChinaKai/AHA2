@@ -3,8 +3,10 @@ export type LanguagePreference = "auto" | Locale;
 
 const zhCN: Record<string, string> = {
   "workspaceViewer.open": "打开工作区",
+  "workspaceTerminal.title": "工作区终端",
   "workspaceTerminal.allowLAN": "允许通过局域网访问终端",
-  "workspaceTerminal.allowLANHelp": "默认关闭。开启后，允许通过局域网登录的 Owner 在查看器里打开工作区终端。",
+  "workspaceTerminal.allowLANHelp": "默认关闭。在运行 AHA2 的电脑上通过 localhost 开启。Owner 可以从局域网关闭。",
+  "workspaceTerminal.enableRequiresLoopback": "请在运行 AHA2 的电脑上通过 localhost 开启。",
   "workspaceTerminal.saved": "工作区终端设置已保存。",
   "workspaceTerminal.save": "保存终端设置",
   "workspaceTerminal.saving": "正在保存…",
@@ -842,8 +844,10 @@ const zhCN: Record<string, string> = {
 
 const enUS: Record<string, string> = {
   "workspaceViewer.open": "Open Workspace",
+  "workspaceTerminal.title": "Workspace terminal",
   "workspaceTerminal.allowLAN": "Allow workspace terminals over LAN",
-  "workspaceTerminal.allowLANHelp": "Off by default. When enabled, the owner can open workspace terminals while signed in over the LAN.",
+  "workspaceTerminal.allowLANHelp": "Off by default. Enable via localhost on the computer running AHA2. The owner can disable it over the LAN.",
+  "workspaceTerminal.enableRequiresLoopback": "To enable LAN terminals, open this page via localhost on the computer running AHA2.",
   "workspaceTerminal.saved": "Workspace terminal setting saved.",
   "workspaceTerminal.save": "Save terminal setting",
   "workspaceTerminal.saving": "Saving…",

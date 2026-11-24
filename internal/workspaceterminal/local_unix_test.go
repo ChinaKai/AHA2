@@ -48,4 +48,9 @@ func TestWorkspaceTerminalNativePTYEchoAndResize(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("PTY did not output and exit")
 	}
+	for range 2 {
+		if err := process.Close(); err != nil {
+			t.Fatalf("close terminal: %v", err)
+		}
+	}
 }

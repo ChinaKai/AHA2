@@ -6,8 +6,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -22,7 +26,12 @@ func TestWorkspaceTerminalOwnerLANWebSocketLifecycle(t *testing.T) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" && runtime.GOOS != "freebsd" {
 		t.Skip("exercise the Unix PTY shell and stty")
 	}
-	t.Setenv("SHELL", "/bin/sh")
+	shell := "/bin/sh"
+	if bash, err := exec.LookPath("bash"); err == nil {
+		shell = bash
+	}
+	t.Setenv("SHELL", shell)
+	t.Setenv("HOME", t.TempDir())
 	fixture := newTaskDetailFixture(t, false)
 	worktree, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -91,7 +100,14 @@ func TestWorkspaceTerminalOwnerLANWebSocketLifecycle(t *testing.T) {
 	check(http.MethodPost, base, size, lan, fixture.client, 403, "workspace_terminal_lan_locked")
 	check(http.MethodPost, base, `{"cols":80,"rows":24,"cwd":"/"}`, nil, fixture.client, 400, "workspace_terminal_invalid_size")
 	check(http.MethodPost, base+"?root=/", size, nil, fixture.client, 400, "workspace_terminal_invalid_target")
-	check(http.MethodPut, setting, `{"workspace_terminal_lan":true}`, lan, fixture.client, 200, `"workspace_terminal_lan":true`)
+	const enableLAN = `{"workspace_terminal_lan":true}`
+	const loopbackRequired = "workspace_terminal_lan_enable_requires_loopback"
+	check(http.MethodPut, setting, enableLAN, lan, fixture.client, 403, loopbackRequired)
+	check(http.MethodPut, setting, enableLAN, http.Header{"X-Forwarded-For": {"192.0.2.10"}}, fixture.client, 403, loopbackRequired)
+	if stored, err := fixture.database.SecuritySettings(t.Context()); err != nil || stored.WorkspaceTerminalLAN {
+		t.Fatalf("rejected enable changed the persisted setting: %+v %v", stored, err)
+	}
+	check(http.MethodPut, setting, enableLAN, nil, fixture.client, 200, `"workspace_terminal_lan":true`)
 	if stored, err := fixture.database.SecuritySettings(t.Context()); err != nil || !stored.WorkspaceTerminalLAN || !stored.ValidateOrigin {
 		t.Fatalf("terminal setting was not persisted independently: %+v %v", stored, err)
 	}
@@ -193,8 +209,44 @@ func TestWorkspaceTerminalOwnerLANWebSocketLifecycle(t *testing.T) {
 	dial(server.URL, lan, "", 403)
 	conn = dial(server.URL, nil, "", 101)
 	readUntil(conn, "WS-MARKER:"+worktree, "39 106")
-	// Explicit close ends the PTY and makes its ID unusable.
+	// The background job ignores SIGHUP and has its own process group when
+	// the interactive shell uses job control.
+	jobCommand := "nohup sleep 120 </dev/null >/dev/null 2>&1 & printf 'PTY''-JOB:%s:JOB''-READY\\n' \"$!\"\n"
+	if err := conn.Write(ctx, websocket.MessageBinary, []byte(jobCommand)); err != nil {
+		t.Fatal(err)
+	}
+	jobOutput := readUntil(conn, "PTY-JOB:", ":JOB-READY")
+	jobMatch := regexp.MustCompile(`PTY-JOB:([0-9]+):JOB-READY`).FindStringSubmatch(jobOutput)
+	if jobMatch == nil {
+		t.Fatal("no background PTY job PID in shell output")
+	}
+	jobPID, err := strconv.Atoi(jobMatch[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := os.FindProcess(jobPID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = job.Kill() })
+	jobRunning := func() bool {
+		output, _ := exec.Command("ps", "-p", jobMatch[1], "-o", "stat=").Output()
+		state := strings.TrimSpace(string(output))
+		return state != "" && !strings.HasPrefix(state, "Z")
+	}
+	if !jobRunning() {
+		t.Fatal("background PTY job was not running before DELETE")
+	}
+	// Explicit close ends the PTY, including the background job, and makes
+	// its ID unusable.
 	check(http.MethodDelete, item, "", nil, fixture.client, 200, `"ok":true`)
+	deadline := time.Now().Add(3 * time.Second)
+	for jobRunning() {
+		if time.Now().After(deadline) {
+			t.Fatal("nohup sleep still running after terminal DELETE")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
 	for {
 		_, _, err := conn.Read(ctx)
 		if err != nil {

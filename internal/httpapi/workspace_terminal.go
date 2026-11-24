@@ -118,6 +118,12 @@ func (s *Server) updateWorkspaceTerminalLAN(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
+	// Enabling a remote shell requires the same direct loopback origin that
+	// can use the terminal while LAN access is locked.
+	if *payload.Enabled && !loopbackTerminalRequest(r) {
+		writeError(w, http.StatusForbidden, "workspace_terminal_lan_enable_requires_loopback")
+		return
+	}
 	settings, err := s.store.UpdateWorkspaceTerminalLAN(r.Context(), *payload.Enabled)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "update_security_settings_failed")
