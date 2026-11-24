@@ -205,6 +205,12 @@ var (
 	errWorkspaceTerminalLANLocked     = errors.New("workspace_terminal_lan_locked")
 )
 
+const (
+	workspaceTerminalRecheckInterval = 3 * time.Second
+	workspaceTerminalRecheckTimeout  = 2 * time.Second
+	workspaceTerminalAccessGrace     = 20 * time.Second
+)
+
 type workspaceTerminalCheckError struct{ error }
 
 func (e workspaceTerminalCheckError) Unwrap() error { return e.error }
@@ -491,20 +497,16 @@ func (s *Server) workspaceTerminalSocket(w http.ResponseWriter, r *http.Request)
 	}
 	defer connection.CloseNow()
 	connection.SetReadLimit(64 << 10)
-	ctx, cancel := context.WithCancel(r.Context())
+	ctx, cancel := context.WithDeadline(r.Context(), login.ExpiresAt)
 	defer cancel()
 
+	// The access watcher cancels this context for both input and output.
+	// Input frames do not need their own database reads.
 	go func() {
 		defer cancel()
 		for {
 			kind, data, err := connection.Read(ctx)
-			if err != nil {
-				return
-			}
-			if err := s.workspaceTerminalLANCheck(ctx, r); err != nil {
-				if ctx.Err() == nil {
-					logger.Warn("workspace terminal input stopped", "stage", "input_check_lan", "error", err)
-				}
+			if err != nil || ctx.Err() != nil {
 				return
 			}
 			switch kind {
@@ -522,39 +524,11 @@ func (s *Server) workspaceTerminalSocket(w http.ResponseWriter, r *http.Request)
 			}
 		}
 	}()
-	go func() {
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-		ping := time.NewTicker(25 * time.Second)
-		defer ping.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				check, stop := context.WithTimeout(ctx, 2*time.Second)
-				err := s.workspaceTerminalRecheck(check, r, login)
-				stop()
-				if err != nil {
-					if ctx.Err() == nil {
-						logger.Warn("workspace terminal socket closed", "stage", "socket_recheck_access", "error", err)
-					}
-					cancel()
-					return
-				}
-			case <-ping.C:
-				check, stop := context.WithTimeout(ctx, 3*time.Second)
-				err := connection.Ping(check)
-				stop()
-				if err != nil {
-					cancel()
-					return
-				}
-			}
-		}
-	}()
+	go watchWorkspaceTerminalAccess(ctx, cancel, logger, func(check context.Context) error {
+		return s.workspaceTerminalRecheck(check, r, login)
+	}, connection.Ping)
 	for cursor := uint64(0); ; {
-		if ctx.Err() != nil || !login.ExpiresAt.After(time.Now()) {
+		if ctx.Err() != nil {
 			return
 		}
 		data, end, changed, closed := link.Session.Output(cursor)
@@ -577,6 +551,65 @@ func (s *Server) workspaceTerminalSocket(w http.ResponseWriter, r *http.Request)
 			return
 		case <-changed:
 		case <-link.Session.Done():
+		}
+	}
+}
+
+func watchWorkspaceTerminalAccess(ctx context.Context, cancel context.CancelFunc, logger *slog.Logger, recheck, ping func(context.Context) error) {
+	defer cancel()
+	ticker := time.NewTicker(workspaceTerminalRecheckInterval)
+	defer ticker.Stop()
+	heartbeat := time.NewTicker(25 * time.Second)
+	defer heartbeat.Stop()
+
+	// A database call can outlast its context deadline. The timer fences
+	// input and output even when the watcher is waiting for that call.
+	validUntil := time.Now().Add(workspaceTerminalAccessGrace)
+	expire := func() {
+		if ctx.Err() == nil {
+			cancel()
+			logger.Warn("workspace terminal socket closed", "stage", "socket_recheck_access",
+				"reason", "access_recheck_grace_expired", "grace", workspaceTerminalAccessGrace)
+		}
+	}
+	expiration := time.AfterFunc(time.Until(validUntil), expire)
+	defer expiration.Stop()
+
+	for ctx.Err() == nil {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			started := time.Now()
+			check, stop := context.WithDeadline(ctx, started.Add(workspaceTerminalRecheckTimeout))
+			err := recheck(check)
+			stop()
+			if ctx.Err() != nil {
+				return
+			}
+			var unavailable workspaceTerminalCheckError
+			switch {
+			case err == nil:
+				if !time.Now().Before(validUntil) || !expiration.Stop() {
+					return
+				}
+				// Anchor the new window before either policy read took place.
+				validUntil = started.Add(workspaceTerminalAccessGrace)
+				expiration.Reset(time.Until(validUntil))
+			case errors.As(err, &unavailable):
+				logger.Debug("workspace terminal access recheck unavailable", "stage", "socket_recheck_access", "error", err)
+			default:
+				cancel()
+				logger.Warn("workspace terminal socket closed", "stage", "socket_recheck_access", "error", err)
+				return
+			}
+		case <-heartbeat.C:
+			check, stop := context.WithTimeout(ctx, 3*time.Second)
+			err := ping(check)
+			stop()
+			if err != nil {
+				return
+			}
 		}
 	}
 }

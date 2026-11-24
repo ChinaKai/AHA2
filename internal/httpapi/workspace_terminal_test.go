@@ -18,11 +18,15 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/agentapi"
 	"github.com/ChinaKai/AHA2/internal/domain"
+	"github.com/ChinaKai/AHA2/internal/store"
 	"github.com/ChinaKai/AHA2/internal/workspaceterminal"
 	"github.com/coder/websocket"
 )
@@ -161,6 +165,79 @@ func TestWorkspaceTerminalAccessRecheckDistinguishesQueryFailure(t *testing.T) {
 	checkResponse(api.workspaceTerminalRecheck(t.Context(), request, login), 403, "workspace_terminal_access_revoked")
 }
 
+func TestWorkspaceTerminalWatchAccess(t *testing.T) {
+	busy := workspaceTerminalCheckError{errors.New("database is locked (5) (SQLITE_BUSY)")}
+	for _, test := range []struct {
+		name           string
+		recheck        func(ctx context.Context, attempt int) error
+		wantCloseAfter time.Duration
+	}{
+		{
+			name: "timeout and busy survive; a fresh check renews the grace period",
+			recheck: func(ctx context.Context, attempt int) error {
+				switch attempt {
+				case 1:
+					<-ctx.Done()
+					return workspaceTerminalCheckError{ctx.Err()}
+				case 3:
+					time.Sleep(time.Second)
+					return nil
+				default:
+					return busy
+				}
+			},
+			wantCloseAfter: 3*workspaceTerminalRecheckInterval + workspaceTerminalAccessGrace,
+		},
+		{
+			name: "a definitive denial closes after a transient failure",
+			recheck: func(_ context.Context, attempt int) error {
+				if attempt == 1 {
+					return busy
+				}
+				return errWorkspaceTerminalAccessRevoked
+			},
+			wantCloseAfter: 2 * workspaceTerminalRecheckInterval,
+		},
+		{
+			name: "the grace period ends during a blocked database call",
+			recheck: func(context.Context, int) error {
+				time.Sleep(workspaceTerminalAccessGrace)
+				return nil
+			},
+			wantCloseAfter: workspaceTerminalAccessGrace,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				logger := slog.New(slog.DiscardHandler)
+				attempt := 0
+				finished := make(chan struct{})
+				go func() {
+					defer close(finished)
+					watchWorkspaceTerminalAccess(ctx, cancel, logger, func(ctx context.Context) error {
+						attempt++
+						return test.recheck(ctx, attempt)
+					}, func(context.Context) error { return nil })
+				}()
+
+				time.Sleep(test.wantCloseAfter - time.Nanosecond)
+				synctest.Wait()
+				if ctx.Err() != nil {
+					t.Fatalf("socket canceled before %v: %v", test.wantCloseAfter, ctx.Err())
+				}
+				time.Sleep(time.Nanosecond)
+				synctest.Wait()
+				if ctx.Err() == nil {
+					t.Fatalf("socket still active at %v", test.wantCloseAfter)
+				}
+				<-finished
+			})
+		})
+	}
+}
+
 func TestWorkspaceTerminalOwnerLANWebSocketLifecycle(t *testing.T) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" && runtime.GOOS != "freebsd" {
 		t.Skip("exercise the Unix PTY shell and stty")
@@ -171,7 +248,33 @@ func TestWorkspaceTerminalOwnerLANWebSocketLifecycle(t *testing.T) {
 	}
 	t.Setenv("SHELL", shell)
 	t.Setenv("HOME", t.TempDir())
+	var watchQueries atomic.Bool
+	var loginReads, settingsReads atomic.Int32
+	blocked := make(chan time.Time, 1)
+	retrying := make(chan struct{})
+	unblock := make(chan struct{})
+	releaseQuery := sync.OnceFunc(func() { close(unblock) })
+	store.SetSQLQueryObserverForTest(func(query string) {
+		if !watchQueries.Load() {
+			return
+		}
+		switch {
+		case strings.Contains(query, "FROM sessions WHERE token_hash"):
+			switch loginReads.Add(1) {
+			case 1:
+				blocked <- time.Now()
+				<-unblock
+			case 2:
+				close(retrying)
+			}
+		case strings.Contains(query, "FROM security_settings"):
+			settingsReads.Add(1)
+		}
+	})
+	t.Cleanup(func() { store.SetSQLQueryObserverForTest(nil) })
 	fixture := newTaskDetailFixture(t, false)
+	store.SetSQLQueryObserverForTest(nil)
+	t.Cleanup(releaseQuery)
 	worktree, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -437,6 +540,13 @@ func TestWorkspaceTerminalOwnerLANWebSocketLifecycle(t *testing.T) {
 			}
 		}
 	}
+	watchQueries.Store(true)
+	var blockedAt time.Time
+	select {
+	case blockedAt = <-blocked:
+	case <-ctx.Done():
+		t.Fatal("terminal did not recheck the login")
+	}
 	if err := conn.Write(ctx, websocket.MessageText, []byte(`{"cols":106,"rows":39}`)); err != nil {
 		t.Fatal(err)
 	}
@@ -444,12 +554,34 @@ func TestWorkspaceTerminalOwnerLANWebSocketLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	readUntil(conn, "WS-MARKER:"+worktree, "39 106")
+	if got := settingsReads.Load(); got != 0 {
+		t.Fatalf("terminal input queried security settings %d times while the watcher was blocked", got)
+	}
+	// Let the first recheck context expire inside the driver. The same
+	// socket must still handle input after the watcher retries.
+	time.Sleep(time.Until(blockedAt.Add(workspaceTerminalRecheckTimeout)))
+	releaseQuery()
+	select {
+	case <-retrying:
+	case <-ctx.Done():
+		t.Fatal("terminal did not retry after the login lookup timed out")
+	}
+	watchQueries.Store(false)
+	if err := conn.Write(ctx, websocket.MessageBinary, []byte("printf 'WS''-RESUMED\\n'\n")); err != nil {
+		t.Fatal(err)
+	}
+	readUntil(conn, "WS-RESUMED")
+	stop()
+	ctx, stop = context.WithTimeout(t.Context(), 15*time.Second)
+	defer stop()
 
 	check(http.MethodPut, setting, `{"workspace_terminal_lan":false}`, lan, fixture.client, 200, `"workspace_terminal_lan":false`)
+	lockCtx, stopLock := context.WithTimeout(t.Context(), workspaceTerminalRecheckInterval+workspaceTerminalRecheckTimeout+time.Second)
+	defer stopLock()
 	for {
-		_, _, err := conn.Read(ctx)
+		_, _, err := conn.Read(lockCtx)
 		if err != nil {
-			if ctx.Err() != nil {
+			if lockCtx.Err() != nil {
 				t.Fatal("turning off LAN did not disconnect an active LAN socket")
 			}
 			break
