@@ -58,11 +58,10 @@ test("vendor-only change bumps the production vendor URL but not the app hash", 
     assert.notEqual(second.version, first.version, "vendor bytes must feed the build-wide ?v=");
     assert.ok(index.includes(`/app.${first.file.slice(4)}?v=${second.version}`), "index must carry the new vendor version");
 
-    // hardware_panel copies the script query onto the vendor URLs, which is the
-    // path that was stuck on the old xterm before this regression test existed.
-    const panel = await readFile(join(workDir, "web", "build", "hardware_panel.js"), "utf8");
-    assert.match(panel, /script\[type="module"\]\[src\*="\/app"\]/);
-    assert.match(panel, /`\/vendor\/xterm\.js\$\{version\}`/);
+    // The shared loader applies the entry's build version to the xterm URL.
+    const loader = await readFile(join(workDir, "web", "build", "terminal_assets.js"), "utf8");
+    assert.match(loader, /script\[type="module"\]\[src\*="\/app"\]/);
+    assert.match(loader, /script\.src = assetURL\("\/vendor\/xterm\.js"\)/);
   } finally {
     await rm(workDir, {recursive: true, force: true});
   }

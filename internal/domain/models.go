@@ -104,10 +104,11 @@ type NetworkSettings struct {
 }
 
 type SecuritySettings struct {
-	ValidateOrigin  bool      `json:"validate_origin"`
-	AccessScope     string    `json:"access_scope"`
-	StartupOverride bool      `json:"startup_override,omitempty"`
-	UpdatedAt       time.Time `json:"updated_at,omitempty"`
+	WorkspaceTerminalLAN bool      `json:"workspace_terminal_lan"`
+	ValidateOrigin       bool      `json:"validate_origin"`
+	AccessScope          string    `json:"access_scope"`
+	StartupOverride      bool      `json:"startup_override,omitempty"`
+	UpdatedAt            time.Time `json:"updated_at,omitempty"`
 }
 
 // AgentAPISettings holds the one Agent API value a human may still set by hand.

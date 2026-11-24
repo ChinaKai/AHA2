@@ -74,43 +74,87 @@ type viewerFS interface {
 	openRepository(context.Context, string) (viewerFS, func(), error)
 }
 
-func (s *Service) ReadTaskWorkspace(ctx context.Context, taskID string, req WorkspaceViewerRequest) (any, error) {
+type WorkspaceViewerTargetOption struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+func (s *Service) WorkspaceViewerTargets(ctx context.Context, taskID string) ([]WorkspaceViewerTargetOption, error) {
 	task, err := s.store.Task(ctx, taskID)
 	if err != nil {
 		return nil, err
 	}
-	item, err := s.store.Workspace(ctx, task.WorkspaceID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrViewerUnavailable
-	}
+	items, err := s.store.ListWorkspaces(ctx, task.ProjectID)
 	if err != nil {
 		return nil, err
 	}
+	options := make([]WorkspaceViewerTargetOption, 0, len(items))
+	for _, item := range items {
+		id := item.ID
+		if id == task.WorkspaceID {
+			id = ""
+		}
+		options = append(options, WorkspaceViewerTargetOption{ID: id, Name: item.Name})
+	}
+	return options, nil
+}
+
+func (s *Service) viewerWorkspace(ctx context.Context, taskID, workspaceID string) (domain.Task, domain.Workspace, string, error) {
+	task, err := s.store.Task(ctx, taskID)
+	if err != nil {
+		return domain.Task{}, domain.Workspace{}, "", err
+	}
+	useTaskRoot := workspaceID == "" || workspaceID == task.WorkspaceID
+	if useTaskRoot {
+		workspaceID = task.WorkspaceID
+	}
+	item, err := s.store.Workspace(ctx, workspaceID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Task{}, domain.Workspace{}, "", ErrViewerUnavailable
+	}
+	if err != nil {
+		return domain.Task{}, domain.Workspace{}, "", err
+	}
 	if item.ProjectID != task.ProjectID {
-		return nil, ErrViewerUnavailable
+		return domain.Task{}, domain.Workspace{}, "", ErrViewerUnavailable
 	}
 	for _, lookup := range []struct {
 		id   string
 		find func(context.Context, string) (domain.ChannelInstance, error)
 	}{{task.ID, s.store.RetiredChannelInstanceForTask}, {item.ID, s.store.RetiredChannelInstanceForWorkspace}} {
 		if _, err := lookup.find(ctx, lookup.id); err == nil {
-			return nil, ErrViewerUnavailable
+			return domain.Task{}, domain.Workspace{}, "", ErrViewerUnavailable
 		} else if !errors.Is(err, sql.ErrNoRows) {
-			return nil, err
+			return domain.Task{}, domain.Workspace{}, "", err
 		}
 	}
-	root := task.TaskWorkspacePath
-	if root == "" {
+	root := item.RootPath
+	if useTaskRoot {
 		// An unprepared or removed worktree cannot fall back to the parent repo.
-		if task.Isolation == "worktree" {
-			return nil, ErrViewerUnavailable
+		if task.TaskWorkspacePath != "" {
+			root = task.TaskWorkspacePath
+		} else if task.Isolation == "worktree" {
+			return domain.Task{}, domain.Workspace{}, "", ErrViewerUnavailable
 		}
-		root = item.RootPath
+	} else {
+		task.BaseCommit, task.TargetBranch = "", ""
 	}
 	if strings.TrimSpace(root) == "" {
-		return nil, ErrViewerUnavailable
+		return domain.Task{}, domain.Workspace{}, "", ErrViewerUnavailable
 	}
 
+	return task, item, root, nil
+}
+
+func (s *Service) ReadTaskWorkspace(ctx context.Context, taskID string, req WorkspaceViewerRequest) (any, error) {
+	return s.ReadWorkspaceViewerTarget(ctx, taskID, "", req)
+}
+
+func (s *Service) ReadWorkspaceViewerTarget(ctx context.Context, taskID, workspaceID string, req WorkspaceViewerRequest) (any, error) {
+	task, item, root, err := s.viewerWorkspace(ctx, taskID, workspaceID)
+	if err != nil {
+		return nil, err
+	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	var source viewerFS

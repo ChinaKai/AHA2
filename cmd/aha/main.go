@@ -658,6 +658,7 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	appService.SetPetSecurityApplier(apiServer)
 	apiServer.StartSyncLoop(ctx)
 	defer apiServer.CloseDesktop()
+	defer apiServer.CloseWorkspaceTerminals()
 	mailWorker := mailworker.New(mailworker.Config{
 		Store: database, Secrets: secretStore, Sender: mailpkg.NewSMTPSender(),
 		Logger: logger, DownloadBaseURL: options.mailDownloadBaseURL,
@@ -726,6 +727,7 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	}
 	select {
 	case <-ctx.Done():
+		apiServer.CloseWorkspaceTerminals()
 		shutdownContext, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if err := appService.Shutdown(shutdownContext); err != nil {

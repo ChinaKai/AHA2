@@ -114,6 +114,9 @@ func (s *Server) authLogin(writer http.ResponseWriter, request *http.Request) {
 func (s *Server) authLogout(writer http.ResponseWriter, request *http.Request) {
 	session, _ := sessionFromContext(request.Context())
 	_ = s.auth.Logout(request.Context(), session.ID)
+	if s.workspaceTerminals != nil {
+		s.workspaceTerminals.CloseOwner(session.OwnerID)
+	}
 	clearSessionCookie(writer, s.secureCookie)
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true})
 }
@@ -145,6 +148,9 @@ func (s *Server) authChangePassword(writer http.ResponseWriter, request *http.Re
 		}
 		writeError(writer, http.StatusInternalServerError, "password_change_failed")
 		return
+	}
+	if s.workspaceTerminals != nil {
+		s.workspaceTerminals.CloseOtherLogins(session.OwnerID, session.ID)
 	}
 	_ = s.store.AppendAudit(
 		request.Context(), session.OwnerID, "owner.password.change", "owner", session.OwnerID, nil,
@@ -194,6 +200,9 @@ func (s *Server) authRecover(writer http.ResponseWriter, request *http.Request) 
 		return
 	}
 	s.authLimiter.success(clientKey)
+	if s.workspaceTerminals != nil {
+		s.workspaceTerminals.CloseOwner(result.Owner.ID)
+	}
 	setSessionCookie(writer, result.SessionToken, result.Session.ExpiresAt, s.secureCookie)
 	_ = s.store.AppendAudit(
 		request.Context(), result.Owner.ID, "owner.password.recover", "owner", result.Owner.ID, nil,

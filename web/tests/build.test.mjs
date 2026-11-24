@@ -1228,6 +1228,7 @@ test("built web contains responsive application", async () => {
   const taskComposer = await readFile(resolve(root, "build", "task_composer.js"), "utf8");
   const taskTools = await readFile(resolve(root, "build", "task_tools.js"), "utf8");
   const hardwarePanel = await readFile(resolve(root, "build", "hardware_panel.js"), "utf8");
+  const terminalAssets = await readFile(resolve(root, "build", "terminal_assets.js"), "utf8");
   const hardwareResources = await readFile(resolve(root, "build", "hardware_resources.js"), "utf8");
   const resources = await readFile(resolve(root, "build", "resources.js"), "utf8");
   const mailResources = await readFile(resolve(root, "build", "mail_resources.js"), "utf8");
@@ -1433,8 +1434,8 @@ test("built web contains responsive application", async () => {
   assert.match(hardwareTerminal, /type:\s*"resize"/);
   assert.doesNotMatch(index, /vendor\/xterm\.(?:js|css)/);
   assert.match(hardwarePanel, /loadTerminalAssets/);
-  assert.match(hardwarePanel, /\/vendor\/xterm\.js/);
-  assert.match(hardwarePanel, /\/vendor\/xterm\.css/);
+  assert.match(terminalAssets, /\/vendor\/xterm\.js/);
+  assert.match(terminalAssets, /\/vendor\/xterm\.css/);
   assert.match(hardwarePanel, /data-hardware-terminal-key="ctrl-c"/);
   // Copying the console: a selected region copies alone, otherwise the whole
   // scrollback, and the result is only claimed once the write resolved.

@@ -7,6 +7,7 @@ export interface AuthStatus {
   csrf_token?: string;
 }
 export interface SecuritySettings {
+  workspace_terminal_lan?: boolean;
   validate_origin: boolean;
   // "local" answers only this machine; "lan" also answers private network
   // addresses. The server binds every interface, so this is what narrows it.

@@ -1,3 +1,4 @@
+import {loadTerminalAssets} from "./terminal_assets.js";
 import {api} from "./api.js";
 import {mountHardwareTerminal} from "./hardware_terminal.js";
 import type {HardwareTerminalBinding} from "./hardware_terminal.js";
@@ -53,7 +54,6 @@ let pollGeneration = 0;
 let swappingPanelDOM = false;
 let pollTimer = 0;
 let activeTerminal: HardwareTerminalBinding | null = null;
-let terminalAssetsPromise: Promise<void> | null = null;
 
 const HARDWARE_AUTO_COPY_KEY = "aha2.hardware.autoCopy";
 
@@ -81,28 +81,6 @@ function setHardwareAutoCopy(enabled: boolean): void {
     // A blocked storage API must not break the console; the choice just does not
     // survive a reload.
   }
-}
-
-function loadTerminalAssets(): Promise<void> {
-  if (window.Terminal) return Promise.resolve();
-  if (terminalAssetsPromise) return terminalAssetsPromise;
-  // The production bundle has a content-hashed name (app.<hash>.js); its ?v=
-  // query is a build-wide version covering the bundle, CSS and vendor files,
-  // so changing the terminal asset also refreshes the URLs loaded below.
-  const appScript = document.querySelector<HTMLScriptElement>('script[type="module"][src*="/app"]');
-  const version = appScript ? new URL(appScript.src, location.href).search : "";
-  const stylesheet = document.createElement("link");
-  stylesheet.rel = "stylesheet";
-  stylesheet.href = `/vendor/xterm.css${version}`;
-  document.head.appendChild(stylesheet);
-  terminalAssetsPromise = new Promise<void>((resolve, reject) => {
-    const script = document.createElement("script");
-    script.src = `/vendor/xterm.js${version}`;
-    script.onload = () => resolve();
-    script.onerror = () => reject(new Error("终端组件加载失败"));
-    document.head.appendChild(script);
-  });
-  return terminalAssetsPromise;
 }
 
 function escapeHTML(value: unknown): string {

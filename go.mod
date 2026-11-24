@@ -6,6 +6,7 @@ require (
 	github.com/apernet/hysteria/core/v2 v2.12.2
 	github.com/apernet/hysteria/extras/v2 v2.12.2
 	github.com/coder/websocket v1.8.14
+	github.com/creack/pty v1.1.24
 	github.com/skip2/go-qrcode v0.0.0
 	github.com/xtls/xray-core v1.260327.0
 	golang.org/x/crypto v0.55.0

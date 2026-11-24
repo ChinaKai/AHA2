@@ -24,7 +24,7 @@ func (s *Server) taskWorkspaceView(writer http.ResponseWriter, request *http.Req
 		writeError(writer, http.StatusBadRequest, app.ErrViewerBranch.Error())
 		return
 	}
-	value, err := s.app.ReadTaskWorkspace(request.Context(), request.PathValue("id"), app.WorkspaceViewerRequest{
+	value, err := s.app.ReadWorkspaceViewerTarget(request.Context(), request.PathValue("id"), request.PathValue("workspace"), app.WorkspaceViewerRequest{
 		View: request.PathValue("view"), Path: query.Get("path"), Scope: query.Get("scope"),
 		Base: query.Get("base"), Commit: query.Get("commit"), Repo: query.Get("repo"), Branch: query.Get("branch"), Summary: query.Get("summary") == "1",
 		Availability: query.Get("availability") == "1", IgnoreWhitespace: query.Get("ignore_whitespace") == "1",
@@ -45,5 +45,17 @@ func (s *Server) taskWorkspaceView(writer http.ResponseWriter, request *http.Req
 		writeError(writer, http.StatusServiceUnavailable, err.Error())
 	default:
 		writeError(writer, http.StatusInternalServerError, "workspace_viewer_failed")
+	}
+}
+
+func (s *Server) workspaceViewerTargets(writer http.ResponseWriter, request *http.Request) {
+	options, err := s.app.WorkspaceViewerTargets(request.Context(), request.PathValue("id"))
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		writeError(writer, http.StatusNotFound, "task_not_found")
+	case err != nil:
+		writeError(writer, http.StatusInternalServerError, "workspace_viewer_failed")
+	default:
+		writeJSON(writer, http.StatusOK, map[string]any{"workspaces": options})
 	}
 }

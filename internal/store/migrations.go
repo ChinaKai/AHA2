@@ -4343,6 +4343,16 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := s.migrateLegacyPetOptIn(ctx); err != nil {
 		return fmt.Errorf("apply schema v160 pet opt-in: %w", err)
 	}
+	if !s.tableHasColumn(ctx, "security_settings", "workspace_terminal_lan") {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE security_settings ADD COLUMN workspace_terminal_lan INTEGER NOT NULL DEFAULT 0 CHECK(workspace_terminal_lan IN (0,1))`); err != nil &&
+			!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("apply schema v161 workspace terminal LAN: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(161, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v161: %w", err)
+	}
 	return nil
 }
 

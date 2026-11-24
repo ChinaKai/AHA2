@@ -67,7 +67,7 @@ let browser;
 const errors = [];
 try {
   browser = await chromium.launch({...launch, headless: true});
-  async function context(width, language) {
+  async function context(width, language, terminalFixture = false) {
     const ctx = await browser.newContext({viewport: {width, height: 800}});
     ctx.on("page", page => page.on("pageerror", error => errors.push(error.message)));
     await ctx.addInitScript(() => {
@@ -76,19 +76,74 @@ try {
     const queries = [];
     let childDiscovered = true;
     let remoteBranchError = "";
+    const terminalRequests = [];
+    const terminalMessages = [];
+    const sessions = new Map();
+    const sockets = new Map();
+    let allowTerminalLAN = false;
+    let nextTerminal = 1;
+    if (terminalFixture) await ctx.routeWebSocket(/\/workspace-terminal\/[^/]+\/ws/, ws => {
+      const url = new URL(ws.url());
+      const id = url.pathname.split("/").at(-2);
+      if (!allowTerminalLAN || !sockets.has(id)) {
+        void ws.close({code: 1008});
+        return;
+      }
+      sockets.get(id).add(ws);
+      ws.onClose(() => sockets.get(id)?.delete(ws));
+      ws.send(Buffer.from("PTY fixture for " + id + "\r\n"));
+      ws.onMessage(data => {
+        terminalMessages.push({id, data});
+        if (Buffer.isBuffer(data)) ws.send(Buffer.from("echo=" + data.toString() + "\r\n"));
+      });
+    });
     await ctx.route("**/api/v1/**", async route => {
       const url = new URL(route.request().url());
       const path = url.pathname;
       const answer = (json, status = 200) => route.fulfill({json, status});
       if (path === "/api/v1/auth/status") return answer({authenticated: true, csrf_token: "fixture", username: "Owner"});
       if (path === "/api/v1/settings/general") return answer({general: {language}});
+      if (terminalFixture && path === "/api/v1/settings/security") {
+        return answer({security: {access_scope: "lan", validate_origin: true, workspace_terminal_lan: allowTerminalLAN}});
+      }
+      if (terminalFixture && path === "/api/v1/settings/security/workspace-terminal") {
+        allowTerminalLAN = route.request().postDataJSON().workspace_terminal_lan;
+        if (!allowTerminalLAN) for (const list of sockets.values()) {
+          for (const ws of list) void ws.close({code: 1008});
+        }
+        return answer({security: {access_scope: "lan", validate_origin: true, workspace_terminal_lan: allowTerminalLAN}});
+      }
+      if (path.endsWith("/workspace-targets")) return answer({workspaces: terminalFixture
+        ? [{id: "", name: "Local checkout"}, {id: "ssh-workspace", name: "Builder"}] : []});
+      if (path.includes("/workspace-terminal")) {
+        if (!terminalFixture || !allowTerminalLAN) return answer({locked: true});
+        const workspace = url.searchParams.get("workspace") || "";
+        const method = route.request().method();
+        const list = sessions.get(workspace) || [];
+        terminalRequests.push({method, workspace, path});
+        if (method === "GET") return answer({sessions: list,
+          cwd: workspace ? "/srv/workspace" : "/resolved/worktree", ssh: Boolean(workspace)});
+        if (method === "POST") {
+          assert.deepEqual(Object.keys(route.request().postDataJSON()).sort(), ["cols", "initial", "rows"]);
+          const info = {id: "pty-" + nextTerminal++, number: list.length + 1};
+          sockets.set(info.id, new Set());
+          list.push(info);
+          sessions.set(workspace, list);
+          return answer(info, 201);
+        }
+        const id = path.split("/").at(-1);
+        for (const ws of sockets.get(id) || []) void ws.close({code: 1000, reason: "terminal ended"});
+        sockets.delete(id);
+        sessions.set(workspace, list.filter(item => item.id !== id));
+        return answer({ok: true});
+      }
       if (path === "/api/v1/projects") return answer({projects: [{id: "p", name: "Project", project_type: "folder"}]});
       if (path === "/api/v1/workspaces") return answer({workspaces: [{id: "w", project_id: "p", name: "Viewer fixture", root_path: "/project"}]});
       if (path === "/api/v1/tasks") return answer({tasks: [task], counts: {status: {active: 1}, project: {p: 1}, device: {local: 1}}});
       if (path === "/api/v1/tasks/viewer-task") return answer({task, turns: [], agents: [{agent_id: "main", title: "Main", role: "main", backend: "stub", status: "idle", wire_model: "stub"}], hardware: []});
       if (path.endsWith("/conversation")) return answer({conversation: {items: []}});
       if (path === "/api/v1/assistant") return answer({assistant: {enabled: false}});
-      const match = path.match(/^\/api\/v1\/tasks\/([^/]+)\/workspace\/([^/]+)$/);
+      const match = path.match(/^\/api\/v1\/tasks\/([^/]+)\/(?:workspace|workspace-target\/ssh-workspace)\/([^/]+)$/);
       if (!match) return answer({});
       const [, id, view] = match;
       queries.push({view, query: url.searchParams, method: route.request().method()});
@@ -153,7 +208,7 @@ try {
       return answer(file === ".env" ? {text: "", placeholder: "masked"}
         : {text: child && file === childPath ? "Child source" : file === "README.md" ? "<script>literal only</script>\n" + "long".repeat(300) : "Working notes"});
     });
-    return {ctx, queries, forgetChild: () => { childDiscovered = false; }, restoreChild: () => { childDiscovered = true; },
+    return {ctx, queries, terminalRequests, terminalMessages, forgetChild: () => { childDiscovered = false; }, restoreChild: () => { childDiscovered = true; },
       failRemoteBranch: error => { remoteBranchError = error; }};
   }
 
@@ -574,6 +629,95 @@ try {
   await narrow.goto(origin + "/workspace-viewer?task=missing");
   await narrow.getByText("该任务的工作区或工作树不可用。").waitFor();
   await mobile.ctx.close();
+  for (const width of [1280, 1024, 390]) {
+    const terminal = await context(width, "en-US", true);
+    const page = await terminal.ctx.newPage();
+    await page.goto(origin + "/workspace-viewer?task=" + task.id);
+    const lock = page.getByRole("link", {name: /LAN terminal locked/});
+    await lock.waitFor();
+    const drawer = page.locator(".wv-terminal:visible");
+    assert.equal(Math.round((await drawer.boundingBox()).height), 37);
+    assert.equal(await drawer.getByRole("tab").count(), 0);
+    assert.equal(terminal.terminalRequests.length, 0);
+    const openingSettings = page.waitForEvent("popup");
+    await lock.click();
+    const settings = await openingSettings;
+    await settings.waitForURL("**/#other");
+    const toggle = settings.getByRole("checkbox", {name: /Allow workspace terminals over LAN/});
+    assert.equal(await toggle.isChecked(), false);
+    await toggle.check();
+    await settings.getByRole("button", {name: "Save terminal setting"}).click();
+    await settings.getByText("Workspace terminal setting saved.").waitFor();
+    await settings.reload();
+    await settings.locator('[name="workspace_terminal_lan"]:checked').waitFor();
+    await page.bringToFront();
+    await page.getByRole("button", {name: "Refresh", exact: true}).click();
+    const left = drawer.locator('[data-pane="0"]');
+    const right = drawer.locator('[data-pane="1"]');
+    await left.getByText(/PTY fixture for pty-1/).waitFor();
+    assert.equal(await left.locator(".wv-term-cwd").textContent(), "/resolved/worktree");
+    await drawer.getByRole("button", {name: "New terminal on this workspace host"}).click();
+    await left.getByText(/PTY fixture for pty-2/).waitFor();
+    assert.equal(await drawer.getByRole("tab").count(), 2);
+    await drawer.getByRole("button", {name: "Split terminal side by side"}).click();
+    await right.getByText(/PTY fixture for pty-1/).waitFor();
+    assert.equal(await drawer.locator(".wv-term-tab.in-other").count(), 1);
+    const [leftRect, rightRect] = await Promise.all([left.boundingBox(), right.boundingBox()]);
+    assert.ok(Math.abs(leftRect.width - rightRect.width) <= 2 && leftRect.x + leftRect.width <= rightRect.x + 1);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await left.getByRole("textbox", {name: "Terminal input"}).focus();
+    await page.keyboard.press("X");
+    await left.getByText("echo=X", {exact: true}).waitFor();
+    assert.ok(terminal.terminalMessages.some(({data}) => typeof data === "string" && JSON.parse(data).cols > 1));
+
+    const resizer = drawer.locator(".wv-term-resizer");
+    const initialHeight = (await drawer.boundingBox()).height;
+    const drag = await resizer.boundingBox();
+    await page.mouse.move(drag.x + drag.width / 2, drag.y + 4);
+    await page.mouse.down();
+    await page.mouse.move(drag.x + drag.width / 2, drag.y - 66, {steps: 4});
+    await page.mouse.up();
+    assert.ok((await drawer.boundingBox()).height > initialHeight + 50);
+    await resizer.dblclick();
+    assert.equal((await drawer.boundingBox()).height, initialHeight);
+    await drawer.getByRole("button", {name: "Maximize terminal"}).click();
+    assert.ok((await drawer.boundingBox()).height > initialHeight * 1.5);
+    await drawer.getByRole("button", {name: "Restore terminal height"}).click();
+    assert.equal((await drawer.boundingBox()).height, initialHeight);
+
+    await page.keyboard.press("Control+Backquote");
+    await left.waitFor({state: "hidden"});
+    assert.equal(Math.round((await drawer.boundingBox()).height), 37);
+    assert.equal(await drawer.getByRole("tab").count(), 2);
+    await drawer.getByRole("button", {name: "Expand terminal"}).click();
+    await left.getByText("echo=X", {exact: true}).waitFor();
+
+    const switcher = page.getByRole("combobox", {name: "Switch workspace"});
+    await switcher.selectOption("ssh-workspace");
+    await drawer.getByRole("tab", {name: /Terminal 1 SSH/}).waitFor();
+    assert.equal(await drawer.getByRole("tab").count(), 1);
+    await left.getByText(/PTY fixture for pty-3/).waitFor();
+    assert.equal(await left.locator(".wv-term-cwd").textContent(), "/srv/workspace");
+    assert.ok(terminal.terminalRequests.some(({method, workspace}) => method === "POST" && workspace === "ssh-workspace"));
+    await switcher.selectOption("");
+    await right.getByText(/PTY fixture for pty-1/).waitFor();
+    await left.getByText("echo=X", {exact: true}).waitFor();
+    assert.equal(terminal.terminalRequests.filter(({method}) => method === "POST").length, 3);
+
+    await drawer.getByRole("button", {name: "Close Terminal 2"}).click();
+    await drawer.getByRole("tab", {name: "Terminal 2", exact: true}).waitFor({state: "hidden"});
+    assert.ok(terminal.terminalRequests.some(({method, path}) => method === "DELETE" && path.endsWith("/pty-2")));
+    await page.reload();
+    await drawer.getByRole("tab", {name: "Terminal 1", exact: true}).waitFor();
+    await left.getByText(/PTY fixture for pty-1/).waitFor();
+    assert.equal(terminal.terminalRequests.filter(({method}) => method === "POST").length, 3);
+
+    await toggle.uncheck();
+    await settings.getByRole("button", {name: "Save terminal setting"}).click();
+    await lock.waitFor();
+    await terminal.ctx.close();
+    console.log(`Workspace terminal and LAN settings verified at ${width}px`);
+  }
   assert.deepEqual(errors, []);
   console.log("Workspace viewer verified at 1280px, 1024px and 390px in real Chromium");
 } finally {

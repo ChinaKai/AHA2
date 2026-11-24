@@ -5376,6 +5376,13 @@ function otherSettingsView(): string {
         <div class="dialog-actions"><button class="primary" type="submit">保存访问范围</button></div>
       </form>
     </section>
+    <section class="panel spaced account-security-panel">
+      <div class="panel-head"><strong>${t("workspaceTerminal.title")}</strong></div>
+      <form id="workspace-terminal-settings-form">
+        <label class="security-setting-toggle"><input name="workspace_terminal_lan" type="checkbox" ${origin.workspace_terminal_lan ? "checked" : ""}><span><strong>${t("workspaceTerminal.allowLAN")}</strong><small>${t("workspaceTerminal.allowLANHelp")}</small></span></label>
+        <div class="dialog-actions"><button class="primary" type="submit">${t("workspaceTerminal.save")}</button></div>
+      </form>
+    </section>
     <section class="panel spaced account-security-panel agent-api-override-panel">
       <div class="panel-head"><strong>Agent API 高级覆盖</strong><span>仅用于排障</span></div>
       <form id="agent-api-override-form">
@@ -6909,9 +6916,14 @@ function bindWorkspaceEntry(): void {
   const task = link?.dataset.workspaceEntry;
   if (!link || !task) return;
   if (workspaceEntryProbe?.task !== task || Date.now() - workspaceEntryProbe.time > 10_000) {
-    const result = api.request(`/api/v1/tasks/${encodeURIComponent(task)}/workspace/state?availability=1`)
-      .then(() => "", (error: {code?: string}) => error.code === "workspace_viewer_transport_unsupported"
-        ? "workspaceViewer.transport" : "workspaceViewer.unavailable");
+    const taskURL = `/api/v1/tasks/${encodeURIComponent(task)}`;
+    const result = api.request(`${taskURL}/workspace/state?availability=1`).then(() => "", async (error: {code?: string}) => {
+      if (error.code !== "workspace_viewer_transport_unsupported") return "workspaceViewer.unavailable";
+      // For example, Windows SSH can provide a PTY even when the read-only
+      // viewer's POSIX file worker cannot run on the remote host.
+      const terminal = await api.request<{cwd?: string}>(`${taskURL}/workspace-terminal`).catch(() => null);
+      return terminal?.cwd ? "" : "workspaceViewer.transport";
+    });
     workspaceEntryProbe = {task, time: Date.now(), result};
   }
   void workspaceEntryProbe.result.then(error => {
@@ -8568,6 +8580,11 @@ function bindCommon(): void {
     state.securitySettings = response.security;
     setMessage("notice", accessScope === "local" ? "访问范围已改为仅本机" : "访问范围已改为本机与局域网");
   }, "保存中");
+  bindForm("#workspace-terminal-settings-form", async form => {
+    const response = await api.updateWorkspaceTerminalLAN(form.get("workspace_terminal_lan") === "on");
+    state.securitySettings = response.security;
+    setMessage("notice", t("workspaceTerminal.saved"));
+  }, t("workspaceTerminal.saving"), false);
   bindForm("#agent-api-override-form", async form => {
     const url = String(form.get("url") || "").trim();
     const response = await api.updateAgentAPISettings({url});

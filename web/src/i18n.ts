@@ -3,6 +3,11 @@ export type LanguagePreference = "auto" | Locale;
 
 const zhCN: Record<string, string> = {
   "workspaceViewer.open": "打开工作区",
+  "workspaceTerminal.allowLAN": "允许通过局域网访问终端",
+  "workspaceTerminal.allowLANHelp": "默认关闭。开启后，允许通过局域网登录的 Owner 在查看器里打开工作区终端。",
+  "workspaceTerminal.saved": "工作区终端设置已保存。",
+  "workspaceTerminal.save": "保存终端设置",
+  "workspaceTerminal.saving": "正在保存…",
   "workspaceViewer.unavailable": "该任务的工作区或工作树不可用。",
   "workspaceViewer.transport": "无法通过当前连接读取工作区。SSH 和 WSL 需要支持 Python 3 的 Unix 环境。",
   "onboarding.open": "打开首装引导",
@@ -837,6 +842,11 @@ const zhCN: Record<string, string> = {
 
 const enUS: Record<string, string> = {
   "workspaceViewer.open": "Open Workspace",
+  "workspaceTerminal.allowLAN": "Allow workspace terminals over LAN",
+  "workspaceTerminal.allowLANHelp": "Off by default. When enabled, the owner can open workspace terminals while signed in over the LAN.",
+  "workspaceTerminal.saved": "Workspace terminal setting saved.",
+  "workspaceTerminal.save": "Save terminal setting",
+  "workspaceTerminal.saving": "Saving…",
   "workspaceViewer.unavailable": "This task’s workspace or worktree is unavailable.",
   "workspaceViewer.transport": "Unable to read the workspace over this connection. SSH and WSL require a Unix environment with Python 3.",
   "onboarding.open": "Open setup checklist",

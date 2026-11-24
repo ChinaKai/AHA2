@@ -521,11 +521,21 @@ func (runner *SSHRunner) connect(ctx context.Context, endpoint string) (*ssh.Cli
 	if err != nil {
 		return nil, err
 	}
+	// Bound the handshake as well as the TCP dial. A peer can accept TCP
+	// without replying to the SSH handshake.
+	deadline := time.Now().Add(config.Timeout)
+	if requested, ok := ctx.Deadline(); ok && requested.Before(deadline) {
+		deadline = requested
+	}
+	_ = connection.SetDeadline(deadline)
+	stop := context.AfterFunc(ctx, func() { _ = connection.Close() })
 	clientConnection, channels, requests, err := ssh.NewClientConn(connection, endpoint, config)
+	stop()
 	if err != nil {
 		connection.Close()
 		return nil, err
 	}
+	_ = connection.SetDeadline(time.Time{})
 	return ssh.NewClient(clientConnection, channels, requests), nil
 }
 

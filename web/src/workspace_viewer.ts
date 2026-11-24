@@ -1,6 +1,7 @@
 import {api} from "./api.js";
 import {currentLocale, formatLocaleDateTime, t} from "./i18n.js";
 import {icon} from "./icons.js";
+import {terminalLabel, workspaceTerminals} from "./workspace_terminal.js";
 
 type Scope = "file" | "uncommitted" | "base" | "commit";
 type Mode = "files" | "changes";
@@ -323,6 +324,7 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string, copyText: 
         <div class="wv-content"></div>
       </section>
     </div>
+    <div class="wv-drawers"></div>
   </section>`;
   const root = host.querySelector<HTMLElement>(".workspace-viewer")!;
   const header = root.querySelector<HTMLElement>(".wv-header")!;
@@ -333,6 +335,10 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string, copyText: 
   const tabBar = root.querySelector<HTMLElement>(".wv-tabs")!;
   const content = root.querySelector<HTMLElement>(".wv-content")!;
   const url = new URL(window.location.href);
+  const terminal = workspaceTerminals(root.querySelector<HTMLElement>(".wv-drawers")!, task);
+  let workspaceID = url.searchParams.get("workspace") || "";
+  let workspaces: {id: string; name: string}[] = [];
+  terminal.show(workspaceID);
   let initialFile = url.searchParams.get("file");
   const initialScope = url.searchParams.get("scope");
   const initialFileRepo = url.searchParams.get("fileRepo");
@@ -370,7 +376,8 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string, copyText: 
   function read<T>(view: string, params: Record<string, string>, signal: AbortSignal, repository = repo): Promise<T> {
     const query = new URLSearchParams(params);
     if (repository) query.set("repo", repository);
-    return api.request<T>(`/api/v1/tasks/${encodeURIComponent(task)}/workspace/${view}?${query}`, {signal});
+    const target = workspaceID ? `workspace-target/${encodeURIComponent(workspaceID)}` : "workspace";
+    return api.request<T>(`/api/v1/tasks/${encodeURIComponent(task)}/${target}/${view}?${query}`, {signal});
   }
 
   function showNotice(message = ""): void {
@@ -381,6 +388,7 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string, copyText: 
   function saveLocation(): void {
     const next = new URL(window.location.href);
     next.search = new URLSearchParams({task, tab: mode}).toString();
+    if (workspaceID) next.searchParams.set("workspace", workspaceID);
     const savedBase = base || (!repo ? state?.base : "");
     if (savedBase) next.searchParams.set("base", savedBase);
     if (repo) next.searchParams.set("repo", repo);
@@ -449,6 +457,9 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string, copyText: 
           ${baseline && !state.baseAtHead && !state.noCommonAncestor ? `<span class="wv-counts" title="${html(label("comparison", {ahead: state.ahead, behind: state.behind}))}">↑${state.ahead} ↓${state.behind}</span>` : ""}`
         : state && !state.repositoryUnavailable ? `<span class="wv-badge">${label("nonGit")}</span>` : ""}
         <button type="button" data-wv-action="refresh" title="${t("common.refresh")}" aria-label="${t("common.refresh")}">${icon("refresh")}</button>
+        ${workspaces.length > 1 ? `<select data-wv-workspace aria-label="${terminalLabel("workspace")}">
+          ${workspaces.map(item => `<option value="${html(item.id)}" ${item.id === workspaceID ? "selected" : ""}>${html(item.name)}</option>`).join("")}
+        </select>` : ""}
       </div>
       ${branchNotices.length ? `<div class="wv-branch-notices" id="wv-branch-notices" role="status">
         ${branchNotices.map(notice => `<span>${html(notice)}</span>`).join("")}
@@ -945,10 +956,31 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string, copyText: 
     }
   });
   header.addEventListener("click", event => {
-    if ((event.target as Element).closest('[data-wv-action="refresh"]')) void refresh();
+    if ((event.target as Element).closest('[data-wv-action="refresh"]')) {
+      terminal.show(workspaceID);
+      void refresh();
+    }
   });
   header.addEventListener("change", event => {
     const input = event.target as HTMLSelectElement;
+    if (input.hasAttribute("data-wv-workspace")) {
+      workspaceID = input.value;
+      base = branch = repo = "";
+      loaded = false;
+      mode = "changes";
+      repositories = [];
+      repositoryBases.clear();
+      repositoryBranches.clear();
+      contentRequest?.abort();
+      contentRequest = undefined;
+      tabs.length = 0;
+      selected = undefined;
+      renderTabs();
+      renderContent();
+      terminal.show(workspaceID);
+      switchRepository("");
+      return;
+    }
     if (input.hasAttribute("data-wv-repo")) {
       switchRepository(input.value);
       return;
@@ -1006,5 +1038,9 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string, copyText: 
   renderContent();
   showNotice(task ? t("common.loading") : label("notFound"));
   void refresh();
+  if (task) void api.request<{workspaces: typeof workspaces}>(`/api/v1/tasks/${encodeURIComponent(task)}/workspace-targets`).then(
+    data => { workspaces = data.workspaces || []; renderHeader(); },
+    () => {},
+  );
   window.setInterval(() => { void refresh(true); }, 10_000);
 }

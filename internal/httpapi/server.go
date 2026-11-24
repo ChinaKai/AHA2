@@ -26,6 +26,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/outboundproxy"
 	"github.com/ChinaKai/AHA2/internal/store"
 	"github.com/ChinaKai/AHA2/internal/workspace"
+	"github.com/ChinaKai/AHA2/internal/workspaceterminal"
 )
 
 const sessionCookieName = "aha2_session"
@@ -94,6 +95,7 @@ type Config struct {
 }
 
 type Server struct {
+	workspaceTerminals       *workspaceterminal.Manager
 	store                    *store.Store
 	syncStore                *store.Store
 	auth                     *auth.Service
@@ -237,7 +239,8 @@ func New(config Config) *Server {
 		attachmentLimit = workspace.DefaultScratchAttachmentBytes
 	}
 	server := &Server{
-		store: config.Store, syncStore: syncStore, auth: config.Auth, app: config.App, web: config.Web,
+		workspaceTerminals: workspaceterminal.New(),
+		store:              config.Store, syncStore: syncStore, auth: config.Auth, app: config.App, web: config.Web,
 		logger: logger, secureCookie: config.SecureCookie, validateOrigin: validateOrigin,
 		originStartupOverride:    config.AllowCrossOrigin,
 		accessScope:              newAccessScopeGate(accessScopeValue),
@@ -546,6 +549,10 @@ func (s *Server) routeMux() *http.ServeMux {
 	mux.Handle("GET /api/v1/tasks/{id}", s.withAuth(http.HandlerFunc(s.taskDetail)))
 	mux.Handle("GET /api/v1/tasks/{id}/workspace/{view}", s.withAuth(http.HandlerFunc(s.taskWorkspaceView)))
 	mux.HandleFunc("/api/v1/tasks/{id}/workspace/{view}", workspaceViewerMethodNotAllowed)
+	mux.Handle("GET /api/v1/tasks/{id}/workspace-targets", s.withAuth(http.HandlerFunc(s.workspaceViewerTargets)))
+	mux.Handle("GET /api/v1/tasks/{id}/workspace-target/{workspace}/{view}", s.withAuth(http.HandlerFunc(s.taskWorkspaceView)))
+	mux.HandleFunc("/api/v1/tasks/{id}/workspace-target/{workspace}/{view}", workspaceViewerMethodNotAllowed)
+	s.registerWorkspaceTerminalRoutes(mux)
 	mux.Handle("GET /api/v1/tasks/{id}/channel-routes", s.withAuth(http.HandlerFunc(s.taskChannelRoutes)))
 	mux.Handle("POST /api/v1/tasks/{id}/channel-routes", s.withAuth(http.HandlerFunc(s.bindTaskChannelRoute)))
 	mux.Handle("DELETE /api/v1/tasks/{id}/channel-routes/{route}", s.withAuth(http.HandlerFunc(s.unbindTaskChannelRoute)))

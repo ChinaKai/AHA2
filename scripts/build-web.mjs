@@ -14,6 +14,14 @@ const root = resolve(import.meta.dirname, "..");
 const source = resolve(root, "web");
 const modulesOutput = resolve(source, "build");
 const output = resolve(source, "dist");
+const terminalStylesBlock = /\/\* workspace-terminal:start \*\/([\s\S]*?)\/\* workspace-terminal:end \*\//;
+
+async function readStyles() {
+  const styles = await readFile(resolve(source, "src", "styles.css"), "utf8");
+  const [block, terminalStyles] = styles.match(terminalStylesBlock) || [];
+  if (!block) throw new Error("workspace terminal styles are missing");
+  return [styles.replace(block, ""), terminalStyles];
+}
 
 // esbuild is pinned in web/package.json. Resolve it from there so a plain
 // `node scripts/build-web.mjs` works from the repository root.
@@ -24,7 +32,7 @@ try {
   throw new Error("esbuild is not installed; run `npm ci` in web/ before building");
 }
 
-const moduleNames = ["api", "i18n", "icons", "types", "lazy_page", "pet_bubble", "pet_character", "pet_navigation", "pet_approvals", "pet_workbench", "runtime_picker", "task_agents", "task_composer", "task_drafts", "task_filters", "hardware_terminal", "hardware_panel", "hardware_resources", "browser_resources", "browser_task_panel", "mail_cards", "mail_editor", "mail_resources", "mail_task", "resources", "desktop_panel", "task_tools", "mcp_page", "markdown", "conversation_ui", "ui_helpers", "model_health", "model_selection", "prompt_admin", "proxy_settings", "data_retention", "sync_settings", "codex_accounts", "skill_groups", "knowledge_workspace", "knowledge_vault", "knowledge_vault_settings", "task_vault_skills", "model_source_picker", "channels", "assistant", "backends", "onboarding", "workspace_viewer", "command_palette", "main"];
+const moduleNames = ["api", "i18n", "icons", "types", "lazy_page", "pet_bubble", "pet_character", "pet_navigation", "pet_approvals", "pet_workbench", "runtime_picker", "task_agents", "task_composer", "task_drafts", "task_filters", "hardware_terminal", "hardware_panel", "hardware_resources", "browser_resources", "browser_task_panel", "mail_cards", "mail_editor", "mail_resources", "mail_task", "resources", "desktop_panel", "task_tools", "mcp_page", "markdown", "conversation_ui", "ui_helpers", "model_health", "model_selection", "prompt_admin", "proxy_settings", "data_retention", "sync_settings", "codex_accounts", "skill_groups", "knowledge_workspace", "knowledge_vault", "knowledge_vault_settings", "task_vault_skills", "model_source_picker", "channels", "assistant", "backends", "onboarding", "workspace_viewer", "workspace_terminal", "terminal_assets", "command_palette", "main"];
 
 async function writeAssets(target) {
   await mkdir(resolve(target, "vendor"), {recursive: true});
@@ -52,8 +60,9 @@ async function buildModules() {
     await writeFile(resolve(modulesOutput, `${outputName}.js`), transformed);
   }
   await copyFile(resolve(source, "index.html"), resolve(modulesOutput, "index.html"));
-  const styles = await readFile(resolve(source, "src", "styles.css"), "utf8");
+  const [styles, terminalStyles] = await readStyles();
   const mailStyles = await readFile(resolve(source, "src", "mail.css"), "utf8");
+  await writeFile(resolve(modulesOutput, "workspace-terminal.css"), terminalStyles);
   await writeFile(resolve(modulesOutput, "styles.css"), `${styles}\n${mailStyles}`);
 
   // A single build version keeps every shared singleton module on the exact
@@ -61,6 +70,7 @@ async function buildModules() {
   const versionSource = await Promise.all([
     ...moduleNames.map(name => readFile(resolve(modulesOutput, `${name === "main" ? "app" : name}.js`))),
     readFile(resolve(modulesOutput, "styles.css")),
+    readFile(resolve(modulesOutput, "workspace-terminal.css")),
     readFile(resolve(modulesOutput, "vendor", "xterm.js")),
     readFile(resolve(modulesOutput, "vendor", "xterm.css")),
   ]);
@@ -71,7 +81,8 @@ async function buildModules() {
   // runtime, so the list stays explicit per file.
   const importers = {
     "app.js": ["api", "i18n", "icons", "lazy_page", "pet_approvals", "pet_workbench", "runtime_picker", "task_agents", "task_composer", "task_drafts", "task_filters", "hardware_panel", "desktop_panel", "hardware_terminal", "task_tools", "markdown", "conversation_ui", "assistant", "backends", "ui_helpers", "model_health", "model_selection", "prompt_admin", "proxy_settings", "data_retention", "sync_settings", "codex_accounts", "hardware_resources", "browser_resources", "knowledge_workspace", "knowledge_vault", "knowledge_vault_settings", "task_vault_skills", "channels", "resources", "mail_task", "mail_cards", "mail_resources", "command_palette", "onboarding", "mcp_page", "workspace_viewer"],
-    "workspace_viewer.js": ["api", "i18n", "icons"],
+    "workspace_viewer.js": ["api", "i18n", "icons", "workspace_terminal"],
+    "workspace_terminal.js": ["api", "i18n", "icons", "terminal_assets"],
     "model_selection.js": ["ui_helpers"],
     "onboarding.js": ["api", "i18n", "model_health"],
     "runtime_picker.js": ["backends"],
@@ -79,7 +90,7 @@ async function buildModules() {
     "conversation_ui.js": ["icons", "mail_cards", "markdown", "task_agents", "ui_helpers"],
     "task_composer.js": ["icons", "i18n"],
     "task_tools.js": ["icons", "hardware_panel", "desktop_panel", "task_agents"],
-    "hardware_panel.js": ["api", "icons", "hardware_terminal"],
+    "hardware_panel.js": ["api", "icons", "hardware_terminal", "terminal_assets"],
     "hardware_resources.js": ["api", "icons"],
     "browser_resources.js": ["api", "icons"],
     "browser_task_panel.js": ["api", "icons"],
@@ -152,17 +163,16 @@ async function buildProduction() {
   if (!entry) throw new Error("production build produced no entry chunk");
   const jsHash = contentHash(entry.text);
 
-  const styles = await readFile(resolve(source, "src", "styles.css"), "utf8");
+  const [styles, terminalStyles] = await readStyles();
   const mailStyles = await readFile(resolve(source, "src", "mail.css"), "utf8");
-  const css = await esbuild.transform(`${styles}\n${mailStyles}`, {
-    loader: "css",
-    minify: true,
-    charset: "utf8",
-    legalComments: "none",
-  });
+  const cssOptions = {loader: "css", minify: true, charset: "utf8", legalComments: "none"};
+  const [css, terminalCSS] = await Promise.all([
+    esbuild.transform(`${styles}\n${mailStyles}`, cssOptions),
+    esbuild.transform(terminalStyles, cssOptions),
+  ]);
   const cssHash = contentHash(css.code);
 
-  // hardware_panel.ts copies the app script's ?v= query onto the lazily loaded
+  // terminal_assets.ts copies the app script's ?v= query onto the lazily loaded
   // /vendor/xterm.js and /vendor/xterm.css URLs. The query therefore has to
   // cover the vendor bytes too: a vendor-only change must not keep serving the
   // old terminal from the immutable cache. It also covers every route chunk,
@@ -172,6 +182,7 @@ async function buildProduction() {
   const buildHash = contentHash(Buffer.concat([
     ...jsOutputs.map(file => Buffer.from(file.text, "utf8")),
     Buffer.from(css.code, "utf8"),
+    Buffer.from(terminalCSS.code, "utf8"),
     ...vendorContent,
   ]));
 
@@ -188,6 +199,7 @@ async function buildProduction() {
     await writeFile(resolve(output, name), text);
   }
   await writeFile(resolve(output, `styles.${cssHash}.css`), css.code);
+  await writeFile(resolve(output, "workspace-terminal.css"), terminalCSS.code);
 
   const template = await readFile(resolve(source, "index.html"), "utf8");
   // The file name stays the app bundle hash (that is the true cache key); the
