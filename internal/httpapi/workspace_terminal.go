@@ -76,11 +76,18 @@ func workspaceTerminalDirectOrigin(r *http.Request) bool {
 	return !origin.ForceQuery && origin.Scheme == scheme
 }
 
+func workspaceTerminalSingleOrigin(r *http.Request) bool {
+	return len(r.Header.Values("Origin")) <= 1 && !strings.Contains(r.Header.Get("Origin"), ",")
+}
+
+func workspaceTerminalDirectOrNoOrigin(r *http.Request) bool {
+	return workspaceTerminalSingleOrigin(r) && (r.Header.Get("Origin") == "" || workspaceTerminalDirectOrigin(r))
+}
+
 func (s *Server) checkWorkspaceTerminalOrigin(w http.ResponseWriter, r *http.Request, required bool) bool {
-	values := r.Header.Values("Origin")
 	origin := r.Header.Get("Origin")
 	switch {
-	case len(values) > 1 || strings.Contains(origin, ","):
+	case !workspaceTerminalSingleOrigin(r):
 		return s.rejectWorkspaceTerminalOrigin(w, r, "multiple_origins")
 	case origin == "":
 		if required {
@@ -214,7 +221,8 @@ func (s *Server) workspaceTerminalLogger(r *http.Request, target app.WorkspaceTe
 }
 
 func (s *Server) workspaceTerminalLANCheck(ctx context.Context, r *http.Request) error {
-	if loopbackTerminalRequest(r) {
+	// A same-host proxy can make both the peer and upstream Host look local.
+	if loopbackTerminalRequest(r) && workspaceTerminalDirectOrNoOrigin(r) {
 		return nil
 	}
 	settings, err := s.store.SecuritySettings(ctx)
@@ -240,6 +248,10 @@ func (s *Server) workspaceTerminalAccess(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) updateWorkspaceTerminalSettings(w http.ResponseWriter, r *http.Request) {
+	if !workspaceTerminalDirectOrNoOrigin(r) {
+		s.rejectWorkspaceTerminalOrigin(w, r, "direct_origin_required")
+		return
+	}
 	var payload struct {
 		Enabled        *bool   `json:"workspace_terminal_lan"`
 		ExternalOrigin *string `json:"workspace_terminal_external_origin"`

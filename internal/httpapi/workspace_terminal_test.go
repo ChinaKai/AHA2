@@ -247,6 +247,9 @@ func TestWorkspaceTerminalOwnerLANWebSocketLifecycle(t *testing.T) {
 	check(http.MethodPost, base, `{"cols":80,"rows":24,"cwd":"/"}`, nil, fixture.client, 400, "workspace_terminal_invalid_size")
 	check(http.MethodPost, base+"?root=/", size, nil, fixture.client, 400, "workspace_terminal_invalid_target")
 	const enableLAN = `{"workspace_terminal_lan":true}`
+	const disableLAN = `{"workspace_terminal_lan":false}`
+	const externalSetting = `{"workspace_terminal_external_origin":"HTTPS://PROXY.Example:443/"}`
+	const normalizedExternalSetting = `"workspace_terminal_external_origin":"https://proxy.example"`
 	const loopbackRequired = "workspace_terminal_lan_enable_requires_loopback"
 	check(http.MethodPut, setting, enableLAN, lan, fixture.client, 403, loopbackRequired)
 	check(http.MethodPut, setting, enableLAN, http.Header{"X-Forwarded-For": {"192.0.2.10"}}, fixture.client, 403, loopbackRequired)
@@ -261,25 +264,24 @@ func TestWorkspaceTerminalOwnerLANWebSocketLifecycle(t *testing.T) {
 	check(http.MethodPost, base, size, lan, fixture.client, 403, "access_scope_local_only")
 	check(http.MethodPut, "/api/v1/settings/security", `{"validate_origin":true,"access_scope":"lan"}`, nil, fixture.client, 200, `"workspace_terminal_lan":true`)
 
-	t.Run("save external origin behind proxy", func(t *testing.T) {
-		const body = `{"workspace_terminal_external_origin":"HTTPS://PROXY.Example:443/"}`
+	direct := http.Header{"Origin": {server.URL}}
+	t.Run("settings require a direct origin", func(t *testing.T) {
 		proxy := http.Header{"Origin": {externalOrigin}, "X-Test-Lan": {"yes"}, "X-Test-Preserve-Host": {"yes"}}
-		check(http.MethodPut, setting, body, proxy, http.DefaultClient, 401, "authentication_required")
-		noCSRF := proxy.Clone()
+		check(http.MethodPut, setting, externalSetting, proxy, http.DefaultClient, 401, "authentication_required")
+		noCSRF := direct.Clone()
 		noCSRF.Set("X-CSRF-Token", "")
-		check(http.MethodPut, setting, body, noCSRF, fixture.client, 403, "csrf_rejected")
-		check(http.MethodPut, setting, enableLAN, proxy, fixture.client, 403, loopbackRequired)
-		check(http.MethodPut, setting, `{"workspace_terminal_external_origin":"https://proxy.example/path"}`, proxy, fixture.client, 400, "workspace_terminal_invalid_external_origin")
+		check(http.MethodPut, setting, externalSetting, noCSRF, fixture.client, 403, "csrf_rejected")
+		check(http.MethodPut, setting, externalSetting, proxy, fixture.client, 403, "origin_rejected")
+		check(http.MethodPut, setting, externalSetting, http.Header{"Origin": {"", server.URL}}, fixture.client, 403, "origin_rejected")
+		check(http.MethodPut, setting, `{"workspace_terminal_external_origin":"https://proxy.example/path"}`, direct, fixture.client, 400, "workspace_terminal_invalid_external_origin")
 		check(http.MethodGet, "/api/v1/settings/security", "", nil, fixture.client, 200, `"workspace_terminal_external_origin":""`)
 
-		// Settings still follow the general Origin policy, which the reported
-		// deployment has disabled. Simulate a rewritten Host for that case.
-		proxy.Del("X-Test-Preserve-Host")
-		check(http.MethodPut, setting, body, proxy, fixture.client, 403, "origin_rejected")
-		api.setOriginValidation(false)
-		check(http.MethodPut, setting, body, proxy, fixture.client, 200, `"workspace_terminal_external_origin":"https://proxy.example"`)
-		api.setOriginValidation(true)
-		check(http.MethodGet, "/api/v1/settings/security", "", nil, fixture.client, 200, `"workspace_terminal_lan":true`)
+		// A non-loopback peer making a direct, same-origin request can save
+		// the address, while enabling LAN still requires a loopback request.
+		directLAN := direct.Clone()
+		directLAN.Set("X-Test-LAN", "yes")
+		check(http.MethodPut, setting, enableLAN, directLAN, fixture.client, 403, loopbackRequired)
+		check(http.MethodPut, setting, externalSetting, directLAN, fixture.client, 200, normalizedExternalSetting)
 	})
 
 	remote := domain.Workspace{ID: "other-workspace", ProjectID: fixture.task.ProjectID, Name: "Another target",
@@ -341,6 +343,44 @@ func TestWorkspaceTerminalOwnerLANWebSocketLifecycle(t *testing.T) {
 		t.Cleanup(func() { _ = conn.CloseNow() })
 		return conn
 	}
+	createProxiedTerminal := func(t *testing.T, headers http.Header) string {
+		t.Helper()
+		body := check(http.MethodPost, base, size, headers, fixture.client, 201, `"id":`)
+		var terminal workspaceterminal.Info
+		if err := json.Unmarshal([]byte(body), &terminal); err != nil || terminal.ID == "" {
+			t.Fatalf("could not decode created terminal: %v", err)
+		}
+		return base + "/" + terminal.ID
+	}
+	for _, validateOrigin := range []bool{false, true} {
+		t.Run("same-host proxy validate_origin="+strconv.FormatBool(validateOrigin), func(t *testing.T) {
+			api.setOriginValidation(validateOrigin)
+			// The test server sees a loopback peer and Host, as it would
+			// after proxying. Supply the external Origin without forwarding headers.
+			proxy := http.Header{"Origin": {externalOrigin}}
+			check(http.MethodPut, setting, disableLAN, direct, fixture.client, 200, `"workspace_terminal_lan":false`)
+			check(http.MethodPut, setting, enableLAN, proxy, fixture.client, 403, "origin_rejected")
+			check(http.MethodPut, setting, disableLAN, proxy, fixture.client, 403, "origin_rejected")
+			check(http.MethodPut, setting, `{"workspace_terminal_external_origin":""}`, proxy, fixture.client, 403, "origin_rejected")
+			check(http.MethodPut, setting, externalSetting, direct, fixture.client, 200, normalizedExternalSetting)
+
+			check(http.MethodPost, base, size, proxy, fixture.client, 403, "workspace_terminal_lan_locked")
+			dial(externalOrigin, proxy, "", 403)
+			check(http.MethodDelete, item, "", proxy, fixture.client, 403, "workspace_terminal_lan_locked")
+
+			check(http.MethodPut, setting, enableLAN, direct, fixture.client, 200, `"workspace_terminal_lan":true`)
+			policy := strconv.FormatBool(validateOrigin)
+			check(http.MethodPut, "/api/v1/settings/security", `{"validate_origin":`+policy+`,"access_scope":"local"}`, direct, fixture.client, 200, `"access_scope":"local"`)
+			check(http.MethodPost, base, size, proxy, fixture.client, 403, "workspace_terminal_lan_locked")
+			check(http.MethodPut, "/api/v1/settings/security", `{"validate_origin":`+policy+`,"access_scope":"lan"}`, direct, fixture.client, 200, `"access_scope":"lan"`)
+			proxiedItem := createProxiedTerminal(t, proxy)
+			directSocketURL := socketURL
+			socketURL = "ws" + strings.TrimPrefix(server.URL, "http") + proxiedItem + "/ws"
+			defer func() { socketURL = directSocketURL }()
+			dial(externalOrigin, proxy, "", 101)
+			check(http.MethodDelete, proxiedItem, "", proxy, fixture.client, 200, `"ok":true`)
+		})
+	}
 	for _, name := range []string{"Host preserved", "Host rewritten"} {
 		t.Run(name, func(t *testing.T) {
 			proxy := lan.Clone()
@@ -351,12 +391,7 @@ func TestWorkspaceTerminalOwnerLANWebSocketLifecycle(t *testing.T) {
 			noCSRF := proxy.Clone()
 			noCSRF.Set("X-CSRF-Token", "")
 			check(http.MethodPost, base, size, noCSRF, fixture.client, 403, "csrf_rejected")
-			body := check(http.MethodPost, base, size, proxy, fixture.client, 201, `"id":`)
-			var proxiedSession workspaceterminal.Info
-			if err := json.Unmarshal([]byte(body), &proxiedSession); err != nil || proxiedSession.ID == "" {
-				t.Fatalf("could not decode created terminal: %v", err)
-			}
-			proxiedItem := base + "/" + proxiedSession.ID
+			proxiedItem := createProxiedTerminal(t, proxy)
 			directSocketURL := socketURL
 			socketURL = "ws" + strings.TrimPrefix(server.URL, "http") + proxiedItem + "/ws"
 			defer func() { socketURL = directSocketURL }()
