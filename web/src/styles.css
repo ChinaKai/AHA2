@@ -3811,15 +3811,14 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
 .task-tool-actions .workspace-viewer-entry[aria-disabled="true"]:hover { background: #f8fafc; color: #a0a7b1; cursor: default; }
 .workspace-viewer { display: grid; grid-template-rows: auto auto minmax(0, 1fr); height: 100dvh; color: var(--text); background: var(--surface); }
 .workspace-viewer [hidden] { display: none; }
-.wv-header { min-width: 0; display: flex; justify-content: space-between; align-items: center; gap: var(--space-4); padding: var(--space-3) var(--space-5); border-bottom: 1px solid var(--line); background: var(--color-surface-raised); }
+.wv-header { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 3fr); align-items: center; gap: var(--space-2) var(--space-4); padding: var(--space-3) var(--space-5); border-bottom: 1px solid var(--line); background: var(--color-surface-raised); }
 .wv-heading, .wv-meta { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
-.wv-heading { flex: 1 1 25%; }
 .wv-heading > div { min-width: 0; }
 .wv-heading-icon { display: grid; place-items: center; flex: 0 0 36px; height: 36px; border-radius: var(--radius-control); background: var(--color-accent-soft); color: var(--color-accent-ink); }
 .wv-heading h1, .wv-heading p { margin: 0; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
 .wv-heading h1 { font-size: var(--font-size-16); }
 .wv-heading p { font-size: var(--font-size-12); color: var(--muted); }
-.wv-meta { flex: 0 1 75%; justify-content: flex-end; font-size: var(--font-size-12); white-space: nowrap; }
+.wv-meta { justify-content: flex-end; font-size: var(--font-size-12); white-space: nowrap; }
 .wv-meta label { display: flex; flex: 0 1 30%; min-width: 0; margin: 0; gap: var(--space-1); align-items: center; font-weight: 650; }
 .wv-meta label > span, .wv-meta .wv-branch > svg { flex: none; }
 .wv-meta select { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -3830,6 +3829,7 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
 .wv-badge { display: inline-flex; align-items: center; gap: var(--space-1); background: var(--surface-soft); border-radius: var(--radius-control); padding: var(--space-1) var(--space-2); font-size: var(--font-size-12); white-space: nowrap; }
 .wv-branch { display: flex; align-items: center; gap: var(--space-1); flex: 1 1 24%; min-width: 0; }
 .wv-branch select { width: 100%; font-family: var(--font-mono); }
+.wv-branch-notices { grid-column: 2; display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-3); color: var(--color-warning-ink); font-size: var(--font-size-12); }
 .wv-counts { flex: none; font-family: var(--font-mono); color: var(--muted); }
 .wv-notice { padding: var(--space-2) var(--space-5); color: var(--color-warning-ink); background: var(--color-warning-soft); }
 .wv-layout { min-height: 0; grid-row: 3; display: grid; grid-template-columns: minmax(250px, min(32%, 350px)) minmax(0, 1fr); }
@@ -3871,6 +3871,7 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
 .wv-tab button, .wv-close-all { min-width: 0; min-height: 38px; border: 0; border-radius: 0; background: transparent; font-size: var(--font-size-12); white-space: nowrap; }
 .wv-tab button { padding: 0 var(--space-2); }
 .wv-tab button span { overflow: hidden; text-overflow: ellipsis; }
+.wv-tab button .wv-badge { flex-shrink: 0; }
 .wv-tab .icon { flex: 0 0 14px; width: 14px; height: 14px; }
 .wv-close-all { flex-shrink: 0; border-left: 1px solid var(--line); }
 .wv-tab button:hover, .wv-close-all:hover { background: var(--color-accent-soft); }
@@ -3899,9 +3900,9 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
 .wv-empty .icon { width: 28px; height: 28px; }
 
 @media (max-width: 720px) {
-  .wv-header { align-items: flex-start; flex-direction: column; gap: var(--space-2); padding: var(--space-2) var(--space-3); }
-  .wv-heading { max-width: 100%; }
-  .wv-meta { flex-basis: auto; width: 100%; justify-content: flex-start; }
+  .wv-header { grid-template-columns: minmax(0, 1fr); padding: var(--space-2) var(--space-3); }
+  .wv-meta { justify-content: flex-start; }
+  .wv-branch-notices { grid-column: 1; }
   .wv-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
   .wv-side { max-height: 35dvh; border-right: 0; border-bottom: 1px solid var(--line); }
   .wv-navigator { overflow: auto; }

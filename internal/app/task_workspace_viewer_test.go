@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -17,6 +18,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/workspace"
@@ -261,6 +263,10 @@ func TestWorkspaceViewerBranchSelection(t *testing.T) {
 		runViewerFixtureGit(t, dir, "tag", "refs/heads/team", remote)
 		runViewerFixtureGit(t, dir, "switch", "main")
 		runViewerFixtureGit(t, dir, "branch", "-D", "remote-fixture")
+		orphanTree := runViewerFixtureGit(t, dir, "rev-parse", local+"^{tree}")
+		orphan := runViewerFixtureGit(t, dir, "commit-tree", orphanTree, "-m", "unrelated history")
+		const orphanRef = "refs/heads/unrelated"
+		runViewerFixtureGit(t, dir, "update-ref", orphanRef, orphan)
 		writeViewerFixture(t, dir, "readme.txt", "uncommitted\n")
 		index := filepath.Join(dir, ".git", "index")
 		before, err := os.ReadFile(index)
@@ -301,7 +307,7 @@ func TestWorkspaceViewerBranchSelection(t *testing.T) {
 			selected := state(option.ref, false)
 			if selected.Head != option.head || selected.CheckedOutBranch != "main" || len(selected.Uncommitted) != 0 ||
 				selected.MergeBase != base || selected.Ahead != 1 || len(selected.BaseChanges) != 1 || len(selected.Commits) != 1 ||
-				selected.Commits[0].ID != option.head {
+				selected.Commits[0].ID != option.head || selected.NoCommonAncestor {
 				t.Fatalf("%s: %+v", option.ref, selected)
 			}
 			for _, scope := range []string{"base", "commit"} {
@@ -310,6 +316,19 @@ func TestWorkspaceViewerBranchSelection(t *testing.T) {
 					t.Fatalf("%s diff at %s: %+v, %v", scope, option.ref, result, err)
 				}
 			}
+		}
+		unrelated := state(orphanRef, false)
+		if !unrelated.NoCommonAncestor || unrelated.Base != base || unrelated.MergeBase != "" || unrelated.Ahead != 0 ||
+			unrelated.Behind != 0 || len(unrelated.BaseChanges) != 0 || len(unrelated.Commits) != 1 ||
+			unrelated.Commits[0].ID != orphan || len(unrelated.Commits[0].Files) != 1 {
+			t.Fatalf("unrelated history: %+v", unrelated)
+		}
+		if _, err := view(WorkspaceViewerRequest{View: "diff", Scope: "base", Path: "readme.txt", Branch: orphanRef}); !errors.Is(err, ErrViewerRevision) {
+			t.Fatalf("base diff for unrelated history: %v", err)
+		}
+		result, err := view(WorkspaceViewerRequest{View: "diff", Scope: "commit", Path: "readme.txt", Branch: orphanRef, Commit: orphan})
+		if err != nil || !strings.Contains(result.(viewerContent).Text, "+local change") {
+			t.Fatalf("commit diff for unrelated history: %+v, %v", result, err)
 		}
 		latest := state(remoteRef, false).Commits[0]
 		if latest.Short != remote[:7] || latest.Subject != subject || latest.Author != "Test" || latest.Date <= 0 {
@@ -353,6 +372,146 @@ func TestWorkspaceViewerBranchSelection(t *testing.T) {
 			t.Fatal("branch viewing changed the index, working copy or HEAD")
 		}
 	})
+}
+
+func TestWorkspaceViewerBranchLimits(t *testing.T) {
+	testViewerGitSources(t, func(t *testing.T, dir string, source viewerFS) {
+		runViewerFixtureGit(t, dir, "init", "-b", "main")
+		runViewerFixtureGit(t, dir, "commit", "--allow-empty", "-m", "base")
+		head := runViewerFixtureGit(t, dir, "rev-parse", "HEAD")
+		var updates strings.Builder
+		for i := 0; i < viewerBranchLimit; i++ {
+			if i < viewerBranchLimit-1 {
+				fmt.Fprintf(&updates, "create refs/heads/a/%03d %s\n", i, head)
+			}
+			fmt.Fprintf(&updates, "create refs/remotes/origin/b/%03d %s\n", i, head)
+		}
+		cmd := exec.CommandContext(t.Context(), "git", "update-ref", "--stdin")
+		cmd.Dir = dir
+		cmd.Stdin = strings.NewReader(updates.String())
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("seed branch refs: %v: %s", err, output)
+		}
+		read := func(summary bool) viewerState {
+			t.Helper()
+			state, err := readViewerState(t.Context(), source, domain.Task{}, "fixture", WorkspaceViewerRequest{Summary: summary}, viewerRepositories{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return state
+		}
+		exact := read(false)
+		if exact.LocalRefsTruncated || exact.RemoteRefsTruncated || len(exact.Branches) != viewerBranchLimit ||
+			!slices.Contains(exact.Branches, "main") || len(exact.BranchOptions) != 2*viewerBranchLimit {
+			t.Fatal("a list at the ref limit was truncated or incomplete")
+		}
+		runViewerFixtureGit(t, dir, "update-ref", "refs/heads/a/499", head)
+		local := read(false)
+		if !local.LocalRefsTruncated || local.RemoteRefsTruncated || local.Truncated || len(local.Branches) != viewerBranchLimit ||
+			slices.Contains(local.Branches, "main") || len(local.BranchOptions) != 2*viewerBranchLimit || local.CheckedOutBranch != "main" {
+			t.Fatal("local truncation did not preserve the checked-out branch and list bounds")
+		}
+		if version := read(true).Version; version == exact.Version || version != local.Version {
+			t.Fatal("summary did not detect local branch truncation")
+		}
+		runViewerFixtureGit(t, dir, "update-ref", "refs/remotes/origin/b/500", head)
+		runViewerFixtureGit(t, dir, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/b/000")
+		both := read(false)
+		if !both.LocalRefsTruncated || !both.RemoteRefsTruncated || both.Truncated || len(both.BranchOptions) > 2*viewerBranchLimit ||
+			slices.Contains(both.BranchOptions, viewerBranch{Ref: "refs/remotes/origin/HEAD", Name: "origin/HEAD"}) {
+			t.Fatal("remote truncation was missed when a symbolic ref consumed a scan slot")
+		}
+	})
+}
+
+type viewerBudgetSource struct {
+	viewerFS
+	check func(context.Context, string, bool) error
+}
+
+func (source viewerBudgetSource) repositories(ctx context.Context) (viewerRepositories, error) {
+	if err := source.check(ctx, "repositories", false); err != nil {
+		return viewerRepositories{}, err
+	}
+	return source.viewerFS.repositories(ctx)
+}
+
+func (source viewerBudgetSource) git(ctx context.Context, limit int, readLineEndings bool, args ...string) (viewerGitOutput, error) {
+	branch := slices.Contains(args, "for-each-ref")
+	if err := source.check(ctx, args[len(args)-1], branch); err != nil {
+		return viewerGitOutput{}, err
+	}
+	return source.viewerFS.git(ctx, limit, readLineEndings, args...)
+}
+
+func TestWorkspaceViewerBranchBudget(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is unavailable")
+	}
+	dir, native := viewerFixture(t)
+	runViewerFixtureGit(t, dir, "init", "-b", "main")
+	writeViewerFixture(t, dir, "readme.txt", "base\n")
+	runViewerFixtureGit(t, dir, "add", "readme.txt")
+	runViewerFixtureGit(t, dir, "commit", "-m", "base")
+	head := runViewerFixtureGit(t, dir, "rev-parse", "HEAD")
+	const ref = "refs/heads/topic"
+	runViewerFixtureGit(t, dir, "update-ref", ref, head)
+	task := domain.Task{BaseCommit: head}
+
+	for _, tc := range []struct {
+		name string
+		req  WorkspaceViewerRequest
+		refs []string
+		fail bool
+	}{
+		{"state", WorkspaceViewerRequest{View: "state", Branch: ref}, []string{ref, viewerLocalRefs, viewerRemoteRefs}, false},
+		{"base diff", WorkspaceViewerRequest{View: "diff", Scope: "base", Path: "readme.txt", Branch: ref}, []string{ref, viewerLocalRefs}, false},
+		{"commit diff", WorkspaceViewerRequest{View: "diff", Scope: "commit", Commit: head, Path: "readme.txt", Branch: ref}, []string{ref}, false},
+		{"enumeration error", WorkspaceViewerRequest{View: "state", Branch: ref}, []string{ref, viewerLocalRefs}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			start := time.Now()
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+			defer cancel()
+			deadline, _ := ctx.Deadline()
+			var branchDeadline time.Time
+			var refs []string
+			var otherReads int
+			source := viewerBudgetSource{viewerFS: native, check: func(callCtx context.Context, step string, branch bool) error {
+				got, _ := callCtx.Deadline()
+				if !branch {
+					otherReads++
+					if got != deadline {
+						t.Errorf("%s used %v; want the original request deadline %v", step, got, deadline)
+					}
+					return nil
+				}
+				refs = append(refs, step)
+				if branchDeadline.IsZero() {
+					branchDeadline = got
+				}
+				if got != branchDeadline || got.Before(start.Add(5*time.Second)) || got.After(time.Now().Add(5*time.Second)) {
+					t.Errorf("%s did not use the shared five-second branch deadline: %v", step, got)
+				}
+				if tc.fail && step == viewerLocalRefs {
+					return ErrViewerGit
+				}
+				return nil
+			}}
+			result, err := readWorkspaceView(ctx, source, task, "fixture", "fixture", tc.req)
+			if tc.fail {
+				partial, _ := result.(viewerState)
+				if !errors.Is(err, ErrViewerGit) || partial.Version != "" {
+					t.Fatalf("enumeration error returned result=%v err=%v", result, err)
+				}
+			} else if err != nil || otherReads == 0 {
+				t.Fatalf("ordinary reads=%d err=%v", otherReads, err)
+			}
+			if !slices.Equal(refs, tc.refs) {
+				t.Errorf("branch queries %v; want %v", refs, tc.refs)
+			}
+		})
+	}
 }
 
 func isolateViewerGitConfig(t *testing.T) string {
@@ -569,6 +728,31 @@ func TestWorkspaceViewerCommitLimits(t *testing.T) {
 	for _, commit := range state.Commits {
 		if len(commit.Files) != viewerCommitFiles || !commit.Truncated {
 			t.Fatalf("files=%d truncated=%v", len(commit.Files), commit.Truncated)
+		}
+	}
+}
+
+func TestWorkspaceViewerCommitTextLimits(t *testing.T) {
+	id := strings.Repeat("a", 40)
+	subject := strings.Repeat("界", 100_000)
+	author := strings.Repeat("🦊", viewerAuthorLimit+1)
+	var state viewerState
+	state.readLog([]string{"\x1e" + id, "1", author, subject, "1\t0\tfile",
+		"\x1e" + id, "2", strings.Repeat("作", viewerAuthorLimit), strings.Repeat("题", viewerSubjectLimit)})
+	if len(state.Commits) != 2 || state.Truncated || len(state.Commits[0].Files) != 1 {
+		t.Fatal("metadata limits changed history or file parsing")
+	}
+	for _, field := range []struct {
+		value, want string
+		limit       int
+	}{
+		{state.Commits[0].Subject, strings.Repeat("界", viewerSubjectLimit-1) + "…", viewerSubjectLimit},
+		{state.Commits[0].Author, strings.Repeat("🦊", viewerAuthorLimit-1) + "…", viewerAuthorLimit},
+		{state.Commits[1].Subject, strings.Repeat("题", viewerSubjectLimit), viewerSubjectLimit},
+		{state.Commits[1].Author, strings.Repeat("作", viewerAuthorLimit), viewerAuthorLimit},
+	} {
+		if !utf8.ValidString(field.value) || utf8.RuneCountInString(field.value) != field.limit || field.value != field.want {
+			t.Errorf("unexpected metadata at the %d-character limit; got %d characters", field.limit, utf8.RuneCountInString(field.value))
 		}
 	}
 }

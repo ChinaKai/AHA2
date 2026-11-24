@@ -39,11 +39,14 @@ const longBranch = "task/" + "long-branch-".repeat(17) + "end";
 const longBase = "release/" + "long-baseline-".repeat(16) + "end";
 const localRef = "refs/heads/release";
 const remoteRef = "refs/remotes/origin/release";
+const orphanRef = "refs/heads/unrelated";
 const localHead = "d".repeat(40);
 const remoteHead = "e".repeat(40);
+const orphanHead = "f".repeat(40);
 const author = "A & B";
 const date = Date.UTC(2026, 0, 15, 12) / 1000;
-const longSubject = "Earlier commit " + "long-unbroken-title".repeat(80);
+const longSubject = "Earlier commit " + "x".repeat(4080) + "…";
+const longAuthor = "界".repeat(1023) + "…";
 const childRepository = "modules/application";
 const childPath = "README.md";
 const longPath = "nested/" + "long-file-name-".repeat(24) + ".md";
@@ -96,8 +99,9 @@ try {
       const unavailable = repo === "modules/missing";
       const branch = url.searchParams.get("branch");
       const remote = branch === remoteRef;
-      const branchHead = remote ? remoteHead : localHead;
-      const branchName = remote ? "origin/release" : "release";
+      const orphan = branch === orphanRef;
+      const branchHead = orphan ? orphanHead : remote ? remoteHead : localHead;
+      const branchName = orphan ? "unrelated" : remote ? "origin/release" : "release";
       const version = branch ? "v1-" + branch : "v1";
       if (view === "state" && url.searchParams.has("availability")) return answer({available: true});
       if (view === "state" && repo === "modules/pending") {
@@ -117,16 +121,19 @@ try {
         version, branch: branch ? branchName : child ? "feature" : longBranch, head: branch ? branchHead : head,
         checkedOutBranch: child ? "feature" : longBranch,
         branchOptions: child ? [{ref: "refs/heads/feature", name: "feature"}] : [
-          {ref: "refs/heads/" + longBranch, name: longBranch}, {ref: localRef, name: "release"}, {ref: remoteRef, name: "origin/release"},
+          {ref: "refs/heads/" + longBranch, name: longBranch}, {ref: localRef, name: "release"},
+          {ref: orphanRef, name: "unrelated"}, {ref: remoteRef, name: "origin/release"},
         ],
-        base: child ? "HEAD" : url.searchParams.get("base") || longBase, mergeBase: child ? "" : older,
+        localBranchesTruncated: isGit && !child && !remote, remoteBranchesTruncated: isGit && !child && !!branch,
+        base: child ? "HEAD" : url.searchParams.get("base") || longBase, mergeBase: child || orphan ? "" : older,
+        noCommonAncestor: orphan,
         baseAtHead: child, baseFallback: child && url.searchParams.has("base"),
-        ahead: child ? 0 : 1, behind: 0, branches: child ? ["feature"] : ["main", "release", longBase, longBranch], baseChanges: changes,
+        ahead: child || orphan ? 0 : 1, behind: 0, branches: child ? ["feature"] : ["main", "release", longBase, longBranch], baseChanges: orphan ? [] : changes,
         uncommitted: branch ? [] : [{...changes[0], path: child ? childPath : changes[0].path, status: ".M"}],
         commits: unavailable ? [] : branch ? [{id: branchHead, short: branchHead.slice(0, 7), subject: branchName + " commit", author, date, files: changes}]
           : child ? [{id: head, short: "aaaaaaa", subject: "Child commit", files: [{...changes[0], path: childPath}]}]
           : [{id: head, short: "aaaaaaa", subject: "Latest commit", author, date, files: changes},
-          {id: older, short: "bbbbbbb", subject: longSubject, author, date, files: [{path: longPath, added: 1, deleted: 0}]},
+          {id: older, short: "bbbbbbb", subject: longSubject, author: longAuthor, date, files: [{path: longPath, added: 1, deleted: 0}]},
           {id: gitlinkCommit, short: "ccccccc", subject: "Update application pointer", files: [gitlink]}, ...history],
       });
       if (view === "tree") {
@@ -184,6 +191,8 @@ try {
       const label = meta.querySelector("label > span");
       const baseSelect = meta.querySelector("[data-wv-base]");
       const branch = meta.querySelector("[data-wv-branch]");
+      const branchNotices = document.getElementById(branch.getAttribute("aria-describedby"));
+      const notices = branchNotices?.getBoundingClientRect();
       return {
         sameRow: boxes.every(box => Math.abs(center(box) - center(boxes[0])) < 1),
         noOverlap: boxes.every((box, i) => box.right <= innerWidth && (i === 0 || box.left >= boxes[i - 1].right)) &&
@@ -191,12 +200,17 @@ try {
         noWrap: getComputedStyle(label).whiteSpace === "nowrap",
         baseEllipsis: getComputedStyle(baseSelect).textOverflow === "ellipsis",
         branchEllipsis: getComputedStyle(branch).textOverflow === "ellipsis",
+        noticesNearby: notices && notices.top >= branch.getBoundingClientRect().bottom && notices.right <= innerWidth,
       };
     });
-    assert.deepEqual(layout, {sameRow: true, noOverlap: true, noWrap: true, baseEllipsis: true, branchEllipsis: true}, `viewer header at ${width}px`);
+    assert.deepEqual(layout, {sameRow: true, noOverlap: true, noWrap: true, baseEllipsis: true, branchEllipsis: true, noticesNearby: true}, `viewer header at ${width}px`);
     assert.equal(await page.locator("[data-wv-branch]").getAttribute("title"), longBranch);
   }
   const branchSelect = viewer.getByRole("combobox", {name: "Branch"});
+  const branchNotices = viewer.locator("header .wv-branch-notices");
+  await branchNotices.getByText("Local branch list truncated.", {exact: true}).waitFor();
+  assert.equal(await branchNotices.getByText("The remote branch list reached its scan limit and may be incomplete.", {exact: true}).count(), 0);
+  assert.equal(await viewer.locator(".wv-navigator").getByText("This list is truncated.", {exact: true}).count(), 0);
   assert.equal(await branchSelect.inputValue(), "");
   assert.equal(await branchSelect.locator("option:checked").textContent(), longBranch);
   assert.equal(await branchSelect.locator('optgroup[label="Local branches"]').locator(`option[value="${localRef}"]`).count(), 1);
@@ -238,6 +252,7 @@ try {
   assert.equal(await commitRows.first().locator(".wv-commit-info").innerText(), commitInfo);
   const longRow = viewer.locator(`[data-wv-toggle-commit="${older}"]`);
   assert.ok((await longRow.getAttribute("title")).startsWith(longSubject));
+  assert.ok((await longRow.getAttribute("title")).includes(`\nAuthor ${longAuthor}\n`));
   assert.equal(await longRow.locator(".wv-row-name > span:last-child").evaluate(el => el.scrollWidth > el.clientWidth), true);
   await desktop.ctx.grantPermissions(["clipboard-read", "clipboard-write"], {origin});
   await copy.click();
@@ -454,11 +469,15 @@ try {
   await viewer.waitForURL(url => url.searchParams.get("branch") === localRef);
   await commitGroup.click();
   await viewer.locator(`[data-wv-toggle-commit="${localHead}"]`).waitFor();
+  await branchNotices.getByText("Local branch list truncated.", {exact: true}).waitFor();
+  await branchNotices.getByText("The remote branch list reached its scan limit and may be incomplete.", {exact: true}).waitFor();
   await viewer.locator('[data-wv-action="baseChanges"]').click();
   await viewer.locator('[data-wv-scope="base"]').click();
   await viewer.getByText("+release change", {exact: true}).waitFor();
   await viewer.getByRole("combobox", {name: "Branch"}).selectOption(remoteRef);
   await viewer.locator(`[data-wv-toggle-commit="${remoteHead}"]`).waitFor();
+  assert.equal(await branchNotices.getByText("Local branch list truncated.", {exact: true}).count(), 0);
+  await branchNotices.getByText("The remote branch list reached its scan limit and may be incomplete.", {exact: true}).waitFor();
   assert.equal(await viewer.locator(`[data-wv-toggle-commit="${localHead}"]`).count(), 0);
   assert.equal(await viewer.locator('[data-wv-action="uncommitted"]').count(), 0);
   assert.equal(await viewer.locator(".wv-tab").count(), 0);
@@ -493,6 +512,21 @@ try {
   await branchSelect.selectOption("");
   await viewer.locator('[data-wv-action="uncommitted"]').waitFor();
   assert.equal(new URL(viewer.url()).searchParams.has("branch"), false);
+
+  await branchSelect.selectOption(orphanRef);
+  await viewer.locator(".wv-navigator").getByText("This branch and the base have no common ancestor. The diff against base is unavailable.").waitFor();
+  assert.match(await commitGroup.textContent(), /Recent commits/);
+  assert.equal(await viewer.locator(".wv-counts, [data-wv-action=baseChanges]").count(), 0);
+  await commitGroup.click();
+  await viewer.locator(`[data-wv-toggle-commit="${orphanHead}"]`).waitFor();
+  await viewer.getByRole("button", {name: "Working tree files", exact: true}).click();
+  await viewer.locator('[data-wv-scope="file"][data-wv-path="README.md"]').click();
+  await viewer.locator(".wv-code").getByText("<script>literal only</script>", {exact: false}).waitFor();
+  await viewer.locator(".wv-tab .wv-badge").getByText("Working tree", {exact: true}).waitFor();
+  await viewer.locator(".wv-content-head .wv-badge").getByText("Working tree", {exact: true}).waitFor();
+  const fileQuery = desktop.queries.findLast(({view, query}) => view === "file" && query.get("path") === "README.md");
+  assert.ok(fileQuery && !fileQuery.query.has("branch"));
+  assert.equal(await branchSelect.inputValue(), orphanRef);
   assert.ok(desktop.queries.every(({method}) => method === "GET"));
   await desktop.ctx.close();
 
@@ -518,14 +552,25 @@ try {
   await checkHeader(narrow, 1024);
   await checkHeader(narrow, 390);
   const narrowBranch = narrow.getByRole("combobox", {name: "分支"});
+  const narrowNotices = narrow.locator("header .wv-branch-notices");
+  await narrowNotices.getByText("本地分支列表已截断。", {exact: true}).waitFor();
   assert.equal(await narrowBranch.locator("option:checked").textContent(), longBranch);
   await narrowBranch.selectOption(remoteRef);
+  await narrowNotices.getByText("远程分支列表达到读取上限，可能不完整。", {exact: true}).waitFor();
   await narrow.locator('[data-wv-action="commits"]').click();
   await narrow.locator(`[data-wv-scope="commit"][data-wv-commit="${remoteHead}"]`).click();
   await checkToolbar(narrow, 390, ["忽略空白", "自动换行", "上一处差异", "下一处差异"]);
   const narrowCommit = narrow.locator(`[data-wv-toggle-commit="${remoteHead}"]`);
   assert.equal(await narrowCommit.locator("code").textContent(), "eeeeeee");
   assert.match(await narrowCommit.getAttribute("title"), new RegExp(`完整哈希 ${remoteHead}\\n作者 A & B\\n提交时间 .*2026`));
+  await narrowBranch.selectOption(orphanRef);
+  await narrow.locator(".wv-navigator").getByText("该分支与基线无共同祖先，无法计算基线差异。").waitFor();
+  assert.equal(await narrow.locator(".wv-counts, [data-wv-action=baseChanges]").count(), 0);
+  await narrow.getByRole("button", {name: "工作区文件", exact: true}).click();
+  await narrow.locator('[data-wv-scope="file"][data-wv-path="README.md"]').click();
+  await narrow.locator(".wv-content-head .wv-badge").getByText("工作区", {exact: true}).waitFor();
+  await narrow.locator(".wv-tab .wv-badge").getByText("工作区", {exact: true}).waitFor();
+  assert.equal(await narrow.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   await narrow.goto(origin + "/workspace-viewer?task=missing");
   await narrow.getByText("该任务的工作区或工作树不可用。").waitFor();
   await mobile.ctx.close();

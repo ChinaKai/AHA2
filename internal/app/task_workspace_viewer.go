@@ -147,14 +147,9 @@ func (s *Service) ReadTaskWorkspace(ctx context.Context, taskID string, req Work
 }
 
 func readWorkspaceView(ctx context.Context, source viewerFS, task domain.Task, name, repositoryName string, req WorkspaceViewerRequest) (any, error) {
-	if req.Branch != "" {
-		if !validViewerBranchRef(req.Branch) || (req.View != "state" && req.View != "diff") ||
-			req.Availability || req.Scope == "uncommitted" {
-			return nil, ErrViewerBranch
-		}
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, viewerBranchTimeout)
-		defer cancel()
+	if req.Branch != "" && (!validViewerBranchRef(req.Branch) || (req.View != "state" && req.View != "diff") ||
+		req.Availability || req.Scope == "uncommitted") {
+		return nil, ErrViewerBranch
 	}
 	switch req.View {
 	case "state":

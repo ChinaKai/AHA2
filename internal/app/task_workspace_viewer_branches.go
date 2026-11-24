@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -9,10 +10,16 @@ import (
 
 const (
 	viewerBranchTimeout = 5 * time.Second
+	viewerBranchLimit   = 500
 	viewerLocalRefs     = "refs/heads/"
 	viewerRemoteRefs    = "refs/remotes/"
 	viewerRefFormat     = "--format=%(refname)%00%(objectname)%00%(symref)"
 )
+
+func viewerBranchRecords(data []byte) []string {
+	lines := strings.Split(string(data), "\n")
+	return lines[:len(lines)-1] // The last item is empty or a partial record.
+}
 
 type viewerBranch struct {
 	Ref  string `json:"ref"`
@@ -81,15 +88,17 @@ func (git viewerGit) selectedBranch(ctx context.Context, ref string) (string, er
 }
 
 func (git viewerGit) remoteBranches(ctx context.Context) ([]viewerBranch, viewerGitOutput, error) {
-	out, err := git.checked(ctx, 512<<10, "for-each-ref", "--sort=refname", "--count=501", viewerRefFormat, viewerRemoteRefs)
+	out, err := git.checked(ctx, 512<<10, "for-each-ref", "--sort=refname", "--count="+strconv.Itoa(viewerBranchLimit+1), viewerRefFormat, viewerRemoteRefs)
 	if err != nil {
 		return nil, out, err
 	}
 	options := []viewerBranch{}
-	for line := range strings.SplitSeq(string(out.data), "\n") {
+	records := viewerBranchRecords(out.data)
+	// Symbolic refs also consume slots in Git's bounded scan.
+	out.truncated = out.truncated || len(records) > viewerBranchLimit
+	for _, line := range records {
 		if ref, _, ok := readViewerBranchRecord(line); ok {
-			if len(options) == 500 {
-				out.truncated = true
+			if len(options) == viewerBranchLimit {
 				break
 			}
 			options = append(options, viewerBranch{Ref: ref, Name: viewerBranchName(ref)})

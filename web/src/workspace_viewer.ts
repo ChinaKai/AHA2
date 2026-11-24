@@ -41,11 +41,14 @@ interface ViewerState {
   branch?: string;
   checkedOutBranch?: string;
   branchOptions?: Branch[];
+  localBranchesTruncated?: boolean;
+  remoteBranchesTruncated?: boolean;
   head?: string;
   base?: string;
   baseFallback?: boolean;
   baseAtHead?: boolean;
   mergeBase?: string;
+  noCommonAncestor?: boolean;
   ahead: number;
   behind: number;
   branches: string[];
@@ -107,6 +110,8 @@ const copy: Record<string, Record<string, string>> = {
     currentBranch: "当前分支",
     localBranches: "本地分支",
     remoteBranches: "远程分支",
+    localBranchesTruncated: "本地分支列表已截断。",
+    remoteBranchesTruncated: "远程分支列表达到读取上限，可能不完整。",
     invalidBranch: "所选分支不存在或已不可用。",
     repository: "仓库",
     repositoryUnavailableLabel: "{name}（不可用）",
@@ -128,10 +133,12 @@ const copy: Record<string, Record<string, string>> = {
     changes: "变更",
     files: "文件",
     worktreeFiles: "工作区文件",
+    worktree: "工作区",
     uncommitted: "未提交变更",
     commits: "最近提交",
     relativeCommits: "基线之后的提交",
     baseChanges: "与基线的差异",
+    noCommonAncestor: "该分支与基线无共同祖先，无法计算基线差异。",
     noChanges: "没有文件变更",
     noCommits: "暂无提交",
     loadMoreCommits: "加载更多",
@@ -175,6 +182,8 @@ const copy: Record<string, Record<string, string>> = {
     currentBranch: "Current branch",
     localBranches: "Local branches",
     remoteBranches: "Remote branches",
+    localBranchesTruncated: "Local branch list truncated.",
+    remoteBranchesTruncated: "The remote branch list reached its scan limit and may be incomplete.",
     invalidBranch: "The selected branch is missing or unavailable.",
     repository: "Repository",
     repositoryUnavailableLabel: "{name} (unavailable)",
@@ -196,10 +205,12 @@ const copy: Record<string, Record<string, string>> = {
     changes: "Changes",
     files: "Files",
     worktreeFiles: "Working tree files",
+    worktree: "Working tree",
     uncommitted: "Uncommitted changes",
     commits: "Recent commits",
     relativeCommits: "Commits relative to base",
     baseChanges: "Diff against base",
+    noCommonAncestor: "This branch and the base have no common ancestor. The diff against base is unavailable.",
     noChanges: "No changed files",
     noCommits: "No commits",
     loadMoreCommits: "Load more",
@@ -335,7 +346,7 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string, copyText: 
   const repositoryBases = new Map<string, string>();
   const repositoryBranches = new Map<string, string>();
   if (initialFileRepo !== null && initialFileBranch !== null) repositoryBranches.set(initialFileRepo, initialFileBranch);
-  let branchMenu: {options: Branch[]; current: string; title: string; checkedOutRef: string} | undefined;
+  let branchMenu: {options: Branch[]; current: string; title: string; checkedOutRef: string; notices: string[]} | undefined;
   let repositories: Repository[] = [];
   let state: ViewerState | undefined;
   let wrap = false;
@@ -396,6 +407,7 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string, copyText: 
     const options = branchMenu?.options || [];
     const selectedBranch = options.find(option => option.ref === branch);
     const branchTitle = selectedBranch?.name || branch || branchMenu?.title || current;
+    const branchNotices = branchMenu?.notices || [];
     const branchOptions = (prefix: string) => options.filter(option =>
       option.ref.startsWith(prefix) && (option.ref !== branchMenu?.checkedOutRef || option.ref === branch))
       .map(({ref, name}) => `<option value="${html(ref)}" ${ref === branch ? "selected" : ""}>${html(name)}</option>`).join("");
@@ -424,7 +436,7 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string, copyText: 
           ${repositories.map(item => `<option value="${html(item.id)}" ${item.id === repo ? "selected" : ""}>${html(repositoryLabel(item))}</option>`).join("")}
         </select>` : ""}
         ${branchMenu || branch ? `<span class="wv-branch">${icon("branch")}
-          <select data-wv-branch aria-label="${label("branch")}" title="${html(branchTitle)}">
+          <select data-wv-branch aria-label="${label("branch")}" title="${html(branchTitle)}" ${branchNotices.length ? 'aria-describedby="wv-branch-notices"' : ""}>
             <option value="">${html(current)}</option>
             ${local ? `<optgroup label="${label("localBranches")}">${local}</optgroup>` : ""}
             ${remote ? `<optgroup label="${label("remoteBranches")}">${remote}</optgroup>` : ""}
@@ -434,10 +446,13 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string, copyText: 
             <option value="">${html(automatic)}</option>
             ${[...choices].map(value => `<option value="${html(value)}" ${value === visibleBase ? "selected" : ""}>${html(value === baseline ? shortBase : value)}</option>`).join("")}
           </select></label>
-          ${baseline && !state.baseAtHead ? `<span class="wv-counts" title="${html(label("comparison", {ahead: state.ahead, behind: state.behind}))}">↑${state.ahead} ↓${state.behind}</span>` : ""}`
+          ${baseline && !state.baseAtHead && !state.noCommonAncestor ? `<span class="wv-counts" title="${html(label("comparison", {ahead: state.ahead, behind: state.behind}))}">↑${state.ahead} ↓${state.behind}</span>` : ""}`
         : state && !state.repositoryUnavailable ? `<span class="wv-badge">${label("nonGit")}</span>` : ""}
         <button type="button" data-wv-action="refresh" title="${t("common.refresh")}" aria-label="${t("common.refresh")}">${icon("refresh")}</button>
-      </div>`;
+      </div>
+      ${branchNotices.length ? `<div class="wv-branch-notices" id="wv-branch-notices" role="status">
+        ${branchNotices.map(notice => `<span>${html(notice)}</span>`).join("")}
+      </div>` : ""}`;
     if (focusAttr) header.querySelector<HTMLElement>(`[${focusAttr}]`)?.focus({preventScroll: true});
   }
 
@@ -489,9 +504,10 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string, copyText: 
       </button>
       ${groupOpen ? changeList(state!.uncommitted, "uncommitted") : ""}
     </section>`}
+    ${state!.noCommonAncestor ? `<p class="wv-hint" role="status">${label("noCommonAncestor")}</p>` : ""}
     <section class="wv-group">
       <button type="button" class="wv-group-title" data-wv-action="commits" aria-expanded="${commitsOpen}">
-        <span aria-hidden="true">${commitsOpen ? "▾" : "▸"}</span> ${state!.base && !state!.baseAtHead ? label("relativeCommits") : label("commits")} <span class="wv-count">${commits.length}</span>
+        <span aria-hidden="true">${commitsOpen ? "▾" : "▸"}</span> ${state!.base && !state!.baseAtHead && !state!.noCommonAncestor ? label("relativeCommits") : label("commits")} <span class="wv-count">${commits.length}</span>
       </button>
       ${commitsOpen ? history || `<p class="wv-hint">${label("noCommits")}</p>` : ""}
       ${commitsOpen && visibleCommitCount < commits.length ? `<button type="button" class="wv-row" data-wv-action="loadMoreCommits">${label("loadMoreCommits")}</button>` : ""}
@@ -553,7 +569,8 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string, copyText: 
       const caption = duplicate && repository ? `${name} · ${repository}` : name;
       const closeLabel = html(label("closeTab", {file: caption}));
       return `<div class="wv-tab" data-wv-tab="${index}">
-        <button type="button" data-wv-select="${index}" aria-pressed="${tab === selected}" title="${html(repository ? `${repository} · ${tab.path}` : tab.path)}">${icon("file")}<span>${html(caption)}</span></button>
+        <button type="button" data-wv-select="${index}" aria-pressed="${tab === selected}" title="${html(repository ? `${repository} · ${tab.path}` : tab.path)}">${icon("file")}<span>${html(caption)}</span>
+          ${branch && tab.scope === "file" ? `<span class="wv-badge">${label("worktree")}</span>` : ""}</button>
         <button type="button" data-wv-close="${index}" title="${closeLabel}" aria-label="${closeLabel}">${icon("close")}</button>
       </div>`;
     }).join("")}</div>
@@ -591,7 +608,7 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string, copyText: 
     else if (placeholder) body = `<p class="wv-hint">${label(placeholder === "too_large" ? "tooLarge" : placeholder)}</p>`;
     else if (info && !info.text) body = `<p class="wv-hint">${label(diff ? "noDiff" : "emptyFile")}</p>`;
     else if (info) body = `<pre class="wv-code ${wrap ? "wv-wrap" : ""}" tabindex="0"><code>${diff ? diffHTML(info.text) : html(info.text)}</code></pre>`;
-    const source = tab.scope === "file" ? "" : tab.scope === "uncommitted" ? label("uncommitted")
+    const source = tab.scope === "file" ? label("worktree") : tab.scope === "uncommitted" ? label("uncommitted")
       : tab.scope === "base" ? label("baseChanges") : tab.commit.slice(0, 7);
     content.innerHTML = `<div class="wv-content-head"><strong title="${html(tab.path)}">${html(tab.path)}</strong>
       ${source ? `<span class="wv-badge">${html(source)}</span>` : ""}
@@ -782,6 +799,10 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string, copyText: 
           current: checkedOut || (!branch && next.head ? label("detached", {head: next.head.slice(0, 8)}) : label("currentBranch")),
           title: checkedOut || (!branch && next.head ? label("detached", {head: next.head}) : label("currentBranch")),
           checkedOutRef: checkedOut ? `refs/heads/${checkedOut}` : "",
+          notices: [
+            next.localBranchesTruncated ? label("localBranchesTruncated") : "",
+            next.remoteBranchesTruncated ? label("remoteBranchesTruncated") : "",
+          ].filter(Boolean),
         } : undefined;
         repositories = next.repositories || [];
         document.title = `${next.name} · AHA2`;
