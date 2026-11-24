@@ -119,8 +119,8 @@ func channelMCPTools() []mcpTool {
 		{
 			Name: "channel_request_permission",
 			Description: "Create an Owner permission request before a sensitive action requested by a " +
-				"non-Owner group participant. Do not perform the action until the request is approved. " +
-				"The confirmation card is sent to the channel Owner.",
+				"non-Owner group participant. The request stays pending until the Owner approves or rejects it. " +
+				"The confirmation card is sent to the channel Owner. Perform the action only after approval.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

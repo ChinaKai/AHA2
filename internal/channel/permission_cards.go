@@ -61,7 +61,7 @@ func (s *Service) resolveTaskPermissionCardAction(
 		return err
 	}
 	if !changed {
-		return fmt.Errorf("permission request is already decided or expired")
+		return fmt.Errorf("permission request is no longer pending")
 	}
 	if decision == "reject" {
 		if err := s.store.FinishChannelPendingAction(ctx, action.ID, resolved.ID, "cancelled",
@@ -175,7 +175,7 @@ func (s *Service) SendTaskPermissionRequestCard(ctx context.Context, instanceID,
 			"scope": request.Scope, "reason": request.Reason, "risk": request.Risk,
 		},
 		Precondition: map[string]any{"request_status": "pending"},
-		Status:       "pending", ExpiresAt: request.ExpiresAt, CreatedAt: now, UpdatedAt: now,
+		Status:       "pending", CreatedAt: now, UpdatedAt: now,
 	}
 	created, err := s.store.CreateChannelPendingAction(ctx, action)
 	if err != nil {

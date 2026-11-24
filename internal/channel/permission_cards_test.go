@@ -2,6 +2,7 @@ package channel
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -151,7 +152,7 @@ func TestSendTaskPermissionRequestCardCreatesOwnerAction(t *testing.T) {
 	request := domain.TaskPermissionRequest{
 		ID: "task_permission_card", TaskID: f.task.ID, ApplicantName: "张三",
 		Action: "push main", Scope: "origin/main", Reason: "联调", Risk: "high",
-		Status: "pending", CreatedAt: f.now, UpdatedAt: f.now, ExpiresAt: f.now.Add(10 * time.Minute),
+		Status: "pending", CreatedAt: f.now, UpdatedAt: f.now,
 	}
 	actionID, err := f.service.SendTaskPermissionRequestCard(f.ctx, f.instance.ID, f.conversation.ID, request)
 	if err != nil {
@@ -159,7 +160,7 @@ func TestSendTaskPermissionRequestCardCreatesOwnerAction(t *testing.T) {
 	}
 	action, err := f.database.ChannelPendingAction(f.ctx, actionID)
 	if err != nil || action.Operation != "task_permission" || action.ActorIdentityLinkID != "owner-identity" ||
-		action.TargetID != request.ID {
+		action.TargetID != request.ID || !action.ExpiresAt.IsZero() {
 		t.Fatalf("action=%#v err=%v", action, err)
 	}
 }
@@ -169,6 +170,8 @@ func TestSendTaskPermissionRequestCardCreatesOwnerAction(t *testing.T) {
 // without depending on a running Agent.
 func TestTaskPermissionCardDecisionsNotifyTerminalTask(t *testing.T) {
 	f := newPermissionCardFixture(t)
+	clock := f.now
+	f.service.now = func() time.Time { return clock }
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if err := f.database.UpdateTaskStatus(f.ctx, f.task.ID, domain.TaskActive, domain.TaskCompleted, now, now); err != nil {
 		t.Fatal(err)
@@ -181,6 +184,7 @@ func TestTaskPermissionCardDecisionsNotifyTerminalTask(t *testing.T) {
 		{decision: "approved", input: "confirm", want: "owner 已批准"},
 		{decision: "rejected", input: "cancel", want: "owner 已拒绝"},
 	} {
+		clock = f.now
 		expectedResults := index + 1
 		request, err := f.appService.CreateTaskPermissionRequest(f.ctx, app.TaskPermissionRequestInput{
 			TaskID: f.task.ID, ChannelInstanceID: f.instance.ID, ChannelConversationID: f.conversation.ID,
@@ -194,36 +198,53 @@ func TestTaskPermissionCardDecisionsNotifyTerminalTask(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		action, err := f.database.ChannelPendingAction(f.ctx, actionID)
+		if err := f.appService.SetTaskPermissionRequestChannelAction(f.ctx, request.ID, actionID); err != nil {
+			t.Fatal(err)
+		}
+		messageID := "message-" + item.decision
+		if err := f.database.BindChannelActionProviderMessage(f.ctx, actionID, f.instance.ID, f.conversation.ID, messageID); err != nil {
+			t.Fatal(err)
+		}
+		// New confirmations in the same group must leave this request active.
+		other, err := f.database.CreateChannelPendingAction(f.ctx, domain.ChannelPendingAction{
+			ID: "exit-" + item.decision, InstanceID: f.instance.ID, ConversationID: f.conversation.ID,
+			ActorIdentityLinkID: f.identity.ID, Operation: "exit", TargetType: "task_route",
+			Status: "pending", ExpiresAt: f.now.Add(time.Minute), CreatedAt: f.now, UpdatedAt: f.now,
+		})
 		if err != nil {
 			t.Fatal(err)
 		}
-		// The real card path claims the action before resolving it.
-		claimed, ok, err := f.database.BeginChannelPendingAction(
-			f.ctx, action.ID, f.instance.ID, f.conversation.ID, f.identity.ID, "", f.now)
-		if err != nil || !ok {
-			t.Fatalf("claim action: %#v ok=%v err=%v", claimed, ok, err)
+		clock = f.now.Add(72 * time.Hour)
+		if _, claimed, err := f.database.BeginChannelPendingAction(
+			f.ctx, other.ID, f.instance.ID, f.conversation.ID, f.identity.ID, "", f.service.now(),
+		); claimed || !errors.Is(err, store.ErrChannelRevision) {
+			t.Fatalf("claim expired exit confirmation: claimed = %v, err = %v", claimed, err)
+		}
+		envelope := domain.ChannelInboundEnvelope{
+			ExternalChatID: f.conversation.ExternalChatID, ExternalSenderID: f.identity.ExternalUserID,
+			CardAction: map[string]any{"action_id": actionID, "provider_message_id": messageID, "decision": item.input},
 		}
 		receipt := f.processingReceipt(t, "receipt-"+item.decision)
-		if err := f.service.resolveTaskPermissionCardAction(f.ctx, receipt, f.instance, f.identity, claimed, item.input); err != nil {
+		if err := f.service.processCardAction(f.ctx, receipt, f.instance, envelope); err != nil {
 			t.Fatal(err)
 		}
-		finished, err := f.database.ChannelInboxReceipt(f.ctx, f.instance.ID, receipt.ID)
-		if err != nil || finished.State != "processed" {
-			t.Fatalf("%s receipt state = %#v err=%v", item.decision, finished.State, err)
+		resolved, err := f.database.TaskPermissionRequest(f.ctx, request.ID)
+		if err != nil || resolved.Status != item.decision {
+			t.Fatalf("resolved request = %#v, err = %v", resolved, err)
+		}
+		repeat := f.processingReceipt(t, "repeat-"+item.decision)
+		if err := f.service.processCardAction(f.ctx, repeat, f.instance, envelope); err != nil {
+			t.Fatal(err)
+		}
+		finished, err := f.database.ChannelInboxReceipt(f.ctx, f.instance.ID, repeat.ID)
+		if err != nil || finished.State != "processed" || finished.Outcome != "duplicate_action" {
+			t.Fatalf("%s repeat receipt = %#v, err = %v", item.decision, finished, err)
 		}
 		if count := f.resultCount(t, "渠道权限申请「push main」"); count != expectedResults {
 			t.Fatalf("%s result messages = %d, want %d", item.decision, count, expectedResults)
 		}
 		if count := f.resultCount(t, item.want); count != 1 {
 			t.Fatalf("%s decision messages = %d, want 1", item.decision, count)
-		}
-		// A repeated card click cannot resolve an already-decided request.
-		if err := f.service.resolveTaskPermissionCardAction(f.ctx, receipt, f.instance, f.identity, claimed, item.input); err == nil {
-			t.Fatalf("%s repeated decision was accepted", item.decision)
-		}
-		if count := f.resultCount(t, "渠道权限申请「push main」"); count != expectedResults {
-			t.Fatalf("repeated %s decision produced %d results, want %d", item.decision, count, expectedResults)
 		}
 	}
 }

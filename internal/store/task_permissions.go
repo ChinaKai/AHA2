@@ -3,11 +3,13 @@ package store
 import (
 	"context"
 	"database/sql"
-	"strings"
+	"errors"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
+
+var ErrTaskPermissionPending = errors.New("task already has a pending permission request")
 
 const taskPermissionRequestColumns = `id,task_id,turn_id,inbound_receipt_id,channel_instance_id,channel_conversation_id,channel_action_id,applicant_identity_link_id,applicant_name,applicant_is_bot,action,scope,reason,risk,status,decider_identity_link_id,decider_name,decision_reason,created_at,updated_at,decided_at,expires_at`
 
@@ -30,17 +32,34 @@ func scanTaskPermissionRequest(scanner interface{ Scan(...any) error }) (domain.
 }
 
 func (s *Store) CreateTaskPermissionRequest(ctx context.Context, item domain.TaskPermissionRequest) error {
-	_, err := s.db.ExecContext(ctx, `
+	// Check for a pending request in the insert so concurrent callers cannot
+	// create two pending requests for the same Task.
+	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO task_permission_requests(`+taskPermissionRequestColumns+`)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		SELECT ?,?,?,?,?,?,?,
+		       ?,?,?,?,?,?,?,
+		       ?,?,?,?,?,?,?,''
+		WHERE ? <> 'pending' OR NOT EXISTS (
+			SELECT 1 FROM task_permission_requests WHERE task_id=? AND status='pending'
+		)`,
 		item.ID, item.TaskID, item.TurnID, item.InboundReceiptID, item.ChannelInstanceID,
 		item.ChannelConversationID, item.ChannelActionID, item.ApplicantIdentityLinkID,
 		item.ApplicantName, item.ApplicantIsBot, item.Action, item.Scope, item.Reason,
 		item.Risk, item.Status, item.DeciderIdentityLinkID, item.DeciderName,
 		item.DecisionReason, timeString(item.CreatedAt), timeString(item.UpdatedAt),
-		timeString(item.DecidedAt), timeString(item.ExpiresAt),
+		timeString(item.DecidedAt), item.Status, item.TaskID,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrTaskPermissionPending
+	}
+	return nil
 }
 
 func (s *Store) TaskPermissionRequest(ctx context.Context, id string) (domain.TaskPermissionRequest, error) {
@@ -48,9 +67,6 @@ func (s *Store) TaskPermissionRequest(ctx context.Context, id string) (domain.Ta
 		`SELECT `+taskPermissionRequestColumns+` FROM task_permission_requests WHERE id=?`, id))
 }
 
-// ListTaskPermissionRequests is a pure read. Expiry is settled explicitly by
-// ExpireTaskPermissionRequests so a read or an unrelated write can never turn a
-// request into expired without the caller also sending its result message.
 func (s *Store) ListTaskPermissionRequests(ctx context.Context, taskID string, limit int) ([]domain.TaskPermissionRequest, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 50
@@ -82,63 +98,8 @@ func (s *Store) SetTaskPermissionRequestChannelAction(ctx context.Context, id, a
 	return err
 }
 
-// ExpireTaskPermissionRequests moves due pending requests to expired and
-// returns only the rows this call actually changed. The conditional update
-// keeps concurrent readers from reporting the same expiry twice, so the caller
-// can use the result to send exactly one approval-result message per request.
-func (s *Store) ExpireTaskPermissionRequests(ctx context.Context, taskID string, at time.Time) ([]domain.TaskPermissionRequest, error) {
-	taskID = strings.TrimSpace(taskID)
-	if taskID == "" {
-		return nil, nil
-	}
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT `+taskPermissionRequestColumns+` FROM task_permission_requests
-		WHERE task_id=? AND status='pending' AND expires_at<=?`,
-		taskID, timeString(at))
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var due []domain.TaskPermissionRequest
-	for rows.Next() {
-		item, scanErr := scanTaskPermissionRequest(rows)
-		if scanErr != nil {
-			return nil, scanErr
-		}
-		due = append(due, item)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	expired := make([]domain.TaskPermissionRequest, 0, len(due))
-	for _, item := range due {
-		result, err := s.db.ExecContext(ctx, `
-			UPDATE task_permission_requests SET status='expired',updated_at=?
-			WHERE id=? AND status='pending' AND expires_at<=?`,
-			timeString(at), item.ID, timeString(at))
-		if err != nil {
-			return nil, err
-		}
-		affected, err := result.RowsAffected()
-		if err != nil {
-			return nil, err
-		}
-		if affected != 1 {
-			continue
-		}
-		item.Status = "expired"
-		item.UpdatedAt = at
-		expired = append(expired, item)
-	}
-	return expired, nil
-}
-
 // ResolveTaskPermissionRequest consumes one pending request. It returns false
-// without changing anything when the request is already decided, expired, or
-// belongs to another task.
+// when the stored request is no longer pending.
 func (s *Store) ResolveTaskPermissionRequest(
 	ctx context.Context,
 	id, decision, deciderIdentityLinkID, deciderName, reason string,
@@ -150,8 +111,8 @@ func (s *Store) ResolveTaskPermissionRequest(
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE task_permission_requests
 		SET status=?,decider_identity_link_id=?,decider_name=?,decision_reason=?,decided_at=?,updated_at=?
-		WHERE id=? AND status='pending' AND expires_at>?`,
-		decision, deciderIdentityLinkID, deciderName, reason, timeString(at), timeString(at), id, timeString(at))
+		WHERE id=? AND status='pending'`,
+		decision, deciderIdentityLinkID, deciderName, reason, timeString(at), timeString(at), id)
 	if err != nil {
 		return domain.TaskPermissionRequest{}, false, err
 	}

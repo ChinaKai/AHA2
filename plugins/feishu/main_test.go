@@ -336,7 +336,10 @@ func TestRenderTaskPermissionConfirmationCardIsHumanReadable(t *testing.T) {
 	if strings.Contains(content, "request_id") || strings.Contains(content, `\"scope\":`) || strings.Contains(content, "{\n") {
 		t.Fatalf("raw preview JSON leaked into card: %s", content)
 	}
-	for _, want := range []string{"申请人：", "蒋开开", "动作：", "向 AHA-TEST 群发送实现代码", "范围：", "原因：", "风险：", "高", "待审批", "有效期至："} {
+	if strings.Contains(content, "有效期至：") {
+		t.Fatalf("card displayed a legacy expiry: %s", content)
+	}
+	for _, want := range []string{"申请人：", "蒋开开", "动作：", "向 AHA-TEST 群发送实现代码", "范围：", "原因：", "风险：", "高", "待审批", "批准", "拒绝"} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("card missing %q: %s", want, content)
 		}

@@ -2,15 +2,13 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"log"
 	"strings"
-	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
+	"github.com/ChinaKai/AHA2/internal/store"
 )
-
-const taskPermissionTTL = 15 * 60
 
 type TaskPermissionRequestInput struct {
 	TaskID                  string
@@ -25,7 +23,6 @@ type TaskPermissionRequestInput struct {
 	Scope                   string
 	Reason                  string
 	Risk                    string
-	ExpiresInSeconds        int
 }
 
 // CreateTaskPermissionRequest records an Owner decision request before the
@@ -48,21 +45,6 @@ func (s *Service) CreateTaskPermissionRequest(ctx context.Context, input TaskPer
 	if _, err := s.store.Task(ctx, input.TaskID); err != nil {
 		return domain.TaskPermissionRequest{}, fmt.Errorf("Task 不存在")
 	}
-	// Settle old expired rows before checking for a pending duplicate. This is
-	// the only expiry writer besides the read path, so a new request can never
-	// silently consume an expired one without its result message.
-	s.settleExpiredTaskPermissionRequests(ctx, input.TaskID)
-	if existing, listErr := s.store.ListTaskPermissionRequests(ctx, input.TaskID, 100); listErr == nil {
-		now := s.now().UTC()
-		for _, item := range existing {
-			if item.Status == "pending" && item.ExpiresAt.After(now) {
-				return domain.TaskPermissionRequest{}, fmt.Errorf("当前 Task 已有待审批的权限申请")
-			}
-		}
-	}
-	if input.ExpiresInSeconds <= 0 || input.ExpiresInSeconds > taskPermissionTTL {
-		input.ExpiresInSeconds = taskPermissionTTL
-	}
 	now := s.now().UTC()
 	item := domain.TaskPermissionRequest{
 		ID: domain.NewID("task_permission"), TaskID: input.TaskID, TurnID: input.TurnID,
@@ -72,38 +54,18 @@ func (s *Service) CreateTaskPermissionRequest(ctx context.Context, input TaskPer
 		ApplicantName:           input.ApplicantName, ApplicantIsBot: input.ApplicantIsBot,
 		Action: input.Action, Scope: input.Scope, Reason: input.Reason, Risk: input.Risk,
 		Status: "pending", CreatedAt: now, UpdatedAt: now,
-		ExpiresAt: now.Add(time.Duration(input.ExpiresInSeconds) * time.Second),
 	}
 	if err := s.store.CreateTaskPermissionRequest(ctx, item); err != nil {
+		if errors.Is(err, store.ErrTaskPermissionPending) {
+			return domain.TaskPermissionRequest{}, fmt.Errorf("当前 Task 已有待审批的权限申请")
+		}
 		return domain.TaskPermissionRequest{}, err
 	}
 	return item, nil
 }
 
 func (s *Service) TaskPermissionRequests(ctx context.Context, taskID string, limit int) ([]domain.TaskPermissionRequest, error) {
-	taskID = strings.TrimSpace(taskID)
-	s.settleExpiredTaskPermissionRequests(ctx, taskID)
-	return s.store.ListTaskPermissionRequests(ctx, taskID, limit)
-}
-
-// settleExpiredTaskPermissionRequests is the single expiry writer. The store
-// returns only rows this call changed, so concurrent readers and a following
-// Create still produce exactly one result message per expired request.
-func (s *Service) settleExpiredTaskPermissionRequests(ctx context.Context, taskID string) {
-	expired, err := s.store.ExpireTaskPermissionRequests(ctx, taskID, s.now().UTC())
-	if err != nil {
-		log.Printf("expire task permission requests for %s: %v", taskID, err)
-		return
-	}
-	for _, item := range expired {
-		if notifyErr := s.NotifyTaskApprovalResult(ctx, TaskApprovalResultInput{
-			TaskID: item.TaskID, Kind: TaskApprovalKindChannelPermission,
-			Subject: item.Action, ReferenceID: item.ID, Decision: "expired",
-			Decider: "owner", At: item.UpdatedAt,
-		}); notifyErr != nil {
-			log.Printf("notify expired permission request %s: %v", item.ID, notifyErr)
-		}
-	}
+	return s.store.ListTaskPermissionRequests(ctx, strings.TrimSpace(taskID), limit)
 }
 
 // ResolveTaskPermissionRequest consumes a pending request. The caller must
