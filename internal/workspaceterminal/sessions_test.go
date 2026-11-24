@@ -149,3 +149,40 @@ func TestWorkspaceTerminalLogoutCancelsStartingSession(t *testing.T) {
 		t.Fatal("startup was not canceled")
 	}
 }
+
+func TestWorkspaceTerminalFailedStartupClosesUnpublishedProcess(t *testing.T) {
+	manager := New()
+	t.Cleanup(manager.Close)
+	process := newTestProcess()
+	scope := Scope{WorkspaceID: "work"}
+	started := make(chan struct{})
+	checked := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		_, err := manager.Create(t.Context(), scope, time.Now().Add(time.Hour), true, func(ctx context.Context) (Process, error) {
+			close(started)
+			select {
+			case <-checked:
+				return process, context.DeadlineExceeded
+			case <-ctx.Done():
+				return process, ctx.Err()
+			}
+		})
+		result <- err
+	}()
+	// A pending shell reserves quota without appearing in session lists.
+	<-started
+	if list := manager.List(scope); len(list) != 0 {
+		t.Fatalf("pending process appeared in session list: %+v", list)
+	}
+	close(checked)
+	if err := <-result; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("startup error lost: %v", err)
+	}
+	if _, err := process.writer.Write([]byte("closed")); !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatal("failed startup left the process open")
+	}
+	if list := manager.List(scope); len(list) != 0 {
+		t.Fatalf("failed startup left a published session: %+v", list)
+	}
+}

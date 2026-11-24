@@ -3,7 +3,38 @@ package workspaceterminal
 import (
 	"os"
 	"strings"
+	"time"
 )
+
+// ObserveEarlyExit reports the output drained by the terminal reader. Waiting
+// for the exit status happens independently of session startup and cleanup.
+func ObserveEarlyExit(process Process, report func(exitCode int64, outputBytes uint64, err error)) Process {
+	status, ok := process.(interface{ ExitStatus() (int64, error) })
+	if !ok {
+		return process
+	}
+	return &observedProcess{Process: process, status: status.ExitStatus, report: report, started: time.Now()}
+}
+
+type observedProcess struct {
+	Process
+	status  func() (int64, error)
+	report  func(int64, uint64, error)
+	started time.Time
+	bytes   uint64 // Only the session's output reader updates this.
+}
+
+func (p *observedProcess) Read(data []byte) (int, error) {
+	n, err := p.Process.Read(data)
+	p.bytes += uint64(n)
+	if err != nil && time.Since(p.started) <= 5*time.Second {
+		go func(outputBytes uint64) {
+			code, exitErr := p.status()
+			p.report(code, outputBytes, exitErr)
+		}(p.bytes)
+	}
+	return n, err
+}
 
 // The server's process environment can contain credentials for its own use.
 func shellEnvironment() []string {

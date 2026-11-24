@@ -3,6 +3,7 @@ package workspaceterminal
 import (
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -19,6 +20,9 @@ type windowsTerminal struct {
 	mu            sync.Mutex
 	console       windows.Handle
 	job           windows.Handle
+	exitCode      uint32
+	exitErr       error
+	exited        chan struct{}
 }
 
 // ConPTY requires synchronous pipe handles. The browser bridge uses the
@@ -53,25 +57,25 @@ func StartLocal(root string, cols, rows int) (Process, error) {
 	}
 	identity, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get process token user: %w", err)
 	}
 	descriptor, err := windows.SecurityDescriptorFromString("D:P(A;;GA;;;" + identity.User.Sid.String() + ")")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create pipe security descriptor: %w", err)
 	}
 	security := windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: descriptor}
 	inputRead, inputWrite, err := consolePipe(windows.PIPE_ACCESS_INBOUND, windows.GENERIC_WRITE, &security)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("open ConPTY input pipe: %w", err)
 	}
 	outputWrite, outputRead, err := consolePipe(windows.PIPE_ACCESS_OUTBOUND, windows.GENERIC_READ, &security)
 	if err != nil {
 		_ = windows.CloseHandle(inputRead)
 		_ = inputWrite.Close()
-		return nil, err
+		return nil, fmt.Errorf("open ConPTY output pipe: %w", err)
 	}
 
-	terminal := &windowsTerminal{input: inputWrite, output: outputRead}
+	terminal := &windowsTerminal{input: inputWrite, output: outputRead, exited: make(chan struct{})}
 	process, err := terminal.start(root, cols, rows, inputRead, outputWrite)
 	_ = windows.CloseHandle(inputRead)
 	_ = windows.CloseHandle(outputWrite)
@@ -81,7 +85,11 @@ func StartLocal(root string, cols, rows int) (Process, error) {
 	}
 	go func() {
 		defer windows.CloseHandle(process)
-		_, _ = windows.WaitForSingleObject(process, windows.INFINITE)
+		_, terminal.exitErr = windows.WaitForSingleObject(process, windows.INFINITE)
+		if terminal.exitErr == nil {
+			terminal.exitErr = windows.GetExitCodeProcess(process, &terminal.exitCode)
+		}
+		close(terminal.exited)
 		terminal.closeConsole()
 	}()
 	return terminal, nil
@@ -90,27 +98,27 @@ func StartLocal(root string, cols, rows int) (Process, error) {
 func (p *windowsTerminal) start(root string, cols, rows int, input, output windows.Handle) (windows.Handle, error) {
 	size := windows.Coord{X: int16(cols), Y: int16(rows)}
 	if err := windows.CreatePseudoConsole(size, input, output, 0, &p.console); err != nil {
-		return 0, err
+		return 0, fmt.Errorf("create ConPTY: %w", err)
 	}
 	attributes, err := windows.NewProcThreadAttributeList(1)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("allocate process attributes: %w", err)
 	}
 	defer attributes.Delete()
 	// UpdateProcThreadAttribute expects the opaque HPCON value as a pointer.
 	consoleAttribute := *(*unsafe.Pointer)(unsafe.Pointer(&p.console))
 	if err := attributes.Update(windows.PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, consoleAttribute, unsafe.Sizeof(p.console)); err != nil {
-		return 0, err
+		return 0, fmt.Errorf("set ConPTY process attribute: %w", err)
 	}
 	p.job, err = windows.CreateJobObject(nil, nil)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("create job object: %w", err)
 	}
 	jobInfo := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{}
 	jobInfo.BasicLimitInformation.LimitFlags = windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
 	if _, err := windows.SetInformationJobObject(p.job, windows.JobObjectExtendedLimitInformation,
 		uintptr(unsafe.Pointer(&jobInfo)), uint32(unsafe.Sizeof(jobInfo))); err != nil {
-		return 0, err
+		return 0, fmt.Errorf("set job object limits: %w", err)
 	}
 
 	systemDir, err := windows.GetSystemDirectory()
@@ -139,28 +147,39 @@ func (p *windowsTerminal) start(root string, cols, rows int, input, output windo
 	slices.Sort(env)
 	block := utf16.Encode([]rune(strings.Join(env, "\x00") + "\x00\x00"))
 	startup := windows.StartupInfoEx{ProcThreadAttributeList: attributes.List()}
+	// Leave the standard handles null so ConPTY supplies them instead of
+	// letting the shell use the server's console handles.
+	startup.StartupInfo.Flags |= windows.STARTF_USESTDHANDLES
 	startup.Cb = uint32(unsafe.Sizeof(startup))
 	var info windows.ProcessInformation
 	flags := uint32(windows.EXTENDED_STARTUPINFO_PRESENT | windows.CREATE_UNICODE_ENVIRONMENT | windows.CREATE_SUSPENDED)
 	if err := windows.CreateProcess(executable, command, nil, nil, false, flags, &block[0], dir, &startup.StartupInfo, &info); err != nil {
-		return 0, err
+		return 0, fmt.Errorf("create shell process: %w", err)
 	}
 	defer windows.CloseHandle(info.Thread)
 	// Assign before resuming so child processes inherit the same lifetime.
 	if err := windows.AssignProcessToJobObject(p.job, info.Process); err != nil {
 		_ = windows.TerminateProcess(info.Process, 1)
 		_ = windows.CloseHandle(info.Process)
-		return 0, err
+		return 0, fmt.Errorf("assign shell to job object: %w", err)
 	}
 	if _, err := windows.ResumeThread(info.Thread); err != nil {
 		_ = windows.CloseHandle(info.Process)
-		return 0, err
+		return 0, fmt.Errorf("resume shell: %w", err)
 	}
 	return info.Process, nil
 }
 
 func (p *windowsTerminal) Read(data []byte) (int, error)  { return p.output.Read(data) }
 func (p *windowsTerminal) Write(data []byte) (int, error) { return p.input.Write(data) }
+
+func (p *windowsTerminal) ExitStatus() (int64, error) {
+	<-p.exited
+	if p.exitErr != nil {
+		return -1, p.exitErr
+	}
+	return int64(p.exitCode), nil
+}
 
 func (p *windowsTerminal) Resize(cols, rows int) error {
 	p.mu.Lock()

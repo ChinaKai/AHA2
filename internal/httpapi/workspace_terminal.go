@@ -6,7 +6,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -94,17 +96,47 @@ func terminalLoopbackHost(host string) bool {
 	return strings.EqualFold(host, "localhost") || net.ParseIP(strings.Trim(host, "[]")).IsLoopback()
 }
 
-func (s *Server) workspaceTerminalLANAllowed(ctx context.Context, r *http.Request) bool {
+var (
+	errWorkspaceTerminalAccessRevoked = errors.New("workspace_terminal_access_revoked")
+	errWorkspaceTerminalLANLocked     = errors.New("workspace_terminal_lan_locked")
+)
+
+type workspaceTerminalCheckError struct{ error }
+
+func (e workspaceTerminalCheckError) Unwrap() error { return e.error }
+
+func (s *Server) workspaceTerminalLogger(r *http.Request, target app.WorkspaceTerminalTarget) *slog.Logger {
+	transport := "unresolved"
+	if target.WorkspaceID() != "" {
+		transport = "local"
+		if target.UsesSSH() {
+			transport = "ssh"
+		}
+	}
+	return s.logger.With("task", r.PathValue("id"), "workspace", target.WorkspaceID(), "transport", transport)
+}
+
+func (s *Server) workspaceTerminalLANCheck(ctx context.Context, r *http.Request) error {
 	if loopbackTerminalRequest(r) {
-		return true
+		return nil
 	}
 	settings, err := s.store.SecuritySettings(ctx)
-	return err == nil && settings.AccessScope == domain.AccessScopeLAN && settings.WorkspaceTerminalLAN
+	if err != nil {
+		return workspaceTerminalCheckError{fmt.Errorf("read terminal LAN settings: %w", err)}
+	}
+	if settings.AccessScope != domain.AccessScopeLAN || !settings.WorkspaceTerminalLAN {
+		return errWorkspaceTerminalLANLocked
+	}
+	return nil
 }
 
 func (s *Server) workspaceTerminalAccess(w http.ResponseWriter, r *http.Request) bool {
-	if !s.workspaceTerminalLANAllowed(r.Context(), r) {
-		writeError(w, http.StatusForbidden, "workspace_terminal_lan_locked")
+	if err := s.workspaceTerminalLANCheck(r.Context(), r); err != nil {
+		if !errors.Is(err, errWorkspaceTerminalLANLocked) {
+			s.workspaceTerminalLogger(r, app.WorkspaceTerminalTarget{}).
+				Warn("workspace terminal request failed", "stage", "check_lan", "error", err)
+		}
+		workspaceTerminalError(w, err)
 		return false
 	}
 	return true
@@ -138,7 +170,14 @@ func (s *Server) updateWorkspaceTerminalLAN(w http.ResponseWriter, r *http.Reque
 }
 
 func workspaceTerminalError(w http.ResponseWriter, err error) {
+	var checkFailed workspaceTerminalCheckError
 	switch {
+	case errors.As(err, &checkFailed):
+		writeError(w, http.StatusServiceUnavailable, "workspace_terminal_check_failed")
+	case errors.Is(err, errWorkspaceTerminalAccessRevoked):
+		writeError(w, http.StatusForbidden, errWorkspaceTerminalAccessRevoked.Error())
+	case errors.Is(err, errWorkspaceTerminalLANLocked):
+		writeError(w, http.StatusForbidden, errWorkspaceTerminalLANLocked.Error())
 	case errors.Is(err, sql.ErrNoRows):
 		writeError(w, http.StatusNotFound, "task_not_found")
 	case errors.Is(err, app.ErrViewerUnavailable):
@@ -162,6 +201,9 @@ func (s *Server) workspaceTerminalTarget(w http.ResponseWriter, r *http.Request)
 	}
 	target, err := s.app.WorkspaceTerminalTarget(r.Context(), r.PathValue("id"), query.Get("workspace"))
 	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) && !errors.Is(err, app.ErrViewerUnavailable) && !errors.Is(err, app.ErrWorkspaceTerminalUnsupported) {
+			s.workspaceTerminalLogger(r, target).Warn("workspace terminal request failed", "stage", "resolve_target", "error", err)
+		}
 		workspaceTerminalError(w, err)
 		return app.WorkspaceTerminalTarget{}, false
 	}
@@ -169,8 +211,13 @@ func (s *Server) workspaceTerminalTarget(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) workspaceTerminalState(w http.ResponseWriter, r *http.Request) {
-	if !s.workspaceTerminalLANAllowed(r.Context(), r) {
+	if err := s.workspaceTerminalLANCheck(r.Context(), r); errors.Is(err, errWorkspaceTerminalLANLocked) {
 		writeJSON(w, http.StatusOK, map[string]any{"locked": true})
+		return
+	} else if err != nil {
+		s.workspaceTerminalLogger(r, app.WorkspaceTerminalTarget{}).
+			Warn("workspace terminal request failed", "stage", "check_lan", "error", err)
+		workspaceTerminalError(w, err)
 		return
 	}
 	target, ok := s.workspaceTerminalTarget(w, r)
@@ -205,22 +252,44 @@ func (s *Server) workspaceTerminalCreate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	login, _ := sessionFromContext(r.Context())
-	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
-	defer cancel()
 	scope := target.Scope(login)
-	info, err := s.workspaceTerminals.Create(ctx, scope, login.ExpiresAt, size.Initial, func(ctx context.Context) (workspaceterminal.Process, error) {
-		return s.app.StartWorkspaceTerminal(ctx, target, size.Cols, size.Rows)
+	logger := s.workspaceTerminalLogger(r, target)
+	stage := "create"
+	info, err := s.workspaceTerminals.Create(r.Context(), scope, login.ExpiresAt, size.Initial, func(ctx context.Context) (workspaceterminal.Process, error) {
+		stage = "start_local"
+		if target.UsesSSH() {
+			stage = "start_ssh"
+		}
+		start, cancel := context.WithTimeout(ctx, 20*time.Second)
+		process, err := s.app.StartWorkspaceTerminal(start, target, size.Cols, size.Rows)
+		startErr := start.Err()
+		cancel()
+		if err != nil {
+			return nil, err
+		}
+		if startErr != nil {
+			return process, startErr
+		}
+		process = workspaceterminal.ObserveEarlyExit(process, func(code int64, bytes uint64, err error) {
+			logger.Info("workspace terminal shell ended within five seconds", "stage", "shell_exit",
+				"exit_code", code, "output_bytes", bytes, "error", err)
+		})
+		// Keep the shell private until the login and LAN policy are confirmed.
+		// A failed check leaves cleanup to Manager.Create.
+		stage = "recheck_access"
+		check, stop := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+		defer stop()
+		if err := s.workspaceTerminalRecheck(check, r, login); err != nil {
+			return process, err
+		}
+		stage = "publish"
+		return process, nil
 	})
 	if err != nil {
+		if !errors.Is(err, workspaceterminal.ErrExists) && !errors.Is(err, workspaceterminal.ErrLimit) {
+			logger.Warn("workspace terminal request failed", "stage", stage, "error", err)
+		}
 		workspaceTerminalError(w, err)
-		return
-	}
-	// Logout or an access change may have raced the SSH setup.
-	allowed, cancelCheck := context.WithTimeout(context.WithoutCancel(r.Context()), 2*time.Second)
-	defer cancelCheck()
-	if !s.workspaceTerminalLoginValid(allowed, login) || !s.workspaceTerminalLANAllowed(allowed, r) {
-		_ = s.workspaceTerminals.Delete(scope, info.ID)
-		writeError(w, http.StatusForbidden, "workspace_terminal_access_revoked")
 		return
 	}
 	writeJSON(w, http.StatusCreated, info)
@@ -236,15 +305,32 @@ func (s *Server) workspaceTerminalDelete(w http.ResponseWriter, r *http.Request)
 	}
 	login, _ := sessionFromContext(r.Context())
 	if err := s.workspaceTerminals.Delete(target.Scope(login), r.PathValue("terminal")); err != nil {
-		workspaceTerminalError(w, err)
+		s.workspaceTerminalLogger(r, target).Warn("workspace terminal request failed", "stage", "delete", "error", err)
+		if errors.Is(err, workspaceterminal.ErrMissing) {
+			workspaceTerminalError(w, err)
+		} else {
+			writeError(w, http.StatusServiceUnavailable, "workspace_terminal_close_failed")
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-func (s *Server) workspaceTerminalLoginValid(ctx context.Context, login domain.Session) bool {
+func (s *Server) workspaceTerminalRecheck(ctx context.Context, r *http.Request, login domain.Session) error {
 	current, err := s.store.SessionByTokenHash(ctx, login.TokenHash)
-	return err == nil && current.ID == login.ID && current.RevokedAt.IsZero() && current.ExpiresAt.After(time.Now())
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return errWorkspaceTerminalAccessRevoked
+	case err != nil:
+		return workspaceTerminalCheckError{fmt.Errorf("read terminal login: %w", err)}
+	case current.ID != login.ID || !current.RevokedAt.IsZero() || !current.ExpiresAt.After(time.Now()):
+		return errWorkspaceTerminalAccessRevoked
+	}
+	err = s.workspaceTerminalLANCheck(ctx, r)
+	if errors.Is(err, errWorkspaceTerminalLANLocked) {
+		return fmt.Errorf("%w: %w", errWorkspaceTerminalAccessRevoked, err)
+	}
+	return err
 }
 
 func (s *Server) workspaceTerminalSocket(w http.ResponseWriter, r *http.Request) {
@@ -260,14 +346,18 @@ func (s *Server) workspaceTerminalSocket(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	login, _ := sessionFromContext(r.Context())
+	logger := s.workspaceTerminalLogger(r, target)
 	link, err := s.workspaceTerminals.Attach(target.Scope(login), r.PathValue("terminal"))
 	if err != nil {
+		logger.Warn("workspace terminal request failed", "stage", "attach", "error", err)
 		workspaceTerminalError(w, err)
 		return
 	}
 	defer s.workspaceTerminals.Detach(link)
 	connection, err := websocket.Accept(w, r, &websocket.AcceptOptions{CompressionMode: websocket.CompressionDisabled})
 	if err != nil {
+		// Accept errors can quote raw handshake headers, including the key.
+		logger.Warn("workspace terminal request failed", "stage", "upgrade", "error", "WebSocket handshake rejected")
 		return
 	}
 	defer connection.CloseNow()
@@ -282,7 +372,10 @@ func (s *Server) workspaceTerminalSocket(w http.ResponseWriter, r *http.Request)
 			if err != nil {
 				return
 			}
-			if !s.workspaceTerminalLANAllowed(ctx, r) {
+			if err := s.workspaceTerminalLANCheck(ctx, r); err != nil {
+				if ctx.Err() == nil {
+					logger.Warn("workspace terminal input stopped", "stage", "input_check_lan", "error", err)
+				}
 				return
 			}
 			switch kind {
@@ -295,6 +388,7 @@ func (s *Server) workspaceTerminalSocket(w http.ResponseWriter, r *http.Request)
 				err = s.resizeWorkspaceTerminal(link, data)
 			}
 			if err != nil {
+				logger.Debug("workspace terminal input stopped", "stage", "input", "error", err)
 				return
 			}
 		}
@@ -310,9 +404,12 @@ func (s *Server) workspaceTerminalSocket(w http.ResponseWriter, r *http.Request)
 				return
 			case <-ticker.C:
 				check, stop := context.WithTimeout(ctx, 2*time.Second)
-				allowed := s.workspaceTerminalLoginValid(check, login) && s.workspaceTerminalLANAllowed(check, r)
+				err := s.workspaceTerminalRecheck(check, r, login)
 				stop()
-				if !allowed {
+				if err != nil {
+					if ctx.Err() == nil {
+						logger.Warn("workspace terminal socket closed", "stage", "socket_recheck_access", "error", err)
+					}
 					cancel()
 					return
 				}

@@ -1,8 +1,11 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -21,6 +24,60 @@ import (
 	"github.com/ChinaKai/AHA2/internal/workspaceterminal"
 	"github.com/coder/websocket"
 )
+
+func TestWorkspaceTerminalAccessRecheckDistinguishesQueryFailure(t *testing.T) {
+	fixture := newTaskDetailFixture(t, false)
+	loginURL, err := url.Parse(fixture.server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var login domain.Session
+	for _, cookie := range fixture.client.Jar.Cookies(loginURL) {
+		if cookie.Name == sessionCookieName {
+			login, err = authServiceForTest(fixture.database).Authenticate(t.Context(), cookie.Value)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if login.ID == "" {
+		t.Fatal("fixture login missing")
+	}
+
+	api := &Server{store: fixture.database}
+	request := httptest.NewRequest(http.MethodPost, "http://localhost/api/v1/tasks/test/workspace-terminal", nil)
+	request.RemoteAddr = "127.0.0.1:12345"
+	if err := api.workspaceTerminalRecheck(t.Context(), request, login); err != nil {
+		t.Fatalf("valid login rejected: %v", err)
+	}
+
+	checkResponse := func(err error, status int, code string) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("access check unexpectedly succeeded, want %s", code)
+		}
+		recorder := httptest.NewRecorder()
+		workspaceTerminalError(recorder, err)
+		if recorder.Code != status || !strings.Contains(recorder.Body.String(), `"error":"`+code+`"`) {
+			t.Fatalf("unexpected response: %d %s", recorder.Code, recorder.Body)
+		}
+	}
+	ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	defer cancel()
+	err = api.workspaceTerminalRecheck(ctx, request, login)
+	if !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errWorkspaceTerminalAccessRevoked) {
+		t.Fatalf("timeout misclassified: %v", err)
+	}
+	checkResponse(err, 503, "workspace_terminal_check_failed")
+
+	request.RemoteAddr = "192.0.2.10:12345"
+	checkResponse(api.workspaceTerminalRecheck(t.Context(), request, login), 403, "workspace_terminal_access_revoked")
+	if err := fixture.database.RevokeSession(t.Context(), login.ID, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	request.RemoteAddr = "127.0.0.1:12345"
+	checkResponse(api.workspaceTerminalRecheck(t.Context(), request, login), 403, "workspace_terminal_access_revoked")
+}
 
 func TestWorkspaceTerminalOwnerLANWebSocketLifecycle(t *testing.T) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" && runtime.GOOS != "freebsd" {
@@ -46,8 +103,9 @@ func TestWorkspaceTerminalOwnerLANWebSocketLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var logs bytes.Buffer
 	api := New(Config{Store: fixture.database, Auth: authServiceForTest(fixture.database), App: fixture.app,
-		AgentCapabilities: capabilities, AllowCrossOrigin: true})
+		AgentCapabilities: capabilities, AllowCrossOrigin: true, Logger: slog.New(slog.NewTextHandler(&logs, nil))})
 	handler := api.Handler()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Test-LAN") == "yes" {
@@ -129,6 +187,18 @@ func TestWorkspaceTerminalOwnerLANWebSocketLifecycle(t *testing.T) {
 	check(http.MethodGet, taskURL+"/workspace-targets", "", nil, fixture.client, 200, remote.ID)
 	check(http.MethodGet, taskURL+"/workspace-target/"+remote.ID+"/state?availability=1", "", nil, fixture.client, 200, `"available":true`)
 	check(http.MethodPost, base+"?workspace="+wsl.ID, size, nil, fixture.client, 422, "workspace_terminal_unsupported")
+
+	t.Run("local startup failure is logged", func(t *testing.T) {
+		missingShell := filepath.Join(worktree, "missing-shell")
+		t.Setenv("SHELL", missingShell)
+		check(http.MethodPost, base, size, nil, fixture.client, 503, "workspace_terminal_start_failed")
+		for _, field := range []string{"task=" + fixture.task.ID, "workspace=" + fixture.task.WorkspaceID,
+			"transport=local", "stage=start_local", "error=", missingShell} {
+			if !strings.Contains(logs.String(), field) {
+				t.Fatalf("missing startup diagnostic %q", field)
+			}
+		}
+	})
 
 	response := requestJSON(t, fixture.client, http.MethodPost, server.URL+base, map[string]int{"cols": 80, "rows": 24}, authStatus.CSRF)
 	var session workspaceterminal.Info

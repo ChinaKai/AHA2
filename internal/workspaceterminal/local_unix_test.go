@@ -4,11 +4,51 @@ package workspaceterminal
 
 import (
 	"bufio"
+	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestWorkspaceTerminalEarlyExitReportsStatusAndBytes(t *testing.T) {
+	root := t.TempDir()
+	shell := filepath.Join(root, "shell")
+	if err := os.WriteFile(shell, []byte("#!/bin/sh\nprintf exit-marker; exit 7\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SHELL", shell)
+	process, err := StartLocal(root, 80, 24)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = process.Close() })
+	reported := make(chan struct {
+		code  int64
+		bytes uint64
+		err   error
+	}, 1)
+	observed := ObserveEarlyExit(process, func(code int64, bytes uint64, err error) {
+		reported <- struct {
+			code  int64
+			bytes uint64
+			err   error
+		}{code, bytes, err}
+	})
+	output, _ := io.ReadAll(observed)
+	if err := observed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case exit := <-reported:
+		if string(output) != "exit-marker" || exit.code != 7 || exit.bytes != uint64(len(output)) || exit.err != nil {
+			t.Fatalf("early exit output=%q status=%+v", output, exit)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("early shell exit went unreported")
+	}
+}
 
 func TestWorkspaceTerminalNativePTYEchoAndResize(t *testing.T) {
 	t.Setenv("SHELL", "/bin/sh")

@@ -292,22 +292,21 @@ func (m *Manager) Delete(scope Scope, id string) error {
 	if s == nil || s.scope != scope {
 		return ErrMissing
 	}
-	m.remove(id, s, false)
-	return nil
+	return m.remove(id, s, false)
 }
 
-func (m *Manager) remove(id string, s *Session, flush bool) {
+func (m *Manager) remove(id string, s *Session, flush bool) error {
 	m.mu.Lock()
 	if m.sessions[id] != s {
 		m.mu.Unlock()
-		return
+		return nil
 	}
 	delete(m.sessions, id)
 	m.mu.Unlock()
-	s.close(flush)
+	return s.close(flush)
 }
 
-func (s *Session) close(flush bool) {
+func (s *Session) close(flush bool) error {
 	s.mu.Lock()
 	close(s.done)
 	if !flush {
@@ -320,8 +319,9 @@ func (s *Session) close(flush bool) {
 	s.process = nil
 	s.mu.Unlock()
 	if process != nil {
-		_ = process.Close()
+		return process.Close()
 	}
+	return nil
 }
 
 func (m *Manager) CloseOwner(ownerID string) {

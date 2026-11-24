@@ -533,7 +533,7 @@ func (runner *SSHRunner) connect(ctx context.Context, endpoint string) (*ssh.Cli
 	stop()
 	if err != nil {
 		connection.Close()
-		return nil, err
+		return nil, sshHandshakeError{err}
 	}
 	_ = connection.SetDeadline(time.Time{})
 	return ssh.NewClient(clientConnection, channels, requests), nil
@@ -584,8 +584,19 @@ func (runner *SSHRunner) remotePlatform(ctx context.Context) (string, error) {
 	if detail == "" {
 		detail = fmt.Sprintf("exit code %d", result.ExitCode)
 	}
-	return "", fmt.Errorf("detect SSH target platform: %s", detail)
+	return "", sshPlatformProbeError{exitCode: result.ExitCode, detail: detail}
 }
+
+type sshHandshakeError struct{ error }
+
+func (e sshHandshakeError) Unwrap() error { return e.error }
+
+type sshPlatformProbeError struct {
+	exitCode int
+	detail   string
+}
+
+func (e sshPlatformProbeError) Error() string { return "detect SSH target platform: " + e.detail }
 
 func (runner *SSHRunner) DetectedPlatform() string {
 	runner.platformMu.Lock()

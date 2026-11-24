@@ -22,6 +22,8 @@ type unixTerminal struct {
 	command   *exec.Cmd
 	closeOnce sync.Once
 	closeErr  error
+	exited    chan struct{}
+	exitErr   error
 }
 
 func StartLocal(root string, cols, rows int) (Process, error) {
@@ -40,7 +42,7 @@ func StartLocal(root string, cols, rows int) (Process, error) {
 	}
 	// pty opens the master in blocking mode on some Unix platforms. Hand a
 	// nonblocking descriptor to Go so close can interrupt pending input.
-	terminal := &unixTerminal{File: file, command: command}
+	terminal := &unixTerminal{File: file, command: command, exited: make(chan struct{})}
 	fd, err := unix.FcntlInt(file.Fd(), unix.F_DUPFD_CLOEXEC, 0)
 	if err == nil {
 		err = unix.SetNonblock(fd, true)
@@ -79,9 +81,20 @@ func (p *unixTerminal) Close() error {
 		// reuse its PID while we are still using it as a session identifier.
 		killTerminalGroups(p.command.Process.Pid)
 		p.closeErr = p.File.Close()
-		go func() { _ = p.command.Wait() }()
+		go func() {
+			p.exitErr = p.command.Wait()
+			close(p.exited)
+		}()
 	})
 	return p.closeErr
+}
+
+func (p *unixTerminal) ExitStatus() (int64, error) {
+	<-p.exited
+	if p.command.ProcessState == nil {
+		return -1, p.exitErr
+	}
+	return int64(p.command.ProcessState.ExitCode()), nil
 }
 
 func killTerminalGroups(session int) {

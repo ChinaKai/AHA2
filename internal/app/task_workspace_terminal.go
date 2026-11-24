@@ -54,6 +54,8 @@ func (s *Service) WorkspaceTerminalTarget(ctx context.Context, taskID, workspace
 
 func (target WorkspaceTerminalTarget) Directory() string { return target.root }
 
+func (target WorkspaceTerminalTarget) WorkspaceID() string { return target.item.ID }
+
 func (target WorkspaceTerminalTarget) UsesSSH() bool {
 	return target.item.Transport == "ssh" || target.item.Locality == "remote"
 }
@@ -83,7 +85,11 @@ func (s *Service) StartWorkspaceTerminal(ctx context.Context, target WorkspaceTe
 			item.SSHPassword = password
 		}
 		runner := workspace.RunnerFor(item).(*workspace.SSHRunner)
-		return runner.StartTerminal(ctx, target.root, cols, rows)
+		process, err := runner.StartTerminal(ctx, target.root, cols, rows)
+		if err != nil {
+			return nil, err
+		}
+		return process, nil
 	}
 	return workspaceterminal.StartLocal(target.root, cols, rows)
 }

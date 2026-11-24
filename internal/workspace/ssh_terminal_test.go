@@ -57,6 +57,9 @@ func TestWorkspaceTerminalAgainstRealOpenSSH(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("OpenSSH PTY did not output and exit")
 	}
+	if code, err := terminal.ExitStatus(); err != nil || code != 0 {
+		t.Fatalf("OpenSSH exit status = %d: %v", code, err)
+	}
 }
 
 func TestWorkspaceTerminalSSHRequiresAbsoluteRoot(t *testing.T) {
