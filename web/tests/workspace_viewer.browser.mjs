@@ -175,8 +175,8 @@ try {
   }
   const repositorySelect = viewer.getByRole("combobox", {name: "Repository"});
   assert.equal(await repositorySelect.locator('option[value=""]').textContent(), "AHA2");
-  await viewer.getByText(/The repository list may be incomplete/).waitFor();
-  await viewer.getByText(/Repository discovery timed out/).waitFor();
+  await viewer.getByText(/The submodule list may be incomplete/).waitFor();
+  await viewer.getByText(/Reading registered submodules timed out/).waitFor();
   await checkHeader(viewer, 1280);
   await viewer.locator("[data-wv-base]").selectOption(longBase);
   await viewer.locator(`[data-wv-base][title="${longBase}"]`).waitFor();
@@ -322,10 +322,12 @@ try {
   const invalid = viewer.locator(".wv-notice").filter({hasText: /The selected repository is missing or is no longer/});
   desktop.forgetChild();
   await viewer.waitForResponse(response => response.status() === 400 && new URL(response.url()).searchParams.get("summary") === "1");
-  await invalid.waitFor();
-  assert.equal(await repositorySelect.inputValue(), childRepository);
+  const fallback = viewer.locator(".wv-notice").filter({hasText: /Showing the workspace root/});
+  await invalid.or(fallback).waitFor();
+  assert.equal(await repositorySelect.inputValue(), childRepository, "an invalid repository on a later poll keeps the selected repository");
   assert.equal(await viewer.locator(".wv-tab").count(), 2);
   assert.equal(new URL(viewer.url()).searchParams.get("repo"), childRepository);
+  assert.equal(await invalid.isVisible(), true);
   await childDiff.waitFor();
   await rootTab.click();
   await rootSource.waitFor();
@@ -387,7 +389,7 @@ try {
   assert.ok(mobile.queries.every(({view}) => view !== "diff"));
   await narrow.goto(origin + `/workspace-viewer?task=${task.id}&base=${encodeURIComponent(longBase)}`);
   await narrow.getByLabel("基线", {exact: true}).waitFor();
-  await narrow.getByText(/仓库扫描超时/).waitFor();
+  await narrow.getByText(/读取子模块登记超时/).waitFor();
   await checkHeader(narrow, 1024);
   await narrow.goto(origin + "/workspace-viewer?task=missing");
   await narrow.getByText("该任务的工作区或工作树不可用。").waitFor();

@@ -4,9 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -249,11 +247,13 @@ func (source nativeViewerFS) repositoryDetails(ctx context.Context, repo nativeV
 	item.Head = head
 	item.Branch = strings.TrimPrefix(strings.TrimSuffix(string(branch.data), "\n"), "refs/heads/")
 	item.Detached = branch.exit == 1 && head != ""
-	children, truncated := repo.repositoryChildren(ctx)
+	children, truncated := repo.registeredGitlinks(ctx)
 	return item, children, truncated
 }
 
-func (source nativeViewerFS) repositoryChildren(ctx context.Context) ([]string, bool) {
+// Discovery follows the Git index at each repository boundary. Ordinary
+// directories and unregistered nested checkouts are not discovery inputs.
+func (source nativeViewerFS) registeredGitlinks(ctx context.Context) ([]string, bool) {
 	children := map[string]bool{}
 	git := viewerGit{source: source}
 	probe, cancel := context.WithTimeout(ctx, 2*time.Second)
@@ -266,55 +266,10 @@ func (source nativeViewerFS) repositoryChildren(ctx context.Context) ([]string, 
 		}
 	}
 
-	// A repository can be checked out inside a workspace without being
-	// registered as a submodule. Its contents are scanned in its own turn.
-	queue := []string{""}
-	for len(queue) > 0 && ctx.Err() == nil {
-		rel := queue[0]
-		queue = queue[1:]
-		err := source.scanRepositoryDirectories(ctx, rel, func(child string) {
-			if children[child] {
-				return
-			}
-			info, err := source.info(path.Join(child, ".git"))
-			switch {
-			case err == nil:
-				if info.IsDir() || info.Mode().IsRegular() {
-					children[child] = true
-				}
-			case errors.Is(err, ErrViewerMissing):
-				queue = append(queue, child)
-			}
-		})
-		truncated = truncated || err != nil
-	}
 	paths := make([]string, 0, len(children))
 	for child := range children {
 		paths = append(paths, child)
 	}
 	slices.Sort(paths)
-	return paths, truncated || len(queue) > 0
-}
-
-func (source nativeViewerFS) scanRepositoryDirectories(ctx context.Context, rel string, visit func(string)) error {
-	handle, err := source.openDirectory(rel)
-	if err != nil {
-		return err
-	}
-	defer handle.Close()
-	for ctx.Err() == nil {
-		entries, err := handle.ReadDir(512)
-		for _, entry := range entries {
-			if child := path.Join(rel, entry.Name()); entry.IsDir() && validViewerRepositoryPath(child) {
-				visit(child)
-			}
-		}
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-	}
-	return ctx.Err()
+	return paths, truncated
 }

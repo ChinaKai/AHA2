@@ -1,6 +1,5 @@
 """Fixed POSIX workspace reader invoked through the SSH/WSL runner."""
 import base64
-from collections import deque
 import datetime
 import json
 import os
@@ -244,7 +243,7 @@ def submodule_git_dir(root, scoped, relative, root_path, module_dirs):
     return None
 
 
-def repository_children(root, git_dir, deadline):
+def registered_gitlinks(git_dir, deadline):
     children = set()
     try:
         index, code, truncated = repository_git(git_dir, GITLINK_LIMIT, "ls-files", "--stage", "-z", "--", deadline=deadline)
@@ -257,38 +256,7 @@ def repository_children(root, git_dir, deadline):
     except OSError:
         truncated = True
 
-    queue = deque([""])
-    while queue and time.monotonic() < deadline:
-        relative = queue.popleft()
-        try:
-            handle = open_path(root, relative, DIRECTORY)
-            try:
-                with os.scandir(handle) as entries:
-                    for entry in entries:
-                        if time.monotonic() >= deadline:
-                            truncated = True
-                            break
-                        name = relative + "/" + entry.name if relative else entry.name
-                        if name in children or not valid_repository_path(name) or not entry.is_dir(follow_symlinks=False):
-                            continue
-                        try:
-                            child = open_path(handle, entry.name, DIRECTORY)
-                            try:
-                                if git_marker(child):
-                                    children.add(name)
-                                else:
-                                    queue.append(name)
-                            finally:
-                                os.close(child)
-                        except FileNotFoundError:
-                            continue
-                        except OSError:
-                            continue
-            finally:
-                os.close(handle)
-        except OSError:
-            truncated = True
-    return sorted(children), truncated or bool(queue)
+    return sorted(children), truncated
 
 
 def repository_details(root, relative, root_path, module_dirs, deadline):
@@ -321,7 +289,7 @@ def repository_details(root, relative, root_path, module_dirs, deadline):
             branch = branch[len(b"refs/heads/"):]
         item.update(readable=True, head=head.decode("ascii"), detached=code == 1 and bool(head),
                     branch=branch.decode("utf-8", errors="replace"))
-        children, cut = repository_children(handle, git_dir, deadline)
+        children, cut = registered_gitlinks(git_dir, deadline)
         return item, children, cut
     except OSError:
         return item, [], True

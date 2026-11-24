@@ -34,17 +34,33 @@ func TestWorkspaceViewerRepositories(t *testing.T) {
 		makeRepo(child, "feature", "child data")
 		makeRepo(nested, "trunk", "nested data")
 		makeRepo(deep, "main", "deep repository")
+		makeRepo(child+"/unregistered", "main", "unregistered repository")
 		childDir := filepath.Join(dir, filepath.FromSlash(child))
 		nestedDir := filepath.Join(dir, filepath.FromSlash(nested))
 		runViewerFixtureGit(t, nestedDir, "checkout", "--detach")
 		childHead := runViewerFixtureGit(t, childDir, "rev-parse", "HEAD")
 		nestedHead := runViewerFixtureGit(t, nestedDir, "rev-parse", "HEAD")
+		deepHead := runViewerFixtureGit(t, filepath.Join(dir, filepath.FromSlash(deep)), "rev-parse", "HEAD")
+		for _, link := range []struct{ parent, name, head string }{
+			{nestedDir, "tools", deepHead},
+			{childDir, "sdk", nestedHead},
+		} {
+			writeViewerFixture(t, link.parent, ".gitmodules", fmt.Sprintf("[submodule %q]\n path = %s\n url = ./unused\n", link.name, link.name))
+			runViewerFixtureGit(t, link.parent, "add", ".gitmodules")
+			runViewerFixtureGit(t, link.parent, "update-index", "--add", "--cacheinfo", "160000,"+link.head+","+link.name)
+		}
 		writeViewerFixture(t, dir, ".gitmodules", "[submodule \"application\"]\n path = "+child+"\n url = ./unused\n[submodule \"missing\"]\n path = modules/missing\n url = ./unused\n")
 		runViewerFixtureGit(t, dir, "add", ".gitmodules")
 		runViewerFixtureGit(t, dir, "update-index", "--add", "--cacheinfo", "160000,"+childHead+","+child)
 		runViewerFixtureGit(t, dir, "update-index", "--add", "--cacheinfo", "160000,"+childHead+",modules/missing")
 		runViewerFixtureGit(t, dir, "commit", "-m", "Add submodule pointers")
 		runViewerFixtureGit(t, dir, "submodule", "absorbgitdirs", child)
+		for _, rel := range []string{child, nested, deep} {
+			marker, err := os.Lstat(filepath.Join(dir, filepath.FromSlash(rel), ".git"))
+			if err != nil || !marker.Mode().IsRegular() {
+				t.Fatalf("expected an absorbed gitfile for %s: %v", rel, err)
+			}
+		}
 		if err := os.MkdirAll(filepath.Join(dir, "modules/missing"), 0700); err != nil {
 			t.Fatal(err)
 		}
@@ -57,6 +73,8 @@ func TestWorkspaceViewerRepositories(t *testing.T) {
 			t.Fatal(err)
 		}
 		writeViewerFixture(t, dir, "external/.git", "gitdir: "+filepath.Join(outside, ".git")+"\n")
+		outsideHead := runViewerFixtureGit(t, outside, "rev-parse", "HEAD")
+		runViewerFixtureGit(t, dir, "update-index", "--add", "--cacheinfo", "160000,"+outsideHead+",external")
 		linkAllowed := os.Symlink(outside, filepath.Join(dir, "linked")) == nil
 		if linkAllowed {
 			// Even a registered Git link cannot select a symlink target.
@@ -185,6 +203,7 @@ func TestWorkspaceViewerRepositories(t *testing.T) {
 		}{
 			{WorkspaceViewerRequest{View: "state", Repo: "../outside"}, ErrViewerRepository},
 			{WorkspaceViewerRequest{View: "tree", Repo: "ordinary"}, ErrViewerRepository},
+			{WorkspaceViewerRequest{View: "file", Repo: child + "/unregistered", Path: "shared.txt"}, ErrViewerRepository},
 			{WorkspaceViewerRequest{View: "file", Repo: "modules/missing", Path: "shared.txt"}, ErrViewerRepoMissing},
 			{WorkspaceViewerRequest{View: "diff", Repo: "external", Path: "shared.txt", Scope: "commit", Commit: childHead}, ErrViewerRepoMissing},
 			{WorkspaceViewerRequest{View: "file", Repo: child, Path: "../shared.txt"}, ErrViewerPath},
@@ -385,7 +404,7 @@ func TestWorkspaceViewerGitlinkChanges(t *testing.T) {
 	})
 }
 
-func TestWorkspaceViewerDiscoversRepositoriesAfterWideAndDeepPaths(t *testing.T) {
+func TestWorkspaceViewerDiscoversGitlinksAtDeepPaths(t *testing.T) {
 	testViewerGitSources(t, func(t *testing.T, dir string, source viewerFS) {
 		runViewerFixtureGit(t, dir, "init", "-b", "main")
 		for i := range 520 {
@@ -400,6 +419,10 @@ func TestWorkspaceViewerDiscoversRepositoriesAfterWideAndDeepPaths(t *testing.T)
 		}
 		runViewerFixtureGit(t, folder, "init", "-b", "main")
 		writeViewerFixture(t, folder, "deep.txt", "deep data")
+		runViewerFixtureGit(t, folder, "add", "deep.txt")
+		runViewerFixtureGit(t, folder, "commit", "-m", "Deep submodule")
+		head := runViewerFixtureGit(t, folder, "rev-parse", "HEAD")
+		runViewerFixtureGit(t, dir, "update-index", "--add", "--cacheinfo", "160000,"+head+","+deep)
 		value, err := readWorkspaceView(t.Context(), source, domain.Task{}, "Workspace", "parent-repository", WorkspaceViewerRequest{View: "state"})
 		if err != nil {
 			t.Fatal(err)
@@ -412,6 +435,66 @@ func TestWorkspaceViewerDiscoversRepositoriesAfterWideAndDeepPaths(t *testing.T)
 			WorkspaceViewerRequest{View: "file", Repo: deep, Path: "deep.txt"})
 		if err != nil || got.(viewerContent).Text != "deep data" {
 			t.Fatalf("read discovered repository: %+v, %v", got, err)
+		}
+	})
+}
+
+func TestWorkspaceViewerGitlinksSurviveLargeDirectoryScan(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a 137,256-directory fixture")
+	}
+	testViewerGitSources(t, func(t *testing.T, dir string, source viewerFS) {
+		isolateViewerGitConfig(t)
+		const sub = "zsub"
+		subDir := filepath.Join(dir, sub)
+		if err := os.Mkdir(subDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		runViewerFixtureGit(t, subDir, "init", "-b", "main")
+		writeViewerFixture(t, subDir, "source.txt", "submodule content\n")
+		runViewerFixtureGit(t, subDir, "add", "source.txt")
+		runViewerFixtureGit(t, subDir, "commit", "-m", "Submodule source")
+		head := runViewerFixtureGit(t, subDir, "rev-parse", "HEAD")
+		runViewerFixtureGit(t, dir, "init", "-b", "main")
+		writeViewerFixture(t, dir, ".gitmodules", "[submodule \"zsub\"]\n path = zsub\n url = ./unused\n")
+		runViewerFixtureGit(t, dir, "add", ".gitmodules")
+		runViewerFixtureGit(t, dir, "update-index", "--add", "--cacheinfo", "160000,"+head+","+sub)
+		runViewerFixtureGit(t, dir, "commit", "-m", "Register submodule")
+		runViewerFixtureGit(t, dir, "submodule", "absorbgitdirs", sub)
+
+		var buildTree func(string, int)
+		buildTree = func(parent string, levels int) {
+			if err := os.Mkdir(parent, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if levels == 0 {
+				return
+			}
+			for _, letter := range "abcdefg" {
+				buildTree(filepath.Join(parent, string(letter)), levels-1)
+			}
+		}
+		buildTree(filepath.Join(dir, "build"), 6)
+		runViewerFixtureGit(t, filepath.Join(dir, "build", "a"), "init", "-b", "main")
+
+		start := time.Now()
+		repos, err := source.repositories(t.Context())
+		t.Logf("discovery took %s, timed out=%t, listed=%d repositories", time.Since(start).Round(time.Millisecond), repos.DeadlineReached, len(repos.Items))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.ContainsFunc(repos.Items, func(repo viewerRepository) bool {
+			return repo.ID == sub && repo.Readable && repo.Head == head
+		}) {
+			t.Fatalf("registered submodule disappeared: %+v", repos)
+		}
+		if len(repos.Items) != 2 || repos.Truncated {
+			t.Fatalf("discovery must only list the root and registered gitlink: %+v", repos)
+		}
+		read, err := readWorkspaceView(t.Context(), source, domain.Task{}, "Workspace", "parent-repository",
+			WorkspaceViewerRequest{View: "file", Repo: sub, Path: "source.txt"})
+		if err != nil || read.(viewerContent).Text != "submodule content\n" {
+			t.Fatalf("read registered submodule: %+v, %v", read, err)
 		}
 	})
 }
