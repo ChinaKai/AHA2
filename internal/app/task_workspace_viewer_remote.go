@@ -18,11 +18,13 @@ var viewerRemoteWorker string
 
 type remoteViewerFS struct {
 	root   string
+	repo   string
 	runner workspace.Runner
 }
 
 type viewerRemoteRequest struct {
 	Root            string   `json:"root"`
+	Repo            string   `json:"repo,omitempty"`
 	Op              string   `json:"op"`
 	Path            string   `json:"path,omitempty"`
 	Args            []string `json:"args,omitempty"`
@@ -31,6 +33,7 @@ type viewerRemoteRequest struct {
 }
 
 type viewerRemoteResponse struct {
+	viewerRepositories
 	Error     string     `json:"error"`
 	Marker    bool       `json:"marker"`
 	Tree      viewerTree `json:"tree"`
@@ -41,6 +44,7 @@ type viewerRemoteResponse struct {
 
 func (source remoteViewerFS) request(ctx context.Context, req viewerRemoteRequest) (viewerRemoteResponse, error) {
 	req.Root = source.root
+	req.Repo = source.repo
 	input, err := json.Marshal(req)
 	if err != nil {
 		return viewerRemoteResponse{}, err
@@ -77,9 +81,24 @@ func (source remoteViewerFS) request(ctx context.Context, req viewerRemoteReques
 		return response, ErrViewerPath
 	case "git":
 		return response, ErrViewerGit
+	case "repo":
+		return response, ErrViewerRepoMissing
 	default:
 		return response, ErrViewerTransport
 	}
+}
+
+func (source remoteViewerFS) repositories(ctx context.Context) (viewerRepositories, error) {
+	result, err := source.request(ctx, viewerRemoteRequest{Op: "repositories"})
+	return result.viewerRepositories, err
+}
+
+func (source remoteViewerFS) openRepository(_ context.Context, rel string) (viewerFS, func(), error) {
+	if !validViewerRepositoryPath(rel) {
+		return nil, nil, ErrViewerRepository
+	}
+	source.repo = rel
+	return source, func() {}, nil
 }
 
 func (source remoteViewerFS) available(ctx context.Context) error {

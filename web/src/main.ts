@@ -6901,7 +6901,7 @@ function taskMailPendingCount(): number {
 function workspaceEntryHTML(task: Task, configured: boolean): string {
   const label = t("workspaceViewer.open");
   const reason = t(configured ? "common.loading" : "workspaceViewer.unavailable");
-  return `<a class="workspace-viewer-entry" data-workspace-entry="${configured ? escapeHTML(task.id) : ""}" aria-disabled="true" aria-label="${label}" title="${reason}" target="_blank" rel="noopener">${icon("folder")}<span>${label}</span></a>`;
+  return `<a class="task-tool-button workspace-viewer-entry" data-workspace-entry="${configured ? escapeHTML(task.id) : ""}" aria-disabled="true" aria-label="${escapeHTML(label)}" title="${escapeHTML(reason)}" target="_blank" rel="noopener">${icon("folder")}</a>`;
 }
 
 function bindWorkspaceEntry(): void {

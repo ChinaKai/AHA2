@@ -1,5 +1,5 @@
 import {api} from "./api.js";
-import {formatLocaleDateTime, t} from "./i18n.js";
+import {currentLocale, formatLocaleDateTime, t} from "./i18n.js";
 import {icon} from "./icons.js";
 
 type Scope = "file" | "uncommitted" | "base" | "commit";
@@ -32,6 +32,8 @@ interface ViewerState {
   branch?: string;
   head?: string;
   base?: string;
+  baseFallback?: boolean;
+  baseAtHead?: boolean;
   mergeBase?: string;
   ahead: number;
   behind: number;
@@ -40,6 +42,16 @@ interface ViewerState {
   baseChanges: Change[];
   commits: Commit[];
   truncated: boolean;
+  repositories?: Repository[];
+  repositoriesTruncated?: boolean;
+  repositoryUnavailable?: boolean;
+}
+
+interface Repository {
+  id: string;
+  name: string;
+  path: string;
+  readable: boolean;
 }
 
 interface Entry {
@@ -69,6 +81,113 @@ interface Tab {
   error?: string;
 }
 
+const copy: Record<string, Record<string, string>> = {
+  "zh-CN": {
+    title: "工作区查看器",
+    navigation: "工作区导航",
+    preview: "内容预览",
+    baseline: "基线",
+    repository: "仓库",
+    rootRepository: "工作区根仓库",
+    repositoryUnavailableLabel: "{name}（不可用）",
+    repositoryUnavailable: "这个仓库尚未初始化，或无法读取 Git 数据。",
+    invalidRepository: "找不到所选仓库，或该仓库已不在工作区仓库列表中。",
+    repositoriesTruncated: "已达到仓库发现上限，列表可能不完整。",
+    baselineFallback: "仓库中没有基线 {requested}，当前使用 {actual}。",
+    detached: "分离 HEAD · {head}",
+    automatic: "自动",
+    automaticBase: "自动 · {base}",
+    comparison: "领先 {ahead} 个提交，落后 {behind} 个提交",
+    nonGit: "非 Git 工作区",
+    changes: "变更",
+    files: "文件",
+    uncommitted: "未提交变更",
+    commits: "最近提交",
+    relativeCommits: "基线之后的提交",
+    baseChanges: "与基线的差异",
+    noChanges: "没有文件变更",
+    noCommits: "暂无提交",
+    noSubject: "无提交说明",
+    tabs: "已打开的文件",
+    closeTab: "关闭 {file}",
+    closeAll: "关闭全部",
+    empty: "从左侧选择文件或变更查看内容。",
+    emptyFolder: "这个目录是空的。",
+    emptyFile: "这个文件是空的。",
+    noDiff: "当前选项下没有差异。",
+    ignoreWhitespace: "忽略空白",
+    wrap: "自动换行",
+    previous: "上一处差异",
+    next: "下一处差异",
+    maskedLabel: "已遮蔽",
+    binaryLabel: "二进制",
+    masked: "这个文件的内容已遮蔽。",
+    binary: "二进制文件无法预览。",
+    tooLarge: "文件超过 1 MiB，无法预览。",
+    truncatedList: "列表已截断。",
+    truncatedDiff: "差异过大，已截断。",
+    bytes: "{size} 字节",
+    notFound: "找不到该任务。",
+    gitFailed: "读取工作区的 Git 信息失败。",
+    missing: "找不到该文件或目录。",
+    invalidPath: "无法读取这个路径。符号链接和工作区之外的路径不可查看。",
+    invalidRevision: "所选基线或提交已不可用。",
+    failed: "读取工作区失败，请刷新重试。",
+  },
+  "en-US": {
+    title: "Workspace viewer",
+    navigation: "Workspace navigation",
+    preview: "Content preview",
+    baseline: "Base",
+    repository: "Repository",
+    rootRepository: "Workspace root",
+    repositoryUnavailableLabel: "{name} (unavailable)",
+    repositoryUnavailable: "This repository has not been initialized or its Git data could not be read.",
+    invalidRepository: "The selected repository is missing or is no longer in the workspace repository list.",
+    repositoriesTruncated: "Repository discovery reached its limit. The list may be incomplete.",
+    baselineFallback: "Base {requested} is unavailable in this repository. Using {actual}.",
+    detached: "Detached HEAD · {head}",
+    automatic: "Automatic",
+    automaticBase: "Automatic · {base}",
+    comparison: "{ahead} commits ahead, {behind} behind",
+    nonGit: "Non-Git workspace",
+    changes: "Changes",
+    files: "Files",
+    uncommitted: "Uncommitted changes",
+    commits: "Recent commits",
+    relativeCommits: "Commits relative to base",
+    baseChanges: "Diff against base",
+    noChanges: "No changed files",
+    noCommits: "No commits",
+    noSubject: "No commit message",
+    tabs: "Open files",
+    closeTab: "Close {file}",
+    closeAll: "Close all",
+    empty: "Select a file or a change to preview it.",
+    emptyFolder: "This folder is empty.",
+    emptyFile: "This file is empty.",
+    noDiff: "No differences with the current options.",
+    ignoreWhitespace: "Ignore whitespace",
+    wrap: "Wrap lines",
+    previous: "Previous hunk",
+    next: "Next hunk",
+    maskedLabel: "Hidden",
+    binaryLabel: "Binary",
+    masked: "This file’s contents are hidden.",
+    binary: "Binary file preview is unavailable.",
+    tooLarge: "This file exceeds the 1 MiB preview limit.",
+    truncatedList: "This list is truncated.",
+    truncatedDiff: "This diff exceeds the display limit and was truncated.",
+    bytes: "{size} bytes",
+    notFound: "Task not found.",
+    gitFailed: "Unable to read Git information for this workspace.",
+    missing: "File or folder not found.",
+    invalidPath: "This path cannot be read. Symlinks and paths outside the workspace are unavailable.",
+    invalidRevision: "The selected base or commit is unavailable.",
+    failed: "Unable to read the workspace. Refresh to try again.",
+  },
+};
+
 const errorLabels: Record<string, string> = {
   task_not_found: "notFound",
   workspace_viewer_unavailable: "unavailable",
@@ -77,11 +196,15 @@ const errorLabels: Record<string, string> = {
   workspace_viewer_path_not_found: "missing",
   workspace_viewer_invalid_path: "invalidPath",
   workspace_viewer_invalid_revision: "invalidRevision",
+  workspace_viewer_invalid_repository: "invalidRepository",
+  workspace_viewer_repository_unavailable: "repositoryUnavailable",
   workspace_viewer_not_git: "nonGit",
 };
 
 function label(key: string, values?: Record<string, string | number>): string {
-  return t(`workspaceViewer.${key}`, values);
+  const text = copy[currentLocale()][key];
+  return text ? text.replace(/\{(\w+)\}/g, (match, name) => String(values?.[name] ?? match))
+    : t(`workspaceViewer.${key}`, values);
 }
 
 function errorText(reason: unknown): string {
@@ -147,16 +270,20 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string): void {
   const tabBar = root.querySelector<HTMLElement>(".wv-tabs")!;
   const content = root.querySelector<HTMLElement>(".wv-content")!;
   const url = new URL(window.location.href);
-  const initialFile = url.searchParams.get("file");
+  let initialFile = url.searchParams.get("file");
   const initialScope = url.searchParams.get("scope");
   let mode: Mode = url.searchParams.get("tab") === "files" ? "files" : "changes";
   let base = url.searchParams.get("base") || "";
+  let repo = url.searchParams.get("repo") || "";
+  const repositoryBases = new Map<string, string>();
+  let repositories: Repository[] = [];
   let state: ViewerState | undefined;
   let wrap = false;
   let ignoreWhitespace = false;
   let selected: Tab | undefined;
   let statusRequest: AbortController | undefined;
   let contentRequest: AbortController | undefined;
+  let treeSession = new AbortController();
   let currentHunk = -1;
   const tabs: Tab[] = [];
   const expandedFolders = new Set([""]);
@@ -169,6 +296,7 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string): void {
 
   function read<T>(view: string, params: Record<string, string>, signal?: AbortSignal): Promise<T> {
     const query = new URLSearchParams(params);
+    if (repo) query.set("repo", repo);
     return api.request<T>(`/api/v1/tasks/${encodeURIComponent(task)}/workspace/${view}?${query}`, {signal});
   }
 
@@ -180,7 +308,9 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string): void {
   function saveLocation(): void {
     const next = new URL(window.location.href);
     next.search = new URLSearchParams({task, tab: mode}).toString();
-    if (base || state?.base) next.searchParams.set("base", base || state!.base!);
+    const savedBase = base || (!repo ? state?.base : "");
+    if (savedBase) next.searchParams.set("base", savedBase);
+    if (repo) next.searchParams.set("repo", repo);
     if (selected) {
       next.searchParams.set("file", selected.path);
       next.searchParams.set("scope", selected.scope);
@@ -190,26 +320,41 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string): void {
   }
 
   function renderHeader(): void {
-    const branch = state?.branch || (state?.head ? state.head.slice(0, 8) : label("noCommits"));
+    const focused = document.activeElement?.closest("select, button");
+    const focusAttr = focused && header.contains(focused) ? [...focused.attributes].find(attr => attr.name.startsWith("data-wv-"))?.name : undefined;
+    const branch = state?.branch || (state?.head ? label("detached", {head: state.head.slice(0, 8)}) : label("noCommits"));
     const baseline = state?.base || "";
     const shortBase = /^[a-f0-9]{40,64}$/.test(baseline) ? baseline.slice(0, 8) : baseline;
     const choices = new Set(state?.branches || []);
-    if (base) choices.add(base);
+    const visibleBase = state?.baseFallback ? "" : base;
+    if (visibleBase) choices.add(visibleBase);
+    const automatic = shortBase ? label("automaticBase", {base: shortBase}) : label("automatic");
+    const baseTitle = state?.baseFallback ? label("baselineFallback", {requested: base, actual: baseline || label("noCommits")})
+      : visibleBase || (baseline ? label("automaticBase", {base: baseline}) : automatic);
+    const repositoryLabel = (item: Repository) => {
+      const name = item.path || label("rootRepository");
+      return item.readable ? name : label("repositoryUnavailableLabel", {name});
+    };
+    const currentRepository = repositories.find(item => item.id === repo);
     header.innerHTML = `<div class="wv-heading">
         <span class="wv-heading-icon">${icon("folder")}</span>
-        <div><h1>${html(state?.name || label("title"))}</h1>
+        <div><h1>${html(state?.name || repositories[0]?.name || label("title"))}</h1>
         ${state ? `<p>${html([state.taskCode, state.taskTitle].filter(Boolean).join(" · "))}</p>` : ""}</div>
       </div>
       <div class="wv-meta">
-        ${state?.isGit || (!state && base) ? `<span class="wv-branch" title="${html(branch)}">${icon("branch")}<span>${html(branch)}</span></span>
-          <label>${label("baseline")} <select data-wv-base>
-            <option value="">${html(shortBase ? label("automaticBase", {base: shortBase}) : label("automatic"))}</option>
-            ${[...choices].map(value => `<option value="${html(value)}" ${value === base ? "selected" : ""}>${html(value === baseline ? shortBase : value)}</option>`).join("")}
+        ${repositories.length > 0 ? `<select data-wv-repo aria-label="${label("repository")}" title="${html(currentRepository ? repositoryLabel(currentRepository) : label("repository"))}">
+          ${repositories.map(item => `<option value="${html(item.id)}" ${item.id === repo ? "selected" : ""}>${html(repositoryLabel(item))}</option>`).join("")}
+        </select>` : ""}
+        ${state?.isGit ? `<span class="wv-branch" title="${html(state.head && !state.branch ? label("detached", {head: state.head}) : branch)}">${icon("branch")}<span>${html(branch)}</span></span>
+          <label><span>${label("baseline")}</span><select data-wv-base aria-label="${label("baseline")}" title="${html(baseTitle)}">
+            <option value="">${html(automatic)}</option>
+            ${[...choices].map(value => `<option value="${html(value)}" ${value === visibleBase ? "selected" : ""}>${html(value === baseline ? shortBase : value)}</option>`).join("")}
           </select></label>
-          ${state && baseline ? `<span class="wv-counts" title="${html(label("comparison", {ahead: state.ahead, behind: state.behind}))}">↑${state.ahead} ↓${state.behind}</span>` : ""}`
-        : state ? `<span class="wv-badge">${label("nonGit")}</span>` : ""}
+          ${baseline && !state.baseAtHead ? `<span class="wv-counts" title="${html(label("comparison", {ahead: state.ahead, behind: state.behind}))}">↑${state.ahead} ↓${state.behind}</span>` : ""}`
+        : state && !state.repositoryUnavailable ? `<span class="wv-badge">${label("nonGit")}</span>` : ""}
         <button type="button" data-wv-action="refresh" title="${t("common.refresh")}" aria-label="${t("common.refresh")}">${icon("refresh")}</button>
       </div>`;
+    if (focusAttr) header.querySelector<HTMLElement>(`[${focusAttr}]`)?.focus({preventScroll: true});
   }
 
   function changeList(changes: Change[], scope: Scope, commit = ""): string {
@@ -241,7 +386,7 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string): void {
       ${groupOpen ? changeList(state!.uncommitted, "uncommitted") : ""}
     </section>
     <section class="wv-group">
-      <h2 class="wv-group-title">${state!.base ? label("relativeCommits") : label("commits")} <span class="wv-count">${commits.length}</span></h2>
+      <h2 class="wv-group-title">${state!.base && !state!.baseAtHead ? label("relativeCommits") : label("commits")} <span class="wv-count">${commits.length}</span></h2>
       ${history || `<p class="wv-hint">${label("noCommits")}</p>`}
     </section>
     ${state!.mergeBase ? `<section class="wv-group">
@@ -280,9 +425,10 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string): void {
     const scroll = navigation.scrollTop;
     const focused = navigation.contains(document.activeElement) ? document.activeElement as HTMLButtonElement : undefined;
     const focusKey = focused && Object.entries(focused.dataset).filter(([key]) => key.startsWith("wv"));
+    const ready = state && !state.repositoryUnavailable;
     modes.innerHTML = `${state?.isGit ? `<button type="button" data-wv-mode="changes" aria-pressed="${mode === "changes"}">${icon("branch")}${label("changes")}</button>` : ""}
-      ${state ? `<button type="button" data-wv-mode="files" aria-pressed="${mode === "files"}">${icon("folder")}${label("files")}</button>` : ""}`;
-    navigation.innerHTML = state ? (mode === "changes" ? renderChanges() : renderTree()) : "";
+      ${ready ? `<button type="button" data-wv-mode="files" aria-pressed="${mode === "files"}">${icon("folder")}${label("files")}</button>` : ""}`;
+    navigation.innerHTML = ready ? (mode === "changes" ? renderChanges() : renderTree()) : "";
     navigation.scrollTop = scroll;
     if (focusKey?.length) {
       [...navigation.querySelectorAll("button")].find(button =>
@@ -315,7 +461,7 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string): void {
     const left = keepScroll ? content.querySelector(".wv-code")?.scrollLeft || 0 : 0;
     currentHunk = -1;
     if (!selected) {
-      content.innerHTML = `<div class="wv-empty">${icon("file")}<p>${label("empty")}</p></div>`;
+      content.innerHTML = state?.repositoryUnavailable ? "" : `<div class="wv-empty">${icon("file")}<p>${label("empty")}</p></div>`;
       return;
     }
     const tab = selected;
@@ -356,7 +502,7 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string): void {
     if (tab.scope !== "file") {
       params.scope = tab.scope;
       if (tab.scope === "commit") params.commit = tab.commit;
-      if (tab.scope === "base" && (base || state?.base)) params.base = base || state!.base!;
+      if (tab.scope === "base" && (base || (!repo && state?.base))) params.base = base || state!.base!;
       if (ignoreWhitespace) params.ignore_whitespace = "1";
     }
     try {
@@ -409,18 +555,21 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string): void {
   function readTree(path: string): Promise<void> {
     const pending = treeRequests.get(path);
     if (pending) return pending;
+    const signal = treeSession.signal;
     const promise = (async () => {
       try {
-        const value = await read<Tree>("tree", {path});
+        const value = await read<Tree>("tree", {path}, signal);
+        if (signal.aborted) return;
         const hadError = treeErrors.delete(path);
         if (!hadError && JSON.stringify(tree.get(path)) === JSON.stringify(value)) return;
         tree.set(path, value);
       } catch (reason) {
+        if (signal.aborted) return;
         const message = errorText(reason);
         if (treeErrors.get(path) === message) return;
         treeErrors.set(path, message);
       } finally {
-        treeRequests.delete(path);
+        if (!signal.aborted) treeRequests.delete(path);
       }
       if (mode === "files" && expandedFolders.has(path)) renderNavigation();
     })();
@@ -446,12 +595,13 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string): void {
         const next = await read<ViewerState>("state", params, controller.signal);
         if (controller.signal.aborted) return;
         const first = !state;
-        const latest = next.commits[0]?.id;
-        if (latest && latest !== state?.commits[0]?.id) expandedCommits.add(latest);
-        const lostGit = state?.isGit && !next.isGit;
+        const latest = next.commits?.[0]?.id;
+        if (latest && latest !== state?.commits?.[0]?.id) expandedCommits.add(latest);
+        const lostGit = state?.isGit && !next.isGit && !next.repositoryUnavailable;
         state = next;
+        repositories = next.repositories || [];
         document.title = `${next.name} · AHA2`;
-        if (!next.isGit) {
+        if (!next.isGit && !next.repositoryUnavailable) {
           mode = "files";
           base = "";
         }
@@ -463,7 +613,7 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string): void {
         }
         renderHeader();
         renderNavigation();
-        if (first && initialFile) {
+        if (first && initialFile && !next.repositoryUnavailable) {
           const scope = next.isGit && (initialScope === "uncommitted" || initialScope === "commit" || initialScope === "base")
             ? initialScope : "file";
           if (mode === "files") {
@@ -473,9 +623,18 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string): void {
           }
           open(initialFile, scope, url.searchParams.get("commit") || "");
         }
+        initialFile = null;
+        if (next.repositoryUnavailable) {
+          tabs.length = 0;
+          select(undefined);
+        } else if (!selected) renderContent();
         saveLocation();
       }
-      showNotice();
+      if (state?.repositoryUnavailable) {
+        showNotice(label("repositoryUnavailable"));
+        return;
+      }
+      showNotice(state?.repositoriesTruncated ? label("repositoriesTruncated") : "");
       if (mode === "files") {
         const activePath = selected?.path || "";
         const selectedFolder = activePath.slice(0, Math.max(0, activePath.lastIndexOf("/")));
@@ -549,9 +708,33 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string): void {
     if ((event.target as Element).closest('[data-wv-action="refresh"]')) void refresh();
   });
   header.addEventListener("change", event => {
-    const select = (event.target as Element).closest<HTMLSelectElement>("[data-wv-base]");
-    if (!select) return;
-    base = select.value;
+    const input = event.target as HTMLSelectElement;
+    if (input.hasAttribute("data-wv-repo")) {
+      repositoryBases.set(repo, base);
+      repo = input.value;
+      base = repositoryBases.get(repo) ?? (repo ? repositoryBases.get("") || "" : "");
+      initialFile = null;
+      state = undefined;
+      treeSession.abort();
+      treeSession = new AbortController();
+      treeRequests.clear();
+      treeErrors.clear();
+      tree.clear();
+      expandedFolders.clear();
+      expandedFolders.add("");
+      expandedCommits.clear();
+      groupOpen = true;
+      baseOpen = false;
+      tabs.length = 0;
+      select(undefined);
+      renderHeader();
+      renderNavigation();
+      showNotice(t("common.loading"));
+      void refresh();
+      return;
+    }
+    if (!input.hasAttribute("data-wv-base")) return;
+    base = input.value;
     if (selected?.scope === "base") {
       contentRequest?.abort();
       contentRequest = undefined;

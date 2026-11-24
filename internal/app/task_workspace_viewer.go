@@ -34,10 +34,12 @@ var (
 	ErrViewerGit         = errors.New("workspace_viewer_git_failed")
 	ErrViewerNotGit      = errors.New("workspace_viewer_not_git")
 	ErrViewerRevision    = errors.New("workspace_viewer_invalid_revision")
+	ErrViewerRepository  = errors.New("workspace_viewer_invalid_repository")
+	ErrViewerRepoMissing = errors.New("workspace_viewer_repository_unavailable")
 )
 
 type WorkspaceViewerRequest struct {
-	View, Path, Scope, Base, Commit         string
+	View, Path, Scope, Base, Commit, Repo   string
 	Summary, Availability, IgnoreWhitespace bool
 }
 
@@ -66,6 +68,8 @@ type viewerFS interface {
 	tree(context.Context, string) (viewerTree, error)
 	file(context.Context, string) (viewerContent, error)
 	git(ctx context.Context, limit int, readLineEndings bool, args ...string) (viewerGitOutput, error)
+	repositories(context.Context) (viewerRepositories, error)
+	openRepository(context.Context, string) (viewerFS, func(), error)
 }
 
 func (s *Service) ReadTaskWorkspace(ctx context.Context, taskID string, req WorkspaceViewerRequest) (any, error) {
@@ -141,16 +145,51 @@ func (s *Service) ReadTaskWorkspace(ctx context.Context, taskID string, req Work
 func readWorkspaceView(ctx context.Context, source viewerFS, task domain.Task, name string, req WorkspaceViewerRequest) (any, error) {
 	switch req.View {
 	case "state":
-		if req.Availability {
+		if req.Availability && req.Repo == "" {
 			return map[string]bool{"available": true}, source.available(ctx)
 		}
-		return readViewerState(ctx, source, task, name, req)
 	case "tree", "file", "diff":
 		if !validViewerPath(req.Path, req.View == "tree") {
 			return nil, ErrViewerPath
 		}
 	default:
 		return nil, ErrViewerPath
+	}
+
+	var repos viewerRepositories
+	var selected viewerRepository
+	if req.Repo != "" && !validViewerRepositoryPath(req.Repo) {
+		return nil, ErrViewerRepository
+	}
+	if req.View == "state" || req.Repo != "" {
+		var err error
+		repos, err = source.repositories(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if req.Repo != "" {
+		index := slices.IndexFunc(repos.Items, func(repo viewerRepository) bool { return repo.ID == req.Repo })
+		if index < 0 {
+			return nil, ErrViewerRepository
+		}
+		selected = repos.Items[index]
+		if selected.Readable {
+			repo, closeRepo, err := source.openRepository(ctx, selected.Path)
+			if err != nil {
+				return nil, err
+			}
+			defer closeRepo()
+			source = repo
+		} else if req.View != "state" || req.Availability {
+			return nil, ErrViewerRepoMissing
+		}
+	}
+	if req.View == "state" {
+		if req.Availability {
+			return map[string]bool{"available": true}, source.available(ctx)
+		}
+		return readViewerRepositoryState(ctx, source, task, name, req, repos, selected)
 	}
 
 	if req.View == "tree" {
@@ -233,8 +272,9 @@ func viewerSensitivePath(value string) bool {
 }
 
 type nativeViewerFS struct {
-	root *os.Root
-	dir  string
+	root   *os.Root
+	dir    string
+	gitDir string // Validated target of a submodule's .git file.
 }
 
 func (source nativeViewerFS) available(_ context.Context) error { return nil }

@@ -1,14 +1,22 @@
 """Fixed POSIX workspace reader invoked through the SSH/WSL runner."""
 import base64
+from collections import deque
 import datetime
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
 import threading
+import time
 
 DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+REPO_LIMIT = 64
+REPO_DEPTH = 2
+REPO_SCAN_LIMIT = 512
+REPO_PATH_DEPTH = 12
+GITLINK_LIMIT = 8 << 20
 
 
 def open_path(root, relative, flags):
@@ -91,14 +99,14 @@ def run_git_command(argv, env, limit, timeout=None):
                 timer.cancel()
 
 
-def line_ending_args(env):
+def line_ending_args(env, git_dir):
     config_env = env.copy()
     for key in ("GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM"):
         if key in os.environ:
             config_env[key] = os.environ[key]
     try:
         data, status, truncated = run_git_command(
-            ["git", "--no-pager", "--git-dir=.git", "--work-tree=.",
+            ["git", "--no-pager", "--git-dir=" + git_dir, "--work-tree=.",
              "config", "--includes", "--null", "--get-regexp", r"^core\.(autocrlf|eol)$"],
             config_env, 4096, timeout=0.5,
         )
@@ -122,16 +130,28 @@ def line_ending_args(env):
     return args
 
 
-def run_git(req):
+def git_environment():
     env = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
-    line_endings = line_ending_args(env) if req.get("read_line_endings") else []
+    return env
+
+
+def isolated_git_environment(env):
     env.update(
         LC_ALL="C", GIT_OPTIONAL_LOCKS="0", GIT_CONFIG_NOSYSTEM="1",
         GIT_CONFIG_GLOBAL=os.devnull, GIT_ATTR_NOSYSTEM="1", GIT_NO_LAZY_FETCH="1",
         GIT_ALLOW_PROTOCOL="", GIT_TERMINAL_PROMPT="0",
     )
+    return env
+
+
+def run_git(req, git_dir):
+    env = git_environment()
+    line_endings = line_ending_args(env, git_dir) if req.get("read_line_endings") else []
     try:
-        data, status, truncated = run_git_command(["git", *line_endings, *req["args"]], env, req["limit"])
+        data, status, truncated = run_git_command(
+            ["git", *line_endings, "--git-dir=" + git_dir, "-c", "core.hooksPath=" + os.devnull, *req["args"]],
+            isolated_git_environment(env), req["limit"], timeout=12,
+        )
         return {"data": encode(data), "exit": status, "truncated": truncated}
     except OSError:
         return {"error": "git"}
@@ -141,36 +161,238 @@ def encode(data):
     return base64.b64encode(data).decode("ascii")
 
 
+def valid_repository_path(relative):
+    try:
+        if not relative or len(relative.encode("utf-8")) > 4096 or any(char in relative for char in "\\:\x00"):
+            return False
+    except UnicodeEncodeError:
+        return False
+    blocked = {
+        ".git", ".aha2-context", ".env", ".envrc", ".ssh", ".gnupg", ".aws", ".kube",
+        ".npmrc", ".netrc", ".pypirc", ".git-credentials", ".docker", "credentials",
+        "credentials.json", "secrets", "secrets.json", "token", "tokens", "auth.json",
+        "id_rsa", "id_ed25519", "id_ecdsa",
+    }
+    prefixes = (".env.", "credential.", "credentials.", "secret.", "secrets.", "token.", "tokens.")
+    suffixes = (".env", ".pem", ".key", ".p12", ".pfx", ".kdbx", ".jks")
+    return all(
+        part and part.rstrip(". ") == part and part.lower() not in blocked
+        and not part.lower().startswith(prefixes) and not part.lower().endswith(suffixes)
+        for part in relative.split("/")
+    )
+
+
+def git_marker(root):
+    try:
+        info = os.stat(".git", dir_fd=root, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    if not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
+        raise OSError("invalid Git marker")
+    return True
+
+
+def repository_git(git_dir, limit, *args):
+    return run_git_command(
+        ["git", "--no-pager", "--git-dir=" + git_dir, "--work-tree=.", "-c", "core.fsmonitor=false",
+         "-c", "core.hooksPath=" + os.devnull, *args],
+        isolated_git_environment(git_environment()), limit, timeout=2,
+    )
+
+
+def common_module_dir():
+    data, code, cut = repository_git(".git", 4096, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    common = os.fsdecode(data).rstrip("\n")
+    return os.path.join(common, "modules") if not cut and code == 0 and os.path.isabs(common) else ""
+
+
+def submodule_git_dir(root, scoped, relative, root_path, modules):
+    if not relative or stat.S_ISDIR(os.stat(".git", dir_fd=scoped, follow_symlinks=False).st_mode):
+        return ".git"
+    # Gitfiles can point to the workspace's module metadata, including the
+    # shared Git directory of a linked worktree.
+    handle = open_path(scoped, ".git", os.O_RDONLY | os.O_NONBLOCK)
+    with os.fdopen(handle, "rb") as file:
+        if not stat.S_ISREG(os.fstat(file.fileno()).st_mode):
+            return None
+        data = file.read(4107).rstrip(b"\r\n")
+    if not data.startswith(b"gitdir: "):
+        return None
+    raw = os.fsdecode(data[8:])
+    if not raw or len(data[8:]) > 4096 or any(char in raw for char in "\r\n\x00"):
+        return None
+    target = os.path.normpath(os.path.join(root_path, relative, raw))
+    if os.path.realpath(target) != target or not os.path.isdir(target):
+        return None
+    if modules and target.startswith(modules.rstrip("/") + "/"):
+        return target
+    parent = relative.rpartition("/")[0]
+    while parent:
+        marker = parent + "/.git"
+        if target.startswith(os.path.join(root_path, marker, "modules") + "/"):
+            try:
+                os.close(open_path(root, marker, DIRECTORY))
+                return target
+            except OSError:
+                pass
+        parent = parent.rpartition("/")[0]
+    return None
+
+
+def repository_children(root, git_dir, scan, deadline):
+    children = set()
+    try:
+        index, code, truncated = repository_git(git_dir, GITLINK_LIMIT, "ls-files", "--stage", "-z", "--")
+        truncated = truncated or code != 0
+        for record in index.split(b"\x00")[:-1]:
+            header, _, relative = record.partition(b"\t")
+            name = os.fsdecode(relative)
+            if header.startswith(b"160000 ") and valid_repository_path(name):
+                children.add(name)
+    except OSError:
+        truncated = True
+
+    queue = deque([""])
+    while queue and scan[0] and time.monotonic() < deadline:
+        scan[0] -= 1
+        relative = queue.popleft()
+        try:
+            listing = list_tree(root, relative)["tree"]
+        except OSError:
+            truncated = True
+            continue
+        truncated = truncated or listing["truncated"]
+        for entry in listing["entries"]:
+            name = entry["path"]
+            if entry["kind"] != "directory" or name in children or not valid_repository_path(name):
+                continue
+            try:
+                child = open_path(root, name, DIRECTORY)
+                try:
+                    if git_marker(child):
+                        children.add(name)
+                        continue
+                finally:
+                    os.close(child)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                continue
+            if name.count("/") + 1 == REPO_PATH_DEPTH or len(queue) >= scan[0]:
+                truncated = True
+            else:
+                queue.append(name)
+    return sorted(children), truncated or bool(queue)
+
+
+def repositories(root):
+    if not git_marker(root):
+        return {}
+    root_path = os.getcwd()
+    modules = common_module_dir()
+    items, scan = [], [REPO_SCAN_LIMIT]
+    deadline = time.monotonic() + 5
+    truncated = False
+
+    def visit(relative, depth):
+        nonlocal truncated
+        item = {
+            "id": relative, "path": relative, "name": relative.rsplit("/", 1)[-1],
+            "initialized": False, "readable": False,
+        }
+        items.append(item)
+        try:
+            handle = open_path(root, relative, DIRECTORY)
+        except OSError:
+            return
+        try:
+            os.fchdir(handle)
+            item["initialized"] = git_marker(handle)
+            if not item["initialized"]:
+                return
+            git_dir = submodule_git_dir(root, handle, relative, root_path, modules)
+            if git_dir is None:
+                return
+            head, code, cut = repository_git(git_dir, 1024, "rev-parse", "--verify", "--quiet", "HEAD")
+            head = head.strip()
+            if cut or (code != 1 and (code != 0 or not re.fullmatch(b"(?:[0-9a-f]{40}|[0-9a-f]{64})", head))):
+                return
+            branch, code, cut = repository_git(git_dir, 4096, "symbolic-ref", "--quiet", "HEAD")
+            if cut or code not in (0, 1):
+                return
+            item.update(readable=True, head=head.decode("ascii"), detached=code == 1 and bool(head),
+                        branch=branch.decode("utf-8", errors="replace").rstrip("\n")[len("refs/heads/"):] if code == 0 else "")
+            children, cut = repository_children(handle, git_dir, scan, deadline)
+            truncated = truncated or cut
+            for child in children:
+                if depth == REPO_DEPTH or len(items) == REPO_LIMIT or time.monotonic() >= deadline:
+                    truncated = True
+                    break
+                full_path = relative + "/" + child if relative else child
+                if valid_repository_path(full_path):
+                    visit(full_path, depth + 1)
+        except OSError:
+            return
+        finally:
+            os.close(handle)
+
+    visit("", 0)
+    if not items[0]["readable"]:
+        return {"error": "git"}
+    return {"repositories": items, "repositoriesTruncated": truncated}
+
+
 def read(req):
     try:
         os.chdir(req["root"])
         root = os.open(".", DIRECTORY)
     except OSError:
         return {"error": "root"}
+    scoped = root
     try:
+        git_dir = ".git"
         op = req["op"]
+        if op == "repositories":
+            try:
+                return repositories(root)
+            except OSError:
+                return {"error": "git"}
+        relative = req.get("repo")
+        if relative:
+            if not valid_repository_path(relative):
+                return {"error": "repo"}
+            try:
+                scoped = open_path(root, relative, DIRECTORY)
+                if not git_marker(scoped):
+                    return {"error": "repo"}
+                if not stat.S_ISDIR(os.stat(".git", dir_fd=scoped, follow_symlinks=False).st_mode):
+                    git_dir = submodule_git_dir(root, scoped, relative, os.getcwd(), common_module_dir())
+                    if git_dir is None:
+                        return {"error": "repo"}
+                os.fchdir(scoped)
+            except OSError:
+                return {"error": "repo"}
         if op == "root":
             return {}
         if op == "marker":
             try:
-                info = os.stat(".git", dir_fd=root, follow_symlinks=False)
-            except FileNotFoundError:
-                return {"marker": False}
-            if stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode):
-                return {"marker": True}
-            return {"error": "git"}
+                return {"marker": git_marker(scoped)}
+            except OSError:
+                return {"error": "git"}
         if op == "tree":
-            return list_tree(root, req.get("path", ""))
+            return list_tree(scoped, req.get("path", ""))
         if op == "file":
-            return read_file(root, req["path"], req["limit"])
+            return read_file(scoped, req["path"], req["limit"])
         if op == "git":
-            return run_git(req)
+            return run_git(req, git_dir)
         return {"error": "path"}
     except FileNotFoundError:
         return {"error": "missing"}
     except OSError:
         return {"error": "path"}
     finally:
+        if scoped != root:
+            os.close(scoped)
         os.close(root)
 
 

@@ -35,6 +35,8 @@ func TestTaskWorkspaceViewerHTTP(t *testing.T) {
 		{"HEAD", "file?path=example.txt", fixture.client, 200, ""},
 		{"GET", "file?path=%2e%2e%2fexample.txt", fixture.client, 400, "workspace_viewer_invalid_path"},
 		{"GET", "state?root=" + url.QueryEscape(worktree), fixture.client, 400, "workspace_viewer_invalid_path"},
+		{"GET", "state?repo=" + url.QueryEscape(worktree), fixture.client, 400, "workspace_viewer_invalid_repository"},
+		{"GET", "tree?repo=ordinary", fixture.client, 400, "workspace_viewer_invalid_repository"},
 		{"POST", "file?path=example.txt", fixture.client, 405, "method_not_allowed"},
 		{"DELETE", "file?path=example.txt", fixture.client, 405, "method_not_allowed"},
 		{"OPTIONS", "file", fixture.client, 405, "method_not_allowed"},

@@ -1,0 +1,231 @@
+package app
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/ChinaKai/AHA2/internal/domain"
+)
+
+func TestWorkspaceViewerRepositories(t *testing.T) {
+	testViewerGitSources(t, func(t *testing.T, dir string, source viewerFS) {
+		const child = "modules/application"
+		const nested = child + "/sdk"
+		makeRepo := func(rel, branch, text string) {
+			folder := filepath.Join(dir, filepath.FromSlash(rel))
+			if err := os.MkdirAll(folder, 0700); err != nil {
+				t.Fatal(err)
+			}
+			runViewerFixtureGit(t, folder, "init", "-b", branch)
+			writeViewerFixture(t, folder, "shared.txt", text+"\n")
+			runViewerFixtureGit(t, folder, "add", "shared.txt")
+			runViewerFixtureGit(t, folder, "commit", "-m", text)
+		}
+		makeRepo("", "main", "parent data")
+		makeRepo(child, "feature", "child data")
+		makeRepo(nested, "trunk", "nested data")
+		makeRepo(nested+"/too-deep", "main", "too deep")
+		childDir := filepath.Join(dir, filepath.FromSlash(child))
+		nestedDir := filepath.Join(dir, filepath.FromSlash(nested))
+		runViewerFixtureGit(t, nestedDir, "checkout", "--detach")
+		childHead := runViewerFixtureGit(t, childDir, "rev-parse", "HEAD")
+		nestedHead := runViewerFixtureGit(t, nestedDir, "rev-parse", "HEAD")
+		writeViewerFixture(t, dir, ".gitmodules", "[submodule \"application\"]\n path = "+child+"\n url = ./unused\n[submodule \"missing\"]\n path = modules/missing\n url = ./unused\n")
+		runViewerFixtureGit(t, dir, "add", ".gitmodules")
+		runViewerFixtureGit(t, dir, "update-index", "--add", "--cacheinfo", "160000,"+childHead+","+child)
+		runViewerFixtureGit(t, dir, "update-index", "--add", "--cacheinfo", "160000,"+childHead+",modules/missing")
+		runViewerFixtureGit(t, dir, "commit", "-m", "Add submodule pointers")
+		runViewerFixtureGit(t, dir, "submodule", "absorbgitdirs", child)
+		if err := os.MkdirAll(filepath.Join(dir, "modules/missing"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		outside := t.TempDir()
+		runViewerFixtureGit(t, outside, "init", "-b", "main")
+		writeViewerFixture(t, outside, "shared.txt", "outside\n")
+		runViewerFixtureGit(t, outside, "add", ".")
+		runViewerFixtureGit(t, outside, "commit", "-m", "outside metadata")
+		if err := os.Mkdir(filepath.Join(dir, "external"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		writeViewerFixture(t, dir, "external/.git", "gitdir: "+filepath.Join(outside, ".git")+"\n")
+		linkAllowed := os.Symlink(outside, filepath.Join(dir, "linked")) == nil
+		if linkAllowed {
+			// Even a registered Git link cannot select a symlink target.
+			runViewerFixtureGit(t, dir, "update-index", "--add", "--cacheinfo", "160000,"+childHead+",linked")
+		}
+		if err := os.Mkdir(filepath.Join(dir, "ordinary"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		writeViewerFixture(t, childDir, "shared.txt", "working change in child\n")
+		writeViewerFixture(t, childDir, ".env", "hidden\n")
+		rootIndex := filepath.Join(dir, ".git", "index")
+		childIndex := filepath.Join(dir, ".git", "modules", "application", "index")
+		indexBefore := map[string]os.FileInfo{}
+		for _, index := range []string{rootIndex, childIndex} {
+			info, err := os.Stat(index)
+			if err != nil {
+				t.Fatal(err)
+			}
+			indexBefore[index] = info
+		}
+
+		task := domain.Task{Title: "task", TargetBranch: "main"}
+		view := func(req WorkspaceViewerRequest) (any, error) {
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+			defer cancel()
+			return readWorkspaceView(ctx, source, task, "Workspace", req)
+		}
+		read := func(req WorkspaceViewerRequest) any {
+			t.Helper()
+			value, err := view(req)
+			if err != nil {
+				t.Fatalf("%+v: %v", req, err)
+			}
+			return value
+		}
+		state := read(WorkspaceViewerRequest{View: "state"}).(viewerState)
+		wantIDs := []string{"", "external", child, nested, "modules/missing"}
+		if linkAllowed {
+			wantIDs = slices.Insert(wantIDs, 2, "linked")
+		}
+		ids := []string{}
+		for _, item := range state.Items {
+			ids = append(ids, item.ID)
+			switch item.ID {
+			case "":
+				if item.Name != "Workspace" || !item.Readable || item.Branch != "main" {
+					t.Fatalf("root repository: %+v", item)
+				}
+			case child:
+				if item.Name != "application" || item.Path != child || !item.Initialized || !item.Readable || item.Head != childHead || item.Branch != "feature" || item.Detached {
+					t.Fatalf("submodule: %+v", item)
+				}
+			case nested:
+				if !item.Readable || item.Branch != "" || !item.Detached || item.Head != nestedHead {
+					t.Fatalf("nested repository: %+v", item)
+				}
+			case "modules/missing", "linked":
+				if item.Initialized || item.Readable {
+					t.Fatalf("unavailable repository: %+v", item)
+				}
+			case "external":
+				if !item.Initialized || item.Readable || item.Head != "" {
+					t.Fatalf("external Git metadata: %+v", item)
+				}
+			}
+		}
+		if !slices.Equal(ids, wantIDs) || !state.viewerRepositories.Truncated {
+			t.Fatalf("repository list: %+v", state.viewerRepositories)
+		}
+		if got := read(WorkspaceViewerRequest{View: "state", Summary: true}).(viewerState); got.Version != state.Version {
+			t.Fatalf("root summary version %s, full %s", got.Version, state.Version)
+		}
+
+		state = read(WorkspaceViewerRequest{View: "state", Repo: child, Base: "main"}).(viewerState)
+		if !state.IsGit || state.Head != childHead || state.Base != "HEAD" || !state.BaseFallback || !state.BaseAtHead ||
+			len(state.Commits) != 1 || state.Commits[0].ID != childHead ||
+			!slices.ContainsFunc(state.Uncommitted, func(c viewerChange) bool { return c.Path == "shared.txt" }) {
+			t.Fatalf("child state: %+v", state)
+		}
+		unavailable := read(WorkspaceViewerRequest{View: "state", Repo: "modules/missing"}).(viewerState)
+		if !unavailable.RepositoryUnavailable || unavailable.IsGit || len(unavailable.Commits) != 0 || len(unavailable.Items) == 0 {
+			t.Fatalf("unavailable state: %+v", unavailable)
+		}
+
+		list := read(WorkspaceViewerRequest{View: "tree", Repo: child}).(viewerTree)
+		if !slices.ContainsFunc(list.Entries, func(e viewerEntry) bool { return e.Path == ".env" && e.Masked }) ||
+			slices.ContainsFunc(list.Entries, func(e viewerEntry) bool { return e.Path == ".git" || strings.HasPrefix(e.Path, child) }) {
+			t.Fatalf("child tree: %+v", list)
+		}
+		for repo, want := range map[string]string{"": "parent data\n", child: "working change in child\n", nested: "nested data\n"} {
+			if file := read(WorkspaceViewerRequest{View: "file", Repo: repo, Path: "shared.txt"}).(viewerContent); file.Text != want {
+				t.Fatalf("file in %q: %+v", repo, file)
+			}
+		}
+		diff := read(WorkspaceViewerRequest{View: "diff", Repo: child, Path: "shared.txt", Scope: "uncommitted"}).(viewerContent)
+		if !strings.Contains(diff.Text, "-child data\n+working change in child\n") {
+			t.Fatalf("child working diff: %+v", diff)
+		}
+		diff = read(WorkspaceViewerRequest{View: "diff", Repo: nested, Path: "shared.txt", Scope: "commit", Commit: nestedHead}).(viewerContent)
+		if !strings.Contains(diff.Text, "+nested data\n") {
+			t.Fatalf("nested commit diff: %+v", diff)
+		}
+		assertIndexUnchanged := func(index string) {
+			t.Helper()
+			after, err := os.Stat(index)
+			before := indexBefore[index]
+			if err != nil || !os.SameFile(before, after) || !before.ModTime().Equal(after.ModTime()) {
+				t.Fatalf("viewer modified index %q: %v", index, err)
+			}
+		}
+		assertIndexUnchanged(childIndex)
+		runViewerFixtureGit(t, childDir, "branch", "main", childHead)
+		runViewerFixtureGit(t, childDir, "add", "shared.txt")
+		runViewerFixtureGit(t, childDir, "commit", "-m", "child change")
+		state = read(WorkspaceViewerRequest{View: "state", Repo: child, Base: "parent-only"}).(viewerState)
+		if state.Base != "main" || !state.BaseFallback || state.BaseAtHead || state.Ahead != 1 || len(state.Commits) != 1 {
+			t.Fatalf("child default branch fallback: %+v", state)
+		}
+		diff = read(WorkspaceViewerRequest{View: "diff", Repo: child, Base: "parent-only", Path: "shared.txt", Scope: "base"}).(viewerContent)
+		if !strings.Contains(diff.Text, "-child data\n+working change in child\n") {
+			t.Fatalf("child baseline diff: %+v", diff)
+		}
+		for _, tc := range []struct {
+			req WorkspaceViewerRequest
+			err error
+		}{
+			{WorkspaceViewerRequest{View: "state", Repo: "../outside"}, ErrViewerRepository},
+			{WorkspaceViewerRequest{View: "tree", Repo: "ordinary"}, ErrViewerRepository},
+			{WorkspaceViewerRequest{View: "tree", Repo: nested + "/too-deep"}, ErrViewerRepository},
+			{WorkspaceViewerRequest{View: "file", Repo: "modules/missing", Path: "shared.txt"}, ErrViewerRepoMissing},
+			{WorkspaceViewerRequest{View: "diff", Repo: "external", Path: "shared.txt", Scope: "commit", Commit: childHead}, ErrViewerRepoMissing},
+			{WorkspaceViewerRequest{View: "file", Repo: child, Path: "../shared.txt"}, ErrViewerPath},
+			{WorkspaceViewerRequest{View: "file", Repo: child, Path: ".git"}, ErrViewerPath},
+			{WorkspaceViewerRequest{View: "file", Repo: child, Path: ".aha2-context/task.md"}, ErrViewerPath},
+			{WorkspaceViewerRequest{View: "diff", Repo: child, Path: "shared.txt", Scope: "commit", Commit: nestedHead}, ErrViewerRevision},
+		} {
+			if _, err := view(tc.req); !errors.Is(err, tc.err) {
+				t.Fatalf("%+v: got %v, want %v", tc.req, err, tc.err)
+			}
+		}
+		if linkAllowed {
+			if _, err := view(WorkspaceViewerRequest{View: "file", Repo: "linked", Path: "shared.txt"}); !errors.Is(err, ErrViewerRepoMissing) {
+				t.Fatalf("symlink selection: %v", err)
+			}
+		}
+		assertIndexUnchanged(rootIndex)
+	})
+}
+
+func TestWorkspaceViewerRepositoryLimit(t *testing.T) {
+	testViewerGitSources(t, func(t *testing.T, dir string, source viewerFS) {
+		runViewerFixtureGit(t, dir, "init", "-b", "main")
+		writeViewerFixture(t, dir, "root.txt", "root\n")
+		runViewerFixtureGit(t, dir, "add", ".")
+		runViewerFixtureGit(t, dir, "commit", "-m", "root")
+		head := runViewerFixtureGit(t, dir, "rev-parse", "HEAD")
+		var links strings.Builder
+		for i := 0; i < viewerRepoLimit; i++ {
+			fmt.Fprintf(&links, "160000 %s\tmodule-%02d\n", head, i)
+		}
+		cmd := exec.CommandContext(t.Context(), "git", "update-index", "--index-info")
+		cmd.Dir = dir
+		cmd.Stdin = strings.NewReader(links.String())
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("Git link fixture: %v: %s", err, output)
+		}
+		repos, err := source.repositories(t.Context())
+		if err != nil || len(repos.Items) != viewerRepoLimit || !repos.Truncated ||
+			repos.Items[0].ID != "" || repos.Items[viewerRepoLimit-1].ID != "module-62" {
+			t.Fatalf("bounded discovery: %+v, %v", repos, err)
+		}
+	})
+}

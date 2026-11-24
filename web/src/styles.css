@@ -2309,7 +2309,7 @@ dialog.agent-config-dialog { width: min(760px,calc(100vw - 32px)); }
   .task-head .actions { min-width: 0; overflow: visible; }
   .task-head .actions { gap: 3px; }
   .task-head .task-tool-actions { gap: 0; }
-  .task-head .actions > button { display: inline-flex; width: 30px; min-height: 30px; padding: 0; }
+  .task-head .actions > :is(button, .workspace-viewer-entry) { display: inline-flex; width: 30px; min-height: 30px; padding: 0; }
   .task-head .actions .icon { width: 14px; height: 14px; }
   .task-head > button { width: 36px; min-height: 36px; padding: 0; }
   .task-grid, .task-screen .task-grid, .task-grid.task-tool-open.task-tool-split { grid-template-columns: minmax(0,1fr); width: 100%; max-width: 100%; min-width: 0; height: calc(100% - 60px); border-right: 0; border-left: 0; overflow-x: hidden; }
@@ -3804,26 +3804,32 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
 .onboarding-feedback { color: var(--color-text-muted); overflow-wrap: anywhere; }
 
 /* Task workspace viewer */
-.workspace-viewer-entry { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-1); min-height: 36px; padding: 0 var(--space-2); border-right: 1px solid var(--line); white-space: nowrap; text-decoration: none; font-size: var(--font-size-12); font-weight: 650; color: var(--text); }
-.workspace-viewer-entry[href]:hover { background: var(--color-accent-soft); color: var(--color-accent-ink); }
-.workspace-viewer-entry[aria-disabled="true"] { color: var(--muted); opacity: .65; cursor: default; }
+.workspace-viewer-entry { display: inline-flex; align-items: center; justify-content: center; text-decoration: none; }
+.task-tool-actions .workspace-viewer-entry[href]:active { box-shadow: inset 0 -2px var(--focus-ring-color); }
+.task-tool-actions .workspace-viewer-entry:focus-visible { outline: 2px solid var(--focus-ring-color); outline-offset: -3px; }
+.task-tool-actions .workspace-viewer-entry[aria-disabled="true"],
+.task-tool-actions .workspace-viewer-entry[aria-disabled="true"]:hover { background: #f8fafc; color: #a0a7b1; cursor: default; }
 .workspace-viewer { display: grid; grid-template-rows: auto auto minmax(0, 1fr); height: 100dvh; color: var(--text); background: var(--surface); }
 .workspace-viewer [hidden] { display: none; }
 .wv-header { min-width: 0; display: flex; justify-content: space-between; align-items: center; gap: var(--space-4); padding: var(--space-3) var(--space-5); border-bottom: 1px solid var(--line); background: var(--color-surface-raised); }
 .wv-heading, .wv-meta { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.wv-heading { flex: 1 1 25%; }
 .wv-heading > div { min-width: 0; }
 .wv-heading-icon { display: grid; place-items: center; flex: 0 0 36px; height: 36px; border-radius: var(--radius-control); background: var(--color-accent-soft); color: var(--color-accent-ink); }
 .wv-heading h1, .wv-heading p { margin: 0; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
 .wv-heading h1 { font-size: var(--font-size-16); }
 .wv-heading p { font-size: var(--font-size-12); color: var(--muted); }
-.wv-meta { flex: 0 1 auto; flex-wrap: wrap; justify-content: flex-end; font-size: var(--font-size-12); }
-.wv-meta label { display: flex; gap: var(--space-1); align-items: center; font-weight: 650; }
-.wv-meta select { min-width: 0; max-width: 200px; padding: var(--space-1) var(--space-2); }
-.wv-meta button { padding: 0 var(--space-2); }
+.wv-meta { flex: 0 1 75%; justify-content: flex-end; font-size: var(--font-size-12); white-space: nowrap; }
+.wv-meta label { display: flex; flex: 0 1 30%; min-width: 0; margin: 0; gap: var(--space-1); align-items: center; font-weight: 650; }
+.wv-meta label > span, .wv-meta .wv-branch > svg { flex: none; }
+.wv-meta select, .wv-branch span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wv-meta select { padding-inline-start: var(--space-2); }
+.wv-meta [data-wv-repo] { flex: 0 1 24%; }
+.wv-meta [data-wv-base] { flex: 1 1 auto; max-width: 100%; }
+.wv-meta button { flex: none; padding: 0 var(--space-2); }
 .wv-branch, .wv-badge { display: inline-flex; align-items: center; gap: var(--space-1); background: var(--surface-soft); border-radius: var(--radius-control); padding: var(--space-1) var(--space-2); font-size: var(--font-size-12); white-space: nowrap; }
-.wv-branch { font-family: var(--font-mono); }
-.wv-branch span { max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
-.wv-counts { font-family: var(--font-mono); color: var(--muted); white-space: nowrap; }
+.wv-branch { flex: 0 1 24%; min-width: 0; font-family: var(--font-mono); }
+.wv-counts { flex: none; font-family: var(--font-mono); color: var(--muted); }
 .wv-notice { padding: var(--space-2) var(--space-5); color: var(--color-warning-ink); background: var(--color-warning-soft); }
 .wv-layout { min-height: 0; grid-row: 3; display: grid; grid-template-columns: minmax(250px, min(32%, 350px)) minmax(0, 1fr); }
 .wv-side, .wv-editor { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
@@ -3882,12 +3888,9 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
 .wv-empty .icon { width: 28px; height: 28px; }
 
 @media (max-width: 720px) {
-  .workspace-viewer-entry { min-width: 30px; padding: 0 var(--space-1); }
-  .workspace-viewer-entry > span { display: none; }
   .wv-header { align-items: flex-start; flex-direction: column; gap: var(--space-2); padding: var(--space-2) var(--space-3); }
   .wv-heading { max-width: 100%; }
-  .wv-meta { justify-content: flex-start; }
-  .wv-meta select, .wv-branch span { max-width: 130px; }
+  .wv-meta { flex-basis: auto; width: 100%; justify-content: flex-start; }
   .wv-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
   .wv-side { max-height: 35dvh; border-right: 0; border-bottom: 1px solid var(--line); }
   .wv-navigator { overflow: auto; }

@@ -8,7 +8,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -32,30 +34,58 @@ type viewerGitOutput struct {
 }
 
 func (source nativeViewerFS) git(ctx context.Context, limit int, readLineEndings bool, args ...string) (viewerGitOutput, error) {
+	handle, err := source.root.Open(".")
+	if err != nil {
+		return viewerGitOutput{}, ErrViewerGit
+	}
+	defer handle.Close()
+	info, err := handle.Stat()
+	if err != nil {
+		return viewerGitOutput{}, ErrViewerGit
+	}
+	canonical, err := filepath.EvalSymlinks(source.dir)
+	actual, statErr := os.Stat(source.dir)
+	if err != nil || statErr != nil || canonical != source.dir || !os.SameFile(info, actual) {
+		return viewerGitOutput{}, ErrViewerGit
+	}
+	// Linux can start Git in the opened directory even if a path component
+	// changes between validation and the subprocess's chdir.
+	dir := source.dir
+	if runtime.GOOS == "linux" {
+		fdPath := fmt.Sprintf("/proc/self/fd/%d", handle.Fd())
+		if fdInfo, err := os.Stat(fdPath); err == nil && os.SameFile(info, fdInfo) {
+			dir = fdPath
+		}
+	}
 	var env []string
 	for _, item := range os.Environ() {
 		if !strings.HasPrefix(strings.ToUpper(item), "GIT_") {
 			env = append(env, item)
 		}
 	}
+	gitDir := ".git"
+	if source.gitDir != "" {
+		gitDir = source.gitDir
+	}
+	args = append([]string{"--git-dir=" + gitDir, "-c", "core.hooksPath=" + os.DevNull}, args...)
 	if readLineEndings {
-		args = append(source.gitLineEndingArgs(ctx, env), args...)
+		args = append(viewerGitLineEndingArgs(ctx, dir, gitDir, env), args...)
 	}
 	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = source.dir
+	cmd.Dir = dir
 	cmd.Env = append(env, "LC_ALL=C", "GIT_OPTIONAL_LOCKS=0", "GIT_CONFIG_NOSYSTEM=1",
 		"GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_ATTR_NOSYSTEM=1", "GIT_NO_LAZY_FETCH=1", "GIT_ALLOW_PROTOCOL=", "GIT_TERMINAL_PROMPT=0")
 	return runNativeViewerGit(ctx, cmd, limit)
 }
 
-func (source nativeViewerFS) gitLineEndingArgs(ctx context.Context, env []string) []string {
+func viewerGitLineEndingArgs(ctx context.Context, dir, gitDir string, env []string) []string {
 	// The fixed config query consults normal config files. Preserve explicit
 	// config locations for this query only. The diff still runs isolated.
 	ctx, cancel := context.WithTimeout(ctx, viewerGitConfigTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "--no-pager", "--git-dir=.git", "--work-tree=.",
+	cmd := exec.CommandContext(ctx, "git", "--no-pager", "--git-dir="+gitDir, "--work-tree=.",
 		"config", "--includes", "--null", "--get-regexp", `^core\.(autocrlf|eol)$`)
-	cmd.Dir = source.dir
+	cmd.Dir = dir
 	cmd.Env = append([]string(nil), env...)
 	for _, key := range []string{"GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM"} {
 		if value, ok := os.LookupEnv(key); ok {
@@ -114,7 +144,7 @@ type viewerGit struct {
 }
 
 func (git viewerGit) run(ctx context.Context, limit int, args ...string) (viewerGitOutput, error) {
-	command := []string{"--no-pager", "--git-dir=.git", "--work-tree=.", "-c", "core.fsmonitor=false",
+	command := []string{"--no-pager", "--work-tree=.", "-c", "core.fsmonitor=false",
 		"-c", "core.untrackedCache=false", "-c", "core.quotePath=false", "-c", "color.ui=never",
 		// git diff can rewrite the index and invoke post-index-change even
 		// with GIT_OPTIONAL_LOCKS=0. These args also reach the remote worker.
@@ -181,22 +211,26 @@ type viewerCommit struct {
 }
 
 type viewerState struct {
-	Name        string         `json:"name"`
-	TaskTitle   string         `json:"taskTitle"`
-	TaskCode    string         `json:"taskCode"`
-	IsGit       bool           `json:"isGit"`
-	Version     string         `json:"version,omitempty"`
-	Branch      string         `json:"branch,omitempty"`
-	Head        string         `json:"head,omitempty"`
-	Base        string         `json:"base,omitempty"`
-	MergeBase   string         `json:"mergeBase,omitempty"`
-	Ahead       int            `json:"ahead"`
-	Behind      int            `json:"behind"`
-	Branches    []string       `json:"branches"`
-	Uncommitted []viewerChange `json:"uncommitted"`
-	BaseChanges []viewerChange `json:"baseChanges"`
-	Commits     []viewerCommit `json:"commits"`
-	Truncated   bool           `json:"truncated"`
+	viewerRepositories
+	RepositoryUnavailable bool           `json:"repositoryUnavailable,omitempty"`
+	BaseFallback          bool           `json:"baseFallback,omitempty"`
+	BaseAtHead            bool           `json:"baseAtHead,omitempty"`
+	Name                  string         `json:"name"`
+	TaskTitle             string         `json:"taskTitle"`
+	TaskCode              string         `json:"taskCode"`
+	IsGit                 bool           `json:"isGit"`
+	Version               string         `json:"version,omitempty"`
+	Branch                string         `json:"branch,omitempty"`
+	Head                  string         `json:"head,omitempty"`
+	Base                  string         `json:"base,omitempty"`
+	MergeBase             string         `json:"mergeBase,omitempty"`
+	Ahead                 int            `json:"ahead"`
+	Behind                int            `json:"behind"`
+	Branches              []string       `json:"branches"`
+	Uncommitted           []viewerChange `json:"uncommitted"`
+	BaseChanges           []viewerChange `json:"baseChanges"`
+	Commits               []viewerCommit `json:"commits"`
+	Truncated             bool           `json:"truncated"`
 }
 
 func readViewerState(ctx context.Context, source viewerFS, task domain.Task, name string, req WorkspaceViewerRequest) (viewerState, error) {
@@ -232,11 +266,13 @@ func readViewerState(ctx context.Context, source viewerFS, task domain.Task, nam
 			state.Branches = append(state.Branches, branch)
 		}
 	}
-	base, baseline, err := git.baseline(ctx, task, refs, state.Branch, req.Base)
+	base, baseline, fallback, err := git.comparisonBase(ctx, task, refs, state.Branch, state.Head, req)
 	if err != nil {
 		return state, err
 	}
 	state.Base = base
+	state.BaseFallback = fallback
+	state.BaseAtHead = req.Repo != "" && base == "HEAD" && baseline == ""
 	if state.Head == "" {
 		return state, nil
 	}
@@ -417,6 +453,27 @@ func (git viewerGit) baseline(ctx context.Context, task domain.Task, refs map[st
 	return "", "", nil
 }
 
+func (git viewerGit) comparisonBase(ctx context.Context, task domain.Task, refs map[string]string, branch, head string, req WorkspaceViewerRequest) (string, string, bool, error) {
+	if req.Repo == "" {
+		name, id, err := git.baseline(ctx, task, refs, branch, req.Base)
+		return name, id, false, err
+	}
+	if id := refs[req.Base]; req.Base != "" && id != "" {
+		return req.Base, id, false, nil
+	}
+	fallback := req.Base != ""
+	for _, name := range []string{task.TargetBranch, "main", "master", "trunk"} {
+		if id := refs[name]; name != "" && name != branch && id != "" && id != head {
+			return name, id, fallback, nil
+		}
+	}
+	// Keep showing recent history when HEAD is the only useful baseline.
+	if head != "" {
+		return "HEAD", "", fallback, nil
+	}
+	return "", "", fallback, nil
+}
+
 func (git viewerGit) mergeBase(ctx context.Context, base, head string) (string, error) {
 	out, err := git.run(ctx, 1024, "merge-base", base, head)
 	if err != nil {
@@ -525,14 +582,14 @@ func readViewerDiff(ctx context.Context, source viewerFS, task domain.Task, req 
 			return viewerContent{}, err
 		}
 		branch := ""
-		if req.Base == "" {
+		if req.Base == "" || req.Repo != "" {
 			out, err := git.run(ctx, 4096, "symbolic-ref", "--quiet", "--short", "HEAD")
 			if err != nil {
 				return viewerContent{}, err
 			}
 			branch = strings.TrimSpace(string(out.data))
 		}
-		_, baseline, err := git.baseline(ctx, task, refs, branch, req.Base)
+		_, baseline, _, err := git.comparisonBase(ctx, task, refs, branch, head, req)
 		if err != nil {
 			return viewerContent{}, err
 		}
