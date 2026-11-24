@@ -645,7 +645,7 @@ try {
     "en-US": {
       title: "Workspace terminal", lock: /LAN terminal locked/, allow: /Allow workspace terminals over LAN/,
       externalOrigin: "External terminal address",
-      externalOriginHelp: /The first save must be made on the AHA2 computer or via a direct address/,
+      externalOriginHelp: /Saving requires the AHA2 computer or a direct address/,
       requiresDirectOrigin: "Terminal settings can only be changed on the AHA2 computer or via a direct address. Open http://localhost:8766 on that computer, or use the LAN direct address, then save.",
       save: "Save terminal setting", saved: "Workspace terminal setting saved.", refresh: "Refresh",
       new: "New terminal on this workspace host", split: "Split terminal side by side", input: "Terminal input",
@@ -655,7 +655,7 @@ try {
     "zh-CN": {
       title: "工作区终端", lock: /局域网终端已锁定/, allow: /允许通过局域网访问终端/,
       externalOrigin: "终端外部访问地址",
-      externalOriginHelp: /首次保存需在本机或直连地址下进行/,
+      externalOriginHelp: /。保存需在本机或直连地址下进行/,
       requiresDirectOrigin: "终端设置只能在本机或通过直连地址修改：请在运行 AHA2 的电脑上打开 http://localhost:8766，或使用局域网直连地址后再保存。",
       save: "保存终端设置", saved: "工作区终端设置已保存。", refresh: "刷新",
       new: "在当前工作区主机新建终端", split: "分屏（左右两栏）", input: "终端输入",
