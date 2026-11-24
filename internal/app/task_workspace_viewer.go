@@ -65,7 +65,7 @@ type viewerFS interface {
 	gitMarker(context.Context) (bool, error)
 	tree(context.Context, string) (viewerTree, error)
 	file(context.Context, string) (viewerContent, error)
-	git(context.Context, int, ...string) (viewerGitOutput, error)
+	git(ctx context.Context, limit int, readLineEndings bool, args ...string) (viewerGitOutput, error)
 }
 
 func (s *Service) ReadTaskWorkspace(ctx context.Context, taskID string, req WorkspaceViewerRequest) (any, error) {

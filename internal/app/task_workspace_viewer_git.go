@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
@@ -19,6 +20,9 @@ const (
 	viewerCommitLimit = 100
 	viewerCommitFiles = 300
 	viewerHistorySize = 8 << 20
+
+	viewerGitConfigTimeout = 500 * time.Millisecond
+	viewerGitConfigLimit   = 4096
 )
 
 type viewerGitOutput struct {
@@ -27,16 +31,67 @@ type viewerGitOutput struct {
 	truncated bool
 }
 
-func (source nativeViewerFS) git(ctx context.Context, limit int, args ...string) (viewerGitOutput, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = source.dir
+func (source nativeViewerFS) git(ctx context.Context, limit int, readLineEndings bool, args ...string) (viewerGitOutput, error) {
+	var env []string
 	for _, item := range os.Environ() {
 		if !strings.HasPrefix(strings.ToUpper(item), "GIT_") {
-			cmd.Env = append(cmd.Env, item)
+			env = append(env, item)
 		}
 	}
-	cmd.Env = append(cmd.Env, "LC_ALL=C", "GIT_OPTIONAL_LOCKS=0", "GIT_CONFIG_NOSYSTEM=1",
+	if readLineEndings {
+		args = append(source.gitLineEndingArgs(ctx, env), args...)
+	}
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = source.dir
+	cmd.Env = append(env, "LC_ALL=C", "GIT_OPTIONAL_LOCKS=0", "GIT_CONFIG_NOSYSTEM=1",
 		"GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_ATTR_NOSYSTEM=1", "GIT_NO_LAZY_FETCH=1", "GIT_ALLOW_PROTOCOL=", "GIT_TERMINAL_PROMPT=0")
+	return runNativeViewerGit(ctx, cmd, limit)
+}
+
+func (source nativeViewerFS) gitLineEndingArgs(ctx context.Context, env []string) []string {
+	// The fixed config query consults normal config files. Preserve explicit
+	// config locations for this query only. The diff still runs isolated.
+	ctx, cancel := context.WithTimeout(ctx, viewerGitConfigTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "--no-pager", "--git-dir=.git", "--work-tree=.",
+		"config", "--includes", "--null", "--get-regexp", `^core\.(autocrlf|eol)$`)
+	cmd.Dir = source.dir
+	cmd.Env = append([]string(nil), env...)
+	for _, key := range []string{"GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM"} {
+		if value, ok := os.LookupEnv(key); ok {
+			cmd.Env = append(cmd.Env, key+"="+value)
+		}
+	}
+	out, err := runNativeViewerGit(ctx, cmd, viewerGitConfigLimit)
+	if err != nil || out.exit != 0 || out.truncated {
+		return nil
+	}
+
+	// Git reads config scopes in precedence order. Use the last value for
+	// each key, and pass it back only if it is an allowed Git enum value.
+	var autocrlf, eol string
+	for _, record := range out.records() {
+		key, value, _ := strings.Cut(record, "\n")
+		switch key {
+		case "core.autocrlf":
+			autocrlf = strings.ToLower(value)
+		case "core.eol":
+			eol = strings.ToLower(value)
+		}
+	}
+	var args []string
+	switch autocrlf {
+	case "true", "false", "input":
+		args = append(args, "-c", "core.autocrlf="+autocrlf)
+	}
+	switch eol {
+	case "lf", "crlf", "native":
+		args = append(args, "-c", "core.eol="+eol)
+	}
+	return args
+}
+
+func runNativeViewerGit(ctx context.Context, cmd *exec.Cmd, limit int) (viewerGitOutput, error) {
 	stdout, err := cmd.StdoutPipe()
 	if err != nil || cmd.Start() != nil {
 		return viewerGitOutput{}, ErrViewerGit
@@ -60,10 +115,14 @@ type viewerGit struct {
 
 func (git viewerGit) run(ctx context.Context, limit int, args ...string) (viewerGitOutput, error) {
 	command := []string{"--no-pager", "--git-dir=.git", "--work-tree=.", "-c", "core.fsmonitor=false",
-		"-c", "core.untrackedCache=false", "-c", "core.quotePath=false", "-c", "color.ui=never"}
+		"-c", "core.untrackedCache=false", "-c", "core.quotePath=false", "-c", "color.ui=never",
+		// git diff can rewrite the index and invoke post-index-change even
+		// with GIT_OPTIONAL_LOCKS=0. These args also reach the remote worker.
+		"-c", "diff.autoRefreshIndex=false"}
 	command = append(command, git.config...)
 	command = append(command, args...)
-	return git.source.git(ctx, limit, command...)
+	readLineEndings := args[0] == "status" || args[0] == "diff"
+	return git.source.git(ctx, limit, readLineEndings, command...)
 }
 
 func (git viewerGit) checked(ctx context.Context, limit int, args ...string) (viewerGitOutput, error) {

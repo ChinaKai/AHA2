@@ -22,11 +22,12 @@ type remoteViewerFS struct {
 }
 
 type viewerRemoteRequest struct {
-	Root  string   `json:"root"`
-	Op    string   `json:"op"`
-	Path  string   `json:"path,omitempty"`
-	Args  []string `json:"args,omitempty"`
-	Limit int      `json:"limit,omitempty"`
+	Root            string   `json:"root"`
+	Op              string   `json:"op"`
+	Path            string   `json:"path,omitempty"`
+	Args            []string `json:"args,omitempty"`
+	Limit           int      `json:"limit,omitempty"`
+	ReadLineEndings bool     `json:"read_line_endings,omitempty"`
 }
 
 type viewerRemoteResponse struct {
@@ -104,7 +105,7 @@ func (source remoteViewerFS) file(ctx context.Context, rel string) (viewerConten
 	return viewerText(result.Data), err
 }
 
-func (source remoteViewerFS) git(ctx context.Context, limit int, args ...string) (viewerGitOutput, error) {
-	result, err := source.request(ctx, viewerRemoteRequest{Op: "git", Args: args, Limit: limit})
+func (source remoteViewerFS) git(ctx context.Context, limit int, readLineEndings bool, args ...string) (viewerGitOutput, error) {
+	result, err := source.request(ctx, viewerRemoteRequest{Op: "git", Args: args, Limit: limit, ReadLineEndings: readLineEndings})
 	return viewerGitOutput{data: result.Data, exit: result.Exit, truncated: result.Truncated}, err
 }

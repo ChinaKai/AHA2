@@ -1,6 +1,8 @@
 package app
 
 import (
+	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/subtle"
@@ -13,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/workspace"
@@ -211,6 +214,201 @@ func TestWorkspaceViewerGit(t *testing.T) {
 	if !os.SameFile(indexBefore, indexAfter) || !indexBefore.ModTime().Equal(indexAfter.ModTime()) {
 		t.Fatal("viewing a worktree changed its Git index")
 	}
+}
+
+func testViewerGitSources(t *testing.T, test func(*testing.T, string, viewerFS)) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is unavailable")
+	}
+	t.Run("native", func(t *testing.T) {
+		dir, source := viewerFixture(t)
+		test(t, dir, source)
+	})
+	t.Run("ssh", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("POSIX worker requires a Unix test host")
+		}
+		for _, name := range []string{"sh", "python3"} {
+			if _, err := exec.LookPath(name); err != nil {
+				t.Skipf("%s is unavailable", name)
+			}
+		}
+		dir := t.TempDir()
+		test(t, dir, remoteViewerFS{root: dir, runner: viewerSSHFixture(t)})
+	})
+}
+
+func isolateViewerGitConfig(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", home)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	// Give the fixture and the viewer's config query the same isolated user config.
+	config := filepath.Join(home, ".gitconfig")
+	t.Setenv("GIT_CONFIG_GLOBAL", config)
+	return config
+}
+
+func TestWorkspaceViewerDiffLeavesIndexUntouched(t *testing.T) {
+	testViewerGitSources(t, func(t *testing.T, dir string, source viewerFS) {
+		isolateViewerGitConfig(t)
+		runViewerFixtureGit(t, dir, "init", "-b", "main")
+		runViewerFixtureGit(t, dir, "config", "diff.autoRefreshIndex", "true")
+		const name = "unchanged.txt"
+		writeViewerFixture(t, dir, name, "unchanged\n")
+		runViewerFixtureGit(t, dir, "add", name)
+		runViewerFixtureGit(t, dir, "commit", "-m", "base")
+
+		gitDir := filepath.Join(dir, ".git")
+		hook := filepath.Join(gitDir, "hooks", "post-index-change")
+		if err := os.WriteFile(hook, []byte("#!/bin/sh\nprintf 'ran\\n' > hook-ran\n"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(dir, name)
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dirtyTime := info.ModTime().Add(-2 * time.Second)
+		if err := os.Chtimes(path, dirtyTime, dirtyTime); err != nil {
+			t.Fatal(err)
+		}
+		index := filepath.Join(gitDir, "index")
+		before, err := os.ReadFile(index)
+		if err != nil {
+			t.Fatal(err)
+		}
+		beforeInfo, err := os.Stat(index)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := readViewerDiff(t.Context(), source, domain.Task{}, WorkspaceViewerRequest{Path: name, Scope: "uncommitted"})
+		if err != nil || got != (viewerContent{}) {
+			t.Fatalf("expected no content change: %+v %v", got, err)
+		}
+		after, err := os.ReadFile(index)
+		if err != nil {
+			t.Fatal(err)
+		}
+		afterInfo, err := os.Stat(index)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(before, after) || !os.SameFile(beforeInfo, afterInfo) || !beforeInfo.ModTime().Equal(afterInfo.ModTime()) {
+			t.Error("viewing an unchanged file with different timestamps rewrote the index")
+		}
+		if _, err := os.Stat(filepath.Join(dir, "hook-ran")); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("unexpected post-index-change hook result: %v", err)
+		}
+	})
+}
+
+func TestWorkspaceViewerDiffKeepsConfiguredLineEndings(t *testing.T) {
+	testViewerGitSources(t, func(t *testing.T, dir string, source viewerFS) {
+		config := isolateViewerGitConfig(t)
+		runViewerFixtureGit(t, dir, "config", "--global", "core.autocrlf", "true")
+		runViewerFixtureGit(t, dir, "init", "-b", "main")
+		const name = "readme.txt"
+		const original = "first\r\nsecond\r\nthird\r\nfourth\r\nfifth\r\n"
+		writeViewerFixture(t, dir, name, original)
+		runViewerFixtureGit(t, dir, "add", name)
+		runViewerFixtureGit(t, dir, "commit", "-m", "base")
+		if err := os.Remove(filepath.Join(dir, name)); err != nil {
+			t.Fatal(err)
+		}
+		runViewerFixtureGit(t, dir, "checkout", "--", name)
+		checkedOut, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil || string(checkedOut) != original {
+			t.Fatalf("test checkout must use CRLF: %q %v", checkedOut, err)
+		}
+		writeViewerFixture(t, dir, name, strings.Replace(original, "third", "changed", 1))
+		normal := runViewerFixtureGit(t, dir, "diff", "--numstat", "HEAD", "--", name)
+		if normal != "1\t1\t"+name {
+			t.Fatalf("expected one changed line in the normal Git diff: %q", normal)
+		}
+
+		// Global callbacks must still be unavailable to the viewer's Git commands.
+		writeViewerFixture(t, dir, ".gitattributes", "*.txt diff=viewer filter=viewer\n")
+		if err := os.WriteFile(config, []byte("[core]\n autocrlf = true\n eol = crlf\n fsmonitor = ./callback.sh\n"+
+			"[diff]\n external = ./callback.sh\n[diff \"viewer\"]\n command = ./callback.sh\n textconv = ./callback.sh\n"+
+			"[filter \"viewer\"]\n clean = ./callback.sh\n process = ./callback.sh\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "callback.sh"), []byte("#!/bin/sh\nprintf 'ran\\n' > callback-ran\n"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		got, err := readViewerDiff(t.Context(), source, domain.Task{}, WorkspaceViewerRequest{Path: name, Scope: "uncommitted"})
+		if err != nil || !strings.Contains(got.Text, "\n-third\n+changed\n") || strings.Count(got.Text, "\n+") != 2 || strings.Count(got.Text, "\n-") != 2 || strings.Contains(got.Text, "\r") {
+			t.Errorf("expected a one-line diff: %+v %v", got, err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "callback-ran")); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("unexpected global callback result: %v", err)
+		}
+	})
+}
+
+func TestWorkspaceViewerGitReadsOnlySystemLineEndingConfig(t *testing.T) {
+	testViewerGitSources(t, func(t *testing.T, dir string, source viewerFS) {
+		config := isolateViewerGitConfig(t)
+		system := filepath.Join(t.TempDir(), "gitconfig")
+		t.Setenv("GIT_CONFIG_NOSYSTEM", "0")
+		t.Setenv("GIT_CONFIG_SYSTEM", system)
+		if err := os.WriteFile(system, []byte("[core]\n autocrlf = false\n eol = LF\n pager = fixture\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(config, []byte("[core]\n autocrlf = input\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		runViewerFixtureGit(t, dir, "init", "-b", "main")
+		out, err := source.git(t.Context(), 4096, true, "--no-pager", "config", "--null", "--get-regexp", "^core\\.(autocrlf|eol|pager)$")
+		if err != nil || out.exit != 0 || out.truncated || string(out.data) != "core.autocrlf\ninput\x00core.eol\nlf\x00" {
+			t.Fatalf("expected only normalized line ending settings: %q, exit=%d, %v", out.data, out.exit, err)
+		}
+	})
+}
+
+func TestWorkspaceViewerGitConfigProbeFallback(t *testing.T) {
+	testViewerGitSources(t, func(t *testing.T, dir string, source viewerFS) {
+		config := isolateViewerGitConfig(t)
+		runViewerFixtureGit(t, dir, "init", "-b", "main")
+		const name = "readme.txt"
+		writeViewerFixture(t, dir, name, "old\n")
+		runViewerFixtureGit(t, dir, "add", name)
+		runViewerFixtureGit(t, dir, "commit", "-m", "base")
+		writeViewerFixture(t, dir, name, "new\n")
+
+		for _, tc := range []struct{ name, cfg string }{
+			{"parse error", "[core\n"},
+			{"invalid values", "[core]\n autocrlf = invalid\n eol = invalid\n"},
+			{"timeout", ""},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				if err := os.Remove(config); err != nil && !errors.Is(err, os.ErrNotExist) {
+					t.Fatal(err)
+				}
+				if tc.name == "timeout" {
+					mkfifo, err := exec.LookPath("mkfifo")
+					if err != nil || runtime.GOOS == "windows" {
+						t.Skip("FIFO fixture requires a POSIX host")
+					}
+					if err := exec.CommandContext(t.Context(), mkfifo, config).Run(); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := os.WriteFile(config, []byte(tc.cfg), 0600); err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+				defer cancel()
+				got, err := readViewerDiff(ctx, source, domain.Task{}, WorkspaceViewerRequest{Path: name, Scope: "uncommitted"})
+				if err != nil || !strings.Contains(got.Text, "\n-old\n+new\n") || ctx.Err() != nil {
+					t.Fatalf("bad user config must not stop the protected diff: %+v %v", got, err)
+				}
+			})
+		}
+	})
 }
 
 func TestWorkspaceViewerDisablesGitCallbacks(t *testing.T) {
