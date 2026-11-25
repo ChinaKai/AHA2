@@ -308,7 +308,14 @@ func (s *Service) SetAgentChannelReplyDecision(ctx context.Context, claims agent
 			return fmt.Errorf("inbound_receipt_id does not belong to this Turn")
 		}
 	}
-	if err := s.store.SetTurnChannelReplyDecision(ctx, claims.TurnID, claims.TaskID, claims.AgentID, decision); err != nil {
+	threadID, topicScoped := channelContext["thread_id"].(string)
+	if endpointKind == domain.ChannelEndpointGroupDigitalHuman && topicScoped {
+		conversationID, _ := channelContext["conversation_id"].(string)
+		err = s.store.SetChannelTopicReplyDecision(ctx, claims.TurnID, conversationID, threadID, decision, reason)
+	} else {
+		err = s.store.SetTurnChannelReplyDecision(ctx, claims.TurnID, claims.TaskID, claims.AgentID, decision)
+	}
+	if err != nil {
 		return err
 	}
 	terminalState := "decided_continue"

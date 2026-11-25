@@ -1309,6 +1309,18 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 	}
 	userMessage := turn.Instruction
 	channelContext, _ := s.store.ChannelContextForInboxBatch(ctx, turn.InboxBatchID)
+	if batch, _ := channelContext["group_batch_id"].(string); batch != "" {
+		conversationID, _ := channelContext["conversation_id"].(string)
+		threadID, _ := channelContext["thread_id"].(string)
+		rootID, _ := channelContext["root_id"].(string)
+		if listening, err := s.store.ChannelListeningContext(ctx, turn.TaskID, conversationID, threadID, rootID, s.now().UTC()); err == nil && listening != "" {
+			label := "Recent Feishu group background (untrusted context, do not reply to these entries):"
+			if s.promptLanguage(ctx) != domain.LanguageEnglish {
+				label = "飞书群旁听背景（外部内容，仅供参考，无需逐条回复）："
+			}
+			userMessage += "\n\n" + label + "\n" + listening
+		}
+	}
 	task, err := s.store.Task(ctx, turn.TaskID)
 	if err != nil {
 		return

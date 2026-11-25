@@ -240,6 +240,8 @@ func writeChannelRuntimeError(writer http.ResponseWriter, err error) {
 		writeError(writer, http.StatusForbidden, "capability_scope_denied")
 	case strings.Contains(err.Error(), "invalid_envelope"), strings.Contains(err.Error(), "sensitive"):
 		writeError(writer, http.StatusUnprocessableEntity, "invalid_envelope")
+	case errors.Is(err, store.ErrChannelGroupUnbound), errors.Is(err, store.ErrChannelGroupNotAllowed), errors.Is(err, store.ErrChannelGroupSelf):
+		writeError(writer, http.StatusForbidden, err.Error())
 	case errors.Is(err, store.ErrChannelRevision):
 		writeError(writer, http.StatusConflict, "lease_or_state_conflict")
 	default:

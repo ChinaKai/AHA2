@@ -2,6 +2,7 @@ package channel
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -86,8 +87,8 @@ func TestChannelMediaInboundAuthorizationAndAttachmentBinding(t *testing.T) {
 	}
 	unmentioned := envelope
 	unmentioned.ExternalEventID, unmentioned.ChatType, unmentioned.ExternalSenderID = "unmentioned-media", "group", "participant"
-	if _, _, err := service.ReceiveInbound(ctx, claims, unmentioned); err != nil {
-		t.Fatal(err)
+	if _, _, err := service.ReceiveInbound(ctx, claims, unmentioned); !errors.Is(err, store.ErrChannelGroupUnbound) {
+		t.Fatalf("unbound group media returned %v", err)
 	}
 	if err := service.processInboundBatch(ctx); err != nil {
 		t.Fatal(err)

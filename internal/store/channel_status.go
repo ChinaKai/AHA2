@@ -84,15 +84,22 @@ func (s *Store) ReconcileChannelMessageStatuses(
 		if err != nil {
 			return nil, err
 		}
+		inboundDecision, inboundReason := replyDecision, reasonText
+		if threadID, topicScoped := channelContext["thread_id"].(string); topicScoped {
+			inboundDecision, inboundReason, err = channelTopicDecisionTx(ctx, tx, turnID, stringValue(channelContext["conversation_id"]), threadID)
+			if err != nil {
+				return nil, err
+			}
+		}
 		messageStatus, statusReason := channelStatusOutcome(
-			terminalState, reason, replyDecision, replyFound,
+			terminalState, reason, inboundDecision, replyFound,
 		)
 		if messageStatus == "" {
 			continue
 		}
 		statusReasonText := ""
 		if messageStatus == "not_replied" && statusReason == "reply_decision_end" {
-			statusReasonText = strings.TrimSpace(reasonText)
+			statusReasonText = strings.TrimSpace(inboundReason)
 			if statusReasonText == "" {
 				statusReasonText, err = channelStatusReasonTextTx(ctx, tx, taskID, inbound.receiptID)
 				if err != nil {
@@ -146,7 +153,7 @@ func (s *Store) ReconcileChannelMessageStatuses(
 				"message_status":     messageStatus,
 				"status_reason":      statusReason,
 				"status_reason_text": statusReasonText,
-				"reply_decision":     replyDecision,
+				"reply_decision":     inboundDecision,
 				"is_bot_dialogue":    boolValue(actor["is_bot"]),
 				"message":            message,
 				"inbound_message":    inboundMessage,

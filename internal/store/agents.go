@@ -1045,6 +1045,13 @@ func (s *Store) ClaimInboxAndCreateTurn(
 	if active > 0 {
 		return domain.Turn{}, nil, ErrActiveTurn
 	}
+	items, topic, err := prepareChannelTopicTurn(ctx, tx, items, turn)
+	if err != nil {
+		return domain.Turn{}, nil, err
+	}
+	if len(items) == 0 {
+		return domain.Turn{}, nil, tx.Commit()
+	}
 	claimedAt := timeString(turn.QueuedAt)
 	claimed := make([]domain.AgentInboxItem, 0, len(items))
 	for _, item := range items {
@@ -1087,6 +1094,13 @@ func (s *Store) ClaimInboxAndCreateTurn(
 	}
 	if err := insertTurnTx(ctx, tx, turn); err != nil {
 		return domain.Turn{}, nil, err
+	}
+	if topic.conversationID != "" {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO channel_topic_turns(turn_id,conversation_id,thread_id,queued_ms,bot_only)
+			VALUES(?,?,?,?,?)`, turn.ID, topic.conversationID, topic.threadID, turn.QueuedAt.UnixMilli(), topic.botOnly); err != nil {
+			return domain.Turn{}, nil, err
+		}
 	}
 	for _, item := range claimed {
 		if item.MessageID != "" {

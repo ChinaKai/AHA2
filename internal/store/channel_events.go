@@ -102,7 +102,7 @@ func (s *Store) AppendChannelSourceAndProject(ctx context.Context, source domain
 		routeCardID := ""
 		if source.EventType == "agent_reply" {
 			if target.endpointKind == domain.ChannelEndpointGroupDigitalHuman {
-				state, stateErr := channelGroupReplyStateTx(ctx, tx, source.TaskID, source.RoundID, source.TurnID, target.conversationID)
+				state, stateErr := channelGroupReplyStateTx(ctx, tx, source.TaskID, source.RoundID, source.TurnID, target.conversationID, "")
 				if stateErr != nil {
 					return stateErr
 				}
@@ -280,13 +280,15 @@ func (s *Store) ChannelBotDialogueTurnCount(ctx context.Context, taskID, convers
 }
 
 type channelBotReplyState struct {
-	matches   bool
-	isBot     bool
-	decision  string
-	turnCount int
+	matches     bool
+	isBot       bool
+	decision    string
+	turnCount   int
+	topicScoped bool
+	threadID    string
 }
 
-func channelGroupReplyStateTx(ctx context.Context, tx *sql.Tx, taskID, roundID, turnID, conversationID string) (channelBotReplyState, error) {
+func channelGroupReplyStateTx(ctx context.Context, tx *sql.Tx, taskID, roundID, turnID, conversationID, receiptID string) (channelBotReplyState, error) {
 	state := channelBotReplyState{}
 	var payloadJSON string
 	if err := tx.QueryRowContext(ctx, `
@@ -297,9 +299,11 @@ func channelGroupReplyStateTx(ctx context.Context, tx *sql.Tx, taskID, roundID, 
 		  AND json_extract(item.payload_json,'$.channel_context.endpoint')=?
 		  AND json_extract(item.payload_json,'$.channel_context.conversation_id')=?
 		  AND receipt.conversation_id=? AND receipt.state='processed'
-		  AND COALESCE(json_extract(receipt.normalized_payload_json,'$.mentioned_bot'),0)=1
+		  AND (COALESCE(json_extract(receipt.normalized_payload_json,'$.mentioned_bot'),0)=1
+		       OR COALESCE(json_extract(receipt.normalized_payload_json,'$.thread_id'),'')<>'')
+		  AND (?='' OR receipt.id=?)
 		ORDER BY item.sequence DESC LIMIT 1`,
-		taskID, roundID, domain.ChannelEndpointGroupDigitalHuman, conversationID, conversationID,
+		taskID, roundID, domain.ChannelEndpointGroupDigitalHuman, conversationID, conversationID, receiptID, receiptID,
 	).Scan(&payloadJSON); err != nil {
 		if err == sql.ErrNoRows {
 			return state, nil
@@ -311,6 +315,15 @@ func channelGroupReplyStateTx(ctx context.Context, tx *sql.Tx, taskID, roundID, 
 	channelContext, _ := payload["channel_context"].(map[string]any)
 	actor, _ := channelContext["actor"].(map[string]any)
 	state.isBot, _ = actor["is_bot"].(bool)
+	state.threadID, state.topicScoped = channelContext["thread_id"].(string)
+	if state.topicScoped {
+		var err error
+		state.decision, _, err = channelTopicDecisionTx(ctx, tx, turnID, conversationID, state.threadID)
+		if err == nil && state.isBot {
+			state.turnCount, err = channelTopicBotTurns(ctx, tx, conversationID, state.threadID)
+		}
+		return state, err
+	}
 	if turnID != "" {
 		_ = tx.QueryRowContext(ctx, `SELECT channel_reply_decision FROM turns WHERE id=? AND task_id=?`, turnID, taskID).Scan(&state.decision)
 	}
@@ -400,7 +413,8 @@ func channelGroupReplyMatchesRoundTx(ctx context.Context, tx *sql.Tx, taskID, ro
 			  AND json_extract(item.payload_json,'$.channel_context.conversation_id')=?
 			  AND json_extract(item.payload_json,'$.channel_context.inbound_receipt_id')=receipt.id
 			  AND receipt.conversation_id=? AND receipt.state='processed'
-			  AND COALESCE(json_extract(receipt.normalized_payload_json,'$.mentioned_bot'),0)=1
+			  AND (COALESCE(json_extract(receipt.normalized_payload_json,'$.mentioned_bot'),0)=1
+		       OR COALESCE(json_extract(receipt.normalized_payload_json,'$.thread_id'),'')<>'')
 		)`,
 		taskID, roundID, domain.ChannelEndpointGroupDigitalHuman, conversationID, conversationID,
 	).Scan(&matches)

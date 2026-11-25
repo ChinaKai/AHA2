@@ -212,16 +212,16 @@ func TestPetChannelTurnUsesEveryChannelToolThroughARealTaskRoute(t *testing.T) {
 	}
 	t.Logf("evidence reply delivery id=%s state=%s attempts=%d provider_message_id=%q (one row after two calls)", replies[0].ID, replies[0].State, replies[0].Attempts, replies[0].ProviderMessageID)
 
-	// channel_reply_decision: records the end decision on this Turn.
+	// channel_reply_decision records the end decision for the group topic.
 	decision := coreMCPCallTool(t, url, token, "channel_reply_decision", map[string]any{"reason": "已在群里回复"})
 	if decision.IsError {
 		t.Fatalf("decision=%#v", decision)
 	}
-	stored, err := database.Turn(ctx, turn.ID)
-	if err != nil || stored.ChannelReplyDecision != "end" {
-		t.Fatalf("turn decision=%q err=%v", stored.ChannelReplyDecision, err)
+	stored, err := database.ChannelTopicReplyDecision(ctx, turn.ID, conversation.ID, "")
+	if err != nil || stored != "end" {
+		t.Fatalf("topic decision=%q err=%v", stored, err)
 	}
-	t.Logf("evidence channel_reply_decision status=%d isError=%v text=%s turn.channel_reply_decision=%s", decision.Status, decision.IsError, decision.Text, stored.ChannelReplyDecision)
+	t.Logf("evidence channel_reply_decision status=%d isError=%v text=%s topic.decision=%s", decision.Status, decision.IsError, decision.Text, stored)
 
 	// Boundary: another Task's Turn cannot borrow task_pet's receipt.
 	otherTurn := createCoreTurn(t, database, base, "main", "batch-pet-route-other")

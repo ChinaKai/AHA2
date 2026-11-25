@@ -598,6 +598,17 @@ func (s *Store) ChannelDeliveryAttempts(ctx context.Context, deliveryID string) 
 	return result, rows.Err()
 }
 
+func setChannelReplyTarget(target map[string]string, normalizedPayloadJSON string) {
+	payload := decodeJSON(normalizedPayloadJSON, map[string]any{})
+	messageID, threadID := stringValue(payload["external_message_id"]), stringValue(payload["thread_id"])
+	if messageID == "" && threadID == "" {
+		return
+	}
+	target["reply_message_id"] = messageID
+	target["thread_id"] = threadID
+	target["root_id"] = stringValue(payload["root_id"])
+}
+
 func (s *Store) ChannelDeliveryTarget(ctx context.Context, conversationID string, sourceEventSequence int64) (map[string]string, error) {
 	var chatID, senderID, instanceID string
 	if err := s.db.QueryRowContext(ctx, `SELECT external_chat_id,external_sender_id,instance_id FROM channel_conversations WHERE id=? AND status='active'`, conversationID).Scan(&chatID, &senderID, &instanceID); err != nil {
@@ -627,10 +638,7 @@ func (s *Store) ChannelDeliveryTarget(ctx context.Context, conversationID string
 		).Scan(&normalizedPayloadJSON); err != nil {
 			return nil, err
 		}
-		normalizedPayload := decodeJSON(normalizedPayloadJSON, map[string]any{})
-		if messageID := strings.TrimSpace(fmt.Sprint(normalizedPayload["external_message_id"])); messageID != "" && messageID != "<nil>" {
-			target["reply_message_id"] = messageID
-		}
+		setChannelReplyTarget(target, normalizedPayloadJSON)
 	} else if taskID != "" && roundID != "" {
 		rows, err := s.db.QueryContext(ctx, `SELECT payload_json FROM conversation_items WHERE task_id=? AND round_id=? AND kind='user_message' ORDER BY sequence`, taskID, roundID)
 		if err == nil {
@@ -654,10 +662,7 @@ func (s *Store) ChannelDeliveryTarget(ctx context.Context, conversationID string
 				if receiptID != "" && receiptID != "<nil>" {
 					var normalizedPayloadJSON string
 					if err := s.db.QueryRowContext(ctx, `SELECT normalized_payload_json FROM channel_inbox_dedup WHERE id=? AND conversation_id=?`, receiptID, conversationID).Scan(&normalizedPayloadJSON); err == nil {
-						normalizedPayload := decodeJSON(normalizedPayloadJSON, map[string]any{})
-						if messageID := strings.TrimSpace(fmt.Sprint(normalizedPayload["external_message_id"])); messageID != "" && messageID != "<nil>" {
-							target["reply_message_id"] = messageID
-						}
+						setChannelReplyTarget(target, normalizedPayloadJSON)
 					}
 				}
 				actor, _ := channelContext["actor"].(map[string]any)
@@ -734,11 +739,9 @@ func (s *Store) ChannelDeliveryTarget(ctx context.Context, conversationID string
 	}
 	if target["reply_message_id"] == "" && roundID == "" && strings.TrimSpace(fmt.Sprint(sourcePayload["kind"])) != "agent_outreach" {
 		var payloadJSON string
-		if err := s.db.QueryRowContext(ctx, `SELECT normalized_payload_json FROM channel_inbox_dedup WHERE conversation_id=? AND state='processed' ORDER BY received_at DESC LIMIT 1`, conversationID).Scan(&payloadJSON); err == nil {
-			payload := decodeJSON(payloadJSON, map[string]any{})
-			if messageID := strings.TrimSpace(fmt.Sprint(payload["external_message_id"])); messageID != "" && messageID != "<nil>" {
-				target["reply_message_id"] = messageID
-			}
+		if err := s.db.QueryRowContext(ctx, `SELECT normalized_payload_json FROM channel_inbox_dedup WHERE conversation_id=? AND state='processed' AND outcome<>'listening_only'
+			ORDER BY received_at DESC,rowid DESC LIMIT 1`, conversationID).Scan(&payloadJSON); err == nil {
+			setChannelReplyTarget(target, payloadJSON)
 		}
 	}
 	return target, nil
@@ -1007,18 +1010,22 @@ func (s *Store) EnqueueAgentChannelReplyWithMentions(
 		return domain.ChannelDelivery{}, "", false, ErrChannelReplyEnded
 	}
 	if endpointKind == domain.ChannelEndpointGroupDigitalHuman && !permissionApproved {
-		state, stateErr := channelGroupReplyStateTx(ctx, tx, taskID, roundID, turnID, conversationID)
+		state, stateErr := channelGroupReplyStateTx(ctx, tx, taskID, roundID, turnID, conversationID, inboundReceiptID)
 		if stateErr != nil {
 			return domain.ChannelDelivery{}, "", false, stateErr
 		}
 		if !state.matches {
 			return domain.ChannelDelivery{}, "", false, errors.New("group receipt is not eligible for a Task reply")
 		}
-		if state.isBot && state.decision == "end" {
+		if state.decision == "end" && (state.isBot || state.topicScoped) {
 			return domain.ChannelDelivery{}, "", false, ErrChannelBotDialogueEnded
 		}
 		if state.isBot && state.decision == "" {
-			if _, err := tx.ExecContext(ctx, `
+			if state.topicScoped {
+				if err := setChannelTopicReplyDecision(ctx, tx, turnID, conversationID, state.threadID, "continue", ""); err != nil {
+					return domain.ChannelDelivery{}, "", false, err
+				}
+			} else if _, err := tx.ExecContext(ctx, `
 				UPDATE turns SET channel_reply_decision='continue'
 				WHERE id=? AND task_id=? AND COALESCE(channel_reply_decision,'')=''`,
 				turnID, taskID,

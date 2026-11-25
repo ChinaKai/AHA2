@@ -1200,25 +1200,25 @@ func sendRenderedDelivery(ctx context.Context, client *lark.Client, item deliver
 		return updateID, response.RequestId(), nil
 	}
 	uuid := deterministicUUID(item.IdempotencyKey)
-	if replyID := item.Target["reply_message_id"]; replyID != "" {
-		request := larkim.NewReplyMessageReqBuilder().MessageId(replyID).Body(larkim.NewReplyMessageReqBodyBuilder().MsgType(msgType).Content(content).Uuid(uuid).Build()).Build()
-		response, err := client.Im.V1.Message.Reply(ctx, request)
-		if err != nil {
-			return "", "", err
+	threadID, replyID := item.Target["thread_id"], item.Target["reply_message_id"]
+	if threadID != "" && replyID == "" {
+		replyID = item.Target["root_id"]
+		if replyID == "" {
+			return "", "", deliverySendFailure{code: "feishu_topic_target_missing"}
 		}
-		if response.Success() && response.Data != nil && response.Data.MessageId != nil {
-			return *response.Data.MessageId, response.RequestId(), nil
+	}
+	if replyID != "" {
+		messageID, requestID, err := replyRenderedDelivery(ctx, client, item, replyID, threadID != "", msgType, content, uuid)
+		var failure deliverySendFailure
+		if err == nil || !errors.As(err, &failure) || !failure.replyTargetInvalid {
+			return messageID, requestID, err
 		}
-		failure := providerDeliveryFailure("reply", response.StatusCode, response.Code)
-		if response.Success() {
-			failure = invalidDeliveryResponse("reply")
-		}
-		// A withdrawn/deleted parent permanently rejects Reply, and retrying
-		// the same reply can never succeed. Deliver the content as a fresh
-		// message in the same chat instead; ordering and idempotency still come
-		// from the outbox delivery and its deterministic UUID.
-		if !failure.replyTargetInvalid {
-			return "", response.RequestId(), deliveryResponseError(item, "reply", response.StatusCode, response.Code)
+		if threadID != "" {
+			rootID := item.Target["root_id"]
+			if rootID == "" || rootID == replyID {
+				return "", requestID, err
+			}
+			return replyRenderedDelivery(ctx, client, item, rootID, true, msgType, content, uuid)
 		}
 	}
 	request := larkim.NewCreateMessageReqBuilder().ReceiveIdType(receiveIDType).Body(larkim.NewCreateMessageReqBodyBuilder().ReceiveId(receiveID).MsgType(msgType).Content(content).Uuid(uuid).Build()).Build()
@@ -1233,6 +1233,25 @@ func sendRenderedDelivery(ctx context.Context, client *lark.Client, item deliver
 		return "", response.RequestId(), deliveryResponseError(item, "create", response.StatusCode, response.Code)
 	}
 	return *response.Data.MessageId, response.RequestId(), nil
+}
+
+func replyRenderedDelivery(ctx context.Context, client *lark.Client, item delivery, replyID string, inThread bool, msgType, content, uuid string) (string, string, error) {
+	body := larkim.NewReplyMessageReqBodyBuilder().MsgType(msgType).Content(content).Uuid(uuid)
+	if inThread {
+		body.ReplyInThread(true)
+	}
+	request := larkim.NewReplyMessageReqBuilder().MessageId(replyID).Body(body.Build()).Build()
+	response, err := client.Im.V1.Message.Reply(ctx, request)
+	if err != nil {
+		return "", "", err
+	}
+	if response.Success() {
+		if response.Data == nil || response.Data.MessageId == nil {
+			return "", response.RequestId(), invalidDeliveryResponse("reply")
+		}
+		return *response.Data.MessageId, response.RequestId(), nil
+	}
+	return "", response.RequestId(), deliveryResponseError(item, "reply", response.StatusCode, response.Code)
 }
 
 func renderOutreachImagePost(payload map[string]any, target map[string]string, imageKeys []string) (string, error) {

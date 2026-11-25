@@ -867,6 +867,10 @@ func (s *Service) scheduleAgent(ctx context.Context, taskID, agentID string) (do
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return domain.Turn{}, false, err
 	}
+	items, err = s.selectInboxBatch(ctx, items)
+	if err != nil || len(items) == 0 {
+		return domain.Turn{}, false, err
+	}
 	agent, err := s.store.TaskAgent(ctx, taskID, agentID)
 	if err != nil {
 		return domain.Turn{}, false, err
@@ -931,6 +935,39 @@ func (s *Service) scheduleAgent(ctx context.Context, taskID, agentID string) (do
 	})
 	s.startTurn(turn)
 	return turn, true, nil
+}
+
+// Select one ready channel batch. A pending batch waiting for an attachment
+// must not delay an unrelated topic or a Web Owner message.
+func (s *Service) selectInboxBatch(ctx context.Context, items []domain.AgentInboxItem) ([]domain.AgentInboxItem, error) {
+	var selected []domain.AgentInboxItem
+	notReady := map[string]bool{}
+	chosen := ""
+	for _, item := range items {
+		channelContext, _ := item.Payload["channel_context"].(map[string]any)
+		batchID, _ := channelContext["group_batch_id"].(string)
+		if batchID != "" && len(selected) == 0 && !notReady[batchID] {
+			ready, err := s.store.ChannelGroupBatchReady(ctx, batchID)
+			if err != nil {
+				return nil, err
+			}
+			notReady[batchID] = !ready
+		}
+		if notReady[batchID] || (len(selected) > 0 && batchID != chosen) {
+			continue
+		}
+		chosen = batchID
+		selected = append(selected, item)
+	}
+	return selected, nil
+}
+
+func (s *Service) ScheduleChannelGroupInbox(ctx context.Context, taskID string) error {
+	_, _, err := s.scheduleAgent(ctx, taskID, "main")
+	if errors.Is(err, store.ErrTaskNotRunnable) {
+		return nil
+	}
+	return err
 }
 
 // reconcilePendingCollaborationAssignments closes or quarantines pending

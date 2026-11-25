@@ -106,7 +106,14 @@ func scanChannelInbox(scanner interface{ Scan(...any) error }) (domain.ChannelIn
 }
 
 func (s *Store) ReceiveChannelInbox(ctx context.Context, item domain.ChannelInboxReceipt) (domain.ChannelInboxReceipt, bool, error) {
-	result, err := s.db.ExecContext(ctx, `INSERT INTO channel_inbox_dedup(id,instance_id,external_event_id,event_type,payload_digest,normalized_payload_json,state,lease_id,lease_until,conversation_id,aha_message_id,outcome,occurred_at,received_at,processed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(instance_id,external_event_id) DO NOTHING`,
+	return receiveChannelInbox(ctx, s.db, item)
+}
+
+func receiveChannelInbox(ctx context.Context, db interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, item domain.ChannelInboxReceipt) (domain.ChannelInboxReceipt, bool, error) {
+	result, err := db.ExecContext(ctx, `INSERT INTO channel_inbox_dedup(id,instance_id,external_event_id,event_type,payload_digest,normalized_payload_json,state,lease_id,lease_until,conversation_id,aha_message_id,outcome,occurred_at,received_at,processed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(instance_id,external_event_id) DO NOTHING`,
 		item.ID, item.InstanceID, item.ExternalEventID, item.EventType, item.PayloadDigest, encodeJSON(item.NormalizedPayload), item.State,
 		item.LeaseID, timeString(item.LeaseUntil), nullableString(item.ConversationID), item.AHAMessageID, item.Outcome,
 		timeString(item.OccurredAt), timeString(item.ReceivedAt), timeString(item.ProcessedAt))
@@ -114,7 +121,7 @@ func (s *Store) ReceiveChannelInbox(ctx context.Context, item domain.ChannelInbo
 		return domain.ChannelInboxReceipt{}, false, err
 	}
 	inserted, _ := result.RowsAffected()
-	existing, err := scanChannelInbox(s.db.QueryRowContext(ctx, `SELECT `+channelInboxColumns+` FROM channel_inbox_dedup WHERE instance_id=? AND external_event_id=?`, item.InstanceID, item.ExternalEventID))
+	existing, err := scanChannelInbox(db.QueryRowContext(ctx, `SELECT `+channelInboxColumns+` FROM channel_inbox_dedup WHERE instance_id=? AND external_event_id=?`, item.InstanceID, item.ExternalEventID))
 	if err != nil {
 		return domain.ChannelInboxReceipt{}, false, err
 	}
@@ -136,7 +143,10 @@ func (s *Store) ClaimChannelInbox(ctx context.Context, limit int, now time.Time,
 	if _, err := tx.ExecContext(ctx, `UPDATE channel_inbox_dedup SET state='received',lease_id='',lease_until='' WHERE state='processing' AND lease_until<>'' AND lease_until<=?`, timeString(now)); err != nil {
 		return nil, err
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT id FROM channel_inbox_dedup WHERE state='received' ORDER BY received_at,id LIMIT ?`, limit)
+	rows, err := tx.QueryContext(ctx, `SELECT r.id FROM channel_inbox_dedup r
+		LEFT JOIN channel_group_receipts g ON g.receipt_id=r.id
+		WHERE r.state='received' AND (g.receipt_id IS NULL OR g.ready_ms<=?)
+		ORDER BY r.received_at,r.rowid LIMIT ?`, now.UnixMilli(), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -360,7 +370,7 @@ func (s *Store) CreateChannelConversation(ctx context.Context, item domain.Chann
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `INSERT INTO channel_conversations(id,instance_id,endpoint_id,scope_key_version,scope_key,external_chat_id,external_sender_id,display_name,owner_identity_link_id,host_task_id,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		item.ID, item.InstanceID, item.EndpointID, item.ScopeKeyVersion, item.ScopeKey, item.ExternalChatID, item.ExternalSenderID, item.DisplayName, nullableString(item.OwnerIdentityLinkID), item.HostTaskID, item.Status, timeString(item.CreatedAt), timeString(item.UpdatedAt)); err != nil {
+		item.ID, item.InstanceID, item.EndpointID, item.ScopeKeyVersion, item.ScopeKey, item.ExternalChatID, item.ExternalSenderID, item.DisplayName, nullableString(item.OwnerIdentityLinkID), nullableString(item.HostTaskID), item.Status, timeString(item.CreatedAt), timeString(item.UpdatedAt)); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO channel_sessions(id,conversation_id,generation,mode,status,inbound_cursor,outbound_cursor,started_at,closed_at) VALUES(?,?,?,?,?,?,?,?,?)`,
@@ -466,6 +476,11 @@ func (s *Store) enqueueChannelMessage(
 		if receiptState != "processing" {
 			return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, ErrChannelRevision
 		}
+		if stringValue(provenance["group_batch_id"]) != "" {
+			if err := checkGroupInboxRoute(ctx, tx, receiptID, message.TaskID); err != nil {
+				return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, err
+			}
+		}
 	} else {
 		var receiptState, receiptConversationID string
 		if err := tx.QueryRowContext(ctx, `SELECT state,COALESCE(conversation_id,'') FROM channel_inbox_dedup WHERE id=?`, receiptID).Scan(&receiptState, &receiptConversationID); err != nil {
@@ -518,6 +533,9 @@ func (s *Store) enqueueChannelMessage(
 		ID: domain.NewID("inbox"), TaskID: message.TaskID, RoundID: round.ID, TargetAgentID: targetAgentID,
 		SourceAgentID: "owner", SourceKind: "owner_message", MessageID: message.ID, Content: message.Content,
 		Payload: payload, Status: "pending", CreatedAt: message.CreatedAt,
+	}
+	if stringValue(provenance["group_batch_id"]) != "" {
+		inbox.SourceKind = "channel_group_message"
 	}
 	result, err := tx.ExecContext(ctx, `INSERT INTO agent_inbox(id,task_id,round_id,target_agent_id,source_agent_id,source_kind,source_turn_id,message_id,content,payload_json,status,batch_id,created_at,claimed_at,processed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		inbox.ID, inbox.TaskID, inbox.RoundID, inbox.TargetAgentID, inbox.SourceAgentID, inbox.SourceKind, "", inbox.MessageID,
@@ -612,7 +630,7 @@ func (s *Store) ChannelContextForInboxBatch(ctx context.Context, batchID string)
 		return nil, sql.ErrNoRows
 	}
 	if latest != nil {
-		for _, key := range []string{"actor", "mentions", "inbound_receipt_id", "chat_display_name", "reply_context"} {
+		for _, key := range []string{"actor", "mentions", "inbound_receipt_id", "chat_display_name", "reply_context", "thread_id", "root_id", "group_batch_id"} {
 			if child, exists := latest[key]; exists {
 				result[key] = child
 			}

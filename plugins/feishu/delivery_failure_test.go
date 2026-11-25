@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -233,5 +234,44 @@ func TestDeliveryNackRecordsStableCodeAndProviderRequestID(t *testing.T) {
 	if nack["error_code"] != "feishu_target_unavailable" || nack["provider_request_id"] != "req-provider" ||
 		nack["outcome_certainty"] != deliveryCertaintyFailure || nack["permanent"] != true {
 		t.Fatalf("nack=%#v", nack)
+	}
+}
+
+func TestWithdrawnTopicReplyUsesRootAndNeverCreatesGroupMessage(t *testing.T) {
+	t.Parallel()
+	for _, rootAvailable := range []bool{true, false} {
+		label := fmt.Sprintf("topic-root-%t", rootAvailable)
+		t.Run(label, func(t *testing.T) {
+			var replies []string
+			client := lark.NewClient(label, "test-secret", lark.WithHttpClient(mockHTTPClient{do: func(request *http.Request) (*http.Response, error) {
+				if strings.Contains(request.URL.Path, "/auth/") {
+					return mediaTestResponse(200, `{"code":0,"tenant_access_token":"token","expire":3600}`), nil
+				}
+				if !strings.HasSuffix(request.URL.Path, "/reply") {
+					t.Fatalf("unexpected non-reply request %s", request.URL.Path)
+				}
+				replies = append(replies, request.URL.Path)
+				var body struct {
+					InThread bool `json:"reply_in_thread"`
+				}
+				if err := json.NewDecoder(request.Body).Decode(&body); err != nil || !body.InThread {
+					t.Fatalf("reply not marked for the topic: %#v err=%v", body, err)
+				}
+				if strings.Contains(request.URL.Path, "/om_root/") && rootAvailable {
+					return deliveryResponse(200, "req-root", `{"code":0,"data":{"message_id":"om_replied"}}`), nil
+				}
+				return deliveryResponse(400, "req-withdrawn", `{"code":230011,"msg":"message withdrawn"}`), nil
+			}}))
+			messageID, _, err := sendRenderedDelivery(context.Background(), client, delivery{
+				IdempotencyKey: "topic-reply",
+				Target:         map[string]string{"chat_id": "oc_chat", "reply_message_id": "om_leaf", "thread_id": "omt_topic", "root_id": "om_root"},
+			}, "text", `{"text":"hello"}`)
+			if len(replies) != 2 || !strings.Contains(replies[0], "/om_leaf/") || !strings.Contains(replies[1], "/om_root/") {
+				t.Fatalf("reply requests %v", replies)
+			}
+			if (rootAvailable && (err != nil || messageID != "om_replied")) || (!rootAvailable && err == nil) {
+				t.Fatalf("message=%q err=%v", messageID, err)
+			}
+		})
 	}
 }

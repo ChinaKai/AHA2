@@ -135,6 +135,7 @@ func (s *Service) Start(ctx context.Context) {
 	go func() {
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
+		var lastListeningPrune time.Time
 		for {
 			select {
 			case <-ctx.Done():
@@ -147,6 +148,9 @@ func (s *Service) Start(ctx context.Context) {
 			}
 			if err := s.processInboundBatch(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				s.logger.Warn("channel inbound processing failed", "error", err)
+			}
+			if err := s.maintainGroupScheduling(ctx, &lastListeningPrune); err != nil && !errors.Is(err, context.Canceled) {
+				s.logger.Warn("channel group maintenance failed", "error", err)
 			}
 			s.reconcileProcesses(ctx)
 		}
@@ -630,7 +634,7 @@ func (s *Service) ResetRuntimeMenus(ctx context.Context, ownerID, id, idempotenc
 }
 
 func (s *Service) validateChannelInstanceConfig(ctx context.Context, instance domain.ChannelInstance, config map[string]any) error {
-	if raw, present := config[feishuGroupAllowlistKey]; present {
+	if raw, present := config[domain.FeishuGroupAllowlistKey]; present {
 		switch chats := raw.(type) {
 		case []any:
 			for _, chat := range chats {
@@ -648,7 +652,7 @@ func (s *Service) validateChannelInstanceConfig(ctx context.Context, instance do
 		default:
 			return fmt.Errorf("Feishu group allowlist must be a list of chat IDs")
 		}
-		config[feishuGroupAllowlistKey], _ = stringListField(config, feishuGroupAllowlistKey)
+		config[domain.FeishuGroupAllowlistKey], _ = stringListField(config, domain.FeishuGroupAllowlistKey)
 	}
 	if _, present := config["channel_permission_ids"]; present {
 		values, valid := stringListField(config, "channel_permission_ids")
@@ -1639,6 +1643,35 @@ func (s *Service) ReceiveInbound(ctx context.Context, claims RuntimeClaims, enve
 	if envelope.EventType == "menu_action" && (envelope.ChatType != "p2p" || !validChannelMenuKey(stringField(envelope.MenuAction, "key"))) {
 		return domain.ChannelInboxReceipt{}, false, fmt.Errorf("invalid_envelope")
 	}
+	feishuGroup := false
+	var route domain.ChannelTaskRoute
+	if envelope.ChatType == "group" && envelope.EventType == "message" {
+		instance, err := s.store.ChannelInstance(ctx, claims.InstanceID)
+		if err != nil {
+			return domain.ChannelInboxReceipt{}, false, err
+		}
+		feishuGroup = instance.ProviderKey == "feishu"
+		if feishuGroup {
+			if err := normalizeGroupMetadata(&envelope); err != nil {
+				return domain.ChannelInboxReceipt{}, false, err
+			}
+			if envelope.ExternalSenderID == stringField(instance.Config, "runtime_bot_open_id") {
+				return domain.ChannelInboxReceipt{}, false, store.ErrChannelGroupSelf
+			}
+			_, route, err = s.feishuGroupRoute(ctx, instance, envelope, instance.Status == "ready" || instance.Status == "degraded")
+			if err != nil {
+				return domain.ChannelInboxReceipt{}, false, err
+			}
+			if !domain.FeishuGroupMessageAllowed(instance.Config, envelope.ExternalChatID, envelope.MentionedBot) {
+				return domain.ChannelInboxReceipt{}, false, store.ErrChannelGroupNotAllowed
+			}
+			fallback := "群成员"
+			if envelope.SenderIsBot {
+				fallback = "群机器人"
+			}
+			envelope.SenderDisplayName = safeChannelDisplayName(envelope.SenderDisplayName, fallback, instance.ID, envelope.ExternalSenderID)
+		}
+	}
 	raw, err := json.Marshal(envelope)
 	if err != nil {
 		return domain.ChannelInboxReceipt{}, false, err
@@ -1653,12 +1686,18 @@ func (s *Service) ReceiveInbound(ctx context.Context, claims RuntimeClaims, enve
 		envelope.OccurredAt = now
 		normalized["occurred_at"] = envelope.OccurredAt
 	}
-	receipt, duplicate, err := s.store.ReceiveChannelInbox(ctx, domain.ChannelInboxReceipt{
+	receipt := domain.ChannelInboxReceipt{
 		ID: domain.NewID("channel_inbox"), InstanceID: claims.InstanceID, ExternalEventID: envelope.ExternalEventID,
 		EventType: envelope.EventType, PayloadDigest: hex.EncodeToString(digest[:]), NormalizedPayload: normalized,
 		State: "received", OccurredAt: envelope.OccurredAt, ReceivedAt: now,
-	})
-	if err == nil && !duplicate {
+	}
+	var duplicate bool
+	if feishuGroup {
+		receipt, duplicate, err = s.store.ReceiveChannelGroupMessage(ctx, receipt, route, envelope)
+	} else {
+		receipt, duplicate, err = s.store.ReceiveChannelInbox(ctx, receipt)
+	}
+	if err == nil && !duplicate && receipt.State == "received" {
 		select {
 		case s.wakeInbound <- struct{}{}:
 		default:
@@ -1685,6 +1724,9 @@ func (s *Service) processInboundBatch(ctx context.Context) error {
 }
 
 func safeOutcome(err error) string {
+	if errors.Is(err, store.ErrChannelGroupUnbound) || errors.Is(err, store.ErrChannelGroupNotAllowed) {
+		return err.Error()
+	}
 	value := err.Error()
 	if strings.Contains(value, "owner") {
 		return "owner_required"
@@ -1717,6 +1759,38 @@ func (s *Service) processInbound(ctx context.Context, receipt domain.ChannelInbo
 	if envelope.EventType == "menu_action" {
 		return s.processMenuAction(ctx, receipt, instance, envelope)
 	}
+	feishuGroup := instance.ProviderKey == "feishu" && envelope.ChatType == "group"
+	var groupConversation domain.ChannelConversation
+	var groupRoute domain.ChannelTaskRoute
+	var groupReceipt store.ChannelGroupReceipt
+	if feishuGroup {
+		if !domain.FeishuGroupMessageAllowed(instance.Config, envelope.ExternalChatID, envelope.MentionedBot) {
+			return store.ErrChannelGroupNotAllowed
+		}
+		if !envelope.MentionedBot && envelope.ThreadID == "" {
+			return fmt.Errorf("group mention is required")
+		}
+		groupConversation, groupRoute, err = s.feishuGroupRoute(ctx, instance, envelope, false)
+		if err != nil {
+			return err
+		}
+		groupReceipt, err = s.store.ChannelGroupReceipt(ctx, receipt.ID)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if groupReceipt.BatchID != "" {
+			if groupReceipt.RouteID != groupRoute.ID || groupReceipt.TargetTaskID != groupRoute.TargetTaskID {
+				return store.ErrChannelGroupUnbound
+			}
+			outcome, err := s.store.ChannelGroupBatchLimit(ctx, groupReceipt.BatchID, groupConversation.ID, envelope.ThreadID, s.now().UTC())
+			if err != nil {
+				return err
+			}
+			if outcome != "" {
+				return s.store.FinishChannelInbox(ctx, receipt.ID, receipt.LeaseID, "rejected", groupConversation.ID, "", outcome, s.now().UTC())
+			}
+		}
+	}
 	endpointKind := domain.ChannelEndpointGroupDigitalHuman
 	role := "participant"
 	var identity domain.ChannelIdentityLink
@@ -1739,7 +1813,7 @@ func (s *Service) processInbound(ctx context.Context, receipt domain.ChannelInbo
 			}
 		}
 	} else {
-		if !envelope.MentionedBot {
+		if !feishuGroup && !envelope.MentionedBot {
 			return fmt.Errorf("group mention is required")
 		}
 		envelope.ChatDisplayName = safeChannelDisplayName(envelope.ChatDisplayName, "群聊", instance.ID, envelope.ExternalChatID)
@@ -1764,15 +1838,20 @@ func (s *Service) processInbound(ctx context.Context, receipt domain.ChannelInbo
 	if err != nil || !endpoint.Enabled {
 		return fmt.Errorf("channel endpoint is unavailable")
 	}
-	scopeVersion := 1
-	if endpointKind == domain.ChannelEndpointGroupDigitalHuman {
-		scopeVersion = 2
+	conversation := groupConversation
+	if feishuGroup {
+		conversation, err = s.updateChannelConversationIdentity(ctx, conversation, instance, endpointKind, envelope)
+	} else {
+		scopeVersion := 1
+		if endpointKind == domain.ChannelEndpointGroupDigitalHuman {
+			scopeVersion = 2
+		}
+		scopeKey, err := s.scopeKey(instance.ID, endpointKind, identity.ID, envelope.ExternalChatID, envelope.ExternalSenderID)
+		if err != nil {
+			return err
+		}
+		conversation, err = s.ensureConversation(ctx, instance, endpoint, identity, envelope, scopeVersion, scopeKey)
 	}
-	scopeKey, err := s.scopeKey(instance.ID, endpointKind, identity.ID, envelope.ExternalChatID, envelope.ExternalSenderID)
-	if err != nil {
-		return err
-	}
-	conversation, err := s.ensureConversation(ctx, instance, endpoint, identity, envelope, scopeVersion, scopeKey)
 	if err != nil {
 		return err
 	}
@@ -1780,7 +1859,9 @@ func (s *Service) processInbound(ctx context.Context, receipt domain.ChannelInbo
 		_ = s.store.UpsertChannelConversationMember(ctx, conversation.ID, identity.ID, envelope.SenderIsBot, envelope.OccurredAt)
 	}
 	targetTaskID, routeMode := conversation.HostTaskID, "assistant"
-	if route, routeErr := s.store.ActiveChannelTaskRoute(ctx, conversation.ID); routeErr == nil {
+	if feishuGroup {
+		targetTaskID, routeMode = groupRoute.TargetTaskID, "task_route"
+	} else if route, routeErr := s.store.ActiveChannelTaskRoute(ctx, conversation.ID); routeErr == nil {
 		targetTaskID, routeMode = route.TargetTaskID, "task_route"
 	} else if endpointKind == domain.ChannelEndpointGroupDigitalHuman {
 		routeMode = "group_qa"
@@ -1791,6 +1872,9 @@ func (s *Service) processInbound(ctx context.Context, receipt domain.ChannelInbo
 	if finished, finishedErr := s.finishedChannelTarget(ctx, targetTaskID); finishedErr != nil {
 		return finishedErr
 	} else if finished.ID != "" {
+		if feishuGroup {
+			return store.ErrChannelGroupUnbound
+		}
 		continued, continueErr := s.continueFinishedChannelTask(ctx, instance, conversation, endpointKind, finished, receipt.ID)
 		if continueErr != nil {
 			return continueErr
@@ -1833,7 +1917,11 @@ func (s *Service) processInbound(ctx context.Context, receipt domain.ChannelInbo
 	}
 	botDialogueTurns := 0
 	if endpointKind == domain.ChannelEndpointGroupDigitalHuman && envelope.SenderIsBot {
-		botDialogueTurns, _ = s.store.ChannelBotDialogueTurnCount(ctx, targetTaskID, conversation.ID)
+		if feishuGroup {
+			botDialogueTurns, _ = s.store.ChannelTopicBotTurns(ctx, conversation.ID, envelope.ThreadID)
+		} else {
+			botDialogueTurns, _ = s.store.ChannelBotDialogueTurnCount(ctx, targetTaskID, conversation.ID)
+		}
 		botDialogueTurns++
 	}
 	provenance := map[string]any{
@@ -1842,6 +1930,12 @@ func (s *Service) processInbound(ctx context.Context, receipt domain.ChannelInbo
 		"actor":    map[string]any{"identity_link_id": identity.ID, "role": role, "is_owner": role == "owner", "display_name": identity.DisplayName, "is_bot": envelope.SenderIsBot},
 		"mentions": mentions,
 		"route":    map[string]any{"mode": routeMode, "target_task_id": targetTaskID}, "inbound_receipt_id": receipt.ID,
+	}
+	if feishuGroup {
+		provenance["thread_id"] = envelope.ThreadID
+		provenance["root_id"] = envelope.RootID
+		provenance["group_batch_id"] = groupReceipt.BatchID
+		provenance["actor"].(map[string]any)["sender_type"] = envelope.SenderType
 	}
 	if envelope.ReplyContext != nil {
 		replyContext := *envelope.ReplyContext
@@ -1855,7 +1949,7 @@ func (s *Service) processInbound(ctx context.Context, receipt domain.ChannelInbo
 	}
 	attachmentIDs, warning, pending, err := s.inboundAttachments(ctx, receipt, conversation, targetTaskID, envelope)
 	if errors.Is(err, errMediaRouteChanged) {
-		if noticeErr := s.store.EnqueueChannelControlDelivery(ctx, instance.ID, conversation.ID, receipt.ID+":media-route-changed", "media_notice", map[string]any{"text": "接管目标已变化，本条消息及附件未转发，请在当前会话重新发送。"}, s.now().UTC()); noticeErr != nil {
+		if noticeErr := s.store.EnqueueChannelControlDelivery(ctx, instance.ID, conversation.ID, receipt.ID+":media-route-changed", "media_notice", map[string]any{"text": "接管目标已变化，本条消息及附件未转发，请在当前会话重新发送。", "reply_to_receipt_id": receipt.ID}, s.now().UTC()); noticeErr != nil {
 			return noticeErr
 		}
 		return s.store.FinishChannelInbox(ctx, receipt.ID, receipt.LeaseID, "processed", conversation.ID, "", "media_route_changed", s.now().UTC())

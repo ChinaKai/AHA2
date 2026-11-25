@@ -11,8 +11,6 @@ import (
 
 const (
 	feishuPermissionCatalogVersion = 5
-	feishuFullGroupPermission      = "group_message_read"
-	feishuGroupAllowlistKey        = "feishu_group_message_allowlist"
 )
 
 type onboardingPermissionDefinition struct {
@@ -39,7 +37,7 @@ var feishuPermissionCatalog = []onboardingPermissionDefinition{
 		Scopes:      []string{"im:message.group_at_msg:readonly", "im:message.group_at_msg.include_bot:readonly"},
 	},
 	{
-		ID: feishuFullGroupPermission, Name: "群消息全量接收", Sensitive: true,
+		ID: domain.FeishuFullGroupPermission, Name: "群消息全量接收", Sensitive: true,
 		Description: "接收机器人所在群的用户和其他机器人消息。AHA 只处理已绑定 Task 且列入群白名单的群。升级后需重新扫码授权。",
 		Scopes:      []string{"im:message.group_msg", "im:message.group_msg.include_bot:read"},
 	},
@@ -199,10 +197,10 @@ func defaultFeishuPermissionIDs() []string {
 }
 
 func feishuGroupMessageAllowlist(instance domain.ChannelInstance) []string {
-	if instance.ProviderKey != "feishu" || !configuredPermissionSet(instance.Config)[feishuFullGroupPermission] {
+	if instance.ProviderKey != "feishu" || !domain.FeishuFullGroupMessagesEnabled(instance.Config) {
 		return nil
 	}
-	chats, _ := stringListField(instance.Config, feishuGroupAllowlistKey)
+	chats, _ := stringListField(instance.Config, domain.FeishuGroupAllowlistKey)
 	return chats
 }
 

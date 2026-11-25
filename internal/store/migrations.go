@@ -4388,6 +4388,9 @@ func (s *Store) migrate(ctx context.Context) error {
 		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(163, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v163: %w", err)
 	}
+	if _, err := s.db.ExecContext(ctx, schemaChannelTopics); err != nil {
+		return fmt.Errorf("apply schema v164 channel group topics: %w", err)
+	}
 	return nil
 }
 

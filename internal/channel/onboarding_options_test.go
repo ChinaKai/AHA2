@@ -62,7 +62,7 @@ func TestFeishuSensitiveGroupScopesAreOptIn(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		selected, err := resolveOnboardingSelection(instance, plugin, []string{feishuFullGroupPermission})
+		selected, err := resolveOnboardingSelection(instance, plugin, []string{domain.FeishuFullGroupPermission})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -76,7 +76,7 @@ func TestFeishuSensitiveGroupScopesAreOptIn(t *testing.T) {
 		}
 	}
 	for _, definition := range feishuPermissionCatalog {
-		if definition.ID == feishuFullGroupPermission {
+		if definition.ID == domain.FeishuFullGroupPermission {
 			if !definition.Sensitive || definition.Required || feishuPermissionCatalogVersion != 5 {
 				t.Fatalf("unexpected sensitive permission %#v", definition)
 			}

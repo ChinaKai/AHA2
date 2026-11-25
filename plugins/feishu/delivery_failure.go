@@ -40,7 +40,7 @@ func providerDeliveryFailure(stage string, status, code int) deliverySendFailure
 	switch code {
 	case 230011:
 		// The reply target was withdrawn or no longer exists. Replying again
-		// can never succeed; the caller should fall back to a plain message.
+		// can never succeed; the caller chooses the fallback for the chat or topic.
 		if stage == "reply" {
 			failure.code = "feishu_reply_target_unavailable"
 			failure.replyTargetInvalid = true
