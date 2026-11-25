@@ -50,7 +50,7 @@ SDK 返回的用户信息只有 `open_id` 与 `tenant_brand`，不返回 `tenant
 6. 核心在同一受控完成流程中把扫码用户建立为该实例唯一 active `owner` IdentityLink，并关联发起 onboarding 的 AHA Owner。Secret 已落但数据库提交失败时，核心清理暂存 Secret；重复完成按 onboarding ID 幂等返回原结果。
 7. 插件用新凭据启动官方 Channel/WebSocket，核心逐项验证长连接、机器人收消息、发消息及卡片交互；全部通过后实例才从 `onboarding` 进入 `ready`。
 
-最小申请集一期锁定为应用身份权限 `im:message.p2p_msg:readonly`、`im:message.group_at_msg:readonly`、`im:message:send_as_bot`，事件 `im.message.receive_v1`，回调 `card.action.trigger`，以及经真实 SDK 验活证明为卡片发送所必需的最小 CardKit 权限。回复/引用消息的正文不在接收事件中，需按 `parent_id` 调用获取指定消息接口；该路径使用已有消息读取权限，不申请会扩大为读取群内全部消息的 `im:message.group_msg`。读取失败只让引用上下文降级为 unavailable，不影响原消息入站。实施时用官方权限目录再次校验标识；未知标识不能因为 SDK 只校验形状而被当作已配置成功。
+最小申请集一期锁定为应用身份权限 `im:message.p2p_msg:readonly`、`im:message.group_at_msg:readonly`、`im:message:send_as_bot`，事件 `im.message.receive_v1`，回调 `card.action.trigger`，以及经真实 SDK 验活证明为卡片发送所必需的最小 CardKit 权限。回复/引用消息的正文不在接收事件中，需按 `parent_id` 调用获取指定消息接口；该路径使用已有消息读取权限。群消息全量接收另在权限目录 v5 中申请应用级敏感权限 `im:message.group_msg` 和 `im:message.group_msg.include_bot:read`。读取失败只让引用上下文降级为 unavailable，不影响原消息入站。群消息全量接收和群白名单默认关闭。升级后，owner 在飞书渠道权限页勾选「群消息全量接收」，重新扫码授权，再对已绑定 Task 的群配置群白名单。飞书如要求管理员审核，以审核和发布结果为准。机器人非 @ 消息的推送需在授权后的测试群验证。见[飞书接收消息文档](https://open.larkenterprise.com/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/events/receive)。实施时用官方权限目录再次校验标识；未知标识不能因为 SDK 只校验形状而被当作已配置成功。
 
 ### 3.3 明示的兼容分支
 

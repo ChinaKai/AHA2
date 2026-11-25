@@ -20,6 +20,31 @@ const (
 	maxForwardedReplyEntries = 20
 )
 
+func inboundTopic(message *channeltypes.NormalizedMessage) (threadID, rootID string) {
+	if event, ok := message.RawEvent.(*larkim.P2MessageReceiveV1); ok && event.Event != nil && event.Event.Message != nil {
+		received := event.Event.Message
+		return optionalString(received.ThreadId), optionalString(received.RootId)
+	}
+	return "", ""
+}
+
+func inboundBotDisplayName(ctx context.Context, client *lark.Client, messageID string) string {
+	if messageID == "" {
+		return ""
+	}
+	request := larkim.NewGetMessageReqBuilder().MessageId(messageID).WithSenderName(true).Build()
+	response, err := client.Im.V1.Message.Get(ctx, request)
+	if err != nil || !response.Success() || response.Data == nil {
+		return ""
+	}
+	for _, item := range response.Data.Items {
+		if item != nil && item.Sender != nil && optionalString(item.MessageId) == messageID {
+			return optionalString(item.Sender.SenderName)
+		}
+	}
+	return ""
+}
+
 func inboundReplyContext(ctx context.Context, client *lark.Client, message *channeltypes.NormalizedMessage) map[string]any {
 	if client == nil || message == nil {
 		return nil
@@ -108,6 +133,11 @@ func inboundReplyContext(ctx context.Context, client *lark.Client, message *chan
 
 func normalizedReplyContent(messageType, raw string) (string, []map[string]any) {
 	messageType = strings.TrimSpace(messageType)
+	if messageType == "interactive" {
+		if content := interactiveCardText(raw); content != "" {
+			return content, nil
+		}
+	}
 	if messageType == "post" {
 		var body map[string]json.RawMessage
 		if json.Unmarshal([]byte(raw), &body) == nil && (len(body["content"]) > 0 || len(body["content_v2"]) > 0) {
@@ -185,10 +215,7 @@ func replySender(sender *larkim.Sender) (string, bool) {
 	isBot := false
 	name := ""
 	if sender != nil {
-		if sender.SenderType != nil {
-			kind := strings.ToLower(strings.TrimSpace(*sender.SenderType))
-			isBot = kind == "app" || kind == "bot"
-		}
+		isBot = !strings.EqualFold(optionalString(sender.SenderType), "user")
 		if sender.SenderName != nil {
 			name = strings.TrimSpace(*sender.SenderName)
 		}

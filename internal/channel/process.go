@@ -36,17 +36,18 @@ type managedPluginProcess struct {
 }
 
 type pluginBootstrap struct {
-	Schema         string `json:"schema"`
-	Protocol       string `json:"protocol"`
-	RuntimeBaseURL string `json:"runtime_base_url"`
-	PluginID       string `json:"plugin_id"`
-	ProviderKey    string `json:"provider_key"`
-	InstanceID     string `json:"instance_id"`
-	Capability     string `json:"capability"`
-	AppID          string `json:"app_id,omitempty"`
-	AppSecret      string `json:"app_secret,omitempty"`
-	TenantBrand    string `json:"tenant_brand,omitempty"`
-	Registration   bool   `json:"registration"`
+	Schema                string   `json:"schema"`
+	Protocol              string   `json:"protocol"`
+	RuntimeBaseURL        string   `json:"runtime_base_url"`
+	PluginID              string   `json:"plugin_id"`
+	ProviderKey           string   `json:"provider_key"`
+	InstanceID            string   `json:"instance_id"`
+	Capability            string   `json:"capability"`
+	AppID                 string   `json:"app_id,omitempty"`
+	AppSecret             string   `json:"app_secret,omitempty"`
+	TenantBrand           string   `json:"tenant_brand,omitempty"`
+	Registration          bool     `json:"registration"`
+	GroupMessageAllowlist []string `json:"group_message_allowlist,omitempty"`
 }
 
 type secretIPCMessage struct {
@@ -177,7 +178,8 @@ func (s *Service) ensurePluginProcess(instanceID, rawCapability string) error {
 	bootstrap := pluginBootstrap{
 		Schema: "channel-secret/v1", Protocol: "channel-runtime/v1", RuntimeBaseURL: runtimeBaseURL,
 		PluginID: plugin.ID, ProviderKey: plugin.ProviderKey, InstanceID: instance.ID, Capability: rawCapability,
-		AppID: instance.AppID, TenantBrand: strings.TrimSpace(fmt.Sprint(instance.Config["tenant_brand"])),
+		GroupMessageAllowlist: feishuGroupMessageAllowlist(instance),
+		AppID:                 instance.AppID, TenantBrand: strings.TrimSpace(fmt.Sprint(instance.Config["tenant_brand"])),
 	}
 	bootstrap.Registration, err = s.registrationProcessRequired(runCtx, instance)
 	if err != nil {

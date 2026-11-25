@@ -300,6 +300,9 @@ type ChannelInboundEnvelope struct {
 	Content           string               `json:"content"`
 	ChatDisplayName   string               `json:"chat_display_name,omitempty"`
 	SenderDisplayName string               `json:"sender_display_name,omitempty"`
+	ThreadID          string               `json:"thread_id,omitempty"`
+	RootID            string               `json:"root_id,omitempty"`
+	SenderType        string               `json:"sender_type,omitempty"`
 	SenderIsBot       bool                 `json:"sender_is_bot,omitempty"`
 	Mentions          []ChannelMention     `json:"mentions,omitempty"`
 	MentionedBot      bool                 `json:"mentioned_bot"`
@@ -486,6 +489,7 @@ type ChannelOnboardingPermission struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	Required    bool   `json:"required"`
+	Sensitive   bool   `json:"sensitive,omitempty"`
 	Enabled     bool   `json:"enabled"`
 }
 

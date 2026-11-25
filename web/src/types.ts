@@ -1520,6 +1520,7 @@ export interface ChannelOnboardingSession {
 }
 
 export interface ChannelOnboardingPermission {
+  sensitive?: boolean;
   id: string;
   name: string;
   description: string;

@@ -53,13 +53,37 @@ func TestResolveFeishuOnboardingSelectionRejectsUnknownOptions(t *testing.T) {
 	}
 }
 
-func TestFeishuPermissionCatalogExcludesSensitiveGroupHistory(t *testing.T) {
+func TestFeishuSensitiveGroupScopesAreOptIn(t *testing.T) {
 	t.Parallel()
-	for _, definition := range feishuPermissionCatalog {
-		if definition.ID == "group_message_read" || sliceSet(definition.Scopes)["im:message.group_msg"] {
-			t.Fatalf("sensitive group history scope must remain disabled: %#v", definition)
+	plugin := domain.ChannelPlugin{ProviderKey: "feishu"}
+	for _, existing := range []bool{false, true} {
+		instance := domain.ChannelInstance{ProviderKey: "feishu", CredentialConfigured: existing}
+		defaults, err := resolveOnboardingSelection(instance, plugin, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		selected, err := resolveOnboardingSelection(instance, plugin, []string{feishuFullGroupPermission})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, scope := range []string{"im:message.group_msg", "im:message.group_msg.include_bot:read"} {
+			if sliceSet(defaults.TenantScopes)[scope] || !sliceSet(selected.RequestScopes)[scope] {
+				t.Fatalf("scope %s defaults=%v selected=%v", scope, defaults, selected)
+			}
+		}
+		if len(feishuGroupMessageAllowlist(instance)) != 0 {
+			t.Fatal("allowlist must default to empty")
 		}
 	}
+	for _, definition := range feishuPermissionCatalog {
+		if definition.ID == feishuFullGroupPermission {
+			if !definition.Sensitive || definition.Required || feishuPermissionCatalogVersion != 5 {
+				t.Fatalf("unexpected sensitive permission %#v", definition)
+			}
+			return
+		}
+	}
+	t.Fatal("group permission missing")
 }
 
 func TestResolveFeishuCloudDocumentReadScopes(t *testing.T) {

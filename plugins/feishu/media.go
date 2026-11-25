@@ -72,6 +72,13 @@ var inboundImageReference = regexp.MustCompile(`!\[[^\]\r\n]*\]\(([^)\r\n]+)\)`)
 
 func normalizedInboundMedia(message *channeltypes.NormalizedMessage) (string, []map[string]any) {
 	content, sourceResources := repairedInboundPost(message)
+	if message.RawContentType == "interactive" {
+		if event, ok := message.RawEvent.(*larkim.P2MessageReceiveV1); ok && event.Event != nil && event.Event.Message != nil {
+			if text := interactiveCardText(optionalString(event.Event.Message.Content)); text != "" {
+				content = text
+			}
+		}
+	}
 	resources := make([]map[string]any, 0, len(sourceResources))
 	imageKeys := make(map[string]bool)
 	for _, resource := range sourceResources {
@@ -179,15 +186,51 @@ func restoreInboundMentionTypes(message *channeltypes.NormalizedMessage) {
 	}
 }
 
+func inboundSenderType(message *channeltypes.NormalizedMessage) string {
+	if message != nil {
+		if event, ok := message.RawEvent.(*larkim.P2MessageReceiveV1); ok && event.Event != nil && event.Event.Sender != nil {
+			if kind := strings.ToLower(optionalString(event.Event.Sender.SenderType)); kind != "" {
+				return kind
+			}
+		}
+	}
+	return "unknown"
+}
+
 func inboundSenderIsBot(message *channeltypes.NormalizedMessage) bool {
-	if message == nil {
-		return false
+	return inboundSenderType(message) != "user"
+}
+
+// Card values, URLs and action payloads are excluded. Only visible card text
+// and layout containers are traversed.
+func interactiveCardText(raw string) string {
+	var card any
+	if json.Unmarshal([]byte(raw), &card) != nil {
+		return ""
 	}
-	event, ok := message.RawEvent.(*larkim.P2MessageReceiveV1)
-	if !ok || event.Event == nil || event.Event.Sender == nil || event.Event.Sender.SenderType == nil {
-		return false
+	var lines []string
+	var visit func(any)
+	visit = func(value any) {
+		switch node := value.(type) {
+		case string:
+			if text := strings.TrimSpace(node); text != "" {
+				lines = append(lines, text)
+			}
+		case []any:
+			for _, child := range node {
+				visit(child)
+			}
+		case map[string]any:
+			for _, key := range []string{
+				"header", "title", "subtitle", "body", "elements", "columns", "rows",
+				"fields", "actions", "options", "text", "content", "label", "name",
+			} {
+				visit(node[key])
+			}
+		}
 	}
-	return strings.EqualFold(strings.TrimSpace(*event.Event.Sender.SenderType), "bot")
+	visit(card)
+	return strings.Join(lines, "\n")
 }
 
 type limitedMediaBody struct {

@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -556,6 +557,7 @@ func (s *Service) UpdateInstance(ctx context.Context, ownerID, id, name string, 
 	if strings.TrimSpace(name) != "" {
 		item.Name = strings.TrimSpace(name)
 	}
+	previousAllowlist := feishuGroupMessageAllowlist(item)
 	if config != nil {
 		merged := map[string]any{}
 		for key, value := range item.Config {
@@ -579,7 +581,11 @@ func (s *Service) UpdateInstance(ctx context.Context, ownerID, id, name string, 
 		item.Config = merged
 	}
 	item.UpdatedAt = s.now().UTC()
-	return s.store.UpdateChannelInstance(ctx, item, expectedRevision)
+	updated, err := s.store.UpdateChannelInstance(ctx, item, expectedRevision)
+	if err == nil && !slices.Equal(previousAllowlist, feishuGroupMessageAllowlist(updated)) {
+		s.stopPluginProcess(id)
+	}
+	return updated, err
 }
 
 func (s *Service) ResetRuntimeMenus(ctx context.Context, ownerID, id, idempotencyKey string, expectedRevision int) (domain.ChannelPluginCommand, error) {
@@ -624,6 +630,26 @@ func (s *Service) ResetRuntimeMenus(ctx context.Context, ownerID, id, idempotenc
 }
 
 func (s *Service) validateChannelInstanceConfig(ctx context.Context, instance domain.ChannelInstance, config map[string]any) error {
+	if raw, present := config[feishuGroupAllowlistKey]; present {
+		switch chats := raw.(type) {
+		case []any:
+			for _, chat := range chats {
+				id, ok := chat.(string)
+				if !ok || !validFeishuGroupID(strings.TrimSpace(id)) {
+					return fmt.Errorf("invalid Feishu group chat ID in allowlist")
+				}
+			}
+		case []string:
+			for _, id := range chats {
+				if !validFeishuGroupID(strings.TrimSpace(id)) {
+					return fmt.Errorf("invalid Feishu group chat ID in allowlist")
+				}
+			}
+		default:
+			return fmt.Errorf("Feishu group allowlist must be a list of chat IDs")
+		}
+		config[feishuGroupAllowlistKey], _ = stringListField(config, feishuGroupAllowlistKey)
+	}
 	if _, present := config["channel_permission_ids"]; present {
 		values, valid := stringListField(config, "channel_permission_ids")
 		existing, existingPresent := stringListField(instance.Config, "channel_permission_ids")

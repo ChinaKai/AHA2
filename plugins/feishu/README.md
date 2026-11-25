@@ -55,11 +55,16 @@ into the Inbox as untrusted data rather than concatenating it into the current
 sender's text. A failed parent lookup does not drop the incoming message; it
 produces an `unavailable` context with a stable, sanitized error code.
 
-The plugin does not request `im:message.group_msg` for quoted group messages.
-Live verification with the existing message read scope successfully loaded
-quoted text, image, and file messages without the sensitive group-history
-permission. Failed lookups remain optional context and never drop the incoming
-message.
+## Group topics and full message reception
+
+After upgrading, open the Feishu channel's permission page, select **群消息全量接收**, and scan the QR code again to authorize the existing app. Feishu may require an administrator to approve the sensitive application scopes. The permission is off by default. Bind each group to a Task and add its `oc_…` chat ID to the channel's **飞书群消息白名单** in Settings.
+
+Feishu documents `im:message.group_msg` for user messages and
+`im:message.group_msg.include_bot:read` for user and other-bot messages.
+`im:message.group_at_msg.include_bot:readonly` covers messages from other bots and users that mention this bot. Full reception applies to the app's groups at Feishu; the AHA allowlist controls local processing. Confirm the new scopes and actual non-mention delivery in a bound test group after authorizing. See the [Feishu receive-message event](https://open.larkenterprise.com/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/events/receive).
+
+Each event retains its message-level thread ID, root ID and sender. Interactive
+cards expose the visible text and button labels included in the event.
 
 ## Images and files
 

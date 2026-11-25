@@ -11,6 +11,7 @@ import (
 	"html"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -29,17 +30,18 @@ import (
 )
 
 type bootstrap struct {
-	Schema         string `json:"schema"`
-	Protocol       string `json:"protocol"`
-	RuntimeBaseURL string `json:"runtime_base_url"`
-	PluginID       string `json:"plugin_id"`
-	ProviderKey    string `json:"provider_key"`
-	InstanceID     string `json:"instance_id"`
-	Capability     string `json:"capability"`
-	AppID          string `json:"app_id"`
-	AppSecret      string `json:"app_secret"`
-	TenantBrand    string `json:"tenant_brand"`
-	Registration   bool   `json:"registration"`
+	Schema                string   `json:"schema"`
+	Protocol              string   `json:"protocol"`
+	RuntimeBaseURL        string   `json:"runtime_base_url"`
+	PluginID              string   `json:"plugin_id"`
+	ProviderKey           string   `json:"provider_key"`
+	InstanceID            string   `json:"instance_id"`
+	Capability            string   `json:"capability"`
+	AppID                 string   `json:"app_id"`
+	AppSecret             string   `json:"app_secret"`
+	TenantBrand           string   `json:"tenant_brand"`
+	Registration          bool     `json:"registration"`
+	GroupMessageAllowlist []string `json:"group_message_allowlist,omitempty"`
 }
 
 type runtimeClient struct {
@@ -513,7 +515,13 @@ func registerChannelHealth(callbacks channelLifecycle, set func(status, errorCod
 func runChannel(ctx context.Context, runtime *runtimeClient, boot bootstrap) error {
 	client, wsClient := newFeishuClients(boot)
 	selfBotOpenID, selfBotName := feishuBotIdentity(ctx, client)
-	channel := larkchannel.NewChannel(client, wsClient)
+	safety := channeltypes.DefaultChannelConfig().Safety
+	safety.Batch.DelayMs = 0
+	requireMention := len(boot.GroupMessageAllowlist) == 0
+	channel := larkchannel.NewChannel(client, wsClient,
+		channeltypes.WithSafetyConfig(safety),
+		channeltypes.WithPolicyConfig(channeltypes.PolicyConfig{RequireMention: &requireMention}),
+	)
 	healthMetadata := map[string]string{"bot_open_id": selfBotOpenID, "bot_display_name": selfBotName}
 	healthState := &channelHealthState{}
 	reporter := newChannelHealthReporter(healthState, func(reportCtx context.Context, status, errorCode string, metadata map[string]string) error {
@@ -522,18 +530,39 @@ func runChannel(ctx context.Context, runtime *runtimeClient, boot bootstrap) err
 	go reporter.run(ctx)
 	registerChannelHealth(channel, reporter.set)
 	channel.OnMessage(func(eventCtx context.Context, message *channeltypes.NormalizedMessage) error {
+		if !allowInboundMessage(message, boot.GroupMessageAllowlist) {
+			return nil
+		}
 		healthState.inbound()
+		threadID, rootID := inboundTopic(message)
+		listenOnly := message.ChatType == "group" && !message.MentionedBot && threadID == ""
 		replyContextResult := make(chan map[string]any, 1)
-		go func() { replyContextResult <- inboundReplyContext(eventCtx, client, message) }()
+		go func() {
+			if listenOnly {
+				replyContextResult <- nil
+				return
+			}
+			replyContextResult <- inboundReplyContext(eventCtx, client, message)
+		}()
 		restoreInboundMentionTypes(message)
 		content, resources := normalizedInboundMedia(message)
 		cloudDocumentResult := make(chan string, 1)
 		go func() {
+			if listenOnly {
+				cloudDocumentResult <- content
+				return
+			}
 			cloudDocumentResult <- enrichInboundCloudDocuments(eventCtx, larkCloudDocumentReader{client: client}, content)
 		}()
 		chatName, senderName := feishuDisplayNames(eventCtx, client, message)
 		content = <-cloudDocumentResult
-		payload := map[string]any{"schema_version": 1, "request_id": message.EventID, "instance_id": runtime.instanceID, "external_event_id": message.EventID, "event_type": "message", "occurred_at": time.UnixMilli(message.CreateTimeMs).UTC(), "chat_type": message.ChatType, "external_chat_id": message.ChatID, "external_sender_id": message.UserID, "external_message_id": message.MessageID, "content": content, "chat_display_name": chatName, "sender_display_name": senderName, "sender_is_bot": inboundSenderIsBot(message), "mentions": normalizedInboundMentions(message, selfBotOpenID), "mentioned_bot": message.MentionedBot, "resources": resources}
+		if listenOnly {
+			resources = nil
+		}
+		if senderName == "" && inboundSenderIsBot(message) {
+			senderName = "其他机器人"
+		}
+		payload := map[string]any{"schema_version": 1, "request_id": message.EventID, "instance_id": runtime.instanceID, "external_event_id": message.EventID, "event_type": "message", "occurred_at": time.UnixMilli(message.CreateTimeMs).UTC(), "chat_type": message.ChatType, "external_chat_id": message.ChatID, "external_sender_id": message.UserID, "external_message_id": message.MessageID, "content": content, "chat_display_name": chatName, "sender_display_name": senderName, "sender_is_bot": inboundSenderIsBot(message), "sender_type": inboundSenderType(message), "thread_id": threadID, "root_id": rootID, "mentions": normalizedInboundMentions(message, selfBotOpenID), "mentioned_bot": message.MentionedBot, "resources": resources}
 		if replyContext := <-replyContextResult; replyContext != nil {
 			payload["reply_context"] = replyContext
 		}
@@ -654,6 +683,10 @@ func cardFormScalar(value any, limit int) string {
 	return result
 }
 
+func allowInboundMessage(message *channeltypes.NormalizedMessage, allowlist []string) bool {
+	return message.ChatType != "group" || message.MentionedBot || slices.Contains(allowlist, message.ChatID)
+}
+
 func feishuDisplayNames(ctx context.Context, client *lark.Client, message *channeltypes.NormalizedMessage) (string, string) {
 	chatName, senderName := "", ""
 	if message == nil {
@@ -672,7 +705,11 @@ func feishuDisplayNames(ctx context.Context, client *lark.Client, message *chann
 			go func() {
 				value := ""
 				if message.ChatType == "group" && message.ChatID != "" {
-					value = groupMemberDisplayName(lookupCtx, client, message.ChatID, message.UserID)
+					if inboundSenderIsBot(message) {
+						value = inboundBotDisplayName(lookupCtx, client, message.MessageID)
+					} else {
+						value = groupMemberDisplayName(lookupCtx, client, message.ChatID, message.UserID)
+					}
 				} else {
 					request := larkcontact.NewGetUserReqBuilder().UserId(message.UserID).UserIdType("open_id").Build()
 					if response, err := client.Contact.V3.User.Get(lookupCtx, request); err == nil && response.Success() && response.Data != nil && response.Data.User != nil && response.Data.User.Name != nil {

@@ -4,17 +4,23 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"regexp"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
-const feishuPermissionCatalogVersion = 4
+const (
+	feishuPermissionCatalogVersion = 5
+	feishuFullGroupPermission      = "group_message_read"
+	feishuGroupAllowlistKey        = "feishu_group_message_allowlist"
+)
 
 type onboardingPermissionDefinition struct {
 	ID          string
 	Name        string
 	Description string
 	Required    bool
+	Sensitive   bool
 	Scopes      []string
 }
 
@@ -31,6 +37,11 @@ var feishuPermissionCatalog = []onboardingPermissionDefinition{
 		ID: "group_messages", Name: "群聊消息",
 		Description: "接收群聊中 @机器人 的消息以及机器人之间的消息。",
 		Scopes:      []string{"im:message.group_at_msg:readonly", "im:message.group_at_msg.include_bot:readonly"},
+	},
+	{
+		ID: feishuFullGroupPermission, Name: "群消息全量接收", Sensitive: true,
+		Description: "接收机器人所在群的用户和其他机器人消息。AHA 只处理已绑定 Task 且列入群白名单的群。升级后需重新扫码授权。",
+		Scopes:      []string{"im:message.group_msg", "im:message.group_msg.include_bot:read"},
 	},
 	{
 		ID: "chat_members", Name: "群成员与联系人",
@@ -88,7 +99,7 @@ func (s *Service) OnboardingOptions(ctx context.Context, ownerID, instanceID str
 		required := definition.Required || (!instance.CredentialConfigured && definition.ID == "app_menu_maintenance")
 		options.Permissions = append(options.Permissions, domain.ChannelOnboardingPermission{
 			ID: definition.ID, Name: definition.Name, Description: definition.Description,
-			Required: required, Enabled: required || permissionSet[definition.ID],
+			Required: required, Sensitive: definition.Sensitive, Enabled: required || permissionSet[definition.ID],
 		})
 	}
 	return options, nil
@@ -180,7 +191,21 @@ func legacyFeishuPermissionIDs() []string {
 func defaultFeishuPermissionIDs() []string {
 	result := make([]string, 0, len(feishuPermissionCatalog))
 	for _, definition := range feishuPermissionCatalog {
-		result = append(result, definition.ID)
+		if !definition.Sensitive {
+			result = append(result, definition.ID)
+		}
 	}
 	return result
 }
+
+func feishuGroupMessageAllowlist(instance domain.ChannelInstance) []string {
+	if instance.ProviderKey != "feishu" || !configuredPermissionSet(instance.Config)[feishuFullGroupPermission] {
+		return nil
+	}
+	chats, _ := stringListField(instance.Config, feishuGroupAllowlistKey)
+	return chats
+}
+
+var feishuGroupIDPattern = regexp.MustCompile(`^oc_[A-Za-z0-9_-]{1,125}$`)
+
+func validFeishuGroupID(id string) bool { return feishuGroupIDPattern.MatchString(id) }
