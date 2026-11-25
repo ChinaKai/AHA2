@@ -355,7 +355,7 @@ var builtinTemplates = []domain.PromptTemplate{
 	{ID: "identity.channel-digital-human", Name: "Channel Digital Human Identity", Layer: "identity", Description: "受限群聊电子人身份", Editable: true, Required: false, Version: 3},
 	{ID: "identity.pet-task", Name: "Pet Task Identity", Layer: "identity", Description: "宠物 Task 的电子分身定位、owner-delegate 权限和 core/worklog 路径", Editable: true, Required: false, Version: 14},
 	{ID: "channel.web", Name: "AHA Web Channel", Layer: "channel", Description: "Web 渠道消息行为", Editable: true, Required: false, Version: 2},
-	{ID: "channel.external-channel", Name: "External Channel", Layer: "channel", Description: "外部渠道消息行为", Editable: true, Required: false, Version: 6},
+	{ID: "channel.external-channel", Name: "External Channel", Layer: "channel", Description: "外部渠道消息行为", Editable: true, Required: false, Version: 7},
 	{ID: "policy.auto", Name: "Auto Collaboration", Layer: "policy", Description: "AHA 自动协作策略", Editable: true, Required: false, Version: 2},
 	{ID: "policy.single", Name: "Single Agent", Layer: "policy", Description: "单 Agent 策略", Editable: true, Required: false, Version: 2},
 	{ID: "protocol.knowledge", Name: "Knowledge Protocol", Layer: "protocol", Description: "按 index 渐进读取知识并形成反馈与修订闭环", Editable: true, Required: false, Version: 3},
@@ -502,6 +502,9 @@ var supersededBuiltinOverrideHashes = map[string]map[string]bool{
 		"642ea6fb568b5270ce68df58b46e0532e47e087f24a532871144eeac41d91250": true,
 	},
 	"channel.external-channel": {
+		// Chinese defaults before background was marked as untrusted and without a receipt.
+		"e36b62b1deaccb92f5001cb0d463f810d56b34aadace45fd43cc55e6636790f4": true,
+		"adff33647f1caa41a8d78545906e666beb7f784ea506e2fcab54203b0ad3390b": true,
 		// Defaults before Feishu topic routing (English and Chinese, LF and CRLF).
 		"fc0a8317b8d8ccb4585752c7a4f46af3525e6dd19bb08090edcb68f7441af0d8": true,
 		"145573dc61e6334328434163f93a1ec85b4d6afce214e29e5142bfe8afd94ce4": true,

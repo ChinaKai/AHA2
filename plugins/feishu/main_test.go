@@ -285,7 +285,7 @@ func TestSyncChatMembersCommandListsMembersWithoutInboundMessages(t *testing.T) 
 	members, _ := result["members"].([]map[string]any)
 	if err != nil || len(members) != 2 || members[0]["external_user_id"] != "member-open" ||
 		members[0]["display_name"] != "云端李四" || members[0]["is_bot"] != false ||
-		members[1]["external_user_id"] != "member-open-2" {
+		members[1]["external_user_id"] != "member-open-2" || members[1]["display_name"] != "固件王五" {
 		t.Fatalf("members=%#v err=%v", members, err)
 	}
 	if len(queries) != 2 ||
@@ -550,5 +550,34 @@ func TestChannelHealthReporterReportsInitialStateAndInbound(t *testing.T) {
 	}
 	if _, ok := second.metadata["last_inbound_at"]; !ok {
 		t.Fatalf("metadata missing last_inbound_at: %#v", second.metadata)
+	}
+}
+
+func TestSyncChatMembersCommandRejectsRepeatedPageToken(t *testing.T) {
+	t.Parallel()
+	memberQueries := 0
+	client := lark.NewClient("member-token-cycle", "fixture-secret", lark.WithHttpClient(mockHTTPClient{do: func(request *http.Request) (*http.Response, error) {
+		switch request.URL.Path {
+		case "/open-apis/auth/v3/tenant_access_token/internal":
+			return mediaTestResponse(200, `{"code":0,"tenant_access_token":"fixture-token","expire":7200}`), nil
+		case "/open-apis/im/v1/chats/chat-test/members":
+			memberQueries++
+			wantToken := ""
+			if memberQueries == 2 {
+				wantToken = "repeat-page"
+			}
+			if memberQueries > 2 || request.URL.Query().Get("page_token") != wantToken {
+				return nil, errors.New("unexpected member page request")
+			}
+			return mediaTestResponse(200, `{"code":0,"data":{"items":[{"member_id":"member-open"}],"has_more":true,"page_token":"repeat-page"}}`), nil
+		default:
+			return nil, errors.New("unexpected Feishu request")
+		}
+	}}))
+	result, err := syncChatMembersCommand(context.Background(), client, command{
+		Payload: map[string]any{"conversation_id": "conversation-test", "external_chat_id": "chat-test"},
+	})
+	if result != nil || err == nil || err.Error() != "invalid Feishu member pagination" || memberQueries != 2 {
+		t.Fatalf("repeated token did not stop pagination without a partial roster: requests=%d result=%v err=%v", memberQueries, result, err)
 	}
 }

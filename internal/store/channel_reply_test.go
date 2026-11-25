@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -389,6 +390,23 @@ func TestAgentChannelReplyIsReceiptBoundAndIdempotent(t *testing.T) {
 	)
 	if err != nil || humanDelivery.ID == "" {
 		t.Fatalf("ending a bot topic affected a human topic in the same Turn: %v", err)
+	}
+
+	// Check the topic lock before status-card reconciliation can reject the
+	// receipt independently. It must apply to human messages as well.
+	if err := database.SetChannelTopicReplyDecision(ctx, turn.ID, conversation.ID, "omt_human", "end", "已说明"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := database.EnqueueAgentChannelReply(
+		ctx, task.ID, turn.ID, "human-reply-after-own-topic-end", receiptID, "不应发送", nil, now.Add(2*time.Second),
+	); !errors.Is(err, ErrChannelBotDialogueEnded) {
+		t.Fatalf("closed human topic accepted a reply: %v", err)
+	}
+	if err := database.SetChannelTopicReplyDecision(ctx, turn.ID, conversation.ID, "omt_human", "continue", ""); !errors.Is(err, ErrChannelBotDialogueEnded) {
+		t.Fatalf("continue overwrote end for a human topic: %v", err)
+	}
+	if decision, err := database.ChannelTopicReplyDecision(ctx, turn.ID, conversation.ID, "omt_human"); err != nil || decision != "end" {
+		t.Fatalf("human topic decision = %q, want end: %v", decision, err)
 	}
 
 	silentReceiptID := domain.NewID("channel_inbox")

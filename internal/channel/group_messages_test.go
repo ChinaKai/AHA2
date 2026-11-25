@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -20,14 +21,16 @@ func TestFeishuGroupListeningAndTopicBatches(t *testing.T) {
 	clock := time.Now().UTC()
 	service.now = func() time.Time { return clock }
 
-	send := func(id, chatID, threadID, rootID, senderType, content string, mentioned bool) (domain.ChannelInboxReceipt, error) {
-		receipt, _, err := service.ReceiveInbound(ctx, claims, domain.ChannelInboundEnvelope{
+	groupMessage := func(id, chatID, threadID, rootID, senderType, content string, mentioned bool) domain.ChannelInboundEnvelope {
+		return domain.ChannelInboundEnvelope{
 			SchemaVersion: 1, InstanceID: instance.ID, ExternalEventID: id, ExternalMessageID: id,
 			EventType: "message", OccurredAt: clock, ChatType: "group", ExternalChatID: chatID,
 			ExternalSenderID: "sender-" + id, SenderDisplayName: "Sender " + id,
 			ThreadID: threadID, RootID: rootID, SenderType: senderType, Content: content, MentionedBot: mentioned,
-			Resources: nil,
-		})
+		}
+	}
+	send := func(id, chatID, threadID, rootID, senderType, content string, mentioned bool) (domain.ChannelInboxReceipt, error) {
+		receipt, _, err := service.ReceiveInbound(ctx, claims, groupMessage(id, chatID, threadID, rootID, senderType, content, mentioned))
 		return receipt, err
 	}
 	const chat = "oc_allowed"
@@ -103,9 +106,16 @@ func TestFeishuGroupListeningAndTopicBatches(t *testing.T) {
 		t.Fatalf("listener created attachment commands: %v err=%v", commands, err)
 	}
 
-	first, err := send("om_first", chat, "omt_a", "om_root", "user", "WAKE_FIRST", false)
+	firstMessage := groupMessage("om_first", chat, "omt_a", "om_root", "user", "WAKE_FIRST", false)
+	first, _, err := service.ReceiveInbound(ctx, claims, firstMessage)
 	if err != nil {
 		t.Fatal(err)
+	}
+	redelivery := firstMessage
+	redelivery.ExternalEventID = "fresh_event_for_om_first"
+	duplicateReceipt, duplicate, err := service.ReceiveInbound(ctx, claims, redelivery)
+	if err != nil || !duplicate || duplicateReceipt.ID != first.ID {
+		t.Fatalf("same message under a different event ID was not deduplicated: duplicate=%v err=%v", duplicate, err)
 	}
 	clock = clock.Add(100 * time.Millisecond)
 	second, err := send("om_second", chat, "omt_b", "om_other_root", "user", "WAKE_SECOND", true)
@@ -149,7 +159,7 @@ func TestFeishuGroupListeningAndTopicBatches(t *testing.T) {
 			for _, turn := range turns {
 				switch {
 				case strings.Contains(turn.Instruction, "WAKE_FIRST"):
-					if !strings.Contains(turn.Instruction, "WAKE_OTHER_BOT") || strings.Contains(turn.Instruction, "WAKE_SECOND") ||
+					if strings.Count(turn.Instruction, "WAKE_FIRST") != 1 || !strings.Contains(turn.Instruction, "WAKE_OTHER_BOT") || strings.Contains(turn.Instruction, "WAKE_SECOND") ||
 						!strings.Contains(turn.PromptSnapshot, "ROOT_BACKGROUND_FOREACH") {
 						t.Fatalf("incorrect first-topic input, instruction=%q status=%s error=%s", turn.Instruction, turn.Status, turn.Error)
 					}
@@ -300,7 +310,7 @@ func TestFeishuGroupIngressRequiresPermissionAndBindingOnlyForNonMentions(t *tes
 }
 
 func TestFeishuGroupMentionContinuesFinishedBinding(t *testing.T) {
-	for _, cleanup := range []string{"route still active", "released after receipt", "released before receipt"} {
+	for _, cleanup := range []string{"route still active", "released after receipt", "released before receipt", "manually unbound"} {
 		t.Run(cleanup, func(t *testing.T) {
 			service, instance, claims := mediaTestService(t)
 			ctx := context.Background()
@@ -316,11 +326,17 @@ func TestFeishuGroupMentionContinuesFinishedBinding(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := service.store.ActivateOwnerChannelTaskRoute(ctx, instance.ID, conversation.ID, previous.ID, now); err != nil {
+			previousRoute, err := service.store.ActivateOwnerChannelTaskRoute(ctx, instance.ID, conversation.ID, previous.ID, now)
+			if err != nil {
 				t.Fatal(err)
 			}
 			if err := service.application.CompleteTask(ctx, previous.ID); err != nil {
 				t.Fatal(err)
+			}
+			if cleanup == "manually unbound" {
+				if err := service.UnbindTaskChannelRoute(ctx, instance.OwnerID, previous.ID, previousRoute.ID); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if cleanup == "released before receipt" {
 				if err := service.reconcileTerminalTaskRoutes(ctx); err != nil {
@@ -343,7 +359,32 @@ func TestFeishuGroupMentionContinuesFinishedBinding(t *testing.T) {
 				}
 				receipts = append(receipts, receipt)
 			}
+			var nonMention domain.ChannelInboxReceipt
 			if cleanup == "released after receipt" {
+				instance, err = service.store.ChannelInstance(ctx, instance.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				instance.Config["channel_permission_ids"] = []string{domain.FeishuFullGroupPermission}
+				instance.Config[domain.FeishuGroupAllowlistKey] = []string{chat}
+				if _, err := service.store.UpdateChannelInstance(ctx, instance, instance.Revision); err != nil {
+					t.Fatal(err)
+				}
+				quiet := first
+				quiet.ExternalEventID, quiet.ExternalMessageID, quiet.Content = "quiet-event", "om_quiet", "non-mention must not migrate"
+				quiet.MentionedBot = false
+				nonMention, _, err = service.ReceiveInbound(ctx, claims, quiet)
+				if err != nil {
+					t.Fatal(err)
+				}
+				mentionGroup, err := service.store.ChannelGroupReceipt(ctx, receipts[0].ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				quietGroup, err := service.store.ChannelGroupReceipt(ctx, nonMention.ID)
+				if err != nil || quietGroup.BatchID == "" || quietGroup.BatchID != mentionGroup.BatchID {
+					t.Fatalf("non-mention did not join the same topic batch: group=%v err=%v", quietGroup, err)
+				}
 				if err := service.reconcileTerminalTaskRoutes(ctx); err != nil {
 					t.Fatal(err)
 				}
@@ -353,8 +394,24 @@ func TestFeishuGroupMentionContinuesFinishedBinding(t *testing.T) {
 				t.Fatal(err)
 			}
 			route, err := service.store.ActiveChannelTaskRoute(ctx, conversation.ID)
-			if err != nil || route.TargetTaskID == previous.ID || route.TargetTaskID == conversation.HostTaskID {
+			targetTaskID := route.TargetTaskID
+			if cleanup == "manually unbound" {
+				if !errors.Is(err, sql.ErrNoRows) {
+					t.Fatalf("explicit @ resurrected an owner-unbound route: route=%v err=%v", route, err)
+				}
+				targetTaskID = conversation.HostTaskID
+			} else if err != nil || targetTaskID == previous.ID || targetTaskID == conversation.HostTaskID {
 				t.Fatalf("no continuation of finished binding: route=%v err=%v", route, err)
+			}
+			if nonMention.ID != "" {
+				quietGroup, err := service.store.ChannelGroupReceipt(ctx, nonMention.ID)
+				if err != nil || quietGroup.RouteID != previousRoute.ID || quietGroup.TargetTaskID != previous.ID {
+					t.Fatalf("non-mention followed the continuation: group=%v err=%v", quietGroup, err)
+				}
+				stored, err := service.store.ChannelInboxReceipt(ctx, instance.ID, nonMention.ID)
+				if err != nil || stored.AHAMessageID != "" || stored.Outcome != "group_task_route_required" {
+					t.Fatalf("non-mention was not rejected at the old binding: state=%q outcome=%q err=%v", stored.State, stored.Outcome, err)
+				}
 			}
 			for _, receipt := range receipts {
 				stored, err := service.store.ChannelInboxReceipt(ctx, instance.ID, receipt.ID)
@@ -362,9 +419,14 @@ func TestFeishuGroupMentionContinuesFinishedBinding(t *testing.T) {
 					t.Fatalf("receipt did not reach the continuation: outcome=%q err=%v", stored.Outcome, err)
 				}
 			}
-			page, err := service.store.ConversationPageForAgent(ctx, route.TargetTaskID, "main", 0, 0, 100, nil)
+			page, err := service.store.ConversationPageForAgent(ctx, targetTaskID, "main", 0, 0, 100, nil)
 			if err != nil {
 				t.Fatal(err)
+			}
+			for _, item := range page.Items {
+				if item.Kind == "user_message" && item.Summary == "non-mention must not migrate" {
+					t.Fatal("non-mention body reached the continuation")
+				}
 			}
 			for _, input := range []string{"continue first", "continue second"} {
 				found := false
@@ -372,7 +434,7 @@ func TestFeishuGroupMentionContinuesFinishedBinding(t *testing.T) {
 					found = found || (item.Kind == "user_message" && item.Summary == input)
 				}
 				if !found {
-					t.Fatalf("continuation did not receive %q", input)
+					t.Fatalf("selected Task did not receive %q", input)
 				}
 			}
 		})
@@ -405,4 +467,76 @@ func TestFeishuMentionRepairsMetadataOnlyGroup(t *testing.T) {
 	if conversation.ID != existing.ID {
 		t.Fatalf("legacy group metadata was replaced: got %q want %q", conversation.ID, existing.ID)
 	}
+}
+
+func TestFeishuGroupHostBotDialogueCountsAndKeepsParticipantRole(t *testing.T) {
+	service, instance, claims := mediaTestService(t)
+	ctx := context.Background()
+
+	for wantTurn := 1; wantTurn <= 2; wantTurn++ {
+		eventID := fmt.Sprintf("bot-event-%d", wantTurn)
+		receipt, _, err := service.ReceiveInbound(ctx, claims, domain.ChannelInboundEnvelope{
+			SchemaVersion: 1, InstanceID: instance.ID, EventType: "message", ChatType: "group",
+			ExternalChatID: "oc_bot_dialogue", ExternalEventID: eventID, ExternalMessageID: "om_" + eventID,
+			ExternalSenderID: "owner-open", // Exercise the fixture's existing owner link.
+			SenderType:       "app", MentionedBot: true, Content: "robot dialogue",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := service.processInboundBatch(ctx); err != nil {
+			t.Fatal(err)
+		}
+		stored, err := service.store.ChannelInboxReceipt(ctx, instance.ID, receipt.ID)
+		if err != nil || stored.Outcome != "delivered_to_task" {
+			t.Fatalf("bot mention did not reach the host: outcome=%q err=%v", stored.Outcome, err)
+		}
+		conversation, err := service.store.ChannelConversation(ctx, stored.ConversationID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		turnContext := waitForFeishuHostTurnContext(t, service.store, conversation.HostTaskID, wantTurn)
+		actor, _ := turnContext["actor"].(map[string]any)
+		if actor["role"] != "participant" || actor["is_owner"] != false || actor["is_bot"] != true {
+			t.Fatalf("bot with an owner identity link gained owner authority: actor=%v", actor)
+		}
+		dialogue, _ := turnContext["bot_dialogue"].(map[string]any)
+		if dialogue["active"] != true || dialogue["turn"] != float64(wantTurn) {
+			t.Fatalf("host bot dialogue turn = %v, want %d", dialogue, wantTurn)
+		}
+	}
+}
+
+func waitForFeishuHostTurnContext(t *testing.T, database *store.Store, taskID string, count int) map[string]any {
+	t.Helper()
+	ctx := context.Background()
+	deadline := time.Now().Add(4 * time.Second)
+	for time.Now().Before(deadline) {
+		turns, err := database.ListTurns(ctx, taskID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(turns) == count && turns[count-1].Status.Terminal() {
+			turn := turns[count-1]
+			if turn.Status != domain.TurnSucceeded {
+				t.Fatalf("host turn did not succeed: status=%s err=%s", turn.Status, turn.Error)
+			}
+			task, err := database.Task(ctx, taskID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The Task returns to waiting_user after the Round settles, so the
+			// next inbound message starts a separate dialogue round.
+			if task.Status == domain.TaskWaitingUser {
+				channelContext, err := database.ChannelContextForInboxBatch(ctx, turn.InboxBatchID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return channelContext
+			}
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	t.Fatalf("expected %d host Turns to finish", count)
+	return nil
 }

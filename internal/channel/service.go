@@ -1936,7 +1936,7 @@ func (s *Service) processInbound(ctx context.Context, receipt domain.ChannelInbo
 	}
 	botDialogueTurns := 0
 	if endpointKind == domain.ChannelEndpointGroupDigitalHuman && envelope.SenderIsBot {
-		if feishuGroup {
+		if groupReceipt.BatchID != "" && routeMode == "task_route" {
 			botDialogueTurns, _ = s.store.ChannelTopicBotTurns(ctx, conversation.ID, envelope.ThreadID)
 		} else {
 			botDialogueTurns, _ = s.store.ChannelBotDialogueTurnCount(ctx, targetTaskID, conversation.ID)

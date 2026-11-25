@@ -99,12 +99,11 @@ func TestChannelOwnerAndRuntimeAPIBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	response = channelJSON(t, client, http.MethodPost, server.URL+"/api/channel-runtime/v1/handshake", map[string]any{"schema_version": 1, "instance_id": instanceID, "plugin_id": "feishu", "supported_protocols": []string{"channel-runtime/v1"}, "boot_id": "boot"}, map[string]string{"Authorization": "Bearer " + rawCapability})
-	if response.StatusCode != http.StatusOK {
-		var body map[string]any
-		decodeResponse(t, response, &body)
-		t.Fatalf("handshake=%#v", body)
+	var handshake map[string]any
+	decodeResponse(t, response, &handshake)
+	if response.StatusCode != http.StatusOK || handshake["group_topics"] != true {
+		t.Fatalf("runtime handshake did not advertise group topic support: status=%d body=%v", response.StatusCode, handshake)
 	}
-	response.Body.Close()
 	response = channelJSON(t, client, http.MethodPut, server.URL+"/api/channel-runtime/v1/instances/not-this-instance/health", map[string]any{"schema_version": 1, "status": "ready"}, map[string]string{"Authorization": "Bearer " + rawCapability})
 	if response.StatusCode != http.StatusForbidden {
 		t.Fatalf("cross instance status=%d", response.StatusCode)

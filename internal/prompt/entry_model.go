@@ -100,7 +100,7 @@ var phaseThreeAnchorSpecs = []entryAnchorSpec{
 	{EntryID: EntryCore, Key: "role-main", LegacyID: "role.main", Kind: anchorKindResident, FrozenVersion: 5, Order: 1, Condition: "role:main"},
 	{EntryID: EntryCore, Key: "role-sub", LegacyID: "role.sub", Kind: anchorKindResident, FrozenVersion: 2, Order: 1, Condition: "role:sub"},
 	{EntryID: EntryCore, Key: "channel-web", LegacyID: "channel.web", Kind: anchorKindResident, FrozenVersion: 2, Order: 4, Condition: "channel:web"},
-	{EntryID: EntryCore, Key: "channel-external", LegacyID: "channel.external-channel", Kind: anchorKindResident, FrozenVersion: 6, Order: 4, Condition: "channel:external-channel"},
+	{EntryID: EntryCore, Key: "channel-external", LegacyID: "channel.external-channel", Kind: anchorKindResident, FrozenVersion: 7, Order: 4, Condition: "channel:external-channel"},
 
 	{EntryID: EntryTaskContext, Key: "policy-auto", LegacyID: "policy.auto", Kind: anchorKindResident, FrozenVersion: 2, Order: 3, Condition: "policy:auto"},
 	{EntryID: EntryTaskContext, Key: "policy-single", LegacyID: "policy.single", Kind: anchorKindResident, FrozenVersion: 2, Order: 3, Condition: "policy:single"},

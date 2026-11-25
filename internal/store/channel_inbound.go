@@ -635,6 +635,13 @@ func (s *Store) ChannelContextForInboxBatch(ctx context.Context, batchID string)
 				result[key] = child
 			}
 		}
+		// Legacy group Turns carry the consecutive-message count from their
+		// receipt. Topic batches have their own accounting.
+		if stringValue(latest["group_batch_id"]) == "" {
+			if dialogue, exists := latest["bot_dialogue"]; exists {
+				result["bot_dialogue"] = dialogue
+			}
+		}
 	}
 	return result, rows.Err()
 }
