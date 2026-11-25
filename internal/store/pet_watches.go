@@ -80,7 +80,8 @@ func (s *Store) IgnorePetTaskWatch(ctx context.Context, taskID, ignoreOnlyReason
 }
 
 // RestorePetTaskWatch clears an ignored watch. An ignore-only row is deleted so
-// the Task returns to the unfollowed list; a real follow is only un-ignored.
+// the Task returns to the unfollowed list. Resuming a real follow resets its
+// notification deduplication so the next status change can wake the pet.
 // The DELETE is scoped by reason, so it can never remove a follow that raced in
 // between the Owner's ignore and restore actions.
 func (s *Store) RestorePetTaskWatch(ctx context.Context, taskID, ignoreOnlyReason string, at time.Time) (removed, found bool, err error) {
@@ -93,7 +94,11 @@ func (s *Store) RestorePetTaskWatch(ctx context.Context, taskID, ignoreOnlyReaso
 		return true, true, nil
 	}
 	result, err = s.db.ExecContext(ctx, `
-		UPDATE pet_task_watches SET ignored_at='',updated_at=? WHERE task_id=?`,
+		UPDATE pet_task_watches
+		SET last_notified_status=CASE WHEN ignored_at<>'' THEN '' ELSE last_notified_status END,
+		    last_notified_turn_id=CASE WHEN ignored_at<>'' THEN '' ELSE last_notified_turn_id END,
+		    ignored_at='',updated_at=?
+		WHERE task_id=?`,
 		timeString(at), taskID)
 	if err != nil {
 		return false, false, err

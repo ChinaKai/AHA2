@@ -123,6 +123,110 @@ func TestIgnoredPetWatchSuppressesNotificationsAndPetCannotReactivate(t *testing
 	waitForTask(t, fixture.database, petTaskID, domain.TaskWaitingUser)
 }
 
+func TestRestoredPetWatchNotifiesOnSameStatusAndTurn(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	if _, err := fixture.service.UpdateOwnerPetSettings(fixture.ctx, PetSettingsInput{
+		Enabled: true, ChatModelID: fixture.model.ID, Actions: []string{"walk"},
+		IdleMinutes: 5, QuietEnabled: boolPointer(false), QuietStart: 22, QuietEnd: 8, HourlyLimit: 2,
+		AllowViewTasks: boolPointer(true), AllowCreateTasks: boolPointer(true),
+		AllowCreateWorkspaces: boolPointer(true),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitForTask(t, fixture.database, petTaskID, domain.TaskWaitingUser)
+	fixture.service.StartPetTaskNotifications()
+	project, err := fixture.service.PetCreateProject(fixture.ctx, PetCreateProjectInput{Name: "Restore watch"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := fixture.service.PetCreateWorkspace(fixture.ctx, PetCreateWorkspaceInput{
+		ProjectID: project.ID, Name: "Restore workspace", RootPath: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// PetCreateTask follows the Task before starting its first Turn.
+	task, err := fixture.service.PetCreateTask(fixture.ctx, PetCreateTaskInput{
+		ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "Followed task",
+		Request: "Report when ready", Start: boolPointer(true),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForTask(t, fixture.database, task.ID, domain.TaskWaitingUser)
+	turn, err := fixture.database.LatestTurnForAgent(fixture.ctx, task.ID, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusMessages := func() []string {
+		t.Helper()
+		messages, err := fixture.database.ListMessages(fixture.ctx, petTaskID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var updates []string
+		for _, message := range messages {
+			if strings.HasPrefix(message.Content, "[任务动态]") && strings.Contains(message.Content, task.Code) {
+				updates = append(updates, message.Content)
+			}
+		}
+		return updates
+	}
+	waitForWakes := func(want int) {
+		t.Helper()
+		deadline := time.Now().Add(3 * time.Second)
+		for {
+			messages := statusMessages()
+			if len(messages) == want && strings.Contains(messages[want-1], "waiting_user") {
+				return
+			}
+			if len(messages) >= want || time.Now().After(deadline) {
+				t.Fatalf("want %d waiting_user wakes, got %q", want, messages)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	assertNotified := func() {
+		t.Helper()
+		watch, err := fixture.database.PetTaskWatch(fixture.ctx, task.ID)
+		if err != nil || watch.LastNotifiedStatus != string(domain.TaskWaitingUser) || watch.LastNotifiedTurnID != turn.ID {
+			t.Fatalf("want waiting_user notification for Turn %s, got watch=%+v err=%v", turn.ID, watch, err)
+		}
+	}
+	waitForWakes(1)
+	assertNotified()
+
+	ignored, err := fixture.service.SetPetTaskWatchIgnored(fixture.ctx, task.ID, true)
+	if err != nil || !ignored.Ignored {
+		t.Fatalf("ignored follow=%+v err=%v", ignored, err)
+	}
+	if err := fixture.service.CompleteTask(fixture.ctx, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertNotified()
+	if messages := statusMessages(); len(messages) != 1 {
+		t.Fatalf("completed Task woke the pet while ignored: %q", messages)
+	}
+	restored, err := fixture.service.SetPetTaskWatchIgnored(fixture.ctx, task.ID, false)
+	if err != nil || restored.Ignored || restored.Reason != ignored.Reason {
+		t.Fatalf("restored follow=%+v err=%v", restored, err)
+	}
+	// Reopen re-enters waiting_user without creating a new Main Turn.
+	if err := fixture.service.ReopenTask(fixture.ctx, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if latest, err := fixture.database.LatestTurnForAgent(fixture.ctx, task.ID, "main"); err != nil || latest.ID != turn.ID {
+		t.Fatalf("reopen changed the latest Main Turn: got %s want %s err=%v", latest.ID, turn.ID, err)
+	}
+	waitForWakes(2)
+	assertNotified()
+	if _, err := fixture.service.SetPetTaskWatchIgnored(fixture.ctx, task.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	assertNotified()
+	waitForTask(t, fixture.database, petTaskID, domain.TaskWaitingUser)
+}
+
 func TestPetTaskWatchListIncludesUnwatchedActiveOrdinaryTasks(t *testing.T) {
 	fixture := newPetTaskFixture(t)
 	if _, err := fixture.service.OwnerAssistant(fixture.ctx); err != nil {

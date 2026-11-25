@@ -93,6 +93,23 @@ func TestPetWorkStateShowsInspectionAndAllOpenTasks(t *testing.T) {
 	if len(state.IgnoredTasks) != 1 || state.IgnoredTasks[0] != wantIgnored {
 		t.Fatalf("ignored tasks=%+v want=%+v", state.IgnoredTasks, wantIgnored)
 	}
+	t.Run("overview", func(t *testing.T) {
+		waitForTask(t, fixture.database, petTaskID, domain.TaskWaitingUser)
+		result, err := fixture.service.PetMCPTool(fixture.ctx, "aha_overview", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var overview PetAHAOverview
+		if err := json.Unmarshal([]byte(result), &overview); err != nil {
+			t.Fatal(err)
+		}
+		if len(overview.Attention) != 1 || overview.Attention[0].ID != openTask.ID {
+			t.Fatalf("overview attention=%+v, want only followed Task %s", overview.Attention, openTask.ID)
+		}
+		if overview.WaitingUser != 3 {
+			t.Fatalf("overview waiting_user=%d, want the followed, ignored, and pet Tasks in the global count", overview.WaitingUser)
+		}
+	})
 	if reason := state.OpenTasks[0].AttentionReason; reason != "waiting_user：等待下一步指令" {
 		t.Fatalf("succeeded waiting task should await the next message, got %q", reason)
 	}
