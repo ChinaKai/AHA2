@@ -68,7 +68,8 @@ func normalizeGroupMetadata(envelope *domain.ChannelInboundEnvelope) error {
 	envelope.ThreadID = strings.TrimSpace(envelope.ThreadID)
 	envelope.RootID = strings.TrimSpace(envelope.RootID)
 	envelope.SenderType = strings.ToLower(strings.TrimSpace(envelope.SenderType))
-	if len(envelope.ThreadID) > 128 || len(envelope.RootID) > 128 || len(envelope.SenderType) > 32 {
+	if len(envelope.ThreadID) > 128 || len(envelope.RootID) > 128 || len(envelope.SenderType) > 32 ||
+		strings.ContainsAny(envelope.ThreadID+envelope.RootID+envelope.SenderType, " \t\r\n") {
 		return fmt.Errorf("invalid_envelope")
 	}
 	// Older plugins supplied only sender_is_bot. The new typed field is

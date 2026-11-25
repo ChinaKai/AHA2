@@ -174,7 +174,7 @@ func (s *Service) channelMCPDetail() domain.MCPServer {
 		Transport:   "builtin", Enabled: true, Builtin: true, AutoInject: true, Health: "ok",
 		Tools: []domain.MCPTool{
 			{Name: "channel_reply", Description: "回复触发本 Turn 的渠道消息；立即送达，只在最终答复时调用一次。群聊里自动 @ 发送者，可另外 @ 联系人。"},
-			{Name: "channel_reply_decision", Description: "本 Turn 无需回复时结束；理由只显示在 AHA Web 状态卡，不发到群里。"},
+			{Name: "channel_reply_decision", Description: "结束这个飞书话题的回复，或结案指定私聊消息。理由显示在 AHA Web 状态卡。"},
 			{Name: "channel_request_permission", Description: "为非 Owner 群成员的敏感操作申请权限。申请会一直等待 Owner 批准或拒绝，批准后才能执行。"},
 			{Name: "channel_contacts", Description: "列出本 Task 群里可以 @ 的联系人及其 ID，供 channel_reply 的 mention_identity_link_ids 使用。"},
 		},

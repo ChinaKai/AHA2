@@ -104,7 +104,7 @@ The final Main answer belongs to AHA Web and is not automatically mirrored to a 
 
 Use the `inbound_receipt_id` from the live inbox message or its channel context. A channel reply may only answer that source conversation and actor. Do not include Web-only artifacts, private diagnostics, installation packages, or unrelated Task output unless the Owner explicitly asks to send them to that channel. Multiple channel messages require independently addressable replies; one Web final answer must not be reused as their combined response.
 
-Before the final response, resolve every task-routed receipt with either a receipt-bound channel reply or `reply-decision`. If intentionally silent, call `reply-decision` with `decision:"end"` and a reason specific to that message. A Web-only final answer is not a channel reply and leaves the receipt unresolved.
+Before the final response, send any needed receipt-bound replies. In a Feishu group, use `reply-decision` with `decision:"end"`, a receipt and a reason to close replies for that topic. In private chat, use the decision for the receipt being closed. Feishu group background has no replyable receipt. Replies within a Feishu topic stay there.
 
 `task_route` Turns (group or private) receive the built-in `channel_reply` and `channel_reply_decision` MCP tools. Use them to resolve the current message's receipt; there is no server-side final-answer fallback for these routes. `channel_reply` is delivered immediately: call it once with the final answer, not for progress, planning, or tool-error narration. Include relevant `attachment_ids` when the answer needs files. The HTTP endpoints remain available when the MCP tools are absent.
 
@@ -146,20 +146,19 @@ For an ordinary Task with an active group primary channel, Main may read selecte
 - `POST /api/v1/agent/channel/reply-decision`
 - `POST /api/v1/agent/channel/handoffs`
 
-Action previews use `{"operation":"takeover|exit|create_task|status_change|handoff_decision","target_id":"optional","intent":{...}}`. Contact messages use `{"request_id":"stable-retry-key","purpose":"blocker","message":"...","mention_identity_link_ids":[],"attachment_ids":["attachment_..."]}`; leave the mention list empty for a plain group post and fill it (up to 5 verified contacts) only when those people need to act. Attachment IDs must come from this Turn's Task attachment upload API; text and native image/file deliveries are ordered and share the same idempotent request.
+Action previews use `{"operation":"takeover|exit|create_task|status_change|handoff_decision","target_id":"optional","intent":{...}}`. Contact messages use `{"request_id":"stable-retry-key","purpose":"blocker","message":"...","mention_identity_link_ids":[],"attachment_ids":["attachment_..."]}`; leave the mention list empty for a plain group post and fill it only when those people need to act. Attachment IDs must come from this Turn's Task attachment upload API; text and native image/file deliveries are ordered and share the same idempotent request.
 
-**Mentions.** Typing `@name` in message text is plain text: it notifies nobody. A receipt-bound reply in a group already quotes the original message and @-mentions its sender, so do not repeat `@name` in the text. To notify anyone else in a reply, add `mention_identity_link_ids` to the reply (up to 4 IDs from `GET /api/v1/agent/channel/contacts` or the `channel_contacts` tool; only contacts the Owner selected for this Task are accepted). A contact message takes the same field. AHA puts the mentions in front of the message, so leave `@name` out of the text there too.
+**Mentions.** Typing `@name` in message text is plain text: it notifies nobody. A receipt-bound reply in a group already quotes the original message and @-mentions its sender, so do not repeat `@name` in the text. To notify anyone else in a reply, add `mention_identity_link_ids` to the reply (IDs from `GET /api/v1/agent/channel/contacts` or the `channel_contacts` tool; only contacts the Owner selected for this Task are accepted). A contact message takes the same field. AHA puts the mentions in front of the message, so leave `@name` out of the text there too.
 
 For a task-routed channel message, an explicit receipt-bound
 `POST /api/v1/agent/channel/replies` is the `continue` signal. Call
 `POST /api/v1/agent/channel/reply-decision` with
 `{"decision":"end","inbound_receipt_id":"channel_inbox_...","reason":"..."}` when
-the message deliberately needs no channel reply. The reason must contain 1 to
-300 characters and is displayed on that receipt's AHA Web status card; it is
-not sent to the channel. `end` keeps the final answer in AHA Web and blocks a
-later reply to that receipt. The server also enforces the configured maximum
-consecutive bot turns. Do not use the ordinary channel message endpoint for a
-normal channel reply.
+the remaining topic messages, or the selected private-chat receipt, need no
+channel reply. The reason must contain 1 to 300 characters and appears on the
+AHA Web status card. In Feishu groups the decision blocks later replies for
+that topic in this Turn. The server also caps consecutive bot-only Turns and
+hourly Turns for each topic.
 
 ## Knowledge and Skills
 

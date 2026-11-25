@@ -64,6 +64,7 @@ func (s *Server) channelRuntimeHandshake(writer http.ResponseWriter, request *ht
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"ok": true, "schema_version": 1, "selected_protocol": "channel-runtime/v1", "instance_id": claims.InstanceID,
 		"command_batch_limit": 50, "delivery_batch_limit": 50, "lease_seconds": 30, "capability_expires_at": claims.ExpiresAt,
+		"group_topics": true,
 	})
 }
 
@@ -78,23 +79,25 @@ func containsString(values []string, expected string) bool {
 
 func (s *Server) channelRuntimeHealth(writer http.ResponseWriter, request *http.Request) {
 	var payload struct {
-		SchemaVersion  int    `json:"schema_version"`
-		Status         string `json:"status"`
-		ErrorCode      string `json:"error_code"`
-		BotOpenID      string `json:"bot_open_id"`
-		BotDisplayName string `json:"bot_display_name"`
-		LastInboundAt  string `json:"last_inbound_at"`
-		Heartbeat      string `json:"heartbeat"`
+		SchemaVersion            int    `json:"schema_version"`
+		Status                   string `json:"status"`
+		ErrorCode                string `json:"error_code"`
+		BotOpenID                string `json:"bot_open_id"`
+		BotDisplayName           string `json:"bot_display_name"`
+		LastInboundAt            string `json:"last_inbound_at"`
+		LastNonMentionBotTopicAt string `json:"last_non_mention_bot_topic_at"`
+		Heartbeat                string `json:"heartbeat"`
 	}
 	if err := decodeJSON(request, &payload); err != nil || payload.SchemaVersion != 1 {
 		writeError(writer, http.StatusUnprocessableEntity, "invalid_envelope")
 		return
 	}
 	metadata := map[string]string{
-		"runtime_bot_open_id":               payload.BotOpenID,
-		"runtime_bot_provider_display_name": payload.BotDisplayName,
-		"last_inbound_at":                   payload.LastInboundAt,
-		"heartbeat":                         payload.Heartbeat,
+		"runtime_bot_open_id":                     payload.BotOpenID,
+		"runtime_bot_provider_display_name":       payload.BotDisplayName,
+		"last_inbound_at":                         payload.LastInboundAt,
+		"runtime_feishu_non_mention_bot_topic_at": payload.LastNonMentionBotTopicAt,
+		"heartbeat":                               payload.Heartbeat,
 	}
 	if err := s.channels.UpdateHealth(request.Context(), channelRuntimeClaims(request.Context()), payload.Status, payload.ErrorCode, metadata); err != nil {
 		writeChannelRuntimeError(writer, err)

@@ -311,9 +311,6 @@ func (s *Service) PetRequestChannelSend(ctx context.Context, input PetChannelSen
 	if message == "" || len([]rune(message)) > 1000 {
 		return domain.PetApproval{}, fmt.Errorf("消息不能为空且不能超过 1000 个字符")
 	}
-	if len(input.MentionIdentityLinkIDs) > 5 {
-		return domain.PetApproval{}, fmt.Errorf("最多提及 5 个渠道联系人")
-	}
 	task, err := s.store.Task(ctx, taskID)
 	if err != nil || task.ReadOnly {
 		return domain.PetApproval{}, fmt.Errorf("Task 不存在或只读")
@@ -333,7 +330,7 @@ func (s *Service) PetRequestChannelSend(ctx context.Context, input PetChannelSen
 	if destination.EndpointKind != domain.ChannelEndpointGroupDigitalHuman || destination.Status != "active" {
 		return domain.PetApproval{}, fmt.Errorf("只有群聊数字人渠道支持对外发送")
 	}
-	contacts, err := s.store.TaskChannelContacts(ctx, task.ID, route.InstanceID, route.ConversationID, 50)
+	contacts, err := s.store.TaskChannelContacts(ctx, task.ID, route.InstanceID, route.ConversationID)
 	if err != nil {
 		return domain.PetApproval{}, err
 	}

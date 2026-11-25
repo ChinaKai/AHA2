@@ -130,10 +130,7 @@ func (s *Store) ReplaceProviderChannelMembers(ctx context.Context, conversationI
 	return tx.Commit()
 }
 
-func (s *Store) ChannelMembersForConversation(ctx context.Context, instanceID, conversationID string, limit int) ([]domain.ChannelGroupMember, error) {
-	if limit < 1 || limit > 1000 {
-		limit = 500
-	}
+func (s *Store) ChannelMembersForConversation(ctx context.Context, instanceID, conversationID string) ([]domain.ChannelGroupMember, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT identity.id,
 		       CASE
@@ -160,8 +157,7 @@ func (s *Store) ChannelMembersForConversation(ctx context.Context, instanceID, c
 			OR (member.is_bot=1 AND member.observed_at<>'')
 			OR (conversation.members_synced_at='' AND member.observed_at<>'')
 		  )
-		ORDER BY member.is_bot,identity.display_name,identity.id
-		LIMIT ?`, conversationID, instanceID, limit)
+		ORDER BY member.is_bot,identity.display_name,identity.id`, conversationID, instanceID)
 	if err != nil {
 		return nil, err
 	}
@@ -187,10 +183,7 @@ func (s *Store) ChannelMembersForConversation(ctx context.Context, instanceID, c
 	return items, rows.Err()
 }
 
-func (s *Store) TaskChannelContacts(ctx context.Context, taskID, instanceID, conversationID string, limit int) ([]domain.ChannelContact, error) {
-	if limit < 1 || limit > 100 {
-		limit = 50
-	}
+func (s *Store) TaskChannelContacts(ctx context.Context, taskID, instanceID, conversationID string) ([]domain.ChannelContact, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT identity.id,identity.display_name,identity.role,contact.collaboration_role,
 		       member.is_bot,
@@ -210,8 +203,7 @@ func (s *Store) TaskChannelContacts(ctx context.Context, taskID, instanceID, con
 			OR (member.is_bot=1 AND member.observed_at<>'')
 			OR (conversation.members_synced_at='' AND member.observed_at<>'')
 		  )
-		ORDER BY identity.display_name,identity.id
-		LIMIT ?`, taskID, conversationID, instanceID, limit)
+		ORDER BY identity.display_name,identity.id`, taskID, conversationID, instanceID)
 	if err != nil {
 		return nil, err
 	}

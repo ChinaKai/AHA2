@@ -486,6 +486,9 @@ export function renderChannels(providers: ChannelPlugin[], instances: ChannelIns
     <p class="channel-retired-note">实例已归档，运行能力与本地凭据已移除；历史记录保持只读，飞书后台应用不会自动删除。</p>
     <div class="channel-retired-actions"><button type="button" data-channel-view="${escapeHTML(instance.id)}" data-project-id="${escapeHTML(instance.host_project_id)}">查看</button><button type="button" data-channel-export="${escapeHTML(instance.id)}">导出</button><button type="button" class="danger" data-channel-purge="${escapeHTML(instance.id)}" data-revision="${instance.revision}">永久删除</button></div>
   </article>`;
+    const config = objectValue(instance.config);
+    const fullFeishuGroups = instance.provider_key === "feishu" && stringList(config, "channel_permission_ids", []).includes("group_message_read");
+    const lastBotTopic = typeof config.runtime_feishu_non_mention_bot_topic_at === "string" ? config.runtime_feishu_non_mention_bot_topic_at : "";
 	return `<article class="channel-instance-card">
     <header><div><strong>${escapeHTML(instance.name)}</strong><small>${escapeHTML(instance.provider_key || instance.plugin_id)}</small></div><span><span class="status ${instance.status === "ready" ? "good" : instance.status === "error" || instance.status === "degraded" ? "bad" : "warn"}">${instanceState(instance)}</span><button type="button" data-channel-instance-toggle="${escapeHTML(instance.id)}" data-enabled="${instance.status !== "disabled"}" data-revision="${instance.revision}">${instance.status === "disabled" ? "启用" : "停用"}</button></span></header>
     <dl><div><dt>凭据</dt><dd>${instance.credential_configured ? "已安全保存" : "未配置"}</dd></div><div><dt>App ID</dt><dd>${instance.app_id ? escapeHTML(instance.app_id) : "尚未创建"}</dd></div></dl>
@@ -497,6 +500,7 @@ export function renderChannels(providers: ChannelPlugin[], instances: ChannelIns
       <button type="button" class="danger" data-channel-archive="${escapeHTML(instance.id)}" data-revision="${instance.revision}">归档实例</button>
     </div>
     ${instance.owner_bound ? `<small class="channel-instance-hint">权限更新仅做增量授权；AHA 运行时菜单可独立勾选，不修改飞书后台已有菜单。</small>` : ""}
+    ${fullFeishuGroups ? `<small class="channel-instance-hint">${lastBotTopic ? `最近接收机器人非 @ 话题消息 ${escapeHTML(lastBotTopic)}` : "机器人非 @ 话题推送待测试群验证。"} </small>` : ""}
     <div data-channel-deliveries="${escapeHTML(instance.id)}" hidden></div>
   </article>`;
   }).join("") : `<div class="empty"><strong>尚未创建渠道实例</strong><p>每个实例独立绑定一个 Owner，并包含私聊助手与群聊电子人。</p></div>`;

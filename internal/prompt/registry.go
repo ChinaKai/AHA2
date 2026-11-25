@@ -355,7 +355,7 @@ var builtinTemplates = []domain.PromptTemplate{
 	{ID: "identity.channel-digital-human", Name: "Channel Digital Human Identity", Layer: "identity", Description: "受限群聊电子人身份", Editable: true, Required: false, Version: 3},
 	{ID: "identity.pet-task", Name: "Pet Task Identity", Layer: "identity", Description: "宠物 Task 的电子分身定位、owner-delegate 权限和 core/worklog 路径", Editable: true, Required: false, Version: 14},
 	{ID: "channel.web", Name: "AHA Web Channel", Layer: "channel", Description: "Web 渠道消息行为", Editable: true, Required: false, Version: 2},
-	{ID: "channel.external-channel", Name: "External Channel", Layer: "channel", Description: "外部渠道消息行为", Editable: true, Required: false, Version: 5},
+	{ID: "channel.external-channel", Name: "External Channel", Layer: "channel", Description: "外部渠道消息行为", Editable: true, Required: false, Version: 6},
 	{ID: "policy.auto", Name: "Auto Collaboration", Layer: "policy", Description: "AHA 自动协作策略", Editable: true, Required: false, Version: 2},
 	{ID: "policy.single", Name: "Single Agent", Layer: "policy", Description: "单 Agent 策略", Editable: true, Required: false, Version: 2},
 	{ID: "protocol.knowledge", Name: "Knowledge Protocol", Layer: "protocol", Description: "按 index 渐进读取知识并形成反馈与修订闭环", Editable: true, Required: false, Version: 3},
@@ -373,7 +373,7 @@ var builtinTemplates = []domain.PromptTemplate{
 	{ID: "section.available-context", Name: "Available Context Section", Layer: "section", Description: "可用上下文入口列表段落", Editable: true, Required: true, Version: 3},
 	{ID: "section.current-inbox", Name: "Current Inbox Section", Layer: "section", Description: "当前 Inbox Batch 段落", Editable: true, Required: true, Version: 1},
 	{ID: "section.inbox-batch-content", Name: "Inbox Batch Content", Layer: "section", Description: "Inbox 消息、渠道来源、引用上下文和附件引用的内容模板", Editable: true, Required: true, Version: 4},
-	{ID: "resource.agent-api", Name: "Agent API Reference File", Layer: "resource", Description: "Agent API 的 HTTP 参考；内置 MCP 工具不覆盖时查阅", Editable: false, Required: true, Version: 13},
+	{ID: "resource.agent-api", Name: "Agent API Reference File", Layer: "resource", Description: "Agent API 的 HTTP 参考；内置 MCP 工具不覆盖时查阅", Editable: false, Required: true, Version: 14},
 	{ID: "resource.attachment-protocol", Name: "Attachment Protocol File", Layer: "resource", Description: "只读参考模板；附件上传、绑定与回执规程", Editable: false, Required: true, Version: 1},
 	{ID: "resource.group-permissions", Name: "Group Permission Rules File", Layer: "resource", Description: "只读参考模板；群聊 task_route 的 Owner 权限申请规则", Editable: false, Required: false, Version: 1},
 }
@@ -502,6 +502,11 @@ var supersededBuiltinOverrideHashes = map[string]map[string]bool{
 		"642ea6fb568b5270ce68df58b46e0532e47e087f24a532871144eeac41d91250": true,
 	},
 	"channel.external-channel": {
+		// Defaults before Feishu topic routing (English and Chinese, LF and CRLF).
+		"fc0a8317b8d8ccb4585752c7a4f46af3525e6dd19bb08090edcb68f7441af0d8": true,
+		"145573dc61e6334328434163f93a1ec85b4d6afce214e29e5142bfe8afd94ce4": true,
+		"3ee2eafe1eda6f1ddd8503249dd4599aa8b24067df504efa90dc7c31667f1300": true,
+		"d049f8b1bc1574193a4a038b995d0cd35aa95b9520ca3fe86946a5a2eae2a8cc": true,
 		// The builtins before the prompt rewrite that explains the system, gives
 		// each rule its reason, and moves the per-Turn sections last (en, zh-CN;
 		// LF and CRLF).

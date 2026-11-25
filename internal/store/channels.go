@@ -297,6 +297,12 @@ func (s *Store) UpdateChannelInstanceHealth(ctx context.Context, id, status, err
 				}
 				continue
 			}
+			if key == "runtime_feishu_non_mention_bot_topic_at" {
+				if observedAt := parseTime(value); !observedAt.IsZero() && !observedAt.After(at.Add(time.Minute)) {
+					configPatch[key] = timeString(observedAt)
+				}
+				continue
+			}
 			if key == "runtime_bot_open_id" || key == "runtime_bot_provider_display_name" || key == "last_inbound_at" {
 				if value != "" {
 					if key == "last_inbound_at" {

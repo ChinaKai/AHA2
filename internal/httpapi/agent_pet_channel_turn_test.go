@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -22,7 +23,7 @@ import (
 // A pet channel Turn reaches the four aha2_channel tools the same way an
 // ordinary routed Task does. The chain is real end to end inside one process:
 // the owner routes a group conversation to task_pet over the Web API, the
-// channel runtime hands in an @-mention, the channel service turns it into a
+// channel runtime hands in a Feishu topic message, the channel service turns it into a
 // task_pet Turn, and that Turn's token drives the tools. No plugin runtime is
 // running and none is started, so the queued reply and permission card stay
 // in the isolated database and nothing reaches a real channel.
@@ -80,7 +81,8 @@ func TestPetChannelTurnUsesEveryChannelToolThroughARealTaskRoute(t *testing.T) {
 	}
 	hostProject := domain.Project{ID: "pet-route-host-project", Name: "Channel", ProjectType: "channel", DefaultWorkspaceID: "pet-route-host-workspace", KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now}
 	hostWorkspace := domain.Workspace{ID: hostProject.DefaultWorkspaceID, ProjectID: hostProject.ID, Name: "Channel", Locality: "local", Transport: "native", RootPath: dataDir, Health: "ready", AgentAPIMode: "global", AgentAPIStatus: "unknown", CreatedAt: now, UpdatedAt: now}
-	instance := domain.ChannelInstance{ID: "pet-route-instance", PluginID: plugin.ID, OwnerID: owner.ID, RuntimeDeviceID: "local", Name: "团队飞书", Status: "ready", Revision: 1, HostProjectID: hostProject.ID, HostWorkspaceID: hostWorkspace.ID, Config: map[string]any{"operation_scope_mode": "all", "runtime_bot_open_id": "pet-route-bot"}, CreatedAt: now, UpdatedAt: now}
+	instance := domain.ChannelInstance{ID: "pet-route-instance", PluginID: plugin.ID, OwnerID: owner.ID, RuntimeDeviceID: "local", Name: "团队飞书", Status: "ready", Revision: 1, HostProjectID: hostProject.ID, HostWorkspaceID: hostWorkspace.ID, Config: map[string]any{"operation_scope_mode": "all", "runtime_bot_open_id": "pet-route-bot",
+		"channel_permission_ids": []string{domain.FeishuFullGroupPermission}, domain.FeishuGroupAllowlistKey: []string{"oc_pet_provider_chat"}}, CreatedAt: now, UpdatedAt: now}
 	endpoint := domain.ChannelEndpoint{ID: "pet-route-endpoint", InstanceID: instance.ID, Kind: domain.ChannelEndpointGroupDigitalHuman, Enabled: true, Config: map[string]any{}, CreatedAt: now, UpdatedAt: now}
 	if err := database.CreateChannelInstanceWithHost(ctx, hostProject, hostWorkspace, instance, []domain.ChannelEndpoint{endpoint}); err != nil {
 		t.Fatal(err)
@@ -93,7 +95,7 @@ func TestPetChannelTurnUsesEveryChannelToolThroughARealTaskRoute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	conversation := domain.ChannelConversation{ID: "pet-route-conversation", InstanceID: instance.ID, EndpointID: endpoint.ID, ScopeKeyVersion: 2, ScopeKey: "pet-scope", ExternalChatID: "pet-provider-chat", DisplayName: "宠物联调群", HostTaskID: hostTask.ID, Status: "active", CreatedAt: now, UpdatedAt: now}
+	conversation := domain.ChannelConversation{ID: "pet-route-conversation", InstanceID: instance.ID, EndpointID: endpoint.ID, ScopeKeyVersion: 2, ScopeKey: "pet-scope", ExternalChatID: "oc_pet_provider_chat", DisplayName: "宠物联调群", HostTaskID: hostTask.ID, Status: "active", CreatedAt: now, UpdatedAt: now}
 	if err := database.CreateChannelConversation(ctx, conversation, domain.ChannelSession{ID: "pet-route-session", ConversationID: conversation.ID, Generation: 1, Mode: "group_qa", Status: "active", StartedAt: now}); err != nil {
 		t.Fatal(err)
 	}
@@ -113,20 +115,40 @@ func TestPetChannelTurnUsesEveryChannelToolThroughARealTaskRoute(t *testing.T) {
 	if err := database.UpsertChannelConversationMember(ctx, conversation.ID, participant.ID, false, now); err != nil {
 		t.Fatal(err)
 	}
-	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/tasks/"+pet.ID+"/channel-contacts", map[string]any{"contacts": []map[string]any{{"identity_link_id": participant.ID, "collaboration_role": "测试"}}}, csrf)
+	contactSelection := []map[string]any{{"identity_link_id": participant.ID, "collaboration_role": "测试"}}
+	extraMentionIDs := []string{}
+	expectedMentions := []string{participant.ExternalUserID}
+	for index := range 6 {
+		member, err := database.UpsertChannelParticipant(ctx, domain.ChannelIdentityLink{
+			ID: fmt.Sprintf("extra-member-%d", index), InstanceID: instance.ID,
+			ExternalUserID: fmt.Sprintf("extra-provider-member-%d", index), Role: "participant",
+			DisplayName: fmt.Sprintf("Member %d", index), Status: "active", LinkedAt: now,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := database.UpsertChannelConversationMember(ctx, conversation.ID, member.ID, false, now); err != nil {
+			t.Fatal(err)
+		}
+		contactSelection = append(contactSelection, map[string]any{"identity_link_id": member.ID, "collaboration_role": "联调"})
+		extraMentionIDs = append(extraMentionIDs, member.ID)
+		expectedMentions = append(expectedMentions, member.ExternalUserID)
+	}
+	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/tasks/"+pet.ID+"/channel-contacts", map[string]any{"contacts": contactSelection}, csrf)
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("owner contacts for task_pet status=%d body=%s", response.StatusCode, readBody(t, response))
 	}
 	response.Body.Close()
 
-	// Channel runtime: one @-mention; the channel service routes it to task_pet.
+	// Channel runtime: a human message follows an existing topic without @.
 	runCtx, stop := context.WithCancel(ctx)
 	defer stop()
 	channelService.Start(runCtx)
 	receipt, duplicate, err := channelService.ReceiveInbound(ctx, channel.RuntimeClaims{InstanceID: instance.ID, Scopes: map[string]bool{"channel.inbound.write": true}}, domain.ChannelInboundEnvelope{
 		SchemaVersion: 1, InstanceID: instance.ID, ExternalEventID: "pet-route-event-1", EventType: "message", OccurredAt: now,
 		ChatType: "group", ExternalChatID: conversation.ExternalChatID, ExternalSenderID: "provider-user-li", ExternalMessageID: "pet-route-message-1",
-		Content: "@AHA 帮忙看下日志", SenderDisplayName: "李四", MentionedBot: true,
+		Content: "帮忙看下日志", SenderDisplayName: "李四", SenderType: "user",
+		ThreadID: "omt_pet", RootID: "om_pet_root",
 	})
 	if err != nil || duplicate {
 		t.Fatalf("inbound receipt=%#v duplicate=%v err=%v", receipt, duplicate, err)
@@ -211,13 +233,33 @@ func TestPetChannelTurnUsesEveryChannelToolThroughARealTaskRoute(t *testing.T) {
 		t.Fatalf("queued replies=%#v", replies)
 	}
 	t.Logf("evidence reply delivery id=%s state=%s attempts=%d provider_message_id=%q (one row after two calls)", replies[0].ID, replies[0].State, replies[0].Attempts, replies[0].ProviderMessageID)
+	target, err := database.ChannelDeliveryTarget(ctx, conversation.ID, replies[0].SourceEventSequence)
+	if err != nil || target["thread_id"] != "omt_pet" || target["root_id"] != "om_pet_root" ||
+		target["reply_message_id"] != "pet-route-message-1" || target["mention_user_ids"] != `["provider-user-li"]` {
+		t.Fatalf("automatic topic reply target=%v err=%v", target, err)
+	}
+	wide := coreMCPCallTool(t, url, token, "channel_reply", map[string]any{
+		"message": "MANY-MENTIONS", "mention_identity_link_ids": extraMentionIDs,
+	})
+	if wide.IsError {
+		t.Fatalf("six valid additional mentions: %v", wide)
+	}
+	mentionReplies := carrying("MANY-MENTIONS")
+	if len(mentionReplies) != 1 {
+		t.Fatalf("explicit mention reply count=%d", len(mentionReplies))
+	}
+	fullTarget, err := database.ChannelDeliveryTarget(ctx, conversation.ID, mentionReplies[0].SourceEventSequence)
+	want, _ := json.Marshal(expectedMentions)
+	if err != nil || fullTarget["mention_user_ids"] != string(want) {
+		t.Fatalf("explicit mention target=%v want=%s err=%v", fullTarget, want, err)
+	}
 
 	// channel_reply_decision records the end decision for the group topic.
 	decision := coreMCPCallTool(t, url, token, "channel_reply_decision", map[string]any{"reason": "已在群里回复"})
 	if decision.IsError {
 		t.Fatalf("decision=%#v", decision)
 	}
-	stored, err := database.ChannelTopicReplyDecision(ctx, turn.ID, conversation.ID, "")
+	stored, err := database.ChannelTopicReplyDecision(ctx, turn.ID, conversation.ID, "omt_pet")
 	if err != nil || stored != "end" {
 		t.Fatalf("topic decision=%q err=%v", stored, err)
 	}

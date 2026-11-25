@@ -43,6 +43,7 @@ type Service struct {
 	logger             *slog.Logger
 	now                func() time.Time
 	createMu           sync.Mutex
+	scopeKeyMu         sync.Mutex
 	pluginRefreshMu    sync.Mutex
 	pluginsRefreshedAt time.Time
 	wakeInbound        chan struct{}
@@ -274,7 +275,7 @@ func (s *Service) OwnerTaskChannelContacts(ctx context.Context, ownerID, taskID 
 		}
 		return nil, err
 	}
-	return s.store.TaskChannelContacts(ctx, taskID, route.InstanceID, route.ConversationID, 50)
+	return s.store.TaskChannelContacts(ctx, taskID, route.InstanceID, route.ConversationID)
 }
 
 func (s *Service) OwnerTaskChannelMembers(ctx context.Context, ownerID, taskID string) ([]domain.ChannelGroupMember, error) {
@@ -289,13 +290,10 @@ func (s *Service) OwnerTaskChannelMembers(ctx context.Context, ownerID, taskID s
 		}
 		return nil, err
 	}
-	return s.store.ChannelMembersForConversation(ctx, route.InstanceID, route.ConversationID, 500)
+	return s.store.ChannelMembersForConversation(ctx, route.InstanceID, route.ConversationID)
 }
 
 func (s *Service) SetOwnerTaskChannelContacts(ctx context.Context, ownerID, taskID string, contacts []store.TaskChannelContactInput) ([]domain.ChannelContact, error) {
-	if len(contacts) > 50 {
-		return nil, fmt.Errorf("choose no more than 50 task channel contacts")
-	}
 	route, err := s.store.ActiveChannelTaskRouteForTask(ctx, taskID)
 	if err != nil {
 		return nil, err
@@ -307,7 +305,7 @@ func (s *Service) SetOwnerTaskChannelContacts(ctx context.Context, ownerID, task
 	if err := s.store.ReplaceTaskChannelContacts(ctx, taskID, route.InstanceID, route.ConversationID, contacts, s.now().UTC()); err != nil {
 		return nil, err
 	}
-	return s.store.TaskChannelContacts(ctx, taskID, route.InstanceID, route.ConversationID, 50)
+	return s.store.TaskChannelContacts(ctx, taskID, route.InstanceID, route.ConversationID)
 }
 
 func (s *Service) RefreshOwnerTaskChannelMembers(ctx context.Context, ownerID, taskID string) (domain.ChannelPluginCommand, error) {
@@ -1829,7 +1827,7 @@ func (s *Service) processInbound(ctx context.Context, receipt domain.ChannelInbo
 		if err != nil {
 			return err
 		}
-		if identity.Role == "owner" && identity.OwnerID == instance.OwnerID {
+		if !envelope.SenderIsBot && identity.Role == "owner" && identity.OwnerID == instance.OwnerID {
 			role = "owner"
 		}
 		envelope.SenderDisplayName = identity.DisplayName
@@ -2266,7 +2264,7 @@ func (s *Service) taskChannelContacts(ctx context.Context, taskID string) (domai
 	if err != nil || (instance.Status != "ready" && instance.Status != "degraded") {
 		return domain.ChannelDestination{}, nil, app.ErrAgentCallForbidden
 	}
-	contacts, err := s.store.TaskChannelContacts(ctx, taskID, route.InstanceID, route.ConversationID, 50)
+	contacts, err := s.store.TaskChannelContacts(ctx, taskID, route.InstanceID, route.ConversationID)
 	if err != nil {
 		return domain.ChannelDestination{}, nil, err
 	}
@@ -2332,9 +2330,6 @@ func (s *Service) sendTaskChannelOutreach(ctx context.Context, taskID, turnID st
 	// made the Agent pick a random member just to pass validation, which pinged
 	// an uninvolved person. When mentions are given they must still be real
 	// contacts of this group.
-	if len(input.MentionIdentityLinkIDs) > 5 {
-		return domain.ChannelDelivery{}, fmt.Errorf("choose at most 5 channel contacts")
-	}
 	available := map[string]bool{}
 	for _, contact := range contacts {
 		available[contact.IdentityLinkID] = true
@@ -2406,19 +2401,12 @@ func (s *Service) SendAgentChannelReply(ctx context.Context, claims agentapi.Cla
 	return delivery, nil
 }
 
-// maxReplyExtraMentions leaves one of the five mention slots a delivery
-// resolves for the sender of the message being answered.
-const maxReplyExtraMentions = 4
-
 // replyMentionIDs validates the extra people a reply wants to @. They must be
 // contacts the Owner selected for this Task's group, the same rule a blocker
 // outreach message follows, so a reply cannot summon someone outreach could not.
 func (s *Service) replyMentionIDs(ctx context.Context, taskID string, requested []string) ([]string, error) {
 	if len(requested) == 0 {
 		return nil, nil
-	}
-	if len(requested) > maxReplyExtraMentions {
-		return nil, fmt.Errorf("mention at most %d people besides the sender", maxReplyExtraMentions)
 	}
 	_, contacts, err := s.taskChannelContacts(ctx, taskID)
 	if err != nil {
@@ -3106,6 +3094,8 @@ func (s *Service) scopeKey(instanceID, endpointKind, identityID, chatID, senderI
 		return "", fmt.Errorf("secret store is unavailable")
 	}
 	const ref = "channel/runtime/scope_pepper"
+	s.scopeKeyMu.Lock()
+	defer s.scopeKeyMu.Unlock()
 	pepper, ok := s.secrets.Get(ref)
 	if !ok || pepper == "" {
 		value := make([]byte, 32)

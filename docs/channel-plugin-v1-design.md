@@ -52,6 +52,8 @@ SDK 返回的用户信息只有 `open_id` 与 `tenant_brand`，不返回 `tenant
 
 最小申请集一期锁定为应用身份权限 `im:message.p2p_msg:readonly`、`im:message.group_at_msg:readonly`、`im:message:send_as_bot`，事件 `im.message.receive_v1`，回调 `card.action.trigger`，以及经真实 SDK 验活证明为卡片发送所必需的最小 CardKit 权限。回复/引用消息的正文不在接收事件中，需按 `parent_id` 调用获取指定消息接口；该路径使用已有消息读取权限。群消息全量接收另在权限目录 v5 中申请应用级敏感权限 `im:message.group_msg` 和 `im:message.group_msg.include_bot:read`。读取失败只让引用上下文降级为 unavailable，不影响原消息入站。群消息全量接收和群白名单默认关闭。升级后，owner 在飞书渠道权限页勾选「群消息全量接收」，重新扫码授权，再对已绑定 Task 的群配置群白名单。飞书如要求管理员审核，以审核和发布结果为准。机器人非 @ 消息的推送需在授权后的测试群验证。见[飞书接收消息文档](https://open.larkenterprise.com/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/message/events/receive)。实施时用官方权限目录再次校验标识；未知标识不能因为 SDK 只校验形状而被当作已配置成功。
 
+飞书群 v1 只处理已绑定 Task 的群。首次在新群 @ AHA 机器人时，系统只登记群名和群 ID，供 owner 在 Task 页面绑定。默认只接收这些已绑定群的 @ 消息。开通全量接收后，插件先过滤白名单外的非 @ 消息，core 再校验群绑定和白名单，白名单外的正文不入库。普通群以消息的 `thread_id` 判断话题。顶层非 @ 消息只作旁听背景，保留 7 天 / 每群最近 200 条，下次相应话题被唤醒时最多注入 4 KiB。话题在收到首条消息后合并 6 秒，每个话题最多连续 3 次纯机器人 Turn，滚动一小时最多 12 次 Turn。顶层 @ 消息单独计入主聊天。话题内回复从原消息发出，撤回时回到话题根消息。显式 @ 使用 owner 为当前 Task 选定的群成员，自动 @ 只提醒原消息发送者。
+
 ### 3.3 明示的兼容分支
 
 若当前租户、区域或已安装 SDK 不支持一键注册，页面必须显示 `one_click_registration_unavailable` 及平台原因，再提供“官方后台快捷创建 + 一次性录入 App ID/App Secret”的手工分支；不得静默切换。手工 Secret 仍立即进入 Secret Store，响应只返回 configured。已存在应用的更新流程也必须由 Owner 显式选择，并在飞书确认页审阅增量权限。
@@ -480,7 +482,7 @@ Knowledge 范围按 endpoint 存在 `channel_knowledge_policies.scope_mode=all|s
 
 一期媒体范围为图片、文件双向收发，不包含音视频消息理解或转码。复用已有 attachments/blob、channel_plugin_commands、channel_inbox_dedup 和 channel_delivery_outbox，不增加提供方专属领域表。
 
-- 入站：校验实例、私聊 Owner 或群聊 @、会话与目标 Task → 持久化逐资源 download_resource 命令 → 插件按原消息与资源标识下载 → 凭 command lease 上传 → 核心以确定性附件 ID 存储 → 将附件与用户消息、收件完成状态在同一事务内绑定。等待过程中改变接管目标不会把已授权资源静默转入新 Task。
+- 入站：校验实例、私聊 Owner 或有唤醒资格的群聊消息、会话与目标 Task → 持久化逐资源 download_resource 命令 → 插件按原消息与资源标识下载 → 凭 command lease 上传 → 核心以确定性附件 ID 存储 → 将附件与用户消息、收件完成状态在同一事务内绑定。等待过程中改变接管目标不会把已授权资源静默转入新 Task。
 - 出站：Agent 通过通用附件 API 上传并在 turn/messages 中引用附件 → 主 Agent 最终回复事件收集本 Turn 的结果附件 → 正文和每个附件拆成独立有序投递 → 按 delivery lease 读取文件 → 飞书上传 → 核心持久化资源 key → 使用稳定 UUID 发送 → ack/nack。群聊仍仅投递最终回复及随附文件，owner_global 状态订阅不携带附件。
 - 通用发送契约：上述上传与消息绑定步骤进入所有 Task 必带、不可编辑的 Agent API Protocol 及 agent-api.md，不依赖当前 Task Memory、选中 Skill、Backend 或 Web/外部渠道模板。生成工具预览、描述文字、Markdown 和本地路径不等于 AHA 附件；必须取得真实文件、检查上传成功并读取 attachment.id，再将其绑定到当前 Task/Turn 消息。禁止复用其他 Task 的附件 ID。上传/绑定成功仅表示消息关联完成，Web 可见与飞书送达须分别以回执或 Owner 反馈验收；无匹配渠道订阅的普通 Web Task 不自动发送到飞书。
 - 新增版本化接口：POST /api/channel-runtime/v1/commands/{id}/attachment；GET /api/channel-runtime/v1/deliveries/{id}/attachment；POST /api/channel-runtime/v1/deliveries/{id}/media。新增 channel.media.upload/read capability，均强制实例与租约绑定；接口不接受任意 Task、文件路径或资源 URL。

@@ -464,11 +464,11 @@ func TestTaskChannelRouteAPI(t *testing.T) {
 		t.Fatalf("plain group post status=%d payload=%#v", response.StatusCode, plainSent)
 	}
 	response = agentRequest(t, server.URL+"/api/v1/agent/channel/messages", http.MethodPost, token, map[string]any{
-		"request_id": "too-many-mentions", "purpose": "blocker", "message": "不应发送",
+		"request_id": "unverified-mentions", "purpose": "blocker", "message": "不应发送",
 		"mention_identity_link_ids": []string{"a", "b", "c", "d", "e", "f"},
 	})
 	if response.StatusCode != http.StatusBadRequest {
-		t.Fatalf("more than five mentions status=%d", response.StatusCode)
+		t.Fatalf("unverified mentions status=%d", response.StatusCode)
 	}
 	response.Body.Close()
 
@@ -481,15 +481,13 @@ func TestTaskChannelRouteAPI(t *testing.T) {
 	}
 	response.Body.Close()
 
-	// A reply may @ people besides the sender, but only this Task's selected
-	// contacts and at most four of them; both are refused before any delivery
-	// is queued, so the receipt in these probes never has to exist.
+	// Unverified members are refused before any delivery is queued.
 	for name, probe := range map[string]struct {
 		mentions []string
 		want     string
 	}{
-		"unknown contact":   {[]string{"channel-route-unknown"}, "channel contact is not available"},
-		"too many mentions": {[]string{"a", "b", "c", "d", "e"}, "mention at most 4 people"},
+		"unknown contact": {[]string{"channel-route-unknown"}, "channel contact is not available"},
+		"unverified list": {[]string{"a", "b", "c", "d", "e", "f"}, "channel contact is not available"},
 	} {
 		response = agentRequest(t, server.URL+"/api/v1/agent/channel/replies", http.MethodPost, token, map[string]any{
 			"request_id": "reply-mention-probe", "inbound_receipt_id": "channel_inbox_missing", "message": "不应发送",
@@ -553,7 +551,7 @@ func TestTaskChannelRouteAPI(t *testing.T) {
 	if err != nil || currentRoute.TargetTaskID != takeoverTask.ID {
 		t.Fatalf("transferred route=%#v err=%v", currentRoute, err)
 	}
-	takeoverContacts, err := database.TaskChannelContacts(ctx, takeoverTask.ID, instance.ID, conversation.ID, 50)
+	takeoverContacts, err := database.TaskChannelContacts(ctx, takeoverTask.ID, instance.ID, conversation.ID)
 	if err != nil || len(takeoverContacts) != 1 {
 		t.Fatalf("transferred contacts=%#v err=%v", takeoverContacts, err)
 	}

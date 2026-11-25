@@ -47,6 +47,7 @@ type bootstrap struct {
 type runtimeClient struct {
 	baseURL, instanceID, token string
 	http                       *http.Client
+	groupTopics                bool
 }
 
 type command struct {
@@ -259,7 +260,12 @@ func (c *runtimeClient) request(ctx context.Context, method, path string, body, 
 }
 
 func (c *runtimeClient) handshake(ctx context.Context, boot bootstrap) error {
-	return c.request(ctx, http.MethodPost, "/api/channel-runtime/v1/handshake", map[string]any{"schema_version": 1, "instance_id": c.instanceID, "plugin_id": boot.PluginID, "supported_protocols": []string{"channel-runtime/v1"}, "boot_id": fmt.Sprint(time.Now().UnixNano())}, &map[string]any{})
+	var result struct {
+		GroupTopics bool `json:"group_topics"`
+	}
+	err := c.request(ctx, http.MethodPost, "/api/channel-runtime/v1/handshake", map[string]any{"schema_version": 1, "instance_id": c.instanceID, "plugin_id": boot.PluginID, "supported_protocols": []string{"channel-runtime/v1"}, "boot_id": fmt.Sprint(time.Now().UnixNano())}, &result)
+	c.groupTopics = result.GroupTopics
+	return err
 }
 
 func (c *runtimeClient) claimCommands(ctx context.Context) ([]command, error) {
@@ -426,10 +432,11 @@ type channelLifecycle interface {
 // inbound observation. Lifecycle callbacks only update it; the reporter sends
 // it asynchronously so a slow AHA runtime can never block SDK reconnects.
 type channelHealthState struct {
-	mu            sync.Mutex
-	status        string
-	errorCode     string
-	lastInboundAt time.Time
+	mu                       sync.Mutex
+	status                   string
+	errorCode                string
+	lastInboundAt            time.Time
+	lastNonMentionBotTopicAt time.Time
 }
 
 func (s *channelHealthState) set(status, errorCode string) {
@@ -444,12 +451,21 @@ func (s *channelHealthState) inbound() {
 	s.mu.Unlock()
 }
 
+func (s *channelHealthState) observeNonMentionBotTopic() {
+	s.mu.Lock()
+	s.lastNonMentionBotTopicAt = time.Now().UTC()
+	s.mu.Unlock()
+}
+
 func (s *channelHealthState) snapshot() (string, string, map[string]string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	metadata := map[string]string{}
 	if !s.lastInboundAt.IsZero() {
 		metadata["last_inbound_at"] = s.lastInboundAt.Format(time.RFC3339Nano)
+	}
+	if !s.lastNonMentionBotTopicAt.IsZero() {
+		metadata["last_non_mention_bot_topic_at"] = s.lastNonMentionBotTopicAt.Format(time.RFC3339Nano)
 	}
 	return s.status, s.errorCode, metadata
 }
@@ -517,7 +533,11 @@ func runChannel(ctx context.Context, runtime *runtimeClient, boot bootstrap) err
 	selfBotOpenID, selfBotName := feishuBotIdentity(ctx, client)
 	safety := channeltypes.DefaultChannelConfig().Safety
 	safety.Batch.DelayMs = 0
-	requireMention := len(boot.GroupMessageAllowlist) == 0
+	allowlist := boot.GroupMessageAllowlist
+	if !runtime.groupTopics {
+		allowlist = nil
+	}
+	requireMention := len(allowlist) == 0
 	channel := larkchannel.NewChannel(client, wsClient,
 		channeltypes.WithSafetyConfig(safety),
 		channeltypes.WithPolicyConfig(channeltypes.PolicyConfig{RequireMention: &requireMention}),
@@ -530,7 +550,7 @@ func runChannel(ctx context.Context, runtime *runtimeClient, boot bootstrap) err
 	go reporter.run(ctx)
 	registerChannelHealth(channel, reporter.set)
 	channel.OnMessage(func(eventCtx context.Context, message *channeltypes.NormalizedMessage) error {
-		if !allowInboundMessage(message, boot.GroupMessageAllowlist) {
+		if !allowInboundMessage(message, allowlist) {
 			return nil
 		}
 		healthState.inbound()
@@ -566,7 +586,14 @@ func runChannel(ctx context.Context, runtime *runtimeClient, boot bootstrap) err
 		if replyContext := <-replyContextResult; replyContext != nil {
 			payload["reply_context"] = replyContext
 		}
-		return runtime.inbound(eventCtx, payload)
+		if err := runtime.inbound(eventCtx, payload); err != nil {
+			return err
+		}
+		if runtime.groupTopics && message.ChatType == "group" && threadID != "" && !message.MentionedBot && inboundSenderIsBot(message) {
+			healthState.observeNonMentionBotTopic()
+			reporter.notify()
+		}
+		return nil
 	})
 	wsClient.EventHandler().OnP2BotMenuV6(func(eventCtx context.Context, event *larkapplication.P2BotMenuV6) error {
 		if event == nil || event.Event == nil || event.Event.Operator == nil || event.Event.Operator.OperatorId == nil || event.Event.Operator.OperatorId.OpenId == nil || event.Event.EventKey == nil || event.EventV2Base == nil || event.EventV2Base.Header == nil {
@@ -815,7 +842,8 @@ func (c *runtimeClient) health(ctx context.Context, status, code string, metadat
 	payload := map[string]any{"schema_version": 1, "status": status, "error_code": code, "heartbeat": "1"}
 	for _, values := range metadata {
 		for key, value := range values {
-			if key == "bot_open_id" || key == "bot_display_name" || key == "last_inbound_at" {
+			if key == "bot_open_id" || key == "bot_display_name" || key == "last_inbound_at" ||
+				(c.groupTopics && key == "last_non_mention_bot_topic_at") {
 				payload[key] = strings.TrimSpace(value)
 			}
 		}
@@ -824,6 +852,13 @@ func (c *runtimeClient) health(ctx context.Context, status, code string, metadat
 }
 
 func (c *runtimeClient) inbound(ctx context.Context, payload map[string]any) error {
+	if !c.groupTopics {
+		// Older cores reject unknown JSON fields. Keep the original v1
+		// sender fields and the quote context understood by those cores.
+		delete(payload, "thread_id")
+		delete(payload, "root_id")
+		delete(payload, "sender_type")
+	}
 	return c.request(ctx, http.MethodPost, "/api/channel-runtime/v1/instances/"+c.instanceID+"/inbound-events", payload, &map[string]any{})
 }
 
@@ -880,7 +915,11 @@ func syncChatMembersCommand(ctx context.Context, client *lark.Client, item comma
 	}
 	members := []map[string]any{}
 	pageToken := ""
-	for page := 0; page < 10; page++ {
+	seenTokens := map[string]bool{}
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		builder := larkim.NewGetChatMembersReqBuilder().ChatId(chatID).MemberIdType("open_id").PageSize(100)
 		if pageToken != "" {
 			builder.PageToken(pageToken)
@@ -907,14 +946,15 @@ func syncChatMembersCommand(ctx context.Context, client *lark.Client, item comma
 				// Other bots are learned from message mention events instead.
 				"is_bot": false,
 			})
-			if len(members) >= 1000 {
-				return map[string]any{"members": members}, nil
-			}
 		}
-		if response.Data.HasMore == nil || !*response.Data.HasMore || response.Data.PageToken == nil || *response.Data.PageToken == "" {
+		if response.Data.HasMore == nil || !*response.Data.HasMore {
 			break
 		}
-		pageToken = *response.Data.PageToken
+		pageToken = optionalString(response.Data.PageToken)
+		if pageToken == "" || seenTokens[pageToken] {
+			return nil, errors.New("invalid Feishu member pagination")
+		}
+		seenTokens[pageToken] = true
 	}
 	return map[string]any{"members": members}, nil
 }

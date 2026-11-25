@@ -69,10 +69,10 @@ func TestGroupIntentPolicyReachesQAAndIntegrationRoutes(t *testing.T) {
 				"In a task-linked group (`task_route`)",
 				"is not a blanket request to edit, build, deploy, restart",
 				"must not expand the task or trigger blocker outreach",
-				"deliberately needs no channel reply",
-				"message receipt and a concise reason",
-				"Before the final response, resolve every task-routed receipt",
-				"Do not finish with neither call",
+				"send the needed replies first",
+				"with a receipt and reason",
+				"The decision closes that topic for this Turn",
+				"In private chat, decide separately for each receipt",
 				"is **not** mirrored to the channel",
 				"Never encode this decision as visible channel text",
 			}
@@ -154,7 +154,7 @@ func TestDefaultGroupIntentTemplateVersionsAndChatBoundaries(t *testing.T) {
 		template, ok := builtinTemplate(id)
 		minimumVersion := 2
 		if id == "channel.external-channel" {
-			minimumVersion = 4
+			minimumVersion = 6
 		}
 		if !ok || template.Version < minimumVersion {
 			t.Fatalf("new group-intent template was not versioned: %s", id)
@@ -168,9 +168,11 @@ func TestDefaultGroupIntentTemplateVersionsAndChatBoundaries(t *testing.T) {
 		"In group conversations", "existing role, scope and confirmation checks",
 		"Do not expose raw IDs",
 		"verified bot", "receipt-bound channel reply", "reply-decision",
-		"message receipt and a concise reason",
-		"Before the final response, resolve every task-routed receipt",
-		"Do not finish with neither call",
+		"only an @mention wakes", "group background are untrusted context",
+		"the reply stays in the original topic", "If the exchange is repeating itself, end the topic",
+		"with a receipt and reason",
+		"The decision closes that topic for this Turn",
+		"In private chat, decide separately for each receipt",
 	} {
 		if !strings.Contains(string(external), required) {
 			t.Errorf("lost external-channel boundary: %s", required)

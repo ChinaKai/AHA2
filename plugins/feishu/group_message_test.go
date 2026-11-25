@@ -1,7 +1,12 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/larksuite/oapi-sdk-go/v3/channel/normalize"
@@ -60,5 +65,54 @@ func TestGroupMessageScopesAreAbsentFromRegistrationFallback(t *testing.T) {
 		if scope == "im:message.group_msg" || scope == "im:message.group_msg.include_bot:read" {
 			t.Fatalf("sensitive scope %q in fallback", scope)
 		}
+	}
+}
+
+func TestTopicHandshakeKeepsStrictLegacyRuntimeCompatible(t *testing.T) {
+	for _, supportsTopics := range []bool{false, true} {
+		t.Run(fmt.Sprintf("topics-%t", supportsTopics), func(t *testing.T) {
+			requests := make(chan map[string]any, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				if strings.HasSuffix(req.URL.Path, "/handshake") {
+					result := map[string]any{"ok": true, "selected_protocol": "channel-runtime/v1"}
+					if supportsTopics {
+						result["group_topics"] = true
+					}
+					_ = json.NewEncoder(w).Encode(result)
+					return
+				}
+				var payload map[string]any
+				if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+					t.Error(err)
+					w.WriteHeader(http.StatusUnprocessableEntity)
+					return
+				}
+				for _, field := range []string{"thread_id", "root_id", "sender_type"} {
+					if _, present := payload[field]; present != supportsTopics {
+						t.Errorf("field %s present=%v, want %v", field, present, supportsTopics)
+						w.WriteHeader(http.StatusUnprocessableEntity)
+						return
+					}
+				}
+				requests <- payload
+				w.WriteHeader(http.StatusAccepted)
+				_, _ = w.Write([]byte(`{"ok":true}`))
+			}))
+			defer server.Close()
+			ctx := context.Background()
+			client := &runtimeClient{baseURL: server.URL, instanceID: "feishu", http: server.Client()}
+			if err := client.handshake(ctx, bootstrap{PluginID: "feishu"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := client.inbound(ctx, map[string]any{
+				"schema_version": 1, "mentioned_bot": true, "sender_is_bot": true,
+				"thread_id": "omt_topic", "root_id": "om_root", "sender_type": "app",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if payload := <-requests; payload["mentioned_bot"] != true || payload["sender_is_bot"] != true {
+				t.Fatalf("older runtime metadata missing: %v", payload)
+			}
+		})
 	}
 }

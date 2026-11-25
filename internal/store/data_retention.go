@@ -46,6 +46,7 @@ var databaseCatalog = []databaseCategoryDef{
 		"channel_sessions", "channel_subscriptions", "channel_task_contacts", "channel_task_routes",
 		"channel_onboarding_sessions", "channel_pending_actions", "channel_knowledge_grants",
 		"channel_knowledge_policies", "channel_handoffs",
+		"channel_group_listening", "channel_group_receipts", "channel_topic_turns",
 	}},
 	{"F", "mail", domain.DatabaseSafetyKeep, "", []string{
 		"mail_accounts", "mail_account_aliases", "mail_templates", "mail_template_versions", "mail_bindings",

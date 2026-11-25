@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -82,8 +83,17 @@ func TestChannelTopicTurnLimitsAreIsolatedAndPersistOutcomes(t *testing.T) {
 		}
 		return turn
 	}
+	var lastBotTurn domain.Turn
 	for range channelTopicBotLimit {
-		submit("omt_bot_limit", true, "")
+		lastBotTurn = submit("omt_bot_limit", true, "")
+	}
+	retry := lastBotTurn
+	retry.ID = domain.NewID("turn")
+	retry.ParentTurnID = lastBotTurn.ID
+	retry.Attempt = 2
+	retry.QueuedAt = lastBotTurn.QueuedAt.Add(time.Second)
+	if _, err := database.CreateAgentTurn(ctx, retry); !errors.Is(err, ErrChannelTopicTurnLimited) {
+		t.Fatalf("retry bypassed topic turn cap: %v", err)
 	}
 	submit("", false, "") // A human top-level message does not reset the topic.
 	submit("omt_bot_limit", true, "topic_bot_turn_limit")

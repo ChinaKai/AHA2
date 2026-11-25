@@ -105,9 +105,8 @@ func channelMCPTools() []mcpTool {
 						"description": "Optional attachment IDs uploaded during this Turn.",
 					},
 					"mention_identity_link_ids": map[string]any{
-						"type":     "array",
-						"items":    map[string]any{"type": "string"},
-						"maxItems": 4,
+						"type":  "array",
+						"items": map[string]any{"type": "string"},
 						"description": "Group only: identity_link_id values from channel_contacts for people to @ " +
 							"besides the sender. Use it only when that person must act. Do not also type @name in the message.",
 					},
@@ -148,9 +147,8 @@ func channelMCPTools() []mcpTool {
 		},
 		{
 			Name: "channel_reply_decision",
-			Description: "End this channel Turn without replying. Use only when the message " +
-				"deliberately needs no reply. The reason is shown on the AHA Web status card, " +
-				"not sent to the group.",
+			Description: "Close replies for this Feishu group topic, or for the selected private-chat receipt. " +
+				"Send any needed replies first. The reason appears on the AHA Web status card.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

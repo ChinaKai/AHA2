@@ -1096,9 +1096,7 @@ func (s *Store) ClaimInboxAndCreateTurn(
 		return domain.Turn{}, nil, err
 	}
 	if topic.conversationID != "" {
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO channel_topic_turns(turn_id,conversation_id,thread_id,queued_ms,bot_only)
-			VALUES(?,?,?,?,?)`, turn.ID, topic.conversationID, topic.threadID, turn.QueuedAt.UnixMilli(), topic.botOnly); err != nil {
+		if err := insertChannelTopicTurn(ctx, tx, turn, topic); err != nil {
 			return domain.Turn{}, nil, err
 		}
 	}

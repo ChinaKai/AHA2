@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -33,6 +34,9 @@ CREATE TABLE IF NOT EXISTS channel_group_receipts (
 CREATE INDEX IF NOT EXISTS idx_channel_group_receipts_open
 ON channel_group_receipts(route_id,target_task_id,thread_id,ready_ms);
 CREATE INDEX IF NOT EXISTS idx_channel_group_receipts_batch ON channel_group_receipts(batch_id);
+CREATE INDEX IF NOT EXISTS idx_channel_inbox_provider_message
+ON channel_inbox_dedup(conversation_id,json_extract(normalized_payload_json,'$.external_message_id'))
+WHERE event_type='message' AND conversation_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS channel_group_listening (
     id TEXT PRIMARY KEY,
@@ -105,6 +109,30 @@ func (s *Store) ReceiveChannelGroupMessage(ctx context.Context, receipt domain.C
 		return domain.ChannelInboxReceipt{}, false, err
 	}
 	receipt.ConversationID = route.ConversationID
+	if envelope.ExternalMessageID != "" {
+		// Feishu can redeliver the same message using another event ID.
+		existing, err := scanChannelInbox(tx.QueryRowContext(ctx, `
+			SELECT `+channelInboxColumns+` FROM channel_inbox_dedup
+			WHERE conversation_id=? AND event_type='message'
+			  AND json_extract(normalized_payload_json,'$.external_message_id')=?
+			ORDER BY received_at LIMIT 1`, route.ConversationID, envelope.ExternalMessageID))
+		if err == nil {
+			return existing, true, tx.Commit()
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return domain.ChannelInboxReceipt{}, false, err
+		}
+		var listeningID string
+		err = tx.QueryRowContext(ctx, `SELECT id FROM channel_group_listening WHERE conversation_id=? AND message_id=?`,
+			route.ConversationID, envelope.ExternalMessageID).Scan(&listeningID)
+		if err == nil {
+			receipt.ID, receipt.State, receipt.Outcome, receipt.NormalizedPayload = listeningID, "listening", "listening_only", nil
+			return receipt, true, tx.Commit()
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return domain.ChannelInboxReceipt{}, false, err
+		}
+	}
 	if !envelope.MentionedBot && envelope.ThreadID == "" {
 		return storeListeningMessage(ctx, tx, receipt, route, envelope)
 	}
@@ -215,6 +243,7 @@ func (s *Store) ChannelListeningContext(ctx context.Context, taskID, conversatio
 		if remaining <= len(prefix) {
 			break
 		}
+		content = strings.NewReplacer("\r", " ", "\n", " ").Replace(content)
 		line := limitChannelText(prefix+content, remaining)
 		lines = append(lines, line)
 		remaining -= len(line) + 1
@@ -460,4 +489,39 @@ func (s *Store) ChannelTopicReplyDecision(ctx context.Context, turnID, conversat
 		SELECT decision FROM channel_topic_turns WHERE turn_id=? AND conversation_id=? AND thread_id=?`,
 		turnID, conversationID, threadID).Scan(&decision)
 	return decision, err
+}
+
+var ErrChannelTopicTurnLimited = errors.New("group topic Turn limit reached")
+
+func admitChannelTopicRetry(ctx context.Context, tx *sql.Tx, turn domain.Turn) error {
+	if turn.Attempt <= 1 || turn.ParentTurnID == "" {
+		return nil
+	}
+	var topic channelTopicTurn
+	err := tx.QueryRowContext(ctx, `
+		SELECT topic.conversation_id,topic.thread_id,topic.bot_only
+		FROM channel_topic_turns topic JOIN turns previous ON previous.id=topic.turn_id
+		WHERE topic.turn_id=? AND topic.queued_ms>0 AND previous.task_id=? AND previous.inbox_batch_id=?`,
+		turn.ParentTurnID, turn.TaskID, turn.InboxBatchID).Scan(&topic.conversationID, &topic.threadID, &topic.botOnly)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	outcome, err := channelTopicTurnLimit(ctx, tx, topic, turn.QueuedAt)
+	if err != nil {
+		return err
+	}
+	if outcome != "" {
+		return fmt.Errorf("%w: %s", ErrChannelTopicTurnLimited, outcome)
+	}
+	return insertChannelTopicTurn(ctx, tx, turn, topic)
+}
+
+func insertChannelTopicTurn(ctx context.Context, tx *sql.Tx, turn domain.Turn, topic channelTopicTurn) error {
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO channel_topic_turns(turn_id,conversation_id,thread_id,queued_ms,bot_only)
+		VALUES(?,?,?,?,?)`, turn.ID, topic.conversationID, topic.threadID, turn.QueuedAt.UnixMilli(), topic.botOnly)
+	return err
 }

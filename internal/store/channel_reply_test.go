@@ -108,12 +108,12 @@ func TestAgentChannelReplyIsReceiptBoundAndIdempotent(t *testing.T) {
 	receiptID := domain.NewID("channel_inbox")
 	normalized, _ := json.Marshal(map[string]any{
 		"external_message_id": "provider-message-reply",
-		"mentioned_bot":       true,
+		"mentioned_bot":       false, "thread_id": "omt_human", "root_id": "om_root",
 	})
 	channelContext := map[string]any{
 		"schema": "aha.channel-context/v1", "provider": "feishu", "instance_id": instance.ID,
 		"conversation_id": conversation.ID, "endpoint": endpoint.Kind,
-		"chat_display_name": conversation.DisplayName, "inbound_receipt_id": receiptID,
+		"chat_display_name": conversation.DisplayName, "inbound_receipt_id": receiptID, "thread_id": "omt_human",
 		"route": map[string]any{"mode": "task_route", "target_task_id": task.ID},
 		"actor": map[string]any{
 			"identity_link_id": actor.ID, "display_name": actor.DisplayName,
@@ -197,7 +197,8 @@ func TestAgentChannelReplyIsReceiptBoundAndIdempotent(t *testing.T) {
 	}
 	target, err := database.ChannelDeliveryTarget(ctx, conversation.ID, delivery.SourceEventSequence)
 	if err != nil || target["reply_message_id"] != "provider-message-reply" ||
-		target["mention_user_ids"] != `["provider-user-reply"]` {
+		target["mention_user_ids"] != `["provider-user-reply"]` ||
+		target["thread_id"] != "omt_human" || target["root_id"] != "om_root" {
 		t.Fatalf("reply target=%#v err=%v", target, err)
 	}
 
@@ -276,6 +277,23 @@ func TestAgentChannelReplyIsReceiptBoundAndIdempotent(t *testing.T) {
 		t.Fatalf("owner reply target=%#v err=%v", ownerTarget, err)
 	}
 
+	// An automatic legacy Round reply selects one receipt and its sender.
+	sourceID := domain.NewID("channel_source_event")
+	if err := database.AppendChannelSourceAndProject(ctx, domain.ChannelSourceEvent{
+		ID: sourceID, SourceKey: "legacy-automatic", TaskID: task.ID, RoundID: round.ID, TurnID: turn.ID,
+		EventClass: "message", EventType: "agent_reply", OccurredAt: now,
+	}, ""); err != nil {
+		t.Fatal(err)
+	}
+	var sequence int64
+	if err := database.db.QueryRowContext(ctx, `SELECT sequence FROM channel_source_events WHERE id=?`, sourceID).Scan(&sequence); err != nil {
+		t.Fatal(err)
+	}
+	automatic, err := database.ChannelDeliveryTarget(ctx, conversation.ID, sequence)
+	if err != nil || automatic["reply_message_id"] != "provider-message-owner" || automatic["mention_user_ids"] != `["provider-user-owner"]` {
+		t.Fatalf("automatic round target=%v err=%v", automatic, err)
+	}
+
 	// A reply can also summon someone other than the sender. The sender keeps
 	// the first mention slot, a repeated ID is not mentioned twice, and typing
 	// "@name" in the text is not needed for either of them.
@@ -294,13 +312,14 @@ func TestAgentChannelReplyIsReceiptBoundAndIdempotent(t *testing.T) {
 	botReceiptID := domain.NewID("channel_inbox")
 	botNormalized, _ := json.Marshal(map[string]any{
 		"external_message_id": "provider-message-bot",
-		"mentioned_bot":       true,
+		"mentioned_bot":       false, "thread_id": "omt_bot", "root_id": "om_bot_root",
 	})
 	botContext := make(map[string]any, len(channelContext))
 	for key, value := range channelContext {
 		botContext[key] = value
 	}
 	botContext["inbound_receipt_id"] = botReceiptID
+	botContext["thread_id"] = "omt_bot"
 	botContext["actor"] = map[string]any{
 		"identity_link_id": actor.ID, "display_name": "联调机器人",
 		"role": "participant", "is_bot": true,
@@ -345,10 +364,8 @@ func TestAgentChannelReplyIsReceiptBoundAndIdempotent(t *testing.T) {
 	if err != nil || botDelivery.ID == "" {
 		t.Fatalf("explicit bot reply delivery=%#v err=%v", botDelivery, err)
 	}
-	var replyDecision string
-	if err := database.db.QueryRowContext(ctx,
-		`SELECT channel_reply_decision FROM turns WHERE id=?`, turn.ID,
-	).Scan(&replyDecision); err != nil || replyDecision != "continue" {
+	replyDecision, err := database.ChannelTopicReplyDecision(ctx, turn.ID, conversation.ID, "omt_bot")
+	if err != nil || replyDecision != "continue" {
 		t.Fatalf("bot reply decision=%q err=%v", replyDecision, err)
 	}
 	statuses, err = database.ReconcileChannelMessageStatuses(
@@ -358,9 +375,7 @@ func TestAgentChannelReplyIsReceiptBoundAndIdempotent(t *testing.T) {
 		statuses[0].Payload["delivery_state"] != "pending" {
 		t.Fatalf("replied status cards=%#v err=%v", statuses, err)
 	}
-	if _, err := database.db.ExecContext(ctx,
-		`UPDATE turns SET channel_reply_decision='end' WHERE id=?`, turn.ID,
-	); err != nil {
+	if err := database.SetChannelTopicReplyDecision(ctx, turn.ID, conversation.ID, "omt_bot", "end", "没有新信息"); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, _, err := database.EnqueueAgentChannelReply(
@@ -369,12 +384,20 @@ func TestAgentChannelReplyIsReceiptBoundAndIdempotent(t *testing.T) {
 		t.Fatalf("reply after bot dialogue end err=%v", err)
 	}
 
+	humanDelivery, _, _, err := database.EnqueueAgentChannelReply(
+		ctx, task.ID, turn.ID, "human-reply-after-other-topic-end", receiptID, "继续人类话题", nil, now.Add(2*time.Second),
+	)
+	if err != nil || humanDelivery.ID == "" {
+		t.Fatalf("ending a bot topic affected a human topic in the same Turn: %v", err)
+	}
+
 	silentReceiptID := domain.NewID("channel_inbox")
 	silentContext := make(map[string]any, len(channelContext))
 	for key, value := range channelContext {
 		silentContext[key] = value
 	}
 	silentContext["inbound_receipt_id"] = silentReceiptID
+	silentContext["thread_id"] = "omt_silent"
 	silentPayloadJSON := encodeJSON(map[string]any{
 		"channel_receipt_id": silentReceiptID,
 		"channel_context":    silentContext,
@@ -413,6 +436,9 @@ func TestAgentChannelReplyIsReceiptBoundAndIdempotent(t *testing.T) {
 	activeGroupRoute, err := database.HasActiveTaskGroupRoute(ctx, task.ID)
 	if err != nil || !activeGroupRoute {
 		t.Fatalf("active task group route=%v err=%v", activeGroupRoute, err)
+	}
+	if err := database.SetChannelTopicReplyDecision(ctx, turn.ID, conversation.ID, "omt_silent", "end", "这是群聊里的玩笑，没有需要处理的请求。"); err != nil {
+		t.Fatal(err)
 	}
 	statuses, err = database.ReconcileChannelMessageStatuses(
 		ctx, task.ID, turn.ID, silentReceiptID, "decided_end", "reply_decision_end",
@@ -597,7 +623,8 @@ func TestAgentChannelReplyIsReceiptBoundAndIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	deliveries, err := database.ChannelDeliveries(ctx, instance.ID, 20)
-	if err != nil || len(deliveries) != 6 ||
+	if err != nil || len(deliveries) != 7 ||
+		!slices.ContainsFunc(deliveries, func(item domain.ChannelDelivery) bool { return item.ID == humanDelivery.ID }) ||
 		!slices.ContainsFunc(deliveries, func(item domain.ChannelDelivery) bool { return item.ID == delivery.ID }) ||
 		!slices.ContainsFunc(deliveries, func(item domain.ChannelDelivery) bool { return item.ID == mentionDelivery.ID }) ||
 		!slices.ContainsFunc(deliveries, func(item domain.ChannelDelivery) bool { return item.ID == ownerDelivery.ID }) ||

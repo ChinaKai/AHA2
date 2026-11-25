@@ -144,7 +144,7 @@ func TestHandoffTaskChannelRouteCopiesContactsAndPreservesSingleActiveTarget(t *
 	if _, err := database.ActiveChannelTaskRouteForTask(ctx, "clone-channel-source"); err == nil {
 		t.Fatal("source channel route remained active")
 	}
-	contacts, err := database.TaskChannelContacts(ctx, "clone-channel-target", instance.ID, conversation.ID, 50)
+	contacts, err := database.TaskChannelContacts(ctx, "clone-channel-target", instance.ID, conversation.ID)
 	if err != nil || len(contacts) != 1 || contacts[0].IdentityLinkID != participant.ID || contacts[0].CollaborationRole != "firmware" {
 		t.Fatalf("target contacts=%#v err=%v", contacts, err)
 	}

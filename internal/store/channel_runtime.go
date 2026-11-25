@@ -640,57 +640,25 @@ func (s *Store) ChannelDeliveryTarget(ctx context.Context, conversationID string
 		}
 		setChannelReplyTarget(target, normalizedPayloadJSON)
 	} else if taskID != "" && roundID != "" {
-		rows, err := s.db.QueryContext(ctx, `SELECT payload_json FROM conversation_items WHERE task_id=? AND round_id=? AND kind='user_message' ORDER BY sequence`, taskID, roundID)
+		var receiptPayload, actorID string
+		err := s.db.QueryRowContext(ctx, `
+			SELECT r.normalized_payload_json,COALESCE(json_extract(i.payload_json,'$.channel_context.actor.identity_link_id'),'')
+			FROM conversation_items i
+			JOIN channel_inbox_dedup r ON r.id=json_extract(i.payload_json,'$.channel_receipt_id')
+			WHERE i.task_id=? AND i.round_id=? AND i.kind='user_message' AND r.conversation_id=?
+			  AND r.state='processed' AND r.outcome<>'listening_only'
+			ORDER BY i.sequence DESC LIMIT 1`, taskID, roundID, conversationID).Scan(&receiptPayload, &actorID)
 		if err == nil {
-			payloads := []string{}
-			for rows.Next() {
-				var payloadJSON string
-				if rows.Scan(&payloadJSON) == nil {
-					payloads = append(payloads, payloadJSON)
+			setChannelReplyTarget(target, receiptPayload)
+			if target["reply_message_id"] != "" {
+				var userID, name string
+				err = s.db.QueryRowContext(ctx, `
+					SELECT external_user_id,display_name FROM channel_identity_links
+					WHERE id=? AND instance_id=? AND status='active'`, actorID, instanceID).Scan(&userID, &name)
+				if err == nil && userID != "" {
+					target["mention_user_ids"] = encodeJSON([]string{userID})
+					target["mention_names"] = encodeJSON([]string{name})
 				}
-			}
-			_ = rows.Close()
-			identityNames := map[string]string{}
-			identityOrder := []string{}
-			for _, payloadJSON := range payloads {
-				payload := decodeJSON(payloadJSON, map[string]any{})
-				channelContext, _ := payload["channel_context"].(map[string]any)
-				if strings.TrimSpace(fmt.Sprint(channelContext["conversation_id"])) != conversationID {
-					continue
-				}
-				receiptID := strings.TrimSpace(fmt.Sprint(payload["channel_receipt_id"]))
-				if receiptID != "" && receiptID != "<nil>" {
-					var normalizedPayloadJSON string
-					if err := s.db.QueryRowContext(ctx, `SELECT normalized_payload_json FROM channel_inbox_dedup WHERE id=? AND conversation_id=?`, receiptID, conversationID).Scan(&normalizedPayloadJSON); err == nil {
-						setChannelReplyTarget(target, normalizedPayloadJSON)
-					}
-				}
-				actor, _ := channelContext["actor"].(map[string]any)
-				identityID := strings.TrimSpace(fmt.Sprint(actor["identity_link_id"]))
-				if identityID != "" && identityID != "<nil>" {
-					if _, exists := identityNames[identityID]; !exists && len(identityOrder) < 5 {
-						identityOrder = append(identityOrder, identityID)
-						identityNames[identityID] = strings.TrimSpace(fmt.Sprint(actor["display_name"]))
-					}
-				}
-			}
-			userIDs, names := []string{}, []string{}
-			for _, identityID := range identityOrder {
-				var externalUserID, displayName string
-				if err := s.db.QueryRowContext(ctx, `SELECT external_user_id,display_name FROM channel_identity_links WHERE id=? AND status='active'`, identityID).Scan(&externalUserID, &displayName); err != nil || externalUserID == "" {
-					continue
-				}
-				if identityNames[identityID] != "" && identityNames[identityID] != "<nil>" {
-					displayName = identityNames[identityID]
-				}
-				userIDs = append(userIDs, externalUserID)
-				names = append(names, displayName)
-			}
-			if len(userIDs) > 0 {
-				rawIDs, _ := json.Marshal(userIDs)
-				rawNames, _ := json.Marshal(names)
-				target["mention_user_ids"] = string(rawIDs)
-				target["mention_names"] = string(rawNames)
 			}
 		}
 	}
@@ -705,7 +673,7 @@ func (s *Store) ChannelDeliveryTarget(ctx context.Context, conversationID string
 			seen := map[string]bool{}
 			for _, identityID := range identityIDs {
 				identityID = strings.TrimSpace(identityID)
-				if identityID == "" || seen[identityID] || len(userIDs) >= 5 {
+				if identityID == "" || seen[identityID] {
 					continue
 				}
 				var externalUserID, displayName string
@@ -1063,13 +1031,11 @@ func (s *Store) EnqueueAgentChannelReplyWithMentions(
 		"reply_to_receipt_id": replyToReceiptID,
 	}
 	if endpointKind == domain.ChannelEndpointGroupDigitalHuman {
-		// Delivery resolves at most five mentions, so keep the sender's slot and
-		// fill the rest in the caller's order.
-		mentionIDs := make([]string, 0, 5)
+		mentionIDs := make([]string, 0, len(extraMentionIDs)+1)
 		seenMention := map[string]bool{}
 		for _, identityID := range append([]string{recipientID}, extraMentionIDs...) {
 			identityID = strings.TrimSpace(identityID)
-			if identityID == "" || seenMention[identityID] || len(mentionIDs) >= 5 {
+			if identityID == "" || seenMention[identityID] {
 				continue
 			}
 			seenMention[identityID] = true
