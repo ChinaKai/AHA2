@@ -94,7 +94,11 @@ func sshTerminalCommand(platform, root string) (string, error) {
 	if !path.IsAbs(root) {
 		return "", errors.New("invalid terminal root")
 	}
-	return "cd " + shellQuote(root) + " && exec \"${SHELL:-/bin/sh}\" -i", nil
+	// Fish cannot expand ${SHELL:-/bin/sh}. Let sh interpret the launch script
+	// and pass the root as an argument, escaping backslashes outside quotes
+	// because fish also interprets them within single quotes.
+	quotedRoot := strings.ReplaceAll(shellQuote(root), `\`, `'\\'`)
+	return `exec /bin/sh -c 'cd "$1" && exec "${SHELL:-/bin/sh}" -il' sh ` + quotedRoot, nil
 }
 
 func startSSHPTY(client *ssh.Client, command string, cols, rows int) (*SSHTerminal, error) {

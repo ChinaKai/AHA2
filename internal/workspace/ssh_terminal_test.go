@@ -62,6 +62,17 @@ func TestWorkspaceTerminalAgainstRealOpenSSH(t *testing.T) {
 	}
 }
 
+func TestWorkspaceTerminalSSHStartsInteractiveLoginShell(t *testing.T) {
+	command, err := sshTerminalCommand("linux", `/workspace with 'quote\and $name`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `exec /bin/sh -c 'cd "$1" && exec "${SHELL:-/bin/sh}" -il' sh '/workspace with '"'"'quote'\\'and $name'`
+	if command != want {
+		t.Fatalf("SSH terminal command = %q, want %q", command, want)
+	}
+}
+
 func TestWorkspaceTerminalSSHRequiresAbsoluteRoot(t *testing.T) {
 	for _, test := range []struct{ platform, root string }{
 		{"linux", "checkout"}, {"linux", "C:\\path"}, {"windows/amd64", "C:checkout"},
