@@ -348,6 +348,10 @@ func (s *Service) ensurePetTaskStarted(ctx context.Context, task domain.Task) {
 func (s *Service) submitPetWake(ctx context.Context, message string) error {
 	s.petTaskMu.Lock()
 	defer s.petTaskMu.Unlock()
+	return s.submitPetWakeLocked(ctx, message)
+}
+
+func (s *Service) submitPetWakeLocked(ctx context.Context, message string) error {
 	assistant, err := s.petAssistant(ctx)
 	if err != nil {
 		return err

@@ -58,6 +58,20 @@ func TestPetWorkStateShowsInspectionAndAllOpenTasks(t *testing.T) {
 	if err := fixture.database.UpdateTaskStatus(fixture.ctx, completedTask.ID, domain.TaskWaitingUser, domain.TaskCompleted, timeString(now), timeString(now)); err != nil {
 		t.Fatal(err)
 	}
+	ignoredTask, err := fixture.service.PetCreateTask(fixture.ctx, PetCreateTaskInput{
+		ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "已搁置的巡检任务",
+		Request: "只读核对", Start: boolPointer(true),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForTask(t, fixture.database, ignoredTask.ID, domain.TaskWaitingUser)
+	ignoredAt := now.Add(-time.Hour)
+	for _, id := range []string{ignoredTask.ID, completedTask.ID} {
+		if err := fixture.database.IgnorePetTaskWatch(fixture.ctx, id, petWatchReasonIgnored, ignoredAt); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	state, err := fixture.service.PetWorkState(fixture.ctx)
 	if err != nil {
@@ -66,7 +80,7 @@ func TestPetWorkStateShowsInspectionAndAllOpenTasks(t *testing.T) {
 	if state.Inspection.Health != "ok" || state.Inspection.Version != "0.5.999" || state.Inspection.WebVersion != "0.5.999" {
 		t.Fatalf("inspection identity=%#v", state.Inspection)
 	}
-	if state.Inspection.TasksTotal != 2 || state.Inspection.WaitingUser != 1 || state.Inspection.Completed != 1 {
+	if state.Inspection.TasksTotal != 3 || state.Inspection.WaitingUser != 2 || state.Inspection.Completed != 1 {
 		t.Fatalf("inspection counts=%#v", state.Inspection)
 	}
 	if state.Inspection.OpenTasks != 1 || state.Inspection.AttentionTasks != 1 {
@@ -74,6 +88,10 @@ func TestPetWorkStateShowsInspectionAndAllOpenTasks(t *testing.T) {
 	}
 	if len(state.OpenTasks) != 1 || state.OpenTasks[0].ID != openTask.ID || !state.OpenTasks[0].NeedsAttention {
 		t.Fatalf("open tasks=%#v", state.OpenTasks)
+	}
+	wantIgnored := PetIgnoredTask{ID: ignoredTask.ID, Code: ignoredTask.Code, Title: ignoredTask.Title, Status: domain.TaskWaitingUser, IgnoredAt: ignoredAt}
+	if len(state.IgnoredTasks) != 1 || state.IgnoredTasks[0] != wantIgnored {
+		t.Fatalf("ignored tasks=%+v want=%+v", state.IgnoredTasks, wantIgnored)
 	}
 	if reason := state.OpenTasks[0].AttentionReason; reason != "waiting_user：等待下一步指令" {
 		t.Fatalf("succeeded waiting task should await the next message, got %q", reason)

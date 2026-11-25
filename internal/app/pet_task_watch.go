@@ -104,25 +104,28 @@ func (s *Service) deliverPetTaskStatusMessage(taskID, message string, removeWatc
 	if s == nil || strings.TrimSpace(message) == "" {
 		return
 	}
-	// The watch may have been ignored or removed while a quiet-hours callback
-	// was waiting. Re-check before starting a new pet turn.
-	if watch, err := s.store.PetTaskWatch(context.Background(), taskID); err != nil || watch.Ignored {
-		return
-	}
 	s.mu.Lock()
 	closing := s.closing
 	s.mu.Unlock()
 	if closing {
 		return
 	}
-	if err := s.submitPetWake(context.Background(), message); err != nil {
+	ctx := context.Background()
+	// An Owner ignore and a status wake serialize through enqueue and terminal
+	// cleanup, including when delivery was deferred during quiet hours.
+	s.petTaskMu.Lock()
+	defer s.petTaskMu.Unlock()
+	if watch, err := s.store.PetTaskWatch(ctx, taskID); err != nil || watch.Ignored {
+		return
+	}
+	if err := s.submitPetWakeLocked(ctx, message); err != nil {
 		if !errors.Is(err, errPetDisabled) {
 			log.Printf("notify pet task about watched task status: %v", err)
 		}
 		return
 	}
 	if removeWatch {
-		if err := s.store.DeletePetTaskWatch(context.Background(), taskID); err != nil {
+		if err := s.store.DeletePetTaskWatch(ctx, taskID); err != nil {
 			log.Printf("remove completed pet task watch: %v", err)
 		}
 	}
@@ -218,30 +221,50 @@ func (s *Service) PetUnwatchTask(ctx context.Context, taskID string) error {
 	if err != nil {
 		return err
 	}
-	if watch, watchErr := s.store.PetTaskWatch(ctx, task.ID); watchErr == nil && watch.Ignored {
+	s.petTaskMu.Lock()
+	defer s.petTaskMu.Unlock()
+	watch, err := s.store.PetTaskWatch(ctx, task.ID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if watch.Ignored {
 		return fmt.Errorf("该任务已被 owner 忽略，请由 owner 在宠物工作台取消关注")
 	}
 	return s.store.DeletePetTaskWatch(ctx, task.ID)
 }
 
-// PetTaskWatchList returns the Owner workbench follows tab: every non-terminal
-// ordinary Task, plus any watched Task (including terminal or ignored ones) so
-// the Owner can manage existing follows.
+// PetTaskWatchList returns the Owner workbench follows: ordinary open Tasks and
+// existing watches, excluding completed and cancelled Tasks.
 func (s *Service) PetTaskWatchList(ctx context.Context) ([]PetTaskWatchView, error) {
 	tasks, err := s.store.ListTasks(ctx, "")
 	if err != nil {
 		return nil, err
 	}
-	return s.petTaskWatchListWithTasks(ctx, tasks)
+	watches, err := s.petTaskWatchIndex(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return s.petTaskWatchListWithTasks(ctx, tasks, watches)
 }
 
-// petTaskWatchListWithTasks lets the workbench share one task list with its
-// inspection snapshot instead of re-reading the same rows.
-func (s *Service) petTaskWatchListWithTasks(ctx context.Context, tasks []domain.Task) ([]PetTaskWatchView, error) {
+func (s *Service) petTaskWatchIndex(ctx context.Context) (map[string]domain.PetTaskWatch, error) {
 	watches, err := s.store.PetTaskWatches(ctx)
 	if err != nil {
 		return nil, err
 	}
+	byTask := make(map[string]domain.PetTaskWatch, len(watches))
+	for _, watch := range watches {
+		byTask[watch.TaskID] = watch
+	}
+	return byTask, nil
+}
+
+func petTaskInFollowLists(task domain.Task) bool {
+	return task.ID != petTaskID && task.Status != domain.TaskCompleted && task.Status != domain.TaskCancelled
+}
+
+// petTaskWatchListWithTasks shares task and watch reads with the inspection.
+func (s *Service) petTaskWatchListWithTasks(ctx context.Context, tasks []domain.Task, watchByTask map[string]domain.PetTaskWatch) ([]PetTaskWatchView, error) {
 	projects, err := s.store.ListProjects(ctx)
 	if err != nil {
 		return nil, err
@@ -252,18 +275,9 @@ func (s *Service) petTaskWatchListWithTasks(ctx context.Context, tasks []domain.
 			ordinaryProjects[project.ID] = true
 		}
 	}
-	watchByTask := make(map[string]domain.PetTaskWatch, len(watches))
-	for _, watch := range watches {
-		watchByTask[watch.TaskID] = watch
-	}
 	views := make([]PetTaskWatchView, 0, len(tasks))
 	for _, task := range tasks {
-		if task.ID == petTaskID {
-			continue
-		}
-		// Completed and cancelled Tasks are closed history; they must not stay
-		// in the follows list even if an older watch row still exists.
-		if task.Status == domain.TaskCompleted || task.Status == domain.TaskCancelled {
+		if !petTaskInFollowLists(task) {
 			continue
 		}
 		watch, hasWatch := watchByTask[task.ID]
@@ -359,6 +373,8 @@ func (s *Service) SetPetTaskWatchIgnored(ctx context.Context, taskID string, ign
 	if taskID == "" {
 		return domain.PetTaskWatch{}, fmt.Errorf("task_id 不能为空")
 	}
+	s.petTaskMu.Lock()
+	defer s.petTaskMu.Unlock()
 	now := s.now().UTC()
 	if ignored {
 		// Validate a Task that is not already watched. An existing follow needs

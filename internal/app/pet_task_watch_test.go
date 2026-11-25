@@ -23,6 +23,7 @@ func TestIgnoredPetWatchSuppressesNotificationsAndPetCannotReactivate(t *testing
 	}); err != nil {
 		t.Fatal(err)
 	}
+	waitForTask(t, fixture.database, petTaskID, domain.TaskWaitingUser)
 	fixture.service.StartPetTaskNotifications()
 	project, err := fixture.service.PetCreateProject(fixture.ctx, PetCreateProjectInput{Name: "忽略项目"})
 	if err != nil {
@@ -65,7 +66,6 @@ func TestIgnoredPetWatchSuppressesNotificationsAndPetCannotReactivate(t *testing
 	if err := fixture.database.UpdateTaskStatus(fixture.ctx, task.ID, domain.TaskPreparing, domain.TaskFailed, now.Format(time.RFC3339Nano), ""); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(100 * time.Millisecond)
 	watch, err := fixture.database.PetTaskWatch(fixture.ctx, task.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -73,16 +73,54 @@ func TestIgnoredPetWatchSuppressesNotificationsAndPetCannotReactivate(t *testing
 	if watch.LastNotifiedStatus != "" {
 		t.Fatalf("ignored watch was notified: %#v", watch)
 	}
+	// Exercise the delivery-time gate for a callback queued before the ignore.
+	fixture.service.deliverPetTaskStatusMessage(task.ID, fixture.service.petTaskStatusMessage(fixture.ctx, task, domain.TaskCompleted), true)
+	if watch, err := fixture.database.PetTaskWatch(fixture.ctx, task.ID); err != nil || !watch.Ignored {
+		t.Fatalf("deferred delivery removed ignore: watch=%+v err=%v", watch, err)
+	}
+	statusMessages := func() []string {
+		t.Helper()
+		messages, err := fixture.database.ListMessages(fixture.ctx, petTaskID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var updates []string
+		for _, message := range messages {
+			if strings.Contains(message.Content, task.Code) && strings.HasPrefix(message.Content, "[任务动态]") {
+				updates = append(updates, message.Content)
+			}
+		}
+		return updates
+	}
+	if messages := statusMessages(); len(messages) != 0 {
+		t.Fatalf("ignored task woke pet: %q", messages)
+	}
 
 	if _, err := fixture.service.SetPetTaskWatchIgnored(fixture.ctx, task.ID, false); err != nil {
 		t.Fatal(err)
 	}
+	if err := fixture.database.UpdateTaskStatus(fixture.ctx, task.ID, domain.TaskFailed, domain.TaskWaitingUser, timeString(fixture.service.now().UTC()), ""); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		messages := statusMessages()
+		if len(messages) == 1 && strings.Contains(messages[0], "waiting_user") {
+			break
+		}
+		if len(messages) > 0 || time.Now().After(deadline) {
+			t.Fatalf("expected one waiting_user wake after restore, got %q", messages)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if err := fixture.service.RemovePetTaskWatch(fixture.ctx, task.ID); err != nil {
 		t.Fatal(err)
 	}
-	if watches, err := fixture.service.PetTaskWatchList(fixture.ctx); err != nil || len(watches) != 0 {
+	if watches, err := fixture.service.PetTaskWatchList(fixture.ctx); err != nil || len(watches) != 1 ||
+		watches[0].TaskID != task.ID || watches[0].Ignored || watches[0].Watched {
 		t.Fatalf("watches after owner removal=%#v err=%v", watches, err)
 	}
+	waitForTask(t, fixture.database, petTaskID, domain.TaskWaitingUser)
 }
 
 func TestPetTaskWatchListIncludesUnwatchedActiveOrdinaryTasks(t *testing.T) {
@@ -212,6 +250,18 @@ func TestPetTaskWatchIgnoreWithoutFollowRestoresToUnfollowed(t *testing.T) {
 	fixture.service.watchPetTask(fixture.ctx, task.ID, "auto")
 	if stored, err := fixture.database.PetTaskWatch(fixture.ctx, task.ID); err != nil || !stored.Ignored || stored.Reason != petWatchReasonIgnored {
 		t.Fatalf("auto watch revived ignore row=%#v err=%v", stored, err)
+	}
+	assistant, err := fixture.service.petAssistant(fixture.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.database.UpdateOwnerPetPermissions(fixture.ctx, assistant.ID, false, true, true, true, true, true, true, true, now); err != nil {
+		t.Fatal(err)
+	}
+	state, err := fixture.service.PetWorkState(fixture.ctx)
+	want := PetIgnoredTask{ID: task.ID, Code: task.Code, IgnoredAt: watch.IgnoredAt}
+	if err != nil || len(state.IgnoredTasks) != 1 || state.IgnoredTasks[0] != want {
+		t.Fatalf("ignore should retain the task reference without private details: got=%+v want=%+v err=%v", state.IgnoredTasks, want, err)
 	}
 
 	// Restoring returns the Task to the unfollowed list rather than following it.

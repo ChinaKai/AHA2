@@ -21,10 +21,15 @@ const approvals = [
   {id:"approval-2", task_id:"pet-task", kind:"permission_change", title:"开启宠物权限：管理渠道", summary:"宠物申请开启权限「管理渠道」。\n原因：需要巡检渠道。", risk:"medium", status:"pending", created_at:now},
   {id:"idea-1", task_id:"pet-task", kind:"idea", title:"自动整理渠道联系人", summary:"想法说明\n\n计划：\n先巡检。\n\n预期收益：\n减少重复。", risk:"low", status:"pending", created_at:now},
 ];
+const watches = [
+  {task_id:"ignored-task", code:"task-801", title:"Ignored task", status:"waiting_user", watched:true, ignored:true, created_at:now, updated_at:now},
+  {task_id:"unfollowed-task", code:"task-520", title:"Unfollowed task", status:"waiting_user", watched:false, ignored:false, created_at:now, updated_at:now},
+];
 const bootstrap = `
 const json=(v,s=200)=>new Response(JSON.stringify(v),{status:s,headers:{"Content-Type":"application/json"}});
 const assistant=${JSON.stringify(assistant)};
 const approvals=${JSON.stringify(approvals)};
+const watches=${JSON.stringify(watches)};
 window.pendingCount=0;
 window.petPendingReads=0;
 const nativeSetInterval=window.setInterval.bind(window);
@@ -46,7 +51,12 @@ window.fetch=async(input,init={})=>{
   if(item?.status==="pending"){item.status=JSON.parse(init.body).decision;window.pendingCount--;}
   return json({ok:true,approval:item});
  }
- if(path==="/api/v1/pet/workbench")return json({core:[],worklog:[],approvals,updated_at:new Date().toISOString(),inspection:{health:"degraded",version:"9.9.9",web_version:"web-1",uptime_minutes:125,checked_at:new Date().toISOString(),pending_approvals:3},channels:[{id:"c-1",name:"Mail",status:"degraded",pending:2,degraded:true}],channel_total:1});
+ if(path.startsWith("/api/v1/pet/watches/")&&method==="PATCH"){
+  const watch=watches.find(w=>path.endsWith("/"+w.task_id));
+  watch.ignored=JSON.parse(init.body).ignored;
+  return json({ok:true,watch});
+ }
+ if(path==="/api/v1/pet/workbench")return json({core:[],worklog:[],approvals,watches,updated_at:new Date().toISOString(),inspection:{health:"degraded",version:"9.9.9",web_version:"web-1",uptime_minutes:125,checked_at:new Date().toISOString(),pending_approvals:3},channels:[{id:"c-1",name:"Mail",status:"degraded",pending:2,degraded:true}],channel_total:1});
  if(path==="/api/v1/tasks")return json({tasks:[],has_more:false});
  if(path==="/api/v1/projects")return json({projects:[],has_more:false});
  if(path==="/api/v1/workspaces")return json({workspaces:[]});
@@ -119,7 +129,7 @@ try{
     recentBottom: Math.round(recent.getBoundingClientRect().bottom),
    };
   });
-  assert.deepEqual(layout.sections.map(section => section.className), ["pet-overview-status", "pet-overview-cards", "pet-overview-follows", "pet-overview-other", "pet-overview-recent"], label);
+  assert.deepEqual(layout.sections.map(section => section.className), ["pet-overview-status", "pet-overview-cards", "pet-overview-follows", "pet-overview-other", "pet-overview-other", "pet-overview-recent"], label);
   assert.ok(layout.sections.every(section => section.width > 0 && section.height > 0), label + " has an empty section");
   assert.equal(layout.recentBottom, layout.overviewBottom, label + " leaves space below Recent activity");
  };
@@ -127,6 +137,19 @@ try{
  await page.setViewportSize({width:390,height:844});
  await assertOverviewLayout("mobile overview");
  await page.setViewportSize({width:1400,height:1000});
+ const ignored = workbenchBody.locator("#pet-overview-ignored");
+ const unfollowed = workbenchBody.locator("#pet-overview-unfollowed");
+ const task520 = '[data-pet-watch-task="unfollowed-task"]';
+ assert.equal(await ignored.locator("summary").innerText(), "Ignored tasks (1)");
+ assert.equal(await ignored.locator(task520).count(), 0);
+ await unfollowed.locator("summary").click();
+ await unfollowed.locator(task520 + '[data-pet-watch-ignore="true"]').click();
+ await ignored.locator(task520 + '[data-pet-watch-ignore="false"]').waitFor({state:"attached"});
+ assert.equal(await ignored.locator("summary").innerText(), "Ignored tasks (2)");
+ await ignored.locator("summary").click();
+ await ignored.locator(task520 + '[data-pet-watch-ignore="false"]').click();
+ await unfollowed.locator(task520 + '[data-pet-watch-ignore="true"]').waitFor({state:"attached"});
+ assert.equal(await ignored.locator("summary").innerText(), "Ignored tasks (1)");
  assert.equal(await page.locator('[data-pet-workbench-tab="diary"]').count(), 0);
  assert.doesNotMatch(await page.locator("#app").innerText(), /日记|diary/i);
  const nav = page.locator('button[data-view="pet-workbench"]');

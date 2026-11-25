@@ -97,7 +97,11 @@ func (s *Service) PetWorkbenchWithOptions(ctx context.Context, options PetWorkbe
 	if err != nil {
 		return PetWorkbenchView{}, err
 	}
-	watches, err := s.petTaskWatchListWithTasks(ctx, tasks)
+	watchByTask, err := s.petTaskWatchIndex(ctx)
+	if err != nil {
+		return PetWorkbenchView{}, err
+	}
+	watches, err := s.petTaskWatchListWithTasks(ctx, tasks, watchByTask)
 	if err != nil {
 		return PetWorkbenchView{}, err
 	}
@@ -111,7 +115,7 @@ func (s *Service) PetWorkbenchWithOptions(ctx context.Context, options PetWorkbe
 	}
 	// The summary is additive: a failed inspection read must not take the rest
 	// of the workbench down, and the client shows an explicit empty state.
-	if inspection, inspectErr := s.petWorkbenchInspection(ctx, tasks, now, channels); inspectErr == nil {
+	if inspection, inspectErr := s.petWorkbenchInspection(ctx, tasks, watchByTask, now, channels); inspectErr == nil {
 		view.Inspection = &inspection
 	}
 	if task, taskErr := s.store.Task(ctx, petTaskID); taskErr == nil {
@@ -122,7 +126,7 @@ func (s *Service) PetWorkbenchWithOptions(ctx context.Context, options PetWorkbe
 
 // petWorkbenchInspection reuses the petInspection field derivation without the
 // costly per-task enrichment PetWorkState performs for its open-task list.
-func (s *Service) petWorkbenchInspection(ctx context.Context, tasks []domain.Task, now time.Time, channels petChannelSnapshotValues) (PetInspection, error) {
+func (s *Service) petWorkbenchInspection(ctx context.Context, tasks []domain.Task, watches map[string]domain.PetTaskWatch, now time.Time, channels petChannelSnapshotValues) (PetInspection, error) {
 	pendingApprovals, err := s.store.ListPendingPetApprovals(ctx, 200)
 	if err != nil {
 		return PetInspection{}, err
@@ -131,7 +135,7 @@ func (s *Service) petWorkbenchInspection(ctx context.Context, tasks []domain.Tas
 	if err != nil {
 		return PetInspection{}, err
 	}
-	openTasks, attentionTasks := petOpenTaskCounts(ids, tasks, pendingApprovals)
+	openTasks, attentionTasks := petOpenTaskCounts(petOpenTaskCandidates(ids, tasks, watches), pendingApprovals)
 	inspection := s.petInspectionWithChannelSnapshot(now, tasks, pendingApprovals, openTasks, attentionTasks, channels)
 	// The workbench already renders the full channel cards, so keep the
 	// embedded snapshot compact; callers that need the rows use PetWorkState.
@@ -736,6 +740,10 @@ func (s *Service) PetAHAOverview(ctx context.Context) (PetAHAOverview, error) {
 	if err != nil {
 		return PetAHAOverview{}, err
 	}
+	watches, err := s.petTaskWatchIndex(ctx)
+	if err != nil {
+		return PetAHAOverview{}, err
+	}
 	overview := PetAHAOverview{Projects: len(projects), Workspaces: len(workspaces), Tasks: len(tasks)}
 	projectNames := make(map[string]string, len(projects))
 	for _, project := range projects {
@@ -757,7 +765,7 @@ func (s *Service) PetAHAOverview(ctx context.Context) (PetAHAOverview, error) {
 		case domain.TaskBlocked:
 			overview.Blocked++
 		}
-		if task.ID == petTaskID {
+		if task.ID == petTaskID || watches[task.ID].Ignored {
 			continue
 		}
 		switch task.Status {

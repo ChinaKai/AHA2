@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"database/sql"
-	"strings"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
@@ -19,7 +18,7 @@ func scanPetTaskWatch(scanner interface{ Scan(...any) error }) (domain.PetTaskWa
 		&item.LastNotifiedStatus, &item.LastNotifiedTurnID, &ignoredAt,
 	)
 	item.CreatedAt, item.UpdatedAt = parseTime(created), parseTime(updated)
-	if strings.TrimSpace(ignoredAt) != "" {
+	if ignoredAt != "" {
 		item.Ignored = true
 		item.IgnoredAt = parseTime(ignoredAt)
 	}
@@ -107,7 +106,7 @@ func (s *Store) MarkPetTaskWatchNotified(ctx context.Context, taskID, status, tu
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE pet_task_watches
 		SET last_status=?,last_turn_id=?,last_notified_status=?,last_notified_turn_id=?,updated_at=?
-		WHERE task_id=?`,
+		WHERE task_id=? AND ignored_at=''`,
 		status, turnID, status, turnID, timeString(at), taskID)
 	if err != nil {
 		return err

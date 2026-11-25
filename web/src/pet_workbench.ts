@@ -619,20 +619,22 @@ export function renderPetOverview(options: PetOverviewOptions): string {
   // which streams and measures variable rows. If the server ever returns a
   // watch list materially above 500, apply the conversation window pattern.
   const watched = watches.filter(item => item.watched && !item.ignored);
-  const others = watches.filter(item => !item.watched || item.ignored);
+  const ignored = watches.filter(item => item.ignored);
+  const unfollowed = watches.filter(item => !item.watched && !item.ignored);
   const followRows = watched.length
     ? watched.map(item => renderWatchRow(item, options)).join("")
     : `<div class="field-help">${escapeHTML(translate("petWorkbench.emptyFollows"))}</div>`;
-  // Both watch lists are ordinary collapsed sections, consistent with the
-  // inspection/channel details below. The count comes from the rows the
-  // overview actually renders, not the untruncated server total.
   const followTitle = translate("petWorkbench.overviewFollows", {count: String(watched.length)});
-  const ignoredTitle = translate("petWorkbench.otherFollows", {count: String(others.length)});
-  const followDetails = `<details class="pet-overview-follows" id="pet-overview-follows" aria-label="${escapeHTML(followTitle)}"><summary>${escapeHTML(followTitle)}</summary><div class="pet-overview-follows-body"><div class="field-help">${escapeHTML(translate("petWorkbench.followHint"))}</div>${followRows}</div></details>`;
-  const ignoredRows = others.length
-    ? others.map(item => renderWatchRow(item, options)).join("")
+  const ignoredTitle = translate("petWorkbench.otherFollows", {count: String(ignored.length)});
+  const followDetails = `<details class="pet-overview-follows" id="pet-overview-follows" aria-label="${escapeHTML(followTitle)}"><summary>${escapeHTML(followTitle)}</summary><div class="pet-overview-follows-body">${followRows}</div></details>`;
+  const ignoredRows = ignored.length
+    ? ignored.map(item => renderWatchRow(item, options)).join("")
     : `<div class="field-help">${escapeHTML(translate("petWorkbench.emptyIgnored"))}</div>`;
-  const otherRows = `<details class="pet-overview-other" aria-label="${escapeHTML(ignoredTitle)}"><summary>${escapeHTML(ignoredTitle)}</summary><div class="pet-overview-other-body">${ignoredRows}</div></details>`;
+  const ignoredDetails = `<details class="pet-overview-other" id="pet-overview-ignored" aria-label="${escapeHTML(ignoredTitle)}"><summary>${escapeHTML(ignoredTitle)}</summary><div class="pet-overview-other-body">${ignoredRows}</div></details>`;
+  const unfollowedTitle = translate("petWorkbench.unfollowedTasks", {count: String(unfollowed.length)});
+  const unfollowedDetails = unfollowed.length
+    ? `<details class="pet-overview-other" id="pet-overview-unfollowed" aria-label="${escapeHTML(unfollowedTitle)}"><summary>${escapeHTML(unfollowedTitle)}</summary><div class="pet-overview-other-body">${unfollowed.map(item => renderWatchRow(item, options)).join("")}</div></details>`
+    : "";
 
   const activities: Array<{time: string; html: string}> = [];
   for (const item of approvals) {
@@ -667,7 +669,8 @@ export function renderPetOverview(options: PetOverviewOptions): string {
       ${overviewCard("channels", degraded, translate("petWorkbench.overviewChannels"), translate("petWorkbench.overviewChannelsHint", {total: String(channelTotal)}), degraded ? "attention" : "")}
     </div>
     ${followDetails}
-    ${otherRows}
+    ${ignoredDetails}
+    ${unfollowedDetails}
     <section class="pet-overview-recent">
       <h3>${escapeHTML(translate("petWorkbench.overviewRecent"))}</h3>
       <div class="pet-overview-activity-list">${recent}</div>

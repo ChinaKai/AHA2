@@ -37,6 +37,13 @@ func TestRestorePetTaskWatchKeepsRealFollow(t *testing.T) {
 	if err != nil || !watch.Ignored || watch.Reason != "manual" {
 		t.Fatalf("followed ignored watch=%#v err=%v", watch, err)
 	}
+	// A status listener may have read the follow before the Owner muted it.
+	if err := database.MarkPetTaskWatchNotified(ctx, taskID, "waiting_user", "turn-1", now.Add(2*time.Second)); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("mark notification for ignored watch: %v", err)
+	}
+	if stored, err := database.PetTaskWatch(ctx, taskID); err != nil || stored != watch {
+		t.Fatalf("notification changed ignored watch: got=%+v want=%+v err=%v", stored, watch, err)
+	}
 
 	removed, found, err := database.RestorePetTaskWatch(ctx, taskID, ignoreOnlyReason, now.Add(2*time.Second))
 	if err != nil || removed || !found {

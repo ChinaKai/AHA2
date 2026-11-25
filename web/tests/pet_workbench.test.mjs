@@ -999,14 +999,14 @@ const overviewTranslations = {
   "petWorkbench.overviewChannelsHint": "{total} channels",
   "petWorkbench.overviewFollows": "关注任务（{count}）",
   "petWorkbench.otherFollows": "忽略的任务（{count}）",
+  "petWorkbench.unfollowedTasks": "未关注的任务（{count}）",
   "petWorkbench.emptyIgnored": "没有忽略的任务。",
-  "petWorkbench.followHint": "关注提示",
   "petWorkbench.recordsToc": "目录",
   "petWorkbench.recordsTocCollapse": "收起目录",
   "petWorkbench.recordsTocExpand": "展开目录",
   "petWorkbench.core": "核心文档",
   "petWorkbench.worklog": "工作记录",
-  "petWorkbench.emptyFollows": "暂无未结束的普通任务。",
+  "petWorkbench.emptyFollows": "暂无关注的任务。",
 };
 const overviewText = (key, values = {}) => (overviewTranslations[key] ?? key)
   .replace(/\{(\w+)\}/g, (_, name) => String(values[name] ?? `{${name}}`));
@@ -1029,6 +1029,7 @@ test("overview counts pending approvals, watched anomalies and degraded channels
       {task_id: "t-failed", code: "AHA-1", title: "Failed task", status: "failed", watched: true, reason: "manual", ignored: false, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-05T00:00:00Z"},
       {task_id: "t-ok", code: "AHA-2", title: "Running task", status: "active", watched: true, reason: "manual", ignored: false, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-04T00:00:00Z"},
       {task_id: "t-unwatched", code: "AHA-3", title: "Blocked but unwatched", status: "blocked", watched: false, reason: "manual", ignored: false, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-03T00:00:00Z"},
+      {task_id: "t-ignored", code: "AHA-4", title: "Ignored task", status: "waiting_user", watched: false, reason: "ignored", ignored: true, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-03T00:00:00Z"},
     ],
     channels: [overviewChannel],
     channelTotal: 2,
@@ -1041,10 +1042,16 @@ test("overview counts pending approvals, watched anomalies and degraded channels
   assert.match(html, /data-pet-overview-jump="channels"[^>]*>\s*<strong>1<\/strong>/);
   assert.match(html, /2 channels/);
   assert.match(html, /id="pet-overview-follows"/);
-  // Both watch lists are collapsed details whose titles carry the live counts.
   assert.match(html, /<details class="pet-overview-follows" id="pet-overview-follows"[^>]*><summary>关注任务（2）<\/summary>/);
   assert.doesNotMatch(html, /class="pet-overview-follows"[^>]*\sopen/);
-  assert.match(html, /<details class="pet-overview-other"[^>]*><summary>忽略的任务（1）<\/summary>/);
+  const ignoredList = html.match(/<details [^>]*id="pet-overview-ignored"[\s\S]*?<\/details>/)?.[0] ?? "";
+  const unfollowedList = html.match(/<details [^>]*id="pet-overview-unfollowed"[\s\S]*?<\/details>/)?.[0] ?? "";
+  assert.match(ignoredList, /<summary>忽略的任务（1）<\/summary>/);
+  assert.match(ignoredList, /data-pet-watch-ignore="false" data-pet-watch-task="t-ignored"/);
+  assert.doesNotMatch(ignoredList, /t-unwatched/);
+  assert.match(unfollowedList, /<summary>未关注的任务（1）<\/summary>/);
+  assert.match(unfollowedList, /data-pet-watch-ignore="true" data-pet-watch-task="t-unwatched"/);
+  assert.doesNotMatch(unfollowedList, /t-ignored/);
   assert.doesNotMatch(html, /class="pet-overview-other"[^>]*\sopen/);
   assert.match(html, /data-pet-overview-task="t-failed"/);
   assert.match(html, /data-pet-watch-unfollow data-pet-watch-task="t-failed"/, "unfollow is available from the overview");
@@ -1192,10 +1199,12 @@ test("watch lists align titles, status and actions to the left", async () => {
   assert.doesNotMatch(mobile, /\.pet-watch-row-actions \{[^}]*justify-content: flex-end/);
 });
 
-test("the ignored list is renamed in both locales without touching behavior", async () => {
+test("ignored and unfollowed lists have labels in both locales", async () => {
   const i18n = await readFile(resolve(root, "web/src/i18n.ts"), "utf8");
   assert.match(i18n, /"petWorkbench\.otherFollows": "忽略的任务（\{count\}）"/);
   assert.match(i18n, /"petWorkbench\.otherFollows": "Ignored tasks \(\{count\}\)"/);
+  assert.match(i18n, /"petWorkbench\.unfollowedTasks": "未关注的任务（\{count\}）"/);
+  assert.match(i18n, /"petWorkbench\.unfollowedTasks": "Unfollowed tasks \(\{count\}\)"/);
   assert.match(i18n, /"petWorkbench\.emptyIgnored": "没有忽略的任务。"/);
   assert.match(i18n, /"petWorkbench\.emptyIgnored": "No ignored tasks\."/);
   assert.doesNotMatch(i18n, /其他关注|Other watches/);

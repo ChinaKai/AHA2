@@ -2,6 +2,9 @@ package httpapi
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -9,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ChinaKai/AHA2/internal/agentapi"
 	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/auth"
 	"github.com/ChinaKai/AHA2/internal/domain"
@@ -30,7 +34,12 @@ func TestPetWatchAPIListIgnoreAndRemove(t *testing.T) {
 	}
 	authService := auth.NewService(database, "setup-test", time.Hour)
 	appService := app.NewService(database, secretStore, app.StubExecutor{})
-	server := httptest.NewServer(New(Config{Store: database, Auth: authService, App: appService}).Handler())
+	capabilities := agentapi.NewCapabilities()
+	petToken, err := capabilities.Issue("task_pet", "main", "turn-pet", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(New(Config{Store: database, Auth: authService, App: appService, AgentCapabilities: capabilities}).Handler())
 	defer server.Close()
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{Jar: jar}
@@ -73,11 +82,38 @@ func TestPetWatchAPIListIgnoreAndRemove(t *testing.T) {
 	task := domain.Task{
 		ID: "task-watch", ProjectID: project.ID, WorkspaceID: workspace.ID,
 		Title: "Watched task", OriginalRequest: "request", CurrentGoal: "request",
-		Status: domain.TaskActive, RuntimeConfigSnapshotID: snapshot.ID,
+		Status: domain.TaskWaitingUser, RuntimeConfigSnapshotID: snapshot.ID,
 		CollaborationMode: "single", MaxAgents: 1, CreatedAt: now, UpdatedAt: now,
 	}
 	if err := database.CreateTask(ctx, task); err != nil {
 		t.Fatal(err)
+	}
+	task, err = database.Task(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.AppendPetEvent(ctx, domain.PetEvent{
+		ID: "event-watch-created", Kind: "task_created", Actor: "pet", Detail: task.ID, At: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	readWorkState := func() app.PetWorkState {
+		t.Helper()
+		raw := petMCPToolText(t, client, server.URL, petToken, "aha_pet_work_state", map[string]any{})
+		var state app.PetWorkState
+		if err := json.Unmarshal([]byte(raw), &state); err != nil {
+			t.Fatal(err)
+		}
+		return state
+	}
+	assertOpen := func() {
+		t.Helper()
+		state := readWorkState()
+		if len(state.IgnoredTasks) != 0 || len(state.OpenTasks) != 1 ||
+			state.OpenTasks[0].ID != task.ID || !state.OpenTasks[0].NeedsAttention ||
+			state.Inspection.AttentionTasks != 1 || state.Inspection.OpenTasks != 1 {
+			t.Fatalf("open=%+v ignored=%+v inspection=%+v", state.OpenTasks, state.IgnoredTasks, state.Inspection)
+		}
 	}
 
 	response := requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/pet/workbench", nil, "")
@@ -93,6 +129,10 @@ func TestPetWatchAPIListIgnoreAndRemove(t *testing.T) {
 		workbench.Watches[0].TaskID != task.ID || workbench.Watches[0].Watched || workbench.Watches[0].Ignored {
 		t.Fatalf("workbench=%d %#v", response.StatusCode, workbench)
 	}
+	if _, err := database.PetTaskWatch(ctx, task.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("unfollowed task should start without a watch row: %v", err)
+	}
+	assertOpen()
 
 	// Ignore directly without following first, then restore back to the
 	// unfollowed list instead of silently starting a follow.
@@ -110,15 +150,32 @@ func TestPetWatchAPIListIgnoreAndRemove(t *testing.T) {
 	response.Body.Close()
 	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/pet/workbench", nil, "")
 	var ignoredWorkbench struct {
-		Watches []struct {
-			TaskID  string `json:"task_id"`
-			Watched bool   `json:"watched"`
-			Ignored bool   `json:"ignored"`
+		Inspection app.PetInspection `json:"inspection"`
+		Watches    []struct {
+			TaskID    string    `json:"task_id"`
+			Watched   bool      `json:"watched"`
+			Ignored   bool      `json:"ignored"`
+			IgnoredAt time.Time `json:"ignored_at"`
 		} `json:"watches"`
 	}
 	decodeResponse(t, response, &ignoredWorkbench)
 	if len(ignoredWorkbench.Watches) != 1 || ignoredWorkbench.Watches[0].Watched || !ignoredWorkbench.Watches[0].Ignored {
 		t.Fatalf("ignored-unwatched workbench=%#v", ignoredWorkbench.Watches)
+	}
+	watch, err := database.PetTaskWatch(ctx, task.ID)
+	if err != nil || watch.Reason != "ignored" || watch.IgnoredAt.IsZero() || !watch.IgnoredAt.Equal(ignoredWorkbench.Watches[0].IgnoredAt) {
+		t.Fatalf("stored ignore=%+v web=%+v err=%v", watch, ignoredWorkbench.Watches[0], err)
+	}
+	state := readWorkState()
+	if len(state.OpenTasks) != 0 || len(state.Work) != 0 || state.Inspection.OpenTasks != 0 ||
+		state.Inspection.AttentionTasks != 0 || state.Inspection.Note != "没有未闭环任务。" || state.Note == "" ||
+		ignoredWorkbench.Inspection.OpenTasks != 0 || ignoredWorkbench.Inspection.AttentionTasks != 0 {
+		t.Fatalf("ignored task still actionable: open=%+v work=%+v inspection=%+v note=%q web=%+v",
+			state.OpenTasks, state.Work, state.Inspection, state.Note, ignoredWorkbench.Inspection)
+	}
+	wantIgnored := app.PetIgnoredTask{ID: task.ID, Code: task.Code, Title: task.Title, Status: task.Status, IgnoredAt: watch.IgnoredAt}
+	if len(state.IgnoredTasks) != 1 || state.IgnoredTasks[0] != wantIgnored {
+		t.Fatalf("ignored tasks=%+v want=%+v", state.IgnoredTasks, wantIgnored)
 	}
 	response = requestJSON(t, client, http.MethodPatch, server.URL+"/api/v1/pet/watches/"+task.ID,
 		map[string]any{"ignored": false}, csrf)
@@ -138,6 +195,7 @@ func TestPetWatchAPIListIgnoreAndRemove(t *testing.T) {
 		t.Fatalf("restored-unwatched workbench=%#v", ignoredWorkbench.Watches)
 	}
 	response.Body.Close()
+	assertOpen()
 
 	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/pet/watches/"+task.ID, nil, csrf)
 	var followed struct {
