@@ -12,10 +12,8 @@ func FeishuFullGroupMessagesEnabled(config map[string]any) bool {
 }
 
 func FeishuGroupMessageAllowed(config map[string]any, chatID string, mentioned bool) bool {
-	if !FeishuFullGroupMessagesEnabled(config) {
-		return mentioned
-	}
-	return channelConfigHasValue(config[FeishuGroupAllowlistKey], chatID)
+	return mentioned || (FeishuFullGroupMessagesEnabled(config) &&
+		channelConfigHasValue(config[FeishuGroupAllowlistKey], chatID))
 }
 
 func channelConfigHasValue(value any, expected string) bool {

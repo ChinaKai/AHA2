@@ -87,8 +87,8 @@ func TestChannelMediaInboundAuthorizationAndAttachmentBinding(t *testing.T) {
 	}
 	unmentioned := envelope
 	unmentioned.ExternalEventID, unmentioned.ChatType, unmentioned.ExternalSenderID = "unmentioned-media", "group", "participant"
-	if _, _, err := service.ReceiveInbound(ctx, claims, unmentioned); !errors.Is(err, store.ErrChannelGroupUnbound) {
-		t.Fatalf("unbound group media returned %v", err)
+	if _, _, err := service.ReceiveInbound(ctx, claims, unmentioned); !errors.Is(err, store.ErrChannelGroupNotAllowed) {
+		t.Fatalf("non-mention group media with full reception off returned %v", err)
 	}
 	if err := service.processInboundBatch(ctx); err != nil {
 		t.Fatal(err)
@@ -249,5 +249,26 @@ func TestChannelMediaFailureNoticeRetainsSanitizedDiagnostic(t *testing.T) {
 				t.Fatalf("warning=%q pending=%v err=%v", warning, pending, err)
 			}
 		})
+	}
+}
+
+func TestUnboundFeishuGroupMentionStillDownloadsItsAttachment(t *testing.T) {
+	service, instance, claims := mediaTestService(t)
+	ctx := context.Background()
+	message := domain.ChannelInboundEnvelope{
+		SchemaVersion: 1, InstanceID: instance.ID, EventType: "message", ChatType: "group",
+		ExternalChatID: "oc_media", ChatDisplayName: "附件群", ExternalSenderID: "ou_participant",
+		ExternalEventID: "group-media-event", ExternalMessageID: "om_media", MentionedBot: true,
+		Resources: []map[string]any{{"type": "file", "file_key": "source-file", "file_name": "report.txt"}},
+	}
+	if _, _, err := service.ReceiveInbound(ctx, claims, message); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.processInboundBatch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	commands, err := service.ClaimCommands(ctx, claims, 10)
+	if err != nil || len(commands) != 1 || commands[0].Kind != "download_resource" {
+		t.Fatalf("group mention did not queue its download: count=%d err=%v", len(commands), err)
 	}
 }

@@ -48,6 +48,10 @@ func TestChannelTopicTurnLimitsAreIsolatedAndPersistOutcomes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		outcome, err := database.ChannelGroupBatchLimit(ctx, group.BatchID, conversation.ID, threadID, now.Add(ChannelTopicWindow))
+		if err != nil || outcome != expectedOutcome {
+			t.Fatalf("preflight outcome=%q want=%q err=%v", outcome, expectedOutcome, err)
+		}
 		message := domain.Message{ID: domain.NewID("message"), TaskID: task.ID, Role: "user", Sender: "sender", Content: "wake", CreatedAt: now}
 		round, inbox, _, _, err := database.EnqueueChannelOwnerMessage(ctx, receipt.ID, leases[0].LeaseID, conversation.ID, message, "main", map[string]any{
 			"group_batch_id": group.BatchID, "conversation_id": conversation.ID, "thread_id": threadID,
@@ -105,10 +109,91 @@ func TestChannelTopicTurnLimitsAreIsolatedAndPersistOutcomes(t *testing.T) {
 	submit("omt_bot_limit", true, "topic_dialogue_ended")
 	submit("omt_unrelated", true, "")
 
+	for range channelTopicHourlyLimit + 1 {
+		submit("", false, "")
+	}
+	// Human main-chat traffic does not consume the bot-only hourly budget.
+	submit("", true, "")
+	for range channelTopicHourlyLimit - 1 {
+		submit("", false, "")
+		submit("", true, "")
+	}
+	submit("", true, "topic_hourly_turn_limit")
+	submit("", false, "")
+
 	for range channelTopicHourlyLimit {
 		submit("omt_busy", false, "")
 	}
 	submit("omt_busy", false, "topic_hourly_turn_limit")
 	now = now.Add(time.Hour)
 	submit("omt_busy", false, "")
+}
+
+func TestReceiveChannelGroupMessageRechecksBindingAndPermissionBeforeStorage(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	instance, conversation := createDeliveryTestInstance(t, database)
+	task := createStoreTestTask(t, database)
+	now := time.Now().UTC()
+	route, err := database.ActivateOwnerChannelTaskRoute(ctx, instance.ID, conversation.ID, task.ID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance, err = database.ChannelInstance(ctx, instance.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance.Config[domain.FeishuGroupAllowlistKey] = []string{conversation.ExternalChatID}
+	instance, err = database.UpdateChannelInstance(ctx, instance, instance.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertDenied := func(t *testing.T, want error) {
+		t.Helper()
+		for _, thread := range []string{"", "omt_topic"} {
+			envelope := domain.ChannelInboundEnvelope{
+				InstanceID: instance.ID, ExternalChatID: conversation.ExternalChatID, ThreadID: thread,
+				ExternalMessageID: "om_private", Content: "private test content", SenderType: "user",
+			}
+			receipt := domain.ChannelInboxReceipt{
+				ID: domain.NewID("receipt"), InstanceID: instance.ID, ExternalEventID: "denied-" + thread, EventType: "message",
+				State: "received", ReceivedAt: now, OccurredAt: now, PayloadDigest: "test-digest",
+				NormalizedPayload: map[string]any{"external_chat_id": conversation.ExternalChatID, "content": envelope.Content},
+			}
+			stored, _, err := database.ReceiveChannelGroupMessage(ctx, receipt, route, envelope)
+			if stored.ID != "" || !errors.Is(err, want) {
+				t.Fatalf("thread=%q receipt=%q err=%v, want %v", thread, stored.ID, err, want)
+			}
+		}
+		var wakes, listening int
+		if err := database.db.QueryRowContext(ctx, `SELECT
+			(SELECT COUNT(*) FROM channel_inbox_dedup WHERE instance_id=?),
+			(SELECT COUNT(*) FROM channel_group_listening WHERE conversation_id=?)`,
+			instance.ID, conversation.ID).Scan(&wakes, &listening); err != nil {
+			t.Fatal(err)
+		}
+		if wakes != 0 || listening != 0 {
+			t.Fatalf("denied body reached storage: inbox=%d listening=%d", wakes, listening)
+		}
+	}
+	t.Run("permission off", func(t *testing.T) {
+		assertDenied(t, ErrChannelGroupNotAllowed)
+	})
+	instance.Config["channel_permission_ids"] = []string{domain.FeishuFullGroupPermission}
+	if _, err := database.UpdateChannelInstance(ctx, instance, instance.Revision); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.ExitOwnerChannelTaskRoute(ctx, route.ID, task.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	// The service saw a live binding earlier. A direct store call simulates
+	// the owner unbinding it immediately before the receipt transaction.
+	t.Run("binding released", func(t *testing.T) {
+		assertDenied(t, ErrChannelGroupUnbound)
+	})
 }

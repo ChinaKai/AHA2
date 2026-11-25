@@ -1656,12 +1656,10 @@ func (s *Service) ReceiveInbound(ctx context.Context, claims RuntimeClaims, enve
 			if envelope.ExternalSenderID == stringField(instance.Config, "runtime_bot_open_id") {
 				return domain.ChannelInboxReceipt{}, false, store.ErrChannelGroupSelf
 			}
-			_, route, err = s.feishuGroupRoute(ctx, instance, envelope, instance.Status == "ready" || instance.Status == "degraded")
+			route, err = s.feishuGroupIngressRoute(ctx, instance, envelope)
 			if err != nil {
+				s.logFeishuGroupRejection(ctx, envelope, err)
 				return domain.ChannelInboxReceipt{}, false, err
-			}
-			if !domain.FeishuGroupMessageAllowed(instance.Config, envelope.ExternalChatID, envelope.MentionedBot) {
-				return domain.ChannelInboxReceipt{}, false, store.ErrChannelGroupNotAllowed
 			}
 			fallback := "群成员"
 			if envelope.SenderIsBot {
@@ -1690,8 +1688,16 @@ func (s *Service) ReceiveInbound(ctx context.Context, claims RuntimeClaims, enve
 		State: "received", OccurredAt: envelope.OccurredAt, ReceivedAt: now,
 	}
 	var duplicate bool
-	if feishuGroup {
-		receipt, duplicate, err = s.store.ReceiveChannelGroupMessage(ctx, receipt, route, envelope)
+	if route.ID != "" {
+		stored, existing, groupErr := s.store.ReceiveChannelGroupMessage(ctx, receipt, route, envelope)
+		if envelope.MentionedBot && errors.Is(groupErr, store.ErrChannelGroupUnbound) {
+			// The route may have been released since the ingress lookup.
+			// An explicit mention can still enter the original inbox.
+			receipt, duplicate, err = s.store.ReceiveChannelInbox(ctx, receipt)
+		} else {
+			receipt, duplicate, err = stored, existing, groupErr
+			s.logFeishuGroupRejection(ctx, envelope, err)
+		}
 	} else {
 		receipt, duplicate, err = s.store.ReceiveChannelInbox(ctx, receipt)
 	}
@@ -1715,7 +1721,7 @@ func (s *Service) processInboundBatch(ctx context.Context) error {
 	for _, receipt := range items {
 		if err := s.processInbound(ctx, receipt); err != nil {
 			s.logger.Warn("channel inbound receipt failed", "receipt_id", receipt.ID, "error", err)
-			_ = s.store.FinishChannelInbox(ctx, receipt.ID, receipt.LeaseID, "failed", "", "", safeOutcome(err), s.now().UTC())
+			_ = s.store.FinishChannelInbox(ctx, receipt.ID, receipt.LeaseID, "failed", receipt.ConversationID, "", safeOutcome(err), s.now().UTC())
 		}
 	}
 	return nil
@@ -1768,8 +1774,8 @@ func (s *Service) processInbound(ctx context.Context, receipt domain.ChannelInbo
 		if !envelope.MentionedBot && envelope.ThreadID == "" {
 			return fmt.Errorf("group mention is required")
 		}
-		groupConversation, groupRoute, err = s.feishuGroupRoute(ctx, instance, envelope, false)
-		if err != nil {
+		groupConversation, groupRoute, err = s.feishuGroupRoute(ctx, instance.ID, envelope.ExternalChatID, envelope.MentionedBot)
+		if err != nil && !(envelope.MentionedBot && errors.Is(err, store.ErrChannelGroupUnbound)) {
 			return err
 		}
 		groupReceipt, err = s.store.ChannelGroupReceipt(ctx, receipt.ID)
@@ -1785,6 +1791,8 @@ func (s *Service) processInbound(ctx context.Context, receipt domain.ChannelInbo
 				return err
 			}
 			if outcome != "" {
+				s.logger.InfoContext(ctx, "Feishu group message not scheduled",
+					"conversation_id", groupConversation.ID, "receipt_id", receipt.ID, "reason", outcome)
 				return s.store.FinishChannelInbox(ctx, receipt.ID, receipt.LeaseID, "rejected", groupConversation.ID, "", outcome, s.now().UTC())
 			}
 		}
@@ -1837,7 +1845,7 @@ func (s *Service) processInbound(ctx context.Context, receipt domain.ChannelInbo
 		return fmt.Errorf("channel endpoint is unavailable")
 	}
 	conversation := groupConversation
-	if feishuGroup {
+	if groupRoute.ID != "" {
 		conversation, err = s.updateChannelConversationIdentity(ctx, conversation, instance, endpointKind, envelope)
 	} else {
 		scopeVersion := 1
@@ -1857,12 +1865,25 @@ func (s *Service) processInbound(ctx context.Context, receipt domain.ChannelInbo
 		_ = s.store.UpsertChannelConversationMember(ctx, conversation.ID, identity.ID, envelope.SenderIsBot, envelope.OccurredAt)
 	}
 	targetTaskID, routeMode := conversation.HostTaskID, "assistant"
-	if feishuGroup {
+	if groupRoute.ID != "" {
 		targetTaskID, routeMode = groupRoute.TargetTaskID, "task_route"
 	} else if route, routeErr := s.store.ActiveChannelTaskRoute(ctx, conversation.ID); routeErr == nil {
 		targetTaskID, routeMode = route.TargetTaskID, "task_route"
 	} else if endpointKind == domain.ChannelEndpointGroupDigitalHuman {
 		routeMode = "group_qa"
+	}
+	if feishuGroup && targetTaskID == "" && routeMode == "group_qa" {
+		// Upgrade conversations created by the metadata-only detection path.
+		host, err := s.createChannelHostTask(ctx, instance, endpoint, envelope)
+		if err != nil {
+			return err
+		}
+		if err := s.store.AdoptChannelConversationHost(ctx, conversation.ID, host.ID, s.now().UTC()); err != nil {
+			s.discardUnusedChannelTask(ctx, host)
+			return err
+		}
+		targetTaskID = host.ID
+		conversation.HostTaskID = host.ID
 	}
 	// A finished Task refuses further input, so the message would fail with
 	// "task is completed" and the sender would see silence. Continue it in a
@@ -1870,10 +1891,10 @@ func (s *Service) processInbound(ctx context.Context, receipt domain.ChannelInbo
 	if finished, finishedErr := s.finishedChannelTarget(ctx, targetTaskID); finishedErr != nil {
 		return finishedErr
 	} else if finished.ID != "" {
-		if feishuGroup {
+		if feishuGroup && !envelope.MentionedBot {
 			return store.ErrChannelGroupUnbound
 		}
-		continued, continueErr := s.continueFinishedChannelTask(ctx, instance, conversation, endpointKind, finished, receipt.ID)
+		continued, continueErr := s.continueFinishedChannelTask(ctx, instance, conversation, endpointKind, finished, receipt.ID, groupRoute)
 		if continueErr != nil {
 			return continueErr
 		}
@@ -2894,7 +2915,7 @@ func (s *Service) finishedChannelTarget(ctx context.Context, taskID string) (dom
 // the triggering message is delivered to it instead of the frozen Task. It is
 // idempotent: repeating a delivery for the same finished Task reuses the
 // continuation it already created.
-func (s *Service) continueFinishedChannelTask(ctx context.Context, instance domain.ChannelInstance, conversation domain.ChannelConversation, endpointKind string, finished domain.Task, receiptID string) (domain.Task, error) {
+func (s *Service) continueFinishedChannelTask(ctx context.Context, instance domain.ChannelInstance, conversation domain.ChannelConversation, endpointKind string, finished domain.Task, receiptID string, previousGroupRoute domain.ChannelTaskRoute) (domain.Task, error) {
 	previous, snapshotErr := s.store.RuntimeSnapshot(ctx, finished.RuntimeConfigSnapshotID)
 	if snapshotErr != nil && !errors.Is(snapshotErr, sql.ErrNoRows) {
 		return domain.Task{}, fmt.Errorf("continuation runtime is unavailable")
@@ -2941,7 +2962,8 @@ func (s *Service) continueFinishedChannelTask(ctx context.Context, instance doma
 	// already finished (the conversation keeps pointing at its original host).
 	continuationID := stableID("task", "channel-continuation", finished.ID, receiptID)
 	task, err := s.store.Task(ctx, continuationID)
-	if errors.Is(err, sql.ErrNoRows) {
+	created := errors.Is(err, sql.ErrNoRows)
+	if created {
 		task, err = s.application.CreateTask(ctx, app.CreateTaskInput{
 			ID: continuationID, ProjectID: finished.ProjectID, WorkspaceID: finished.WorkspaceID,
 			Title: finished.Title, Request: channelContinuationRequest(finished),
@@ -2961,9 +2983,17 @@ func (s *Service) continueFinishedChannelTask(ctx context.Context, instance doma
 	} else if err != nil {
 		return domain.Task{}, err
 	}
-	// The finished Task still owns the route slot, so route activation
-	// supersedes it; this also wakes a paused channel session.
-	if _, err := s.store.ActivateOwnerChannelTaskRoute(ctx, instance.ID, conversation.ID, task.ID, s.now().UTC()); err != nil {
+	// Feishu mentions can resume a terminal group route after cleanup released
+	// it. The store moves pending mentions together with the new binding.
+	if previousGroupRoute.ID != "" {
+		err = s.store.ContinueChannelGroupTaskRoute(ctx, previousGroupRoute, task.ID, s.now().UTC())
+	} else {
+		_, err = s.store.ActivateOwnerChannelTaskRoute(ctx, instance.ID, conversation.ID, task.ID, s.now().UTC())
+	}
+	if err != nil {
+		if created && errors.Is(err, store.ErrChannelRevision) {
+			s.discardUnusedChannelTask(ctx, task)
+		}
 		return domain.Task{}, err
 	}
 	return task, nil
@@ -3151,31 +3181,12 @@ func (s *Service) ensureConversation(ctx context.Context, instance domain.Channe
 	if !errors.Is(err, sql.ErrNoRows) {
 		return domain.ChannelConversation{}, err
 	}
-	runtimeChoice, err := s.resolveChannelRuntime(ctx, instance)
+	task, err := s.createChannelHostTask(ctx, instance, endpoint, envelope)
 	if err != nil {
 		return domain.ChannelConversation{}, err
 	}
 	conversationID := domain.NewID("channel_conversation")
-	effort := runtimeChoice.ReasoningEffort
-	filesystem := "read-only"
-	if endpoint.Kind == domain.ChannelEndpointAssistantDM {
-		effort = privateChatReasoningEffort
-		filesystem = privateChatFilesystem
-	}
-	task, err := s.application.CreateTask(ctx, app.CreateTaskInput{
-		ProjectID: instance.HostProjectID, WorkspaceID: instance.HostWorkspaceID,
-		Title:   s.channelConversationTitle(ctx, instance, endpoint.Kind, envelope),
-		Request: "System-managed external channel conversation host.", Isolation: "inplace",
-		Backend: runtimeChoice.Model.Backend, ModelSource: runtimeChoice.ModelSource, ModelID: runtimeChoice.Model.ID, WireModel: runtimeChoice.WireModel,
-		CodexAccountID: runtimeChoice.CodexAccountID, ProxyEnabled: runtimeChoice.ProxyEnabled,
-		ReasoningEffort: effort, Filesystem: filesystem, Approval: "never",
-		CollaborationMode: "single", MaxAgents: 1, KnowledgePolicy: "enabled", AllowSystemProject: true,
-	})
-	if err != nil {
-		return domain.ChannelConversation{}, fmt.Errorf("channel runtime task: %w", err)
-	}
 	now := s.now().UTC()
-	_ = s.store.UpdateTaskStatus(ctx, task.ID, task.Status, domain.TaskWaitingUser, timeStringUTC(now), "")
 	conversation = domain.ChannelConversation{
 		ID: conversationID, InstanceID: instance.ID, EndpointID: endpoint.ID, ScopeKeyVersion: scopeVersion, ScopeKey: scopeKey,
 		ExternalChatID: envelope.ExternalChatID, ExternalSenderID: envelope.ExternalSenderID, HostTaskID: task.ID,
@@ -3194,8 +3205,7 @@ func (s *Service) ensureConversation(ctx context.Context, instance domain.Channe
 	}
 	session := domain.ChannelSession{ID: domain.NewID("channel_session"), ConversationID: conversation.ID, Generation: 1, Mode: mode, Status: "active", StartedAt: now}
 	if err := s.store.CreateChannelConversation(ctx, conversation, session); err != nil {
-		_ = s.store.DeleteTask(ctx, task.ID)
-		_ = s.store.DeleteRuntimeSnapshot(ctx, task.RuntimeConfigSnapshotID)
+		s.discardUnusedChannelTask(ctx, task)
 		if existing, lookupErr := s.store.ChannelConversationByScope(ctx, endpoint.ID, scopeVersion, scopeKey); lookupErr == nil {
 			return existing, nil
 		}
@@ -3213,6 +3223,40 @@ func (s *Service) ensureConversation(ctx context.Context, instance domain.Channe
 		}
 	}
 	return conversation, nil
+}
+
+func (s *Service) createChannelHostTask(ctx context.Context, instance domain.ChannelInstance, endpoint domain.ChannelEndpoint, envelope domain.ChannelInboundEnvelope) (domain.Task, error) {
+	runtimeChoice, err := s.resolveChannelRuntime(ctx, instance)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	effort := runtimeChoice.ReasoningEffort
+	filesystem := "read-only"
+	if endpoint.Kind == domain.ChannelEndpointAssistantDM {
+		effort = privateChatReasoningEffort
+		filesystem = privateChatFilesystem
+	}
+	task, err := s.application.CreateTask(ctx, app.CreateTaskInput{
+		ProjectID: instance.HostProjectID, WorkspaceID: instance.HostWorkspaceID,
+		Title:   s.channelConversationTitle(ctx, instance, endpoint.Kind, envelope),
+		Request: "System-managed external channel conversation host.", Isolation: "inplace",
+		Backend: runtimeChoice.Model.Backend, ModelSource: runtimeChoice.ModelSource, ModelID: runtimeChoice.Model.ID, WireModel: runtimeChoice.WireModel,
+		CodexAccountID: runtimeChoice.CodexAccountID, ProxyEnabled: runtimeChoice.ProxyEnabled,
+		ReasoningEffort: effort, Filesystem: filesystem, Approval: "never",
+		CollaborationMode: "single", MaxAgents: 1, KnowledgePolicy: "enabled", AllowSystemProject: true,
+	})
+	if err != nil {
+		return domain.Task{}, fmt.Errorf("channel runtime task: %w", err)
+	}
+	now := s.now().UTC()
+	_ = s.store.UpdateTaskStatus(ctx, task.ID, task.Status, domain.TaskWaitingUser, timeStringUTC(now), "")
+	return task, nil
+}
+
+func (s *Service) discardUnusedChannelTask(ctx context.Context, task domain.Task) {
+	if err := s.store.DeleteTask(ctx, task.ID); err == nil {
+		_ = s.store.DeleteRuntimeSnapshot(ctx, task.RuntimeConfigSnapshotID)
+	}
 }
 
 func (s *Service) updateChannelConversationIdentity(ctx context.Context, conversation domain.ChannelConversation, instance domain.ChannelInstance, endpointKind string, envelope domain.ChannelInboundEnvelope) (domain.ChannelConversation, error) {

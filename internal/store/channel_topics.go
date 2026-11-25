@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS channel_group_receipts (
     batch_id TEXT NOT NULL,
     ready_ms INTEGER NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_channel_task_routes_conversation ON channel_task_routes(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_channel_group_receipts_open
 ON channel_group_receipts(route_id,target_task_id,thread_id,ready_ms);
 CREATE INDEX IF NOT EXISTS idx_channel_group_receipts_batch ON channel_group_receipts(batch_id);
@@ -84,8 +85,9 @@ func checkGroupRouteTx(ctx context.Context, tx *sql.Tx, route domain.ChannelTask
 		JOIN channel_endpoints e ON e.id=c.endpoint_id AND e.enabled=1
 		JOIN channel_instances i ON i.id=r.instance_id
 		WHERE r.id=? AND r.state='active' AND r.target_task_id=?
+		  AND r.conversation_id=? AND r.instance_id=?
 		  AND c.external_chat_id=? AND i.retired_at='' AND i.status IN ('ready','degraded')`,
-		route.ID, route.TargetTaskID, chatID).Scan(&configJSON)
+		route.ID, route.TargetTaskID, route.ConversationID, route.InstanceID, chatID).Scan(&configJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrChannelGroupUnbound
 	}
@@ -339,12 +341,12 @@ func checkGroupInboxRoute(ctx context.Context, tx *sql.Tx, receiptID, taskID str
 	var chatID string
 	var mentioned bool
 	err := tx.QueryRowContext(ctx, `
-		SELECT g.route_id,g.target_task_id,
+		SELECT g.route_id,g.target_task_id,g.conversation_id,r.instance_id,
 		       json_extract(r.normalized_payload_json,'$.external_chat_id'),
 		       COALESCE(json_extract(r.normalized_payload_json,'$.mentioned_bot'),0)
 		FROM channel_group_receipts g
 		JOIN channel_inbox_dedup r ON r.id=g.receipt_id
-		WHERE g.receipt_id=?`, receiptID).Scan(&route.ID, &route.TargetTaskID, &chatID, &mentioned)
+		WHERE g.receipt_id=?`, receiptID).Scan(&route.ID, &route.TargetTaskID, &route.ConversationID, &route.InstanceID, &chatID, &mentioned)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && route.TargetTaskID != taskID) {
 		return ErrChannelGroupUnbound
 	}
@@ -357,9 +359,15 @@ func checkGroupInboxRoute(ctx context.Context, tx *sql.Tx, receiptID, taskID str
 func channelTopicTurnLimit(ctx context.Context, db interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }, topic channelTopicTurn, now time.Time) (string, error) {
+	// Human @mentions in the main chat keep their original availability.
+	// Their Turns still reset the consecutive-bot count for that scope.
+	if topic.threadID == "" && !topic.botOnly {
+		return "", nil
+	}
 	var hourly int
 	if err := db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM channel_topic_turns WHERE conversation_id=? AND thread_id=? AND queued_ms>?`,
+		SELECT COUNT(*) FROM channel_topic_turns
+		WHERE conversation_id=? AND thread_id=? AND queued_ms>? AND (thread_id<>'' OR bot_only=1)`,
 		topic.conversationID, topic.threadID, now.Add(-time.Hour).UnixMilli()).Scan(&hourly); err != nil {
 		return "", err
 	}

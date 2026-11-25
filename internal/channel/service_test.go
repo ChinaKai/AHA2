@@ -933,16 +933,25 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 		group.ExternalEventID = fmt.Sprintf("group-event-%d", index)
 		group.ChatType, group.ExternalChatID, group.ExternalSenderID, group.MentionedBot = "group", chatID, "same-user", true
 		group.ChatDisplayName, group.SenderDisplayName = "研发群", "张三"
-		if _, _, err := service.ReceiveInbound(ctx, claims, group); !errors.Is(err, store.ErrChannelGroupUnbound) {
-			t.Fatalf("unbound group %s returned %v", chatID, err)
+		if _, _, err := service.ReceiveInbound(ctx, claims, group); err != nil {
+			t.Fatal(err)
 		}
 	}
 	if err := service.processInboundBatch(ctx); err != nil {
 		t.Fatal(err)
 	}
 	tasks, _ = database.ListTasks(ctx, instance.HostProjectID)
-	if len(tasks) != 1 {
-		t.Fatalf("unbound groups created host Tasks: %#v", tasks)
+	if len(tasks) != 3 {
+		t.Fatalf("group scopes did not isolate by chat: %#v", tasks)
+	}
+	groupTitles := 0
+	for _, task := range tasks {
+		if task.Title == "飞书群聊 · 研发群" {
+			groupTitles++
+		}
+	}
+	if groupTitles != 2 {
+		t.Fatalf("group channel task titles=%#v", tasks)
 	}
 	groupEndpoint, err := database.ChannelEndpoint(ctx, instance.ID, domain.ChannelEndpointGroupDigitalHuman)
 	if err != nil {
@@ -1036,8 +1045,8 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 		t.Fatal(err)
 	}
 	tasks, _ = database.ListTasks(ctx, instance.HostProjectID)
-	if len(tasks) != 1 {
-		t.Fatalf("bound group created a replacement host task: %#v", tasks)
+	if len(tasks) != 3 {
+		t.Fatalf("bound legacy group created a replacement host task: %#v", tasks)
 	}
 	routedLegacy, err := database.ActiveChannelTaskRoute(ctx, groupConversation.ID)
 	if err != nil || routedLegacy.TargetTaskID != target.ID {
@@ -1162,11 +1171,7 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 	kinds := map[string]bool{}
 	for _, summary := range summaries {
 		kinds[summary.EndpointKind] = true
-		if summary.ID == groupBConversation.ID {
-			if summary.InboundCount != 0 || summary.OutboundCount != 0 {
-				t.Fatalf("unbound discovery stored a message: %#v", summary)
-			}
-		} else if summary.InboundCount == 0 || summary.LastInboundState == "" {
+		if summary.InboundCount == 0 || summary.LastInboundState == "" {
 			t.Fatalf("conversation summary missing inbound activity: %#v", summary)
 		}
 	}
@@ -1488,7 +1493,7 @@ func TestCompletedChannelTaskContinuesInNewTask(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	continuedHost, err := service.continueFinishedChannelTask(ctx, instance, conversation, domain.ChannelEndpointAssistantDM, hostTask, "private-host-continuation")
+	continuedHost, err := service.continueFinishedChannelTask(ctx, instance, conversation, domain.ChannelEndpointAssistantDM, hostTask, "private-host-continuation", domain.ChannelTaskRoute{})
 	if err != nil {
 		t.Fatal(err)
 	}

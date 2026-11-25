@@ -215,8 +215,68 @@ func (s *Store) ExitOwnerChannelTaskRoute(ctx context.Context, routeID, taskID s
 	return s.exitChannelTaskRoute(ctx, routeID, taskID, "owner disconnected task channel", at)
 }
 
+const channelTerminalRouteExitReason = "task reached terminal state"
+
 func (s *Store) ExitTerminalChannelTaskRoute(ctx context.Context, routeID, taskID string, at time.Time) error {
-	return s.exitChannelTaskRoute(ctx, routeID, taskID, "task reached terminal state", at)
+	return s.exitChannelTaskRoute(ctx, routeID, taskID, channelTerminalRouteExitReason, at)
+}
+
+// ChannelTaskRouteForMention includes a route that the terminal reconciler
+// just released. An explicit Owner unbind or a newer route ends that history.
+func (s *Store) ChannelTaskRouteForMention(ctx context.Context, conversationID string) (domain.ChannelTaskRoute, error) {
+	return channelTaskRouteForMention(ctx, s.db, conversationID)
+}
+
+func channelTaskRouteForMention(ctx context.Context, db interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, conversationID string) (domain.ChannelTaskRoute, error) {
+	return scanChannelTaskRoute(db.QueryRowContext(ctx, `
+		SELECT r.id,r.instance_id,r.conversation_id,r.target_task_id,r.state,r.revision,
+		       r.pending_action_id,r.activated_at,r.exited_at,r.exit_reason
+		FROM channel_task_routes r
+		JOIN tasks t ON t.id=r.target_task_id
+		WHERE r.id=(SELECT id FROM channel_task_routes WHERE conversation_id=? ORDER BY rowid DESC LIMIT 1)
+		  AND (r.state='active' OR (r.state='exited' AND r.exit_reason=? AND t.status IN (?,?)))`,
+		conversationID, channelTerminalRouteExitReason, domain.TaskCompleted, domain.TaskCancelled))
+}
+
+// ContinueChannelGroupTaskRoute changes the binding and the queued mention
+// receipts together. Non-mentions retain their original route and cannot
+// follow a terminal Task into a continuation.
+func (s *Store) ContinueChannelGroupTaskRoute(ctx context.Context, previous domain.ChannelTaskRoute, taskID string, at time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	current, err := channelTaskRouteForMention(ctx, tx, previous.ConversationID)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && (current.ID != previous.ID || current.TargetTaskID != previous.TargetTaskID)) {
+		return ErrChannelRevision
+	}
+	if err != nil {
+		return err
+	}
+	var status domain.TaskStatus
+	if err := tx.QueryRowContext(ctx, `SELECT status FROM tasks WHERE id=?`, current.TargetTaskID).Scan(&status); err != nil {
+		return err
+	}
+	if status != domain.TaskCompleted && status != domain.TaskCancelled {
+		return ErrChannelRevision
+	}
+	routeID, err := activateChannelTaskRouteTx(ctx, tx, current.InstanceID, current.ConversationID, taskID, "", at)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE channel_group_receipts SET route_id=?,target_task_id=?
+		WHERE route_id=? AND target_task_id=? AND receipt_id IN (
+		    SELECT id FROM channel_inbox_dedup WHERE conversation_id=?
+		      AND state IN ('received','processing')
+		      AND json_extract(normalized_payload_json,'$.mentioned_bot')=1
+		)`, routeID, taskID, current.ID, current.TargetTaskID, current.ConversationID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) exitChannelTaskRoute(ctx context.Context, routeID, taskID, reason string, at time.Time) error {
