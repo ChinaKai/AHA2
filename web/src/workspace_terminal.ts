@@ -731,7 +731,7 @@ function mountDrawer(host: HTMLElement, endpoint: string, layoutKey: string): {r
   };
 }
 
-export function workspaceTerminals(slot: HTMLElement, task: string): {show(workspace: string): void} {
+export function workspaceTerminals(slot: HTMLElement, endpointFor: (workspace: string) => string): {show(workspace: string): void} {
   const drawers = new Map<string, {host: HTMLElement; drawer: ReturnType<typeof mountDrawer>}>();
   let active: ReturnType<typeof mountDrawer> | undefined;
   let current = "";
@@ -757,7 +757,6 @@ export function workspaceTerminals(slot: HTMLElement, task: string): {show(works
   window.addEventListener("keydown", shortcut, true);
   return {
     show(workspace) {
-      if (!task) return;
       if (current === workspace && active) {
         refresh();
         return;
@@ -779,8 +778,7 @@ export function workspaceTerminals(slot: HTMLElement, task: string): {show(works
       const host = document.createElement("div");
       if (!drawers.size) slot.replaceChildren();
       slot.append(host);
-      const path = "/api/v1/tasks/" + encodeURIComponent(task) + "/workspace-terminal";
-      const endpoint = workspace ? path + "?" + new URLSearchParams({workspace}) : path;
+      const endpoint = endpointFor(workspace);
       entry = {host, drawer: mountDrawer(host, endpoint, "aha2.workspaceTerminal." + endpoint)};
       drawers.set(workspace, entry);
     }

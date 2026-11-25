@@ -1642,3 +1642,15 @@ class APIClient {
 }
 
 export const api = new APIClient();
+
+export function workspaceViewerEndpoints(task: string, workspace: string): {view: string; terminal: string} {
+  if (task) {
+    const base = `/api/v1/tasks/${encodeURIComponent(task)}`;
+    return {
+      view: `${base}/${workspace ? `workspace-target/${encodeURIComponent(workspace)}` : "workspace"}`,
+      terminal: `${base}/workspace-terminal${workspace ? `?${new URLSearchParams({workspace})}` : ""}`,
+    };
+  }
+  const base = `/api/v1/workspaces/${encodeURIComponent(workspace)}`;
+  return {view: `${base}/viewer`, terminal: `${base}/workspace-terminal`};
+}

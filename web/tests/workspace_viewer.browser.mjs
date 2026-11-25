@@ -33,6 +33,14 @@ await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
 const origin = `http://127.0.0.1:${server.address().port}`;
 const task = {id: "viewer-task", code: "task-42", title: "Review the changes", status: "active", isolation: "worktree",
   project_id: "p", workspace_id: "w", task_workspace_path: "/resolved/worktree"};
+const projectWorkspaces = [
+  {id: "empty-workspace", project_id: "single", name: "Empty checkout", health: "ready"},
+  {id: "local-checkout", project_id: "multi", name: "Local checkout", health: "ready"},
+  {id: "builder", project_id: "multi", name: "Remote builder", health: "degraded", locality: "remote", transport: "ssh"},
+  {id: "remote-copy", project_id: "multi", name: "Synced copy", health: "ready", read_only: true, locality: "remote"},
+  {id: "failed-checkout", project_id: "multi", name: "Failed checkout", health: "error"},
+  {id: "unreachable", project_id: "multi", name: "Unreachable checkout", health: "unknown"},
+].map(workspace => ({root_path: "/project/" + workspace.id, ...workspace}));
 const headerTask = {
   code: "task-276",
   title: "远程工作区查看器在手机窄屏上的布局调整与分支、基线和工作区切换的可用性验证",
@@ -72,7 +80,7 @@ let browser;
 const errors = [];
 try {
   browser = await chromium.launch({...launch, headless: true});
-  async function context(width, language, terminalFixture = false, headerFixture = false) {
+  async function context(width, language, terminalFixture = false, headerFixture = false, projectFixture = false) {
     const ctx = await browser.newContext({
       viewport: {width, height: 800},
       isMobile: headerFixture && width <= 430,
@@ -132,7 +140,8 @@ try {
         ? [{id: "", name: "Local checkout"}, {id: "ssh-workspace", name: headerFixture ? headerTask.workspace : "Builder"}] : []});
       if (path.includes("/workspace-terminal")) {
         if (!terminalFixture || !allowTerminalLAN) return answer({locked: true});
-        const workspace = url.searchParams.get("workspace") || "";
+        const direct = path.match(/^\/api\/v1\/workspaces\/([^/]+)\/workspace-terminal/);
+        const workspace = direct?.[1] || url.searchParams.get("workspace") || "";
         const method = route.request().method();
         const list = sessions.get(workspace) || [];
         terminalRequests.push({method, workspace, path});
@@ -142,7 +151,7 @@ try {
           return answer({error: fault.error}, fault.status);
         }
         if (method === "GET") return answer({sessions: list,
-          cwd: workspace ? "/srv/workspace" : "/resolved/worktree", ssh: Boolean(workspace)});
+          cwd: direct ? "/project/" + workspace : workspace ? "/srv/workspace" : "/resolved/worktree", ssh: direct ? workspace === "builder" : Boolean(workspace)});
         if (method === "POST") {
           assert.deepEqual(Object.keys(route.request().postDataJSON()).sort(), ["cols", "initial", "rows"]);
           const info = {id: "pty-" + nextTerminal++, number: list.length + 1};
@@ -157,12 +166,31 @@ try {
         sessions.set(workspace, list.filter(item => item.id !== id));
         return answer({ok: true});
       }
-      if (path === "/api/v1/projects") return answer({projects: [{id: "p", name: "Project", project_type: "folder"}]});
-      if (path === "/api/v1/workspaces") return answer({workspaces: [{id: "w", project_id: "p", name: "Viewer fixture", root_path: "/project"}]});
-      if (path === "/api/v1/tasks") return answer({tasks: [task], counts: {status: {active: 1}, project: {p: 1}, device: {local: 1}}});
+      if (path === "/api/v1/projects") return answer({projects: projectFixture ? [
+        {id: "single", name: "Single workspace project"}, {id: "multi", name: "Multiple workspaces"}, {id: "none", name: "No workspaces"},
+      ] : [{id: "p", name: "Project", project_type: "folder"}]});
+      if (path === "/api/v1/workspaces") return answer({workspaces: projectFixture ? projectWorkspaces : [{id: "w", project_id: "p", name: "Viewer fixture", root_path: "/project"}]});
+      if (path === "/api/v1/tasks") {
+        if (projectFixture && url.searchParams.get("project_id") === "multi" && url.searchParams.has("summary") && !url.searchParams.has("limit")) {
+          return answer({tasks: [
+            {id: "active-builder", workspace_id: "builder", status: "active"},
+            {id: "completed-local", workspace_id: "local-checkout", status: "completed"},
+          ]});
+        }
+        return answer({tasks: projectFixture ? [] : [task], counts: {status: {active: 1}, project: {p: 1}, device: {local: 1}}});
+      }
       if (path === "/api/v1/tasks/viewer-task") return answer({task, turns: [], agents: [{agent_id: "main", title: "Main", role: "main", backend: "stub", status: "idle", wire_model: "stub"}], hardware: []});
       if (path.endsWith("/conversation")) return answer({conversation: {items: []}});
       if (path === "/api/v1/assistant") return answer({assistant: {enabled: false}});
+      const direct = path.match(/^\/api\/v1\/workspaces\/([^/]+)\/viewer\/([^/]+)$/);
+      if (direct) {
+        const workspace = projectWorkspaces.find(item => item.id === direct[1]);
+        if (!workspace || workspace.id === "unreachable") return answer({error: "workspace_viewer_unavailable"}, 404);
+        if (url.searchParams.has("availability")) return answer({available: true});
+        if (direct[2] === "tree") return answer({entries: [{path: "workspace.txt", kind: "file"}]});
+        if (direct[2] === "file") return answer({text: workspace.name + " file contents"});
+        return answer({name: workspace.name, isGit: false});
+      }
       const match = path.match(/^\/api\/v1\/tasks\/([^/]+)\/(?:workspace|workspace-target\/ssh-workspace)\/([^/]+)$/);
       if (!match) return answer({});
       const [, id, view] = match;
@@ -307,6 +335,55 @@ try {
     await ctx.close();
   }
   assert.deepEqual(headerFailures, [], "workspace viewer responsive header");
+
+  const projects = await context(390, "en-US", true, false, true);
+  projects.allowTerminal();
+  const projectPage = await projects.ctx.newPage();
+  await projectPage.goto(origin + "/#projects");
+  const single = projectPage.locator('[data-project="single"]').getByRole("link", {name: "Open Workspace"});
+  let opening = projectPage.waitForEvent("popup");
+  await single.click();
+  const singleViewer = await opening;
+  await singleViewer.getByRole("heading", {name: "Empty checkout"}).waitFor();
+  assert.equal(new URL(singleViewer.url()).pathname, "/workspace-viewer");
+  assert.equal(new URL(singleViewer.url()).searchParams.get("workspace"), "empty-workspace");
+  assert.equal(new URL(singleViewer.url()).searchParams.has("task"), false);
+  await singleViewer.getByRole("button", {name: "workspace.txt"}).click();
+  await singleViewer.getByText("Empty checkout file contents", {exact: true}).waitFor();
+  await singleViewer.getByRole("button", {name: "New terminal on this workspace host"}).click();
+  await singleViewer.getByText("PTY fixture for pty-1", {exact: true}).waitFor();
+  assert.ok(projects.terminalRequests.some(({method, path}) => method === "POST" && path === "/api/v1/workspaces/empty-workspace/workspace-terminal"));
+  await singleViewer.close();
+  assert.equal(await projectPage.locator('[data-project="none"]').getByRole("link", {name: /no workspaces yet/}).isDisabled(), true);
+
+  const multi = projectPage.locator('[data-project="multi"]').getByRole("button", {name: "Open Workspace"});
+  await multi.click();
+  const picker = projectPage.getByRole("dialog", {name: "Choose a workspace"});
+  await picker.waitFor();
+  assert.equal(projects.ctx.pages().length, 1);
+  assert.equal(await picker.getByText("Last opened").count(), 0);
+  await picker.getByText("Active tasks: 0", {exact: true}).first().waitFor();
+  const builder = picker.getByRole("link", {name: "Remote builder", exact: true});
+  await builder.getByText("Active tasks: 1", {exact: true}).waitFor();
+  assert.match(await builder.textContent(), /Degraded · Remote/);
+  for (const [name, reason] of [["Synced copy", /read-only copy/], ["Failed checkout", /check failed/], ["Unreachable checkout", /unavailable/]]) {
+    const choice = picker.getByRole("link", {name: new RegExp(name)});
+    await choice.getByText(reason).waitFor();
+    assert.equal(await choice.isDisabled(), true);
+    assert.equal(await choice.getAttribute("href"), null);
+  }
+  opening = projectPage.waitForEvent("popup");
+  await builder.click();
+  const builderViewer = await opening;
+  await builderViewer.getByRole("heading", {name: "Remote builder"}).waitFor();
+  assert.equal(new URL(builderViewer.url()).searchParams.get("workspace"), "builder");
+  await picker.waitFor({state: "hidden"});
+  await projectPage.reload();
+  await multi.click();
+  await picker.waitFor();
+  await builder.getByText(/Last opened/).waitFor();
+  assert.equal(projects.ctx.pages().length, 2);
+  await projects.ctx.close();
 
   const desktop = await context(1280, "en-US");
   const page = await desktop.ctx.newPage();

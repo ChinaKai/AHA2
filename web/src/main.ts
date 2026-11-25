@@ -1,4 +1,4 @@
-import {api, setAPIRequestObserver} from "./api.js";
+import {api, setAPIRequestObserver, workspaceViewerEndpoints} from "./api.js";
 import type {APIRequestSample} from "./api.js";
 import {COMMAND_PALETTE_COMPOSITION_GUARD_MS, COMMAND_PALETTE_DEBOUNCE_MS, buildCommandSections, createDebouncer, flattenCommandSections, isPaletteShortcut, paletteKeyAction, readRecentTaskIDs, rememberRecentTaskID, runPaletteSelection} from "./command_palette.js";
 import type {CommandItem, CommandSection, CommandSectionID} from "./command_palette.js";
@@ -272,6 +272,7 @@ function lazyPageState<T>(page: LazyPage<T>): string {
     : chunkLoadingHTML(t("chunk.loading"));
 }
 
+const projectListPage = createLazyPage("project-list", () => import("./project_list.js"), {onChange: () => render()});
 const workspaceViewerPage = createLazyPage("workspace-viewer", () => import("./workspace_viewer.js"), {onChange: () => render()});
 const workspaceTerminalPage = createLazyPage("workspace-terminal-settings", () => import("./workspace_terminal.js"), {onChange: () => render()});
 
@@ -794,10 +795,8 @@ const state: State = {
 
 applyLocale("auto");
 const app = document.querySelector<HTMLDivElement>("#app");
-const workspaceViewerTask = window.location.pathname === "/workspace-viewer"
-  ? new URLSearchParams(window.location.search).get("task") || ""
-  : null;
-let workspaceEntryProbe: {task: string; time: number; result: Promise<string>} | undefined;
+const isWorkspaceViewer = window.location.pathname === "/workspace-viewer";
+const workspaceEntryProbes = new Map<string, {expires: number; result: Promise<string>}>();
 let onboarding: OnboardingChecklist | null = null;
 let loadingOnboarding: Promise<OnboardingChecklist> | null = null;
 
@@ -2575,7 +2574,7 @@ async function bootstrap(): Promise<void> {
         state.generalSettings = general.general;
         applyLocale(general.general.language);
       }
-      if (workspaceViewerTask !== null) return;
+      if (isWorkspaceViewer) return;
       state.loading = false;
       state.hydrating = true;
       render();
@@ -4410,25 +4409,17 @@ function pageHead(title: string, description: string, actions = ""): string {
 }
 
 function projectsView(): string {
-  const rows = state.projects.map(project => {
-    const workspaces = state.workspaces.filter(item => item.project_id === project.id);
-    const tasks = state.tasks.filter(item => item.project_id === project.id);
-    const archived = project.channel_retired === true;
-    const system = isSystemProject(project);
-    return `<article class="list-row project-row" data-project="${project.id}">
-      <div class="item-title"><span class="square-icon">${icon("projects")}</span><div><strong>${escapeHTML(project.name)}</strong><small>${projectTypeLabel(project.project_type)}${archived ? " · 渠道归档" : system ? " · 系统托管" : ""}</small></div><span class="row-actions">${archived ? `<span class="status warn">已归档</span><button type="button" data-delete-project="${project.id}" class="icon-button danger project-del" title="永久删除归档">${icon("close")}</button>` : system ? `<span class="status warn">系统托管</span>` : `<button type="button" data-edit-project="${project.id}" class="icon-button" title="编辑项目">${icon("edit")}</button><button type="button" data-delete-project="${project.id}" class="icon-button project-del" title="删除项目">${icon("close")}</button>`}</span></div>
-      <div class="chips">${workspaces.map(item => `<span>${item.locality === "remote" ? icon("server") : icon("monitor")}${escapeHTML(item.name)}</span>`).join("") || "<span>暂无 Workspace</span>"}</div>
-      <div><strong>${tasks.length}</strong><small>任务</small></div>
-      <div><strong>${workspaces.filter(item => item.health === "ready").length}/${workspaces.length}</strong><small>Workspace Ready</small></div>
-    </article>`;
-  }).join("");
-  return shell(`<section class="page">
-    ${pageHead("项目", "管理逻辑 Project，点开项目配置其 Workspace。", `<button data-dialog="project">${icon("plus")}新建项目</button>`)}
-    <div data-onboarding-host></div>
-    <div class="metrics"><div><small>项目</small><strong>${state.projects.length}</strong></div><div><small>Workspace</small><strong>${state.workspaces.length}</strong></div><div><small>活动任务</small><strong>${state.tasks.filter(item => item.status === "active").length}</strong></div><div><small>知识</small><strong>${state.knowledge.length}</strong></div></div>
-    <div class="panel"><div class="panel-head"><strong>所有项目</strong><button id="refresh">${icon("refresh")}刷新</button></div>${rows || `<div class="empty">创建第一个项目，随后点开配置 Workspace。</div>`}${loadMoreHTML("projects")}</div>
-    ${projectDialog()}
-  </section>`);
+  const page = projectListPage.loaded();
+  if (!page) {
+    void projectListPage.load();
+    return shell(lazyPageState(projectListPage));
+  }
+  return shell(page.renderProjectList({
+    projects: state.projects, workspaces: state.workspaces, tasks: state.tasks, knowledgeCount: state.knowledge.length,
+    isSystemProject, projectTypeLabel, escapeHTML, workspaceEntryHTML,
+    header: pageHead("项目", "管理逻辑 Project，点开项目配置其 Workspace。", `<button data-dialog="project">${icon("plus")}新建项目</button>`),
+    form: projectDialog(), pagination: loadMoreHTML("projects"),
+  }));
 }
 
 function projectDetailView(project: Project): string {
@@ -6906,38 +6897,54 @@ function taskMailPendingCount(): number {
   return (state.taskMailOptions?.messages || []).filter(card => card.message.status === "pending_approval").length;
 }
 
-function workspaceEntryHTML(task: Task, configured: boolean): string {
-  const label = t("workspaceViewer.open");
-  const reason = t(configured ? "common.loading" : "workspaceViewer.unavailable");
-  return `<a class="task-tool-button workspace-viewer-entry" data-workspace-entry="${configured ? escapeHTML(task.id) : ""}" aria-disabled="true" aria-label="${escapeHTML(label)}" title="${escapeHTML(reason)}" target="_blank" rel="noopener">${icon("folder")}</a>`;
+function workspaceEntryHTML(className: string, {task = "", workspace = "", project = "", reason = "",
+  label = t("workspaceViewer.open"), content = icon("folder"), detailsID = "",
+}: {task?: string; workspace?: string; project?: string; reason?: string; label?: string; content?: string; detailsID?: string}): string {
+  return `<a class="${className} workspace-viewer-entry" data-workspace-entry="${reason ? "" : escapeHTML(task)}" data-workspace-id="${reason ? "" : escapeHTML(workspace)}" data-workspace-project="${escapeHTML(project)}" ${project ? 'role="link"' : ""} ${detailsID ? `aria-describedby="${escapeHTML(detailsID)}"` : ""} aria-disabled="true" aria-label="${escapeHTML(project && reason ? `${label} — ${reason}` : label)}" title="${escapeHTML(reason || t("common.loading"))}" target="_blank" rel="noopener">${content}</a>`;
 }
 
-function bindWorkspaceEntry(): void {
-  const link = document.querySelector<HTMLAnchorElement>("[data-workspace-entry]");
-  const task = link?.dataset.workspaceEntry;
-  if (!link || !task) return;
-  if (workspaceEntryProbe?.task !== task || Date.now() - workspaceEntryProbe.time > 10_000) {
-    const taskURL = `/api/v1/tasks/${encodeURIComponent(task)}`;
-    const result = api.request(`${taskURL}/workspace/state?availability=1`).then(() => "", async (error: {code?: string}) => {
-      if (error.code !== "workspace_viewer_transport_unsupported") return "workspaceViewer.unavailable";
-      // For example, Windows SSH can provide a PTY even when the read-only
-      // viewer's POSIX file worker cannot run on the remote host.
-      const terminal = await api.request<{cwd?: string}>(`${taskURL}/workspace-terminal`).catch(() => null);
-      return terminal?.cwd ? "" : "workspaceViewer.transport";
-    });
-    workspaceEntryProbe = {task, time: Date.now(), result};
+function bindWorkspaceEntries(root: ParentNode = document): void {
+  const now = Date.now();
+  for (const [key, probe] of workspaceEntryProbes) {
+    if (probe.expires <= now) workspaceEntryProbes.delete(key);
   }
-  void workspaceEntryProbe.result.then(error => {
-    if (!link.isConnected) return;
-    if (error) {
-      link.title = t(error);
-      link.setAttribute("aria-label", `${t("workspaceViewer.open")} — ${link.title}`);
-      return;
+  for (const link of root.querySelectorAll<HTMLAnchorElement>("[data-workspace-entry]")) {
+    const {workspaceEntry: task = "", workspaceId: workspace = "", workspaceProject: project} = link.dataset;
+    if (!task && !workspace) continue;
+    const endpoint = workspaceViewerEndpoints(task, workspace);
+    let probe = workspaceEntryProbes.get(endpoint.view);
+    if (!probe) {
+      const result = api.request(`${endpoint.view}/state?availability=1`).then(() => "", async (error: {code?: string}) => {
+        if (error.code !== "workspace_viewer_transport_unsupported") return task ? "workspaceViewer.unavailable" : "workspaceViewer.workspaceUnavailable";
+        // Windows SSH can provide a PTY even when the POSIX viewer cannot run.
+        const terminal = await api.request<{cwd?: string}>(endpoint.terminal).catch(() => null);
+        return terminal?.cwd ? "" : "workspaceViewer.transport";
+      });
+      probe = {expires: now + 10_000, result};
+      workspaceEntryProbes.set(endpoint.view, probe);
     }
-    link.href = `/workspace-viewer?${new URLSearchParams({task})}`;
-    link.title = t("workspaceViewer.open");
-    link.removeAttribute("aria-disabled");
-  });
+    void probe.result.then(error => {
+      if (!link.isConnected) return;
+      const label = link.getAttribute("aria-label") || t("workspaceViewer.open");
+      if (error) {
+        link.title = t(error);
+        link.setAttribute("aria-label", `${label} — ${link.title}`);
+        const reason = link.querySelector<HTMLElement>("[data-workspace-entry-reason]");
+        if (reason) {
+          reason.textContent = link.title;
+          reason.hidden = false;
+        }
+        return;
+      }
+      link.href = `/workspace-viewer?${new URLSearchParams(task ? {task} : {workspace})}`;
+      link.title = label;
+      link.removeAttribute("aria-disabled");
+      if (project) link.addEventListener("click", () => {
+        try { localStorage.setItem(`aha2.projectWorkspace.${project}`, workspace); } catch {}
+        link.closest("dialog")?.close();
+      });
+    });
+  }
 }
 
 function taskDetailView(detail: TaskDetail): string {
@@ -6965,8 +6972,9 @@ function taskDetailView(detail: TaskDetail): string {
   // and read-only Tasks. Keep it in the toolbar even at zero pending; those
   // Tasks render only the approval section, never the route form.
   const channelVisible = true;
+  const viewerConfigured = !remoteReadOnly && !archivedReadOnly && (detail.task.task_workspace_path || (detail.task.isolation !== "worktree" && workspace?.root_path));
   return shell(`<section class="task-screen">
-    <header class="task-head"><button id="back-tasks">←</button><div class="task-title-block"><h1><span class="task-code">${escapeHTML(detail.task.code || "")}</span><span class="task-title-text">${escapeHTML(detail.task.title)}</span></h1><div class="task-head-subline"><span class="task-head-meta" title="${escapeHTML(taskMeta)}">${escapeHTML(taskMeta)}</span><span id="task-detail-status" class="status ${statusClass(detail.task.status)}">${statusLabel(detail.task.status)}</span><span class="task-branch">${escapeHTML(detail.task.task_branch || "")}</span><span id="task-review-slot">${renderTaskReviewDecision(detail.task, tr)}</span></div></div><div class="actions task-tool-actions">${workspaceEntryHTML(detail.task, Boolean(!remoteReadOnly && !archivedReadOnly && (detail.task.task_workspace_path || (detail.task.isolation !== "worktree" && workspace?.root_path))))}${renderTaskToolButtons(state.taskTool, {includeChannel: channelVisible, channelConnected: Boolean(state.taskChannelDestination), channelLabel: taskChannelButtonLabel(state.taskChannelDestination), pendingPermissions: taskPermissionPendingCount(detail), pendingMail: taskMailPendingCount()})}</div></header>
+    <header class="task-head"><button id="back-tasks">←</button><div class="task-title-block"><h1><span class="task-code">${escapeHTML(detail.task.code || "")}</span><span class="task-title-text">${escapeHTML(detail.task.title)}</span></h1><div class="task-head-subline"><span class="task-head-meta" title="${escapeHTML(taskMeta)}">${escapeHTML(taskMeta)}</span><span id="task-detail-status" class="status ${statusClass(detail.task.status)}">${statusLabel(detail.task.status)}</span><span class="task-branch">${escapeHTML(detail.task.task_branch || "")}</span><span id="task-review-slot">${renderTaskReviewDecision(detail.task, tr)}</span></div></div><div class="actions task-tool-actions">${workspaceEntryHTML("task-tool-button", {task: detail.task.id, reason: viewerConfigured ? "" : t("workspaceViewer.unavailable")})}${renderTaskToolButtons(state.taskTool, {includeChannel: channelVisible, channelConnected: Boolean(state.taskChannelDestination), channelLabel: taskChannelButtonLabel(state.taskChannelDestination), pendingPermissions: taskPermissionPendingCount(detail), pendingMail: taskMailPendingCount()})}</div></header>
     <div class="task-grid${toolLayout}" style="--task-tool-width:${state.taskToolWidth}%">
       ${chat}
       ${renderTaskToolPanel(state.taskTool, detail, state.selectedTaskAgent, taskCtxHtml(), state.taskToolMode, taskChannelPanelHTML(), state.taskToolPinned === state.taskTool, taskMailPanelHTML(detail))}
@@ -7332,10 +7340,10 @@ function updateTaskLiveRegions(): void {
 
 function render(): void {
   if (!app) return;
-  if (workspaceViewerTask !== null && state.auth?.authenticated && !state.loading) {
+  if (isWorkspaceViewer && state.auth?.authenticated && !state.loading) {
     const module = workspaceViewerPage.loaded();
     if (module) {
-      if (!app.querySelector(".workspace-viewer")) module.mountWorkspaceViewer(app, workspaceViewerTask, copyText);
+      if (!app.querySelector(".workspace-viewer")) module.mountWorkspaceViewer(app, copyText);
     } else {
       app.innerHTML = lazyPageState(workspaceViewerPage);
       app.querySelector("[data-chunk-retry]")?.addEventListener("click", () => { void workspaceViewerPage.retry(); });
@@ -7572,7 +7580,7 @@ function render(): void {
 }
 
 async function loadAfterWebLogin(): Promise<void> {
-  if (workspaceViewerTask !== null) {
+  if (isWorkspaceViewer) {
     const settings = await api.generalSettings().catch(() => null);
     if (settings?.general) applyLocale(settings.general.language);
     return;
@@ -8149,7 +8157,12 @@ function bindCommon(): void {
     if (dialog?.id === "agent-config-dialog" && !confirmAgentConfigClose(dialog)) return;
     dialog?.close();
   }));
-  document.querySelectorAll<HTMLElement>("[data-project]").forEach(element => element.addEventListener("click", () => {
+  document.querySelectorAll<HTMLElement>("[data-open-project-workspaces]").forEach(button => button.addEventListener("click", () => {
+    const project = state.projects.find(item => item.id === button.dataset.openProjectWorkspaces);
+    if (project) projectListPage.loaded()?.showProjectWorkspaces(project, state.workspaces, {escapeHTML, workspaceEntryHTML}, bindWorkspaceEntries);
+  }));
+  document.querySelectorAll<HTMLElement>("[data-project]").forEach(element => element.addEventListener("click", event => {
+    if ((event.target as Element).closest("[data-open-project-workspaces], [data-workspace-entry]")) return;
     const id = element.dataset.project!;
     state.selectedProject = state.projects.find(item => item.id === id) || null;
     state.dialogProjectID = id;
@@ -8496,7 +8509,7 @@ function bindCommon(): void {
     setMessage("notice", `${agentID} 配置已更新，下一个 Turn 生效`);
   });
   document.querySelector("#back-tasks")?.addEventListener("click", () => closeTaskDetail());
-  bindWorkspaceEntry();
+  bindWorkspaceEntries();
   document.querySelector<HTMLFormElement>("#task-takeover-form")?.addEventListener("submit", event => {
     event.preventDefault();
     if (!state.selectedTask?.task.read_only) return;

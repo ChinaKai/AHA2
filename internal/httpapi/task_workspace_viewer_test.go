@@ -9,6 +9,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ChinaKai/AHA2/internal/domain"
+	"github.com/ChinaKai/AHA2/internal/workspaceterminal"
 )
 
 func TestTaskWorkspaceViewerHTTP(t *testing.T) {
@@ -78,5 +81,64 @@ func TestTaskWorkspaceViewerHTTP(t *testing.T) {
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusNotFound {
 		t.Fatalf("missing worktree: HTTP %d", response.StatusCode)
+	}
+}
+
+func TestWorkspaceViewerAndTerminalWithoutTaskHTTP(t *testing.T) {
+	fixture := newTaskDetailFixture(t, false)
+	ctx := t.Context()
+	now := time.Now().UTC()
+	project := domain.Project{ID: "project-without-tasks", Name: "Empty project", CreatedAt: now, UpdatedAt: now}
+	if err := fixture.database.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "example.txt"), []byte("from the workspace root"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, ws := range []domain.Workspace{
+		{ID: "empty", Name: "Empty workspace", Health: "ready"},
+		{ID: "mirror", Name: "Remote mirror", Health: "ready", ReadOnly: true},
+		{ID: "unhealthy", Name: "Unhealthy workspace", Health: "error"},
+	} {
+		ws.ProjectID, ws.RootPath = project.ID, root
+		ws.Locality, ws.Transport = "local", "native"
+		ws.CreatedAt, ws.UpdatedAt = now, now
+		if err := fixture.database.CreateWorkspace(ctx, ws); err != nil {
+			t.Fatal(err)
+		}
+	}
+	base := fixture.server.URL + "/api/v1/workspaces/"
+	check := func(client *http.Client, method, path string, wantStatus int, wantBody string) {
+		t.Helper()
+		response := requestJSON(t, client, method, base+path, nil, "")
+		defer response.Body.Close()
+		body, err := io.ReadAll(response.Body)
+		if err != nil || response.StatusCode != wantStatus || !strings.Contains(string(body), wantBody) {
+			t.Fatalf("%s %s: HTTP %d %s (%v)", method, path, response.StatusCode, body, err)
+		}
+	}
+	check(http.DefaultClient, "GET", "empty/viewer/state", 401, "authentication_required")
+	check(http.DefaultClient, "GET", "empty/workspace-terminal", 401, "authentication_required")
+	check(fixture.client, "GET", "empty/viewer/state?availability=1", 200, `"available":true`)
+	check(fixture.client, "GET", "empty/viewer/file?path=example.txt", 200, "from the workspace root")
+	check(fixture.client, "GET", "empty/viewer/state?root="+url.QueryEscape(root), 400, "workspace_viewer_invalid_path")
+	check(fixture.client, "POST", "empty/viewer/file?path=example.txt", 405, "method_not_allowed")
+	check(fixture.client, "POST", "empty/workspace-terminal", 403, "csrf_rejected")
+	check(fixture.client, "GET", "empty/workspace-terminal?workspace=mirror", 400, "workspace_terminal_invalid_target")
+	for _, workspace := range []string{"mirror", "unhealthy", "missing"} {
+		check(fixture.client, "GET", workspace+"/viewer/state", 404, "workspace_viewer_unavailable")
+		check(fixture.client, "GET", workspace+"/workspace-terminal", 404, "workspace_terminal_unavailable")
+	}
+	if workspaceterminal.LocalSupported() {
+		response := requestJSON(t, fixture.client, "GET", base+"empty/workspace-terminal", nil, "")
+		var terminal struct{ Cwd string }
+		decodeResponse(t, response, &terminal)
+		if response.StatusCode != http.StatusOK || terminal.Cwd != root {
+			t.Fatalf("workspace terminal: HTTP %d, cwd %q, want %q", response.StatusCode, terminal.Cwd, root)
+		}
 	}
 }

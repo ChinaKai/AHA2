@@ -100,13 +100,18 @@ func (s *Service) WorkspaceViewerTargets(ctx context.Context, taskID string) ([]
 }
 
 func (s *Service) viewerWorkspace(ctx context.Context, taskID, workspaceID string) (domain.Task, domain.Workspace, string, error) {
-	task, err := s.store.Task(ctx, taskID)
-	if err != nil {
-		return domain.Task{}, domain.Workspace{}, "", err
-	}
-	useTaskRoot := workspaceID == "" || workspaceID == task.WorkspaceID
-	if useTaskRoot {
-		workspaceID = task.WorkspaceID
+	var task domain.Task // Optional metadata and checkout information for task-scoped requests.
+	useTaskRoot := false
+	if taskID != "" {
+		var err error
+		task, err = s.store.Task(ctx, taskID)
+		if err != nil {
+			return domain.Task{}, domain.Workspace{}, "", err
+		}
+		useTaskRoot = workspaceID == "" || workspaceID == task.WorkspaceID
+		if useTaskRoot {
+			workspaceID = task.WorkspaceID
+		}
 	}
 	item, err := s.store.Workspace(ctx, workspaceID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -115,18 +120,22 @@ func (s *Service) viewerWorkspace(ctx context.Context, taskID, workspaceID strin
 	if err != nil {
 		return domain.Task{}, domain.Workspace{}, "", err
 	}
-	if item.ProjectID != task.ProjectID {
-		return domain.Task{}, domain.Workspace{}, "", ErrViewerUnavailable
-	}
-	for _, lookup := range []struct {
-		id   string
-		find func(context.Context, string) (domain.ChannelInstance, error)
-	}{{task.ID, s.store.RetiredChannelInstanceForTask}, {item.ID, s.store.RetiredChannelInstanceForWorkspace}} {
-		if _, err := lookup.find(ctx, lookup.id); err == nil {
+	if taskID != "" {
+		if item.ProjectID != task.ProjectID {
+			return domain.Task{}, domain.Workspace{}, "", ErrViewerUnavailable
+		}
+		if _, err := s.store.RetiredChannelInstanceForTask(ctx, task.ID); err == nil {
 			return domain.Task{}, domain.Workspace{}, "", ErrViewerUnavailable
 		} else if !errors.Is(err, sql.ErrNoRows) {
 			return domain.Task{}, domain.Workspace{}, "", err
 		}
+	} else if item.ReadOnly || item.Health == "error" {
+		return domain.Task{}, domain.Workspace{}, "", ErrViewerUnavailable
+	}
+	if _, err := s.store.RetiredChannelInstanceForWorkspace(ctx, item.ID); err == nil {
+		return domain.Task{}, domain.Workspace{}, "", ErrViewerUnavailable
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return domain.Task{}, domain.Workspace{}, "", err
 	}
 	root := item.RootPath
 	if useTaskRoot {

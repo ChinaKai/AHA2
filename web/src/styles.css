@@ -372,6 +372,14 @@ body.task-view-active .banner { border: 1px solid var(--color-border); border-ra
 
 .project-row { cursor: pointer; }
 .project-row:hover { background: #f8fafc; }
+.row-actions .project-workspace-entry { min-height: 36px; flex: 0 0 auto; border: 1px solid var(--color-border-strong); border-radius: var(--radius-control); background: var(--color-surface); color: var(--color-text); }
+.row-actions .project-workspace-entry[href]:hover { border-color: var(--color-accent); background: var(--color-accent-soft); color: var(--color-accent-ink); }
+.project-workspace-choices { display: grid; gap: var(--space-2); }
+.project-workspace-choices .project-workspace-option { display: grid; justify-content: stretch; gap: 4px; padding: 9px 12px; border: 1px solid var(--color-border); border-radius: var(--radius-control); color: var(--color-text); overflow-wrap: anywhere; }
+.project-workspace-option > span { color: var(--color-text-muted); }
+.project-workspace-option.recent, .project-workspace-option[href]:hover { border-color: var(--color-accent); background: var(--color-accent-soft); }
+.project-workspace-option [data-workspace-entry-reason] { color: var(--color-danger-ink); }
+.project-workspace-entry[aria-disabled="true"], .project-workspace-option[aria-disabled="true"] { opacity: .6; cursor: not-allowed; }
 .project-del { margin-left: auto; width: 28px; min-height: 28px; padding: 0; flex: 0 0 auto; }
 .back-link { border: 0; background: transparent; padding: 0; color: var(--muted); font-size: 12px; font-weight: 650; margin-bottom: 10px; }
 .back-link:hover { color: var(--blue); }

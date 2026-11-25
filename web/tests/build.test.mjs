@@ -3863,7 +3863,7 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   const jsNames = entries.filter(name => name.endsWith(".js"));
   assert.ok(jsNames.includes(bundleName), "entry chunk must be present");
   assert.ok(jsNames.length > 1, "route pages must be emitted as separate chunks");
-  for (const page of ["knowledge_workspace", "mcp_page", "resources", "channels", "mail_task", "codex_accounts", "prompt_admin", "proxy_settings", "sync_settings", "data_retention", "workspace_viewer"]) {
+  for (const page of ["knowledge_workspace", "mcp_page", "resources", "channels", "mail_task", "codex_accounts", "prompt_admin", "proxy_settings", "sync_settings", "data_retention", "project_list", "workspace_viewer"]) {
     assert.ok(jsNames.some(name => name.startsWith(`${page}.`)), `${page} must be a route chunk`);
   }
 

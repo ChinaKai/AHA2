@@ -25,11 +25,12 @@ import (
 )
 
 func (s *Server) registerWorkspaceTerminalRoutes(mux *http.ServeMux) {
-	const base = "/api/v1/tasks/{id}/workspace-terminal"
-	mux.Handle("GET "+base, s.withWorkspaceTerminalOwner(s.workspaceTerminalState, false))
-	mux.Handle("POST "+base, s.withWorkspaceTerminalOwner(s.workspaceTerminalCreate, false))
-	mux.Handle("DELETE "+base+"/{terminal}", s.withWorkspaceTerminalOwner(s.workspaceTerminalDelete, false))
-	mux.Handle("GET "+base+"/{terminal}/ws", s.withWorkspaceTerminalOwner(s.workspaceTerminalSocket, true))
+	for _, base := range []string{"/api/v1/tasks/{id}/workspace-terminal", "/api/v1/workspaces/{workspace}/workspace-terminal"} {
+		mux.Handle("GET "+base, s.withWorkspaceTerminalOwner(s.workspaceTerminalState, false))
+		mux.Handle("POST "+base, s.withWorkspaceTerminalOwner(s.workspaceTerminalCreate, false))
+		mux.Handle("DELETE "+base+"/{terminal}", s.withWorkspaceTerminalOwner(s.workspaceTerminalDelete, false))
+		mux.Handle("GET "+base+"/{terminal}/ws", s.withWorkspaceTerminalOwner(s.workspaceTerminalSocket, true))
+	}
 	mux.Handle("PUT /api/v1/settings/security/workspace-terminal", s.withAuth(http.HandlerFunc(s.updateWorkspaceTerminalSettings)))
 }
 
@@ -329,12 +330,16 @@ func workspaceTerminalError(w http.ResponseWriter, err error) {
 }
 
 func (s *Server) workspaceTerminalTarget(w http.ResponseWriter, r *http.Request) (app.WorkspaceTerminalTarget, bool) {
+	taskID, workspaceID := r.PathValue("id"), r.PathValue("workspace")
 	query, err := url.ParseQuery(r.URL.RawQuery)
-	if err != nil || len(query["workspace"]) > 1 || len(query) > 1 || len(query) == 1 && !query.Has("workspace") {
+	if err != nil || (len(query) != 0 && (taskID == "" || len(query) != 1 || len(query["workspace"]) != 1)) {
 		writeError(w, http.StatusBadRequest, "workspace_terminal_invalid_target")
 		return app.WorkspaceTerminalTarget{}, false
 	}
-	target, err := s.app.WorkspaceTerminalTarget(r.Context(), r.PathValue("id"), query.Get("workspace"))
+	if taskID != "" {
+		workspaceID = query.Get("workspace")
+	}
+	target, err := s.app.WorkspaceTerminalTarget(r.Context(), taskID, workspaceID)
 	if err != nil {
 		if !errors.Is(err, sql.ErrNoRows) && !errors.Is(err, app.ErrViewerUnavailable) && !errors.Is(err, app.ErrWorkspaceTerminalUnsupported) {
 			s.workspaceTerminalLogger(r, target).Warn("workspace terminal request failed", "stage", "resolve_target", "error", err)

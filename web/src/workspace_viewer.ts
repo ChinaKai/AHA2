@@ -1,4 +1,4 @@
-import {api} from "./api.js";
+import {api, workspaceViewerEndpoints} from "./api.js";
 import {currentLocale, formatLocaleDateTime, t} from "./i18n.js";
 import {icon} from "./icons.js";
 import {terminalLabel, workspaceTerminals} from "./workspace_terminal.js";
@@ -418,7 +418,7 @@ function bindFileSidebar(layout: HTMLElement): void {
   render();
 }
 
-export function mountWorkspaceViewer(host: HTMLElement, task: string, copyText: (value: string) => Promise<void>): void {
+export function mountWorkspaceViewer(host: HTMLElement, copyText: (value: string) => Promise<void>): void {
   host.innerHTML = `<section class="workspace-viewer" data-i18n-ignore>
     <header class="wv-header"></header>
     <div class="wv-notice" role="status" hidden></div>
@@ -451,10 +451,11 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string, copyText: 
   const tabBar = root.querySelector<HTMLElement>(".wv-tabs")!;
   const content = root.querySelector<HTMLElement>(".wv-content")!;
   const url = new URL(window.location.href);
-  const terminal = workspaceTerminals(root.querySelector<HTMLElement>(".wv-drawers")!, task);
+  const task = url.searchParams.get("task") || "";
   let workspaceID = url.searchParams.get("workspace") || "";
   let workspaces: {id: string; name: string}[] = [];
-  terminal.show(workspaceID);
+  const terminal = workspaceTerminals(root.querySelector<HTMLElement>(".wv-drawers")!, id => workspaceViewerEndpoints(task, id).terminal);
+  if (task || workspaceID) terminal.show(workspaceID);
   let initialFile = url.searchParams.get("file");
   const initialScope = url.searchParams.get("scope");
   const initialFileRepo = url.searchParams.get("fileRepo");
@@ -492,8 +493,8 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string, copyText: 
   function read<T>(view: string, params: Record<string, string>, signal: AbortSignal, repository = repo): Promise<T> {
     const query = new URLSearchParams(params);
     if (repository) query.set("repo", repository);
-    const target = workspaceID ? `workspace-target/${encodeURIComponent(workspaceID)}` : "workspace";
-    return api.request<T>(`/api/v1/tasks/${encodeURIComponent(task)}/${target}/${view}?${query}`, {signal});
+    const target = workspaceViewerEndpoints(task, workspaceID);
+    return api.request<T>(`${target.view}/${view}?${query}`, {signal});
   }
 
   function showNotice(message = ""): void {
@@ -503,7 +504,7 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string, copyText: 
 
   function saveLocation(): void {
     const next = new URL(window.location.href);
-    next.search = new URLSearchParams({task, tab: mode}).toString();
+    next.search = new URLSearchParams(task ? {task, tab: mode} : {tab: mode}).toString();
     if (workspaceID) next.searchParams.set("workspace", workspaceID);
     const savedBase = base || (!repo ? state?.base : "");
     if (savedBase) next.searchParams.set("base", savedBase);
@@ -554,7 +555,7 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string, copyText: 
     header.innerHTML = `<div class="wv-heading">
         <span class="wv-heading-icon">${icon("folder")}</span>
         <div><h1>${html(state?.name || repositories[0]?.name || label("title"))}</h1>
-        ${state ? `<p>${html([state.taskCode, state.taskTitle].filter(Boolean).join(" · "))}</p>` : ""}</div>
+        ${task && state ? `<p>${html([state.taskCode, state.taskTitle].filter(Boolean).join(" · "))}</p>` : ""}</div>
       </div>
       <div class="wv-meta">
         ${repositories.length > 0 ? `<select data-wv-repo aria-label="${label("repository")}" title="${html(currentRepository ? repositoryLabel(currentRepository) : label("repository"))}">
@@ -898,7 +899,7 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string, copyText: 
   }
 
   async function refresh(poll = false, recoveryNotice = ""): Promise<void> {
-    if (!task) return;
+    if (!task && !workspaceID) return;
     if (poll && (document.hidden || statusRequest)) return;
     statusRequest?.abort();
     const controller = new AbortController();
@@ -1153,7 +1154,7 @@ export function mountWorkspaceViewer(host: HTMLElement, task: string, copyText: 
   renderHeader();
   renderTabs();
   renderContent();
-  showNotice(task ? t("common.loading") : label("notFound"));
+  showNotice(task || workspaceID ? t("common.loading") : label("notFound"));
   void refresh();
   if (task) void api.request<{workspaces: typeof workspaces}>(`/api/v1/tasks/${encodeURIComponent(task)}/workspace-targets`).then(
     data => { workspaces = data.workspaces || []; renderHeader(); },

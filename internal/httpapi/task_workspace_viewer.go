@@ -14,7 +14,7 @@ func workspaceViewerMethodNotAllowed(writer http.ResponseWriter, _ *http.Request
 	writeError(writer, http.StatusMethodNotAllowed, "method_not_allowed")
 }
 
-func (s *Server) taskWorkspaceView(writer http.ResponseWriter, request *http.Request) {
+func (s *Server) workspaceView(writer http.ResponseWriter, request *http.Request) {
 	query, err := url.ParseQuery(request.URL.RawQuery)
 	if err != nil || query.Has("root") {
 		writeError(writer, http.StatusBadRequest, "workspace_viewer_invalid_path")
