@@ -2,7 +2,9 @@ package httpapi
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/cookiejar"
@@ -35,7 +37,7 @@ func TestPetChannelTurnUsesEveryChannelToolThroughARealTaskRoute(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer database.Close()
-	executor := &blockingAgentAPIExecutor{started: make(chan app.ExecutionRequest, 4), release: make(chan struct{}), done: make(chan struct{})}
+	executor := &blockingAgentAPIExecutor{started: make(chan app.ExecutionRequest, 4), release: make(chan struct{}, 1), done: make(chan struct{})}
 	appService := app.NewService(database, nil, executor)
 	secrets := &fakeSecretStore{values: map[string]string{}}
 	channelService := channel.New(channel.Config{Store: database, App: appService, Secrets: secrets, DataDir: dataDir})
@@ -142,35 +144,55 @@ func TestPetChannelTurnUsesEveryChannelToolThroughARealTaskRoute(t *testing.T) {
 
 	// Channel runtime: a human message follows an existing topic without @.
 	runCtx, stop := context.WithCancel(ctx)
-	defer stop()
 	channelService.Start(runCtx)
-	receipt, duplicate, err := channelService.ReceiveInbound(ctx, channel.RuntimeClaims{InstanceID: instance.ID, Scopes: map[string]bool{"channel.inbound.write": true}}, domain.ChannelInboundEnvelope{
-		SchemaVersion: 1, InstanceID: instance.ID, ExternalEventID: "pet-route-event-1", EventType: "message", OccurredAt: now,
-		ChatType: "group", ExternalChatID: conversation.ExternalChatID, ExternalSenderID: "provider-user-li", ExternalMessageID: "pet-route-message-1",
-		Content: "帮忙看下日志", SenderDisplayName: "李四", SenderType: "user",
-		ThreadID: "omt_pet", RootID: "om_pet_root",
-	})
-	if err != nil || duplicate {
-		t.Fatalf("inbound receipt=%#v duplicate=%v err=%v", receipt, duplicate, err)
-	}
-	var turn domain.Turn
-	select {
-	case request := <-executor.started:
-		if request.Task.ID != pet.ID {
-			t.Fatalf("routed message started a Turn for %s, want task_pet", request.Task.ID)
-		}
-		turn = request.Turn
-	case <-time.After(15 * time.Second):
-		t.Fatal("routed channel message did not start a task_pet Turn")
-	}
 	defer func() {
-		close(executor.release)
-		select {
-		case <-executor.done:
-		case <-time.After(10 * time.Second):
-		}
 		stop()
+		close(executor.release)
+		shutdownCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		if err := appService.Shutdown(shutdownCtx); err != nil {
+			t.Errorf("waiting for channel Turns to stop: %v", err)
+		}
 	}()
+	receive := func(eventID, messageID, content string) domain.ChannelInboxReceipt {
+		t.Helper()
+		receipt, duplicate, err := channelService.ReceiveInbound(ctx, channel.RuntimeClaims{
+			InstanceID: instance.ID, Scopes: map[string]bool{"channel.inbound.write": true},
+		}, domain.ChannelInboundEnvelope{
+			SchemaVersion: 1, InstanceID: instance.ID, ExternalEventID: eventID, EventType: "message", OccurredAt: now,
+			ChatType: "group", ExternalChatID: conversation.ExternalChatID, ExternalSenderID: "provider-user-li",
+			ExternalMessageID: messageID, Content: content, SenderDisplayName: "李四", SenderType: "user",
+			ThreadID: "omt_pet", RootID: "om_pet_root",
+		})
+		if err != nil || duplicate {
+			t.Fatalf("inbound receipt=%#v duplicate=%v err=%v", receipt, duplicate, err)
+		}
+		return receipt
+	}
+	waitForTurn := func(receiptID string) domain.Turn {
+		t.Helper()
+		select {
+		case request := <-executor.started:
+			if request.Task.ID != pet.ID {
+				t.Fatalf("routed message started a Turn for %s, want task_pet", request.Task.ID)
+			}
+			return request.Turn
+		case <-time.After(15 * time.Second):
+			stored, _ := database.ChannelInboxReceipt(ctx, instance.ID, receiptID)
+			turns, _ := database.ListTurns(ctx, pet.ID)
+			for _, turn := range turns {
+				t.Logf("Turn %d: %s (%s)", turn.Sequence, turn.Status, turn.Error)
+			}
+			t.Fatalf("routed message did not start a task_pet Turn: receipt state=%s outcome=%s", stored.State, stored.Outcome)
+			return domain.Turn{}
+		}
+	}
+	priorReceipt := receive("pet-route-prior-event", "pet-route-prior-message", "Earlier group request")
+	priorTurn := waitForTurn(priorReceipt.ID)
+	executor.release <- struct{}{}
+	waitForTaskStatus(t, database, pet.ID, domain.TaskWaitingUser)
+	receipt := receive("pet-route-event-1", "pet-route-message-1", "帮忙看下日志")
+	turn := waitForTurn(receipt.ID)
 	token, err := capabilities.Issue(pet.ID, "main", turn.ID, time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -198,6 +220,39 @@ func TestPetChannelTurnUsesEveryChannelToolThroughARealTaskRoute(t *testing.T) {
 			}
 		}
 		return found
+	}
+
+	if !t.Run("rejects_receipt_from_another_Turn_in_the_same_Task", func(t *testing.T) {
+		if priorTurn.ID == turn.ID || priorTurn.TaskID != turn.TaskID {
+			t.Fatalf("expected two distinct Turns in the same Task, got %s and %s", priorTurn.ID, turn.ID)
+		}
+		priorContext, err := database.ChannelContextForReceipt(ctx, pet.ID, priorTurn.ID, priorReceipt.ID)
+		if err != nil || priorContext["inbound_receipt_id"] != priorReceipt.ID {
+			t.Fatalf("the previous Turn never owned the receipt: context=%v, err=%v", priorContext, err)
+		}
+		if borrowedContext, err := database.ChannelContextForReceipt(ctx, pet.ID, turn.ID, priorReceipt.ID); borrowedContext != nil || !errors.Is(err, sql.ErrNoRows) {
+			t.Errorf("current Turn can read the previous Turn's receipt: context=%v, err=%v", borrowedContext, err)
+		}
+
+		const replyText = "REPLY-USING-PREVIOUS-TURN-RECEIPT"
+		reply := coreMCPCallTool(t, url, token, "channel_reply", map[string]any{
+			"message": replyText, "inbound_receipt_id": priorReceipt.ID,
+		})
+		if !refused(reply) || len(carrying(replyText)) != 0 {
+			t.Errorf("reply using the previous Turn's receipt was not refused: %#v", reply)
+		}
+		permission := coreMCPCallTool(t, url, token, "channel_request_permission", map[string]any{
+			"action": "读取固件日志", "reason": "Earlier group request", "inbound_receipt_id": priorReceipt.ID,
+		})
+		if !refused(permission) || !strings.Contains(permission.Text, "no channel context") {
+			t.Errorf("permission request using the previous Turn's receipt was not refused: %#v", permission)
+		}
+		requests, err := database.ListTaskPermissionRequests(ctx, pet.ID, 10)
+		if err != nil || len(requests) != 0 {
+			t.Errorf("attempt using the previous Turn's receipt left permission requests: %v, err=%v", requests, err)
+		}
+	}) {
+		return
 	}
 
 	// channel_contacts: the owner-chosen contact, never the provider identity.

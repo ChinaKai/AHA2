@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -684,5 +685,70 @@ func TestCompactChannelReply(t *testing.T) {
 	got := compactChannelReply(long)
 	if len([]rune(got)) != 120 || !strings.HasSuffix(got, "…") {
 		t.Fatalf("long reply length=%d value=%q", len([]rune(got)), got)
+	}
+}
+
+func TestChannelContextForReceiptRejectsPendingReceiptForTurnWithoutBatch(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	instance, conversation := createDeliveryTestInstance(t, database)
+	task := createStoreTestTask(t, database)
+	now := time.Now().UTC()
+	webMessage := domain.Message{
+		ID: domain.NewID("message"), TaskID: task.ID, Role: "user", Sender: "owner", Content: "Web request", CreatedAt: now,
+	}
+	webRound := domain.TaskRound{
+		ID: domain.NewID("round"), TaskID: task.ID, InputMessageID: webMessage.ID,
+		Status: domain.RoundRunning, CreatedAt: now, StartedAt: now,
+	}
+	_, turn, err := database.CreateMessageRoundAndTurn(ctx, webMessage, webRound, domain.Turn{
+		ID: domain.NewID("turn"), TaskID: task.ID, AgentID: "main", InputMessageID: webMessage.ID,
+		Status: domain.TurnRunning, QueuedAt: now, Attempt: 1, Required: true,
+		RuntimeConfigSnapshotID: task.RuntimeConfigSnapshotID,
+	})
+	if err != nil || turn.InboxBatchID != "" {
+		t.Fatalf("expected a Turn without an inbox batch: batch=%q, err=%v", turn.InboxBatchID, err)
+	}
+	route, err := database.ActivateOwnerChannelTaskRoute(ctx, instance.ID, conversation.ID, task.ID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, duplicate, err := database.ReceiveChannelGroupMessage(ctx, domain.ChannelInboxReceipt{
+		ID: "pending-receipt", InstanceID: instance.ID, ExternalEventID: "pending-event", EventType: "message",
+		State: "received", OccurredAt: now, ReceivedAt: now, PayloadDigest: "pending-event",
+		NormalizedPayload: map[string]any{"external_chat_id": conversation.ExternalChatID, "mentioned_bot": true},
+	}, route, domain.ChannelInboundEnvelope{
+		ExternalChatID: conversation.ExternalChatID, MentionedBot: true,
+	})
+	if err != nil || duplicate {
+		t.Fatalf("receiving group receipt: duplicate=%v, err=%v", duplicate, err)
+	}
+	leases, err := database.ClaimChannelInbox(ctx, 1, now, time.Minute)
+	if err != nil || len(leases) != 1 || leases[0].ID != receipt.ID {
+		t.Fatalf("claiming group receipt: %v, err=%v", leases, err)
+	}
+	group, err := database.ChannelGroupReceipt(ctx, receipt.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := domain.Message{
+		ID: domain.NewID("message"), TaskID: task.ID, Role: "user", Content: "Undelivered group message", CreatedAt: now,
+	}
+	_, pending, _, inserted, err := database.EnqueueChannelOwnerMessage(ctx, receipt.ID, leases[0].LeaseID, conversation.ID, message, "main", map[string]any{
+		"endpoint":        domain.ChannelEndpointGroupDigitalHuman,
+		"conversation_id": conversation.ID, "group_batch_id": group.BatchID, "inbound_receipt_id": receipt.ID,
+		"route": map[string]any{"mode": "task_route", "target_task_id": task.ID},
+	})
+	if err != nil || !inserted || pending.Status != "pending" || pending.BatchID != "" || pending.RoundID != turn.RoundID {
+		t.Fatalf("expected an unclaimed inbox message, got %v, err=%v", pending, err)
+	}
+
+	if got, err := database.ChannelContextForReceipt(ctx, task.ID, turn.ID, receipt.ID); got != nil || !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("Turn without a batch can read a pending receipt: context=%v, err=%v", got, err)
 	}
 }
