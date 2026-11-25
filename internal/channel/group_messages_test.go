@@ -79,6 +79,14 @@ func TestFeishuGroupListeningAndTopicBatches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	instance.Config["runtime_bot_open_id"] = "sender-self"
+	instance, err = database.UpdateChannelInstance(ctx, instance, instance.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt, err := send("self", chat, "omt_a", "", "app", "self-authored message", false); !errors.Is(err, store.ErrChannelGroupSelf) || receipt.ID != "" {
+		t.Fatalf("self-authored message was not rejected before receipt creation: receipt=%v err=%v", receipt, err)
+	}
 	listener := domain.ChannelInboundEnvelope{
 		SchemaVersion: 1, InstanceID: instance.ID, ExternalEventID: "om_root", ExternalMessageID: "om_root",
 		EventType: "message", OccurredAt: clock, ChatType: "group", ExternalChatID: chat,

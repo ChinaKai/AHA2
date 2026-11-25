@@ -293,7 +293,7 @@ function openChannelSettings(instance: ChannelInstance, context: ChannelUIContex
     <div class="dialog-body">
       ${channelRuntimeEditor(config, context, instance)}
       <fieldset><legend>消息通知</legend><label class="channel-check"><input type="checkbox" name="notify_task_status" ${config.notify_task_status === true ? "checked" : ""}>普通 Task 状态变更推送到飞书私聊助手</label><small>仅推送等待处理、完成、失败或中断等状态；不会推送普通消息、过程输出或渠道宿主 Task。</small></fieldset>
-      ${instance.provider_key === "feishu" ? `<fieldset><legend>飞书群消息白名单</legend><label for="feishu-group-message-allowlist">群 ID（每行一个）</label><textarea id="feishu-group-message-allowlist" rows="3">${escapeHTML(stringList(config, "feishu_group_message_allowlist", []).join("\n"))}</textarea><small>默认留空。先绑定群与 Task，再在权限页面勾选群消息全量接收并重新扫码。</small></fieldset>` : ""}
+      ${instance.provider_key === "feishu" ? `<fieldset><legend>飞书群消息白名单</legend><label for="feishu-group-message-allowlist">群 ID（每行一个）</label><textarea id="feishu-group-message-allowlist" rows="3">${escapeHTML(stringList(config, "feishu_group_message_allowlist", []).join("\n"))}</textarea><small>默认留空。先绑定群与 Task，再在权限页面勾选群消息全量接收并重新扫码。授权生效前，保存的白名单不会启用。</small></fieldset>` : ""}
       <section class="channel-settings-knowledge"><div class="panel-head"><strong>Knowledge 访问范围</strong><span>私聊不限制；群聊可选全局知识 + 项目知识库</span></div><div data-channel-settings-knowledge><small>加载中…</small></div></section>
     </div>
     <div class="dialog-actions"><button type="button" data-close>取消</button><button type="button" class="primary" data-save>保存设置</button></div>`;

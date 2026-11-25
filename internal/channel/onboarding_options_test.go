@@ -1,6 +1,7 @@
 package channel
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -84,6 +85,30 @@ func TestFeishuSensitiveGroupScopesAreOptIn(t *testing.T) {
 		}
 	}
 	t.Fatal("group permission missing")
+}
+
+func TestFeishuGroupAllowlistRequiresExplicitPermission(t *testing.T) {
+	allowlist := []string{"oc_allowed"}
+	for _, tt := range []struct {
+		name        string
+		permissions any
+		want        []string
+	}{
+		{name: "legacy configuration"},
+		{name: "mention permission only", permissions: []any{"group_messages"}},
+		{name: "full reception granted", permissions: []any{domain.FeishuFullGroupPermission}, want: allowlist},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			config := map[string]any{domain.FeishuGroupAllowlistKey: allowlist}
+			if tt.permissions != nil {
+				config["channel_permission_ids"] = tt.permissions
+			}
+			instance := domain.ChannelInstance{ProviderKey: "feishu", Config: config}
+			if got := feishuGroupMessageAllowlist(instance); !slices.Equal(got, tt.want) {
+				t.Fatalf("effective group allowlist = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }
 
 func TestResolveFeishuCloudDocumentReadScopes(t *testing.T) {

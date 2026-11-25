@@ -188,7 +188,7 @@ func restoreInboundMentionTypes(message *channeltypes.NormalizedMessage) {
 
 func inboundSenderType(message *channeltypes.NormalizedMessage) string {
 	if message != nil {
-		if event, ok := message.RawEvent.(*larkim.P2MessageReceiveV1); ok && event.Event != nil && event.Event.Sender != nil {
+		if event, ok := message.RawEvent.(*larkim.P2MessageReceiveV1); ok && event != nil && event.Event != nil && event.Event.Sender != nil {
 			if kind := strings.ToLower(optionalString(event.Event.Sender.SenderType)); kind != "" {
 				return kind
 			}
@@ -208,29 +208,67 @@ func interactiveCardText(raw string) string {
 	if json.Unmarshal([]byte(raw), &card) != nil {
 		return ""
 	}
-	var lines []string
-	var visit func(any)
-	visit = func(value any) {
-		switch node := value.(type) {
-		case string:
-			if text := strings.TrimSpace(node); text != "" {
-				lines = append(lines, text)
-			}
-		case []any:
-			for _, child := range node {
-				visit(child)
-			}
-		case map[string]any:
-			for _, key := range []string{
-				"header", "title", "subtitle", "body", "elements", "columns", "rows",
-				"fields", "actions", "options", "text", "content", "label", "name",
-			} {
-				visit(node[key])
-			}
+	return strings.Join(appendInteractiveCardText(nil, card), "\n")
+}
+
+func appendInteractiveCardText(lines []string, value any) []string {
+	switch node := value.(type) {
+	case string:
+		if text := strings.TrimSpace(node); text != "" {
+			lines = append(lines, text)
+		}
+	case []any:
+		for _, child := range node {
+			lines = appendInteractiveCardText(lines, child)
+		}
+	case map[string]any:
+		if node["tag"] == "table" {
+			return appendInteractiveTableText(lines, node)
+		}
+		for _, key := range []string{
+			"header", "title", "subtitle", "body", "elements", "columns",
+			"text", "content", "fields", "actions", "options", "label", "display_name",
+		} {
+			lines = appendInteractiveCardText(lines, node[key])
 		}
 	}
-	visit(card)
-	return strings.Join(lines, "\n")
+	return lines
+}
+
+func appendInteractiveTableText(lines []string, table map[string]any) []string {
+	appendRow := func(cells []string) {
+		if strings.Join(cells, "") != "" {
+			lines = append(lines, strings.Join(cells, " | "))
+		}
+	}
+	columns, _ := table["columns"].([]any)
+	var keys, headings []string
+	for _, item := range columns {
+		column, _ := item.(map[string]any)
+		key, _ := column["name"].(string)
+		if key == "" {
+			continue
+		}
+		keys = append(keys, key)
+		headings = append(headings, strings.Join(appendInteractiveCardText(nil, column["display_name"]), " "))
+	}
+	appendRow(headings)
+
+	rows, _ := table["rows"].([]any)
+	for _, item := range rows {
+		row, _ := item.(map[string]any)
+		cells := make([]string, 0, len(keys))
+		for _, key := range keys {
+			switch cell := row[key].(type) {
+			case float64, bool:
+				cells = append(cells, fmt.Sprint(cell))
+			default:
+				cells = append(cells, strings.Join(appendInteractiveCardText(nil, cell), " "))
+			}
+		}
+		appendRow(cells)
+	}
+	return lines
 }
 
 type limitedMediaBody struct {

@@ -531,17 +531,11 @@ func registerChannelHealth(callbacks channelLifecycle, set func(status, errorCod
 func runChannel(ctx context.Context, runtime *runtimeClient, boot bootstrap) error {
 	client, wsClient := newFeishuClients(boot)
 	selfBotOpenID, selfBotName := feishuBotIdentity(ctx, client)
-	safety := channeltypes.DefaultChannelConfig().Safety
-	safety.Batch.DelayMs = 0
 	allowlist := boot.GroupMessageAllowlist
 	if !runtime.groupTopics {
 		allowlist = nil
 	}
-	requireMention := len(allowlist) == 0
-	channel := larkchannel.NewChannel(client, wsClient,
-		channeltypes.WithSafetyConfig(safety),
-		channeltypes.WithPolicyConfig(channeltypes.PolicyConfig{RequireMention: &requireMention}),
-	)
+	channel := larkchannel.NewChannel(client, wsClient, inboundChannelOptions(allowlist)...)
 	healthMetadata := map[string]string{"bot_open_id": selfBotOpenID, "bot_display_name": selfBotName}
 	healthState := &channelHealthState{}
 	reporter := newChannelHealthReporter(healthState, func(reportCtx context.Context, status, errorCode string, metadata map[string]string) error {
@@ -710,8 +704,29 @@ func cardFormScalar(value any, limit int) string {
 	return result
 }
 
+func inboundChannelOptions(allowlist []string) []channeltypes.ChannelOption {
+	safety := channeltypes.DefaultChannelConfig().Safety
+	safety.Batch.DelayMs = 0
+	respondToMentionAll := len(allowlist) > 0
+	requireMention := !respondToMentionAll
+	return []channeltypes.ChannelOption{
+		channeltypes.WithSafetyConfig(safety),
+		channeltypes.WithPolicyConfig(channeltypes.PolicyConfig{
+			RequireMention:      &requireMention,
+			RespondToMentionAll: &respondToMentionAll,
+		}),
+	}
+}
+
 func allowInboundMessage(message *channeltypes.NormalizedMessage, allowlist []string) bool {
-	return message.ChatType != "group" || message.MentionedBot || slices.Contains(allowlist, message.ChatID)
+	switch message.ChatType {
+	case "p2p":
+		return true
+	case "group":
+		return message.MentionedBot || slices.Contains(allowlist, message.ChatID)
+	default:
+		return false
+	}
 }
 
 func feishuDisplayNames(ctx context.Context, client *lark.Client, message *channeltypes.NormalizedMessage) (string, string) {
@@ -724,8 +739,9 @@ func feishuDisplayNames(ctx context.Context, client *lark.Client, message *chann
 	type result struct{ kind, value string }
 	results := make(chan result, 2)
 	pending := 0
+	senderKey := "user:" + message.UserID
 	if message.UserID != "" {
-		if cached := cachedName("user:" + message.UserID); cached != "" {
+		if cached, found := cachedName(senderKey); found {
 			senderName = cached
 		} else {
 			pending++
@@ -734,6 +750,11 @@ func feishuDisplayNames(ctx context.Context, client *lark.Client, message *chann
 				if message.ChatType == "group" && message.ChatID != "" {
 					if inboundSenderIsBot(message) {
 						value = inboundBotDisplayName(lookupCtx, client, message.MessageID)
+						if value == "" && ctx.Err() == nil {
+							// High-volume group traffic should not retry a failed
+							// sender lookup on every event, or overwrite a good name.
+							displayNameCache.LoadOrStore(senderKey, cachedDisplayName{expiresAt: time.Now().Add(30 * time.Second)})
+						}
 					} else {
 						value = groupMemberDisplayName(lookupCtx, client, message.ChatID, message.UserID)
 					}
@@ -748,7 +769,7 @@ func feishuDisplayNames(ctx context.Context, client *lark.Client, message *chann
 		}
 	}
 	if message.ChatType == "group" && message.ChatID != "" {
-		if cached := cachedName("chat:" + message.ChatID); cached != "" {
+		if cached, found := cachedName("chat:" + message.ChatID); found {
 			chatName = cached
 		} else {
 			pending++
@@ -768,7 +789,7 @@ func feishuDisplayNames(ctx context.Context, client *lark.Client, message *chann
 			pending--
 			if item.kind == "user" {
 				senderName = item.value
-				cacheName("user:"+message.UserID, item.value)
+				cacheName(senderKey, item.value)
 			} else {
 				chatName = item.value
 				cacheName("chat:"+message.ChatID, item.value)
@@ -804,17 +825,17 @@ func groupMemberDisplayName(ctx context.Context, client *lark.Client, chatID, se
 	return ""
 }
 
-func cachedName(key string) string {
+func cachedName(key string) (string, bool) {
 	raw, ok := displayNameCache.Load(key)
 	if !ok {
-		return ""
+		return "", false
 	}
-	item, ok := raw.(cachedDisplayName)
-	if !ok || !item.expiresAt.After(time.Now()) {
-		displayNameCache.Delete(key)
-		return ""
+	item := raw.(cachedDisplayName)
+	if !item.expiresAt.After(time.Now()) {
+		displayNameCache.CompareAndDelete(key, item)
+		return "", false
 	}
-	return item.value
+	return item.value, true
 }
 
 func cacheName(key, value string) {

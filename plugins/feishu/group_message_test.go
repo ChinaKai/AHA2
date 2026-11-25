@@ -8,8 +8,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	lark "github.com/larksuite/oapi-sdk-go/v3"
 	"github.com/larksuite/oapi-sdk-go/v3/channel/normalize"
+	"github.com/larksuite/oapi-sdk-go/v3/channel/safety"
 	channeltypes "github.com/larksuite/oapi-sdk-go/v3/channel/types"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
@@ -41,6 +44,129 @@ func TestGroupMessageMetadataAndCardText(t *testing.T) {
 	event.Event.Message.ThreadId, event.Event.Message.RootId = nil, nil
 	if thread, root := inboundTopic(message); thread != "" || root != "" {
 		t.Fatalf("top-level message thread=%q root=%q", thread, root)
+	}
+}
+
+func TestInboundChannelOptionsDisableSDKBatchingAndSetGroupPolicy(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		allowlist []string
+	}{
+		{name: "mention only"},
+		{name: "full reception", allowlist: []string{"oc_allowed"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := channeltypes.DefaultChannelConfig()
+			for _, option := range inboundChannelOptions(tt.allowlist) {
+				option(&cfg)
+			}
+			if cfg.Safety.Batch.DelayMs != 0 {
+				t.Errorf("SDK batch delay = %s, want disabled", cfg.Safety.Batch.DelayMs)
+			}
+			full := len(tt.allowlist) > 0
+			if cfg.Policy.RequireMention == nil || *cfg.Policy.RequireMention != !full {
+				t.Error("RequireMention must be true only when the effective allowlist is empty")
+			}
+
+			gate := safety.NewPolicyGate(&cfg.Policy, nil)
+			for _, message := range []struct {
+				name       string
+				chat       string
+				mentionAll bool
+				mentionBot bool
+				want       bool
+			}{
+				{name: "ordinary", chat: "oc_allowed", want: full},
+				{name: "mention all", chat: "oc_allowed", mentionAll: true, want: full},
+				{name: "mention all and bot", chat: "oc_allowed", mentionAll: true, mentionBot: true, want: full},
+				{name: "mention all outside", chat: "oc_other", mentionAll: true},
+				{name: "explicit mention outside", chat: "oc_other", mentionBot: true, want: true},
+			} {
+				event := &channeltypes.NormalizedMessage{
+					ChatType: "group", ChatID: message.chat, MentionAll: message.mentionAll, MentionedBot: message.mentionBot,
+				}
+				decision := gate.Evaluate(event)
+				if got := decision.Allowed && allowInboundMessage(event, tt.allowlist); got != message.want {
+					t.Errorf("%s forwarded = %v, want %v (SDK reason %q)", message.name, got, message.want, decision.Reason)
+				}
+			}
+		})
+	}
+}
+
+func TestInboundMessageRejectsUnknownChatType(t *testing.T) {
+	if allowInboundMessage(&channeltypes.NormalizedMessage{ChatType: "unsupported", MentionedBot: true}, []string{"oc_allowed"}) {
+		t.Fatal("an unsupported chat type passed the plugin gate")
+	}
+	if !allowInboundMessage(&channeltypes.NormalizedMessage{ChatType: "p2p"}, nil) {
+		t.Fatal("private chat must pass the plugin gate")
+	}
+}
+
+func TestInboundSenderMissingTypeAndNonMentionedBot(t *testing.T) {
+	raw := `{"header":{"event_id":"evt"},"event":{"sender":{"sender_id":{"open_id":"bot_sender"}},"message":{"chat_id":"oc_allowed","chat_type":"group","message_id":"om_bot","thread_id":"omt_bot","message_type":"text","content":"{\"text\":\"状态\"}"}}}`
+	var event larkim.P2MessageReceiveV1
+	if err := json.Unmarshal([]byte(raw), &event); err != nil {
+		t.Fatal(err)
+	}
+	message := normalize.ParseMessage(&event)
+	if message == nil || inboundSenderType(message) != "unknown" || !inboundSenderIsBot(message) {
+		t.Fatal("an event without sender_type must retain the conservative bot classification")
+	}
+	if !inboundSenderIsBot(&channeltypes.NormalizedMessage{}) {
+		t.Fatal("an event without raw sender metadata must also be treated as a bot")
+	}
+
+	kind := "bot"
+	event.Event.Sender.SenderType = &kind
+	allowlist := []string{"oc_allowed"}
+	cfg := channeltypes.DefaultChannelConfig()
+	for _, option := range inboundChannelOptions(allowlist) {
+		option(&cfg)
+	}
+	message = normalize.ParseMessage(&event)
+	if message == nil || message.MentionedBot || !inboundSenderIsBot(message) ||
+		!safety.NewPolicyGate(&cfg.Policy, nil).Evaluate(message).Allowed || !allowInboundMessage(message, allowlist) {
+		t.Fatal("a non-mention bot topic event in an allowlisted group must reach core")
+	}
+	message.ChatID = "oc_other"
+	if allowInboundMessage(message, allowlist) {
+		t.Fatal("a non-mention bot topic event outside the allowlist reached core")
+	}
+}
+
+func TestBotDisplayNameLookupFailureIsBrieflyCached(t *testing.T) {
+	const senderID = "bot_name_lookup_failure"
+	const key = "user:" + senderID
+	t.Cleanup(func() { displayNameCache.Delete(key) })
+	requests := 0
+	client := lark.NewClient("sender-name-cache", "test-secret", lark.WithHttpClient(mockHTTPClient{do: func(request *http.Request) (*http.Response, error) {
+		switch {
+		case strings.Contains(request.URL.Path, "/auth/"):
+			return mediaTestResponse(200, `{"code":0,"tenant_access_token":"token","expire":3600}`), nil
+		case strings.HasSuffix(request.URL.Path, "/om_missing_name"):
+			requests++
+			if requests == 1 {
+				return mediaTestResponse(200, `{"code":230008}`), nil
+			}
+			return mediaTestResponse(200, `{"code":0,"data":{"items":[{"message_id":"om_missing_name","sender":{"sender_name":"联调机器人"}}]}}`), nil
+		default:
+			return mediaTestResponse(200, `{"code":0,"data":{"name":"测试群"}}`), nil
+		}
+	}}))
+	message := &channeltypes.NormalizedMessage{ChatType: "group", ChatID: "oc_bot_name_lookup_failure", MessageID: "om_missing_name", UserID: senderID}
+	t.Cleanup(func() { displayNameCache.Delete("chat:" + message.ChatID) })
+	for range 2 {
+		if _, name := feishuDisplayNames(context.Background(), client, message); name != "" {
+			t.Fatalf("failed lookup returned name %q", name)
+		}
+	}
+	if requests != 1 {
+		t.Fatalf("sender lookup made %d requests within the short failure cache window", requests)
+	}
+	displayNameCache.Store(key, cachedDisplayName{expiresAt: time.Now().Add(-time.Second)})
+	if _, name := feishuDisplayNames(context.Background(), client, message); name != "联调机器人" || requests != 2 {
+		t.Fatalf("expired lookup did not recover: name=%q requests=%d", name, requests)
 	}
 }
 
@@ -112,6 +238,53 @@ func TestTopicHandshakeKeepsStrictLegacyRuntimeCompatible(t *testing.T) {
 			}
 			if payload := <-requests; payload["mentioned_bot"] != true || payload["sender_is_bot"] != true {
 				t.Fatalf("older runtime metadata missing: %v", payload)
+			}
+		})
+	}
+}
+
+func TestInteractiveCardEventDisplayText(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "received card with rows of elements",
+			raw:  `{"title":"工具告警","elements":[[{"tag":"img","image_key":"img_hidden"},{"tag":"text","text":"请升级至最新版本客户端，以查看内容"}]]}`,
+			want: "工具告警\n请升级至最新版本客户端，以查看内容",
+		},
+		{
+			name: "form and table",
+			raw: `{"body":{"elements":[
+				{"tag":"div","text":{"content":"处理结果"},"fields":[{"text":{"content":"已完成"}}]},
+				{"tag":"form","name":"form_1","elements":[
+					{"tag":"input","name":"reason_input","label":{"content":"原因"},"value":"private input"},
+					{"tag":"button","name":"submit_btn","text":{"content":"提交"},"value":{"text":"hidden action"}}]},
+				{"tag":"table",
+				 "columns":[{"name":"customer_id","display_name":"客户"},{"name":"status_id","display_name":"状态"}],
+				 "rows":[{"status_id":{"content":"通过"},"customer_id":"张三","private_key":"hidden column"}]}
+			]}}`,
+			want: "处理结果\n已完成\n原因\n提交\n客户 | 状态\n张三 | 通过",
+		},
+		{name: "malformed content falls back to the SDK placeholder", raw: `{"title":`, want: "[unsupported message]"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			raw, err := json.Marshal(tt.raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload := `{"header":{"event_id":"evt"},"event":{"sender":{"sender_id":{"open_id":"ou_sender"},"sender_type":"user"},"message":{"chat_id":"oc_allowed","chat_type":"group","message_id":"om_card","message_type":"interactive","content":` + string(raw) + `}}}`
+			var event larkim.P2MessageReceiveV1
+			if err := json.Unmarshal([]byte(payload), &event); err != nil {
+				t.Fatal(err)
+			}
+			message := normalize.ParseMessage(&event)
+			if message == nil {
+				t.Fatal("SDK did not normalize the event")
+			}
+			if got, _ := normalizedInboundMedia(message); got != tt.want {
+				t.Fatalf("card text = %q, want %q", got, tt.want)
 			}
 		})
 	}
