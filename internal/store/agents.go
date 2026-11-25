@@ -632,9 +632,9 @@ func (s *Store) PendingAgentInbox(ctx context.Context, taskID, agentID string) (
 	return result, rows.Err()
 }
 
-// ClaimOwnerInboxForTurn claims pending owner and peer-Task messages for the
-// model-driven inbox/wait endpoint. Both kinds stay ordered by inbox sequence
-// and only rows in the current round and after the caller's cursor qualify.
+// ClaimOwnerInboxForTurn claims pending owner, peer-Task and matching Feishu
+// group messages for inbox/wait. Rows stay ordered by inbox sequence within
+// the current round and after the caller's cursor.
 func (s *Store) ClaimOwnerInboxForTurn(
 	ctx context.Context,
 	taskID, agentID, roundID, turnID string,
@@ -652,9 +652,10 @@ func (s *Store) ClaimOwnerInboxForTurn(
 	rows, err := tx.QueryContext(ctx, `
 		SELECT `+inboxColumns+` FROM agent_inbox
 		WHERE task_id=? AND target_agent_id=? AND round_id=? AND sequence>?
-		  AND source_kind IN ('owner_message','peer_task_message') AND status='pending'
+		  AND status='pending'
+		  AND (source_kind IN ('owner_message','peer_task_message') OR `+liveChannelGroupMatchesTurn+`)
 		ORDER BY sequence LIMIT ?`,
-		taskID, agentID, roundID, after, limit,
+		taskID, agentID, roundID, after, turnID, limit,
 	)
 	if err != nil {
 		return nil, err
@@ -675,10 +676,11 @@ func (s *Store) ClaimOwnerInboxForTurn(
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
-	if len(items) == 0 {
-		return nil, tx.Commit()
-	}
 	now := time.Now().UTC()
+	items, err = recheckChannelGroupInbox(ctx, tx, taskID, items, now)
+	if err != nil {
+		return nil, err
+	}
 	for _, item := range items {
 		result, err := tx.ExecContext(ctx, `
 			UPDATE agent_inbox
@@ -694,10 +696,12 @@ func (s *Store) ClaimOwnerInboxForTurn(
 			return nil, fmt.Errorf("owner inbox item changed concurrently")
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
+	if len(items) > 0 {
+		if err := markChannelTopicLiveHuman(ctx, tx, turnID); err != nil {
+			return nil, err
+		}
 	}
-	return items, nil
+	return items, tx.Commit()
 }
 
 func (s *Store) MarkLiveInboxProcessedForTurn(ctx context.Context, turnID string, processedAt time.Time) error {
@@ -739,7 +743,8 @@ func (s *Store) RequeueClaimedInboxForTurn(ctx context.Context, turnID string) (
 // claim is not a delivery: it stays claimed_in_turn until the backend confirms
 // the steer (Ack) or fails to inject it (Nack). Unlike the model-driven Wait
 // endpoint, this is called by the DSH control plugin at tool boundaries inside
-// the current turn. Other routed source kinds stay on the Turn-boundary path.
+// the current turn. Bound Feishu group messages can join a running Turn
+// when its original input belongs to the same binding and topic.
 func (s *Store) ClaimOwnerInboxForLiveInjection(
 	ctx context.Context,
 	taskID, agentID, roundID, turnID string,
@@ -756,9 +761,10 @@ func (s *Store) ClaimOwnerInboxForLiveInjection(
 	rows, err := tx.QueryContext(ctx, `
 		SELECT `+inboxColumns+` FROM agent_inbox
 		WHERE task_id=? AND target_agent_id=? AND round_id=?
-		  AND source_kind IN ('owner_message','pet_delegate_message','peer_task_message') AND status='pending'
+		  AND status='pending'
+		  AND (source_kind IN ('owner_message','pet_delegate_message','peer_task_message') OR `+liveChannelGroupMatchesTurn+`)
 		ORDER BY sequence LIMIT ?`,
-		taskID, agentID, roundID, limit,
+		taskID, agentID, roundID, turnID, limit,
 	)
 	if err != nil {
 		return nil, err
@@ -779,10 +785,11 @@ func (s *Store) ClaimOwnerInboxForLiveInjection(
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
-	if len(items) == 0 {
-		return nil, tx.Commit()
-	}
 	now := time.Now().UTC()
+	items, err = recheckChannelGroupInbox(ctx, tx, taskID, items, now)
+	if err != nil {
+		return nil, err
+	}
 	for _, item := range items {
 		result, execErr := tx.ExecContext(ctx, `
 			UPDATE agent_inbox
@@ -889,6 +896,11 @@ func (s *Store) AckLiveInboxForTurn(
 			WHERE id=? AND status='claimed_in_turn'`,
 			id,
 		); err != nil {
+			return 0, err
+		}
+	}
+	if delivered {
+		if err := markChannelTopicLiveHuman(ctx, tx, turnID); err != nil {
 			return 0, err
 		}
 	}

@@ -1040,7 +1040,6 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 	if _, _, err := service.ReceiveInbound(ctx, claims, secondSender); err != nil {
 		t.Fatal(err)
 	}
-	clock = clock.Add(store.ChannelTopicWindow)
 	if err := service.processInboundBatch(ctx); err != nil {
 		t.Fatal(err)
 	}

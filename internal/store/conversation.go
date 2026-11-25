@@ -116,7 +116,7 @@ func (s *Store) CreateAgentTurn(ctx context.Context, item domain.Turn) (domain.T
 	if err := insertTurnTx(ctx, tx, item); err != nil {
 		return domain.Turn{}, err
 	}
-	if err := admitChannelTopicRetry(ctx, tx, item); err != nil {
+	if err := copyChannelTopicForRetry(ctx, tx, item); err != nil {
 		return domain.Turn{}, err
 	}
 	return item, tx.Commit()

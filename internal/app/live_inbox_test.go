@@ -17,6 +17,7 @@ func TestLiveInboxInjectionTextCarriesSourceAndAttachments(t *testing.T) {
 			ID: "inbox-1", Content: "please stop and check the screenshot",
 			Payload: map[string]any{
 				"channel_receipt_id": "channel_inbox_123",
+				"channel_context":    map[string]any{"thread_id": "omt_release"},
 				"attachments": []any{map[string]any{
 					"id": "attachment-1", "name": "screen shot.png", "media_type": "image/png", "size": float64(2048),
 				}},
@@ -33,6 +34,7 @@ func TestLiveInboxInjectionTextCarriesSourceAndAttachments(t *testing.T) {
 		"[AHA live inbox] 2 new message(s)",
 		"蒋开开 (channel, role=owner, authority=task_channel_participant)",
 		"Channel reply receipt: channel_inbox_123",
+		"Channel topic: omt_release",
 		"please stop and check the screenshot",
 		"screen shot.png (image/png, 2048 bytes, id attachment-1, sha256 )",
 		".aha2-context/live-attachments/attachment-1/screen shot.png",

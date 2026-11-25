@@ -207,15 +207,43 @@ func TestPetChannelTurnUsesEveryChannelToolThroughARealTaskRoute(t *testing.T) {
 	}
 	t.Logf("evidence channel_contacts status=%d isError=%v text=%s", contacts.Status, contacts.IsError, contacts.Text)
 
+	// A second sender can join this running Turn through the live inbox.
+	liveReceipt, duplicate, err := channelService.ReceiveInbound(ctx, channel.RuntimeClaims{
+		InstanceID: instance.ID, Scopes: map[string]bool{"channel.inbound.write": true},
+	}, domain.ChannelInboundEnvelope{
+		SchemaVersion: 1, InstanceID: instance.ID, ExternalEventID: "pet-route-live-event", EventType: "message",
+		ChatType: "group", ExternalChatID: conversation.ExternalChatID, ExternalSenderID: "extra-provider-member-0",
+		ExternalMessageID: "pet-route-live-message", Content: "请读取固件日志", SenderType: "user",
+		ThreadID: "omt_pet", RootID: "om_pet_root",
+	})
+	if err != nil || duplicate {
+		t.Fatalf("live receipt: %v, duplicate=%v", err, duplicate)
+	}
+	wait := agentRequest(t, server.URL+"/api/v1/agent/turn/inbox/wait", http.MethodPost, token, map[string]any{
+		"after_cursor": 0, "timeout_seconds": 3,
+	})
+	var batch struct {
+		Messages []domain.LiveInboxMessage `json:"messages"`
+	}
+	decodeErr := json.NewDecoder(wait.Body).Decode(&batch)
+	wait.Body.Close()
+	if wait.StatusCode != http.StatusOK || decodeErr != nil || len(batch.Messages) != 1 {
+		t.Fatalf("live inbox status=%d messages=%v err=%v", wait.StatusCode, batch.Messages, decodeErr)
+	}
+	live := batch.Messages[0]
+	if live.Source.Authority != "task_channel_participant" || live.Payload["channel_receipt_id"] != liveReceipt.ID {
+		t.Fatalf("live inbox lost sender authority or its receipt: %v", live)
+	}
+
 	// channel_request_permission: a pending request plus an owner card; the
 	// pet cannot approve it, the decision stays with the owner.
-	permission := coreMCPCallTool(t, url, token, "channel_request_permission", map[string]any{"action": "读取固件日志", "scope": "本群当前问题", "reason": "PET-PERMISSION-REASON", "risk": "只读"})
+	permission := coreMCPCallTool(t, url, token, "channel_request_permission", map[string]any{"action": "读取固件日志", "scope": "本群当前问题", "reason": "PET-PERMISSION-REASON", "risk": "只读", "inbound_receipt_id": liveReceipt.ID})
 	if permission.IsError || !strings.Contains(permission.Text, "Permission request") {
 		t.Fatalf("permission=%#v", permission)
 	}
 	t.Logf("evidence channel_request_permission status=%d isError=%v text=%s", permission.Status, permission.IsError, permission.Text)
 	requests, err := database.ListTaskPermissionRequests(ctx, pet.ID, 10)
-	if err != nil || len(requests) != 1 || requests[0].Status != "pending" || requests[0].InboundReceiptID != receipt.ID || requests[0].ApplicantIdentityLinkID == "" {
+	if err != nil || len(requests) != 1 || requests[0].Status != "pending" || requests[0].InboundReceiptID != liveReceipt.ID || requests[0].ApplicantIdentityLinkID != extraMentionIDs[0] {
 		t.Fatalf("permission requests=%#v err=%v", requests, err)
 	}
 	t.Logf("evidence permission request id=%s status=%s receipt=%s", requests[0].ID, requests[0].Status, requests[0].InboundReceiptID)
@@ -254,6 +282,19 @@ func TestPetChannelTurnUsesEveryChannelToolThroughARealTaskRoute(t *testing.T) {
 		t.Fatalf("explicit mention target=%v want=%s err=%v", fullTarget, want, err)
 	}
 
+	liveReply := coreMCPCallTool(t, url, token, "channel_reply", map[string]any{
+		"message": "PET-LIVE-REPLY", "inbound_receipt_id": liveReceipt.ID,
+	})
+	liveReplies := carrying("PET-LIVE-REPLY")
+	if liveReply.IsError || len(liveReplies) != 1 {
+		t.Fatalf("live receipt reply=%#v, deliveries=%v", liveReply, liveReplies)
+	}
+	liveTarget, err := database.ChannelDeliveryTarget(ctx, conversation.ID, liveReplies[0].SourceEventSequence)
+	if err != nil || liveTarget["thread_id"] != "omt_pet" || liveTarget["reply_message_id"] != "pet-route-live-message" ||
+		liveTarget["mention_user_ids"] != `["extra-provider-member-0"]` {
+		t.Fatalf("reply used the wrong live message target: %v err=%v", liveTarget, err)
+	}
+
 	// channel_reply_decision records the end decision for the group topic.
 	decision := coreMCPCallTool(t, url, token, "channel_reply_decision", map[string]any{"reason": "已在群里回复"})
 	if decision.IsError {
@@ -281,6 +322,13 @@ func TestPetChannelTurnUsesEveryChannelToolThroughARealTaskRoute(t *testing.T) {
 		t.Fatalf("borrowed receipt decision=%#v", refusedDecision)
 	}
 	t.Logf("evidence borrowed-receipt channel_reply_decision status=%d isError=%v text=%s", refusedDecision.Status, refusedDecision.IsError, refusedDecision.Text)
+	refusedPermission := coreMCPCallTool(t, url, token, "channel_request_permission", map[string]any{
+		"action": "读取固件日志", "reason": "foreign receipt", "inbound_receipt_id": "unrelated-receipt",
+	})
+	if !refused(refusedPermission) || !strings.Contains(refusedPermission.Text, "no channel context") {
+		t.Fatalf("permission request accepted an unrelated receipt: %#v", refusedPermission)
+	}
+
 	for _, item := range deliveries() {
 		if item.ProviderMessageID != "" || item.Attempts != 0 {
 			t.Fatalf("a delivery left the process: %#v", item)

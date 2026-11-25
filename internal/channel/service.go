@@ -1786,15 +1786,7 @@ func (s *Service) processInbound(ctx context.Context, receipt domain.ChannelInbo
 			if groupReceipt.RouteID != groupRoute.ID || groupReceipt.TargetTaskID != groupRoute.TargetTaskID {
 				return store.ErrChannelGroupUnbound
 			}
-			ended, err := s.store.ChannelGroupBatchDialogueEnded(ctx, groupReceipt.BatchID, groupConversation.ID, envelope.ThreadID)
-			if err != nil {
-				return err
-			}
-			if ended {
-				s.logger.InfoContext(ctx, "Feishu group message not scheduled",
-					"conversation_id", groupConversation.ID, "receipt_id", receipt.ID, "reason", store.ChannelTopicDialogueEndedOutcome)
-				return s.store.FinishChannelInbox(ctx, receipt.ID, receipt.LeaseID, "rejected", groupConversation.ID, "", store.ChannelTopicDialogueEndedOutcome, s.now().UTC())
-			}
+
 		}
 	}
 	endpointKind := domain.ChannelEndpointGroupDigitalHuman

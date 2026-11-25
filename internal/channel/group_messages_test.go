@@ -14,7 +14,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/store"
 )
 
-func TestFeishuGroupListeningAndTopicBatches(t *testing.T) {
+func TestFeishuGroupListeningAndImmediateTurns(t *testing.T) {
 	service, instance, claims := mediaTestService(t)
 	ctx := context.Background()
 	database := service.store
@@ -118,36 +118,20 @@ func TestFeishuGroupListeningAndTopicBatches(t *testing.T) {
 		t.Fatalf("same message under a different event ID was not deduplicated: duplicate=%v err=%v", duplicate, err)
 	}
 	clock = clock.Add(100 * time.Millisecond)
-	second, err := send("om_second", chat, "omt_b", "om_other_root", "user", "WAKE_SECOND", true)
+	_, err = send("om_second", chat, "omt_b", "om_other_root", "user", "WAKE_SECOND", true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	clock = clock.Add(100 * time.Millisecond)
-	third, err := send("om_third", chat, "omt_a", "om_root", "app", "WAKE_OTHER_BOT", false)
+	_, err = send("om_third", chat, "omt_a", "om_root", "app", "WAKE_OTHER_BOT", false)
 	if err != nil {
 		t.Fatal(err)
-	}
-	a, err := database.ChannelGroupReceipt(ctx, first.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, err := database.ChannelGroupReceipt(ctx, second.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	c, err := database.ChannelGroupReceipt(ctx, third.ID)
-	if err != nil || a.BatchID == b.BatchID || a.BatchID != c.BatchID {
-		t.Fatalf("topic batch IDs %v %v %v err=%v", a, b, c, err)
 	}
 	if err := service.processInboundBatch(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if turns, err := database.ListTurns(ctx, task.ID); err != nil || len(turns) != 0 {
-		t.Fatalf("Turn before topic window closed: %v err=%v", turns, err)
-	}
-	clock = clock.Add(store.ChannelTopicWindow)
-	if err := service.processInboundBatch(ctx); err != nil {
-		t.Fatal(err)
+	if turns, err := database.ListTurns(ctx, task.ID); err != nil || len(turns) == 0 {
+		t.Fatalf("no Turn immediately after processing incoming messages: %v err=%v", turns, err)
 	}
 	deadline := time.Now().Add(4 * time.Second)
 	for time.Now().Before(deadline) {
@@ -155,20 +139,23 @@ func TestFeishuGroupListeningAndTopicBatches(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(turns) == 2 && turns[0].Status.Terminal() && turns[1].Status.Terminal() {
+		if len(turns) == 3 && turns[0].Status.Terminal() && turns[1].Status.Terminal() && turns[2].Status.Terminal() {
+			wantBackground := map[string]bool{"WAKE_FIRST": true, "WAKE_SECOND": false, "WAKE_OTHER_BOT": true}
 			for _, turn := range turns {
-				switch {
-				case strings.Contains(turn.Instruction, "WAKE_FIRST"):
-					if strings.Count(turn.Instruction, "WAKE_FIRST") != 1 || !strings.Contains(turn.Instruction, "WAKE_OTHER_BOT") || strings.Contains(turn.Instruction, "WAKE_SECOND") ||
-						!strings.Contains(turn.PromptSnapshot, "ROOT_BACKGROUND_FOREACH") {
-						t.Fatalf("incorrect first-topic input, instruction=%q status=%s error=%s", turn.Instruction, turn.Status, turn.Error)
+				if turn.Status != domain.TurnSucceeded {
+					t.Fatalf("turn failed: %s %s", turn.Status, turn.Error)
+				}
+				matches := 0
+				for message, want := range wantBackground {
+					if strings.Contains(turn.Instruction, message) {
+						matches++
+						if strings.Contains(turn.PromptSnapshot, "ROOT_BACKGROUND_FOREACH") != want {
+							t.Fatalf("wrong background for %s, expected present=%v", message, want)
+						}
 					}
-				case strings.Contains(turn.Instruction, "WAKE_SECOND"):
-					if strings.Contains(turn.Instruction, "WAKE_OTHER_BOT") || strings.Contains(turn.PromptSnapshot, "ROOT_BACKGROUND_FOREACH") {
-						t.Fatalf("background or messages leaked across topics: %q", turn.Instruction)
-					}
-				default:
-					t.Fatalf("unexpected Turn %q", turn.Instruction)
+				}
+				if matches != 1 {
+					t.Fatalf("expected one starting message per Turn: %q", turn.Instruction)
 				}
 			}
 			return
@@ -176,7 +163,7 @@ func TestFeishuGroupListeningAndTopicBatches(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	turns, _ := database.ListTurns(ctx, task.ID)
-	t.Fatalf("expected two finished topic Turns, got %d", len(turns))
+	t.Fatalf("expected three finished topic Turns, got %d", len(turns))
 }
 
 func startFeishuMentionHost(t *testing.T, service *Service, instance domain.ChannelInstance, claims RuntimeClaims, chat string, now time.Time) domain.ChannelConversation {
@@ -299,7 +286,6 @@ func TestFeishuGroupIngressRequiresPermissionAndBindingOnlyForNonMentions(t *tes
 	if err != nil || groupReceipt.RouteID != route.ID {
 		t.Fatalf("bound @ outside the allowlist did not retain its Task route: route=%q err=%v", groupReceipt.RouteID, err)
 	}
-	now = now.Add(store.ChannelTopicWindow)
 	if err := service.processInboundBatch(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -377,19 +363,10 @@ func TestFeishuGroupMentionContinuesFinishedBinding(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				mentionGroup, err := service.store.ChannelGroupReceipt(ctx, receipts[0].ID)
-				if err != nil {
-					t.Fatal(err)
-				}
-				quietGroup, err := service.store.ChannelGroupReceipt(ctx, nonMention.ID)
-				if err != nil || quietGroup.BatchID == "" || quietGroup.BatchID != mentionGroup.BatchID {
-					t.Fatalf("non-mention did not join the same topic batch: group=%v err=%v", quietGroup, err)
-				}
 				if err := service.reconcileTerminalTaskRoutes(ctx); err != nil {
 					t.Fatal(err)
 				}
 			}
-			now = now.Add(store.ChannelTopicWindow)
 			if err := service.processInboundBatch(ctx); err != nil {
 				t.Fatal(err)
 			}

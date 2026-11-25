@@ -127,7 +127,7 @@ var phaseThreeAnchorSpecs = []entryAnchorSpec{
 
 	// Shared read-only references. They are grouped under core because they are
 	// global boundaries, not task context.
-	{EntryID: EntryCore, Key: "resource-agent-api", LegacyID: "resource.agent-api", Kind: anchorKindResource, FrozenVersion: 15, Order: 200},
+	{EntryID: EntryCore, Key: "resource-agent-api", LegacyID: "resource.agent-api", Kind: anchorKindResource, FrozenVersion: 16, Order: 200},
 	{EntryID: EntryCore, Key: "resource-attachment-protocol", LegacyID: "resource.attachment-protocol", Kind: anchorKindResource, FrozenVersion: 1, Order: 201},
 	{EntryID: EntryCore, Key: "resource-group-permissions", LegacyID: "resource.group-permissions", Kind: anchorKindResource, FrozenVersion: 1, Order: 202},
 }

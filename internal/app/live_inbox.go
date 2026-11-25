@@ -39,9 +39,8 @@ func (s *Service) ClaimAgentInbox(ctx context.Context, claims agentapi.Claims, l
 	return s.claimLiveInbox(ctx, call.Task, call.Turn, limit)
 }
 
-// claimLiveInbox claims pending owner/channel and pet-delegated messages for
-// turn and renders them as injection text. Both the DSH plugin endpoint and a
-// stream-input Claude Turn go through here, so they share one claim semantics.
+// claimLiveInbox claims pending messages for the Turn and renders them as
+// injection text. Backend adapters and the DSH plugin share this path.
 func (s *Service) claimLiveInbox(ctx context.Context, task domain.Task, turn domain.Turn, limit int) (AgentInboxClaim, error) {
 	items, err := s.store.ClaimOwnerInboxForLiveInjection(
 		ctx, task.ID, turn.AgentID, turn.RoundID, turn.ID, limit,
@@ -267,12 +266,16 @@ func liveInboxInjectionText(
 	fmt.Fprintf(&output,
 		"[AHA live inbox] %d new message(s) arrived while this Turn is still running. "+
 			"They are already delivered to you; do not call inbox/wait for them and do not defer them to a later Turn. "+
-			"Apply them now, before continuing your current work.\n", len(messages))
+			"Read them using each message’s source and authority before continuing your current work.\n", len(messages))
 	for index, message := range messages {
 		fmt.Fprintf(&output, "\n### Message %d\n", index+1)
 		fmt.Fprintf(&output, "Source: %s\n", liveInboxSourceLabel(message))
 		if receipt, _ := message.Payload["channel_receipt_id"].(string); strings.TrimSpace(receipt) != "" {
 			fmt.Fprintf(&output, "Channel reply receipt: %s (use this with the channel reply API if this message needs a reply)\n", strings.TrimSpace(receipt))
+		}
+		channelContext, _ := message.Payload["channel_context"].(map[string]any)
+		if threadID, _ := channelContext["thread_id"].(string); threadID != "" {
+			fmt.Fprintf(&output, "Channel topic: %s\n", threadID)
 		}
 		content := strings.TrimSpace(message.Content)
 		if content == "" {

@@ -12,11 +12,9 @@ import (
 )
 
 const (
-	ChannelTopicWindow               = 6 * time.Second
-	channelListeningRetention        = 7 * 24 * time.Hour
-	channelListeningPerGroup         = 200
-	channelListeningBytes            = 4 * 1024
-	ChannelTopicDialogueEndedOutcome = "topic_dialogue_ended"
+	channelListeningRetention = 7 * 24 * time.Hour
+	channelListeningPerGroup  = 200
+	channelListeningBytes     = 4 * 1024
 )
 
 const schemaChannelTopics = `
@@ -140,18 +138,11 @@ func (s *Store) ReceiveChannelGroupMessage(ctx context.Context, receipt domain.C
 	if err != nil || duplicate {
 		return stored, duplicate, err
 	}
-	batchID, readyMS := receipt.ID, receipt.ReceivedAt.Add(ChannelTopicWindow).UnixMilli()
-	err = tx.QueryRowContext(ctx, `
-		SELECT batch_id,ready_ms FROM channel_group_receipts
-		WHERE route_id=? AND target_task_id=? AND thread_id=? AND ready_ms>?
-		ORDER BY ready_ms LIMIT 1`,
-		route.ID, route.TargetTaskID, envelope.ThreadID, receipt.ReceivedAt.UnixMilli()).Scan(&batchID, &readyMS)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return domain.ChannelInboxReceipt{}, false, err
-	}
+	// Keep the receipt metadata compatible with pending messages from older cores.
+	// Each new receipt is independently eligible for scheduling.
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO channel_group_receipts(receipt_id,conversation_id,route_id,target_task_id,thread_id,batch_id,ready_ms)
-		VALUES(?,?,?,?,?,?,?)`, receipt.ID, route.ConversationID, route.ID, route.TargetTaskID, envelope.ThreadID, batchID, readyMS); err != nil {
+		VALUES(?,?,?,?,?,?,?)`, receipt.ID, route.ConversationID, route.ID, route.TargetTaskID, envelope.ThreadID, receipt.ID, receipt.ReceivedAt.UnixMilli()); err != nil {
 		return domain.ChannelInboxReceipt{}, false, err
 	}
 	return stored, false, tx.Commit()
@@ -265,16 +256,6 @@ func (s *Store) ChannelGroupReceipt(ctx context.Context, receiptID string) (Chan
 	return group, err
 }
 
-func (s *Store) ChannelGroupBatchReady(ctx context.Context, batchID string) (bool, error) {
-	var ready bool
-	err := s.db.QueryRowContext(ctx, `
-		SELECT NOT EXISTS(
-		    SELECT 1 FROM channel_group_receipts g JOIN channel_inbox_dedup r ON r.id=g.receipt_id
-		    WHERE g.batch_id=? AND r.state IN ('received','processing')
-		)`, batchID).Scan(&ready)
-	return ready, err
-}
-
 func (s *Store) PendingChannelGroupTasks(ctx context.Context) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT DISTINCT task_id FROM agent_inbox
@@ -354,37 +335,37 @@ func checkGroupInboxRoute(ctx context.Context, tx *sql.Tx, receiptID, taskID str
 	return checkGroupRouteTx(ctx, tx, route, chatID, mentioned)
 }
 
-func channelTopicDialogueEnded(ctx context.Context, db interface {
-	QueryRowContext(context.Context, string, ...any) *sql.Row
-}, topic channelTopicTurn) (bool, error) {
-	if !topic.botOnly {
-		return false, nil
-	}
-	var lastDecision string
-	err := db.QueryRowContext(ctx, `
-		SELECT decision FROM channel_topic_turns WHERE conversation_id=? AND thread_id=? AND queued_ms>0
-		ORDER BY queued_ms DESC,rowid DESC LIMIT 1`, topic.conversationID, topic.threadID).Scan(&lastDecision)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	return lastDecision == "end", err
-}
+// Both live inbox paths match the pending receipt to the Turn's original
+// binding and topic. After end, new messages stay pending for the next Turn.
+const liveChannelGroupMatchesTurn = `(
+	source_kind='channel_group_message' AND EXISTS (
+		SELECT 1
+		FROM turns active
+		JOIN agent_inbox origin ON origin.batch_id=active.inbox_batch_id
+		    AND origin.task_id=active.task_id AND origin.target_agent_id=active.agent_id
+		    AND origin.source_kind='channel_group_message'
+		JOIN channel_group_receipts initial ON initial.receipt_id=json_extract(origin.payload_json,'$.channel_receipt_id')
+		JOIN channel_group_receipts incoming ON incoming.receipt_id=json_extract(agent_inbox.payload_json,'$.channel_receipt_id')
+		    AND incoming.route_id=initial.route_id AND incoming.thread_id=initial.thread_id
+		LEFT JOIN channel_topic_turns topic ON topic.turn_id=active.id
+		    AND topic.conversation_id=initial.conversation_id AND topic.thread_id=initial.thread_id
+		WHERE active.id=? AND active.inbox_batch_id<>'' AND active.status IN ('starting','running')
+		  AND active.task_id=agent_inbox.task_id AND active.round_id=agent_inbox.round_id
+		  AND active.agent_id=agent_inbox.target_agent_id
+		  AND COALESCE(topic.decision,'')<>'end'
+	)
+)`
 
-// ChannelGroupBatchDialogueEnded checks whether an explicit end closed the
-// topic before Task submission. The Turn claim checks again under a write lock.
-func (s *Store) ChannelGroupBatchDialogueEnded(ctx context.Context, batchID, conversationID, threadID string) (bool, error) {
-	var hasHuman bool
-	err := s.db.QueryRowContext(ctx, `
-		SELECT EXISTS (
-		    SELECT 1 FROM channel_group_receipts g
-		    JOIN channel_inbox_dedup r ON r.id=g.receipt_id
-		    WHERE g.batch_id=? AND r.state IN ('received','processing','processed')
-		      AND COALESCE(json_extract(r.normalized_payload_json,'$.sender_is_bot'),0)=0
-		)`, batchID).Scan(&hasHuman)
-	if err != nil {
-		return false, err
-	}
-	return channelTopicDialogueEnded(ctx, s.db, channelTopicTurn{conversationID: conversationID, threadID: threadID, botOnly: !hasHuman})
+func markChannelTopicLiveHuman(ctx context.Context, tx *sql.Tx, turnID string) error {
+	_, err := tx.ExecContext(ctx, `
+		UPDATE channel_topic_turns SET bot_only=0
+		WHERE turn_id=? AND bot_only=1 AND EXISTS (
+			SELECT 1 FROM agent_inbox
+			WHERE delivered_turn_id=channel_topic_turns.turn_id
+			  AND status='delivered_in_turn' AND source_kind='channel_group_message'
+			  AND COALESCE(json_extract(payload_json,'$.channel_context.actor.is_bot'),0)=0
+		)`, turnID)
+	return err
 }
 
 func suppressChannelInboxItem(ctx context.Context, tx *sql.Tx, item domain.AgentInboxItem, outcome string, now time.Time) error {
@@ -401,34 +382,31 @@ func prepareChannelTopicTurn(ctx context.Context, tx *sql.Tx, items []domain.Age
 	if items[0].SourceKind != "channel_group_message" {
 		return items, channelTopicTurn{}, nil
 	}
-	eligible := make([]domain.AgentInboxItem, 0, len(items))
+	eligible, err := recheckChannelGroupInbox(ctx, tx, turn.TaskID, items, turn.QueuedAt)
+	if err != nil || len(eligible) == 0 {
+		return nil, channelTopicTurn{}, err
+	}
+	return eligible, channelTopicForInbox(eligible), nil
+}
+
+func recheckChannelGroupInbox(ctx context.Context, tx *sql.Tx, taskID string, items []domain.AgentInboxItem, now time.Time) ([]domain.AgentInboxItem, error) {
+	eligible := items[:0]
 	for _, item := range items {
-		err := checkGroupInboxRoute(ctx, tx, stringValue(item.Payload["channel_receipt_id"]), turn.TaskID)
-		switch {
-		case err == nil:
-			eligible = append(eligible, item)
-		case errors.Is(err, ErrChannelGroupUnbound), errors.Is(err, ErrChannelGroupNotAllowed):
-			if err := suppressChannelInboxItem(ctx, tx, item, err.Error(), turn.QueuedAt); err != nil {
-				return nil, channelTopicTurn{}, err
+		if item.SourceKind == "channel_group_message" {
+			err := checkGroupInboxRoute(ctx, tx, stringValue(item.Payload["channel_receipt_id"]), taskID)
+			if errors.Is(err, ErrChannelGroupUnbound) || errors.Is(err, ErrChannelGroupNotAllowed) {
+				if err := suppressChannelInboxItem(ctx, tx, item, err.Error(), now); err != nil {
+					return nil, err
+				}
+				continue
 			}
-		default:
-			return nil, channelTopicTurn{}, err
+			if err != nil {
+				return nil, err
+			}
 		}
+		eligible = append(eligible, item)
 	}
-	if len(eligible) == 0 {
-		return nil, channelTopicTurn{}, nil
-	}
-	topic := channelTopicForInbox(eligible)
-	ended, err := channelTopicDialogueEnded(ctx, tx, topic)
-	if err != nil || !ended {
-		return eligible, topic, err
-	}
-	for _, item := range eligible {
-		if err := suppressChannelInboxItem(ctx, tx, item, ChannelTopicDialogueEndedOutcome, turn.QueuedAt); err != nil {
-			return nil, channelTopicTurn{}, err
-		}
-	}
-	return nil, channelTopicTurn{}, nil
+	return eligible, nil
 }
 
 func (s *Store) SetChannelTopicReplyDecision(ctx context.Context, turnID, conversationID, threadID, decision, reason string) error {
@@ -472,30 +450,21 @@ func (s *Store) ChannelTopicReplyDecision(ctx context.Context, turnID, conversat
 	return decision, err
 }
 
-func admitChannelTopicRetry(ctx context.Context, tx *sql.Tx, turn domain.Turn) error {
+func copyChannelTopicForRetry(ctx context.Context, tx *sql.Tx, turn domain.Turn) error {
 	if turn.Attempt <= 1 || turn.ParentTurnID == "" {
 		return nil
 	}
-	var topic channelTopicTurn
-	err := tx.QueryRowContext(ctx, `
-		SELECT topic.conversation_id,topic.thread_id,topic.bot_only
+	// Retrying the same input preserves an explicit choice to stay silent.
+	// New messages start with an independent decision.
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO channel_topic_turns(turn_id,conversation_id,thread_id,queued_ms,bot_only,decision,reason)
+		SELECT ?,topic.conversation_id,topic.thread_id,?,topic.bot_only,
+		       CASE WHEN topic.decision='end' THEN 'end' ELSE '' END,
+		       CASE WHEN topic.decision='end' THEN topic.reason ELSE '' END
 		FROM channel_topic_turns topic JOIN turns previous ON previous.id=topic.turn_id
 		WHERE topic.turn_id=? AND topic.queued_ms>0 AND previous.task_id=? AND previous.inbox_batch_id=?`,
-		turn.ParentTurnID, turn.TaskID, turn.InboxBatchID).Scan(&topic.conversationID, &topic.threadID, &topic.botOnly)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	ended, err := channelTopicDialogueEnded(ctx, tx, topic)
-	if err != nil {
-		return err
-	}
-	if ended {
-		return ErrChannelBotDialogueEnded
-	}
-	return insertChannelTopicTurn(ctx, tx, turn, topic)
+		turn.ID, turn.QueuedAt.UnixMilli(), turn.ParentTurnID, turn.TaskID, turn.InboxBatchID)
+	return err
 }
 
 func insertChannelTopicTurn(ctx context.Context, tx *sql.Tx, turn domain.Turn, topic channelTopicTurn) error {

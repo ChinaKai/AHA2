@@ -143,10 +143,8 @@ func (s *Store) ClaimChannelInbox(ctx context.Context, limit int, now time.Time,
 	if _, err := tx.ExecContext(ctx, `UPDATE channel_inbox_dedup SET state='received',lease_id='',lease_until='' WHERE state='processing' AND lease_until<>'' AND lease_until<=?`, timeString(now)); err != nil {
 		return nil, err
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT r.id FROM channel_inbox_dedup r
-		LEFT JOIN channel_group_receipts g ON g.receipt_id=r.id
-		WHERE r.state='received' AND (g.receipt_id IS NULL OR g.ready_ms<=?)
-		ORDER BY r.received_at,r.rowid LIMIT ?`, now.UnixMilli(), limit)
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM channel_inbox_dedup
+		WHERE state='received' ORDER BY received_at,rowid LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}

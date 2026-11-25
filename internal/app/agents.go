@@ -867,10 +867,7 @@ func (s *Service) scheduleAgent(ctx context.Context, taskID, agentID string) (do
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return domain.Turn{}, false, err
 	}
-	items, err = s.selectInboxBatch(ctx, items)
-	if err != nil || len(items) == 0 {
-		return domain.Turn{}, false, err
-	}
+	items = selectInboxBatch(items)
 	agent, err := s.store.TaskAgent(ctx, taskID, agentID)
 	if err != nil {
 		return domain.Turn{}, false, err
@@ -937,29 +934,19 @@ func (s *Service) scheduleAgent(ctx context.Context, taskID, agentID string) (do
 	return turn, true, nil
 }
 
-// Select one ready channel batch. A pending batch waiting for an attachment
-// must not delay an unrelated topic or a Web Owner message.
-func (s *Service) selectInboxBatch(ctx context.Context, items []domain.AgentInboxItem) ([]domain.AgentInboxItem, error) {
-	var selected []domain.AgentInboxItem
-	notReady := map[string]bool{}
-	chosen := ""
-	for _, item := range items {
-		channelContext, _ := item.Payload["channel_context"].(map[string]any)
-		batchID, _ := channelContext["group_batch_id"].(string)
-		if batchID != "" && len(selected) == 0 && !notReady[batchID] {
-			ready, err := s.store.ChannelGroupBatchReady(ctx, batchID)
-			if err != nil {
-				return nil, err
-			}
-			notReady[batchID] = !ready
-		}
-		if notReady[batchID] || (len(selected) > 0 && batchID != chosen) {
-			continue
-		}
-		chosen = batchID
-		selected = append(selected, item)
+// Start a group Turn from one receipt. Later messages in the same topic
+// can reach it through the live inbox while it is running.
+func selectInboxBatch(items []domain.AgentInboxItem) []domain.AgentInboxItem {
+	if items[0].SourceKind == "channel_group_message" {
+		return items[:1]
 	}
-	return selected, nil
+	selected := items[:0]
+	for _, item := range items {
+		if item.SourceKind != "channel_group_message" {
+			selected = append(selected, item)
+		}
+	}
+	return selected
 }
 
 func (s *Service) ScheduleChannelGroupInbox(ctx context.Context, taskID string) error {

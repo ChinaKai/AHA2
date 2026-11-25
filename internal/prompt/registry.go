@@ -373,7 +373,7 @@ var builtinTemplates = []domain.PromptTemplate{
 	{ID: "section.available-context", Name: "Available Context Section", Layer: "section", Description: "可用上下文入口列表段落", Editable: true, Required: true, Version: 3},
 	{ID: "section.current-inbox", Name: "Current Inbox Section", Layer: "section", Description: "当前 Inbox Batch 段落", Editable: true, Required: true, Version: 1},
 	{ID: "section.inbox-batch-content", Name: "Inbox Batch Content", Layer: "section", Description: "Inbox 消息、渠道来源、引用上下文和附件引用的内容模板", Editable: true, Required: true, Version: 4},
-	{ID: "resource.agent-api", Name: "Agent API Reference File", Layer: "resource", Description: "Agent API 的 HTTP 参考；内置 MCP 工具不覆盖时查阅", Editable: false, Required: true, Version: 15},
+	{ID: "resource.agent-api", Name: "Agent API Reference File", Layer: "resource", Description: "Agent API 的 HTTP 参考；内置 MCP 工具不覆盖时查阅", Editable: false, Required: true, Version: 16},
 	{ID: "resource.attachment-protocol", Name: "Attachment Protocol File", Layer: "resource", Description: "只读参考模板；附件上传、绑定与回执规程", Editable: false, Required: true, Version: 1},
 	{ID: "resource.group-permissions", Name: "Group Permission Rules File", Layer: "resource", Description: "只读参考模板；群聊 task_route 的 Owner 权限申请规则", Editable: false, Required: false, Version: 1},
 }

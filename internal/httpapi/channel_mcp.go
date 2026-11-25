@@ -83,10 +83,10 @@ func channelMCPTools() []mcpTool {
 	return []mcpTool{
 		{
 			Name: "channel_reply",
-			Description: "Reply to the channel message that triggered this Turn. " +
+			Description: "Reply to a channel message delivered to this Turn. " +
 				"The message is delivered immediately: call this once at the end with the final answer, " +
 				"not for progress, planning, or tool-failure narration. " +
-				"The current message's receipt is resolved automatically. In a group the reply quotes the " +
+				"For a live inbox message, pass its receipt. In a group the reply quotes the " +
 				"original message and @-mentions its sender for you; typing @name in the text mentions nobody.",
 			InputSchema: map[string]any{
 				"type": "object",
@@ -123,6 +123,10 @@ func channelMCPTools() []mcpTool {
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
+					"inbound_receipt_id": map[string]any{
+						"type":        "string",
+						"description": "Pass the receipt of the live inbox message that requested the action.",
+					},
 					"action": map[string]any{
 						"type":        "string",
 						"description": "Concrete action that needs Owner permission, 1 to 800 characters.",
@@ -147,7 +151,7 @@ func channelMCPTools() []mcpTool {
 		},
 		{
 			Name: "channel_reply_decision",
-			Description: "Close replies for this Feishu group topic, or for the selected private-chat receipt. " +
+			Description: "Close replies for this Feishu group topic in this Turn, or for the selected private-chat receipt. " +
 				"Send any needed replies first. The reason appears on the AHA Web status card.",
 			InputSchema: map[string]any{
 				"type": "object",
@@ -258,10 +262,11 @@ func (s *Server) callChannelMCPTool(writer http.ResponseWriter, request *http.Re
 		})
 	case "channel_request_permission":
 		var input struct {
-			Action string `json:"action"`
-			Scope  string `json:"scope"`
-			Reason string `json:"reason"`
-			Risk   string `json:"risk"`
+			Action           string `json:"action"`
+			Scope            string `json:"scope"`
+			Reason           string `json:"reason"`
+			Risk             string `json:"risk"`
+			InboundReceiptID string `json:"inbound_receipt_id"`
 		}
 		if err := json.Unmarshal(call.Arguments, &input); err != nil || strings.TrimSpace(input.Action) == "" || strings.TrimSpace(input.Reason) == "" {
 			toolError("invalid channel_request_permission arguments")
@@ -272,9 +277,14 @@ func (s *Server) callChannelMCPTool(writer http.ResponseWriter, request *http.Re
 			toolError(err.Error())
 			return
 		}
-		channelContext, err := s.store.ChannelContextForInboxBatch(request.Context(), agentCall.Turn.InboxBatchID)
+		var channelContext map[string]any
+		if receiptID := strings.TrimSpace(input.InboundReceiptID); receiptID != "" {
+			channelContext, err = s.store.ChannelContextForReceipt(request.Context(), claims.TaskID, agentCall.Turn.ID, receiptID)
+		} else {
+			channelContext, err = s.store.ChannelContextForInboxBatch(request.Context(), agentCall.Turn.InboxBatchID)
+		}
 		if err != nil {
-			toolError("this Turn has no channel context")
+			toolError("this Turn has no channel context for the requested message")
 			return
 		}
 		route, _ := channelContext["route"].(map[string]any)

@@ -227,9 +227,9 @@ func (s *Store) ChannelContextForReceipt(
 	err := s.db.QueryRowContext(ctx, `
 		SELECT payload_json FROM agent_inbox
 		WHERE task_id=? AND target_agent_id='main'
-		  AND (delivered_turn_id=? OR batch_id=(
+		  AND (delivered_turn_id=? OR (batch_id<>'' AND batch_id=(
 			SELECT inbox_batch_id FROM turns WHERE id=? AND task_id=?
-		  ))
+		  )))
 		  AND json_extract(payload_json,'$.channel_receipt_id')=?
 		ORDER BY sequence DESC LIMIT 1`,
 		taskID, turnID, turnID, taskID, receiptID,
