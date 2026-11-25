@@ -157,8 +157,8 @@ For a task-routed channel message, an explicit receipt-bound
 the remaining topic messages, or the selected private-chat receipt, need no
 channel reply. The reason must contain 1 to 300 characters and appears on the
 AHA Web status card. In Feishu groups the decision blocks later replies for
-that topic in this Turn. The server also caps consecutive bot-only Turns and
-hourly Turns for each topic.
+that topic in this Turn and stops bot-only wakes until a human message
+starts a new Turn in the topic.
 
 ## Knowledge and Skills
 

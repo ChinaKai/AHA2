@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -13,12 +12,11 @@ import (
 )
 
 const (
-	ChannelTopicWindow        = 6 * time.Second
-	channelListeningRetention = 7 * 24 * time.Hour
-	channelListeningPerGroup  = 200
-	channelListeningBytes     = 4 * 1024
-	channelTopicBotLimit      = 3
-	channelTopicHourlyLimit   = 12
+	ChannelTopicWindow               = 6 * time.Second
+	channelListeningRetention        = 7 * 24 * time.Hour
+	channelListeningPerGroup         = 200
+	channelListeningBytes            = 4 * 1024
+	ChannelTopicDialogueEndedOutcome = "topic_dialogue_ended"
 )
 
 const schemaChannelTopics = `
@@ -356,62 +354,37 @@ func checkGroupInboxRoute(ctx context.Context, tx *sql.Tx, receiptID, taskID str
 	return checkGroupRouteTx(ctx, tx, route, chatID, mentioned)
 }
 
-func channelTopicTurnLimit(ctx context.Context, db interface {
+func channelTopicDialogueEnded(ctx context.Context, db interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
-}, topic channelTopicTurn, now time.Time) (string, error) {
-	// Human @mentions in the main chat keep their original availability.
-	// Their Turns still reset the consecutive-bot count for that scope.
-	if topic.threadID == "" && !topic.botOnly {
-		return "", nil
-	}
-	var hourly int
-	if err := db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM channel_topic_turns
-		WHERE conversation_id=? AND thread_id=? AND queued_ms>? AND (thread_id<>'' OR bot_only=1)`,
-		topic.conversationID, topic.threadID, now.Add(-time.Hour).UnixMilli()).Scan(&hourly); err != nil {
-		return "", err
-	}
-	if hourly >= channelTopicHourlyLimit {
-		return "topic_hourly_turn_limit", nil
-	}
+}, topic channelTopicTurn) (bool, error) {
 	if !topic.botOnly {
-		return "", nil
+		return false, nil
 	}
 	var lastDecision string
 	err := db.QueryRowContext(ctx, `
 		SELECT decision FROM channel_topic_turns WHERE conversation_id=? AND thread_id=? AND queued_ms>0
 		ORDER BY queued_ms DESC,rowid DESC LIMIT 1`, topic.conversationID, topic.threadID).Scan(&lastDecision)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return "", err
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
 	}
-	if lastDecision == "end" {
-		return "topic_dialogue_ended", nil
-	}
-	botTurns, err := channelTopicBotTurns(ctx, db, topic.conversationID, topic.threadID)
-	if err != nil {
-		return "", err
-	}
-	if botTurns >= channelTopicBotLimit {
-		return "topic_bot_turn_limit", nil
-	}
-	return "", nil
+	return lastDecision == "end", err
 }
 
-// Skip a batch before Task submission when its topic has already reached
-// a limit. The Turn claim checks again under a write lock.
-func (s *Store) ChannelGroupBatchLimit(ctx context.Context, batchID, conversationID, threadID string, now time.Time) (string, error) {
+// ChannelGroupBatchDialogueEnded checks whether an explicit end closed the
+// topic before Task submission. The Turn claim checks again under a write lock.
+func (s *Store) ChannelGroupBatchDialogueEnded(ctx context.Context, batchID, conversationID, threadID string) (bool, error) {
 	var hasHuman bool
 	err := s.db.QueryRowContext(ctx, `
 		SELECT EXISTS (
-			SELECT 1 FROM channel_group_receipts g
-			JOIN channel_inbox_dedup r ON r.id=g.receipt_id
-			WHERE g.batch_id=? AND r.state IN ('received','processing','processed')
-			  AND COALESCE(json_extract(r.normalized_payload_json,'$.sender_is_bot'),0)=0
+		    SELECT 1 FROM channel_group_receipts g
+		    JOIN channel_inbox_dedup r ON r.id=g.receipt_id
+		    WHERE g.batch_id=? AND r.state IN ('received','processing','processed')
+		      AND COALESCE(json_extract(r.normalized_payload_json,'$.sender_is_bot'),0)=0
 		)`, batchID).Scan(&hasHuman)
 	if err != nil {
-		return "", err
+		return false, err
 	}
-	return channelTopicTurnLimit(ctx, s.db, channelTopicTurn{conversationID: conversationID, threadID: threadID, botOnly: !hasHuman}, now)
+	return channelTopicDialogueEnded(ctx, s.db, channelTopicTurn{conversationID: conversationID, threadID: threadID, botOnly: !hasHuman})
 }
 
 func suppressChannelInboxItem(ctx context.Context, tx *sql.Tx, item domain.AgentInboxItem, outcome string, now time.Time) error {
@@ -446,12 +419,12 @@ func prepareChannelTopicTurn(ctx context.Context, tx *sql.Tx, items []domain.Age
 		return nil, channelTopicTurn{}, nil
 	}
 	topic := channelTopicForInbox(eligible)
-	outcome, err := channelTopicTurnLimit(ctx, tx, topic, turn.QueuedAt)
-	if err != nil || outcome == "" {
+	ended, err := channelTopicDialogueEnded(ctx, tx, topic)
+	if err != nil || !ended {
 		return eligible, topic, err
 	}
 	for _, item := range eligible {
-		if err := suppressChannelInboxItem(ctx, tx, item, outcome, turn.QueuedAt); err != nil {
+		if err := suppressChannelInboxItem(ctx, tx, item, ChannelTopicDialogueEndedOutcome, turn.QueuedAt); err != nil {
 			return nil, channelTopicTurn{}, err
 		}
 	}
@@ -499,8 +472,6 @@ func (s *Store) ChannelTopicReplyDecision(ctx context.Context, turnID, conversat
 	return decision, err
 }
 
-var ErrChannelTopicTurnLimited = errors.New("group topic Turn limit reached")
-
 func admitChannelTopicRetry(ctx context.Context, tx *sql.Tx, turn domain.Turn) error {
 	if turn.Attempt <= 1 || turn.ParentTurnID == "" {
 		return nil
@@ -517,12 +488,12 @@ func admitChannelTopicRetry(ctx context.Context, tx *sql.Tx, turn domain.Turn) e
 	if err != nil {
 		return err
 	}
-	outcome, err := channelTopicTurnLimit(ctx, tx, topic, turn.QueuedAt)
+	ended, err := channelTopicDialogueEnded(ctx, tx, topic)
 	if err != nil {
 		return err
 	}
-	if outcome != "" {
-		return fmt.Errorf("%w: %s", ErrChannelTopicTurnLimited, outcome)
+	if ended {
+		return ErrChannelBotDialogueEnded
 	}
 	return insertChannelTopicTurn(ctx, tx, turn, topic)
 }

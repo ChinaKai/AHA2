@@ -11,7 +11,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
-func TestChannelTopicTurnLimitsAreIsolatedAndPersistOutcomes(t *testing.T) {
+func TestChannelTopicTurnsHaveNoNumericCapsAndRespectEnd(t *testing.T) {
 	ctx := context.Background()
 	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
 	if err != nil {
@@ -26,7 +26,7 @@ func TestChannelTopicTurnLimitsAreIsolatedAndPersistOutcomes(t *testing.T) {
 		t.Fatal(err)
 	}
 	locus := 0
-	submit := func(threadID string, bot bool, expectedOutcome string) domain.Turn {
+	submit := func(threadID string, bot, wantEnded bool) domain.Turn {
 		t.Helper()
 		locus++
 		eventID := fmt.Sprintf("event-%d", locus)
@@ -48,9 +48,9 @@ func TestChannelTopicTurnLimitsAreIsolatedAndPersistOutcomes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		outcome, err := database.ChannelGroupBatchLimit(ctx, group.BatchID, conversation.ID, threadID, now.Add(ChannelTopicWindow))
-		if err != nil || outcome != expectedOutcome {
-			t.Fatalf("preflight outcome=%q want=%q err=%v", outcome, expectedOutcome, err)
+		ended, err := database.ChannelGroupBatchDialogueEnded(ctx, group.BatchID, conversation.ID, threadID)
+		if err != nil || ended != wantEnded {
+			t.Fatalf("preflight ended=%v want=%v err=%v", ended, wantEnded, err)
 		}
 		message := domain.Message{ID: domain.NewID("message"), TaskID: task.ID, Role: "user", Sender: "sender", Content: "wake", CreatedAt: now}
 		round, inbox, _, _, err := database.EnqueueChannelOwnerMessage(ctx, receipt.ID, leases[0].LeaseID, conversation.ID, message, "main", map[string]any{
@@ -72,61 +72,58 @@ func TestChannelTopicTurnLimitsAreIsolatedAndPersistOutcomes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if expectedOutcome != "" {
-			if len(claimed) != 0 || turn.ID != "" || current.State != "rejected" || current.Outcome != expectedOutcome {
-				t.Fatalf("topic=%q turn=%q claimed=%d receipt=%s/%s; want %s",
-					threadID, turn.ID, len(claimed), current.State, current.Outcome, expectedOutcome)
+		if wantEnded {
+			if len(claimed) != 0 || turn.ID != "" || current.State != "rejected" || current.Outcome != ChannelTopicDialogueEndedOutcome {
+				t.Fatalf("closed topic %q: turn=%q claimed=%d receipt=%s/%s",
+					threadID, turn.ID, len(claimed), current.State, current.Outcome)
 			}
-		} else {
-			if len(claimed) != 1 || turn.ID == "" {
-				t.Fatalf("topic %q did not create a Turn", threadID)
-			}
-			if _, err := database.db.ExecContext(ctx, `UPDATE turns SET status='succeeded' WHERE id=?`, turn.ID); err != nil {
-				t.Fatal(err)
-			}
+			return turn
+		}
+		if len(claimed) != 1 || turn.ID == "" {
+			t.Fatalf("topic %q did not create a Turn: claimed=%d outcome=%s", threadID, len(claimed), current.Outcome)
+		}
+		if _, err := database.db.ExecContext(ctx, `UPDATE turns SET status='succeeded' WHERE id=?`, turn.ID); err != nil {
+			t.Fatal(err)
 		}
 		return turn
 	}
+	// These Turns fit within a single hour and cross both former caps.
 	var lastBotTurn domain.Turn
-	for range channelTopicBotLimit {
-		lastBotTurn = submit("omt_bot_limit", true, "")
+	for range 13 {
+		lastBotTurn = submit("omt_robot", true, false)
 	}
+	for range 13 {
+		submit("omt_busy", false, false)
+	}
+	for range 13 {
+		submit("", true, false)
+	}
+
 	retry := lastBotTurn
 	retry.ID = domain.NewID("turn")
 	retry.ParentTurnID = lastBotTurn.ID
 	retry.Attempt = 2
-	retry.QueuedAt = lastBotTurn.QueuedAt.Add(time.Second)
-	if _, err := database.CreateAgentTurn(ctx, retry); !errors.Is(err, ErrChannelTopicTurnLimited) {
-		t.Fatalf("retry bypassed topic turn cap: %v", err)
+	retry.QueuedAt = now.Add(ChannelTopicWindow)
+	retry.Status = domain.TurnQueued
+	retried, err := database.CreateAgentTurn(ctx, retry)
+	if err != nil {
+		t.Fatalf("bot topic retry was rejected before end: %v", err)
 	}
-	submit("", false, "") // A human top-level message does not reset the topic.
-	submit("omt_bot_limit", true, "topic_bot_turn_limit")
-	submit("omt_bot_limit", false, "")
-	turn := submit("omt_bot_limit", true, "")
-	if err := database.SetChannelTopicReplyDecision(ctx, turn.ID, conversation.ID, "omt_bot_limit", "end", "Already answered"); err != nil {
+	if _, err := database.db.ExecContext(ctx, `UPDATE turns SET status='succeeded' WHERE id=?`, retried.ID); err != nil {
 		t.Fatal(err)
 	}
-	submit("omt_bot_limit", true, "topic_dialogue_ended")
-	submit("omt_unrelated", true, "")
-
-	for range channelTopicHourlyLimit + 1 {
-		submit("", false, "")
+	if err := database.SetChannelTopicReplyDecision(ctx, retried.ID, conversation.ID, "omt_robot", "end", "Already answered"); err != nil {
+		t.Fatal(err)
 	}
-	// Human main-chat traffic does not consume the bot-only hourly budget.
-	submit("", true, "")
-	for range channelTopicHourlyLimit - 1 {
-		submit("", false, "")
-		submit("", true, "")
+	retry.ID, retry.ParentTurnID, retry.Attempt = domain.NewID("turn"), retried.ID, 3
+	retry.QueuedAt = retry.QueuedAt.Add(time.Second)
+	if _, err := database.CreateAgentTurn(ctx, retry); !errors.Is(err, ErrChannelBotDialogueEnded) {
+		t.Fatalf("bot topic retry bypassed end: %v", err)
 	}
-	submit("", true, "topic_hourly_turn_limit")
-	submit("", false, "")
-
-	for range channelTopicHourlyLimit {
-		submit("omt_busy", false, "")
-	}
-	submit("omt_busy", false, "topic_hourly_turn_limit")
-	now = now.Add(time.Hour)
-	submit("omt_busy", false, "")
+	submit("omt_robot", true, true)
+	submit("omt_unrelated", true, false)
+	submit("omt_robot", false, false)
+	submit("omt_robot", true, false)
 }
 
 func TestReceiveChannelGroupMessageRechecksBindingAndPermissionBeforeStorage(t *testing.T) {
