@@ -4042,7 +4042,8 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   // the same masked-query, level-5 build from 4812d34 (228,679 JS + 58,080
   // CSS = 286,759); ceil to the next 256-byte boundary.
   //   approvals tab into records: 228,948 JS + 58,204 CSS = 287,152.
-  const FIRST_SCREEN_GZIP_BUDGET = 287232;
+  //   Alt+P shortcut: 229,214 JS + 58,204 CSS = 287,418.
+  const FIRST_SCREEN_GZIP_BUDGET = 287488;
   // The version query parameter is a content hash and its hex digits change
   // how the same code gzips: main already sits exactly on the budget, so a
   // hash-only change could trip it without growing the payload. Mask the

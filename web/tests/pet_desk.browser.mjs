@@ -569,6 +569,62 @@ try {
   assert.equal(await historyPage.locator('[data-pet-workbench-tab="overview"]').getAttribute("class"), "active");
   await historyPage.close();
 
+  // Round 4, item 4: Alt+P opens the workbench overview. It works on another
+  // page and inside a text field, does nothing while a dialog (the command
+  // palette) is open or while an IME composes, and prevents the default.
+  const keyPage = await browser.newPage({viewport: {width: 1400, height: 1000}, locale: "en-US"});
+  keyPage.on("pageerror", error => errors.push(error.message));
+  await keyPage.goto(`${url}/`, {waitUntil: "domcontentloaded"});
+  await keyPage.waitForSelector("#pet-workbench-body .pet-desk", {timeout: 20000});
+  // The shortcut is discoverable: the nav button's name and the palette item.
+  const petNav = keyPage.locator('.sidebar [data-view="pet-workbench"]');
+  assert.match(await petNav.getAttribute("title"), /\(Alt\+P\)$/);
+  assert.equal(await petNav.getAttribute("aria-keyshortcuts"), "Alt+P");
+  await keyPage.click('[data-pet-workbench-tab="records"]');
+  await keyPage.keyboard.press("Alt+KeyP");
+  await keyPage.waitForSelector('[data-pet-workbench-tab="overview"].active', {timeout: 5000});
+  await keyPage.locator('.sidebar [data-view="projects"]').click();
+  await keyPage.waitForSelector(".pet-workbench-page", {state: "detached"});
+  await keyPage.keyboard.press("Alt+KeyP");
+  await keyPage.waitForSelector("#pet-workbench-body .pet-desk", {timeout: 15000});
+  // Inside a text field.
+  await keyPage.locator('.sidebar [data-view="projects"]').click();
+  await keyPage.waitForSelector(".pet-workbench-page", {state: "detached"});
+  await keyPage.evaluate(() => { const input = document.createElement("input"); input.id = "probe-input"; document.body.append(input); input.focus(); });
+  const prevented = await keyPage.evaluate(() => {
+    const event = new KeyboardEvent("keydown", {key: "p", code: "KeyP", altKey: true, bubbles: true, cancelable: true});
+    document.getElementById("probe-input").dispatchEvent(event);
+    return event.defaultPrevented;
+  });
+  assert.equal(prevented, true, "the shortcut prevents the default in a text field");
+  await keyPage.waitForSelector("#pet-workbench-body .pet-desk", {timeout: 15000});
+  // A dialog is open: nothing happens.
+  await keyPage.locator('.sidebar [data-view="projects"]').click();
+  await keyPage.waitForSelector(".pet-workbench-page", {state: "detached"});
+  await keyPage.keyboard.press("Control+k");
+  await keyPage.waitForSelector("#command-palette-input:focus");
+  await keyPage.keyboard.press("Alt+KeyP");
+  await keyPage.waitForTimeout(300);
+  assert.equal(await keyPage.locator(".pet-workbench-page").count(), 0, "no navigation behind an open dialog");
+  assert.equal(await keyPage.evaluate(() => document.querySelector("dialog#command-palette")?.open), true);
+  await keyPage.keyboard.press("Escape");
+  // IME composition: nothing happens.
+  const composing = await keyPage.evaluate(() => {
+    const event = new KeyboardEvent("keydown", {key: "Process", code: "KeyP", altKey: true, isComposing: true, bubbles: true, cancelable: true});
+    document.body.dispatchEvent(event);
+    return event.defaultPrevented;
+  });
+  await keyPage.waitForTimeout(300);
+  assert.equal(composing, false);
+  assert.equal(await keyPage.locator(".pet-workbench-page").count(), 0, "no navigation while composing");
+  // The palette item names the shortcut.
+  await keyPage.keyboard.press("Control+k");
+  await keyPage.keyboard.type("Open pet workbench");
+  await keyPage.waitForTimeout(200);
+  assert.match(await keyPage.locator(".command-palette-option").first().innerText(), /Pet workbench · Alt\+P/);
+  await keyPage.keyboard.press("Escape");
+  await keyPage.close();
+
   // Step three, items 9-11: the records tab.
   await openOverview(page);
   await page.click('[data-pet-workbench-tab="records"]');

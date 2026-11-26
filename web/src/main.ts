@@ -1,6 +1,6 @@
 import {api, setAPIRequestObserver, workspaceViewerEndpoints} from "./api.js";
 import type {APIRequestSample} from "./api.js";
-import {COMMAND_PALETTE_COMPOSITION_GUARD_MS, COMMAND_PALETTE_DEBOUNCE_MS, buildCommandSections, createDebouncer, flattenCommandSections, isPaletteShortcut, paletteKeyAction, readRecentTaskIDs, rememberRecentTaskID, runPaletteSelection} from "./command_palette.js";
+import {COMMAND_PALETTE_COMPOSITION_GUARD_MS, COMMAND_PALETTE_DEBOUNCE_MS, buildCommandSections, createDebouncer, flattenCommandSections, isPaletteShortcut, isPetWorkbenchShortcut, paletteKeyAction, petWorkbenchShortcutLabel, readRecentTaskIDs, rememberRecentTaskID, runPaletteSelection} from "./command_palette.js";
 import type {CommandItem, CommandSection, CommandSectionID} from "./command_palette.js";
 import type {OnboardingChecklist} from "./onboarding.js";
 import {handlePetStreamEvent, mountAssistant, showPetSettings, notifyPetTaskIdle, notifyPetTaskReply, notifyPetTaskThinking, resumePetNavigation, setAssistantVisible} from "./assistant.js";
@@ -2210,7 +2210,7 @@ function commandPaletteActions(): CommandItem[] {
     {id: "action:open-models", kind: "action", label: t("palette.openModels"), detail: t("nav.models"), keywords: ["model", "models", "模型"], target: "models"},
     {id: "action:open-onboarding", kind: "action", label: t("onboarding.open"), detail: t("onboarding.openDetail"), keywords: ["onboarding", "setup", "guide", "getting started", "首装", "引导"], target: "onboarding"},
     {id: "action:open-approvals", kind: "action", label: t("palette.openApprovals"), detail: t("palette.page.approvalsDetail"), keywords: ["approval", "approvals", "审批"], target: "approvals"},
-    {id: "action:open-pet-workbench", kind: "action", label: t("palette.openPetWorkbench"), detail: t("petWorkbench.title"), keywords: ["pet", "workbench", "宠物", "工作台"], target: "pet-workbench"},
+    {id: "action:open-pet-workbench", kind: "action", label: t("palette.openPetWorkbench"), detail: `${t("petWorkbench.title")} · ${petWorkbenchShortcutText()}`, keywords: ["pet", "workbench", "宠物", "工作台", "alt+p"], target: "pet-workbench"},
   ];
 }
 
@@ -2497,8 +2497,8 @@ function focusPetWorkbenchTarget(): boolean {
 // openPetWorkbenchFor routes every pet workbench entry by intent:
 // "handle-pending" opens the overview and moves focus to its "for you" list;
 // "approval-history" opens the records tab on the approval history group.
-function openPetWorkbenchFor(intent: PetWorkbenchIntent): void {
-  petWorkbenchTab = petWorkbenchIntentTab(intent);
+function openPetWorkbenchFor(intent: PetWorkbenchIntent | "overview"): void {
+  petWorkbenchTab = intent === "overview" ? "overview" : petWorkbenchIntentTab(intent);
   if (intent === "handle-pending") petWorkbenchFocusNeeds = true;
   if (state.view === "pet-workbench" && petWorkbenchPageKeeper.binding?.show) {
     petWorkbenchPageKeeper.binding.show(petWorkbenchTab);
@@ -2518,8 +2518,7 @@ async function runCommandPaletteAction(action: string): Promise<void> {
     // "Open approvals" means handle what is pending: the overview's "for you".
     openPetWorkbenchFor("handle-pending");
   } else if (action === "pet-workbench") {
-    petWorkbenchTab = "overview";
-    switchView("pet-workbench");
+    openPetWorkbenchFor("overview");
   }
 }
 
@@ -2582,6 +2581,16 @@ document.addEventListener("keydown", event => {
   event.preventDefault();
   if (commandPaletteRoot?.open) closeCommandPalette();
   else openCommandPalette();
+});
+
+// Alt+P opens the pet workbench's overview from anywhere, including a text
+// field (like Ctrl+K). It waits while a dialog or the command palette is
+// open and while an IME is composing.
+document.addEventListener("keydown", event => {
+  if (event.defaultPrevented || !isPetWorkbenchShortcut(event)) return;
+  if (!state.auth?.authenticated || document.querySelector("dialog[open]")) return;
+  event.preventDefault();
+  openPetWorkbenchFor("overview");
 });
 
 // Escape dismisses the Task detail like its back control. A dialog, the command
@@ -4351,6 +4360,16 @@ function petPendingApprovalLabel(): string {
   return `${t("petWorkbench.title")} · ${t("petWorkbench.pendingCount", {count: petApprovalCounter.pending})}`;
 }
 
+function petWorkbenchShortcutText(): string {
+  return petWorkbenchShortcutLabel(navigator.platform || "");
+}
+
+// The pet nav button's name carries the shortcut so it can be discovered
+// from the tooltip and read out by a screen reader.
+function petNavLabel(pending: number): string {
+  return `${pending > 0 ? petPendingApprovalLabel() : t("nav.pet")} (${petWorkbenchShortcutText()})`;
+}
+
 function updatePetPendingApprovalIndicators(): void {
   const pending = petApprovalCounter.pending;
   const added = seenPendingApprovals === null ? 0 : pending - seenPendingApprovals;
@@ -4358,7 +4377,7 @@ function updatePetPendingApprovalIndicators(): void {
   if (added > 0) announceStatus(t("a11y.newApprovals", {count: added}));
   document.querySelectorAll<HTMLElement>('[data-view="pet-workbench"]').forEach(button => {
     button.classList.toggle("has-pending", pending > 0);
-    const label = pending > 0 ? petPendingApprovalLabel() : t("nav.pet");
+    const label = petNavLabel(pending);
     button.title = label;
     button.setAttribute("aria-label", label);
     button.querySelector(".task-tool-badge")?.remove();
@@ -4381,8 +4400,9 @@ function refreshPetApprovalState(): void {
 
 function navButton(view: View, glyph: string, label: Parameters<typeof t>[0]): string {
   const pending = view === "pet-workbench" ? petApprovalCounter.pending : 0;
-  const description = pending > 0 ? petPendingApprovalLabel() : t(label);
-  return `<button data-view="${view}" class="${state.view === view ? "active" : ""}${pending > 0 ? " has-pending" : ""}" title="${escapeHTML(description)}" aria-label="${escapeHTML(description)}">${icon(glyph)}<span>${t(label)}</span>${petPendingApprovalBadge(pending)}</button>`;
+  const description = view === "pet-workbench" ? petNavLabel(pending) : t(label);
+  const shortcut = view === "pet-workbench" ? ` aria-keyshortcuts="Alt+P"` : "";
+  return `<button data-view="${view}" class="${state.view === view ? "active" : ""}${pending > 0 ? " has-pending" : ""}" title="${escapeHTML(description)}" aria-label="${escapeHTML(description)}"${shortcut}>${icon(glyph)}<span>${t(label)}</span>${petPendingApprovalBadge(pending)}</button>`;
 }
 
 function shell(content: string, options: {taskShell?: boolean; taskBand?: string} = {}): string {
