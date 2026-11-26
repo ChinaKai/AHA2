@@ -4049,6 +4049,7 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   //   icon-rail sidebar on the workbench: 229,645 JS + 58,250 CSS = 287,895.
   //   inline approve / reject (controller and copy in the chunk; main.ts
   //   wires it, the styles are shared): 229,795 JS + 58,432 CSS = 288,227.
+  //   rail workspace column fix: 229,795 JS + 58,440 CSS = 288,235.
   const FIRST_SCREEN_GZIP_BUDGET = 288256;
   // The version query parameter is a content hash and its hex digits change
   // how the same code gzips: main already sits exactly on the budget, so a

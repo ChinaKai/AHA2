@@ -642,6 +642,8 @@ td small { margin-top: 3px; color: var(--muted); }
 .app-shell.task-shell.task-band-overlay { --task-band-width: 0px; }
 /* The pet workbench uses the same icon rail without the task band. */
 .app-shell.rail-shell { grid-template-columns: 64px minmax(0,1fr); }
+/* .workspace sits in column 3 (after the resizer); the rail has no resizer. */
+.app-shell.rail-shell > .workspace { grid-column: 2; }
 .app-shell:is(.task-shell, .rail-shell) .sidebar { padding: 18px 8px 14px; overflow: hidden; }
 .app-shell:is(.task-shell, .rail-shell) .sidebar .brand-lockup { justify-content: center; }
 .app-shell:is(.task-shell, .rail-shell) .sidebar .brand-lockup > div,

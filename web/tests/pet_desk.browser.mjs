@@ -181,7 +181,9 @@ window.__resolveWaiters = [];
 const decideNeed = ${decideNeed.toString()};
 const decideDesk = () => {
   const pending = window.__decideApprovals.filter(item => item.status === "pending");
-  return {...${JSON.stringify(desk)}, needs_owner: pending.filter(item => item.kind !== "idea").map(decideNeed), needs_owner_total: pending.filter(item => item.kind !== "idea").length,
+  // A task with questions sits among the approvals, as on a real desk.
+  const question = ${JSON.stringify(desk.needs_owner.find(item => item.kind === "question"))};
+  return {...${JSON.stringify(desk)}, needs_owner: [question, ...pending.filter(item => item.kind !== "idea").map(decideNeed)], needs_owner_total: pending.filter(item => item.kind !== "idea").length + 1,
     later: pending.filter(item => item.kind === "idea").map(decideNeed), later_total: pending.filter(item => item.kind === "idea").length};
 };
 window.fetch = async (input, init = {}) => {
@@ -798,6 +800,14 @@ try {
   assert.equal(rail.petActive, true, "the pet entry stays selected");
   assert.equal(rail.petBadge, "2", "the pending badge stays");
   assert.match(rail.petTitle, /2 pending approvals \(Alt\+P\)/);
+  // Every workbench tab sits right after the rail (the board fills the
+  // viewport; records and settings are ordinary pages in the same column).
+  for (const tab of ["records", "settings", "overview"]) {
+    await railPage.click(`[data-pet-workbench-tab="${tab}"]`);
+    await railPage.waitForTimeout(150);
+    const box = await railPage.evaluate(() => { const ws = document.querySelector(".workspace").getBoundingClientRect(); return {left: Math.round(ws.left), width: Math.round(ws.width)}; });
+    assert.deepEqual(box, {left: 64, width: 1440 - 64}, `${tab}: the workspace starts right after the rail`);
+  }
   await railPage.locator('.sidebar [data-view="projects"]').click();
   await railPage.waitForSelector(".pet-workbench-page", {state: "detached"});
   rail = await shellState();
