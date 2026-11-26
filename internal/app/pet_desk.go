@@ -42,6 +42,9 @@ const (
 	PetDeskWaitReview    = "review"
 	PetDeskWaitExecuting = "executing"
 	PetDeskWaitChannel   = "channel"
+	// PetDeskWaitLoop is a "waiting" row the pet wrote in core/loops.md or
+	// core/agenda.md. The files carry no time, so Since stays zero.
+	PetDeskWaitLoop = "loop"
 )
 
 // PetDeskNeed is one thing on the Owner's side of the desk: an approval to
@@ -63,13 +66,15 @@ type PetDeskNeed struct {
 // flight, an approved action being executed, or channel messages queued for
 // delivery.
 type PetDeskWait struct {
-	Kind     string    `json:"kind"`
-	TaskID   string    `json:"task_id,omitempty"`
-	TaskCode string    `json:"task_code,omitempty"`
-	Title    string    `json:"title"`
-	On       string    `json:"on,omitempty"`
-	Count    int       `json:"count,omitempty"`
-	Since    time.Time `json:"since"`
+	Kind     string `json:"kind"`
+	TaskID   string `json:"task_id,omitempty"`
+	TaskCode string `json:"task_code,omitempty"`
+	Title    string `json:"title"`
+	On       string `json:"on,omitempty"`
+	Count    int    `json:"count,omitempty"`
+	// Detail is the next step of a loop wait.
+	Detail string    `json:"detail,omitempty"`
+	Since  time.Time `json:"since"`
 }
 
 // PetDeskRun is a Task that is being worked on right now.
@@ -102,6 +107,8 @@ type PetDesk struct {
 	OpenLoopsTotal     int             `json:"open_loops_total"`
 	Agenda             []string        `json:"agenda"`
 	AgendaTotal        int             `json:"agenda_total"`
+	// LastReply is the pet's latest finished reply; nil when it has none.
+	LastReply *PetDeskLastReply `json:"last_reply,omitempty"`
 }
 
 // petDeskInput carries the reads the workbench already made, so building the
@@ -273,10 +280,28 @@ func (s *Service) petDesk(ctx context.Context, input petDeskInput) (PetDesk, err
 		})
 	}
 
+	pendingIDs := make([]string, 0, len(pendingApprovals))
+	for _, approval := range pendingApprovals {
+		pendingIDs = append(pendingIDs, approval.ID)
+	}
+	root := strings.TrimSpace(s.petWorkspaceRoot(ctx))
+	desk.WaitingOthers = append(desk.WaitingOthers, petDeskLedgerWaits(
+		petReadCoreFile(root, petCoreLoopsPath), petReadCoreFile(root, petCoreAgendaPath), pendingIDs,
+	)...)
+
 	// The longest-waiting item is the one most likely forgotten, so it leads.
 	// Finished rounds are the opposite: the most recent is the freshest context.
 	sort.SliceStable(desk.NeedsOwner, func(i, j int) bool { return desk.NeedsOwner[i].Since.Before(desk.NeedsOwner[j].Since) })
-	sort.SliceStable(desk.WaitingOthers, func(i, j int) bool { return desk.WaitingOthers[i].Since.Before(desk.WaitingOthers[j].Since) })
+	// Loop waits carry no time. They follow the timed waits in file order, so a
+	// long ledger cannot push a running review or a queued channel past the
+	// list limit.
+	sort.SliceStable(desk.WaitingOthers, func(i, j int) bool {
+		left, right := desk.WaitingOthers[i].Since, desk.WaitingOthers[j].Since
+		if left.IsZero() != right.IsZero() {
+			return right.IsZero()
+		}
+		return left.Before(right)
+	})
 	sort.SliceStable(desk.Later, func(i, j int) bool { return desk.Later[i].Since.After(desk.Later[j].Since) })
 	sort.SliceStable(desk.Running, func(i, j int) bool { return desk.Running[i].Since.Before(desk.Running[j].Since) })
 	desk.NeedsOwnerTotal, desk.LaterTotal = len(desk.NeedsOwner), len(desk.Later)
@@ -308,6 +333,10 @@ func (s *Service) petDesk(ctx context.Context, input petDeskInput) (PetDesk, err
 		desk.Agenda = digest.Agenda
 	}
 	desk.OpenLoopsTotal, desk.AgendaTotal = digest.OpenLoopsTotal, digest.AgendaTotal
+	// A failed read leaves the line off; the rest of the desk still renders.
+	if reply, replyErr := s.petDeskLastReply(ctx); replyErr == nil {
+		desk.LastReply = reply
+	}
 	return desk, nil
 }
 
