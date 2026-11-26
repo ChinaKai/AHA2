@@ -112,10 +112,20 @@ const layoutWatches = [
   ...Array.from({length: 20}, (_, i) => ({task_id: `t-un${i}`, code: `task-un${i}`, title: `未关注的任务 ${i}`, status: "active", watched: false, ignored: false, reason: "auto", created_at: minutesAgo(900), updated_at: minutesAgo(80 + i)})),
 ];
 
+// Follow-list sizes for the always-open lists: ?watches=small is watched 1 /
+// ignored 2 / unfollowed 1, ?watches=huge is 200 / 300 / 50.
+const watchSet = (watched, ignored, unfollowed) => [
+  ...Array.from({length: watched}, (_, i) => ({task_id: `t-fw${i}`, code: `task-fw${i}`, title: `关注 ${i}`, status: "active", watched: true, ignored: false, reason: "manual", created_at: minutesAgo(900), updated_at: minutesAgo(30 + i)})),
+  ...Array.from({length: ignored}, (_, i) => ({task_id: `t-fi${i}`, code: `task-fi${i}`, title: `忽略 ${i}`, status: "active", watched: true, ignored: true, reason: "auto", created_at: minutesAgo(900), updated_at: minutesAgo(60 + i)})),
+  ...Array.from({length: unfollowed}, (_, i) => ({task_id: `t-fu${i}`, code: `task-fu${i}`, title: `未关注 ${i}`, status: "active", watched: false, ignored: false, reason: "auto", created_at: minutesAgo(900), updated_at: minutesAgo(80 + i)})),
+];
+const watchSets = {small: watchSet(1, 2, 1), huge: watchSet(200, 300, 50)};
+
 const bootstrap = `
 const json = (value, status = 200) => new Response(JSON.stringify(value), {status, headers: {"Content-Type": "application/json"}});
 const params = new URLSearchParams(location.search);
 const layoutDesks = {owner: ${JSON.stringify(ownerDesk)}, large: ${JSON.stringify(largeDesk)}};
+const watchSets = ${JSON.stringify(watchSets)};
 window.__desk = params.get("desk") === "0" ? undefined : layoutDesks[params.get("desk")] || ${JSON.stringify(desk)};
 const weekInsights = layoutDesks[params.get("desk")] ? ${JSON.stringify(ownerInsights)} : ${JSON.stringify(insights)};
 window.__workbenchQueries = [];
@@ -189,7 +199,7 @@ window.fetch = async (input, init = {}) => {
     return json({
       ok: true, core: [{name: "loops.md", content: "loops"}, {name: "identity.md", content: "identity"}, {name: "principles.md", content: "principles"}, {name: "agenda.md", content: "agenda"}], worklog: [{date: "2026-11-25", content: "做了一件事"}], worklog_total: 1, approvals, approval_total: allApprovals.length,
       approval_counts: [{kind: "idea", status: "pending", count: 1}, {kind: "owner_decision", status: "pending", count: 1}],
-      watches: layoutDesks[params.get("desk")] ? ${JSON.stringify(layoutWatches)} : ${JSON.stringify(watches)}, updated_at: new Date().toISOString(),
+      watches: watchSets[params.get("watches")] || (layoutDesks[params.get("desk")] ? ${JSON.stringify(layoutWatches)} : ${JSON.stringify(watches)}), updated_at: new Date().toISOString(),
       inspection: {health: "ok", version: "9.9.9", web_version: "web-1", uptime_minutes: 125, checked_at: new Date().toISOString(), pending_approvals: 2},
       channels: [{id: "c-1", name: "Mail", status: "degraded", pending: 3, degraded: true}], channel_total: 1,
       ...(window.__desk ? {desk: window.__desk} : {}),
@@ -577,7 +587,7 @@ try {
       sideways: doc.scrollWidth - doc.clientWidth,
       board: getComputedStyle(document.querySelector(".pet-desk-col")).display !== "contents",
       headers: ["pet-desk-needs", "pet-desk-waiting", "pet-desk-pet", "pet-desk-running", "pet-desk-insights"].map(id => inView(box(`#${id} > header`))),
-      follows: [...document.querySelectorAll(".pet-desk-follows > details > summary")].map(el => inView(el.getBoundingClientRect())),
+      follows: [...document.querySelectorAll(".pet-desk-follows > .pet-follow-list > .pet-follow-title")].map(el => inView(el.getBoundingClientRect())),
       columns: ["pet-desk-col-side", "pet-desk-col-main", "pet-desk-col-run"].map(name => Math.round(document.querySelector(`.${name} > section`).getBoundingClientRect().left)),
       stackOrder: [box("#pet-desk-waiting").bottom <= box("#pet-desk-pet").top, box("#pet-desk-running").bottom <= box("#pet-desk-insights").top],
       needs: scroller("pet-desk-needs"), waiting: scroller("pet-desk-waiting"), running: scroller("pet-desk-running"),
@@ -618,10 +628,9 @@ try {
     assert.equal(await toggle.getAttribute("aria-expanded"), "true");
     assert.equal(await toggle.innerText(), "Collapse");
     assert.match(await reply.locator(".pet-desk-reply-full").innerText(), /\*\*task-813[\s\S]*__其余项目__/, "the full text is the original");
-    await layoutPage.locator("#pet-overview-ignored summary").click();
     let m = await layout(layoutPage);
     fitsBoard(m, `${label} expanded`);
-    assert.ok(await layoutPage.locator("#pet-overview-ignored .pet-overview-other-body").evaluate(el => el.scrollHeight > el.clientHeight && el.getBoundingClientRect().bottom <= innerHeight), `${label}: the open follow list scrolls inside`);
+    assert.ok(await layoutPage.locator("#pet-overview-ignored .pet-overview-other-body").evaluate(el => el.scrollHeight > el.clientHeight && el.getBoundingClientRect().bottom <= innerHeight), `${label}: the follow list scrolls inside`);
     await toggle.click();
     assert.equal(await toggle.getAttribute("aria-expanded"), "false");
     assert.equal(await reply.locator(".pet-desk-reply-full").isHidden(), true);
@@ -644,11 +653,66 @@ try {
     await layoutPage.keyboard.press("PageDown");
     await layoutPage.waitForFunction(() => document.querySelector("#pet-desk-needs .pet-desk-scroll").scrollTop > 0);
     fitsBoard(await layout(layoutPage), `${label} large scrolled`);
-    await layoutPage.locator("#pet-overview-unfollowed summary").click();
     await layoutPage.locator("[data-pet-desk-reply-toggle]").click();
     fitsBoard(await layout(layoutPage), `${label} large expanded`);
   }
+  // The three follow lists are always open (owner, 2026-11-26). Two data
+  // sizes: watched 1 / ignored 2 / unfollowed 1, and 200 / 300 / 50. The
+  // page never scrolls, each list scrolls under its own title, the longest
+  // list sets the strip height (capped), the shorter lists keep their own
+  // height instead of a mostly empty scroll area, and the three boards above
+  // still show each block's title and at least two rows.
+  const followStrip = page => page.evaluate(() => {
+    const lists = [...document.querySelectorAll(".pet-desk-follows > .pet-follow-list")].map(list => {
+      const body = list.querySelector(".pet-follow-body");
+      const rows = body.querySelectorAll(".pet-watch-row").length;
+      return {height: Math.round(list.getBoundingClientRect().height), rows, scrolls: body.scrollHeight > body.clientHeight + 1, empty: body.scrollHeight - body.clientHeight, title: list.querySelector(".pet-follow-title").getBoundingClientRect().top};
+    });
+    const rowsShown = id => {
+      const scroll = document.querySelector(`#${id} .pet-desk-scroll`);
+      if (!scroll) return 99;
+      const bottom = scroll.getBoundingClientRect().bottom;
+      return [...scroll.querySelectorAll(":scope > ol > li, :scope > ul > li")].filter(li => li.getBoundingClientRect().bottom <= bottom + 1).length;
+    };
+    return {strip: Math.round(document.querySelector(".pet-desk-follows").getBoundingClientRect().height), details: document.querySelectorAll(".pet-desk-follows details, .pet-desk-follows summary").length, lists,
+      shown: ["pet-desk-needs", "pet-desk-waiting", "pet-desk-running", "pet-desk-insights"].map(rowsShown)};
+  });
+  for (const [width, height] of [[1920, 912], [1440, 900], [1366, 768], [1100, 640]]) {
+    for (const set of ["small", "huge"]) {
+      const label = `${width}x${height} follows ${set}`;
+      await layoutPage.setViewportSize({width, height});
+      await layoutPage.goto(`${url}/?desk=large&watches=${set}`, {waitUntil: "domcontentloaded"});
+      await layoutPage.waitForSelector("#pet-desk-insights .pet-desk-insights-list", {timeout: 20000});
+      fitsBoard(await layout(layoutPage), label);
+      const f = await followStrip(layoutPage);
+      assert.equal(f.details, 0, `${label}: no collapse control`);
+      assert.ok(f.strip <= Math.max(150, (height - 210) / 4) + 2, `${label}: the strip stays within its cap (${f.strip}px)`);
+      assert.ok(f.shown.every(rows => rows >= 2), `${label}: every block above shows its title and two rows (${f.shown})`);
+      const tallest = Math.max(...f.lists.map(list => list.height));
+      assert.equal(f.strip, tallest, `${label}: the longest list sets the strip height`);
+      for (const list of f.lists) {
+        // A list either fits (no scroll area) or fills the strip and scrolls.
+        assert.ok(!list.scrolls || list.height === tallest, `${label}: a scrolling list is the full strip height`);
+      }
+      if (set === "small") {
+        assert.deepEqual(f.lists.map(list => list.rows), [1, 2, 1]);
+        assert.ok(f.lists[0].height < tallest && f.lists[2].height < tallest || width < 1366, `${label}: the one-row lists are shorter than the two-row list`);
+      } else {
+        assert.deepEqual(f.lists.map(list => list.rows), [200, 300, 50]);
+        assert.ok(f.lists.every(list => list.scrolls), `${label}: every long list scrolls inside`);
+        // Scrolling a list keeps its title where it is and the page still.
+        const ignoredBody = layoutPage.locator("#pet-overview-ignored .pet-follow-body");
+        await ignoredBody.focus();
+        await layoutPage.keyboard.press("End");
+        await layoutPage.waitForFunction(() => document.querySelector("#pet-overview-ignored .pet-follow-body").scrollTop > 0);
+        const after = await followStrip(layoutPage);
+        assert.equal(after.lists[1].title, f.lists[1].title, `${label}: the title does not scroll away`);
+        fitsBoard(await layout(layoutPage), `${label} scrolled`);
+      }
+    }
+  }
   // A follow action still works from the board's follow lists.
+  await openLayout(1920, 912, "owner");
   await layoutPage.locator('#pet-overview-unfollowed [data-pet-watch-follow][data-pet-watch-task="t-un0"]').click();
   await layoutPage.waitForFunction(() => (window.__watchWrites || []).some(([method, id]) => method === "POST" && id === "t-un0"));
   await openLayout(1366, 768, "owner");
@@ -664,6 +728,12 @@ try {
     assert.ok(m.sideways <= 1, `${width}x${height}: no sideways scroll (${m.sideways}px)`);
     const order = await layoutPage.evaluate(() => ["pet-desk-needs", "pet-desk-waiting", "pet-desk-pet", "pet-desk-insights"].map(id => document.getElementById(id).getBoundingClientRect().top));
     assert.deepEqual([...order].sort((a, b) => a - b), order, `${width}x${height}: for you, waiting, the pet's side, last 7 days top to bottom`);
+    // Stacked: the follow lists are open too, each capped and scrolling
+    // inside, so 550 rows do not stretch the page.
+    await layoutPage.goto(`${url}/?desk=owner&watches=huge`, {waitUntil: "domcontentloaded"});
+    await layoutPage.waitForSelector("#pet-desk-insights .pet-desk-insights-list", {timeout: 20000});
+    const stacked = await layoutPage.evaluate(() => [...document.querySelectorAll(".pet-desk-follows .pet-follow-body")].map(body => [body.clientHeight <= innerHeight * 0.4 + 1, body.scrollHeight > body.clientHeight]));
+    assert.deepEqual(stacked, [[true, true], [true, true], [true, true]], `${width}x${height}: stacked lists are capped and scroll inside`);
   }
   assert.deepEqual(await untranslated(layoutPage), [], "English board left untranslated Chinese");
   await layoutPage.close();

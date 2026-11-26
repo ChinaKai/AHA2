@@ -10342,11 +10342,11 @@ async function bindPetWorkbenchPage(): Promise<void> {
           if (binding) binding.tab = active;
           renderTab();
         } else {
-          // The watch list starts collapsed like the other overview sections,
-          // so the jump has to reveal it before scrolling.
+          // The legacy overview's anomaly card jumps to the watch list, which
+          // is always open; bring it into view and move focus to it.
           const follows = document.getElementById("pet-overview-follows");
-          if (follows instanceof HTMLDetailsElement) follows.open = true;
           follows?.scrollIntoView({block: "start", behavior: "smooth"});
+          follows?.querySelector<HTMLElement>(".pet-follow-body[tabindex]")?.focus({preventScroll: true});
         }
       });
     });

@@ -3045,7 +3045,14 @@ dialog.agent-config-dialog { width: min(760px,calc(100vw - 32px)); }
 .pet-overview-recent { display: grid; gap: 8px; }
 .pet-overview-follows, .pet-overview-other { text-align: left; }
 .pet-overview-follows-body, .pet-overview-other-body { display: grid; gap: 8px; margin-top: 8px; }
-.pet-overview-follows summary, .pet-overview-other summary { text-align: left; }
+/* The three follow lists are always open; each keeps its title and scrolls
+   its rows under it. On a phone or a short screen the cap keeps a long list
+   from stretching the page. */
+.pet-follow-list { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.pet-follow-title { margin: 0; font-size: 14px; font-weight: 700; flex: 0 0 auto; }
+.pet-follow-body { max-height: 40vh; overflow-y: auto; overscroll-behavior: contain; align-content: start; }
+.pet-follow-body:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+.pet-follow-empty { margin: 0; }
 .pet-overview-follows h3, .pet-overview-recent h3 { margin: 0; font-size: 14px; }
 .pet-watch-row { display: flex; gap: 8px; align-items: center; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; text-align: left; }
 .pet-watch-row.anomaly { border-color: #fecaca; background: #fef2f2; }
@@ -3062,7 +3069,6 @@ dialog.agent-config-dialog { width: min(760px,calc(100vw - 32px)); }
 .pet-overview-activity strong { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pet-overview-activity small { flex: 0 0 auto; color: var(--muted); font-size: 11px; }
 .pet-overview-other, .pet-overview-follows { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
-.pet-overview-other summary, .pet-overview-follows summary { cursor: pointer; font-weight: 700; }
 
 /* Pet desk (task-813): the overview grouped by who has to move. The waiting
    and running columns sit side by side on wide screens and stack on narrow
@@ -3165,10 +3171,21 @@ button.pet-desk-item-main:hover strong { color: var(--color-accent-hover); }
   .pet-desk-col-main > .pet-desk-needs { flex-grow: 1; }
   /* The week is a handful of lines: a long running list gives way first. */
   .pet-desk-col > .pet-desk-insights { flex-shrink: .05; }
+  /* Below 720px of height the follow strip takes its share; the week block
+     then gives way like the others (down to its title and two lines) so the
+     running list above it also keeps two rows. */
+  @media (max-height: 719px) { .pet-desk-col > .pet-desk-insights { flex-shrink: 1; min-height: 150px; } }
   .pet-desk-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
   .pet-desk-later { margin-top: auto; }
-  .pet-desk-later-body, .pet-desk-follows .pet-overview-follows-body, .pet-desk-follows .pet-overview-other-body { max-height: 30vh; overflow-y: auto; overscroll-behavior: contain; }
-  .pet-desk-follows { grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: start; }
+  .pet-desk-later-body { max-height: 30vh; overflow-y: auto; overscroll-behavior: contain; }
+  /* The follow strip is as tall as its longest list, capped at a quarter of
+     the space below the status and reply rows (viewport minus about 210px of
+     page head, tabs, status and reply) but never under two rows plus the
+     title (150px), so a short list is never cut on a 768px screen. The other
+     two lists keep their own content height. */
+  .pet-desk-follows { grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: start; max-height: calc((100dvh - 210px) / 4); min-height: 0; }
+  .pet-desk-follows > .pet-follow-list { max-height: inherit; }
+  .pet-desk-follows .pet-follow-body { flex: 0 1 auto; max-height: none; min-height: 0; }
   .pet-desk-insights-list { grid-template-columns: minmax(0, 1fr); gap: var(--space-1); }
 }
 .pet-desk-scroll:focus-visible, .pet-desk-detail:focus-visible, .pet-desk-reply-full:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }

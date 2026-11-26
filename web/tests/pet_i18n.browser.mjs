@@ -129,7 +129,7 @@ try{
     recentBottom: Math.round(recent.getBoundingClientRect().bottom),
    };
   });
-  assert.deepEqual(layout.sections.map(section => section.className), ["pet-overview-status", "pet-overview-cards", "pet-overview-follows", "pet-overview-other", "pet-overview-other", "pet-overview-recent"], label);
+  assert.deepEqual(layout.sections.map(section => section.className), ["pet-overview-status", "pet-overview-cards", "pet-overview-follows pet-follow-list", "pet-overview-other pet-follow-list", "pet-overview-other pet-follow-list", "pet-overview-recent"], label);
   assert.ok(layout.sections.every(section => section.width > 0 && section.height > 0), label + " has an empty section");
   assert.equal(layout.recentBottom, layout.overviewBottom, label + " leaves space below Recent activity");
  };
@@ -140,16 +140,16 @@ try{
  const ignored = workbenchBody.locator("#pet-overview-ignored");
  const unfollowed = workbenchBody.locator("#pet-overview-unfollowed");
  const task520 = '[data-pet-watch-task="unfollowed-task"]';
- assert.equal(await ignored.locator("summary").innerText(), "Ignored tasks (1)");
+ // The follow lists are always open (no summary to click): the buttons are
+ // usable right away and the titles count the rows.
+ assert.equal(await ignored.locator(".pet-follow-title").innerText(), "Ignored tasks (1)");
  assert.equal(await ignored.locator(task520).count(), 0);
- await unfollowed.locator("summary").click();
  await unfollowed.locator(task520 + '[data-pet-watch-ignore="true"]').click();
  await ignored.locator(task520 + '[data-pet-watch-ignore="false"]').waitFor({state:"attached"});
- assert.equal(await ignored.locator("summary").innerText(), "Ignored tasks (2)");
- await ignored.locator("summary").click();
+ assert.equal(await ignored.locator(".pet-follow-title").innerText(), "Ignored tasks (2)");
  await ignored.locator(task520 + '[data-pet-watch-ignore="false"]').click();
  await unfollowed.locator(task520 + '[data-pet-watch-ignore="true"]').waitFor({state:"attached"});
- assert.equal(await ignored.locator("summary").innerText(), "Ignored tasks (1)");
+ assert.equal(await ignored.locator(".pet-follow-title").innerText(), "Ignored tasks (1)");
  assert.equal(await page.locator('[data-pet-workbench-tab="diary"]').count(), 0);
  assert.doesNotMatch(await page.locator("#app").innerText(), /日记|diary/i);
  const nav = page.locator('button[data-view="pet-workbench"]');

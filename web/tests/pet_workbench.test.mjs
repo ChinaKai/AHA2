@@ -1047,17 +1047,19 @@ test("overview counts pending approvals, watched anomalies and degraded channels
   assert.match(html, /data-pet-overview-jump="channels"[^>]*>\s*<strong>1<\/strong>/);
   assert.match(html, /2 channels/);
   assert.match(html, /id="pet-overview-follows"/);
-  assert.match(html, /<details class="pet-overview-follows" id="pet-overview-follows"[^>]*><summary>关注任务（2）<\/summary>/);
-  assert.doesNotMatch(html, /class="pet-overview-follows"[^>]*\sopen/);
-  const ignoredList = html.match(/<details [^>]*id="pet-overview-ignored"[\s\S]*?<\/details>/)?.[0] ?? "";
-  const unfollowedList = html.match(/<details [^>]*id="pet-overview-unfollowed"[\s\S]*?<\/details>/)?.[0] ?? "";
-  assert.match(ignoredList, /<summary>忽略的任务（1）<\/summary>/);
+  // The three follow lists are always open: a plain heading, no <details>.
+  assert.match(html, /<section class="pet-overview-follows pet-follow-list" id="pet-overview-follows" aria-labelledby="pet-overview-follows-title"><h3 class="pet-follow-title" id="pet-overview-follows-title">关注任务（2）<\/h3>/);
+  assert.doesNotMatch(html, /<details|<summary/);
+  const ignoredList = html.match(/<section [^>]*id="pet-overview-ignored"[\s\S]*?<\/section>/)?.[0] ?? "";
+  const unfollowedList = html.match(/<section [^>]*id="pet-overview-unfollowed"[\s\S]*?<\/section>/)?.[0] ?? "";
+  assert.match(ignoredList, /<h3 class="pet-follow-title" id="pet-overview-ignored-title">忽略的任务（1）<\/h3>/);
   assert.match(ignoredList, /data-pet-watch-ignore="false" data-pet-watch-task="t-ignored"/);
   assert.doesNotMatch(ignoredList, /t-unwatched/);
-  assert.match(unfollowedList, /<summary>未关注的任务（1）<\/summary>/);
+  assert.match(unfollowedList, /<h3 class="pet-follow-title" id="pet-overview-unfollowed-title">未关注的任务（1）<\/h3>/);
   assert.match(unfollowedList, /data-pet-watch-ignore="true" data-pet-watch-task="t-unwatched"/);
   assert.doesNotMatch(unfollowedList, /t-ignored/);
-  assert.doesNotMatch(html, /class="pet-overview-other"[^>]*\sopen/);
+  // A list with rows is a keyboard-reachable scroll area under its heading.
+  assert.match(ignoredList, /<div class="pet-overview-other-body pet-follow-body" tabindex="0" aria-labelledby="pet-overview-ignored-title">/);
   assert.match(html, /data-pet-overview-task="t-failed"/);
   assert.match(html, /data-pet-watch-unfollow data-pet-watch-task="t-failed"/, "unfollow is available from the overview");
   assert.match(html, /pet-watch-row anomaly/);
@@ -1085,18 +1087,21 @@ test("overview counts pending approvals, watched anomalies and degraded channels
   );
 });
 
-test("empty watch lists render as collapsed sections with zero counts", () => {
+test("empty watch lists stay open with a one-line empty state and zero counts", () => {
   const html = renderPetOverview({
     watches: [],
     channels: [],
     translate: overviewText,
     formatTime: identityTime,
   });
-  assert.match(html, /class="pet-overview-follows"[^>]*><summary>关注任务（0）<\/summary>/);
-  assert.match(html, /class="pet-overview-other"[^>]*><summary>忽略的任务（0）<\/summary>/);
+  assert.match(html, /id="pet-overview-follows-title">关注任务（0）<\/h3><div class="pet-overview-follows-body pet-follow-body"><div class="field-help pet-follow-empty">暂无关注的任务。<\/div><\/div>/);
+  assert.match(html, /id="pet-overview-ignored-title">忽略的任务（0）<\/h3>/);
   assert.match(html, /没有忽略的任务。/);
-  assert.doesNotMatch(html, /class="pet-overview-follows"[^>]*\sopen/);
-  assert.doesNotMatch(html, /class="pet-overview-other"[^>]*\sopen/);
+  // The unfollowed list is always present now, with its own empty line; an
+  // empty list is not a focusable scroll area.
+  assert.match(html, /id="pet-overview-unfollowed-title">未关注的任务（0）<\/h3><div class="pet-overview-other-body pet-follow-body"><div class="field-help pet-follow-empty">/);
+  assert.doesNotMatch(html, /pet-follow-body" tabindex/);
+  assert.doesNotMatch(html, /<details|<summary/);
   assert.doesNotMatch(html, /class="pet-overview-inspection"/);
   assert.doesNotMatch(html, /class="pet-overview-channels"/);
 });
@@ -1431,7 +1436,8 @@ test("desk layout replaces the cards and recent activity but keeps the follow li
   assert.ok(order.every(index => index >= 0), `every block renders: ${order}`);
   assert.deepEqual([...order].sort((a, b) => a - b), order, "top-to-bottom order");
   assert.doesNotMatch(html, /pet-overview-cards|pet-overview-card\b|pet-overview-recent|pet-overview-activity/);
-  assert.match(html, /<details class="pet-overview-follows" id="pet-overview-follows"[^>]*><summary>关注任务（1）<\/summary>/);
+  assert.match(html, /id="pet-overview-follows-title">关注任务（1）<\/h3>/);
+  assert.doesNotMatch(html, /<details class="pet-overview/);
   assert.match(html, /data-pet-watch-ignore="false" data-pet-watch-task="t-i"/, "follow actions are unchanged");
 });
 

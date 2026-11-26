@@ -185,38 +185,36 @@ function overviewCard(jump: string, count: number, label: string, hint: string, 
   </button>`;
 }
 
-// renderOverviewWatchLists renders the three collapsed follow lists shared by
-// the legacy overview and the desk: watched, ignored and (when non-empty)
-// unfollowed tasks.
+// renderOverviewWatchLists renders the three follow lists shared by the
+// legacy overview and the desk: watched, ignored and unfollowed tasks. They
+// are always open (owner, 2026-11-26): a plain heading with the count and a
+// body that scrolls inside its own height cap, so the heading never scrolls
+// away. An empty list is one line.
 function renderOverviewWatchLists(watches: PetTaskWatch[], options: PetOverviewOptions): {watched: PetTaskWatch[]; lists: string} {
   const translate = options.translate;
   // Deliberately not virtualized. The 2026-11 fixture with 500 watches (200
-  // followed + 300 other/ignored) rendered 500 rows in two collapsed <details>,
-  // each row a fixed 54px. The list is static unless the owner changes a
-  // follow, so the DOM cost is bounded and paid once, unlike the conversation
-  // which streams and measures variable rows. If the server ever returns a
-  // watch list materially above 500, apply the conversation window pattern.
+  // followed + 300 other/ignored) rendered 500 rows, each a fixed 54px, in
+  // lists that scroll inside their cap. The list is static unless the owner
+  // changes a follow, so the DOM cost is bounded and paid once, unlike the
+  // conversation which streams and measures variable rows. If the server ever
+  // returns a watch list materially above 500, apply the conversation window
+  // pattern.
   const watched = watches.filter(item => item.watched && !item.ignored);
   const ignored = watches.filter(item => item.ignored);
   const unfollowed = watches.filter(item => !item.watched && !item.ignored);
-  const followRows = watched.length
-    ? watched.map(item => renderWatchRow(item, options)).join("")
-    : `<div class="field-help">${escapeHTML(translate("petWorkbench.emptyFollows"))}</div>`;
-  const followTitle = translate("petWorkbench.overviewFollows", {count: String(watched.length)});
-  const ignoredTitle = translate("petWorkbench.otherFollows", {count: String(ignored.length)});
-  const followDetails = `<details class="pet-overview-follows" id="pet-overview-follows" aria-label="${escapeHTML(followTitle)}"><summary>${escapeHTML(followTitle)}</summary><div class="pet-overview-follows-body">${followRows}</div></details>`;
-  const ignoredRows = ignored.length
-    ? ignored.map(item => renderWatchRow(item, options)).join("")
-    : `<div class="field-help">${escapeHTML(translate("petWorkbench.emptyIgnored"))}</div>`;
-  const ignoredDetails = `<details class="pet-overview-other" id="pet-overview-ignored" aria-label="${escapeHTML(ignoredTitle)}"><summary>${escapeHTML(ignoredTitle)}</summary><div class="pet-overview-other-body">${ignoredRows}</div></details>`;
-  const unfollowedTitle = translate("petWorkbench.unfollowedTasks", {count: String(unfollowed.length)});
-  const unfollowedDetails = unfollowed.length
-    ? `<details class="pet-overview-other" id="pet-overview-unfollowed" aria-label="${escapeHTML(unfollowedTitle)}"><summary>${escapeHTML(unfollowedTitle)}</summary><div class="pet-overview-other-body">${unfollowed.map(item => renderWatchRow(item, options)).join("")}</div></details>`
-    : "";
-
-  return {watched, lists: `${followDetails}
-    ${ignoredDetails}
-    ${unfollowedDetails}`};
+  const list = (id: string, className: string, title: string, items: PetTaskWatch[], empty: string) => {
+    const rows = items.length
+      ? items.map(item => renderWatchRow(item, options)).join("")
+      : `<div class="field-help pet-follow-empty">${escapeHTML(empty)}</div>`;
+    // The body is a keyboard-reachable scroll area only when it has rows.
+    const focus = items.length ? ` tabindex="0" aria-labelledby="${id}-title"` : "";
+    return `<section class="${className} pet-follow-list" id="${id}" aria-labelledby="${id}-title"><h3 class="pet-follow-title" id="${id}-title">${escapeHTML(title)}</h3><div class="${className}-body pet-follow-body"${focus}>${rows}</div></section>`;
+  };
+  return {watched, lists: [
+    list("pet-overview-follows", "pet-overview-follows", translate("petWorkbench.overviewFollows", {count: String(watched.length)}), watched, translate("petWorkbench.emptyFollows")),
+    list("pet-overview-ignored", "pet-overview-other", translate("petWorkbench.otherFollows", {count: String(ignored.length)}), ignored, translate("petWorkbench.emptyIgnored")),
+    list("pet-overview-unfollowed", "pet-overview-other", translate("petWorkbench.unfollowedTasks", {count: String(unfollowed.length)}), unfollowed, deskCopy("emptyUnfollowed")),
+  ].join("\n    ")};
 }
 
 // renderPetOverview is the landing tab. With a desk (task-813) it is the pet's
@@ -632,12 +630,14 @@ export function petDeskReplyPreview(text: string): string {
 
 // The expand control's copy lives in this chunk, like the records copy, so
 // the shared first-screen catalog does not grow for a desk-only button.
-const PET_DESK_COPY: Record<"zh-CN" | "en-US", Record<"expand" | "collapse", string>> = {
-  "zh-CN": {expand: "展开", collapse: "收起"},
-  "en-US": {expand: "Expand", collapse: "Collapse"},
-};
+const PET_DESK_COPY = {
+  "zh-CN": {expand: "展开", collapse: "收起", emptyUnfollowed: "没有未关注的任务。"},
+  "en-US": {expand: "Expand", collapse: "Collapse", emptyUnfollowed: "No unfollowed tasks."},
+} satisfies Record<"zh-CN" | "en-US", Record<string, string>>;
 
-function deskCopy(key: "expand" | "collapse"): string {
+type PetDeskCopyKey = keyof typeof PET_DESK_COPY["en-US"];
+
+function deskCopy(key: PetDeskCopyKey): string {
   return PET_DESK_COPY[currentLocale() === "en-US" ? "en-US" : "zh-CN"][key];
 }
 
