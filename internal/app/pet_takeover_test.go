@@ -125,6 +125,25 @@ func TestPetTakeoverRemoteTaskAndWorkspace(t *testing.T) {
 	if takenTask.ProjectID != project.ID || takenTask.WorkspaceID != localWorkspace.ID || takenTask.OriginalRequest != remoteTask.OriginalRequest {
 		t.Fatalf("taken task=%#v", takenTask)
 	}
+	t.Run("open task ownership survives unfollow", func(t *testing.T) {
+		if err := fixture.service.RemovePetTaskWatch(fixture.ctx, takenTask.ID); err != nil {
+			t.Fatal(err)
+		}
+		state, err := fixture.service.PetWorkState(fixture.ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(state.OpenTasks) != 1 || state.OpenTasks[0].ID != takenTask.ID || !state.OpenTasks[0].CreatedByPet {
+			t.Fatalf("open tasks after pet takeover=%+v", state.OpenTasks)
+		}
+		workbench, err := fixture.service.PetWorkbench(fixture.ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if workbench.Inspection == nil || workbench.Inspection.OpenTasks != state.Inspection.OpenTasks || state.Inspection.OpenTasks != 1 {
+			t.Fatalf("briefing inspection=%+v; workbench inspection=%+v", state.Inspection, workbench.Inspection)
+		}
+	})
 	if len(groups) != 1 || groups[0].ID != "board" || !groups[0].PasswordConfigured || groups[0].Access != domain.HardwareAccessReadWrite {
 		t.Fatalf("taken hardware=%#v", groups)
 	}
