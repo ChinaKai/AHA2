@@ -1216,6 +1216,21 @@ func (s *Store) TaskGoalHistory(ctx context.Context, taskID string, limit int) (
 	if limit <= 0 || limit > 20 {
 		limit = 20
 	}
+	return s.taskGoalHistory(ctx, taskID, limit)
+}
+
+// TaskLifecycleMemory reads the state card with its full goal history. The
+// ordinary state-card endpoint keeps its existing twenty-event limit.
+func (s *Store) TaskLifecycleMemory(ctx context.Context, taskID string) (domain.TaskMemory, error) {
+	item, err := readTaskMemory(ctx, s.db, taskID)
+	if err != nil && err != sql.ErrNoRows {
+		return item, err
+	}
+	item.GoalHistory, err = s.taskGoalHistory(ctx, taskID, -1)
+	return item, err
+}
+
+func (s *Store) taskGoalHistory(ctx context.Context, taskID string, limit int) ([]domain.TaskGoalChange, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT sequence,id,task_id,round_id,turn_id,source_message_id,
 		       goal_before,goal_after,change_type,reason,created_at

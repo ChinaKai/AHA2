@@ -18,6 +18,9 @@ const (
 	petDeskWaitingLimit = 30
 	petDeskRunningLimit = 30
 	petDeskDetailRunes  = 240
+	petDeskStalledLimit = 30
+	petDeskRecentLimit  = 30
+	petDeskRecentWindow = 7 * 24 * time.Hour
 )
 
 // Desk item kinds. They are part of the workbench API contract.
@@ -40,6 +43,7 @@ const (
 	PetDeskLaterNextStep = "next_step"
 
 	PetDeskWaitReview    = "review"
+	PetDeskWaitLine      = "line"
 	PetDeskWaitExecuting = "executing"
 	PetDeskWaitChannel   = "channel"
 	// PetDeskWaitLoop is a "waiting" row the pet wrote in core/loops.md or
@@ -50,16 +54,18 @@ const (
 // PetDeskNeed is one thing on the Owner's side of the desk: an approval to
 // resolve or a Task that cannot move until the Owner answers.
 type PetDeskNeed struct {
-	Kind         string    `json:"kind"`
-	ApprovalID   string    `json:"approval_id,omitempty"`
-	ApprovalKind string    `json:"approval_kind,omitempty"`
-	Risk         string    `json:"risk,omitempty"`
-	TaskID       string    `json:"task_id,omitempty"`
-	TaskCode     string    `json:"task_code,omitempty"`
-	Title        string    `json:"title"`
-	Questions    []string  `json:"questions,omitempty"`
-	Detail       string    `json:"detail,omitempty"`
-	Since        time.Time `json:"since"`
+	Kind         string        `json:"kind"`
+	ApprovalID   string        `json:"approval_id,omitempty"`
+	ApprovalKind string        `json:"approval_kind,omitempty"`
+	Risk         string        `json:"risk,omitempty"`
+	TaskID       string        `json:"task_id,omitempty"`
+	TaskCode     string        `json:"task_code,omitempty"`
+	Title        string        `json:"title"`
+	Questions    []string      `json:"questions,omitempty"`
+	StuckOn      string        `json:"stuck_on,omitempty"`
+	Lines        []PetDeskLine `json:"lines,omitempty"`
+	Detail       string        `json:"detail,omitempty"`
+	Since        time.Time     `json:"since"`
 }
 
 // PetDeskWait is something that is moving without the Owner: a review in
@@ -73,8 +79,27 @@ type PetDeskWait struct {
 	On       string `json:"on,omitempty"`
 	Count    int    `json:"count,omitempty"`
 	// Detail is the next step of a loop wait.
-	Detail string    `json:"detail,omitempty"`
-	Since  time.Time `json:"since"`
+	Detail string        `json:"detail,omitempty"`
+	Lines  []PetDeskLine `json:"lines,omitempty"`
+	Since  time.Time     `json:"since"`
+}
+
+type PetDeskLine struct {
+	ID      string `json:"id"`
+	Title   string `json:"title"`
+	State   string `json:"state"`
+	Step    string `json:"step"`
+	Blocker string `json:"blocker"`
+	Who     string `json:"who,omitempty"`
+}
+
+type PetDeskRecentTask struct {
+	TaskID     string            `json:"task_id"`
+	TaskCode   string            `json:"task_code"`
+	Title      string            `json:"title"`
+	Status     domain.TaskStatus `json:"status"`
+	Watched    bool              `json:"watched"`
+	LastActive time.Time         `json:"last_active"`
 }
 
 // PetDeskRun is a Task that is being worked on right now.
@@ -94,19 +119,23 @@ type PetDeskRun struct {
 // already keeps: pet approvals, Task status, Task state cards, review links,
 // channel outbox health, the pet's ledgers and the Owner's corrections.
 type PetDesk struct {
-	NeedsOwner         []PetDeskNeed   `json:"needs_owner"`
-	NeedsOwnerTotal    int             `json:"needs_owner_total"`
-	Later              []PetDeskNeed   `json:"later"`
-	LaterTotal         int             `json:"later_total"`
-	WaitingOthers      []PetDeskWait   `json:"waiting_others"`
-	WaitingOthersTotal int             `json:"waiting_others_total"`
-	Running            []PetDeskRun    `json:"running"`
-	RunningTotal       int             `json:"running_total"`
-	Corrections        []PetCorrection `json:"corrections"`
-	OpenLoops          []string        `json:"open_loops"`
-	OpenLoopsTotal     int             `json:"open_loops_total"`
-	Agenda             []string        `json:"agenda"`
-	AgendaTotal        int             `json:"agenda_total"`
+	Stalled            []PetDeskStalledTask `json:"stalled"`
+	StalledTotal       int                  `json:"stalled_total"`
+	Recent             []PetDeskRecentTask  `json:"recent"`
+	RecentTotal        int                  `json:"recent_total"`
+	NeedsOwner         []PetDeskNeed        `json:"needs_owner"`
+	NeedsOwnerTotal    int                  `json:"needs_owner_total"`
+	Later              []PetDeskNeed        `json:"later"`
+	LaterTotal         int                  `json:"later_total"`
+	WaitingOthers      []PetDeskWait        `json:"waiting_others"`
+	WaitingOthersTotal int                  `json:"waiting_others_total"`
+	Running            []PetDeskRun         `json:"running"`
+	RunningTotal       int                  `json:"running_total"`
+	Corrections        []PetCorrection      `json:"corrections"`
+	OpenLoops          []string             `json:"open_loops"`
+	OpenLoopsTotal     int                  `json:"open_loops_total"`
+	Agenda             []string             `json:"agenda"`
+	AgendaTotal        int                  `json:"agenda_total"`
 	// LastReply is the pet's latest finished reply; nil when it has none.
 	LastReply *PetDeskLastReply `json:"last_reply,omitempty"`
 }
@@ -128,6 +157,7 @@ type petDeskInput struct {
 // lookup.
 func (s *Service) petDesk(ctx context.Context, input petDeskInput) (PetDesk, error) {
 	desk := PetDesk{
+		Stalled: []PetDeskStalledTask{}, Recent: []PetDeskRecentTask{},
 		NeedsOwner: []PetDeskNeed{}, Later: []PetDeskNeed{}, WaitingOthers: []PetDeskWait{},
 		Running: []PetDeskRun{}, Corrections: []PetCorrection{}, OpenLoops: []string{}, Agenda: []string{},
 	}
@@ -147,17 +177,20 @@ func (s *Service) petDesk(ctx context.Context, input petDeskInput) (PetDesk, err
 	}
 	taskByID := make(map[string]domain.Task, len(input.tasks))
 	var open []domain.Task
-	var waitingIDs, turnIDs []string
+	var waitingIDs, turnIDs, recentIDs []string
 	for _, task := range input.tasks {
 		taskByID[task.ID] = task
 		watch, hasWatch := input.watches[task.ID]
-		if !petTaskInFollowLists(task) || petWorkStateWatchIgnored(watch) {
+		if task.ID == petTaskID || petWorkStateWatchIgnored(watch) {
 			continue
 		}
 		// Same visibility rule as the follow list: a Task in a system-managed
 		// project appears only when the Owner or the pet follows it.
 		if !hasWatch && !ordinaryProjects[task.ProjectID] {
 			continue
+		}
+		if task.Status != domain.TaskDraft {
+			recentIDs = append(recentIDs, task.ID)
 		}
 		switch task.Status {
 		case domain.TaskWaitingUser, domain.TaskBlocked, domain.TaskFailed:
@@ -183,6 +216,31 @@ func (s *Service) petDesk(ctx context.Context, input petDeskInput) (PetDesk, err
 		return PetDesk{}, err
 	}
 	pendingByTask := petPendingApprovalTaskMap(pendingApprovals)
+	unresolved, err := s.store.TasksWithUnresolvedPetApproval(ctx)
+	if err != nil {
+		return PetDesk{}, err
+	}
+	finishes, err := s.store.LatestTaskTurnFinishes(ctx, recentIDs)
+	if err != nil {
+		return PetDesk{}, err
+	}
+	for _, id := range recentIDs {
+		task := taskByID[id]
+		last := task.UpdatedAt
+		if finishes[id].After(last) {
+			last = finishes[id]
+		}
+		if (task.Status == domain.TaskCompleted || task.Status == domain.TaskCancelled) && last.Before(input.now.Add(-petDeskRecentWindow)) {
+			continue
+		}
+		_, watched := input.watches[id]
+		desk.Recent = append(desk.Recent, PetDeskRecentTask{
+			TaskID: id, TaskCode: task.Code, Title: task.Title, Status: task.Status, Watched: watched, LastActive: last,
+		})
+	}
+	sort.SliceStable(desk.Recent, func(i, j int) bool { return desk.Recent[i].LastActive.After(desk.Recent[j].LastActive) })
+	desk.RecentTotal = len(desk.Recent)
+	desk.Recent = desk.Recent[:min(len(desk.Recent), petDeskRecentLimit)]
 
 	for _, approval := range pendingApprovals {
 		need := PetDeskNeed{
@@ -245,13 +303,42 @@ func (s *Service) petDesk(ctx context.Context, input petDeskInput) (PetDesk, err
 			TaskID: task.ID, TaskCode: task.Code, Title: task.Title,
 			Questions: petDeskQuestions(card.OpenQuestions), Since: task.UpdatedAt,
 		}
+		if task.Status == domain.TaskWaitingUser {
+			wait := taskStuckOn(card.Lines)
+			need.StuckOn = wait.on
+			if idle, ok := taskStall(task, card, wait, turn, input.now, false, unresolved[task.ID], false); ok {
+				desk.Stalled = append(desk.Stalled, idle)
+				continue
+			}
+			// A round that broke off outranks the lines: they were written
+			// before it broke, and the Owner has to know it did not finish.
+			broken := turn.Status != "" && !domain.TurnStatus(turn.Status).EndedCleanly()
+			switch {
+			case wait.on == taskStuckOwner:
+				need.Lines = petDeskLines(card.Lines, domain.TaskLineOwnerOwner)
+			case broken:
+			case wait.on == taskStuckSelf:
+				need.Kind, need.Detail = PetDeskLaterNextStep, wait.self.Step
+				desk.Later = append(desk.Later, need)
+				continue
+			case wait.on == taskStuckOther:
+				desk.WaitingOthers = append(desk.WaitingOthers, PetDeskWait{
+					Kind: PetDeskWaitLine, TaskID: task.ID, TaskCode: task.Code, Title: task.Title,
+					On: strings.Join(wait.who, "、"), Lines: petDeskLines(card.Lines, domain.TaskLineOwnerOther), Since: task.UpdatedAt,
+				})
+				continue
+			}
+			// taskStuckNone falls through with taskStuckUnknown: the state card
+			// decides, so a question written after the last line closed still
+			// reaches the Owner instead of hiding under "later".
+		}
 		turnError := truncateAssistantText(turn.Error, petDeskDetailRunes)
 		switch {
 		case task.Status == domain.TaskBlocked:
 			need.Kind, need.Detail = PetDeskNeedBlocked, turnError
 		case task.Status == domain.TaskFailed:
 			need.Kind, need.Detail = PetDeskNeedFailed, turnError
-		case len(need.Questions) > 0:
+		case need.StuckOn == taskStuckOwner || len(need.Questions) > 0:
 			need.Kind = PetDeskNeedQuestion
 			if !card.StatusUpdatedAt.IsZero() {
 				need.Since = card.StatusUpdatedAt
@@ -302,6 +389,9 @@ func (s *Service) petDesk(ctx context.Context, input petDeskInput) (PetDesk, err
 		}
 		return left.Before(right)
 	})
+	sort.SliceStable(desk.Stalled, func(i, j int) bool { return desk.Stalled[i].Since.Before(desk.Stalled[j].Since) })
+	desk.StalledTotal = len(desk.Stalled)
+	desk.Stalled = desk.Stalled[:min(len(desk.Stalled), petDeskStalledLimit)]
 	sort.SliceStable(desk.Later, func(i, j int) bool { return desk.Later[i].Since.After(desk.Later[j].Since) })
 	sort.SliceStable(desk.Running, func(i, j int) bool { return desk.Running[i].Since.Before(desk.Running[j].Since) })
 	desk.NeedsOwnerTotal, desk.LaterTotal = len(desk.NeedsOwner), len(desk.Later)
@@ -354,6 +444,16 @@ func petDeskActiveReview(links []store.PetCodeReviewLink) string {
 		return link.ReviewTaskID
 	}
 	return ""
+}
+
+func petDeskLines(lines []domain.TaskLine, owner string) []PetDeskLine {
+	var out []PetDeskLine
+	for _, line := range lines {
+		if line.State != domain.TaskLineClosed && line.Owner == owner {
+			out = append(out, PetDeskLine{ID: line.ID, Title: line.Title, State: line.State, Step: line.Step, Blocker: line.Blocker, Who: line.Who})
+		}
+	}
+	return out
 }
 
 func petDeskQuestions(items []string) []string {
