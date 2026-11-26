@@ -587,3 +587,184 @@ func TestV1FingerprintMigrationKeepsOnlyUnchangedVerdicts(t *testing.T) {
 		}
 	}
 }
+
+const bareHandlerPreamble = `
+func methodNotAllowed(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Allow", "GET")
+	writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+}
+`
+
+// A handler written as a bare package-level function name resolves to that
+// function: its source is the fingerprint and the reject-only rule applies.
+func TestBarePackageFunctionHandlersResolveAndFingerprint(t *testing.T) {
+	classify(t, map[string]string{"internal/api (*Server).Routes": "httpapi"})
+	scan := func(t *testing.T, preamble string) Registration {
+		t.Helper()
+		root := writeTree(t, map[string]string{"internal/api/server.go": serverPreamble + preamble + `
+func (s *Server) Routes() {
+	mux := http.NewServeMux()
+	mux.Handle("GET /api/v1/view", s.withAuth(http.HandlerFunc(s.list)))
+	mux.HandleFunc("/api/v1/view", methodNotAllowed)
+}
+`})
+		routes, stats, err := ScanRoutes(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stats.Calls != 2 || stats.Registering != 2 {
+			t.Fatalf("stats = %+v", stats)
+		}
+		for _, route := range routes {
+			if route.Operation == "ANY /api/v1/view" {
+				return route
+			}
+		}
+		t.Fatalf("ANY /api/v1/view not scanned: %+v", routes)
+		return Registration{}
+	}
+	route := scan(t, bareHandlerPreamble)
+	if route.Handler != "methodNotAllowed" || route.Boundary != "transport_auth" || route.Wrappers != "" || !route.RejectOnly || !strings.HasPrefix(route.Fingerprint, fingerprintVersion) {
+		t.Fatalf("bare handler resolved to %+v", route)
+	}
+	// The fingerprint follows the function body.
+	changed := scan(t, strings.Replace(bareHandlerPreamble, `"method_not_allowed"`, `"not_allowed"`, 1))
+	if changed.Fingerprint == route.Fingerprint {
+		t.Fatal("changing the function body kept the fingerprint")
+	}
+	// A function that does work is not reject-only.
+	working := scan(t, strings.Replace(bareHandlerPreamble, `writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")`, `doWork(); writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")`, 1)+"\nfunc doWork() {}\n")
+	if working.RejectOnly {
+		t.Fatal("a handler that calls other code was marked reject-only")
+	}
+}
+
+func TestBareHandlerNamesThatAreNotPackageFunctionsFailTheScan(t *testing.T) {
+	for name, item := range map[string][2]string{
+		"undeclared name":       {`func (s *Server) Routes() { mux := http.NewServeMux(); mux.HandleFunc("/x", missing) }`, "not a package-level function"},
+		"local handler value":   {`func (s *Server) Routes() { mux := http.NewServeMux(); h := s.list; mux.HandleFunc("/x", h) }`, "local value h"},
+		"parameter handler":     {`func (s *Server) Routes(h http.HandlerFunc) { mux := http.NewServeMux(); mux.HandleFunc("/x", h) }`, "local value h"},
+		"local shadows package": {bareHandlerPreamble + `func (s *Server) Routes() { mux := http.NewServeMux(); var methodNotAllowed http.HandlerFunc = s.list; mux.HandleFunc("/x", methodNotAllowed) }`, "local value methodNotAllowed"},
+		"package variable":      {`var dynamic http.HandlerFunc; func (s *Server) Routes() { mux := http.NewServeMux(); mux.HandleFunc("/x", dynamic) }`, "not a package-level function"},
+		"method name, no s.":    {`func (s *Server) Routes() { mux := http.NewServeMux(); mux.HandleFunc("/x", list) }`, "not a package-level function"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			classify(t, map[string]string{"internal/api (*Server).Routes": "httpapi"})
+			root := writeTree(t, map[string]string{"internal/api/server.go": serverPreamble + item[0] + "\n"})
+			if _, _, err := ScanRoutes(root); err == nil || !strings.Contains(err.Error(), item[1]) {
+				t.Fatalf("scan error = %v, want %q", err, item[1])
+			}
+		})
+	}
+}
+
+// A classified helper that ranges over a literal []string of bases expands
+// one route per element; the helper itself must still be classified.
+func TestStringSliceRouteLoopsExpandInAClassifiedHelper(t *testing.T) {
+	classify(t, map[string]string{"internal/api (*Server).Routes": "httpapi", "internal/api (*Server).registerTerminals": "httpapi"})
+	root := writeTree(t, map[string]string{"internal/api/server.go": serverPreamble + `
+const terminalSuffix = "/terminal"
+
+func (s *Server) Routes() {
+	mux := http.NewServeMux()
+	s.registerTerminals(mux)
+}
+
+func (s *Server) registerTerminals(mux *http.ServeMux) {
+	for _, base := range []string{"/api/v1/tasks/{id}" + terminalSuffix, "/api/v1/workspaces/{workspace}" + terminalSuffix} {
+		mux.Handle("GET "+base, s.withAuth(http.HandlerFunc(s.list)))
+		mux.Handle("DELETE "+base+"/{terminal}", s.withAuth(http.HandlerFunc(s.status)))
+	}
+	mux.Handle("PUT /api/v1/settings/terminal", s.withAuth(http.HandlerFunc(s.observe)))
+}
+`})
+	routes, stats, err := ScanRoutes(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Calls != 3 || stats.Registering != 3 {
+		t.Fatalf("stats = %+v", stats)
+	}
+	var operations []string
+	for _, route := range routes {
+		operations = append(operations, route.Operation+" "+route.Handler)
+	}
+	want := "DELETE /api/v1/tasks/{id}/terminal/{terminal} status|DELETE /api/v1/workspaces/{workspace}/terminal/{terminal} status|GET /api/v1/tasks/{id}/terminal list|GET /api/v1/workspaces/{workspace}/terminal list|PUT /api/v1/settings/terminal observe"
+	if strings.Join(operations, "|") != want {
+		t.Fatalf("routes = %v", operations)
+	}
+	unclassified := writeTree(t, map[string]string{"internal/api/server.go": serverPreamble + `
+func (s *Server) Routes() { mux := http.NewServeMux(); s.other(mux) }
+func (s *Server) other(mux *http.ServeMux) {
+	for _, base := range []string{"/a", "/b"} {
+		mux.Handle("GET "+base, s.withAuth(http.HandlerFunc(s.list)))
+	}
+}
+`})
+	if _, _, err := ScanRoutes(unclassified); err == nil || !strings.Contains(err.Error(), "not classified") {
+		t.Fatalf("an unclassified helper must still fail: %v", err)
+	}
+}
+
+func TestRouteLoopsTheScanCannotEnumerateStillFail(t *testing.T) {
+	for name, item := range map[string][2]string{
+		"range over a variable":  {`func (s *Server) Routes(bases []string) { mux := http.NewServeMux(); for _, base := range bases { mux.Handle("GET "+base, s.withAuth(http.HandlerFunc(s.list))) } }`, "does not range over a literal"},
+		"non-constant element":   {`func (s *Server) Routes(extra string) { mux := http.NewServeMux(); for _, base := range []string{"/a", extra} { mux.Handle("GET "+base, s.withAuth(http.HandlerFunc(s.list))) } }`, "non-constant element"},
+		"loop variable reassign": {`func (s *Server) Routes() { mux := http.NewServeMux(); for _, base := range []string{"/a"} { base = base + "/x"; mux.Handle("GET "+base, s.withAuth(http.HandlerFunc(s.list))) } }`, "reassigned"},
+		"array, not slice":       {`func (s *Server) Routes() { mux := http.NewServeMux(); for _, base := range [1]string{"/a"} { mux.Handle("GET "+base, s.withAuth(http.HandlerFunc(s.list))) } }`, "not range over a slice literal"},
+		"non-string slice":       {`func (s *Server) Routes() { mux := http.NewServeMux(); for _, n := range []int{1} { _ = n; mux.Handle("GET /"+string(rune(n)), s.withAuth(http.HandlerFunc(s.list))) } }`, "non-string slice"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			classify(t, map[string]string{"internal/api (*Server).Routes": "httpapi"})
+			root := writeTree(t, map[string]string{"internal/api/server.go": serverPreamble + item[0] + "\n"})
+			if _, _, err := ScanRoutes(root); err == nil || !strings.Contains(err.Error(), item[1]) {
+				t.Fatalf("scan error = %v, want %q", err, item[1])
+			}
+		})
+	}
+}
+
+// A reviewed wrapper whose handler is its first argument resolves to that
+// handler; its other arguments stay constants in the fingerprint.
+func TestReviewedWrapperWithLeadingHandlerArgument(t *testing.T) {
+	classify(t, map[string]string{"internal/api (*Server).Routes": "httpapi"})
+	withBoundary(t, "withTerminal", "owner_session")
+	saved := wrapperHandlerArgument
+	wrapperHandlerArgument = map[string]int{"withTerminal": 0}
+	t.Cleanup(func() { wrapperHandlerArgument = saved })
+	const preamble = `
+func (s *Server) withTerminal(handler http.HandlerFunc, strict bool) http.Handler { return handler }
+func (s *Server) withOther(handler http.HandlerFunc, strict bool) http.Handler { return handler }
+`
+	root := writeTree(t, map[string]string{"internal/api/server.go": serverPreamble + preamble + `
+func (s *Server) Routes() {
+	mux := http.NewServeMux()
+	mux.Handle("GET /a", s.withTerminal(s.list, false))
+	mux.Handle("GET /b", s.withTerminal(s.list, true))
+}
+`})
+	routes, _, err := ScanRoutes(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(routes) != 2 || routes[0].Handler != "list" || routes[0].Boundary != "owner_session" || routes[0].Wrappers != `withTerminal("false")` || routes[1].Wrappers != `withTerminal("true")` {
+		t.Fatalf("routes = %+v", routes)
+	}
+	if routes[0].Fingerprint == routes[1].Fingerprint {
+		t.Fatal("the constant argument must reach the fingerprint")
+	}
+	for name, item := range map[string][2]string{
+		// The same shape without a reviewed boundary is still an unreviewed wrapper.
+		"unreviewed wrapper": {`func (s *Server) Routes() { mux := http.NewServeMux(); mux.Handle("GET /x", s.withOther(s.list, true)) }`, "no reviewed boundary"},
+		"non-constant flag":  {`func (s *Server) Routes(strict bool) { mux := http.NewServeMux(); mux.Handle("GET /x", s.withTerminal(s.list, strict)) }`, "non-constant argument"},
+		"shadowed true":      {`func (s *Server) Routes() { mux := http.NewServeMux(); true := false; mux.Handle("GET /x", s.withTerminal(s.list, true)) }`, "non-constant argument"},
+		"missing argument":   {`func (s *Server) withTerminalShort() {}; func (s *Server) Routes() { mux := http.NewServeMux(); mux.Handle("GET /x", s.withTerminal()) }`, "unsupported handler expression"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := writeTree(t, map[string]string{"internal/api/server.go": serverPreamble + preamble + item[0] + "\n"})
+			if _, _, err := ScanRoutes(root); err == nil || !strings.Contains(err.Error(), item[1]) {
+				t.Fatalf("scan error = %v, want %q", err, item[1])
+			}
+		})
+	}
+}
