@@ -12,9 +12,8 @@ import (
 )
 
 const (
-	petOpenTaskListLimit = 50
 	// The wake-up briefing is consumed by an MCP client that caps a single
-	// tool result. Keep the default response bounded and let the pet opt into
+	// tool result. Keep default history bounded and let the pet opt into
 	// more history explicitly instead of always paying for 20 full rows.
 	petWorkStateDefaultHistoryLimit = 8
 	petWorkStateMaxHistoryLimit     = 50
@@ -64,12 +63,13 @@ type PetWorkItem struct {
 	Note           string `json:"note,omitempty"`
 }
 
-// PetOpenTask is a pet-created Task that has not reached a final closed state
-// yet. It is intentionally task-level rather than event-level: an old waiting
-// Task must stay visible even after it falls out of the recent-event window.
+// PetOpenTask is a still-open Task the pet created or follows. CreatedByPet
+// identifies Tasks the pet is responsible for closing. The list is independent
+// of recent events so older Tasks stay visible.
 type PetOpenTask struct {
 	ID                string `json:"id"`
 	Code              string `json:"code,omitempty"`
+	CreatedByPet      bool   `json:"created_by_pet"`
 	Title             string `json:"title"`
 	Project           string `json:"project,omitempty"`
 	Workspace         string `json:"workspace,omitempty"`
@@ -210,10 +210,10 @@ func normalizePetWorkStateOptions(opts PetWorkStateOptions) PetWorkStateOptions 
 }
 
 // PetWorkState is the pet's own wake-up briefing: approval results, the
-// inspection snapshot, every still-open Task it created, and the
+// inspection snapshot, every still-open Task it created or follows, and the
 // tasks/projects/workspaces it touched recently. It only reads state; the pet
 // decides whether to continue, remind the owner, or record the outcome in
-// worklog. The default view is bounded; use PetWorkStateWithOptions to expand.
+// worklog. The default history is bounded; use PetWorkStateWithOptions to expand.
 func (s *Service) PetWorkState(ctx context.Context) (PetWorkState, error) {
 	return s.PetWorkStateWithOptions(ctx, defaultPetWorkStateOptions())
 }
@@ -249,10 +249,17 @@ func (s *Service) PetWorkStateWithOptions(ctx context.Context, opts PetWorkState
 	if err != nil {
 		return PetWorkState{}, err
 	}
-	openTasks, openTaskTotal, attentionTasks, err := s.petOpenTasks(ctx, petOpenTaskCandidates(ids, tasks, watches), pendingApprovals, opts)
+	assistant, err := s.petAssistant(ctx)
 	if err != nil {
 		return PetWorkState{}, err
 	}
+	candidates := petOpenTaskCandidates(ids, tasks, watches)
+	pendingByTask := petPendingApprovalTaskMap(pendingApprovals)
+	openTasks, err := s.petOpenTasks(ctx, candidates, pendingByTask, opts, assistant.PetAllowViewTasks)
+	if err != nil {
+		return PetWorkState{}, err
+	}
+	openTaskTotal, attentionTasks := petOpenTaskCounts(candidates, pendingByTask)
 	loops := s.PetOpenLoops(ctx)
 	agenda := s.PetAgenda(ctx)
 	core := s.petCoreDigest(ctx, s.petUsesEnglish(ctx))
@@ -268,28 +275,22 @@ func (s *Service) PetWorkStateWithOptions(ctx context.Context, opts PetWorkState
 		LabPath: s.petLabPath(ctx),
 	}
 	for _, task := range tasks {
-		if watch := watches[task.ID]; watch.Ignored && petTaskInFollowLists(task) {
+		if watch := watches[task.ID]; petWorkStateWatchIgnored(watch) && petTaskInFollowLists(task) {
 			state.IgnoredTasks = append(state.IgnoredTasks, PetIgnoredTask{
 				ID: task.ID, Code: task.Code, Title: task.Title, Status: task.Status, IgnoredAt: watch.IgnoredAt,
 			})
 		}
 	}
-	if len(state.IgnoredTasks) > 0 {
-		assistant, err := s.petAssistant(ctx)
-		if err != nil {
-			return PetWorkState{}, err
+	if len(state.IgnoredTasks) > 0 && !assistant.PetAllowViewTasks {
+		created := make(map[string]bool, len(ids))
+		for _, id := range ids {
+			created[id] = true
 		}
-		if !assistant.PetAllowViewTasks {
-			created := make(map[string]bool, len(ids))
-			for _, id := range ids {
-				created[id] = true
-			}
-			// Keep references to the Owner's holds even when other Task details are private.
-			for i := range state.IgnoredTasks {
-				item := &state.IgnoredTasks[i]
-				if !created[item.ID] {
-					item.Title, item.Status = "", ""
-				}
+		// Keep references to the Owner's holds even when other Task details are private.
+		for i := range state.IgnoredTasks {
+			item := &state.IgnoredTasks[i]
+			if !created[item.ID] {
+				item.Title, item.Status = "", ""
 			}
 		}
 	}
@@ -334,7 +335,7 @@ func (s *Service) PetWorkStateWithOptions(ctx context.Context, opts PetWorkState
 				continue
 			}
 			targetID := strings.TrimSpace(event.Detail)
-			if targetID == "" || (targetType == "task" && watches[targetID].Ignored) {
+			if targetID == "" || (targetType == "task" && petWorkStateWatchIgnored(watches[targetID])) {
 				continue
 			}
 			// The event table has no separate target type; the kind prefix is enough
@@ -490,39 +491,63 @@ func petWorkStateTurnResult(value string, chars int) string {
 	return truncateAssistantText(value, chars)
 }
 
+func petWorkStateWatchIgnored(watch domain.PetTaskWatch) bool {
+	return watch.Ignored || watch.Reason == petWatchReasonIgnored
+}
+
+type petOpenTaskCandidate struct {
+	domain.Task
+	createdByPet bool
+}
+
 // petOpenTaskCandidates is shared by the wake-up briefing and Web inspection.
-func petOpenTaskCandidates(ids []string, tasks []domain.Task, watches map[string]domain.PetTaskWatch) []domain.Task {
-	tasksByID := make(map[string]domain.Task, len(tasks))
-	for _, task := range tasks {
-		if petTaskInFollowLists(task) && !watches[task.ID].Ignored {
-			tasksByID[task.ID] = task
-		}
-	}
-	var candidates []domain.Task
+func petOpenTaskCandidates(ids []string, tasks []domain.Task, watches map[string]domain.PetTaskWatch) []petOpenTaskCandidate {
+	created := make(map[string]bool, len(ids))
 	for _, id := range ids {
-		if task, ok := tasksByID[id]; ok {
-			candidates = append(candidates, task)
-		}
+		created[id] = true
 	}
+	seen := make(map[string]bool)
+	var candidates []petOpenTaskCandidate
+	for _, task := range tasks {
+		watch, watched := watches[task.ID]
+		createdByPet := created[task.ID]
+		if !petTaskInFollowLists(task) || petWorkStateWatchIgnored(watch) || (!createdByPet && !watched) || seen[task.ID] {
+			continue
+		}
+		candidates = append(candidates, petOpenTaskCandidate{Task: task, createdByPet: createdByPet})
+		seen[task.ID] = true
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].CreatedAt.Equal(candidates[j].CreatedAt) {
+			return candidates[i].ID < candidates[j].ID
+		}
+		return candidates[i].CreatedAt.Before(candidates[j].CreatedAt)
+	})
 	return candidates
 }
 
-func (s *Service) petOpenTasks(ctx context.Context, tasks []domain.Task, pendingApprovals []domain.PetApproval, opts PetWorkStateOptions) ([]PetOpenTask, int, int, error) {
-	pendingByTask := petPendingApprovalTaskMap(pendingApprovals)
-	activeReviews, err := s.petActiveReviewLabels(ctx, tasks)
+func (s *Service) petOpenTasks(ctx context.Context, tasks []petOpenTaskCandidate, pendingByTask map[string]string, opts PetWorkStateOptions, canViewTasks bool) ([]PetOpenTask, error) {
+	activeReviews, err := s.petActiveReviewLabels(ctx, tasks, canViewTasks)
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, err
 	}
 	now := s.now().UTC()
 	open := make([]PetOpenTask, 0, len(tasks))
-	attention := 0
 	for _, task := range tasks {
 		item := PetOpenTask{
-			ID: task.ID, Code: task.Code, Title: task.Title, Status: string(task.Status),
-			Goal:      truncateAssistantText(task.CurrentGoal, 300),
-			CreatedAt: task.CreatedAt.Format(time.RFC3339), UpdatedAt: task.UpdatedAt.Format(time.RFC3339),
-			AgeMinutes: int(now.Sub(task.CreatedAt).Minutes()),
+			ID: task.ID, Code: task.Code, CreatedByPet: task.createdByPet,
+			PendingApprovalID: pendingByTask[task.ID],
 		}
+		item.NeedsAttention = petOpenTaskAttentionReason(task.Status, "", "") != "" && item.PendingApprovalID == ""
+		// Keep the followed Task in the list even when its details are private.
+		if !canViewTasks && !task.createdByPet {
+			open = append(open, item)
+			continue
+		}
+		item.Title, item.Status = task.Title, string(task.Status)
+		item.Goal = truncateAssistantText(task.CurrentGoal, 300)
+		item.CreatedAt, item.UpdatedAt = task.CreatedAt.Format(time.RFC3339), task.UpdatedAt.Format(time.RFC3339)
+		item.AgeMinutes = int(now.Sub(task.CreatedAt).Minutes())
 		if item.AgeMinutes < 0 {
 			item.AgeMinutes = 0
 		}
@@ -539,35 +564,17 @@ func (s *Service) petOpenTasks(ctx context.Context, tasks []domain.Task, pending
 				item.LastTurnResult = petWorkStateTurnResult(turn.Result, opts.TurnResultChars)
 			}
 		}
-		if approvalID := pendingByTask[task.ID]; approvalID != "" {
-			item.PendingApprovalID = approvalID
-		}
 		activeReview := ""
 		if task.Status == domain.TaskWaitingUser {
 			activeReview = activeReviews[task.ID]
 		}
 		item.AttentionReason = petOpenTaskAttentionReason(task.Status, domain.TurnStatus(item.LastTurnStatus), activeReview)
-		if item.AttentionReason != "" {
-			if item.PendingApprovalID != "" {
-				item.AttentionReason = "已提交待审批 " + item.PendingApprovalID
-			} else {
-				item.NeedsAttention = true
-				attention++
-			}
+		if item.AttentionReason != "" && item.PendingApprovalID != "" {
+			item.AttentionReason = "已提交待审批 " + item.PendingApprovalID
 		}
 		open = append(open, item)
 	}
-	total := len(open)
-	sort.SliceStable(open, func(i, j int) bool {
-		if open[i].CreatedAt == open[j].CreatedAt {
-			return open[i].ID < open[j].ID
-		}
-		return open[i].CreatedAt < open[j].CreatedAt
-	})
-	if len(open) > petOpenTaskListLimit {
-		open = open[:petOpenTaskListLimit]
-	}
-	return open, total, attention, nil
+	return open, nil
 }
 
 func petApprovalTargetTaskID(item domain.PetApproval) string {
@@ -600,10 +607,10 @@ func petPendingApprovalTaskMap(pendingApprovals []domain.PetApproval) map[string
 // flow, never from titles or prompts. A review that already stopped running is
 // not progress: only preparing/active reviews describe an implementation Task
 // as under review.
-func (s *Service) petActiveReviewLabels(ctx context.Context, tasks []domain.Task) (map[string]string, error) {
+func (s *Service) petActiveReviewLabels(ctx context.Context, tasks []petOpenTaskCandidate, canViewTasks bool) (map[string]string, error) {
 	waitingIDs := make([]string, 0, len(tasks))
 	for _, task := range tasks {
-		if task.Status == domain.TaskWaitingUser {
+		if task.Status == domain.TaskWaitingUser && (canViewTasks || task.createdByPet) {
 			waitingIDs = append(waitingIDs, task.ID)
 		}
 	}
@@ -662,11 +669,9 @@ func petOpenTaskAttentionReason(status domain.TaskStatus, lastTurnStatus domain.
 	}
 }
 
-// petOpenTaskCounts is the cheap subset of petOpenTasks used by the workbench
-// inspection snapshot. It computes the same open/attention totals without the
-// per-task project, workspace and latest-turn lookups the full list needs.
-func petOpenTaskCounts(tasks []domain.Task, pendingApprovals []domain.PetApproval) (open int, attention int) {
-	pendingByTask := petPendingApprovalTaskMap(pendingApprovals)
+// petOpenTaskCounts supplies the totals for both inspection snapshots without
+// the per-task project, workspace and latest-turn lookups the full list needs.
+func petOpenTaskCounts(tasks []petOpenTaskCandidate, pendingByTask map[string]string) (open int, attention int) {
 	for _, task := range tasks {
 		// The count keeps its original meaning: every waiting_user Task without
 		// a pending approval counts, whether or not it is merely awaiting the

@@ -23,6 +23,11 @@ func TestPetAutonomousMessageFollowsOwnerLanguage(t *testing.T) {
 			t.Fatalf("English autonomous message still contains %q: %s", unwanted, message)
 		}
 	}
+	for _, want := range []string{"oldest open Task with created_by_pet=true", "followed Tasks with created_by_pet=false", "leave completion or cancellation to the Owner"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("English wake-up ownership rule missing %q", want)
+		}
+	}
 	chinese := petAutonomousMessage(false, 20, "后台（服务端调度）", PetLayout{})
 	for _, want := range []string{"[自主行为] 距上次自主复盘约 20 分钟", "工作唤醒", "core/agenda.md", "aha_pet_work_state", "inspection", "open_tasks", "owner_decision", "pet_request_approval", "巡检摘要", "NOOP"} {
 		if !strings.Contains(chinese, want) {
@@ -31,6 +36,11 @@ func TestPetAutonomousMessageFollowsOwnerLanguage(t *testing.T) {
 	}
 	if strings.Contains(chinese, "任务 A") {
 		t.Fatalf("Chinese autonomous message should not inline open loops: %s", chinese)
+	}
+	for _, want := range []string{"created_by_pet=true 的任务里最早还没闭环的一个", "created_by_pet=false 的关注任务只跟踪和汇报", "完成或取消由 owner 决定"} {
+		if !strings.Contains(chinese, want) {
+			t.Fatalf("Chinese wake-up ownership rule missing %q", want)
+		}
 	}
 }
 

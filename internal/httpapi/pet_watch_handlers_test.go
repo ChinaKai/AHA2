@@ -93,26 +93,49 @@ func TestPetWatchAPIListIgnoreAndRemove(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := database.AppendPetEvent(ctx, domain.PetEvent{
-		ID: "event-watch-created", Kind: "task_created", Actor: "pet", Detail: task.ID, At: now,
+		ID: "event-watch-started", Kind: "task_started", Actor: "pet", Detail: task.ID, At: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	readWorkState := func() app.PetWorkState {
 		t.Helper()
 		raw := petMCPToolText(t, client, server.URL, petToken, "aha_pet_work_state", map[string]any{})
-		var state app.PetWorkState
+		var state struct {
+			app.PetWorkState
+			OpenTasks []struct {
+				app.PetOpenTask
+				CreatedByPet *bool `json:"created_by_pet"`
+			} `json:"open_tasks"`
+		}
 		if err := json.Unmarshal([]byte(raw), &state); err != nil {
 			t.Fatal(err)
 		}
-		return state
+		for _, item := range state.OpenTasks {
+			if item.CreatedByPet == nil || *item.CreatedByPet {
+				t.Fatalf("owner task %s should serialize created_by_pet=false: %s", item.ID, raw)
+			}
+			state.PetWorkState.OpenTasks = append(state.PetWorkState.OpenTasks, item.PetOpenTask)
+		}
+		return state.PetWorkState
 	}
-	assertOpen := func() {
+	assertOpen := func(want int) {
 		t.Helper()
 		state := readWorkState()
-		if len(state.IgnoredTasks) != 0 || len(state.OpenTasks) != 1 ||
-			state.OpenTasks[0].ID != task.ID || !state.OpenTasks[0].NeedsAttention ||
-			state.Inspection.AttentionTasks != 1 || state.Inspection.OpenTasks != 1 {
+		if len(state.IgnoredTasks) != 0 || len(state.OpenTasks) != want ||
+			state.Inspection.AttentionTasks != want || state.Inspection.OpenTasks != want {
 			t.Fatalf("open=%+v ignored=%+v inspection=%+v", state.OpenTasks, state.IgnoredTasks, state.Inspection)
+		}
+		if want == 1 && (state.OpenTasks[0].ID != task.ID || state.OpenTasks[0].Status != string(domain.TaskWaitingUser) ||
+			!state.OpenTasks[0].NeedsAttention) {
+			t.Fatalf("owner-followed waiting task missing: %+v", state.OpenTasks)
+		}
+		response := requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/pet/workbench", nil, "")
+		var view struct {
+			Inspection app.PetInspection `json:"inspection"`
+		}
+		decodeResponse(t, response, &view)
+		if response.StatusCode != http.StatusOK || view.Inspection.OpenTasks != want || view.Inspection.AttentionTasks != want {
+			t.Fatalf("workbench=%d inspection=%+v, want %d open tasks", response.StatusCode, view.Inspection, want)
 		}
 	}
 
@@ -132,7 +155,7 @@ func TestPetWatchAPIListIgnoreAndRemove(t *testing.T) {
 	if _, err := database.PetTaskWatch(ctx, task.ID); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("unfollowed task should start without a watch row: %v", err)
 	}
-	assertOpen()
+	assertOpen(0)
 
 	// Ignore directly without following first, then restore back to the
 	// unfollowed list instead of silently starting a follow.
@@ -195,7 +218,7 @@ func TestPetWatchAPIListIgnoreAndRemove(t *testing.T) {
 		t.Fatalf("restored-unwatched workbench=%#v", ignoredWorkbench.Watches)
 	}
 	response.Body.Close()
-	assertOpen()
+	assertOpen(0)
 
 	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/pet/watches/"+task.ID, nil, csrf)
 	var followed struct {
@@ -207,6 +230,7 @@ func TestPetWatchAPIListIgnoreAndRemove(t *testing.T) {
 	if response.StatusCode != http.StatusOK || followed.Watch.TaskID != task.ID {
 		t.Fatalf("follow=%d %#v", response.StatusCode, followed)
 	}
+	assertOpen(1)
 
 	response = requestJSON(t, client, http.MethodPatch, server.URL+"/api/v1/pet/watches/"+task.ID,
 		map[string]any{"ignored": true}, csrf)
@@ -225,4 +249,5 @@ func TestPetWatchAPIListIgnoreAndRemove(t *testing.T) {
 	if len(workbench.Watches) != 1 || workbench.Watches[0].TaskID != task.ID || workbench.Watches[0].Watched {
 		t.Fatalf("watches after remove=%#v", workbench.Watches)
 	}
+	assertOpen(0)
 }

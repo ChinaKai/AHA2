@@ -221,6 +221,7 @@ func TestPetWorkbenchInspectionSnapshot(t *testing.T) {
 	fixture.service.webVersion = "web-test"
 	fixture.service.startedAt = fixture.createdAt.Add(-65 * time.Minute)
 	now := fixture.createdAt
+	fixture.service.now = func() time.Time { return now }
 	project := domain.Project{ID: "project-inspection", Name: "Inspection", CreatedAt: now, UpdatedAt: now}
 	workspace := domain.Workspace{
 		ID: "workspace-inspection", ProjectID: project.ID, Name: "inspection", Locality: "local",
@@ -265,6 +266,22 @@ func TestPetWorkbenchInspectionSnapshot(t *testing.T) {
 	create("task-active", domain.TaskActive, true)
 	create("task-completed", domain.TaskCompleted, true)
 	create("task-other", domain.TaskActive, false)
+	create("task-watched-active", domain.TaskActive, false)
+	create("task-watched-waiting", domain.TaskWaitingUser, false)
+	create("task-ignored-follow", domain.TaskActive, false)
+	create("task-ignore-only", domain.TaskActive, false)
+	create("task-cancelled", domain.TaskCancelled, false)
+	for _, id := range []string{"task-active", "task-watched-active", "task-watched-waiting", "task-ignored-follow", "task-cancelled"} {
+		if err := fixture.database.UpsertPetTaskWatch(fixture.ctx, id, "manual", now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := fixture.database.IgnorePetTaskWatch(fixture.ctx, "task-ignored-follow", petWatchReasonIgnored, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.database.UpsertPetTaskWatch(fixture.ctx, "task-ignore-only", petWatchReasonIgnored, now); err != nil {
+		t.Fatal(err)
+	}
 	for _, approval := range []domain.PetApproval{
 		{ID: "approval-task", TaskID: petTaskID, Kind: "owner_decision", Title: "decision", Summary: "summary", Status: petApprovalPending, Payload: `{"task_id":"task-approved"}`, CreatedAt: now},
 		{ID: "approval-generic", TaskID: petTaskID, Kind: "idea", Title: "idea", Summary: "summary", Status: petApprovalPending, CreatedAt: now},
@@ -288,11 +305,11 @@ func TestPetWorkbenchInspectionSnapshot(t *testing.T) {
 	if inspection.CheckedAt == "" || inspection.StartedAt == "" || inspection.UptimeMinutes < 65 {
 		t.Fatalf("inspection time fields=%#v", inspection)
 	}
-	if inspection.TasksTotal != 5 || inspection.Active != 2 || inspection.WaitingUser != 0 ||
+	if inspection.TasksTotal != 10 || inspection.Active != 5 || inspection.WaitingUser != 1 ||
 		inspection.Failed != 1 || inspection.Blocked != 1 || inspection.Completed != 1 {
 		t.Fatalf("task stats=%#v", inspection)
 	}
-	if inspection.OpenTasks != 3 || inspection.AttentionTasks != 1 {
+	if inspection.OpenTasks != 5 || inspection.AttentionTasks != 2 {
 		t.Fatalf("open/attention=%d/%d", inspection.OpenTasks, inspection.AttentionTasks)
 	}
 	if inspection.PendingApprovals != 2 || inspection.DegradedChannelCount != 0 || inspection.ChannelsTotal != 0 {
@@ -301,14 +318,66 @@ func TestPetWorkbenchInspectionSnapshot(t *testing.T) {
 	if inspection.Channels != nil {
 		t.Fatalf("embedded snapshot should stay compact: %#v", inspection.Channels)
 	}
-	if !strings.Contains(inspection.Note, "1 个未闭环任务需要处理") {
+	if !strings.Contains(inspection.Note, "2 个未闭环任务需要处理") {
 		t.Fatalf("inspection note=%q", inspection.Note)
+	}
+	state, err := fixture.service.PetWorkState(fixture.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.OpenTasks) != inspection.OpenTasks || state.Inspection.OpenTasks != inspection.OpenTasks ||
+		state.Inspection.AttentionTasks != inspection.AttentionTasks {
+		t.Fatalf("work state open=%+v inspection=%+v; workbench inspection=%+v", state.OpenTasks, state.Inspection, inspection)
+	}
+	wantIDs := []string{"task-active", "task-approved", "task-attention", "task-watched-active", "task-watched-waiting"}
+	wantStatuses := []domain.TaskStatus{domain.TaskActive, domain.TaskBlocked, domain.TaskFailed, domain.TaskActive, domain.TaskWaitingUser}
+	for i, item := range state.OpenTasks {
+		if item.ID != wantIDs[i] || item.Status != string(wantStatuses[i]) || item.CreatedByPet != (i < 3) {
+			t.Fatalf("open task at %d = %+v, want %s (%s), created_by_pet=%t", i, item, wantIDs[i], wantStatuses[i], i < 3)
+		}
+	}
+	ignored := map[string]bool{}
+	for _, task := range state.IgnoredTasks {
+		ignored[task.ID] = true
+	}
+	if len(state.IgnoredTasks) != 2 || !ignored["task-ignored-follow"] || !ignored["task-ignore-only"] {
+		t.Fatalf("ignored tasks=%+v", state.IgnoredTasks)
 	}
 	// The existing workbench payload must remain intact next to the additive
 	// inspection field.
 	if view.UpdatedAt.IsZero() || view.ChannelTotal != 0 || view.ApprovalTotal != 2 {
 		t.Fatalf("workbench compatibility fields=%#v", view)
 	}
+
+	t.Run("view permission disabled", func(t *testing.T) {
+		assistant, err := fixture.service.petAssistant(fixture.ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := fixture.database.UpdateOwnerPetPermissions(fixture.ctx, assistant.ID, false,
+			assistant.PetAllowCreateTasks, assistant.PetAllowCreateWorkspaces, assistant.PetAllowMessageTasks,
+			assistant.PetAllowManageModels, assistant.PetAllowManageKnowledge, assistant.PetAllowManageChannels,
+			assistant.PetAllowManageSystem, now); err != nil {
+			t.Fatal(err)
+		}
+		private, err := fixture.service.PetWorkState(fixture.ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(private.OpenTasks) != inspection.OpenTasks || private.Inspection.AttentionTasks != inspection.AttentionTasks {
+			t.Fatalf("private state open=%+v inspection=%+v", private.OpenTasks, private.Inspection)
+		}
+		if private.OpenTasks[0] != state.OpenTasks[0] {
+			t.Fatalf("pet-created task was redacted: %+v", private.OpenTasks[0])
+		}
+		for i := 3; i < len(private.OpenTasks); i++ {
+			full := state.OpenTasks[i]
+			want := PetOpenTask{ID: full.ID, Code: full.Code, NeedsAttention: full.NeedsAttention}
+			if private.OpenTasks[i] != want {
+				t.Fatalf("private followed task = %+v, want %+v", private.OpenTasks[i], want)
+			}
+		}
+	})
 }
 
 func TestPetWorkbenchInspectionSnapshotDegradedChannelAndPayload(t *testing.T) {

@@ -124,8 +124,8 @@ func (s *Service) PetWorkbenchWithOptions(ctx context.Context, options PetWorkbe
 	return view, nil
 }
 
-// petWorkbenchInspection reuses the petInspection field derivation without the
-// costly per-task enrichment PetWorkState performs for its open-task list.
+// petWorkbenchInspection counts the same open-task candidates as the wake-up
+// briefing without enriching each Task for display.
 func (s *Service) petWorkbenchInspection(ctx context.Context, tasks []domain.Task, watches map[string]domain.PetTaskWatch, now time.Time, channels petChannelSnapshotValues) (PetInspection, error) {
 	pendingApprovals, err := s.store.ListPendingPetApprovals(ctx, 200)
 	if err != nil {
@@ -135,7 +135,8 @@ func (s *Service) petWorkbenchInspection(ctx context.Context, tasks []domain.Tas
 	if err != nil {
 		return PetInspection{}, err
 	}
-	openTasks, attentionTasks := petOpenTaskCounts(petOpenTaskCandidates(ids, tasks, watches), pendingApprovals)
+	candidates := petOpenTaskCandidates(ids, tasks, watches)
+	openTasks, attentionTasks := petOpenTaskCounts(candidates, petPendingApprovalTaskMap(pendingApprovals))
 	inspection := s.petInspectionWithChannelSnapshot(now, tasks, pendingApprovals, openTasks, attentionTasks, channels)
 	// The workbench already renders the full channel cards, so keep the
 	// embedded snapshot compact; callers that need the rows use PetWorkState.
