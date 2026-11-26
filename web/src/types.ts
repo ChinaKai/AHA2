@@ -2052,6 +2052,8 @@ export interface TaskLifecycleEvent {
   title?: string;
   detail?: string;
   ref_id?: string;
+  /** line_* events: the line as it stood after the change. */
+  line?: {owner: string; who?: string; state: string; step?: string; blocker?: string};
 }
 
 export interface TaskLifecycle {

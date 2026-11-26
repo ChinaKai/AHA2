@@ -2150,3 +2150,57 @@ test("desk keeps an empty recent list distinct from an older response", async ()
     i18n.applyLocale("zh-CN");
   }
 });
+
+test("lifecycle timeline words line changes, closing events and review verdicts in the page language", async () => {
+  const {renderTaskLifecycle} = await import("../build/pet_lifecycle.js");
+  const lifecycle = {
+    task: {id: "t-1", code: "task-1", title: "Ship it", status: "completed", project: "AHA", created_at: "2026-11-20T01:00:00Z", updated_at: "2026-11-21T01:00:00Z", current_goal: ""},
+    now: {status: "", next_steps: [], open_questions: [], updated_at: "0001-01-01T00:00:00Z", stuck_on: "", stuck_who: [], idle_since: "0001-01-01T00:00:00Z", lines_recorded: true},
+    lines: [], parallel: {subs: [], reviews: [
+      {task_id: "r-1", code: "task-2", status: "completed", decision: "REQUEST_CHANGES", reason: "", decided_at: "2026-11-20T03:00:00Z"},
+      {task_id: "r-2", code: "task-3", status: "completed", decision: "LGTM <b>", reason: "", decided_at: "2026-11-20T03:30:00Z"},
+    ]},
+    timeline: [
+      {at: "2026-11-20T01:00:00Z", kind: "created", title: "Ship it", detail: "", ref_id: "t-1"},
+      {at: "2026-11-20T02:00:00Z", kind: "line_opened", title: "Device test", detail: "other / Lab · waiting · Build sent · No free device", ref_id: "device",
+        line: {owner: "other", who: "Lab <team>", state: "waiting", step: "Build sent", blocker: "No free device"}},
+      {at: "2026-11-20T02:10:00Z", kind: "line_updated", title: "Docs", detail: "self · open", ref_id: "docs", line: {owner: "self", who: "", state: "open", step: "", blocker: ""}},
+      {at: "2026-11-20T02:20:00Z", kind: "line_closed", title: "Old server", detail: "owner · closed · signed off", ref_id: "old"},
+      {at: "2026-11-20T02:30:00Z", kind: "line_updated", title: "Odd", detail: "", ref_id: "odd", line: {owner: "owner", state: "paused"}},
+      {at: "2026-11-20T03:00:00Z", kind: "review", title: "APPROVE", detail: "Looks right", ref_id: "r-1"},
+      {at: "2026-11-20T03:10:00Z", kind: "review", title: "skipped", detail: "Docs only", ref_id: ""},
+      {at: "2026-11-21T01:00:00Z", kind: "completed", title: "Ship it", detail: "", ref_id: "t-1"},
+      {at: "2026-11-21T02:00:00Z", kind: "cancelled", title: "Ship it", detail: "", ref_id: "t-1"},
+    ],
+    turns: [], stats: {turns: 0, duration_seconds: 0, tokens: 0},
+  };
+  const options = {formatTime: value => value, formatDuration: () => "0", statusLabel: value => value, idleDuration: () => ""};
+  const timelineOf = html => html.match(/<details open>[\s\S]*?<\/details>/)[0];
+  const i18n = await deskCatalog("en-US");
+  try {
+    const html = renderTaskLifecycle(lifecycle, options);
+    const timeline = timelineOf(html);
+    assert.match(timeline, /<strong>Task created<\/strong> <small>/, "the task's own events do not repeat its title");
+    assert.match(timeline, /<strong>Task completed<\/strong> <small>/);
+    assert.match(timeline, /<strong>Task cancelled<\/strong> <small>/);
+    assert.doesNotMatch(timeline, /Task event/);
+    assert.match(timeline, /<p><span data-i18n-ignore>Lab &lt;team&gt;<\/span> · waiting · <span data-i18n-ignore>Build sent<\/span> · Blocker: <span data-i18n-ignore>No free device<\/span><\/p>/);
+    assert.match(timeline, /Docs<\/span> <small>[^<]*<\/small><\/div>\s*<p>Task itself · in progress<\/p>/, "empty step and blocker leave no trailing separators");
+    assert.match(timeline, /<p><span data-i18n-ignore>owner · closed · signed off<\/span><\/p>/, "an older server's plain detail is shown as it came");
+    assert.match(timeline, /<p>Owner · <span data-i18n-ignore>paused<\/span><\/p>/, "an unknown state is shown as it came");
+    assert.match(timeline, /<strong>Review decision<\/strong> · Approved <small>/);
+    assert.match(timeline, /<strong>Review decision<\/strong> · Review skipped <small>/);
+    assert.match(html, /task-2<\/span> · Changes requested/);
+    assert.match(html, /task-3<\/span> · <span data-i18n-ignore>LGTM &lt;b&gt;<\/span>/, "an unknown verdict is escaped server text");
+    assert.doesNotMatch(html, /undefined|\[object/);
+    i18n.applyLocale("zh-CN");
+    const zh = timelineOf(renderTaskLifecycle(lifecycle, options));
+    assert.match(zh, /<strong>任务完成<\/strong>/);
+    assert.match(zh, /· 等待中 · <span data-i18n-ignore>Build sent<\/span> · 卡点：<span data-i18n-ignore>No free device<\/span>/);
+    assert.match(zh, /<p>任务自己 · 进行中<\/p>/);
+    assert.match(zh, /<strong>评审结论<\/strong> · 通过 /);
+    assert.doesNotMatch(zh.replace(/<span data-i18n-ignore>[\s\S]*?<\/span>/g, "").replace(/<[^>]+>/g, " "), /\b(self|open|waiting|blocked|APPROVE|skipped)\b/, "no raw enum words outside server text");
+  } finally {
+    i18n.applyLocale("zh-CN");
+  }
+});

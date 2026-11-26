@@ -23,6 +23,10 @@ const EN = {
   review: "Review decision",
   lineOpened: "Workstream opened", lineUpdated: "Workstream updated", lineClosed: "Workstream closed",
   lineReopened: "Workstream reopened", event: "Task event",
+  taskCompleted: "Task completed", taskCancelled: "Task cancelled",
+  stateOpen: "in progress", stateWaiting: "waiting", stateBlocked: "blocked", stateClosed: "closed",
+  blockerIs: "Blocker: {text}",
+  reviewApprove: "Approved", reviewChanges: "Changes requested", reviewRequired: "Review required", reviewSkipped: "Review skipped",
 } as const;
 
 const ZH: Record<keyof typeof EN, string> = {
@@ -46,12 +50,16 @@ const ZH: Record<keyof typeof EN, string> = {
   review: "评审结论",
   lineOpened: "分线开启", lineUpdated: "分线更新", lineClosed: "分线闭环",
   lineReopened: "分线重开", event: "任务事件",
+  taskCompleted: "任务完成", taskCancelled: "任务取消",
+  stateOpen: "进行中", stateWaiting: "等待中", stateBlocked: "受阻", stateClosed: "已闭环",
+  blockerIs: "卡点：{text}",
+  reviewApprove: "通过", reviewChanges: "要求修改", reviewRequired: "需要评审", reviewSkipped: "跳过评审",
 };
 
 export const PET_LIFECYCLE_COPY = {"en-US": EN, "zh-CN": ZH};
 
 type CopyKey = keyof typeof EN;
-const copy = (key: CopyKey, values: Record<string, number> = {}): string =>
+const copy = (key: CopyKey, values: Record<string, number | string> = {}): string =>
   PET_LIFECYCLE_COPY[currentLocale() === "en-US" ? "en-US" : "zh-CN"][key].replace(/\{(\w+)\}/g, (match, name) => String(values[name] ?? match));
 
 function escapeHTML(value: string): string {
@@ -86,8 +94,7 @@ function lineTable(lines: TaskLine[], date: (value?: string) => string): string 
   const headers: CopyKey[] = ["stream", "responsible", "step", "blocker", "updated"];
   return `<table><thead><tr>${headers.map(header => `<th scope="col">${copy(header)}</th>`).join("")}</tr></thead><tbody>
     ${lines.map(line => {
-      const responsible = line.owner === "other" ? serverText(line.who) || copy("other")
-        : copy(line.owner === "self" ? "taskItself" : "owner");
+      const responsible = responsibleFor(line);
       return `<tr><th scope="row">${serverText(line.title) || "—"}</th><td>${responsible}</td><td>${serverText(line.step) || "—"}</td><td>${serverText(line.blocker) || "—"}</td><td>${date(line.updated_at) || "—"}</td></tr>`;
     }).join("")}
   </tbody></table>`;
@@ -97,7 +104,39 @@ const EVENT_LABELS = new Map<string, CopyKey>([
   ["created", "created"], ["constraint", "constraint"], ["approval_requested", "approvalRequested"],
   ["review", "review"], ["line_opened", "lineOpened"], ["line_updated", "lineUpdated"],
   ["line_closed", "lineClosed"], ["line_reopened", "lineReopened"],
+  ["completed", "taskCompleted"], ["cancelled", "taskCancelled"],
 ]);
+// These events are about the task itself; the dialog header already names it.
+const UNTITLED_EVENTS = new Set(["created", "completed", "cancelled"]);
+const LINE_STATES = new Map<string, CopyKey>([
+  ["open", "stateOpen"], ["waiting", "stateWaiting"], ["blocked", "stateBlocked"], ["closed", "stateClosed"],
+]);
+// A review verdict or the completion declaration, as the server stores them.
+const REVIEW_DECISIONS = new Map<string, CopyKey>([
+  ["APPROVE", "reviewApprove"], ["REQUEST_CHANGES", "reviewChanges"], ["required", "reviewRequired"], ["skipped", "reviewSkipped"],
+]);
+
+function reviewDecision(value: string): string {
+  const key = REVIEW_DECISIONS.get(value);
+  return key ? copy(key) : serverText(value);
+}
+
+function responsibleFor(line: {owner: string; who?: string}): string {
+  return line.owner === "other" ? serverText(line.who) || copy("other") : copy(line.owner === "self" ? "taskItself" : "owner");
+}
+
+// Who holds the line, where it stands, and what is in the way, in the page's
+// language. An older server sends only the plain-text detail.
+function lineChange(item: TaskLifecycleEvent): string {
+  const line = item.line;
+  if (!line) return serverText(item.detail);
+  const state = LINE_STATES.get(line.state);
+  return [
+    responsibleFor(line), state ? copy(state) : serverText(line.state), serverText(line.step),
+    line.blocker ? copy("blockerIs", {text: serverText(line.blocker)}) : "",
+  ].filter(Boolean).join(" · ");
+}
+
 const GOAL_LABELS = new Map<string, CopyKey>([
   ["set", "goalSet"], ["revise", "goalRevise"], ["pause", "goalPause"], ["resume", "goalResume"],
   ["complete", "goalComplete"], ["reopen", "goalReopen"],
@@ -110,8 +149,11 @@ function milestone(item: TaskLifecycleEvent, date: (value?: string) => string): 
   const codedTitle = item.kind === "goal" ? GOAL_LABELS.get(item.title || "") :
     item.kind === "approval_resolved" ? APPROVAL_LABELS.get(item.title || "") : undefined;
   const label = codedTitle ?? (item.kind === "goal" ? "goalChange" : item.kind === "approval_resolved" ? "approvalResolved" : EVENT_LABELS.get(item.kind) ?? "event");
-  return `<li><div><strong>${copy(label)}</strong>${!codedTitle && item.title ? ` · ${serverText(item.title)}` : ""} <small>${date(item.at)}</small></div>
-    ${item.detail ? `<p>${serverText(item.detail)}</p>` : ""}</li>`;
+  const title = codedTitle || UNTITLED_EVENTS.has(item.kind) || !item.title ? ""
+    : item.kind === "review" ? reviewDecision(item.title) : serverText(item.title);
+  const detail = item.kind.startsWith("line_") ? lineChange(item) : serverText(item.detail);
+  return `<li><div><strong>${copy(label)}</strong>${title ? ` · ${title}` : ""} <small>${date(item.at)}</small></div>
+    ${detail ? `<p>${detail}</p>` : ""}</li>`;
 }
 
 export interface TaskLifecycleRenderOptions {
@@ -146,7 +188,7 @@ export function renderTaskLifecycle(lifecycle: TaskLifecycle, options: TaskLifec
   const subs = parallel.subs?.map(sub =>
     `<li>${serverText(sub.title || sub.agent_id)} · ${status(sub.status)} <small>${date(sub.finished_at) || date(sub.started_at)}</small></li>`).join("");
   const reviews = parallel.reviews?.map(review =>
-    `<li>${serverText(review.code || review.task_id)} · ${serverText(review.decision) || status(review.status)}
+    `<li>${serverText(review.code || review.task_id)} · ${review.decision ? reviewDecision(review.decision) : status(review.status)}
     <small>${date(review.decided_at)}</small>${review.reason ? `<p>${serverText(review.reason)}</p>` : ""}</li>`).join("");
   const parallelWork = section("parallel", `<div class="pet-lifecycle-parallel">
     <div><h4>${copy("subs")}</h4>${subs ? `<ul>${subs}</ul>` : empty("noSubs")}</div>

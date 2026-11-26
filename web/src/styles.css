@@ -3295,6 +3295,8 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
 .pet-lifecycle-scroll > p { margin-top: 12px; }
 .pet-lifecycle-scroll ul, .pet-lifecycle-scroll ol { margin: 3px 0 0; padding-inline-start: 18px; }
 .pet-lifecycle-scroll li + li { margin-top: 3px; }
+/* A goal change carries the new goal and its reason on separate lines. */
+.pet-lifecycle-scroll li p { white-space: pre-line; }
 .pet-lifecycle-scroll small, .pet-lifecycle-scroll dt { color: var(--color-text-muted); }
 .pet-lifecycle-scroll dl, .pet-lifecycle-parallel { display: flex; flex-wrap: wrap; gap: 4px 18px; margin: 4px 0 0; }
 .pet-lifecycle-scroll dd { margin: 0; }

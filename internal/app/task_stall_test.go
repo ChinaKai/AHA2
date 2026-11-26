@@ -460,9 +460,23 @@ func TestTaskLifecycleClosingEventAndTurnSummary(t *testing.T) {
 		t.Fatalf("cancelled task timeline ends with %+v", event)
 	}
 	open := f.task("open", domain.TaskWaitingUser, time.Minute)
+	f.lines(open, stallPatch("lab", "other", "waiting", "Lab"))
+	var lineEvents int
 	for _, event := range read(open).Timeline {
 		if event.Kind == "completed" || event.Kind == "cancelled" {
 			t.Fatalf("open task has a closing event: %+v", event)
 		}
+		if (event.Line != nil) != strings.HasPrefix(event.Kind, "line_") {
+			t.Fatalf("only line events carry the line: %+v", event)
+		}
+		if event.Line != nil {
+			lineEvents++
+			if want := (lifecycleEventLine{Owner: "other", Who: "Lab", State: "waiting", Step: "Step lab", Blocker: "Blocker lab"}); *event.Line != want {
+				t.Fatalf("line event carries %+v, want %+v", *event.Line, want)
+			}
+		}
+	}
+	if lineEvents != 1 {
+		t.Fatalf("line events = %d", lineEvents)
 	}
 }

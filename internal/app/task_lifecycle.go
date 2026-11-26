@@ -76,6 +76,18 @@ type lifecycleEvent struct {
 	Title  string    `json:"title"`
 	Detail string    `json:"detail"`
 	RefID  string    `json:"ref_id"`
+	// Line is the line as it stood after a line_* event. The page words the
+	// owner and state itself; Detail keeps the same facts as plain text for a
+	// reader that does not know this field.
+	Line *lifecycleEventLine `json:"line,omitempty"`
+}
+
+type lifecycleEventLine struct {
+	Owner   string `json:"owner"`
+	Who     string `json:"who"`
+	State   string `json:"state"`
+	Step    string `json:"step"`
+	Blocker string `json:"blocker"`
 }
 
 type lifecycleTurn struct {
@@ -266,6 +278,7 @@ func (view *TaskLifecycle) buildTimeline(task domain.Task, card domain.TaskMemor
 		}
 		events = append(events, lifecycleEvent{
 			At: line.CreatedAt, Kind: "line_" + line.Kind, Title: after.Title, Detail: strings.Join(detail, " · "), RefID: line.LineID,
+			Line: &lifecycleEventLine{Owner: after.Owner, Who: after.Who, State: after.State, Step: after.Step, Blocker: after.Blocker},
 		})
 	}
 	// The Task keeps one closing time. A cancelled Task has none, so its last
