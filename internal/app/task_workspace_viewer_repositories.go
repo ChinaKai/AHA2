@@ -46,7 +46,7 @@ func validViewerRepositoryPath(rel string) bool {
 }
 
 func readViewerRepositoryState(ctx context.Context, source viewerFS, task domain.Task, name, repositoryName string,
-	req WorkspaceViewerRequest, repos viewerRepositories, selected viewerRepository,
+	req WorkspaceViewerRequest, repos, changeRepos viewerRepositories, selected viewerRepository, worktrees []viewerWorktree,
 ) (viewerState, error) {
 	var state viewerState
 	if req.Repo != "" && !selected.Readable {
@@ -56,23 +56,24 @@ func readViewerRepositoryState(ctx context.Context, source viewerFS, task domain
 		state = viewerState{Name: name, TaskTitle: task.Title, TaskCode: task.Code, RepositoryUnavailable: true}
 	} else {
 		var err error
-		state, err = readViewerState(ctx, source, task, name, req, repos)
+		state, err = readViewerState(ctx, source, task, name, req, changeRepos)
 		if err != nil {
 			return state, err
 		}
 	}
 	state.viewerRepositories = repos
+	state.Worktrees = worktrees
 	if len(repos.Items) > 0 {
 		if repositoryName != "" && repositoryName != "." && repositoryName != string(filepath.Separator) {
 			state.Items[0].Name = repositoryName
 		}
-		// Polling also detects repository additions, removals and initialization.
-		metadata, err := json.Marshal(repos)
-		if err != nil {
-			return state, err
-		}
-		state.Version = fmt.Sprintf("%x", sha256.Sum256(append([]byte(state.Version), metadata...)))
 	}
+	// Polling also detects checkout additions, removals and initialization.
+	metadata, err := json.Marshal([]any{repos, worktrees})
+	if err != nil {
+		return state, err
+	}
+	state.Version = fmt.Sprintf("%x", sha256.Sum256(append([]byte(state.Version), metadata...)))
 	if req.Summary {
 		return viewerState{IsGit: state.IsGit, Version: state.Version}, nil
 	}

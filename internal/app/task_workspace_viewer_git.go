@@ -216,30 +216,32 @@ type viewerCommit struct {
 
 type viewerState struct {
 	viewerRepositories
-	RepositoryUnavailable bool           `json:"repositoryUnavailable,omitempty"`
-	BaseFallback          bool           `json:"baseFallback,omitempty"`
-	BaseAtHead            bool           `json:"baseAtHead,omitempty"`
-	Name                  string         `json:"name"`
-	TaskTitle             string         `json:"taskTitle"`
-	TaskCode              string         `json:"taskCode"`
-	IsGit                 bool           `json:"isGit"`
-	Version               string         `json:"version,omitempty"`
-	Branch                string         `json:"branch,omitempty"`
-	CheckedOutBranch      string         `json:"checkedOutBranch,omitempty"`
-	BranchOptions         []viewerBranch `json:"branchOptions"`
-	LocalRefsTruncated    bool           `json:"localBranchesTruncated,omitempty"`
-	RemoteRefsTruncated   bool           `json:"remoteBranchesTruncated,omitempty"`
-	Head                  string         `json:"head,omitempty"`
-	Base                  string         `json:"base,omitempty"`
-	MergeBase             string         `json:"mergeBase,omitempty"`
-	NoCommonAncestor      bool           `json:"noCommonAncestor,omitempty"`
-	Ahead                 int            `json:"ahead"`
-	Behind                int            `json:"behind"`
-	Branches              []string       `json:"branches"`
-	Uncommitted           []viewerChange `json:"uncommitted"`
-	BaseChanges           []viewerChange `json:"baseChanges"`
-	Commits               []viewerCommit `json:"commits"`
-	Truncated             bool           `json:"truncated"`
+	RepositoryUnavailable bool             `json:"repositoryUnavailable,omitempty"`
+	BaseFallback          bool             `json:"baseFallback,omitempty"`
+	BaseAtHead            bool             `json:"baseAtHead,omitempty"`
+	Name                  string           `json:"name"`
+	TaskTitle             string           `json:"taskTitle"`
+	TaskCode              string           `json:"taskCode"`
+	IsGit                 bool             `json:"isGit"`
+	Version               string           `json:"version,omitempty"`
+	Branch                string           `json:"branch,omitempty"`
+	CheckedOutBranch      string           `json:"checkedOutBranch,omitempty"`
+	BranchOptions         []viewerBranch   `json:"branchOptions"`
+	LocalRefsTruncated    bool             `json:"localBranchesTruncated,omitempty"`
+	RemoteRefsTruncated   bool             `json:"remoteBranchesTruncated,omitempty"`
+	Head                  string           `json:"head,omitempty"`
+	Base                  string           `json:"base,omitempty"`
+	MergeBase             string           `json:"mergeBase,omitempty"`
+	NoCommonAncestor      bool             `json:"noCommonAncestor,omitempty"`
+	BaselineAvailable     bool             `json:"baselineAvailable"`
+	Worktrees             []viewerWorktree `json:"worktrees,omitempty"`
+	Ahead                 int              `json:"ahead"`
+	Behind                int              `json:"behind"`
+	Branches              []string         `json:"branches"`
+	Uncommitted           []viewerChange   `json:"uncommitted"`
+	BaseChanges           []viewerChange   `json:"baseChanges"`
+	Commits               []viewerCommit   `json:"commits"`
+	Truncated             bool             `json:"truncated"`
 }
 
 func readViewerState(ctx context.Context, source viewerFS, task domain.Task, name string, req WorkspaceViewerRequest, repos viewerRepositories) (viewerState, error) {
@@ -345,7 +347,6 @@ func readViewerState(ctx context.Context, source viewerFS, task domain.Task, nam
 		}
 		state.NoCommonAncestor = req.Branch != "" && state.MergeBase == ""
 		if !state.NoCommonAncestor {
-			history = baseline + ".." + state.Head
 			counts, err := git.checked(ctx, 1024, "rev-list", "--left-right", "--count", baseline+"..."+state.Head)
 			if err != nil {
 				return state, err
@@ -353,6 +354,10 @@ func readViewerState(ctx context.Context, source viewerFS, task domain.Task, nam
 			_, _ = fmt.Sscan(string(counts.data), &state.Behind, &state.Ahead)
 		}
 		if state.MergeBase != "" {
+			state.BaselineAvailable = true
+			if req.BaselineCommits {
+				history = baseline + ".." + state.Head
+			}
 			out, err := git.checked(ctx, viewerHistorySize, "diff", "--raw", "--numstat", "-z", "--no-abbrev", "--no-renames", "--no-ext-diff", "--no-textconv", "--ignore-submodules=none", "--submodule=short", state.MergeBase, state.Head, "--")
 			if err != nil {
 				return state, err

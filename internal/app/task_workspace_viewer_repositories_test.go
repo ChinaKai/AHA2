@@ -189,7 +189,7 @@ func TestWorkspaceViewerRepositories(t *testing.T) {
 		runViewerFixtureGit(t, childDir, "branch", "main", childHead)
 		runViewerFixtureGit(t, childDir, "add", "shared.txt")
 		runViewerFixtureGit(t, childDir, "commit", "-m", "child change")
-		state = read(WorkspaceViewerRequest{View: "state", Repo: child, Base: "parent-only"}).(viewerState)
+		state = read(WorkspaceViewerRequest{View: "state", Repo: child, Base: "parent-only", BaselineCommits: true}).(viewerState)
 		if state.Base != "main" || !state.BaseFallback || state.BaseAtHead || state.Ahead != 1 || len(state.Commits) != 1 {
 			t.Fatalf("child default branch fallback: %+v", state)
 		}
@@ -366,7 +366,7 @@ func TestWorkspaceViewerGitlinkChanges(t *testing.T) {
 				t.Fatalf("%s pointer preview: %q", scope, diff.Text)
 			}
 		}
-		state := read(WorkspaceViewerRequest{View: "state"}).(viewerState)
+		state := read(WorkspaceViewerRequest{View: "state", BaselineCommits: true}).(viewerState)
 		if len(state.Commits) != 1 {
 			t.Fatalf("pointer-only commit: %+v", state.Commits)
 		}

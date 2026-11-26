@@ -18,35 +18,46 @@ import (
 var viewerRemoteWorker string
 
 type remoteViewerFS struct {
-	root   string
-	repo   string
-	runner workspace.Runner
+	root     string
+	repo     string
+	runner   workspace.Runner
+	checkout *viewerRemoteWorktree
+}
+
+type viewerRemoteWorktree struct {
+	Dir    string `json:"dir"`
+	Common string `json:"common"`
 }
 
 type viewerRemoteRequest struct {
-	Root            string   `json:"root"`
-	Repo            string   `json:"repo,omitempty"`
-	Op              string   `json:"op"`
-	Path            string   `json:"path,omitempty"`
-	Args            []string `json:"args,omitempty"`
-	Limit           int      `json:"limit,omitempty"`
-	TimeoutMS       int64    `json:"timeout_ms,omitempty"`
-	ReadLineEndings bool     `json:"read_line_endings,omitempty"`
+	Root            string                `json:"root"`
+	Repo            string                `json:"repo,omitempty"`
+	Op              string                `json:"op"`
+	Path            string                `json:"path,omitempty"`
+	Args            []string              `json:"args,omitempty"`
+	Limit           int                   `json:"limit,omitempty"`
+	TimeoutMS       int64                 `json:"timeout_ms,omitempty"`
+	ReadLineEndings bool                  `json:"read_line_endings,omitempty"`
+	WorkspaceRoot   string                `json:"workspace_root,omitempty"`
+	WorktreePaths   []string              `json:"worktree_paths,omitempty"`
+	Checkout        *viewerRemoteWorktree `json:"checkout,omitempty"`
 }
 
 type viewerRemoteResponse struct {
 	viewerRepositories
-	Error     string     `json:"error"`
-	Marker    bool       `json:"marker"`
-	Tree      viewerTree `json:"tree"`
-	Data      []byte     `json:"data"`
-	Exit      int        `json:"exit"`
-	Truncated bool       `json:"truncated"`
+	Error         string              `json:"error"`
+	Marker        bool                `json:"marker"`
+	Tree          viewerTree          `json:"tree"`
+	Data          []byte              `json:"data"`
+	Exit          int                 `json:"exit"`
+	Truncated     bool                `json:"truncated"`
+	WorktreePaths viewerWorktreePaths `json:"worktree_paths"`
 }
 
 func (source remoteViewerFS) request(ctx context.Context, req viewerRemoteRequest) (viewerRemoteResponse, error) {
 	req.Root = source.root
 	req.Repo = source.repo
+	req.Checkout = source.checkout
 	input, err := json.Marshal(req)
 	if err != nil {
 		return viewerRemoteResponse{}, err
@@ -85,9 +96,22 @@ func (source remoteViewerFS) request(ctx context.Context, req viewerRemoteReques
 		return response, ErrViewerGit
 	case "repo":
 		return response, ErrViewerRepoMissing
+	case "worktree":
+		return response, ErrViewerWorktreeMissing
 	default:
 		return response, ErrViewerTransport
 	}
+}
+
+func (source remoteViewerFS) checkWorktreePaths(ctx context.Context, root string, dirs []string) (viewerWorktreePaths, error) {
+	result, err := source.request(ctx, viewerRemoteRequest{Op: "worktree_paths", WorkspaceRoot: root, WorktreePaths: dirs})
+	return result.WorktreePaths, err
+}
+
+func (source remoteViewerFS) openWorktree(_ context.Context, check viewerWorktreePaths, dir string) (viewerFS, func(), error) {
+	source.root, source.repo = check.Root, ""
+	source.checkout = &viewerRemoteWorktree{Dir: dir, Common: check.Common}
+	return source, func() {}, nil
 }
 
 func (source remoteViewerFS) repositories(ctx context.Context) (viewerRepositories, error) {

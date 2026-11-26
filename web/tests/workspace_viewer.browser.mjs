@@ -64,6 +64,9 @@ const childRepository = "modules/application";
 const childPath = "README.md";
 const longPath = "nested/" + "long-file-name-".repeat(24) + ".md";
 const gitlinkCommit = "c".repeat(40);
+const mainWorktree = {id: "1".repeat(64), name: "AHA2", main: true, branch: "main", head: localHead.slice(0, 7)};
+const taskWorktree = {id: "2".repeat(64), name: "task-819", task: true, default: true, branch: "aha/task-819", head: head.slice(0, 7)};
+const missingWorktree = {id: "3".repeat(64), name: "retired-worktree", unavailable: "missing", branch: "review"};
 const gitlink = {path: childRepository, added: 1, deleted: 1, gitlink: {old: older, new: head}};
 const history = Array.from({length: 42}, (_, index) => ({
   id: index.toString(16).padStart(40, "0"), short: index.toString(16).padStart(7, "0"), subject: "Fixture " + (index + 1), files: [],
@@ -80,7 +83,7 @@ let browser;
 const errors = [];
 try {
   browser = await chromium.launch({...launch, headless: true});
-  async function context(width, language, terminalFixture = false, headerFixture = false, projectFixture = false) {
+  async function context(width, language, terminalFixture = false, headerFixture = false, projectFixture = false, worktreeFixture = false) {
     const ctx = await browser.newContext({
       viewport: {width, height: 800},
       isMobile: headerFixture && width <= 430,
@@ -93,6 +96,7 @@ try {
     const queries = [];
     let childDiscovered = true;
     let remoteBranchError = "";
+    let mainUnavailable = false;
     const terminalRequests = [];
     const terminalMessages = [];
     const terminalFaults = new Map();
@@ -201,12 +205,16 @@ try {
       const child = repo === childRepository;
       const unavailable = repo === "modules/missing";
       const branch = url.searchParams.get("branch");
+      const checkout = url.searchParams.get("worktree");
+      const viewingMain = checkout === mainWorktree.id;
+      const filter = url.searchParams.get("baseline_commits") === "1";
       const remote = branch === remoteRef;
       const orphan = branch === orphanRef;
       const branchHead = orphan ? orphanHead : remote ? remoteHead : localHead;
       const branchName = orphan ? "unrelated" : remote ? "origin/release" : "release";
       const version = branch ? "v1-" + branch : "v1";
       if (view === "state" && url.searchParams.has("availability")) return answer({available: true});
+      if (viewingMain && mainUnavailable) return answer({error: "workspace_viewer_worktree_unavailable"}, 404);
       if (view === "state" && repo === "modules/pending") {
         return answer({error: "workspace_viewer_repository_discovery_incomplete"}, 503);
       }
@@ -218,32 +226,35 @@ try {
       }
       if (view === "state" && url.searchParams.has("summary")) return answer({isGit, version});
       if (view === "state") return answer({
-        isGit: isGit && !unavailable, name: isGit ? (headerFixture ? headerTask.workspace : "Viewer fixture") : "Plain folder",
+        isGit: isGit && !unavailable, name: isGit ? (worktreeFixture ? "AHA2-BUILDER-SERVER" : headerFixture ? headerTask.workspace : "Viewer fixture") : "Plain folder",
         taskTitle: headerFixture ? headerTask.title : task.title, taskCode: headerFixture ? headerTask.code : task.code,
+        worktrees: worktreeFixture || headerFixture ? [mainWorktree, taskWorktree, missingWorktree] : undefined,
         repositories: isGit ? repositories.filter(item => childDiscovered || item.id !== childRepository) : undefined,
-        repositoryUnavailable: unavailable, repositoriesTruncated: isGit && !child, repositoryDeadlineReached: isGit && !child,
+        repositoryUnavailable: unavailable, repositoriesTruncated: isGit && !child && !worktreeFixture, repositoryDeadlineReached: isGit && !child && !worktreeFixture,
         version, branch: branch ? branchName : child ? "feature" : longBranch, head: branch ? branchHead : head,
-        checkedOutBranch: child ? "feature" : longBranch,
+        checkedOutBranch: child ? "feature" : viewingMain ? "main" : worktreeFixture ? taskWorktree.branch : longBranch,
         branchOptions: child ? [{ref: "refs/heads/feature", name: "feature"}] : [
           {ref: "refs/heads/" + longBranch, name: longBranch}, {ref: localRef, name: "release"},
           {ref: orphanRef, name: "unrelated"}, {ref: remoteRef, name: "origin/release"},
         ],
-        localBranchesTruncated: isGit && !child && !remote, remoteBranchesTruncated: isGit && !child && !!branch,
-        base: child ? "HEAD" : url.searchParams.get("base") || longBase, mergeBase: child || orphan ? "" : older,
-        noCommonAncestor: orphan,
+        localBranchesTruncated: isGit && !child && !remote && !worktreeFixture, remoteBranchesTruncated: isGit && !child && !!branch,
+        base: viewingMain ? "" : child ? "HEAD" : url.searchParams.get("base") || (worktreeFixture ? "main" : longBase),
+        mergeBase: child || orphan || viewingMain ? "" : older,
+        noCommonAncestor: orphan, baselineAvailable: !viewingMain && !child && !orphan,
         baseAtHead: child, baseFallback: child && url.searchParams.has("base"),
         ahead: child || orphan ? 0 : 1, behind: 0, branches: child ? ["feature"] : ["main", "release", longBase, longBranch], baseChanges: orphan ? [] : changes,
         uncommitted: branch ? [] : [{...changes[0], path: child ? childPath : changes[0].path, status: ".M"}],
-        commits: unavailable ? [] : branch ? [{id: branchHead, short: branchHead.slice(0, 7), subject: branchName + " commit", author, date, files: changes}]
+        commits: unavailable ? [] : viewingMain ? [{id: localHead, short: mainWorktree.head, subject: "Main checkout commit", author, date, files: changes}]
+          : branch ? [{id: branchHead, short: branchHead.slice(0, 7), subject: branchName + " commit", author, date, files: changes}]
           : child ? [{id: head, short: "aaaaaaa", subject: "Child commit", files: [{...changes[0], path: childPath}]}]
           : [{id: head, short: "aaaaaaa", subject: "Latest commit", author, date, files: changes},
           {id: older, short: "bbbbbbb", subject: longSubject, author: longAuthor, date, files: [{path: longPath, added: 1, deleted: 0}]},
-          {id: gitlinkCommit, short: "ccccccc", subject: "Update application pointer", files: [gitlink]}, ...history],
+          {id: gitlinkCommit, short: "ccccccc", subject: "Update application pointer", files: [gitlink]}, ...(filter ? [] : history)],
       });
       if (view === "tree") {
         const directory = url.searchParams.get("path");
         const entry = (path, kind, masked = false) => ({path, kind, masked, size: 12, mtime: "2026-01-01T00:00:00Z"});
-        return answer({entries: child ? [entry(childPath, "file")] : directory === "docs" ? [entry("docs/notes.md", "file")]
+        return answer({entries: viewingMain ? [entry("main-checkout.txt", "file")] : child ? [entry(childPath, "file")] : directory === "docs" ? [entry("docs/notes.md", "file")]
           : [entry("docs", "directory"), entry("README.md", "file"), entry(".env", "file", true)]});
       }
       if (view === "diff") {
@@ -258,7 +269,8 @@ try {
         : {text: child && file === childPath ? "Child source" : file === "README.md" ? "<script>literal only</script>\n" + "long".repeat(300) : "Working notes"});
     });
     return {ctx, queries, terminalRequests, terminalMessages, forgetChild: () => { childDiscovered = false; }, restoreChild: () => { childDiscovered = true; },
-      failRemoteBranch: error => { remoteBranchError = error; }, allowTerminal: () => { allowTerminalLAN = true; },
+      failRemoteBranch: error => { remoteBranchError = error; }, failMainWorktree: unavailable => { mainUnavailable = unavailable; },
+      allowTerminal: () => { allowTerminalLAN = true; },
       failTerminal: (method, error, status) => terminalFaults.set(method, {error, status}), clearTerminalFault: method => terminalFaults.delete(method)};
   }
 
@@ -272,10 +284,10 @@ try {
     const header = page.locator(".wv-header");
     await header.getByRole("heading", {name: headerTask.workspace, exact: true}).waitFor();
     const names = locale === "zh-CN"
-      ? ["仓库", "分支", "基线", "切换工作区", "刷新"]
-      : ["Repository", "Branch", "Base", "Switch workspace", "Refresh"];
-    const controls = names.slice(0, 4).map(name => header.getByRole("combobox", {name, exact: true}));
-    controls.push(header.getByRole("button", {name: names[4], exact: true}));
+      ? ["切换 worktree", "仓库", "分支", "基线", "切换工作区", "刷新"]
+      : ["Switch worktree", "Repository", "Branch", "Base", "Switch workspace", "Refresh"];
+    const controls = names.slice(0, -1).map(name => header.getByRole("combobox", {name, exact: true}));
+    controls.push(header.getByRole("button", {name: names.at(-1), exact: true}));
     for (const control of controls) await control.waitFor();
     const counts = header.getByText("↑1 ↓0", {exact: true});
     await counts.waitFor();
@@ -335,6 +347,62 @@ try {
     await ctx.close();
   }
   assert.deepEqual(headerFailures, [], "workspace viewer responsive header");
+
+  const checkoutFixture = await context(1440, "zh-CN", false, false, false, true);
+  const checkoutPage = await checkoutFixture.ctx.newPage();
+  await checkoutPage.goto(origin + "/workspace-viewer?task=" + task.id);
+  const worktreePicker = checkoutPage.getByRole("combobox", {name: "切换 worktree"});
+  const historyGroup = checkoutPage.locator('[data-wv-action="commits"]');
+  const filter = checkoutPage.getByRole("checkbox", {name: "只看基线之后"});
+  const count = historyGroup.locator(".wv-count");
+  const more = checkoutPage.getByRole("button", {name: "加载更多"});
+  await worktreePicker.waitFor();
+  assert.equal(await worktreePicker.inputValue(), taskWorktree.id);
+  assert.match(await worktreePicker.locator("option:checked").textContent(), /task-819.*aha\/task-819.*aaaaaaa/);
+  const missingOption = worktreePicker.locator(`option[value="${missingWorktree.id}"]`);
+  assert.equal(await missingOption.getAttribute("disabled"), "");
+  assert.match(await missingOption.textContent(), /目录已不存在/);
+  assert.equal(await historyGroup.getAttribute("aria-expanded"), "true");
+  assert.equal(await filter.isChecked(), false);
+  assert.equal(await count.textContent(), "45");
+  await more.click();
+  assert.equal(await checkoutPage.locator(".wv-commit").count(), 40);
+  await filter.check();
+  await checkoutPage.waitForFunction(() => document.querySelector('[data-wv-action="commits"] .wv-count')?.textContent === "3");
+  assert.equal(await filter.isChecked(), true);
+  assert.equal(await more.count(), 0);
+  if (screenshotDir) await checkoutPage.screenshot({path: resolve(screenshotDir, "workspace-viewer-after-base.png")});
+  await filter.uncheck();
+  await checkoutPage.waitForFunction(() => document.querySelector('[data-wv-action="commits"] .wv-count')?.textContent === "45");
+  assert.equal(await checkoutPage.locator(".wv-commit").count(), 20);
+
+  checkoutFixture.failMainWorktree(true);
+  await worktreePicker.selectOption(mainWorktree.id);
+  await checkoutPage.locator(".wv-notice").getByText(/切换 worktree 失败/).waitFor();
+  assert.equal(await worktreePicker.inputValue(), taskWorktree.id);
+  assert.equal(await count.textContent(), "45");
+  checkoutFixture.failMainWorktree(false);
+  await worktreePicker.selectOption(mainWorktree.id);
+  await checkoutPage.getByRole("button", {name: /Main checkout commit/}).waitFor();
+  assert.equal(await worktreePicker.inputValue(), mainWorktree.id);
+  assert.equal(await filter.isDisabled(), true);
+  await checkoutPage.getByText("当前没有可用基线，显示当前分支的提交。").waitFor();
+  assert.equal(await checkoutPage.getByLabel("基线", {exact: true}).inputValue(), "");
+  assert.equal(await checkoutPage.getByLabel("分支", {exact: true}).locator("option:checked").textContent(), "main");
+  const switchedRequest = checkoutFixture.queries.findLast(({view}) => view === "state");
+  assert.equal(switchedRequest.query.get("worktree"), mainWorktree.id);
+  assert.equal(switchedRequest.query.has("base"), false);
+  if (screenshotDir) await checkoutPage.screenshot({path: resolve(screenshotDir, "workspace-viewer-switched-worktree.png")});
+  await checkoutPage.getByRole("button", {name: "文件", exact: true}).click();
+  await checkoutPage.getByRole("button", {name: /main-checkout\.txt/}).click();
+  await checkoutPage.getByText("Working notes", {exact: true}).waitFor();
+  assert.ok(checkoutFixture.queries.some(({view, query}) => view === "file" && query.get("worktree") === mainWorktree.id));
+  assert.equal(new URL(checkoutPage.url()).searchParams.has("worktree"), false);
+  await checkoutPage.reload();
+  await checkoutPage.getByRole("button", {name: /Latest commit/}).waitFor();
+  assert.equal(await worktreePicker.inputValue(), taskWorktree.id);
+  assert.equal(await filter.isChecked(), false);
+  await checkoutFixture.ctx.close();
 
   const projects = await context(390, "en-US", true, false, true);
   projects.allowTerminal();
@@ -416,8 +484,8 @@ try {
       const controls = [...meta.children];
       const boxes = controls.map(control => control.getBoundingClientRect());
       const center = ({y, height}) => y + height / 2;
-      const label = meta.querySelector("label > span");
       const baseSelect = meta.querySelector("[data-wv-base]");
+      const label = baseSelect.previousElementSibling;
       const branch = meta.querySelector("[data-wv-branch]");
       const branchNotices = document.getElementById(branch.getAttribute("aria-describedby"));
       const notices = branchNotices?.getBoundingClientRect();
@@ -454,9 +522,7 @@ try {
   const commitGroup = viewer.locator('[data-wv-action="commits"]');
   const commitRows = viewer.locator(".wv-commit");
   const loadMore = viewer.getByRole("button", {name: "Load more", exact: true});
-  assert.equal(await commitGroup.getAttribute("aria-expanded"), "false");
-  assert.equal(await commitRows.count(), 0);
-  await commitGroup.click();
+  assert.equal(await commitGroup.getAttribute("aria-expanded"), "true");
   assert.equal(await commitRows.count(), 20);
   await loadMore.click();
   assert.equal(await commitRows.count(), 40);
@@ -634,9 +700,8 @@ try {
   assert.ok(desktop.queries.slice(afterReload).some(({view, query}) => view === "file" && query.get("repo") === childRepository));
 
   await viewer.getByRole("button", {name: "Changes", exact: true}).click();
-  await viewer.getByRole("button", {name: /Recent commits/}).waitFor();
-  assert.equal(await commitGroup.getAttribute("aria-expanded"), "false");
-  await commitGroup.click();
+  await viewer.getByRole("button", {name: /Current branch commits/}).waitFor();
+  assert.equal(await commitGroup.getAttribute("aria-expanded"), "true");
   await viewer.locator('[data-wv-scope="commit"][data-wv-path="README.md"]').click();
   const childDiff = viewer.getByText("+child change", {exact: true});
   await childDiff.waitFor();
@@ -665,7 +730,6 @@ try {
   await childDiff.waitFor();
   assert.equal(await viewer.locator(".wv-tab").count(), 2);
   await repositorySelect.selectOption("");
-  await commitGroup.click();
   await viewer.getByRole("button", {name: /Latest commit/}).waitFor();
   assert.equal(new URL(viewer.url()).searchParams.has("repo"), false);
   assert.equal(await viewer.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
@@ -677,7 +741,6 @@ try {
   const recovered = viewer.getByText("The selected repository is unavailable. Showing the workspace root.");
   await recovered.waitFor();
   assert.equal(await repositorySelect.inputValue(), "");
-  await commitGroup.click();
   await viewer.getByRole("button", {name: /Latest commit/}).waitFor();
   const recoveredURL = new URL(viewer.url());
   assert.ok(["repo", "file", "scope", "commit"].every(key => !recoveredURL.searchParams.has(key)));
@@ -695,7 +758,6 @@ try {
   await viewer.goto(origin + "/workspace-viewer?task=" + task.id);
   await branchSelect.selectOption(localRef);
   await viewer.waitForURL(url => url.searchParams.get("branch") === localRef);
-  await commitGroup.click();
   await viewer.locator(`[data-wv-toggle-commit="${localHead}"]`).waitFor();
   await branchNotices.getByText("Local branch list truncated.", {exact: true}).waitFor();
   await branchNotices.getByText("The remote branch list reached its scan limit and may be incomplete.", {exact: true}).waitFor();
@@ -743,9 +805,8 @@ try {
 
   await branchSelect.selectOption(orphanRef);
   await viewer.locator(".wv-navigator").getByText("This branch and the base have no common ancestor. The diff against base is unavailable.").waitFor();
-  assert.match(await commitGroup.textContent(), /Recent commits/);
+  assert.match(await commitGroup.textContent(), /Current branch commits/);
   assert.equal(await viewer.locator(".wv-counts, [data-wv-action=baseChanges]").count(), 0);
-  await commitGroup.click();
   await viewer.locator(`[data-wv-toggle-commit="${orphanHead}"]`).waitFor();
   await viewer.getByRole("button", {name: "Working tree files", exact: true}).click();
   await viewer.locator('[data-wv-scope="file"][data-wv-path="README.md"]').click();
@@ -785,7 +846,6 @@ try {
   assert.equal(await narrowBranch.locator("option:checked").textContent(), longBranch);
   await narrowBranch.selectOption(remoteRef);
   await narrowNotices.getByText("远程分支列表达到读取上限，可能不完整。", {exact: true}).waitFor();
-  await narrow.locator('[data-wv-action="commits"]').click();
   await narrow.locator(`[data-wv-scope="commit"][data-wv-commit="${remoteHead}"]`).click();
   await checkToolbar(narrow, 390, ["忽略空白", "自动换行", "上一处差异", "下一处差异"]);
   const narrowCommit = narrow.locator(`[data-wv-toggle-commit="${remoteHead}"]`);

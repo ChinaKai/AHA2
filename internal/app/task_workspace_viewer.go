@@ -27,22 +27,26 @@ const (
 )
 
 var (
-	ErrViewerUnavailable = errors.New("workspace_viewer_unavailable")
-	ErrViewerTransport   = errors.New("workspace_viewer_transport_unsupported")
-	ErrViewerPath        = errors.New("workspace_viewer_invalid_path")
-	ErrViewerMissing     = errors.New("workspace_viewer_path_not_found")
-	ErrViewerGit         = errors.New("workspace_viewer_git_failed")
-	ErrViewerNotGit      = errors.New("workspace_viewer_not_git")
-	ErrViewerRevision    = errors.New("workspace_viewer_invalid_revision")
-	ErrViewerBranch      = errors.New("workspace_viewer_invalid_branch")
-	ErrViewerRepository  = errors.New("workspace_viewer_invalid_repository")
-	ErrViewerRepoScan    = errors.New("workspace_viewer_repository_discovery_incomplete")
-	ErrViewerRepoMissing = errors.New("workspace_viewer_repository_unavailable")
+	ErrViewerUnavailable     = errors.New("workspace_viewer_unavailable")
+	ErrViewerTransport       = errors.New("workspace_viewer_transport_unsupported")
+	ErrViewerPath            = errors.New("workspace_viewer_invalid_path")
+	ErrViewerMissing         = errors.New("workspace_viewer_path_not_found")
+	ErrViewerGit             = errors.New("workspace_viewer_git_failed")
+	ErrViewerNotGit          = errors.New("workspace_viewer_not_git")
+	ErrViewerRevision        = errors.New("workspace_viewer_invalid_revision")
+	ErrViewerBranch          = errors.New("workspace_viewer_invalid_branch")
+	ErrViewerRepository      = errors.New("workspace_viewer_invalid_repository")
+	ErrViewerRepoScan        = errors.New("workspace_viewer_repository_discovery_incomplete")
+	ErrViewerRepoMissing     = errors.New("workspace_viewer_repository_unavailable")
+	ErrViewerWorktree        = errors.New("workspace_viewer_invalid_worktree")
+	ErrViewerWorktreeMissing = errors.New("workspace_viewer_worktree_unavailable")
 )
 
 type WorkspaceViewerRequest struct {
-	View, Path, Scope, Base, Commit, Repo, Branch string
-	Summary, Availability, IgnoreWhitespace       bool
+	View, Path, Scope, Base, Commit, Repo, Branch, Worktree  string
+	Summary, Availability, IgnoreWhitespace, BaselineCommits bool
+	workspaceRoot                                            string
+	taskCheckout                                             bool
 }
 
 type viewerEntry struct {
@@ -72,6 +76,8 @@ type viewerFS interface {
 	git(ctx context.Context, limit int, readLineEndings bool, args ...string) (viewerGitOutput, error)
 	repositories(context.Context) (viewerRepositories, error)
 	openRepository(context.Context, string) (viewerFS, func(), error)
+	checkWorktreePaths(context.Context, string, []string) (viewerWorktreePaths, error)
+	openWorktree(context.Context, viewerWorktreePaths, string) (viewerFS, func(), error)
 }
 
 type WorkspaceViewerTargetOption struct {
@@ -196,10 +202,15 @@ func (s *Service) ReadWorkspaceViewerTarget(ctx context.Context, taskID, workspa
 	}
 	// The task checkout can be named after its worktree. Use the original
 	// repository directory for the root selector even when the workspace has an alias.
+	req.workspaceRoot = item.RootPath
+	req.taskCheckout = task.ID != "" && task.WorkspaceID == item.ID
 	return readWorkspaceView(ctx, source, task, item.Name, filepath.Base(item.RootPath), req)
 }
 
 func readWorkspaceView(ctx context.Context, source viewerFS, task domain.Task, name, repositoryName string, req WorkspaceViewerRequest) (any, error) {
+	if req.Worktree != "" && (!validViewerWorktreeID(req.Worktree) || req.Availability) {
+		return nil, ErrViewerWorktree
+	}
 	if req.Branch != "" && (!validViewerBranchRef(req.Branch) || (req.View != "state" && req.View != "diff") ||
 		req.Availability || req.Scope == "uncommitted") {
 		return nil, ErrViewerBranch
@@ -245,15 +256,45 @@ func readWorkspaceView(ctx context.Context, source viewerFS, task domain.Task, n
 			}
 			defer closeRepo()
 			source = repo
-		} else if req.View != "state" || req.Availability {
+		} else if req.View != "state" || req.Availability || req.Worktree != "" {
 			return nil, ErrViewerRepoMissing
+		}
+	}
+	var worktrees []viewerWorktree
+	switched := false
+	if req.Worktree != "" || (req.View == "state" && !req.Availability && req.workspaceRoot != "" && len(repos.Items) != 0 && (req.Repo == "" || selected.Readable)) {
+		items, checkout, closeCheckout, err := selectViewerWorktree(ctx, source, req)
+		if err != nil {
+			return nil, err
+		}
+		worktrees = items
+		if checkout != nil {
+			defer closeCheckout()
+			source = checkout
+			task.BaseCommit, task.TargetBranch = "", ""
+			switched = true
+		}
+	}
+	// Keep the repository selector anchored at the task's original checkout.
+	// Gitlink comparisons need the checkouts inside the worktree being viewed.
+	changeRepos := repos
+	if switched && (req.View == "state" && !req.Summary || req.View == "diff" && req.Scope == "uncommitted") {
+		var err error
+		changeRepos, err = source.repositories(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if req.Repo != "" {
+			for i := range changeRepos.Items {
+				changeRepos.Items[i].Path = path.Join(req.Repo, changeRepos.Items[i].Path)
+			}
 		}
 	}
 	if req.View == "state" {
 		if req.Availability {
 			return map[string]bool{"available": true}, source.available(ctx)
 		}
-		return readViewerRepositoryState(ctx, source, task, name, repositoryName, req, repos, selected)
+		return readViewerRepositoryState(ctx, source, task, name, repositoryName, req, repos, changeRepos, selected, worktrees)
 	}
 
 	if req.View == "tree" {
@@ -291,7 +332,7 @@ func readWorkspaceView(ctx context.Context, source viewerFS, task domain.Task, n
 		}
 		return source.file(ctx, req.Path)
 	}
-	return readViewerDiff(ctx, source, task, req, repos)
+	return readViewerDiff(ctx, source, task, req, changeRepos)
 }
 
 func validViewerPath(value string, allowRoot bool) bool {

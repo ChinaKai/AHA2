@@ -16,12 +16,12 @@ REPO_METADATA_LIMIT = 8 << 20
 GITLINK_LIMIT = 8 << 20
 
 
-def open_path(root, relative, flags):
+def open_path(root, relative, flags, intermediate_flags=DIRECTORY):
     parts = relative.split("/")
     current = os.dup(root)
     try:
         for part in parts[:-1]:
-            child = os.open(part, DIRECTORY, dir_fd=current)
+            child = os.open(part, intermediate_flags, dir_fd=current)
             os.close(current)
             current = child
         return os.open(parts[-1] or ".", flags | os.O_NOFOLLOW, dir_fd=current)
@@ -201,13 +201,13 @@ def repository_git(git_dir, limit, *args, deadline=None):
     )
 
 
-def workspace_module_dirs(deadline=None):
+def workspace_module_dirs(deadline=None, git_dir=".git"):
     dirs = []
     for flag in ("--git-common-dir", "--git-dir"):
-        data, code, cut = repository_git(".git", 4096, "rev-parse", "--path-format=absolute", flag, deadline=deadline)
-        git_dir = os.fsdecode(data.rstrip(b"\n"))
-        if not cut and code == 0 and os.path.isabs(git_dir):
-            dirs.append(os.path.join(git_dir, "modules"))
+        data, code, cut = repository_git(git_dir, 4096, "rev-parse", "--path-format=absolute", flag, deadline=deadline)
+        metadata_dir = os.fsdecode(data.rstrip(b"\n"))
+        if not cut and code == 0 and os.path.isabs(metadata_dir):
+            dirs.append(os.path.join(metadata_dir, "modules"))
     return dirs
 
 
@@ -260,7 +260,7 @@ def registered_gitlinks(git_dir, deadline):
     return sorted(children), truncated
 
 
-def repository_details(root, relative, root_path, module_dirs, deadline):
+def repository_details(root, relative, root_path, module_dirs, deadline, root_git_dir):
     item = {
         "id": relative, "path": relative, "name": os.path.basename(relative or root_path),
         "initialized": False, "readable": False, "head": "", "branch": "", "detached": False,
@@ -274,7 +274,7 @@ def repository_details(root, relative, root_path, module_dirs, deadline):
         item["initialized"] = git_marker(handle)
         if not item["initialized"]:
             return item, [], False
-        git_dir = submodule_git_dir(root, handle, relative, root_path, module_dirs)
+        git_dir = submodule_git_dir(root, handle, relative, root_path, module_dirs) if relative else root_git_dir
         if git_dir is None:
             return item, [], False
         head, code, cut = repository_git(git_dir, 1024, "rev-parse", "--verify", "--quiet", "HEAD", deadline=deadline)
@@ -298,12 +298,12 @@ def repository_details(root, relative, root_path, module_dirs, deadline):
         os.close(handle)
 
 
-def repositories(root):
+def repositories(root, git_dir=".git"):
     if not git_marker(root):
         return {}
     root_path = os.getcwd()
     deadline = time.monotonic() + REPO_TIMEOUT
-    module_dirs = workspace_module_dirs(deadline)
+    module_dirs = workspace_module_dirs(deadline, git_dir)
     items, pending, seen = [], [""], set()
     size = 0
     truncated = size_reached = False
@@ -312,7 +312,7 @@ def repositories(root):
         if relative in seen:
             continue
         seen.add(relative)
-        item, children, cut = repository_details(root, relative, root_path, module_dirs, deadline)
+        item, children, cut = repository_details(root, relative, root_path, module_dirs, deadline, git_dir)
         size += len(json.dumps(item, ensure_ascii=False).encode("utf-8")) + 2
         if size > REPO_METADATA_LIMIT:
             size_reached = True
@@ -332,19 +332,120 @@ def repositories(root):
     }
 
 
-def read(req):
+def worktree_git_path(directory, value):
+    if not value or len(value) > 4096 or any(char in value for char in "\r\n\x00"):
+        return ""
+    return os.path.normpath(os.path.join(directory, value))
+
+
+def worktree_git_file(root, name):
+    handle = open_path(root, name, os.O_RDONLY | os.O_NONBLOCK)
+    with os.fdopen(handle, "rb") as file:
+        if not stat.S_ISREG(os.fstat(file.fileno()).st_mode):
+            return ""
+        return os.fsdecode(file.read(4112).rstrip(b"\r\n"))
+
+
+def worktree_git_dir(root, directory, common):
+    if not common or os.path.realpath(common) != common:
+        return ""
+    marker = os.path.join(directory, ".git")
+    linked = not stat.S_ISDIR(os.stat(".git", dir_fd=root, follow_symlinks=False).st_mode)
+    target = marker
+    if linked:
+        value = worktree_git_file(root, ".git")
+        if not value.startswith("gitdir: "):
+            return ""
+        target = worktree_git_path(directory, value[8:])
+        if os.path.dirname(target) != os.path.join(common, "worktrees"):
+            return ""
+    elif target != common:
+        return ""
+    if os.path.realpath(target) != target:
+        return ""
+    handle = os.open(target, DIRECTORY)
     try:
-        os.chdir(req["root"])
-        root = os.open(".", DIRECTORY)
+        if linked:
+            for name, expected in (("commondir", common), ("gitdir", marker)):
+                if worktree_git_path(target, worktree_git_file(handle, name)) != expected:
+                    return ""
+        return target if worktree_git_file(handle, "HEAD") else ""
+    finally:
+        os.close(handle)
+
+
+def open_worktree(workspace, directory, common):
+    if not os.path.isabs(workspace) or not os.path.isabs(directory):
+        return None, "", "outside"
+    relative = os.path.relpath(directory, workspace)
+    if relative != "." and not valid_repository_path(relative):
+        return None, "", "outside"
+    if os.path.realpath(directory) != directory:
+        return None, "", "outside"
+    try:
+        anchor = os.open("/", DIRECTORY)
+        try:
+            # Walk the absolute path with O_NOFOLLOW on every component.
+            search = getattr(os, "O_PATH", getattr(os, "O_SEARCH", os.O_RDONLY))
+            root = open_path(anchor, directory.lstrip("/"), DIRECTORY, search | os.O_DIRECTORY | os.O_NOFOLLOW)
+        finally:
+            os.close(anchor)
+    except FileNotFoundError:
+        return None, "", "missing"
+    except OSError:
+        return None, "", "unreadable"
+    try:
+        git_dir = worktree_git_dir(root, directory, common)
+        if git_dir:
+            return root, git_dir, ""
+    except OSError:
+        pass
+    os.close(root)
+    return None, "", "unreadable"
+
+
+def worktree_paths(req, git_dir):
+    current = os.getcwd()
+    workspace = os.path.realpath(req["workspace_root"]) if os.path.isabs(req.get("workspace_root", "")) else ""
+    data, code, cut = repository_git(git_dir, 8192, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    if code != 0 or cut:
+        return {"error": "git"}
+    common = os.fsdecode(data[:-1] if data.endswith(b"\n") else data)
+    if not os.path.isabs(common) or os.path.realpath(common) != common:
+        common = ""
+    statuses = []
+    for directory in req.get("worktree_paths", []):
+        handle, _, status = open_worktree(workspace, directory, common)
+        if handle is not None:
+            os.close(handle)
+        statuses.append(status)
+    return {"worktree_paths": {"root": workspace, "current": current, "common": common, "status": statuses}}
+
+
+def read(req):
+    git_dir = ".git"
+    checkout = req.get("checkout")
+    try:
+        if checkout:
+            root, git_dir, status = open_worktree(req["root"], checkout["dir"], checkout["common"])
+            if status:
+                return {"error": "worktree"}
+            try:
+                os.fchdir(root)
+            except OSError:
+                os.close(root)
+                return {"error": "worktree"}
+        else:
+            os.chdir(req["root"])
+            root = os.open(".", DIRECTORY)
     except OSError:
         return {"error": "root"}
     scoped = root
     try:
-        git_dir = ".git"
         op = req["op"]
         if op == "repositories":
             try:
-                return repositories(root)
+                return repositories(root, git_dir)
             except OSError:
                 return {"error": "git"}
         relative = req.get("repo")
@@ -364,6 +465,8 @@ def read(req):
                 return {"error": "repo"}
         if op == "root":
             return {}
+        if op == "worktree_paths":
+            return worktree_paths(req, git_dir)
         if op == "marker":
             try:
                 return {"marker": git_marker(scoped)}

@@ -3877,7 +3877,9 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
 .wv-meta label > span, .wv-meta .wv-branch > svg { flex: none; }
 .wv-meta select { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wv-meta select { padding-inline-start: var(--space-2); }
-.wv-meta [data-wv-repo] { flex: 0 1 24%; }
+.wv-meta [data-wv-repo] { flex: 0 1 16%; }
+.wv-meta .wv-worktree-picker { flex: 2 1 38%; }
+.wv-worktree-picker select { flex: 1; font-weight: normal; }
 .wv-meta [data-wv-base] { flex: 1 1 auto; max-width: 100%; }
 .wv-meta [data-wv-workspace] { flex: 0 1 22%; }
 .wv-meta button { flex: none; padding: 0 var(--space-2); }
@@ -3903,6 +3905,11 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
 .wv-navigator { overflow: auto; }
 .wv-group + .wv-group { border-top: 1px solid var(--line); }
 .wv-group-title { display: flex; align-items: center; gap: var(--space-1); width: 100%; margin: 0; min-height: 34px; padding: var(--space-2) var(--space-3); border: 0; border-radius: 0; background: var(--surface-soft); text-align: left; font-size: var(--font-size-12); font-weight: 700; }
+.wv-commit-group-heading { display: flex; align-items: center; background: var(--surface-soft); }
+.wv-commit-group-heading .wv-group-title { flex: 1 1 auto; min-width: 0; }
+.wv-baseline-filter { display: inline-flex; flex: none; align-items: center; gap: var(--space-1); margin: 0 var(--space-2) 0 0; font-size: var(--font-size-12); }
+.wv-baseline-filter input { width: auto; margin: 0; }
+.wv-baseline-filter:has(input:disabled) { color: var(--muted); }
 .wv-count { margin-left: auto; color: var(--muted); font-family: var(--font-mono); }
 .wv-list { margin: 0; padding: 0; list-style: none; }
 .wv-commit-files, .wv-tree .wv-tree { margin-left: var(--space-3); border-left: 1px solid var(--color-border-subtle); }
@@ -3916,6 +3923,8 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
 .wv-row > small, .wv-row > code, .wv-stat { color: var(--muted); white-space: nowrap; }
 .wv-commit-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
 .wv-commit-title { min-width: 0; font-weight: 650; }
+.wv-commit-title .wv-row-name { flex: 1; }
+.wv-commit-count { font-size: var(--font-size-11); font-weight: normal; }
 .wv-copy-commit { min-height: 26px; padding: 0 var(--space-1); margin-inline-end: var(--space-1); }
 .wv-copy-commit .icon { width: 14px; height: 14px; }
 .wv-commit-info { display: none; grid-column: 1 / -1; padding: var(--space-2); color: var(--muted); background: var(--surface-soft); font-size: var(--font-size-12); white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -3967,6 +3976,7 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
   .wv-heading h1, .wv-heading p { white-space: normal; overflow-wrap: anywhere; }
   .wv-meta { flex-wrap: wrap; justify-content: flex-start; }
   .wv-meta [data-wv-repo] { flex: 1 1 5.5rem; }
+  .wv-meta .wv-worktree-picker { flex: 2 1 14rem; }
   .wv-meta .wv-branch { flex: 2 1 10.5rem; }
   .wv-meta label { flex: 2 1 11rem; }
   .wv-meta [data-wv-workspace] { flex: 1 1 12rem; }

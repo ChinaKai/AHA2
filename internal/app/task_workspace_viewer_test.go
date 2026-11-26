@@ -158,7 +158,7 @@ func TestWorkspaceViewerGit(t *testing.T) {
 	defer root.Close()
 	source := nativeViewerFS{root: root, dir: worktree}
 	task := domain.Task{Title: "viewer", BaseCommit: base, TargetBranch: "main"}
-	state, err := readViewerState(t.Context(), source, task, "test", WorkspaceViewerRequest{}, viewerRepositories{})
+	state, err := readViewerState(t.Context(), source, task, "test", WorkspaceViewerRequest{BaselineCommits: true}, viewerRepositories{})
 	if err != nil || !state.IsGit || state.Head != head || state.Branch != "task" || state.Base != base ||
 		state.Ahead != 1 || state.Behind != 0 || state.MergeBase != base || len(state.Branches) != 2 ||
 		len(state.Commits) != 1 || len(state.Uncommitted) != 3 || len(state.BaseChanges) != 2 {
@@ -281,7 +281,7 @@ func TestWorkspaceViewerBranchSelection(t *testing.T) {
 		}
 		state := func(ref string, summary bool) viewerState {
 			t.Helper()
-			result, err := view(WorkspaceViewerRequest{View: "state", Branch: ref, Summary: summary})
+			result, err := view(WorkspaceViewerRequest{View: "state", Branch: ref, Summary: summary, BaselineCommits: true})
 			if err != nil {
 				t.Fatal(err)
 			}
