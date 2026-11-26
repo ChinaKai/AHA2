@@ -170,7 +170,7 @@ func (s *Service) TaskLifecycle(ctx context.Context, task domain.Task) (TaskLife
 		}
 		view.Stats.DurationSeconds += duration
 		if index < lifecycleTurnLimit {
-			line, _, _ := strings.Cut(turn.Result, "\n")
+			line, _, _ := strings.Cut(strings.TrimSpace(turn.Result), "\n")
 			view.Turns = append(view.Turns, lifecycleTurn{
 				ID: turn.ID, Sequence: turn.Sequence, Status: turn.Status,
 				StartedAt: turn.StartedAt, FinishedAt: turn.FinishedAt, DurationSeconds: duration,
@@ -267,6 +267,20 @@ func (view *TaskLifecycle) buildTimeline(task domain.Task, card domain.TaskMemor
 		events = append(events, lifecycleEvent{
 			At: line.CreatedAt, Kind: "line_" + line.Kind, Title: after.Title, Detail: strings.Join(detail, " · "), RefID: line.LineID,
 		})
+	}
+	// The Task keeps one closing time. A cancelled Task has none, so its last
+	// update stands in for it.
+	switch task.Status {
+	case domain.TaskCompleted:
+		if !task.CompletedAt.IsZero() {
+			events = append(events, lifecycleEvent{At: task.CompletedAt, Kind: "completed", Title: task.Title, RefID: task.ID})
+		}
+	case domain.TaskCancelled:
+		at := task.CompletedAt
+		if at.IsZero() {
+			at = task.UpdatedAt
+		}
+		events = append(events, lifecycleEvent{At: at, Kind: "cancelled", Title: task.Title, RefID: task.ID})
 	}
 	slices.SortStableFunc(events, func(a, b lifecycleEvent) int { return a.At.Compare(b.At) })
 	view.TimelineTruncated = len(events) > lifecycleTimelineLimit

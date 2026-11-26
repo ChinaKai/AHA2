@@ -356,3 +356,113 @@ func TestPetDeskStallChecksApprovalsBeyondVisibleLimit(t *testing.T) {
 			desk.StalledTotal, desk.NeedsOwnerTotal)
 	}
 }
+
+// The lines only say more than the state card while one of them is still
+// open. These are the cases where trusting them alone would hide something
+// from the Owner.
+func TestPetDeskLinesNeverHideQuestionsOrBrokenRounds(t *testing.T) {
+	f := newPetDeskFixture(t)
+	old := f.now.Add(-20 * time.Minute)
+	closed := stallPatch("done", "self", "closed", "")
+	paused := stallPatch("paused", "self", "blocked", "")
+	newTask := func(id string, turn domain.TurnStatus, nextSteps, questions []string, patches ...domain.TaskLinePatch) domain.Task {
+		task := f.task(id, domain.TaskWaitingUser, time.Hour)
+		f.lifecycleTurn(task, "main", turn, old)
+		f.card(task.ID, "status "+id, nextSteps, questions, old)
+		for _, patch := range patches {
+			if *patch.State == domain.TaskLineClosed {
+				// A line has to be opened before it can be closed.
+				f.lines(task, stallPatch(patch.ID, *patch.Owner, domain.TaskLineOpen, ""))
+			}
+		}
+		f.lines(task, patches...)
+		return task
+	}
+	closedAsk := newTask("closed-ask", domain.TurnSucceeded, []string{"plan"}, []string{"which one?"}, closed)
+	closedStall := newTask("closed-stall", domain.TurnSucceeded, []string{strings.Repeat("步", 400)}, nil, closed)
+	closedLater := newTask("closed-later", domain.TurnSucceeded, nil, nil, closed)
+	pausedNext := newTask("paused-next", domain.TurnSucceeded, []string{"resume later"}, nil, paused)
+	pausedAsk := newTask("paused-ask", domain.TurnSucceeded, nil, []string{"unblock?"}, paused)
+	brokenSelf := newTask("broken-self", domain.TurnInterrupted, []string{"plan"}, nil, stallPatch("self", "self", "open", ""))
+	brokenOther := newTask("broken-other", domain.TurnFailed, nil, nil, stallPatch("lab", "other", "waiting", "Lab"))
+	brokenOwner := newTask("broken-owner", domain.TurnInterrupted, nil, nil, stallPatch("ask", "owner", "waiting", ""))
+
+	desk := f.desk()
+	needs, later, waiting := map[string]PetDeskNeed{}, map[string]PetDeskNeed{}, map[string]PetDeskWait{}
+	for _, row := range desk.NeedsOwner {
+		needs[row.TaskID] = row
+	}
+	for _, row := range desk.Later {
+		later[row.TaskID] = row
+	}
+	for _, row := range desk.WaitingOthers {
+		waiting[row.TaskID] = row
+	}
+	for _, id := range []string{closedAsk.ID, pausedAsk.ID} {
+		if got := needs[id]; got.Kind != PetDeskNeedQuestion || got.StuckOn != "none" || len(got.Lines) != 0 || len(got.Questions) != 1 {
+			t.Fatalf("a question written beside finished or paused lines must reach the owner: %s = %+v; later = %+v", id, got, later[id])
+		}
+	}
+	if len(desk.Stalled) != 1 || desk.Stalled[0].TaskID != closedStall.ID || desk.Stalled[0].LineID != "" ||
+		len([]rune(desk.Stalled[0].Detail)) > petDeskDetailRunes+1 || !desk.Stalled[0].Since.Equal(old) {
+		t.Fatalf("a task that closed every line and stopped with a next step is stalled: %+v", desk.Stalled)
+	}
+	for _, id := range []string{closedLater.ID, pausedNext.ID} {
+		if got := later[id]; got.Kind != PetDeskLaterNextStep || got.StuckOn != "none" {
+			t.Fatalf("later %s = %+v", id, got)
+		}
+	}
+	for _, id := range []string{brokenSelf.ID, brokenOther.ID} {
+		if got := needs[id]; got.Kind != PetDeskNeedStopped || later[id].TaskID != "" || waiting[id].TaskID != "" {
+			t.Fatalf("a round that broke off must show as stopped whatever the lines say: %s = %+v", id, got)
+		}
+	}
+	if got := needs[brokenOwner.ID]; got.Kind != PetDeskNeedQuestion || len(got.Lines) != 1 || got.Lines[0].ID != "ask" {
+		t.Fatalf("owner lines stay visible after a broken round: %+v", got)
+	}
+}
+
+func TestTaskLifecycleClosingEventAndTurnSummary(t *testing.T) {
+	f := newPetDeskFixture(t)
+	at := f.now.Add(-time.Hour)
+	read := func(task domain.Task) TaskLifecycle {
+		t.Helper()
+		view, err := f.service.TaskLifecycle(f.ctx, task)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return view
+	}
+	last := func(view TaskLifecycle) lifecycleEvent { return view.Timeline[len(view.Timeline)-1] }
+
+	done := f.task("done", domain.TaskCompleted, 2*time.Hour)
+	done.CompletedAt = at
+	if err := f.database.AddMessage(f.ctx, domain.Message{ID: "closing-input", TaskID: done.ID, Role: "user", Sender: "owner", Content: "go", CreatedAt: at}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.database.CreateTurn(f.ctx, domain.Turn{
+		ID: "closing-turn", TaskID: done.ID, AgentID: "main", Sequence: 1, InputMessageID: "closing-input",
+		Status: domain.TurnSucceeded, RuntimeConfigSnapshotID: done.RuntimeConfigSnapshotID, RoundID: "closing-round",
+		StartedAt: at.Add(-2 * time.Minute), FinishedAt: at.Add(-time.Minute), Result: "\n\n  结论在第二行\n细节",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	view := read(done)
+	if event := last(view); event.Kind != "completed" || !event.At.Equal(at) || event.RefID != done.ID {
+		t.Fatalf("completed task timeline ends with %+v", event)
+	}
+	if len(view.Turns) != 1 || view.Turns[0].Summary != "结论在第二行" {
+		t.Fatalf("turn summary skips leading blank lines: %+v", view.Turns)
+	}
+
+	cancelled := f.task("cancelled", domain.TaskCancelled, 30*time.Minute)
+	if event := last(read(cancelled)); event.Kind != "cancelled" || !event.At.Equal(cancelled.UpdatedAt) {
+		t.Fatalf("cancelled task timeline ends with %+v", event)
+	}
+	open := f.task("open", domain.TaskWaitingUser, time.Minute)
+	for _, event := range read(open).Timeline {
+		if event.Kind == "completed" || event.Kind == "cancelled" {
+			t.Fatalf("open task has a closing event: %+v", event)
+		}
+	}
+}

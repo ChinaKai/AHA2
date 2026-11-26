@@ -45,7 +45,7 @@ func (s *Store) TaskLifecycleMainTurns(ctx context.Context, taskID string, showL
 			ORDER BY sequence DESC LIMIT ?
 		)
 		SELECT t.id,t.sequence,t.status,t.started_at,t.finished_at,
-		       CASE WHEN v.id IS NULL THEN '' ELSE substr(t.result,1,200) END,
+		       CASE WHEN v.id IS NULL THEN '' ELSE substr(ltrim(t.result,char(9)||char(10)||char(13)||' '),1,200) END,
 		       CASE WHEN v.id IS NULL THEN '' ELSE substr(t.error,1,200) END
 		FROM turns t LEFT JOIN visible v ON v.id=t.id
 		WHERE t.task_id=? AND t.agent_id='main' ORDER BY t.sequence DESC`,

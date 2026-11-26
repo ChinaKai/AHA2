@@ -310,24 +310,27 @@ func (s *Service) petDesk(ctx context.Context, input petDeskInput) (PetDesk, err
 				desk.Stalled = append(desk.Stalled, idle)
 				continue
 			}
-			switch wait.on {
-			case taskStuckSelf, taskStuckNone:
-				need.Kind = PetDeskLaterNextStep
-				need.Detail = truncateAssistantText(petDeskFirst(card.NextSteps), petDeskDetailRunes)
-				if wait.on == taskStuckSelf {
-					need.Detail = wait.self.Step
-				}
+			// A round that broke off outranks the lines: they were written
+			// before it broke, and the Owner has to know it did not finish.
+			broken := turn.Status != "" && !domain.TurnStatus(turn.Status).EndedCleanly()
+			switch {
+			case wait.on == taskStuckOwner:
+				need.Lines = petDeskLines(card.Lines, domain.TaskLineOwnerOwner)
+			case broken:
+			case wait.on == taskStuckSelf:
+				need.Kind, need.Detail = PetDeskLaterNextStep, wait.self.Step
 				desk.Later = append(desk.Later, need)
 				continue
-			case taskStuckOther:
+			case wait.on == taskStuckOther:
 				desk.WaitingOthers = append(desk.WaitingOthers, PetDeskWait{
 					Kind: PetDeskWaitLine, TaskID: task.ID, TaskCode: task.Code, Title: task.Title,
 					On: strings.Join(wait.who, "、"), Lines: petDeskLines(card.Lines, domain.TaskLineOwnerOther), Since: task.UpdatedAt,
 				})
 				continue
-			case taskStuckOwner:
-				need.Lines = petDeskLines(card.Lines, domain.TaskLineOwnerOwner)
 			}
+			// taskStuckNone falls through with taskStuckUnknown: the state card
+			// decides, so a question written after the last line closed still
+			// reaches the Owner instead of hiding under "later".
 		}
 		turnError := truncateAssistantText(turn.Error, petDeskDetailRunes)
 		switch {

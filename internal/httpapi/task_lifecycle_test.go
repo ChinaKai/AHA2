@@ -175,7 +175,7 @@ func TestTaskLifecycleEndpointSourcesAndAccess(t *testing.T) {
 		t.Fatalf("parallel = %+v", view.Parallel)
 	}
 	wantKinds := []string{"created", "goal", "goal", "constraint", "approval_requested", "line_opened",
-		"approval_resolved", "line_updated", "line_closed", "line_opened", "review", "goal", "review"}
+		"approval_resolved", "line_updated", "line_closed", "line_opened", "review", "goal", "review", "completed"}
 	var gotKinds []string
 	for i, event := range view.Timeline {
 		gotKinds = append(gotKinds, event.Kind)
@@ -192,7 +192,8 @@ func TestTaskLifecycleEndpointSourcesAndAccess(t *testing.T) {
 		view.Timeline[6].Title != "rejected" || view.Timeline[6].Detail != "Use tomorrow's window" ||
 		view.Timeline[7].Title != "Inspections" || view.Timeline[7].Detail != "self · blocked · Device offline" ||
 		view.Timeline[8].RefID != "inspect" || view.Timeline[10].RefID != review.ID ||
-		view.Timeline[10].Detail != "Verified evidence" || view.Timeline[11].Title != "complete" {
+		view.Timeline[10].Detail != "Verified evidence" || view.Timeline[11].Title != "complete" ||
+		view.Timeline[13].RefID != view.Task.ID || view.Timeline[13].At.IsZero() {
 		t.Fatalf("timeline source mismatch: %+v", view.Timeline)
 	}
 	if len(view.Turns) != 2 || view.Turns[0].ID != last.ID || view.Turns[0].Summary != "Final result" ||

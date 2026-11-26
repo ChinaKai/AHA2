@@ -464,9 +464,9 @@ owner 在 2026-11-26 部署后提出并确认了这一步。口径都是和 owne
 | 有 `owner=self` 且 `state=open` 的线 | 不等谁：任务自己能往下走 |
 | 没有上面那种，有 `owner=owner` 的线 | 等 owner |
 | 只剩 `owner=other` 的线 | 等别人（列出 `who`） |
-| 全部闭环 | 只等下一句话 |
+| 全部闭环 | 分线说明不了现在卡在谁，按状态卡判断 |
 
-没有分线的任务沿用现在的规则（状态卡有问题算等 owner，否则算只等下一句话），页面上标明“没有记录分线”。
+没有分线的任务沿用现在的规则（状态卡有问题算等 owner，否则算只等下一句话），页面上标明“没有记录分线”。分线全部闭环的任务同样按状态卡判断：任务做完几条线之后，可能只在状态卡上写了一个等 owner 决定的问题，没有再开线；只看分线会把这个问题藏起来（评审时发现，原表写的是“只等下一句话”）。
 
 工位的分类跟着改：
 
@@ -543,6 +543,7 @@ owner 在 2026-11-26 部署后提出并确认了这一步。口径都是和 owne
 - 工位、宠物工作状态和生命周期共用分线判定。等了正好 15 分钟仍在宽限期。工位按批读取最近结束时间。待处理和执行中的审批都挡住“停着没人推”，包括审批列表上限之外的记录。
 - 最近活动取任务更新时间和任一 Agent 最近一次 Turn 结束时间中的较晚值。完成、取消任务保留到满 7 天。宠物默认预算优先保留全部停滞记录，其他任务的详情仍按查看权限遮蔽。
 - 生命周期请求到达后才读取各来源。时间相同的事件按固定来源顺序排列，同一来源保留写入顺序。评审使用关联评审任务的有效 verdict 和持久保存的完成决定。轮数和耗时统计主 Agent 全部 Turn，Token 复用任务列表算法。
+- 评审时改了四处（Main 改的）：分线全部闭环的任务改按状态卡判断，避免状态卡上的问题被藏进“不急的”，这类任务停下来时也进“停着没人推”；最近一轮没正常结束的任务不再被分线规则盖住，照旧显示为“这一轮没跑完”；时间线补上完成和取消；每一轮的摘要跳过结果开头的空行。`idle_since` 保持实现时的含义（只在停着没人推时有值），约定里补了说明。
 - 用定向 Go 测试验证分类、边界、权限、响应预算、生命周期时间线和截断。200 轮 Turn、100 条分线事件、20 次目标变更的本机 SQLite 夹具上，发起 20 次已登录 HTTP 请求并解码 JSON，P50 为 3.52 ms，P95 为 4.12 ms。 `go vet`、store、domain、httpapi 整包和覆盖台账检查通过。app 整包只有在 `71b9cac` 已复现的三个失败。
 
 ### 12.8 风险和没定的事
@@ -564,10 +565,10 @@ owner 在 2026-11-26 部署后提出并确认了这一步。口径都是和 owne
 | `self` | 有 `owner=self` 且 `state=open` 的未闭环分线 |
 | `owner` | 不满足上一条，且有 `owner=owner` 的未闭环分线 |
 | `other` | 不满足上两条，且有 `owner=other` 的未闭环分线 |
-| `none` | 有分线记录，但全部闭环 |
+| `none` | 有分线记录，但没有上面三种线（全部闭环，或只剩自己暂停、受阻的线） |
 | `unknown` | 任务没有记录过分线，沿用旧规则 |
 
-“有分线记录”指状态卡上有分线（含已闭环的）。`owner=self` 但 `state` 是 `waiting` 或 `blocked` 的线不算“自己能推”：`waiting` 说明它在等别的线，`blocked` 说明有卡点，这两种都归到 `owner`、`other` 或 `none` 里看其余的线；如果只剩这种线，按 `none` 处理并在工位上照常显示为“等你下一句话”。
+“有分线记录”指状态卡上有分线（含已闭环的）。`owner=self` 但 `state` 是 `waiting` 或 `blocked` 的线不算“自己能推”：`waiting` 说明它在等别的线，`blocked` 说明有卡点，这两种都归到 `owner`、`other` 或 `none` 里看其余的线；如果只剩这种线，按 `none` 处理。
 
 **工作台接口 `GET /api/v1/pet/workbench` 的 `desk` 新增或变化：**
 
@@ -598,8 +599,9 @@ desk
 - `stuck_on=self`：满足 12.5 其余条件的进 `stalled`，不再进 `needs_owner` 或 `later`；还没停够 15 分钟的进 `later`（kind 仍是 `next_step`）。
 - `stuck_on=owner`：进 `needs_owner`，kind 是 `question`，带 `lines`；状态卡里的 `questions` 照常带上。
 - `stuck_on=other`：进 `waiting_others`，kind 是 `line`。
-- `stuck_on=none`：进 `later`，kind 是 `next_step`。
+- `stuck_on=none`：按状态卡判断，和 `unknown` 一样——状态卡有等 owner 决定的事进 `needs_owner`（kind 是 `question`，不带 `lines`），否则进 `later`。分线全部闭环、状态卡有下一步、没有等 owner 决定的事，并且满足 12.5 其余条件的进 `stalled`；还留着自己暂停或受阻的线的不进 `stalled`，那是任务写明了的等待理由。
 - `stuck_on=unknown`：和现在一样（有问题进 `needs_owner`，否则进 `later`）；另外满足“状态卡有下一步、没有等 owner 决定的事”和 12.5 其余条件的进 `stalled`。
+- 最近一轮主 Agent Turn 不是正常结束的（中断、失败），除了 `stuck_on=owner` 以外都不按分线分类，照原规则进 `needs_owner`（kind 是 `stopped`，状态卡有问题时是 `question`）：分线是这一轮出事之前写的，owner 需要先知道它没跑完。
 - 有未处理审批、有在跑的评审、被忽略的任务，规则和现在一样，优先于上面各条。
 
 `recent` 的范围：非宠物任务、未被忽略；系统托管项目里的任务只有被关注时才出现；状态是完成或取消的只保留最近 7 天内的；草稿不出现。`last_active` 取任务更新时间和最近一轮 Turn 结束时间中较晚的。
@@ -620,6 +622,8 @@ lifecycle
 ├─ task        id, code, title, status, project, created_at, updated_at, current_goal
 ├─ now         status, next_steps[], open_questions[], updated_at,
 │              stuck_on, stuck_who[], idle_since, lines_recorded
+│              idle_since 只在任务符合 12.5 的“停着没人推”时有值，是最近一轮结束的时间；
+│              其余情况是零值，页面用 updated_at 显示状态卡多久没更新
 ├─ lines[]     状态卡上的分线，未闭环在前：
 │              id, title, owner, who, state, step, blocker, updated_at, opened_at, closed_at
 ├─ parallel
@@ -636,6 +640,8 @@ lifecycle
 │                review             评审结论；title 是结论，detail 是理由
 │                line_opened / line_updated / line_closed / line_reopened
 │                                   title 是线的标题，detail 是这次变化后的负责方、状态、走到哪、卡点
+│                completed / cancelled（评审时新增）
+│                                   任务完成或取消；取消没有单独记时间，用任务最后更新时间
 ├─ turns[]     主 Agent 的 Turn，最新的在前，最多 100 条，超出带 turns_truncated=true：
 │              id, sequence, status, started_at, finished_at, duration_seconds,
 │              summary（结果的第一行，最多 200 个字）, error（最多 200 个字）

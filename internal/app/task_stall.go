@@ -25,6 +25,9 @@ type taskLineWait struct {
 	on   string
 	who  []string
 	self domain.TaskLine
+	// unclosed counts the lines that are not closed. A card whose lines are
+	// all closed says nothing about who the Task waits for now.
+	unclosed int
 }
 
 func taskStuckOn(lines []domain.TaskLine) taskLineWait {
@@ -36,6 +39,7 @@ func taskStuckOn(lines []domain.TaskLine) taskLineWait {
 		if line.State == domain.TaskLineClosed {
 			continue
 		}
+		wait.unclosed++
 		switch {
 		case line.Owner == domain.TaskLineOwnerSelf && line.State == domain.TaskLineOpen:
 			return taskLineWait{on: taskStuckSelf, self: line}
@@ -70,11 +74,15 @@ func taskStall(task domain.Task, card store.TaskStateCard, wait taskLineWait, tu
 		return PetDeskStalledTask{}, false
 	}
 	detail := wait.self.Step
-	switch wait.on {
-	case taskStuckSelf:
-	case taskStuckUnknown:
-		detail = petDeskFirst(card.NextSteps)
-		if detail == "" || petDeskFirst(card.OpenQuestions) != "" {
+	switch {
+	case wait.on == taskStuckSelf:
+	// A Task that closed every line and then stopped is the case this list
+	// exists for: it reads like a Task that never recorded lines, so the state
+	// card decides. A paused or blocked line of its own is a stated reason to
+	// wait and never counts.
+	case wait.on == taskStuckUnknown, wait.on == taskStuckNone && wait.unclosed == 0:
+		detail = truncateAssistantText(petDeskFirst(card.NextSteps), petDeskDetailRunes)
+		if detail == "" || len(petDeskQuestions(card.OpenQuestions)) > 0 {
 			return PetDeskStalledTask{}, false
 		}
 	default:
