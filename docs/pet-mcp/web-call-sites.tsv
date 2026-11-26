@@ -240,6 +240,7 @@ web/src/api.ts	GET/see-source	/api/v1/tasks/${encodeURIComponent(id)}/channel-ro
 web/src/api.ts	POST	/api/v1/tasks/${encodeURIComponent(id)}/channel-routes	1
 web/src/api.ts	DELETE	/api/v1/tasks/${encodeURIComponent(id)}/channel-routes/${encodeURIComponent(routeID)}	1
 web/src/api.ts	PUT	/api/v1/tasks/${encodeURIComponent(id)}/hardware-bindings	1
+web/src/api.ts	GET/see-source	/api/v1/tasks/${encodeURIComponent(id)}/lifecycle	1
 web/src/api.ts	PUT	/api/v1/tasks/${encodeURIComponent(id)}/mcp-servers	1
 web/src/api.ts	DELETE	/api/v1/tasks/${encodeURIComponent(id)}/remote-mirror	1
 web/src/api.ts	POST	/api/v1/tasks/${encodeURIComponent(id)}/start	1
@@ -250,6 +251,7 @@ web/src/api.ts	DELETE	/api/v1/tasks/${encodeURIComponent(taskID)}/attachments/${
 web/src/api.ts	GET/see-source	/api/v1/tasks/${encodeURIComponent(taskID)}/browser	1
 web/src/api.ts	POST	/api/v1/tasks/${encodeURIComponent(taskID)}/browser-sessions	1
 web/src/api.ts	GET/see-source	/api/v1/tasks/${encodeURIComponent(taskID)}/mail	1
+web/src/api.ts	POST	/api/v1/tasks/${encodeURIComponent(taskID)}/messages	1
 web/src/api.ts	POST	/api/v1/tasks/${encodeURIComponent(taskID)}/permission-requests/${encodeURIComponent(requestID)}/resolve	1
 web/src/api.ts	GET/see-source	/api/v1/tasks/${id}	1
 web/src/api.ts	GET/see-source	/api/v1/tasks/${id}/agents	1
@@ -270,7 +272,6 @@ web/src/api.ts	POST	/api/v1/tasks/${taskID}/hardware/${encodeURIComponent(hardwa
 web/src/api.ts	GET/see-source	/api/v1/tasks/${taskID}/hardware/${encodeURIComponent(hardwareID)}/host-key?transport=network	1
 web/src/api.ts	POST	/api/v1/tasks/${taskID}/hardware/${encodeURIComponent(hardwareID)}/send?transport=${transport}	1
 web/src/api.ts	GET/see-source	/api/v1/tasks/${taskID}/hardware/${encodeURIComponent(hardwareID)}/terminal?${query}	1
-web/src/api.ts	POST	/api/v1/tasks/${taskID}/messages	1
 web/src/api.ts	POST	/api/v1/turns/${id}/interrupt	1
 web/src/api.ts	POST	/api/v1/workspaces	1
 web/src/api.ts	GET/see-source	/api/v1/workspaces${query}	1

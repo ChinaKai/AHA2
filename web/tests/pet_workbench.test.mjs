@@ -1382,11 +1382,11 @@ test("desk needs list keeps the server order, numbers from ① and labels every 
   assert.match(needs, /<div class="field-help pet-desk-more">还有 2 条未显示<\/div>/, "truncation uses needs_owner_total");
 });
 
-test("desk rows open tasks and approval details, and approvals carry inline approve and reject", async () => {
+test("desk titles open lifecycle and approval details, with direct task and inline approval actions", async () => {
   const i18n = await deskCatalog("zh-CN");
   const html = renderDesk(deskOptions(i18n, deskFixture()));
   const needs = section(html, "pet-desk-needs");
-  assert.match(needs, /class="pet-desk-item-main" data-pet-overview-task="t-790"/);
+  assert.match(needs, /class="pet-desk-item-main" data-pet-task-lifecycle="t-790"/);
   assert.match(needs, /class="pet-desk-item-main" data-pet-approval-open="a-801"/, "an approval opens its detail");
   // task-813 round 4: approve and reject sit on the row; the title still
   // opens the detail. a-801 is high risk, so approve asks once more.
@@ -1427,10 +1427,10 @@ test("desk waiting and running columns label every kind and show elapsed time an
   assert.doesNotMatch(waiting, /pet-desk-more/, "not truncated when the total equals the rows");
   const running = section(html, "pet-desk-running");
   assert.match(running, /<h3 tabindex="-1">在跑什么（4）<\/h3>/);
-  assert.match(running, /task-811<\/span> · <span data-i18n-ignore>Overnight comparison<\/span><\/strong><small>[^<]* · 已跑 12 分钟<\/small>/);
+  assert.match(running, /task-811<\/span> · <span data-i18n-ignore>Overnight comparison<\/span><\/strong><small><span data-i18n-ignore>[^<]*<\/span> · 已跑 12 分钟<\/small>/);
   assert.match(running, /<p class="pet-desk-detail" tabindex="0"><span data-i18n-ignore title="comparing builds">comparing builds<\/span><\/p>/);
   assert.match(running, /<p class="pet-desk-hardware">硬件：<span data-i18n-ignore>Debug board 1<\/span><\/p>/);
-  const preparing = running.match(/data-pet-overview-task="t-812">[\s\S]*?<\/small>/)?.[0] ?? "";
+  const preparing = running.match(/data-pet-task-lifecycle="t-812">[\s\S]*?<\/small>/)?.[0] ?? "";
   assert.match(preparing, /Preparing task/);
   assert.doesNotMatch(preparing, /已跑/, "an invalid since shows no duration");
   assert.match(running, /还有 2 条未显示/);
@@ -1495,7 +1495,7 @@ test("unknown desk kinds and missing fields fall back to readable labels", async
     assert.match(html, /<li class="pet-desk-item kind-other">[\s\S]*?No kind<\/span><\/strong><small>Needs you<\/small>/);
     assert.match(html, /Later thing<\/span><\/strong><small>Can wait<\/small>/);
     assert.match(html, /<strong>\(untitled\)<\/strong><small>In progress<\/small>/);
-    assert.match(html, /data-pet-overview-task="t-r"><strong><span data-i18n-ignore>t-r<\/span><\/strong>/, "a running row without title falls back to the task id");
+    assert.match(html, /data-pet-task-lifecycle="t-r"><strong><span data-i18n-ignore>t-r<\/span><\/strong>/, "a running row without title falls back to the task id");
     assert.match(html, /<li><strong>\(untitled\)<\/strong><span class="pet-desk-quote"><span data-i18n-ignore>note<\/span>/);
   } finally {
     i18n.applyLocale("zh-CN");
@@ -1572,7 +1572,7 @@ test("every desk catalog key exists in both locales", async () => {
 
 test("the workbench passes the desk and a fresh clock to the overview", async () => {
   const main = await readFile(resolve(root, "web/src/main.ts"), "utf8");
-  assert.match(main, /desk: view\.desk,\n\s*now: Date\.now\(\),/);
+  assert.match(main, /desk: deskContinue\.visible\(view\.desk\),\n\s*now: Date\.now\(\),/);
   assert.match(main, /jump === "records"/);
   assert.match(main, /openOverviewApproval\(button\.dataset\.petApprovalOpen \|\| ""\)/);
   const types = await readFile(resolve(root, "web/src/types.ts"), "utf8");
@@ -2117,5 +2117,36 @@ test("the reject form is one labelled line with confirm disabled until there is 
     assert.match(renderPetDeskRejectForm("a-1", "x", "kept"), /value="kept"[\s\S]*data-pet-desk-reject-confirm="a-1">Confirm reject/, "a restored reason enables confirm");
   } finally {
     (await deskCatalog("zh-CN"));
+  }
+});
+
+
+test("desk and lifecycle copy have matching locale keys and placeholders", async () => {
+  const {PET_DESK_COPY} = await import("../build/pet_desk.js");
+  const {PET_LIFECYCLE_COPY} = await import("../build/pet_lifecycle.js");
+  for (const {"zh-CN": zh, "en-US": en} of [PET_DESK_COPY, PET_LIFECYCLE_COPY]) {
+    assert.deepEqual(Object.keys(zh).sort(), Object.keys(en).sort());
+    for (const key of Object.keys(en)) {
+      const slots = value => (value.match(/\{\w+\}/g) ?? []).sort();
+      assert.deepEqual(slots(zh[key]), slots(en[key]), key);
+      assert.ok(zh[key].trim() && en[key].trim(), key);
+      assert.doesNotMatch(en[key], /[一-鿿]/u, key);
+    }
+  }
+});
+
+test("desk keeps an empty recent list distinct from an older response", async () => {
+  const i18n = await deskCatalog("en-US");
+  try {
+    const legacy = renderDesk(deskOptions(i18n, {}));
+    assert.match(legacy, /id="pet-overview-unfollowed"/);
+    assert.doesNotMatch(legacy, /id="pet-overview-recent"|\b0 stalled/);
+    for (const recent of [null, []]) {
+      const current = renderDesk(deskOptions(i18n, {recent, recent_total: 0}));
+      assert.match(section(current, "pet-overview-recent"), /Recent activity \(0\)[\s\S]+No recent activity/);
+      assert.doesNotMatch(current, /id="pet-overview-unfollowed"/);
+    }
+  } finally {
+    i18n.applyLocale("zh-CN");
   }
 });

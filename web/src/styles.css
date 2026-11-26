@@ -3060,11 +3060,13 @@ dialog.agent-config-dialog { width: min(760px,calc(100vw - 32px)); }
 .pet-overview-follows h3, .pet-overview-recent h3 { margin: 0; font-size: 14px; }
 .pet-watch-row { display: flex; gap: 8px; align-items: center; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; text-align: left; }
 .pet-watch-row.anomaly { border-color: #fecaca; background: #fef2f2; }
+.pet-watch-row.terminal .pet-watch-row-main { color: var(--color-text-muted); }
 /* The global button rule centers inline content; the grid needs an explicit
    start so the title and status sit against the left edge. */
 .pet-watch-row-main { flex: 1 1 auto; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; text-align: left; justify-content: start; justify-items: start; border: 0; background: transparent; color: var(--text); padding: 0; cursor: pointer; }
 .pet-watch-row-main strong, .pet-watch-row-main small { max-width: 100%; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
 .pet-watch-row-main small { color: var(--muted); }
+.pet-watch-row-main .pet-desk-recent-meta { display: flex; flex-wrap: wrap; gap: 0 var(--space-2); white-space: normal; font-size: var(--font-size-12); font-weight: 400; }
 .pet-watch-row-actions { display: flex; gap: 6px; flex: 0 0 auto; justify-content: flex-start; }
 .pet-watch-row-actions button { border: 1px solid var(--line); background: transparent; color: var(--muted); border-radius: 6px; padding: 4px 8px; font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
 .pet-overview-activity-list { display: grid; gap: 4px; }
@@ -3109,12 +3111,18 @@ button.pet-desk-item-main:hover strong { color: var(--color-accent-hover); }
 .pet-desk-item-actions button { border: 1px solid var(--color-border); background: transparent; color: var(--color-text-muted); border-radius: var(--radius-control); padding: 2px var(--space-2); font: inherit; font-size: var(--font-size-12); cursor: pointer; white-space: nowrap; min-height: 28px; }
 .pet-desk-later { border-top: 1px dashed var(--color-border); padding-top: var(--space-2); }
 /* Inline approve / reject on the desk (task-813 round 4). */
+.pet-desk-open-mark { display: none; }
 .pet-desk-item-actions .pet-desk-approve { border-color: color-mix(in srgb, var(--color-accent) 45%, var(--color-border)); color: var(--color-accent-ink); }
 .pet-desk-item-actions .pet-desk-reject { color: var(--color-danger-ink); }
 .pet-desk-item-actions button[disabled] { opacity: .55; cursor: default; }
 .pet-desk-item-actions button.primary { border-color: var(--color-accent); background: var(--color-accent); color: var(--color-on-accent, #fff); }
 .pet-desk-confirm { display: inline-flex; gap: var(--space-1); }
 .pet-desk-item.busy .pet-desk-item-main { opacity: .7; }
+.pet-desk-stalled { padding: var(--space-2); border-radius: var(--radius-control); background: var(--color-warning-soft); }
+.pet-desk-stalled h4 { margin: 0 0 var(--space-2); font-size: var(--font-size-13); }
+.pet-desk-continue-form { margin: 2px 0; }
+.pet-desk-continue-form p { margin: 2px 0 4px; font-size: var(--font-size-13); overflow-wrap: anywhere; }
+.pet-desk-continue-form .pet-desk-item-actions { padding: 0; }
 .pet-desk-decision-status { margin: 0; font-size: var(--font-size-12); color: var(--color-text-muted); }
 .pet-desk-decision-status:empty { display: none; }
 .pet-desk-decision-status.failed { color: var(--color-danger-ink); }
@@ -3200,6 +3208,11 @@ button.pet-desk-item-main:hover strong { color: var(--color-accent-hover); }
      then gives way like the others (down to its title and two lines) so the
      running list above it also keeps two rows. */
   @media (max-height: 719px) { .pet-desk-col > .pet-desk-insights { flex-shrink: 1; min-height: 150px; } }
+  @media (max-width: 1279px) {
+    .pet-desk-item-actions .pet-desk-open-task { width: 28px; padding: 0; font-size: var(--font-size-16); }
+    .pet-desk-open-label { display: none; }
+    .pet-desk-open-task .pet-desk-open-mark { display: inline; }
+  }
   .pet-desk-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
   .pet-desk-later { margin-top: auto; }
   .pet-desk-later-body { max-height: 30vh; overflow-y: auto; overscroll-behavior: contain; }
@@ -3265,6 +3278,30 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
 .pet-approval-filter-panel h3 { margin: 0; font-size: 13px; }
 .pet-approval-filter-actions { display: flex; justify-content: flex-end; }
 .pet-approval-filters { flex-wrap: wrap; }
+
+.pet-lifecycle-dialog { width: min(860px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); overflow: hidden; }
+.pet-lifecycle-dialog > div { max-height: calc(100dvh - 26px); grid-template-rows: auto minmax(0, 1fr); gap: 0; }
+.pet-lifecycle-dialog header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: start; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--color-border); }
+.pet-lifecycle-dialog header h2 { margin: 0; font-size: var(--font-size-16); overflow-wrap: anywhere; }
+.pet-lifecycle-dialog header p, .pet-lifecycle-dialog header [data-pet-lifecycle-meta] { margin: 0; color: var(--color-text-muted); font-size: var(--font-size-12); overflow-wrap: anywhere; }
+.pet-lifecycle-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.pet-lifecycle-actions button { min-height: 28px; padding: 2px 8px; }
+.pet-lifecycle-actions button[aria-disabled="true"] { opacity: .55; cursor: wait; }
+.pet-lifecycle-scroll { overflow: auto; overscroll-behavior: contain; padding: 0 16px 12px; font-size: var(--font-size-13); overflow-wrap: anywhere; }
+.pet-lifecycle-scroll > section, .pet-lifecycle-scroll > details { padding: 8px 0; border-bottom: 1px solid var(--color-border-subtle); }
+.pet-lifecycle-scroll h3, .pet-lifecycle-scroll h4, .pet-lifecycle-scroll p { margin: 0 0 4px; }
+.pet-lifecycle-scroll h3, .pet-lifecycle-scroll summary { font-size: var(--font-size-14); font-weight: 600; }
+.pet-lifecycle-scroll summary { cursor: pointer; }
+.pet-lifecycle-scroll > p { margin-top: 12px; }
+.pet-lifecycle-scroll ul, .pet-lifecycle-scroll ol { margin: 3px 0 0; padding-inline-start: 18px; }
+.pet-lifecycle-scroll li + li { margin-top: 3px; }
+.pet-lifecycle-scroll small, .pet-lifecycle-scroll dt { color: var(--color-text-muted); }
+.pet-lifecycle-scroll dl, .pet-lifecycle-parallel { display: flex; flex-wrap: wrap; gap: 4px 18px; margin: 4px 0 0; }
+.pet-lifecycle-scroll dd { margin: 0; }
+.pet-lifecycle-scroll table { width: 100%; text-align: start; border-collapse: collapse; }
+.pet-lifecycle-scroll th, .pet-lifecycle-scroll td { padding: 3px 6px; border-bottom: 1px solid var(--color-border-subtle); text-align: start; vertical-align: top; }
+.pet-lifecycle-scroll th[scope="row"] { text-transform: none; letter-spacing: normal; color: var(--color-text); }
+.pet-lifecycle-scroll details details, .pet-lifecycle-scroll table + details { margin-top: 4px; }
 
 
 .mcp-edit-fields { display: grid; gap: 8px; margin: 12px 0; }

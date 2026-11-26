@@ -4057,7 +4057,12 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   // Round 4 and 4A land together. The merged tree, same masked-query, level-5
   // build: 230,425 JS + 58,440 CSS = 288,865. Ceil to the next 256-byte
   // boundary.
-  const FIRST_SCREEN_GZIP_BUDGET = 289024;
+  // task-813 4B/4C add the overview wiring and shared styles. The
+  // lifecycle content is fetched only when a task title is opened. From
+  // 71b9cac (230,425 JS + 58,440 CSS = 288,865), the same masked-query,
+  // level-5 build measures 230,636 JS + 58,991 CSS = 289,627. Ceil to the
+  // next 256-byte boundary.
+  const FIRST_SCREEN_GZIP_BUDGET = 289792;
   // The version query parameter is a content hash and its hex digits change
   // how the same code gzips: main already sits exactly on the budget, so a
   // hash-only change could trip it without growing the payload. Mask the
@@ -4067,7 +4072,13 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   const gzipped = [...seen.values()].reduce((total, text) => total + firstScreenGzip(text), 0);
   // The pet desk renderers stay in their route chunk (task-813 step two).
   const deskChunk = jsNames.find(name => name.startsWith("pet_desk."));
-  assert.ok((await readFile(resolve(dist, deskChunk), "utf8")).includes("pet-desk-insights"));
+  const deskSource = await readFile(resolve(dist, deskChunk), "utf8");
+  assert.ok(deskSource.includes("pet-desk-insights"));
+  const lifecycleChunk = jsNames.find(name => name.startsWith("pet_lifecycle."));
+  assert.ok(deskSource.includes(`import("./${lifecycleChunk}?v=${version}")`), "the lifecycle renderer loads only from the desk");
+  const lifecycleCopy = "No turning points recorded.";
+  assert.ok((await readFile(resolve(dist, lifecycleChunk), "utf8")).includes(lifecycleCopy));
+  assert.ok(!deskSource.includes(lifecycleCopy) && [...seen.values()].every(text => !text.includes(lifecycleCopy)), "lifecycle content stays in its own lazy chunk");
   assert.ok([...seen.values()].every(text => !text.includes("pet-desk-insights") && !text.includes("pet-record-toc-sub")), "desk and records renderers stay in the lazy chunk");
   assert.ok([...seen.values()].every(text => !text.includes("它答应的事") && !text.includes("What it promised")), "records copy stays in the lazy chunk");
   const repositoryNotice = "Reading registered submodules timed out.";
