@@ -1943,14 +1943,17 @@ export interface PetDeskNeed {
 
 /** Something moving without the Owner. */
 export interface PetDeskWait {
-  /** review | executing | channel. */
+  /** review | executing | channel | loop. */
   kind: string;
   task_id?: string;
   task_code?: string;
   title: string;
-  /** Review task code, approval kind or channel id depending on kind. */
+  /** Review task code, approval kind, channel id or ledger file (loop). */
   on?: string;
   count?: number;
+  /** The next step of a loop wait. */
+  detail?: string;
+  /** Zero time for loop waits: the ledger files carry no time. */
   since: string;
 }
 
@@ -1987,6 +1990,42 @@ export interface PetDesk {
   open_loops_total: number;
   agenda: string[];
   agenda_total: number;
+  /** The pet's latest finished reply; absent when it has none. */
+  last_reply?: PetDeskLastReply;
+}
+
+export interface PetDeskLastReply {
+  /** At most 400 characters. */
+  text: string;
+  finished_at: string;
+  /** The reply starts with NOOP: the wake had nothing to move. */
+  noop: boolean;
+  /** The Turn answered a server wake; false means "the latest reply". */
+  from_wake: boolean;
+}
+
+/** GET /api/v1/pet/workbench/insights: the pet's last seven days. */
+export interface PetInsights {
+  from: string;
+  to: string;
+  actions: number;
+  approvals: {
+    total: number;
+    approved: number;
+    rejected: number;
+    cancelled: number;
+    /** Includes approvals still being carried out. */
+    pending: number;
+    ideas: number;
+  };
+  corrections: number;
+  wakes: {
+    turns: number;
+    noop: number;
+    tokens: number;
+    /** "window" or "cumulative" (the pet Task's whole history). */
+    token_scope: string;
+  };
 }
 
 // --- Mail resources -------------------------------------------------------

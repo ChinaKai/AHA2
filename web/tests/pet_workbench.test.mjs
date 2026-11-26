@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import {readFile} from "node:fs/promises";
 import {resolve} from "node:path";
 import {createPetApprovalCounter, petApprovalFilterCount, petPendingApprovalBadge, renderPetApprovalFilters, renderPetApprovalList, sortPetApprovals} from "../build/pet_approvals.js";
-import {bindPetDocEditorButtons, countPetWatchAnomalies, createPetWorkbenchLoader, createPetWorkbenchPageKeeper, mapPetWorkbenchTab, PET_APPROVAL_MAX_LIMIT, petApprovalMatches, petApprovalPage, renderPetApprovalLoadMore, renderPetOverview, renderPetRecords, renderPetWorkbenchLoadError, sortPetWorklog, swapPetWorkbenchPage} from "../build/pet_workbench.js";
+import {createPetWorkbenchLoader, createPetWorkbenchPageKeeper, mapPetWorkbenchTab, PET_APPROVAL_MAX_LIMIT, petApprovalMatches, petApprovalPage, renderPetApprovalLoadMore, renderPetWorkbenchLoadError, swapPetWorkbenchPage} from "../build/pet_workbench.js";
+import {bindPetDocEditorButtons, countPetWatchAnomalies, renderPetOverview, renderPetRecords, sortPetWorklog} from "../build/pet_desk.js";
 
 const root = resolve(import.meta.dirname, "../..");
 
@@ -794,10 +795,12 @@ test("approval load-more markup matches the task list component and loading stat
 test("workbench collapses core documents and opens approvals on pending with ten-row pages", async () => {
   const main = await readFile(resolve(root, "web/src/main.ts"), "utf8");
   const loader = await readFile(resolve(root, "web/src/pet_workbench.ts"), "utf8");
+  // The records renderer moved to the pet_desk route chunk (task-813).
+  const desk = await readFile(resolve(root, "web/src/pet_desk.ts"), "utf8");
   assert.match(main, /renderPetRecords\(view\.core, view\.worklog,/);
-  assert.match(loader, /core\.map\(\(entry, index\) => renderCoreEntry\(/);
-  assert.match(loader, /<details class="pet-doc-entry" id="pet-record-core-\$\{index\}">/);
-  assert.doesNotMatch(loader, /<details class="pet-doc-entry" open>/);
+  assert.match(desk, /core\.map\(\(entry, index\) => renderCoreEntry\(/);
+  assert.match(desk, /<details class="pet-doc-entry" id="pet-record-core-\$\{index\}">/);
+  assert.doesNotMatch(desk, /<details class="pet-doc-entry" open>/);
   assert.match(main, /let petApprovalStatusFilter[^=]*= "pending";/);
   assert.match(main, /let petApprovalFilter: [^=]+= "all";/);
   assert.match(main, /let approvalLimit = 10;/);
@@ -963,7 +966,8 @@ test("document edit buttons open collapsed entries, focus the editor and save bo
 
 test("document editors share one attribute and the approval footer caps at 200", async () => {
   const main = await readFile(resolve(root, "web/src/main.ts"), "utf8");
-  const loader = await readFile(resolve(root, "web/src/pet_workbench.ts"), "utf8");
+  // Document editing renders and binds from the pet_desk route chunk.
+  const loader = await readFile(resolve(root, "web/src/pet_desk.ts"), "utf8");
   const approvals = await readFile(resolve(root, "web/src/pet_approvals.ts"), "utf8");
   const coreEdit = loader.match(/function renderCoreEntry\([\s\S]*?\n}/)?.[0] || "";
   const worklogEdit = loader.match(/function renderWorklogEntry\([\s\S]*?\n}/)?.[0] || "";
@@ -1115,6 +1119,7 @@ test("approvals open on pending, sorted by the longest wait", () => {
   const newIndex = html.indexOf("data-pet-approval-open=\"new-pending\"");
   assert.ok(oldIndex >= 0 && oldIndex < newIndex, "longest wait first");
   assert.match(html, /已等待 26 小时 0 分钟|petWorkbench\.approvalWaiting/, "waiting duration is shown");
+  assert.doesNotMatch(html, /小时 0 分钟|天 0 小时/, "whole hours and days drop the zero part");
   assert.match(html, /class="pet-approval-row pending"/);
   assert.match(renderPetApprovalList([], {translate: overviewText, empty: "没有待处理审批"}), /没有待处理审批/);
 });
@@ -1217,7 +1222,8 @@ test("ignored and unfollowed lists have labels in both locales", async () => {
 test("records use a collapsible left contents column that survives tab switches", async () => {
   const css = await readFile(resolve(root, "web/src/styles.css"), "utf8");
   const main = await readFile(resolve(root, "web/src/main.ts"), "utf8");
-  const loader = await readFile(resolve(root, "web/src/pet_workbench.ts"), "utf8");
+  // The records renderer is in the pet_desk route chunk.
+  const loader = await readFile(resolve(root, "web/src/pet_desk.ts"), "utf8");
   assert.match(css, /\.pet-records \{ display: grid; grid-template-columns: minmax\(180px, 220px\) minmax\(0, 1fr\); gap: 12px; align-items: start; \}/);
   assert.match(css, /\.pet-records\.toc-collapsed \{ grid-template-columns: minmax\(0, 1fr\); \}/);
   assert.match(css, /\.pet-records\.toc-collapsed \.pet-record-toc \{ display: none; \}/);
@@ -1295,7 +1301,7 @@ const deskOptions = (i18n, desk, extra = {}) => ({
 const section = (html, id) => html.match(new RegExp(`<section [^>]*id="${id}"[\\s\\S]*?</section>`))?.[0] ?? "";
 
 test("desk elapsed time is a pure function that hides unknown timestamps", async () => {
-  const {petDeskElapsedMinutes, petDeskElapsedText} = await import("../build/pet_workbench.js");
+  const {petDeskElapsedMinutes, petDeskElapsedText} = await import("../build/pet_desk.js");
   assert.equal(petDeskElapsedMinutes("2026-11-26T00:30:00Z", deskNow), 90);
   assert.equal(petDeskElapsedMinutes("2026-11-26T02:05:00Z", deskNow), 0, "a clock ahead of the browser is zero, not negative");
   for (const bad of ["0001-01-01T00:00:00Z", "1970-01-01T00:00:00Z", "", "  ", "not a time", null, undefined, 42]) {
@@ -1308,7 +1314,7 @@ test("desk elapsed time is a pure function that hides unknown timestamps", async
 });
 
 test("desk circled numerals start at one and fall back past fifty", async () => {
-  const {petDeskIndexLabel} = await import("../build/pet_workbench.js");
+  const {petDeskIndexLabel} = await import("../build/pet_desk.js");
   assert.deepEqual([1, 2, 20, 21, 35, 36, 50].map(petDeskIndexLabel), ["①", "②", "⑳", "㉑", "㉟", "㊱", "㊿"]);
   assert.equal(petDeskIndexLabel(51), "(51)");
 });
@@ -1337,7 +1343,7 @@ test("desk needs list keeps the server order, numbers from ① and labels every 
   const order = [...needs.matchAll(/<li class="pet-desk-item kind-(\w+)">\s*<span class="pet-desk-index" aria-hidden="true">(.)<\/span>/g)].map(match => `${match[2]}${match[1]}`);
   assert.deepEqual(order, ["①blocked", "②approval", "③question", "④failed", "⑤stopped"], "rows keep the response order");
   assert.match(needs, /被阻塞 · <span data-i18n-ignore>task-790<\/span> · 等了 1 小时 30 分钟/);
-  assert.match(needs, /审批 · <span data-i18n-ignore>task-801<\/span> · 高风险 · 等了 1 小时 0 分钟/);
+  assert.match(needs, /审批 · <span data-i18n-ignore>task-801<\/span> · 高风险 · 等了 1 小时<\/small>/, "a whole hour drops the zero minutes");
   assert.match(needs, /有 2 个问题等你 · <span data-i18n-ignore>task-813<\/span> · 等了 45 分钟/);
   assert.match(needs, /<ul class="pet-desk-questions"><li data-i18n-ignore>Step one only\?<\/li><li data-i18n-ignore>Plan or build\?<\/li><\/ul>/);
   assert.match(needs, /失败 · <span data-i18n-ignore>task-1<\/span> · 等了 40 分钟/);
@@ -1516,13 +1522,14 @@ test("the English desk has no Chinese interface copy", async () => {
 test("every desk catalog key exists in both locales", async () => {
   const source = await readFile(resolve(root, "web/src/i18n.ts"), "utf8");
   const [zhBlock, enBlock] = [source.slice(0, source.indexOf("const enUS")), source.slice(source.indexOf("const enUS"), source.indexOf("const legacyEnglish"))];
-  const keys = block => new Set([...block.matchAll(/"(petWorkbench\.desk\.[^"]+)":/g)].map(match => match[1]));
+  const keys = block => new Set([...block.matchAll(/"(petWorkbench\.(?:desk|insights)\.[^"]+|petWorkbench\.wait[A-Za-z]+)":/g)].map(match => match[1]));
   const zh = keys(zhBlock);
   const en = keys(enBlock);
   assert.ok(zh.size >= 40, `desk keys: ${zh.size}`);
   assert.deepEqual([...zh].sort(), [...en].sort());
-  const renderer = await readFile(resolve(root, "web/src/pet_workbench.ts"), "utf8");
-  for (const [, key] of renderer.matchAll(/"(petWorkbench\.desk\.[A-Za-z_.]+)"/g)) assert.ok(zh.has(key), `missing catalog key ${key}`);
+  const renderer = await readFile(resolve(root, "web/src/pet_desk.ts"), "utf8");
+  for (const [, key] of renderer.matchAll(/"(petWorkbench\.(?:desk|insights)\.[A-Za-z_.]+)"/g)) assert.ok(zh.has(key), `missing catalog key ${key}`);
+  for (const key of ["petWorkbench.waitHoursOnly", "petWorkbench.waitDaysOnly", "petWorkbench.insights.tokensWindow", "petWorkbench.insights.tokensCumulative"]) assert.ok(zh.has(key) && en.has(key), key);
   for (const list of ["need", "later"]) for (const kind of ["other", ...(list === "need" ? ["approval", "question", "blocked", "failed", "stopped"] : ["idea", "next_step"])]) {
     assert.ok(zh.has(`petWorkbench.desk.${list}.${kind}`), `${list}.${kind}`);
   }
@@ -1535,4 +1542,141 @@ test("the workbench passes the desk and a fresh clock to the overview", async ()
   assert.match(main, /openOverviewApproval\(button\.dataset\.petApprovalOpen \|\| ""\)/);
   const types = await readFile(resolve(root, "web/src/types.ts"), "utf8");
   assert.match(types, /desk\?: PetDesk;/);
+});
+
+/* Step two (task-813, design doc section 11) ----------------------------- */
+
+test("durations drop the zero part on whole hours and days, in both languages", async () => {
+  const {petApprovalDurationText} = await import("../build/pet_approvals.js");
+  const i18n = await deskCatalog("zh-CN");
+  try {
+    const zh = minutes => petApprovalDurationText(minutes, i18n.t);
+    assert.deepEqual([0, 45, 60, 61, 120, 1439, 1440, 1500, 2880, 2940].map(zh),
+      ["0 分钟", "45 分钟", "1 小时", "1 小时 1 分钟", "2 小时", "23 小时 59 分钟", "1 天", "1 天 1 小时", "2 天", "2 天 1 小时"]);
+    i18n.applyLocale("en-US");
+    const en = minutes => petApprovalDurationText(minutes, i18n.t);
+    assert.deepEqual([0, 60, 90, 1440, 1500].map(en), ["0 min", "1 h", "1 h 30 min", "1 d", "1 d 1 h"]);
+    // The approvals tab uses the same helper.
+    const {renderPetApprovalList} = await import("../build/pet_approvals.js");
+    const html = renderPetApprovalList([{id: "a", kind: "delete_task", status: "pending", title: "x", created_at: "2026-01-01T00:00:00Z"}], {translate: i18n.t, now: Date.parse("2026-01-01T02:00:00Z")});
+    assert.match(html, /Waiting 2 h|waited 2 h|2 h(?! \d)/);
+    assert.doesNotMatch(html, /2 h 0 min/);
+  } finally {
+    i18n.applyLocale("zh-CN");
+  }
+});
+
+test("a desk that is an array is treated as no desk", async () => {
+  const {petDeskPresent} = await import("../build/pet_desk.js");
+  const i18n = await deskCatalog("zh-CN");
+  for (const desk of [[], [deskFixture()], "desk", 1]) {
+    assert.equal(petDeskPresent(desk), false, JSON.stringify(desk).slice(0, 20));
+    const html = renderPetOverview(deskOptions(i18n, desk));
+    assert.match(html, /class="pet-overview-cards"/, "legacy overview");
+    assert.doesNotMatch(html, /pet-desk/);
+  }
+  assert.equal(petDeskPresent(deskFixture()), true);
+  // Rows that are arrays are not records either.
+  const html = renderPetOverview(deskOptions(i18n, {...deskFixture(), needs_owner: [["approval"], {kind: "blocked", task_id: "t", title: "real", since: ""}], needs_owner_total: 2, later: [], later_total: 0}));
+  const numbered = section(html, "pet-desk-needs").match(/<span class="pet-desk-index"[^>]*>(.)<\/span>/g) || [];
+  assert.deepEqual(numbered.length, 1, "only the object row renders");
+  assert.match(section(html, "pet-desk-needs"), /real<\/span>/);
+});
+
+test("loop waits from the pet's ledgers show the item, next step and source file", async () => {
+  const i18n = await deskCatalog("zh-CN");
+  const desk = {...deskFixture(), waiting_others: [
+    {kind: "loop", title: "等合作方答复 <格式>", detail: "周五再问", on: "core/loops.md", since: "0001-01-01T00:00:00Z"},
+    {kind: "loop", title: "等渠道恢复", on: "core/agenda.md", since: "0001-01-01T00:00:00Z"},
+  ], waiting_others_total: 2};
+  const waiting = section(renderPetOverview(deskOptions(i18n, desk)), "pet-desk-waiting");
+  assert.match(waiting, /<li class="pet-desk-item kind-loop"><div class="pet-desk-item-body"><button type="button" class="pet-desk-item-main" data-pet-overview-jump="records"><strong><span data-i18n-ignore>等合作方答复 &lt;格式&gt;<\/span><\/strong><small>宠物记下的等待 · <span data-i18n-ignore>core\/loops\.md<\/span><\/small><\/button><p class="pet-desk-detail">下一步：<span data-i18n-ignore>周五再问<\/span><\/p>/);
+  assert.match(waiting, /等渠道恢复<\/span><\/strong><small>宠物记下的等待 · <span data-i18n-ignore>core\/agenda\.md<\/span><\/small><\/button><\/div><\/li>/, "no next step, no detail line");
+  assert.doesNotMatch(waiting, /等了/, "loop waits have no time");
+});
+
+test("the last reply line shows the wake reply, NOOP copy, or the latest reply", async () => {
+  const i18n = await deskCatalog("zh-CN");
+  const render = reply => renderPetOverview(deskOptions(i18n, {...deskFixture(), last_reply: reply}));
+  const line = html => html.match(/<section class="pet-desk-reply"[\s\S]*?<\/section>/)?.[0] ?? "";
+  let html = render({text: "推进了 <b>task-1</b>", finished_at: "2026-11-26T01:30:00Z", noop: false, from_wake: true});
+  assert.match(line(html), /<strong>宠物上次巡检说<\/strong><span class="pet-desk-reply-text" data-i18n-ignore>推进了 &lt;b&gt;task-1&lt;\/b&gt;<\/span><small>at 2026-11-26T01:30:00Z<\/small>/);
+  assert.ok(html.indexOf("pet-desk-reply") > html.indexOf("pet-desk-status") && html.indexOf("pet-desk-reply") < html.indexOf("pet-desk-needs"), "between the status row and for-you");
+  html = render({text: "NOOP · 没有变化", finished_at: "2026-11-26T01:30:00Z", noop: true, from_wake: true});
+  assert.match(line(html), /<span class="pet-desk-reply-noop">上次巡检没有要推进的事<\/span>/);
+  assert.doesNotMatch(line(html), /没有变化/);
+  html = render({text: "好的，我来看看", finished_at: "2026-11-26T01:30:00Z", noop: false, from_wake: false});
+  assert.match(line(html), /<strong>上一轮回复<\/strong>/);
+  html = render({text: "x", finished_at: "0001-01-01T00:00:00Z", noop: false, from_wake: true});
+  assert.doesNotMatch(line(html), /<small>/, "zero time shows no time");
+  for (const reply of [undefined, null, [], {text: "", noop: false}]) {
+    assert.doesNotMatch(render(reply), /pet-desk-reply/, `no line for ${JSON.stringify(reply)}`);
+  }
+});
+
+test("the last 7 days block renders counts, outcomes and the token scope", async () => {
+  const {renderPetInsightsBody, renderPetInsightsPlaceholder} = await import("../build/pet_desk.js");
+  const i18n = await deskCatalog("zh-CN");
+  const options = {translate: i18n.t, formatTime: value => `at ${value}`};
+  const insights = {
+    from: "2026-11-18T16:00:00Z", to: "2026-11-26T02:00:00Z", actions: 12,
+    approvals: {total: 5, approved: 2, rejected: 1, cancelled: 1, pending: 1, ideas: 3},
+    corrections: 2, wakes: {turns: 40, noop: 31, tokens: 1234567, token_scope: "window"},
+  };
+  let html = renderPetInsightsBody(insights, options);
+  assert.match(html, /<h3>近 7 天<\/h3>/);
+  assert.match(html, /at 2026-11-18T16:00:00Z 至 at 2026-11-26T02:00:00Z/);
+  assert.match(html, /<strong>宠物自己办了 12 件<\/strong>/);
+  assert.match(html, /<strong>提给你 5 件<\/strong><small>已批准 2 · 已否决 1 · 已取消 1 · 还在等 1<\/small>/);
+  assert.match(html, /想法 3 条/);
+  assert.match(html, /你纠正了 2 次/);
+  assert.match(html, /宠物被唤醒 40 次，其中 31 次没有要推进的事<\/strong><small>这 7 天用了 1,234,567 Token<\/small>/);
+  html = renderPetInsightsBody({...insights, wakes: {...insights.wakes, token_scope: "cumulative"}}, options);
+  assert.match(html, /宠物任务累计用了 1,234,567 Token（这 7 天的用量拆不出来）/);
+  assert.doesNotMatch(html, /这 7 天用了/);
+  for (const failed of [null, undefined, [], "x"]) {
+    assert.match(renderPetInsightsBody(failed, options), /暂时读不到近 7 天的数据。/);
+  }
+  // Partial payloads never print undefined or NaN.
+  assert.doesNotMatch(renderPetInsightsBody({}, options), /undefined|NaN/);
+  assert.match(renderPetInsightsPlaceholder(i18n.t), /data-pet-insights/);
+  // The desk renders the placeholder under the pet's side.
+  const desk = renderPetOverview(deskOptions(i18n, deskFixture()));
+  assert.ok(desk.indexOf('id="pet-desk-insights"') > desk.indexOf('id="pet-desk-pet"') && desk.indexOf('id="pet-desk-insights"') < desk.indexOf("pet-desk-follows"));
+});
+
+test("the English insights, loop waits and last reply have no Chinese interface copy", async () => {
+  const {renderPetInsightsBody} = await import("../build/pet_desk.js");
+  const i18n = await deskCatalog("en-US");
+  try {
+    const chrome = html => html.replace(/<(\w+)[^>]*data-i18n-ignore[^>]*>[\s\S]*?<\/\1>/g, "");
+    const body = renderPetInsightsBody({from: "a", to: "b", actions: 1, approvals: {total: 1, approved: 1, rejected: 0, cancelled: 0, pending: 0, ideas: 0}, corrections: 0, wakes: {turns: 2, noop: 1, tokens: 5, token_scope: "cumulative"}}, {translate: i18n.t, formatTime: v => v});
+    assert.doesNotMatch(body, /[一-鿿]/);
+    assert.match(body, /Tokens for the whole pet task: 5/);
+    assert.doesNotMatch(renderPetInsightsBody(null, {translate: i18n.t, formatTime: v => v}), /[一-鿿]/);
+    const html = renderPetOverview(deskOptions(i18n, {...deskFixture(), waiting_others: [{kind: "loop", title: "等", detail: "下", on: "core/loops.md", since: ""}], waiting_others_total: 1, last_reply: {text: "NOOP", noop: true, from_wake: true, finished_at: "2026-11-26T01:00:00Z"}}));
+    assert.doesNotMatch(chrome(html), /[一-鿿]/, chrome(html).match(/.{0,40}[一-鿿].{0,40}/)?.[0]);
+    assert.match(html, /Nothing to move at the last check/);
+    assert.match(html, /Waiting \(pet&#039;s notes\)/);
+  } finally {
+    i18n.applyLocale("zh-CN");
+  }
+});
+
+test("the workbench loads the desk chunk lazily, fills insights per paint and reads one approval by id", async () => {
+  const main = await readFile(resolve(root, "web/src/main.ts"), "utf8");
+  const api = await readFile(resolve(root, "web/src/api.ts"), "utf8");
+  const workbench = await readFile(resolve(root, "web/src/pet_workbench.ts"), "utf8");
+  assert.match(main, /createLazyPage<PetDeskModule>\("pet-desk", \(\) => import\("\.\/pet_desk\.js"\)/);
+  assert.doesNotMatch(main, /from "\.\/pet_desk\.js"/, "no static import of the desk chunk");
+  assert.match(main, /chunkErrorHTML\(petDeskPage\.key, t\("petWorkbench\.desk\.chunkFailed"\)/, "a failed chunk is retryable");
+  assert.match(main, /if \(!host\.isConnected \|\| petWorkbenchPageKeeper\.binding !== binding\) return;/);
+  assert.match(main, /insightsController\?\.abort\(\);/);
+  assert.match(main, /api\.petApproval\(approvalID, AbortSignal\.timeout\(PET_WORKBENCH_TIMEOUT_MS\)\)/);
+  assert.doesNotMatch(main, /approvalLimit: PET_APPROVAL_MAX_LIMIT, worklogLimit: 1/, "the whole-page re-read is gone");
+  assert.match(api, /"\/api\/v1\/pet\/workbench\/insights"/);
+  assert.match(api, /`\/api\/v1\/pet\/approvals\/\$\{encodeURIComponent\(id\)\}`/);
+  for (const moved of ["renderPetOverview", "renderPetRecords", "renderPetDesk", "bindPetDocEditorButtons"]) {
+    assert.doesNotMatch(workbench, new RegExp(`function ${moved}\\b`), `${moved} left the first-screen module`);
+  }
 });

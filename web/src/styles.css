@@ -3103,6 +3103,16 @@ button.pet-desk-item-main:hover strong { color: var(--color-accent-hover); }
 /* .field-help pulls itself up for form hints; desk notes sit in normal flow. */
 .pet-desk-more, .pet-desk-empty { margin: 0; font-size: var(--font-size-12); }
 .pet-desk-follows { display: grid; gap: var(--space-2); }
+.pet-desk-reply { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-2); border: 1px solid var(--color-border-subtle); border-radius: var(--radius-card); background: var(--color-surface); padding: var(--space-2) var(--space-3); font-size: var(--font-size-13); min-width: 0; }
+.pet-desk-reply > strong { flex: 0 0 auto; }
+.pet-desk-reply-text { flex: 1 1 240px; min-width: 0; color: var(--color-text); overflow-wrap: anywhere; white-space: pre-line; }
+.pet-desk-reply-noop { flex: 1 1 auto; color: var(--color-text-muted); }
+.pet-desk-reply small { color: var(--color-text-muted); font-size: var(--font-size-12); }
+.pet-desk-insights-range { color: var(--color-text-muted); font-size: var(--font-size-12); }
+.pet-desk-insights-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--space-2) var(--space-3); }
+.pet-desk-insights-list li { display: grid; gap: 2px; min-width: 0; }
+.pet-desk-insights-list strong { font-size: var(--font-size-13); }
+.pet-desk-insights-list small { color: var(--color-text-muted); font-size: var(--font-size-12); overflow-wrap: anywhere; }
 @media (max-width: 760px) {
   .pet-desk-pair { grid-template-columns: minmax(0, 1fr); }
   .pet-desk-item { flex-wrap: wrap; }

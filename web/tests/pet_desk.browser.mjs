@@ -1,5 +1,6 @@
 // Browser verification for the pet desk overview (task-813, design doc
-// section 10, items 1, 4, 5, 10, 12, 13 and 15).
+// section 10 items 1, 4, 5, 10, 12, 13 and 15; section 11.2 items 2, 4, 5, 6
+// and 7).
 //
 // Checks against the real built Web bundle with a stubbed API:
 //   - with `desk` the overview renders the desk blocks in order, the waiting
@@ -65,6 +66,14 @@ const desk = {
   corrections: [{at: minutesAgo(300), approval_id: "a-9", kind: "delete_workspace", title: "删除工作区 X", owner_note: "这个还要留着对比"}],
   open_loops: ["跟进合作方答复"], open_loops_total: 5,
   agenda: ["整理渠道"], agenda_total: 3,
+  last_reply: {text: "推进了 task-790，等 owner 批权限", finished_at: minutesAgo(20), noop: false, from_wake: true},
+};
+desk.waiting_others.push({kind: "loop", title: "等合作方答复接口格式", detail: "周五再问一次", on: "core/loops.md", since: "0001-01-01T00:00:00Z"});
+desk.waiting_others_total = desk.waiting_others.length;
+const insights = {
+  from: minutesAgo(8 * 24 * 60), to: minutesAgo(0), actions: 12,
+  approvals: {total: 5, approved: 2, rejected: 1, cancelled: 1, pending: 1, ideas: 3},
+  corrections: 2, wakes: {turns: 40, noop: 31, tokens: 123456, token_scope: "window"},
 };
 const watches = [
   {task_id: "t-w", code: "task-9", title: "关注的任务", status: "active", watched: true, ignored: false, reason: "manual", created_at: minutesAgo(600), updated_at: minutesAgo(30)},
@@ -76,6 +85,13 @@ const params = new URLSearchParams(location.search);
 window.__desk = params.get("desk") === "0" ? undefined : ${JSON.stringify(desk)};
 window.__workbenchQueries = [];
 window.__taskReads = [];
+window.__approvalReads = [];
+window.__insightReads = 0;
+// insights=fail answers 500, insights=old answers 404 like a server without
+// the route, insights=slow holds the response until __releaseInsights().
+window.__insightsMode = params.get("insights") || "ok";
+window.__insightWaiters = [];
+window.__releaseInsights = () => { for (const resolve of window.__insightWaiters.splice(0)) resolve(); };
 const pageApprovals = ${JSON.stringify(pageApprovals)};
 const allApprovals = ${JSON.stringify(allApprovals)};
 window.fetch = async (input, init = {}) => {
@@ -86,6 +102,22 @@ window.fetch = async (input, init = {}) => {
   if (path === "/api/v1/system") return json({system: {web_version: "test", version: "test", started_at: new Date().toISOString()}});
   if (path === "/api/v1/assistant") return json({assistant: {character: "gugugaga", name: "AHA", nickname: "AHA", enabled: false}, messages: [], models: [], tools: []});
   if (path === "/api/v1/pet/approvals/pending-count") return json({ok: true, pending: 2});
+  if (path.startsWith("/api/v1/pet/approvals/") && (init.method || "GET").toUpperCase() === "GET") {
+    const id = decodeURIComponent(path.split("/")[5]);
+    window.__approvalReads.push(id);
+    const item = allApprovals.find(approval => approval.id === id);
+    return item ? json({ok: true, approval: item}) : json({ok: false, error: "pet_approval_not_found"}, 404);
+  }
+  if (path === "/api/v1/pet/workbench/insights") {
+    window.__insightReads++;
+    if (window.__insightsMode === "fail") return json({ok: false, error: "pet_insights_failed"}, 500);
+    if (window.__insightsMode === "old") return new Response("404 page not found", {status: 404});
+    if (window.__insightsMode === "slow") {
+      (window.__insightSignals ||= []).push(init.signal);
+      await new Promise(resolve => window.__insightWaiters.push(resolve));
+    }
+    return json({ok: true, insights: ${JSON.stringify(insights)}});
+  }
   if (path === "/api/v1/pet/workbench") {
     const limit = Number(url.searchParams.get("approval_limit") || 50);
     window.__workbenchQueries.push(limit);
@@ -122,9 +154,21 @@ sessionStorage.setItem("aha2.navigation", JSON.stringify({view: "pet-workbench"}
 
 const html = `<!doctype html><html lang="en-US"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="/styles.css"></head><body><div id="app"></div><div id="app-status" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div><script src="/fixture.js"></script><script type="module" src="/app.js"></script></body></html>`;
 
+// While deskChunkFailures > 0 the server refuses the lazy desk module, so the
+// test can prove a failed chunk shows a retry card instead of a blank tab.
+let deskChunkFailures = 0;
+let deskChunkRequests = 0;
 const server = createServer(async (request, response) => {
   const name = new URL(request.url, "http://localhost").pathname;
   try {
+    if (name === "/pet_desk.js") {
+      deskChunkRequests++;
+      if (deskChunkFailures > 0) {
+        deskChunkFailures--;
+        response.writeHead(503).end();
+        return;
+      }
+    }
     response.setHeader("Content-Security-Policy", csp);
     if (name === "/" || name === "/index.html") {
       response.setHeader("Content-Type", "text/html");
@@ -199,7 +243,18 @@ try {
 
   // Item 1: block order; cards and recent activity are gone.
   const blocks = await page.evaluate(() => [...document.querySelector("#pet-workbench-body .pet-desk").children].map(el => el.className));
-  assert.deepEqual(blocks, ["pet-desk-status", "pet-desk-section pet-desk-needs", "pet-desk-pair", "pet-desk-section pet-desk-pet", "pet-desk-follows"]);
+  assert.deepEqual(blocks, ["pet-desk-status", "pet-desk-reply", "pet-desk-section pet-desk-needs", "pet-desk-pair", "pet-desk-section pet-desk-pet", "pet-desk-section pet-desk-insights", "pet-desk-follows"]);
+  // Step two, item 4: the last reply sits under the status row.
+  assert.match(await body.locator(".pet-desk-reply").innerText(), /Pet's last check[\s\S]*推进了 task-790/);
+  // Item 2: the last 7 days fill in after the desk.
+  await body.locator("#pet-desk-insights .pet-desk-insights-list").waitFor({timeout: 15000});
+  const week = await body.locator("#pet-desk-insights").innerText();
+  assert.match(week, /Handled by the pet: 12/);
+  assert.match(week, /Put to you: 5\s+approved 2 · rejected 1 · cancelled 1 · still waiting 1/);
+  assert.match(week, /Wake-ups: 40, 31 with nothing to move\s+Tokens in these 7 days: 123,456/);
+  // Item 5: the pet's own waiting note shows with its next step.
+  const loopRow = body.locator("#pet-desk-waiting .pet-desk-item.kind-loop");
+  assert.match(await loopRow.innerText(), /等合作方答复接口格式[\s\S]*Waiting \(pet's notes\)[\s\S]*core\/loops\.md[\s\S]*Next: 周五再问一次/);
   assert.equal(await body.locator(".pet-overview-cards, .pet-overview-recent").count(), 0);
   assert.equal(await body.locator("#pet-overview-follows, #pet-overview-ignored").count(), 2);
   // Wide screen: waiting and running side by side; phone: stacked.
@@ -221,7 +276,7 @@ try {
   assert.deepEqual(await untranslated(page), [], "English desk left untranslated Chinese");
   const status = await body.locator(".pet-desk-status").innerText();
   assert.match(status, /3 for you/);
-  assert.match(status, /2 waiting on others/);
+  assert.match(status, /3 waiting on others/);
   assert.match(status, /1 running/);
   assert.match(await body.locator(".pet-desk-status").getAttribute("title"), /Version: 9\.9\.9/);
   // Item 3: numbering from ① in response order.
@@ -231,23 +286,25 @@ try {
   await backToOverview(page);
   assert.equal(await body.locator("#pet-desk-later").getAttribute("open"), null, "later starts collapsed");
 
-  // Item 4: an approval older than the loaded approval page still opens its
-  // detail; the page reads the wider list once.
+  // Item 4 (step two, item 7): an approval older than the loaded approval
+  // page opens its detail through GET /api/v1/pet/approvals/{id}, without
+  // re-reading the whole workbench.
   const queriesBefore = await page.evaluate(() => window.__workbenchQueries.length);
   await body.locator('#pet-desk-needs [data-pet-approval-open="a-old"].pet-desk-item-main').click();
   await page.waitForSelector("dialog.pet-approval-detail-dialog[open]", {timeout: 15000});
   assert.match(await page.locator("dialog.pet-approval-detail-dialog").innerText(), /是否合并 task-801 的候选/);
-  assert.ok((await page.evaluate(() => window.__workbenchQueries.slice(-1)[0])) >= 200, "the wide read uses the server cap");
+  assert.deepEqual(await page.evaluate(() => window.__approvalReads), ["a-old"]);
+  assert.equal(await page.evaluate(() => window.__workbenchQueries.length), queriesBefore, "no whole-page re-read");
   await closeDialog(page);
   assert.equal(await page.locator('[data-pet-workbench-tab="overview"]').getAttribute("class"), "active", "still on the overview");
   // An idea from the folded later list opens from the loaded page directly.
   const queriesBeforeIdea = await page.evaluate(() => window.__workbenchQueries.length);
-  assert.ok(queriesBeforeIdea > queriesBefore);
   await body.locator("#pet-desk-later summary").click();
   await body.locator('#pet-desk-later [data-pet-approval-open="idea-1"].pet-desk-item-main').click();
   await page.waitForSelector("dialog.pet-approval-detail-dialog[open]");
   assert.match(await page.locator("dialog.pet-approval-detail-dialog").innerText(), /整理渠道联系人/);
   assert.equal(await page.evaluate(() => window.__workbenchQueries.length), queriesBeforeIdea, "a loaded approval needs no extra read");
+  assert.deepEqual(await page.evaluate(() => window.__approvalReads), ["a-old"], "nor a by-id read");
   await closeDialog(page);
   // No approve/reject buttons on the desk itself.
   assert.equal(await body.locator("[data-pet-approval-decision]").count(), 0);
@@ -285,6 +342,74 @@ try {
   await body.locator(".pet-desk").waitFor();
   assert.match(await body.locator("#pet-desk-needs h3").innerText(), /要你定（3）/);
   assert.match(await body.locator("#pet-desk-later summary").innerText(), /不急的还有 2 件/);
+
+  // Step two, item 6: a same-view full render (a hash change re-runs render()
+  // for the same view) keeps the lazily loaded page working, and a slow
+  // insights read that lands after the render fills the live block.
+  await openOverview(page, "?insights=slow");
+  await body.locator(".pet-desk").waitFor();
+  await page.waitForFunction(() => window.__insightReads === 1);
+  const bodyHandle = await page.evaluateHandle(() => document.querySelector("#pet-workbench-body"));
+  for (let round = 1; round <= 3; round++) {
+    await page.evaluate(round => { location.hash = `#pet-workbench?render=${round}`; }, round);
+    await page.waitForFunction(round => location.hash.endsWith(String(round)), round);
+  }
+  await page.waitForTimeout(200);
+  assert.equal(await page.evaluate(body => body === document.querySelector("#pet-workbench-body") && body.isConnected, bodyHandle), true, "the page survives same-view renders");
+  assert.equal(await page.evaluate(() => window.__insightReads), 1, "renders do not restart the insights read");
+  await page.evaluate(() => window.__releaseInsights());
+  await body.locator("#pet-desk-insights .pet-desk-insights-list").waitFor({timeout: 15000});
+  // Buttons rendered by the lazy chunk still work after those renders.
+  await body.locator("#pet-desk-pet [data-pet-overview-jump=\"records\"]").click();
+  await body.locator(".pet-records").waitFor();
+  await backToOverview(page);
+  // The finished result is reused: a repaint paints it at once and does not
+  // read again.
+  assert.equal(await body.locator("#pet-desk-insights .pet-desk-insights-list").count(), 1, "repaint shows the cached block immediately");
+  await page.waitForTimeout(300);
+  assert.equal(await page.evaluate(() => window.__insightReads), 1, "repaint does not read again");
+
+  // A tab switch while insights are still loading aborts that read; coming
+  // back starts one new read and only it fills the block.
+  await openOverview(page, "?insights=slow");
+  await page.waitForFunction(() => window.__insightReads === 1);
+  await page.click('[data-pet-workbench-tab="approvals"]');
+  await page.waitForSelector("[data-pet-approval-filters-open]");
+  assert.equal(await page.evaluate(() => window.__insightSignals.at(-1)?.aborted), true, "leaving the overview aborts the insights read");
+  await backToOverview(page);
+  await page.waitForFunction(() => window.__insightReads === 2);
+  assert.equal(await page.evaluate(() => window.__insightSignals.at(-1)?.aborted), false);
+  await page.evaluate(() => window.__releaseInsights());
+  await body.locator("#pet-desk-insights .pet-desk-insights-list").waitFor({timeout: 15000});
+  assert.equal(await body.locator("#pet-desk-insights").count(), 1);
+
+  // Item 2: a failing insights endpoint or an older server without it shows
+  // "not available" in the block; the rest of the desk is untouched.
+  for (const mode of ["fail", "old"]) {
+    await openOverview(page, `?insights=${mode}`);
+    await body.locator(".pet-desk").waitFor();
+    await page.waitForFunction(() => document.querySelector("#pet-desk-insights")?.textContent.includes("not available"), null, {timeout: 15000});
+    assert.equal(await body.locator("#pet-desk-needs .pet-desk-index").count(), 3, `${mode}: the desk still renders`);
+    assert.deepEqual(await untranslated(page), [], `${mode}: English only`);
+  }
+
+  // Item 6: a desk chunk that fails to load shows a retry card, and retry
+  // brings the overview back without a page reload.
+  deskChunkFailures = 1;
+  const requestsBefore = deskChunkRequests;
+  await page.goto(`${url}/`, {waitUntil: "domcontentloaded"});
+  await page.waitForSelector("#pet-workbench-body .chunk-state-error", {timeout: 20000});
+  assert.equal(deskChunkRequests, requestsBefore + 1);
+  assert.match(await body.innerText(), /The workbench page failed to load/);
+  assert.deepEqual(await untranslated(page), []);
+  await body.locator("[data-chunk-retry]").click();
+  await body.locator(".pet-desk").waitFor({timeout: 15000});
+  // The approvals tab does not need the chunk at all.
+  deskChunkFailures = 1;
+  await page.goto(`${url}/`, {waitUntil: "domcontentloaded"});
+  await page.waitForSelector("#pet-workbench-body .chunk-state-error", {timeout: 20000});
+  await page.click('[data-pet-workbench-tab="approvals"]');
+  await page.waitForSelector("[data-pet-approval-filters-open]", {timeout: 15000});
 
   assert.deepEqual(errors, [], `page errors: ${errors.join(" | ")}`);
   console.log("pet desk browser checks passed");

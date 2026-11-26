@@ -3382,7 +3382,7 @@ test("sidebar and mobile navigation expose pet workbench and resources", async (
 test("pet workbench overview exposes unfollow and ignore actions", async () => {
   const root = resolve(import.meta.dirname, "..");
   const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
-  const workbench = await readFile(resolve(root, "src", "pet_workbench.ts"), "utf8");
+  const workbench = await readFile(resolve(root, "src", "pet_desk.ts"), "utf8");
   const api = await readFile(resolve(root, "src", "api.ts"), "utf8");
   const i18n = await readFile(resolve(root, "src", "i18n.ts"), "utf8");
   assert.match(main, /data-pet-workbench-tab="overview"/);
@@ -3417,7 +3417,7 @@ test("pet workbench actions cover unfollowed, followed, ignored, and restored ro
   assert.deepEqual(petWatchActionKeys({watched: false, ignored: true}), ["restoreIgnored"]);
 
   const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
-  const workbench = await readFile(resolve(root, "src", "pet_workbench.ts"), "utf8");
+  const workbench = await readFile(resolve(root, "src", "pet_desk.ts"), "utf8");
   // The unwatched branch renders the same ignore action, and its restore
   // button reuses the existing ignored=false handler.
   assert.match(workbench, /case "ignore": return `<button[^`]*data-pet-watch-ignore="true"/);
@@ -3891,7 +3891,7 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   const jsNames = entries.filter(name => name.endsWith(".js"));
   assert.ok(jsNames.includes(bundleName), "entry chunk must be present");
   assert.ok(jsNames.length > 1, "route pages must be emitted as separate chunks");
-  for (const page of ["knowledge_workspace", "mcp_page", "resources", "channels", "mail_task", "codex_accounts", "prompt_admin", "proxy_settings", "sync_settings", "data_retention", "project_list", "workspace_viewer"]) {
+  for (const page of ["knowledge_workspace", "mcp_page", "resources", "channels", "mail_task", "codex_accounts", "prompt_admin", "proxy_settings", "sync_settings", "data_retention", "project_list", "workspace_viewer", "pet_desk"]) {
     assert.ok(jsNames.some(name => name.startsWith(`${page}.`)), `${page} must be a route chunk`);
   }
 
@@ -4018,7 +4018,12 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   // zh/en copy (+3,769 JS, about 1,070 of it copy) and its styles (+630 CSS).
   // From 0ae8f66 (283,378) the same masked-query, level-5 build measures
   // 287,777. Ceil to the next 256-byte boundary.
-  const FIRST_SCREEN_GZIP_BUDGET = 288000;
+  // task-813 step two moves the desk, last-7-days and records renderers into
+  // the pet_desk route chunk (loaded when the workbench opens) and adds the
+  // step-two styles to the shared stylesheet. From 3e514e1 (230,884 JS +
+  // 56,892 CSS = 287,776) the same masked-query, level-5 build measures
+  // 228,415 JS + 57,027 CSS = 285,442. Ceil to the next 256-byte boundary.
+  const FIRST_SCREEN_GZIP_BUDGET = 285696;
   // The version query parameter is a content hash and its hex digits change
   // how the same code gzips: main already sits exactly on the budget, so a
   // hash-only change could trip it without growing the payload. Mask the
@@ -4026,6 +4031,10 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   // tracks the code rather than hash luck.
   const firstScreenGzip = text => gzipSync(Buffer.from(text.replace(/\?v=[a-f0-9]{12}/g, "?v=3f9a1c7e5b2d")), {level: 5}).length;
   const gzipped = [...seen.values()].reduce((total, text) => total + firstScreenGzip(text), 0);
+  // The pet desk renderers stay in their route chunk (task-813 step two).
+  const deskChunk = jsNames.find(name => name.startsWith("pet_desk."));
+  assert.ok((await readFile(resolve(dist, deskChunk), "utf8")).includes("pet-desk-insights"));
+  assert.ok([...seen.values()].every(text => !text.includes("pet-desk-insights") && !text.includes("pet-record-toc-sub")), "desk and records renderers stay in the lazy chunk");
   const repositoryNotice = "Reading registered submodules timed out.";
   const viewerChunk = jsNames.find(name => name.startsWith("workspace_viewer."));
   assert.ok((await readFile(resolve(dist, viewerChunk), "utf8")).includes(repositoryNotice));
