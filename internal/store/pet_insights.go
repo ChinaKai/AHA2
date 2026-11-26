@@ -193,3 +193,28 @@ func (s *Store) LatestFinishedMainTurnReply(ctx context.Context, taskID string, 
 func IsNoRows(err error) bool {
 	return errors.Is(err, sql.ErrNoRows)
 }
+
+// ListPetEventsByKind returns the newest events of one kind in any status.
+func (s *Store) ListPetEventsByKind(ctx context.Context, kind string, limit int) ([]domain.PetEvent, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id,at,device_id,actor,kind,page,detail,status FROM pet_events
+		WHERE kind=? ORDER BY at DESC,id DESC LIMIT ?`, kind, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []domain.PetEvent{}
+	for rows.Next() {
+		var item domain.PetEvent
+		var at string
+		if err := rows.Scan(&item.ID, &at, &item.DeviceID, &item.Actor, &item.Kind, &item.Page, &item.Detail, &item.Status); err != nil {
+			return nil, err
+		}
+		item.At = parseTime(at)
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}

@@ -59,6 +59,22 @@ type PetInsights struct {
 	Approvals   PetInsightApprovals `json:"approvals"`
 	Corrections int                 `json:"corrections"`
 	Wakes       PetInsightWakes     `json:"wakes"`
+	// The records page asks for these two; the overview does not, so its
+	// "last 7 days" block never waits for a knowledge read.
+	Knowledge         *PetKnowledgeHealth    `json:"knowledge,omitempty"`
+	KnowledgeError    string                 `json:"knowledge_error,omitempty"`
+	CorrectionHistory *[]PetCorrectionRecord `json:"correction_history,omitempty"`
+	CorrectionsError  string                 `json:"corrections_error,omitempty"`
+	// Ledgers holds the status counts of loops.md and agenda.md.
+	Ledgers []PetLedgerCounts `json:"ledgers,omitempty"`
+}
+
+// PetInsightsOptions selects the optional parts of the insights response.
+type PetInsightsOptions struct {
+	// Records adds the correction history and the knowledge health. A
+	// failure in either is reported in its own error field; the counts are
+	// still returned.
+	Records bool
 }
 
 // PetInsightsTokenCounter totals token usage for Turns the same way the Task
@@ -76,7 +92,7 @@ func petInsightsWindow(now time.Time) (time.Time, time.Time) {
 
 // PetInsights counts the pet's last seven days. tokens may be nil, in which
 // case the token number is left at zero with the cumulative scope.
-func (s *Service) PetInsights(ctx context.Context, tokens PetInsightsTokenCounter) (PetInsights, error) {
+func (s *Service) PetInsights(ctx context.Context, tokens PetInsightsTokenCounter, options ...PetInsightsOptions) (PetInsights, error) {
 	from, to := petInsightsWindow(s.now())
 	result := PetInsights{From: from.UTC(), To: to.UTC()}
 
@@ -144,6 +160,22 @@ func (s *Service) PetInsights(ctx context.Context, tokens PetInsightsTokenCounte
 			return PetInsights{}, err
 		}
 		result.Wakes.Tokens, result.Wakes.TokenScope = total, scope
+	}
+	if len(options) > 0 && options[0].Records {
+		// A pointer, so an empty history is still sent as [] while the
+		// overview read (not asked) leaves the field out; the records page
+		// treats a missing field as "could not read".
+		if history, err := s.PetCorrectionHistory(ctx); err != nil {
+			result.CorrectionsError = "pet_corrections_failed"
+		} else {
+			result.CorrectionHistory = &history
+		}
+		result.Ledgers = s.PetLedgerStatusCounts(ctx)
+		if health, err := s.PetKnowledgeHealth(ctx); err != nil {
+			result.KnowledgeError = "pet_knowledge_health_failed"
+		} else {
+			result.Knowledge = &health
+		}
 	}
 	return result, nil
 }

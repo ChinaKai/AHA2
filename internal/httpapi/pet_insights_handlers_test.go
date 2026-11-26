@@ -116,6 +116,34 @@ func TestPetApprovalDetailAndInsightsNeedTheOwnerSession(t *testing.T) {
 	if span := insights.Insights.To.Sub(insights.Insights.From); span < 7*24*time.Hour || span > 8*24*time.Hour+time.Hour {
 		t.Fatalf("window spans %s, want seven whole days plus today", span)
 	}
+	// The overview read carries no records data; records=1 adds the
+	// correction history and the knowledge health.
+	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/pet/workbench/insights", nil, "")
+	var bare struct {
+		Insights map[string]any `json:"insights"`
+	}
+	decodeResponse(t, response, &bare)
+	if _, ok := bare.Insights["knowledge"]; ok {
+		t.Fatalf("plain insights carries knowledge: %v", bare.Insights)
+	}
+	if _, ok := bare.Insights["correction_history"]; ok {
+		t.Fatalf("plain insights carries correction history: %v", bare.Insights)
+	}
+	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/pet/workbench/insights?records=1", nil, "")
+	var withRecords struct {
+		Insights struct {
+			Knowledge *struct {
+				Spaces []struct {
+					Scope string `json:"scope"`
+				} `json:"spaces"`
+			} `json:"knowledge"`
+			CorrectionHistory []any `json:"correction_history"`
+		} `json:"insights"`
+	}
+	decodeResponse(t, response, &withRecords)
+	if response.StatusCode != http.StatusOK || withRecords.Insights.Knowledge == nil || len(withRecords.Insights.Knowledge.Spaces) == 0 || withRecords.Insights.CorrectionHistory == nil {
+		t.Fatalf("records insights = %d %#v", response.StatusCode, withRecords)
+	}
 	// The pet Task has no Turns, so nothing is summable and the scope is the
 	// labelled cumulative one.
 	if insights.Insights.Wakes.TokenScope != app.PetTokenScopeCumulative && insights.Insights.Wakes.TokenScope != app.PetTokenScopeWindow {

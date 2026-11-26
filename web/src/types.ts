@@ -2026,6 +2026,67 @@ export interface PetInsights {
     /** "window" or "cumulative" (the pet Task's whole history). */
     token_scope: string;
   };
+  /** Only with ?records=1 (the records tab). */
+  knowledge?: PetKnowledgeHealth;
+  knowledge_error?: string;
+  /** Only with ?records=1; [] when there are none. */
+  correction_history?: PetCorrectionRecord[];
+  corrections_error?: string;
+  /** Only with ?records=1: status counts of loops.md and agenda.md. */
+  ledgers?: PetLedgerCounts[];
+}
+
+export interface PetCorrectionRecord {
+  at: string;
+  approval_id?: string;
+  kind?: string;
+  title: string;
+  owner_note: string;
+  /** open (not absorbed yet, within 7 days) | absorbed | expired. */
+  state: string;
+}
+
+export interface PetLedgerCounts {
+  name: string;
+  counts: Record<string, number>;
+  total: number;
+}
+
+export interface PetKnowledgeSpaceHealth {
+  scope: string;
+  project_id?: string;
+  name: string;
+  source: string;
+  entries: number;
+  pending: number;
+  helped: number;
+  /** False for vault spaces: helped feedback is not kept on the entry. */
+  helped_known: boolean;
+  error?: string;
+}
+
+export interface PetKnowledgePending {
+  id: string;
+  title: string;
+  scope: string;
+  project_id?: string;
+  space: string;
+  /** stale | wrong. */
+  status: string;
+}
+
+export interface PetKnowledgeHealth {
+  entries: number;
+  pending: number;
+  helped: number;
+  /** Some space could not report helped feedback; helped covers the rest. */
+  helped_partial: boolean;
+  spaces: PetKnowledgeSpaceHealth[];
+  pending_items: PetKnowledgePending[];
+  truncated: boolean;
+  failed: number;
+  projects: number;
+  elapsed_ms: number;
 }
 
 // --- Mail resources -------------------------------------------------------

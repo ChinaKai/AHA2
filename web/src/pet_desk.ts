@@ -4,7 +4,8 @@
 // first screen of every other page does not carry them. The loader, page
 // keeper, tab mapping and approvals-tab helpers stay in pet_workbench.ts,
 // which the shell needs before this chunk arrives.
-import type {PetApproval, PetChannelHealth, PetDesk, PetDeskCorrection, PetDeskLastReply, PetDeskNeed, PetDeskRun, PetDeskWait, PetInsights, PetInspection, PetTaskWatch} from "./types.js";
+import type {PetApproval, PetChannelHealth, PetCorrectionRecord, PetDesk, PetDeskCorrection, PetDeskLastReply, PetDeskNeed, PetDeskRun, PetDeskWait, PetInsights, PetInspection, PetKnowledgeHealth, PetKnowledgePending, PetLedgerCounts, PetTaskWatch} from "./types.js";
+import {currentLocale} from "./i18n.js";
 import {petApprovalDurationText, petApprovalRiskLabel} from "./pet_approvals.js";
 import {petWatchActionKeys} from "./ui_helpers.js";
 
@@ -774,41 +775,77 @@ export function sortPetWorklog<T extends {date?: string}>(entries: T[]): T[] {
   return [...entries].sort((left, right) => String(right.date || "").localeCompare(String(left.date || "")));
 }
 
-function renderCoreEntry(entry: {name: string; content: string}, index: number, translate: Translate): string {
-  return `<details class="pet-doc-entry" id="pet-record-core-${index}"><summary><span>${escapeHTML(entry.name)}</span><button type="button" class="pet-doc-edit" data-pet-doc-edit data-pet-doc-section="core" data-pet-doc-name="${escapeHTML(entry.name)}">${escapeHTML(translate("common.edit"))}</button></summary><pre>${escapeHTML(entry.content)}</pre></details>`;
+// A ledger entry gets a slot next to its name for the status counts, which
+// arrive with the records insights read.
+function renderCoreEntry(entry: {name: string; content: string}, index: number, translate: Translate, ledger = false): string {
+  const counts = ledger ? `<span class="pet-record-ledger-slot" data-pet-ledger-counts="${escapeHTML(entry.name)}"></span>` : "";
+  return `<details class="pet-doc-entry" id="pet-record-core-${index}"><summary><span>${escapeHTML(entry.name)}</span>${counts}<button type="button" class="pet-doc-edit" data-pet-doc-edit data-pet-doc-section="core" data-pet-doc-name="${escapeHTML(entry.name)}">${escapeHTML(translate("common.edit"))}</button></summary><pre>${escapeHTML(entry.content)}</pre></details>`;
 }
 
 function renderWorklogEntry(entry: PetRecordEntry, index: number, translate: Translate): string {
   return `<details class="pet-doc-entry" id="pet-record-worklog-${index}"><summary><span>${escapeHTML(entry.date)}</span><button type="button" class="pet-doc-edit" data-pet-doc-edit data-pet-doc-section="worklog" data-pet-doc-name="${escapeHTML(entry.date)}.md">${escapeHTML(translate("common.edit"))}</button></summary><pre>${escapeHTML(entry.content)}</pre></details>`;
 }
 
-// renderPetRecords merges the old core and worklog tabs into one body. Core
-// documents stay pinned above the dated log. On wide screens the table of
-// contents sits in a left column and can collapse so the body takes the full
-// width; on phones it starts folded and expands above the body.
+// The records page groups the pet's documents by what they are to the Owner.
+// Group membership is by file name; a core file that is not listed lands in
+// the first group so nothing the pet writes disappears from the page.
+const PET_RECORD_JUDGMENT = ["identity.md", "principles.md", "changes.md"];
+const PET_RECORD_PROMISES = ["loops.md", "agenda.md"];
+
+function petRecordGroup(name: string): "judgment" | "promises" {
+  return PET_RECORD_PROMISES.includes(name) ? "promises" : "judgment";
+}
+
+function orderPetCore(entries: Array<{name: string; content: string; index: number}>, order: string[]) {
+  const rank = (name: string) => {
+    const position = order.indexOf(name);
+    return position < 0 ? order.length : position;
+  };
+  return [...entries].sort((left, right) => rank(left.name) - rank(right.name) || left.index - right.index);
+}
+
+// renderPetRecords shows four groups: who the pet is and how it judges, the
+// Owner's corrections, what it promised, and what it did. The corrections
+// and the ledger status counts come from the records insights read and are
+// filled in after this renders. Edit buttons, the table of contents (open on
+// wide screens, folded on phones) and worklog paging are unchanged.
 export function renderPetRecords(
   core: Array<{name: string; content: string}>,
   worklog: PetRecordEntry[],
   options: PetRecordsOptions,
 ): string {
-  const translate = options.translate;
+  const translate = petRecordsText(options.translate);
   const sorted = sortPetWorklog(worklog);
   const tocOpen = options.tocOpen !== false;
+  // Element ids keep the response index so an entry keeps its id whichever
+  // group it is in.
+  const indexed = core.map((entry, index) => ({...entry, index}));
+  const judgment = orderPetCore(indexed.filter(entry => petRecordGroup(entry.name) === "judgment"), PET_RECORD_JUDGMENT);
+  const promises = orderPetCore(indexed.filter(entry => petRecordGroup(entry.name) === "promises"), PET_RECORD_PROMISES);
+  const tocGroup = (id: string, titleKey: string, count: number | null, items: string) =>
+    `<button type="button" data-pet-record-goto="${id}">${escapeHTML(translate(titleKey))}${count === null ? "" : ` (${count})`}</button>${items}`;
+  const tocCore = (entries: typeof indexed) => entries.map(entry => `<button type="button" class="pet-record-toc-sub" data-pet-record-goto="pet-record-core-${entry.index}">${escapeHTML(entry.name)}</button>`).join("");
   const toc = [
-    `<button type="button" data-pet-record-goto="pet-record-core">${escapeHTML(translate("petWorkbench.core"))} (${core.length})</button>`,
-    ...core.map((entry, index) => `<button type="button" class="pet-record-toc-sub" data-pet-record-goto="pet-record-core-${index}">${escapeHTML(entry.name)}</button>`),
-    `<button type="button" data-pet-record-goto="pet-record-worklog">${escapeHTML(translate("petWorkbench.worklog"))} (${sorted.length})</button>`,
-    ...sorted.map((entry, index) => `<button type="button" class="pet-record-toc-sub" data-pet-record-goto="pet-record-worklog-${index}">${escapeHTML(entry.date)}</button>`),
+    tocGroup("pet-record-judgment", "petWorkbench.records.judgment", judgment.length, tocCore(judgment)),
+    tocGroup("pet-record-corrections", "petWorkbench.records.corrections", null, ""),
+    tocGroup("pet-record-promises", "petWorkbench.records.promises", promises.length, tocCore(promises)),
+    tocGroup("pet-record-worklog", "petWorkbench.records.worklog", sorted.length,
+      sorted.map((entry, index) => `<button type="button" class="pet-record-toc-sub" data-pet-record-goto="pet-record-worklog-${index}">${escapeHTML(entry.date)}</button>`).join("")),
   ].join("");
   const toggleLabel = tocOpen
     ? translate("petWorkbench.recordsTocCollapse")
     : translate("petWorkbench.recordsTocExpand");
-  const coreBody = core.length
-    ? core.map((entry, index) => renderCoreEntry(entry, index, translate)).join("")
+  const coreBody = (entries: typeof indexed, ledger: boolean) => entries.length
+    ? entries.map(entry => renderCoreEntry(entry, entry.index, translate, ledger)).join("")
     : `<div class="field-help">${escapeHTML(options.emptyCore)}</div>`;
   const worklogBody = sorted.length
     ? sorted.map((entry, index) => renderWorklogEntry(entry, index, translate)).join("")
     : `<div class="field-help">${escapeHTML(options.emptyWorklog)}</div>`;
+  const section = (id: string, key: string, body: string) => `<section class="pet-record-section" id="${id}">
+        <h3>${escapeHTML(translate(`petWorkbench.records.${key}`))}</h3>
+        <p class="pet-record-intro">${escapeHTML(translate(`petWorkbench.records.${key}Intro`))}</p>
+        ${body}
+      </section>`;
   return `<div class="pet-records${tocOpen ? "" : " toc-collapsed"}">
     <aside class="pet-record-toc" id="pet-record-toc">
       <strong>${escapeHTML(translate("petWorkbench.recordsToc"))}</strong>
@@ -816,15 +853,171 @@ export function renderPetRecords(
     </aside>
     <div class="pet-record-content">
       <div class="pet-record-toolbar"><button type="button" class="pet-record-toc-toggle" data-pet-record-toc-toggle aria-expanded="${tocOpen}" aria-controls="pet-record-toc-nav">${escapeHTML(toggleLabel)}</button></div>
-      <section class="pet-record-section" id="pet-record-core">
-        <h3>${escapeHTML(translate("petWorkbench.core"))}</h3>
-        ${coreBody}
-      </section>
-      <section class="pet-record-section" id="pet-record-worklog">
-        <h3>${escapeHTML(translate("petWorkbench.worklog"))}</h3>
-        ${worklogBody}
-      </section>
+      <div class="pet-record-knowledge" data-pet-record-knowledge role="status">${escapeHTML(translate("common.loading"))}</div>
+      ${section("pet-record-judgment", "judgment", coreBody(judgment, false))}
+      ${section("pet-record-corrections", "corrections", `<div class="pet-record-corrections" data-pet-record-corrections><div class="field-help">${escapeHTML(translate("common.loading"))}</div></div>`)}
+      ${section("pet-record-promises", "promises", coreBody(promises, true))}
+      ${section("pet-record-worklog", "worklog", worklogBody)}
     </div>
   </div>`;
 }
 
+/* Records page copy -------------------------------------------------------- */
+
+// The records page's copy lives in this route chunk instead of the shared
+// catalog, so it costs the first screen nothing (task-813 step three). Keys
+// are looked up through recordsText, which falls back to the shared
+// translate for anything else.
+const PET_RECORDS_COPY: Record<"zh-CN" | "en-US", Record<string, string>> = {
+  "zh-CN": {
+    "judgment": "它是谁、怎么判断",
+    "judgmentIntro": "宠物的身份和做事准则，以及 AHA 自动记下的每次修改。",
+    "corrections": "你的纠正",
+    "correctionsIntro": "你否决审批时写的原因。宠物把判断写进做事准则后，这些纠正就算消化了。",
+    "correctionsEmpty": "你还没有纠正过宠物。",
+    "correctionsUnavailable": "暂时读不到纠正记录。",
+    "correctionState.open": "还没消化",
+    "correctionState.absorbed": "已写进原则",
+    "correctionState.expired": "已过期",
+    "promises": "它答应的事",
+    "promisesIntro": "宠物记下的未闭环事项和自己的议程，标题旁是各状态的条数。",
+    "ledgerEmpty": "没有条目",
+    "worklog": "它做过的事",
+    "worklogIntro": "宠物按日期写的工作记录，新的在上。",
+    "knowledgeTitle": "知识库：",
+    "knowledgeEntries": "{entries} 条",
+    "knowledgePending": "待修订 {pending} 条",
+    "knowledgeHelped": "有帮助 {helped} 次",
+    "knowledgeHelpedPartial": "有帮助 {helped} 次（新知识库不记这个数，未计入）",
+    "knowledgeTruncated": "只读了前 {projects} 个项目",
+    "knowledgeFailed": "{count} 个知识空间读取失败",
+    "knowledgeUnavailable": "暂时读不到知识库的情况。",
+    "knowledgeStatus.stale": "过时",
+    "knowledgeStatus.wrong": "错误",
+  },
+  "en-US": {
+    "judgment": "Who it is and how it judges",
+    "judgmentIntro": "The pet's identity and principles, and every change AHA recorded.",
+    "corrections": "Your corrections",
+    "correctionsIntro": "The reasons you wrote when rejecting approvals. A correction is absorbed once the pet writes the judgment into its principles.",
+    "correctionsEmpty": "You have not corrected the pet yet.",
+    "correctionsUnavailable": "Corrections are not available right now.",
+    "correctionState.open": "Not absorbed yet",
+    "correctionState.absorbed": "In its principles",
+    "correctionState.expired": "Expired",
+    "promises": "What it promised",
+    "promisesIntro": "The pet's open loops and its own agenda, with the count per status next to each title.",
+    "ledgerEmpty": "no entries",
+    "worklog": "What it did",
+    "worklogIntro": "The pet's dated work log, newest first.",
+    "knowledgeTitle": "Knowledge:",
+    "knowledgeEntries": "{entries} entries",
+    "knowledgePending": "{pending} to revise",
+    "knowledgeHelped": "{helped} helped",
+    "knowledgeHelpedPartial": "{helped} helped (the new knowledge base does not keep this count)",
+    "knowledgeTruncated": "only the first {projects} projects read",
+    "knowledgeFailed": "{count} knowledge spaces failed to read",
+    "knowledgeUnavailable": "Knowledge health is not available right now.",
+    "knowledgeStatus.stale": "stale",
+    "knowledgeStatus.wrong": "wrong",
+  },
+};
+
+function recordsLocale(): "zh-CN" | "en-US" {
+  return currentLocale() === "en-US" ? "en-US" : "zh-CN";
+}
+
+// recordsText resolves "petWorkbench.records.*" keys from this chunk and
+// everything else through the page's translate.
+export function petRecordsText(translate: Translate): Translate {
+  return (key, values = {}) => {
+    if (!key.startsWith("petWorkbench.records.")) return translate(key, values);
+    const name = key.slice("petWorkbench.records.".length);
+    const template = PET_RECORDS_COPY[recordsLocale()][name] ?? PET_RECORDS_COPY["zh-CN"][name] ?? key;
+    return template.replace(/\{(\w+)\}/g, (_, field: string) => String(values[field] ?? `{${field}}`));
+  };
+}
+
+/* Records page data filled after render ----------------------------------- */
+
+export interface PetRecordsDataOptions {
+  translate: Translate;
+  formatTime: FormatTime;
+}
+
+const PET_CORRECTION_STATES = ["open", "absorbed", "expired"];
+
+// renderPetCorrectionHistory fills the corrections group. `records` null
+// means the read failed or the server has no such data.
+export function renderPetCorrectionHistory(records: PetCorrectionRecord[] | null | undefined, options: PetRecordsDataOptions): string {
+  const translate = petRecordsText(options.translate);
+  if (!Array.isArray(records)) {
+    return `<div class="field-help" role="status">${escapeHTML(translate("petWorkbench.records.correctionsUnavailable"))}</div>`;
+  }
+  const rows = records.filter(item => item && typeof item === "object" && !Array.isArray(item));
+  if (!rows.length) {
+    return `<div class="field-help">${escapeHTML(translate("petWorkbench.records.correctionsEmpty"))}</div>`;
+  }
+  return `<ol class="pet-record-correction-list">${rows.map(item => {
+    const state = PET_CORRECTION_STATES.includes(textValue(item.state)) ? textValue(item.state) : "open";
+    const at = textValue(item.at);
+    const time = at && petDeskElapsedMinutes(at, Date.now()) !== null ? `<small>${escapeHTML(options.formatTime(at))}</small>` : "";
+    const title = textValue(item.title);
+    return `<li class="pet-record-correction state-${state}">
+      <div class="pet-record-correction-head"><strong>${title ? deskText(title) : escapeHTML(translate("petWorkbench.desk.untitled"))}</strong><span class="pet-record-correction-state">${escapeHTML(translate(`petWorkbench.records.correctionState.${state}`))}</span>${time}</div>
+      <p>${deskText(textValue(item.owner_note))}</p>
+    </li>`;
+  }).join("")}</ol>`;
+}
+
+// renderPetLedgerCounts is the "open 2 · waiting 1" line next to a ledger's
+// title. Statuses are the pet's own words, so they are shown as written.
+export function renderPetLedgerCounts(counts: PetLedgerCounts | undefined, pageTranslate: Translate): string {
+  const translate = petRecordsText(pageTranslate);
+  if (!counts || typeof counts !== "object" || !counts.counts || typeof counts.counts !== "object") return "";
+  const parts = Object.entries(counts.counts)
+    .filter(([status, count]) => status && typeof count === "number" && count > 0)
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .map(([status, count]) => `${deskText(status)} ${count}`);
+  if (!parts.length) return `<span class="pet-record-ledger-counts">${escapeHTML(translate("petWorkbench.records.ledgerEmpty"))}</span>`;
+  return `<span class="pet-record-ledger-counts">${parts.join(" · ")}</span>`;
+}
+
+// petKnowledgeEntryHash is the knowledge page's deep link for one entry.
+export function petKnowledgeEntryHash(item: {id?: string; scope?: string; project_id?: string}): string {
+  const params = new URLSearchParams({doc: String(item.id || "")});
+  if (item.scope === "global") {
+    params.set("scope", "global");
+  } else {
+    params.set("scope", "project");
+    if (item.project_id) params.set("project", item.project_id);
+  }
+  return `#knowledge?${params.toString()}`;
+}
+
+// renderPetKnowledgeHealth is the line at the top of the records page.
+// `health` null means the read failed; the rest of the page is unaffected.
+export function renderPetKnowledgeHealth(health: PetKnowledgeHealth | null | undefined, pageTranslate: Translate): string {
+  const translate = petRecordsText(pageTranslate);
+  if (!health || typeof health !== "object" || Array.isArray(health)) {
+    return `<span class="pet-record-knowledge-summary">${escapeHTML(translate("petWorkbench.records.knowledgeUnavailable"))}</span>`;
+  }
+  const helped = health.helped_partial
+    ? translate("petWorkbench.records.knowledgeHelpedPartial", {helped: countValue(health.helped) ?? 0})
+    : translate("petWorkbench.records.knowledgeHelped", {helped: countValue(health.helped) ?? 0});
+  const parts = [
+    translate("petWorkbench.records.knowledgeEntries", {entries: countValue(health.entries) ?? 0}),
+    translate("petWorkbench.records.knowledgePending", {pending: countValue(health.pending) ?? 0}),
+    helped,
+  ];
+  if (health.truncated) parts.push(translate("petWorkbench.records.knowledgeTruncated", {projects: countValue(health.projects) ?? 0}));
+  if ((countValue(health.failed) ?? 0) > 0) parts.push(translate("petWorkbench.records.knowledgeFailed", {count: countValue(health.failed) ?? 0}));
+  const items = deskList<PetKnowledgePending>(health.pending_items).filter(item => textValue(item.id));
+  const list = items.length
+    ? `<ul class="pet-record-knowledge-pending">${items.map(item => {
+      const status = textValue(item.status) === "wrong" ? "wrong" : "stale";
+      return `<li><a href="${escapeHTML(petKnowledgeEntryHash(item))}" data-pet-knowledge-link>${deskText(textValue(item.title) || textValue(item.id))}</a><small>${deskText(textValue(item.space))} · ${escapeHTML(translate(`petWorkbench.records.knowledgeStatus.${status}`))}</small></li>`;
+    }).join("")}</ul>`
+    : "";
+  return `<span class="pet-record-knowledge-summary"><strong>${escapeHTML(translate("petWorkbench.records.knowledgeTitle"))}</strong> ${escapeHTML(parts.join(" · "))}</span>${list}`;
+}

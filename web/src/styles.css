@@ -3103,6 +3103,24 @@ button.pet-desk-item-main:hover strong { color: var(--color-accent-hover); }
 /* .field-help pulls itself up for form hints; desk notes sit in normal flow. */
 .pet-desk-more, .pet-desk-empty { margin: 0; font-size: var(--font-size-12); }
 .pet-desk-follows { display: grid; gap: var(--space-2); }
+/* Records page groups (task-813 step three). */
+.pet-record-intro { margin: 0 0 var(--space-2); color: var(--color-text-muted); font-size: var(--font-size-13); }
+.pet-record-knowledge { display: grid; gap: var(--space-1); border: 1px solid var(--color-border-subtle); border-radius: var(--radius-card); background: var(--color-surface); padding: var(--space-2) var(--space-3); font-size: var(--font-size-13); color: var(--color-text-muted); }
+.pet-record-knowledge-summary strong { color: var(--color-text); }
+.pet-record-knowledge-pending { margin: 0; padding-left: var(--space-4); display: grid; gap: 2px; }
+.pet-record-knowledge-pending li { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-2); align-items: baseline; min-width: 0; }
+.pet-record-knowledge-pending a { color: var(--color-accent-ink); overflow-wrap: anywhere; }
+.pet-record-knowledge-pending small { font-size: var(--font-size-12); }
+.pet-record-correction-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-2); }
+.pet-record-correction { border: 1px solid var(--color-border-subtle); border-radius: var(--radius-control); padding: var(--space-2); display: grid; gap: var(--space-1); min-width: 0; }
+.pet-record-correction p { margin: 0; font-size: var(--font-size-13); overflow-wrap: anywhere; }
+.pet-record-correction-head { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-2); align-items: baseline; min-width: 0; }
+.pet-record-correction-head strong { overflow-wrap: anywhere; }
+.pet-record-correction-head small { color: var(--color-text-muted); font-size: var(--font-size-12); }
+.pet-record-correction-state { border-radius: 999px; padding: 0 var(--space-2); font-size: var(--font-size-12); border: 1px solid var(--color-border); color: var(--color-text-muted); }
+.pet-record-correction.state-open .pet-record-correction-state { color: var(--color-warning-ink); background: var(--color-warning-soft); border-color: color-mix(in srgb, var(--color-warning) 35%, var(--color-border)); }
+.pet-record-correction.state-absorbed .pet-record-correction-state { color: var(--color-success-ink); background: var(--color-success-soft); border-color: color-mix(in srgb, var(--color-success) 35%, var(--color-border)); }
+.pet-record-ledger-counts { color: var(--color-text-muted); font-size: var(--font-size-12); font-weight: 400; margin-left: var(--space-2); }
 .pet-desk-reply { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-2); border: 1px solid var(--color-border-subtle); border-radius: var(--radius-card); background: var(--color-surface); padding: var(--space-2) var(--space-3); font-size: var(--font-size-13); min-width: 0; }
 .pet-desk-reply > strong { flex: 0 0 auto; }
 .pet-desk-reply-text { flex: 1 1 240px; min-width: 0; color: var(--color-text); overflow-wrap: anywhere; white-space: pre-line; }

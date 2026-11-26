@@ -112,7 +112,7 @@ async function buildModules() {
     "task_vault_skills.js": ["api"],
     "model_source_picker.js": ["i18n"],
     "channels.js": ["api", "icons", "i18n", "model_source_picker"],
-    "pet_desk.js": ["pet_approvals", "ui_helpers"],
+    "pet_desk.js": ["i18n", "pet_approvals", "ui_helpers"],
     "assistant.js": ["api", "i18n", "pet_bubble", "pet_character", "pet_navigation", "model_source_picker"],
   };
   for (const [file, dependencies] of Object.entries(importers)) {

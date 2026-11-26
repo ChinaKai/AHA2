@@ -4023,7 +4023,12 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   // step-two styles to the shared stylesheet. From 3e514e1 (230,884 JS +
   // 56,892 CSS = 287,776) the same masked-query, level-5 build measures
   // 228,415 JS + 57,027 CSS = 285,442. Ceil to the next 256-byte boundary.
-  const FIRST_SCREEN_GZIP_BUDGET = 285696;
+  // task-813 step three regroups the records tab and adds the knowledge line.
+  // Its renderers and copy stay in the pet_desk chunk; the first screen gains
+  // the records-tab wiring in main.ts and the records styles. From 5898f80
+  // (285,442) the same masked-query, level-5 build measures 228,671 JS +
+  // 57,313 CSS = 285,984. Ceil to the next 256-byte boundary.
+  const FIRST_SCREEN_GZIP_BUDGET = 286208;
   // The version query parameter is a content hash and its hex digits change
   // how the same code gzips: main already sits exactly on the budget, so a
   // hash-only change could trip it without growing the payload. Mask the
@@ -4035,6 +4040,7 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   const deskChunk = jsNames.find(name => name.startsWith("pet_desk."));
   assert.ok((await readFile(resolve(dist, deskChunk), "utf8")).includes("pet-desk-insights"));
   assert.ok([...seen.values()].every(text => !text.includes("pet-desk-insights") && !text.includes("pet-record-toc-sub")), "desk and records renderers stay in the lazy chunk");
+  assert.ok([...seen.values()].every(text => !text.includes("它答应的事") && !text.includes("What it promised")), "records copy stays in the lazy chunk");
   const repositoryNotice = "Reading registered submodules timed out.";
   const viewerChunk = jsNames.find(name => name.startsWith("workspace_viewer."));
   assert.ok((await readFile(resolve(dist, viewerChunk), "utf8")).includes(repositoryNotice));

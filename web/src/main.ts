@@ -9938,11 +9938,53 @@ async function bindPetWorkbenchPage(): Promise<void> {
       });
   };
 
+  // The records tab reads the correction history, ledger counts and
+  // knowledge health with ?records=1, only when the tab is opened, so the
+  // overview's first load never waits for them. Same guards as the overview
+  // block: one request per paint, aborted on leaving, written only into the
+  // live nodes of the current binding, and a finished result is reused.
+  let recordsData: PetInsights | null | undefined;
+  let recordsController: AbortController | null = null;
+  const loadRecordsData = (module: PetDeskModule): void => {
+    const knowledgeHost = body.querySelector<HTMLElement>("[data-pet-record-knowledge]");
+    const correctionsHost = body.querySelector<HTMLElement>("[data-pet-record-corrections]");
+    if (!knowledgeHost || !correctionsHost) return;
+    const paint = (value: PetInsights | null) => {
+      knowledgeHost.innerHTML = module.renderPetKnowledgeHealth(value && !value.knowledge_error ? value.knowledge : null, t);
+      correctionsHost.innerHTML = module.renderPetCorrectionHistory(value && !value.corrections_error ? value.correction_history : null, {translate: t, formatTime: formatDateTime});
+      body.querySelectorAll<HTMLElement>("[data-pet-ledger-counts]").forEach(slot => {
+        slot.innerHTML = module.renderPetLedgerCounts(value?.ledgers?.find(item => item?.name === slot.dataset.petLedgerCounts), t);
+      });
+    };
+    if (recordsData !== undefined) {
+      paint(recordsData);
+      return;
+    }
+    recordsController?.abort();
+    const controller = new AbortController();
+    recordsController = controller;
+    const timer = window.setTimeout(() => controller.abort(), PET_WORKBENCH_TIMEOUT_MS);
+    void api.petWorkbenchInsights(controller.signal, {records: true})
+      .then(result => result?.insights ?? null, () => null)
+      .then(value => {
+        window.clearTimeout(timer);
+        if (recordsController === controller) recordsController = null;
+        if (controller.signal.aborted && recordsController !== null) return;
+        if (!knowledgeHost.isConnected || petWorkbenchPageKeeper.binding !== binding) return;
+        if (value) recordsData = value;
+        paint(value);
+      });
+  };
+
   const renderTab = () => {
     active = mapPetWorkbenchTab(active);
     if (active !== "overview") {
       insightsController?.abort();
       insightsController = null;
+    }
+    if (active !== "records") {
+      recordsController?.abort();
+      recordsController = null;
     }
     tabs.forEach(tab => tab.classList.toggle("active", tab.dataset.petWorkbenchTab === active));
     if (!view) {
@@ -10004,6 +10046,7 @@ async function bindPetWorkbenchPage(): Promise<void> {
       });
       bindRecordToc();
       bindRecordTocToggle();
+      loadRecordsData(deskModule);
       bindLoadMore();
     } else if (active === "settings") {
       body.innerHTML = `<div id="pet-settings-host" class="pet-workbench-settings"></div>`;
@@ -10024,8 +10067,10 @@ async function bindPetWorkbenchPage(): Promise<void> {
     onData: value => {
       view = value;
       loadingMore = null;
-      // A full reload (event, save, retry) re-reads the last 7 days too.
+      // A full reload (event, save, retry) re-reads the last 7 days and the
+      // records data too.
       insights = undefined;
+      recordsData = undefined;
       void refreshPetPendingApprovalCount();
       renderTab();
       if ((view.approvals || []).some(item => item.status === "executing")) scheduleApprovalExecutionPoll();
@@ -10045,7 +10090,13 @@ async function bindPetWorkbenchPage(): Promise<void> {
   });
   // Leaving the view releases the binding; that aborts the workbench read and
   // the last-7-days read together.
-  const pageRequests = {dispose: () => { insightsController?.abort(); insightsController = null; loader.dispose(); }};
+  const pageRequests = {dispose: () => {
+    insightsController?.abort();
+    insightsController = null;
+    recordsController?.abort();
+    recordsController = null;
+    loader.dispose();
+  }};
   binding = petWorkbenchPageKeeper.adopt(body, body.closest<HTMLElement>(".pet-workbench-page"), pageRequests, active);
   binding.refresh = () => { if (active === "approvals") refreshApprovals(); };
   // Only the tabs that render from the chunk repaint when it settles; the

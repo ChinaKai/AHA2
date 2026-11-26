@@ -90,6 +90,19 @@ window.__insightReads = 0;
 // insights=fail answers 500, insights=old answers 404 like a server without
 // the route, insights=slow holds the response until __releaseInsights().
 window.__insightsMode = params.get("insights") || "ok";
+window.__recordsMode = params.get("records") || "ok";
+window.__recordsData = {
+  correction_history: params.get("corrections") === "none" ? [] : [
+    {at: new Date(Date.now() - 3600e3).toISOString(), approval_id: "a-9", kind: "delete_workspace", title: "删除工作区 X", owner_note: "这个还要留着对比", state: "open"},
+    {at: new Date(Date.now() - 3 * 86400e3).toISOString(), approval_id: "a-8", kind: "owner_decision", title: "合并 task-700", owner_note: "先评审再合", state: "absorbed"},
+    {at: new Date(Date.now() - 9 * 86400e3).toISOString(), approval_id: "a-7", kind: "owner_decision", title: "换模型", owner_note: "等下个月", state: "expired"},
+  ],
+  ledgers: [{name: "loops.md", counts: {open: 2, waiting: 1}, total: 3}, {name: "agenda.md", counts: {next: 1}, total: 1}],
+  knowledge: {
+    entries: 42, pending: 2, helped: 7, helped_partial: true, truncated: false, failed: 0, projects: 3, elapsed_ms: 4, spaces: [],
+    pending_items: [{id: "k-1", title: "过时的部署说明", scope: "project", project_id: "p-1", space: "AHA2", status: "stale"}],
+  },
+};
 window.__insightWaiters = [];
 window.__releaseInsights = () => { for (const resolve of window.__insightWaiters.splice(0)) resolve(); };
 const pageApprovals = ${JSON.stringify(pageApprovals)};
@@ -102,11 +115,26 @@ window.fetch = async (input, init = {}) => {
   if (path === "/api/v1/system") return json({system: {web_version: "test", version: "test", started_at: new Date().toISOString()}});
   if (path === "/api/v1/assistant") return json({assistant: {character: "gugugaga", name: "AHA", nickname: "AHA", enabled: false}, messages: [], models: [], tools: []});
   if (path === "/api/v1/pet/approvals/pending-count") return json({ok: true, pending: 2});
+  if (path.startsWith("/api/v1/pet/workbench/core/") && (init.method || "GET").toUpperCase() === "PUT") {
+    window.__savedDocs = [...(window.__savedDocs || []), decodeURIComponent(path.split("/").pop())];
+    return json({ok: true});
+  }
   if (path.startsWith("/api/v1/pet/approvals/") && (init.method || "GET").toUpperCase() === "GET") {
     const id = decodeURIComponent(path.split("/")[5]);
     window.__approvalReads.push(id);
     const item = allApprovals.find(approval => approval.id === id);
     return item ? json({ok: true, approval: item}) : json({ok: false, error: "pet_approval_not_found"}, 404);
+  }
+  if (path === "/api/v1/pet/workbench/insights" && url.searchParams.get("records") === "1") {
+    // The records tab's read (task-813 step three). Counted apart so the
+    // overview's insights checks keep their meaning.
+    window.__recordsReads = (window.__recordsReads || 0) + 1;
+    if (window.__recordsMode === "fail") return json({ok: false, error: "pet_insights_failed"}, 500);
+    if (window.__recordsMode === "slow") {
+      (window.__recordsSignals ||= []).push(init.signal);
+      await new Promise(resolve => (window.__recordsWaiters ||= []).push(resolve));
+    }
+    return json({ok: true, insights: {...${JSON.stringify(insights)}, ...window.__recordsData}});
   }
   if (path === "/api/v1/pet/workbench/insights") {
     window.__insightReads++;
@@ -123,7 +151,7 @@ window.fetch = async (input, init = {}) => {
     window.__workbenchQueries.push(limit);
     const approvals = limit >= 200 ? allApprovals : pageApprovals;
     return json({
-      ok: true, core: [{name: "core/loops.md", content: "loops"}], worklog: [], approvals, approval_total: allApprovals.length,
+      ok: true, core: [{name: "loops.md", content: "loops"}, {name: "identity.md", content: "identity"}, {name: "principles.md", content: "principles"}, {name: "agenda.md", content: "agenda"}], worklog: [{date: "2026-11-25", content: "做了一件事"}], worklog_total: 1, approvals, approval_total: allApprovals.length,
       approval_counts: [{kind: "idea", status: "pending", count: 1}, {kind: "owner_decision", status: "pending", count: 1}],
       watches: ${JSON.stringify(watches)}, updated_at: new Date().toISOString(),
       inspection: {health: "ok", version: "9.9.9", web_version: "web-1", uptime_minutes: 125, checked_at: new Date().toISOString(), pending_approvals: 2},
@@ -412,6 +440,96 @@ try {
   await page.waitForSelector("#pet-workbench-body .chunk-state-error", {timeout: 20000});
   await page.click('[data-pet-workbench-tab="approvals"]');
   await page.waitForSelector("[data-pet-approval-filters-open]", {timeout: 15000});
+
+  // Step three, items 9-11: the records tab.
+  await openOverview(page);
+  await page.click('[data-pet-workbench-tab="records"]');
+  await body.locator(".pet-records").waitFor({timeout: 15000});
+  const groups = await page.evaluate(() => [...document.querySelectorAll("#pet-workbench-body .pet-record-section")].map(section => [section.id, section.querySelector("h3")?.textContent, Boolean(section.querySelector(".pet-record-intro")?.textContent.trim())]));
+  assert.deepEqual(groups, [
+    ["pet-record-judgment", "Who it is and how it judges", true],
+    ["pet-record-corrections", "Your corrections", true],
+    ["pet-record-promises", "What it promised", true],
+    ["pet-record-worklog", "What it did", true],
+  ]);
+  await body.locator(".pet-record-correction").first().waitFor({timeout: 15000});
+  assert.deepEqual(await body.locator(".pet-record-correction-state").allInnerTexts(), ["Not absorbed yet", "In its principles", "Expired"]);
+  assert.match(await body.locator(".pet-record-correction").first().innerText(), /删除工作区 X[\s\S]*这个还要留着对比/);
+  assert.match(await body.locator('[data-pet-ledger-counts="loops.md"]').innerText(), /open 2 · waiting 1/);
+  assert.match(await body.locator('[data-pet-ledger-counts="agenda.md"]').innerText(), /next 1/);
+  assert.match(await body.locator("[data-pet-record-knowledge]").innerText(), /Knowledge: 42 entries · 2 to revise · 7 helped \(the new knowledge base does not keep this count\)/);
+  assert.equal(await body.locator("[data-pet-knowledge-link]").getAttribute("href"), "#knowledge?doc=k-1&scope=project&project=p-1");
+  // English only (titles and notes are content, marked data-i18n-ignore).
+  assert.deepEqual(await untranslated(page).then(items => items.filter(text => !/^(identity|principles|loops|agenda)$/.test(text) && text !== "做了一件事")), []);
+  // The table of contents follows the groups and still jumps.
+  const tocTargets = await page.evaluate(() => [...document.querySelectorAll("#pet-record-toc-nav [data-pet-record-goto]")].map(button => button.dataset.petRecordGoto));
+  assert.deepEqual(tocTargets.filter(target => !target.startsWith("pet-record-core-") && !target.startsWith("pet-record-worklog-")),
+    ["pet-record-judgment", "pet-record-corrections", "pet-record-promises", "pet-record-worklog"]);
+  await body.locator('#pet-record-toc-nav [data-pet-record-goto="pet-record-promises"]').click();
+  // The edit button on a document in a regrouped section still edits and saves it.
+  // agenda.md is the fourth core document in the response (index 3); its id
+  // stays put whichever group it renders in. The edit button that carries the
+  // name is removed once the editor opens, so select by id.
+  const agenda = body.locator("#pet-record-promises #pet-record-core-3");
+  assert.equal(await agenda.locator('[data-pet-doc-name="agenda.md"]').count(), 1);
+  await agenda.locator("[data-pet-doc-edit]").click();
+  await agenda.locator("textarea").fill("新的议程");
+  await agenda.locator("button.primary").click();
+  await page.waitForFunction(() => (window.__savedDocs || []).includes("agenda.md"), null, {timeout: 15000});
+  // The knowledge link opens the knowledge page.
+  await body.locator("[data-pet-knowledge-link]").click();
+  await page.waitForSelector(".pet-workbench-page", {state: "detached", timeout: 15000});
+  assert.match(await page.evaluate(() => location.hash), /^#knowledge/);
+
+  // A failed records read: the line and the corrections say so, the documents
+  // still render and their edit buttons still exist.
+  await openOverview(page, "?records=fail");
+  await page.click('[data-pet-workbench-tab="records"]');
+  await page.waitForFunction(() => document.querySelector("[data-pet-record-knowledge]")?.textContent.includes("not available"), null, {timeout: 15000});
+  assert.match(await body.locator("[data-pet-record-corrections]").innerText(), /Corrections are not available right now\./);
+  assert.equal(await body.locator("#pet-record-judgment [data-pet-doc-edit]").count(), 2);
+  assert.equal(await body.locator(".pet-record-ledger-counts").count(), 0, "no counts without data");
+  assert.deepEqual(await untranslated(page).then(items => items.filter(text => !/^(identity|principles|loops|agenda)$/.test(text) && text !== "做了一件事")), []);
+
+  // No corrections yet: the empty state.
+  await openOverview(page, "?corrections=none");
+  await page.click('[data-pet-workbench-tab="records"]');
+  await page.waitForFunction(() => document.querySelector("[data-pet-record-corrections]")?.textContent.includes("You have not corrected"), null, {timeout: 15000});
+
+  // The records read happens only on the records tab, once per page, and a
+  // tab switch while it is in flight aborts it.
+  await openOverview(page);
+  await body.locator("#pet-desk-insights .pet-desk-insights-list").waitFor({timeout: 15000});
+  assert.equal(await page.evaluate(() => window.__recordsReads || 0), 0, "the overview never asks for records data");
+  await page.click('[data-pet-workbench-tab="records"]');
+  await body.locator(".pet-record-correction").first().waitFor({timeout: 15000});
+  // Overview and back repaints the tab without a reload: the result is reused.
+  // (The approvals tab always reloads the workbench, which also refreshes
+  // the records data; that is the existing approvals behaviour.)
+  await page.click('[data-pet-workbench-tab="overview"]');
+  await page.click('[data-pet-workbench-tab="records"]');
+  assert.equal(await body.locator(".pet-record-correction").count(), 3, "repaint fills from the cached result at once");
+  await page.waitForTimeout(300);
+  assert.equal(await page.evaluate(() => window.__recordsReads), 1, "a finished records read is reused");
+
+  // Leaving the records tab while its read is in flight aborts it, and the
+  // late answer never writes into the page.
+  await openOverview(page, "?records=slow");
+  await page.click('[data-pet-workbench-tab="records"]');
+  await page.waitForFunction(() => (window.__recordsSignals || []).length === 1);
+  await page.click('[data-pet-workbench-tab="overview"]');
+  assert.equal(await page.evaluate(() => window.__recordsSignals[0].aborted), true, "leaving records aborts its read");
+  await page.evaluate(() => { for (const resolve of window.__recordsWaiters.splice(0)) resolve(); });
+  await page.waitForTimeout(200);
+  assert.equal(await body.locator(".pet-desk").count(), 1, "the overview is untouched by the late answer");
+  assert.deepEqual(errors, [], `page errors: ${errors.join(" | ")}`);
+
+  // Chinese records page.
+  await openOverview(page, "?language=zh-CN");
+  await page.click('[data-pet-workbench-tab="records"]');
+  await body.locator(".pet-record-correction").first().waitFor({timeout: 15000});
+  assert.deepEqual(await body.locator(".pet-record-section h3").allInnerTexts(), ["它是谁、怎么判断", "你的纠正", "它答应的事", "它做过的事"]);
+  assert.deepEqual(await body.locator(".pet-record-correction-state").allInnerTexts(), ["还没消化", "已写进原则", "已过期"]);
 
   assert.deepEqual(errors, [], `page errors: ${errors.join(" | ")}`);
   console.log("pet desk browser checks passed");

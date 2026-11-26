@@ -798,7 +798,8 @@ test("workbench collapses core documents and opens approvals on pending with ten
   // The records renderer moved to the pet_desk route chunk (task-813).
   const desk = await readFile(resolve(root, "web/src/pet_desk.ts"), "utf8");
   assert.match(main, /renderPetRecords\(view\.core, view\.worklog,/);
-  assert.match(desk, /core\.map\(\(entry, index\) => renderCoreEntry\(/);
+  // Records render core documents in their groups (task-813 step three).
+  assert.match(desk, /entries\.map\(entry => renderCoreEntry\(entry, entry\.index, translate, ledger\)\)/);
   assert.match(desk, /<details class="pet-doc-entry" id="pet-record-core-\$\{index\}">/);
   assert.doesNotMatch(desk, /<details class="pet-doc-entry" open>/);
   assert.match(main, /let petApprovalStatusFilter[^=]*= "pending";/);
@@ -1154,15 +1155,19 @@ test("records pin core documents above a newest-first worklog with a collapsible
   assert.match(html, /<aside class="pet-record-toc" id="pet-record-toc">/);
   assert.match(html, /<nav id="pet-record-toc-nav">/);
   assert.match(html, /data-pet-record-toc-toggle aria-expanded="true" aria-controls="pet-record-toc-nav">收起目录</);
-  assert.match(html, /data-pet-record-goto="pet-record-core"/);
+  // The contents follow the four groups (task-813 step three), with each
+  // core document under its group.
+  assert.match(html, /data-pet-record-goto="pet-record-judgment"/);
   assert.match(html, /data-pet-record-goto="pet-record-core-0"/);
+  assert.match(html, /data-pet-record-goto="pet-record-corrections"/);
+  assert.match(html, /data-pet-record-goto="pet-record-promises"/);
   assert.match(html, /data-pet-record-goto="pet-record-worklog"/);
   // The index lists each dated worklog entry, not only the section heading.
   assert.match(html, /data-pet-record-goto="pet-record-worklog-0">2026-01-03</);
   assert.match(html, /data-pet-record-goto="pet-record-worklog-1">2026-01-02</);
   assert.match(html, /data-pet-record-goto="pet-record-worklog-2">2026-01-01</);
   assert.match(html, /id="pet-record-worklog-0"/);
-  assert.ok(html.indexOf('id="pet-record-core"') < html.indexOf('id="pet-record-worklog"'), "core stays pinned on top");
+  assert.ok(html.indexOf('id="pet-record-judgment"') < html.indexOf('id="pet-record-worklog"'), "core stays pinned on top");
   assert.ok(html.indexOf("newest") < html.indexOf("middle") && html.indexOf("middle") < html.indexOf("oldest"));
   assert.match(html, /data-pet-doc-section="core" data-pet-doc-name="identity\.md"/);
   assert.match(html, /data-pet-doc-section="worklog" data-pet-doc-name="2026-01-03\.md"/);
@@ -1247,8 +1252,14 @@ test("records use a collapsible left contents column that survives tab switches"
 
 /* Pet desk overview (task-813, design doc section 10) --------------------- */
 
+// pet_desk.js imports the versioned i18n URL that build-web.mjs writes, so the
+// tests must use that same instance: a bare "../build/i18n.js" import is a
+// second module whose locale pet_desk never sees.
 const deskCatalog = async locale => {
-  const i18n = await import("../build/i18n.js");
+  const source = await readFile(resolve(root, "web/build/pet_desk.js"), "utf8");
+  const versioned = source.match(/from "\.\/(i18n\.js\?v=[^"]+)"/)?.[1];
+  assert.ok(versioned, "pet_desk.js must import the versioned i18n singleton");
+  const i18n = await import(new URL(`../build/${versioned}`, import.meta.url).href);
   i18n.applyLocale(locale);
   return i18n;
 };
@@ -1683,9 +1694,140 @@ test("the workbench loads the desk chunk lazily, fills insights per paint and re
   assert.match(main, /insightsController\?\.abort\(\);/);
   assert.match(main, /api\.petApproval\(approvalID, AbortSignal\.timeout\(PET_WORKBENCH_TIMEOUT_MS\)\)/);
   assert.doesNotMatch(main, /approvalLimit: PET_APPROVAL_MAX_LIMIT, worklogLimit: 1/, "the whole-page re-read is gone");
-  assert.match(api, /"\/api\/v1\/pet\/workbench\/insights"/);
+  assert.match(api, /`\/api\/v1\/pet\/workbench\/insights\$\{options\.records \? "\?records=1" : ""\}`/);
   assert.match(api, /`\/api\/v1\/pet\/approvals\/\$\{encodeURIComponent\(id\)\}`/);
   for (const moved of ["renderPetOverview", "renderPetRecords", "renderPetDesk", "bindPetDocEditorButtons"]) {
     assert.doesNotMatch(workbench, new RegExp(`function ${moved}\\b`), `${moved} left the first-screen module`);
   }
+});
+
+/* Step three: records page (task-813, design doc section 11) ------------- */
+
+const recordCore = [
+  {name: "loops.md", content: "loops"},
+  {name: "identity.md", content: "identity"},
+  {name: "agenda.md", content: "agenda"},
+  {name: "changes.md", content: "changes"},
+  {name: "principles.md", content: "principles"},
+];
+
+test("the records page shows four groups in order, each with a one-line intro", async () => {
+  const i18n = await deskCatalog("zh-CN");
+  const html = renderPetRecords(recordCore, [{date: "2026-11-25", content: "did"}], {translate: i18n.t, emptyCore: "无", emptyWorklog: "无", tocOpen: true});
+  const ids = ["pet-record-judgment", "pet-record-corrections", "pet-record-promises", "pet-record-worklog"];
+  const positions = ids.map(id => html.indexOf(`<section class="pet-record-section" id="${id}"`));
+  assert.ok(positions.every(position => position >= 0), `all groups: ${positions}`);
+  assert.deepEqual([...positions].sort((a, b) => a - b), positions, "group order");
+  for (const [id, title, intro] of [
+    ["pet-record-judgment", "它是谁、怎么判断", "宠物的身份和做事准则"],
+    ["pet-record-corrections", "你的纠正", "你否决审批时写的原因"],
+    ["pet-record-promises", "它答应的事", "宠物记下的未闭环事项和自己的议程"],
+    ["pet-record-worklog", "它做过的事", "宠物按日期写的工作记录"],
+  ]) {
+    const group = html.match(new RegExp(`<section class="pet-record-section" id="${id}">[\\s\\S]*?</section>`))?.[0] ?? "";
+    assert.match(group, new RegExp(`<h3>${title}</h3>\\s*<p class="pet-record-intro">${intro}`), id);
+  }
+  // Files land in their group in a fixed order; ids keep the response index.
+  const judgment = html.match(/<section class="pet-record-section" id="pet-record-judgment">[\s\S]*?<\/section>/)[0];
+  assert.deepEqual([...judgment.matchAll(/data-pet-doc-name="([^"]+)"/g)].map(match => match[1]), ["identity.md", "principles.md", "changes.md"]);
+  const promises = html.match(/<section class="pet-record-section" id="pet-record-promises">[\s\S]*?<\/section>/)[0];
+  assert.deepEqual([...promises.matchAll(/data-pet-doc-name="([^"]+)"/g)].map(match => match[1]), ["loops.md", "agenda.md"]);
+  assert.match(promises, /id="pet-record-core-0"><summary><span>loops\.md<\/span><span class="pet-record-ledger-slot" data-pet-ledger-counts="loops\.md"><\/span><button type="button" class="pet-doc-edit" data-pet-doc-edit data-pet-doc-section="core" data-pet-doc-name="loops\.md">/);
+  assert.match(judgment, /id="pet-record-core-1"><summary><span>identity\.md<\/span><button type="button" class="pet-doc-edit" data-pet-doc-edit/, "judgment files have no counts slot");
+  // The contents mirror the groups.
+  const toc = html.match(/<nav id="pet-record-toc-nav">([\s\S]*?)<\/nav>/)[1];
+  assert.deepEqual([...toc.matchAll(/data-pet-record-goto="([^"]+)"/g)].map(match => match[1]),
+    ["pet-record-judgment", "pet-record-core-1", "pet-record-core-4", "pet-record-core-3", "pet-record-corrections", "pet-record-promises", "pet-record-core-0", "pet-record-core-2", "pet-record-worklog", "pet-record-worklog-0"]);
+  // The knowledge line and corrections start as placeholders.
+  assert.ok(html.indexOf("data-pet-record-knowledge") < html.indexOf('id="pet-record-judgment"'), "knowledge line on top");
+  assert.match(html, /data-pet-record-corrections/);
+  // An unknown core file is not dropped.
+  assert.match(renderPetRecords([{name: "notes.md", content: "x"}], [], {translate: i18n.t, emptyCore: "无", emptyWorklog: "无"}), /<section class="pet-record-section" id="pet-record-judgment">[\s\S]*notes\.md/);
+});
+
+test("corrections show the three states, newest first, and an empty or failed read", async () => {
+  const {renderPetCorrectionHistory} = await import("../build/pet_desk.js");
+  const i18n = await deskCatalog("zh-CN");
+  const options = {translate: i18n.t, formatTime: value => `at ${value}`};
+  const html = renderPetCorrectionHistory([
+    {at: "2026-11-26T01:00:00Z", title: "删除 <X>", owner_note: "留着 <对比>", state: "open"},
+    {at: "2026-11-20T01:00:00Z", title: "合并", owner_note: "先评审", state: "absorbed"},
+    {at: "2026-11-10T01:00:00Z", title: "", owner_note: "太早", state: "expired"},
+    {at: "0001-01-01T00:00:00Z", title: "怪状态", owner_note: "x", state: "weird"},
+  ], options);
+  const rows = [...html.matchAll(/<li class="pet-record-correction state-(\w+)">[\s\S]*?<\/li>/g)];
+  assert.deepEqual(rows.map(row => row[1]), ["open", "absorbed", "expired", "open"], "server order; unknown state shows as open");
+  assert.match(rows[0][0], /<strong><span data-i18n-ignore>删除 &lt;X&gt;<\/span><\/strong><span class="pet-record-correction-state">还没消化<\/span><small>at 2026-11-26T01:00:00Z<\/small>/);
+  assert.match(rows[0][0], /<p><span data-i18n-ignore>留着 &lt;对比&gt;<\/span><\/p>/);
+  assert.match(rows[1][0], /已写进原则/);
+  assert.match(rows[2][0], /<strong>（无标题）<\/strong><span class="pet-record-correction-state">已过期<\/span>/);
+  assert.doesNotMatch(rows[3][0], /<small>/, "zero time shows no time");
+  assert.match(renderPetCorrectionHistory([], options), /你还没有纠正过宠物。/);
+  for (const failed of [null, undefined, {}, "x"]) assert.match(renderPetCorrectionHistory(failed, options), /暂时读不到纠正记录。/);
+});
+
+test("ledger counts come from the server, largest first", async () => {
+  const {renderPetLedgerCounts} = await import("../build/pet_desk.js");
+  const i18n = await deskCatalog("zh-CN");
+  assert.equal(renderPetLedgerCounts({name: "loops.md", counts: {waiting: 1, open: 3, "<x>": 2}, total: 6}, i18n.t),
+    '<span class="pet-record-ledger-counts"><span data-i18n-ignore>open</span> 3 · <span data-i18n-ignore>&lt;x&gt;</span> 2 · <span data-i18n-ignore>waiting</span> 1</span>');
+  assert.match(renderPetLedgerCounts({name: "agenda.md", counts: {}, total: 0}, i18n.t), /没有条目/);
+  assert.equal(renderPetLedgerCounts(undefined, i18n.t), "", "no data, no counts");
+});
+
+test("the knowledge line shows totals, pending titles with links, and a failed read", async () => {
+  const {renderPetKnowledgeHealth, petKnowledgeEntryHash} = await import("../build/pet_desk.js");
+  const i18n = await deskCatalog("zh-CN");
+  const health = {
+    entries: 120, pending: 3, helped: 14, helped_partial: false, truncated: false, failed: 0, projects: 4, elapsed_ms: 5,
+    spaces: [], pending_items: [
+      {id: "k-1", title: "过时 <A>", scope: "global", space: "global", status: "stale"},
+      {id: "k-2", title: "错误 B", scope: "project", project_id: "p 1", space: "AHA2", status: "wrong"},
+    ],
+  };
+  const html = renderPetKnowledgeHealth(health, i18n.t);
+  assert.match(html, /<strong>知识库：<\/strong> 120 条 · 待修订 3 条 · 有帮助 14 次/);
+  assert.match(html, /<a href="#knowledge\?doc=k-1&amp;scope=global" data-pet-knowledge-link><span data-i18n-ignore>过时 &lt;A&gt;<\/span><\/a><small><span data-i18n-ignore>global<\/span> · 过时<\/small>/);
+  assert.match(html, /<a href="#knowledge\?doc=k-2&amp;scope=project&amp;project=p\+1" data-pet-knowledge-link>/);
+  assert.equal(petKnowledgeEntryHash({id: "k-2", scope: "project", project_id: "p 1"}), "#knowledge?doc=k-2&scope=project&project=p+1");
+  // Vault spaces cannot report helped feedback; the line says so.
+  assert.match(renderPetKnowledgeHealth({...health, helped_partial: true}, i18n.t), /有帮助 14 次（新知识库不记这个数，未计入）/);
+  assert.match(renderPetKnowledgeHealth({...health, truncated: true, projects: 50}, i18n.t), /只读了前 50 个项目/);
+  assert.match(renderPetKnowledgeHealth({...health, failed: 2}, i18n.t), /2 个知识空间读取失败/);
+  assert.doesNotMatch(renderPetKnowledgeHealth({...health, pending_items: []}, i18n.t), /<ul/);
+  for (const failed of [null, undefined, [], "x"]) assert.match(renderPetKnowledgeHealth(failed, i18n.t), /暂时读不到知识库的情况。/);
+  assert.doesNotMatch(renderPetKnowledgeHealth({}, i18n.t), /undefined|NaN/);
+});
+
+test("the English records page has no Chinese interface copy", async () => {
+  const {renderPetCorrectionHistory, renderPetKnowledgeHealth, renderPetLedgerCounts} = await import("../build/pet_desk.js");
+  const i18n = await deskCatalog("en-US");
+  try {
+    const chrome = html => html.replace(/<(\w+)[^>]*data-i18n-ignore[^>]*>[\s\S]*?<\/\1>/g, "");
+    const options = {translate: i18n.t, formatTime: v => v};
+    const pieces = [
+      renderPetRecords(recordCore, [{date: "2026-11-25", content: "内容"}], {translate: i18n.t, emptyCore: i18n.t("petWorkbench.emptyCore"), emptyWorklog: i18n.t("petWorkbench.emptyWorklog")}).replace(/<pre>[\s\S]*?<\/pre>/g, ""),
+      renderPetCorrectionHistory([{at: "2026-11-26T01:00:00Z", title: "标题", owner_note: "原因", state: "open"}, {at: "", title: "", owner_note: "x", state: "expired"}], options),
+      renderPetCorrectionHistory([], options), renderPetCorrectionHistory(null, options),
+      renderPetKnowledgeHealth({entries: 1, pending: 1, helped: 0, helped_partial: true, truncated: true, failed: 1, projects: 50, pending_items: [{id: "k", title: "中文标题", scope: "global", space: "全局", status: "wrong"}]}, i18n.t),
+      renderPetKnowledgeHealth(null, i18n.t),
+      renderPetLedgerCounts({name: "loops.md", counts: {等待: 1}, total: 1}, i18n.t),
+      renderPetLedgerCounts({name: "loops.md", counts: {}, total: 0}, i18n.t),
+    ];
+    for (const piece of pieces) assert.doesNotMatch(chrome(piece), /[一-鿿]/, chrome(piece).match(/.{0,40}[一-鿿].{0,40}/)?.[0]);
+    assert.match(pieces[0], /<h3>What it promised<\/h3>/);
+    assert.match(pieces[1], /Not absorbed yet[\s\S]*Expired/);
+  } finally {
+    i18n.applyLocale("zh-CN");
+  }
+});
+
+test("the records tab reads its data only when opened and keeps the copy in the chunk", async () => {
+  const main = await readFile(resolve(root, "web/src/main.ts"), "utf8");
+  const i18n = await readFile(resolve(root, "web/src/i18n.ts"), "utf8");
+  assert.match(main, /api\.petWorkbenchInsights\(controller\.signal, \{records: true\}\)/);
+  assert.match(main, /loadRecordsData\(deskModule\);/);
+  assert.match(main, /if \(active !== "records"\) \{\s*recordsController\?\.abort\(\);/);
+  assert.match(main, /if \(!knowledgeHost\.isConnected \|\| petWorkbenchPageKeeper\.binding !== binding\) return;/);
+  assert.doesNotMatch(i18n, /petWorkbench\.records\./, "records copy is not in the first-screen catalog");
 });

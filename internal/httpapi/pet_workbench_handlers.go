@@ -166,7 +166,10 @@ func (s *Server) petPendingApprovalCount(writer http.ResponseWriter, request *ht
 func (s *Server) petInsights(writer http.ResponseWriter, request *http.Request) {
 	ctx, cancel := context.WithTimeout(request.Context(), 10*time.Second)
 	defer cancel()
-	insights, err := s.app.PetInsights(ctx, s.petInsightTokens)
+	// records=1 is the records page: it adds the correction history and the
+	// knowledge health, which the overview does not need.
+	records := strings.TrimSpace(request.URL.Query().Get("records")) == "1"
+	insights, err := s.app.PetInsights(ctx, s.petInsightTokens, app.PetInsightsOptions{Records: records})
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, "pet_insights_failed")
 		return
