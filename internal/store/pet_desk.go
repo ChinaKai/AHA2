@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
@@ -123,4 +124,68 @@ func (s *Store) latestMainTurnBriefBatch(ctx context.Context, args []any, result
 		result[item.TaskID] = item
 	}
 	return rows.Err()
+}
+
+// LatestTaskTurnFinishes finds the last activity from any agent, including a
+// finished Sub when the Main or a newer Turn is still running. Stored times
+// are UTC RFC3339Nano. Removing the Z makes a whole second sort before a
+// fractional value in that same second.
+func (s *Store) LatestTaskTurnFinishes(ctx context.Context, taskIDs []string) (map[string]time.Time, error) {
+	result := make(map[string]time.Time, len(taskIDs))
+	for start := 0; start < len(taskIDs); start += petDeskBatchSize {
+		end := min(start+petDeskBatchSize, len(taskIDs))
+		args := make([]any, end-start)
+		for index, id := range taskIDs[start:end] {
+			args[index] = id
+		}
+		if err := s.latestTaskTurnFinishBatch(ctx, args, result); err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
+}
+
+func (s *Store) latestTaskTurnFinishBatch(ctx context.Context, args []any, result map[string]time.Time) error {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT task_id, MAX(rtrim(finished_at,'Z'))
+		FROM turns WHERE finished_at<>'' AND task_id IN (`+placeholders(len(args))+`)
+		GROUP BY task_id`, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, finished string
+		if err := rows.Scan(&id, &finished); err != nil {
+			return err
+		}
+		result[id] = parseTime(finished + "Z")
+	}
+	return rows.Err()
+}
+
+// TasksWithUnresolvedPetApproval reads the full set independently of the
+// visible approval history limit. payload_json.task_id names the target;
+// pet_approvals.task_id is the pet that requested the approval.
+func (s *Store) TasksWithUnresolvedPetApproval(ctx context.Context) (map[string]bool, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT `+petApprovalTargetSQL+`
+		FROM pet_approvals WHERE status IN ('pending','executing')`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	targets := map[string]bool{}
+	for rows.Next() {
+		var target *string
+		if err := rows.Scan(&target); err != nil {
+			return nil, err
+		}
+		if target != nil {
+			if id := strings.TrimSpace(*target); id != "" {
+				targets[id] = true
+			}
+		}
+	}
+	return targets, rows.Err()
 }

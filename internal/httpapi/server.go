@@ -554,6 +554,7 @@ func (s *Server) routeMux() *http.ServeMux {
 	mux.Handle("DELETE /api/v1/tasks/{id}/remote-mirror", s.withAuth(http.HandlerFunc(s.retireRemoteTaskMirror)))
 	mux.Handle("POST /api/v1/tasks/{id}/takeover", s.withAuth(http.HandlerFunc(s.takeoverTask)))
 	mux.Handle("GET /api/v1/tasks/{id}", s.withAuth(http.HandlerFunc(s.taskDetail)))
+	mux.Handle("GET /api/v1/tasks/{id}/lifecycle", s.withAuth(http.HandlerFunc(s.taskLifecycle)))
 	mux.Handle("GET /api/v1/tasks/{id}/workspace/{view}", s.withAuth(http.HandlerFunc(s.workspaceView)))
 	mux.HandleFunc("/api/v1/tasks/{id}/workspace/{view}", workspaceViewerMethodNotAllowed)
 	mux.Handle("GET /api/v1/tasks/{id}/workspace-targets", s.withAuth(http.HandlerFunc(s.workspaceViewerTargets)))

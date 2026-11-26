@@ -144,7 +144,21 @@ type PetInspection struct {
 	Note                 string             `json:"note,omitempty"`
 }
 
+type PetStalledTask struct {
+	ID          string `json:"id"`
+	Code        string `json:"code"`
+	Title       string `json:"title,omitempty"`
+	LineID      string `json:"line_id,omitempty"`
+	LineTitle   string `json:"line_title,omitempty"`
+	Detail      string `json:"detail,omitempty"`
+	IdleMinutes int    `json:"idle_minutes"`
+}
+
+const petStalledTaskNote = "这些任务自己能往下走却停着，逐个给它发一句继续，或者说明为什么不该继续。"
+
 type PetWorkState struct {
+	StalledTasks     []PetStalledTask     `json:"stalled_tasks"`
+	StalledTasksNote string               `json:"stalled_tasks_note,omitempty"`
 	PendingApprovals int                  `json:"pending_approvals"`
 	Approvals        []domain.PetApproval `json:"approvals"`
 	// Notifications are unresolved background sync problems the pet must
@@ -260,7 +274,7 @@ func (s *Service) PetWorkStateWithOptions(ctx context.Context, opts PetWorkState
 	}
 	candidates := petOpenTaskCandidates(ids, tasks, watches)
 	pendingByTask := petPendingApprovalTaskMap(pendingApprovals)
-	openTasks, err := s.petOpenTasks(ctx, candidates, pendingByTask, opts, assistant.PetAllowViewTasks)
+	openTasks, stalledTasks, err := s.petOpenTasks(ctx, candidates, pendingByTask, opts, assistant.PetAllowViewTasks)
 	if err != nil {
 		return PetWorkState{}, err
 	}
@@ -271,13 +285,16 @@ func (s *Service) PetWorkStateWithOptions(ctx context.Context, opts PetWorkState
 	state := PetWorkState{
 		Core:      core,
 		Approvals: approvals, PendingApprovals: len(pendingApprovals),
-		OpenTasks: openTasks, Inspection: s.petInspection(ctx, tasks, pendingApprovals, openTaskTotal, attentionTasks),
+		OpenTasks: openTasks, StalledTasks: stalledTasks, Inspection: s.petInspection(ctx, tasks, pendingApprovals, openTaskTotal, attentionTasks),
 		IgnoredTasks:  make([]PetIgnoredTask, 0),
 		Notifications: make([]PetNotification, 0),
 		Work:          make([]PetWorkItem, 0),
 		OpenLoops:     loops, OpenLoopsPath: s.petOpenLoopsPath(ctx), OpenLoopsNote: petLoopsNote(loops),
 		Agenda: agenda, AgendaPath: s.petAgendaPath(ctx), AgendaNote: petAgendaNote(agenda),
 		LabPath: s.petLabPath(ctx),
+	}
+	if len(stalledTasks) > 0 {
+		state.StalledTasksNote = petStalledTaskNote
 	}
 	for _, task := range tasks {
 		if watch := watches[task.ID]; petWorkStateWatchIgnored(watch) && petTaskInFollowLists(task) {
@@ -394,7 +411,7 @@ func (s *Service) PetWorkStateWithOptions(ctx context.Context, opts PetWorkState
 }
 
 // fitDefaultBudget trims history and optional details. When mandatory fields
-// alone exceed the target, the full open-task list and notification references
+// alone exceed the target, the full open-task list, stalled-task rows and notification references
 // still take priority.
 func (state *PetWorkState) fitDefaultBudget(limit int) {
 	data, err := json.Marshal(state)
@@ -554,22 +571,45 @@ func petOpenTaskCandidates(ids []string, tasks []domain.Task, watches map[string
 	return candidates
 }
 
-func (s *Service) petOpenTasks(ctx context.Context, tasks []petOpenTaskCandidate, pendingByTask map[string]string, opts PetWorkStateOptions, canViewTasks bool) ([]PetOpenTask, error) {
+func (s *Service) petOpenTasks(ctx context.Context, tasks []petOpenTaskCandidate, pendingByTask map[string]string, opts PetWorkStateOptions, canViewTasks bool) ([]PetOpenTask, []PetStalledTask, error) {
 	activeReviews, err := s.petActiveReviewLabels(ctx, tasks)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	// One read serves every row. A failed read only drops the question counts.
-	cardIDs := make([]string, 0, len(tasks))
+	// Private watched Tasks may be classified, but the response only includes
+	// their identifiers and age. A missing card never qualifies as stalled.
+	cardIDs, waitingIDs := make([]string, 0, len(tasks)), make([]string, 0, len(tasks))
 	for _, task := range tasks {
-		if canViewTasks || task.createdByPet {
+		waiting := task.Status == domain.TaskWaitingUser
+		if canViewTasks || task.createdByPet || waiting {
 			cardIDs = append(cardIDs, task.ID)
+		}
+		if waiting {
+			waitingIDs = append(waitingIDs, task.ID)
 		}
 	}
 	cards, _ := s.store.TaskStateCards(ctx, cardIDs)
+	finishes, err := s.store.LatestMainTurnBriefs(ctx, waitingIDs)
+	if err != nil {
+		return nil, nil, err
+	}
+	unresolved, err := s.store.TasksWithUnresolvedPetApproval(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
 	now := s.now().UTC()
 	open := make([]PetOpenTask, 0, len(tasks))
+	stalled := []PetStalledTask{}
 	for _, task := range tasks {
+		card := cards[task.ID]
+		if row, ok := taskStall(task.Task, card, taskStuckOn(card.Lines), finishes[task.ID],
+			now, false, unresolved[task.ID], activeReviews[task.ID] != ""); ok {
+			item := PetStalledTask{ID: row.TaskID, Code: row.TaskCode, IdleMinutes: int(now.Sub(row.Since) / time.Minute)}
+			if canViewTasks || task.createdByPet {
+				item.Title, item.LineID, item.LineTitle, item.Detail = row.Title, row.LineID, row.LineTitle, row.Detail
+			}
+			stalled = append(stalled, item)
+		}
 		item := PetOpenTask{
 			ID: task.ID, Code: task.Code, CreatedByPet: task.createdByPet,
 			PendingApprovalID: pendingByTask[task.ID],
@@ -609,7 +649,7 @@ func (s *Service) petOpenTasks(ctx context.Context, tasks []petOpenTaskCandidate
 		}
 		open = append(open, item)
 	}
-	return open, nil
+	return open, stalled, nil
 }
 
 func petApprovalTargetTaskID(item domain.PetApproval) string {
@@ -645,7 +685,7 @@ func petPendingApprovalTaskMap(pendingApprovals []domain.PetApproval) map[string
 func (s *Service) petActiveReviewLabels(ctx context.Context, tasks []petOpenTaskCandidate) (map[string]string, error) {
 	waitingIDs := make([]string, 0, len(tasks))
 	for _, task := range tasks {
-		if task.Status == domain.TaskWaitingUser && task.createdByPet {
+		if task.Status == domain.TaskWaitingUser {
 			waitingIDs = append(waitingIDs, task.ID)
 		}
 	}
@@ -658,18 +698,7 @@ func (s *Service) petActiveReviewLabels(ctx context.Context, tasks []petOpenTask
 	}
 	labels := make(map[string]string, len(linked))
 	for sourceTaskID, reviews := range linked {
-		for i := len(reviews) - 1; i >= 0; i-- {
-			review := reviews[i]
-			if !petCodeReviewInFlight(review.Status) {
-				continue
-			}
-			label := strings.TrimSpace(review.Code)
-			if label == "" {
-				label = review.ReviewTaskID
-			}
-			labels[sourceTaskID] = label
-			break
-		}
+		labels[sourceTaskID] = petDeskActiveReview(reviews)
 	}
 	return labels, nil
 }

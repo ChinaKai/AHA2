@@ -192,6 +192,7 @@ GET /api/v1/tasks/{id}/hardware	httpapi	internal/httpapi/server.go	taskHardware	
 GET /api/v1/tasks/{id}/hardware/{hardware}/host-key	httpapi	internal/httpapi/server.go	hardwareSSHHostKey	owner_session	v2:d02348639236	pending	pending	pending	pending	pending
 GET /api/v1/tasks/{id}/hardware/{hardware}/terminal	httpapi	internal/httpapi/server.go	hardwareTerminal	owner_session	v2:5158c0d42bbe	pending	pending	pending	pending	pending
 GET /api/v1/tasks/{id}/hardware/{hardware}/terminal/ws	httpapi	internal/httpapi/server.go	hardwareTerminalWebSocket	owner_session	v2:2fb54cdedee4	pending	pending	pending	pending	pending
+GET /api/v1/tasks/{id}/lifecycle	httpapi	internal/httpapi/server.go	taskLifecycle	owner_session	v2:a0d8565644fa	pending	pending	pending	pending	pending
 GET /api/v1/tasks/{id}/mail	httpapi	internal/httpapi/server.go	taskMailOptions	owner_session	v2:f19d25365217	pending	pending	pending	pending	pending
 GET /api/v1/tasks/{id}/workspace-target/{workspace}/{view}	httpapi	internal/httpapi/server.go	workspaceView	owner_session	v2:4db28f759aef	pending	pending	pending	pending	pending
 GET /api/v1/tasks/{id}/workspace-targets	httpapi	internal/httpapi/server.go	workspaceViewerTargets	owner_session	v2:27b3dd0a08db	pending	pending	pending	pending	pending
