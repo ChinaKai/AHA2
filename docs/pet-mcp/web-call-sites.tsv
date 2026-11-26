@@ -135,9 +135,14 @@ web/src/api.ts	DELETE	/api/v1/models/${encodeURIComponent(id)}	1
 web/src/api.ts	PUT	/api/v1/models/${encodeURIComponent(id)}	1
 web/src/api.ts	POST	/api/v1/models/${encodeURIComponent(id)}/health-check	1
 web/src/api.ts	POST	/api/v1/models/batch-delete	1
+web/src/api.ts	GET/see-source	/api/v1/onboarding	1
+web/src/api.ts	PUT	/api/v1/onboarding/dismiss	1
+web/src/api.ts	POST	/api/v1/onboarding/task	1
+web/src/api.ts	POST	/api/v1/onboarding/workspace	1
 web/src/api.ts	GET/see-source	/api/v1/pet	1
 web/src/api.ts	PUT	/api/v1/pet	1
 web/src/api.ts	GET/see-source	/api/v1/pet/activity?limit=${limit}	1
+web/src/api.ts	GET/see-source	/api/v1/pet/approvals/${encodeURIComponent(id)}	1
 web/src/api.ts	POST	/api/v1/pet/approvals/${encodeURIComponent(id)}/resolve	1
 web/src/api.ts	GET/see-source	/api/v1/pet/approvals/pending-count	1
 web/src/api.ts	POST	/api/v1/pet/brain	1
@@ -151,6 +156,7 @@ web/src/api.ts	PATCH	/api/v1/pet/watches/${encodeURIComponent(taskID)}	1
 web/src/api.ts	POST	/api/v1/pet/watches/${encodeURIComponent(taskID)}	1
 web/src/api.ts	GET/see-source	"/api/v1/pet/workbench${suffix ? `?${suffix}` : """"}"	1
 web/src/api.ts	PUT	/api/v1/pet/workbench/${encodeURIComponent(section)}/${encodeURIComponent(name)}	1
+web/src/api.ts	GET/see-source	"/api/v1/pet/workbench/insights${options.records ? ""?records=1"" : """"}"	1
 web/src/api.ts	POST	/api/v1/projects	1
 web/src/api.ts	GET/see-source	"/api/v1/projects${query.size ? `?${query}` : """"}"	1
 web/src/api.ts	DELETE	/api/v1/projects/${encodeURIComponent(id)}	1
@@ -200,6 +206,7 @@ web/src/api.ts	POST	/api/v1/settings/proxy/subscription/refresh	1
 web/src/api.ts	POST	/api/v1/settings/proxy/test	1
 web/src/api.ts	GET/see-source	/api/v1/settings/security	1
 web/src/api.ts	PUT	/api/v1/settings/security	1
+web/src/api.ts	PUT	/api/v1/settings/security/workspace-terminal	1
 web/src/api.ts	GET/see-source	/api/v1/settings/sync	1
 web/src/api.ts	PUT	/api/v1/settings/sync	1
 web/src/api.ts	GET/see-source	/api/v1/settings/sync/conflicts	1
@@ -237,6 +244,7 @@ web/src/api.ts	PUT	/api/v1/tasks/${encodeURIComponent(id)}/mcp-servers	1
 web/src/api.ts	DELETE	/api/v1/tasks/${encodeURIComponent(id)}/remote-mirror	1
 web/src/api.ts	POST	/api/v1/tasks/${encodeURIComponent(id)}/start	1
 web/src/api.ts	POST	/api/v1/tasks/${encodeURIComponent(id)}/takeover	1
+web/src/api.ts	GET/see-source	/api/v1/tasks/${encodeURIComponent(task)}	1
 web/src/api.ts	POST	/api/v1/tasks/${encodeURIComponent(taskID)}/attachments	1
 web/src/api.ts	DELETE	/api/v1/tasks/${encodeURIComponent(taskID)}/attachments/${encodeURIComponent(attachmentID)}	1
 web/src/api.ts	GET/see-source	/api/v1/tasks/${encodeURIComponent(taskID)}/browser	1
@@ -272,6 +280,7 @@ web/src/api.ts	GET/see-source	/api/v1/workspaces/${encodeURIComponent(id)}/host-
 web/src/api.ts	POST	/api/v1/workspaces/${encodeURIComponent(id)}/host-key/trust	1
 web/src/api.ts	DELETE	/api/v1/workspaces/${encodeURIComponent(id)}/remote-mirror	1
 web/src/api.ts	POST	/api/v1/workspaces/${encodeURIComponent(id)}/takeover	1
+web/src/api.ts	GET/see-source	/api/v1/workspaces/${encodeURIComponent(workspace)}	1
 web/src/api.ts	POST	/api/v1/workspaces/${id}/detect	1
 web/src/channels.ts	PUT	/api/v1/channel-instances/${encodeURIComponent(instance.id)}/conversations/groups/${encodeURIComponent(chatID)}/reception	1
 web/src/channels.ts	PUT	/api/v1/channel-instances/${encodeURIComponent(instance.id)}/conversations/groups/${encodeURIComponent(chatID)}/topic-wake	1
@@ -286,3 +295,4 @@ web/src/knowledge_vault_settings.ts	POST	/api/v1/settings/knowledge-vault/${acti
 web/src/main.ts	GET/see-source	/api/v1/events	1
 web/src/main.ts	GET/see-source	/api/v1/tasks/${encodeURIComponent(item.task_id)}/attachments/${encodeURIComponent(item.id)}	1
 web/src/main.ts	GET/see-source	/api/v1/tasks/${taskID}/events?after=${after}	1
+web/src/workspace_viewer.ts	GET/see-source	/api/v1/tasks/${encodeURIComponent(task)}/workspace-targets	1
