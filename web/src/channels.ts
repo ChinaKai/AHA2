@@ -440,7 +440,7 @@ export function conversationCard(item: ChannelConversationSummary): string {
     ? `${entry.state}${entry.outcome ? ` · ${entry.outcome}` : ""} · ${formatChannelTime(entry.at)}`
     : "暂无";
   const groupReception = group ? `<label class="channel-check">
-    <span><strong>接收全量消息</strong><br><small>非 @ 消息进旁听，不唤醒；${item.bound_task_id ? "@ 仍唤醒绑定任务" : "@ 由群聊电子人接"}</small></span>
+    <span><strong>接收全量消息</strong><br><small>非 @ 消息进旁听，不唤醒；${item.bound_task_id ? "@ 仍唤醒绑定任务" : "@ 由群聊电子人接"}</small>${item.not_in_bot_group_list ? "<br><small>不在机器人群列表</small>" : ""}</span>
     <span class="kv-skill-auto"><input type="checkbox" role="switch" aria-label="接收全量消息" data-group-reception="${escapeHTML(group.chat_id)}" ${group.receive_all_messages ? "checked" : ""}><span class="kv-skill-auto-track" aria-hidden="true"></span></span>
     <small data-group-reception-state>${group.receive_all_messages ? "旁听中" : "仅 @"}</small>
   </label>` : "";

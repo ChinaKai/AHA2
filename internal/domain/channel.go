@@ -344,6 +344,7 @@ type ChannelConversationSummary struct {
 	LastMentionInbound    *ChannelInboundSummary `json:"last_mention_inbound,omitempty"`
 	LastNonMentionInbound *ChannelInboundSummary `json:"last_non_mention_inbound,omitempty"`
 	Group                 *FeishuGroup           `json:"group,omitempty"`
+	NotInBotGroupList     bool                   `json:"not_in_bot_group_list,omitempty"`
 	LastOutboundAt        string                 `json:"last_outbound_at,omitempty"`
 	LastOutboundState     string                 `json:"last_outbound_state,omitempty"`
 	LastOutboundError     string                 `json:"last_outbound_error,omitempty"`

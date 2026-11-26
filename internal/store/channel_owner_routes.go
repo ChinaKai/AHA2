@@ -458,7 +458,17 @@ func (s *Store) ChannelConversationSummaries(ctx context.Context, ownerID string
 		if groups != nil && destination.EndpointKind == domain.ChannelEndpointGroupDigitalHuman {
 			group, listed := groups[destination.ExternalChatID]
 			if refreshed && !listed {
-				continue
+				// Keep unlisted local groups with reception enabled so the owner can turn it off.
+				group, err = scanFeishuGroup(s.db.QueryRowContext(ctx, `SELECT `+feishuGroupColumns+`
+					FROM channel_feishu_groups WHERE instance_id=? AND chat_id=? AND receive_all_messages=1`,
+					instance.ID, destination.ExternalChatID))
+				if errors.Is(err, sql.ErrNoRows) {
+					continue
+				}
+				if err != nil {
+					return nil, err
+				}
+				summary.NotInBotGroupList = true
 			}
 			delete(groups, destination.ExternalChatID)
 			group.ChatID = destination.ExternalChatID

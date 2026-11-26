@@ -1485,6 +1485,7 @@ export interface ChannelConversationSummary {
   last_mention_inbound?: ChannelInboundSummary;
   last_non_mention_inbound?: ChannelInboundSummary;
   group?: FeishuGroup;
+  not_in_bot_group_list?: boolean;
   last_outbound_at?: string;
   last_outbound_state?: string;
   last_outbound_error?: string;

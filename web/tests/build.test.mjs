@@ -367,6 +367,10 @@ test("channel lifecycle renders active and retired actions with guarded purge", 
   assert.match(listening, /最近入站（@）：processed.*delivered_to_task/);
   assert.match(listening, /最近入站（非 @）：listening.*listening_only/);
   assert.match(listening, /旁听中/);
+  assert.doesNotMatch(listening, /不在机器人群列表/);
+  const unlisted = module.conversationCard({...group, bound_task_id: "task-1", not_in_bot_group_list: true});
+  assert.match(unlisted, /不在机器人群列表/);
+  assert.match(unlisted, /data-group-reception="oc_test" checked/);
   const mentionsOnly = module.conversationCard({...group, bound_task_id: "task-1", group: {...group.group, receive_all_messages: false}});
   assert.match(mentionsOnly, /@ 仍唤醒绑定任务/);
   assert.match(mentionsOnly, /仅 @/);

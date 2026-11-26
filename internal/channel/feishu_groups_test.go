@@ -41,6 +41,40 @@ func setTestGroupReception(t *testing.T, service *Service, instance domain.Chann
 	}
 }
 
+func TestFeishuGroupReceptionCanBeDisabledAfterGroupLeavesBotList(t *testing.T) {
+	service, instance, claims := mediaTestService(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	const chat = "oc_local_bound"
+	const listedChat = "oc_still_listed"
+	host := startFeishuMentionHost(t, service, instance, claims, chat, now)
+	route, err := service.store.ActivateOwnerChannelTaskRoute(ctx, instance.ID, host.ID, host.HostTaskID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	syncTestFeishuGroups(t, service, claims, chat, listedChat, "oc_no_local_conversation")
+	setTestGroupReception(t, service, instance, chat, true)
+	syncTestFeishuGroups(t, service, claims, listedChat)
+
+	summaries, err := service.OwnerConversationSummaries(ctx, instance.OwnerID, instance.ID)
+	if err != nil || len(summaries) != 2 {
+		t.Fatalf("refresh did not keep the local group alongside the listed group: %+v, %v", summaries, err)
+	}
+	local := summaries[0]
+	if local.ID != host.ID || local.BoundTaskID != route.TargetTaskID || !local.NotInBotGroupList ||
+		local.Group == nil || local.Group.ChatID != chat || !local.Group.ReceiveAllMessages || local.Group.UpdatedBy != instance.OwnerID {
+		t.Fatalf("unlisted group lost its binding or switch state: %+v", local)
+	}
+	if summaries[1].ID != listedChat || summaries[1].NotInBotGroupList {
+		t.Fatalf("listed group was not preserved: %+v", summaries[1])
+	}
+	setTestGroupReception(t, service, instance, local.Group.ChatID, false)
+	summaries, err = service.OwnerConversationSummaries(ctx, instance.OwnerID, instance.ID)
+	if err != nil || len(summaries) != 1 || summaries[0].ID != listedChat {
+		t.Fatalf("unlisted group still appears after turning off reception: %+v, %v", summaries, err)
+	}
+}
+
 func TestFeishuGroupReceptionMatrix(t *testing.T) {
 	service, instance, claims := mediaTestService(t)
 	ctx := context.Background()
@@ -287,4 +321,24 @@ func TestUnboundFeishuTopicStartsHostAndListeningNeverContinuesIt(t *testing.T) 
 		summaries[0].LastNonMentionInbound == nil || summaries[0].LastNonMentionInbound.State != quiet.State || quiet.State != "listening" {
 		t.Fatalf("conversation summary lost unbound listening: %+v, %v", summaries, err)
 	}
+
+	t.Run("non_mention_topic_after_host_completion", func(t *testing.T) {
+		topic := send("om_topic_after_completion", "omt_cold", "om_root", "Topic after host completion")
+		metadata, err := service.store.ChannelGroupReceipt(ctx, topic.ID)
+		if err != nil || topic.State != "received" || metadata.BatchID == "" || metadata.RouteID != "" || metadata.TargetTaskID != host.ID {
+			t.Fatalf("topic receipt did not target the unbound host: state=%q metadata=%+v, %v", topic.State, metadata, err)
+		}
+		if err := service.processInboundBatch(ctx); err != nil {
+			t.Fatal(err)
+		}
+		stored, err := service.store.ChannelInboxReceipt(ctx, instance.ID, topic.ID)
+		if err != nil || stored.State != "failed" || stored.Outcome != "group_task_route_required" || stored.AHAMessageID != "" {
+			t.Errorf("topic receipt: state=%q outcome=%q message=%q, want failed/group_task_route_required with no message, err=%v",
+				stored.State, stored.Outcome, stored.AHAMessageID, err)
+		}
+		tasks, err := service.store.ListTasks(ctx, instance.HostProjectID)
+		if err != nil || len(tasks) != 1 || tasks[0].ID != host.ID || tasks[0].Status != domain.TaskCompleted {
+			t.Errorf("expected only the completed host, got %d Tasks, err=%v", len(tasks), err)
+		}
+	})
 }
