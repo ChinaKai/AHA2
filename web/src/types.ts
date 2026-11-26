@@ -1939,6 +1939,17 @@ export interface PetWorkbench {
   updated_at: string;
 }
 
+export type TaskStuckOn = "self" | "owner" | "other" | "none" | "unknown";
+
+export interface PetDeskLine {
+  id: string;
+  title: string;
+  state: TaskLine["state"];
+  step?: string;
+  blocker?: string;
+  who?: string;
+}
+
 /** Something waiting on the Owner (`needs_owner`) or parked for later (`later`). */
 export interface PetDeskNeed {
   /** approval | question | blocked | failed | stopped; later: idea | next_step. */
@@ -1950,6 +1961,8 @@ export interface PetDeskNeed {
   task_code?: string;
   title: string;
   questions?: string[];
+  stuck_on?: TaskStuckOn;
+  lines?: PetDeskLine[];
   detail?: string;
   /** RFC 3339; the Go zero time when unknown. */
   since: string;
@@ -1957,13 +1970,14 @@ export interface PetDeskNeed {
 
 /** Something moving without the Owner. */
 export interface PetDeskWait {
-  /** review | executing | channel | loop. */
+  /** review | executing | channel | loop | line. */
   kind: string;
   task_id?: string;
   task_code?: string;
   title: string;
-  /** Review task code, approval kind, channel id or ledger file (loop). */
+  /** Review task code, approval kind, channel id, ledger file (loop), or people (line). */
   on?: string;
+  lines?: PetDeskLine[];
   count?: number;
   /** The next step of a loop wait. */
   detail?: string;
@@ -1990,9 +2004,33 @@ export interface PetDeskCorrection {
   owner_note: string;
 }
 
+export interface PetDeskStalled {
+  task_id: string;
+  task_code: string;
+  title: string;
+  line_id?: string;
+  line_title?: string;
+  detail?: string;
+  since: string;
+}
+
+export interface PetDeskRecent {
+  task_id: string;
+  task_code: string;
+  title: string;
+  status: string;
+  watched: boolean;
+  last_active: string;
+}
+
 export interface PetDesk {
   needs_owner: PetDeskNeed[];
   needs_owner_total: number;
+  stalled?: PetDeskStalled[];
+  stalled_total?: number;
+  /** Absent on servers that still use the unfollowed list. */
+  recent?: PetDeskRecent[] | null;
+  recent_total?: number;
   later: PetDeskNeed[];
   later_total: number;
   waiting_others: PetDeskWait[];
@@ -2006,6 +2044,56 @@ export interface PetDesk {
   agenda_total: number;
   /** The pet's latest finished reply; absent when it has none. */
   last_reply?: PetDeskLastReply;
+}
+
+export interface TaskLifecycleEvent {
+  at: string;
+  kind: string;
+  title?: string;
+  detail?: string;
+  ref_id?: string;
+}
+
+export interface TaskLifecycle {
+  task: {
+    id: string;
+    code: string;
+    title: string;
+    status: string;
+    project: string;
+    created_at: string;
+    updated_at: string;
+    current_goal: string;
+  };
+  now: {
+    status: string;
+    next_steps?: string[] | null;
+    open_questions?: string[] | null;
+    updated_at: string;
+    stuck_on?: TaskStuckOn | "";
+    stuck_who?: string[] | null;
+    idle_since: string;
+    lines_recorded: boolean;
+  };
+  lines?: TaskLine[] | null;
+  parallel: {
+    subs?: Array<{agent_id: string; title: string; status: string; started_at: string; finished_at: string}> | null;
+    reviews?: Array<{task_id: string; code: string; status: string; decision: string; reason: string; decided_at: string}> | null;
+  };
+  timeline?: TaskLifecycleEvent[] | null;
+  timeline_truncated?: boolean;
+  turns?: Array<{
+    id: string;
+    sequence: number;
+    status: string;
+    started_at: string;
+    finished_at: string;
+    duration_seconds: number;
+    summary: string;
+    error: string;
+  }> | null;
+  turns_truncated?: boolean;
+  stats: {turns: number; duration_seconds: number; tokens: number};
 }
 
 export interface PetDeskLastReply {

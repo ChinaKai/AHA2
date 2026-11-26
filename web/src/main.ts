@@ -10123,6 +10123,7 @@ async function bindPetWorkbenchPage(): Promise<void> {
     });
     return deskDecisions;
   };
+  let deskContinue: ReturnType<PetDeskModule["createPetDeskContinue"]> | undefined;
   const captureInlineDecision = (): unknown => deskDecisions?.capture() ?? null;
   const restoreInlineDecision = (state: unknown): void => {
     if (state) deskDecisions?.restore(state as Parameters<NonNullable<typeof deskDecisions>["restore"]>[0]);
@@ -10159,6 +10160,16 @@ async function bindPetWorkbenchPage(): Promise<void> {
       return;
     }
     if (active === "overview" && deskModule) {
+      deskContinue ??= deskModule.createPetDeskContinue({
+        root: body,
+        send: (taskID, message) => api.message(taskID, message),
+        done: () => {
+          if (!body.isConnected || active !== "overview") return;
+          repaintOverviewKeepingState();
+          if (loader.busy()) void load().then(() => deskRefresher?.wake());
+          else deskRefresher?.wake();
+        },
+      });
       body.innerHTML = deskModule.renderPetOverview({
         inspection: view.inspection,
         approvals: view.approvals || [],
@@ -10171,7 +10182,7 @@ async function bindPetWorkbenchPage(): Promise<void> {
         translate: t,
         formatTime: formatDateTime,
         statusLabel: taskStatusText,
-        desk: view.desk,
+        desk: deskContinue.visible(view.desk),
         now: Date.now(),
         // An approval asking for a choice keeps "Review" only: the choice is
         // made in the detail dialog. The workbench page holds the newest 10
@@ -10186,7 +10197,20 @@ async function bindPetWorkbenchPage(): Promise<void> {
       });
       deskModule.bindPetDesk(body);
       ensureDeskDecisions(deskModule).bind();
+      deskContinue.restore();
       bindOverviewActions();
+      deskModule.bindPetDeskLifecycle(body, {
+        createDialog: () => createWorkbenchDialog("pet-lifecycle-dialog", ""),
+        read: async (id, signal) => (await api.taskLifecycle(id, signal)).lifecycle,
+        timeoutMs: PET_WORKBENCH_TIMEOUT_MS,
+        openTask: openOverviewTask,
+        close: closePetWorkbenchDialogs,
+        canReturnFocus: () => active === "overview" && !petWorkbenchDialog,
+        formatTime: formatDateTime,
+        formatDuration,
+        statusLabel: taskStatusText,
+        translate: t,
+      });
       bindPetWatchActions();
       loadInsights(deskModule);
       paintFreshness();
@@ -10248,6 +10272,7 @@ async function bindPetWorkbenchPage(): Promise<void> {
     },
     onData: value => {
       view = value;
+      deskContinue?.accept(view.desk);
       loadingMore = null;
       fetchedAt = Date.now();
       refreshFailed = false;

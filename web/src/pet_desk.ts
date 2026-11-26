@@ -4,7 +4,7 @@
 // first screen of every other page does not carry them. The loader, page
 // keeper, tab mapping and approvals-tab helpers stay in pet_workbench.ts,
 // which the shell needs before this chunk arrives.
-import type {PetApproval, PetChannelHealth, PetCorrectionRecord, PetDesk, PetDeskCorrection, PetDeskLastReply, PetDeskNeed, PetDeskRun, PetDeskWait, PetInsights, PetInspection, PetKnowledgeHealth, PetKnowledgePending, PetLedgerCounts, PetTaskWatch} from "./types.js";
+import type {PetApproval, PetChannelHealth, PetCorrectionRecord, PetDesk, PetDeskCorrection, PetDeskLastReply, PetDeskLine, PetDeskNeed, PetDeskRecent, PetDeskRun, PetDeskStalled, PetDeskWait, PetInsights, PetInspection, PetKnowledgeHealth, PetKnowledgePending, PetLedgerCounts, PetTaskWatch, TaskLifecycle} from "./types.js";
 import {currentLocale} from "./i18n.js";
 import {petApprovalDurationText, petApprovalRiskLabel, renderPetApprovalRow} from "./pet_approvals.js";
 import {petWatchActionKeys} from "./ui_helpers.js";
@@ -146,8 +146,9 @@ function watchReasonLabel(reason: string, translate: Translate): string {
   return label === key ? reason : label;
 }
 
-function watchActionButtons(item: PetTaskWatch, translate: Translate): string {
-  return petWatchActionKeys(item).map(action => {
+function watchActionButtons(item: Pick<PetTaskWatch, "task_id" | "watched" | "ignored">, translate: Translate, recent: boolean): string {
+  const actions = petWatchActionKeys(item);
+  return actions.filter(action => !recent || action === "follow" || action === "ignore").map(action => {
     switch (action) {
       case "follow": return `<button type="button" data-pet-watch-follow data-pet-watch-task="${escapeHTML(item.task_id)}">${escapeHTML(translate("petWorkbench.followTask"))}</button>`;
       case "unfollow": return `<button type="button" data-pet-watch-unfollow data-pet-watch-task="${escapeHTML(item.task_id)}">${escapeHTML(translate("petWorkbench.unfollowTask"))}</button>`;
@@ -163,18 +164,22 @@ function watchActionButtons(item: PetTaskWatch, translate: Translate): string {
 // left, open plus the state-specific follow action on the right. Anomalous
 // tasks are tinted so the overview card count points to something visible
 // without opening every row.
-function renderWatchRow(item: PetTaskWatch, options: PetOverviewOptions): string {
+function renderWatchRow(item: Pick<PetTaskWatch, "task_id" | "code" | "title" | "status" | "updated_at" | "reason" | "watched" | "ignored">, options: PetOverviewOptions, recent = false): string {
   const title = `${item.code || item.task_id} · ${item.title || item.task_id}`;
-  const anomaly = petWatchAnomaly(item);
-  const meta = `${overviewStatusLabel(item.status, options)} · ${options.formatTime(item.updated_at)}`;
-  return `<article class="pet-watch-row${anomaly ? " anomaly" : ""}">
-    <button type="button" class="pet-watch-row-main" data-pet-overview-task="${escapeHTML(item.task_id)}">
-      <strong>${escapeHTML(title)}</strong>
-      <small>${escapeHTML(meta)}${item.reason ? ` · ${escapeHTML(watchReasonLabel(item.reason, options.translate))}` : ""}</small>
+  const tone = recent && ["completed", "cancelled"].includes(item.status) ? " terminal" : petWatchAnomaly(item) ? " anomaly" : "";
+  const status = overviewStatusLabel(item.status, options);
+  const time = petDeskElapsedMinutes(item.updated_at, Date.now()) === null ? "" : options.formatTime(item.updated_at);
+  const meta = recent
+    ? `<small class="pet-desk-recent-meta">${deskText(status)}${time ? `<time datetime="${escapeHTML(item.updated_at)}">${escapeHTML(time)}</time>` : ""}</small>`
+    : `<small>${deskText(status)}${time ? ` · ${escapeHTML(time)}` : ""}${item.reason ? ` · ${deskText(watchReasonLabel(item.reason, options.translate))}` : ""}</small>`;
+  return `<article class="pet-watch-row${tone}">
+    <button type="button" class="pet-watch-row-main" data-pet-task-lifecycle="${escapeHTML(item.task_id)}">
+      <strong data-i18n-ignore>${escapeHTML(title)}</strong>
+      ${meta}
     </button>
     <div class="pet-watch-row-actions">
       <button type="button" data-pet-overview-task="${escapeHTML(item.task_id)}">${escapeHTML(options.translate("petWorkbench.openTask"))}</button>
-      ${watchActionButtons(item, options.translate)}
+      ${watchActionButtons(item, options.translate, recent)}
     </div>
   </article>`;
 }
@@ -187,36 +192,32 @@ function overviewCard(jump: string, count: number, label: string, hint: string, 
   </button>`;
 }
 
-// renderOverviewWatchLists renders the three follow lists shared by the
-// legacy overview and the desk: watched, ignored and unfollowed tasks. They
-// are always open (owner, 2026-11-26): a plain heading with the count and a
-// body that scrolls inside its own height cap, so the heading never scrolls
-// away. An empty list is one line.
-function renderOverviewWatchLists(watches: PetTaskWatch[], options: PetOverviewOptions): {watched: PetTaskWatch[]; lists: string} {
+// Watch lists and recent activity share the same bounded, independently
+// scrolling body. Leave headings outside it and omit an empty tab stop.
+function renderOverviewWatchLists(watches: PetTaskWatch[], options: PetOverviewOptions, desk?: PetDesk): {watched: PetTaskWatch[]; lists: string} {
   const translate = options.translate;
-  // Deliberately not virtualized. The 2026-11 fixture with 500 watches (200
-  // followed + 300 other/ignored) rendered 500 rows, each a fixed 54px, in
-  // lists that scroll inside their cap. The list is static unless the owner
-  // changes a follow, so the DOM cost is bounded and paid once, unlike the
-  // conversation which streams and measures variable rows. If the server ever
-  // returns a watch list materially above 500, apply the conversation window
-  // pattern.
   const watched = watches.filter(item => item.watched && !item.ignored);
   const ignored = watches.filter(item => item.ignored);
-  const unfollowed = watches.filter(item => !item.watched && !item.ignored);
-  const list = (id: string, className: string, title: string, items: PetTaskWatch[], empty: string) => {
-    const rows = items.length
-      ? items.map(item => renderWatchRow(item, options)).join("")
-      : `<div class="field-help pet-follow-empty">${escapeHTML(empty)}</div>`;
-    // The body is a keyboard-reachable scroll area only when it has rows.
-    const focus = items.length ? ` tabindex="0" aria-labelledby="${id}-title"` : "";
-    return `<section class="${className} pet-follow-list" id="${id}" aria-labelledby="${id}-title"><h3 class="pet-follow-title" id="${id}-title">${escapeHTML(title)}</h3><div class="${className}-body pet-follow-body"${focus}>${rows}</div></section>`;
+  const watchRows = (items: PetTaskWatch[]) => items.map(item => renderWatchRow(item, options));
+  const list = (id: string, className: string, title: string, rows: string[], empty: string, more = "") => {
+    const focus = rows.length ? ` tabindex="0" aria-labelledby="${id}-title"` : "";
+    const content = rows.length ? rows.join("") : `<div class="field-help pet-follow-empty">${escapeHTML(empty)}</div>`;
+    return `<section class="${className} pet-follow-list" id="${id}" aria-labelledby="${id}-title"><h3 class="pet-follow-title" id="${id}-title">${escapeHTML(title)}</h3><div class="${className}-body pet-follow-body"${focus}>${content}${more}</div></section>`;
   };
-  return {watched, lists: [
-    list("pet-overview-follows", "pet-overview-follows", translate("petWorkbench.overviewFollows", {count: String(watched.length)}), watched, translate("petWorkbench.emptyFollows")),
-    list("pet-overview-ignored", "pet-overview-other", translate("petWorkbench.otherFollows", {count: String(ignored.length)}), ignored, translate("petWorkbench.emptyIgnored")),
-    list("pet-overview-unfollowed", "pet-overview-other", translate("petWorkbench.unfollowedTasks", {count: String(unfollowed.length)}), unfollowed, deskCopy("emptyUnfollowed")),
-  ].join("\n    ")};
+  const follows = list("pet-overview-follows", "pet-overview-follows", translate("petWorkbench.overviewFollows", {count: String(watched.length)}), watchRows(watched), translate("petWorkbench.emptyFollows"));
+  const ignoredList = list("pet-overview-ignored", "pet-overview-other", translate("petWorkbench.otherFollows", {count: String(ignored.length)}), watchRows(ignored), translate("petWorkbench.emptyIgnored"));
+  if (desk?.recent !== undefined) {
+    const recent = deskList<PetDeskRecent>(desk.recent);
+    const total = deskTotal(desk.recent_total, recent.length);
+    const recentList = list("pet-overview-recent", "pet-overview-other", deskCopy("recent", {count: String(total)}),
+      recent.map(item => renderWatchRow({...item, code: item.task_code, updated_at: item.last_active, ignored: false}, options, true)),
+      deskCopy("emptyRecent"), deskTruncated(total, recent.length, translate));
+    return {watched, lists: [follows, recentList, ignoredList].join("")};
+  }
+  const unfollowed = watches.filter(item => !item.watched && !item.ignored);
+  return {watched, lists: [follows, ignoredList,
+    list("pet-overview-unfollowed", "pet-overview-other", translate("petWorkbench.unfollowedTasks", {count: String(unfollowed.length)}), watchRows(unfollowed), deskCopy("emptyUnfollowed")),
+  ].join("")};
 }
 
 // renderPetOverview is the landing tab. With a desk (task-813) it is the pet's
@@ -279,7 +280,7 @@ function renderLegacyPetOverview(options: PetOverviewOptions): string {
   for (const item of watched) {
     activities.push({
       time: item.updated_at || "",
-      html: `<button type="button" class="pet-overview-activity" data-pet-overview-task="${escapeHTML(item.task_id)}"><span class="pet-overview-activity-kind">${escapeHTML(translate("petWorkbench.overviewTaskKind"))}</span><strong>${escapeHTML(item.title || item.task_id)}</strong><small>${escapeHTML(options.formatTime(item.updated_at || ""))}</small></button>`,
+      html: `<button type="button" class="pet-overview-activity" data-pet-task-lifecycle="${escapeHTML(item.task_id)}"><span class="pet-overview-activity-kind">${escapeHTML(translate("petWorkbench.overviewTaskKind"))}</span><strong data-i18n-ignore>${escapeHTML(item.title || item.task_id)}</strong><small>${escapeHTML(options.formatTime(item.updated_at || ""))}</small></button>`,
     });
   }
   activities.sort((left, right) => {
@@ -302,7 +303,7 @@ function renderLegacyPetOverview(options: PetOverviewOptions): string {
       ${overviewCard("channels", degraded, translate("petWorkbench.overviewChannels"), translate("petWorkbench.overviewChannelsHint", {total: String(channelTotal)}), degraded ? "attention" : "")}
     </div>
     ${watchLists}
-    <section class="pet-overview-recent">
+    <section class="pet-overview-recent" id="pet-overview-legacy-recent">
       <h3>${escapeHTML(translate("petWorkbench.overviewRecent"))}</h3>
       <div class="pet-overview-activity-list">${recent}</div>
     </section>
@@ -338,7 +339,8 @@ export function petDeskElapsedMinutes(since: unknown, now: number): number | nul
 export function petDeskElapsedText(since: unknown, now: number, key: string, translate: Translate): string {
   const minutes = petDeskElapsedMinutes(since, now);
   if (minutes === null) return "";
-  return translate(key, {duration: petApprovalDurationText(minutes, translate)});
+  const duration = petApprovalDurationText(minutes, translate);
+  return key ? translate(key, {duration}) : duration;
 }
 
 // deskElapsed is an elapsed-time label that can be recomputed in place: the
@@ -410,7 +412,7 @@ function deskDetail(text: string, label = ""): string {
 const PET_DESK_KINDS: Record<string, readonly string[]> = {
   need: ["approval", "question", "blocked", "failed", "stopped"],
   later: ["idea", "next_step"],
-  wait: ["review", "executing", "channel", "loop"],
+  wait: ["review", "executing", "channel", "loop", "line"],
 };
 
 export function petDeskKnownKind(list: "need" | "later" | "wait", kind: unknown): boolean {
@@ -448,8 +450,49 @@ function deskHeadlineHTML(item: {title?: string; task_code?: string; task_id?: s
   return deskTitleHTML(item, translate);
 }
 
-function deskOpenTaskButton(taskID: string, translate: Translate): string {
-  return `<button type="button" data-pet-overview-task="${escapeHTML(taskID)}">${escapeHTML(translate("petWorkbench.desk.openTask"))}</button>`;
+function deskOpenTaskButton(taskID: string, translate: Translate, compact = false): string {
+  const label = escapeHTML(translate("petWorkbench.desk.openTask"));
+  const target = `data-pet-overview-task="${escapeHTML(taskID)}"`;
+  if (!compact) return `<button type="button" ${target}>${label}</button>`;
+  return `<button type="button" class="pet-desk-open-task" ${target} title="${label}" aria-label="${label}"><span class="pet-desk-open-label">${label}</span><span class="pet-desk-open-mark" aria-hidden="true">↗</span></button>`;
+}
+
+function deskLifecycleTarget(taskID: string): string {
+  return taskID ? `data-pet-task-lifecycle="${escapeHTML(taskID)}"` : "";
+}
+
+function deskWorkflowLines(lines: PetDeskLine[]): string {
+  return `<ul class="pet-desk-questions">${lines.map(line => `<li>
+    ${deskText(line.title, "strong")}
+    ${line.step ? deskText(line.step, "div") : ""}
+    ${line.blocker ? `<div>${escapeHTML(deskCopy("blocker"))} ${deskText(line.blocker)}</div>` : ""}
+  </li>`).join("")}</ul>`;
+}
+
+function renderDeskStalled(item: PetDeskStalled, options: PetOverviewOptions, now: number): string {
+  const id = escapeHTML(item.task_id);
+  const elapsed = deskElapsed(item.since, now, "petWorkbench.desk.waited", options.translate);
+  const meta = [item.line_title ? deskText(item.line_title) : "", elapsed].filter(Boolean).join(" · ");
+  return `<li class="pet-desk-item pet-desk-stalled-item" data-pet-desk-stalled="${id}">
+    <div class="pet-desk-item-body">
+      <button type="button" class="pet-desk-item-main" ${deskLifecycleTarget(item.task_id)}>
+        <strong>${deskHeadlineHTML(item, options.translate)}</strong>${meta ? `<small>${meta}</small>` : ""}
+      </button>
+      ${item.detail ? deskDetail(item.detail) : ""}
+      <div class="pet-desk-continue-form" data-pet-desk-continue-form hidden>
+        <p data-pet-desk-continue-message></p>
+        <div class="pet-desk-item-actions">
+          <button type="button" class="primary" data-pet-desk-send="${id}">${escapeHTML(deskCopy("send"))}</button>
+          <button type="button" data-pet-desk-cancel-continue="${id}">${escapeHTML(deskCopy("cancel"))}</button>
+        </div>
+      </div>
+      <p class="pet-desk-decision-status" data-pet-desk-continue-status role="status" data-i18n-ignore></p>
+    </div>
+    <div class="pet-desk-item-actions">
+      <button type="button" data-pet-desk-continue="${id}" aria-expanded="false">${escapeHTML(deskCopy("continueTask"))}</button>
+      ${deskOpenTaskButton(item.task_id, options.translate)}
+    </div>
+  </li>`;
 }
 
 /* Inline approve / reject (task-813 round 4) ------------------------------ */
@@ -504,7 +547,7 @@ export function renderPetDeskRejectForm(approvalID: string, title: string, reaso
 }
 
 // A needs/later row: the main button opens the approval detail for approvals
-// and ideas, otherwise the Task. Approvals tied to a Task also get an explicit
+// and ideas, otherwise the task lifecycle. Approvals tied to a Task also get an explicit
 // open-task button. Approvals and ideas carry inline approve / reject
 // (task-813 round 4); high-risk and delete approvals ask once more.
 function renderDeskNeed(item: PetDeskNeed, position: number | null, options: PetOverviewOptions, now: number): string {
@@ -514,24 +557,31 @@ function renderDeskNeed(item: PetDeskNeed, position: number | null, options: Pet
   const taskID = textValue(item.task_id);
   const isApproval = (kind === "approval" || kind === "idea") && approvalID !== "";
   const questions = deskStrings(item.questions);
+  const lines = deskList<PetDeskLine>(item.lines);
+  const showLines = kind === "question" && Array.isArray(item.lines);
   const list = position === null ? "later" : "need";
-  const kindLabel = deskKindLabel(list, kind, translate, {count: String(questions.length)});
+  const kindLabel = showLines
+    ? deskCopy("linesForYou", {count: String(lines.length)})
+    : deskKindLabel(list, kind, translate, {count: String(questions.length)});
   const meta: string[] = [escapeHTML(kindLabel)];
   const taskLabel = deskTaskLabel(item);
   if (taskLabel && textValue(item.title) !== taskLabel) meta.push(deskText(taskLabel));
   if (kind === "approval" && textValue(item.risk)) meta.push(escapeHTML(petApprovalRiskLabel(String(item.risk), translate)));
   const waited = deskElapsed(item.since, now, "petWorkbench.desk.waited", translate);
   if (waited) meta.push(waited);
+  if (taskID && item.stuck_on === "unknown") meta.push(escapeHTML(deskCopy("noLines")));
   const target = isApproval
     ? `data-pet-approval-open="${escapeHTML(approvalID)}"`
-    : taskID ? `data-pet-overview-task="${escapeHTML(taskID)}"` : "";
+    : deskLifecycleTarget(taskID);
   const head = `<strong>${deskTitleHTML(item, translate)}</strong><small>${meta.join(" · ")}</small>`;
   const main = target
     ? `<button type="button" class="pet-desk-item-main" ${target}>${head}</button>`
     : `<div class="pet-desk-item-main">${head}</div>`;
   const detail = textValue(item.detail);
   let body = "";
-  if (kind === "question" && questions.length) {
+  if (showLines) {
+    if (lines.length) body = deskWorkflowLines(lines);
+  } else if (kind === "question" && questions.length) {
     body = `<ul class="pet-desk-questions">${questions.map(question => deskText(question, "li")).join("")}</ul>`;
   } else if (detail) {
     body = deskDetail(detail, kind === "next_step" ? escapeHTML(translate("petWorkbench.desk.nextStep")) : "");
@@ -558,10 +608,13 @@ function renderDeskWait(item: PetDeskWait, options: PetOverviewOptions, now: num
   const count = countValue(item.count) ?? 0;
   const meta: string[] = [];
   let headline: string;
-  let target = taskID ? `data-pet-overview-task="${escapeHTML(taskID)}"` : "";
+  let target = deskLifecycleTarget(taskID);
   if (kind === "review") {
     headline = deskHeadlineHTML(item, translate);
     meta.push(escapeHTML(translate("petWorkbench.desk.wait.review")) + (on ? ` → ${deskText(on)}` : ""));
+  } else if (kind === "line") {
+    headline = deskHeadlineHTML(item, translate);
+    meta.push(escapeHTML(deskCopy("waitingOn")) + (on ? ` ${deskText(on)}` : ""));
   } else if (kind === "executing") {
     headline = deskTitleHTML(item, translate);
     meta.push(escapeHTML(translate("petWorkbench.desk.wait.executing")));
@@ -591,10 +644,12 @@ function renderDeskWait(item: PetDeskWait, options: PetOverviewOptions, now: num
     ? `<button type="button" class="pet-desk-item-main" ${target}>${head}</button>`
     : `<div class="pet-desk-item-main">${head}</div>`;
   const detail = textValue(item.detail);
+  const lines = kind === "line" ? deskList<PetDeskLine>(item.lines) : [];
   const next = kind === "loop" && detail
     ? deskDetail(detail, escapeHTML(translate("petWorkbench.desk.nextStep")))
-    : "";
-  return `<li class="pet-desk-item kind-${deskKindClass(kind)}"><div class="pet-desk-item-body">${main}${next}</div></li>`;
+    : lines.length ? deskWorkflowLines(lines) : "";
+  const actions = taskID ? `<div class="pet-desk-item-actions">${deskOpenTaskButton(taskID, translate, true)}</div>` : "";
+  return `<li class="pet-desk-item kind-${deskKindClass(kind)}"><div class="pet-desk-item-body">${main}${next}</div>${actions}</li>`;
 }
 
 function renderDeskRun(item: PetDeskRun, options: PetOverviewOptions, now: number): string {
@@ -602,12 +657,12 @@ function renderDeskRun(item: PetDeskRun, options: PetOverviewOptions, now: numbe
   const taskID = textValue(item.task_id);
   const meta: string[] = [];
   const status = textValue(item.status);
-  if (status) meta.push(escapeHTML(overviewStatusLabel(status, options)));
+  if (status) meta.push(deskText(overviewStatusLabel(status, options)));
   const ran = deskElapsed(item.since, now, "petWorkbench.desk.ran", translate);
   if (ran) meta.push(ran);
   const head = `<strong>${deskHeadlineHTML(item, translate)}</strong><small>${meta.join(" · ")}</small>`;
   const main = taskID
-    ? `<button type="button" class="pet-desk-item-main" data-pet-overview-task="${escapeHTML(taskID)}">${head}</button>`
+    ? `<button type="button" class="pet-desk-item-main" ${deskLifecycleTarget(taskID)}>${head}</button>`
     : `<div class="pet-desk-item-main">${head}</div>`;
   const detail = textValue(item.detail);
   const hardware = deskStrings(item.hardware);
@@ -615,13 +670,15 @@ function renderDeskRun(item: PetDeskRun, options: PetOverviewOptions, now: numbe
     detail ? deskDetail(detail) : "",
     hardware.length ? `<p class="pet-desk-hardware">${escapeHTML(translate("petWorkbench.desk.hardware"))}${hardware.map(name => deskText(name)).join(", ")}</p>` : "",
   ].join("");
-  return `<li class="pet-desk-item kind-running"><div class="pet-desk-item-body">${main}${lines}</div></li>`;
+  const actions = taskID ? `<div class="pet-desk-item-actions">${deskOpenTaskButton(taskID, translate, true)}</div>` : "";
+  return `<li class="pet-desk-item kind-running"><div class="pet-desk-item-body">${main}${lines}</div>${actions}</li>`;
 }
 
-function renderDeskSection(id: string, className: string, title: string, rows: string[], total: number, empty: string, translate: Translate, extra = ""): string {
-  const list = rows.length
-    ? deskScroll(`<ol class="pet-desk-list">${rows.join("")}</ol>${deskTruncated(total, rows.length, translate)}`)
+function renderDeskSection(id: string, className: string, title: string, rows: string[], total: number, empty: string, translate: Translate, extra = "", leading = ""): string {
+  const content = rows.length
+    ? `<ol class="pet-desk-list">${rows.join("")}</ol>${deskTruncated(total, rows.length, translate)}`
     : `<div class="field-help pet-desk-empty">${escapeHTML(empty)}</div>`;
+  const list = rows.length || leading ? deskScroll(leading + content) : content;
   return `<section class="pet-desk-section ${className}" id="${id}" aria-label="${escapeHTML(title)}">
     <header><h3 tabindex="-1">${escapeHTML(title)}</h3></header>
     ${list}
@@ -629,7 +686,7 @@ function renderDeskSection(id: string, className: string, title: string, rows: s
   </section>`;
 }
 
-function renderDeskStatus(desk: PetDesk, options: PetOverviewOptions, totals: {needs: number; waiting: number; running: number}): string {
+function renderDeskStatus(desk: PetDesk, options: PetOverviewOptions, totals: {needs: number; stalled: number; waiting: number; running: number}): string {
   const translate = options.translate;
   const inspection = options.inspection;
   const health = textValue(inspection?.health);
@@ -650,6 +707,7 @@ function renderDeskStatus(desk: PetDesk, options: PetOverviewOptions, totals: {n
   if (uptime !== null) hint.push(`${translate("petWorkbench.inspectionUptime")}: ${uptimeText(uptime, translate)}`);
   const counts = [
     translate("petWorkbench.desk.statusNeeds", {count: String(totals.needs)}),
+    ...(totals.stalled ? [deskCopy("stalledCount", {count: String(totals.stalled)})] : []),
     translate("petWorkbench.desk.statusWaiting", {count: String(totals.waiting)}),
     translate("petWorkbench.desk.statusRunning", {count: String(totals.running)}),
   ];
@@ -710,18 +768,29 @@ export function petDeskReplyPreview(text: string): string {
 
 // The expand control's copy lives in this chunk, like the records copy, so
 // the shared first-screen catalog does not grow for a desk-only button.
-const PET_DESK_COPY = {
+export const PET_DESK_COPY = {
   "zh-CN": {expand: "展开", collapse: "收起", emptyUnfollowed: "没有未关注的任务。", updatedAt: "更新于 {time}", updateFailed: "刷新失败，稍后会再试；显示的是 {time} 的数据",
+    stalled: "停着没人推", stalledCount: "{count} 个停着", continueTask: "让它继续", send: "发送", sending: "发送中…", sent: "已发送继续消息",
+    continueMessage: "继续：按状态卡上的下一步往下做；做不了就说明卡在哪。", sendFailed: "发送失败：{message}", sendFailedUnknown: "没有收到失败原因",
+    noLines: "没有记录分线", linesForYou: "有 {count} 条线等你", blocker: "卡点：", waitingOn: "等", recent: "最近活动（{count}）", emptyRecent: "没有最近活动。",
+    lifecycleTitle: "任务生命周期", lifecycleOpen: "打开任务", lifecycleRefresh: "刷新", lifecycleClose: "关闭", lifecycleRetry: "重试",
+    lifecycleLoading: "正在读取任务生命周期…", lifecycleLoaded: "已读取任务生命周期。",
+    lifecycleMissing: "这个任务已不存在。", lifecycleUnavailable: "当前服务端无法提供任务生命周期。", lifecycleFailed: "读取任务生命周期失败。", lifecycleTimedOut: "请求超时。",
     approve: "批准", reject: "否决", approveNamed: "批准：{title}", rejectNamed: "否决：{title}", reviewNamed: "去处理：{title}",
     confirmApprove: "确认批准？", confirm: "确认", cancel: "算了", working: "处理中…", approveFailed: "没有处理成功：{message}",
     rejectReason: "原因（宠物会记下来，写一句）", rejectReasonNamed: "否决“{title}”的原因", rejectConfirm: "确认否决", rejectNeedsReason: "写一句原因再否决"},
   "en-US": {expand: "Expand", collapse: "Collapse", emptyUnfollowed: "No unfollowed tasks.", updatedAt: "Updated {time}", updateFailed: "Refresh failed, will retry; showing data from {time}",
+    stalled: "Stalled", stalledCount: "{count} stalled", continueTask: "Ask to continue", send: "Send", sending: "Sending…", sent: "Continue message sent",
+    continueMessage: "Continue with the next step on your status card. If you cannot proceed, say what is blocking you.", sendFailed: "Could not send: {message}", sendFailedUnknown: "No reason was returned",
+    noLines: "No workstreams recorded", linesForYou: "Workstreams for you ({count})", blocker: "Blocker:", waitingOn: "Waiting for", recent: "Recent activity ({count})", emptyRecent: "No recent activity.",
+    lifecycleTitle: "Task lifecycle", lifecycleOpen: "Open task", lifecycleRefresh: "Refresh", lifecycleClose: "Close", lifecycleRetry: "Retry",
+    lifecycleLoading: "Loading task lifecycle…", lifecycleLoaded: "Task lifecycle loaded.",
+    lifecycleMissing: "This task no longer exists.", lifecycleUnavailable: "Task lifecycle is unavailable on this server.", lifecycleFailed: "Could not load the task lifecycle.", lifecycleTimedOut: "The request timed out.",
     approve: "Approve", reject: "Reject", approveNamed: "Approve: {title}", rejectNamed: "Reject: {title}", reviewNamed: "Review: {title}",
     confirmApprove: "Approve?", confirm: "Confirm", cancel: "Never mind", working: "Working…", approveFailed: "That did not work: {message}",
     rejectReason: "Reason (the pet keeps it; one line)", rejectReasonNamed: "Reason for rejecting “{title}”", rejectConfirm: "Confirm reject", rejectNeedsReason: "Write a reason to reject"},
 } satisfies Record<"zh-CN" | "en-US", Record<string, string>>;
-
-type PetDeskCopyKey = keyof typeof PET_DESK_COPY["en-US"];
+type PetDeskCopyKey = keyof (typeof PET_DESK_COPY)["en-US" | "zh-CN"];
 
 function deskCopy(key: PetDeskCopyKey, values: Record<string, string> = {}): string {
   return PET_DESK_COPY[currentLocale() === "en-US" ? "en-US" : "zh-CN"][key].replace(/\{(\w+)\}/g, (_, name: string) => values[name] ?? `{${name}}`);
@@ -876,11 +945,13 @@ function renderPetDesk(desk: PetDesk, options: PetOverviewOptions): string {
   const translate = options.translate;
   const now = typeof options.now === "number" && Number.isFinite(options.now) ? options.now : Date.now();
   const needs = deskList<PetDeskNeed>(desk.needs_owner);
+  const stalled = deskList<PetDeskStalled>(desk.stalled);
   const later = deskList<PetDeskNeed>(desk.later);
   const waiting = deskList<PetDeskWait>(desk.waiting_others);
   const running = deskList<PetDeskRun>(desk.running);
   const totals = {
     needs: deskTotal(desk.needs_owner_total, needs.length),
+    stalled: deskTotal(desk.stalled_total, stalled.length),
     later: deskTotal(desk.later_total, later.length),
     waiting: deskTotal(desk.waiting_others_total, waiting.length),
     running: deskTotal(desk.running_total, running.length),
@@ -890,11 +961,17 @@ function renderPetDesk(desk: PetDesk, options: PetOverviewOptions): string {
     ? `<ol class="pet-desk-list">${later.map(item => renderDeskNeed(item, null, options, now)).join("")}</ol>${deskTruncated(totals.later, later.length, translate)}`
     : `<div class="field-help pet-desk-empty">${escapeHTML(translate("petWorkbench.desk.emptyLater"))}</div>`;
   const laterDetails = `<details class="pet-desk-later" id="pet-desk-later"><summary>${escapeHTML(laterTitle)}</summary><div class="pet-desk-later-body">${laterBody}</div></details>`;
+  const stalledGroup = totals.stalled
+    ? `<section class="pet-desk-stalled" aria-labelledby="pet-desk-stalled-title">
+      <h4 id="pet-desk-stalled-title">${escapeHTML(deskCopy("stalled"))}</h4>
+      <ul class="pet-desk-list">${stalled.map(item => renderDeskStalled(item, options, now)).join("")}</ul>
+      ${deskTruncated(totals.stalled, stalled.length, translate)}
+    </section>` : "";
   const needsSection = renderDeskSection(
     "pet-desk-needs", "pet-desk-needs",
     translate("petWorkbench.desk.needsTitle", {count: String(totals.needs)}),
     needs.map((item, index) => renderDeskNeed(item, index + 1, options, now)),
-    totals.needs, translate("petWorkbench.desk.emptyNeeds"), translate, laterDetails,
+    totals.needs, translate("petWorkbench.desk.emptyNeeds"), translate, laterDetails, stalledGroup,
   );
   const waitingSection = renderDeskSection(
     "pet-desk-waiting", "pet-desk-waiting",
@@ -908,7 +985,7 @@ function renderPetDesk(desk: PetDesk, options: PetOverviewOptions): string {
     running.map(item => renderDeskRun(item, options, now)),
     totals.running, translate("petWorkbench.desk.emptyRunning"), translate,
   );
-  const {lists} = renderOverviewWatchLists(options.watches || [], options);
+  const {lists} = renderOverviewWatchLists(options.watches || [], options, desk);
   // The board is three columns on a wide screen: for-you in the middle (first
   // in the markup, so it is also first for the keyboard and on a phone),
   // waiting and the pet's side on the left, running and the last 7 days on
@@ -1395,7 +1472,7 @@ export function petDeskNodeKey(node: HTMLElement): string {
   const block = node.closest<HTMLElement>("[id]");
   const scope = block?.id ? `#${CSS.escape(block.id)}` : "";
   if (node.id) return `#${CSS.escape(node.id)}`;
-  for (const attribute of ["data-pet-approval-open", "data-pet-overview-task", "data-pet-desk-approve", "data-pet-desk-reject", "data-pet-watch-task"]) {
+  for (const attribute of ["data-pet-approval-open", "data-pet-task-lifecycle", "data-pet-overview-task", "data-pet-desk-continue", "data-pet-desk-send", "data-pet-desk-cancel-continue", "data-pet-desk-approve", "data-pet-desk-reject", "data-pet-watch-task"]) {
     const value = node.getAttribute(attribute);
     if (value !== null) return `${scope} [${attribute}="${CSS.escape(value)}"]${node.classList.contains("pet-desk-item-main") ? ".pet-desk-item-main" : ""}`.trim();
   }
@@ -1641,4 +1718,229 @@ export function createPetDeskDecisions(options: PetDeskDecisionOptions): PetDesk
       }
     },
   };
+}
+
+/* Continue a stalled task -------------------------------------------------- */
+
+interface PetDeskContinueOptions {
+  root: HTMLElement;
+  send: (taskID: string, message: string) => Promise<unknown>;
+  done: () => void;
+}
+
+export function createPetDeskContinue(options: PetDeskContinueOptions) {
+  const {root} = options;
+  const confirming = new Map<string, {message: string; busy: boolean; error?: string}>();
+  const sent = new Set<string>();
+  const live = document.createElement("span");
+  live.className = "visually-hidden";
+  live.setAttribute("role", "status");
+  root.before(live);
+
+  const rowFor = (id: string) => root.querySelector<HTMLElement>(`[data-pet-desk-stalled="${CSS.escape(id)}"]`);
+  const paint = (row: HTMLElement, id: string): void => {
+    const state = confirming.get(id);
+    const form = row.querySelector<HTMLElement>("[data-pet-desk-continue-form]")!;
+    const toggle = row.querySelector<HTMLButtonElement>("[data-pet-desk-continue]")!;
+    const quote = row.querySelector<HTMLElement>("[data-pet-desk-continue-message]")!;
+    const status = row.querySelector<HTMLElement>("[data-pet-desk-continue-status]")!;
+    form.hidden = state === undefined;
+    toggle.setAttribute("aria-expanded", String(Boolean(state)));
+    quote.textContent = state?.message ?? "";
+    const busy = state?.busy ?? false;
+    row.classList.toggle("busy", busy);
+    form.setAttribute("aria-busy", String(busy));
+    row.querySelectorAll<HTMLButtonElement>("button").forEach(button => { button.disabled = busy; });
+    status.classList.toggle("failed", Boolean(state?.error));
+    status.textContent = state?.error ? deskCopy("sendFailed", {message: state.error}) : busy ? deskCopy("sending") : "";
+  };
+
+  root.addEventListener("click", event => {
+    if (!(event.target instanceof Element)) return;
+    const button = event.target.closest<HTMLButtonElement>("button");
+    const row = button?.closest<HTMLElement>("[data-pet-desk-stalled]");
+    const id = row?.dataset.petDeskStalled;
+    if (!button || !row || !id) return;
+    const state = confirming.get(id);
+    if (state?.busy || sent.has(id)) return;
+    if (button.hasAttribute("data-pet-desk-continue")) {
+      if (!state) confirming.set(id, {message: deskCopy("continueMessage"), busy: false});
+      paint(row, id);
+      row.querySelector<HTMLButtonElement>("[data-pet-desk-send]")?.focus();
+    } else if (button.hasAttribute("data-pet-desk-cancel-continue")) {
+      confirming.delete(id);
+      paint(row, id);
+      row.querySelector<HTMLButtonElement>("[data-pet-desk-continue]")?.focus();
+    } else if (state && button.hasAttribute("data-pet-desk-send")) {
+      state.busy = true;
+      state.error = undefined;
+      const returnFocus = document.activeElement === button;
+      live.textContent = "";
+      paint(row, id);
+      void options.send(id, state.message).then(() => {
+        confirming.delete(id);
+        sent.add(id);
+        options.done();
+        live.textContent = deskCopy("sent");
+        if (returnFocus && document.activeElement === document.body) {
+          root.querySelector<HTMLElement>("#pet-desk-needs h3")?.focus({preventScroll: true});
+        }
+      }, error => {
+        state.busy = false;
+        state.error = (error instanceof Error ? error.message : String(error)) || deskCopy("sendFailedUnknown");
+        const current = rowFor(id);
+        if (!current) return;
+        paint(current, id);
+        if (returnFocus && document.activeElement === document.body) {
+          current.querySelector<HTMLButtonElement>("[data-pet-desk-send]")?.focus({preventScroll: true});
+        }
+      });
+    }
+  });
+
+  return {
+    // A refresh begun before the send can still return the just-sent row.
+    // Keep it out of the UI until the server no longer lists that task.
+    visible(desk: PetDesk | undefined): PetDesk | undefined {
+      if (!desk || !sent.size) return desk;
+      const rows = deskList<PetDeskStalled>(desk.stalled);
+      const visible = rows.filter(item => !sent.has(item.task_id));
+      if (rows.length === visible.length) return desk;
+      return {...desk, stalled: visible, stalled_total: deskTotal(desk.stalled_total, rows.length) - (rows.length - visible.length)};
+    },
+    accept(desk: PetDesk | undefined): void {
+      if (!desk || (!confirming.size && !sent.size)) return;
+      const listed = new Set(deskList<PetDeskStalled>(desk.stalled).map(item => item.task_id));
+      for (const id of sent) if (!listed.has(id)) sent.delete(id);
+      for (const [id, state] of confirming) if (!state.busy && !listed.has(id)) confirming.delete(id);
+    },
+    restore(): void {
+      for (const id of confirming.keys()) {
+        const row = rowFor(id);
+        if (row) paint(row, id);
+      }
+    },
+  };
+}
+
+
+/* Task lifecycle ---------------------------------------------------------- */
+
+interface PetDeskLifecycleOptions {
+  createDialog: () => HTMLDialogElement;
+  read: (taskID: string, signal: AbortSignal) => Promise<TaskLifecycle>;
+  timeoutMs: number;
+  openTask: (taskID: string) => void;
+  close: () => void;
+  canReturnFocus: () => boolean;
+  formatTime: FormatTime;
+  formatDuration: (milliseconds: number) => string;
+  statusLabel: (status: string) => string;
+  translate: Translate;
+}
+
+export function bindPetDeskLifecycle(root: HTMLElement, options: PetDeskLifecycleOptions): void {
+  root.querySelectorAll<HTMLButtonElement>("[data-pet-task-lifecycle]").forEach(button => {
+    button.addEventListener("click", () => {
+      const taskID = button.dataset.petTaskLifecycle;
+      if (!taskID) return;
+      const key = petDeskNodeKey(button);
+      bindTaskLifecycleDialog(options.createDialog(), {
+        ...options,
+        triggerTitle: button.querySelector("strong")?.textContent || "",
+        read: signal => options.read(taskID, signal),
+        openTask: () => options.openTask(taskID),
+        returnFocus: () => {
+          if (!root.isConnected || !options.canReturnFocus()) return;
+          const target = (key && root.querySelector<HTMLElement>(key)) || root.querySelector<HTMLElement>("#pet-desk-needs h3");
+          target?.focus({preventScroll: true});
+        },
+        elapsed: since => petDeskElapsedText(since, Date.now(), "", options.translate),
+      });
+    });
+  });
+}
+
+function bindTaskLifecycleDialog(dialog: HTMLDialogElement, options: Pick<PetDeskLifecycleOptions, "close" | "formatTime" | "formatDuration" | "statusLabel" | "timeoutMs"> & {
+  read: (signal: AbortSignal) => Promise<TaskLifecycle>;
+  openTask: () => void;
+  returnFocus: () => void;
+  triggerTitle: string;
+  elapsed: (since: string) => string;
+}): void {
+  dialog.setAttribute("aria-modal", "true");
+  dialog.setAttribute("aria-labelledby", "pet-lifecycle-title");
+  dialog.firstElementChild!.innerHTML = `<header>
+    <div><p>${deskCopy("lifecycleTitle")}</p><h2 id="pet-lifecycle-title" data-i18n-ignore></h2><div data-pet-lifecycle-meta></div></div>
+    <div class="pet-lifecycle-actions">
+      <button type="button" data-pet-lifecycle-open>${deskCopy("lifecycleOpen")}</button>
+      <button type="button" data-pet-lifecycle-refresh>${deskCopy("lifecycleRefresh")}</button>
+      <button type="button" data-pet-lifecycle-close autofocus>${deskCopy("lifecycleClose")}</button>
+    </div>
+  </header>
+  <div class="visually-hidden" role="status" data-pet-lifecycle-live></div>
+  <div class="pet-lifecycle-scroll" tabindex="0" aria-labelledby="pet-lifecycle-title"></div>`;
+  const title = dialog.querySelector<HTMLElement>("#pet-lifecycle-title")!;
+  title.textContent = options.triggerTitle || deskCopy("lifecycleTitle");
+  const meta = dialog.querySelector<HTMLElement>("[data-pet-lifecycle-meta]")!;
+  const content = dialog.querySelector<HTMLElement>(".pet-lifecycle-scroll")!;
+  const live = dialog.querySelector<HTMLElement>("[data-pet-lifecycle-live]")!;
+  const refresh = dialog.querySelector<HTMLButtonElement>("[data-pet-lifecycle-refresh]")!;
+  let controller: AbortController | null = null;
+  const message = (key: PetDeskCopyKey, detail?: string) => {
+    live.textContent = deskCopy(key);
+    content.innerHTML = `<p>${deskCopy(key)}${detail ? ` ${deskText(detail)}` : ""}</p>`;
+  };
+  const read = async (): Promise<void> => {
+    if (controller || !dialog.open) return;
+    const requested = new AbortController();
+    controller = requested;
+    refresh.setAttribute("aria-disabled", "true");
+    refresh.textContent = deskCopy("lifecycleRefresh");
+    content.setAttribute("aria-busy", "true");
+    message("lifecycleLoading");
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const [lifecycle, renderer] = await Promise.race([
+        Promise.all([options.read(requested.signal), import("./pet_lifecycle.js")]),
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => reject(new Error(deskCopy("lifecycleTimedOut"))), options.timeoutMs);
+        }),
+      ]);
+      if (requested.signal.aborted || !dialog.open) return;
+      const task = lifecycle.task;
+      const html = renderer.renderTaskLifecycle(lifecycle, {...options, idleDuration: options.elapsed});
+      title.textContent = [task.code, task.title].filter(Boolean).join(" · ") || deskCopy("lifecycleTitle");
+      meta.innerHTML = [task.project ? deskText(task.project) : "", task.status ? deskText(options.statusLabel(task.status)) : ""].filter(Boolean).join(" · ");
+      content.innerHTML = html;
+      content.scrollTop = 0;
+      live.textContent = deskCopy("lifecycleLoaded");
+    } catch (error) {
+      if (requested.signal.aborted || !dialog.open) return;
+      requested.abort();
+      const failure = error as {status?: number; code?: string; message?: string};
+      if (failure?.status === 404) message(failure.code === "task_not_found" ? "lifecycleMissing" : "lifecycleUnavailable");
+      else {
+        message("lifecycleFailed", failure?.message);
+        refresh.textContent = deskCopy("lifecycleRetry");
+      }
+    } finally {
+      clearTimeout(timeout);
+      if (controller === requested) controller = null;
+      refresh.removeAttribute("aria-disabled");
+      content.setAttribute("aria-busy", "false");
+    }
+  };
+  refresh.addEventListener("click", () => void read());
+  dialog.querySelector("[data-pet-lifecycle-close]")?.addEventListener("click", () => {
+    controller?.abort();
+    options.close();
+  });
+  dialog.querySelector("[data-pet-lifecycle-open]")?.addEventListener("click", options.openTask);
+  dialog.addEventListener("close", () => {
+    controller?.abort();
+    options.returnFocus();
+  }, {once: true});
+  dialog.showModal();
+  void read();
 }

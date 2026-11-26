@@ -838,6 +838,10 @@ class APIClient {
     return this.readOnce(`/api/v1/tasks/${id}`);
   }
 
+  taskLifecycle(id: string, signal: AbortSignal): Promise<{ok: boolean; lifecycle: import("./types").TaskLifecycle}> {
+    return this.request(`/api/v1/tasks/${encodeURIComponent(id)}/lifecycle`, {signal});
+  }
+
   resolveTaskPermissionRequest(taskID: string, requestID: string, decision: "approve" | "reject", reason = ""): Promise<{ok: boolean; request: import("./types").TaskPermissionRequest}> {
     return this.request(`/api/v1/tasks/${encodeURIComponent(taskID)}/permission-requests/${encodeURIComponent(requestID)}/resolve`, {
       method: "POST", body: JSON.stringify({decision, reason}),
@@ -918,7 +922,7 @@ class APIClient {
   }
 
   message(taskID: string, content: string): Promise<{turn: {id: string}}> {
-    return this.request(`/api/v1/tasks/${taskID}/messages`, {method: "POST", body: JSON.stringify({content})});
+    return this.request(`/api/v1/tasks/${encodeURIComponent(taskID)}/messages`, {method: "POST", body: JSON.stringify({content})});
   }
 
   agentMessage(taskID: string, agentID: string, content: string, attachmentIDs: string[] = []): Promise<{turn?: {id: string}; queued: boolean; started: boolean}> {

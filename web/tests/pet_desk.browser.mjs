@@ -6,7 +6,7 @@
 //   - with `desk` the overview renders the desk blocks in order, the waiting
 //     and running columns sit side by side on a wide screen and stack on a
 //     phone, and the English UI shows no Chinese interface copy;
-//   - a task row opens the Task, an approval row and an idea open the existing
+//   - a task title opens its lifecycle, an approval row and an idea open the existing
 //     approval detail (also when the approval is older than the loaded page),
 //     a channel row jumps to the channel cards and "see all" opens Records;
 //   - the desk buttons still work after the body is repainted;
@@ -140,15 +140,102 @@ const decideApprovals = [
 ];
 const decideNeed = item => ({kind: item.kind === "idea" ? "idea" : "approval", approval_id: item.id, approval_kind: item.kind, risk: item.risk, title: item.title, detail: item.summary, since: item.created_at});
 
+const zeroTime = "0001-01-01T00:00:00Z";
+const continueEN = "Continue with the next step on your status card. If you cannot proceed, say what is blocking you.";
+const continueZH = "继续：按状态卡上的下一步往下做；做不了就说明卡在哪。";
+const markup = '<img src=x onerror="window.__unsafe = true">评审材料';
+const workstreamDesk = {
+  ...desk,
+  corrections: [{at: minutesAgo(80), title: "Archive stale build notes", owner_note: "Keep the latest installation notes."}],
+  open_loops: ["Check the export format with Design"], open_loops_total: 1,
+  agenda: ["Compare the next stability run"], agenda_total: 1,
+  last_reply: {text: "The review is ready. I will check the export after design replies.", finished_at: minutesAgo(4), noop: false, from_wake: true},
+  needs_owner: [
+    {kind: "question", task_id: "t-813", task_code: "task-813", title: "Pet workbench refresh", stuck_on: "owner",
+      questions: ["This unrelated question must stay hidden"], since: minutesAgo(49),
+      lines: [{id: "release", title: "Release order", state: "waiting", step: "Choose a rollout window", blocker: "Owner approval"}]},
+    {kind: "question", task_id: "t-790", task_code: "task-790", title: "Update workspace access", stuck_on: "unknown",
+      questions: ["Keep access restricted to the build server?"], since: minutesAgo(25)},
+  ],
+  needs_owner_total: 2,
+  later: [{kind: "next_step", task_id: "t-later", task_code: "task-814", title: "Update the installation notes", detail: "Confirm the new command", stuck_on: "unknown", since: minutesAgo(5)},
+    {kind: "question", task_id: "t-empty-lines", task_code: "task-815", title: "No active workstreams", lines: [], questions: ["This obsolete question must stay hidden"], since: zeroTime}],
+  later_total: 2,
+  stalled: [
+    {task_id: "t-stall-one", task_code: "task-816", title: "Recheck webhook delivery", line_id: "replay", line_title: "Retry audit", detail: "Compare delivery logs from the last run", since: minutesAgo(68)},
+    {task_id: "t-stall-two", task_code: "task-817", title: "Check the migration fixture", detail: "Run the database upgrade tests", since: minutesAgo(27)},
+  ],
+  stalled_total: 2,
+  waiting_others: [
+    {kind: "line", task_id: "t-line", task_code: "task-819", title: "Finish the API guide", on: "Design, Docs", since: minutesAgo(35),
+      lines: [{id: "diagram", title: "Navigation diagram", who: "Design", state: "waiting", step: "Waiting for revised assets"}, {id: "edit", title: "Docs pass", who: "Docs", state: "waiting"}]},
+    {kind: "review", task_id: "t-805", task_code: "task-805", title: "Check installer packaging", on: "task-818", since: minutesAgo(18)},
+  ],
+  waiting_others_total: 2,
+  running: [{task_id: "t-811", task_code: "task-811", title: "Overnight stability run", status: "active", detail: "Comparing the last two runs", since: minutesAgo(12)}],
+  running_total: 1,
+  recent: [
+    {task_id: "t-recent-done", task_code: "task-820", title: "Profiled the task list", status: "completed", watched: false, last_active: minutesAgo(4)},
+    {task_id: "t-recent-watched", task_code: "task-821", title: "Rotate test credentials", status: "waiting_user", watched: true, last_active: minutesAgo(6)},
+    {task_id: "t-recent-cancelled", task_code: "task-822", title: "Retire obsolete test job", status: "cancelled", watched: false, last_active: minutesAgo(30)},
+  ],
+  recent_total: 5,
+};
+const workstreamWatches = [
+  {...watches[0], title: "Audit the installer"},
+  {...layoutWatches[1], title: "Old synchronization trial"},
+];
+const lifecycleFixture = {
+  task: {id: "t-813", code: "task-813", title: "Pet workbench refresh", status: "waiting_user", project: "AHA2",
+    created_at: minutesAgo(400), updated_at: minutesAgo(15), current_goal: "Keep the desk on one screen"},
+  now: {status: "The approval flow is ready for review.", next_steps: ["Verify the merged build"], open_questions: ["Which rollout window?"],
+    updated_at: minutesAgo(20), stuck_on: "other", stuck_who: ["Release team"], idle_since: minutesAgo(20), lines_recorded: true},
+  // Deliberately put the closed workstream first to verify grouping.
+  lines: [
+    {id: "layout", title: "One-screen layout", owner: "self", state: "closed", step: "Checked all viewports", updated_at: minutesAgo(70), opened_at: minutesAgo(90), closed_at: minutesAgo(70)},
+    {id: "release", title: "Release order", owner: "owner", state: "waiting", step: "Choose a rollout window", blocker: "Owner approval", updated_at: minutesAgo(20), opened_at: minutesAgo(40), closed_at: zeroTime},
+    {id: "notes", title: "Release notes", owner: "other", who: "Docs", state: "waiting", step: "Draft shared", updated_at: zeroTime, opened_at: minutesAgo(40), closed_at: zeroTime},
+  ],
+  parallel: {
+    subs: [{agent_id: "sub-001", title: "Desk interface", status: "running", started_at: minutesAgo(45), finished_at: zeroTime}],
+    reviews: [{task_id: "t-review", code: "task-819", status: "completed", decision: "Approved with comments", reason: "Layout and keyboard checks passed.", decided_at: minutesAgo(15)}],
+  },
+  timeline: [
+    {at: minutesAgo(400), kind: "created"},
+    {at: minutesAgo(250), kind: "goal", title: "revise", detail: "Add the lifecycle while keeping the one-screen board."},
+    {at: minutesAgo(245), kind: "constraint", detail: "Keep the task links on every supporting row."},
+    {at: minutesAgo(90), kind: "line_opened", title: "One-screen layout"},
+    {at: minutesAgo(80), kind: "approval_requested", title: "Allow fixture updates", ref_id: "a-23"},
+    {at: minutesAgo(78), kind: "approval_resolved", title: "approved", detail: "The fixtures are local.", ref_id: "a-23"},
+    {at: minutesAgo(70), kind: "line_closed", title: "One-screen layout"},
+    {at: minutesAgo(50), kind: "line_reopened", title: "One-screen layout"},
+    {at: minutesAgo(35), kind: "line_updated", title: "Release order", detail: "Owner needs to pick a date."},
+    {at: minutesAgo(15), kind: "review", title: "Approved with comments", detail: "Retest when merged."},
+    {at: minutesAgo(10), kind: "future_event", title: markup},
+    ...Array.from({length: 8}, (_, index) => ({at: minutesAgo(9 - index), kind: "line_updated", title: "Release notes",
+      detail: `Editor update ${index + 1}: reviewed the list of changes for the release.`})),
+  ],
+  turns: [{id: "turn-3", sequence: 3, status: "succeeded", started_at: minutesAgo(25), finished_at: minutesAgo(20),
+    duration_seconds: 300, summary: "The interface is ready for review.", error: ""}],
+  stats: {turns: 3, duration_seconds: 780, tokens: 12345},
+};
+const compactLifecycle = {...lifecycleFixture, timeline: lifecycleFixture.timeline.filter(event => ["created", "goal", "approval_resolved", "line_closed"].includes(event.kind))};
 const bootstrap = `
 const json = (value, status = 200) => new Response(JSON.stringify(value), {status, headers: {"Content-Type": "application/json"}});
 const params = new URLSearchParams(location.search);
-const layoutDesks = {owner: ${JSON.stringify(ownerDesk)}, large: ${JSON.stringify(largeDesk)}};
+const layoutDesks = {workstreams: ${JSON.stringify(workstreamDesk)}, owner: ${JSON.stringify(ownerDesk)}, large: ${JSON.stringify(largeDesk)}};
 const watchSets = ${JSON.stringify(watchSets)};
+const workstreamWatches = ${JSON.stringify(workstreamWatches)};
 window.__desk = params.get("desk") === "0" ? undefined : layoutDesks[params.get("desk")] || ${JSON.stringify(desk)};
 const weekInsights = layoutDesks[params.get("desk")] ? ${JSON.stringify(ownerInsights)} : ${JSON.stringify(insights)};
 window.__workbenchQueries = [];
 window.__taskReads = [];
+window.__lifecycleReads = [];
+window.__lifecycleWaiters = new Map();
+window.__lifecycleMode = "ok";
+window.__continueWrites = [];
+const lifecycleFixture = ${JSON.stringify(lifecycleFixture)};
+const compactLifecycle = ${JSON.stringify(compactLifecycle)};
 window.__approvalReads = [];
 window.__insightReads = 0;
 // insights=fail answers 500, insights=old answers 404 like a server without
@@ -198,7 +285,21 @@ window.fetch = async (input, init = {}) => {
     window.__savedDocs = [...(window.__savedDocs || []), decodeURIComponent(path.split("/").pop())];
     return json({ok: true});
   }
-  if (path.startsWith("/api/v1/pet/watches/")) (window.__watchWrites ||= []).push([(init.method || "GET").toUpperCase(), decodeURIComponent(path.split("/").pop())]);
+  if (path.startsWith("/api/v1/pet/watches/")) {
+    const id = decodeURIComponent(path.split("/").pop());
+    const method = init.method || "GET";
+    (window.__watchWrites ||= []).push([method, id]);
+    const recent = window.__desk?.recent?.find(item => item.task_id === id);
+    if (recent) {
+      const ignored = method === "PATCH" && JSON.parse(init.body).ignored;
+      if (method === "POST") recent.watched = true;
+      if (ignored) {
+        window.__desk.recent = window.__desk.recent.filter(item => item.task_id !== id);
+        window.__desk.recent_total--;
+      }
+      workstreamWatches.push({...recent, code: recent.task_code, updated_at: recent.last_active, created_at: recent.last_active, reason: "manual", ignored});
+    }
+  }
   if (path.startsWith("/api/v1/pet/approvals/") && path.endsWith("/resolve")) {
     const id = decodeURIComponent(path.split("/")[5]);
     const body = JSON.parse(init.body || "{}");
@@ -246,11 +347,37 @@ window.fetch = async (input, init = {}) => {
     return json({
       ok: true, core: [{name: "loops.md", content: "loops"}, {name: "identity.md", content: "identity"}, {name: "principles.md", content: "principles"}, {name: "agenda.md", content: "agenda"}], worklog: [{date: "2026-11-25", content: "做了一件事"}], worklog_total: 1, approvals, approval_total: history ? historyApprovals.length : allApprovals.length,
       approval_counts: history ? Object.values(historyApprovals.reduce((groups, item) => { const key = (item.kind === "idea" ? "idea" : "owner_decision") + item.status; groups[key] = groups[key] || {kind: item.kind, status: item.status, count: 0}; groups[key].count++; return groups; }, {})) : [{kind: "idea", status: "pending", count: 1}, {kind: "owner_decision", status: "pending", count: 1}],
-      watches: watchSets[params.get("watches")] || (layoutDesks[params.get("desk")] ? ${JSON.stringify(layoutWatches)} : ${JSON.stringify(watches)}), updated_at: new Date().toISOString(),
+      watches: (params.get("desk") === "workstreams" ? workstreamWatches : watchSets[params.get("watches")]) || (layoutDesks[params.get("desk")] ? ${JSON.stringify(layoutWatches)} : ${JSON.stringify(watches)}), updated_at: new Date().toISOString(),
       inspection: {health: "ok", version: "9.9.9", web_version: "web-1", uptime_minutes: 125, checked_at: new Date().toISOString(), pending_approvals: 2},
       channels: [{id: "c-1", name: "Mail", status: "degraded", pending: 3, degraded: true}], channel_total: 1,
       ...(window.__desk ? {desk: window.__desk} : {}),
     });
+  }
+  const lifecycle = path.match(/^\\/api\\/v1\\/tasks\\/([^/]+)\\/lifecycle$/);
+  if (lifecycle) {
+    const id = decodeURIComponent(lifecycle[1]);
+    window.__lifecycleReads.push({id, signal: init.signal});
+    if (window.__lifecycleMode === "old") return new Response("404 page not found", {status: 404});
+    if (window.__lifecycleMode === "missing") return json({ok: false, error: "task_not_found"}, 404);
+    if (window.__lifecycleMode === "fail") return json({ok: false, message: "Read interrupted"}, 500);
+    if (window.__lifecycleMode === "slow") await new Promise(resolve => window.__lifecycleWaiters.set(id, resolve));
+    const source = window.__lifecycleCompact ? compactLifecycle : lifecycleFixture;
+    const fixture = id === "t-813" ? source : {...source, task: {...source.task, id, code: id, title: "Lifecycle for " + id}};
+    if (window.__lifecycleMode === "empty") return json({ok: true, lifecycle: {...fixture,
+      now: {status: "", next_steps: [], open_questions: [], updated_at: "${zeroTime}", idle_since: "${zeroTime}", lines_recorded: false},
+      lines: null, parallel: {subs: null, reviews: []}, timeline: null, turns: []}});
+    return json({ok: true, lifecycle: fixture});
+  }
+  const messages = path.match(/^\\/api\\/v1\\/tasks\\/([^/]+)\\/messages$/);
+  if (messages && init.method === "POST") {
+    const id = decodeURIComponent(messages[1]);
+    window.__continueWrites.push({id, content: JSON.parse(init.body).content});
+    const mode = window.__continueMode;
+    if (mode === "slow") await new Promise(resolve => { window.__releaseContinue = resolve; });
+    if (mode === "fail") return json({ok: false, message: ${JSON.stringify("Send rejected: " + markup)}}, 400);
+    window.__desk.stalled = window.__desk.stalled.filter(item => item.task_id !== id);
+    window.__desk.stalled_total--;
+    return json({ok: true, turn: {id: "new-turn"}});
   }
   if (path.startsWith("/api/v1/tasks/")) {
     window.__taskReads.push(path.split("/")[4]);
@@ -322,7 +449,7 @@ const url = `http://127.0.0.1:${server.address().port}`;
 // Same scan as pet_i18n.browser.mjs: interface copy must be English; server
 // content is marked data-i18n-ignore by the desk renderer.
 const untranslated = page => page.evaluate(() => {
-  const body = document.querySelector("#pet-workbench-body");
+  const body = document.querySelector("dialog.pet-lifecycle-dialog[open]") || document.querySelector("#pet-workbench-body");
   // .pet-approval-row-main strong is the approval title (server text) in the
   // shared approval row, skipped the same way in pet_i18n.browser.mjs.
   const skip = "[data-i18n-ignore],.pet-watch-row strong,.pet-approval-row-main strong,pre,code,textarea,input";
@@ -459,8 +586,8 @@ try {
   await page.locator('.sidebar [data-view="pet-workbench"]').click();
   await page.waitForSelector("#pet-workbench-body .pet-desk", {timeout: 20000});
 
-  // A task row opens the Task.
-  await page.locator('#pet-desk-needs .pet-desk-item-main[data-pet-overview-task="t-790"]').click();
+  // The explicit Open task button still opens the Task.
+  await page.locator('#pet-desk-needs [data-pet-overview-task="t-790"]').click();
   await page.waitForFunction(() => window.__taskReads.includes("t-790"), null, {timeout: 15000});
   await page.waitForSelector(".pet-workbench-page", {state: "detached"});
 
@@ -1172,6 +1299,208 @@ try {
   }
   assert.deepEqual(await untranslated(layoutPage), [], "English board left untranslated Chinese");
   await layoutPage.close();
+
+  // 4B/4C use the 12.9 response shapes until the real routes are available.
+  const streamsPage = await browser.newPage({viewport: {width: 1920, height: 912}, locale: "en-US"});
+  streamsPage.on("pageerror", error => { if (error.message !== "task_stub") errors.push(error.message); });
+  await streamsPage.clock.install();
+  await openOverview(streamsPage, "?desk=workstreams");
+  await streamsPage.locator("#pet-desk-insights .pet-desk-insights-list").waitFor();
+  const locator = selector => streamsPage.locator(selector);
+  const stalled = locator(".pet-desk-stalled");
+  assert.equal(await stalled.locator("li.pet-desk-stalled-item").count(), 2);
+  assert.equal(await stalled.locator(".pet-desk-index").count(), 0);
+  assert.match(await stalled.innerText(), /Retry audit[\s\S]+waited[\s\S]+Compare delivery logs/);
+  assert.match(await locator(".pet-desk-status-counts").innerText(), /2 for you\s+2 stalled\s+2 waiting on others/);
+  const ownerLine = locator("#pet-desk-needs .pet-desk-scroll > .pet-desk-list > .kind-question").first();
+  assert.match(await ownerLine.innerText(), /Release order[\s\S]+Choose a rollout window[\s\S]+Owner approval/);
+  assert.doesNotMatch(await ownerLine.innerText(), /unrelated question/);
+  assert.match(await locator("#pet-desk-needs .pet-desk-scroll > .pet-desk-list > .kind-question").last().innerText(), /No workstreams recorded[\s\S]+Keep access restricted/);
+  await locator("#pet-desk-later summary").click();
+  assert.match(await locator("#pet-desk-later").innerText(), /No workstreams recorded[\s\S]+Confirm the new command/);
+  assert.doesNotMatch(await locator("#pet-desk-later").innerText(), /obsolete question/);
+  await locator("#pet-desk-later summary").click();
+  assert.match(await locator("#pet-desk-waiting .kind-line").innerText(), /Waiting for Design, Docs[\s\S]+Navigation diagram[\s\S]+Docs pass/);
+  assert.deepEqual(await locator(".pet-desk-follows > section").evaluateAll(el => el.map(node => node.id)), ["pet-overview-follows", "pet-overview-recent", "pet-overview-ignored"]);
+  const recent = locator("#pet-overview-recent");
+  assert.deepEqual(await recent.locator("[data-pet-task-lifecycle]").evaluateAll(el => el.map(node => node.dataset.petTaskLifecycle)), ["t-recent-done", "t-recent-watched", "t-recent-cancelled"]);
+  assert.match(await recent.innerText(), /Recent activity \(5\)[\s\S]+Profiled the task list[\s\S]+Completed[\s\S]+\d{4}-\d{2}-\d{2}[\s\S]+2 more not shown/i);
+  assert.equal(await recent.locator(".pet-watch-row.terminal").count(), 2);
+  assert.equal(await recent.locator("[data-pet-watch-follow]").count(), 2);
+  assert.equal(await recent.locator("[data-pet-watch-unfollow]").count(), 0);
+  assert.equal(await recent.locator("[data-pet-watch-ignore]").count(), 3);
+  assert.deepEqual(await untranslated(streamsPage), []);
+  assert.equal(await streamsPage.evaluate(() => window.__lifecycleReads.length), 0, "zero lifecycle reads on overview load");
+
+  const lifecycle = locator("dialog.pet-lifecycle-dialog");
+  const closeLifecycle = () => lifecycle.locator("[data-pet-lifecycle-close]").click();
+  const refreshLifecycle = () => lifecycle.locator("[data-pet-lifecycle-refresh]").click();
+  const launchLifecycle = async trigger => {
+    await trigger.click();
+    await lifecycle.locator(".pet-lifecycle-scroll section").first().waitFor();
+  };
+  const ownerTrigger = ownerLine.locator("[data-pet-task-lifecycle]");
+  const phase4Shots = process.env.AHA_PET_LIFECYCLE_SCREENSHOT_DIR;
+  if (phase4Shots) {
+    await mkdir(phase4Shots, {recursive: true});
+    await streamsPage.screenshot({path: resolve(phase4Shots, "overview-1920x912.png")});
+    await streamsPage.evaluate(() => { window.__lifecycleCompact = true; });
+    await launchLifecycle(ownerTrigger);
+    await lifecycle.locator(".pet-lifecycle-scroll > details").last().evaluate(el => { el.open = true; });
+    await streamsPage.screenshot({path: resolve(phase4Shots, "lifecycle-1920x912.png")});
+    await closeLifecycle();
+    await streamsPage.evaluate(() => { window.__lifecycleCompact = false; });
+  }
+
+  await ownerTrigger.focus();
+  await streamsPage.keyboard.press("Enter");
+  await lifecycle.locator(".pet-lifecycle-scroll section").first().waitFor();
+  assert.equal(await lifecycle.getAttribute("aria-modal"), "true");
+  assert.equal(await lifecycle.locator("[data-pet-lifecycle-close]:focus").count(), 1, "focus enters the dialog");
+  assert.match(await lifecycle.locator("header").innerText(), /task-813 · Pet workbench refresh[\s\S]+AHA2/);
+  assert.deepEqual(await lifecycle.locator(".pet-lifecycle-scroll > section > h3, .pet-lifecycle-scroll > details > summary").allInnerTexts(), ["Now", "Workstreams", "Parallel work", "Turning points", "Turns", "Totals"]);
+  const modalText = await lifecycle.innerText();
+  for (const text of ["The approval flow is ready for review.", "Verify the merged build", "Release team", "Idle for", "Choose a rollout window",
+    "Approved with comments", "Desk interface", "Task created", "Goal revised", "Owner constraint", "Approval requested", "Approval granted",
+    "Review decision", "Workstream opened", "Workstream closed", "Workstream reopened", "Workstream updated", "Task event", "12,345"]) {
+    assert.ok(modalText.includes(text), text);
+  }
+  assert.doesNotMatch(modalText, /undefined|0001-01-01/);
+  assert.equal(await lifecycle.locator("img, script").count(), 0);
+  assert.equal(await lifecycle.locator("[data-i18n-ignore]").filter({hasText: "评审材料"}).count(), 1);
+  assert.deepEqual(await untranslated(streamsPage), []);
+  const closed = lifecycle.locator("section details").filter({hasText: "1 closed"});
+  assert.equal(await closed.getAttribute("open"), null);
+  assert.deepEqual(await lifecycle.locator("table").first().locator("tbody th").allInnerTexts(), ["Release order", "Release notes"]);
+  const round = lifecycle.locator(".pet-lifecycle-scroll > details").last();
+  assert.equal(await round.getAttribute("open"), null);
+  assert.equal(await lifecycle.locator(".pet-lifecycle-scroll > details").first().getAttribute("open"), "");
+  await round.locator("summary").click();
+  assert.match(await round.innerText(), /Turn 3[\s\S]+05:00[\s\S]+The interface is ready for review/);
+  const modalReads = await streamsPage.evaluate(() => window.__lifecycleReads.length);
+  const backgroundRefresh = async () => {
+    const old = await streamsPage.evaluate(() => {
+      document.querySelector('[data-pet-task-lifecycle="t-813"]').dataset.refreshProbe = "old";
+      return window.__workbenchQueries.length;
+    });
+    await streamsPage.evaluate(() => window.__emit("task_status_changed"));
+    await streamsPage.clock.runFor(5000);
+    await streamsPage.waitForFunction(count => window.__workbenchQueries.length > count &&
+      !document.querySelector('[data-pet-task-lifecycle="t-813"][data-refresh-probe]'), old);
+  };
+  await backgroundRefresh();
+  assert.equal(await round.getAttribute("open"), "");
+  assert.equal(await streamsPage.evaluate(() => window.__lifecycleReads.length), modalReads);
+  // Even if an older server posts out-of-order timestamps, the browser
+  // preserves its response order.
+  await streamsPage.evaluate(() => window.__desk.recent.reverse());
+  await backgroundRefresh();
+  assert.deepEqual(await recent.locator("[data-pet-task-lifecycle]").evaluateAll(el => el.map(node => node.dataset.petTaskLifecycle)), ["t-recent-cancelled", "t-recent-watched", "t-recent-done"]);
+  for (const [width, height] of [[1920, 912], [1440, 900], [1366, 768], [1100, 640]]) {
+    await streamsPage.setViewportSize({width, height});
+    fitsBoard(await layout(streamsPage), `lifecycle ${width}x${height}`);
+    const canScroll = await lifecycle.locator(".pet-lifecycle-scroll").evaluate(el => el.clientHeight > 0 && el.scrollHeight > el.clientHeight);
+    assert.ok(canScroll, "the lifecycle body scrolls independently");
+  }
+  await streamsPage.setViewportSize({width: 1920, height: 912});
+  await streamsPage.keyboard.press("Escape");
+  await lifecycle.waitFor({state: "detached"});
+  await locator('#pet-desk-needs [data-pet-task-lifecycle="t-813"]:focus').waitFor();
+
+  await locator("#pet-desk-later summary").click();
+  for (const id of ["t-later", "t-line", "t-805", "t-811", "t-stall-one", "t-w", "t-recent-done", "t-ig0"]) {
+    const trigger = locator(`[data-pet-task-lifecycle="${id}"]`);
+    await launchLifecycle(trigger);
+    assert.ok((await lifecycle.locator("h2").innerText()).includes(id), id);
+    await closeLifecycle();
+    await locator(`[data-pet-task-lifecycle="${id}"]:focus`).waitFor();
+  }
+  await locator("#pet-desk-later summary").click();
+
+  await streamsPage.evaluate(() => { window.__lifecycleMode = "slow"; });
+  await ownerTrigger.click();
+  assert.match(await lifecycle.locator(".pet-lifecycle-scroll").innerText(), /Loading task lifecycle/);
+  const slowRead = await streamsPage.evaluate(() => window.__lifecycleReads.length);
+  await locator('[data-pet-task-lifecycle="t-811"]').evaluate(button => button.click());
+  await streamsPage.waitForFunction(count => window.__lifecycleReads.length === count + 1 && window.__lifecycleReads.at(-2).signal.aborted, slowRead);
+  await streamsPage.evaluate(() => window.__lifecycleWaiters.get("t-811")());
+  await lifecycle.locator("h2").filter({hasText: "Lifecycle for t-811"}).waitFor();
+  await streamsPage.evaluate(() => window.__lifecycleWaiters.get("t-813")());
+  assert.match(await lifecycle.locator("h2").innerText(), /Lifecycle for t-811/);
+  await streamsPage.evaluate(() => { window.__lifecycleMode = "fail"; });
+  await refreshLifecycle();
+  await lifecycle.locator(".pet-lifecycle-scroll").getByText(/Read interrupted/).waitFor();
+  assert.match(await lifecycle.locator(".pet-lifecycle-scroll").innerText(), /Could not load.*Read interrupted/);
+  assert.equal(await lifecycle.locator("[data-pet-lifecycle-refresh]").innerText(), "Retry");
+  await streamsPage.evaluate(() => { window.__lifecycleMode = "empty"; });
+  await refreshLifecycle();
+  await lifecycle.locator(".pet-lifecycle-scroll").getByText("No current status recorded.").waitFor();
+  const emptyRead = await lifecycle.textContent();
+  for (const text of ["No current status recorded", "no recorded workstreams", "No sub-agents", "No related reviews", "No turning points", "No approval events", "No turns recorded"]) {
+    assert.ok(emptyRead.includes(text), text);
+  }
+  await streamsPage.evaluate(() => { window.__lifecycleMode = "missing"; });
+  await refreshLifecycle();
+  await lifecycle.locator(".pet-lifecycle-scroll").getByText(/task no longer exists/i).waitFor();
+  await streamsPage.evaluate(() => { window.__lifecycleMode = "old"; });
+  await refreshLifecycle();
+  await lifecycle.locator(".pet-lifecycle-scroll").getByText(/unavailable on this server/).waitFor();
+  await closeLifecycle();
+  await streamsPage.evaluate(() => { window.__lifecycleMode = "slow"; });
+  await ownerTrigger.click();
+  await closeLifecycle();
+  await streamsPage.waitForFunction(() => window.__lifecycleReads.at(-1).signal.aborted);
+  await streamsPage.evaluate(() => window.__lifecycleWaiters.get("t-813")());
+  await ownerTrigger.click();
+  await streamsPage.clock.runFor(12_001);
+  await lifecycle.locator(".pet-lifecycle-scroll").getByText(/request timed out/i).waitFor();
+  assert.equal(await streamsPage.evaluate(() => window.__lifecycleReads.at(-1).signal.aborted), true);
+  await streamsPage.evaluate(() => window.__lifecycleWaiters.get("t-813")());
+  await closeLifecycle();
+
+  const stalledRow = locator('[data-pet-desk-stalled="t-stall-one"]');
+  const toggleContinue = stalledRow.locator("[data-pet-desk-continue]");
+  const sendContinue = stalledRow.locator("[data-pet-desk-send]");
+  await toggleContinue.click();
+  assert.equal(await stalledRow.locator("[data-pet-desk-continue-message]").innerText(), continueEN);
+  await stalledRow.locator("[data-pet-desk-cancel-continue]").click();
+  assert.equal(await toggleContinue.getAttribute("aria-expanded"), "false");
+  await toggleContinue.click();
+  await backgroundRefresh();
+  assert.equal(await stalledRow.locator("[data-pet-desk-continue-message]").innerText(), continueEN);
+  await stalledRow.locator("[data-pet-desk-send]:focus").waitFor();
+  await streamsPage.evaluate(() => { window.__continueMode = "fail"; });
+  await sendContinue.click();
+  await stalledRow.locator('[role="status"]').getByText(/Could not send: Send rejected/).waitFor();
+  assert.equal(await stalledRow.locator("img").count(), 0);
+  assert.deepEqual(await untranslated(streamsPage), []);
+  await streamsPage.evaluate(() => { window.__continueMode = "slow"; });
+  await sendContinue.click();
+  await stalledRow.locator("[data-pet-desk-send]:disabled").waitFor();
+  assert.match(await stalledRow.locator('[role="status"]').innerText(), /Sending…/);
+  await sendContinue.evaluate(el => { el.dispatchEvent(new MouseEvent("click", {bubbles: true})); });
+  assert.deepEqual(await streamsPage.evaluate(() => window.__continueWrites), [{id: "t-stall-one", content: continueEN}, {id: "t-stall-one", content: continueEN}]);
+  const preSendReads = await streamsPage.evaluate(() => window.__workbenchQueries.length);
+  await streamsPage.evaluate(() => window.__releaseContinue());
+  await stalledRow.waitFor({state: "detached"});
+  assert.match(await locator(".pet-desk-status-counts").innerText(), /2 for you\s+1 stalled/);
+  await streamsPage.clock.runFor(5000);
+  await streamsPage.waitForFunction(count => window.__workbenchQueries.length > count, preSendReads);
+  await recent.locator('[data-pet-watch-follow][data-pet-watch-task="t-recent-done"]').click();
+  await recent.locator('[data-pet-watch-ignore][data-pet-watch-task="t-recent-watched"]').click();
+  await recent.locator('[data-pet-task-lifecycle="t-recent-watched"]').waitFor({state: "detached"});
+  await recent.locator('[data-pet-watch-follow][data-pet-watch-task="t-recent-done"]').waitFor({state: "detached"});
+  assert.deepEqual(await streamsPage.evaluate(() => window.__watchWrites), [["POST", "t-recent-done"], ["PATCH", "t-recent-watched"]]);
+
+  await streamsPage.evaluate(() => { window.__lifecycleMode = "old"; });
+  await ownerTrigger.click();
+  await lifecycle.locator("[data-pet-lifecycle-open]").click();
+  await streamsPage.waitForFunction(() => window.__taskReads.includes("t-813"));
+  await openOverview(streamsPage, "?desk=workstreams&language=zh-CN");
+  await locator('[data-pet-desk-stalled="t-stall-two"] [data-pet-desk-continue]').click();
+  assert.equal(await locator('[data-pet-desk-stalled="t-stall-two"] [data-pet-desk-continue-message]').innerText(), continueZH);
+  await streamsPage.close();
+
 
   // Chinese records page.
   await openOverview(page, "?language=zh-CN");

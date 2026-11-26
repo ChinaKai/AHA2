@@ -32,7 +32,7 @@ try {
   throw new Error("esbuild is not installed; run `npm ci` in web/ before building");
 }
 
-const moduleNames = ["api", "i18n", "icons", "types", "lazy_page", "pet_bubble", "pet_character", "pet_navigation", "pet_approvals", "pet_workbench", "pet_desk", "runtime_picker", "task_agents", "task_composer", "task_drafts", "task_filters", "hardware_terminal", "hardware_panel", "hardware_resources", "browser_resources", "browser_task_panel", "mail_cards", "mail_editor", "mail_resources", "mail_task", "resources", "desktop_panel", "task_tools", "mcp_page", "markdown", "conversation_ui", "ui_helpers", "model_health", "model_selection", "prompt_admin", "proxy_settings", "data_retention", "sync_settings", "codex_accounts", "skill_groups", "knowledge_workspace", "knowledge_vault", "knowledge_vault_settings", "task_vault_skills", "model_source_picker", "channels", "assistant", "backends", "onboarding", "project_list", "workspace_viewer", "workspace_terminal", "terminal_assets", "command_palette", "main"];
+const moduleNames = ["api", "i18n", "icons", "types", "lazy_page", "pet_bubble", "pet_character", "pet_navigation", "pet_approvals", "pet_workbench", "pet_desk", "pet_lifecycle", "runtime_picker", "task_agents", "task_composer", "task_drafts", "task_filters", "hardware_terminal", "hardware_panel", "hardware_resources", "browser_resources", "browser_task_panel", "mail_cards", "mail_editor", "mail_resources", "mail_task", "resources", "desktop_panel", "task_tools", "mcp_page", "markdown", "conversation_ui", "ui_helpers", "model_health", "model_selection", "prompt_admin", "proxy_settings", "data_retention", "sync_settings", "codex_accounts", "skill_groups", "knowledge_workspace", "knowledge_vault", "knowledge_vault_settings", "task_vault_skills", "model_source_picker", "channels", "assistant", "backends", "onboarding", "project_list", "workspace_viewer", "workspace_terminal", "terminal_assets", "command_palette", "main"];
 
 async function writeAssets(target) {
   await mkdir(resolve(target, "vendor"), {recursive: true});
@@ -112,7 +112,8 @@ async function buildModules() {
     "task_vault_skills.js": ["api"],
     "model_source_picker.js": ["i18n"],
     "channels.js": ["api", "icons", "i18n", "model_source_picker"],
-    "pet_desk.js": ["i18n", "pet_approvals", "ui_helpers"],
+    "pet_desk.js": ["i18n", "pet_approvals", "pet_lifecycle", "ui_helpers"],
+    "pet_lifecycle.js": ["i18n"],
     "assistant.js": ["api", "i18n", "pet_bubble", "pet_character", "pet_navigation", "model_source_picker"],
   };
   for (const [file, dependencies] of Object.entries(importers)) {
