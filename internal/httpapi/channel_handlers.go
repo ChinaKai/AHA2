@@ -512,6 +512,27 @@ func (s *Server) channelGroupReception(writer http.ResponseWriter, request *http
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "group": group})
 }
 
+func (s *Server) channelGroupTopicWake(writer http.ResponseWriter, request *http.Request) {
+	if s.channels == nil {
+		writeError(writer, http.StatusNotFound, "channel_resource_not_found")
+		return
+	}
+	var payload struct {
+		Mode string `json:"topic_wake_mode"`
+	}
+	if err := decodeJSON(request, &payload); err != nil || (payload.Mode != domain.FeishuTopicWakeFull && payload.Mode != domain.FeishuTopicWakeMention) {
+		writeError(writer, http.StatusBadRequest, "invalid_topic_wake_mode")
+		return
+	}
+	session, _ := sessionFromContext(request.Context())
+	group, err := s.channels.SetFeishuGroupTopicWakeMode(request.Context(), session.OwnerID, request.PathValue("id"), request.PathValue("chatID"), payload.Mode)
+	if err != nil {
+		writeChannelError(writer, err, "update_channel_group_topic_wake_failed")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "group": group})
+}
+
 func (s *Server) channelKnowledgePolicy(writer http.ResponseWriter, request *http.Request) {
 	if s.channels == nil {
 		writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "policies": []any{}, "configured": false})

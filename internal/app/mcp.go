@@ -165,18 +165,19 @@ func (s *Service) mailMCPDetail() domain.MCPServer {
 }
 
 // channelMCPDetail describes the built-in channel MCP without claiming a
-// static URL. The actual endpoint is injected per Turn by mcpRuntimeForTask.
+// static URL. The actual endpoint is injected per Turn.
 func (s *Service) channelMCPDetail() domain.MCPServer {
 	now := s.now().UTC()
 	return domain.MCPServer{
 		ID: "mcp_channel", Name: "渠道（内置）",
-		Description: "群聊路由的 Turn 自动注入；提供渠道回复（可 @ 联系人）、结束回复、Owner 权限申请和联系人查询工具。",
+		Description: "渠道路由的 Turn 可回复、查询联系人和申请 Owner 权限。飞书群话题的 Turn 可撤销当前话题的免 @ 唤醒。",
 		Transport:   "builtin", Enabled: true, Builtin: true, AutoInject: true, Health: "ok",
 		Tools: []domain.MCPTool{
 			{Name: "channel_reply", Description: "回复触发本 Turn 的渠道消息；立即送达，只在最终答复时调用一次。群聊里自动 @ 发送者，可另外 @ 联系人。"},
 			{Name: "channel_reply_decision", Description: "结束本轮对这个飞书话题的回复，或结案指定私聊消息。理由显示在 AHA Web 状态卡。"},
 			{Name: "channel_request_permission", Description: "为非 Owner 群成员的敏感操作申请权限。申请会一直等待 Owner 批准或拒绝，批准后才能执行。"},
 			{Name: "channel_contacts", Description: "列出本 Task 群里可以 @ 的联系人及其 ID，供 channel_reply 的 mention_identity_link_ids 使用。"},
+			{Name: "channel_revoke_topic_wake", Description: "问题处理完后，撤销当前飞书群话题的免 @ 唤醒。再次 @ 机器人可恢复。"},
 		},
 		CreatedAt: now, UpdatedAt: now,
 	}

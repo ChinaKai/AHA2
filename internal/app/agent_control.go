@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -327,6 +328,57 @@ func (s *Service) SetAgentChannelReplyDecision(ctx context.Context, claims agent
 	return s.SyncAgentChannelMessageStatuses(
 		ctx, claims.TaskID, claims.TurnID, inboundReceiptID, terminalState, reasonCode, reasonText,
 	)
+}
+
+type AgentFeishuTopicRevokeInput struct {
+	ChatID           string `json:"chat_id"`
+	ThreadID         string `json:"thread_id"`
+	InboundReceiptID string `json:"inbound_receipt_id"`
+	Reason           string `json:"reason"`
+}
+
+func (s *Service) RevokeAgentFeishuTopicWake(ctx context.Context, claims agentapi.Claims, input AgentFeishuTopicRevokeInput) error {
+	call, err := s.AgentCallContext(ctx, claims, true)
+	if err != nil {
+		return err
+	}
+	if input.ChatID == "" || input.ThreadID == "" || len(input.ChatID) > 128 || len(input.ThreadID) > 128 ||
+		strings.ContainsAny(input.ChatID+input.ThreadID, " \t\r\n") {
+		return fmt.Errorf("valid chat_id and thread_id are required")
+	}
+	reason := strings.TrimSpace(input.Reason)
+	if len([]rune(reason)) > 300 {
+		return fmt.Errorf("reason must contain at most 300 characters")
+	}
+	err = s.store.RevokeFeishuTopicWake(ctx, call.Task.ID, call.Turn.AgentID, call.Turn.ID, input.ChatID,
+		input.ThreadID, strings.TrimSpace(input.InboundReceiptID), reason, s.now().UTC())
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrAgentCallForbidden
+	}
+	return err
+}
+
+// AgentFeishuTopicRoute describes the starting channel context for tool
+// discovery. The action also verifies receipt ownership and the current route.
+func (s *Service) AgentFeishuTopicRoute(ctx context.Context, call AgentCallContext) string {
+	return s.feishuTopicRoute(ctx, call.Turn.AgentID, call.Turn.InboxBatchID)
+}
+
+func (s *Service) feishuTopicRoute(ctx context.Context, agentID, inboxBatchID string) string {
+	if agentID != "main" {
+		return ""
+	}
+	channelContext, err := s.store.ChannelContextForInboxBatch(ctx, inboxBatchID)
+	threadID, _ := channelContext["thread_id"].(string)
+	if err != nil || threadID == "" || channelContext["provider"] != "feishu" ||
+		channelContext["endpoint"] != domain.ChannelEndpointGroupDigitalHuman {
+		return ""
+	}
+	mode := channelRouteMode(channelContext)
+	if mode == "task_route" || mode == "group_qa" {
+		return mode
+	}
+	return ""
 }
 
 func (s *Service) UpdateAgentMemory(ctx context.Context, claims agentapi.Claims, update MemoryUpdate) (domain.TaskMemory, error) {

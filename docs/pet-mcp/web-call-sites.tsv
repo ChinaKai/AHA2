@@ -273,7 +273,8 @@ web/src/api.ts	POST	/api/v1/workspaces/${encodeURIComponent(id)}/host-key/trust	
 web/src/api.ts	DELETE	/api/v1/workspaces/${encodeURIComponent(id)}/remote-mirror	1
 web/src/api.ts	POST	/api/v1/workspaces/${encodeURIComponent(id)}/takeover	1
 web/src/api.ts	POST	/api/v1/workspaces/${id}/detect	1
-web/src/channels.ts	PUT	/api/v1/channel-instances/${encodeURIComponent(instance.id)}/conversations/groups/${encodeURIComponent(input.dataset.groupReception)}/reception	1
+web/src/channels.ts	PUT	/api/v1/channel-instances/${encodeURIComponent(instance.id)}/conversations/groups/${encodeURIComponent(chatID)}/reception	1
+web/src/channels.ts	PUT	/api/v1/channel-instances/${encodeURIComponent(instance.id)}/conversations/groups/${encodeURIComponent(chatID)}/topic-wake	1
 web/src/channels.ts	POST	/api/v1/channel-instances/${encodeURIComponent(instance.id)}/conversations/refresh	1
 web/src/channels.ts	GET/see-source	/api/v1/channel-onboarding-sessions/${encodeURIComponent(item.id)}/qr	1
 web/src/conversation_ui.ts	GET/see-source	/api/v1/tasks/${encodeURIComponent(item.task_id)}/attachments/${encodeURIComponent(id)}	1

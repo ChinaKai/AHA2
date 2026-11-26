@@ -1941,6 +1941,7 @@ func (s *Service) processInbound(ctx context.Context, receipt domain.ChannelInbo
 		"route":    map[string]any{"mode": routeMode, "target_task_id": targetTaskID}, "inbound_receipt_id": receipt.ID,
 	}
 	if feishuGroup {
+		provenance["chat_id"] = envelope.ExternalChatID
 		provenance["thread_id"] = envelope.ThreadID
 		provenance["root_id"] = envelope.RootID
 		provenance["group_batch_id"] = groupReceipt.BatchID

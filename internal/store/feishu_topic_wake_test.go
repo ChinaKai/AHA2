@@ -92,6 +92,12 @@ func TestFeishuTopicWakeUpgradeDoesNotBackfillParticipation(t *testing.T) {
 	if err := database.AckChannelDelivery(ctx, instance.ID, delivery.ID, leased[0].LeaseID, "om_new", "", &actualThread, now); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := database.db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version=166`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.migrateFeishuTopicWake(ctx); err != nil {
+		t.Fatalf("rerun v166 over an existing schema: %v", err)
+	}
 	var got string
 	if err := database.db.QueryRowContext(ctx, `SELECT thread_id FROM channel_feishu_topics WHERE instance_id=? AND chat_id=?`,
 		instance.ID, chat).Scan(&got); err != nil || got != actualThread {

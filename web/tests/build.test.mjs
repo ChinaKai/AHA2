@@ -356,25 +356,29 @@ test("channel lifecycle renders active and retired actions with guarded purge", 
   const group = {
     id: "conversation-1", endpoint_kind: "group_digital_human", display_name: "测试群",
     status: "active", inbound_count: 2, outbound_count: 1,
-    group: {chat_id: "oc_test", receive_all_messages: true},
+    group: {chat_id: "oc_test", receive_all_messages: true, topic_wake_mode: "full"},
     last_mention_inbound: {at: "2026-11-25T12:00:00Z", state: "processed", outcome: "delivered_to_task"},
     last_non_mention_inbound: {at: "2026-11-25T11:00:00Z", state: "listening", outcome: "listening_only"},
   };
   const listening = module.conversationCard(group);
-  assert.match(listening, /绑定任务[\s\S]*接收全量消息[\s\S]*入站 <b>/);
+  assert.match(listening, /绑定任务[\s\S]*接收全量消息[\s\S]*话题唤醒方式[\s\S]*入站 <b>/);
   assert.match(listening, /@ 由群聊电子人接/);
   assert.match(listening, /data-group-reception="oc_test" checked/);
   assert.match(listening, /最近入站（@）：processed.*delivered_to_task/);
   assert.match(listening, /最近入站（非 @）：listening.*listening_only/);
-  assert.match(listening, /旁听中/);
+  assert.match(listening, /value="full" selected>全量唤醒/);
+  assert.doesNotMatch(listening, /data-group-topic-wake="full" disabled/);
   assert.doesNotMatch(listening, /不在机器人群列表/);
   const unlisted = module.conversationCard({...group, bound_task_id: "task-1", not_in_bot_group_list: true});
   assert.match(unlisted, /不在机器人群列表/);
   assert.match(unlisted, /data-group-reception="oc_test" checked/);
-  const mentionsOnly = module.conversationCard({...group, bound_task_id: "task-1", group: {...group.group, receive_all_messages: false}});
+  const mentionsOnly = module.conversationCard({...group, bound_task_id: "task-1", group: {...group.group, receive_all_messages: false, topic_wake_mode: "mention"}});
   assert.match(mentionsOnly, /@ 仍唤醒绑定任务/);
   assert.match(mentionsOnly, /仅 @/);
   assert.doesNotMatch(mentionsOnly, /data-group-reception="oc_test" checked/);
+  assert.match(mentionsOnly, /data-group-topic-wake="mention" disabled/);
+  assert.match(mentionsOnly, /请先开启「接收全量消息」/);
+  assert.match(mentionsOnly, /value="mention" selected>需 @/);
   assert.match(source, /channel-conversation-card/);
   assert.match(source, /绑定任务/);
   assert.match(source, /最近入站/);

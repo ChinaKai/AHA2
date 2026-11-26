@@ -198,10 +198,18 @@ func TestChineseFeishuBackgroundHasNoReplyReceipt(t *testing.T) {
 	if !strings.Contains(string(raw), background) {
 		t.Fatal("Chinese channel template must describe background as external context without a reply receipt")
 	}
-	previous := strings.Replace(string(raw), background, "标为「飞书群旁听背景」的内容只供参考，逐条回应会打扰群聊。", 1)
-	for _, content := range []string{previous, strings.ReplaceAll(previous, "\n", "\r\n")} {
-		if !isSupersededBuiltinOverride("channel.external-channel", content) {
-			t.Fatal("the previous Chinese default would override the new guidance")
+	beforeWakeAction, wakeBlock, starts := strings.Cut(string(raw), "{{if .FeishuTopic}}")
+	_, afterWakeAction, ends := strings.Cut(wakeBlock, "{{end}}\n")
+	if !starts || !ends || !strings.Contains(wakeBlock, "channel_revoke_topic_wake") {
+		t.Fatal("Chinese Feishu topics must include the wake action guidance")
+	}
+	previous := beforeWakeAction + afterWakeAction
+	beforeBackground := strings.Replace(previous, background, "标为「飞书群旁听背景」的内容只供参考，逐条回应会打扰群聊。", 1)
+	for _, old := range []string{previous, beforeBackground} {
+		for _, content := range []string{old, strings.ReplaceAll(old, "\n", "\r\n")} {
+			if !isSupersededBuiltinOverride("channel.external-channel", content) {
+				t.Fatal("an older Chinese default would override the new guidance")
+			}
 		}
 	}
 }

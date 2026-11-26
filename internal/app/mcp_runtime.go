@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -490,13 +491,7 @@ func (s *Service) mcpRuntimeForTask(ctx context.Context, task domain.Task, agent
 	}
 	if agentAPIURL = strings.TrimSpace(agentAPIURL); agentAPIURL != "" {
 		if routed, _ := s.store.HasActiveChannelTaskRoute(ctx, task.ID); routed {
-			servers = append(servers, backend.MCPServer{
-				Name: channelMCPName, Transport: "http",
-				URL:            strings.TrimRight(agentAPIURL, "/") + channelMCPPath,
-				URLFromEnv:     "AHA2_AGENT_API_URL",
-				URLPath:        channelMCPPath,
-				BearerTokenEnv: "AHA2_AGENT_API_TOKEN",
-			})
+			servers = append(servers, channelMCPServer(agentAPIURL))
 			allowed = append(allowed,
 				"mcp__"+channelMCPName+"__channel_reply",
 				"mcp__"+channelMCPName+"__channel_reply_decision",
@@ -532,6 +527,12 @@ func (s *Service) mcpRuntimeForTurn(ctx context.Context, task domain.Task, agent
 		return servers, allowed
 	}
 	agentID = strings.TrimSpace(agentID)
+	if s.feishuTopicRoute(ctx, agentID, inboxBatchID) != "" {
+		if !slices.ContainsFunc(servers, func(server backend.MCPServer) bool { return server.Name == channelMCPName }) {
+			servers = append(servers, channelMCPServer(agentAPIURL))
+		}
+		allowed = append(allowed, "mcp__"+channelMCPName+"__channel_revoke_topic_wake")
+	}
 	agent, agentErr := s.store.TaskAgent(ctx, task.ID, agentID)
 	write := agentErr == nil && s.agentSnapshotWritable(ctx, task, agent.RuntimeConfigSnapshotID, agentID)
 	ioWrite := agentErr == nil && s.hardwareMCPSnapshotWritable(ctx, task, agent.RuntimeConfigSnapshotID, agentID)
@@ -621,6 +622,16 @@ func (s *Service) mcpRuntimeForTurn(ctx context.Context, task domain.Task, agent
 		}
 	}
 	return servers, allowed
+}
+
+func channelMCPServer(agentAPIURL string) backend.MCPServer {
+	return backend.MCPServer{
+		Name: channelMCPName, Transport: "http",
+		URL:            strings.TrimRight(agentAPIURL, "/") + channelMCPPath,
+		URLFromEnv:     "AHA2_AGENT_API_URL",
+		URLPath:        channelMCPPath,
+		BearerTokenEnv: "AHA2_AGENT_API_TOKEN",
+	}
 }
 
 // refreshMCPToolsIfStale re-probes a bound server whose persisted tool list is

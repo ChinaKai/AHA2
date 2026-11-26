@@ -36,12 +36,12 @@ func TestChannelMCPIsListedAsAutoInjectedBuiltin(t *testing.T) {
 	if !channel.Builtin || !channel.AutoInject || !channel.Enabled || channel.Health != "ok" {
 		t.Fatalf("unexpected channel MCP: %#v", channel)
 	}
-	if len(channel.Tools) != 4 {
+	if len(channel.Tools) != 5 {
 		t.Fatalf("channel MCP tools=%#v", channel.Tools)
 	}
 
 	detail, err := service.MCPServerDetail(ctx, "mcp_channel")
-	if err != nil || len(detail.Tools) != 4 {
+	if err != nil || len(detail.Tools) != 5 {
 		t.Fatalf("detail=%#v err=%v", detail, err)
 	}
 	if _, err := service.SaveMCPServer(ctx, domain.MCPServer{

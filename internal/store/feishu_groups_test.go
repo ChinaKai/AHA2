@@ -132,10 +132,24 @@ func TestFeishuGroupReceptionMigratesLegacyAllowlist(t *testing.T) {
 	if err != nil || changed || repeated.UpdatedAt != updated.UpdatedAt {
 		t.Fatalf("idempotent toggle changed audit data: %+v, changed=%v, %v", repeated, changed, err)
 	}
+	if _, err := database.SetFeishuGroupTopicWakeMode(ctx, instance.ID, instance.OwnerID, missingChat, domain.FeishuTopicWakeMention); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("mode was editable while reception was off: %v", err)
+	}
+	if _, err := database.SetFeishuGroupTopicWakeMode(ctx, instance.ID, "foreign-owner", conversation.ExternalChatID, domain.FeishuTopicWakeMention); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("another owner can change topic mode: %v", err)
+	}
+	if _, err := database.SetFeishuGroupTopicWakeMode(ctx, instance.ID, instance.OwnerID, conversation.ExternalChatID, domain.FeishuTopicWakeMention); err != nil {
+		t.Fatal(err)
+	}
+	refresh("refresh-three", knownGroup)
 
 	database = reopenAfterMigration(t, database, path)
 	t.Cleanup(func() { _ = database.Close() })
 	if allowed, err := database.FeishuGroupMessageAllowed(ctx, instance, missingChat, false); err != nil || allowed {
 		t.Fatalf("reopening replayed the legacy setting: %v, %v", allowed, err)
+	}
+	groups, _, err = database.feishuConversationGroups(ctx, instance.ID)
+	if group := groups[conversation.ExternalChatID]; err != nil || group.TopicWakeMode != domain.FeishuTopicWakeMention || !group.ReceiveAllMessages {
+		t.Fatalf("refresh or reopen changed topic mode: %+v, %v", group, err)
 	}
 }

@@ -22,6 +22,13 @@ func (s *Service) SetFeishuGroupReception(ctx context.Context, ownerID, instance
 	return group, err
 }
 
+func (s *Service) SetFeishuGroupTopicWakeMode(ctx context.Context, ownerID, instanceID, chatID, mode string) (domain.FeishuGroup, error) {
+	if !validFeishuGroupID(chatID) {
+		return domain.FeishuGroup{}, fmt.Errorf("invalid Feishu group chat ID")
+	}
+	return s.store.SetFeishuGroupTopicWakeMode(ctx, instanceID, ownerID, chatID, mode)
+}
+
 func (s *Service) RefreshFeishuConversations(ctx context.Context, ownerID, instanceID string) ([]domain.ChannelConversationSummary, error) {
 	instance, err := s.store.ChannelInstance(ctx, instanceID)
 	if err != nil || instance.OwnerID != ownerID || instance.ProviderKey != "feishu" || instance.Retired {

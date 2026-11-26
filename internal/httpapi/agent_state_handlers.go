@@ -62,7 +62,8 @@ func (s *Server) agentCapabilityMap(ctx context.Context, claims agentapi.Claims,
 		"workspace_read": main, "task_create": main, "clone_hardware": main,
 		"collaboration":    main && call.Task.CollaborationMode == "auto",
 		"channel_outreach": channelOutreach, "channel_reply": channelReply, "channel_reply_decision": channelReplyDecision,
-		"hardware": true, "managed_process": true,
+		"channel_revoke_topic_wake": s.app.AgentFeishuTopicRoute(ctx, call) != "",
+		"hardware":                  true, "managed_process": true,
 		"browser": s.browser != nil,
 		"desktop": main && s.desktop.Status(call.Task.ID).Supported,
 	}
@@ -252,6 +253,20 @@ func (s *Server) setAgentChannelReplyDecision(writer http.ResponseWriter, reques
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"ok": true, "decision": payload.Decision, "inbound_receipt_id": payload.InboundReceiptID,
 	})
+}
+
+func (s *Server) revokeAgentFeishuTopicWake(writer http.ResponseWriter, request *http.Request) {
+	claims, _ := agentClaimsFromContext(request.Context())
+	var input app.AgentFeishuTopicRevokeInput
+	if err := decodeJSON(request, &input); err != nil {
+		writeErrorDetail(writer, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	if err := s.app.RevokeAgentFeishuTopicWake(request.Context(), claims, input); err != nil {
+		writeAgentControlError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (s *Server) agentKnowledgeGuide(writer http.ResponseWriter, request *http.Request) {

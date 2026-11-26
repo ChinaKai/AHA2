@@ -160,6 +160,7 @@ func TestFeishuGroupReceptionMatrix(t *testing.T) {
 			}{
 				{"top_plain", "", "user", false},
 				{"top_bot", "", "app", false},
+				{"cold_topic", "omt_a", "user", false},
 				{"top_mention", "", "user", true},
 				{"topic_mention", "omt_a", "user", true},
 				{"topic_plain", "omt_a", "user", false},
@@ -210,7 +211,7 @@ func TestFeishuGroupReceptionMatrix(t *testing.T) {
 						if commands, err := service.ClaimCommands(ctx, claims, 10); err != nil || len(commands) != 0 {
 							t.Fatalf("listening queued a command: %v, %v", commands, err)
 						}
-						if group.bound && message.thread == "" {
+						if group.bound && (message.thread == "" || message.name == "cold_topic") {
 							if task, err := service.store.Task(ctx, targetID); err != nil || task.Status != domain.TaskWaitingUser || !task.UpdatedAt.Equal(now) {
 								t.Fatalf("listening updated Task: %+v, %v", task, err)
 							}

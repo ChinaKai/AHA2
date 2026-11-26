@@ -53,6 +53,7 @@ var agentTokenRoutePolicies = map[string]agentTokenRoutePolicy{
 	"POST /api/v1/agent/channel/messages":                           {Domain: "channel", Access: agentRouteWrite, Mode: agentRouteBusiness},
 	"POST /api/v1/agent/channel/replies":                            {Domain: "channel", Access: agentRouteWrite, Mode: agentRouteBusiness},
 	"POST /api/v1/agent/channel/reply-decision":                     {Domain: "channel", Access: agentRouteBookkeeping, Mode: agentRouteBusiness},
+	"POST /api/v1/agent/channel/topic-wake/revoke":                  {Domain: "channel", Access: agentRouteWrite, Mode: agentRouteBusiness},
 	"POST /api/v1/agent/collab/mcp":                                 {Domain: "collaboration", Access: agentRouteTools, Mode: agentRouteMCP},
 	"POST /api/v1/agent/collaboration/batches":                      {Domain: "collaboration", Access: agentRouteWrite, Mode: agentRouteBusiness},
 	"POST /api/v1/agent/collaboration/batches/{batch}/wait":         {Domain: "collaboration", Access: agentRouteWrite, Mode: agentRouteBusiness},

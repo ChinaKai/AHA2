@@ -268,6 +268,7 @@ type templateData struct {
 	// task_route conversation has receipts to resolve.
 	ChannelGroup          bool
 	ChannelTaskRoute      bool
+	FeishuTopic           bool
 	Backend               string
 	Collaboration         string
 	MaxAgents             int
@@ -355,7 +356,7 @@ var builtinTemplates = []domain.PromptTemplate{
 	{ID: "identity.channel-digital-human", Name: "Channel Digital Human Identity", Layer: "identity", Description: "受限群聊电子人身份", Editable: true, Required: false, Version: 3},
 	{ID: "identity.pet-task", Name: "Pet Task Identity", Layer: "identity", Description: "宠物 Task 的电子分身定位、owner-delegate 权限和 core/worklog 路径", Editable: true, Required: false, Version: 14},
 	{ID: "channel.web", Name: "AHA Web Channel", Layer: "channel", Description: "Web 渠道消息行为", Editable: true, Required: false, Version: 2},
-	{ID: "channel.external-channel", Name: "External Channel", Layer: "channel", Description: "外部渠道消息行为", Editable: true, Required: false, Version: 7},
+	{ID: "channel.external-channel", Name: "External Channel", Layer: "channel", Description: "外部渠道消息行为", Editable: true, Required: false, Version: 8},
 	{ID: "policy.auto", Name: "Auto Collaboration", Layer: "policy", Description: "AHA 自动协作策略", Editable: true, Required: false, Version: 2},
 	{ID: "policy.single", Name: "Single Agent", Layer: "policy", Description: "单 Agent 策略", Editable: true, Required: false, Version: 2},
 	{ID: "protocol.knowledge", Name: "Knowledge Protocol", Layer: "protocol", Description: "按 index 渐进读取知识并形成反馈与修订闭环", Editable: true, Required: false, Version: 3},
@@ -373,7 +374,7 @@ var builtinTemplates = []domain.PromptTemplate{
 	{ID: "section.available-context", Name: "Available Context Section", Layer: "section", Description: "可用上下文入口列表段落", Editable: true, Required: true, Version: 3},
 	{ID: "section.current-inbox", Name: "Current Inbox Section", Layer: "section", Description: "当前 Inbox Batch 段落", Editable: true, Required: true, Version: 1},
 	{ID: "section.inbox-batch-content", Name: "Inbox Batch Content", Layer: "section", Description: "Inbox 消息、渠道来源、引用上下文和附件引用的内容模板", Editable: true, Required: true, Version: 4},
-	{ID: "resource.agent-api", Name: "Agent API Reference File", Layer: "resource", Description: "Agent API 的 HTTP 参考；内置 MCP 工具不覆盖时查阅", Editable: false, Required: true, Version: 16},
+	{ID: "resource.agent-api", Name: "Agent API Reference File", Layer: "resource", Description: "Agent API 的 HTTP 参考；内置 MCP 工具不覆盖时查阅", Editable: false, Required: true, Version: 17},
 	{ID: "resource.attachment-protocol", Name: "Attachment Protocol File", Layer: "resource", Description: "只读参考模板；附件上传、绑定与回执规程", Editable: false, Required: true, Version: 1},
 	{ID: "resource.group-permissions", Name: "Group Permission Rules File", Layer: "resource", Description: "只读参考模板；群聊 task_route 的 Owner 权限申请规则", Editable: false, Required: false, Version: 1},
 }
@@ -502,6 +503,11 @@ var supersededBuiltinOverrideHashes = map[string]map[string]bool{
 		"642ea6fb568b5270ce68df58b46e0532e47e087f24a532871144eeac41d91250": true,
 	},
 	"channel.external-channel": {
+		// Defaults before the Feishu topic wake action (English and Chinese, LF and CRLF).
+		"da110d661f84bce86ab1b9ed620d94c74511e26c40a88a66bc54714742750bbe": true,
+		"246a2fa7ebb70dcb52a44f65cb3a0d1044f89ebaa5b1708a5287e8be0888bd21": true,
+		"98a6f028b28e351e93ad92918109f22d359f981a889edb26d5d10d8a92050233": true,
+		"4b0d8ae37ab29b92e559f8a4977104a01626325ef56d30f792d2f21be5b691fe": true,
 		// Chinese defaults before background was marked as untrusted and without a receipt.
 		"e36b62b1deaccb92f5001cb0d463f810d56b34aadace45fd43cc55e6636790f4": true,
 		"adff33647f1caa41a8d78545906e666beb7f784ea506e2fcab54203b0ad3390b": true,
@@ -820,7 +826,9 @@ func (engine *Engine) BuildLegacy(ctx context.Context, input BuildInput) (BuildR
 		AgentID: input.Agent.AgentID, AgentRole: input.Agent.Role, Identity: identityName,
 		Channel: channelName, ChannelGroup: channelIsGroup(input.ChannelContext),
 		ChannelTaskRoute: channelRouteMode(input.ChannelContext) == "task_route",
-		Backend:          input.Snapshot.Backend, Collaboration: input.Task.CollaborationMode,
+		FeishuTopic: input.Agent.AgentID == "main" && channelIsGroup(input.ChannelContext) &&
+			contextString(input.ChannelContext, "provider") == "feishu" && contextString(input.ChannelContext, "thread_id") != "",
+		Backend: input.Snapshot.Backend, Collaboration: input.Task.CollaborationMode,
 		MaxAgents: input.Task.MaxAgents, TaskID: input.Task.ID, TaskCode: input.Task.Code,
 		TaskTitle: input.Task.Title, ContextRoot: contextRoot, ScratchRoot: scratchRoot, TaskWorkspace: workDir,
 		Workspace: input.Workspace.Name, WorkspaceTransport: input.Workspace.Transport,

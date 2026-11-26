@@ -238,3 +238,15 @@ func (s *Store) SetFeishuGroupReception(ctx context.Context, instanceID, ownerID
 	}
 	return group, count > 0, tx.Commit()
 }
+
+func (s *Store) SetFeishuGroupTopicWakeMode(ctx context.Context, instanceID, ownerID, chatID, mode string) (domain.FeishuGroup, error) {
+	return scanFeishuGroup(s.db.QueryRowContext(ctx, `
+		UPDATE channel_feishu_groups
+		SET topic_wake_mode=?
+		WHERE instance_id=? AND chat_id=? AND receive_all_messages=1
+		  AND EXISTS (
+		      SELECT 1 FROM channel_instances i JOIN channel_plugins p ON p.id=i.plugin_id AND p.provider_key='feishu'
+		      WHERE i.id=? AND i.owner_id=? AND i.retired_at=''
+		  )
+		RETURNING `+feishuGroupColumns, mode, instanceID, chatID, instanceID, ownerID))
+}

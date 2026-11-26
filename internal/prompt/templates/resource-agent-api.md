@@ -14,7 +14,7 @@ AHA exposes one Task-scoped control plane two ways, behind the same server-side 
 | `aha2_core` | `inbox_wait`, `progress`, `memory_update`, `attachment_bind`, `task_get`, `task_list`, `task_message`, `capabilities` | Turn state |
 | `aha2_knowledge` | `knowledge_list`, `knowledge_get`, `knowledge_guide`, `knowledge_submit`, `knowledge_feedback`, `skill_list`, `skill_get` | Knowledge and Skills |
 | `aha2_collab` | `collab_batch_submit`, `collab_batch_wait` | Turn state (collaboration batches) |
-| `aha2_channel` | `channel_reply`, `channel_reply_decision`, `channel_request_permission`, `channel_contacts` | Channel operations (`task_route` only) |
+| `aha2_channel` | `channel_reply`, `channel_reply_decision`, `channel_request_permission`, `channel_contacts`, `channel_revoke_topic_wake` | Channel Task routes and topic wake control for Feishu group hosts |
 
 Which servers a Turn receives depends on the Task; a Sub Agent or a read-only Turn sees only the read tools. HTTP only: uploading attachment bytes, creating Tasks, creating or updating Skills, and channel contact messages that are not a reply.
 
@@ -51,6 +51,7 @@ Send UTF-8 JSON with `Content-Type: application/json; charset=utf-8`. Windows Po
 - `POST /api/v1/agent/collaboration/batches`
 - `POST /api/v1/agent/channel/replies`
 - `POST /api/v1/agent/channel/reply-decision`
+- `POST /api/v1/agent/channel/topic-wake/revoke`
 - `GET /api/v1/agent/project/workspaces`
 - `GET /api/v1/agent/project/runtimes`
 - `POST /api/v1/agent/tasks`
@@ -160,6 +161,14 @@ AHA Web status card. In Feishu groups the decision blocks later replies for
 that topic in this Turn. A later eligible message, including a message from
 another bot, can start a new Turn. Use the live inbox message's own receipt
 when replying to it or requesting Owner permission with `channel_request_permission`.
+
+For a Feishu group topic, either the routed Task or the unbound group host can
+revoke wake-up without an @mention when the issue is resolved. Use
+`channel_revoke_topic_wake`, or `POST /api/v1/agent/channel/topic-wake/revoke`
+with `{"chat_id":"oc_...","thread_id":"omt_...","reason":"optional"}`. Use the IDs in
+`channel-context.json`. To close based on a live inbox message, include its
+`inbound_receipt_id`. The receipt must have been delivered to the calling Main
+Turn while it handles that group. The next @mention clears the revocation.
 
 ## Knowledge and Skills
 

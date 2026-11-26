@@ -427,6 +427,11 @@ function conversationBoundTask(item: ChannelConversationSummary): string {
   return [item.bound_task_code, item.bound_task_title].filter(Boolean).join(" · ") || item.bound_task_id;
 }
 
+function topicWakeHint(enabled: boolean, mode: string): string {
+  if (!enabled) return "请先开启「接收全量消息」。";
+  return mode === "mention" ? "话题内也要 @ 机器人。" : "机器人发过消息的话题可免 @ 唤醒。";
+}
+
 export function conversationCard(item: ChannelConversationSummary): string {
   const kind = item.endpoint_kind === "group_digital_human" ? "群聊" : "私聊";
   const inbound = item.last_inbound_state
@@ -436,13 +441,21 @@ export function conversationCard(item: ChannelConversationSummary): string {
     ? `${item.last_outbound_state}${item.last_outbound_error ? ` · ${item.last_outbound_error}` : ""} · ${formatChannelTime(item.last_outbound_at)}`
     : "暂无";
   const group = item.group;
+  const topicWakeMode = group?.topic_wake_mode === "mention" ? "mention" : "full";
   const formatInbound = (entry: ChannelConversationSummary["last_mention_inbound"]) => entry
     ? `${entry.state}${entry.outcome ? ` · ${entry.outcome}` : ""} · ${formatChannelTime(entry.at)}`
     : "暂无";
   const groupReception = group ? `<label class="channel-check">
-    <span><strong>接收全量消息</strong><br><small>非 @ 消息进旁听，不唤醒；${item.bound_task_id ? "@ 仍唤醒绑定任务" : "@ 由群聊电子人接"}</small>${item.not_in_bot_group_list ? "<br><small>不在机器人群列表</small>" : ""}</span>
+    <span><strong>接收全量消息</strong><br><small>接收非 @ 消息。${item.bound_task_id ? "@ 仍唤醒绑定任务" : "@ 由群聊电子人接"}</small>${item.not_in_bot_group_list ? "<br><small>不在机器人群列表</small>" : ""}</span>
     <span class="kv-skill-auto"><input type="checkbox" role="switch" aria-label="接收全量消息" data-group-reception="${escapeHTML(group.chat_id)}" ${group.receive_all_messages ? "checked" : ""}><span class="kv-skill-auto-track" aria-hidden="true"></span></span>
-    <small data-group-reception-state>${group.receive_all_messages ? "旁听中" : "仅 @"}</small>
+    <small data-group-reception-state>${group.receive_all_messages ? "已开启" : "仅 @"}</small>
+  </label>
+  <label class="channel-check">
+    <span><strong>话题唤醒方式</strong><br><small data-topic-wake-hint>${topicWakeHint(group.receive_all_messages, topicWakeMode)}</small></span>
+    <select aria-label="话题唤醒方式" data-group-topic-wake="${topicWakeMode}" ${group.receive_all_messages ? "" : "disabled"}>
+      <option value="full" ${topicWakeMode === "full" ? "selected" : ""}>全量唤醒</option>
+      <option value="mention" ${topicWakeMode === "mention" ? "selected" : ""}>需 @</option>
+    </select>
   </label>` : "";
   return `<article class="channel-conversation-card">
     <header><strong>${escapeHTML(item.display_name || `${kind}会话`)}</strong><span class="status ${item.status === "active" ? "good" : "warn"}">${kind}</span></header>
@@ -482,8 +495,9 @@ function openChannelConversations(instance: ChannelInstance, uiOptions: {setMess
   const refreshGroups = async () => {
     if (!refreshButton) return;
     refreshButton.disabled = true;
-    const switches = body.querySelectorAll<HTMLInputElement>("[data-group-reception]");
-    switches.forEach(input => { input.disabled = true; });
+    const controls = body.querySelectorAll<HTMLInputElement | HTMLSelectElement>("[data-group-reception], [data-group-topic-wake]");
+    const disabled = Array.from(controls, control => control.disabled);
+    controls.forEach(control => { control.disabled = true; });
     status.textContent = "正在刷新群聊…";
     try {
       render(await api.request(`/api/v1/channel-instances/${encodeURIComponent(instance.id)}/conversations/refresh`, {method: "POST", body: "{}"}));
@@ -491,32 +505,50 @@ function openChannelConversations(instance: ChannelInstance, uiOptions: {setMess
     } catch (error) {
       status.textContent = channelErrorMessage(error);
     } finally {
-      switches.forEach(input => { input.disabled = false; });
+      controls.forEach((control, index) => { control.disabled = disabled[index]; });
       refreshButton.disabled = false;
     }
   };
   refreshButton?.addEventListener("click", () => { void refreshGroups(); });
   let pendingSaves = 0;
   body.addEventListener("change", event => {
-    const input = event.target;
-    if (!(input instanceof HTMLInputElement) || !input.dataset.groupReception) return;
-    const enabled = input.checked;
-    input.disabled = true;
+    const control = event.target;
+    const isReception = control instanceof HTMLInputElement && control.hasAttribute("data-group-reception");
+    const isMode = control instanceof HTMLSelectElement && control.hasAttribute("data-group-topic-wake");
+    if (!isReception && !isMode) return;
+    const card = control.closest(".channel-conversation-card");
+    const reception = card?.querySelector<HTMLInputElement>("[data-group-reception]");
+    const mode = card?.querySelector<HTMLSelectElement>("[data-group-topic-wake]");
+    if (!reception?.dataset.groupReception || !mode) return;
+    const previousReception = isReception ? !reception.checked : reception.checked;
+    const previousMode = mode.dataset.groupTopicWake || "full";
+    const chatID = reception.dataset.groupReception;
+    reception.disabled = true;
+    mode.disabled = true;
     pendingSaves++;
     if (refreshButton) refreshButton.disabled = true;
-    void api.request<{group: NonNullable<ChannelConversationSummary["group"]>}>(
-      `/api/v1/channel-instances/${encodeURIComponent(instance.id)}/conversations/groups/${encodeURIComponent(input.dataset.groupReception)}/reception`,
-      {method: "PUT", body: JSON.stringify({receive_all_messages: enabled})},
-    ).then(({group}) => {
-      input.checked = group.receive_all_messages;
-      const receptionState = input.closest("label")?.querySelector("[data-group-reception-state]");
-      if (receptionState) receptionState.textContent = input.checked ? "旁听中" : "仅 @";
+    const save = isReception ? api.request<{group: NonNullable<ChannelConversationSummary["group"]>}>(
+      `/api/v1/channel-instances/${encodeURIComponent(instance.id)}/conversations/groups/${encodeURIComponent(chatID)}/reception`,
+      {method: "PUT", body: JSON.stringify({receive_all_messages: reception.checked})},
+    ) : api.request<{group: NonNullable<ChannelConversationSummary["group"]>}>(
+      `/api/v1/channel-instances/${encodeURIComponent(instance.id)}/conversations/groups/${encodeURIComponent(chatID)}/topic-wake`,
+      {method: "PUT", body: JSON.stringify({topic_wake_mode: mode.value})},
+    );
+    void save.then(({group}) => {
+      reception.checked = group.receive_all_messages;
+      mode.value = mode.dataset.groupTopicWake = group.topic_wake_mode === "mention" ? "mention" : "full";
+      const receptionState = card?.querySelector("[data-group-reception-state]");
+      if (receptionState) receptionState.textContent = reception.checked ? "已开启" : "仅 @";
+      const hint = card?.querySelector("[data-topic-wake-hint]");
+      if (hint) hint.textContent = topicWakeHint(reception.checked, mode.value);
       status.textContent = "";
     }).catch(error => {
-      input.checked = !enabled;
-      status.textContent = `保存群开关失败：${channelErrorMessage(error)}`;
+      reception.checked = previousReception;
+      mode.value = previousMode;
+      status.textContent = `保存${isReception ? "群开关" : "话题唤醒方式"}失败：${channelErrorMessage(error)}`;
     }).finally(() => {
-      input.disabled = false;
+      reception.disabled = false;
+      mode.disabled = !reception.checked;
       pendingSaves--;
       if (refreshButton && pendingSaves === 0) refreshButton.disabled = false;
     });

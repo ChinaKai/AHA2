@@ -13,11 +13,8 @@ import (
 	"github.com/ChinaKai/AHA2/internal/channel"
 )
 
-// agentChannelMCP is the narrow MCP endpoint attached to group task_route
-// Turns. It exposes exactly two tools: reply to the message that triggered this
-// Turn, or record that it deliberately needs no reply. A read-only Agent cannot
-// run curl, and a task_route has no automatic group mirror, so without this
-// endpoint a successful Turn can only end in no_channel_reply.
+// agentChannelMCP exposes receipt-scoped tools to task routes and the topic
+// wake action to unbound Feishu group hosts.
 //
 // The endpoint is mounted behind withAgentCapability. It therefore acts with
 // the same Task/Turn claims as the Agent API and cannot be used by another Task
@@ -58,7 +55,18 @@ func (s *Server) agentChannelMCP(writer http.ResponseWriter, request *http.Reque
 	case "ping":
 		respond(map[string]any{})
 	case "tools/list":
-		respond(map[string]any{"tools": channelMCPTools()})
+		tools := channelRoutingMCPTools()
+		if s.app != nil {
+			if call, err := s.app.AgentCallContext(request.Context(), claims, true); err == nil {
+				switch s.app.AgentFeishuTopicRoute(request.Context(), call) {
+				case "group_qa":
+					tools = []mcpTool{channelTopicWakeMCPTool()}
+				case "task_route":
+					tools = append(tools, channelTopicWakeMCPTool())
+				}
+			}
+		}
+		respond(map[string]any{"tools": tools})
 	case "tools/call":
 		s.callChannelMCPTool(writer, request, claims, payload)
 	default:
@@ -80,6 +88,10 @@ type mcpTool struct {
 }
 
 func channelMCPTools() []mcpTool {
+	return append(channelRoutingMCPTools(), channelTopicWakeMCPTool())
+}
+
+func channelRoutingMCPTools() []mcpTool {
 	return []mcpTool{
 		{
 			Name: "channel_reply",
@@ -177,6 +189,25 @@ func channelMCPTools() []mcpTool {
 				"type": "object", "properties": map[string]any{},
 				"required": []string{}, "additionalProperties": false,
 			},
+		},
+	}
+}
+
+func channelTopicWakeMCPTool() mcpTool {
+	return mcpTool{
+		Name: "channel_revoke_topic_wake",
+		Description: "After the issue is resolved, require a new @mention to wake this Feishu topic. " +
+			"Use the current topic's chat_id and thread_id from channel-context.json. Only receipts delivered to this Turn are accepted.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"chat_id":   map[string]any{"type": "string"},
+				"thread_id": map[string]any{"type": "string"},
+				"inbound_receipt_id": map[string]any{"type": "string",
+					"description": "Use this receipt when closing a topic after a live inbox message."},
+				"reason": map[string]any{"type": "string", "maxLength": 300},
+			},
+			"required": []string{"chat_id", "thread_id"}, "additionalProperties": false,
 		},
 	}
 }
@@ -349,6 +380,19 @@ func (s *Server) callChannelMCPTool(writer http.ResponseWriter, request *http.Re
 		}
 		respond(map[string]any{
 			"content": []map[string]any{{"type": "text", "text": "No channel reply will be sent for this message."}},
+		})
+	case "channel_revoke_topic_wake":
+		var input app.AgentFeishuTopicRevokeInput
+		if err := json.Unmarshal(call.Arguments, &input); err != nil {
+			toolError("invalid channel_revoke_topic_wake arguments")
+			return
+		}
+		if err := s.app.RevokeAgentFeishuTopicWake(request.Context(), claims, input); err != nil {
+			toolError(err.Error())
+			return
+		}
+		respond(map[string]any{
+			"content": []map[string]any{{"type": "text", "text": "Topic wake without an @mention was revoked. A new @mention can restore it."}},
 		})
 	default:
 		writeJSON(writer, http.StatusOK, map[string]any{

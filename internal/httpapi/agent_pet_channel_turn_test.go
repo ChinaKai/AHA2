@@ -10,6 +10,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -22,7 +23,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/store"
 )
 
-// A pet channel Turn reaches the four aha2_channel tools the same way an
+// A pet channel Turn reaches the aha2_channel tools the same way an
 // ordinary routed Task does. The chain is real end to end inside one process:
 // the owner routes a group conversation to task_pet over the Web API, the
 // channel runtime hands in a Feishu topic message, the channel service turns it into a
@@ -47,6 +48,7 @@ func TestPetChannelTurnUsesEveryChannelToolThroughARealTaskRoute(t *testing.T) {
 		App: appService, Channels: channelService, AgentCapabilities: capabilities, Secrets: secrets,
 	}).Handler())
 	defer server.Close()
+	appService.SetAgentAPI(capabilities, server.URL)
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{Jar: jar}
 	csrf := registerOwner(t, client, server.URL)
@@ -152,7 +154,7 @@ func TestPetChannelTurnUsesEveryChannelToolThroughARealTaskRoute(t *testing.T) {
 	}
 	response.Body.Close()
 
-	// Channel runtime: a human message follows an existing topic without @.
+	// Channel runtime: explicit mentions start a previously unparticipated topic.
 	runCtx, stop := context.WithCancel(ctx)
 	channelService.Start(runCtx)
 	defer func() {
@@ -172,7 +174,7 @@ func TestPetChannelTurnUsesEveryChannelToolThroughARealTaskRoute(t *testing.T) {
 			SchemaVersion: 1, InstanceID: instance.ID, ExternalEventID: eventID, EventType: "message", OccurredAt: now,
 			ChatType: "group", ExternalChatID: conversation.ExternalChatID, ExternalSenderID: "provider-user-li",
 			ExternalMessageID: messageID, Content: content, SenderDisplayName: "李四", SenderType: "user",
-			ThreadID: "omt_pet", RootID: "om_pet_root",
+			ThreadID: "omt_pet", RootID: "om_pet_root", MentionedBot: true,
 		})
 		if err != nil || duplicate {
 			t.Fatalf("inbound receipt=%#v duplicate=%v err=%v", receipt, duplicate, err)
@@ -185,6 +187,9 @@ func TestPetChannelTurnUsesEveryChannelToolThroughARealTaskRoute(t *testing.T) {
 		case request := <-executor.started:
 			if request.Task.ID != pet.ID {
 				t.Fatalf("routed message started a Turn for %s, want task_pet", request.Task.ID)
+			}
+			if !slices.Contains(request.AllowedTools, "mcp__aha2_channel__channel_revoke_topic_wake") {
+				t.Fatalf("the bound topic Turn did not receive the revoke tool: %v", request.AllowedTools)
 			}
 			return request.Turn
 		case <-time.After(15 * time.Second):
@@ -209,7 +214,7 @@ func TestPetChannelTurnUsesEveryChannelToolThroughARealTaskRoute(t *testing.T) {
 	}
 	url := server.URL + "/api/v1/agent/channel/mcp"
 	status, names, _ := coreMCPToolsList(t, url, token)
-	if status != http.StatusOK || strings.Join(names, ",") != "channel_reply,channel_request_permission,channel_reply_decision,channel_contacts" {
+	if status != http.StatusOK || strings.Join(names, ",") != "channel_reply,channel_request_permission,channel_reply_decision,channel_contacts,channel_revoke_topic_wake" {
 		t.Fatalf("pet channel tools status=%d names=%v", status, names)
 	}
 	t.Logf("evidence tools/list status=%d names=%v (task=%s turn=%s receipt=%s)", status, names, pet.ID, turn.ID, receipt.ID)
@@ -279,7 +284,7 @@ func TestPetChannelTurnUsesEveryChannelToolThroughARealTaskRoute(t *testing.T) {
 		SchemaVersion: 1, InstanceID: instance.ID, ExternalEventID: "pet-route-live-event", EventType: "message",
 		ChatType: "group", ExternalChatID: conversation.ExternalChatID, ExternalSenderID: "extra-provider-member-0",
 		ExternalMessageID: "pet-route-live-message", Content: "请读取固件日志", SenderType: "user",
-		ThreadID: "omt_pet", RootID: "om_pet_root",
+		ThreadID: "omt_pet", RootID: "om_pet_root", MentionedBot: true,
 	})
 	if err != nil || duplicate {
 		t.Fatalf("live receipt: %v, duplicate=%v", err, duplicate)
@@ -400,4 +405,166 @@ func TestPetChannelTurnUsesEveryChannelToolThroughARealTaskRoute(t *testing.T) {
 		}
 		t.Logf("evidence delivery id=%s state=%s attempts=%d provider_message_id=%q", item.ID, item.State, item.Attempts, item.ProviderMessageID)
 	}
+
+	t.Run("topic_wake_modes_and_revocation", func(t *testing.T) {
+		deliveryTime := time.Now().UTC().Add(time.Minute)
+		for range len(deliveries()) {
+			leased, err := database.ClaimChannelDeliveries(ctx, instance.ID, 20, deliveryTime, time.Minute)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, item := range leased {
+				if err := database.AckChannelDelivery(ctx, instance.ID, item.ID, item.LeaseID, "om_"+item.ID, "", nil, deliveryTime); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		externalChat := conversation.ExternalChatID
+		const topic = "omt_pet"
+		topicModeURL := strings.TrimSuffix(receptionURL, "/reception") + "/topic-wake"
+		revocationURL := server.URL + "/api/v1/agent/channel/topic-wake/revoke"
+		groupListURL := server.URL + "/api/v1/channel-instances/" + instance.ID + "/conversations"
+		setMode := func(mode string) {
+			t.Helper()
+			response := requestJSON(t, client, http.MethodPut, topicModeURL, map[string]string{"topic_wake_mode": mode}, csrf)
+			if response.StatusCode != http.StatusOK {
+				t.Fatalf("set mode %s: status=%d body=%s", mode, response.StatusCode, readBody(t, response))
+			}
+			var updated struct{ Group domain.FeishuGroup }
+			decodeResponse(t, response, &updated)
+			if updated.Group.TopicWakeMode != mode || !updated.Group.ReceiveAllMessages {
+				t.Fatalf("mode didn't save independently of reception: %+v", updated.Group)
+			}
+			response = requestJSON(t, client, http.MethodGet, groupListURL, nil, csrf)
+			var list struct {
+				Conversations []domain.ChannelConversationSummary
+			}
+			decodeResponse(t, response, &list)
+			if len(list.Conversations) != 1 || list.Conversations[0].Group == nil || list.Conversations[0].Group.TopicWakeMode != mode {
+				t.Fatalf("group list didn't return saved mode %s: %+v", mode, list.Conversations)
+			}
+		}
+		send := func(chat, thread, eventID, messageID, senderType string, mentioned bool, wantState string, wantDuplicate bool) domain.ChannelInboxReceipt {
+			t.Helper()
+			item, duplicate, err := channelService.ReceiveInbound(ctx, channel.RuntimeClaims{
+				InstanceID: instance.ID, Scopes: map[string]bool{"channel.inbound.write": true},
+			}, domain.ChannelInboundEnvelope{
+				SchemaVersion: 1, InstanceID: instance.ID, ExternalEventID: eventID, EventType: "message",
+				ChatType: "group", ExternalChatID: chat, ExternalSenderID: "topic-" + senderType,
+				ExternalMessageID: messageID, Content: eventID, SenderType: senderType,
+				ThreadID: thread, MentionedBot: mentioned,
+			})
+			if err != nil || duplicate != wantDuplicate || (!duplicate && item.State != wantState) {
+				t.Fatalf("%s: state=%q duplicate=%v err=%v, want state=%q duplicate=%v", eventID, item.State, duplicate, err, wantState, wantDuplicate)
+			}
+			return item
+		}
+		revoke := func(chat, thread, receiptID string) map[string]any {
+			return map[string]any{"chat_id": chat, "thread_id": thread, "inbound_receipt_id": receiptID, "reason": "验证完成"}
+		}
+		for _, invalid := range []map[string]any{
+			revoke("oc_other_group", topic, ""), revoke(externalChat, "omt_other", ""),
+			revoke(externalChat, topic, priorReceipt.ID),
+		} {
+			if result := coreMCPCallTool(t, url, token, "channel_revoke_topic_wake", invalid); !refused(result) {
+				t.Fatalf("out-of-scope revoke accepted: %#v", result)
+			}
+		}
+		response := agentRequest(t, revocationURL, http.MethodPost, otherToken, revoke(externalChat, topic, receipt.ID))
+		if response.StatusCode != http.StatusForbidden {
+			t.Fatalf("unrelated Task revoked the topic: %d", response.StatusCode)
+		}
+		response.Body.Close()
+
+		setMode(domain.FeishuTopicWakeMention)
+		send(externalChat, topic, "mention-mode-plain", "om_mention_mode_plain", "user", false, "listening", false)
+		if result := coreMCPCallTool(t, url, token, "channel_revoke_topic_wake", revoke(externalChat, topic, "")); result.IsError {
+			t.Fatalf("MCP revoke: %#v", result)
+		}
+		send(externalChat, topic, "human-restore", "om_human_restore", "user", true, "received", false)
+		setMode(domain.FeishuTopicWakeFull)
+		send(externalChat, topic, "human-restored", "om_human_restored", "user", false, "received", false)
+		send(externalChat, "omt_other", "other-thread", "om_other_thread", "user", false, "listening", false)
+
+		response = agentRequest(t, revocationURL, http.MethodPost, token, revoke(externalChat, topic, liveReceipt.ID))
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("Agent API revoke with live receipt: status=%d body=%s", response.StatusCode, readBody(t, response))
+		}
+		response.Body.Close()
+		send(externalChat, topic, "revoked", "om_revoked", "user", false, "listening", false)
+		send(externalChat, topic, "replayed-old-mention", "om_human_restore", "user", true, "", true)
+		send(externalChat, topic, "still-revoked", "om_still_revoked", "user", false, "listening", false)
+		send(externalChat, topic, "bot-restore", "om_bot_restore", "app", true, "received", false)
+		response = agentRequest(t, revocationURL, http.MethodPost, token, revoke(externalChat, topic, liveReceipt.ID))
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("retry of restored action: status=%d body=%s", response.StatusCode, readBody(t, response))
+		}
+		response.Body.Close()
+		send(externalChat, topic, "bot-restored", "om_bot_restored", "user", false, "received", false)
+
+		raw, err := sql.Open("sqlite", filepath.Join(dataDir, "aha2.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer raw.Close()
+		var records, restored int
+		if err := raw.QueryRowContext(ctx, `
+			SELECT COUNT(*),COUNT(NULLIF(restored_at,''))
+			FROM channel_feishu_topic_revocations
+			WHERE instance_id=? AND chat_id=? AND thread_id=? AND task_id=? AND agent_id='main' AND turn_id=?
+			  AND reason='验证完成' AND revoked_at<>'' AND restored_by IN ('topic-user','topic-app')
+		`, instance.ID, externalChat, topic, pet.ID, turn.ID).Scan(&records, &restored); err != nil || records != 2 || restored != 2 {
+			t.Fatalf("revocation audit: records=%d restored=%d err=%v", records, restored, err)
+		}
+
+		// The same topic ID in a different, unbound group starts cold.
+		unboundHost, err := appService.CreateTask(ctx, app.CreateTaskInput{
+			ProjectID: hostProject.ID, WorkspaceID: hostWorkspace.ID, Title: "飞书群聊 · 未绑定测试群",
+			Request: "host", Isolation: "inplace", ModelID: snapshot.ModelID, Filesystem: "read-only",
+			Approval: "never", CollaborationMode: "single", AllowSystemProject: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		activate(unboundHost)
+		other := conversation
+		other.ID, other.ScopeKey, other.ExternalChatID = "unbound-topic-conversation", "unbound-topic-scope", "oc_other_group"
+		other.HostTaskID = unboundHost.ID
+		if err := database.CreateChannelConversation(ctx, other, domain.ChannelSession{
+			ID: "unbound-topic-session", ConversationID: other.ID, Generation: 1, Mode: "group_qa", Status: "active", StartedAt: now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := database.SetFeishuGroupReception(ctx, instance.ID, owner.ID, other.ExternalChatID, true, now); err != nil {
+			t.Fatal(err)
+		}
+		send(other.ExternalChatID, topic, "other-group-plain", "om_other_group_plain", "user", false, "listening", false)
+		send(other.ExternalChatID, topic, "other-group-mention", "om_other_group_mention", "user", true, "received", false)
+		var hostTurn domain.Turn
+		select {
+		case request := <-executor.started:
+			if request.Task.ID != unboundHost.ID || !slices.Contains(request.AllowedTools, "mcp__aha2_channel__channel_revoke_topic_wake") ||
+				slices.Contains(request.AllowedTools, "mcp__aha2_channel__channel_reply") {
+				t.Fatalf("unbound group host tool scope: task=%s tools=%v", request.Task.ID, request.AllowedTools)
+			}
+			hostTurn = request.Turn
+		case <-time.After(15 * time.Second):
+			t.Fatal("unbound topic mention did not start a host Turn")
+		}
+		hostToken, err := capabilities.Issue(unboundHost.ID, "main", hostTurn.ID, time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		status, names, _ := coreMCPToolsList(t, url, hostToken)
+		if status != http.StatusOK || strings.Join(names, ",") != "channel_revoke_topic_wake" {
+			t.Fatalf("unbound host discovery status=%d names=%v", status, names)
+		}
+		if result := coreMCPCallTool(t, url, hostToken, "channel_revoke_topic_wake", revoke(other.ExternalChatID, topic, "")); result.IsError {
+			t.Fatalf("unbound group host revoke: %#v", result)
+		}
+		if result := coreMCPCallTool(t, url, hostToken, "channel_revoke_topic_wake", revoke(externalChat, topic, receipt.ID)); !refused(result) {
+			t.Fatalf("unbound host revoked another group's topic: %#v", result)
+		}
+		send(externalChat, topic, "original-group-unaffected", "om_original_unaffected", "user", false, "received", false)
+	})
 }

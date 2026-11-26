@@ -1500,6 +1500,7 @@ interface ChannelInboundSummary {
 export interface FeishuGroup {
   chat_id: string;
   receive_all_messages: boolean;
+  topic_wake_mode: "full" | "mention";
   updated_at?: string;
   updated_by?: string;
 }

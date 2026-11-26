@@ -633,7 +633,7 @@ func (s *Store) ChannelContextForInboxBatch(ctx context.Context, batchID string)
 			return nil, sql.ErrNoRows
 		}
 		stable := map[string]any{}
-		for _, key := range []string{"schema", "instance_id", "provider", "endpoint", "conversation_id", "route"} {
+		for _, key := range []string{"schema", "instance_id", "provider", "endpoint", "conversation_id", "chat_id", "route"} {
 			if child, exists := value[key]; exists {
 				stable[key] = child
 			}
