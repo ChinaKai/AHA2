@@ -250,6 +250,8 @@ try {
   await body.locator("#pet-desk-insights .pet-desk-insights-list").waitFor({timeout: 15000});
   const week = await body.locator("#pet-desk-insights").innerText();
   assert.match(week, /Handled by the pet: 12/);
+  assert.match(week, /\d{4}-\d\d-\d\d to today/, "the range shows dates only");
+  assert.doesNotMatch(week, /\d\d:\d\d:\d\d/);
   assert.match(week, /Put to you: 5\s+approved 2 · rejected 1 · cancelled 1 · still waiting 1/);
   assert.match(week, /Wake-ups: 40, 31 with nothing to move\s+Tokens in these 7 days: 123,456/);
   // Item 5: the pet's own waiting note shows with its next step.

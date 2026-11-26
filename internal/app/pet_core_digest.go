@@ -165,11 +165,31 @@ func petDigestTruncationMarker(omitted, shortened int, relative string, english 
 	return fmt.Sprintf("（摘要已截断：省略 %d 行、缩短 %d 条；完整内容见 %s）", omitted, shortened, relative)
 }
 
-// petDigestLedgerItems picks ledger entries ("- status | item | ...") whose
-// status passes keep. Guidance bullets without a "|" are not entries.
-func petDigestLedgerItems(content string, limit int, keep func(status string) bool) ([]string, int) {
-	items := []string{}
-	total := 0
+// petLedgerEntry is one ledger row of core/loops.md or core/agenda.md:
+// "- status | item | next | ...". Body is the row after the bullet, Columns
+// are the trimmed "|" fields after the status.
+type petLedgerEntry struct {
+	Status  string
+	Columns []string
+	Body    string
+}
+
+// Column returns the index-th field after the status, or "".
+func (entry petLedgerEntry) Column(index int) string {
+	if index < 0 || index >= len(entry.Columns) {
+		return ""
+	}
+	return entry.Columns[index]
+}
+
+// parsePetLedger is the one parser for the pet's ledgers; the core digest,
+// the desk's waiting items and the records page's status counts all read
+// rows through it. An entry is a top-level "- " or "* " bullet whose text
+// before the first "|" is one short status word (lower-cased, square
+// brackets dropped). Indented bullets are notes and guidance bullets have no
+// "|", so neither is an entry.
+func parsePetLedger(content string) []petLedgerEntry {
+	entries := []petLedgerEntry{}
 	for _, line := range strings.Split(content, "\n") {
 		if strings.TrimSpace(line) != strings.TrimRight(line, "\r") {
 			continue
@@ -179,19 +199,36 @@ func petDigestLedgerItems(content string, limit int, keep func(status string) bo
 			continue
 		}
 		body := strings.TrimSpace(trimmed[2:])
-		status, _, found := strings.Cut(body, "|")
-		if !found {
+		fields := strings.Split(body, "|")
+		if len(fields) < 2 {
 			continue
 		}
-		status = strings.ToLower(strings.TrimSpace(strings.Trim(strings.TrimSpace(status), "[]")))
+		status := strings.ToLower(strings.TrimSpace(strings.Trim(strings.TrimSpace(fields[0]), "[]")))
 		// A status is one short word; this skips the seeded format line
 		// "每项写：状态（open/waiting/blocked）| 事项 | ...".
-		if !petLedgerStatus.MatchString(status) || !keep(status) {
+		if !petLedgerStatus.MatchString(status) {
+			continue
+		}
+		columns := make([]string, 0, len(fields)-1)
+		for _, field := range fields[1:] {
+			columns = append(columns, strings.TrimSpace(field))
+		}
+		entries = append(entries, petLedgerEntry{Status: status, Columns: columns, Body: body})
+	}
+	return entries
+}
+
+// petDigestLedgerItems picks ledger entries whose status passes keep.
+func petDigestLedgerItems(content string, limit int, keep func(status string) bool) ([]string, int) {
+	items := []string{}
+	total := 0
+	for _, entry := range parsePetLedger(content) {
+		if !keep(entry.Status) {
 			continue
 		}
 		total++
 		if len(items) < limit {
-			items = append(items, truncateAssistantText(body, petDigestItemLimit))
+			items = append(items, truncateAssistantText(entry.Body, petDigestItemLimit))
 		}
 	}
 	return items, total

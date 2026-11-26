@@ -1625,7 +1625,14 @@ test("the last 7 days block renders counts, outcomes and the token scope", async
   };
   let html = renderPetInsightsBody(insights, options);
   assert.match(html, /<h3>近 7 天<\/h3>/);
-  assert.match(html, /at 2026-11-18T16:00:00Z 至 at 2026-11-26T02:00:00Z/);
+  // Only the first day, in local time, and "today" for the end.
+  const {petInsightsDate} = await import("../build/pet_desk.js");
+  const fromLocal = new Date("2026-11-18T16:00:00Z");
+  const expected = `${fromLocal.getFullYear()}-${String(fromLocal.getMonth() + 1).padStart(2, "0")}-${String(fromLocal.getDate()).padStart(2, "0")}`;
+  assert.equal(petInsightsDate("2026-11-18T16:00:00Z"), expected);
+  assert.match(html, new RegExp(`<small class="pet-desk-insights-range">${expected} 至今天</small>`));
+  assert.doesNotMatch(html, /\d\d:\d\d/, "no clock time in the range");
+  for (const bad of ["", "nope", "0001-01-01T00:00:00Z", null, 3]) assert.equal(petInsightsDate(bad), "", String(bad));
   assert.match(html, /<strong>宠物自己办了 12 件<\/strong>/);
   assert.match(html, /<strong>提给你 5 件<\/strong><small>已批准 2 · 已否决 1 · 已取消 1 · 还在等 1<\/small>/);
   assert.match(html, /想法 3 条/);
@@ -1653,6 +1660,8 @@ test("the English insights, loop waits and last reply have no Chinese interface 
     const body = renderPetInsightsBody({from: "a", to: "b", actions: 1, approvals: {total: 1, approved: 1, rejected: 0, cancelled: 0, pending: 0, ideas: 0}, corrections: 0, wakes: {turns: 2, noop: 1, tokens: 5, token_scope: "cumulative"}}, {translate: i18n.t, formatTime: v => v});
     assert.doesNotMatch(body, /[一-鿿]/);
     assert.match(body, /Tokens for the whole pet task: 5/);
+    const english = renderPetInsightsBody({from: "2026-11-18T16:00:00Z", to: "2026-11-26T02:00:00Z", actions: 0, approvals: {}, corrections: 0, wakes: {}}, {translate: i18n.t, formatTime: v => v});
+    assert.match(english, /\d{4}-\d\d-\d\d to today<\/small>/);
     assert.doesNotMatch(renderPetInsightsBody(null, {translate: i18n.t, formatTime: v => v}), /[一-鿿]/);
     const html = renderPetOverview(deskOptions(i18n, {...deskFixture(), waiting_others: [{kind: "loop", title: "等", detail: "下", on: "core/loops.md", since: ""}], waiting_others_total: 1, last_reply: {text: "NOOP", noop: true, from_wake: true, finished_at: "2026-11-26T01:00:00Z"}}));
     assert.doesNotMatch(chrome(html), /[一-鿿]/, chrome(html).match(/.{0,40}[一-鿿].{0,40}/)?.[0]);

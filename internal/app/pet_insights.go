@@ -198,45 +198,6 @@ func (s *Service) petDeskLastReply(ctx context.Context) (*PetDeskLastReply, erro
 
 /* Waiting items from the pet's ledgers ------------------------------------ */
 
-// petLedgerWait is one "waiting" ledger row: "- waiting | item | next | ...".
-type petLedgerWait struct {
-	Item string
-	Next string
-}
-
-// petLedgerWaits parses waiting rows with the same rules as the digest
-// (petDigestLedgerItems): top-level "- " or "* " bullets with a short status
-// word before the first "|". Indented bullets are notes, not entries.
-func petLedgerWaits(content string) []petLedgerWait {
-	waits := []petLedgerWait{}
-	for _, line := range strings.Split(content, "\n") {
-		if strings.TrimSpace(line) != strings.TrimRight(line, "\r") {
-			continue
-		}
-		trimmed := strings.TrimSpace(line)
-		if !strings.HasPrefix(trimmed, "- ") && !strings.HasPrefix(trimmed, "* ") {
-			continue
-		}
-		fields := strings.Split(strings.TrimSpace(trimmed[2:]), "|")
-		if len(fields) < 2 {
-			continue
-		}
-		status := strings.ToLower(strings.TrimSpace(strings.Trim(strings.TrimSpace(fields[0]), "[]")))
-		if !petLedgerStatus.MatchString(status) || status != "waiting" {
-			continue
-		}
-		wait := petLedgerWait{Item: strings.TrimSpace(fields[1])}
-		if len(fields) > 2 {
-			wait.Next = strings.TrimSpace(fields[2])
-		}
-		if wait.Item == "" {
-			continue
-		}
-		waits = append(waits, wait)
-	}
-	return waits
-}
-
 // petDeskLedgerWaits turns the waiting rows of core/loops.md (outside its
 // closed sections) and core/agenda.md into desk waits. A row that names a
 // pending approval is skipped: that decision is already on the desk under
@@ -250,14 +211,20 @@ func petDeskLedgerWaits(loops, agenda string, pendingApprovalIDs []string) []Pet
 		{petCoreLoopsPath, activePetLoops(loops)},
 		{petCoreAgendaPath, agenda},
 	} {
-		for _, wait := range petLedgerWaits(source.content) {
-			if petLedgerNamesApproval(wait.Item+" "+wait.Next, pendingApprovalIDs) {
+		for _, entry := range parsePetLedger(source.content) {
+			item := entry.Column(0)
+			if entry.Status != "waiting" || item == "" {
+				continue
+			}
+			// The whole row: an approval can be cited in any column, for
+			// example the close condition or the "needs the Owner" column.
+			if petLedgerNamesApproval(entry.Body, pendingApprovalIDs) {
 				continue
 			}
 			result = append(result, PetDeskWait{
 				Kind:   PetDeskWaitLoop,
-				Title:  truncateAssistantText(wait.Item, petDeskDetailRunes),
-				Detail: truncateAssistantText(wait.Next, petDeskDetailRunes),
+				Title:  truncateAssistantText(item, petDeskDetailRunes),
+				Detail: truncateAssistantText(entry.Column(1), petDeskDetailRunes),
 				On:     source.path,
 			})
 		}

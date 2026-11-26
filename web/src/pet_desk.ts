@@ -640,6 +640,17 @@ export function renderPetInsightsPlaceholder(translate: Translate): string {
   </section>`;
 }
 
+// petInsightsDate renders a window bound as the browser's local date
+// (YYYY-MM-DD). The server aligns the window to its local midnight; for an
+// Owner in the same time zone the two agree. Unparsable input is "".
+export function petInsightsDate(value: unknown): string {
+  if (typeof value !== "string" || !value.trim()) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime()) || date.getTime() <= 0) return "";
+  const pad = (n: number): string => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
 function insightCount(value: unknown): number {
   return countValue(value) ?? 0;
 }
@@ -662,8 +673,11 @@ export function renderPetInsightsBody(insights: PetInsights | null | undefined, 
   const wakes = insights.wakes && typeof insights.wakes === "object" ? insights.wakes : ({} as PetInsights["wakes"]);
   const from = textValue(insights.from);
   const to = textValue(insights.to);
-  const range = from && to
-    ? `<small class="pet-desk-insights-range">${escapeHTML(translate("petWorkbench.insights.range", {from: options.formatTime(from), to: options.formatTime(to)}))}</small>`
+  // The window is whole local days ending today, so only the first day is
+  // worth printing; the end is always "today".
+  const fromDate = petInsightsDate(from);
+  const range = fromDate && to
+    ? `<small class="pet-desk-insights-range">${escapeHTML(translate("petWorkbench.insights.range", {from: fromDate}))}</small>`
     : "";
   const outcomes = [
     translate("petWorkbench.insights.approved", {count: insightCount(approvals.approved)}),

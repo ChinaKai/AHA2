@@ -148,6 +148,17 @@ func TestPetInsightsCountsTheSevenDayWindowAndItsEdges(t *testing.T) {
 	f.turn("main", before, "NOOP", nil, domain.PetWakeSourceKind)
 	f.turn("helper", inside, "NOOP", nil) // not the Main Agent
 
+	// Rows after the window end (the fixed clock) are outside too. The store
+	// would hold them when the server clock lags a writer, or in a test.
+	after := f.now.Add(time.Second)
+	f.event("pet", "task_created", "task-future", after)
+	f.event("pet", "task_created", "task-at-end", f.now) // [from, to): the end is exclusive
+	f.approval("a-future", "owner_decision", petApprovalPending, after)
+	f.approval("a-future-idea", "idea", petApprovalPending, after)
+	f.event("owner", petCorrectionEventKind, `{"owner_note":"future"}`, after)
+	f.turn("main", after, "NOOP", nil, domain.PetWakeSourceKind)
+	f.turn("main", f.now, "at the end", nil, domain.PetWakeSourceKind)
+
 	insights, err := f.service.PetInsights(f.ctx, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -245,7 +256,10 @@ func TestPetDeskListsLedgerWaitsExceptClosedAndApprovalLinked(t *testing.T) {
 		"## 其他",
 		"- [waiting] | 等评审意见 | 看完再改 | 评审通过",
 	}, "\n")
-	agenda := "# 自主议程\n- waiting | 等渠道恢复 | 恢复后重发 | 发出 | 否\n- next | 下一项 | 做 | 完 | 否\n"
+	// The approval id only in the fourth column (the "needs the Owner"
+	// column) still links the row to the pending approval.
+	agenda := "# 自主议程\n- waiting | 等渠道恢复 | 恢复后重发 | 发出 | 否\n- next | 下一项 | 做 | 完 | 否\n" +
+		"- waiting | 等 owner 拍板 | 等 | 批了 | 是，见 pet_approval_0123456789abcdef0123\n"
 	for name, content := range map[string]string{petCoreLoopsPath: loops, petCoreAgendaPath: agenda} {
 		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o600); err != nil {
 			t.Fatal(err)
