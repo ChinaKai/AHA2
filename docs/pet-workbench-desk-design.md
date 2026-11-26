@@ -545,3 +545,104 @@ owner 在 2026-11-26 部署后提出并确认了这一步。口径都是和 owne
 - **老任务没有分线。**它们沿用旧规则，弹窗里只有时间线。
 - **“让它继续”是 owner 替任务做的推动**，消息内容固定，不带新指令，避免变成一个随手发指令的入口。
 - **没定**：任务有不依赖别人的下一步时，是否不许它结束这一轮。这涉及任务何时可以收工，影响面比分线大，owner 还没决定，这一步不做。
+
+### 12.9 4B、4C 的接口约定
+
+4A 已合入 main（`837682f`）。剩下两部分都要改同一批文件，所以改成按前后端切：一边做全部后端，一边做全部前端，同时进行，靠这一节的约定对上。字段名以这里为准；实现中发现约定不够用，后端可以只增不改地加字段并在交付说明里写明，不能改名或删字段。时间一律 RFC 3339，没有值时是 Go 的零值时间，前端按“没有”处理。
+
+**卡在谁（`stuck_on`）**：只对等待输入的任务计算，取值：
+
+| 值 | 条件 |
+| --- | --- |
+| `self` | 有 `owner=self` 且 `state=open` 的未闭环分线 |
+| `owner` | 不满足上一条，且有 `owner=owner` 的未闭环分线 |
+| `other` | 不满足上两条，且有 `owner=other` 的未闭环分线 |
+| `none` | 有分线记录，但全部闭环 |
+| `unknown` | 任务没有记录过分线，沿用旧规则 |
+
+“有分线记录”指状态卡上有分线（含已闭环的）。`owner=self` 但 `state` 是 `waiting` 或 `blocked` 的线不算“自己能推”：`waiting` 说明它在等别的线，`blocked` 说明有卡点，这两种都归到 `owner`、`other` 或 `none` 里看其余的线；如果只剩这种线，按 `none` 处理并在工位上照常显示为“等你下一句话”。
+
+**工作台接口 `GET /api/v1/pet/workbench` 的 `desk` 新增或变化：**
+
+```
+desk
+├─ stalled[] / stalled_total            停着没人推（最多 30 条，停得最久的在前）
+│    task_id, task_code, title,
+│    line_id, line_title,               自己能推的那条线；没有分线的任务为空
+│    detail,                            那条线的 step；没有分线时是状态卡的第一条下一步
+│    since                              最近一轮主 Agent Turn 结束的时间
+├─ recent[] / recent_total              最近活动（最多 30 条，最新的在前）
+│    task_id, task_code, title, status,
+│    watched,                           是否已关注
+│    last_active                        任务最后活动时间
+├─ needs_owner[] / later[] 每条新增
+│    stuck_on,                          任务类条目才有，取值见上表
+│    lines[]                            kind=question 且 stuck_on=owner 时，负责人是 owner 的未闭环线：
+│                                       id, title, state, step, blocker
+└─ waiting_others[] 新增一种 kind=line  任务只剩等别人的线
+     task_id, task_code, title,
+     on,                                等的是谁，多个用顿号连接
+     lines[],                           同上结构，负责人是 other 的未闭环线，另带 who
+     since                              任务最后更新时间
+```
+
+分类规则的变化（只影响等待输入的任务，其余不变）：
+
+- `stuck_on=self`：满足 12.5 其余条件的进 `stalled`，不再进 `needs_owner` 或 `later`；还没停够 15 分钟的进 `later`（kind 仍是 `next_step`）。
+- `stuck_on=owner`：进 `needs_owner`，kind 是 `question`，带 `lines`；状态卡里的 `questions` 照常带上。
+- `stuck_on=other`：进 `waiting_others`，kind 是 `line`。
+- `stuck_on=none`：进 `later`，kind 是 `next_step`。
+- `stuck_on=unknown`：和现在一样（有问题进 `needs_owner`，否则进 `later`）；另外满足“状态卡有下一步、没有等 owner 决定的事”和 12.5 其余条件的进 `stalled`。
+- 有未处理审批、有在跑的评审、被忽略的任务，规则和现在一样，优先于上面各条。
+
+`recent` 的范围：非宠物任务、未被忽略；系统托管项目里的任务只有被关注时才出现；状态是完成或取消的只保留最近 7 天内的；草稿不出现。`last_active` 取任务更新时间和最近一轮 Turn 结束时间中较晚的。
+
+**宠物工作状态 `aha_pet_work_state` 新增：**
+
+```
+stalled_tasks[]        id, code, title, line_id, line_title, detail, idle_minutes
+stalled_tasks_note     固定说明文字，名单为空时不返回
+```
+
+只包含宠物创建或关注的任务；未开“查看其他任务信息”权限时，不是宠物创建的任务只返回 `id`、`code` 和 `idle_minutes`。默认 16KB 预算裁剪时这份名单的每一行都保留。
+
+**新接口 `GET /api/v1/tasks/{id}/lifecycle`**（owner 会话；任务不存在返回 404）：
+
+```
+lifecycle
+├─ task        id, code, title, status, project, created_at, updated_at, current_goal
+├─ now         status, next_steps[], open_questions[], updated_at,
+│              stuck_on, stuck_who[], idle_since, lines_recorded
+├─ lines[]     状态卡上的分线，未闭环在前：
+│              id, title, owner, who, state, step, blocker, updated_at, opened_at, closed_at
+├─ parallel
+│    ├─ subs[]     agent_id, title, status, started_at, finished_at   最近一个协作批次里的 Sub
+│    └─ reviews[]  task_id, code, status, decision, reason, decided_at
+├─ timeline[]  按时间从旧到新，最多 200 条，超出时保留最新的并带 timeline_truncated=true
+│              at, kind, title, detail, ref_id
+│              kind 取值：
+│                created            任务创建
+│                goal               目标变更；title 是变更类型（set/revise/pause/resume/complete/reopen），detail 是新目标和原因
+│                constraint         owner 定下的约束；detail 是约束原文
+│                approval_requested 宠物为它提的审批；title 是审批标题，ref_id 是审批编号
+│                approval_resolved  审批的结果；title 是 approved/rejected/cancelled，detail 是 owner 写的原因
+│                review             评审结论；title 是结论，detail 是理由
+│                line_opened / line_updated / line_closed / line_reopened
+│                                   title 是线的标题，detail 是这次变化后的负责方、状态、走到哪、卡点
+├─ turns[]     主 Agent 的 Turn，最新的在前，最多 100 条，超出带 turns_truncated=true：
+│              id, sequence, status, started_at, finished_at, duration_seconds,
+│              summary（结果的第一行，最多 200 个字）, error（最多 200 个字）
+└─ stats       turns, duration_seconds, tokens（沿用任务列表的算法）
+```
+
+**“让它继续”**不新增接口：前端用现有的发消息接口给任务发一句固定的话，内容在确认框里原样显示。中文是“继续：按状态卡上的下一步往下做；做不了就说明卡在哪。”英文是对应的翻译，随界面语言。
+
+**页面**（前端按这个做）：
+
+- 状态条在“N 件要你定”后面加“N 个停着”，为 0 时不显示。
+- “要你定”这一栏最上面是“停着没人推”，和审批、任务条目用不同的底色区分，不编序号；每条显示任务、哪条线、停了多久、`detail`，按钮是“让它继续”和“打开任务”。
+- `kind=question` 且带 `lines` 时，显示这些线（标题、走到哪、卡点），不再列状态卡的全部问题；`stuck_on=unknown` 的任务条目在小字里标“没有记录分线”。
+- “等别人”里 `kind=line` 显示任务、等谁、哪几条线。
+- 底部三列是关注 / 最近活动 / 已忽略。最近活动每行：编号、标题、状态、最后活动时间；没关注的带“关注”，都带“忽略”；已完成或取消的行用弱化样式。原来的“未关注”一列不再出现。
+- 概览上所有任务行（要你定、不急的、等别人、在跑什么、停着没人推、关注、最近活动、已忽略）点标题打开生命周期弹窗；原来的“打开任务”按钮保留。审批和想法行点标题仍是审批详情。
+- 弹窗七块按 12.6 的顺序。读取中、读取失败、任务不存在各有状态；旧服务端没有这个接口（404）时提示不可用并给“打开任务”。
