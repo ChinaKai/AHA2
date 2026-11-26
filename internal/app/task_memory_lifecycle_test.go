@@ -80,11 +80,10 @@ func TestTaskMemoryCarriesPersistedLinesIntoNextTurnPrompt(t *testing.T) {
 	waitForTurn(t, fixture.database, first.ID, domain.TurnSucceeded)
 
 	title, owner, state, step := "Verify on a device", "self", "open", "Build sent to the device"
-	if err := fixture.database.UpdateTaskMemory(fixture.ctx, task.ID, first, fixture.now,
-		[]domain.TaskLinePatch{{ID: "device", Title: &title, Owner: &owner, State: &state, Step: &step}},
+	patches := []domain.TaskLinePatch{{ID: "device", Title: &title, Owner: &owner, State: &state, Step: &step}}
+	if err := fixture.database.UpdateTaskMemory(fixture.ctx, task.ID, first, fixture.now, patches,
 		func(memory *domain.TaskMemory) (*domain.TaskGoalChange, error) {
-			memory.Status, memory.StatusTurnID, memory.StatusUpdatedAt = "Release verification underway", first.ID, fixture.now
-			return nil, nil
+			return applyMemoryUpdate(memory, first, fixture.now, MemoryUpdate{Lines: patches})
 		}); err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +97,11 @@ func TestTaskMemoryCarriesPersistedLinesIntoNextTurnPrompt(t *testing.T) {
 		t.Fatalf("received %d executor prompts for two Turns", len(prompts))
 	}
 	patch := "device: Verify on a device (owner: self, state: open) | step: Build sent to the device"
-	if strings.Contains(prompts[0], patch) || !strings.Contains(prompts[len(prompts)-1], patch) {
-		t.Fatalf("expected the persisted line in the second prompt: %q", prompts[len(prompts)-1])
+	last := prompts[len(prompts)-1]
+	if strings.Contains(prompts[0], patch) || !strings.Contains(last, patch) {
+		t.Fatalf("expected the persisted line in the second prompt: %q", last)
+	}
+	if strings.Contains(last, "ended without updating this card") {
+		t.Fatal("a state card with only a line update was flagged as stale")
 	}
 }

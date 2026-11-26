@@ -2406,7 +2406,7 @@ func cleanMemoryItems(field string, values []string, limit int) ([]string, error
 }
 
 func applyMemoryUpdate(memory *domain.TaskMemory, turn domain.Turn, now time.Time, update MemoryUpdate) (*domain.TaskGoalChange, error) {
-	touchedNow := false
+	touchedNow := len(update.Lines) > 0
 	if update.Status != nil {
 		status := strings.TrimSpace(*update.Status)
 		if len([]rune(status)) > domain.TaskMemoryStatusMaxRunes {

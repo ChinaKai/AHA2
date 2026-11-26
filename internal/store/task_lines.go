@@ -30,9 +30,21 @@ func (s *Store) migrateTaskLines(ctx context.Context) error {
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=167)`).Scan(&applied); err != nil || applied {
 		return err
 	}
+	// The version marker can be missing when an existing database is repaired
+	// or opened through an older upgrader. Preserve data already in v167.
+	var hasLines bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM pragma_table_info('task_memory') WHERE name='lines_json'
+	)`).Scan(&hasLines); err != nil {
+		return err
+	}
+	if !hasLines {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE task_memory ADD COLUMN lines_json TEXT NOT NULL DEFAULT '[]'`); err != nil {
+			return err
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `
-		ALTER TABLE task_memory ADD COLUMN lines_json TEXT NOT NULL DEFAULT '[]';
-		CREATE TABLE task_line_events (
+		CREATE TABLE IF NOT EXISTS task_line_events (
 			sequence INTEGER PRIMARY KEY AUTOINCREMENT,
 			task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
 			line_id TEXT NOT NULL,
@@ -43,8 +55,8 @@ func (s *Store) migrateTaskLines(ctx context.Context) error {
 			before_json TEXT NOT NULL,
 			after_json TEXT NOT NULL
 		);
-		CREATE INDEX idx_task_line_events_task_sequence ON task_line_events(task_id,sequence);
-		CREATE INDEX idx_task_line_events_line_sequence ON task_line_events(task_id,line_id,sequence);
+		CREATE INDEX IF NOT EXISTS idx_task_line_events_task_sequence ON task_line_events(task_id,sequence);
+		CREATE INDEX IF NOT EXISTS idx_task_line_events_line_sequence ON task_line_events(task_id,line_id,sequence);
 		INSERT INTO schema_migrations(version,applied_at) VALUES(167,strftime('%Y-%m-%dT%H:%M:%fZ','now'));
 	`); err != nil {
 		return err

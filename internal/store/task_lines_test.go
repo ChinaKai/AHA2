@@ -342,6 +342,19 @@ func TestTaskLinesMigrationRollbackRetryAndReopen(t *testing.T) {
 	if err != nil || len(card.Lines) != 1 || card.Lines[0].ID != "persist" || card.Status != "Existing state card" {
 		t.Fatalf("reopening erased line or card data: %+v, %v", card, err)
 	}
+	// Older version upgrade fixtures keep the schema but discard newer markers.
+	if _, err := db.db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version=167`); err != nil {
+		t.Fatal(err)
+	}
+	db = reopenAfterMigration(t, db, path)
+	again, err := db.TaskMemory(ctx, task.ID)
+	if err != nil || !reflect.DeepEqual(again, card) {
+		t.Fatalf("rerunning v167 over an installed schema changed the card: %+v, %v", again, err)
+	}
+	events, err := db.TaskLineEvents(ctx, task.ID)
+	if err != nil || len(events) != 1 || events[0].LineID != "persist" {
+		t.Fatalf("rerunning v167 erased or duplicated events: %+v, %v", events, err)
+	}
 	var markers int
 	if err := db.db.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations WHERE version=167`).Scan(&markers); err != nil || markers != 1 {
 		t.Fatalf("migration markers = %d, %v", markers, err)
