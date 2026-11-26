@@ -1,5 +1,6 @@
 // Browser verification for the pet desk overview (task-813, design doc
-// section 10, items 1, 4, 5, 10, 12, 13 and 15).
+// section 10 items 1, 4, 5, 10, 12, 13 and 15; section 11.2 items 2, 4, 5, 6
+// and 7).
 //
 // Checks against the real built Web bundle with a stubbed API:
 //   - with `desk` the overview renders the desk blocks in order, the waiting
@@ -65,6 +66,14 @@ const desk = {
   corrections: [{at: minutesAgo(300), approval_id: "a-9", kind: "delete_workspace", title: "删除工作区 X", owner_note: "这个还要留着对比"}],
   open_loops: ["跟进合作方答复"], open_loops_total: 5,
   agenda: ["整理渠道"], agenda_total: 3,
+  last_reply: {text: "推进了 task-790，等 owner 批权限", finished_at: minutesAgo(20), noop: false, from_wake: true},
+};
+desk.waiting_others.push({kind: "loop", title: "等合作方答复接口格式", detail: "周五再问一次", on: "core/loops.md", since: "0001-01-01T00:00:00Z"});
+desk.waiting_others_total = desk.waiting_others.length;
+const insights = {
+  from: minutesAgo(8 * 24 * 60), to: minutesAgo(0), actions: 12,
+  approvals: {total: 5, approved: 2, rejected: 1, cancelled: 1, pending: 1, ideas: 3},
+  corrections: 2, wakes: {turns: 40, noop: 31, tokens: 123456, token_scope: "window"},
 };
 const watches = [
   {task_id: "t-w", code: "task-9", title: "关注的任务", status: "active", watched: true, ignored: false, reason: "manual", created_at: minutesAgo(600), updated_at: minutesAgo(30)},
@@ -76,6 +85,26 @@ const params = new URLSearchParams(location.search);
 window.__desk = params.get("desk") === "0" ? undefined : ${JSON.stringify(desk)};
 window.__workbenchQueries = [];
 window.__taskReads = [];
+window.__approvalReads = [];
+window.__insightReads = 0;
+// insights=fail answers 500, insights=old answers 404 like a server without
+// the route, insights=slow holds the response until __releaseInsights().
+window.__insightsMode = params.get("insights") || "ok";
+window.__recordsMode = params.get("records") || "ok";
+window.__recordsData = {
+  correction_history: params.get("corrections") === "none" ? [] : [
+    {at: new Date(Date.now() - 3600e3).toISOString(), approval_id: "a-9", kind: "delete_workspace", title: "删除工作区 X", owner_note: "这个还要留着对比", state: "open"},
+    {at: new Date(Date.now() - 3 * 86400e3).toISOString(), approval_id: "a-8", kind: "owner_decision", title: "合并 task-700", owner_note: "先评审再合", state: "absorbed"},
+    {at: new Date(Date.now() - 9 * 86400e3).toISOString(), approval_id: "a-7", kind: "owner_decision", title: "换模型", owner_note: "等下个月", state: "expired"},
+  ],
+  ledgers: [{name: "loops.md", counts: {open: 2, waiting: 1}, total: 3}, {name: "agenda.md", counts: {next: 1}, total: 1}],
+  knowledge: {
+    entries: 42, pending: 2, helped: 7, helped_partial: true, truncated: false, failed: 0, projects: 3, elapsed_ms: 4, spaces: [],
+    pending_items: [{id: "k-1", title: "过时的部署说明", scope: "project", project_id: "p-1", space: "AHA2", status: "stale"}],
+  },
+};
+window.__insightWaiters = [];
+window.__releaseInsights = () => { for (const resolve of window.__insightWaiters.splice(0)) resolve(); };
 const pageApprovals = ${JSON.stringify(pageApprovals)};
 const allApprovals = ${JSON.stringify(allApprovals)};
 window.fetch = async (input, init = {}) => {
@@ -86,12 +115,43 @@ window.fetch = async (input, init = {}) => {
   if (path === "/api/v1/system") return json({system: {web_version: "test", version: "test", started_at: new Date().toISOString()}});
   if (path === "/api/v1/assistant") return json({assistant: {character: "gugugaga", name: "AHA", nickname: "AHA", enabled: false}, messages: [], models: [], tools: []});
   if (path === "/api/v1/pet/approvals/pending-count") return json({ok: true, pending: 2});
+  if (path.startsWith("/api/v1/pet/workbench/core/") && (init.method || "GET").toUpperCase() === "PUT") {
+    window.__savedDocs = [...(window.__savedDocs || []), decodeURIComponent(path.split("/").pop())];
+    return json({ok: true});
+  }
+  if (path.startsWith("/api/v1/pet/approvals/") && (init.method || "GET").toUpperCase() === "GET") {
+    const id = decodeURIComponent(path.split("/")[5]);
+    window.__approvalReads.push(id);
+    const item = allApprovals.find(approval => approval.id === id);
+    return item ? json({ok: true, approval: item}) : json({ok: false, error: "pet_approval_not_found"}, 404);
+  }
+  if (path === "/api/v1/pet/workbench/insights" && url.searchParams.get("records") === "1") {
+    // The records tab's read (task-813 step three). Counted apart so the
+    // overview's insights checks keep their meaning.
+    window.__recordsReads = (window.__recordsReads || 0) + 1;
+    if (window.__recordsMode === "fail") return json({ok: false, error: "pet_insights_failed"}, 500);
+    if (window.__recordsMode === "slow") {
+      (window.__recordsSignals ||= []).push(init.signal);
+      await new Promise(resolve => (window.__recordsWaiters ||= []).push(resolve));
+    }
+    return json({ok: true, insights: {...${JSON.stringify(insights)}, ...window.__recordsData}});
+  }
+  if (path === "/api/v1/pet/workbench/insights") {
+    window.__insightReads++;
+    if (window.__insightsMode === "fail") return json({ok: false, error: "pet_insights_failed"}, 500);
+    if (window.__insightsMode === "old") return new Response("404 page not found", {status: 404});
+    if (window.__insightsMode === "slow") {
+      (window.__insightSignals ||= []).push(init.signal);
+      await new Promise(resolve => window.__insightWaiters.push(resolve));
+    }
+    return json({ok: true, insights: ${JSON.stringify(insights)}});
+  }
   if (path === "/api/v1/pet/workbench") {
     const limit = Number(url.searchParams.get("approval_limit") || 50);
     window.__workbenchQueries.push(limit);
     const approvals = limit >= 200 ? allApprovals : pageApprovals;
     return json({
-      ok: true, core: [{name: "core/loops.md", content: "loops"}], worklog: [], approvals, approval_total: allApprovals.length,
+      ok: true, core: [{name: "loops.md", content: "loops"}, {name: "identity.md", content: "identity"}, {name: "principles.md", content: "principles"}, {name: "agenda.md", content: "agenda"}], worklog: [{date: "2026-11-25", content: "做了一件事"}], worklog_total: 1, approvals, approval_total: allApprovals.length,
       approval_counts: [{kind: "idea", status: "pending", count: 1}, {kind: "owner_decision", status: "pending", count: 1}],
       watches: ${JSON.stringify(watches)}, updated_at: new Date().toISOString(),
       inspection: {health: "ok", version: "9.9.9", web_version: "web-1", uptime_minutes: 125, checked_at: new Date().toISOString(), pending_approvals: 2},
@@ -122,9 +182,21 @@ sessionStorage.setItem("aha2.navigation", JSON.stringify({view: "pet-workbench"}
 
 const html = `<!doctype html><html lang="en-US"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="/styles.css"></head><body><div id="app"></div><div id="app-status" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div><script src="/fixture.js"></script><script type="module" src="/app.js"></script></body></html>`;
 
+// While deskChunkFailures > 0 the server refuses the lazy desk module, so the
+// test can prove a failed chunk shows a retry card instead of a blank tab.
+let deskChunkFailures = 0;
+let deskChunkRequests = 0;
 const server = createServer(async (request, response) => {
   const name = new URL(request.url, "http://localhost").pathname;
   try {
+    if (name === "/pet_desk.js") {
+      deskChunkRequests++;
+      if (deskChunkFailures > 0) {
+        deskChunkFailures--;
+        response.writeHead(503).end();
+        return;
+      }
+    }
     response.setHeader("Content-Security-Policy", csp);
     if (name === "/" || name === "/index.html") {
       response.setHeader("Content-Type", "text/html");
@@ -199,7 +271,20 @@ try {
 
   // Item 1: block order; cards and recent activity are gone.
   const blocks = await page.evaluate(() => [...document.querySelector("#pet-workbench-body .pet-desk").children].map(el => el.className));
-  assert.deepEqual(blocks, ["pet-desk-status", "pet-desk-section pet-desk-needs", "pet-desk-pair", "pet-desk-section pet-desk-pet", "pet-desk-follows"]);
+  assert.deepEqual(blocks, ["pet-desk-status", "pet-desk-reply", "pet-desk-section pet-desk-needs", "pet-desk-pair", "pet-desk-section pet-desk-pet", "pet-desk-section pet-desk-insights", "pet-desk-follows"]);
+  // Step two, item 4: the last reply sits under the status row.
+  assert.match(await body.locator(".pet-desk-reply").innerText(), /Pet's last check[\s\S]*推进了 task-790/);
+  // Item 2: the last 7 days fill in after the desk.
+  await body.locator("#pet-desk-insights .pet-desk-insights-list").waitFor({timeout: 15000});
+  const week = await body.locator("#pet-desk-insights").innerText();
+  assert.match(week, /Handled by the pet: 12/);
+  assert.match(week, /\d{4}-\d\d-\d\d to today/, "the range shows dates only");
+  assert.doesNotMatch(week, /\d\d:\d\d:\d\d/);
+  assert.match(week, /Put to you: 5\s+approved 2 · rejected 1 · cancelled 1 · still waiting 1/);
+  assert.match(week, /Wake-ups: 40, 31 with nothing to move\s+Tokens in these 7 days: 123,456/);
+  // Item 5: the pet's own waiting note shows with its next step.
+  const loopRow = body.locator("#pet-desk-waiting .pet-desk-item.kind-loop");
+  assert.match(await loopRow.innerText(), /等合作方答复接口格式[\s\S]*Waiting \(pet's notes\)[\s\S]*core\/loops\.md[\s\S]*Next: 周五再问一次/);
   assert.equal(await body.locator(".pet-overview-cards, .pet-overview-recent").count(), 0);
   assert.equal(await body.locator("#pet-overview-follows, #pet-overview-ignored").count(), 2);
   // Wide screen: waiting and running side by side; phone: stacked.
@@ -221,7 +306,7 @@ try {
   assert.deepEqual(await untranslated(page), [], "English desk left untranslated Chinese");
   const status = await body.locator(".pet-desk-status").innerText();
   assert.match(status, /3 for you/);
-  assert.match(status, /2 waiting on others/);
+  assert.match(status, /3 waiting on others/);
   assert.match(status, /1 running/);
   assert.match(await body.locator(".pet-desk-status").getAttribute("title"), /Version: 9\.9\.9/);
   // Item 3: numbering from ① in response order.
@@ -231,23 +316,25 @@ try {
   await backToOverview(page);
   assert.equal(await body.locator("#pet-desk-later").getAttribute("open"), null, "later starts collapsed");
 
-  // Item 4: an approval older than the loaded approval page still opens its
-  // detail; the page reads the wider list once.
+  // Item 4 (step two, item 7): an approval older than the loaded approval
+  // page opens its detail through GET /api/v1/pet/approvals/{id}, without
+  // re-reading the whole workbench.
   const queriesBefore = await page.evaluate(() => window.__workbenchQueries.length);
   await body.locator('#pet-desk-needs [data-pet-approval-open="a-old"].pet-desk-item-main').click();
   await page.waitForSelector("dialog.pet-approval-detail-dialog[open]", {timeout: 15000});
   assert.match(await page.locator("dialog.pet-approval-detail-dialog").innerText(), /是否合并 task-801 的候选/);
-  assert.ok((await page.evaluate(() => window.__workbenchQueries.slice(-1)[0])) >= 200, "the wide read uses the server cap");
+  assert.deepEqual(await page.evaluate(() => window.__approvalReads), ["a-old"]);
+  assert.equal(await page.evaluate(() => window.__workbenchQueries.length), queriesBefore, "no whole-page re-read");
   await closeDialog(page);
   assert.equal(await page.locator('[data-pet-workbench-tab="overview"]').getAttribute("class"), "active", "still on the overview");
   // An idea from the folded later list opens from the loaded page directly.
   const queriesBeforeIdea = await page.evaluate(() => window.__workbenchQueries.length);
-  assert.ok(queriesBeforeIdea > queriesBefore);
   await body.locator("#pet-desk-later summary").click();
   await body.locator('#pet-desk-later [data-pet-approval-open="idea-1"].pet-desk-item-main').click();
   await page.waitForSelector("dialog.pet-approval-detail-dialog[open]");
   assert.match(await page.locator("dialog.pet-approval-detail-dialog").innerText(), /整理渠道联系人/);
   assert.equal(await page.evaluate(() => window.__workbenchQueries.length), queriesBeforeIdea, "a loaded approval needs no extra read");
+  assert.deepEqual(await page.evaluate(() => window.__approvalReads), ["a-old"], "nor a by-id read");
   await closeDialog(page);
   // No approve/reject buttons on the desk itself.
   assert.equal(await body.locator("[data-pet-approval-decision]").count(), 0);
@@ -285,6 +372,164 @@ try {
   await body.locator(".pet-desk").waitFor();
   assert.match(await body.locator("#pet-desk-needs h3").innerText(), /要你定（3）/);
   assert.match(await body.locator("#pet-desk-later summary").innerText(), /不急的还有 2 件/);
+
+  // Step two, item 6: a same-view full render (a hash change re-runs render()
+  // for the same view) keeps the lazily loaded page working, and a slow
+  // insights read that lands after the render fills the live block.
+  await openOverview(page, "?insights=slow");
+  await body.locator(".pet-desk").waitFor();
+  await page.waitForFunction(() => window.__insightReads === 1);
+  const bodyHandle = await page.evaluateHandle(() => document.querySelector("#pet-workbench-body"));
+  for (let round = 1; round <= 3; round++) {
+    await page.evaluate(round => { location.hash = `#pet-workbench?render=${round}`; }, round);
+    await page.waitForFunction(round => location.hash.endsWith(String(round)), round);
+  }
+  await page.waitForTimeout(200);
+  assert.equal(await page.evaluate(body => body === document.querySelector("#pet-workbench-body") && body.isConnected, bodyHandle), true, "the page survives same-view renders");
+  assert.equal(await page.evaluate(() => window.__insightReads), 1, "renders do not restart the insights read");
+  await page.evaluate(() => window.__releaseInsights());
+  await body.locator("#pet-desk-insights .pet-desk-insights-list").waitFor({timeout: 15000});
+  // Buttons rendered by the lazy chunk still work after those renders.
+  await body.locator("#pet-desk-pet [data-pet-overview-jump=\"records\"]").click();
+  await body.locator(".pet-records").waitFor();
+  await backToOverview(page);
+  // The finished result is reused: a repaint paints it at once and does not
+  // read again.
+  assert.equal(await body.locator("#pet-desk-insights .pet-desk-insights-list").count(), 1, "repaint shows the cached block immediately");
+  await page.waitForTimeout(300);
+  assert.equal(await page.evaluate(() => window.__insightReads), 1, "repaint does not read again");
+
+  // A tab switch while insights are still loading aborts that read; coming
+  // back starts one new read and only it fills the block.
+  await openOverview(page, "?insights=slow");
+  await page.waitForFunction(() => window.__insightReads === 1);
+  await page.click('[data-pet-workbench-tab="approvals"]');
+  await page.waitForSelector("[data-pet-approval-filters-open]");
+  assert.equal(await page.evaluate(() => window.__insightSignals.at(-1)?.aborted), true, "leaving the overview aborts the insights read");
+  await backToOverview(page);
+  await page.waitForFunction(() => window.__insightReads === 2);
+  assert.equal(await page.evaluate(() => window.__insightSignals.at(-1)?.aborted), false);
+  await page.evaluate(() => window.__releaseInsights());
+  await body.locator("#pet-desk-insights .pet-desk-insights-list").waitFor({timeout: 15000});
+  assert.equal(await body.locator("#pet-desk-insights").count(), 1);
+
+  // Item 2: a failing insights endpoint or an older server without it shows
+  // "not available" in the block; the rest of the desk is untouched.
+  for (const mode of ["fail", "old"]) {
+    await openOverview(page, `?insights=${mode}`);
+    await body.locator(".pet-desk").waitFor();
+    await page.waitForFunction(() => document.querySelector("#pet-desk-insights")?.textContent.includes("not available"), null, {timeout: 15000});
+    assert.equal(await body.locator("#pet-desk-needs .pet-desk-index").count(), 3, `${mode}: the desk still renders`);
+    assert.deepEqual(await untranslated(page), [], `${mode}: English only`);
+  }
+
+  // Item 6: a desk chunk that fails to load shows a retry card, and retry
+  // brings the overview back without a page reload.
+  deskChunkFailures = 1;
+  const requestsBefore = deskChunkRequests;
+  await page.goto(`${url}/`, {waitUntil: "domcontentloaded"});
+  await page.waitForSelector("#pet-workbench-body .chunk-state-error", {timeout: 20000});
+  assert.equal(deskChunkRequests, requestsBefore + 1);
+  assert.match(await body.innerText(), /The workbench page failed to load/);
+  assert.deepEqual(await untranslated(page), []);
+  await body.locator("[data-chunk-retry]").click();
+  await body.locator(".pet-desk").waitFor({timeout: 15000});
+  // The approvals tab does not need the chunk at all.
+  deskChunkFailures = 1;
+  await page.goto(`${url}/`, {waitUntil: "domcontentloaded"});
+  await page.waitForSelector("#pet-workbench-body .chunk-state-error", {timeout: 20000});
+  await page.click('[data-pet-workbench-tab="approvals"]');
+  await page.waitForSelector("[data-pet-approval-filters-open]", {timeout: 15000});
+
+  // Step three, items 9-11: the records tab.
+  await openOverview(page);
+  await page.click('[data-pet-workbench-tab="records"]');
+  await body.locator(".pet-records").waitFor({timeout: 15000});
+  const groups = await page.evaluate(() => [...document.querySelectorAll("#pet-workbench-body .pet-record-section")].map(section => [section.id, section.querySelector("h3")?.textContent, Boolean(section.querySelector(".pet-record-intro")?.textContent.trim())]));
+  assert.deepEqual(groups, [
+    ["pet-record-judgment", "Who it is and how it judges", true],
+    ["pet-record-corrections", "Your corrections", true],
+    ["pet-record-promises", "What it promised", true],
+    ["pet-record-worklog", "What it did", true],
+  ]);
+  await body.locator(".pet-record-correction").first().waitFor({timeout: 15000});
+  assert.deepEqual(await body.locator(".pet-record-correction-state").allInnerTexts(), ["Not absorbed yet", "In its principles", "Expired"]);
+  assert.match(await body.locator(".pet-record-correction").first().innerText(), /删除工作区 X[\s\S]*这个还要留着对比/);
+  assert.match(await body.locator('[data-pet-ledger-counts="loops.md"]').innerText(), /open 2 · waiting 1/);
+  assert.match(await body.locator('[data-pet-ledger-counts="agenda.md"]').innerText(), /next 1/);
+  assert.match(await body.locator("[data-pet-record-knowledge]").innerText(), /Knowledge: 42 entries · 2 to revise · 7 helped \(the new knowledge base does not keep this count\)/);
+  assert.equal(await body.locator("[data-pet-knowledge-link]").getAttribute("href"), "#knowledge?doc=k-1&scope=project&project=p-1");
+  // English only (titles and notes are content, marked data-i18n-ignore).
+  assert.deepEqual(await untranslated(page).then(items => items.filter(text => !/^(identity|principles|loops|agenda)$/.test(text) && text !== "做了一件事")), []);
+  // The table of contents follows the groups and still jumps.
+  const tocTargets = await page.evaluate(() => [...document.querySelectorAll("#pet-record-toc-nav [data-pet-record-goto]")].map(button => button.dataset.petRecordGoto));
+  assert.deepEqual(tocTargets.filter(target => !target.startsWith("pet-record-core-") && !target.startsWith("pet-record-worklog-")),
+    ["pet-record-judgment", "pet-record-corrections", "pet-record-promises", "pet-record-worklog"]);
+  await body.locator('#pet-record-toc-nav [data-pet-record-goto="pet-record-promises"]').click();
+  // The edit button on a document in a regrouped section still edits and saves it.
+  // agenda.md is the fourth core document in the response (index 3); its id
+  // stays put whichever group it renders in. The edit button that carries the
+  // name is removed once the editor opens, so select by id.
+  const agenda = body.locator("#pet-record-promises #pet-record-core-3");
+  assert.equal(await agenda.locator('[data-pet-doc-name="agenda.md"]').count(), 1);
+  await agenda.locator("[data-pet-doc-edit]").click();
+  await agenda.locator("textarea").fill("新的议程");
+  await agenda.locator("button.primary").click();
+  await page.waitForFunction(() => (window.__savedDocs || []).includes("agenda.md"), null, {timeout: 15000});
+  // The knowledge link opens the knowledge page.
+  await body.locator("[data-pet-knowledge-link]").click();
+  await page.waitForSelector(".pet-workbench-page", {state: "detached", timeout: 15000});
+  assert.match(await page.evaluate(() => location.hash), /^#knowledge/);
+
+  // A failed records read: the line and the corrections say so, the documents
+  // still render and their edit buttons still exist.
+  await openOverview(page, "?records=fail");
+  await page.click('[data-pet-workbench-tab="records"]');
+  await page.waitForFunction(() => document.querySelector("[data-pet-record-knowledge]")?.textContent.includes("not available"), null, {timeout: 15000});
+  assert.match(await body.locator("[data-pet-record-corrections]").innerText(), /Corrections are not available right now\./);
+  assert.equal(await body.locator("#pet-record-judgment [data-pet-doc-edit]").count(), 2);
+  assert.equal(await body.locator(".pet-record-ledger-counts").count(), 0, "no counts without data");
+  assert.deepEqual(await untranslated(page).then(items => items.filter(text => !/^(identity|principles|loops|agenda)$/.test(text) && text !== "做了一件事")), []);
+
+  // No corrections yet: the empty state.
+  await openOverview(page, "?corrections=none");
+  await page.click('[data-pet-workbench-tab="records"]');
+  await page.waitForFunction(() => document.querySelector("[data-pet-record-corrections]")?.textContent.includes("You have not corrected"), null, {timeout: 15000});
+
+  // The records read happens only on the records tab, once per page, and a
+  // tab switch while it is in flight aborts it.
+  await openOverview(page);
+  await body.locator("#pet-desk-insights .pet-desk-insights-list").waitFor({timeout: 15000});
+  assert.equal(await page.evaluate(() => window.__recordsReads || 0), 0, "the overview never asks for records data");
+  await page.click('[data-pet-workbench-tab="records"]');
+  await body.locator(".pet-record-correction").first().waitFor({timeout: 15000});
+  // Overview and back repaints the tab without a reload: the result is reused.
+  // (The approvals tab always reloads the workbench, which also refreshes
+  // the records data; that is the existing approvals behaviour.)
+  await page.click('[data-pet-workbench-tab="overview"]');
+  await page.click('[data-pet-workbench-tab="records"]');
+  assert.equal(await body.locator(".pet-record-correction").count(), 3, "repaint fills from the cached result at once");
+  await page.waitForTimeout(300);
+  assert.equal(await page.evaluate(() => window.__recordsReads), 1, "a finished records read is reused");
+
+  // Leaving the records tab while its read is in flight aborts it, and the
+  // late answer never writes into the page.
+  await openOverview(page, "?records=slow");
+  await page.click('[data-pet-workbench-tab="records"]');
+  await page.waitForFunction(() => (window.__recordsSignals || []).length === 1);
+  await page.click('[data-pet-workbench-tab="overview"]');
+  assert.equal(await page.evaluate(() => window.__recordsSignals[0].aborted), true, "leaving records aborts its read");
+  await page.evaluate(() => { for (const resolve of window.__recordsWaiters.splice(0)) resolve(); });
+  await page.waitForTimeout(200);
+  assert.equal(await body.locator(".pet-desk").count(), 1, "the overview is untouched by the late answer");
+  assert.deepEqual(errors, [], `page errors: ${errors.join(" | ")}`);
+
+  // Chinese records page.
+  await openOverview(page, "?language=zh-CN");
+  await page.click('[data-pet-workbench-tab="records"]');
+  await body.locator(".pet-record-correction").first().waitFor({timeout: 15000});
+  assert.deepEqual(await body.locator(".pet-record-section h3").allInnerTexts(), ["它是谁、怎么判断", "你的纠正", "它答应的事", "它做过的事"]);
+  assert.deepEqual(await body.locator(".pet-record-correction-state").allInnerTexts(), ["还没消化", "已写进原则", "已过期"]);
 
   assert.deepEqual(errors, [], `page errors: ${errors.join(" | ")}`);
   console.log("pet desk browser checks passed");

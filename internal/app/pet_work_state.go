@@ -320,22 +320,9 @@ func (s *Service) PetWorkStateWithOptions(ctx context.Context, opts PetWorkState
 		if err != nil {
 			return PetWorkState{}, err
 		}
-		workKinds := map[string]string{
-			"task_created": "task", "task_started": "task", "task_message_sent": "task",
-			"task_deleted": "task", "project_created": "project", "project_deleted": "project",
-			"workspace_created": "workspace", "workspace_deleted": "workspace",
-			"knowledge_submitted": "knowledge", "knowledge_deleted": "knowledge",
-			"skill_created": "skill", "skill_updated": "skill", "skill_deleted": "skill",
-			"prompt_updated": "prompt", "channel_message_sent": "channel",
-			"channel_enabled": "channel", "channel_disabled": "channel",
-			"channel_reset_binding": "channel", "channel_archive": "channel", "channel_purge": "channel",
-			"security_settings_updated": "system", "permission_changed": "permission", "idea_submitted": "idea",
-			"model_deleted": "model", "provider_deleted": "model", "env_group_deleted": "model",
-			"hardware_resource_deleted": "hardware",
-		}
 		seen := map[string]bool{}
 		for _, event := range events {
-			targetType, ok := workKinds[event.Kind]
+			targetType, ok := petWorkKinds[event.Kind]
 			if !ok {
 				continue
 			}
@@ -1011,6 +998,24 @@ func buildPetChannelHealth(channels []domain.ChannelInstance, outbox map[string]
 		health = health[:petChannelHealthListLimit]
 	}
 	return health, degraded, total
+}
+
+// petWorkKinds lists the pet event kinds that are actions (something the pet
+// did, not something it observed) and the target type each acts on. The work
+// state's recent-work list and the workbench insights count from this one
+// table.
+var petWorkKinds = map[string]string{
+	"task_created": "task", "task_started": "task", "task_message_sent": "task",
+	"task_deleted": "task", "project_created": "project", "project_deleted": "project",
+	"workspace_created": "workspace", "workspace_deleted": "workspace",
+	"knowledge_submitted": "knowledge", "knowledge_deleted": "knowledge",
+	"skill_created": "skill", "skill_updated": "skill", "skill_deleted": "skill",
+	"prompt_updated": "prompt", "channel_message_sent": "channel",
+	"channel_enabled": "channel", "channel_disabled": "channel",
+	"channel_reset_binding": "channel", "channel_archive": "channel", "channel_purge": "channel",
+	"security_settings_updated": "system", "permission_changed": "permission", "idea_submitted": "idea",
+	"model_deleted": "model", "provider_deleted": "model", "env_group_deleted": "model",
+	"hardware_resource_deleted": "hardware",
 }
 
 func (s *Service) recordPetWork(ctx context.Context, kind, targetID, status string) {

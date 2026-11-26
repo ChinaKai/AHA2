@@ -1943,14 +1943,17 @@ export interface PetDeskNeed {
 
 /** Something moving without the Owner. */
 export interface PetDeskWait {
-  /** review | executing | channel. */
+  /** review | executing | channel | loop. */
   kind: string;
   task_id?: string;
   task_code?: string;
   title: string;
-  /** Review task code, approval kind or channel id depending on kind. */
+  /** Review task code, approval kind, channel id or ledger file (loop). */
   on?: string;
   count?: number;
+  /** The next step of a loop wait. */
+  detail?: string;
+  /** Zero time for loop waits: the ledger files carry no time. */
   since: string;
 }
 
@@ -1987,6 +1990,103 @@ export interface PetDesk {
   open_loops_total: number;
   agenda: string[];
   agenda_total: number;
+  /** The pet's latest finished reply; absent when it has none. */
+  last_reply?: PetDeskLastReply;
+}
+
+export interface PetDeskLastReply {
+  /** At most 400 characters. */
+  text: string;
+  finished_at: string;
+  /** The reply starts with NOOP: the wake had nothing to move. */
+  noop: boolean;
+  /** The Turn answered a server wake; false means "the latest reply". */
+  from_wake: boolean;
+}
+
+/** GET /api/v1/pet/workbench/insights: the pet's last seven days. */
+export interface PetInsights {
+  from: string;
+  to: string;
+  actions: number;
+  approvals: {
+    total: number;
+    approved: number;
+    rejected: number;
+    cancelled: number;
+    /** Includes approvals still being carried out. */
+    pending: number;
+    ideas: number;
+  };
+  corrections: number;
+  wakes: {
+    turns: number;
+    noop: number;
+    tokens: number;
+    /** "window" or "cumulative" (the pet Task's whole history). */
+    token_scope: string;
+  };
+  /** Only with ?records=1 (the records tab). */
+  knowledge?: PetKnowledgeHealth;
+  knowledge_error?: string;
+  /** Only with ?records=1; [] when there are none. */
+  correction_history?: PetCorrectionRecord[];
+  corrections_error?: string;
+  /** Only with ?records=1: status counts of loops.md and agenda.md. */
+  ledgers?: PetLedgerCounts[];
+}
+
+export interface PetCorrectionRecord {
+  at: string;
+  approval_id?: string;
+  kind?: string;
+  title: string;
+  owner_note: string;
+  /** open (not absorbed yet, within 7 days) | absorbed | expired. */
+  state: string;
+}
+
+export interface PetLedgerCounts {
+  name: string;
+  counts: Record<string, number>;
+  total: number;
+}
+
+export interface PetKnowledgeSpaceHealth {
+  scope: string;
+  project_id?: string;
+  name: string;
+  source: string;
+  entries: number;
+  pending: number;
+  helped: number;
+  /** False for vault spaces: helped feedback is not kept on the entry. */
+  helped_known: boolean;
+  error?: string;
+}
+
+export interface PetKnowledgePending {
+  id: string;
+  title: string;
+  scope: string;
+  project_id?: string;
+  space: string;
+  /** stale | wrong. */
+  status: string;
+}
+
+export interface PetKnowledgeHealth {
+  entries: number;
+  pending: number;
+  helped: number;
+  /** Some space could not report helped feedback; helped covers the rest. */
+  helped_partial: boolean;
+  spaces: PetKnowledgeSpaceHealth[];
+  pending_items: PetKnowledgePending[];
+  truncated: boolean;
+  failed: number;
+  projects: number;
+  elapsed_ms: number;
 }
 
 // --- Mail resources -------------------------------------------------------

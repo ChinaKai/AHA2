@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -156,4 +158,103 @@ func (s *Server) petPendingApprovalCount(writer http.ResponseWriter, request *ht
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "pending": pending})
+}
+
+// petInsights serves the workbench "last 7 days" block. It is a separate
+// request so the desk renders first and a slow or failed count only affects
+// this block.
+func (s *Server) petInsights(writer http.ResponseWriter, request *http.Request) {
+	ctx, cancel := context.WithTimeout(request.Context(), 10*time.Second)
+	defer cancel()
+	// records=1 is the records page: it adds the correction history and the
+	// knowledge health, which the overview does not need.
+	records := strings.TrimSpace(request.URL.Query().Get("records")) == "1"
+	insights, err := s.app.PetInsights(ctx, s.petInsightTokens, app.PetInsightsOptions{Records: records})
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "pet_insights_failed")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "insights": insights})
+}
+
+// petInsightTokens totals the pet's tokens with the Task list's algorithm
+// (taskTotalTokens). That algorithm treats usage differently per backend:
+//   - claude and dsh: the session total is the sum of its Turns' usage, so
+//     the Turns that started in the window can be summed on their own;
+//   - codex (and anything else): the session row carries the provider's
+//     running session total and a Turn only holds its delta against that
+//     baseline. Without the session row the algorithm keeps only the latest
+//     Turn, and with it the whole session is counted, so a window cannot be
+//     cut out of it.
+//
+// When every window Turn ran on a summable backend, the window number is
+// returned. Otherwise the pet Task's cumulative total (the number the Task
+// list shows) is returned and labelled as such.
+func (s *Server) petInsightTokens(ctx context.Context, taskID string, windowTurns []domain.Turn) (int64, string, error) {
+	backends, err := s.turnBackends(ctx, windowTurns)
+	if err != nil {
+		return 0, "", err
+	}
+	windowed := true
+	for _, turn := range windowTurns {
+		if backend := backends[turn.RuntimeConfigSnapshotID]; backend != "claude" && backend != "dsh" {
+			windowed = false
+			break
+		}
+	}
+	if windowed {
+		// No session rows: each session's Turns are then summed by the
+		// per-session branch, and a session's stored running total (which
+		// covers Turns outside the window) is never added.
+		return int64(taskTotalTokens(windowTurns, nil, backends)), app.PetTokenScopeWindow, nil
+	}
+	turnsByTask, err := s.store.ListTurnTokenUsageForTasks(ctx, []string{taskID})
+	if err != nil {
+		return 0, "", err
+	}
+	sessionsByTask, err := s.store.ListBackendSessionsForTasks(ctx, []string{taskID})
+	if err != nil {
+		return 0, "", err
+	}
+	all := turnsByTask[taskID]
+	if backends, err = s.turnBackends(ctx, all); err != nil {
+		return 0, "", err
+	}
+	return int64(taskTotalTokens(all, sessionsByTask[taskID], backends)), app.PetTokenScopeCumulative, nil
+}
+
+// turnBackends maps each Turn's runtime snapshot to its backend name.
+func (s *Server) turnBackends(ctx context.Context, turns []domain.Turn) (map[string]string, error) {
+	ids := []string{}
+	seen := map[string]bool{}
+	for _, turn := range turns {
+		if turn.RuntimeConfigSnapshotID != "" && !seen[turn.RuntimeConfigSnapshotID] {
+			seen[turn.RuntimeConfigSnapshotID] = true
+			ids = append(ids, turn.RuntimeConfigSnapshotID)
+		}
+	}
+	snapshots, err := s.store.RuntimeSnapshotsByIDs(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	backends := make(map[string]string, len(snapshots))
+	for id, snapshot := range snapshots {
+		backends[id] = snapshot.Backend
+	}
+	return backends, nil
+}
+
+// petApprovalDetail returns one pet approval. The overview opens approvals
+// that may be older than the loaded approvals page.
+func (s *Server) petApprovalDetail(writer http.ResponseWriter, request *http.Request) {
+	item, err := s.app.PetApproval(request.Context(), request.PathValue("id"))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(writer, http.StatusNotFound, "pet_approval_not_found")
+			return
+		}
+		writeError(writer, http.StatusInternalServerError, "pet_approval_read_failed")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "approval": item})
 }

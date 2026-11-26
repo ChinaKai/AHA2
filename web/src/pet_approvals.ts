@@ -159,12 +159,23 @@ export function petApprovalFilterCount(kind: string, status: string): number {
   return (kind && kind !== "all" ? 1 : 0) + (status && status !== "all" ? 1 : 0);
 }
 
+// A whole hour or day drops the zero part: "2 小时", not "2 小时 0 分钟".
+// Under an hour the minutes are always shown, including "0 分钟".
 export function petApprovalDurationText(minutes: number, translate: PetApprovalTranslate): string {
   const value = Number.isFinite(minutes) && minutes > 0 ? Math.trunc(minutes) : 0;
   if (value < 60) return translate("petWorkbench.waitMinutes", {minutes: String(value)});
   const hours = Math.floor(value / 60);
-  if (hours < 24) return translate("petWorkbench.waitHours", {hours: String(hours), minutes: String(value % 60)});
-  return translate("petWorkbench.waitDays", {days: String(Math.floor(hours / 24)), hours: String(hours % 24)});
+  if (hours < 24) {
+    const rest = value % 60;
+    return rest
+      ? translate("petWorkbench.waitHours", {hours: String(hours), minutes: String(rest)})
+      : translate("petWorkbench.waitHoursOnly", {hours: String(hours)});
+  }
+  const days = Math.floor(hours / 24);
+  const restHours = hours % 24;
+  return restHours
+    ? translate("petWorkbench.waitDays", {days: String(days), hours: String(restHours)})
+    : translate("petWorkbench.waitDaysOnly", {days: String(days)});
 }
 
 // Waiting time is measured from creation until resolution; a pending row keeps

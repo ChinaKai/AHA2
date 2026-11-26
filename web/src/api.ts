@@ -766,6 +766,14 @@ class APIClient {
     return this.request(`/api/v1/pet/workbench${suffix ? `?${suffix}` : ""}`, {signal});
   }
 
+  petWorkbenchInsights(signal?: AbortSignal, options: {records?: boolean} = {}): Promise<{ok: boolean; insights: import("./types").PetInsights}> {
+    return this.request(`/api/v1/pet/workbench/insights${options.records ? "?records=1" : ""}`, {signal});
+  }
+
+  petApproval(id: string, signal?: AbortSignal): Promise<{ok: boolean; approval: import("./types").PetApproval}> {
+    return this.request(`/api/v1/pet/approvals/${encodeURIComponent(id)}`, {signal});
+  }
+
   savePetWorkbenchDocument(section: string, name: string, content: string): Promise<{ok: boolean}> {
     return this.request(`/api/v1/pet/workbench/${encodeURIComponent(section)}/${encodeURIComponent(name)}`, {
       method: "PUT", body: JSON.stringify({content}),
