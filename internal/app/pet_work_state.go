@@ -83,6 +83,9 @@ type PetOpenTask struct {
 	NeedsAttention    bool   `json:"needs_attention"`
 	AttentionReason   string `json:"attention_reason,omitempty"`
 	PendingApprovalID string `json:"pending_approval_id,omitempty"`
+	// OwnerQuestions counts the decisions the Task's own state card says are
+	// waiting on the Owner. aha_task_detail returns their text.
+	OwnerQuestions int `json:"owner_questions,omitempty"`
 }
 
 type PetIgnoredTask struct {
@@ -569,6 +572,14 @@ func (s *Service) petOpenTasks(ctx context.Context, tasks []petOpenTaskCandidate
 	if err != nil {
 		return nil, err
 	}
+	// One read serves every row. A failed read only drops the question counts.
+	cardIDs := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		if canViewTasks || task.createdByPet {
+			cardIDs = append(cardIDs, task.ID)
+		}
+	}
+	cards, _ := s.store.TaskStateCards(ctx, cardIDs)
 	now := s.now().UTC()
 	open := make([]PetOpenTask, 0, len(tasks))
 	for _, task := range tasks {
@@ -583,6 +594,7 @@ func (s *Service) petOpenTasks(ctx context.Context, tasks []petOpenTaskCandidate
 			continue
 		}
 		item.Title, item.Status = task.Title, string(task.Status)
+		item.OwnerQuestions = len(petDeskQuestions(cards[task.ID].OpenQuestions))
 		item.Goal = truncateAssistantText(task.CurrentGoal, 300)
 		item.CreatedAt, item.UpdatedAt = task.CreatedAt.Format(time.RFC3339), task.UpdatedAt.Format(time.RFC3339)
 		item.AgeMinutes = int(now.Sub(task.CreatedAt).Minutes())

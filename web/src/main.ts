@@ -5,7 +5,7 @@ import type {CommandItem, CommandSection, CommandSectionID} from "./command_pale
 import type {OnboardingChecklist} from "./onboarding.js";
 import {handlePetStreamEvent, mountAssistant, showPetSettings, notifyPetTaskIdle, notifyPetTaskReply, notifyPetTaskThinking, resumePetNavigation, setAssistantVisible} from "./assistant.js";
 import {MODEL_WIRE_OPTIONS, backendSelectOptionsHTML, backendsPanelHTML, modelWireEditOptionsHTML, persistedWireValue, resolveBackendOptions} from "./backends.js";
-import {bindPetDocEditorButtons, createPetWorkbenchLoader, createPetWorkbenchPageKeeper, mapPetWorkbenchTab, PET_APPROVAL_MAX_LIMIT, petApprovalMatches, petApprovalPage, renderPetApprovalLoadMore, renderPetOverview, renderPetRecords, renderPetWorkbenchLoadError, swapPetWorkbenchPage} from "./pet_workbench.js";
+import {bindPetDocEditorButtons, createPetWorkbenchLoader, createPetWorkbenchPageKeeper, mapPetWorkbenchTab, PET_APPROVAL_MAX_LIMIT, PET_WORKBENCH_TIMEOUT_MS, petApprovalMatches, petApprovalPage, renderPetApprovalLoadMore, renderPetOverview, renderPetRecords, renderPetWorkbenchLoadError, swapPetWorkbenchPage} from "./pet_workbench.js";
 import type {PetWorkbenchPageBinding} from "./pet_workbench.js";
 import {conversationItemKeys, conversationRenderableItems, conversationWindow, renderConversationList} from "./conversation_ui.js";
 import type {ConversationWindow, ConversationWindowOptions} from "./conversation_ui.js";
@@ -93,6 +93,7 @@ import type {
   MailTemplate,
   TaskMailOptions,
   Model,
+  PetApproval,
   MCPServer,
   Project,
   Provider,
@@ -9912,6 +9913,8 @@ async function bindPetWorkbenchPage(): Promise<void> {
         translate: t,
         formatTime: formatDateTime,
         statusLabel: taskStatusText,
+        desk: view.desk,
+        now: Date.now(),
       });
       bindOverviewActions();
       bindPetWatchActions();
@@ -10054,8 +10057,8 @@ async function bindPetWorkbenchPage(): Promise<void> {
     });
   };
 
-  const openApprovalDetail = (approvalID: string): void => {
-    const approval = view?.approvals.find(item => item.id === approvalID);
+  const openApprovalDetail = (approvalID: string, known?: PetApproval): void => {
+    const approval = known ?? view?.approvals.find(item => item.id === approvalID);
     if (!approval) return;
     const dialog = createWorkbenchDialog("pet-approval-detail-dialog", renderPetApprovalDetail(approval, {
       translate: petApprovalText,
@@ -10103,10 +10106,38 @@ async function bindPetWorkbenchPage(): Promise<void> {
     dialog.showModal();
   };
 
-  const bindApprovalRows = (): void => {
-    body.querySelectorAll<HTMLButtonElement>("[data-pet-approval-open]").forEach(button => {
-      button.addEventListener("click", () => openApprovalDetail(button.dataset.petApprovalOpen || ""));
-    });
+  // The desk lists the oldest pending approvals first, but the workbench loads
+  // only the newest page of approvals (10 rows until "load more"), so an
+  // approval on the desk may be missing from view.approvals. Read it once with
+  // the server cap, outside the loader, so the approvals tab keeps its own
+  // paging. If it is still missing (resolved meanwhile, or beyond the cap),
+  // the approvals tab is the honest fallback.
+  let overviewApprovalOpening = "";
+  const openOverviewApproval = async (approvalID: string): Promise<void> => {
+    if (!approvalID || overviewApprovalOpening) return;
+    let approval = view?.approvals.find(item => item.id === approvalID);
+    if (!approval) {
+      overviewApprovalOpening = approvalID;
+      try {
+        const wide = await api.petWorkbench({approvalLimit: PET_APPROVAL_MAX_LIMIT, worklogLimit: 1}, AbortSignal.timeout(PET_WORKBENCH_TIMEOUT_MS));
+        approval = (wide.approvals || []).find(item => item.id === approvalID);
+      } catch {
+        approval = undefined;
+      } finally {
+        overviewApprovalOpening = "";
+      }
+    }
+    if (!body.isConnected || petWorkbenchPageKeeper.binding !== binding || active !== "overview") return;
+    if (approval) {
+      openApprovalDetail(approvalID, approval);
+      return;
+    }
+    closePetWorkbenchDialogs();
+    active = "approvals";
+    petWorkbenchTab = active;
+    if (binding) binding.tab = active;
+    renderTab();
+    void load();
   };
 
   const renderApprovalRows = (): void => {
@@ -10180,6 +10211,12 @@ async function bindPetWorkbenchPage(): Promise<void> {
           renderTab();
         } else if (jump === "channels") {
           switchView("channels");
+        } else if (jump === "records") {
+          closePetWorkbenchDialogs();
+          active = "records";
+          petWorkbenchTab = active;
+          if (binding) binding.tab = active;
+          renderTab();
         } else {
           // The watch list starts collapsed like the other overview sections,
           // so the jump has to reveal it before scrolling.
@@ -10189,7 +10226,9 @@ async function bindPetWorkbenchPage(): Promise<void> {
         }
       });
     });
-    bindApprovalRows();
+    body.querySelectorAll<HTMLButtonElement>("[data-pet-approval-open]").forEach(button => {
+      button.addEventListener("click", () => void openOverviewApproval(button.dataset.petApprovalOpen || ""));
+    });
     body.querySelectorAll<HTMLButtonElement>("[data-pet-overview-task]").forEach(button => {
       button.addEventListener("click", () => openOverviewTask(button.dataset.petOverviewTask || ""));
     });

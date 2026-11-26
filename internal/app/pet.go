@@ -1222,7 +1222,7 @@ func ahaPetTools() []gateway.ChatTool {
 		{Name: "aha_overview", Description: "只读查看 AHA2 项目、任务、渠道的汇总和需要关注的任务", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{},
 		}},
-		{Name: "aha_pet_work_state", Description: "开始工作前查看：巡检快照、未闭环且我创建或关注的任务（open_tasks）、owner 已搁置的任务（ignored_tasks，只在 owner 明确要求时处理）、审批、未处理的知识库自动同步异常（notifications）和最近 Task 进展。默认只返回最近 8 条审批/工作动态且不含 last_turn_result（默认以 16KB 为预算，保留全部未闭环任务；history_truncated 表示压掉了历史，open_task_details_truncated 表示精简了关注任务的详情）；需要完整历史时传 history_limit（最多 50）和 include_turn_results=true，单任务详情用 aha_task_detail/aha_task_turns", Parameters: map[string]any{
+		{Name: "aha_pet_work_state", Description: "开始工作前查看：巡检快照、未闭环且我创建或关注的任务（open_tasks）、owner 已搁置的任务（ignored_tasks，只在 owner 明确要求时处理）、审批、未处理的知识库自动同步异常（notifications）和最近 Task 进展。默认只返回最近 8 条审批/工作动态且不含 last_turn_result（默认以 16KB 为预算，保留全部未闭环任务；history_truncated 表示压掉了历史，open_task_details_truncated 表示精简了关注任务的详情）；需要完整历史时传 history_limit（最多 50）和 include_turn_results=true，open_tasks 里 owner_questions>0 表示该任务的状态卡写了等 owner 决定的事；单任务详情用 aha_task_detail/aha_task_turns", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"history_limit": map[string]any{
 					"type": "integer", "minimum": 0, "maximum": 50,
@@ -1265,7 +1265,7 @@ func ahaPetTools() []gateway.ChatTool {
 				"reason":  map[string]any{"type": "string", "description": "为什么需要这项权限；必填"},
 			}, "required": []string{"permission", "enabled", "reason"},
 		}},
-		{Name: "aha_task_detail", Description: "只读查看一个 Task 的状态、目标和最近一次 Turn 的错误/结果", Parameters: map[string]any{
+		{Name: "aha_task_detail", Description: "只读查看一个 Task 的状态、目标、状态卡（state_card：现在到哪、下一步、等 owner 决定的事）和最近一次 Turn 的错误/结果", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"task_id": map[string]any{"type": "string"},
 			}, "required": []string{"task_id"},

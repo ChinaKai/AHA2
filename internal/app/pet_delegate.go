@@ -59,7 +59,10 @@ type PetWorkbenchView struct {
 	ChannelTotal   int                       `json:"channel_total,omitempty"`
 	ChannelNote    string                    `json:"channel_note,omitempty"`
 	Inspection     *PetInspection            `json:"inspection,omitempty"`
-	UpdatedAt      time.Time                 `json:"updated_at"`
+	// Desk groups the same state by what the Owner has to do. It is additive:
+	// nil means the desk read failed and the rest of the workbench still works.
+	Desk      *PetDesk  `json:"desk,omitempty"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type PetWorkbenchOptions struct {
@@ -117,6 +120,11 @@ func (s *Service) PetWorkbenchWithOptions(ctx context.Context, options PetWorkbe
 	// of the workbench down, and the client shows an explicit empty state.
 	if inspection, inspectErr := s.petWorkbenchInspection(ctx, tasks, watchByTask, now, channels); inspectErr == nil {
 		view.Inspection = &inspection
+	}
+	if desk, deskErr := s.petDesk(ctx, petDeskInput{
+		tasks: tasks, watches: watchByTask, approvals: approvals, channels: channels.Health, now: now,
+	}); deskErr == nil {
+		view.Desk = &desk
 	}
 	if task, taskErr := s.store.Task(ctx, petTaskID); taskErr == nil {
 		view.Task = &task
@@ -831,6 +839,9 @@ type PetTaskDetail struct {
 	ReadOnly      bool                     `json:"read_only,omitempty"`
 	OwnerDeviceID string                   `json:"owner_device_id,omitempty"`
 	Hardware      []PetRemoteHardwareBrief `json:"hardware,omitempty"`
+	// StateCard is the Task's own status note, including the decisions it says
+	// are waiting on the Owner. Nil when the Task never wrote one.
+	StateCard *PetTaskStateCard `json:"state_card,omitempty"`
 }
 
 // PetTaskDetail exposes one task to the pet only when the owner enabled the
@@ -877,6 +888,9 @@ func (s *Service) PetTaskDetail(ctx context.Context, taskID string) (PetTaskDeta
 	}
 	if workspace, workspaceErr := s.store.Workspace(ctx, task.WorkspaceID); workspaceErr == nil {
 		detail.Workspace = workspace.Name
+	}
+	if cards, cardErr := s.store.TaskStateCards(ctx, []string{task.ID}); cardErr == nil {
+		detail.StateCard = petTaskStateCard(cards[task.ID])
 	}
 	turns, err := s.store.ListTurns(ctx, task.ID)
 	if err == nil && len(turns) > 0 {

@@ -1916,7 +1916,77 @@ export interface PetWorkbench {
   channel_total?: number;
   channel_note?: string;
   inspection?: PetInspection;
+  /**
+   * The overview grouped by who has to move (internal/app/pet_desk.go).
+   * Absent on older servers or when the desk read failed; the overview then
+   * falls back to the pre-desk layout.
+   */
+  desk?: PetDesk;
   updated_at: string;
+}
+
+/** Something waiting on the Owner (`needs_owner`) or parked for later (`later`). */
+export interface PetDeskNeed {
+  /** approval | question | blocked | failed | stopped; later: idea | next_step. */
+  kind: string;
+  approval_id?: string;
+  approval_kind?: string;
+  risk?: string;
+  task_id?: string;
+  task_code?: string;
+  title: string;
+  questions?: string[];
+  detail?: string;
+  /** RFC 3339; the Go zero time when unknown. */
+  since: string;
+}
+
+/** Something moving without the Owner. */
+export interface PetDeskWait {
+  /** review | executing | channel. */
+  kind: string;
+  task_id?: string;
+  task_code?: string;
+  title: string;
+  /** Review task code, approval kind or channel id depending on kind. */
+  on?: string;
+  count?: number;
+  since: string;
+}
+
+export interface PetDeskRun {
+  task_id: string;
+  task_code?: string;
+  title: string;
+  status: string;
+  turn_status?: string;
+  detail?: string;
+  hardware?: string[];
+  since: string;
+}
+
+export interface PetDeskCorrection {
+  at: string;
+  approval_id?: string;
+  kind?: string;
+  title: string;
+  owner_note: string;
+}
+
+export interface PetDesk {
+  needs_owner: PetDeskNeed[];
+  needs_owner_total: number;
+  later: PetDeskNeed[];
+  later_total: number;
+  waiting_others: PetDeskWait[];
+  waiting_others_total: number;
+  running: PetDeskRun[];
+  running_total: number;
+  corrections: PetDeskCorrection[];
+  open_loops: string[];
+  open_loops_total: number;
+  agenda: string[];
+  agenda_total: number;
 }
 
 // --- Mail resources -------------------------------------------------------

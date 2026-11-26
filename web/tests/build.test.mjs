@@ -4014,7 +4014,11 @@ test("production web splits route chunks and keeps the first-screen budget", asy
   // points, login focus fix, and shared styles measure 279,997 bytes total.
   // task-769 adds the task header entry, shared locale strings and viewer
   // styles. Viewer logic loads as a route chunk. Measured 283,226 bytes.
-  const FIRST_SCREEN_GZIP_BUDGET = 283392;
+  // task-813 turns the pet workbench overview into the desk: its renderer and
+  // zh/en copy (+3,769 JS, about 1,070 of it copy) and its styles (+630 CSS).
+  // From 0ae8f66 (283,378) the same masked-query, level-5 build measures
+  // 287,777. Ceil to the next 256-byte boundary.
+  const FIRST_SCREEN_GZIP_BUDGET = 288000;
   // The version query parameter is a content hash and its hex digits change
   // how the same code gzips: main already sits exactly on the budget, so a
   // hash-only change could trip it without growing the payload. Mask the
