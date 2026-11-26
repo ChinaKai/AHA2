@@ -4391,6 +4391,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, schemaChannelTopics); err != nil {
 		return fmt.Errorf("apply schema v164 channel group topics: %w", err)
 	}
+	if err := s.migrateFeishuGroups(ctx); err != nil {
+		return fmt.Errorf("apply schema v165 Feishu groups: %w", err)
+	}
 	return nil
 }
 

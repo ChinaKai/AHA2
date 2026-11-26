@@ -150,6 +150,7 @@ type ChannelTaskRoute struct {
 }
 
 type ChannelDestination struct {
+	ExternalChatID string    `json:"-"`
 	ConversationID string    `json:"conversation_id"`
 	InstanceID     string    `json:"instance_id"`
 	InstanceName   string    `json:"instance_name"`
@@ -328,21 +329,38 @@ type ChannelSourceEvent struct {
 }
 
 type ChannelConversationSummary struct {
-	ID                 string `json:"id"`
-	EndpointKind       string `json:"endpoint_kind"`
-	DisplayName        string `json:"display_name"`
-	Status             string `json:"status"`
-	BoundTaskID        string `json:"bound_task_id,omitempty"`
-	BoundTaskCode      string `json:"bound_task_code,omitempty"`
-	BoundTaskTitle     string `json:"bound_task_title,omitempty"`
-	InboundCount       int    `json:"inbound_count"`
-	OutboundCount      int    `json:"outbound_count"`
-	LastInboundAt      string `json:"last_inbound_at,omitempty"`
-	LastInboundState   string `json:"last_inbound_state,omitempty"`
-	LastInboundOutcome string `json:"last_inbound_outcome,omitempty"`
-	LastOutboundAt     string `json:"last_outbound_at,omitempty"`
-	LastOutboundState  string `json:"last_outbound_state,omitempty"`
-	LastOutboundError  string `json:"last_outbound_error,omitempty"`
+	ID                    string                 `json:"id"`
+	EndpointKind          string                 `json:"endpoint_kind"`
+	DisplayName           string                 `json:"display_name"`
+	Status                string                 `json:"status"`
+	BoundTaskID           string                 `json:"bound_task_id,omitempty"`
+	BoundTaskCode         string                 `json:"bound_task_code,omitempty"`
+	BoundTaskTitle        string                 `json:"bound_task_title,omitempty"`
+	InboundCount          int                    `json:"inbound_count"`
+	OutboundCount         int                    `json:"outbound_count"`
+	LastInboundAt         string                 `json:"last_inbound_at,omitempty"`
+	LastInboundState      string                 `json:"last_inbound_state,omitempty"`
+	LastInboundOutcome    string                 `json:"last_inbound_outcome,omitempty"`
+	LastMentionInbound    *ChannelInboundSummary `json:"last_mention_inbound,omitempty"`
+	LastNonMentionInbound *ChannelInboundSummary `json:"last_non_mention_inbound,omitempty"`
+	Group                 *FeishuGroup           `json:"group,omitempty"`
+	LastOutboundAt        string                 `json:"last_outbound_at,omitempty"`
+	LastOutboundState     string                 `json:"last_outbound_state,omitempty"`
+	LastOutboundError     string                 `json:"last_outbound_error,omitempty"`
+}
+
+type ChannelInboundSummary struct {
+	At      string `json:"at"`
+	State   string `json:"state"`
+	Outcome string `json:"outcome,omitempty"`
+}
+
+type FeishuGroup struct {
+	ChatID             string `json:"chat_id"`
+	DisplayName        string `json:"display_name,omitempty"`
+	ReceiveAllMessages bool   `json:"receive_all_messages"`
+	UpdatedAt          string `json:"updated_at,omitempty"`
+	UpdatedBy          string `json:"updated_by,omitempty"`
 }
 
 type ChannelDelivery struct {

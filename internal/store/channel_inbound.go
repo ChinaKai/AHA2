@@ -475,6 +475,12 @@ func (s *Store) enqueueChannelMessage(
 			return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, ErrChannelRevision
 		}
 		if stringValue(provenance["group_batch_id"]) != "" {
+			// The first non-@ topic message may have arrived before the host existed.
+			if _, err := tx.ExecContext(ctx, `UPDATE channel_group_receipts SET target_task_id=?
+				WHERE receipt_id=? AND conversation_id=? AND route_id IS NULL AND target_task_id=''`,
+				message.TaskID, receiptID, conversationID); err != nil {
+				return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, err
+			}
 			if err := checkGroupInboxRoute(ctx, tx, receiptID, message.TaskID); err != nil {
 				return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, err
 			}

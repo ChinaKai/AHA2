@@ -428,6 +428,8 @@ func (s *Server) routeMux() *http.ServeMux {
 	mux.Handle("GET /api/v1/channel-onboarding-sessions/{id}/qr", s.withAuth(http.HandlerFunc(s.channelOnboardingQR)))
 	mux.Handle("POST /api/v1/channel-onboarding-sessions/{id}/cancel", s.withAuth(http.HandlerFunc(s.cancelChannelOnboarding)))
 	mux.Handle("GET /api/v1/channel-instances/{id}/conversations", s.withAuth(http.HandlerFunc(s.channelConversationSummaries)))
+	mux.Handle("POST /api/v1/channel-instances/{id}/conversations/refresh", s.withAuth(http.HandlerFunc(s.channelConversationsRefresh)))
+	mux.Handle("PUT /api/v1/channel-instances/{id}/conversations/groups/{chatID}/reception", s.withAuth(http.HandlerFunc(s.channelGroupReception)))
 	mux.Handle("GET /api/v1/channel-instances/{id}/handoffs", s.withAuth(http.HandlerFunc(s.channelHandoffs)))
 	mux.Handle("GET /api/v1/channel-instances/{id}/deliveries", s.withAuth(http.HandlerFunc(s.channelDeliveries)))
 	mux.Handle("GET /api/v1/channel-deliveries/{id}/attempts", s.withAuth(http.HandlerFunc(s.channelDeliveryAttempts)))

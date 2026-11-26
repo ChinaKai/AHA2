@@ -477,6 +477,41 @@ func (s *Server) channelConversationSummaries(writer http.ResponseWriter, reques
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "conversations": items})
 }
 
+func (s *Server) channelConversationsRefresh(writer http.ResponseWriter, request *http.Request) {
+	if s.channels == nil {
+		writeError(writer, http.StatusNotFound, "channel_resource_not_found")
+		return
+	}
+	session, _ := sessionFromContext(request.Context())
+	items, err := s.channels.RefreshFeishuConversations(request.Context(), session.OwnerID, request.PathValue("id"))
+	if err != nil {
+		writeChannelError(writer, err, "refresh_channel_conversations_failed")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "conversations": items})
+}
+
+func (s *Server) channelGroupReception(writer http.ResponseWriter, request *http.Request) {
+	if s.channels == nil {
+		writeError(writer, http.StatusNotFound, "channel_resource_not_found")
+		return
+	}
+	var payload struct {
+		ReceiveAllMessages *bool `json:"receive_all_messages"`
+	}
+	if err := decodeJSON(request, &payload); err != nil || payload.ReceiveAllMessages == nil {
+		writeError(writer, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	session, _ := sessionFromContext(request.Context())
+	group, err := s.channels.SetFeishuGroupReception(request.Context(), session.OwnerID, request.PathValue("id"), request.PathValue("chatID"), *payload.ReceiveAllMessages)
+	if err != nil {
+		writeChannelError(writer, err, "update_channel_group_reception_failed")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "group": group})
+}
+
 func (s *Server) channelKnowledgePolicy(writer http.ResponseWriter, request *http.Request) {
 	if s.channels == nil {
 		writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "policies": []any{}, "configured": false})

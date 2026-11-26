@@ -13,16 +13,63 @@ import (
 )
 
 func (s *Service) feishuGroupIngressRoute(ctx context.Context, instance domain.ChannelInstance, envelope domain.ChannelInboundEnvelope) (domain.ChannelTaskRoute, error) {
-	if !domain.FeishuGroupMessageAllowed(instance.Config, envelope.ExternalChatID, envelope.MentionedBot) {
+	allowed, err := s.store.FeishuGroupMessageAllowed(ctx, instance, envelope.ExternalChatID, envelope.MentionedBot)
+	if err != nil {
+		return domain.ChannelTaskRoute{}, err
+	}
+	if !allowed {
 		return domain.ChannelTaskRoute{}, store.ErrChannelGroupNotAllowed
 	}
-	_, route, err := s.feishuGroupRoute(ctx, instance.ID, envelope.ExternalChatID, false)
-	if envelope.MentionedBot && errors.Is(err, store.ErrChannelGroupUnbound) {
-		// An explicit mention can create or reuse a group host through the
-		// original inbox. Only full reception requires an existing Task route.
+	conversation, route, err := s.feishuGroupRoute(ctx, instance.ID, envelope.ExternalChatID, false)
+	if !errors.Is(err, store.ErrChannelGroupUnbound) {
+		return route, err
+	}
+	if envelope.MentionedBot && envelope.ThreadID == "" {
+		// A top-level mention still uses the original host inbox.
 		return domain.ChannelTaskRoute{}, nil
 	}
-	return route, err
+	if conversation.ID == "" {
+		conversation, err = s.ensureFeishuGroupMetadata(ctx, instance, envelope)
+		if envelope.MentionedBot && errors.Is(err, store.ErrChannelGroupUnbound) {
+			return domain.ChannelTaskRoute{}, nil
+		}
+		if err != nil {
+			return domain.ChannelTaskRoute{}, err
+		}
+	}
+	return domain.ChannelTaskRoute{
+		InstanceID: instance.ID, ConversationID: conversation.ID, TargetTaskID: conversation.HostTaskID,
+	}, nil
+}
+
+func (s *Service) ensureFeishuGroupMetadata(ctx context.Context, instance domain.ChannelInstance, envelope domain.ChannelInboundEnvelope) (domain.ChannelConversation, error) {
+	endpoint, err := s.store.ChannelEndpoint(ctx, instance.ID, domain.ChannelEndpointGroupDigitalHuman)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && !endpoint.Enabled) {
+		return domain.ChannelConversation{}, store.ErrChannelGroupUnbound
+	}
+	if err != nil {
+		return domain.ChannelConversation{}, err
+	}
+	scopeKey, err := s.scopeKey(instance.ID, endpoint.Kind, "", envelope.ExternalChatID, "")
+	if err != nil {
+		return domain.ChannelConversation{}, err
+	}
+	now := s.now().UTC()
+	conversation := domain.ChannelConversation{
+		ID: domain.NewID("channel_conversation"), InstanceID: instance.ID, EndpointID: endpoint.ID,
+		ScopeKeyVersion: 2, ScopeKey: scopeKey, ExternalChatID: envelope.ExternalChatID,
+		DisplayName: safeChannelDisplayName(envelope.ChatDisplayName, "群聊", instance.ID, envelope.ExternalChatID),
+		Status:      "active", CreatedAt: now, UpdatedAt: now,
+	}
+	session := domain.ChannelSession{ID: domain.NewID("channel_session"), ConversationID: conversation.ID,
+		Generation: 1, Mode: "group_qa", Status: "active", StartedAt: now}
+	if err := s.store.CreateChannelConversation(ctx, conversation, session); err != nil {
+		if existing, lookupErr := s.store.PreferredChannelGroupConversation(ctx, endpoint.ID, envelope.ExternalChatID); lookupErr == nil {
+			return existing, nil
+		}
+		return domain.ChannelConversation{}, err
+	}
+	return conversation, nil
 }
 
 func (s *Service) feishuGroupRoute(ctx context.Context, instanceID, chatID string, mentioned bool) (domain.ChannelConversation, domain.ChannelTaskRoute, error) {

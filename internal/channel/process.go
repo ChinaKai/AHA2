@@ -178,8 +178,7 @@ func (s *Service) ensurePluginProcess(instanceID, rawCapability string) error {
 	bootstrap := pluginBootstrap{
 		Schema: "channel-secret/v1", Protocol: "channel-runtime/v1", RuntimeBaseURL: runtimeBaseURL,
 		PluginID: plugin.ID, ProviderKey: plugin.ProviderKey, InstanceID: instance.ID, Capability: rawCapability,
-		GroupMessageAllowlist: feishuGroupMessageAllowlist(instance),
-		AppID:                 instance.AppID, TenantBrand: strings.TrimSpace(fmt.Sprint(instance.Config["tenant_brand"])),
+		AppID: instance.AppID, TenantBrand: strings.TrimSpace(fmt.Sprint(instance.Config["tenant_brand"])),
 	}
 	bootstrap.Registration, err = s.registrationProcessRequired(runCtx, instance)
 	if err != nil {
@@ -210,23 +209,38 @@ func (s *Service) ensurePluginProcess(instanceID, rawCapability string) error {
 		cancel()
 		return err
 	}
+	// Publish the process under the same lock used to stop it after a toggle.
+	// If a toggle won the race, the new process must read the new allowlist.
+	s.processMu.Lock()
+	if s.processes[instanceID] != nil {
+		s.processMu.Unlock()
+		cancel()
+		_ = stdin.Close()
+		_ = stdout.Close()
+		_ = stderr.Close()
+		return nil
+	}
+	bootstrap.GroupMessageAllowlist, err = s.store.FeishuGroupMessageAllowlist(runCtx, instance)
+	if err != nil {
+		s.processMu.Unlock()
+		cancel()
+		_ = stdin.Close()
+		_ = stdout.Close()
+		_ = stderr.Close()
+		return err
+	}
 	if err := command.Start(); err != nil {
+		s.processMu.Unlock()
 		cancel()
 		return err
 	}
 	cleanup, err := attachPluginProcess(command)
 	if err != nil {
-		cancel()
-		_ = command.Process.Kill()
-		return fmt.Errorf("attach channel plugin process lifecycle: %w", err)
-	}
-	s.processMu.Lock()
-	if existing := s.processes[instanceID]; existing != nil {
 		s.processMu.Unlock()
 		cancel()
 		_ = command.Process.Kill()
-		cleanup()
-		return nil
+		_ = command.Wait()
+		return fmt.Errorf("attach channel plugin process lifecycle: %w", err)
 	}
 	s.processes[instanceID] = &managedPluginProcess{command: command, cancel: cancel, cleanup: cleanup, startedAt: s.now().UTC()}
 	s.processMu.Unlock()

@@ -1482,9 +1482,25 @@ export interface ChannelConversationSummary {
   last_inbound_at?: string;
   last_inbound_state?: string;
   last_inbound_outcome?: string;
+  last_mention_inbound?: ChannelInboundSummary;
+  last_non_mention_inbound?: ChannelInboundSummary;
+  group?: FeishuGroup;
   last_outbound_at?: string;
   last_outbound_state?: string;
   last_outbound_error?: string;
+}
+
+interface ChannelInboundSummary {
+  at: string;
+  state: string;
+  outcome?: string;
+}
+
+export interface FeishuGroup {
+  chat_id: string;
+  receive_all_messages: boolean;
+  updated_at?: string;
+  updated_by?: string;
 }
 
 export interface ChannelContact {

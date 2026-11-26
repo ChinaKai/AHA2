@@ -79,7 +79,7 @@ GET /api/v1/browser/profiles/{id}/session	httpapi	internal/httpapi/browser_handl
 GET /api/v1/channel-deliveries/{id}/attempts	httpapi	internal/httpapi/server.go	channelDeliveryAttempts	owner_session	v2:70de593747e9	pending	pending	pending	pending	pending
 GET /api/v1/channel-instances	httpapi	internal/httpapi/server.go	channelInstances	owner_session	v2:ac4f72321b86	pending	pending	pending	pending	pending
 GET /api/v1/channel-instances/{id}	httpapi	internal/httpapi/server.go	channelInstance	owner_session	v2:13e2596d75d6	pending	pending	pending	pending	pending
-GET /api/v1/channel-instances/{id}/conversations	httpapi	internal/httpapi/server.go	channelConversationSummaries	owner_session	v2:024bd7b9df95	pending	pending	pending	pending	pending
+GET /api/v1/channel-instances/{id}/conversations	httpapi	internal/httpapi/server.go	channelConversationSummaries	owner_session	v2:5dbba1df092d	pending	pending	pending	pending	pending
 GET /api/v1/channel-instances/{id}/deliveries	httpapi	internal/httpapi/server.go	channelDeliveries	owner_session	v2:1fb230857141	pending	pending	pending	pending	pending
 GET /api/v1/channel-instances/{id}/handoffs	httpapi	internal/httpapi/server.go	channelHandoffs	owner_session	v2:5d28186cd5ba	pending	pending	pending	pending	pending
 GET /api/v1/channel-instances/{id}/knowledge-bindings	httpapi	internal/httpapi/server.go	channelKnowledgeBindings	owner_session	v2:3c27046f5ab4	pending	pending	pending	pending	pending
@@ -278,6 +278,7 @@ POST /api/v1/channel-deliveries/{id}/replay	httpapi	internal/httpapi/server.go	r
 POST /api/v1/channel-deliveries/{id}/skip	httpapi	internal/httpapi/server.go	skipChannelDelivery	owner_session	v2:dac040d2c685	pending	pending	pending	pending	pending
 POST /api/v1/channel-instances	httpapi	internal/httpapi/server.go	createChannelInstance	owner_session	v2:bd798f513287	pending	pending	pending	pending	pending
 POST /api/v1/channel-instances/{id}/archive	httpapi	internal/httpapi/server.go	archiveChannelInstance	owner_session	v2:8b0ec828fe29	pending	pending	pending	pending	pending
+POST /api/v1/channel-instances/{id}/conversations/refresh	httpapi	internal/httpapi/server.go	channelConversationsRefresh	owner_session	v2:2ad739fafdd3	pending	pending	pending	pending	pending
 POST /api/v1/channel-instances/{id}/onboarding-sessions	httpapi	internal/httpapi/server.go	startChannelOnboarding	owner_session	v2:a1207e403ecb	pending	pending	pending	pending	pending
 POST /api/v1/channel-instances/{id}/purge	httpapi	internal/httpapi/server.go	purgeChannelInstance	owner_session	v2:02676254451c	pending	pending	pending	pending	pending
 POST /api/v1/channel-instances/{id}/reset-binding	httpapi	internal/httpapi/server.go	resetChannelBinding	owner_session	v2:f492479384d5	pending	pending	pending	pending	pending
@@ -399,6 +400,7 @@ POST /v1/sync/push	centersync	internal/centersync/service.go	inline	device_token
 PUT /api/channel-runtime/v1/instances/{instance_id}/health	httpapi	internal/httpapi/server.go	channelRuntimeHealth	channel_runtime	v2:2dd3c741c095	pending	pending	pending	pending	pending
 PUT /api/v1/agent/skills/{skill}	httpapi	internal/httpapi/server.go	updateAgentSkill	agent_turn	v2:650839b47a25	pending	pending	pending	pending	pending
 PUT /api/v1/assistant	httpapi	internal/httpapi/server.go	updateOwnerAssistant	owner_session	v2:6f64ce8536ad	pending	pending	pending	pending	pending
+PUT /api/v1/channel-instances/{id}/conversations/groups/{chatID}/reception	httpapi	internal/httpapi/server.go	channelGroupReception	owner_session	v2:36d2ef4a0936	pending	pending	pending	pending	pending
 PUT /api/v1/channel-instances/{id}/credentials	httpapi	internal/httpapi/server.go	updateChannelCredentials	owner_session	v2:844a460cf2a8	pending	pending	pending	pending	pending
 PUT /api/v1/channel-instances/{id}/knowledge-bindings	httpapi	internal/httpapi/server.go	updateChannelKnowledgeBindings	owner_session	v2:b951eab0e083	pending	pending	pending	pending	pending
 PUT /api/v1/channel-instances/{id}/knowledge-bindings/group	httpapi	internal/httpapi/server.go	updateChannelGroupKnowledgeBindings	owner_session	v2:bf5109946767	pending	pending	pending	pending	pending

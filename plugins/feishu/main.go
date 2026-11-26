@@ -911,6 +911,15 @@ func (c *runtimeClient) commandLoop(ctx context.Context, client *lark.Client, bo
 					continue
 				}
 				_ = c.complete(ctx, item, true, result, "")
+			case "sync_feishu_groups":
+				listCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+				groups, err := listBotGroups(listCtx, client)
+				cancel()
+				if err != nil {
+					_ = c.complete(ctx, item, false, nil, "feishu_group_list_failed")
+					continue
+				}
+				_ = c.complete(ctx, item, true, map[string]any{"groups": groups}, "")
 			case "configure_menu", "initialize_menu", "reset_menu":
 				result, err := configureMenuCommand(ctx, client, boot.AppID, item)
 				if err != nil {

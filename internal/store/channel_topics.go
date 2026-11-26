@@ -75,7 +75,23 @@ var ErrChannelGroupNotAllowed = errors.New("group_not_allowlisted")
 // The route is rechecked under the same write lock as the content insert.
 func checkGroupRouteTx(ctx context.Context, tx *sql.Tx, route domain.ChannelTaskRoute, chatID string, mentioned bool) error {
 	var configJSON string
-	err := tx.QueryRowContext(ctx, `
+	var err error
+	if route.ID == "" {
+		err = tx.QueryRowContext(ctx, `
+			SELECT i.config_json FROM channel_conversations c
+			JOIN channel_endpoints e ON e.id=c.endpoint_id AND e.enabled=1
+			JOIN channel_instances i ON i.id=c.instance_id
+			WHERE c.id=? AND c.instance_id=? AND c.external_chat_id=? AND c.status='active'
+			  AND e.kind='group_digital_human' AND i.retired_at='' AND i.status IN ('ready','degraded')
+			  AND (?='' OR c.host_task_id=?)
+			  AND NOT EXISTS (
+			      SELECT 1 FROM channel_task_routes r
+			      JOIN channel_conversations bound ON bound.id=r.conversation_id
+			      WHERE r.instance_id=i.id AND r.state='active' AND bound.endpoint_id=c.endpoint_id
+			        AND bound.external_chat_id=c.external_chat_id AND bound.status='active'
+			  )`, route.ConversationID, route.InstanceID, chatID, route.TargetTaskID, route.TargetTaskID).Scan(&configJSON)
+	} else {
+		err = tx.QueryRowContext(ctx, `
 		SELECT i.config_json FROM channel_task_routes r
 		JOIN channel_conversations c ON c.id=r.conversation_id AND c.status='active'
 		JOIN channel_endpoints e ON e.id=c.endpoint_id AND e.enabled=1
@@ -83,15 +99,19 @@ func checkGroupRouteTx(ctx context.Context, tx *sql.Tx, route domain.ChannelTask
 		WHERE r.id=? AND r.state='active' AND r.target_task_id=?
 		  AND r.conversation_id=? AND r.instance_id=?
 		  AND c.external_chat_id=? AND i.retired_at='' AND i.status IN ('ready','degraded')`,
-		route.ID, route.TargetTaskID, route.ConversationID, route.InstanceID, chatID).Scan(&configJSON)
+			route.ID, route.TargetTaskID, route.ConversationID, route.InstanceID, chatID).Scan(&configJSON)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrChannelGroupUnbound
 	}
 	if err != nil {
 		return err
 	}
-	config := decodeJSON(configJSON, map[string]any{})
-	if !domain.FeishuGroupMessageAllowed(config, chatID, mentioned) {
+	allowed, err := feishuGroupMessageAllowed(ctx, tx, route.InstanceID, decodeJSON(configJSON, map[string]any{}), chatID, mentioned)
+	if err != nil {
+		return err
+	}
+	if !allowed {
 		return ErrChannelGroupNotAllowed
 	}
 	return nil
@@ -142,7 +162,7 @@ func (s *Store) ReceiveChannelGroupMessage(ctx context.Context, receipt domain.C
 	// Each new receipt is independently eligible for scheduling.
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO channel_group_receipts(receipt_id,conversation_id,route_id,target_task_id,thread_id,batch_id,ready_ms)
-		VALUES(?,?,?,?,?,?,?)`, receipt.ID, route.ConversationID, route.ID, route.TargetTaskID, envelope.ThreadID, receipt.ID, receipt.ReceivedAt.UnixMilli()); err != nil {
+		VALUES(?,?,?,?,?,?,?)`, receipt.ID, route.ConversationID, nullableString(route.ID), route.TargetTaskID, envelope.ThreadID, receipt.ID, receipt.ReceivedAt.UnixMilli()); err != nil {
 		return domain.ChannelInboxReceipt{}, false, err
 	}
 	return stored, false, tx.Commit()
@@ -157,7 +177,7 @@ func storeListeningMessage(ctx context.Context, tx *sql.Tx, receipt domain.Chann
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO channel_group_listening(id,conversation_id,route_id,target_task_id,message_id,thread_id,sender_name,sender_type,content,occurred_at,received_ms)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(conversation_id,message_id) DO NOTHING`,
-		receipt.ID, route.ConversationID, route.ID, route.TargetTaskID, messageID, envelope.ThreadID,
+		receipt.ID, route.ConversationID, nullableString(route.ID), route.TargetTaskID, messageID, envelope.ThreadID,
 		envelope.SenderDisplayName, envelope.SenderType, limitChannelText(envelope.Content, channelListeningBytes),
 		timeString(receipt.OccurredAt), receipt.ReceivedAt.UnixMilli())
 	if err != nil {
@@ -203,15 +223,18 @@ func (s *Store) ChannelListeningContext(ctx context.Context, taskID, conversatio
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT l.sender_name,l.sender_type,l.occurred_at,l.content
 		FROM channel_group_listening l
-		JOIN channel_task_routes r ON r.id=l.route_id AND r.state='active' AND r.target_task_id=l.target_task_id
 		JOIN channel_conversations c ON c.id=l.conversation_id AND c.status='active'
 		JOIN channel_instances i ON i.id=c.instance_id
-		WHERE l.target_task_id=? AND l.conversation_id=? AND l.received_ms>?
-		  AND c.external_chat_id IN (SELECT value FROM json_each(i.config_json,'$.feishu_group_message_allowlist'))
+		JOIN channel_feishu_groups g ON g.instance_id=i.id AND g.chat_id=c.external_chat_id AND g.receive_all_messages=1
+		LEFT JOIN channel_task_routes r ON r.id=l.route_id AND r.state='active' AND r.target_task_id=l.target_task_id
+		WHERE l.conversation_id=? AND l.received_ms>?
+		  AND ((r.id IS NOT NULL AND l.target_task_id=?)
+		       OR (l.route_id IS NULL AND c.host_task_id=? AND l.target_task_id IN ('',c.host_task_id)
+		           AND NOT EXISTS(SELECT 1 FROM channel_task_routes active WHERE active.conversation_id=c.id AND active.state='active')))
 		  AND 'group_message_read' IN (SELECT value FROM json_each(i.config_json,'$.channel_permission_ids'))
 		  AND (l.thread_id=? OR (?<>'' AND l.message_id=?))
 		ORDER BY l.received_ms DESC,l.id DESC LIMIT ?`,
-		taskID, conversationID, now.Add(-channelListeningRetention).UnixMilli(), threadID, rootID, rootID, channelListeningPerGroup)
+		conversationID, now.Add(-channelListeningRetention).UnixMilli(), taskID, taskID, threadID, rootID, rootID, channelListeningPerGroup)
 	if err != nil {
 		return "", err
 	}
@@ -246,13 +269,13 @@ func (s *Store) ChannelListeningContext(ctx context.Context, taskID, conversatio
 }
 
 type ChannelGroupReceipt struct {
-	BatchID, RouteID, TargetTaskID string
+	BatchID, RouteID, TargetTaskID, ConversationID string
 }
 
 func (s *Store) ChannelGroupReceipt(ctx context.Context, receiptID string) (ChannelGroupReceipt, error) {
 	var group ChannelGroupReceipt
-	err := s.db.QueryRowContext(ctx, `SELECT batch_id,route_id,target_task_id FROM channel_group_receipts WHERE receipt_id=?`, receiptID).
-		Scan(&group.BatchID, &group.RouteID, &group.TargetTaskID)
+	err := s.db.QueryRowContext(ctx, `SELECT batch_id,COALESCE(route_id,''),target_task_id,conversation_id FROM channel_group_receipts WHERE receipt_id=?`, receiptID).
+		Scan(&group.BatchID, &group.RouteID, &group.TargetTaskID, &group.ConversationID)
 	return group, err
 }
 
@@ -320,7 +343,7 @@ func checkGroupInboxRoute(ctx context.Context, tx *sql.Tx, receiptID, taskID str
 	var chatID string
 	var mentioned bool
 	err := tx.QueryRowContext(ctx, `
-		SELECT g.route_id,g.target_task_id,g.conversation_id,r.instance_id,
+		SELECT COALESCE(g.route_id,''),g.target_task_id,g.conversation_id,r.instance_id,
 		       json_extract(r.normalized_payload_json,'$.external_chat_id'),
 		       COALESCE(json_extract(r.normalized_payload_json,'$.mentioned_bot'),0)
 		FROM channel_group_receipts g
@@ -346,7 +369,8 @@ const liveChannelGroupMatchesTurn = `(
 		    AND origin.source_kind='channel_group_message'
 		JOIN channel_group_receipts initial ON initial.receipt_id=json_extract(origin.payload_json,'$.channel_receipt_id')
 		JOIN channel_group_receipts incoming ON incoming.receipt_id=json_extract(agent_inbox.payload_json,'$.channel_receipt_id')
-		    AND incoming.route_id=initial.route_id AND incoming.thread_id=initial.thread_id
+		    AND incoming.route_id IS initial.route_id AND incoming.thread_id=initial.thread_id
+		    AND incoming.conversation_id=initial.conversation_id AND incoming.target_task_id=initial.target_task_id
 		LEFT JOIN channel_topic_turns topic ON topic.turn_id=active.id
 		    AND topic.conversation_id=initial.conversation_id AND topic.thread_id=initial.thread_id
 		WHERE active.id=? AND active.inbox_batch_id<>'' AND active.status IN ('starting','running')

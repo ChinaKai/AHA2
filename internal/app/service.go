@@ -1309,7 +1309,7 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 	}
 	userMessage := turn.Instruction
 	channelContext, _ := s.store.ChannelContextForInboxBatch(ctx, turn.InboxBatchID)
-	if batch, _ := channelContext["group_batch_id"].(string); batch != "" {
+	if channelContext["provider"] == "feishu" && channelContext["endpoint"] == domain.ChannelEndpointGroupDigitalHuman {
 		conversationID, _ := channelContext["conversation_id"].(string)
 		threadID, _ := channelContext["thread_id"].(string)
 		rootID, _ := channelContext["root_id"].(string)

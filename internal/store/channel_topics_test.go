@@ -141,9 +141,7 @@ func TestReceiveChannelGroupMessageRechecksBindingAndPermissionBeforeStorage(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	instance.Config[domain.FeishuGroupAllowlistKey] = []string{conversation.ExternalChatID}
-	instance, err = database.UpdateChannelInstance(ctx, instance, instance.Revision)
-	if err != nil {
+	if _, _, err := database.SetFeishuGroupReception(ctx, instance.ID, instance.OwnerID, conversation.ExternalChatID, true, now); err != nil {
 		t.Fatal(err)
 	}
 
@@ -182,6 +180,12 @@ func TestReceiveChannelGroupMessageRechecksBindingAndPermissionBeforeStorage(t *
 	if _, err := database.UpdateChannelInstance(ctx, instance, instance.Revision); err != nil {
 		t.Fatal(err)
 	}
+	if _, _, err := database.SetFeishuGroupReception(ctx, instance.ID, instance.OwnerID, conversation.ExternalChatID, false, now); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("bound switch off", func(t *testing.T) {
+		assertDenied(t, ErrChannelGroupNotAllowed)
+	})
 	if err := database.ExitOwnerChannelTaskRoute(ctx, route.ID, task.ID, now); err != nil {
 		t.Fatal(err)
 	}
@@ -189,6 +193,10 @@ func TestReceiveChannelGroupMessageRechecksBindingAndPermissionBeforeStorage(t *
 	// the owner unbinding it immediately before the receipt transaction.
 	t.Run("binding released", func(t *testing.T) {
 		assertDenied(t, ErrChannelGroupUnbound)
+	})
+	route = domain.ChannelTaskRoute{InstanceID: instance.ID, ConversationID: conversation.ID, TargetTaskID: conversation.HostTaskID}
+	t.Run("unbound switch off", func(t *testing.T) {
+		assertDenied(t, ErrChannelGroupNotAllowed)
 	})
 }
 
@@ -210,10 +218,12 @@ func TestFeishuTopicLiveInboxMatchesTurnAndRechecksPermission(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	instance.Config[domain.FeishuGroupAllowlistKey] = []string{conversation.ExternalChatID}
 	instance.Config["channel_permission_ids"] = []string{domain.FeishuFullGroupPermission}
 	instance, err = database.UpdateChannelInstance(ctx, instance, instance.Revision)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := database.SetFeishuGroupReception(ctx, instance.ID, instance.OwnerID, conversation.ExternalChatID, true, now); err != nil {
 		t.Fatal(err)
 	}
 
@@ -275,8 +285,7 @@ func TestFeishuTopicLiveInboxMatchesTurnAndRechecksPermission(t *testing.T) {
 
 	_, revoked := enqueue("receipt-revoked", "omt_release", false, true)
 	_, liveHuman := enqueue("receipt-live-human", "omt_release", true, false)
-	instance.Config[domain.FeishuGroupAllowlistKey] = []string{}
-	if _, err := database.UpdateChannelInstance(ctx, instance, instance.Revision); err != nil {
+	if _, _, err := database.SetFeishuGroupReception(ctx, instance.ID, instance.OwnerID, conversation.ExternalChatID, false, now); err != nil {
 		t.Fatal(err)
 	}
 	items, err = database.ClaimOwnerInboxForLiveInjection(ctx, task.ID, "main", round.ID, turn.ID, 10)

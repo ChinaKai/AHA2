@@ -55,16 +55,11 @@ func TestFeishuGroupListeningAndImmediateTurns(t *testing.T) {
 		t.Fatal(err)
 	}
 	instance.Config["channel_permission_ids"] = []string{domain.FeishuFullGroupPermission}
-	instance.Config[domain.FeishuGroupAllowlistKey] = []string{"oc_somewhere_else"}
 	instance, err = database.UpdateChannelInstance(ctx, instance, instance.Revision)
 	if err != nil {
 		t.Fatal(err)
 	}
-	instance.Config[domain.FeishuGroupAllowlistKey] = []string{chat}
-	instance, err = database.UpdateChannelInstance(ctx, instance, instance.Revision)
-	if err != nil {
-		t.Fatal(err)
-	}
+	setTestGroupReception(t, service, instance, chat, true)
 	instance.Config["runtime_bot_open_id"] = "sender-self"
 	instance, err = database.UpdateChannelInstance(ctx, instance, instance.Revision)
 	if err != nil {
@@ -197,7 +192,7 @@ func startFeishuMentionHost(t *testing.T, service *Service, instance domain.Chan
 	return conversation
 }
 
-func TestFeishuGroupIngressRequiresPermissionAndBindingOnlyForNonMentions(t *testing.T) {
+func TestFeishuGroupIngressKeepsMentionsWithoutFullReception(t *testing.T) {
 	service, instance, claims := mediaTestService(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -239,11 +234,7 @@ func TestFeishuGroupIngressRequiresPermissionAndBindingOnlyForNonMentions(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	instance.Config[domain.FeishuGroupAllowlistKey] = []string{chat, "oc_unbound"}
-	instance, err = service.store.UpdateChannelInstance(ctx, instance, instance.Revision)
-	if err != nil {
-		t.Fatal(err)
-	}
+	setTestGroupReception(t, service, instance, chat, true)
 	envelope := domain.ChannelInboundEnvelope{
 		SchemaVersion: 1, InstanceID: instance.ID, EventType: "message", ChatType: "group",
 		ExternalChatID: chat, ExternalSenderID: "ou_human", ExternalEventID: "nonmention",
@@ -261,19 +252,11 @@ func TestFeishuGroupIngressRequiresPermissionAndBindingOnlyForNonMentions(t *tes
 		}
 	}
 	instance.Config["channel_permission_ids"] = []string{domain.FeishuFullGroupPermission}
-	instance.Config[domain.FeishuGroupAllowlistKey] = []string{"oc_unbound"}
 	instance, err = service.store.UpdateChannelInstance(ctx, instance, instance.Revision)
 	if err != nil {
 		t.Fatal(err)
 	}
-	envelope.ExternalChatID = "oc_unbound"
-	if _, err := service.feishuGroupIngressRoute(ctx, instance, envelope); !errors.Is(err, store.ErrChannelGroupUnbound) {
-		t.Fatalf("service allowed allowlisted non-mention from an unbound group: %v", err)
-	}
-	if receipt, _, err := service.ReceiveInbound(ctx, claims, envelope); receipt.ID != "" || !errors.Is(err, store.ErrChannelGroupUnbound) {
-		t.Fatalf("unbound non-mention reached storage: receipt=%q err=%v", receipt.ID, err)
-	}
-	envelope.ExternalChatID = chat
+	setTestGroupReception(t, service, instance, chat, false)
 	if receipt, _, err := service.ReceiveInbound(ctx, claims, envelope); receipt.ID != "" || !errors.Is(err, store.ErrChannelGroupNotAllowed) {
 		t.Fatalf("outside non-mention reached storage: receipt=%q err=%v", receipt.ID, err)
 	}
@@ -352,10 +335,10 @@ func TestFeishuGroupMentionContinuesFinishedBinding(t *testing.T) {
 					t.Fatal(err)
 				}
 				instance.Config["channel_permission_ids"] = []string{domain.FeishuFullGroupPermission}
-				instance.Config[domain.FeishuGroupAllowlistKey] = []string{chat}
 				if _, err := service.store.UpdateChannelInstance(ctx, instance, instance.Revision); err != nil {
 					t.Fatal(err)
 				}
+				setTestGroupReception(t, service, instance, chat, true)
 				quiet := first
 				quiet.ExternalEventID, quiet.ExternalMessageID, quiet.Content = "quiet-event", "om_quiet", "non-mention must not migrate"
 				quiet.MentionedBot = false

@@ -2,18 +2,10 @@ package domain
 
 import "slices"
 
-const (
-	FeishuFullGroupPermission = "group_message_read"
-	FeishuGroupAllowlistKey   = "feishu_group_message_allowlist"
-)
+const FeishuFullGroupPermission = "group_message_read"
 
 func FeishuFullGroupMessagesEnabled(config map[string]any) bool {
 	return channelConfigHasValue(config["channel_permission_ids"], FeishuFullGroupPermission)
-}
-
-func FeishuGroupMessageAllowed(config map[string]any, chatID string, mentioned bool) bool {
-	return mentioned || (FeishuFullGroupMessagesEnabled(config) &&
-		channelConfigHasValue(config[FeishuGroupAllowlistKey], chatID))
 }
 
 func channelConfigHasValue(value any, expected string) bool {

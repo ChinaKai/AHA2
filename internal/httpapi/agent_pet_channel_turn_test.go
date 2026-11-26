@@ -84,7 +84,7 @@ func TestPetChannelTurnUsesEveryChannelToolThroughARealTaskRoute(t *testing.T) {
 	hostProject := domain.Project{ID: "pet-route-host-project", Name: "Channel", ProjectType: "channel", DefaultWorkspaceID: "pet-route-host-workspace", KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now}
 	hostWorkspace := domain.Workspace{ID: hostProject.DefaultWorkspaceID, ProjectID: hostProject.ID, Name: "Channel", Locality: "local", Transport: "native", RootPath: dataDir, Health: "ready", AgentAPIMode: "global", AgentAPIStatus: "unknown", CreatedAt: now, UpdatedAt: now}
 	instance := domain.ChannelInstance{ID: "pet-route-instance", PluginID: plugin.ID, OwnerID: owner.ID, RuntimeDeviceID: "local", Name: "团队飞书", Status: "ready", Revision: 1, HostProjectID: hostProject.ID, HostWorkspaceID: hostWorkspace.ID, Config: map[string]any{"operation_scope_mode": "all", "runtime_bot_open_id": "pet-route-bot",
-		"channel_permission_ids": []string{domain.FeishuFullGroupPermission}, domain.FeishuGroupAllowlistKey: []string{"oc_pet_provider_chat"}}, CreatedAt: now, UpdatedAt: now}
+		"channel_permission_ids": []string{domain.FeishuFullGroupPermission}}, CreatedAt: now, UpdatedAt: now}
 	endpoint := domain.ChannelEndpoint{ID: "pet-route-endpoint", InstanceID: instance.ID, Kind: domain.ChannelEndpointGroupDigitalHuman, Enabled: true, Config: map[string]any{}, CreatedAt: now, UpdatedAt: now}
 	if err := database.CreateChannelInstanceWithHost(ctx, hostProject, hostWorkspace, instance, []domain.ChannelEndpoint{endpoint}); err != nil {
 		t.Fatal(err)
@@ -104,8 +104,18 @@ func TestPetChannelTurnUsesEveryChannelToolThroughARealTaskRoute(t *testing.T) {
 	if err := database.EnsureConversationHostSubscription(ctx, instance.ID, conversation.ID, hostTask.ID, now); err != nil {
 		t.Fatal(err)
 	}
+	receptionURL := server.URL + "/api/v1/channel-instances/" + instance.ID + "/conversations/groups/" + conversation.ExternalChatID + "/reception"
+	response := requestJSON(t, client, http.MethodPut, receptionURL, map[string]any{"receive_all_messages": true}, csrf)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("owner full reception status=%d body=%s", response.StatusCode, readBody(t, response))
+	}
+	var updated struct{ Group domain.FeishuGroup }
+	decodeResponse(t, response, &updated)
+	if !updated.Group.ReceiveAllMessages || updated.Group.UpdatedBy != owner.ID || updated.Group.UpdatedAt == "" {
+		t.Fatalf("owner full reception audit = %#v", updated.Group)
+	}
 	// Owner Web: route the group to task_pet and choose its contact.
-	response := requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/tasks/"+pet.ID+"/channel-routes", map[string]any{"conversation_id": conversation.ID}, csrf)
+	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/tasks/"+pet.ID+"/channel-routes", map[string]any{"conversation_id": conversation.ID}, csrf)
 	if response.StatusCode != http.StatusCreated {
 		t.Fatalf("owner route to task_pet status=%d body=%s", response.StatusCode, readBody(t, response))
 	}

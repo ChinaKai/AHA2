@@ -97,6 +97,7 @@ func (s *Store) resetChannelLifecycle(ctx context.Context, id, ownerID string, e
 		{`UPDATE channel_subscriptions SET state='revoked',updated_at=? WHERE instance_id=? AND state='active'`, []any{timeString(at), id}},
 		{`UPDATE channel_sessions SET status='closed',closed_at=? WHERE status='active' AND conversation_id IN (SELECT id FROM channel_conversations WHERE instance_id=?)`, []any{timeString(at), id}},
 		{`UPDATE channel_conversations SET status='closed',updated_at=? WHERE instance_id=? AND status='active'`, []any{timeString(at), id}},
+		{`UPDATE channel_feishu_groups SET provider_listed=0 WHERE instance_id=? AND provider_listed=1`, []any{id}},
 		{`UPDATE channel_delivery_outbox SET state='skipped',lease_id='',lease_until='',last_error_code='channel_retired',updated_at=? WHERE instance_id=? AND state IN ('pending','leased')`, []any{timeString(at), id}},
 	}
 	for _, statement := range statements {

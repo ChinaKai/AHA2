@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"sort"
 	"strings"
 	"time"
 
@@ -17,7 +18,7 @@ func scanChannelDestination(scanner interface{ Scan(...any) error }) (domain.Cha
 	err := scanner.Scan(
 		&item.ConversationID, &item.InstanceID, &item.InstanceName, &item.ProviderKey,
 		&item.EndpointKind, &item.DisplayName, &item.Status,
-		&routeID, &item.RouteRevision, &targetTaskID, &targetTaskCode, &targetTaskName, &updated,
+		&routeID, &item.RouteRevision, &targetTaskID, &targetTaskCode, &targetTaskName, &updated, &item.ExternalChatID,
 	)
 	if routeID.Valid {
 		item.RouteID = routeID.String
@@ -44,7 +45,7 @@ func scanChannelDestination(scanner interface{ Scan(...any) error }) (domain.Cha
 
 const channelDestinationQuery = `
 	SELECT c.id,i.id,i.name,p.provider_key,e.kind,c.display_name,c.status,
-	       r.id,COALESCE(r.revision,0),r.target_task_id,t.code,t.title,c.updated_at
+	       r.id,COALESCE(r.revision,0),r.target_task_id,t.code,t.title,c.updated_at,c.external_chat_id
 	FROM channel_conversations c
 	JOIN channel_instances i ON i.id=c.instance_id
 	JOIN channel_plugins p ON p.id=i.plugin_id
@@ -430,14 +431,22 @@ func (s *Store) AdoptChannelConversationHost(ctx context.Context, conversationID
 	return tx.Commit()
 }
 
-func (s *Store) ChannelConversationSummaries(ctx context.Context, ownerID, instanceID string) ([]domain.ChannelConversationSummary, error) {
+func (s *Store) ChannelConversationSummaries(ctx context.Context, ownerID string, instance domain.ChannelInstance) ([]domain.ChannelConversationSummary, error) {
 	destinations, err := s.ChannelDestinations(ctx, ownerID)
 	if err != nil {
 		return nil, err
 	}
 	result := []domain.ChannelConversationSummary{}
+	var groups map[string]domain.FeishuGroup
+	var refreshed bool
+	if instance.ProviderKey == "feishu" && !instance.Retired {
+		groups, refreshed, err = s.feishuConversationGroups(ctx, instance.ID)
+		if err != nil {
+			return nil, err
+		}
+	}
 	for _, destination := range destinations {
-		if destination.InstanceID != instanceID {
+		if destination.InstanceID != instance.ID {
 			continue
 		}
 		summary := domain.ChannelConversationSummary{
@@ -445,6 +454,18 @@ func (s *Store) ChannelConversationSummaries(ctx context.Context, ownerID, insta
 			DisplayName: destination.DisplayName, Status: destination.Status,
 			BoundTaskID: destination.TargetTaskID, BoundTaskCode: destination.TargetTaskCode,
 			BoundTaskTitle: destination.TargetTaskName,
+		}
+		if groups != nil && destination.EndpointKind == domain.ChannelEndpointGroupDigitalHuman {
+			group, listed := groups[destination.ExternalChatID]
+			if refreshed && !listed {
+				continue
+			}
+			delete(groups, destination.ExternalChatID)
+			group.ChatID = destination.ExternalChatID
+			summary.Group = &group
+			if group.DisplayName != "" {
+				summary.DisplayName = group.DisplayName
+			}
 		}
 		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM channel_inbox_dedup WHERE conversation_id=?`, destination.ConversationID).Scan(&summary.InboundCount); err != nil {
 			return nil, err
@@ -454,6 +475,11 @@ func (s *Store) ChannelConversationSummaries(ctx context.Context, ownerID, insta
 			return nil, err
 		} else if err == nil {
 			summary.LastInboundAt = receivedAt
+		}
+		if summary.Group != nil {
+			if err := s.feishuConversationInbound(ctx, &summary); err != nil {
+				return nil, err
+			}
 		}
 		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM channel_delivery_outbox WHERE conversation_id=?`, destination.ConversationID).Scan(&summary.OutboundCount); err != nil {
 			return nil, err
@@ -466,7 +492,62 @@ func (s *Store) ChannelConversationSummaries(ctx context.Context, ownerID, insta
 		}
 		result = append(result, summary)
 	}
+	if refreshed {
+		for _, group := range groups {
+			result = append(result, domain.ChannelConversationSummary{
+				ID: group.ChatID, EndpointKind: domain.ChannelEndpointGroupDigitalHuman, DisplayName: group.DisplayName,
+				Status: "active", Group: &group,
+			})
+		}
+		sort.SliceStable(result, func(i, j int) bool {
+			if result[i].EndpointKind != result[j].EndpointKind {
+				return result[i].EndpointKind < result[j].EndpointKind
+			}
+			if result[i].DisplayName != result[j].DisplayName {
+				return result[i].DisplayName < result[j].DisplayName
+			}
+			return result[i].ID < result[j].ID
+		})
+	}
 	return result, nil
+}
+
+func (s *Store) feishuConversationInbound(ctx context.Context, summary *domain.ChannelConversationSummary) error {
+	var listeningCount int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM channel_group_listening WHERE conversation_id=?`, summary.ID).Scan(&listeningCount); err != nil {
+		return err
+	}
+	summary.InboundCount += listeningCount
+	for _, mentioned := range []bool{true, false} {
+		var latest domain.ChannelInboundSummary
+		err := s.db.QueryRowContext(ctx, `
+			SELECT received_at,state,outcome FROM channel_inbox_dedup
+			WHERE conversation_id=? AND event_type='message'
+			  AND COALESCE(json_extract(normalized_payload_json,'$.mentioned_bot'),0)=?
+			ORDER BY received_at DESC,id DESC LIMIT 1`, summary.ID, mentioned).Scan(&latest.At, &latest.State, &latest.Outcome)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if mentioned {
+			if err == nil {
+				summary.LastMentionInbound = &latest
+			}
+			continue
+		}
+		var receivedMS int64
+		err = s.db.QueryRowContext(ctx, `SELECT received_ms FROM channel_group_listening
+			WHERE conversation_id=? ORDER BY received_ms DESC,id DESC LIMIT 1`, summary.ID).Scan(&receivedMS)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if err == nil && time.UnixMilli(receivedMS).After(parseTime(latest.At)) {
+			latest = domain.ChannelInboundSummary{At: timeString(time.UnixMilli(receivedMS)), State: "listening", Outcome: "listening_only"}
+		}
+		if latest.At != "" {
+			summary.LastNonMentionInbound = &latest
+		}
+	}
+	return nil
 }
 
 func (s *Store) ChannelRouteOwnedBy(ctx context.Context, routeID, ownerID string) (domain.ChannelTaskRoute, error) {

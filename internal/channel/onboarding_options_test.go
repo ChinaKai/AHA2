@@ -1,6 +1,7 @@
 package channel
 
 import (
+	"context"
 	"slices"
 	"strings"
 	"testing"
@@ -72,9 +73,6 @@ func TestFeishuSensitiveGroupScopesAreOptIn(t *testing.T) {
 				t.Fatalf("scope %s defaults=%v selected=%v", scope, defaults, selected)
 			}
 		}
-		if len(feishuGroupMessageAllowlist(instance)) != 0 {
-			t.Fatal("allowlist must default to empty")
-		}
 	}
 	for _, definition := range feishuPermissionCatalog {
 		if definition.ID == domain.FeishuFullGroupPermission {
@@ -88,6 +86,10 @@ func TestFeishuSensitiveGroupScopesAreOptIn(t *testing.T) {
 }
 
 func TestFeishuGroupAllowlistRequiresExplicitPermission(t *testing.T) {
+	ctx := context.Background()
+	service, instance, claims := mediaTestService(t)
+	syncTestFeishuGroups(t, service, claims, "oc_allowed")
+	setTestGroupReception(t, service, instance, "oc_allowed", true)
 	allowlist := []string{"oc_allowed"}
 	for _, tt := range []struct {
 		name        string
@@ -99,13 +101,13 @@ func TestFeishuGroupAllowlistRequiresExplicitPermission(t *testing.T) {
 		{name: "full reception granted", permissions: []any{domain.FeishuFullGroupPermission}, want: allowlist},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			config := map[string]any{domain.FeishuGroupAllowlistKey: allowlist}
+			config := map[string]any{}
 			if tt.permissions != nil {
 				config["channel_permission_ids"] = tt.permissions
 			}
-			instance := domain.ChannelInstance{ProviderKey: "feishu", Config: config}
-			if got := feishuGroupMessageAllowlist(instance); !slices.Equal(got, tt.want) {
-				t.Fatalf("effective group allowlist = %v, want %v", got, tt.want)
+			instance.Config = config
+			if got, err := service.store.FeishuGroupMessageAllowlist(ctx, instance); err != nil || !slices.Equal(got, tt.want) {
+				t.Fatalf("effective group allowlist = %v, want %v, err=%v", got, tt.want, err)
 			}
 		})
 	}

@@ -170,9 +170,11 @@ func TestBotDisplayNameLookupFailureIsBrieflyCached(t *testing.T) {
 	}
 }
 
-func TestGroupMessageAllowlistKeepsMentions(t *testing.T) {
-	message := &channeltypes.NormalizedMessage{ChatType: "group", ChatID: "oc_allowed"}
-	allowlist := []string{"oc_allowed"}
+func TestGroupMessageAllowlistDoesNotRequireTaskBinding(t *testing.T) {
+	// The bootstrap knows which groups have full reception enabled and carries
+	// no Task routing information, including for this unbound group.
+	message := &channeltypes.NormalizedMessage{ChatType: "group", ChatID: "oc_unbound"}
+	allowlist := []string{"oc_unbound"}
 	if allowInboundMessage(message, nil) || !allowInboundMessage(message, allowlist) {
 		t.Fatal("ordinary messages require an enabled group")
 	}
@@ -183,6 +185,33 @@ func TestGroupMessageAllowlistKeepsMentions(t *testing.T) {
 	message.MentionedBot = true
 	if !allowInboundMessage(message, allowlist) {
 		t.Fatal("core must receive explicit mentions to enforce group routing")
+	}
+}
+
+func TestListBotGroupsUsesTenantAndPaginates(t *testing.T) {
+	var pages int
+	client := lark.NewClient("bot-group-list", "test-secret", lark.WithHttpClient(mockHTTPClient{do: func(request *http.Request) (*http.Response, error) {
+		if strings.Contains(request.URL.Path, "/auth/") {
+			return mediaTestResponse(200, `{"code":0,"tenant_access_token":"tenant-token","expire":3600}`), nil
+		}
+		if request.Method != http.MethodGet || request.URL.Path != "/open-apis/im/v1/chats" ||
+			request.Header.Get("Authorization") != "Bearer tenant-token" || request.URL.Query().Get("types") != "group" {
+			t.Fatalf("expected tenant group-list request, got %s %s", request.Method, request.URL)
+		}
+		pages++
+		switch request.URL.Query().Get("page_token") {
+		case "":
+			return mediaTestResponse(200, `{"code":0,"data":{"items":[{"chat_id":"oc_unbound","name":"群一"},{"chat_id":"oc_private","chat_mode":"p2p"}],"has_more":true,"page_token":"next"}}`), nil
+		case "next":
+			return mediaTestResponse(200, `{"code":0,"data":{"items":[{"chat_id":"oc_topic","name":"话题群","chat_mode":"topic"}],"has_more":false}}`), nil
+		default:
+			t.Fatal("unexpected page token")
+			return nil, nil
+		}
+	}}))
+	groups, err := listBotGroups(context.Background(), client)
+	if err != nil || pages != 2 || len(groups) != 2 || groups[0] != (feishuBotGroup{"oc_unbound", "群一"}) || groups[1] != (feishuBotGroup{"oc_topic", "话题群"}) {
+		t.Fatalf("groups=%+v, pages=%d, err=%v", groups, pages, err)
 	}
 }
 

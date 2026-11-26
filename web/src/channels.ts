@@ -293,7 +293,6 @@ function openChannelSettings(instance: ChannelInstance, context: ChannelUIContex
     <div class="dialog-body">
       ${channelRuntimeEditor(config, context, instance)}
       <fieldset><legend>消息通知</legend><label class="channel-check"><input type="checkbox" name="notify_task_status" ${config.notify_task_status === true ? "checked" : ""}>普通 Task 状态变更推送到飞书私聊助手</label><small>仅推送等待处理、完成、失败或中断等状态；不会推送普通消息、过程输出或渠道宿主 Task。</small></fieldset>
-      ${instance.provider_key === "feishu" ? `<fieldset><legend>飞书群消息白名单</legend><label for="feishu-group-message-allowlist">群 ID（每行一个）</label><textarea id="feishu-group-message-allowlist" rows="3">${escapeHTML(stringList(config, "feishu_group_message_allowlist", []).join("\n"))}</textarea><small>默认留空。先绑定群与 Task，再在权限页面勾选群消息全量接收并重新扫码。授权生效前，保存的白名单不会启用。</small></fieldset>` : ""}
       <section class="channel-settings-knowledge"><div class="panel-head"><strong>Knowledge 访问范围</strong><span>私聊不限制；群聊可选全局知识 + 项目知识库</span></div><div data-channel-settings-knowledge><small>加载中…</small></div></section>
     </div>
     <div class="dialog-actions"><button type="button" data-close>取消</button><button type="button" class="primary" data-save>保存设置</button></div>`;
@@ -343,9 +342,7 @@ function openChannelSettings(instance: ChannelInstance, context: ChannelUIContex
   saveButton?.addEventListener("click", () => {
     void (async () => {
       const runtimeSelection = readModelSourceSelection("channel-runtime");
-      const allowlist = dialog.querySelector<HTMLTextAreaElement>("#feishu-group-message-allowlist");
       const configUpdate = {
-        ...(allowlist ? {feishu_group_message_allowlist: allowlist.value.split(/\s+/).filter(Boolean)} : {}),
         runtime_default: runtimeSelection,
         runtime_assistant_dm: {inherit: true},
         runtime_group_digital_human: {inherit: true},
@@ -430,7 +427,7 @@ function conversationBoundTask(item: ChannelConversationSummary): string {
   return [item.bound_task_code, item.bound_task_title].filter(Boolean).join(" · ") || item.bound_task_id;
 }
 
-function conversationCard(item: ChannelConversationSummary): string {
+export function conversationCard(item: ChannelConversationSummary): string {
   const kind = item.endpoint_kind === "group_digital_human" ? "群聊" : "私聊";
   const inbound = item.last_inbound_state
     ? `${item.last_inbound_state}${item.last_inbound_outcome ? ` · ${item.last_inbound_outcome}` : ""} · ${formatChannelTime(item.last_inbound_at)}`
@@ -438,11 +435,21 @@ function conversationCard(item: ChannelConversationSummary): string {
   const outbound = item.last_outbound_state
     ? `${item.last_outbound_state}${item.last_outbound_error ? ` · ${item.last_outbound_error}` : ""} · ${formatChannelTime(item.last_outbound_at)}`
     : "暂无";
+  const group = item.group;
+  const formatInbound = (entry: ChannelConversationSummary["last_mention_inbound"]) => entry
+    ? `${entry.state}${entry.outcome ? ` · ${entry.outcome}` : ""} · ${formatChannelTime(entry.at)}`
+    : "暂无";
+  const groupReception = group ? `<label class="channel-check">
+    <span><strong>接收全量消息</strong><br><small>非 @ 消息进旁听，不唤醒；${item.bound_task_id ? "@ 仍唤醒绑定任务" : "@ 由群聊电子人接"}</small></span>
+    <span class="kv-skill-auto"><input type="checkbox" role="switch" aria-label="接收全量消息" data-group-reception="${escapeHTML(group.chat_id)}" ${group.receive_all_messages ? "checked" : ""}><span class="kv-skill-auto-track" aria-hidden="true"></span></span>
+    <small data-group-reception-state>${group.receive_all_messages ? "旁听中" : "仅 @"}</small>
+  </label>` : "";
   return `<article class="channel-conversation-card">
     <header><strong>${escapeHTML(item.display_name || `${kind}会话`)}</strong><span class="status ${item.status === "active" ? "good" : "warn"}">${kind}</span></header>
     <div class="channel-conversation-bound"><span>绑定任务</span><strong>${escapeHTML(conversationBoundTask(item))}</strong></div>
+    ${groupReception}
     <div class="channel-conversation-counts"><span>入站 <b>${item.inbound_count}</b></span><span>出站 <b>${item.outbound_count}</b></span></div>
-    <small>最近入站：${escapeHTML(inbound)}</small>
+    ${group ? `<small>最近入站（@）：${escapeHTML(formatInbound(item.last_mention_inbound))}</small><small>最近入站（非 @）：${escapeHTML(formatInbound(item.last_non_mention_inbound))}</small>` : `<small>最近入站：${escapeHTML(inbound)}</small>`}
     <small>最近出站：${escapeHTML(outbound)}</small>
   </article>`;
 }
@@ -452,21 +459,73 @@ function openChannelConversations(instance: ChannelInstance, uiOptions: {setMess
   const dialog = document.createElement("dialog");
   dialog.id = "channel-conversations-dialog";
   dialog.className = "channel-conversations-dialog";
-  dialog.innerHTML = `<div class="dialog-head"><div><h2>会话</h2><p>${escapeHTML(instance.name)} · 私聊与群聊</p></div><button type="button" class="icon-button" data-close aria-label="${t("common.closeDialog")}">${icon("close")}</button></div><div class="dialog-body"><div data-conversations-body><small>加载中…</small></div></div><div class="dialog-actions"><button type="button" data-close>关闭</button></div>`;
+  const feishu = instance.provider_key === "feishu" && instance.status !== "retired";
+  const canRefresh = feishu && ["ready", "degraded"].includes(instance.status);
+  const needsPermission = feishu && !stringList(objectValue(instance.config), "channel_permission_ids", []).includes("group_message_read");
+  dialog.innerHTML = `<div class="dialog-head"><div><h2>会话</h2><p>${escapeHTML(instance.name)} · 私聊与群聊</p></div><button type="button" class="icon-button" data-close aria-label="${t("common.closeDialog")}">${icon("close")}</button></div><div class="dialog-body">${needsPermission ? "<small>群开关在「群消息全量接收」扫码授权后生效。</small>" : ""}<div data-conversations-body><small>加载中…</small></div><small data-conversations-status role="status"></small></div><div class="dialog-actions">${canRefresh ? `<button type="button" data-refresh-groups disabled>${icon("refresh")}刷新群聊</button>` : ""}<button type="button" data-close>关闭</button></div>`;
   document.body.append(dialog);
   dialog.showModal();
   const close = () => { dialog.close(); dialog.remove(); };
   dialog.querySelectorAll("[data-close]").forEach(button => button.addEventListener("click", close));
   dialog.addEventListener("cancel", event => { event.preventDefault(); close(); });
   const body = dialog.querySelector<HTMLElement>("[data-conversations-body]");
-  if (!body) return;
-  void api.channelConversations(instance.id).then(result => {
+  const status = dialog.querySelector<HTMLElement>("[data-conversations-status]");
+  const refreshButton = dialog.querySelector<HTMLButtonElement>("[data-refresh-groups]");
+  if (!body || !status) return;
+  const render = (result: {conversations: ChannelConversationSummary[]}) => {
     if (!dialog.isConnected) return;
     const direct = result.conversations.filter(item => item.endpoint_kind === "assistant_dm");
     const groups = result.conversations.filter(item => item.endpoint_kind === "group_digital_human");
     const section = (title: string, items: ChannelConversationSummary[]) => `<section class="channel-conversation-section"><header><strong>${title}</strong><span>${items.length}</span></header><div class="channel-conversation-grid">${items.map(conversationCard).join("") || `<small>暂无${title}</small>`}</div></section>`;
     body.innerHTML = section("私聊", direct) + section("群聊", groups);
+  };
+  const refreshGroups = async () => {
+    if (!refreshButton) return;
+    refreshButton.disabled = true;
+    const switches = body.querySelectorAll<HTMLInputElement>("[data-group-reception]");
+    switches.forEach(input => { input.disabled = true; });
+    status.textContent = "正在刷新群聊…";
+    try {
+      render(await api.request(`/api/v1/channel-instances/${encodeURIComponent(instance.id)}/conversations/refresh`, {method: "POST", body: "{}"}));
+      status.textContent = "";
+    } catch (error) {
+      status.textContent = channelErrorMessage(error);
+    } finally {
+      switches.forEach(input => { input.disabled = false; });
+      refreshButton.disabled = false;
+    }
+  };
+  refreshButton?.addEventListener("click", () => { void refreshGroups(); });
+  let pendingSaves = 0;
+  body.addEventListener("change", event => {
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement) || !input.dataset.groupReception) return;
+    const enabled = input.checked;
+    input.disabled = true;
+    pendingSaves++;
+    if (refreshButton) refreshButton.disabled = true;
+    void api.request<{group: NonNullable<ChannelConversationSummary["group"]>}>(
+      `/api/v1/channel-instances/${encodeURIComponent(instance.id)}/conversations/groups/${encodeURIComponent(input.dataset.groupReception)}/reception`,
+      {method: "PUT", body: JSON.stringify({receive_all_messages: enabled})},
+    ).then(({group}) => {
+      input.checked = group.receive_all_messages;
+      const receptionState = input.closest("label")?.querySelector("[data-group-reception-state]");
+      if (receptionState) receptionState.textContent = input.checked ? "旁听中" : "仅 @";
+      status.textContent = "";
+    }).catch(error => {
+      input.checked = !enabled;
+      status.textContent = `保存群开关失败：${channelErrorMessage(error)}`;
+    }).finally(() => {
+      input.disabled = false;
+      pendingSaves--;
+      if (refreshButton && pendingSaves === 0) refreshButton.disabled = false;
+    });
+  });
+  void api.channelConversations(instance.id).then(result => {
+    render(result);
+    if (dialog.isConnected) void refreshGroups();
   }).catch(error => {
+    if (refreshButton) refreshButton.disabled = false;
     body.textContent = error instanceof Error ? error.message : String(error);
     uiOptions.setMessage("error", "会话列表加载失败。");
   });

@@ -38,12 +38,12 @@ var feishuPermissionCatalog = []onboardingPermissionDefinition{
 	},
 	{
 		ID: domain.FeishuFullGroupPermission, Name: "群消息全量接收", Sensitive: true,
-		Description: "接收机器人所在群的用户和其他机器人消息。AHA 只处理已绑定 Task 且列入群白名单的群。升级后需重新扫码授权。",
+		Description: "接收机器人所在群的用户和其他机器人消息。在渠道会话中按群开启。首次勾选后需重新扫码授权。",
 		Scopes:      []string{"im:message.group_msg", "im:message.group_msg.include_bot:read"},
 	},
 	{
 		ID: "chat_members", Name: "群成员与联系人",
-		Description: "读取群成员列表和基础联系人信息，用于联调人选择。",
+		Description: "读取机器人所在群、群成员和基础联系人信息，用于刷新群列表和选择联调人。",
 		Scopes:      []string{"im:chat:readonly", "contact:user.base:readonly"},
 	},
 	{
@@ -194,14 +194,6 @@ func defaultFeishuPermissionIDs() []string {
 		}
 	}
 	return result
-}
-
-func feishuGroupMessageAllowlist(instance domain.ChannelInstance) []string {
-	if instance.ProviderKey != "feishu" || !domain.FeishuFullGroupMessagesEnabled(instance.Config) {
-		return nil
-	}
-	chats, _ := stringListField(instance.Config, domain.FeishuGroupAllowlistKey)
-	return chats
 }
 
 var feishuGroupIDPattern = regexp.MustCompile(`^oc_[A-Za-z0-9_-]{1,125}$`)
