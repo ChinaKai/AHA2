@@ -309,7 +309,7 @@ function fakeTabbedWorkbench() {
       return match ? tabs.get(match[1]) ?? null : null;
     },
   };
-  for (const name of ["overview", "approvals", "records", "settings"]) {
+  for (const name of ["overview", "records", "settings"]) {
     const classes = new Set(name === "overview" ? ["active"] : []);
     tabs.set(name, {
       dataset: {petWorkbenchTab: name},
@@ -372,21 +372,21 @@ test("a programmatic tab change is followed on the preserved page without restar
   assert.equal(requests[0].aborted, false, "following the tab must not abort the request");
 
   // The kept page's listeners still work when the user moves back to overview
-  // and approvals, and each click follows the normal path.
+  // and records, and each click follows the normal path.
   tabs.get("overview").click();
   assert.equal(active, "overview");
   assert.equal(tabs.get("overview").isActive(), true);
   assert.equal(binding.tab, "overview");
-  tabs.get("approvals").click();
-  assert.equal(active, "approvals");
-  assert.equal(tabs.get("approvals").isActive(), true);
-  assert.equal(binding.tab, "approvals");
+  tabs.get("records").click();
+  assert.equal(active, "records");
+  assert.equal(tabs.get("records").isActive(), true);
+  assert.equal(binding.tab, "records");
   assert.equal(requests.length, 1, "tab switches must not issue another request");
 
   // Already on the wanted tab: no extra click (otherwise renders could loop).
-  const approvalClicks = clickCounts.get("approvals");
-  assert.equal(keeper.beforeRender({view: "pet-workbench", authenticated: true, tab: "approvals"}), page);
-  assert.equal(clickCounts.get("approvals"), approvalClicks, "a matching tab is not clicked again");
+  const recordClicks = clickCounts.get("records");
+  assert.equal(keeper.beforeRender({view: "pet-workbench", authenticated: true, tab: "records"}), page);
+  assert.equal(clickCounts.get("records"), recordClicks, "a matching tab is not clicked again");
   assert.equal(requests.length, 1);
 
   // Leaving the view still aborts exactly once.
@@ -649,16 +649,17 @@ test("live pet_approval events refresh the mounted approval list", async () => {
   // The global stream and the reconnect path share one helper.
   assert.match(main, /if \(type === "pet_approval"\) refreshPetApprovalState\(\);/);
   assert.match(main, /function refreshPetApprovalState\(\): void \{[\s\S]*?void refreshPetPendingApprovalCount\(true\);[\s\S]*?petWorkbenchPageKeeper\.binding\?\.refresh\?\.\(\);/);
-  // Only the approvals tab reloads live; entering it re-reads because events
-  // that arrived on another tab cannot patch the mounted rows.
-  assert.match(main, /binding\.refresh = \(\) => \{ if \(active === "approvals"\) refreshApprovals\(\); \};/);
-  assert.match(main, /if \(active === "approvals"\) void load\(\);/);
+  // The approval history now lives on the records tab: it reloads live there,
+  // and entering records re-reads because events that arrived on another tab
+  // cannot patch the mounted rows.
+  assert.match(main, /binding\.refresh = \(\) => \{\s*if \(active === "records"\) refreshApprovals\(\);\s*else approvalEventMissed = true;\s*\};/);
+  assert.match(main, /if \(active === "records" && approvalEventMissed\) \{\s*approvalEventMissed = false;\s*void load\(\);/);
   // An event during an in-flight read queues exactly one follow-up.
   assert.match(main, /if \(approvalRefreshQueued\) return;/);
   assert.match(main, /approvalRefreshQueued = true;/);
   assert.match(main, /void load\(\)\.then\(\(\) => \{\s*approvalRefreshQueued = false;/);
   // A failed refresh keeps the last good list instead of clearing it.
-  assert.match(main, /if \(view && active === "approvals"\) renderTab\(\);/);
+  assert.match(main, /if \(view && active === "records"\) renderTab\(\);/);
   assert.match(main, /loadError \? renderPetWorkbenchLoadError\(loadError, t\) : ""/);
   assert.match(loader, /refresh\?: \(\) => void;/);
   // The resolve path uses the same queued refresh instead of a plain load.
@@ -802,7 +803,9 @@ test("workbench collapses core documents and opens approvals on pending with ten
   assert.match(desk, /entries\.map\(entry => renderCoreEntry\(entry, entry\.index, translate, ledger\)\)/);
   assert.match(desk, /<details class="pet-doc-entry" id="pet-record-core-\$\{index\}">/);
   assert.doesNotMatch(desk, /<details class="pet-doc-entry" open>/);
-  assert.match(main, /let petApprovalStatusFilter[^=]*= "pending";/);
+  // The approval history shows every status by default (the pending queue
+  // is the overview's "for you" list).
+  assert.match(main, /let petApprovalStatusFilter[^=]*= "all";/);
   assert.match(main, /let petApprovalFilter: [^=]+= "all";/);
   assert.match(main, /let approvalLimit = 10;/);
   assert.match(main, /approvalLimit = Math\.min\(approvalLimit \+ 10, PET_APPROVAL_MAX_LIMIT\)/);
@@ -983,14 +986,21 @@ test("document editors share one attribute and the approval footer caps at 200",
   assert.match(approvals, /petWorkbench\.pendingFirstHint/);
 });
 
-test("the four workbench tabs default to overview and absorb legacy names", async () => {
-  const {PET_WORKBENCH_TABS} = await import("../build/pet_workbench.js");
-  assert.deepEqual([...PET_WORKBENCH_TABS], ["overview", "approvals", "records", "settings"]);
+test("the three workbench tabs default to overview and absorb legacy names", async () => {
+  const {PET_WORKBENCH_TABS, petWorkbenchTabAnchor, petWorkbenchIntentTab} = await import("../build/pet_workbench.js");
+  assert.deepEqual([...PET_WORKBENCH_TABS], ["overview", "records", "settings"]);
+  // Old approvals links land on the records tab's approval history.
+  assert.equal(petWorkbenchTabAnchor("approvals"), "pet-record-approvals");
+  assert.equal(petWorkbenchTabAnchor("ideas"), "pet-record-approvals");
+  assert.equal(petWorkbenchTabAnchor("records"), "");
+  assert.equal(mapPetWorkbenchTab(petWorkbenchIntentTab("handle-pending")), "overview");
+  assert.equal(mapPetWorkbenchTab(petWorkbenchIntentTab("approval-history")), "records");
+  assert.equal(petWorkbenchTabAnchor(petWorkbenchIntentTab("approval-history")), "pet-record-approvals");
   assert.equal(mapPetWorkbenchTab(undefined), "overview");
   assert.equal(mapPetWorkbenchTab(""), "overview");
   assert.equal(mapPetWorkbenchTab("overview"), "overview");
-  assert.equal(mapPetWorkbenchTab("approvals"), "approvals");
-  assert.equal(mapPetWorkbenchTab("ideas"), "approvals", "legacy idea links open approvals");
+  assert.equal(mapPetWorkbenchTab("approvals"), "records", "the approvals tab is the records history now");
+  assert.equal(mapPetWorkbenchTab("ideas"), "records", "legacy idea links open the history");
   assert.equal(mapPetWorkbenchTab("records"), "records");
   assert.equal(mapPetWorkbenchTab("core"), "records");
   assert.equal(mapPetWorkbenchTab("worklog"), "records");
@@ -1184,11 +1194,11 @@ test("records pin core documents above a newest-first worklog with a collapsible
   assert.match(collapsed, /data-pet-record-toc-toggle aria-expanded="false"[^>]*>展开目录</);
 });
 
-test("phones fit four tabs and turn approval dialogs into full-screen sheets", async () => {
+test("phones fit the three tabs and turn approval dialogs into full-screen sheets", async () => {
   const css = await readFile(resolve(root, "web/src/styles.css"), "utf8");
   const mobile = css.slice(css.lastIndexOf("@media (max-width: 640px)"));
   assert.notEqual(mobile, css, "a phone breakpoint must exist");
-  assert.match(mobile, /\.pet-workbench-tabs \{ display: grid; grid-template-columns: repeat\(4, minmax\(0, 1fr\)\); gap: 4px; \}/);
+  assert.match(mobile, /\.pet-workbench-tabs \{ display: grid; grid-template-columns: repeat\(3, minmax\(0, 1fr\)\); gap: 4px; \}/);
   assert.match(mobile, /\.pet-workbench-tabs button \{[^}]*min-width: 0;[^}]*overflow: hidden;/);
   assert.match(mobile, /\.pet-overview-cards \{ grid-template-columns: repeat\(3, minmax\(0, 1fr\)\); gap: 4px; \}/);
   assert.match(mobile, /\.pet-overview-card \{ padding: 6px 8px;/);
@@ -1355,7 +1365,7 @@ test("desk needs list keeps the server order, numbers from ① and labels every 
   const i18n = await deskCatalog("zh-CN");
   const html = renderPetOverview(deskOptions(i18n, deskFixture()));
   const needs = section(html, "pet-desk-needs");
-  assert.match(needs, /<h3>要你定（7）<\/h3>/);
+  assert.match(needs, /<h3 tabindex="-1">要你定（7）<\/h3>/);
   const order = [...needs.matchAll(/<li class="pet-desk-item kind-(\w+)">\s*<span class="pet-desk-index" aria-hidden="true">(.)<\/span>/g)].map(match => `${match[2]}${match[1]}`);
   assert.deepEqual(order, ["①blocked", "②approval", "③question", "④failed", "⑤stopped"], "rows keep the response order");
   assert.match(needs, /被阻塞 · <span data-i18n-ignore>task-790<\/span> · 等了 1 小时 30 分钟/);
@@ -1402,13 +1412,13 @@ test("desk waiting and running columns label every kind and show elapsed time an
   const i18n = await deskCatalog("zh-CN");
   const html = renderPetOverview(deskOptions(i18n, deskFixture()));
   const waiting = section(html, "pet-desk-waiting");
-  assert.match(waiting, /<h3>等别人（3）<\/h3>/);
+  assert.match(waiting, /<h3 tabindex="-1">等别人（3）<\/h3>/);
   assert.match(waiting, /<strong><span data-i18n-ignore>task-805<\/span> · <span data-i18n-ignore>Reviewed work<\/span><\/strong><small>评审中 → <span data-i18n-ignore>task-806<\/span> · 等了 45 分钟/);
   assert.match(waiting, /<small>审批执行中 · 等了 2 分钟<\/small>/);
   assert.match(waiting, /Feishu group A<\/span><\/strong><small>3 条待发 · 最早一条等了 4 分钟<\/small>/);
   assert.doesNotMatch(waiting, /pet-desk-more/, "not truncated when the total equals the rows");
   const running = section(html, "pet-desk-running");
-  assert.match(running, /<h3>在跑什么（4）<\/h3>/);
+  assert.match(running, /<h3 tabindex="-1">在跑什么（4）<\/h3>/);
   assert.match(running, /task-811<\/span> · <span data-i18n-ignore>Overnight comparison<\/span><\/strong><small>[^<]* · 已跑 12 分钟<\/small>/);
   assert.match(running, /<p class="pet-desk-detail" tabindex="0"><span data-i18n-ignore title="comparing builds">comparing builds<\/span><\/p>/);
   assert.match(running, /<p class="pet-desk-hardware">硬件：<span data-i18n-ignore>Debug board 1<\/span><\/p>/);
@@ -1729,38 +1739,40 @@ const recordCore = [
   {name: "principles.md", content: "principles"},
 ];
 
-test("the records page shows four groups in order, each with a one-line intro", async () => {
+test("the records page shows five groups in order, each with a one-line intro", async () => {
   const i18n = await deskCatalog("zh-CN");
   const html = renderPetRecords(recordCore, [{date: "2026-11-25", content: "did"}], {translate: i18n.t, emptyCore: "无", emptyWorklog: "无", tocOpen: true});
-  const ids = ["pet-record-judgment", "pet-record-corrections", "pet-record-promises", "pet-record-worklog"];
+  // The approval history (the former approvals tab) follows the corrections.
+  const ids = ["pet-record-judgment", "pet-record-corrections", "pet-record-approvals", "pet-record-promises", "pet-record-worklog"];
   const positions = ids.map(id => html.indexOf(`<section class="pet-record-section" id="${id}"`));
   assert.ok(positions.every(position => position >= 0), `all groups: ${positions}`);
   assert.deepEqual([...positions].sort((a, b) => a - b), positions, "group order");
   for (const [id, title, intro] of [
     ["pet-record-judgment", "它是谁、怎么判断", "宠物的身份和做事准则"],
     ["pet-record-corrections", "你的纠正", "你否决审批时写的原因"],
+    ["pet-record-approvals", "审批记录", "宠物提给你的审批和想法，新的在上，可以按种类和状态筛选。待处理的在概览的“要你定”里。"],
     ["pet-record-promises", "它答应的事", "宠物记下的未闭环事项和自己的议程"],
     ["pet-record-worklog", "它做过的事", "宠物按日期写的工作记录"],
   ]) {
-    const group = html.match(new RegExp(`<section class="pet-record-section" id="${id}">[\\s\\S]*?</section>`))?.[0] ?? "";
-    assert.match(group, new RegExp(`<h3>${title}</h3>\\s*<p class="pet-record-intro">${intro}`), id);
+    const group = html.match(new RegExp(`<section class="pet-record-section" id="${id}"[^>]*>[\\s\\S]*?</section>`))?.[0] ?? "";
+    assert.match(group, new RegExp(`<h3 id="${id}-title" tabindex="-1">${title}</h3>\\s*<p class="pet-record-intro">${intro}`), id);
   }
   // Files land in their group in a fixed order; ids keep the response index.
-  const judgment = html.match(/<section class="pet-record-section" id="pet-record-judgment">[\s\S]*?<\/section>/)[0];
+  const judgment = html.match(/<section class="pet-record-section" id="pet-record-judgment"[^>]*>[\s\S]*?<\/section>/)[0];
   assert.deepEqual([...judgment.matchAll(/data-pet-doc-name="([^"]+)"/g)].map(match => match[1]), ["identity.md", "principles.md", "changes.md"]);
-  const promises = html.match(/<section class="pet-record-section" id="pet-record-promises">[\s\S]*?<\/section>/)[0];
+  const promises = html.match(/<section class="pet-record-section" id="pet-record-promises"[^>]*>[\s\S]*?<\/section>/)[0];
   assert.deepEqual([...promises.matchAll(/data-pet-doc-name="([^"]+)"/g)].map(match => match[1]), ["loops.md", "agenda.md"]);
   assert.match(promises, /id="pet-record-core-0"><summary><span>loops\.md<\/span><span class="pet-record-ledger-slot" data-pet-ledger-counts="loops\.md"><\/span><button type="button" class="pet-doc-edit" data-pet-doc-edit data-pet-doc-section="core" data-pet-doc-name="loops\.md">/);
   assert.match(judgment, /id="pet-record-core-1"><summary><span>identity\.md<\/span><button type="button" class="pet-doc-edit" data-pet-doc-edit/, "judgment files have no counts slot");
   // The contents mirror the groups.
   const toc = html.match(/<nav id="pet-record-toc-nav">([\s\S]*?)<\/nav>/)[1];
   assert.deepEqual([...toc.matchAll(/data-pet-record-goto="([^"]+)"/g)].map(match => match[1]),
-    ["pet-record-judgment", "pet-record-core-1", "pet-record-core-4", "pet-record-core-3", "pet-record-corrections", "pet-record-promises", "pet-record-core-0", "pet-record-core-2", "pet-record-worklog", "pet-record-worklog-0"]);
+    ["pet-record-judgment", "pet-record-core-1", "pet-record-core-4", "pet-record-core-3", "pet-record-corrections", "pet-record-approvals", "pet-record-promises", "pet-record-core-0", "pet-record-core-2", "pet-record-worklog", "pet-record-worklog-0"]);
   // The knowledge line and corrections start as placeholders.
   assert.ok(html.indexOf("data-pet-record-knowledge") < html.indexOf('id="pet-record-judgment"'), "knowledge line on top");
   assert.match(html, /data-pet-record-corrections/);
   // An unknown core file is not dropped.
-  assert.match(renderPetRecords([{name: "notes.md", content: "x"}], [], {translate: i18n.t, emptyCore: "无", emptyWorklog: "无"}), /<section class="pet-record-section" id="pet-record-judgment">[\s\S]*notes\.md/);
+  assert.match(renderPetRecords([{name: "notes.md", content: "x"}], [], {translate: i18n.t, emptyCore: "无", emptyWorklog: "无"}), /<section class="pet-record-section" id="pet-record-judgment"[^>]*>[\s\S]*notes\.md/);
 });
 
 test("corrections show the three states, newest first, and an empty or failed read", async () => {
@@ -1833,7 +1845,8 @@ test("the English records page has no Chinese interface copy", async () => {
       renderPetLedgerCounts({name: "loops.md", counts: {}, total: 0}, i18n.t),
     ];
     for (const piece of pieces) assert.doesNotMatch(chrome(piece), /[一-鿿]/, chrome(piece).match(/.{0,40}[一-鿿].{0,40}/)?.[0]);
-    assert.match(pieces[0], /<h3>What it promised<\/h3>/);
+    assert.match(pieces[0], /tabindex="-1">What it promised<\/h3>/);
+    assert.match(pieces[0], /tabindex="-1">Approval history<\/h3>/);
     assert.match(pieces[1], /Not absorbed yet[\s\S]*Expired/);
   } finally {
     i18n.applyLocale("zh-CN");

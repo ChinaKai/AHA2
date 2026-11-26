@@ -260,7 +260,12 @@ test("main.ts wires the shortcut, dialog semantics, IME guard and routing", asyn
   assert.match(main, /state\.selectedProject = project;/);
   assert.match(main, /switchView\(view\)/);
   assert.match(main, /await openTaskCreateDialogFromPalette\(\)/);
-  assert.match(main, /petWorkbenchTab = "approvals";/);
+  // The approvals tab is gone (task-813): "Open approvals" and the workbench
+  // page entry mean handle what is pending (the overview's "for you"); the
+  // approval history entry opens the records tab on that group.
+  assert.match(main, /openPetWorkbenchFor\("handle-pending"\)/);
+  assert.match(main, /openPetWorkbenchFor\("approval-history"\)/);
+  assert.doesNotMatch(main, /petWorkbenchTab = "approvals";/);
 
   // Focus returns to the trigger after closing and after a route change...
   assert.match(main, /function closeCommandPalette\(restoreFocus = true\): void \{[\s\S]{0,600}?if \(!restoreFocus\) return;[\s\S]{0,240}?previous\?\.isConnected\) previous\.focus\(\)/);

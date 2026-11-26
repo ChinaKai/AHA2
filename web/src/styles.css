@@ -3117,6 +3117,9 @@ button.pet-desk-item-main:hover strong { color: var(--color-accent-hover); }
 .pet-desk-more, .pet-desk-empty { margin: 0; font-size: var(--font-size-12); }
 .pet-desk-follows { display: grid; gap: var(--space-2); }
 /* Records page groups (task-813 step three). */
+.pet-record-section > h3:focus { outline: none; }
+.pet-record-section > h3:focus-visible, .pet-desk-section > header h3:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+#pet-record-approvals .pet-approvals-toolbar { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
 .pet-record-intro { margin: 0 0 var(--space-2); color: var(--color-text-muted); font-size: var(--font-size-13); }
 .pet-record-knowledge { display: grid; gap: var(--space-1); border: 1px solid var(--color-border-subtle); border-radius: var(--radius-card); background: var(--color-surface); padding: var(--space-2) var(--space-3); font-size: var(--font-size-13); color: var(--color-text-muted); }
 .pet-record-knowledge-summary strong { color: var(--color-text); }
@@ -3598,7 +3601,7 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
 }
 
 @media (max-width: 640px) {
-  .pet-workbench-tabs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; }
+  .pet-workbench-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
   .pet-workbench-tabs button { padding: 8px 4px; border-radius: 8px; font-size: 12px; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   /* Three status numerals stay on one compact row; the hint text is redundant
      on a phone and would force each card taller or wider. */

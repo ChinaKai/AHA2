@@ -5,14 +5,14 @@ import type {CommandItem, CommandSection, CommandSectionID} from "./command_pale
 import type {OnboardingChecklist} from "./onboarding.js";
 import {handlePetStreamEvent, mountAssistant, showPetSettings, notifyPetTaskIdle, notifyPetTaskReply, notifyPetTaskThinking, resumePetNavigation, setAssistantVisible} from "./assistant.js";
 import {MODEL_WIRE_OPTIONS, backendSelectOptionsHTML, backendsPanelHTML, modelWireEditOptionsHTML, persistedWireValue, resolveBackendOptions} from "./backends.js";
-import {createPetWorkbenchLoader, createPetWorkbenchPageKeeper, mapPetWorkbenchTab, PET_APPROVAL_MAX_LIMIT, PET_WORKBENCH_TIMEOUT_MS, petApprovalMatches, petApprovalPage, renderPetApprovalLoadMore, renderPetWorkbenchLoadError, swapPetWorkbenchPage} from "./pet_workbench.js";
-import type {PetWorkbenchPageBinding} from "./pet_workbench.js";
+import {createPetWorkbenchLoader, createPetWorkbenchPageKeeper, mapPetWorkbenchTab, petWorkbenchIntentTab, petWorkbenchTabAnchor, PET_APPROVAL_MAX_LIMIT, PET_WORKBENCH_TIMEOUT_MS, petApprovalMatches, petApprovalPage, renderPetApprovalLoadMore, renderPetWorkbenchLoadError, swapPetWorkbenchPage} from "./pet_workbench.js";
+import type {PetWorkbenchIntent, PetWorkbenchPageBinding} from "./pet_workbench.js";
 import {conversationItemKeys, conversationRenderableItems, conversationWindow, renderConversationList} from "./conversation_ui.js";
 import type {ConversationWindow, ConversationWindowOptions} from "./conversation_ui.js";
 import {chunkErrorHTML, chunkLoadingHTML, createLazyPage, retryLazyPage} from "./lazy_page.js";
 import type {LazyPage} from "./lazy_page.js";
 import {icon} from "./icons.js";
-import {createPetApprovalCounter, petApprovalFilterCount, petPendingApprovalBadge, petApprovalOptions, renderPetApprovalDetail, renderPetApprovalFilters, renderPetApprovalList, selectedPetApprovalOption} from "./pet_approvals.js";
+import {createPetApprovalCounter, petApprovalFilterCount, petPendingApprovalBadge, petApprovalOptions, renderPetApprovalDetail, renderPetApprovalFilters, selectedPetApprovalOption} from "./pet_approvals.js";
 import {applyLocale, normalizeLanguagePreference, startUITranslationObserver, t, tr, translateUI} from "./i18n.js";
 import {bindHardwarePanel, refreshHardwarePanel, stopHardwarePanel} from "./hardware_panel.js";
 import type {ResourcesTab} from "./resources.js";
@@ -856,6 +856,9 @@ const petApprovalCounter = createPetApprovalCounter(() => api.petPendingApproval
 let seenPendingApprovals: number | null = null;
 let petPendingApprovalTimer = 0;
 let petWorkbenchTab = "overview";
+// Set by an entry that means "handle pending approvals": the next overview
+// paint moves focus to the "for you" list (and brings it into view).
+let petWorkbenchFocusNeeds = false;
 // Records table of contents: wide screens start open, phones start folded. The
 // choice lives here, not in the rendered node, so switching tabs (which
 // replaces the body) keeps it for the rest of the session.
@@ -865,7 +868,9 @@ let petRecordsTocOpen: boolean | null = null;
 // render cannot abort and restart its request; leaving the view releases it.
 const petWorkbenchPageKeeper = createPetWorkbenchPageKeeper();
 let petApprovalFilter: "all" | "idea" | "decision" = "all";
-let petApprovalStatusFilter: "all" | "pending" | "approved" | "rejected" | "cancelled" = "pending";
+// The approval history (records tab) shows every status by default: the
+// pending queue is the overview's "for you" list now.
+let petApprovalStatusFilter: "all" | "pending" | "approved" | "rejected" | "cancelled" = "all";
 // Mobile folds the approval detail and filters into full-screen dialogs. They
 // live outside #app so a background refresh cannot detach them mid-decision.
 let petWorkbenchDialog: HTMLDialogElement | null = null;
@@ -2190,6 +2195,7 @@ function commandPalettePages(): CommandItem[] {
   return [
     {id: "page:models", kind: "page", label: t("nav.models"), detail: t("palette.page.modelsDetail"), keywords: ["model", "models", "模型"], target: "models"},
     {id: "page:pet-workbench", kind: "page", label: t("palette.petApprovalsPage"), detail: t("palette.page.approvalsDetail"), keywords: ["approval", "approvals", "审批", "pet", "宠物"], target: "pet-workbench"},
+    {id: "page:pet-approval-history", kind: "page", label: t("palette.petApprovalHistory"), detail: t("palette.page.approvalHistoryDetail"), keywords: ["approval", "approvals", "history", "审批", "记录", "历史"], target: "pet-approval-history"},
     {id: "page:knowledge", kind: "page", label: t("nav.knowledge"), detail: t("palette.page.knowledgeDetail"), keywords: ["knowledge", "doc", "知识", "文档"], target: "knowledge"},
     {id: "page:channels", kind: "page", label: t("nav.channels"), detail: t("palette.page.channelsDetail"), keywords: ["channel", "channels", "bot", "渠道"], target: "channels"},
     {id: "page:mcp", kind: "page", label: "MCP", detail: t("palette.page.mcpDetail"), keywords: ["mcp", "tool", "工具"], target: "mcp"},
@@ -2203,7 +2209,7 @@ function commandPaletteActions(): CommandItem[] {
     {id: "action:new-task", kind: "action", label: t("palette.newTask"), detail: t("palette.newTaskDetail"), keywords: ["new", "create", "task", "新建", "任务"], target: "new-task"},
     {id: "action:open-models", kind: "action", label: t("palette.openModels"), detail: t("nav.models"), keywords: ["model", "models", "模型"], target: "models"},
     {id: "action:open-onboarding", kind: "action", label: t("onboarding.open"), detail: t("onboarding.openDetail"), keywords: ["onboarding", "setup", "guide", "getting started", "首装", "引导"], target: "onboarding"},
-    {id: "action:open-approvals", kind: "action", label: t("palette.openApprovals"), detail: t("petWorkbench.approvals"), keywords: ["approval", "approvals", "审批"], target: "approvals"},
+    {id: "action:open-approvals", kind: "action", label: t("palette.openApprovals"), detail: t("palette.page.approvalsDetail"), keywords: ["approval", "approvals", "审批"], target: "approvals"},
     {id: "action:open-pet-workbench", kind: "action", label: t("palette.openPetWorkbench"), detail: t("petWorkbench.title"), keywords: ["pet", "workbench", "宠物", "工作台"], target: "pet-workbench"},
   ];
 }
@@ -2474,6 +2480,33 @@ async function openTaskCreateDialogFromPalette(): Promise<void> {
   showTaskCreateDialog();
 }
 
+// petWorkbenchFocusTarget is the element an entry asked focus to land on:
+// the overview's "for you" list or the records tab's approval history
+// heading. The workbench sets it while painting; the palette (which restores
+// focus after navigating) and the shortcut call focusPetWorkbenchTarget last.
+let petWorkbenchFocusTarget: HTMLElement | null = null;
+
+function focusPetWorkbenchTarget(): boolean {
+  const target = petWorkbenchFocusTarget;
+  petWorkbenchFocusTarget = null;
+  if (!target?.isConnected) return false;
+  target.focus({preventScroll: true});
+  return true;
+}
+
+// openPetWorkbenchFor routes every pet workbench entry by intent:
+// "handle-pending" opens the overview and moves focus to its "for you" list;
+// "approval-history" opens the records tab on the approval history group.
+function openPetWorkbenchFor(intent: PetWorkbenchIntent): void {
+  petWorkbenchTab = petWorkbenchIntentTab(intent);
+  if (intent === "handle-pending") petWorkbenchFocusNeeds = true;
+  if (state.view === "pet-workbench" && petWorkbenchPageKeeper.binding?.show) {
+    petWorkbenchPageKeeper.binding.show(petWorkbenchTab);
+    return;
+  }
+  switchView("pet-workbench");
+}
+
 async function runCommandPaletteAction(action: string): Promise<void> {
   if (action === "new-task") {
     await openTaskCreateDialogFromPalette();
@@ -2482,8 +2515,8 @@ async function runCommandPaletteAction(action: string): Promise<void> {
   } else if (action === "onboarding") {
     await openOnboardingChecklist();
   } else if (action === "approvals") {
-    petWorkbenchTab = "approvals";
-    switchView("pet-workbench");
+    // "Open approvals" means handle what is pending: the overview's "for you".
+    openPetWorkbenchFor("handle-pending");
   } else if (action === "pet-workbench") {
     petWorkbenchTab = "overview";
     switchView("pet-workbench");
@@ -2497,9 +2530,18 @@ async function navigateCommandPaletteItem(item: CommandItem): Promise<void> {
   } else if (item.kind === "project" || item.kind === "workspace") {
     openCommandPaletteProject(item.target);
   } else if (item.kind === "page") {
+    if (item.target === "pet-approval-history") {
+      openPetWorkbenchFor("approval-history");
+      return;
+    }
     const view = viewFromName(item.target);
     if (!view) return;
-    if (view === "pet-workbench") petWorkbenchTab = "approvals";
+    // The workbench page entry is "Approvals (Pet workbench)": pending
+    // approvals are on the overview.
+    if (view === "pet-workbench") {
+      openPetWorkbenchFor("handle-pending");
+      return;
+    }
     switchView(view);
   } else {
     await runCommandPaletteAction(item.target);
@@ -2523,7 +2565,7 @@ async function executeCommandPaletteItem(item: CommandItem): Promise<void> {
     // The navigation replaced the shell, so the element that opened the
     // palette may be detached; put focus on the freshly rendered trigger.
     if (item.target === "onboarding") onboarding?.focus();
-    else focusCommandPaletteTrigger();
+    else if (!focusPetWorkbenchTarget()) focusCommandPaletteTrigger();
   }
 }
 
@@ -4322,8 +4364,6 @@ function updatePetPendingApprovalIndicators(): void {
     button.querySelector(".task-tool-badge")?.remove();
     button.insertAdjacentHTML("beforeend", petPendingApprovalBadge(pending));
   });
-  const count = document.querySelector<HTMLElement>("#pet-approval-count");
-  if (count) count.textContent = pending > 0 ? String(pending) : "";
 }
 
 async function refreshPetPendingApprovalCount(afterMutation = false): Promise<void> {
@@ -9767,7 +9807,6 @@ function petWorkbenchView(): string {
     <header class="page-head"><div><h1>${t("petWorkbench.title")}</h1><p>${t("petWorkbench.subtitle")}</p></div></header>
     <div class="pet-workbench-tabs" role="tablist">
       <button type="button" role="tab" class="active" data-pet-workbench-tab="overview">${t("petWorkbench.overview")}</button>
-      <button type="button" role="tab" data-pet-workbench-tab="approvals">${t("petWorkbench.approvals")} <span id="pet-approval-count">${petApprovalCounter.pending > 0 ? petApprovalCounter.pending : ""}</span></button>
       <button type="button" role="tab" data-pet-workbench-tab="records">${t("petWorkbench.records")}</button>
       <button type="button" role="tab" data-pet-workbench-tab="settings">${t("petWorkbench.settings")}</button>
     </div>
@@ -9795,8 +9834,9 @@ function showPetWorkbenchBindFailure(error: unknown): void {
   body.querySelector<HTMLButtonElement>("[data-pet-workbench-retry]")?.addEventListener("click", () => render());
 }
 
-// Legacy bookmarks and the pet panel use "ideas"; the tab is now "approvals".
-// Old five-tab names (core/worklog/inspection/follows) fold into the four tabs.
+// Legacy names fold into the three tabs: "approvals" and "ideas" open the
+// records tab's approval history, and the old five-tab names
+// (core/worklog/inspection/follows) map as before.
 function normalizedPetWorkbenchTab(): string {
   return mapPetWorkbenchTab(petWorkbenchTab);
 }
@@ -9819,12 +9859,14 @@ async function bindPetWorkbenchPage(): Promise<void> {
   if (petWorkbenchPageKeeper.owns(body)) return;
   // Fetch the renderer chunk alongside the workbench data, not after it.
   void petDeskPage.load();
+  // An old approvals/ideas link opens the records tab on its approval history.
+  let recordsAnchor = petWorkbenchTabAnchor(petWorkbenchTab);
   let active = normalizedPetWorkbenchTab();
   petWorkbenchTab = active;
   let view: Awaited<ReturnType<typeof api.petWorkbench>> | null = null;
   let loadError = "";
-  // The approvals tab opens on pending and pages 10 rows at a time; the worklog
-  // keeps its existing 30-row page.
+  // The approval history pages 10 rows at a time; the worklog keeps its
+  // existing 30-row page.
   let approvalLimit = 10;
   let worklogLimit = 30;
   let loadingMore: "approval" | "worklog" | null = null;
@@ -10024,10 +10066,15 @@ async function bindPetWorkbenchPage(): Promise<void> {
       bindOverviewActions();
       bindPetWatchActions();
       loadInsights(deskModule);
-    } else if (active === "approvals") {
-      body.innerHTML = (loadError ? renderPetWorkbenchLoadError(loadError, t) : "") + `<div class="pet-approvals-toolbar"><button type="button" class="pet-approval-filter-button" data-pet-approval-filters-open>${icon("filter")}<span>${escapeHTML(t("petWorkbench.filterButton"))}</span><span class="pet-approval-filter-count" data-pet-approval-filter-count>${petApprovalFilterCount(petApprovalFilter, petApprovalStatusFilter)}</span></button></div><div id="pet-approval-rows-host"></div><div id="pet-approval-more-host"></div>`;
-      body.querySelector<HTMLButtonElement>("[data-pet-approval-filters-open]")?.addEventListener("click", openApprovalFilters);
-      renderApprovalRows();
+      if (petWorkbenchFocusNeeds) {
+        petWorkbenchFocusNeeds = false;
+        // "Handle pending approvals": bring the "for you" list into view and
+        // put focus on it, so the keyboard starts there.
+        const needs = body.querySelector<HTMLElement>("#pet-desk-needs");
+        needs?.scrollIntoView({block: "nearest"});
+        petWorkbenchFocusTarget = needs?.querySelector<HTMLElement>(".pet-desk-scroll") || needs?.querySelector<HTMLElement>("h3[tabindex]") || null;
+        petWorkbenchFocusTarget?.focus({preventScroll: true});
+      }
     } else if (active === "records" && deskModule) {
       if (petRecordsTocOpen === null) {
         // Phones open the records tab on the body, not on a full-height index.
@@ -10048,7 +10095,16 @@ async function bindPetWorkbenchPage(): Promise<void> {
       bindRecordToc();
       bindRecordTocToggle();
       loadRecordsData(deskModule);
+      // The approval history group: the old approvals tab's filters and
+      // paging, inside the records tab.
+      const toolbar = body.querySelector<HTMLElement>("[data-pet-approval-toolbar]");
+      if (toolbar) {
+        toolbar.innerHTML = (loadError ? renderPetWorkbenchLoadError(loadError, t) : "") + `<button type="button" class="pet-approval-filter-button" data-pet-approval-filters-open>${icon("filter")}<span>${escapeHTML(t("petWorkbench.filterButton"))}</span><span class="pet-approval-filter-count" data-pet-approval-filter-count>${petApprovalFilterCount(petApprovalFilter, petApprovalStatusFilter)}</span></button>`;
+        toolbar.querySelector<HTMLButtonElement>("[data-pet-approval-filters-open]")?.addEventListener("click", openApprovalFilters);
+      }
+      renderApprovalRows();
       bindLoadMore();
+      revealRecordsAnchor();
     } else if (active === "settings") {
       body.innerHTML = `<div id="pet-settings-host" class="pet-workbench-settings"></div>`;
       void showPetSettings();
@@ -10079,9 +10135,11 @@ async function bindPetWorkbenchPage(): Promise<void> {
     onError: message => {
       loadingMore = null;
       loadError = message;
-      // A failed list refresh keeps the last good approvals on screen; other
-      // tabs keep the original full retry state.
-      if (view && active === "approvals") renderTab();
+      // A failed refresh of the records tab keeps the last good documents and
+      // approval history on screen with an inline error; the overview keeps
+      // its own refresh (see the desk refresher) and other tabs keep the
+      // original full retry state.
+      if (view && active === "records") renderTab();
       else {
         view = null;
         showLoadState();
@@ -10099,7 +10157,35 @@ async function bindPetWorkbenchPage(): Promise<void> {
     loader.dispose();
   }};
   binding = petWorkbenchPageKeeper.adopt(body, body.closest<HTMLElement>(".pet-workbench-page"), pageRequests, active);
-  binding.refresh = () => { if (active === "approvals") refreshApprovals(); };
+  // An approval event while another tab is open cannot patch the hidden
+  // history rows; remember it so entering records re-reads once.
+  let approvalEventMissed = false;
+  binding.refresh = () => {
+    if (active === "records") refreshApprovals();
+    else approvalEventMissed = true;
+  };
+  binding.show = (tab: string) => {
+    if (!body.isConnected || petWorkbenchPageKeeper.binding !== binding) return;
+    const anchor = petWorkbenchTabAnchor(tab);
+    const next = mapPetWorkbenchTab(tab);
+    closePetWorkbenchDialogs();
+    active = next;
+    petWorkbenchTab = next;
+    if (binding) binding.tab = next;
+    if (next !== "records") {
+      renderTab();
+      return;
+    }
+    // Records re-reads its approval history; land on the anchor once the
+    // fresh data has painted, so the repaint does not drop the focus.
+    renderTab();
+    approvalEventMissed = false;
+    void load().then(() => {
+      if (anchor) recordsAnchor = anchor;
+      if (body.isConnected && petWorkbenchPageKeeper.binding === binding && active === "records") revealRecordsAnchor();
+      focusPetWorkbenchTarget();
+    });
+  };
   // Only the tabs that render from the chunk repaint when it settles; the
   // approvals and settings tabs keep their mounted state.
   binding.repaint = () => {
@@ -10256,24 +10342,22 @@ async function bindPetWorkbenchPage(): Promise<void> {
       openApprovalDetail(approvalID, approval);
       return;
     }
-    closePetWorkbenchDialogs();
-    active = "approvals";
-    petWorkbenchTab = active;
-    if (binding) binding.tab = active;
-    renderTab();
+    // Gone or unreadable: show it in the approval history instead.
+    showApprovalHistory();
     void load();
   };
 
   const renderApprovalRows = (): void => {
     if (!view) return;
-    const items = (view.approvals || []).filter(item => petApprovalMatches(item, petApprovalFilter, petApprovalStatusFilter));
-    const filtering = petApprovalFilter !== "all" || (petApprovalStatusFilter !== "all" && petApprovalStatusFilter !== "pending");
+    const deskModule = petDeskPage.loaded();
     const host = body.querySelector<HTMLElement>("#pet-approval-rows-host");
-    if (host) {
-      host.innerHTML = renderPetApprovalList(items, {
+    if (host && deskModule) {
+      const items = (view.approvals || []).filter(item => petApprovalMatches(item, petApprovalFilter, petApprovalStatusFilter));
+      const filtering = petApprovalFilter !== "all" || petApprovalStatusFilter !== "all";
+      host.innerHTML = deskModule.renderPetApprovalHistory(items, {
         translate: petApprovalText,
         now: Date.now(),
-        empty: filtering ? t("petWorkbench.emptyFiltered") : t("petWorkbench.emptyApprovalsPending"),
+        empty: filtering ? t("petWorkbench.emptyFiltered") : deskModule.petRecordsText(t)("petWorkbench.records.approvalsEmpty"),
       });
       host.querySelectorAll<HTMLButtonElement>("[data-pet-approval-open]").forEach(button => {
         button.addEventListener("click", () => openApprovalDetail(button.dataset.petApprovalOpen || ""));
@@ -10328,11 +10412,11 @@ async function bindPetWorkbenchPage(): Promise<void> {
       button.addEventListener("click", () => {
         const jump = button.dataset.petOverviewJump;
         if (jump === "approvals") {
-          closePetWorkbenchDialogs();
-          active = "approvals";
-          petWorkbenchTab = active;
-          if (binding) binding.tab = active;
-          renderTab();
+          // The legacy overview's pending card: the queue is the overview's
+          // "for you" list now, but the legacy overview has none, so it opens
+          // the approval history (filtered to pending).
+          petApprovalStatusFilter = "pending";
+          showApprovalHistory();
         } else if (jump === "channels") {
           switchView("channels");
         } else if (jump === "records") {
@@ -10356,6 +10440,28 @@ async function bindPetWorkbenchPage(): Promise<void> {
     body.querySelectorAll<HTMLButtonElement>("[data-pet-overview-task]").forEach(button => {
       button.addEventListener("click", () => openOverviewTask(button.dataset.petOverviewTask || ""));
     });
+  };
+
+  // showApprovalHistory switches to the records tab and lands on its
+  // approval history group.
+  const showApprovalHistory = (): void => {
+    closePetWorkbenchDialogs();
+    active = "records";
+    petWorkbenchTab = active;
+    recordsAnchor = "pet-record-approvals";
+    if (binding) binding.tab = active;
+    renderTab();
+  };
+
+  // Scroll to and focus the group a request asked for (once per request).
+  const revealRecordsAnchor = (): void => {
+    if (!recordsAnchor) return;
+    const target = document.getElementById(recordsAnchor);
+    if (!target) return;
+    recordsAnchor = "";
+    target.scrollIntoView({block: "start"});
+    petWorkbenchFocusTarget = target.querySelector<HTMLElement>("h3[tabindex]");
+    petWorkbenchFocusTarget?.focus({preventScroll: true});
   };
 
   const bindRecordToc = (): void => {
@@ -10442,9 +10548,12 @@ async function bindPetWorkbenchPage(): Promise<void> {
     closePetWorkbenchDialogs();
     if (binding) binding.tab = active;
     renderTab();
-    // Entering approvals always re-reads, because events that arrived while
-    // another tab was open cannot patch the mounted rows.
-    if (active === "approvals") void load();
+    // Entering records re-reads its approval history when an approval event
+    // arrived while another tab was open: those cannot patch hidden rows.
+    if (active === "records" && approvalEventMissed) {
+      approvalEventMissed = false;
+      void load();
+    }
   }));
   await load();
 }

@@ -43,6 +43,15 @@ const allApprovals = [
   ...pageApprovals,
   {id: "a-old", task_id: "pet-task", kind: "owner_decision", title: "是否合并 task-801 的候选", summary: "宠物的理由摘要", risk: "high", status: "pending", created_at: minutesAgo(60)},
 ];
+// ?history=1 serves an approval history of 14 rows in mixed states, paged 10
+// at a time like the server: the records tab's history group must show every
+// status newest first, filter by kind and status, and load the next page.
+const historyApprovals = Array.from({length: 14}, (_, i) => ({
+  id: `h-${String(i).padStart(2, "0")}`, task_id: "pet-task", kind: i % 4 === 0 ? "idea" : "owner_decision",
+  title: `历史审批 ${i}`, summary: "历史", risk: "low",
+  status: ["approved", "rejected", "cancelled", "pending"][i % 4],
+  created_at: minutesAgo(1000 + i * 60), resolved_at: i % 4 === 3 ? "" : minutesAgo(900 + i * 60),
+}));
 const desk = {
   needs_owner: [
     {kind: "blocked", task_id: "t-790", task_code: "task-790", title: "需要一个权限才能继续", detail: "缺少权限", since: minutesAgo(90)},
@@ -152,6 +161,7 @@ window.__insightWaiters = [];
 window.__releaseInsights = () => { for (const resolve of window.__insightWaiters.splice(0)) resolve(); };
 const pageApprovals = ${JSON.stringify(pageApprovals)};
 const allApprovals = ${JSON.stringify(allApprovals)};
+const historyApprovals = ${JSON.stringify(historyApprovals)};
 window.fetch = async (input, init = {}) => {
   const url = new URL(typeof input === "string" ? input : input.url, location.origin);
   const path = url.pathname;
@@ -195,10 +205,11 @@ window.fetch = async (input, init = {}) => {
   if (path === "/api/v1/pet/workbench") {
     const limit = Number(url.searchParams.get("approval_limit") || 50);
     window.__workbenchQueries.push(limit);
-    const approvals = limit >= 200 ? allApprovals : pageApprovals;
+    const history = params.get("history") === "1";
+    const approvals = history ? historyApprovals.slice(0, limit) : limit >= 200 ? allApprovals : pageApprovals;
     return json({
-      ok: true, core: [{name: "loops.md", content: "loops"}, {name: "identity.md", content: "identity"}, {name: "principles.md", content: "principles"}, {name: "agenda.md", content: "agenda"}], worklog: [{date: "2026-11-25", content: "做了一件事"}], worklog_total: 1, approvals, approval_total: allApprovals.length,
-      approval_counts: [{kind: "idea", status: "pending", count: 1}, {kind: "owner_decision", status: "pending", count: 1}],
+      ok: true, core: [{name: "loops.md", content: "loops"}, {name: "identity.md", content: "identity"}, {name: "principles.md", content: "principles"}, {name: "agenda.md", content: "agenda"}], worklog: [{date: "2026-11-25", content: "做了一件事"}], worklog_total: 1, approvals, approval_total: history ? historyApprovals.length : allApprovals.length,
+      approval_counts: history ? Object.values(historyApprovals.reduce((groups, item) => { const key = (item.kind === "idea" ? "idea" : "owner_decision") + item.status; groups[key] = groups[key] || {kind: item.kind, status: item.status, count: 0}; groups[key].count++; return groups; }, {})) : [{kind: "idea", status: "pending", count: 1}, {kind: "owner_decision", status: "pending", count: 1}],
       watches: watchSets[params.get("watches")] || (layoutDesks[params.get("desk")] ? ${JSON.stringify(layoutWatches)} : ${JSON.stringify(watches)}), updated_at: new Date().toISOString(),
       inspection: {health: "ok", version: "9.9.9", web_version: "web-1", uptime_minutes: 125, checked_at: new Date().toISOString(), pending_approvals: 2},
       channels: [{id: "c-1", name: "Mail", status: "degraded", pending: 3, degraded: true}], channel_total: 1,
@@ -269,7 +280,9 @@ const url = `http://127.0.0.1:${server.address().port}`;
 // content is marked data-i18n-ignore by the desk renderer.
 const untranslated = page => page.evaluate(() => {
   const body = document.querySelector("#pet-workbench-body");
-  const skip = "[data-i18n-ignore],.pet-watch-row strong,pre,code,textarea,input";
+  // .pet-approval-row-main strong is the approval title (server text) in the
+  // shared approval row, skipped the same way in pet_i18n.browser.mjs.
+  const skip = "[data-i18n-ignore],.pet-watch-row strong,.pet-approval-row-main strong,pre,code,textarea,input";
   const out = [];
   const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
   while (walker.nextNode()) {
@@ -388,8 +401,8 @@ try {
   assert.equal(await body.locator("[data-pet-approval-decision]").count(), 0);
 
   // Item 12: after a repaint (tab round trip) the desk buttons still work.
-  await page.click('[data-pet-workbench-tab="approvals"]');
-  await page.waitForSelector("[data-pet-approval-filters-open]");
+  await page.click('[data-pet-workbench-tab="records"]');
+  await page.waitForSelector("#pet-record-approvals [data-pet-approval-filters-open]");
   await backToOverview(page);
   await body.locator("#pet-desk-pet [data-pet-overview-jump=\"records\"]").click();
   await page.waitForSelector('[data-pet-workbench-tab="records"].active');
@@ -451,8 +464,8 @@ try {
   // back starts one new read and only it fills the block.
   await openOverview(page, "?insights=slow");
   await page.waitForFunction(() => window.__insightReads === 1);
-  await page.click('[data-pet-workbench-tab="approvals"]');
-  await page.waitForSelector("[data-pet-approval-filters-open]");
+  await page.click('[data-pet-workbench-tab="settings"]');
+  await page.waitForSelector("#pet-settings-host");
   assert.equal(await page.evaluate(() => window.__insightSignals.at(-1)?.aborted), true, "leaving the overview aborts the insights read");
   await backToOverview(page);
   await page.waitForFunction(() => window.__insightReads === 2);
@@ -482,12 +495,79 @@ try {
   assert.deepEqual(await untranslated(page), []);
   await body.locator("[data-chunk-retry]").click();
   await body.locator(".pet-desk").waitFor({timeout: 15000});
-  // The approvals tab does not need the chunk at all.
+  // The settings tab does not need the chunk at all.
   deskChunkFailures = 1;
   await page.goto(`${url}/`, {waitUntil: "domcontentloaded"});
   await page.waitForSelector("#pet-workbench-body .chunk-state-error", {timeout: 20000});
-  await page.click('[data-pet-workbench-tab="approvals"]');
-  await page.waitForSelector("[data-pet-approval-filters-open]", {timeout: 15000});
+  await page.click('[data-pet-workbench-tab="settings"]');
+  await page.waitForSelector("#pet-settings-host", {timeout: 15000});
+
+  // Round 4, item 2: the approvals tab is gone. Its history is a group of the
+  // records tab, after the corrections, with the same filters and paging;
+  // it shows every status, newest first.
+  const historyPage = await browser.newPage({viewport: {width: 1400, height: 1000}, locale: "en-US"});
+  historyPage.on("pageerror", error => errors.push(error.message));
+  await historyPage.goto(`${url}/?history=1`, {waitUntil: "domcontentloaded"});
+  await historyPage.waitForSelector("#pet-workbench-body .pet-desk", {timeout: 20000});
+  assert.deepEqual(await historyPage.locator("[data-pet-workbench-tab]").evaluateAll(tabs => tabs.map(tab => tab.dataset.petWorkbenchTab)), ["overview", "records", "settings"]);
+  await historyPage.click('[data-pet-workbench-tab="records"]');
+  const history = historyPage.locator("#pet-record-approvals");
+  await history.locator("[data-pet-approval-open]").first().waitFor({timeout: 15000});
+  assert.ok(await historyPage.evaluate(() => {
+    const corrections = document.getElementById("pet-record-corrections").getBoundingClientRect().top;
+    return corrections < document.getElementById("pet-record-approvals").getBoundingClientRect().top;
+  }), "approval history follows the corrections");
+  assert.match(await history.locator(".pet-record-intro").innerText(), /Pending ones are on the overview under “For you”/);
+  const historyIDs = () => history.locator("[data-pet-approval-open]").evaluateAll(rows => rows.map(row => row.dataset.petApprovalOpen));
+  // Ten per page, every status, newest first: a resolved row by when it was
+  // resolved, a pending one by when it was created (h-03 and h-07 are pending
+  // and older than their resolved neighbours).
+  assert.deepEqual(await historyIDs(), ["h-00", "h-01", "h-02", "h-04", "h-03", "h-05", "h-06", "h-08", "h-07", "h-09"]);
+  assert.match(await history.locator(".pet-approval-filter-count").innerText(), /^0$/, "no filter by default");
+  await history.locator("[data-pet-load-more=\"approval\"]").click();
+  await historyPage.waitForFunction(() => document.querySelectorAll("#pet-record-approvals [data-pet-approval-open]").length === 14);
+  // Filter: ideas only, then also pending only.
+  await history.locator("[data-pet-approval-filters-open]").click();
+  await historyPage.click('dialog.pet-approval-filter-dialog [data-pet-approval-filter="idea"]');
+  assert.deepEqual(await historyIDs(), ["h-00", "h-04", "h-08", "h-12"]);
+  await historyPage.click('dialog.pet-approval-filter-dialog [data-pet-approval-status-filter="rejected"]');
+  assert.deepEqual(await historyIDs(), [], "no rejected ideas");
+  assert.match(await history.innerText(), /No matching records\./);
+  await historyPage.click('dialog.pet-approval-filter-dialog [data-pet-approval-filter="all"]');
+  assert.deepEqual(await historyIDs(), ["h-01", "h-05", "h-09", "h-13"]);
+  await historyPage.click("dialog.pet-approval-filter-dialog [data-pet-approval-filters-close]");
+  await historyPage.waitForSelector("dialog.pet-approval-filter-dialog", {state: "detached"});
+  assert.equal(await history.locator(".pet-approval-filter-count").innerText(), "1");
+  // A row opens the existing detail dialog.
+  await history.locator('[data-pet-approval-open="h-05"]').click();
+  await historyPage.waitForSelector("dialog.pet-approval-detail-dialog[open]");
+  assert.match(await historyPage.locator("dialog.pet-approval-detail-dialog").innerText(), /历史审批 5/);
+  await historyPage.click("dialog.pet-approval-detail-dialog [data-pet-approval-detail-close]");
+  assert.deepEqual(await untranslated(historyPage), [], "English approval history");
+  // Old entry points. The command palette's "Open approvals" and the
+  // workbench page entry mean handle what is pending: the overview, with
+  // focus in "For you". "Approval history" opens the records group.
+  const palette = async query => {
+    await historyPage.keyboard.press("Control+k");
+    await historyPage.waitForSelector("#command-palette-input:focus");
+    await historyPage.keyboard.type(query);
+    await historyPage.waitForTimeout(200);
+    await historyPage.keyboard.press("Enter");
+    await historyPage.waitForFunction(() => !document.querySelector("dialog[open]"), null, {timeout: 5000});
+  };
+  await palette("Open approvals");
+  await historyPage.waitForSelector('[data-pet-workbench-tab="overview"].active');
+  await historyPage.waitForFunction(() => document.activeElement?.closest("#pet-desk-needs") !== null);
+  await palette("Approval history");
+  await historyPage.waitForSelector('[data-pet-workbench-tab="records"].active');
+  await historyPage.waitForFunction(() => document.activeElement?.id === "pet-record-approvals-title");
+  // From another page the workbench entry still lands on the overview.
+  await historyPage.locator('.sidebar [data-view="projects"]').click();
+  await historyPage.waitForSelector(".pet-workbench-page", {state: "detached"});
+  await palette("Approvals (Pet workbench)");
+  await historyPage.waitForSelector('#pet-workbench-body .pet-desk', {timeout: 15000});
+  assert.equal(await historyPage.locator('[data-pet-workbench-tab="overview"]').getAttribute("class"), "active");
+  await historyPage.close();
 
   // Step three, items 9-11: the records tab.
   await openOverview(page);
@@ -497,6 +577,7 @@ try {
   assert.deepEqual(groups, [
     ["pet-record-judgment", "Who it is and how it judges", true],
     ["pet-record-corrections", "Your corrections", true],
+    ["pet-record-approvals", "Approval history", true],
     ["pet-record-promises", "What it promised", true],
     ["pet-record-worklog", "What it did", true],
   ]);
@@ -512,7 +593,7 @@ try {
   // The table of contents follows the groups and still jumps.
   const tocTargets = await page.evaluate(() => [...document.querySelectorAll("#pet-record-toc-nav [data-pet-record-goto]")].map(button => button.dataset.petRecordGoto));
   assert.deepEqual(tocTargets.filter(target => !target.startsWith("pet-record-core-") && !target.startsWith("pet-record-worklog-")),
-    ["pet-record-judgment", "pet-record-corrections", "pet-record-promises", "pet-record-worklog"]);
+    ["pet-record-judgment", "pet-record-corrections", "pet-record-approvals", "pet-record-promises", "pet-record-worklog"]);
   await body.locator('#pet-record-toc-nav [data-pet-record-goto="pet-record-promises"]').click();
   // The edit button on a document in a regrouped section still edits and saves it.
   // agenda.md is the fourth core document in the response (index 3); its id
@@ -552,8 +633,6 @@ try {
   await page.click('[data-pet-workbench-tab="records"]');
   await body.locator(".pet-record-correction").first().waitFor({timeout: 15000});
   // Overview and back repaints the tab without a reload: the result is reused.
-  // (The approvals tab always reloads the workbench, which also refreshes
-  // the records data; that is the existing approvals behaviour.)
   await page.click('[data-pet-workbench-tab="overview"]');
   await page.click('[data-pet-workbench-tab="records"]');
   assert.equal(await body.locator(".pet-record-correction").count(), 3, "repaint fills from the cached result at once");
@@ -742,7 +821,7 @@ try {
   await openOverview(page, "?language=zh-CN");
   await page.click('[data-pet-workbench-tab="records"]');
   await body.locator(".pet-record-correction").first().waitFor({timeout: 15000});
-  assert.deepEqual(await body.locator(".pet-record-section h3").allInnerTexts(), ["它是谁、怎么判断", "你的纠正", "它答应的事", "它做过的事"]);
+  assert.deepEqual(await body.locator(".pet-record-section h3").allInnerTexts(), ["它是谁、怎么判断", "你的纠正", "审批记录", "它答应的事", "它做过的事"]);
   assert.deepEqual(await body.locator(".pet-record-correction-state").allInnerTexts(), ["还没消化", "已写进原则", "已过期"]);
 
   assert.deepEqual(errors, [], `page errors: ${errors.join(" | ")}`);

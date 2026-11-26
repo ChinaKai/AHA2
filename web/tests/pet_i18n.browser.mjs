@@ -168,8 +168,10 @@ try{
    assert.match(await button.getAttribute("title"), new RegExp(value+" pending approvals"));
    assert.match(await button.getAttribute("aria-label"), new RegExp(value+" pending approvals"));
   }
-  assert.equal(await page.locator("#pet-approval-count").innerText(),String(value));
  }
+ // The workbench tab badge went with the approvals tab (task-813); only the
+ // navigation badge counts pending approvals.
+ assert.equal(await page.locator("#pet-approval-count").count(),0);
  await setCount(3);
  // Exercise the real global SSE listeners away from the workbench: neither
  // a page reload nor the disabled interval can refresh the badge for this test.
@@ -194,16 +196,17 @@ try{
  await eventCount(5,"open"); // Reconnect catches up to missed approvals.
  await page.locator('.sidebar [data-view="pet-workbench"]').click();
  await page.waitForSelector('[data-pet-workbench-tab="overview"].active');
- assert.equal(await page.locator("#pet-approval-count").innerText(),"5");
+ assert.equal(await nav.first().locator(".task-tool-badge").innerText(),"5");
  await setCount(3);
- await page.locator('[data-pet-workbench-tab="approvals"]').click();
+ await page.locator('[data-pet-workbench-tab="records"]').click();
+ await page.waitForSelector('#pet-record-approvals [data-pet-approval-open="approval-1"]');
  for(const [id,decision,want] of [["approval-1","approve",2],["approval-2","reject",1],["idea-1","cancel",0]]){
   await page.locator('[data-pet-approval-open="'+id+'"]').click();
   await page.waitForSelector("dialog.pet-approval-detail-dialog[open]");
   const handle=async dialog=>dialog.accept("test reason");
   if(decision==="reject")page.once("dialog",handle);
   await page.locator('dialog.pet-approval-detail-dialog [data-pet-approval-decision="'+decision+'"]').click();
-  await page.waitForFunction(want=>document.querySelector("#pet-approval-count")?.textContent===(want?String(want):""),want);
+  await page.waitForFunction(want=>{const badge=document.querySelector('.sidebar [data-view="pet-workbench"] .task-tool-badge');return want?badge?.textContent===String(want):!badge;},want);
   if(decision==="reject")page.removeListener("dialog",handle);
   await page.waitForSelector("dialog.pet-approval-detail-dialog",{state:"detached"});
   assert.equal(await nav.locator(".task-tool-badge").count(),want?2:0);
@@ -215,7 +218,8 @@ try{
  await page.goto(url+"/?legacy=1#pet-diary",{waitUntil:"networkidle"});
  assert.equal(new URL(page.url()).hash,"#pet-workbench");
  await page.waitForSelector('[data-pet-workbench-tab="overview"].active');
- await page.evaluate(()=>document.querySelector('[data-pet-workbench-tab="approvals"]')?.click());await page.waitForTimeout(300);await scan("pet approvals");
+ assert.equal(await page.locator('[data-pet-workbench-tab="approvals"]').count(),0,"no approvals tab");
+ await page.evaluate(()=>document.querySelector('[data-pet-workbench-tab="records"]')?.click());await page.waitForSelector("#pet-record-approvals [data-pet-approval-filters-open]");await page.waitForTimeout(300);await scan("pet approval history");
  await page.locator("[data-pet-approval-filters-open]").click();
  await page.waitForSelector("dialog.pet-approval-filter-dialog[open]");
  await page.evaluate(()=>document.querySelector('[data-pet-approval-filter="idea"]')?.click());await page.waitForTimeout(200);await scan("pet ideas filter");

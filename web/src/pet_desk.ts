@@ -6,7 +6,7 @@
 // which the shell needs before this chunk arrives.
 import type {PetApproval, PetChannelHealth, PetCorrectionRecord, PetDesk, PetDeskCorrection, PetDeskLastReply, PetDeskNeed, PetDeskRun, PetDeskWait, PetInsights, PetInspection, PetKnowledgeHealth, PetKnowledgePending, PetLedgerCounts, PetTaskWatch} from "./types.js";
 import {currentLocale} from "./i18n.js";
-import {petApprovalDurationText, petApprovalRiskLabel} from "./pet_approvals.js";
+import {petApprovalDurationText, petApprovalRiskLabel, renderPetApprovalRow} from "./pet_approvals.js";
 import {petWatchActionKeys} from "./ui_helpers.js";
 
 type Translate = (key: string, values?: Record<string, string | number>) => string;
@@ -544,7 +544,7 @@ function renderDeskSection(id: string, className: string, title: string, rows: s
     ? deskScroll(`<ol class="pet-desk-list">${rows.join("")}</ol>${deskTruncated(total, rows.length, translate)}`)
     : `<div class="field-help pet-desk-empty">${escapeHTML(empty)}</div>`;
   return `<section class="pet-desk-section ${className}" id="${id}" aria-label="${escapeHTML(title)}">
-    <header><h3>${escapeHTML(title)}</h3></header>
+    <header><h3 tabindex="-1">${escapeHTML(title)}</h3></header>
     ${list}
     ${extra}
   </section>`;
@@ -893,6 +893,7 @@ export function renderPetRecords(
   const toc = [
     tocGroup("pet-record-judgment", "petWorkbench.records.judgment", judgment.length, tocCore(judgment)),
     tocGroup("pet-record-corrections", "petWorkbench.records.corrections", null, ""),
+    tocGroup("pet-record-approvals", "petWorkbench.records.approvals", null, ""),
     tocGroup("pet-record-promises", "petWorkbench.records.promises", promises.length, tocCore(promises)),
     tocGroup("pet-record-worklog", "petWorkbench.records.worklog", sorted.length,
       sorted.map((entry, index) => `<button type="button" class="pet-record-toc-sub" data-pet-record-goto="pet-record-worklog-${index}">${escapeHTML(entry.date)}</button>`).join("")),
@@ -906,8 +907,10 @@ export function renderPetRecords(
   const worklogBody = sorted.length
     ? sorted.map((entry, index) => renderWorklogEntry(entry, index, translate)).join("")
     : `<div class="field-help">${escapeHTML(options.emptyWorklog)}</div>`;
-  const section = (id: string, key: string, body: string) => `<section class="pet-record-section" id="${id}">
-        <h3>${escapeHTML(translate(`petWorkbench.records.${key}`))}</h3>
+  // Headings take focus (tabindex -1) so a link to a group, such as the old
+  // approvals tab now landing on the approval history, can move focus there.
+  const section = (id: string, key: string, body: string) => `<section class="pet-record-section" id="${id}" aria-labelledby="${id}-title">
+        <h3 id="${id}-title" tabindex="-1">${escapeHTML(translate(`petWorkbench.records.${key}`))}</h3>
         <p class="pet-record-intro">${escapeHTML(translate(`petWorkbench.records.${key}Intro`))}</p>
         ${body}
       </section>`;
@@ -921,6 +924,7 @@ export function renderPetRecords(
       <div class="pet-record-knowledge" data-pet-record-knowledge role="status">${escapeHTML(translate("common.loading"))}</div>
       ${section("pet-record-judgment", "judgment", coreBody(judgment, false))}
       ${section("pet-record-corrections", "corrections", `<div class="pet-record-corrections" data-pet-record-corrections><div class="field-help">${escapeHTML(translate("common.loading"))}</div></div>`)}
+      ${section("pet-record-approvals", "approvals", `<div class="pet-approvals-toolbar" data-pet-approval-toolbar></div><div id="pet-approval-rows-host" aria-live="polite"></div><div id="pet-approval-more-host"></div>`)}
       ${section("pet-record-promises", "promises", coreBody(promises, true))}
       ${section("pet-record-worklog", "worklog", worklogBody)}
     </div>
@@ -944,6 +948,9 @@ const PET_RECORDS_COPY: Record<"zh-CN" | "en-US", Record<string, string>> = {
     "correctionState.open": "还没消化",
     "correctionState.absorbed": "已写进原则",
     "correctionState.expired": "已过期",
+    "approvals": "审批记录",
+    "approvalsIntro": "宠物提给你的审批和想法，新的在上，可以按种类和状态筛选。待处理的在概览的“要你定”里。",
+    "approvalsEmpty": "还没有审批记录。",
     "promises": "它答应的事",
     "promisesIntro": "宠物记下的未闭环事项和自己的议程，标题旁是各状态的条数。",
     "ledgerEmpty": "没有条目",
@@ -970,6 +977,9 @@ const PET_RECORDS_COPY: Record<"zh-CN" | "en-US", Record<string, string>> = {
     "correctionState.open": "Not absorbed yet",
     "correctionState.absorbed": "In its principles",
     "correctionState.expired": "Expired",
+    "approvals": "Approval history",
+    "approvalsIntro": "Approvals and ideas the pet put to you, newest first, filterable by kind and status. Pending ones are on the overview under “For you”.",
+    "approvalsEmpty": "No approvals yet.",
     "promises": "What it promised",
     "promisesIntro": "The pet's open loops and its own agenda, with the count per status next to each title.",
     "ledgerEmpty": "no entries",
@@ -1001,6 +1011,33 @@ export function petRecordsText(translate: Translate): Translate {
     const template = PET_RECORDS_COPY[recordsLocale()][name] ?? PET_RECORDS_COPY["zh-CN"][name] ?? key;
     return template.replace(/\{(\w+)\}/g, (_, field: string) => String(values[field] ?? `{${field}}`));
   };
+}
+
+/* Records page: approval history ------------------------------------------- */
+
+// Newest first: the history is for looking back, unlike the old approvals
+// tab, which was the pending queue (oldest pending first). Pending and
+// executing rows sort by when they were created, resolved rows by when they
+// were resolved. The input array is not touched.
+export function sortPetApprovalHistory<T extends {status?: string; created_at?: string; resolved_at?: string}>(items: T[]): T[] {
+  const time = (item: T): number => {
+    const parsed = Date.parse(String(item.resolved_at || item.created_at || ""));
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+  return [...items].sort((left, right) => time(right) - time(left));
+}
+
+export interface PetApprovalHistoryOptions {
+  translate: Translate;
+  now: number;
+  /** Shown when nothing matches; the caller picks "no approvals" or "no matches". */
+  empty: string;
+}
+
+export function renderPetApprovalHistory(items: PetApproval[], options: PetApprovalHistoryOptions): string {
+  const rows = items.filter(item => item && typeof item === "object" && !Array.isArray(item));
+  if (!rows.length) return `<div class="field-help">${escapeHTML(options.empty)}</div>`;
+  return `<div class="pet-approval-rows">${sortPetApprovalHistory(rows).map(item => renderPetApprovalRow(item, {translate: options.translate, now: options.now})).join("")}</div>`;
 }
 
 /* Records page data filled after render ----------------------------------- */
